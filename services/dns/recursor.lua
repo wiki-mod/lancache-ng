@@ -32,9 +32,29 @@ for _, zone in ipairs({
   addNTA(zone, "lancache-ng: locally forwarded, intentionally unsigned zone")
 end
 
+-- What: zones the operator marked as unsigned.
+-- Why: their answers carry no DNSSEC and would be SERVFAIL.
+-- From: Issue #1918
+for zone in string.gmatch(os.getenv("DNS_UPSTREAM_UNSIGNED_ZONES") or "", "%S+") do
+  addNTA(zone, "lancache-ng: unsigned zone of the upstream resolver")
+end
+
+-- What: note whether the entrypoint forwards ".".
+-- Why: the root mirror is idle while every name is forwarded.
+-- From: Issue #1918
+local upstream_root = false
+for zone in string.gmatch(os.getenv("DNS_UPSTREAM_ZONES") or "", "%S+") do
+  if zone == "." then
+    upstream_root = true
+  end
+end
+
 -- Root-Zone Mirror: keep root zone cached locally (PowerDNS Recursor 5.x API)
 -- Enable with ROOT_ZONE_MIRROR=1 (default: 1, disable with 0)
-if os.getenv("ROOT_ZONE_MIRROR") ~= "0" then
+-- What: the root mirror stays off while "." is forwarded.
+-- Why: no query reaches the root servers, so the copy is idle.
+-- From: Issue #1918
+if os.getenv("ROOT_ZONE_MIRROR") ~= "0" and not upstream_root then
   zoneToCache(".", "axfr", "199.9.14.201", { refreshPeriod=3600, retryOnError=3600 })
   zoneToCache(".", "axfr", "192.33.4.12",    { refreshPeriod=3600, retryOnError=3600 })
   zoneToCache(".", "axfr", "192.5.5.241",    { refreshPeriod=3600, retryOnError=3600 })

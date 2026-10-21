@@ -1155,6 +1155,13 @@ services:
       # hedge -- TSIG (DDNS_TSIG_KEY above) is the real auth control either way.
       - DDNS_ALLOW_FROM=${IP_STANDARD},${IP_SSL:-}
       - KEEP_KNOWN_GOOD_CONFIGS=${KEEP_KNOWN_GOOD_CONFIGS:-3}
+      # What: upstream resolvers for non-LAN names.
+      # Why: one setting feeds every recursor.
+      # From: Issue #1918
+      - DNS_UPSTREAM_SERVERS=${DNS_UPSTREAM_SERVERS:-}
+      - DNS_UPSTREAM_ZONES=${DNS_UPSTREAM_ZONES:-.}
+      - DNS_UPSTREAM_UNSIGNED_ZONES=${DNS_UPSTREAM_UNSIGNED_ZONES:-}
+      - DNS_LISTEN_IPS=${IP_STANDARD},${IP_SSL:-}
     volumes:
       # Shared-secret bootstrap (#858): first-writer-wins PDNS_API_KEY/DDNS_TSIG_KEY.
       - shared-secrets:/var/lib/lancache-secrets
@@ -1206,6 +1213,13 @@ services:
       # regardless of which of the two DNS servers Kea's D2 daemon targets.
       - DDNS_ALLOW_FROM=${IP_STANDARD},${IP_SSL:-}
       - KEEP_KNOWN_GOOD_CONFIGS=${KEEP_KNOWN_GOOD_CONFIGS:-3}
+      # What: upstream resolvers for non-LAN names.
+      # Why: one setting feeds every recursor.
+      # From: Issue #1918
+      - DNS_UPSTREAM_SERVERS=${DNS_UPSTREAM_SERVERS:-}
+      - DNS_UPSTREAM_ZONES=${DNS_UPSTREAM_ZONES:-.}
+      - DNS_UPSTREAM_UNSIGNED_ZONES=${DNS_UPSTREAM_UNSIGNED_ZONES:-}
+      - DNS_LISTEN_IPS=${IP_STANDARD},${IP_SSL:-}
     volumes:
       # Shared-secret bootstrap (#858): first-writer-wins PDNS_API_KEY/DDNS_TSIG_KEY.
       - shared-secrets:/var/lib/lancache-secrets

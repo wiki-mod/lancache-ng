@@ -20,6 +20,13 @@ services:
       # Known-good pdns.conf/recursor.conf snapshot retention (#615), same
       # variable/default as the primary's config/{dev,prod}/dns-standard.env.
       - KEEP_KNOWN_GOOD_CONFIGS=${KEEP_KNOWN_GOOD_CONFIGS:-3}
+      # What: upstream resolvers for non-LAN names.
+      # Why: one setting feeds every recursor.
+      # From: Issue #1918
+      - DNS_UPSTREAM_SERVERS=${DNS_UPSTREAM_SERVERS:-}
+      - DNS_UPSTREAM_ZONES=${DNS_UPSTREAM_ZONES:-.}
+      - DNS_UPSTREAM_UNSIGNED_ZONES=${DNS_UPSTREAM_UNSIGNED_ZONES:-}
+      - DNS_LISTEN_IPS=${LISTEN_IP:-}
     volumes:
       - pdns-data:/var/lib/powerdns
       - pdns-filter-state:/var/lib/powerdns-state
