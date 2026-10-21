@@ -547,6 +547,9 @@ recurrence:
   (AG-CODE-011): `ci_cmd_result_gate` and `ci_cmd_nightly_report` both read
   `CI_NEEDS` through `_ci_needs_pairs` and `_ci_needs_class`; no CI check
   detects a reader that parses it again.
+- **A zombie sccache server read as a live one** (AG-VAL-029):
+  `_ci_sccache_reap` skips process state Z; no CI check detects a recurrence,
+  only a build whose server exits before its parent collects it.
 - **A scan of another image than the published digest**: `scan-stack` scans
   `_ci_published_digest`.
 - **Case-sensitive repository-name comparison**: `_ci_repo` lowercases.

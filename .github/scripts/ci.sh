@@ -3674,10 +3674,19 @@ _ci_sccache_stop() {
 # Why: a server timed out on Redis keeps on running.
 # From: Issue #1683 | PR #1858
 _ci_sccache_reap() {
-    local dir="$1" p env_s out rc=0
+    local dir="$1" p env_s stat_s state out rc=0
     for p in /proc/[0-9]*; do
         [ -r "${p}/environ" ] || continue
         [ "$(cat "${p}/comm" 2>&1)" = sccache ] || continue
+        # What: a zombie is dead; nothing is left to stop.
+        # Why: environ fails until the parent collects it.
+        # From: Issue #1683 | PR #1912
+        if ! stat_s="$( { cat "${p}/stat"; } 2>&1)"; then
+            [ ! -e "${p}" ] || { ci_error "[CI-ERROR-CACHE-0019]" "pid=${p#/proc/} reason=\"sccache server stat unreadable\"" "${stat_s}"; rc=2; }
+            continue
+        fi
+        state="${stat_s##*) }"
+        [ "${state%% *}" != Z ] || continue
         # What: a pid gone before read or kill is skipped.
         # Why: a stopped server exits while the scan runs.
         # From: Issue #1683 | PR #1912
