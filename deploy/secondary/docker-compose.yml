@@ -26,8 +26,8 @@ services:
       # Why: Retains known-good config snapshots for rollback
       # From: Issue #615
       - KEEP_KNOWN_GOOD_CONFIGS=${KEEP_KNOWN_GOOD_CONFIGS:-3}
-      # What: upstream resolvers and zones for non-LAN names.
-      # Why: a secondary may sit behind another LAN resolver.
+      # What: upstream resolvers for non-LAN names.
+      # Why: a secondary may sit behind another resolver.
       # From: Issue #1918
       - DNS_UPSTREAM_SERVERS=${DNS_UPSTREAM_SERVERS:-}
       - DNS_UPSTREAM_ZONES=${DNS_UPSTREAM_ZONES:-.}

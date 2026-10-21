@@ -464,6 +464,16 @@ use a real Linux host, e.g. over SSH to a self-hosted runner, per
   path.
 - `ping`/`ss` alone are not acceptable substitutes for either check (`AG-VAL-019`/
   `AG-VAL-020`) — a real query/response or a real TLS handshake is required.
+- **Upstream resolver (issue #1918):** with `DNS_UPSTREAM_SERVERS` empty, a name that
+  only a LAN resolver knows must give `NXDOMAIN` and `recursor.conf` must hold no
+  `forward_zones_recurse`. With it set to that resolver's IP, `dig @<IP_STANDARD> <private
+  name>` must return the resolver's answer, a CDN domain must still resolve to the proxy
+  IP (RPZ), and an invalid value (host name, loopback, a LanCache address, a zone served
+  locally) must stop the dns container at start with a `FATAL` line. While `.` is
+  forwarded, DNSSEC validation is off for every forwarded name; check with a
+  deliberately broken signed domain (it answers instead of `SERVFAIL`). Reverse lookups
+  of LAN addresses stay with the local authoritative server and are not answered by the
+  upstream resolver.
 - **Wildcard/subdomain scope semantics (open gap, not yet closed by this pass —
   issue #1391):** the checks above only ever resolve one literal domain per mode;
   they never prove `AG-OP-015`'s scope rule (a leading-dot `cdn-domains.txt` entry is
@@ -1310,6 +1320,15 @@ grep -E "legacy_rank=[0-9]" <logfile> | grep -v "decision=protect"
 
 **Genuinely under-tested today — do not assume these are covered without a fresh,
 explicit pass:**
+
+- **DNS upstream resolver (issue #1918):** no committed regression test covers
+  `dns_upstream_setup` in `services/dns/entrypoint.sh`; a new test needs a prior
+  maintainer ACK (`AG-CODE-010`). The behavior was proven once by hand against the
+  real entrypoint (empty setting unchanged, forward, scoped forward, IPv6 plus port,
+  seven invalid inputs, upstream down) and is recorded in the pull request. Not
+  covered: a rollback of `recursor.conf` to an older snapshot without the upstream
+  block still lets `recursor.lua` set the NTA and skip the root mirror, because the
+  environment, not the restored file, drives the Lua.
 
 - **Admin UI cache-resize's full loop** (dashboard submission → `.env` write →
   `lancache-converge.service` tick → `docker compose up -d` recreate → nginx actually
