@@ -7757,8 +7757,8 @@ _ci_validate_seed() {
     fi
 }
 
-# What: Derive a collision-free /27 in 172.16/12.
-# Why: The full private B block gives ~32k /27 slots.
+# What: Derive a collision-free slot in the SOT pool.
+# Why: CI_VALIDATE_SUBNET_POOL sets the slot count.
 # From: Issue #1683
 _ci_validate_subnet() {
     local seed="$1" pool slot plen base h
