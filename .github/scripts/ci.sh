@@ -3409,7 +3409,7 @@ _ci_status_case() {
 }
 
 # What: job and result of a needs object, one line per job.
-# Why: one parser for the result gate and the nightly report.
+# Why: one parser for the result gate and nightly report.
 # From: Issue #1683 | PR #1912
 _ci_needs_pairs() {
     _ci_run "[CI-ERROR-CORE-0133]" "reason=\"CI_NEEDS is not a needs object\"" \
@@ -9004,10 +9004,16 @@ _ci_validate_kea_agent() {
 }
 
 # What: One Kea Control Agent command; prints the reply.
-# Why: ready poll, subnet read and rollback check share it.
+# Why: setup.sh owns the sender; ci.sh adds none
 # From: Issue #763 | PR #1858
 _ci_validate_kea_cmd() {
-    _ci_curl_secret user "$2:$3" -fsS -H 'Content-Type: application/json' -d "$4" "$1/"
+    (
+        export CI_KEA_TOKEN="$3"
+        _ci_run "[CI-ERROR-VALIDATE-0133]" "url=\"$1\" reason=\"Kea Control Agent command failed\"" bash -c "$(cat <<'PROG'
+source "$1" && kea_ctrl_send "$2" "$3" "${CI_KEA_TOKEN}" "$4"
+PROG
+            )" _ "${CI_REPO_ROOT}/setup.sh" "$1/" "$2" "$4"
+    )
 }
 
 # What: fail unless a Kea reply carries result 0
