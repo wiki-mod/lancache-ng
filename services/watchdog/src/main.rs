@@ -4040,6 +4040,9 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
         ("NGINX_SUBDIR_CERTS", subdir.clone()),
         ("NGINX_HTTPS_LISTEN_FILE", listen_file.clone()),
         ("NGINX_HEALTHZ_FILE", healthz_file.clone()),
+        ("PROXY_HEALTH_PATH", ctx.need("PROXY_HEALTH_PATH")?),
+        ("PROXY_STATUS_PATH", ctx.need("PROXY_STATUS_PATH")?),
+        ("DOCKER_BRIDGE_NET", ctx.need("DOCKER_BRIDGE_NET")?),
         ("LOOPBACK_BIND_IP", loopback.clone()),
     ];
     for (template, out, on) in [

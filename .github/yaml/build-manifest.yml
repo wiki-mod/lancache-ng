@@ -548,7 +548,11 @@ runtime:
     - KEA_SOCKET_DIR=/run/kea
     - KEA4_SOCKET=@KEA_SOCKET_DIR@/kea4.sock
     - KEA_DDNS_SOCKET=@KEA_SOCKET_DIR@/kea-ddns.sock
-    - KEA_CTRL_ALLOW_FROM=172.16.0.0/12 127.0.0.0/8
+    # What: the Docker bridge range of internal clients.
+    # Why: Kea control and proxy ACLs admit the same range.
+    # From: Issue #1683 | PR #1912
+    - DOCKER_BRIDGE_NET=172.16.0.0/12
+    - KEA_CTRL_ALLOW_FROM=@DOCKER_BRIDGE_NET@ 127.0.0.0/8
     - KEA_CTRL_CHAIN=LANCACHE_KEA_CTRL
     - KEA_CTRL_REALM=kea-control
     - KEA_HOOKS_ROOT=/usr/lib
@@ -617,7 +621,8 @@ runtime:
     - STATUS_FILE=@STATUS_DIR@/status.json
     - SYSLOG_LOG_ROOT=/var/log/lancache-syslog-ng
     - SYSLOG_LOG_ROOT_ALLOWED_PREFIX=/var/log
-    - PROXY_STATUS_URL=http://proxy
+    - PROXY_STATUS_PATH=/nginx_status
+    - PROXY_STATUS_URL=http://proxy@PROXY_STATUS_PATH@
     - DHCP_API_HOST=host.docker.internal
     - DNS_URL=http://dns
     - HTTPS_ENABLED=1
@@ -644,8 +649,9 @@ runtime:
     - DEFAULT_CERT_NAME=default
     - DEFAULT_CERT_DNS=lancache-default
     - NGINX_CACHE_DIR=/var/cache/nginx/lancache
-    - PROXY_HEALTH_URL=http://@LOOPBACK_BIND_IP@/healthz
-    - PROXY_HEALTH_HTTPS_URL=https://@LOOPBACK_BIND_IP@:8445/healthz
+    - PROXY_HEALTH_PATH=/healthz
+    - PROXY_HEALTH_URL=http://@LOOPBACK_BIND_IP@@PROXY_HEALTH_PATH@
+    - PROXY_HEALTH_HTTPS_URL=https://@LOOPBACK_BIND_IP@:8445@PROXY_HEALTH_PATH@
     - NGINX_MITM_PORT=8444
     - NGINX_MITM_RELAY_PORT=9445
     - NGINX_PASSTHROUGH_RELAY_PORT=9446

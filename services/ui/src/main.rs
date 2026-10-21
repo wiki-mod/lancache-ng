@@ -1420,9 +1420,9 @@ struct NginxStatus {
 
 // What: nginx connection counters; None if unreachable.
 // Why: the dashboard shows a gap rather than stale numbers.
-async fn nginx_status(client: &reqwest::Client, base_url: &str) -> Option<NginxStatus> {
+async fn nginx_status(client: &reqwest::Client, url: &str) -> Option<NginxStatus> {
     let text = client
-        .get(format!("{base_url}/nginx_status"))
+        .get(url)
         .timeout(Duration::from_secs(3))
         .send()
         .await
