@@ -1806,7 +1806,8 @@ _ci_service_smoke() {
     if [[ "${runtime}" == *@CRATE@* ]]; then
         crates="$(_ci_required_field "${service}" crates list)" || return 2
         while IFS= read -r crate; do
-            each="${each}${runtime//@CRATE@/${crate}}"$'\n'
+            _ci_fill "${runtime}" "CRATE=${crate}" || return 2
+            each="${each}${REPLY}"$'\n'
         done <<< "${crates}"
         runtime="${each}"
     fi
@@ -3347,8 +3348,8 @@ _ci_status_text() {
         ci_log "[CI-ERROR-STATUS-0010]" "kind=\"${kind}\" reason=\"no SOT status_reports label and scope\""
         return 2
     fi
-    scope="${scope//@SERVICE@/${svc}}"
-    printf '%s\n%s\n' "${label}${svc:+-${svc}-${arch}}" "${scope//@ARCH@/${arch}}"
+    _ci_fill "${scope}" "SERVICE=${svc}"$'\n'"ARCH=${arch}" || return 2
+    printf '%s\n%s\n' "${label}${svc:+-${svc}-${arch}}" "${REPLY}"
 }
 
 # What: the issue body of one failing case.
@@ -8830,13 +8831,13 @@ _ci_validate_shared_secret() {
 }
 
 # What: the SOT runtime.defaults rows, @KEY@ resolved.
-# Why: setup.sh owns the resolver; ci.sh bakes its output.
+# Why: ci.sh resolves them; setup.sh is the customer file.
 # From: Issue #1683 | PR #1912
 _ci_runtime_defaults() {
     local rows
     rows="$(_ci_required_field runtime defaults blocklist)" || return 2
-    _ci_run "[CI-ERROR-VALIDATE-0127]" "reason=\"runtime.defaults not resolved\"" \
-        bash -c "source \"\$1\" && runtime_defaults_expand" _ "${CI_REPO_ROOT}/setup.sh" <<< "${rows}"
+    _ci_fill "${rows}" "${rows}" || { ci_log "[CI-ERROR-VALIDATE-0127]" "reason=\"runtime.defaults not resolved (error above)\""; return 2; }
+    printf '%s\n' "${REPLY}"
 }
 
 # What: one key's value in a KEY=value row list.
@@ -8863,17 +8864,38 @@ _ci_runtime_default() {
     _ci_default_in "${list}" "$1"
 }
 
-# What: text with each @KEY@ replaced by a row's value.
-# Why: a value names a default; it does not copy it.
+# What: REPLY = $1, each @KEY@ set from KEY=value rows $2.
+# Why: the one @KEY@ replacer; a value may name another key.
 # From: Issue #1683 | PR #1912
-_ci_fill_defaults() {
-    local text="$1" rows="$2" key val
+_ci_fill() {
+    local text="$1" depth="${3:-0}" key pre out=""
+    # What: the row table is built once, at the first level.
+    # Why: a chained value reads it; no rescan per token.
+    # From: Issue #1683 | PR #1912
+    if [ "${depth}" -eq 0 ]; then
+        local -A _ci_fv=()
+        local row
+        while IFS= read -r row; do
+            [[ "${row}" == *=* ]] || continue
+            [ -n "${_ci_fv[${row%%=*}]+x}" ] || _ci_fv["${row%%=*}"]="${row#*=}"
+        done <<< "$2"
+    fi
+    if [ "${depth}" -gt 16 ]; then
+        ci_log "[CI-ERROR-CORE-0156]" "text=\"$1\" reason=\"an @KEY@ value refers to itself\""
+        return 2
+    fi
     while [[ "${text}" =~ @([A-Z][A-Z0-9_]*)@ ]]; do
         key="${BASH_REMATCH[1]}"
-        val="$(_ci_default_in "${rows}" "${key}")" || return 2
-        text="${text//@${key}@/${val}}"
+        if [ -z "${_ci_fv[${key}]+x}" ]; then
+            ci_log "[CI-ERROR-CORE-0155]" "key=\"${key}\" text=\"${text}\" reason=\"@KEY@ names no row\""
+            return 2
+        fi
+        pre="${text%%"@${key}@"*}"
+        text="${text#*"@${key}@"}"
+        _ci_fill "${_ci_fv[${key}]}" "" $((depth + 1)) || return 2
+        out+="${pre}${REPLY}"
     done
-    printf '%s' "${text}"
+    REPLY="${out}${text}"
 }
 
 # What: http://<dns ip>:<port> of the rollback listener
@@ -9832,7 +9854,8 @@ _ci_service_setup() {
     tokens="${tokens//$'\n'/ }"
     rows="$(_ci_runtime_defaults)" || return 2
     gid="$(_ci_required_field runtime gid block)" || return 2
-    _ci_fill_defaults "${tokens}" "${rows}"$'\n'"GID=${gid}"
+    _ci_fill "${tokens}" "${rows}"$'\n'"GID=${gid}" || return 2
+    printf '%s' "${REPLY}"
 }
 
 # What: runtime.defaults rows a service image reads.
@@ -10018,7 +10041,8 @@ _ci_apk_repositories() {
                 ci_log "[CI-ERROR-BUILDARGS-0016]" "tag=\"${tag}\" reason=\"alpine pin tag is not major.minor; no repo branch\""
                 return 2
             fi
-            out="${out//@ALPINE_BRANCH@/v${tag}}"
+            _ci_fill "${out}" "ALPINE_BRANCH=v${tag}" || return 2
+            out="${REPLY}"
             ;;
     esac
     printf '%s' "${out//$'\n'/ }"
@@ -10703,18 +10727,14 @@ _ci_rh_cleanup() {
     return "${rc}"
 }
 
-# What: a runner_host unit text; fill the @KEY@ value pairs.
+# What: a runner_host unit text; fill the @KEY@ rows in $2.
 # Why: service and timer text share one fill and print.
 # From: Issue #1683 | PR #1912
 _ci_rh_unit_text() {
     local field="$1" text
-    shift
     text="$(_ci_block_entry_list runner_host "" "${field}")" || return 2
-    while [ "$#" -gt 1 ]; do
-        text="${text//$1/$2}"
-        shift 2
-    done
-    printf '%s\n' "${text}"
+    _ci_fill "${text}" "$2" || return 2
+    printf '%s\n' "${REPLY}"
 }
 
 # What: the systemd service unit text of the cleanup run.
@@ -10723,7 +10743,7 @@ _ci_rh_unit_text() {
 _ci_rh_service_text() {
     local repo
     repo="$(_ci_repo)" || return 2
-    _ci_rh_unit_text service_unit @REPO@ "${repo}" @SCRIPT_DIR@ "${CI_SCRIPT_DIR}"
+    _ci_rh_unit_text service_unit "REPO=${repo}"$'\n'"SCRIPT_DIR=${CI_SCRIPT_DIR}"
 }
 
 # What: the systemd timer unit text of the cleanup run.
@@ -10733,7 +10753,7 @@ _ci_rh_timer_text() {
     local calendar delay
     calendar="$(_ci_rh_val timer_calendar)" || return 2
     delay="$(_ci_rh_val timer_delay)" || return 2
-    _ci_rh_unit_text timer_unit @CALENDAR@ "${calendar}" @DELAY@ "${delay}"
+    _ci_rh_unit_text timer_unit "CALENDAR=${calendar}"$'\n'"DELAY=${delay}"
 }
 
 # What: install the cleanup service and timer, enable it.
@@ -11610,7 +11630,7 @@ EOF
 # Why: a cancelled job skips its own teardown step.
 # From: Issue #1622 | PR #1624
 _ci_rh_hook_post_text() {
-    local text
+    local text min_age prefix legacy
     text="$(cat <<'EOF'
 #!/bin/bash
 # What: removes orphaned validate nets, resets the owner.
@@ -11660,10 +11680,11 @@ if [ -n "${GITHUB_WORKSPACE:-}" ] && [ -d "${GITHUB_WORKSPACE}" ]; then
 fi
 EOF
 )"
-    text="${text//@MIN_AGE@/$(_ci_rh_val hook_network_min_age)}"
-    text="${text//@PREFIX@/$(_ci_validate_project "")}"
-    text="${text//@LEGACY@/$(_ci_rh_val legacy_validation_prefix)}"
-    printf '%s\n' "${text}"
+    min_age="$(_ci_rh_val hook_network_min_age)" || return 2
+    prefix="$(_ci_validate_project "")" || return 2
+    legacy="$(_ci_rh_val legacy_validation_prefix)" || return 2
+    _ci_fill "${text}" "MIN_AGE=${min_age}"$'\n'"PREFIX=${prefix}"$'\n'"LEGACY=${legacy}" || return 2
+    printf '%s\n' "${REPLY}"
 }
 
 # What: install both job hooks owned by the runner account.
@@ -11705,7 +11726,8 @@ _ci_rh_access() {
     _ci_rh_need_sudo || return 2
     file="$(_ci_rh_sudoers_file "${user}")" || return 2
     rule="$(_ci_rh_val sudoers_rule)" || return 2
-    rule="${rule//@USER@/${user}}"
+    _ci_fill "${rule}" "USER=${user}" || return 2
+    rule="${REPLY}"
     mode="$(_ci_rh_val sudoers_mode)" || return 2
     dgroup="$(_ci_rh_val docker_group)" || return 2
     if _ci_rh_root test -f "${file}"; then
@@ -11750,7 +11772,8 @@ _ci_rh_backports() {
     list="$(_ci_rh_val backports_list)" || return 2
     pref="$(_ci_rh_val backports_pref)" || return 2
     want_list="$(_ci_rh_val backports_repo)" || return 2
-    want_list="${want_list//@SUITE@/${suite}}"
+    _ci_fill "${want_list}" "SUITE=${suite}" || return 2
+    want_list="${REPLY}"
     pin="$(_ci_block_entry_list runner_host "" backports_pin)" || return 2
     want_pref="${pin}"
     if [ "$(_ci_run -m 1 "[CI-ERROR-RUNNER-0072]" "file=\"${list}\" reason=\"unreadable\"" _ci_rh_root cat "${list}")" != "${want_list}" ]; then
@@ -11839,12 +11862,14 @@ _ci_rh_runner_fetch() {
     user="$(_ci_rh_val user)" || return 2
     group="$(_ci_rh_group "${user}")" || return 2
     tar="$(_ci_rh_val runner_tar)" || return 2
-    tar="${tar//@VERSION@/${ver}}"
+    _ci_fill "${tar}" "VERSION=${ver}" || return 2
+    tar="${REPLY}"
     url="$(_ci_rh_val runner_release_url)" || return 2
-    url="${url//@VERSION@/${ver}}"
-    url="${url//@TAR@/${tar}}"
+    _ci_fill "${url}" "VERSION=${ver}"$'\n'"TAR=${tar}" || return 2
+    url="${REPLY}"
     api="$(_ci_rh_val runner_api_url)" || return 2
-    api="${api//@VERSION@/${ver}}"
+    _ci_fill "${api}" "VERSION=${ver}" || return 2
+    api="${REPLY}"
     envf="$(_ci_rh_val runner_env_file)" || return 2
     lang="$(_ci_rh_val runner_env_lang)" || return 2
     # What: accept only a new or empty dir under the root.
@@ -12041,7 +12066,8 @@ _ci_rh_sccache_fetch() {
     _ci_run "[CI-ERROR-RUNNER-0101]" "file=\"${src}/${main_name}\" reason=\"staged binary does not run\"" _ci_rh_root sudo -u "${user}" env HOME="${root}/${user}" "${src}/${main_name}" --version || return 2
     _ci_run "[CI-ERROR-RUNNER-0102]" "file=\"${src}/${dist_name}\" reason=\"staged binary does not run\"" "${src}/${dist_name}" --help || return 2
     for f in ${list}; do
-        staged="${bin_dir}/${stmpl//@FILE@/${f}}"
+        _ci_fill "${stmpl}" "FILE=${f}" || return 2
+        staged="${bin_dir}/${REPLY}"
         _ci_run "[CI-ERROR-RUNNER-0103]" "file=\"${f}\" reason=\"not installed\"" _ci_rh_root install -o root -g "${group}" -m "${bmode}" "${src}/${f}" "${staged}" || { _ci_rh_root rm -f "${staged}"; return 2; }
         _ci_run "[CI-ERROR-RUNNER-0104]" "file=\"${f}\" reason=\"not moved in place\"" _ci_rh_root mv -f "${staged}" "${bin_dir}/${f}" || { _ci_rh_root rm -f "${staged}"; return 2; }
     done
@@ -14939,7 +14965,7 @@ _ci_validation_env() {
     while IFS= read -r k; do
         [ -n "${k}" ] || continue
         case "${k}" in
-            *=*) v="$(_ci_fill_defaults "${k}" "${rows}")" || return 2 ;;
+            *=*) _ci_fill "${k}" "${rows}" || return 2; v="${REPLY}" ;;
             *) v="$(_ci_default_in "${rows}" "${k}")" || return 2; v="${k}=${v}" ;;
         esac
         printf '%s\n' "${v}"
