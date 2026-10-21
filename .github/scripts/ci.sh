@@ -15289,17 +15289,34 @@ PROG
     printf 'netdata-isolation=clean\n'
 }
 
-# What: /healthz ACL order and ignored-header hiding.
+# What: health ACL order and ignored-header hiding.
 # Why: a bare return skips the ACL; ignored headers leak.
 # From: Issue #1683 | PR #1858
 _ci_check_proxy_nginx_policy() {
-    local repo_root="${1:-${CI_REPO_ROOT}}" f out line pp first="" blocks=0 b h a d al r px
+    local repo_root="${1:-${CI_REPO_ROOT}}" f out line pp first="" blocks=0 b h a d al r px hk hu hp="" hq
     local -a viol=()
     px="$(_ci_service_path proxy "" "${repo_root}")" || return 2
     px="${px%/}"
+    # What: the health path both SOT health URLs name.
+    # Why: the SOT owns it; templates must match.
+    # From: Issue #1683 | PR #1912
+    for hk in PROXY_HEALTH_URL PROXY_HEALTH_HTTPS_URL; do
+        hu="$(_ci_runtime_default "${hk}")" || return 2
+        hq="${hu#*://}"
+        hq="/${hq#*/}"
+        if [[ "${hu}" != *://*/* ]] || ! [[ "${hq}" =~ ^/[A-Za-z0-9._/-]+$ ]]; then
+            ci_log "[CI-ERROR-CHECK-0194]" "key=\"${hk}\" value=\"${hu}\" reason=\"SOT health URL names no plain absolute path\""
+            return 2
+        fi
+        if [ -n "${hp}" ] && [ "${hp}" != "${hq}" ]; then
+            ci_log "[CI-ERROR-CHECK-0195]" "key=\"${hk}\" path=\"${hq}\" other=\"${hp}\" reason=\"the SOT health URLs name different paths\""
+            return 2
+        fi
+        hp="${hq}"
+    done
     for f in "${px}"/conf.d/*.conf; do
-        out="$(_ci_capture 0 awk "$(cat <<'PROG'
-            /^[[:space:]]*location = \/healthz \{/ { inb = 1; n++; body = ""; a = 0; d = 0; al = 0; r = 0; next }
+        out="$(_ci_capture 0 awk -v "P=${hp}" "$(cat <<'PROG'
+            $1 == "location" && $2 == "=" && $3 == P && $4 == "{" { inb = 1; n++; body = ""; a = 0; d = 0; al = 0; r = 0; next }
             inb && /^[[:space:]]*\}/ {
                 printf "%s|%d|%d|%d|%d\n", body, a, d, al, r; inb = 0; next }
             inb { line = $0; gsub(/^[[:space:]]+|[[:space:]]+$/, "", line); gsub(/[[:space:]]+/, " ", line)
@@ -15314,13 +15331,13 @@ PROG
             [ -n "${b}" ] || continue
             blocks=$((blocks + 1))
             IFS='|' read -r a d al r <<<"${line}"
-            [ "${a}" -ge 1 ] && [ "${d}" -eq 1 ] || viol+=("${f#"${repo_root}/"}: /healthz needs allow lines followed by deny all")
-            [ "${al}" -eq 1 ] && [ "${r}" -eq 0 ] || viol+=("${f#"${repo_root}/"}: /healthz must serve via alias, never return (return skips the ACL)")
+            [ "${a}" -ge 1 ] && [ "${d}" -eq 1 ] || viol+=("${f#"${repo_root}/"}: ${hp} needs allow lines followed by deny all")
+            [ "${al}" -eq 1 ] && [ "${r}" -eq 0 ] || viol+=("${f#"${repo_root}/"}: ${hp} must serve via alias, never return (return skips the ACL)")
             [ -n "${first}" ] || first="${b}"
-            [ "${b}" = "${first}" ] || viol+=("${f#"${repo_root}/"}: /healthz differs from the first block")
+            [ "${b}" = "${first}" ] || viol+=("${f#"${repo_root}/"}: ${hp} differs from the first block")
         done <<<"${out}"
     done
-    [ "${blocks}" -gt 0 ] || viol+=("${px#"${repo_root}/"}/conf.d: no /healthz block found")
+    [ "${blocks}" -gt 0 ] || viol+=("${px#"${repo_root}/"}/conf.d: no ${hp} block found")
     pp="${px}/proxy-params.conf"
     out="$(_ci_capture 0 awk "$(cat <<'PROG'
         $1 == "proxy_ignore_headers" { for (i = 2; i <= NF; i++) { h = $i; sub(/;$/, "", h); ign[h] = 1 } }
