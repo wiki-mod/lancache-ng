@@ -218,6 +218,18 @@ name it packages. `LANCACHE_IMAGE_REGISTRY`, `LANCACHE_IMAGE_PREFIX`,
 environment variable names every service/script uses to assemble an image
 reference; do not introduce a second set of image-location variables.
 
+### GHCR image tags
+
+Rule: the prefix `sha-` names a commit and nothing else. A per-commit tag is
+`sha-<full 40-hex commit SHA>` (AG-REL-015, `docs/release-versioning.md`).
+A tag that names a build identity (the 64-hex hash of a service's build
+inputs, `docs/ci-2.0-architecture.md`) is
+`<release.tag_identity_prefix><build identity>-<arch>`, with the prefix
+`identity-` owned by `.github/yaml/build-manifest.yml` (`release:`) and
+written and read only through `_ci_image_tag` in `.github/scripts/ci.sh`.
+An identity tag never starts with `sha-`, so no commit-tag reader, pin
+check or retention rank can mistake it for a commit.
+
 ### Environment variables that refer to services or containers
 
 Rule: no environment variable names a service or a container. The ui has

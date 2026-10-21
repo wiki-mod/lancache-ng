@@ -914,6 +914,10 @@ release:
   # Why: setup.sh accepts only these as immutable pins.
   # From: Issue #1683 | PR #1912
   tag_commit: ^sha-[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$
+  # What: prefix of the per-identity, per-arch image tag.
+  # Why: sha- names a commit only (AG-REL-015).
+  # From: Issue #1683 | PR #1912
+  tag_identity_prefix: identity-
   # What: SPDX license of the whole project.
   # Why: crates and image labels read it; no literal copies.
   # From: Issue #1683 | PR #1858

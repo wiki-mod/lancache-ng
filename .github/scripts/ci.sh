@@ -3863,9 +3863,17 @@ _ci_retry() {
 # Why: One tag owner; build/publish/verify must agree.
 # From: Issue #1683
 _ci_image_tag() {
-    local name
+    local name prefix
     name="$(_ci_image_ref "$1")" || return 2
-    printf '%s:sha-%s-%s' "${name}" "$3" "${2##*/}"
+    # What: the identity tag prefix comes from the SOT.
+    # Why: AG-REL-015 keeps sha- for the commit SHA only.
+    # From: Issue #1683 | PR #1912
+    _ci_block_entry_fields release "" tag_identity_prefix prefix || return 2
+    if [ -z "${prefix}" ]; then
+        ci_log "[CI-ERROR-CORE-0141]" "reason=\"no SOT release.tag_identity_prefix; FAIL CLOSED\""
+        return 2
+    fi
+    printf '%s:%s%s-%s' "${name}" "${prefix}" "$3" "${2##*/}"
 }
 
 # What: registry/repo, then /target, then @digest if given.
