@@ -931,7 +931,7 @@ dns_local_forward_zones() {
 }
 
 # What: stop boot on a bad DNS_UPSTREAM_SERVERS entry.
-# Why: a silent fallback would hide a typo from the operator.
+# Why: a silent fallback would hide an operator typo.
 # From: Issue #1918
 dns_upstream_fatal() {
     echo "[lancache-dns] FATAL: DNS_UPSTREAM_SERVERS entry '$1' $2." >&2
@@ -939,7 +939,7 @@ dns_upstream_fatal() {
 }
 
 # What: check one upstream resolver, print it for the YAML.
-# Why: the recursor takes IP[:port] only; hosts would resolve.
+# Why: the recursor takes IP[:port], not host names.
 # From: Issue #1918
 dns_upstream_forwarder() {
     local entry="$1" ip="$1" port="" octet own addr

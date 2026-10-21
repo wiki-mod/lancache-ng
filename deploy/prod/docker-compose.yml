@@ -84,7 +84,7 @@ services:
       - NATS_PASSWORD_SHARED_SECRET=nats-dns-writer-password
       - NATS_CONSUMER=dns-standard
       - NATS_RECONCILER=1
-      # What: upstream resolvers and zones for non-LAN names.
+      # What: upstream resolvers for non-LAN names.
       # Why: one .env.local value feeds both recursors.
       # From: Issue #1918
       - DNS_UPSTREAM_SERVERS=${DNS_UPSTREAM_SERVERS:-}
@@ -167,7 +167,7 @@ services:
       # shared file so it matches the value the nats server generates.
       - NATS_PASSWORD_SHARED_SECRET=nats-dns-replica-password
       - NATS_CONSUMER=dns-ssl
-      # What: upstream resolvers and zones for non-LAN names.
+      # What: upstream resolvers for non-LAN names.
       # Why: one .env.local value feeds both recursors.
       # From: Issue #1918
       - DNS_UPSTREAM_SERVERS=${DNS_UPSTREAM_SERVERS:-}
