@@ -15293,13 +15293,19 @@ PROG
 # Why: a bare return skips the ACL; ignored headers leak.
 # From: Issue #1683 | PR #1858
 _ci_check_proxy_nginx_policy() {
-    local repo_root="${1:-${CI_REPO_ROOT}}" f out line pp first="" blocks=0 b h a d al r px hk hu hp="" hq pn lb fb
-    local -a viol=()
+    local repo_root="${1:-${CI_REPO_ROOT}}" f out line pp first="" blocks=0 b h a d al r px hk hu hp="" hq pn lb fb hv sv sp bn
+    local -a viol=() bnt
     px="$(_ci_service_path proxy "" "${repo_root}")" || return 2
     px="${px%/}"
-    # What: the health path both SOT health URLs name.
-    # Why: the SOT owns it; templates must match.
+    # What: the health and status paths of the SOT.
+    # Why: the templates name the keys; values must be sane.
     # From: Issue #1683 | PR #1912
+    hv="$(_ci_runtime_default PROXY_HEALTH_PATH)" || return 2
+    sv="$(_ci_runtime_default PROXY_STATUS_PATH)" || return 2
+    if ! [[ "${sv}" =~ ^/[A-Za-z0-9._/-]+$ ]]; then
+        ci_log "[CI-ERROR-CHECK-0196]" "key=\"PROXY_STATUS_PATH\" value=\"${sv}\" reason=\"SOT status path is no plain absolute path\""
+        return 2
+    fi
     for hk in PROXY_HEALTH_URL PROXY_HEALTH_HTTPS_URL; do
         hu="$(_ci_runtime_default "${hk}")" || return 2
         hq="${hu#*://}"
@@ -15308,17 +15314,24 @@ _ci_check_proxy_nginx_policy() {
             ci_log "[CI-ERROR-CHECK-0194]" "key=\"${hk}\" value=\"${hu}\" reason=\"SOT health URL names no plain absolute path\""
             return 2
         fi
-        if [ -n "${hp}" ] && [ "${hp}" != "${hq}" ]; then
-            ci_log "[CI-ERROR-CHECK-0195]" "key=\"${hk}\" path=\"${hq}\" other=\"${hp}\" reason=\"the SOT health URLs name different paths\""
+        if [ "${hq}" != "${hv}" ]; then
+            ci_log "[CI-ERROR-CHECK-0195]" "key=\"${hk}\" path=\"${hq}\" other=\"${hv}\" reason=\"the SOT health URL path differs from PROXY_HEALTH_PATH\""
             return 2
         fi
-        hp="${hq}"
     done
-    # What: the allow targets a health block may carry.
-    # Why: the SOT owns the ranges; a template follows it.
+    hp="\${PROXY_HEALTH_PATH}"
+    sp="\${PROXY_STATUS_PATH}"
+    # What: the allow targets a location may carry.
+    # Why: the SOT owns the ranges; templates name the key.
     # From: Issue #1683 | PR #1912
     pn="$(_ci_runtime_default PRIVATE_NETS)" || return 2
-    lb="\${LOOPBACK_BIND_IP}/32"
+    bn="$(_ci_runtime_default DOCKER_BRIDGE_NET)" || return 2
+    read -ra bnt <<<"${bn}"
+    for h in "${bnt[@]}"; do
+        [[ " ${pn} " == *" ${h} "* ]] \
+            || viol+=("DOCKER_BRIDGE_NET holds ${h}, which is no PRIVATE_NETS member")
+    done
+    lb="\${LOOPBACK_BIND_IP}/32 \${DOCKER_BRIDGE_NET}"
     for f in "${px}"/conf.d/*.conf; do
         out="$(_ci_capture 0 awk -v "P=${hp}" "$(cat <<'PROG'
             $1 == "location" && $2 == "=" && $3 == P && $4 == "{" { inb = 1; n++; body = ""; a = 0; d = 0; al = 0; r = 0; next }
@@ -15348,21 +15361,25 @@ PROG
         # Why: a location with allow lines is an ACL.
         # From: Issue #1683 | PR #1912
         out="$(_ci_capture 0 awk "$(cat <<'PROG'
-            $1 == "location" { loc = $0; sub(/^[[:space:]]+/, "", loc); sub(/[[:space:]]*\{.*$/, "", loc); gsub(/[[:space:]]+/, " ", loc)
-                inb = 1; depth = 0; a = 0; d = 0 }
+            $1 == "location" { loc = $0; sub(/^[[:space:]]+/, "", loc); sub(/[[:space:]]*\{[[:space:]]*$/, "", loc); gsub(/[[:space:]]+/, " ", loc)
+                inb = 1; depth = 0; a = 0; d = 0; s = 0 }
             inb { line = $0; gsub(/^[[:space:]]+|[[:space:]]+$/, "", line); gsub(/[[:space:]]+/, " ", line)
                 if (line ~ /^allow /) { t = line; sub(/^allow /, "", t); sub(/;$/, "", t); print loc "|T|" t; a++; if (d) d = -1 }
                 if (line == "deny all;" && d == 0) d = 1
+                if (line == "stub_status;") s = 1
                 o = $0; c = $0
                 depth += gsub(/\{/, "", o) - gsub(/\}/, "", c)
-                if (depth <= 0) { if (a > 0 && d != 1) print loc "|D|"; inb = 0 } }
+                if (depth <= 0) { if (a > 0 && d != 1) print loc "|D|"; if (s) print loc "|S|"; inb = 0 } }
 PROG
             )" "${f}")" || return 2
         while IFS='|' read -r line b h; do
             [ -n "${line}" ] || continue
             if [ "${b}" = "T" ]; then
-                [[ " ${pn} ${lb} " == *" ${h} "* ]] \
-                    || viol+=("${f#"${repo_root}/"}: ${line} allows ${h}, neither the loopback bind nor a PRIVATE_NETS member")
+                [[ " ${lb} " == *" ${h} "* ]] \
+                    || viol+=("${f#"${repo_root}/"}: ${line} allows ${h}, neither the loopback bind nor \${DOCKER_BRIDGE_NET} (a literal is a second owner)")
+            elif [ "${b}" = "S" ]; then
+                [ "${line}" = "location = ${sp}" ] \
+                    || viol+=("${f#"${repo_root}/"}: ${line} serves stub_status but is not location = ${sp}")
             elif [ "${line}" != "location = ${hp}" ]; then
                 viol+=("${f#"${repo_root}/"}: ${line} needs allow lines followed by deny all")
             fi
