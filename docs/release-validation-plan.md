@@ -539,6 +539,10 @@ recurrence:
 - **A build-identity tag starting with `sha-`** (AG-REL-015): `_ci_image_tag`
   renders `release.tag_identity_prefix` (`identity-`); no CI check detects a
   recurrence of the old `sha-<identity>-<arch>` form.
+- **A short or pr-prefixed `sha-` pin accepted as a commit pin** (AG-REL-015):
+  `release.tag_commit` is `sha-` plus 40 hex and `validate_lancache_image_tag`
+  has no `pr-*` branch; a stored short pin stops `setup.sh` with an error that
+  names the valid forms. No CI check detects a recurrence.
 - **A scan of another image than the published digest**: `scan-stack` scans
   `_ci_published_digest`.
 - **Case-sensitive repository-name comparison**: `_ci_repo` lowercases.

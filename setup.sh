@@ -2721,21 +2721,17 @@ validate_lancache_image_tag() {
 
     case "$tag" in
         sha-*)
+            # What: short or malformed sha- pin stops
+            # Why: AG-REL-015: full 40-hex SHA only
+            # From: Issue #1683 | PR #1912
             is_commit_image_tag "$tag" \
-                || die "LANCACHE_IMAGE_TAG must be a valid sha-* image tag."
-            return 0
-            ;;
-        pr-*)
-            # What: pr-<N>-sha-<full> CI tags are accepted
-            # Why: CI simulation installs a pinned PR build
-            [[ "$tag" =~ ^pr-[0-9]+-sha-[0-9a-fA-F]{7,}$ ]] \
-                || die "LANCACHE_IMAGE_TAG pr-* staging tags must match pr-<number>-sha-<commit>."
+                || die "LANCACHE_IMAGE_TAG '$tag' is not sha-<40-hex commit SHA>. Set the full commit SHA, a vX.Y.Z tag or a channel."
             return 0
             ;;
     esac
 
     is_release_tag "$tag" \
-        || die "LANCACHE_IMAGE_TAG must be an immutable sha-* tag or a vX.Y.Z / vX.Y.Z-rc.N release tag."
+        || die "LANCACHE_IMAGE_TAG must be sha-<40-hex commit SHA> or a vX.Y.Z / vX.Y.Z-rc.N release tag."
 }
 
 # What: SOT release rows of one kind, fields after it
@@ -3049,7 +3045,7 @@ To proceed, choose one of these options:
 
   2. Pin to a specific release version or commit (immutable):
      LANCACHE_IMAGE_TAG=vX.Y.Z ./setup.sh install        # once a stable release is tagged
-     LANCACHE_IMAGE_TAG=sha-abc1234 ./setup.sh install   # specific commit build
+     LANCACHE_IMAGE_TAG=sha-<40-hex commit SHA> ./setup.sh install   # specific commit build
 
 For details on release channels and their stability, see:
   docs/release-versioning.md

@@ -48,7 +48,7 @@ must stay consistent with that file.
 
 | Channel | Meaning | Mutability | Intended use |
 | --- | --- | --- | --- |
-| `sha-<commit>` | Immutable build identity for a source commit | Immutable | Debugging, rollback, provenance, and promotion source |
+| `sha-<commit>` | Immutable tag for a source commit, always the full 40-hex SHA (`release.tag_commit`; `setup.sh` rejects a short SHA) | Immutable | Debugging, rollback, provenance, and promotion source |
 | `nightly` | Tested pre-stable integration channel, built from `current_dev`'s tip once a day (01:00 UTC) plus on-demand, gated on a full green build+scan | Mutable | Operators who explicitly opt into pre-stable builds |
 | `vX.Y.Z-rc.N` | Release candidate | Immutable | Pre-release validation; GitHub release must be marked prerelease |
 | `vX.Y.Z` | Stable release | Immutable | Production release pinning |

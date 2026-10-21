@@ -910,10 +910,10 @@ release:
   # From: Issue #1683 | PR #1912
   tag_final: ^v[0-9]+\.[0-9]+\.[0-9]+$
   tag_prerelease: ^v[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$
-  # What: grammar of a commit image tag (sha-...).
-  # Why: setup.sh accepts only these as immutable pins.
+  # What: grammar of a commit image tag: sha-<40 hex>.
+  # Why: AG-REL-015 full SHA; setup.sh pins only these.
   # From: Issue #1683 | PR #1912
-  tag_commit: ^sha-[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$
+  tag_commit: ^sha-[0-9a-f]{40}$
   # What: prefix of the per-identity, per-arch image tag.
   # Why: sha- names a commit only (AG-REL-015).
   # From: Issue #1683 | PR #1912
