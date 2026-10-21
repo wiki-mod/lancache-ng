@@ -197,6 +197,13 @@ adapter) is:
    - Applies the snapshot via Kea's Control Agent API (the same sequence the Admin UI uses)
    - Persists the config to disk
 
+   `setup.sh` judges the Control Agent's replies itself (`kea_reply_check`,
+   result 0 or stop) and does not call the Admin UI's Rust code
+   (`kea_outcome`), because this path exists for the case that the
+   container or the Admin UI is not running. `ci.sh` neither sends nor
+   judges Kea commands on its own: it calls `kea_ctrl_send` and
+   `kea_reply_check`.
+
 4. Check logs after rollback:
    ```bash
    docker compose -f deploy/prod/docker-compose.yml logs dhcp

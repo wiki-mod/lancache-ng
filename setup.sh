@@ -5795,9 +5795,9 @@ compose_config_value() {
 }
 
 # What: one Kea Control Agent command, as the UI sends it
-# Why: Kea answers per service; result 0 means success
+# Why: the one sender; setup.sh and ci.sh share it
 # From: Issue #1683 | PR #1858
-kea_ctrl_post() {
+kea_ctrl_send() {
     local kea_ctrl_url="$1" kea_ctrl_user="$2" kea_ctrl_token="$3" body="$4"
     local out http_status response
 
@@ -5819,6 +5819,15 @@ kea_ctrl_post() {
     if [[ ! "$http_status" =~ ^2 ]]; then
         die "Kea's Control Agent rejected the request with HTTP ${http_status}. Response: ${response}"
     fi
+    printf '%s\n' "$response"
+}
+
+# What: one Kea command that must carry result 0
+# Why: Kea answers per service; result 0 means success
+# From: Issue #1683 | PR #1912
+kea_ctrl_post() {
+    local response
+    response=$(kea_ctrl_send "$@") || exit $?
     kea_reply_check "$response"
     printf '%s\n' "$response"
 }
