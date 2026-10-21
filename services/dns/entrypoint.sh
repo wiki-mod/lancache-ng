@@ -934,11 +934,11 @@ dns_local_forward_zones() {
     sed -n 's/^    - zone: \([^ ]*\)$/\1/p' /etc/pdns/recursor.conf.template
 }
 
-# What: stop boot on a bad DNS_UPSTREAM_SERVERS entry.
-# Why: a silent fallback would hide an operator typo.
+# What: report a bad DNS_UPSTREAM_SERVERS entry.
+# Why: the caller then starts without the upstream.
 # From: Issue #1918
-dns_upstream_fatal() {
-    echo "[lancache-dns] FATAL: DNS_UPSTREAM_SERVERS entry '$1' $2." >&2
+dns_upstream_error() {
+    echo "[lancache-dns] ERROR: DNS_UPSTREAM_SERVERS entry '$1' $2." >&2
     return 1
 }
 
@@ -956,38 +956,38 @@ dns_upstream_forwarder() {
     esac
     if [ -n "$port" ]; then
         if ! [[ "$port" =~ ^[0-9]{1,5}$ ]] || [ "$((10#$port))" -lt 1 ] || [ "$((10#$port))" -gt 65535 ]; then
-            dns_upstream_fatal "$entry" "has no valid port"
+            dns_upstream_error "$entry" "has no valid port"
             return 1
         fi
         port="$((10#$port))"
     fi
     if [[ "$ip" == *:* ]]; then
         if ! [[ "$ip" =~ ^[0-9A-Fa-f:]+$ && "$ip" == *:*:* ]]; then
-            dns_upstream_fatal "$entry" "is no IPv6 address"
+            dns_upstream_error "$entry" "is no IPv6 address"
             return 1
         fi
     else
         IFS=. read -r -a octets <<< "$ip"
         if [ "${#octets[@]}" -ne 4 ]; then
-            dns_upstream_fatal "$entry" "is no IPv4 address"
+            dns_upstream_error "$entry" "is no IPv4 address"
             return 1
         fi
         for octet in "${octets[@]}"; do
             if ! [[ "$octet" =~ ^[0-9]{1,3}$ ]] || [ "$((10#$octet))" -gt 255 ]; then
-                dns_upstream_fatal "$entry" "is no IPv4 address"
+                dns_upstream_error "$entry" "is no IPv4 address"
                 return 1
             fi
         done
     fi
     case "$ip" in
         127.*|0.0.0.0|::1|::)
-            dns_upstream_fatal "$entry" "is a loopback or unspecified address"
+            dns_upstream_error "$entry" "is a loopback or unspecified address"
             return 1
             ;;
     esac
     IFS=, read -r -a addrs <<< "$DNS_LISTEN_IPS"
     if ! own="$(ip -o addr show)"; then
-        echo "[lancache-dns] FATAL: could not list this container's addresses." >&2
+        echo "[lancache-dns] ERROR: could not list this container's addresses." >&2
         return 1
     fi
     while read -r _ _ _ addr _; do
@@ -995,7 +995,7 @@ dns_upstream_forwarder() {
     done <<< "$own"
     for addr in "${addrs[@]}"; do
         if [ -n "$addr" ] && [ "$addr" = "$ip" ]; then
-            dns_upstream_fatal "$entry" "is a LanCache address and would loop"
+            dns_upstream_error "$entry" "is a LanCache address and would loop"
             return 1
         fi
     done
@@ -1030,12 +1030,12 @@ dns_upstream_zone_list() {
             zone="${zone,,}"
             zone="${zone%.}"
             if [ "${#zone}" -gt 253 ] || ! [[ "$zone" =~ ^[a-z0-9_]([a-z0-9_-]*)(\.[a-z0-9_]([a-z0-9_-]*))*$ ]]; then
-                echo "[lancache-dns] FATAL: $name entry '$zone' is no DNS zone name." >&2
+                echo "[lancache-dns] ERROR: $name entry '$zone' is no DNS zone name." >&2
                 return 1
             fi
         fi
         if grep -qxF -- "$zone" <<< "$local_zones"; then
-            echo "[lancache-dns] FATAL: $name entry '$zone' is served by the local authoritative server." >&2
+            echo "[lancache-dns] ERROR: $name entry '$zone' is served by the local authoritative server." >&2
             return 1
         fi
         case " ${zones[*]:-} " in
@@ -1079,7 +1079,7 @@ dns_upstream_setup() {
             fi
         done
         if [ "$zone" = "." ] || [ "$covered" -ne 1 ]; then
-            echo "[lancache-dns] FATAL: DNS_UPSTREAM_UNSIGNED_ZONES entry '$zone' must lie inside DNS_UPSTREAM_ZONES and must not be '.'." >&2
+            echo "[lancache-dns] ERROR: DNS_UPSTREAM_UNSIGNED_ZONES entry '$zone' must lie inside DNS_UPSTREAM_ZONES and must not be '.'." >&2
             return 1
         fi
     done
@@ -1093,7 +1093,15 @@ dns_upstream_setup() {
 }
 
 # ── 1. Generate Recursor Config ──────────────────────────────────────────────
-dns_upstream_setup || exit 1
+# What: start without upstream if the setting is invalid.
+# Why: a typo must not take the DNS server away.
+# From: Issue #1918
+if ! dns_upstream_setup; then
+    echo "[lancache-dns] ERROR: the DNS_UPSTREAM_* setting is invalid; starting WITHOUT an upstream resolver. Fix it with: ./setup.sh configure-upstream-dns" >&2
+    PDNS_RECURSOR_UPSTREAM_ZONES=""
+    DNS_UPSTREAM_ZONES=""
+    DNS_UPSTREAM_UNSIGNED_ZONES=""
+fi
 export PDNS_RECURSOR_UPSTREAM_ZONES DNS_UPSTREAM_ZONES DNS_UPSTREAM_UNSIGNED_ZONES
 echo "[lancache-dns] Generating recursor.conf..."
 # shellcheck disable=SC2016 # envsubst needs the literal variable name.
