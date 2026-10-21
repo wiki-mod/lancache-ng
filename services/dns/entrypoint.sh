@@ -288,6 +288,18 @@ if secret_is_placeholder "$DDNS_TSIG_KEY"; then
 fi
 LOG_QUERIES="${LOG_QUERIES:-${DNSMASQ_LOG_QUERIES:-0}}"
 ROOT_ZONE_MIRROR="${ROOT_ZONE_MIRROR:-1}"
+# What: upstream resolvers for names outside the LAN zones.
+# Why: a LAN resolver answers private names the root cannot.
+# From: Issue #1918
+DNS_UPSTREAM_SERVERS="${DNS_UPSTREAM_SERVERS:-}"
+# What: the zones sent to those upstream resolvers.
+# Why: "." forwards every name; a list scopes the forward.
+# From: Issue #1918
+DNS_UPSTREAM_ZONES="${DNS_UPSTREAM_ZONES:-.}"
+# What: LanCache addresses that clients use to reach DNS.
+# Why: an upstream on one of them would loop back to us.
+# From: Issue #1918
+DNS_LISTEN_IPS="${DNS_LISTEN_IPS:-}"
 NATS_URL="${NATS_URL:-nats://nats:4222}"
 NATS_USER="${NATS_USER:-}"
 # Resolve the shared NATS password (issue #858). The nats server and this dns
@@ -1225,7 +1237,142 @@ _dns_auth_validate_snapshot_or_rollback() {
 echo "[lancache-dns] Proxy IPv4: $PROXY_IP"
 [ -n "$PROXY_IPV6" ] && echo "[lancache-dns] Proxy IPv6: $PROXY_IPV6"
 
+# What: the zones the recursor template forwards locally.
+# Why: an upstream zone must not repeat one of them.
+# From: Issue #1918
+dns_local_forward_zones() {
+    sed -n 's/^    - zone: \([^ ]*\)$/\1/p' /etc/pdns/recursor.conf.template
+}
+
+# What: stop boot on a bad DNS_UPSTREAM_SERVERS entry.
+# Why: a silent fallback would hide a typo from the operator.
+# From: Issue #1918
+dns_upstream_fatal() {
+    echo "[lancache-dns] FATAL: DNS_UPSTREAM_SERVERS entry '$1' $2." >&2
+    return 1
+}
+
+# What: check one upstream resolver, print it for the YAML.
+# Why: the recursor takes IP[:port] only; hosts would resolve.
+# From: Issue #1918
+dns_upstream_forwarder() {
+    local entry="$1" ip="$1" port="" octet own addr
+    local -a octets=() addrs=()
+    case "$entry" in
+        \[*\]:*) ip="${entry#\[}"; ip="${ip%%\]*}"; port="${entry##*\]:}" ;;
+        \[*\]) ip="${entry#\[}"; ip="${ip%\]}" ;;
+        *:*:*) ip="$entry" ;;
+        *:*) ip="${entry%%:*}"; port="${entry#*:}" ;;
+    esac
+    if [ -n "$port" ]; then
+        if ! [[ "$port" =~ ^[0-9]{1,5}$ ]] || [ "$((10#$port))" -lt 1 ] || [ "$((10#$port))" -gt 65535 ]; then
+            dns_upstream_fatal "$entry" "has no valid port"
+            return 1
+        fi
+        port="$((10#$port))"
+    fi
+    if [[ "$ip" == *:* ]]; then
+        if ! [[ "$ip" =~ ^[0-9A-Fa-f:]+$ && "$ip" == *:*:* ]]; then
+            dns_upstream_fatal "$entry" "is no IPv6 address"
+            return 1
+        fi
+    else
+        IFS=. read -r -a octets <<< "$ip"
+        if [ "${#octets[@]}" -ne 4 ]; then
+            dns_upstream_fatal "$entry" "is no IPv4 address"
+            return 1
+        fi
+        for octet in "${octets[@]}"; do
+            if ! [[ "$octet" =~ ^[0-9]{1,3}$ ]] || [ "$((10#$octet))" -gt 255 ]; then
+                dns_upstream_fatal "$entry" "is no IPv4 address"
+                return 1
+            fi
+        done
+    fi
+    case "$ip" in
+        127.*|0.0.0.0|::1|::)
+            dns_upstream_fatal "$entry" "is a loopback or unspecified address"
+            return 1
+            ;;
+    esac
+    IFS=, read -r -a addrs <<< "$DNS_LISTEN_IPS"
+    if ! own="$(ip -o addr show)"; then
+        echo "[lancache-dns] FATAL: could not list this container's addresses." >&2
+        return 1
+    fi
+    while read -r _ _ _ addr _; do
+        addrs+=("${addr%%/*}")
+    done <<< "$own"
+    for addr in "${addrs[@]}"; do
+        if [ -n "$addr" ] && [ "$addr" = "$ip" ]; then
+            dns_upstream_fatal "$entry" "is a LanCache address and would loop"
+            return 1
+        fi
+    done
+    if [[ "$ip" == *:* ]]; then
+        printf '"[%s]:%s"\n' "$ip" "${port:-53}"
+    else
+        printf '"%s%s"\n' "$ip" "${port:+:$port}"
+    fi
+}
+
+# What: print the forward_zones_recurse block of the YAML.
+# Why: envsubst places it inside the recursor mapping.
+# From: Issue #1918
+dns_upstream_yaml() {
+    local forwarders="$1" zone
+    shift
+    printf '  forward_zones_recurse:\n'
+    for zone in "$@"; do
+        printf '    - zone: "%s"\n      forwarders: [%s]\n' "$zone" "$forwarders"
+    done
+}
+
+# What: build the upstream forward block and zone list.
+# Why: the template and recursor.lua both read the result.
+# From: Issue #1918
+dns_upstream_setup() {
+    local entry zone forwarders="" local_zones
+    local -a servers=() requested=() zones=()
+    PDNS_RECURSOR_UPSTREAM_ZONES=""
+    read -r -a servers <<< "${DNS_UPSTREAM_SERVERS//,/ }"
+    if [ "${#servers[@]}" -eq 0 ]; then
+        DNS_UPSTREAM_ZONES=""
+        return 0
+    fi
+    for entry in "${servers[@]}"; do
+        entry="$(dns_upstream_forwarder "$entry")" || return 1
+        forwarders+="${forwarders:+, }${entry}"
+    done
+    local_zones="$(dns_local_forward_zones)" || return 1
+    read -r -a requested <<< "${DNS_UPSTREAM_ZONES//,/ }"
+    [ "${#requested[@]}" -gt 0 ] || requested=(.)
+    for zone in "${requested[@]}"; do
+        if [ "$zone" != "." ]; then
+            zone="${zone,,}"
+            zone="${zone%.}"
+            if [ "${#zone}" -gt 253 ] || ! [[ "$zone" =~ ^[a-z0-9_]([a-z0-9_-]*)(\.[a-z0-9_]([a-z0-9_-]*))*$ ]]; then
+                echo "[lancache-dns] FATAL: DNS_UPSTREAM_ZONES entry '$zone' is no DNS zone name." >&2
+                return 1
+            fi
+        fi
+        if grep -qxF -- "$zone" <<< "$local_zones"; then
+            echo "[lancache-dns] FATAL: DNS_UPSTREAM_ZONES entry '$zone' is served by the local authoritative server." >&2
+            return 1
+        fi
+        case " ${zones[*]:-} " in
+            *" $zone "*) ;;
+            *) zones+=("$zone") ;;
+        esac
+    done
+    PDNS_RECURSOR_UPSTREAM_ZONES="$(dns_upstream_yaml "$forwarders" "${zones[@]}")" || return 1
+    DNS_UPSTREAM_ZONES="${zones[*]}"
+    echo "[lancache-dns] Forwarding zones '${DNS_UPSTREAM_ZONES}' to upstream resolvers: ${forwarders//\"/}"
+}
+
 # ── 1. Generate Recursor Config ──────────────────────────────────────────────
+dns_upstream_setup || exit 1
+export PDNS_RECURSOR_UPSTREAM_ZONES DNS_UPSTREAM_ZONES
 echo "[lancache-dns] Generating recursor.conf..."
 # shellcheck disable=SC2016 # envsubst needs the literal variable name.
 if [ "$LOG_QUERIES" = "1" ]; then
@@ -1244,7 +1391,7 @@ if [ "$DNS_REPLICATION_ROLE" = "secondary" ]; then
 fi
 export PDNS_RECURSOR_NEGATIVE_TTL
 # shellcheck disable=SC2016 # render_template_atomic needs literal envsubst variable names.
-render_template_atomic '${PDNS_API_KEY}:${PDNS_RECURSOR_NEGATIVE_TTL}' /etc/pdns/recursor.conf.template "$RECURSOR_CONF_FILE" "$recursor_extra_sed"
+render_template_atomic '${PDNS_API_KEY}:${PDNS_RECURSOR_NEGATIVE_TTL}:${PDNS_RECURSOR_UPSTREAM_ZONES}' /etc/pdns/recursor.conf.template "$RECURSOR_CONF_FILE" "$recursor_extra_sed"
 _dns_recursor_validate_snapshot_or_rollback "$RECURSOR_CONF_FILE" || _dns_enter_rescue_mode "recursor"
 
 # ── 2. Generate Authoritative Config ─────────────────────────────────────────

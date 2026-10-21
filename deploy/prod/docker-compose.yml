@@ -61,6 +61,12 @@ services:
       - NATS_RECONCILER=1
       - DNS_REPLICATION_ROLE=primary
       - DNS_XFR_NOTIFY_TARGETS=dns-ssl:5300
+      # What: upstream resolvers and zones for non-LAN names.
+      # Why: one .env.local value feeds both recursors.
+      # From: Issue #1918
+      - DNS_UPSTREAM_SERVERS=${DNS_UPSTREAM_SERVERS:-}
+      - DNS_UPSTREAM_ZONES=${DNS_UPSTREAM_ZONES:-.}
+      - DNS_LISTEN_IPS=${IP_STANDARD},${IP_SSL}
     volumes:
       - shared-secrets:/var/lib/lancache-secrets
       - ../../services/dns/cdn-domains.txt:/etc/pdns/cdn-domains.txt
@@ -112,6 +118,12 @@ services:
       - NATS_RECORD_WRITES=0
       - DNS_REPLICATION_ROLE=secondary
       - DNS_XFR_PRIMARY=dns-standard:5300
+      # What: upstream resolvers and zones for non-LAN names.
+      # Why: one .env.local value feeds both recursors.
+      # From: Issue #1918
+      - DNS_UPSTREAM_SERVERS=${DNS_UPSTREAM_SERVERS:-}
+      - DNS_UPSTREAM_ZONES=${DNS_UPSTREAM_ZONES:-.}
+      - DNS_LISTEN_IPS=${IP_STANDARD},${IP_SSL}
     volumes:
       # What: shared-secrets volume, first-writer-wins for PDNS_API_KEY/DDNS_TSIG_KEY.
       # Why: every consumer of these secrets must agree on the same value.
