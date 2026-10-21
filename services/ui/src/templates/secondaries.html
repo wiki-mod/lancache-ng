@@ -3,6 +3,7 @@
 {# SPDX-License-Identifier: AGPL-3.0-or-later #}
 {# What: Secondary DNS registration and management page #}
 {# Why: second tab of the DNS section next to domains #}
+{# From: Issue #1683 | PR #1912 #}
 {% extends "base.html" %}
 {% block title %} – Secondary{% endblock %}
 
@@ -18,6 +19,8 @@
 
   {{ <section_tabs main_href={pages.domains} main_label="DNS" main_page="domains" active_page={active_page} secondaries_href={pages.secondaries}/> }}
 
+  {# What: install command for a new secondary, copyable #}
+  {# Why: token and primary URL are rendered by main.rs #}
   <div class="card flex flex-col gap-4">
     <div>
       <h2 class="font-semibold text-slate-200">Neuen Secondary registrieren</h2>
@@ -48,6 +51,8 @@
     </p>
   </div>
 
+  {# What: table of registered secondaries with actions #}
+  {# Why: health, address, token and removal per row #}
   <div class="card flex flex-col gap-4">
     <div>
       <h2 class="font-semibold text-slate-200">Registrierte Secondaries</h2>
@@ -68,9 +73,9 @@
             <th class="th px-3">Aktionen</th>
           </tr>
         </thead>
-        <tbody class="divide-y divide-slate-700">
+        <tbody class="rows">
           {% for secondary in secondaries %}
-          <tr class="hover:bg-slate-700/50 transition-colors">
+          <tr>
             <td class="px-3 py-2 text-slate-200 font-mono">{{ secondary.name }}</td>
             <td class="px-3 py-2 text-slate-300">{{ secondary.consumer_name }}</td>
             <td class="px-3 py-2 text-slate-300 text-xs">
@@ -118,13 +123,15 @@
 
 {% block scripts %}
 <script>
+  // What: POST to the rotate route of one secondary
+  // Why: server rotates; alert shows the result
   async function rotateToken(name) {
     try {
       const response = await fetch('{{ routes.secondary_rotate | safe }}'.replace('{name}', name), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-CSRF-Token': '{{ csrf_token }}'
+          'X-CSRF-Token': CSRF_TOKEN
         },
         body: JSON.stringify({
           token: "{{ registration_token }}"
@@ -142,6 +149,8 @@
     }
   }
 
+  // What: DELETE of one secondary after confirm()
+  // Why: removal cannot be undone; the page then reloads
   async function removeSecondary(name) {
     if (!confirm(`${name} wirklich entfernen?`)) {
       return;
@@ -151,7 +160,7 @@
       const response = await fetch('{{ routes.secondary | safe }}'.replace('{name}', name), {
         method: 'DELETE',
         headers: {
-          'X-CSRF-Token': '{{ csrf_token }}'
+          'X-CSRF-Token': CSRF_TOKEN
         }
       });
 
@@ -179,6 +188,8 @@
     error: ['Unerwartete Antwort', 'text-amber-400'],
   };
 
+  // What: writes label, serial and detail of one probe
+  // Why: one renderer for the click and the page-load run
   function renderHealth(span, data) {
     const [label, cls] = HEALTH_LABELS[data.status] || ['Unbekannt', 'text-slate-500'];
     span.className = cls;
@@ -186,13 +197,15 @@
     if (data.detail) span.title = data.detail;
   }
 
+  // What: POST health probe of one secondary, shows status
+  // Why: the DNS probe runs on the server, not in the page
   async function checkSecondaryHealth(name) {
     const span = document.getElementById('health-' + name);
     if (span) { span.className = 'text-slate-400'; span.textContent = 'Prüfe…'; }
     try {
       const response = await fetch('{{ routes.secondary_health | safe }}'.replace('{name}', name), {
         method: 'POST',
-        headers: { 'X-CSRF-Token': '{{ csrf_token }}' }
+        headers: { 'X-CSRF-Token': CSRF_TOKEN }
       });
       if (response.ok) {
         renderHealth(span, await response.json());
@@ -205,13 +218,15 @@
     }
   }
 
+  // What: prompt() for a new address, POST, then reload
+  // Why: the server checks it; 400 means not a private IPv4
   async function editSecondaryAddress(name, current) {
     const input = prompt(`Adresse (private IPv4) für ${name}:`, current || '');
     if (input === null) return;
     try {
       const response = await fetch('{{ routes.secondary_address | safe }}'.replace('{name}', name), {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': '{{ csrf_token }}' },
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF_TOKEN },
         body: JSON.stringify({ address: input.trim() })
       });
       if (response.ok) {

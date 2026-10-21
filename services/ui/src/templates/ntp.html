@@ -3,6 +3,7 @@
 {# SPDX-License-Identifier: AGPL-3.0-or-later #}
 {# What: NTP page: container toggle and upstream servers #}
 {# Why: the LAN address can be set as Kea's NTP server #}
+{# From: Issue #1683 | PR #1912 #}
 {% extends "base.html" %}
 {% block title %} – NTP{% endblock %}
 
@@ -29,8 +30,10 @@
       {{ <on_off_badge on={ntp_enabled}/> }}
     </div>
 
+    {# What: saves chronyd, upstream and DHCP switches
+       Why: the watchdog starts or stops chronyd from it #}
     <form method="post" action="{{ routes.ntp_settings | safe }}" class="space-y-4">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      {{ <csrf_field csrf_token={csrf_token}/> }}
 
       <div class="flex items-center gap-2">
         <input type="checkbox" id="ntp_enabled" name="ntp_enabled" value="1"
@@ -44,14 +47,15 @@
       <div>
         <label class="block text-xs text-slate-400 mb-1">Upstream-NTP-Server</label>
         <textarea name="ntp_upstream_servers" rows="3" required
-          class="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded text-white text-sm font-mono"
-          placeholder="0.debian.pool.ntp.org 1.debian.pool.ntp.org time.cloudflare.com">{{ ntp_upstream_servers }}</textarea>
+          class="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded text-white text-sm font-mono">{{ ntp_upstream_servers }}</textarea>
         <p class="text-xs text-slate-500 mt-1">
           Leerzeichen- oder kommagetrennt. Hostnamen oder IPv4/IPv6-Adressen. Mindestens ein
           Eintrag ist erforderlich -- dieser Dienst läuft nie als eigenständige Zeitquelle.
         </p>
       </div>
 
+      {# What: auto DHCP-NTP switch; disabled without Kea
+         Why: the setting only applies to Kea subnets #}
       <div class="rounded border border-slate-700 bg-slate-900/50 p-3 space-y-2">
         <div class="flex items-center gap-2">
           <input type="checkbox" id="ntp_auto_dhcp" name="ntp_auto_dhcp" value="1"

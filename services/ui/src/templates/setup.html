@@ -48,7 +48,7 @@
     </div>
 
     <form method="post" action="{{ routes.setup_update | safe }}" class="grid gap-4 md:grid-cols-2 items-end">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      {{ <csrf_field csrf_token={csrf_token}/> }}
       <div>
         <label class="block text-xs text-slate-400 mb-1">Release-Kanal</label>
         <select name="lancache_image_channel"
@@ -77,6 +77,8 @@
     </form>
   </div>
 
+  <!-- What: router DNAT commands for port 80 to http_ip
+       Why: caches all LAN devices, no client setup -->
   <div class="card space-y-4">
     <div>
       <h2 class="font-semibold text-slate-200">Transparenter HTTP-Proxy <span class="ml-2 text-xs font-normal px-2 py-0.5 rounded-full bg-green-500/20 text-green-400">Empfohlen</span></h2>
@@ -130,6 +132,8 @@ nft add rule ip lancache prerouting \
     </details>
   </div>
 
+  <!-- What: per-client proxy commands for package managers
+       Why: for when the router cannot be changed -->
   <div class="card space-y-4">
     <div>
       <h2 class="font-semibold text-slate-200">Client-seitige Proxy-Einstellung <span class="ml-2 text-xs font-normal px-2 py-0.5 rounded-full bg-slate-600/50 text-slate-400">Alternativ</span></h2>
@@ -179,6 +183,8 @@ echo 'https_proxy=http://{{ http_ip }}' | sudo tee -a /etc/environment</pre>
     </div>
   </div>
 
+  <!-- What: CA install commands for the HTTPS mode
+       Why: MITM caching needs the CA on every client -->
   <div class="card space-y-4">
     <div>
       <h2 class="font-semibold text-slate-200">HTTPS-Modus ({{ https_ip }}) — auch HTTPS cachen</h2>
