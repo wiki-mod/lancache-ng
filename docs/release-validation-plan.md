@@ -1325,10 +1325,8 @@ explicit pass:**
   `dns_upstream_setup` in `services/dns/entrypoint.sh`; a new test needs a prior
   maintainer ACK (`AG-CODE-010`). The behavior was proven once by hand against the
   real entrypoint (empty setting unchanged, forward, scoped forward, IPv6 plus port,
-  seven invalid inputs, upstream down) and is recorded in the pull request. Not
-  covered: a rollback of `recursor.conf` to an older snapshot without the upstream
-  block still lets `recursor.lua` set the NTA and skip the root mirror, because the
-  environment, not the restored file, drives the Lua.
+  seven invalid inputs, upstream down, rollback of `recursor.conf` to a snapshot
+  without the upstream block) and is recorded in the pull request.
 
 - **Admin UI cache-resize's full loop** (dashboard submission → `.env` write →
   `lancache-converge.service` tick → `docker compose up -d` recreate → nginx actually

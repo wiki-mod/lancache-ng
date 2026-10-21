@@ -1393,6 +1393,14 @@ export PDNS_RECURSOR_NEGATIVE_TTL
 # shellcheck disable=SC2016 # render_template_atomic needs literal envsubst variable names.
 render_template_atomic '${PDNS_API_KEY}:${PDNS_RECURSOR_NEGATIVE_TTL}:${PDNS_RECURSOR_UPSTREAM_ZONES}' /etc/pdns/recursor.conf.template "$RECURSOR_CONF_FILE" "$recursor_extra_sed"
 _dns_recursor_validate_snapshot_or_rollback "$RECURSOR_CONF_FILE" || _dns_enter_rescue_mode "recursor"
+# What: clear upstream zones if the file lost its block.
+# Why: after a rollback, Lua must match the live file.
+# From: Issue #1918
+if [ -n "$DNS_UPSTREAM_ZONES" ] && ! grep -q '^  forward_zones_recurse:' "$RECURSOR_CONF_FILE"; then
+    echo "[lancache-dns] WARNING: recursor.conf has no upstream forward after the rollback; DNS_UPSTREAM_SERVERS is ignored until a config validates." >&2
+    DNS_UPSTREAM_ZONES=""
+    export DNS_UPSTREAM_ZONES
+fi
 
 # ── 2. Generate Authoritative Config ─────────────────────────────────────────
 echo "[lancache-dns] Generating pdns.conf..."
