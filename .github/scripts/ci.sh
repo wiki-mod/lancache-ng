@@ -3409,7 +3409,7 @@ _ci_status_case() {
 }
 
 # What: job and result of a needs object, one line per job.
-# Why: one parser for the result gate and the nightly report.
+# Why: one parser for the result gate and nightly report.
 # From: Issue #1683 | PR #1912
 _ci_needs_pairs() {
     _ci_run "[CI-ERROR-CORE-0133]" "reason=\"CI_NEEDS is not a needs object\"" \
