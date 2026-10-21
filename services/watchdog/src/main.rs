@@ -5212,6 +5212,7 @@ mod tests {
             assert!(!old.exists(), "stamp {broken} blocked the purge");
             file_at(&old, rnd(1, u8::MAX.into()), now - past(days));
         }
+        fs::remove_dir_all(&root).expect("remove scratch dir");
     }
 
     // What: age floor, then oldest-first to the budget.
@@ -5252,6 +5253,7 @@ mod tests {
         prune_syslog(&r, later);
         assert!(live.exists(), "the file written today was pruned");
         assert_eq!(stamp_of(&r.syslog_stamp), later + r.syslog_cooldown - DAY);
+        fs::remove_dir_all(&root).expect("remove scratch dir");
     }
 
     // What: closed files become .xz; today's stay plain.

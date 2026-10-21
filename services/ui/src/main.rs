@@ -6328,16 +6328,16 @@ mod tests {
     // From: Issue #866
     #[test]
     fn advertised_nats_url_is_explicit_or_derived() {
-        let internal = "nats://nats:4222";
+        let internal = "nats://nats:7422";
         assert_eq!(
             advertised_nats_url(" nats://x:1 ", "", ""),
             Some("nats://x:1".to_string())
         );
         assert_eq!(
             advertised_nats_url("", " 192.0.2.5 ", internal),
-            Some("nats://192.0.2.5:4222".to_string())
+            Some("nats://192.0.2.5:7422".to_string())
         );
-        let v6 = Some("nats://[2001:db8::1]:4222".to_string());
+        let v6 = Some("nats://[2001:db8::1]:7422".to_string());
         assert_eq!(advertised_nats_url("", "[2001:db8::1]", internal), v6);
         assert_eq!(advertised_nats_url("", "2001:db8::1", internal), v6);
         for none in ["", "0.0.0.0", "::", "127.0.0.1", "::1", "no-ip"] {
@@ -6377,6 +6377,8 @@ mod tests {
         assert_eq!(set(true), format!("{plain}; Secure"));
     }
 
+    // What: text keys the ui config needs to load.
+    // Why: each is removed once to prove it is required.
     const TEXT_KEYS: [&str; 42] = [
         "LANCACHE_REPO_URL",
         "ANY_BIND_IP",
@@ -6422,33 +6424,37 @@ mod tests {
         "LANCACHE_SHARED_SECRET_DIR",
     ];
 
+    // What: numeric keys with values unlike the SOT's.
+    // Why: tests must not copy SOT values (AG-CODE-010).
     const NUMBER_KEYS: [(&str, &str); 24] = [
         ("UI_WATCHDOG_REFRESH_MS", "11"),
         ("UI_DASHBOARD_REFRESH_MS", "12"),
         ("UI_STATS_REFRESH_MS", "13"),
         ("UI_STATS_POINTS", "14"),
         ("CONVERGE_TIMER_INTERVAL_MINUTES", "15"),
-        ("RESTART_AFTER", "3"),
-        ("DHCP_LEASE_TIME_MIN", "60"),
-        ("DHCP_LEASE_TIME_MAX", "604800"),
-        ("DHCP_MAX_LEASE_FACTOR", "2"),
-        ("PDNS_AUTH_PORT", "5300"),
-        ("DNS_PORT", "53"),
-        ("PDNS_AUTH_API_PORT", "8081"),
-        ("PDNS_HTTP_API_PORT", "8082"),
-        ("DNS_ROLLBACK_PORT", "8083"),
-        ("KEA_CTRL_PORT", "8000"),
-        ("DHCP_LEASE_TIME", "86400"),
-        ("UI_SESSION_TTL_SECONDS", "3600"),
-        ("UI_SESSION_TTL_MAX_SECONDS", "31536000"),
-        ("RETRY_BACKOFF_START", "1"),
-        ("RETRY_BACKOFF_MAX", "30"),
+        ("RESTART_AFTER", "16"),
+        ("DHCP_LEASE_TIME_MIN", "70"),
+        ("DHCP_LEASE_TIME_MAX", "700000"),
+        ("DHCP_MAX_LEASE_FACTOR", "4"),
+        ("PDNS_AUTH_PORT", "5301"),
+        ("DNS_PORT", "5354"),
+        ("PDNS_AUTH_API_PORT", "8181"),
+        ("PDNS_HTTP_API_PORT", "8182"),
+        ("DNS_ROLLBACK_PORT", "8183"),
+        ("KEA_CTRL_PORT", "8100"),
+        ("DHCP_LEASE_TIME", "90000"),
+        ("UI_SESSION_TTL_SECONDS", "3601"),
+        ("UI_SESSION_TTL_MAX_SECONDS", "31000000"),
+        ("RETRY_BACKOFF_START", "2"),
+        ("RETRY_BACKOFF_MAX", "40"),
         ("KEEP_KNOWN_GOOD_CONFIGS", "7"),
         ("UI_LOGS_MAX_ENTRIES", "250"),
-        ("UI_LISTEN_PORT", "8081"),
+        ("UI_LISTEN_PORT", "8090"),
         ("SYSLOG_MAX_GB", "3"),
     ];
 
+    // What: flag keys the ui config needs to load.
+    // Why: each must be present and a valid boolean.
     const FLAG_KEYS: [&str; 11] = [
         "HTTPS_ENABLED",
         "UI_SECURITY_HEADERS",
@@ -6476,10 +6482,12 @@ mod tests {
         for key in FLAG_KEYS {
             env.insert(key.to_string(), "true".to_string());
         }
-        env.insert("CACHE_MAX_SIZE".to_string(), "50g".to_string());
+        env.insert("CACHE_MAX_SIZE".to_string(), "40g".to_string());
         env
     }
 
+    // What: Config::load over a test env map.
+    // Why: tests load the real config, not a copy of it.
     fn load_from(env: &HashMap<String, String>) -> Result<Config, String> {
         Config::load(&|key: &str| env.get(key).cloned())
     }
@@ -6505,12 +6513,12 @@ mod tests {
             assert!(load_from(&env).is_err(), "{key} junk");
         }
         for (key, junk) in [
-            ("UI_SESSION_TTL_SECONDS", "31536001"),
+            ("UI_SESSION_TTL_SECONDS", "31000001"),
             ("UI_LISTEN_PORT", "65536"),
             ("KEEP_KNOWN_GOOD_CONFIGS", "0"),
-            ("DHCP_LEASE_TIME", "59"),
-            ("DHCP_LEASE_TIME", "604801"),
-            ("CACHE_MAX_SIZE", "50"),
+            ("DHCP_LEASE_TIME", "69"),
+            ("DHCP_LEASE_TIME", "700001"),
+            ("CACHE_MAX_SIZE", "40"),
         ] {
             let mut env = full_env();
             env.insert(key.to_string(), junk.to_string());
@@ -6566,7 +6574,7 @@ mod tests {
         assert!((1000..1100).contains(&age), "age {age}");
         assert_eq!(stale["updated"], "t1");
         assert_eq!(stale["services"].as_array().unwrap().len(), 4);
-        let _ = fs::remove_dir_all(&dir);
+        fs::remove_dir_all(&dir).expect("remove scratch dir");
     }
 
     // What: byte counts print in B, KB, MB and GB.
@@ -6669,6 +6677,8 @@ mod tests {
         assert_eq!(delay, policy.max);
     }
 
+    // What: a full env plus the NATS users and passwords.
+    // Why: the key tests build the real config from it.
     fn nats_env() -> HashMap<String, String> {
         let mut env = full_env();
         let extra = [
@@ -6853,6 +6863,8 @@ mod tests {
         assert_eq!(domain_error_message(""), None);
     }
 
+    // What: a CDN entry parsed by the real parser.
+    // Why: the removal test needs a valid DeleteTarget.
     fn cdn(text: &str) -> CdnDomain {
         parse_cdn_domain(text).expect("a valid entry")
     }
@@ -7074,7 +7086,7 @@ mod tests {
             .unwrap();
         assert_eq!(kept, "tok");
         assert!(open_database("/no/such/dir/ui.db").is_err());
-        let _ = fs::remove_dir_all(&dir);
+        fs::remove_dir_all(&dir).expect("remove scratch dir");
     }
 
     // What: the issuer and xkey come from seed or file.
@@ -7140,7 +7152,7 @@ mod tests {
                 .contains("issuer NKey seed at")
         );
         assert!(callout_xkey(&cfg).err().unwrap().contains("xkey seed at"));
-        let _ = fs::remove_dir_all(&dir);
+        fs::remove_dir_all(&dir).expect("remove scratch dir");
     }
 
     // What: a UI on a free port with an offline NATS.
@@ -7157,7 +7169,7 @@ mod tests {
         let http = lancache_ng::http_client(&lancache_ng::test_http_env).unwrap();
         let nats = async_nats::ConnectOptions::new()
             .retry_on_initial_connect()
-            .connect("nats://127.0.0.1:1")
+            .connect(format!("nats://{}:1", Ipv4Addr::LOCALHOST))
             .await
             .unwrap();
         let db = open_database(&dir.join("ui.db").to_string_lossy()).unwrap();
@@ -7169,7 +7181,9 @@ mod tests {
             [9u8; 32],
             Duration::from_secs(3600),
         ));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         tokio::spawn(axum::serve(listener, router(state.clone())).into_future());
         (base, state, dir)
@@ -7183,7 +7197,9 @@ mod tests {
             .unwrap();
         let set = response.headers()[header::SET_COOKIE].to_str().unwrap();
         let pair = set.split(';').next().unwrap().to_string();
-        let value = pair.strip_prefix("lancache_ui_session=").unwrap();
+        let value = pair
+            .strip_prefix(&format!("{SESSION_COOKIE_NAME}="))
+            .unwrap();
         let session = validate_session(value, &state.ui_session_secret).unwrap();
         (pair, session.csrf_token)
     }
@@ -7232,8 +7248,8 @@ mod tests {
         assert_eq!(stored.len(), 1);
         assert_eq!(stored[0].unique_id, 5);
         assert_eq!(stored[0].name, "disk");
-        let _ = fs::remove_dir_all(&dir);
-        let _ = fs::remove_dir_all(&sdir);
+        fs::remove_dir_all(&dir).expect("remove scratch dir");
+        fs::remove_dir_all(&sdir).expect("remove scratch dir");
 
         let (base, _state, sdir) = test_server(|cfg| {
             cfg.netdata_alarm_token = String::new();
@@ -7247,7 +7263,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(open.status(), 401);
-        let _ = fs::remove_dir_all(&sdir);
+        fs::remove_dir_all(&sdir).expect("remove scratch dir");
     }
 
     // What: post a form with session cookie and CSRF token.
@@ -7304,8 +7320,8 @@ mod tests {
         let desired = DesiredState::read(&file);
         assert_eq!(desired.dhcp, Some(DesiredRunState::Stopped));
         assert_eq!(desired.ntp, Some(DesiredRunState::Stopped));
-        let _ = fs::remove_dir_all(&dir);
-        let _ = fs::remove_dir_all(&sdir);
+        fs::remove_dir_all(&dir).expect("remove scratch dir");
+        fs::remove_dir_all(&sdir).expect("remove scratch dir");
     }
 
     // What: AAAA and DDNS markers appear in the DNS dir.
@@ -7349,7 +7365,7 @@ mod tests {
             empty.headers()[header::LOCATION],
             domains_error("ddns_allow_unsigned_no_key").as_str()
         );
-        let _ = fs::remove_dir_all(&dir);
-        let _ = fs::remove_dir_all(&sdir);
+        fs::remove_dir_all(&dir).expect("remove scratch dir");
+        fs::remove_dir_all(&sdir).expect("remove scratch dir");
     }
 }

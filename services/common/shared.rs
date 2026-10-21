@@ -515,7 +515,7 @@ pub fn unique_temp_dir(tag: &str) -> PathBuf {
     dir
 }
 
-// What: HTTP client times for tests, 10 s each.
+// What: HTTP client times for tests, 7 s each.
 // Why: tests of several crates build an http_client.
 // From: Issue #1683 | PR #1912
 pub fn test_http_env(key: &str) -> Option<String> {
@@ -525,7 +525,7 @@ pub fn test_http_env(key: &str) -> Option<String> {
         "HTTP_TCP_KEEPALIVE",
     ]
     .contains(&key)
-    .then(|| "10".to_string())
+    .then(|| "7".to_string())
 }
 
 // What: a local HTTP server that answers canned replies.
@@ -1757,7 +1757,7 @@ mod tests {
         assert!(resolve_shared_secret(&gone, "a", "", 0, hex32).is_err());
         fs::create_dir(dir.join("blocked")).unwrap();
         assert!(resolve_shared_secret(&dir, "blocked", "cfg", 0, hex32).is_err());
-        let _ = fs::remove_dir_all(&dir);
+        fs::remove_dir_all(&dir).expect("remove scratch dir");
     }
 
     // What: equal secrets match, any difference does not.
@@ -1834,7 +1834,7 @@ mod tests {
             (read.dhcp, read.ntp),
             (None, Some(DesiredRunState::Stopped))
         );
-        let _ = fs::remove_dir_all(&root);
+        fs::remove_dir_all(&root).expect("remove scratch dir");
     }
 
     // What: both endpoint forms build; URLs are trimmed.
