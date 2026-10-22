@@ -99,6 +99,32 @@ pub struct DesiredState {
 }
 
 impl DesiredState {
+    // What: the dhcp entry name in desired-state.json.
+    // Why: equals the serde field name `dhcp` above.
+    // From: Issue #1683 | PR #1912
+    pub const DHCP: &'static str = "dhcp";
+    // What: the ntp entry name in desired-state.json.
+    // Why: equals the serde field name `ntp` above.
+    // From: Issue #1683 | PR #1912
+    pub const NTP: &'static str = "ntp";
+    // What: every service name the file accepts.
+    // Why: one list for the ui route, the dock and slot().
+    // From: Issue #1683 | PR #1912
+    pub const SERVICES: [&'static str; 2] = [Self::DHCP, Self::NTP];
+
+    // What: one service's entry by name; None if unknown.
+    // Why: callers name a service, not a struct field.
+    // From: Issue #1683 | PR #1912
+    pub fn slot(&mut self, service: &str) -> Option<&mut Option<DesiredRunState>> {
+        if service == Self::DHCP {
+            Some(&mut self.dhcp)
+        } else if service == Self::NTP {
+            Some(&mut self.ntp)
+        } else {
+            None
+        }
+    }
+
     // What: the file's state; absent is no opinion.
     // Why: a writer must not replace a file it cannot read.
     // From: Issue #1683 | PR #1912

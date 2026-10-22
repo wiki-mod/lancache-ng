@@ -1232,7 +1232,7 @@ fn page_ctx(headers: &HeaderMap, active: &str) -> Context {
 // Why: monitors read the status; dev mode shows the cause.
 // From: Issue #1683 | PR #1858
 fn render(state: &AppState, name: &str, ctx: &Context) -> Response {
-    // What: SOT numbers and the repo address for pages.
+    // What: SOT numbers, repo address, dock service names.
     // Why: every page and base.html read them here.
     // From: Issue #1683 | PR #1912
     let mut page = ctx.clone();
@@ -1240,6 +1240,7 @@ fn render(state: &AppState, name: &str, ctx: &Context) -> Response {
         page.insert(*key, value);
     }
     page.insert("repo_url", &state.config.repo_url);
+    page.insert("desired_services", &DesiredState::SERVICES);
     match state.templates.render(name, &page) {
         Ok(html) => Html(html).into_response(),
         Err(e) => {
@@ -6548,10 +6549,10 @@ async fn set_service_desired_state(
     AxPath(service): AxPath<String>,
     Json(body): Json<DesiredStateBody>,
 ) -> StatusCode {
-    // What: only dhcp or ntp, running or stopped, pass.
+    // What: only DesiredState names, running or stopped.
     // Why: the watchdog knows no other service or state.
-    // From: Issue #1683 | PR #1858
-    if !matches!(service.as_str(), "dhcp" | "ntp") {
+    // From: Issue #1683 | PR #1912
+    if !DesiredState::SERVICES.contains(&service.as_str()) {
         return StatusCode::NOT_FOUND;
     }
     let run_state = match body.state.as_str() {
@@ -6570,11 +6571,10 @@ async fn set_service_desired_state(
     let written = DesiredState::try_read(path)
         .map_err(io::Error::other)
         .and_then(|mut desired| {
-            if service == "dhcp" {
-                desired.dhcp = Some(run_state);
-            } else {
-                desired.ntp = Some(run_state);
-            }
+            let slot = desired
+                .slot(&service)
+                .ok_or_else(|| io::Error::other(format!("no desired state for {service}")))?;
+            *slot = Some(run_state);
             serde_json::to_vec_pretty(&desired).map_err(io::Error::other)
         })
         .and_then(|json| write_file(path, &json, 0o644, Place::Replace));

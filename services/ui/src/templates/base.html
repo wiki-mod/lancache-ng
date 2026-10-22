@@ -481,12 +481,10 @@
       }
     }
 
-    // What: dock start/stop map; only dhcp is listed
-    // Why: keys are the status.json (compose) service names
+    // What: names that get a dock start/stop button
+    // Why: DesiredState::SERVICES, matched to status.json
     // From: Issue #1683 | PR #1912
-    const DOCK_CONTROLLABLE_SERVICES = {
-      'dhcp': 'dhcp',
-    };
+    const DOCK_CONTROLLABLE_SERVICES = [{% for name in desired_services %}'{{ name }}',{% endfor %}];
 
     // What: render beambar service entries via DOM nodes
     // Why: no HTML is built from server-supplied strings
@@ -503,8 +501,7 @@
         window.LancacheWatchdog.paintDot(dot, svc.status);
         wrap.appendChild(dot);
         wrap.appendChild(document.createTextNode(svc.name));
-        const dockService = DOCK_CONTROLLABLE_SERVICES[svc.name];
-        if (dockService) {
+        if (DOCK_CONTROLLABLE_SERVICES.includes(svc.name)) {
           // What: Start for red or gray, otherwise Stopp
           // Why: status.json has no running/stopped field
           // From: Issue #1437
@@ -516,7 +513,7 @@
           button.style.padding = '0 0.4rem';
           button.textContent = running ? 'Stopp' : 'Start';
           button.addEventListener('click', function () {
-            setDockServiceState(dockService, running ? 'stopped' : 'running', button);
+            setDockServiceState(svc.name, running ? 'stopped' : 'running', button);
           });
           wrap.appendChild(button);
         }
