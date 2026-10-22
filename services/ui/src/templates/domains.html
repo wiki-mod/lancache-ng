@@ -159,11 +159,12 @@
           <select name="record_type" required data-lan-record-type
                   class="bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-green-500">
             <option value="">Typ wählen</option>
-            <option value="A">A</option>
-            <option value="AAAA">AAAA</option>
-            <option value="CNAME">CNAME</option>
-            <option value="MX">MX</option>
-            <option value="TXT">TXT</option>
+            {# What: one option per LAN_RECORD_TYPES entry
+               Why: the form offers what validation accepts
+               From: Issue #1683 | PR #1912 #}
+            {% for record_type in lan_record_types %}
+            <option value="{{ record_type }}">{{ record_type }}</option>
+            {% endfor %}
           </select>
         </div>
         <div class="flex gap-2">
