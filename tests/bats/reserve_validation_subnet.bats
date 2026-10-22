@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Fast, Docker-free unit coverage for scripts/lib/reserve-validation-subnet.sh
 # (issue #703; slot/`/27` redesign issue #832). The real race this closes --

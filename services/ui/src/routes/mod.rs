@@ -1,4 +1,4 @@
-//! lancache-ng (https://github.com/wiki-mod/lancache-ng)
+//! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 //!
 //! Admin UI route modules, plus shared helpers used across them: Tera
 //! template rendering with dev/prod error detail, and CSRF token

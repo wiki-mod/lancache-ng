@@ -1,4 +1,4 @@
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # First-party build of the `netdata` service, replacing the previously
 # pulled third-party `netdata/netdata` Docker image (Debian trixie based,

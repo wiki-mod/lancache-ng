@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Regression tests for setup.sh's install_quickstart_compose_assets(), which
 # copies deploy/quickstart/docker-compose.yml plus the scripts it

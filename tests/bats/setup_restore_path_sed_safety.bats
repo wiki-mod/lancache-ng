@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Fixture tests for restore_path_is_sed_safe(), the guard cmd_restore uses
 # before rewriting the archived install path to the current one inside a

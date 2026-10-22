@@ -1,5 +1,5 @@
 #!/bin/bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Reserve a collision-free full-setup validation subnet, export its complete
 # VALIDATION_* environment, then run a single command (a *-simulation.sh

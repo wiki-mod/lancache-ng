@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Real DNS/HTTP/HTTPS caching test against a genuinely fetchable target
 # (issue #597, part of #557 scenario 1). Game CDN domains in cdn-domains.txt

@@ -1,4 +1,4 @@
-//! lancache-ng (https://github.com/wiki-mod/lancache-ng)
+//! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 //!
 //! Active NATS connection termination for a removed/rotated secondary (issue
 //! #681, follow-up to #621's per-secondary auth-callout identity).

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Hard line-count ceiling for .github/workflows/*.yml (issue #1095's
 # build-push.yml trigger investigation, 2026-08-01). Empirically confirmed via

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Real DHCP behavior test for services/dhcp-proxy's ProxyDHCP/PXE mode
 # (issue #705) -- the dnsmasq-proxy DHCP mode that

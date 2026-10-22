@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Standing guard (AG-VAL-029) for a confirmed real CI failure: a shell
 # pipeline that pipes a live-running producer command into an early-exiting

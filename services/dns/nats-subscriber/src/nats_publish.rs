@@ -1,4 +1,4 @@
-//! lancache-ng (https://github.com/wiki-mod/lancache-ng)
+//! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 //!
 //! Shared JetStream publish helper for `lancache.dns.record` messages.
 //! Factored out so both the existing periodic `lan.` reconciler (`main.rs`'s

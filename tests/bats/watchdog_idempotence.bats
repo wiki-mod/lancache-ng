@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Repeat-cycle convergence tests for services/watchdog/watchdog.sh's stateful
 # functions: check_and_maybe_restart() (per-container failure counter +

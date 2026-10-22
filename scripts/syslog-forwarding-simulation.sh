@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Real end-to-end proof for issue #453's last two comments: it is not enough
 # to show a log line reaches syslog-ng on disk -- the maintainer's own

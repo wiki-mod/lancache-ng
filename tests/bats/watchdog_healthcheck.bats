@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Coverage for services/watchdog/healthcheck.sh, the Docker HEALTHCHECK for
 # the watchdog container. Unlike watchdog.sh (sourced via

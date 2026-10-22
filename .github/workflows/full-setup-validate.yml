@@ -1,4 +1,4 @@
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Standalone, manually-triggered end-to-end check for the full-setup
 # validation stack (deploy/full-setup/docker-compose.yml). Actually starts

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Bats helper that generates RPZ zones from domain lists, extracted from
 # services/dns/entrypoint.sh. Used to test zone generation logic without

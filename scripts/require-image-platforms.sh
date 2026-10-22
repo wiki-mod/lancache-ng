@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # Shared release/promotion guard: inspects a published image with
 # `docker buildx imagetools` and fails closed if it does not expose all of
 # the given comma-separated required platforms. Avoids external JSON parsers

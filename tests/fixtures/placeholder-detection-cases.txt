@@ -1,4 +1,4 @@
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Shared parity fixture for secret/token placeholder detection (issue #967).
 # There are THREE independently-maintained "is this value still a checked-in

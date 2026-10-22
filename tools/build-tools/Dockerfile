@@ -1,4 +1,4 @@
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # CI and developer validation toolchain with Rust, sccache, distcc, and build utilities.
 #
 # Intentional build-tools default: use rust:latest so developer and CI

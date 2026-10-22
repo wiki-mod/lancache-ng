@@ -1,4 +1,4 @@
-//! lancache-ng (https://github.com/wiki-mod/lancache-ng)
+//! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 //! cargo-fuzz target (issue #1252): exercises the real
 //! `serde_json::from_slice::<ZoneInfo>` deserialization `reconciler()` (see
 //! `../src/main.rs`) runs against PowerDNS's own `GET .../zones/{zone}`

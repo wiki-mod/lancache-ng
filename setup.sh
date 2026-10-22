@@ -1,5 +1,5 @@
 #!/bin/bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Guided lifecycle CLI for a lancache-ng installation. Subcommands: install
 # (interactive first-time setup — installs Docker/Compose if missing on

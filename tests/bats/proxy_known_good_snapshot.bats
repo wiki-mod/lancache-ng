@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Adapter-level tests for the proxy (nginx) known-good-snapshot integration
 # in services/proxy/entrypoint.sh (#415). Loads the real

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Full-setup client simulation: runs a real client container on the validation
 # network and verifies client-facing DNS/HTTP behavior after Compose health

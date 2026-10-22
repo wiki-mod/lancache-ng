@@ -1,4 +1,4 @@
-//! lancache-ng (https://github.com/wiki-mod/lancache-ng)
+//! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 //! Reader for the central syslog-ng log store (#633 PR4). Sibling to
 //! nginx_client.rs, not a patch to it: the two log formats are unrelated
 //! (nginx's custom access-log format vs. syslog-ng's own

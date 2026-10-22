@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # Generates an OpenVEX (https://openvex.dev) JSON document from the accepted-
 # vulnerability records in .trivyignore.yaml, so that downstream consumers get
 # a standard, portable VEX statement for every vulnerability this project has

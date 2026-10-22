@@ -1,5 +1,5 @@
 #!/bin/bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Shared helper: turns a services/dns/cdn-domains.txt entry into a DNS-legal
 # probe name for scripts/full-setup-client-simulation.sh's live `dig` checks

@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Tests for the generic known-good configuration snapshot contract
 # (scripts/lib/known-good-snapshots.sh, issue #415). Covers retention

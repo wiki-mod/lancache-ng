@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Scans git-tracked files for the required repository header (see AGENTS.md's
 # "File Headers" section) and, separately, for the SPDX-License-Identifier
@@ -13,7 +13,7 @@ script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 repo_root=$(cd "$script_dir/.." && pwd)
 cd "$repo_root"
 
-HEADER_TEXT='lancache-ng (https://github.com/wiki-mod/lancache-ng)'
+HEADER_TEXT='LanCache-NG (https://github.com/wiki-mod/lancache-ng)'
 SPDX_TEXT='SPDX-License-Identifier: AGPL-3.0-or-later'
 HEADER_SCAN_LINES=20
 

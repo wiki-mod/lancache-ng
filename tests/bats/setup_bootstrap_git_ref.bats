@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Regression tests for #814: the standalone git-clone bootstrap (the
 # documented curl | bash first-run path) previously always checked out

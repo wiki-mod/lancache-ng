@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Docker-free, git-free unit coverage for scripts/compute-next-release-tag.sh
 # (#819): the pure patch-bump arithmetic the promote job's version-bump step

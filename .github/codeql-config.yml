@@ -1,4 +1,4 @@
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # CodeQL configuration for security and quality scanning (root-level legacy config)
 name: lancache-ng-codeql
 

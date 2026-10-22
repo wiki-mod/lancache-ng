@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Regression tests for setup.sh's prebuilt-image platform guards (#665):
 # host_image_platform, assert_prebuilt_image_platform_supported (host

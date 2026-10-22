@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Real Kea Control Agent mutation round-trip test (issue #634, the "static
 # host reservations" gap explicitly left open by

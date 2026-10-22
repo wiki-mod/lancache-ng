@@ -1,5 +1,5 @@
 #!/bin/bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Docker HEALTHCHECK for the watchdog container. Existence-only ("test -f
 # status.json") is not enough: watchdog.sh's main loop writes status.json

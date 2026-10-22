@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Makes the PR-scoped staging images the full-setup deep validation suite
 # needs actually present before the sims run, on a pull_request event. This

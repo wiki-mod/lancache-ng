@@ -1,4 +1,4 @@
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Automated companion to AGENTS.md's AG-GH-017 (issue #990): periodically
 # scans every remote branch older than 1 hour for one that has neither an

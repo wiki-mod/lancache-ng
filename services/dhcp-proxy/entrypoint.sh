@@ -1,5 +1,5 @@
 #!/bin/bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # dnsmasq DHCP proxy entrypoint. Validates required env vars, renders
 # dnsmasq.conf.template via envsubst, validates the result and keeps a

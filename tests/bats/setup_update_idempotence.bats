@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Repeat-run idempotence fixture tests for migrate_env_for_update(), the real
 # function `setup.sh update` calls to converge an install's .env before

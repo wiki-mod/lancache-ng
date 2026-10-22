@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Regression coverage for services/watchdog/retention.sh's
 # validate_retention_dir() (#842 Teil 1 hardening, 2026-08-01): before this

@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Coverage for scripts/check-executable-bits.sh (issue #1019 / #822
 # Pattern B): the CI guard that fails a build when a repo script is invoked

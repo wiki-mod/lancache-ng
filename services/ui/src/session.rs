@@ -1,4 +1,4 @@
-//! lancache-ng (https://github.com/wiki-mod/lancache-ng)
+//! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 //!
 //! Per-session CSRF token issuance and validation for the Admin UI. Sessions
 //! are opaque, HMAC-signed cookies (`v1.{expires_at}.{csrf_token}.{signature}`)

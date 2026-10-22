@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Guards the `services_with_healthcheck="..."` literal against silent
 # divergence (issue #822 pattern audit, 2026-07-17).

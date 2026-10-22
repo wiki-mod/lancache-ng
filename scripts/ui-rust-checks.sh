@@ -1,5 +1,5 @@
 #!/bin/bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # Runs Docker-based Rust quality checks (fmt, check, clippy, test, build) for
 # the Admin UI without requiring host Rust tooling. Uses the repo's
 # build-tools image by default and can optionally enable sccache, including

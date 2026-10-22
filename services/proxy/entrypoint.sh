@@ -1,5 +1,5 @@
 #!/bin/bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Nginx proxy entrypoint. Generates TLS interception certificates, renders
 # request policy maps derived from cdn-domains.txt, validates the result and

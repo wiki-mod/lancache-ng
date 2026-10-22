@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # CI guard for issue #1304's netdata-specific finding, and the maintainer-
 # approved tracking mechanism promised in PR #1352 (option (c): merge the

@@ -1,4 +1,4 @@
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # PowerDNS authoritative server config template: SQLite backend, API, DDNS support.
 
 # Bound to two addresses, not one (issue #706): 127.0.0.1 is required

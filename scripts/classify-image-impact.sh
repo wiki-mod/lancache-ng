@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Shared per-path change classifier for the Build & Push pipeline. Emits the
 # same `key=value` booleans build-push.yml's `detect-changes` job used to

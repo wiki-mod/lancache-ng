@@ -1,4 +1,4 @@
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # systemd timer that triggers lancache-ci-cleanup.service daily; see README.md.
 [Unit]
 Description=Daily lancache-ng CI runner host docker cleanup

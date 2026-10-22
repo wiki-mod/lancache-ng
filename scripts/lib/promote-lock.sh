@@ -1,5 +1,5 @@
 #!/bin/bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Cross-host, cross-workflow mutual exclusion for `build-push.yml`'s
 # `promote` job and `backfill-stack-latest.yml`'s `backfill-latest` job

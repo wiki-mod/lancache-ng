@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Drift guard (issue #1091) for the two compose `dhcp` service healthchecks'
 # KEA_CTRL_TOKEN placeholder detection. Each healthcheck must decide "is the

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Enforces the parts of docs/naming-conventions.md that are mechanically
 # checkable: that the Docker socket proxy allowlist (scripts/docker-socket-proxy.sh),

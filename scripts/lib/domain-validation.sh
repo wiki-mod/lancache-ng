@@ -1,5 +1,5 @@
 #!/bin/bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Domain-entry validation contract, shared by every consumer of
 # cdn-domains.txt-style domain lists (proxy wildcard-cert/nginx-map

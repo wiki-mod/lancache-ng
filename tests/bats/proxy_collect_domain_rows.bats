@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Regression tests for services/proxy/entrypoint.sh's _collect_domain_rows(),
 # specifically the leading-"!" disabled-entry skip added for #1073 (the

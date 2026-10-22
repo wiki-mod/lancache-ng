@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Coverage for scripts/check-pr-title-convention.sh (#850, AG-GH-018): the
 # CI guard that validates a pull request's TITLE against this repo's

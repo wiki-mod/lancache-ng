@@ -1,4 +1,4 @@
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # Trivy security scanner ignore list for accepted vulnerabilities with expiry dates
 vulnerabilities:
   - id: CVE-2026-34040

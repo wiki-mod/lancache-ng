@@ -1,4 +1,4 @@
-//! lancache-ng (https://github.com/wiki-mod/lancache-ng)
+//! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 //!
 //! Admin UI DHCP routes. Renders Kea DHCP subnets, leases, reservations, and
 //! dual DHCP probe checks, and applies guarded DHCP config mutations through

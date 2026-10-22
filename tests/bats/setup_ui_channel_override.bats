@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Regression tests for lancache_ui_channel_override_is_valid() (#819) -- the
 # pure gate cmd_converge_reconcile uses before ever folding an Admin-UI-

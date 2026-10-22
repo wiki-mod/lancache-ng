@@ -1,5 +1,5 @@
 #!/bin/bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # Standalone file-retention daemon: cache-age purge, syslog-ng storage-budget
 # retention, and fluent-bit self-log rotation (see #1236 for the last one).
 #

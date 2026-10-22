@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Bats helper that loads the DNS (PowerDNS) entrypoint's known-good-snapshot
 # library and its `_dns_recursor_validate_snapshot_or_rollback` /

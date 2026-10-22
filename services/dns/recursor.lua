@@ -1,4 +1,4 @@
--- lancache-ng (https://github.com/wiki-mod/lancache-ng)
+-- LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 -- PowerDNS recursor Lua hooks: RPZ policy loading, negative trust anchors,
 -- and optional root zone caching.
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Coverage for scripts/check-pr-tracking-metadata.sh (AG-GH-008): the CI
 # guard that validates a pull request carries labels, a milestone, and (when

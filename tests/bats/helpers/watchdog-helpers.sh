@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Bats helper that loads services/watchdog/watchdog.sh's real config-default
 # variables and stateful functions (check_and_maybe_restart, write_status,

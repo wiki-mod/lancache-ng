@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Optional local pre-push hook (issue #801): runs
 # scripts/check-action-node-versions.sh before a push that touches any

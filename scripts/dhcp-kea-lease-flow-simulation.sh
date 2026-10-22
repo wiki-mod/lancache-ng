@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Real DHCP behavior test for our own Kea service (issue #448) -- distinct
 # from the Admin UI's own dhcp-probe container's #377 conflict-discovery

@@ -1,4 +1,4 @@
-//! lancache-ng (https://github.com/wiki-mod/lancache-ng)
+//! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 //!
 //! Library surface for `nats-subscriber`, split out from the binary crate
 //! (`src/main.rs`) purely so the pure, external-input-parsing types and

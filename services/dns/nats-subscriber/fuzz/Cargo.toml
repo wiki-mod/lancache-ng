@@ -1,4 +1,4 @@
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # cargo-fuzz harness crate for nats-subscriber (issue #1252): fuzzes the
 # NATS DNSRecord/zone-update deserialization path and the PowerDNS zone-export
 # API response deserialization path, both against the real nats-subscriber

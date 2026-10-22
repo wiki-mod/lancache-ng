@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Coverage for services/watchdog/retention.sh's maybe_purge() (#872, moved
 # here from watchdog.sh by #842's blast-radius-separation extraction,

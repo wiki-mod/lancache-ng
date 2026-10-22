@@ -1,4 +1,4 @@
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Opt-in GitHub-hosted OVERFLOW path for the image build/scan/publish job
 # class that build-push.yml's `container-scan`, `build`, `merge-manifests`,

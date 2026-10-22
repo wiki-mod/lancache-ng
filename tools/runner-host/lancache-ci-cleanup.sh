@@ -1,5 +1,5 @@
 #!/bin/bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # CI runner host maintenance: scheduled docker cleanup for self-hosted runner
 # hosts. Keeps every runner host from accumulating build cache, unused images,

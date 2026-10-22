@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Cross-language parity coverage for domain-entry validation (issue #822
 # pattern audit). services/proxy/entrypoint.sh's bash validator (mirrored

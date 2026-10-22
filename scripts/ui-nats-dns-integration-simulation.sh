@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Real multi-service integration test (issue #400, sub-item of #398 priority
 # 1): drives the actual UI -> NATS -> nats-subscriber -> PowerDNS flow

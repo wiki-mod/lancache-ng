@@ -1,5 +1,5 @@
 #!/bin/bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # Health monitor and auto-restart-on-failure daemon.
 #
 # File-retention responsibilities (cache-age purge, syslog-ng storage-budget

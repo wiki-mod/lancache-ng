@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Repeat-run idempotence fixture tests for the PowerDNS known-good-snapshot
 # adapter functions in services/dns/entrypoint.sh

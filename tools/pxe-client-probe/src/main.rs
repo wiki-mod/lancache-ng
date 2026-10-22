@@ -1,4 +1,4 @@
-//! lancache-ng (https://github.com/wiki-mod/lancache-ng)
+//! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 //!
 //! Synthetic PXE-client DHCPDISCOVER probe for scripts/dhcp-proxy-pxe-
 //! simulation.sh (issue #705). No off-the-shelf DHCP client (dhclient,

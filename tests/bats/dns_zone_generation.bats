@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Regression tests for RPZ zone file generation (services/dns/entrypoint.sh).
 # Tests zone format validity, serial monotonicity, and domain/record handling

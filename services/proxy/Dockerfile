@@ -1,4 +1,4 @@
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # nginx-based caching proxy image: unified standard (SNI passthrough) and
 # SSL/MITM (TLS-interception) mode, selected at runtime by entrypoint.sh.

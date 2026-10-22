@@ -1,5 +1,5 @@
 #!/bin/bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Shared host-local flock for CI jobs that drive a compose file with FIXED
 # `container_name:` values (issue #838). Today that is only

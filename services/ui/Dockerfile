@@ -1,4 +1,4 @@
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Multi-stage build for the Admin UI service. The builder stage compiles the
 # Rust binary against the shared build-tools image, opportunistically

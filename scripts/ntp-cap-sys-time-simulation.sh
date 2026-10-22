@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Real end-to-end proof that the shipped `ntp` (chrony) image genuinely
 # disciplines the system clock when it is actually granted CAP_SYS_TIME --

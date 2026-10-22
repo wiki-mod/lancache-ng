@@ -1,4 +1,4 @@
-//! lancache-ng (https://github.com/wiki-mod/lancache-ng)
+//! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 //! cargo-fuzz target (issue #1252): exercises the real `build_netdata_url`
 //! allowlisted-path builder `routes/netdata_proxy.rs::proxy` calls against
 //! the incoming request's `path`/query-parameter axum extractors -- the

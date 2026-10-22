@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Coverage for scripts/check-pipefail-early-exit-grep.sh (AG-VAL-029 standing
 # check for the confirmed real CI failure on issue #815's PR #1374, job

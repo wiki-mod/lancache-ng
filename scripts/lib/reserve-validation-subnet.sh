@@ -1,5 +1,5 @@
 #!/bin/bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Host-local, per-slot locking for the full-setup-validate validation
 # Docker subnet (issue #703; slot/`/27` redesign issue #832). Pure functions

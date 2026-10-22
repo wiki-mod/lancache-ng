@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Sync-guard test to ensure the CA subject string (CN/O) stays consistent
 # between certs/generate-ca.sh and services/proxy/entrypoint.sh.

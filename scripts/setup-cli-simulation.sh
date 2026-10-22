@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Executes the real setup.sh CLI end-to-end instead of only bash -n syntax
 # checking it (issue #403): a fresh install through its interactive prompts,
