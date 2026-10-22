@@ -302,8 +302,8 @@ impl Config {
         let https_ip = need("IP_HTTPS")?;
         let nats_url = need("NATS_URL")?;
         let tag = need("LANCACHE_IMAGE_TAG")?;
-        // What: an unset or blank channel derives from the tag.
-        // Why: a tag-only install names no channel of its own.
+        // What: a blank channel derives from the tag.
+        // Why: a tag-only install names no channel.
         // From: Issue #1683 | PR #1912
         let channel = set("LANCACHE_IMAGE_CHANNEL")
             .filter(|v| !v.trim().is_empty())
@@ -327,7 +327,7 @@ impl Config {
                 .unwrap_or_default()
         };
         // What: a real DHCP_API_TOKEN, else KEA_CTRL_TOKEN.
-        // Why: compose maps it; a placeholder must not be used.
+        // Why: compose maps it; no placeholder use.
         // From: Issue #1683 | PR #1912
         let dhcp_api_token = match env("DHCP_API_TOKEN") {
             Some(v) if !is_placeholder(&v) => v,
@@ -519,7 +519,7 @@ impl Config {
         DhcpMode::parse(&self.setting("DHCP_MODE"))
     }
 
-    // What: requested cache size in GB; junk = current size.
+    // What: requested cache GB; junk = current size.
     // Why: differs from cache_max_gb until proxy recreate.
     // From: Issue #1683 | PR #1858
     fn requested_cache_gb(&self) -> f64 {
@@ -549,7 +549,7 @@ impl Config {
                 None => config::saved_setting(file, key).unwrap_or_default(),
             };
             // What: write only keys that have a value.
-            // Why: an absent key falls back to the startup value.
+            // Why: an absent key keeps the start value.
             // From: Issue #1683 | PR #1912
             if !value.trim().is_empty() {
                 content.push_str(&format!("{key}={}\n", value.trim()));
@@ -666,8 +666,8 @@ fn nats_port(nats_url: &str) -> Option<&str> {
 fn ensure_shared_secrets(dir: &str, gid: u32, prefix: &str) -> Result<(), String> {
     for var in SHARED_SECRET_VARS.iter().filter(|v| v.starts_with(prefix)) {
         let configured = config::env_opt(var).unwrap_or_default();
-        // What: a placeholder counts as no configured value.
-        // Why: a checked-in placeholder must never be a secret.
+        // What: a placeholder is no configured value.
+        // Why: a placeholder must never be a secret.
         // From: Issue #1683 | PR #1912
         let current = if is_placeholder(&configured) {
             ""
@@ -952,7 +952,7 @@ async fn basic_auth(State(state): Shared, mut req: Request, next: Next) -> Respo
                 let (u, p) = creds.split_once(':')?;
                 Some((u.to_owned(), p.to_owned()))
             });
-        // What: Argon2id check off the async pool; a panic denies.
+        // What: Argon2id off the async pool; panic denies.
         // Why: it is CPU and memory heavy by design.
         // From: Issue #1683 | PR #1912
         let valid = match presented {
@@ -1979,7 +1979,7 @@ fn syslog_stats(root: &str) -> SyslogStats {
         let mut days: HashSet<String> = HashSet::new();
         for entry in fs::read_dir(&dir).into_iter().flatten().flatten() {
             // What: count regular files only.
-            // Why: a subdir or a vanished entry holds no log day.
+            // Why: a dir or gone entry holds no log day.
             // From: Issue #1683 | PR #1858
             let Ok(meta) = entry.metadata() else { continue };
             if !meta.is_file() {
@@ -2939,7 +2939,7 @@ async fn register_secondary(
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     };
     // What: refuse without the shared DDNS TSIG key.
-    // Why: the secondary needs it; fail before any DB write.
+    // Why: the secondary needs it; fail before DB write.
     // From: Issue #1683 | PR #1912
     let tsig_path =
         Path::new(&state.config.shared_secret_dir).join(shared_secret_file_name("DDNS_TSIG_KEY"));
@@ -4114,7 +4114,7 @@ fn edit_custom_option(
             } else {
                 let before = options.len();
                 options.retain(|o| !same(o));
-                // What: nothing removed means no such option.
+                // What: none removed: no such option.
                 // Why: kea_modify maps this error to a 404.
                 // From: Issue #1683 | PR #1858
                 if options.len() == before {
@@ -4565,7 +4565,7 @@ async fn sync_subnet_ntp(state: &AppState, auto: bool) -> Result<(), String> {
     if !kea_available(state) {
         return Ok(());
     }
-    // What: LAN address if auto, else default; none on error.
+    // What: LAN IP if auto, else default; none on error.
     // Why: auto off hands the option back to one value.
     // From: Issue #1683 | PR #1858
     let servers = if auto {
@@ -5177,7 +5177,7 @@ async fn flush_recursor_cache(state: &AppState, request: FlushRequest) {
         tracing::warn!("cache flush of {url} failed: {err}");
     }
     // What: publish the flush to every other DNS node.
-    // Why: a failed publish is logged; entries still expire.
+    // Why: a failed publish is logged; entries expire.
     // From: Issue #1683 | PR #1912
     let request = FlushRequest { domain, ..request };
     match serde_json::to_vec(&request) {
@@ -5428,7 +5428,7 @@ fn ptr_rows(rrsets: &[Value]) -> Vec<PtrRow> {
         }
         let Some(address) = address else { continue };
         // What: a missing ttl shows as 0.
-        // Why: a row without ttl still lists its PTR target.
+        // Why: a row without ttl still lists its PTR.
         // From: Issue #1683 | PR #1858
         let ttl = rrset.get("ttl").and_then(Value::as_u64).unwrap_or(0) as u32;
         for record in rrset
@@ -5513,7 +5513,7 @@ async fn fetch_zone_groups(state: &AppState) -> Vec<ZoneSnapshotGroup> {
         .iter()
         .map(|(zone, list)| ZoneSnapshotGroup {
             zone: zone.clone(),
-            // What: skip id-less entries; no time reads as 0.
+            // What: skip id-less entries; no time = 0.
             // Why: an old listener degrades to fewer rows.
             // From: Issue #1683 | PR #1858
             snapshots: list
@@ -5602,7 +5602,7 @@ async fn domains_page(
 ) -> Response {
     let cfg = &state.config;
     // What: an unread CDN list shows an empty table.
-    // Why: the error is logged; the other lists still render.
+    // Why: logged; the other lists still render.
     // From: Issue #1683 | PR #1858
     let list = fs::read_to_string(&cfg.cdn_domains_file).unwrap_or_else(|e| {
         tracing::error!("CDN domain list {} not read: {e}", cfg.cdn_domains_file);
@@ -5611,7 +5611,7 @@ async fn domains_page(
     let rows = domain_rows(&list);
     let (lan, ptr, groups) = tokio::join!(
         // What: unreadable LAN records show as none.
-        // Why: the error is logged; the other lists still render.
+        // Why: logged; the other lists still render.
         // From: Issue #1683 | PR #1912
         async {
             state
@@ -5857,7 +5857,7 @@ async fn add_ptr_record(State(state): Shared, Form(f): Form<Fields>) -> Redirect
 // Why: the key is the address; no other field is needed.
 // From: Issue #1683 | PR #1858
 async fn remove_ptr_record(State(state): Shared, Form(f): Form<Fields>) -> Redirect {
-    // What: an address outside the reverse zones is refused.
+    // What: an address outside reverse zones is refused.
     // Why: PowerDNS has no zone to delete the PTR from.
     // From: Issue #1683 | PR #1912
     let Some((zone, name)) = ptr_location(f.get("ip")) else {
@@ -5881,7 +5881,7 @@ async fn blocking<T: Default + Send + 'static>(
     job: impl FnOnce(&AppState) -> T + Send + 'static,
 ) -> T {
     let state = state.clone();
-    // What: a failed job is logged and gives the empty value.
+    // What: a failed job is logged; gives the default.
     // Why: one broken collector must not fail the page.
     // From: Issue #1683 | PR #1858
     match tokio::task::spawn_blocking(move || job(&state)).await {
@@ -6395,7 +6395,7 @@ fn registration_token(configured: &str, token_file: &str) -> Result<String, Stri
     };
     let length = token.chars().count();
     // What: a token under the minimum length is refused.
-    // Why: a short token could be guessed by a remote client.
+    // Why: a short token could be guessed remotely.
     // From: Issue #1683 | PR #1858
     if length < MIN_REGISTRATION_TOKEN_LEN {
         return Err(format!(
@@ -6461,7 +6461,7 @@ fn init_tracing() {
             None
         }
     };
-    // What: RUST_LOG, else info for the ui, warn for crates.
+    // What: RUST_LOG, else ui at info, crates at warn.
     // Why: an unset filter must not mute the ui log.
     // From: Issue #1683 | PR #1858
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()

@@ -959,8 +959,8 @@ impl SnapshotStore {
         };
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
-            // What: old = a dir with a non-numeric, non-staging name.
-            // Why: staging dirs and new snapshots stay untouched.
+            // What: old = dir, not numeric, not staging.
+            // Why: staging and new snapshots stay.
             // From: Issue #1683 | PR #1912
             let old = entry.file_type().is_ok_and(|t| t.is_dir())
                 && !name.starts_with(STAGING)
@@ -1603,7 +1603,7 @@ impl DockerApi {
         Self { client, base_url }
     }
 
-    // What: containers of one compose project; None on failure.
+    // What: containers of one compose project, or None.
     // Why: the stack is whatever compose started; no list.
     // From: Issue #1683
     pub async fn project_containers(
