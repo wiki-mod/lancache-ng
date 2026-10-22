@@ -60,6 +60,7 @@
 
   {# What: DHCP mode select, form of the active mode #}
   {# Why: proxy and relay values exist only in their mode #}
+  {# From: Issue #1683 | PR #1912 #}
   <div class="card space-y-4">
     <div class="flex flex-wrap items-center justify-between gap-3">
       <div>
@@ -92,6 +93,7 @@
     {% if dhcp_is_dnsmasq and not dhcp_is_relay %}
       {# What: ProxyDHCP values and their edit form #}
       {# Why: options reach only PXE clients in this mode #}
+      {# From: Issue #1683 | PR #1912 #}
       <div class="text-sm text-amber-300 space-y-2">
         <p>dnsmasq proxy mode is active. This page shows the live proxy values and lets you edit them directly as simple fields.</p>
         <ul class="list-disc pl-5 space-y-1 text-amber-200">
@@ -158,6 +160,7 @@
     {% elif dhcp_has_kea %}
       {# What: Kea mode summary of the managed values #}
       {# Why: lists what the subnet editor below manages #}
+      {# From: Issue #1683 | PR #1912 #}
       <div class="text-sm text-green-400 space-y-2">
         <p>Kea mode is active. The configuration area below is visible and editable with direct fields for gateway, DNS, NTP, reservations, and subnet details.</p>
         <ul class="list-disc pl-5 space-y-1 text-green-300">
@@ -174,6 +177,7 @@
   {% if dhcp_has_kea %}
   <!-- What: status card for the DHCP conflict probe -->
   <!-- Why: element ids are read by checkDhcpConflict() -->
+  <!-- From: Issue #1683 | PR #1912 -->
   <div id="dhcp-check" class="bg-slate-800 border border-slate-700 rounded-lg p-4">
     <div class="flex items-center justify-between">
       <div>
@@ -182,10 +186,12 @@
         <p id="check-conflict-status" class="text-sm text-slate-400 mt-1">Konfliktprobe läuft noch nicht.</p>
         {# What: extra fields of the found DHCP server #}
         {# Why: address above; hidden without details #}
+        {# From: Issue #1683 | PR #1912 #}
         <ul id="check-conflict-details" class="text-xs text-slate-400 mt-1 ml-4 list-disc hidden"></ul>
         <p id="check-client-status" class="text-sm text-slate-400 mt-1">DHCP-Client-Dry-Run läuft noch nicht.</p>
         {# What: lease fields of a passed client dry-run #}
         {# Why: summary above; hidden without details #}
+        {# From: Issue #1683 | PR #1912 #}
         <ul id="check-client-details" class="text-xs text-slate-400 mt-1 ml-4 list-disc hidden"></ul>
       </div>
       <button onclick="checkDhcpConflict()" class="btn btn-slate">
@@ -228,6 +234,7 @@
 
   {# What: Kea subnet list with add, edit, remove forms #}
   {# Why: add form stays hidden until toggleAddSubnet() #}
+  {# From: Issue #1683 | PR #1912 #}
   <div class="bg-slate-800 border border-slate-700 rounded-lg p-6">
     <div class="flex items-center justify-between mb-4">
       <h2 class="text-lg font-semibold text-white">Subnetze</h2>
@@ -299,6 +306,7 @@
 
       {# What: free DHCPv4 code/value options per subnet #}
       {# Why: fixed fields own router, DNS, domain, NTP #}
+      {# From: Issue #1683 | PR #1912 #}
       <div class="p-4 bg-slate-900/40 border-t border-slate-700 space-y-3">
         <div>
           <h3 class="text-sm font-medium text-slate-200">Zusätzliche DHCP-Optionen</h3>
@@ -350,6 +358,7 @@
 
   {# What: static reservations: add form and list #}
   {# Why: the add form needs a subnet; hidden without one #}
+  {# From: Issue #1683 | PR #1912 #}
   <div class="bg-slate-800 border border-slate-700 rounded-lg p-6">
     <h2 class="text-lg font-semibold text-white mb-4">Statische Reservierungen</h2>
 
@@ -403,6 +412,7 @@
 
   {# What: active Kea leases with a release form each #}
   {# Why: expiry is epoch; base.html formats [data-epoch] #}
+  {# From: Issue #1683 | PR #1912 #}
   <div class="bg-slate-800 border border-slate-700 rounded-lg p-6">
     <h2 class="text-lg font-semibold text-white mb-4">Aktive DHCP-Leases</h2>
     <div class="overflow-x-auto">
@@ -507,6 +517,7 @@
 <script>
 // What: shows or hides the new-subnet form
 // Why: the form stays hidden until the button is pressed
+// From: Issue #1683 | PR #1912
 function toggleAddSubnet() {
   const el = document.getElementById('add-subnet-form');
   el.classList.toggle('hidden');
@@ -514,6 +525,7 @@ function toggleAddSubnet() {
 
 // What: shows or hides the edit form of subnet id
 // Why: each subnet row has its own hidden edit form
+// From: Issue #1683 | PR #1912
 function toggleEditSubnet(id) {
   const el = document.getElementById('edit-subnet-' + id);
   el.classList.toggle('hidden');
@@ -548,6 +560,7 @@ const CHECK = {{ dhcp_check_words | safe }};
 
 // What: runs the DHCP check and fills the status card
 // Why: the probe runs on the server; the page shows it
+// From: Issue #1683 | PR #1912
 async function checkDhcpConflict() {
   const statusEl = document.getElementById('check-status');
   const conflictEl = document.getElementById('check-conflict-status');
@@ -609,12 +622,14 @@ async function checkDhcpConflict() {
   } catch (e) {
     // What: writes the fetch or JSON error into the card
     // Why: the operator sees the failure, not a stale text
+    // From: Issue #1683 | PR #1912
     statusEl.textContent = 'Fehler beim Prüfen: ' + e.message;
   }
 }
 
 // What: runs the DHCP check once after the page loads
 // Why: status shows without a click on "Erneut prüfen"
+// From: Issue #1683 | PR #1912
 document.addEventListener('DOMContentLoaded', checkDhcpConflict);
 </script>
 {% endif %}

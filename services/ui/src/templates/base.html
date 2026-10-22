@@ -90,7 +90,8 @@
       --color-accent-coral-soft: rgba(200, 70, 47, 0.12);
     }
     /* What: body font and colours, display font for titles
-       Why: fonts and colours come from the :root tokens */
+       Why: fonts and colours come from the :root tokens
+       From: Issue #1683 | PR #1912 */
     body { font-family: var(--font-body); background: var(--color-bg); color: var(--color-text); }
     main h1 { font-family: var(--font-display); }
     .stat-num { font-family: var(--font-display); }
@@ -120,7 +121,8 @@
     :root[data-theme="light"] .hover\:border-slate-400:hover { border-color: var(--color-border); }
 
     /* What: dock, nav link, card, badge, scrollbar styles
-       Why: same look on every page; tokens set colours */
+       Why: same look on every page; tokens set colours
+       From: Issue #1683 | PR #1912 */
     .dock { background: var(--color-surface); border-right: 1px solid var(--color-border); }
     .nav-link {
       display: flex; align-items: center; gap: 0.625rem;
@@ -270,7 +272,8 @@
 <body class="h-full flex">
 
   <!-- What: sidebar with logo, nav links and image info
-       Why: one layout, same navigation on every page -->
+       Why: one layout, same navigation on every page
+       From: Issue #1683 | PR #1912 -->
   <aside class="dock w-52 shrink-0 flex flex-col">
     <div class="px-4 py-5" style="border-bottom: 1px solid var(--color-border);">
       <div class="flex items-center gap-2">
@@ -350,6 +353,7 @@
       }
       // What: paints server-rendered [data-dot-status]
       // Why: setup and dashboard dots get the same colours
+      // From: Issue #1683 | PR #1912
       document.querySelectorAll('[data-dot-status]').forEach(function (dot) {
         paintDot(dot, dot.dataset.dotStatus);
       });
@@ -442,6 +446,7 @@
         sel.addRange(range);
         // What: on failure report it, keep selection
         // Why: the operator can still copy it with Ctrl+C
+        // From: Issue #1683 | PR #1912
         let ok;
         try {
           ok = document.execCommand('copy');
@@ -533,6 +538,7 @@
 
     // What: loads watchdog status now and per SOT interval
     // Why: beambar and dashboard dots read the same data
+    // From: Issue #1683 | PR #1912
     window.LancacheWatchdog.refresh();
     setInterval(window.LancacheWatchdog.refresh, {{ watchdog_refresh_seconds * 1000 }});
 

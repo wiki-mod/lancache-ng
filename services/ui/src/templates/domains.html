@@ -25,7 +25,8 @@
   </div>
 
   {# What: banner for a rejected CDN-domain add, fixed text
-     Why: fixed strings only, never query text #}
+     Why: fixed strings only, never query text
+     From: Issue #1683 | PR #1912 #}
   {% if domain_error_message %}
   <div class="bg-red-500/10 border border-red-500/30 rounded-lg px-4 py-3 text-sm text-red-300">
     {{ domain_error_message }}
@@ -35,7 +36,8 @@
   {{ <section_tabs main_href={pages.domains} main_label="DNS" main_page="domains" active_page={active_page} secondaries_href={pages.secondaries}/> }}
 
   {# What: one tab button per data-dns-panel section below
-     Why: setActiveDnsTab maps data-dns-tab to the panel #}
+     Why: setActiveDnsTab maps data-dns-tab to the panel
+     From: Issue #1683 | PR #1912 #}
   <div class="flex flex-wrap items-center gap-2 border-b border-slate-700">
     <button type="button" data-dns-tab="cdn"
             class="tab dns-tab-btn">
@@ -61,7 +63,8 @@
 
   <div class="space-y-6">
     {# What: CDN domain list: add, switch, remove
-       Why: one list cdn-domains.txt; certs follow it #}
+       Why: one list cdn-domains.txt; certs follow it
+       From: Issue #1683 | PR #1912 #}
     <section data-dns-panel="cdn" class="card flex flex-col gap-4">
       <div>
         <h2 class="font-semibold text-slate-200">CDN-Domains</h2>
@@ -75,7 +78,8 @@
       <form action="{{ routes.dns_add | safe }}" method="post" class="flex gap-2">
         {{ <csrf_field csrf_token={csrf_token}/> }}
         {# What: one domain per submit, one input
-           Why: each add runs after_domain_change #}
+           Why: each add runs after_domain_change
+           From: Issue #1683 | PR #1912 #}
         <input type="text" name="domain" placeholder="z.B. steamcontent.com"
                required
                class="flex-1 bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500">
@@ -103,7 +107,8 @@
 
           {% if domain.is_default and domain.is_valid %}
           {# What: on/off switch for default rows
-             Why: a "!" prefix marks a disabled row #}
+             Why: a "!" prefix marks a disabled row
+             From: Issue #1683 | PR #1912 #}
           <form action="{{ routes.dns_toggle | safe }}" method="post" class="flex items-center gap-2 flex-shrink-0">
             {{ <csrf_field csrf_token={csrf_token}/> }}
             <input type="hidden" name="domain" value="{{ domain.display }}">
@@ -121,7 +126,8 @@
           <form action="{{ routes.dns_remove | safe }}" method="post" class="opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0">
             {{ <csrf_field csrf_token={csrf_token}/> }}
             {# What: hidden value is the raw file entry
-               Why: removal keys on the raw entry #}
+               Why: removal keys on the raw entry
+               From: Issue #1683 | PR #1912 #}
             <input type="hidden" name="domain" value="{{ domain.raw }}">
             <button type="submit"
                     onclick="return confirm('{{ domain.display }} aus der Domain-Liste entfernen?\nDer Proxy wird ggf. neu gestartet, falls der HTTPS-Modus aktiv ist.')"
@@ -141,7 +147,8 @@
     </section>
 
     {# What: LAN records in PowerDNS: add form and list
-       Why: changes apply live, no container restart #}
+       Why: changes apply live, no container restart
+       From: Issue #1683 | PR #1912 #}
     <section data-dns-panel="lan" class="card flex flex-col gap-4 hidden">
       <div>
         <h2 class="font-semibold text-slate-200">LAN-Einträge</h2>
@@ -151,7 +158,8 @@
       <form action="{{ routes.lan_add | safe }}" method="post" class="flex flex-col gap-3" data-lan-record-form>
         {{ <csrf_field csrf_token={csrf_token}/> }}
         {# What: record name, type, content fields
-           Why: type and content not parsed together #}
+           Why: type and content not parsed together
+           From: Issue #1683 | PR #1912 #}
         <div class="flex gap-2">
           <input type="text" name="name" placeholder="z.B. myserver.{{ lan_zone }}"
                  required
@@ -194,7 +202,8 @@
           <form action="{{ routes.lan_remove | safe }}" method="post" class="opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0 ml-2">
             {{ <csrf_field csrf_token={csrf_token}/> }}
             {# What: hidden name, type and joined content
-               Why: removal targets the RRset #}
+               Why: removal targets the RRset
+               From: Issue #1683 | PR #1912 #}
             <input type="hidden" name="name" value="{{ record.name }}">
             <input type="hidden" name="record_type" value="{{ record.type }}">
             <input type="hidden" name="content" value="{% for c in record.records %}{{ c.content }}{% if not loop.last %};{% endif %}{% endfor %}">
@@ -217,7 +226,8 @@
     </section>
 
     {# What: PTR records of the private reverse zones
-       Why: Kea DDNS and manual entries share one list #}
+       Why: Kea DDNS and manual entries share one list
+       From: Issue #1683 | PR #1912 #}
     <section data-dns-panel="ptr" class="card flex flex-col gap-4 hidden">
       <div>
         <h2 class="font-semibold text-slate-200">PTR / Reverse-DNS</h2>
@@ -235,7 +245,8 @@
       <form action="{{ routes.ptr_add | safe }}" method="post" class="flex flex-col gap-3">
         {{ <csrf_field csrf_token={csrf_token}/> }}
         {# What: form takes IP and hostname; name is derived
-           Why: the reverse record name comes from the IP #}
+           Why: the reverse record name comes from the IP
+           From: Issue #1683 | PR #1912 #}
         <div class="flex gap-2">
           <input type="text" name="ip" placeholder="IP, z.B. 192.168.1.50"
                  required
@@ -268,7 +279,8 @@
           <form action="{{ routes.ptr_remove | safe }}" method="post" class="opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0 ml-2">
             {{ <csrf_field csrf_token={csrf_token}/> }}
             {# What: removal deletes the PTR rrset for IP
-               Why: the PTR rrset is keyed by IP #}
+               Why: the PTR rrset is keyed by IP
+               From: Issue #1683 | PR #1912 #}
             <input type="hidden" name="ip" value="{{ ptr.ip }}">
             <button type="submit"
                     data-ptr-ip="{{ ptr.ip }}"
@@ -289,7 +301,8 @@
     </section>
 
     {# What: global IPv4-only switch (AAAA filter)
-       Why: clients then use IPv4 and reach the cache #}
+       Why: clients then use IPv4 and reach the cache
+       From: Issue #1683 | PR #1912 #}
     <section data-dns-panel="settings" class="card flex flex-col gap-4 hidden">
       <div>
         <h2 class="font-semibold text-slate-200">Settings / IPv4-only Modus</h2>
@@ -302,7 +315,8 @@
       <form action="{{ routes.aaaa_filter | safe }}" method="post" class="flex items-center gap-4">
         {{ <csrf_field csrf_token={csrf_token}/> }}
         {# What: global AAAA filter, stored as a marker
-           Why: the domain rows above are not edited #}
+           Why: the domain rows above are not edited
+           From: Issue #1683 | PR #1912 #}
         <div class="flex items-center gap-2">
           <input type="checkbox" id="aaaa-enabled" name="enabled" value="1"
                  {% if aaaa_filter_enabled %}checked{% endif %}
@@ -387,7 +401,8 @@
     </section>
 
     {# What: zone snapshot table; rows come from main.rs
-       Why: snapshot storage lives in nats-subscriber #}
+       Why: snapshot storage lives in nats-subscriber
+       From: Issue #1683 | PR #1912 #}
     <section data-dns-panel="zones" class="card flex flex-col gap-4 hidden">
       <div class="flex items-center justify-between">
         <div>
@@ -423,7 +438,8 @@
                   </td>
                   <td class="py-2">
                     {# What: group.zone is a fixed zone
-                       Why: no JS escaping needed #}
+                       Why: no JS escaping needed
+                       From: Issue #1683 | PR #1912 #}
                     <form method="POST" action="{{ routes.zone_rollback | safe }}" class="inline"
                           onsubmit="return confirm('Zone {{ group.zone }} auf diesen Snapshot zurückrollen? Seit dem Snapshot hinzugekommene Records können dabei verloren gehen.')">
                       {{ <csrf_field csrf_token={csrf_token}/> }}
@@ -464,6 +480,7 @@
 <script>
   // What: shows one DNS panel and marks its tab button
   // Why: tabs switch client-side; no reload per tab
+  // From: Issue #1683 | PR #1912
   function setActiveDnsTab(tabName) {
     document.querySelectorAll('[data-dns-panel]').forEach((panel) => {
       panel.classList.toggle('hidden', panel.dataset.dnsPanel !== tabName);
@@ -476,18 +493,21 @@
 
   // What: confirm() with record name and type
   // Why: values come from data-*, not inline JS strings
+  // From: Issue #1683 | PR #1912
   function confirmRemoveRecord(btn) {
     return confirm(btn.dataset.recordName + ' (' + btn.dataset.recordType + ') entfernen?');
   }
 
   // What: confirm() with PTR IP and hostname
   // Why: values come from data-*, not inline JS strings
+  // From: Issue #1683 | PR #1912
   function confirmRemovePtr(btn) {
     return confirm('PTR ' + btn.dataset.ptrIp + ' → ' + btn.dataset.ptrHost + ' entfernen?');
   }
 
   // What: TXT length check in UTF-8 bytes
   // Why: the Rust limit MAX_TXT_BYTES counts bytes
+  // From: Issue #1683 | PR #1912
   function validateLanTxtContent() {
     const form = document.querySelector('[data-lan-record-form]');
     const recordType = form.querySelector('[data-lan-record-type]');
@@ -503,6 +523,7 @@
 
   // What: wires the tab buttons and the TXT length check
   // Why: the check reruns on type change, input and submit
+  // From: Issue #1683 | PR #1912
   document.querySelectorAll('.dns-tab-btn').forEach((button) => {
     button.addEventListener('click', () => setActiveDnsTab(button.dataset.dnsTab));
   });
@@ -513,6 +534,7 @@
 
   // What: opens the CDN tab on page load
   // Why: marks its button; markup sets no active class
+  // From: Issue #1683 | PR #1912
   setActiveDnsTab('cdn');
 </script>
 {% endblock %}

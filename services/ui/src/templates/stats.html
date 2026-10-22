@@ -2,7 +2,8 @@
 {# LanCache-NG (https://github.com/wiki-mod/lancache-ng) #}
 {# SPDX-License-Identifier: AGPL-3.0-or-later #}
 {# What: system stats page: CPU, RAM, network, disk I/O
-   Why: metrics come from Netdata via routes.netdata #}
+   Why: Netdata is not published; the ui proxies its data
+   From: Issue #1683 | PR #1912 #}
 {% extends "base.html" %}
 {% block title %} – Statistiken{% endblock %}
 
@@ -16,6 +17,7 @@
 
   <!-- What: grid holding the four chart cards -->
   <!-- Why: one column below lg, two columns from lg -->
+  <!-- From: Issue #1683 | PR #1912 -->
   <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
 
     <div class="card">
@@ -57,9 +59,11 @@
 const NETDATA = '{{ routes.netdata | safe }}';
 // What: sample count per chart and netdata request
 // Why: bounds chart array length and request size
+// From: Issue #1683 | PR #1912
 const POINTS  = {{ stats_points }};
 // What: refresh() interval; SOT seconds as setInterval ms
 // Why: each tick fetches every chart from netdata
+// From: Issue #1683 | PR #1912
 const REFRESH  = {{ stats_refresh_seconds * 1000 }};
 
 // What: shared line-chart options for all four charts
@@ -138,12 +142,14 @@ async function fetchChart(path) {
   const res = await fetch(`${NETDATA.replace('{*path}', path)}&points=${POINTS}&group=average&format=json`);
   // What: throws on a non-2xx netdata response.
   // Why: refresh() turns the throw into the error banner.
+  // From: Issue #1683 | PR #1912
   if (!res.ok) throw new Error(`netdata ${path}: HTTP ${res.status}`);
   return res.json();
 }
 
 // What: newest non-null row of a netdata reply, or null.
 // Why: rows come newest first; the oldest rows can be null.
+// From: Issue #1683 | PR #1912
 function newestRow(reply) {
   const rows = reply.data.filter(r => r.slice(1).some(v => v !== null));
   return rows.length ? rows.reduce((a, b) => (b[0] > a[0] ? b : a)) : null;
@@ -151,6 +157,7 @@ function newestRow(reply) {
 
 // What: the column of a netdata reply by its label.
 // Why: a position changes with the netdata version.
+// From: Issue #1683 | PR #1912
 function column(reply, label) {
   const at = reply.labels.indexOf(label);
   if (at < 1) throw new Error(`no ${label} column`);
@@ -169,6 +176,7 @@ async function refresh() {
   try {
     // What: busy % = sum of the system.cpu state columns.
     // Why: system.cpu has no idle column; last is iowait.
+    // From: Issue #1683 | PR #1912
     const cpu = await fetchChart('data?chart=system.cpu');
     const cpuRow = newestRow(cpu);
     const cpuPct = cpuRow
@@ -178,6 +186,7 @@ async function refresh() {
 
     // What: used RAM in GB via the "used" label.
     // Why: column 1 is free, not used; values are MiB.
+    // From: Issue #1683 | PR #1912
     const ram = await fetchChart('data?chart=system.ram');
     const ramRow = newestRow(ram);
     const usedGB = ramRow ? (ramRow[column(ram, 'used')] / 1024).toFixed(2) : 0;
@@ -185,6 +194,7 @@ async function refresh() {
 
     // What: net.eth0; on error report, try net.eth1.
     // Why: interface names differ between hosts.
+    // From: Issue #1683 | PR #1912
     let net;
     try { net = await fetchChart('data?chart=net.eth0'); }
     catch (err) {
@@ -193,6 +203,7 @@ async function refresh() {
     }
     // What: net kilobits/s to MB/s: divide by 8000.
     // Why: net.* units are kilobits/s; sent is negative.
+    // From: Issue #1683 | PR #1912
     const netRow = newestRow(net);
     const rxMB = netRow ? Math.abs(netRow[column(net, 'received')] / 8000).toFixed(2) : 0;
     const txMB = netRow ? Math.abs(netRow[column(net, 'sent')] / 8000).toFixed(2) : 0;
@@ -200,6 +211,7 @@ async function refresh() {
 
     // What: disk KiB/s to MB/s: times 1024, divide by 1e6.
     // Why: system.io units are KiB/s; writes are negative.
+    // From: Issue #1683 | PR #1912
     const disk = await fetchChart('data?chart=system.io');
     const diskRow = newestRow(disk);
     const readMB  = diskRow ? Math.abs(diskRow[column(disk, 'in')] * 1.024 / 1000).toFixed(2) : 0;

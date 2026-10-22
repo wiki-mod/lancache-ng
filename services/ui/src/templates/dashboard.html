@@ -36,7 +36,8 @@
   <h1 class="text-xl font-bold text-white">Dashboard</h1>
 
   <!-- What: active DHCP mode and what the UI controls in it
-       Why: Kea settings apply only in Kea mode -->
+       Why: Kea settings apply only in Kea mode
+       From: Issue #1683 | PR #1912 -->
   <div class="card space-y-2">
     <div class="flex items-center justify-between">
       <h2 class="font-semibold text-slate-200">DHCP mode</h2>
@@ -57,7 +58,8 @@
   </div>
 
   <!-- What: one dot per watchdog service and the cache disk
-       Why: base.html's LancacheWatchdog updates them -->
+       Why: base.html's LancacheWatchdog updates them
+       From: Issue #1683 | PR #1912 -->
   <div class="card" id="watchdog-status-card">
     <div class="flex items-center justify-between mb-3">
       <h2 class="font-semibold text-slate-200">Service health</h2>
@@ -75,7 +77,8 @@
       {% for svc in watchdog_status.services %}
       <div class="flex items-center gap-2" data-service="{{ svc.name }}">
         {# What: service dot; base.html paints its status
-           Why: title shows svc.health as the tooltip #}
+           Why: the colour alone does not say what failed
+           From: Issue #1683 | PR #1912 #}
         <span class="beambar-dot" data-role="dot" data-dot-status="{{ svc.status }}" title="{{ svc.health }}"></span>
         <span class="text-sm text-slate-300">{{ svc.name }}</span>
         {% if svc.failures > 0 %}
@@ -92,7 +95,8 @@
   </div>
 
   <!-- What: Netdata alarms from main.rs, shown on load
-       Why: alarms are events; no live polling -->
+       Why: alarms are events; no live polling
+       From: Issue #1683 | PR #1912 -->
   <div class="card" id="netdata-alarms-card">
     <div class="flex items-center justify-between mb-3">
       <h2 class="font-semibold text-slate-200">Netdata alarms</h2>
@@ -105,7 +109,8 @@
       {% for alarm in netdata_alarms %}
       <div class="flex items-center gap-2 text-sm" data-unique-id="{{ alarm.unique_id }}">
         {# What: Netdata alarm status to a colour token
-           Why: base.html paintDot owns token-to-colour #}
+           Why: base.html paintDot owns token-to-colour
+           From: Issue #1683 | PR #1912 #}
         <span class="beambar-dot shrink-0" data-role="dot" data-dot-status="{% if alarm.status == "CRITICAL" %}red{% elif alarm.status == "WARNING" %}yellow{% elif alarm.status == "CLEAR" %}green{% endif %}"></span>
         <span class="text-xs text-slate-500 shrink-0">{{ alarm.when_display }}</span>
         <span class="text-slate-300 font-medium">{{ alarm.name }}</span>
@@ -141,7 +146,8 @@
     </div>
 
     <!-- What: resize saves CACHE_MAX_GB, host applies it
-         Why: proxy container restarts; no live reload -->
+         Why: proxy container restarts; no live reload
+         From: Issue #1683 | PR #1912 -->
     {% if cache_resize_pending %}
     <div class="bg-amber-500/10 border border-amber-500/30 rounded-lg px-3 py-2 text-xs text-amber-300 mb-3">
       Resize to {{ effective_cache_max_gb }} GB requested. This takes effect within the next
@@ -172,7 +178,8 @@
   </div>
 
   <!-- What: hit rate and totals from log_stats
-       Why: parsed from log lines, not nginx status -->
+       Why: parsed from log lines, not nginx status
+       From: Issue #1683 | PR #1912 -->
   <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
     <div class="card text-center">
       <p class="stat-num text-3xl font-bold text-emerald-400">{{ log_stats.hit_pct | round(precision=1) }}%</p>
@@ -193,7 +200,8 @@
   </div>
 
   <!-- What: size and file totals of the syslog store
-       Why: watchdog owns retention; card only reports -->
+       Why: watchdog owns retention; card only reports
+       From: Issue #1683 | PR #1912 -->
   <div class="card">
     <div class="flex items-center justify-between mb-3">
       <div>
@@ -203,7 +211,8 @@
       <span class="text-xs text-slate-500 font-mono">{{ syslog_size_gb }} / {{ syslog_max_gb }} GB</span>
     </div>
     <!-- What: per-host table from syslog_stats (main.rs)
-         Why: shows per-host data, not only the totals -->
+         Why: shows per-host data, not only the totals
+         From: Issue #1683 | PR #1912 -->
     {% if syslog_stats.hosts %}
     <div class="overflow-x-auto">
       <table class="w-full text-xs">
@@ -287,7 +296,8 @@
 {% endblock %}
 
 {# What: page script after base.html's script
-   Why: it uses window.LancacheWatchdog from base.html #}
+   Why: it uses window.LancacheWatchdog from base.html
+   From: Issue #1683 | PR #1912 #}
 {% block scripts %}
 <script>
   // What: writes the three counters of one proxy card
@@ -359,6 +369,7 @@
 
   // What: repaints note and dots on each watchdog update
   // Why: base.html polls; this page only renders the data
+  // From: Issue #1683 | PR #1912
   window.LancacheWatchdog.onUpdate(function (data) {
     const note = document.getElementById('watchdog-status-note');
     // What: note text from the watchdog document state
