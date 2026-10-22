@@ -3671,18 +3671,24 @@ _ci_sccache_stop() {
     return "${frc}"
 }
 
-# What: test whether a /proc entry is gone or a zombie.
-# Why: a dead process has nothing left to stop or read.
+# What: test whether a /proc entry is dead or exiting.
+# Why: environ fails once the address space is gone.
 # From: Issue #1683 | PR #1912
 _ci_proc_dead() {
-    local stat_s state
+    local stat_s state mem_s
     if ! stat_s="$( { cat "$1/stat"; } 2>&1)"; then
         REPLY="${stat_s}"
         [ -e "$1" ] || return 0
         return 2
     fi
     state="${stat_s##*) }"
-    [ "${state%% *}" = Z ]
+    [ "${state%% *}" != Z ] || return 0
+    if ! mem_s="$( { cat "$1/statm"; } 2>&1)"; then
+        REPLY="${mem_s}"
+        [ -e "$1" ] || return 0
+        return 2
+    fi
+    [ "${mem_s%% *}" = 0 ]
 }
 
 # What: kill sccache servers under this run's socket dir.
@@ -3693,7 +3699,7 @@ _ci_sccache_reap() {
     for p in /proc/[0-9]*; do
         [ -r "${p}/environ" ] || continue
         [ "$(cat "${p}/comm" 2>&1)" = sccache ] || continue
-        # What: a gone or zombie server is dead; skip it.
+        # What: a dead or exiting server is skipped.
         # Why: environ fails until the parent collects it.
         # From: Issue #1683 | PR #1912
         pst=0
