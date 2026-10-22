@@ -260,6 +260,17 @@ impl Config {
                 above,
             })
         };
+        // What: timer seconds, clamped to browser range.
+        // Why: setInterval delay is a 32-bit ms count.
+        let seconds = |name: &'static str| {
+            read(Uint {
+                name,
+                min: 1,
+                max: i32::MAX as u64 / 1000,
+                below: OutOfRange::Clamp,
+                above: OutOfRange::Clamp,
+            })
+        };
 
         // What: both proxy addresses come from compose.
         // Why: no LAN address is hardcoded (AG-SEC-007).
@@ -353,9 +364,18 @@ impl Config {
             ),
             repo_url: need("LANCACHE_REPO_URL")?,
             page_numbers: [
-                ("watchdog_refresh_ms", number("UI_WATCHDOG_REFRESH_MS")?),
-                ("dashboard_refresh_ms", number("UI_DASHBOARD_REFRESH_MS")?),
-                ("stats_refresh_ms", number("UI_STATS_REFRESH_MS")?),
+                (
+                    "watchdog_refresh_seconds",
+                    seconds("UI_WATCHDOG_REFRESH_SECONDS")?,
+                ),
+                (
+                    "dashboard_refresh_seconds",
+                    seconds("UI_DASHBOARD_REFRESH_SECONDS")?,
+                ),
+                (
+                    "stats_refresh_seconds",
+                    seconds("UI_STATS_REFRESH_SECONDS")?,
+                ),
                 ("stats_points", number("UI_STATS_POINTS")?),
                 (
                     "converge_minutes",
@@ -6427,9 +6447,9 @@ mod tests {
     // What: numeric keys with values unlike the SOT's.
     // Why: tests must not copy SOT values (AG-CODE-010).
     const NUMBER_KEYS: [(&str, &str); 24] = [
-        ("UI_WATCHDOG_REFRESH_MS", "11"),
-        ("UI_DASHBOARD_REFRESH_MS", "12"),
-        ("UI_STATS_REFRESH_MS", "13"),
+        ("UI_WATCHDOG_REFRESH_SECONDS", "11"),
+        ("UI_DASHBOARD_REFRESH_SECONDS", "12"),
+        ("UI_STATS_REFRESH_SECONDS", "13"),
         ("UI_STATS_POINTS", "14"),
         ("CONVERGE_TIMER_INTERVAL_MINUTES", "15"),
         ("RESTART_AFTER", "16"),

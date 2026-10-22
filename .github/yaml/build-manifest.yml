@@ -507,17 +507,17 @@ runtime:
     - UI_ROUTE_LAN_ADD=/domains/lan/add
     - UI_ROUTE_STATIC_ADD=/dhcp/static/add
     - UI_ROUTE_SECONDARY_REGISTER=/api/secondary/register
-    # What: ui page refresh timings, in milliseconds.
+    # What: ui page refresh timings, in seconds.
     # Why: templates read the value; no literal in markup.
     # From: Issue #1683 | PR #1912
-    - UI_WATCHDOG_REFRESH_MS=10000
-    - UI_DASHBOARD_REFRESH_MS=10000
-    - UI_STATS_REFRESH_MS=3000
-    # What: restart page poll gap and first wait, in ms.
+    - UI_WATCHDOG_REFRESH_SECONDS=10
+    - UI_DASHBOARD_REFRESH_SECONDS=10
+    - UI_STATS_REFRESH_SECONDS=3
+    # What: restart page poll gap and first wait, seconds.
     # Why: the page script reads them; no literal in markup.
     # From: Issue #1683 | PR #1912
-    - UI_RESTART_POLL_INTERVAL_MS=1000
-    - UI_RESTART_POLL_FIRST_DELAY_MS=1500
+    - UI_RESTART_POLL_INTERVAL_SECONDS=1
+    - UI_RESTART_POLL_FIRST_DELAY_SECONDS=2
     # What: samples the stats page charts keep per series.
     # Why: one value for the chart size and the query.
     # From: Issue #1683 | PR #1912
