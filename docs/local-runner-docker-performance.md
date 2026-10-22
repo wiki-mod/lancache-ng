@@ -199,20 +199,18 @@ from-source build until Issue #1781 replaced that `COPY` with this
 stage's own `apk add`/`apt-get install curl`), and this file never wires
 `CC=distcc`/`CC="ccache ..."` for either. The ccache/distcc-accelerated
 from-source build this correction refers to only ever existed in
-`services/utilities/Dockerfile`'s now-removed `curl-builder` stage. It is
-unclear from this PR's scope whether `build-tools.yml`'s and
-`build-push.yml`'s own `ccache_redis_url`/`distcc_potential_hosts` secret
-provisioning for the `build-tools` matrix entry, and the "for all four
-services" claim below, were ever accurate or are simply dead as a result
--- flagged separately, not resolved here. The distcc wrapper that
+`services/utilities/Dockerfile`'s now-removed `curl-builder` stage. In CI
+2.0, `ci.sh` (`_ci_set_runtime`) writes the build secrets: `ccache_redis_url`
+and `sccache_redis_url` from `SCCACHE_REDIS_URL` when the sccache chain
+includes `redis`, and `distcc_potential_hosts` only for Rust builds on a
+self-hosted runner. The distcc wrapper that
 `ci.sh` generates (`_ci_rust_distcc_wrapper`) understands both distcc calling
 conventions -- the original `$0`-basename masquerade dispatch, and
 ccache's `CCACHE_PREFIX` convention (invoked as `distcc
 <real-compiler-path> <args>`, real compiler is `$1`) -- disambiguated by
-checking `$0` first. `build-push.yml`'s real CI pipeline populates the
-`ccache_redis_url` secret and the preflight action's `ccache-redis-file`
-input for all four services (confirmed live, issue #1095, prior to this
-correction) -- see `AGENTS.md`'s `AG-CI-022` note for the wiring history.
+checking `$0` first. Without these secrets a build runs without ccache or
+distcc and logs `CI-INFO-RUSTBUILD-0031` or `CI-INFO-RUSTBUILD-0025` -- see
+`AGENTS.md`'s `AG-CI-022` note for the wiring history.
 
 Important rules:
 

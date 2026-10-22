@@ -1,9 +1,10 @@
 # CI GitHub-Hosted Fallback Decision
 
-This document records the current, re-verified decision on which
-`.github/workflows/build-push.yml` job classes can realistically run on
-GitHub-hosted runners as a fallback for self-hosted-runner unavailability,
-and why the remaining classes do not (yet). It exists to satisfy issue
+The CI 2.0 state is in the "Current state" section below. The rest of this
+document records the CI 1.x decision on which job classes of the removed
+`build-push.yml` could run on GitHub-hosted runners as a fallback for
+self-hosted-runner unavailability, and why the remaining classes could not.
+It exists to satisfy issue
 #509's second acceptance criterion -- "a documented decision for whether/how
 Rust build/test jobs and image build/push jobs get a fallback path, even if
 the answer is 'not feasible'" -- as a standalone, findable document rather

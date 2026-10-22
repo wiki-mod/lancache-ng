@@ -404,26 +404,27 @@ Setup and update changes must preserve these rules:
 ## Release and package changes
 
 Release and package changes must follow `docs/release-versioning.md` and the
-machine-readable inventory in `release/stack-images.yml`.
+SOT `.github/yaml/build-manifest.yml` (services, `build_toolchain`,
+`base_images`, `release`).
 
 Required rules:
 
 - first-party runtime images are promoted as one stack package set
 - `latest` means the latest stable release only
-- `nightly` is the tested pre-stable channel, built from `current_dev`'s tip once a day
-  (01:00 UTC) plus on-demand, gated on a full green build+scan (formerly `edge`; **corrected
-  2026-08-05, issue #1391 doc-sweep audit** — a prior version of this line said "built
-  continuously from `master`," which was wrong on both counts: `nightly` has been built from
-  `current_dev`, not `master`, since v0.3.0 [#825/#1141], and has been once-daily-plus-on-demand,
-  not continuous, since #1254/#1255 [2026-07-25] — see `docs/release-versioning.md`, the
+- `nightly` is the tested pre-stable channel from `current_dev`, moved once a
+  day and on demand by `.github/workflows/nightly.yml` after validation, never
+  rebuilt there (formerly `edge`; see `docs/release-versioning.md`, the
   authoritative source for this channel's semantics, for the full history)
 - release candidates use `vX.Y.Z-rc.N` and must be GitHub prereleases
 - stable releases use `vX.Y.Z` and may move `latest`
-- release-capable paths must not depend on mutable `build-tools:latest`
-- compose image references must keep `LANCACHE_IMAGE_REGISTRY`,
-  `LANCACHE_IMAGE_PREFIX`, and `LANCACHE_IMAGE_TAG` wired consistently
-- package, workflow, release-note, and setup changes must run
-  `bash scripts/untracked/validate-stack-images.sh`
+- every job after the first runs in the build-tools image the first job
+  resolved to a digest (`ci.sh build-tools resolve-image`); only that first job
+  and the jobs that must run when it failed name the mutable
+  `build-tools:nightly` channel
+- every first-party compose image is one `LANCACHE_IMAGE_REF_<NAME>` value,
+  which `setup.sh` writes as `<image>@<digest>`
+- package, workflow, release-note, and setup changes must pass
+  `bash .github/scripts/ci.sh check all`
 
 ## Admin UI changes
 

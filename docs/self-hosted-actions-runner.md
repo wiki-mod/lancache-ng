@@ -56,11 +56,21 @@ Buildx support, outbound network access, and CodeQL action setup.
 
 ## Job concurrency serialization
 
-`build-push.yml`'s `promote` job and `backfill-stack-latest.yml`'s `backfill-latest` job both move mutable GHCR channel tags (`latest`/`nightly`) for the same images and must never run their tag-moving critical section at the same time as each other. This used to be enforced with a shared GitHub Actions job-level `concurrency:` group (`"Build & Push-promote"`), but that primitive was removed per issue #897: GitHub's concurrency admission can silently cancel a run that is still *queued* (not yet running) the moment another run requests the same group, which is exactly the failure #892 hit once multiple `promote`-reaching runs were able to build in parallel.
+Two jobs move mutable GHCR channel tags: the `promote` job of `ci.yml`
+(`bash .github/scripts/ci.sh promote-ref`) and the `nightly` job of
+`nightly.yml` (`bash .github/scripts/ci.sh promote nightly`). No GitHub
+Actions `concurrency:` group serializes them: GitHub's concurrency admission
+can cancel a run that is still queued (issue #897).
 
-Real mutual exclusion now comes from `scripts/lib/promote-lock.sh`, a cross-host, cross-workflow lock backed by a dedicated non-branch/non-tag git ref (`refs/promote-lock/...`) on the shared GHCR-adjacent remote both workflows already push to — not a host-local `flock`, since the `lancache-heavy` runner label both jobs use is held by runners on multiple distinct physical hosts, so a `/tmp`-based lock would give each host its own, independently "uncontested" lock. Both jobs acquire/release this lock as explicit steps (see `promote`'s own step comments in `build-push.yml` and the "Acquire the cross-workflow promote lock" step in `backfill-stack-latest.yml`), giving the same any-promote-vs-any-backfill, any-ref exclusion the old concurrency group provided, without the queued-run-cancellation risk.
+`ci.sh` serializes them with one lock per channel: the git ref
+`CI_PROMOTE_LOCK_REF/<channel>` (SOT value `refs/ci/promote-lock`) on the
+repository remote, written by compare-and-swap. A git ref works across
+runner hosts; a host-local `flock` would not. The lock note names the
+holder run. A waiting run retries after `CI_LOCK_POLL_SECONDS`, at most
+`CI_PROMOTE_LOCK_MAX` times, and takes the lock over only when the holder run
+has ended.
 
-This lock applies only to the tag-moving critical section in these two jobs; it does not block routine CI runs or any other job.
+The lock covers only the channel move; it does not block other jobs.
 
 ## Acceleration contract
 
