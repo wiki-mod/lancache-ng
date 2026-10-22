@@ -132,6 +132,7 @@ jobs:
       rust-audit: ${{ steps.plan.outputs.rust-audit }}
       docs-only: ${{ steps.plan.outputs.docs-only }}
       identities: ${{ steps.plan.outputs.identities }}
+      reuse: ${{ steps.plan.outputs.reuse }}
     steps:
       - *bootstrap
       # What: collect changed-file list via ci.sh
@@ -146,6 +147,7 @@ jobs:
         env:
           CHANGED_FILES: ${{ steps.changed.outputs.file }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: &pr_number ${{ github.event.pull_request.number }}
         run: bash .github/scripts/ci.sh plan-matrix
 
   # What: build, publish, verify one target per platform
@@ -266,7 +268,7 @@ jobs:
   lint:
     name: lint
     needs: [platform, plan]
-    if: needs.plan.outputs.docs-only != 'true'
+    if: needs.plan.outputs.docs-only != 'true' && needs.plan.outputs.reuse != 'true'
     runs-on: ${{ needs.platform.outputs.runner }}
     timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['lint'] }}
     container: *bt_platform
@@ -478,14 +480,14 @@ jobs:
     # Why: least privilege: the PAT reaches two steps only
     # From: Issue #1683 | PR #1858
     env:
-      PR_NUMBER: ${{ github.event.pull_request.number }}
+      PR_NUMBER: *pr_number
       PR_TITLE: ${{ github.event.pull_request.title }}
       PR_AUTHOR: ${{ github.event.pull_request.user.login }}
       PR_BODY: ${{ github.event.pull_request.body }}
       PR_LABELS_JSON: ${{ toJSON(github.event.pull_request.labels.*.name) }}
       PR_MILESTONE_TITLE: ${{ github.event.pull_request.milestone.title }}
       PR_DRAFT: ${{ github.event.pull_request.draft }}
-      PR_IS_FORK: ${{ github.event.pull_request.head.repo.fork }}
+      PR_IS_FORK: &pr_is_fork ${{ github.event.pull_request.head.repo.fork }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - *bootstrap
@@ -525,6 +527,12 @@ jobs:
     container:
       image: ${{ needs.platform.outputs.image || format('ghcr.io/{0}/build-tools:nightly', github.repository) }}
       credentials: *ghcr_credentials
+    # What: contents write for the green run mark ref.
+    # Why: the mark is a ci.sh git ref; images read only.
+    # From: Issue #1683 | PR #1858
+    permissions:
+      contents: write
+      packages: read
     steps:
       - *bootstrap
       # What: pass the native needs context to the gate
@@ -534,3 +542,13 @@ jobs:
         env:
           CI_NEEDS: ${{ toJSON(needs) }}
         run: bash .github/scripts/ci.sh result-gate
+      # What: record a green PR run for the next PR run.
+      # Why: runs only after the gate step succeeded.
+      # From: Issue #1683 | PR #1858
+      - name: Mark the green PR run
+        env:
+          PR_NUMBER: *pr_number
+          PR_IS_FORK: *pr_is_fork
+          CI_PLAN_ANY_BUILD: ${{ needs.plan.outputs.any-build }}
+          CI_RUN_IDENTITIES: *run_ids
+        run: bash .github/scripts/ci.sh pr-green-mark

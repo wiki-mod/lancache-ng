@@ -75,7 +75,7 @@ declare -A CI_DISPATCH=(
     [release-publish]=ci_cmd_release_publish [release-images]=ci_cmd_release_images [release-sbom-stack]=ci_cmd_release_sbom_stack [release-vex]=ci_cmd_release_vex [cut-release-tag]=ci_cmd_cut_release_tag [release-notes]=ci_cmd_release_notes [release-changelog]=ci_cmd_release_changelog
     [gc]=ci_cmd_gc [check]=ci_cmd_check [close-linked-issues]=ci_cmd_close_linked_issues [pr-labels]=ci_cmd_pr_labels [board-add]=ci_cmd_board_add
     [welcome]=ci_cmd_welcome [version]=ci_cmd_version [docker-daemon-config]=ci_cmd_docker_daemon_config [runner-host]=ci_cmd_runner_host
-    [have-command]=ci_cmd_have_command
+    [have-command]=ci_cmd_have_command [pr-green-mark]=ci_cmd_pr_green_mark
 )
 
 # What: check name -> "scope function" for ci.sh check.
@@ -1166,25 +1166,107 @@ _ci_sot_named_paths() {
     _ci_block_entry_list release "" governance_paths || return 2
 }
 
+# What: path $1: rc 0 doc, 1 no doc, 3 SOT-named doc.
+# Why: docs dir $2, SOT paths $3; one doc rule (§63).
+# From: Issue #1683 | PR #1858
+_ci_doc_path() {
+    case "$1" in
+        *.md|"$2"/*) ;;
+        *) return 1 ;;
+    esac
+    ! _ci_list_has "$1" "$3" || return 3
+}
+
 # What: rc 0 if every path is a doc no SOT key names.
 # Why: docs are NOOP (§63) unless an input (§12.4).
 # From: Issue #1683 | PR #1858
 _ci_docs_only() {
     [ "$#" -gt 0 ] || return 1
-    local f named docs
+    local f named docs rc
     named="$(_ci_sot_named_paths)" || return 2
     docs="$(_ci_variable CI_DOCS_DIR)" || return 2
     for f in "$@"; do
-        case "${f}" in
-            *.md|"${docs}"/*) ;;
-            *) return 1 ;;
-        esac
-        if _ci_list_has "${f}" "${named}"; then
+        rc=0; _ci_doc_path "${f}" "${docs}" "${named}" || rc=$?
+        [ "${rc}" -ne 1 ] || return 1
+        if [ "${rc}" -eq 3 ]; then
             ci_log "[CI-INFO-PLAN-0007]" "path=\"${f}\" reason=\"doc is a SOT-named input; not docs-only\""
             return 1
         fi
     done
     return 0
+}
+
+# What: sha256 of the non-doc tree and every pair digest.
+# Why: one value names the checked tree and images.
+# From: Issue #1683 | PR #1858
+_ci_pr_fingerprint() {
+    local tree line named docs rc _ci_fp_rows="" _ci_fp_absent=""
+    named="$(_ci_sot_named_paths)" || return 2
+    docs="$(_ci_variable CI_DOCS_DIR)" || return 2
+    tree="$(_ci_capture 0 git -C "${CI_REPO_ROOT}" ls-tree -r HEAD)" || return 2
+    while IFS= read -r line; do
+        [ -n "${line}" ] || continue
+        rc=0; _ci_doc_path "${line#*$'\t'}" "${docs}" "${named}" || rc=$?
+        [ "${rc}" -eq 0 ] || _ci_fp_rows+="${line}"$'\n'
+    done <<< "${tree}"
+    _ci_for_all_pairs _ci_pr_fingerprint_pair || return "$?"
+    # What: a pair without an image gives no value.
+    # Why: only a published digest was checked (§2.3).
+    # From: Issue #1683 | PR #1858
+    if [ -n "${_ci_fp_absent}" ]; then
+        ci_log "[CI-INFO-PLAN-0011]" "absent=\"${_ci_fp_absent% }\" reason=\"pair has no image; no fingerprint\""
+        return 1
+    fi
+    printf '%s' "${_ci_fp_rows}" | _ci_sha256_hex
+}
+
+# What: add "pair svc plat id digest" to the fingerprint.
+# Why: a new digest of any pair needs the full run.
+# From: Issue #1683 | PR #1858
+_ci_pr_fingerprint_pair() {
+    local id digest rc=0
+    id="$(_ci_identity_for "$1" "$2")" || return 2
+    digest="$(_ci_published_digest "$1" "$2" ok)" || rc=$?
+    case "${rc}" in
+        0) _ci_fp_rows+="pair $1 $2 ${id} ${digest}"$'\n' ;;
+        1) _ci_fp_absent+="$1/$2 " ;;
+        *) return 2 ;;
+    esac
+}
+
+# What: ref of the last green run mark of one PR.
+# Why: one ref per PR keeps one value per PR.
+# From: Issue #1683 | PR #1858
+_ci_green_ref() {
+    local prefix n
+    n="$(_ci_env_required PR_NUMBER)" || return 2
+    if [[ ! "${n}" =~ ^[1-9][0-9]*$ ]]; then
+        ci_log "[CI-ERROR-PLAN-0012]" "pr=\"${n}\" reason=\"PR_NUMBER is no PR number\""
+        return 2
+    fi
+    prefix="$(_ci_variable CI_GREEN_REF)" || return 2
+    printf '%s/pr-%s' "${prefix}" "${n}"
+}
+
+# What: subject of a green run mark for fingerprint $1.
+# Why: plan and result-mark compare one text.
+# From: Issue #1683 | PR #1858
+_ci_green_note() {
+    printf 'green %s' "$1"
+}
+
+# What: rc 0 if the last green run had this fingerprint.
+# Why: §2.1: an equal tree and digests give no new work.
+# From: Issue #1683 | PR #1858
+_ci_pr_green_reuse() {
+    local fp ref rc=0
+    [ "${GITHUB_EVENT_NAME:-}" = pull_request ] || return 1
+    fp="$(_ci_pr_fingerprint)" || rc=$?
+    [ "${rc}" -eq 0 ] || return "${rc}"
+    ref="$(_ci_green_ref)" || return 2
+    rc=0; _ci_mark_has "${ref}" "$(_ci_green_note "${fp}")" || rc=$?
+    [ "${rc}" -eq 0 ] || return "${rc}"
+    ci_log "[CI-INFO-PLAN-0013]" "ref=\"${ref}\" fingerprint=\"${fp}\" reason=\"last green run checked this tree and these digests; build, scan, test and validate NOT-RUN\""
 }
 
 # What: Emit a resolve-filtered matrix to GITHUB_OUTPUT.
@@ -1290,6 +1372,18 @@ ci_cmd_plan_matrix() {
     if [ "${any}" = true ] || [ -n "${ptargets}" ]; then
         _ci_for_all_pairs _ci_plan_record || return "$?"
     fi
+    # What: a PR run reuses its last green run.
+    # Why: §2.1 §29 §30: equal tree and digests, no work.
+    # From: Issue #1683 | PR #1858
+    local reuse=false
+    if [ "${any}" = true ] && [ -z "${ptargets}" ]; then
+        rc=0; _ci_pr_green_reuse || rc=$?
+        case "${rc}" in
+            0) reuse=true any=false include='[]' test_services='' rust_audit=false ;;
+            1) ;;
+            *) return "${rc}" ;;
+        esac
+    fi
     # What: promote a ref target not yet on the candidate
     # Why: §50 needs no build; §8: no retag when current
     # From: Issue #1683 | PR #1858
@@ -1322,6 +1416,7 @@ ci_cmd_plan_matrix() {
         printf 'rust-validation=%s\n' "${rust_validation}"
         printf 'rust-audit=%s\n' "${rust_audit}"
         printf 'docs-only=%s\n' "${docs_only}"
+        printf 'reuse=%s\n' "${reuse}"
     } >> "${out}"
     _ci_record_emit || return 2
     if [ -n "${unknown}" ]; then
@@ -2714,39 +2809,88 @@ _ci_verified_note() {
     printf 'verified %s %s %s' "$1" "$2" "$3"
 }
 
+# What: rc 0 if ref $1 holds subject $2, 1 if not.
+# Why: one reader for every mark that holds one value.
+# From: Issue #1683 | PR #1858
+_ci_mark_has() {
+    local remote subject
+    remote="$(_ci_git_remote)" || return 2
+    subject="$(_ci_ref_note "${remote}" "$1")" || return $?
+    [ "${subject}" = "$2" ] || return 1
+}
+
+# What: set ref $1 to subject $2 (message $3) once.
+# Why: one CAS writer for marks; $4 $5 name a failure.
+# From: Issue #1683 | PR #1858
+_ci_mark_write() {
+    local ref="$1" want="$2" remote sha cur rc=0 raw
+    remote="$(_ci_git_remote)" || return 2
+    _ci_mark_has "${ref}" "${want}" || rc=$?
+    [ "${rc}" -ne 0 ] || return 0
+    [ "${rc}" -eq 1 ] || return 2
+    sha="$(_ci_cas_note_commit "$3")" || return 2
+    rc=0; cur="$(_ci_cas_ref_sha "${remote}" "${ref}")" || rc=$?
+    [ "${rc}" -le 1 ] || return 2
+    rc=0; raw="$(_ci_cas_push "${remote}" "${ref}" "${sha}" "${cur}")" || rc=$?
+    [ "${rc}" -ne 0 ] || return 0
+    # What: a lost push race with an equal mark is success.
+    # Why: both runs wrote the same value.
+    # From: Issue #1683 | PR #1912
+    rc=0; _ci_mark_has "${ref}" "${want}" || rc=$?
+    [ "${rc}" -ne 0 ] || return 0
+    ci_error "$4" "ref=\"${ref}\" $5" "${raw}"
+    return 2
+}
+
 # What: rc 0 if a build verified this digest, 1 if not.
 # Why: a pushed image is not an accepted image (B20).
 # From: Issue #1683 | PR #1912
 _ci_verified_has() {
-    local remote ref subject
-    remote="$(_ci_git_remote)" || return 2
+    local ref
     ref="$(_ci_verified_ref "$1" "$2")" || return 2
-    subject="$(_ci_ref_note "${remote}" "${ref}")" || return $?
-    [ "${subject}" = "$(_ci_verified_note "$1" "$2" "$3")" ] || return 1
+    _ci_mark_has "${ref}" "$(_ci_verified_note "$1" "$2" "$3")"
 }
 
 # What: mark a digest verified after its smoke test.
 # Why: ship pushes before it verifies; only this accepts.
 # From: Issue #1683 | PR #1912
 _ci_verified_mark() {
-    local remote ref sha cur rc=0 raw
-    remote="$(_ci_git_remote)" || return 2
+    local ref note
     ref="$(_ci_verified_ref "$1" "$2")" || return 2
-    _ci_verified_has "$1" "$2" "$3" || rc=$?
-    [ "${rc}" -ne 0 ] || return 0
-    [ "${rc}" -eq 1 ] || return 2
-    sha="$(_ci_cas_note_commit "$(_ci_verified_note "$1" "$2" "$3")")" || return 2
-    rc=0; cur="$(_ci_cas_ref_sha "${remote}" "${ref}")" || rc=$?
-    [ "${rc}" -le 1 ] || return 2
-    rc=0; raw="$(_ci_cas_push "${remote}" "${ref}" "${sha}" "${cur}")" || rc=$?
-    [ "${rc}" -ne 0 ] || return 0
-    # What: a lost push race with an equal mark is success.
-    # Why: both runs verified the same digest.
-    # From: Issue #1683 | PR #1912
-    rc=0; _ci_verified_has "$1" "$2" "$3" || rc=$?
-    [ "${rc}" -ne 0 ] || return 0
-    ci_error "[CI-ERROR-SHIP-0007]" "service=\"$1\" platform=\"$2\" digest=\"$3\" reason=\"verified mark not written\"" "${raw}"
-    return 2
+    note="$(_ci_verified_note "$1" "$2" "$3")"
+    _ci_mark_write "${ref}" "${note}" "${note}" "[CI-ERROR-SHIP-0007]" \
+        "service=\"$1\" platform=\"$2\" digest=\"$3\" reason=\"verified mark not written\""
+}
+
+# What: mark this run's fingerprint green for its PR.
+# Why: a later run of the same PR reuses it (§2.1).
+# From: Issue #1683 | PR #1858
+ci_cmd_pr_green_mark() {
+    local fp ref note rc=0
+    if [ "${GITHUB_EVENT_NAME:-}" != pull_request ]; then
+        printf 'pr-green-mark=NOT-RUN reason="not a pull request"\n'
+        return 0
+    fi
+    if [ "${PR_IS_FORK:-false}" = true ]; then
+        printf 'pr-green-mark=NOT-RUN reason="fork PR: the token cannot write refs"\n'
+        return 0
+    fi
+    if [ "${CI_PLAN_ANY_BUILD:-}" != true ]; then
+        printf 'pr-green-mark=NOT-RUN reason="plan had no build or verify pair; nothing to carry over" any-build="%s"\n' "${CI_PLAN_ANY_BUILD:-}"
+        return 0
+    fi
+    _ci_require_ghcr_auth || return "$?"
+    fp="$(_ci_pr_fingerprint)" || rc=$?
+    if [ "${rc}" -eq 1 ]; then
+        printf 'pr-green-mark=NOT-RUN reason="a pair has no image; nothing recorded"\n'
+        return 0
+    fi
+    [ "${rc}" -eq 0 ] || return 2
+    ref="$(_ci_green_ref)" || return 2
+    note="$(_ci_green_note "${fp}")"
+    _ci_mark_write "${ref}" "${note}" "${note}"$'\n\n'"$(_ci_lock_note run)" "[CI-ERROR-PLAN-0014]" \
+        "fingerprint=\"${fp}\" reason=\"green run mark not written\"" || return 2
+    printf 'pr-green-mark=written ref=%s fingerprint=%s\n' "${ref}" "${fp}"
 }
 
 # What: verify one digest and mark it on success.
