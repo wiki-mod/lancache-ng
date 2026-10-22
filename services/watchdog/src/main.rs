@@ -24,9 +24,10 @@ use lancache_ng::{
     ALARM_INGEST_PATH, ALARM_TOKEN_HEADER, Backoff, COMPOSE_PROJECT_LABEL, COMPOSE_SERVICE_LABEL,
     CaFiles, CertSpec, ClientCheck, ConflictCheck, DesiredRunState, DesiredState, Detail,
     DiskHealth, DiskInfo, DockerApi, NetdataAlarm, Place, ProbeAnswer, ProbeReport, ServiceHealth,
-    WatchdogStatus, df, files_under, hex32, is_placeholder, need_secs, openssl_ca, openssl_leaf,
-    openssl_x509, own, probe_health, probe_health_tls, resolve_shared_secret, run_program,
-    sha256_hex, shared_secret_file_name, terminate, unix_secs, write_file, write_if_changed,
+    WatchdogStatus, df, files_under, hex32, is_placeholder, metadata_if_present, need_secs,
+    openssl_ca, openssl_leaf, openssl_x509, own, probe_health, probe_health_tls,
+    resolve_shared_secret, run_program, sha256_hex, shared_secret_file_name, terminate, unix_nanos,
+    unix_secs, write_file, write_if_changed,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -34,16 +35,19 @@ use time::OffsetDateTime;
 
 // What: central-control settings, read once at start.
 // Why: a deployment change recreates this container.
+// From: Issue #1683 | PR #1912
 struct Settings {
     docker_host: String,
     check_interval: Duration,
     restart_after: u32,
     // What: None means no timeout; 0 in the env.
     // Why: ZERO would mean "instant" to the HTTP client.
+    // From: Issue #1683 | PR #1912
     api_timeout: Option<Duration>,
     restart_timeout: Option<Duration>,
     // What: seconds Docker waits for TERM before KILL.
     // Why: stays inside the restart call's own API budget.
+    // From: Issue #1683 | PR #1912
     restart_grace: u32,
     disk_warn_pct: u32,
     disk_alarm_pct: u32,
@@ -51,15 +55,18 @@ struct Settings {
     cache_dir: PathBuf,
     // What: log root and syslog-ng control socket.
     // Why: the log-loss check compares both.
+    // From: Issue #1683 | PR #1912
     syslog_root: PathBuf,
     syslog_ctl: PathBuf,
     // What: this container's id, Docker's default hostname.
     // Why: its compose project label names the stack.
+    // From: Issue #1683 | PR #1912
     own_id: String,
 }
 
 // What: seconds as a timeout; 0 means no timeout (None).
 // Why: fractions stay valid; 0 must not time out at once.
+// From: Issue #1683 | PR #1912
 fn api_timeout(raw: Option<&str>, name: &str) -> Result<Option<Duration>, String> {
     let raw = raw.ok_or_else(|| format!("FATAL: {}.", config::not_set(name)))?;
     let invalid = |why: &str| format!("FATAL: invalid {name}={raw}{why}.");
@@ -74,6 +81,7 @@ fn api_timeout(raw: Option<&str>, name: &str) -> Result<Option<Duration>, String
 
 // What: one Uint knob from the env; a clamp warns.
 // Why: watch and retention read knobs by one rule.
+// From: Issue #1683 | PR #1858
 fn read_knob(
     get: &dyn Fn(&str) -> Option<String>,
     spec: Uint,
@@ -133,6 +141,7 @@ fn load_settings(env: impl Fn(&str) -> Option<String>) -> Result<(Settings, Vec<
 
 // What: typed Docker health plus watchdog's own outcomes.
 // Why: restarts use Healthy/Unhealthy; alerts is_alert_ok.
+// From: Issue #1683 | PR #1858
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Reading {
     Healthy,
@@ -140,15 +149,19 @@ enum Reading {
     Starting,
     // What: Docker reports no health status at all.
     // Why: a valid answer, unlike an unreachable proxy.
+    // From: Issue #1683 | PR #1858
     None,
     // What: no reading at all (network, timeout, non-2xx).
     // Why: not a Docker-reported state.
+    // From: Issue #1683 | PR #1858
     Unreachable,
     // What: an unknown Docker health string, verbatim.
     // Why: never coerce it into a known variant.
+    // From: Issue #1683 | PR #1858
     Other(String),
     // What: healthy, but the check printed DEGRADED: text.
     // Why: reduced guarantees must stay visible (ntp).
+    // From: Issue #1683 | PR #1858
     Degraded,
 }
 
@@ -163,6 +176,7 @@ impl Reading {
             .unwrap_or("none");
         // What: only the newest check-log entry counts.
         // Why: an old DEGRADED line must expire with it.
+        // From: Issue #1683 | PR #1858
         let degraded = body
             .pointer("/State/Health/Log")
             .and_then(|log| log.as_array())
@@ -197,6 +211,7 @@ impl Reading {
 
     // What: true if an alert-only service is not failing.
     // Why: Degraded is known; Other is treated as a fault.
+    // From: Issue #1683 | PR #1858
     fn is_alert_ok(&self) -> bool {
         matches!(
             self,
@@ -207,24 +222,28 @@ impl Reading {
 
 // What: what the loop logs or does after one reading.
 // Why: None covers steady health and all inert readings.
+// From: Issue #1683 | PR #1858
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Event {
     None,
     Failing(u32),
     // What: restart, then the counter resets to 0.
     // Why: reset even if the restart call itself fails.
+    // From: Issue #1683 | PR #1858
     Restart,
     Recovered,
 }
 
 // What: consecutive failures of one monitored service.
 // Why: a restart fires only after RESTART_AFTER misses.
+// From: Issue #1683 | PR #1858
 #[derive(Debug, Default)]
 struct Counter(u32);
 
 impl Counter {
     // What: reset to zero; Recovered if a streak ran.
     // Why: RECOVERED is logged once per outage, not cycle.
+    // From: Issue #1683 | PR #1858
     fn clear(&mut self) -> Event {
         if std::mem::take(&mut self.0) > 0 {
             Event::Recovered
@@ -235,6 +254,7 @@ impl Counter {
 
     // What: count one reading of a restart-capable service.
     // Why: inert readings keep the counter; no restart.
+    // From: Issue #1683 | PR #1858
     fn observe(&mut self, reading: &Reading, restart_after: u32) -> Event {
         match reading {
             Reading::Unhealthy => {
@@ -253,6 +273,7 @@ impl Counter {
 
     // What: count one reading of an alert-only service.
     // Why: watchdog must not restart these; only reports.
+    // From: Issue #1683 | PR #1858
     fn observe_alert(&mut self, ok: bool) -> Event {
         if ok {
             return self.clear();
@@ -264,6 +285,7 @@ impl Counter {
 
 // What: UTC time as YYYY-MM-DDTHH:MM:SSZ, no fractions.
 // Why: status.json's `updated` format is a fixed contract.
+// From: Issue #1683 | PR #1858
 fn stamp(at: OffsetDateTime) -> String {
     const FORMAT: &[time::format_description::FormatItem] =
         time::macros::format_description!("[year]-[month]-[day]T[hour]:[minute]:[second]Z");
@@ -280,6 +302,7 @@ tokio::task_local! {
 
 // What: the "[tag] HH:MM:SS" line prefix.
 // Why: operators grep the logs for this exact shape.
+// From: Issue #1683 | PR #1912
 fn prefix() -> String {
     let tag = TAG.try_with(|t| *t).unwrap_or("watchdog");
     format!("[{tag}] {}", &stamp(OffsetDateTime::now_utc())[11..19])
@@ -299,18 +322,21 @@ fn emit(msg: &str, to_stderr: bool) {
 
 // What: write one info line.
 // Why: callers need no stream choice for normal output.
+// From: Issue #1683 | PR #1858
 fn log(msg: &str) {
     emit(msg, false);
 }
 
 // What: write one error line to stderr.
 // Why: errors stay visible apart from normal output.
+// From: Issue #1683 | PR #1858
 fn log_err(msg: &str) {
     emit(msg, true);
 }
 
 // What: the color of a disk use percent.
 // Why: alarm outranks warn; below both is green.
+// From: Issue #1683 | PR #1858
 fn disk_status(pct: u32, warn_pct: u32, alarm_pct: u32) -> &'static str {
     if pct >= alarm_pct {
         "red"
@@ -321,27 +347,57 @@ fn disk_status(pct: u32, warn_pct: u32, alarm_pct: u32) -> &'static str {
     }
 }
 
+// What: true for an existing dir; a stat fault is logged.
+// Why: "does not exist" must not hide a permission fault.
+// From: Issue #1683 | PR #1912
+fn dir_present(dir: &Path) -> bool {
+    match metadata_if_present(dir) {
+        Ok(meta) => meta.is_some_and(|meta| meta.is_dir()),
+        Err(e) => {
+            log_err(&format!("ERROR: {e}"));
+            false
+        }
+    }
+}
+
+// What: true for an existing file; a stat fault is Err.
+// Why: a key or CA must not be made again on a fault.
+// From: Issue #1683 | PR #1912
+fn file_present(path: &Path) -> Result<bool, String> {
+    Ok(metadata_if_present(path)
+        .map_err(|e| e.to_string())?
+        .is_some_and(|meta| meta.is_file()))
+}
+
 // What: cache disk use as a traffic-light status.
 // Why: a missing directory or failed df is unknown.
+// From: Issue #1683 | PR #1912
 fn disk_info(dir: &Path, warn_pct: u32, alarm_pct: u32) -> DiskHealth {
     let unknown = DiskHealth {
         pct: 0,
         status: "unknown".to_string(),
     };
-    if !dir.is_dir() {
+    if !dir_present(dir) {
         return unknown;
     }
+    // What: a failed df is unknown, logged with its cause.
+    // Why: "unknown" alone does not say what went wrong.
+    // From: Issue #1683 | PR #1912
     match df(dir) {
-        Some(d) => DiskHealth {
+        Ok(d) => DiskHealth {
             pct: d.used_pct,
             status: disk_status(d.used_pct, warn_pct, alarm_pct).to_string(),
         },
-        None => unknown,
+        Err(e) => {
+            log_err(&format!("WARNING: cache disk use unknown: {e}"));
+            unknown
+        }
     }
 }
 
 // What: seconds of one day, the stamp rate limit.
 // Why: purge and syslog prune run at most once a day.
+// From: Issue #1683 | PR #1858
 const DAY: u64 = time::Duration::DAY.whole_seconds() as u64;
 
 // What: retention settings, read once from the env.
@@ -407,6 +463,7 @@ fn load_retention(
 
 // What: absolute path, symlinks and dots resolved.
 // Why: like realpath -m; a target may not exist yet.
+// From: Issue #1683 | PR #1858
 fn canonical(path: &Path) -> io::Result<PathBuf> {
     let mut out = PathBuf::from(Component::RootDir.as_os_str());
     for part in path.components() {
@@ -421,6 +478,7 @@ fn canonical(path: &Path) -> io::Result<PathBuf> {
                     Ok(real) => real,
                     // What: a dangling link fails
                     // Why: its prefix is unknown
+                    // From: Issue #1683 | PR #1858
                     Err(e) if e.kind() == io::ErrorKind::NotFound => {
                         if fs::symlink_metadata(&next).is_ok() {
                             return Err(io::Error::other("dangling symbolic link"));
@@ -468,23 +526,39 @@ fn retention_target(name: &str, raw: &str, prefix: &Path) -> Result<PathBuf, Str
     Ok(resolved)
 }
 
-// What: a file's mtime in epoch seconds, else now.
+// What: a file's mtime since the epoch, or why not.
+// Why: one owner for both mtime readers in this file.
+// From: Issue #1683 | PR #1912
+fn file_time(meta: &fs::Metadata) -> Result<Duration, String> {
+    let modified = meta.modified().map_err(|e| e.to_string())?;
+    modified
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_err(|e| e.to_string())
+}
+
+// What: a file's mtime in epoch seconds, else now, logged.
 // Why: an unreadable mtime must never look old.
+// From: Issue #1683 | PR #1912
 fn mtime_secs(meta: &fs::Metadata, now: u64) -> u64 {
-    meta.modified()
-        .ok()
-        .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
-        .map_or(now, |d| d.as_secs())
+    match file_time(meta) {
+        Ok(d) => d.as_secs(),
+        Err(e) => {
+            log_err(&format!("WARNING: file time unreadable, taken as now: {e}"));
+            now
+        }
+    }
 }
 
 // What: whole days since the file's last change.
 // Why: find -mtime +N counts days the same way.
+// From: Issue #1683 | PR #1858
 fn age_days(meta: &fs::Metadata, now: u64) -> u64 {
     now.saturating_sub(mtime_secs(meta, now)) / DAY
 }
 
 // What: remove a path only while it is a regular file.
 // Why: a path replaced since the scan stays untouched.
+// From: Issue #1683 | PR #1858
 fn remove_file_if_regular(path: &Path) -> bool {
     match fs::symlink_metadata(path) {
         Ok(meta) if meta.is_file() => match fs::remove_file(path) {
@@ -494,12 +568,21 @@ fn remove_file_if_regular(path: &Path) -> bool {
                 false
             }
         },
-        _ => false,
+        Ok(_) => false,
+        // What: a path gone since the scan is skipped.
+        // Why: any other stat error is logged, not hidden.
+        // From: Issue #1683 | PR #1912
+        Err(e) if e.kind() == io::ErrorKind::NotFound => false,
+        Err(e) => {
+            log_err(&format!("ERROR: cannot stat {}: {e}", path.display()));
+            false
+        }
     }
 }
 
 // What: last run from a stamp; junk or future reads 0.
 // Why: a broken stamp must not block the daily run.
+// From: Issue #1683 | PR #1858
 fn read_stamp(path: &Path, now: u64) -> u64 {
     let raw = match fs::read_to_string(path) {
         Ok(raw) => raw,
@@ -532,6 +615,7 @@ fn read_stamp(path: &Path, now: u64) -> u64 {
 
 // What: write a stamp; a failed write is logged.
 // Why: the next cycle then retries instead of skipping.
+// From: Issue #1683 | PR #1858
 fn write_stamp(path: &Path, value: u64) {
     let written = path
         .parent()
@@ -553,7 +637,7 @@ fn purge_cache(r: &Retention, now: u64) {
         Ok(dir) => dir,
         Err(e) => return log_err(&e),
     };
-    if !dir.is_dir() {
+    if !dir_present(&dir) {
         return log(&format!(
             "CACHE_DIR={} does not exist; skipping purge",
             dir.display()
@@ -579,6 +663,7 @@ fn purge_cache(r: &Retention, now: u64) {
 
 // What: whether a file changed since UTC midnight.
 // Why: syslog-ng still writes today's per-program files.
+// From: Issue #1683 | PR #1858
 fn written_today(meta: &fs::Metadata, now: u64) -> bool {
     mtime_secs(meta, now) >= now - now % DAY
 }
@@ -594,7 +679,7 @@ fn prune_syslog(r: &Retention, now: u64) {
         Ok(root) => root,
         Err(e) => return log_err(&e),
     };
-    if !root.is_dir() {
+    if !dir_present(&root) {
         return log(&format!(
             "SYSLOG_LOG_ROOT={} does not exist yet; skipping syslog prune",
             root.display()
@@ -638,7 +723,10 @@ fn prune_syslog(r: &Retention, now: u64) {
     log(&format!(
         "Syslog size budget exceeded: {size} > {budget} bytes; pruning oldest first"
     ));
-    files.sort_by_key(|(_, meta)| meta.modified().ok());
+    // What: oldest first by mtime_secs; unreadable is now.
+    // Why: an unreadable mtime must not be deleted first.
+    // From: Issue #1683 | PR #1912
+    files.sort_by_key(|(_, meta)| mtime_secs(meta, now));
     let mut sized = 0;
     for (path, meta) in &files {
         if size <= budget {
@@ -724,7 +812,7 @@ fn compress_syslog(r: &Retention, now: u64) {
         Ok(root) => root,
         Err(e) => return log_err(&e),
     };
-    if !root.is_dir() {
+    if !dir_present(&root) {
         return;
     }
     let files = match files_under(&root) {
@@ -788,7 +876,7 @@ async fn own_project(docker: &DockerApi, s: &Settings) -> Result<(String, String
     let body = docker
         .inspect(&s.own_id, s.api_timeout)
         .await
-        .ok_or_else(|| format!("cannot inspect own container {}", s.own_id))?;
+        .map_err(|e| format!("cannot inspect own container {}: {e}", s.own_id))?;
     let label = format!("/Config/Labels/{COMPOSE_PROJECT_LABEL}");
     let project = body.pointer(&label).and_then(Value::as_str);
     let name = body.pointer("/Name").and_then(Value::as_str);
@@ -800,12 +888,14 @@ async fn own_project(docker: &DockerApi, s: &Settings) -> Result<(String, String
 
 // What: a container name without Docker's leading slash.
 // Why: list and inspect answers both carry the slash.
+// From: Issue #1683 | PR #1912
 fn container_name(raw: &str) -> String {
     raw.trim_start_matches('/').to_string()
 }
 
 // What: name and compose service of one list entry.
 // Why: status.json is keyed by service, calls by name.
+// From: Issue #1683 | PR #1912
 fn listed(entry: &Value) -> Option<(String, String)> {
     let name = entry.pointer("/Names/0")?.as_str()?;
     let service = entry.get("Labels")?.get(COMPOSE_SERVICE_LABEL)?.as_str()?;
@@ -846,17 +936,25 @@ async fn watch() -> Result<(), String> {
         last_sample = sample.or(last_sample);
         let mut services: HashMap<String, ServiceHealth> = HashMap::new();
         services.insert(LOG_ROW.to_string(), log_health);
-        let listing = docker.project_containers(&project, s.api_timeout).await;
-        let Some(listing) = listing else {
-            log_err("WARNING: cannot list the stack containers");
-            write_status(&s, services)?;
-            tokio::time::sleep(s.check_interval).await;
-            continue;
+        let listing = match docker.project_containers(&project, s.api_timeout).await {
+            Ok(listing) => listing,
+            Err(e) => {
+                log_err(&format!("WARNING: cannot list the stack containers: {e}"));
+                write_status(&s, services)?;
+                tokio::time::sleep(s.check_interval).await;
+                continue;
+            }
         };
         for (name, service) in listing.iter().filter_map(listed) {
+            // What: failed inspect is unreachable.
+            // Why: counter acts; the cause is logged.
+            // From: Issue #1683 | PR #1912
             let reading = match docker.inspect(&name, s.api_timeout).await {
-                Some(body) => Reading::from_inspect(&body),
-                None => Reading::Unreachable,
+                Ok(body) => Reading::from_inspect(&body),
+                Err(e) => {
+                    log_err(&format!("WARNING: cannot inspect {name}: {e}"));
+                    Reading::Unreachable
+                }
             };
             // What: own container only alerts.
             // Why: a self-restart ends this restart call.
@@ -901,6 +999,7 @@ async fn watch() -> Result<(), String> {
 
 // What: write status.json for the ui, atomically.
 // Why: a failed write ends the task; health turns red.
+// From: Issue #1683 | PR #1912
 fn write_status(s: &Settings, services: HashMap<String, ServiceHealth>) -> Result<(), String> {
     let status = WatchdogStatus {
         updated: stamp(OffsetDateTime::now_utc()),
@@ -923,21 +1022,26 @@ fn write_status(s: &Settings, services: HashMap<String, ServiceHealth>) -> Resul
 struct Timing {
     // What: how often the supervisor converges.
     // Why: every program is re-checked once per tick.
+    // From: Issue #1683 | PR #1912
     tick: Duration,
     // What: restart pauses, RETRY_BACKOFF_START up to _MAX.
     // Why: a crash loop must slow down, not spin.
+    // From: Issue #1683 | PR #1912
     backoff: Backoff,
     // What: a run this long resets the restart backoff.
     // Why: one late crash must not keep the long pause.
+    // From: Issue #1683 | PR #1912
     backoff_reset: Duration,
     // What: wait for a stopped program before SIGKILL.
     // Why: TERM needs time to flush state before the kill.
+    // From: Issue #1683 | PR #1912
     stop_grace: Duration,
 }
 
 impl Timing {
     // What: every supervisor time from the env, seconds.
     // Why: a missing or junk value stops the supervisor.
+    // From: Issue #1683 | PR #1912
     fn load() -> Result<Self, String> {
         let secs = |key| bounded(key, 1, u32::MAX.into()).map(Duration::from_secs);
         Ok(Self {
@@ -961,11 +1065,19 @@ struct Ctx {
 impl Ctx {
     // What: the saved ui setting, else the env value.
     // Why: operators change settings live in the ui.
+    // From: Issue #1683 | PR #1912
     fn setting(&self, key: &str) -> Option<String> {
-        let saved = self
-            .settings_file
-            .as_deref()
-            .and_then(|file| config::saved_setting(file, key));
+        // What: an unreadable file is logged; env wins.
+        // Why: a render must still use the known values.
+        // From: Issue #1683 | PR #1912
+        let saved = self.settings_file.as_deref().and_then(|file| {
+            config::saved_setting(file, key).unwrap_or_else(|e| {
+                log_err(&format!(
+                    "WARNING: {key} not read from the settings file: {e}"
+                ));
+                None
+            })
+        });
         config::non_empty(saved.as_deref())
             .map(str::to_string)
             .or_else(|| env_opt(key))
@@ -974,12 +1086,14 @@ impl Ctx {
 
     // What: a required value from the env.
     // Why: no defaults in Rust; the SOT bakes them in.
+    // From: Issue #1683 | PR #1912
     fn need(&self, key: &str) -> Result<String, String> {
         config::need(&config::process_env, key)
     }
 
     // What: a DHCP DNS IP from env, else its LAN address.
     // Why: compose derives no fallback; config owns it.
+    // From: Issue #1683 | PR #1912
     fn need_dns(&self, key: &str) -> Result<String, String> {
         env_opt(key)
             .or_else(|| config::dhcp_dns_fallback(&config::process_env, key))
@@ -988,6 +1102,7 @@ impl Ctx {
 
     // What: a file in the run dir, written fresh.
     // Why: each start renders from the current settings.
+    // From: Issue #1683 | PR #1912
     fn render(&self, file: &str, body: &str) -> Result<String, String> {
         let path = self.run_dir.join(file);
         write_file(&path, body.as_bytes(), 0o644, Place::Replace)
@@ -1049,6 +1164,7 @@ impl Kind {
 
     // What: the name as LANCACHE_PROCESSES spells it.
     // Why: logs and the status file use the same name.
+    // From: Issue #1683 | PR #1912
     fn name(self) -> &'static str {
         match self {
             Self::Watch => "watch",
@@ -1079,6 +1195,7 @@ impl Kind {
         let dhcp = || DhcpMode::parse(&ctx.setting("DHCP_MODE").unwrap_or_default());
         // What: the dock's run request for one service.
         // Why: "stopped" overrides the saved setting.
+        // From: Issue #1683 | PR #1912
         let desired = || {
             ctx.desired_file
                 .as_deref()
@@ -1104,6 +1221,7 @@ impl Kind {
 
     // What: render the config, return what to start.
     // Why: a render error keeps the program stopped.
+    // From: Issue #1683 | PR #1912
     fn launch(self, ctx: &Ctx) -> Result<Run, String> {
         match self {
             Self::Watch | Self::Retention | Self::Soa | Self::DhcpProbe => Ok(Run::default()),
@@ -1136,18 +1254,26 @@ struct Run {
     env: Vec<(String, String)>,
     // What: files whose change restarts the program.
     // Why: the ui writes files; the program converges.
+    // From: Issue #1683 | PR #1912
     watch: Vec<PathBuf>,
 }
 
 // What: size and mtime of each watched file, if any.
 // Why: a changed input means a restart; absent is a state.
+// From: Issue #1683 | PR #1912
 fn fingerprint(files: &[PathBuf]) -> Vec<Option<(u64, i64, i64)>> {
     files
         .iter()
-        .map(|f| {
-            fs::metadata(f)
-                .ok()
-                .map(|m| (m.len(), m.mtime(), m.mtime_nsec()))
+        .map(|f| match fs::metadata(f) {
+            Ok(m) => Some((m.len(), m.mtime(), m.mtime_nsec())),
+            // What: absent is a state; errors log.
+            // Why: a stat fault is not "absent".
+            // From: Issue #1683 | PR #1912
+            Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+            Err(e) => {
+                log_err(&format!("WARNING: cannot stat {}: {e}", f.display()));
+                None
+            }
         })
         .collect()
 }
@@ -1216,16 +1342,30 @@ fn processed_count(stats: &str, destination: &str) -> Option<u64> {
 // Why: a write moves it; retention and packing do not.
 // From: Issue #1428 | PR #1912
 fn newest_write(root: &Path) -> u128 {
-    files_under(root).map_or(0, |files| {
-        files
-            .iter()
-            .filter(|(path, _)| !path.to_string_lossy().ends_with(XZ_SUFFIX))
-            .filter_map(|(_, meta)| meta.modified().ok())
-            .filter_map(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_nanos())
-            .max()
-            .unwrap_or(0)
-    })
+    // What: a failed scan is logged and reads as 0.
+    // Why: 0 shows no write; the cause must stay visible.
+    // From: Issue #1683 | PR #1912
+    let files = match files_under(root) {
+        Ok(files) => files,
+        Err(e) => {
+            log_err(&format!("WARNING: cannot scan {}: {e}", root.display()));
+            return 0;
+        }
+    };
+    files
+        .iter()
+        .filter(|(path, _)| !path.to_string_lossy().ends_with(XZ_SUFFIX))
+        // What: a file with no readable time is logged.
+        // Why: one bad file must not hide the newest write.
+        // From: Issue #1683 | PR #1912
+        .filter_map(|(path, meta)| {
+            file_time(meta)
+                .inspect_err(|e| log_err(&format!("WARNING: {} time: {e}", path.display())))
+                .ok()
+        })
+        .map(|d| d.as_nanos())
+        .max()
+        .unwrap_or(0)
 }
 
 // What: syslog-ng's counter and the newest log write.
@@ -1233,9 +1373,20 @@ fn newest_write(root: &Path) -> u128 {
 // From: Issue #1428 | PR #1912
 fn log_sample(s: &Settings) -> Option<LogSample> {
     let ctl = format!("--control={}", s.syslog_ctl.display());
-    let stats = run_program("syslog-ng-ctl", &["stats", &ctl], None).ok()?;
+    // What: a failed stats read or no counter is logged.
+    // Why: None alone hides why no sample was taken.
+    // From: Issue #1683 | PR #1912
+    let stats = run_program("syslog-ng-ctl", &["stats", &ctl], None)
+        .inspect_err(|e| log_err(&format!("WARNING: syslog-ng stats not read: {e}")))
+        .ok()?;
+    let Some(processed) = processed_count(&stats, SYSLOG_NG_DESTINATION) else {
+        log_err(&format!(
+            "WARNING: syslog-ng stats have no processed count for {SYSLOG_NG_DESTINATION}"
+        ));
+        return None;
+    };
     Some(LogSample {
-        processed: processed_count(&stats, SYSLOG_NG_DESTINATION)?,
+        processed,
         newest: newest_write(&s.syslog_root),
     })
 }
@@ -1331,6 +1482,7 @@ fn logging_off(
 
 // What: render syslog-ng.conf; the syslog-ng command.
 // Why: state files live in the private run dir.
+// From: Issue #1683 | PR #1912
 fn syslog_ng(ctx: &Ctx) -> Result<Run, String> {
     let off = logging_off(ctx, &|key| ctx.need(key))?;
     let off: Vec<&str> = off.iter().map(String::as_str).collect();
@@ -1503,6 +1655,7 @@ fn chrony_conf(upstreams: &str, cidrs: &str, drift: &str, port: u16) -> Result<S
     }
     // What: step on large early offsets; sync the RTC.
     // Why: stale start clock; kernel copies time to RTC.
+    // From: Issue #1683 | PR #1912
     let mut conf = format!("driftfile {drift}\nport {port}\nmakestep 1.0 3\nrtcsync\n");
     for entry in servers {
         let kind = if is_ip_literal(entry) {
@@ -1523,6 +1676,7 @@ fn chrony_conf(upstreams: &str, cidrs: &str, drift: &str, port: u16) -> Result<S
 
 // What: render chrony.conf; chronyd in the foreground.
 // Why: -d logs to stderr; a ui change restarts it.
+// From: Issue #1683 | PR #1912
 fn chronyd(ctx: &Ctx) -> Result<Run, String> {
     let conf = chrony_conf(
         &ctx.setting("NTP_UPSTREAM_SERVERS").unwrap_or_default(),
@@ -1549,6 +1703,7 @@ enum DnsRole {
 
 // What: DNS_REPLICATION_ROLE as a role.
 // Why: an unknown spelling must never start a server.
+// From: Issue #1683 | PR #1912
 fn dns_role(raw: &str) -> Result<DnsRole, String> {
     match raw {
         "primary" => Ok(DnsRole::Primary),
@@ -1657,6 +1812,7 @@ struct DnsKnobs {
 impl DnsKnobs {
     // What: every DNS render value from the env.
     // Why: a missing or junk value stops the render.
+    // From: Issue #1683 | PR #1912
     fn load() -> Result<Self, String> {
         let secs = |key| bounded(key, 0, u32::MAX.into());
         let count = |key| bounded(key, 1, u32::MAX.into());
@@ -1699,6 +1855,7 @@ impl DnsKnobs {
 
 // What: YAML list rows of one value list.
 // Why: recursor.conf lists nets one per row.
+// From: Issue #1683 | PR #1912
 fn yaml_rows(items: &[String]) -> String {
     items.iter().map(|i| format!("    - {i}\n")).collect()
 }
@@ -1711,12 +1868,14 @@ const TSIG_ALGORITHM: &str = "hmac-sha256";
 
 // What: the local API root of a PowerDNS server.
 // Why: the supervisor and nats-subscriber share it.
+// From: Issue #1683 | PR #1912
 fn api_root(loopback: &str, port: u16) -> String {
     format!("http://{loopback}:{port}{}", config::PDNS_API_PATH)
 }
 
 // What: 32 random bytes in base64, a TSIG secret.
 // Why: Kea and PowerDNS read the key in this form.
+// From: Issue #1683 | PR #1912
 fn base64_32() -> String {
     use base64::Engine as _;
     base64::engine::general_purpose::STANDARD.encode(rand::random::<[u8; 32]>())
@@ -1780,6 +1939,7 @@ fn soa_knobs() -> Result<(u64, u64, u64), String> {
 fn own_address() -> Result<std::net::Ipv4Addr, String> {
     // What: a connected UDP socket names the route source.
     // Why: connect() sends no packet; no ip tool needed.
+    // From: Issue #1683 | PR #1912
     let any = config::any_bind(&config::process_env)?;
     let target = config::need(&config::process_env, "ROUTE_PROBE_TARGET")?;
     let socket = std::net::UdpSocket::bind((any.as_str(), 0))
@@ -1816,6 +1976,7 @@ fn endpoint(raw: &str, key: &'static str) -> Result<std::net::SocketAddrV4, Stri
 
 // What: the comma or space list of DNS_XFR_NOTIFY_TARGETS.
 // Why: a primary notifies and allows AXFR to each one.
+// From: Issue #1683 | PR #1912
 fn notify_targets() -> Result<Vec<std::net::SocketAddrV4>, String> {
     env_opt("DNS_XFR_NOTIFY_TARGETS")
         .unwrap_or_default()
@@ -1851,6 +2012,7 @@ impl AuthConf<'_> {
         let yes = |on: bool| if on { "yes" } else { "no" };
         // What: pdns accepts unsigned updates globally.
         // Why: per-zone TSIG metadata is the real gate.
+        // From: Issue #1683 | PR #1912
         format!(
             "local-address={lo},{local}\nlocal-port={auth_port}\nlaunch=gsqlite3\n\
              gsqlite3-database={db}\nprimary={primary}\nsecondary={secondary}\n\
@@ -1925,6 +2087,7 @@ fn first_good(
 
 // What: each readable snapshot, newest first.
 // Why: a restore re-applies what this start owns.
+// From: Issue #1683 | PR #1912
 fn snapshots<T>(
     store: &lancache_ng::SnapshotStore,
     read: &dyn Fn(Value) -> Option<T>,
@@ -1933,10 +2096,23 @@ fn snapshots<T>(
         log_err(&format!("WARNING: cannot list snapshots: {e}"));
         Vec::new()
     });
-    ids.into_iter()
-        .rev()
-        .filter_map(|id| Some((id.clone(), read(store.read(&id).ok()?)?)))
-        .collect()
+    // What: a skipped snapshot is logged with its cause.
+    // Why: a restore must show why a target was left out.
+    // From: Issue #1683 | PR #1912
+    let usable = |id: String| match store.read(&id) {
+        Ok(value) => match read(value) {
+            Some(item) => Some((id, item)),
+            None => {
+                log_err(&format!("WARNING: snapshot {id} has no usable payload"));
+                None
+            }
+        },
+        Err(e) => {
+            log_err(&format!("WARNING: {e:#}"));
+            None
+        }
+    };
+    ids.into_iter().rev().filter_map(usable).collect()
 }
 
 // What: no file may be missing from a snapshot.
@@ -2014,6 +2190,7 @@ fn checked_files(
     };
     // What: convert old shell snapshots before use.
     // Why: an update keeps its rollback targets.
+    // From: Issue #1683 | PR #1912
     store.adopt_legacy();
     let fresh = ("new".to_string(), files.to_vec());
     let used = first_good(
@@ -2048,6 +2225,7 @@ fn checked_files(
 
 // What: replace each line that starts with a key.
 // Why: a restored snapshot gets this start's values.
+// From: Issue #1683 | PR #1912
 fn restamp_lines(text: &str, lines: &[(&str, String)]) -> String {
     text.lines()
         .map(|line| {
@@ -2077,12 +2255,14 @@ fn pdns_check(program: &str, config_dir: &str) -> [String; 3] {
 
 // What: run pdnsutil on the auth config; text or error.
 // Why: every zone and key change goes through one call.
+// From: Issue #1683 | PR #1912
 fn pdnsutil(dir: &Path, args: &[&str]) -> Result<String, String> {
     lancache_ng::pdnsutil(&dir.display().to_string(), args, None)
 }
 
 // What: true for pdnsutil's "exists already" refusal.
 // Why: a restart finds every zone; only that is fine.
+// From: Issue #1683 | PR #1912
 fn exists_already(error: &str) -> bool {
     error.to_ascii_lowercase().contains("exists already")
 }
@@ -2092,7 +2272,13 @@ fn exists_already(error: &str) -> bool {
 // From: Issue #815
 fn pdns_database(data_dir: &Path) -> Result<PathBuf, String> {
     let db = data_dir.join("pdns.sqlite3");
-    if db.exists() {
+    // What: a stat error stops the start, not a rebuild.
+    // Why: an existing database must never be replaced.
+    // From: Issue #1683 | PR #1912
+    if db
+        .try_exists()
+        .map_err(|e| format!("cannot check {}: {e}", db.display()))?
+    {
         return Ok(db);
     }
     let schema_file = config::need(&config::process_env, "PDNS_SCHEMA_FILE")?;
@@ -2103,6 +2289,7 @@ fn pdns_database(data_dir: &Path) -> Result<PathBuf, String> {
         .map_err(|e| format!("cannot create {} from {schema_file}: {e}", db.display()));
     // What: a half-made database file is removed.
     // Why: the next start would skip a file that exists.
+    // From: Issue #1683 | PR #1912
     if let Err(e) = created {
         if let Err(rm) = fs::remove_file(&db)
             && rm.kind() != io::ErrorKind::NotFound
@@ -2113,6 +2300,7 @@ fn pdns_database(data_dir: &Path) -> Result<PathBuf, String> {
     }
     // What: the owner changes; the mode SQLite chose stays.
     // Why: own with no mode leaves the mode alone.
+    // From: Issue #1683 | PR #1912
     own(
         &db,
         Some(account_id("passwd", "pdns")?),
@@ -2139,7 +2327,16 @@ fn ddns_tsig(dir: &Path, zones: &[String], tsig: &str, unsigned: &Path) -> Resul
         return Ok(());
     }
     pdnsutil(dir, &["import-tsig-key", TSIG_NAME, TSIG_ALGORITHM, tsig])?;
-    let relaxed = unsigned.exists();
+    // What: an unreadable marker is logged; signed stays.
+    // Why: strict is the safe side; the cause is shown.
+    // From: Issue #1683 | PR #1912
+    let relaxed = unsigned.try_exists().unwrap_or_else(|e| {
+        log_err(&format!(
+            "WARNING: cannot check {}: {e}",
+            unsigned.display()
+        ));
+        false
+    });
     if relaxed {
         log_err("WARNING: the ui allows unsigned DNS UPDATE for LAN zones");
     }
@@ -2196,6 +2393,7 @@ fn dns_zones(
         pdnsutil(dir, &["zone", "set-kind", zone, "primary"])?;
         // What: SOA bump and NOTIFY on API and DDNS writes.
         // Why: secondaries converge via NOTIFY and AXFR.
+        // From: Issue #1683 | PR #1912
         pdnsutil(dir, &["set-meta", zone, "SOA-EDIT-DNSUPDATE", "INCREASE"])?;
         pdnsutil(dir, &["set-meta", zone, "SOA-EDIT-API", "INCREASE"])?;
         pdnsutil(dir, &["set-meta", zone, "NOTIFY-DNSUPDATE", "1"])?;
@@ -2238,12 +2436,14 @@ fn pdns_auth(ctx: &Ctx) -> Result<Run, String> {
     let api_key = pdns_api_key()?;
     // What: TSIG off when the shared key cannot persist.
     // Why: a key only this container knows signs nothing.
+    // From: Issue #1683 | PR #1912
     let tsig = ddns_tsig_key().unwrap_or_else(|e| {
         log_err(&format!("WARNING: DDNS TSIG is off: {e}"));
         String::new()
     });
     // What: no key or a replica: DDNS only from loopback.
     // Why: unsigned or replica LAN updates are refused.
+    // From: Issue #1683 | PR #1912
     let loopback = config::loopback()?;
     let allow_from = if tsig.is_empty() || role == DnsRole::Secondary {
         loopback.clone()
@@ -2349,6 +2549,7 @@ fn rpz_zone(
 ) -> (String, usize) {
     // What: locals feed the template as plain captures.
     // Why: CodeQL misses captures beside named args.
+    // From: Issue #1683 | PR #1912
     let (ttl, mname, rname) = (knobs.rpz_ttl, &knobs.soa_mname, &knobs.rpz_rname);
     let (refresh, retry, expire) = (knobs.rpz_refresh, knobs.rpz_retry, knobs.soa_expire);
     let mut zone = format!(
@@ -2444,6 +2645,7 @@ impl RecursorConf<'_> {
             .collect();
         // What: locals feed the template as plain captures.
         // Why: CodeQL misses captures beside named args.
+        // From: Issue #1683 | PR #1912
         let RecursorConf {
             port,
             api_port,
@@ -2489,6 +2691,7 @@ fn recursor(ctx: &Ctx, rec: &Recursor) -> Result<Run, String> {
     let knobs = DnsKnobs::load()?;
     // What: secondary negative TTL = AXFR cycle.
     // Why: a pre-AXFR miss must not outlive the sync.
+    // From: Issue #1683 | PR #1912
     let negative_ttl = if role == DnsRole::Secondary {
         knobs.xfr_cycle
     } else {
@@ -2579,7 +2782,13 @@ fn recursor(ctx: &Ctx, rec: &Recursor) -> Result<Run, String> {
 fn nats_server(ctx: &Ctx) -> Result<Run, String> {
     let conf = ctx.need("NATS_CONF_PATH")?;
     let fragment = ctx.need("NATS_AUTH_CALLOUT_PATH")?;
-    if !Path::new(&fragment).exists() {
+    // What: wait for the fragment; a stat error is named.
+    // Why: "waiting" must not hide a permission fault.
+    // From: Issue #1683 | PR #1912
+    let written = Path::new(&fragment)
+        .try_exists()
+        .map_err(|e| format!("cannot check {fragment}: {e}"))?;
+    if !written {
         return Err(format!("waiting for the ui to write {fragment}"));
     }
     let roles = NatsRoles::read(&|user_key, password_key| {
@@ -2635,6 +2844,7 @@ fn nats_subscriber(ctx: &Ctx) -> Result<Run, String> {
     ];
     // What: writer's NATS password from the shared file.
     // Why: a remote secondary has its own; no file is used.
+    // From: Issue #1683 | PR #1912
     if let Some(file) = env_opt("NATS_PASSWORD_SHARED_SECRET") {
         env.push((
             "NATS_PASSWORD".to_string(),
@@ -2721,6 +2931,7 @@ async fn soa_upkeep() -> Result<(), String> {
         }
         // What: retry soon while no zone could be written.
         // Why: a cold auth server must not wait an hour.
+        // From: Issue #1683 | PR #1912
         let pause = if ok == 0 { cold } else { resync };
         tokio::time::sleep(Duration::from_secs(pause)).await;
     }
@@ -2728,6 +2939,7 @@ async fn soa_upkeep() -> Result<(), String> {
 
 // What: env key of the kea-dhcp4 control socket path.
 // Why: the healthcheck and the configs name one socket.
+// From: Issue #1683 | PR #1912
 const KEA4_SOCKET_KEY: &str = "KEA4_SOCKET";
 
 // What: Kea render values: sockets, hook, fence, logs.
@@ -2755,6 +2967,7 @@ struct KeaKnobs {
 impl KeaKnobs {
     // What: every Kea render value from the env.
     // Why: a missing or junk value stops the render.
+    // From: Issue #1683 | PR #1912
     fn load() -> Result<Self, String> {
         let text = |key: &str| config::need(&config::process_env, key);
         Ok(Self {
@@ -2783,6 +2996,7 @@ impl KeaKnobs {
 
 // What: env key of the kea-dhcp-ddns loopback port.
 // Why: kea-dhcp4 sends its name change requests there.
+// From: Issue #1683 | PR #1912
 const KEA_NCR_PORT_KEY: &str = "KEA_NCR_PORT";
 
 // What: the shared DDNS TSIG key, or the error.
@@ -2798,14 +3012,25 @@ fn ddns_tsig_key() -> Result<String, String> {
 
 // What: the first file of this name below dir, by depth.
 // Why: the lease_cmds hook path differs per Kea build.
+// From: Issue #1683 | PR #1912
 fn find_file(dir: &Path, name: &str, depth: u32) -> Option<PathBuf> {
+    // What: unreadable entries are logged.
+    // Why: "not found" must not hide a permission fault.
+    // From: Issue #1683 | PR #1912
+    let skipped = |e: io::Error| log_err(&format!("WARNING: {} not read: {e}", dir.display()));
+    let entries = fs::read_dir(dir).inspect_err(|e| {
+        log_err(&format!("WARNING: {} not listed: {e}", dir.display()));
+    });
     let mut dirs = Vec::new();
-    for entry in fs::read_dir(dir).ok()?.flatten() {
+    for entry in entries.ok()? {
+        let Ok(entry) = entry.map_err(skipped) else {
+            continue;
+        };
         let path = entry.path();
         if entry.file_name() == name {
             return Some(path);
         }
-        if depth > 0 && entry.file_type().is_ok_and(|t| t.is_dir()) {
+        if depth > 0 && entry.file_type().map_err(skipped).is_ok_and(|t| t.is_dir()) {
             dirs.push(path);
         }
     }
@@ -2838,6 +3063,7 @@ fn dhcp_ntp_servers(raw: &str, port: u16) -> Result<Vec<std::net::Ipv4Addr>, Str
 
 // What: Kea loggers that write to stdout only.
 // Why: Docker hands stdout to the one syslog-ng.
+// From: Issue #1683 | PR #1912
 fn kea_loggers(loggers: &[(&str, &str)], debuglevel: u64) -> Value {
     loggers
         .iter()
@@ -2930,6 +3156,7 @@ fn kea_dhcp4_own(
     dhcp4.insert("hooks-libraries".into(), Value::Array(hooks));
     // What: set DDNS and threading keys only if absent.
     // Why: a saved UI choice must survive restarts.
+    // From: Issue #1683 | PR #1912
     let defaults = [
         (
             "multi-threading",
@@ -2978,6 +3205,7 @@ fn kea_dhcp4_own(
 
 // What: the Kea socket dir, private to Kea.
 // Why: Kea refuses a socket dir others can enter.
+// From: Issue #1683 | PR #1912
 fn kea_socket_dir(kea: &KeaKnobs) -> Result<(), String> {
     let dir = &kea.socket_dir;
     fs::create_dir_all(dir)
@@ -3020,12 +3248,22 @@ fn kea_dhcp4(ctx: &Ctx) -> Result<Run, String> {
         == Some(true);
     let loopback = config::loopback()?;
     let ncr_port = env_port(KEA_NCR_PORT_KEY)?;
+    // What: a config that cannot take our keys is logged.
+    // Why: the fallback to a snapshot must show its cause.
+    // From: Issue #1683 | PR #1912
     let owned = |mut conf: Value| -> Option<String> {
-        kea_dhcp4_own(&mut conf, &hook, &domain, ddns, (&loopback, ncr_port), &kea).ok()?;
-        serde_json::to_string_pretty(&conf).ok()
+        let warn = |e: &dyn std::fmt::Display| log_err(&format!("WARNING: Kea config: {e}"));
+        kea_dhcp4_own(&mut conf, &hook, &domain, ddns, (&loopback, ncr_port), &kea)
+            .inspect_err(|e| warn(e))
+            .ok()?;
+        serde_json::to_string_pretty(&conf)
+            .inspect_err(|e| warn(e))
+            .ok()
     };
     let current = match fs::read_to_string(&path) {
-        Ok(raw) => serde_json::from_str(&raw).ok(),
+        Ok(raw) => serde_json::from_str(&raw)
+            .inspect_err(|e| log_err(&format!("WARNING: {} is no JSON: {e}", path.display())))
+            .ok(),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Some(kea_dhcp4_first(ctx, &kea)?),
         Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
     };
@@ -3145,6 +3383,7 @@ fn kea_dhcp_ddns(ctx: &Ctx) -> Result<Run, String> {
 
 // What: one dnsmasq.conf line per set value, else none.
 // Why: a line break would inject a second directive.
+// From: Issue #1683 | PR #1912
 fn dnsmasq_line(lines: &mut String, key: &str, values: &[&str], line: String) {
     if values.iter().any(|v| v.contains(['\n', '\r'])) {
         log_err(&format!("WARNING: {key} holds a line break; not rendered"));
@@ -3164,6 +3403,7 @@ fn dnsmasq_conf(set: &dyn Fn(&str) -> String, relay: bool, log_dhcp: bool) -> St
     let mut conf = String::from("port=0\nno-resolv\nno-poll\nlog-facility=-\n");
     // What: option logging follows the DHCP logging switch.
     // Why: every service has one switch; log-dhcp is extra.
+    // From: Issue #1683 | PR #1912
     if log_dhcp {
         conf.push_str("log-dhcp\n");
     }
@@ -3247,6 +3487,7 @@ fn dnsmasq_conf(set: &dyn Fn(&str) -> String, relay: bool, log_dhcp: bool) -> St
     }
     // What: inert pxe-service when BIOS is not set.
     // Why: dnsmasq needs one pxe-service to reply.
+    // From: Issue #1683 | PR #1912
     if bios.is_empty() {
         lines.push_str("pxe-service=IA64_EFI,\"lancache-ng PXE proxy active\",0\n");
     }
@@ -3316,6 +3557,7 @@ struct Psl {
 impl Psl {
     // What: rules up to the private section, by kind.
     // Why: a private CDN suffix must not split a platform.
+    // From: Issue #1683 | PR #1912
     fn parse(text: &str) -> Self {
         let mut psl = Self::default();
         for line in text.lines().map(str::trim) {
@@ -3338,6 +3580,7 @@ impl Psl {
 
     // What: the public suffix plus one label.
     // Why: None when the name is itself a public suffix.
+    // From: Issue #1683 | PR #1912
     fn root(&self, domain: &str) -> Option<String> {
         let labels: Vec<&str> = domain.split('.').collect();
         let n = labels.len();
@@ -3365,23 +3608,29 @@ impl Psl {
 struct CdnHosts {
     // What: registrable roots; root and *.root.
     // Why: the cert, allow and stream maps start from them.
+    // From: Issue #1683 | PR #1912
     roots: Vec<String>,
     // What: wildcard-only rows below a root; *.base.
     // Why: one wildcard cert covers every host below.
+    // From: Issue #1683 | PR #1912
     bases: Vec<String>,
     // What: exact rows two or more labels below a root.
     // Why: a wildcard cannot cover them; each gets a cert.
+    // From: Issue #1683 | PR #1912
     exact: Vec<String>,
     // What: roots that are themselves a wildcard-only row.
     // Why: the https dispatch treats them like a base.
+    // From: Issue #1683 | PR #1912
     root_wildcards: HashSet<String>,
     // What: true when a row was invalid or had no root.
     // Why: a skipped row blocks the known-good save.
+    // From: Issue #1683 | PR #1912
     skipped: bool,
 }
 
 // What: append a name once, keeping the file order.
 // Why: maps and certificates list each name once.
+// From: Issue #1683 | PR #1912
 fn push_new(list: &mut Vec<String>, name: &str) {
     if !list.iter().any(|known| known == name) {
         list.push(name.to_string());
@@ -3428,6 +3677,7 @@ fn cert_name(host: &str, kind: &str) -> String {
 impl CdnHosts {
     // What: (hostnames key, certificate name) pairs.
     // Why: the cert, allow and stream maps share the keys.
+    // From: Issue #1683 | PR #1912
     fn keys(&self) -> Vec<(String, String)> {
         let mut keys = Vec::new();
         for root in &self.roots {
@@ -3446,16 +3696,19 @@ impl CdnHosts {
 
 // What: first line of every generated nginx file.
 // Why: an operator must not hand-edit a rendered file.
+// From: Issue #1683 | PR #1912
 const NGINX_GENERATED: &str = "# Generated by lancache-watchdog; do not edit\n";
 
 // What: the sink for SNI-less or refused TLS clients.
 // Why: the discard port closes the connection at once.
+// From: Issue #1683 | PR #1912
 fn nginx_refuse(loopback: &str) -> String {
     format!("{loopback}:{NGINX_DISCARD_PORT}")
 }
 
 // What: the discard service port (RFC 863).
 // Why: the protocol fixes it; it is no deployment value.
+// From: Issue #1683 | PR #1912
 const NGINX_DISCARD_PORT: u16 = 9;
 
 // What: loopback ports and relay timeouts of https.
@@ -3521,6 +3774,7 @@ struct CertKnobs {
 impl CertKnobs {
     // What: every certificate value from the env.
     // Why: a missing or junk value stops the render.
+    // From: Issue #1683 | PR #1912
     fn load() -> Result<Self, String> {
         let text = |key: &str| config::need(&config::process_env, key);
         let days = |key| bounded(key, 1, u32::MAX.into()).map(|d| d.to_string());
@@ -3542,6 +3796,7 @@ impl CertKnobs {
 
 // What: one aligned "key value;" map line.
 // Why: rendered maps stay readable for operators.
+// From: Issue #1683 | PR #1912
 fn map_line(key: &str, value: &str) -> String {
     format!("    {key:<45} {value};\n")
 }
@@ -3617,6 +3872,7 @@ fn nginx_stream_targets(
     out.push_str("}\n");
     // What: the SNI passthrough server on the public port.
     // Why: one owner renders every stream server.
+    // From: Issue #1683 | PR #1912
     let (port, acl) = (ports.passthrough, acl.display());
     out.push_str(&format!(
         "\nserver {{\n    listen {port};\n    listen [::]:{port};\n    include {acl};\n    \
@@ -3712,6 +3968,7 @@ fn nginx_https_dispatch(
     };
     // What: locals feed the template as plain captures.
     // Why: CodeQL misses captures beside named args.
+    // From: Issue #1683 | PR #1912
     let (acl, mitm_port) = (acl.display(), ports.mitm);
     let timeouts = nginx_relay_timeouts(ports);
     out.push_str(&format!(
@@ -3742,6 +3999,7 @@ fn fill(template: &str, values: &[(&str, String)]) -> String {
 
 // What: a resolver token without brackets or port.
 // Why: nginx takes [v6] and ip:port; compare bare IPs.
+// From: Issue #1683 | PR #1912
 fn resolver_host(token: &str) -> &str {
     if let Some(rest) = token.strip_prefix('[') {
         rest.split(']').next().unwrap_or(rest)
@@ -3840,7 +4098,10 @@ fn nginx_certs(
 ) -> Result<(), String> {
     let (ca_crt, ca_key) = (ca.join(&cert.ca_cert_file), ca.join(&cert.ca_key_file));
     let path = |p: &Path| p.display().to_string();
-    if !(ca_crt.is_file() && ca_key.is_file()) {
+    // What: make a CA only when its files are absent.
+    // Why: a stat fault must not replace the clients' CA.
+    // From: Issue #1683 | PR #1912
+    if !(file_present(&ca_crt)? && file_present(&ca_key)?) {
         fs::create_dir_all(ca).map_err(|e| format!("cannot create {}: {e}", ca.display()))?;
         openssl_ca(
             &ca_key,
@@ -3862,9 +4123,21 @@ fn nginx_certs(
     own(certs, None, Some(gid), Some(0o2750)).map_err(|e| e.to_string())?;
     // What: drop every leaf when the CA changed.
     // Why: leaves of an old CA would fail on every client.
+    // From: Issue #1683 | PR #1912
     let print = openssl_x509(&ca_crt, &["-fingerprint", "-sha256"])?;
     let stamp = certs.join(".ca-fingerprint");
-    if fs::read_to_string(&stamp).ok().as_deref() != Some(print.as_str()) {
+    // What: an unreadable stamp counts as a changed CA.
+    // Why: new leaves are safe; the read error is logged.
+    // From: Issue #1683 | PR #1912
+    let stamped = match fs::read_to_string(&stamp) {
+        Ok(text) => Some(text),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(e) => {
+            log_err(&format!("WARNING: cannot read {}: {e}", stamp.display()));
+            None
+        }
+    };
+    if stamped.as_deref() != Some(print.as_str()) {
         for entry in
             fs::read_dir(certs).map_err(|e| format!("cannot list {}: {e}", certs.display()))?
         {
@@ -3881,11 +4154,11 @@ fn nginx_certs(
             .map_err(|e| format!("cannot write {}: {e}", stamp.display()))?;
     }
     let serial = ca.join(&cert.ca_serial_file);
-    if !serial.is_file() {
-        let nanos = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
+    // What: start a serial file only when it is absent.
+    // Why: a stat fault must not reset the serial count.
+    // From: Issue #1683 | PR #1912
+    if !file_present(&serial)? {
+        let nanos = unix_nanos();
         write_file(
             &serial,
             format!("{nanos:016x}\n").as_bytes(),
@@ -3898,8 +4171,9 @@ fn nginx_certs(
     let default_crt = certs.join(format!("{}.crt", cert.default_cert_name));
     // What: no readable default cert means no SAN rows.
     // Why: a missing or broken cert is signed again below.
+    // From: Issue #1683 | PR #1912
     let san = openssl_x509(&default_crt, &["-ext", "subjectAltName"]).unwrap_or_else(|e| {
-        if default_crt.exists() {
+        if !matches!(metadata_if_present(&default_crt), Ok(None)) {
             log_err(&format!(
                 "WARNING: default cert not read, signed again: {e}"
             ));
@@ -3910,7 +4184,7 @@ fn nginx_certs(
         || san
             .split([',', '\n'])
             .any(|entry| entry.trim() == format!("IP Address:{ip_https}"));
-    if !default_key.is_file() || !san.contains("DNS:") || !has_ip {
+    if !file_present(&default_key)? || !san.contains("DNS:") || !has_ip {
         let mut names = format!("DNS:{}", cert.default_cert_dns);
         if !ip_https.is_empty() {
             names.push_str(&format!(",IP:{ip_https}"));
@@ -3938,7 +4212,7 @@ fn nginx_certs(
             certs.join(format!("{file}.key")),
             certs.join(format!("{file}.crt")),
         );
-        if !(key.is_file() && crt.is_file()) {
+        if !(file_present(&key)? && file_present(&crt)?) {
             log(&format!("Generating certificate {file} for {names}"));
             sign_leaf(ca, run, (&key, &crt), &names, cert)?;
         }
@@ -3971,6 +4245,7 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
     let resolver = ctx.need("NGINX_UPSTREAM_RESOLVER")?;
     // What: the upstream resolver must not be LanCache.
     // Why: the LanCache DNS would loop back.
+    // From: Issue #1683 | PR #1912
     for token in resolver.split_whitespace().map(resolver_host) {
         if token == ip_http || (!ip_https.is_empty() && token == ip_https) {
             return Err(format!(
@@ -4023,8 +4298,16 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
             worker_gid,
             &cert,
         )?;
-    } else if https.exists() {
-        fs::remove_file(&https).map_err(|e| format!("cannot remove {}: {e}", https.display()))?;
+    } else {
+        // What: remove stale https.conf if there.
+        // Why: a stat error must not keep HTTPS mode on.
+        // From: Issue #1683 | PR #1912
+        match fs::remove_file(&https) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => {
+                return Err(format!("cannot remove {}: {e}", https.display()));
+            }
+            _ => {}
+        }
     }
     for file in [NGINX_HTTPS_MAP, NGINX_CLIENT_ACL] {
         let sub = dir.join(file);
@@ -4168,6 +4451,7 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
 
 // What: DHCP client and server UDP ports (RFC 2131).
 // Why: the protocol fixes both ports; probe is a client.
+// From: Issue #1683 | PR #1912
 const DHCP_CLIENT_PORT: u16 = 68;
 const DHCP_SERVER_PORT: u16 = 67;
 
@@ -4177,18 +4461,22 @@ const DHCP_SERVER_PORT: u16 = 67;
 struct ProbeTiming {
     // What: how long offers are collected after a DISCOVER.
     // Why: several servers answer; first offer is not all.
+    // From: Issue #1683 | PR #1912
     window: Duration,
     // What: how long the REQUEST waits for an ACK or NAK.
     // Why: a silent server must not block the probe.
+    // From: Issue #1683 | PR #1912
     request_timeout: Duration,
     // What: DISCOVER sends in one window, spread evenly.
     // Why: UDP loses packets; one send may vanish.
+    // From: Issue #1683 | PR #1912
     retransmits: u32,
 }
 
 impl ProbeTiming {
     // What: the probe times from the env, seconds.
     // Why: a missing or junk value makes the probe fail.
+    // From: Issue #1683 | PR #1912
     fn load() -> Result<Self, String> {
         let secs = |key| bounded(key, 1, u32::MAX.into()).map(Duration::from_secs);
         Ok(Self {
@@ -4201,6 +4489,7 @@ impl ProbeTiming {
 
 // What: option fields shown per offer, as (label, code).
 // Why: None is the offered address; the rest are options.
+// From: Issue #1683 | PR #1912
 const OFFER_FIELDS: [(&str, Option<OptionCode>); 10] = [
     ("Server Identifier", Some(OptionCode::ServerIdentifier)),
     ("IP Offered", None),
@@ -4219,6 +4508,7 @@ const OFFER_FIELDS: [(&str, Option<OptionCode>); 10] = [
 
 // What: what the probe keeps of one OFFER or ACK.
 // Why: REQUEST needs address and server; page needs rows.
+// From: Issue #1683 | PR #1912
 struct Offer {
     address: Option<Ipv4Addr>,
     server: Option<Ipv4Addr>,
@@ -4227,6 +4517,7 @@ struct Offer {
 
 // What: read an OFFER or ACK into address, server, rows.
 // Why: both message types carry the same option set.
+// From: Issue #1683 | PR #1912
 fn read_offer(msg: &Message) -> Offer {
     let opts = msg.opts();
     let address = Some(msg.yiaddr()).filter(|a| !a.is_unspecified());
@@ -4274,6 +4565,7 @@ fn read_offer(msg: &Message) -> Offer {
 
 // What: true when a message has the given DHCP type.
 // Why: replies of other types on the segment are ignored.
+// From: Issue #1683 | PR #1912
 fn is_kind(msg: &Message, kind: MessageType) -> bool {
     matches!(msg.opts().get(OptionCode::MessageType), Some(DhcpOption::MessageType(t)) if t == &kind)
 }
@@ -4292,6 +4584,7 @@ fn dhcp_message(
     let mut msg = Message::new_with_id(xid, ciaddr, none, none, none, chaddr);
     // What: set the broadcast flag on all but the RELEASE.
     // Why: no client address, so replies must broadcast.
+    // From: Issue #1683 | PR #1912
     if !matches!(kind, MessageType::Release) {
         msg.set_flags(Flags::default().set_broadcast());
     }
@@ -4304,6 +4597,7 @@ fn dhcp_message(
 
 // What: the options asked of every server.
 // Why: exactly the fields the probe can show.
+// From: Issue #1683 | PR #1912
 fn request_list() -> DhcpOption {
     DhcpOption::ParameterRequestList(
         OFFER_FIELDS
@@ -4316,6 +4610,7 @@ fn request_list() -> DhcpOption {
 
 // What: encode and send one message.
 // Why: all probe traffic goes out through this one path.
+// From: Issue #1683 | PR #1912
 fn send_dhcp(socket: &UdpSocket, msg: &Message, to: SocketAddrV4) -> io::Result<()> {
     let mut buffer = Vec::new();
     msg.encode(&mut Encoder::new(&mut buffer))
@@ -4325,6 +4620,7 @@ fn send_dhcp(socket: &UdpSocket, msg: &Message, to: SocketAddrV4) -> io::Result<
 
 // What: feed replies of one exchange to a handler.
 // Why: stops at the deadline or when the handler says done.
+// From: Issue #1683 | PR #1912
 fn listen(
     socket: &UdpSocket,
     xid: u32,
@@ -4341,6 +4637,7 @@ fn listen(
         match socket.recv_from(&mut buffer) {
             // What: skip datagrams that are not ours.
             // Why: others share the broadcast domain.
+            // From: Issue #1683 | PR #1912
             Ok((n, _)) => {
                 if let Ok(msg) = Message::decode(&mut Decoder::new(&buffer[..n]))
                     && msg.xid() == xid
@@ -4351,6 +4648,7 @@ fn listen(
             }
             // What: a signal only restarts the wait.
             // Why: the loop recomputes the deadline.
+            // From: Issue #1683 | PR #1912
             Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
             Err(e)
                 if matches!(
@@ -4367,6 +4665,7 @@ fn listen(
 
 // What: REQUEST the first offer, wait for the ACK, release.
 // Why: proves a client can get a lease; it is returned.
+// From: Issue #1683 | PR #1912
 fn dry_run(
     socket: &UdpSocket,
     xid: u32,
@@ -4428,6 +4727,7 @@ fn dry_run(
     };
     // What: return the leased address to the server's pool.
     // Why: best effort; the lease would expire on its own.
+    // From: Issue #1683 | PR #1912
     if let Some(leased) = ack.address {
         let release = dhcp_message(
             rand::random(),
@@ -4455,6 +4755,7 @@ fn dry_run(
 
 // What: one broadcast round answering both checks.
 // Why: offers expose rogue servers; first one dry-runs.
+// From: Issue #1683 | PR #1912
 fn run_probe() -> ProbeReport {
     let timing = match ProbeTiming::load() {
         Ok(timing) => timing,
@@ -4475,9 +4776,11 @@ fn run_probe() -> ProbeReport {
     let destination = SocketAddrV4::new(Ipv4Addr::BROADCAST, DHCP_SERVER_PORT);
     // What: one transaction id for DISCOVER and REQUEST.
     // Why: a server honours a REQUEST only for its offer.
+    // From: Issue #1683 | PR #1912
     let xid: u32 = rand::random();
     // What: a random locally administered unicast MAC.
     // Why: the probe must not look like a real device.
+    // From: Issue #1683 | PR #1912
     let mut chaddr: [u8; 6] = rand::random();
     chaddr[0] = (chaddr[0] | 0x02) & !0x01;
 
@@ -4500,13 +4803,15 @@ fn run_probe() -> ProbeReport {
         } else {
             slice.min(end)
         };
-        // What: a failed read ends the slice only.
+        // What: a failed read ends the slice only, logged.
         // Why: later retransmits may still collect offers.
-        let _ = listen(&socket, xid, until, |msg| {
+        // From: Issue #1683 | PR #1912
+        let heard = listen(&socket, xid, until, |msg| {
             if is_kind(msg, MessageType::Offer) {
                 let offer = read_offer(msg);
                 // What: count each server once.
                 // Why: answering twice is no second rogue.
+                // From: Issue #1683 | PR #1912
                 let seen = offers
                     .iter()
                     .any(|o| o.server.is_some() && o.server == offer.server);
@@ -4516,6 +4821,9 @@ fn run_probe() -> ProbeReport {
             }
             false
         });
+        if let Err(e) = heard {
+            log_err(&format!("WARNING: DHCP offer read {attempt} failed: {e}"));
+        }
     }
 
     let conflict = match offers.first() {
@@ -4553,18 +4861,37 @@ async fn probe_upkeep() -> Result<(), String> {
     let need = |key: &str| config::need(&config::process_env, key);
     let request = PathBuf::from(need("DHCP_PROBE_REQUEST_FILE")?);
     let answer = PathBuf::from(need("DHCP_PROBE_RESULT_FILE")?);
+    // What: the answered id; read or parse faults logged.
+    // Why: no id reruns the probe; the cause must show.
+    // From: Issue #1683 | PR #1912
     let read_id = || {
-        fs::read_to_string(&answer)
+        let raw = match fs::read_to_string(&answer) {
+            Ok(raw) => raw,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return None,
+            Err(e) => {
+                log_err(&format!("WARNING: cannot read {}: {e}", answer.display()));
+                return None;
+            }
+        };
+        serde_json::from_str::<ProbeAnswer>(&raw)
+            .inspect_err(|e| log_err(&format!("WARNING: {} is no answer: {e}", answer.display())))
             .ok()
-            .and_then(|raw| serde_json::from_str::<ProbeAnswer>(&raw).ok())
             .map(|a| a.id)
     };
     let tick = bounded("SUPERVISE_TICK", 1, u32::MAX.into()).map(Duration::from_secs)?;
     let mut answered = read_id();
     loop {
         tokio::time::sleep(tick).await;
-        let Ok(id) = fs::read_to_string(&request) else {
-            continue;
+        // What: no request waits; a read fault is logged.
+        // Why: a permission fault is not "no ask".
+        // From: Issue #1683 | PR #1912
+        let id = match fs::read_to_string(&request) {
+            Ok(id) => id,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                log_err(&format!("WARNING: cannot read {}: {e}", request.display()));
+                continue;
+            }
         };
         let id = id.trim().to_string();
         if id.is_empty() || answered.as_deref() == Some(id.as_str()) {
@@ -4586,10 +4913,12 @@ async fn probe_upkeep() -> Result<(), String> {
 
 // What: one supervised slot and its restart state.
 // Why: the loop converges each slot to wanted state.
+// From: Issue #1683 | PR #1912
 struct Slot {
     kind: Kind,
     // What: watched inputs and their state at the start.
     // Why: a differing state restarts the program.
+    // From: Issue #1683 | PR #1912
     watch: Vec<PathBuf>,
     seen: Vec<Option<(u64, i64, i64)>>,
     child: Option<tokio::process::Child>,
@@ -4604,12 +4933,14 @@ struct Slot {
 impl Slot {
     // What: true while the program or task is alive.
     // Why: the status file and healthcheck report it.
+    // From: Issue #1683 | PR #1912
     fn running(&self) -> bool {
         self.child.is_some() || self.task.as_ref().is_some_and(|t| !t.is_finished())
     }
 
     // What: start the program or task once.
     // Why: a failed start sets the backoff for next try.
+    // From: Issue #1683 | PR #1912
     fn start(&mut self, ctx: &Ctx) {
         let name = self.kind.name();
         let run = match self.kind.launch(ctx) {
@@ -4642,6 +4973,7 @@ impl Slot {
 
     // What: log a failure and schedule the next start.
     // Why: the delay doubles up to the backoff maximum.
+    // From: Issue #1683 | PR #1912
     fn failed(&mut self, why: &str) {
         log_err(&format!(
             "ERROR: {why}; next start in {}s",
@@ -4654,6 +4986,7 @@ impl Slot {
 
     // What: notice an exited program or task.
     // Why: an exit is a failure; a long run resets backoff.
+    // From: Issue #1683 | PR #1912
     async fn reap(&mut self) {
         let name = self.kind.name();
         let ran_long = self
@@ -4685,6 +5018,7 @@ impl Slot {
 
     // What: stop the program: TERM, wait, then KILL.
     // Why: a clean stop lets daemons flush their state.
+    // From: Issue #1683 | PR #1912
     async fn stop(&mut self) {
         if let Some(task) = self.task.take() {
             task.abort();
@@ -4715,11 +5049,13 @@ impl Slot {
 
 // What: the supervisor's report for the healthcheck.
 // Why: the healthcheck runs as its own process.
+// From: Issue #1683 | PR #1912
 #[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
 struct SuperviseStatus {
     updated: u64,
     // What: wanted programs that are not running now.
     // Why: one red entry makes the container unhealthy.
+    // From: Issue #1683 | PR #1912
     down: Vec<String>,
     // What: programs running now.
     // Why: the healthcheck probes their listeners.
@@ -4730,6 +5066,7 @@ struct SuperviseStatus {
 
 // What: the kinds this container runs, in order.
 // Why: an unknown or doubled name fails the start.
+// From: Issue #1683 | PR #1912
 fn kinds(raw: &str) -> Result<Vec<Kind>, String> {
     let mut out: Vec<Kind> = Vec::new();
     for name in raw.split_whitespace() {
@@ -4795,6 +5132,7 @@ async fn supervise() -> Result<(), String> {
             } else if slot.running() && (!wanted || fingerprint(&slot.watch) != slot.seen) {
                 // What: stop on changed input or unwanted.
                 // Why: a start reads its inputs anew.
+                // From: Issue #1683 | PR #1912
                 if wanted {
                     log(&format!("{}: input changed; restarting", slot.kind.name()));
                 }
@@ -4895,6 +5233,7 @@ async fn healthcheck() -> Result<(), String> {
 
 // What: the verdict for one status at one time.
 // Why: pure, so tests feed it any status and clock.
+// From: Issue #1683 | PR #1912
 fn health_verdict(status: &SuperviseStatus, now: u64, max_age: u64) -> Result<(), String> {
     let age = now.saturating_sub(status.updated);
     if age > max_age {
@@ -4944,10 +5283,12 @@ mod tests {
 
     // What: syslog-ng time-reap seconds of the tests.
     // Why: the render copies it; any value does.
+    // From: Issue #1683 | PR #1912
     const REAP: u64 = 7;
 
     // What: a fresh random number in [lo, hi].
     // Why: no fixed value in a test; each run differs.
+    // From: Issue #1683 | PR #1858
     fn rnd(lo: u64, hi: u64) -> u64 {
         use std::hash::{BuildHasher as _, Hasher as _};
         let mut h = std::collections::hash_map::RandomState::new().build_hasher();
@@ -4960,6 +5301,7 @@ mod tests {
 
     // What: a fresh name, never a fixed word.
     // Why: no test value stands in for an owner's value.
+    // From: Issue #1683 | PR #1858
     fn gen_name() -> String {
         format!("v{:x}", rnd(0, u64::MAX))
     }
@@ -4991,6 +5333,7 @@ mod tests {
 
     // What: restart at threshold; inert reads never count.
     // Why: restarting an unreachable service is unsafe.
+    // From: Issue #1683 | PR #1858
     #[test]
     fn counters_restart_at_threshold_and_recover_once() {
         let n = rnd(2, u8::MAX.into()) as u32;
@@ -5104,6 +5447,7 @@ mod tests {
 
     // What: disk colors follow the warn and alarm limits.
     // Why: alarm outranks warn; equal to a limit counts.
+    // From: Issue #1683 | PR #1858
     #[test]
     fn disk_status_follows_the_limits() {
         let warn = rnd(1, u64::from(u32::MAX) / 2) as u32;
@@ -5117,6 +5461,7 @@ mod tests {
 
     // What: the timestamp keeps its fixed UTC shape.
     // Why: status.json's `updated` field is a contract.
+    // From: Issue #1683 | PR #1858
     #[test]
     fn stamp_has_the_fixed_shape() {
         let secs = rnd(0, i32::MAX as u64) as i64;
@@ -5135,12 +5480,14 @@ mod tests {
 
     // What: a canonical scratch root for one test.
     // Why: targets resolve symlinks; the prefix must too.
+    // From: Issue #1683 | PR #1858
     fn scratch() -> PathBuf {
         fs::canonicalize(lancache_ng::unique_temp_dir(&gen_name())).expect("scratch root")
     }
 
     // What: retention settings on a scratch tree.
     // Why: each test owns its paths and fresh limits.
+    // From: Issue #1683 | PR #1858
     fn scratch_retention(root: &Path) -> Retention {
         let max_days = unix_secs() / DAY / 2;
         let under = |prefix: &Path| prefix.join(gen_name()).display().to_string();
@@ -5162,6 +5509,7 @@ mod tests {
 
     // What: a file of len bytes with mtime at epoch secs.
     // Why: age tests need a known mtime, not a sleep.
+    // From: Issue #1683 | PR #1858
     fn file_at(path: &Path, len: u64, mtime: u64) {
         fs::create_dir_all(path.parent().expect("parent")).expect("parent dir");
         fs::write(path, vec![0; len as usize]).expect("write");
@@ -5175,12 +5523,14 @@ mod tests {
 
     // What: seconds that put a file past days whole days.
     // Why: find -mtime +N needs more than N whole days.
+    // From: Issue #1683 | PR #1858
     fn past(days: u64) -> u64 {
         (days + 1) * DAY + rnd(1, DAY - 1)
     }
 
     // What: the stamp a run left, as a number.
     // Why: the daily gate and retry read this value.
+    // From: Issue #1683 | PR #1858
     fn stamp_of(path: &Path) -> u64 {
         fs::read_to_string(path)
             .expect("stamp")
@@ -5191,6 +5541,7 @@ mod tests {
 
     // What: purge deletes files past the limit, once a day.
     // Why: newer files stay; a broken stamp must not block.
+    // From: Issue #1683 | PR #1858
     #[test]
     fn purge_deletes_past_the_limit_once_a_day() {
         let root = scratch();
@@ -5222,6 +5573,7 @@ mod tests {
 
     // What: age floor, then oldest-first to the budget.
     // Why: a file written today stays even over budget.
+    // From: Issue #1683 | PR #1858
     #[test]
     fn syslog_prune_keeps_floor_budget_and_today() {
         let root = scratch();
@@ -5263,6 +5615,7 @@ mod tests {
 
     // What: closed files become .xz; today's stay plain.
     // Why: syslog-ng still writes today's program files.
+    // From: Issue #1683 | PR #1912
     #[test]
     fn syslog_files_compress_to_xz_except_today() {
         let root = scratch();
@@ -5299,6 +5652,7 @@ mod tests {
 
     // What: the loop ends when stop fires mid-sleep
     // Why: docker stop sends TERM; a hang ends in a kill
+    // From: Issue #1683 | PR #1858
     #[tokio::test]
     async fn retention_stops_at_once_mid_sleep() {
         let r = scratch_retention(&scratch());
@@ -5319,12 +5673,14 @@ mod tests {
 
     // What: a random IPv4 address for a proxy IP.
     // Why: render tests must not depend on one address.
+    // From: Issue #1683 | PR #1912
     fn gen_ipv4() -> std::net::Ipv4Addr {
         std::net::Ipv4Addr::from(rnd(1, u32::MAX.into()) as u32)
     }
 
     // What: template keys, resolver tokens, account ids.
     // Why: each feeds nginx or chown verbatim.
+    // From: Issue #1683 | PR #1912
     #[test]
     fn nginx_helpers_fill_strip_and_look_up() {
         let [key, value] = std::array::from_fn(|_| gen_name());
@@ -5346,6 +5702,7 @@ mod tests {
 
     // What: restamp swaps keyed lines, keeps the rest.
     // Why: a restored snapshot must use this start's key.
+    // From: Issue #1683 | PR #1912
     #[test]
     fn restamp_replaces_only_keyed_lines() {
         let (old, new, other) = (gen_name(), gen_name(), gen_name());
@@ -5372,6 +5729,7 @@ mod tests {
 
     // What: the date serial is YYMMDD000 below 2^31.
     // Why: RFC 1982 compares serials in 32-bit space.
+    // From: Issue #1683 | PR #1912
     #[test]
     fn date_serial_has_the_date_shape() {
         let serial = date_serial();
@@ -5384,6 +5742,7 @@ mod tests {
 
     // What: a changed watched file changes the print.
     // Why: that difference is what restarts a program.
+    // From: Issue #1683 | PR #1912
     #[test]
     fn fingerprint_sees_a_changed_file() {
         let dir = scratch();
@@ -5399,6 +5758,7 @@ mod tests {
 
     // What: files are found below a dir, depth limited.
     // Why: the Kea hook path differs per build.
+    // From: Issue #1683 | PR #1912
     #[test]
     fn find_file_walks_down_to_its_depth() {
         let root = scratch();

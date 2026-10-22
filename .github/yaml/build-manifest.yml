@@ -1226,7 +1226,7 @@ runner_host:
   user: codex
   # What: archives from this size up are clone leftovers.
   # Why: clone leftover archives are GB-sized.
-  # From: Issue #1622
+  # From: Issue #1622 | PR #1912
   stray_archive_min_bytes: 1073741824
   # What: cleanup log, its size cap, reap ages in hours.
   # Why: AG-CI-016: a timer run has no terminal; bound all.

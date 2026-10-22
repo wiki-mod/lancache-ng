@@ -41,10 +41,24 @@ pub fn default_in(list: &str, name: &str) -> Option<String> {
 pub fn process_env(name: &str) -> Option<String> {
     match std::env::var(name) {
         Ok(value) if !value.is_empty() => Some(value),
-        other => std::env::var(RUNTIME_DEFAULTS_KEY)
-            .ok()
-            .and_then(|list| default_in(&list, name))
-            .or(other.ok()),
+        // What: a value that is no UTF-8 is logged, unset.
+        // Why: a default must not replace a broken value.
+        // From: Issue #1683 | PR #1912
+        Err(std::env::VarError::NotUnicode(_)) => {
+            eprintln!("[config] WARNING: {name} is not valid UTF-8; ignored");
+            None
+        }
+        other => match std::env::var(RUNTIME_DEFAULTS_KEY) {
+            Ok(list) => default_in(&list, name).or(other.ok()),
+            Err(std::env::VarError::NotPresent) => other.ok(),
+            // What: broken defaults are logged, not used.
+            // Why: an unreadable list must be visible.
+            // From: Issue #1683 | PR #1912
+            Err(e) => {
+                eprintln!("[config] WARNING: {RUNTIME_DEFAULTS_KEY} not read: {e}");
+                other.ok()
+            }
+        },
     }
 }
 
@@ -105,14 +119,21 @@ pub fn need_flag(get: &dyn Fn(&str) -> Option<String>, name: &str) -> Result<boo
 
 // What: one KEY=value from the ui settings file, trimmed.
 // Why: the ui saves live settings; services read them.
-// From: Issue #1683
-pub fn saved_setting(path: &std::path::Path, key: &str) -> Option<String> {
-    let content = std::fs::read_to_string(path).ok()?;
-    content.lines().map(str::trim).find_map(|line| {
+// From: Issue #1683 | PR #1912
+pub fn saved_setting(path: &std::path::Path, key: &str) -> Result<Option<String>, String> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        // What: a missing file holds no saved setting.
+        // Why: a fresh install has saved nothing yet.
+        // From: Issue #1683 | PR #1912
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
+    };
+    Ok(content.lines().map(str::trim).find_map(|line| {
         line.strip_prefix(key)
             .and_then(|rest| rest.strip_prefix('='))
             .map(|value| value.trim().to_string())
-    })
+    }))
 }
 
 // What: 1/true/yes/on or 0/false/no/off, trimmed, any case.

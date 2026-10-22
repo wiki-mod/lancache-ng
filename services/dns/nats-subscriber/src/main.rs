@@ -33,9 +33,11 @@ use serde_json::{Value, json};
 
 // What: log tag of start errors.
 // Why: the log shows which service refused to start.
+// From: Issue #1683 | PR #1858
 const TAG: &str = "nats-subscriber";
 // What: messages per fetch.
 // Why: bounds a batch; NATS_FETCH_WAIT ends an idle fetch.
+// From: Issue #1683 | PR #1912
 const FETCH_BATCH: usize = 10;
 // What: in-process confirmation tries before a Nak.
 // Why: a longer sleep holds the message past ack_wait.
@@ -105,11 +107,13 @@ impl Times {
 
 // What: state shared by the consumer and the helper tasks.
 // Why: one lock orders zone writes, snapshots, rollbacks.
+// From: Issue #1683 | PR #1858
 struct Ctx {
     pdns: PowerDns,
     times: Times,
     // What: auth and recursor API roots, auth config dir.
     // Why: the dns supervisor owns the layout, passes it.
+    // From: Issue #1683 | PR #1858
     pdns_auth_url: String,
     pdns_rec_urls: Vec<String>,
     pdns_auth_config_dir: String,
@@ -118,6 +122,7 @@ struct Ctx {
     keep_n: u32,
     // What: the local zone name, from DHCP_DOMAIN.
     // Why: the SOT owns it; no literal in this crate.
+    // From: Issue #1683 | PR #1912
     lan_zone: String,
     lock: tokio::sync::Mutex<()>,
     js: jetstream::Context,
@@ -152,6 +157,7 @@ impl Ctx {
 
     // What: the snapshot store of one dotted zone.
     // Why: every zone has its own directory under zones/.
+    // From: Issue #1683 | PR #1858
     fn store(&self, zone: &str) -> SnapshotStore {
         let root = self.snapshot_dir.join("zones").join(zone);
         SnapshotStore::new(root, self.snapshot_file.as_str(), "dns")
@@ -159,6 +165,7 @@ impl Ctx {
 
     // What: the rrsets array of one zone, as a JSON array.
     // Why: snapshots, rollback and the reconciler read it.
+    // From: Issue #1683 | PR #1858
     async fn zone_rrsets(&self, zone: &str) -> Result<Value, String> {
         let rrsets = self.pdns.zone_rrsets(&self.pdns_auth_url, zone).await;
         rrsets.map(Value::Array)
@@ -167,6 +174,7 @@ impl Ctx {
 
 // What: publish to JetStream and await the stream ack.
 // Why: a permission denial only shows as a missing ack.
+// From: Issue #1683 | PR #1858
 async fn publish(
     js: &jetstream::Context,
     subject: &str,
@@ -190,6 +198,7 @@ async fn publish(
 
 // What: publish one record message, logging a failure.
 // Why: replication is best-effort; the next tick retries.
+// From: Issue #1683 | PR #1858
 // Returns true only when JetStream acknowledged the message.
 async fn publish_record(js: &jetstream::Context, msg_id: &str, record: &DnsRecord) -> bool {
     let payload = match serde_json::to_vec(record) {
@@ -208,7 +217,22 @@ async fn publish_record(js: &jetstream::Context, msg_id: &str, record: &DnsRecor
 
 // What: a record message from one PowerDNS rrset.
 // Why: reconciler and rollback share the message shape.
+// From: Issue #1683 | PR #1858
 fn rrset_record(action: &str, zone: &str, rrset: &Value) -> Option<DnsRecord> {
+    // What: undecodable records drop the rrset, logged.
+    // Why: a replace without them would empty the set.
+    // From: Issue #1683 | PR #1912
+    let records = match rrset
+        .get("records")
+        .map(|r| serde_json::from_value(r.clone()))
+    {
+        Some(Err(e)) => {
+            let name = rrset_key(rrset).0;
+            eprintln!("[{TAG}] WARNING: records of rrset {name} not decoded: {e}");
+            return None;
+        }
+        other => other.and_then(Result::ok),
+    };
     Some(DnsRecord {
         action: action.to_string(),
         zone: zone.to_string(),
@@ -218,14 +242,13 @@ fn rrset_record(action: &str, zone: &str, rrset: &Value) -> Option<DnsRecord> {
             .get("ttl")
             .and_then(Value::as_i64)
             .and_then(|ttl| i32::try_from(ttl).ok()),
-        records: rrset
-            .get("records")
-            .and_then(|records| serde_json::from_value(records.clone()).ok()),
+        records,
     })
 }
 
 // What: PowerDNS PATCH body for one record message.
 // Why: unknown actions fail before anything is sent.
+// From: Issue #1683 | PR #1858
 fn patch_body(record: &DnsRecord) -> Result<Value, String> {
     let mut rrset = json!({"name": record.name, "type": record.record_type});
     match record.action.as_str() {
@@ -244,6 +267,7 @@ fn patch_body(record: &DnsRecord) -> Result<Value, String> {
 
 // What: rrsets without SOA and NS.
 // Why: a rollback must never rewrite the SOA serial or NS.
+// From: Issue #1683 | PR #1858
 fn data_rrsets(rrsets: &Value) -> Value {
     let kept = rrsets.as_array().into_iter().flatten().filter(|rrset| {
         !matches!(
@@ -256,6 +280,7 @@ fn data_rrsets(rrsets: &Value) -> Value {
 
 // What: (name, type) of an rrset, empty if missing.
 // Why: the identity PowerDNS uses for one rrset.
+// From: Issue #1683 | PR #1858
 fn rrset_key(rrset: &Value) -> (String, String) {
     let text = |field: &str| rrset.get(field).and_then(Value::as_str).unwrap_or("");
     (text("name").to_string(), text("type").to_string())
@@ -263,6 +288,7 @@ fn rrset_key(rrset: &Value) -> (String, String) {
 
 // What: rrsets sorted by key, records sorted by content.
 // Why: equal zones compare equal in any PowerDNS order.
+// From: Issue #1683 | PR #1858
 fn canonicalize(rrsets: &Value) -> Vec<Value> {
     let mut list = rrsets.as_array().cloned().unwrap_or_default();
     list.sort_by_key(rrset_key);
@@ -276,20 +302,33 @@ fn canonicalize(rrsets: &Value) -> Vec<Value> {
 
 // What: true if candidate equals the newest snapshot.
 // Why: the tick watcher must not evict history with copies.
+// From: Issue #1683 | PR #1858
 fn matches_latest(store: &SnapshotStore, candidate: &Value) -> bool {
-    let Ok(ids) = store.ids() else {
-        return false;
+    // What: a failed list or read is logged as no match.
+    // Why: a new snapshot is safe; a silent skip hides it.
+    // From: Issue #1683 | PR #1912
+    let ids = match store.ids() {
+        Ok(ids) => ids,
+        Err(e) => {
+            store.log("WARNING", &format!("cannot list snapshots: {e}"));
+            return false;
+        }
     };
     let Some(latest) = ids.last() else {
         return canonicalize(candidate).is_empty();
     };
-    store
-        .read(latest)
-        .is_ok_and(|snapshot| canonicalize(&snapshot) == canonicalize(candidate))
+    match store.read(latest) {
+        Ok(snapshot) => canonicalize(&snapshot) == canonicalize(candidate),
+        Err(e) => {
+            store.log("WARNING", &format!("{e:#}"));
+            false
+        }
+    }
 }
 
 // What: PATCH body that rolls current back to a snapshot.
 // Why: unchanged rrsets stay out, so flushes stay precise.
+// From: Issue #1683 | PR #1858
 fn rollback_patch(snapshot: &Value, current: &Value) -> Value {
     let (snapshot, current) = (canonicalize(snapshot), canonicalize(current));
     let current_by_key: HashMap<_, _> = current.iter().map(|r| (rrset_key(r), r)).collect();
@@ -313,6 +352,7 @@ fn rollback_patch(snapshot: &Value, current: &Value) -> Value {
 
 // What: names a patch touches, first occurrence only.
 // Why: each name is flushed from the recursor caches once.
+// From: Issue #1683 | PR #1858
 fn changed_names(patch: &Value) -> Vec<String> {
     let mut seen = HashSet::new();
     let names = patch["rrsets"].as_array().into_iter().flatten();
@@ -352,6 +392,7 @@ async fn snapshot_zone(ctx: &Ctx, zone: &str) {
 
 // What: every DNS_SYNC_TICK, snapshot all managed zones.
 // Why: runs on every node, unlike the NATS reconciler.
+// From: Issue #1683 | PR #1912
 async fn snapshot_watcher(ctx: Arc<Ctx>) {
     let mut interval = tokio::time::interval(ctx.times.tick);
     loop {
@@ -364,6 +405,7 @@ async fn snapshot_watcher(ctx: Arc<Ctx>) {
 
 // What: every DNS_SYNC_TICK, republish the lan zone.
 // Why: a node that missed messages converges again.
+// From: Issue #1683 | PR #1912
 async fn reconciler(ctx: Arc<Ctx>) {
     let mut interval = tokio::time::interval(ctx.times.tick);
     loop {
@@ -410,12 +452,14 @@ struct AppliedSequences(HashMap<(String, String, String), u64>);
 impl AppliedSequences {
     // What: true if seq is not newer than the applied one.
     // Why: an exact redelivery is skipped, not re-patched.
+    // From: Issue #1683 | PR #1858
     fn is_stale(&self, key: &(String, String, String), seq: u64) -> bool {
         self.0.get(key).is_some_and(|applied| seq <= *applied)
     }
 
     // What: remember seq as applied; never lowers a mark.
     // Why: out-of-order applies within a batch stay safe.
+    // From: Issue #1683 | PR #1858
     fn record(&mut self, key: (String, String, String), seq: u64) {
         let entry = self.0.entry(key).or_insert(0);
         *entry = (*entry).max(seq);
@@ -430,20 +474,24 @@ enum Outcome {
     Ack,
     // What: Nak with delay, keep consuming the batch.
     // Why: a flush has no ordering hazard.
+    // From: Issue #1683 | PR #1858
     Retry,
     // What: Nak with delay, stop the batch.
     // Why: a later same-key update must not overtake it.
+    // From: Issue #1683 | PR #1858
     RetryStop,
 }
 
 // What: true for a zone name safe in an API URL path.
 // Why: the zone comes from a NATS message, not a file.
+// From: Issue #1683 | PR #1858
 fn zone_is_safe(zone: &str) -> bool {
     is_dns_name(zone.trim_end_matches('.'), false, false)
 }
 
 // What: the recursor flush URL for one domain.
 // Why: the domain is message text; & or # would split it.
+// From: Issue #1683 | PR #1858
 fn flush_url(rec_url: &str, domain: &str) -> Result<reqwest::Url, String> {
     reqwest::Url::parse_with_params(&format!("{rec_url}/cache/flush"), [("domain", domain)])
         .map_err(|e| e.to_string())
@@ -451,6 +499,7 @@ fn flush_url(rec_url: &str, domain: &str) -> Result<reqwest::Url, String> {
 
 // What: apply one record message to PowerDNS.
 // Why: 4xx and malformed ack; 5xx and network errors retry.
+// From: Issue #1683 | PR #1858
 async fn apply_record(
     ctx: &Ctx,
     msg: &jetstream::Message,
@@ -475,7 +524,16 @@ async fn apply_record(
         return Outcome::Ack;
     }
     let key = record_key(&record);
-    let seq = msg.info().ok().map(|info| info.stream_sequence);
+    // What: no stream info is logged; no stale check then.
+    // Why: the write applies; the cause is logged.
+    // From: Issue #1683 | PR #1912
+    let seq = match msg.info() {
+        Ok(info) => Some(info.stream_sequence),
+        Err(e) => {
+            eprintln!("No stream sequence for zone={}: {e}", record.zone);
+            None
+        }
+    };
     if let Some(seq) = seq
         && applied.is_stale(&key, seq)
     {
@@ -487,6 +545,7 @@ async fn apply_record(
     }
     // What: the lock covers the PATCH itself.
     // Why: rollback must not diff data this write replaces.
+    // From: Issue #1683 | PR #1858
     let sent = {
         let _guard = ctx.lock.lock().await;
         ctx.pdns
@@ -523,6 +582,7 @@ async fn apply_record(
     );
     // What: tell secondaries to pull the zone.
     // Why: AXFR consumers would stay stale until a recheck.
+    // From: Issue #1683 | PR #1858
     let notify = ctx
         .pdns
         .call(
@@ -531,13 +591,22 @@ async fn apply_record(
             None,
         )
         .await;
-    if !notify.is_ok_and(|response| response.status().is_success()) {
-        eprintln!("PDNS notify failed (will retry) for zone={zone}");
+    // What: a failed notify retries; its cause is logged.
+    // Why: the operator must see why secondaries lag.
+    // From: Issue #1683 | PR #1912
+    let failed = match notify {
+        Ok(response) if response.status().is_success() => None,
+        Ok(response) => Some(response.status().to_string()),
+        Err(e) => Some(e),
+    };
+    if let Some(cause) = failed {
+        eprintln!("PDNS notify failed (will retry) for zone={zone}: {cause}");
         return Outcome::RetryStop;
     }
     snapshot_zone(ctx, &canonical_zone(zone)).await;
     // What: mark applied only after PowerDNS confirmed.
     // Why: a failed write must not make a retry look stale.
+    // From: Issue #1683 | PR #1858
     if let Some(seq) = seq {
         applied.record(key, seq);
     }
@@ -558,6 +627,7 @@ fn rrset_matches_expected(
     };
     // What: false if the TTL differs from expected_ttl.
     // Why: content alone confirms before AXFR lands it.
+    // From: Issue #1683 | PR #1912
     if let Some(ttl) = expected_ttl
         && rrset.get("ttl").and_then(Value::as_i64) != Some(i64::from(ttl))
     {
@@ -565,6 +635,7 @@ fn rrset_matches_expected(
     }
     // What: A and AAAA text is parsed and printed again.
     // Why: AXFR rebuilds canonical RDATA, the ui may not.
+    // From: Issue #1683 | PR #1858
     let canon = |content: &str| {
         match record_type {
             "AAAA" => content.parse::<std::net::Ipv6Addr>().map(|a| a.to_string()),
@@ -590,9 +661,12 @@ fn rrset_matches_expected(
 // Why: confirm the zone first, else a stale answer caches.
 // From: Issue #1095
 async fn apply_flush(ctx: &Ctx, msg: &jetstream::Message) -> Outcome {
-    let request = serde_json::from_slice::<FlushRequest>(&msg.payload).ok();
+    let request = serde_json::from_slice::<FlushRequest>(&msg.payload)
+        .inspect_err(|e| eprintln!("Unreadable flush message, flushing \".\": {e}"))
+        .ok();
     // What: unreadable flush message flushes name ".".
     // Why: old publishers send no domain field.
+    // From: Issue #1683 | PR #1912
     let domain = request.as_ref().map_or(".", |r| r.domain.as_str());
     if let Some(request) = &request
         && let (Some(zone), Some(kind)) = (&request.zone, &request.record_type)
@@ -605,7 +679,12 @@ async fn apply_flush(ctx: &Ctx, msg: &jetstream::Message) -> Outcome {
         for _ in 0..CONFIRM_TRIES {
             // What: a failed zone read counts unconfirmed.
             // Why: "absent" must not come from an error.
-            let rrsets = ctx.zone_rrsets(zone).await.ok();
+            // From: Issue #1683 | PR #1858
+            let rrsets = ctx
+                .zone_rrsets(zone)
+                .await
+                .inspect_err(|e| eprintln!("Zone {zone} not read for the flush check: {e}"))
+                .ok();
             let expected = request.expected_content.as_deref();
             let key = (domain.to_string(), kind.clone());
             confirmed = rrsets.is_some_and(|rrsets| {
@@ -620,7 +699,16 @@ async fn apply_flush(ctx: &Ctx, msg: &jetstream::Message) -> Outcome {
             tokio::time::sleep(ctx.times.confirm_pause).await;
         }
         if !confirmed {
-            let delivered = msg.info().map_or(0, |info| info.delivered);
+            // What: no stream info is logged as delivery 0.
+            // Why: the flush defers; the cause is logged.
+            // From: Issue #1683 | PR #1912
+            let delivered = match msg.info() {
+                Ok(info) => info.delivered,
+                Err(e) => {
+                    eprintln!("No delivery count for the flush of {domain}: {e}");
+                    0
+                }
+            };
             if delivered < CONFIRM_MAX_DELIVERIES {
                 println!(
                     "Deferring recursor flush for {domain} ({kind}): zone not yet confirmed (delivery {delivered})"
@@ -663,6 +751,7 @@ async fn apply_flush(ctx: &Ctx, msg: &jetstream::Message) -> Outcome {
 
 // What: route one message by subject.
 // Why: unknown subjects are logged, acked and ignored.
+// From: Issue #1683 | PR #1858
 async fn handle(
     ctx: &Ctx,
     msg: &jetstream::Message,
@@ -688,6 +777,7 @@ async fn handle(
 
 // What: constant-time check of the X-API-Key header.
 // Why: the listener changes zone data; network is no trust.
+// From: Issue #1683 | PR #1858
 fn authorized(headers: &HeaderMap, key: &str) -> bool {
     let sent = headers.get("X-API-Key").and_then(|v| v.to_str().ok());
     sent.is_some_and(|sent| ct_eq(sent, key))
@@ -695,6 +785,7 @@ fn authorized(headers: &HeaderMap, key: &str) -> bool {
 
 // What: a JSON error reply.
 // Why: the ui reads the error field of every failure.
+// From: Issue #1683 | PR #1858
 fn failure(status: StatusCode, message: impl Into<String>) -> (StatusCode, Json<Value>) {
     (status, Json(json!({"error": message.into()})))
 }
@@ -714,13 +805,25 @@ fn rejected(
 
 // What: GET /snapshots: ids and times per managed zone.
 // Why: the ui lists them newest first for the operator.
+// From: Issue #1683 | PR #1858
 async fn list_snapshots(State(ctx): State<Arc<Ctx>>, headers: HeaderMap) -> Response {
     if !authorized(&headers, ctx.pdns.api_key()) {
         return failure(StatusCode::UNAUTHORIZED, "missing or invalid X-API-Key").into_response();
     }
     let mut zones = HashMap::new();
     for zone in rollback_zones(&ctx.lan_zone) {
-        let ids = ctx.store(&zone).ids().unwrap_or_default();
+        // What: an unlisted store fails the whole request.
+        // Why: an error must not show as "no snapshots".
+        // From: Issue #1683 | PR #1912
+        let store = ctx.store(&zone);
+        let ids = match store.ids() {
+            Ok(ids) => ids,
+            Err(e) => {
+                let message = format!("cannot list snapshots of {zone}: {e}");
+                store.log("WARNING", &message);
+                return failure(StatusCode::INTERNAL_SERVER_ERROR, message).into_response();
+            }
+        };
         let list: Vec<Value> = ids
             .into_iter()
             .rev()
@@ -733,6 +836,7 @@ async fn list_snapshots(State(ctx): State<Arc<Ctx>>, headers: HeaderMap) -> Resp
 
 // What: body of POST /rollback.
 // Why: the ui sends the zone and the chosen snapshot id.
+// From: Issue #1683 | PR #1858
 #[derive(Deserialize)]
 struct RollbackRequest {
     zone: String,
@@ -741,6 +845,7 @@ struct RollbackRequest {
 
 // What: pdnsutil check-zone under the zone_check limit.
 // Why: a wedged auth database must not hang the rollback.
+// From: Issue #1683 | PR #1912
 async fn check_zone(ctx: &Ctx, store: &SnapshotStore, zone: &str) -> bool {
     let config_dir = ctx.pdns_auth_config_dir.clone();
     let (limit, zone_name) = (ctx.times.zone_check, zone.to_owned());
@@ -763,6 +868,7 @@ async fn check_zone(ctx: &Ctx, store: &SnapshotStore, zone: &str) -> bool {
 
 // What: republish a rollback patch for the lan zone.
 // Why: other nodes converge now, not at the next tick.
+// From: Issue #1683 | PR #1858
 // Returns true only when every record was acknowledged.
 async fn publish_patch(js: &jetstream::Context, lan_zone: &str, patch: &Value) -> bool {
     let stamp = unix_nanos();
@@ -770,13 +876,21 @@ async fn publish_patch(js: &jetstream::Context, lan_zone: &str, patch: &Value) -
     for rrset in patch["rrsets"].as_array().into_iter().flatten() {
         let delete = rrset.get("changetype").and_then(Value::as_str) == Some("DELETE");
         let action = if delete { "delete" } else { "replace" };
-        if let Some(record) = rrset_record(action, lan_zone, rrset) {
-            let name = record.name.trim_end_matches('.');
-            // What: a fresh message id per republish.
-            // Why: the dedup window absorbs a repeated id.
-            let msg_id = format!("rollback-{stamp}-{name}-{}", record.record_type);
-            all_published &= publish_record(js, &msg_id, &record).await;
-        }
+        // What: an rrset with no record fails publish.
+        // Why: other nodes would miss it without a trace.
+        // From: Issue #1683 | PR #1912
+        let Some(record) = rrset_record(action, lan_zone, rrset) else {
+            let (name, kind) = rrset_key(rrset);
+            eprintln!("Rollback rrset {name} {kind} not republished: no record message");
+            all_published = false;
+            continue;
+        };
+        let name = record.name.trim_end_matches('.');
+        // What: a fresh message id per republish.
+        // Why: the dedup window absorbs a repeated id.
+        // From: Issue #1683 | PR #1912
+        let msg_id = format!("rollback-{stamp}-{name}-{}", record.record_type);
+        all_published &= publish_record(js, &msg_id, &record).await;
     }
     all_published
 }
@@ -799,6 +913,7 @@ async fn rollback(ctx: &Ctx, request: RollbackRequest) -> Result<Value, (StatusC
     })?;
     // What: only listed ids are read.
     // Why: the id list is the path-traversal guard.
+    // From: Issue #1683 | PR #1858
     if !ids.contains(&request.snapshot_id) {
         return Err(failure(
             StatusCode::NOT_FOUND,
@@ -821,6 +936,7 @@ async fn rollback(ctx: &Ctx, request: RollbackRequest) -> Result<Value, (StatusC
 
     // What: the lock is taken before the state is read.
     // Why: else a live write lands between diff and apply.
+    // From: Issue #1683 | PR #1858
     let _guard = ctx.lock.lock().await;
     let current = ctx.zone_rrsets(&zone).await.map_err(|e| {
         failure(
@@ -865,12 +981,14 @@ async fn rollback(ctx: &Ctx, request: RollbackRequest) -> Result<Value, (StatusC
 
     // What: records go out before any flush.
     // Why: else a flushed cache refills from stale data.
+    // From: Issue #1683 | PR #1858
     let republished = zone == canonical_zone(&ctx.lan_zone)
         && patch_len > 0
         && publish_patch(&ctx.js, &ctx.lan_zone, &patch).await;
 
     // What: all flushes at once, each DNS_FLUSH_TIMEOUT.
     // Why: serial acks would exceed the ui's HTTP timeout.
+    // From: Issue #1683 | PR #1912
     let logger = &store;
     let flushes = changed.iter().map(|name| async move {
         let payload = json!({"domain": name}).to_string().into_bytes();
@@ -919,6 +1037,7 @@ async fn rollback(ctx: &Ctx, request: RollbackRequest) -> Result<Value, (StatusC
 
 // What: POST /rollback: auth first, then the body.
 // Why: unauthenticated callers must not reach parse errors.
+// From: Issue #1683 | PR #1858
 async fn rollback_handler(
     State(ctx): State<Arc<Ctx>>,
     headers: HeaderMap,
@@ -945,6 +1064,7 @@ async fn rollback_handler(
 
 // What: the rollback listener on DNS_ROLLBACK_LISTEN_ADDR.
 // Why: ANY_BIND_IP, as the ui is in another namespace.
+// From: Issue #1683 | PR #1858
 async fn serve_rollback(ctx: Arc<Ctx>, addr: String) {
     let router = Router::new()
         .route("/snapshots", get(list_snapshots))
@@ -967,18 +1087,21 @@ async fn serve_rollback(ctx: Arc<Ctx>, addr: String) {
 
 // What: a required env value, or exit with a message.
 // Why: an empty URL, consumer or address starts unsafely.
+// From: Issue #1683 | PR #1858
 fn required(name: &str) -> String {
     need(&process_env, name).unwrap_or_else(|e| die(TAG, &e))
 }
 
 // What: connect to NATS, start helpers, apply records.
 // Why: one process owns apply, reconcile and rollback.
+// From: Issue #1683 | PR #1858
 #[tokio::main]
 async fn main() {
     let nats_url = required("NATS_URL");
     let consumer_name = required("NATS_CONSUMER");
     // What: only a clear "off" disables record writes.
     // Why: an unknown spelling must keep replication on.
+    // From: Issue #1683 | PR #1858
     let record_writes = env_opt("NATS_RECORD_WRITES").is_none_or(|v| parse_bool(&v) != Some(false));
     let reconcile = env_opt("NATS_RECONCILER").is_some_and(|v| parse_bool(&v) == Some(true));
     let times = Times::load(&process_env).unwrap_or_else(|error| die(TAG, &error));
@@ -1006,6 +1129,7 @@ async fn main() {
 
     // What: a file-backed stream, NATS_DNS_STREAM_MAX_AGE.
     // Why: messages survive a restart; the oldest go first.
+    // From: Issue #1683 | PR #1912
     let stream_config = jetstream::stream::Config {
         name: NATS_STREAM_DNS.to_string(),
         subjects: vec![NATS_SUBJECT_DNS.to_string()],
@@ -1039,6 +1163,7 @@ async fn main() {
 
     // What: this loop alone applies records.
     // Why: so `applied` needs no lock.
+    // From: Issue #1683 | PR #1858
     let mut applied = AppliedSequences::default();
     let policy = Backoff::load(&process_env).unwrap_or_else(|error| die(TAG, &error));
     let mut backoff = policy.start;
@@ -1097,6 +1222,7 @@ mod tests {
 
     // What: builds an rrset with the given contents.
     // Why: most tests need a small literal rrset.
+    // From: Issue #1683 | PR #1912
     fn rrset(name: &str, kind: &str, ttl: i64, contents: &[&str]) -> Value {
         let records: Vec<Value> = contents
             .iter()
@@ -1107,6 +1233,7 @@ mod tests {
 
     // What: the flush domain is encoded into the query.
     // Why: a message must not add or cut query parameters.
+    // From: Issue #1683 | PR #1858
     #[test]
     fn flush_url_encodes_the_domain() {
         let url = flush_url("http://rec:8082/api/v1/servers/localhost", "a.lan.").unwrap();
@@ -1118,6 +1245,7 @@ mod tests {
 
     // What: builds an A record message for host.lan.
     // Why: the record_key test reuses one record literal.
+    // From: Issue #1683 | PR #1912
     fn message(
         action: &str,
         ttl: Option<i32>,
@@ -1194,6 +1322,7 @@ mod tests {
 
     // What: an rrset becomes a record message when keyed.
     // Why: reconciler and rollback republish through this.
+    // From: Issue #1683 | PR #1858
     #[test]
     fn rrset_record_requires_name_and_type() {
         let record = rrset_record("replace", "lan", &rrset("h.lan.", "A", 60, &["1"])).unwrap();

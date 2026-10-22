@@ -3,7 +3,7 @@
 //! SPDX-License-Identifier: AGPL-3.0-or-later
 //! What: the common owners that service binaries call.
 //! Why: one owner per shared rule; services call it.
-//! From: Issue #1683 | PR #1858
+//! From: Issue #1683 | PR #1912
 
 pub mod config;
 
@@ -99,44 +99,90 @@ pub struct DesiredState {
 }
 
 impl DesiredState {
-    // What: read the file; any failure means no opinion.
+    // What: the file's state; absent is no opinion.
+    // Why: a writer must not replace a file it cannot read.
+    // From: Issue #1683 | PR #1912
+    pub fn try_read(path: &Path) -> Result<Self, String> {
+        match fs::read_to_string(path) {
+            Ok(text) => serde_json::from_str(&text)
+                .map_err(|e| format!("{} is no desired state: {e}", path.display())),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(e) => Err(format!("cannot read {}: {e}", path.display())),
+        }
+    }
+
+    // What: try_read; a failure is logged as no opinion.
     // Why: a read glitch must never stop a caller's loop.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1912
     pub fn read(path: &Path) -> Self {
-        fs::read_to_string(path)
-            .ok()
-            .and_then(|text| serde_json::from_str(&text).ok())
-            .unwrap_or_default()
+        Self::try_read(path).unwrap_or_else(|e| {
+            eprintln!("[desired-state] WARNING: {e}; no opinion");
+            Self::default()
+        })
+    }
+}
+
+// What: metadata of a path; None only when it is absent.
+// Why: a stat error must not read as "absent".
+// From: Issue #1683 | PR #1912
+pub fn metadata_if_present(path: &Path) -> io::Result<Option<fs::Metadata>> {
+    match fs::metadata(path) {
+        Ok(meta) => Ok(Some(meta)),
+        // What: missing path or file parent is absent.
+        // Why: a path below a plain file cannot exist.
+        // From: Issue #1683 | PR #1912
+        Err(e)
+            if matches!(
+                e.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+            ) =>
+        {
+            Ok(None)
+        }
+        Err(e) => Err(io::Error::new(
+            e.kind(),
+            format!("cannot check {}: {e}", path.display()),
+        )),
     }
 }
 
 // What: space figures of the filesystem holding a path.
 // Why: watchdog reads use%, the ui resize check free KiB.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1912
 pub struct Df {
     pub avail_kib: u64,
     pub used_pct: u32,
 }
 
-// What: figures from statvfs; None on any failure.
+// What: figures from statvfs, or why there are none.
 // Why: std has no statvfs; used percent rounds up.
 // From: Issue #1683 | PR #1912
-pub fn df(path: &Path) -> Option<Df> {
-    let stat = rustix::fs::statvfs(path).ok()?;
+pub fn df(path: &Path) -> Result<Df, String> {
+    let shown = path.display();
+    let stat = rustix::fs::statvfs(path).map_err(|e| format!("statvfs {shown}: {e}"))?;
+    let overflow = || format!("space figures of {shown} overflow");
     // What: used = blocks - free; total = used + avail.
     // Why: df counts reserved blocks as used, not as total.
     // From: Issue #1683 | PR #1912
-    let used = stat.f_blocks.checked_sub(stat.f_bfree)?;
-    let total = used.checked_add(stat.f_bavail)?;
+    let used = stat
+        .f_blocks
+        .checked_sub(stat.f_bfree)
+        .ok_or_else(overflow)?;
+    let total = used.checked_add(stat.f_bavail).ok_or_else(overflow)?;
     // What: no figures for a filesystem without blocks.
     // Why: a division by zero must not read as 0 percent.
     // From: Issue #1683 | PR #1912
     if total == 0 {
-        return None;
+        return Err(format!("the filesystem of {shown} has no blocks"));
     }
-    Some(Df {
-        avail_kib: stat.f_bavail.checked_mul(stat.f_frsize)? / 1024,
-        used_pct: u32::try_from(used.checked_mul(100)?.div_ceil(total)).ok()?,
+    let avail = stat
+        .f_bavail
+        .checked_mul(stat.f_frsize)
+        .ok_or_else(overflow)?;
+    let pct = used.checked_mul(100).ok_or_else(overflow)?.div_ceil(total);
+    Ok(Df {
+        avail_kib: avail / 1024,
+        used_pct: u32::try_from(pct).map_err(|_| overflow())?,
     })
 }
 
@@ -852,7 +898,10 @@ impl SnapshotStore {
     // Why: fixed-width ids make name order chronological.
     // From: Issue #1683 | PR #1858
     pub fn ids(&self) -> io::Result<Vec<String>> {
-        if !self.root.is_dir() {
+        // What: no root is no snapshot; a stat error fails.
+        // Why: an unreadable store must not look empty.
+        // From: Issue #1683 | PR #1912
+        if !metadata_if_present(&self.root)?.is_some_and(|meta| meta.is_dir()) {
             return Ok(Vec::new());
         }
         let mut ids = Vec::new();
@@ -864,7 +913,8 @@ impl SnapshotStore {
             // From: Issue #1683 | PR #1912
             let complete = entry.file_type()?.is_dir()
                 && is_snapshot_id(&name)
-                && entry.path().join(&self.file).is_file();
+                && metadata_if_present(&entry.path().join(&self.file))?
+                    .is_some_and(|meta| meta.is_file());
             if complete {
                 ids.push(name);
             }
@@ -1010,7 +1060,7 @@ impl SnapshotStore {
         // Why: the rename must not replace a snapshot.
         // From: Issue #1683 | PR #1912
         anyhow::ensure!(
-            !self.root.join(&id).exists(),
+            metadata_if_present(&self.root.join(&id))?.is_none(),
             "a snapshot {id} exists already"
         );
         let mut set = serde_json::Map::new();
@@ -1206,9 +1256,14 @@ pub fn write_file_as(
             },
         });
     // What: drop the temp name; absent after a rename.
-    // Why: the write result stays the outcome.
-    // From: PR #1858
-    let _ = fs::remove_file(&tmp);
+    // Why: the write result stays; a left temp is logged.
+    // From: Issue #1683 | PR #1912
+    match fs::remove_file(&tmp) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => {
+            eprintln!("[write_file] WARNING: {} not removed: {e}", tmp.display());
+        }
+        _ => {}
+    }
     placed
 }
 
@@ -1379,7 +1434,7 @@ pub fn resolve_shared_secret(
     let keep_current = || {
         let conflict = match on_disk() {
             Some(v) => v != current,
-            None => file.exists(),
+            None => metadata_if_present(&file).map_or(true, |meta| meta.is_some()),
         };
         !current.is_empty() && !conflict
     };
@@ -1409,10 +1464,14 @@ pub fn resolve_shared_secret(
         place,
         Some((None, Some(gid))),
     )
-    .or_else(|_| write_file_as(&file, value.as_bytes(), 0o640, place, None));
-    if written.is_ok() {
-        return Ok(value);
-    }
+    .or_else(|grouped| {
+        write_file_as(&file, value.as_bytes(), 0o640, place, None)
+            .map_err(|plain| format!("{plain}; with group {gid}: {grouped}"))
+    });
+    let failed = match written {
+        Ok(()) => return Ok(value),
+        Err(e) => e,
+    };
     // What: after a lost race, take the winner's file.
     // Why: only one secret may exist for all starters.
     // From: Issue #1683 | PR #1912
@@ -1425,9 +1484,20 @@ pub fn resolve_shared_secret(
     // Why: a failed write must not stop a valid setup.
     // From: Issue #1683 | PR #1912
     if keep_current() {
+        eprintln!(
+            "[shared-secret] WARNING: {} not written, configured value kept: {failed}",
+            file.display()
+        );
         return Ok(current.to_string());
     }
-    Err(format!("cannot place {}", file.display()))
+    // What: name the write error and any read error.
+    // Why: "cannot place" alone hides the cause.
+    // From: Issue #1683 | PR #1912
+    let read = match fs::read_to_string(&file) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => format!("; read: {e}"),
+        _ => String::new(),
+    };
+    Err(format!("cannot place {}: {failed}{read}", file.display()))
 }
 
 // What: N-byte hex secret, persisted with load_or_create.
@@ -1475,6 +1545,14 @@ impl std::fmt::Display for DockerError {
 }
 
 impl std::error::Error for DockerError {}
+
+// What: a Docker answer body decoded from JSON.
+// Why: a junk body must name its decode error.
+// From: Issue #1683 | PR #1912
+fn json_answer<T: serde::de::DeserializeOwned>(body: &[u8]) -> Result<T, DockerError> {
+    serde_json::from_slice(body)
+        .map_err(|e| DockerError::Transport(format!("the answer is no JSON: {e}")))
+}
 
 // What: Docker log stream text without frame headers.
 // Why: a container without a tty multiplexes its streams.
@@ -1627,23 +1705,23 @@ impl DockerApi {
         Self { client, base_url }
     }
 
-    // What: containers of one compose project, or None.
+    // What: containers of one compose project, or why not.
     // Why: the stack is whatever compose started; no list.
-    // From: Issue #1683
+    // From: Issue #1683 | PR #1912
     pub async fn project_containers(
         &self,
         project: &str,
         timeout: Option<Duration>,
-    ) -> Option<Vec<Value>> {
+    ) -> Result<Vec<Value>, DockerError> {
         let filter = serde_json::json!({ "label": [format!("{COMPOSE_PROJECT_LABEL}={project}")] });
         let url = reqwest::Url::parse_with_params(
             "http://docker/containers/json",
             [("all", "1"), ("filters", filter.to_string().as_str())],
         )
-        .ok()?;
-        let path = format!("{}?{}", url.path(), url.query()?);
-        let body = self.call(reqwest::Method::GET, &path, timeout).await.ok()?;
-        serde_json::from_slice(&body).ok()
+        .map_err(|e| DockerError::Transport(format!("container list URL: {e}")))?;
+        let path = format!("{}?{}", url.path(), url.query().unwrap_or_default());
+        let body = self.call(reqwest::Method::GET, &path, timeout).await?;
+        json_answer(&body)
     }
 
     // What: send one signal to a container's main process.
@@ -1695,13 +1773,17 @@ impl DockerApi {
         response.bytes().await.map(|b| b.to_vec()).map_err(failed)
     }
 
-    // What: container inspect JSON, None on any failure.
+    // What: container inspect JSON, or why there is none.
     // Why: one read feeds health and running state.
-    // From: Issue #1683 | PR #1858
-    pub async fn inspect(&self, name: &str, timeout: Option<Duration>) -> Option<Value> {
+    // From: Issue #1683 | PR #1912
+    pub async fn inspect(
+        &self,
+        name: &str,
+        timeout: Option<Duration>,
+    ) -> Result<Value, DockerError> {
         let path = format!("/containers/{name}/json");
-        let body = self.call(reqwest::Method::GET, &path, timeout).await.ok()?;
-        serde_json::from_slice(&body).ok()
+        let body = self.call(reqwest::Method::GET, &path, timeout).await?;
+        json_answer(&body)
     }
 
     // What: POST one container action like start or stop.
@@ -1748,9 +1830,9 @@ impl DockerApi {
     pub async fn wait(&self, name: &str, timeout: Option<Duration>) -> Result<i64, DockerError> {
         let path = format!("/containers/{name}/wait?condition=not-running");
         let body = self.call(reqwest::Method::POST, &path, timeout).await?;
-        serde_json::from_slice::<Value>(&body)
-            .ok()
-            .and_then(|answer| answer.get("StatusCode")?.as_i64())
+        json_answer::<Value>(&body)?
+            .get("StatusCode")
+            .and_then(Value::as_i64)
             .ok_or_else(|| DockerError::Transport("the wait answer has no StatusCode".into()))
     }
 

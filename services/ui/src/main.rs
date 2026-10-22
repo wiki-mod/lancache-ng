@@ -28,9 +28,9 @@ use lancache_ng::{
     ALARM_INGEST_PATH, ALARM_TOKEN_HEADER, Backoff, DesiredRunState, DesiredState, DnsRecord,
     FlushRequest, NetdataAlarm, Place, PowerDns, ProbeAnswer, ProbeReport, SnapshotStore,
     WatchdogStatus, ct_eq, df, die, error_chain, files_under, hex32, http_client, is_placeholder,
-    load_or_create, load_or_create_hex, need_secs, own, probe_health, resolve_shared_secret,
-    shared_secret, shared_secret_file_name, snapshot_created_unix, unix_secs, write_file,
-    write_if_changed,
+    load_or_create, load_or_create_hex, metadata_if_present, need_secs, own, probe_health,
+    resolve_shared_secret, shared_secret, shared_secret_file_name, snapshot_created_unix,
+    unix_secs, write_file, write_if_changed,
 };
 use nkeys::{KeyPair, XKey};
 use regex::Regex;
@@ -499,10 +499,17 @@ impl Config {
 
     // What: a setting; the saved value beats startup's.
     // Why: operators change settings live, no restart.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1912
     fn setting(&self, key: &str) -> String {
-        config::saved_setting(Path::new(&self.ui_settings_file), key)
-            .unwrap_or_else(|| self.startup_settings.get(key).cloned().unwrap_or_default())
+        // What: an unreadable file is logged; startup wins.
+        // Why: a page must still render with known values.
+        // From: Issue #1683 | PR #1912
+        let saved =
+            config::saved_setting(Path::new(&self.ui_settings_file), key).unwrap_or_else(|e| {
+                tracing::warn!("{key} not read from the settings file: {e}");
+                None
+            });
+        saved.unwrap_or_else(|| self.startup_settings.get(key).cloned().unwrap_or_default())
     }
 
     // What: a setting stored as 1 for on.
@@ -521,7 +528,7 @@ impl Config {
 
     // What: requested cache GB; junk = current size.
     // Why: differs from cache_max_gb until proxy recreate.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1912
     fn requested_cache_gb(&self) -> f64 {
         self.setting("CACHE_MAX_GB")
             .trim()
@@ -548,7 +555,12 @@ impl Config {
         for key in SETTING_KEYS.into_iter().chain(log_keys) {
             let value = match changes.iter().find(|(name, _)| *name == key) {
                 Some((_, value)) => value.clone(),
-                None => config::saved_setting(file, key).unwrap_or_default(),
+                // What: an unreadable file stops the save.
+                // Why: a rewrite would drop other keys.
+                // From: Issue #1683 | PR #1912
+                None => config::saved_setting(file, key)
+                    .map_err(io::Error::other)?
+                    .unwrap_or_default(),
             };
             // What: write only keys that have a value.
             // Why: an absent key keeps the start value.
@@ -1422,19 +1434,37 @@ fn load_templates(cfg: &Config) -> Tera {
 // Why: fresh, stale and missing data look different.
 // From: Issue #870
 fn watchdog_json(path: &str, cycles: u32) -> Value {
-    let age = fs::metadata(path)
-        .and_then(|m| m.modified())
-        .ok()
-        .map(|modified| {
+    let unavailable = json!({ "state": "unavailable" });
+    // What: no file is unavailable; other faults logged.
+    // Why: a start without a status is normal, junk not.
+    // From: Issue #1683 | PR #1912
+    let content = match fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return unavailable,
+        Err(e) => {
+            tracing::warn!("watchdog status {path} not read: {e}");
+            return unavailable;
+        }
+    };
+    let read = serde_json::from_str::<WatchdogStatus>(&content)
+        .map_err(|e| format!("is no status document: {e}"))
+        .and_then(|status| {
+            let modified = fs::metadata(path).and_then(|m| m.modified());
+            modified
+                .map(|m| (status, m))
+                .map_err(|e| format!("has no file time: {e}"))
+        });
+    let (status, age) = match read {
+        Ok((status, modified)) => (
+            status,
             SystemTime::now()
                 .duration_since(modified)
-                .unwrap_or_default()
-        });
-    let status: Option<WatchdogStatus> = fs::read_to_string(path)
-        .ok()
-        .and_then(|content| serde_json::from_str(&content).ok());
-    let (Some(status), Some(age)) = (status, age) else {
-        return json!({ "state": "unavailable" });
+                .unwrap_or_default(),
+        ),
+        Err(e) => {
+            tracing::warn!("watchdog status {path} {e}");
+            return unavailable;
+        }
     };
     // What: compose service names, sorted by name.
     // Why: the SOT names them; the ui keeps no own list.
@@ -1501,14 +1531,14 @@ fn du_gb(path: &str) -> f64 {
     }
 }
 
-// What: free MiB on the cache filesystem; None if unknown.
+// What: free MiB on the cache filesystem, or why unknown.
 // Why: callers must fail closed, not assume unlimited.
-// From: Issue #1683 | PR #1858
-fn cache_free_mib(path: &str) -> Option<u64> {
-    path_allowed(path)
-        .then(|| df(Path::new(path)))
-        .flatten()
-        .map(|space| space.avail_kib / 1024)
+// From: Issue #1683 | PR #1912
+fn cache_free_mib(path: &str) -> Result<u64, String> {
+    if !path_allowed(path) {
+        return Err(format!("{path} is no absolute path without .."));
+    }
+    df(Path::new(path)).map(|space| space.avail_kib / 1024)
 }
 
 // What: MiB that must stay free after a cache of this size.
@@ -1566,16 +1596,22 @@ struct NginxStatus {
 
 // What: nginx connection counters; None if unreachable.
 // Why: the dashboard shows a gap rather than stale numbers.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1912
 async fn nginx_status(client: &reqwest::Client, url: &str) -> Option<NginxStatus> {
-    let text = client
+    // What: the client's SOT timeout; a failure is logged.
+    // Why: no fixed wait; the gap must show its cause.
+    // From: Issue #1683 | PR #1912
+    let fetched = match client
         .get(url)
-        .timeout(Duration::from_secs(3))
         .send()
         .await
-        .ok()?
-        .text()
-        .await
+        .and_then(|r| r.error_for_status())
+    {
+        Ok(response) => response.text().await,
+        Err(e) => Err(e),
+    };
+    let text = fetched
+        .inspect_err(|e| tracing::warn!("nginx status {url} not read: {}", error_chain(e)))
         .ok()?;
     // What: a missing or junk counter reads as 0.
     // Why: one bad line must not hide the other counters.
@@ -1668,10 +1704,23 @@ fn proxy_log_files(dir: &str) -> Vec<PathBuf> {
                 None
             }
         })
-        .filter(|p| p.extension().is_some_and(|e| e == "log") && p.is_file())
+        .filter(|p| p.extension().is_some_and(|e| e == "log") && present(p, fs::Metadata::is_file))
         .collect();
     files.sort();
     files
+}
+
+// What: true when a path exists as `kind`; faults logged.
+// Why: a page must not drop an entry without a trace.
+// From: Issue #1683 | PR #1912
+fn present(path: &Path, kind: fn(&fs::Metadata) -> bool) -> bool {
+    match metadata_if_present(path) {
+        Ok(meta) => meta.is_some_and(|meta| kind(&meta)),
+        Err(e) => {
+            tracing::warn!("{e}");
+            false
+        }
+    }
 }
 
 // What: the last `limit` lines of a file, oldest first.
@@ -1845,14 +1894,21 @@ const PER_HOST_FLOOR: usize = 10;
 
 // What: the host directories under the store root.
 // Why: one host per directory, named by syslog-ng.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1912
 fn syslog_host_dirs(root: &str) -> Vec<PathBuf> {
+    // What: unreadable entries are logged and skipped.
+    // Why: one bad entry must not hide a host silently.
+    // From: Issue #1683 | PR #1912
     let mut dirs: Vec<PathBuf> = fs::read_dir(root)
         .map(|entries| {
             entries
-                .flatten()
+                .filter_map(|entry| {
+                    entry
+                        .inspect_err(|e| tracing::warn!("syslog entry in {root} not read: {e}"))
+                        .ok()
+                })
                 .map(|e| e.path())
-                .filter(|p| p.is_dir())
+                .filter(|p| present(p, fs::Metadata::is_dir))
                 .collect()
         })
         .unwrap_or_else(|e| {
@@ -2108,29 +2164,39 @@ fn syslog_stats(root: &str) -> SyslogStats {
 // From: Issue #1683 | PR #1858
 const MAX_ALARMS: usize = 50;
 
-// What: stored alarms, newest first; any failure is empty.
+// What: stored alarms; a failure is logged as empty.
 // Why: the dashboard must render even with a broken file.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1912
 fn read_alarms(path: &str) -> Vec<NetdataAlarm> {
-    let content = match fs::read_to_string(path) {
-        Ok(content) => content,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Vec::new(),
-        Err(e) => {
-            tracing::warn!("alarm file {path} not read: {e}");
-            return Vec::new();
-        }
-    };
-    serde_json::from_str(&content).unwrap_or_else(|e| {
-        tracing::warn!("alarm file {path} is not valid JSON: {e}");
+    load_alarms(path).unwrap_or_else(|e| {
+        tracing::warn!("{e}");
         Vec::new()
     })
 }
 
+// What: stored alarms, newest first; absent is empty.
+// Why: a writer must not replace a file it cannot read.
+// From: Issue #1683 | PR #1912
+fn load_alarms(path: &str) -> io::Result<Vec<NetdataAlarm>> {
+    let content = match fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => {
+            return Err(io::Error::new(
+                e.kind(),
+                format!("alarm file {path} not read: {e}"),
+            ));
+        }
+    };
+    serde_json::from_str(&content)
+        .map_err(|e| io::Error::other(format!("alarm file {path} is not valid JSON: {e}")))
+}
+
 // What: store one alarm unless its unique_id is known.
 // Why: netdata resends; the caller holds the alarms lock.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1912
 fn append_alarm(path: &str, alarm: NetdataAlarm) -> io::Result<()> {
-    let mut alarms = read_alarms(path);
+    let mut alarms = load_alarms(path)?;
     if alarms.iter().any(|a| a.unique_id == alarm.unique_id) {
         return Ok(());
     }
@@ -2658,11 +2724,7 @@ fn authorize_secondary(state: &AppState, nats_user: &str, password: &str) -> Opt
         .optional()
     })
     .ok()??;
-    let hash = PasswordHash::new(&stored).ok()?;
-    Argon2::default()
-        .verify_password(password.as_bytes(), &hash)
-        .ok()
-        .map(|()| nats_user.to_string())
+    password_matches(&stored, password).then(|| nats_user.to_string())
 }
 
 // What: the signed authorization response for one request.
@@ -4693,7 +4755,7 @@ async fn release_lease(State(state): Shared, Form(f): Form<Fields>) -> Result<Re
 async fn sync_subnet_ntp(state: &AppState, auto: bool) -> Result<(), String> {
     // What: nothing to sync outside Kea mode.
     // Why: only Kea subnets carry the ntp-servers option.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1912
     if !kea_available(state) {
         return Ok(());
     }
@@ -4922,17 +4984,30 @@ async fn check_dhcp_conflict(State(state): Shared) -> Json<Value> {
         return unavailable(format!("cannot write {}: {e}", request.display()));
     }
     let deadline = Instant::now() + PROBE_WAIT_TIMEOUT;
+    // What: the last read or parse fault of the answer.
+    // Why: the timeout message must name what went wrong.
+    // From: Issue #1683 | PR #1912
+    let mut fault = String::new();
+    let answer_file = &state.config.dhcp_probe_result_file;
     while Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(500)).await;
-        let answer = fs::read_to_string(&state.config.dhcp_probe_result_file)
-            .ok()
-            .and_then(|raw| serde_json::from_str::<ProbeAnswer>(&raw).ok());
+        let answer = match fs::read_to_string(answer_file) {
+            Ok(raw) => serde_json::from_str::<ProbeAnswer>(&raw)
+                .map_err(|e| fault = format!("; {answer_file} is no answer: {e}"))
+                .ok(),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+            Err(e) => {
+                fault = format!("; {answer_file} not read: {e}");
+                None
+            }
+        };
         if let Some(answer) = answer.filter(|a| a.id == id) {
             return Json(answer.page);
         }
     }
+    tracing::warn!("no DHCP probe answer{fault}");
     unavailable(format!(
-        "no DHCP probe answer within {}s; is the dhcp container running?",
+        "no DHCP probe answer within {}s; is the dhcp container running?{fault}",
         PROBE_WAIT_TIMEOUT.as_secs()
     ))
 }
@@ -5647,7 +5722,7 @@ async fn fetch_zone_groups(state: &AppState) -> Vec<ZoneSnapshotGroup> {
             zone: zone.clone(),
             // What: skip id-less entries; no time = 0.
             // Why: an old listener degrades to fewer rows.
-            // From: Issue #1683 | PR #1858
+            // From: Issue #1683 | PR #1912
             snapshots: list
                 .as_array()
                 .into_iter()
@@ -6256,7 +6331,8 @@ async fn resize_cache(State(state): Shared, Form(f): Form<Fields>) -> Result<Red
     // What: refuse when the free space is unknown.
     // Why: a failed df must never read as unlimited space.
     // From: Issue #1683 | PR #1858
-    let avail_mib = cache_free_mib(dir).ok_or_else(|| {
+    let avail_mib = cache_free_mib(dir).map_err(|e| {
+        tracing::warn!("free disk space at {dir} unknown: {e}");
         let message = format!("Could not determine free disk space at {dir}. Refusing to resize.");
         area(StatusCode::INTERNAL_SERVER_ERROR, message)
     })?;
@@ -6488,14 +6564,19 @@ async fn set_service_desired_state(
     // Why: two toggles at once must not drop each other.
     // From: Issue #1683 | PR #1858
     let _guard = hold(&state.file_lock);
-    let mut desired = DesiredState::read(path);
-    if service == "dhcp" {
-        desired.dhcp = Some(run_state);
-    } else {
-        desired.ntp = Some(run_state);
-    }
-    let written = serde_json::to_vec_pretty(&desired)
+    // What: an unreadable file fails the toggle.
+    // Why: a rewrite would drop the other service's state.
+    // From: Issue #1683 | PR #1912
+    let written = DesiredState::try_read(path)
         .map_err(io::Error::other)
+        .and_then(|mut desired| {
+            if service == "dhcp" {
+                desired.dhcp = Some(run_state);
+            } else {
+                desired.ntp = Some(run_state);
+            }
+            serde_json::to_vec_pretty(&desired).map_err(io::Error::other)
+        })
         .and_then(|json| write_file(path, &json, 0o644, Place::Replace));
     stored_status(&format!("desired state for {service}"), written)
 }
@@ -6616,9 +6697,16 @@ fn init_tracing() {
     };
     // What: RUST_LOG, else ui at info, crates at warn.
     // Why: an unset filter must not mute the ui log.
-    // From: Issue #1683 | PR #1858
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| "lancache_ui=info,warn".into());
+    // From: Issue #1683 | PR #1912
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|e| {
+        // What: a set but unusable RUST_LOG is reported.
+        // Why: a typo must not change the level.
+        // From: Issue #1683 | PR #1912
+        if std::env::var_os("RUST_LOG").is_some() {
+            eprintln!("warning: RUST_LOG not used: {e} (default filter)");
+        }
+        "lancache_ui=info,warn".into()
+    });
     tracing_subscriber::registry()
         .with(filter)
         .with(tracing_subscriber::fmt::layer())
