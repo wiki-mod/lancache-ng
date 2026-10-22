@@ -287,32 +287,32 @@ release gate.
 
 ## Platform Support
 
-The currently supported prebuilt production platforms are `linux/amd64` and
-`linux/arm64`. `release/stack-images.yml`, the build workflow, and `setup.sh`
-must agree on that platform list. `setup.sh` fails closed before pulling
-prebuilt production images if either:
+The supported prebuilt production platforms are the SOT
+`build_matrix.platforms` list in `.github/yaml/build-manifest.yml`; a build
+target may narrow it, never widen it. `ci.sh` reads that list for the build
+matrix. `setup.sh` fails closed before pulling prebuilt
+production images if either:
 
 - the host architecture is not one setup.sh recognizes (only x86_64/amd64 and
   aarch64/arm64 are supported), or
 - the specific tag/channel this install resolved to does not actually publish
   a manifest for this host's architecture (checked via `docker buildx
-  imagetools inspect`, mirroring `scripts/untracked/require-image-platforms.sh`'s
-  release/promotion guard).
+  imagetools inspect`).
 
-Adding another platform beyond amd64/arm64 requires updating the manifest,
-build workflow, setup platform guards, release notes, and validation together.
+Adding another platform requires updating the SOT list, the setup platform
+guard, and validation together.
 
 ## External Images
 
-External images are not part of the first-party stack tag. They remain explicit
-dependencies and are tracked in `release/stack-images.yml`. See
+External images are not part of the first-party stack tag. They are the SOT
+`base_images` entries. See
 [docs/release-external-images.md](release-external-images.md) for the
-per-image table (role, digest, policy) and provenance/SBOM expectations --
-this section states the policy only, not the current image list.
+per-image table (role, policy) and provenance/SBOM expectations -- this
+section states the policy only, not the current image list.
 
-Before a stable release, each external image used by a supported deployment
-profile must be pinned by digest, mirrored, or documented as intentionally
-floating with a clear reason.
+Every external image must be pinned by digest in the SOT `base_images`;
+`ci.sh check all` runs the `stable-external-images` check on every CI run
+except issue events.
 
 ## Rollback
 
@@ -322,302 +322,72 @@ bad pull without guessing which image was running.
 
 ## Retention
 
-`release/stack-images.yml` defines the retention contract.
+GHCR retention is reachability, not a count budget. `ci.sh gc` decides it;
+`.github/workflows/gc.yml` runs it once a day and on `workflow_dispatch`,
+with `--apply`. The policy values are the SOT `release.retention` keys.
 
-### Ordinary-history budget
+### Protected roots
 
-- Normal history budget: `accepted_ordinary_roots_per_package: 30`. For each
-  first-party runtime, tooling, or metadata package, keep the thirty newest
-  ordinary root identities rankable on the managed producer histories
-  (`current_dev`, `master`, `release/*`, and `v*` release branches that
-  actually exist in the full checkout).
-- A commit present on several histories uses its best first-parent rank; the
-  package still receives one shared thirty-root budget, not thirty per branch.
-- Raised from 10 to 30: a period with many concurrently open PRs that each
-  only change YAML/governance files still produces one new build-tools
-  `sha-<commit>` image per push, and a ten-slot window could evict still-live
-  history from those PRs before they merge.
-- The budget counts stored root identity, not tag names. Multiple immutable
-  `sha-<commit>` aliases resolving to the same root digest consume one
-  ordinary history slot. Platform child manifests and provenance/SBOM/referrer
-  artifacts do not consume ordinary-history slots; they remain part of the
-  required artifact closure while a retained or otherwise protected root
-  references them.
+`ci.sh gc` builds one protected root set before it looks at any version:
 
-### Audit and destructive GC roles
+- every record of the acceptance ledger (the git ref named by the
+  `CI_LEDGER_REF` variable), in any state;
+- every mutable channel (SOT `release.channels`) of every build target;
+- the layer cache tags of every build target and platform;
+- the index children of each of these.
 
-A `sha-*` tag proves that an immutable build identity exists; it is not a
-permanent storage exemption.
+A failed read of any of these sources is UNKNOWN: the run stops and deletes
+nothing. An empty protected root set stops the run too.
 
-- The read-only retention audit ranks resolvable ordinary roots by the
-  managed Git first-parent histories and labels roots beyond the manifest
-  budget `would-delete`. A resolvable root on none of those managed
-  histories is also `would-delete`; an unresolvable or mixed
-  managed/unmanaged root set stays protected fail-closed.
-- The destructive GC may consume only those exact version IDs after
-  independently confirming the same digest and complete tag set still
-  exist, the version is older than `GC_MIN_AGE_SECONDS`, and no
-  open/unknown PR state blocks deletion.
-- A root whose commit cannot be resolved on the managed history remains
-  protected fail-closed instead of being guessed deletable.
+### Candidates and verdict
 
-### Protected references
+The candidates are the GHCR versions of the SOT build targets only, never
+other packages of the owner. Each candidate gets one verdict:
 
-Protected references are exceptions to the rolling ordinary-history budget.
-The exact digest/root identities required by `nightly`, `latest`, a supported
-stable release, or an accepted stack identity remain protected together with
-their required artifact closure even when they fall outside the thirty
-ordinary accepted roots. Git ancestry can help classify where a legacy SHA
-came from, but being an ancestor of a protected branch or tag is not by
-itself a permanent storage exemption.
+- KEEP when its digest is in the protected root set;
+- KEEP when it is a `sha256-<subject>` referrer (attestation, SBOM) of a
+  protected root;
+- KEEP when it is younger than `release.retention.unaggregated_grace_minutes`,
+  so a build that is still being aggregated is not removed;
+- DELETE otherwise.
 
-The `stack` metadata package follows the same bounded `sha-*` root policy as
-runtime/tooling packages; its package class alone is not a permanent exemption.
-Its live `latest`/`nightly`/supported-release/rollback identities remain
-protected by the same reference rules below. Manifest-declared `legacy:`
-packages use a zero ordinary-root budget when the destructive GC addresses
-them, while any live protected release/channel/rollback reference still wins.
+A candidate that cannot be classified stops the run.
 
-The project must additionally keep at least the current stable release and two
-previous stable releases for the full first-party image set. Release digests,
-rollback digests, and SHA identities referenced by those protected releases must
-not be deleted.
+### Deleting
 
-Mutable channels such as `latest` and `nightly` may move, but the exact digests
-they still reference are protected. Historical channel targets are not retained
-merely because a mutable channel once pointed at them unless another retention
-rule still protects that identity.
+Without `--apply`, `ci.sh gc` only prints the verdicts. With `--apply` it
+deletes only when `release.retention.deletion_policy` is
+`manual-or-approved-automation-only` and GHCR auth is present; `gc.yml`
+passes `GHCR_PACKAGE_DELETE_PAT` for the delete calls.
 
-**The protected-reference model (issue #1501).** The audit
-(`scripts/lib/sha-retention-audit.sh`, `scripts/untracked/gc-sha-retention-audit.sh`)
-checks every classified package version's attached tags against the
-`nightly`/`latest`/supported-stable-release categories above and reports a
-specific reason instead of a generic one whenever a match is found:
+Right before each delete the candidate is classified again; a candidate that
+is now referenced is kept and logged. A delete counts as done when GitHub
+answers HTTP 404 or the version reads back with `deleted_at` set; any other
+answer stops the run. The run ends with one line that counts kept, deleted
+and classified versions.
 
-- `nightly-channel-protected` — this exact digest currently carries the
-  `nightly` tag.
-- `latest-channel-protected` — this exact digest currently carries the
-  `latest` tag.
-- `stable-release-protected` — this exact digest carries a `vX.Y.Z` tag that
-  is still among this package's `minimum_stable_releases` (3) newest stable
-  releases, selected by real semver order from the package's own tag
-  inventory rather than an extra GitHub Releases API call.
-
-A digest can carry more than one of these at once (e.g. immediately after a
-promotion, when `current_dev` and `master` briefly share a commit); the audit
-reports every applicable reason, `+`-joined
-(e.g. `nightly-channel-protected+stable-release-protected`), rather than
-picking one arbitrarily.
-
-This works because the promote job (`build-push.yml`) always retags an
-existing digest (`docker buildx imagetools create --prefer-index=false`)
-rather than rebuilding, so a currently active channel or release tag always
-lands on the exact same GHCR package-version object as the `sha-<commit>` tag
-it originated from — the audit does not need a second, separate
-digest-matching pass to find this; it only needs to read the already-fetched
-tag list honestly instead of collapsing it into a single generic bucket.
-
-**Protection is current-state-only, never "was ever" (maintainer
-clarification, 2026-08-14).** A real live audit found 32,895 package
-versions across the 9 first-party packages, far more than a blanket "anything
-ever nightly/latest stays protected forever" retention could justify. A
-registry tag name resolves to exactly one digest at a time, so a GHCR package
-version's own `tags` array is, by construction, the *live* pointer set, never
-a history of everything a tag ever pointed at: once `nightly`/`latest` moves
-to a new digest, the old digest's version object simply stops carrying that
-tag, and this audit reads that same live state. The same applies to
-`stable-release-protected`: it credits only a `vX.Y.Z` tag currently among
-the newest `minimum_stable_releases`, never an older, no-longer-supported
-release tag.
-
-A version whose only extra tag is unrecognized — a release-candidate, a
-staging tag, or a release tag past `minimum_stable_releases` — is **not**
-blanket-protected anymore: it falls through into the same ordinary
-root-candidate ranking (`legacy_rank`, budget) as a plain `sha-<commit>`
-root, since it still has a resolvable git-history root to rank by.
-`non-sha-tag-attached`/`non-ordinary-version` now only ever label a root
-with no *resolvable* commit history at all (the `root_count==0` case), not
-"carries some extra tag."
-
-### Destructive retention GC (issue #1095)
-
-`gc-pr-staging-images.yml` keeps the read-only audit as the sole
-ordinary-root classifier and runs one filtered audit per manifest package.
-
-- The filtered audit exports the exact normalized package snapshot it
-  classified, and the destructive worker reuses that snapshot instead of
-  immediately listing the same multi-thousand-version package again.
-- Package workers may run concurrently, but each package's graph analysis,
-  revalidation, and DELETE sequence remains serial and subject to the
-  existing per-package and run-wide deletion caps.
-- Confirmed PR planning states are shared only within the current sweep to
-  avoid duplicate cross-package API lookups; immediate pre-delete PR checks
-  always bypass that cache.
-
-**Immediately before deleting** an audit-authorized root, closed-PR version,
-retention-closure artifact, or untagged orphan, the GC re-reads the exact
-package version with caching disabled and requires its ID, digest, complete
-sorted tag set, and minimum age to still match the planned candidate.
-
-- Any PR tag is also rechecked and must resolve CLOSED.
-- A changed channel/release tag, API ambiguity, malformed data, or shared
-  child digest therefore keeps the object.
-- Tagged `sha-<commit>-<arch>` / `sha256-<subject>` closure is retained
-  while its root or subject is live, but remains collectible in a later
-  sweep if that parent was removed by an earlier run; closure no longer
-  depends on remembering a same-run root deletion.
-- OCI `.subject.digest` is treated as a reverse referrer edge, not a forward
-  child edge, so a stale attestation cannot keep an otherwise-dead subject
-  alive by itself.
-
-DELETE itself uses the project's bounded retry wrapper; HTTP 404 is idempotent
-success, permanent 4xx responses fail immediately, and transient failures retry.
-`workflow_dispatch` exposes dry-run, concurrency, age, per-package deletion-cap,
-and run-wide deletion-cap controls for supervised/backlog runs.
-
-**Deliberately not implemented: a "previous nightly" safety net.** The
-maintainer's real operational intent for `nightly` protection is narrower
-than "every digest nightly ever pointed at," but broader than "only the
-current one" — if a broken `current_dev` tip gets built as `nightly`, an
-operator needs to fall back to the last *working* nightly build. This audit
-protects only the exact current `nightly` digest; it does not separately
-protect whichever digest was `nightly` immediately before that. Implementing
-that would require reading `nightly-refresh.yml`'s own GitHub Actions run
-history (GHCR itself exposes no tag history at all, only the current
-pointer) via a new Actions API surface and an `actions: read` permission
-this audit's workflow does not currently have — a real, but separate,
-follow-up scope, not a silent gap: `accepted_ordinary_roots_per_package`
-(30) already retains far more than one prior build's `sha-<commit>` root as
-ordinary history regardless of channel-tag status, so a last-known-good
-nightly commit typically stays available as an ordinary root in practice
-even without dedicated channel-level protection for it. See issue #1501's
-comment thread for the maintainer decision on whether to build the
-dedicated Actions-API lookup.
-
-### Rollback digests: `retention.rollback_anchors` (status: implemented)
-
-`protect_release_and_rollback_digests` names two distinct protections:
-
-- the *release* half (`stable-release-protected`, described above) is
-  derived automatically from real Git release tags;
-- the *rollback* half has no such automatic source — "this digest is a
-  designated rollback target" is not a fact Git history or any existing
-  GHCR/CI record can derive on its own. It is an explicit maintainer
-  judgment call, typically made right after a regression is found ("the
-  last known-good digest before this regression must stay available").
-
-`release/stack-images.yml`'s `retention.rollback_anchors` key is exactly
-that judgment call, made queryable: a maintainer-curated list of exact
-`sha256:<64-hex>` digests, initially empty, that stays empty unless and
-until a maintainer deliberately adds one.
-
-- Every rollback anchor digest is checked against every classified package
-  version *before* any other classification rule (class, tag shape,
-  release-tag status, ordinary-history rank) and independent of all of
-  them — `reason=explicit-rollback-anchor` — so a declared anchor is
-  protected unconditionally, even if it would otherwise fall far outside
-  the ordinary-history budget.
-- Entries are **digest-only, never a git tag or ref**: a tag or ref can be
-  moved or deleted out from under an anchor, silently repointing or
-  breaking the guarantee this mechanism exists to provide, without the
-  audit ever noticing — a content-addressed digest cannot.
-- `scripts/untracked/validate-stack-images.sh` statically rejects any entry
-  that is not an exact `sha256:<64-hex>` string (reusing
-  `scripts/lib/sha-retention-audit.sh`'s `sra_is_rollback_anchor_digest`,
-  the single canonical definition of the accepted shape). That static check
-  cannot prove a listed digest actually *exists* under its intended
-  package, since it has no GHCR access.
-- `scripts/untracked/gc-sha-retention-audit.sh` does that existence check
-  for real, at audit time, against the package versions it fetches from
-  GHCR, and marks every declared anchor digest it actually observes. **Any
-  declared anchor digest never observed in any audited first-party package
-  (a typo, an already-deleted digest, one that never existed) fails the
-  entire audit run closed** — an unproven rollback declaration is never
-  silently ignored, the same fail-closed posture used throughout this
-  audit.
-- `rollback_anchors` is a manually maintained list, not an automated
-  feature: no automated expiry, TTL, or pruning of stale entries. A
-  maintainer who adds an anchor after a regression is also responsible for
-  removing it later once it is no longer needed, or the list grows without
-  bound.
-- This does not overlap `setup.sh`'s `reset-to-last-known-good-config`
-  (restores local Kea/PowerDNS *configuration* snapshots on an operator's
-  own install, never touches a GHCR image tag or digest) or `setup.sh
-  update`'s own pre-update backup (archives `LANCACHE_IMAGE_TAG` only inside
-  that one operator's own local backup archive, never in GHCR or this
-  repository) — neither is a centrally-recorded, GHCR-queryable registry,
-  which is exactly why `rollback_anchors` had to be its own declared list
-  rather than derived from either.
-
-**Correction (2026-08-16).** An earlier revision of this section stated that
-a separate rollback-anchor check was "considered and rejected as a
-fabricated check with no real data source." That reasoning applied to
-*inferring* a rollback target automatically (from GHCR tag history GHCR
-does not expose, or from an operator's own local backup this repository
-cannot see) — it does not apply to a maintainer directly declaring a digest
-in the manifest, which needs no inference at all and is the same kind of
-manually-maintained declaration as every other key in this `retention:`
-block. The mechanism above was already implemented before that revision was
-written; this section now reflects the actually-shipped design.
-
-### Automated cleanup approval and reporting
-
-Automated cleanup must be explicitly approved and must consume the manifest
-retention contract plus canonical accepted/protected identity evidence. The
-repository's configured `GHCR Retention GC` schedule is that approved automation:
-
-- it currently performs one bounded destructive sweep per day;
-- `workflow_dispatch` permits either the same destructive mode or a
-  supervised dry-run;
-- during a large historical backlog the schedule may be run more often only
-  after measured API behavior shows the smaller repeated sweeps remain
-  below GitHub rate/service-pressure limits;
-- the read-only audit itself still must not expose a switch that turns it
-  into a package-version deletion path;
-- every destructive run must fail closed when package-version schema,
-  protected references, PR state, age, or artifact-graph closure cannot be
-  proven.
-
-The audit reports every package version beyond the accepted-roots budget as
-a labeled dry-run candidate (`decision=would-delete`) rather than folding it
-into the same blanket `protect` reason as a genuinely protected identity.
-Each reported candidate carries the real GHCR `created_at` build date for
-that specific package version alongside its tag and digest, so a maintainer
-reading the report sees which build a candidate is, not only a count.
-`created_at` is display-only; it is never read as input to the
-acceptance-ranking decision itself (that ranking is git-history-derived, see
-above) — using package-registry timestamps to decide ranking was the exact
-`created_at`-reuse defect this audit was rebuilt to avoid. If GHCR does not
-return a usable build date for a specific version, that is a real
-data-quality defect in the build/publish pipeline (e.g. a missing container
-timestamp), reported as its own distinct finding, and never silently folded
-into an unrelated protect/would-delete reason.
-
-**Optional operator selectors remain deferred:** date/date-range, tag/time-span,
-and free-text/pattern selectors (for example a specific `sha-<commit>` alias,
-full `sha256:` digest, or PR-associated tag) are not implemented. They are
-optional targeting conveniences, not an activation prerequisite: normal
-retention GC is already authorized through the bounded scheduled/manual
-collector described above.
+A digest with a ledger record stays as long as that record exists, so a
+released digest is not garbage. A mutable channel protects only the digest
+it points at now.
 
 ## CI Guardrails
 
-The CI guardrails must fail closed when:
+`ci.sh check all` runs in the `checks` job of every CI run except issue
+events. The run fails
+closed when:
 
-- compose image names drift from `release/stack-images.yml`
-- the build matrix omits a first-party package
-- `latest` is published through any path other than the gated `promote` job
-  (e.g. `docker/metadata-action`'s own `is_default_branch` auto-tag on a raw
-  build step) -- `master`'s own `promote`-job publish of `latest` is the
-  correct, audited path and is not what this guards against
-- an RC tag attempts to create a non-prerelease
-- a release job uses mutable `build-tools:latest`
-- release notes omit a first-party package
-- a public channel would be promoted before the full package set exists
-- retention rules are missing from the stack image manifest
-- stable release promotion would move `latest` while supported external images
-  are still floating
-- release or release-adjacent jobs that mention build acceleration do not state
-  whether that accelerator is optional, preferred, or a gate
-- normal setup/update validation would inherit LAN-only cache assumptions from
-  a self-hosted runner path
+- a compose image is neither a first-party `LANCACHE_*` image nor a digest
+  pin from the SOT `base_images` (`stable-external-images`);
+- a changed file uses a mutable image reference (`mutable-refs`);
+- channel or tag resolution does not come from one config across
+  `setup.sh`, the UI and compose (`image-channel-resolution`);
+- a production install path builds instead of pulling prebuilt images
+  (`prebuilt-prod`);
+- a SOT-owned job does not take its runner and timeout from
+  `ci.sh job-settings` (`workflow-job-settings`);
+- one of the SOT `ci_result_gate.required` phases did not run and succeed.
+
+Channel moves happen only in `ci.sh promote`, under the promote lock. A
+`vX.Y.Z-rc.N` tag creates a prerelease and promotes only its own tag; a
+final `vX.Y.Z` tag also moves the channels marked `release_tags: true` in
+the SOT.
