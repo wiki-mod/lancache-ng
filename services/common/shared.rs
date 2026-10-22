@@ -148,23 +148,23 @@ impl DesiredState {
     }
 }
 
+// What: true when an IO error means the path is absent.
+// Why: a path below a plain file cannot exist either.
+// From: Issue #1683 | PR #1858
+fn io_absent(e: &io::Error) -> bool {
+    matches!(
+        e.kind(),
+        io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+    )
+}
+
 // What: metadata of a path; None only when it is absent.
 // Why: a stat error must not read as "absent".
 // From: Issue #1683 | PR #1912
 pub fn metadata_if_present(path: &Path) -> io::Result<Option<fs::Metadata>> {
     match fs::metadata(path) {
         Ok(meta) => Ok(Some(meta)),
-        // What: missing path or file parent is absent.
-        // Why: a path below a plain file cannot exist.
-        // From: Issue #1683 | PR #1912
-        Err(e)
-            if matches!(
-                e.kind(),
-                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
-            ) =>
-        {
-            Ok(None)
-        }
+        Err(e) if io_absent(&e) => Ok(None),
         Err(e) => Err(io::Error::new(
             e.kind(),
             format!("cannot check {}: {e}", path.display()),
@@ -1438,13 +1438,19 @@ pub fn resolve_shared_secret(
 ) -> Result<String, String> {
     let file = dir.join(name);
     // What: the file text without newlines; empty is none.
-    // Why: an empty file counts as no secret yet.
-    // From: Issue #1683 | PR #1912
-    let on_disk = || {
-        fs::read_to_string(&file)
-            .ok()
-            .map(|v| v.replace('\n', ""))
-            .filter(|v| !v.is_empty())
+    // Why: an empty file counts as no secret yet; any
+    // other read error is logged, then counts as none.
+    // From: Issue #1683 | PR #1858
+    let on_disk = || match fs::read_to_string(&file) {
+        Ok(v) => Some(v.replace('\n', "")).filter(|v| !v.is_empty()),
+        Err(e) if io_absent(&e) => None,
+        Err(e) => {
+            eprintln!(
+                "[shared-secret] WARNING: {} not read, counted as absent: {e}",
+                file.display()
+            );
+            None
+        }
     };
     // What: reuse the file when it fits the current value.
     // Why: the first writer's secret must stay.

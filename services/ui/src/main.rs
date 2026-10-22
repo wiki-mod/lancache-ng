@@ -7035,11 +7035,12 @@ async fn run() -> anyhow::Result<()> {
     let issuer = issuer_keypair(&cfg).unwrap_or_else(|e| container_start_fatal(&e));
     let xkey = callout_xkey(&cfg).unwrap_or_else(|e| container_start_fatal(&e));
     // What: fragment written before the NATS connect.
-    // Why: dns nats-server waits for it; no deadlock.
-    // From: Issue #811 | PR #1912
-    if let Err(e) = write_callout_fragment(&cfg, &issuer.public_key(), &xkey.public_key()) {
-        tracing::error!("Failed to write the auth_callout fragment: {e}");
-    }
+    // Why: dns nats-server waits for it; a write error
+    // stops the start, it must not wait unseen.
+    // From: Issue #811 | PR #1858
+    write_callout_fragment(&cfg, &issuer.public_key(), &xkey.public_key()).unwrap_or_else(|e| {
+        container_start_fatal(&format!("cannot write the auth_callout fragment: {e}"))
+    });
     let nats = connect_nats_with_retry(&cfg).await;
     let http = http_client(&config::process_env).map_err(anyhow::Error::msg)?;
     let db = open_database(&cfg.database_file)?;
