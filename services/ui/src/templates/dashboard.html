@@ -349,7 +349,7 @@
   // What: reruns refreshDashboardMetrics per SOT interval
   // Why: counters stay live without a page reload
   // From: Issue #1683 | PR #1912
-  setInterval(refreshDashboardMetrics, {{ dashboard_refresh_seconds * 1000 }});
+  setInterval(refreshDashboardMetrics, window.LancacheUi.ms({{ dashboard_refresh_seconds }}));
 
   // What: skip title update when health is omitted
   // Why: the disk-cache dot has no health string to show

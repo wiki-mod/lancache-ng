@@ -227,6 +227,11 @@
     :root[data-theme="light"] .list-row:hover { background-color: var(--color-surface-raised); }
   </style>
   <script>
+    // What: SOT seconds as the milliseconds JS timers take
+    // Why: one conversion for every page script
+    // From: Issue #1683 | PR #1912
+    window.LancacheUi = { ms: function (seconds) { return seconds * 1000; } };
+
     // What: set data-theme before the first paint
     // Why: stored choice, else OS setting; one CSS rule set
     // From: Issue #1437 | PR #1912
@@ -544,7 +549,7 @@
     // Why: beambar and dashboard dots read the same data
     // From: Issue #1683 | PR #1912
     window.LancacheWatchdog.refresh();
-    setInterval(window.LancacheWatchdog.refresh, {{ watchdog_refresh_seconds * 1000 }});
+    setInterval(window.LancacheWatchdog.refresh, window.LancacheUi.ms({{ watchdog_refresh_seconds }}));
 
     // What: each [data-epoch] value as de-DE date and time
     // Why: one owner for every page; 0 or junk stays raw
@@ -559,7 +564,7 @@
         if (!Number.isFinite(epoch) || epoch <= 0) {
           return;
         }
-        el.textContent = formatter.format(new Date(epoch * 1000));
+        el.textContent = formatter.format(new Date(window.LancacheUi.ms(epoch)));
         el.title = 'Unix: ' + el.dataset.epoch;
       });
     })();

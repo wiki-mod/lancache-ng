@@ -64,7 +64,7 @@ const POINTS  = {{ stats_points }};
 // What: refresh() interval; SOT seconds as setInterval ms
 // Why: each tick fetches every chart from netdata
 // From: Issue #1683 | PR #1912
-const REFRESH  = {{ stats_refresh_seconds * 1000 }};
+const REFRESH  = window.LancacheUi.ms({{ stats_refresh_seconds }});
 
 // What: shared line-chart options for all four charts
 // Why: one look; no animation keeps each tick cheap
