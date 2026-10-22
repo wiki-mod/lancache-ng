@@ -102,10 +102,15 @@ deliberately **not** applied to any of `.229`/`.241`/`.243` during this
 investigation since all three had live CI containers running at inspection
 time). Verification recipe for whoever runs this test:
 
+nginx writes its access log to stdout (`access_log /dev/stdout` in
+`services/proxy/nginx.conf`); Docker's `syslog` driver hands it to syslog-ng
+in `services`, which stores it under `SYSLOG_NG_LOG_DIR` in the directory
+named after the proxy container (logging switch `LOGGING_PROXY_ENABLED` on).
+
 ```sh
 # Before: capture a real client request's $remote_addr as nginx sees it.
 curl -s http://<lancache-host>/some/cached/path -o /dev/null
-docker exec lancache-proxy tail -5 /var/log/nginx/access.log   # note $remote_addr
+tail -5 "${SYSLOG_NG_LOG_DIR}/LanCache-NG-proxy/$(date +%Y%m%d).log"   # note $remote_addr
 
 # Apply the change (requires a Docker daemon restart -- disruptive):
 sudo vi /etc/docker/daemon.json     # add "userland-proxy": false
@@ -114,7 +119,7 @@ docker compose -f deploy/prod/docker-compose.yml up -d
 
 # After: repeat the same request from the same real client and compare.
 curl -s http://<lancache-host>/some/cached/path -o /dev/null
-docker exec lancache-proxy tail -5 /var/log/nginx/access.log   # compare $remote_addr
+tail -5 "${SYSLOG_NG_LOG_DIR}/LanCache-NG-proxy/$(date +%Y%m%d).log"   # compare $remote_addr
 ```
 
 If `$remote_addr` already shows the real client IP with `userland-proxy:
