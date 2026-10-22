@@ -264,7 +264,7 @@ services:
       - CHOWN
     read_only: true
     tmpfs:
-      - /var/tmp
+      - /tmp
     volumes:
       - proxy-cache:/var/cache/lancache
       - retention-state:/var/lib/lancache-retention-state

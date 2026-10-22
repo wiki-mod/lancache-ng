@@ -1372,7 +1372,7 @@ services:
       - CHOWN
     read_only: true
     tmpfs:
-      - /var/tmp
+      - /tmp
     environment:
       - CACHE_VALID_DAYS=365
       - CACHE_DIR=/var/cache/lancache

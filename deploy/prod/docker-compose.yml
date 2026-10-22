@@ -416,9 +416,9 @@ services:
     read_only: true
     tmpfs:
       # retention.sh's mktemp calls (scan/error scratch files ahead of every
-      # find/rm pass) need a writable /var/tmp -- the rest of the root
+      # find/rm pass) need a writable /tmp -- the rest of the root
       # filesystem stays read-only.
-      - /var/tmp
+      - /tmp
     env_file:
       - ../../config/prod/watchdog.env
     # Same rationale as watchdog's own identical block before this split --
