@@ -12,14 +12,14 @@ client is DHCP. LanCache NG supports four DHCP modes, selected once during
 | `dnsmasq-proxy` | LanCache NG runs dnsmasq in proxy-DHCP mode next to an existing DHCP server, injecting PXE/DNS options into the supplemental exchange only. | Your existing router/DHCP server |
 | `dnsmasq-relay` (#844) | LanCache NG runs dnsmasq as a real DHCP relay, forwarding every client's DHCP request to an upstream DHCP server on another network segment and relaying the reply back. | Your upstream DHCP server |
 
-The four modes are mutually exclusive. `setup.sh` writes exactly one runtime
-Compose profile (`dhcp-kea` **or** `dhcp-proxy`, never both), and the Admin UI
-stops the other DHCP service whenever you switch modes. Kea and dnsmasq both
-bind UDP port 67, so only one can be active at a time. The two dnsmasq modes
-(`dnsmasq-proxy` and `dnsmasq-relay`) share the same `dhcp-proxy` container and
-Compose profile; the container reads `DHCP_MODE` and renders the ProxyDHCP or
-the relay config accordingly, so they too are mutually exclusive (never both on
-one interface).
+The four modes are mutually exclusive. Kea and dnsmasq both run in the one
+`dhcp` container on the host network. Its supervisor reads `DHCP_MODE` and
+starts the Kea programs only in `kea` mode and dnsmasq only in a dnsmasq mode;
+in `disabled` it starts neither. Kea and dnsmasq both bind UDP port 67, so only
+one can be active at a time. When the Admin UI saves a new mode, the supervisor
+stops the programs the new mode does not want and starts the others. dnsmasq
+renders the ProxyDHCP or the relay config from `DHCP_MODE`, so the two dnsmasq
+modes are mutually exclusive too (never both on one interface).
 
 ## When to use Kea mode
 
@@ -53,19 +53,20 @@ router (and set DNS another way) or switch DHCP fully to LanCache NG.
 Selecting `kea` in `setup.sh` prepares Kea's configuration, secrets, and
 volumes, but `setup.sh` does not let Kea become an active DHCP server without
 one more safety step. Immediately before the stack starts — after images are
-pulled, right before `docker compose up` — `setup.sh` runs a non-invasive
-DHCP discovery probe (`nmap --script broadcast-dhcp-discover`) using the Kea
-image itself. This only runs `nmap` inside that image and exits; it does not
-start Kea and does not touch the network beyond the broadcast probe.
+pulled, right before `docker compose up` — `setup.sh`
+(`run_kea_dhcp_activation_preflight`) runs one DHCP probe in the `dhcp` image
+(`docker compose run --rm --no-deps dhcp probe`, the same probe as the Admin
+UI DHCP check). It prints its report and exits; it does not start Kea and
+does not touch the network beyond the probe's own DHCP exchange.
 
 - If no other DHCP server answers, setup proceeds automatically and Kea
   starts as normal.
-- If another DHCP server answers (Server Identifier detected), `setup.sh`
+- If another DHCP server answers (probe status `conflict_found`), `setup.sh`
   prints the responding server and requires an explicit `y`/`yes`
   confirmation before continuing. Answering no cancels activation entirely —
   Kea is never started.
-- If the probe itself could not run for any other reason (e.g. Docker/network
-  issues), `setup.sh` fails closed the same way: it requires an explicit
+- If the probe itself could not run or reports `unavailable` (e.g.
+  Docker/network issues), `setup.sh` fails closed the same way: it requires an explicit
   confirmation rather than silently proceeding as if no conflict exists.
 
 This closes the gap that existed before: previously, selecting `kea` started
@@ -81,11 +82,11 @@ itself it does not prevent Kea from serving. The `setup.sh` preflight
 documented here is what actually blocks Kea's first activation when a
 conflict is detected or the check could not run.
 
-Neither check validates Kea's own configuration or replays a real DHCP lease
-negotiation (`DHCPDISCOVER`/`DHCPOFFER`/`DHCPREQUEST`/`DHCPACK`) end to end —
-both are discovery-only broadcast probes for a second DHCP server on the
-segment. A behavioral test of Kea's actual lease/option responses is tracked
-separately (Refs #448).
+Neither check validates Kea's own configuration. The probe sends a broadcast
+DISCOVER and a client dry-run (`DHCPREQUEST` for the first offer, then
+`DHCPRELEASE`) against whatever server answers; it does not test the leases
+or options Kea itself hands out. A behavioral test of Kea's actual
+lease/option responses is tracked separately (Refs #448).
 
 ## When to use dnsmasq-proxy mode
 
@@ -166,7 +167,8 @@ DHCP page.
 Every option below is only delivered to PXE/network-boot-aware clients via
 the supplemental ProxyDHCP/PXE exchange (the same mechanism the DNS option
 above already uses) — never to ordinary DHCP clients. Leave any of these
-empty to skip it; entrypoint.sh omits the corresponding line entirely rather
+empty to skip it; the supervisor's dnsmasq render (`dnsmasq_conf` in
+`services/watchdog/src/main.rs`) omits the corresponding line entirely rather
 than rendering an empty or invalid one.
 
 > **Issue #705 finding, affecting every option in this section:** dnsmasq's
@@ -192,17 +194,18 @@ than rendering an empty or invalid one.
 | `DHCP_PROXY_DOMAIN` | Domain name option (DHCP option 15), PXE-scoped. | `lan.local` |
 | `DHCP_PROXY_BOOT_FILENAME` | PXE boot filename, via dnsmasq's `dhcp-boot` directive — the directive the dnsmasq man page documents as intended for this exact "ProxyDHCP server alongside a real DHCP server" case. | `pxelinux.0` |
 | `DHCP_PROXY_BOOT_SERVER` | Boot server address for `dhcp-boot`. Requires `DHCP_PROXY_BOOT_FILENAME`; defaults to dnsmasq's own address if left empty while a filename is set. | `10.0.0.5` |
-| `DHCP_PROXY_CUSTOM_OPTIONS` | Additional safe custom options as `CODE:VALUE`, one per line in the Admin UI (stored as `;`-separated `CODE:VALUE` pairs). The **Admin UI form** rejects codes already covered by the dedicated fields above (3, 6, 15, 42) plus 119 (domain-search), to avoid two conflicting ways to set the same option; the container `entrypoint.sh` itself only range-checks the code (1-254) and does not re-enforce this exclusion, so a value hand-edited directly into the env file bypasses the UI's check and can render a duplicate, conflicting `dhcp-option-pxe` line. | `60:PXEClient` |
+| `DHCP_PROXY_CUSTOM_OPTIONS` | Additional safe custom options as `CODE:VALUE`, one per line in the Admin UI (stored as `;`-separated `CODE:VALUE` pairs). The Admin UI form and the supervisor's render use the same rule (`parse_custom_options` in `services/common/config.rs`): a code from 1 to 254, not one of the codes the dedicated fields above own (`DNSMASQ_MANAGED_CODES`: router, DNS, domain, NTP), one line of data without `;`. A hand-edited value that breaks the rule is not rendered at all; the `dhcp` log shows `WARNING: DHCP_PROXY_CUSTOM_OPTIONS not rendered`. | `60:PXEClient` |
 
-`setup.sh update` and the container entrypoint both fail closed for the
-*required* values: if any is missing or invalid, setup refuses to continue
-and the container refuses to start, rather than silently running with
-broken DHCP configuration. The optional values above are validated only when
-non-empty (empty is the supported "not using this option" state); a
-structurally invalid optional value (e.g. an out-of-range custom option
-code) is skipped with an explicit warning in the container logs rather than
-silently accepted or crash the container. Existing non-empty values in your
-local `.env` are preserved and never overwritten on update.
+`setup.sh update` fails closed for the *required* values: if any is missing
+or invalid, setup refuses to continue. In the container the supervisor checks
+every dnsmasq render with `dnsmasq --test`; a render that fails runs from the
+newest known-good snapshot instead (`WARNING: ... runs from known-good
+snapshot`), so dnsmasq never starts on a broken new config. The optional values
+above are validated only when non-empty (empty is the supported "not using this
+option" state); a value with a line break or an invalid custom option is
+skipped with an explicit `WARNING` in the `dhcp` log rather than silently
+accepted. Existing non-empty values in your local `.env` are preserved and
+never overwritten on update.
 
 ### PXE boot-pointer (issue #705)
 
@@ -223,18 +226,13 @@ this section or the "Optional (issue #450)" one above changes.
 > wiring three new form fields through `services/ui/src/main.rs`,
 > which is a separate, larger piece of work than the setup.sh side. Until
 > that lands, changing these three values after initial setup means editing
-> the runtime env `deploy/prod/.env.local` and restarting: the dhcp
+> the runtime env `deploy/prod/.env.local` and recreating `dhcp`: the dhcp
 > service in `deploy/prod/docker-compose.yml` wires each of these keys as
 > `KEY: ${KEY:-}` in its `environment:` map, so the running container reads the value the
 > runtime env holds at `docker compose up` time. No `.env` is tracked;
-> an empty value falls back to the default in `runtime.defaults` of the SOT. A value an
-> older install set in `config/prod/dhcp-proxy.local.env` moves into the
-> runtime env on the next `setup.sh update`: it is copied during the update and
-> removed from the local file only after the update succeeded. The
-> `ci.sh check dhcp-proxy-env` guard fails if a template key the dhcp-proxy
-> entrypoint reads is not passed to the service.
-> STATUS: as of 2026-08-06, `setup.sh` coverage is
-> done; Admin UI coverage is open (AG-FEAT-002 UI delivery debt).
+> an empty value falls back to the default in `runtime.defaults` of the SOT.
+> STATUS: `setup.sh` coverage is done; Admin UI coverage is open (AG-FEAT-002
+> UI delivery debt).
 
 | Key | Meaning | Example |
 |---|---|---|
@@ -273,8 +271,8 @@ BIOS), and for any architecture other than BIOS it renders no boot
 filename at all. `pxe-service` is still rendered once (for BIOS if
 configured, or a dedicated inert placeholder architecture otherwise)
 purely because at least one such directive must exist for ProxyDHCP
-replies to happen at all — see `services/dhcp-proxy/entrypoint.sh` for the
-full account.
+replies to happen at all — see `dnsmasq_conf` in
+`services/watchdog/src/main.rs`.
 
 ## When to use dnsmasq-relay mode (issue #844)
 
@@ -311,9 +309,9 @@ editable from the Admin UI's DHCP page, which shows a dedicated relay panel):
 - **`UPSTREAM_DHCP_IP`** (required): the upstream DHCP server every request is
   forwarded to.
 
-The container renders `dhcp-relay=<DHCP_RELAY_LOCAL_ADDR>,<UPSTREAM_DHCP_IP>`
-(no `dhcp-range`, no option injection). As with every other dnsmasq config in
-this project, `dnsmasq --test` validates the generated config at startup and a
+The supervisor in `dhcp` renders `dhcp-relay=<DHCP_RELAY_LOCAL_ADDR>,<UPSTREAM_DHCP_IP>`
+(no `dhcp-range`, no option injection). As with the ProxyDHCP config,
+`dnsmasq --test` validates the generated config before dnsmasq starts and a
 failed validation rolls back to the last known-good config rather than starting
 broken. Note the known-good-snapshot history is shared between the two dnsmasq
 modes, so a failed relay-config validation may roll back to a stored *ProxyDHCP*
@@ -358,88 +356,19 @@ mode, that is the expected limitation described above: the upstream DHCP
 server's DNS option can take precedence. Switch to `kea` mode, or set DNS on the
 router/clients directly, to guarantee cache routing.
 
-## Automated DHCP behavior testing (CI)
+## Automated DHCP checks
 
-This project has four separate, non-overlapping automated DHCP checks.
-None run on the host's real network interface by default:
+These checks exist today. None configures a negotiated lease on any
+interface:
 
 | Check | What it answers | Where it runs | Invasive? |
 |---|---|---|---|
-| **Conflict discovery** (`services/watchdog/src/main.rs`, the `dhcp-probe` process of the `dhcp` container; the Admin UI asks for a run through `DHCP_PROBE_REQUEST_FILE`) | Does *any* DHCP server answer on this LAN segment (a native broadcast DHCPDISCOVER, no external tool), and does a client dry-run (a real DISCOVER/OFFER/REQUEST/ACK exchange against the first offer) also succeed? Replaced the former `nmap --script broadcast-dhcp-discover` + `dhclient -1` invocations (issue #1288: both EOL/no longer packaged on current Alpine) with a from-scratch DHCPv4 client. | Admin UI DHCP page, on demand | The client dry-run leg never binds/applies the negotiated lease to any interface (only UDP socket bytes are read/written) and releases the lease (DHCPRELEASE) immediately after confirming it, rather than leaving it allocated for its full lease time as the former `dhclient -1` dry-run did. It does still run against the host's own network (bound to the well-known DHCP client port, broadcasting on the real LAN segment). |
-| **Kea lease-flow simulation** (`scripts/untracked/simulations/dhcp-kea-lease-flow-simulation.sh`) | Does *our own* Kea service complete a real Discover/Offer/Request/Ack and return the address range, router, DNS, NTP, lease-time, and domain-name options actually configured? Also: does a static host reservation, added directly through Kea's Control Agent API, actually get honored by a subsequent real lease request for the reserved MAC, and does it stay isolated to that MAC (a different, unrelated MAC still gets an ordinary pool address)? And does a granted lease produce a matching PowerDNS **forward (A record)** AND **reverse (PTR record)** DDNS update? | `dhcp-kea-lease-flow-simulation` job in the `Full-Setup Validate` GitHub Actions workflow (`workflow_dispatch` only, never on every PR) | No -- it builds a throwaway Kea container, a throwaway PowerDNS container, and throwaway client containers, all on a dedicated Docker bridge network the script creates and destroys itself. No container's interface, nor any host interface, is ever configured with the negotiated lease. |
-| **Kea Control Agent mutation round-trip** (`scripts/untracked/simulations/dhcp-kea-ctrl-agent-mutation-simulation.sh`) | Does a real static host reservation added/removed through the actual Admin UI HTTP route (`kea_config_modify()`'s config-get/config-test/config-set/config-write sequence) against a real Kea Control Agent actually change what a *subsequent* real DHCP lease request receives -- not just that the API call returned success? | `dhcp-kea-ctrl-agent-mutation-simulation` job in the `Full-Setup Validate` GitHub Actions workflow (`workflow_dispatch` only, never on every PR) | No -- real Kea and Admin UI containers on the throwaway compose project's own bridge network; DHCP clients again use `dhclient -sf /bin/true`, never applying the negotiated lease to any interface. |
-| **dnsmasq-proxy PXE simulation** (`scripts/untracked/simulations/dhcp-proxy-pxe-simulation.sh`) | Does *our own* dnsmasq-proxy ProxyDHCP mode reply to a real, synthetically-crafted PXE-tagged DHCPDISCOVER with the correct external boot server address, architecture-appropriate boot filename, and LanCache NG DNS servers -- for both legacy BIOS and UEFI clients -- while still ignoring an ordinary, non-PXE-tagged DISCOVER? | `dhcp-proxy-pxe-simulation` job in the `Full-Setup Validate` GitHub Actions workflow (`workflow_dispatch` only, never on every PR) | No -- it builds a throwaway dnsmasq-proxy container and a throwaway synthetic-PXE-client container (the Rust `tools/pxe-client-probe` binary, compiled with the build-tools image), both on a dedicated Docker bridge network the script creates and destroys itself. No host interface is ever involved, and the external PXE boot server it asserts against is never a real listening service -- just a configured address, per issue #705's scope of pointing at operator infrastructure this project does not itself run. |
-| **dnsmasq-relay flow simulation** (`scripts/untracked/simulations/dhcp-relay-flow-simulation.sh`, #844) | Does *our own* dnsmasq-relay mode genuinely forward a real client DHCPDISCOVER across a network-segment boundary to an upstream DHCP server? A client on an isolated client-subnet bridge (with **no** direct path to the upstream) sends a real dhclient DISCOVER; the assertion is that the upstream -- on a separate server-subnet bridge -- receives that relayed request and offers an address from the **client** subnet's pool, which is only possible if the relay stamped the correct `giaddr` (`DHCP_RELAY_LOCAL_ADDR`). | `dhcp-relay-flow-simulation` job in the `Full-Setup Validate` GitHub Actions workflow (`workflow_dispatch` only, never on every PR) | No -- it builds a throwaway relay container (this checkout's `dhcp-proxy` image, `DHCP_MODE=dnsmasq-relay`), a throwaway upstream-dnsmasq container, and a throwaway dhclient container across two dedicated Docker bridge networks it creates and destroys itself. No host interface is involved. The two-segment topology is deliberate: if the client and upstream shared one segment the relay would be bypassed. |
+| **Conflict discovery** (`services/watchdog/src/main.rs`, the `dhcp-probe` process of the `dhcp` container; the Admin UI asks for a run through `DHCP_PROBE_REQUEST_FILE`) | Does *any* DHCP server answer on this LAN segment (a native broadcast DHCPDISCOVER, no external tool), and does a client dry-run (a real DISCOVER/OFFER/REQUEST/ACK exchange against the first offer) also succeed? Replaced the former `nmap --script broadcast-dhcp-discover` + `dhclient -1` invocations (issue #1288: both EOL/no longer packaged on current Alpine) with a from-scratch DHCPv4 client. | Admin UI DHCP page, on demand; `setup.sh` Kea activation preflight | The client dry-run leg never binds/applies the negotiated lease to any interface (only UDP socket bytes are read/written) and releases the lease (DHCPRELEASE) immediately after confirming it. It does still run against the host's own network (bound to the well-known DHCP client port, broadcasting on the real LAN segment). |
+| **Kea leg of `ci.sh validate`** (`_ci_validate_kea_rollback` in `.github/scripts/ci.sh`) | Do two static reservations added through the Admin UI's real HTTP routes reach Kea's running config, and does a `setup.sh` rollback to the first snapshot leave only the first one in a live `config-get`? | `ci.sh validate`, after the stack checks passed | No -- `dhcp` in `kea` mode and the ui run as their own containers inside the per-run /27 network, `dhcp` with the host networking reset; no DHCP client takes part. |
+| **`ci.sh check setup-kea-preflight`** | Does the `setup.sh` install flow still call `run_kea_dhcp_activation_preflight`? | `ci.sh check all` | No -- reads `setup.sh` only. |
 
-The second, third, and fourth checks exist because the first only tells you
-a DHCP server answered -- it does not prove ours behaves correctly, and it
-does not report individual option values. `scripts/untracked/simulations/dhcp-kea-lease-flow-simulation.sh`
-is the authoritative check for "did Kea hand out what I configured, and does
-it honor a static reservation the way an operator using the Admin UI's DHCP
-page would expect" -- its output (printed to the job log and, in CI,
-`$GITHUB_STEP_SUMMARY`) lists every offered value and both reservation
-outcomes explicitly so a wrong result is easy to spot.
-
-This is a different layer than issue #634's Kea Control Agent mutation test:
-that one drives a reservation add/remove through the Admin UI's own real
-HTTP routes on a full stack, proving the Rust `kea_config_modify()` code
-path is correct end to end. `dhcp-kea-lease-flow-simulation.sh` instead
-drives the same underlying Kea Control Agent commands directly, on its own
-lightweight single-Kea-container setup, to prove Kea's own runtime honors a
-reservation for the right client and only the right client -- complementary
-coverage, not a duplicate.
-
-`scripts/untracked/simulations/dhcp-proxy-pxe-simulation.sh` is the authoritative check for the
-`dnsmasq-proxy` DHCP mode's entirely separate code path
-(`services/dhcp-proxy`), covering ProxyDHCP PXE-tagged behavior that none of
-the Kea-focused checks above exercise at all. Like the others, it prints
-every asserted value explicitly (to the job log and, in CI,
-`$GITHUB_STEP_SUMMARY`) so a wrong result is easy to spot.
-
-**What the Kea lease-flow simulation does NOT verify** (documented here per
-its own design -- see the script's header comment for the full rationale):
-
-- Native PowerDNS AXFR/NOTIFY convergence from `dns` to remote DNS
-  secondaries. The simulation proves Kea's D2 daemon sends
-  TSIG-signed DDNS updates to the single intended writer (`dns`);
-  #1164's replication path is a separate PowerDNS primary/secondary concern
-  and needs its own live transfer/convergence proof.
-- The `dnsmasq-proxy` DHCP mode -- entirely different code path
-  (`services/dhcp-proxy`), covered instead by the PXE simulation below.
-
-**What the dnsmasq-proxy PXE simulation does NOT verify** (documented here
-per its own design -- see `scripts/untracked/simulations/dhcp-proxy-pxe-simulation.sh`'s own
-header comment for the full rationale):
-
-- PXE boot menu behavior -- this project deliberately implements none;
-  dnsmasq's role here is only to point a PXE client at an external boot
-  server, never to serve a menu or boot files itself.
-- An actual TFTP/HTTP boot-file transfer against the configured external
-  boot server -- out of scope by design, and that server is never a real
-  listening service in this simulation, just a configured address the
-  DHCPOFFER is asserted to point at.
-
-Neither check has an invasive/host-interface mode: every server and client
-container involved always runs inside its own throwaway, isolated Docker
-network, so there was nothing that needed gating behind an explicit opt-in
-flag beyond each job itself only running on manual dispatch.
-
-`scripts/untracked/simulations/dhcp-kea-ctrl-agent-mutation-simulation.sh` (issue #634) closes the
-static-reservation gap left open above: it drives a real static host
-reservation add/remove through the Admin UI's actual `/dhcp/static/add` and
-`/dhcp/static/remove` HTTP routes -- the same `kea_config_modify()` Rust code
-path a real operator's browser would hit -- against a real Kea Control Agent,
-and confirms both a follow-up `config-get` and a subsequent real DHCP lease
-request for the same MAC address reflect each change. This is what would have
-caught #630 (Kea 2.6.3's `config-get` response including a `hash` field that
-`config-test`/`config-set` reject) automatically instead of needing a human
-to hit it in production: every existing `cargo test` for that function mocks
-Kea's response and none of those mocks omitted the fix once written, so they
-prove the fix works, not that the assumed response shape is still accurate.
-**What it does NOT verify**: subnet/custom-option mutation routes beyond
-reservations (same underlying `kea_config_modify()` code path, so this is
-representative coverage of that function, not route-by-route exhaustive),
-DHCP-DDNS lease-event follow-through (issue #557), and the `dnsmasq-proxy`
-mode (entirely different code path, no Kea/Admin-UI Control Agent interaction
-at all). Also has no invasive/host-interface mode, for the same reason as the
-lease-flow simulation above.
+No automated check renders or exercises the two dnsmasq modes, a real Kea
+lease with its options, a reservation's effect on a real lease, or a DDNS
+update from a lease. The former simulation scripts and their workflow jobs are
+not in the tree. These behaviors are checked live on a real LAN, see §3 of
+[docs/release-validation-plan.md](release-validation-plan.md).
