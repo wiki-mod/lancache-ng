@@ -1406,10 +1406,9 @@ runner_host:
     - Persistent=true
     - "[Install]"
     - WantedBy=timers.target
-  # What: route probe address, runner file, dir, unit names.
+  # What: runner file, dir and unit names.
   # Why: AG-CI-006: host names and globs have one owner.
   # From: Issue #1683 | PR #1912
-  route_probe_ip: 1.1.1.1
   runner_dir_glob: "actions-runner*"
   runner_unit_glob: "actions.runner.*.service"
   stray_archive_globs: ["*.tgz", "*.tar.gz"]

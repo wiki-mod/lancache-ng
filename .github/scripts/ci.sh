@@ -10976,11 +10976,13 @@ _ci_rh_host_token() {
 }
 
 # What: the IPv4 that routes to the probe address, or none.
-# Why: no route is a normal answer on an isolated host.
-# From: Issue #1622 | PR #1624
+# Why: no route is a normal answer on an isolated host;
+# the address is the host of ROUTE_PROBE_TARGET.
+# From: Issue #1622 | PR #1858
 _ci_rh_ipv4() {
     local out probe
-    probe="$(_ci_rh_val route_probe_ip)" || return 2
+    probe="$(_ci_runtime_default ROUTE_PROBE_TARGET)" || return 2
+    probe="${probe%:*}"
     out="$(_ci_run -m 2 "[CI-ERROR-RUNNER-0013]" "reason=\"route lookup failed\"" ip -4 route get "${probe}")" || return 2
     [[ "${out}" =~ src\ ([0-9.]+) ]] || return 0
     printf '%s' "${BASH_REMATCH[1]}"
