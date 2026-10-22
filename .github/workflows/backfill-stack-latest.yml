@@ -57,6 +57,7 @@ jobs:
   backfill-latest:
     name: backfill latest from existing stack pointer
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    timeout-minutes: 45
     steps:
       - name: Require default branch dispatch
         env:

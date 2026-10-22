@@ -304,4 +304,7 @@ jobs:
       - name: Clean up image
         if: always()
         run: |
-          docker rmi lancache-ng-full-setup:channel-smoke || true
+          image_id="$(timeout --kill-after=30 60 docker images --quiet lancache-ng-full-setup:channel-smoke)"
+          if [ -n "$image_id" ]; then
+            timeout --kill-after=30 120 docker rmi lancache-ng-full-setup:channel-smoke
+          fi

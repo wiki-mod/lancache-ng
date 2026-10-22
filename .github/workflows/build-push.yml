@@ -270,6 +270,7 @@ jobs:
   push-supersession-check:
     name: check for a newer push already superseding this one
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    timeout-minutes: 15
     outputs:
       superseded: ${{ steps.check.outputs.superseded }}
     steps:
@@ -3470,7 +3471,10 @@ jobs:
       - name: Clean up image
         if: always()
         run: |
-          docker rmi lancache-ng-full-setup:validation || true
+          image_id="$(timeout --kill-after=30 60 docker images --quiet lancache-ng-full-setup:validation)"
+          if [ -n "$image_id" ]; then
+            timeout --kill-after=30 120 docker rmi lancache-ng-full-setup:validation
+          fi
 
   dns_rust_quality:
     # DNS Rust quality is scoped by detect-changes for PR speed, but workflow changes

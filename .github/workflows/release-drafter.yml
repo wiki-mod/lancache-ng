@@ -32,6 +32,7 @@ jobs:
   update_release_draft:
     name: draft/update release notes
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       # release-drafter needs to create/update a draft release and resolve
       # merged-PR labels; contents:write is release-drafter's own documented

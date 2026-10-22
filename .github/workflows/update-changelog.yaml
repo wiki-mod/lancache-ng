@@ -22,6 +22,7 @@ jobs:
   update:
     name: write release notes into CHANGELOG.md
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       # Both this job's own git-auto-commit-action push and the default
       # checkout need write access to commit CHANGELOG.md back.
