@@ -76,10 +76,10 @@ ARG NETDATA_X86_64_SHA256=9c5c06a9ff4949e0aad9fc894ba4649146ed213b558200cd050e4a
 # skipping validation.
 RUN set -eu; \
     apk add --no-cache bash ca-certificates; \
-    wget -q -O /tmp/netdata.gz.run \
+    wget -q -O /var/tmp/netdata.gz.run \
       "https://github.com/netdata/netdata/releases/download/${NETDATA_VERSION}/netdata-x86_64-${NETDATA_VERSION}.gz.run"; \
-    echo "${NETDATA_X86_64_SHA256}  /tmp/netdata.gz.run" | sha256sum -c -; \
-    chmod +x /tmp/netdata.gz.run; \
+    echo "${NETDATA_X86_64_SHA256}  /var/tmp/netdata.gz.run" | sha256sum -c -; \
+    chmod +x /var/tmp/netdata.gz.run; \
     # --dont-start-it: this is a Docker build, not a running system --
     # netdata is started by this image's own entrypoint.sh at container
     # start, not by the installer. --disable-telemetry: no anonymous
@@ -87,9 +87,9 @@ RUN set -eu; \
     # channel rather than its nightly channel, matching this project's
     # own "pull only pinned/stable references" posture (Rule-Ref:
     # AG-CI-009/AG-VAL-026).
-    /tmp/netdata.gz.run --accept -- --dont-start-it --disable-telemetry --stable-channel; \
-    rm -f /tmp/netdata.gz.run; \
-    rm -rf /tmp/netdata-updater* /tmp/netdata-installer*
+    /var/tmp/netdata.gz.run --accept -- --dont-start-it --disable-telemetry --stable-channel; \
+    rm -f /var/tmp/netdata.gz.run; \
+    rm -rf /var/tmp/netdata-updater* /var/tmp/netdata-installer*
 
 EXPOSE 19999
 

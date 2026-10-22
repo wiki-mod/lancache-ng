@@ -445,14 +445,14 @@ teardown() {
     run _sign_cert "csr-fail.example.com" "$key_as_dir" "$crt" "subjectAltName=DNS:csr-fail.example.com"
 
     [ "$status" -ne 0 ]
-    [ ! -f "/tmp/lancache-cert.csr" ]
+    [ ! -f "/var/tmp/lancache-cert.csr" ]
     [ ! -f "$crt" ]
 
     rmdir "$key_as_dir"
 }
 
 # _sign_cert writes its intermediate CSR to a single hardcoded path,
-# /tmp/lancache-cert.csr (see entrypoint.sh), rather than a per-call
+# /var/tmp/lancache-cert.csr (see entrypoint.sh), rather than a per-call
 # temp file, and removes it with `rm -f` on both the success and every
 # failure path. This test's name says "on generation failure" but exercises
 # the success path (a real deployment signs many domains back-to-back, so
@@ -471,7 +471,7 @@ teardown() {
     _sign_cert "$domain" "$key" "$crt" "subjectAltName=DNS:${domain}"
 
     # Check that no orphaned CSR files remain
-    [ ! -f "/tmp/lancache-cert.csr" ]
+    [ ! -f "/var/tmp/lancache-cert.csr" ]
 }
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -505,7 +505,7 @@ teardown() {
     # Before the #655 fix, the key from the successful `openssl req` step
     # would still be sitting on disk here even though signing failed.
     [ ! -f "$key" ]
-    [ ! -f "/tmp/lancache-cert.csr" ]
+    [ ! -f "/var/tmp/lancache-cert.csr" ]
 
     rmdir "$crt"
 }
@@ -533,7 +533,7 @@ teardown() {
 
     [ "$status" -ne 0 ]
     [ ! -f "$crt" ]
-    [ ! -f "/tmp/lancache-cert.csr" ]
+    [ ! -f "/var/tmp/lancache-cert.csr" ]
 }
 
 # Reproduces #655's exact scenario: IP_SSL migrates from 192.168.1.11 to

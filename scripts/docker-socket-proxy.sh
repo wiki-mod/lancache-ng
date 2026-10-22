@@ -6,7 +6,7 @@
 # and explicitly allowed lifecycle actions.
 set -eu
 
-cat > /tmp/lancache-haproxy.cfg <<'EOF'
+cat > /var/tmp/lancache-haproxy.cfg <<'EOF'
 # Docker exec and generic container creation are intentionally banned here:
 # the Admin UI and watchdog only need narrowly scoped lifecycle operations for
 # known lancache-ng containers. A compromised UI should not gain a general
@@ -67,4 +67,4 @@ frontend dockerfrontend
     default_backend dockerbackend
 EOF
 
-exec haproxy -f /tmp/lancache-haproxy.cfg
+exec haproxy -f /var/tmp/lancache-haproxy.cfg

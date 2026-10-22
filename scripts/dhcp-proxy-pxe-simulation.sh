@@ -134,10 +134,10 @@ docker build -q -t "$image_tag" services/dhcp-proxy >/dev/null
 # ends at 172.31.255.255, so 172.32.0.0/16 is public address space and a
 # Docker bridge route there could hijack traffic to a real public
 # destination, found in PR #765 review), in its OWN lock namespace
-# (/tmp/lancache-validation-locks-dhcp-proxy-pxe) so this pool's octet
+# (/var/tmp/lancache-validation-locks-dhcp-proxy-pxe) so this pool's octet
 # contention never unnecessarily serializes against the unrelated 172.30/
 # 172.31 pools.
-subnet_lock_root="/tmp/lancache-validation-locks-dhcp-proxy-pxe"
+subnet_lock_root="/var/tmp/lancache-validation-locks-dhcp-proxy-pxe"
 subnet_max_attempts=10
 subnet_run_id="${GITHUB_RUN_ID:-local}-$$-${RANDOM:-0}-pxe"
 subnet_run_attempt="${GITHUB_RUN_ATTEMPT:-1}"

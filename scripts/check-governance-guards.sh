@@ -207,7 +207,7 @@ contains_partial_scope_language() {
 contains_malformed_body_upload() {
   local body="$1"
 
-  if grep -Eq '(^|[[:space:]])@/tmp/[^[:space:]]+' <<<"$body"; then
+  if grep -Eq '(^|[[:space:]])@/var/tmp/[^[:space:]]+' <<<"$body"; then
     return 0
   fi
 

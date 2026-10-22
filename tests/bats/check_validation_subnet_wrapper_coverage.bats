@@ -315,7 +315,7 @@ EOF
     runs-on: ubuntu-latest
     steps:
       - run: |
-          exec {lock_fd}>/tmp/lancache-setup-cli-simulation.lock
+          exec {lock_fd}>/var/tmp/lancache-setup-cli-simulation.lock
           flock "$lock_fd"
           bash scripts/setup-cli-simulation.sh
 

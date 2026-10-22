@@ -1771,7 +1771,7 @@ cmd_runner_fetch() {
     # after this point aborts under `set -e` (checksum mismatch aside,
     # which already cleans up explicitly, but also sha256sum/tar/chown
     # failing), execution never reaches an explicit cleanup line and this
-    # uniquely-named temp file is left under /tmp forever -- every retried
+    # uniquely-named temp file is left under /var/tmp forever -- every retried
     # provisioning attempt would then leave one more behind.
     trap 'rm -f "$tmp_tarball"' EXIT
 

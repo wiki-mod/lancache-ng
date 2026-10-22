@@ -60,6 +60,11 @@ on:
 permissions:
   contents: read
 
+env:
+  # Host temp files go to disk: /tmp is a small tmpfs on some runners and
+  # trivy alone writes 5 to 8 GB of image export there (run 39765669925).
+  TMPDIR: /var/tmp
+
 jobs:
   # Derives a per-run validation subnet keyed on this run's own id/attempt
   # (#623). Its outputs are threaded into the sim jobs' env blocks below; the

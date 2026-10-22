@@ -748,14 +748,14 @@ if [ "${SSL_ENABLED}" = "1" ]; then
         # baseline), so the real hostname belongs only in $ext's SAN, which
         # has no such length limit here.
         if ! openssl req -new -newkey rsa:2048 -nodes -subj "/CN=lancache-ng" \
-            -keyout "$key" -out /tmp/lancache-cert.csr; then
-            rm -f /tmp/lancache-cert.csr
+            -keyout "$key" -out /var/tmp/lancache-cert.csr; then
+            rm -f /var/tmp/lancache-cert.csr
             echo "[lancache] ERROR: Failed to generate certificate request for ${cn}" >&2
             return 1
         fi
         if [ -n "$ext" ]; then
             if ! openssl x509 -req -days 3650 \
-                -in /tmp/lancache-cert.csr \
+                -in /var/tmp/lancache-cert.csr \
                 -CA "$CA_DIR/ca.crt" -CAkey "$CA_DIR/ca.key" -CAserial "$SERIAL_FILE" \
                 -extfile <(printf "%s" "$ext") \
                 -out "$crt"; then
@@ -763,21 +763,21 @@ if [ "${SSL_ENABLED}" = "1" ]; then
                 # failed sign otherwise leaves an orphaned private key (and a
                 # possibly truncated $crt from an interrupted/full-disk write)
                 # on disk (#655).
-                rm -f /tmp/lancache-cert.csr "$key" "$crt"
+                rm -f /var/tmp/lancache-cert.csr "$key" "$crt"
                 echo "[lancache] ERROR: Failed to sign certificate for ${cn}" >&2
                 return 1
             fi
         else
             if ! openssl x509 -req -days 3650 \
-                -in /tmp/lancache-cert.csr \
+                -in /var/tmp/lancache-cert.csr \
                 -CA "$CA_DIR/ca.crt" -CAkey "$CA_DIR/ca.key" -CAserial "$SERIAL_FILE" \
                 -out "$crt"; then
-                rm -f /tmp/lancache-cert.csr "$key" "$crt"
+                rm -f /var/tmp/lancache-cert.csr "$key" "$crt"
                 echo "[lancache] ERROR: Failed to sign certificate for ${cn}" >&2
                 return 1
             fi
         fi
-        rm -f /tmp/lancache-cert.csr
+        rm -f /var/tmp/lancache-cert.csr
     }
 
     # Returns 0 (true = needs regen) if the default cert:

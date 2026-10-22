@@ -156,7 +156,7 @@ freshly created throwaway directory first, then serve *that*:
 # the throwaway directory is removed automatically, no separate cleanup step needed
 ```
 
-Use `mktemp -d`, not a fixed path like `mkdir -p /tmp/lancache-ca-serve`: `mktemp
+Use `mktemp -d`, not a fixed path like `mkdir -p /var/tmp/lancache-ca-serve`: `mktemp
 -d` only succeeds by creating a directory that did not exist a moment ago, so
 there is no path for this command to silently follow a pre-existing directory
 or symlink left at a predictable name — `mkdir -p` on an existing path is a
@@ -174,7 +174,7 @@ out-of-memory kill, a host power loss) — this project supports too wide a
 range of host operating systems (see `CONTRIBUTING.md`: "do not assume every
 operator runs the same ... host OS") to promise any specific OS-level temp
 cleanup will catch that case. The realistic worst case if it happens is a
-leftover copy of the public `ca.crt` sitting under `/tmp` until it's removed
+leftover copy of the public `ca.crt` sitting under `/var/tmp` until it's removed
 by hand or by whatever temp-cleaning policy (if any) the host itself runs —
 not a secret, so this is a tidiness gap, not a security one.
 

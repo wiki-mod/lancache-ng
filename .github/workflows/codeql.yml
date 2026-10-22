@@ -28,6 +28,9 @@ permissions:
   security-events: write
 
 env:
+  # Host temp files go to disk: /tmp is a small tmpfs on some runners and
+  # trivy alone writes 5 to 8 GB of image export there (run 39765669925).
+  TMPDIR: /var/tmp
   CARGO_BUILD_JOBS: ${{ vars.CARGO_BUILD_JOBS }}
 
 defaults:

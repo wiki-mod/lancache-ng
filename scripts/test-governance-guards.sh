@@ -156,7 +156,7 @@ mkdir -p "$repo"
 : > "$repo/pr-title.txt"
 : > "$repo/pr-body.txt"
 make_fixture "$repo" \
-  --body '@/tmp/PR_BODY.txt'
+  --body '@/var/tmp/PR_BODY.txt'
 expect_failure "literal tmp upload body" run_checker "$repo"
 
 # #1023: a negated partial-scope claim ("no follow-up required") must not be

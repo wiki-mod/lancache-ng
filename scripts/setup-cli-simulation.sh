@@ -77,7 +77,7 @@ git config --global --add safe.directory "$repo_root"
 # install_dir must be a path this container and the host Docker daemon both
 # resolve to the same real directory. docker compose (run through the
 # bind-mounted host socket) always resolves bind-mount sources against the
-# HOST filesystem, not this container's -- a plain /tmp/... path only exists
+# HOST filesystem, not this container's -- a plain /var/tmp/... path only exists
 # inside this container's own ephemeral layer, so the host daemon can't find
 # it and silently auto-creates it as an empty directory instead, then fails
 # trying to bind-mount that directory onto a file destination (e.g. the
@@ -90,7 +90,7 @@ git config --global --add safe.directory "$repo_root"
 # bind-mounted scripts still are). /work
 # (this checkout, bind-mounted from the same host path the workflow step
 # runs in) is the only path both sides agree on, so the install directory
-# has to live under it instead of under /tmp.
+# has to live under it instead of under /var/tmp.
 # deploy/quickstart/docker-compose.yml pins a static top-level `name:
 # lancache-ng`, and Compose prefers that yaml name over the --project-
 # directory basename it would otherwise derive -- so every docker compose

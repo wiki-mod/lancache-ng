@@ -24,7 +24,7 @@
 # (`a-lancache-runner-240-*`, `b-lancache-runner-229-1`,
 # `lancache-runner-228*`, `d-lancache-runner-241-1`). Two concurrent
 # `promote`/`backfill-latest` runs can genuinely land on two different
-# hosts, so a `/tmp`-based flock would give each host its own, independently
+# hosts, so a `/var/tmp`-based flock would give each host its own, independently
 # "uncontested" lock -- no real exclusion at all. Per AG-CI-003 (never build
 # CI correctness on a hidden single-host/LAN-only assumption), the lock here
 # is instead backed by a resource every runner host reaches identically: the

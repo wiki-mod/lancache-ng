@@ -5483,16 +5483,16 @@ dns_rollback_exec() {
             fi
             m="$1"; p="$2"; b="$3"
             if [ "$m" = "POST" ]; then
-                status=$(curl -sS -o /tmp/.dns-rollback-resp -w "%{http_code}" -X POST \
+                status=$(curl -sS -o /var/tmp/.dns-rollback-resp -w "%{http_code}" -X POST \
                     -H "X-API-Key: $key" -H "Content-Type: application/json" -d "$b" \
                     "http://127.0.0.1:8083$p") || { echo "DNS_ROLLBACK_EXEC_CURL_FAILED"; exit 8; }
             else
-                status=$(curl -sS -o /tmp/.dns-rollback-resp -w "%{http_code}" \
+                status=$(curl -sS -o /var/tmp/.dns-rollback-resp -w "%{http_code}" \
                     -H "X-API-Key: $key" "http://127.0.0.1:8083$p") || { echo "DNS_ROLLBACK_EXEC_CURL_FAILED"; exit 8; }
             fi
             printf "%s\n" "$status"
-            cat /tmp/.dns-rollback-resp
-            rm -f /tmp/.dns-rollback-resp
+            cat /var/tmp/.dns-rollback-resp
+            rm -f /var/tmp/.dns-rollback-resp
         ' sh "$method" "$path" "$body" 2>"$err_file")
     rc=$?
     exec_err=$(cat "$err_file" 2>/dev/null || true)

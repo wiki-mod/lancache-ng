@@ -144,6 +144,9 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  # Host temp files go to disk: /tmp is a small tmpfs on some runners and
+  # trivy alone writes 5 to 8 GB of image export there (run 39765669925).
+  TMPDIR: /var/tmp
   CARGO_BUILD_JOBS: ${{ vars.CARGO_BUILD_JOBS }}
   DOCKER_METADATA_SHORT_SHA_LENGTH: "7"
   RELEASE_PLATFORMS: linux/amd64,linux/arm64
@@ -411,13 +414,13 @@ jobs:
           # return the real PR body twice despite #903/#905's fixes, with no
           # visible gh CLI error -- capture stderr and byte count to find out
           # why, instead of guessing further. Remove once root-caused.
-          gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json body -q .body > /tmp/pr-body-live.txt 2> /tmp/pr-body-live.stderr || {
+          gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json body -q .body > /var/tmp/pr-body-live.txt 2> /var/tmp/pr-body-live.stderr || {
             echo "::error::gh pr view failed, exit code $?"
-            cat /tmp/pr-body-live.stderr
+            cat /var/tmp/pr-body-live.stderr
             exit 1
           }
-          echo "::notice::gh pr view succeeded. Body byte count: $(wc -c < /tmp/pr-body-live.txt). stderr: $(cat /tmp/pr-body-live.stderr)"
-          bash scripts/validate-pr-template.sh /tmp/pr-body-live.txt
+          echo "::notice::gh pr view succeeded. Body byte count: $(wc -c < /var/tmp/pr-body-live.txt). stderr: $(cat /var/tmp/pr-body-live.stderr)"
+          bash scripts/validate-pr-template.sh /var/tmp/pr-body-live.txt
 
   pr-template-check-hosted:
     # Same zero-LAN-dependency property as file-headers-hosted: this check
@@ -453,8 +456,8 @@ jobs:
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
           set -euo pipefail
-          gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json body -q .body > /tmp/pr-body-live.txt
-          bash scripts/validate-pr-template.sh /tmp/pr-body-live.txt
+          gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json body -q .body > /var/tmp/pr-body-live.txt
+          bash scripts/validate-pr-template.sh /var/tmp/pr-body-live.txt
 
   pr-tracking-metadata-check:
     # Enforces AGENTS.md AG-GH-008: a PR must carry labels, a milestone, and (when
@@ -560,10 +563,10 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
-          gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json labels -q '.labels' > /tmp/pr-labels-live.json
+          gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json labels -q '.labels' > /var/tmp/pr-labels-live.json
           milestone_title="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json milestone -q '.milestone.title // ""')"
           {
-            echo "labels_file=/tmp/pr-labels-live.json"
+            echo "labels_file=/var/tmp/pr-labels-live.json"
             echo "milestone_title=$milestone_title"
           } >> "$GITHUB_OUTPUT"
       - name: Validate labels, milestone, and project-board placement
@@ -671,10 +674,10 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
-          gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json labels -q '.labels' > /tmp/pr-labels-live.json
+          gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json labels -q '.labels' > /var/tmp/pr-labels-live.json
           milestone_title="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json milestone -q '.milestone.title // ""')"
           {
-            echo "labels_file=/tmp/pr-labels-live.json"
+            echo "labels_file=/var/tmp/pr-labels-live.json"
             echo "milestone_title=$milestone_title"
           } >> "$GITHUB_OUTPUT"
       - name: Validate labels, milestone, and project-board placement
@@ -748,7 +751,7 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
-          gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json title -q .title > /tmp/pr-title-live.txt
+          gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json title -q .title > /var/tmp/pr-title-live.txt
       - name: Validate PR title convention
         env:
           PR_DRAFT: ${{ github.event.pull_request.draft }}
@@ -764,7 +767,7 @@ jobs:
           PR_TITLE_LINT_MODE: ${{ vars.PR_TITLE_LINT_MODE }}
         run: |
           set -euo pipefail
-          pr_title="$(cat /tmp/pr-title-live.txt)"
+          pr_title="$(cat /var/tmp/pr-title-live.txt)"
           docker run --rm \
             --user "$(id -u):$(id -g)" \
             -v "$PWD:/work:ro" \
@@ -814,7 +817,7 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
-          gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json title -q .title > /tmp/pr-title-live.txt
+          gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json title -q .title > /var/tmp/pr-title-live.txt
       - name: Validate PR title convention
         env:
           PR_DRAFT: ${{ github.event.pull_request.draft }}
@@ -822,7 +825,7 @@ jobs:
           PR_TITLE_LINT_MODE: ${{ vars.PR_TITLE_LINT_MODE }}
         run: |
           set -euo pipefail
-          pr_title="$(cat /tmp/pr-title-live.txt)"
+          pr_title="$(cat /var/tmp/pr-title-live.txt)"
           docker run --rm \
             --user "$(id -u):$(id -g)" \
             -v "$PWD:/work:ro" \
@@ -1223,7 +1226,7 @@ jobs:
         run: |
           set -euo pipefail
           # tests/setup-migration-semantics.sh only reads setup.sh and writes to
-          # mktemp -d (container /tmp), so the read-only repo mount is sufficient.
+          # mktemp -d (container /var/tmp), so the read-only repo mount is sufficient.
           docker run --rm \
             --user "$(id -u):$(id -g)" \
             -v "$PWD:/work:ro" \
@@ -1701,8 +1704,8 @@ jobs:
             --user "$(id -u):$(id -g)" \
             -v "$PWD:/work:ro" \
             -w /work \
-            --env HOME=/tmp \
-            --env DOCKER_CONFIG=/tmp/.docker \
+            --env HOME=/var/tmp \
+            --env DOCKER_CONFIG=/var/tmp/.docker \
             --env CACHE_INACTIVE \
             --env CACHE_MAX_SIZE \
             --env CACHE_MEM_MB \
@@ -1814,9 +1817,9 @@ jobs:
             || { echo "::error::DNS entrypoint must render generated configs through the atomic helper."; exit 1; }
           grep -Fq 'mktemp "${target_dir}/.${target_name}.tmp.XXXXXX"' services/dns/entrypoint.sh \
             || { echo "::error::DNS entrypoint generated configs must stage temp files in the target directory."; exit 1; }
-          if grep -Fq '> /tmp/recursor.conf' services/dns/entrypoint.sh \
-            || grep -Fq '> /tmp/pdns.conf' services/dns/entrypoint.sh; then
-            echo "::error::DNS entrypoint must not render PDNS configs through /tmp before replacing target configs."
+          if grep -Fq '> /var/tmp/recursor.conf' services/dns/entrypoint.sh \
+            || grep -Fq '> /var/tmp/pdns.conf' services/dns/entrypoint.sh; then
+            echo "::error::DNS entrypoint must not render PDNS configs through /var/tmp before replacing target configs."
             exit 1
           fi
           if grep -Fq "sed -i 's/^  loglevel: 3$/  loglevel: 6/' /etc/pdns/recursor.conf" services/dns/entrypoint.sh; then
@@ -2243,9 +2246,9 @@ jobs:
             || { echo "::error::shellcheck container must mount the workspace read-only."; exit 1; }
           grep -F 'lancache-ng-build-tools-validation:${GITHUB_SHA:-local}-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}' scripts/select-build-tools-image.sh >/dev/null \
             || { echo "::error::Compose validation fallback image tag must be scoped to the workflow run and attempt."; exit 1; }
-          grep -F -- "--env DOCKER_CONFIG=/tmp/.docker" .github/workflows/build-push.yml >/dev/null \
+          grep -F -- "--env DOCKER_CONFIG=/var/tmp/.docker" .github/workflows/build-push.yml >/dev/null \
             || { echo "::error::Compose validation must set a writable Docker config directory inside the build-tools container."; exit 1; }
-          grep -F -- "--env HOME=/tmp" .github/workflows/build-push.yml >/dev/null \
+          grep -F -- "--env HOME=/var/tmp" .github/workflows/build-push.yml >/dev/null \
             || { echo "::error::Compose validation must set a writable HOME inside the build-tools container."; exit 1; }
           # Acceleration-infrastructure policy checks start here.
           # They validate the sccache/distcc contract, not product correctness.
@@ -2936,8 +2939,8 @@ jobs:
             --user "$(id -u):$(id -g)" \
             -v "$PWD:/work:ro" \
             -w /work \
-            --env HOME=/tmp \
-            --env DOCKER_CONFIG=/tmp/.docker \
+            --env HOME=/var/tmp \
+            --env DOCKER_CONFIG=/var/tmp/.docker \
             --env CACHE_INACTIVE \
             --env CACHE_MAX_SIZE \
             --env CACHE_MEM_MB \
@@ -3952,9 +3955,9 @@ jobs:
 
           docker run --rm \
             --user "$(id -u):$(id -g)" \
-            -e HOME=/tmp \
-            -e CARGO_HOME=/tmp/cargo-home \
-            -e CARGO_TARGET_DIR=/tmp/target-dns \
+            -e HOME=/var/tmp \
+            -e CARGO_HOME=/var/tmp/cargo-home \
+            -e CARGO_TARGET_DIR=/var/tmp/target-dns \
             -v "$PWD:/work" \
             -v "$PWD/coverage-dns:/coverage-dns" \
             -w /work \
@@ -3973,9 +3976,9 @@ jobs:
 
           docker run --rm \
             --user "$(id -u):$(id -g)" \
-            -e HOME=/tmp \
-            -e CARGO_HOME=/tmp/cargo-home \
-            -e CARGO_TARGET_DIR=/tmp/target-ui \
+            -e HOME=/var/tmp \
+            -e CARGO_HOME=/var/tmp/cargo-home \
+            -e CARGO_TARGET_DIR=/var/tmp/target-ui \
             -v "$PWD:/work" \
             -v "$PWD/coverage-ui:/coverage-ui" \
             -w /work \
@@ -3996,7 +3999,7 @@ jobs:
           mkdir -p coverage-badge
           docker run --rm \
             --user "$(id -u):$(id -g)" \
-            -e HOME=/tmp \
+            -e HOME=/var/tmp \
             -v "$PWD:/work:ro" \
             -v "$PWD/coverage-badge:/coverage-badge" \
             -w /work \
@@ -4415,8 +4418,8 @@ jobs:
 
           docker run --rm \
             --user "$(id -u):$(id -g)" \
-            -e HOME=/tmp \
-            -e CARGO_HOME=/tmp/cargo-home \
+            -e HOME=/var/tmp \
+            -e CARGO_HOME=/var/tmp/cargo-home \
             -v "$PWD:/work:ro" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
@@ -4483,8 +4486,8 @@ jobs:
 
           docker run --rm \
             --user "$(id -u):$(id -g)" \
-            -e HOME=/tmp \
-            -e CARGO_HOME=/tmp/cargo-home \
+            -e HOME=/var/tmp \
+            -e CARGO_HOME=/var/tmp/cargo-home \
             -v "$PWD:/work:ro" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
@@ -4553,8 +4556,8 @@ jobs:
 
           docker run --rm \
             --user "$(id -u):$(id -g)" \
-            -e HOME=/tmp \
-            -e CARGO_HOME=/tmp/cargo-home \
+            -e HOME=/var/tmp \
+            -e CARGO_HOME=/var/tmp/cargo-home \
             -v "$PWD:/work:ro" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
@@ -8508,7 +8511,7 @@ jobs:
             -e TAG_NAME \
             -e COMMIT_SHA \
             -e EXPECTED_PRERELEASE="$expected_prerelease" \
-            -v "$notes_file:/tmp/lancache-release-notes.md:ro" \
+            -v "$notes_file:/var/tmp/lancache-release-notes.md:ro" \
             "$build_tools_image" \
             bash -s <<'UPDATE_RELEASE'
           set -euo pipefail
@@ -8540,7 +8543,7 @@ jobs:
             # shellcheck disable=SC2016
             updated_body="$(jq -nr \
               --arg body "$existing_body" \
-              --arg notes "$(cat /tmp/lancache-release-notes.md)" \
+              --arg notes "$(cat /var/tmp/lancache-release-notes.md)" \
               --arg start "$image_notes_start" \
               --arg end "$image_notes_end" \
               '
@@ -8579,7 +8582,7 @@ jobs:
               --arg tag_name "$TAG_NAME" \
               --arg target_commitish "$COMMIT_SHA" \
               --arg name "$TAG_NAME" \
-              --arg body "$(cat /tmp/lancache-release-notes.md)" \
+              --arg body "$(cat /var/tmp/lancache-release-notes.md)" \
               --argjson prerelease "$expected_prerelease" \
               '{tag_name:$tag_name, target_commitish:$target_commitish, name:$name, body:$body, draft:false, prerelease:$prerelease}' \
               > "$response_file.create"
@@ -8632,7 +8635,7 @@ jobs:
             -e GITHUB_TOKEN \
             -e REPOSITORY \
             -e TAG_NAME \
-            -v "$PWD/vex.openvex.json:/tmp/vex.openvex.json:ro" \
+            -v "$PWD/vex.openvex.json:/var/tmp/vex.openvex.json:ro" \
             "$build_tools_image" \
             bash -s <<'UPLOAD_VEX'
           set -euo pipefail
@@ -8658,7 +8661,7 @@ jobs:
           curl -fsS -X POST \
             -H "$auth" -H "$accept" -H "$version" \
             -H "Content-Type: application/json" \
-            --data-binary @/tmp/vex.openvex.json \
+            --data-binary @/var/tmp/vex.openvex.json \
             "$uploads/releases/$release_id/assets?name=$asset_name" >/dev/null
           echo "Uploaded $asset_name to release $TAG_NAME."
           UPLOAD_VEX
@@ -8787,7 +8790,7 @@ jobs:
             -e REPOSITORY \
             -e TAG_NAME \
             -e ASSET_NAME="$asset" \
-            -v "$PWD/$asset:/tmp/$asset:ro" \
+            -v "$PWD/$asset:/var/tmp/$asset:ro" \
             "$build_tools_image" \
             bash -s <<'UPLOAD_SBOM'
           set -euo pipefail
@@ -8812,7 +8815,7 @@ jobs:
           curl -fsS -X POST \
             -H "$auth" -H "$accept" -H "$version" \
             -H "Content-Type: application/json" \
-            --data-binary "@/tmp/$ASSET_NAME" \
+            --data-binary "@/var/tmp/$ASSET_NAME" \
             "$uploads/releases/$release_id/assets?name=$ASSET_NAME" >/dev/null
           echo "Uploaded $ASSET_NAME to release $TAG_NAME."
           UPLOAD_SBOM

@@ -277,13 +277,13 @@ docker build -q -t "$image_tag" services/dhcp >/dev/null
 # jobs use (scripts/lib/reserve-validation-subnet.sh), on a dedicated
 # 172.31.0.0/16 range (unused by the now-retired deploy/dev's 172.28.0.0/16,
 # v0.3.0 #766, and full-setup-validate's 172.30.0.0/16) and its OWN lock namespace
-# (/tmp/lancache-validation-locks-dhcp-kea) so this pool's octet contention
+# (/var/tmp/lancache-validation-locks-dhcp-kea) so this pool's octet contention
 # never unnecessarily serializes against the unrelated 172.30 pool.
 #
 # run_id/run_attempt fold in this shell's own PID and $RANDOM so a local,
 # non-CI invocation (no GITHUB_RUN_ID) still gets fresh entropy per run,
 # mirroring this script's pre-#820 fallback.
-subnet_lock_root="/tmp/lancache-validation-locks-dhcp-kea"
+subnet_lock_root="/var/tmp/lancache-validation-locks-dhcp-kea"
 subnet_max_attempts=10
 subnet_run_id="${GITHUB_RUN_ID:-local}-$$-${RANDOM:-0}"
 subnet_run_attempt="${GITHUB_RUN_ATTEMPT:-1}"

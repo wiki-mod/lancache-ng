@@ -15,7 +15,7 @@
 # succeeds again once released -- using two real flock-backed processes
 # against a throwaway $BATS_TEST_TMPDIR lock root, which is the same
 # mechanism a genuinely concurrent second workflow run would hit on the
-# real, shared /tmp lock root.
+# real, shared /var/tmp lock root.
 
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"

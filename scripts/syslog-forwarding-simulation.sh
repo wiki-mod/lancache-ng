@@ -841,7 +841,7 @@ docker run -d --name "$dhcp_proxy_client_container" \
     --network "${compose_project}_dhcp-proxy-test-net" \
     --cap-add NET_ADMIN --cap-add NET_RAW \
     "$BUILD_TOOLS_IMAGE" \
-    bash -c 'dhclient -4 -1 -v -d -sf /bin/true -pf /tmp/dhcp-proxy-client.pid -lf /tmp/dhcp-proxy-client.leases eth0 >/tmp/dhcp-proxy-client.out 2>&1 || true; sleep 3' \
+    bash -c 'dhclient -4 -1 -v -d -sf /bin/true -pf /var/tmp/dhcp-proxy-client.pid -lf /var/tmp/dhcp-proxy-client.leases eth0 >/var/tmp/dhcp-proxy-client.out 2>&1 || true; sleep 3' \
     >/dev/null
 sleep 5
 docker rm -f "$dhcp_proxy_client_container" >/dev/null 2>&1 || true
