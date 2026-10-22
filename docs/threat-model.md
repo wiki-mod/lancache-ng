@@ -145,8 +145,9 @@ architecture content as of 2026-07-31 — that content moved into `AGENTS.md`).
   `ssl_preread`, not the `$lancache_client_allowed` geo variable, which is
   http-context-only and structurally unusable from `stream{}`) — see T2.
 - **Admin UI** — Rust/axum service. Fail-closed auth (see T3). Has no Docker
-  access; it writes the desired state the watchdog in the `services`
-  container reads and acts on (see T6).
+  access; it writes the desired state (`DESIRED_STATE_FILE`) that the
+  supervisor inside the supervised containers reads to run or stop its own
+  processes (see T6).
 - **DHCP** — optional, three mutually-exclusive modes (`disabled` / `kea` /
   `dnsmasq-proxy`) so clients receive the appliance's DNS automatically.
 - **NATS event bus** — carries DNS record changes from the Admin UI to the
@@ -223,8 +224,8 @@ trusted-LAN assumption.
 ### T3: Unauthorized access to the Admin UI
 
 **Threat**: An attacker reaches the Admin UI and purges the cache, edits domain
-lists, switches DHCP mode, or sets a desired service state the watchdog then
-applies.
+lists, switches DHCP mode, or sets a desired service state that stops or runs
+the DHCP or NTP process.
 
 **Likelihood**: Low on a firewalled LAN; High if the UI port is exposed to an
 untrusted network · **Impact**: High
@@ -453,12 +454,12 @@ sensitive) · **Impact**: Critical (full host compromise)
 **Mitigations / actual exposure** (verified in
 `deploy/prod/docker-compose.yml` and `services/common/shared.rs`):
 - **The Admin UI has no Docker access.** It only writes the desired service
-  state; the watchdog reads it and acts. A compromised UI cannot call the
-  Docker API.
+  state, which the supervisor inside the supervised containers reads without
+  any Docker call. A compromised UI cannot call the Docker API.
 - **The `services` container mounts the Docker socket read-write, with no
   socket proxy.** Its watchdog process is the only Docker API client in the
-  code (`DockerApi`: container list of the compose project, inspect, start,
-  stop, restart). The mount is visible to every process in that container
+  code (`DockerApi`: container list of the compose project, inspect, and
+  restart of a failing container). The mount is visible to every process in that container
   (watchdog, syslog-ng, chronyd, netdata, retention), and the socket itself
   grants the full Docker API, so a compromise of the `services` container is a
   host compromise. The container drops all capabilities except the list in

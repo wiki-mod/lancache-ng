@@ -104,7 +104,7 @@ This section documents intentional security design decisions and known tradeoffs
 
 ### 3. Docker Socket Mount in the services Container
 
-**Design**: The `services` container mounts the Docker daemon socket (SOT `DOCKER_SOCKET`, read-write, no socket proxy) for its watchdog process, the one component that starts, stops, restarts and inspects containers (`DockerApi` in `services/common/shared.rs`). The Admin UI container has no socket; it only writes the desired state the watchdog reads.
+**Design**: The `services` container mounts the Docker daemon socket (SOT `DOCKER_SOCKET`, read-write, no socket proxy) for its watchdog process, the only Docker API client (`DockerApi` in `services/common/shared.rs`); it lists the stack's containers, inspects them and restarts a failing one. The Admin UI container has no socket; it writes the desired state (`DESIRED_STATE_FILE`) that the supervisor inside the supervised containers reads to run or stop its own processes, with no Docker call.
 
 **Known Risk**: The Docker socket is a privileged interface — any process with access can run arbitrary containers with full host privileges. The mount is visible to the whole `services` container (watchdog, syslog-ng, chronyd, netdata, retention), so a compromise of that container is a host compromise.
 
