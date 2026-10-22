@@ -7082,14 +7082,6 @@ ci_cmd_release_changelog() {
     printf 'release-changelog=written tag=%s branch=%s\n' "${tag}" "${branch}"
 }
 
-# What: every image a release names: targets and the stack.
-# Why: notes and provenance walk one list.
-# From: Issue #1683 | PR #1912
-_ci_release_image_names() {
-    ci_build_targets || return 2
-    printf 'stack\n'
-}
-
 # What: the released images with their digests, as a matrix.
 # Why: the workflow attests each digest; no list in YAML.
 # From: Issue #1683 | PR #1912
@@ -7098,7 +7090,7 @@ ci_cmd_release_images() {
     [ -n "${tag}" ] || { ci_log "[CI-ERROR-RELEASE-0053]" "reason=\"tag arg required\""; return 2; }
     _ci_require_ghcr_auth || return "$?"
     base="$(_ci_image_ref)" || return 2
-    names="$(_ci_release_image_names)" || return 2
+    names="$(ci_build_targets)" || return 2
     while IFS= read -r name; do
         [ -n "${name}" ] || continue
         img="${base}/${name}"
@@ -7123,7 +7115,7 @@ _ci_release_notes_block() {
     printf '\n## Images\n\n'
     printf 'Images published for %s (commit %s):\n\n' "${tag}" "${head}"
     local targets
-    targets="$(_ci_release_image_names)" || return 2
+    targets="$(ci_build_targets)" || return 2
     for target in ${targets}; do
         img="${base}/${target}:${tag}"
         dig="$(_ci_registry_digest "${img}")" || return "$?"
