@@ -1580,28 +1580,6 @@ fn json_answer<T: serde::de::DeserializeOwned>(body: &[u8]) -> Result<T, DockerE
         .map_err(|e| DockerError::Transport(format!("the answer is no JSON: {e}")))
 }
 
-// What: Docker log stream text without frame headers.
-// Why: a container without a tty multiplexes its streams.
-// From: Issue #1683 | PR #1858
-fn log_text(mut bytes: &[u8]) -> String {
-    let mut text = String::new();
-    // What: cut frames of 8 byte header, payload.
-    // Why: the header holds stream id and size.
-    // From: Issue #1683 | PR #1912
-    while bytes.len() >= 8 {
-        let size = u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize;
-        let end = bytes.len().min(8usize.saturating_add(size));
-        // What: keep stdout (1) and stderr (2) frames only.
-        // Why: other stream ids carry no log text.
-        // From: Issue #1683 | PR #1912
-        if matches!(bytes[0], 1 | 2) {
-            text.push_str(&String::from_utf8_lossy(&bytes[8..end]));
-        }
-        bytes = &bytes[end..];
-    }
-    text
-}
-
 // What: client of PowerDNS's HTTP API with the API key.
 // Why: ui, watchdog and nats-subscriber share it.
 // From: Issue #1683 | PR #1912
@@ -1755,19 +1733,6 @@ impl DockerApi {
         json_answer(&body)
     }
 
-    // What: send one signal to a container's main process.
-    // Why: nginx reopens its access log on USR1.
-    // From: Issue #1683
-    pub async fn signal(
-        &self,
-        name: &str,
-        signal: &str,
-        timeout: Option<Duration>,
-    ) -> Result<(), DockerError> {
-        self.act(name, &format!("kill?signal={signal}"), timeout)
-            .await
-    }
-
     // What: one call; the body of a 2xx or 304 answer.
     // Why: 304 means the container already has that state.
     // From: Issue #1683 | PR #1858
@@ -1843,42 +1808,6 @@ impl DockerApi {
     ) -> Result<(), DockerError> {
         self.act(name, &format!("restart?t={grace_secs}"), timeout)
             .await
-    }
-
-    // What: GET /_ping; true only for the body "OK".
-    // Why: a 200 stalling before the body must fail.
-    // From: Issue #1683 | PR #1858
-    pub async fn ping(&self, timeout: Option<Duration>) -> bool {
-        matches!(
-            self.call(reqwest::Method::GET, "/_ping", timeout).await,
-            Ok(body) if body.trim_ascii() == b"OK"
-        )
-    }
-
-    // What: block until the container stops; its exit code.
-    // Why: the DHCP probe is a one-shot container.
-    // From: Issue #1683 | PR #1858
-    pub async fn wait(&self, name: &str, timeout: Option<Duration>) -> Result<i64, DockerError> {
-        let path = format!("/containers/{name}/wait?condition=not-running");
-        let body = self.call(reqwest::Method::POST, &path, timeout).await?;
-        json_answer::<Value>(&body)?
-            .get("StatusCode")
-            .and_then(Value::as_i64)
-            .ok_or_else(|| DockerError::Transport("the wait answer has no StatusCode".into()))
-    }
-
-    // What: container output since unix time, both streams.
-    // Why: the probe result is a line in its output.
-    // From: Issue #1683 | PR #1858
-    pub async fn logs(
-        &self,
-        name: &str,
-        since: u64,
-        timeout: Option<Duration>,
-    ) -> Result<String, DockerError> {
-        let path = format!("/containers/{name}/logs?stdout=1&stderr=1&since={since}");
-        let body = self.call(reqwest::Method::GET, &path, timeout).await?;
-        Ok(log_text(&body))
     }
 }
 
