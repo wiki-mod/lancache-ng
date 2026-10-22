@@ -306,6 +306,13 @@
         Channel: {{ lancache_image_channel() }}
       </p>
       <p class="mt-3 text-xs" style="color: var(--color-text-muted);">Netdata läuft intern<br>und speist die Graphen.</p>
+      <!-- What: link to the project repository page
+           Why: address only from the SOT, escaped by tera
+           From: Issue #1683 | PR #1912 -->
+      <p class="mt-3 text-xs">
+        <a href="{{ repo_url }}" target="_blank" rel="noopener noreferrer"
+           class="underline" style="color: var(--color-text-muted);">Projektseite</a>
+      </p>
     </div>
   </aside>
 
