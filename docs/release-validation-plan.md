@@ -150,12 +150,11 @@ stack itself.
      images` as the documented failure case).
   4. Only then run this section's remaining bring-up checks (`docker compose ps` health,
      etc.) against the resulting `deploy/prod` — this is the point where a real Part B
-     pass confirms `docker-socket-proxy`/`nats` are healthy rather than trusting the
-     `docker compose up` exit code.
+     pass confirms that all five containers (`services`, `proxy`, `dns`, `dhcp`, `ui`)
+     are healthy rather than trusting the `docker compose up` exit code.
 - **Profile**: `deploy/prod/docker-compose.yml` is the one deployment profile
   (AG-KD-008) and what `setup.sh install` produces; it references images by `image:`,
-  not `build:`. `deploy/full-setup/` is a CI 1.x harness that is still in the tree; no
-  `ci.sh` gate and no workflow uses it.
+  not `build:`, and declares no compose profiles: all five services always start.
 - Check every service: `docker compose -f deploy/prod/docker-compose.yml ps`, and
   `docker inspect --format='{{.State.Health.Status}}' <container>` where the summary is
   ambiguous.
@@ -211,16 +210,18 @@ stack itself.
 
 ### 3. DHCP — all three modes
 
-`dhcp` (Kea) and `dhcp-proxy` (dnsmasq) are profile-gated and run with host
-networking, as does the one-shot `dhcp-probe`; `ci.sh validate` starts none of them.
-Its Kea leg runs Kea on its own containers (Part A). The wire-level checks below need
-a real LAN.
+The `dhcp` container runs Kea or dnsmasq, one mode at a time (`DHCP_MODE`), on the
+host network (`network_mode: host`). `ci.sh validate` leaves it out of the stack start
+and names the exclusion (`CI-INFO-VALIDATE-0055`); for its Kea checks it runs `dhcp`
+alone inside the per-run /27 with the host networking reset (Part A). The wire-level
+checks below need a real LAN.
 
-- **Probe**: `docker compose -f deploy/prod/docker-compose.yml run --rm dhcp-probe`
-  (`lancache-ui --dhcp-probe`) sends one DISCOVER and a REQUEST for the first offer
-  from a random locally administered MAC and prints a JSON report after its result
-  marker: `conflict` (other DHCP servers that offered) and `client` (whether the
-  exchange completed).
+- **Probe**: the Admin UI DHCP page posts to `/api/dhcp/check`; the ui writes a
+  request id to `DHCP_PROBE_REQUEST_FILE`, the `dhcp-probe` program in the `dhcp`
+  container runs one DISCOVER and a REQUEST for the first offer and writes its answer
+  to `DHCP_PROBE_RESULT_FILE`. The page shows `conflict` (other DHCP servers that
+  offered) and `client` (whether the exchange completed); no answer within the ui's
+  wait time shows as `unavailable`.
 - **Kea**: a real LAN client completes DISCOVER, OFFER, REQUEST, ACK; the address lies
   in the configured pool and the client receives the configured DNS and NTP options
   (AG-OP-014). A static reservation added through the Admin UI applies to the next
@@ -234,10 +235,12 @@ a real LAN.
 - **One mode at a time**: `DHCP_MODE` selects exactly one rendered dnsmasq or Kea
   config; inspect the rendered config inside the running container, not only the env
   variable.
-- **dnsmasq sub-mode switch** (issue #1486): with `dhcp-proxy` running as ProxyDHCP,
-  switch to relay on the Admin UI `/dhcp/mode` form (or back). Pass: the container
-  restarted (`docker inspect lancache-dhcp-proxy --format '{{.State.StartedAt}}'`
-  is later) and the rendered dnsmasq config shows the new sub-mode.
+- **dnsmasq sub-mode switch** (issue #1486): with `dhcp` in `dnsmasq-proxy` mode,
+  switch to `dnsmasq-relay` on the Admin UI `/dhcp/mode` form (or back). The ui saves
+  the mode in `UI_SETTINGS_FILE`; the supervisor in `dhcp` sees the changed file and
+  restarts dnsmasq, the container keeps running. Pass: the `dhcp` log shows
+  `dnsmasq: input changed; restarting`, and `dnsmasq.conf` in `SUPERVISE_RUN_DIR`
+  inside the container shows the new sub-mode.
 
 ### 4. Cache hit/miss — HTTP and HTTPS
 
@@ -309,62 +312,44 @@ CI covers the Admin UI → NATS → `nats-subscriber` → PowerDNS write path
   `docker exec <proxy container> nginx -T` shows the new `max_size=` on
   `proxy_cache_path`; a `200`/`303` from the form is not the proof.
 - **Self-restart** (issue #1486): submit the restart form on `/setup`
-  (`POST /setup/restart-ui`). Pass: `docker inspect lancache-ui --format
-  '{{.State.StartedAt}}'` is later, the acknowledgement page's `/health` poll sees the
-  ui go away and come back and ends on `/setup`, and a raw `curl -X POST` through
-  `docker-socket-proxy` against `lancache-syslog` or `lancache-watchdog` gets the
-  HAProxy deny, not the Docker API's 404/409. No CI check covers the allowlist or the
-  live negative control.
-- **DHCP/NTP dock start and stop** (issue #1437): the dock's Start/Stop for `dhcp`,
-  `dhcp-proxy` and `ntp` posts to `/api/services/{service}/desired-state`; the
-  watchdog alone reads that state and starts or stops the container through
-  `docker-socket-proxy`. Pass: Stop moves the container to `exited` within one
-  watchdog cycle (`docker inspect --format '{{.State.Status}}'`), Start brings it back
-  with a later `StartedAt`, and without a dock action (no state file, or the key
-  absent) the watchdog never starts or stops either service. The watchdog and ui
-  crates cover the reconcile logic and the file contract in their own tests.
+  (`POST /setup/restart-ui`). The ui answers with the wait page and ends its own
+  process; compose `restart: always` starts it again. The ui has no Docker access.
+  Pass: the `StartedAt` of the ui container (`docker inspect --format
+  '{{.State.StartedAt}}' "$(docker compose -f deploy/prod/docker-compose.yml ps -q ui)"`)
+  is later, and the wait page's `/health` poll sees the ui go away and come back and
+  ends on `/setup`.
+- **DHCP/NTP dock start and stop** (issue #1437): the dock's Start/Stop posts
+  `running` or `stopped` for `dhcp` or `ntp` to `/api/services/{service}/desired-state`;
+  the ui writes `DESIRED_STATE_FILE`, and the supervisors read it. Stop of `dhcp` stops
+  the Kea or dnsmasq programs in the `dhcp` container, Stop of `ntp` stops `chronyd`
+  in `services`; the containers keep running and stay healthy. Pass: within one
+  supervisor tick the program leaves the `running` list of `supervise.json` in
+  `SUPERVISE_RUN_DIR` of that container, Start brings it back, and with no state file
+  or the key absent the program follows its mode and settings alone.
 
 ### 7. Watchdog — auto-restart coverage
 
-- Confirm coverage matches the **documented, deliberate** per-service decision table
-  from PR #1167 exactly (`docs/architecture-ng.md`'s Watchdog section): `proxy`,
-  `dns` (http and https recursors), and `nats` (new) are monitored/restarted;
-  `ui`, `dhcp` (Kea), `dhcp-proxy` (dnsmasq), `netdata`, `syslog`/`syslog-ng` are
-  deliberately **not** — each for a distinct, documented reason (allowlist gaps for
-  `ui`/`dhcp`, no meaningful healthcheck defined for `dhcp-proxy`/`netdata`, no fixed
-  `container_name` for `syslog`). Do not treat an unmonitored service in this list as
-  a regression — check `docs/architecture-ng.md`'s table before filing anything.
-  **This table is about health-triggered restart and remains unchanged by issue
-  #1437**: `dhcp`/`dhcp-proxy`/`ntp` are still never *restarted* on an unhealthy
-  reading. Issue #1437 adds a separate, narrower mechanism -- an explicit
-  operator start/stop via the dock, reconciled against `desired-state.json` (see
-  the "DHCP/NTP dock start and stop" item of §6) -- that only fires on
-  an explicit dock action, never as a reaction to health state. The two
-  mechanisms share the container but not the trigger, and they **do** interact
-  in one known, accepted way: `resolve_alert_only_targets` (unchanged by issue
-  #1437) still monitors `dhcp`/`dhcp-proxy`/`ntp` whenever provisioned, so
-  stopping one via the dock reads as "unreachable" to that monitor and climbs
-  its `AlertCounter` exactly like an unplanned outage would, producing a
-  standing red row on the dashboard for as long as the operator leaves it
-  stopped. This is not a bug and needs no fix -- it is the expected, visible
-  cost of exposing a real stop control for a service that was previously
-  always-on whenever provisioned. A Part B pass should confirm this specific
-  behavior (red row appears on dock-initiated Stop, clears on dock-initiated
-  Start) rather than treating red-while-deliberately-stopped as a regression.
-- For `nats`, the only single-process monitored service, hang it with
-  `docker kill --signal=STOP lancache-nats` from the host (external `SIGSTOP`, not an
-  in-container one) and confirm a genuine restart (new `StartedAt`).
-- **For `proxy` and `dns` (multi-process containers), use
-  `docker top <container> -o pid` then `kill -STOP` every listed PID from outside
-  the container (root/`sudo`), instead of `--signal=STOP` on the container** — see
-  the reason here. `docker kill --signal=STOP` signals only PID 1; in a multi-process
-  container the workers keep serving and the healthcheck stays green. Stopping every
-  PID leaves the cgroup running, so Docker still starts healthcheck execs, and they
-  time out. `docker pause` marks the container unhealthy without running a probe
-  (`FailingStreak` stays 0) and proves no hang detection. Run the technique
-  against the actual images, confirming a real `FailingStreak` increase from a
-  timed-out probe (not just a `Status` flip) and a genuine watchdog-triggered
-  restart (new `StartedAt`).
+- **Coverage**: `watch` in `services` lists every container that carries the compose
+  project label of its own container and inspects each every `CHECK_INTERVAL`. A
+  container that reads as failing `RESTART_AFTER` times in a row is restarted through
+  the Docker API; the log shows `UNHEALTHY <name> (<n>/<RESTART_AFTER>)`,
+  `RESTARTING <name>` and `RECOVERED <name>`. Its own container `services` only
+  alerts and is never restarted by `watch`. This covers all five containers, with no
+  exception list. Inside a supervised container the supervisor restarts a program
+  that exits; the container reads unhealthy when a wanted program stays down, a
+  listener does not accept or the supervisor status is older than
+  `SUPERVISE_STATUS_MAX_AGE` (Watchdog section of `docs/architecture-ng.md`).
+- **Dock Stop is no outage**: a program stopped by the dock (§6) is not wanted, so the
+  container stays healthy and `watch` counts nothing for it.
+- **Hang check**: run `docker top <container> -o pid`, then `kill -STOP` every listed
+  PID from outside the container (root/`sudo`). `docker kill --signal=STOP` signals
+  only PID 1 (`init: true` makes that tini), and the programs keep serving. With
+  every PID stopped the supervisor stops writing `supervise.json`, and Docker still
+  starts healthcheck execs, which fail. `docker pause` marks the container unhealthy
+  without running a probe (`FailingStreak` stays 0) and proves no hang detection.
+  Pass: a real `FailingStreak` increase from failed probes (not just a `Status`
+  flip) and a restart by `watch` (new `StartedAt`); for `services` itself the
+  `UNHEALTHY` line without a restart.
 
 ### 8. Central logging / syslog forwarding
 
@@ -387,10 +372,12 @@ CI covers the Admin UI → NATS → `nats-subscriber` → PowerDNS write path
   switches were removed. The four keys in a fresh `.env`, the migration of
   an old `LOGGING_ENABLED`, a UI switch reaching `.env` and the watchdog's
   syslog-ng filter per switch have no CI check (Coverage Assessment).
-- **Known gap:** the silent-data-loss detector of the former combined `syslog`
-  container is gone with that container; a log root that syslog-ng cannot
-  write to is not detected by a dedicated check. `setup.sh` pre-creates and
-  chowns the log root on fresh install.
+- **Silent log loss** (issue #1428): `watch` adds a `syslog-ng` row to
+  `status.json` every cycle. When syslog-ng processed messages but no log file
+  was written, it logs `ALERT: silent log loss: syslog-ng processed messages
+  but no log file was written` and the row turns red. Live check: make the
+  log root unwritable for syslog-ng and confirm the alert and the row.
+  `setup.sh` pre-creates and chowns the log root on fresh install.
 
 ### 9. Resource-Leak / Cleanup Pass (standing check, run every release)
 
@@ -405,26 +392,27 @@ triggered the removal/rotation/restart returned success.
 |---|---|---|
 | A removed/rotated NATS secondary's live connection is actually gone, not just access-revoked | The `connz` polling of §5: after removal, poll `nats-server`'s `connz` monitor endpoint until the connection entry disappears — do not stop at the HTTP 200 from the removal API | Fail if the connection lingers in `connz` past a reasonable poll window |
 | Watchdog-restarted containers leave no orphaned process/connection from the pre-restart instance | After a watchdog-triggered restart (Part B §7), `docker exec <host or a diagnostic container> ss -tnp` (or `netstat -tnp` if `ss` is unavailable) targeting the restarted service's port, confirm no stale connection to the old container's now-dead PID remains | Fail if a stale ESTABLISHED/CLOSE-WAIT connection to the pre-restart process persists |
-| `docker compose down -v` genuinely removes every container and named volume for the stack | `docker ps -a --filter "name=lancache"` and `docker volume ls --filter "name=lancache"` immediately after teardown — both must return empty | Fail if any lancache-prefixed container or volume remains |
-| A resized/rotated proxy container (cache-resize, PR #1174) doesn't leave the old container running alongside the new one | `docker ps --filter "name=lancache-proxy"` immediately after a convergence-triggered recreate — exactly one container, with a `StartedAt` matching the recreate, not two | Fail if more than one `lancache-proxy` container is running, or the old one's `StartedAt` is unchanged (recreate didn't actually happen) |
+| `docker compose down -v` genuinely removes every container and named volume for the stack | `docker ps -a --filter "label=com.docker.compose.project=lancache-ng"` and `docker volume ls --filter "label=com.docker.compose.project=lancache-ng"` immediately after teardown — both must return empty | Fail if any container or volume with that project label remains |
+| A resized/rotated proxy container (cache-resize, PR #1174) doesn't leave the old container running alongside the new one | `docker compose -f deploy/prod/docker-compose.yml ps -a proxy` immediately after a convergence-triggered recreate — exactly one container, with a `StartedAt` matching the recreate, not two | Fail if more than one `proxy` container exists, or the old one's `StartedAt` is unchanged (recreate didn't actually happen) |
 | No file-descriptor exhaustion from repeated watchdog restart cycles over a longer soak | `docker exec <container> ls /proc/1/fd \| wc -l` sampled before and after several forced restart cycles of the same service — should return to a stable baseline, not grow monotonically | Fail (flag for investigation) if FD count trends upward across cycles rather than stabilizing |
 
 ### 10. NTP — clock discipline
 
-`ntp` is profile-gated and runs on the bridge network; `ci.sh validate` enables every
-profile, so it starts `ntp` and waits for it. Its config render has no CI check;
-clock discipline is live only.
+`chronyd` runs inside `services` while `NTP_ENABLED` is true (off in the SOT) and the
+dock's desired state of `ntp` is not `stopped`; the supervisor renders `chrony.conf`
+from `NTP_UPSTREAM_SERVERS` and `NTP_ALLOWED_CLIENT_CIDRS`. Clock discipline is live
+only.
 
-- On a host that grants `CAP_SYS_TIME`, force a clock skew and confirm that
-  `chronyc tracking` inside the `ntp` container returns to a `Leap status` of `Normal` with
-  a stratum above 0. On a host that denies it (commonly a nested or LXC container
-  host, issue #1296) the container logs a `WARNING` that it runs degraded: it tracks
-  upstream and answers LAN queries but does not discipline the host clock.
-- **Upstream change while enabled** (issue #1486): with `ntp` running, submit
+- With `NTP_ENABLED=1` (compose grants `services` the `SYS_TIME` capability), force a
+  clock skew and confirm that `chronyc tracking` inside `services` returns to a
+  `Leap status` of `Normal` with a stratum above 0. On a host that denies setting the
+  clock (commonly a nested or LXC container host, issue #1296) record what chronyd
+  logs; the supervisor has no separate degraded mode.
+- **Upstream change while enabled** (issue #1486): with chronyd running, submit
   `/ntp/settings` with a changed `ntp_upstream_servers` list and `ntp_enabled` still
-  on. Pass: a later `StartedAt` (`docker inspect lancache-ntp`) and the startup line
-  `Starting LanCache-NG-NTP (chronyd) with upstream servers: ...` lists the new
-  servers.
+  on. The ui saves it in `UI_SETTINGS_FILE`; the supervisor sees the changed file.
+  Pass: the `services` log shows `chronyd: input changed; restarting`, and
+  `chronyc sources` lists the new servers.
 
 ### 11. `setup.sh update` — live scenario
 
@@ -598,10 +586,10 @@ guard, and the skip branches of the Dockerfile acceleration functions.
 
 ## Scope Boundaries
 
-`ci.sh validate` enables every compose profile of `deploy/prod` and starts every service
-that does not use host networking. The host-network services `dhcp`, `dhcp-proxy` and
-`dhcp-probe` cannot be isolated in its /27 network and are not started; their checks
-are the Kea leg of `ci.sh validate` (Kea on its own containers) and the live
+`ci.sh validate` starts every service of `deploy/prod` that does not use host
+networking. The host-network service `dhcp` cannot be isolated in the /27 network and
+is left out of the stack start (`CI-INFO-VALIDATE-0055`); its checks are the Kea leg
+of `ci.sh validate` (`dhcp` run alone with the host networking reset) and the live
 scenarios of §3; the dnsmasq render has no check (Coverage Assessment). Covered only
 live in Part B:
 
@@ -628,4 +616,4 @@ The Rust checks of Part A are off by default (AG-VAL-008).
 | `bash .github/scripts/ci.sh release-validation` | the AG-REL-011 gate over `docs/validation-state.json` for the checked-out commit |
 | `bash .github/scripts/ci.sh check all`, `check <name>` | the guards of the diff, repo and (with `PR_NUMBER`) pr scope, or one named guard; the guards it skips print `NOT-RUN` |
 | `bats .github/scripts/ci.bats` in the `build-tools` image (AG-VAL-016) | the regression suite; it holds no test, so `check ci-bats` reports `NOT-RUN` |
-| `docker compose -f deploy/prod/docker-compose.yml run --rm dhcp-probe` | the DHCP conflict and client probe (§3) |
+| Admin UI DHCP page (`POST /api/dhcp/check`) | the DHCP conflict and client probe (§3) |
