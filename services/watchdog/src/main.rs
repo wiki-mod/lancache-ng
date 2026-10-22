@@ -2297,7 +2297,7 @@ fn pdns_auth(ctx: &Ctx) -> Result<Run, String> {
     let dir = ctx.run_dir.join("auth");
     let store = lancache_ng::SnapshotStore::new(
         PathBuf::from(ctx.need("DNS_CONFIG_SNAPSHOT_DIR")?).join("auth"),
-        "pdns.conf",
+        ctx.need("DNS_AUTH_CONFIG_SNAPSHOT_FILE")?,
         "dns-auth",
     );
     let restamp = |old: &str| {
@@ -2543,7 +2543,7 @@ fn recursor(ctx: &Ctx, rec: &Recursor) -> Result<Run, String> {
     };
     let store = lancache_ng::SnapshotStore::new(
         PathBuf::from(ctx.need("DNS_CONFIG_SNAPSHOT_DIR")?).join(rec.name),
-        "recursor.conf",
+        ctx.need("DNS_RECURSOR_CONFIG_SNAPSHOT_FILE")?,
         "dns-recursor",
     );
     let restamp = |old: &str| restamp_lines(old, &[("api_key:", format!("  api_key: {api_key}"))]);
@@ -3274,7 +3274,7 @@ fn dnsmasq(ctx: &Ctx, relay: bool) -> Result<Run, String> {
     let path = ctx.run_dir.join("dnsmasq.conf");
     let store = lancache_ng::SnapshotStore::new(
         PathBuf::from(ctx.need("DHCP_CONFIG_SNAPSHOT_DIR")?),
-        "dnsmasq.conf",
+        ctx.need("DHCP_CONFIG_SNAPSHOT_FILE")?,
         "dhcp-proxy",
     );
     let check = [
@@ -4135,7 +4135,7 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
         .collect();
     let store = lancache_ng::SnapshotStore::new(
         PathBuf::from(ctx.need("PROXY_CONFIG_SNAPSHOT_DIR")?),
-        "nginx.json",
+        ctx.need("PROXY_CONFIG_SNAPSHOT_FILE")?,
         "proxy",
     );
     // What: backfill takes dispatch, listen from here.

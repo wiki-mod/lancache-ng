@@ -567,10 +567,15 @@ runtime:
     - KEA_LOG_DEBUGLEVEL=0
     - DHCP_SNAPSHOT_MOUNT=/var/lib/lancache-dhcp
     - DHCP_CONFIG_SNAPSHOT_DIR=@DHCP_SNAPSHOT_MOUNT@/config-snapshots
+    - DHCP_CONFIG_SNAPSHOT_FILE=dnsmasq.conf
     - DNS_SNAPSHOT_MOUNT=/var/lib/lancache-dns
     - DNS_CONFIG_SNAPSHOT_DIR=@DNS_SNAPSHOT_MOUNT@/config-snapshots
+    - DNS_AUTH_CONFIG_SNAPSHOT_FILE=pdns.conf
+    - DNS_RECURSOR_CONFIG_SNAPSHOT_FILE=recursor.conf
+    - DNS_ZONE_SNAPSHOT_FILE=zone.json
     - PROXY_SNAPSHOT_MOUNT=/var/lib/lancache-proxy
     - PROXY_CONFIG_SNAPSHOT_DIR=@PROXY_SNAPSHOT_MOUNT@/config-snapshots
+    - PROXY_CONFIG_SNAPSHOT_FILE=nginx.json
     - DNS_STATE_DIR=/var/lib/powerdns-state
     - PDNS_DATA_DIR=/var/lib/powerdns
     - NATS_CONF_MOUNT=/etc/nats
