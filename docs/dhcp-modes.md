@@ -151,16 +151,11 @@ DHCP page.
 | `DHCP_DNS_PRIMARY` | Primary DNS server offered to proxy/PXE clients — normally the LanCache NG DNS IP (`IP_HTTP`). | `10.0.0.10` |
 | `DHCP_DNS_SECONDARY` | Secondary DNS server. Leave empty to use `IP_HTTPS`. | `10.0.0.11` |
 
-> **A note on `UPSTREAM_DHCP_IP` (issue #450):** an earlier revision of
-> `services/dhcp-proxy/dnsmasq.conf.template` fed this value into dnsmasq's
-> `dhcp-proxy=<ip>` directive. Per `dnsmasq --help`, that flag means "use
-> these DHCP relays as full proxies" (an RFC 5107 serverid-override) — it
-> only does anything when paired with dnsmasq's separate `--dhcp-relay=`
-> feature, which this service never configures. It was a no-op, confirmed
-> against a live `dnsmasq --help`/`--test`, not a functioning link to the
-> upstream server. It has been removed; `UPSTREAM_DHCP_IP` is kept purely so
-> you and the Admin UI's DHCP conflict check agree on which server is
-> expected to answer.
+> **A note on `UPSTREAM_DHCP_IP` (issue #450):** in this mode `dnsmasq_conf`
+> (`services/watchdog/src/main.rs`) renders no line from this value; the
+> earlier `dhcp-proxy=<ip>` line was a no-op without a relay and was removed.
+> Only the `dnsmasq-relay` mode uses it, in its `dhcp-relay=` line (see
+> below).
 
 ### Optional (issue #450)
 

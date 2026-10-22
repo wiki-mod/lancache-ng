@@ -195,17 +195,17 @@ ordering.
 
 | Area | State | Where |
 |---|---|---|
-| DHCP mode switch (disabled/kea/dnsmasq-proxy) | Admin UI, implemented | `dhcp.rs::update_dhcp_mode` |
+| DHCP mode switch (disabled/kea/dnsmasq-proxy/dnsmasq-relay) | Admin UI, implemented | `services/ui/src/main.rs` `update_dhcp_mode` |
 | End-to-end activation of either mode | **Broken in v0.2.0 field test** | #1068 (prerequisite) |
-| Subnet CRUD | Admin UI, implemented | `dhcp.rs::{add,update,remove}_subnet` |
-| Reservation CRUD | Admin UI, implemented | `dhcp.rs::{add,remove}_reservation` |
-| Per-subnet numeric DHCP options (1–254) | Admin UI, implemented | `dhcp.rs::add_subnet_option` |
+| Subnet CRUD | Admin UI, implemented | `services/ui/src/main.rs` `add_subnet`, `update_subnet`, `remove_subnet` |
+| Reservation CRUD | Admin UI, implemented | `services/ui/src/main.rs` `add_reservation`, `remove_reservation` |
+| Per-subnet numeric DHCP options (1–254) | Admin UI, implemented | `services/ui/src/main.rs` `add_subnet_option` |
 | PXE keys (`next-server`/`server-hostname`/`boot-file-name`) | Not built | Planned, #1085 |
 | Standard-options table with tooltips | Not built | Planned, v0.3.0; i18n decision in §6 |
-| Lease release | Admin UI, implemented | `dhcp.rs::release_lease` |
+| Lease release | Admin UI, implemented | `services/ui/src/main.rs` `release_lease` |
 | Lease release → DDNS record cleanup | Implemented, best-effort on NATS/publish failures | #1083 |
-| DHCP conflict pre-check ("DHCP-Precheck") | Admin UI, implemented | `dhcp.rs::check_dhcp_conflict` |
-| Kea config snapshot rollback | Admin UI, implemented | `dhcp.rs::rollback_kea_snapshot`, #614 |
+| DHCP conflict pre-check ("DHCP-Precheck") | Admin UI, implemented | `services/ui/src/main.rs` `check_dhcp_conflict` |
+| Kea config snapshot rollback | Admin UI, implemented | `services/ui/src/main.rs` `rollback_kea_snapshot`, #614 |
 | "Enable DDNS Updates" toggle (independent of DHCP-Server) | Admin UI, implemented | #1076 |
 | DDNS convergence to remote secondaries | Implemented via single-writer DDNS plus native PowerDNS AXFR/NOTIFY | #770/#1164 |
 | Snapshot-rollback status indicator | Not built (log-only) | Planned, v0.3.0, not Kea-specific |
