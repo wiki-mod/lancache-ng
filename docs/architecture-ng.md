@@ -2,7 +2,7 @@
 
 ## Services
 
-Every service below (proxy, PowerDNS, Kea DHCP, dhcp-proxy, Watchdog, Admin UI)
+Every service below (proxy, PowerDNS, Kea DHCP, dnsmasq DHCP, Watchdog, Admin UI)
 already existed before this project's first version tag (`v0.1.0`, cut
 2026-07-06) was created, so a per-service "included since vX.Y.Z" column
 would not actually differentiate anything -- every real row would read the
@@ -18,12 +18,12 @@ depot-fetch capability.
 |---|---|---|---|
 | nginx (proxy) | on | — | Mainline from nginx.org, Alpine base (issue #815) |
 | PowerDNS | on | dnsmasq | Authoritative + Recursor for DNS spoofing & recursion |
-| Kea DHCP / DHCP modes | off | — | Configurable four-state: `disabled` / `kea` / `dnsmasq-proxy` / `dnsmasq-relay` (#844); requires PowerDNS (DDNS via nsupdate) in `kea` mode. The two dnsmasq modes share one `dhcp-proxy` container (config selected by DHCP_MODE): `dnsmasq-proxy` injects PXE options alongside an existing server, `dnsmasq-relay` forwards DHCP to an upstream server on another segment. See [docs/dhcp-modes.md](dhcp-modes.md). |
+| Kea DHCP / DHCP modes | off | — | Configurable four-state: `disabled` / `kea` / `dnsmasq-proxy` / `dnsmasq-relay` (#844); requires PowerDNS (DDNS via nsupdate) in `kea` mode. Kea and both dnsmasq modes run in the one `dhcp` container; its supervisor starts Kea or dnsmasq by `DHCP_MODE` (`disabled` in the SOT): `dnsmasq-proxy` injects PXE options alongside an existing server, `dnsmasq-relay` forwards DHCP to an upstream server on another segment. See [docs/dhcp-modes.md](dhcp-modes.md). |
 | NTP (chronyd inside `services`) | off (`NTP_ENABLED`) | — | The supervisor runs chronyd while `NTP_ENABLED` is true and the desired state of `ntp` is not `stopped` (see the Watchdog section). chrony-based NTP server, disciplined against public NTP servers, serving LAN clients on UDP/123; optional "auto-set as DHCP NTP server" toggle pushes its LAN address into Kea's `ntp-servers` option. See the "Kea DHCP" section below. |
 | Watchdog (inside `services`) | on | — | Supervisor of every supervised image, restart of an unhealthy container, retention; see the Watchdog section |
 | syslog-ng (inside `services`) | on; per-service switches `LOGGING_PROXY_ENABLED`, `LOGGING_DNS_ENABLED`, `LOGGING_DHCP_ENABLED`, `LOGGING_UI_ENABLED` (Admin UI `/logs`) | — | Central log receiver; every container logs to it through the Docker syslog driver — see the syslog-ng section's logging matrix below |
 | Admin UI | on | — | Axum/Rust, Tera, Tailwind, separate port |
-| CacheHamster (Cache-Prefill) | off (`cachehamster` Compose profile) | — | **Infra-wired, functionally still a scaffold**: `services/cachehamster` (issue #871) has a CI-built/published multi-arch image and an opt-in Compose profile since its infra integration (issue #871), but no real Steam depot-fetch capability yet -- credential-store + stream-fetch primitives only. Mechanism decided: stream-and-discard prefill, not SteamCMD; independently-switchable service (not a `services/ui` module). See [docs/design-steam-prefill.md](design-steam-prefill.md) (issue #816, issue #871) for the current design plan and its one remaining open decision (credential strategy). Do not treat this row as a runnable feature until Steam control-plane/depot integration lands. |
+| CacheHamster (Cache-Prefill) | off (no supervised program) | — | **Built, functionally still a scaffold**: `services/cachehamster` (issue #871) is built into the `services` image as `lancache-cachehamster`; no supervisor starts it, an operator runs it by hand (`docker compose exec services lancache-cachehamster ...`). No real Steam depot-fetch capability yet -- credential-store + stream-fetch primitives only. Mechanism decided: stream-and-discard prefill, not SteamCMD; its own crate (not a `services/ui` module). See [docs/design-steam-prefill.md](design-steam-prefill.md) (issue #816, issue #871) for the current design plan and its one remaining open decision (credential strategy). Do not treat this row as a runnable feature until Steam control-plane/depot integration lands. |
 
 ## nginx
 
@@ -511,16 +511,15 @@ persistence — see "Credential handling" below) and the stream-fetch primitive
 real CDN chunk URLs — this needs a real Steam account to test safely against and is
 deliberately deferred (see `services/cachehamster/src/main.rs`'s own module doc comment).
 
-**Infra integration (issue #871): CI-built/published, opt-in Compose profile, functionally
-still inert.** As of this integration pass, `services/cachehamster` is built, Trivy-scanned,
-and published multi-arch (amd64+arm64) by CI like every other service, and
-`deploy/prod/docker-compose.yml` gates its container behind an opt-in
-`cachehamster` Compose profile (default off — the operator must set `COMPOSE_PROFILES` to
-include it and supply Steam credentials). It is intentionally excluded from full-stack CI
-deep-validation (AG-VAL-027) for the same reason it was excluded from Compose before: an
-inert scaffold with no real depot-fetch behavior and no CI-available Steam credential would
-add CI surface without a testable claim to validate. Do not treat this row as a runnable
-feature until the Steam control-plane/depot integration above lands.
+**Infra integration (issue #871, issue #1683): built into `services`, functionally still
+inert.** `lancache-cachehamster` is a crate of the `services` image (`crates` of `services`
+in `.github/yaml/build-manifest.yml`), so CI builds, scans and publishes it with that image.
+It is no supervised program (`processes` of `services` does not list it), so nothing
+starts it; `deploy/prod/docker-compose.yml` passes `CACHEHAMSTER_URLS` and mounts
+`CACHEHAMSTER_DATA_DIR` into `services`. It has no full-stack CI check (AG-VAL-027): an
+inert scaffold with no real depot-fetch behavior and no CI-available Steam credential gives
+no testable claim. Do not treat this row as a runnable feature until the Steam
+control-plane/depot integration above lands.
 
 **Decision: stream-and-discard prefill, no SteamCMD.** `steamcmd` was rejected because
 `steamcmd app_update` performs a real local install — it downloads, verifies, decompresses, and
