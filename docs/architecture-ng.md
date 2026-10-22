@@ -170,7 +170,7 @@ real host:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `ROOT_ZONE_MIRROR` | `1` (enabled) in `services/dns/entrypoint.sh`'s own fallback; this repo's shipped `config/prod/dns-*.env` explicitly set `1` | Root zone mirror (AXFR from root servers). Was previously documented here as `ENABLE_ROOT_MIRROR` — that name does not exist in code; `docs/dns-admin-ui-scope.md` already used the correct name. |
+| `ROOT_ZONE_MIRROR` | SOT runtime default in `.github/yaml/build-manifest.yml`; the supervisor's `recursor` render (`services/watchdog/src/main.rs`) turns the mirror on unless the value parses as false | Root zone mirror (AXFR from root servers). Was previously documented here as `ENABLE_ROOT_MIRROR` — that name does not exist in code; `docs/dns-admin-ui-scope.md` already used the correct name. |
 | Global AAAA-response filter | off by default | Suppresses all AAAA answers for every client, regardless of address family. Not an env var/restart-time setting: toggled live via the Admin UI (`POST /domains/aaaa-filter`), which writes/removes a marker file on the shared `powerdns-state` volume, read live by `filter-aaaa.lua`'s recursor `preresolve` hook. (Previously documented here as two separate env vars, `FILTER_AAAA_V4`/`FILTER_AAAA_V6` — neither name appears anywhere in `services/dns/` or `services/ui/src`; see `docs/dns-admin-ui-scope.md` §1b for the real, shipped mechanism.) **Planned change, not yet implemented**: starting with v0.3.0, this filter is intended to default to **on** instead of off (maintainer decision recorded in issue #1068; no dedicated tracking issue exists yet for the code change itself). Current shipped behavior as of this writing is still off-by-default — do not treat this bullet as already-shipped. |
 | `DNS_REPLICATION_ROLE` | `native` | Selects whether a DNS container owns local zones normally (`native`), acts as the transfer primary (`primary`), or creates the fixed LAN/reverse zones as PowerDNS secondaries (`secondary`). Shipped production and full-setup topology sets `dns` to `primary`; remote secondaries (`setup.sh secondary`) use `secondary`. |
 | `DNS_XFR_PRIMARY` | — | Required when `DNS_REPLICATION_ROLE=secondary`; host:port endpoint of the PowerDNS primary used for native AXFR/refresh polling. Remote secondaries receive this from the Admin UI registration response. |
@@ -269,10 +269,10 @@ it does not control what `dns` publishes.
 - IP ranges as start–end (no CIDR required)
 - Static assignments: MAC → IP, editable via UI
 - DDNS → PowerDNS: lease = automatically an A record (in the configured DHCP domain) and a PTR record (in the matching private reverse zone) via TSIG-secured nsupdate (RFC 2136). PTR updates were **not** applied in production until issue #768's fix: Kea's D2 daemon used to send every reverse update's on-wire zone as the literal `in-addr.arpa.`, which had no matching PowerDNS zone (only narrower private-range subzones exist), so PowerDNS rejected every PTR update regardless of octet; `reverse-ddns` now lists one entry per real private reverse zone instead. See [docs/dhcp-modes.md](dhcp-modes.md) for the full detail.
-- DDNS enable/disable (issue #1076): whether Kea writes those DNS records is a separate control from whether Kea DHCP is running at all. The `DHCP_DDNS_ENABLED` env var (`config/{dev,prod}/dhcp.env`) sets the first-boot default for Kea's `dhcp-ddns.enable-updates`, and the Admin UI's DHCP page carries an independent "Enable DDNS Updates" toggle that flips `enable-updates` live via the Kea Control API. It defaults **off** for a fresh install (opt-in, matching Kea's own default), while an already-running install keeps whatever value it already has — `migrate_dhcp4_config()` merges the persisted `dhcp-ddns` block over the default, so the toggle's choice (and any existing install's on-state) survives restarts.
+- DDNS enable/disable (issue #1076): whether Kea writes those DNS records is a separate control from whether Kea DHCP is running at all. The `DHCP_DDNS_ENABLED` env var (SOT runtime default in `.github/yaml/build-manifest.yml`) sets the first-boot default for Kea's `dhcp-ddns.enable-updates`, and the Admin UI's DHCP page carries an independent "Enable DDNS Updates" toggle that flips `enable-updates` live via the Kea Control API. It defaults **off** for a fresh install (opt-in, matching Kea's own default), while an already-running install keeps whatever value it already has — the supervisor's `kea_dhcp4_own` (`services/watchdog/src/main.rs`) sets the `dhcp-ddns` block only when the saved `kea-dhcp4.conf` has none, so the toggle's choice (and any existing install's on-state) survives restarts.
 - REST API (Kea Control Agent) for Admin UI
 - NTP option (`ntp-servers`, DHCPv4 option 42): each subnet's value is a plain operator-editable field (`main.rs`'s `add_subnet`/`update_subnet`), defaulting to the project-wide `DHCP_NTP_SERVERS` setting. When the LanCache-NG-NTP container is enabled AND its separate "auto-set as DHCP NTP server" toggle is on, `main.rs`'s `apply_ntp_lan_ip_to_all_subnets` instead forces every subnet's `ntp-servers` option to that container's LAN address (`IP_HTTP`), overriding any per-subnet manual value for as long as the toggle stays on; turning it off restores the project-wide default via `restore_default_ntp_on_all_subnets`. The toggle is deliberately independent from the NTP container's own enable/disable switch — enabling the container never auto-populates DHCP by itself.
-- **Multi-threading is explicitly disabled** (`"multi-threading": {"enable-multi-threading": false}` in `services/dhcp/kea-dhcp4.conf`, re-asserted on every migration by `services/dhcp/entrypoint.sh`'s `migrate_dhcp4_config`). This is a deliberate override, not an oversight: Kea has shipped multi-threaded packet processing enabled by default since 2.4.0, but that feature targets high-query-rate ISP/carrier deployments processing thousands of leases per second across many CPU cores -- this project's DHCP server serves one LAN/lab-scale subnet, so the added concurrency surface (interacting with the `lease_cmds` hook, the DDNS-forwarding path, and the Admin UI's config-write/rollback machinery, none of which were designed against concurrent packet handlers) buys no real benefit here. No project history (commit messages, linked PRs) documents an incompatibility that was actually hit; this is a preventive simplicity choice, re-stated here so it isn't mistaken for an unexamined default. An operator with a genuinely large multi-subnet deployment can re-enable it (Kea's own default), but should first re-verify it against the hooks/DDNS paths above.
+- **Multi-threading is explicitly disabled** (`"multi-threading": {"enable-multi-threading": false}`, set by the supervisor's `kea_dhcp4_own` in `services/watchdog/src/main.rs` on every Kea start when the saved `kea-dhcp4.conf` has no `multi-threading` key). This is a deliberate override, not an oversight: Kea has shipped multi-threaded packet processing enabled by default since 2.4.0, but that feature targets high-query-rate ISP/carrier deployments processing thousands of leases per second across many CPU cores -- this project's DHCP server serves one LAN/lab-scale subnet, so the added concurrency surface (interacting with the `lease_cmds` hook, the DDNS-forwarding path, and the Admin UI's config-write/rollback machinery, none of which were designed against concurrent packet handlers) buys no real benefit here. No project history (commit messages, linked PRs) documents an incompatibility that was actually hit; this is a preventive simplicity choice, re-stated here so it isn't mistaken for an unexamined default. An operator with a genuinely large multi-subnet deployment can re-enable it (Kea's own default), but should first re-verify it against the hooks/DDNS paths above.
 
 ## Admin UI security headers
 
@@ -403,25 +403,12 @@ to their actual source -- collected here rather than left as unexplained
   used when a record actually changes. **Expected** whenever the `lan.` zone
   genuinely has no non-SOA/NS records yet -- a fresh install before any
   DHCP-DDNS client has registered, an install with DHCP-DDNS disabled
-  entirely (`DHCP_DDNS_ENABLED=false`, the default -- see `config/prod/dhcp.env`),
+  entirely (`DHCP_DDNS_ENABLED=false`, the SOT default in `.github/yaml/build-manifest.yml`),
   or any deployment that legitimately has zero dynamically-registered LAN
   hosts. **Would be a real problem** only if DHCP-DDNS is enabled with active
   leases and this line persists anyway -- that would point at a PowerDNS
   API-connectivity or zone-content issue worth investigating directly (e.g.
   `pdns_control` / the zone's REST endpoint), not this reconciler's own logic.
-- **`pdns_server is ready (attempt 2)`** (`services/dns/entrypoint.sh`): after
-  starting the PowerDNS authoritative server (`run_auth &`) in the
-  background, the entrypoint polls `pdns_control rping` (a real control-socket
-  RPC, not a bare network ping -- satisfies AG-VAL-018's "real query/response
-  probe" requirement) up to 10 times, 0.5s apart, before starting the
-  recursor, so the recursor's own startup never races ahead of the auth
-  server's control socket becoming responsive. `attempt 2` simply means the
-  auth server took slightly over 0.5s (one extra poll cycle) to finish
-  initializing after being forked -- a normal, self-resolving startup
-  ordering delay, not a retry-after-failure or a bug. Any single-digit
-  attempt count here is unremarkable; only exhausting all 10 attempts (the
-  `WARNING: pdns_server did not respond to ping` line) would indicate a real
-  problem.
 - **NATS connection-refused-then-retry on `lancache-ui` startup**
   (`services/ui/src/main.rs`'s `connect_nats_with_retry()`): the Admin UI's
   `main()` awaits this function -- with a 1s-to-30s capped exponential
@@ -615,8 +602,9 @@ reuses the shared-memory zone across a reload while recalculating `max_size`
 from the new config, and `ngx_master_process_cycle` in
 `src/os/unix/ngx_process_cycle.c` respawns fresh cache manager/loader
 processes with that new config on `SIGHUP`); it is this project's own
-`services/proxy/entrypoint.sh` (renders `nginx.conf` from its template once,
-before `exec nginx`, with no signal handler to re-render and reload) that
+supervisor's `nginx` render in `services/watchdog/src/main.rs` (fills
+`CACHE_MAX_SIZE` from the container env into `nginx.conf` when it starts nginx,
+and sends nginx no reload signal) that
 makes a full recreate the only mechanism available today, not a limitation of
 nginx itself. The convergence writes the setup.sh-managed runtime env
 (`deploy/prod/.env.local`), from which `deploy/prod/docker-compose.yml`

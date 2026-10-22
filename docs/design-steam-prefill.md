@@ -135,11 +135,12 @@ The sentinel hostname is `lancache.steamcontent.com`, confirmed via
 LanCache.NET's own 2020 announcement post and the community-maintained
 `uklans/cache-domains` hostname list.
 
-**No DNS change is needed.** `services/dns/entrypoint.sh` generates the RPZ
-zone from `cdn-domains.txt` by emitting both an exact match and a
-wildcard record per line. Since `steamcontent.com` is already a line in the
-file (re-verified directly against `services/dns/cdn-domains.txt` while
-writing this document), the generated zone already includes
+**No DNS change is needed.** The supervisor's `rpz_zone`
+(`services/watchdog/src/main.rs`) generates the RPZ zone from
+`cdn-domains.txt`: a bare line is an exact match, a line with a leading `.`
+is a wildcard for its subdomains only (`config::cdn_entry` in
+`services/common/config.rs`). Since `.steamcontent.com` is a line in
+`services/dns/cdn-domains.txt`, the generated zone already includes
 `*.steamcontent.com → PROXY_IP`, which matches `lancache.steamcontent.com`
 as a subdomain.
 
