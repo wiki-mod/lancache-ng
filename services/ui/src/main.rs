@@ -19,8 +19,9 @@ use base64::Engine as _;
 use futures_util::StreamExt as _;
 use lancache_ng::config::{
     self, AAAA_FILTER_MARKER, DDNS_UNSIGNED_MARKER, DEFAULT_RECORD_TTL, DNSMASQ_MANAGED_CODES,
-    DhcpMode, KEA_MANAGED_CODES, LeaseLimits, NATS_SUBJECT_FLUSH, NATS_SUBJECT_RECORD, NatsLogin,
-    NatsRoles, OPTION_CODE_MAX, OPTION_CODE_MIN, OutOfRange, PDNS_API_PATH,
+    DhcpMode, KEA_MANAGED_CODES, LeaseLimits, MANAGED_OPTIONS, ManagedOption, NATS_SUBJECT_FLUSH,
+    NATS_SUBJECT_RECORD, NatsLogin, NatsRoles, OPTION_CODE_MAX, OPTION_CODE_MIN, OPTION_DNS,
+    OPTION_DOMAIN, OPTION_NTP, OPTION_ROUTERS, OPTION_SEARCH, OutOfRange, PDNS_API_PATH,
     PROXY_ACCESS_LOG_PATTERN, Uint, canonical_zone, dns_reader_publish, dns_subscribe, is_dns_name,
     option_code, option_data, parse_bool, parse_custom_options, reverse_zones, zone_url,
 };
@@ -3747,19 +3748,20 @@ fn is_dhcp4_option(option: &Value) -> bool {
         .is_none_or(|s| s == "dhcp4")
 }
 
+// What: true if a dhcp4 option is `managed`, by name or code.
+// Why: Kea accepts either; both spell the same option.
+// From: Issue #1683 | PR #1912
+fn is_option(option: &Value, managed: ManagedOption) -> bool {
+    is_dhcp4_option(option)
+        && (text_of(option, "name", "") == managed.name
+            || option.get("code").and_then(Value::as_u64) == Some(managed.code.into()))
+}
+
 // What: true for an option a dedicated subnet field owns.
-// Why: routers, DNS, domain and NTP have their own inputs.
-// From: Issue #1683 | PR #1858
+// Why: each MANAGED_OPTIONS entry has its own input.
+// From: Issue #1683 | PR #1912
 fn is_managed_option(option: &Value) -> bool {
-    let by_name = matches!(
-        text_of(option, "name", ""),
-        "routers" | "domain-name" | "domain-search" | "domain-name-servers" | "ntp-servers"
-    );
-    let by_code = option
-        .get("code")
-        .and_then(Value::as_u64)
-        .is_some_and(|code| KEA_MANAGED_CODES.iter().any(|m| u64::from(*m) == code));
-    is_dhcp4_option(option) && (by_name || by_code)
+    MANAGED_OPTIONS.iter().any(|m| is_option(option, *m))
 }
 
 // What: true for an operator-added numbered option.
@@ -3796,21 +3798,15 @@ fn read_subnet(subnet: &Value, default_lease: u32) -> Subnet {
         .and_then(|p| p.get(0))
         .map_or("", |p| text_of(p, "pool", ""));
     let (pool_start, pool_end) = pool.split_once(" - ").unwrap_or((pool, ""));
-    let option = |name: &str, code: u64| -> String {
+    let option = |managed: ManagedOption| -> String {
         subnet
             .get("option-data")
             .and_then(Value::as_array)
-            .and_then(|options| {
-                options.iter().find(|o| {
-                    is_dhcp4_option(o)
-                        && (text_of(o, "name", "") == name
-                            || o.get("code").and_then(Value::as_u64) == Some(code))
-                })
-            })
+            .and_then(|options| options.iter().find(|o| is_option(o, managed)))
             .map_or("", |o| text_of(o, "data", ""))
             .to_string()
     };
-    let dns = split_list(&option("domain-name-servers", 6));
+    let dns = split_list(&option(OPTION_DNS));
     let custom_options = subnet
         .get("option-data")
         .and_then(Value::as_array)
@@ -3829,10 +3825,10 @@ fn read_subnet(subnet: &Value, default_lease: u32) -> Subnet {
         subnet: text_of(subnet, "subnet", "").to_string(),
         pool_start: pool_start.trim().to_string(),
         pool_end: pool_end.trim().to_string(),
-        gateway: option("routers", 3),
+        gateway: option(OPTION_ROUTERS),
         dns_primary: dns.first().cloned().unwrap_or_default(),
         dns_secondary: dns.get(1).cloned().unwrap_or_default(),
-        ntp_servers: option("ntp-servers", 42),
+        ntp_servers: option(OPTION_NTP),
         // What: default lease time if the subnet sets none.
         // Why: the page shows what dhcp would hand out.
         // From: Issue #1683 | PR #1912
@@ -3840,7 +3836,7 @@ fn read_subnet(subnet: &Value, default_lease: u32) -> Subnet {
             .get("valid-lifetime")
             .and_then(Value::as_u64)
             .unwrap_or(default_lease.into()) as u32,
-        domain: option("domain-name", 15),
+        domain: option(OPTION_DOMAIN),
         custom_options,
     }
 }
@@ -4168,15 +4164,15 @@ fn apply_subnet(
     } else {
         format!("{primary}, {secondary}")
     };
-    options.push(json!({"name": "routers", "data": f.get("gateway")}));
-    options.push(json!({"name": "domain-name-servers", "data": dns}));
-    options.push(json!({"name": "domain-name", "data": f.get("domain")}));
-    options.push(json!({"name": "domain-search", "data": f.get("domain")}));
+    options.push(json!({"name": OPTION_ROUTERS.name, "data": f.get("gateway")}));
+    options.push(json!({"name": OPTION_DNS.name, "data": dns}));
+    options.push(json!({"name": OPTION_DOMAIN.name, "data": f.get("domain")}));
+    options.push(json!({"name": OPTION_SEARCH.name, "data": f.get("domain")}));
     // What: an NTP option only when servers are given.
     // Why: an unset field means no NTP option for clients.
     // From: Issue #1683 | PR #1858
     if !ntp.is_empty() {
-        options.push(json!({"name": "ntp-servers", "data": ntp}));
+        options.push(json!({"name": OPTION_NTP.name, "data": ntp}));
     }
     // What: keep reservations that fit the new subnet.
     // Why: Kea rejects a subnet with foreign reservations.
@@ -4329,16 +4325,12 @@ fn set_subnet_ntp(subnet: &mut Value, servers: &str) -> Result<(), &'static str>
         .get_mut("option-data")
         .and_then(Value::as_array_mut)
         .ok_or("subnet option-data missing or not an array")?;
-    options.retain(|o| {
-        !(is_dhcp4_option(o)
-            && (text_of(o, "name", "") == "ntp-servers"
-                || o.get("code").and_then(Value::as_u64) == Some(42)))
-    });
+    options.retain(|o| !is_option(o, OPTION_NTP));
     // What: an NTP option only when servers are given.
     // Why: no servers means no NTP option for clients.
     // From: Issue #1683 | PR #1858
     if !servers.is_empty() {
-        options.push(json!({"name": "ntp-servers", "data": servers}));
+        options.push(json!({"name": OPTION_NTP.name, "data": servers}));
     }
     Ok(())
 }

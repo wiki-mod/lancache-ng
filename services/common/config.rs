@@ -728,10 +728,60 @@ pub fn zone_api_id(zone: &str) -> &str {
     zone.trim_end_matches('.')
 }
 
-// What: option codes the dedicated subnet fields own.
-// Why: routers 3, DNS 6, domain 15, NTP 42, search 119.
+// What: one DHCPv4 option a dedicated subnet field owns.
+// Why: Kea names it, dnsmasq and option-data use its code.
 // From: Issue #1683 | PR #1912
-pub const KEA_MANAGED_CODES: [u16; 5] = [3, 6, 15, 42, 119];
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ManagedOption {
+    pub name: &'static str,
+    pub code: u16,
+}
+
+// What: the five managed options, Kea name and DHCPv4 code.
+// Why: one pair per option for the ui, Kea and dnsmasq.
+// From: Issue #1683 | PR #1912
+pub const OPTION_ROUTERS: ManagedOption = ManagedOption {
+    name: "routers",
+    code: 3,
+};
+pub const OPTION_DNS: ManagedOption = ManagedOption {
+    name: "domain-name-servers",
+    code: 6,
+};
+pub const OPTION_DOMAIN: ManagedOption = ManagedOption {
+    name: "domain-name",
+    code: 15,
+};
+pub const OPTION_NTP: ManagedOption = ManagedOption {
+    name: "ntp-servers",
+    code: 42,
+};
+pub const OPTION_SEARCH: ManagedOption = ManagedOption {
+    name: "domain-search",
+    code: 119,
+};
+
+// What: every managed option, in KEA_MANAGED_CODES order.
+// Why: name checks and code lists read the same set.
+// From: Issue #1683 | PR #1912
+pub const MANAGED_OPTIONS: [ManagedOption; 5] = [
+    OPTION_ROUTERS,
+    OPTION_DNS,
+    OPTION_DOMAIN,
+    OPTION_NTP,
+    OPTION_SEARCH,
+];
+
+// What: option codes the dedicated subnet fields own.
+// Why: derived from MANAGED_OPTIONS for the forms and pages.
+// From: Issue #1683 | PR #1912
+pub const KEA_MANAGED_CODES: [u16; 5] = [
+    MANAGED_OPTIONS[0].code,
+    MANAGED_OPTIONS[1].code,
+    MANAGED_OPTIONS[2].code,
+    MANAGED_OPTIONS[3].code,
+    MANAGED_OPTIONS[4].code,
+];
 
 // What: option codes dnsmasq-proxy renders itself.
 // Why: Kea's list without search; search stays custom.

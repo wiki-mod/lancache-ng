@@ -3086,13 +3086,13 @@ fn kea_dhcp4_first(ctx: &Ctx, kea: &KeaKnobs) -> Result<Value, String> {
     let lease = limits.lease(&config::process_env, "DHCP_LEASE_TIME")?;
     let domain = config::lan_zone(&config::process_env)?;
     let mut options = vec![
-        serde_json::json!({"name": "routers", "data": ctx.need("DHCP_GATEWAY")?}),
+        serde_json::json!({"name": config::OPTION_ROUTERS.name, "data": ctx.need("DHCP_GATEWAY")?}),
         serde_json::json!({
-            "name": "domain-name-servers",
+            "name": config::OPTION_DNS.name,
             "data": format!("{}, {}", ctx.need_dns("DHCP_DNS_PRIMARY")?, ctx.need_dns("DHCP_DNS_SECONDARY")?)
         }),
-        serde_json::json!({"name": "domain-name", "data": domain}),
-        serde_json::json!({"name": "domain-search", "data": domain}),
+        serde_json::json!({"name": config::OPTION_DOMAIN.name, "data": domain}),
+        serde_json::json!({"name": config::OPTION_SEARCH.name, "data": domain}),
     ];
     let ntp = dhcp_ntp_servers(
         &env_opt("DHCP_NTP_SERVERS").unwrap_or_default(),
@@ -3100,7 +3100,7 @@ fn kea_dhcp4_first(ctx: &Ctx, kea: &KeaKnobs) -> Result<Value, String> {
     )?;
     if !ntp.is_empty() {
         let list: Vec<String> = ntp.iter().map(ToString::to_string).collect();
-        options.push(serde_json::json!({"name": "ntp-servers", "data": list.join(",")}));
+        options.push(serde_json::json!({"name": config::OPTION_NTP.name, "data": list.join(",")}));
     }
     Ok(serde_json::json!({
         "Dhcp4": {
@@ -3428,13 +3428,17 @@ fn dnsmasq_conf(set: &dyn Fn(&str) -> String, relay: bool, log_dhcp: bool) -> St
     );
     let primary = set("DHCP_DNS_PRIMARY");
     let secondary = set("DHCP_DNS_SECONDARY");
-    let dns = format!("dhcp-option-pxe=6,{primary},{secondary}");
+    // What: the dhcp-option-pxe prefix of one managed option.
+    // Why: its code comes from the one ManagedOption owner.
+    // From: Issue #1683 | PR #1912
+    let pxe = |option: config::ManagedOption| format!("dhcp-option-pxe={},", option.code);
+    let dns = format!("{}{primary},{secondary}", pxe(config::OPTION_DNS));
     dnsmasq_line(&mut conf, "DHCP_DNS_PRIMARY", &[&primary, &secondary], dns);
     let fields = [
-        ("DHCP_PROXY_INTERFACE", "interface="),
-        ("DHCP_PROXY_ROUTER", "dhcp-option-pxe=3,"),
-        ("DHCP_NTP_SERVERS", "dhcp-option-pxe=42,"),
-        ("DHCP_PROXY_DOMAIN", "dhcp-option-pxe=15,"),
+        ("DHCP_PROXY_INTERFACE", "interface=".to_string()),
+        ("DHCP_PROXY_ROUTER", pxe(config::OPTION_ROUTERS)),
+        ("DHCP_NTP_SERVERS", pxe(config::OPTION_NTP)),
+        ("DHCP_PROXY_DOMAIN", pxe(config::OPTION_DOMAIN)),
     ];
     for (key, prefix) in fields {
         let value = set(key);
