@@ -73,7 +73,7 @@
     <div class="flex flex-wrap gap-x-6 gap-y-2" id="watchdog-services">
       {% for svc in watchdog_status.services %}
       <div class="flex items-center gap-2" data-service="{{ svc.name }}">
-        {# What: amber is a reduced-guarantee state
+        {# What: service dot; base.html paints its status
            Why: title shows svc.health as the tooltip #}
         <span class="beambar-dot" data-role="dot" data-dot-status="{{ svc.status }}" title="{{ svc.health }}"></span>
         <span class="text-sm text-slate-300">{{ svc.name }}</span>
@@ -144,7 +144,7 @@
     {% if cache_resize_pending %}
     <div class="bg-amber-500/10 border border-amber-500/30 rounded-lg px-3 py-2 text-xs text-amber-300 mb-3">
       Resize to {{ effective_cache_max_gb }} GB requested. This takes effect within the next
-      few minutes (the host convergence timer runs every 5 minutes) and briefly restarts the
+      few minutes (the host convergence timer runs every {{ converge_minutes }} minutes) and briefly restarts the
       proxy container.
     </div>
     {% endif %}
@@ -293,18 +293,24 @@
   // Why: http and https cards share one id scheme
   // From: Issue #1683 | PR #1912
   function updateMetricsSection(prefix, status) {
+    // What: a null status leaves the card unchanged
+    // Why: an unreachable proxy reports null
+    // From: Issue #1683 | PR #1912
     if (!status) {
       return;
     }
     const active = document.getElementById(prefix + '-active');
     const requests = document.getElementById(prefix + '-requests');
     const waiting = document.getElementById(prefix + '-waiting');
+    // What: skips counters the card did not render
+    // Why: disabled or unreachable cards lack counter ids
+    // From: Issue #1683 | PR #1912
     if (active) active.textContent = status.active;
     if (requests) requests.textContent = status.requests;
     if (waiting) waiting.textContent = status.waiting;
   }
 
-  // What: polls the metrics route every 10s, patches counts
+  // What: fetches the metrics route, patches the counters
   // Why: a reload also recomputes cache and log stats
   // From: Issue #1683 | PR #1912
   async function refreshDashboardMetrics() {
@@ -315,6 +321,9 @@
       }
       const data = await response.json();
       updateMetricsSection('http', data.http);
+      // What: https counters only when HTTPS is enabled
+      // Why: the disabled HTTPS card has no counters
+      // From: Issue #1683 | PR #1912
       if (data.https_enabled) {
         updateMetricsSection('https', data.https);
       }
@@ -326,12 +335,18 @@
     }
   }
 
-  setInterval(refreshDashboardMetrics, 10000);
+  // What: reruns refreshDashboardMetrics per SOT interval
+  // Why: counters stay live without a page reload
+  // From: Issue #1683 | PR #1912
+  setInterval(refreshDashboardMetrics, {{ dashboard_refresh_seconds * 1000 }});
 
   // What: skip title update when health is omitted
   // Why: the disk-cache dot has no health string to show
   // From: Issue #1437
   function setWatchdogDotColor(dot, status, health) {
+    // What: no dot element means nothing to paint
+    // Why: a service row may lack a rendered dot
+    // From: Issue #1683 | PR #1912
     if (!dot) {
       return;
     }
@@ -345,6 +360,9 @@
   // Why: base.html polls; this page only renders the data
   window.LancacheWatchdog.onUpdate(function (data) {
     const note = document.getElementById('watchdog-status-note');
+    // What: note text from the watchdog document state
+    // Why: same three states the server-side note shows
+    // From: Issue #1683 | PR #1912
     if (note) {
       if (data.state === 'stale') {
         note.textContent = 'stale (' + data.age_seconds + 's old)';
@@ -354,16 +372,25 @@
         note.textContent = 'live';
       }
     }
+    // What: no dots to repaint while status is unavailable
+    // Why: the document then carries no service list
+    // From: Issue #1683 | PR #1912
     if (data.state === 'unavailable') {
       return;
     }
     (data.services || []).forEach(function (svc) {
       const row = document.querySelector('[data-service="' + svc.name + '"]');
+      // What: skips services without a row on this page
+      // Why: rows exist only for services rendered at load
+      // From: Issue #1683 | PR #1912
       if (!row) {
         return;
       }
       setWatchdogDotColor(row.querySelector('[data-role="dot"]'), svc.status, svc.health);
     });
+    // What: repaints the cache-disk dot when both exist
+    // Why: the disk block or its row can be absent
+    // From: Issue #1683 | PR #1912
     if (data.disk && data.disk.cache) {
       const diskRow = document.querySelector('[data-service="disk-cache"]');
       if (diskRow) {

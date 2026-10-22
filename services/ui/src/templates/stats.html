@@ -2,7 +2,7 @@
 {# LanCache-NG (https://github.com/wiki-mod/lancache-ng) #}
 {# SPDX-License-Identifier: AGPL-3.0-or-later #}
 {# What: system stats page: CPU, RAM, network, disk I/O
-   Why: metrics are fetched from Netdata at /api/netdata #}
+   Why: metrics come from Netdata via routes.netdata #}
 {% extends "base.html" %}
 {% block title %} – Statistiken{% endblock %}
 
@@ -51,14 +51,20 @@
 {% block scripts %}
 <script src="{{ routes.chart_js | safe }}"></script>
 <script>
+// What: netdata proxy route; {*path} is the chart path
+// Why: main.rs owns the route string
+// From: Issue #1683 | PR #1912
 const NETDATA = '{{ routes.netdata | safe }}';
 // What: sample count per chart and netdata request
 // Why: bounds chart array length and request size
-const POINTS  = 60;
-// What: refresh() interval in milliseconds
+const POINTS  = {{ stats_points }};
+// What: refresh() interval; SOT seconds as setInterval ms
 // Why: each tick fetches every chart from netdata
-const REFRESH  = 3000;
+const REFRESH  = {{ stats_refresh_seconds * 1000 }};
 
+// What: shared line-chart options for all four charts
+// Why: one look; no animation keeps each tick cheap
+// From: Issue #1683 | PR #1912
 const chartDefaults = {
   type: 'line',
   options: {
@@ -76,6 +82,9 @@ const chartDefaults = {
   }
 };
 
+// What: builds a chart with POINTS empty labels
+// Why: the x axis has a fixed length from the start
+// From: Issue #1683 | PR #1912
 function makeChart(id, labels, datasets) {
   const ctx = document.getElementById(id);
   return new Chart(ctx, {
@@ -84,6 +93,9 @@ function makeChart(id, labels, datasets) {
   });
 }
 
+// What: the CPU, RAM, network and disk charts
+// Why: each canvas id above gets one chart
+// From: Issue #1683 | PR #1912
 const cpuChart = makeChart('cpuChart', [], [{
   label: 'CPU %', data: [], fill: true,
   borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,0.1)',
@@ -106,6 +118,9 @@ const diskChart = makeChart('diskChart', [], [
   { label: 'Schreiben (MB/s)',data: [], fill: false, borderColor: '#f43f5e', tension: 0.3, pointRadius: 0, borderWidth: 2 },
 ]);
 
+// What: appends one value per dataset, drops the oldest
+// Why: keeps every dataset at POINTS entries
+// From: Issue #1683 | PR #1912
 function push(chart, ...values) {
   values.forEach((v, i) => {
     chart.data.datasets[i].data.push(v);
@@ -116,6 +131,9 @@ function push(chart, ...values) {
   chart.update('none');
 }
 
+// What: fetches one netdata chart for POINTS samples
+// Why: average grouping fits the chart length
+// From: Issue #1683 | PR #1912
 async function fetchChart(path) {
   const res = await fetch(`${NETDATA.replace('{*path}', path)}&points=${POINTS}&group=average&format=json`);
   // What: throws on a non-2xx netdata response.
@@ -139,8 +157,14 @@ function column(reply, label) {
   return at;
 }
 
+// What: true while the error banner is shown
+// Why: refresh() shows the banner once per failure run
+// From: Issue #849 | PR #1460
 let errorShown = false;
 
+// What: fetches all four charts and pushes new values
+// Why: one tick updates every chart together
+// From: Issue #1683 | PR #1912
 async function refresh() {
   try {
     // What: busy % = sum of the system.cpu state columns.
@@ -185,7 +209,7 @@ async function refresh() {
     document.getElementById('netdata-error').classList.add('hidden');
     // What: resets errorShown after a successful refresh.
     // Why: otherwise the banner only shows once per page.
-    // From: Issue #849
+    // From: Issue #849 | PR #1460
     errorShown = false;
   } catch (e) {
     reportError(e);
@@ -196,6 +220,9 @@ async function refresh() {
   }
 }
 
+// What: first refresh now, then every REFRESH ms
+// Why: the charts fill without waiting one interval
+// From: Issue #1683 | PR #1912
 refresh();
 setInterval(refresh, REFRESH);
 </script>

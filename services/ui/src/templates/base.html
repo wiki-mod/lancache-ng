@@ -241,6 +241,9 @@
         // From: Issue #1437
         reportError(err);
       }
+      // What: stored theme if valid, else the OS setting
+      // Why: one rule for page load and both change events
+      // From: Issue #1437 | PR #1912
       function apply() {
         const own = stored === 'light' || stored === 'dark';
         root.setAttribute('data-theme', own ? stored : (osLight.matches ? 'light' : 'dark'));
@@ -332,6 +335,9 @@
     // From: Issue #1437
     window.LancacheWatchdog = (function () {
       const DOT_COLOR_CLASSES = ['green', 'amber', 'yellow', 'red', 'gray'];
+      // What: the status as dot class; unknown becomes gray
+      // Why: a server value never adds an unknown class
+      // From: Issue #1683 | PR #1912
       function colorClass(status) {
         return DOT_COLOR_CLASSES.includes(status) ? status : 'gray';
       }
@@ -347,14 +353,23 @@
       document.querySelectorAll('[data-dot-status]').forEach(function (dot) {
         paintDot(dot, dot.dataset.dotStatus);
       });
+      // What: registers a renderer for each status update
+      // Why: beambar and dashboard share one poll
+      // From: Issue #1683 | PR #1912
       const listeners = [];
       function onUpdate(fn) {
         listeners.push(fn);
       }
+      // What: fetches the status and hands it to listeners
+      // Why: one fetch feeds every renderer on the page
+      // From: Issue #1683 | PR #1912
       async function refresh() {
         let data;
         try {
           const response = await fetch('{{ routes.watchdog_status | safe }}');
+          // What: throws on a non-2xx status response
+          // Why: the catch below reports it as fetch error
+          // From: Issue #1683 | PR #1912
           if (!response.ok) {
             throw new Error('watchdog status: HTTP ' + response.status);
           }
@@ -384,6 +399,9 @@
           headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF_TOKEN },
           body: JSON.stringify({ state: state }),
         });
+        // What: throws on a non-2xx desired-state response
+        // Why: the catch below reports it as fetch error
+        // From: Issue #1683 | PR #1912
         if (!response.ok) {
           throw new Error('desired state: HTTP ' + response.status);
         }
@@ -402,6 +420,9 @@
     // From: Issue #1068 | PR #1912
     function copyText(id, button) {
       const el = document.getElementById(id);
+      // What: shows "Kopiert!" briefly, then the old label
+      // Why: confirms the copy without a dialog
+      // From: Issue #1683 | PR #1912
       function flash() {
         button.textContent = 'Kopiert!';
         button.classList.add('text-green-400');
@@ -410,6 +431,9 @@
           button.classList.remove('text-green-400');
         }, 1500);
       }
+      // What: selects element text, copies by execCommand
+      // Why: fallback when the Clipboard API is missing
+      // From: Issue #1683 | PR #1912
       function selectAndCopy() {
         const range = document.createRange();
         range.selectNodeContents(el);
@@ -432,6 +456,9 @@
         sel.removeAllRanges();
         flash();
       }
+      // What: Clipboard API if secure context, else select
+      // Why: browsers offer navigator.clipboard only there
+      // From: Issue #1683 | PR #1912
       if (navigator.clipboard && window.isSecureContext) {
         navigator.clipboard.writeText(el.innerText).then(flash, function (err) {
           reportError(err);
@@ -454,6 +481,9 @@
     // From: Issue #1437
     (function () {
       const container = document.getElementById('beambar-services');
+      // What: one beambar entry: dot, name, dock button
+      // Why: built from DOM nodes, never from HTML strings
+      // From: Issue #1683 | PR #1912
       function serviceEntry(svc) {
         const wrap = document.createElement('span');
         wrap.title = svc.health || '';
@@ -480,6 +510,9 @@
         }
         return wrap;
       }
+      // What: rebuilds the beambar from one status update
+      // Why: unavailable and stale states own their text
+      // From: Issue #1683 | PR #1912
       function render(data) {
         container.textContent = '';
         if (data.state === 'unavailable') {
@@ -498,10 +531,10 @@
       window.LancacheWatchdog.onUpdate(render);
     })();
 
-    // What: loads watchdog status now, then every 10s
+    // What: loads watchdog status now and per SOT interval
     // Why: beambar and dashboard dots read the same data
     window.LancacheWatchdog.refresh();
-    setInterval(window.LancacheWatchdog.refresh, 10000);
+    setInterval(window.LancacheWatchdog.refresh, {{ watchdog_refresh_seconds * 1000 }});
 
     // What: each [data-epoch] value as de-DE date and time
     // Why: one owner for every page; 0 or junk stays raw
