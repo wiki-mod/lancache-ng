@@ -43,6 +43,13 @@ adapter) is:
    | dns-secondary (remote secondary node, same image/entrypoint) | `/var/lib/lancache-dns/config-snapshots/{recursor,auth}` | `pdns-config-snapshots` |
    | dhcp (Kea) | `/var/lib/kea/config-snapshots` — see "Kea" below | `kea-data` (shared with the `dhcp` service) |
 
+   The name of the payload file inside each snapshot is owned by
+   `runtime.defaults` in `.github/yaml/build-manifest.yml`:
+   `PROXY_CONFIG_SNAPSHOT_FILE`, `DHCP_CONFIG_SNAPSHOT_FILE`,
+   `DNS_AUTH_CONFIG_SNAPSHOT_FILE`, `DNS_RECURSOR_CONFIG_SNAPSHOT_FILE`,
+   `DNS_ZONE_SNAPSHOT_FILE` (zones, see below) and
+   `KEA_CONFIG_SNAPSHOT_FILE`.
+
 4. **Rollback refuses invalid snapshots.** When a candidate config fails
    validation, the adapter tries every stored snapshot from newest to
    oldest, re-validating each one before applying it. A snapshot that fails

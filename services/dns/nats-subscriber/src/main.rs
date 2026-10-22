@@ -114,6 +114,7 @@ struct Ctx {
     pdns_rec_urls: Vec<String>,
     pdns_auth_config_dir: String,
     snapshot_dir: PathBuf,
+    snapshot_file: String,
     keep_n: u32,
     // What: the local zone name, from DHCP_DOMAIN.
     // Why: the SOT owns it; no literal in this crate.
@@ -141,6 +142,7 @@ impl Ctx {
                 .collect(),
             pdns_auth_config_dir: need(get, "PDNS_AUTH_CONFIG_DIR")?,
             snapshot_dir: PathBuf::from(need(get, "DNS_CONFIG_SNAPSHOT_DIR")?),
+            snapshot_file: need(get, "DNS_ZONE_SNAPSHOT_FILE")?,
             keep_n: keep_known_good(get)?,
             lan_zone: lan_zone(get)?,
             lock: tokio::sync::Mutex::new(()),
@@ -152,7 +154,7 @@ impl Ctx {
     // Why: every zone has its own directory under zones/.
     fn store(&self, zone: &str) -> SnapshotStore {
         let root = self.snapshot_dir.join("zones").join(zone);
-        SnapshotStore::new(root, "zone.json", "dns")
+        SnapshotStore::new(root, self.snapshot_file.as_str(), "dns")
     }
 
     // What: the rrsets array of one zone, as a JSON array.
