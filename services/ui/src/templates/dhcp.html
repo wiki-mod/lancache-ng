@@ -541,6 +541,11 @@ function showDetails(listEl, details) {
   }
 }
 
+// What: status words of the DHCP check from shared.rs
+// Why: the page compares the words Rust sends, no copy
+// From: Issue #1683 | PR #1912
+const CHECK = {{ dhcp_check_words | safe }};
+
 // What: runs the DHCP check and fills the status card
 // Why: the probe runs on the server; the page shows it
 async function checkDhcpConflict() {
@@ -565,13 +570,13 @@ async function checkDhcpConflict() {
       }
     });
     const data = await res.json();
-    if (data.status === 'verified') {
+    if (data.status === CHECK.overall.verified) {
       statusEl.className = 'text-sm text-green-400';
       statusEl.textContent = '✓ Konfliktprobe und DHCP-Client-Dry-Run erfolgreich';
-    } else if (data.status === 'conflict_found') {
+    } else if (data.status === CHECK.overall.conflict_found) {
       statusEl.className = 'text-sm text-yellow-400';
       statusEl.textContent = '⚠ Fremder DHCP-Server gefunden';
-    } else if (data.status === 'client_failed') {
+    } else if (data.status === CHECK.overall.client_failed) {
       statusEl.className = 'text-sm text-amber-400';
       statusEl.textContent = '⚠ DHCP-Client-Dry-Run fehlgeschlagen';
     } else {
@@ -579,22 +584,22 @@ async function checkDhcpConflict() {
       const reason = data.conflict?.reason ?? data.client?.reason ?? 'unbekannt';
       statusEl.textContent = `DHCP-Prüfung nicht verfügbar: ${reason}`;
     }
-    if (data.conflict?.status === 'found') {
+    if (data.conflict?.status === CHECK.conflict.found) {
       conflictEl.className = 'text-sm text-yellow-400';
       conflictEl.textContent = `Konfliktprobe: fremder DHCP-Server gefunden (${data.conflict.output ?? 'ohne Detail'})`;
       showDetails(conflictDetailsEl, data.conflict.details ?? []);
-    } else if (data.conflict?.status === 'not_found') {
+    } else if (data.conflict?.status === CHECK.conflict.not_found) {
       conflictEl.className = 'text-sm text-green-400';
       conflictEl.textContent = 'Konfliktprobe: kein fremder DHCP-Server im gescannten Segment gefunden';
     } else {
       conflictEl.className = 'text-sm text-amber-400';
       conflictEl.textContent = `Konfliktprobe: nicht verfügbar (${data.conflict?.reason ?? 'unbekannt'})`;
     }
-    if (data.client?.status === 'passed') {
+    if (data.client?.status === CHECK.client.passed) {
       clientEl.className = 'text-sm text-green-400';
       clientEl.textContent = `DHCP-Client-Dry-Run: erfolgreich (${data.client.output ?? 'ohne Detail'})`;
       showDetails(clientDetailsEl, data.client.details ?? []);
-    } else if (data.client?.status === 'failed') {
+    } else if (data.client?.status === CHECK.client.failed) {
       clientEl.className = 'text-sm text-amber-400';
       clientEl.textContent = `DHCP-Client-Dry-Run: fehlgeschlagen (${data.client.output ?? 'ohne Detail'})`;
     } else {

@@ -1698,6 +1698,40 @@ impl ProbeReport {
         }
     }
 
+    // What: each status word the dhcp page compares.
+    // Why: overall() and serde own them; no page copy.
+    // From: Issue #1683 | PR #1912
+    pub fn status_words() -> Value {
+        let found = || ConflictCheck::Found {
+            output: String::new(),
+            details: Vec::new(),
+        };
+        let passed = || ClientCheck::Passed {
+            output: String::new(),
+            details: Vec::new(),
+        };
+        let failed = || ClientCheck::Failed {
+            output: String::new(),
+        };
+        let overall = |conflict, client| Self { conflict, client }.overall();
+        let tag = |check: Value| check["status"].clone();
+        serde_json::json!({
+            "overall": {
+                "verified": overall(ConflictCheck::NotFound, passed()),
+                "conflict_found": overall(found(), passed()),
+                "client_failed": overall(ConflictCheck::NotFound, failed()),
+            },
+            "conflict": {
+                "found": tag(serde_json::json!(found())),
+                "not_found": tag(serde_json::json!(ConflictCheck::NotFound)),
+            },
+            "client": {
+                "passed": tag(serde_json::json!(passed())),
+                "failed": tag(serde_json::json!(failed())),
+            },
+        })
+    }
+
     // What: the page's JSON: one status plus both checks.
     // Why: the dhcp page script reads exactly this shape.
     pub fn page(&self) -> Value {
