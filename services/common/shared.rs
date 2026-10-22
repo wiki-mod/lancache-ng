@@ -954,17 +954,41 @@ impl SnapshotStore {
     // Why: an update keeps rollback targets (AG-OP-007).
     // From: Issue #1683 | PR #1912
     pub fn adopt_legacy(&self) {
-        let Ok(entries) = fs::read_dir(&self.root) else {
-            return;
+        // What: no root, nothing to adopt; log errors.
+        // Why: a first start has no store yet.
+        // From: Issue #1683 | PR #1912
+        let entries = match fs::read_dir(&self.root) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return,
+            Err(e) => {
+                let root = self.root.display();
+                self.log(
+                    "FATAL",
+                    &format!("cannot list {root} for old snapshots: {e}"),
+                );
+                return;
+            }
         };
-        for entry in entries.flatten() {
+        for entry in entries {
+            // What: an unreadable entry is skipped, logged.
+            // Why: the other old snapshots still adopt.
+            // From: Issue #1683 | PR #1912
+            let (entry, is_dir) = match entry.and_then(|e| {
+                let is_dir = e.file_type()?.is_dir();
+                Ok((e, is_dir))
+            }) {
+                Ok(found) => found,
+                Err(e) => {
+                    let root = self.root.display();
+                    self.log("FATAL", &format!("cannot read an entry of {root}: {e}"));
+                    continue;
+                }
+            };
             let name = entry.file_name().to_string_lossy().into_owned();
             // What: old = dir, not numeric, not staging.
             // Why: staging and new snapshots stay.
             // From: Issue #1683 | PR #1912
-            let old = entry.file_type().is_ok_and(|t| t.is_dir())
-                && !name.starts_with(STAGING)
-                && !is_snapshot_id(&name);
+            let old = is_dir && !name.starts_with(STAGING) && !is_snapshot_id(&name);
             if !old {
                 continue;
             }

@@ -529,11 +529,13 @@ impl Config {
             .unwrap_or(self.cache_max_gb)
     }
 
-    // What: NETDATA_URL parsed; None if it is no URL.
+    // What: NETDATA_URL parsed; None, logged, if no URL.
     // Why: one parse for the chart proxy and the port text.
     // From: Issue #1683 | PR #1912
     fn netdata_base(&self) -> Option<reqwest::Url> {
-        reqwest::Url::parse(&self.netdata_url).ok()
+        reqwest::Url::parse(&self.netdata_url)
+            .inspect_err(|e| tracing::error!("NETDATA_URL {} is no URL: {e}", self.netdata_url))
+            .ok()
     }
 
     // What: save changed values; keep other saved keys.
@@ -1645,11 +1647,27 @@ fn log_regex() -> &'static Regex {
 // Why: closed days are xz; the open ones are read.
 // From: Issue #1683 | PR #1912
 fn proxy_log_files(dir: &str) -> Vec<PathBuf> {
-    let mut files: Vec<PathBuf> = fs::read_dir(dir)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .map(|e| e.path())
+    // What: an unlisted log dir gives no file, logged.
+    // Why: the page still renders; the cause is in the log.
+    // From: Issue #1683 | PR #1912
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) => {
+            tracing::warn!("proxy log dir {dir} not listed: {e}");
+            return Vec::new();
+        }
+    };
+    // What: an unreadable entry is skipped, logged.
+    // Why: one bad entry must not hide the other days.
+    // From: Issue #1683 | PR #1912
+    let mut files: Vec<PathBuf> = entries
+        .filter_map(|entry| match entry {
+            Ok(entry) => Some(entry.path()),
+            Err(e) => {
+                tracing::warn!("proxy log entry in {dir} not read: {e}");
+                None
+            }
+        })
         .filter(|p| p.extension().is_some_and(|e| e == "log") && p.is_file())
         .collect();
     files.sort();
@@ -1661,11 +1679,19 @@ fn proxy_log_files(dir: &str) -> Vec<PathBuf> {
 // From: Issue #1683 | PR #1858
 fn tail_lines(path: &str, limit: usize) -> Vec<String> {
     const CHUNK: u64 = 64 * 1024;
-    let Ok(mut file) = File::open(path) else {
-        return vec![];
-    };
-    let Ok(mut pos) = file.seek(SeekFrom::End(0)) else {
-        return vec![];
+    // What: an unopened or unseekable file gives no line.
+    // Why: the page still renders; the cause is in the log.
+    // From: Issue #1683 | PR #1912
+    let opened = File::open(path).and_then(|mut file| {
+        let end = file.seek(SeekFrom::End(0))?;
+        Ok((file, end))
+    });
+    let (mut file, mut pos) = match opened {
+        Ok(opened) => opened,
+        Err(e) => {
+            tracing::warn!("log file {path} not read: {e}");
+            return vec![];
+        }
     };
     let mut buffer: Vec<u8> = Vec::new();
     let mut newlines = 0;
@@ -1676,7 +1702,14 @@ fn tail_lines(path: &str, limit: usize) -> Vec<String> {
         let len = CHUNK.min(pos);
         pos -= len;
         let mut chunk = vec![0u8; len as usize];
-        if file.seek(SeekFrom::Start(pos)).is_err() || file.read_exact(&mut chunk).is_err() {
+        // What: a failed chunk read ends the tail, logged.
+        // Why: the lines read so far still show.
+        // From: Issue #1683 | PR #1912
+        if let Err(e) = file
+            .seek(SeekFrom::Start(pos))
+            .and_then(|_| file.read_exact(&mut chunk))
+        {
+            tracing::warn!("log file {path} not read at {pos}: {e}");
             break;
         }
         newlines += chunk.iter().filter(|&&b| b == b'\n').count();
@@ -1724,11 +1757,30 @@ fn log_stats(dir: &str) -> LogStats {
     let mut stats = LogStats::default();
     let mut total_bytes: u64 = 0;
     for path in proxy_log_files(dir) {
-        let Ok(file) = File::open(path) else { continue };
+        // What: an unopened day file is skipped, logged.
+        // Why: the other days still count.
+        // From: Issue #1683 | PR #1912
+        let file = match File::open(&path) {
+            Ok(file) => file,
+            Err(e) => {
+                tracing::warn!("log file {} not read: {e}", path.display());
+                continue;
+            }
+        };
         // What: read raw lines, decode each lossily.
         // Why: a non-UTF-8 byte must not hide later lines.
         // From: Issue #1683 | PR #1858
-        for raw in BufReader::new(file).split(b'\n').map_while(Result::ok) {
+        for raw in BufReader::new(file).split(b'\n') {
+            // What: a read error ends this file, logged.
+            // Why: the lines counted so far still show.
+            // From: Issue #1683 | PR #1912
+            let raw = match raw {
+                Ok(raw) => raw,
+                Err(e) => {
+                    tracing::warn!("log file {} not read: {e}", path.display());
+                    break;
+                }
+            };
             let line = String::from_utf8_lossy(&raw);
             let Some(caps) = log_regex().captures(&line) else {
                 continue;
@@ -1825,18 +1877,24 @@ fn syslog_hosts(root: &str) -> Vec<String> {
 // Why: the watchdog compresses closed log files to xz.
 // From: Issue #1683
 fn read_syslog_file(path: &Path) -> Option<String> {
-    let raw = fs::read(path).ok()?;
-    let bytes = match path.extension().and_then(|e| e.to_str()) {
+    // What: an unread or bad file gives None, logged.
+    // Why: the other files of the view still show.
+    // From: Issue #1683 | PR #1912
+    let read = fs::read(path).and_then(|raw| match path.extension().and_then(|e| e.to_str()) {
         Some("xz") => {
             let mut out = Vec::new();
-            liblzma::read::XzDecoder::new(&raw[..])
-                .read_to_end(&mut out)
-                .ok()?;
-            out
+            liblzma::read::XzDecoder::new(&raw[..]).read_to_end(&mut out)?;
+            Ok(out)
         }
-        _ => raw,
-    };
-    Some(String::from_utf8_lossy(&bytes).into_owned())
+        _ => Ok(raw),
+    });
+    match read {
+        Ok(bytes) => Some(String::from_utf8_lossy(&bytes).into_owned()),
+        Err(e) => {
+            tracing::warn!("syslog file {} not read: {e}", path.display());
+            None
+        }
+    }
 }
 
 // What: one syslog line as an entry; odd lines stay raw.
@@ -1885,16 +1943,37 @@ fn syslog_tail(root: &str, host: Option<&str>, limit: usize) -> Vec<SyslogEntry>
         Some(_) => vec![],
         None => syslog_host_dirs(root),
     };
-    let mut files: Vec<(PathBuf, SystemTime)> = dirs
-        .iter()
-        .filter_map(|dir| fs::read_dir(dir).ok())
-        .flat_map(|entries| entries.flatten())
-        .filter_map(|e| {
-            let meta = e.metadata().ok()?;
-            meta.is_file()
-                .then(|| (e.path(), meta.modified().unwrap_or(SystemTime::UNIX_EPOCH)))
-        })
-        .collect();
+    // What: unlisted dirs, entries or times are logged.
+    // Why: the readable files still show; none hides.
+    // From: Issue #1683 | PR #1912
+    let mut files: Vec<(PathBuf, SystemTime)> = Vec::new();
+    for dir in &dirs {
+        let entries = match fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(e) => {
+                tracing::warn!("syslog dir {} not listed: {e}", dir.display());
+                continue;
+            }
+        };
+        for entry in entries {
+            let (path, meta) = match entry.and_then(|e| Ok((e.path(), e.metadata()?))) {
+                Ok((path, meta)) if meta.is_file() => (path, meta),
+                Ok(_) => continue,
+                Err(e) => {
+                    tracing::warn!("syslog entry in {} not read: {e}", dir.display());
+                    continue;
+                }
+            };
+            // What: no file time sorts it as oldest.
+            // Why: it still shows, after dated ones.
+            // From: Issue #1683 | PR #1912
+            let mtime = meta.modified().unwrap_or_else(|e| {
+                tracing::warn!("syslog file {} has no time: {e}", path.display());
+                SystemTime::UNIX_EPOCH
+            });
+            files.push((path, mtime));
+        }
+    }
     files.sort_by_key(|(_, mtime)| std::cmp::Reverse(*mtime));
     let hosts_with_data: HashSet<PathBuf> = files
         .iter()
@@ -1977,11 +2056,30 @@ fn syslog_stats(root: &str) -> SyslogStats {
             ..Default::default()
         };
         let mut days: HashSet<String> = HashSet::new();
-        for entry in fs::read_dir(&dir).into_iter().flatten().flatten() {
-            // What: count regular files only.
-            // Why: a dir or gone entry holds no log day.
-            // From: Issue #1683 | PR #1858
-            let Ok(meta) = entry.metadata() else { continue };
+        // What: an unlisted host dir counts empty, logged.
+        // Why: the other hosts still show their storage.
+        // From: Issue #1683 | PR #1912
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => Some(entries),
+            Err(e) => {
+                tracing::warn!("syslog dir {} not listed: {e}", dir.display());
+                None
+            }
+        };
+        for entry in entries.into_iter().flatten() {
+            // What: count regular files; log errors.
+            // Why: a dir holds no log day; none hides.
+            // From: Issue #1683 | PR #1912
+            let (entry, meta) = match entry.and_then(|e| {
+                let meta = e.metadata()?;
+                Ok((e, meta))
+            }) {
+                Ok(found) => found,
+                Err(e) => {
+                    tracing::warn!("syslog entry in {} not read: {e}", dir.display());
+                    continue;
+                }
+            };
             if !meta.is_file() {
                 continue;
             }
@@ -2129,20 +2227,24 @@ async fn netdata_proxy(
         .config
         .netdata_base()
         .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    // What: a Netdata URL without path segments is a 500.
+    // Why: NETDATA_URL is then no base URL; it is logged.
+    // From: Issue #1683 | PR #1912
     url.path_segments_mut()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|()| {
+            tracing::error!("NETDATA_URL {} takes no API path", state.config.netdata_url);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
         .pop_if_empty()
         .extend(["api", "v1", &path]);
     let mut pairs: Vec<(&String, &String)> = params.iter().collect();
     pairs.sort();
     url.query_pairs_mut().extend_pairs(pairs);
 
-    let upstream = state
-        .http_client
-        .get(url)
-        .send()
-        .await
-        .map_err(|_| StatusCode::BAD_GATEWAY)?;
+    let upstream = state.http_client.get(url).send().await.map_err(|e| {
+        tracing::warn!("Netdata {path} not reached: {e}");
+        StatusCode::BAD_GATEWAY
+    })?;
     let status = upstream.status().as_u16();
     // What: an absent content type is sent as JSON.
     // Why: both allowed netdata paths answer JSON.
@@ -2157,8 +2259,15 @@ async fn netdata_proxy(
     let mut body = Vec::new();
     let mut stream = upstream.bytes_stream();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|_| StatusCode::BAD_GATEWAY)?;
+        let chunk = chunk.map_err(|e| {
+            tracing::warn!("Netdata {path} answer cut off: {e}");
+            StatusCode::BAD_GATEWAY
+        })?;
+        // What: an answer above MAX_BODY is a 502, logged.
+        // Why: the operator sees why charts stay empty.
+        // From: Issue #1683 | PR #1912
         if body.len() + chunk.len() > MAX_BODY {
+            tracing::warn!("Netdata {path} answer above {MAX_BODY} bytes");
             return Err(StatusCode::BAD_GATEWAY);
         }
         body.extend_from_slice(&chunk);
@@ -2167,7 +2276,10 @@ async fn netdata_proxy(
         .status(status)
         .header(header::CONTENT_TYPE, content_type)
         .body(Body::from(body))
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(|e| {
+            tracing::error!("Netdata {path} answer not passed on: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })
 }
 
 // What: the dotted reverse zone that owns an IPv4 address.
@@ -2515,11 +2627,19 @@ fn decode_password_hash(value: &str) -> Result<String, String> {
 // Why: the login compares against a hash only.
 // From: Issue #1683 | PR #1912
 fn password_matches(stored_hash: &str, password: &str) -> bool {
-    PasswordHash::new(stored_hash).is_ok_and(|hash| {
-        Argon2::default()
-            .verify_password(password.as_bytes(), &hash)
-            .is_ok()
-    })
+    // What: a malformed stored hash matches none, logged.
+    // Why: no login can pass it; the cause is in the log.
+    // From: Issue #1683 | PR #1912
+    let hash = match PasswordHash::new(stored_hash) {
+        Ok(hash) => hash,
+        Err(e) => {
+            tracing::error!("stored password hash is no PHC string: {e}");
+            return false;
+        }
+    };
+    Argon2::default()
+        .verify_password(password.as_bytes(), &hash)
+        .is_ok()
 }
 
 // What: the secondary a user and password belong to.
@@ -2945,14 +3065,23 @@ async fn register_secondary(
         Path::new(&state.config.shared_secret_dir).join(shared_secret_file_name("DDNS_TSIG_KEY"));
     let ddns_tsig_key = fs::read_to_string(&tsig_path)
         .map(|key| key.trim().to_string())
-        .ok()
-        .filter(|key| !key.is_empty())
-        .ok_or_else(|| {
-            tracing::error!(path = %tsig_path.display(), "refusing secondary registration: no shared DDNS TSIG key");
+        .map_err(|e| e.to_string())
+        .and_then(|key| {
+            if key.is_empty() {
+                Err("the file is empty".to_string())
+            } else {
+                Ok(key)
+            }
+        })
+        .map_err(|e| {
+            tracing::error!(path = %tsig_path.display(), "refusing secondary registration: no shared DDNS TSIG key: {e}");
             StatusCode::SERVICE_UNAVAILABLE
         })?;
     let nats_password = new_nats_password();
-    let hash = hash_password(&nats_password).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let hash = hash_password(&nats_password).map_err(|e| {
+        tracing::error!("secondary {}: {e}", form.name);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
     let reported = form
         .address
         .as_deref()
@@ -3114,7 +3243,10 @@ async fn rotate_token(
         return Err(StatusCode::UNAUTHORIZED);
     }
     let nats_password = new_nats_password();
-    let hash = hash_password(&nats_password).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let hash = hash_password(&nats_password).map_err(|e| {
+        tracing::error!("secondary {name}: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
     let changed = with_db(&state, |db| {
         db.execute(
             "UPDATE secondaries SET nats_password_hash = ? WHERE name = ?",
@@ -3929,8 +4061,8 @@ async fn resolve_ntp_servers(raw: &str) -> Result<String, String> {
             }
             Err(_) => tokio::net::lookup_host(format!("{entry}:0"))
                 .await
-                .map_err(|_| {
-                    format!("NTP server '{entry}' is not an IPv4 address and could not be resolved via DNS")
+                .map_err(|e| {
+                    format!("NTP server '{entry}' is not an IPv4 address and could not be resolved via DNS: {e}")
                 })?
                 .find_map(|found| match found.ip() {
                     IpAddr::V4(v4) => Some(v4),
@@ -5620,7 +5752,11 @@ async fn domains_page(
                 .await
                 .map(|sets| {
                     sets.into_iter()
-                        .filter_map(|set| serde_json::from_value::<RRset>(set).ok())
+                        .filter_map(|set| {
+                            serde_json::from_value::<RRset>(set)
+                                .inspect_err(|e| tracing::warn!("LAN rrset not decoded: {e}"))
+                                .ok()
+                        })
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_else(|e| {
@@ -5631,7 +5767,16 @@ async fn domains_page(
         fetch_ptr_records(&state),
         fetch_zone_groups(&state),
     );
-    let marker_set = |file: &str| Path::new(&cfg.dns_state_dir).join(file).exists();
+    // What: an unchecked marker shows as off, logged.
+    // Why: off is the default; the cause is in the log.
+    // From: Issue #1683 | PR #1912
+    let marker_set = |file: &str| {
+        let path = Path::new(&cfg.dns_state_dir).join(file);
+        path.try_exists().unwrap_or_else(|e| {
+            tracing::warn!("marker {} not checked: {e}", path.display());
+            false
+        })
+    };
     let mut ctx = page_ctx(&headers, "domains");
     ctx.insert("dns_domains", &rows);
     ctx.insert("lan_records", &lan);
@@ -5663,10 +5808,18 @@ async fn domains_page(
 // Why: the dns side writes it; an empty file is void.
 // From: Issue #858
 fn tsig_key_configured(config: &Config) -> bool {
-    fs::metadata(
-        Path::new(&config.shared_secret_dir).join(shared_secret_file_name("DDNS_TSIG_KEY")),
-    )
-    .is_ok_and(|m| m.len() > 0)
+    let path = Path::new(&config.shared_secret_dir).join(shared_secret_file_name("DDNS_TSIG_KEY"));
+    // What: no file means no key; other errors are logged.
+    // Why: a missing key is normal, a denied one not.
+    // From: Issue #1683 | PR #1912
+    match fs::metadata(&path) {
+        Ok(meta) => meta.len() > 0,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => false,
+        Err(e) => {
+            tracing::warn!("TSIG key {} not checked: {e}", path.display());
+            false
+        }
+    }
 }
 
 // What: write a failed list edit to the log as a 500.
@@ -6574,11 +6727,13 @@ fn container_root_start() {
             container_start_fatal(&format!("cannot chown {}: {e}", dir.display()));
         }
     }
-    // What: a missing log dir keeps its modes unset.
+    // What: no log dir: modes unset; check error: fatal.
     // Why: init_tracing falls back to stdout then.
     // From: Issue #1683 | PR #1858
     if let Some(log_dir) = log_file.parent()
-        && log_dir.exists()
+        && log_dir.try_exists().unwrap_or_else(|e| {
+            container_start_fatal(&format!("cannot check {}: {e}", log_dir.display()))
+        })
         && let Err(e) = open_log_dir_to_group(log_dir, gid)
     {
         container_start_fatal(&format!("cannot set {} modes: {e}", log_dir.display()));
