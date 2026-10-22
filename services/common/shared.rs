@@ -1694,6 +1694,11 @@ pub const COMPOSE_SERVICE_LABEL: &str = "com.docker.compose.service";
 // From: Issue #1683
 pub const DOCKER_UNIX_PREFIX: &str = "unix://";
 
+// What: the base URL of HTTP over a local Docker socket.
+// Why: HTTP needs a host; the socket ignores its name.
+// From: Issue #1683 | PR #1912
+const DOCKER_SOCKET_BASE_URL: &str = "http://docker";
+
 // What: client of the Docker Engine API.
 // Why: only the watchdog drives containers; one owner.
 // From: Issue #1683
@@ -1712,13 +1717,13 @@ impl DockerApi {
         // Why: a 3xx could reach an unexpected path.
         // From: Issue #1683 | PR #1912
         let builder = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
-        // What: a unix socket gets a fixed dummy host name.
+        // What: a unix socket gets DOCKER_SOCKET_BASE_URL.
         // Why: HTTP over a socket needs a host name.
         // From: Issue #1683 | PR #1912
         let (builder, base_url) = match endpoint.strip_prefix(DOCKER_UNIX_PREFIX) {
             Some(socket) => (
                 builder.unix_socket(PathBuf::from(socket)),
-                "http://docker".to_string(),
+                DOCKER_SOCKET_BASE_URL.to_string(),
             ),
             None => (builder, endpoint.trim_end_matches('/').to_string()),
         };
@@ -1741,7 +1746,7 @@ impl DockerApi {
     ) -> Result<Vec<Value>, DockerError> {
         let filter = serde_json::json!({ "label": [format!("{COMPOSE_PROJECT_LABEL}={project}")] });
         let url = reqwest::Url::parse_with_params(
-            "http://docker/containers/json",
+            &format!("{DOCKER_SOCKET_BASE_URL}/containers/json"),
             [("all", "1"), ("filters", filter.to_string().as_str())],
         )
         .map_err(|e| DockerError::Transport(format!("container list URL: {e}")))?;

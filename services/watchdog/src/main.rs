@@ -22,12 +22,12 @@ use lancache_ng::config::{
 };
 use lancache_ng::{
     ALARM_INGEST_PATH, ALARM_TOKEN_HEADER, Backoff, COMPOSE_PROJECT_LABEL, COMPOSE_SERVICE_LABEL,
-    CaFiles, CertSpec, ClientCheck, ConflictCheck, DesiredRunState, DesiredState, Detail,
-    DiskHealth, DiskInfo, DockerApi, NetdataAlarm, Place, ProbeAnswer, ProbeReport, ServiceHealth,
-    WatchdogStatus, df, files_under, hex32, is_placeholder, metadata_if_present, need_secs,
-    openssl_ca, openssl_leaf, openssl_x509, own, probe_health, probe_health_tls,
-    resolve_shared_secret, run_program, sha256_hex, shared_secret_file_name, terminate, unix_nanos,
-    unix_secs, write_file, write_if_changed,
+    CaFiles, CertSpec, ClientCheck, ConflictCheck, DOCKER_UNIX_PREFIX, DesiredRunState,
+    DesiredState, Detail, DiskHealth, DiskInfo, DockerApi, NetdataAlarm, Place, ProbeAnswer,
+    ProbeReport, ServiceHealth, WatchdogStatus, df, files_under, hex32, is_placeholder,
+    metadata_if_present, need_secs, openssl_ca, openssl_leaf, openssl_x509, own, probe_health,
+    probe_health_tls, resolve_shared_secret, run_program, sha256_hex, shared_secret_file_name,
+    terminate, unix_nanos, unix_secs, write_file, write_if_changed,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -122,7 +122,7 @@ fn load_settings(env: impl Fn(&str) -> Option<String>) -> Result<(Settings, Vec<
     )?;
     let need = |name: &str| config::need(&env, name).map_err(|e| format!("FATAL: {e}."));
     let settings = Settings {
-        docker_host: format!("unix://{}", need("DOCKER_SOCKET")?),
+        docker_host: format!("{DOCKER_UNIX_PREFIX}{}", need("DOCKER_SOCKET")?),
         check_interval: Duration::from_secs(check_interval),
         restart_after: restart_after as u32,
         api_timeout: api,
