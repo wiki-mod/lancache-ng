@@ -2810,13 +2810,6 @@ migrate_env_for_update() {
     # updates on for an existing install that never asked for them.
     set_env_key_if_empty_or_missing AUTO_UPDATE_ENABLED "0" "$env_file"
 
-    # What: adds the external-DNS keys with their off defaults.
-    # Why: older installs lack them; an existing value stays.
-    # From: Issue #1918
-    append_env_key_if_missing DNS_UPSTREAM_SERVERS "" "$env_file"
-    append_env_key_if_missing DNS_UPSTREAM_ZONES "." "$env_file"
-    append_env_key_if_missing DNS_UPSTREAM_UNSIGNED_ZONES "" "$env_file"
-
     state_root_default=$(production_state_root_default "$install_dir")
     state_dir=$(get_env_var LANCACHE_STATE_DIR "$env_file")
     state_dir="${state_dir:-$(legacy_state_root_or_default "$state_root_default")}"

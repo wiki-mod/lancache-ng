@@ -137,9 +137,6 @@ write_converged_env_fixture() {
         'UI_AUTH_PASSWORD=RealAdminPassword123' \
         'ALLOW_INSECURE_UI=false' \
         'AUTO_UPDATE_ENABLED=0' \
-        'DNS_UPSTREAM_SERVERS=' \
-        'DNS_UPSTREAM_ZONES=.' \
-        'DNS_UPSTREAM_UNSIGNED_ZONES=' \
         'NTP_ENABLED=0' \
         > "$env_file"
 }

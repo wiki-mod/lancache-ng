@@ -257,7 +257,7 @@ if ! expect_prompt_block="$(
     LANCACHE_IMAGE_CHANNEL="$setup_sim_fresh_install_channel" \
     LANCACHE_IMAGE_TAG="$setup_sim_fresh_install_tag" \
     build_expect_prompt_block "$repo_root/setup.sh" "$setup_sim_answers_file" \
-        "$ip_standard" "y" "$ip_ssl" "" "$install_dir" "" "" "" "" "" "disabled" "" "n" "y" "n"
+        "$ip_standard" "y" "$ip_ssl" "" "$install_dir" "" "" "" "" "disabled" "" "n" "y" "n"
 )"; then
     echo "::error::Could not derive the fresh-install expect_prompt sequence from 'setup.sh list-prompts' (issue #1176). See the error above for which prompt/reply count mismatched." >&2
     exit 1
