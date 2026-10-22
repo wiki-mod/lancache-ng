@@ -9061,10 +9061,15 @@ PROG
 # Why: the rollback target is the id a ui write added.
 # From: Issue #763 | PR #1858
 _ci_validate_kea_snapshots() {
-    local found p id
-    found="$(_ci_capture 0 find "$1" -mindepth 2 -maxdepth 2 -name dhcp4.json)" || return 2
+    local found p id file
+    file="$(_ci_runtime_default KEA_CONFIG_SNAPSHOT_FILE)" || return 2
+    if ! [[ "${file}" =~ ^[A-Za-z0-9._-]+$ ]]; then
+        ci_log "[CI-ERROR-CHECK-0197]" "key=\"KEA_CONFIG_SNAPSHOT_FILE\" value=\"${file}\" reason=\"SOT snapshot file name is no plain file name\""
+        return 2
+    fi
+    found="$(_ci_capture 0 find "$1" -mindepth 2 -maxdepth 2 -name "${file}")" || return 2
     while IFS= read -r p; do
-        id="${p%/dhcp4.json}"
+        id="${p%/"${file}"}"
         id="${id##*/}"
         if [[ "${id}" =~ ^[0-9]+$ ]]; then
             printf '%s\n' "${id}"
