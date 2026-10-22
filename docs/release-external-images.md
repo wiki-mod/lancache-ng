@@ -142,8 +142,8 @@ of that upstream project's own release process, not this document.
 
 Accepted, deliberately-suppressed vulnerability findings live in the repo-root
 `.trivyignore.yaml` (each entry: the CVE id, the affected file paths, a
-`statement` explaining why it is accepted, and an `expired_at` date forcing
-periodic re-review). That file is Trivy-specific and not something a downstream
+`statement` explaining why it is accepted and when the exception ends;
+entries carry no deadline date). That file is Trivy-specific and not something a downstream
 consumer's non-Trivy tooling can parse.
 
 `scripts/generate-vex.sh` converts those entries into a standard

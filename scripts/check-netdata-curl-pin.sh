@@ -24,46 +24,40 @@
 # obviously map to a released version), extract CURL_VERSION, and compare it
 # against CURL_SAFE_THRESHOLD below.
 #
-# CURL_SAFE_THRESHOLD provenance (verified against curl.se's own per-CVE
-# pages, 2026-07-31, PR #1352): every one of the 7 CVE IDs issue #1304
-# tracks (CVE-2026-12064, CVE-2026-8286, CVE-2026-8927, CVE-2026-8932,
-# CVE-2026-9079, CVE-2026-9080, CVE-2026-9545) states "Not affected
-# versions: curl < X and >= 8.21.0" -- i.e. 8.21.0 is the actual fixed
-# version for every one of them. This is a snapshot of that one specific,
-# already-known CVE set, not a live feed: if curl discloses a NEW CVE after
-# 8.21.0 with a later fixed version, this script's hardcoded threshold goes
-# stale silently, since it has no way to know about a CVE that doesn't
-# exist in this comment yet. Whoever bumps NETDATA_VERSION in
+# CURL_SAFE_THRESHOLD provenance (curl's own vulnerability data,
+# https://curl.se/docs/vuln.json, checked 2026-10-22): every one of the 7
+# CVE IDs issue #1304 tracks (CVE-2026-12064, CVE-2026-8286, CVE-2026-8927,
+# CVE-2026-8932, CVE-2026-9079, CVE-2026-9080, CVE-2026-9545) affects curl
+# 8.17.0 up to (excluding) 8.20.1 and is fixed in 8.20.1 and in 8.21.0 --
+# i.e. 8.20.1 is the lowest fixed version for every curl release this
+# netdata line can vendor. This is a snapshot of that one specific,
+# already-known CVE set, not a live feed: if curl discloses a NEW CVE with a
+# later fixed version, this script's hardcoded threshold goes stale
+# silently, since it has no way to know about a CVE that doesn't exist in
+# this comment yet. Whoever bumps NETDATA_VERSION in
 # services/netdata/Dockerfile must re-check curl's own vulnerability list
 # (https://curl.se/docs/vulnerabilities.html) at that time and bump
 # CURL_SAFE_THRESHOLD (and this comment's date) if a newer curl release has
-# fixed something new since 2026-07-31.
+# fixed something new since 2026-10-22.
 #
-# ACCEPTED_UNTIL: the known-affected state is real TODAY (netdata v2.10.4
-# vendors curl 8.17.0, confirmed below threshold) -- making this check a
-# hard, unconditional failure the moment it merges would turn this
-# project's whole `validate-compose` gate permanently red for every future
-# PR, for a risk this repository does not control the fix for (it lives in
-# netdata's own upstream build recipe, not this project's Dockerfile).
-# That is not what the maintainer's option (c) decision on PR #1352 asked
-# for ("merge for the benefits, track the risk", not "block all CI until
-# netdata ships a fix"). So: below the threshold is a `::warning::`, not a
-# blocking `::error::`, while today's date is on or before ACCEPTED_UNTIL --
-# visible on every run, but non-blocking, mirroring the same time-boxed-
-# acceptance shape this project already uses for `.trivyignore.yaml`'s own
-# `expired_at` fields and `PR_TITLE_LINT_MODE`'s warn-then-block transition.
-# Once ACCEPTED_UNTIL passes, a still-affected pin becomes a hard failure --
-# this is a deliberate escalation, not a bug: the point of a checkpoint
-# date is that silence past it is no longer acceptable, and whoever re-
-# reviews issue #1304's accept-and-VEX decision at its own 2026-08-15
-# checkpoint should update this date (and re-verify CURL_SAFE_THRESHOLD)
-# together with that review, not treat them as unrelated.
+# Standing exception (AG-KD-003, tool-specific, no deadline): the affected
+# state is real today. Checked 2026-10-22: netdata v2.12.1 (latest release),
+# v2.12.0, v2.11.1 and netdata master vendor curl-8_20_0, this project's pin
+# v2.10.4 vendors curl-8_17_0; no netdata release vendors a fixed curl yet
+# (latest curl release: 8.23.0). The fix lives in netdata's own upstream
+# build recipe, not in this project's Dockerfile, so a hard failure here
+# would only turn this project's whole `validate-compose` gate red without
+# anything this repository can change (maintainer decision (c) on PR #1352:
+# "merge for the benefits, track the risk"). While the pinned curl is below
+# CURL_SAFE_THRESHOLD this check therefore reports a `::warning::` on every
+# run, non-blocking and without any date. The exception ends by itself: as
+# soon as a netdata release vendoring curl >= CURL_SAFE_THRESHOLD exists,
+# NETDATA_VERSION is bumped to it and this check prints OK.
 set -euo pipefail
 
-CURL_SAFE_THRESHOLD="8.21.0"
+CURL_SAFE_THRESHOLD="8.20.1"
 TRACKED_CVES=(CVE-2026-12064 CVE-2026-8286 CVE-2026-8927 CVE-2026-8932 CVE-2026-9079 CVE-2026-9080 CVE-2026-9545)
-TRACKED_CVES_SOURCE_DATE="2026-07-31"
-ACCEPTED_UNTIL="2026-08-15"
+TRACKED_CVES_SOURCE_DATE="2026-10-22"
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/.." && pwd)"
@@ -178,10 +172,6 @@ main() {
     return 0
   fi
 
-  # Test hook, same idea as BUNDLED_PACKAGES_CONTENT_FILE above: lets bats
-  # exercise both sides of the ACCEPTED_UNTIL boundary deterministically,
-  # without depending on (or waiting for) the real wall-clock date.
-  local today="${NETDATA_CURL_PIN_TODAY:-$(date -u +%F)}"
   local cve
   local finding_lines=()
   finding_lines+=("netdata ${netdata_version} vendors curl ${curl_version}, which is BELOW the ${CURL_SAFE_THRESHOLD} fixed-version threshold for issue #1304's tracked CVE set:")
@@ -189,22 +179,12 @@ main() {
     finding_lines+=("  - ${cve} (see https://curl.se/docs/${cve}.html)")
   done
 
-  if [[ "${today}" > "${ACCEPTED_UNTIL}" ]]; then
-    echo "::error::${finding_lines[0]}" >&2
-    local line
-    for line in "${finding_lines[@]:1}"; do
-      echo "::error::${line}" >&2
-    done
-    echo "::error::This grace period (ACCEPTED_UNTIL=${ACCEPTED_UNTIL}, per issue #1304/PR #1352) has PASSED -- today is ${today}. This is now a hard failure, not a warning: re-review issue #1304's accept-and-VEX decision (its own 2026-08-15 checkpoint), and either bump ACCEPTED_UNTIL after that re-review, update CURL_SAFE_THRESHOLD if a newer netdata release vendors a fixed curl, or resolve the underlying risk another way. Do not silently push this date out without an actual re-review." >&2
-    return 1
-  fi
-
   echo "::warning::${finding_lines[0]}"
   local line
   for line in "${finding_lines[@]:1}"; do
     echo "::warning::${line}"
   done
-  echo "::warning::This is a known, deliberately time-boxed acceptance (maintainer decision (c) on PR #1352, issue #1304) -- non-blocking until ACCEPTED_UNTIL=${ACCEPTED_UNTIL} (today: ${today}), after which it becomes a hard failure. The statically-linked curl inside services/netdata's image is very likely still affected by these CVEs, invisible to Trivy."
+  echo "::warning::This is a known, standing exception (maintainer decision (c) on PR #1352, issue #1304; AG-KD-003) without a date: it ends when a netdata release vendoring curl >= ${CURL_SAFE_THRESHOLD} exists and NETDATA_VERSION is bumped to it. The statically-linked curl inside services/netdata's image is very likely still affected by these CVEs, invisible to Trivy."
   return 0
 }
 

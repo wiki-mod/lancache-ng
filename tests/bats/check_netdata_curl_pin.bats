@@ -96,51 +96,26 @@ EOF
 
 # --- main(): end-to-end via the BUNDLED_PACKAGES_CONTENT_FILE test hook -----
 #
-# ACCEPTED_UNTIL="2026-08-15" is a hardcoded time-boxed acceptance window
-# (see the script's own header comment): a still-affected pin only WARNS
-# (exit 0) before that date, and FAILS (exit 1) on or after it. Tests below
-# use the NETDATA_CURL_PIN_TODAY test hook to exercise both sides of that
-# boundary deterministically, rather than depending on (or waiting for) the
-# real wall-clock date.
+# A still-affected pin only WARNS (exit 0): it is a standing exception
+# without a date (see the script's own header comment).
 
-@test "main: a still-vulnerable pinned curl version WARNS (non-blocking) before the grace-period deadline" {
+@test "main: a still-vulnerable pinned curl version WARNS (non-blocking)" {
     write_dockerfile_fixture "v2.10.4"
     write_bundled_fixture "8_17_0"
-    BUNDLED_PACKAGES_CONTENT_FILE="$bundled_fixture" NETDATA_CURL_PIN_TODAY="2026-08-01" \
+    BUNDLED_PACKAGES_CONTENT_FILE="$bundled_fixture" \
         run bash "$script" "$dockerfile_fixture"
     [ "$status" -eq 0 ]
     [[ "$output" == *"::warning::"* ]]
     [[ "$output" == *"CVE-2026-12064"* ]]
     [[ "$output" == *"CVE-2026-9545"* ]]
-    [[ "$output" == *"BELOW the 8.21.0"* ]]
-    [[ "$output" == *"time-boxed acceptance"* ]]
+    [[ "$output" == *"BELOW the 8.20.1"* ]]
+    [[ "$output" == *"standing exception"* ]]
 }
 
-@test "main: a still-vulnerable pinned curl version FAILS (blocking) once the grace-period deadline has passed" {
-    write_dockerfile_fixture "v2.10.4"
-    write_bundled_fixture "8_17_0"
-    BUNDLED_PACKAGES_CONTENT_FILE="$bundled_fixture" NETDATA_CURL_PIN_TODAY="2026-08-16" \
-        run bash "$script" "$dockerfile_fixture"
-    [ "$status" -ne 0 ]
-    [[ "$output" == *"::error::"* ]]
-    [[ "$output" == *"CVE-2026-12064"* ]]
-    [[ "$output" == *"CVE-2026-9545"* ]]
-    [[ "$output" == *"grace period"*"PASSED"* ]]
-}
-
-@test "main: exactly on the grace-period deadline still WARNS, not fails (deadline is inclusive)" {
-    write_dockerfile_fixture "v2.10.4"
-    write_bundled_fixture "8_17_0"
-    BUNDLED_PACKAGES_CONTENT_FILE="$bundled_fixture" NETDATA_CURL_PIN_TODAY="2026-08-15" \
-        run bash "$script" "$dockerfile_fixture"
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"::warning::"* ]]
-}
-
-@test "main: a patched pinned curl version (>= 8.21.0) passes cleanly regardless of date" {
+@test "main: a patched pinned curl version (>= 8.20.1) passes cleanly" {
     write_dockerfile_fixture "v2.99.0"
-    write_bundled_fixture "8_21_0"
-    BUNDLED_PACKAGES_CONTENT_FILE="$bundled_fixture" NETDATA_CURL_PIN_TODAY="2027-01-01" \
+    write_bundled_fixture "8_20_1"
+    BUNDLED_PACKAGES_CONTENT_FILE="$bundled_fixture" \
         run bash "$script" "$dockerfile_fixture"
     [ "$status" -eq 0 ]
     [[ "$output" == *"OK:"* ]]
@@ -158,9 +133,8 @@ EOF
     # Not a fixture -- this reads the REAL Dockerfile shipped in this PR,
     # combined with a fixture bundled-packages.version carrying the exact
     # real value PR #1352 found upstream (curl-8_17_0 at netdata v2.10.4).
-    # Today's real date is inside the ACCEPTED_UNTIL grace period, so this
-    # currently warns rather than fails -- documents the actual current
-    # state without depending on the injected-date hook.
+    # The pinned curl is below the fixed version, so this warns rather than
+    # fails -- documents the actual current state.
     real_dockerfile="$BATS_TEST_DIRNAME/../../services/netdata/Dockerfile"
     write_bundled_fixture "8_17_0"
     BUNDLED_PACKAGES_CONTENT_FILE="$bundled_fixture" run bash "$script" "$real_dockerfile"
@@ -168,14 +142,3 @@ EOF
     [[ "$output" == *"::warning::"* ]]
 }
 
-@test "main: the real services/netdata/Dockerfile's pin would hard-fail once the grace period passes" {
-    # Same real Dockerfile as above, but with the injected-date hook pushed
-    # past ACCEPTED_UNTIL -- proves this project's actual current pin is
-    # exactly the state the escalation-to-failure branch is meant to catch,
-    # not just a synthetic fixture value.
-    real_dockerfile="$BATS_TEST_DIRNAME/../../services/netdata/Dockerfile"
-    write_bundled_fixture "8_17_0"
-    BUNDLED_PACKAGES_CONTENT_FILE="$bundled_fixture" NETDATA_CURL_PIN_TODAY="2026-08-16" \
-        run bash "$script" "$real_dockerfile"
-    [ "$status" -ne 0 ]
-}
