@@ -206,14 +206,16 @@ images.
 - Docker Engine and Docker Compose v2 (the `docker compose` subcommand,
   not the standalone `docker-compose` v1 binary).
 - No local Rust toolchain is required to build the images: the Rust
-  service builders (`services/dns/nats-subscriber`, `services/ui`)
-  consume the prebuilt `ghcr.io/wiki-mod/lancache-ng/build-tools` image
-  (selected via `BUILD_TOOLS_IMAGE`, resolved by
-  `scripts/untracked/select-build-tools-image.sh`) inside their own multi-stage
-  Dockerfile, so `cargo`/`rustc` never need to be installed on the host.
+  crates are members of the workspace in the repository-root `Cargo.toml`,
+  and every `services/<name>/Dockerfile` builds them inside the prebuilt
+  `ghcr.io/wiki-mod/lancache-ng/build-tools` image (build arg
+  `BUILD_TOOLS_IMAGE`, resolved to a digest by
+  `bash .github/scripts/ci.sh build-tools resolve-image`, which needs
+  `GITHUB_ACTOR` and `GHCR_TOKEN` for GHCR read access), so `cargo`/`rustc`
+  never need to be installed on the host.
   If you do want a local Rust toolchain for editor tooling (rust-analyzer,
   etc.), any recent stable toolchain matching the edition declared in
-  each crate's `Cargo.toml` works; see `AGENTS.md`'s "Build-tools
+  the workspace `Cargo.toml` works; see `AGENTS.md`'s "Build-tools
   container verification" section for why the build-tools container, not
   your host toolchain, is still the only path CI/PR verification counts.
 - No local Node.js, Python, or Go toolchain is required either — see
@@ -247,17 +249,13 @@ matching local tag is used as-is, with no push/pull round-trip required.
 
 ```bash
 # Example: rebuild only the Admin UI image.
-docker build -t lancache-ng-ui:local \
-  --build-arg BUILD_TOOLS_IMAGE="$(bash scripts/untracked/select-build-tools-image.sh)" \
-  services/ui
+bash .github/scripts/ci.sh build ui linux/amd64
 ```
 
-Every Rust service builder Dockerfile takes `BUILD_TOOLS_IMAGE` as a
-build arg; omitting it falls back to the Dockerfile's own `ARG
-BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools:latest`
-default, which is fine for a quick local rebuild but is never what real
-CI passes (see `AGENTS.md`'s **AG-CI-008** for why CI always passes this
-argument explicitly instead of relying on that default).
+Every service Dockerfile declares its arguments (`BUILD_TOOLS_IMAGE`, the
+base images, the SOT values) with no default and needs the `ci-scripts`
+build context, so a plain `docker build` fails by design; `ci.sh build`
+passes all of them (see `AGENTS.md`'s **AG-CI-008**).
 
 ### Production builds
 
@@ -275,15 +273,16 @@ up`.
 This section documents how the project selects, obtains, and tracks its
 dependencies, across every ecosystem this repository uses.
 
-- **Rust crates** (`services/ui`, `services/dns/nats-subscriber`): pinned
-  via each crate's `Cargo.lock`, committed to the repository. New
+- **Rust crates** (the workspace members in the repository-root
+  `Cargo.toml`): pinned via the one workspace `Cargo.lock`, committed to
+  the repository. New
   dependencies are added deliberately per change, preferring
   well-maintained crates already in the Rust ecosystem's common use (see
   `AGENTS.md`'s **AG-REL-003** for one concrete selection constraint:
-  `reqwest` must use `rustls-tls`, never `openssl-sys`). `cargo-audit`
-  runs in CI (`dns_cargo_audit`/`ui_cargo_audit` jobs) against every
-  PR/push to flag known-vulnerable versions of already-added
-  dependencies.
+  `reqwest` must use `rustls-tls`, never `openssl-sys`).
+  `bash .github/scripts/ci.sh check cargo-audit` flags known-vulnerable
+  versions of already-added dependencies: in the `ci.yml` `cargo-audit`
+  job when the lockfile changes, and daily in `nightly.yml`.
 - **GitHub Actions** (`.github/workflows/*.yml`): pinned to full commit
   SHAs with a version comment (never floating tags like `@v4`), per this
   file's "Quality and release process expectations" section above.
@@ -315,11 +314,11 @@ Treat host-local tools (`cargo`, `rustc`, `rustfmt`, `clippy`, `shellcheck`, `ac
 
 To run checks with the build-tools container:
 
-1. The build-tools image is selected automatically: `bash scripts/untracked/select-build-tools-image.sh` determines the correct version (published image or local build).
+1. Resolve the published build-tools image to its digest: `bash .github/scripts/ci.sh build-tools resolve-image` (needs `GITHUB_ACTOR` and `GHCR_TOKEN`; it reads the channel of the branch in `GITHUB_BASE_REF` or `GITHUB_REF_NAME`, else the SOT `release.default_channel`).
 2. Run checks inside the container with the standard pattern:
 
 ```bash
-BUILD_TOOLS_IMAGE="$(bash scripts/untracked/select-build-tools-image.sh)"
+BUILD_TOOLS_IMAGE="$(bash .github/scripts/ci.sh build-tools resolve-image)"
 docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work:ro" -w /work "$BUILD_TOOLS_IMAGE" <check-command>
 ```
 
@@ -327,12 +326,13 @@ docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work:ro" -w /work "$BUILD_TOOLS
 
 Run the checks that match your change.
 
-For shell scripts, run the checks inside the build-tools container:
+For shell scripts, run the check inside the build-tools container; it checks
+the shell files your change touches:
 
 ```bash
-BUILD_TOOLS_IMAGE="$(bash scripts/untracked/select-build-tools-image.sh)"
+BUILD_TOOLS_IMAGE="$(bash .github/scripts/ci.sh build-tools resolve-image)"
 docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work:ro" -w /work "$BUILD_TOOLS_IMAGE" \
-  bash -lc 'set -euo pipefail; find . -name "*.sh" -not -path "./.git/*" -not -path "*/target/*" -print0 | xargs -0 --no-run-if-empty shellcheck --norc'
+  bash .github/scripts/ci.sh check shellcheck
 ```
 
 For Compose changes, you can validate locally (this does not depend on build-tools):
@@ -344,17 +344,17 @@ docker compose -f deploy/prod/docker-compose.yml config
 For image inventory, release, or package-channel changes, run inside the build-tools container:
 
 ```bash
-BUILD_TOOLS_IMAGE="$(bash scripts/untracked/select-build-tools-image.sh)"
+BUILD_TOOLS_IMAGE="$(bash .github/scripts/ci.sh build-tools resolve-image)"
 docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work:ro" -w /work "$BUILD_TOOLS_IMAGE" \
-  bash scripts/untracked/validate-stack-images.sh
+  bash -c 'set -e; for c in stable-external-images image-channel-resolution prebuilt-prod; do bash .github/scripts/ci.sh check "$c"; done'
 ```
 
 For workflow changes, run inside the build-tools container:
 
 ```bash
-BUILD_TOOLS_IMAGE="$(bash scripts/untracked/select-build-tools-image.sh)"
+BUILD_TOOLS_IMAGE="$(bash .github/scripts/ci.sh build-tools resolve-image)"
 docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work:ro" -w /work "$BUILD_TOOLS_IMAGE" \
-  actionlint .github/workflows/*.yml
+  bash .github/scripts/ci.sh check actionlint
 ```
 
 Also run the `action-node-versions` check (issue #801) if you changed or re-pinned any `uses:` action reference -- it scans every pinned action across all workflows and fails if any of them declares a deprecated Node runtime in its own `action.yml`/`action.yaml`:
@@ -373,13 +373,15 @@ Enable it once per checkout:
 git config core.hooksPath .githooks
 ```
 
-For Rust services, run the relevant Cargo checks for the service you changed inside
-the build-tools container. The UI service lives in `services/ui`. The DNS crate is in `services/dns/nats-subscriber`.
+For Rust changes, run the same Cargo checks `ci.sh test-stack` runs, from the
+workspace root inside the build-tools container (`-p <crate>` narrows them to
+the crate you changed; the crates are the members of the root `Cargo.toml`).
+`cargo check` stays a manual step (`AGENTS.md` **AG-VAL-008**).
 
 ```bash
-BUILD_TOOLS_IMAGE="$(bash scripts/untracked/select-build-tools-image.sh)"
-docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work:ro" -w /work "$BUILD_TOOLS_IMAGE" \
-  bash -lc 'cargo test --locked --manifest-path services/ui/Cargo.toml && cargo test --locked --manifest-path services/dns/nats-subscriber/Cargo.toml'
+BUILD_TOOLS_IMAGE="$(bash .github/scripts/ci.sh build-tools resolve-image)"
+docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work" -w /work "$BUILD_TOOLS_IMAGE" \
+  bash -c 'cargo fmt --check && cargo clippy --locked --all-targets -- -D warnings && cargo test --locked'
 ```
 
 If you cannot run a relevant check locally (for example, if Docker is unavailable),
