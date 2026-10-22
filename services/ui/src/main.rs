@@ -18,11 +18,11 @@ use axum::routing::{MethodRouter, delete, get, post};
 use base64::Engine as _;
 use futures_util::StreamExt as _;
 use lancache_ng::config::{
-    self, AAAA_FILTER_MARKER, DDNS_UNSIGNED_MARKER, DEFAULT_RECORD_TTL, DhcpMode,
-    KEA_MANAGED_CODES, LeaseLimits, NATS_SUBJECT_FLUSH, NATS_SUBJECT_RECORD, NatsLogin, NatsRoles,
-    OPTION_CODE_MAX, OPTION_CODE_MIN, OutOfRange, PDNS_API_PATH, PROXY_ACCESS_LOG_PATTERN, Uint,
-    canonical_zone, dns_reader_publish, dns_subscribe, is_dns_name, option_code, option_data,
-    parse_bool, parse_custom_options, reverse_zones, zone_url,
+    self, AAAA_FILTER_MARKER, DDNS_UNSIGNED_MARKER, DEFAULT_RECORD_TTL, DNSMASQ_MANAGED_CODES,
+    DhcpMode, KEA_MANAGED_CODES, LeaseLimits, NATS_SUBJECT_FLUSH, NATS_SUBJECT_RECORD, NatsLogin,
+    NatsRoles, OPTION_CODE_MAX, OPTION_CODE_MIN, OutOfRange, PDNS_API_PATH,
+    PROXY_ACCESS_LOG_PATTERN, Uint, canonical_zone, dns_reader_publish, dns_subscribe, is_dns_name,
+    option_code, option_data, parse_bool, parse_custom_options, reverse_zones, zone_url,
 };
 use lancache_ng::{
     ALARM_INGEST_PATH, ALARM_TOKEN_HEADER, Backoff, DesiredRunState, DesiredState, DnsRecord,
@@ -1024,6 +1024,17 @@ fn hold(lock: &Mutex<()>) -> std::sync::MutexGuard<'_, ()> {
     lock.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+// What: the DHCP mode, all mode names and its kind flags.
+// Why: pages branch on DhcpMode, not on own mode strings.
+// From: Issue #1683 | PR #1912
+fn insert_dhcp_mode(ctx: &mut Context, mode: DhcpMode) {
+    ctx.insert("dhcp_mode", mode.as_str());
+    ctx.insert("dhcp_modes", &DhcpMode::ALL.map(DhcpMode::as_str));
+    ctx.insert("dhcp_has_kea", &mode.is_kea());
+    ctx.insert("dhcp_is_dnsmasq", &mode.is_dnsmasq());
+    ctx.insert("dhcp_is_relay", &mode.is_dnsmasq_relay());
+}
+
 // What: a template context with page name and CSRF token.
 // Why: every page's forms need the live session's token.
 fn page_ctx(headers: &HeaderMap, active: &str) -> Context {
@@ -1047,6 +1058,8 @@ fn page_ctx(headers: &HeaderMap, active: &str) -> Context {
     ctx.insert("txt_max_bytes", &MAX_TXT_BYTES);
     ctx.insert("option_code_min", &OPTION_CODE_MIN);
     ctx.insert("option_code_max", &OPTION_CODE_MAX);
+    ctx.insert("kea_managed_codes", &KEA_MANAGED_CODES);
+    ctx.insert("dnsmasq_managed_codes", &DNSMASQ_MANAGED_CODES);
     // What: each page path from its one Rust owner.
     // Why: nav and links follow the router path.
     // From: Issue #1683 | PR #1912
@@ -3420,8 +3433,7 @@ async fn kea_leases(state: &AppState) -> Result<Vec<Lease>, String> {
 async fn dhcp_page(State(state): Shared, headers: HeaderMap) -> Response {
     let cfg = &state.config;
     let mut ctx = page_ctx(&headers, "dhcp");
-    ctx.insert("dhcp_mode", cfg.dhcp_mode().as_str());
-    ctx.insert("dhcp_has_kea", &cfg.dhcp_mode().is_kea());
+    insert_dhcp_mode(&mut ctx, cfg.dhcp_mode());
     ctx.insert("dhcp_api_url", &cfg.dhcp_api_url);
     ctx.insert("default_lease_time", &cfg.dhcp_lease_time);
     ctx.insert("dhcp_domain", &cfg.lan_zone);
@@ -5434,8 +5446,7 @@ async fn dashboard(State(state): Shared, headers: HeaderMap) -> Response {
     let mode = cfg.dhcp_mode();
     let mut ctx = page_ctx(&headers, "dashboard");
     ctx.insert("https_enabled", &cfg.https_enabled);
-    ctx.insert("dhcp_mode", mode.as_str());
-    ctx.insert("dhcp_mode_has_kea", &mode.is_kea());
+    insert_dhcp_mode(&mut ctx, mode);
     ctx.insert("http_status", &proxy.0);
     ctx.insert("https_status", &proxy.1);
     ctx.insert("cache_dir", &cfg.cache_dir);
@@ -5607,7 +5618,7 @@ async fn ntp_page(State(state): Shared, headers: HeaderMap) -> Response {
     ctx.insert("ntp_auto_dhcp", &cfg.flag("NTP_AUTO_DHCP"));
     ctx.insert("http_ip", &cfg.http_ip);
     ctx.insert("ntp_port", &cfg.ntp_port);
-    ctx.insert("dhcp_has_kea", &cfg.dhcp_mode().is_kea());
+    insert_dhcp_mode(&mut ctx, cfg.dhcp_mode());
     render(&state, "ntp.html", &ctx)
 }
 

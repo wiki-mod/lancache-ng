@@ -75,10 +75,12 @@
         <label class="block text-xs text-slate-400 mb-1">Aktiver DHCP-Modus</label>
         <select name="dhcp_mode"
                 class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-blue-500">
-          <option value="disabled" {% if dhcp_mode == "disabled" %}selected{% endif %}>disabled</option>
-          <option value="kea" {% if dhcp_mode == "kea" %}selected{% endif %}>kea</option>
-          <option value="dnsmasq-proxy" {% if dhcp_mode == "dnsmasq-proxy" %}selected{% endif %}>dnsmasq-proxy</option>
-          <option value="dnsmasq-relay" {% if dhcp_mode == "dnsmasq-relay" %}selected{% endif %}>dnsmasq-relay</option>
+          {# What: one option per DhcpMode::ALL name
+             Why: offers what update_dhcp_mode accepts
+             From: Issue #1683 | PR #1912 #}
+          {% for mode in dhcp_modes %}
+          <option value="{{ mode }}" {% if dhcp_mode == mode %}selected{% endif %}>{{ mode }}</option>
+          {% endfor %}
         </select>
       </div>
       <button type="submit"
@@ -87,7 +89,7 @@
       </button>
     </form>
 
-    {% if dhcp_mode == "dnsmasq-proxy" %}
+    {% if dhcp_is_dnsmasq and not dhcp_is_relay %}
       {# What: ProxyDHCP values and their edit form #}
       {# Why: options reach only PXE clients in this mode #}
       <div class="text-sm text-amber-300 space-y-2">
@@ -121,7 +123,7 @@
               <label class="block text-xs text-slate-400 mb-1">Additional safe custom options (optional, PXE-scoped)</label>
               <textarea name="dhcp_proxy_custom_options" rows="3" placeholder="60:PXEClient&#10;93:0"
                 class="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded text-white text-sm font-mono">{{ dhcp_proxy_custom_options_form }}</textarea>
-              <p class="text-xs text-slate-500 mt-1">One <code>CODE:VALUE</code> pair per line, e.g. <code>60:PXEClient</code>. Codes already used by the dedicated fields above (3, 6, 15, 42) are rejected here to avoid two conflicting ways to set the same option.</p>
+              <p class="text-xs text-slate-500 mt-1">One <code>CODE:VALUE</code> pair per line, e.g. <code>60:PXEClient</code>. Codes already used by the dedicated fields above ({{ dnsmasq_managed_codes | join(sep=", ") }}) are rejected here to avoid two conflicting ways to set the same option.</p>
             </div>
           </div>
           <button type="submit"
@@ -130,7 +132,7 @@
           </button>
         </form>
       </div>
-    {% elif dhcp_mode == "dnsmasq-relay" %}
+    {% elif dhcp_is_relay %}
       {# What: real DHCP relay to the upstream server #}
       {# Why: client broadcasts cannot reach upstream #}
       {# From: Issue #844 #}
@@ -153,7 +155,7 @@
           </button>
         </form>
       </div>
-    {% elif dhcp_mode == "kea" %}
+    {% elif dhcp_has_kea %}
       {# What: Kea mode summary of the managed values #}
       {# Why: lists what the subnet editor below manages #}
       <div class="text-sm text-green-400 space-y-2">
@@ -238,7 +240,7 @@
       <h3 class="text-sm font-medium text-white mb-3">Neues Subnet</h3>
       <form method="POST" action="{{ routes.subnet_add | safe }}" class="space-y-3">
         {{ <csrf_field csrf_token={csrf_token}/> }}
-        {{ <subnet_fields tone={raised_tone} ntp_auto={ntp_auto_dhcp_active} ntp_url={pages.ntp} dns_primary={dhcp_dns_primary} dns_secondary={dhcp_dns_secondary} lease_time={default_lease_time} domain="lan" ntp_servers={dhcp_ntp_servers}/> }}
+        {{ <subnet_fields tone={raised_tone} ntp_auto={ntp_auto_dhcp_active} ntp_url={pages.ntp} dns_primary={dhcp_dns_primary} dns_secondary={dhcp_dns_secondary} lease_time={default_lease_time} domain={dhcp_domain} ntp_servers={dhcp_ntp_servers}/> }}
         <div class="flex gap-2">
           <button type="submit" class="btn btn-blue">
             Hinzufügen
@@ -301,7 +303,7 @@
         <div>
           <h3 class="text-sm font-medium text-slate-200">Zusätzliche DHCP-Optionen</h3>
           <p class="text-xs text-slate-500 mt-1">
-            Freie Kea-Optionen werden als einfache DHCPv4-Code/Wert-Paare verwaltet. Router, DNS, Domain, Domain-Search und NTP bleiben über die festen Felder oben geschützt.
+            Freie Kea-Optionen werden als einfache DHCPv4-Code/Wert-Paare verwaltet. Die Codes {{ kea_managed_codes | join(sep=", ") }} bleiben über die festen Felder oben geschützt.
           </p>
         </div>
 
