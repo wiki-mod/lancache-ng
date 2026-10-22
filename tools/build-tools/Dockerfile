@@ -18,7 +18,7 @@ ARG DOCKER_BUILDX_VERSION=0.35.0
 # containerd/containerd/v2 does publish a newer, non-breaking 2.2.x tag, so
 # `go get` this exact module up to the fixed version before building instead
 # of carrying the vulnerability forward.
-ARG DOCKER_BUILDX_CONTAINERD_VERSION=2.2.7
+ARG DOCKER_BUILDX_CONTAINERD_VERSION=2.3.7
 # docker-buildx v0.35.0, docker-compose v5.2.0, AND the Docker CLI v29.6.1
 # (its own vendor.mod pins the same version -- checked when auditing all
 # four source-built tools for this same CVE class, not just the two CI
@@ -30,7 +30,7 @@ ARG DOCKER_BUILDX_CONTAINERD_VERSION=2.2.7
 # reasoning as the containerd override above: neither project has cut a
 # release that resolves this on its own yet, so `go get` the fixed version
 # directly before building.
-ARG GRPC_GO_VERSION=1.83.2
+ARG GRPC_GO_VERSION=1.84.0
 # docker-buildx v0.35.0 (go.mod: v0.37.0) and docker-compose v5.2.0 / the
 # Docker CLI v29.6.1 (both: v0.38.0, checked when auditing all three
 # source-built Go tools with a go.mod/vendor.mod for this same CVE class,
@@ -46,7 +46,7 @@ ARG GRPC_GO_VERSION=1.83.2
 # this fix, one past the v0.39.0 minimum fix version) rather than the bare
 # minimum, since there is no indication of a regression between the two and
 # staying on latest needs no extra reasoning to re-justify later.
-ARG GOLANG_X_TEXT_VERSION=0.41.0
+ARG GOLANG_X_TEXT_VERSION=0.43.0
 # Trivy (build-tools run 39732785848 on master) reported HIGH findings in the
 # source-built docker-buildx and docker-compose binaries, each with a fixed
 # release that neither upstream's go.mod pulls in yet. Same approach as the
@@ -59,11 +59,11 @@ ARG GOLANG_X_TEXT_VERSION=0.41.0
 #   x/net           CVE-2026-78669  fixed 0.60.0
 #   x/text          CVE-2026-56851  fixed 0.41.0 (pin above)
 #   grpc            CVE-2026-84304/84445  fixed 1.83.2 (pin above)
-ARG KLAUSPOST_COMPRESS_VERSION=1.18.7
-ARG MOBY_GO_ARCHIVE_VERSION=0.3.0
-ARG GOLANG_X_CRYPTO_VERSION=0.55.0
-ARG GOLANG_X_MOD_VERSION=0.40.0
-ARG GOLANG_X_NET_VERSION=0.60.0
+ARG KLAUSPOST_COMPRESS_VERSION=1.20.3
+ARG MOBY_GO_ARCHIVE_VERSION=0.3.3
+ARG GOLANG_X_CRYPTO_VERSION=0.58.0
+ARG GOLANG_X_MOD_VERSION=0.42.0
+ARG GOLANG_X_NET_VERSION=0.61.0
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
@@ -137,6 +137,7 @@ RUN set -euo pipefail; \
       && go get "golang.org/x/crypto@v${GOLANG_X_CRYPTO_VERSION}" \
       && go get "golang.org/x/mod@v${GOLANG_X_MOD_VERSION}" \
       && go get "golang.org/x/net@v${GOLANG_X_NET_VERSION}" \
+      && go mod tidy \
       && go mod vendor \
       && go build -ldflags "-X github.com/docker/buildx/version.Version=v${DOCKER_BUILDX_VERSION}" -o /out/docker-buildx ./cmd/buildx ); \
     rm -rf "$buildx_src"; \
