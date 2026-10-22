@@ -6376,7 +6376,6 @@ jobs:
 
           {
             printf 'rust=%s\n' "$(digest_for_image rust:latest)"
-            printf 'golang=%s\n' "$(digest_for_image golang:latest)"
           } >> "$GITHUB_OUTPUT"
 
       - name: Prepare local Buildx cache
@@ -6627,7 +6626,6 @@ jobs:
             ${{ steps.meta.outputs.labels }}
             org.opencontainers.image.description=${{ matrix.description }}
             ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.rust.digest={0}', steps.build-tools-base-digests.outputs.rust) || '' }}
-            ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.golang.digest={0}', steps.build-tools-base-digests.outputs.golang) || '' }}
           # No `annotations:` input here (issue #620). A genuinely single-platform push with
           # provenance disabled has no index for buildx to attach an index-level description
           # annotation to -- `docker buildx build --annotation index:...` on a real
@@ -7182,7 +7180,6 @@ jobs:
 
           {
             printf 'rust=%s\n' "$(digest_for_image rust:latest)"
-            printf 'golang=%s\n' "$(digest_for_image golang:latest)"
           } >> "$GITHUB_OUTPUT"
 
       - name: Compute Docker build parallelism
@@ -7257,7 +7254,6 @@ jobs:
             ${{ steps.meta.outputs.labels }}
             org.opencontainers.image.description=${{ matrix.description }}
             ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.rust.digest={0}', steps.build-tools-base-digests.outputs.rust) || '' }}
-            ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.golang.digest={0}', steps.build-tools-base-digests.outputs.golang) || '' }}
           # See build's equivalent step for why there is no `annotations:`
           # input here and why `outputs: type=image,oci-mediatypes=true` is
           # still required groundwork for issue #620.
@@ -8464,8 +8460,7 @@ jobs:
           ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools inspect "$stack_pointer_image" >/dev/null
           ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker pull "$build_tools_image" >/dev/null
           rust_base_digest="$(docker image inspect "$build_tools_image" --format '{{ index .Config.Labels "org.opencontainers.image.base.rust.digest" }}')"
-          golang_base_digest="$(docker image inspect "$build_tools_image" --format '{{ index .Config.Labels "org.opencontainers.image.base.golang.digest" }}')"
-          if [[ ! "$rust_base_digest" =~ ^sha256:[0-9a-f]{64}$ || ! "$golang_base_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+          if [[ ! "$rust_base_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
             echo "::error::build-tools image is missing build-time base digest labels."
             exit 1
           fi
@@ -8500,7 +8495,6 @@ jobs:
             printf -- '- ghcr.io/%s/stack:%s -> %s\n' "$REPOSITORY" "$source_tag" "$(digest_for_image "ghcr.io/${REPOSITORY}/stack:${source_tag}")"
             printf '\nResolved build-tools base image digests:\n\n'
             printf -- '- rust:latest -> %s\n' "$rust_base_digest"
-            printf -- '- golang:latest -> %s\n' "$golang_base_digest"
             printf '\nProvenance and SBOM status:\n\n'
             printf -- '- Provenance attestations are pushed to GHCR for every first-party service image digest and the stack channel-pointer digest.\n'
             printf -- '- CycloneDX SBOMs are generated per released first-party image digest (via Trivy) and attached to this GitHub release as <service>.cdx.json assets by the release-sbom job.\n'

@@ -238,6 +238,474 @@
       ],
       "status": "affected",
       "action_statement": "Accepted, tracked risk -- same libexpat finding group as CVE-2025-59375 above (see that entry for the full background: transitive-via-python3/distcc-pump provenance, why no `paths:` scoping is given, and the end condition). CVE-2026-56408 is an integer overflow in `copyString`. Same `Status: affected`, `FixedVersion: None` (trixie, backports, sid) as of 2026-07-31, same single affected image (`tools/build-tools`), same non-reachable usage (no untrusted XML input ever reaches libexpat in this image)."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-111943"
+      },
+      "timestamp": "2026-07-31T15:52:38Z",
+      "products": [
+        {
+          "@id": "pkg:github/wiki-mod/lancache-ng",
+          "subcomponents": [
+            {
+              "@id": "usr/local/bin/actionlint"
+            }
+          ]
+        }
+      ],
+      "status": "affected",
+      "action_statement": "Accepted, tracked risk (AG-KD-003, tool-specific, no deadline). The finding is in the Go standard library (v1.26.1) embedded in the official actionlint 1.7.12 release binary, which is the newest actionlint release and the only source of this tool for the Debian build-tools image (Debian ships no actionlint package, and compiling it from source with a newer Go toolchain is what this image no longer does). actionlint is a CI-only linter: it reads workflow files from the checkout and prints findings, it opens no listening socket and parses no network, e-mail or MIME input from outside the repository, so the network, TLS, certificate, mail, XML and HTTP/2 code paths named by the advisory are not reached with untrusted input. The exception ends when an actionlint release built with a fixed Go toolchain exists (or a Debian package does) and the pin in tools/build-tools/Dockerfile is moved to it."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-27145"
+      },
+      "timestamp": "2026-07-31T15:52:38Z",
+      "products": [
+        {
+          "@id": "pkg:github/wiki-mod/lancache-ng",
+          "subcomponents": [
+            {
+              "@id": "usr/local/bin/actionlint"
+            }
+          ]
+        }
+      ],
+      "status": "affected",
+      "action_statement": "Accepted, tracked risk (AG-KD-003, tool-specific, no deadline). The finding is in the Go standard library (v1.26.1) embedded in the official actionlint 1.7.12 release binary, which is the newest actionlint release and the only source of this tool for the Debian build-tools image (Debian ships no actionlint package, and compiling it from source with a newer Go toolchain is what this image no longer does). actionlint is a CI-only linter: it reads workflow files from the checkout and prints findings, it opens no listening socket and parses no network, e-mail or MIME input from outside the repository, so the network, TLS, certificate, mail, XML and HTTP/2 code paths named by the advisory are not reached with untrusted input. The exception ends when an actionlint release built with a fixed Go toolchain exists (or a Debian package does) and the pin in tools/build-tools/Dockerfile is moved to it."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-32280"
+      },
+      "timestamp": "2026-07-31T15:52:38Z",
+      "products": [
+        {
+          "@id": "pkg:github/wiki-mod/lancache-ng",
+          "subcomponents": [
+            {
+              "@id": "usr/local/bin/actionlint"
+            }
+          ]
+        }
+      ],
+      "status": "affected",
+      "action_statement": "Accepted, tracked risk (AG-KD-003, tool-specific, no deadline). The finding is in the Go standard library (v1.26.1) embedded in the official actionlint 1.7.12 release binary, which is the newest actionlint release and the only source of this tool for the Debian build-tools image (Debian ships no actionlint package, and compiling it from source with a newer Go toolchain is what this image no longer does). actionlint is a CI-only linter: it reads workflow files from the checkout and prints findings, it opens no listening socket and parses no network, e-mail or MIME input from outside the repository, so the network, TLS, certificate, mail, XML and HTTP/2 code paths named by the advisory are not reached with untrusted input. The exception ends when an actionlint release built with a fixed Go toolchain exists (or a Debian package does) and the pin in tools/build-tools/Dockerfile is moved to it."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-32281"
+      },
+      "timestamp": "2026-07-31T15:52:38Z",
+      "products": [
+        {
+          "@id": "pkg:github/wiki-mod/lancache-ng",
+          "subcomponents": [
+            {
+              "@id": "usr/local/bin/actionlint"
+            }
+          ]
+        }
+      ],
+      "status": "affected",
+      "action_statement": "Accepted, tracked risk (AG-KD-003, tool-specific, no deadline). The finding is in the Go standard library (v1.26.1) embedded in the official actionlint 1.7.12 release binary, which is the newest actionlint release and the only source of this tool for the Debian build-tools image (Debian ships no actionlint package, and compiling it from source with a newer Go toolchain is what this image no longer does). actionlint is a CI-only linter: it reads workflow files from the checkout and prints findings, it opens no listening socket and parses no network, e-mail or MIME input from outside the repository, so the network, TLS, certificate, mail, XML and HTTP/2 code paths named by the advisory are not reached with untrusted input. The exception ends when an actionlint release built with a fixed Go toolchain exists (or a Debian package does) and the pin in tools/build-tools/Dockerfile is moved to it."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-32283"
+      },
+      "timestamp": "2026-07-31T15:52:38Z",
+      "products": [
+        {
+          "@id": "pkg:github/wiki-mod/lancache-ng",
+          "subcomponents": [
+            {
+              "@id": "usr/local/bin/actionlint"
+            }
+          ]
+        }
+      ],
+      "status": "affected",
+      "action_statement": "Accepted, tracked risk (AG-KD-003, tool-specific, no deadline). The finding is in the Go standard library (v1.26.1) embedded in the official actionlint 1.7.12 release binary, which is the newest actionlint release and the only source of this tool for the Debian build-tools image (Debian ships no actionlint package, and compiling it from source with a newer Go toolchain is what this image no longer does). actionlint is a CI-only linter: it reads workflow files from the checkout and prints findings, it opens no listening socket and parses no network, e-mail or MIME input from outside the repository, so the network, TLS, certificate, mail, XML and HTTP/2 code paths named by the advisory are not reached with untrusted input. The exception ends when an actionlint release built with a fixed Go toolchain exists (or a Debian package does) and the pin in tools/build-tools/Dockerfile is moved to it."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-33810"
+      },
+      "timestamp": "2026-07-31T15:52:38Z",
+      "products": [
+        {
+          "@id": "pkg:github/wiki-mod/lancache-ng",
+          "subcomponents": [
+            {
+              "@id": "usr/local/bin/actionlint"
+            }
+          ]
+        }
+      ],
+      "status": "affected",
+      "action_statement": "Accepted, tracked risk (AG-KD-003, tool-specific, no deadline). The finding is in the Go standard library (v1.26.1) embedded in the official actionlint 1.7.12 release binary, which is the newest actionlint release and the only source of this tool for the Debian build-tools image (Debian ships no actionlint package, and compiling it from source with a newer Go toolchain is what this image no longer does). actionlint is a CI-only linter: it reads workflow files from the checkout and prints findings, it opens no listening socket and parses no network, e-mail or MIME input from outside the repository, so the network, TLS, certificate, mail, XML and HTTP/2 code paths named by the advisory are not reached with untrusted input. The exception ends when an actionlint release built with a fixed Go toolchain exists (or a Debian package does) and the pin in tools/build-tools/Dockerfile is moved to it."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-33811"
+      },
+      "timestamp": "2026-07-31T15:52:38Z",
+      "products": [
+        {
+          "@id": "pkg:github/wiki-mod/lancache-ng",
+          "subcomponents": [
+            {
+              "@id": "usr/local/bin/actionlint"
+            }
+          ]
+        }
+      ],
+      "status": "affected",
+      "action_statement": "Accepted, tracked risk (AG-KD-003, tool-specific, no deadline). The finding is in the Go standard library (v1.26.1) embedded in the official actionlint 1.7.12 release binary, which is the newest actionlint release and the only source of this tool for the Debian build-tools image (Debian ships no actionlint package, and compiling it from source with a newer Go toolchain is what this image no longer does). actionlint is a CI-only linter: it reads workflow files from the checkout and prints findings, it opens no listening socket and parses no network, e-mail or MIME input from outside the repository, so the network, TLS, certificate, mail, XML and HTTP/2 code paths named by the advisory are not reached with untrusted input. The exception ends when an actionlint release built with a fixed Go toolchain exists (or a Debian package does) and the pin in tools/build-tools/Dockerfile is moved to it."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-33814"
+      },
+      "timestamp": "2026-07-31T15:52:38Z",
+      "products": [
+        {
+          "@id": "pkg:github/wiki-mod/lancache-ng",
+          "subcomponents": [
+            {
+              "@id": "usr/local/bin/actionlint"
+            }
+          ]
+        }
+      ],
+      "status": "affected",
+      "action_statement": "Accepted, tracked risk (AG-KD-003, tool-specific, no deadline). The finding is in the Go standard library (v1.26.1) embedded in the official actionlint 1.7.12 release binary, which is the newest actionlint release and the only source of this tool for the Debian build-tools image (Debian ships no actionlint package, and compiling it from source with a newer Go toolchain is what this image no longer does). actionlint is a CI-only linter: it reads workflow files from the checkout and prints findings, it opens no listening socket and parses no network, e-mail or MIME input from outside the repository, so the network, TLS, certificate, mail, XML and HTTP/2 code paths named by the advisory are not reached with untrusted input. The exception ends when an actionlint release built with a fixed Go toolchain exists (or a Debian package does) and the pin in tools/build-tools/Dockerfile is moved to it."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-33818"
+      },
+      "timestamp": "2026-07-31T15:52:38Z",
+      "products": [
+        {
+          "@id": "pkg:github/wiki-mod/lancache-ng",
+          "subcomponents": [
+            {
+              "@id": "usr/local/bin/actionlint"
+            }
+          ]
+        }
+      ],
+      "status": "affected",
+      "action_statement": "Accepted, tracked risk (AG-KD-003, tool-specific, no deadline). The finding is in the Go standard library (v1.26.1) embedded in the official actionlint 1.7.12 release binary, which is the newest actionlint release and the only source of this tool for the Debian build-tools image (Debian ships no actionlint package, and compiling it from source with a newer Go toolchain is what this image no longer does). actionlint is a CI-only linter: it reads workflow files from the checkout and prints findings, it opens no listening socket and parses no network, e-mail or MIME input from outside the repository, so the network, TLS, certificate, mail, XML and HTTP/2 code paths named by the advisory are not reached with untrusted input. The exception ends when an actionlint release built with a fixed Go toolchain exists (or a Debian package does) and the pin in tools/build-tools/Dockerfile is moved to it."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-39820"
+      },
+      "timestamp": "2026-07-31T15:52:38Z",
+      "products": [
+        {
+          "@id": "pkg:github/wiki-mod/lancache-ng",
+          "subcomponents": [
+            {
+              "@id": "usr/local/bin/actionlint"
+            }
+          ]
+        }
+      ],
+      "status": "affected",
+      "action_statement": "Accepted, tracked risk (AG-KD-003, tool-specific, no deadline). The finding is in the Go standard library (v1.26.1) embedded in the official actionlint 1.7.12 release binary, which is the newest actionlint release and the only source of this tool for the Debian build-tools image (Debian ships no actionlint package, and compiling it from source with a newer Go toolchain is what this image no longer does). actionlint is a CI-only linter: it reads workflow files from the checkout and prints findings, it opens no listening socket and parses no network, e-mail or MIME input from outside the repository, so the network, TLS, certificate, mail, XML and HTTP/2 code paths named by the advisory are not reached with untrusted input. The exception ends when an actionlint release built with a fixed Go toolchain exists (or a Debian package does) and the pin in tools/build-tools/Dockerfile is moved to it."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-39821"
+      },
+      "timestamp": "2026-07-31T15:52:38Z",
+      "products": [
+        {
+          "@id": "pkg:github/wiki-mod/lancache-ng",
+          "subcomponents": [
+            {
+              "@id": "usr/local/bin/actionlint"
+            }
+          ]
+        }
+      ],
+      "status": "affected",
+      "action_statement": "Accepted, tracked risk (AG-KD-003, tool-specific, no deadline). The finding is in the Go standard library (v1.26.1) embedded in the official actionlint 1.7.12 release binary, which is the newest actionlint release and the only source of this tool for the Debian build-tools image (Debian ships no actionlint package, and compiling it from source with a newer Go toolchain is what this image no longer does). actionlint is a CI-only linter: it reads workflow files from the checkout and prints findings, it opens no listening socket and parses no network, e-mail or MIME input from outside the repository, so the network, TLS, certificate, mail, XML and HTTP/2 code paths named by the advisory are not reached with untrusted input. The exception ends when an actionlint release built with a fixed Go toolchain exists (or a Debian package does) and the pin in tools/build-tools/Dockerfile is moved to it."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-39822"
+      },
+      "timestamp": "2026-07-31T15:52:38Z",
+      "products": [
+        {
+          "@id": "pkg:github/wiki-mod/lancache-ng",
+          "subcomponents": [
+            {
+              "@id": "usr/local/bin/actionlint"
+            }
+          ]
+        }
+      ],
+      "status": "affected",
+      "action_statement": "Accepted, tracked risk (AG-KD-003, tool-specific, no deadline). The finding is in the Go standard library (v1.26.1) embedded in the official actionlint 1.7.12 release binary, which is the newest actionlint release and the only source of this tool for the Debian build-tools image (Debian ships no actionlint package, and compiling it from source with a newer Go toolchain is what this image no longer does). actionlint is a CI-only linter: it reads workflow files from the checkout and prints findings, it opens no listening socket and parses no network, e-mail or MIME input from outside the repository, so the network, TLS, certificate, mail, XML and HTTP/2 code paths named by the advisory are not reached with untrusted input. The exception ends when an actionlint release built with a fixed Go toolchain exists (or a Debian package does) and the pin in tools/build-tools/Dockerfile is moved to it."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-39836"
+      },
+      "timestamp": "2026-07-31T15:52:38Z",
+      "products": [
+        {
+          "@id": "pkg:github/wiki-mod/lancache-ng",
+          "subcomponents": [
+            {
+              "@id": "usr/local/bin/actionlint"
+            }
+          ]
+        }
+      ],
+      "status": "affected",
+      "action_statement": "Accepted, tracked risk (AG-KD-003, tool-specific, no deadline). The finding is in the Go standard library (v1.26.1) embedded in the official actionlint 1.7.12 release binary, which is the newest actionlint release and the only source of this tool for the Debian build-tools image (Debian ships no actionlint package, and compiling it from source with a newer Go toolchain is what this image no longer does). actionlint is a CI-only linter: it reads workflow files from the checkout and prints findings, it opens no listening socket and parses no network, e-mail or MIME input from outside the repository, so the network, TLS, certificate, mail, XML and HTTP/2 code paths named by the advisory are not reached with untrusted input. The exception ends when an actionlint release built with a fixed Go toolchain exists (or a Debian package does) and the pin in tools/build-tools/Dockerfile is moved to it."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-42499"
+      },
+      "timestamp": "2026-07-31T15:52:38Z",
+      "products": [
+        {
+          "@id": "pkg:github/wiki-mod/lancache-ng",
+          "subcomponents": [
+            {
+              "@id": "usr/local/bin/actionlint"
+            }
+          ]
+        }
+      ],
+      "status": "affected",
+      "action_statement": "Accepted, tracked risk (AG-KD-003, tool-specific, no deadline). The finding is in the Go standard library (v1.26.1) embedded in the official actionlint 1.7.12 release binary, which is the newest actionlint release and the only source of this tool for the Debian build-tools image (Debian ships no actionlint package, and compiling it from source with a newer Go toolchain is what this image no longer does). actionlint is a CI-only linter: it reads workflow files from the checkout and prints findings, it opens no listening socket and parses no network, e-mail or MIME input from outside the repository, so the network, TLS, certificate, mail, XML and HTTP/2 code paths named by the advisory are not reached with untrusted input. The exception ends when an actionlint release built with a fixed Go toolchain exists (or a Debian package does) and the pin in tools/build-tools/Dockerfile is moved to it."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-42504"
+      },
+      "timestamp": "2026-07-31T15:52:38Z",
+      "products": [
+        {
+          "@id": "pkg:github/wiki-mod/lancache-ng",
+          "subcomponents": [
+            {
+              "@id": "usr/local/bin/actionlint"
+            }
+          ]
+        }
+      ],
+      "status": "affected",
+      "action_statement": "Accepted, tracked risk (AG-KD-003, tool-specific, no deadline). The finding is in the Go standard library (v1.26.1) embedded in the official actionlint 1.7.12 release binary, which is the newest actionlint release and the only source of this tool for the Debian build-tools image (Debian ships no actionlint package, and compiling it from source with a newer Go toolchain is what this image no longer does). actionlint is a CI-only linter: it reads workflow files from the checkout and prints findings, it opens no listening socket and parses no network, e-mail or MIME input from outside the repository, so the network, TLS, certificate, mail, XML and HTTP/2 code paths named by the advisory are not reached with untrusted input. The exception ends when an actionlint release built with a fixed Go toolchain exists (or a Debian package does) and the pin in tools/build-tools/Dockerfile is moved to it."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-46600"
+      },
+      "timestamp": "2026-07-31T15:52:38Z",
+      "products": [
+        {
+          "@id": "pkg:github/wiki-mod/lancache-ng",
+          "subcomponents": [
+            {
+              "@id": "usr/local/bin/actionlint"
+            }
+          ]
+        }
+      ],
+      "status": "affected",
+      "action_statement": "Accepted, tracked risk (AG-KD-003, tool-specific, no deadline). The finding is in the Go standard library (v1.26.1) embedded in the official actionlint 1.7.12 release binary, which is the newest actionlint release and the only source of this tool for the Debian build-tools image (Debian ships no actionlint package, and compiling it from source with a newer Go toolchain is what this image no longer does). actionlint is a CI-only linter: it reads workflow files from the checkout and prints findings, it opens no listening socket and parses no network, e-mail or MIME input from outside the repository, so the network, TLS, certificate, mail, XML and HTTP/2 code paths named by the advisory are not reached with untrusted input. The exception ends when an actionlint release built with a fixed Go toolchain exists (or a Debian package does) and the pin in tools/build-tools/Dockerfile is moved to it."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-56853"
+      },
+      "timestamp": "2026-07-31T15:52:38Z",
+      "products": [
+        {
+          "@id": "pkg:github/wiki-mod/lancache-ng",
+          "subcomponents": [
+            {
+              "@id": "usr/local/bin/actionlint"
+            }
+          ]
+        }
+      ],
+      "status": "affected",
+      "action_statement": "Accepted, tracked risk (AG-KD-003, tool-specific, no deadline). The finding is in the Go standard library (v1.26.1) embedded in the official actionlint 1.7.12 release binary, which is the newest actionlint release and the only source of this tool for the Debian build-tools image (Debian ships no actionlint package, and compiling it from source with a newer Go toolchain is what this image no longer does). actionlint is a CI-only linter: it reads workflow files from the checkout and prints findings, it opens no listening socket and parses no network, e-mail or MIME input from outside the repository, so the network, TLS, certificate, mail, XML and HTTP/2 code paths named by the advisory are not reached with untrusted input. The exception ends when an actionlint release built with a fixed Go toolchain exists (or a Debian package does) and the pin in tools/build-tools/Dockerfile is moved to it."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-56858"
+      },
+      "timestamp": "2026-07-31T15:52:38Z",
+      "products": [
+        {
+          "@id": "pkg:github/wiki-mod/lancache-ng",
+          "subcomponents": [
+            {
+              "@id": "usr/local/bin/actionlint"
+            }
+          ]
+        }
+      ],
+      "status": "affected",
+      "action_statement": "Accepted, tracked risk (AG-KD-003, tool-specific, no deadline). The finding is in the Go standard library (v1.26.1) embedded in the official actionlint 1.7.12 release binary, which is the newest actionlint release and the only source of this tool for the Debian build-tools image (Debian ships no actionlint package, and compiling it from source with a newer Go toolchain is what this image no longer does). actionlint is a CI-only linter: it reads workflow files from the checkout and prints findings, it opens no listening socket and parses no network, e-mail or MIME input from outside the repository, so the network, TLS, certificate, mail, XML and HTTP/2 code paths named by the advisory are not reached with untrusted input. The exception ends when an actionlint release built with a fixed Go toolchain exists (or a Debian package does) and the pin in tools/build-tools/Dockerfile is moved to it."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-56859"
+      },
+      "timestamp": "2026-07-31T15:52:38Z",
+      "products": [
+        {
+          "@id": "pkg:github/wiki-mod/lancache-ng",
+          "subcomponents": [
+            {
+              "@id": "usr/local/bin/actionlint"
+            }
+          ]
+        }
+      ],
+      "status": "affected",
+      "action_statement": "Accepted, tracked risk (AG-KD-003, tool-specific, no deadline). The finding is in the Go standard library (v1.26.1) embedded in the official actionlint 1.7.12 release binary, which is the newest actionlint release and the only source of this tool for the Debian build-tools image (Debian ships no actionlint package, and compiling it from source with a newer Go toolchain is what this image no longer does). actionlint is a CI-only linter: it reads workflow files from the checkout and prints findings, it opens no listening socket and parses no network, e-mail or MIME input from outside the repository, so the network, TLS, certificate, mail, XML and HTTP/2 code paths named by the advisory are not reached with untrusted input. The exception ends when an actionlint release built with a fixed Go toolchain exists (or a Debian package does) and the pin in tools/build-tools/Dockerfile is moved to it."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-56860"
+      },
+      "timestamp": "2026-07-31T15:52:38Z",
+      "products": [
+        {
+          "@id": "pkg:github/wiki-mod/lancache-ng",
+          "subcomponents": [
+            {
+              "@id": "usr/local/bin/actionlint"
+            }
+          ]
+        }
+      ],
+      "status": "affected",
+      "action_statement": "Accepted, tracked risk (AG-KD-003, tool-specific, no deadline). The finding is in the Go standard library (v1.26.1) embedded in the official actionlint 1.7.12 release binary, which is the newest actionlint release and the only source of this tool for the Debian build-tools image (Debian ships no actionlint package, and compiling it from source with a newer Go toolchain is what this image no longer does). actionlint is a CI-only linter: it reads workflow files from the checkout and prints findings, it opens no listening socket and parses no network, e-mail or MIME input from outside the repository, so the network, TLS, certificate, mail, XML and HTTP/2 code paths named by the advisory are not reached with untrusted input. The exception ends when an actionlint release built with a fixed Go toolchain exists (or a Debian package does) and the pin in tools/build-tools/Dockerfile is moved to it."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-56862"
+      },
+      "timestamp": "2026-07-31T15:52:38Z",
+      "products": [
+        {
+          "@id": "pkg:github/wiki-mod/lancache-ng",
+          "subcomponents": [
+            {
+              "@id": "usr/local/bin/actionlint"
+            }
+          ]
+        }
+      ],
+      "status": "affected",
+      "action_statement": "Accepted, tracked risk (AG-KD-003, tool-specific, no deadline). The finding is in the Go standard library (v1.26.1) embedded in the official actionlint 1.7.12 release binary, which is the newest actionlint release and the only source of this tool for the Debian build-tools image (Debian ships no actionlint package, and compiling it from source with a newer Go toolchain is what this image no longer does). actionlint is a CI-only linter: it reads workflow files from the checkout and prints findings, it opens no listening socket and parses no network, e-mail or MIME input from outside the repository, so the network, TLS, certificate, mail, XML and HTTP/2 code paths named by the advisory are not reached with untrusted input. The exception ends when an actionlint release built with a fixed Go toolchain exists (or a Debian package does) and the pin in tools/build-tools/Dockerfile is moved to it."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-78667"
+      },
+      "timestamp": "2026-07-31T15:52:38Z",
+      "products": [
+        {
+          "@id": "pkg:github/wiki-mod/lancache-ng",
+          "subcomponents": [
+            {
+              "@id": "usr/local/bin/actionlint"
+            }
+          ]
+        }
+      ],
+      "status": "affected",
+      "action_statement": "Accepted, tracked risk (AG-KD-003, tool-specific, no deadline). The finding is in the Go standard library (v1.26.1) embedded in the official actionlint 1.7.12 release binary, which is the newest actionlint release and the only source of this tool for the Debian build-tools image (Debian ships no actionlint package, and compiling it from source with a newer Go toolchain is what this image no longer does). actionlint is a CI-only linter: it reads workflow files from the checkout and prints findings, it opens no listening socket and parses no network, e-mail or MIME input from outside the repository, so the network, TLS, certificate, mail, XML and HTTP/2 code paths named by the advisory are not reached with untrusted input. The exception ends when an actionlint release built with a fixed Go toolchain exists (or a Debian package does) and the pin in tools/build-tools/Dockerfile is moved to it."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-78669"
+      },
+      "timestamp": "2026-07-31T15:52:38Z",
+      "products": [
+        {
+          "@id": "pkg:github/wiki-mod/lancache-ng",
+          "subcomponents": [
+            {
+              "@id": "usr/local/bin/actionlint"
+            }
+          ]
+        }
+      ],
+      "status": "affected",
+      "action_statement": "Accepted, tracked risk (AG-KD-003, tool-specific, no deadline). The finding is in the Go standard library (v1.26.1) embedded in the official actionlint 1.7.12 release binary, which is the newest actionlint release and the only source of this tool for the Debian build-tools image (Debian ships no actionlint package, and compiling it from source with a newer Go toolchain is what this image no longer does). actionlint is a CI-only linter: it reads workflow files from the checkout and prints findings, it opens no listening socket and parses no network, e-mail or MIME input from outside the repository, so the network, TLS, certificate, mail, XML and HTTP/2 code paths named by the advisory are not reached with untrusted input. The exception ends when an actionlint release built with a fixed Go toolchain exists (or a Debian package does) and the pin in tools/build-tools/Dockerfile is moved to it."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-97031"
+      },
+      "timestamp": "2026-07-31T15:52:38Z",
+      "products": [
+        {
+          "@id": "pkg:github/wiki-mod/lancache-ng",
+          "subcomponents": [
+            {
+              "@id": "usr/local/bin/actionlint"
+            }
+          ]
+        }
+      ],
+      "status": "affected",
+      "action_statement": "Accepted, tracked risk (AG-KD-003, tool-specific, no deadline). The finding is in the Go standard library (v1.26.1) embedded in the official actionlint 1.7.12 release binary, which is the newest actionlint release and the only source of this tool for the Debian build-tools image (Debian ships no actionlint package, and compiling it from source with a newer Go toolchain is what this image no longer does). actionlint is a CI-only linter: it reads workflow files from the checkout and prints findings, it opens no listening socket and parses no network, e-mail or MIME input from outside the repository, so the network, TLS, certificate, mail, XML and HTTP/2 code paths named by the advisory are not reached with untrusted input. The exception ends when an actionlint release built with a fixed Go toolchain exists (or a Debian package does) and the pin in tools/build-tools/Dockerfile is moved to it."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-17106"
+      },
+      "timestamp": "2026-07-31T15:52:38Z",
+      "products": [
+        {
+          "@id": "pkg:github/wiki-mod/lancache-ng",
+          "subcomponents": [
+            {
+              "@id": "usr/local/lib/docker/cli-plugins/docker-buildx"
+            }
+          ]
+        }
+      ],
+      "status": "affected",
+      "action_statement": "github.com/moby/go-archive v0.2.0 (fixed in 0.3.0). Accepted, tracked risk (AG-KD-003, tool-specific, no deadline). The finding is in a Go module vendored into the official docker buildx v0.38.1 release binary (the newest buildx release; the Debian docker-buildx package is 0.13.1 and lacks `imagetools create --prefer-index`, which promote and the build-tools workflow call). The fixed module version is out, but no buildx release contains it yet. buildx runs as a short-lived CLI plugin in CI against registries this project controls; it is not exposed to untrusted network input as a server. The exception ends when a buildx release with the fixed module exists and the pin in tools/build-tools/Dockerfile is moved to it."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-78669"
+      },
+      "timestamp": "2026-07-31T15:52:38Z",
+      "products": [
+        {
+          "@id": "pkg:github/wiki-mod/lancache-ng",
+          "subcomponents": [
+            {
+              "@id": "usr/local/lib/docker/cli-plugins/docker-buildx"
+            }
+          ]
+        }
+      ],
+      "status": "affected",
+      "action_statement": "golang.org/x/net v0.59.0 (fixed in 0.60.0). Accepted, tracked risk (AG-KD-003, tool-specific, no deadline). The finding is in a Go module vendored into the official docker buildx v0.38.1 release binary (the newest buildx release; the Debian docker-buildx package is 0.13.1 and lacks `imagetools create --prefer-index`, which promote and the build-tools workflow call). The fixed module version is out, but no buildx release contains it yet. buildx runs as a short-lived CLI plugin in CI against registries this project controls; it is not exposed to untrusted network input as a server. The exception ends when a buildx release with the fixed module exists and the pin in tools/build-tools/Dockerfile is moved to it."
     }
   ]
 }
