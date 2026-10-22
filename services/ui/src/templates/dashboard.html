@@ -115,7 +115,7 @@
       {% endfor %}
     </div>
     {% endif %}
-    <p class="text-xs text-slate-500 mt-3">Netdata's own dashboard (port 19999) is intentionally not published outside this host; this card only forwards the alarms it fires, not its full metrics UI.</p>
+    <p class="text-xs text-slate-500 mt-3">Netdata's own dashboard{% if netdata_port %} (port {{ netdata_port }}){% endif %} is intentionally not published outside this host; this card only forwards the alarms it fires, not its full metrics UI.</p>
   </div>
 
   <!-- What: cache figures from one shared CACHE_DIR

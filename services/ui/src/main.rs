@@ -491,6 +491,13 @@ impl Config {
             .unwrap_or(self.cache_max_gb)
     }
 
+    // What: NETDATA_URL parsed; None if it is no URL.
+    // Why: one parse for the chart proxy and the port text.
+    // From: Issue #1683 | PR #1912
+    fn netdata_base(&self) -> Option<reqwest::Url> {
+        reqwest::Url::parse(&self.netdata_url).ok()
+    }
+
     // What: save changed values; keep other saved keys.
     // Why: no env value or SOT default enters the file.
     // From: Issue #1683 | PR #1912
@@ -1972,8 +1979,10 @@ async fn netdata_proxy(
     if !["data", "charts"].contains(&path.as_str()) {
         return Err(StatusCode::NOT_FOUND);
     }
-    let mut url = reqwest::Url::parse(&state.config.netdata_url)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let mut url = state
+        .config
+        .netdata_base()
+        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
     url.path_segments_mut()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .pop_if_empty()
@@ -5481,6 +5490,13 @@ async fn dashboard(State(state): Shared, headers: HeaderMap) -> Response {
         &watchdog_json(&cfg.watchdog_status_file, cfg.watchdog_miss_limit),
     );
     ctx.insert("netdata_alarms", &alarm_views(&alarms));
+    // What: the Netdata port the dashboard note names.
+    // Why: NETDATA_URL owns the address; no port in markup.
+    // From: Issue #1683 | PR #1912
+    let netdata_port = cfg
+        .netdata_base()
+        .and_then(|url| url.port_or_known_default());
+    ctx.insert("netdata_port", &netdata_port);
     render(&state, "dashboard.html", &ctx)
 }
 
