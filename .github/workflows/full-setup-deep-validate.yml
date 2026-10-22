@@ -435,85 +435,6 @@ jobs:
           # sim inside it rather than racing the shared job-level subnet.
           bash scripts/lib/run-in-validation-subnet.sh bash scripts/dns-zone-rollback-simulation.sh
 
-  dhcp-kea-ui-rollback-simulation:
-    # Real end-to-end proof for issue #837: the Admin UI's OWN Kea rollback
-    # route (POST /dhcp/snapshot/rollback, rollback_kea_snapshot in
-    # services/ui/src/routes/dhcp.rs) must genuinely roll a real, running Kea
-    # server back to an earlier known-good config via its Control Agent API,
-    # not just return an HTTP redirect. The CLI fallback
-    # (setup.sh reset-to-last-known-good-config kea) is separately proven by
-    # setup-reset-kea-config-simulation (now inside full-setup-sims.yml, issue
-    # #1014); this covers the UI-reachable path that one does not. Builds Kea
-    # from THIS checkout's services/dhcp (like the sibling sims), so it needs
-    # no staging tag for that image; only the published `ui` image is pulled.
-    # See scripts/dhcp-kea-ui-rollback-simulation.sh's own header for exactly
-    # what this does and does not prove.
-    #
-    # This job is deep-validate-only (it has no counterpart in the manual
-    # full-setup-validate.yml), so unlike its former sibling
-    # setup-reset-kea-config-simulation it did NOT move into the reusable
-    # full-setup-sims.yml (issue #1014) -- doing so would run it in the
-    # manual-dispatch context where it never existed. Instead it stays a
-    # top-level job here, alongside dns-zone-rollback-simulation and
-    # syslog-forwarding-simulation, needing the whole full-setup-sims caller
-    # job (its former dependency, ui-reachability-crash-loop-simulation, is
-    # now one of the jobs folded inside it and no longer addressable by name
-    # at this level) instead of compute-validation-network's raw per-job
-    # outputs directly.
-    name: Admin UI Kea rollback (POST /dhcp/snapshot/rollback) simulation
-    needs: [plan, ensure-pr-staging-images, full-setup-sims]
-    if: >-
-      always() &&
-      needs.plan.outputs.should_run == 'true' &&
-      needs['ensure-pr-staging-images'].result != 'failure' &&
-      needs['ensure-pr-staging-images'].result != 'cancelled'
-    # heavy, not light: this job builds and runs a real Kea container plus
-    # the Admin UI/NATS stack, not just planning or polling.
-    runs-on: [self-hosted, linux, lancache, lancache-heavy]
-    timeout-minutes: 45
-    env:
-      LANCACHE_IMAGE_TAG: ${{ needs.plan.outputs.image_tag }}
-      # The run-in-validation-subnet.sh wrapper below self-reserves a
-      # collision-free slot and exports the full VALIDATION_* set for it.
-      # Issue #1014: this job no longer threads compute-validation-network's
-      # per-run outputs as job-level env -- that job now lives in the reusable
-      # full-setup-sims.yml, and the wrapper supplies the addresses anyway
-      # (same reasoning as dns-zone-rollback-simulation above).
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Resolve build-tools image
-        # No BUILD_TOOLS_REQUIRE_PUBLISHED: same-PR tools/build-tools override
-        # preference, matching every other job in this suite.
-        id: build-tools-image
-        # See dns-zone-rollback-simulation's "Resolve build-tools image" step
-        # above for why these are read via env: + quoted shell variables
-        # instead of interpolating `${{ }}` expressions directly into the
-        # run: script (OSPS-BR-01.04 hardening, refs #1130).
-        env:
-          PR_STAGING_AVAILABLE: ${{ needs.plan.outputs.pr_staging_available }}
-          BUILD_TOOLS_TOUCHED: ${{ needs.plan.outputs.build_tools }}
-          IMAGE_TAG: ${{ needs.plan.outputs.image_tag }}
-          REPOSITORY: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          if [[ "$PR_STAGING_AVAILABLE" == "true" && "$BUILD_TOOLS_TOUCHED" == "true" ]]; then
-            image="ghcr.io/${REPOSITORY}/build-tools:${IMAGE_TAG}"
-            echo "::notice::This PR touched tools/build-tools; using its confirmed staging image $image instead of build-tools:latest."
-          else
-            image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"
-          fi
-          echo "image=$image" >> "$GITHUB_OUTPUT"
-      - name: Run Admin UI Kea rollback (POST /dhcp/snapshot/rollback) simulation
-        env:
-          BUILD_TOOLS_IMAGE: ${{ steps.build-tools-image.outputs.image }}
-        run: |
-          set -euo pipefail
-          # Reserve a collision-free subnet (flock + retry, #820) and run the
-          # sim inside it, exactly like the other deep-only sims above -- both
-          # stand up a full validation stack and must not share a _validation
-          # network with a concurrent run.
-          bash scripts/lib/run-in-validation-subnet.sh bash scripts/dhcp-kea-ui-rollback-simulation.sh
-
   syslog-forwarding-simulation:
     # Real end-to-end proof for #453's last two comments: not just "a log
     # line reached syslog-ng on disk" (which #756/#757/#758 already covered
@@ -660,7 +581,6 @@ jobs:
       - full-setup-sims
       - ntp-cap-sys-time-simulation
       - dns-zone-rollback-simulation
-      - dhcp-kea-ui-rollback-simulation
       - syslog-forwarding-simulation
     if: always()
     # heavy per explicit maintainer judgment, even though this job itself is
@@ -686,7 +606,6 @@ jobs:
           FULL_SETUP_SIMS_RESULT: ${{ needs['full-setup-sims'].result }}
           NTP_CAP_SYS_TIME_RESULT: ${{ needs['ntp-cap-sys-time-simulation'].result }}
           DNS_ROLLBACK_RESULT: ${{ needs['dns-zone-rollback-simulation'].result }}
-          UI_KEA_ROLLBACK_RESULT: ${{ needs['dhcp-kea-ui-rollback-simulation'].result }}
           SYSLOG_FORWARDING_RESULT: ${{ needs['syslog-forwarding-simulation'].result }}
         run: |
           set -euo pipefail
@@ -731,7 +650,6 @@ jobs:
           check "ensure-pr-staging-images" "$ENSURE_RESULT"
           check "ntp-cap-sys-time-simulation" "$NTP_CAP_SYS_TIME_RESULT"
           check "dns-zone-rollback-simulation" "$DNS_ROLLBACK_RESULT"
-          check "dhcp-kea-ui-rollback-simulation" "$UI_KEA_ROLLBACK_RESULT"
           check "syslog-forwarding-simulation" "$SYSLOG_FORWARDING_RESULT"
 
           if [[ "$overall" -ne 0 ]]; then

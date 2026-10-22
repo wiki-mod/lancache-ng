@@ -4,10 +4,8 @@
 # Fast, Docker-free unit coverage for scripts/lib/dhcp-lease-parse.sh (issue
 # #448). Feeds canned dhclient .leases fixtures and asserts the extracted
 # offered-address/server-identifier/router/DNS/NTP/lease-time/domain fields
-# -- this is what actually keeps the option-parsing logic honest between
-# real, Docker-based runs of scripts/dhcp-kea-lease-flow-simulation.sh
-# (which only runs via workflow_dispatch and needs a runner with Docker), so
-# a regression in the parser itself is still caught by normal, fast bats CI.
+# -- this is what actually keeps the option-parsing logic honest in
+# normal, fast bats CI, without Docker.
 
 # Required for `run !` (used below to correctly fail a test on a negated
 # assertion, see the SC2314 comment inline) -- same requirement as

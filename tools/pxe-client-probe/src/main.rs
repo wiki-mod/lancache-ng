@@ -1,7 +1,7 @@
 //! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 //!
-//! Synthetic PXE-client DHCPDISCOVER probe for scripts/dhcp-proxy-pxe-
-//! simulation.sh (issue #705). No off-the-shelf DHCP client (dhclient,
+//! Synthetic PXE-client DHCPDISCOVER probe for the former PXE simulation
+//! script (issue #705, removed). No off-the-shelf DHCP client (dhclient,
 //! udhcpc, ...) can be made to send a real PXE-tagged DHCPDISCOVER (DHCP
 //! option 60=PXEClient, option 93=client-system-architecture) -- that is
 //! exactly the packet shape a real PXE ROM sends and the shape this
