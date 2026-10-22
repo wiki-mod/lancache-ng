@@ -196,10 +196,9 @@ async fn publish(
         .map_err(|e| e.to_string())
 }
 
-// What: publish one record message, logging a failure.
+// What: publish one record; true once JetStream acked it.
 // Why: replication is best-effort; the next tick retries.
-// From: Issue #1683 | PR #1858
-// Returns true only when JetStream acknowledged the message.
+// From: Issue #1683 | PR #1912
 async fn publish_record(js: &jetstream::Context, msg_id: &str, record: &DnsRecord) -> bool {
     let payload = match serde_json::to_vec(record) {
         Ok(payload) => payload,
@@ -866,10 +865,9 @@ async fn check_zone(ctx: &Ctx, store: &SnapshotStore, zone: &str) -> bool {
     }
 }
 
-// What: republish a rollback patch for the lan zone.
+// What: republish a lan rollback patch; true if all acked.
 // Why: other nodes converge now, not at the next tick.
-// From: Issue #1683 | PR #1858
-// Returns true only when every record was acknowledged.
+// From: Issue #1683 | PR #1912
 async fn publish_patch(js: &jetstream::Context, lan_zone: &str, patch: &Value) -> bool {
     let stamp = unix_nanos();
     let mut all_published = true;
