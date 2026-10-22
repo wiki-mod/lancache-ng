@@ -83,8 +83,8 @@ This section documents intentional security design decisions and known tradeoffs
 - Document the CA installation process for clients
 
 **When to use**: 
-- SSL mode (`192.168.1.11` DNS) is designed for maximum caching benefit
-- Clients that cannot or will not trust the CA can use standard mode instead
+- HTTPS mode (`192.168.1.11` DNS) is designed for maximum caching benefit
+- Clients that cannot or will not trust the CA can use HTTP mode instead
 
 ### 2. DNS Spoofing of CDN Domains
 
@@ -96,7 +96,7 @@ This section documents intentional security design decisions and known tradeoffs
 - Only known CDN domains are spoofed; see `services/dns/cdn-domains.txt`
 - Gaming consoles (PS5, Xbox) are explicitly excluded to prevent breakage
 - The spoofing scope is limited to a curated list; arbitrary domains are not affected
-- Clients can opt out by using standard mode (passthrough HTTPS) or external DNS
+- Clients can opt out by using HTTP mode (passthrough HTTPS) or external DNS
 
 **What is spoofed**: Game CDNs (Steam, Epic, Blizzard, etc.) and software distributors.
 
@@ -140,7 +140,7 @@ This section documents intentional security design decisions and known tradeoffs
 
 ### 6. Upstream TLS Verification in nginx
 
-**Design**: nginx proxies cached HTTP and SSL-mode requests to the real CDN over HTTPS and validates the upstream certificate chain (`proxy_ssl_verify on`).
+**Design**: nginx proxies cached HTTP and HTTPS-mode requests to the real CDN over HTTPS and validates the upstream certificate chain (`proxy_ssl_verify on`).
 
 **Reason**: The proxy resolves upstream CDN hostnames with public DNS resolvers configured in nginx, not the local DNS-spoofing recursor, so certificate verification can validate the real origin.
 
@@ -175,8 +175,8 @@ lancache-ng install -- the local CA key, `PDNS_API_KEY`, `KEA_CTRL_TOKEN`,
 - **Storing**: written to the operator's own `.env` file (gitignored) or, for
   values shared across containers, a shared-secrets Docker volume (see
   `docs/threat-model.md` T4/T5/T12 for the exact mechanism per secret).
-  `ca.key` lives under `<install>/certs/` and is gitignored (`AGENTS.md`
-  `AG-KD-002`).
+  `ca.key` lives in the CA state directory (`CA_DIR`), outside the
+  checkout (`AGENTS.md` `AG-KD-002`).
 - **Accessing**: each service's entrypoint resolves only the specific
   secret(s) it needs from `.env`/the shared-secrets volume at startup; no
   service is handed a shared "all secrets" credential set.

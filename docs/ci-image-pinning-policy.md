@@ -34,9 +34,6 @@ defaults, decided as AGENTS.md AG-CI-008).
   `ci.sh` passes the digest-pinned SOT `base_images` entries from
   `.github/yaml/build-manifest.yml` and the build-tools image as a digest from
   `ci.sh build-tools resolve-image`.
-- **External images run by the stack**: SOT `external_services`. A digest-less
-  tag is allowed only for an explicit `policy: tag-latest` entry (netdata,
-  maintainer decision recorded on PR #1858, 2026-10-01).
 - **Pinned tool downloads**: SOT `external_versions` with their checksums.
 
 Docker Hub bases are pulled through `mirror.gcr.io/library/*`. The digest is the
@@ -87,7 +84,7 @@ inside the `build-tools` container (AG-VAL-016):
 bash .github/scripts/ci.sh check mutable-refs            # tags, branches, short SHAs, unpinned images
 bash .github/scripts/ci.sh check action-node-versions    # pinned actions: runtime and reference shape
 bash .github/scripts/ci.sh check stable-external-images  # digest-less external images
-bash .github/scripts/ci.sh version verify                # external_versions consumers
+bash .github/scripts/ci.sh check version-drift           # external_versions consumers
 ```
 
 ## Drift is part of the build identity
@@ -96,6 +93,15 @@ CI 2.0 decides reuse the same way for every trigger
 (docs/ci-2.0-architecture.md sections 6, 27 and 54): a target is rebuilt only
 when its build identity changed and no accepted digest exists for it. The base
 image enters the identity as its SOT-pinned digest (`base_digest`) and apk
-package versions are resolved live whenever an identity is computed
-(`package_versions`), so a new pin or a newer package changes the identity and
-requires a build; an unchanged one reuses the accepted digest.
+package versions are resolved live from the package index
+(`package_versions`); the planner run record (`CI_RUN_IDENTITIES`) then fixes
+every pair's identity for the rest of the run, so a new pin or a newer
+package changes the identity and requires a build; an unchanged one reuses
+the accepted digest.
+
+A run started by one of the events the SOT lists in
+`build_admission.refresh_events` has no base commit to compare against. Section
+17 of the architecture names such a run a controlled refresh, so the resolver
+alone decides there: a pair with no accepted artifact for its current identity
+is built, and a pair that already has one is reused. Nothing is rebuilt over an
+accepted artifact of the same identity.

@@ -24,19 +24,15 @@ defaults:
 # Why: ci.sh owns auth; workflow only wires the env
 # From: Issue #1683
 env:
-  GHCR_USERNAME: ${{ github.actor }}
   GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   # What: optional Docker Hub login for ci.sh pulls.
   # Why: anonymous docker.io pulls hit the shared-IP limit.
   # From: Issue #1095 | PR #1858
   DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
   DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-  # What: wire LAN proxy for self-hosted runners
-  # Why: AG-CI-009; ci.sh is the sole proxy policy owner.
+  # What: LAN proxy CA secret; ci.sh uses it self-hosted.
+  # Why: secrets are not in CI_VARIABLES; vars are.
   # From: Issue #1683 | PR #1858
-  PROJECT_SELFHOSTED_PROXY_HTTP: ${{ vars.PROJECT_SELFHOSTED_PROXY_HTTP }}
-  PROJECT_SELFHOSTED_PROXY_HTTPS: ${{ vars.PROJECT_SELFHOSTED_PROXY_HTTPS }}
-  PROJECT_SELFHOSTED_PROXY_EXCLUSION: ${{ vars.PROJECT_SELFHOSTED_PROXY_EXCLUSION }}
   PROJECT_SELFHOSTED_PROXY_CA: ${{ secrets.PROJECT_SELFHOSTED_PROXY_CA }}
   # What: all repo/org variables once, as json, for ci.sh.
   # Why: ci.sh reads vars by name; YAML lists none of them.
@@ -58,6 +54,7 @@ jobs:
       image: ${{ steps.resolve.outputs.image }}
       runner: ${{ steps.jobs.outputs.runner }}
       timeouts: ${{ steps.jobs.outputs.timeouts }}
+      validate-dir: ${{ steps.jobs.outputs.validate-dir }}
     # What: one mutable entry: the current_dev channel.
     # Why: ci.sh needs a container before steps run
     # From: Issue #1683 | PR #1858
@@ -83,7 +80,8 @@ jobs:
       # What: switch to the nightly source ref from the SOT
       # Why: a schedule run checks out the default branch
       # From: Issue #1683 | PR #1858
-      - name: Check out the nightly source ref
+      - &nightly_source
+        name: Check out the nightly source ref
         id: source
         run: bash .github/scripts/ci.sh channel-checkout nightly
       - name: Resolve the build-tools image
@@ -93,25 +91,198 @@ jobs:
         id: jobs
         run: bash .github/scripts/ci.sh job-settings
 
-  # What: validate full stack of accepted candidate
-  # Why: runner host: compose binds need host paths.
-  # From: Issue #1683
-  validate:
-    name: validate
+  # What: one planner: the pair ids and the build matrix.
+  # Why: §72, §82: nightly holds no second admission path.
+  # From: Issue #1683 | PR #1912
+  plan:
+    name: plan
     needs: platform
     runs-on: ${{ needs.platform.outputs.runner }}
-    timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['validate'] }}
+    timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['plan'] }}
+    container:
+      image: ${{ needs.platform.outputs.image }}
+      credentials: *ghcr_credentials
+      # What: the build-tools ref this job runs in.
+      # Why: ids and Rust builds read the platform resolve.
+      # From: Issue #1683 | PR #1912
+      env:
+        CI_BUILD_TOOLS_IMAGE: ${{ needs.platform.outputs.image }}
+    outputs:
+      identities: ${{ steps.plan.outputs.identities }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+      any-build: ${{ steps.plan.outputs.any-build }}
     steps:
       - *bootstrap
       # What: check out the commit the platform job resolved
-      # Why: validate and promote must see one tree
-      # From: Issue #1683 | PR #1858
+      # Why: plan, validate and promote must see one tree
+      # From: Issue #1683 | PR #1912
       - &channel_pin
         name: Check out the resolved nightly commit
         env:
           SOURCE_COMMIT: ${{ needs.platform.outputs.commit }}
         run: bash .github/scripts/ci.sh channel-checkout nightly "${SOURCE_COMMIT}"
+      # What: collect the changed-file list via ci.sh.
+      # Why: one owner; a run with no base lists them all.
+      # From: Issue #1683 | PR #1912
+      - name: Collect changed files
+        id: changed
+        run: bash .github/scripts/ci.sh changed-files
+      # What: the same planner command ci.yml calls.
+      # Why: §6.2: nightly produces only what is missing.
+      # From: Issue #1683 | PR #1912
+      - name: Plan the build matrix and record the ids
+        id: plan
+        env:
+          CHANGED_FILES: ${{ steps.changed.outputs.file }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash .github/scripts/ci.sh plan-matrix
+
+  # What: build only what the plan admitted, then ship it.
+  # Why: §6.2: nightly produces the missing results.
+  # From: Issue #1683 | PR #1912
+  build:
+    name: build ${{ matrix.service }} ${{ matrix.arch }}
+    needs: [platform, plan]
+    if: needs.plan.outputs.any-build == 'true'
+    # What: each target and platform builds to its end.
+    # Why: one red build must not cancel the other targets.
+    # From: Issue #1683 | PR #1912
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['build'] }}
+    container:
+      image: ${{ needs.platform.outputs.image }}
+      credentials: *ghcr_credentials
+      # What: the build-tools ref this job runs in.
+      # Why: ids and Rust builds read the platform resolve.
+      # From: Issue #1683 | PR #1912
+      env:
+        CI_BUILD_TOOLS_IMAGE: ${{ needs.platform.outputs.image }}
+    # What: cache secrets the build's set-runtime needs.
+    # Why: secrets never reach ci.sh through CI_VARIABLES.
+    # From: Issue #1683 | PR #1912
+    env:
+      SCCACHE_REDIS_URL: ${{ secrets.SCCACHE_REDIS_URL }}
+      SCCACHE_DIST_AUTH_TOKEN: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
+    steps:
+      - *bootstrap
+      - *channel_pin
+      # What: export args for the GHA cache runtime step.
+      # Why: ci.sh owns the kill timeout and the var list.
+      # From: Issue #1683 | PR #1912
+      - name: Prepare the GHA cache runtime export
+        id: gha-runtime
+        run: bash .github/scripts/ci.sh gha-runtime-args
+      # What: hand the GHA cache runtime to later steps.
+      # Why: only action steps get ACTIONS_RUNTIME_TOKEN.
+      # From: Issue #1683 | PR #1912
+      - name: Export the GHA cache runtime
+        uses: docker://mirror.gcr.io/library/alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
+        with:
+          entrypoint: timeout
+          args: ${{ steps.gha-runtime.outputs.args }}
+      # What: build, then publish and verify the result.
+      # Why: publish is not build; readback proves it.
+      # From: Issue #1683 | PR #1912
+      - name: Build, publish and verify the platform image
+        env:
+          SERVICE: ${{ matrix.service }}
+          PLATFORM: ${{ matrix.platform }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # What: jobs that read ids use the plan's record.
+          # Why: one run, one id; ci.sh fails on a gap.
+          # From: Issue #1683 | PR #1912
+          CI_RUN_IDENTITIES: &run_ids ${{ needs.plan.outputs.identities }}
+        run: bash .github/scripts/ci.sh ship "${SERVICE}" "${PLATFORM}"
+      # What: frees this run's build lock after a cancel.
+      # Why: a cancel stops the step; bash gets no signal.
+      # From: Issue #1683 | PR #1912
+      - name: Release the build lock after a cancel
+        if: cancelled()
+        env:
+          SERVICE: ${{ matrix.service }}
+          PLATFORM: ${{ matrix.platform }}
+          CI_RUN_IDENTITIES: *run_ids
+        run: bash .github/scripts/ci.sh ship-release "${SERVICE}" "${PLATFORM}"
+
+  # What: aggregate this run's acceptance into the ledger.
+  # Why: one aggregator, one CAS commit, after the scan.
+  # From: Issue #1683 | PR #1912
+  aggregate:
+    name: aggregate
+    needs: [platform, plan, build, scan]
+    if: >-
+      !cancelled() && needs.scan.outputs.passed != '' &&
+      needs.plan.outputs.any-build == 'true'
+    runs-on: ${{ needs.platform.outputs.runner }}
+    timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['aggregate'] }}
+    container:
+      image: ${{ needs.platform.outputs.image }}
+      credentials: *ghcr_credentials
+    steps:
+      - *bootstrap
+      - *channel_pin
+      - name: Aggregate acceptance into the ledger
+        env:
+          CI_BUILD_MATRIX: ${{ needs.scan.outputs.passed }}
+          CI_RUN_IDENTITIES: *run_ids
+        run: bash .github/scripts/ci.sh aggregate-stack
+
+  # What: merge the platform digests into one index.
+  # Why: ci.sh owns the merge: both platforms or none.
+  # From: Issue #1683 | PR #1912
+  assemble:
+    name: assemble
+    needs: [platform, plan, build, scan, aggregate]
+    if: >-
+      !cancelled() && needs.aggregate.result == 'success' &&
+      needs.plan.outputs.any-build == 'true'
+    runs-on: ${{ needs.platform.outputs.runner }}
+    timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['assemble'] }}
+    container:
+      image: ${{ needs.platform.outputs.image }}
+      credentials: *ghcr_credentials
+    steps:
+      - *bootstrap
+      - *channel_pin
+      - name: Assemble multi-arch indexes
+        env:
+          CI_BUILD_MATRIX: ${{ needs.scan.outputs.passed }}
+          CI_RUN_IDENTITIES: *run_ids
+        run: bash .github/scripts/ci.sh assemble-stack
+
+  # What: validate full stack of accepted candidate
+  # Why: AG-VAL-016; the shared dir keeps host paths.
+  # From: Issue #1683 | PR #1912
+  validate:
+    name: validate
+    needs: [platform, plan, build, scan, aggregate, assemble]
+    # What: it runs on a quiet night and after a build.
+    # Why: §54.1: builds are targeted, validation is not.
+    # From: Issue #1683 | PR #1912
+    if: >-
+      !cancelled() &&
+      contains(fromJSON('["success","skipped"]'), needs.build.result) &&
+      (needs.plan.outputs.any-build == 'false' ||
+      needs.assemble.result == 'success')
+    runs-on: ${{ needs.platform.outputs.runner }}
+    timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['validate'] }}
+    container:
+      image: ${{ needs.platform.outputs.image }}
+      credentials: *ghcr_credentials
+      volumes:
+        - ${{ needs.platform.outputs.validate-dir }}:${{ needs.platform.outputs.validate-dir }}
+    steps:
+      - *bootstrap
+      - *channel_pin
       - name: Validate the accepted stack candidate
+        env:
+          # What: the plan job's pair ids for this run.
+          # Why: a live re-read can differ; a gap fails.
+          # From: Issue #1683 | PR #1912
+          CI_RUN_IDENTITIES: *run_ids
         run: bash .github/scripts/ci.sh validate
 
   # What: audit Cargo.lock against new advisories
@@ -129,20 +300,14 @@ jobs:
       - *bootstrap
       - *channel_pin
       - name: Audit rust dependencies
-        id: audit
         run: bash .github/scripts/ci.sh check cargo-audit
-      - name: Report the audit outcome
-        if: always()
-        env:
-          OUTCOME: ${{ steps.audit.outcome == 'success' && 'success' || 'failure' }}
-        run: bash .github/scripts/ci.sh nightly-status "${OUTCOME}" "nightly cargo-audit (current_dev)"
 
-  # What: promote validated current_dev, report outcome
-  # Why: nightly reuses; never rebuilds; always reports
+  # What: promote validated current_dev
+  # Why: nightly reuses; never rebuilds
   # From: Issue #1683
   nightly:
     name: nightly
-    needs: [platform, validate]
+    needs: [platform, plan, validate]
     if: ${{ !cancelled() && needs.platform.result == 'success' }}
     runs-on: ${{ needs.platform.outputs.runner }}
     timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['nightly'] }}
@@ -156,16 +321,75 @@ jobs:
       # Why: only after validate passed; moves refs only
       # From: Issue #1683
       - name: Promote the nightly channel
-        id: promote
         if: needs.validate.result == 'success'
         env:
           CI_STACK_VALIDATED: SUCCESS
+          CI_RUN_IDENTITIES: *run_ids
         run: bash .github/scripts/ci.sh promote nightly
-      # What: report nightly outcome to tracking issue
-      # Why: nightly must be reported reliably; self-closing
-      # From: Issue #1683
-      - name: Report the nightly outcome
-        if: always()
+
+  # What: scan what this run built and every channel image.
+  # Why: §31 a new CVE; §1050 acceptance needs a scan.
+  # From: Issue #1683 | PR #1912
+  scan:
+    name: scan
+    needs: [platform, plan, build]
+    # What: the CVE scan runs whatever the build did.
+    # Why: §31: a new CVE hits an image no build scans.
+    # From: Issue #1683 | PR #1912
+    if: >-
+      !cancelled() && needs.plan.result == 'success'
+    runs-on: ${{ needs.platform.outputs.runner }}
+    timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['scan'] }}
+    container:
+      image: ${{ needs.platform.outputs.image }}
+      credentials: *ghcr_credentials
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    outputs:
+      passed: ${{ steps.scan.outputs.passed }}
+    steps:
+      - *bootstrap
+      - *channel_pin
+      # What: scan the images this run built, by digest.
+      # Why: §1050: READBACK, SCAN, then acceptance.
+      # From: Issue #1683 | PR #1912
+      - name: Scan the built images by digest
+        id: scan
+        if: needs.plan.outputs.any-build == 'true' && needs.build.result == 'success'
         env:
-          OUTCOME: ${{ (needs.validate.result == 'success' && steps.promote.outcome == 'success') && 'success' || 'failure' }}
-        run: bash .github/scripts/ci.sh nightly-status "${OUTCOME}" "nightly channel promote (current_dev)"
+          CI_BUILD_MATRIX: ${{ needs.plan.outputs.matrix }}
+          CI_RUN_IDENTITIES: *run_ids
+        run: bash .github/scripts/ci.sh scan-stack
+      # What: the channel scan runs after the stack scan.
+      # Why: §31: a new CVE hits an image no build scans.
+      # From: Issue #1683 | PR #1912
+      - name: Scan every channel image
+        if: ${{ !cancelled() }}
+        env:
+          CI_RUN_IDENTITIES: *run_ids
+        run: bash .github/scripts/ci.sh scan-channel
+
+  # What: report the nightly outcome to the tracking issues
+  # Why: own job; it runs when platform or a job failed
+  # From: Issue #1683 | PR #1912
+  report:
+    name: report
+    needs: [platform, plan, build, scan, aggregate, assemble, validate, cargo-audit, nightly]
+    if: ${{ !cancelled() }}
+    # What: platform's runner and image, else the pair.
+    # Why: the report must run when platform failed.
+    # From: Issue #1683 | PR #1912
+    runs-on: ${{ needs.platform.outputs.runner || 'ubuntu-latest' }}
+    timeout-minutes: 15
+    container:
+      image: ${{ needs.platform.outputs.image || format('ghcr.io/{0}/build-tools:nightly', github.repository) }}
+      credentials: *ghcr_credentials
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - *bootstrap
+      - *nightly_source
+      - name: Report the nightly outcome
+        env:
+          CI_NEEDS: ${{ toJSON(needs) }}
+        run: bash .github/scripts/ci.sh nightly-report

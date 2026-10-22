@@ -1,27 +1,64 @@
 
 {# LanCache-NG (https://github.com/wiki-mod/lancache-ng) #}
 {# SPDX-License-Identifier: AGPL-3.0-or-later #}
-{#
+{# What: root layout: dock nav, beambar, admin.css #}
+{# Why: child templates extend it and override the blocks #}
+{# From: Issue #1683 | PR #1912 #}
 
-   Root Tera layout every other template under this directory extends. Defines
-   the dock sidebar navigation (Dashboard/DHCP/NTP/DNS/Secondary/Statistiken/
-   Logs/Einrichtung, active-page highlighting via the `active_page` context
-   var), the beambar top status bar (live per-service health, polled from
-   GET /api/watchdog-status -- see the shared LancacheWatchdog script below),
-   runtime image metadata from Tera globals, links the compiled Tailwind
-   output (/static/admin.css), and declares the `title`, `content`, and
-   `scripts` blocks that child templates override. #}
+{# What: one link of the section tab bar #}
+{# Why: one class string and active rule for all tabs #}
+{# From: Issue #1683 | PR #1912 #}
+{% component section_tab(href, label, active) %}<a href="{{ href | safe }}"
+       class="tab {% if active %}active{% endif %}">{{ label }}</a>{% endcomponent section_tab %}
+{# What: tab bar of the DHCP, DNS and Secondary pages #}
+{# Why: one copy; Secondary tab same on each page #}
+{# From: Issue #1683 | PR #1912 #}
+{% component section_tabs(main_href, main_label, main_page, active_page, secondaries_href) %}<div class="flex items-center gap-2 border-b border-slate-700">
+    {{ <section_tab href={main_href} label={main_label} active={active_page == main_page}/> }}
+    {{ <section_tab href={secondaries_href} label="Secondary" active={active_page == "secondaries"}/> }}
+  </div>{% endcomponent section_tabs %}
+{# What: hidden csrf_token field of every POST form #}
+{# Why: one markup; main.rs CSRF_FORM_FIELD reads it #}
+{# From: Issue #1683 | PR #1912 #}
+{% component csrf_field(csrf_token) %}<input type="hidden" name="csrf_token" value="{{ csrf_token }}">{% endcomponent csrf_field %}
+{# What: Admin-UI restart form; confirm() before submit #}
+{# Why: UI exits, compose restarts it; top bar and setup #}
+{# From: Issue #1683 | PR #1912 #}
+{% component restart_ui_form(action, csrf_token, button_class, label, title=none) %}<form method="post" action="{{ action | safe }}"
+              onsubmit="return confirm('Admin-UI wirklich neu starten? Die Seite ist danach kurz nicht erreichbar.')">
+          {{ <csrf_field csrf_token={csrf_token}/> }}
+          <button type="submit" class="{{ button_class }}"{% if title is not none %} title="{{ title }}"{% endif %}>{{ label }}</button>
+        </form>{% endcomponent restart_ui_form %}
+{# What: "Kopieren" button; copyText() copies target #}
+{# Why: one markup for setup and Secondary copy buttons #}
+{# From: Issue #1683 | PR #1912 #}
+{% component copy_button(target, extra_class="") %}<button type="button" onclick="copyText('{{ target }}', this)"
+                class="btn btn-sm btn-slate absolute top-2 right-2 {{ extra_class }}">Kopieren</button>{% endcomponent copy_button %}
+{# What: on/off badge, "aktiv" or "inaktiv" #}
+{# Why: one markup for the DHCP-DDNS and NTP state #}
+{# From: Issue #1683 | PR #1912 #}
+{% component on_off_badge(on) %}<span class="{% if on %}badge-on{% else %}badge-off{% endif %}">{% if on %}aktiv{% else %}inaktiv{% endif %}</span>{% endcomponent on_off_badge %}
+{# What: one sidebar link: icon path(s), label, active #}
+{# Why: one markup and active rule for all eight links #}
+{# From: Issue #1683 | PR #1912 #}
+{% component nav_link(href, label, active, d, d2="") %}<a href="{{ href | safe }}" class="nav-link {% if active %}active{% endif %}">
+        <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="{{ d }}"/>
+          {% if d2 %}<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="{{ d2 }}"/>{% endif %}
+        </svg>
+        {{ label }}
+      </a>{% endcomponent nav_link %}
 <!DOCTYPE html>
 <html lang="de" class="h-full">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>LanCache-NG Admin{% block title %}{% endblock %}</title>
-  <link rel="icon" type="image/x-icon" href="/favicon.ico">
-  <link rel="stylesheet" href="/static/admin.css">
+  <link rel="icon" type="image/x-icon" href="{{ routes.favicon | safe }}">
+  <link rel="stylesheet" href="{{ routes.admin_css | safe }}">
   <style>
-    /* What: palette/theme tokens for the visual redesign
-       Why: dark-first per mockup, explicit override + toggle
+    /* What: CSS tokens; dark values on :root
+       Why: dark is the default; light needs an override
        From: Issue #1437 */
     :root {
       --color-bg: #0b1220;
@@ -37,26 +74,9 @@
       --font-display: Georgia, Cambria, "Times New Roman", serif;
       --font-body: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
     }
-    /* What: light palette, only without an explicit override
-       Why: manual toggle below must always win over OS setting
-       From: Issue #1437 */
-    @media (prefers-color-scheme: light) {
-      :root:not([data-theme="dark"]) {
-        --color-bg: #f6f4ec;
-        --color-surface: #ffffff;
-        --color-surface-raised: #fbf9f2;
-        --color-border: #e4e0d0;
-        --color-text: #1c2333;
-        --color-text-muted: #5b6478;
-        --color-accent-gold: #a97c1f;
-        --color-accent-gold-soft: rgba(169, 124, 31, 0.12);
-        --color-accent-coral: #c8462f;
-        --color-accent-coral-soft: rgba(200, 70, 47, 0.12);
-      }
-    }
-    /* What: explicit light override, wins over OS preference
-       Why: mockup wants an explicit toggle, not just OS setting
-       From: Issue #1437 */
+    /* What: light tokens when data-theme is "light"
+       Why: the head script sets it from storage or OS
+       From: Issue #1437 | PR #1912 */
     :root[data-theme="light"] {
       --color-bg: #f6f4ec;
       --color-surface: #ffffff;
@@ -69,17 +89,22 @@
       --color-accent-coral: #c8462f;
       --color-accent-coral-soft: rgba(200, 70, 47, 0.12);
     }
+    /* What: body font and colours, display font for titles
+       Why: fonts and colours come from the :root tokens
+       From: Issue #1683 | PR #1912 */
     body { font-family: var(--font-body); background: var(--color-bg); color: var(--color-text); }
     main h1 { font-family: var(--font-display); }
     .stat-num { font-family: var(--font-display); }
 
-    /* What: keep light mode readable on pages not yet restyled
-       Why: admin.css is a static Tailwind build, colors are fixed
-       From: Issue #1437 */
+    /* What: slate classes and hovers to light theme tokens
+       Why: admin.css colors are fixed, not theme variables
+       From: Issue #1437 | PR #1912 */
     :root[data-theme="light"] .text-white,
     :root[data-theme="light"] .text-slate-100,
     :root[data-theme="light"] .text-slate-200,
-    :root[data-theme="light"] .text-slate-300 { color: var(--color-text); }
+    :root[data-theme="light"] .text-slate-300,
+    :root[data-theme="light"] .hover\:text-white:hover,
+    :root[data-theme="light"] .hover\:text-slate-300:hover { color: var(--color-text); }
     :root[data-theme="light"] .text-slate-400,
     :root[data-theme="light"] .text-slate-500 { color: var(--color-text-muted); }
     :root[data-theme="light"] .bg-slate-900,
@@ -87,30 +112,17 @@
     :root[data-theme="light"] .bg-slate-800,
     :root[data-theme="light"] .bg-slate-750 { background-color: var(--color-surface); }
     :root[data-theme="light"] .bg-slate-600,
-    :root[data-theme="light"] .bg-slate-700 { background-color: var(--color-surface-raised); }
+    :root[data-theme="light"] .bg-slate-700,
+    :root[data-theme="light"] .hover\:bg-slate-600:hover { background-color: var(--color-surface-raised); }
     :root[data-theme="light"] .border-slate-400,
     :root[data-theme="light"] .border-slate-500,
     :root[data-theme="light"] .border-slate-600,
-    :root[data-theme="light"] .border-slate-700 { border-color: var(--color-border); }
-    @media (prefers-color-scheme: light) {
-      :root:not([data-theme="dark"]) .text-white,
-      :root:not([data-theme="dark"]) .text-slate-100,
-      :root:not([data-theme="dark"]) .text-slate-200,
-      :root:not([data-theme="dark"]) .text-slate-300 { color: var(--color-text); }
-      :root:not([data-theme="dark"]) .text-slate-400,
-      :root:not([data-theme="dark"]) .text-slate-500 { color: var(--color-text-muted); }
-      :root:not([data-theme="dark"]) .bg-slate-900,
-      :root:not([data-theme="dark"]) .bg-slate-950 { background-color: var(--color-bg); }
-      :root:not([data-theme="dark"]) .bg-slate-800,
-      :root:not([data-theme="dark"]) .bg-slate-750 { background-color: var(--color-surface); }
-      :root:not([data-theme="dark"]) .bg-slate-600,
-      :root:not([data-theme="dark"]) .bg-slate-700 { background-color: var(--color-surface-raised); }
-      :root:not([data-theme="dark"]) .border-slate-400,
-      :root:not([data-theme="dark"]) .border-slate-500,
-      :root:not([data-theme="dark"]) .border-slate-600,
-      :root:not([data-theme="dark"]) .border-slate-700 { border-color: var(--color-border); }
-    }
+    :root[data-theme="light"] .border-slate-700,
+    :root[data-theme="light"] .hover\:border-slate-400:hover { border-color: var(--color-border); }
 
+    /* What: dock, nav link, card, badge, scrollbar styles
+       Why: same look on every page; tokens set colours
+       From: Issue #1683 | PR #1912 */
     .dock { background: var(--color-surface); border-right: 1px solid var(--color-border); }
     .nav-link {
       display: flex; align-items: center; gap: 0.625rem;
@@ -126,11 +138,11 @@
       border-left-color: var(--color-accent-gold); font-weight: 600;
     }
     .card { background: var(--color-surface); border-radius: 0.75rem; border: 1px solid var(--color-border); padding: 1.25rem; }
-    .badge-hit     { background: rgba(16,185,129,0.2); color: #34d399; }
+    .badge-hit, .badge-on { background: rgba(16,185,129,0.2); color: #34d399; }
     .badge-miss    { background: var(--color-accent-coral-soft); color: var(--color-accent-coral); }
     .badge-expired { background: rgba(234,179,8,0.2);  color: #facc15; }
-    .badge-other   { background: rgba(100,116,139,0.2); color: var(--color-text-muted); }
-    .badge-hit, .badge-miss, .badge-expired, .badge-other {
+    .badge-other, .badge-off { background: rgba(100,116,139,0.2); color: var(--color-text-muted); }
+    .badge-hit, .badge-miss, .badge-expired, .badge-other, .badge-on, .badge-off {
       font-size: 0.7rem; font-weight: 700; padding: 0.15rem 0.45rem;
       border-radius: 0.25rem; display: inline-block; line-height: 1.4;
     }
@@ -139,7 +151,7 @@
     ::-webkit-scrollbar-thumb { background: var(--color-border); border-radius: 3px; }
 
     /* What: slim top bar showing live per-service health
-       Why: was dashboard-only, now needed on every page
+       Why: rendered by base.html, so on every page
        From: Issue #1437 */
     .beambar {
       position: relative; overflow: hidden;
@@ -170,15 +182,107 @@
       cursor: pointer;
     }
     .theme-toggle:hover { color: var(--color-text); border-color: var(--color-accent-gold); }
+
+    /* What: buttons, tabs, table heads, rows, list rows
+       Why: one owner for styles repeated across the pages
+       From: Issue #1683 | PR #1912 */
+    .btn {
+      display: inline-block; font-size: 0.875rem; line-height: 1.25rem; font-weight: 500;
+      padding: 0.5rem 1rem; border-radius: 0.5rem; color: #ffffff;
+      transition: background-color 0.15s, color 0.15s;
+    }
+    .btn-sm { font-size: 0.75rem; line-height: 1rem; font-weight: 400; padding: 0.25rem 0.5rem; border-radius: 0.25rem; }
+    .btn-blue  { background: #2563eb; } .btn-blue:hover  { background: #3b82f6; }
+    .btn-green { background: #16a34a; } .btn-green:hover { background: #22c55e; }
+    .btn-amber { background: #d97706; } .btn-amber:hover { background: #f59e0b; }
+    .btn-sky   { background: #0284c7; } .btn-sky:hover   { background: #0ea5e9; }
+    .btn-slate { background: #475569; } .btn-slate:hover { background: #64748b; }
+    .btn-danger { background: #7f1d1d; color: #fecaca; } .btn-danger:hover { background: #991b1b; }
+    .btn-warn   { background: #78350f; color: #fef3c7; } .btn-warn:hover   { background: #92400e; }
+    .btn-ghost-red   { background: transparent; color: #f87171; }
+    .btn-ghost-red:hover   { background: rgba(239, 68, 68, 0.1); color: #fca5a5; }
+    .btn-ghost-amber { background: transparent; color: #fbbf24; }
+    .btn-ghost-amber:hover { background: rgba(245, 158, 11, 0.1); color: #fcd34d; }
+    .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    .btn-blue:disabled:hover { background: #2563eb; }
+    .tab {
+      padding: 0.5rem 1rem; font-size: 0.875rem; line-height: 1.25rem; font-weight: 500;
+      border-bottom: 2px solid transparent; color: var(--color-text-muted);
+    }
+    .tab:hover { color: var(--color-text); }
+    .tab.active { border-bottom-color: #3b82f6; color: #93c5fd; }
+    .th { text-align: left; padding-top: 0.5rem; padding-bottom: 0.5rem; font-weight: 500; color: #cbd5e1; border-bottom: 1px solid #334155; }
+    .rows > tr + tr { border-top: 1px solid rgba(51, 65, 85, 0.5); }
+    .rows > tr { transition: background-color 0.15s; }
+    .rows > tr:hover { background-color: rgba(51, 65, 85, 0.3); }
+    .list-row {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0.5rem 0.75rem; border-radius: 0.5rem;
+    }
+    .list-row:hover { background-color: rgba(51, 65, 85, 0.5); }
+    :root[data-theme="light"] .btn-slate { background-color: var(--color-surface-raised); color: var(--color-text); }
+    :root[data-theme="light"] .th { color: var(--color-text); border-bottom-color: var(--color-border); }
+    :root[data-theme="light"] .rows > tr + tr { border-top-color: var(--color-border); }
+    :root[data-theme="light"] .rows > tr:hover,
+    :root[data-theme="light"] .list-row:hover { background-color: var(--color-surface-raised); }
   </style>
+  <script>
+    // What: SOT seconds as the milliseconds JS timers take
+    // Why: one conversion for every page script
+    // From: Issue #1683 | PR #1912
+    window.LancacheUi = { ms: function (seconds) { return seconds * 1000; } };
+
+    // What: set data-theme before the first paint
+    // Why: stored choice, else OS setting; one CSS rule set
+    // From: Issue #1437 | PR #1912
+    (function () {
+      const STORAGE_KEY = 'lancache-ui-theme';
+      const root = document.documentElement;
+      const osLight = window.matchMedia('(prefers-color-scheme: light)');
+      let stored = null;
+      try {
+        stored = localStorage.getItem(STORAGE_KEY);
+      } catch (err) {
+        // What: report read error, keep the OS theme
+        // Why: private browsing may block localStorage
+        // From: Issue #1437
+        reportError(err);
+      }
+      // What: stored theme if valid, else the OS setting
+      // Why: one rule for page load and both change events
+      // From: Issue #1437 | PR #1912
+      function apply() {
+        const own = stored === 'light' || stored === 'dark';
+        root.setAttribute('data-theme', own ? stored : (osLight.matches ? 'light' : 'dark'));
+      }
+      apply();
+      osLight.addEventListener('change', apply);
+      document.addEventListener('DOMContentLoaded', function () {
+        document.getElementById('theme-toggle').addEventListener('click', function () {
+          stored = root.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+          apply();
+          try {
+            localStorage.setItem(STORAGE_KEY, stored);
+          } catch (err) {
+            // What: report write error; theme still set
+            // Why: the choice only fails to persist
+            // From: Issue #1437
+            reportError(err);
+          }
+        });
+      });
+    })();
+  </script>
 </head>
 <body class="h-full flex">
 
-  <!-- Dock (sidebar) -->
+  <!-- What: sidebar with logo, nav links and image info
+       Why: one layout, same navigation on every page
+       From: Issue #1683 | PR #1912 -->
   <aside class="dock w-52 shrink-0 flex flex-col">
     <div class="px-4 py-5" style="border-bottom: 1px solid var(--color-border);">
       <div class="flex items-center gap-2">
-        <img src="/static/logo-icon.png" alt="LanCache-NG Logo" class="w-8 h-8 rounded-full">
+        <img src="{{ routes.logo_icon | safe }}" alt="LanCache-NG Logo" class="w-8 h-8 rounded-full">
         <div>
           <p class="font-bold leading-none" style="color: var(--color-text);">LanCache-NG</p>
           <p class="text-xs mt-0.5" style="color: var(--color-text-muted);">Admin Interface</p>
@@ -187,63 +291,14 @@
     </div>
 
     <nav class="flex-1 p-3 space-y-0.5">
-      <a href="/" class="nav-link {% if active_page == "dashboard" %}active{% endif %}">
-        <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-            d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"/>
-        </svg>
-        Dashboard
-      </a>
-      <a href="/dhcp" class="nav-link {% if active_page == "dhcp" %}active{% endif %}">
-        <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-            d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/>
-        </svg>
-        DHCP
-      </a>
-      <a href="/ntp" class="nav-link {% if active_page == "ntp" %}active{% endif %}">
-        <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-            d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
-        </svg>
-        NTP
-      </a>
-      <a href="/domains" class="nav-link {% if active_page == "domains" %}active{% endif %}">
-        <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-            d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9"/>
-        </svg>
-        DNS
-      </a>
-      <a href="/secondaries" class="nav-link {% if active_page == "secondaries" %}active{% endif %}">
-        <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-            d="M9 12l2 2 4-4m7.538-4.854a.75.75 0 00-1.054-1.054l-5.5 5.5a1 1 0 01-1.414 0l-2.5-2.5a.75.75 0 00-1.06 1.061l2.5 2.5a1 1 0 001.414 0l5.5-5.5zm0 7a.75.75 0 00-1.054-1.054l-5.5 5.5a1 1 0 01-1.414 0l-2.5-2.5a.75.75 0 10-1.06 1.061l2.5 2.5a1 1 0 001.414 0l5.5-5.5z"/>
-        </svg>
-        Secondary
-      </a>
-      <a href="/stats" class="nav-link {% if active_page == "stats" %}active{% endif %}">
-        <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-            d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/>
-        </svg>
-        Statistiken
-      </a>
-      <a href="/logs" class="nav-link {% if active_page == "logs" %}active{% endif %}">
-        <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-            d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
-        </svg>
-        Logs
-      </a>
-      <a href="/setup" class="nav-link {% if active_page == "setup" %}active{% endif %}">
-        <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-            d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/>
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
-        </svg>
-        Einrichtung
-      </a>
+      {{ <nav_link href={pages.dashboard} label="Dashboard" active={active_page == "dashboard"} d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"/> }}
+      {{ <nav_link href={pages.dhcp} label="DHCP" active={active_page == "dhcp"} d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-2-4h.01M17 16h.01"/> }}
+      {{ <nav_link href={pages.ntp} label="NTP" active={active_page == "ntp"} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/> }}
+      {{ <nav_link href={pages.domains} label="DNS" active={active_page == "domains"} d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9"/> }}
+      {{ <nav_link href={pages.secondaries} label="Secondary" active={active_page == "secondaries"} d="M9 12l2 2 4-4m7.538-4.854a.75.75 0 00-1.054-1.054l-5.5 5.5a1 1 0 01-1.414 0l-2.5-2.5a.75.75 0 00-1.06 1.061l2.5 2.5a1 1 0 001.414 0l5.5-5.5zm0 7a.75.75 0 00-1.054-1.054l-5.5 5.5a1 1 0 01-1.414 0l-2.5-2.5a.75.75 0 10-1.06 1.061l2.5 2.5a1 1 0 001.414 0l5.5-5.5z"/> }}
+      {{ <nav_link href={pages.stats} label="Statistiken" active={active_page == "stats"} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/> }}
+      {{ <nav_link href={pages.logs} label="Logs" active={active_page == "logs"} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/> }}
+      {{ <nav_link href={pages.setup} label="Einrichtung" active={active_page == "setup"} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" d2="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/> }}
     </nav>
 
     <div class="p-4" style="border-top: 1px solid var(--color-border);">
@@ -256,27 +311,26 @@
         Channel: {{ lancache_image_channel() }}
       </p>
       <p class="mt-3 text-xs" style="color: var(--color-text-muted);">Netdata läuft intern<br>und speist die Graphen.</p>
+      <!-- What: link to the project repository page
+           Why: address only from the SOT, escaped by tera
+           From: Issue #1683 | PR #1912 -->
+      <p class="mt-3 text-xs">
+        <a href="{{ repo_url }}" target="_blank" rel="noopener noreferrer"
+           class="underline" style="color: var(--color-text-muted);">Projektseite</a>
+      </p>
     </div>
   </aside>
 
-  <!-- Main -->
   <div class="flex-1 flex flex-col overflow-hidden">
-    <!-- What: per-service health bar + theme toggle
-         Why: dashboard-only health, no toggle, before this
+    <!-- What: health bar and theme toggle in the header
+         Why: base.html renders it on every page
          From: Issue #1437 -->
     <header class="beambar" id="beambar">
       <div class="beambar-services" id="beambar-services">
         <span style="color: var(--color-text-muted);">Service health: laden…</span>
       </div>
       <div class="flex items-center gap-2">
-        <!-- What: real ui restart control, from setup.html
-             Why: was buried on /setup, now reachable everywhere
-             From: Issue #1437 -->
-        <form method="post" action="/setup/restart-ui"
-              onsubmit="return confirm('Admin-UI wirklich neu starten? Die Seite ist danach kurz nicht erreichbar.')">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <button type="submit" class="theme-toggle" title="Admin-UI neu starten">⟳ UI</button>
-        </form>
+        {{ <restart_ui_form action={routes.restart_ui} csrf_token={csrf_token} button_class="theme-toggle" label="⟳ UI" title="Admin-UI neu starten"/> }}
         <button type="button" class="theme-toggle" id="theme-toggle" title="Toggle light/dark theme">🌓 Theme</button>
       </div>
     </header>
@@ -286,128 +340,175 @@
   </div>
 
   <script>
-    // What: shared token for every fetch()-driven POST below
-    // Why: base.html has no <form>, so no hidden csrf_token field
+    // What: CSRF token for the fetch()-based POSTs below
+    // Why: sent as X-CSRF-Token header, not a form field
     // From: Issue #1437
     const CSRF_TOKEN = "{{ csrf_token }}";
-
-    // What: persist/apply the explicit light/dark theme override
-    // Why: mockup wants prefers-color-scheme + manual override
-    // From: Issue #1437
-    (function () {
-      const STORAGE_KEY = 'lancache-ui-theme';
-      const root = document.documentElement;
-      function apply(theme) {
-        if (theme === 'light' || theme === 'dark') {
-          root.setAttribute('data-theme', theme);
-        } else {
-          root.removeAttribute('data-theme');
-        }
-      }
-      let stored = null;
-      try {
-        stored = localStorage.getItem(STORAGE_KEY);
-      } catch (err) {
-        // What: fall back silently when storage read fails
-        // Why: private browsing can block localStorage access
-        // From: Issue #1437
-      }
-      apply(stored);
-      document.getElementById('theme-toggle').addEventListener('click', function () {
-        const prefersLight = window.matchMedia('(prefers-color-scheme: light)').matches;
-        const current = root.getAttribute('data-theme') || (prefersLight ? 'light' : 'dark');
-        const next = current === 'dark' ? 'light' : 'dark';
-        apply(next);
-        try {
-          localStorage.setItem(STORAGE_KEY, next);
-        } catch (err) {
-          // What: ignore storage write failure
-          // Why: theme just won't persist across reloads
-          // From: Issue #1437
-        }
-      });
-    })();
 
     // What: shared watchdog poll for beambar + dashboard
     // Why: one fetch/interval, not one per template
     // From: Issue #1437
     window.LancacheWatchdog = (function () {
       const DOT_COLOR_CLASSES = ['green', 'amber', 'yellow', 'red', 'gray'];
+      // What: the status as dot class; unknown becomes gray
+      // Why: a server value never adds an unknown class
+      // From: Issue #1683 | PR #1912
       function colorClass(status) {
         return DOT_COLOR_CLASSES.includes(status) ? status : 'gray';
       }
+      // What: sets a dot's .beambar-dot colour for a status
+      // Why: one status-to-colour owner for all dots
+      // From: Issue #1683 | PR #1912
+      function paintDot(dot, status) {
+        dot.classList.remove(...DOT_COLOR_CLASSES);
+        dot.classList.add('beambar-dot', colorClass(status));
+      }
+      // What: paints server-rendered [data-dot-status]
+      // Why: setup and dashboard dots get the same colours
+      // From: Issue #1683 | PR #1912
+      document.querySelectorAll('[data-dot-status]').forEach(function (dot) {
+        paintDot(dot, dot.dataset.dotStatus);
+      });
+      // What: registers a renderer for each status update
+      // Why: beambar and dashboard share one poll
+      // From: Issue #1683 | PR #1912
       const listeners = [];
       function onUpdate(fn) {
         listeners.push(fn);
       }
+      // What: fetches the status and hands it to listeners
+      // Why: one fetch feeds every renderer on the page
+      // From: Issue #1683 | PR #1912
       async function refresh() {
         let data;
         try {
-          const response = await fetch('/api/watchdog-status');
+          const response = await fetch('{{ routes.watchdog_status | safe }}');
+          // What: throws on a non-2xx status response
+          // Why: the catch below reports it as fetch error
+          // From: Issue #1683 | PR #1912
           if (!response.ok) {
-            return;
+            throw new Error('watchdog status: HTTP ' + response.status);
           }
           data = await response.json();
         } catch (err) {
-          // What: keep last render, retry on next interval
+          // What: report it, keep last render, retry
           // Why: network hiccup or the UI itself restarting
           // From: Issue #1437
+          reportError(err);
           return;
         }
         listeners.forEach(function (fn) {
           fn(data);
         });
       }
-      return { colorClass: colorClass, onUpdate: onUpdate, refresh: refresh };
+      return { colorClass: colorClass, paintDot: paintDot, onUpdate: onUpdate, refresh: refresh };
     })();
 
-    // What: dock start/stop POST -- watchdog is the actor
-    // Why: shared by every controllable service's button below
+    // What: POSTs desired state; the watchdog applies it
+    // Why: shared by all dock start/stop buttons
     // From: Issue #1437
     async function setDockServiceState(service, state, button) {
       button.disabled = true;
       try {
-        const response = await fetch('/api/services/' + service + '/desired-state', {
+        const response = await fetch('{{ routes.desired_state | safe }}'.replace('{service}', service), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF_TOKEN },
           body: JSON.stringify({ state: state }),
         });
-        if (response.ok) {
-          window.LancacheWatchdog.refresh();
+        // What: throws on a non-2xx desired-state response
+        // Why: the catch below reports it as fetch error
+        // From: Issue #1683 | PR #1912
+        if (!response.ok) {
+          throw new Error('desired state: HTTP ' + response.status);
         }
+        window.LancacheWatchdog.refresh();
       } catch (err) {
-        // What: leave the button re-enabled below either way
-        // Why: a network hiccup must not strand a disabled button
+        // What: reports the error, re-enables button
+        // Why: a network hiccup must not strand the button
         // From: Issue #1437
+        reportError(err);
       }
       button.disabled = false;
     }
 
-    // What: maps a watchdog container name to its dock service key
-    // Why: only dhcp/dhcp-proxy/ntp have a real start/stop route
-    // From: Issue #1437
-    const DOCK_CONTROLLABLE_SERVICES = {
-      'lancache-dhcp': 'dhcp',
-      'lancache-dhcp-proxy': 'dhcp',
-      'lancache-ntp': 'ntp',
-    };
+    // What: copies an element's text to the clipboard
+    // Why: no clipboard API on HTTP; use execCommand
+    // From: Issue #1068 | PR #1912
+    function copyText(id, button) {
+      const el = document.getElementById(id);
+      // What: shows "Kopiert!" briefly, then the old label
+      // Why: confirms the copy without a dialog
+      // From: Issue #1683 | PR #1912
+      function flash() {
+        button.textContent = 'Kopiert!';
+        button.classList.add('text-green-400');
+        setTimeout(function () {
+          button.textContent = 'Kopieren';
+          button.classList.remove('text-green-400');
+        }, 1500);
+      }
+      // What: selects element text, copies by execCommand
+      // Why: fallback when the Clipboard API is missing
+      // From: Issue #1683 | PR #1912
+      function selectAndCopy() {
+        const range = document.createRange();
+        range.selectNodeContents(el);
+        const sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+        // What: on failure report it, keep selection
+        // Why: the operator can still copy it with Ctrl+C
+        // From: Issue #1683 | PR #1912
+        let ok;
+        try {
+          ok = document.execCommand('copy');
+        } catch (err) {
+          reportError(err);
+          return;
+        }
+        if (!ok) {
+          reportError(new Error('copy: execCommand failed'));
+          return;
+        }
+        sel.removeAllRanges();
+        flash();
+      }
+      // What: Clipboard API if secure context, else select
+      // Why: browsers offer navigator.clipboard only there
+      // From: Issue #1683 | PR #1912
+      if (navigator.clipboard && window.isSecureContext) {
+        navigator.clipboard.writeText(el.innerText).then(flash, function (err) {
+          reportError(err);
+          selectAndCopy();
+        });
+      } else {
+        selectAndCopy();
+      }
+    }
+
+    // What: names that get a dock start/stop button
+    // Why: DesiredState::SERVICES, matched to status.json
+    // From: Issue #1683 | PR #1912
+    const DOCK_CONTROLLABLE_SERVICES = [{% for name in desired_services %}'{{ name }}',{% endfor %}];
 
     // What: render beambar service entries via DOM nodes
-    // Why: avoids building HTML from server-supplied strings
+    // Why: no HTML is built from server-supplied strings
     // From: Issue #1437
     (function () {
       const container = document.getElementById('beambar-services');
+      // What: one beambar entry: dot, name, dock button
+      // Why: built from DOM nodes, never from HTML strings
+      // From: Issue #1683 | PR #1912
       function serviceEntry(svc) {
         const wrap = document.createElement('span');
         wrap.title = svc.health || '';
         const dot = document.createElement('span');
-        dot.className = 'beambar-dot ' + window.LancacheWatchdog.colorClass(svc.status);
+        window.LancacheWatchdog.paintDot(dot, svc.status);
         wrap.appendChild(dot);
-        wrap.appendChild(document.createTextNode(svc.label));
-        const dockService = DOCK_CONTROLLABLE_SERVICES[svc.name];
-        if (dockService) {
-          // What: red/gray reads as "not running" for the button label
-          // Why: status.json has no separate running/stopped field
+        wrap.appendChild(document.createTextNode(svc.name));
+        if (DOCK_CONTROLLABLE_SERVICES.includes(svc.name)) {
+          // What: Start for red or gray, otherwise Stopp
+          // Why: status.json has no running/stopped field
           // From: Issue #1437
           const running = svc.status !== 'red' && svc.status !== 'gray';
           const button = document.createElement('button');
@@ -417,12 +518,15 @@
           button.style.padding = '0 0.4rem';
           button.textContent = running ? 'Stopp' : 'Start';
           button.addEventListener('click', function () {
-            setDockServiceState(dockService, running ? 'stopped' : 'running', button);
+            setDockServiceState(svc.name, running ? 'stopped' : 'running', button);
           });
           wrap.appendChild(button);
         }
         return wrap;
       }
+      // What: rebuilds the beambar from one status update
+      // Why: unavailable and stale states own their text
+      // From: Issue #1683 | PR #1912
       function render(data) {
         container.textContent = '';
         if (data.state === 'unavailable') {
@@ -441,8 +545,29 @@
       window.LancacheWatchdog.onUpdate(render);
     })();
 
+    // What: loads watchdog status now and per SOT interval
+    // Why: beambar and dashboard dots read the same data
+    // From: Issue #1683 | PR #1912
     window.LancacheWatchdog.refresh();
-    setInterval(window.LancacheWatchdog.refresh, 10000);
+    setInterval(window.LancacheWatchdog.refresh, window.LancacheUi.ms({{ watchdog_refresh_seconds }}));
+
+    // What: each [data-epoch] value as de-DE date and time
+    // Why: one owner for every page; 0 or junk stays raw
+    // From: Issue #1683 | PR #1912
+    (function () {
+      const formatter = new Intl.DateTimeFormat('de-DE', {
+        dateStyle: 'medium',
+        timeStyle: 'medium',
+      });
+      document.querySelectorAll('[data-epoch]').forEach(function (el) {
+        const epoch = Number(el.dataset.epoch);
+        if (!Number.isFinite(epoch) || epoch <= 0) {
+          return;
+        }
+        el.textContent = formatter.format(new Date(window.LancacheUi.ms(epoch)));
+        el.title = 'Unix: ' + el.dataset.epoch;
+      });
+    })();
   </script>
 
   {% block scripts %}{% endblock %}

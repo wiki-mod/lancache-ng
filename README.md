@@ -21,7 +21,7 @@ It can reduce internet traffic, save bandwidth and make repeated downloads much 
 
 LanCache NG is still actively changing.
 
-The current setup already provides the main stack, guided installation, Admin UI, DNS based cache routing, optional SSL caching, optional DHCP, optional LanCache-NG-NTP server, optional scheduled automatic updates, and secondary DNS support.
+The current setup already provides the main stack, guided installation, Admin UI, DNS based cache routing, optional HTTPS caching, optional DHCP, optional LanCache-NG-NTP server, optional scheduled automatic updates, and secondary DNS support.
 
 Some internal paths, root elements and service details may still change while the project grows.
 
@@ -31,8 +31,8 @@ LanCache NG combines several services into one Docker based stack:
 
 - DNS service
   - for redirecting known CDN domains to your local cache
-- Nginx cache proxy for standard HTTP caching
-  - optional SSL cache proxy for HTTPS capable clients
+- Nginx cache proxy for plain HTTP caching
+  - optional HTTPS cache proxy for HTTPS capable clients
 - Admin UI for cache status, domains, DNS records, DHCP leases and settings
   - optional Kea DHCP server
   - optional DHCP-Dnsmasq-based proxy helper
@@ -67,7 +67,7 @@ It can:
 - ask before installing missing dependencies such as Docker, curl or git
 - clone the repository to `/opt/lancache-ng`
 - ask for the cache server IP
-- optionally enable SSL caching with a second IP
+- optionally enable HTTPS caching with a second IP
 - ask for cache directory and cache size
 - optionally enable scheduled automatic updates (a host systemd timer)
 - create pre-update rollback backups
@@ -102,15 +102,15 @@ http://192.168.1.10:8080
 
 LanCache NG can run in two modes.
 
-### Standard mode
+### HTTP mode
 
-Standard mode is the safest and easiest mode.
+HTTP mode is the safest and easiest mode.
 
 It does not need a certificate on the clients.
 
 Use this mode if you want maximum compatibility.
 
-Standard mode:
+HTTP mode:
 
 - caches HTTP downloads
 - passes HTTPS traffic through normally
@@ -124,15 +124,15 @@ Example DNS target:
 192.168.1.10
 ```
 
-### SSL mode
+### HTTPS mode
 
-SSL mode is optional.
+HTTPS mode is optional.
 
-It can cache HTTP and HTTPS downloads, but it needs a locally generated Root CA certificate on every client that should use SSL caching.
+It can cache HTTP and HTTPS downloads, but it needs a locally generated Root CA certificate on every client that should use HTTPS caching.
 
 Use this mode only for devices you own and trust.
 
-SSL mode:
+HTTPS mode:
 
 - needs a second LAN IP
 - needs the generated CA certificate installed on each client
@@ -154,13 +154,13 @@ Example:
 
 | Mode | Client setup | DNS server |
 |---|---|---|
-| Standard mode | no certificate needed | `192.168.1.10` |
-| SSL mode | CA certificate installed | `192.168.1.11` |
+| HTTP mode | no certificate needed | `192.168.1.10` |
+| HTTPS mode | CA certificate installed | `192.168.1.11` |
 
 This lets you decide per client.
 
-A console can use standard mode.  
-A gaming PC with the certificate installed can use SSL mode.
+A console can use HTTP mode.  
+A gaming PC with the certificate installed can use HTTPS mode.
 
 ## What can be cached
 
@@ -189,7 +189,7 @@ Important:
 
 Not every platform behaves the same.  
 Some services change their CDN domains.  
-Some downloads use HTTPS in a way that only works with SSL mode.  
+Some downloads use HTTPS in a way that only works with HTTPS mode.  
 Some clients may bypass the cache completely.
 
 The first download is normally a cache miss.  
@@ -212,12 +212,12 @@ to cache.
 
 ## Console support
 
-Xbox, PlayStation and similar consoles should usually use standard mode.
+Xbox, PlayStation and similar consoles should usually use HTTP mode.
 
 They normally cannot install a custom Root CA certificate in a useful way.  
-Because of that, SSL caching is not recommended for consoles.
+Because of that, HTTPS caching is not recommended for consoles.
 
-Consoles should continue to work normally through standard mode.  
+Consoles should continue to work normally through HTTP mode.  
 HTTPS traffic that cannot be cached is passed through to the original CDN.
 
 
@@ -231,9 +231,9 @@ You need:
 - enough disk space for the cache
 - port `53` free for DNS
 - port `80` free for HTTP cache traffic
-- port `443` free if SSL mode is enabled
+- port `443` free if HTTPS mode is enabled
 - port `8080` for the Admin UI
-- optional second LAN IP for SSL mode
+- optional second LAN IP for HTTPS mode
 - optional port `67/udp` if using the built in DHCP server
 
 Recommended storage:
@@ -261,8 +261,8 @@ Example values:
 
 | Setting | Example |
 |---|---|
-| Standard mode IP | `192.168.1.10` |
-| SSL mode IP | `192.168.1.11` |
+| HTTP mode IP | `192.168.1.10` |
+| HTTPS mode IP | `192.168.1.11` |
 | install directory | `/opt/lancache-ng` |
 | cache directory (shared) | `/opt/lancache-ng/cache` |
 | cache size | `500` GiB |
@@ -278,7 +278,7 @@ docker compose ps
 Open the Admin UI:
 
 ```text
-http://<standard-ip>:8080
+http://<http-ip>:8080
 ```
 
 ## Updating
@@ -442,12 +442,12 @@ Example:
 | Client type | DNS server |
 |---|---|
 | normal client without certificate | `192.168.1.10` |
-| SSL client with certificate installed | `192.168.1.11` |
+| HTTPS client with certificate installed | `192.168.1.11` |
 
 On many routers you can set the DNS server handed out by DHCP.  
-Set it to the LanCache NG standard IP if you want all clients to use standard mode.
+Set it to the LanCache NG HTTP IP if you want all clients to use HTTP mode.
 
-For SSL mode, only point clients to the SSL IP after the CA certificate was installed.
+For HTTPS mode, only point clients to the HTTPS IP after the CA certificate was installed.
 
 ## Optional DHCP
 
@@ -531,19 +531,14 @@ If the setup asks whether the Admin UI should be password protected, using a pas
 
 Do not expose the Admin UI to the internet.
 
-## SSL mode certificate
+## HTTPS mode certificate
 
-SSL mode generates a local CA certificate.
+HTTPS mode generates a local CA certificate.
 
-Clients using SSL mode must trust this certificate.
+Clients using HTTPS mode must trust this certificate.
 
-After the first start, the certificate is available here:
-
-```text
-/opt/lancache-ng/certs/ca.crt
-```
-
-Depending on your installation path, the file may be inside your selected install directory.
+After the first start, the certificate is in the CA state directory
+(`CA_DIR`, by default below `LANCACHE_STATE_DIR`). `setup.sh` prints its path.
 
 ### Install on clients
 
@@ -563,7 +558,7 @@ If HTTPS caching does not work in Firefox, import the certificate into Firefox t
 ### Steam Deck note
 
 Steam Deck can require extra handling because the system is more locked down than a normal Linux desktop.  
-See the certificate documentation before using SSL mode on it.
+See the certificate documentation before using HTTPS mode on it.
 
 ## Testing DNS
 
@@ -608,16 +603,16 @@ services/dns/cdn-domains.txt
 ```
 
 One list drives everything: DNS based cache routing, and (as of v0.2.0)
-SSL mode certificate coverage too. The proxy derives each entry's
+HTTPS mode certificate coverage too. The proxy derives each entry's
 registrable root domain automatically at startup and generates a wildcard
-cert for it — there is no separate SSL domain file to keep in sync by hand.
+cert for it — there is no separate HTTPS domain file to keep in sync by hand.
 
 After manual file changes in a repository-based setup, restart the affected
 services so they reload the mounted files:
 
 ```bash
 cd /opt/lancache-ng
-docker compose restart dns-standard dns-ssl proxy
+docker compose restart dns proxy
 ```
 
 Only add domains you understand.  
@@ -639,12 +634,10 @@ Secondary DNS nodes sync with the primary through NATS.
 **Prerequisite**: the primary must be configured with a NATS address a remote
 secondary can actually reach before you register one. By default NATS is not
 published on the host at all, so registration fails closed with HTTP 503
-until the primary has `NATS_BIND_IP` (reusing the same trusted LAN/VPN
-interface `docker-compose.nats-secondary.yml` binds NATS to) or, for a
+until the primary has `NATS_BIND_IP` (a trusted LAN/VPN interface) or, for a
 non-default port/scheme/hostname, the more specific `NATS_ADVERTISE_URL`
-set in its `.env`/`.env.local`, and the `nats` service recreated with the
-`docker-compose.nats-secondary.yml` override included so it actually
-publishes that address. See
+set in its `.env`/`.env.local`, and the `dns` service (it runs NATS)
+recreated so it actually publishes that address. See
 [docs/architecture-ng.md's "Remote secondary NATS access"](docs/architecture-ng.md#remote-secondary-nats-access)
 section for the full setup and the exact failure modes it fail-closes.
 
@@ -655,10 +648,14 @@ bash <(curl -fsSL https://raw.githubusercontent.com/wiki-mod/lancache-ng/master/
   --primary http://192.168.1.10:8080 \
   --token <SECONDARY_REGISTRATION_TOKEN> \
   --name my-secondary \
-  --proxy-ip 192.168.1.10
+  --ip-http 192.168.1.10
 ```
 
 The registration token is generated during primary setup and stored in `.env`.
+
+Optional https side: add `--ip-https <primary https proxy ip> --listen-ip-https <second bind ip>`
+to the same command. The secondary's one dns container then also answers on the
+second bind IP; both flags are required together.
 
 You can also view a ready command inside the Admin UI under the secondary DNS section.
 
@@ -683,21 +680,18 @@ git clone https://github.com/wiki-mod/lancache-ng.git
 cd lancache-ng
 ```
 
-Copy the checked-in production template to an untracked runtime env file and
-edit that file:
-
-```bash
-cp deploy/prod/.env deploy/prod/.env.local
-nano deploy/prod/.env.local
-```
-
-Set at least:
+No `.env` file is tracked. `setup.sh install` writes the untracked runtime env
+file `deploy/prod/.env.local` with the values of your installation. Every
+default value lives in `.github/yaml/build-manifest.yml` (`runtime.defaults`)
+and is baked into the images, so `.env.local` never repeats a default. To set
+the installation values by hand, create `deploy/prod/.env.local` and set at
+least:
 
 ```env
-IP_STANDARD=192.168.1.10
-IP_SSL=192.168.1.11
+IP_HTTP=192.168.1.10
+IP_HTTPS=192.168.1.11
 
-SSL_ENABLED=1
+HTTPS_ENABLED=1
 
 LANCACHE_STATE_DIR=/opt/lancache-ng
 
@@ -725,7 +719,7 @@ LANCACHE_IMAGE_CHANNEL=stable
 LANCACHE_IMAGE_TAG=sha-<resolved-by-setup>
 ```
 
-`NGINX_UPSTREAM_RESOLVER` is what nginx uses to resolve the *real* CDN hostnames it proxies to. Its default lives in `deploy/prod/.env`; put your own value in `deploy/prod/.env.local`, which `deploy/prod/docker-compose.yml` passes to the `proxy` service, then recreate that container from the repository root (`sudo ./setup.sh compose deploy/prod up -d proxy`). The default — `8.8.8.8 8.8.4.4 [2001:4860:4860::8888] [2001:4860:4860::8844]` (Google Public DNS, both IPv4 and IPv6; IPv6 entries are bracketed because nginx's `resolver` directive requires that) — is a convenience default, not a requirement. Set it to whatever real upstream DNS servers you prefer: your ISP's resolvers, a corporate DNS server, 1.1.1.1, or anything else. The actual requirement is that the chosen resolver returns the CDN's *real* origin address for these hostnames — not merely that its own server IP differs from the LanCache DNS/proxy IP. Setup rejects the obvious case (setting this directly to `IP_STANDARD`/`IP_SSL`) automatically, but it cannot detect an indirect loop: for example, a split-DNS or conditional-forwarding resolver that itself forwards the CDN's zone back to the LanCache DNS server would still hand nginx the LanCache proxy IP, at which point nginx loops even though the configured resolver's own IP isn't the cache's. If you use split-DNS or conditional forwarding upstream of this resolver, make sure CDN zones aren't among the forwarded ones.
+`NGINX_UPSTREAM_RESOLVER` is what nginx uses to resolve the *real* CDN hostnames it proxies to. Its default lives in `runtime.defaults` of `.github/yaml/build-manifest.yml`; put your own value in `deploy/prod/.env.local` (an empty value keeps the default), which `deploy/prod/docker-compose.yml` passes to the `proxy` service, then recreate that container from the repository root (`sudo ./setup.sh compose deploy/prod up -d proxy`). The default — `8.8.8.8 8.8.4.4 [2001:4860:4860::8888] [2001:4860:4860::8844]` (Google Public DNS, both IPv4 and IPv6; IPv6 entries are bracketed because nginx's `resolver` directive requires that) — is a convenience default, not a requirement. Set it to whatever real upstream DNS servers you prefer: your ISP's resolvers, a corporate DNS server, 1.1.1.1, or anything else. The actual requirement is that the chosen resolver returns the CDN's *real* origin address for these hostnames — not merely that its own server IP differs from the LanCache DNS/proxy IP. Setup rejects the obvious case (setting this directly to `IP_HTTP`/`IP_HTTPS`) automatically, but it cannot detect an indirect loop: for example, a split-DNS or conditional-forwarding resolver that itself forwards the CDN's zone back to the LanCache DNS server would still hand nginx the LanCache proxy IP, at which point nginx loops even though the configured resolver's own IP isn't the cache's. If you use split-DNS or conditional forwarding upstream of this resolver, make sure CDN zones aren't among the forwarded ones.
 
 `PROXY_SECURITY_MODE` controls how defensive the proxy is at request time:
 
@@ -756,8 +750,7 @@ Current prebuilt first-party images are published for both `linux/amd64` and `li
 
 Release channels and package rules are documented in `docs/release-versioning.md`. External image handling is documented in `docs/release-external-images.md`.
 
-Keep `deploy/prod/.env` as the checked-in template. Manual production changes
-belong in `deploy/prod/.env.local`, which is ignored by git and preferred by
+Manual production changes belong in `deploy/prod/.env.local`, which is ignored by git and preferred by
 `setup.sh update`, `setup.sh auto-update`, `setup.sh backup`, `setup.sh restore`,
 `setup.sh update-ip`, and `setup.sh create-logs-for-issue` when present.
 
@@ -767,7 +760,6 @@ If you use NATS, secondary DNS or DHCP DDNS, set real secret values too:
 DDNS_TSIG_KEY=<generate-a-secret>
 NATS_UI_PASSWORD=<generate-a-secret>
 NATS_DNS_WRITER_PASSWORD=<generate-a-secret>
-NATS_DNS_REPLICA_PASSWORD=<generate-a-secret>
 NATS_CALLOUT_PASSWORD=<generate-a-secret>
 NATS_SYS_PASSWORD=<generate-a-secret>
 ```
@@ -797,9 +789,9 @@ Secrets in `.env` follow a simple rule: they are generated once on first install
 
 Secret formats vary by key, not by naming suffix — despite the `*_KEY`/`*_PASSWORD` names, generation kind is assigned per key in `setup.sh`, and the two families are not generated the same way as each other:
 
-- 64 hex characters (`openssl rand -hex 32`): `KEA_CTRL_TOKEN`, `PDNS_API_KEY`, `NATS_UI_PASSWORD`, `NATS_DNS_WRITER_PASSWORD`, `NATS_DNS_REPLICA_PASSWORD`, `NATS_CALLOUT_PASSWORD`, `NATS_SYS_PASSWORD`, `SECONDARY_REGISTRATION_TOKEN`
+- 64 hex characters (`openssl rand -hex 32`): `KEA_CTRL_TOKEN`, `PDNS_API_KEY`, `NATS_UI_PASSWORD`, `NATS_DNS_WRITER_PASSWORD`, `NATS_CALLOUT_PASSWORD`, `NATS_SYS_PASSWORD`, `SECONDARY_REGISTRATION_TOKEN`
 - 44 base64 characters (`openssl rand -base64 32`): `DDNS_TSIG_KEY`
-- 20 alphanumeric characters: `UI_AUTH_PASSWORD`
+- 20 alphanumeric characters: the Admin UI password. It is shown once; only its Argon2id hash is stored as `UI_AUTH_PASSWORD_HASH`.
 
 Store your actual secret values securely if you need to rotate them manually. The setup script will not regenerate them unless you explicitly delete or clear the `.env` entry.
 
@@ -808,8 +800,7 @@ Create directories:
 ```bash
 mkdir -p /opt/lancache-ng/cache
 mkdir -p /opt/lancache-ng/kea
-mkdir -p /opt/lancache-ng/pdns-standard
-mkdir -p /opt/lancache-ng/pdns-ssl
+mkdir -p /opt/lancache-ng/pdns
 mkdir -p /opt/lancache-ng/pdns-filter-state
 mkdir -p /opt/lancache-ng/nats
 mkdir -p /opt/lancache-ng/nats-conf
@@ -855,7 +846,7 @@ Recommended:
 - enable nesting
 - keep the container inside your LAN
 - give the container a static IP
-- use a second IP if SSL mode is enabled
+- use a second IP if HTTPS mode is enabled
 
 Example LXC config on the Proxmox host:
 
@@ -871,8 +862,8 @@ echo 'net.ipv4.ip_unprivileged_port_start=53' >> /etc/sysctl.conf
 sysctl -p
 ```
 
-If SSL mode is enabled, the container requires a second usable LAN IPs.
-- The reason is, that you then be able to cache also SSL Downloads from the configured domain list.
+If HTTPS mode is enabled, the container requires a second usable LAN IPs.
+- The reason is, that you then be able to cache also HTTPS downloads from the configured domain list.
   - But you will need to install the CA-Certificate to let this happen.
 
 ## Ports
@@ -881,7 +872,7 @@ If SSL mode is enabled, the container requires a second usable LAN IPs.
 |---|---|---|
 | `53` | TCP and UDP | DNS |
 | `80` | TCP | HTTP cache |
-| `443` | TCP | SSL mode cache |
+| `443` | TCP | HTTPS mode cache |
 | `8080` | TCP | Admin UI |
 | `67` | UDP | optional DHCP server |
 | `8000` | TCP | optional Kea control agent |
@@ -900,14 +891,13 @@ deploy/secondary/        Secondary DNS compose files
 docs/                    Documentation
 scripts/                 Helper scripts
 services/dns/            DNS service
-services/proxy/          Unified proxy for HTTP mode and SSL mode
+services/proxy/          Unified proxy for HTTP mode and HTTPS mode
 services/ui/             Admin UI
 services/watchdog/       Watchdog service
 services/dhcp/           Kea DHCP service
 services/dhcp-proxy/     DHCP proxy service
 services/ntp/            LanCache-NG-NTP (chrony) service
 services/nats/           NATS sync service
-certs/                   Generated or mounted certificates
 ```
 
 ## Common problems
@@ -944,19 +934,19 @@ Check:
 - is the client using the correct DNS server
 - is the domain part of the cache domain list
 - is the download using HTTPS
-- if SSL mode is needed, is the client using the SSL DNS IP
-- if SSL mode is needed, is the CA certificate installed
+- if HTTPS mode is needed, is the client using the HTTPS DNS IP
+- if HTTPS mode is needed, is the CA certificate installed
 
-### SSL mode does not work
+### HTTPS mode does not work
 
 Check:
 
-- the client uses the SSL mode DNS IP
+- the client uses the HTTPS mode DNS IP
 - the second IP is really assigned to the server
 - the CA certificate is installed
 - Firefox has the certificate if Firefox is used
-- the domain exists in the SSL domain list
-- the SSL proxy container is running
+- the domain exists in the HTTPS domain list
+- the HTTPS proxy container is running
 
 ### Admin UI does not open
 
@@ -974,7 +964,7 @@ Common causes:
 - blocked port `8080`
 - UI container not running
 - firewall blocks access
-- `UI_BIND_IP` binds the UI to another address than `IP_STANDARD`
+- `UI_BIND_IP` binds the UI to another address than `IP_HTTP`
 
 ### Cache hit rate is low
 
@@ -998,15 +988,15 @@ Recommended:
 - keep generated tokens private
 - keep the CA private
 - install the CA certificate only on clients you own and trust
-- do not use SSL mode for unknown or guest devices
+- do not use HTTPS mode for unknown or guest devices
 - review the setup script before running it on important systems
 
 A local Root CA can inspect traffic for configured domains.  
-That is required for SSL caching, but it also means the CA must be handled carefully.
+That is required for HTTPS caching, but it also means the CA must be handled carefully.
 
 ## When to use which mode
 
-Use standard mode when:
+Use HTTP mode when:
 
 - you want the easiest setup
 - you use consoles
@@ -1014,7 +1004,7 @@ Use standard mode when:
 - you only want safe basic caching
 - you are testing the project for the first time
 
-Use SSL mode when:
+Use HTTPS mode when:
 
 - you control the client device
 - you can install the CA certificate

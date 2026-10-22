@@ -38,10 +38,10 @@ If you installed manually or need direct control over the config, follow the ste
 
 | Mode | Variable | Purpose |
 |---|---|---|
-| Standard | `IP_STANDARD` | HTTP cache + HTTPS passthrough — clients use this as DNS |
-| SSL | `IP_SSL` | Full HTTPS interception — clients use this as DNS (CA cert required) |
+| HTTP | `IP_HTTP` | HTTP cache + HTTPS passthrough — clients use this as DNS |
+| HTTPS | `IP_HTTPS` | Full HTTPS interception — clients use this as DNS (CA cert required) |
 
-If you only run **standard mode**, you only have one IP to change.
+If you only run **HTTP mode**, you only have one IP to change.
 
 ---
 
@@ -108,29 +108,16 @@ nano deploy/prod/.env.local
 Change the IP lines:
 
 ```env
-IP_STANDARD=192.168.2.10
-IP_SSL=192.168.2.11
+IP_HTTP=192.168.2.10
+IP_HTTPS=192.168.2.11
 ```
 
 ---
 
-## Step 3 — Update DNS config
+## Step 3 — DNS config
 
-Edit both DNS env files to match the new IPs:
-
-```bash
-nano config/prod/dns-standard.env
-```
-```env
-PROXY_IP=192.168.2.10
-```
-
-```bash
-nano config/prod/dns-ssl.env
-```
-```env
-PROXY_IP=192.168.2.11
-```
+Nothing to edit. The `dns` container takes its two addresses from `IP_HTTP`
+and `IP_HTTPS` in the same `.env` file.
 
 ---
 
@@ -147,7 +134,7 @@ Wait a few seconds, then check everything is healthy:
 docker compose --env-file .env.local ps
 ```
 
-You should see `healthy` next to the proxy and DNS containers (`proxy`, `dns-standard`, and `dns-ssl` when SSL mode is enabled).
+You should see `healthy` next to the proxy and DNS containers (`proxy` and `dns`).
 
 ---
 
@@ -157,8 +144,8 @@ Clients need to point their DNS to the new IP(s):
 
 | Mode | DNS Server |
 |---|---|
-| Standard | `192.168.2.10` |
-| SSL | `192.168.2.11` |
+| HTTP | `192.168.2.10` |
+| HTTPS | `192.168.2.11` |
 
 **Via your DHCP server (recommended):** Update the DNS option there — clients pick it up on the next lease renewal (or reboot).
 
@@ -166,9 +153,9 @@ Clients need to point their DNS to the new IP(s):
 
 ---
 
-## Single-IP setup (standard mode only)
+## Single-IP setup (HTTP mode only)
 
-Only using standard mode and no SSL interception? You only need to change `IP_STANDARD` and `config/prod/dns-standard.env`. Skip everything referencing `IP_SSL`.
+Only using HTTP mode and no HTTPS interception? You only need to change `IP_HTTP`. Skip everything referencing `IP_HTTPS`.
 
 ---
 

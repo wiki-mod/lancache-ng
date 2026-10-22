@@ -2,8 +2,9 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-# What: health/restart daemon and file-retention sidecar.
-# Why: compose runs retention from this image (own entry).
+# What: the services image; one supervisor runs it all.
+# Why: the watchdog owns the services image.
+# From: Issue #1683
 
 # What: base image pin, supplied by ci.sh from the SOT.
 # Why: SOT base_images.alpine is the sole owner (AG-CI-006).
@@ -17,16 +18,16 @@ ARG BUILD_TOOLS_IMAGE
 # What: scratch only when ci.sh passed no image arg.
 # Why: no baked image; a missing arg fails the build.
 # From: Issue #1683 | PR #1858
-FROM ${BUILD_TOOLS_IMAGE:-scratch} AS watchdog-builder
+FROM ${BUILD_TOOLS_IMAGE:-scratch} AS services-builder
 
 # What: musl cross-target, supplied by ci.sh per platform.
 # Why: ci.sh owns arch mapping; no uname -m in the image.
 # From: Issue #1683
 ARG MUSL_TARGET
-# What: workspace crate, supplied by ci.sh from the SOT.
-# Why: the SOT owns the crate; rust-build receives it.
+# What: workspace crates, supplied by ci.sh from the SOT.
+# Why: the SOT owns the crates; rust-build receives them.
 # From: Issue #1683 | PR #1858
-ARG RUST_CRATE
+ARG RUST_CRATES
 
 # What: cargo tuning args, consumed by ci.sh rust-build.
 # Why: PROJECT_CARGO_*/CARGO_BUILD_JOBS own these.
@@ -38,10 +39,15 @@ ARG PROJECT_CARGO_CODEGENUNIT=
 # Why: ci.sh rust-build folds it into the ccache key.
 # From: Issue #1683
 ARG BUILD_TOOLS_IMAGE
-# What: compiler VAR=driver pairs, supplied by ci.sh.
+# What: compiler pairs and cache key prefix, from ci.sh.
 # Why: the builder has no SOT; rust-build reads the env.
-# From: Issue #1683 | PR #1858
+# From: Issue #1683 | PR #1912
 ARG CI_TOOLCHAIN_COMPILERS
+ARG CI_CACHE_PREFIX
+# What: cargo home, root of the cargo cache mounts.
+# Why: §39 registry and git caches; the SOT owns it.
+# From: Issue #1683 | PR #1912
+ARG CI_CARGO_HOME
 
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
@@ -54,6 +60,7 @@ COPY services/dns/nats-subscriber/Cargo.toml services/dns/nats-subscriber/Cargo.
 # From: Issue #1683 | PR #1858
 COPY services/common services/common
 COPY services/watchdog/src/ ./services/watchdog/src/
+COPY services/cachehamster/src/ ./services/cachehamster/src/
 # What: retry policy for ci.sh, from SOT stage_variables
 # Why: this stage has no SOT; ci.sh reads them from env
 # From: Issue #1683 | PR #1858
@@ -70,14 +77,14 @@ RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
     --mount=type=secret,id=distcc_potential_hosts \
     --mount=type=secret,id=ccache_redis_url \
     --mount=type=secret,id=project_selfhosted_proxy_ca \
-    bash /usr/local/bin/ci.sh rust-build watchdog "${RUST_CRATE}"
+    --mount=type=cache,target=${CI_CARGO_HOME}/registry,sharing=locked \
+    --mount=type=cache,target=${CI_CARGO_HOME}/git,sharing=locked \
+    bash /usr/local/bin/ci.sh rust-build services "${RUST_CRATES}"
 
 # What: scratch only when ci.sh passed no image arg.
 # Why: no baked image; a missing arg fails the build.
 # From: Issue #1683 | PR #1858
 FROM ${ALPINE_IMAGE:-scratch}
-
-LABEL org.opencontainers.image.description="lancache-ng watchdog: compiled Rust health-check/restart daemon plus the separate file-retention sidecar entrypoint."
 
 # What: build identity keys the cache of later layers.
 # Why: a new package set must not reuse a stale apk layer.
@@ -87,10 +94,11 @@ ARG BUILD_IDENTITY
 # Why: the SOT owns the list; this stage only consumes it.
 # From: Issue #1683
 ARG APK_PACKAGES
-# What: Install bash before SHELL directive
-# Why: AG-REL-001 forbids ash; RUN needs bash
-# From: Issue #1683
-RUN apk add --no-cache bash
+# What: bootstrap apk list, supplied from the SOT.
+# Why: AG-REL-001 forbids ash; ci.sh apk-setup needs bash.
+# From: Issue #1683 | PR #1912
+ARG APK_BOOTSTRAP
+RUN apk add --no-cache ${APK_BOOTSTRAP}
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 # What: retry policy for ci.sh, from SOT stage_variables
 # Why: this stage has no SOT; ci.sh reads them from env
@@ -104,22 +112,35 @@ RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
     --mount=type=secret,id=project_selfhosted_proxy_ca \
     bash /usr/local/bin/ci.sh apk-setup ${APK_PACKAGES}
 
-COPY --from=watchdog-builder /build/lancache-watchdog-out /usr/local/bin/lancache-watchdog
-COPY services/watchdog/healthcheck.sh /healthcheck.sh
-COPY services/watchdog/retention.sh /retention.sh
-COPY services/watchdog/retention-entrypoint.sh /retention-entrypoint.sh
-RUN chmod +x /healthcheck.sh /retention.sh /retention-entrypoint.sh
-VOLUME ["/var/run/watchdog"]
+# What: accounts and dirs of this image, from the SOT.
+# Why: ci.sh creates them; the Dockerfile names none.
+# From: Issue #1683 | PR #1912
+ARG IMAGE_SETUP
+RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
+    bash /usr/local/bin/ci.sh image-setup
 
-# What: lancache account, fixed uid/gid 10001.
-# Why: only the retention sidecar drops to this user.
-# From: Issue #842
-RUN addgroup -g 10001 lancache && \
-    adduser -D -H -u 10001 -G lancache -s /sbin/nologin lancache && \
-    mkdir -p /var/lib/lancache-retention-state && \
-    chown lancache:lancache /var/lib/lancache-retention-state
+# What: the shared gid of the stack's secret files.
+# Why: ci.sh passes it from the SOT; compose names none.
+# From: Issue #1683 | PR #1912
+ARG LANCACHE_RUNTIME_GID
+ENV LANCACHE_RUNTIME_GID=${LANCACHE_RUNTIME_GID}
 
-# What: default ENTRYPOINT is the compiled Rust binary now.
-# Why: maintainer decision authorized the ENTRYPOINT swap.
-# From: Issue #842
+# What: the SOT default values, one pipe-joined list.
+# Why: ci.sh passes the list; binaries read it as env.
+# From: Issue #1683 | PR #1912
+ARG LANCACHE_RUNTIME_DEFAULTS
+ENV LANCACHE_RUNTIME_DEFAULTS=${LANCACHE_RUNTIME_DEFAULTS}
+
+COPY --from=services-builder /build/lancache-watchdog-out /usr/local/bin/lancache-watchdog
+COPY --from=services-builder /build/lancache-cachehamster-out /usr/local/bin/lancache-cachehamster
+
+# What: processes the supervisor runs, from the SOT.
+# Why: ci.sh passes the list; the image holds no copy.
+# From: Issue #1683
+ARG LANCACHE_PROCESSES
+ENV LANCACHE_PROCESSES=${LANCACHE_PROCESSES}
+
+# What: the supervisor binary; no argument means supervise.
+# Why: compose and setup.sh add healthcheck or probe.
+# From: Issue #1683 | PR #1912
 ENTRYPOINT ["/usr/local/bin/lancache-watchdog"]

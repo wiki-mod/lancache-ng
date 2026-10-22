@@ -190,9 +190,9 @@ compile's result from Redis instead of recompiling and redistributing it
 every time.
 
 **Correction (2026-09-01, Issue #1781):** this paragraph used to also claim
-that, since issue #1304/PR #1661, `tools/build-tools/Dockerfile` layered
+that, since issue #1304/PR #1661, `.github/build-tools/Dockerfile` layered
 this same ccache-over-distcc mechanism in front of its own "from-source
-curl/git C compiles." `tools/build-tools/Dockerfile` has no such compile:
+curl/git C compiles." `.github/build-tools/Dockerfile` has no such compile:
 curl and git are both plain `apk add`/`apt-get install` packages there
 (curl was `COPY`'d from the shared `services/utilities` image's own
 from-source build until Issue #1781 replaced that `COPY` with this

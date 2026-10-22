@@ -1,23 +1,9 @@
 
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-#
-# Shared parity fixture for domain-entry validation (issue #822 pattern
-# audit). Read by BOTH the bash validator (_is_valid_domain in
-# scripts/lib/domain-validation.sh, exercised via
-# tests/bats/domain_validation_parity.bats) and the Rust validator
-# (is_valid_domain in services/ui/src/main.rs, exercised via its
-# own is_valid_domain_matches_shared_parity_fixture test), so the two
-# independent implementations are checked against the exact same cases and
-# can't silently diverge in what they accept or reject.
-#
-# Format: one case per line, "valid <domain>" or "invalid <domain>". Blank
-# lines and lines starting with "#" are ignored by both readers. Dynamically
-# generated length-boundary cases (a 64-char label, a >253-char total domain)
-# are intentionally NOT here -- they can't be expressed as static fixture
-# lines -- and instead stay as separate, per-language tests (see
-# .github/scripts/ci.bats's domain test and domains.rs's own
-# accepts_domain_entries_with_optional_wildcard_marker test).
+# What: "valid <domain>" or "invalid <domain>" per row.
+# Why: cdn_entry is the one rule for ui, dns and proxy.
+# From: Issue #822 | PR #1912
 
 valid example.com
 valid cdn1.sub.example.com

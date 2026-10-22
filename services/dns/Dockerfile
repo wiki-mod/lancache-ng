@@ -2,8 +2,9 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-# What: PowerDNS, nats-subscriber and Lua RPZ on Alpine.
-# Why: record ingest ships in the same image as the DNS.
+# What: PowerDNS auth, two recursors, NATS on Alpine.
+# Why: one supervisor runs every program of the image.
+# From: Issue #1683
 
 # What: base image pin, supplied by ci.sh from the SOT.
 # Why: SOT base_images.alpine is the sole owner (AG-CI-006).
@@ -17,16 +18,16 @@ ARG BUILD_TOOLS_IMAGE
 # What: scratch only when ci.sh passed no image arg.
 # Why: no baked image; a missing arg fails the build.
 # From: Issue #1683 | PR #1858
-FROM ${BUILD_TOOLS_IMAGE:-scratch} AS subscriber-builder
+FROM ${BUILD_TOOLS_IMAGE:-scratch} AS dns-builder
 
 # What: musl cross-target, supplied by ci.sh per platform.
 # Why: ci.sh owns arch mapping; no uname -m in the image.
 # From: Issue #1683
 ARG MUSL_TARGET
-# What: workspace crate, supplied by ci.sh from the SOT.
-# Why: the SOT owns the crate; rust-build receives it.
+# What: workspace crates, supplied by ci.sh from the SOT.
+# Why: the SOT owns the crates; rust-build receives them.
 # From: Issue #1683 | PR #1858
-ARG RUST_CRATE
+ARG RUST_CRATES
 
 # What: cargo tuning args, consumed by ci.sh rust-build.
 # Why: PROJECT_CARGO_*/CARGO_BUILD_JOBS own these.
@@ -38,10 +39,15 @@ ARG PROJECT_CARGO_CODEGENUNIT=
 # Why: ci.sh rust-build folds it into the ccache key.
 # From: Issue #1683
 ARG BUILD_TOOLS_IMAGE
-# What: compiler VAR=driver pairs, supplied by ci.sh.
+# What: compiler pairs and cache key prefix, from ci.sh.
 # Why: the builder has no SOT; rust-build reads the env.
-# From: Issue #1683 | PR #1858
+# From: Issue #1683 | PR #1912
 ARG CI_TOOLCHAIN_COMPILERS
+ARG CI_CACHE_PREFIX
+# What: cargo home, root of the cargo cache mounts.
+# Why: §39 registry and git caches; the SOT owns it.
+# From: Issue #1683 | PR #1912
+ARG CI_CARGO_HOME
 
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
@@ -54,6 +60,7 @@ COPY services/watchdog/Cargo.toml services/watchdog/Cargo.toml
 # From: Issue #1683 | PR #1858
 COPY services/common services/common
 COPY services/dns/nats-subscriber/src services/dns/nats-subscriber/src
+COPY services/watchdog/src services/watchdog/src
 # What: retry policy for ci.sh, from SOT stage_variables
 # Why: this stage has no SOT; ci.sh reads them from env
 # From: Issue #1683 | PR #1858
@@ -70,27 +77,14 @@ RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
     --mount=type=secret,id=distcc_potential_hosts \
     --mount=type=secret,id=ccache_redis_url \
     --mount=type=secret,id=project_selfhosted_proxy_ca \
-    bash /usr/local/bin/ci.sh rust-build dns "${RUST_CRATE}"
+    --mount=type=cache,target=${CI_CARGO_HOME}/registry,sharing=locked \
+    --mount=type=cache,target=${CI_CARGO_HOME}/git,sharing=locked \
+    bash /usr/local/bin/ci.sh rust-build dns "${RUST_CRATES}"
 
 # What: scratch only when ci.sh passed no image arg.
 # Why: no baked image; a missing arg fails the build.
 # From: Issue #1683 | PR #1858
 FROM ${ALPINE_IMAGE:-scratch}
-
-LABEL org.opencontainers.image.description="PowerDNS recursor, authoritative DNS, and NATS subscriber service for lancache-ng cache routing."
-
-# What: dns owns domain-validation.sh; copied from its dir.
-# Why: dns is the arch owner; no shared-scripts indirection.
-# From: Issue #1683
-COPY services/dns/domain-validation.sh /usr/local/lib/domain-validation.sh
-# What: copy the shared-secret bootstrap lib.
-# Why: entrypoint uses it; no duplicate copy.
-# From: Issue #1683
-COPY --from=shared-secret shared-secret-bootstrap.sh /usr/local/lib/shared-secret-bootstrap.sh
-# What: copy the known-good-snapshot library.
-# Why: entrypoint uses it; no duplicate copy.
-# From: Issue #1683
-COPY --from=known-good known-good-snapshots.sh /usr/local/lib/known-good-snapshots.sh
 
 # What: build identity keys the cache of later layers.
 # Why: a new package set must not reuse a stale apk layer.
@@ -100,10 +94,11 @@ ARG BUILD_IDENTITY
 # Why: the SOT owns the list; this stage only consumes it.
 # From: Issue #1683
 ARG APK_PACKAGES
-# What: bootstrap bash for SHELL compatibility.
+# What: bootstrap apk list, supplied from the SOT.
 # Why: AG-REL-001 forbids ash; ci.sh apk-setup needs bash.
-# From: Issue #1683
-RUN apk add --no-cache bash
+# From: Issue #1683 | PR #1912
+ARG APK_BOOTSTRAP
+RUN apk add --no-cache ${APK_BOOTSTRAP}
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 # What: retry policy for ci.sh, from SOT stage_variables
 # Why: this stage has no SOT; ci.sh reads them from env
@@ -117,25 +112,49 @@ RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
     --mount=type=secret,id=project_selfhosted_proxy_ca \
     bash /usr/local/bin/ci.sh apk-setup ${APK_PACKAGES}
 
-# What: pdns user/group comes from the package pre-install.
-# Why: no separate useradd step is needed on Alpine.
-# From: Issue #815
-RUN mkdir -p /etc/pdns/auth /var/lib/powerdns /var/run/pdns \
-    && chown -R pdns:pdns /var/lib/powerdns /var/run/pdns
+# What: accounts and dirs of this image, from the SOT.
+# Why: ci.sh creates them; the Dockerfile names none.
+# From: Issue #1683 | PR #1912
+ARG IMAGE_SETUP
+RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
+    bash /usr/local/bin/ci.sh image-setup
 
-COPY --from=subscriber-builder /build/nats-subscriber-out /usr/local/bin/nats-subscriber
+COPY --from=dns-builder /build/nats-subscriber-out /usr/local/bin/nats-subscriber
+COPY --from=dns-builder /build/lancache-watchdog-out /usr/local/bin/lancache-watchdog
 
-COPY services/dns/recursor.conf.template /etc/pdns/recursor.conf.template
-COPY services/dns/pdns.conf.template /etc/pdns/auth/pdns.conf.template
-COPY services/dns/recursor.lua /etc/pdns/recursor.lua
-COPY services/dns/filter-aaaa.lua /etc/pdns/filter-aaaa.lua
-COPY services/dns/cdn-domains.txt /etc/pdns/cdn-domains.txt
-# What: vendored gsqlite3 schema for pdns-backend-sqlite3.
-# Why: the Alpine package ships no schema file.
-# From: Issue #815
-COPY services/dns/schema.sqlite3.sql /usr/share/lancache-ng/schema.sqlite3.sql
-COPY services/dns/entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
-EXPOSE 53/udp 53/tcp 8081 8082 8083
+# What: static inputs at the paths the SOT names.
+# Why: the supervisor reads the same paths.
+# From: Issue #1683 | PR #1912
+ARG PDNS_LUA_DNS_SCRIPT
+ARG PDNS_SCHEMA_FILE
+COPY services/dns/filter-aaaa.lua ${PDNS_LUA_DNS_SCRIPT}
+COPY services/dns/schema.sqlite3.sql ${PDNS_SCHEMA_FILE}
 
-ENTRYPOINT ["/entrypoint.sh"]
+# What: the CDN domain list at the path the SOT names.
+# Why: a replica has no bind mount; the image carries it.
+# From: Issue #1683 | PR #1912
+ARG CDN_DOMAINS_FILE
+COPY services/dns/cdn-domains.txt ${CDN_DOMAINS_FILE}
+
+# What: processes the supervisor runs, from the SOT.
+# Why: ci.sh passes the list; the image holds no copy.
+# From: Issue #1683
+ARG LANCACHE_PROCESSES
+ENV LANCACHE_PROCESSES=${LANCACHE_PROCESSES}
+
+# What: the shared gid of the stack's secret files.
+# Why: ci.sh passes it from the SOT; compose names none.
+# From: Issue #1683 | PR #1912
+ARG LANCACHE_RUNTIME_GID
+ENV LANCACHE_RUNTIME_GID=${LANCACHE_RUNTIME_GID}
+
+# What: the SOT default values, one pipe-joined list.
+# Why: ci.sh passes the list; binaries read it as env.
+# From: Issue #1683 | PR #1912
+ARG LANCACHE_RUNTIME_DEFAULTS
+ENV LANCACHE_RUNTIME_DEFAULTS=${LANCACHE_RUNTIME_DEFAULTS}
+
+# What: the supervisor binary; no argument means supervise.
+# Why: compose and setup.sh add healthcheck or probe.
+# From: Issue #1683 | PR #1912
+ENTRYPOINT ["/usr/local/bin/lancache-watchdog"]

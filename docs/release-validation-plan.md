@@ -5,7 +5,8 @@ This plan defines how a release candidate is validated, on two layers:
 - **CI**: the automated gates of `ci.yml`, `nightly.yml`, `release.yml`,
   `gc.yml` and `codeql.yml`. Every workflow job only calls
   `.github/scripts/ci.sh`; the gates, their error codes and their raw output
-  live there. `.github/scripts/ci.bats` is the regression suite.
+  live there. `.github/scripts/ci.bats` is the regression suite; it holds
+  no test, and a new test needs a maintainer ACK (#1683).
 - **Stack**: the running product. `ci.sh validate` brings the `deploy/prod`
   stack up in an isolated /27 network on the runner host and runs the live
   probes named in Part A. Part B lists the scenarios that need a real Linux
@@ -41,8 +42,8 @@ It holds only records:
 A missing record or a `null` commit means never validated. The scope of a
 record comes from the SOT, not from the record:
 
-- a build target: its `context` and the paths of its `dependency_graph`
-  contexts, the list `plan` uses (`_ci_target_paths`);
+- a build target: its `context` and the Rust workspace paths that ci.sh
+  derives from `Cargo.toml`, the list `plan` uses (`_ci_target_paths`);
 - a layer: the `pr_labels` path class that `release.validation_layers` names.
 
 The gate loads the full history first, so it also works in the depth-1
@@ -84,8 +85,8 @@ current for the same commit.
 | Workflow | Jobs and `ci.sh` commands | Trigger |
 |---|---|---|
 | `ci.yml` | `plan` (`changed-files`, `plan-matrix`), `lint` (`check shellcheck`, `check actionlint`), `checks` (`check all`, which runs `check ci-bats`), `cargo-audit`, `build` (`ship`), `test` (`test-stack`), `scan` (`scan-stack`), `aggregate`, `assemble`, `validate`, `promote` (`promote-ref`), `result` (`result-gate`) | pull request, push to `current_dev`/`master`, `v*` tag, dispatch |
-| `nightly.yml` | `platform` (`channel-checkout nightly`), `validate`, `cargo-audit`, `nightly` (`promote nightly`, `nightly-status`) | schedule, dispatch |
-| `release.yml` | `cut-release-tag`, `release-changelog`, `release-publish`, `release-vex`, `release-sbom-stack` | `v*` tag, dispatch |
+| `nightly.yml` | `platform` (`channel-checkout nightly`), `plan` (`identity --run-record`), `validate`, `cargo-audit`, `nightly` (`promote nightly`), `scan` (`scan-channel`), `report` (`nightly-report`) | schedule, dispatch |
+| `release.yml` | `cut-release-tag`, `release-changelog`, `release-publish`, `release-vex`, `release-sbom-stack`, `release-images` (matrix of `actions/attest` in `release-provenance`) | `v*` tag, dispatch |
 | `gc.yml` | `gc --apply`, `check orphaned-branches` | schedule, dispatch |
 | `codeql.yml` | `codeql-impact`, `codeql-analyze <language>` | pull request, push, schedule, dispatch |
 
@@ -99,18 +100,17 @@ commit (`_ci_head_commit`).
 
 | Subsystem | Gate | Fails when |
 |---|---|---|
-| DHCP — Kea | ci.bats "dhcp kea ipv4 and ntp helpers per input", "dhcp kea templates render complete valid json", "dhcp kea runtime config migration converges"; `ci.sh validate` Kea leg (`_ci_validate_kea_rollback`: two Admin UI reservations, `setup.sh` rollback to the first snapshot, live `config-get`); `check setup-kea-preflight` and ci.bats "setup kea preflight asks before a second dhcp server" | a render or migration differs, the rollback leaves the second reservation in Kea's running config, or `setup.sh` stops calling the preflight |
-| DHCP — dnsmasq (ProxyDHCP, relay) | ci.bats "dhcp-proxy optional and pxe directives render exactly per input", "setup dhcp mode, compose profiles and dnsmasq templates"; `check dhcp-proxy-env` | a rendered directive differs, or the compose file stops passing a template key |
-| DNS | `ci.sh validate` (`_ci_validate_dns`: a real `dig`, the standard and ssl answers differ; `_ci_validate_dns_rollback`: snapshot and rollback round trip through the rollback listener); ci.bats "domain validator matches the parity fixture and the cdn list" | no answer, identical answers in both modes, or a rollback that does not revert the record |
-| NATS | `ci.sh validate` (`_ci_validate_ui_nats_dns`: an Admin UI record resolves in both DNS modes through NATS and PowerDNS; `_ci_validate_secondary_identity`: two secondaries get distinct identities); ci.bats "setup secondary registration end to end per primary answer"; `check nats-atomic-write` | the record never resolves, two secondaries share an identity, or a shared config is written non-atomically |
+| DHCP — Kea | `ci.sh validate` Kea leg (`_ci_validate_kea_rollback`: two Admin UI reservations, `setup.sh` rollback to the first snapshot, live `config-get`); `check setup-kea-preflight` | the rollback leaves the second reservation in Kea's running config, or `setup.sh` stops calling the preflight |
+| DNS | `ci.sh validate` (`_ci_validate_dns`: a real `dig`, the http and https answers differ; `_ci_validate_dns_rollback`: snapshot and rollback round trip through the rollback listener) | no answer, identical answers in both modes, or a rollback that does not revert the record |
+| NATS | `ci.sh validate` (`_ci_validate_ui_nats_dns`: an Admin UI record resolves in both DNS modes through NATS and PowerDNS; `_ci_validate_secondary_identity`: two secondaries get distinct identities) | the record never resolves, or two secondaries share an identity |
 | Proxy cache | `ci.sh validate` (`_ci_validate_proxy`: a real MISS, then a HIT); `check proxy-cache-env-doc-drift`; `check proxy-cert-volume` | the second request is not a HIT, a documented `CACHE_*` default differs from the shipped one, or the cert dir is not a named volume |
-| Proxy routing and TLS | `ci.sh validate` (`_ci_validate_proxy_stream_map`: a wildcard SNI forwards to the requested name; `_ci_validate_ssl_mitm`: the ssl-mode certificate is issued by the LAN CA; `_ci_validate_ssl_dispatch_map`: a depth ≥ 2 SNI takes the passthrough relay); ci.bats "proxy ssl map, stream map and client acl render exactly per mode and input", "proxy CA, cert dir and CA rotation behave per state", "proxy leaf signing and default cert regen per input", "proxy registrable domain per public suffix rule"; `check proxy-nginx-policy` | a probe or render differs, or `/healthz` serves through `return` instead of `alias` |
+| Proxy routing and TLS | `ci.sh validate` (`_ci_validate_proxy_stream_map`: a wildcard SNI forwards to the requested name; `_ci_validate_https_mitm`: the https-mode certificate is issued by the LAN CA; `_ci_validate_https_dispatch_map`: a depth ≥ 2 SNI takes the passthrough relay); `check proxy-nginx-policy` | a probe differs, or `/healthz` serves through `return` instead of `alias` |
 | Stack bring-up | `ci.sh validate` waits for every service it starts: healthcheck services until healthy, the others until their state is stable, and ships state and logs of a failing service; `check compose-config` (every compose file renders in every profile); `check compose-healthchecks` | a service is unhealthy or restarting, a compose file does not render, or a service has no healthcheck |
-| `setup.sh` | ci.bats `migrate_env_for_update` tests, "setup fresh install writes a config the prod compose takes", "setup update pulls the checkout and continues on its setup.sh", "setup backup and restore round-trip per target and host", "setup log bundle finds every managed secret and redacts it"; `check setup-update-safety`, `check prod-state-wiring`, `check prebuilt-prod`, `check image-channel-resolution` | a migration is not idempotent or convergent (AG-OP-006/007), a stable value rotates, or a secret reaches the log bundle |
-| Images and supply chain | `plan` content identity (ci.bats "identity is keyed, deterministic, per target and platform"); `scan-stack` scans the published digest (ci.bats "scan outcome: every trivy scan status has its own code"); `check vex-drift`; `check mutable-refs`; `check stable-external-images`; ci.bats "oci labels: provenance from the SOT, the env and the checkout"; `check cargo-audit` | an identity ignores a build input, a scan status is read as clean, `.trivyignore.yaml` does not yield a complete OpenVEX document, a reference is mutable, or a dependency is vulnerable or yanked |
-| Channels and release | `channel-checkout` (ci.bats "channel checkout: SOT source ref, pinned commit, coded misuse"); `promote-ref` supersede check and the AG-REL-011 gate; ci.bats "release tag: next patch from a tag string, an rc tag refused"; `check orphaned-branches` (ci.bats "orphaned branches: channel ref and source_ref branches are long-lived") | a channel run builds the wrong ref, a moved branch tip is promoted, a stale record releases, or a channel branch is reported as orphaned |
-| Rust services | `test-stack` runs `cargo fmt --check`, `cargo clippy -- -D warnings` and `cargo test` per crate only when enabled; off by default (AG-VAL-008, ci.bats "test-stack: rust off by default, apk skips, cache errors coded"); `cargo check` is a manual developer step | a Rust check fails when enabled |
-| Repository guards | `ci.sh check all` runs every guard; `ci.sh check <name>` runs one; the guard list is `ci_cmd_check` in `ci.sh` | a guard reports a finding |
+| `setup.sh` | `check setup-update-safety`, `check prod-state-wiring`, `check prebuilt-prod`, `check image-channel-resolution` | a guard reports a finding; migration idempotence and convergence (AG-OP-006/007), stable secrets and log-bundle redaction have no CI check (Coverage Assessment) |
+| Images and supply chain | `scan-stack` scans the published digest; `check vex-drift`; `check mutable-refs`; `check stable-external-images`; `check cargo-audit` | `.trivyignore.yaml` does not yield a complete OpenVEX document, a reference is mutable, or a dependency is vulnerable or yanked |
+| Channels and release | `promote-ref` supersede check and the AG-REL-011 gate | a moved branch tip is promoted, or a stale record releases |
+| Rust services | `test-stack` runs `cargo fmt --check`, `cargo clippy -- -D warnings` and `cargo test` per crate only when enabled; off by default (AG-VAL-008); `cargo check` is a manual developer step | a Rust check fails when enabled |
+| Repository guards | `ci.sh check all` runs the diff and repo guards and, with `PR_NUMBER` set, the pr guards; the job guards (`cargo-audit`, `shellcheck`, `actionlint`, `orphaned-branches`, `pr-tracking-metadata`) run in the workflow step of their own job. Each guard `check all` does not run prints `<name>=NOT-RUN` with its reason, and the final `check-all=` line counts the guards it invoked and names those it did not; a guard may still report `NOT-RUN` itself (for example `ci-bats`). `ci.sh check <name>` runs one; the guard list is the `CI_CHECKS` table in `ci.sh` | a guard reports a finding |
 
 ---
 
@@ -126,10 +126,8 @@ stack itself.
 
 - **Real `setup.sh install` bring-up is the correct starting point, not a direct
   `docker compose up`.** `setup.sh` installs the checkout's `deploy/prod` (AG-KD-008), whose
-  compose file reaches the repository inputs it needs (`certs/`, `config/prod/`,
-  `scripts/lib/shared-secret-bootstrap.sh`, `services/dns/cdn-domains.txt`,
-  `services/syslog/netdata-web_log.conf`) through `../../` paths that exist in every
-  real checkout. **`docker compose up` itself exits 0 even when a container
+  compose file reaches the repository input it needs (`services/dns/cdn-domains.txt`)
+  through a `../../` path that exists in every real checkout. **`docker compose up` itself exits 0 even when a container
   later crash-loops**, so a validator relying on the `up` exit code alone will not see it;
   check `docker compose ps`/`docker inspect --format='{{.State.Health.Status}}'` per
   container instead.
@@ -140,17 +138,14 @@ stack itself.
      (introspective — no root or Docker required). On a host where no LAN address is
      detected the server-IP prompt has no default, so the answers file must name it;
      `list-prompts` fails instead of looping when a prompt rejects its answer.
-  2. Feed that sequence into the same `expect`-based driving mechanism
-     `scripts/untracked/simulations/setup-cli-simulation.sh` already uses in CI
-     (`build_expect_prompt_block`) to run `bash setup.sh` for real (`install` is the
+  2. Feed that sequence through `expect` to run `bash setup.sh` for real (`install` is the
      default action with no subcommand; a real install run needs root,
      `setup.sh` enforces `[[ "$(id -u)" = "0" ]]`). Set
      `LANCACHE_IMAGE_CHANNEL`/`LANCACHE_IMAGE_TAG` only as a per-command env prefix on this
      one invocation, never exported process-wide, so it cannot leak into a later
      update/migration phase that should read the channel back from the written runtime env.
-     Prefer a dedicated loopback alias for `IP_STANDARD` (e.g. `127.0.0.2`) to avoid port contention with
-     other work on a shared runner (the same reasoning `scripts/untracked/simulations/setup-cli-simulation.sh`
-     already documents for itself).
+     Prefer a dedicated loopback alias for `IP_HTTP` (e.g. `127.0.0.2`) to avoid port contention with
+     other work on a shared runner.
   3. Expect `Stack started` as the success marker (`Failed to pull required container
      images` as the documented failure case).
   4. Only then run this section's remaining bring-up checks (`docker compose ps` health,
@@ -184,32 +179,31 @@ stack itself.
   different entry from the same file (`download.epicgames.com` and `deb.debian.org`
   answered publicly) before concluding anything is
   broken.
-- **Standard mode**: `dig @<IP_STANDARD> steamcontent.com` (or any
+- **HTTP mode**: `dig @<IP_HTTP> steamcontent.com` (or any
   configured CDN domain) resolves to the proxy's IP. Confirm the TLS handshake for
   that domain is **passthrough** (no interception) — `openssl s_client -connect
   <proxy>:443 -servername steamcontent.com` and confirm the presented certificate is
   the real CDN's own cert, not this project's CA. **Port correction (2026-08-05,
   issue #1391):** a prior version of this document named `:8443` here — that is
   only the container-**internal** listener port; every real deployment profile maps
-  it to the standard HTTPS port externally (`deploy/prod/docker-compose.yml` publishes
-  `${IP_STANDARD}:443:8443`) — `:443` is what an operator or
+  it to the usual HTTPS port 443 externally (`deploy/prod/docker-compose.yml` publishes
+  `${IP_HTTP}:443:8443`) — `:443` is what an operator or
   validator actually connects to from outside the container.
-- **SSL/MITM mode**: same `dig` against the SSL DNS instance; `openssl s_client
+- **HTTPS/MITM mode**: same `dig` against the https side of the `dns` container; `openssl s_client
   -connect <proxy>:443 -servername steamcontent.com -CAfile <ca.crt>` and confirm the
   presented certificate **is** signed by the project's own CA (proves interception is
   actually happening, not merely configured). **CA path:** the CA lives in the
   directory the proxy service mounts at `/etc/nginx/ssl/ca`, resolved relative to that
   profile's own `docker-compose.yml` (this document's `AG-VAL-010` note on Compose
   path resolution). `deploy/prod/docker-compose.yml` mounts
-  `../../certs:/etc/nginx/ssl/ca`, so for `deploy/prod` the path, run from the repo
-  root, is `certs/ca.crt`; for any other profile read its own mount. Using the wrong
+  `CA_DIR` (default: the `STATE_SUBDIR_CA` folder below `LANCACHE_STATE_DIR`), so for
+  `deploy/prod` the path is `$CA_DIR/ca.crt`; for any other profile read its own mount. Using the wrong
   path fails `openssl verify`/`s_client` with a misleading error that looks like broken
   interception but is only a wrong path.
 - `ping`/`ss` alone are not acceptable substitutes for either check (AG-VAL-013) — a
   real query/response or a real TLS handshake is required.
 - **Wildcard scope at the DNS layer** (AG-OP-015): the proxy half of the rule is in CI
-  (`_ci_validate_proxy_stream_map`, `_ci_validate_ssl_dispatch_map`, ci.bats "proxy
-  ssl map, stream map and client acl render exactly per mode and input"). The DNS half
+  (`_ci_validate_proxy_stream_map`, `_ci_validate_https_dispatch_map`). The DNS half
   is live only: pick one wildcard-only entry (`.example.com`) from
   `services/dns/cdn-domains.txt` (or a scratch entry) and `dig` three names: the
   wildcard's bare root, a subdomain under it, and an unrelated domain. Pass: only the
@@ -255,25 +249,25 @@ a real LAN.
   (`AG-OP-001`/`AG-OP-012`): request the same path with two different query strings,
   confirm both hit the same cache entry (second request is a HIT even though the
   query string differs).
-- **Correction (confirmed live, 2026-07-24, against v0.3.0/commit 88ddbf6a): standard-mode
+- **Correction (confirmed live, 2026-07-24, against v0.3.0/commit 88ddbf6a): HTTP-mode
   HTTPS is NOT cached, and this is not testable as a HIT/MISS check at all.** A prior
-  version of this document claimed standard-mode passthrough HTTPS "should still cache"
+  version of this document claimed HTTP-mode passthrough HTTPS "should still cache"
   because "SNI-routed connections still terminate at nginx's `stream` block only for the
-  TLS layer" — that premise is wrong. Per `CLAUDE.md`'s own architecture section, standard
+  TLS layer" — that premise is wrong. Per `CLAUDE.md`'s own architecture section, HTTP
   mode's `stream` block uses `ssl_preread` to read the ClientHello's SNI **without
   terminating TLS at all**; it then blindly forwards the still-encrypted bytes straight to
   the real origin (`proxy_pass` in the `stream` context). nginx never sees plaintext HTTP
   on this path, so it cannot apply `proxy_cache` and cannot add `X-Cache-Status` (confirmed
-  live: a real request through the standard-mode HTTPS port returns the origin's own
+  live: a real request through the HTTP-mode HTTPS port returns the origin's own
   `Server` header directly, e.g. `Server: Apache` for a real mirror, with no
   `X-Cache-Status` header at all — compare against the passthrough certificate proof two
   bullets above, which already demonstrates the same blind-forward behavior at the TLS
-  layer). Only **HTTP** is cached in standard mode. Do not attempt a HIT/MISS proof against
-  standard-mode HTTPS — there is nothing to observe.
-- SSL/MITM-mode intercepted HTTPS **is** cached (confirmed live: a real MISS-then-HIT with
+  layer). Only **HTTP** is cached in HTTP mode. Do not attempt a HIT/MISS proof against
+  HTTP-mode HTTPS — there is nothing to observe.
+- HTTPS/MITM-mode intercepted HTTPS **is** cached (confirmed live: a real MISS-then-HIT with
   byte-identical bodies, same as the HTTP case above) — nginx genuinely terminates TLS here,
   so the request reaches the normal HTTP proxy/cache layer. Confirmed also that the cache is
-  shared across all three reachable paths (standard-mode HTTP, SSL/MITM HTTP, SSL/MITM
+  shared across all three reachable paths (HTTP-mode HTTP, HTTPS/MITM HTTP, HTTPS/MITM
   HTTPS) since the cache key is `$host$uri` regardless of scheme or which mode's listener
   received the request — a request already cached via one path can come back as an
   immediate HIT via a different path for the same host+URI.
@@ -319,8 +313,8 @@ CI covers the Admin UI → NATS → `nats-subscriber` → PowerDNS write path
   '{{.State.StartedAt}}'` is later, the acknowledgement page's `/health` poll sees the
   ui go away and come back and ends on `/setup`, and a raw `curl -X POST` through
   `docker-socket-proxy` against `lancache-syslog` or `lancache-watchdog` gets the
-  HAProxy deny, not the Docker API's 404/409. `check docker-socket-proxy` keeps the
-  allowlist deny-by-default; the live negative control is not automated.
+  HAProxy deny, not the Docker API's 404/409. No CI check covers the allowlist or the
+  live negative control.
 - **DHCP/NTP dock start and stop** (issue #1437): the dock's Start/Stop for `dhcp`,
   `dhcp-proxy` and `ntp` posts to `/api/services/{service}/desired-state`; the
   watchdog alone reads that state and starts or stops the container through
@@ -334,7 +328,7 @@ CI covers the Admin UI → NATS → `nats-subscriber` → PowerDNS write path
 
 - Confirm coverage matches the **documented, deliberate** per-service decision table
   from PR #1167 exactly (`docs/architecture-ng.md`'s Watchdog section): `proxy`,
-  `dns-standard`, `dns-ssl` (SSL-mode only), and `nats` (new) are monitored/restarted;
+  `dns` (http and https recursors), and `nats` (new) are monitored/restarted;
   `ui`, `dhcp` (Kea), `dhcp-proxy` (dnsmasq), `netdata`, `syslog`/`syslog-ng` are
   deliberately **not** — each for a distinct, documented reason (allowlist gaps for
   `ui`/`dhcp`, no meaningful healthcheck defined for `dhcp-proxy`/`netdata`, no fixed
@@ -360,7 +354,7 @@ CI covers the Admin UI → NATS → `nats-subscriber` → PowerDNS write path
 - For `nats`, the only single-process monitored service, hang it with
   `docker kill --signal=STOP lancache-nats` from the host (external `SIGSTOP`, not an
   in-container one) and confirm a genuine restart (new `StartedAt`).
-- **For `proxy`, `dns-standard`, and `dns-ssl` (multi-process containers), use
+- **For `proxy` and `dns` (multi-process containers), use
   `docker top <container> -o pid` then `kill -STOP` every listed PID from outside
   the container (root/`sudo`), instead of `--signal=STOP` on the container** — see
   the reason here. `docker kill --signal=STOP` signals only PID 1; in a multi-process
@@ -371,68 +365,32 @@ CI covers the Admin UI → NATS → `nats-subscriber` → PowerDNS write path
   against the actual images, confirming a real `FailingStreak` increase from a
   timed-out probe (not just a `Status` flip) and a genuine watchdog-triggered
   restart (new `StartedAt`).
-- Known open, non-blocking gap (#1166, surfaced during #1167's own live validation):
-  `restart_container()`'s `CURL_MAX_TIME` (deployed value 5s, `config/prod/watchdog.env`) can be shorter than Docker's
-  own restart grace period (10s) for a container slow to respond to SIGTERM, producing
-  a spurious `WARNING: restart call failed` log line even when the restart actually
-  succeeds a few seconds later. If you see this, cross-check `docker inspect
-  --format='{{.State.StartedAt}}'` before concluding the restart genuinely failed —
-  this is a known, separately-tracked cosmetic-log bug, not (yet) a real functional
-  failure.
 
 ### 8. Central logging / syslog forwarding
 
-- The `logging` profile is on by default since issue #1343 (a real opt-out remains
-  via `LOGGING_ENABLED=0`, not an opt-in feature) — confirm real log lines from a
-  monitored service actually arrive at the `syslog-ng`/fluent-bit target, not just
-  that the containers are up. `syslog-forwarding-simulation` (part of
-  `full-setup-deep-validate.yml`) is the reusable proof for this — invoke it directly
-  or via `gh workflow run` rather than re-deriving a new check.
-- **UPDATED (syslog+fluent-bit consolidation PR, 2026-08):** `syslog` and
-  `syslog-ng` are no longer two separate containers -- they are one combined
-  container (`services/syslog/`) running both processes, under the single
-  Compose service name `syslog`. Its healthcheck
-  (`services/syslog/healthcheck.sh`) is no longer a binary-presence-only
-  check: it verifies fluent-bit AND syslog-ng independently (a real
-  `syslog-ng-ctl stats` probe against the control socket, plus a
-  cmdline-based process check for fluent-bit) and only reports healthy when
-  both are, writing a structured status file
-  (`/var/lib/lancache-syslog-data/health-status.json`, including a
-  `data_loss_alert_active` field). Still validate the pipeline directly (a
-  real log line arriving at the target) in addition to trusting this
-  healthcheck, per `AG-VAL-023`'s netdata precedent -- a real check on top of
-  a real check is the point, not a contradiction.
-- **Standing check (AG-VAL-029, added by issue #1343):** `scripts/untracked/simulations/setup-cli-simulation.sh`'s
-  Phase 1 now asserts, after a default fresh install (every wizard prompt answered
-  with its default), that `.env` contains `LOGGING_ENABLED=1`, that `COMPOSE_PROFILES`
-  includes `logging`, and that the real `syslog` container (the combined
-  fluent-bit+syslog-ng container since the consolidation PR above) is actually
-  running — guarding against a regression back to the bug this issue fixed (central
-  logging silently never starting on a normal install). This runs as part of the same
-  CI job the rest of this section already points at (`setup-cli-simulation` in
-  `full-setup-sims.yml`), not a new standalone check.
-- **Standing check (AG-VAL-029, added by the syslog+fluent-bit consolidation
-  PR, 2026-08 -- real confirmed bug):** the combined `syslog` container ships
-  a periodic silent-data-loss detector (`services/syslog/data-loss-detector.sh`,
-  invoked from `entrypoint.sh`'s detector loop) comparing syslog-ng's own
-  "processed" stats counter against real bytes landing on disk under the
-  syslog-ng log root. This guards against a real, live-reproduced bug: a
-  bind-mounted log-root directory left root-owned (Docker's own default when
-  the host directory does not already exist before first container start)
-  silently swallows every message a non-root syslog-ng receives --
-  `syslog-ng-ctl stats` still increments its `processed` counter and
-  syslog-ng logs no error at all, while zero bytes ever reach disk. Verified
-  live on a self-hosted runner (see the PR body for the exact reproduction
-  commands): the detector correctly fires (`processed_delta=1
-  bytes_delta=0`, non-zero exit) against the broken condition and stays
-  silent (`bytes_delta=71`, exit 0) against a matched, correctly-owned
-  control run delivering the same message. `setup.sh` also now pre-creates
-  and chowns this directory on fresh install specifically to prevent the
-  condition from occurring in the first place (see setup.sh's own "Creating
-  directories" step); this detector is the defense-in-depth backstop for an
-  install that predates that fix, skipped the fix (e.g. a from-scratch
-  manual deploy without running setup.sh), or has its permissions changed
-  later.
+- One syslog-ng runs inside the `services` container. Every container logs
+  through Docker's `syslog` driver to `udp://127.0.0.1:${LANCACHE_LOG_PORT}`;
+  files land in `${SYSLOG_NG_LOG_DIR}/LanCache-NG-<service>/YYYYMMDD.log`.
+  There is no separate syslog container and no Fluent Bit. Confirm that real
+  log lines of `proxy`, `dns`, `dhcp` and `ui` actually arrive there, not just
+  that the containers are up.
+- Logging is switched per service (`LOGGING_PROXY_ENABLED`,
+  `LOGGING_DNS_ENABLED`, `LOGGING_DHCP_ENABLED`, `LOGGING_UI_ENABLED`, default
+  `1`) on the Admin UI `/logs` page. The ui only saves the switch; the
+  watchdog re-renders the syslog-ng config and restarts syslog-ng. Switch one
+  service off and confirm that only its directory stops growing, the others
+  and `LanCache-NG-services/` (the watchdog, never switchable) keep growing.
+- With the proxy switch off the proxy access log gets no new lines; the Admin
+  UI statistics and dashboard show no new traffic. Confirm the `/logs` page
+  says so.
+- **Standing checks (AG-VAL-029):** none. The Rust tests of the logging
+  switches were removed. The four keys in a fresh `.env`, the migration of
+  an old `LOGGING_ENABLED`, a UI switch reaching `.env` and the watchdog's
+  syslog-ng filter per switch have no CI check (Coverage Assessment).
+- **Known gap:** the silent-data-loss detector of the former combined `syslog`
+  container is gone with that container; a log root that syslog-ng cannot
+  write to is not detected by a dedicated check. `setup.sh` pre-creates and
+  chowns the log root on fresh install.
 
 ### 9. Resource-Leak / Cleanup Pass (standing check, run every release)
 
@@ -454,8 +412,8 @@ triggered the removal/rotation/restart returned success.
 ### 10. NTP — clock discipline
 
 `ntp` is profile-gated and runs on the bridge network; `ci.sh validate` enables every
-profile, so it starts `ntp` and waits for it. Its config render is in CI (ci.bats "ntp
-config renders and validates exactly per input"); clock discipline is live only.
+profile, so it starts `ntp` and waits for it. Its config render has no CI check;
+clock discipline is live only.
 
 - On a host that grants `CAP_SYS_TIME`, force a clock skew and confirm that
   `chronyc tracking` inside the `ntp` container returns to a `Leap status` of `Normal` with
@@ -476,10 +434,9 @@ continues on the pulled `setup.sh` (`update_repo_and_resume`), migrates `.env`
 (`migrate_env_for_update`), pulls the images and applies the update service by service
 with health gates (`apply_stack_update_ordered`); a failure rolls the stack back
 (`rollback_stack_update`). The flow runs no `docker compose down -v`, so named volumes
-and bind mounts stay. CI covers the migration and the checkout handoff (ci.bats
-`migrate_env_for_update` tests, "setup update pulls the checkout and continues on its
-setup.sh") and that the update pauses convergence first (`check
-setup-update-safety`); the update of a running stack is live only:
+and bind mounts stay. CI checks only that the update pauses convergence first
+(`check setup-update-safety`); the migration, the checkout handoff and the update of a
+running stack are live only:
 
 1. Bring a stack up with `setup.sh install` (§1).
 2. Record each service's image ID (`docker inspect <image> --format '{{.Id}}'`) and
@@ -504,7 +461,7 @@ is named in a warning and does not block it.
 | A service already unhealthy before the update does not roll the update back | Bring a stack up where an opt-in service stays unhealthy (for example `ntp` on a host that denies `CAP_SYS_TIME`), run `setup.sh update` | Pass if the update completes with `Proceeding despite service(s) unhealthy before this update started too`; fail if it rolls back for that service |
 | A real regression still rolls the update back | On a stack with every non-UI service healthy, add a `docker-compose.override.yml` that makes one healthy service (not `proxy` or `dns`, whose functional probe would also fire) fail its healthcheck after recreation, run `setup.sh update` | Pass if it reports `Service(s) regressed from healthy to unhealthy during this update: <service>` and `rollback_stack_update` restores the backup; fail otherwise |
 
-No ci.bats test covers the baseline or the gate today (see Coverage Assessment).
+No CI check covers the baseline or the gate (see Coverage Assessment).
 
 ---
 
@@ -517,45 +474,101 @@ a stated reason it has none (AG-VAL-029).
 
 | Failure class | Durable check |
 |---|---|
-| Kea config render, migration or rollback drift | ci.bats "dhcp kea templates render complete valid json", "dhcp kea runtime config migration converges"; `_ci_validate_kea_rollback` |
-| Kea starting next to another DHCP server on the LAN | `check setup-kea-preflight`; ci.bats "setup kea preflight asks before a second dhcp server" |
-| dnsmasq directive or template-key drift | ci.bats "dhcp-proxy optional and pxe directives render exactly per input"; `check dhcp-proxy-env` |
-| DNS split routing lost (standard and ssl answer alike) | `_ci_validate_dns` |
+| Kea rollback leaving a reservation in the running config | `_ci_validate_kea_rollback` |
+| Kea starting next to another DHCP server on the LAN | `check setup-kea-preflight` |
+| DNS split routing lost (http and https answer alike) | `_ci_validate_dns` |
 | DNS rollback that does not revert, or does not snapshot the restored state | `_ci_validate_dns_rollback` |
 | Admin UI record not reaching PowerDNS in both modes | `_ci_validate_ui_nats_dns` |
 | Two secondaries sharing one NATS identity | `_ci_validate_secondary_identity` |
-| Torn shared-config write | `check nats-atomic-write` |
-| Wildcard SNI forwarded to a fixed root (#1297) | `_ci_validate_proxy_stream_map`; ci.bats "proxy ssl map, stream map and client acl render exactly per mode and input" |
-| Depth ≥ 2 SNI intercepted instead of relayed (#1276/#1322) | `_ci_validate_ssl_dispatch_map` |
-| SSL mode not intercepting | `_ci_validate_ssl_mitm` |
-| Stream-level client ACL missing on a listener | ci.bats "proxy ssl map, stream map and client acl render exactly per mode and input" |
+| Wildcard SNI forwarded to a fixed root (#1297) | `_ci_validate_proxy_stream_map` |
+| Depth ≥ 2 SNI intercepted instead of relayed (#1276/#1322) | `_ci_validate_https_dispatch_map` |
+| HTTPS mode not intercepting | `_ci_validate_https_mitm` |
 | `/healthz` ACL bypassed by `return` | `check proxy-nginx-policy` |
 | Documented `CACHE_*` default drifting from the shipped one | `check proxy-cache-env-doc-drift` |
 | Cache not serving a HIT | `_ci_validate_proxy` |
 | A service crash-looping after `docker compose up` exits 0 | the health and stability wait of `ci.sh validate`, for every service it starts (all but the host-network ones, see Scope Boundaries) |
-| `.env` migration not idempotent, rotating a secret or duplicating a key | ci.bats `migrate_env_for_update` tests |
-| An update continuing on the old `setup.sh` after a pull | ci.bats "setup update pulls the checkout and continues on its setup.sh" |
-| Image revision label or index tag naming another commit than the built tree | `_ci_head_commit`; ci.bats "oci labels: provenance from the SOT, the env and the checkout" |
-| A scheduled channel run building the default branch instead of its source ref | `channel-checkout`; ci.bats "channel checkout: SOT source ref, pinned commit, coded misuse" |
-| A scan of another image than the published digest | `scan-stack` scans `_ci_published_digest`; ci.bats "scan outcome: every trivy scan status has its own code" |
 | A `.trivyignore.yaml` entry not yielding a complete OpenVEX statement | `check vex-drift` |
-| Case-sensitive repository-name comparison | `_ci_repo` lowercases; ci.bats "action ref is external unless local, docker, or this repo" (upper-case owner case) |
-| Live pipe into an early-exit consumer under `pipefail` (exit 141) | `check pipefail-early-exit` |
-| Review chronology or stale line references in comments | `check review-chronology` |
-| Closing keywords read outside the linked-issues section | `_ci_pr_section`; ci.bats "check pr-template: every real template section filled, one box marked", "pr markdown: comments strip, a section ends at any real heading" |
+| Live pipe into an early-exit consumer under `pipefail` (exit 141) | `check shell-guards` |
+| Review chronology or stale line references in comments | `check comments` |
+| A comment, heredoc or YAML text block breaking the What/Why/From contract, or carrying a bare issue number (`.trivyignore.yaml` statements went unread) | `check comments` (CHECK-0128, CHECK-0078, CHECK-0080) |
 | A bats `[ ] && [ ]` check that cannot fail | `check bats-and-chain` |
-| `$?` read from an `if` instead of the command | `check if-without-else-status` |
+| `$?` read from an `if` instead of the command | `check shell-guards` |
 | An exit path losing its code, context or raw output | `check exit-evidence` |
 | Mutable image or action reference | `check mutable-refs`; `check action-node-versions` |
+| Two jobs of one run computing two identities for one target and platform | `_ci_identity_compute` runs only in a planner scope (`plan-matrix`, `identity`, `impact`) and fails closed beside a given `CI_RUN_IDENTITIES` (IDENTITY-0018); every other reader goes through `_ci_identity_for`, which reads only the run record and fails closed without it or without the pair (IDENTITY-0017, IDENTITY-0015) |
 
 ### No durable check
 
-- **`setup.sh update` health baseline and regression gate** (issue #1391): no ci.bats
-  test; §12 is live only.
+`.github/scripts/ci.bats` holds no test, so these classes have no regression
+check; the named function or job is the fix, not a check that detects a
+recurrence:
+
+- **Kea config render or migration drift**: the Kea templates and their migration.
+- **dnsmasq directive or template-key drift**: the dnsmasq templates and the compose
+  keys that feed them.
+- **Torn shared-config write**: the NATS shared-config writer.
+- **Stream-level client ACL missing on a listener**: the proxy stream map render.
+- **`.env` migration not idempotent, rotating a secret or duplicating a key**:
+  `migrate_env_for_update` in `setup.sh`.
+- **An update continuing on the old `setup.sh` after a pull**: `update_repo_and_resume`.
+- **Image revision label or index tag naming another commit than the built tree**:
+  `_ci_head_commit`.
+- **A scheduled channel run building the default branch instead of its source ref**:
+  `channel-checkout`.
+- **Validation env binding the SOT state root instead of the per-run root**
+  (compose then bound paths the runner does not have): `_ci_validation_env` takes
+  the root as its argument. No CI check detects a recurrence; only the live
+  `ci.sh validate` stack run exercises it, and a static guard would be a new
+  test, which needs a maintainer ACK.
+- **A Trivy gate reading an unrecorded or stale DB** (AG-VAL-026):
+  `_ci_trivy_db_ensure_fresh` runs trivy's own refresh before every scan and
+  `_ci_trivy_db_record` prints the DB version and sha256 into the scan result;
+  no check detects a skipped refresh.
+- **A rollback leg handing setup.sh no per-run state root** (VALIDATE-0043 at
+  run time): `_ci_validate_setup_rollback` writes `LANCACHE_STATE_DIR` first into
+  the one-run `.env.local` and fails without it; only the live `ci.sh validate`
+  stack run exercises it.
+- **A Trivy ignore entry matching nothing** (AG-VAL-007): `scan-channel` runs the
+  second `--show-suppressed` pass and `_ci_trivyignore_stale` fails; a subset run
+  prints `ignore-stale=NOT-RUN`, so a partial scan never finds a stale entry.
+- **LAN-only dist scheduler or distcc hosts reaching a GitHub-hosted build**
+  (AG-CI-002/003, AG-CI-011): `_ci_set_runtime` reads both only when
+  `_ci_runner_self_hosted` and otherwise logs `VARIABLES-0024`; no CI check
+  detects a recurrence, only a build on a hosted runner exercises it.
+- **A build-identity tag starting with `sha-`** (AG-REL-015): `_ci_image_tag`
+  renders `release.tag_identity_prefix` (`identity-`); no CI check detects a
+  recurrence of the old `sha-<identity>-<arch>` form.
+- **A short or pr-prefixed `sha-` pin accepted as a commit pin** (AG-REL-015):
+  `release.tag_commit` is `sha-` plus 40 hex and `validate_lancache_image_tag`
+  has no `pr-*` branch; a stored short pin stops `setup.sh` with an error that
+  names the valid forms. No CI check detects a recurrence.
+- **Two readers of the needs object classifying results differently**
+  (AG-CODE-011): `ci_cmd_result_gate` and `ci_cmd_nightly_report` both read
+  `CI_NEEDS` through `_ci_needs_pairs` and `_ci_needs_class`; no CI check
+  detects a reader that parses it again.
+- **A zombie sccache server read as a live one** (AG-VAL-029):
+  `_ci_sccache_reap` skips process state Z; no CI check detects a recurrence,
+  only a build whose server exits before its parent collects it.
+- **A scan of another image than the published digest**: `scan-stack` scans
+  `_ci_published_digest`.
+- **Case-sensitive repository-name comparison**: `_ci_repo` lowercases.
+- **Closing keywords read outside the linked-issues section**: `_ci_pr_section`.
+- **A Trivy finding, DB outage or scan error that no issue reports, or that one case
+  closes for another**: the status and scan report steps.
+- **An image no build rebuilds never scanned again**: `scan-channel` in the
+  `nightly.yml` job `scan`.
+- **A released image digest without a provenance attestation**: `release-provenance`
+  (one `actions/attest` per `release-images` entry).
+- **A report step that does not start because the job it judges failed**: the
+  `nightly.yml` job `report` (own job, `!cancelled()`).
+- **A required-check gate that passes a skipped phase without a reason**:
+  `result-gate`.
+- **`setup.sh update` health baseline and regression gate** (issue #1391): §12 is
+  live only.
 - **Dockerfile lint**: BuildKit's `docker buildx build --call check` (for example a
   trailing `\` that merges the next instruction into a `RUN`) runs in no job; such a
   Dockerfile fails only in `build`.
-- **`FROM ${VAR}` without a global `ARG`**: `check dockerfile-stage-variables` covers
+- **`FROM ${VAR}` without a global `ARG`**: `check dockerfiles` covers
   the stage `ARG`s of `ci.sh` stages only; the build fails.
 - **A bare `!` inside a bats loop body**: shellcheck does not report this shape; no
   check.
@@ -566,11 +579,11 @@ a stated reason it has none (AG-VAL-029).
   serialization in `ci.sh` (AG-CI-017).
 - **`check actionlint`**: no per-command kill bound; the `lint` job timeout from the
   SOT applies.
-- **Comment claims drifting from code**: `check comment-length` checks structure; the
+- **Comment claims drifting from code**: `check comments` checks structure; the
   truth of a claim is manual review.
 - **Third-party reviewer output language** (AG-CC-004): manual review.
-- **GHCR GC reachability** (`ci.sh gc`, run by `gc.yml` with `--apply`): ci.bats tests
-  only its argument guard, not the classification into kept and deleted versions.
+- **GHCR GC reachability** (`ci.sh gc`, run by `gc.yml` with `--apply`): neither its
+  argument guard nor the classification into kept and deleted versions has a check.
 
 ### Retired with their mechanism
 
@@ -588,8 +601,9 @@ guard, and the skip branches of the Dockerfile acceleration functions.
 `ci.sh validate` enables every compose profile of `deploy/prod` and starts every service
 that does not use host networking. The host-network services `dhcp`, `dhcp-proxy` and
 `dhcp-probe` cannot be isolated in its /27 network and are not started; their checks
-are the Kea leg of `ci.sh validate` (Kea on its own containers), the dnsmasq render
-tests of Part A, and the live scenarios of §3. Covered only live in Part B:
+are the Kea leg of `ci.sh validate` (Kea on its own containers) and the live
+scenarios of §3; the dnsmasq render has no check (Coverage Assessment). Covered only
+live in Part B:
 
 - wire-level DHCP in all three modes, the lease effect of an Admin UI reservation and
   the dnsmasq sub-mode switch (§3);
@@ -610,8 +624,8 @@ The Rust checks of Part A are off by default (AG-VAL-008).
 
 | Command | Proves |
 |---|---|
-| `bash .github/scripts/ci.sh validate` | the running-stack validation of Part A for the accepted stack candidate, on the runner host |
+| `bash .github/scripts/ci.sh validate` | the running-stack validation of Part A for the accepted stack candidate, inside the `build-tools` container (AG-VAL-016) |
 | `bash .github/scripts/ci.sh release-validation` | the AG-REL-011 gate over `docs/validation-state.json` for the checked-out commit |
-| `bash .github/scripts/ci.sh check all`, `check <name>` | every repository guard, or one |
-| `bats .github/scripts/ci.bats` in the `build-tools` image (AG-VAL-016) | the regression suite |
+| `bash .github/scripts/ci.sh check all`, `check <name>` | the guards of the diff, repo and (with `PR_NUMBER`) pr scope, or one named guard; the guards it skips print `NOT-RUN` |
+| `bats .github/scripts/ci.bats` in the `build-tools` image (AG-VAL-016) | the regression suite; it holds no test, so `check ci-bats` reports `NOT-RUN` |
 | `docker compose -f deploy/prod/docker-compose.yml run --rm dhcp-probe` | the DHCP conflict and client probe (§3) |

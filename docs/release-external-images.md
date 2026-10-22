@@ -34,8 +34,6 @@ Mutable external tags are not authoritative release records.
 | Image | Role | Current policy |
 | --- | --- | --- |
 | `nats:2-alpine@sha256:c11af972c99ae542de8925e6a7d9c533aa1eb039660420d2074beed6089b3bf0` | DNS record sync message bus | Digest-pinned |
-| `cr.fluentbit.io/fluent/fluent-bit:3.2.10@sha256:d6dec000c4929a439562525728c708f6e99800d7ddc82efd6aa4f45f3a20b562` | Optional log collector/forwarder (`syslog` service); forwards to `syslog-ng` (#453) | Digest-pinned; replaces the non-pullable `fluent/fluent-bit:3` reference |
-| `balabit/syslog-ng:latest@sha256:78ad81d617f83e46bf6fa9f45d5c437a841464be5e1cddfda2745e01e87dd335` | Central log receiver (`syslog-ng` service, #453); maintained by the syslog-ng project (published under the `balabit/` Docker Hub namespace) | Digest-pinned |
 | `tecnativa/docker-socket-proxy@sha256:1f3a6f303320723d199d2316a3e82b2e2685d86c275d5e3deeaf182573b47476` | Docker API guard for UI/watchdog | Digest-pinned |
 | `netdata/netdata@sha256:a130dbbf3d6e6a5472efdebaa123797190a5822627e908106d34edae02bc8a74` | Optional monitoring helper | Digest-pinned |
 | `busybox:stable-musl@sha256:3c6ae8008e2c2eedd141725c30b20d9c36b026eb796688f88205845ef17aa213` | Minimal base for the stack channel pointer image | Digest-pinned |
@@ -61,15 +59,15 @@ Current status:
   digest and the stack channel-pointer digest (see "Verifying Release
   Provenance" below).
 - **SBOMs** are generated per released first-party image digest by the
-  `release-sbom` job in `.github/workflows/build-push.yml`. That job runs on
-  release tags, resolves each `vX.Y.Z` image reference to its immutable digest,
-  runs the project's pinned Trivy action in CycloneDX SBOM mode against that
-  digest, and attaches the result to the GitHub release for the tag as a
-  `<service>.cdx.json` asset. The covered set is the Trivy-scanned first-party
-  images: `proxy`, `dns`, `watchdog`, `dhcp`, `dhcp-proxy`, `ntp`, `syslog`,
-  `ui`, and `build-tools`. The `stack` channel-pointer image is excluded on purpose: it is
-  a busybox pointer image, not a compiled software asset, and is not
-  vulnerability-scanned either.
+  `release-sbom` job in `.github/workflows/release.yml` (`ci.sh
+  release-sbom-stack`). That job runs on release tags, resolves each `vX.Y.Z`
+  image reference to its immutable digest, runs Trivy in CycloneDX SBOM mode
+  against that digest, and attaches the result to the GitHub release for the
+  tag as a `<service>.cdx.json` asset. The covered set is every build target of
+  the SOT (`services` plus `build_toolchain` in
+  `.github/yaml/build-manifest.yml`). The `stack` channel-pointer image is
+  excluded on purpose: it is a busybox pointer image, not a compiled software
+  asset, and is not vulnerability-scanned either.
 - **VEX** (vulnerability disposition) for accepted findings is published as the
   `vex.openvex.json` release asset, regenerated fresh from the tag's own
   `.trivyignore.yaml` at release time — see "Vulnerability Disposition (VEX)"
@@ -87,12 +85,12 @@ metadata must record the approved upstream digest.
 
 ## Verifying Release Provenance
 
-Every first-party image digest (`proxy`, `dns`, `watchdog`, `dhcp`,
-`dhcp-proxy`, `ntp`, `syslog`, `ui`, `build-tools`, and the `stack`
+Every first-party image digest (every build target of the SOT and the `stack`
 channel-pointer image) gets a
 [GitHub Artifact Attestation](https://docs.github.com/en/actions/security-guides/using-artifact-attestations-to-establish-provenance-for-builds)
-pushed to GHCR alongside it (`.github/actions/ghcr-attest-retry`, wrapping
-`actions/attest`). This attestation is a signed, Sigstore-backed statement that
+pushed to GHCR alongside it (the `release-provenance` job in
+`.github/workflows/release.yml`, wrapping `actions/attest`; `ci.sh
+release-images` names the digests). This attestation is a signed, Sigstore-backed statement that
 cryptographically binds the exact image digest to the specific GitHub Actions
 workflow run (repository, workflow file, and commit) that built it, and does
 not depend on trusting GHCR itself as the source of truth.
@@ -176,8 +174,8 @@ exact class of bug it was meant to prevent. Instead:
   belong to the release channel.
 - `ci.sh check vex-drift` runs the generator on the checked-out
   `.trivyignore.yaml` and requires one statement per entry, failing a change
-  that feeds it an unsupported shape, status or justification. The generator
-  and this check are covered by `ci.bats`.
+  that feeds it an unsupported shape, status or justification. No test
+  covers the generator or this check (`ci.bats` holds no test).
 
 This complements the Vulnerability Management Policy documentation in
 `SECURITY.md` (refs #1130 / #1185).

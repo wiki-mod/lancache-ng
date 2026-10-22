@@ -9,18 +9,11 @@ data/
 /kea/
 /nats/
 /nats-conf/
-/pdns-standard/
-/pdns-ssl/
+/pdns/
 /pdns-filter-state/
 /ntp/
 /syslog-ng/
 /cachehamster/
-
-# Generated certificates (keep only the CA template, not issued certs)
-certs/*.crt
-certs/*.key
-certs/*.pem
-!certs/.gitkeep
 
 # Generated BIND9 keys (auto-created at container startup)
 services/dns/keys/
@@ -30,12 +23,8 @@ services/dhcp/keys/
 
 # Environment files with secrets (root-level only)
 /.env
-/.env.dev
-/.env.prod
 deploy/prod/.env.local
 config/prod/*.local.env
-
-# config/*.env files are committed (no secrets, just operational config)
 
 # Claude Code project settings
 .claude/
@@ -44,9 +33,8 @@ config/prod/*.local.env
 .DS_Store
 Thumbs.db
 
-# Rust build artifacts
-# What: one root /target/, replacing 4 per-crate entries.
-# Why: a real workspace builds into one shared target dir.
+# What: ignores the one workspace build dir /target/.
+# Why: the Cargo workspace builds into one target dir.
 # From: Issue #1095
 /target/
 
