@@ -24,7 +24,9 @@ use std::time::Duration;
 use lancache_cachehamster::credential_store::{
     self, CredentialPersistence, load_or_create_master_secret,
 };
-use lancache_cachehamster::stream_fetch::{ByteCounter, fetch_many_and_discard, spawn_throughput_logger};
+use lancache_cachehamster::stream_fetch::{
+    ByteCounter, fetch_many_and_discard, spawn_throughput_logger,
+};
 
 /// What: default location for this service's own persisted secrets.
 /// Why: matches the `/data` volume convention services/ui/src/main.rs's
@@ -103,7 +105,8 @@ fn resolve_steam_credential(
     persistence: CredentialPersistence,
     data_dir: &str,
 ) -> anyhow::Result<Option<String>> {
-    let env_value = reject_placeholder_credential(std::env::var("CACHEHAMSTER_STEAM_CREDENTIAL").ok())?;
+    let env_value =
+        reject_placeholder_credential(std::env::var("CACHEHAMSTER_STEAM_CREDENTIAL").ok())?;
 
     match persistence {
         CredentialPersistence::None => Ok(env_value),
