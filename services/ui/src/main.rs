@@ -2941,7 +2941,8 @@ async fn register_secondary(
     // What: refuse without the shared DDNS TSIG key.
     // Why: the secondary needs it; fail before any DB write.
     // From: Issue #1683 | PR #1912
-    let tsig_path = Path::new(&state.config.shared_secret_dir).join("ddns-tsig-key");
+    let tsig_path =
+        Path::new(&state.config.shared_secret_dir).join(shared_secret_file_name("DDNS_TSIG_KEY"));
     let ddns_tsig_key = fs::read_to_string(&tsig_path)
         .map(|key| key.trim().to_string())
         .ok()
@@ -5662,8 +5663,10 @@ async fn domains_page(
 // Why: the dns side writes it; an empty file is void.
 // From: Issue #858
 fn tsig_key_configured(config: &Config) -> bool {
-    fs::metadata(Path::new(&config.shared_secret_dir).join("ddns-tsig-key"))
-        .is_ok_and(|m| m.len() > 0)
+    fs::metadata(
+        Path::new(&config.shared_secret_dir).join(shared_secret_file_name("DDNS_TSIG_KEY")),
+    )
+    .is_ok_and(|m| m.len() > 0)
 }
 
 // What: write a failed list edit to the log as a 500.
