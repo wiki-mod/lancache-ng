@@ -32,8 +32,8 @@
 # `action_statement` would otherwise hold. An entry opts into this by adding
 # `status: not_affected` (and, only if `vulnerable_code_not_present` is not
 # the right justification for that specific entry, an explicit
-# `justification:` line) alongside its existing `id`/`paths`/`statement`/
-# `expired_at` fields.
+# `justification:` line) alongside its existing `id`/`paths`/`statement`
+# fields.
 #
 # Parsing approach mirrors scripts/validate-stack-images.sh: a targeted awk
 # reader for this project's own small, controlled YAML schema (no yq/PyYAML
@@ -65,11 +65,11 @@ if [ ! -f "$trivyignore" ]; then
 fi
 
 # awk emits one TAB-delimited record per accepted-vulnerability entry:
-#   <id> \t <expired_at> \t <statement> \t <status> \t <justification> \t <path1>|<path2>|...
+#   <id> \t <statement> \t <status> \t <justification> \t <path1>|<path2>|...
 # The folded '>-' statement scalar is reassembled by joining its continuation
 # lines with single spaces (reproducing YAML folded-scalar semantics). Paths
 # and ids never contain a TAB or '|', so those delimiters are safe here.
-# expiry/status/justification are optional per entry and can legitimately be
+# status/justification are optional per entry and can legitimately be
 # empty -- a bare, genuinely empty field between two TABs is not safe to rely
 # on here: bash "read" with IFS set to a whitespace character (TAB counts,
 # same as space/newline) collapses a run of consecutive delimiters into one
@@ -78,7 +78,7 @@ fi
 # IFS=$tab read -r f1 f2 f3 f4 yields f3=d, f4 empty, not f3 empty/f4=d). The
 # nz() wrapper below substitutes a control-character sentinel (octal 001, a
 # byte that cannot occur in this YAML file's actual text) for a genuinely
-# empty field, so every record always carries exactly six non-empty,
+# empty field, so every record always carries exactly five non-empty,
 # TAB-separated tokens; the bash side undoes this substitution right after
 # "read" assigns the fields.
 parsed="$(
@@ -87,9 +87,9 @@ parsed="$(
     function flush() {
       if (have_entry) {
         gsub(/^ +| +$/, "", stmt)
-        printf "%s\t%s\t%s\t%s\t%s\t%s\n", nz(id), nz(expiry), nz(stmt), nz(status), nz(justification), nz(paths)
+        printf "%s\t%s\t%s\t%s\t%s\n", nz(id), nz(stmt), nz(status), nz(justification), nz(paths)
       }
-      have_entry=0; id=""; expiry=""; stmt=""; status=""; justification=""; paths=""; mode=""
+      have_entry=0; id=""; stmt=""; status=""; justification=""; paths=""; mode=""
     }
     {
       match($0, /^ */); indent=RLENGTH
@@ -114,11 +114,6 @@ parsed="$(
       # a genuine inline scalar value if one was given on the same line.
       if (v ~ /^[>|][+-]?[ \t]*$/) { v="" }
       stmt=v
-      next
-    }
-    indent == 4 && rest ~ /^expired_at:/ {
-      v=rest; sub(/^expired_at:[ \t]*/, "", v)
-      gsub(/^"|"$/, "", v); expiry=v; mode=""
       next
     }
     # Optional per-entry OpenVEX status override (see the top-of-file comment
@@ -154,15 +149,15 @@ parsed="$(
 )"
 
 statements="[]"
-while IFS=$'\t' read -r id exp stmt entry_status justification paths_joined; do
+while IFS=$'\t' read -r id stmt entry_status justification paths_joined; do
   [ -n "$id" ] || continue
 
   # Undo the awk-side nz() sentinel substitution (see this script's earlier
   # comment on why a bare empty field cannot survive IFS=TAB read splitting
   # unscathed) -- a field that is genuinely empty in .trivyignore.yaml (no
-  # expired_at, no status, no justification) must read back as empty here,
+  # status, no justification) must read back as empty here,
   # not as the literal sentinel byte.
-  for var_name in id exp stmt entry_status justification paths_joined; do
+  for var_name in id stmt entry_status justification paths_joined; do
     if [ "${!var_name}" = $'\001' ]; then
       printf -v "$var_name" '%s' ""
     fi
@@ -189,9 +184,6 @@ while IFS=$'\t' read -r id exp stmt entry_status justification paths_joined; do
     # instead, OpenVEX's field for elaborating on a non-affected disposition.
     entry_justification="${justification:-vulnerable_code_not_present}"
     impact_statement="$stmt"
-    if [ -n "$exp" ]; then
-      impact_statement="${stmt} (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before ${exp} in case the underlying module pin or upstream situation has changed.)"
-    fi
     statement_json="$(
       jq -n \
         --arg cve "$id" \
@@ -210,13 +202,9 @@ while IFS=$'\t' read -r id exp stmt entry_status justification paths_joined; do
         }'
     )"
   else
-    # An `affected` OpenVEX statement requires an action_statement; fold the
-    # accepted-vulnerability rationale and its mandatory re-review date (there is
-    # no native OpenVEX field for an expiry, so it is stated in the text) into it.
+    # An `affected` OpenVEX statement requires an action_statement; the
+    # accepted-vulnerability rationale is it.
     action_statement="$stmt"
-    if [ -n "$exp" ]; then
-      action_statement="${stmt} (Accepted, tracked risk recorded in .trivyignore.yaml; this disposition expires ${exp} and must be re-reviewed on or before that date.)"
-    fi
 
     statement_json="$(
       jq -n \
