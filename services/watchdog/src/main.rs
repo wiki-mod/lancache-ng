@@ -3031,7 +3031,8 @@ fn kea_dhcp4(ctx: &Ctx) -> Result<Run, String> {
     };
     let snap_dir = PathBuf::from(ctx.need("KEA_CONFIG_SNAPSHOT_DIR")?);
     kea_snapshot_dir(&snap_dir)?;
-    let store = lancache_ng::SnapshotStore::new(snap_dir, "dhcp4.json", "kea");
+    let snap_file = ctx.need("KEA_CONFIG_SNAPSHOT_FILE")?;
+    let store = lancache_ng::SnapshotStore::new(snap_dir, snap_file, "kea");
     let fresh = current
         .and_then(owned)
         .map(|text| ("current".to_string(), text));

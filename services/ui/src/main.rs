@@ -3101,12 +3101,11 @@ async fn kea_config(state: &AppState) -> Result<Value, String> {
 
 // What: the snapshot store of Kea configs.
 // Why: ui writes it, the dhcp container shares the volume.
-fn kea_store(config: &Config) -> SnapshotStore {
-    SnapshotStore::new(
-        PathBuf::from(&config.kea_config_snapshot_dir),
-        "dhcp4.json",
-        "kea",
-    )
+fn kea_store(config: &Config) -> anyhow::Result<SnapshotStore> {
+    let file = config::need(&config::process_env, "KEA_CONFIG_SNAPSHOT_FILE")
+        .map_err(anyhow::Error::msg)?;
+    let root = PathBuf::from(&config.kea_config_snapshot_dir);
+    Ok(SnapshotStore::new(root, file, "kea"))
 }
 
 // What: put the old config back after a refused write.
@@ -3148,7 +3147,7 @@ async fn kea_apply(
     // Why: a failed snapshot weakens rollback, not the edit
     let record = || {
         let keep = state.config.kea_keep_known_good_configs;
-        if let Err(e) = kea_store(&state.config).create(&config, keep) {
+        if let Err(e) = kea_store(&state.config).and_then(|store| store.create(&config, keep)) {
             tracing::warn!(error = %e, "failed to record a known-good Kea snapshot");
         }
     };
@@ -3456,7 +3455,7 @@ async fn dhcp_page(State(state): Shared, headers: HeaderMap) -> Response {
     // What: snapshots newest first, with creation times.
     // Why: operators pick a rollback target, newest first.
     let snapshots: Vec<SnapshotSummary> = kea_store(cfg)
-        .ids()
+        .and_then(|store| Ok(store.ids()?))
         .unwrap_or_else(|e| {
             tracing::warn!("Kea snapshots not listed: {e}");
             Vec::new()
@@ -4048,7 +4047,8 @@ async fn rollback_kea_snapshot(
     Form(f): Form<Fields>,
 ) -> Result<Redirect, HtmlError> {
     require_kea(&state)?;
-    let store = kea_store(&state.config);
+    let store = kea_store(&state.config)
+        .map_err(|e| fail(format!("Kea config snapshot store unavailable: {e:#}")))?;
     let id = f.get("snapshot_id");
     let known = store.ids().map_err(|e| {
         fail(format!(

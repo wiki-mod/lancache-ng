@@ -545,6 +545,8 @@ documented contract, in `services/ui/src/main.rs`:
   config, and
   `setup.sh reset-to-last-known-good-config kea` maps it to the host path
   through the Kea data mount (a value outside that mount is refused).
+  `KEA_CONFIG_SNAPSHOT_FILE` (`dhcp4.json`) in the same `runtime.defaults`
+  names the payload file inside each snapshot for the `ui` and `dhcp` images.
   `KEEP_KNOWN_GOOD_CONFIGS` (default 3, same variable name as the shell
   adapters) is read by the Admin UI process.
 - The Admin UI owns that directory: at start, as root, it chowns it to

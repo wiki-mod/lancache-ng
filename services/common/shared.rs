@@ -765,7 +765,7 @@ pub struct FlushRequest {
 // From: Issue #628
 pub struct SnapshotStore {
     pub root: PathBuf,
-    file: &'static str,
+    file: String,
     service: &'static str,
 }
 
@@ -795,10 +795,10 @@ fn drop_staging(staging: &Path, e: anyhow::Error) -> anyhow::Error {
 impl SnapshotStore {
     // What: a store of `file` payloads under `root`.
     // Why: `service` names the log line vocabulary.
-    pub fn new(root: PathBuf, file: &'static str, service: &'static str) -> Self {
+    pub fn new(root: PathBuf, file: impl Into<String>, service: &'static str) -> Self {
         Self {
             root,
-            file,
+            file: file.into(),
             service,
         }
     }
@@ -823,7 +823,7 @@ impl SnapshotStore {
             // Why: staging or empty dirs are no target.
             let complete = entry.file_type()?.is_dir()
                 && is_snapshot_id(&name)
-                && entry.path().join(self.file).is_file();
+                && entry.path().join(&self.file).is_file();
             if complete {
                 ids.push(name);
             }
@@ -839,7 +839,7 @@ impl SnapshotStore {
             is_snapshot_id(id),
             "rejected known-good snapshot id {id:?}: must be a purely numeric snapshot id"
         );
-        let raw = fs::read_to_string(self.root.join(id).join(self.file))
+        let raw = fs::read_to_string(self.root.join(id).join(&self.file))
             .with_context(|| format!("cannot read known-good snapshot {id}"))?;
         serde_json::from_str(&raw)
             .with_context(|| format!("known-good snapshot {id} is not valid JSON"))
@@ -855,7 +855,7 @@ impl SnapshotStore {
         fs::create_dir_all(&staging)
             .with_context(|| format!("cannot create staging directory {}", staging.display()))?;
         let finish = || -> anyhow::Result<()> {
-            fs::write(staging.join(self.file), serde_json::to_vec_pretty(data)?)?;
+            fs::write(staging.join(&self.file), serde_json::to_vec_pretty(data)?)?;
             Ok(fs::rename(&staging, self.root.join(&id))?)
         };
         if let Err(e) = finish() {
@@ -956,7 +956,7 @@ impl SnapshotStore {
         fs::create_dir_all(&staging)?;
         let finish = || -> anyhow::Result<()> {
             fs::write(
-                staging.join(self.file),
+                staging.join(&self.file),
                 serde_json::to_vec_pretty(&Value::Object(set))?,
             )?;
             fs::rename(&staging, self.root.join(&id))?;
