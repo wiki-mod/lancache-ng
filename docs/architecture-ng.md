@@ -19,8 +19,8 @@ depot-fetch capability.
 | nginx (proxy) | on | — | Mainline from nginx.org, Alpine base (issue #815) |
 | PowerDNS | on | dnsmasq | Authoritative + Recursor for DNS spoofing & recursion |
 | Kea DHCP / DHCP modes | off | — | Configurable four-state: `disabled` / `kea` / `dnsmasq-proxy` / `dnsmasq-relay` (#844); requires PowerDNS (DDNS via nsupdate) in `kea` mode. The two dnsmasq modes share one `dhcp-proxy` container (config selected by DHCP_MODE): `dnsmasq-proxy` injects PXE options alongside an existing server, `dnsmasq-relay` forwards DHCP to an upstream server on another segment. See [docs/dhcp-modes.md](dhcp-modes.md). |
-| LanCache-NG-NTP | off (`ntp` Compose profile) | — | chrony-based NTP server, disciplined against public NTP servers, serving LAN clients on UDP/123; optional "auto-set as DHCP NTP server" toggle pushes its LAN address into Kea's `ntp-servers` option. See the "Kea DHCP" section below. |
-| Watchdog | on | — | Health checks, auto-restart, purge cron |
+| NTP (chronyd inside `services`) | off (`NTP_ENABLED`) | — | The supervisor runs chronyd while `NTP_ENABLED` is true and the desired state of `ntp` is not `stopped` (see the Watchdog section). chrony-based NTP server, disciplined against public NTP servers, serving LAN clients on UDP/123; optional "auto-set as DHCP NTP server" toggle pushes its LAN address into Kea's `ntp-servers` option. See the "Kea DHCP" section below. |
+| Watchdog (inside `services`) | on | — | Supervisor of every supervised image, restart of an unhealthy container, retention; see the Watchdog section |
 | syslog-ng (inside `services`) | on; per-service switches `LOGGING_PROXY_ENABLED`, `LOGGING_DNS_ENABLED`, `LOGGING_DHCP_ENABLED`, `LOGGING_UI_ENABLED` (Admin UI `/logs`) | — | Central log receiver; every container logs to it through the Docker syslog driver — see the syslog-ng section's logging matrix below |
 | Admin UI | on | — | Axum/Rust, Tera, Tailwind, separate port |
 | CacheHamster (Cache-Prefill) | off (`cachehamster` Compose profile) | — | **Infra-wired, functionally still a scaffold**: `services/cachehamster` (issue #871) has a CI-built/published multi-arch image and an opt-in Compose profile since its infra integration (issue #871), but no real Steam depot-fetch capability yet -- credential-store + stream-fetch primitives only. Mechanism decided: stream-and-discard prefill, not SteamCMD; independently-switchable service (not a `services/ui` module). See [docs/design-steam-prefill.md](design-steam-prefill.md) (issue #816, issue #871) for the current design plan and its one remaining open decision (credential strategy). Do not treat this row as a runnable feature until Steam control-plane/depot integration lands. |
@@ -287,195 +287,107 @@ Keep `UI_HSTS_MODE=auto` for direct LAN HTTP access or TLS-terminating reverse p
 
 ## Watchdog
 
-Lightweight container with Docker socket access (restart permission).
+`lancache-watchdog` (`services/watchdog/src/main.rs`) is the entry point of
+the four supervised images: `services`, `proxy`, `dns` and `dhcp`. The `ui`
+image has no supervisor. Every value below is an environment key that the
+SOT (`.github/yaml/build-manifest.yml`) bakes in; the binary has no defaults.
 
-**Health checks:** every persistent-daemon service across `deploy/*/docker-compose.yml`
-has a Docker Compose `healthcheck:` block (#1169 closed the last gaps:
-`dhcp-proxy`, `ntp`, `netdata`, and `docker-socket-proxy` previously had none
-at all), enforced going forward by `ci.sh check compose-healthchecks`
-(part of `ci.sh check all` in the CI checks job) so a newly added service
-can't silently regress this. The exceptions are exactly the services in the
-SOT field `validation.healthcheck_exempt` in `.github/yaml/build-manifest.yml`
-(the guard reads only that list). The one-shot ones among them -- `dhcp-probe`,
-a helper the Admin UI starts and stops on demand, `cachehamster`, and the init
-containers `syslog-logs-permissions` and `watchdog-prepare`, which prepare log
-volume ownership -- run with `restart: "no"` to completion rather than staying
-up as a long-running daemon, so a liveness
-healthcheck has no meaningful state to probe. `retention`, a long-running
-sidecar, is exempt on purpose: since #842 its liveness stays outside the
-health-check/restart state machine (PR #1360, which also names a
-heartbeat-based liveness check as the follow-up). The watchdog binary itself only
-*acts* on a subset of the services below -- see the "Auto-restart" scope note
-directly below this list before assuming every entry here is watched and
-restarted by the watchdog daemon.
-- nginx: HTTP request on `/health`
-- PowerDNS: DNS query test via `rec_control`
-- Kea: REST API ping
-- nats: HTTP probe against nats-server's own monitor endpoint (`http_port: 8222` set in the compose-generated boot config, checked via `wget` against `/healthz` -- nats:2-alpine ships BusyBox's wget/nc but no curl, verified empirically)
-- ui: HTTP request on `/health` (`services/ui/src/main.rs`'s shallow liveness route, checked via `curl`, present in the image)
-- dhcp-proxy (dnsmasq): liveness + config-integrity, not a functional DHCP probe (#1169) -- dnsmasq has no REST/control-socket API and this config disables DNS entirely (`port=0`), so a query/response probe like PowerDNS's isn't possible, and synthesizing a real DHCPDISCOVER every interval would inject genuine broadcast LAN traffic as a healthcheck side effect. Checks that PID 1 is still `dnsmasq` (the entrypoint execs it directly, no wrapper shell) and that `dnsmasq --test` still validates the on-disk config
-- ntp (chrony): real query/response probe via `chronyc tracking` against chronyd's own command socket (#1169) -- a genuine round-trip, not a bare port-listen check, but deliberately does not require an already-synchronised stratum, since "alive but not yet synced" is a legitimate transient state during `start_period` or an upstream network blip
-- netdata: HTTP probe against its own REST API, `GET /api/v1/info` (#1169), matching the check `deploy/full-setup/docker-compose.yml`'s validation stack already used for the same pinned image
-- docker-socket-proxy: HTTP probe against the Docker API's own `/_ping` endpoint (#1169), explicitly allowlisted by `scripts/untracked/docker-socket-proxy.sh`'s own `safe_ping` ACL -- proves the HAProxy frontend is actually forwarding to the real Docker socket backend, not just that port 2375 is open
+**Supervisor.** `lancache-watchdog supervise` (the default) reads
+`LANCACHE_PROCESSES`, which the image build bakes from the SOT `processes:`
+list of that image, and keeps each program running:
 
-**Auto-restart:** X failed checks → `docker restart <container>`. Scope,
-verified against the compiled `services/watchdog` Rust binary (the production
-`ENTRYPOINT` since issue #842's ENTRYPOINT swap -- see this file's own
-`services/watchdog/Dockerfile` and `deploy/*/docker-compose.yml`): `main()`'s
-own `monitored` list covers `proxy`, `dns`, `nats` (always
-monitored, not flag-gated) and `netdata` (always monitored, added by #842's
-2026-08-07 restart-capability decision). The binary writes this state to a
-`status.json` file every `CHECK_INTERVAL` seconds (default 30); see "Status"
-below for how the Admin UI renders it. The former bash implementation
-`services/watchdog/watchdog.sh` is no longer in the repository.
+| Image | Programs |
+| --- | --- |
+| `services` | `watch`, `retention`, `syslog-ng`, `chronyd`, `netdata` |
+| `proxy` | `nginx` |
+| `dns` | `pdns`, `dns-http`, `dns-https`, `nats-server`, `nats-subscriber`, `soa` |
+| `dhcp` | `kea-dhcp4`, `kea-ctrl-agent`, `kea-dhcp-ddns`, `dnsmasq`, `dhcp-probe` |
 
-These five `CONTAINER_*` variables exist only as a fail-loud consistency
-check, not a real renaming mechanism: the binary rejects any value that
-does not match the fixed default and exits at startup (issue #849 bug-hunt
-finding #5, carried forward from the bash implementation into
-`load_settings` in `services/watchdog/src/main.rs`). Running more than one
-lancache-ng stack on the same host is a deliberate non-goal, not an
-unfinished feature; open a feature request for a genuine
-multi-stack-per-host need.
+Every `SUPERVISE_TICK` seconds the supervisor:
+- starts a wanted program that is not running, after its backoff
+  (`RETRY_BACKOFF_START` doubling up to its maximum; a run of
+  `SUPERVISE_BACKOFF_RESET` seconds resets it);
+- stops a running program that is no longer wanted (TERM, then KILL after
+  `SUPERVISE_STOP_GRACE`);
+- restarts a running program whose watched input file changed (for example
+  the Admin UI settings file, `cdn-domains.txt` or the NATS config);
+- writes `supervise.json` into `SUPERVISE_RUN_DIR`.
 
-Beyond the five restart-capable services above, the watchdog binary has
-alert-only paths that never call `restart()`: it probes `docker-socket-proxy`
-every cycle through `/_ping`, monitors `ui` (always), the correct `dhcp`/
-`dhcp-proxy` container (per `DHCP_MODE`), and `ntp` when `NTP_ENABLED` is truthy. Alert-only coverage is
-deliberately distinct from restart permission: observing a service through
-the inspect allowlist does not grant or imply a Docker restart action for it.
+A program is wanted (`Kind::wanted`) by these rules:
+- `kea-dhcp4`, `kea-ctrl-agent` and `kea-dhcp-ddns` only in the Kea DHCP
+  mode, `dnsmasq` only in a dnsmasq mode, and both only while the desired
+  state of `dhcp` is not `stopped`;
+- `chronyd` only while `NTP_ENABLED` is true and the desired state of `ntp`
+  is not `stopped`;
+- `nats-server` and `soa` not on a DNS secondary;
+- `dns-https` only when `IP_HTTPS` is set;
+- every other program always.
 
-- **`ui`**: has a real Docker healthcheck and is alert-only monitored
-  unconditionally. **Corrected 2026-08-19 (issue #1486): `ui` is no longer
-  restart-grant-free.** It has its own narrow `safe_ui_restart` acl (`POST
-  .../containers/lancache-ui/restart` only, never `start`/`stop`) for the
-  Admin UI's own operator-initiated self-restart control
-  (`/setup/restart-ui`) -- deliberately restart-only so this path can never
-  leave `ui` stopped. This grant is not caller-specific: the socket proxy
-  authorizes only the HTTP method/path, not which client sent the request,
-  so any client able to reach the proxy (UI, watchdog, or otherwise) could
-  invoke this endpoint once it exists -- watchdog's Rust rewrite simply has
-  no code that does so, and still never calls `restart_container` for `ui`,
-  so `ui` remains outside `check_and_maybe_restart`'s blind
-  restart-on-unhealthy loop exactly as before; only an explicit operator
-  request through the Admin UI can trigger this restart.
-- **`dhcp` (Kea) and `dhcp-proxy` (dnsmasq)**: both have real Docker
-  healthchecks and are alert-only monitored (the container matching the
-  active `DHCP_MODE`). Deliberately kept start/stop-only in
-  `scripts/untracked/docker-socket-proxy.sh` (`safe_dhcp_action`), never given a
-  `restart` grant: Kea/dnsmasq's own known-good-config rollback semantics
-  make a blind watchdog-triggered restart mid-rollback risky -- a concern
-  raised explicitly in #842's own history. **Updated (issue #1437,
-  maintainer-directed watchdog-as-actor architecture):** the actual caller of
-  `safe_dhcp_action`'s start/stop is now watchdog's own main loop, not the
-  Admin UI -- the Admin UI only writes an operator's intent to
-  `desired-state.json` (`services/ui/src/main.rs`'s
-  `set_service_desired_state`), and watchdog's `reconcile_one`
-  (`services/watchdog/src/main.rs`) reads it fresh every `CHECK_INTERVAL`
-  and issues `start`/`stop` accordingly. This still never issues a
-  `restart` and never acts without an explicit prior dock action (an
-  absent `desired-state.json` entry is "no opinion", not "should run" --
-  see `status::DesiredState`'s own doc comment), so the original rollback
-  concern this paragraph describes is unchanged; only which process holds
-  the socket-proxy allowlist grant changed.
-- **`netdata`**: promoted to real restart-capability (#842, 2026-08-07
-  decision) -- see the `Auto-restart` paragraph above. Its own dedicated
-  `safe_netdata_restart` allowlist grant follows the same
-  one-acl-per-service pattern `safe_ntp_action`/`safe_dhcp_action` already
-  use, rather than widening the shared `safe_service_restart` acl.
-- **`ntp` (chrony)**: alert-only monitored when `NTP_ENABLED` is truthy. Its
-  own start/stop-only allowlist grant (`safe_ntp_action`) mirrors `dhcp`'s
-  shape; no restart grant exists for it either. As of issue #1437, the
-  actual caller of that grant is watchdog's main loop, reconciling against
-  `desired-state.json`, the same way as `dhcp` above -- see that entry for
-  the full mechanism.
+The desired state is `DESIRED_STATE_FILE`. The Admin UI writes it; the
+supervisor reads it on every tick. No Docker call is involved.
 
-**Alert-only monitoring's own allowlist precondition (issue #842/#849,
-2026-08-05):** alert-only health reads require inspect-only Docker API access
-through `scripts/untracked/docker-socket-proxy.sh`'s allowlist. That inspection grant is
-separate from the `safe_service_restart` allowlist; alert-only monitoring does
-not call `restart_container()`, so observing a target never makes it
-restart-capable. syslog-ng runs inside the `services` container itself (the
-watchdog supervises it), so there is no separate logging container to monitor;
-the per-service logging switches are described in the syslog-ng section below.
-- **`docker-socket-proxy`**: this is watchdog's own gateway to the Docker
-  API. If it is down or hung, watchdog cannot reach any container through
-  it -- including this one -- so "restart docker-socket-proxy via
-  docker-socket-proxy" cannot work by construction. It now has a real Docker
-  healthcheck too (#1169, an HTTP probe against the Docker API's own
-  `/_ping`), which makes the problem visible/measurable via `docker inspect`,
-  but does not fix the chicken-and-egg restart problem above -- Docker's own
-  `restart: always` already covers a hard process crash, which is the only
-  failure mode watchdog could conceivably help with here anyway.
+**Healthcheck.** Compose runs `lancache-watchdog healthcheck` in the four
+supervised containers (`x-watchdog-healthcheck` in
+`deploy/prod/docker-compose.yml`). It fails when:
+- `supervise.json` is older than `SUPERVISE_STATUS_MAX_AGE` seconds;
+- a wanted program is not running;
+- a running `nats-subscriber` or `kea-ctrl-agent` does not accept a TCP
+  connection on its port, or a running `kea-dhcp4` does not accept one on
+  its control socket;
+- in the `proxy` container, nginx does not answer its health URL, and with
+  `HTTPS_ENABLED` also its HTTPS health URL checked against the stack CA.
 
-  **Alert-only probe (issue #1170 Part 1, added after the above analysis):**
-  a *hung-but-not-crashed* docker-socket-proxy (process alive, HAProxy not
-  answering) used to be completely invisible -- Docker's own `restart:
-  always` only reacts to the process exiting, and nothing else in the stack
-  polled it at all. The watchdog binary's `main()` loop now
-  hits `docker-socket-proxy`'s own `GET /_ping` endpoint every cycle (already
-  permitted by `scripts/untracked/docker-socket-proxy.sh`'s `safe_ping` ACL -- zero new
-  privilege) and writes the result into `status.json`'s `services` map like
-  any other monitored container, so it renders on the Admin UI dashboard.
-  This is deliberately alert-only, driven through `AlertCounter` rather
-  than `FailureCounter` --
-  the circular-dependency reasoning above still fully applies to *restarting*
-  it. Actually self-healing docker-socket-proxy from inside its own
-  container (a supervisor that kills its own PID 1 so `restart: always`
-  recovers it) is tracked separately as issue #1170 Part 2 and was not
-  implemented here; it has open verification questions (reliable
-  in-container hang detection, a clean way to trigger PID 1 exit) that this
-  alert-only probe does not need to answer.
+The `ui` container runs `lancache-ui healthcheck`. `ci.sh check
+compose-healthchecks` (part of `ci.sh check all`) fails for a compose service
+without a healthcheck, except a service named in the SOT field
+`validation.healthcheck_exempt`; the SOT has no such field today.
 
-All of the above still get Docker's own `restart: always`/`restart: "no"`
-policy (`deploy/*/docker-compose.yml`), which restarts a container that
-*exits*; watchdog's gap is specifically for a container that is still
-running but reports unhealthy (hung, wedged) without ever exiting.
+**Watch (restart of an unhealthy container).** The `watch` task in the
+`services` container is the only Docker API client (`DockerApi` in
+`services/common/shared.rs`). It reaches the socket `DOCKER_SOCKET`, mounted
+read-write with no socket proxy (see `SECURITY.md` section 3). Every
+`CHECK_INTERVAL` seconds it:
+- lists the containers of its own compose project (the project label of its
+  own container);
+- inspects each container and counts `unhealthy` readings in a row;
+- restarts the container after `RESTART_AFTER` readings in a row
+  (`DOCKER_RESTART_GRACE`, `DOCKER_RESTART_TIMEOUT`); `starting`, no health,
+  unreachable and `degraded` readings do not count.
 
-**Scheduled purge (cron, daily):** since issue #842 (2026-08-01), this and the
-two retention engines below run in `services/watchdog/retention.sh` inside a
-dedicated `retention:` Compose service, separate from the health-monitoring
-`watchdog` container. `retention-entrypoint.sh` performs the privilege drop
-and launches the long-running retention loop with its own restricted mount,
-capability, filesystem, and network posture. Keeping destructive file
-retention in a separate container prevents a fault or compromise in that logic
-from sharing the watchdog's Docker API channel or status-writer process. Every
-env-derived target directory (`CACHE_DIR`, `SYSLOG_LOG_ROOT`) is canonicalized via `realpath -m` and checked
-against an expected mount-root prefix (`CACHE_DIR_ALLOWED_PREFIX`/
-`SYSLOG_LOG_ROOT_ALLOWED_PREFIX`,
-defaulting to `/var/cache`/`/var/log`/`/var/lib`) before any `find`/`rm` runs
-against it, fail-closed (loud rejection, no deletion, no stamp write) on any
-value resolving outside that prefix.
-- Remove cache entries older than `CACHE_VALID_DAYS` (`runtime.defaults`) — not `CACHE_VALID_HIT`, which is the unrelated nginx/proxy cache-validity variable (`runtime.defaults`) (both happen to default to `365`, which previously masked this doc citing the wrong one)
-- Complements nginx `inactive` (which works by access time)
-- Syslog retention (opt-in, `SYSLOG_ENABLED=true`): storage-budget pruning under `SYSLOG_LOG_ROOT` — see the syslog-ng section below for the exact age-then-size ordering
+Its own container is only reported, never restarted: a self-restart would end
+the restart call. The watchdog never starts or stops a container. Docker's
+`restart: always` restarts a container that exits.
 
-**Disk monitoring:**
-- `watchdog.sh`'s `disk_info()` computes a yellow (85% full) / red (95% full)
-  color and writes it into `status.json` every 30 seconds, monitoring actual
-  disk usage, not just nginx `max_size`. Since issue #870, the Admin UI's
-  dashboard reads this file (`services/ui/src/main.rs`) and
-  renders the color in the "Service health" card's "Cache disk" indicator,
-  polling `GET /api/watchdog-status` every 10 seconds to stay live -- this
-  closes #849 observability finding #3. The dashboard's own cache-usage bar
-  (`cache_pct` in `services/ui/src/main.rs`) remains a separate,
-  independently computed value (used cache bytes vs. `CACHE_MAX_GB`), not
-  this disk-usage color.
+**Status.** The `watch` task writes `status.json` (`STATUS_FILE`, on the
+`watchdog-status` volume) every cycle:
+- one row per compose service: health text, color and failure count;
+- a `syslog-ng` row, red ("silent log loss") when syslog-ng processed
+  messages but no log file was written;
+- the cache disk color: yellow from `DISK_WARN_PCT`, red from
+  `DISK_ALARM_PCT`, `unknown` when `df` fails.
 
-**Status:** `watchdog.sh` computes per-service health and disk-usage color
-(green/yellow/red) into `status.json` every 30 seconds. Since issue #870,
-the Admin UI (`services/ui/src/main.rs`,
-`services/ui/src/main.rs`, `templates/dashboard.html`) reads and
-renders that file as a per-service "traffic light" indicator in the
-dashboard's "Service health" card, sharing `status.json` via the
-`watchdog-status` named volume (mounted read-only into the `ui` container --
-see `deploy/*/docker-compose.yml`'s `ui:` service). A missing or stale
-`status.json` (watchdog not running, or crashed) renders as an explicit
-"unavailable"/"stale" state rather than a silently frozen last-known color.
-Since issue #1170 Part 1, the `services` map also includes an entry for
-`docker-socket-proxy` itself (alert-only -- see its dedicated bullet above);
-the dashboard renders it through the same generic per-service loop as every
-other entry, with no template or route changes needed for it specifically.
+The `ui` container mounts the volume read-only; the dashboard reads it through
+`GET /api/watchdog-status` (`ROUTE_WATCHDOG_STATUS` in
+`services/ui/src/main.rs`).
+
+**Retention.** The `retention` task in the `services` container runs every
+`CHECK_INTERVAL` seconds:
+- once a day it deletes cache files older than `CACHE_VALID_DAYS`
+  (`purge_cache`, stamp `PURGE_STAMP`);
+- it xz-compresses every closed syslog file (`compress_syslog`); today's
+  files stay open in syslog-ng;
+- once a day it deletes syslog files older than `SYSLOG_RETENTION_DAYS`,
+  then the oldest ones until the store fits `SYSLOG_MAX_GB`; today's files
+  stay, and an over-budget store is retried after
+  `SYSLOG_PRUNE_RETRY_COOLDOWN` (`prune_syslog`, stamp
+  `SYSLOG_PRUNE_STAMP`).
+
+Each target directory is resolved (symlinks and `..`) and must lie strictly
+inside `CACHE_DIR_ALLOWED_PREFIX` or `SYSLOG_LOG_ROOT_ALLOWED_PREFIX`;
+otherwise nothing is deleted and no stamp is written.
+
+**Other entry points.** `lancache-watchdog probe` prints one DHCP probe as
+JSON; `lancache-watchdog get KEY` prints one baked value.
 
 ### Known benign startup/log messages (issue #849 item 8)
 
@@ -663,7 +575,7 @@ Epic / GOG: not planned to be supported.
 | Mechanism | Trigger | Basis |
 |---|---|---|
 | nginx `inactive` | automatic, continuous | not accessed since `CACHE_INACTIVE` |
-| Watchdog purge cron | daily automatic | file older than `CACHE_VALID_DAYS` (`services/watchdog/retention.sh`'s `maybe_purge()`, since #842 -- a separate process from the health-check daemon) |
+| Watchdog purge cron | daily automatic | file older than `CACHE_VALID_DAYS` (`purge_cache` in the watchdog's retention task, `services/watchdog/src/main.rs`) |
 | Admin UI cache resize | operator on-demand from the dashboard | requested whole-GB `CACHE_MAX_SIZE`, re-validated against real free disk space (issue #1069 part 3) |
 
 `setup.sh`'s initial "Cache size in GiB" prompt also validates the requested
@@ -714,8 +626,8 @@ interpolates both `CACHE_MAX_SIZE` for the `proxy` service and
 the limit nginx enforces change in the same recreate.
 
 **Not yet implemented:** a manual "clear cache now" / purge-by-age / purge-
-by-access / pin-app-ID surface. `services/watchdog/watchdog.sh`'s
-`maybe_purge()` is the only automatic purge path beyond nginx's own
+by-access / pin-app-ID surface. The watchdog's `purge_cache`
+(`services/watchdog/src/main.rs`) is the only automatic purge path beyond nginx's own
 `inactive` eviction; there is no route or template anywhere in
 `services/ui/src/main.rs` that clears, previews, or selectively deletes cache
 entries. See issue #1069's own feasibility notes for why an out-of-cycle
@@ -768,7 +680,7 @@ Runs on its own Axum webserver (port 8080) — independent from nginx. If nginx 
 ## Security
 
 - All generated secrets (TSIG keys, Kea API token) auto-generated at container start, never in repo
-- Docker socket in watchdog: restart permission only, no full admin
+- Docker socket only in the `services` container, read-write and with no socket proxy; its watchdog lists, inspects and restarts the stack's containers (see `SECURITY.md` section 3)
 - Repo is public: no real IPs, passwords, or keys in config files
 
 ## Implementation order
