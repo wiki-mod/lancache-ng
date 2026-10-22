@@ -37,7 +37,7 @@ the top is a signal that its threats need re-checking.
 | TLS interception + local CA | `services/proxy/entrypoint.sh`, `services/proxy/conf.d/https.conf` | v0.2.0 | T7, T8, T10 |
 | Proxy request policy (client CIDR + host allowlists) | `services/proxy/entrypoint.sh`, `services/proxy/conf.d/http.conf` | v0.2.0 | T2, T9 |
 | Admin UI authentication | `services/ui/src/main.rs` | v0.2.0 | T3 |
-| Docker access mediation (socket-proxy) | `deploy/prod/docker-compose.yml` | v0.2.0 | T6 |
+| Docker access (socket in the `services` container, watchdog client) | `deploy/prod/docker-compose.yml`, `services/common/shared.rs` (`DockerApi`) | `current_dev` (Issue #1683) | T6 |
 | DHCP — Kea mode | `services/dhcp/entrypoint.sh`, `docs/dhcp-modes.md` | v0.2.0 | T12 |
 | DHCP — dnsmasq-proxy mode | `services/dhcp-proxy/entrypoint.sh`, `docs/dhcp-modes.md` | v0.2.0 | T12, T13 |
 | NATS event bus + role-scoped credentials | `deploy/prod/docker-compose.yml` (nats), `services/dns/nats-subscriber/` | v0.2.0 | T5 |
@@ -89,8 +89,8 @@ protects *from the operator*. It is called out again in "Out of scope".
 │  │     mode SNI passthrough              - Kea Control Agent API     │ │
 │  │   - DNS (PowerDNS auth + recursor)      (port 8000, host-net)     │ │
 │  │   - DHCP (Kea) OR dnsmasq-proxy       - NATS event bus (4222)     │ │
-│  │                                       - docker-socket-proxy       │ │
-│  │  Local CA key (HTTPS mode) lives on     (HAProxy allowlist) ──────┼─┼─► Docker
+│  │                                       - watchdog in `services`    │ │
+│  │  Local CA key (HTTPS mode) lives on     (Docker socket mount) ────┼─┼─► Docker
 │  │  host: <CA_DIR>/ca.key                                           │ │   daemon
 │  └──────────────────────────────────────────────────────────────────┘ │
 │                                                                        │
@@ -144,8 +144,9 @@ architecture content as of 2026-07-31 — that content moved into `AGENTS.md`).
   plain `allow`/`deny` directives (a TCP-level accept/reject before
   `ssl_preread`, not the `$lancache_client_allowed` geo variable, which is
   http-context-only and structurally unusable from `stream{}`) — see T2.
-- **Admin UI** — Rust/axum service. Fail-closed auth (see T3). Reaches Docker
-  only through the scoped `docker-socket-proxy`.
+- **Admin UI** — Rust/axum service. Fail-closed auth (see T3). Has no Docker
+  access; it writes the desired state the watchdog in the `services`
+  container reads and acts on (see T6).
 - **DHCP** — optional, three mutually-exclusive modes (`disabled` / `kea` /
   `dnsmasq-proxy`) so clients receive the appliance's DNS automatically.
 - **NATS event bus** — carries DNS record changes from the Admin UI to the
@@ -222,7 +223,8 @@ trusted-LAN assumption.
 ### T3: Unauthorized access to the Admin UI
 
 **Threat**: An attacker reaches the Admin UI and purges the cache, edits domain
-lists, switches DHCP mode, or drives the (scoped) Docker control path.
+lists, switches DHCP mode, or sets a desired service state the watchdog then
+applies.
 
 **Likelihood**: Low on a firewalled LAN; High if the UI port is exposed to an
 untrusted network · **Impact**: High
@@ -449,18 +451,18 @@ creates privileged containers or `exec`s into others, escaping to the host.
 sensitive) · **Impact**: Critical (full host compromise)
 
 **Mitigations / actual exposure** (verified in
-`deploy/prod/docker-compose.yml`):
-- The **Admin UI and watchdog do not mount the Docker socket directly.** They
-  reach Docker only through `docker-socket-proxy`, a HAProxy instance on an
-  `internal` `docker-api` network with a **deny-by-default allowlist**. It permits
-  only `_ping`/`version`, `inspect`/`logs`/`restart`/`start`/`stop` on a fixed set
-  of named `lancache-*` containers, and **explicitly denies** generic container
-  creation and `exec`. A compromised UI therefore cannot obtain a general Docker
-  API.
-- **However, one other service still holds direct socket access** and remains
-  part of this threat's real surface:
-  - `netdata` mounts `/var/run/docker.sock` **read-only** (for metrics).
-  A compromise of it bypasses the scoped proxy.
+`deploy/prod/docker-compose.yml` and `services/common/shared.rs`):
+- **The Admin UI has no Docker access.** It only writes the desired service
+  state; the watchdog reads it and acts. A compromised UI cannot call the
+  Docker API.
+- **The `services` container mounts the Docker socket read-write, with no
+  socket proxy.** Its watchdog process is the only Docker API client in the
+  code (`DockerApi`: container list of the compose project, inspect, start,
+  stop, restart). The mount is visible to every process in that container
+  (watchdog, syslog-ng, chronyd, netdata, retention), and the socket itself
+  grants the full Docker API, so a compromise of the `services` container is a
+  host compromise. The container drops all capabilities except the list in
+  `deploy/prod/docker-compose.yml`.
 - **Scheduled automatic updates (#819) do not add a new socket-access
   surface.** Unlike the removed Watchtower helper (which mounted the socket
   **read-write** in its own container for image updates), the update
@@ -469,11 +471,10 @@ sensitive) · **Impact**: Critical (full host compromise)
   running `setup.sh update` already has -- no container is granted expanded
   Docker-socket or filesystem access to perform it.
 
-**Residual risk**: Low-Medium — the primary control-plane path (UI) is well
-contained; residual risk concentrates in netdata's read-only socket access.
-Removing Watchtower (#819) eliminated the one read-write in-container socket
-exposure this threat previously had to accept as a real, documented
-trade-off.
+**Residual risk**: Medium — the network-facing control-plane path (UI) has no
+Docker reach; the risk concentrates in the `services` container, whose
+read-write socket mount gives any compromised process in it the full Docker
+API.
 
 ---
 
@@ -798,8 +799,8 @@ tagging each release, then update the top marker and the
    - `services/dns/nats-subscriber/`, and the `nats` service block +
      `deploy/prod/docker-compose.nats-secondary.yml`
    - `deploy/prod/docker-compose.yml`
-     — especially every service that mounts `/var/run/docker.sock` and the
-     `docker-socket-proxy` HAProxy ACLs.
+     — especially every service that mounts the Docker socket (SOT
+     `DOCKER_SOCKET`) and every caller of `DockerApi`.
 2. **For each component, confirm the mitigations still match the code** —
    fail-closed guards, allowlists, iptables scoping, credential roles. If a
    mitigation was narrowed, broadened, renamed, or removed, rewrite the affected
@@ -835,9 +836,9 @@ deliberately trades some guarantees (it MITMs client HTTPS in HTTPS mode; it tru
 every LAN device) for caching performance, while keeping the *control plane*
 fail-closed: the Admin UI, NATS credentials, the PowerDNS API key, the Kea Control Agent,
 DDNS updates, and secondary registration all refuse to start in an
-insecure/unauthenticated state unless the operator explicitly opts out. The Docker control path for the Admin UI
-is mediated by a deny-by-default socket proxy, though netdata (read-only)
-retains direct socket access. Scheduled automatic updates run on the host
+insecure/unauthenticated state unless the operator explicitly opts out. The Admin UI
+has no Docker access; only the `services` container mounts the Docker socket,
+read-write, for its watchdog. Scheduled automatic updates run on the host
 via `systemd`, not as a container, so they add no socket-access surface.
 
 The operator remains responsible for:

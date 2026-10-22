@@ -102,17 +102,17 @@ This section documents intentional security design decisions and known tradeoffs
 
 **What is not spoofed**: Web browsers, corporate networks, banking, or other general-purpose traffic.
 
-### 3. Docker Socket Mount in UI Container
+### 3. Docker Socket Mount in the services Container
 
-**Design**: The Admin UI container mounts the Docker daemon socket (`/var/run/docker.sock`) to allow container management.
+**Design**: The `services` container mounts the Docker daemon socket (SOT `DOCKER_SOCKET`, read-write, no socket proxy) for its watchdog process, the one component that starts, stops, restarts and inspects containers (`DockerApi` in `services/common/shared.rs`). The Admin UI container has no socket; it only writes the desired state the watchdog reads.
 
-**Known Risk**: The Docker socket is a privileged interface — any process with access can run arbitrary containers with full host privileges.
+**Known Risk**: The Docker socket is a privileged interface — any process with access can run arbitrary containers with full host privileges. The mount is visible to the whole `services` container (watchdog, syslog-ng, chronyd, netdata, retention), so a compromise of that container is a host compromise.
 
 **Mitigation**:
-- Enable authentication for the Admin UI before production deployment
+- The `services` container drops all capabilities except the list in `deploy/prod/docker-compose.yml`
+- The Admin UI cannot reach Docker; enable its authentication before production deployment
 - Configure Docker rootless mode on the host if available
-- Restrict network access to the Admin UI (do not expose to untrusted networks)
-- Use network policies or firewall rules to limit Admin UI access to trusted IPs
+- Restrict network access to the Admin UI and the `services` ports (do not expose them to untrusted networks)
 
 ### 4. Admin UI Authentication Must Be Explicit
 

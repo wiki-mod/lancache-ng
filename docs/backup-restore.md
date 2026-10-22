@@ -46,7 +46,7 @@ Use this when moving to new hardware or when losing cached objects would be expe
 
 The automated manifest includes these paths when they exist:
 
-- install configuration: the active runtime env file (`.env` or `deploy/prod/.env.local`), `docker-compose.yml`; manual `deploy/prod` backups also include the repository-root runtime inputs reached via `../../` (`config/prod/`, `services/dns/cdn-domains.txt`, and `scripts/untracked/docker-socket-proxy.sh`) because production compose mounts or reads those tracked files outside `deploy/prod/`
+- install configuration: the active runtime env file (`.env` or `deploy/prod/.env.local`), `docker-compose.yml`; manual `deploy/prod` backups also include the repository-root runtime inputs `deploy/prod/docker-compose.yml` reaches via `../../` and that exist in the checkout (today `services/dns/cdn-domains.txt`), because production compose mounts those tracked files outside `deploy/prod/`
 - Docker named volumes discovered from the compose project, including stopped containers so PowerDNS and NATS volumes are included; the cache volume (`<project>_proxy-cache`) is skipped in `--config` mode and only archived in `--full` mode, matching the cache-directory scope described above, since Docker reports that volume's mount type as "volume" even though it is bind-backed under the hood
 - an `image-revisions.txt` file with the image revisions present before an update pulls new tags
 - PowerDNS state from Docker named volumes, the production state root `LANCACHE_STATE_DIR`, optional `PDNS_DIR` and `PDNS_FILTER_STATE_DIR`, and the legacy PowerDNS and filter-state directories below `/srv/lancache` when present
