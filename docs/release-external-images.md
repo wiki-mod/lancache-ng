@@ -7,16 +7,15 @@ see [docs/release-versioning.md](release-versioning.md) for that process --
 its own "External Images" section links back here for the per-image table
 and provenance/SBOM handling below.
 
-Reviewed against the current release pipeline (`.github/workflows/build-push.yml`)
-and `release/stack-images.yml`: the image list, digests, and the provenance/SBOM
-status below are accurate as of this writing (re-verified when per-image SBOM
-generation and the OpenVEX vulnerability-disposition document were added, refs
-#1130).
+The source for every image name and pin below is the SOT
+`.github/yaml/build-manifest.yml`; `.github/scripts/ci.sh` and
+`.github/workflows/release.yml` read it. This document names the SOT keys
+and does not copy their values.
 
 ## Policy
 
-First-party images are stack release artifacts and are tracked in
-`release/stack-images.yml`.
+First-party images are stack release artifacts: every SOT `services` entry
+(`dhcp`, `dns`, `proxy`, `services`, `ui`) and the `build_toolchain` target.
 
 External images are third-party dependencies. They must be handled by the least
 risky option that still supports the deployment profile:
@@ -31,13 +30,22 @@ Mutable external tags are not authoritative release records.
 
 ## Current External Images
 
-| Image | Role | Current policy |
+| SOT key | Role | Current policy |
 | --- | --- | --- |
-| `nats:2-alpine@sha256:c11af972c99ae542de8925e6a7d9c533aa1eb039660420d2074beed6089b3bf0` | DNS record sync message bus | Digest-pinned |
-| `tecnativa/docker-socket-proxy@sha256:1f3a6f303320723d199d2316a3e82b2e2685d86c275d5e3deeaf182573b47476` | Docker API guard for UI/watchdog | Digest-pinned |
-| `netdata/netdata@sha256:a130dbbf3d6e6a5472efdebaa123797190a5822627e908106d34edae02bc8a74` | Optional monitoring helper | Digest-pinned |
-| `busybox:stable-musl@sha256:3c6ae8008e2c2eedd141725c30b20d9c36b026eb796688f88205845ef17aa213` | Minimal base for the stack channel pointer image | Digest-pinned |
-| `rust:latest` | Build-tools base image | Allowed for build-tools only when provenance records the resolved base digest |
+| `base_images.alpine` | Final base of every first-party image and of the build-tools image; `setup.sh` helper image | Digest-pinned |
+| `base_images.buildkit` | BuildKit builder of the CI build step | Digest-pinned |
+
+nginx, PowerDNS, NATS, syslog-ng, chrony, netdata, Kea and dnsmasq are apk
+packages inside the first-party images (nginx from the nginx.org Alpine
+repository), not separate external images; the per-image SBOM lists them.
+
+Two `uses: docker://` steps in `.github/workflows/ci.yml` and
+`.github/workflows/nightly.yml` must name the `base_images.alpine` value
+literally, because a workflow `uses:` cannot read the SOT. `ci.sh check all`
+fails any `docker://` step that is not a SOT `base_images` pin, and the
+`stable-external-images` check fails any compose image outside the
+`LANCACHE_*` first-party refs that is not digest-pinned or not a SOT
+`base_images` pin (`CI-ERROR-CHECK-0014`).
 
 ## Provenance And SBOM Expectations
 
@@ -56,8 +64,7 @@ The target evidence set is:
 Current status:
 
 - **Provenance** attestations are pushed to GHCR for every first-party image
-  digest and the stack channel-pointer digest (see "Verifying Release
-  Provenance" below).
+  digest (see "Verifying Release Provenance" below).
 - **SBOMs** are generated per released first-party image digest by the
   `release-sbom` job in `.github/workflows/release.yml` (`ci.sh
   release-sbom-stack`). That job runs on release tags, resolves each `vX.Y.Z`
@@ -65,17 +72,17 @@ Current status:
   against that digest, and attaches the result to the GitHub release for the
   tag as a `<service>.cdx.json` asset. The covered set is every build target of
   the SOT (`services` plus `build_toolchain` in
-  `.github/yaml/build-manifest.yml`). The `stack` channel-pointer image is
-  excluded on purpose: it is a busybox pointer image, not a compiled software
-  asset, and is not vulnerability-scanned either.
+  `.github/yaml/build-manifest.yml`).
 - **VEX** (vulnerability disposition) for accepted findings is published as the
   `vex.openvex.json` release asset, regenerated fresh from the tag's own
   `.trivyignore.yaml` at release time — see "Vulnerability Disposition (VEX)"
   below.
 
-Because a release re-run is idempotent (the release job replaces same-named
-assets rather than duplicating them), re-running a tag's release workflow
-backfills SBOM and VEX assets for a release cut before this job existed.
+A release re-run never replaces an attached asset: an SBOM or VEX asset that
+is already attached must equal the one derived now, else the job fails; a
+missing one is uploaded and read back. Re-running a tag's release workflow
+therefore backfills SBOM and VEX assets for a release cut before this job
+existed.
 
 For mirrored or repackaged external images, the mirrored artifact must carry the
 project's own provenance and SBOM for the mirrored digest.
@@ -85,8 +92,7 @@ metadata must record the approved upstream digest.
 
 ## Verifying Release Provenance
 
-Every first-party image digest (every build target of the SOT and the `stack`
-channel-pointer image) gets a
+Every first-party image digest (every build target of the SOT) gets a
 [GitHub Artifact Attestation](https://docs.github.com/en/actions/security-guides/using-artifact-attestations-to-establish-provenance-for-builds)
 pushed to GHCR alongside it (the `release-provenance` job in
 `.github/workflows/release.yml`, wrapping `actions/attest`; `ci.sh
@@ -103,15 +109,9 @@ the GitHub CLI:
 ```bash
 # Resolve the tag to its immutable digest first (attestation verification is
 # digest-based, not tag-based, since a mutable tag like `latest` is not itself
-# a fixed subject). Use the immutable `sha-<commit>` tag -- the one tag scheme
-# guaranteed to exist for every first-party image build, per this document's
-# "Core Rule" (see docs/release-versioning.md) -- rather than assuming a
-# per-service `vX.Y.Z` tag was published for a given release; those "may still
-# exist for human inspection" per the promotion pipeline but are not the
-# guaranteed path setup/update itself relies on. Find the exact `sha-<commit>`
-# for a given stable release from that release's own notes/CHANGELOG.md entry,
-# or from `stack.env` inside the matching `ghcr.io/.../stack:<channel>` pointer
-# image (see "Setup And Update Selection" in docs/release-versioning.md).
+# a fixed subject). The "Images" block of the release notes lists every image
+# of the release with its digest; the immutable `sha-<commit>` tag (full
+# 40-hex commit) names the same digest for the release commit.
 digest=$(docker inspect --format='{{index .RepoDigests 0}}' \
   ghcr.io/wiki-mod/lancache-ng/proxy:sha-<commit>)
 
@@ -126,11 +126,9 @@ A successful verification prints the workflow run, repository, and commit SHA
 that produced the image -- this is the "expected identity of the person or
 process authoring the release" for lancache-ng: a specific GitHub Actions
 workflow run in this repository, not an individual's personal signing key.
-Repeat the same two commands with any other first-party service name and
-`sha-<commit>` tag (or a `vX.Y.Z` tag, when one has actually been published
-for that image -- confirm with `docker manifest inspect` or the GHCR package
-page first, since per-service release tags are not guaranteed the way
-`sha-<commit>` is) to verify that image instead. If `gh attestation verify`
+Repeat the same two commands with any other first-party image name and its
+`sha-<commit>` or `vX.Y.Z` tag (promotion moves `vX.Y.Z` for every image of
+the release in one stack-atomic step) to verify that image instead. If `gh attestation verify`
 reports no matching attestation, or reports a builder identity outside
 `wiki-mod/lancache-ng`, treat the image as unverified and do not deploy it.
 
@@ -187,7 +185,7 @@ procedure, or published deployment document. Keep at least the current stable
 release and two previous stable release digests for first-party images and any
 mirrored external image they depend on.
 
-The stable release workflow enforces this conservatively: supported deployment
-profiles must not move `latest` while external image references are still
-floating. Pin by digest, mirror, or remove the external helper from the stable
-profile before publishing a stable release.
+A floating external reference cannot reach a channel: `ci.sh check all` runs
+the `stable-external-images` check on every CI run, and promotion runs only
+after a green run. Pin by digest in the SOT `base_images`, mirror, or remove
+the external helper from the deployment profile.

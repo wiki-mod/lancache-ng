@@ -9,40 +9,29 @@ lancache-ng releases are stack releases. Runtime service images are not promoted
 independently for operator consumption. A consumable channel tag must identify a
 coherent stack built from the same source commit and the same release gate.
 
-The first-party runtime package set is:
+The first-party runtime package set is the SOT `services` list in
+`.github/yaml/build-manifest.yml`:
 
+- `services` (watchdog, syslog-ng, chrony, netdata, retention and cachehamster)
 - `proxy`
-- `dns`
-- `watchdog`
-- `dhcp`
-- `dhcp-proxy`
-- `ntp`
+- `dns` (PowerDNS, dns-http, dns-https and NATS)
+- `dhcp` (Kea or dnsmasq proxy/relay, one mode at a time)
 - `ui`
-- `syslog`
-- `cachehamster` (issue #871; Steam cache-warming prefill scaffold, opt-in via
-  the `cachehamster` Compose profile, default off -- not yet functional
-  end-to-end)
 
-The first-party tooling package is:
-
-- `build-tools`
+The first-party tooling package is the SOT `build_toolchain` target
+(`build-tools`).
 
 (issue #1556 added a second tooling package, `utilities`, a shared
 non-compiler CLI-tools image consumed via `COPY --from=` by seven
 first-party images; issue #1781 removed it again -- each former consumer
 now `apk add`s its own copy of what it used to `COPY` instead.)
 
-The first-party metadata package is:
+There is no metadata or pointer package. A channel is the same tag on every
+first-party image, moved together by one promotion (see Promotion below).
 
-- `stack`
-
-`stack` is not a runtime service. It is the single mutable channel pointer used
-by setup/update to resolve `latest` or `nightly` to one immutable `sha-*`
-runtime image set.
-
-The authoritative machine-readable inventory is
-`release/stack-images.yml`. Workflows, release notes, setup behavior, and docs
-must stay consistent with that file.
+The authoritative machine-readable inventory is the SOT
+`.github/yaml/build-manifest.yml`. Workflows, release notes, setup behavior,
+and docs must stay consistent with it.
 
 ## Channels
 
@@ -53,7 +42,7 @@ must stay consistent with that file.
 | `vX.Y.Z-rc.N` | Release candidate | Immutable | Pre-release validation; GitHub release must be marked prerelease |
 | `vX.Y.Z` | Stable release | Immutable | Production release pinning |
 | `latest` | Latest stable release, published continuously from `master` | Mutable | Default stable install path |
-| `stable` | Operator-facing name for the same channel `latest` publishes | Mutable | `setup.sh`'s interactive channel picker (#819); no separate `stack:stable` GHCR tag exists -- `stable` and `latest` resolve to the identical pointer image |
+| `stable` | Operator-facing name for the same channel `latest` publishes | Mutable | `setup.sh`'s interactive channel picker (#819); no separate `stable` GHCR tag exists -- `stable` is the SOT alias of `latest` (`release.channels.latest.aliases`) and resolves to the same tags |
 
 `nightly`'s history: renamed from `edge` in v0.3.0 (#1056); re-pointed from
 `master` to `current_dev` in v0.3.0 (#825/#1141); changed from "republished on
@@ -87,28 +76,23 @@ like Firefox Nightly, not republished on every push."
 - **After:** a plain `current_dev` push no longer moves the `nightly`
   channel tag. It still builds, scans, and publishes that commit's durable
   per-service `sha-<commit>` tags exactly as before (unaffected). `nightly`
-  refreshes:
-  - once a day via `.github/workflows/nightly-refresh.yml`'s `schedule`
-    trigger (`0 1 * * *` = 01:00 UTC = 02:00 CET winter / 03:00 CEST
-    summer -- GitHub Actions cron has no timezone concept, so this one-hour
-    seasonal drift is deliberately accepted, matching `build-push.yml`'s own
-    daily `latest` schedule);
-  - on-demand via that same workflow's `workflow_dispatch`, or via
-    `build-push.yml`'s pre-existing `channel: nightly` `workflow_dispatch`
-    input dispatched directly against `current_dev`.
-  - Either path runs `build-push.yml`'s full pipeline (build, test, scan,
-    then `promote`) against `current_dev`'s tip, so `nightly` stays
-    green-gated and fail-closed by construction: `promote` only runs after
-    `merge-manifests` succeeds, so a broken `current_dev` tip never reaches
-    `promote` and `nightly` holds its last good state.
+  refreshes through `.github/workflows/nightly.yml`:
+  - once a day via its `schedule` trigger (`23 3 * * *` = 03:23 UTC =
+    04:23 CET winter / 05:23 CEST summer -- GitHub Actions cron has no
+    timezone concept, so this one-hour seasonal drift is deliberately
+    accepted);
+  - on-demand via its `workflow_dispatch`.
+  - Either path validates the accepted `current_dev` stack and then runs
+    `ci.sh promote nightly`; it never rebuilds `current_dev`. Promotion
+    refuses an incomplete or not validated stack, so a broken `current_dev`
+    tip never reaches `nightly` and `nightly` holds its last good state.
 - **Known gap:** GitHub's `schedule:` trigger only fires from a workflow file
   as it exists on the default branch (`master`), so the daily cron does not
-  start firing until `nightly-refresh.yml` itself is merged to `master` --
-  until then (and whenever it lags `current_dev` afterward), `nightly`
-  refreshes only via manual dispatch. Per AG-CI-019 (AGENTS.md) this is not
-  an accepted long-term tradeoff: it must reach `master` via its own sync PR
-  in reasonably short order, the same sync obligation `build-push.yml`'s own
-  daily `latest` schedule already carries.
+  start firing until `nightly.yml` itself is merged to `master` -- until
+  then (and whenever it lags `current_dev` afterward), `nightly` refreshes
+  only via manual dispatch. Per AG-CI-019 (AGENTS.md) this is not an accepted
+  long-term tradeoff: it must reach `master` via its own sync PR in
+  reasonably short order.
 - This change does not affect #808's untouched-service PR backfill
   correctness guarantee -- that mechanism no longer depends on `nightly`
   staying continuously fresh at all (see Promotion below).
@@ -147,9 +131,9 @@ operator to switch to `nightly`, rather than being silently accepted.
 channel names: `nightly` (default pre-1.0) and `stable`, each with an inline
 explanation of what it means.
 
-- `stable` is not a new GHCR tag -- `resolve_lancache_stack_channel_tag` maps
-  it onto the existing `latest` pointer before pulling, so introducing it
-  required no change to the promotion/release pipeline.
+- `stable` is not a new GHCR tag -- `setup.sh` maps it onto the `latest`
+  tags before pulling (SOT `release.channels.latest.aliases`), so
+  introducing it required no change to the promotion/release pipeline.
 - `pinned` remains a valid `LANCACHE_IMAGE_CHANNEL` value (env var / `.env`,
   or the secondary-node registration flow) but is not offered by the
   interactive picker -- it is a request for one specific immutable tag, not
@@ -160,12 +144,12 @@ label were originally on `stable`, matching the plan when this channel was
 introduced (#819) for a project expected to soon cut a stable release. In
 practice, pre-1.0 lasted long enough that this silently walked a new
 operator's "just press enter" choice into a `docker pull` failure
-(`stack:latest` does not exist yet, since it is the same pointer `stable`
-maps to). The default and recommendation were changed to `nightly` for as
-long as this project has no stable release; `stable` remains a fully valid,
-non-removed answer -- choosing it explicitly pre-1.0 still hits
-`resolve_lancache_stack_channel_tag`'s clear explanation rather than a raw
-Docker error, and it automatically becomes the right default again once a
+(no `latest` tag exists yet, and `stable` maps to it). The default and
+recommendation were changed to `nightly` for as long as this project has no
+stable release; `stable` remains a fully valid, non-removed answer --
+choosing it explicitly pre-1.0 still hits `setup.sh`'s clear explanation
+("Cannot resolve the 'stable' release channel") rather than a raw Docker
+error, and it automatically becomes the right default again once a
 real `vX.Y.Z` stable release exists and moves `latest`. The Admin UI's own
 channel selector (`services/ui/src/main.rs` / `setup.html`) needs no
 equivalent change: it only ever displays and edits an *existing* install's
@@ -174,14 +158,16 @@ already-resolved channel value, so it has no "default a new choice" moment.
 ## Promotion
 
 The release pipeline must build immutable `sha-<commit>` images first. Public
-service channel tags are promoted only after the full first-party package set
-has been built and checked. The single `stack` channel pointer is moved last.
+channel tags are promoted only after the full first-party package set has been
+built and checked.
 
 GHCR does not provide a true transaction that can atomically retag several
-packages. The project therefore treats `ghcr.io/.../stack:<channel>` as the
-authoritative mutable pointer for setup/update. Service channel tags may still
-exist for human inspection, but setup resolves the stack pointer to an immutable
-`sha-*` before pulling services.
+packages. `ci.sh promote` therefore moves every image's channel tag inside one
+promote lock (the git ref `CI_PROMOTE_LOCK_REF/<channel>` in the SOT), moves
+nothing for an incomplete or not validated stack, and moves already moved tags
+back to their earlier digest when a later move fails. `setup.sh` reads every
+image's channel digest twice while that lock is free and pins each image to
+its digest only when both reads are equal (see Setup And Update Selection).
 
 The promotion flow is:
 
@@ -227,16 +213,19 @@ Default behavior:
   `LANCACHE_IMAGE_TAG`
 - missing image selector values are added during migration
 
-Mutable channels are resolved through the single stack pointer image:
+Mutable channels are resolved per image:
 
 ```text
-ghcr.io/wiki-mod/lancache-ng/stack:<channel>
+ghcr.io/wiki-mod/lancache-ng/<image>:<channel>
 ```
 
-That image contains `stack.env`, including the immutable `sha-*` tag for the
-coherent first-party image set. Setup resolves `latest` and `nightly`
-through this pointer before `docker compose pull`, so a user install/update does
-not consume per-service mutable tags while a promotion is in progress.
+For every `LANCACHE_IMAGE_REF_*` image of `deploy/prod/docker-compose.yml`,
+`setup.sh` reads the channel tag's digest twice while the channel's promote
+lock is free. Only two equal reads count; it then writes
+`LANCACHE_IMAGE_REF_<NAME>=<image>@<digest>` for each image, so Docker Compose
+pulls digests, never a mutable tag, and an install/update never mixes two
+stacks while a promotion is in progress. A held lock or two different reads
+retry after `CI_LOCK_POLL_SECONDS`, at most `CI_PROMOTE_LOCK_MAX` times.
 
 `LANCACHE_IMAGE_REGISTRY` and `LANCACHE_IMAGE_PREFIX` are the registry and image
 namespace selectors. Their defaults are:

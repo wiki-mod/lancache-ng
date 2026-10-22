@@ -730,14 +730,16 @@ LANCACHE_IMAGE_TAG=sha-<resolved-by-setup>
 
 `KEEP_KNOWN_GOOD_CONFIGS` (default `3`) controls how many validated nginx/dnsmasq/PowerDNS configurations are kept for automatic rollback if a newly generated config fails validation at container startup. It also controls how many known-good Kea DHCP config snapshots the Admin UI keeps for operator-selected rollback (see the DHCP settings page). See [docs/known-good-config-snapshots.md](docs/known-good-config-snapshots.md).
 
-`LANCACHE_IMAGE_CHANNEL` controls the mutable stack channel. `stable` (default)
-and `latest` both mean the same released channel — `stable` is the friendlier
-name `setup.sh`'s interactive picker offers, `latest` is the original name and
-remains valid. Use `nightly` only when you explicitly want the most recently
-built, less tested pre-stable channel (renamed from `edge` in v0.3.0).
-`setup.sh` resolves mutable channels
-through the `stack` pointer image and writes the immutable `LANCACHE_IMAGE_TAG`
-that Docker Compose pulls. If you install from a tagged release archive or a
+`LANCACHE_IMAGE_CHANNEL` controls the mutable stack channel. `nightly` (the
+pre-1.0 default, SOT `release.default_channel`; renamed from `edge` in v0.3.0)
+is the tested pre-stable channel from `current_dev`. `stable` and `latest`
+both mean the same released channel — `stable` is the friendlier name
+`setup.sh`'s interactive picker offers, `latest` is the original name and
+remains valid.
+`setup.sh` resolves a mutable channel by reading every first-party image's
+channel digest twice while no promotion runs, and writes each image as
+`LANCACHE_IMAGE_REF_<NAME>=<image>@<digest>`, which Docker Compose pulls
+(see [docs/release-versioning.md](docs/release-versioning.md)). If you install from a tagged release archive or a
 checked-out `vX.Y.Z` / `vX.Y.Z-rc.N` tag, set `LANCACHE_IMAGE_CHANNEL=pinned`
 and `LANCACHE_IMAGE_TAG` to that same release tag so the running containers
 match the source tree.
