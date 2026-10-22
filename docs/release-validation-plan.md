@@ -331,8 +331,9 @@ use a real Linux host, e.g. over SSH to a self-hosted runner, per
   resolve to the proxy IP (RPZ), and a private name must give `SERVFAIL` until its zone is
   listed in `DNS_UPSTREAM_UNSIGNED_ZONES`, after which `dig @<IP_STANDARD> <private name>`
   returns the resolver's answer. An invalid value (host name, loopback, a LanCache
-  address, a zone served locally, an unsigned zone outside the forwarded zones) must stop
-  the dns container at start with a `FATAL` line. Reverse lookups of LAN addresses stay
+  address, a zone served locally, an unsigned zone outside the forwarded zones) must
+  be rejected by `setup.sh` when typed; the dns container must start without an upstream and log an `ERROR` line.
+  Reverse lookups of LAN addresses stay
   with the local authoritative server and are not answered by the upstream resolver.
 
 ### 3. DHCP — all three modes

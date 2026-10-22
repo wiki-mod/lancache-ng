@@ -102,7 +102,7 @@ This section documents intentional security design decisions and known tradeoffs
 
 **What is not spoofed**: Web browsers, corporate networks, banking, or other general-purpose traffic.
 
-**Optional upstream resolver**: If an operator sets `DNS_UPSTREAM_SERVERS`, the recursors forward the configured zones (default every name) to those resolvers instead of resolving them from the root servers. DNSSEC validation stays on for forwarded names; only the zones the operator lists in `DNS_UPSTREAM_UNSIGNED_ZONES` (private zones without signatures) are exempt, and the configured resolver is trusted for them. The settings are operator-only and empty by default; the DNS container refuses loopback addresses, LanCache addresses and malformed entries at start.
+**Optional upstream resolver**: If an operator sets `DNS_UPSTREAM_SERVERS`, the recursors forward the configured zones (default every name) to those resolvers instead of resolving them from the root servers. DNSSEC validation stays on for forwarded names; only the zones the operator lists in `DNS_UPSTREAM_UNSIGNED_ZONES` (private zones without signatures) are exempt, and the configured resolver is trusted for them. The settings are operator-only and empty by default; `setup.sh` and the DNS container reject loopback addresses, LanCache addresses and malformed entries; the container then starts without an upstream and logs an error.
 
 ### 3. Docker Socket Mount in UI Container
 
