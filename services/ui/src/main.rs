@@ -2095,9 +2095,11 @@ fn soa_serial(buf: &[u8]) -> Option<u32> {
     Some(u32::from_be_bytes(buf.get(at..at + 4)?.try_into().ok()?))
 }
 
-// What: classify an lan. SOA answer for the operator.
+// What: classify a zone's SOA answer for the operator.
 // Why: AA flag and RCODE tell served-here from relayed.
-fn classify_soa(buf: &[u8], expected_id: u16) -> Result<ProbeResult, String> {
+// From: Issue #1683 | PR #1912
+fn classify_soa(buf: &[u8], expected_id: u16, zone: &str) -> Result<ProbeResult, String> {
+    let zone = canonical_zone(zone);
     if buf.len() < 12 {
         return Err("short DNS response (<12 bytes)".to_string());
     }
@@ -2113,27 +2115,27 @@ fn classify_soa(buf: &[u8], expected_id: u16) -> Result<ProbeResult, String> {
     let (status, detail, serial) = match buf[3] & 0x0F {
         0 if authoritative && answers => (
             "ok",
-            "answered authoritatively for lan. (SOA present)".to_string(),
+            format!("answered authoritatively for {zone} (SOA present)"),
             serial,
         ),
         0 if answers => (
             "not_authoritative",
-            "returned an lan. answer but without the authoritative (AA) flag".to_string(),
+            format!("returned an {zone} answer but without the authoritative (AA) flag"),
             serial,
         ),
         0 => (
             "error",
-            "NOERROR but no answer for lan. SOA".to_string(),
+            format!("NOERROR but no answer for {zone} SOA"),
             None,
         ),
         5 => (
             "no_zone",
-            "REFUSED -- host is not authoritative for lan. (zone not configured?)".to_string(),
+            format!("REFUSED -- host is not authoritative for {zone} (zone not configured?)"),
             None,
         ),
         2 => (
             "broken",
-            "SERVFAIL -- lan. zone present but the host failed to answer".to_string(),
+            format!("SERVFAIL -- {zone} zone present but the host failed to answer"),
             None,
         ),
         other => (
@@ -2179,7 +2181,7 @@ async fn probe_secondary_soa(any: &str, addr: Ipv4Addr, port: u16, lan_zone: &st
         socket.send(&query).await.map_err(|e| e.to_string())?;
         let mut buf = [0u8; 512];
         let n = socket.recv(&mut buf).await.map_err(|e| e.to_string())?;
-        classify_soa(&buf[..n], id)
+        classify_soa(&buf[..n], id, lan_zone)
     };
     let unreachable = |detail: String| ProbeResult {
         status: "unreachable",
@@ -4879,8 +4881,9 @@ async fn set_ptr_record(
     }
 }
 
-// What: a LAN record name as a dotted FQDN in zone lan.
-// Why: the bare name "lan" is the zone root, not lan.lan.
+// What: a LAN record name as a dotted FQDN in lan_zone.
+// Why: the bare zone name is the zone root, no child.
+// From: Issue #1683 | PR #1912
 fn normalize_lan_name(name: &str, lan_zone: &str) -> String {
     let name = name.trim().to_lowercase();
     if name.ends_with('.') {
@@ -5210,6 +5213,12 @@ async fn domains_page(
             .and_then(|code| domain_error_message(code)),
     );
     ctx.insert("zone_snapshot_retention", &cfg.kea_keep_known_good_configs);
+    // What: the zone names the page text and examples show.
+    // Why: common config.rs owns them; no copy in markup.
+    // From: Issue #1683 | PR #1912
+    ctx.insert("lan_zone", &canonical_zone(&cfg.lan_zone));
+    ctx.insert("reverse_zones", &reverse_zones());
+    ctx.insert("rollback_zones", &config::rollback_zones(&cfg.lan_zone));
     render(&state, "domains.html", &ctx)
 }
 
@@ -5301,7 +5310,8 @@ async fn add_lan_record(State(state): Shared, Form(f): Form<Fields>) -> Redirect
 }
 
 // What: delete a LAN record set through NATS.
-// Why: any type may be deleted; the name must be in lan.
+// Why: any type may be deleted; name must be in lan_zone.
+// From: Issue #1683 | PR #1912
 async fn remove_lan_record(State(state): Shared, Form(f): Form<Fields>) -> Redirect {
     let name = normalize_lan_name(f.get("name"), &state.config.lan_zone);
     let (Some(kind), true) = (

@@ -116,7 +116,7 @@
             {{ <text_field label="Listen interface (optional)" name="dhcp_proxy_interface" value={dhcp_proxy_interface} placeholder="eth0" hint="Bind dnsmasq to one host interface instead of all of them. Leave empty on a single-NIC host."/> }}
             {{ <text_field label="Router/gateway option (optional, PXE-scoped)" name="dhcp_proxy_router" value={dhcp_proxy_router} placeholder="10.0.0.1"/> }}
             {{ <text_field label="NTP servers (optional, PXE-scoped)" name="dhcp_ntp_servers" value={dhcp_ntp_servers} placeholder="10.0.0.20, 10.0.0.21" hint="Comma-separated IPv4 list."/> }}
-            {{ <text_field label="Domain option (optional, PXE-scoped)" name="dhcp_proxy_domain" value={dhcp_proxy_domain} placeholder="lan.local"/> }}
+            {{ <text_field label="Domain option (optional, PXE-scoped)" name="dhcp_proxy_domain" value={dhcp_proxy_domain} placeholder={dhcp_domain}/> }}
             {{ <text_field label="PXE boot filename (optional)" name="dhcp_proxy_boot_filename" value={dhcp_proxy_boot_filename} placeholder="pxelinux.0"/> }}
             {{ <text_field label="PXE boot server address (optional)" name="dhcp_proxy_boot_server" value={dhcp_proxy_boot_server} placeholder="10.0.0.5" hint="Requires a boot filename above; defaults to this host's own address if left empty while a filename is set."/> }}
             <div class="col-span-2">
