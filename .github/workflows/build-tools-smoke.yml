@@ -396,7 +396,7 @@ jobs:
             -v "$PWD:/work:ro" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            bash -lc 'set -euo pipefail; if command -v parallel >/dev/null; then bats --jobs 16 --no-parallelize-within-files tests/bats; else echo "::notice::parallel is unavailable; running Bats serially."; bats tests/bats; fi'
+            bash -lc 'set -euo pipefail; bats tests/bats'
 
       # Mirrors build-tools.yml's identically-named step exactly.
       - name: Run ShellSpec setup fixtures
