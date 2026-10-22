@@ -22,46 +22,62 @@
 # project's image actually vendors -- not assumed from a version banner,
 # which PR #1352's own evaluation found to be a `-DEV` string that doesn't
 # obviously map to a released version), extract CURL_VERSION, and compare it
-# against CURL_SAFE_THRESHOLD below.
+# against the minimum safe version read from the manifest (see below).
 #
-# CURL_SAFE_THRESHOLD provenance (curl's own vulnerability data,
-# https://curl.se/docs/vuln.json, checked 2026-10-22): every one of the 7
-# CVE IDs issue #1304 tracks (CVE-2026-12064, CVE-2026-8286, CVE-2026-8927,
-# CVE-2026-8932, CVE-2026-9079, CVE-2026-9080, CVE-2026-9545) affects curl
-# 8.17.0 up to (excluding) 8.20.1 and is fixed in 8.20.1 and in 8.21.0 --
-# i.e. 8.20.1 is the lowest fixed version for every curl release this
-# netdata line can vendor. This is a snapshot of that one specific,
-# already-known CVE set, not a live feed: if curl discloses a NEW CVE with a
-# later fixed version, this script's hardcoded threshold goes stale
-# silently, since it has no way to know about a CVE that doesn't exist in
-# this comment yet. Whoever bumps NETDATA_VERSION in
-# services/netdata/Dockerfile must re-check curl's own vulnerability list
-# (https://curl.se/docs/vulnerabilities.html) at that time and bump
-# CURL_SAFE_THRESHOLD (and this comment's date) if a newer curl release has
-# fixed something new since 2026-10-22.
-#
-# Standing exception (AG-KD-003, tool-specific, no deadline): the affected
-# state is real today. Checked 2026-10-22: netdata v2.12.1 (latest release),
-# v2.12.0, v2.11.1 and netdata master vendor curl-8_20_0, this project's pin
-# v2.10.4 vendors curl-8_17_0; no netdata release vendors a fixed curl yet
-# (latest curl release: 8.23.0). The fix lives in netdata's own upstream
-# build recipe, not in this project's Dockerfile, so a hard failure here
-# would only turn this project's whole `validate-compose` gate red without
-# anything this repository can change (maintainer decision (c) on PR #1352:
-# "merge for the benefits, track the risk"). While the pinned curl is below
-# CURL_SAFE_THRESHOLD this check therefore reports a `::warning::` on every
-# run, non-blocking and without any date. The exception ends by itself: as
-# soon as a netdata release vendoring curl >= CURL_SAFE_THRESHOLD exists,
-# NETDATA_VERSION is bumped to it and this check prints OK.
+# The minimum safe curl version, the tracked CVE IDs and the written
+# justification of the standing exception (AG-KD-003, tool-specific, no
+# deadline) are data, not logic: they live in release/stack-images.yml under
+# `vendored_tool_pins` -> `netdata-curl` (the repository's single
+# machine-readable inventory, see docs/release-versioning.md) and are read
+# from there at run time. While the pinned curl is below the minimum this
+# check reports a standing `::warning::` on every run, non-blocking; as soon
+# as a netdata release vendoring a fixed curl exists, NETDATA_VERSION is
+# bumped to it and this check prints OK.
 set -euo pipefail
-
-CURL_SAFE_THRESHOLD="8.20.1"
-TRACKED_CVES=(CVE-2026-12064 CVE-2026-8286 CVE-2026-8927 CVE-2026-8932 CVE-2026-9079 CVE-2026-9080 CVE-2026-9545)
-TRACKED_CVES_SOURCE_DATE="2026-10-22"
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/.." && pwd)"
+manifest="${STACK_IMAGES_MANIFEST:-${repo_root}/release/stack-images.yml}"
 dockerfile="${1:-${repo_root}/services/netdata/Dockerfile}"
+
+# Reads one scalar field of the `netdata-curl` entry in the manifest's
+# `vendored_tool_pins` section (e.g. minimum_version).
+read_pin_field() {
+  local field="$1" value
+  value="$(awk -v field="${field}" '
+    $0 == "vendored_tool_pins:" { in_section=1; next }
+    in_section && /^[[:alnum:]_-]+:/ { in_section=0 }
+    in_section && $0 == "  - name: netdata-curl" { in_entry=1; next }
+    in_section && /^  - name: / { in_entry=0 }
+    in_entry && index($0, "    " field ": ") == 1 { sub("^    " field ": ", ""); print; exit }
+  ' "${manifest}")"
+  if [ -z "${value}" ]; then
+    echo "::error::Could not find vendored_tool_pins -> netdata-curl -> ${field} in ${manifest}" >&2
+    return 1
+  fi
+  printf '%s
+' "${value}"
+}
+
+# Reads the `tracked_cves` list of the same entry, one CVE ID per line.
+read_pin_cves() {
+  local cves
+  cves="$(awk '
+    $0 == "vendored_tool_pins:" { in_section=1; next }
+    in_section && /^[[:alnum:]_-]+:/ { in_section=0 }
+    in_section && $0 == "  - name: netdata-curl" { in_entry=1; next }
+    in_section && /^  - name: / { in_entry=0 }
+    in_entry && $0 == "    tracked_cves:" { in_list=1; next }
+    in_entry && in_list && /^      - / { sub(/^      - /, ""); print; next }
+    in_entry && in_list { in_list=0 }
+  ' "${manifest}")"
+  if [ -z "${cves}" ]; then
+    echo "::error::Could not find vendored_tool_pins -> netdata-curl -> tracked_cves in ${manifest}" >&2
+    return 1
+  fi
+  printf '%s
+' "${cves}"
+}
 
 # Parses `ARG NETDATA_VERSION=vX.Y.Z` out of services/netdata/Dockerfile.
 # Kept as its own function so tests can feed it a fixture Dockerfile
@@ -148,10 +164,14 @@ fetch_bundled_packages_version() {
 }
 
 main() {
-  local netdata_version bundled_packages_content curl_version
+  local netdata_version bundled_packages_content curl_version safe_threshold
+  local -a tracked_cves
+
+  safe_threshold="$(read_pin_field minimum_version)"
+  mapfile -t tracked_cves < <(read_pin_cves)
 
   netdata_version="$(extract_netdata_version "${dockerfile}")"
-  echo "Checking netdata ${netdata_version}'s pinned curl version against issue #1304's tracked CVE set (fixed at curl ${CURL_SAFE_THRESHOLD}, per curl.se as of ${TRACKED_CVES_SOURCE_DATE})..."
+  echo "Checking netdata ${netdata_version}'s pinned curl version against issue #1304's tracked CVE set (fixed at curl ${safe_threshold}, per ${manifest##*/} vendored_tool_pins -> netdata-curl)..."
 
   # Test hook: if BUNDLED_PACKAGES_CONTENT_FILE is set (bats fixtures use
   # this), read from that local file instead of hitting the real network --
@@ -167,15 +187,15 @@ main() {
   curl_version="$(extract_curl_version_tag "${bundled_packages_content}")"
   echo "netdata ${netdata_version} vendors curl ${curl_version} (from its own packaging/makeself/bundled-packages.version)."
 
-  if version_ge "${curl_version}" "${CURL_SAFE_THRESHOLD}"; then
-    echo "OK: ${curl_version} >= ${CURL_SAFE_THRESHOLD} -- not in the affected range for the tracked CVE set as of ${TRACKED_CVES_SOURCE_DATE}."
+  if version_ge "${curl_version}" "${safe_threshold}"; then
+    echo "OK: ${curl_version} >= ${safe_threshold} -- not in the affected range for the tracked CVE set."
     return 0
   fi
 
   local cve
   local finding_lines=()
-  finding_lines+=("netdata ${netdata_version} vendors curl ${curl_version}, which is BELOW the ${CURL_SAFE_THRESHOLD} fixed-version threshold for issue #1304's tracked CVE set:")
-  for cve in "${TRACKED_CVES[@]}"; do
+  finding_lines+=("netdata ${netdata_version} vendors curl ${curl_version}, which is BELOW the ${safe_threshold} fixed-version threshold for issue #1304's tracked CVE set:")
+  for cve in "${tracked_cves[@]}"; do
     finding_lines+=("  - ${cve} (see https://curl.se/docs/${cve}.html)")
   done
 
@@ -184,7 +204,7 @@ main() {
   for line in "${finding_lines[@]:1}"; do
     echo "::warning::${line}"
   done
-  echo "::warning::This is a known, standing exception (maintainer decision (c) on PR #1352, issue #1304; AG-KD-003) without a date: it ends when a netdata release vendoring curl >= ${CURL_SAFE_THRESHOLD} exists and NETDATA_VERSION is bumped to it. The statically-linked curl inside services/netdata's image is very likely still affected by these CVEs, invisible to Trivy."
+  echo "::warning::This is a known, standing exception (maintainer decision (c) on PR #1352, issue #1304; AG-KD-003) without a date (justification: ${manifest##*/} vendored_tool_pins -> netdata-curl -> statement): it ends when a netdata release vendoring curl >= ${safe_threshold} exists and NETDATA_VERSION is bumped to it. The statically-linked curl inside services/netdata's image is very likely still affected by these CVEs, invisible to Trivy."
   return 0
 }
 

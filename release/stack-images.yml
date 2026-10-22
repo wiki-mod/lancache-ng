@@ -173,3 +173,26 @@ external:
     image: busybox:stable-musl@sha256:3c6ae8008e2c2eedd141725c30b20d9c36b026eb796688f88205845ef17aa213
     policy: digest-pinned
     compose: []
+vendored_tool_pins:
+  - name: netdata-curl
+    consumer: scripts/check-netdata-curl-pin.sh
+    minimum_version: 8.20.1
+    tracked_cves:
+      - CVE-2026-12064
+      - CVE-2026-8286
+      - CVE-2026-8927
+      - CVE-2026-8932
+      - CVE-2026-9079
+      - CVE-2026-9080
+      - CVE-2026-9545
+    statement: >-
+      Standing exception under AG-KD-003 for the curl statically linked into
+      services/netdata's image (invisible to Trivy). Per curl's vulnerability
+      data (https://curl.se/docs/vuln.json) all tracked CVEs affect curl 8.17.0
+      up to, excluding, 8.20.1 and are fixed in 8.20.1 and 8.21.0. No netdata
+      release vendors a fixed curl yet: v2.12.1 (the latest release), v2.12.0,
+      v2.11.1 and netdata master vendor curl 8.20.0, the pinned v2.10.4 vendors
+      curl 8.17.0. The fix lives in netdata's own build recipe, not in this
+      repository, so the check only warns (maintainer decision (c) on PR #1352,
+      issue #1304). The exception ends when a netdata release vendoring curl at
+      or above minimum_version exists and NETDATA_VERSION is bumped to it.
