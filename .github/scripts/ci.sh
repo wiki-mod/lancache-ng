@@ -3671,28 +3671,46 @@ _ci_sccache_stop() {
     return "${frc}"
 }
 
+# What: test whether a /proc entry is gone or a zombie.
+# Why: a dead process has nothing left to stop or read.
+# From: Issue #1683 | PR #1912
+_ci_proc_dead() {
+    local stat_s state
+    if ! stat_s="$( { cat "$1/stat"; } 2>&1)"; then
+        REPLY="${stat_s}"
+        [ -e "$1" ] || return 0
+        return 2
+    fi
+    state="${stat_s##*) }"
+    [ "${state%% *}" = Z ]
+}
+
 # What: kill sccache servers under this run's socket dir.
 # Why: a server timed out on Redis keeps on running.
 # From: Issue #1683 | PR #1858
 _ci_sccache_reap() {
-    local dir="$1" p env_s stat_s state out rc=0
+    local dir="$1" p env_s pst out rc=0
     for p in /proc/[0-9]*; do
         [ -r "${p}/environ" ] || continue
         [ "$(cat "${p}/comm" 2>&1)" = sccache ] || continue
-        # What: a zombie is dead; nothing is left to stop.
+        # What: a gone or zombie server is dead; skip it.
         # Why: environ fails until the parent collects it.
         # From: Issue #1683 | PR #1912
-        if ! stat_s="$( { cat "${p}/stat"; } 2>&1)"; then
-            [ ! -e "${p}" ] || { ci_error "[CI-ERROR-CACHE-0019]" "pid=${p#/proc/} reason=\"sccache server stat unreadable\"" "${stat_s}"; rc=2; }
+        pst=0
+        _ci_proc_dead "${p}" || pst=$?
+        if [ "${pst}" -eq 2 ]; then
+            ci_error "[CI-ERROR-CACHE-0019]" "pid=${p#/proc/} reason=\"sccache server stat unreadable\"" "${REPLY}"
+            rc=2
             continue
         fi
-        state="${stat_s##*) }"
-        [ "${state%% *}" != Z ] || continue
-        # What: a pid gone before read or kill is skipped.
-        # Why: a stopped server exits while the scan runs.
+        [ "${pst}" -ne 0 ] || continue
+        # What: test again after a failed environ read.
+        # Why: a stopped server turns zombie after the test.
         # From: Issue #1683 | PR #1912
         if ! env_s="$( { tr '\0' '\n' < "${p}/environ"; } 2>&1)"; then
-            [ ! -e "${p}" ] || { ci_error "[CI-ERROR-CACHE-0011]" "pid=${p#/proc/} reason=\"sccache server environ unreadable\"" "${env_s}"; rc=2; }
+            pst=0
+            _ci_proc_dead "${p}" || pst=$?
+            [ "${pst}" -eq 0 ] || { ci_error "[CI-ERROR-CACHE-0011]" "pid=${p#/proc/} reason=\"sccache server environ unreadable\"" "${env_s}"; rc=2; }
             continue
         fi
         [[ $'\n'"${env_s}" == *$'\n'"SCCACHE_SERVER_UDS=${dir}/"* ]] || continue
