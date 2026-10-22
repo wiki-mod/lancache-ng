@@ -773,7 +773,7 @@ pub const MANAGED_OPTIONS: [ManagedOption; 5] = [
 ];
 
 // What: option codes the dedicated subnet fields own.
-// Why: derived from MANAGED_OPTIONS for the forms and pages.
+// Why: derived from MANAGED_OPTIONS for forms and pages.
 // From: Issue #1683 | PR #1912
 pub const KEA_MANAGED_CODES: [u16; 5] = [
     MANAGED_OPTIONS[0].code,

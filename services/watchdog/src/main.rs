@@ -3428,7 +3428,7 @@ fn dnsmasq_conf(set: &dyn Fn(&str) -> String, relay: bool, log_dhcp: bool) -> St
     );
     let primary = set("DHCP_DNS_PRIMARY");
     let secondary = set("DHCP_DNS_SECONDARY");
-    // What: the dhcp-option-pxe prefix of one managed option.
+    // What: dhcp-option-pxe prefix of one managed option.
     // Why: its code comes from the one ManagedOption owner.
     // From: Issue #1683 | PR #1912
     let pxe = |option: config::ManagedOption| format!("dhcp-option-pxe={},", option.code);

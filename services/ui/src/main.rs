@@ -3748,7 +3748,7 @@ fn is_dhcp4_option(option: &Value) -> bool {
         .is_none_or(|s| s == "dhcp4")
 }
 
-// What: true if a dhcp4 option is `managed`, by name or code.
+// What: dhcp4 option matches `managed` by name or code.
 // Why: Kea accepts either; both spell the same option.
 // From: Issue #1683 | PR #1912
 fn is_option(option: &Value, managed: ManagedOption) -> bool {
