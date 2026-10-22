@@ -1225,7 +1225,7 @@ runner_host:
   hooks_dir: "@{runner_host.opt_root}/lancache-ci-hooks"
   user: codex
   # What: archives from this size up are clone leftovers.
-  # Why: confirmed leftovers were 6.7 GB and 14.3 GB.
+  # Why: clone leftover archives are GB-sized.
   # From: Issue #1622
   stray_archive_min_bytes: 1073741824
   # What: cleanup log, its size cap, reap ages in hours.

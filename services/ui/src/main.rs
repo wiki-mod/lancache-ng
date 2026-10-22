@@ -302,6 +302,9 @@ impl Config {
         let https_ip = need("IP_HTTPS")?;
         let nats_url = need("NATS_URL")?;
         let tag = need("LANCACHE_IMAGE_TAG")?;
+        // What: an unset or blank channel derives from the tag.
+        // Why: a tag-only install names no channel of its own.
+        // From: Issue #1683 | PR #1912
         let channel = set("LANCACHE_IMAGE_CHANNEL")
             .filter(|v| !v.trim().is_empty())
             .unwrap_or_else(|| derive_image_channel(&tag));
@@ -323,6 +326,9 @@ impl Config {
                 .or_else(|| config::dhcp_dns_fallback(env, key))
                 .unwrap_or_default()
         };
+        // What: a real DHCP_API_TOKEN, else KEA_CTRL_TOKEN.
+        // Why: compose maps it; a placeholder must not be used.
+        // From: Issue #1683 | PR #1912
         let dhcp_api_token = match env("DHCP_API_TOKEN") {
             Some(v) if !is_placeholder(&v) => v,
             _ => secret("KEA_CTRL_TOKEN")?,
@@ -513,7 +519,7 @@ impl Config {
         DhcpMode::parse(&self.setting("DHCP_MODE"))
     }
 
-    // What: the cache size an operator requested, in GB.
+    // What: requested cache size in GB; junk = current size.
     // Why: differs from cache_max_gb until proxy recreate.
     // From: Issue #1683 | PR #1858
     fn requested_cache_gb(&self) -> f64 {
@@ -542,6 +548,9 @@ impl Config {
                 Some((_, value)) => value.clone(),
                 None => config::saved_setting(file, key).unwrap_or_default(),
             };
+            // What: write only keys that have a value.
+            // Why: an absent key falls back to the startup value.
+            // From: Issue #1683 | PR #1912
             if !value.trim().is_empty() {
                 content.push_str(&format!("{key}={}\n", value.trim()));
             }
@@ -657,6 +666,9 @@ fn nats_port(nats_url: &str) -> Option<&str> {
 fn ensure_shared_secrets(dir: &str, gid: u32, prefix: &str) -> Result<(), String> {
     for var in SHARED_SECRET_VARS.iter().filter(|v| v.starts_with(prefix)) {
         let configured = config::env_opt(var).unwrap_or_default();
+        // What: a placeholder counts as no configured value.
+        // Why: a checked-in placeholder must never be a secret.
+        // From: Issue #1683 | PR #1912
         let current = if is_placeholder(&configured) {
             ""
         } else {
@@ -940,7 +952,7 @@ async fn basic_auth(State(state): Shared, mut req: Request, next: Next) -> Respo
                 let (u, p) = creds.split_once(':')?;
                 Some((u.to_owned(), p.to_owned()))
             });
-        // What: the Argon2id check runs off the async pool.
+        // What: Argon2id check off the async pool; a panic denies.
         // Why: it is CPU and memory heavy by design.
         // From: Issue #1683 | PR #1912
         let valid = match presented {
@@ -970,11 +982,17 @@ async fn basic_auth(State(state): Shared, mut req: Request, next: Next) -> Respo
     let needs_cookie = existing.is_none();
     let session =
         existing.unwrap_or_else(|| issue_session(&state.ui_session_secret, state.ui_session_ttl));
+    // What: hand the CSRF token on to the page handlers.
+    // Why: page_ctx puts it into every form of the page.
+    // From: Issue #1683 | PR #1858
     if let Ok(value) = HeaderValue::from_str(&session.csrf_token) {
         req.headers_mut()
             .insert(HeaderName::from_static(INTERNAL_CSRF_HEADER), value);
     }
 
+    // What: only state-changing methods need a CSRF token.
+    // Why: a GET changes nothing; every form posts.
+    // From: Issue #1683 | PR #1858
     let mutating = matches!(
         *req.method(),
         Method::POST | Method::PUT | Method::PATCH | Method::DELETE
@@ -1007,6 +1025,9 @@ async fn basic_auth(State(state): Shared, mut req: Request, next: Next) -> Respo
     } else {
         next.run(req).await
     };
+    // What: set a cookie only for a new session.
+    // Why: a valid cookie keeps its expiry and its token.
+    // From: Issue #1683 | PR #1858
     if needs_cookie {
         attach_session_cookie(&mut response, &session, state.ui_session_ttl, secure_cookie);
     }
@@ -1101,6 +1122,9 @@ fn insert_dhcp_mode(ctx: &mut Context, mode: DhcpMode) {
 // Why: every page's forms need the live session's token.
 // From: Issue #1683 | PR #1858
 fn page_ctx(headers: &HeaderMap, active: &str) -> Context {
+    // What: no token renders the forms without one, logged.
+    // Why: the CSRF layer then refuses their posts.
+    // From: Issue #1683 | PR #1858
     let token = headers
         .get(INTERNAL_CSRF_HEADER)
         .and_then(|v| v.to_str().ok())
@@ -1459,7 +1483,7 @@ const KIB: u64 = 1_024;
 const MIB: u64 = 1_048_576;
 const GIB: u64 = 1_073_741_824;
 
-// What: size of an allowed directory in GiB, 0 if refused.
+// What: GiB size of an allowed dir; 0 if refused or unread.
 // Why: the shared tree walk sums it; no links.
 // From: Issue #1683 | PR #1912
 fn du_gb(path: &str) -> f64 {
@@ -1551,6 +1575,9 @@ async fn nginx_status(client: &reqwest::Client, url: &str) -> Option<NginxStatus
         .text()
         .await
         .ok()?;
+    // What: a missing or junk counter reads as 0.
+    // Why: one bad line must not hide the other counters.
+    // From: Issue #1683 | PR #1858
     let number = |token: Option<&str>| token.and_then(|t| t.parse().ok()).unwrap_or(0);
     let mut status = NginxStatus::default();
     let mut lines = text.lines();
@@ -1717,6 +1744,9 @@ fn log_stats(dir: &str) -> LogStats {
         }
     }
     stats.total_bytes_gb = total_bytes as f64 / GIB as f64;
+    // What: a hit percent only with one request or more.
+    // Why: no request must not divide by zero.
+    // From: Issue #1683 | PR #1858
     if stats.total_requests > 0 {
         stats.hit_pct = stats.hits as f64 / stats.total_requests as f64 * 100.0;
     }
@@ -1839,6 +1869,9 @@ fn parse_syslog_line(host: &str, line: &str) -> Option<SyslogEntry> {
 // Why: every host with data shows before the early stop.
 // From: Issue #1683 | PR #1858
 fn syslog_tail(root: &str, host: Option<&str>, limit: usize) -> Vec<SyslogEntry> {
+    // What: a zero limit returns no entry at once.
+    // Why: no file is read for an empty view.
+    // From: Issue #1683 | PR #1858
     if limit == 0 {
         return vec![];
     }
@@ -1896,6 +1929,9 @@ fn fair_window(collected: Vec<SyslogEntry>, limit: usize) -> Vec<SyslogEntry> {
     for entry in collected {
         by_host.entry(entry.host.clone()).or_default().push(entry);
     }
+    // What: no entry gives an empty window.
+    // Why: the floor below divides by the host count.
+    // From: Issue #1683 | PR #1858
     if by_host.is_empty() {
         return vec![];
     }
@@ -1942,6 +1978,9 @@ fn syslog_stats(root: &str) -> SyslogStats {
         };
         let mut days: HashSet<String> = HashSet::new();
         for entry in fs::read_dir(&dir).into_iter().flatten().flatten() {
+            // What: count regular files only.
+            // Why: a subdir or a vanished entry holds no log day.
+            // From: Issue #1683 | PR #1858
             let Ok(meta) = entry.metadata() else { continue };
             if !meta.is_file() {
                 continue;
@@ -2105,6 +2144,9 @@ async fn netdata_proxy(
         .await
         .map_err(|_| StatusCode::BAD_GATEWAY)?;
     let status = upstream.status().as_u16();
+    // What: an absent content type is sent as JSON.
+    // Why: both allowed netdata paths answer JSON.
+    // From: Issue #1683 | PR #1858
     let content_type = upstream
         .headers()
         .get(reqwest::header::CONTENT_TYPE)
@@ -2223,6 +2265,9 @@ fn soa_serial(buf: &[u8]) -> Option<u32> {
 // From: Issue #1683 | PR #1912
 fn classify_soa(buf: &[u8], expected_id: u16, zone: &str) -> Result<ProbeResult, String> {
     let zone = canonical_zone(zone);
+    // What: refuse a short, foreign or non-response packet.
+    // Why: only the answer to our own query is classified.
+    // From: Issue #1683 | PR #1858
     if buf.len() < 12 {
         return Err("short DNS response (<12 bytes)".to_string());
     }
@@ -2510,6 +2555,9 @@ fn auth_callout_response(
     authorized: Option<&str>,
 ) -> Result<String, String> {
     let now = unix_secs() as i64;
+    // What: refuse to sign with a clock at the epoch.
+    // Why: iat and exp would be wrong in every issued JWT.
+    // From: Issue #1683 | PR #1858
     if now == 0 {
         return Err("system clock is set before the Unix epoch".to_string());
     }
@@ -2580,6 +2628,9 @@ async fn answer_auth_callout(
     };
     let request = decode_jwt_payload(&String::from_utf8_lossy(&plain))?;
     let nats = &request["nats"];
+    // What: a missing request field reads as empty text.
+    // Why: an empty user or password never authorizes.
+    // From: Issue #1683 | PR #1858
     let field = |value: &Value| value.as_str().unwrap_or_default().to_string();
     let user = field(&nats["connect_opts"]["user"]);
     let authorized = authorize_secondary(state, &user, &field(&nats["connect_opts"]["pass"]));
@@ -2648,6 +2699,9 @@ async fn run_auth_callout(state: Arc<AppState>, issuer: KeyPair, xkey: XKey) {
 // From: Issue #681
 async fn kick_secondary(state: &AppState, nats_user: &str) -> Result<usize, String> {
     const STEP: Duration = Duration::from_secs(5);
+    // What: no system user configured fails the kick.
+    // Why: only the system account may list and kick.
+    // From: Issue #1683 | PR #1912
     if state.config.nats.sys.user.is_empty() {
         return Err("NATS_SYS_USER is not configured".to_string());
     }
@@ -2688,6 +2742,9 @@ async fn kick_secondary(state: &AppState, nats_user: &str) -> Result<usize, Stri
         .into_iter()
         .flatten()
     {
+        // What: skip a listed connection without a cid.
+        // Why: KICK addresses a connection by its cid only.
+        // From: Issue #1683 | PR #1912
         let Some(cid) = conn["cid"].as_u64() else {
             continue;
         };
@@ -2824,6 +2881,9 @@ async fn secondaries_page(
         })?
         .collect::<Result<Vec<_>, _>>()
     })
+    // What: a failed read lists no secondary, logged.
+    // Why: the page still shows the registration command.
+    // From: Issue #1683 | PR #1912
     .unwrap_or_else(|e| {
         tracing::error!("secondaries not read: {e}");
         Vec::new()
@@ -2856,6 +2916,9 @@ async fn register_secondary(
     if !registration_token_ok(&state, &form.token) {
         return Err(StatusCode::UNAUTHORIZED);
     }
+    // What: a name is 1-32 letters, digits or dashes.
+    // Why: it becomes the NATS user and consumer name.
+    // From: Issue #1683 | PR #1858
     let valid_name = !form.name.is_empty()
         && form.name.len() <= 32
         && form
@@ -2875,6 +2938,9 @@ async fn register_secondary(
         );
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     };
+    // What: refuse without the shared DDNS TSIG key.
+    // Why: the secondary needs it; fail before any DB write.
+    // From: Issue #1683 | PR #1912
     let tsig_path = Path::new(&state.config.shared_secret_dir).join("ddns-tsig-key");
     let ddns_tsig_key = fs::read_to_string(&tsig_path)
         .map(|key| key.trim().to_string())
@@ -2929,6 +2995,9 @@ async fn remove_secondary(
     let removed = with_db(&state, |db| {
         db.execute("DELETE FROM secondaries WHERE name = ?", [&name])
     })?;
+    // What: no deleted row means no such secondary.
+    // Why: a 404 tells a typo from a removal.
+    // From: Issue #1683 | PR #1858
     if removed == 0 {
         return Err(StatusCode::NOT_FOUND);
     }
@@ -2959,6 +3028,9 @@ async fn set_secondary_address(
             [addr.to_string(), name.clone()],
         )
     })?;
+    // What: no updated row means no such secondary.
+    // Why: a 404 tells a typo from a stored change.
+    // From: Issue #1683 | PR #1858
     if changed == 0 {
         return Err(StatusCode::NOT_FOUND);
     }
@@ -2981,6 +3053,9 @@ async fn check_secondary_health(
         .optional()
     })?
     .ok_or(StatusCode::NOT_FOUND)?;
+    // What: no private address on record: no_address.
+    // Why: the probe may only reach private addresses.
+    // From: Issue #1683 | PR #1858
     let Some(addr) = stored.as_deref().and_then(parse_private_ipv4) else {
         return Ok(Json(json!({
             "status": "no_address",
@@ -3045,6 +3120,9 @@ async fn rotate_token(
             [&hash, &name],
         )
     })?;
+    // What: no updated row means no such secondary.
+    // Why: no new password is handed out for a typo.
+    // From: Issue #1683 | PR #1858
     if changed == 0 {
         return Err(StatusCode::NOT_FOUND);
     }
@@ -3203,6 +3281,9 @@ async fn kea_post(
     arguments: Option<&Value>,
 ) -> Result<Value, String> {
     let mut body = json!({"command": command, "service": ["dhcp4"]});
+    // What: attach arguments only when the command has any.
+    // Why: commands like config-get take no arguments.
+    // From: Issue #1683 | PR #1912
     if let Some(arguments) = arguments {
         body["arguments"] = arguments.clone();
     }
@@ -3250,6 +3331,9 @@ enum Kea {
 // From: Issue #1683 | PR #1912
 fn kea_outcome(reply: &Value) -> Kea {
     let first = reply.get(0);
+    // What: a reply without text reads as "Kea error".
+    // Why: the operator still sees that Kea refused.
+    // From: Issue #1683 | PR #1912
     let text = first
         .and_then(|r| r.get("text"))
         .and_then(Value::as_str)
@@ -3296,6 +3380,9 @@ async fn kea_run(
 // From: Issue #1683 | PR #1858
 async fn kea_config(state: &AppState) -> Result<Value, String> {
     let mut config = kea_run(state, "config-get", None).await?;
+    // What: refuse a config-get reply without arguments.
+    // Why: an empty config must never be tested or set.
+    // From: Issue #1683 | PR #1912
     if config.is_null() {
         return Err("config-get: missing arguments".into());
     }
@@ -3782,9 +3869,15 @@ fn validate_subnet(f: &Fields, limits: &LeaseLimits) -> Result<(u32, (u32, u32))
     let end = address("pool_end", "Invalid pool end address.")?;
     let gateway = address("gateway", "Invalid gateway address.")?;
     address("dns_primary", "Invalid primary DNS address.")?;
+    // What: the second DNS server is checked only when set.
+    // Why: an empty field means one DNS server only.
+    // From: Issue #1683 | PR #1858
     if !f.get("dns_secondary").is_empty() {
         address("dns_secondary", "Invalid secondary DNS address.")?;
     }
+    // What: pool and gateway in the subnet; start <= end.
+    // Why: a pool outside its subnet serves no client.
+    // From: Issue #1683 | PR #1912
     let inside = |ip: Ipv4Addr| u32::from(ip) & cidr.1 == cidr.0;
     if !(inside(start) && inside(end) && inside(gateway)) || u32::from(start) > u32::from(end) {
         return Err(
@@ -3792,10 +3885,16 @@ fn validate_subnet(f: &Fields, limits: &LeaseLimits) -> Result<(u32, (u32, u32))
                 .into(),
         );
     }
+    // What: a set NTP field needs at least one entry.
+    // Why: a list of separators only names no server.
+    // From: Issue #1683 | PR #1912
     let ntp = f.get("ntp_servers");
     if !ntp.is_empty() && split_list(ntp).is_empty() {
         return Err("Invalid NTP servers: use a list of addresses or host names.".into());
     }
+    // What: a set domain must be a plain DNS name.
+    // Why: it lands in the domain-name and search options.
+    // From: Issue #1683 | PR #1912
     let domain = f.get("domain");
     if !domain.is_empty() && !is_valid_domain_name(domain) {
         return Err(
@@ -3877,6 +3976,9 @@ fn apply_subnet(
     options.push(json!({"name": "domain-name-servers", "data": dns}));
     options.push(json!({"name": "domain-name", "data": f.get("domain")}));
     options.push(json!({"name": "domain-search", "data": f.get("domain")}));
+    // What: an NTP option only when servers are given.
+    // Why: an unset field means no NTP option for clients.
+    // From: Issue #1683 | PR #1858
     if !ntp.is_empty() {
         options.push(json!({"name": "ntp-servers", "data": ntp}));
     }
@@ -3907,6 +4009,9 @@ fn apply_subnet(
     object.insert("option-data".into(), Value::Array(options));
     object.insert("valid-lifetime".into(), json!(lease));
     object.insert("max-valid-lifetime".into(), json!(max_lifetime));
+    // What: drop the dhcpd lease-time key names.
+    // Why: the valid-lifetime keys above replace them.
+    // From: Issue #1683 | PR #1858
     object.remove("default-lease-time");
     object.remove("max-lease-time");
     // What: drop a subnet-level reservation id list.
@@ -4008,6 +4113,9 @@ fn edit_custom_option(
             } else {
                 let before = options.len();
                 options.retain(|o| !same(o));
+                // What: nothing removed means no such option.
+                // Why: kea_modify maps this error to a 404.
+                // From: Issue #1683 | PR #1858
                 if options.len() == before {
                     return Err(KEA_OPTION_MISSING);
                 }
@@ -4030,6 +4138,9 @@ fn set_subnet_ntp(subnet: &mut Value, servers: &str) -> Result<(), &'static str>
             && (text_of(o, "name", "") == "ntp-servers"
                 || o.get("code").and_then(Value::as_u64) == Some(42)))
     });
+    // What: an NTP option only when servers are given.
+    // Why: no servers means no NTP option for clients.
+    // From: Issue #1683 | PR #1858
     if !servers.is_empty() {
         options.push(json!({"name": "ntp-servers", "data": servers}));
     }
@@ -4220,6 +4331,9 @@ async fn add_reservation(
 ) -> Result<Redirect, HtmlError> {
     require_kea(&state)?;
     let (mac, ip, hostname) = (f.get("mac"), f.get("ip"), f.get("hostname"));
+    // What: refuse a bad MAC or IPv4 address.
+    // Why: no client would ever match such a reservation.
+    // From: Issue #1683 | PR #1858
     if !is_valid_mac(mac) || ipv4(ip).is_none() {
         return Err(invalid("Invalid MAC or IPv4 address."));
     }
@@ -4257,6 +4371,9 @@ async fn remove_reservation(
     Form(f): Form<Fields>,
 ) -> Result<Redirect, HtmlError> {
     require_kea(&state)?;
+    // What: refuse a malformed MAC.
+    // Why: the MAC is the only key of the removal.
+    // From: Issue #1683 | PR #1912
     if !is_valid_mac(f.get("mac")) {
         return Err(invalid("Invalid MAC address."));
     }
@@ -4286,6 +4403,9 @@ async fn update_dhcp_ddns(
     Form(f): Form<Fields>,
 ) -> Result<Redirect, HtmlError> {
     require_kea(&state)?;
+    // What: a missing or junk value turns DDNS off.
+    // Why: an unclear request must not enable updates.
+    // From: Issue #1683 | PR #1912
     let enabled = parse_bool(f.get("enabled")).unwrap_or(false);
     kea_modify(&state, move |config| {
         let ddns = config
@@ -4438,10 +4558,13 @@ async fn release_lease(State(state): Shared, Form(f): Form<Fields>) -> Result<Re
 // Why: the NTP auto toggle owns that option while it is on.
 // From: Issue #1079
 async fn sync_subnet_ntp(state: &AppState, auto: bool) -> Result<(), String> {
+    // What: nothing to sync outside Kea mode.
+    // Why: only Kea subnets carry the ntp-servers option.
+    // From: Issue #1683 | PR #1858
     if !kea_available(state) {
         return Ok(());
     }
-    // What: the LAN address if auto, else the default.
+    // What: LAN address if auto, else default; none on error.
     // Why: auto off hands the option back to one value.
     // From: Issue #1683 | PR #1858
     let servers = if auto {
@@ -4471,6 +4594,9 @@ async fn update_dhcp_mode(
     Form(f): Form<Fields>,
 ) -> Result<Redirect, HtmlError> {
     let raw = f.get("dhcp_mode").to_ascii_lowercase();
+    // What: refuse an unknown mode name.
+    // Why: only DhcpMode names may reach the settings file.
+    // From: Issue #1683 | PR #1912
     let Some(mode) = DhcpMode::from_name(&raw) else {
         return Err(dhcp_error(
             StatusCode::CONFLICT,
@@ -4517,6 +4643,9 @@ async fn update_dhcp_proxy(
             .filter(|s| !s.is_empty())
             .all(address)
     }
+    // What: both required fields must be IPv4 addresses.
+    // Why: the proxy mode cannot start without either.
+    // From: Issue #1683 | PR #1912
     let required: [(&str, &str); 2] = [
         (
             "dhcp_subnet_start",
@@ -4616,6 +4745,9 @@ async fn update_dhcp_relay(
     State(state): Shared,
     Form(f): Form<Fields>,
 ) -> Result<Redirect, HtmlError> {
+    // What: both relay fields must be IPv4 addresses.
+    // Why: the relay forwards between these two addresses.
+    // From: Issue #1683 | PR #1912
     if ipv4(f.get("dhcp_relay_local_addr")).is_none() {
         return Err(invalid(
             "Relay local address must be a valid IPv4 address (this relay's own IP on the client network).",
@@ -4871,6 +5003,9 @@ fn domain_rows(content: &str) -> Vec<DomainRow> {
                 is_default = false;
                 return None;
             }
+            // What: skip blank lines and comment lines.
+            // Why: neither is a list entry for the page.
+            // From: Issue #1683 | PR #1858
             if raw.is_empty() || raw.starts_with('#') {
                 return None;
             }
@@ -4926,6 +5061,9 @@ fn with_added(content: &str, entry: &CdnDomain) -> Option<String> {
         None => {}
     }
     let mut text = content.to_string();
+    // What: end the last line before appending.
+    // Why: the new entry must start on its own line.
+    // From: Issue #1683 | PR #1858
     if !text.is_empty() && !text.ends_with('\n') {
         text.push('\n');
     }
@@ -4989,6 +5127,9 @@ fn edit_domains(
 ) -> anyhow::Result<()> {
     let _guard = hold(&state.file_lock);
     let path = Path::new(&state.config.cdn_domains_file);
+    // What: a missing file reads empty only with create.
+    // Why: a removal must not create the list file.
+    // From: Issue #1683 | PR #1858
     let content = match fs::read_to_string(path) {
         Ok(content) => content,
         Err(e) if create && e.kind() == io::ErrorKind::NotFound => String::new(),
@@ -5034,6 +5175,9 @@ async fn flush_recursor_cache(state: &AppState, request: FlushRequest) {
     if let Err(err) = state.pdns.call(reqwest::Method::PUT, &url, None).await {
         tracing::warn!("cache flush of {url} failed: {err}");
     }
+    // What: publish the flush to every other DNS node.
+    // Why: a failed publish is logged; entries still expire.
+    // From: Issue #1683 | PR #1912
     let request = FlushRequest { domain, ..request };
     match serde_json::to_vec(&request) {
         Ok(payload) => {
@@ -5282,6 +5426,9 @@ fn ptr_rows(rrsets: &[Value]) -> Vec<PtrRow> {
             continue;
         }
         let Some(address) = address else { continue };
+        // What: a missing ttl shows as 0.
+        // Why: a row without ttl still lists its PTR target.
+        // From: Issue #1683 | PR #1858
         let ttl = rrset.get("ttl").and_then(Value::as_u64).unwrap_or(0) as u32;
         for record in rrset
             .get("records")
@@ -5365,7 +5512,7 @@ async fn fetch_zone_groups(state: &AppState) -> Vec<ZoneSnapshotGroup> {
         .iter()
         .map(|(zone, list)| ZoneSnapshotGroup {
             zone: zone.clone(),
-            // What: skip entries without an id.
+            // What: skip id-less entries; no time reads as 0.
             // Why: an old listener degrades to fewer rows.
             // From: Issue #1683 | PR #1858
             snapshots: list
@@ -5453,12 +5600,18 @@ async fn domains_page(
     Query(query): Query<HashMap<String, String>>,
 ) -> Response {
     let cfg = &state.config;
+    // What: an unread CDN list shows an empty table.
+    // Why: the error is logged; the other lists still render.
+    // From: Issue #1683 | PR #1858
     let list = fs::read_to_string(&cfg.cdn_domains_file).unwrap_or_else(|e| {
         tracing::error!("CDN domain list {} not read: {e}", cfg.cdn_domains_file);
         String::new()
     });
     let rows = domain_rows(&list);
     let (lan, ptr, groups) = tokio::join!(
+        // What: unreadable LAN records show as none.
+        // Why: the error is logged; the other lists still render.
+        // From: Issue #1683 | PR #1912
         async {
             state
                 .pdns
@@ -5546,6 +5699,9 @@ async fn add_dns(State(state): Shared, Form(f): Form<Fields>) -> Result<Redirect
 // Why: a malformed line must stay removable by its text.
 // From: Issue #1683 | PR #1858
 async fn remove_dns(State(state): Shared, Form(f): Form<Fields>) -> Result<Redirect, StatusCode> {
+    // What: an empty or unusable delete target is a 400.
+    // Why: nothing to remove is named; no write happens.
+    // From: Issue #1683 | PR #1912
     let Some(target) = delete_target(f.get("domain")) else {
         tracing::warn!(domain = %f.get("domain"), "Rejected invalid dns domain delete");
         return Err(StatusCode::BAD_REQUEST);
@@ -5567,6 +5723,9 @@ async fn toggle_default_domain(
     State(state): Shared,
     Form(f): Form<Fields>,
 ) -> Result<Redirect, StatusCode> {
+    // What: an unparsable toggle target is a 400.
+    // Why: only a valid entry can carry the ! marker.
+    // From: Issue #1683 | PR #1912
     let Some(target) = parse_cdn_domain(f.get("domain")) else {
         tracing::warn!(domain = %f.get("domain"), "Rejected invalid dns domain toggle");
         return Err(StatusCode::BAD_REQUEST);
@@ -5584,6 +5743,9 @@ async fn toggle_default_domain(
 async fn add_lan_record(State(state): Shared, Form(f): Form<Fields>) -> Redirect {
     let name = normalize_lan_name(f.get("name"), &state.config.lan_zone);
     let ttl = form_ttl(&f);
+    // What: an invalid record is logged and not written.
+    // Why: only valid records may reach every DNS node.
+    // From: Issue #1683 | PR #1912
     let Some((kind, content)) = validate_lan_record(
         &name,
         f.get("record_type"),
@@ -5603,6 +5765,9 @@ async fn add_lan_record(State(state): Shared, Form(f): Form<Fields>) -> Redirect
 // From: Issue #1683 | PR #1912
 async fn remove_lan_record(State(state): Shared, Form(f): Form<Fields>) -> Redirect {
     let name = normalize_lan_name(f.get("name"), &state.config.lan_zone);
+    // What: a bad type or foreign name is logged, not sent.
+    // Why: the ui may only delete inside its own zone.
+    // From: Issue #1683 | PR #1912
     let (Some(kind), true) = (
         delete_record_type(f.get("record_type")),
         is_lan_name(&name, true, &state.config.lan_zone),
@@ -5622,6 +5787,9 @@ fn set_markers(state: &AppState, file: &str, enabled: bool) -> Result<(), Status
     let result = if enabled {
         write_file(&path, b"1", 0o644, Place::Replace)
     } else {
+        // What: an absent marker counts as cleared.
+        // Why: the wanted state, off, already holds.
+        // From: Issue #1683 | PR #1912
         match fs::remove_file(&path) {
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
             other => other,
@@ -5667,6 +5835,9 @@ async fn toggle_ddns_allow_unsigned_updates(
 // From: Issue #1683 | PR #1858
 async fn add_ptr_record(State(state): Shared, Form(f): Form<Fields>) -> Redirect {
     let ttl = form_ttl(&f);
+    // What: a bad address, target or ttl is not written.
+    // Why: only provisioned zones and real hosts are valid.
+    // From: Issue #1683 | PR #1912
     let (Some((zone, name)), Some(target), true) = (
         ptr_location(f.get("ip")),
         normalize_ptr_target(f.get("hostname")),
@@ -5683,6 +5854,9 @@ async fn add_ptr_record(State(state): Shared, Form(f): Form<Fields>) -> Redirect
 // Why: the key is the address; no other field is needed.
 // From: Issue #1683 | PR #1858
 async fn remove_ptr_record(State(state): Shared, Form(f): Form<Fields>) -> Redirect {
+    // What: an address outside the reverse zones is refused.
+    // Why: PowerDNS has no zone to delete the PTR from.
+    // From: Issue #1683 | PR #1912
     let Some((zone, name)) = ptr_location(f.get("ip")) else {
         tracing::warn!(ip = %f.get("ip"), "Rejected invalid PTR delete");
         return Redirect::to(PAGE_DOMAINS);
@@ -5704,6 +5878,9 @@ async fn blocking<T: Default + Send + 'static>(
     job: impl FnOnce(&AppState) -> T + Send + 'static,
 ) -> T {
     let state = state.clone();
+    // What: a failed job is logged and gives the empty value.
+    // Why: one broken collector must not fail the page.
+    // From: Issue #1683 | PR #1858
     match tokio::task::spawn_blocking(move || job(&state)).await {
         Ok(value) => value,
         Err(e) => {
@@ -5719,6 +5896,9 @@ async fn blocking<T: Default + Send + 'static>(
 async fn proxy_statuses(state: &AppState) -> (Option<NginxStatus>, Option<NginxStatus>) {
     let cfg = &state.config;
     let http = nginx_status(&state.http_client, &cfg.proxy_status_url).await;
+    // What: no https counters while HTTPS is off.
+    // Why: no https side runs that could report them.
+    // From: Issue #1683 | PR #1912
     let https = if cfg.https_enabled {
         http.clone()
     } else {
@@ -5748,6 +5928,9 @@ async fn dashboard(State(state): Shared, headers: HeaderMap) -> Response {
     // Why: a pending resize must not look applied.
     // From: Issue #1683 | PR #1858
     let requested_gb = cfg.requested_cache_gb();
+    // What: a zero cache size shows as 0 percent.
+    // Why: dividing by a zero size gives no percentage.
+    // From: Issue #1683 | PR #1912
     let percent = if cfg.cache_max_gb > 0.0 {
         (cache_used_gb / cfg.cache_max_gb * 100.0).min(100.0) as u64
     } else {
@@ -5902,6 +6085,9 @@ fn resize_rejection(cache_dir: &str, cache_gb: u64, avail_mib: u64) -> String {
 async fn resize_cache(State(state): Shared, Form(f): Form<Fields>) -> Result<Redirect, HtmlError> {
     let area = |status, message: String| HtmlError::new(status, &CACHE_AREA, message);
     let dir = &state.config.cache_dir;
+    // What: zero or a non-number is a 400.
+    // Why: a cache needs a positive whole size in GB.
+    // From: Issue #1683 | PR #1858
     let gb = f
         .number::<u64>("cache_gb")
         .filter(|gb| *gb > 0)
@@ -6044,6 +6230,9 @@ async fn update_stack_settings(
     Form(f): Form<Fields>,
 ) -> Result<Redirect, HtmlError> {
     let channel = f.get("lancache_image_channel");
+    // What: an unknown channel is a 400.
+    // Why: an unknown channel must not reach the settings.
+    // From: Issue #1683 | PR #1858
     if !is_valid_ui_channel(channel) {
         return Err(HtmlError::new(
             StatusCode::BAD_REQUEST,
@@ -6127,6 +6316,9 @@ async fn set_service_desired_state(
     AxPath(service): AxPath<String>,
     Json(body): Json<DesiredStateBody>,
 ) -> StatusCode {
+    // What: only dhcp or ntp, running or stopped, pass.
+    // Why: the watchdog knows no other service or state.
+    // From: Issue #1683 | PR #1858
     if !matches!(service.as_str(), "dhcp" | "ntp") {
         return StatusCode::NOT_FOUND;
     }
@@ -6151,6 +6343,7 @@ async fn set_service_desired_state(
         .and_then(|json| write_file(path, &json, 0o644, Place::Replace));
     stored_status(&format!("desired state for {service}"), written)
 }
+
 // What: minimum registration token length, in characters.
 // Why: this token alone gates remote registration.
 // From: Issue #1683 | PR #1858
@@ -6198,6 +6391,9 @@ fn registration_token(configured: &str, token_file: &str) -> Result<String, Stri
         configured.to_string()
     };
     let length = token.chars().count();
+    // What: a token under the minimum length is refused.
+    // Why: a short token could be guessed by a remote client.
+    // From: Issue #1683 | PR #1858
     if length < MIN_REGISTRATION_TOKEN_LEN {
         return Err(format!(
             "SECONDARY_REGISTRATION_TOKEN is only {length} character(s), below the required \
@@ -6262,6 +6458,9 @@ fn init_tracing() {
             None
         }
     };
+    // What: RUST_LOG, else info for the ui, warn for crates.
+    // Why: an unset filter must not mute the ui log.
+    // From: Issue #1683 | PR #1858
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| "lancache_ui=info,warn".into());
     tracing_subscriber::registry()
@@ -6298,6 +6497,9 @@ fn ui_written_dirs(cfg: &Config, log_file: &Path) -> Vec<PathBuf> {
             PathBuf::from(&cfg.kea_config_snapshot_dir),
         ])
         .chain(log_file.parent().map(Path::to_path_buf))
+        // What: drop the empty parent of a bare file name.
+        // Why: a bare name has no directory to own.
+        // From: Issue #1683 | PR #1858
         .filter(|dir| !dir.as_os_str().is_empty())
         .collect();
     dirs.sort();
@@ -6340,6 +6542,9 @@ fn container_root_start() {
     let euid = fs::metadata("/proc/self")
         .unwrap_or_else(|e| container_start_fatal(&format!("cannot read /proc/self: {e}")))
         .uid();
+    // What: a non-root start skips this and runs as is.
+    // Why: only root can chown and drop to the user.
+    // From: Issue #1683 | PR #1858
     if euid != 0 {
         return;
     }
@@ -6357,12 +6562,18 @@ fn container_root_start() {
     }
     let log_file = PathBuf::from(ui_log_file());
     for dir in ui_written_dirs(&cfg, &log_file) {
+        // What: a missing dir is skipped.
+        // Why: a volume not mounted has nothing to own.
+        // From: Issue #1683 | PR #1858
         if fs::symlink_metadata(&dir).is_ok()
             && let Err(e) = chown_tree(&dir, uid, gid)
         {
             container_start_fatal(&format!("cannot chown {}: {e}", dir.display()));
         }
     }
+    // What: a missing log dir keeps its modes unset.
+    // Why: init_tracing falls back to stdout then.
+    // From: Issue #1683 | PR #1858
     if let Some(log_dir) = log_file.parent()
         && log_dir.exists()
         && let Err(e) = open_log_dir_to_group(log_dir, gid)
@@ -6372,6 +6583,9 @@ fn container_root_start() {
     let exe = std::env::current_exe()
         .unwrap_or_else(|e| container_start_fatal(&format!("cannot locate own binary: {e}")));
     let mut args = std::env::args_os();
+    // What: argv0 falls back to the binary path.
+    // Why: an empty argv still needs a process name.
+    // From: Issue #1683 | PR #1858
     let argv0 = args.next().unwrap_or_else(|| exe.clone().into_os_string());
     let err = std::process::Command::new(&exe)
         .arg0(argv0)
@@ -6644,6 +6858,9 @@ fn hash_password_from_stdin() -> Result<String, String> {
         .read_line(&mut line)
         .map_err(|e| format!("cannot read the password: {e}"))?;
     let password = line.trim_end_matches(['\r', '\n']);
+    // What: an empty password is refused.
+    // Why: setup.sh must not store a hash of nothing.
+    // From: Issue #1683 | PR #1912
     if password.is_empty() {
         return Err("the password on stdin is empty".to_string());
     }
