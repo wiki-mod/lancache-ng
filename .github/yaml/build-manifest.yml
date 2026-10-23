@@ -130,7 +130,7 @@ services:
     # From: Issue #1683
     crates: [nats-subscriber, lancache-watchdog]
     processes: [pdns, dns-http, dns-https, nats-server, nats-subscriber, soa]
-    default_args: [CDN_DOMAINS_FILE, PDNS_LUA_DNS_SCRIPT, PDNS_SCHEMA_FILE]
+    default_args: [PDNS_LUA_DNS_SCRIPT, PDNS_SCHEMA_FILE]
     setup:
       - dir=@PDNS_CONF_DIR@/auth
       - dir=@PDNS_DATA_DIR@:pdns

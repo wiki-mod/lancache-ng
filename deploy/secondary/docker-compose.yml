@@ -35,6 +35,7 @@ services:
       - pdns-data:${SOT_PDNS_DATA_DIR}
       - pdns-filter-state:${SOT_DNS_STATE_DIR}
       - dns-config-snapshots:${SOT_DNS_SNAPSHOT_MOUNT}
+      - ./cdn-domains.txt:${SOT_CDN_DOMAINS_FILE}
     tmpfs:
       - ${SOT_SUPERVISE_RUN_DIR}
     # What: dns-https binds its own IP and host port.

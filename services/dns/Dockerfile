@@ -130,12 +130,6 @@ ARG PDNS_SCHEMA_FILE
 COPY services/dns/filter-aaaa.lua ${PDNS_LUA_DNS_SCRIPT}
 COPY services/dns/schema.sqlite3.sql ${PDNS_SCHEMA_FILE}
 
-# What: the CDN domain list at the path the SOT names.
-# Why: a replica has no bind mount; the image carries it.
-# From: Issue #1683 | PR #1912
-ARG CDN_DOMAINS_FILE
-COPY services/dns/cdn-domains.txt ${CDN_DOMAINS_FILE}
-
 # What: processes the supervisor runs, from the SOT.
 # Why: ci.sh passes the list; the image holds no copy.
 # From: Issue #1683
