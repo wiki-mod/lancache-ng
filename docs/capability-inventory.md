@@ -223,8 +223,8 @@ The service runs:
 * Kea Control Agent.
 * Kea DHCP-DDNS.
 
-The entrypoint owns configuration rendering, migrations, secret handling and
-process supervision.
+The supervisor binary (`services/watchdog`) owns configuration rendering,
+migrations, secret handling and process supervision.
 
 ### Admin UI capabilities
 
@@ -301,7 +301,7 @@ current exposed product surface.
 
 ### Purpose
 
-`services/dhcp-proxy` uses dnsmasq for two distinct modes:
+The `dhcp` image (`services/dhcp`) also runs dnsmasq for two distinct modes:
 
 * ProxyDHCP and PXE assistance alongside an existing DHCP server.
 * Real DHCP relay operation toward an upstream DHCP server.
@@ -361,8 +361,8 @@ configuration than full first-class UI controls.
 
 ### Purpose
 
-`services/nats` is the internal messaging and authentication backbone used by
-multiple LanCache-NG components.
+nats-server inside the `dns` container is the internal messaging and
+authentication backbone used by multiple LanCache-NG components.
 
 It is not an operator-facing message broker for arbitrary application traffic.
 
@@ -409,8 +409,9 @@ credential.
 
 ### Generated NATS configuration
 
-The UI generates the static NATS configuration required for the server,
-including the authentication callout and internal roles.
+The supervisor renders the static NATS configuration from the internal roles
+in `services/common/config.rs`; the UI writes only the authentication-callout
+fragment.
 
 Normal secondary registration, rotation and removal no longer require
 regenerating the entire NATS configuration for each credential change.
@@ -512,9 +513,7 @@ identity.
 
 `services/watchdog` provides stack health monitoring and controlled recovery.
 
-The production watchdog is implemented in Rust. The older Bash watchdog is
-historical implementation material and is not the current production control
-loop.
+The watchdog is implemented in Rust.
 
 ### Current capabilities
 
@@ -546,19 +545,12 @@ Destructive retention and pruning work is separated from the Rust health loop.
 The retention path has its own narrowly-scoped runtime environment instead of
 giving the main watchdog broad file-system mutation access.
 
-### Legacy Bash implementation
-
-`services/watchdog/watchdog.sh` remains in the repository for historical and
-supporting context, but the compiled Rust implementation is the production
-watchdog entrypoint.
-
 ## Netdata
 
 ### Purpose
 
-The `netdata` service (upstream image `netdata/netdata:latest`, no first-party
-build) provides system and service metrics used by the Admin UI and for direct
-operational diagnostics.
+Netdata inside the `services` container provides system and service metrics
+used by the Admin UI and for direct operational diagnostics.
 
 ### Current capabilities
 
@@ -604,14 +596,14 @@ reason for individual services to become silent.
 
 ### Purpose
 
-`services/ntp` provides a LAN NTP server using chrony.
+chronyd inside the `services` container provides a LAN NTP server.
 
 It can synchronize against configured upstream time sources and serve time to
 LAN clients on UDP port 123.
 
 ### Current implementation
 
-The image uses Alpine and the `chrony-nts` package.
+The `services` image installs Alpine's `chrony-nts` package.
 
 Installing the NTS-capable package preserves cryptographic NTS capability for
 future use even though the current LanCache-NG chrony configuration does not

@@ -889,17 +889,15 @@ Important paths:
 
 ```text
 deploy/prod/             Production compose used by setup.sh
-deploy/secondary/        Secondary DNS compose files
+deploy/secondary/        Secondary DNS compose file
 docs/                    Documentation
-scripts/                 Helper scripts
-services/dns/            DNS service
+services/watchdog/       services image: supervisor, syslog-ng, chrony, Netdata
 services/proxy/          Unified proxy for HTTP mode and HTTPS mode
+services/dns/            DNS image: PowerDNS, NATS, nats-subscriber
+services/dhcp/           DHCP image: Kea or dnsmasq proxy/relay
 services/ui/             Admin UI
-services/watchdog/       Watchdog service
-services/dhcp/           Kea DHCP service
-services/dhcp-proxy/     DHCP proxy service
-services/ntp/            LanCache-NG-NTP (chrony) service
-services/nats/           NATS sync service
+services/common/         Shared Rust crate
+services/cachehamster/   CacheHamster scaffold, built into services
 ```
 
 ## Common problems
