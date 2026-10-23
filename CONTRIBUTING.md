@@ -240,7 +240,7 @@ service you changed the same way (see "Building a single service image"
 below), matching the image reference `deploy/prod/docker-compose.yml`
 resolves by default (`ghcr.io/wiki-mod/lancache-ng/<service>:latest`, or
 whatever `LANCACHE_IMAGE_REGISTRY`/`LANCACHE_IMAGE_PREFIX`/`LANCACHE_IMAGE_TAG`
-you have set in `deploy/prod/.env`/`.env.local`), then run
+you have set in `deploy/prod/.env.local`), then run
 `docker compose -f deploy/prod/docker-compose.yml up -d` as usual — Compose's
 default pull policy only pulls an image that is missing locally, so a
 matching local tag is used as-is, with no push/pull round-trip required.

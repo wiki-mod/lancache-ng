@@ -55,7 +55,7 @@ Retention & Cleanup" below for what the Admin UI actually lets an operator
 change after initial setup — currently only `CACHE_MAX_SIZE`, via the
 dashboard's resize control, issue #1069 part 3):**
 
-`CACHE_MAX_SIZE` and `CACHE_MEM_MB` live in `deploy/prod/.env` (per install). The other defaults below come from `runtime.defaults` in `build-manifest.yml`; an operator overrides one in `.env.local`.
+`CACHE_MAX_SIZE` and `CACHE_MEM_MB` live in `deploy/prod/.env.local` (per install). The other defaults below come from `runtime.defaults` in `build-manifest.yml`; an operator overrides one in the same file.
 
 | Variable | Default | Description |
 |---|---|---|
