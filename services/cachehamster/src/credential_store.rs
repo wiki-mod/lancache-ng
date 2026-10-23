@@ -158,9 +158,9 @@ pub fn encrypt(
     let key = derive_key(master_secret, &salt)?;
     let cipher = XChaCha20Poly1305::new((&key).into());
     let nonce_bytes: [u8; NONCE_LEN] = rand::random();
-    let nonce = XNonce::from_slice(&nonce_bytes);
+    let nonce = XNonce::from(nonce_bytes);
     let ciphertext = cipher
-        .encrypt(nonce, plaintext)
+        .encrypt(&nonce, plaintext)
         .map_err(|e| anyhow::anyhow!("credential encryption failed: {e}"))?;
     Ok(EncryptedCredential {
         salt: salt.to_vec(),
@@ -184,9 +184,10 @@ pub fn decrypt(
 ) -> anyhow::Result<Vec<u8>> {
     let key = derive_key(master_secret, &stored.salt)?;
     let cipher = XChaCha20Poly1305::new((&key).into());
-    let nonce = XNonce::from_slice(&stored.nonce);
+    let nonce = XNonce::try_from(stored.nonce.as_slice())
+        .map_err(|_| anyhow::anyhow!("credential nonce has the wrong length"))?;
     cipher
-        .decrypt(nonce, stored.ciphertext.as_ref())
+        .decrypt(&nonce, stored.ciphertext.as_ref())
         .map_err(|e| {
             anyhow::anyhow!(
                 "credential decryption failed (wrong master secret, or data corrupted): {e}"

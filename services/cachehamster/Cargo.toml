@@ -47,7 +47,7 @@ futures-util = "0.3"
 # raw-KDF form (hash_password_into, not the PHC-string hash_password API)
 # to derive a symmetric encryption key -- a genuinely different use of the
 # same already-vetted crate, not a new hashing library.
-argon2 = "0.5"
+argon2 = "0.6"
 # AEAD encryption for the operator-supplied Steam credential at rest: no
 # existing project dependency does this (Argon2id above is one-way and
 # cannot recover a login-usable plaintext; see services/cachehamster/src/
@@ -56,7 +56,7 @@ argon2 = "0.5"
 # not the 96-bit ChaCha20Poly1305 variant, because nonces here are
 # randomly generated per encryption rather than counter-based (maintainer
 # decision, issue #871).
-chacha20poly1305 = "0.10"
+chacha20poly1305 = "0.11"
 rand = "0.10"
 hex = "0.4"
 anyhow = "1"
