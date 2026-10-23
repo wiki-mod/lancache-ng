@@ -571,7 +571,7 @@ below, per that same rule's "genuinely unautomatable case" carve-out):
   the live pipe entirely). The identical shape (`git log | tail | head -n 50`) was
   independently found and fixed the same session in PR #1371's
   `find_built_ancestor()`. New Standing check row above (`scripts/check-pipefail-
-  early-exit-grep.sh`, wired into the `shellcheck`/`shellcheck-hosted` jobs); a
+  early-exit-grep.sh`, wired into the `shellcheck` job); a
   proposed AGENTS.md rule for the general failure class (`AG-VAL-030`) was posted
   as a PR #1374 comment for maintainer review, per `AG-WF-025`.
 
