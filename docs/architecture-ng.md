@@ -424,15 +424,13 @@ to their actual source -- collected here rather than left as unexplained
 - **netdata: permission-denied on `/host/proc/<pid>/io` for nginx, and a
   missing `/etc/netdata/scripts.d`** -- two distinct findings bundled in the
   original report:
-  - The permission-denied error is **already fixed** (PR #1125, `pid: host`
-    in `deploy/*/docker-compose.yml`'s `netdata:` service, plus
-    `cap_add: SYS_PTRACE` and `security_opt: apparmor:unconfined`): without
-    `pid: host`, netdata's own PID namespace is merely a sibling of, not an
-    ancestor of, the host's, so the kernel's `ptrace_may_access` check for a
-    process outside netdata's own container fails with `Permission denied`
-    regardless of `SYS_PTRACE` -- this is netdata's own documented
-    requirement for `apps.plugin` to read other containers' `/proc/<pid>`
-    entries, not a project-specific workaround.
+  - The `/host/proc` message came from the former separate netdata
+    container. netdata now runs as a process inside the `services`
+    container, which mounts no host `/proc` and has no `pid: host`
+    (`deploy/prod/docker-compose.yml`, service `services`; its `cap_add`
+    lists `SYS_PTRACE`). netdata's `apps.plugin` therefore reads only the
+    processes of the `services` container; the nginx processes of `proxy`
+    are in another PID namespace and are not shown.
   - The missing `/etc/netdata/scripts.d` message is **netdata's own,
     harmless, expected behavior for an unused optional collector**, verified
     against netdata's own documentation (AG-VAL-023) rather than assumed:
@@ -442,10 +440,12 @@ to their actual source -- collected here rather than left as unexplained
     scripts anywhere, so the directory is legitimately absent, and netdata
     logs this the same way it reports any other optional, unconfigured
     external plugin at startup -- informational, not an error, and not
-    something this project's `netdata:` service needs to create or mount. An
+    something the `services` container needs to create or mount. An
     operator who wants to silence the message specifically (not required for
-    correct operation) can disable `scripts.d.plugin` in netdata's own
-    `netdata.conf` `[plugins]` section.
+    correct operation) would disable `scripts.d.plugin` in the `[plugins]`
+    section of `netdata.conf`. The watchdog writes that file on every
+    netdata start (`NETDATA_CONF` in `services/watchdog/src/main.rs`), so the
+    change belongs there.
 
 ## syslog-ng
 
@@ -631,12 +631,13 @@ one) rather than being a given.
   in the dashboard's "Service health" card, live-polled every 10 seconds
   (issue #870; see the "Status" note under Watchdog above)
 - Netdata alarm forwarding (bug-hunt #849 observability pass,
-  finding #3): the `netdata` container's own `health.d` alarms (disk usage,
+  finding #3): netdata's own `health.d` alarms (disk usage,
   CPU, memory, ...) previously had no notification integration or Admin UI
-  surface of their own. The `netdata:` service's compose command block now
-  configures Netdata's `custom_sender()` alarm-notify mechanism to POST each
+  surface of their own. The watchdog in the `services` container now writes
+  netdata's `health_alarm_notify.conf` with a `custom_sender()` that POSTs each
   alarm event to the Admin UI's `POST /api/netdata-alarms`
-  (`services/ui/src/main.rs`), gated by a shared
+  (`alarm_notify_conf` in `services/watchdog/src/main.rs`,
+  `services/ui/src/main.rs`), gated by a shared
   `NETDATA_ALARM_TOKEN` (issue #858 shared-secret pattern, same as
   `PDNS_API_KEY`). The dashboard's "Netdata alarms" card
   (`services/ui/src/main.rs`) shows the most recent alarms
