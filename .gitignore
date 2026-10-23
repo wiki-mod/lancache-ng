@@ -15,12 +15,6 @@ data/
 /syslog-ng/
 /cachehamster/
 
-# Generated BIND9 keys (auto-created at container startup)
-services/dns/keys/
-
-# Generated Kea secrets (auto-created at container startup)
-services/dhcp/keys/
-
 # Environment files with secrets (root-level only)
 /.env
 deploy/prod/.env.local
