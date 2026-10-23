@@ -5773,7 +5773,14 @@ jobs:
             always() &&
             steps.push-scan-changes.outputs.should-scan == 'true'
           }}
-        run: timeout --kill-after=30 120 docker rmi lancache-ng-scan:${{ matrix.service }}-${{ matrix.platform_tag }}-${{ github.run_id }} || true
+        run: |
+          image="lancache-ng-scan:${{ matrix.service }}-${{ matrix.platform_tag }}-${{ github.run_id }}"
+          # Absent image is not a failure (the build may have stopped before it
+          # existed); a hung or failing docker call is, and must stay visible.
+          image_id="$(timeout --kill-after=30 120 docker images --quiet "$image")"
+          if [ -n "$image_id" ]; then
+            timeout --kill-after=30 120 docker rmi "$image"
+          fi
 
   determine-push-reuse-scope:
     # Step 4 (issue #1095): decides, once per push (not once per build/build-arm64/
