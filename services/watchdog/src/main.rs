@@ -2347,7 +2347,15 @@ fn ddns_tsig(
         log("DDNS_TSIG_KEY is empty; DDNS stays loopback-only, TSIG rights revoked");
         return Ok(());
     }
-    pdnsutil(dir, &["import-tsig-key", id.name.as_str(), id.algorithm.as_str(), tsig])?;
+    pdnsutil(
+        dir,
+        &[
+            "import-tsig-key",
+            id.name.as_str(),
+            id.algorithm.as_str(),
+            tsig,
+        ],
+    )?;
     // What: an unreadable marker is logged; signed stays.
     // Why: strict is the safe side; the cause is shown.
     // From: Issue #1683 | PR #1912
@@ -2387,7 +2395,15 @@ fn dns_zones(
         if tsig.is_empty() {
             return Err("DDNS_TSIG_KEY is required for AXFR from the primary".into());
         }
-        pdnsutil(dir, &["import-tsig-key", id.name.as_str(), id.algorithm.as_str(), tsig])?;
+        pdnsutil(
+            dir,
+            &[
+                "import-tsig-key",
+                id.name.as_str(),
+                id.algorithm.as_str(),
+                tsig,
+            ],
+        )?;
         let primary = primary.to_string();
         for zone in &zones {
             match pdnsutil(dir, &["zone", "create-secondary", zone, &primary]) {
@@ -2398,7 +2414,10 @@ fn dns_zones(
                 }
                 Err(e) => return Err(e),
             }
-            pdnsutil(dir, &["tsigkey", "activate", zone, id.name.as_str(), "secondary"])?;
+            pdnsutil(
+                dir,
+                &["tsigkey", "activate", zone, id.name.as_str(), "secondary"],
+            )?;
         }
         return Ok(());
     }
@@ -2420,7 +2439,10 @@ fn dns_zones(
         pdnsutil(dir, &["set-meta", zone, "SOA-EDIT-API", "INCREASE"])?;
         pdnsutil(dir, &["set-meta", zone, "NOTIFY-DNSUPDATE", "1"])?;
         if !tsig.is_empty() {
-            pdnsutil(dir, &["tsigkey", "activate", zone, id.name.as_str(), "primary"])?;
+            pdnsutil(
+                dir,
+                &["tsigkey", "activate", zone, id.name.as_str(), "primary"],
+            )?;
         }
         if !targets.is_empty() {
             let mut args = vec!["set-meta", zone.as_str(), "ALSO-NOTIFY"];
