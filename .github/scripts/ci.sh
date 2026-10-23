@@ -3797,6 +3797,41 @@ ci_cmd_gha_runtime_args() {
     printf '%s\n' "${args}"
 }
 
+# What: kill timeout (s) of a docker run/exec CI command.
+# Why: AG-CI-016: one SOT value, checked before use.
+# From: Issue #1683 | PR #1858
+_ci_container_limit() {
+    local t
+    t="$(_ci_variable CI_CONTAINER_CMD_TIMEOUT)" || return 2
+    if [[ ! "${t}" =~ ^[1-9][0-9]*$ ]]; then
+        ci_log "[CI-ERROR-JOBS-0008]" "value=\"${t}\" reason=\"CI_CONTAINER_CMD_TIMEOUT must be positive whole seconds\""
+        return 2
+    fi
+    printf '%s\n' "${t}"
+}
+
+# What: docker exec with the command under timeout -s KILL.
+# Why: AG-CI-016: a hung exec ends; rc 137 reaches the caller.
+# From: Issue #1683 | PR #1858
+_ci_bounded_exec() {
+    local cid="$1" t
+    shift
+    t="$(_ci_container_limit)" || return 2
+    docker exec "${cid}" timeout -s KILL "${t}" "$@"
+}
+
+# What: offline docker run, command under timeout -s KILL.
+# Why: AG-CI-016: a hung run ends; rc 137 reaches the caller.
+# From: Issue #1683 | PR #1858
+_ci_bounded_run() {
+    local vol="$1" image="$2" t
+    local -a mount=()
+    shift 2
+    t="$(_ci_container_limit)" || return 2
+    [ -z "${vol}" ] || mount=(-v "${vol}")
+    docker run --rm --network none "${mount[@]}" --entrypoint timeout "${image}" -s KILL "${t}" "$@"
+}
+
 # What: stop this run's sccache server, drop its socket.
 # Why: a started server must not outlive its run.
 # From: Issue #1683 | PR #1858
@@ -8363,7 +8398,7 @@ _ci_validate_teardown() {
         local base
         if ! base="$(_ci_alpine_image "[CI-ERROR-VALIDATE-0102]" "key=\"base_images.alpine\" reason=\"no alpine base to clear the state root\"")"; then
             rc=2
-        elif ! out="$(docker run --rm --network none -v "${LANCACHE_STATE_DIR}:/s" "${base}" \
+        elif ! out="$(_ci_bounded_run "${LANCACHE_STATE_DIR}:/s" "${base}" \
                 find /s -mindepth 1 -delete 2>&1 && rmdir "${LANCACHE_STATE_DIR}" 2>&1)"; then
             ci_error "[CI-ERROR-VALIDATE-0061]" "reason=\"per-run state root not removed\"" "${out}"
             rc=2
@@ -8638,7 +8673,7 @@ _ci_validate_proxy_map() {
         ci_log "$5" "reason=\"$6\""
         return 2
     fi
-    if ! map="$(_ci_capture 0 docker exec "${cid}" cat "${file}")"; then
+    if ! map="$(_ci_capture 0 _ci_bounded_exec "${cid}" cat "${file}")"; then
         ci_log "$7" "reason=\"$8\""
         return 2
     fi
@@ -8987,7 +9022,7 @@ _ci_validate_shared_secret() {
         ci_log "[CI-ERROR-VALIDATE-0107]" "container=\"${cid}\" reason=\"no shared-secrets volume mount\""
         return 2
     fi
-    _ci_capture 0 docker exec "${cid}" cat "${dir}/${name}"
+    _ci_capture 0 _ci_bounded_exec "${cid}" cat "${dir}/${name}"
 }
 
 # What: the SOT runtime.defaults rows, @KEY@ resolved.
@@ -9439,11 +9474,11 @@ _ci_validate_secondary_identity() {
     # What: token as the ui resolves it: its file, else env.
     # Why: no file when the ui got a real token via env.
     # From: Issue #583 | PR #1858
-    docker exec "${cid}" test -f "${tf}" || trc=$?
+    _ci_bounded_exec "${cid}" test -f "${tf}" || trc=$?
     case "${trc}" in
-        0) token="$(_ci_capture 0 docker exec "${cid}" cat "${tf}")" || {
+        0) token="$(_ci_capture 0 _ci_bounded_exec "${cid}" cat "${tf}")" || {
                ci_log "[CI-ERROR-VALIDATE-0084]" "container=\"${cid}\" file=\"${tf}\" reason=\"token file unreadable (raw above)\""; return 2; } ;;
-        1) token="$(_ci_capture 0 docker exec "${cid}" printenv SECONDARY_REGISTRATION_TOKEN)" || {
+        1) token="$(_ci_capture 0 _ci_bounded_exec "${cid}" printenv SECONDARY_REGISTRATION_TOKEN)" || {
                ci_log "[CI-ERROR-VALIDATE-0085]" "container=\"${cid}\" reason=\"no token file and no SECONDARY_REGISTRATION_TOKEN env (raw above)\""; return 2; } ;;
         *)
             ci_log "[CI-ERROR-VALIDATE-0066]" "container=\"${cid}\" file=\"${tf}\" rc=${trc} reason=\"token file check in the ui container failed (docker error above)\""
@@ -9740,7 +9775,7 @@ _ci_bake_inspect() {
     done <<< "${envs}"
     marker="$(_ci_second_line "${PROJECT_SELFHOSTED_PROXY_CA:-}")"
     if [ -n "${marker}" ]; then
-        bundle="$(docker run --rm --network none --entrypoint cat "${image}" "${CI_SYSTEM_CA_PATH}" 2>&1)" || { printf '%s\n' "${bundle}"; return 2; }
+        bundle="$(_ci_bounded_run "" "${image}" cat "${CI_SYSTEM_CA_PATH}" 2>&1)" || { printf '%s\n' "${bundle}"; return 2; }
         n="$(_ci_capture 1 grep -cF -- "${marker}" <<< "${bundle}")" || return 2
     fi
     printf 'extra_ca %s\n' "${n:-0}"

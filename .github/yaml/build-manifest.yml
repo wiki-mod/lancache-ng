@@ -1065,6 +1065,10 @@ ci_variables:
   # Why: AG-CI-016: every container command is bounded.
   # From: Issue #1683 | PR #1858
   CI_GHA_RUNTIME_EXPORT_TIMEOUT: 30
+  # What: kill timeout (s) of a docker run/exec CI command.
+  # Why: AG-CI-016; 2 minutes is the limit DoMe agreed on.
+  # From: Issue #1683 | PR #1858
+  CI_CONTAINER_CMD_TIMEOUT: 120
   # What: prod compose; setup.sh installs, CI checks it.
   # Why: AG-KD-008 one deploy profile; one path owner.
   # From: Issue #1683 | PR #1858
