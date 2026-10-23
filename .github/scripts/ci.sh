@@ -2869,13 +2869,22 @@ _ci_verified_mark() {
         "service=\"$1\" platform=\"$2\" digest=\"$3\" reason=\"verified mark not written\""
 }
 
+# What: print <name>=NOT-RUN outside a pull request.
+# Why: one owner for the PR-only guard (AG-CODE-011).
+# From: Issue #1683 | PR #1858
+_ci_skip_outside_pr() {
+    if [ "${GITHUB_EVENT_NAME:-}" = pull_request ]; then
+        return 1
+    fi
+    printf '%s=NOT-RUN reason="not a pull request"\n' "$1"
+}
+
 # What: mark this run's fingerprint green for its PR.
 # Why: a later run of the same PR reuses it (§2.1).
 # From: Issue #1683 | PR #1858
 ci_cmd_pr_green_mark() {
     local fp ref note rc=0
-    if [ "${GITHUB_EVENT_NAME:-}" != pull_request ]; then
-        printf 'pr-green-mark=NOT-RUN reason="not a pull request"\n'
+    if _ci_skip_outside_pr pr-green-mark; then
         return 0
     fi
     if [ "${PR_IS_FORK:-false}" = true ]; then
@@ -3359,8 +3368,7 @@ _ci_pr_labels_for() {
 ci_cmd_pr_labels() {
     local list labels l repo out stored
     local -a files=() args=() missing=()
-    if [ "${GITHUB_EVENT_NAME:-}" != pull_request ] || [ -z "${PR_NUMBER:-}" ]; then
-        printf 'pr-labels=NOT-RUN reason="not a pull request"\n'
+    if _ci_skip_outside_pr pr-labels; then
         return 0
     fi
     if [ "${PR_IS_FORK:-false}" = true ]; then
@@ -13978,8 +13986,7 @@ _ci_check_pr_tracking_metadata() {
     # What: no pull request means no PR metadata to check
     # Why: its own PAT step runs on every checks event
     # From: Issue #1683 | PR #1858
-    if [ "${GITHUB_EVENT_NAME:-}" != pull_request ]; then
-        printf 'pr-tracking-metadata=NOT-RUN reason="not a pull request"\n'
+    if _ci_skip_outside_pr pr-tracking-metadata; then
         return 0
     fi
     if [ -z "${pr_number}" ]; then
@@ -16037,6 +16044,12 @@ _ci_check_vex_drift() {
 _ci_check_changelog_direct_edit() {
     local -a changed=("$@")
     local path edited=0 file
+    # What: the label rule needs a pull request.
+    # Why: by hand all files count as changed, no labels.
+    # From: Issue #1683 | PR #1858
+    if _ci_skip_outside_pr changelog-direct-edit; then
+        return 0
+    fi
     file="$(_ci_variable CI_CHANGELOG)" || return 2
     for path in "${changed[@]}"; do
         [ "${path}" = "${file}" ] && { edited=1; break; }
