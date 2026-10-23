@@ -7035,8 +7035,7 @@ async fn run() -> anyhow::Result<()> {
     let issuer = issuer_keypair(&cfg).unwrap_or_else(|e| container_start_fatal(&e));
     let xkey = callout_xkey(&cfg).unwrap_or_else(|e| container_start_fatal(&e));
     // What: fragment written before the NATS connect.
-    // Why: dns nats-server waits for it; a write error
-    // stops the start, it must not wait unseen.
+    // Why: nats-server waits for it; errors stop the start.
     // From: Issue #811 | PR #1858
     write_callout_fragment(&cfg, &issuer.public_key(), &xkey.public_key()).unwrap_or_else(|e| {
         container_start_fatal(&format!("cannot write the auth_callout fragment: {e}"))

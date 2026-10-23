@@ -1438,8 +1438,7 @@ pub fn resolve_shared_secret(
 ) -> Result<String, String> {
     let file = dir.join(name);
     // What: the file text without newlines; empty is none.
-    // Why: an empty file counts as no secret yet; any
-    // other read error is logged, then counts as none.
+    // Why: empty is no secret yet; read errors are logged.
     // From: Issue #1683 | PR #1858
     let on_disk = || match fs::read_to_string(&file) {
         Ok(v) => Some(v.replace('\n', "")).filter(|v| !v.is_empty()),

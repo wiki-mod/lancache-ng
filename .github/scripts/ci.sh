@@ -3818,7 +3818,7 @@ _ci_container_limit() {
 }
 
 # What: docker exec with the command under timeout -s KILL.
-# Why: AG-CI-016: a hung exec ends; rc 137 reaches the caller.
+# Why: AG-CI-016: a hung exec ends; rc 137 to the caller.
 # From: Issue #1683 | PR #1858
 _ci_bounded_exec() {
     local cid="$1" t
@@ -3828,7 +3828,7 @@ _ci_bounded_exec() {
 }
 
 # What: offline docker run, command under timeout -s KILL.
-# Why: AG-CI-016: a hung run ends; rc 137 reaches the caller.
+# Why: --init: timeout as PID 1 ignores its own KILL.
 # From: Issue #1683 | PR #1858
 _ci_bounded_run() {
     local vol="$1" image="$2" t
@@ -3836,7 +3836,7 @@ _ci_bounded_run() {
     shift 2
     t="$(_ci_container_limit)" || return 2
     [ -z "${vol}" ] || mount=(-v "${vol}")
-    docker run --rm --network none "${mount[@]}" --entrypoint timeout "${image}" -s KILL "${t}" "$@"
+    docker run --rm --init --network none "${mount[@]}" --entrypoint timeout "${image}" -s KILL "${t}" "$@"
 }
 
 # What: stop this run's sccache server, drop its socket.
@@ -5945,7 +5945,7 @@ _ci_image_smoke() {
     # What: tools go as args; runs on stdin, one a line.
     # Why: a run holds spaces/pipes; stdin keeps it intact.
     # From: Issue #1683 | PR #1858
-    if ! out="$(docker run --rm -i --entrypoint timeout "${image}" --kill-after="${grace}" --signal=TERM "${limit}" \
+    if ! out="$(docker run --rm -i --init --entrypoint timeout "${image}" --kill-after="${grace}" --signal=TERM "${limit}" \
         bash -c "${lookup}"$'\n''for t in "$@"; do _ci_command_available "$t" || { echo "missing $t"; exit 1; }; done
             while IFS= read -r r; do
                 [ -n "${r}" ] || continue
