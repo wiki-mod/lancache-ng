@@ -5945,7 +5945,7 @@ _ci_image_smoke() {
     # What: tools go as args; runs on stdin, one a line.
     # Why: a run holds spaces/pipes; stdin keeps it intact.
     # From: Issue #1683 | PR #1858
-    if ! out="$(docker run --rm -i --init --entrypoint timeout "${image}" --kill-after="${grace}" --signal=TERM "${limit}" \
+    if ! out="$(docker run --rm -i --init --entrypoint timeout "${image}" -k "${grace}" -s TERM "${limit}" \
         bash -c "${lookup}"$'\n''for t in "$@"; do _ci_command_available "$t" || { echo "missing $t"; exit 1; }; done
             while IFS= read -r r; do
                 [ -n "${r}" ] || continue
@@ -7899,8 +7899,8 @@ ci_cmd_gc_green_refs() {
                     ci_log "[CI-ERROR-GC-0039]" "ref=\"${ref}\" reason=\"ref delete failed (raw above)\""
                     return 2
                 fi
-                # What: deleted = the ref is absent on read back.
-                # Why: AG-WF-031: a delete is checked, not assumed.
+                # What: deleted = absent on read back.
+                # Why: AG-WF-031: check, never assume.
                 # From: Issue #1683 | PR #1858
                 rc=0; out="$(_ci_cas_ref_sha "${remote}" "${ref}")" || rc=$?
                 case "${rc}" in
