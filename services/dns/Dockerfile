@@ -396,7 +396,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
     fi; \
     cp "target/${musl_target}/release/nats-subscriber" /build/nats-subscriber-out
 
-FROM mirror.gcr.io/library/alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
+FROM mirror.gcr.io/library/alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
 
 LABEL org.opencontainers.image.description="PowerDNS recursor, authoritative DNS, and NATS subscriber service for lancache-ng cache routing."
 
