@@ -7352,6 +7352,11 @@ jobs:
           REPOSITORY: ${{ github.repository }}
           COMMIT_SHA: ${{ github.sha }}
           PROJECT_AUTOMATION_PAT: ${{ secrets.PROJECT_AUTOMATION_PAT }}
+          # The annotated tag needs a tagger identity. Self-hosted runners
+          # carried one in their copied host .gitconfig; GitHub-hosted runners
+          # have none and `git tag -a` fails with "empty ident name".
+          GIT_COMMITTER_NAME: github-actions[bot]
+          GIT_COMMITTER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
         run: |
           set -euo pipefail
 
