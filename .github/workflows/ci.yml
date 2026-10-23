@@ -113,6 +113,13 @@ jobs:
     needs: platform
     if: github.event_name != 'issues'
     runs-on: ${{ needs.platform.outputs.runner }}
+    # What: contents write for the ci.sh refresh records.
+    # Why: §17: a dispatch run writes the apk refresh ref.
+    # From: Issue #1683 | PR #1858
+    permissions: &ship_write
+      actions: read
+      contents: write
+      packages: write
     timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['plan'] }}
     container: &bt_platform
       image: ${{ needs.platform.outputs.image }}
@@ -167,10 +174,7 @@ jobs:
     # What: contents write for the ci.sh build lock refs.
     # Why: the lock is a ci.sh git ref, no YAML group.
     # From: Issue #1683 | PR #1912
-    permissions: &ship_write
-      actions: read
-      contents: write
-      packages: write
+    permissions: *ship_write
     timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['build'] }}
     container: *bt_platform
     # What: cache secrets the build's set-runtime needs.

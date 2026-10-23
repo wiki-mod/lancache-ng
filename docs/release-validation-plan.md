@@ -537,6 +537,10 @@ recurrence:
 - **A zombie sccache server read as a live one** (AG-VAL-029):
   `_ci_sccache_reap` skips process state Z; no CI check detects a recurrence,
   only a build whose server exits before its parent collects it.
+- **A refresh run reusing an image whose apk packages the index has newer**
+  (architecture §17): `_ci_package_refresh_all` writes a new `package_refresh`
+  value for that pair; no CI check detects a recurrence, only a nightly or
+  dispatch run against a newer APKINDEX exercises it.
 - **A scan of another image than the published digest**: `scan-stack` scans
   `_ci_published_digest`.
 - **Case-sensitive repository-name comparison**: `_ci_repo` lowercases.

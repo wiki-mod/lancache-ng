@@ -868,9 +868,9 @@ status_reports:
 # From: Issue #1683
 build_identity:
   rust:
-    inputs: [source_sha, toolchain_digest, base_digest, build_variables]
+    inputs: [source_sha, toolchain_digest, base_digest, build_variables, package_refresh]
   toolchain:
-    inputs: [toolchain_source_sha, base_digest]
+    inputs: [toolchain_source_sha, base_digest, package_refresh]
 
 # What: the events §17 names as a controlled refresh.
 # Why: such a run has no base; missing then proves BUILD.
@@ -1171,6 +1171,11 @@ ci_variables:
   CI_LEDGER_REF: refs/ci/acceptance/ledger
   CI_LEDGER_FILE: records
   CI_GIT_REMOTE: origin
+  # What: ref + file of the §17 apk refresh records.
+  # Why: a refresh run writes them; every id reads them.
+  # From: Issue #1683 | PR #1858
+  CI_REFRESH_REF: refs/ci/refresh/packages
+  CI_REFRESH_FILE: records
   # What: layer cache tag stem; ci.sh appends -<arch>.
   # Why: §35: one registry cache per service and arch.
   # From: Issue #1683 | PR #1912

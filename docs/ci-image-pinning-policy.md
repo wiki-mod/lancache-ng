@@ -92,12 +92,18 @@ bash .github/scripts/ci.sh check version-drift           # external_versions con
 CI 2.0 decides reuse the same way for every trigger
 (docs/ci-2.0-architecture.md sections 6, 27 and 54): a target is rebuilt only
 when its build identity changed and no accepted digest exists for it. The base
-image enters the identity as its SOT-pinned digest (`base_digest`) and apk
-package versions are resolved live from the package index
-(`package_versions`); the planner run record (`CI_RUN_IDENTITIES`) then fixes
-every pair's identity for the rest of the run, so a new pin or a newer
-package changes the identity and requires a build; an unchanged one reuses
-the accepted digest.
+image enters the identity as its SOT-pinned digest (`base_digest`). Every
+image build runs `apk update` and `apk upgrade` (`ci.sh apk-setup`), so a
+build takes the current packages. A run started by one of the
+`build_admission.refresh_events` compares the installed apk packages of each
+accepted image with the APKINDEX of the image's own repositories; when the
+index has a newer version, `ci.sh` writes a new value for that pair to the
+records under the `CI_REFRESH_REF` variable, the pair's `package_refresh`
+identity input changes, and the pair builds. Every other run reads the
+recorded value and resolves nothing (architecture section 17). The repository
+keeps no package version list. The planner run record (`CI_RUN_IDENTITIES`)
+then fixes every pair's identity for the rest of the run; an unchanged
+identity reuses the accepted digest.
 
 A run started by one of the events the SOT lists in
 `build_admission.refresh_events` has no base commit to compare against. Section

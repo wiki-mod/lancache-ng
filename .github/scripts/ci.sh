@@ -1298,6 +1298,19 @@ ci_cmd_plan_matrix() {
     # From: Issue #1683
     local targets svc_type
     targets="$(ci_build_targets)" || return 2
+    # What: a refresh run compares apk with the index first.
+    # Why: §17: a newer package gives the pair a new id.
+    # From: Issue #1683 | PR #1858
+    rc=0; _ci_refresh_event || rc=$?
+    case "${rc}" in
+        0)
+            _ci_require_ghcr_auth || return "$?"
+            authed=true
+            _ci_package_refresh_all || return "$?"
+            ;;
+        1) ;;
+        *) return 2 ;;
+    esac
     for service in ${targets}; do
         path_cand=false rc=0
         _ci_plan_candidate "${service}" "${changed[@]}" || rc=$?
@@ -1938,6 +1951,12 @@ _ci_identity_pins() {
                 else
                     _ci_service_build_args "${service}" --bare "${platform}" no || return 2
                 fi
+                ;;
+            package_refresh)
+                # What: last §17 apk refresh value.
+                # Why: a newer index package is a new id.
+                # From: Issue #1683 | PR #1858
+                _ci_package_refresh_value "${service}" "${platform}" || return 2
                 ;;
             *)
                 ci_log "[CI-ERROR-IDENTITY-0006]" "input=\"${input}\" reason=\"unknown build_identity input; FAIL CLOSED\""
@@ -2940,8 +2959,11 @@ _ci_head_commit() {
 # From: Issue #1683
 _ci_ledger_blob() {
     local remote="$1" rc=0 ledger_ref file
-    ledger_ref="$(_ci_variable CI_LEDGER_REF)" || return 2
-    file="$(_ci_variable CI_LEDGER_FILE)" || return 2
+    # What: $2/$3 name another ref and file variable.
+    # Why: the refresh records reuse this one reader.
+    # From: Issue #1683 | PR #1858
+    ledger_ref="$(_ci_variable "${2:-CI_LEDGER_REF}")" || return 2
+    file="$(_ci_variable "${3:-CI_LEDGER_FILE}")" || return 2
     _ci_cas_ref_sha "${remote}" "${ledger_ref}" >&2 || rc=$?
     [ "${rc}" -eq 1 ] && return 1
     [ "${rc}" -eq 0 ] || return 2
@@ -2975,12 +2997,13 @@ _ci_ledger_read() {
 # From: Issue #1683
 _ci_ledger_upsert() {
     local remote="$1" new blob rc=0 parent="" ids kept merged blobsha treesha commitsha raw ledger_ref file
-    ledger_ref="$(_ci_variable CI_LEDGER_REF)" || return 3
-    file="$(_ci_variable CI_LEDGER_FILE)" || return 3
+    local refvar="${2:-CI_LEDGER_REF}" filevar="${3:-CI_LEDGER_FILE}" mode="${4:-}"
+    ledger_ref="$(_ci_variable "${refvar}")" || return 3
+    file="$(_ci_variable "${filevar}")" || return 3
     new="$(cat)"
     new="$(printf '%s\n' "${new}" | awk 'NF>0')"
     [ -n "${new}" ] || return 0
-    blob="$(_ci_ledger_blob "${remote}")" || rc=$?
+    blob="$(_ci_ledger_blob "${remote}" "${refvar}" "${filevar}")" || rc=$?
     if [ "${rc}" -eq 2 ]; then
         ci_log "[CI-ERROR-LEDGER-0001]" "ref=\"${ledger_ref}\" remote=\"${remote}\" reason=\"ledger read UNKNOWN (raw above); refusing to write\""
         return 3
@@ -2988,8 +3011,12 @@ _ci_ledger_upsert() {
     # What: two different records for one identity fail
     # Why: conflicting records fail closed (§26.4)
     # From: Issue #1683 | PR #1912
-    local conflict
-    conflict="$(printf '%s\n%s\n' "${blob}" "${new}" | awk -F'\t' 'NF > 0 { if (($1 in seen) && seen[$1] != $0) print $1; seen[$1] = $0 }')"
+    local conflict=""
+    # What: mode replace: a new line replaces its key.
+    # Why: a refresh record is a value, not an acceptance.
+    # From: Issue #1683 | PR #1858
+    [ "${mode}" = replace ] \
+        || conflict="$(printf '%s\n%s\n' "${blob}" "${new}" | awk -F'\t' 'NF > 0 { if (($1 in seen) && seen[$1] != $0) print $1; seen[$1] = $0 }')"
     if [ -n "${conflict}" ]; then
         ci_error "[CI-ERROR-LEDGER-0006]" "ref=\"${ledger_ref}\" reason=\"conflicting records for one identity; refusing to write\"" "${conflict}"
         return 3
@@ -5546,6 +5573,116 @@ _ci_refresh_event() {
     [ -n "${event}" ] || return 1
     events="$(_ci_required_field build_admission refresh_events blocklist)" || return 2
     _ci_list_has "${event}" "${events}" || return 1
+}
+
+# What: a pair's refresh value, or none; 2 unknown.
+# Why: §17: the last refresh run's result, never re-read.
+# From: Issue #1683 | PR #1858
+_ci_package_refresh_value() {
+    local key="$1@$2" remote blob rc=0 k v
+    remote="$(_ci_git_remote)" || return 2
+    blob="$(_ci_ledger_blob "${remote}" CI_REFRESH_REF CI_REFRESH_FILE)" || rc=$?
+    case "${rc}" in
+        0)
+            while IFS=$'\t' read -r k v; do
+                if [ "${k}" = "${key}" ]; then printf '%s\n' "${v}"; return 0; fi
+            done <<< "${blob}"
+            ;;
+        1) ;;
+        *) return 2 ;;
+    esac
+    printf 'none\n'
+}
+
+# What: record each pair whose accepted image is behind.
+# Why: §17: one write; the new value changes the pair id.
+# From: Issue #1683 | PR #1858
+_ci_package_refresh_all() {
+    local _ci_plan_ids="" _ci_refresh_new="" remote rc=0
+    _ci_for_all_pairs _ci_package_refresh_pair || return "$?"
+    [ -n "${_ci_refresh_new}" ] || return 0
+    remote="$(_ci_git_remote)" || return 2
+    printf '%s' "${_ci_refresh_new}" | _ci_ledger_upsert "${remote}" CI_REFRESH_REF CI_REFRESH_FILE replace || rc=$?
+    if [ "${rc}" -ne 0 ]; then
+        ci_log "[CI-ERROR-REFRESH-0004]" "rc=${rc} reason=\"refresh records not written (raw above); no build on a stale id\""
+        return 2
+    fi
+}
+
+# What: check one pair's accepted image against the index.
+# Why: writes the caller's record list (dynamic scope).
+# From: Issue #1683 | PR #1858
+_ci_package_refresh_pair() {
+    local service="$1" platform="$2" id remote lrec rc=0 ref outdated value
+    _ci_plan_record "${service}" "${platform}" || return "$?"
+    id="$(_ci_identity_for "${service}" "${platform}")" || return "$?"
+    remote="$(_ci_git_remote)" || return 2
+    lrec="$(_ci_ledger_read "${remote}" "${id}")" || rc=$?
+    # What: no record: the plan builds the pair anyway.
+    # Why: only an accepted image can be behind the index.
+    # From: Issue #1683 | PR #1858
+    [ "${rc}" -ne 1 ] || return 0
+    [ "${rc}" -eq 0 ] || return 2
+    [ "${lrec%%$'\t'*}" = ACCEPTED ] || return 0
+    ref="$(_ci_image_ref "${service}" "${lrec#*$'\t'}")" || return 2
+    outdated="$(_ci_with_workdir ci-apk _ci_apk_outdated "${ref}" "${platform}")" || return 2
+    if [ -z "${outdated}" ]; then
+        ci_log "[CI-INFO-REFRESH-0005]" "service=\"${service}\" platform=\"${platform}\" image=\"${ref}\" reason=\"apk packages match the index; reuse\""
+        return 0
+    fi
+    value="$(printf '%s\n' "${outdated}" | _ci_sha256_hex)" || return 2
+    ci_error "[CI-INFO-REFRESH-0001]" "service=\"${service}\" platform=\"${platform}\" image=\"${ref}\" value=\"${value}\" reason=\"the index has newer apk packages; new id, rebuild\"" "${outdated}"
+    _ci_refresh_new+="${service}@${platform}"$'\t'"${value}"$'\n'
+}
+
+# What: installed apk packages the index has newer.
+# Why: create and cp read the image; it never runs here.
+# From: Issue #1683 | PR #1858
+_ci_apk_outdated() {
+    local ref="$1" platform="$2" work="$3" cid f out rc=0 arch line n=0
+    _ci_retry registry docker pull --quiet --platform "${platform}" "${ref}" >&2 || return 2
+    cid="$(_ci_capture 0 docker create --platform "${platform}" --entrypoint /bin/true "${ref}")" || return 2
+    for f in /lib/apk/db/installed /etc/apk/repositories /etc/apk/arch; do
+        if ! out="$(docker cp "${cid}:${f}" "${work}/${f##*/}" 2>&1)"; then
+            ci_error "[CI-ERROR-REFRESH-0002]" "image=\"${ref}\" file=\"${f}\" reason=\"apk state not read from the image\"" "${out}"
+            rc=2
+            break
+        fi
+    done
+    _ci_capture 0 docker rm "${cid}" >&2 || rc=2
+    [ "${rc}" -eq 0 ] || return 2
+    arch="$(<"${work}/arch")"
+    # What: one APKINDEX per repository line of the image.
+    # Why: a tagged line is "@tag url"; the url is last.
+    # From: Issue #1683 | PR #1858
+    while IFS= read -r line; do
+        case "${line}" in ''|'#'*) continue ;; esac
+        n=$((n + 1))
+        _ci_retry download _ci_http_download "${line##* }/${arch}/APKINDEX.tar.gz" "${work}/index-${n}.tar.gz" >&2 || return 2
+        if ! out="$(tar -xzf "${work}/index-${n}.tar.gz" -O APKINDEX 2>&1 >> "${work}/index")"; then
+            ci_error "[CI-ERROR-REFRESH-0003]" "image=\"${ref}\" repo=\"${line}\" reason=\"APKINDEX not unpacked\"" "${out}"
+            return 2
+        fi
+    done < "${work}/repositories"
+    _ci_apk_newer "${work}/installed" "${work}/index"
+}
+
+# What: "name installed newer" for each package behind.
+# Why: apk version -t owns the order; no own compare.
+# From: Issue #1683 | PR #1858
+_ci_apk_newer() {
+    local pairs name have cand order
+    # What: P: then V: per record, in both file formats.
+    # Why: one parser for the installed db and the index.
+    # From: Issue #1683 | PR #1858
+    pairs="$(awk 'FNR == 1 { file++ } /^P:/ { p = substr($0, 3) } /^V:/ { v = substr($0, 3)
+        if (file == 1) have[p] = v
+        else if ((p in have) && v != have[p]) print p "\t" have[p] "\t" v }' "$1" "$2")"
+    while IFS=$'\t' read -r name have cand; do
+        [ -n "${name}" ] || continue
+        order="$(_ci_capture 0 apk version -t "${have}" "${cand}")" || return 2
+        [ "${order}" != "<" ] || printf '%s %s %s\n' "${name}" "${have}" "${cand}"
+    done <<< "${pairs}" | LC_ALL=C sort -u
 }
 
 # What: Read the semantic build-impact verdict, fail-closed.
