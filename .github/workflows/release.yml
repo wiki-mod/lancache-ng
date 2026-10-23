@@ -109,11 +109,10 @@ jobs:
       images: ${{ steps.images.outputs.matrix }}
     steps:
       - *bootstrap
-      - name: Publish the GitHub release and OpenVEX
-        run: |
-          set -euo pipefail
-          bash .github/scripts/ci.sh release-publish "${RELEASE_TAG}"
-          bash .github/scripts/ci.sh release-vex "${RELEASE_TAG}"
+      - name: Publish the GitHub release
+        run: bash .github/scripts/ci.sh release-publish "${RELEASE_TAG}"
+      - name: Attach the OpenVEX document
+        run: bash .github/scripts/ci.sh release-vex "${RELEASE_TAG}"
       - name: Add the release to CHANGELOG.md
         run: bash .github/scripts/ci.sh release-changelog "${RELEASE_TAG}"
       # What: name every released image digest
@@ -189,7 +188,7 @@ jobs:
     steps:
       - *bootstrap
       # What: the PAT reaches the tag push step only
-      # Why: least privilege; the bootstrap needs no PAT
+      # Why: least privilege; the checkout needs no PAT
       # From: Issue #1683 | PR #1858
       - name: Cut and push the next patch tag
         env:
