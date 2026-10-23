@@ -73,7 +73,7 @@ context reviewers need. `Linked Issues`' exact casing matters: both
 `ci.sh check pr-template` (the required-section check) read sections
 through one parser that matches the heading exactly (issue #1496).
 - if the change touches build, CI, or release automation, whether any accelerator (`sccache`, `sccache-dist`, `distcc`, `distcc-pump`, or Buildx cache) is optional, preferred, or a gate
-- whether a GitHub-hosted fallback still works without LAN-only cache assumptions
+- whether the change still works on a GitHub-hosted runner, where `ci.sh` reads no LAN proxy and no dist scheduler or distcc host
 
 Prefer focused pull requests. For example, do not mix documentation rewrites,
 CI fixes and runtime behavior changes unless they must land together.
@@ -166,9 +166,9 @@ already have a regression test covering that behavior. A major change must
 add or update an automated test in the relevant test suite (Rust `#[test]`
 functions for `services/ui`/`services/dns/nats-subscriber`, a test in
 `.github/scripts/ci.bats` for shell/setup logic only with a prior maintainer ACK
-documented on the PR (issue #1683 comment 6145242213), or a real end-to-end simulation
-script wired into a CI workflow for full-stack behavior) that exercises the
-new or changed behavior. A pull request that changes behavior with no
+documented on the PR (issue #1683 comment 6145242213), or a live probe in
+`ci.sh validate` for full-stack behavior) that exercises the new or changed
+behavior. A pull request that changes behavior with no
 corresponding test change should explain why in the PR body (for example,
 "covered by existing test X" or "no automated coverage is practical for this
 because Y" -- see `docs/threat-model.md`'s own precedent of naming untestable
@@ -176,7 +176,7 @@ gaps explicitly rather than silently shipping without coverage). Purely
 cosmetic changes (docs, comments, formatting) are not major changes and are
 exempt.
 
-Because of this limitation, **a green CodeQL Rust job must not be read as full security-scan coverage of the Rust codebase.** A concrete historical example (PR #357, Actions run 28596839186) shows the Rust extractor reporting 12 files "extracted with errors" against 2 "without error" while the job still concluded `success`. That state is expected: CodeQL's own authoritative quality gate — the `rust/diagnostic/database-quality` ("Low Rust analysis quality") diagnostic query — did not fire on that run, so CodeQL classifies partial macro-expansion extraction as normal, not degraded. The raw per-file counts are metric-query output printed only to the analysis log summary; they are not exposed as a supported, machine-readable workflow output (github/codeql-action #1742, open since 2023), and the database is cleaned after `analyze`. This is why `.github/workflows/codeql.yml` reports CodeQL's own `database-quality` determination and a standing caveat in the job summary rather than enforcing a hand-rolled count threshold (which would be permanently red on an upstream limitation that is not tunable here — Rust supports only `build-mode: none`). Rust security correctness continues to be enforced separately by the `dns_rust_quality`, `ui_rust_quality`, `dns_test`, and `ui_test` jobs, which are independent of CodeQL extraction quality.
+Because of this limitation, **a green CodeQL Rust job must not be read as full security-scan coverage of the Rust codebase.** A concrete historical example (PR #357, Actions run 28596839186) shows the Rust extractor reporting 12 files "extracted with errors" against 2 "without error" while the job still concluded `success`. That state is expected: CodeQL's own authoritative quality gate — the `rust/diagnostic/database-quality` ("Low Rust analysis quality") diagnostic query — did not fire on that run, so CodeQL classifies partial macro-expansion extraction as normal, not degraded. The raw per-file counts are metric-query output printed only to the analysis log summary; they are not exposed as a supported, machine-readable workflow output (github/codeql-action #1742, open since 2023), and the database is cleaned after `analyze`. This is why `.github/workflows/codeql.yml` reports CodeQL's own `database-quality` determination and a standing caveat in the job summary rather than enforcing a hand-rolled count threshold (which would be permanently red on an upstream limitation that is not tunable here — Rust supports only `build-mode: none`). The Rust checks independent of CodeQL extraction quality are `cargo fmt --check`, `cargo clippy -- -D warnings` and `cargo test` in the `ci.yml` job `test` (`ci.sh test-stack`), which runs only when Rust validation is enabled (AG-VAL-008).
 
 - Keep workflow action references pinned to full commit SHAs with a version comment; floating tags such as `@v4` are forbidden in project PRs, because Dependabot and similar tooling report them as a security finding.
 - Keep workflow changes reviewable:
@@ -193,9 +193,11 @@ These are required, not stylistic suggestions — a PR missing them will fail CI
 
 ## Building from source
 
-lancache-ng is a Docker Compose stack of Rust services (Admin UI, DNS
-NATS subscriber) plus nginx, PowerDNS, and Kea, each with its own
-Dockerfile under `services/<name>/`. There is no single top-level build
+lancache-ng is a Docker Compose stack of five containers (`services`,
+`proxy`, `dns`, `dhcp`, `ui`). Each is a build target in the SOT
+`.github/yaml/build-manifest.yml` with its own Dockerfile (`services` builds
+from `services/watchdog/`, the others from `services/<name>/`) and its Rust
+programs. There is no single top-level build
 command that produces a native binary outside Docker — building "from
 source" means building the container images from this repository's
 source instead of pulling the prebuilt `ghcr.io/wiki-mod/lancache-ng/*`
@@ -218,12 +220,10 @@ images.
   the workspace `Cargo.toml` works; see `AGENTS.md`'s "Build-tools
   container verification" section for why the build-tools container, not
   your host toolchain, is still the only path CI/PR verification counts.
-- No local Node.js, Python, or Go toolchain is required either — see
-  `AGENTS.md`'s "Project Language" and `AG-KD-003` sections for the
-  narrow, documented exceptions where this project's own CI images build
-  a *different* project's Go-based tool (`actionlint`, Docker CLI,
-  `docker-compose`) from source for a security reason, which is unrelated
-  to building lancache-ng's own services.
+- No local Node.js, Python, or Go toolchain is required either. The
+  build-tools image installs its third-party tools (`actionlint`, Docker
+  CLI, Buildx, Compose) as Alpine packages from the SOT (`AGENTS.md`
+  `AG-KD-003`).
 
 ### Building the full stack
 
