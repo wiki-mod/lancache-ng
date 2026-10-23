@@ -13259,11 +13259,11 @@ _ci_check_deny_short_sha() {
     local -a _ci_override=("$@") files=() yml_rs=() viol=() rs=() other=()
     local -A seen=()
     local path out
-    # What: shell set plus workflow, action, Rust files.
+    # What: shell set plus workflow and Rust files.
     # Why: one shell-file owner; run blocks, Rust slice.
     # From: Issue #1683 | PR #1912
     _ci_shell_sources files _ci_override dockerfiles || return 2
-    _ci_scan_files yml_rs _ci_override '.github/workflows/*.yml' '.github/actions/**/action.yml' '*.rs' || return 2
+    _ci_scan_files yml_rs _ci_override '.github/workflows/*.yml' '*.rs' || return 2
     for path in "${files[@]}" "${yml_rs[@]}"; do
         [ -z "${seen[${path}]:-}" ] || continue
         seen[${path}]=1
@@ -13332,7 +13332,7 @@ _ci_check_language_policy() {
 # From: Issue #1683
 _ci_check_mutable_refs() {
     local -a _ci_override=("$@") files=() yml=() dock=() viol=()
-    _ci_scan_files files _ci_override '.github/workflows/*.yml' '.github/actions/**/action.yml' "${CI_DOCKERFILE_SPECS[@]}" || return 2
+    _ci_scan_files files _ci_override '.github/workflows/*.yml' "${CI_DOCKERFILE_SPECS[@]}" || return 2
     local path out row
     for path in "${files[@]}"; do
         case "${path}" in
@@ -13916,27 +13916,21 @@ _ci_measure_run_blocks() {
     ' "$@"
 }
 
-# What: list workflow files, or with "actions" action files
+# What: list the workflow files of a directory.
 # Why: a guard that read no workflow must fail, not pass
 # From: Issue #1683 | PR #1858
 _ci_workflow_files() {
     local -n _ci_wf_out="$1"
-    local _ci_wf_dir="$2" _ci_wf_kind="${3:-workflows}" _ci_wf_f
-    local -a _ci_wf_glob=("${_ci_wf_dir}"/*.yml "${_ci_wf_dir}"/*.yaml)
+    local _ci_wf_dir="$2" _ci_wf_f
     _ci_wf_out=()
-    # What: composite actions are optional; workflows not.
-    # Why: target CI has no actions; a run needs workflows
-    # From: Issue #1683 | PR #1858
-    if [ "${_ci_wf_kind}" = actions ]; then
-        _ci_wf_glob=("${_ci_wf_dir}"/*/action.yml "${_ci_wf_dir}"/*/action.yaml)
-    elif [ ! -d "${_ci_wf_dir}" ]; then
+    if [ ! -d "${_ci_wf_dir}" ]; then
         ci_error "[CI-ERROR-CHECK-0016]" "dir=\"${_ci_wf_dir}\" reason=\"not a directory\"" "$(ls -ld -- "${_ci_wf_dir}" 2>&1)"
         return 2
     fi
-    for _ci_wf_f in "${_ci_wf_glob[@]}"; do
+    for _ci_wf_f in "${_ci_wf_dir}"/*.yml "${_ci_wf_dir}"/*.yaml; do
         [ -f "${_ci_wf_f}" ] && _ci_wf_out+=("${_ci_wf_f}")
     done
-    if [ "${_ci_wf_kind}" != actions ] && [ "${#_ci_wf_out[@]}" -eq 0 ]; then
+    if [ "${#_ci_wf_out[@]}" -eq 0 ]; then
         ci_error "[CI-ERROR-CHECK-0053]" "dir=\"${_ci_wf_dir}\" reason=\"no workflow files (*.yml, *.yaml)\"" "$(ls -la -- "${_ci_wf_dir}" 2>&1)"
         return 2
     fi
@@ -14224,7 +14218,7 @@ _ci_check_orphaned_branches() {
 _ci_action_deprecated_runtimes=" node6 node10 node12 node16 node20 "
 
 # What: print top-level runs.using from an action manifest.
-# Why: one parser for local + fetched action.yml bodies.
+# Why: one parser for each fetched action.yml body.
 # From: Issue #1683 | PR #1858
 _ci_action_runs_using() {
     awk '
@@ -14314,14 +14308,11 @@ _ci_action_sot_entry() {
 # From: Issue #1683 | PR #1858
 _ci_check_action_node_versions() {
     local repo_root="${1:-${CI_REPO_ROOT:-.}}"
-    local wf_dir act_dir
+    local wf_dir
     wf_dir="$(_ci_repo_path CI_WORKFLOW_DIR "${repo_root}")" || return 2
-    act_dir="$(_ci_repo_path CI_ACTIONS_DIR "${repo_root}")" || return 2
-    local -a wf_files=() act_files=() scan_files=()
+    local -a scan_files=()
     local f
-    _ci_workflow_files wf_files "${wf_dir}" || return 2
-    _ci_workflow_files act_files "${act_dir}" actions || return 2
-    scan_files=("${wf_files[@]}" "${act_files[@]}")
+    _ci_workflow_files scan_files "${wf_dir}" || return 2
 
     local -a viol=() xv=() infra=() uses_entries=() literal_entries=()
     # What: collect every uses: step, resolve anchors.
@@ -14413,53 +14404,19 @@ _ci_check_action_node_versions() {
         viol+=("third-party action '${key}' is pinned to multiple refs across .github/**: ${key_refs[${key}]# }; keep one canonical ref")
     done
 
-    # What: fail expression in composite description.
-    # Why: manifest validator evaluates description.
-    # From: Issue #1683 | PR #1858
-    local af hits hl
-    for af in "${act_files[@]}"; do
-        hits="$(awk '
-            in_block {
-                if ($0 ~ /^[[:space:]]*$/) { next }
-                match($0, /^[[:space:]]*/)
-                if (RLENGTH > bi) { if (index($0,"${{")>0 || index($0,"}}")>0) print NR; next }
-                in_block = 0
-            }
-            /^[[:space:]]*description[[:space:]]*:/ {
-                match($0, /^[[:space:]]*/); bi = RLENGTH
-                rest = $0; sub(/^[[:space:]]*description[[:space:]]*:[[:space:]]*/, "", rest)
-                if (rest ~ /^[>|]/) { in_block = 1; next }
-                if (index(rest,"${{")>0 || index(rest,"}}")>0) print NR
-            }' "${af}")"
-        [ -z "${hits}" ] && continue
-        while IFS= read -r hl; do
-            [ -n "${hl}" ] && viol+=("${af} line ${hl}: description: field contains \${{ }} expression syntax; the manifest validator evaluates it and the action fails to load")
-        done <<< "${hits}"
-    done
-
     # What: check each pin's runs.using for dead runtime.
-    # Why: local reads disk; external via raw SHA reads.
+    # Why: external manifests come via raw SHA reads.
     # From: Issue #1683 | PR #1858
-    local v using local_dir cand resolved_file owner repo subpath ref res marker meta
+    local v using owner repo subpath ref res marker meta
     local entry sha tag f files used_entries=" "
     for v in "${uses_values[@]}"; do
         [ -n "${v}" ] || continue
+        # What: a local uses: ./ path fails; workflows pass.
+        # Why: CI 2.0 has no composite actions (§84 Phase 15).
+        # From: Issue #1683 | PR #1858
         if [[ "${v}" == ./* ]]; then
             case "${v}" in *.yml|*.yaml) continue ;; esac
-            local_dir="${repo_root}/${v#./}"
-            resolved_file=""
-            for cand in "${local_dir}/action.yml" "${local_dir}/action.yaml"; do
-                [ -f "${cand}" ] && { resolved_file="${cand}"; break; }
-            done
-            if [ -z "${resolved_file}" ]; then
-                viol+=("local action '${v}' (in: $(_ci_ando_reffiles "${v}")) has no action.yml/action.yaml"); continue
-            fi
-            using="$(_ci_action_runs_using < "${resolved_file}")" || {
-                ci_log "[CI-ERROR-CHECK-0121]" "file=\"${resolved_file}\" action=\"${v}\" reason=\"action manifest not readable (raw above)\""; return 2; }
-            [ -z "${using}" ] && { viol+=("local action '${v}' has no parseable runs.using"); continue; }
-            case "${_ci_action_deprecated_runtimes}" in
-                *" ${using} "*) viol+=("local action '${v}' declares runs.using: ${using}, a deprecated Node runtime") ;;
-            esac
+            viol+=("local action '${v}' (in: $(_ci_ando_reffiles "${v}")); CI 2.0 has no composite actions")
             continue
         fi
         # What: a docker:// step must pin a SOT base image.
@@ -14558,7 +14515,7 @@ _ci_check_action_node_versions() {
         ci_error "[CI-ERROR-CHECK-0054]" "reason=\"uses: extraction failure (unresolved alias / unparseable step)\"" "$(printf '%s\n' "${xv[@]}")"
     fi
     if [ "${#viol[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0095]" "reason=\"deprecated runtime / ref drift / description expression\"" "$(printf '%s\n' "${viol[@]}")"
+        ci_error "[CI-ERROR-CHECK-0095]" "reason=\"deprecated runtime / ref drift / local action\"" "$(printf '%s\n' "${viol[@]}")"
     fi
     if [ "${#xv[@]}" -gt 0 ] || [ "${#viol[@]}" -gt 0 ]; then
         return 1

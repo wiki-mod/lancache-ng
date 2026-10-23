@@ -1106,7 +1106,6 @@ ci_variables:
   # Why: ci.sh joins them via _ci_repo_path, no literals.
   # From: Issue #1683 | PR #1858
   CI_WORKFLOW_DIR: .github/workflows
-  CI_ACTIONS_DIR: .github/actions
   CI_PR_TEMPLATE: .github/pull_request_template.md
   CI_CHANGELOG: CHANGELOG.md
   CI_README: README.md
