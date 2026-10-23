@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Repeat-run idempotence coverage for the `nats` container's inline entrypoint
 # static-nats.conf generator (the `command:` block in deploy/{dev,prod,quickstart}

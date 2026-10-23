@@ -1,5 +1,5 @@
 #!/bin/bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Kea DHCP entrypoint. Validates required secrets, renders Kea config
 # templates from env vars on first boot, migrates existing runtime configs

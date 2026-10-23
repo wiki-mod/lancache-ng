@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Exercises scripts/check-review-chronology-comments.sh (AG-CODE-003's
 # review-chronology sub-pattern) against small, throwaway fixture trees

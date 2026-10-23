@@ -1,9 +1,9 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Fast, Docker-free unit coverage for scripts/lib/promote-lock.sh (issue
 # #897). Unlike scripts/lib/reserve-validation-subnet.sh's bats coverage
-# (which uses real flock-backed processes against a throwaway local /tmp
+# (which uses real flock-backed processes against a throwaway local /var/tmp
 # lock root), this file exercises the functions against a REAL local bare
 # git repository standing in for the GitHub remote -- these functions only
 # ever call plain `git` (ls-remote/fetch/commit-tree/push/log), so a local

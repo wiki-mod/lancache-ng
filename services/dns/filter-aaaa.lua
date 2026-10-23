@@ -1,4 +1,4 @@
--- lancache-ng (https://github.com/wiki-mod/lancache-ng)
+-- LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 --
 -- PowerDNS Recursor Lua script (preresolve hook): AAAA filter that suppresses
 -- IPv6 DNS responses for all domains. Enabled by the presence of

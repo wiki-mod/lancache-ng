@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Enforces AGENTS.md's AG-GH-008: a pull request must carry at least one
 # label and a milestone, and (when a project-read token is configured)
@@ -133,7 +133,7 @@ print(json.dumps({"query": q, "variables": {"owner": "'"$project_owner"'", "pr":
         # $response_file itself: bash's mktemp path and a separately
         # invoked Python interpreter can disagree about path translation
         # (confirmed locally under Git Bash on Windows, where MSYS's
-        # /tmp/... isn't the same filesystem view native Python sees) --
+        # /var/tmp/... isn't the same filesystem view native Python sees) --
         # piping keeps path resolution entirely inside the shell that
         # already wrote the file.
         #

@@ -1,4 +1,4 @@
-//! lancache-ng (https://github.com/wiki-mod/lancache-ng)
+//! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 //!
 //! Active DNS health probe for registered secondaries (#1084). Sends a real
 //! `lan.` SOA query (a genuine query/response probe per AG-VAL-018, not a mere

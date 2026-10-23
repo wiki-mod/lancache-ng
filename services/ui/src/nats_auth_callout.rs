@@ -1,4 +1,4 @@
-//! lancache-ng (https://github.com/wiki-mod/lancache-ng)
+//! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 //!
 //! NATS auth callout (issue #583, per #433's "finish the originally-intended
 //! design" decision): gives every registered secondary a genuinely unique,

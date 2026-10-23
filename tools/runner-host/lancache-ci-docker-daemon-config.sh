@@ -1,5 +1,5 @@
 #!/bin/bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # CI runner host maintenance: safely apply the bounded-build-cache + log-
 # rotation additions to a self-hosted runner host's /etc/docker/daemon.json.

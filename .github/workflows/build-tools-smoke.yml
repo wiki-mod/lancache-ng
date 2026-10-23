@@ -1,4 +1,4 @@
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # CI workflow (#1253, Q1 of #1255) that runs the tests/bats and
 # tests/shellspec fixture suites against the ALREADY-PUBLISHED build-tools
 # image, pulled via scripts/select-build-tools-image.sh -- it never builds or
@@ -65,14 +65,12 @@ on:
       - "scripts/check-pr-tracking-metadata.sh"
       - "scripts/check-setup-prompt-drift.sh"
       - "scripts/check-compose-healthchecks.sh"
-      - "scripts/check-netdata-curl-pin.sh"
       - "scripts/check-workflow-line-limit.sh"
       - "scripts/check-review-chronology-comments.sh"
       - "scripts/generate-vex.sh"
       - "scripts/setup-cli-simulation.sh"
       - "scripts/syslog-forwarding-simulation.sh"
       - ".github/workflows/gc-pr-staging-images.yml"
-      - ".github/workflows/backfill-stack-latest.yml"
       - ".github/workflows/build-push.yml"
       - ".github/workflows/full-setup-validate.yml"
       - ".github/workflows/full-setup-deep-validate.yml"
@@ -177,11 +175,6 @@ on:
       # not already match any other path above and so would never run that
       # suite.
       - "tools/runner-host/lancache-ci-docker-daemon-config.sh"
-      # tools/runner-host/lancache-ci-runner-clone-init.sh (#1624): its own
-      # tests/bats/runner_clone_init.bats sources this script directly to
-      # exercise own_host_token()/is_foreign_runner_dir() -- same reasoning
-      # as the sibling entry immediately above.
-      - "tools/runner-host/lancache-ci-runner-clone-init.sh"
       - "services/dns/cdn-domains.txt"
       - "services/dns/entrypoint.sh"
       - "services/dhcp/entrypoint.sh"
@@ -244,14 +237,12 @@ on:
       - "scripts/check-pr-tracking-metadata.sh"
       - "scripts/check-setup-prompt-drift.sh"
       - "scripts/check-compose-healthchecks.sh"
-      - "scripts/check-netdata-curl-pin.sh"
       - "scripts/check-workflow-line-limit.sh"
       - "scripts/check-review-chronology-comments.sh"
       - "scripts/generate-vex.sh"
       - "scripts/setup-cli-simulation.sh"
       - "scripts/syslog-forwarding-simulation.sh"
       - ".github/workflows/gc-pr-staging-images.yml"
-      - ".github/workflows/backfill-stack-latest.yml"
       - ".github/workflows/build-push.yml"
       - ".github/workflows/full-setup-validate.yml"
       - ".github/workflows/full-setup-deep-validate.yml"
@@ -265,11 +256,6 @@ on:
       # not already match any other path above and so would never run that
       # suite.
       - "tools/runner-host/lancache-ci-docker-daemon-config.sh"
-      # tools/runner-host/lancache-ci-runner-clone-init.sh (#1624): its own
-      # tests/bats/runner_clone_init.bats sources this script directly to
-      # exercise own_host_token()/is_foreign_runner_dir() -- same reasoning
-      # as the sibling entry immediately above.
-      - "tools/runner-host/lancache-ci-runner-clone-init.sh"
       - "services/dns/cdn-domains.txt"
       - "services/dns/entrypoint.sh"
       - "services/dhcp/entrypoint.sh"
@@ -316,6 +302,11 @@ concurrency:
 defaults:
   run:
     shell: bash
+
+env:
+  # Host temp files go to disk: /tmp is a small tmpfs on some runners and
+  # trivy alone writes 5 to 8 GB of image export there (run 39765669925).
+  TMPDIR: /var/tmp
 
 jobs:
   bats-shellspec-smoke:

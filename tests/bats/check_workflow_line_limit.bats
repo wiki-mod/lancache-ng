@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Exercises scripts/check-workflow-line-limit.sh (issue #1095, 2026-08-01)
 # against small, throwaway .github/workflows fixture trees rather than this

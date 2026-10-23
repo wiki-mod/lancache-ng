@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Pure version-arithmetic helper for the automated patch-release step in
 # build-push.yml's `promote` job (#819). Deliberately has no git/network

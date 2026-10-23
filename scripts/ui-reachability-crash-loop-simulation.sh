@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Real end-to-end proof for issue #763's "the Admin UI is the one thing that
 # must always stay reachable, even when other services are crash-looping"
@@ -70,9 +70,8 @@ compose=(docker compose -p "$compose_project" -f "$compose_file" -f "$override_f
 cleanup() {
     local status=$?
     "${compose[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
-    # `|| true`: confirmed for real in the sibling setup-reset-kea-config-
-    # simulation.sh that an unguarded `rm -rf` as the last command in this
-    # trap can turn a run whose actual test logic already passed into a job
+    # `|| true`: confirmed for real in a sibling simulation script that an
+    # unguarded `rm -rf` as the last command in this trap can turn a run whose actual test logic already passed into a job
     # CI reports as failed, if removal hits so much as one permission-denied
     # file. work_dir here only ever holds a plain compose override file this
     # script itself wrote (no container bind-mount into it, unlike the Kea

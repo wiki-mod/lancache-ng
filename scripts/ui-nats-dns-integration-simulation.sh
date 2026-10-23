@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Real multi-service integration test (issue #400, sub-item of #398 priority
 # 1): drives the actual UI -> NATS -> nats-subscriber -> PowerDNS flow
@@ -98,7 +98,7 @@ done
 echo "proxy, dns-standard, dns-ssl, and ui are healthy."
 
 # Each call is a brand new --rm container, so nothing written to a container's
-# own /tmp survives past that one call -- confirmed the hard way in
+# own /var/tmp survives past that one call -- confirmed the hard way in
 # ssl-mitm-cache-simulation.sh. /shared is bind-mounted from work_dir (a real,
 # persistent host directory) so the cookie jar survives across the GET (which
 # establishes the session) and the POST (which spends it).

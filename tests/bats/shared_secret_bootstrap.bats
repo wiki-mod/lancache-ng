@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Behavior tests for the shared-secret bootstrap library (issue #858):
 # operator-value-wins, first-boot generate, read-existing, and -- the property

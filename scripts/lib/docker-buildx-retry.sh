@@ -1,5 +1,5 @@
 #!/bin/bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Retry wrapper for a *local* `docker buildx build` invocation, specifically
 # for the transient BuildKit/containerd content-store race confirmed live at

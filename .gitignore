@@ -1,4 +1,4 @@
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # Git ignore patterns for build artifacts, secrets, and generated files
 
 # Cache data - never commit

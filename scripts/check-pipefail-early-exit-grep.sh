@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Standing guard (AG-VAL-029) for a confirmed real CI failure: a shell
 # pipeline that pipes a live-running producer command into an early-exiting
@@ -27,7 +27,7 @@
 # confirmed incident occurred in. An earlier version of this script scanned
 # every shell script under scripts/ and tools/ too, and found 41 preexisting
 # instances of the same raw pattern across the codebase (e.g.
-# `scripts/check-file-headers.sh`, `scripts/check-netdata-curl-pin.sh`,
+# `scripts/check-file-headers.sh`,
 # `scripts/setup-cli-simulation.sh`, and others) -- each would need
 # individual review to determine whether it is a real latent SIGPIPE risk
 # (most looked low-risk on inspection: a `printf`/single small-string

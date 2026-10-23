@@ -1,5 +1,5 @@
 #!/bin/bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # Runs Docker-based Rust quality checks (fmt, check, clippy, test, build) for
 # the Admin UI without requiring host Rust tooling. Uses the repo's
 # build-tools image by default and can optionally enable sccache, including
@@ -211,16 +211,16 @@ else
 fi
 
 DOCKER_ENVS=(
-  -e CARGO_HOME=/tmp/cargo
-  -e CARGO_TARGET_DIR=/tmp/target
-  -e PATH=/tmp/cargo-tools/bin:/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+  -e CARGO_HOME=/var/tmp/cargo
+  -e CARGO_TARGET_DIR=/var/tmp/target
+  -e PATH=/var/tmp/cargo-tools/bin:/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 )
 
 if [[ ${ENABLE_SCCACHE} -eq 1 ]]; then
   DOCKER_ENVS+=( -e RUSTC_WRAPPER=sccache )
-  DOCKER_ENVS+=( -e SCCACHE_DIR=/tmp/sccache )
+  DOCKER_ENVS+=( -e SCCACHE_DIR=/var/tmp/sccache )
   DOCKER_ENVS+=( -e SCCACHE_REDIS_KEY_PREFIX=lancache-ui )
-  DOCKER_ENVS+=( -e CARGO_INSTALL_ROOT=/tmp/cargo-tools )
+  DOCKER_ENVS+=( -e CARGO_INSTALL_ROOT=/var/tmp/cargo-tools )
   if [[ -n "${REDIS_URL}" ]]; then
     DOCKER_ENVS+=( -e SCCACHE_REDIS="${REDIS_URL}" )
   fi

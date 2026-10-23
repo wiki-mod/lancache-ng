@@ -338,95 +338,21 @@ router/clients directly, to guarantee cache routing.
 
 ## Automated DHCP behavior testing (CI)
 
-This project has four separate, non-overlapping automated DHCP checks.
-None run on the host's real network interface by default:
+The only automated DHCP check is the Admin UI's native conflict discovery.
+It does not run on the host's real network interface by default:
 
 | Check | What it answers | Where it runs | Invasive? |
 |---|---|---|---|
 | **Conflict discovery** (`services/ui/src/dhcp_probe_native.rs`, `lancache-ui --dhcp-probe`) | Does *any* DHCP server answer on this LAN segment (a native broadcast DHCPDISCOVER, no external tool), and does a client dry-run (a real DISCOVER/OFFER/REQUEST/ACK exchange against the first offer) also succeed? Replaced the former `nmap --script broadcast-dhcp-discover` + `dhclient -1` invocations (issue #1288: both EOL/no longer packaged on current Alpine) with a from-scratch DHCPv4 client. | Admin UI DHCP page, on demand | The client dry-run leg never binds/applies the negotiated lease to any interface (only UDP socket bytes are read/written) and releases the lease (DHCPRELEASE) immediately after confirming it, rather than leaving it allocated for its full lease time as the former `dhclient -1` dry-run did. It does still run against the host's own network (bound to the well-known DHCP client port, broadcasting on the real LAN segment). |
-| **Kea lease-flow simulation** (`scripts/dhcp-kea-lease-flow-simulation.sh`) | Does *our own* Kea service complete a real Discover/Offer/Request/Ack and return the address range, router, DNS, NTP, lease-time, and domain-name options actually configured? Also: does a static host reservation, added directly through Kea's Control Agent API, actually get honored by a subsequent real lease request for the reserved MAC, and does it stay isolated to that MAC (a different, unrelated MAC still gets an ordinary pool address)? And does a granted lease produce a matching PowerDNS **forward (A record)** AND **reverse (PTR record)** DDNS update? | `dhcp-kea-lease-flow-simulation` job in the `Full-Setup Validate` GitHub Actions workflow (`workflow_dispatch` only, never on every PR) | No -- it builds a throwaway Kea container, a throwaway PowerDNS container, and throwaway client containers, all on a dedicated Docker bridge network the script creates and destroys itself. No container's interface, nor any host interface, is ever configured with the negotiated lease. |
-| **Kea Control Agent mutation round-trip** (`scripts/dhcp-kea-ctrl-agent-mutation-simulation.sh`) | Does a real static host reservation added/removed through the actual Admin UI HTTP route (`kea_config_modify()`'s config-get/config-test/config-set/config-write sequence) against a real Kea Control Agent actually change what a *subsequent* real DHCP lease request receives -- not just that the API call returned success? | `dhcp-kea-ctrl-agent-mutation-simulation` job in the `Full-Setup Validate` GitHub Actions workflow (`workflow_dispatch` only, never on every PR) | No -- real Kea and Admin UI containers on the throwaway compose project's own bridge network; DHCP clients again use `dhclient -sf /bin/true`, never applying the negotiated lease to any interface. |
-| **dnsmasq-proxy PXE simulation** (`scripts/dhcp-proxy-pxe-simulation.sh`) | Does *our own* dnsmasq-proxy ProxyDHCP mode reply to a real, synthetically-crafted PXE-tagged DHCPDISCOVER with the correct external boot server address, architecture-appropriate boot filename, and LanCache NG DNS servers -- for both legacy BIOS and UEFI clients -- while still ignoring an ordinary, non-PXE-tagged DISCOVER? | `dhcp-proxy-pxe-simulation` job in the `Full-Setup Validate` GitHub Actions workflow (`workflow_dispatch` only, never on every PR) | No -- it builds a throwaway dnsmasq-proxy container and a throwaway synthetic-PXE-client container (the Rust `tools/pxe-client-probe` binary, compiled with the build-tools image), both on a dedicated Docker bridge network the script creates and destroys itself. No host interface is ever involved, and the external PXE boot server it asserts against is never a real listening service -- just a configured address, per issue #705's scope of pointing at operator infrastructure this project does not itself run. |
-| **dnsmasq-relay flow simulation** (`scripts/dhcp-relay-flow-simulation.sh`, #844) | Does *our own* dnsmasq-relay mode genuinely forward a real client DHCPDISCOVER across a network-segment boundary to an upstream DHCP server? A client on an isolated client-subnet bridge (with **no** direct path to the upstream) sends a real dhclient DISCOVER; the assertion is that the upstream -- on a separate server-subnet bridge -- receives that relayed request and offers an address from the **client** subnet's pool, which is only possible if the relay stamped the correct `giaddr` (`DHCP_RELAY_LOCAL_ADDR`). | `dhcp-relay-flow-simulation` job in the `Full-Setup Validate` GitHub Actions workflow (`workflow_dispatch` only, never on every PR) | No -- it builds a throwaway relay container (this checkout's `dhcp-proxy` image, `DHCP_MODE=dnsmasq-relay`), a throwaway upstream-dnsmasq container, and a throwaway dhclient container across two dedicated Docker bridge networks it creates and destroys itself. No host interface is involved. The two-segment topology is deliberate: if the client and upstream shared one segment the relay would be bypassed. |
 
-The second, third, and fourth checks exist because the first only tells you
-a DHCP server answered -- it does not prove ours behaves correctly, and it
-does not report individual option values. `scripts/dhcp-kea-lease-flow-simulation.sh`
-is the authoritative check for "did Kea hand out what I configured, and does
-it honor a static reservation the way an operator using the Admin UI's DHCP
-page would expect" -- its output (printed to the job log and, in CI,
-`$GITHUB_STEP_SUMMARY`) lists every offered value and both reservation
-outcomes explicitly so a wrong result is easy to spot.
+Conflict discovery only tells you a DHCP server answered -- it does not prove
+ours behaves correctly and does not report individual option values.
 
-This is a different layer than issue #634's Kea Control Agent mutation test:
-that one drives a reservation add/remove through the Admin UI's own real
-HTTP routes on a full stack, proving the Rust `kea_config_modify()` code
-path is correct end to end. `dhcp-kea-lease-flow-simulation.sh` instead
-drives the same underlying Kea Control Agent commands directly, on its own
-lightweight single-Kea-container setup, to prove Kea's own runtime honors a
-reservation for the right client and only the right client -- complementary
-coverage, not a duplicate.
-
-`scripts/dhcp-proxy-pxe-simulation.sh` is the authoritative check for the
-`dnsmasq-proxy` DHCP mode's entirely separate code path
-(`services/dhcp-proxy`), covering ProxyDHCP PXE-tagged behavior that none of
-the Kea-focused checks above exercise at all. Like the others, it prints
-every asserted value explicitly (to the job log and, in CI,
-`$GITHUB_STEP_SUMMARY`) so a wrong result is easy to spot.
-
-**What the Kea lease-flow simulation does NOT verify** (documented here per
-its own design -- see the script's header comment for the full rationale):
-
-- Whether `dns-ssl` (the SSL-mode PowerDNS instance) also receives DHCP
-  lease records. It doesn't, under normal operation (issue #770, discovered
-  during PR #769's review): `services/dhcp/kea-dhcp-ddns.conf` lists both
-  DNS servers in one `dns-servers` array, but Kea's D2 daemon treats that
-  list as first-to-last **failover**, not fan-out -- as long as
-  `dns-standard` is healthy (the first entry in prod/quickstart), it is the
-  only PowerDNS instance that ever receives the update. Clients that only
-  resolve against the SSL-mode DNS IP do not currently get DHCP-issued LAN
-  hostnames. This predates #706/#769 (before those fixes, DDNS reached
-  *neither* instance), so it isn't a regression, but it also isn't fixed by
-  them; real fan-out to both independent PowerDNS databases needs its own
-  design (zone replication or NATS-mediated delivery) and is tracked as new
-  work for v0.3.0 in issue #770, not squeezed into the v0.2.0 stabilization
-  fix this document otherwise describes.
-- The `dnsmasq-proxy` DHCP mode -- entirely different code path
-  (`services/dhcp-proxy`), covered instead by the PXE simulation below.
-
-**What the dnsmasq-proxy PXE simulation does NOT verify** (documented here
-per its own design -- see `scripts/dhcp-proxy-pxe-simulation.sh`'s own
-header comment for the full rationale):
-
-- PXE boot menu behavior -- this project deliberately implements none;
-  dnsmasq's role here is only to point a PXE client at an external boot
-  server, never to serve a menu or boot files itself.
-- An actual TFTP/HTTP boot-file transfer against the configured external
-  boot server -- out of scope by design, and that server is never a real
-  listening service in this simulation, just a configured address the
-  DHCPOFFER is asserted to point at.
-
-Neither check has an invasive/host-interface mode: every server and client
-container involved always runs inside its own throwaway, isolated Docker
-network, so there was nothing that needed gating behind an explicit opt-in
-flag beyond each job itself only running on manual dispatch.
-
-`scripts/dhcp-kea-ctrl-agent-mutation-simulation.sh` (issue #634) closes the
-static-reservation gap left open above: it drives a real static host
-reservation add/remove through the Admin UI's actual `/dhcp/static/add` and
-`/dhcp/static/remove` HTTP routes -- the same `kea_config_modify()` Rust code
-path a real operator's browser would hit -- against a real Kea Control Agent,
-and confirms both a follow-up `config-get` and a subsequent real DHCP lease
-request for the same MAC address reflect each change. This is what would have
-caught #630 (Kea 2.6.3's `config-get` response including a `hash` field that
-`config-test`/`config-set` reject) automatically instead of needing a human
-to hit it in production: every existing `cargo test` for that function mocks
-Kea's response and none of those mocks omitted the fix once written, so they
-prove the fix works, not that the assumed response shape is still accurate.
-**What it does NOT verify**: subnet/custom-option mutation routes beyond
-reservations (same underlying `kea_config_modify()` code path, so this is
-representative coverage of that function, not route-by-route exhaustive),
-DHCP-DDNS lease-event follow-through (issue #557), and the `dnsmasq-proxy`
-mode (entirely different code path, no Kea/Admin-UI Control Agent interaction
-at all). Also has no invasive/host-interface mode, for the same reason as the
-lease-flow simulation above.
+The former Kea lease-flow, Kea Control Agent mutation, dnsmasq-proxy PXE and
+dnsmasq-relay simulations were removed: each built its own image inside the
+job, so they never tested the image the PR publishes. No CI job replaces
+them: end-to-end Kea, ProxyDHCP/PXE and relay behavior is currently not tested
+in CI.
+Parsing of dhclient lease files remains covered by
+`tests/bats/dhcp_lease_flow_parsing.bats`, Kea config generation by
+`tests/bats/dhcp_kea_config_generation.bats`.

@@ -1,4 +1,4 @@
-//! lancache-ng (https://github.com/wiki-mod/lancache-ng)
+//! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 //! First-run setup wizard displaying network configuration details, plus the
 //! ongoing release-channel / scheduled-update settings control (#819).
 //!

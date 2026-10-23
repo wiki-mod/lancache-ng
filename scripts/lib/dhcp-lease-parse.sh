@@ -1,11 +1,10 @@
 #!/bin/bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Parser for ISC dhclient .leases files (issue #448). Pure functions, no
-# top-level executable code, so this can be sourced directly both by
-# scripts/dhcp-kea-lease-flow-simulation.sh (the real, opt-in Kea
-# lease-flow test) and by tests/bats/dhcp_lease_flow_parsing.bats (fast,
-# Docker-free unit coverage of the parsing logic against canned fixtures).
+# top-level executable code, so this can be sourced directly by
+# tests/bats/dhcp_lease_flow_parsing.bats (fast, Docker-free unit coverage
+# of the parsing logic against canned fixtures).
 #
 # dhclient.leases is a sequence of `lease { ... }` blocks, oldest first, one
 # appended per renewal/rebind. Only the LAST block reflects the current,

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Enforces AG-REL-001 (project language: Rust and shell for code we write,
 # other languages need explicit maintainer approval every time) by scanning

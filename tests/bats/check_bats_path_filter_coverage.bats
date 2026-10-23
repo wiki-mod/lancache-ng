@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Coverage for scripts/check-bats-path-filter-coverage.sh (#879): the CI
 # guard that fails a build if .github/workflows/build-tools-smoke.yml's

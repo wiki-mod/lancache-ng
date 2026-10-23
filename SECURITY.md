@@ -102,6 +102,8 @@ This section documents intentional security design decisions and known tradeoffs
 
 **What is not spoofed**: Web browsers, corporate networks, banking, or other general-purpose traffic.
 
+**Optional upstream resolver**: If an operator sets `DNS_UPSTREAM_SERVERS`, the recursors forward the configured zones (default every name) to those resolvers instead of resolving them from the root servers. DNSSEC validation stays on for forwarded names; only the zones the operator lists in `DNS_UPSTREAM_UNSIGNED_ZONES` (private zones without signatures) are exempt, and the configured resolver is trusted for them. The settings are operator-only and empty by default; `setup.sh` and the DNS container reject loopback addresses, LanCache addresses and malformed entries; the container then starts without an upstream and logs an error.
+
 ### 3. Docker Socket Mount in UI Container
 
 **Design**: The Admin UI container mounts the Docker daemon socket (`/var/run/docker.sock`) to allow container management.
@@ -211,9 +213,9 @@ Static Application Security Testing (SAST) remediation policy.
 - **Threshold**: zero-tolerance by default. Any `cargo audit` finding, or any
   Trivy-reported vulnerability not already listed in `.trivyignore.yaml`, is
   treated as a blocking failure. A finding may only be accepted (not fixed) by
-  adding a dated, justified entry to `.trivyignore.yaml` with an explicit
-  `expired_at` date, forcing periodic re-review rather than a silent permanent
-  exception -- there is no equivalent suppression file for `cargo audit`
+  adding a justified entry to `.trivyignore.yaml` that states when the
+  exception ends (a fixed version becoming available) and carries no
+  deadline date -- there is no equivalent suppression file for `cargo audit`
   findings today, so a Rust dependency advisory must be fixed (upgrade,
   patch, or replace the dependency) rather than suppressed.
 - **License findings**: dependency license compliance is not currently

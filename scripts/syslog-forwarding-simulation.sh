@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Real end-to-end proof for issue #453's last two comments: it is not enough
 # to show a log line reaches syslog-ng on disk -- the maintainer's own
@@ -25,10 +25,8 @@
 # in production (needed for real broadcast DHCP on the operator's actual
 # LAN) -- exercising that unmodified on a shared CI runner would leak real
 # DHCPDISCOVER broadcast traffic onto the runner host's own LAN interface,
-# the same risk scripts/dhcp-kea-lease-flow-simulation.sh and
-# scripts/dhcp-proxy-pxe-simulation.sh already avoid by using their own
-# isolated bridge-network containers instead of quickstart's host-network
-# services. This script does the same for its two DHCP triggers: a
+# the same risk avoided here by using isolated bridge-network containers
+# instead of quickstart's host-network services, for its two DHCP triggers: a
 # per-run compose override (`$work_dir/dhcp-test-override.yml`, built below)
 # uses Compose's `!reset` merge tag (supported by this project's runners,
 # Compose v5.3.0+) to null out `dhcp`/`dhcp-proxy`'s `network_mode: host` and
@@ -43,9 +41,8 @@
 # path this script proves (service -> log file -> fluent-bit tail ->
 # syslog-ng -> Admin UI `/logs`) is identical regardless of network mode,
 # so this loses no coverage of what #864 actually asks for (central-logging
-# E2E visibility), while dhcp-kea-lease-flow-simulation.sh/
-# dhcp-proxy-pxe-simulation.sh remain the authority on real host-network/PXE
-# protocol behavior. Because neither DHCP server ever binds a host-level
+# E2E visibility). Real host-network/PXE protocol behavior is NOT covered
+# by this script. Because neither DHCP server ever binds a host-level
 # port under this override (each gets its own bridge-network namespace),
 # the "sequential, never-simultaneous bring-up" constraint #864 originally
 # raised for host-network port contention does not apply here -- both run
@@ -178,8 +175,7 @@ fi
 # independently-chosen /24s: one octet lookup covers both networks with no
 # possibility of the two ranges overlapping each other, and 172.29.0.0/16 is
 # not used by any other script in this repo (deploy/dev's now-retired
-# 172.28.0.0/16, full-setup-validate's 172.30.0.0/16, and
-# dhcp-kea-lease-flow-simulation.sh's 172.31.0.0/16 are all distinct ranges).
+# 172.28.0.0/16 and full-setup-validate's 172.30.0.0/16 are distinct ranges).
 dhcp_gateway="172.29.${octet}.1"
 dhcp_range_start="172.29.${octet}.10"
 dhcp_range_end="172.29.${octet}.100"
@@ -257,7 +253,7 @@ if ! expect_prompt_block="$(
     LANCACHE_IMAGE_CHANNEL="$setup_sim_fresh_install_channel" \
     LANCACHE_IMAGE_TAG="$setup_sim_fresh_install_tag" \
     build_expect_prompt_block "$repo_root/setup.sh" "$setup_sim_answers_file" \
-        "$ip_standard" "y" "$ip_ssl" "" "$install_dir" "" "" "" "" "disabled" "" "n" "y" "n"
+        "$ip_standard" "y" "$ip_ssl" "" "$install_dir" "" "" "" "" "" "disabled" "" "n" "y" "n"
 )"; then
     echo "::error::Could not derive the fresh-install expect_prompt sequence from 'setup.sh list-prompts' (issue #1176). See the error above for which prompt/reply count mismatched." >&2
     exit 1
@@ -754,17 +750,16 @@ echo "== Trigger 7/8: dhcp (Kea) -- a real DHCPDISCOVER/OFFER/REQUEST/ACK lease 
 # A real dhclient, on the dedicated dhcp-test-net bridge network (see the
 # override built in Phase 2/3 above), negotiates a genuine lease against
 # this run's own Kea container -- the identical Discover/Offer/Request/Ack
-# exchange dhcp-kea-lease-flow-simulation.sh already proves in depth, driven
+# exchange of a standard DHCP lease, driven
 # here only far enough to produce a real, per-run-unique log line (the
 # offered address, drawn from this run's own $dhcp_range_start-
 # $dhcp_range_end pool) in kea-dhcp4.log -- confirmed live before writing
 # this trigger that Kea's own DHCP4_LEASE_ALLOC log line names the leased
 # address verbatim. `-sf /bin/true` (a no-op lease-apply script) means the
 # lease is negotiated over the wire but never actually applied to this
-# throwaway client container's own interface, the same safety technique
-# dhcp-kea-lease-flow-simulation.sh's own real-dhclient test uses -- both
-# scripts deliberately still use real `dhclient` for THIS isolated-network
-# CI purpose (testing Kea's own server behavior), distinct from the Admin
+# throwaway client container's own interface, a standard safety
+# technique -- this script deliberately uses real `dhclient` for THIS
+# isolated-network CI purpose (testing Kea's own server behavior), distinct from the Admin
 # UI's own dhcp-probe container, which issue #1288 rewrote to a native
 # Rust DHCP client with no dhclient dependency at all.
 dhcp_client_container="lancachee2e-dhcp-client-$$"
@@ -780,7 +775,7 @@ dhcp_lease_deadline=$((SECONDS + 30))
 dhcp_lease_obtained=0
 while (( SECONDS < dhcp_lease_deadline )); do
     # Same "wait for the closing brace, not just file existence" reasoning
-    # as dhcp-kea-lease-flow-simulation.sh's own identical wait loop: the
+    # as any dhclient lease wait loop: the
     # lease file appears the moment dhclient starts writing it, well before
     # the record is complete.
     if [[ -s "$work_dir/shared/dhcp-client.leases" ]] && grep -q '^}' "$work_dir/shared/dhcp-client.leases" 2>/dev/null; then
@@ -824,8 +819,7 @@ echo "== Trigger 8/8: dhcp-proxy (dnsmasq) -- real DHCPDISCOVER over the isolate
 # a lease on its own, so there is no offered-address marker to parse the way
 # Trigger 7 above has. Confirmed live before writing this trigger: without a
 # paired primary DHCP server (out of scope to stand up here -- a separate,
-# heavier scenario dhcp-proxy-pxe-simulation.sh is better positioned to
-# cover if ever needed), a real DHCPDISCOVER received here only produces
+# heavier scenario, out of scope here), a real DHCPDISCOVER received here only produces
 # dnsmasq's own "no address range available for DHCP request via eth0" line,
 # which carries no per-run marker. Instead, this trigger's marker is the
 # real, operator-configured DHCP_SUBNET_START value this run's override set
@@ -841,7 +835,7 @@ docker run -d --name "$dhcp_proxy_client_container" \
     --network "${compose_project}_dhcp-proxy-test-net" \
     --cap-add NET_ADMIN --cap-add NET_RAW \
     "$BUILD_TOOLS_IMAGE" \
-    bash -c 'dhclient -4 -1 -v -d -sf /bin/true -pf /tmp/dhcp-proxy-client.pid -lf /tmp/dhcp-proxy-client.leases eth0 >/tmp/dhcp-proxy-client.out 2>&1 || true; sleep 3' \
+    bash -c 'dhclient -4 -1 -v -d -sf /bin/true -pf /var/tmp/dhcp-proxy-client.pid -lf /var/tmp/dhcp-proxy-client.leases eth0 >/var/tmp/dhcp-proxy-client.out 2>&1 || true; sleep 3' \
     >/dev/null
 sleep 5
 docker rm -f "$dhcp_proxy_client_container" >/dev/null 2>&1 || true

@@ -1,4 +1,4 @@
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Scheduled/manual refresh for the `nightly` channel (#1254/#1255, 2026-07-25
 # maintainer decision: nightly becomes a real once-daily build, like Firefox
@@ -83,6 +83,11 @@ concurrency:
   # negligible).
   group: nightly-refresh
   cancel-in-progress: false
+
+env:
+  # Host temp files go to disk: /tmp is a small tmpfs on some runners and
+  # trivy alone writes 5 to 8 GB of image export there (run 39765669925).
+  TMPDIR: /var/tmp
 
 jobs:
   refresh-nightly:

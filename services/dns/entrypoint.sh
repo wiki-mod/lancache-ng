@@ -1,5 +1,5 @@
 #!/bin/bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # PowerDNS container entrypoint. Generates RPZ zones from cdn-domains.txt
 # (with monotonic serial handling), renders the recursor/authoritative config
@@ -225,6 +225,22 @@ if secret_is_placeholder "$DDNS_TSIG_KEY"; then
 fi
 LOG_QUERIES="${LOG_QUERIES:-${DNSMASQ_LOG_QUERIES:-0}}"
 ROOT_ZONE_MIRROR="${ROOT_ZONE_MIRROR:-1}"
+# What: upstream resolvers for names outside the LAN zones.
+# Why: a LAN resolver answers private names the root cannot.
+# From: Issue #1918
+DNS_UPSTREAM_SERVERS="${DNS_UPSTREAM_SERVERS:-}"
+# What: the zones sent to those upstream resolvers.
+# Why: "." forwards every name; a list scopes the forward.
+# From: Issue #1918
+DNS_UPSTREAM_ZONES="${DNS_UPSTREAM_ZONES:-.}"
+# What: forwarded zones whose answers carry no DNSSEC.
+# Why: validation stays on for every other name.
+# From: Issue #1918
+DNS_UPSTREAM_UNSIGNED_ZONES="${DNS_UPSTREAM_UNSIGNED_ZONES:-}"
+# What: LanCache addresses that clients use to reach DNS.
+# Why: an upstream on one of them would loop back to us.
+# From: Issue #1918
+DNS_LISTEN_IPS="${DNS_LISTEN_IPS:-}"
 NATS_URL="${NATS_URL:-nats://nats:4222}"
 NATS_USER="${NATS_USER:-}"
 # Resolve the shared NATS password (issue #858). The nats server and this dns
@@ -911,14 +927,199 @@ _dns_auth_validate_snapshot_or_rollback() {
 echo "[lancache-dns] Proxy IPv4: $PROXY_IP"
 [ -n "$PROXY_IPV6" ] && echo "[lancache-dns] Proxy IPv6: $PROXY_IPV6"
 
+# What: the zones the recursor template forwards locally.
+# Why: an upstream zone must not repeat one of them.
+# From: Issue #1918
+dns_local_forward_zones() {
+    sed -n 's/^    - zone: \([^ ]*\)$/\1/p' /etc/pdns/recursor.conf.template
+}
+
+# What: report a bad DNS_UPSTREAM_SERVERS entry.
+# Why: the caller then starts without the upstream.
+# From: Issue #1918
+dns_upstream_error() {
+    echo "[lancache-dns] ERROR: DNS_UPSTREAM_SERVERS entry '$1' $2." >&2
+    return 1
+}
+
+# What: check one upstream resolver, print it for the YAML.
+# Why: the recursor takes IP[:port], not host names.
+# From: Issue #1918
+dns_upstream_forwarder() {
+    local entry="$1" ip="$1" port="" octet own addr
+    local -a octets=() addrs=()
+    case "$entry" in
+        \[*\]:*) ip="${entry#\[}"; ip="${ip%%\]*}"; port="${entry##*\]:}" ;;
+        \[*\]) ip="${entry#\[}"; ip="${ip%\]}" ;;
+        *:*:*) ip="$entry" ;;
+        *:*) ip="${entry%%:*}"; port="${entry#*:}" ;;
+    esac
+    if [ -n "$port" ]; then
+        if ! [[ "$port" =~ ^[0-9]{1,5}$ ]] || [ "$((10#$port))" -lt 1 ] || [ "$((10#$port))" -gt 65535 ]; then
+            dns_upstream_error "$entry" "has no valid port"
+            return 1
+        fi
+        port="$((10#$port))"
+    fi
+    if [[ "$ip" == *:* ]]; then
+        if ! [[ "$ip" =~ ^[0-9A-Fa-f:]+$ && "$ip" == *:*:* ]]; then
+            dns_upstream_error "$entry" "is no IPv6 address"
+            return 1
+        fi
+    else
+        IFS=. read -r -a octets <<< "$ip"
+        if [ "${#octets[@]}" -ne 4 ]; then
+            dns_upstream_error "$entry" "is no IPv4 address"
+            return 1
+        fi
+        for octet in "${octets[@]}"; do
+            if ! [[ "$octet" =~ ^[0-9]{1,3}$ ]] || [ "$((10#$octet))" -gt 255 ]; then
+                dns_upstream_error "$entry" "is no IPv4 address"
+                return 1
+            fi
+        done
+    fi
+    case "$ip" in
+        127.*|0.0.0.0|::1|::)
+            dns_upstream_error "$entry" "is a loopback or unspecified address"
+            return 1
+            ;;
+    esac
+    IFS=, read -r -a addrs <<< "$DNS_LISTEN_IPS"
+    if ! own="$(ip -o addr show)"; then
+        echo "[lancache-dns] ERROR: could not list this container's addresses." >&2
+        return 1
+    fi
+    while read -r _ _ _ addr _; do
+        addrs+=("${addr%%/*}")
+    done <<< "$own"
+    for addr in "${addrs[@]}"; do
+        if [ -n "$addr" ] && [ "$addr" = "$ip" ]; then
+            dns_upstream_error "$entry" "is a LanCache address and would loop"
+            return 1
+        fi
+    done
+    if [[ "$ip" == *:* ]]; then
+        printf '"[%s]:%s"\n' "$ip" "${port:-53}"
+    else
+        printf '"%s%s"\n' "$ip" "${port:+:$port}"
+    fi
+}
+
+# What: print the forward_zones_recurse block of the YAML.
+# Why: envsubst places it inside the recursor mapping.
+# From: Issue #1918
+dns_upstream_yaml() {
+    local forwarders="$1" zone
+    shift
+    printf '  forward_zones_recurse:\n'
+    for zone in "$@"; do
+        printf '    - zone: "%s"\n      forwarders: [%s]\n' "$zone" "$forwarders"
+    done
+}
+
+# What: check a zone list, print it normalized on one line.
+# Why: both zone lists share one name and local-zone check.
+# From: Issue #1918
+dns_upstream_zone_list() {
+    local name="$1" list="$2" local_zones="$3" zone
+    local -a requested=() zones=()
+    read -r -a requested <<< "${list//,/ }"
+    for zone in "${requested[@]}"; do
+        if [ "$zone" != "." ]; then
+            zone="${zone,,}"
+            zone="${zone%.}"
+            if [ "${#zone}" -gt 253 ] || ! [[ "$zone" =~ ^[a-z0-9_]([a-z0-9_-]*)(\.[a-z0-9_]([a-z0-9_-]*))*$ ]]; then
+                echo "[lancache-dns] ERROR: $name entry '$zone' is no DNS zone name." >&2
+                return 1
+            fi
+        fi
+        if grep -qxF -- "$zone" <<< "$local_zones"; then
+            echo "[lancache-dns] ERROR: $name entry '$zone' is served by the local authoritative server." >&2
+            return 1
+        fi
+        case " ${zones[*]:-} " in
+            *" $zone "*) ;;
+            *) zones+=("$zone") ;;
+        esac
+    done
+    printf '%s\n' "${zones[*]:-}"
+}
+
+# What: build the upstream forward block and zone lists.
+# Why: the template and recursor.lua both read the result.
+# From: Issue #1918
+dns_upstream_setup() {
+    local entry zone forward local_zones covered
+    local forwarders="" zone_out
+    local -a servers=() zones=() unsigned=()
+    PDNS_RECURSOR_UPSTREAM_ZONES=""
+    read -r -a servers <<< "${DNS_UPSTREAM_SERVERS//,/ }"
+    if [ "${#servers[@]}" -eq 0 ]; then
+        DNS_UPSTREAM_ZONES=""
+        DNS_UPSTREAM_UNSIGNED_ZONES=""
+        return 0
+    fi
+    for entry in "${servers[@]}"; do
+        entry="$(dns_upstream_forwarder "$entry")" || return 1
+        forwarders+="${forwarders:+, }${entry}"
+    done
+    local_zones="$(dns_local_forward_zones)" || return 1
+    zone_out="$(dns_upstream_zone_list DNS_UPSTREAM_ZONES "${DNS_UPSTREAM_ZONES:-.}" "$local_zones")" || return 1
+    read -r -a zones <<< "$zone_out"
+    [ "${#zones[@]}" -gt 0 ] || zones=(.)
+    zone_out="$(dns_upstream_zone_list DNS_UPSTREAM_UNSIGNED_ZONES "$DNS_UPSTREAM_UNSIGNED_ZONES" "$local_zones")" || return 1
+    read -r -a unsigned <<< "$zone_out"
+    for zone in "${unsigned[@]}"; do
+        [ -n "$zone" ] || continue
+        covered=0
+        for forward in "${zones[@]}"; do
+            if [ "$forward" = "." ] || [ "$zone" = "$forward" ] || [[ "$zone" == *".$forward" ]]; then
+                covered=1
+            fi
+        done
+        if [ "$zone" = "." ] || [ "$covered" -ne 1 ]; then
+            echo "[lancache-dns] ERROR: DNS_UPSTREAM_UNSIGNED_ZONES entry '$zone' must lie inside DNS_UPSTREAM_ZONES and must not be '.'." >&2
+            return 1
+        fi
+    done
+    PDNS_RECURSOR_UPSTREAM_ZONES="$(dns_upstream_yaml "$forwarders" "${zones[@]}")" || return 1
+    DNS_UPSTREAM_ZONES="${zones[*]}"
+    DNS_UPSTREAM_UNSIGNED_ZONES="${unsigned[*]:-}"
+    echo "[lancache-dns] Forwarding zones '${DNS_UPSTREAM_ZONES}' to upstream resolvers: ${forwarders//\"/}"
+    if [ -n "$DNS_UPSTREAM_UNSIGNED_ZONES" ]; then
+        echo "[lancache-dns] DNSSEC validation is off only for: ${DNS_UPSTREAM_UNSIGNED_ZONES}"
+    fi
+}
+
 # ── 1. Generate Recursor Config ──────────────────────────────────────────────
+# What: start without upstream if the setting is invalid.
+# Why: a typo must not take the DNS server away.
+# From: Issue #1918
+if ! dns_upstream_setup; then
+    echo "[lancache-dns] ERROR: the DNS_UPSTREAM_* setting is invalid; starting WITHOUT an upstream resolver. Fix it with: ./setup.sh configure-upstream-dns" >&2
+    PDNS_RECURSOR_UPSTREAM_ZONES=""
+    DNS_UPSTREAM_ZONES=""
+    DNS_UPSTREAM_UNSIGNED_ZONES=""
+fi
+export PDNS_RECURSOR_UPSTREAM_ZONES DNS_UPSTREAM_ZONES DNS_UPSTREAM_UNSIGNED_ZONES
 echo "[lancache-dns] Generating recursor.conf..."
 # shellcheck disable=SC2016 # envsubst needs the literal variable name.
 if [ "$LOG_QUERIES" = "1" ]; then
     echo "[lancache-dns] Enabling query logging..."
 fi
-render_template_atomic '${PDNS_API_KEY}' /etc/pdns/recursor.conf.template "$RECURSOR_CONF_FILE" "$LOG_QUERIES"
+# shellcheck disable=SC2016 # render_template_atomic needs literal envsubst variable names.
+render_template_atomic '${PDNS_API_KEY}:${PDNS_RECURSOR_UPSTREAM_ZONES}' /etc/pdns/recursor.conf.template "$RECURSOR_CONF_FILE" "$LOG_QUERIES"
 _dns_recursor_validate_snapshot_or_rollback "$RECURSOR_CONF_FILE" || _dns_enter_rescue_mode "recursor"
+# What: clear upstream zones if the file lost its block.
+# Why: after a rollback, Lua must match the live file.
+# From: Issue #1918
+if [ -n "$DNS_UPSTREAM_ZONES" ] && ! grep -q '^  forward_zones_recurse:' "$RECURSOR_CONF_FILE"; then
+    echo "[lancache-dns] WARNING: recursor.conf has no upstream forward after the rollback; DNS_UPSTREAM_SERVERS is ignored until a config validates." >&2
+    DNS_UPSTREAM_ZONES=""
+    DNS_UPSTREAM_UNSIGNED_ZONES=""
+    export DNS_UPSTREAM_ZONES DNS_UPSTREAM_UNSIGNED_ZONES
+fi
 
 # ── 2. Generate Authoritative Config ─────────────────────────────────────────
 echo "[lancache-dns] Generating pdns.conf..."

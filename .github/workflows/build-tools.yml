@@ -1,4 +1,4 @@
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # CI workflow that builds, smoke-tests, and scans the multi-arch build-tools container
 # image (providing rustc, sccache, distcc) locally, then publishes it to GHCR on a
 # weekly schedule, on relevant pushes to master, and on manual dispatch. This
@@ -98,6 +98,9 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  # Host temp files go to disk: /tmp is a small tmpfs on some runners and
+  # trivy alone writes 5 to 8 GB of image export there (run 39765669925).
+  TMPDIR: /var/tmp
   BUILD_TOOLS_IMAGE: ghcr.io/${{ github.repository }}/build-tools
   # run_id-run_attempt suffixed, not a fixed name: build-tools and
   # build-tools-arm64 each load a *local* scan image onto their own runner's
@@ -761,7 +764,12 @@ jobs:
       - name: Remove local scan image
         if: always()
         run: |
-          docker rmi "${BUILD_TOOLS_SCAN_IMAGE_AMD64}" || true
+          # Absent image is not a failure (the build may have stopped before it
+          # existed); a hung or failing docker call is, and must stay visible.
+          image_id="$(timeout --kill-after=30 120 docker images --quiet "${BUILD_TOOLS_SCAN_IMAGE_AMD64}")"
+          if [ -n "$image_id" ]; then
+            timeout --kill-after=30 120 docker rmi "${BUILD_TOOLS_SCAN_IMAGE_AMD64}"
+          fi
 
       # The docker-container builder "Set up Docker Buildx" created above is
       # never torn down by setup-buildx-action itself, and this runner pool
@@ -987,7 +995,12 @@ jobs:
       - name: Remove local scan image
         if: always()
         run: |
-          docker rmi "${BUILD_TOOLS_SCAN_IMAGE_ARM64}" || true
+          # Absent image is not a failure (the build may have stopped before it
+          # existed); a hung or failing docker call is, and must stay visible.
+          image_id="$(timeout --kill-after=30 120 docker images --quiet "${BUILD_TOOLS_SCAN_IMAGE_ARM64}")"
+          if [ -n "$image_id" ]; then
+            timeout --kill-after=30 120 docker rmi "${BUILD_TOOLS_SCAN_IMAGE_ARM64}"
+          fi
 
       # Same leak as the amd64 leg's own "Remove buildx builder" step above:
       # setup-buildx-action never tears its builder down on its own. This

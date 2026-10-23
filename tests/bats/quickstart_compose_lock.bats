@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Fast, Docker-free unit coverage for scripts/lib/quickstart-compose-lock.sh
 # (issue #838). Unlike scripts/lib/promote-lock.sh's bats coverage (a git-ref
@@ -7,7 +7,7 @@
 # primitive is a plain host-local flock, so contention is proven with real,
 # genuinely separate `bash` processes racing over a throwaway
 # $BATS_TEST_TMPDIR lock file -- the same mechanism two real CI jobs on the
-# same runner host would hit on the real /tmp lock path.
+# same runner host would hit on the real /var/tmp lock path.
 #
 # The design point this suite exists to prove empirically (not just assert
 # by reasoning) is the file header's central claim: `exec {fd}>...; flock`
@@ -28,7 +28,7 @@ setup() {
     source "$lock_lib"
 
     # Throwaway per-test lock path -- never the real
-    # /tmp/lancache-setup-cli-simulation.lock constant, so this suite can
+    # /var/tmp/lancache-setup-cli-simulation.lock constant, so this suite can
     # never contend with (or be contended by) a real concurrent CI job or
     # another test run on the same host.
     test_lock_path="$BATS_TEST_TMPDIR/quickstart-compose.lock"
@@ -64,11 +64,11 @@ wait_for_marker() {
 
 @test "sourcing defines the function and preserves the original hardcoded lock path" {
     # The literal path the original 3-copy inline pattern used
-    # (exec {lock_fd}>/tmp/lancache-setup-cli-simulation.lock) must be
+    # (exec {lock_fd}>/var/tmp/lancache-setup-cli-simulation.lock) must be
     # unchanged by this refactor -- a different default here would silently
     # stop this helper from serializing against any leftover job still on
     # the old inline form.
-    [ "$QUICKSTART_COMPOSE_LOCK_PATH" = "/tmp/lancache-setup-cli-simulation.lock" ]
+    [ "$QUICKSTART_COMPOSE_LOCK_PATH" = "/var/tmp/lancache-setup-cli-simulation.lock" ]
     declare -f quickstart_compose_lock_acquire >/dev/null
 }
 
@@ -226,10 +226,10 @@ wait_for_marker() {
     # Regression guard: the old hand-rolled inline form must not reappear in
     # any of the three -- its presence would mean a new call site re-added the
     # exact copy-paste mistake this helper exists to stop.
-    ! grep -q 'exec {lock_fd}>/tmp/lancache-setup-cli-simulation.lock' "$repo_root/.github/workflows/full-setup-deep-validate.yml" \
+    ! grep -q 'exec {lock_fd}>/var/tmp/lancache-setup-cli-simulation.lock' "$repo_root/.github/workflows/full-setup-deep-validate.yml" \
         || fail "full-setup-deep-validate.yml still contains the old inline exec/flock pattern"
-    ! grep -q 'exec {lock_fd}>/tmp/lancache-setup-cli-simulation.lock' "$repo_root/.github/workflows/full-setup-validate.yml" \
+    ! grep -q 'exec {lock_fd}>/var/tmp/lancache-setup-cli-simulation.lock' "$repo_root/.github/workflows/full-setup-validate.yml" \
         || fail "full-setup-validate.yml still contains the old inline exec/flock pattern"
-    ! grep -q 'exec {lock_fd}>/tmp/lancache-setup-cli-simulation.lock' "$repo_root/.github/workflows/full-setup-sims.yml" \
+    ! grep -q 'exec {lock_fd}>/var/tmp/lancache-setup-cli-simulation.lock' "$repo_root/.github/workflows/full-setup-sims.yml" \
         || fail "full-setup-sims.yml still contains the old inline exec/flock pattern"
 }

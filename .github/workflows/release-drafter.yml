@@ -1,4 +1,4 @@
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # Drafts/updates a GitHub Release incrementally on every push to
 # master/current_dev/v0.2.0, using .github/release-drafter.yml's config
 # (#899, decided on #894). Replaces the manual "collect merged PRs by hand
@@ -32,6 +32,7 @@ jobs:
   update_release_draft:
     name: draft/update release notes
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       # release-drafter needs to create/update a draft release and resolve
       # merged-PR labels; contents:write is release-drafter's own documented

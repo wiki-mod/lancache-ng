@@ -1,5 +1,5 @@
 #!/bin/bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Host-local, per-slot locking for the full-setup-validate validation
 # Docker subnet (issue #703; slot/`/27` redesign issue #832). Pure functions
@@ -74,21 +74,11 @@
 # UNCHANGED by the #832 `/27` redesign, deliberately: this function (and
 # validation_subnet_reserve/validation_subnet_try_lock/
 # validation_subnet_release, which it's built on) is also reused, as a
-# generic "reserve one free integer with host-local flock" primitive, by two
-# entirely independent consumers on their OWN separate /16 ranges --
-# scripts/dhcp-kea-lease-flow-simulation.sh (172.31.0.0/16) and
-# scripts/dhcp-proxy-pxe-simulation.sh (172.29.0.0/16) -- neither of which
-# has (or wants) a `/27` subdivision; both still want a single, whole `/24`
-# per octet, exactly as before. A first version of this redesign renamed
-# this function's output to "slot" and changed what it locked/derived,
-# which silently broke both of those unrelated consumers (they kept parsing
-# `sed -n 's/^octet=//p'` on validation_subnet_reserve's output, which no
-# longer existed) -- confirmed for real via a genuine CI run: both scripts'
-# `candidate_octet` came back empty, producing the literal, invalid
-# subnet string "172.31..0/24"/"172.29..0/24". Fixed by keeping THIS
-# function and validation_subnet_reserve exactly as they always were, and
-# adding SEPARATE validation_subnet_derive_slot/validation_subnet_reserve_slot
-# functions (below) for the NEW `/27`-per-slot callers instead of repurposing
+# generic "reserve one free integer with host-local flock" primitive that
+# wants a single, whole `/24` per octet and no `/27` subdivision; its
+# behavior is pinned by tests/bats/reserve_validation_subnet.bats. The `/27`
+# slot callers use the SEPARATE validation_subnet_derive_slot/
+# validation_subnet_reserve_slot functions (below) instead of repurposing
 # the existing octet-only ones.
 validation_subnet_derive_octet() {
     local raw_seed="$1"
@@ -259,9 +249,7 @@ validation_subnet_release() {
 #
 # For the general 172.30.0.0/16 validation-stack pool ONLY -- see
 # validation_subnet_reserve_slot (below) for the `/27`-per-slot equivalent.
-# scripts/dhcp-kea-lease-flow-simulation.sh and
-# scripts/dhcp-proxy-pxe-simulation.sh call THIS function (on their own,
-# separate 172.31.0.0/16 / 172.29.0.0/16 lock_root/range), expecting a plain
+# Callers of THIS function (on their own lock_root/range) expect a plain
 # octet, unchanged by the #832 redesign.
 #
 # This function only arbitrates HOST-LOCAL LOCK contention -- it has no
@@ -425,12 +413,9 @@ PYEOF
 #
 # #832: only 10 of the /27's 30 usable host addresses (base+1..base+10) are
 # claimed here; base+11..base+30 stay free for a couple of consumer scripts
-# that need a few MORE addresses within the SAME reserved subnet
-# (scripts/dhcp-kea-ctrl-agent-mutation-simulation.sh,
-# scripts/setup-reset-kea-config-simulation.sh -- each derives its own
-# extra addresses directly from $VALIDATION_SUBNET's actual base, see those
-# scripts' own comments) and for genuine future growth of the validation
-# stack itself.
+# that need a few MORE addresses within the SAME reserved subnet (each such
+# script derives its own extra addresses directly from $VALIDATION_SUBNET's
+# actual base) and for genuine future growth of the validation stack itself.
 validation_subnet_export_env() {
     local slot="$1"
     local octet=$(( slot / 8 ))

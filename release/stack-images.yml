@@ -1,4 +1,4 @@
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # Release manifest: declares the first-party runtime/tooling/metadata images,
 # their supported platforms and source Dockerfiles, the external
 # (third-party) images used by supported deploy profiles, the mutable/

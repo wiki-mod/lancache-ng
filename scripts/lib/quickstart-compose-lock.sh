@@ -1,5 +1,5 @@
 #!/bin/bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Shared host-local flock for CI jobs that drive a compose file with FIXED
 # `container_name:` values (issue #838). Today that is only
@@ -15,7 +15,7 @@
 # (full-setup-deep-validate.yml, full-setup-validate.yml) and
 # `syslog-forwarding-simulation.sh`'s job (full-setup-deep-validate.yml)
 # each hit this collision independently and were fixed ad-hoc, inline, with
-# a hand-rolled `exec {lock_fd}>/tmp/lancache-setup-cli-simulation.lock;
+# a hand-rolled `exec {lock_fd}>/var/tmp/lancache-setup-cli-simulation.lock;
 # flock "$lock_fd"` copy-pasted into each `run:` step (3 copies total,
 # confirmed via `git grep -n lancache-setup-cli-simulation.lock --
 # .github/workflows`). `syslog-forwarding-simulation.sh`'s FIRST fix attempt
@@ -84,7 +84,7 @@
 # a different path here would silently stop serializing against any CI job
 # still running the old inline form (there should be none left after this
 # change, but the path itself carries no reason to move).
-QUICKSTART_COMPOSE_LOCK_PATH="/tmp/lancache-setup-cli-simulation.lock"
+QUICKSTART_COMPOSE_LOCK_PATH="/var/tmp/lancache-setup-cli-simulation.lock"
 
 # quickstart_compose_lock_acquire
 # Blocks (like the original inline `flock` with no `-n`) until the lock at

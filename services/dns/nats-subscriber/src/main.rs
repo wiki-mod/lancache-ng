@@ -1,4 +1,4 @@
-//! lancache-ng (https://github.com/wiki-mod/lancache-ng)
+//! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 //! NATS JetStream subscriber: consumes DNS record updates and applies them to PowerDNS API.
 
 mod nats_publish;

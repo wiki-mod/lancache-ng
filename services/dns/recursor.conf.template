@@ -1,4 +1,4 @@
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # PowerDNS recursor config template: LAN zone forwarding to local authoritative server.
 
 incoming:
@@ -59,6 +59,7 @@ recursor:
       forwarders: [127.0.0.1:5300]
     - zone: d.f.ip6.arpa
       forwarders: [127.0.0.1:5300]
+${PDNS_RECURSOR_UPSTREAM_ZONES}
   lua_config_file: /etc/pdns/recursor.lua
   lua_dns_script: /etc/pdns/filter-aaaa.lua
   # Clamp all TTLs to at least this many seconds.

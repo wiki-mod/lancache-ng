@@ -1,4 +1,4 @@
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # dnsmasq-based DHCP proxy/relay image. Runs alongside an existing DHCP
 # server in dnsmasq's "proxy" mode, overriding only DNS options for clients

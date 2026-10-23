@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Bats helper that loads setup.sh's DHCP-mode helper functions without
 # executing setup.sh's install/update entrypoint. Extracts the real functions

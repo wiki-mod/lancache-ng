@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Extraction helper for nats_conf_entrypoint_idempotence.bats.
 #
@@ -30,7 +30,7 @@
 #
 # The third transformation is the ONLY test-time deviation from the shipping
 # bytes: it relocates the four hardcoded absolute paths (/etc/nats,
-# /var/log/lancache-nats, /tmp/nats.conf.template, and -- since issue #858's
+# /var/log/lancache-nats, /var/tmp/nats.conf.template, and -- since issue #858's
 # shared-secret bootstrap -- the read-only bind-mounted
 # /usr/local/lib/shared-secret-bootstrap.sh the command block now `.`-sources)
 # under a sandbox root so the script runs hermetically as an unprivileged bats
@@ -76,7 +76,7 @@ extract_nats_entrypoint_command() {
               -e 's/\$\$/$/g' \
               -e "s#/etc/nats#${sandbox_root}/etc/nats#g" \
               -e "s#/var/log/lancache-nats#${sandbox_root}/var/log/lancache-nats#g" \
-              -e "s#/tmp/nats.conf.template#${sandbox_root}/tmp/nats.conf.template#g" \
+              -e "s#/var/tmp/nats.conf.template#${sandbox_root}/var/tmp/nats.conf.template#g" \
               -e "s#/usr/local/lib/shared-secret-bootstrap.sh#${sandbox_root}/usr/local/lib/shared-secret-bootstrap.sh#g" \
         > "$out"
 
@@ -89,9 +89,9 @@ extract_nats_entrypoint_command() {
 }
 
 # run_nats_entrypoint <script> <sandbox_root> <stub_bin> <repo_root>
-# Run an extracted entrypoint script once. Pre-creates the sandbox `/tmp`
+# Run an extracted entrypoint script once. Pre-creates the sandbox `/var/tmp`
 # (always present in the real container, but the script only mkdir -p's its
-# /etc/nats and /var/log targets, not /tmp) and puts the stub `nats-server` /
+# /etc/nats and /var/log targets, not /var/tmp) and puts the stub `nats-server` /
 # `chown` ahead of PATH: `exec nats-server` is the script's final line, so a
 # no-op stub lets the generation complete and return 0 without a real server,
 # and `chown 10001:10001` (the real-container ownership handoff to the Admin UI
@@ -109,7 +109,7 @@ extract_nats_entrypoint_command() {
 # short-circuit dev's own checked-in defaults rely on in the real container.
 run_nats_entrypoint() {
     local script="$1" sandbox_root="$2" stub_bin="$3" repo_root="$4"
-    mkdir -p "$sandbox_root/tmp"
+    mkdir -p "$sandbox_root/var/tmp"
     mkdir -p "$sandbox_root/usr/local/lib"
     cp "$repo_root/scripts/lib/shared-secret-bootstrap.sh" "$sandbox_root/usr/local/lib/shared-secret-bootstrap.sh"
     PATH="$stub_bin:$PATH" sh "$script"

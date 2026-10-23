@@ -1,4 +1,4 @@
-//! lancache-ng (https://github.com/wiki-mod/lancache-ng)
+//! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 //!
 //! Admin UI routes for LanCache-NG-NTP: enable/disable the chrony-based NTP
 //! container, edit its upstream public NTP server list, and toggle whether

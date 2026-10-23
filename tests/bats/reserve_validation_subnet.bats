@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Fast, Docker-free unit coverage for scripts/lib/reserve-validation-subnet.sh
 # (issue #703; slot/`/27` redesign issue #832). The real race this closes --
@@ -15,7 +15,7 @@
 # succeeds again once released -- using two real flock-backed processes
 # against a throwaway $BATS_TEST_TMPDIR lock root, which is the same
 # mechanism a genuinely concurrent second workflow run would hit on the
-# real, shared /tmp lock root.
+# real, shared /var/tmp lock root.
 
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
@@ -84,13 +84,11 @@ teardown() {
 }
 
 @test "derived octet always falls in the reserved pool, excluding 0, 1, 28, and 99" {
-    # UNCHANGED by the #832 /27 redesign: scripts/dhcp-kea-lease-flow-
-    # simulation.sh and scripts/dhcp-proxy-pxe-simulation.sh both still call
-    # validation_subnet_reserve (which derives via THIS function) on their
-    # own separate 172.31.0.0/16 / 172.29.0.0/16 ranges, expecting a plain
-    # octet -- a real CI regression (confirmed via a genuine run) came from
-    # a first version of this redesign changing what this function/
-    # validation_subnet_reserve returned out from under those two scripts.
+    # UNCHANGED by the #832 /27 redesign: validation_subnet_reserve (which
+    # derives via THIS function) still returns a plain octet -- a real CI
+    # regression (confirmed via a genuine run) came from a first version of
+    # this redesign changing what this function/validation_subnet_reserve
+    # returned out from under their callers.
     for seed in "run-1" "run-2" "run-3" "run-4" "run-5" "another-seed" "yet-another"; do
         octet="$(validation_subnet_derive_octet "$seed")"
         [ "$octet" -ge 2 ]
@@ -111,7 +109,7 @@ teardown() {
     # IDENTICAL to what validation_subnet_derive_octet alone computes for
     # the same seed (validation_subnet_derive_slot is built on top of it,
     # not a separate/diverging formula) -- this is what keeps the two
-    # reservation systems (validation_subnet_reserve for the DHCP scripts,
+    # reservation systems (validation_subnet_reserve for the octet-only path,
     # validation_subnet_reserve_slot for the general pool) from ever
     # producing inconsistent octet math for the same seed.
     for seed in "run-1" "run-2" "run-3" "run-4" "run-5" "another-seed" "yet-another"; do
@@ -161,9 +159,8 @@ teardown() {
     # for this run_id/run_attempt) and pre-lock it directly, simulating a
     # second, genuinely concurrent workflow run that got there first -- this
     # is #703's exact scenario, reproduced with two real flock-backed
-    # processes instead of two real GitHub Actions runs. Exercises the exact
-    # path scripts/dhcp-kea-lease-flow-simulation.sh/
-    # scripts/dhcp-proxy-pxe-simulation.sh use (validation_subnet_reserve,
+    # processes instead of two real GitHub Actions runs. Exercises the
+    # octet-only path (validation_subnet_reserve,
     # NOT validation_subnet_reserve_slot -- see the separate slot-based test
     # below for the general pool's own path).
     run_id="run-abc"

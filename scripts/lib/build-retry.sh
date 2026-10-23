@@ -1,5 +1,5 @@
 #!/bin/bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Retry wrapper for a full `docker buildx build` invocation, scoped to one
 # specific transient failure signature -- NOT a general-purpose "retry any

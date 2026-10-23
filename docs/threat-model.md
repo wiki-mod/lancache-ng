@@ -120,7 +120,16 @@ inventory table.
   one container. At startup `services/dns/entrypoint.sh` builds an **RPZ zone**
   from `cdn-domains.txt`, pointing each listed CDN hostname (and its wildcards)
   at the proxy IP via A/AAAA records. Everything *not* listed is resolved
-  normally by the recursor against real upstream DNS.
+  normally by the recursor against real upstream DNS. If the operator sets
+  `DNS_UPSTREAM_SERVERS` (issue #1918), the recursor instead forwards the
+  configured zones (default every name) to those resolvers. DNSSEC validation
+  stays on, so a forwarded public name with a broken signature still fails.
+  Only the zones the operator lists in `DNS_UPSTREAM_UNSIGNED_ZONES` (private
+  LAN zones carry no signatures) are exempt from validation, and the
+  configured resolver is trusted for those names: whoever controls or spoofs
+  it controls the answers clients get for them. The settings are operator-only
+  (environment, not the Admin UI), and `setup.sh` and the entrypoint reject loopback and
+  LanCache addresses to avoid a forwarding loop (the entrypoint then starts without the upstream).
 - **Two proxy modes** (one nginx container, selected by which DNS IP the client
   uses): **standard mode** reads SNI via `ssl_preread` and forwards HTTPS blind
   to the real CDN (no CA needed); **SSL mode** terminates TLS using a per-domain

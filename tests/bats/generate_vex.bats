@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Coverage for scripts/generate-vex.sh's per-entry status/justification
 # handling, added after a Codex review finding on PR #1286: entries whose
@@ -16,8 +16,7 @@
 # f3=d, f4 empty, not f3 empty/f4=d). generate-vex.sh's nz()/sentinel-undo
 # pair exists specifically to prevent that regression; these tests exercise
 # exactly the entry shapes (an entry with `status:` set alongside an
-# already-empty `expired_at`-less predecessor field) that would silently
-# misalign without it.
+# already-empty predecessor field) that would silently misalign without it.
 
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
@@ -36,7 +35,6 @@ vulnerabilities:
       - usr/bin/example
     statement: >-
       Accepted, no fix available yet.
-    expired_at: 2026-12-31
 EOF
 
     run bash "$script" "$fixture"
@@ -56,7 +54,6 @@ vulnerabilities:
       Not exploitable: the vulnerable code path is not compiled into this
       binary at all.
     status: not_affected
-    expired_at: 2026-12-31
 EOF
 
     run bash "$script" "$fixture"
@@ -79,7 +76,6 @@ vulnerabilities:
       Not exploitable: this path can never be reached with attacker input.
     status: not_affected
     justification: vulnerable_code_cannot_be_controlled_by_adversary
-    expired_at: 2026-12-31
 EOF
 
     run bash "$script" "$fixture"
@@ -102,13 +98,11 @@ vulnerabilities:
     statement: >-
       Not exploitable: vulnerable code absent from this binary.
     status: not_affected
-    expired_at: 2026-12-31
   - id: CVE-2026-00005
     paths:
       - usr/bin/second
     statement: >-
       Accepted, no fix available yet either.
-    expired_at: 2026-12-31
 EOF
 
     run bash "$script" "$fixture"
@@ -136,7 +130,6 @@ vulnerabilities:
     statement: >-
       Not exploitable: vulnerable code absent.
     status: not_affected
-    expired_at: 2026-12-31
 EOF
 
     run bash "$script" "$fixture"

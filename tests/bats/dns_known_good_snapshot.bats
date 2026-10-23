@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Adapter-level tests for the DNS (PowerDNS) known-good-snapshot integration
 # in services/dns/entrypoint.sh (#615). Loads the real

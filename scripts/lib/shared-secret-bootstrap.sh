@@ -1,5 +1,5 @@
 #!/bin/sh
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Shared-secret bootstrap helper (issue #858).
 #

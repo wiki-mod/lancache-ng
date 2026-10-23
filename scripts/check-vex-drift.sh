@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # CI drift guard for the committed OpenVEX document (vex.openvex.json): fails
 # closed if that file is out of sync with .trivyignore.yaml. This is what wires
 # "regenerate the VEX document whenever .trivyignore.yaml changes" (OSPS-VM-
@@ -35,12 +35,12 @@ regenerated="$(VEX_TIMESTAMP="$committed_ts" bash "$script_dir/generate-vex.sh" 
 
 if ! diff -u \
     <(jq -S . "$committed") \
-    <(printf '%s\n' "$regenerated" | jq -S .) >/tmp/vex-drift.diff 2>&1; then
+    <(printf '%s\n' "$regenerated" | jq -S .) >/var/tmp/vex-drift.diff 2>&1; then
   echo "::error::$committed is out of sync with $trivyignore." >&2
   echo "Regenerate it with:" >&2
   echo "  bash scripts/generate-vex.sh > $committed" >&2
   echo "Difference (committed vs. regenerated):" >&2
-  cat /tmp/vex-drift.diff >&2
+  cat /var/tmp/vex-drift.diff >&2
   exit 1
 fi
 

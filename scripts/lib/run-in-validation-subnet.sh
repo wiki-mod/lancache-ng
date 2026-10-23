@@ -1,5 +1,5 @@
 #!/bin/bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Reserve a collision-free full-setup validation subnet, export its complete
 # VALIDATION_* environment, then run a single command (a *-simulation.sh
@@ -18,7 +18,7 @@
 # reserve -> run -> release cycle fits in one step -- no cross-step PID
 # threading needed. Sharing the reservation primitives
 # (scripts/lib/reserve-validation-subnet.sh) keeps both paths coordinating on
-# the SAME host-local /tmp lock root, so a deep-validate run, a manual
+# the SAME host-local /var/tmp lock root, so a deep-validate run, a manual
 # full-setup-validate run, and any other concurrent run on the same
 # self-hosted host never fight over the same /27 bridge (see issue #832 --
 # each reservation slot is now a /27 within the same already-owned
@@ -68,7 +68,7 @@ source "$script_dir/reserve-validation-subnet.sh"
 # purpose: it is what makes a deep-validate run and a manual run (and two
 # deep-validate runs) coordinate on one shared per-slot lock namespace per
 # host, rather than each inventing its own and colliding anyway.
-lock_root="/tmp/lancache-validation-locks"
+lock_root="/var/tmp/lancache-validation-locks"
 max_attempts=10
 
 # The collision-conflict check itself (validation_subnet_conflicts) is

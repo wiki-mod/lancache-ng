@@ -1,4 +1,4 @@
-//! lancache-ng (https://github.com/wiki-mod/lancache-ng)
+//! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 //!
 //! Kea's known-good configuration snapshot adapter (#614, follow-up to
 //! #415). See `docs/known-good-config-snapshots.md` for the full contract

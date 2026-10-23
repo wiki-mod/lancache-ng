@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Regression tests for setup.sh's cmd_secondary() function, which generates
 # a docker-compose.yml for secondary DNS nodes. Guards against issue #652,

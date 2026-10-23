@@ -1,4 +1,4 @@
-//! lancache-ng (https://github.com/wiki-mod/lancache-ng)
+//! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 //!
 //! Reader for `services/watchdog/watchdog.sh`'s `status.json` (issue #870,
 //! bug-hunt findings #2/#3 in `docs/bug-hunt/observability.md`). Watchdog

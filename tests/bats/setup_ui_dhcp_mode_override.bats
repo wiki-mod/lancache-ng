@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Regression tests for lancache_ui_dhcp_mode_override_is_valid() (issue
 # #1068 item 6) -- the pure gate cmd_converge_reconcile uses before ever

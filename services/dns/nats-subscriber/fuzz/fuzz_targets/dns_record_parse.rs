@@ -1,4 +1,4 @@
-//! lancache-ng (https://github.com/wiki-mod/lancache-ng)
+//! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 //! cargo-fuzz target (issue #1252): exercises the real
 //! `serde_json::from_slice::<DNSRecord>` deserialization + `
 //! dns_record_to_zone_update` conversion that `handle_dns_record` in

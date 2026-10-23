@@ -1,4 +1,4 @@
-//! lancache-ng (https://github.com/wiki-mod/lancache-ng)
+//! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 //!
 //! PowerDNS zone/record known-good snapshot adapter (#628, the zone/record
 //! rollback design deferred by #615/#625's static-`pdns.conf`/`recursor.conf`

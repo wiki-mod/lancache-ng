@@ -173,7 +173,7 @@ which one a given check actually runs under before treating "current_dev CI is g
 as proof of it:**
 
 - `build-push.yml` / `build-tools.yml`: run automatically on every PR (`pull_request`)
-  and push, including against `current_dev`. This is where `rust_coverage`,
+  and push, including against `current_dev`. This is where
   `dns_rust_quality`/`ui_rust_quality`, `dns_test`/`ui_test`/`watchdog_test`,
   `dns_cargo_audit`/`ui_cargo_audit`, `shellcheck`, `file-headers`, `validate-compose`
   (incl. the VEX-drift guard), `pr-tracking-metadata-check`, and `container-scan` live.
@@ -207,9 +207,9 @@ as proof of it:**
 
 | Subsystem | What to check | How to check it for real | Pass/fail |
 |---|---|---|---|
-| **DHCP — Kea** | `dhcp_kea_config_generation.bats`/`dhcp_lease_flow_parsing.bats` pass, AND the real Kea Control Agent lease flow works | `bats tests/bats/dhcp_kea_config_generation.bats tests/bats/dhcp_lease_flow_parsing.bats` (build-tools container) for config-gen; `full-setup-validate.yml`'s `dhcp-kea-lease-flow-simulation` job (or `gh workflow run`) for a real DHCPDISCOVER→DHCPACK cycle against Kea, asserting a real lease was granted from the configured pool, not just that the container started | Fail if the bats config-gen tests fail, or if the lease-flow simulation does not show a granted IP from the correct pool |
-| **DHCP — dnsmasq ProxyDHCP** | `dhcp_proxy_known_good_snapshot.bats`/`dhcp_proxy_optional_directives.bats` pass; PXE-relevant options actually get injected | Same bats files; `full-setup-validate.yml`'s `dhcp-proxy-pxe-simulation` job for a real PXE client boot-option probe | Fail if bats fail or the PXE simulation doesn't observe the expected boot options on the wire |
-| **DHCP — dnsmasq relay** (new, PR #1117) | `dnsmasq-relay` mode genuinely **relays** (not just injects options) between two network segments | `bash scripts/dhcp-relay-flow-simulation.sh` (build-tools container / real Docker host) — this is the exact script #1117 used: two isolated bridges (client-net, server-net), a real `dhclient` DISCOVER on the client-net side, confirms the upstream DHCP server on the separate server-net received the request via the relay's `giaddr` and answered with a lease from the *client subnet's* pool. `tests/bats/setup_dhcp_mode.bats` for the mode-selection/config-render unit coverage | Fail unless the granted lease's subnet matches the client-side pool specifically (proves `giaddr` routing worked, not a coincidental same-subnet fallback) |
+| **DHCP — Kea** | `dhcp_kea_config_generation.bats`/`dhcp_lease_flow_parsing.bats` pass, AND a real lease is granted by Kea on a real test network | `bats tests/bats/dhcp_kea_config_generation.bats tests/bats/dhcp_lease_flow_parsing.bats` (build-tools container) for config-gen; a manual DHCPDISCOVER→DHCPACK cycle against the release image on an isolated test network (no CI job covers this since the self-building DHCP simulations were removed) | Fail if the bats config-gen tests fail, or if the manual cycle does not show a granted IP from the correct pool |
+| **DHCP — dnsmasq ProxyDHCP** | `dhcp_proxy_known_good_snapshot.bats`/`dhcp_proxy_optional_directives.bats` pass; PXE-relevant options actually get injected | Same bats files; a manual PXE client boot-option probe against the release image (no CI job covers this since the self-building DHCP simulations were removed) | Fail if bats fail or the expected boot options are not observed on the wire |
+| **DHCP — dnsmasq relay** (PR #1117) | `dnsmasq-relay` mode genuinely **relays** (not just injects options) between two network segments | `tests/bats/setup_dhcp_mode.bats` for the mode-selection/config-render unit coverage; the real two-segment relay proof has no CI job since the self-building DHCP simulations were removed and must be run by hand against the release image | Fail unless the upstream server receives the request via the relay's `giaddr` and answers with a lease from the client subnet's pool |
 | **DNS — PowerDNS zones/RPZ** | Real DNS resolution (recursor + authoritative), zone writes propagate, RPZ wildcard coverage is correct | `dig` against `dns-standard`/`dns-ssl` for a known CDN domain and a known `.lan` record — `ping`/`ss` are explicitly **not** acceptable substitutes (`AG-VAL-019`/`AG-VAL-020`). `tests/bats/dns_zone_generation.bats`, `dns_known_good_snapshot.bats`, `dns_config_snapshot_idempotence.bats` | Fail if `dig` doesn't return the expected record, or any DNS bats file fails |
 | **DNS — reset-to-known-good** (new, PR #1152) | `setup.sh reset-to-last-known-good-config dns <zone>` genuinely rolls a live PowerDNS zone back | `bash scripts/setup-reset-dns-config-simulation.sh` (real full-setup stack: makes two real UI-driven zone writes, each producing a real snapshot, then runs the actual CLI against the earlier snapshot, confirms via a real `dig` query that the record content actually reverted). Note from #1152 itself: this script's own real run required two environment-only deviations at the time (a locally built `dns` image; a patched healthcheck probe domain, both because of the unrelated, since-fixed #1150 bug) — when running it again, confirm no deviation is needed anymore before treating a clean run as fully representative | Fail unless the post-rollback `dig` result matches the earlier snapshot's content exactly, and the CLI genuinely used the in-container `PDNS_API_KEY` (the script deliberately seeds a wrong host-side key as a regression guard for this) |
 | **NATS — secondary registration/rotation/removal** | Per-secondary credential isolation; rotation invalidates the old credential; removal actually blocks | `bash scripts/nats-secondary-auth-callout-simulation.sh` against a real `nats-server` + a real `nats-subscriber` built from the branch under test | Fail if an old credential still authenticates after rotation, or a removed secondary can still connect |
@@ -235,7 +235,7 @@ as proof of it:**
 | **pipefail/SIGPIPE early-exit-consumer pattern in `tools/build-tools/Dockerfile`** (fixed, PR #1374, issue #815, 2026-08-01) | An early-exiting consumer (`grep -q`/`grep -m`, `head`, `sed -n`) piped from a still-writing producer under `set -o pipefail` cannot silently fail the pipeline with an unrelated-looking exit code (141/SIGPIPE) again in this specific file | Real CI job 91393831566 (run 30709307913) failed exactly this way on `rustup target list --installed | grep -qx ...` / `rustc -vV | grep -qE ...`; fixed by capturing each producer's output into a variable first, then grepping the variable via a here-string. `bash scripts/check-pipefail-early-exit-grep.sh` (wired into the `shellcheck`/`shellcheck-hosted` jobs in `build-push.yml`); `bats tests/bats/check_pipefail_early_exit_grep.bats` (11 cases, including a negative control reproducing the exact incident pattern and confirming the guard catches it, plus confirming the real fixed Dockerfile passes) | Fail if the guard script reports a finding in `tools/build-tools/Dockerfile`, or if the negative-control bats case stops catching the reintroduced pattern |
 | **Review-chronology code comments (AG-CODE-003 sub-pattern)** (2026-08-02) | No git-tracked source/config comment narrates the review chronology of the change it sits in ("caught in review", "before this fix", "flagged in review on PR #123", and similar phrasings) — these read as internal notes to the reviewer/author at PR-open time, not durable technical rationale, and go stale/confusing the moment the PR merges | `bash scripts/check-review-chronology-comments.sh` (wired into `build-push.yml`'s `file-headers` job); `bats tests/bats/check_review_chronology_comments.bats` (14 cases: 6 real-shaped positive fixtures proving the fail path is reachable per `AG-VAL-024`, including the reverse-order "a PR review (#765) found ..." shape and the self-review compound-word case; 5 deliberate near-miss negative fixtures — "manual review to notice it", "remembered during review", bare "regression pin", "after this PR merges"/"until this PR's OWN builds" — proving the tight adjacency regex does not over-match generic review/PR mentions; the excluded-file-type and self-reference-exclusion cases; and the "passes against the real repository tree" case). A real audit against this repo's own tracked files (2026-08-02) found eighteen genuine instances across fourteen files, fixed in the same pass this guard was added, so the check starts clean | Fail if the guard script reports any finding against the real tree, or if any of the 14 bats cases regresses (especially the 5 negative-fixture cases — a widened regex that starts flagging generic "review"/"PR" mentions is a false-positive regression, not an improvement) |
 
-**Known, deliberately not-yet-closed gap (do not treat as silently dropped):** the guard above (`scripts/check-pipefail-early-exit-grep.sh`) is intentionally scoped to only scan `tools/build-tools/Dockerfile` -- the one file the confirmed incident occurred in -- not the whole repository. An earlier, wider version of the same script (scanning every `scripts/**`/`tools/**` shell file) found **41 preexisting instances** of the identical raw pattern (a live pipe into `grep -q`/`head`/`sed -n`) already in this codebase, e.g. `scripts/check-file-headers.sh`, `scripts/check-netdata-curl-pin.sh`, `scripts/setup-cli-simulation.sh`, `scripts/syslog-forwarding-simulation.sh`, and others. None of the 41 has a confirmed real failure behind it (most looked lower-risk on inspection -- a `printf`/short-string producer piped into `grep -q`, which rarely writes enough to fill a pipe buffer before the consumer's read completes, unlike `rustc -vV`'s larger multi-line output), but none has been individually triaged either. Fixing or reviewing all 41 in PR #1374 would have been a disproportionate scope expansion for a musl-toolchain/network-verification change with no reported incident in any of those 41 locations, and risked introducing real regressions into currently-working scripts under mechanical pattern-matching pressure. Tracked as **issue #1377** (repo-wide review of these 41 findings, plus widening `scripts/check-pipefail-early-exit-grep.sh`'s `scan_files` back to the full `scripts/**`/`tools/**` set once each has been triaged as either a real fix (capture-first) or a reviewed-safe `# pipefail-safe: <reason>` suppression).
+**Known, deliberately not-yet-closed gap (do not treat as silently dropped):** the guard above (`scripts/check-pipefail-early-exit-grep.sh`) is intentionally scoped to only scan `tools/build-tools/Dockerfile` -- the one file the confirmed incident occurred in -- not the whole repository. An earlier, wider version of the same script (scanning every `scripts/**`/`tools/**` shell file) found **41 preexisting instances** of the identical raw pattern (a live pipe into `grep -q`/`head`/`sed -n`) already in this codebase, e.g. `scripts/check-file-headers.sh`, `scripts/setup-cli-simulation.sh`, `scripts/syslog-forwarding-simulation.sh`, and others. None of the 41 has a confirmed real failure behind it (most looked lower-risk on inspection -- a `printf`/short-string producer piped into `grep -q`, which rarely writes enough to fill a pipe buffer before the consumer's read completes, unlike `rustc -vV`'s larger multi-line output), but none has been individually triaged either. Fixing or reviewing all 41 in PR #1374 would have been a disproportionate scope expansion for a musl-toolchain/network-verification change with no reported incident in any of those 41 locations, and risked introducing real regressions into currently-working scripts under mechanical pattern-matching pressure. Tracked as **issue #1377** (repo-wide review of these 41 findings, plus widening `scripts/check-pipefail-early-exit-grep.sh`'s `scan_files` back to the full `scripts/**`/`tools/**` set once each has been triaged as either a real fix (capture-first) or a reviewed-safe `# pipefail-safe: <reason>` suppression).
 
 ---
 
@@ -293,10 +293,8 @@ use a real Linux host, e.g. over SSH to a self-hosted runner, per
   `build-push.yml` run against that exact commit. This applies to `scripts/*-simulation.sh`
   invocations too — `nats-secondary-auth-callout-simulation.sh` and
   `syslog-forwarding-simulation.sh` both default `LANCACHE_IMAGE_TAG` to a mutable channel
-  and need the same treatment; the DHCP simulation scripts
-  (`dhcp-kea-lease-flow-simulation.sh`, `dhcp-proxy-pxe-simulation.sh`,
-  `dhcp-relay-flow-simulation.sh`) are unaffected — they always `docker build` their own
-  images directly from the checked-out source, never from a registry tag.
+  and need the same treatment. No simulation script builds its own image any more;
+  every simulation runs against the images the PR/commit published.
 - Tear down after the full pass: `docker compose -f deploy/<profile>/docker-compose.yml
   down -v`, and confirm via `docker ps -a` and `docker volume ls` that no stack
   containers or named volumes remain (see the Resource-Leak section below — this is
@@ -324,20 +322,32 @@ use a real Linux host, e.g. over SSH to a self-hosted runner, per
   interception is actually happening, not merely configured).
 - `ping`/`ss` alone are not acceptable substitutes for either check (`AG-VAL-019`/
   `AG-VAL-020`) — a real query/response or a real TLS handshake is required.
+- **Upstream resolver (issue #1918):** with `DNS_UPSTREAM_SERVERS` empty, a name that
+  only a LAN resolver knows must give `NXDOMAIN` and `recursor.conf` must hold no
+  `forward_zones_recurse`. With it set to that resolver's IP, a public name must resolve,
+  a deliberately broken signed domain must still give `SERVFAIL`, a CDN domain must still
+  resolve to the proxy IP (RPZ), and a private name must give `SERVFAIL` until its zone is
+  listed in `DNS_UPSTREAM_UNSIGNED_ZONES`, after which `dig @<IP_STANDARD> <private name>`
+  returns the resolver's answer. An invalid value (host name, loopback, a LanCache
+  address, a zone served locally, an unsigned zone outside the forwarded zones) must
+  be rejected by `setup.sh` when typed; the dns container must start without an upstream and log an `ERROR` line.
+  Reverse lookups of LAN addresses stay
+  with the local authoritative server and are not answered by the upstream resolver.
 
 ### 3. DHCP — all three modes
 
-- **Kea**: real DHCPDISCOVER→DHCPOFFER→DHCPREQUEST→DHCPACK cycle via
-  `dhcp-kea-lease-flow-simulation` (or its underlying script run directly), confirm a
-  real lease was granted from the configured pool and is visible via Kea's Control
-  Agent API.
-- **dnsmasq ProxyDHCP**: real PXE boot-option probe via
-  `dhcp-proxy-pxe-simulation`/`tools/pxe-client-probe` (the Rust PXE probe rewritten
-  in PR #1159), confirm the expected boot filename/next-server options are actually
-  injected on the wire.
-- **dnsmasq relay** (new): `bash scripts/dhcp-relay-flow-simulation.sh` — see Part A's
-  entry for the exact mechanism; this is the canonical reusable proof, run it as-is
-  rather than re-deriving a new one.
+- **Kea**: real DHCPDISCOVER→DHCPOFFER→DHCPREQUEST→DHCPACK cycle by hand against the
+  release image on an isolated network, confirm a real lease was granted from the
+  configured pool and is visible via Kea's Control Agent API.
+- **dnsmasq ProxyDHCP**: real PXE boot-option probe by hand (`tools/pxe-client-probe`),
+  confirm the expected boot filename/next-server options are actually injected on the
+  wire.
+- **dnsmasq relay**: run a two-segment relay test by hand (client network, server
+  network) and confirm the upstream server answers via the relay's `giaddr`.
+- **Removed simulations (AG-VAL-033)**: the Kea lease-flow, Kea Control Agent mutation,
+  Kea UI rollback, ProxyDHCP/PXE, relay, setup-reset Kea rollback, proxy deep-wildcard
+  TLS and standard-mode SNI-routing simulations were removed because each built its
+  own image inside the job and so never tested the published image.
 - Confirm the three modes are genuinely mutually exclusive at the config-render level
   (`DHCP_MODE` selects exactly one rendered `dnsmasq`/Kea config) — inspect the
   rendered config inside the running container, not just the env var.
@@ -461,7 +471,7 @@ knows *why* a given Standing check row exists and can retire the specific exampl
 once it stops being new, without deleting the durable check itself:
 
 - DHCP dnsmasq-relay mode (PR #1117, closes #844) — first real relay mode alongside
-  ProxyDHCP; `scripts/dhcp-relay-flow-simulation.sh` is its canonical proof.
+  ProxyDHCP; proven manually (its CI simulation was removed).
 - NATS active-disconnect on secondary removal/rotation (PR #1172, closes #681) — closes
   a documented up-to-90-day access window; `connz`/`KICK` proof via the extended
   `nats-secondary-auth-callout-simulation.sh`.
@@ -561,7 +571,7 @@ below, per that same rule's "genuinely unautomatable case" carve-out):
   the live pipe entirely). The identical shape (`git log | tail | head -n 50`) was
   independently found and fixed the same session in PR #1371's
   `find_built_ancestor()`. New Standing check row above (`scripts/check-pipefail-
-  early-exit-grep.sh`, wired into the `shellcheck`/`shellcheck-hosted` jobs); a
+  early-exit-grep.sh`, wired into the `shellcheck` job); a
   proposed AGENTS.md rule for the general failure class (`AG-VAL-030`) was posted
   as a PR #1374 comment for maintainer review, per `AG-WF-025`.
 
@@ -583,6 +593,13 @@ below, per that same rule's "genuinely unautomatable case" carve-out):
 
 **Genuinely under-tested today — do not assume these are covered without a fresh,
 explicit pass:**
+
+- **DNS upstream resolver (issue #1918):** no committed regression test covers
+  `dns_upstream_setup` in `services/dns/entrypoint.sh`; a new test needs a prior
+  maintainer ACK (`AG-CODE-010`). The behavior was proven once by hand against the
+  real entrypoint (empty setting unchanged, forward, scoped forward, IPv6 plus port,
+  seven invalid inputs, upstream down, rollback of `recursor.conf` to a snapshot
+  without the upstream block) and is recorded in the pull request.
 
 - **Admin UI cache-resize's full loop** (dashboard submission → `.env` write →
   `lancache-converge.service` tick → `docker compose up -d` recreate → nginx actually
@@ -711,10 +728,8 @@ omitted):**
 
 | Script / command | Proves |
 |---|---|
-| `scripts/dhcp-relay-flow-simulation.sh` | Real two-segment DHCP relay (PR #1117) |
 | `scripts/nats-secondary-auth-callout-simulation.sh` | NATS secondary lifecycle, active-disconnect (`connz`/`KICK`), xkey encryption (packet capture + negative control) |
 | `scripts/setup-reset-dns-config-simulation.sh` | Real CLI-driven PowerDNS zone rollback (PR #1152) |
-| `scripts/setup-reset-kea-config-simulation.sh` | Real CLI-driven Kea config rollback |
 | `scripts/generate-vex.sh` / `scripts/check-vex-drift.sh` | OpenVEX document reproducibility and drift detection (PR #1194) |
 | `tests/bats/setup_update_idempotence.bats` (first `@test`) | `.env` key-drift guard (PR #1199) |
 | `scripts/check-idempotence-test-coverage.sh` | Every stateful config-writer has repeat-run/idempotence test coverage |

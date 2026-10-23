@@ -1,4 +1,4 @@
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # Workflow that posts a welcome comment with contribution guidelines on a
 # contributor's first issue or pull request.
 name: First Interaction
@@ -16,6 +16,7 @@ permissions:
 jobs:
   welcome:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Set up Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0

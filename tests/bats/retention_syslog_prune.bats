@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Coverage for services/watchdog/retention.sh's maybe_prune_syslog() (#633
 # retention engine, moved here from watchdog.sh by #842's blast-radius-

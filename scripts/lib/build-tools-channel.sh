@@ -1,5 +1,5 @@
 #!/bin/bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Pure channel-name mapping for scripts/select-build-tools-image.sh: which
 # GHCR "build-tools:<channel>" tag a given target ref should resolve to.

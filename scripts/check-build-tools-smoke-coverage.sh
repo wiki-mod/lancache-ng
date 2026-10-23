@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Standing guard for issues #790/#791 (#822 Pattern G): keeps
 # scripts/select-build-tools-image.sh's smoke_test_image() required-tools

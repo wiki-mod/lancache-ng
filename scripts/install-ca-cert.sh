@@ -1,5 +1,5 @@
 #!/bin/bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # Installs the LAN cache's CA certificate into the local trust store so
 # SSL-intercepted (MITM) downloads are trusted by this Linux client.
 # LanCache-NG CA Certificate Installer for Linux

@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Fixture coverage for tools/runner-host/lancache-ci-docker-daemon-config.sh's
 # pure merge logic (daemon_config_additions_json/merge_daemon_config) -- the

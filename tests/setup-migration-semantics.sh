@@ -1,5 +1,5 @@
 #!/bin/bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # Test setup.sh migration semantics: verify that existing non-empty .env values
 # are preserved by default and not overwritten during migrations or updates.
 # This test validates the AGENTS.md guarantee: "Existing non-empty local values

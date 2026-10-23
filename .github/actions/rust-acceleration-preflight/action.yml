@@ -1,4 +1,4 @@
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # GitHub Action for validating Rust build acceleration infrastructure (sccache, sccache-dist, distcc) configuration and connectivity
 name: Rust acceleration infrastructure preflight
 description: Validate Rust build acceleration infrastructure outside BuildKit cacheable Docker build layers.

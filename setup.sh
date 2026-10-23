@@ -1,5 +1,5 @@
 #!/bin/bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Guided lifecycle CLI for a lancache-ng installation. Subcommands: install
 # (interactive first-time setup — installs Docker/Compose if missing on
@@ -149,6 +149,189 @@ is_dnsmasq_subnet_start() {
     local ip="$1"
 
     is_valid_ipv4 "$ip" && [[ "$ip" == *".0" ]]
+}
+
+# What: true for an IPv4 or IPv6 address of an upstream resolver.
+# Why: the value reaches recursor.conf, so a typo must stop here.
+# From: Issue #1918
+is_valid_dns_upstream_address() {
+    local addr="$1"
+
+    is_valid_ipv4 "$addr" && return 0
+    [[ "$addr" == *:*:* && "$addr" =~ ^[0-9A-Fa-f:]+$ ]]
+}
+
+# What: true for a DNS zone name such as corp.example.
+# Why: zone names become YAML values in recursor.conf.
+# From: Issue #1918
+is_valid_dns_upstream_zone() {
+    local zone="$1"
+    local label='[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?'
+
+    [[ "$zone" =~ ^(${label}\.)*${label}$ ]]
+}
+
+# What: true if the DNS template serves this zone locally.
+# Why: LanCache-NG keeps those zones and cannot forward them.
+# From: Issue #1918
+dns_upstream_zone_is_local() {
+    local zone="${1,,}" template="$SCRIPT_DIR/services/dns/recursor.conf.template"
+
+    [[ -f "$template" ]] || return 1
+    grep -qxF -- "    - zone: ${zone%.}" "$template"
+}
+
+# What: prints a comma/space list as lower-case, comma-joined.
+# Why: .env keeps one stable spelling, so reruns compare equal.
+# From: Issue #1918
+normalize_dns_upstream_list() {
+    local item out="" list_items
+    read -r -a list_items <<< "${1//,/ }"
+    for item in "${list_items[@]}"; do
+        item="${item,,}"
+        [[ "$item" != "." ]] && item="${item%.}"
+        out+="${out:+,}${item}"
+    done
+    printf '%s' "$out"
+}
+
+# What: sends one real DNS query to an upstream candidate.
+# Why: the user sees at once whether the server answers.
+# From: Issue #1918
+dns_upstream_probe() {
+    local server="$1" out
+    command -v dig >/dev/null 2>&1 || install_missing_tools dig >/dev/null 2>&1 || true
+    command -v dig >/dev/null 2>&1 || return 1
+    out=$(dig +time=3 +tries=2 +noall +comments "@${server}" . NS 2>/dev/null) || return 1
+    [[ "$out" == *"status: NOERROR"* ]]
+}
+
+# What: asks the optional upstream-resolver questions.
+# Why: install and configure-dns must ask identical questions.
+# From: Issue #1918
+# Args: current servers, zones, unsigned zones, own LanCache IPs.
+# Sets: DNS_UPSTREAM_SERVERS, DNS_UPSTREAM_ZONES, DNS_UPSTREAM_UNSIGNED_ZONES.
+prompt_dns_upstream() {
+    local cur_servers="$1" cur_zones="$2" cur_unsigned="$3" own_ips="$4"
+    local default_use="N" default_scope="all" entry zone covered bad probe_failed
+    local -a entries=() zone_entries=()
+
+    [[ -n "$cur_servers" ]] && default_use="Y"
+    [[ -n "$cur_zones" && "$cur_zones" != "." ]] && default_scope="zones"
+
+    printf "  LanCache-NG answers DNS for your clients. Names it does not know\n"
+    printf "  (for example your NAS) are looked up on the internet by default.\n"
+    printf "  If your router or firewall (OPNsense, pfSense, ...) knows those\n"
+    printf "  names, LanCache-NG can ask it instead. CDN names for game\n"
+    printf "  downloads are still answered by LanCache-NG itself.\n"
+    printf "  Default: no external DNS server.\n\n"
+
+    ask "Use an external DNS server? [y/N]" "$default_use"
+    if [[ "${REPLY,,}" != "y" ]]; then
+        DNS_UPSTREAM_SERVERS=""
+        DNS_UPSTREAM_ZONES="."
+        DNS_UPSTREAM_UNSIGNED_ZONES=""
+        return 0
+    fi
+
+    while true; do
+        ask "DNS server IP addresses (several: separate with space or comma)" "$cur_servers"
+        read -r -a entries <<< "${REPLY//,/ }"
+        bad=""
+        [[ ${#entries[@]} -gt 0 ]] || bad="enter at least one IP address"
+        for entry in "${entries[@]}"; do
+            if ! is_valid_dns_upstream_address "$entry"; then
+                bad="'$entry' is not a valid IPv4/IPv6 address"
+            elif [[ "$entry" == 127.* || "$entry" == "::1" || "$entry" == "0.0.0.0" || "$entry" == "::" ]]; then
+                bad="'$entry' is this host itself, not an external DNS server"
+            elif [[ ",${own_ips}," == *",${entry},"* ]]; then
+                bad="'$entry' is a LanCache-NG address; forwarding to it would loop"
+            fi
+        done
+        if [[ -z "$bad" ]]; then
+            [[ "$WIZARD_INTROSPECT_MODE" = "1" ]] && break
+            probe_failed=0
+            for entry in "${entries[@]}"; do
+                if dns_upstream_probe "$entry"; then
+                    print_ok "$entry answers DNS queries"
+                else
+                    print_warn "$entry did not answer a DNS query"
+                    probe_failed=1
+                fi
+            done
+            [[ "$probe_failed" = "0" ]] && break
+            ask "A server did not answer. Save anyway? [y/N]" "N"
+            [[ "${REPLY,,}" = "y" ]] && break
+            continue
+        fi
+        print_error "Invalid DNS server: $bad"
+        [[ "$WIZARD_INTROSPECT_MODE" = "1" ]] && die "Invalid DNS server answer: $bad"
+    done
+    DNS_UPSTREAM_SERVERS=$(normalize_dns_upstream_list "${entries[*]}")
+
+    printf "\n  Forward all normal DNS requests to it, or only certain internal\n"
+    printf "  domains (for example lan.example)? Forwarding all is simplest.\n"
+    while true; do
+        ask "Forward which requests? [all/zones]" "$default_scope"
+        case "${REPLY,,}" in
+            all) DNS_UPSTREAM_ZONES="."; break ;;
+            zones)
+                while true; do
+                    ask "Internal domains to forward (separate with space or comma)" "${cur_zones#.}"
+                    read -r -a zone_entries <<< "${REPLY//,/ }"
+                    bad=""
+                    [[ ${#zone_entries[@]} -gt 0 ]] || bad="enter at least one domain"
+                    for zone in "${zone_entries[@]}"; do
+                        if ! is_valid_dns_upstream_zone "${zone%.}"; then
+                            bad="'$zone' is not a valid domain name"
+                        elif dns_upstream_zone_is_local "$zone"; then
+                            bad="'$zone' is answered by LanCache-NG itself and cannot be forwarded"
+                        fi
+                    done
+                    [[ -z "$bad" ]] && break
+                    print_error "Invalid domain: $bad"
+                    [[ "$WIZARD_INTROSPECT_MODE" = "1" ]] && die "Invalid domain answer: $bad"
+                done
+                DNS_UPSTREAM_ZONES=$(normalize_dns_upstream_list "${zone_entries[*]}")
+                break
+                ;;
+            *) print_error "Please answer 'all' or 'zones'." ;;
+        esac
+    done
+
+    printf "\n  LanCache-NG checks DNSSEC signatures and keeps doing so. Private\n"
+    printf "  domains of your own network have no signature, so name them here\n"
+    printf "  (for example corp.example) or they fail. Public names stay\n"
+    printf "  checked. Type 'none' for no private domain.\n"
+    while true; do
+        ask "Private domains without DNSSEC (space/comma, or 'none')" "${cur_unsigned:-none}"
+        bad=""
+        entries=()
+        if [[ "${REPLY,,}" != "none" ]]; then
+            read -r -a entries <<< "${REPLY//,/ }"
+        fi
+        for entry in "${entries[@]}"; do
+            if ! is_valid_dns_upstream_zone "${entry%.}"; then
+                bad="'$entry' is not a valid domain name"
+                continue
+            fi
+            if dns_upstream_zone_is_local "$entry"; then
+                bad="'$entry' is answered by LanCache-NG itself and cannot be listed"
+                continue
+            fi
+            [[ "$DNS_UPSTREAM_ZONES" = "." ]] && continue
+            covered=0
+            for zone in "${zone_entries[@]}"; do
+                zone="${zone,,}"; zone="${zone%.}"; entry="${entry,,}"; entry="${entry%.}"
+                [[ "$entry" == "$zone" || "$entry" == *".${zone}" ]] && covered=1
+            done
+            [[ "$covered" = "1" ]] || bad="'$entry' is not inside a forwarded domain"
+        done
+        [[ -z "$bad" ]] && break
+        print_error "Invalid private domain: $bad"
+        [[ "$WIZARD_INTROSPECT_MODE" = "1" ]] && die "Invalid private-domain answer: $bad"
+    done
+    DNS_UPSTREAM_UNSIGNED_ZONES=$(normalize_dns_upstream_list "${entries[*]:-}")
 }
 
 # Issue #450: light shape validation for the optional dnsmasq relay/proxy
@@ -3623,6 +3806,10 @@ Commands:
   update-ip [install-dir]
                        Change the configured standard and SSL listener IPs.
                        Default dir: /opt/lancache-ng
+  configure-upstream-dns [install-dir]
+                       Show, set, change or remove the external DNS server
+                       (for example your router) for names LanCache-NG does
+                       not know. Default dir: /opt/lancache-ng
   debug [install-dir]  Print diagnostic information for an existing stack.
   create-logs-for-issue [install-dir]
                        Bundle redacted logs/config into an archive to attach
@@ -3739,6 +3926,18 @@ moved to a new image set since the last update -- an unchanged channel is a
 silent no-op, not a full pull-and-restart. When it does act, it runs the
 exact same ordered, health-gated update as ./setup.sh update. If
 [install-dir] is omitted, /opt/lancache-ng is used.
+EOF
+            ;;
+        configure-upstream-dns)
+            cat <<EOF
+Usage: ./setup.sh configure-upstream-dns [install-dir]
+
+Shows the current external DNS setting of an existing installation and lets you
+set, change or remove it. Answer the questions, then confirm. Only the DNS
+containers are recreated, and only if something changed; the cache, DNS
+zones and secrets stay untouched. If the new setting does not work, the
+previous one is restored automatically. If [install-dir] is omitted,
+/opt/lancache-ng is used. The setting is kept by update, backup and restore.
 EOF
             ;;
         update-ip|--reconfigure|reconfigure)
@@ -4173,8 +4372,13 @@ perform_stack_update_flow() {
     # Quickstart installs keep a copied compose bundle under the install tree.
     # Refresh those assets before any backup-driven restart so even copied
     # installs use the current container wiring during the whole update.
-    install_quickstart_compose_assets "$install_dir"
-    print_ok "quickstart compose assets updated"
+    # What: copy quickstart assets only into non-prod dirs.
+    # Why: the copy replaced deploy/prod/docker-compose.yml.
+    # From: Issue #1918
+    if ! is_deploy_prod_install_dir "$install_dir"; then
+        install_quickstart_compose_assets "$install_dir"
+        print_ok "quickstart compose assets updated"
+    fi
 
     print_step "Creating pre-update rollback backup"
     if ! ( cmd_backup --config "$install_dir" ); then
@@ -5279,16 +5483,16 @@ dns_rollback_exec() {
             fi
             m="$1"; p="$2"; b="$3"
             if [ "$m" = "POST" ]; then
-                status=$(curl -sS -o /tmp/.dns-rollback-resp -w "%{http_code}" -X POST \
+                status=$(curl -sS -o /var/tmp/.dns-rollback-resp -w "%{http_code}" -X POST \
                     -H "X-API-Key: $key" -H "Content-Type: application/json" -d "$b" \
                     "http://127.0.0.1:8083$p") || { echo "DNS_ROLLBACK_EXEC_CURL_FAILED"; exit 8; }
             else
-                status=$(curl -sS -o /tmp/.dns-rollback-resp -w "%{http_code}" \
+                status=$(curl -sS -o /var/tmp/.dns-rollback-resp -w "%{http_code}" \
                     -H "X-API-Key: $key" "http://127.0.0.1:8083$p") || { echo "DNS_ROLLBACK_EXEC_CURL_FAILED"; exit 8; }
             fi
             printf "%s\n" "$status"
-            cat /tmp/.dns-rollback-resp
-            rm -f /tmp/.dns-rollback-resp
+            cat /var/tmp/.dns-rollback-resp
+            rm -f /var/tmp/.dns-rollback-resp
         ' sh "$method" "$path" "$body" 2>"$err_file")
     rc=$?
     exec_err=$(cat "$err_file" 2>/dev/null || true)
@@ -5589,6 +5793,153 @@ cmd_update_ip() {
     exit 0
 }
 
+# ── configure-upstream-dns subcommand ─────────────────────────────────────────
+# What: shows and changes the external DNS server of an existing install.
+# Why: users must set, change or remove it without reinstalling.
+# From: Issue #1918
+cmd_configure_upstream_dns() {
+    local install_dir="${1:-/opt/lancache-ng}"
+    install_dir=$(realpath -m "$install_dir")
+
+    printf "\n"
+    printf "${BOLD}╔═══════════════════════════════════════╗${RESET}\n"
+    printf "${BOLD}║  LanCache-NG — External DNS server    ║${RESET}\n"
+    printf "${BOLD}╚═══════════════════════════════════════╝${RESET}\n"
+    printf "\n"
+
+    [[ "$(id -u)" = "0" ]] \
+        || die "This script must be run as root (sudo ./setup.sh configure-upstream-dns [install-dir])."
+    [[ -f "$install_dir/docker-compose.yml" ]] \
+        || die_no_stack_found "$install_dir"
+
+    print_step "Reading current configuration"
+
+    local env_file own_ips
+    local old_servers old_zones old_unsigned new_servers new_zones new_unsigned
+    env_file=$(runtime_env_file_for_install_dir "$install_dir")
+    [[ -f "$env_file" ]] || die "Configuration not found: $env_file"
+
+    old_servers=$(normalize_dns_upstream_list "$(get_env_var DNS_UPSTREAM_SERVERS "$env_file")")
+    old_zones=$(normalize_dns_upstream_list "$(get_env_var DNS_UPSTREAM_ZONES "$env_file")")
+    old_zones="${old_zones:-.}"
+    old_unsigned=$(normalize_dns_upstream_list "$(get_env_var DNS_UPSTREAM_UNSIGNED_ZONES "$env_file")")
+    own_ips="$(get_env_var IP_STANDARD "$env_file"),$(get_env_var IP_SSL "$env_file"),$(get_env_var LISTEN_IP "$env_file")"
+
+    printf "\n  ${BOLD}Current configuration:${RESET}\n"
+    printf "    DNS servers:        %s\n" "${old_servers:-none (LanCache-NG resolves names itself)}"
+    printf "    Forwarded domains:  %s\n" "$old_zones"
+    printf "    Private (unsigned): %s\n" "${old_unsigned:-none}"
+    printf "\n"
+
+    print_step "Prompt for the new setting"
+
+    prompt_dns_upstream "$old_servers" "$old_zones" "$old_unsigned" "$own_ips"
+    new_servers="$DNS_UPSTREAM_SERVERS"
+    new_zones="$DNS_UPSTREAM_ZONES"
+    new_unsigned="$DNS_UPSTREAM_UNSIGNED_ZONES"
+
+    if [[ "$new_servers" = "$old_servers" && "$new_zones" = "$old_zones" && "$new_unsigned" = "$old_unsigned" ]]; then
+        printf "\n"
+        print_ok "No change. Nothing was written and no container was restarted."
+        printf "\n"
+        exit 0
+    fi
+
+    printf "\n  ${BOLD}New configuration:${RESET}\n"
+    printf "    DNS servers:        %s\n" "${new_servers:-none (LanCache-NG resolves names itself)}"
+    printf "    Forwarded domains:  %s\n" "$new_zones"
+    printf "    Private (unsigned): %s\n" "${new_unsigned:-none}"
+    printf "\n"
+
+    ask "Apply changes? [y/N]" "N"
+    [[ "${REPLY,,}" = "y" ]] || { printf "\n  Cancelled.\n\n"; exit 0; }
+
+    local -a compose_files dns_services
+    local service
+    mapfile -t compose_files < <(compose_file_args_for_install_dir "$install_dir" "$env_file")
+    while IFS= read -r service; do
+        case "$service" in
+            dns-standard|dns-ssl|dns-secondary) dns_services+=("$service") ;;
+        esac
+    done < <(cd "$install_dir" && docker compose --env-file "$env_file" "${compose_files[@]}" config --services)
+    [[ ${#dns_services[@]} -gt 0 ]] \
+        || die "No DNS service found in $install_dir/docker-compose.yml."
+
+    print_step "Saving configuration"
+
+    set_env_key DNS_UPSTREAM_SERVERS "$new_servers" "$env_file"
+    set_env_key DNS_UPSTREAM_ZONES "$new_zones" "$env_file"
+    set_env_key DNS_UPSTREAM_UNSIGNED_ZONES "$new_unsigned" "$env_file"
+    print_ok "Saved in $env_file"
+
+    print_step "Recreating only the DNS containers: ${dns_services[*]}"
+
+    if upstream_dns_apply_and_verify "$install_dir" "$env_file" "$new_servers" "${compose_files[@]}" -- "${dns_services[@]}"; then
+        print_ok "DNS containers are healthy and use the new setting"
+    else
+        print_warn "The new setting did not work; restoring the previous one"
+        set_env_key DNS_UPSTREAM_SERVERS "$old_servers" "$env_file"
+        set_env_key DNS_UPSTREAM_ZONES "$old_zones" "$env_file"
+        set_env_key DNS_UPSTREAM_UNSIGNED_ZONES "$old_unsigned" "$env_file"
+        upstream_dns_apply_and_verify "$install_dir" "$env_file" "$old_servers" "${compose_files[@]}" -- "${dns_services[@]}" \
+            || die "Could not restore the previous DNS setting automatically. Check: docker compose --env-file $env_file -f $install_dir/docker-compose.yml logs ${dns_services[*]}"
+        die "The new DNS setting was rejected (see the DNS container log). The previous setting is active again."
+    fi
+
+    printf "\n"
+    printf "${BOLD}${GREEN}════════════════════════════════════════${RESET}\n"
+    printf "${BOLD}${GREEN}  External DNS setting applied!${RESET}\n"
+    printf "${BOLD}${GREEN}════════════════════════════════════════${RESET}\n"
+    printf "\n"
+
+    exit 0
+}
+
+# What: recreates the DNS services and proves the live config.
+# Why: a healthy container alone does not show the setting arrived.
+# From: Issue #1918
+# Args: install dir, env file, wanted servers, compose -f args, --, services.
+upstream_dns_apply_and_verify() {
+    local install_dir="$1" env_file="$2" servers="$3"
+    shift 3
+    local -a compose_files=() services=()
+    local seen_sep=0 arg
+    for arg in "$@"; do
+        if [[ "$arg" = "--" ]]; then seen_sep=1; continue; fi
+        if [[ "$seen_sep" = "0" ]]; then compose_files+=("$arg"); else services+=("$arg"); fi
+    done
+
+    local service cid status waited has_block
+    (cd "$install_dir" && docker compose --env-file "$env_file" "${compose_files[@]}" up -d --no-deps "${services[@]}") \
+        || return 1
+
+    for service in "${services[@]}"; do
+        cid=$(cd "$install_dir" && docker compose --env-file "$env_file" "${compose_files[@]}" ps -q "$service")
+        [[ -n "$cid" ]] || return 1
+        waited=0
+        status=""
+        while (( waited < 150 )); do
+            status=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$cid" 2>/dev/null || true)
+            [[ "$status" = "healthy" ]] && break
+            sleep 3
+            waited=$((waited + 3))
+        done
+        [[ "$status" = "healthy" ]] || { print_error "$service did not become healthy (status: ${status:-unknown})"; return 1; }
+
+        has_block=0
+        docker exec "$cid" grep -q '^  forward_zones_recurse:' /etc/pdns/recursor.conf && has_block=1
+        if [[ -n "$servers" && "$has_block" != "1" ]]; then
+            print_error "$service is healthy but its recursor.conf has no upstream forward"
+            return 1
+        fi
+        if [[ -z "$servers" && "$has_block" = "1" ]]; then
+            print_error "$service still forwards to an upstream resolver"
+            return 1
+        fi
+        print_ok "$service: healthy; upstream forward in recursor.conf: $([[ "$has_block" = "1" ]] && echo yes || echo no)"
+    done
+}
+
 # ── secondary subcommand ──────────────────────────────────────────────────────
 # Secondary setup is intentionally separate from primary install: it consumes
 # credentials returned by the primary UI/API, writes a small DNS-only compose
@@ -5600,6 +5951,7 @@ cmd_secondary() {
     local response_image_registry response_image_prefix response_image_channel response_image_tag
     local existing_env_file lancache_image_registry lancache_image_prefix lancache_image_channel lancache_image_tag
     local explicit_lancache_image_tag keep_known_good_configs
+    local dns_upstream_servers dns_upstream_zones dns_upstream_unsigned_zones
     local preflight_dir preflight_env_file preflight_registry preflight_prefix preflight_channel
     local preflight_tag preflight_verified_registry="" preflight_verified_prefix="" preflight_verified_tag=""
     local missing_fields secondary_env_file
@@ -5930,6 +6282,17 @@ EOF
     fi
     keep_known_good_configs="${keep_known_good_configs:-3}"
 
+    # What: keeps the external-DNS keys across --rotate.
+    # Why: rotate writes a new .env; the setting must survive.
+    # From: Issue #1918
+    dns_upstream_servers="" dns_upstream_zones="." dns_upstream_unsigned_zones=""
+    if [[ -n "$existing_env_file" ]]; then
+        dns_upstream_servers=$(get_env_var DNS_UPSTREAM_SERVERS "$existing_env_file")
+        dns_upstream_zones=$(get_env_var DNS_UPSTREAM_ZONES "$existing_env_file")
+        dns_upstream_zones="${dns_upstream_zones:-.}"
+        dns_upstream_unsigned_zones=$(get_env_var DNS_UPSTREAM_UNSIGNED_ZONES "$existing_env_file")
+    fi
+
     write_generated_runtime_file "${secondary_dir}/docker-compose.yml" <<EOF
 # Secondary DNS node — run on a remote host.
 # Generated by setup.sh secondary — do not edit manually.
@@ -5949,6 +6312,13 @@ services:
       # Known-good pdns.conf/recursor.conf snapshot retention (#615), same
       # variable/default as the primary's config/{dev,prod}/dns-standard.env.
       - KEEP_KNOWN_GOOD_CONFIGS=\${KEEP_KNOWN_GOOD_CONFIGS:-3}
+      # What: upstream resolvers for non-LAN names.
+      # Why: a secondary may sit behind another resolver.
+      # From: Issue #1918
+      - DNS_UPSTREAM_SERVERS=\${DNS_UPSTREAM_SERVERS:-}
+      - DNS_UPSTREAM_ZONES=\${DNS_UPSTREAM_ZONES:-.}
+      - DNS_UPSTREAM_UNSIGNED_ZONES=\${DNS_UPSTREAM_UNSIGNED_ZONES:-}
+      - DNS_LISTEN_IPS=\${LISTEN_IP:-}
     volumes:
       - pdns-data:/var/lib/powerdns
       - pdns-filter-state:/var/lib/powerdns-state
@@ -6003,6 +6373,9 @@ NATS_USER=${nats_user}
 NATS_PASSWORD=${nats_password}
 NATS_CONSUMER=${consumer_name}
 KEEP_KNOWN_GOOD_CONFIGS=${keep_known_good_configs}
+DNS_UPSTREAM_SERVERS=${dns_upstream_servers}
+DNS_UPSTREAM_ZONES=${dns_upstream_zones}
+DNS_UPSTREAM_UNSIGNED_ZONES=${dns_upstream_unsigned_zones}
 LANCACHE_IMAGE_REGISTRY=${lancache_image_registry}
 LANCACHE_IMAGE_PREFIX=${lancache_image_prefix}
 LANCACHE_IMAGE_CHANNEL=${lancache_image_channel}
@@ -6116,6 +6489,12 @@ case "${1:-install}" in
             exit 0
         fi
         shift; cmd_secondary "$@"; exit 0 ;;
+    configure-upstream-dns)
+        if [[ "${2:-}" = "--help" || "${2:-}" = "help" ]]; then
+            print_command_help configure-upstream-dns
+            exit 0
+        fi
+        cmd_configure_upstream_dns "${2:-/opt/lancache-ng}"; exit 0 ;;
     update-ip|--reconfigure|reconfigure)
         if [[ "${2:-}" = "--help" || "${2:-}" = "help" ]]; then
             print_command_help update-ip
@@ -6402,6 +6781,20 @@ if [[ "${REPLY,,}" = "y" ]]; then
     print_ok "Scheduled automatic updates enabled (ordered, health-gated, daily)"
 else
     print_warn "Scheduled automatic updates disabled — manual updates with: ./setup.sh update"
+fi
+
+# What: optional external DNS server for names LanCache-NG does not know.
+# Why: an existing router/firewall can answer private host names.
+# From: Issue #1918
+print_step "External DNS server (optional)"
+DNS_UPSTREAM_SERVERS=""
+DNS_UPSTREAM_ZONES="."
+DNS_UPSTREAM_UNSIGNED_ZONES=""
+prompt_dns_upstream "" "." "" "${IP_STANDARD},${IP_SSL:-}"
+if [[ -n "$DNS_UPSTREAM_SERVERS" ]]; then
+    print_ok "External DNS: ${DNS_UPSTREAM_SERVERS} (zones: ${DNS_UPSTREAM_ZONES})"
+else
+    print_ok "No external DNS server; LanCache-NG resolves names itself"
 fi
 
 COMPOSE_PROFILES=""
@@ -6826,7 +7219,10 @@ validate_env_values_for_initial_write \
     "UI_AUTH_USER=${UI_AUTH_USER}" \
     "UI_AUTH_PASSWORD=${UI_AUTH_PASSWORD}" \
     "ALLOW_INSECURE_UI=${ALLOW_INSECURE_UI}" \
-    "UI_BIND_IP=${IP_STANDARD}"
+    "UI_BIND_IP=${IP_STANDARD}" \
+    "DNS_UPSTREAM_SERVERS=${DNS_UPSTREAM_SERVERS}" \
+    "DNS_UPSTREAM_ZONES=${DNS_UPSTREAM_ZONES}" \
+    "DNS_UPSTREAM_UNSIGNED_ZONES=${DNS_UPSTREAM_UNSIGNED_ZONES}"
 
 write_env_file "$INSTALL_DIR/.env" <<EOF
 # ── LAN IPs ────────────────────────────────────────────────────────────────────
@@ -6959,6 +7355,13 @@ COMPOSE_PROFILES=${COMPOSE_PROFILES}
 # (./setup.sh update). See "Scheduled automatic updates" in setup.sh's
 # interactive install flow.
 AUTO_UPDATE_ENABLED=${AUTO_UPDATE_ENABLED}
+
+# ── External DNS server (optional) ──────────────────────────────────────────────
+# Empty DNS_UPSTREAM_SERVERS = LanCache-NG resolves names itself (default).
+# Change with: ./setup.sh configure-upstream-dns
+DNS_UPSTREAM_SERVERS=${DNS_UPSTREAM_SERVERS}
+DNS_UPSTREAM_ZONES=${DNS_UPSTREAM_ZONES}
+DNS_UPSTREAM_UNSIGNED_ZONES=${DNS_UPSTREAM_UNSIGNED_ZONES}
 
 # ── Admin-UI ───────────────────────────────────────────────────────────────────
 # Empty auth values are only allowed when ALLOW_INSECURE_UI=true is set explicitly.
@@ -7141,6 +7544,11 @@ if [[ "$AUTO_UPDATE_ENABLED" = "1" ]]; then
     printf "  %-26s %s\n" "Scheduled updates:"        "enabled (ordered, health-gated, daily)"
 else
     printf "  %-26s %s\n" "Scheduled updates:"        "disabled — manual: ./setup.sh update"
+fi
+if [[ -n "$DNS_UPSTREAM_SERVERS" ]]; then
+    printf "  %-26s %s\n" "External DNS:"            "${DNS_UPSTREAM_SERVERS} (domains: ${DNS_UPSTREAM_ZONES}; no DNSSEC: ${DNS_UPSTREAM_UNSIGNED_ZONES:-none})"
+else
+    printf "  %-26s %s\n" "External DNS:"            "none — LanCache-NG resolves names itself"
 fi
 if [[ -n "$UI_AUTH_USER" ]]; then
     printf "  %-26s %s\n" "Admin-UI auth:"           "enabled (user: $UI_AUTH_USER)"

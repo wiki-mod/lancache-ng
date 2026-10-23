@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Shared per-path change classifier for the Build & Push pipeline. Emits the
 # same `key=value` booleans build-push.yml's `detect-changes` job used to
@@ -219,8 +219,7 @@ fi
 
 output_bool "deploy" touches_prefix "deploy/"
 
-if touches_prefix "release/" \
-    || touches_exact ".github/workflows/backfill-stack-latest.yml"; then
+if touches_prefix "release/"; then
     printf 'release_contract=true\n'
 else
     printf 'release_contract=false\n'

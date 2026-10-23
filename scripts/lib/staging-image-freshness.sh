@@ -1,5 +1,5 @@
 #!/bin/bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # #808: shared "is this back-fill source image actually fresh enough to
 # validate an untouched service against" check. scripts/ensure-pr-staging-images.sh

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Executes the real setup.sh CLI end-to-end instead of only bash -n syntax
 # checking it (issue #403): a fresh install through its interactive prompts,
@@ -77,7 +77,7 @@ git config --global --add safe.directory "$repo_root"
 # install_dir must be a path this container and the host Docker daemon both
 # resolve to the same real directory. docker compose (run through the
 # bind-mounted host socket) always resolves bind-mount sources against the
-# HOST filesystem, not this container's -- a plain /tmp/... path only exists
+# HOST filesystem, not this container's -- a plain /var/tmp/... path only exists
 # inside this container's own ephemeral layer, so the host daemon can't find
 # it and silently auto-creates it as an empty directory instead, then fails
 # trying to bind-mount that directory onto a file destination (e.g. the
@@ -90,7 +90,7 @@ git config --global --add safe.directory "$repo_root"
 # bind-mounted scripts still are). /work
 # (this checkout, bind-mounted from the same host path the workflow step
 # runs in) is the only path both sides agree on, so the install directory
-# has to live under it instead of under /tmp.
+# has to live under it instead of under /var/tmp.
 # deploy/quickstart/docker-compose.yml pins a static top-level `name:
 # lancache-ng`, and Compose prefers that yaml name over the --project-
 # directory basename it would otherwise derive -- so every docker compose
@@ -251,7 +251,7 @@ run_fresh_install_expect() {
         LANCACHE_IMAGE_CHANNEL="$fresh_install_image_channel" \
         LANCACHE_IMAGE_TAG="$fresh_install_image_tag" \
         build_expect_prompt_block "$repo_root/setup.sh" "$answers_file" \
-            "127.0.0.2" "" "$install_dir" "" "" "" "" "" "" "" "" ""
+            "127.0.0.2" "" "$install_dir" "" "" "" "" "" "" "" "" "" ""
     )"; then
         echo "::error::Could not derive the fresh-install expect_prompt sequence from 'setup.sh list-prompts' (issue #1176). See the error above for which prompt/reply count mismatched." >&2
         return 1

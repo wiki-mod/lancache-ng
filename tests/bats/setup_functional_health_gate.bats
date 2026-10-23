@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Regression coverage for verify_stack_functional_health()'s fail-closed
 # behavior: a functional probe whose required tool (curl, dig) is missing

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Makes the PR-scoped staging images the full-setup deep validation suite
 # needs actually present before the sims run, on a pull_request event. This
@@ -279,10 +279,7 @@ ancestor_search_depth="${STAGING_ANCESTOR_SEARCH_DEPTH:-50}"
 # (2026-07-30, issue #1296): PRs #1277/#1294/#1301, none of which touched
 # dhcp/dhcp-proxy, still failed "Syslog forwarding + Admin UI visibility
 # simulation" with `Error manifest unknown` for both images, because this
-# list never ensured (or base-channel-backfilled) either tag. dhcp
-# additionally still gets its own from-source coverage via the separate
-# dhcp-kea-lease-flow-simulation.sh job; that job is unaffected by this
-# change.
+# list never ensured (or base-channel-backfilled) either tag.
 #
 # ntp (#1296, 2026-07-30, completing the 3-of-3 this issue originally asked
 # for): now included too. scripts/syslog-forwarding-simulation.sh starts it

@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Coverage for scripts/check-setup-prompt-drift.sh (#1176): the CI guard that
 # fails when setup.sh's interactive install wizard and its expect-driven
@@ -308,7 +308,7 @@ if [[ "${SOME_FLAG:-}" = "y" ]]; then
     # is_introspection_driven's skip did not work, this would fail on either
     # the zero-patterns check or a staleness mismatch.
     write_sim "$fixture_root/scripts/setup-cli-simulation.sh" '
-build_expect_prompt_block "setup.sh" "/tmp/does-not-matter" "192.168.1.10"
+build_expect_prompt_block "setup.sh" "/var/tmp/does-not-matter" "192.168.1.10"
 spawn bash setup.sh
 '
     write_sim "$fixture_root/scripts/syslog-forwarding-simulation.sh" 'expect_prompt {Server IP \(Standard mode\)} "192.168.1.10"'
@@ -321,7 +321,7 @@ spawn bash setup.sh
 @test "is_introspection_driven: fails closed if a sim script references build_expect_prompt_block but no longer spawns setup.sh" {
     write_setup 'ask "Server IP (Standard mode)" "192.168.1.10"'
     write_sim "$fixture_root/scripts/setup-cli-simulation.sh" '
-build_expect_prompt_block "setup.sh" "/tmp/does-not-matter" "192.168.1.10"
+build_expect_prompt_block "setup.sh" "/var/tmp/does-not-matter" "192.168.1.10"
 '
     write_sim "$fixture_root/scripts/syslog-forwarding-simulation.sh" 'expect_prompt {Server IP \(Standard mode\)} "192.168.1.10"'
 

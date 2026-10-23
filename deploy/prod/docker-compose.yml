@@ -1,4 +1,4 @@
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Production stack: proxy, DNS, DHCP, Admin UI, and supporting services
 # (NATS, docker-socket-proxy) wired up with production-sized defaults
@@ -84,6 +84,13 @@ services:
       - NATS_PASSWORD_SHARED_SECRET=nats-dns-writer-password
       - NATS_CONSUMER=dns-standard
       - NATS_RECONCILER=1
+      # What: upstream resolvers for non-LAN names.
+      # Why: one .env.local value feeds both recursors.
+      # From: Issue #1918
+      - DNS_UPSTREAM_SERVERS=${DNS_UPSTREAM_SERVERS:-}
+      - DNS_UPSTREAM_ZONES=${DNS_UPSTREAM_ZONES:-.}
+      - DNS_UPSTREAM_UNSIGNED_ZONES=${DNS_UPSTREAM_UNSIGNED_ZONES:-}
+      - DNS_LISTEN_IPS=${IP_STANDARD},${IP_SSL}
     volumes:
       # Shared-secret bootstrap (#858): first-writer-wins PDNS_API_KEY/DDNS_TSIG_KEY.
       - shared-secrets:/var/lib/lancache-secrets
@@ -161,6 +168,13 @@ services:
       # shared file so it matches the value the nats server generates.
       - NATS_PASSWORD_SHARED_SECRET=nats-dns-replica-password
       - NATS_CONSUMER=dns-ssl
+      # What: upstream resolvers for non-LAN names.
+      # Why: one .env.local value feeds both recursors.
+      # From: Issue #1918
+      - DNS_UPSTREAM_SERVERS=${DNS_UPSTREAM_SERVERS:-}
+      - DNS_UPSTREAM_ZONES=${DNS_UPSTREAM_ZONES:-.}
+      - DNS_UPSTREAM_UNSIGNED_ZONES=${DNS_UPSTREAM_UNSIGNED_ZONES:-}
+      - DNS_LISTEN_IPS=${IP_STANDARD},${IP_SSL}
     volumes:
       # Shared-secret bootstrap (#858): first-writer-wins PDNS_API_KEY/DDNS_TSIG_KEY.
       - shared-secrets:/var/lib/lancache-secrets
@@ -752,7 +766,7 @@ services:
         # Keep the shared config writable by the Admin UI user (UID/GID 10001) after NATS restarts.
         tmp_nats_conf="$(mktemp /etc/nats/.nats.conf.XXXXXX)"
         trap 'rm -f "$$tmp_nats_conf"' EXIT
-        cat > /tmp/nats.conf.template <<'EOF'
+        cat > /var/tmp/nats.conf.template <<'EOF'
         jetstream {
           store_dir: /data
         }
@@ -916,7 +930,7 @@ services:
           -e "s|__NATS_CALLOUT_PASSWORD__|$$(escape_sed "$$NATS_CALLOUT_PASSWORD")|g" \
           -e "s|__NATS_SYS_USER__|$$(escape_sed "$$NATS_SYS_USER")|g" \
           -e "s|__NATS_SYS_PASSWORD__|$$(escape_sed "$$NATS_SYS_PASSWORD")|g" \
-          /tmp/nats.conf.template > "$$tmp_nats_conf"
+          /var/tmp/nats.conf.template >"$$tmp_nats_conf"
         chown 10001:10001 "$$tmp_nats_conf"
         mv "$$tmp_nats_conf" /etc/nats/nats.conf
         trap - EXIT

@@ -1,4 +1,4 @@
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # DNS service: PowerDNS (recursor + authoritative), nats-subscriber binary, Lua RPZ scripts.
 
 # Intentional ARG default (overridable at build time via --build-arg).

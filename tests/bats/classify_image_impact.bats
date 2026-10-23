@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Docker-free, git-free unit coverage for scripts/classify-image-impact.sh
 # (#819). Feeds canned changed-file lists (via CHANGED_FILES) and asserts the
@@ -122,8 +122,6 @@ val() {
     run_classify "release/stack-images.yml"
     [ "$(val release_contract)" = "true" ]
 
-    run_classify ".github/workflows/backfill-stack-latest.yml"
-    [ "$(val release_contract)" = "true" ]
 }
 
 # --- IMAGE_IMPACT verdict boundary (the additive #819 layer) ---

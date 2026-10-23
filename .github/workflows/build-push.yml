@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Main CI/CD pipeline: detects changed paths, lints and tests the DNS/UI Rust
 # crates and shell scripts, validates the docker-compose files, scans
@@ -90,7 +90,7 @@ on:
     # nothing: a prior run already produced the authoritative result for this exact
     # commit. Each of build/build-arm64/dns_rust_quality/ui_rust_quality/
     # watchdog_rust_quality/dns_test/ui_test/watchdog_test/dns_cargo_audit/
-    # ui_cargo_audit/watchdog_cargo_audit/rust_coverage's own `if:` therefore
+    # ui_cargo_audit/watchdog_cargo_audit's own `if:` therefore
     # additionally requires the pull_request event's `action` to be one of
     # opened/synchronize/reopened/ready_for_review before it will run at all (see
     # each job's own comment) -- this list and that inline per-job condition must be
@@ -144,6 +144,9 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  # Host temp files go to disk: /tmp is a small tmpfs on some runners and
+  # trivy alone writes 5 to 8 GB of image export there (run 39765669925).
+  TMPDIR: /var/tmp
   CARGO_BUILD_JOBS: ${{ vars.CARGO_BUILD_JOBS }}
   DOCKER_METADATA_SHORT_SHA_LENGTH: "7"
   RELEASE_PLATFORMS: linux/amd64,linux/arm64
@@ -267,6 +270,7 @@ jobs:
   push-supersession-check:
     name: check for a newer push already superseding this one
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    timeout-minutes: 15
     outputs:
       superseded: ${{ steps.check.outputs.superseded }}
     steps:
@@ -411,50 +415,13 @@ jobs:
           # return the real PR body twice despite #903/#905's fixes, with no
           # visible gh CLI error -- capture stderr and byte count to find out
           # why, instead of guessing further. Remove once root-caused.
-          gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json body -q .body > /tmp/pr-body-live.txt 2> /tmp/pr-body-live.stderr || {
+          gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json body -q .body > /var/tmp/pr-body-live.txt 2> /var/tmp/pr-body-live.stderr || {
             echo "::error::gh pr view failed, exit code $?"
-            cat /tmp/pr-body-live.stderr
+            cat /var/tmp/pr-body-live.stderr
             exit 1
           }
-          echo "::notice::gh pr view succeeded. Body byte count: $(wc -c < /tmp/pr-body-live.txt). stderr: $(cat /tmp/pr-body-live.stderr)"
-          bash scripts/validate-pr-template.sh /tmp/pr-body-live.txt
-
-  pr-template-check-hosted:
-    # Same zero-LAN-dependency property as file-headers-hosted: this check
-    # only reads github.event.pull_request context and runs a plain bash
-    # script, so it keeps the self-hosted job's own `if:` guard directly
-    # (not a needs:-based dependency on another job's result) -- see
-    # docs/ci-github-hosted-fallback-decision.md for why that distinction
-    # matters for GitHub-hosted fallback jobs.
-    name: PR template validation (GitHub-hosted fallback)
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    # Real runs: 5-7s on ubuntu-latest. Same 15-minute floor as
-    # detect-changes' self-hosted equivalent above.
-    timeout-minutes: 15
-    permissions:
-      contents: read
-      pull-requests: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: GitHub-hosted fallback notice
-        run: |
-          echo "::notice::Running PR template validation on GitHub-hosted runner as fallback for non-LAN-dependent linting."
-      - name: Validate PR template completeness
-        env:
-          # See the primary pr-template-check job's identical step for why
-          # this fetches the body live via `gh pr view` instead of trusting
-          # github.event.pull_request.body.
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          PR_DRAFT: ${{ github.event.pull_request.draft }}
-          # Dependabot's own PR author identity -- see
-          # validate-pr-template.sh's dependabot[bot] exemption.
-          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
-        run: |
-          set -euo pipefail
-          gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json body -q .body > /tmp/pr-body-live.txt
-          bash scripts/validate-pr-template.sh /tmp/pr-body-live.txt
+          echo "::notice::gh pr view succeeded. Body byte count: $(wc -c < /var/tmp/pr-body-live.txt). stderr: $(cat /var/tmp/pr-body-live.stderr)"
+          bash scripts/validate-pr-template.sh /var/tmp/pr-body-live.txt
 
   pr-tracking-metadata-check:
     # Enforces AGENTS.md AG-GH-008: a PR must carry labels, a milestone, and (when
@@ -560,10 +527,10 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
-          gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json labels -q '.labels' > /tmp/pr-labels-live.json
+          gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json labels -q '.labels' > /var/tmp/pr-labels-live.json
           milestone_title="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json milestone -q '.milestone.title // ""')"
           {
-            echo "labels_file=/tmp/pr-labels-live.json"
+            echo "labels_file=/var/tmp/pr-labels-live.json"
             echo "milestone_title=$milestone_title"
           } >> "$GITHUB_OUTPUT"
       - name: Validate labels, milestone, and project-board placement
@@ -588,113 +555,6 @@ jobs:
           # not an inline JSON string -- read its content before handing it
           # to the container as an env var, same shape the script always
           # expected.
-          labels_json="$(cat "$PR_LABELS_JSON")"
-          docker run --rm \
-            --user "$(id -u):$(id -g)" \
-            -v "$PWD:/work:ro" \
-            -w /work \
-            -e PR_LABELS_JSON="$labels_json" \
-            -e PR_MILESTONE_TITLE \
-            -e PR_DRAFT \
-            -e PR_NUMBER \
-            -e REPO \
-            -e GH_TOKEN \
-            -e PR_IS_FORK \
-            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            bash scripts/check-pr-tracking-metadata.sh
-
-  pr-tracking-metadata-check-hosted:
-    name: PR tracking metadata (labels/milestone/project) (GitHub-hosted fallback)
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    # Real runs: up to ~1 min (build-tools image resolution + gh pr view
-    # calls on ubuntu-latest, slower than the self-hosted twin since it
-    # cannot reuse validate-compose's already-selected image). Same
-    # 15-minute floor as detect-changes above -- still ~15x the observed max.
-    timeout-minutes: 15
-    permissions:
-      contents: read
-      pull-requests: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Select build-tools image
-        # This fallback job must resolve its own image rather than depending
-        # on validate-compose's output (like the self-hosted job above does)
-        # -- it exists specifically for when self-hosted runners (and
-        # anything that depends on them, including validate-compose) are
-        # unavailable, so a needs: dependency on that job would defeat the
-        # fallback's purpose. Matches shellcheck-hosted's own resolution step.
-        env:
-          GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
-        run: |
-          set -euo pipefail
-          printf 'BUILD_TOOLS_IMAGE=%s\n' "$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)" >> "$GITHUB_ENV"
-      - name: GitHub-hosted fallback notice
-        run: |
-          echo "::notice::Running PR tracking metadata check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
-      - name: Auto-assign Dependabot PR milestone
-        # See the primary pr-tracking-metadata-check job's identical step
-        # (issue #1278) for the full rationale: Dependabot cannot set its
-        # own milestone, so this auto-assigns the "LanCache-NG Roadmap"
-        # catch-all (#11) via PROJECT_AUTOMATION_PAT before the live
-        # label/milestone re-fetch below, instead of exempting Dependabot
-        # from the check entirely (the previous approach, #1061-#1064).
-        if: github.event.pull_request.user.login == 'dependabot[bot]'
-        env:
-          GH_TOKEN: ${{ secrets.PROJECT_AUTOMATION_PAT }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          REPO: ${{ github.repository }}
-          DEPENDABOT_MILESTONE_NUMBER: 11
-        run: |
-          set -euo pipefail
-          if [ -z "$GH_TOKEN" ]; then
-            echo "::warning::PROJECT_AUTOMATION_PAT is not configured -- cannot auto-assign a milestone to this Dependabot PR. pr-tracking-metadata-check-hosted will fail below (No milestone set) until a maintainer sets one by hand."
-            exit 0
-          fi
-          current_milestone="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json milestone -q '.milestone.number // empty')"
-          if [ -n "$current_milestone" ]; then
-            echo "Milestone already set (#$current_milestone) -- leaving it as-is."
-            exit 0
-          fi
-          if ! gh api -X PATCH "repos/$REPO/issues/$PR_NUMBER" -F milestone="$DEPENDABOT_MILESTONE_NUMBER"; then
-            echo "::warning::Failed to auto-assign milestone #$DEPENDABOT_MILESTONE_NUMBER to PR #$PR_NUMBER via the GitHub API."
-            exit 0
-          fi
-          echo "Assigned milestone #$DEPENDABOT_MILESTONE_NUMBER (LanCache-NG Roadmap) to PR #$PR_NUMBER."
-      - name: Fetch current labels/milestone live
-        # See the primary pr-tracking-metadata-check job's identical step for
-        # why this fetches live via `gh pr view` instead of trusting
-        # github.event.pull_request.labels/.milestone.
-        id: live-metadata
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: |
-          set -euo pipefail
-          gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json labels -q '.labels' > /tmp/pr-labels-live.json
-          milestone_title="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json milestone -q '.milestone.title // ""')"
-          {
-            echo "labels_file=/tmp/pr-labels-live.json"
-            echo "milestone_title=$milestone_title"
-          } >> "$GITHUB_OUTPUT"
-      - name: Validate labels, milestone, and project-board placement
-        env:
-          PR_LABELS_JSON: ${{ steps.live-metadata.outputs.labels_file }}
-          PR_MILESTONE_TITLE: ${{ steps.live-metadata.outputs.milestone_title }}
-          PR_DRAFT: ${{ github.event.pull_request.draft }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          REPO: ${{ github.repository }}
-          GH_TOKEN: ${{ secrets.PROJECT_AUTOMATION_PAT }}
-          # GitHub does not pass repository secrets (other than the
-          # read-only GITHUB_TOKEN) to pull_request-triggered runs from a
-          # forked repository, so GH_TOKEN above is empty for every external
-          # contributor's PR even once PROJECT_AUTOMATION_PAT is configured.
-          # Telling the script whether this run is from a fork lets it warn
-          # with the right explanation instead of implying the secret is
-          # simply unconfigured -- see check-pr-tracking-metadata.sh.
-          PR_IS_FORK: ${{ github.event.pull_request.head.repo.full_name != github.repository }}
-        run: |
-          set -euo pipefail
           labels_json="$(cat "$PR_LABELS_JSON")"
           docker run --rm \
             --user "$(id -u):$(id -g)" \
@@ -748,7 +608,7 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
-          gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json title -q .title > /tmp/pr-title-live.txt
+          gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json title -q .title > /var/tmp/pr-title-live.txt
       - name: Validate PR title convention
         env:
           PR_DRAFT: ${{ github.event.pull_request.draft }}
@@ -764,7 +624,7 @@ jobs:
           PR_TITLE_LINT_MODE: ${{ vars.PR_TITLE_LINT_MODE }}
         run: |
           set -euo pipefail
-          pr_title="$(cat /tmp/pr-title-live.txt)"
+          pr_title="$(cat /var/tmp/pr-title-live.txt)"
           docker run --rm \
             --user "$(id -u):$(id -g)" \
             -v "$PWD:/work:ro" \
@@ -775,91 +635,6 @@ jobs:
             -e PR_TITLE_LINT_MODE \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             bash scripts/check-pr-title-convention.sh
-
-  pr-title-convention-check-hosted:
-    name: PR title Conventional-Commit lint (GitHub-hosted fallback)
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    # Real runs: up to ~50s (build-tools image resolution on ubuntu-latest +
-    # gh pr view). Same 15-minute floor as detect-changes above.
-    timeout-minutes: 15
-    permissions:
-      contents: read
-      pull-requests: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Select build-tools image
-        # This fallback job must resolve its own image rather than depending
-        # on validate-compose's output (like the self-hosted job above does)
-        # -- it exists specifically for when self-hosted runners (and
-        # anything that depends on them, including validate-compose) are
-        # unavailable, so a needs: dependency on that job would defeat the
-        # fallback's purpose. Matches pr-tracking-metadata-check-hosted's own
-        # resolution step.
-        env:
-          GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
-        run: |
-          set -euo pipefail
-          printf 'BUILD_TOOLS_IMAGE=%s\n' "$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)" >> "$GITHUB_ENV"
-      - name: GitHub-hosted fallback notice
-        run: |
-          echo "::notice::Running PR title convention check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
-      - name: Fetch current PR title live
-        # See the primary pr-title-convention-check job's identical step for
-        # why this fetches live via `gh pr view` instead of trusting
-        # github.event.pull_request.title.
-        id: live-title
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: |
-          set -euo pipefail
-          gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json title -q .title > /tmp/pr-title-live.txt
-      - name: Validate PR title convention
-        env:
-          PR_DRAFT: ${{ github.event.pull_request.draft }}
-          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
-          PR_TITLE_LINT_MODE: ${{ vars.PR_TITLE_LINT_MODE }}
-        run: |
-          set -euo pipefail
-          pr_title="$(cat /tmp/pr-title-live.txt)"
-          docker run --rm \
-            --user "$(id -u):$(id -g)" \
-            -v "$PWD:/work:ro" \
-            -w /work \
-            -e PR_TITLE="$pr_title" \
-            -e PR_DRAFT \
-            -e PR_AUTHOR \
-            -e PR_TITLE_LINT_MODE \
-            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            bash scripts/check-pr-title-convention.sh
-
-  file-headers-hosted:
-    name: file purpose headers (GitHub-hosted fallback)
-    runs-on: ubuntu-latest
-    # Real runs: 5-8s. Same 15-minute floor as detect-changes above.
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: GitHub-hosted fallback notice
-        run: |
-          echo "::notice::Running file-headers check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
-      - name: Check repository header on all tracked files
-        run: bash scripts/check-file-headers.sh
-
-  compose-healthchecks-hosted:
-    name: compose healthchecks (GitHub-hosted fallback)
-    runs-on: ubuntu-latest
-    # Real runs: same order of magnitude as file-headers-hosted. Same
-    # 15-minute floor as detect-changes above.
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: GitHub-hosted fallback notice
-        run: |
-          echo "::notice::Running compose-healthchecks check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
-      - name: Check every deploy/*/docker-compose.yml service has a healthcheck
-        run: bash scripts/check-compose-healthchecks.sh
 
   line-endings:
     # Cheap repository hygiene gate (issue #601). .gitattributes already normalizes line
@@ -1038,19 +813,6 @@ jobs:
             bash scripts/check-changelog-direct-edit.sh --changed-files-file "/work/$(basename "$changelog_guard_changed_files")" \
           || true
 
-  line-endings-hosted:
-    name: line endings (GitHub-hosted fallback)
-    runs-on: ubuntu-latest
-    # Real runs: 4-8s. Same 15-minute floor as detect-changes above.
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: GitHub-hosted fallback notice
-        run: |
-          echo "::notice::Running line-endings check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
-      - name: Check tracked files use Unix (LF) line endings
-        run: bash scripts/check-line-endings.sh
-
   language-policy:
     # Enforces AG-REL-001 (project language: Rust and shell) by asserting the ABSENCE of
     # banned-language source files, rather than scanning code IN a banned language for
@@ -1089,40 +851,6 @@ jobs:
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             bash -lc 'set -euo pipefail; bash scripts/check-language-policy.sh'
 
-  language-policy-hosted:
-    name: language policy (GitHub-hosted fallback)
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: GitHub-hosted fallback notice
-        run: |
-          echo "::notice::Running language-policy check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
-      - name: Check for banned-language source files (AG-REL-001)
-        run: bash scripts/check-language-policy.sh
-
-  # GitHub-hosted fallback is deliberately limited to cheap lint/policy jobs with no LAN
-  # dependency of their own: file-headers-hosted, compose-healthchecks-hosted (#1169),
-  # line-endings-hosted, shellcheck-hosted, pr-template-check-hosted, language-policy-
-  # hosted, and watchdog_test-hosted. Rust builds, image scans, and publish paths stay on
-  # self-hosted runners because they still depend on the shared build-tools image,
-  # sccache/distcc acceleration, or registry credentials with no safe hosted equivalent
-  # yet -- see docs/ci-github-hosted-fallback-decision.md for the full reasoning per job
-  # class.
-  #
-  # Explicit decision on ci_scope_policy's own hosted fallback (issue #509's
-  # second acceptance criterion): NOT feasible as a real fallback today, and
-  # deliberately not attempted here. ci_scope_policy's whole job is to check
-  # the *results* of dns_rust_quality/ui_rust_quality/watchdog_rust_quality/
-  # dns_test/ui_test/watchdog_test/dns_cargo_audit/ui_cargo_audit/
-  # watchdog_cargo_audit -- all self-hosted-only Rust jobs with no hosted
-  # equivalent of their own yet. A "ci_scope_policy-hosted"
-  # job would have to depend on those same self-hosted jobs, so if self-hosted
-  # runners are genuinely unavailable (the scenario this fallback exists for),
-  # it would sit queued waiting on its own needs: forever, same as the jobs
-  # it's meant to be a fallback for. There is no real fallback for this check
-  # until the Rust build/test jobs themselves get a hosted path -- tracked
-  # separately, not solved by this workflow file alone.
   shellcheck:
     # ShellCheck and ActionLint run inside the same build-tools image selected by
     # validate-compose, keeping linting independent from whatever happens to be installed
@@ -1223,7 +951,7 @@ jobs:
         run: |
           set -euo pipefail
           # tests/setup-migration-semantics.sh only reads setup.sh and writes to
-          # mktemp -d (container /tmp), so the read-only repo mount is sufficient.
+          # mktemp -d (container /var/tmp), so the read-only repo mount is sufficient.
           docker run --rm \
             --user "$(id -u):$(id -g)" \
             -v "$PWD:/work:ro" \
@@ -1317,116 +1045,6 @@ jobs:
         # larger follow-up (41 preexisting instances found across scripts/**,
         # each needing individual triage). Pure text scan, no Docker/LAN
         # dependency of its own, same class as the checks above.
-        run: |
-          set -euo pipefail
-          docker run --rm \
-            --user "$(id -u):$(id -g)" \
-            -v "$PWD:/work:ro" \
-            -w /work \
-            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            bash scripts/check-pipefail-early-exit-grep.sh
-
-  shellcheck-hosted:
-    name: shellcheck (GitHub-hosted fallback)
-    runs-on: ubuntu-latest
-    # Real full-job runs: 58-84s. 25 minutes, same as the self-hosted
-    # shellcheck job above, for the same reason: must exceed this job's own
-    # "Run ShellCheck and ActionLint" step timeout added below.
-    timeout-minutes: 25
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Select build-tools image
-        # Always resolve through the digest-pinned, smoke-tested selector -- never fall back
-        # to a bare :latest tag here. This job exists so ShellCheck/ActionLint still run when
-        # self-hosted runners are down; it should not trade the self-hosted job's verified
-        # image for an unpinned, unverified one. BUILD_TOOLS_REQUIRE_PUBLISHED=true matches
-        # validate-compose's own resolution (no local-build fallback for a lint-only job).
-        env:
-          GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
-        run: |
-          set -euo pipefail
-          printf 'BUILD_TOOLS_IMAGE=%s\n' "$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)" >> "$GITHUB_ENV"
-      - name: GitHub-hosted fallback notice
-        run: |
-          echo "::notice::Running ShellCheck and ActionLint on GitHub-hosted runner as fallback for non-LAN-dependent linting."
-      # Parity fix: this step runs the exact same actionlint invocation as the self-hosted
-      # shellcheck job's own "Run ShellCheck and ActionLint" step (see that job's comment
-      # for the real 2026-07-24 incident: a 5+ hour indefinite hang, reproduced 3/3 times,
-      # from actionlint's embedded shellcheck integration). That fix only covered the
-      # self-hosted job; this hosted fallback carried the identical unbounded-hang risk and
-      # had no timeout at all until now. Same coarse 15-minute bound AND the same inner
-      # `timeout --kill-after=30 300` SIGKILL guard, for the same reason.
-      - name: Run ShellCheck and ActionLint
-        timeout-minutes: 15
-        run: |
-          set -euo pipefail
-          docker run --rm \
-            --user "$(id -u):$(id -g)" \
-            -v "$PWD:/work:ro" \
-            -w /work \
-            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            bash -lc 'set -euo pipefail; find . \( -name "*.sh" -o -name "*.bats" \) -not -path "./.git/*" -not -path "*/target/*" -print0 | xargs -0 --no-run-if-empty shellcheck --severity=warning; timeout --kill-after=30 300 actionlint .github/workflows/*.yml'
-
-      - name: Check pinned GitHub Actions for deprecated Node runtimes (#801)
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          docker run --rm \
-            --user "$(id -u):$(id -g)" \
-            -v "$PWD:/work:ro" \
-            -w /work \
-            -e GH_TOKEN \
-            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            bash scripts/check-action-node-versions.sh
-
-      - name: Check validation-subnet wrapper coverage (#896)
-        # Same guard as the self-hosted shellcheck job's own step above (see
-        # its comment for the full rationale); duplicated here so the
-        # GitHub-hosted fallback path enforces it too when self-hosted
-        # runners are unavailable.
-        run: |
-          set -euo pipefail
-          docker run --rm \
-            --user "$(id -u):$(id -g)" \
-            -v "$PWD:/work:ro" \
-            -w /work \
-            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            bash scripts/check-validation-subnet-wrapper-coverage.sh
-
-      - name: Check executable bits on bare-path script invocations (#1019)
-        # Same guard as the self-hosted shellcheck job's own step above (see
-        # its comment for the full rationale); duplicated here so the
-        # GitHub-hosted fallback path enforces it too when self-hosted
-        # runners are unavailable.
-        run: |
-          set -euo pipefail
-          docker run --rm \
-            --user "$(id -u):$(id -g)" \
-            -v "$PWD:/work:ro" \
-            -w /work \
-            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            bash scripts/check-executable-bits.sh
-
-      - name: Check build-tools smoke-test coverage (#790/#791)
-        # Same guard as the self-hosted shellcheck job's own step above (see
-        # its comment for the full rationale); duplicated here so the
-        # GitHub-hosted fallback path enforces it too when self-hosted
-        # runners are unavailable.
-        run: |
-          set -euo pipefail
-          docker run --rm \
-            --user "$(id -u):$(id -g)" \
-            -v "$PWD:/work:ro" \
-            -w /work \
-            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            bash scripts/check-build-tools-smoke-coverage.sh
-
-      - name: Check for pipefail/SIGPIPE early-exit-consumer pattern (AG-VAL-029)
-        # Same guard as the self-hosted shellcheck job's own step above (see
-        # its comment for the full rationale); duplicated here so the
-        # GitHub-hosted fallback path enforces it too when self-hosted
-        # runners are unavailable.
         run: |
           set -euo pipefail
           docker run --rm \
@@ -1701,8 +1319,8 @@ jobs:
             --user "$(id -u):$(id -g)" \
             -v "$PWD:/work:ro" \
             -w /work \
-            --env HOME=/tmp \
-            --env DOCKER_CONFIG=/tmp/.docker \
+            --env HOME=/var/tmp \
+            --env DOCKER_CONFIG=/var/tmp/.docker \
             --env CACHE_INACTIVE \
             --env CACHE_MAX_SIZE \
             --env CACHE_MEM_MB \
@@ -1814,9 +1432,9 @@ jobs:
             || { echo "::error::DNS entrypoint must render generated configs through the atomic helper."; exit 1; }
           grep -Fq 'mktemp "${target_dir}/.${target_name}.tmp.XXXXXX"' services/dns/entrypoint.sh \
             || { echo "::error::DNS entrypoint generated configs must stage temp files in the target directory."; exit 1; }
-          if grep -Fq '> /tmp/recursor.conf' services/dns/entrypoint.sh \
-            || grep -Fq '> /tmp/pdns.conf' services/dns/entrypoint.sh; then
-            echo "::error::DNS entrypoint must not render PDNS configs through /tmp before replacing target configs."
+          if grep -Fq '> /var/tmp/recursor.conf' services/dns/entrypoint.sh \
+            || grep -Fq '> /var/tmp/pdns.conf' services/dns/entrypoint.sh; then
+            echo "::error::DNS entrypoint must not render PDNS configs through /var/tmp before replacing target configs."
             exit 1
           fi
           if grep -Fq "sed -i 's/^  loglevel: 3$/  loglevel: 6/' /etc/pdns/recursor.conf" services/dns/entrypoint.sh; then
@@ -2243,9 +1861,9 @@ jobs:
             || { echo "::error::shellcheck container must mount the workspace read-only."; exit 1; }
           grep -F 'lancache-ng-build-tools-validation:${GITHUB_SHA:-local}-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}' scripts/select-build-tools-image.sh >/dev/null \
             || { echo "::error::Compose validation fallback image tag must be scoped to the workflow run and attempt."; exit 1; }
-          grep -F -- "--env DOCKER_CONFIG=/tmp/.docker" .github/workflows/build-push.yml >/dev/null \
+          grep -F -- "--env DOCKER_CONFIG=/var/tmp/.docker" .github/workflows/build-push.yml >/dev/null \
             || { echo "::error::Compose validation must set a writable Docker config directory inside the build-tools container."; exit 1; }
-          grep -F -- "--env HOME=/tmp" .github/workflows/build-push.yml >/dev/null \
+          grep -F -- "--env HOME=/var/tmp" .github/workflows/build-push.yml >/dev/null \
             || { echo "::error::Compose validation must set a writable HOME inside the build-tools container."; exit 1; }
           # Acceleration-infrastructure policy checks start here.
           # They validate the sccache/distcc contract, not product correctness.
@@ -2835,25 +2453,6 @@ jobs:
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             bash scripts/check-vex-drift.sh
 
-      - name: Check netdata's vendored curl pin against issue #1304's tracked CVEs (PR #1352 tracking mechanism)
-        # services/netdata/Dockerfile installs netdata's official static musl build, which
-        # statically links its OWN vendored curl (confirmed via `ldd`: not a distro package
-        # Trivy's os-pkg scanner can see -- see PR #1352). This is the maintainer-approved
-        # (option (c)) tracking mechanism that keeps that now-invisible risk from silently
-        # falling off radar: it reads netdata's own upstream build recipe for the pinned
-        # NETDATA_VERSION and fails if the vendored curl is still inside the affected range for
-        # issue #1304's 7 tracked CVE IDs. Needs real network access to fetch that recipe from
-        # netdata's GitHub repository, unlike the other checks in this job.
-        run: |
-          set -euo pipefail
-
-          docker run --rm -i \
-            --user "$(id -u):$(id -g)" \
-            -v "$PWD:/work:ro" \
-            -w /work \
-            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            bash scripts/check-netdata-curl-pin.sh
-
       - name: Check config-writer idempotence test coverage (#640)
         run: |
           set -euo pipefail
@@ -2955,8 +2554,8 @@ jobs:
             --user "$(id -u):$(id -g)" \
             -v "$PWD:/work:ro" \
             -w /work \
-            --env HOME=/tmp \
-            --env DOCKER_CONFIG=/tmp/.docker \
+            --env HOME=/var/tmp \
+            --env DOCKER_CONFIG=/var/tmp/.docker \
             --env CACHE_INACTIVE \
             --env CACHE_MAX_SIZE \
             --env CACHE_MEM_MB \
@@ -3000,7 +2599,7 @@ jobs:
 
           case "${BUILD_TOOLS_IMAGE:-}" in
             lancache-ng-build-tools-validation:*)
-              docker rmi "$BUILD_TOOLS_IMAGE"
+              timeout --kill-after=30 120 docker rmi "$BUILD_TOOLS_IMAGE"
               ;;
           esac
 
@@ -3486,7 +3085,10 @@ jobs:
       - name: Clean up image
         if: always()
         run: |
-          docker rmi lancache-ng-full-setup:validation || true
+          image_id="$(timeout --kill-after=30 60 docker images --quiet lancache-ng-full-setup:validation)"
+          if [ -n "$image_id" ]; then
+            timeout --kill-after=30 120 docker rmi lancache-ng-full-setup:validation
+          fi
 
   dns_rust_quality:
     # DNS Rust quality is scoped by detect-changes for PR speed, but workflow changes
@@ -3754,10 +3356,7 @@ jobs:
     # commit's run matters for real capacity. Safe to cancel mid-flight: it is one of
     # ci_scope_policy's `needs`, but that job's push-branch check on this job's result now
     # uses require_success_or_intentional_cancellation() (tolerates
-    # success/skipped/cancelled) specifically because of this group. Its only other
-    # consumer, rust_coverage, already gates with a skip-or-success check, which cleanly
-    # skips coverage rather than erroring; a cancelled result makes that gate false the
-    # same way a skipped one does.
+    # success/skipped/cancelled) specifically because of this group.
     concurrency:
       group: >-
         ${{
@@ -3834,9 +3433,7 @@ jobs:
     # Job-level concurrency (#891 follow-up, mirroring dns_test's own group
     # above for the same reason): scarce lancache-heavy capacity, safe to
     # cancel mid-flight -- ci_scope_policy's push-branch check on this job's
-    # result now uses require_success_or_intentional_cancellation(), and
-    # rust_coverage's own `success`/`skipped` gate on ui_test already treats
-    # a non-matching result as a clean skip.
+    # result now uses require_success_or_intentional_cancellation().
     concurrency:
       group: >-
         ${{
@@ -3877,383 +3474,6 @@ jobs:
         uses: ./.github/actions/cargo-with-sccache-fallback
         with:
           command: cargo test --locked --manifest-path services/ui/Cargo.toml
-
-  rust_coverage:
-    # Also skipped on a metadata-only pull_request event -- see
-    # dns_rust_quality's comment above for the full reasoning. This is a
-    # required branch-protection check on master/v0.2.0 ("coverage (Rust)"),
-    # but it already tolerates a clean `skipped` result today for any PR whose
-    # path scoping below finds no relevant Rust change (e.g. a docs-only PR);
-    # this adds one more, equally clean skip source, not a new failure mode.
-    #
-    # Scope note (2026-08 watchdog Rust CI wiring update): watchdog is
-    # deliberately NOT added to this job's `needs:`/tarpaulin invocation even
-    # though it now has its own dns/ui-shaped rust-quality/test/cargo-audit
-    # jobs above. Coverage here uses a per-crate PASS/FAIL threshold model
-    # (see the "Run coverage" step below) that would need a new threshold
-    # number deliberately chosen for the watchdog crate, which is a separate
-    # decision this CI-wiring change does not make on its own; the watchdog
-    # crate's own 38 unit tests already run and gate merges via watchdog_test
-    # above, just without a tracked coverage percentage yet. Revisit if/when a
-    # maintainer wants a coverage threshold for this crate specifically.
-    name: coverage (Rust)
-    needs: [validate-compose, dns_test, ui_test, detect-changes]
-    if: >-
-      ${{
-        always() &&
-        needs['validate-compose'].result == 'success' &&
-        (needs.dns_test.result == 'success' || needs.dns_test.result == 'skipped') &&
-        (needs.ui_test.result == 'success' || needs.ui_test.result == 'skipped') &&
-        (
-          github.event_name != 'pull_request' ||
-          !contains(fromJSON('["labeled", "unlabeled", "milestoned", "demilestoned"]'), github.event.action)
-        ) &&
-        (
-          github.event_name != 'pull_request' ||
-          needs['detect-changes'].outputs.dns_rust == 'true' ||
-          needs['detect-changes'].outputs.ui == 'true' ||
-          needs['detect-changes'].outputs.workflow == 'true'
-        )
-      }}
-    runs-on: [self-hosted, linux, lancache, lancache-heavy]
-    # Real warm-cache runs: 1.3-6.6min. 60 minutes rather than a tighter
-    # multiple of that: cargo-tarpaulin instruments and recompiles both
-    # crates for coverage (its own build path, separate from the
-    # sccache-fallback compiles elsewhere in this file), and this job can
-    # also fall back to a branch-local build-tools image rebuild (see the
-    # step comment below) when a PR's own Dockerfile change hasn't been
-    # published yet -- neither cold path is represented by the samples above.
-    timeout-minutes: 60
-    # Job-level concurrency (#891, extending #888/#892's proven build/container-scan
-    # pattern): rust_coverage is on the scarce self-hosted lancache-heavy pool, same as
-    # build/container-scan, so reclaiming a superseded commit's coverage run matters for
-    # real capacity, not just consistency. Safe to cancel mid-flight: it is NOT one of
-    # ci_scope_policy's `needs` (unlike dns_test/ui_test/dns_cargo_audit/ui_cargo_audit,
-    # deliberately excluded from this pattern), so nothing hard-asserts its result. Its
-    # only consumer, publish_coverage_badge, gates with
-    # `!cancelled() && needs.rust_coverage.result == 'success'` and only runs on push -- a
-    # cancelled rust_coverage cleanly skips the badge publish instead of erroring.
-    concurrency:
-      group: >-
-        ${{
-          (github.event_name == 'workflow_dispatch' || github.run_attempt != '1') &&
-          format('{0}-rust-coverage-{1}-{2}', github.workflow, github.ref, github.run_id) ||
-          format('{0}-rust-coverage-{1}', github.workflow, github.ref)
-        }}
-      cancel-in-progress: true
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # This job resolves its own build-tools image rather than reusing validate-compose's
-      # exported build_tools_image output. That output is deliberately locked to the
-      # published, digest-qualified image (never a branch-local fallback) because
-      # dns_cargo_audit/ui_cargo_audit need a reproducible, previously-audited image.
-      # Coverage measurement has no such reproducibility requirement, so it can accept a
-      # branch-local rebuild when a PR's own Dockerfile change (like adding tarpaulin) has
-      # not been published to ghcr.io yet.
-      - name: Resolve build-tools image (with tarpaulin required)
-        env:
-          EXTRA_REQUIRED_TOOLS: "cargo-tarpaulin bc"
-          GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
-        run: |
-          set -euo pipefail
-          image="$(bash scripts/select-build-tools-image.sh)"
-          printf 'BUILD_TOOLS_IMAGE=%s\n' "$image" >> "$GITHUB_ENV"
-      # Coverage output must land on a writable host path: the repo checkout
-      # itself is bind-mounted read-only into the build-tools container below,
-      # matching the dns_cargo_audit/ui_cargo_audit pattern.
-      - name: Prepare writable coverage output directories
-        run: |
-          set -euo pipefail
-          mkdir -p coverage-dns coverage-ui
-      - name: Run coverage (dns/nats-subscriber)
-        run: |
-          set -euo pipefail
-
-          docker run --rm \
-            --user "$(id -u):$(id -g)" \
-            -e HOME=/tmp \
-            -e CARGO_HOME=/tmp/cargo-home \
-            -e CARGO_TARGET_DIR=/tmp/target-dns \
-            -v "$PWD:/work" \
-            -v "$PWD/coverage-dns:/coverage-dns" \
-            -w /work \
-            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            bash -c 'set -euo pipefail
-              cargo tarpaulin \
-                --engine llvm \
-                --manifest-path services/dns/nats-subscriber/Cargo.toml \
-                --locked \
-                --timeout 300 \
-                --out json \
-                --output-dir /coverage-dns'
-      - name: Run coverage (ui)
-        run: |
-          set -euo pipefail
-
-          docker run --rm \
-            --user "$(id -u):$(id -g)" \
-            -e HOME=/tmp \
-            -e CARGO_HOME=/tmp/cargo-home \
-            -e CARGO_TARGET_DIR=/tmp/target-ui \
-            -v "$PWD:/work" \
-            -v "$PWD/coverage-ui:/coverage-ui" \
-            -w /work \
-            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            bash -c 'set -euo pipefail
-              cargo tarpaulin \
-                --engine llvm \
-                --manifest-path services/ui/Cargo.toml \
-                --locked \
-                --timeout 300 \
-                --out json \
-                --output-dir /coverage-ui'
-      - name: Merge coverage reports and check threshold
-        id: coverage
-        run: |
-          set -euo pipefail
-
-          mkdir -p coverage-badge
-          docker run --rm \
-            --user "$(id -u):$(id -g)" \
-            -e HOME=/tmp \
-            -v "$PWD:/work:ro" \
-            -v "$PWD/coverage-badge:/coverage-badge" \
-            -w /work \
-            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            bash -c 'set -euo pipefail
-
-              # Extract coverage percentages from JSON reports inside the
-              # selected build-tools image, not from incidental host binaries.
-              dns_coverage=$(jq -r ".coverage" coverage-dns/tarpaulin-report.json 2>/dev/null || echo "0")
-              ui_coverage=$(jq -r ".coverage" coverage-ui/tarpaulin-report.json 2>/dev/null || echo "0")
-
-              echo "DNS coverage: ${dns_coverage}%"
-              echo "UI coverage: ${ui_coverage}%"
-
-              # Per-crate thresholds, not a shared minimum: the two crates real coverage differs by
-              # an order of magnitude (measured on CI: ui about 38.6%, nats-subscriber about 0%).
-              # nats-subscriber unit tests cover its pure conversion logic
-              # (dns_record_to_zone_update); its async subscribe/forward loop needs a live
-              # NATS/PowerDNS harness and is exercised by the full-setup integration jobs, not unit
-              # coverage. A single shared minimum threshold would either block real ui coverage
-              # from ever mattering (if set low enough for nats-subscriber to pass) or permanently
-              # fail nats-subscriber (if set for ui level). Each crate threshold is raised
-              # independently as that crate gains real unit tests. STATUS (2026-07-23):
-              # dns_threshold stays 0 because the floor has not been raised since issue #504 (first
-              # flagged this) was closed -- its pure-logic unit tests landed via PR #515 -- not
-              # because an open gap is still tracked. Raise it once nats-subscriber gains
-              # unit-testable coverage beyond the model.
-              ui_threshold=35
-              dns_threshold=0
-
-              echo "UI threshold: ${ui_threshold}%"
-              echo "DNS threshold: ${dns_threshold}% (floor not raised since #504 closed; async loop covered by full-setup integration)"
-
-              failed=0
-              if (( $(echo "$ui_coverage < $ui_threshold" | bc -l) )); then
-                echo "::error::UI coverage ${ui_coverage}% is below threshold of ${ui_threshold}%"
-                failed=1
-              fi
-              if (( $(echo "$dns_coverage < $dns_threshold" | bc -l) )); then
-                echo "::error::DNS coverage ${dns_coverage}% is below threshold of ${dns_threshold}%"
-                failed=1
-              fi
-
-              if [[ "$failed" -eq 1 ]]; then
-                exit 1
-              fi
-
-              # Badge generation reuses this same containerized jq instead of
-              # assuming a host-installed jq, matching why the coverage
-              # extraction above already runs in here (issue #566).
-              ui_coverage_display="$(printf "%.2f" "$ui_coverage")"
-              dns_coverage_display="$(printf "%.2f" "$dns_coverage")"
-              badge_message="ui ${ui_coverage_display}% / dns ${dns_coverage_display}%"
-              badge_color=yellow
-              if awk -v ui="$ui_coverage" -v dns="$dns_coverage" "BEGIN { exit !(ui >= 80 && dns >= 80) }"; then
-                badge_color=brightgreen
-              fi
-
-              jq -n \
-                --arg message "$badge_message" \
-                --arg color "$badge_color" \
-                "{schemaVersion: 1, label: \"rust coverage\", message: \$message, color: \$color}" \
-                > /coverage-badge/rust.json
-
-              {
-                printf "ui=%s\n" "$ui_coverage_display"
-                printf "dns=%s\n" "$dns_coverage_display"
-                printf "message=%s\n" "$badge_message"
-              } > /coverage-badge/output.env
-
-              echo "Coverage check passed"'
-
-          cat coverage-badge/output.env >> "$GITHUB_OUTPUT"
-      - name: Upload coverage reports
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: rust-coverage-reports
-          path: |
-            coverage-dns/tarpaulin-report.json
-            coverage-ui/tarpaulin-report.json
-          retention-days: 30
-      # The badge JSON is handed off as an artifact rather than pushed from this
-      # job directly: this job runs on every trigger including same-repo pull_request
-      # runs that execute PR-controlled test code (cargo tarpaulin), and a job-level
-      # `permissions: contents: write` would apply to that untrusted code too --
-      # GitHub Actions has no step-level permissions to scope the write down to just
-      # the publish step. publish_coverage_badge below is the only job with write
-      # access, and it only ever runs on trusted push events.
-      - name: Upload coverage badge data
-        if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/')
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: rust-coverage-badge
-          path: coverage-badge/rust.json
-          retention-days: 1
-
-  publish_coverage_badge:
-    # Split out of rust_coverage (see the comment on its "Upload coverage badge data"
-    # step) so the contents:write token this job needs is never present during the
-    # coverage measurement steps that execute PR-controlled code.
-    #
-    # `if:` must start with an explicit status-check function, not a bare
-    # `needs.rust_coverage.result == ...` -- same trap documented on promote's `if:`
-    # below. A bare condition gets an implicit `&& success()` appended by GitHub Actions,
-    # and that success() walks the WHOLE transitive needs graph, not just this job's own
-    # direct `needs: rust_coverage`. Confirmed live: this job skipped on the actual push
-    # that merged it (run 29184177783) because of exactly this.
-    name: publish rust coverage badge
-    needs: rust_coverage
-    if: "!cancelled() && needs.rust_coverage.result == 'success' && github.event_name == 'push' && startsWith(github.ref, 'refs/heads/')"
-    runs-on: [self-hosted, linux, lancache, lancache-light]
-    # Real runs: 10-12s. Same 15-minute floor as detect-changes above.
-    timeout-minutes: 15
-    # Job-level concurrency, keyed per source ref: the top-level group (see top of file)
-    # is run_id-suffixed for push events and therefore never collides, so it no longer
-    # serializes same-branch badge publishes the way its old, fully-global key used to.
-    # cancel-in-progress stays false: this queues a second same-branch publish behind a
-    # running one instead of racing it.
-    #
-    # Deliberately per-ref, NOT workflow-wide: a single shared group would let unrelated
-    # branches queue behind each other, and GitHub's concurrency queue only ever holds one
-    # pending job per group -- a burst of publishes for OTHER branches can bump a given
-    # branch's already-queued publish entirely before it starts, silently skipping that
-    # branch's badge update for this push. Per-ref scoping gives every branch its own
-    # queue slot.
-    #
-    # What per-ref scoping does NOT do is stop two DIFFERENT branches' publishes from
-    # running at the literal same time and racing the shared `badges` branch -- that race
-    # is instead handled below, by retrying the fetch/commit/push instead of doing it
-    # once. A badge push is cheap/fast enough that neither the per-branch queueing nor the
-    # retry loop is a capacity concern the way cancellation is for build/container-scan.
-    concurrency:
-      group: ${{ github.workflow }}-badge-${{ github.ref }}
-      cancel-in-progress: false
-    permissions:
-      contents: write
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Download coverage badge data
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1 (v4.3.0 still declared deprecated Node 20 runtime, see #802)
-        with:
-          name: rust-coverage-badge
-          path: coverage-badge
-      - name: Publish Rust coverage badge endpoint
-        # BADGE_FILE is scoped per source branch (not one shared coverage/rust.json)
-        # so pushes to master and to the active vX.Y.Z integration branch don't
-        # overwrite each other's badge data -- this job's own concurrency group
-        # (above) is per-ref, so it only serializes writes for the SAME branch;
-        # the retry loop below is what protects the shared `badges` branch
-        # itself from two DIFFERENT branches' publishes racing each other.
-        env:
-          BADGE_BRANCH: badges
-          BADGE_FILE: coverage/rust-${{ github.ref_name }}.json
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-
-          : "${GITHUB_TOKEN:?GITHUB_TOKEN is required to publish the coverage badge endpoint}"
-          : "${BADGE_BRANCH:?BADGE_BRANCH is required}"
-          : "${BADGE_FILE:?BADGE_FILE is required}"
-
-          # Debounce/coalesce, same reasoning and mechanism as promote's own branch-tip check
-          # (#777, see that job's comment): the per-ref badge concurrency group above only
-          # serializes the ORDER two same-branch publishes execute in, it does not guarantee the
-          # newer commit's coverage wins. A slow, older run's rust_coverage can still finish and
-          # reach this step after a faster, newer run for the same branch already published --
-          # without this check it would silently fast-forward the badge file back to stale
-          # coverage. Re-resolve the branch's current tip directly from the remote and skip as a
-          # no-op if a newer commit has already landed.
-          current_tip="$(git ls-remote origin "$GITHUB_REF" | cut -f1)"
-          if [[ -z "$current_tip" ]]; then
-            echo "::error::Could not resolve the current tip of ${GITHUB_REF} via git ls-remote; refusing to publish the coverage badge blind."
-            exit 1
-          fi
-          if [[ "$current_tip" != "$GITHUB_SHA" ]]; then
-            echo "::notice::${GITHUB_REF} has already moved to ${current_tip} since this run was triggered for ${GITHUB_SHA}; skipping badge publish so the run already targeting the current tip publishes instead."
-            exit 0
-          fi
-
-          tmp_dir="$(mktemp -d)"
-          trap 'rm -rf "$tmp_dir"' EXIT
-          cp coverage-badge/rust.json "$tmp_dir/rust.json"
-
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          # Retry loop, not a single fetch/commit/push: the concurrency group above is per-ref,
-          # so it only prevents two publishes for the SAME branch from racing each other -- it
-          # does nothing for a DIFFERENT branch's publish landing on the shared `badges` branch
-          # between this attempt's fetch and its own push (previously a single plain `git push`,
-          # no retry/rebase, would just fail non-fast-forward in that case). Re-fetching and
-          # rebuilding the commit on the fresh tip each attempt makes that self-healing instead
-          # of a hard failure, without needing a single global group that would let unrelated
-          # branches bump each other out of the queue.
-          max_attempts=5
-          attempt=1
-          while :; do
-            # Explicit destination refspec, not just "origin $BADGE_BRANCH": actions/checkout's
-            # sparse fetch config only tracks the ref it originally checked out, so fetching a
-            # different branch by name alone lands only in FETCH_HEAD, never in
-            # refs/remotes/origin/$BADGE_BRANCH -- the show-ref check below would then always
-            # report "not found" and take the orphan-branch path even when badges already exists,
-            # and the final push would be rejected as non-fast-forward.
-            git fetch origin "$BADGE_BRANCH:refs/remotes/origin/$BADGE_BRANCH" || true
-            if git show-ref --verify --quiet "refs/remotes/origin/$BADGE_BRANCH"; then
-              # -C (not --create): this is a self-hosted runner, so a local badges branch left
-              # over from a previous job on the same workspace makes a plain --create fail with
-              # "a branch named 'badges' already exists". -C resets it to origin's tip instead,
-              # discarding any local commit left over from a previous failed attempt below.
-              git switch -C "$BADGE_BRANCH" "origin/$BADGE_BRANCH"
-            else
-              git switch --orphan "$BADGE_BRANCH"
-              git rm -rf . >/dev/null 2>&1 || true
-            fi
-
-            mkdir -p "$(dirname "$BADGE_FILE")"
-            cp "$tmp_dir/rust.json" "$BADGE_FILE"
-            git add "$BADGE_FILE"
-
-            if git diff --cached --quiet; then
-              echo "::notice::Rust coverage badge endpoint already up to date."
-              exit 0
-            fi
-
-            git commit -m "chore: update rust coverage badge"
-            if git push origin "$BADGE_BRANCH"; then
-              break
-            fi
-
-            if (( attempt >= max_attempts )); then
-              echo "::error::Failed to push the coverage badge endpoint to ${BADGE_BRANCH} after ${max_attempts} attempts (non-fast-forward every time)."
-              exit 1
-            fi
-            echo "::notice::Push to ${BADGE_BRANCH} was rejected, likely by a concurrent publish for another branch -- refetching and retrying (attempt $((attempt + 1))/${max_attempts})."
-            attempt=$((attempt + 1))
-          done
 
   watchdog_test:
     # Watchdog test now covers two different artifacts under one job: the
@@ -4348,39 +3568,6 @@ jobs:
         with:
           command: cargo test --locked --manifest-path services/watchdog/Cargo.toml
 
-  watchdog_test-hosted:
-    # Unlike watchdog_test above, this fallback deliberately does not gate on
-    # detect-changes/validate-compose (both self-hosted-only). Depending on
-    # them here would reintroduce the same trap that ruled out a
-    # ci_scope_policy-hosted job elsewhere in this file: if self-hosted
-    # runners are genuinely unavailable (the scenario this fallback exists
-    # for), a needs: dependency on a self-hosted-only job would just sit
-    # queued forever. The check itself (bash -n plus an executable-bit test
-    # on one small script) is cheap enough to run unconditionally every time,
-    # same as file-headers-hosted/line-endings-hosted/shellcheck-hosted.
-    #
-    # This hosted fallback deliberately covers only the shell-script half of
-    # watchdog_test above -- it does NOT run `cargo test` for the Rust crate
-    # (2026-08 watchdog Rust CI wiring update), for the same reason dns/ui
-    # never got a hosted fallback for their own rust-quality/test/cargo-audit
-    # jobs: real Rust compilation depends on the shared build-tools image and
-    # sccache/distcc acceleration, which have no safe hosted equivalent yet
-    # (see docs/ci-github-hosted-fallback-decision.md). A green run here is
-    # NOT proof the watchdog crate compiles or its tests pass.
-    name: test (watchdog) (GitHub-hosted fallback)
-    runs-on: ubuntu-latest
-    # Real runs: 3-5s. Same 15-minute floor as detect-changes above.
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: GitHub-hosted fallback notice
-        run: |
-          echo "::notice::Running watchdog syntax check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
-      - name: test (watchdog)
-        run: |
-          bash -n services/watchdog/watchdog.sh
-          test -x services/watchdog/watchdog.sh
-
   dns_cargo_audit:
     # Dependency audits remain crate-specific. They are skipped only when path
     # filtering proves the crate and workflow contract did not change.
@@ -4434,8 +3621,8 @@ jobs:
 
           docker run --rm \
             --user "$(id -u):$(id -g)" \
-            -e HOME=/tmp \
-            -e CARGO_HOME=/tmp/cargo-home \
+            -e HOME=/var/tmp \
+            -e CARGO_HOME=/var/tmp/cargo-home \
             -v "$PWD:/work:ro" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
@@ -4502,8 +3689,8 @@ jobs:
 
           docker run --rm \
             --user "$(id -u):$(id -g)" \
-            -e HOME=/tmp \
-            -e CARGO_HOME=/tmp/cargo-home \
+            -e HOME=/var/tmp \
+            -e CARGO_HOME=/var/tmp/cargo-home \
             -v "$PWD:/work:ro" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
@@ -4572,8 +3759,8 @@ jobs:
 
           docker run --rm \
             --user "$(id -u):$(id -g)" \
-            -e HOME=/tmp \
-            -e CARGO_HOME=/tmp/cargo-home \
+            -e HOME=/var/tmp \
+            -e CARGO_HOME=/var/tmp/cargo-home \
             -v "$PWD:/work:ro" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
@@ -4602,7 +3789,7 @@ jobs:
     # same ref (cancel-in-progress: false, confirmed live on #915), so the PR-event branch
     # of the script stays strict and untouched. push/tag events use a run_id-suffixed
     # top-level key that never collides, so rapid pushes run fully in parallel with no
-    # top-level throttle -- THAT is where #915/#891 gave rust_coverage/shellcheck/
+    # top-level throttle -- THAT is where #915/#891 gave shellcheck/
     # file-headers/line-endings/ci_scope_policy/validate-compose/dns_test/ui_test/
     # dns_cargo_audit/ui_cargo_audit their own per-job cancel-in-progress groups, letting a
     # newer push cancel an older one's copy mid-flight. Those jobs are deliberately NOT on
@@ -4670,9 +3857,7 @@ jobs:
     # already tolerates `skipped`, so it covers this new source with no change;
     # this note just records that on push a `skipped` here can now mean
     # "path-scoped out by detect-changes" as well as "superseded mid-flight".
-    # rust_coverage stays unconditional for the badge (still runs the crates'
-    # tests under tarpaulin regardless), so this change does not touch its
-    # tolerance. watchdog_test WAS also NOT path-scoped on push at this point
+    # watchdog_test WAS also NOT path-scoped on push at this point
     # in the file's history -- see the 2026-08 watchdog Rust CI wiring update
     # below for why that is no longer true.
     #
@@ -5060,7 +4245,7 @@ jobs:
     # scans it). 60 minutes gives real headroom for a cold Docker layer
     # cache or a Trivy vulnerability-database refresh, neither of which
     # shows up in the warm-cache samples above; still far under build's own
-    # 150-minute bound for the same class of work at full multi-arch scale.
+    # 90-minute bound for the same class of work at full multi-arch scale.
     timeout-minutes: 60
     env:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
@@ -5785,7 +4970,14 @@ jobs:
             always() &&
             steps.push-scan-changes.outputs.should-scan == 'true'
           }}
-        run: docker rmi lancache-ng-scan:${{ matrix.service }}-${{ matrix.platform_tag }}-${{ github.run_id }} || true
+        run: |
+          image="lancache-ng-scan:${{ matrix.service }}-${{ matrix.platform_tag }}-${{ github.run_id }}"
+          # Absent image is not a failure (the build may have stopped before it
+          # existed); a hung or failing docker call is, and must stay visible.
+          image_id="$(timeout --kill-after=30 120 docker images --quiet "$image")"
+          if [ -n "$image_id" ]; then
+            timeout --kill-after=30 120 docker rmi "$image"
+          fi
 
   determine-push-reuse-scope:
     # Step 4 (issue #1095): decides, once per push (not once per build/build-arm64/
@@ -6031,7 +5223,7 @@ jobs:
         (github.event_name != 'pull_request' || needs['pr-title-convention-check'].result == 'success')
       }}
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
-    timeout-minutes: 150
+    timeout-minutes: 90
     # Job-level concurrency (#888, keyed per matrix service and per ref). CANONICAL
     # RATIONALE for this whole workflow's channel publish path -- container-scan/
     # build-arm64 and the shellcheck/validate-compose/line-endings/ci_scope_policy gates
@@ -6040,7 +5232,7 @@ jobs:
     # cancel-in-progress is scoped to pull_request events ONLY (issue #979). On a PR, a
     # newer push to the same branch supersedes the older commit, so cancelling the older
     # service build reclaims a scarce lancache-heavy slot (otherwise pinned for the full
-    # ~150-minute timeout) with no downside: a PR's own commits are never promoted to a
+    # ~90-minute timeout) with no downside: a PR's own commits are never promoted to a
     # channel, GHCR tag writes are atomic (a cancelled build leaves no corrupt or
     # partially-visible sha-* tag), and merge-manifests already requires
     # `needs.build.result == 'success'`, so a cancelled build cleanly stops the pipeline.
@@ -6395,7 +5587,6 @@ jobs:
 
           {
             printf 'rust=%s\n' "$(digest_for_image rust:latest)"
-            printf 'golang=%s\n' "$(digest_for_image golang:latest)"
           } >> "$GITHUB_OUTPUT"
 
       - name: Prepare local Buildx cache
@@ -6646,7 +5837,6 @@ jobs:
             ${{ steps.meta.outputs.labels }}
             org.opencontainers.image.description=${{ matrix.description }}
             ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.rust.digest={0}', steps.build-tools-base-digests.outputs.rust) || '' }}
-            ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.golang.digest={0}', steps.build-tools-base-digests.outputs.golang) || '' }}
           # No `annotations:` input here (issue #620). A genuinely single-platform push with
           # provenance disabled has no index for buildx to attach an index-level description
           # annotation to -- `docker buildx build --annotation index:...` on a real
@@ -7201,7 +6391,6 @@ jobs:
 
           {
             printf 'rust=%s\n' "$(digest_for_image rust:latest)"
-            printf 'golang=%s\n' "$(digest_for_image golang:latest)"
           } >> "$GITHUB_OUTPUT"
 
       - name: Compute Docker build parallelism
@@ -7276,7 +6465,6 @@ jobs:
             ${{ steps.meta.outputs.labels }}
             org.opencontainers.image.description=${{ matrix.description }}
             ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.rust.digest={0}', steps.build-tools-base-digests.outputs.rust) || '' }}
-            ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.golang.digest={0}', steps.build-tools-base-digests.outputs.golang) || '' }}
           # See build's equivalent step for why there is no `annotations:`
           # input here and why `outputs: type=image,oci-mediatypes=true` is
           # still required groundwork for issue #620.
@@ -7774,7 +6962,7 @@ jobs:
     # from a merge cascade), before this job's own work even starts. 45 minutes covers
     # that real lock-wait ceiling plus this job's own work with headroom, so normal lock
     # contention can never be mistaken for a hang.
-    timeout-minutes: 45
+    timeout-minutes: 30
     # Promote only repoints already-built, already-pushed sha-* images at mutable
     # channel tags -- it is idempotent and fast, unlike the rest of this workflow, where
     # cancelling stale in-flight work for a superseded commit is desirable. Originally
@@ -8483,8 +7671,7 @@ jobs:
           ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools inspect "$stack_pointer_image" >/dev/null
           ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker pull "$build_tools_image" >/dev/null
           rust_base_digest="$(docker image inspect "$build_tools_image" --format '{{ index .Config.Labels "org.opencontainers.image.base.rust.digest" }}')"
-          golang_base_digest="$(docker image inspect "$build_tools_image" --format '{{ index .Config.Labels "org.opencontainers.image.base.golang.digest" }}')"
-          if [[ ! "$rust_base_digest" =~ ^sha256:[0-9a-f]{64}$ || ! "$golang_base_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+          if [[ ! "$rust_base_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
             echo "::error::build-tools image is missing build-time base digest labels."
             exit 1
           fi
@@ -8519,7 +7706,6 @@ jobs:
             printf -- '- ghcr.io/%s/stack:%s -> %s\n' "$REPOSITORY" "$source_tag" "$(digest_for_image "ghcr.io/${REPOSITORY}/stack:${source_tag}")"
             printf '\nResolved build-tools base image digests:\n\n'
             printf -- '- rust:latest -> %s\n' "$rust_base_digest"
-            printf -- '- golang:latest -> %s\n' "$golang_base_digest"
             printf '\nProvenance and SBOM status:\n\n'
             printf -- '- Provenance attestations are pushed to GHCR for every first-party service image digest and the stack channel-pointer digest.\n'
             printf -- '- CycloneDX SBOMs are generated per released first-party image digest (via Trivy) and attached to this GitHub release as <service>.cdx.json assets by the release-sbom job.\n'
@@ -8533,7 +7719,7 @@ jobs:
             -e TAG_NAME \
             -e COMMIT_SHA \
             -e EXPECTED_PRERELEASE="$expected_prerelease" \
-            -v "$notes_file:/tmp/lancache-release-notes.md:ro" \
+            -v "$notes_file:/var/tmp/lancache-release-notes.md:ro" \
             "$build_tools_image" \
             bash -s <<'UPDATE_RELEASE'
           set -euo pipefail
@@ -8565,7 +7751,7 @@ jobs:
             # shellcheck disable=SC2016
             updated_body="$(jq -nr \
               --arg body "$existing_body" \
-              --arg notes "$(cat /tmp/lancache-release-notes.md)" \
+              --arg notes "$(cat /var/tmp/lancache-release-notes.md)" \
               --arg start "$image_notes_start" \
               --arg end "$image_notes_end" \
               '
@@ -8604,7 +7790,7 @@ jobs:
               --arg tag_name "$TAG_NAME" \
               --arg target_commitish "$COMMIT_SHA" \
               --arg name "$TAG_NAME" \
-              --arg body "$(cat /tmp/lancache-release-notes.md)" \
+              --arg body "$(cat /var/tmp/lancache-release-notes.md)" \
               --argjson prerelease "$expected_prerelease" \
               '{tag_name:$tag_name, target_commitish:$target_commitish, name:$name, body:$body, draft:false, prerelease:$prerelease}' \
               > "$response_file.create"
@@ -8657,7 +7843,7 @@ jobs:
             -e GITHUB_TOKEN \
             -e REPOSITORY \
             -e TAG_NAME \
-            -v "$PWD/vex.openvex.json:/tmp/vex.openvex.json:ro" \
+            -v "$PWD/vex.openvex.json:/var/tmp/vex.openvex.json:ro" \
             "$build_tools_image" \
             bash -s <<'UPLOAD_VEX'
           set -euo pipefail
@@ -8683,7 +7869,7 @@ jobs:
           curl -fsS -X POST \
             -H "$auth" -H "$accept" -H "$version" \
             -H "Content-Type: application/json" \
-            --data-binary @/tmp/vex.openvex.json \
+            --data-binary @/var/tmp/vex.openvex.json \
             "$uploads/releases/$release_id/assets?name=$asset_name" >/dev/null
           echo "Uploaded $asset_name to release $TAG_NAME."
           UPLOAD_VEX
@@ -8712,7 +7898,7 @@ jobs:
     # CycloneDX SBOM output, so it is never slower than that per-service work). 45 minutes
     # gives real headroom over container-scan's own per-service worst case. Flagged
     # explicitly as an estimate, not a measurement.
-    timeout-minutes: 45
+    timeout-minutes: 60
     permissions:
       contents: write
       packages: read
@@ -8812,7 +7998,7 @@ jobs:
             -e REPOSITORY \
             -e TAG_NAME \
             -e ASSET_NAME="$asset" \
-            -v "$PWD/$asset:/tmp/$asset:ro" \
+            -v "$PWD/$asset:/var/tmp/$asset:ro" \
             "$build_tools_image" \
             bash -s <<'UPLOAD_SBOM'
           set -euo pipefail
@@ -8837,7 +8023,7 @@ jobs:
           curl -fsS -X POST \
             -H "$auth" -H "$accept" -H "$version" \
             -H "Content-Type: application/json" \
-            --data-binary "@/tmp/$ASSET_NAME" \
+            --data-binary "@/var/tmp/$ASSET_NAME" \
             "$uploads/releases/$release_id/assets?name=$ASSET_NAME" >/dev/null
           echo "Uploaded $ASSET_NAME to release $TAG_NAME."
           UPLOAD_SBOM

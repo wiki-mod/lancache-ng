@@ -1,4 +1,4 @@
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # Installs the LAN cache's CA certificate into the Windows Local Machine
 # "Root" trust store so SSL-intercepted (MITM) downloads are trusted by this
 # Windows client. Must be run elevated (Administrator).

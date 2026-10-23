@@ -306,19 +306,19 @@ is disruptive, and that mode refuses to run unless explicitly confirmed.
 
 ```sh
 # 1. Copy the script to the target host (or `git pull` this repo there).
-scp tools/runner-host/lancache-ci-docker-daemon-config.sh <host>:/tmp/
+scp tools/runner-host/lancache-ci-docker-daemon-config.sh <host>:/var/tmp/
 
 # 2. On the host: read-only preview of what would change. Writes nothing.
-sudo bash /tmp/lancache-ci-docker-daemon-config.sh check
+sudo bash /var/tmp/lancache-ci-docker-daemon-config.sh check
 
 # 3. Write the merged config to a staged file for manual review (still does
 #    not touch the live /etc/docker/daemon.json).
-sudo bash /tmp/lancache-ci-docker-daemon-config.sh stage
+sudo bash /var/tmp/lancache-ci-docker-daemon-config.sh stage
 cat /etc/docker/daemon.json.staged   # review
 
 # 4. Back up the live file and install the merged config as the new live
 #    file. Does NOT restart dockerd -- the new settings are inert until step 5.
-sudo bash /tmp/lancache-ci-docker-daemon-config.sh apply
+sudo bash /var/tmp/lancache-ci-docker-daemon-config.sh apply
 
 # 5. THE DISRUPTIVE STEP. Only during the agreed quiet window, one host at a
 #    time: restarts dockerd (stopping every container currently running on
@@ -328,7 +328,7 @@ sudo bash /tmp/lancache-ci-docker-daemon-config.sh apply
 #    own comment), and reads back the live config file dockerd just loaded.
 #    Requires an explicit confirmation env var so it can never fire from a
 #    copy-pasted one-liner without a deliberate extra step:
-sudo CONFIRM_DOCKERD_RESTART=yes bash /tmp/lancache-ci-docker-daemon-config.sh restart
+sudo CONFIRM_DOCKERD_RESTART=yes bash /var/tmp/lancache-ci-docker-daemon-config.sh restart
 
 # 6. Confirm the runner picks up CI jobs normally again before moving on to
 #    the next host. Repeat steps 1-6 per host -- never restart all four at

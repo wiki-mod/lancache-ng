@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Coverage for scripts/plan-deep-validation.sh (#715): the glue that turns a
 # triggering event into the deep suite's plan (image_tag / pr_staging_available

@@ -1,5 +1,5 @@
 #!/bin/bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # dnsmasq DHCP proxy entrypoint. Validates required env vars, renders
 # dnsmasq.conf.template via envsubst, validates the result and keeps a
@@ -170,9 +170,8 @@ fi
 # architecture with a dhcp-match/dhcp-boot rule. That claim is false as
 # stated -- it directly contradicts the code below, which deliberately
 # renders BOTH a pxe-service=x86PC line and a dhcp-match/dhcp-boot pair
-# for the SAME architecture (0), and scripts/dhcp-proxy-pxe-simulation.sh
-# (run against this exact code in CI) confirms the BIOS case correctly
-# delivers the operator-configured external siaddr/filename, not
+# for the SAME architecture (0); the BIOS case was confirmed to correctly
+# deliver the operator-configured external siaddr/filename, not
 # dnsmasq's own address or an empty one. UEFI (architectures 7/11) gets
 # no pxe-service entry of its own not because doing so would suppress
 # dhcp-boot, but simply because it would add nothing: finding 1 above
@@ -472,8 +471,7 @@ _dhcp_proxy_render_optional_directives() {
         # the directive the dnsmasq man page documents as working together
         # with ProxyDHCP mode ("it is possible, and useful, to configure
         # dnsmasq as both a PXE proxy-DHCP server and a DHCP relay"), and it
-        # is what the existing PXE tooling (scripts/dhcp-proxy-pxe-simulation.sh,
-        # tools/pxe-client-probe) expects. Server-name is left empty; only
+        # is what the existing PXE tooling (tools/pxe-client-probe) expects. Server-name is left empty; only
         # filename and (optionally) server-address are operator-configurable here.
         printf 'dhcp-boot=%s,,%s\n' "$DHCP_PROXY_BOOT_FILENAME" "$DHCP_PROXY_BOOT_SERVER" >> "$dest_conf"
     elif [ -n "$DHCP_PROXY_BOOT_SERVER" ]; then
@@ -629,9 +627,9 @@ _dhcp_proxy_render_pxe_service_directives() {
         # pxe-service entry would therefore add nothing even if rendered --
         # not because it would suppress dhcp-boot (PR #765 review corrected
         # an earlier version of this comment that claimed exactly that; see
-        # the header comment above's "Correction" paragraph and
-        # scripts/dhcp-proxy-pxe-simulation.sh, which asserts the BIOS case
-        # combining both directives for the SAME architecture in CI). It is
+        # the header comment above's "Correction" paragraph:
+        # combining both directives for the SAME architecture works for the
+        # BIOS case). It is
         # simply redundant: the x86PC pxe-service line rendered above
         # already satisfies the "at least one pxe-service directive must
         # exist" requirement for the whole config, so dhcp-boot (tag-scoped

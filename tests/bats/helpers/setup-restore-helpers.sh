@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Bats helper that loads cmd_restore's two restore helpers --
 # restore_path_is_sed_safe() (rejects a path unsafe for the restore-time sed

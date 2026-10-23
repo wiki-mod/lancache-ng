@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Real end-to-end proof for issue #836's CLI-fallback item: `setup.sh
 # reset-to-last-known-good-config dns` must actually roll a real, running
 # PowerDNS zone's live record data back to an earlier known-good snapshot via
-# nats-subscriber's rollback listener -- not just return success. Mirrors
-# scripts/setup-reset-kea-config-simulation.sh's rigor for the Kea target and
-# reuses scripts/dns-zone-rollback-simulation.sh's proven stack/UI-mutation
+# nats-subscriber's rollback listener -- not just return success. Reuses
+# scripts/dns-zone-rollback-simulation.sh's proven stack/UI-mutation
 # setup (issue #628) for standing up a real dns-standard/nats/ui trio and
 # making real record changes, but exercises the CLI (`bash setup.sh
 # reset-to-last-known-good-config dns ...`) instead of calling the rollback
@@ -48,8 +47,7 @@
 # What this script does NOT verify:
 #   - The interactive confirmation prompt itself (ask()/confirm() read
 #     /dev/tty; --yes exists so this command can be driven the same way
-#     scripted/automated recovery would use it) -- same scope note as
-#     setup-reset-kea-config-simulation.sh.
+#     scripted/automated recovery would use it).
 #   - The #858 shared-secrets first-writer-wins fallback path for
 #     PDNS_API_KEY: this stack (deploy/full-setup/docker-compose.yml)
 #     hardcodes a fixed PDNS_API_KEY on every relevant service rather than

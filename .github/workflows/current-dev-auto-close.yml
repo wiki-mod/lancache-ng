@@ -1,4 +1,4 @@
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # GitHub's built-in "Closes #N"/"Fixes #N" issue auto-close only fires when a
 # pull request merges into the repository's DEFAULT branch (currently
@@ -58,6 +58,7 @@ jobs:
   auto-close:
     name: Relay PR body and close linked issues
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     # `branches: [current_dev]` above already restricts the pull_request
     # trigger to PRs targeting current_dev, but `types: [closed]` still
     # fires for PRs that were closed WITHOUT merging -- guard on

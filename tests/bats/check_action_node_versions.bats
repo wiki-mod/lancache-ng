@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Coverage for scripts/check-action-node-versions.sh (#801): the CI guard
 # that fails a build if any pinned GitHub Action -- local composite or

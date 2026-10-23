@@ -1,4 +1,4 @@
-//! lancache-ng (https://github.com/wiki-mod/lancache-ng)
+//! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 //!
 //! Admin UI domain routes. Handles CDN domain lists, SSL wildcard scope, and
 //! LAN DNS records while preserving the on-disk domain-file semantics.

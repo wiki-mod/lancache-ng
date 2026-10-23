@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Per-service change detection for the full-setup DEEP validation gate
 # (#715). Emits `key=value` lines (proxy/dns_image/ui/watchdog/dhcp/

@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Docker-free coverage for scripts/ensure-pr-staging-images.sh (#715) -- the
 # fail-closed staging guard + untouched-service back-fill that reuses the

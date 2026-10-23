@@ -187,7 +187,7 @@ Because of this limitation, **a green CodeQL Rust job must not be read as full s
 
 These are required, not stylistic suggestions — a PR missing them will fail CI or get flagged in review.
 
-- **File headers.** Every source/config file you add or touch (Rust, shell, YAML, Dockerfiles, `.conf`/template files, HTML/CSS/JS) must open with a short header: the project name and repo URL in the exact form `lancache-ng (https://github.com/wiki-mod/lancache-ng)`, followed by a purpose description of that specific file, using the comment syntax valid for that file's language (`//!` for Rust, `#` for shell/YAML/Dockerfiles, Tera's `{# ... #}` for HTML templates under `services/ui/src/templates/`, `/* ... */` for CSS, `//` for JS). `scripts/check-file-headers.sh` enforces this in CI (`file-headers` job in `build-push.yml`) — it fails a PR if any non-excluded tracked file is missing the exact header string. A short list of files are excluded (`.md` files, the root `.env`/`.env.example`, lockfiles, `.gitkeep`, the `VERSION` file, JSON-backed `.conf` files, vendored/generated build artifacts) — see `scripts/check-file-headers.sh`'s `is_excluded()` function for the exact list, and AGENTS.md's "File Headers" section for the full rationale (why each exclusion exists, how to scale header detail to a file's complexity, and what NOT to invent in a header).
+- **File headers.** Every source/config file you add or touch (Rust, shell, YAML, Dockerfiles, `.conf`/template files, HTML/CSS/JS) must open with a short header: the project name and repo URL in the exact form `LanCache-NG (https://github.com/wiki-mod/lancache-ng)`, followed by a purpose description of that specific file, using the comment syntax valid for that file's language (`//!` for Rust, `#` for shell/YAML/Dockerfiles, Tera's `{# ... #}` for HTML templates under `services/ui/src/templates/`, `/* ... */` for CSS, `//` for JS). `scripts/check-file-headers.sh` enforces this in CI (`file-headers` job in `build-push.yml`) — it fails a PR if any non-excluded tracked file is missing the exact header string. A short list of files are excluded (`.md` files, the root `.env`/`.env.example`, lockfiles, `.gitkeep`, the `VERSION` file, JSON-backed `.conf` files, vendored/generated build artifacts) — see `scripts/check-file-headers.sh`'s `is_excluded()` function for the exact list, and AGENTS.md's "File Headers" section for the full rationale (why each exclusion exists, how to scale header detail to a file's complexity, and what NOT to invent in a header).
 - **Code comments.** Comment only when the WHY would not be obvious from well-named identifiers and the surrounding code — not what the code does, which should be readable from the code itself. Do comment: complex logic, guards, fallbacks, security decisions, non-obvious side effects, a workaround for a specific bug, or a deliberate deviation from the obvious approach. A missing WHY-comment on code that clearly needs one is treated as a defect, whether or not it predates your change — if you're already touching that code, add the missing comment as part of your PR rather than leaving the gap. Do not reference the current task, PR number, or fix in a comment (e.g. "fixed for #123") — that belongs in the PR description, not in code that outlives the change. See AGENTS.md's "Comment Style" section for the full guidance, including how to document a deliberately deferred fix versus a straightforward WHY-comment.
 
 ## Building from source
@@ -385,30 +385,8 @@ docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work:ro" -w /work "$BUILD_TOOLS
   bash -lc 'cargo test --locked --manifest-path services/ui/Cargo.toml && cargo test --locked --manifest-path services/dns/nats-subscriber/Cargo.toml'
 ```
 
-For Rust coverage checks (requires the build-tools container with `cargo-tarpaulin`), use:
-
-```bash
-BUILD_TOOLS_IMAGE="$(bash scripts/select-build-tools-image.sh)"
-docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work:ro" -w /work "$BUILD_TOOLS_IMAGE" \
-  bash -lc 'cargo tarpaulin --engine llvm --manifest-path services/ui/Cargo.toml --locked --out json && cargo tarpaulin --engine llvm --manifest-path services/dns/nats-subscriber/Cargo.toml --locked --out json'
-```
-
-`--engine llvm` matches what CI uses: tarpaulin's default ptrace-based engine needs a
-capability Docker containers don't grant by default (it fails with "ASLR disable
-failed: EPERM"), so both CI and local instructions use the LLVM source-based engine
-instead.
-
-Rust code coverage has a per-crate minimum threshold, not one shared number:
-`services/ui` must stay at or above 35% (real measured coverage is ~38.6% as
-of this writing), and `services/dns/nats-subscriber`'s threshold is still set
-at 0% in the workflow. Issue #504 (closed via PR #515) already added real
-unit tests for `dns_record_to_zone_update()`'s subscribe/forward logic
-(extracted as a pure, testable function), so the crate's tests are no longer
-data-model-only, but the `rust_coverage` job's threshold was deliberately
-left at 0% pending a real tarpaulin measurement and hasn't been raised since.
-Raise each crate's threshold independently as that crate gains real coverage
-— do not average or share a single "minimum" number across both, since their
-coverage levels differ by an order of magnitude for unrelated reasons.
+CI runs no Rust coverage job: the former `coverage (Rust)` job measured near-zero
+coverage, ran without sccache and took 30 minutes or more, so it was removed.
 
 If you cannot run a relevant check locally (for example, if Docker is unavailable),
 say so in the pull request and explain why.

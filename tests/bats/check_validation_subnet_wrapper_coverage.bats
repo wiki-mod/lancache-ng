@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Coverage for scripts/check-validation-subnet-wrapper-coverage.sh (#896):
 # the standing CI guard that fails a build if a job in full-setup-validate.yml
@@ -235,7 +235,7 @@ EOF
     steps:
       - run: echo derive
 
-  setup-reset-kea-config-simulation:
+  setup-reset-dns-config-simulation:
     # Unlike full-setup-validate, this job does NOT call
     # validation_subnet_reserve_slot itself.
     needs: compute-validation-network
@@ -245,12 +245,12 @@ EOF
     steps:
       - name: Run simulation
         run: |
-          bash scripts/setup-reset-kea-config-simulation.sh
+          bash scripts/setup-reset-dns-config-simulation.sh
 '
 
     run "$script" "$fixture_root"
     [ "$status" -ne 0 ]
-    [[ "$output" == *"setup-reset-kea-config-simulation"* ]]
+    [[ "$output" == *"setup-reset-dns-config-simulation"* ]]
 }
 
 @test "reports every violating job in one run, not just the first" {
@@ -270,19 +270,19 @@ EOF
     steps:
       - run: bash scripts/ui-reachability-crash-loop-simulation.sh
 
-  setup-reset-kea-config-simulation:
+  setup-reset-dns-config-simulation:
     needs: compute-validation-network
     runs-on: ubuntu-latest
     env:
       VALIDATION_SUBNET: ${{ needs.compute-validation-network.outputs.subnet }}
     steps:
-      - run: bash scripts/setup-reset-kea-config-simulation.sh
+      - run: bash scripts/setup-reset-dns-config-simulation.sh
 '
 
     run "$script" "$fixture_root"
     [ "$status" -ne 0 ]
     [[ "$output" == *"ui-reachability-crash-loop-simulation"* ]]
-    [[ "$output" == *"setup-reset-kea-config-simulation"* ]]
+    [[ "$output" == *"setup-reset-dns-config-simulation"* ]]
 }
 
 @test "does not flag a job that never references the raw compute-validation-network output" {
@@ -315,22 +315,22 @@ EOF
     runs-on: ubuntu-latest
     steps:
       - run: |
-          exec {lock_fd}>/tmp/lancache-setup-cli-simulation.lock
+          exec {lock_fd}>/var/tmp/lancache-setup-cli-simulation.lock
           flock "$lock_fd"
           bash scripts/setup-cli-simulation.sh
 
-  dhcp-kea-lease-flow-simulation:
+  nats-auth-callout-simulation:
     needs: setup-cli-simulation
     runs-on: ubuntu-latest
     steps:
-      - run: bash scripts/dhcp-kea-lease-flow-simulation.sh
+      - run: bash scripts/nats-auth-callout-simulation.sh
 '
 
     run "$script" "$fixture_root"
     [ "$status" -eq 0 ]
     [[ "$output" == *"OK"* ]]
     [[ "$output" != *"setup-cli-simulation"* ]]
-    [[ "$output" != *"dhcp-kea-lease-flow-simulation"* ]]
+    [[ "$output" != *"nats-auth-callout-simulation"* ]]
 }
 
 @test "fails with a self-diagnostic when neither workflow file references the raw output at all" {

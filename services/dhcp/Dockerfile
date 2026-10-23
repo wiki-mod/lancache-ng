@@ -1,4 +1,4 @@
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Kea DHCP image: DHCPv4 server, control agent (API on :8000), and DHCP-DDNS
 # service for lancache-ng managed networks.

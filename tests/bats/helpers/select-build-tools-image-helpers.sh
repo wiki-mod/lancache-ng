@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Bats helper that loads scripts/select-build-tools-image.sh's
 # select_build_tools_trusted_fallback_allowed() function in isolation,

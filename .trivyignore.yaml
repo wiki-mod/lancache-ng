@@ -1,5 +1,5 @@
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
-# Trivy security scanner ignore list for accepted vulnerabilities with expiry dates
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# Trivy security scanner ignore list for accepted vulnerabilities (no expiry dates)
 vulnerabilities:
   - id: CVE-2026-34040
     paths:
@@ -162,12 +162,11 @@ vulnerabilities:
       never match and the finding would remain unsuppressed; scoping is
       instead inherent to the CVE ID itself, since every ID in this group of
       7 is curl/libcurl-specific in Trivy's own vulnerability database and
-      cannot match any other package. This is a time-boxed acceptance, not
-      an indefinite one: re-review on or before 2026-08-15 -- if trixie,
-      backports, or sid has shipped a fix for any of these 7 CVE IDs by
-      then, drop the corresponding entries and rebuild; if not, this
-      decision needs to be revisited (extend the acceptance, or migrate the
-      affected images off curl entirely). See issue #1304 for the
+      cannot match any other package. This acceptance has no date: it ends
+      as soon as trixie, backports, or sid ships a fix for any of these 7
+      CVE IDs -- then drop the corresponding entries and rebuild (the
+      alternative to waiting is to migrate the affected images off curl
+      entirely). See issue #1304 for the
       complete before/after Trivy evidence per image and the maintainer's
       recorded decision.
 
@@ -176,8 +175,7 @@ vulnerabilities:
       Accepted, tracked risk -- same curl/libcurl4t64 finding group as
       CVE-2026-12064 above (see that entry for the full background: affected
       images, the per-image usage/exploitability analysis, why no
-      `paths:` scoping is given for this finding class, and the 2026-08-15
-      re-review checkpoint). CVE-2026-8286 is an insecure-connection-
+      `paths:` scoping is given for this finding class, and the end condition). CVE-2026-8286 is an insecure-connection-
       establishment issue caused by a TLS configuration mismatch. Same
       `Status: affected`, `FixedVersion: None` (trixie, backports, sid) as of
       2026-07-30, same 5 confirmed-affected images (`services/proxy`,
@@ -189,8 +187,7 @@ vulnerabilities:
       Accepted, tracked risk -- same curl/libcurl4t64 finding group as
       CVE-2026-12064 above (see that entry for the full background: affected
       images, the per-image usage/exploitability analysis, why no
-      `paths:` scoping is given for this finding class, and the 2026-08-15
-      re-review checkpoint). CVE-2026-8927 is an information-disclosure
+      `paths:` scoping is given for this finding class, and the end condition). CVE-2026-8927 is an information-disclosure
       issue caused by proxy authentication state not being cleared between
       connections. Same `Status: affected`, `FixedVersion: None` (trixie,
       backports, sid) as of 2026-07-30, same 5 confirmed-affected images
@@ -202,8 +199,7 @@ vulnerabilities:
       Accepted, tracked risk -- same curl/libcurl4t64 finding group as
       CVE-2026-12064 above (see that entry for the full background: affected
       images, the per-image usage/exploitability analysis, why no
-      `paths:` scoping is given for this finding class, and the 2026-08-15
-      re-review checkpoint). CVE-2026-8932 is a security-feature-bypass
+      `paths:` scoping is given for this finding class, and the end condition). CVE-2026-8932 is a security-feature-bypass
       issue caused by improper mTLS connection reuse. Same `Status:
       affected`, `FixedVersion: None` (trixie, backports, sid) as of
       2026-07-30, same 5 confirmed-affected images (`services/proxy`,
@@ -215,8 +211,7 @@ vulnerabilities:
       Accepted, tracked risk -- same curl/libcurl4t64 finding group as
       CVE-2026-12064 above (see that entry for the full background: affected
       images, the per-image usage/exploitability analysis, why no
-      `paths:` scoping is given for this finding class, and the 2026-08-15
-      re-review checkpoint). CVE-2026-9079 is an information-disclosure
+      `paths:` scoping is given for this finding class, and the end condition). CVE-2026-9079 is an information-disclosure
       issue caused by failure to clear proxy authentication credentials.
       Same `Status: affected`, `FixedVersion: None` (trixie, backports, sid)
       as of 2026-07-30, same 5 confirmed-affected images (`services/proxy`,
@@ -228,8 +223,7 @@ vulnerabilities:
       Accepted, tracked risk -- same curl/libcurl4t64 finding group as
       CVE-2026-12064 above (see that entry for the full background: affected
       images, the per-image usage/exploitability analysis, why no
-      `paths:` scoping is given for this finding class, and the 2026-08-15
-      re-review checkpoint). CVE-2026-9080 is a use-after-free reachable via
+      `paths:` scoping is given for this finding class, and the end condition). CVE-2026-9080 is a use-after-free reachable via
       `curl_easy_pause()` inside a `CURLMOPT_SOCKETFUNCTION` callback -- a
       libcurl multi-interface callback API none of these 5 images' curl
       invocations ever use (each is a plain `curl` CLI call, not code
@@ -244,8 +238,7 @@ vulnerabilities:
       Accepted, tracked risk -- same curl/libcurl4t64 finding group as
       CVE-2026-12064 above (see that entry for the full background: affected
       images, the per-image usage/exploitability analysis, why no
-      `paths:` scoping is given for this finding class, and the 2026-08-15
-      re-review checkpoint). CVE-2026-9545 is an information-disclosure
+      `paths:` scoping is given for this finding class, and the end condition). CVE-2026-9545 is an information-disclosure
       issue via a cached SSL session and early data -- reachable only across
       a long-lived process reusing a session, which does not describe any
       of these 5 images' curl invocations: each is a short-lived,
@@ -280,13 +273,11 @@ vulnerabilities:
       XML-parsing trigger condition at all: `distcc-pump` exchanges this
       project's own internal build-farm protocol data between our own
       runners, not attacker-controlled XML from any external or untrusted
-      source, and no other tool in this image invokes XML parsing. This is
-      a time-boxed acceptance, not an indefinite one: re-review on or
-      before 2026-08-15 -- if trixie, backports, or sid has shipped a fix
-      for any of these 5 CVE IDs by then, drop the corresponding entries
-      and rebuild; if not, this decision needs to be revisited (extend the
-      acceptance, or investigate dropping `python3`/`distcc-pump`
-      entirely). No `paths:` scoping is given, matching this file's other
+      source, and no other tool in this image invokes XML parsing. This
+      acceptance has no date: it ends as soon as trixie, backports, or sid
+      ships a fix for any of these 5 CVE IDs -- then drop the corresponding
+      entries and rebuild (the alternative to waiting is to drop
+      `python3`/`distcc-pump` entirely). No `paths:` scoping is given, matching this file's other
       Debian-os-pkgs-class entries (see the curl group above for why a
       `paths:` value does not suppress this finding class). See issue
       #1314 for the complete before/after Trivy evidence and the
@@ -297,7 +288,7 @@ vulnerabilities:
       Accepted, tracked risk -- same libexpat finding group as
       CVE-2025-59375 above (see that entry for the full background:
       transitive-via-python3/distcc-pump provenance, why no `paths:`
-      scoping is given, and the 2026-08-15 re-review checkpoint).
+      scoping is given, and the end condition).
       CVE-2026-25210 is an integer overflow in buffer reallocation
       (`doContent`). Same `Status: affected`, `FixedVersion: None` (trixie,
       backports, sid) as of 2026-07-31, same single affected image
@@ -309,7 +300,7 @@ vulnerabilities:
       Accepted, tracked risk -- same libexpat finding group as
       CVE-2025-59375 above (see that entry for the full background:
       transitive-via-python3/distcc-pump provenance, why no `paths:`
-      scoping is given, and the 2026-08-15 re-review checkpoint).
+      scoping is given, and the end condition).
       CVE-2026-45186 is a denial-of-service via crafted XML input (an
       attribute-name collision check complexity issue). Same `Status:
       affected`, `FixedVersion: None` (trixie, backports, sid) as of
@@ -322,7 +313,7 @@ vulnerabilities:
       Accepted, tracked risk -- same libexpat finding group as
       CVE-2025-59375 above (see that entry for the full background:
       transitive-via-python3/distcc-pump provenance, why no `paths:`
-      scoping is given, and the 2026-08-15 re-review checkpoint).
+      scoping is given, and the end condition).
       CVE-2026-56131 is a use-after-free via `XML_ResumeParser` handler
       call depth tracking. Same `Status: affected`, `FixedVersion: None`
       (trixie, backports, sid) as of 2026-07-31, same single affected image
@@ -334,10 +325,500 @@ vulnerabilities:
       Accepted, tracked risk -- same libexpat finding group as
       CVE-2025-59375 above (see that entry for the full background:
       transitive-via-python3/distcc-pump provenance, why no `paths:`
-      scoping is given, and the 2026-08-15 re-review checkpoint).
+      scoping is given, and the end condition).
       CVE-2026-56408 is an integer overflow in `copyString`. Same `Status:
       affected`, `FixedVersion: None` (trixie, backports, sid) as of
       2026-07-31, same single affected image (`tools/build-tools`), same
       non-reachable usage (no untrusted XML input ever reaches libexpat in
       this image).
 
+
+  - id: CVE-2026-111943
+    paths:
+      - usr/local/bin/actionlint
+    statement: >-
+      Accepted, tracked risk (AG-KD-003, tool-specific, no deadline). The
+      finding is in the Go standard library (v1.26.1) embedded in the
+      official actionlint 1.7.12 release binary, which is the newest
+      actionlint release and the only source of this tool for the Debian
+      build-tools image (Debian ships no actionlint package, and compiling
+      it from source with a newer Go toolchain is what this image no longer
+      does). actionlint is a CI-only linter: it reads workflow files from
+      the checkout and prints findings, it opens no listening socket and
+      parses no network, e-mail or MIME input from outside the repository,
+      so the network, TLS, certificate, mail, XML and HTTP/2 code paths
+      named by the advisory are not reached with untrusted input. The
+      exception ends when an actionlint release built with a fixed Go
+      toolchain exists (or a Debian package does) and the pin in
+      tools/build-tools/Dockerfile is moved to it.
+
+  - id: CVE-2026-27145
+    paths:
+      - usr/local/bin/actionlint
+    statement: >-
+      Accepted, tracked risk (AG-KD-003, tool-specific, no deadline). The
+      finding is in the Go standard library (v1.26.1) embedded in the
+      official actionlint 1.7.12 release binary, which is the newest
+      actionlint release and the only source of this tool for the Debian
+      build-tools image (Debian ships no actionlint package, and compiling
+      it from source with a newer Go toolchain is what this image no longer
+      does). actionlint is a CI-only linter: it reads workflow files from
+      the checkout and prints findings, it opens no listening socket and
+      parses no network, e-mail or MIME input from outside the repository,
+      so the network, TLS, certificate, mail, XML and HTTP/2 code paths
+      named by the advisory are not reached with untrusted input. The
+      exception ends when an actionlint release built with a fixed Go
+      toolchain exists (or a Debian package does) and the pin in
+      tools/build-tools/Dockerfile is moved to it.
+
+  - id: CVE-2026-32280
+    paths:
+      - usr/local/bin/actionlint
+    statement: >-
+      Accepted, tracked risk (AG-KD-003, tool-specific, no deadline). The
+      finding is in the Go standard library (v1.26.1) embedded in the
+      official actionlint 1.7.12 release binary, which is the newest
+      actionlint release and the only source of this tool for the Debian
+      build-tools image (Debian ships no actionlint package, and compiling
+      it from source with a newer Go toolchain is what this image no longer
+      does). actionlint is a CI-only linter: it reads workflow files from
+      the checkout and prints findings, it opens no listening socket and
+      parses no network, e-mail or MIME input from outside the repository,
+      so the network, TLS, certificate, mail, XML and HTTP/2 code paths
+      named by the advisory are not reached with untrusted input. The
+      exception ends when an actionlint release built with a fixed Go
+      toolchain exists (or a Debian package does) and the pin in
+      tools/build-tools/Dockerfile is moved to it.
+
+  - id: CVE-2026-32281
+    paths:
+      - usr/local/bin/actionlint
+    statement: >-
+      Accepted, tracked risk (AG-KD-003, tool-specific, no deadline). The
+      finding is in the Go standard library (v1.26.1) embedded in the
+      official actionlint 1.7.12 release binary, which is the newest
+      actionlint release and the only source of this tool for the Debian
+      build-tools image (Debian ships no actionlint package, and compiling
+      it from source with a newer Go toolchain is what this image no longer
+      does). actionlint is a CI-only linter: it reads workflow files from
+      the checkout and prints findings, it opens no listening socket and
+      parses no network, e-mail or MIME input from outside the repository,
+      so the network, TLS, certificate, mail, XML and HTTP/2 code paths
+      named by the advisory are not reached with untrusted input. The
+      exception ends when an actionlint release built with a fixed Go
+      toolchain exists (or a Debian package does) and the pin in
+      tools/build-tools/Dockerfile is moved to it.
+
+  - id: CVE-2026-32283
+    paths:
+      - usr/local/bin/actionlint
+    statement: >-
+      Accepted, tracked risk (AG-KD-003, tool-specific, no deadline). The
+      finding is in the Go standard library (v1.26.1) embedded in the
+      official actionlint 1.7.12 release binary, which is the newest
+      actionlint release and the only source of this tool for the Debian
+      build-tools image (Debian ships no actionlint package, and compiling
+      it from source with a newer Go toolchain is what this image no longer
+      does). actionlint is a CI-only linter: it reads workflow files from
+      the checkout and prints findings, it opens no listening socket and
+      parses no network, e-mail or MIME input from outside the repository,
+      so the network, TLS, certificate, mail, XML and HTTP/2 code paths
+      named by the advisory are not reached with untrusted input. The
+      exception ends when an actionlint release built with a fixed Go
+      toolchain exists (or a Debian package does) and the pin in
+      tools/build-tools/Dockerfile is moved to it.
+
+  - id: CVE-2026-33810
+    paths:
+      - usr/local/bin/actionlint
+    statement: >-
+      Accepted, tracked risk (AG-KD-003, tool-specific, no deadline). The
+      finding is in the Go standard library (v1.26.1) embedded in the
+      official actionlint 1.7.12 release binary, which is the newest
+      actionlint release and the only source of this tool for the Debian
+      build-tools image (Debian ships no actionlint package, and compiling
+      it from source with a newer Go toolchain is what this image no longer
+      does). actionlint is a CI-only linter: it reads workflow files from
+      the checkout and prints findings, it opens no listening socket and
+      parses no network, e-mail or MIME input from outside the repository,
+      so the network, TLS, certificate, mail, XML and HTTP/2 code paths
+      named by the advisory are not reached with untrusted input. The
+      exception ends when an actionlint release built with a fixed Go
+      toolchain exists (or a Debian package does) and the pin in
+      tools/build-tools/Dockerfile is moved to it.
+
+  - id: CVE-2026-33811
+    paths:
+      - usr/local/bin/actionlint
+    statement: >-
+      Accepted, tracked risk (AG-KD-003, tool-specific, no deadline). The
+      finding is in the Go standard library (v1.26.1) embedded in the
+      official actionlint 1.7.12 release binary, which is the newest
+      actionlint release and the only source of this tool for the Debian
+      build-tools image (Debian ships no actionlint package, and compiling
+      it from source with a newer Go toolchain is what this image no longer
+      does). actionlint is a CI-only linter: it reads workflow files from
+      the checkout and prints findings, it opens no listening socket and
+      parses no network, e-mail or MIME input from outside the repository,
+      so the network, TLS, certificate, mail, XML and HTTP/2 code paths
+      named by the advisory are not reached with untrusted input. The
+      exception ends when an actionlint release built with a fixed Go
+      toolchain exists (or a Debian package does) and the pin in
+      tools/build-tools/Dockerfile is moved to it.
+
+  - id: CVE-2026-33814
+    paths:
+      - usr/local/bin/actionlint
+    statement: >-
+      Accepted, tracked risk (AG-KD-003, tool-specific, no deadline). The
+      finding is in the Go standard library (v1.26.1) embedded in the
+      official actionlint 1.7.12 release binary, which is the newest
+      actionlint release and the only source of this tool for the Debian
+      build-tools image (Debian ships no actionlint package, and compiling
+      it from source with a newer Go toolchain is what this image no longer
+      does). actionlint is a CI-only linter: it reads workflow files from
+      the checkout and prints findings, it opens no listening socket and
+      parses no network, e-mail or MIME input from outside the repository,
+      so the network, TLS, certificate, mail, XML and HTTP/2 code paths
+      named by the advisory are not reached with untrusted input. The
+      exception ends when an actionlint release built with a fixed Go
+      toolchain exists (or a Debian package does) and the pin in
+      tools/build-tools/Dockerfile is moved to it.
+
+  - id: CVE-2026-33818
+    paths:
+      - usr/local/bin/actionlint
+    statement: >-
+      Accepted, tracked risk (AG-KD-003, tool-specific, no deadline). The
+      finding is in the Go standard library (v1.26.1) embedded in the
+      official actionlint 1.7.12 release binary, which is the newest
+      actionlint release and the only source of this tool for the Debian
+      build-tools image (Debian ships no actionlint package, and compiling
+      it from source with a newer Go toolchain is what this image no longer
+      does). actionlint is a CI-only linter: it reads workflow files from
+      the checkout and prints findings, it opens no listening socket and
+      parses no network, e-mail or MIME input from outside the repository,
+      so the network, TLS, certificate, mail, XML and HTTP/2 code paths
+      named by the advisory are not reached with untrusted input. The
+      exception ends when an actionlint release built with a fixed Go
+      toolchain exists (or a Debian package does) and the pin in
+      tools/build-tools/Dockerfile is moved to it.
+
+  - id: CVE-2026-39820
+    paths:
+      - usr/local/bin/actionlint
+    statement: >-
+      Accepted, tracked risk (AG-KD-003, tool-specific, no deadline). The
+      finding is in the Go standard library (v1.26.1) embedded in the
+      official actionlint 1.7.12 release binary, which is the newest
+      actionlint release and the only source of this tool for the Debian
+      build-tools image (Debian ships no actionlint package, and compiling
+      it from source with a newer Go toolchain is what this image no longer
+      does). actionlint is a CI-only linter: it reads workflow files from
+      the checkout and prints findings, it opens no listening socket and
+      parses no network, e-mail or MIME input from outside the repository,
+      so the network, TLS, certificate, mail, XML and HTTP/2 code paths
+      named by the advisory are not reached with untrusted input. The
+      exception ends when an actionlint release built with a fixed Go
+      toolchain exists (or a Debian package does) and the pin in
+      tools/build-tools/Dockerfile is moved to it.
+
+  - id: CVE-2026-39821
+    paths:
+      - usr/local/bin/actionlint
+    statement: >-
+      Accepted, tracked risk (AG-KD-003, tool-specific, no deadline). The
+      finding is in the Go standard library (v1.26.1) embedded in the
+      official actionlint 1.7.12 release binary, which is the newest
+      actionlint release and the only source of this tool for the Debian
+      build-tools image (Debian ships no actionlint package, and compiling
+      it from source with a newer Go toolchain is what this image no longer
+      does). actionlint is a CI-only linter: it reads workflow files from
+      the checkout and prints findings, it opens no listening socket and
+      parses no network, e-mail or MIME input from outside the repository,
+      so the network, TLS, certificate, mail, XML and HTTP/2 code paths
+      named by the advisory are not reached with untrusted input. The
+      exception ends when an actionlint release built with a fixed Go
+      toolchain exists (or a Debian package does) and the pin in
+      tools/build-tools/Dockerfile is moved to it.
+
+  - id: CVE-2026-39822
+    paths:
+      - usr/local/bin/actionlint
+    statement: >-
+      Accepted, tracked risk (AG-KD-003, tool-specific, no deadline). The
+      finding is in the Go standard library (v1.26.1) embedded in the
+      official actionlint 1.7.12 release binary, which is the newest
+      actionlint release and the only source of this tool for the Debian
+      build-tools image (Debian ships no actionlint package, and compiling
+      it from source with a newer Go toolchain is what this image no longer
+      does). actionlint is a CI-only linter: it reads workflow files from
+      the checkout and prints findings, it opens no listening socket and
+      parses no network, e-mail or MIME input from outside the repository,
+      so the network, TLS, certificate, mail, XML and HTTP/2 code paths
+      named by the advisory are not reached with untrusted input. The
+      exception ends when an actionlint release built with a fixed Go
+      toolchain exists (or a Debian package does) and the pin in
+      tools/build-tools/Dockerfile is moved to it.
+
+  - id: CVE-2026-39836
+    paths:
+      - usr/local/bin/actionlint
+    statement: >-
+      Accepted, tracked risk (AG-KD-003, tool-specific, no deadline). The
+      finding is in the Go standard library (v1.26.1) embedded in the
+      official actionlint 1.7.12 release binary, which is the newest
+      actionlint release and the only source of this tool for the Debian
+      build-tools image (Debian ships no actionlint package, and compiling
+      it from source with a newer Go toolchain is what this image no longer
+      does). actionlint is a CI-only linter: it reads workflow files from
+      the checkout and prints findings, it opens no listening socket and
+      parses no network, e-mail or MIME input from outside the repository,
+      so the network, TLS, certificate, mail, XML and HTTP/2 code paths
+      named by the advisory are not reached with untrusted input. The
+      exception ends when an actionlint release built with a fixed Go
+      toolchain exists (or a Debian package does) and the pin in
+      tools/build-tools/Dockerfile is moved to it.
+
+  - id: CVE-2026-42499
+    paths:
+      - usr/local/bin/actionlint
+    statement: >-
+      Accepted, tracked risk (AG-KD-003, tool-specific, no deadline). The
+      finding is in the Go standard library (v1.26.1) embedded in the
+      official actionlint 1.7.12 release binary, which is the newest
+      actionlint release and the only source of this tool for the Debian
+      build-tools image (Debian ships no actionlint package, and compiling
+      it from source with a newer Go toolchain is what this image no longer
+      does). actionlint is a CI-only linter: it reads workflow files from
+      the checkout and prints findings, it opens no listening socket and
+      parses no network, e-mail or MIME input from outside the repository,
+      so the network, TLS, certificate, mail, XML and HTTP/2 code paths
+      named by the advisory are not reached with untrusted input. The
+      exception ends when an actionlint release built with a fixed Go
+      toolchain exists (or a Debian package does) and the pin in
+      tools/build-tools/Dockerfile is moved to it.
+
+  - id: CVE-2026-42504
+    paths:
+      - usr/local/bin/actionlint
+    statement: >-
+      Accepted, tracked risk (AG-KD-003, tool-specific, no deadline). The
+      finding is in the Go standard library (v1.26.1) embedded in the
+      official actionlint 1.7.12 release binary, which is the newest
+      actionlint release and the only source of this tool for the Debian
+      build-tools image (Debian ships no actionlint package, and compiling
+      it from source with a newer Go toolchain is what this image no longer
+      does). actionlint is a CI-only linter: it reads workflow files from
+      the checkout and prints findings, it opens no listening socket and
+      parses no network, e-mail or MIME input from outside the repository,
+      so the network, TLS, certificate, mail, XML and HTTP/2 code paths
+      named by the advisory are not reached with untrusted input. The
+      exception ends when an actionlint release built with a fixed Go
+      toolchain exists (or a Debian package does) and the pin in
+      tools/build-tools/Dockerfile is moved to it.
+
+  - id: CVE-2026-46600
+    paths:
+      - usr/local/bin/actionlint
+    statement: >-
+      Accepted, tracked risk (AG-KD-003, tool-specific, no deadline). The
+      finding is in the Go standard library (v1.26.1) embedded in the
+      official actionlint 1.7.12 release binary, which is the newest
+      actionlint release and the only source of this tool for the Debian
+      build-tools image (Debian ships no actionlint package, and compiling
+      it from source with a newer Go toolchain is what this image no longer
+      does). actionlint is a CI-only linter: it reads workflow files from
+      the checkout and prints findings, it opens no listening socket and
+      parses no network, e-mail or MIME input from outside the repository,
+      so the network, TLS, certificate, mail, XML and HTTP/2 code paths
+      named by the advisory are not reached with untrusted input. The
+      exception ends when an actionlint release built with a fixed Go
+      toolchain exists (or a Debian package does) and the pin in
+      tools/build-tools/Dockerfile is moved to it.
+
+  - id: CVE-2026-56853
+    paths:
+      - usr/local/bin/actionlint
+    statement: >-
+      Accepted, tracked risk (AG-KD-003, tool-specific, no deadline). The
+      finding is in the Go standard library (v1.26.1) embedded in the
+      official actionlint 1.7.12 release binary, which is the newest
+      actionlint release and the only source of this tool for the Debian
+      build-tools image (Debian ships no actionlint package, and compiling
+      it from source with a newer Go toolchain is what this image no longer
+      does). actionlint is a CI-only linter: it reads workflow files from
+      the checkout and prints findings, it opens no listening socket and
+      parses no network, e-mail or MIME input from outside the repository,
+      so the network, TLS, certificate, mail, XML and HTTP/2 code paths
+      named by the advisory are not reached with untrusted input. The
+      exception ends when an actionlint release built with a fixed Go
+      toolchain exists (or a Debian package does) and the pin in
+      tools/build-tools/Dockerfile is moved to it.
+
+  - id: CVE-2026-56858
+    paths:
+      - usr/local/bin/actionlint
+    statement: >-
+      Accepted, tracked risk (AG-KD-003, tool-specific, no deadline). The
+      finding is in the Go standard library (v1.26.1) embedded in the
+      official actionlint 1.7.12 release binary, which is the newest
+      actionlint release and the only source of this tool for the Debian
+      build-tools image (Debian ships no actionlint package, and compiling
+      it from source with a newer Go toolchain is what this image no longer
+      does). actionlint is a CI-only linter: it reads workflow files from
+      the checkout and prints findings, it opens no listening socket and
+      parses no network, e-mail or MIME input from outside the repository,
+      so the network, TLS, certificate, mail, XML and HTTP/2 code paths
+      named by the advisory are not reached with untrusted input. The
+      exception ends when an actionlint release built with a fixed Go
+      toolchain exists (or a Debian package does) and the pin in
+      tools/build-tools/Dockerfile is moved to it.
+
+  - id: CVE-2026-56859
+    paths:
+      - usr/local/bin/actionlint
+    statement: >-
+      Accepted, tracked risk (AG-KD-003, tool-specific, no deadline). The
+      finding is in the Go standard library (v1.26.1) embedded in the
+      official actionlint 1.7.12 release binary, which is the newest
+      actionlint release and the only source of this tool for the Debian
+      build-tools image (Debian ships no actionlint package, and compiling
+      it from source with a newer Go toolchain is what this image no longer
+      does). actionlint is a CI-only linter: it reads workflow files from
+      the checkout and prints findings, it opens no listening socket and
+      parses no network, e-mail or MIME input from outside the repository,
+      so the network, TLS, certificate, mail, XML and HTTP/2 code paths
+      named by the advisory are not reached with untrusted input. The
+      exception ends when an actionlint release built with a fixed Go
+      toolchain exists (or a Debian package does) and the pin in
+      tools/build-tools/Dockerfile is moved to it.
+
+  - id: CVE-2026-56860
+    paths:
+      - usr/local/bin/actionlint
+    statement: >-
+      Accepted, tracked risk (AG-KD-003, tool-specific, no deadline). The
+      finding is in the Go standard library (v1.26.1) embedded in the
+      official actionlint 1.7.12 release binary, which is the newest
+      actionlint release and the only source of this tool for the Debian
+      build-tools image (Debian ships no actionlint package, and compiling
+      it from source with a newer Go toolchain is what this image no longer
+      does). actionlint is a CI-only linter: it reads workflow files from
+      the checkout and prints findings, it opens no listening socket and
+      parses no network, e-mail or MIME input from outside the repository,
+      so the network, TLS, certificate, mail, XML and HTTP/2 code paths
+      named by the advisory are not reached with untrusted input. The
+      exception ends when an actionlint release built with a fixed Go
+      toolchain exists (or a Debian package does) and the pin in
+      tools/build-tools/Dockerfile is moved to it.
+
+  - id: CVE-2026-56862
+    paths:
+      - usr/local/bin/actionlint
+    statement: >-
+      Accepted, tracked risk (AG-KD-003, tool-specific, no deadline). The
+      finding is in the Go standard library (v1.26.1) embedded in the
+      official actionlint 1.7.12 release binary, which is the newest
+      actionlint release and the only source of this tool for the Debian
+      build-tools image (Debian ships no actionlint package, and compiling
+      it from source with a newer Go toolchain is what this image no longer
+      does). actionlint is a CI-only linter: it reads workflow files from
+      the checkout and prints findings, it opens no listening socket and
+      parses no network, e-mail or MIME input from outside the repository,
+      so the network, TLS, certificate, mail, XML and HTTP/2 code paths
+      named by the advisory are not reached with untrusted input. The
+      exception ends when an actionlint release built with a fixed Go
+      toolchain exists (or a Debian package does) and the pin in
+      tools/build-tools/Dockerfile is moved to it.
+
+  - id: CVE-2026-78667
+    paths:
+      - usr/local/bin/actionlint
+    statement: >-
+      Accepted, tracked risk (AG-KD-003, tool-specific, no deadline). The
+      finding is in the Go standard library (v1.26.1) embedded in the
+      official actionlint 1.7.12 release binary, which is the newest
+      actionlint release and the only source of this tool for the Debian
+      build-tools image (Debian ships no actionlint package, and compiling
+      it from source with a newer Go toolchain is what this image no longer
+      does). actionlint is a CI-only linter: it reads workflow files from
+      the checkout and prints findings, it opens no listening socket and
+      parses no network, e-mail or MIME input from outside the repository,
+      so the network, TLS, certificate, mail, XML and HTTP/2 code paths
+      named by the advisory are not reached with untrusted input. The
+      exception ends when an actionlint release built with a fixed Go
+      toolchain exists (or a Debian package does) and the pin in
+      tools/build-tools/Dockerfile is moved to it.
+
+  - id: CVE-2026-78669
+    paths:
+      - usr/local/bin/actionlint
+    statement: >-
+      Accepted, tracked risk (AG-KD-003, tool-specific, no deadline). The
+      finding is in the Go standard library (v1.26.1) embedded in the
+      official actionlint 1.7.12 release binary, which is the newest
+      actionlint release and the only source of this tool for the Debian
+      build-tools image (Debian ships no actionlint package, and compiling
+      it from source with a newer Go toolchain is what this image no longer
+      does). actionlint is a CI-only linter: it reads workflow files from
+      the checkout and prints findings, it opens no listening socket and
+      parses no network, e-mail or MIME input from outside the repository,
+      so the network, TLS, certificate, mail, XML and HTTP/2 code paths
+      named by the advisory are not reached with untrusted input. The
+      exception ends when an actionlint release built with a fixed Go
+      toolchain exists (or a Debian package does) and the pin in
+      tools/build-tools/Dockerfile is moved to it.
+
+  - id: CVE-2026-97031
+    paths:
+      - usr/local/bin/actionlint
+    statement: >-
+      Accepted, tracked risk (AG-KD-003, tool-specific, no deadline). The
+      finding is in the Go standard library (v1.26.1) embedded in the
+      official actionlint 1.7.12 release binary, which is the newest
+      actionlint release and the only source of this tool for the Debian
+      build-tools image (Debian ships no actionlint package, and compiling
+      it from source with a newer Go toolchain is what this image no longer
+      does). actionlint is a CI-only linter: it reads workflow files from
+      the checkout and prints findings, it opens no listening socket and
+      parses no network, e-mail or MIME input from outside the repository,
+      so the network, TLS, certificate, mail, XML and HTTP/2 code paths
+      named by the advisory are not reached with untrusted input. The
+      exception ends when an actionlint release built with a fixed Go
+      toolchain exists (or a Debian package does) and the pin in
+      tools/build-tools/Dockerfile is moved to it.
+
+  - id: CVE-2026-17106
+    paths:
+      - usr/local/lib/docker/cli-plugins/docker-buildx
+    statement: >-
+      github.com/moby/go-archive v0.2.0 (fixed in 0.3.0).
+      Accepted, tracked risk (AG-KD-003, tool-specific, no deadline). The
+      finding is in a Go module vendored into the official docker buildx
+      v0.38.1 release binary (the newest buildx release; the Debian
+      docker-buildx package is 0.13.1 and lacks `imagetools create
+      --prefer-index`, which promote and the build-tools workflow call).
+      The fixed module version is out, but no buildx release contains it
+      yet. buildx runs as a short-lived CLI plugin in CI against
+      registries this project controls; it is not exposed to untrusted
+      network input as a server. The exception ends when a buildx release
+      with the fixed module exists and the pin in
+      tools/build-tools/Dockerfile is moved to it.
+
+  - id: CVE-2026-78669
+    paths:
+      - usr/local/lib/docker/cli-plugins/docker-buildx
+    statement: >-
+      golang.org/x/net v0.59.0 (fixed in 0.60.0).
+      Accepted, tracked risk (AG-KD-003, tool-specific, no deadline). The
+      finding is in a Go module vendored into the official docker buildx
+      v0.38.1 release binary (the newest buildx release; the Debian
+      docker-buildx package is 0.13.1 and lacks `imagetools create
+      --prefer-index`, which promote and the build-tools workflow call).
+      The fixed module version is out, but no buildx release contains it
+      yet. buildx runs as a short-lived CLI plugin in CI against
+      registries this project controls; it is not exposed to untrusted
+      network input as a server. The exception ends when a buildx release
+      with the fixed module exists and the pin in
+      tools/build-tools/Dockerfile is moved to it.

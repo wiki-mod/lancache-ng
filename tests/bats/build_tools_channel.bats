@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Regression tests for scripts/lib/build-tools-channel.sh's
 # resolve_build_tools_channel (issue #1153, follow-through of #1142/#825): the

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # CI guard against a specific #822 recurrence shape: the service list that
 # drives multi-platform manifest merge, channel promotion, and release is
 # hardcoded as several independent `services=(...)` bash arrays inside
@@ -35,12 +35,6 @@
 #     that must equal the full canonical set (its own comment: "Every
 #     service build-push.yml's build/build-arm64 jobs can push a PR staging
 #     tag for").
-#   - .github/workflows/backfill-stack-latest.yml: a `services=(...)` copy
-#     that is a deliberate, documented SUBSET excluding build-tools (its own
-#     comment: "Product stack latest backfill intentionally excludes
-#     build-tools"). Named `services=`, not `full_setup_services=`, but
-#     semantically the same subset relationship -- see
-#     SUBSET_SERVICES_FILES below.
 #   - scripts/ensure-pr-staging-images.sh: a `full_setup_services=(...)`
 #     copy -- see FULL_SETUP_EXACT_EXCLUSIONS below.
 # All three are checked against the SAME canonical set derived from
@@ -79,7 +73,6 @@ else
     workflow=".github/workflows/build-push.yml"
     extra_files=(
         ".github/workflows/gc-pr-staging-images.yml"
-        ".github/workflows/backfill-stack-latest.yml"
         "scripts/ensure-pr-staging-images.sh"
     )
 fi
@@ -140,42 +133,18 @@ canonical_minus() {
     comm -23 <(printf '%s\n' "$canonical") <(printf '%s\n' "$1" | sort -u)
 }
 
-# Files where a `services=(...)` array is a deliberate, documented SUBSET of
-# the canonical set rather than the full build matrix -- unlike every
-# `services=(...)` copy inside build-push.yml itself (and inside
-# gc-pr-staging-images.yml), which must always equal the full set. Keyed by
-# basename so this stays readable regardless of a file's full path. The value
-# is the EXACT, documented exclusion set (newline-separated), not just a
-# boolean flag: checking only "no phantom members" would accept a real
-# service silently being DROPPED from the array too, which is exactly the
-# #822 failure mode this whole guard exists to catch -- a subset check must
-# still assert equality against the one specific expected subset, not "any
-# subset at all." Each entry here must be backed by that file's own inline
-# comment explaining the intentional exclusion (see backfill-stack-latest.yml's
-# "Product stack latest backfill intentionally excludes build-tools" comment).
-declare -A SUBSET_SERVICES_FILES=(
-    ["backfill-stack-latest.yml"]="build-tools"
-)
-
-# Checks every `services=(...)` array in $1. Equal-to-canonical by default;
-# equal-to-(canonical-minus-exclusions) for files listed in
-# SUBSET_SERVICES_FILES above. $2 ("required" or "optional") controls whether
+# Checks that every `services=(...)` array in $1 equals the canonical set. $2 ("required" or "optional") controls whether
 # finding zero arrays in this file is itself a failure: "required" for files
 # where a `services=(...)` array is known to always exist (build-push.yml,
-# gc-pr-staging-images.yml, backfill-stack-latest.yml) so a rename/refactor
+# gc-pr-staging-images.yml) so a rename/refactor
 # that silently removes it is caught; "optional" for files that legitimately
 # never declare one (e.g. ensure-pr-staging-images.sh only has
 # full_setup_services=(...), checked separately below).
 check_services_arrays() {
-    local file="$1" requirement="$2" file_basename lineno content elements entry
+    local file="$1" requirement="$2" lineno content elements entry
     local -a entries
     local expected expected_oneline
-    file_basename=$(basename "$file")
-    if [[ -n "${SUBSET_SERVICES_FILES[$file_basename]:-}" ]]; then
-        expected=$(canonical_minus "${SUBSET_SERVICES_FILES[$file_basename]}")
-    else
-        expected="$canonical"
-    fi
+    expected="$canonical"
     expected_oneline=$(printf '%s' "$expected" | tr '\n' ' ')
 
     # `[[:space:]]*` (zero or more), not `+`: build-push.yml's copies are
@@ -208,8 +177,7 @@ check_services_arrays() {
 }
 
 # Files where full_setup_services=(...) must equal canonical minus a KNOWN,
-# EXACT exclusion set (not just "no phantom members") -- same reasoning as
-# SUBSET_SERVICES_FILES above: membership-only checking would silently accept
+# EXACT exclusion set (not just "no phantom members"): membership-only checking would silently accept
 # a real service being dropped. Scoped to ensure-pr-staging-images.sh. Before
 # #1296 (2026-07-30), its full_setup_services=(...) exclusion set mirrored
 # build-push.yml's own full_setup_services=(...) exactly (both represented
@@ -306,7 +274,7 @@ check_full_setup_arrays() {
 }
 
 # Per-extra-file expectation of which array kind each file must declare at
-# least one of (basename-keyed, same reasoning as SUBSET_SERVICES_FILES
+# least one of (basename-keyed, same reasoning as REQUIRES_FULL_SETUP_ARRAY
 # above). This is what lets check_services_arrays/check_full_setup_arrays
 # fail closed per file instead of either over-requiring (e.g. demanding
 # ensure-pr-staging-images.sh have a services=(...) array it never had) or
@@ -314,7 +282,6 @@ check_full_setup_arrays() {
 # should always have it).
 declare -A REQUIRES_SERVICES_ARRAY=(
     ["gc-pr-staging-images.yml"]=1
-    ["backfill-stack-latest.yml"]=1
 )
 declare -A REQUIRES_FULL_SETUP_ARRAY=(
     ["ensure-pr-staging-images.sh"]=1

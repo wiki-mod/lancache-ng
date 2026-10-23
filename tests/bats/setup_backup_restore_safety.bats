@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Coverage for the six #669 backup/restore safety gaps fixed in this change,
 # driving the real setup.sh functions (compose_project_name,

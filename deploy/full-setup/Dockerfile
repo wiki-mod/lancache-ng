@@ -1,4 +1,4 @@
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # Full-setup validation image: provides deterministic, offline-capable
 # validation harness for testing the complete stack composition workflow.
 # Used only for validation, not production deployment.

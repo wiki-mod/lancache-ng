@@ -1,5 +1,5 @@
 #!/bin/bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Pure (Docker-free, registry-free) helpers for deciding WHICH image tag the
 # full-setup deep validation suite should test, and whether a PR is eligible

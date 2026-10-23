@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Bats helper that loads setup.sh's reset-to-last-known-good-config family --
 # cmd_reset_to_last_known_good_config(), list_kea_snapshot_ids(),

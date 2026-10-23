@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Standing guard for issue #896: #820 ported the flock+retry collision-safe
 # reservation (issue #703) into every full-setup-validate.yml/full-setup-

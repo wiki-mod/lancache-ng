@@ -1,4 +1,4 @@
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Auto-labels pull requests by changed file paths, using .github/labeler.yml.
 # Reduces the manual labeling burden from AG-GH-008 but does not eliminate
@@ -18,5 +18,6 @@ jobs:
   labeler:
     name: Apply path-based labels
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/labeler@bf12e9b00b37c5c0ca2b87b79b2daf7891dbda13 # v7.0.0

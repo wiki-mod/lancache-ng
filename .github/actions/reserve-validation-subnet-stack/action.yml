@@ -1,4 +1,4 @@
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # Composite action: reserve a collision-free /27 validation subnet (host-local
 # flock + retry loop) and start the full-setup validation stack with it.
 #
@@ -52,7 +52,7 @@ inputs:
   lock-root:
     description: Host-local directory holding the per-slot flock files.
     required: false
-    default: /tmp/lancache-validation-locks
+    default: /var/tmp/lancache-validation-locks
   ghcr-retry-username:
     description: >-
       Optional. When set together with ghcr-retry-password, the validation-image

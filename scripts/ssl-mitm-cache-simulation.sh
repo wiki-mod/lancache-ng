@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 #
 # Real DNS/HTTP/HTTPS caching test against a genuinely fetchable target
 # (issue #597, part of #557 scenario 1). Game CDN domains in cdn-domains.txt
@@ -166,7 +166,7 @@ if ! proxy_cid="$("${compose[@]}" ps -q proxy)"; then
 fi
 docker cp "$proxy_cid:/etc/nginx/ssl/ca/ca.crt" "$work_dir/ca.crt"
 
-# Each call is a brand new --rm container, so /tmp inside it never survives
+# Each call is a brand new --rm container, so /var/tmp inside it never survives
 # past that one call -- confirmed directly: comparing files written by two
 # separate run_client calls always "failed" because neither file existed in
 # either of the (also separate) containers doing the comparing. /shared is
