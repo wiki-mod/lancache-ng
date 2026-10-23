@@ -77,7 +77,7 @@ jobs:
     if: inputs.should_run == 'true'
     # Stays light (not a stack-driving job): pure subnet/IP derivation via a
     # composite action, no Docker/compose stack of its own.
-    runs-on: [self-hosted, linux, lancache, lancache-light]
+    runs-on: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && fromJSON('["self-hosted", "linux", "lancache", "lancache-light"]') || 'ubuntu-latest' }}
     timeout-minutes: 45
     outputs:
       subnet: ${{ steps.derive.outputs.subnet }}
@@ -111,7 +111,7 @@ jobs:
       inputs.should_run == 'true' &&
       needs['compute-validation-network'].result != 'failure' &&
       needs['compute-validation-network'].result != 'cancelled'
-    runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    runs-on: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && fromJSON('["self-hosted", "linux", "lancache", "lancache-heavy"]') || 'ubuntu-latest' }}
     timeout-minutes: 45
     env:
       LANCACHE_IMAGE_TAG: ${{ inputs.image_tag }}
@@ -214,7 +214,7 @@ jobs:
       inputs.should_run == 'true' &&
       needs['compute-validation-network'].result != 'failure' &&
       needs['compute-validation-network'].result != 'cancelled'
-    runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    runs-on: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && fromJSON('["self-hosted", "linux", "lancache", "lancache-heavy"]') || 'ubuntu-latest' }}
     timeout-minutes: 45
     env:
       LANCACHE_IMAGE_TAG: ${{ inputs.image_tag }}
@@ -312,7 +312,7 @@ jobs:
       inputs.should_run == 'true' &&
       needs['compute-validation-network'].result != 'failure' &&
       needs['compute-validation-network'].result != 'cancelled'
-    runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    runs-on: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && fromJSON('["self-hosted", "linux", "lancache", "lancache-heavy"]') || 'ubuntu-latest' }}
     timeout-minutes: 45
     env:
       LANCACHE_IMAGE_TAG: ${{ inputs.image_tag }}
@@ -406,7 +406,7 @@ jobs:
     # ui-nats-dns-integration-simulation instead.
     needs: [ui-nats-dns-integration-simulation]
     if: always() && inputs.should_run == 'true'
-    runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    runs-on: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && fromJSON('["self-hosted", "linux", "lancache", "lancache-heavy"]') || 'ubuntu-latest' }}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -504,7 +504,7 @@ jobs:
       inputs.should_run == 'true' &&
       needs['compute-validation-network'].result != 'failure' &&
       needs['compute-validation-network'].result != 'cancelled'
-    runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    runs-on: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && fromJSON('["self-hosted", "linux", "lancache", "lancache-heavy"]') || 'ubuntu-latest' }}
     timeout-minutes: 45
     env:
       LANCACHE_IMAGE_TAG: ${{ inputs.image_tag }}
@@ -574,7 +574,7 @@ jobs:
       inputs.should_run == 'true' &&
       needs['compute-validation-network'].result != 'failure' &&
       needs['compute-validation-network'].result != 'cancelled'
-    runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    runs-on: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && fromJSON('["self-hosted", "linux", "lancache", "lancache-heavy"]') || 'ubuntu-latest' }}
     timeout-minutes: 45
     env:
       LANCACHE_IMAGE_TAG: ${{ inputs.image_tag }}
@@ -661,7 +661,7 @@ jobs:
       inputs.should_run == 'true' &&
       needs['compute-validation-network'].result != 'failure' &&
       needs['compute-validation-network'].result != 'cancelled'
-    runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    runs-on: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && fromJSON('["self-hosted", "linux", "lancache", "lancache-heavy"]') || 'ubuntu-latest' }}
     timeout-minutes: 45
     env:
       LANCACHE_IMAGE_TAG: ${{ inputs.image_tag }}

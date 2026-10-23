@@ -70,7 +70,7 @@ jobs:
     name: install-smoke (published channel)
     # heavy, not light: this job builds and brings up the full production
     # stack against a published channel image, not just planning/polling.
-    runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    runs-on: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && fromJSON('["self-hosted", "linux", "lancache", "lancache-heavy"]') || 'ubuntu-latest' }}
     timeout-minutes: 45
     env:
       LANCACHE_IMAGE_REGISTRY: ghcr.io

@@ -31,7 +31,7 @@ env:
   # Host temp files go to disk: /tmp is a small tmpfs on some runners and
   # trivy alone writes 5 to 8 GB of image export there (run 39765669925).
   TMPDIR: /var/tmp
-  CARGO_BUILD_JOBS: ${{ vars.CARGO_BUILD_JOBS }}
+  CARGO_BUILD_JOBS: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && vars.CARGO_BUILD_JOBS || '' }}
 
 defaults:
   run:
@@ -61,7 +61,7 @@ jobs:
     # blocks a required check" trap) cannot strand a PR in a perpetually-pending state.
     name: detect changed paths (CodeQL rust relevance)
     if: github.event_name == 'pull_request' || github.event_name == 'push'
-    runs-on: [self-hosted, linux, lancache, lancache-light]
+    runs-on: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && fromJSON('["self-hosted", "linux", "lancache", "lancache-light"]') || 'ubuntu-latest' }}
     # Real runs: a git diff plus one classify-image-impact.sh invocation,
     # comparable to build-push.yml's own detect-changes job (6-17s there).
     # Same generous 15-minute floor that job's comment explains.
@@ -157,7 +157,7 @@ jobs:
     # Run advanced CodeQL on repository-owned runners to avoid GitHub-hosted minutes.
     # CodeQL can compile Rust and is memory-heavy enough to avoid the light runner tier.
     # Repository default setup must be disabled in GitHub Security settings before SARIF upload.
-    runs-on: [self-hosted, linux, lancache, codeql, lancache-heavy]
+    runs-on: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && fromJSON('["self-hosted", "linux", "lancache", "codeql", "lancache-heavy"]') || 'ubuntu-latest' }}
     timeout-minutes: 120
     needs: detect-changes
     # `always()` is required here: GitHub implicitly ANDs any custom job
@@ -242,11 +242,11 @@ jobs:
           }}
         uses: ./.github/actions/configure-rust-sccache
         with:
-          mode: ${{ vars.SCCACHE_REDIS_MODE }}
-          redis-url: ${{ secrets.SCCACHE_REDIS_URL }}
+          mode: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && vars.SCCACHE_REDIS_MODE || 'off' }}
+          redis-url: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && secrets.SCCACHE_REDIS_URL || '' }}
           key-prefix: lancache-codeql-${{ matrix.language }}
-          dist-scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
-          dist-auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
+          dist-scheduler-url: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && vars.SCCACHE_DIST_SCHEDULER_URL || '' }}
+          dist-auth-token: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && secrets.SCCACHE_DIST_AUTH_TOKEN || '' }}
       - name: Initialize CodeQL
         # 'actions' always analyzes; 'rust' only when Rust is actually relevant
         # (or on schedule/dispatch where detect-changes is skipped).

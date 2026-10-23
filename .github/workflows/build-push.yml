@@ -147,7 +147,7 @@ env:
   # Host temp files go to disk: /tmp is a small tmpfs on some runners and
   # trivy alone writes 5 to 8 GB of image export there (run 39765669925).
   TMPDIR: /var/tmp
-  CARGO_BUILD_JOBS: ${{ vars.CARGO_BUILD_JOBS }}
+  CARGO_BUILD_JOBS: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && vars.CARGO_BUILD_JOBS || '' }}
   DOCKER_METADATA_SHORT_SHA_LENGTH: "7"
   RELEASE_PLATFORMS: linux/amd64,linux/arm64
   RUST_ACCELERATION_NETWORK: bridge
@@ -188,7 +188,7 @@ jobs:
   detect-changes:
     name: detect changed paths
     if: github.event_name == 'pull_request' || github.event_name == 'push'
-    runs-on: [self-hosted, linux, lancache, lancache-light]
+    runs-on: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && fromJSON('["self-hosted", "linux", "lancache", "lancache-light"]') || 'ubuntu-latest' }}
     # Real recent runs (30+ samples across pull_request/push events, 2026-07):
     # this job's own git-diff/classify-image-impact.sh work completes in
     # 6-17s. 15 minutes is a generous, round floor (not derived by scaling
@@ -269,7 +269,7 @@ jobs:
   # one `git ls-remote`.
   push-supersession-check:
     name: check for a newer push already superseding this one
-    runs-on: [self-hosted, linux, lancache, lancache-light]
+    runs-on: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && fromJSON('["self-hosted", "linux", "lancache", "lancache-light"]') || 'ubuntu-latest' }}
     timeout-minutes: 15
     outputs:
       superseded: ${{ steps.check.outputs.superseded }}
@@ -320,7 +320,7 @@ jobs:
     # Cheap repository hygiene gate. It runs before expensive Rust/image work so
     # generated files and hand-written scripts keep the expected project header.
     name: file purpose headers
-    runs-on: [self-hosted, linux, lancache, lancache-light]
+    runs-on: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && fromJSON('["self-hosted", "linux", "lancache", "lancache-light"]') || 'ubuntu-latest' }}
     # Real runs: 8-10s. Same 15-minute floor as detect-changes above (see its
     # comment) -- generous relative to real observed duration, not tight.
     timeout-minutes: 15
@@ -361,7 +361,7 @@ jobs:
     # dependency of its own, so it runs directly on a light runner rather
     # than waiting on validate-compose's image selection.
     name: compose healthchecks
-    runs-on: [self-hosted, linux, lancache, lancache-light]
+    runs-on: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && fromJSON('["self-hosted", "linux", "lancache", "lancache-light"]') || 'ubuntu-latest' }}
     # Real runs expected in the same 8-15s range as file-headers (a single
     # bash script scanning ~4 compose files). Same generous 15-minute floor
     # as detect-changes above.
@@ -387,7 +387,7 @@ jobs:
   pr-template-check:
     name: PR template validation
     if: github.event_name == 'pull_request'
-    runs-on: [self-hosted, linux, lancache, lancache-light]
+    runs-on: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && fromJSON('["self-hosted", "linux", "lancache", "lancache-light"]') || 'ubuntu-latest' }}
     # Real runs: 8-12s (one live `gh pr view` call + a bash script). Same
     # 15-minute floor as detect-changes above.
     timeout-minutes: 15
@@ -437,7 +437,7 @@ jobs:
     name: PR tracking metadata (labels/milestone/project)
     if: github.event_name == 'pull_request'
     needs: validate-compose
-    runs-on: [self-hosted, linux, lancache, lancache-light]
+    runs-on: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && fromJSON('["self-hosted", "linux", "lancache", "lancache-light"]') || 'ubuntu-latest' }}
     # Real runs: 8-12s (gh pr view calls + one docker run of the build-tools
     # image). Same 15-minute floor as detect-changes above.
     timeout-minutes: 15
@@ -584,7 +584,7 @@ jobs:
     name: PR title Conventional-Commit lint
     if: github.event_name == 'pull_request'
     needs: validate-compose
-    runs-on: [self-hosted, linux, lancache, lancache-light]
+    runs-on: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && fromJSON('["self-hosted", "linux", "lancache", "lancache-light"]') || 'ubuntu-latest' }}
     # Real runs: 7-10s. Same 15-minute floor as detect-changes above.
     timeout-minutes: 15
     permissions:
@@ -665,7 +665,7 @@ jobs:
     # exact required-check name.
     name: line endings
     needs: validate-compose
-    runs-on: [self-hosted, linux, lancache, lancache-light]
+    runs-on: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && fromJSON('["self-hosted", "linux", "lancache", "lancache-light"]') || 'ubuntu-latest' }}
     # Real runs of the original line-ending check alone: 7-11s. Raised from
     # the 15-minute floor to 25 minutes (#1245) to match what `shellcheck`
     # budgeted for the same governance-guardrails/changelog-warn steps
@@ -825,7 +825,7 @@ jobs:
     # property AG-REL-001 wants enforced.
     name: language policy
     needs: validate-compose
-    runs-on: [self-hosted, linux, lancache, lancache-light]
+    runs-on: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && fromJSON('["self-hosted", "linux", "lancache", "lancache-light"]') || 'ubuntu-latest' }}
     # Real runs: a few seconds (pure git ls-files + case-statement scan).
     # Same 15-minute floor as detect-changes above.
     timeout-minutes: 15
@@ -885,7 +885,7 @@ jobs:
           needs['detect-changes'].outputs.docs_only != 'true'
         )
       }}
-    runs-on: [self-hosted, linux, lancache, lancache-light]
+    runs-on: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && fromJSON('["self-hosted", "linux", "lancache", "lancache-light"]') || 'ubuntu-latest' }}
     # Real full-job runs: 30-85s. Must exceed the "Run ShellCheck and
     # ActionLint" step's own 15-minute timeout below (a job-level bound
     # tighter than a step it contains would fail the job before that step's
@@ -1058,7 +1058,7 @@ jobs:
     # This job is the lightweight project-wide gate. It validates compose/setup
     # contracts and exports one smoke-tested build-tools image reference for all
     # downstream jobs, so later jobs do not independently select mutable tags.
-    runs-on: [self-hosted, linux, lancache, lancache-light]
+    runs-on: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && fromJSON('["self-hosted", "linux", "lancache", "lancache-light"]') || 'ubuntu-latest' }}
     # Real runs: 20-72s (the docker-run/grep checks in this job are cheap).
     # 30 minutes rather than the 15-minute floor used by the other light
     # script jobs in this file: select-build-tools-image.sh's resolution
@@ -2032,7 +2032,7 @@ jobs:
             || { echo "::error::Coverage merge must use the selected build-tools image instead of bare host jq/bc."; exit 1; }
           grep -F 'needs: validate-compose' .github/workflows/build-push.yml >/dev/null \
             || { echo "::error::Shellcheck must depend on validate-compose so it uses the validated build-tools image."; exit 1; }
-          grep -F 'runs-on: [self-hosted, linux, lancache, lancache-heavy]' .github/workflows/build-tools.yml >/dev/null \
+          grep -F '"lancache", "lancache-heavy"]' .github/workflows/build-tools.yml >/dev/null \
             || { echo "::error::The build-tools workflow's amd64 leg must run on the heavy runner tier."; exit 1; }
           # arm64 builds natively on a GitHub-hosted runner (same rationale as
           # build-push.yml's build-arm64, #592) instead of QEMU on the
@@ -2618,7 +2618,7 @@ jobs:
   # deploy/ or the CI contract, far cheaper than that.
   compute-validation-network:
     name: derive per-run validation subnet
-    runs-on: [self-hosted, linux, lancache, lancache-light]
+    runs-on: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && fromJSON('["self-hosted", "linux", "lancache", "lancache-light"]') || 'ubuntu-latest' }}
     # Real runs: 7-9s. Same 15-minute floor as detect-changes above.
     timeout-minutes: 15
     outputs:
@@ -2668,7 +2668,7 @@ jobs:
           needs['detect-changes'].outputs.workflow == 'true'
         )
       }}
-    runs-on: [self-hosted, linux, lancache, lancache-light]
+    runs-on: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && fromJSON('["self-hosted", "linux", "lancache", "lancache-light"]') || 'ubuntu-latest' }}
     # Real runs: 30-71s (pulls the just-published multi-platform image set,
     # brings the full stack up via docker compose, smoke-tests it, tears it
     # down). 30 minutes, not the 15-minute lint-job floor, because this job
@@ -3115,7 +3115,7 @@ jobs:
           needs['detect-changes'].outputs.workflow == 'true'
         )
       }}
-    runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    runs-on: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && fromJSON('["self-hosted", "linux", "lancache", "lancache-heavy"]') || 'ubuntu-latest' }}
     # Real warm-cache runs: 31s-3.3min. But this job's own "cargo clippy"
     # step already carries a 35-minute timeout (a deliberately generous
     # bound for sccache/sccache-dist fallback to a full local compile) -- a
@@ -3147,11 +3147,11 @@ jobs:
           }}
         uses: ./.github/actions/configure-rust-sccache
         with:
-          mode: ${{ vars.SCCACHE_REDIS_MODE }}
-          redis-url: ${{ secrets.SCCACHE_REDIS_URL }}
+          mode: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && vars.SCCACHE_REDIS_MODE || 'off' }}
+          redis-url: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && secrets.SCCACHE_REDIS_URL || '' }}
           key-prefix: lancache-ci-${{ github.job }}
-          dist-scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
-          dist-auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
+          dist-scheduler-url: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && vars.SCCACHE_DIST_SCHEDULER_URL || '' }}
+          dist-auth-token: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && secrets.SCCACHE_DIST_AUTH_TOKEN || '' }}
       - name: cargo fmt --check (dns/nats-subscriber)
         run: cargo fmt --manifest-path services/dns/nats-subscriber/Cargo.toml -- --check
       - name: cargo check with warnings denied (dns/nats-subscriber)
@@ -3187,7 +3187,7 @@ jobs:
           needs['detect-changes'].outputs.workflow == 'true'
         )
       }}
-    runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    runs-on: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && fromJSON('["self-hosted", "linux", "lancache", "lancache-heavy"]') || 'ubuntu-latest' }}
     # Same reasoning as dns_rust_quality above: this job's own "cargo
     # clippy" step below already carries a 35-minute timeout, so the
     # job-level bound must exceed it. Real warm-cache runs: 50s-3.3min.
@@ -3216,11 +3216,11 @@ jobs:
           }}
         uses: ./.github/actions/configure-rust-sccache
         with:
-          mode: ${{ vars.SCCACHE_REDIS_MODE }}
-          redis-url: ${{ secrets.SCCACHE_REDIS_URL }}
+          mode: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && vars.SCCACHE_REDIS_MODE || 'off' }}
+          redis-url: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && secrets.SCCACHE_REDIS_URL || '' }}
           key-prefix: lancache-ci-${{ github.job }}
-          dist-scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
-          dist-auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
+          dist-scheduler-url: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && vars.SCCACHE_DIST_SCHEDULER_URL || '' }}
+          dist-auth-token: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && secrets.SCCACHE_DIST_AUTH_TOKEN || '' }}
       - name: cargo fmt --check (ui)
         run: cargo fmt --manifest-path services/ui/Cargo.toml -- --check
       - name: cargo check with warnings denied (ui)
@@ -3262,7 +3262,7 @@ jobs:
           needs['detect-changes'].outputs.workflow == 'true'
         )
       }}
-    runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    runs-on: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && fromJSON('["self-hosted", "linux", "lancache", "lancache-heavy"]') || 'ubuntu-latest' }}
     # Same reasoning as dns_rust_quality/ui_rust_quality above: this job's own
     # "cargo clippy" step below already carries a 35-minute timeout, so the
     # job-level bound must exceed it.
@@ -3291,11 +3291,11 @@ jobs:
           }}
         uses: ./.github/actions/configure-rust-sccache
         with:
-          mode: ${{ vars.SCCACHE_REDIS_MODE }}
-          redis-url: ${{ secrets.SCCACHE_REDIS_URL }}
+          mode: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && vars.SCCACHE_REDIS_MODE || 'off' }}
+          redis-url: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && secrets.SCCACHE_REDIS_URL || '' }}
           key-prefix: lancache-ci-${{ github.job }}
-          dist-scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
-          dist-auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
+          dist-scheduler-url: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && vars.SCCACHE_DIST_SCHEDULER_URL || '' }}
+          dist-auth-token: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && secrets.SCCACHE_DIST_AUTH_TOKEN || '' }}
       - name: cargo fmt --check (watchdog)
         run: cargo fmt --manifest-path services/watchdog/Cargo.toml -- --check
       - name: cargo check with warnings denied (watchdog)
@@ -3343,7 +3343,7 @@ jobs:
           needs['detect-changes'].outputs.workflow == 'true'
         )
       }}
-    runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    runs-on: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && fromJSON('["self-hosted", "linux", "lancache", "lancache-heavy"]') || 'ubuntu-latest' }}
     # Real warm-cache runs: 26-56s. Same class of risk as dns_rust_quality's
     # clippy step above (this job's own "test" step compiles the crate via
     # the same cargo-with-sccache-fallback path, so an sccache/sccache-dist
@@ -3388,11 +3388,11 @@ jobs:
           }}
         uses: ./.github/actions/configure-rust-sccache
         with:
-          mode: ${{ vars.SCCACHE_REDIS_MODE }}
-          redis-url: ${{ secrets.SCCACHE_REDIS_URL }}
+          mode: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && vars.SCCACHE_REDIS_MODE || 'off' }}
+          redis-url: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && secrets.SCCACHE_REDIS_URL || '' }}
           key-prefix: lancache-ci-${{ github.job }}
-          dist-scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
-          dist-auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
+          dist-scheduler-url: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && vars.SCCACHE_DIST_SCHEDULER_URL || '' }}
+          dist-auth-token: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && secrets.SCCACHE_DIST_AUTH_TOKEN || '' }}
       - name: test (dns/nats-subscriber)
         uses: ./.github/actions/cargo-with-sccache-fallback
         with:
@@ -3425,7 +3425,7 @@ jobs:
           needs['detect-changes'].outputs.workflow == 'true'
         )
       }}
-    runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    runs-on: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && fromJSON('["self-hosted", "linux", "lancache", "lancache-heavy"]') || 'ubuntu-latest' }}
     # Same reasoning and value as dns_test above (compiles via the same
     # cargo-with-sccache-fallback path, so shares its cold-compile risk).
     # Real warm-cache runs: 40-51s.
@@ -3465,11 +3465,11 @@ jobs:
           }}
         uses: ./.github/actions/configure-rust-sccache
         with:
-          mode: ${{ vars.SCCACHE_REDIS_MODE }}
-          redis-url: ${{ secrets.SCCACHE_REDIS_URL }}
+          mode: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && vars.SCCACHE_REDIS_MODE || 'off' }}
+          redis-url: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && secrets.SCCACHE_REDIS_URL || '' }}
           key-prefix: lancache-ci-${{ github.job }}
-          dist-scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
-          dist-auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
+          dist-scheduler-url: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && vars.SCCACHE_DIST_SCHEDULER_URL || '' }}
+          dist-auth-token: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && secrets.SCCACHE_DIST_AUTH_TOKEN || '' }}
       - name: test (ui)
         uses: ./.github/actions/cargo-with-sccache-fallback
         with:
@@ -3515,7 +3515,7 @@ jobs:
           needs['detect-changes'].outputs.workflow == 'true'
         )
       }}
-    runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    runs-on: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && fromJSON('["self-hosted", "linux", "lancache", "lancache-heavy"]') || 'ubuntu-latest' }}
     # Same reasoning and value as dns_test/ui_test above (compiles via the
     # same cargo-with-sccache-fallback path, so shares its cold-compile risk).
     timeout-minutes: 45
@@ -3558,11 +3558,11 @@ jobs:
           }}
         uses: ./.github/actions/configure-rust-sccache
         with:
-          mode: ${{ vars.SCCACHE_REDIS_MODE }}
-          redis-url: ${{ secrets.SCCACHE_REDIS_URL }}
+          mode: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && vars.SCCACHE_REDIS_MODE || 'off' }}
+          redis-url: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && secrets.SCCACHE_REDIS_URL || '' }}
           key-prefix: lancache-ci-${{ github.job }}
-          dist-scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
-          dist-auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
+          dist-scheduler-url: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && vars.SCCACHE_DIST_SCHEDULER_URL || '' }}
+          dist-auth-token: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && secrets.SCCACHE_DIST_AUTH_TOKEN || '' }}
       - name: test (watchdog Rust crate)
         uses: ./.github/actions/cargo-with-sccache-fallback
         with:
@@ -3593,7 +3593,7 @@ jobs:
           needs['detect-changes'].outputs.workflow == 'true'
         )
       }}
-    runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    runs-on: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && fromJSON('["self-hosted", "linux", "lancache", "lancache-heavy"]') || 'ubuntu-latest' }}
     # Real runs: 10-14s. cargo-audit checks Cargo.lock against the advisory
     # database using a prebuilt binary (AG-KD-003) -- it does not compile
     # the crate, so it does not share dns_test's cold-compile risk. 20
@@ -3663,7 +3663,7 @@ jobs:
           needs['detect-changes'].outputs.workflow == 'true'
         )
       }}
-    runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    runs-on: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && fromJSON('["self-hosted", "linux", "lancache", "lancache-heavy"]') || 'ubuntu-latest' }}
     # Same reasoning and value as dns_cargo_audit above (prebuilt cargo-audit
     # binary, no crate compilation). Real runs: 10-18s.
     timeout-minutes: 20
@@ -3733,7 +3733,7 @@ jobs:
           needs['detect-changes'].outputs.workflow == 'true'
         )
       }}
-    runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    runs-on: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && fromJSON('["self-hosted", "linux", "lancache", "lancache-heavy"]') || 'ubuntu-latest' }}
     # Same reasoning and value as dns_cargo_audit/ui_cargo_audit above
     # (prebuilt cargo-audit binary, no crate compilation).
     timeout-minutes: 20
@@ -3914,7 +3914,7 @@ jobs:
       - ui_cargo_audit
       - watchdog_cargo_audit
     if: always()
-    runs-on: [self-hosted, linux, lancache, lancache-light]
+    runs-on: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && fromJSON('["self-hosted", "linux", "lancache", "lancache-light"]') || 'ubuntu-latest' }}
     # Real runs: 7-14s (this job only reads its upstream needs' results and
     # runs a policy script; no compilation or Docker work of its own). Same
     # 15-minute floor as detect-changes above.
@@ -4238,7 +4238,7 @@ jobs:
     # arm64 rows run natively on a GitHub-hosted arm64 runner -- QEMU on the
     # self-hosted pool would reintroduce the emulated-Rust-compile risk this
     # scan is meant to catch before build/build-arm64 push anything real.
-    runs-on: ${{ fromJSON(matrix.runner) }}
+    runs-on: ${{ (matrix.platform_tag == 'amd64' && vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI != 'true') && 'ubuntu-latest' || fromJSON(matrix.runner) }}
     # Real per-service runs: 24s-7min (this job's own comment above notes it
     # "routinely dominates PR runtime" -- it builds a full service image,
     # amd64 on self-hosted or native arm64 on a hosted runner, then Trivy
@@ -4482,11 +4482,11 @@ jobs:
           }}
         id: sccache-secret
         env:
-          SCCACHE_REDIS_MODE: ${{ vars.SCCACHE_REDIS_MODE }}
-          SCCACHE_REDIS_URL: ${{ secrets.SCCACHE_REDIS_URL }}
-          SCCACHE_DIST_SCHEDULER_URL: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
-          SCCACHE_DIST_AUTH_TOKEN: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
-          DISTCC_POTENTIAL_HOSTS: ${{ vars.DISTCC_POTENTIAL_HOSTS }}
+          SCCACHE_REDIS_MODE: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && vars.SCCACHE_REDIS_MODE || 'off' }}
+          SCCACHE_REDIS_URL: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && secrets.SCCACHE_REDIS_URL || '' }}
+          SCCACHE_DIST_SCHEDULER_URL: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && vars.SCCACHE_DIST_SCHEDULER_URL || '' }}
+          SCCACHE_DIST_AUTH_TOKEN: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && secrets.SCCACHE_DIST_AUTH_TOKEN || '' }}
+          DISTCC_POTENTIAL_HOSTS: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && vars.DISTCC_POTENTIAL_HOSTS || '' }}
         run: |
           set -euo pipefail
 
@@ -5007,7 +5007,7 @@ jobs:
     # every other service here). Release tags always get a full, fresh
     # build/scan -- no reuse path at all.
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/')
-    runs-on: [self-hosted, linux, lancache, lancache-light]
+    runs-on: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && fromJSON('["self-hosted", "linux", "lancache", "lancache-light"]') || 'ubuntu-latest' }}
     # Real cost here is a handful of registry reads (docker buildx imagetools
     # inspect, twice per allowlisted service) plus one classify-image-impact.sh
     # invocation per service -- the same "cheap self-hosted script job" class
@@ -5222,7 +5222,7 @@ jobs:
         (github.event_name != 'pull_request' || needs['pr-tracking-metadata-check'].result == 'success') &&
         (github.event_name != 'pull_request' || needs['pr-title-convention-check'].result == 'success')
       }}
-    runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    runs-on: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && fromJSON('["self-hosted", "linux", "lancache", "lancache-heavy"]') || 'ubuntu-latest' }}
     timeout-minutes: 90
     # Job-level concurrency (#888, keyed per matrix service and per ref). CANONICAL
     # RATIONALE for this whole workflow's channel publish path -- container-scan/
@@ -5678,11 +5678,11 @@ jobs:
           }}
         id: sccache-secret
         env:
-          SCCACHE_REDIS_MODE: ${{ vars.SCCACHE_REDIS_MODE }}
-          SCCACHE_REDIS_URL: ${{ secrets.SCCACHE_REDIS_URL }}
-          SCCACHE_DIST_SCHEDULER_URL: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
-          SCCACHE_DIST_AUTH_TOKEN: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
-          DISTCC_POTENTIAL_HOSTS: ${{ vars.DISTCC_POTENTIAL_HOSTS }}
+          SCCACHE_REDIS_MODE: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && vars.SCCACHE_REDIS_MODE || 'off' }}
+          SCCACHE_REDIS_URL: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && secrets.SCCACHE_REDIS_URL || '' }}
+          SCCACHE_DIST_SCHEDULER_URL: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && vars.SCCACHE_DIST_SCHEDULER_URL || '' }}
+          SCCACHE_DIST_AUTH_TOKEN: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && secrets.SCCACHE_DIST_AUTH_TOKEN || '' }}
+          DISTCC_POTENTIAL_HOSTS: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && vars.DISTCC_POTENTIAL_HOSTS || '' }}
         run: |
           set -euo pipefail
 
@@ -6556,7 +6556,7 @@ jobs:
     name: merge multi-platform manifests
     needs: [build, build-arm64]
     if: "!cancelled() && needs.build.result == 'success' && needs['build-arm64'].result == 'success'"
-    runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    runs-on: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && fromJSON('["self-hosted", "linux", "lancache", "lancache-heavy"]') || 'ubuntu-latest' }}
     # Real runs: 17s-4.1min (per this job's own comment, it only assembles a
     # manifest list from two already-pushed digests -- no image rebuild).
     # 30 minutes covers the ghcr_retry backoff windows on its GHCR calls
@@ -6954,7 +6954,7 @@ jobs:
     name: promote stack image channels
     needs: merge-manifests
     if: "!cancelled() && needs['merge-manifests'].result == 'success' && github.event_name != 'pull_request'"
-    runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    runs-on: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && fromJSON('["self-hosted", "linux", "lancache", "lancache-heavy"]') || 'ubuntu-latest' }}
     # Real runs: 17s-3.6min for this job's own promotion work, but
     # scripts/lib/promote-lock.sh's promote_lock_acquire_with_retry is called with
     # (max_attempts=40, backoff_seconds=15), a legitimate non-hang wait of up to ~10
@@ -7554,7 +7554,7 @@ jobs:
     name: publish release source
     needs: promote
     if: "!cancelled() && needs.promote.result == 'success' && startsWith(github.ref, 'refs/tags/v')"
-    runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    runs-on: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && fromJSON('["self-hosted", "linux", "lancache", "lancache-heavy"]') || 'ubuntu-latest' }}
     # NO REAL RUN DATA: this job only runs on an actual `refs/tags/v*` push, and no such
     # run of this workflow has completed in the recorded history checked for this rollout
     # (2026-07, ~3800 total workflow runs) -- tags v0.1.0/v0.2.0/v0.3.0/v0.3.1 exist as
@@ -7890,7 +7890,7 @@ jobs:
     if: "!cancelled() && needs.release.result == 'success' && startsWith(github.ref, 'refs/tags/v')"
     # Container image scanning is memory-heavy, so it takes the heavy tier the
     # same way container-scan does (AG-CI-002).
-    runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    runs-on: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && fromJSON('["self-hosted", "linux", "lancache", "lancache-heavy"]') || 'ubuntu-latest' }}
     # NO REAL RUN DATA: same gap as `release` above -- this job only runs on a tag push,
     # and none has completed in recorded history. Anchored instead to container-scan's
     # per-service class of real data (24s-7min per service for a full image build + Trivy
