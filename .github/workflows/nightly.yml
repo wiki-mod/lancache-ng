@@ -9,7 +9,19 @@ name: CI 2.0 Nightly
 on:
   schedule:
     - cron: "23 3 * * *"
+  # What: manual start; the inputs narrow it to a check.
+  # Why: a channel check alone must not rebuild nightly.
+  # From: Issue #1683 | PR #1858
   workflow_dispatch:
+    inputs:
+      channel:
+        description: "one mutable channel to check; empty checks all"
+        type: string
+        default: ""
+      only-channel-check:
+        description: "run only the channel check, no nightly build or promote"
+        type: boolean
+        default: false
 permissions:
   contents: write
   packages: write
@@ -55,6 +67,8 @@ jobs:
       runner: ${{ steps.jobs.outputs.runner }}
       timeouts: ${{ steps.jobs.outputs.timeouts }}
       validate-dir: ${{ steps.jobs.outputs.validate-dir }}
+      check-channels: ${{ steps.channels.outputs.channels }}
+      check-runner: ${{ steps.channels.outputs.runner }}
     # What: one mutable entry: the current_dev channel.
     # Why: ci.sh needs a container before steps run
     # From: Issue #1683 | PR #1858
@@ -90,6 +104,14 @@ jobs:
       - name: Resolve the job settings
         id: jobs
         run: bash .github/scripts/ci.sh job-settings
+      # What: channels and hosted runner of the channel check.
+      # Why: ci.sh reads the SOT; YAML names no channel.
+      # From: Issue #1683 | PR #1858
+      - name: Resolve the channel check matrix
+        id: channels
+        env:
+          CHECK_CHANNEL: ${{ inputs.channel }}
+        run: bash .github/scripts/ci.sh channel-matrix
 
   # What: one planner: the pair ids and the build matrix.
   # Why: §72, §82: nightly holds no second admission path.
@@ -97,6 +119,10 @@ jobs:
   plan:
     name: plan
     needs: platform
+    # What: a check-only dispatch skips the nightly chain.
+    # Why: build, validate and promote all need the plan.
+    # From: Issue #1683 | PR #1858
+    if: ${{ !inputs.only-channel-check }}
     runs-on: ${{ needs.platform.outputs.runner }}
     timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['plan'] }}
     container:
@@ -291,6 +317,7 @@ jobs:
   cargo-audit:
     name: cargo-audit
     needs: platform
+    if: ${{ !inputs.only-channel-check }}
     runs-on: ${{ needs.platform.outputs.runner }}
     timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['cargo-audit'] }}
     container:
@@ -326,6 +353,41 @@ jobs:
           CI_STACK_VALIDATED: SUCCESS
           CI_RUN_IDENTITIES: *run_ids
         run: bash .github/scripts/ci.sh promote nightly
+
+  # What: pull each channel by its tag and start it.
+  # Why: a lost image must fail here, not at a user's pull.
+  # From: Issue #1683 | PR #1858
+  channel-check:
+    name: channel-check ${{ matrix.channel }}
+    # What: after promote, so nightly is today's channel.
+    # Why: a check-only dispatch has a skipped promote.
+    # From: Issue #1683 | PR #1858
+    needs: [platform, nightly]
+    if: ${{ !cancelled() && needs.platform.result == 'success' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        channel: ${{ fromJSON(needs.platform.outputs.check-channels) }}
+    runs-on: ${{ needs.platform.outputs.check-runner }}
+    timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['channel-check'] }}
+    container:
+      image: ${{ needs.platform.outputs.image }}
+      credentials: *ghcr_credentials
+      volumes:
+        - ${{ needs.platform.outputs.validate-dir }}:${{ needs.platform.outputs.validate-dir }}
+    steps:
+      - *bootstrap
+      # What: the tree the channel's images were built from.
+      # Why: compose and checks must match those images.
+      # From: Issue #1683 | PR #1858
+      - name: Check out the channel source ref
+        env:
+          CHANNEL: ${{ matrix.channel }}
+        run: bash .github/scripts/ci.sh channel-checkout "${CHANNEL}"
+      - name: Pull the channel by its tag and start the stack
+        env:
+          CHANNEL: ${{ matrix.channel }}
+        run: bash .github/scripts/ci.sh channel-check "${CHANNEL}"
 
   # What: scan what this run built and every channel image.
   # Why: §31 a new CVE; §1050 acceptance needs a scan.
@@ -374,7 +436,7 @@ jobs:
   # From: Issue #1683 | PR #1912
   report:
     name: report
-    needs: [platform, plan, build, scan, aggregate, assemble, validate, cargo-audit, nightly]
+    needs: [platform, plan, build, scan, aggregate, assemble, validate, cargo-audit, nightly, channel-check]
     if: ${{ !cancelled() }}
     # What: platform's runner and image, else the pair.
     # Why: the report must run when platform failed.

@@ -813,6 +813,7 @@ ci_job_timeouts:
   assemble: 30
   build: 90
   cargo-audit: 30
+  channel-check: 60
   checks: 30
   cut-release-tag: 15
   gc: 60
@@ -862,6 +863,10 @@ status_reports:
     label: nightly-promote
     scope: "nightly validate and promote of the accepted stack"
     jobs: [platform, plan, validate, nightly]
+  nightly-channel-check:
+    label: nightly-channel-check
+    scope: "daily pull by tag and start of every mutable channel"
+    jobs: [platform, channel-check]
 
 # What: Build-identity inputs per build type (§7).
 # Why: Impact is content-identity, never path-touched alone.
@@ -960,6 +965,10 @@ release:
       # Why: one ref->channel owner; ci.sh has no literal.
       # From: Issue #1683
       ref: refs/heads/master
+      # What: the tree the channel check starts latest from.
+      # Why: its compose must match the images latest holds.
+      # From: Issue #1683 | PR #1858
+      source_ref: refs/heads/master
       # What: final vX.Y.Z tags also move this channel.
       # Why: AG-REL-009 stable channel; read by ci.sh.
       # From: Issue #1683

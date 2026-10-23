@@ -85,7 +85,7 @@ current for the same commit.
 | Workflow | Jobs and `ci.sh` commands | Trigger |
 |---|---|---|
 | `ci.yml` | `plan` (`changed-files`, `plan-matrix`), `lint` (`check shellcheck`, `check actionlint`), `checks` (`check all`, which runs `check ci-bats`), `cargo-audit`, `build` (`ship`), `test` (`test-stack`), `scan` (`scan-stack`), `aggregate`, `assemble`, `validate`, `promote` (`promote-ref`), `result` (`result-gate`) | pull request, push to `current_dev`/`master`, `v*` tag, dispatch |
-| `nightly.yml` | `platform` (`channel-checkout nightly`), `plan` (`identity --run-record`), `validate`, `cargo-audit`, `nightly` (`promote nightly`), `scan` (`scan-channel`), `report` (`nightly-report`) | schedule, dispatch |
+| `nightly.yml` | `platform` (`channel-checkout nightly`), `plan` (`identity --run-record`), `validate`, `cargo-audit`, `nightly` (`promote nightly`), `channel-check` (`channel-matrix` in `platform`, then per channel `channel-checkout <channel>`, `channel-check <channel>`), `scan` (`scan-channel`), `report` (`nightly-report`) | schedule, dispatch (inputs `channel`, `only-channel-check`) |
 | `release.yml` | `cut-release-tag`, `release-changelog`, `release-publish`, `release-vex`, `release-sbom-stack`, `release-images` (matrix of `actions/attest` in `release-provenance`) | `v*` tag, dispatch |
 | `gc.yml` | `gc --apply`, `check orphaned-branches` | schedule, dispatch |
 | `codeql.yml` | `codeql-impact`, `codeql-analyze <language>` | pull request, push, schedule, dispatch |
@@ -95,6 +95,16 @@ run checks out `release.channels.nightly.source_ref` once in its `platform`
 job and every later job pins that commit (`channel-checkout nightly
 <commit>`). Tags, labels, diffs, promotion and release key on the checked-out
 commit (`_ci_head_commit`).
+
+The `channel-check` job runs once per mutable channel of SOT
+`release.channels` on the GitHub-hosted runner of the first `build_matrix`
+platform. It checks out that channel's `source_ref`, reads every service's
+`<service>:<channel>` tag with all its platform children, and starts the
+stack on those digests through the same `validate` probes. A missing tag
+names every missing service and starts no stack. The `report` job files or
+closes the `nightly-channel-check` issue. A dispatch with `channel` checks one
+channel; `only-channel-check` skips `plan` and `cargo-audit`, so no build,
+validate or promote runs.
 
 ### Standing checks per subsystem
 

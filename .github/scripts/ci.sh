@@ -71,7 +71,7 @@ declare -A CI_DISPATCH=(
     [test]=ci_cmd_test [scan-channel]=ci_cmd_scan_channel [assemble]=ci_cmd_assemble
     [aggregate-stack]=ci_cmd_aggregate_stack [scan-stack]=ci_cmd_scan_stack [changed-files]=ci_cmd_changed_files
     [assemble-stack]=ci_cmd_assemble_stack [test-stack]=ci_cmd_test_stack [nightly-report]=ci_cmd_nightly_report
-    [validate]=ci_cmd_validate [result-gate]=ci_cmd_result_gate [promote]=ci_cmd_promote [promote-ref]=ci_cmd_promote_ref [channel-checkout]=ci_cmd_channel_checkout [release-validation]=_ci_release_validation_valid [release-ref]=_ci_release_ref
+    [validate]=ci_cmd_validate [result-gate]=ci_cmd_result_gate [promote]=ci_cmd_promote [promote-ref]=ci_cmd_promote_ref [channel-checkout]=ci_cmd_channel_checkout [channel-matrix]=ci_cmd_channel_matrix [channel-check]=ci_cmd_channel_check [release-validation]=_ci_release_validation_valid [release-ref]=_ci_release_ref
     [release-publish]=ci_cmd_release_publish [release-images]=ci_cmd_release_images [release-sbom-stack]=ci_cmd_release_sbom_stack [release-vex]=ci_cmd_release_vex [cut-release-tag]=ci_cmd_cut_release_tag [release-notes]=ci_cmd_release_notes [release-changelog]=ci_cmd_release_changelog
     [gc]=ci_cmd_gc [gc-green-refs]=ci_cmd_gc_green_refs [check]=ci_cmd_check [close-linked-issues]=ci_cmd_close_linked_issues [pr-labels]=ci_cmd_pr_labels [board-add]=ci_cmd_board_add
     [welcome]=ci_cmd_welcome [version]=ci_cmd_version [docker-daemon-config]=ci_cmd_docker_daemon_config [runner-host]=ci_cmd_runner_host
@@ -6482,6 +6482,71 @@ ci_cmd_channel_checkout() {
     sha="$(_ci_head_commit)" || return 2
     _ci_step_output "[CI-ERROR-PROMOTE-0021]" commit "${sha}" || return 2
     printf 'channel=%s source_ref=%s commit=%s\n' "${channel}" "${ref}" "${sha}"
+}
+
+# What: channels and GitHub-hosted runner for channel-check
+# Why: the SOT owns both; CHECK_CHANNEL narrows a dispatch.
+# From: Issue #1683 | PR #1858
+ci_cmd_channel_matrix() {
+    local want="${CHECK_CHANNEL:-}" list plat runner json vrc=0
+    local -a chans=()
+    if [ -n "${want}" ]; then
+        _ci_valid_channel "${want}" || vrc=$?
+        if [ "${vrc}" -ne 0 ]; then
+            [ "${vrc}" -eq 2 ] || ci_log "[CI-ERROR-PROMOTE-0025]" "channel=\"${want}\" reason=\"not a mutable SOT channel\""
+            return 2
+        fi
+        list="${want}"
+    else
+        list="$(_ci_mutable_channels)" || return 2
+    fi
+    [ -z "${list}" ] || mapfile -t chans <<< "${list}"
+    if [ "${#chans[@]}" -eq 0 ]; then
+        ci_log "[CI-ERROR-PROMOTE-0026]" "reason=\"no mutable SOT channel to check\""
+        return 2
+    fi
+    json="$(_ci_capture 0 jq -cn "\$ARGS.positional" --args "${chans[@]}")" || return 2
+    plat="$(_ci_build_matrix_platforms)" || return 2
+    runner="$(_ci_platform_field "${plat%%$'\n'*}" runner "[CI-ERROR-PROMOTE-0027]" "reason=\"no GitHub-hosted runner for the first build_matrix platform\"")" || return 2
+    _ci_step_output "[CI-ERROR-PROMOTE-0028]" channels "${json}" || return 2
+    _ci_step_output "[CI-ERROR-PROMOTE-0029]" runner "${runner}" || return 2
+    printf 'channels=%s runner=%s\n' "${json}" "${runner}"
+}
+
+# What: pull a channel by its tag and start the stack.
+# Why: a lost channel image must fail before a user pulls.
+# From: Issue #1683 | PR #1858
+ci_cmd_channel_check() {
+    local channel="${1:-}" svcs svc digest cand="" absent="" vrc=0
+    if [ -z "${channel}" ]; then
+        ci_log "[CI-ERROR-PROMOTE-0030]" "reason=\"channel arg required\""
+        return 2
+    fi
+    _ci_valid_channel "${channel}" || vrc=$?
+    if [ "${vrc}" -ne 0 ]; then
+        [ "${vrc}" -eq 2 ] || ci_log "[CI-ERROR-PROMOTE-0031]" "channel=\"${channel}\" reason=\"not a mutable SOT channel\""
+        return 2
+    fi
+    _ci_validate_host_tools || return 2
+    _ci_require_ghcr_auth || return 2
+    svcs="$(ci_services)" || return 2
+    # What: every service tag, then the stack on those digests.
+    # Why: one missing tag names all; no partial stack starts.
+    # From: Issue #1683 | PR #1858
+    while IFS= read -r svc; do
+        [ -n "${svc}" ] || continue
+        if digest="$(_ci_channel_readback "${svc}" "${channel}")"; then
+            cand+="${cand:+$'\n'}${svc}=${digest}"
+        else
+            absent+="${absent:+ }${svc}"
+        fi
+    done <<< "${svcs}"
+    if [ -n "${absent}" ]; then
+        ci_log "[CI-ERROR-PROMOTE-0032]" "channel=\"${channel}\" missing=\"${absent}\" reason=\"channel tag absent or incomplete (raw above); stack not started\""
+        return 1
+    fi
+    printf 'channel-check channel=%s candidate="%s"\n' "${channel}" "${cand//$'\n'/ }"
+    _ci_validate_run "${cand}"
 }
 
 # What: True if a channel is a known mutable channel.
