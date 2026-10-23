@@ -948,6 +948,10 @@ release:
   # Why: crates and image labels read it; no literal copies.
   # From: Issue #1683 | PR #1858
   license: AGPL-3.0-or-later
+  # What: Rust edition of every first-party crate.
+  # Why: Cargo.toml is synced from it; no literal copy.
+  # From: Issue #1683 | PR #1858
+  rust_edition: 2024
   # What: validation record and its full-invalidation paths.
   # Why: AG-REL-011 gate reads them; no ci.sh literal.
   # From: Issue #1683

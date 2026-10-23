@@ -16,7 +16,7 @@ members = [
     "services/common",
 ]
 
-# What: crate version, equal to SOT release.version.
+# What: version, license, edition from SOT release.
 # Why: cargo cannot read the SOT; ci.sh version sync writes.
 # From: Issue #1683 | PR #1858
 [workspace.package]

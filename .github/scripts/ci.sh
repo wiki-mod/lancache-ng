@@ -10778,13 +10778,14 @@ _ci_cargo_member_names() {
     done <<< "${rows}"
 }
 
-# What: set 4 caller vars: version, license, lock, manifest.
-# Why: sync and verify read the same four SOT values once.
+# What: set 5 vars: version, license, edition, lock, toml.
+# Why: sync and verify read the same SOT values once.
 # From: Issue #1683 | PR #1912
 _ci_version_inputs() {
-    local -n _vi_want="$1" _vi_lic="$2" _vi_lock="$3" _vi_cargo="$4"
+    local -n _vi_want="$1" _vi_lic="$2" _vi_ed="$3" _vi_lock="$4" _vi_cargo="$5"
     _vi_want="$(_ci_release_value version)" || return 2
     _vi_lic="$(_ci_release_value license)" || return 2
+    _vi_ed="$(_ci_release_value rust_edition)" || return 2
     _vi_lock="$(_ci_repo_path CI_CARGO_LOCK)" || return 2
     _vi_cargo="$(_ci_repo_path CI_CARGO_MANIFEST)" || return 2
 }
@@ -10793,15 +10794,16 @@ _ci_version_inputs() {
 # Why: copies are synced on demand, idempotent, not by hand.
 # From: Issue #1683 | PR #1858
 _ci_version_release_sync() {
-    local want lic lock cargo names f tmp out wrote=0
-    _ci_version_inputs want lic lock cargo || return 2
+    local want lic ed lock cargo names f tmp out wrote=0
+    _ci_version_inputs want lic ed lock cargo || return 2
     names="$(_ci_cargo_member_names)" || return 2
     for f in "${cargo}" "${lock}"; do
         tmp="$(_ci_mktemp "${CI_TMPDIR}/ci-vsync.XXXXXX")" || return 2
         case "${f}" in
-            "${cargo}") out="$(awk -v v="${want}" -v l="${lic}" '/^\[workspace\.package\]/ { on = 1; print; next } /^\[/ { on = 0 }
+            "${cargo}") out="$(awk -v v="${want}" -v l="${lic}" -v e="${ed}" '/^\[workspace\.package\]/ { on = 1; print; next } /^\[/ { on = 0 }
                 on && $1 == "version" { print "version = \"" v "\""; next }
-                on && $1 == "license" { print "license = \"" l "\""; next } { print }' "${f}" 2>&1 > "${tmp}")" ;;
+                on && $1 == "license" { print "license = \"" l "\""; next }
+                on && $1 == "edition" { print "edition = \"" e "\""; next } { print }' "${f}" 2>&1 > "${tmp}")" ;;
             "${lock}") out="$(awk -v v="${want}" -v names="${names//$'\n'/ }" 'BEGIN { split(names, a, " "); for (i in a) own[a[i]] = 1 }
                 /^name = / { x = $0; sub(/^name = "/, "", x); sub(/"$/, "", x); hit = (x in own) }
                 hit && /^version = / { print "version = \"" v "\""; hit = 0; next } { print }' "${f}" 2>&1 > "${tmp}")" ;;
@@ -10821,8 +10823,8 @@ _ci_version_release_sync() {
 # Why: one release version owner; consumers must not drift.
 # From: Issue #1683 | PR #1858
 _ci_version_release() {
-    local want lic got lock cargo members m mf n k rc=0
-    _ci_version_inputs want lic lock cargo || return 2
+    local want lic ed got lock cargo members m mf n k rc=0
+    _ci_version_inputs want lic ed lock cargo || return 2
     got="$(_ci_cargo_ws_value "${cargo}" version)" || return 2
     if [ "${got}" != "${want}" ]; then
         ci_log "[CI-ERROR-VERSION-0021]" "path=\"${cargo}\" got=\"${got}\" want=\"${want}\" reason=\"workspace.package.version is not SOT release.version\""
@@ -10831,6 +10833,11 @@ _ci_version_release() {
     got="$(_ci_cargo_ws_value "${cargo}" license)" || return 2
     if [ "${got}" != "${lic}" ]; then
         ci_log "[CI-ERROR-VERSION-0028]" "path=\"${cargo}\" got=\"${got}\" want=\"${lic}\" reason=\"workspace.package.license is not SOT release.license\""
+        rc=1
+    fi
+    got="$(_ci_cargo_ws_value "${cargo}" edition)" || return 2
+    if [ "${got}" != "${ed}" ]; then
+        ci_log "[CI-ERROR-VERSION-0031]" "path=\"${cargo}\" got=\"${got}\" want=\"${ed}\" reason=\"workspace.package.edition is not SOT release.rust_edition\""
         rc=1
     fi
     members="$(_ci_cargo_members "${cargo}")" || return 2
