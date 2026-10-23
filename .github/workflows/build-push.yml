@@ -2985,7 +2985,7 @@ jobs:
 
           case "${BUILD_TOOLS_IMAGE:-}" in
             lancache-ng-build-tools-validation:*)
-              docker rmi "$BUILD_TOOLS_IMAGE"
+              timeout --kill-after=30 120 docker rmi "$BUILD_TOOLS_IMAGE"
               ;;
           esac
 
@@ -5048,7 +5048,7 @@ jobs:
     # scans it). 60 minutes gives real headroom for a cold Docker layer
     # cache or a Trivy vulnerability-database refresh, neither of which
     # shows up in the warm-cache samples above; still far under build's own
-    # 150-minute bound for the same class of work at full multi-arch scale.
+    # 90-minute bound for the same class of work at full multi-arch scale.
     timeout-minutes: 60
     env:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
@@ -5773,7 +5773,7 @@ jobs:
             always() &&
             steps.push-scan-changes.outputs.should-scan == 'true'
           }}
-        run: docker rmi lancache-ng-scan:${{ matrix.service }}-${{ matrix.platform_tag }}-${{ github.run_id }} || true
+        run: timeout --kill-after=30 120 docker rmi lancache-ng-scan:${{ matrix.service }}-${{ matrix.platform_tag }}-${{ github.run_id }} || true
 
   determine-push-reuse-scope:
     # Step 4 (issue #1095): decides, once per push (not once per build/build-arm64/
@@ -6019,7 +6019,7 @@ jobs:
         (github.event_name != 'pull_request' || needs['pr-title-convention-check'].result == 'success')
       }}
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
-    timeout-minutes: 150
+    timeout-minutes: 90
     # Job-level concurrency (#888, keyed per matrix service and per ref). CANONICAL
     # RATIONALE for this whole workflow's channel publish path -- container-scan/
     # build-arm64 and the shellcheck/validate-compose/line-endings/ci_scope_policy gates
@@ -6028,7 +6028,7 @@ jobs:
     # cancel-in-progress is scoped to pull_request events ONLY (issue #979). On a PR, a
     # newer push to the same branch supersedes the older commit, so cancelling the older
     # service build reclaims a scarce lancache-heavy slot (otherwise pinned for the full
-    # ~150-minute timeout) with no downside: a PR's own commits are never promoted to a
+    # ~90-minute timeout) with no downside: a PR's own commits are never promoted to a
     # channel, GHCR tag writes are atomic (a cancelled build leaves no corrupt or
     # partially-visible sha-* tag), and merge-manifests already requires
     # `needs.build.result == 'success'`, so a cancelled build cleanly stops the pipeline.
@@ -7758,7 +7758,7 @@ jobs:
     # from a merge cascade), before this job's own work even starts. 45 minutes covers
     # that real lock-wait ceiling plus this job's own work with headroom, so normal lock
     # contention can never be mistaken for a hang.
-    timeout-minutes: 45
+    timeout-minutes: 30
     # Promote only repoints already-built, already-pushed sha-* images at mutable
     # channel tags -- it is idempotent and fast, unlike the rest of this workflow, where
     # cancelling stale in-flight work for a superseded commit is desirable. Originally
@@ -8694,7 +8694,7 @@ jobs:
     # CycloneDX SBOM output, so it is never slower than that per-service work). 45 minutes
     # gives real headroom over container-scan's own per-service worst case. Flagged
     # explicitly as an estimate, not a measurement.
-    timeout-minutes: 45
+    timeout-minutes: 60
     permissions:
       contents: write
       packages: read

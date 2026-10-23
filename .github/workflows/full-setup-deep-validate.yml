@@ -126,7 +126,7 @@ jobs:
   plan:
     name: plan deep validation
     runs-on: [self-hosted, linux, lancache, lancache-light]
-    timeout-minutes: 15
+    timeout-minutes: 30
     outputs:
       should_run: ${{ steps.plan.outputs.should_run }}
       image_tag: ${{ steps.plan.outputs.image_tag }}

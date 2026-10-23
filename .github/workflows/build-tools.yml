@@ -764,7 +764,7 @@ jobs:
       - name: Remove local scan image
         if: always()
         run: |
-          docker rmi "${BUILD_TOOLS_SCAN_IMAGE_AMD64}" || true
+          timeout --kill-after=30 120 docker rmi "${BUILD_TOOLS_SCAN_IMAGE_AMD64}" || true
 
       # The docker-container builder "Set up Docker Buildx" created above is
       # never torn down by setup-buildx-action itself, and this runner pool
@@ -990,7 +990,7 @@ jobs:
       - name: Remove local scan image
         if: always()
         run: |
-          docker rmi "${BUILD_TOOLS_SCAN_IMAGE_ARM64}" || true
+          timeout --kill-after=30 120 docker rmi "${BUILD_TOOLS_SCAN_IMAGE_ARM64}" || true
 
       # Same leak as the amd64 leg's own "Remove buildx builder" step above:
       # setup-buildx-action never tears its builder down on its own. This

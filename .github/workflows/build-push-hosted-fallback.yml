@@ -337,7 +337,7 @@ jobs:
 
       - name: Remove scan image
         if: always()
-        run: docker rmi lancache-ng-scan:${{ matrix.service }}-amd64-hosted-fallback-${{ github.run_id }} || true
+        run: timeout --kill-after=30 120 docker rmi lancache-ng-scan:${{ matrix.service }}-amd64-hosted-fallback-${{ github.run_id }} || true
 
       # Same leak as build-tools.yml/build-push.yml's own builder-teardown
       # steps: "Set up Docker Buildx" above never removes its own builder.
