@@ -56,10 +56,9 @@ name: Full-Setup Deep Validate
 
 on:
   # Manual only, as on current_dev (0eac36d3 dropped the pull_request
-  # trigger, add37d1a dropped the build-push.yml call as a duplicate). A PR
-  # that changes deploy, the workflows or a full-setup service image runs
-  # build-push.yml's "validate full-setup image" instead; none of this
-  # workflow's jobs is a required status check on master.
+  # trigger, add37d1a dropped the build-push.yml call as a duplicate). Every
+  # PR already runs build-push.yml's "validate full-setup image"; none of
+  # this workflow's jobs is a required status check on master.
   workflow_dispatch:
     inputs:
       image_tag:
