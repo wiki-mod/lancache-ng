@@ -1309,7 +1309,10 @@ pub fn write_if_changed(
         Ok(old) => old != contents,
         Err(e) => {
             if e.kind() != io::ErrorKind::NotFound {
-                eprintln!("[write_if_changed] WARNING: {} not read: {e}", path.display());
+                eprintln!(
+                    "[write_if_changed] WARNING: {} not read: {e}",
+                    path.display()
+                );
             }
             true
         }
