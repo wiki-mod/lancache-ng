@@ -42,13 +42,13 @@ Responsibility: determine reachability -> protected artifacts -> unreferenced ar
 ## 7. Central service list
 There is exactly one authoritative product-service list, owned by `.github/yaml/build-manifest.yml`. Current members:
 ```bash
-CI_SERVICES=( proxy dns watchdog dhcp dhcp-proxy ntp syslog ui cachehamster netdata )
+CI_SERVICES=( services proxy dns dhcp ui )
 ```
 `build-tools` is not a product service; it is the separately owned CI build toolchain under `build_toolchain:` in the same SOT. No workflow contains a second product-service list. No scan contains a second list. No release contains a second list. No GC contains a second list. No multi-arch job contains a second list. No full-setup job contains a second list.
 
-`services/netdata/Dockerfile` is part of the CI 2.0 artifact pipeline. `netdata` is a first-party product service and follows the same build, verify, scan, acceptance, assembly, and promotion lifecycle as the other product images.
+`netdata` is not a separate image: by maintainer decision (five-container rule, 2026-10-10) it runs as a process inside the product service `services`, installed as an Alpine package. The SOT has no `external_services` entry for it.
 ## 8. Central service metadata
-`build-manifest.yml` has exactly one product-service definition and a separate `build_toolchain` definition. `ci.sh` consumes this metadata; it does not maintain a second inventory. Conceptually: ```text service: name build context external build contexts platforms runner class compiler class build dependencies runtime dependencies test domains validation domains artifact repository ``` Example: ```text proxy: context = services/proxy external-context = services/dns platforms = amd64,arm64 runner = light dns: context = services/dns platforms = amd64,arm64 runner = heavy rust = true build_toolchain/build-tools: context = tools/build-tools platforms = amd64,arm64 runner = toolchain ``` GitHub matrices are derived from the SOT. Not the other way around.
+`build-manifest.yml` has exactly one product-service definition and a separate `build_toolchain` definition. `ci.sh` consumes this metadata; it does not maintain a second inventory. Conceptually: ```text service: name build context external build contexts platforms runner class compiler class build dependencies runtime dependencies test domains validation domains artifact repository ``` Example: ```text proxy: context = services/proxy external-context = services/dns platforms = amd64,arm64 runner = light dns: context = services/dns platforms = amd64,arm64 runner = heavy rust = true build_toolchain/build-tools: context = .github/build-tools platforms = amd64,arm64 runner = toolchain ``` GitHub matrices are derived from the SOT. Not the other way around.
 ## 9. Central CLI contract
 Example: ```bash ./.github/scripts/ci.sh plan ./.github/scripts/ci.sh impact ./.github/scripts/ci.sh identity proxy ./.github/scripts/ci.sh resolve proxy linux/amd64 ./.github/scripts/ci.sh test proxy ./.github/scripts/ci.sh build proxy linux/amd64 ./.github/scripts/ci.sh publish proxy linux/amd64 ./.github/scripts/ci.sh verify proxy <digest> ./.github/scripts/ci.sh assemble proxy ./.github/scripts/ci.sh validate ./.github/scripts/ci.sh promote nightly ./.github/scripts/ci.sh promote latest ./.github/scripts/ci.sh gc ``` For GitHub: ```bash ./.github/scripts/ci.sh plan --json ```
 returns machine-readable state.
@@ -61,7 +61,7 @@ Example: ```json { "global": { "state": "WORK_REQUIRED" }, "services": { "proxy"
 ## 11. Semantic impact detection
 `git diff` is only the cheap first filter. ```text git diff -> determine candidates -> check semantically -> determine actual impact ``` Git paths are never the final truth.
 ### 11.1 Example: comment change
-```text services/dns/entrypoint.sh # explanation changed -> shell semantics identical -> build identity identical -> test identity identical -> NOOP ```
+```text services/dns/Dockerfile # explanation changed -> Dockerfile semantics identical -> build identity identical -> test identity identical -> NOOP ```
 ### 11.2 YAML comment
 ```text docker-compose.yml # wording changed -> YAML data structure identical -> runtime identity identical -> NOOP ```
 ### 11.3 Bats comment
@@ -412,7 +412,7 @@ Internet
 ```
 Possible contents: APT, APK, Cargo, Go, npm, pip, Maven, Gradle, OCI pulls.
 ### 40.1 APT/APK half (implemented precedent)
-The "LAN package proxy" in this section's diagram is not repo-managed tooling -- it is Squid, already-existing shared infrastructure reachable via the org-level `PROJECT_SELFHOSTED_PROXY_HTTP`/ `PROJECT_SELFHOSTED_PROXY_HTTPS`/`PROJECT_SELFHOSTED_PROXY_EXCLUSION` variables (also used elsewhere for outbound LAN egress). An earlier version of this PR invented a second, repo-managed caching daemon (`apt-cacher-ng`, its own NFS-backed cache directory, and `apt-proxy-*` install/lifecycle modes in `tools/runner-host/lancache-ci-docker-daemon-config.sh`) instead of reusing this -- reverted on explicit maintainer instruction: apt and apk already fetch over deterministic HTTP(S) paths that a generic forward proxy already caches, so standing up a second, apt-specific caching service alongside Squid is redundant infrastructure with its own install/lifecycle burden for no additional benefit. The real shape is deliberately static, not probed at runtime: the CI workflows (`build-tools.yml`, `build-push.yml`) pass `PROJECT_SELFHOSTED_PROXY_HTTP`/`HTTPS`/`EXCLUSION` straight through as Docker's own native `http_proxy`/`https_proxy`/`no_proxy` predefined build-args -- config plumbing, the same way `APT_CACHE_BUST` and `UTILITIES_IMAGE` are already passed today -- but only on the self-hosted build steps (`build-tools:` in `build-tools.yml`, `build:` in `build-push.yml`), which have a network route to the proxy by construction. The GitHub-hosted arm64 steps (`build-tools-arm64:`, `build-arm64:`, both fixed to `runs-on: ubuntu-24.04-arm`, never matrix-driven) simply omit those three build-arg lines, since a GitHub-hosted runner structurally never has a route to the private LAN address -- known statically at authoring time, not something a live reachability check would add information to. Because these are Docker's own predefined build-args rather than a hand-rolled `ARG`/ `ENV` pair, BuildKit injects them into a `RUN` step's environment without a value default ever being baked into the image. `tools/build-tools/Dockerfile` and the service Dockerfiles that gained the same Squid CA-trust wiring (`ui`, `watchdog`, `dns`) do each declare a bare `ARG HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` (plus lowercase) per stage -- required by BuildKit's per-stage ARG scoping so the value is visible in stages that don't inherit global scope -- but a bare `ARG` with no default is never written into that stage's `Config.Env` or history regardless of the declaration. This is unlike a hand-rolled `ARG`+`ENV` pair confirmed live to leak into the pushed image's `Config.Env`: Docker excludes its predefined proxy args from both the final image config and the layer cache key no matter how many stages declare the bare `ARG`. An earlier version of this change added a live reachability probe (and, before that, a dedicated composite-action file for it) to fail open on an unreachable proxy. Reverted on explicit maintainer instruction: the only concrete failure mode ever demonstrated was the arm64 runners' permanent lack of a LAN route (static, not worth probing); a temporarily-down self-hosted Squid is treated as a real infrastructure problem to fix, not a condition to silently code around. Since Squid only caches plain `http`, this is paired with a repo-wide audit switching apt/apk package-source URLs to `http` wherever the upstream doesn't force `https` (tracked in this PR's own body, not restated here). ccache is deliberately not extended the same way -- it is a filesystem cache written from inside a BuildKit build stage, which a network proxy cannot reach; see §41.1's own text for why that is a materially different problem.
+The "LAN package proxy" in this section's diagram is not repo-managed tooling -- it is Squid, already-existing shared infrastructure reachable via the org-level `PROJECT_SELFHOSTED_PROXY_HTTP`/ `PROJECT_SELFHOSTED_PROXY_HTTPS`/`PROJECT_SELFHOSTED_PROXY_EXCLUSION` variables (also used elsewhere for outbound LAN egress). An earlier version of this PR invented a second, repo-managed caching daemon (`apt-cacher-ng`, its own NFS-backed cache directory, and `apt-proxy-*` install/lifecycle modes in `tools/runner-host/lancache-ci-docker-daemon-config.sh`) instead of reusing this -- reverted on explicit maintainer instruction: apt and apk already fetch over deterministic HTTP(S) paths that a generic forward proxy already caches, so standing up a second, apt-specific caching service alongside Squid is redundant infrastructure with its own install/lifecycle burden for no additional benefit. The real shape is deliberately static, not probed at runtime: `ci.sh` (`_ci_proxy_init`) reads `PROJECT_SELFHOSTED_PROXY_HTTP`/`HTTPS`/`EXCLUSION` only on a self-hosted runner and exports them as `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` (plus lowercase); `_ci_proxy_names` hands exactly these names to the BuildKit daemon and to the image build as value-less `--build-arg`s. A GitHub-hosted runner structurally never has a route to the private LAN address, so there `ci.sh` sets no proxy (`CI-INFO-CORE-0113`) -- known statically, not something a live reachability check would add information to. Because these are Docker's own predefined build-args rather than a hand-rolled `ARG`/`ENV` pair, BuildKit injects them into a `RUN` step's environment without any Dockerfile `ARG` and without a value ever being baked into the image; Docker excludes them from both the final image config and the layer cache key. A hand-rolled `ARG`+`ENV` pair was confirmed live to leak into the pushed image's `Config.Env`. The Squid CA reaches every image build only as the build secret `project_selfhosted_proxy_ca`, which `ci.sh` writes and each Dockerfile mounts for its package step. An earlier version of this change added a live reachability probe (and, before that, a dedicated composite-action file for it) to fail open on an unreachable proxy. Reverted on explicit maintainer instruction: the only concrete failure mode ever demonstrated was the arm64 runners' permanent lack of a LAN route (static, not worth probing); a temporarily-down self-hosted Squid is treated as a real infrastructure problem to fix, not a condition to silently code around. Since Squid only caches plain `http`, this is paired with a repo-wide audit switching apt/apk package-source URLs to `http` wherever the upstream doesn't force `https` (tracked in this PR's own body, not restated here). ccache is deliberately not extended the same way -- it is a filesystem cache written from inside a BuildKit build stage, which a network proxy cannot reach; see §41.1's own text for why that is a materially different problem.
 ## 41. No universal NFS cache
 Not:
 ```text
@@ -488,26 +488,21 @@ ACCEPTED
 ```
 A missing platform does not trigger a rebuild of the successful platform.
 ## 46. Service failure domains
-Each product service is its own failure domain. ```text proxy ACCEPTED dns ACCEPTED watchdog FAILED dhcp ACCEPTED dhcp-proxy ACCEPTED ntp ACCEPTED syslog ACCEPTED ui ACCEPTED cachehamster ACCEPTED netdata ACCEPTED ``` Result: watchdog's candidate failed; the other nine product-service results stay valid, stay ACCEPTED, and may be reused on the next run.
+Each product service is its own failure domain. ```text services FAILED proxy ACCEPTED dns ACCEPTED dhcp ACCEPTED ui ACCEPTED ``` Result: services' candidate failed; every other product-service result stays valid, stay ACCEPTED, and may be reused on the next run.
 ## 47. Stack assembly
 A complete stack consists exclusively of ACCEPTED digests.
 ```text
+services digest
 proxy digest
 dns digest
-watchdog digest
 dhcp digest
-dhcp-proxy digest
-ntp digest
-syslog digest
 ui digest
-cachehamster digest
-netdata digest
         |
         v
 STACK CANDIDATE
 ```
 ## 48. Stack Candidate
-Contains exact digests. No moving service tags. ```text proxy=sha256:... dns=sha256:... watchdog=sha256:... ... ```
+Contains exact digests. No moving service tags. ```text services=sha256:... proxy=sha256:... dns=sha256:... dhcp=sha256:... ui=sha256:... ```
 ## 49. Stack Validation
 Full setup uses exclusively these exact digests.
 ```text
@@ -534,14 +529,14 @@ STACK ACCEPTED
 ## 50. Promotion stays atomic
 Builds are per-service independent. Promotion is stack-atomic.
 ```text
-10/10 product-service digests ACCEPTED
+every product-service digest ACCEPTED
 +
 stack validation SUCCESS
         |
         v
 PROMOTE
 ```
-At `9/10`: `NO PROMOTION`. The nine successful product-service artifacts stay ACCEPTED regardless.
+With one product service not ACCEPTED: `NO PROMOTION`. The successful product-service artifacts stay ACCEPTED regardless.
 ## 51. Promotion never builds
 `promote` may exclusively move references. Forbidden: `PROMOTE -> build`. Allowed: ```text PROMOTE -> verify candidate digests -> acquire lock -> move channel refs -> verify readback -> release lock ```
 ## 52. Promotion Lock
@@ -932,7 +927,7 @@ New CI becomes the sole required pipeline.
 ### Phase 15 — Delete CI 1.x
 Remove: old `build-push` logic, obsolete composite actions, obsolete helper scripts, duplicate service lists, old retry wrappers, old reuse paths, old retag paths, obsolete GC special-casing. Only after every necessary guard has been migrated to `ci.sh` or `ci.bats`.
 ## 85. Acceptance tests for CI 2.0
-CI 2.0 is not done until at least the following cases work. **Test A — README only:** README changed. Expected: planner runs, final required check runs, builds = 0, scans = 0, registry writes = 0, heavy runners = 0. **Test B — Shell comment:** comment in `services/dns/entrypoint.sh` changed. Expected: semantic identity unchanged, NOOP. **Test C — Bats comment:** comment in `ci.bats` changed. Expected: test identity unchanged, NOOP. **Test D — Test logic:** a real test in `ci.bats` changed. Expected: affected tests run, container builds = 0. **Test E — DNS source:** DNS build input changed. Expected: DNS considered, unrelated services NOOP. **Test F — Shared proxy dependency:** `services/dns/cdn-domains.txt` changed. Expected: DNS impact calculated, proxy impact calculated, because proxy consumes this real build input. **Test G — Registry down:** desired-artifact lookup hits a registry timeout. Expected: UNKNOWN, retry, block/fail if exhausted, builds = 0. **Test H — Build already running:** runner A builds identity X, runner B requests identity X. Expected: runner B waits/resolves, duplicate builds = 0. **Test I — Publish failure:** build succeeds, push fails. Expected: retry push of the exact produced artifact, second build = 0. **Test J — Readback failure:** build succeeds, publish reports success, readback fails. Expected: `PRODUCED_UNVERIFIED`, retry readback/publish diagnosis, second build = 0. **Test K — Digest mismatch:** expected digest != registry digest. Expected: `MISMATCH`, FAIL, replacement build = 0. **Test L — One service fails:** watchdog fails, other services accepted. Expected: promotion blocked, successful service artifacts remain reusable. **Test M — Nightly unchanged:** `current_dev` desired state unchanged. Expected: container builds = 0. **Test N — Release already accepted:** release points at a fully accepted candidate. Expected: container builds = 0, atomic promotion, release assets generated/reused. **Test O — Full SHA:** search the entire CI for abbreviated Git SHA (must be 0) and abbreviated OCI digest (must be 0).
+CI 2.0 is not done until at least the following cases work. **Test A — README only:** README changed. Expected: planner runs, final required check runs, builds = 0, scans = 0, registry writes = 0, heavy runners = 0. **Test B — Dockerfile comment:** comment in `services/dns/Dockerfile` changed. Expected: semantic identity unchanged, NOOP. **Test C — Bats comment:** comment in `ci.bats` changed. Expected: test identity unchanged, NOOP. **Test D — Test logic:** a real test in `ci.bats` changed. Expected: affected tests run, container builds = 0. **Test E — DNS source:** DNS build input changed. Expected: DNS considered, unrelated services NOOP. **Test F — Shared proxy dependency:** `services/dns/cdn-domains.txt` changed. Expected: DNS impact calculated, proxy impact calculated, because proxy consumes this real build input. **Test G — Registry down:** desired-artifact lookup hits a registry timeout. Expected: UNKNOWN, retry, block/fail if exhausted, builds = 0. **Test H — Build already running:** runner A builds identity X, runner B requests identity X. Expected: runner B waits/resolves, duplicate builds = 0. **Test I — Publish failure:** build succeeds, push fails. Expected: retry push of the exact produced artifact, second build = 0. **Test J — Readback failure:** build succeeds, publish reports success, readback fails. Expected: `PRODUCED_UNVERIFIED`, retry readback/publish diagnosis, second build = 0. **Test K — Digest mismatch:** expected digest != registry digest. Expected: `MISMATCH`, FAIL, replacement build = 0. **Test L — One service fails:** services fails, other services accepted. Expected: promotion blocked, successful service artifacts remain reusable. **Test M — Nightly unchanged:** `current_dev` desired state unchanged. Expected: container builds = 0. **Test N — Release already accepted:** release points at a fully accepted candidate. Expected: container builds = 0, atomic promotion, release assets generated/reused. **Test O — Full SHA:** search the entire CI for abbreviated Git SHA (must be 0) and abbreviated OCI digest (must be 0).
 ## 86. Performance goals
 A normal PR with no build need: seconds to a few minutes. Not 30 minutes, 1 hour, 2 hours. Heavy runners should see almost exclusively real builds or real heavy tests.
 ## 87. Registry goal

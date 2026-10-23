@@ -92,22 +92,9 @@ export DOCKER_BUILDKIT=1
 export COMPOSE_DOCKER_CLI_BUILD=1
 ```
 
-For GitHub Actions, prefer `docker/setup-buildx-action` and
-`docker/build-push-action` with a cache location that belongs to the current
-runner job.
+In CI the workflows use no build action: `ci.sh` runs every image build.
 
-Avoid shared world-writable cache directories. A safe pattern is to use a
-runner-owned temporary path and keep one cache folder per service.
-
-Example cache shape:
-
-```text
-$RUNNER_TEMP/lancache-ng-buildx-cache/proxy
-$RUNNER_TEMP/lancache-ng-buildx-cache/dns
-$RUNNER_TEMP/lancache-ng-buildx-cache/ui
-```
-
-This keeps parallel matrix jobs from fighting over the same cache path.
+Avoid shared world-writable cache directories.
 
 ## Rust builds and sccache
 
@@ -115,16 +102,16 @@ Rust services can benefit from `sccache`.
 
 If you enable `sccache`, use a cache backend that is reachable from the build
 environment. Redis is a common choice for self-hosted runners.
-For jobs that must also run on GitHub-hosted fallback, document whether Redis
-backing is optional, preferred, or a hard gate and keep the job green when the
-cache backend is unavailable.
+With `SCCACHE_REDIS_MODE=required` an sccache outage fails the build
+(`CI-ERROR-RUSTBUILD-0053`); `optional` and `off` build without Redis.
 
 Important rules:
 
 - do not hardcode Redis URLs in Dockerfiles or workflow files
 - do not pass secret Redis URLs through Docker build arguments
 - prefer BuildKit secrets for Docker builds
-- control usage through `SCCACHE_REDIS_MODE` (`required`, `optional`, `off`)
+- control usage through `SCCACHE_REDIS_MODE` (`required`, `optional`, `off`;
+  SOT `ci_variables`, default `required`)
 - keep cache keys separated between unrelated services
 - keep `CARGO_HOME` separate when multiple jobs install command-line tools in
   parallel
@@ -151,26 +138,21 @@ Use this as an opt-in setting:
 
 - store the host list in a GitHub repository variable named `DISTCC_POTENTIAL_HOSTS`
 - do not commit LAN IP addresses into Dockerfiles, workflows or docs
-- include pump-capable entries with the `,cpp` option, for example
+- the list needs at least one pump-capable entry with the `,cpp` option
+  (`CI-ERROR-VARIABLES-0013` otherwise), for example
   `build-a build-b build-a,cpp,lzo build-b,cpp,lzo`
-- keep `pump` enabled only for builders that do not generate C headers during
-  the build; otherwise use normal distcc hosts from the same host list
 
-Rust service builder images consume the host list through a BuildKit secret,
-discover either `/usr/local/lib/distcc` or `/usr/lib/distcc`, put the discovered
-wrapper directory first in `PATH`, export `CC=distcc`, `GCC=distcc`,
-`CXX=distcc`, and `GXX=distcc`. Builders without generated C headers may start
-with `eval \`distcc-pump --startup\`` before `cargo build` and shut it down
-after the build with `distcc-pump --shutdown`. Builders with generated C
-headers, such as the UI build through `aws-lc-sys`, must use normal distcc mode
-instead so generated includes are preprocessed locally before remote compile.
-When the distcc path is attempted, the build logs `[INFO] trying distcc path.`
-and uses `DISTCC_FALLBACK=0` so project logic can explicitly retry once with
-the normal local compiler if distcc is unavailable. Do not add `127.0.0.1` as
-an implicit host.
-Images that install Debian `distcc-pump` patch the package's known invalid
-Python regex escapes before configuration and compile-check the result with
-`SyntaxWarning` treated as an error.
+Rust service builds (`ci.sh rust-build`) consume the host list through a
+BuildKit secret, link every compiler driver of the SOT variable
+`ci_variables.CI_TOOLCHAIN_COMPILERS` (passed to the builder as a build-arg)
+into a per-run masquerade directory, put that directory first in `PATH`, and
+export each compiler variable of the list (`CC=cc`, `CXX=c++`, ...) as its
+driver name. The `,cpp` hosts run in pump mode (`pump --startup`); the other
+hosts stay plain distcc (`DISTCC_HOSTS_NO_PUMP`) for inputs with generated C
+headers, such as `aws-lc-sys`. `DISTCC_FALLBACK=0` is set, and a failed pump
+start or a failed distcc probe compile fails the build
+(`CI-ERROR-RUSTBUILD-0023`, `CI-ERROR-RUSTBUILD-0024`; AG-CI-007). Do not add
+`127.0.0.1` as an implicit host.
 
 Important:
 
@@ -180,90 +162,48 @@ Important:
 
 ## Rust builds and ccache (distcc C-dependency cache)
 
-`services/dns/Dockerfile`, `services/ui/Dockerfile` (issue #1533), and
-`services/watchdog/Dockerfile` (issue #1095) can layer `ccache` in front of
-distcc for their C-dependency compile paths (`ring`/`aws-lc-sys`, via
-`rustls`), so a rebuild against unchanged C sources reuses a previous
-compile's result from Redis instead of recompiling and redistributing it
-every time.
+`ci.sh rust-build` (`_ci_rb_ccache`) can layer `ccache` in front of distcc
+for the C-dependency compile paths of every Rust image (`ring`/`aws-lc-sys`,
+via `rustls`), so a rebuild against unchanged C sources reuses a previous
+compile's result from Redis. `ci.sh` (`_ci_set_runtime`) writes the build
+secrets: `ccache_redis_url` and `sccache_redis_url` from `SCCACHE_REDIS_URL`
+when the sccache chain includes `redis`, and `distcc_potential_hosts` only
+for Rust builds on a self-hosted runner. The distcc wrapper that `ci.sh`
+generates (`_ci_rust_distcc_wrapper`) understands both distcc calling
+conventions -- the `$0`-basename masquerade dispatch and ccache's
+`CCACHE_PREFIX` convention (`distcc <real-compiler-path> <args>`) --
+disambiguated by checking `$0` first.
 
-**Correction (2026-09-01, Issue #1781):** this paragraph used to also claim
-that, since issue #1304/PR #1661, `tools/build-tools/Dockerfile` layered
-this same ccache-over-distcc mechanism in front of its own "from-source
-curl/git C compiles." `tools/build-tools/Dockerfile` has no such compile:
-curl and git are both plain `apk add`/`apt-get install` packages there
-(curl was `COPY`'d from the shared `services/utilities` image's own
-from-source build until Issue #1781 replaced that `COPY` with this
-stage's own `apk add`/`apt-get install curl`), and this file never wires
-`CC=distcc`/`CC="ccache ..."` for either. The ccache/distcc-accelerated
-from-source build this correction refers to only ever existed in
-`services/utilities/Dockerfile`'s now-removed `curl-builder` stage. It is
-unclear from this PR's scope whether `build-tools.yml`'s and
-`build-push.yml`'s own `ccache_redis_url`/`distcc_potential_hosts` secret
-provisioning for the `build-tools` matrix entry, and the "for all four
-services" claim below, were ever accurate or are simply dead as a result
--- flagged separately, not resolved here. `services/ui/Dockerfile`'s
-custom `lancache-distcc-wrapper` now understands both distcc calling
-conventions -- the original `$0`-basename masquerade dispatch, and
-ccache's `CCACHE_PREFIX` convention (invoked as `distcc
-<real-compiler-path> <args>`, real compiler is `$1`) -- disambiguated by
-checking `$0` first. `build-push.yml`'s real CI pipeline populates the
-`ccache_redis_url` secret and the preflight action's `ccache-redis-file`
-input for all four services (confirmed live, issue #1095, prior to this
-correction) -- see `AGENTS.md`'s `AG-CI-022` note for the wiring history.
+Rules `ci.sh` applies:
 
-Important rules:
-
-- ccache is enabled only once distcc itself is already enabled, and only when
-  a ccache Redis endpoint (BuildKit secret `ccache_redis_url`) is present --
-  it automatically reuses the `SCCACHE_REDIS_URL` secret already documented
-  above for sccache, not a second Redis URL
-- once both are enabled, `services/dns/Dockerfile`, `services/ui/Dockerfile`,
-  and `services/watchdog/Dockerfile` export `CC="ccache <real compiler>"`
-  (not the plain `CC=distcc` every other distcc-enabled builder uses), with
-  `CCACHE_PREFIX=distcc` so ccache still dispatches actual cache misses
-  through distcc
-- use `CCACHE_COMPILERCHECK=content`, not the ccache default of `mtime`,
-  since a build-tools image rebuild changes the compiler's mtime but not
-  necessarily its output
-- `CCACHE_EXTRAFILES` folds two files into every cache key: the resolved
-  `$BUILD_TOOLS_IMAGE` reference (so a client-side toolchain upgrade always
-  produces a fresh key instead of reusing an object built by an older client
-  compiler), and a verified remote toolchain identity read back from
-  `configure_distcc()`'s own probe compile -- the `.comment` ELF section
-  GCC/Clang embed in every object, extracted from an object that a real farm
-  host actually produced, not assumed. If a farm host's compiler is upgraded
-  between builds, the next build's probe reads a different `.comment` string
-  and the cache key changes, so a stale remote object from the old toolchain
-  cannot be served as a hit. `configure_ccache()` fails closed (plain distcc,
-  no cache layer) if that identity cannot be read for any reason
-- **known limitation:** this samples whichever single farm host answered one
-  probe compile at the start of a build. It catches a farm upgraded *between*
-  builds, but not a farm that is heterogeneous *within* one build -- e.g. if
-  `192.168.1.229` and `192.168.1.240` (both natively installed, provisioned
-  by hand, with no repository script that keeps them in lockstep) end up on
-  different compiler versions from each other at the same moment, only the
-  probe's own host is reflected in the cache key, not every host distcc might
-  route individual `ring` C files to during the real build. Keep farm host
-  compiler upgrades infrequent, deliberate, and applied to the whole pool at
-  once until a per-object remote-identity check exists
-- every ccache failure detected *before* the real Cargo build (a failed
-  probe compile, or the probe's own Redis write/read check) falls back to
-  plain distcc with no cache layer, rather than hard-failing the build; a
-  Redis error that only surfaces *during* the real build itself cannot fall
-  back after the fact, since the compile already succeeded -- that case is
-  reported as an `[INFO]` diagnostic instead (see
-  `services/dns/Dockerfile`'s post-build stats check)
-
-See issue #887 for the full mechanism and `services/dns/Dockerfile`'s own
-`configure_ccache()`/`disable_ccache()` comments for the implementation.
+- ccache is enabled only once distcc itself is enabled and the
+  `ccache_redis_url` secret is present; without it the build logs
+  `CI-INFO-RUSTBUILD-0031`, without distcc `CI-INFO-RUSTBUILD-0025`
+- the compiler variables become `ccache <real compiler>` with
+  `CCACHE_PREFIX=distcc`, so cache misses still go through distcc
+- `CCACHE_COMPILERCHECK=content`, not the ccache default of `mtime`, since a
+  build-tools image rebuild changes the compiler's mtime but not necessarily
+  its output
+- `CCACHE_EXTRAFILES` folds two identities into every cache key: the local
+  toolchain and the remote toolchain read from the `.comment` ELF section of
+  the distcc probe object a farm host produced. If that remote identity cannot
+  be read, ccache stays off and the build uses plain distcc
+  (`CI-INFO-RUSTBUILD-0026`, AG-CI-022)
+- a failed ccache probe compile or a failed Redis round trip fails the build
+  before Cargo starts (`CI-ERROR-RUSTBUILD-0028`, `CI-ERROR-RUSTBUILD-0029`);
+  a Redis error during the build fails it after the build
+  (`CI-ERROR-RUSTBUILD-0041`)
+- **known limitation:** the remote identity comes from the one farm host that
+  answered the probe compile. It catches a farm upgraded *between* builds, but
+  not a farm whose hosts run different compiler versions at the same moment.
+  Upgrade the compilers of the whole pool at once.
 
 ## Parallel jobs
 
 Parallel CI jobs can reduce wall-clock time, but they also increase load.
 Set the optional `CARGO_BUILD_JOBS` repository variable when the runner farm
-should use a fixed Cargo job count. If it is unset, workflows and Rust service
-Dockerfiles use detected CPU cores minus two, with a minimum of four jobs.
+should use a fixed Cargo job count. If it is unset, `ci.sh rust-build` uses
+detected CPU cores minus two, with a minimum of four jobs.
 Invalid configured values fail closed instead of silently falling back.
 
 Watch these host resources:

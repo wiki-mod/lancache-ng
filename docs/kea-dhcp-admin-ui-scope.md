@@ -38,27 +38,29 @@ here; #1068 is the tracking issue for the field-test failure.
 
 ### 1a. Config-file-only (env var / JSON template, requires a container restart)
 
-These are read at `services/dhcp` container start (`services/dhcp/entrypoint.sh`
-plus the JSON templates `kea-dhcp4.conf`, `kea-ctrl-agent.conf`,
-`kea-dhcp-ddns.conf`) and are not writable from any Admin UI route today.
+These are read at `services/dhcp` container start by the supervisor's Kea
+renders in `services/watchdog/src/main.rs` (`kea_dhcp4`, `kea_dhcp4_first`,
+`kea_dhcp4_own`, `kea_ctrl_agent`, `kea_dhcp_ddns`) from the container env, whose
+defaults are the SOT runtime defaults in `.github/yaml/build-manifest.yml`. They
+are not writable from any Admin UI route today.
 
 | Setting | Source | Notes |
 |---|---|---|
-| Control-agent API socket / auth | `kea-ctrl-agent.conf`, `entrypoint.sh` | The Admin UI is a *client* of the Kea control-agent API (`lease4-del`, `config-*`), not a manager of the agent's own config |
-| Kea DDNS TSIG / update keys | `kea-dhcp-ddns.conf`, PowerDNS `configure_ddns_tsig()` | Shared with PowerDNS; rotating needs coordinated rollout across both containers, not a one-sided UI edit (same reasoning as the DNS doc's §1a) |
-| `DHCP_DOMAIN` (forward DDNS target zone, default `lan`) | `config/*/dhcp.env` | Determines which PowerDNS zone forward DDNS host records land in — defaults to the already-UI-managed `lan.` zone |
-| DDNS target DNS server list | `kea-dhcp-ddns.conf` `forward-ddns`/`reverse-ddns` → `dns-servers` | See §3; this is the subject of open bug #770 |
-| NTP defaults | `DHCP_NTP_SERVERS` (`config/*/dhcp.env`) | Project-wide policy value (AG-OP-014) — not a per-PR cleanup target |
-| Known-good snapshot retention/dir | `entrypoint.sh` env | Automatic, see §4 |
+| Control-agent API socket / auth | `kea_ctrl_agent`, `kea_ctrl_fence` | The Admin UI is a *client* of the Kea control-agent API (`lease4-del`, `config-*`), not a manager of the agent's own config |
+| Kea DDNS TSIG / update keys | `kea_dhcp_ddns` with `ddns_tsig_key`; PowerDNS side `ddns_tsig` | Shared with PowerDNS; rotating needs coordinated rollout across both containers, not a one-sided UI edit (same reasoning as the DNS doc's §1a) |
+| `DHCP_DOMAIN` (forward DDNS target zone, default `lan`) | SOT runtime default | Determines which PowerDNS zone forward DDNS host records land in — defaults to the already-UI-managed `lan.` zone |
+| DDNS target DNS server list | `kea_dhcp_ddns` `forward-ddns`/`reverse-ddns` → `dns-servers` | See §3; this is the subject of open bug #770 |
+| NTP defaults | `DHCP_NTP_SERVERS` (SOT runtime default) | Project-wide policy value (AG-OP-014) — not a per-PR cleanup target |
+| Known-good snapshot dir/file | `KEA_CONFIG_SNAPSHOT_DIR`, `KEA_CONFIG_SNAPSHOT_FILE` (SOT runtime defaults) | `kea_dhcp4` checks the saved config at start and falls back to the newest snapshot that passes; see §4 |
 
 ### 1b. Operator-configurable via Admin UI today
 
 Routes are registered in `services/ui/src/main.rs`; handlers live in
-`services/ui/src/routes/dhcp.rs`.
+`services/ui/src/main.rs`.
 
 | Setting | Route | Handler |
 |---|---|---|
-| DHCP mode (`disabled` / `kea` / `dnsmasq-proxy`) | `POST /dhcp/mode` | `update_dhcp_mode` → `reconcile_dhcp_mode`, persisted to the UI settings file (whole file rewritten each save) |
+| DHCP mode (`disabled` / `kea` / `dnsmasq-proxy` / `dnsmasq-relay`) | `POST /dhcp/mode` | `update_dhcp_mode` → `save_dhcp_settings` writes `DHCP_MODE`; the dhcp supervisor starts the chosen backend |
 | Subnet add / edit / remove | `POST /dhcp/subnet/{add,update,remove}` | `add_subnet` / `update_subnet` / `remove_subnet` |
 | Per-subnet DHCP options | `POST /dhcp/subnet/option/{add,remove}` | `add_subnet_option` / `remove_subnet_option`; option code parsed by `parse_custom_dhcp_option_code` — **numeric codes 1–254 only today** (see §2, open issue #1085) |
 | Static reservations (MAC → IP) | `POST /dhcp/static/{add,remove}` | `add_reservation` / `remove_reservation` |
@@ -101,8 +103,9 @@ and is not this project's goal.
 
 ## 3. DHCP-DDNS follow-through (Kea lease → PowerDNS record)
 
-**Current state.** `services/dhcp/kea-dhcp4.conf` renders
-`dhcp-ddns.enable-updates` from `DHCP_DDNS_ENABLED`, and the Admin UI exposes
+**Current state.** The supervisor's `kea_dhcp4_own` (`services/watchdog/src/main.rs`)
+sets `dhcp-ddns.enable-updates` from `DHCP_DDNS_ENABLED` when the saved config has
+no `dhcp-ddns` block, and the Admin UI exposes
 an independent "Enable DDNS Updates" toggle for changing that value without
 turning the DHCP server itself on or off. Kea's D2 daemon sends forward
 host-record updates to `${DHCP_DOMAIN}` (default `lan`, landing in the
@@ -113,14 +116,14 @@ catch-all caused NOTAUTH rejections).
 **Confirmed gaps and resolved follow-through notes:**
 
 - **#1076 — independent "Enable DDNS Updates" toggle.** Implemented: the
-  template uses `DHCP_DDNS_ENABLED`, `services/dhcp/entrypoint.sh` normalizes
-  the first-boot default and preserves the live persisted value, and
-  `services/ui/src/routes/dhcp.rs` exposes the live toggle.
-- **#770/#1164 — DDNS updates deliberately reach `dns-standard` only.** Each
+  supervisor's `kea_dhcp4_own` takes `DHCP_DDNS_ENABLED` as the first-boot
+  default and keeps a saved `dhcp-ddns` block as it is, and
+  `services/ui/src/main.rs` exposes the live toggle.
+- **#770/#1164 — DDNS updates deliberately reach `dns` only.** Each
   `forward-ddns`/`reverse-ddns` domain's `dns-servers` list is a **failover**
   list (D2 tries the first server, falls back only on failure), **not** a
   fan-out. The resolved design is therefore a single DDNS writer:
-  `dns-standard` accepts the update, while `dns-ssl` and remote DNS
+  `dns` accepts the update, while remote DNS
   secondaries receive the resulting zone state through native PowerDNS
   AXFR/NOTIFY.
 - **#1083 — lease release DDNS cleanup.** Implemented as a best-effort
@@ -145,7 +148,7 @@ doc's §4 and [`known-good-config-snapshots.md`](known-good-config-snapshots.md)
 
 **Not built (log-only today):** there is no dashboard indicator surfacing "this
 Kea node is currently running a stale known-good config because the last
-regeneration was rejected." That gap is shared across all three file-based
+regeneration was rejected." That gap is shared across all four file-based
 snapshot adapters (nginx/dnsmasq/PowerDNS/Kea) and is not Kea-specific; a shared
 "config snapshot rollback happened" status surface is the natural way to close
 it (v0.3.0 candidate, not started — same note as the DNS doc's §4).
@@ -195,19 +198,19 @@ ordering.
 
 | Area | State | Where |
 |---|---|---|
-| DHCP mode switch (disabled/kea/dnsmasq-proxy) | Admin UI, implemented | `dhcp.rs::update_dhcp_mode` |
+| DHCP mode switch (disabled/kea/dnsmasq-proxy/dnsmasq-relay) | Admin UI, implemented | `services/ui/src/main.rs` `update_dhcp_mode` |
 | End-to-end activation of either mode | **Broken in v0.2.0 field test** | #1068 (prerequisite) |
-| Subnet CRUD | Admin UI, implemented | `dhcp.rs::{add,update,remove}_subnet` |
-| Reservation CRUD | Admin UI, implemented | `dhcp.rs::{add,remove}_reservation` |
-| Per-subnet numeric DHCP options (1–254) | Admin UI, implemented | `dhcp.rs::add_subnet_option` |
+| Subnet CRUD | Admin UI, implemented | `services/ui/src/main.rs` `add_subnet`, `update_subnet`, `remove_subnet` |
+| Reservation CRUD | Admin UI, implemented | `services/ui/src/main.rs` `add_reservation`, `remove_reservation` |
+| Per-subnet numeric DHCP options (1–254) | Admin UI, implemented | `services/ui/src/main.rs` `add_subnet_option` |
 | PXE keys (`next-server`/`server-hostname`/`boot-file-name`) | Not built | Planned, #1085 |
 | Standard-options table with tooltips | Not built | Planned, v0.3.0; i18n decision in §6 |
-| Lease release | Admin UI, implemented | `dhcp.rs::release_lease` |
+| Lease release | Admin UI, implemented | `services/ui/src/main.rs` `release_lease` |
 | Lease release → DDNS record cleanup | Implemented, best-effort on NATS/publish failures | #1083 |
-| DHCP conflict pre-check ("DHCP-Precheck") | Admin UI, implemented | `dhcp.rs::check_dhcp_conflict` |
-| Kea config snapshot rollback | Admin UI, implemented | `dhcp.rs::rollback_kea_snapshot`, #614 |
+| DHCP conflict pre-check ("DHCP-Precheck") | Admin UI, implemented | `services/ui/src/main.rs` `check_dhcp_conflict` |
+| Kea config snapshot rollback | Admin UI, implemented | `services/ui/src/main.rs` `rollback_kea_snapshot`, #614 |
 | "Enable DDNS Updates" toggle (independent of DHCP-Server) | Admin UI, implemented | #1076 |
-| DDNS convergence to dns-standard + dns-ssl | Implemented via single-writer DDNS plus native PowerDNS AXFR/NOTIFY | #770/#1164 |
+| DDNS convergence to remote secondaries | Implemented via single-writer DDNS plus native PowerDNS AXFR/NOTIFY | #770/#1164 |
 | Snapshot-rollback status indicator | Not built (log-only) | Planned, v0.3.0, not Kea-specific |
 | UI i18n / localization | Not built (no infra at all) | Prerequisite for localized tooltips, §6 |
 | General Kea JSON config editor | Not planned | Deliberately out of scope |

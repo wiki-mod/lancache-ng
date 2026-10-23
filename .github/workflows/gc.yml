@@ -1,0 +1,135 @@
+
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+# What: reap unreachable GHCR artifacts (reachability GC).
+# Why: GC is its own workflow; retention to roots only.
+# From: Issue #1683
+name: CI 2.0 GC
+on:
+  schedule:
+    - cron: "43 4 * * *"
+  workflow_dispatch:
+permissions:
+  contents: read
+  packages: read
+concurrency:
+  group: ci-2.0-gc
+  cancel-in-progress: false
+defaults:
+  run:
+    shell: bash
+# What: GHCR token for ci.sh; no login action.
+# Why: auth is ci.sh policy; the workflow only sets env.
+# From: Issue #1683
+env:
+  GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  # What: LAN proxy CA secret; ci.sh uses it self-hosted.
+  # Why: secrets are not in CI_VARIABLES; vars are.
+  # From: Issue #1683 | PR #1858
+  PROJECT_SELFHOSTED_PROXY_CA: ${{ secrets.PROJECT_SELFHOSTED_PROXY_CA }}
+  # What: all repo/org variables once, as json, for ci.sh.
+  # Why: ci.sh reads vars by name; YAML lists none of them.
+  # From: Issue #1683 | PR #1858
+  CI_VARIABLES: ${{ toJSON(vars) }}
+jobs:
+  # What: resolve the build-tools channel to a digest.
+  # Why: gc runs in build-tools, never on the runner.
+  # From: Issue #1683 | PR #1858
+  platform:
+    name: platform
+    # What: the one literal runner/timeout; emits the rest.
+    # Why: ci.sh can only pick a runner once one runs it.
+    # From: Issue #1683 | PR #1858
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      image: ${{ steps.resolve.outputs.image }}
+      runner: ${{ steps.jobs.outputs.runner }}
+      timeouts: ${{ steps.jobs.outputs.timeouts }}
+    # What: one mutable entry: the current_dev channel.
+    # Why: ci.sh cannot run before a container exists.
+    # From: Issue #1683 | PR #1858
+    container:
+      image: ghcr.io/${{ github.repository }}/build-tools:nightly
+      credentials: &ghcr_credentials
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      # What: shallow auth checkout of the event commit
+      # Why: no SHA pin outside SOT; git is in build-tools.
+      # From: Issue #1683 | PR #1858
+      - &bootstrap
+        name: Bootstrap the working tree
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory "${PWD}"
+          git init -q .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git config --local "http.${GITHUB_SERVER_URL}/.extraheader" "AUTHORIZATION: basic $(printf 'x-access-token:%s' "${GHCR_TOKEN}" | base64 -w0)"
+          git fetch -q --no-tags --depth=1 origin "${GITHUB_SHA}"
+          git checkout -q FETCH_HEAD
+      - name: Resolve the build-tools image
+        id: resolve
+        run: bash .github/scripts/ci.sh build-tools resolve-image
+      - name: Resolve the job settings
+        id: jobs
+        run: bash .github/scripts/ci.sh job-settings
+
+  # What: reap unreachable artifacts vs protected roots.
+  # Why: reachability decides, not age (§78).
+  # From: Issue #1683
+  gc:
+    name: gc
+    needs: platform
+    runs-on: ${{ needs.platform.outputs.runner }}
+    timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['gc'] }}
+    # What: contents write to delete green run refs.
+    # Why: the refs are ci.sh git refs; PR state is read.
+    # From: Issue #1683 | PR #1858
+    permissions:
+      contents: write
+      packages: read
+      pull-requests: read
+    container:
+      image: ${{ needs.platform.outputs.image }}
+      credentials: *ghcr_credentials
+    steps:
+      - *bootstrap
+      # What: delete only unreachable artifacts (§97).
+      # Why: SQLite is candidate-only; delete needs the PAT.
+      # From: Issue #1683
+      - name: Reap unreachable GHCR artifacts
+        env:
+          GH_TOKEN: ${{ secrets.GHCR_PACKAGE_DELETE_PAT }}
+        run: bash .github/scripts/ci.sh gc --apply
+      # What: delete green run refs of closed PRs.
+      # Why: one ref per PR stays after merge otherwise.
+      # From: Issue #1683 | PR #1858
+      - name: Delete green run refs of closed PRs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash .github/scripts/ci.sh gc-green-refs --apply
+
+  # What: AG-GH-017 sweep for branches with no PR or issue.
+  # Why: reachability of refs; read-only repo token only.
+  # From: Issue #1683 | PR #1858
+  orphaned-branches:
+    name: orphaned-branches
+    needs: platform
+    runs-on: ${{ needs.platform.outputs.runner }}
+    timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['orphaned-branches'] }}
+    permissions:
+      contents: read
+      packages: read
+      issues: read
+      pull-requests: read
+    container:
+      image: ${{ needs.platform.outputs.image }}
+      credentials: *ghcr_credentials
+    steps:
+      - *bootstrap
+      - name: Report branches with no PR or issue reference
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash .github/scripts/ci.sh check orphaned-branches

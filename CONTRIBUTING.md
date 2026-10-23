@@ -16,7 +16,7 @@ lancache-ng provides a Docker based LAN cache stack with:
 
 - DNS based cache routing
 - an nginx cache proxy
-- optional SSL caching with a locally trusted CA
+- optional HTTPS caching with a locally trusted CA
 - an Admin UI
 - optional DHCP and secondary DNS features
 - setup and update automation for first-time users
@@ -69,11 +69,11 @@ The template now exposes visible `Linked Issues` and `Risk / Rollback /
 Follow-up` sections. Fill those in directly instead of relying on hidden
 comments so the rendered PR body always surfaces the tracking and risk
 context reviewers need. `Linked Issues`' exact casing matters: both
-`current-dev-auto-close.yml`'s closing-keyword scanner and
-`scripts/validate-pr-template.sh`'s required-section check match it
-case-sensitively (issue #1496).
+`ci.sh close-linked-issues` (the closing-keyword scanner) and
+`ci.sh check pr-template` (the required-section check) read sections
+through one parser that matches the heading exactly (issue #1496).
 - if the change touches build, CI, or release automation, whether any accelerator (`sccache`, `sccache-dist`, `distcc`, `distcc-pump`, or Buildx cache) is optional, preferred, or a gate
-- whether a GitHub-hosted fallback still works without LAN-only cache assumptions
+- whether the change still works on a GitHub-hosted runner, where `ci.sh` reads no LAN proxy and no dist scheduler or distcc host
 
 Prefer focused pull requests. For example, do not mix documentation rewrites,
 CI fixes and runtime behavior changes unless they must land together.
@@ -92,7 +92,7 @@ Track related work explicitly in the PR body:
 - If the PR title or body says scaffold, partial, deferred, not covered, not implemented, or follow-up, keep the PR open-scoped: explain the remainder with `Refs #123` and avoid `Fixes #123` / `Closes #123` unless the full issue is actually complete.
 - When a PR is merged, completion claims must be checked against the merged code on the active development branch (`current_dev` as of #825, not a hardcoded `master`/`v0.2.0` assumption), not just the PR head or narrative.
 - If no issue exists, that's expected and fine per the "Before you start" guidance above for single, well-scoped work implemented immediately — no need to explain why in that case. If work that genuinely should have had an issue (multi-topic, backlog, needs-discussion) shipped without one, explain why in the PR body instead of leaving the relationship unclear.
-- **`Closes #123` is now automated on `current_dev` merges too** (`.github/workflows/current-dev-auto-close.yml`, issue #1137): GitHub's own built-in closing-keyword behavior still only fires on merges to the repository's default branch (`master`), but this project's own workflow now mechanizes the same relay-and-close pattern for `current_dev` merges -- it posts the merged PR's body verbatim as a comment on each referenced, still-open issue and closes it. `Refs #123` is deliberately never matched (non-closing references stay open, as intended). If this automation is ever down or a PR predates it, the manual fallback in the next section still applies.
+- **`Closes #123` is now automated on `current_dev` merges too** (`ci.sh close-linked-issues`, run by the `close-linked-issues` job in `.github/workflows/ci.yml` on every push to a non-default branch, issue #1137): GitHub's own built-in closing-keyword behavior still only fires on merges to the repository's default branch (`master`), but this project's own CI now mechanizes the same relay-and-close pattern for `current_dev` merges -- it posts the merged PR's body verbatim as a comment on each referenced, still-open issue listed under `## Linked Issues` and closes it. `Refs #123` is deliberately never matched (non-closing references stay open, as intended). If this automation is ever down or a PR predates it, the manual fallback in the next section still applies.
 
 ### Closing an issue manually (fallback, current_dev merges)
 
@@ -121,22 +121,22 @@ not by appending new comments each time something is fixed or added.
 lancache-ng maintains a `CHANGELOG.md` file at the repository root, following
 the [Keep a Changelog](https://keepachangelog.com/) format.
 
-As of #899, updating it is automatic and requires no manual collection step:
+Updating it is automatic and requires no manual collection step (#894):
 
-1. `.github/workflows/release-drafter.yml` drafts/updates a GitHub Release on
-   every push to `master`/`v0.2.0`, listing each merged PR as `#NUMBER | TITLE`
-   grouped by label (config: `.github/release-drafter.yml`).
-2. When that release is published (manually, or via a `workflow_dispatch` run
-   of the same workflow), `.github/workflows/update-changelog.yaml` fires and
-   writes the release's name and notes into `CHANGELOG.md`, committing the
-   result automatically.
+1. A `vX.Y.Z` or `vX.Y.Z-rc.N` tag runs `.github/workflows/release.yml`.
+   `ci.sh release-publish` writes the GitHub Release notes: every PR merged
+   since the previous `vX.Y.Z` tag, as `#NUMBER TITLE (URL)` followed by that
+   PR's own `## Changelog` section, grouped by label (grouping, fallback group
+   and skip label live in `.github/yaml/build-manifest.yml`, `release_notes`).
+2. For a stable `vX.Y.Z` tag, `ci.sh release-changelog` then adds the same
+   list to `CHANGELOG.md` as `## [X.Y.Z] - <date>` and commits it to the
+   default branch.
 
-Applying the `skip-changelog` label to a PR excludes it from the drafted
-release notes (e.g. a pure internal refactor with no user-visible effect).
+Applying the `skip-changelog` label to a PR excludes it from the release
+notes (e.g. a pure internal refactor with no user-visible effect).
 
-`scripts/untracked/collect-changelog-entries.sh` (added in #890) remains as a manual
-fallback -- useful for reconstructing history or if the automated pipeline is
-ever disabled -- but is no longer the primary path.
+`ci.sh release-notes <tag>` prints the same list without publishing anything
+-- useful for reconstructing history or checking notes before a release.
 
 Maintainers reviewing release PRs should verify that `CHANGELOG.md` accurately
 reflects user-visible behavior changes across all merged work for that release.
@@ -151,13 +151,9 @@ the remaining operator risk and any rollback or follow-up notes.
 All actionable static analysis warnings are treated as build failures under the warnings-as-errors rule:
 
 **Hard failures (block a PR):**
-- `cargo clippy` warnings — denied in the `dns_rust_quality` and `ui_rust_quality` jobs
-- `cargo clippy` warnings — enforced via `cargo clippy -- -D warnings` in the same jobs
-- `shellcheck` warnings — enforced via `shellcheck --severity=warning` in the `shellcheck` job
-- `actionlint` warnings — enforced via `actionlint .github/workflows/*.yml`
-- `docker compose config` warnings — enforce via pattern matching for `warn|warning` in `validate-compose` job
-- File header checks — enforced via `bash scripts/tracked/check-file-headers.sh`
-- SPDX license identifier — enforced for files a PR changes via `bash scripts/tracked/check-pr-diff-file-headers.sh`
+- `cargo fmt --check`, `cargo clippy -- -D warnings` and `cargo test` of each changed crate, run by `ci.sh test-stack` in the `test` job
+- `shellcheck` and `actionlint` findings, run by `ci.sh check shellcheck` and `ci.sh check actionlint` in the `lint` job
+- every repository check in `ci.sh check all` (file headers, comment contract, compose config and the rest of the `CI_CHECKS` table) in the `checks` job
 
 **Known exception (tracked in issue #394):**
 GitHub's CodeQL Rust extractor emits `macro expansion failed` warnings for ordinary macros (`format!`, `assert_eq!`, `vec!`, `json!`, `tracing::*`, etc.) as a documented upstream limitation, not due to code defects in this repository. This exception is **scoped to CodeQL Rust macro-expansion extraction warnings only** and does not extend to `cargo clippy` warnings, which remain hard failures. Every instance of a CodeQL macro-expansion warning must stay tracked in #394, and #394 must be periodically reevaluated to monitor upstream status rather than being left as a permanent blanket excuse.
@@ -168,10 +164,11 @@ A **major change** is any pull request that adds a new feature, changes
 existing runtime/setup/update behavior, or fixes a bug in code that did not
 already have a regression test covering that behavior. A major change must
 add or update an automated test in the relevant test suite (Rust `#[test]`
-functions for `services/ui`/`services/dns/nats-subscriber`, a `.bats` fixture
-under `tests/bats/` for shell/setup logic, or a real end-to-end simulation
-script wired into a CI workflow for full-stack behavior) that exercises the
-new or changed behavior. A pull request that changes behavior with no
+functions for `services/ui`/`services/dns/nats-subscriber`, a test in
+`.github/scripts/ci.bats` for shell/setup logic only with a prior maintainer ACK
+documented on the PR (issue #1683 comment 6145242213), or a live probe in
+`ci.sh validate` for full-stack behavior) that exercises the new or changed
+behavior. A pull request that changes behavior with no
 corresponding test change should explain why in the PR body (for example,
 "covered by existing test X" or "no automated coverage is practical for this
 because Y" -- see `docs/threat-model.md`'s own precedent of naming untestable
@@ -179,7 +176,7 @@ gaps explicitly rather than silently shipping without coverage). Purely
 cosmetic changes (docs, comments, formatting) are not major changes and are
 exempt.
 
-Because of this limitation, **a green CodeQL Rust job must not be read as full security-scan coverage of the Rust codebase.** A concrete historical example (PR #357, Actions run 28596839186) shows the Rust extractor reporting 12 files "extracted with errors" against 2 "without error" while the job still concluded `success`. That state is expected: CodeQL's own authoritative quality gate — the `rust/diagnostic/database-quality` ("Low Rust analysis quality") diagnostic query — did not fire on that run, so CodeQL classifies partial macro-expansion extraction as normal, not degraded. The raw per-file counts are metric-query output printed only to the analysis log summary; they are not exposed as a supported, machine-readable workflow output (github/codeql-action #1742, open since 2023), and the database is cleaned after `analyze`. This is why `.github/workflows/codeql.yml` reports CodeQL's own `database-quality` determination and a standing caveat in the job summary rather than enforcing a hand-rolled count threshold (which would be permanently red on an upstream limitation that is not tunable here — Rust supports only `build-mode: none`). Rust security correctness continues to be enforced separately by the `dns_rust_quality`, `ui_rust_quality`, `dns_test`, and `ui_test` jobs, which are independent of CodeQL extraction quality.
+Because of this limitation, **a green CodeQL Rust job must not be read as full security-scan coverage of the Rust codebase.** A concrete historical example (PR #357, Actions run 28596839186) shows the Rust extractor reporting 12 files "extracted with errors" against 2 "without error" while the job still concluded `success`. That state is expected: CodeQL's own authoritative quality gate — the `rust/diagnostic/database-quality` ("Low Rust analysis quality") diagnostic query — did not fire on that run, so CodeQL classifies partial macro-expansion extraction as normal, not degraded. The raw per-file counts are metric-query output printed only to the analysis log summary; they are not exposed as a supported, machine-readable workflow output (github/codeql-action #1742, open since 2023), and the database is cleaned after `analyze`. This is why `.github/workflows/codeql.yml` reports CodeQL's own `database-quality` determination and a standing caveat in the job summary rather than enforcing a hand-rolled count threshold (which would be permanently red on an upstream limitation that is not tunable here — Rust supports only `build-mode: none`). The Rust checks independent of CodeQL extraction quality are `cargo fmt --check`, `cargo clippy -- -D warnings` and `cargo test` in the `ci.yml` job `test` (`ci.sh test-stack`), which runs only when Rust validation is enabled (AG-VAL-008).
 
 - Keep workflow action references pinned to full commit SHAs with a version comment; floating tags such as `@v4` are forbidden in project PRs, because Dependabot and similar tooling report them as a security finding.
 - Keep workflow changes reviewable:
@@ -191,15 +188,16 @@ Because of this limitation, **a green CodeQL Rust job must not be read as full s
 
 These are required, not stylistic suggestions — a PR missing them will fail CI or get flagged in review.
 
-- **File headers.** Every source/config file you add or touch (Rust, shell, YAML, Dockerfiles, `.conf`/template files, HTML/CSS/JS) must open with a short header: the project name and repo URL in the exact form `lancache-ng (https://github.com/wiki-mod/lancache-ng)`, followed by a purpose description of that specific file, using the comment syntax valid for that file's language (`//!` for Rust, `#` for shell/YAML/Dockerfiles, Tera's `{# ... #}` for HTML templates under `services/ui/src/templates/`, `/* ... */` for CSS, `//` for JS). `scripts/tracked/check-file-headers.sh` enforces this in CI (`file-headers` job in `build-push.yml`) — it fails a PR if any non-excluded tracked file is missing the exact header string. A short list of files are excluded (`.md` files, the root `.env`/`.env.example`, lockfiles, `.gitkeep`, the `VERSION` file, JSON-backed `.conf` files, vendored/generated build artifacts) — see `scripts/tracked/check-file-headers.sh`'s `is_excluded()` function for the exact list, and AGENTS.md's "File Headers" section for the full rationale (why each exclusion exists, how to scale header detail to a file's complexity, and what NOT to invent in a header).
-- **SPDX license identifier.** Every file in scope for the header above also carries a `SPDX-License-Identifier: AGPL-3.0-or-later` line, placed immediately after the shebang (if any) and before the `lancache-ng (...)` header line, in that file's own comment syntax. `scripts/tracked/check-pr-diff-file-headers.sh` enforces this in CI (same `file-headers` job) against every file a pull request actually changes; the repo-wide backfill for files a PR doesn't touch is tracked separately and not yet a hard failure. See AGENTS.md's Rule-Ref: AG-HDR-008.
-- **Code comments.** Comment only when the WHY would not be obvious from well-named identifiers and the surrounding code — not what the code does, which should be readable from the code itself. Do comment: complex logic, guards, fallbacks, security decisions, non-obvious side effects, a workaround for a specific bug, or a deliberate deviation from the obvious approach. A missing WHY-comment on code that clearly needs one is treated as a defect, whether or not it predates your change — if you're already touching that code, add the missing comment as part of your PR rather than leaving the gap. Do not reference the current task, PR number, or fix in a comment (e.g. "fixed for #123") — that belongs in the PR description, not in code that outlives the change. See AGENTS.md's "Comment Style" section for the full guidance, including how to document a deliberately deferred fix versus a straightforward WHY-comment.
+- **File headers.** Every file outside the exclusion list starts with the header that AGENTS.md `[AG-HDR-*]` defines: line 1 empty or the interpreter marker, then `LanCache-NG (https://github.com/wiki-mod/lancache-ng)` and `SPDX-License-Identifier: AGPL-3.0-or-later` in the file's own comment syntax. `ci.sh check comments` enforces it; the header text and the exclusion globs live in the SOT `.github/yaml/build-manifest.yml` (`file_headers`).
+- **Code comments.** Every comment block follows AGENTS.md `[AG-CODE-012]`: `What:` and `Why:` on one line each, at most 60 characters, and `From: Issue #N | PR #N` when a source is known. `ci.sh check comments` enforces it.
 
 ## Building from source
 
-lancache-ng is a Docker Compose stack of Rust services (Admin UI, DNS
-NATS subscriber) plus nginx, PowerDNS, and Kea, each with its own
-Dockerfile under `services/<name>/`. There is no single top-level build
+lancache-ng is a Docker Compose stack of five containers (`services`,
+`proxy`, `dns`, `dhcp`, `ui`). Each is a build target in the SOT
+`.github/yaml/build-manifest.yml` with its own Dockerfile (`services` builds
+from `services/watchdog/`, the others from `services/<name>/`) and its Rust
+programs. There is no single top-level build
 command that produces a native binary outside Docker — building "from
 source" means building the container images from this repository's
 source instead of pulling the prebuilt `ghcr.io/wiki-mod/lancache-ng/*`
@@ -210,47 +208,39 @@ images.
 - Docker Engine and Docker Compose v2 (the `docker compose` subcommand,
   not the standalone `docker-compose` v1 binary).
 - No local Rust toolchain is required to build the images: the Rust
-  service builders (`services/dns/nats-subscriber`, `services/ui`)
-  consume the prebuilt `ghcr.io/wiki-mod/lancache-ng/build-tools` image
-  (selected via `BUILD_TOOLS_IMAGE`, resolved by
-  `scripts/untracked/select-build-tools-image.sh`) inside their own multi-stage
-  Dockerfile, so `cargo`/`rustc` never need to be installed on the host.
+  crates are members of the workspace in the repository-root `Cargo.toml`,
+  and every `services/<name>/Dockerfile` builds them inside the prebuilt
+  `ghcr.io/wiki-mod/lancache-ng/build-tools` image (build arg
+  `BUILD_TOOLS_IMAGE`, resolved to a digest by
+  `bash .github/scripts/ci.sh build-tools resolve-image`, which needs
+  `GITHUB_ACTOR` and `GHCR_TOKEN` for GHCR read access), so `cargo`/`rustc`
+  never need to be installed on the host.
   If you do want a local Rust toolchain for editor tooling (rust-analyzer,
   etc.), any recent stable toolchain matching the edition declared in
-  each crate's `Cargo.toml` works; see `AGENTS.md`'s "Build-tools
+  the workspace `Cargo.toml` works; see `AGENTS.md`'s "Build-tools
   container verification" section for why the build-tools container, not
   your host toolchain, is still the only path CI/PR verification counts.
-- No local Node.js, Python, or Go toolchain is required either — see
-  `AGENTS.md`'s "Project Language" and `AG-KD-003` sections for the
-  narrow, documented exceptions where this project's own CI images build
-  a *different* project's Go-based tool (`actionlint`, Docker CLI,
-  `docker-compose`) from source for a security reason, which is unrelated
-  to building lancache-ng's own services.
+- No local Node.js, Python, or Go toolchain is required either. The
+  build-tools image installs its third-party tools (`actionlint`, Docker
+  CLI, Buildx, Compose) as Alpine packages from the SOT (`AGENTS.md`
+  `AG-KD-003`).
 
 ### Building the full stack
 
-There is only one *production* deployment profile, `deploy/prod/docker-compose.yml` (the
-former `deploy/dev/` stack was retired in v0.3.0, #766 — see `AGENTS.md`'s `AG-KD-008`;
-**corrected 2026-08-05, issue #1391 doc-sweep audit** — a prior version of this section said
-"there is only one deployment profile" outright, then immediately named two more
-[`deploy/quickstart/`, `deploy/full-setup/`] as siblings in the very next sentence, and
-pointed at `CLAUDE.md`'s "No Separate Dev Environment" section, which no longer exists there
-— that content moved into `AGENTS.md`'s `## Architecture` section on 2026-07-31, per
-`CLAUDE.md`'s own current text). All three real profiles that exist today
-(`deploy/prod/`, `deploy/quickstart/`, `deploy/full-setup/`) reference every service by
-`image:` rather than `build:`, so there is no compose-level `--build` shortcut to rebuild every
-service from source in one command. This matches how CI itself builds first
--party images: `docker buildx build` directly against each
-`services/<name>/Dockerfile` (see `.github/workflows/build-push.yml`), then
-whatever compose file is in use pulls (or, if a matching tag already exists
-locally, simply reuses) the resulting image.
+There is one deployment profile, `deploy/prod/docker-compose.yml` (`AGENTS.md`
+`AG-KD-008`). It references every service by `image:` rather than `build:`, so
+there is no compose-level `--build` shortcut to rebuild every service from
+source in one command. This matches how CI builds first-party images:
+`ci.sh build` runs `docker buildx build` against each
+`services/<name>/Dockerfile`, then compose pulls (or, if a matching tag already
+exists locally, simply reuses) the resulting image.
 
 To exercise the full stack against local source changes, build and tag each
 service you changed the same way (see "Building a single service image"
 below), matching the image reference `deploy/prod/docker-compose.yml`
 resolves by default (`ghcr.io/wiki-mod/lancache-ng/<service>:latest`, or
 whatever `LANCACHE_IMAGE_REGISTRY`/`LANCACHE_IMAGE_PREFIX`/`LANCACHE_IMAGE_TAG`
-you have set in `deploy/prod/.env`/`.env.local`), then run
+you have set in `deploy/prod/.env.local`), then run
 `docker compose -f deploy/prod/docker-compose.yml up -d` as usual — Compose's
 default pull policy only pulls an image that is missing locally, so a
 matching local tag is used as-is, with no push/pull round-trip required.
@@ -259,17 +249,13 @@ matching local tag is used as-is, with no push/pull round-trip required.
 
 ```bash
 # Example: rebuild only the Admin UI image.
-docker build -t lancache-ng-ui:local \
-  --build-arg BUILD_TOOLS_IMAGE="$(bash scripts/untracked/select-build-tools-image.sh)" \
-  services/ui
+bash .github/scripts/ci.sh build ui linux/amd64
 ```
 
-Every Rust service builder Dockerfile takes `BUILD_TOOLS_IMAGE` as a
-build arg; omitting it falls back to the Dockerfile's own `ARG
-BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools:latest`
-default, which is fine for a quick local rebuild but is never what real
-CI passes (see `AGENTS.md`'s **AG-CI-008** for why CI always passes this
-argument explicitly instead of relying on that default).
+Every service Dockerfile declares its arguments (`BUILD_TOOLS_IMAGE`, the
+base images, the SOT values) with no default and needs the `ci-scripts`
+build context, so a plain `docker build` fails by design; `ci.sh build`
+passes all of them (see `AGENTS.md`'s **AG-CI-008**).
 
 ### Production builds
 
@@ -277,7 +263,7 @@ argument explicitly instead of relying on that default).
 update safety" below) and does not build images from source. To run a
 locally-built image in a production-shaped deployment, build the image
 as shown above, tag it to match `LANCACHE_IMAGE_REGISTRY`/
-`LANCACHE_IMAGE_PREFIX`/`LANCACHE_IMAGE_TAG` in `deploy/prod/.env`, and
+`LANCACHE_IMAGE_PREFIX`/`LANCACHE_IMAGE_TAG` in `deploy/prod/.env.local`, and
 push it to a registry the deployment can pull from (or load it directly
 into the target Docker daemon) before running `setup.sh`/`docker compose
 up`.
@@ -287,15 +273,16 @@ up`.
 This section documents how the project selects, obtains, and tracks its
 dependencies, across every ecosystem this repository uses.
 
-- **Rust crates** (`services/ui`, `services/dns/nats-subscriber`): pinned
-  via each crate's `Cargo.lock`, committed to the repository. New
+- **Rust crates** (the workspace members in the repository-root
+  `Cargo.toml`): pinned via the one workspace `Cargo.lock`, committed to
+  the repository. New
   dependencies are added deliberately per change, preferring
   well-maintained crates already in the Rust ecosystem's common use (see
   `AGENTS.md`'s **AG-REL-003** for one concrete selection constraint:
-  `reqwest` must use `rustls-tls`, never `openssl-sys`). `cargo-audit`
-  runs in CI (`dns_cargo_audit`/`ui_cargo_audit` jobs) against every
-  PR/push to flag known-vulnerable versions of already-added
-  dependencies.
+  `reqwest` must use `rustls-tls`, never `openssl-sys`).
+  `bash .github/scripts/ci.sh check cargo-audit` flags known-vulnerable
+  versions of already-added dependencies: in the `ci.yml` `cargo-audit`
+  job when the lockfile changes, and daily in `nightly.yml`.
 - **GitHub Actions** (`.github/workflows/*.yml`): pinned to full commit
   SHAs with a version comment (never floating tags like `@v4`), per this
   file's "Quality and release process expectations" section above.
@@ -327,11 +314,11 @@ Treat host-local tools (`cargo`, `rustc`, `rustfmt`, `clippy`, `shellcheck`, `ac
 
 To run checks with the build-tools container:
 
-1. The build-tools image is selected automatically: `bash scripts/untracked/select-build-tools-image.sh` determines the correct version (published image or local build).
+1. Resolve the published build-tools image to its digest: `bash .github/scripts/ci.sh build-tools resolve-image` (needs `GITHUB_ACTOR` and `GHCR_TOKEN`; it reads the channel of the branch in `GITHUB_BASE_REF` or `GITHUB_REF_NAME`, else the SOT `release.default_channel`).
 2. Run checks inside the container with the standard pattern:
 
 ```bash
-BUILD_TOOLS_IMAGE="$(bash scripts/untracked/select-build-tools-image.sh)"
+BUILD_TOOLS_IMAGE="$(bash .github/scripts/ci.sh build-tools resolve-image)"
 docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work:ro" -w /work "$BUILD_TOOLS_IMAGE" <check-command>
 ```
 
@@ -339,60 +326,52 @@ docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work:ro" -w /work "$BUILD_TOOLS
 
 Run the checks that match your change.
 
-For shell scripts, run the checks inside the build-tools container:
+For shell scripts, run the check inside the build-tools container; it checks
+the shell files your change touches:
 
 ```bash
-BUILD_TOOLS_IMAGE="$(bash scripts/untracked/select-build-tools-image.sh)"
+BUILD_TOOLS_IMAGE="$(bash .github/scripts/ci.sh build-tools resolve-image)"
 docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work:ro" -w /work "$BUILD_TOOLS_IMAGE" \
-  bash -lc 'set -euo pipefail; find . -name "*.sh" -not -path "./.git/*" -not -path "*/target/*" -print0 | xargs -0 --no-run-if-empty shellcheck --severity=warning'
+  bash .github/scripts/ci.sh check shellcheck
 ```
 
 For Compose changes, you can validate locally (this does not depend on build-tools):
 
 ```bash
-docker compose -f deploy/quickstart/docker-compose.yml config
 docker compose -f deploy/prod/docker-compose.yml config
 ```
 
 For image inventory, release, or package-channel changes, run inside the build-tools container:
 
 ```bash
-BUILD_TOOLS_IMAGE="$(bash scripts/untracked/select-build-tools-image.sh)"
+BUILD_TOOLS_IMAGE="$(bash .github/scripts/ci.sh build-tools resolve-image)"
 docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work:ro" -w /work "$BUILD_TOOLS_IMAGE" \
-  bash scripts/untracked/validate-stack-images.sh
+  bash -c 'set -e; for c in stable-external-images image-channel-resolution prebuilt-prod; do bash .github/scripts/ci.sh check "$c"; done'
 ```
 
 For workflow changes, run inside the build-tools container:
 
 ```bash
-BUILD_TOOLS_IMAGE="$(bash scripts/untracked/select-build-tools-image.sh)"
+BUILD_TOOLS_IMAGE="$(bash .github/scripts/ci.sh build-tools resolve-image)"
 docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work:ro" -w /work "$BUILD_TOOLS_IMAGE" \
-  actionlint .github/workflows/*.yml
+  bash .github/scripts/ci.sh check actionlint
 ```
 
-Also run `scripts/tracked/check-action-node-versions.sh` (issue #801) if you changed or re-pinned any `uses:` action reference -- it scans every pinned action across all workflows and fails if any of them declares a deprecated Node runtime in its own `action.yml`/`action.yaml`:
+Also run the `action-node-versions` check (issue #801) if you changed or re-pinned any `uses:` action reference -- it scans every pinned action across all workflows and fails if any of them declares a deprecated Node runtime in its own `action.yml`/`action.yaml`:
 
 ```bash
-bash scripts/tracked/check-action-node-versions.sh
+bash .github/scripts/ci.sh check action-node-versions
 ```
 
-#### Optional: a local pre-push hook for this same check
-
-`.githooks/pre-push` runs `scripts/tracked/check-action-node-versions.sh` automatically before a push that touches any `.github/workflows/*.yml`/`*.yaml` file, so a deprecated-runtime pin surfaces before you push, not only after CI comes back red. This is an **optional, best-effort local convenience layer only** -- the build-push.yml `shellcheck` job is the actual, non-bypassable enforcement (it runs the same script inside the pinned build-tools container). The hook degrades cleanly (never blocks a push) if it can't run in your environment at all (e.g. no `curl` on `PATH`), but does block the push if it actually runs and finds a real deprecated-runtime pin -- bypass with `git push --no-verify` if needed, same as any other pre-push hook.
-
-Enable it once per checkout:
-
-```bash
-git config core.hooksPath .githooks
-```
-
-For Rust services, run the relevant Cargo checks for the service you changed inside
-the build-tools container. The UI service lives in `services/ui`. The DNS crate is in `services/dns/nats-subscriber`.
+For Rust changes, run the same Cargo checks `ci.sh test-stack` runs, from the
+workspace root inside the build-tools container (`-p <crate>` narrows them to
+the crate you changed; the crates are the members of the root `Cargo.toml`).
+`cargo check` stays a manual step (`AGENTS.md` **AG-VAL-008**).
 
 ```bash
-BUILD_TOOLS_IMAGE="$(bash scripts/untracked/select-build-tools-image.sh)"
-docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work:ro" -w /work "$BUILD_TOOLS_IMAGE" \
-  bash -lc 'cargo test --locked --manifest-path services/ui/Cargo.toml && cargo test --locked --manifest-path services/dns/nats-subscriber/Cargo.toml'
+BUILD_TOOLS_IMAGE="$(bash .github/scripts/ci.sh build-tools resolve-image)"
+docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work" -w /work "$BUILD_TOOLS_IMAGE" \
+  bash -c 'cargo fmt --check && cargo clippy --locked --all-targets -- -D warnings && cargo test --locked'
 ```
 
 If you cannot run a relevant check locally (for example, if Docker is unavailable),
@@ -417,26 +396,27 @@ Setup and update changes must preserve these rules:
 ## Release and package changes
 
 Release and package changes must follow `docs/release-versioning.md` and the
-machine-readable inventory in `release/stack-images.yml`.
+SOT `.github/yaml/build-manifest.yml` (services, `build_toolchain`,
+`base_images`, `release`).
 
 Required rules:
 
 - first-party runtime images are promoted as one stack package set
 - `latest` means the latest stable release only
-- `nightly` is the tested pre-stable channel, built from `current_dev`'s tip once a day
-  (01:00 UTC) plus on-demand, gated on a full green build+scan (formerly `edge`; **corrected
-  2026-08-05, issue #1391 doc-sweep audit** — a prior version of this line said "built
-  continuously from `master`," which was wrong on both counts: `nightly` has been built from
-  `current_dev`, not `master`, since v0.3.0 [#825/#1141], and has been once-daily-plus-on-demand,
-  not continuous, since #1254/#1255 [2026-07-25] — see `docs/release-versioning.md`, the
+- `nightly` is the tested pre-stable channel from `current_dev`, moved once a
+  day and on demand by `.github/workflows/nightly.yml` after validation, never
+  rebuilt there (formerly `edge`; see `docs/release-versioning.md`, the
   authoritative source for this channel's semantics, for the full history)
 - release candidates use `vX.Y.Z-rc.N` and must be GitHub prereleases
 - stable releases use `vX.Y.Z` and may move `latest`
-- release-capable paths must not depend on mutable `build-tools:latest`
-- compose image references must keep `LANCACHE_IMAGE_REGISTRY`,
-  `LANCACHE_IMAGE_PREFIX`, and `LANCACHE_IMAGE_TAG` wired consistently
-- package, workflow, release-note, and setup changes must run
-  `bash scripts/untracked/validate-stack-images.sh`
+- every job after the first runs in the build-tools image the first job
+  resolved to a digest (`ci.sh build-tools resolve-image`); only that first job
+  and the jobs that must run when it failed name the mutable
+  `build-tools:nightly` channel
+- every first-party compose image is one `LANCACHE_IMAGE_REF_<NAME>` value,
+  which `setup.sh` writes as `<image>@<digest>`
+- package, workflow, release-note, and setup changes must pass
+  `bash .github/scripts/ci.sh check all`
 
 ## Admin UI changes
 

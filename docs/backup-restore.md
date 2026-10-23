@@ -2,8 +2,8 @@
 
 LanCache NG stores mutable state outside container images. Back up that state before upgrades, after configuration changes, and before enabling scheduled automatic updates.
 
-For manual production checkouts, keep `deploy/prod/.env` as the checked-in
-template and put real runtime settings in `deploy/prod/.env.local`. `setup.sh`
+For manual production checkouts, no `.env` is tracked: put the runtime
+settings of the installation in `deploy/prod/.env.local`. `setup.sh`
 prefers that untracked file automatically for backup, update, restore, and
 `update-ip` when it exists. `restore` is the one exception worth calling out:
 if the archive being restored has no `.env.local` (older backups, or
@@ -24,6 +24,10 @@ sudo /opt/lancache-ng/setup.sh backup [--config|--full] [install-dir] [--dest /b
 sudo /opt/lancache-ng/setup.sh restore <backup.tar.gz> [install-dir]
 ```
 
+Archives go to `/var/backups/lancache-ng` unless `--dest` is given. Set `LANCACHE_BACKUP_ROOT` to move that default for every command, including the automatic pre-update backup that `update` and `auto-update` roll back from.
+
+`update` also updates the repository checkout itself when it sits on its default branch with no local changes: it takes the pre-update backup first, pulls, and continues with the pulled `setup.sh`. A failed update returns the checkout to its previous revision along with the restored configuration. A checkout on a tag, commit or other branch, or with local changes, is left where it is and the update says so.
+
 The script verifies that required archive tools are present before running backup or restore. If `tar` or `rsync` is missing on an `apt-get` based system, the script installs the missing tool before it touches backup data. `restore` additionally requires `openssl`, since converging a legacy or incomplete `.env` (see "Restore also re-converges `.env`" below) can generate missing service secrets, which shells out to `openssl rand`.
 
 ## Why there are two backup modes
@@ -36,21 +40,23 @@ The `update` command automatically creates this config backup before pulling rep
 
 ### `--full` backup
 
-Use this when moving to new hardware or when losing cached objects would be expensive. It includes everything from `--config` and additionally includes the cache directory from `CACHE_DIR` (or the production state root `LANCACHE_STATE_DIR`), plus any legacy split cache directories and `/srv/lancache/cache` still present on older installs, and the cache Docker named volume (`<project>_proxy-cache`) used by quickstart installs. This can be huge, so it is opt-in.
+Use this when moving to new hardware or when losing cached objects would be expensive. It includes everything from `--config` and additionally includes the cache directory from `CACHE_DIR` (or the production state root `LANCACHE_STATE_DIR`), plus any legacy split cache directories and `/srv/lancache/cache` still present on older installs, and the compose project's cache volume (`<project>_proxy-cache`). This can be huge, so it is opt-in.
 
 ## What the automated backup includes
 
 The automated manifest includes these paths when they exist:
 
-- install configuration: the active runtime env file (`.env` or `deploy/prod/.env.local`), `docker-compose.yml`, and `certs/`; manual `deploy/prod` backups also include the repository-root runtime inputs reached via `../../` (`certs/`, `config/prod/`, `services/dns/cdn-domains.txt`, and `scripts/untracked/docker-socket-proxy.sh`) because production compose mounts or reads those tracked files outside `deploy/prod/`
-- quickstart Docker named volumes discovered from the compose project, including stopped containers so PowerDNS and NATS volumes are included; the cache volume (`<project>_proxy-cache`) is skipped in `--config` mode and only archived in `--full` mode, matching the cache-directory scope described above, since Docker reports that volume's mount type as "volume" even though it is bind-backed under the hood
+- install configuration: the active runtime env file (`.env` or `deploy/prod/.env.local`), `docker-compose.yml`; manual `deploy/prod` backups also include the repository-root runtime inputs `deploy/prod/docker-compose.yml` reaches via `../../` and that exist in the checkout (today `services/dns/cdn-domains.txt`), because production compose mounts those tracked files outside `deploy/prod/`
+- Docker named volumes discovered from the compose project, including stopped containers so PowerDNS and NATS volumes are included; the cache volume (`<project>_proxy-cache`) is skipped in `--config` mode and only archived in `--full` mode, matching the cache-directory scope described above, since Docker reports that volume's mount type as "volume" even though it is bind-backed under the hood
 - an `image-revisions.txt` file with the image revisions present before an update pulls new tags
-- PowerDNS state from Docker named volumes, the production state root `LANCACHE_STATE_DIR`, optional `PDNS_STANDARD_DIR`, `PDNS_SSL_DIR`, `PDNS_FILTER_STATE_DIR`, and legacy `/srv/lancache/pdns-standard`, `/srv/lancache/pdns-ssl`, `/srv/lancache/pdns-filter-state` when present
+- PowerDNS state from Docker named volumes, the production state root `LANCACHE_STATE_DIR`, optional `PDNS_DIR` and `PDNS_FILTER_STATE_DIR`, and the legacy PowerDNS and filter-state directories below `/srv/lancache` when present
 - Kea data from the production state root `LANCACHE_STATE_DIR`, optional `KEA_DATA_DIR`, and legacy `/srv/lancache/kea` when present
+- the HTTPS CA (`ca.crt`, `ca.key`) from the production state root `LANCACHE_STATE_DIR` or optional `CA_DIR`; an update moves a CA from the old repository-root `certs/` there
+- chrony and CacheHamster data from the production state root `LANCACHE_STATE_DIR`, optional `NTP_DATA_DIR`, `CACHEHAMSTER_DATA_DIR`, and legacy `/srv/lancache/ntp`, `/srv/lancache/cachehamster` when present
 - NATS state and generated config from Docker named volumes, the production state root `LANCACHE_STATE_DIR`, optional `NATS_DATA_DIR`, `NATS_CONF_DIR`, and legacy `/srv/lancache/nats`, `/srv/lancache/nats-conf` when present
-- in `--full` mode only, the cache directory from `CACHE_DIR` (or the production state root `LANCACHE_STATE_DIR`), plus legacy split cache directories (`CACHE_DIR_STANDARD`, `CACHE_DIR_SSL`) and `/srv/lancache/cache` when present
+- in `--full` mode only, the cache directory from `CACHE_DIR` (or the production state root `LANCACHE_STATE_DIR`), plus the legacy split cache directories of old installs and `/srv/lancache/cache` when present
 
-Central logging's own log path (`SYSLOG_NG_LOG_DIR`, or the production state root `LANCACHE_STATE_DIR/syslog-ng`; see #453 -- on by default since #1343 for `setup.sh`-managed installs, not an opt-in feature there; a from-scratch manual `deploy/prod` install that never runs `setup.sh` still starts with it off, like its `dhcp-kea`/`dhcp-proxy`/`ntp` sibling profiles) is **not** part of the automated backup manifest yet. Like cache content, it is rotated/compressed application output rather than configuration or operational state, so losing it does not affect the running stack. Back it up manually if you need log retention across a host migration.
+Central logging's own log path (`SYSLOG_NG_LOG_DIR`, or the production state root `LANCACHE_STATE_DIR/syslog-ng`; syslog-ng always runs inside the `services` container) is **not** part of the automated backup manifest yet. Like cache content, it is rotated/compressed application output rather than configuration or operational state, so losing it does not affect the running stack. Back it up manually if you need log retention across a host migration.
 
 The backup command stops the compose stack before copying mutable databases and restarts it afterward. Staging directories are created with restrictive permissions and cleaned up automatically if a copy or archive operation fails. The command rejects backup destinations that sit inside a path being backed up, which prevents recursive copies when using cache disks as backup storage.
 
@@ -81,15 +87,13 @@ If a scheduled automatic update caused the failure, disable it first (set `AUTO_
 
 `restore` restores exactly what a backup archive captured, including whatever
 shape `.env` had at backup time. A backup taken from an older install can
-therefore carry legacy keys (split `CACHE_DIR_STANDARD`/`CACHE_DIR_SSL`, a
+therefore carry legacy keys (a split cache directory pair, a
 stale `PROXY_SECURITY_MODE=strict` with no allowlist), a placeholder secret,
 or keys a later release added that the archived install never had. After
-restoring files and Docker volumes, `restore` refreshes the quickstart
-compose/scripts bundle (the same refresh `update` performs, so a legacy
-archived compose file that still references removed keys like
-`CACHE_DIR_STANDARD` never gets validated against a `.env` that no longer has
-them; skipped for a `deploy/prod` Git checkout target, whose compose file is
-managed by the checkout itself) and then runs the same `.env` convergence
+restoring files and Docker volumes, `restore` migrates an archived quickstart
+install into `deploy/prod` (the same one-time migration `update` performs;
+the compose file always comes from the `deploy/prod` checkout itself) and
+then runs the same `.env` convergence
 path `update` uses (`migrate_env_for_update`, then `validate_compose_config`)
 before starting the stack, so a legacy or incomplete backup converges to the
 current expected `.env` shape automatically. Restoring a backup that is
@@ -147,17 +151,17 @@ Test restores periodically on a spare host or VM:
 3. Confirm DNS replies on port 53.
 4. Confirm Admin UI access on port 8080.
 5. Confirm HTTP cache traffic on port 80.
-6. If SSL mode is enabled, confirm clients still trust the restored `ca.crt`.
+6. If HTTPS mode is enabled, confirm clients still trust the restored `ca.crt`.
 7. If DHCP is enabled, confirm Kea leases/config are restored before enabling DHCP on a production network.
 
 ## Secret and CA handling
 
-Backups contain secrets such as `.env`, `DDNS_TSIG_KEY`, `PDNS_API_KEY`, `NATS_UI_PASSWORD`, `NATS_DNS_WRITER_PASSWORD`, `NATS_DNS_REPLICA_PASSWORD`, `NATS_CALLOUT_PASSWORD`, `NATS_SYS_PASSWORD` (the NATS system-account credential used only to look up and force-disconnect a removed/rotated secondary's live connection, issue #681 -- treat it as at least as sensitive as the other NATS static-role passwords, since it grants read access to every live connection's metadata network-wide via NATS's `$SYS.REQ.SERVER.*` API, not just the ability to disconnect one), the auth-callout issuer NKey seed file (`NATS_ISSUER_SEED_PATH`, default `/data/lancache-nats-issuer.seed` inside the Admin UI's data volume), `SECONDARY_REGISTRATION_TOKEN`, optional Admin UI credentials, and possibly `certs/ca.key`. Store backups off-host and encrypt them when they leave the server. Losing the issuer seed is self-healing, not a durability risk: the Admin UI generates a fresh one on next start and rewrites `nats.conf`'s `auth_callout.issuer` to match before accepting any connections, so already-registered secondaries keep working unchanged (their credential is verified against the `secondaries` table, not tied to any particular issuer key).
+Backups contain secrets such as `.env`, `DDNS_TSIG_KEY`, `PDNS_API_KEY`, `NATS_UI_PASSWORD`, `NATS_DNS_WRITER_PASSWORD`, `NATS_CALLOUT_PASSWORD`, `NATS_SYS_PASSWORD` (the NATS system-account credential used only to look up and force-disconnect a removed/rotated secondary's live connection, issue #681 -- treat it as at least as sensitive as the other NATS static-role passwords, since it grants read access to every live connection's metadata network-wide via NATS's `$SYS.REQ.SERVER.*` API, not just the ability to disconnect one), the auth-callout issuer NKey seed file (`NATS_ISSUER_SEED_PATH`, default `/data/lancache-nats-issuer.seed` inside the Admin UI's data volume), `SECONDARY_REGISTRATION_TOKEN`, optional Admin UI credentials, and possibly `ca.key`. Store backups off-host and encrypt them when they leave the server. Losing the issuer seed is self-healing, not a durability risk: the Admin UI generates a fresh one on next start and rewrites `nats.conf`'s `auth_callout.issuer` to match before accepting any connections, so already-registered secondaries keep working unchanged (their credential is verified against the `secondaries` table, not tied to any particular issuer key).
 
-Treat `certs/ca.key` as highly sensitive. Anyone with that private key can issue certificates trusted by SSL-mode clients. Distribute `ca.crt` to clients, but never distribute `ca.key`. If the CA key is exposed, generate a new CA, remove the old CA from clients, install the new `ca.crt`, and restart the proxy stack.
+Treat `ca.key` in the CA state directory as highly sensitive. Anyone with that private key can issue certificates trusted by HTTPS-mode clients. Distribute `ca.crt` to clients, but never distribute `ca.key`. If the CA key is exposed, generate a new CA, remove the old CA from clients, install the new `ca.crt`, and restart the proxy stack.
 
 ## Future improvements to consider
 
 The current implementation uses timestamped tar archives because they are predictable, easy to inspect, and do not require a long-running backup service. Future PRs could add an optional text-file history layer similar to `etckeeper` for `.env`, compose files, and generated service config, but that should stay separate from cache backups so repository history never grows with cache payloads or secrets accidentally committed to a remote.
 
-Since this document was written, a small piece of that idea landed for individual services: see [known-good-config-snapshots.md](known-good-config-snapshots.md) for the automatic, per-service known-good configuration snapshot mechanism (nginx, dnsmasq, Kea DHCP, and PowerDNS's static `pdns.conf`/`recursor.conf` today; Kea's is operator-selected from the Admin UI rather than automatic, since it has no container-startup moment to trigger from). It is deliberately separate from this backup/restore contract — it is not a replacement, does not cover the whole install, and its snapshot volumes are not part of the automated backup manifest above. PowerDNS's zone/record database (`pdns.sqlite3`) *is* included in the automated backup above (it lives under the PowerDNS state paths listed in "What the automated backup includes"), but the known-good-config-snapshot mechanism itself only snapshots the static `pdns.conf`/`recursor.conf` files, never the live SQLite database; see known-good-config-snapshots.md's "Zones, records, and TSIG/DDNS metadata" section for the scoped design of a lightweight per-zone snapshot/rollback mechanism (issue #628) and why a blind file-level snapshot of that database would be unsafe in the meantime.
+Since this document was written, a small piece of that idea landed for individual services: see [known-good-config-snapshots.md](known-good-config-snapshots.md) for the per-service known-good configuration snapshot mechanism: the supervisor checks nginx, dnsmasq, Kea DHCP and PowerDNS's `pdns.conf`/`recursor.conf` at each start and falls back to the newest snapshot that passes; the Admin UI also saves a Kea snapshot after each config write and offers a Kea rollback. It is deliberately separate from this backup/restore contract — it is not a replacement, does not cover the whole install, and its snapshot volumes are not part of the automated backup manifest above. PowerDNS's zone/record database (`pdns.sqlite3`) *is* included in the automated backup above (it lives under the PowerDNS state paths listed in "What the automated backup includes"). The snapshot mechanism never copies that SQLite file; per-zone record snapshots and their rollback are taken through the PowerDNS API by the `nats-subscriber`, see known-good-config-snapshots.md's "Zones, records, and TSIG/DDNS metadata" section.

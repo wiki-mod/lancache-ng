@@ -97,26 +97,26 @@ peers on top of maintaining the outbound site-to-site tunnel — both paths
 active at once, operator's choice, no conflict between them since they're
 just different peers on the same interface.
 
-## Interaction with the dual-IP/dual-mode (standard/SSL) DNS architecture
+## Interaction with the dual-IP/dual-mode (http/https) DNS architecture
 
 Largely orthogonal, by design, but worth stating explicitly since a WireGuard
 tunnel changes what a client can reach at L3:
 
 - WireGuard operates at L3 (routing) — it gets a remote client's packets
-  into the home LAN. It has no opinion about which of `IP_STANDARD` /
-  `IP_SSL` the client's DNS resolver points at; that's a client-side
+  into the home LAN. It has no opinion about which of `IP_HTTP` /
+  `IP_HTTPS` the client's DNS resolver points at; that's a client-side
   network config choice exactly like it is for a LAN-local client today.
 - A remote client tunneled in via WireGuard should be able to point its
-  DNS at either `IP_STANDARD` or `IP_SSL` (whichever mode it wants) and get
+  DNS at either `IP_HTTP` or `IP_HTTPS` (whichever mode it wants) and get
   the same cached-download experience a LAN-local client gets — nothing in
-  the standard/SSL split assumes L2-LAN-only clients, it assumes clients
+  the http/https split assumes L2-LAN-only clients, it assumes clients
   that can reach the proxy's IP at all, which a routed WireGuard tunnel
   satisfies.
 - **One real interaction worth flagging**: this project's existing
   `NGINX_UPSTREAM_RESOLVER` / DNS-spoofing design (Rule-Ref: AG-OP-002)
   depends on the *proxy's own* upstream DNS resolution never
   looping back through the LAN's PowerDNS. A remote WireGuard client's own
-  DNS queries still need to go to `dns-standard`/`dns-ssl` over the tunnel
+  DNS queries still need to go to `dns` over the tunnel
   (or the client needs to be configured to use them) for the DNS-spoofing
   half of the caching mechanism to apply to it at all — a client that
   keeps using its own home/mobile-carrier DNS while only routing HTTP(S)
@@ -124,10 +124,10 @@ tunnel changes what a client can reach at L3:
   caching benefit, same as any device not pointed at this project's DNS
   today. This is existing behavior the WireGuard feature doesn't change,
   but it should be called out in operator-facing docs once this ships:
-  "point your WireGuard client's DNS at the LAN's standard/SSL DNS IP over
+  "point your WireGuard client's DNS at the LAN's http/https DNS IP over
   the tunnel," not assumed automatic.
 - No changes to the DNS services themselves are anticipated by this
-  design. `dns-standard`/`dns-ssl` and their IP bindings are unaffected;
+  design. `dns` and their IP bindings are unaffected;
   WireGuard adds a new path *into* the LAN, not a new DNS mode.
 
 ## Key management / rotation

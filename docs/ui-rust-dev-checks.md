@@ -1,81 +1,28 @@
 # Local Admin UI Rust Checks
 
-This repository provides local Docker-based Rust checks for the Admin UI
-crate at `services/ui/` (a single directory, not a list of separate
-services), so contributors do not need `rustc` on the host machine.
+The Admin UI crate at `services/ui/` is a member of the Rust workspace in
+the repository-root `Cargo.toml`. Its checks run inside the project
+build-tools container, so contributors do not need `rustc` on the host and
+every run uses the same toolchain as CI. `AGENTS.md`'s build-tools
+verification contract explains why host-local `cargo`/`rustc` do not count
+as verification.
 
-The checks run inside a container specifically so every contributor and CI
-job validates the Admin UI against the exact same toolchain version,
-regardless of what Rust (if any) is installed on the host -- see
-`scripts/untracked/ui-rust-checks.sh`'s own header comment for the same rationale in
-the script itself, and `AGENTS.md`'s build-tools verification contract for
-why this is the only supported way to run these checks at all (host-local
-`cargo`/`rustc` are not treated as valid verification, even if present).
+The build-tools image is the published one, resolved to its digest:
 
-By default, the script uses the project build-tools image:
-
-```text
-ghcr.io/wiki-mod/lancache-ng/build-tools:latest
+```bash
+BUILD_TOOLS_IMAGE="$(bash .github/scripts/ci.sh build-tools resolve-image)"
 ```
 
-That image is intentionally based on `rust:latest` for developer and CI
-validation tooling, then it preinstalls and smoke-tests `rustfmt`, `clippy`,
-`sccache`, `cargo-audit`, `shellcheck`, `actionlint`, `distcc`, `distcc-pump`,
-DNS/setup fixture tools such as `dig`, `ip`, `openssl`, `rsync`, and
-`envsubst`, and the required `PATH`. Trivy image scanning remains part of the
-workflow container-scan path rather than this local Rust check image.
+`resolve-image` needs `GITHUB_ACTOR` and `GHCR_TOKEN` for GHCR read access.
+The tools the image carries are listed in the SOT `build_toolchain` block
+(`bash .github/scripts/ci.sh build-tools packages`).
 
 Run from the repository root:
 
 ```bash
-./scripts/untracked/ui-rust-checks.sh
+docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work" -w /work "$BUILD_TOOLS_IMAGE" \
+  bash -c 'cargo fmt --check -p lancache-ui && cargo clippy --locked --all-targets -p lancache-ui -- -D warnings && cargo test --locked -p lancache-ui'
 ```
 
-The script runs, in this order:
-
-- `cargo fmt --all --manifest-path services/ui/Cargo.toml -- --check`
-- `cargo clippy --locked --manifest-path services/ui/Cargo.toml -- -D warnings`
-- `cargo test --locked --manifest-path services/ui/Cargo.toml`
-- `cargo build --locked --release --manifest-path services/ui/Cargo.toml`
-
-You can override the image for investigation:
-
-```bash
-./scripts/untracked/ui-rust-checks.sh --rust-image rust:latest --no-fmt --no-clippy
-```
-
-If you override the image, it must already contain `rustfmt`, `clippy`, and
-`sccache` when you use the corresponding checks. The script no longer installs
-missing Rust tooling inside the container. Plain `rust:latest` is useful for
-limited investigation, but it does not provide the full default check contract
-unless you prepare an image with the required components installed.
-
-### Optional sccache with Redis
-
-To speed up repeated builds in containers, pass `--sccache` together with Redis.
-The build-tools image already includes `sccache`. If you override the image and
-the replacement image does not contain `sccache`, the script fails closed
-instead of bootstrapping it.
-This is a contributor/CI optimization only; setup, update, and runtime image
-pulls do not depend on it.
-
-```bash
-SCCACHE_REDIS_URL=redis://<redis-host>:6379/0 ./scripts/untracked/ui-rust-checks.sh --sccache
-```
-
-If you do not already have Redis, the script can start a temporary Redis sidecar:
-
-```bash
-./scripts/untracked/ui-rust-checks.sh --sccache --with-redis
-```
-
-Plain `--sccache` without Redis fails on purpose, because cache results should be shareable and predictable.
-If you pass a Redis URL directly, make sure it is reachable from inside the Docker container.
-Do not commit internal Redis URLs or credentials to the repository.
-
-### Useful options
-
-- `--manifest <path>` override path to another UI manifest
-- `--no-fmt`, `--no-check`, `--no-clippy` to skip specific quality checks
-- `--no-test`, `--no-build` to limit the default checks
-- `--rust-image <image>` use a different Rust image
+These are the same commands `ci.sh test-stack` runs per crate in CI.
+`cargo check` stays a manual developer step (`AGENTS.md` **AG-VAL-008**).
