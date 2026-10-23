@@ -549,6 +549,11 @@ runtime:
     - KEA_SOCKET_DIR=/run/kea
     - KEA4_SOCKET=@KEA_SOCKET_DIR@/kea4.sock
     - KEA_DDNS_SOCKET=@KEA_SOCKET_DIR@/kea-ddns.sock
+    # What: TSIG key name and algorithm of DDNS and AXFR.
+    # Why: dns and Kea sign with one name; no Rust literal.
+    # From: Issue #858 | PR #1858
+    - DDNS_TSIG_NAME=lancache-ddns-key
+    - DDNS_TSIG_ALGORITHM=hmac-sha256
     # What: the Docker bridge range of internal clients.
     # Why: Kea control and proxy ACLs admit the same range.
     # From: Issue #1683 | PR #1912

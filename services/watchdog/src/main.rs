@@ -1861,10 +1861,25 @@ fn yaml_rows(items: &[String]) -> String {
 }
 
 // What: TSIG key name and algorithm of DDNS and AXFR.
-// Why: Kea signs with the same name; one spelling.
-// From: Issue #858
-const TSIG_NAME: &str = "lancache-ddns-key";
-const TSIG_ALGORITHM: &str = "hmac-sha256";
+// Why: Kea signs with the same name; the SOT owns both.
+// From: Issue #858 | PR #1858
+struct TsigId {
+    name: String,
+    algorithm: String,
+}
+
+impl TsigId {
+    // What: both TSIG values from the env.
+    // Why: a missing value stops the render.
+    // From: Issue #1683 | PR #1858
+    fn load() -> Result<Self, String> {
+        let text = |key: &str| config::need(&config::process_env, key);
+        Ok(Self {
+            name: text("DDNS_TSIG_NAME")?,
+            algorithm: text("DDNS_TSIG_ALGORITHM")?,
+        })
+    }
+}
 
 // What: the local API root of a PowerDNS server.
 // Why: the supervisor and nats-subscriber share it.
@@ -2315,18 +2330,24 @@ fn pdns_database(data_dir: &Path) -> Result<PathBuf, String> {
 // What: TSIG rights for DDNS on every LAN zone.
 // Why: an empty key revokes; the ui marker relaxes.
 // From: Issue #1683 | PR #1912
-fn ddns_tsig(dir: &Path, zones: &[String], tsig: &str, unsigned: &Path) -> Result<(), String> {
+fn ddns_tsig(
+    dir: &Path,
+    zones: &[String],
+    tsig: &str,
+    id: &TsigId,
+    unsigned: &Path,
+) -> Result<(), String> {
     if tsig.is_empty() {
         for zone in zones {
             pdnsutil(dir, &["set-meta", zone, "TSIG-ALLOW-DNSUPDATE"])?;
         }
-        if let Err(e) = pdnsutil(dir, &["delete-tsig-key", TSIG_NAME]) {
+        if let Err(e) = pdnsutil(dir, &["delete-tsig-key", id.name.as_str()]) {
             log(&format!("No TSIG key to delete: {e}"));
         }
         log("DDNS_TSIG_KEY is empty; DDNS stays loopback-only, TSIG rights revoked");
         return Ok(());
     }
-    pdnsutil(dir, &["import-tsig-key", TSIG_NAME, TSIG_ALGORITHM, tsig])?;
+    pdnsutil(dir, &["import-tsig-key", id.name.as_str(), id.algorithm.as_str(), tsig])?;
     // What: an unreadable marker is logged; signed stays.
     // Why: strict is the safe side; the cause is shown.
     // From: Issue #1683 | PR #1912
@@ -2343,7 +2364,7 @@ fn ddns_tsig(dir: &Path, zones: &[String], tsig: &str, unsigned: &Path) -> Resul
     for zone in zones {
         let mut args = vec!["set-meta", zone.as_str(), "TSIG-ALLOW-DNSUPDATE"];
         if !relaxed {
-            args.push(TSIG_NAME);
+            args.push(id.name.as_str());
         }
         pdnsutil(dir, &args)?;
     }
@@ -2361,11 +2382,12 @@ fn dns_zones(
     notify: &[std::net::SocketAddrV4],
 ) -> Result<(), String> {
     let zones = rollback_zones()?;
+    let id = TsigId::load()?;
     if let (DnsRole::Secondary, Some(primary)) = (role, primary) {
         if tsig.is_empty() {
             return Err("DDNS_TSIG_KEY is required for AXFR from the primary".into());
         }
-        pdnsutil(dir, &["import-tsig-key", TSIG_NAME, TSIG_ALGORITHM, tsig])?;
+        pdnsutil(dir, &["import-tsig-key", id.name.as_str(), id.algorithm.as_str(), tsig])?;
         let primary = primary.to_string();
         for zone in &zones {
             match pdnsutil(dir, &["zone", "create-secondary", zone, &primary]) {
@@ -2376,7 +2398,7 @@ fn dns_zones(
                 }
                 Err(e) => return Err(e),
             }
-            pdnsutil(dir, &["tsigkey", "activate", zone, TSIG_NAME, "secondary"])?;
+            pdnsutil(dir, &["tsigkey", "activate", zone, id.name.as_str(), "secondary"])?;
         }
         return Ok(());
     }
@@ -2387,7 +2409,7 @@ fn dns_zones(
             Err(e) => return Err(e),
         }
     }
-    ddns_tsig(dir, &zones, tsig, &ddns_unsigned_marker()?)?;
+    ddns_tsig(dir, &zones, tsig, &id, &ddns_unsigned_marker()?)?;
     let targets: Vec<String> = notify.iter().map(ToString::to_string).collect();
     for zone in &zones {
         pdnsutil(dir, &["zone", "set-kind", zone, "primary"])?;
@@ -2398,7 +2420,7 @@ fn dns_zones(
         pdnsutil(dir, &["set-meta", zone, "SOA-EDIT-API", "INCREASE"])?;
         pdnsutil(dir, &["set-meta", zone, "NOTIFY-DNSUPDATE", "1"])?;
         if !tsig.is_empty() {
-            pdnsutil(dir, &["tsigkey", "activate", zone, TSIG_NAME, "primary"])?;
+            pdnsutil(dir, &["tsigkey", "activate", zone, id.name.as_str(), "primary"])?;
         }
         if !targets.is_empty() {
             let mut args = vec!["set-meta", zone.as_str(), "ALSO-NOTIFY"];
@@ -3352,11 +3374,12 @@ fn kea_dhcp_ddns(ctx: &Ctx) -> Result<Run, String> {
     let kea = KeaKnobs::load()?;
     kea_socket_dir(&kea)?;
     let tsig = ddns_tsig_key()?;
+    let id = TsigId::load()?;
     let server = serde_json::json!([{
         "ip-address": ctx.need_dns("DHCP_DNS_SERVER_IP")?,
         "port": env_port(AUTH_PORT_KEY)?
     }]);
-    let domain = |name: String| serde_json::json!({"name": name, "key-name": TSIG_NAME, "dns-servers": server});
+    let domain = |name: String| serde_json::json!({"name": name, "key-name": id.name, "dns-servers": server});
     let reverse: Vec<Value> = config::reverse_zones().into_iter().map(domain).collect();
     let conf = serde_json::json!({
         "DhcpDdns": {
@@ -3366,7 +3389,7 @@ fn kea_dhcp_ddns(ctx: &Ctx) -> Result<Run, String> {
                 "socket-type": "unix",
                 "socket-name": kea.ddns_socket
             },
-            "tsig-keys": [{"name": TSIG_NAME, "algorithm": TSIG_ALGORITHM, "secret": tsig}],
+            "tsig-keys": [{"name": id.name, "algorithm": id.algorithm, "secret": tsig}],
             "forward-ddns": {
                 "ddns-domains": [domain(config::canonical_zone(&config::lan_zone(&config::process_env)?))]
             },
