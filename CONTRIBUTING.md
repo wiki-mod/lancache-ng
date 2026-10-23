@@ -363,16 +363,6 @@ Also run the `action-node-versions` check (issue #801) if you changed or re-pinn
 bash .github/scripts/ci.sh check action-node-versions
 ```
 
-#### Optional: a local pre-push hook for this same check
-
-`.githooks/pre-push` runs `ci.sh check action-node-versions` automatically before a push that touches any `.github/workflows/*.yml`/`*.yaml` file, so a deprecated-runtime pin (node20 and older) surfaces before you push, not only after CI comes back red. This is an **optional, best-effort local convenience layer only** -- the CI `validate` job runs the same check authoritatively. The hook degrades cleanly (never blocks a push) if it can't run in your environment at all (e.g. no `curl`, `yq` or `jq` on `PATH`), but does block the push if it actually runs and finds a real deprecated-runtime pin -- bypass with `git push --no-verify` if needed, same as any other pre-push hook.
-
-Enable it once per checkout:
-
-```bash
-git config core.hooksPath .githooks
-```
-
 For Rust changes, run the same Cargo checks `ci.sh test-stack` runs, from the
 workspace root inside the build-tools container (`-p <crate>` narrows them to
 the crate you changed; the crates are the members of the root `Cargo.toml`).

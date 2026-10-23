@@ -12730,7 +12730,7 @@ _CI_AWK_COMMENTS='
         if (b ~ /\.js$/) return "js"
         if (b ~ /\.css$/) return "css"
         if (b ~ /\.ya?ml$/) return "yaml"
-        if (b ~ /\.(sh|bats|toml|conf|txt|dockerignore)$/ || p ~ /(^|\/)\.githooks\//) return "hash"
+        if (b ~ /\.(sh|bats|toml|conf|txt|dockerignore)$/) return "hash"
         if (b ~ /^(Dockerfile|\.gitattributes|\.gitignore|CODEOWNERS)$/) return "hash"
         return ""
     }
@@ -13378,9 +13378,6 @@ _ci_check_mutable_refs() {
 _ci_check_executable_bits() {
     local -a owned=(.github/scripts/ci.sh) paths=()
     local h path mode
-    local hooks
-    hooks="$(_ci_ls_files executable-bits . '.githooks/*')" || return 2
-    while IFS= read -r h; do [ -n "${h}" ] && owned+=("${h}"); done <<< "${hooks}"
     # What: a changed-file list only narrows the owned set.
     # Why: Dockerfile/Cargo.toml are no bare-path scripts.
     # From: Issue #1683 | PR #1858
