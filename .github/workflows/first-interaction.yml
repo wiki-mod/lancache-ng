@@ -6,7 +6,7 @@
 # From: Issue #1683 | PR #1858
 name: First Interaction
 
-# What: issues and target PR events, opened only.
+# What: opened issues and target PRs; a manual run skips.
 # Why: a fork PR comment needs the base write token.
 # From: Issue #1683 | PR #1858
 on:
@@ -14,6 +14,7 @@ on:
     types: [opened]
   pull_request_target:
     types: [opened]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -28,8 +29,8 @@ env:
 
 jobs:
   welcome:
-    # What: runner and timeout equal the SOT root-job values
-    # Why: a root job cannot read job-settings outputs
+    # What: literal runner and timeout of a root job.
+    # Why: SOT ci_job_timeouts: pre-platform jobs keep these
     # From: Issue #1683 | PR #1858
     runs-on: ubuntu-latest
     timeout-minutes: 15

@@ -15,6 +15,7 @@ on:
     types: [opened, assigned]
   pull_request_review:
     types: [submitted]
+  workflow_dispatch:
 
 jobs:
   claude:
@@ -23,8 +24,8 @@ jobs:
       (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
       (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude')) ||
       (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')))
-    # What: runner and timeout equal the SOT root-job values
-    # Why: a root job cannot read job-settings outputs
+    # What: literal runner and timeout of a root job.
+    # Why: SOT ci_job_timeouts: pre-platform jobs keep these
     # From: Issue #1683 | PR #1858
     runs-on: ubuntu-latest
     timeout-minutes: 360
