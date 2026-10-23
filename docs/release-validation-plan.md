@@ -446,7 +446,7 @@ is named in a warning and does not block it.
 
 | What to check | How to check it for real | Pass/fail |
 |---|---|---|
-| A service already unhealthy before the update does not roll the update back | Bring a stack up where an opt-in service stays unhealthy (for example `ntp` on a host that denies `CAP_SYS_TIME`), run `setup.sh update` | Pass if the update completes with `Proceeding despite service(s) unhealthy before this update started too`; fail if it rolls back for that service |
+| A service already unhealthy before the update does not roll the update back | Bring a stack up with a `docker-compose.override.yml` that makes one service (not `proxy` or `dns`) fail its healthcheck before the update and keep failing after it, run `setup.sh update` | Pass if the update completes with `Proceeding despite service(s) unhealthy before this update started too`; fail if it rolls back for that service |
 | A real regression still rolls the update back | On a stack with every non-UI service healthy, add a `docker-compose.override.yml` that makes one healthy service (not `proxy` or `dns`, whose functional probe would also fire) fail its healthcheck after recreation, run `setup.sh update` | Pass if it reports `Service(s) regressed from healthy to unhealthy during this update: <service>` and `rollback_stack_update` restores the backup; fail otherwise |
 
 No CI check covers the baseline or the gate (see Coverage Assessment).
