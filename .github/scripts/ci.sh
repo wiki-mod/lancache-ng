@@ -7722,7 +7722,7 @@ _ci_deletion_policy() {
 }
 
 # What: Emit the transitive protected-root digest set.
-# Why: Ledger + channels + their index children (§101).
+# Why: Ledger + channels + their index children (§75).
 # From: Issue #1683
 _ci_gc_roots() {
     local remote base blob rc=0 pairs="" out="" svc channel dig prc line s d raw ledger_ref

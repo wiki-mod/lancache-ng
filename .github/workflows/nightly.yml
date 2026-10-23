@@ -403,7 +403,7 @@ jobs:
         run: bash .github/scripts/ci.sh channel-report "${CHANNEL}" "${OUTCOME}"
 
   # What: scan what this run built and every channel image.
-  # Why: §31 a new CVE; §1050 acceptance needs a scan.
+  # Why: §31 a new CVE; §96 acceptance needs a scan.
   # From: Issue #1683 | PR #1912
   scan:
     name: scan
@@ -426,7 +426,7 @@ jobs:
       - *bootstrap
       - *channel_pin
       # What: scan the images this run built, by digest.
-      # Why: §1050: READBACK, SCAN, then acceptance.
+      # Why: §96: READBACK, SCAN, then acceptance.
       # From: Issue #1683 | PR #1912
       - name: Scan the built images by digest
         id: scan
