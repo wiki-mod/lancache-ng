@@ -64,19 +64,15 @@ jobs:
       runner: ${{ steps.jobs.outputs.runner }}
       timeouts: ${{ steps.jobs.outputs.timeouts }}
     steps:
-      # What: shallow auth checkout of the event commit
-      # Why: ci.sh loads the diff history it needs itself.
+      # What: shallow checkout of the event commit.
+      # Why: no inline script; pin = SOT github_actions.checkout
       # From: Issue #1683 | PR #1858
       - &bootstrap
-        name: Bootstrap the working tree
-        run: |
-          set -euo pipefail
-          git config --global --add safe.directory "${PWD}"
-          git init -q .
-          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
-          git config --local "http.${GITHUB_SERVER_URL}/.extraheader" "AUTHORIZATION: basic $(printf 'x-access-token:%s' "${GHCR_TOKEN}" | base64 -w0)"
-          git fetch -q --no-tags --depth=1 origin "${GITHUB_SHA}"
-          git checkout -q FETCH_HEAD
+        name: Check out the event commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
       - name: Collect changed files
         id: changed
         run: bash .github/scripts/ci.sh changed-files
