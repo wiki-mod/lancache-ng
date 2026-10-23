@@ -654,7 +654,7 @@ Runs on its own Axum webserver (port 8080) — independent from nginx. If nginx 
 - DNS: create zones, host entries, PTR checkbox for LAN IPs
 - Kea: lease overview, create/edit static assignments
 - Cache: start warming, progress, purging, retention + slice/size settings
-- Logs: filtered by host/service (implemented against the central syslog-ng path, #848); level-selectable filtering is not yet implemented -- raised during #1343's scope discussion and left an explicit open decision there rather than built ad hoc, since fluent-bit's pipeline forwards every tailed line verbatim today with no severity filter anywhere, and nginx's `access.log` in particular has no severity field to filter on at all
+- Logs: filtered by host/service (implemented against the central syslog-ng path, #848); level-selectable filtering is not yet implemented (an open decision from #1343): syslog-ng stores every line with no severity filter, and nginx's access lines have no severity field at all
 - Advanced options (root mirror, filter AAAA, secondary, syslog forwarding) under "Advanced" (syslog forwarding configuration is not yet exposed in the UI; no open tracking issue as of this writing — see the syslog-ng section's "Not implemented yet" note above)
 
 ## IPv6
