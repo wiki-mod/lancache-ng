@@ -2,8 +2,7 @@
 #
 # DEEP full-setup validation gate (#715). This is the THIRD, additive check
 # the project owner asked for in #715's clarification comments: a strict
-# SUPERSET of both existing checks, wired to run automatically on every
-# relevant PR.
+# SUPERSET of both existing checks, run on manual dispatch.
 #
 #   - It does everything build-push.yml's shallow "validate full-setup image"
 #     job does (bring the full-setup compose stack up on real images, assert
@@ -18,11 +17,10 @@
 # and on-demand fallback paths remain available (see #715's comments on why
 # the two originals are kept untouched rather than merged in place).
 #
-# On a pull_request event this validates the PR's OWN commits by reusing the
-# #626/#627 pr-<N>-sha-<short> staging-tag mechanism (see
-# scripts/ensure-pr-staging-images.sh) -- it does NOT reinvent a second
-# tagging scheme. workflow_dispatch is preserved as a manual trigger for
-# ad-hoc runs against a specific published channel tag.
+# workflow_dispatch runs it against a specific published channel tag. The
+# pull_request paths below (the #626/#627 pr-<N>-sha-<short> staging-tag
+# reuse, see scripts/ensure-pr-staging-images.sh) no longer fire since the
+# trigger was dropped; current_dev keeps them the same way.
 #
 # BRANCH PROTECTION NOTE: making this a REQUIRED check is a repository
 # branch-protection setting, which lives in GitHub's settings and not in any
@@ -57,42 +55,11 @@
 name: Full-Setup Deep Validate
 
 on:
-  # Branch-filtered to match build-push.yml's own pull_request trigger
-  # EXACTLY (see build-push.yml's `on.pull_request.branches`). This suite's
-  # whole pr_staging_available/ensure-pr-staging-images mechanism assumes
-  # build-push.yml ran for the same PR and pushed its pr-<N>-sha-<short>
-  # staging tags -- vit_pr_staging_available() (scripts/lib/
-  # validation-image-tag.sh) has no base-branch check of its own, so without
-  # this filter a PR opened against a base branch build-push.yml ignores
-  # would still be marked staging-available here, and
-  # ensure-pr-staging-images would poll for tags that no workflow will ever
-  # push until it times out and fails closed (Codex review finding on
-  # #764). Restricting the trigger the same way build-push.yml is restricted
-  # is the correct fix rather than teaching the planner a fallback: a PR
-  # against an unprotected branch isn't covered by branch-protection
-  # required-status-checks anyway (see the BRANCH PROTECTION NOTE above), so
-  # skipping this workflow entirely for it loses nothing.
-  #
-  # current_dev was missing here even though build-push.yml's own
-  # pull_request.branches already listed it -- found during #709's audit of
-  # hardcoded/drifted branch-trigger lists. Restored to match exactly, as
-  # this comment has always claimed it does.
-  pull_request:
-    branches: [master, current_dev, "v[0-9]*"]
-    # Issue #1203: same trigger-level docs-only skip as build-push.yml's own
-    # pull_request trigger (see that block's comment for the full
-    # rationale/evidence) -- this workflow's own job names (`plan deep
-    # validation`, `ensure PR staging images`, `full-setup simulations`,
-    # `DNS zone/record rollback simulation`,
-    # `Admin UI Kea rollback (POST /dhcp/snapshot/rollback) simulation`,
-    # `Syslog forwarding + Admin UI visibility simulation`,
-    # `deep full-setup validation`) do NOT appear in master's or v0.2.0's
-    # required-status-checks list at all (confirmed via the GitHub API), so
-    # unlike build-push.yml this carries no branch-protection risk on any
-    # branch this workflow triggers for.
-    paths-ignore:
-      - "**/*.md"
-      - "docs/**"
+  # Manual only, as on current_dev (0eac36d3 dropped the pull_request
+  # trigger, add37d1a dropped the build-push.yml call as a duplicate). A PR
+  # that changes deploy or the workflows still runs build-push.yml's
+  # "validate full-setup image"; none of this workflow's jobs is a required
+  # status check on master.
   workflow_dispatch:
     inputs:
       image_tag:

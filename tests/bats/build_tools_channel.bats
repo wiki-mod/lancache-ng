@@ -30,8 +30,26 @@ setup() {
     [ "$output" = "latest" ]
 }
 
-@test "resolve_build_tools_channel maps v0.2.0 to nightly" {
-    run resolve_build_tools_channel "v0.2.0"
+@test "resolve_build_tools_channel maps a vX.Y.Z release tag to latest" {
+    run resolve_build_tools_channel "v0.3.1"
+    [ "$status" -eq 0 ]
+    [ "$output" = "latest" ]
+}
+
+@test "resolve_build_tools_channel maps a vX.Y.Z-rc.N release candidate tag to latest" {
+    run resolve_build_tools_channel "v0.4.0-rc.1"
+    [ "$status" -eq 0 ]
+    [ "$output" = "latest" ]
+}
+
+@test "resolve_build_tools_channel maps a release/vX.Y.Z archive branch to latest" {
+    run resolve_build_tools_channel "release/v0.3.1"
+    [ "$status" -eq 0 ]
+    [ "$output" = "latest" ]
+}
+
+@test "resolve_build_tools_channel keeps a v-prefixed non-version ref on nightly" {
+    run resolve_build_tools_channel "v2-experiment"
     [ "$status" -eq 0 ]
     [ "$output" = "nightly" ]
 }
