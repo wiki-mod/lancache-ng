@@ -573,15 +573,6 @@ recurrence:
 - **GHCR GC reachability** (`ci.sh gc`, run by `gc.yml` with `--apply`): neither its
   argument guard nor the classification into kept and deleted versions has a check.
 
-### Retired with their mechanism
-
-No check is needed where the mechanism is no longer in the tree: the `build-push.yml`
-self-modification trigger, the staging back-fill ancestor fallback, the sparse-checkout
-restore of `gc-pr-staging-images.yml` (no workflow sets a sparse checkout), the
-`utilities` SBOM merge, `docker run` heredocs without `-i` in workflow YAML, the
-`build-tools.yml` nightly promotion branch, the `full-setup-deep-validate.yml` resync
-guard, and the skip branches of the Dockerfile acceleration functions.
-
 ---
 
 ## Scope Boundaries
