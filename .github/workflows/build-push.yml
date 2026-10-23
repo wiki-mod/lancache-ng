@@ -2670,9 +2670,16 @@ jobs:
         (
           github.event_name != 'pull_request' ||
           needs['detect-changes'].outputs.deploy == 'true' ||
-          needs['detect-changes'].outputs.workflow == 'true'
+          needs['detect-changes'].outputs.workflow == 'true' ||
+          needs['detect-changes'].outputs.proxy == 'true' ||
+          needs['detect-changes'].outputs.dns_image == 'true' ||
+          needs['detect-changes'].outputs.watchdog == 'true' ||
+          needs['detect-changes'].outputs.ui == 'true'
         )
       }}
+    # The service filters above cover the full-setup stack's own images: with
+    # full-setup-deep-validate.yml on manual dispatch only, this is the one PR
+    # check that starts the stack, so a services-only PR must not skip it.
     runs-on: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && fromJSON('["self-hosted", "linux", "lancache", "lancache-light"]') || 'ubuntu-latest' }}
     # Real runs: 30-71s (pulls the just-published multi-platform image set,
     # brings the full stack up via docker compose, smoke-tests it, tears it
