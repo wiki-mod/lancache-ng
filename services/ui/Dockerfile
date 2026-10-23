@@ -608,7 +608,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
 # stage. Same pinned alpine:3.24 digest already used by services/dhcp,
 # services/dhcp-proxy, services/watchdog, services/ntp, and services/dns.
 
-FROM mirror.gcr.io/library/alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
+FROM mirror.gcr.io/library/alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
 
 LABEL org.opencontainers.image.description="lancache-ng Admin UI and control-plane service for cache, DNS, DHCP, and secondary management."
 
