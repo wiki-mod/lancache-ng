@@ -6,7 +6,6 @@
 
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/13763/badge)](https://www.bestpractices.dev/projects/13763)
 [![OpenSSF Baseline](https://www.bestpractices.dev/projects/13763/baseline)](https://www.bestpractices.dev/projects/13763)
-[![Rust coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fwiki-mod%2Flancache-ng%2Fbadges%2Fcoverage%2Frust-master.json)](https://github.com/wiki-mod/lancache-ng/actions/workflows/build-push.yml?query=branch%3Amaster)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](LICENSE)
 
 LanCache NG is a local download cache for your home network, LAN party, lab, school, office or gaming room.
@@ -25,10 +24,6 @@ LanCache NG is still actively changing.
 The current setup already provides the main stack, guided installation, Admin UI, DNS based cache routing, optional SSL caching, optional DHCP, optional LanCache-NG-NTP server, optional scheduled automatic updates, and secondary DNS support.
 
 Some internal paths, root elements and service details may still change while the project grows.
-
-### Test coverage
-
-The Rust coverage badge above is a Shields endpoint backed by `coverage/rust-master.json` on the repository's `badges` branch -- this README is only ever viewed on `master` (GitHub always renders the default branch's README on the repo homepage), so the badge here specifically tracks `master`'s own coverage rather than whatever integration branch happens to be active. On trusted branch pushes, the `rust_coverage`/`publish_coverage_badge` jobs write the latest measured `services/ui` and `services/dns/nats-subscriber` percentages to a branch-scoped file (`coverage/rust-<branch>.json`, so master and the active `vX.Y.Z` integration branch don't overwrite each other's numbers); pull requests measure and gate coverage but do not publish badge JSON. The same coverage job runs `cargo tarpaulin` against both Rust crates and enforces a per-crate threshold: `services/ui` must stay at or above 35% (real measured coverage is ~38.6% as of this writing), and `services/dns/nats-subscriber`'s threshold is still set at 0% in the workflow. Issue #504 (closed via PR #515) added real unit tests for `dns_record_to_zone_update()`'s subscribe/forward logic, extracted as a pure, testable function -- so the crate's tests are no longer data-model-only -- but the `rust_coverage` job's threshold was deliberately left at 0% pending a real tarpaulin measurement, and nothing has raised it since. Each crate's threshold is raised independently as that crate gains real coverage.
 
 ## What this project does
 

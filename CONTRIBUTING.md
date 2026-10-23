@@ -385,30 +385,8 @@ docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work:ro" -w /work "$BUILD_TOOLS
   bash -lc 'cargo test --locked --manifest-path services/ui/Cargo.toml && cargo test --locked --manifest-path services/dns/nats-subscriber/Cargo.toml'
 ```
 
-For Rust coverage checks (requires the build-tools container with `cargo-tarpaulin`), use:
-
-```bash
-BUILD_TOOLS_IMAGE="$(bash scripts/select-build-tools-image.sh)"
-docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work:ro" -w /work "$BUILD_TOOLS_IMAGE" \
-  bash -lc 'cargo tarpaulin --engine llvm --manifest-path services/ui/Cargo.toml --locked --out json && cargo tarpaulin --engine llvm --manifest-path services/dns/nats-subscriber/Cargo.toml --locked --out json'
-```
-
-`--engine llvm` matches what CI uses: tarpaulin's default ptrace-based engine needs a
-capability Docker containers don't grant by default (it fails with "ASLR disable
-failed: EPERM"), so both CI and local instructions use the LLVM source-based engine
-instead.
-
-Rust code coverage has a per-crate minimum threshold, not one shared number:
-`services/ui` must stay at or above 35% (real measured coverage is ~38.6% as
-of this writing), and `services/dns/nats-subscriber`'s threshold is still set
-at 0% in the workflow. Issue #504 (closed via PR #515) already added real
-unit tests for `dns_record_to_zone_update()`'s subscribe/forward logic
-(extracted as a pure, testable function), so the crate's tests are no longer
-data-model-only, but the `rust_coverage` job's threshold was deliberately
-left at 0% pending a real tarpaulin measurement and hasn't been raised since.
-Raise each crate's threshold independently as that crate gains real coverage
-— do not average or share a single "minimum" number across both, since their
-coverage levels differ by an order of magnitude for unrelated reasons.
+CI runs no Rust coverage job: the former `coverage (Rust)` job measured near-zero
+coverage, ran without sccache and took 30 minutes or more, so it was removed.
 
 If you cannot run a relevant check locally (for example, if Docker is unavailable),
 say so in the pull request and explain why.

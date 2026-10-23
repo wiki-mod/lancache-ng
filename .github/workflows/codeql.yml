@@ -167,7 +167,7 @@ jobs:
     # `if:` above doesn't cover) would silently skip THIS job too, including
     # the 'actions' matrix entry, which must run on every trigger regardless.
     # Mirrors the identical `always() && (...)` shape build-push.yml's
-    # dns_test/ui_test/rust_coverage jobs already use for the same reason.
+    # dns_test/ui_test jobs already use for the same reason.
     #   - matrix.language == 'actions': always runs. This scans the workflow
     #     files themselves and must not be skipped by Rust-path scoping.
     #   - schedule/workflow_dispatch: detect-changes reports `skipped` here,

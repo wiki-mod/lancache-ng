@@ -173,7 +173,7 @@ which one a given check actually runs under before treating "current_dev CI is g
 as proof of it:**
 
 - `build-push.yml` / `build-tools.yml`: run automatically on every PR (`pull_request`)
-  and push, including against `current_dev`. This is where `rust_coverage`,
+  and push, including against `current_dev`. This is where
   `dns_rust_quality`/`ui_rust_quality`, `dns_test`/`ui_test`/`watchdog_test`,
   `dns_cargo_audit`/`ui_cargo_audit`, `shellcheck`, `file-headers`, `validate-compose`
   (incl. the VEX-drift guard), `pr-tracking-metadata-check`, and `container-scan` live.
