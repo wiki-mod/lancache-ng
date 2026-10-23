@@ -84,6 +84,13 @@ jobs:
     needs: platform
     runs-on: ${{ needs.platform.outputs.runner }}
     timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['gc'] }}
+    # What: contents write to delete green run refs.
+    # Why: the refs are ci.sh git refs; PR state is read.
+    # From: Issue #1683 | PR #1858
+    permissions:
+      contents: write
+      packages: read
+      pull-requests: read
     container:
       image: ${{ needs.platform.outputs.image }}
       credentials: *ghcr_credentials
@@ -96,6 +103,13 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GHCR_PACKAGE_DELETE_PAT }}
         run: bash .github/scripts/ci.sh gc --apply
+      # What: delete green run refs of closed PRs.
+      # Why: one ref per PR stays after merge otherwise.
+      # From: Issue #1683 | PR #1858
+      - name: Delete green run refs of closed PRs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash .github/scripts/ci.sh gc-green-refs --apply
 
   # What: AG-GH-017 sweep for branches with no PR or issue.
   # Why: reachability of refs; read-only repo token only.

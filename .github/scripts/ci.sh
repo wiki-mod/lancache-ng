@@ -73,7 +73,7 @@ declare -A CI_DISPATCH=(
     [assemble-stack]=ci_cmd_assemble_stack [test-stack]=ci_cmd_test_stack [nightly-report]=ci_cmd_nightly_report
     [validate]=ci_cmd_validate [result-gate]=ci_cmd_result_gate [promote]=ci_cmd_promote [promote-ref]=ci_cmd_promote_ref [channel-checkout]=ci_cmd_channel_checkout [release-validation]=_ci_release_validation_valid [release-ref]=_ci_release_ref
     [release-publish]=ci_cmd_release_publish [release-images]=ci_cmd_release_images [release-sbom-stack]=ci_cmd_release_sbom_stack [release-vex]=ci_cmd_release_vex [cut-release-tag]=ci_cmd_cut_release_tag [release-notes]=ci_cmd_release_notes [release-changelog]=ci_cmd_release_changelog
-    [gc]=ci_cmd_gc [check]=ci_cmd_check [close-linked-issues]=ci_cmd_close_linked_issues [pr-labels]=ci_cmd_pr_labels [board-add]=ci_cmd_board_add
+    [gc]=ci_cmd_gc [gc-green-refs]=ci_cmd_gc_green_refs [check]=ci_cmd_check [close-linked-issues]=ci_cmd_close_linked_issues [pr-labels]=ci_cmd_pr_labels [board-add]=ci_cmd_board_add
     [welcome]=ci_cmd_welcome [version]=ci_cmd_version [docker-daemon-config]=ci_cmd_docker_daemon_config [runner-host]=ci_cmd_runner_host
     [have-command]=ci_cmd_have_command [pr-green-mark]=ci_cmd_pr_green_mark
 )
@@ -2670,6 +2670,13 @@ _ci_cas_push() {
     git push --force-with-lease="${ref}:${cur}" "${remote}" "${sha}:${ref}" 2>&1
 }
 
+# What: delete ref $2 on $1 only while it points at $3.
+# Why: one owner for lease deletes of lock and mark refs.
+# From: Issue #1683 | PR #1858
+_ci_ref_delete() {
+    _ci_capture 0 git push --quiet --force-with-lease="$2:$3" "$1" ":$2"
+}
+
 # What: log a failed CAS push; rc 2 race, rc 3 failure.
 # Why: race and real failure both need git's raw text.
 # From: Issue #1683 | PR #1858
@@ -2724,7 +2731,7 @@ _ci_lock_release() {
         ci_log "[CI-INFO-CAS-0007]" "ref=\"${ref}\" holder=\"${held}\" mine=\"${note}\" reason=\"lock reassigned; not released\""
         return 0
     fi
-    _ci_capture 0 git push --quiet --force-with-lease="${ref}:${cur}" "${remote}" ":${ref}" || return 1
+    _ci_ref_delete "${remote}" "${ref}" "${cur}" || return 1
     return 0
 }
 
@@ -7848,6 +7855,70 @@ _ci_gc_run() {
     fi
     printf 'gc result=classified keep=%s delete=%s deleted=%s mode=%s\n' "${keep}" "${del}" "${deleted}" "${mode}"
     return 0
+}
+
+# What: delete green run refs of closed PRs; dry-run lists.
+# Why: one green ref per PR; nothing else deletes it.
+# From: Issue #1683 | PR #1858
+ci_cmd_gc_green_refs() {
+    local mode="dry-run" arg remote prefix repo refs sha ref n state out rc keep=0 del=0 deleted=0
+    for arg in "$@"; do
+        case "${arg}" in
+            --apply) mode="apply" ;;
+            *)
+                ci_log "[CI-ERROR-GC-0036]" "arg=\"${arg}\" reason=\"unknown gc-green-refs argument\""
+                return 2
+                ;;
+        esac
+    done
+    remote="$(_ci_git_remote)" || return 2
+    prefix="$(_ci_variable CI_GREEN_REF)" || return 2
+    repo="$(_ci_env_required GITHUB_REPOSITORY)" || return 2
+    refs="$(_ci_capture 0 git ls-remote --refs "${remote}" "${prefix}/*")" || return 2
+    while IFS=$'\t' read -r sha ref; do
+        [ -n "${ref}" ] || continue
+        n="${ref#"${prefix}/pr-"}"
+        if [[ ! "${n}" =~ ^[1-9][0-9]*$ ]]; then
+            ci_log "[CI-ERROR-GC-0037]" "ref=\"${ref}\" reason=\"not of the form ${prefix}/pr-<number>\""
+            return 2
+        fi
+        if ! state="$(_ci_retry github-read gh api --jq .state "repos/${repo}/pulls/${n}")"; then
+            ci_error "[CI-ERROR-GC-0038]" "ref=\"${ref}\" pr=${n} reason=\"PR state not readable\"" "${state}"
+            return 2
+        fi
+        case "${state}" in
+            open)
+                keep=$((keep + 1))
+                printf 'gc-green-refs ref=%s pr=%s state=open action=KEEP\n' "${ref}" "${n}"
+                ;;
+            closed)
+                del=$((del + 1))
+                printf 'gc-green-refs ref=%s pr=%s state=closed action=DELETE mode=%s\n' "${ref}" "${n}" "${mode}"
+                [ "${mode}" = apply ] || continue
+                if ! _ci_ref_delete "${remote}" "${ref}" "${sha}"; then
+                    ci_log "[CI-ERROR-GC-0039]" "ref=\"${ref}\" reason=\"ref delete failed (raw above)\""
+                    return 2
+                fi
+                # What: deleted = the ref is absent on read back.
+                # Why: AG-WF-031: a delete is checked, not assumed.
+                # From: Issue #1683 | PR #1858
+                rc=0; out="$(_ci_cas_ref_sha "${remote}" "${ref}")" || rc=$?
+                case "${rc}" in
+                    1) deleted=$((deleted + 1)) ;;
+                    0)
+                        ci_log "[CI-ERROR-GC-0040]" "ref=\"${ref}\" sha=\"${out}\" reason=\"ref still present after the delete\""
+                        return 2
+                        ;;
+                    *) return 2 ;;
+                esac
+                ;;
+            *)
+                ci_log "[CI-ERROR-GC-0041]" "ref=\"${ref}\" pr=${n} state=\"${state}\" reason=\"unknown PR state; neither kept nor deleted\""
+                return 2
+                ;;
+        esac
+    done <<< "${refs}"
+    printf 'gc-green-refs result=classified keep=%s delete=%s deleted=%s mode=%s\n' "${keep}" "${del}" "${deleted}" "${mode}"
 }
 
 # =========================================================
