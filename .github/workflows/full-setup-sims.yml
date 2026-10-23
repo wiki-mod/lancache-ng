@@ -1,7 +1,7 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # Reusable workflow: the ten shared full-setup validation/simulation jobs that
 # used to be maintained as two independently-drifting copies in
-# full-setup-validate.yml (manual) and full-setup-deep-validate.yml (per-PR).
+# full-setup-validate.yml (manual) and full-setup-deep-validate.yml (manual).
 # This is now their single source (issue #1014); each caller keeps its own
 # trigger/path-filter surface and passes its own inputs.
 #
