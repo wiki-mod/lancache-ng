@@ -45,7 +45,7 @@ service, not the whole install.
 4. **Log lines.** The store logs
    `[known-good-snapshot][<service>][<LEVEL>] <message>` on stderr, with the
    levels `CREATE`, `PRUNE`, `ADOPT`, `SELECT`, `REJECT`, `WARNING` and
-   `FATAL`. `<service>` is `proxy`, `dhcp-proxy`, `kea`, `dns-auth`,
+   `FATAL`. `<service>` is `proxy`, `dnsmasq`, `kea`, `dns-auth`,
    `dns-recursor` or `dns`.
 
 ## Startup adapters (nginx, dnsmasq, PowerDNS, Kea)

@@ -3520,7 +3520,7 @@ fn dnsmasq(ctx: &Ctx, relay: bool) -> Result<Run, String> {
     let store = lancache_ng::SnapshotStore::new(
         PathBuf::from(ctx.need("DHCP_CONFIG_SNAPSHOT_DIR")?),
         ctx.need("DHCP_CONFIG_SNAPSHOT_FILE")?,
-        "dhcp-proxy",
+        "dnsmasq",
     );
     let check = [
         "dnsmasq".into(),
