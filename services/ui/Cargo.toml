@@ -2,8 +2,8 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-# What: manifest of the lancache-ui Admin UI, one main.rs.
-# Why: server, Docker/NATS/Kea/syslog clients and templates.
+# What: manifest of the lancache-ui Admin UI binary.
+# Why: single binary crate; src/main.rs is the only source.
 # From: Issue #1683 | PR #1858
 [package]
 name = "lancache-ui"
