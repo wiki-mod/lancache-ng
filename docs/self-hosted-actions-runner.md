@@ -11,48 +11,9 @@ Setting the repository variable `PROJECT_SELFHOSTED_RUNNER_USAGE_CI` to exactly
 `true` moves the jobs to `platform_arch.<arch>.runner_self_hosted`
 (`lancache-heavy` for amd64); the first job of each workflow stays
 GitHub-hosted. Every job runs in the
-build-tools container, CodeQL included. The sections below describe the CI 1.x
-self-hosted setup and are historical.
-
-## CI 1.x setup (historical)
-
-The repository workflows are configured to run the build, container checks and CodeQL jobs on self-hosted Linux runners with these labels:
-
-- `self-hosted`
-- `linux`
-- `lancache`
-- `lancache-light` or `lancache-heavy`, depending on the job tier
-
-Register at least one runner for each tier before enabling the workflows. Light runners handle shell and compose validation, while heavy runners handle Docker builds, scans, promotion, release, and the dedicated build-tools publish workflow. The runner user must be able to run Docker builds; project validation tools are supplied by the repository build-tools image instead of being installed ad hoc on the runner.
-
-The workflow also builds and publishes `ghcr.io/wiki-mod/lancache-ng/build-tools`.
-That image is used by local developer checks and is intentionally based on
-`rust:latest`. It carries project validation tools such as Rustfmt, Clippy,
-ShellCheck, Actionlint, Cargo Audit, sccache, distcc, distcc-pump, and
-DNS/setup/template fixture tools. Trivy image scanning remains a workflow
-capability, not a tool bundled into the image. Production service images remain
-separate.
-
-Workflow jobs that only need these bundled validation tools should run them from
-the prebuilt image instead of compiling or installing them per job. For example,
-the Cargo Audit jobs use the image-provided `cargo-audit` binary.
-
-The dedicated `Build Tools Image` workflow runs on `lancache-heavy` because it
-builds and scans Docker images before publishing multi-architecture tags.
-
-Routine pull requests skip the `build-tools` image build when neither
-`.github/build-tools` nor the build workflow changed. Release tags always build the
-tag-scoped build-tools image because release jobs must not use mutable `latest`
-tooling.
-
-The dedicated `Build Tools Image` workflow provides the normal refresh path for
-that image. It runs when build-tools inputs change, can be triggered manually,
-refreshes weekly, smoke-tests the bundled tools, scans the local image, and then
-publishes `linux/amd64` and `linux/arm64` tags on trusted non-PR refs.
-
-The build-tools image does not replace the baseline runner requirements below.
-The GitHub workflows still need a working self-hosted runner, Docker daemon,
-Buildx support, outbound network access, and CodeQL action setup.
+build-tools container, CodeQL included. A self-hosted runner therefore needs
+Docker with Buildx and outbound network access; the project tools come from
+the build-tools image.
 
 ## Job concurrency serialization
 
@@ -77,7 +38,7 @@ The lock covers only the channel move; it does not block other jobs.
 Build acceleration is a CI optimization, not a runtime requirement. Jobs that
 use Redis-backed `sccache`, `sccache-dist`, `distcc`, `distcc-pump`, or a local
 Buildx cache must document whether that accelerator is optional, preferred, or
-a hard gate. GitHub-hosted fallback validation must not inherit LAN-only
+a hard gate. Jobs on GitHub-hosted runners must not inherit LAN-only
 assumptions about Redis URLs, distcc schedulers, cache paths, or runner labels.
 
 As a rule of thumb:
@@ -86,40 +47,25 @@ As a rule of thumb:
 - preferred: use the accelerator when available, but keep a documented fallback
 - gate: the job must have the accelerator or fail closed before doing work
 
-## Native arm64 builds on GitHub-hosted runners
+## Native amd64 and arm64 builds
 
-Prebuilt service images (`proxy`, `dns`, `watchdog`, `dhcp`, `dhcp-proxy`,
-`ntp`, `syslog`, `ui`, `build-tools`) publish both `linux/amd64` and
-`linux/arm64` under one coherent
-multi-platform tag per service. The two platforms are built natively in
-separate lanes, never through QEMU emulation for these images:
+Every image publishes the platforms of the SOT `build_matrix.platforms`
+(`linux/amd64`, `linux/arm64`) under one multi-platform tag. Each platform builds natively on
+the runner of `platform_arch.<arch>` in the SOT, never through QEMU:
 
-- `linux/amd64` still builds on the self-hosted `lancache-heavy` runner pool
-  described above, with the same Redis/sccache-dist/distcc acceleration
-  contract.
-- `linux/arm64` builds natively on GitHub-hosted `ubuntu-24.04-arm` runners (or
-  a newer non-EOL arm64 hosted image — never pin to a runner image GitHub has
-  marked for retirement). These runners are free for public repositories and
-  give real arm64 CPUs, so `ui` and `dns` (the two services that compile Rust
-  from source) build at native speed instead of under QEMU emulation, which
-  was judged too slow and too failure-prone for real `cargo build --release`
-  runs when this was last evaluated (issues #348 / #395).
+- `linux/amd64` builds on `runner` (`ubuntu-latest`), or on
+  `runner_self_hosted` (`lancache-heavy`) when
+  `PROJECT_SELFHOSTED_RUNNER_USAGE_CI` is `true`.
+- `linux/arm64` builds on `ubuntu-24.04-arm` in both cases; the fleet has no
+  arm64 host.
 
-Each platform lane pushes its image by digest only (no mutable tag). A
-separate merge step combines the two digests into the real `sha-<commit>` tag
-per service with `docker buildx imagetools create` -- the same tool the
-`promote` job already uses to move channel tags without rebuilding anything.
-This keeps the amd64 and arm64 build lanes fully independent: either one can
-fail, retry, or take longer without racing the other for the same tag.
+Each platform lane pushes its image by digest only. `ci.sh` then joins the
+two digests into one tag with `docker buildx imagetools create`, so either
+lane can fail or retry without racing the other for the same tag.
 
-GitHub-hosted arm64 runners are outside the self-hosted LAN, so they cannot
-reach the Redis-backed `sccache` cache, the `sccache-dist` scheduler, or the
-`distcc` hosts described in the Acceleration contract above. The arm64 lane
-therefore always builds as an uncached, optional-acceleration `cargo build
---release` -- slower per build than the accelerated amd64 lane, but still a
-native compile, not an emulated one. This is a deliberate, documented
-tradeoff and not a bug: extending the LAN-only acceleration infrastructure to
-a transient cloud runner is out of scope here.
+The `sccache-dist` scheduler and the `distcc` hosts are LAN-only. `ci.sh`
+reads them only on a self-hosted runner and otherwise logs
+`CI-INFO-VARIABLES-0024`, so a GitHub-hosted build compiles without them.
 
 ## Debian runner packages
 
@@ -184,32 +130,10 @@ against a world-writable path.
 
 ## Runner labels
 
-When configuring the runner, include the custom `lancache` label plus the
-appropriate tier label. For example:
-
-```bash
-./config.sh --url https://github.com/<owner>/<repo> --token <registration-token> --labels lancache,lancache-light
-sudo ./svc.sh install
-sudo ./svc.sh start
-```
-
-Heavy runners use the same base labels with `lancache-heavy` instead:
-
-```bash
-./config.sh --url https://github.com/<owner>/<repo> --token <registration-token> --labels lancache,lancache-heavy
-sudo ./svc.sh install
-sudo ./svc.sh start
-```
-
-If the runner will also execute CodeQL workflows, add the `codeql` label:
-
-```bash
-./config.sh --url https://github.com/<owner>/<repo> --token <registration-token> --labels lancache,lancache-heavy,codeql
-sudo ./svc.sh install
-sudo ./svc.sh start
-```
-
-CodeQL requires the `codeql` label to match the `runs-on` configuration in `.github/workflows/codeql.yml`.
+A fleet runner carries the label of `platform_arch.amd64.runner_self_hosted`
+in the SOT (`lancache-heavy`). CodeQL needs no extra label: it runs on the
+same runner as every other job. Register the runner as described under
+"Preparing a new or cloned host" below, with `--labels lancache-heavy`.
 
 ## Runner host maintenance (`ci.sh runner-host`)
 
@@ -338,91 +262,19 @@ restart `docker.service`. The values come from `CI_BUILDER_GC_RESERVED_SPACE`,
 `CI_DAEMON_LOG_MAX_SIZE`, `CI_DAEMON_LOG_MAX_FILE`, `CI_DAEMON_JSON` (SOT
 `ci_variables`, overridable per host by environment).
 
-## Local Docker build cache
+## Rust build acceleration
 
-The build and build-tools workflows use a local Buildx cache under
-`/var/tmp/lancache-ng-buildx-cache` instead of GitHub's `type=gha` cache
-backend. This keeps Docker layer cache traffic on the self-hosted runner and
-avoids consuming GitHub Actions cache quota for image builds.
-
-Create the cache directory once if your runner has restricted `sudo` rules:
-
-```bash
-sudo mkdir -p /var/tmp/lancache-ng-buildx-cache
-sudo chown -R actions-runner:actions-runner /var/tmp/lancache-ng-buildx-cache
-```
-
-Replace `actions-runner:actions-runner` with the runner account and group. The
-workflow does not use `sudo` for cache rotation; the runner account must be able
-to create and replace service-specific cache directories below this path.
-The workflow uses `flock` from `util-linux` so concurrent runs cannot rotate the
-same service cache while another run is importing it.
-
-## Rust compiler cache
-
-Rust checks and Rust image builds use Redis-backed `sccache` when the repository
-is configured for it.
-
-Configure this repository variable:
-
-- `SCCACHE_REDIS_MODE`: `required`, `optional` or `off`.
-
-Configure this GitHub Actions secret:
-
-- `SCCACHE_REDIS_URL`: Redis URL used by sccache.
-
-Use `required` for trusted self-hosted LAN runners where Redis is expected to
-be reachable. Use `optional` or `off` when moving jobs to runners that do not
-have access to the Redis cache.
-
-When `SCCACHE_REDIS_MODE=required`, the runner must have `sccache` available in
-`PATH`. Install it from source and keep the installed binary on the runner
-service account's `PATH`.
-
-### ccache reuse for the Rust service images' C-dependency compiles
-
-The C-dependency compile paths (`ring`, via distcc) of
-`services/dhcp/Dockerfile`, `services/dns/Dockerfile`,
-`services/proxy/Dockerfile`, `services/ui/Dockerfile` and
-`services/watchdog/Dockerfile` can layer `ccache` in front of distcc when
-both a distcc host list and a ccache Redis endpoint are configured.
-
-**Correction (2026-09-01, Issue #1781):** this paragraph used to also claim
-`.github/build-tools/Dockerfile`'s "from-source curl/git compile" inherited
-this same ccache-over-distcc mechanism since issue #1304/PR #1661.
-`.github/build-tools/Dockerfile` has no such compile and never wired
-`CC=distcc`/`CC="ccache ..."` for one -- curl and git are both plain
-`apk add`/`apt-get install` packages there (curl was `COPY`'d from the
-shared `services/utilities` image's own from-source build, not compiled
-in `.github/build-tools/Dockerfile` itself, until Issue #1781 replaced that
-`COPY` with this stage's own `apk add`/`apt-get install curl` too). The
-ccache/distcc-accelerated from-source build this correction refers to only
-ever existed in `services/utilities/Dockerfile`'s now-removed
-`curl-builder` stage. In CI 2.0, `ci.sh` (`_ci_set_runtime`) writes the
-`ccache_redis_url` and `distcc_potential_hosts` secrets only for Rust
-builds (kind `rust`), never for the build-tools image.
-
-This is not a separate secret: it automatically reuses the same
-`SCCACHE_REDIS_URL` value already configured for `sccache` above, on the
-same Redis instance,
-whenever `DISTCC_POTENTIAL_HOSTS` is also set — `ccache`'s own fixed `ccache:`
-key namespace never collides with `sccache`'s distinct
-`SCCACHE_REDIS_KEY_PREFIX`-based one. There is no separate `CCACHE_REDIS_MODE`
-toggle; every ccache failure detected before the real Cargo build falls back
-to plain distcc (no cache layer) instead of hard-failing the build. A Redis
-error surfacing only during the real build cannot fall back after the fact
-(the compile already succeeded) and is reported as an `[INFO]` diagnostic
-instead. Unlike other Rust service builders, `services/dns/Dockerfile`,
-`services/ui/Dockerfile`, and `services/watchdog/Dockerfile` export
-`CC="ccache <real compiler>"` (not the plain `CC=distcc` documented under
-[Rust builds and distcc/pump](local-runner-docker-performance.md#rust-builds-and-distccpump))
-once both distcc and ccache are enabled. See those Dockerfiles' own
-`configure_ccache()`/`disable_ccache()` comments and issue #887/#1533/#1095
-for the full mechanism.
+`sccache`, `sccache-dist`, `distcc` and `ccache` are described in
+[local-runner-docker-performance.md](local-runner-docker-performance.md);
+`ci.sh rust-build` owns them.
 
 ## CodeQL
 
-The CodeQL workflow uses advanced setup with `github/codeql-action` on self-hosted runners labeled `self-hosted`, `linux`, `lancache` and `codeql`. No separate CodeQL package needs to be installed on Debian; the action downloads and manages the CodeQL bundle during the workflow run.
+`ci.sh codeql-analyze <language>` downloads the CodeQL CLI bundle pinned in
+the SOT (`external_versions.codeql`), creates the database with
+`--build-mode=none` and uploads the SARIF with `codeql github upload-results`.
+It runs in the build-tools container on the runner `ci.sh job-settings`
+chose; the runner needs no CodeQL package and no extra label.
 
 Disable CodeQL default setup in GitHub before enabling this workflow. GitHub rejects SARIF uploaded by an advanced CodeQL workflow while default setup remains enabled for the repository.
 
