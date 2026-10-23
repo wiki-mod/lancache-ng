@@ -1303,9 +1303,17 @@ pub fn write_if_changed(
     owner: Option<Owner>,
 ) -> io::Result<bool> {
     // What: compare bytes; unreadable = changed.
-    // Why: a missing or broken file must be written again.
+    // Why: missing = first write; other errors are logged.
     // From: Issue #1683 | PR #1912
-    let changed = fs::read(path).ok().as_deref() != Some(contents);
+    let changed = match fs::read(path) {
+        Ok(old) => old != contents,
+        Err(e) => {
+            if e.kind() != io::ErrorKind::NotFound {
+                eprintln!("[write_if_changed] WARNING: {} not read: {e}", path.display());
+            }
+            true
+        }
+    };
     if changed {
         write_file_as(path, contents, mode, Place::Replace, owner)?;
     }
