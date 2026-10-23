@@ -43,7 +43,11 @@ resolve_build_tools_channel() {
     local channel_ref="$1"
 
     case "$channel_ref" in
-        master)
+        master | v[0-9]*.[0-9]*.[0-9]* | release/v[0-9]*.[0-9]*.[0-9]*)
+            # Release tags are cut from master by promote, and release/vX.Y.Z
+            # archives a tag commit, so both belong to master's line. Resolving
+            # them to nightly made a tag run take current_dev's build-tools and
+            # service channel images (issue #1918 release run 39990316446).
             printf '%s\n' "latest"
             ;;
         *)
