@@ -423,43 +423,6 @@ jobs:
           echo "::notice::gh pr view succeeded. Body byte count: $(wc -c < /var/tmp/pr-body-live.txt). stderr: $(cat /var/tmp/pr-body-live.stderr)"
           bash scripts/validate-pr-template.sh /var/tmp/pr-body-live.txt
 
-  pr-template-check-hosted:
-    # Same zero-LAN-dependency property as file-headers-hosted: this check
-    # only reads github.event.pull_request context and runs a plain bash
-    # script, so it keeps the self-hosted job's own `if:` guard directly
-    # (not a needs:-based dependency on another job's result) -- see
-    # docs/ci-github-hosted-fallback-decision.md for why that distinction
-    # matters for GitHub-hosted fallback jobs.
-    name: PR template validation (GitHub-hosted fallback)
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    # Real runs: 5-7s on ubuntu-latest. Same 15-minute floor as
-    # detect-changes' self-hosted equivalent above.
-    timeout-minutes: 15
-    permissions:
-      contents: read
-      pull-requests: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: GitHub-hosted fallback notice
-        run: |
-          echo "::notice::Running PR template validation on GitHub-hosted runner as fallback for non-LAN-dependent linting."
-      - name: Validate PR template completeness
-        env:
-          # See the primary pr-template-check job's identical step for why
-          # this fetches the body live via `gh pr view` instead of trusting
-          # github.event.pull_request.body.
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          PR_DRAFT: ${{ github.event.pull_request.draft }}
-          # Dependabot's own PR author identity -- see
-          # validate-pr-template.sh's dependabot[bot] exemption.
-          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
-        run: |
-          set -euo pipefail
-          gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json body -q .body > /var/tmp/pr-body-live.txt
-          bash scripts/validate-pr-template.sh /var/tmp/pr-body-live.txt
-
   pr-tracking-metadata-check:
     # Enforces AGENTS.md AG-GH-008: a PR must carry labels, a milestone, and (when
     # PROJECT_AUTOMATION_PAT is configured) project-board placement. Same
@@ -607,113 +570,6 @@ jobs:
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             bash scripts/check-pr-tracking-metadata.sh
 
-  pr-tracking-metadata-check-hosted:
-    name: PR tracking metadata (labels/milestone/project) (GitHub-hosted fallback)
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    # Real runs: up to ~1 min (build-tools image resolution + gh pr view
-    # calls on ubuntu-latest, slower than the self-hosted twin since it
-    # cannot reuse validate-compose's already-selected image). Same
-    # 15-minute floor as detect-changes above -- still ~15x the observed max.
-    timeout-minutes: 15
-    permissions:
-      contents: read
-      pull-requests: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Select build-tools image
-        # This fallback job must resolve its own image rather than depending
-        # on validate-compose's output (like the self-hosted job above does)
-        # -- it exists specifically for when self-hosted runners (and
-        # anything that depends on them, including validate-compose) are
-        # unavailable, so a needs: dependency on that job would defeat the
-        # fallback's purpose. Matches shellcheck-hosted's own resolution step.
-        env:
-          GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
-        run: |
-          set -euo pipefail
-          printf 'BUILD_TOOLS_IMAGE=%s\n' "$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)" >> "$GITHUB_ENV"
-      - name: GitHub-hosted fallback notice
-        run: |
-          echo "::notice::Running PR tracking metadata check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
-      - name: Auto-assign Dependabot PR milestone
-        # See the primary pr-tracking-metadata-check job's identical step
-        # (issue #1278) for the full rationale: Dependabot cannot set its
-        # own milestone, so this auto-assigns the "LanCache-NG Roadmap"
-        # catch-all (#11) via PROJECT_AUTOMATION_PAT before the live
-        # label/milestone re-fetch below, instead of exempting Dependabot
-        # from the check entirely (the previous approach, #1061-#1064).
-        if: github.event.pull_request.user.login == 'dependabot[bot]'
-        env:
-          GH_TOKEN: ${{ secrets.PROJECT_AUTOMATION_PAT }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          REPO: ${{ github.repository }}
-          DEPENDABOT_MILESTONE_NUMBER: 11
-        run: |
-          set -euo pipefail
-          if [ -z "$GH_TOKEN" ]; then
-            echo "::warning::PROJECT_AUTOMATION_PAT is not configured -- cannot auto-assign a milestone to this Dependabot PR. pr-tracking-metadata-check-hosted will fail below (No milestone set) until a maintainer sets one by hand."
-            exit 0
-          fi
-          current_milestone="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json milestone -q '.milestone.number // empty')"
-          if [ -n "$current_milestone" ]; then
-            echo "Milestone already set (#$current_milestone) -- leaving it as-is."
-            exit 0
-          fi
-          if ! gh api -X PATCH "repos/$REPO/issues/$PR_NUMBER" -F milestone="$DEPENDABOT_MILESTONE_NUMBER"; then
-            echo "::warning::Failed to auto-assign milestone #$DEPENDABOT_MILESTONE_NUMBER to PR #$PR_NUMBER via the GitHub API."
-            exit 0
-          fi
-          echo "Assigned milestone #$DEPENDABOT_MILESTONE_NUMBER (LanCache-NG Roadmap) to PR #$PR_NUMBER."
-      - name: Fetch current labels/milestone live
-        # See the primary pr-tracking-metadata-check job's identical step for
-        # why this fetches live via `gh pr view` instead of trusting
-        # github.event.pull_request.labels/.milestone.
-        id: live-metadata
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: |
-          set -euo pipefail
-          gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json labels -q '.labels' > /var/tmp/pr-labels-live.json
-          milestone_title="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json milestone -q '.milestone.title // ""')"
-          {
-            echo "labels_file=/var/tmp/pr-labels-live.json"
-            echo "milestone_title=$milestone_title"
-          } >> "$GITHUB_OUTPUT"
-      - name: Validate labels, milestone, and project-board placement
-        env:
-          PR_LABELS_JSON: ${{ steps.live-metadata.outputs.labels_file }}
-          PR_MILESTONE_TITLE: ${{ steps.live-metadata.outputs.milestone_title }}
-          PR_DRAFT: ${{ github.event.pull_request.draft }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          REPO: ${{ github.repository }}
-          GH_TOKEN: ${{ secrets.PROJECT_AUTOMATION_PAT }}
-          # GitHub does not pass repository secrets (other than the
-          # read-only GITHUB_TOKEN) to pull_request-triggered runs from a
-          # forked repository, so GH_TOKEN above is empty for every external
-          # contributor's PR even once PROJECT_AUTOMATION_PAT is configured.
-          # Telling the script whether this run is from a fork lets it warn
-          # with the right explanation instead of implying the secret is
-          # simply unconfigured -- see check-pr-tracking-metadata.sh.
-          PR_IS_FORK: ${{ github.event.pull_request.head.repo.full_name != github.repository }}
-        run: |
-          set -euo pipefail
-          labels_json="$(cat "$PR_LABELS_JSON")"
-          docker run --rm \
-            --user "$(id -u):$(id -g)" \
-            -v "$PWD:/work:ro" \
-            -w /work \
-            -e PR_LABELS_JSON="$labels_json" \
-            -e PR_MILESTONE_TITLE \
-            -e PR_DRAFT \
-            -e PR_NUMBER \
-            -e REPO \
-            -e GH_TOKEN \
-            -e PR_IS_FORK \
-            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            bash scripts/check-pr-tracking-metadata.sh
-
   pr-title-convention-check:
     # Enforces AGENTS.md AG-GH-018: a PR title must follow this repo's Conventional-Commit
     # taxonomy (audited from real history in #850) -- this repo merges (not squashes) pull
@@ -779,91 +635,6 @@ jobs:
             -e PR_TITLE_LINT_MODE \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             bash scripts/check-pr-title-convention.sh
-
-  pr-title-convention-check-hosted:
-    name: PR title Conventional-Commit lint (GitHub-hosted fallback)
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    # Real runs: up to ~50s (build-tools image resolution on ubuntu-latest +
-    # gh pr view). Same 15-minute floor as detect-changes above.
-    timeout-minutes: 15
-    permissions:
-      contents: read
-      pull-requests: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Select build-tools image
-        # This fallback job must resolve its own image rather than depending
-        # on validate-compose's output (like the self-hosted job above does)
-        # -- it exists specifically for when self-hosted runners (and
-        # anything that depends on them, including validate-compose) are
-        # unavailable, so a needs: dependency on that job would defeat the
-        # fallback's purpose. Matches pr-tracking-metadata-check-hosted's own
-        # resolution step.
-        env:
-          GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
-        run: |
-          set -euo pipefail
-          printf 'BUILD_TOOLS_IMAGE=%s\n' "$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)" >> "$GITHUB_ENV"
-      - name: GitHub-hosted fallback notice
-        run: |
-          echo "::notice::Running PR title convention check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
-      - name: Fetch current PR title live
-        # See the primary pr-title-convention-check job's identical step for
-        # why this fetches live via `gh pr view` instead of trusting
-        # github.event.pull_request.title.
-        id: live-title
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: |
-          set -euo pipefail
-          gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json title -q .title > /var/tmp/pr-title-live.txt
-      - name: Validate PR title convention
-        env:
-          PR_DRAFT: ${{ github.event.pull_request.draft }}
-          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
-          PR_TITLE_LINT_MODE: ${{ vars.PR_TITLE_LINT_MODE }}
-        run: |
-          set -euo pipefail
-          pr_title="$(cat /var/tmp/pr-title-live.txt)"
-          docker run --rm \
-            --user "$(id -u):$(id -g)" \
-            -v "$PWD:/work:ro" \
-            -w /work \
-            -e PR_TITLE="$pr_title" \
-            -e PR_DRAFT \
-            -e PR_AUTHOR \
-            -e PR_TITLE_LINT_MODE \
-            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            bash scripts/check-pr-title-convention.sh
-
-  file-headers-hosted:
-    name: file purpose headers (GitHub-hosted fallback)
-    runs-on: ubuntu-latest
-    # Real runs: 5-8s. Same 15-minute floor as detect-changes above.
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: GitHub-hosted fallback notice
-        run: |
-          echo "::notice::Running file-headers check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
-      - name: Check repository header on all tracked files
-        run: bash scripts/check-file-headers.sh
-
-  compose-healthchecks-hosted:
-    name: compose healthchecks (GitHub-hosted fallback)
-    runs-on: ubuntu-latest
-    # Real runs: same order of magnitude as file-headers-hosted. Same
-    # 15-minute floor as detect-changes above.
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: GitHub-hosted fallback notice
-        run: |
-          echo "::notice::Running compose-healthchecks check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
-      - name: Check every deploy/*/docker-compose.yml service has a healthcheck
-        run: bash scripts/check-compose-healthchecks.sh
 
   line-endings:
     # Cheap repository hygiene gate (issue #601). .gitattributes already normalizes line
@@ -1042,19 +813,6 @@ jobs:
             bash scripts/check-changelog-direct-edit.sh --changed-files-file "/work/$(basename "$changelog_guard_changed_files")" \
           || true
 
-  line-endings-hosted:
-    name: line endings (GitHub-hosted fallback)
-    runs-on: ubuntu-latest
-    # Real runs: 4-8s. Same 15-minute floor as detect-changes above.
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: GitHub-hosted fallback notice
-        run: |
-          echo "::notice::Running line-endings check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
-      - name: Check tracked files use Unix (LF) line endings
-        run: bash scripts/check-line-endings.sh
-
   language-policy:
     # Enforces AG-REL-001 (project language: Rust and shell) by asserting the ABSENCE of
     # banned-language source files, rather than scanning code IN a banned language for
@@ -1093,40 +851,6 @@ jobs:
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             bash -lc 'set -euo pipefail; bash scripts/check-language-policy.sh'
 
-  language-policy-hosted:
-    name: language policy (GitHub-hosted fallback)
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: GitHub-hosted fallback notice
-        run: |
-          echo "::notice::Running language-policy check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
-      - name: Check for banned-language source files (AG-REL-001)
-        run: bash scripts/check-language-policy.sh
-
-  # GitHub-hosted fallback is deliberately limited to cheap lint/policy jobs with no LAN
-  # dependency of their own: file-headers-hosted, compose-healthchecks-hosted (#1169),
-  # line-endings-hosted, shellcheck-hosted, pr-template-check-hosted, language-policy-
-  # hosted, and watchdog_test-hosted. Rust builds, image scans, and publish paths stay on
-  # self-hosted runners because they still depend on the shared build-tools image,
-  # sccache/distcc acceleration, or registry credentials with no safe hosted equivalent
-  # yet -- see docs/ci-github-hosted-fallback-decision.md for the full reasoning per job
-  # class.
-  #
-  # Explicit decision on ci_scope_policy's own hosted fallback (issue #509's
-  # second acceptance criterion): NOT feasible as a real fallback today, and
-  # deliberately not attempted here. ci_scope_policy's whole job is to check
-  # the *results* of dns_rust_quality/ui_rust_quality/watchdog_rust_quality/
-  # dns_test/ui_test/watchdog_test/dns_cargo_audit/ui_cargo_audit/
-  # watchdog_cargo_audit -- all self-hosted-only Rust jobs with no hosted
-  # equivalent of their own yet. A "ci_scope_policy-hosted"
-  # job would have to depend on those same self-hosted jobs, so if self-hosted
-  # runners are genuinely unavailable (the scenario this fallback exists for),
-  # it would sit queued waiting on its own needs: forever, same as the jobs
-  # it's meant to be a fallback for. There is no real fallback for this check
-  # until the Rust build/test jobs themselves get a hosted path -- tracked
-  # separately, not solved by this workflow file alone.
   shellcheck:
     # ShellCheck and ActionLint run inside the same build-tools image selected by
     # validate-compose, keeping linting independent from whatever happens to be installed
@@ -1321,116 +1045,6 @@ jobs:
         # larger follow-up (41 preexisting instances found across scripts/**,
         # each needing individual triage). Pure text scan, no Docker/LAN
         # dependency of its own, same class as the checks above.
-        run: |
-          set -euo pipefail
-          docker run --rm \
-            --user "$(id -u):$(id -g)" \
-            -v "$PWD:/work:ro" \
-            -w /work \
-            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            bash scripts/check-pipefail-early-exit-grep.sh
-
-  shellcheck-hosted:
-    name: shellcheck (GitHub-hosted fallback)
-    runs-on: ubuntu-latest
-    # Real full-job runs: 58-84s. 25 minutes, same as the self-hosted
-    # shellcheck job above, for the same reason: must exceed this job's own
-    # "Run ShellCheck and ActionLint" step timeout added below.
-    timeout-minutes: 25
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Select build-tools image
-        # Always resolve through the digest-pinned, smoke-tested selector -- never fall back
-        # to a bare :latest tag here. This job exists so ShellCheck/ActionLint still run when
-        # self-hosted runners are down; it should not trade the self-hosted job's verified
-        # image for an unpinned, unverified one. BUILD_TOOLS_REQUIRE_PUBLISHED=true matches
-        # validate-compose's own resolution (no local-build fallback for a lint-only job).
-        env:
-          GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
-        run: |
-          set -euo pipefail
-          printf 'BUILD_TOOLS_IMAGE=%s\n' "$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)" >> "$GITHUB_ENV"
-      - name: GitHub-hosted fallback notice
-        run: |
-          echo "::notice::Running ShellCheck and ActionLint on GitHub-hosted runner as fallback for non-LAN-dependent linting."
-      # Parity fix: this step runs the exact same actionlint invocation as the self-hosted
-      # shellcheck job's own "Run ShellCheck and ActionLint" step (see that job's comment
-      # for the real 2026-07-24 incident: a 5+ hour indefinite hang, reproduced 3/3 times,
-      # from actionlint's embedded shellcheck integration). That fix only covered the
-      # self-hosted job; this hosted fallback carried the identical unbounded-hang risk and
-      # had no timeout at all until now. Same coarse 15-minute bound AND the same inner
-      # `timeout --kill-after=30 300` SIGKILL guard, for the same reason.
-      - name: Run ShellCheck and ActionLint
-        timeout-minutes: 15
-        run: |
-          set -euo pipefail
-          docker run --rm \
-            --user "$(id -u):$(id -g)" \
-            -v "$PWD:/work:ro" \
-            -w /work \
-            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            bash -lc 'set -euo pipefail; find . \( -name "*.sh" -o -name "*.bats" \) -not -path "./.git/*" -not -path "*/target/*" -print0 | xargs -0 --no-run-if-empty shellcheck --severity=warning; timeout --kill-after=30 300 actionlint .github/workflows/*.yml'
-
-      - name: Check pinned GitHub Actions for deprecated Node runtimes (#801)
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          docker run --rm \
-            --user "$(id -u):$(id -g)" \
-            -v "$PWD:/work:ro" \
-            -w /work \
-            -e GH_TOKEN \
-            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            bash scripts/check-action-node-versions.sh
-
-      - name: Check validation-subnet wrapper coverage (#896)
-        # Same guard as the self-hosted shellcheck job's own step above (see
-        # its comment for the full rationale); duplicated here so the
-        # GitHub-hosted fallback path enforces it too when self-hosted
-        # runners are unavailable.
-        run: |
-          set -euo pipefail
-          docker run --rm \
-            --user "$(id -u):$(id -g)" \
-            -v "$PWD:/work:ro" \
-            -w /work \
-            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            bash scripts/check-validation-subnet-wrapper-coverage.sh
-
-      - name: Check executable bits on bare-path script invocations (#1019)
-        # Same guard as the self-hosted shellcheck job's own step above (see
-        # its comment for the full rationale); duplicated here so the
-        # GitHub-hosted fallback path enforces it too when self-hosted
-        # runners are unavailable.
-        run: |
-          set -euo pipefail
-          docker run --rm \
-            --user "$(id -u):$(id -g)" \
-            -v "$PWD:/work:ro" \
-            -w /work \
-            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            bash scripts/check-executable-bits.sh
-
-      - name: Check build-tools smoke-test coverage (#790/#791)
-        # Same guard as the self-hosted shellcheck job's own step above (see
-        # its comment for the full rationale); duplicated here so the
-        # GitHub-hosted fallback path enforces it too when self-hosted
-        # runners are unavailable.
-        run: |
-          set -euo pipefail
-          docker run --rm \
-            --user "$(id -u):$(id -g)" \
-            -v "$PWD:/work:ro" \
-            -w /work \
-            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            bash scripts/check-build-tools-smoke-coverage.sh
-
-      - name: Check for pipefail/SIGPIPE early-exit-consumer pattern (AG-VAL-029)
-        # Same guard as the self-hosted shellcheck job's own step above (see
-        # its comment for the full rationale); duplicated here so the
-        # GitHub-hosted fallback path enforces it too when self-hosted
-        # runners are unavailable.
         run: |
           set -euo pipefail
           docker run --rm \
@@ -3953,39 +3567,6 @@ jobs:
         uses: ./.github/actions/cargo-with-sccache-fallback
         with:
           command: cargo test --locked --manifest-path services/watchdog/Cargo.toml
-
-  watchdog_test-hosted:
-    # Unlike watchdog_test above, this fallback deliberately does not gate on
-    # detect-changes/validate-compose (both self-hosted-only). Depending on
-    # them here would reintroduce the same trap that ruled out a
-    # ci_scope_policy-hosted job elsewhere in this file: if self-hosted
-    # runners are genuinely unavailable (the scenario this fallback exists
-    # for), a needs: dependency on a self-hosted-only job would just sit
-    # queued forever. The check itself (bash -n plus an executable-bit test
-    # on one small script) is cheap enough to run unconditionally every time,
-    # same as file-headers-hosted/line-endings-hosted/shellcheck-hosted.
-    #
-    # This hosted fallback deliberately covers only the shell-script half of
-    # watchdog_test above -- it does NOT run `cargo test` for the Rust crate
-    # (2026-08 watchdog Rust CI wiring update), for the same reason dns/ui
-    # never got a hosted fallback for their own rust-quality/test/cargo-audit
-    # jobs: real Rust compilation depends on the shared build-tools image and
-    # sccache/distcc acceleration, which have no safe hosted equivalent yet
-    # (see docs/ci-github-hosted-fallback-decision.md). A green run here is
-    # NOT proof the watchdog crate compiles or its tests pass.
-    name: test (watchdog) (GitHub-hosted fallback)
-    runs-on: ubuntu-latest
-    # Real runs: 3-5s. Same 15-minute floor as detect-changes above.
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: GitHub-hosted fallback notice
-        run: |
-          echo "::notice::Running watchdog syntax check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
-      - name: test (watchdog)
-        run: |
-          bash -n services/watchdog/watchdog.sh
-          test -x services/watchdog/watchdog.sh
 
   dns_cargo_audit:
     # Dependency audits remain crate-specific. They are skipped only when path

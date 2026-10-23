@@ -71,7 +71,6 @@ on:
       - "scripts/setup-cli-simulation.sh"
       - "scripts/syslog-forwarding-simulation.sh"
       - ".github/workflows/gc-pr-staging-images.yml"
-      - ".github/workflows/backfill-stack-latest.yml"
       - ".github/workflows/build-push.yml"
       - ".github/workflows/full-setup-validate.yml"
       - ".github/workflows/full-setup-deep-validate.yml"
@@ -176,11 +175,6 @@ on:
       # not already match any other path above and so would never run that
       # suite.
       - "tools/runner-host/lancache-ci-docker-daemon-config.sh"
-      # tools/runner-host/lancache-ci-runner-clone-init.sh (#1624): its own
-      # tests/bats/runner_clone_init.bats sources this script directly to
-      # exercise own_host_token()/is_foreign_runner_dir() -- same reasoning
-      # as the sibling entry immediately above.
-      - "tools/runner-host/lancache-ci-runner-clone-init.sh"
       - "services/dns/cdn-domains.txt"
       - "services/dns/entrypoint.sh"
       - "services/dhcp/entrypoint.sh"
@@ -249,7 +243,6 @@ on:
       - "scripts/setup-cli-simulation.sh"
       - "scripts/syslog-forwarding-simulation.sh"
       - ".github/workflows/gc-pr-staging-images.yml"
-      - ".github/workflows/backfill-stack-latest.yml"
       - ".github/workflows/build-push.yml"
       - ".github/workflows/full-setup-validate.yml"
       - ".github/workflows/full-setup-deep-validate.yml"
@@ -263,11 +256,6 @@ on:
       # not already match any other path above and so would never run that
       # suite.
       - "tools/runner-host/lancache-ci-docker-daemon-config.sh"
-      # tools/runner-host/lancache-ci-runner-clone-init.sh (#1624): its own
-      # tests/bats/runner_clone_init.bats sources this script directly to
-      # exercise own_host_token()/is_foreign_runner_dir() -- same reasoning
-      # as the sibling entry immediately above.
-      - "tools/runner-host/lancache-ci-runner-clone-init.sh"
       - "services/dns/cdn-domains.txt"
       - "services/dns/entrypoint.sh"
       - "services/dhcp/entrypoint.sh"
