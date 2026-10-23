@@ -70,8 +70,8 @@ jobs:
   # (#623). Its outputs are threaded into the sim jobs' env blocks below; the
   # actual collision-safe reservation is still the per-job flock+retry (the
   # composite action for full-setup-validate, run-in-validation-subnet.sh for
-  # the sims), so this is effectively a per-run starting candidate plus a
-  # serialization anchor.
+  # the sims), so this is effectively a per-run starting candidate that every
+  # simulation job starts from in parallel.
   compute-validation-network:
     name: derive per-run validation subnet
     if: inputs.should_run == 'true'
@@ -202,13 +202,13 @@ jobs:
           fi
 
   ssl-mitm-cache-simulation:
-    # Real DNS/HTTP/HTTPS caching test (deb.debian.org). Chained after the
-    # health-check job to serialize onto the shared runner tier and the
-    # fixed validation IPs; if: always() keeps its signal independent of that
-    # job's own result. LANCACHE_IMAGE_TAG threads the resolved PR staging
+    # Real DNS/HTTP/HTTPS caching test (deb.debian.org). Runs in parallel
+    # with the other simulations, as on current_dev (b01e0a20): each one
+    # reserves its own validation subnet slot; if: always() keeps its signal
+    # independent of the health-check job's own result. LANCACHE_IMAGE_TAG threads the resolved PR staging
     # tag so it tests the PR's own proxy/dns.
     name: SSL MITM cache simulation
-    needs: [compute-validation-network, full-setup-validate]
+    needs: [compute-validation-network]
     if: >-
       always() &&
       inputs.should_run == 'true' &&
@@ -306,7 +306,7 @@ jobs:
     # calls out: the manual full-setup-validate.yml never passed its image_tag
     # through to this job, so it always tested "nightly" regardless of intent.
     name: UI/NATS/DNS integration simulation
-    needs: [compute-validation-network, ssl-mitm-cache-simulation]
+    needs: [compute-validation-network]
     if: >-
       always() &&
       inputs.should_run == 'true' &&
@@ -396,15 +396,10 @@ jobs:
     # setup.sh's channel->stack-pointer->sha path, now only exercised here on
     # dispatch/fork/Dependabot runs rather than on the common same-repo PR).
     name: setup.sh CLI simulation
-    # ui-nats-dns-integration-simulation is included purely for the shared-
-    # runner collision constraint (same compose project name / fixed
-    # validation ports as the other full-setup-deep-validate jobs), not
-    # because this job consumes its outputs. A former
-    # watchtower-update-simulation job used to sit between it and this job in
-    # that same serialization chain; it was removed with Watchtower itself
-    # (#819), so this job now chains directly off
-    # ui-nats-dns-integration-simulation instead.
-    needs: [ui-nats-dns-integration-simulation]
+    # Runs in parallel with the other simulations, as on current_dev
+    # (b01e0a20): it owns the Quickstart compose lock below, not shared
+    # simulation state.
+    needs: [compute-validation-network]
     if: always() && inputs.should_run == 'true'
     runs-on: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && fromJSON('["self-hosted", "linux", "lancache", "lancache-heavy"]') || 'ubuntu-latest' }}
     timeout-minutes: 45
@@ -457,10 +452,9 @@ jobs:
         # FIXED container names (lancache-nats, lancache-ui, ...), which are
         # not project-name-scoped, so two runs of this job landing on the
         # same physical runner host (this repo's runners are registered
-        # several-per-host, sharing one Docker daemon) collide. The `needs:`
-        # chain onto ui-nats-dns-integration-simulation above only serializes
-        # jobs *within this one workflow run*; it does nothing for two
-        # different PRs' runs overlapping, which is what actually happened.
+        # several-per-host, sharing one Docker daemon) collide, whether they
+        # come from one workflow run or from two overlapping runs. The other
+        # simulations use the full-setup stack, which sets no container_name.
         # The lock itself now comes from scripts/lib/quickstart-compose-lock.sh
         # (issue #838) -- see that file's header for why it must be `source`d
         # rather than executed, and why its lock path is a single shared
@@ -498,7 +492,7 @@ jobs:
     # dns/ui/nats images (via the script), so it threads the PR staging tag to
     # test the PR's own secondary credentialing code.
     name: NATS auth-callout simulation
-    needs: [compute-validation-network, setup-cli-simulation]
+    needs: [compute-validation-network]
     if: >-
       always() &&
       inputs.should_run == 'true' &&
@@ -568,7 +562,7 @@ jobs:
     # compose file and assuming so. See the script's own header for exactly
     # what this does and does not prove.
     name: Admin UI reachability during dependency crash-loop
-    needs: [compute-validation-network, nats-auth-callout-simulation]
+    needs: [compute-validation-network]
     if: >-
       always() &&
       inputs.should_run == 'true' &&
@@ -647,15 +641,15 @@ jobs:
     # for exactly what this does and does not prove -- including the
     # deliberate wrong-PDNS_API_KEY regression guard for the
     # host-.env-vs-in-container key resolution this command depends on.
-    # Chained after ui-reachability-crash-loop-simulation (same
-    # one-job-at-a-time reason every job in this suite chains onto the
-    # previous one). The deep-validate caller's own
+    # Runs in parallel with the other simulations, as on current_dev
+    # (b01e0a20): each reserves its own validation subnet slot through
+    # run-in-validation-subnet.sh. The deep-validate caller's own
     # DNS-stack-heavy dns-zone-rollback-simulation job (outside this reusable
     # workflow) already `needs:` this whole full-setup-sims caller job, so it
     # cannot run concurrently with this one either -- no separate
     # cross-workflow needs edge is possible or required here.
     name: setup.sh reset-to-last-known-good-config (DNS) simulation
-    needs: [compute-validation-network, ui-reachability-crash-loop-simulation]
+    needs: [compute-validation-network]
     if: >-
       always() &&
       inputs.should_run == 'true' &&
