@@ -9,8 +9,8 @@
     "commit": "71cb6b02a79daf96a98d199549fc52bea424d7db",
     "date": "2026-10-22",
     "validator": "claude-agent (isolated Debian dockerd on a CI host, real setup.sh, real published CI images; the per-run detail is in the PR #1920 thread)",
-    "scope": "Install v0.3.0, update to the published images of PR #1920, function check before and after, Admin UI cache-resize loop, file-descriptor stability over restart cycles. NOT run: DHCP (Kea, ProxyDHCP/PXE, relay), cache HIT/MISS, SSL/MITM mode, NATS secondary lifecycle, watchdog hang scenarios, syslog forwarding, arm64.",
-    "summary": "PASS for what was run. v0.3.0 installed with its own setup.sh (images rebuilt locally from the v0.3.0 tree because GHCR lacks them), all services healthy. setup.sh update to pr-1920-sha-ad7667c: exit 0, whole stack verified healthy; DNS answers cache domain 127.0.0.2 and real address for other domains, Admin UI 401 without and 200 with login, identical before and after (known: /dns 404 and proxy 502 for a CDN host without upstream, identical on v0.3.0). Cache-resize loop: POST /cache/resize 50 GB to 7 GB returned 303, override written, setup.sh converge-reconcile updated .env (CACHE_MAX_SIZE=7g), docker compose up -d proxy recreated exactly one proxy container with a new StartedAt, nginx -T showed max_size=7g (the systemd converge timer itself was not exercised). FD count stable across 5 restart cycles: watchdog 5, ui 14.",
+    "scope": "Install v0.3.0, update to the published images of PR #1920, function check before and after, Admin UI cache-resize loop, file-descriptor stability over restart cycles; on 2026-10-23 additionally all remaining Part B scenarios against the same published images (pr-1920-sha-ad7667c, revision label ad7667c6): NATS secondary lifecycle, syslog forwarding, DHCP Kea, dnsmasq relay, ProxyDHCP/PXE, cache HIT/MISS in standard and SSL/MITM mode with DNS endpoint routing, watchdog hang restart. NOT run: arm64 runtime (arm64 images are built and scanned in CI only), the systemd converge timer itself.",
+    "summary": "PASS for what was run. v0.3.0 installed with its own setup.sh (images rebuilt locally from the v0.3.0 tree because GHCR lacks them), all services healthy. setup.sh update to pr-1920-sha-ad7667c: exit 0, whole stack verified healthy; DNS answers cache domain 127.0.0.2 and real address for other domains, Admin UI 401 without and 200 with login, identical before and after (known: /dns 404 and proxy 502 for a CDN host without upstream, identical on v0.3.0). Cache-resize loop: POST /cache/resize 50 GB to 7 GB returned 303, override written, setup.sh converge-reconcile updated .env (CACHE_MAX_SIZE=7g), docker compose up -d proxy recreated exactly one proxy container with a new StartedAt, nginx -T showed max_size=7g (the systemd converge timer itself was not exercised). FD count stable across 5 restart cycles: watchdog 5, ui 14. 2026-10-23 additions, all PASS: nats-secondary-auth-callout-simulation.sh rc=0 (register, live connection kicked on removal, old credential rejected, rotation, xkey encryption by packet capture). syslog-forwarding-simulation.sh rc=0 (proxy, ui, nats, dns-standard, dns-ssl, watchdog, dhcp, dhcp-proxy each with a unique marker visible in the Admin UI). DHCP Kea: real dhclient DORA on an isolated bridge got 172.31.77.100 from the configured pool with router, DNS servers and lease time as configured; lease visible via lease4-get-all. dnsmasq relay: client on 172.31.79.0/24 got 172.31.79.100 from Kea on a separate 172.31.78.0/24 network via the relay. ProxyDHCP/PXE: a PXE-tagged DISCOVER (option 60 PXEClient, option 93 = 0) got a proxy OFFER from dnsmasq with next-server 172.31.80.9 and file pxelinux.0 while Kea leased the address. ssl-mitm-cache-simulation.sh rc=0: DNS endpoint distinction, standard-mode HTTP MISS then HIT and SSL-mode HTTPS MITM MISS then HIT with identical real file content (its final network teardown logged a 30 s detach race, after the result). Watchdog: docker pause of lancache-dns-standard and lancache-nats on a real setup.sh install produced UNHEALTHY 1/3, 2/3, 3/3, RESTARTING, a new StartedAt and healthy again; watchdog FD count 5 before and after.",
     "evidence_ref": "https://github.com/wiki-mod/lancache-ng/pull/1920"
   },
   "last_stack_validation": {
@@ -34,35 +34,35 @@
     "dhcp-kea": {
       "path_prefixes": ["services/dhcp/"],
       "layer": "stack",
-      "commit": "885e2f40682d908451ebab465f291601866b0d8c",
-      "date": "2026-08-02",
-      "validator": "claude-agent (dhcp-kea-lease-flow-simulation.sh on lancache-243, built from this commit's published sha-885e2f4 image)",
-      "evidence_ref": "https://github.com/wiki-mod/lancache-ng/issues/1391; see last_stack_validation.summary above for the full result"
+      "commit": "71cb6b02a79daf96a98d199549fc52bea424d7db",
+      "date": "2026-10-23",
+      "validator": "claude-agent (real dhclient DORA against the published PR #1920 dhcp image, isolated bridge network)",
+      "evidence_ref": "https://github.com/wiki-mod/lancache-ng/pull/1920; see stack_validation_2026_10_22.summary"
     },
     "dhcp-dnsmasq": {
       "path_prefixes": ["services/dhcp-proxy/"],
       "layer": "stack",
-      "commit": "885e2f40682d908451ebab465f291601866b0d8c",
-      "date": "2026-08-02",
-      "validator": "claude-agent (dhcp-proxy-pxe-simulation.sh + dhcp-relay-flow-simulation.sh on lancache-243, built from this commit's published sha-885e2f4 image)",
-      "evidence_ref": "https://github.com/wiki-mod/lancache-ng/issues/1391; see last_stack_validation.summary above for the full result"
+      "commit": "71cb6b02a79daf96a98d199549fc52bea424d7db",
+      "date": "2026-10-23",
+      "validator": "claude-agent (relay and ProxyDHCP/PXE against the published PR #1920 dhcp-proxy image, isolated bridge networks)",
+      "evidence_ref": "https://github.com/wiki-mod/lancache-ng/pull/1920; see stack_validation_2026_10_22.summary"
     },
     "dns-pdns": {
       "path_prefixes": ["services/dns/"],
       "layer": "stack",
-      "commit": "885e2f40682d908451ebab465f291601866b0d8c",
-      "date": "2026-08-02",
-      "validator": "claude-agent (dig + openssl s_client against the real main stack on lancache-241, both DNS instances and both TLS-handling modes)",
-      "evidence_ref": "https://github.com/wiki-mod/lancache-ng/issues/1391; see last_stack_validation.summary above for the full result"
+      "commit": "71cb6b02a79daf96a98d199549fc52bea424d7db",
+      "date": "2026-10-23",
+      "validator": "claude-agent (DNS endpoint routing in ssl-mitm-cache-simulation.sh and syslog record add against the published PR #1920 images)",
+      "evidence_ref": "https://github.com/wiki-mod/lancache-ng/pull/1920; see stack_validation_2026_10_22.summary"
     },
     "nats": {
       "path_prefixes": ["services/ui/src/nats_*.rs", "services/ui/src/nats_config.rs", "services/nats/", "setup.sh", "deploy/*/docker-compose.yml"],
       "note": "NATS has no dedicated classify-image-impact.sh key -- its functional surface spans the ui, setup_runtime, and deploy classifier keys. Treat a change as NATS-relevant if it touches any prefix above, not only a single classifier boolean.",
       "layer": "stack",
-      "commit": "885e2f40682d908451ebab465f291601866b0d8c",
-      "date": "2026-08-02",
-      "validator": "claude-agent (nats-secondary-auth-callout-simulation.sh against the real main stack, images built from this commit's source)",
-      "evidence_ref": "https://github.com/wiki-mod/lancache-ng/issues/1391; see last_stack_validation.summary above for the full result"
+      "commit": "71cb6b02a79daf96a98d199549fc52bea424d7db",
+      "date": "2026-10-23",
+      "validator": "claude-agent (nats-secondary-auth-callout-simulation.sh against the published PR #1920 images)",
+      "evidence_ref": "https://github.com/wiki-mod/lancache-ng/pull/1920; see stack_validation_2026_10_22.summary"
     },
     "admin-ui": {
       "path_prefixes": ["services/ui/"],
@@ -75,18 +75,18 @@
     "watchdog": {
       "path_prefixes": ["services/watchdog/"],
       "layer": "stack",
-      "commit": "885e2f40682d908451ebab465f291601866b0d8c",
-      "date": "2026-08-02",
-      "validator": "claude-agent (first-hand: real external docker kill --signal=STOP for nats and dns-standard, real docker stop for dns-standard, /proc/<pid>/status inspection for proxy)",
-      "evidence_ref": "https://github.com/wiki-mod/lancache-ng/issues/1391 -- PARTIAL, recorded honestly rather than rounded to a pass: nats PASS in full per the plan's prescribed method; dns-standard tested via the wrong technique (crash, not hang); proxy's prescribed technique (--signal=STOP) confirmed NOT to produce a real hang on this multi-process container (only PID 1 is signalled, workers keep serving) -- whether Watchdog detects a genuine full nginx hang remains unproven, not disproven; dns-ssl not tested this pass. See last_stack_validation.summary above for the full detail and issue #1391 for the recommended docker pause fix."
+      "commit": "71cb6b02a79daf96a98d199549fc52bea424d7db",
+      "date": "2026-10-23",
+      "validator": "claude-agent (docker pause hang of dns-standard and nats on a real setup.sh install of the PR #1920 images)",
+      "evidence_ref": "https://github.com/wiki-mod/lancache-ng/pull/1920; see stack_validation_2026_10_22.summary"
     },
     "proxy-cache": {
       "path_prefixes": ["services/proxy/"],
       "layer": "stack",
-      "commit": "885e2f40682d908451ebab465f291601866b0d8c",
-      "date": "2026-08-02",
-      "validator": "claude-agent (first-hand: real HTTP MISS/HIT + query-string-invariance, real SSL/MITM HTTPS MISS/HIT, standard-mode HTTPS reconfirmed as genuinely uncached blind passthrough)",
-      "evidence_ref": "https://github.com/wiki-mod/lancache-ng/issues/1391; see last_stack_validation.summary above for the full result"
+      "commit": "71cb6b02a79daf96a98d199549fc52bea424d7db",
+      "date": "2026-10-23",
+      "validator": "claude-agent (ssl-mitm-cache-simulation.sh against the published PR #1920 images: HTTP and HTTPS MITM MISS then HIT)",
+      "evidence_ref": "https://github.com/wiki-mod/lancache-ng/pull/1920; see stack_validation_2026_10_22.summary"
     },
     "ntp": {
       "path_prefixes": ["services/ntp/"],
