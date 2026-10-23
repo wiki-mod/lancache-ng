@@ -14412,7 +14412,7 @@ _ci_check_action_node_versions() {
     for v in "${uses_values[@]}"; do
         [ -n "${v}" ] || continue
         # What: a local uses: ./ path fails; workflows pass.
-        # Why: CI 2.0 has no composite actions (§84 Phase 15).
+        # Why: CI 2.0 has no composite actions (Phase 15).
         # From: Issue #1683 | PR #1858
         if [[ "${v}" == ./* ]]; then
             case "${v}" in *.yml|*.yaml) continue ;; esac
