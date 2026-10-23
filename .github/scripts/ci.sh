@@ -6530,8 +6530,8 @@ ci_cmd_channel_check() {
     _ci_validate_host_tools || return 2
     _ci_require_ghcr_auth || return 2
     svcs="$(ci_services)" || return 2
-    # What: every service tag, then the stack on those digests.
-    # Why: one missing tag names all; no partial stack starts.
+    # What: read each service tag, then start the stack.
+    # Why: a missing tag names all; no partial stack.
     # From: Issue #1683 | PR #1858
     while IFS= read -r svc; do
         [ -n "${svc}" ] || continue

@@ -104,7 +104,7 @@ jobs:
       - name: Resolve the job settings
         id: jobs
         run: bash .github/scripts/ci.sh job-settings
-      # What: channels and hosted runner of the channel check.
+      # What: channels and hosted runner of the check.
       # Why: ci.sh reads the SOT; YAML names no channel.
       # From: Issue #1683 | PR #1858
       - name: Resolve the channel check matrix
