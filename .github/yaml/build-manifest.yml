@@ -356,7 +356,7 @@ github_actions:
     tag: v7.0.1
   claude-code:
     uses: anthropics/claude-code-action
-    sha: "f27be6b65a4652f08a2ba3cff79114829b588967"
+    sha: "e4a6faad497d33dbc7144135c75e41f82f0bf6c0"
     tag: v1
   docker-login:
     uses: docker/login-action
