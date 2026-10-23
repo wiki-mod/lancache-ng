@@ -375,6 +375,8 @@ jobs:
       credentials: *ghcr_credentials
       volumes:
         - ${{ needs.platform.outputs.validate-dir }}:${{ needs.platform.outputs.validate-dir }}
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - *bootstrap
       # What: the tree the channel's images were built from.
@@ -385,9 +387,24 @@ jobs:
           CHANNEL: ${{ matrix.channel }}
         run: bash .github/scripts/ci.sh channel-checkout "${CHANNEL}"
       - name: Pull the channel by its tag and start the stack
+        id: check
         env:
           CHANNEL: ${{ matrix.channel }}
         run: bash .github/scripts/ci.sh channel-check "${CHANNEL}"
+      # What: back to the nightly tree, then file the issue.
+      # Why: the latest tree is master; its ci.sh differs.
+      # From: Issue #1683 | PR #1858
+      - name: Check out the resolved nightly commit
+        if: ${{ !cancelled() }}
+        env:
+          SOURCE_COMMIT: ${{ needs.platform.outputs.commit }}
+        run: bash .github/scripts/ci.sh channel-checkout nightly "${SOURCE_COMMIT}"
+      - name: File or close the channel issue
+        if: ${{ !cancelled() }}
+        env:
+          CHANNEL: ${{ matrix.channel }}
+          OUTCOME: ${{ steps.check.outcome }}
+        run: bash .github/scripts/ci.sh channel-report "${CHANNEL}" "${OUTCOME}"
 
   # What: scan what this run built and every channel image.
   # Why: §31 a new CVE; §1050 acceptance needs a scan.
@@ -436,7 +453,7 @@ jobs:
   # From: Issue #1683 | PR #1912
   report:
     name: report
-    needs: [platform, plan, build, scan, aggregate, assemble, validate, cargo-audit, nightly, channel-check]
+    needs: [platform, plan, build, scan, aggregate, assemble, validate, cargo-audit, nightly]
     if: ${{ !cancelled() }}
     # What: platform's runner and image, else the pair.
     # Why: the report must run when platform failed.

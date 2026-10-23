@@ -71,7 +71,7 @@ declare -A CI_DISPATCH=(
     [test]=ci_cmd_test [scan-channel]=ci_cmd_scan_channel [assemble]=ci_cmd_assemble
     [aggregate-stack]=ci_cmd_aggregate_stack [scan-stack]=ci_cmd_scan_stack [changed-files]=ci_cmd_changed_files
     [assemble-stack]=ci_cmd_assemble_stack [test-stack]=ci_cmd_test_stack [nightly-report]=ci_cmd_nightly_report
-    [validate]=ci_cmd_validate [result-gate]=ci_cmd_result_gate [promote]=ci_cmd_promote [promote-ref]=ci_cmd_promote_ref [channel-checkout]=ci_cmd_channel_checkout [channel-matrix]=ci_cmd_channel_matrix [channel-check]=ci_cmd_channel_check [release-validation]=_ci_release_validation_valid [release-ref]=_ci_release_ref
+    [validate]=ci_cmd_validate [result-gate]=ci_cmd_result_gate [promote]=ci_cmd_promote [promote-ref]=ci_cmd_promote_ref [channel-checkout]=ci_cmd_channel_checkout [channel-matrix]=ci_cmd_channel_matrix [channel-check]=ci_cmd_channel_check [channel-report]=ci_cmd_channel_report [release-validation]=_ci_release_validation_valid [release-ref]=_ci_release_ref
     [release-publish]=ci_cmd_release_publish [release-images]=ci_cmd_release_images [release-sbom-stack]=ci_cmd_release_sbom_stack [release-vex]=ci_cmd_release_vex [cut-release-tag]=ci_cmd_cut_release_tag [release-notes]=ci_cmd_release_notes [release-changelog]=ci_cmd_release_changelog
     [gc]=ci_cmd_gc [gc-green-refs]=ci_cmd_gc_green_refs [check]=ci_cmd_check [close-linked-issues]=ci_cmd_close_linked_issues [pr-labels]=ci_cmd_pr_labels [board-add]=ci_cmd_board_add
     [welcome]=ci_cmd_welcome [version]=ci_cmd_version [docker-daemon-config]=ci_cmd_docker_daemon_config [runner-host]=ci_cmd_runner_host
@@ -3535,7 +3535,7 @@ _ci_status_text() {
         return 2
     fi
     _ci_fill "${scope}" "SERVICE=${svc}"$'\n'"ARCH=${arch}" || return 2
-    printf '%s\n%s\n' "${label}${svc:+-${svc}-${arch}}" "${REPLY}"
+    printf '%s\n%s\n' "${label}${svc:+-${svc}}${arch:+-${arch}}" "${REPLY}"
 }
 
 # What: the issue body of one failing case.
@@ -6547,6 +6547,25 @@ ci_cmd_channel_check() {
     fi
     printf 'channel-check channel=%s candidate="%s"\n' "${channel}" "${cand//$'\n'/ }"
     _ci_validate_run "${cand}"
+}
+
+# What: file or close the issue of one checked channel.
+# Why: each channel has its own issue: -<channel> label.
+# From: Issue #1683 | PR #1858
+ci_cmd_channel_report() {
+    local channel="${1:-}" outcome="${2:-}" text verdict=failure vrc=0
+    if [ -z "${channel}" ] || [ -z "${outcome}" ]; then
+        ci_log "[CI-ERROR-STATUS-0012]" "channel=\"${channel}\" outcome=\"${outcome}\" reason=\"channel and step outcome args required\""
+        return 2
+    fi
+    _ci_valid_channel "${channel}" || vrc=$?
+    if [ "${vrc}" -ne 0 ]; then
+        [ "${vrc}" -eq 2 ] || ci_log "[CI-ERROR-STATUS-0013]" "channel=\"${channel}\" reason=\"not a mutable SOT channel\""
+        return 2
+    fi
+    [ "${outcome}" != success ] || verdict=success
+    text="$(_ci_status_text channel-check "${channel}")" || return 2
+    _ci_status_apply "${verdict}" "${text%%$'\n'*}" "${text#*$'\n'}: ${channel}" "channel=${channel} step outcome=${outcome}"
 }
 
 # What: True if a channel is a known mutable channel.

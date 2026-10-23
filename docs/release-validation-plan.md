@@ -101,10 +101,13 @@ The `channel-check` job runs once per mutable channel of SOT
 platform. It checks out that channel's `source_ref`, reads every service's
 `<service>:<channel>` tag with all its platform children, and starts the
 stack on those digests through the same `validate` probes. A missing tag
-names every missing service and starts no stack. The `report` job files or
-closes the `nightly-channel-check` issue. A dispatch with `channel` checks one
-channel; `only-channel-check` skips `plan` and `cargo-audit`, so no build,
-validate or promote runs.
+names every missing service and starts no stack; nothing is rebuilt (a
+missing accepted image is `MISMATCH`). The job then checks out the nightly
+commit again and `channel-report <channel> <outcome>` files or closes the
+issue of that channel alone: `channel-check-nightly` for `nightly`
+(`current_dev`), `channel-check-latest` for `latest` (`master`). A dispatch
+with `channel` checks only that channel; `only-channel-check` skips `plan`
+and `cargo-audit`, so no build, validate or promote runs.
 
 ### Standing checks per subsystem
 

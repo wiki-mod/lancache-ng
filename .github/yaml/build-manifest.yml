@@ -863,10 +863,12 @@ status_reports:
     label: nightly-promote
     scope: "nightly validate and promote of the accepted stack"
     jobs: [platform, plan, validate, nightly]
-  nightly-channel-check:
-    label: nightly-channel-check
-    scope: "daily pull by tag and start of every mutable channel"
-    jobs: [platform, channel-check]
+  # What: one issue per channel; -<channel> is appended.
+  # Why: nightly (current_dev) and latest (master) differ.
+  # From: Issue #1683 | PR #1858
+  channel-check:
+    label: channel-check
+    scope: "daily pull by tag and start of one mutable channel"
 
 # What: Build-identity inputs per build type (§7).
 # Why: Impact is content-identity, never path-touched alone.
