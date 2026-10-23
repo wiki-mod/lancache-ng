@@ -214,7 +214,7 @@ retried a connection that could never succeed and no DNS record ever synced.
 As of #866, registration now returns `nats://<NATS_BIND_IP>:4222` whenever
 `NATS_BIND_IP` is set on the primary to a routable address -- the same value
 already required by the host-binding override above, so a primary that has
-that override active for the `nats` service gets a working registration
+that override active for the `dns` service gets a working registration
 response for free. An IPv6 `NATS_BIND_IP` literal is bracketed automatically
 (`nats://[2001:db8::5]:4222`), since an unbracketed IPv6 literal is not a
 parsable NATS URL; the same bracketing applies whether `NATS_BIND_IP` itself
@@ -234,7 +234,7 @@ below, the same as leaving it unset) in every other case:
 - **Hostnames** (anything that does not parse as an IP literal at all) are
   also rejected: `NATS_BIND_IP` feeds Compose's port `HOST` field, which is
   an IP/port bind, not a resolvable name, so there is no guarantee a
-  hostname value is reachable at the address `nats` actually publishes on.
+  hostname value is reachable at the address `dns` actually publishes NATS on.
 All three cases need the explicit `NATS_ADVERTISE_URL` override instead, with
 the real routable LAN/VPN address, reverse-proxy hostname, non-default
 port, or `tls://` scheme that `NATS_BIND_IP` alone cannot express.
@@ -271,7 +271,7 @@ it does not control what `dns` publishes.
 - DDNS → PowerDNS: lease = automatically an A record (in the configured DHCP domain) and a PTR record (in the matching private reverse zone) via TSIG-secured nsupdate (RFC 2136). PTR updates were **not** applied in production until issue #768's fix: Kea's D2 daemon used to send every reverse update's on-wire zone as the literal `in-addr.arpa.`, which had no matching PowerDNS zone (only narrower private-range subzones exist), so PowerDNS rejected every PTR update regardless of octet; `reverse-ddns` now lists one entry per real private reverse zone instead. See [docs/dhcp-modes.md](dhcp-modes.md) for the full detail.
 - DDNS enable/disable (issue #1076): whether Kea writes those DNS records is a separate control from whether Kea DHCP is running at all. The `DHCP_DDNS_ENABLED` env var (SOT runtime default in `.github/yaml/build-manifest.yml`) sets the first-boot default for Kea's `dhcp-ddns.enable-updates`, and the Admin UI's DHCP page carries an independent "Enable DDNS Updates" toggle that flips `enable-updates` live via the Kea Control API. It defaults **off** for a fresh install (opt-in, matching Kea's own default), while an already-running install keeps whatever value it already has — the supervisor's `kea_dhcp4_own` (`services/watchdog/src/main.rs`) sets the `dhcp-ddns` block only when the saved `kea-dhcp4.conf` has none, so the toggle's choice (and any existing install's on-state) survives restarts.
 - REST API (Kea Control Agent) for Admin UI
-- NTP option (`ntp-servers`, DHCPv4 option 42): each subnet's value is a plain operator-editable field (`main.rs`'s `add_subnet`/`update_subnet`), defaulting to the project-wide `DHCP_NTP_SERVERS` setting. When the LanCache-NG-NTP container is enabled AND its separate "auto-set as DHCP NTP server" toggle is on, `main.rs`'s `apply_ntp_lan_ip_to_all_subnets` instead forces every subnet's `ntp-servers` option to that container's LAN address (`IP_HTTP`), overriding any per-subnet manual value for as long as the toggle stays on; turning it off restores the project-wide default via `restore_default_ntp_on_all_subnets`. The toggle is deliberately independent from the NTP container's own enable/disable switch — enabling the container never auto-populates DHCP by itself.
+- NTP option (`ntp-servers`, DHCPv4 option 42): each subnet's value is a plain operator-editable field (`main.rs`'s `add_subnet`/`update_subnet`), defaulting to the project-wide `DHCP_NTP_SERVERS` setting. When LanCache-NG-NTP (chronyd in the `services` container) is enabled AND its separate "auto-set as DHCP NTP server" toggle is on, `main.rs`'s `apply_ntp_lan_ip_to_all_subnets` instead forces every subnet's `ntp-servers` option to the stack's LAN address (`IP_HTTP`), overriding any per-subnet manual value for as long as the toggle stays on; turning it off restores the project-wide default via `restore_default_ntp_on_all_subnets`. The toggle is deliberately independent from LanCache-NG-NTP's own enable/disable switch — enabling NTP never auto-populates DHCP by itself.
 - **Multi-threading is explicitly disabled** (`"multi-threading": {"enable-multi-threading": false}`, set by the supervisor's `kea_dhcp4_own` in `services/watchdog/src/main.rs` on every Kea start when the saved `kea-dhcp4.conf` has no `multi-threading` key). This is a deliberate override, not an oversight: Kea has shipped multi-threaded packet processing enabled by default since 2.4.0, but that feature targets high-query-rate ISP/carrier deployments processing thousands of leases per second across many CPU cores -- this project's DHCP server serves one LAN/lab-scale subnet, so the added concurrency surface (interacting with the `lease_cmds` hook, the DDNS-forwarding path, and the Admin UI's config-write/rollback machinery, none of which were designed against concurrent packet handlers) buys no real benefit here. No project history (commit messages, linked PRs) documents an incompatibility that was actually hit; this is a preventive simplicity choice, re-stated here so it isn't mistaken for an unexamined default. An operator with a genuinely large multi-subnet deployment can re-enable it (Kea's own default), but should first re-verify it against the hooks/DDNS paths above.
 
 ## Admin UI security headers
@@ -414,7 +414,7 @@ to their actual source -- collected here rather than left as unexplained
   `main()` awaits this function -- with a 1s-to-30s capped exponential
   backoff loop that treats "not yet reachable" as its normal steady state --
   *before* binding its own HTTP listener at all. Since Compose starts `ui`
-  and `nats` concurrently (no blocking `depends_on: condition:
+  and `dns` concurrently (no blocking `depends_on: condition:
   service_healthy` between them), a connection-refused during `ui`'s first
   few seconds while `nats-server` is still initializing is an expected,
   self-resolving start-order race, confirmed harmless by design (the same
