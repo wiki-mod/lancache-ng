@@ -92,7 +92,7 @@ env:
 jobs:
   refresh-nightly:
     name: dispatch nightly channel refresh
-    runs-on: [self-hosted, linux, lancache, lancache-light]
+    runs-on: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && fromJSON('["self-hosted", "linux", "lancache", "lancache-light"]') || 'ubuntu-latest' }}
     # This job only makes one `gh workflow run` API call and exits -- it does
     # not wait for build-push.yml's own (much longer) pipeline to finish.
     # Generous headroom over that trivial expected runtime still bounds a

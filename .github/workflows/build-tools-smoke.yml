@@ -323,7 +323,7 @@ jobs:
     # (AG-CI-002) rather than the heavy tier's Docker-build/CodeQL/
     # container-scan one.
     name: run bats/shellspec suites against the published build-tools image
-    runs-on: [self-hosted, linux, lancache, lancache-light]
+    runs-on: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && fromJSON('["self-hosted", "linux", "lancache", "lancache-light"]') || 'ubuntu-latest' }}
     # Real runs are expected to be dominated by the image pull (a few tens of
     # seconds on a warm runner) plus the two suites themselves (bounded by
     # build-tools.yml's own identical steps, each given 20 minutes there);

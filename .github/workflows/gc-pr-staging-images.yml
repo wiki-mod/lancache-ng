@@ -58,7 +58,7 @@ env:
 jobs:
   gc:
     name: reap closed-PR staging tags
-    runs-on: [self-hosted, linux, lancache, lancache-light]
+    runs-on: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && fromJSON('["self-hosted", "linux", "lancache", "lancache-light"]') || 'ubuntu-latest' }}
     # 60 minutes: the per-job bound of the `gc` job class from #1912's
     # ci_job_timeouts (build-manifest.yml on the rewrite line). A run that
     # exceeds it is a genuine hang, not GHCR rate limiting to wait out.
