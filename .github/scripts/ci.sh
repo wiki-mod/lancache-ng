@@ -14515,7 +14515,7 @@ _ci_raw_get() {
 }
 
 # What: resolve external action manifest for pin.
-# Why: raw SHA reads, one _ci_retry owner; HTTP code kept.
+# Why: raw tag reads, one _ci_retry owner; HTTP code kept.
 # From: Issue #1860 | PR #1872
 _ci_fetch_action_manifest() {
     local owner="$1" repo="$2" subpath="$3" ref="$4" file out rc code raw
@@ -14672,10 +14672,10 @@ _ci_check_action_node_versions() {
     done
 
     # What: check each pin's runs.using for dead runtime.
-    # Why: external manifests come via raw SHA reads.
+    # Why: external manifests come via raw tag reads.
     # From: Issue #1683 | PR #1858
     local v using owner repo subpath ref res marker meta
-    local entry sha tag f files used_entries=" "
+    local entry tag used_entries=" "
     for v in "${uses_values[@]}"; do
         [ -n "${v}" ] || continue
         # What: a local uses: ./ path fails; workflows pass.
@@ -14711,15 +14711,15 @@ _ci_check_action_node_versions() {
             continue
         fi
         ref="${v##*@}"; key="${v%@*}"
-        # What: external pins must be a 40-hex commit SHA.
-        # Why: the raw read of a tag or branch could drift.
-        # From: Issue #1860 | PR #1872
-        if [[ ! "${ref}" =~ ^[0-9a-fA-F]{40}$ ]]; then
-            viol+=("external action '${v}' (in: $(_ci_ando_reffiles "${v}")) must use a full 40-hex commit SHA")
+        # What: an external ref must be a major tag vN.
+        # Why: no third-party pin; the major tag moves forward.
+        # From: Issue #1683 | PR #1858
+        if [[ ! "${ref}" =~ ^v[0-9]+$ ]]; then
+            viol+=("external action '${v}' (in: $(_ci_ando_reffiles "${v}")) must use a major tag vN")
             continue
         fi
-        # What: an external pin must equal its SOT entry.
-        # Why: uses: reads no SOT; the SOT owns SHA and tag.
+        # What: an external ref must equal its SOT entry.
+        # Why: uses: reads no SOT; the SOT owns the tag.
         # From: Issue #1683 | PR #1912
         entry="$(_ci_action_sot_entry "${key}")" || return 2
         if [ -z "${entry}" ]; then
@@ -14727,14 +14727,8 @@ _ci_check_action_node_versions() {
             continue
         fi
         used_entries+="${entry} "
-        sha="$(_ci_block_entry_field github_actions "${entry}" sha)" || return 2
         tag="$(_ci_block_entry_field github_actions "${entry}" tag)" || return 2
-        [ "${ref}" = "${sha}" ] || viol+=("'${v}' (in: $(_ci_ando_reffiles "${v}")) differs from SOT github_actions.${entry}.sha ${sha}")
-        files="$(_ci_ando_reffiles "${v}")"
-        for f in ${files}; do
-            awk -v v="${v}" -v t="# ${tag}" 'index($0, v) && substr($0, length($0) - length(t) + 1) != t { bad = 1 } END { exit bad }' "${f}" \
-                || viol+=("${f}: '${v}' lacks the SOT tag comment '# ${tag}'")
-        done
+        [ "${ref}" = "${tag}" ] || viol+=("'${v}' (in: $(_ci_ando_reffiles "${v}")) differs from SOT github_actions.${entry}.tag ${tag}")
         owner="${key%%/*}"; repo="${key#*/}"; subpath=""
         [[ "${repo}" != */* ]] || { subpath="${repo#*/}"; repo="${repo%%/*}"; }
         res="$(_ci_fetch_action_manifest "${owner}" "${repo}" "${subpath}" "${ref}")" || return 2

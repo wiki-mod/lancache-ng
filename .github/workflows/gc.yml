@@ -57,11 +57,11 @@ jobs:
         password: ${{ secrets.GITHUB_TOKEN }}
     steps:
       # What: shallow checkout of the event commit.
-      # Why: no inline script; pin from SOT github_actions
+      # Why: no inline script; ref from SOT github_actions
       # From: Issue #1683 | PR #1858
       - &bootstrap
         name: Check out the event commit
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@v7
         with:
           ref: ${{ github.sha }}
           fetch-depth: 1

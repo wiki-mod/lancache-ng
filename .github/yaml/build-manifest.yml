@@ -342,26 +342,22 @@ base_images:
   # From: Issue #1683 | PR #1912
   buildkit: "mirror.gcr.io/moby/buildkit:latest"
 
-# What: pinned external actions: uses, commit SHA, tag.
-# Why: uses: reads no SOT; ci.sh checks each workflow pin.
+# What: external actions: uses and major tag (vN).
+# Why: uses: reads no SOT; ci.sh checks each workflow ref.
 # From: Issue #1683 | PR #1912
 github_actions:
   attest:
     uses: actions/attest
-    sha: "f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6"
-    tag: v4.2.0
+    tag: v4
   checkout:
     uses: actions/checkout
-    sha: "3d3c42e5aac5ba805825da76410c181273ba90b1"
-    tag: v7.0.1
+    tag: v7
   claude-code:
     uses: anthropics/claude-code-action
-    sha: "e4a6faad497d33dbc7144135c75e41f82f0bf6c0"
     tag: v1
   docker-login:
     uses: docker/login-action
-    sha: "dbcb813823bdd20940b903addbd779551569679f"
-    tag: v4.6.0
+    tag: v4
 
 # What: the runtime group id the containers share.
 # Why: ci.sh bakes it into each image; one owner.
