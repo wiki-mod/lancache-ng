@@ -7010,10 +7010,10 @@ _ci_promote_kept() {
         if _ci_text_has "^${p}=" "${have}"; then continue; fi
         line="$(awk -F= -v p="${p}" '$1 == p { print; exit }' <<< "${old}")"
         if [ -z "${line}" ]; then
-            ci_log "[CI-WARN-PROMOTE-0025]" "service=\"${svc}\" channel=\"${channel}\" platform=\"${p}\" reason=\"candidate and channel both lack this platform\""
+            ci_log "[CI-WARN-PROMOTE-0033]" "service=\"${svc}\" channel=\"${channel}\" platform=\"${p}\" reason=\"candidate and channel both lack this platform\""
             continue
         fi
-        ci_log "[CI-INFO-PROMOTE-0026]" "service=\"${svc}\" channel=\"${channel}\" platform=\"${p}\" kept=\"${line#*=}\" reason=\"platform not in the candidate; channel keeps its image\""
+        ci_log "[CI-INFO-PROMOTE-0034]" "service=\"${svc}\" channel=\"${channel}\" platform=\"${p}\" kept=\"${line#*=}\" reason=\"platform not in the candidate; channel keeps its image\""
         kept="${kept} ${line}"
     done <<< "${plats}"
     printf '%s\n' "${kept# }"
@@ -7086,7 +7086,7 @@ _ci_promote_move_all() {
         [ -n "${line}" ] || continue
         svc="${line%%=*}"; digest="${line#*=}"
         if ! kept="$(_ci_promote_kept "${svc}" "${channel}" "${digest}")"; then
-            ci_log "[CI-ERROR-PROMOTE-0027]" "service=\"${svc}\" channel=\"${channel}\" reason=\"kept platforms unreadable; blocking\""
+            ci_log "[CI-ERROR-PROMOTE-0035]" "service=\"${svc}\" channel=\"${channel}\" reason=\"kept platforms unreadable; blocking\""
             _ci_promote_rollback "${channel}" "${moved}"
             return 2
         fi
