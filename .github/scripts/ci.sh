@@ -656,7 +656,7 @@ ci_service_field() {
 # Why: no hidden defaults; the SOT must name every field.
 # From: Issue #1683
 _ci_required_field() {
-    local v
+    local v known
     # What: list; block/blocklist = a top-level value/list.
     # Why: one owner for a missing required SOT field.
     # From: Issue #1683 | PR #1912
@@ -668,6 +668,16 @@ _ci_required_field() {
         *) ci_log "[CI-ERROR-CORE-0146]" "target=\"$1\" field=\"$2\" kind=\"$3\" reason=\"kind must be empty, list, block or blocklist\""; return 2 ;;
     esac
     if [ -z "${v}" ]; then
+        # What: a target not in the SOT is named as such.
+        # Why: an unknown name is no missing field.
+        # From: Issue #1683 | PR #1858
+        if [ "${3:-}" = "" ] || [ "${3:-}" = list ]; then
+            known="$(ci_build_targets)" || return 2
+            if [[ $'\n'"${known}"$'\n' != *$'\n'"$1"$'\n'* ]]; then
+                ci_log "[CI-ERROR-CORE-0147]" "target=\"$1\" known=\"${known//$'\n'/ }\" reason=\"not an SOT build target\""
+                return 2
+            fi
+        fi
         ci_log "[CI-ERROR-CORE-0009]" \
             "target=\"$1\" field=\"$2\" reason=\"required SOT field missing\""
         return 2
