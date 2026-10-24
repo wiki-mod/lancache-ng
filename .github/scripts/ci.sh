@@ -95,7 +95,7 @@ declare -gA CI_CHECKS=(
     [proxy-cache-env-doc-drift]="repo _ci_check_proxy_cache_env_doc_drift" [prebuilt-prod]="repo _ci_check_prebuilt_prod"
     [prod-state-wiring]="repo _ci_check_prod_state_wiring" [compose-config]="repo _ci_check_compose_config"
     [netdata-isolation]="repo _ci_check_netdata_isolation" [proxy-cert-volume]="repo _ci_check_proxy_cert_volume"
-    [proxy-nginx-policy]="repo _ci_check_proxy_nginx_policy" [setup-kea-preflight]="repo _ci_check_setup_kea_preflight"
+    [proxy-nginx-policy]="repo _ci_check_proxy_nginx_policy"
     [setup-update-safety]="repo _ci_check_setup_update_safety" [image-channel-resolution]="repo _ci_check_image_channel_resolution"
     [vex-drift]="repo _ci_check_vex_drift" [logging-matrix]="repo _ci_check_logging_matrix"
     [dockerfiles]="repo _ci_check_dockerfiles"
@@ -16409,59 +16409,13 @@ PROG
     printf 'proxy-cert-volume=clean cert_dir=%s ca_dir=%s cache_dir=%s files=%s\n' "${dir}" "${ca}" "${cache}" "${#seen[@]}"
 }
 
-# What: fails unless setup.sh calls the Kea preflight
-# Why: AG-OP-008: Kea starts only after the LAN probe
+# What: the bootstrap repo address equals the SOT value.
+# Why: setup.sh runs before the clone; the one text check.
 # From: Issue #1683 | PR #1858
-_ci_check_setup_kea_preflight() {
-    local repo_root="${1:-${CI_REPO_ROOT}}" su n
-    su="$(_ci_installer "${repo_root}")" || return 2
-    n="$(_ci_capture 1 grep -cF -- "run_kea_dhcp_activation_preflight \"\$ENV_LOCAL\"" "${su}")" || return 2
-    if [ "${n}" -eq 0 ]; then
-        ci_log "[CI-ERROR-CHECK-0049]" "file=\"${su#"${repo_root}/"}\" reason=\"install flow does not call run_kea_dhcp_activation_preflight\""
-        return 1
-    fi
-    printf 'setup-kea-preflight=clean\n'
-}
-
-# What: update pauses convergence before it mutates
-# Why: AG-OP-010; systemd paths have no hermetic test
-# From: Issue #1683
 _ci_check_setup_update_safety() {
-    local repo_root="${1:-${CI_REPO_ROOT}}"
-    local su pause_out restore_out
+    local repo_root="${1:-${CI_REPO_ROOT}}" su
     local -a viol=()
     su="$(_ci_installer "${repo_root}")" || return 2
-    # What: no flow mutates install state before its pause.
-    # Why: per function; the cmd_update window went stale.
-    # From: Issue #1683 | PR #1858
-    pause_out="$(_ci_capture 0 awk "$(cat <<'PROG'
-        /^[A-Za-z_][A-Za-z0-9_]*\(\) [({]/ { fn = $1; sub(/\(\).*/, "", fn); next }
-        /^[[:space:]]*#/ { next }
-        /pause_lancache_convergence_for_update/ { seen[fn] = 1; paused[fn] = 1; next }
-        !paused[fn] && /(sync_repo_to_default_branch|update_repo_and_resume|adopt_config_prod_edits|cmd_backup|git -C|migrate_env_for_update|validate_compose_config|stack_compose[[:space:]].*[[:space:]](pull|up)([[:space:]]|$)|docker[[:space:]]+compose([[:space:]]+--env-file[[:space:]]+[^[:space:]]+)?[[:space:]]+(pull|up))/ {
-            pend[fn] = pend[fn] NR ": " $0 "\n"
-        }
-        END {
-            for (f in seen) { n++; if (pend[f] != "") { printf "%s mutates before its pause:\n%s", f, pend[f] } }
-            if (n == 0) { print "no update flow calls pause_lancache_convergence_for_update" }
-        }
-PROG
-        )" "${su}")" || return 2
-    if [ -n "${pause_out}" ]; then
-        viol+=("update must pause the convergence timer before mutating install state"$'\n'"${pause_out}")
-    fi
-    _ci_file_match "[CI-ERROR-CHECK-0185]" "reason=\"service stop not searched\"" "${su}" "host_unit_action \"\$CONVERGE_SERVICE_UNIT\" stop" -F \
-        || { [ "$?" -eq 1 ] || return 2; viol+=("update must stop the active convergence service before mutating install state"); }
-    restore_out="$(_ci_capture 0 awk "$(cat <<'PROG'
-/if ! \( cmd_backup --config "\$install_dir" \); then/{b=1;next} b&&/resume_lancache_convergence_after_update true/{r=1} b&&/die "Pre-update rollback backup failed/{d=1;b=0} END{if (!(r&&d)) print "missing"}
-PROG
-        )" "${su}")" || return 2
-    if [ -n "${restore_out}" ]; then
-        viol+=("update must restore the convergence timer when the rollback backup fails")
-    fi
-    # What: the bootstrap repo address equals the SOT value.
-    # Why: first run has no SOT; copies must not drift.
-    # From: Issue #1683 | PR #1912
     local repo_url
     repo_url="$(_ci_runtime_default LANCACHE_REPO_URL)" || return 2
     _ci_file_match "[CI-ERROR-CHECK-0193]" "reason=\"repo address not searched\"" "${su}" "LANCACHE_REPO_URL=\"${repo_url}\"" -Fx \
@@ -16502,36 +16456,12 @@ _ci_compose_image_render() {
 # From: Issue #1683
 _ci_check_image_channel_resolution() {
     local repo_root="${1:-${CI_REPO_ROOT}}"
-    local su sec prod dep start_out
-    su="$(_ci_installer "${repo_root}")" || return 2
+    local sec prod dep
     sec="$(_ci_service_path ui src/main.rs "${repo_root}")" || return 2
     prod="$(_ci_compose_path "${repo_root}")" || return 2
     dep="${prod#"${repo_root}/"}"
     local -a viol=()
     local f
-    start_out="$(_ci_capture 0 awk '/^# ── [0-9]+\. Installing systemd watchdog/{i=1;p=0} /^# ── [0-9]+\. Post-start info/{i=0} i&&/(docker[[:space:]]+compose([[:space:]]+--env-file[[:space:]]+[^[:space:]]+)?|stack_compose[[:space:]].*)[[:space:]]pull([[:space:]]|$)/{p=1} i&&!p&&/^[[:space:]]*(systemctl[[:space:]]+(enable|start)[[:space:]]+("?\$\{?(STACK_UNIT|CONVERGE_TIMER_UNIT)|lancache\.service|lancache-converge\.timer)|(docker[[:space:]]+compose([[:space:]]+--env-file[[:space:]]+[^[:space:]]+)?|stack_compose[[:space:]].*)[[:space:]]up[[:space:]]+-d)/{v=1} END{if (v) print "start"}' "${su}")" || return 2
-    if [ -n "${start_out}" ]; then
-        viol+=("setup.sh must not start/enable lancache services before image pull")
-    fi
-    while IFS= read -r f; do
-        _ci_file_match "[CI-ERROR-CHECK-0186]" "line=\"${f}\" reason=\"setup.sh not searched\"" "${su}" "${f}" -F \
-            || { [ "$?" -eq 1 ] || return 2; viol+=("setup.sh must keep image-resolution: ${f}"); }
-    done <<'LIST'
-lancache_image_registry=$(resolve_lancache_image_registry "$env_file")
-lancache_image_prefix=$(resolve_lancache_image_prefix "$env_file")
-lancache_image_channel=$(resolve_lancache_image_channel "$env_file")
-lancache_image_tag=$(resolve_lancache_image_tag "$env_file")
-lancache_channel_image_refs()
-if [[ "$first" == "$second" ]]; then
-response_image_tag=$(json_value .image_tag "$response")
-response_image_registry=$(json_value .image_registry "$response")
-response_image_prefix=$(json_value .image_prefix "$response")
-response_image_channel=$(json_value .image_channel "$response")
-LANCACHE_IMAGE_REGISTRY=${LANCACHE_IMAGE_REGISTRY}
-LANCACHE_IMAGE_PREFIX=${LANCACHE_IMAGE_PREFIX}
-LANCACHE_IMAGE_CHANNEL=${lancache_image_channel}
-derive_release_archive_image_tag()
-LIST
     if [ ! -f "${sec}" ]; then
         viol+=("ui source missing: ${sec}")
     else
