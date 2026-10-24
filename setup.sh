@@ -3205,7 +3205,7 @@ lancache_sot_list() {
 }
 
 # What: sets the helper image to the SOT's alpine
-# Why: one owner; #1683 5997738274: latest, no pin
+# Why: one owner; latest, no third-party pin
 # From: Issue #1683 | PR #1858
 require_helper_image() {
     [[ -z "$LANCACHE_HELPER_IMAGE" ]] || return 0

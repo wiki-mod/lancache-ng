@@ -333,7 +333,7 @@ build_toolchain:
       - java -version
 
 # What: external base images, latest; the run resolves them.
-# Why: #1683 5997738274 forbids pins; one owner per image.
+# Why: no third-party pin; one owner per image.
 # From: Issue #1683
 base_images:
   alpine: "mirror.gcr.io/library/alpine:latest"

@@ -10753,7 +10753,7 @@ ci_cmd_build_tools() {
 # =========================================================
 
 # What: SOT base image $1 as ref@digest of this run.
-# Why: #1683 5997738274: no pin; the run resolves latest.
+# Why: no third-party pin; the run resolves latest.
 # From: Issue #1683 | PR #1858
 _ci_base_image() {
     local key="$1" id="$2" ctx="$3" val digest memo="" out
