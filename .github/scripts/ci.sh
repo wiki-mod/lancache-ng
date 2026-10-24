@@ -72,7 +72,7 @@ declare -A CI_DISPATCH=(
     [aggregate-stack]=ci_cmd_aggregate_stack [scan-stack]=ci_cmd_scan_stack [changed-files]=ci_cmd_changed_files
     [assemble-stack]=ci_cmd_assemble_stack [test-stack]=ci_cmd_test_stack [nightly-report]=ci_cmd_nightly_report
     [validate]=ci_cmd_validate [result-gate]=ci_cmd_result_gate [promote]=ci_cmd_promote [promote-ref]=ci_cmd_promote_ref [channel-checkout]=ci_cmd_channel_checkout [channel-matrix]=ci_cmd_channel_matrix [channel-check]=ci_cmd_channel_check [channel-report]=ci_cmd_channel_report [release-validation]=_ci_release_validation_valid [release-ref]=_ci_release_ref
-    [release-publish]=ci_cmd_release_publish [release-images]=ci_cmd_release_images [release-sbom-stack]=ci_cmd_release_sbom_stack [release-vex]=ci_cmd_release_vex [cut-release-tag]=ci_cmd_cut_release_tag [release-notes]=ci_cmd_release_notes [release-changelog]=ci_cmd_release_changelog
+    [release-publish]=ci_cmd_release_publish [release-images]=ci_cmd_release_images [release-sbom-stack]=ci_cmd_release_sbom_stack [release-vex]=ci_cmd_release_vex [cut-release-tag]=ci_cmd_cut_release_tag [release-notes]=ci_cmd_release_notes [release-changelog]=ci_cmd_release_changelog [release-variable]=ci_cmd_release_variable
     [gc]=ci_cmd_gc [gc-green-refs]=ci_cmd_gc_green_refs [check]=ci_cmd_check [close-linked-issues]=ci_cmd_close_linked_issues [pr-labels]=ci_cmd_pr_labels [board-add]=ci_cmd_board_add
     [welcome]=ci_cmd_welcome [version]=ci_cmd_version [docker-daemon-config]=ci_cmd_docker_daemon_config [runner-host]=ci_cmd_runner_host
     [have-command]=ci_cmd_have_command [pr-green-mark]=ci_cmd_pr_green_mark
@@ -7485,6 +7485,58 @@ ci_cmd_release_changelog() {
     printf 'release-changelog=written tag=%s branch=%s\n' "${tag}" "${branch}"
 }
 
+# What: repo variable PROJECT_RELEASE_VERSION; 1 = absent.
+# Why: only gh's HTTP 404 means absent; else UNKNOWN.
+# From: Issue #1683 | PR #1858
+_ci_release_variable_get() {
+    local path="$1" pat="$2" out err emsg rc=0
+    err="$(_ci_mktemp "${CI_TMPDIR}/ci-release-var.XXXXXX")" || return 2
+    out="$(GH_TOKEN="${pat}" gh api -X GET --jq .value "${path}" 2>"${err}")" || rc=$?
+    emsg="$(<"${err}")"
+    rm -f "${err}"
+    if [ "${rc}" -ne 0 ]; then
+        if [[ "${emsg}" == *"HTTP 404"* ]]; then return 1; fi
+        ci_error "[CI-ERROR-RELEASE-0058]" "path=\"${path}\" reason=\"repo variable not readable\"" "${emsg}"
+        return 2
+    fi
+    printf '%s\n' "${out}"
+}
+
+# What: set PROJECT_RELEASE_VERSION to a stable tag.
+# Why: AG-SEC-004: the version is a repo variable.
+# From: Issue #1683 | PR #1858
+ci_cmd_release_variable() {
+    local tag="${1:-}" kind="" repo pat name=PROJECT_RELEASE_VERSION want path got rc=0
+    [ -n "${tag}" ] || { ci_log "[CI-ERROR-RELEASE-0059]" "reason=\"tag arg required\""; return 2; }
+    if kind="$(_ci_release_tag_kind "${tag}")"; then :; fi
+    if [ "${kind}" != false ]; then
+        printf 'release-variable=skip tag=%s reason="not a stable vX.Y.Z tag"\n' "${tag}"
+        return 0
+    fi
+    repo="$(_ci_env_required GITHUB_REPOSITORY)" || return 2
+    pat="$(_ci_env_required PROJECT_AUTOMATION_PAT)" || return 2
+    want="${tag#v}"
+    path="repos/${repo}/actions/variables/${name}"
+    got="$(_ci_release_variable_get "${path}" "${pat}")" || rc=$?
+    case "${rc}" in
+        0)
+            [ "${got}" != "${want}" ] || { printf 'release-variable=unchanged name=%s value=%s\n' "${name}" "${want}"; return 0; }
+            GH_TOKEN="${pat}" _ci_retry github-api gh api -X PATCH "${path}" -f name="${name}" -f value="${want}" >&2 || return 2
+            ;;
+        1) GH_TOKEN="${pat}" _ci_retry github-api gh api -X POST "repos/${repo}/actions/variables" -f name="${name}" -f value="${want}" >&2 || return 2 ;;
+        *) return 2 ;;
+    esac
+    # What: read the variable back before it counts.
+    # Why: AG-WF-031: every GitHub write is read back
+    # From: Issue #1683 | PR #1858
+    got="$(_ci_release_variable_get "${path}" "${pat}")" || return 2
+    if [ "${got}" != "${want}" ]; then
+        ci_log "[CI-ERROR-RELEASE-0060]" "name=\"${name}\" want=\"${want}\" found=\"${got}\" reason=\"repo variable not read back\""
+        return 2
+    fi
+    printf 'release-variable=written name=%s value=%s\n' "${name}" "${want}"
+}
+
 # What: the released images with their digests, as a matrix.
 # Why: the workflow attests each digest; no list in YAML.
 # From: Issue #1683 | PR #1912
@@ -10969,27 +11021,25 @@ _ci_cargo_ws_value() {
     _ci_capture 0 env K="$2" yq -p toml -oy '.workspace.package[strenv(K)]' "$1"
 }
 
-# What: set 4 vars: version, license, edition, toml.
+# What: set 3 vars: license, edition, toml.
 # Why: sync and verify read the same SOT values once.
 # From: Issue #1683 | PR #1912
 _ci_version_inputs() {
-    local -n _vi_want="$1" _vi_lic="$2" _vi_ed="$3" _vi_cargo="$4"
-    _vi_want="$(_ci_release_value version)" || return 2
+    local -n _vi_lic="$1" _vi_ed="$2" _vi_cargo="$3"
     _vi_lic="$(_ci_release_value license)" || return 2
     _vi_ed="$(_ci_release_value rust_edition)" || return 2
     _vi_cargo="$(_ci_repo_path CI_CARGO_MANIFEST)" || return 2
 }
 
-# What: write release.version into its derived copies.
+# What: write SOT license and edition into Cargo.toml.
 # Why: copies are synced on demand, idempotent, not by hand.
 # From: Issue #1683 | PR #1858
 _ci_version_release_sync() {
-    local want lic ed cargo f tmp out wrote=0
-    _ci_version_inputs want lic ed cargo || return 2
+    local lic ed cargo f tmp out wrote=0
+    _ci_version_inputs lic ed cargo || return 2
     f="${cargo}"
     tmp="$(_ci_mktemp "${CI_TMPDIR}/ci-vsync.XXXXXX")" || return 2
-    out="$(awk -v v="${want}" -v l="${lic}" -v e="${ed}" '/^\[workspace\.package\]/ { on = 1; print; next } /^\[/ { on = 0 }
-        on && $1 == "version" { print "version = \"" v "\""; next }
+    out="$(awk -v l="${lic}" -v e="${ed}" '/^\[workspace\.package\]/ { on = 1; print; next } /^\[/ { on = 0 }
         on && $1 == "license" { print "license = \"" l "\""; next }
         on && $1 == "edition" { print "edition = \"" e "\""; next } { print }' "${f}" 2>&1 > "${tmp}")" \
         || { ci_error "[CI-ERROR-VERSION-0026]" "path=\"${f}\" reason=\"derived copy not rendered\"" "${out}"; rm -f "${tmp}"; return 2; }
@@ -11000,18 +11050,18 @@ _ci_version_release_sync() {
     fi
     [ "${out}" = unchanged ] || wrote=1
     rm -f "${tmp}"
-    printf 'sync=release-version version=%s changed=%s\n' "${want}" "${wrote}"
+    printf 'sync=cargo-workspace changed=%s\n' "${wrote}"
 }
 
-# What: Cargo and its members equal release.version.
-# Why: one release version owner; consumers must not drift.
+# What: Cargo has no version; license, edition from SOT.
+# Why: AG-SEC-004: PROJECT_RELEASE_VERSION owns it.
 # From: Issue #1683 | PR #1858
 _ci_version_release() {
-    local want lic ed got cargo members m mf k rc=0
-    _ci_version_inputs want lic ed cargo || return 2
+    local lic ed got cargo members m mf k rc=0
+    _ci_version_inputs lic ed cargo || return 2
     got="$(_ci_cargo_ws_value "${cargo}" version)" || return 2
-    if [ "${got}" != "${want}" ]; then
-        ci_log "[CI-ERROR-VERSION-0021]" "path=\"${cargo}\" got=\"${got}\" want=\"${want}\" reason=\"workspace.package.version is not SOT release.version\""
+    if [ "${got}" != null ]; then
+        ci_log "[CI-ERROR-VERSION-0021]" "path=\"${cargo}\" got=\"${got}\" reason=\"workspace.package.version must be absent; the repo variable PROJECT_RELEASE_VERSION owns it\""
         rc=1
     fi
     got="$(_ci_cargo_ws_value "${cargo}" license)" || return 2
@@ -11028,7 +11078,17 @@ _ci_version_release() {
     while IFS= read -r m; do
         [ -n "${m}" ] || continue
         mf="$(_ci_repo_path CI_CARGO_MANIFEST "${CI_REPO_ROOT:-.}/${m}")" || return 2
-        for k in version edition license; do
+        local vrc=0
+        _ci_file_match "[CI-ERROR-VERSION-0033]" "member=\"${m}\" key=\"version\"" "${mf}" "^version([.]workspace)? *=" || vrc=$?
+        case "${vrc}" in
+            0)
+                ci_log "[CI-ERROR-VERSION-0032]" "member=\"${m}\" key=\"version\" reason=\"member sets a version; PROJECT_RELEASE_VERSION owns it\""
+                rc=1
+                ;;
+            1) ;;
+            *) return 2 ;;
+        esac
+        for k in edition license; do
             local mrc=0
             _ci_file_match "[CI-ERROR-VERSION-0029]" "member=\"${m}\" key=\"${k}\"" "${mf}" "^${k}\.workspace *= *true$" || mrc=$?
             case "${mrc}" in
@@ -11041,7 +11101,7 @@ _ci_version_release() {
             esac
         done
     done <<< "${members}"
-    [ "${rc}" -eq 0 ] && printf 'release-version=%s consumers=clean\n' "${want}"
+    [ "${rc}" -eq 0 ] && printf 'cargo-workspace=clean version=absent\n'
     return "${rc}"
 }
 

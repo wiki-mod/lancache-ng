@@ -16,11 +16,10 @@ members = [
     "services/common",
 ]
 
-# What: version, license, edition from SOT release.
-# Why: cargo cannot read the SOT; ci.sh version sync writes.
+# What: license, edition from SOT release; no version.
+# Why: PROJECT_RELEASE_VERSION owns it; no Rust reads it.
 # From: Issue #1683 | PR #1858
 [workspace.package]
-version = "0.3.0"
 license = "AGPL-3.0-or-later"
 edition = "2024"
 

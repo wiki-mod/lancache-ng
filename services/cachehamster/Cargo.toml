@@ -7,7 +7,6 @@
 # From: Issue #871 | PR #1858
 [package]
 name = "lancache-cachehamster"
-version.workspace = true
 edition.workspace = true
 license.workspace = true
 

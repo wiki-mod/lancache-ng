@@ -937,15 +937,11 @@ codeql_languages:
     # From: Issue #1683 | PR #1912
     paths: ["@rust_workspace"]
 
-# What: release version, channels, validation and GC inputs
-# Why: AG-REL-010: one release and artifact inventory
+# What: release channels, validation and GC inputs
+# Why: AG-REL-010; the version is PROJECT_RELEASE_VERSION
 # From: Issue #1683 | PR #1858
 release:
   registry: ghcr.io
-  # What: current release version of the whole project.
-  # Why: one owner; Cargo and its lock are synced from it.
-  # From: Issue #1683 | PR #1858
-  version: 0.3.0
   # What: release tag grammar, final and prerelease.
   # Why: setup.sh and ci.sh read it; no regex copies.
   # From: Issue #1683 | PR #1912
