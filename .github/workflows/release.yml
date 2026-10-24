@@ -113,7 +113,12 @@ jobs:
         run: bash .github/scripts/ci.sh release-publish "${RELEASE_TAG}"
       - name: Attach the OpenVEX document
         run: bash .github/scripts/ci.sh release-vex "${RELEASE_TAG}"
+      # What: the PAT reaches the CHANGELOG push step only
+      # Why: the branch ruleset refuses GITHUB_TOKEN pushes
+      # From: Issue #1683 | PR #1858
       - name: Add the release to CHANGELOG.md
+        env:
+          PROJECT_AUTOMATION_PAT: ${{ secrets.PROJECT_AUTOMATION_PAT }}
         run: bash .github/scripts/ci.sh release-changelog "${RELEASE_TAG}"
       # What: name every released image digest
       # Why: ci.sh owns the list; the matrix reads it

@@ -7313,7 +7313,7 @@ ci_cmd_release_notes() {
 # Why: release writes CHANGELOG; no PR edits it by hand.
 # From: Issue #894 | PR #1858
 ci_cmd_release_changelog() {
-    local tag="${1:-}" branch="${CI_DEFAULT_BRANCH:-}" changes file head out remote
+    local tag="${1:-}" branch="${CI_DEFAULT_BRANCH:-}" changes file head out remote url sha tip
     [ -n "${tag}" ] || { ci_log "[CI-ERROR-RELEASE-0032]" "reason=\"tag arg required\""; return 2; }
     file="$(_ci_variable CI_CHANGELOG)" || return 2
     local kind=""
@@ -7349,7 +7349,17 @@ ci_cmd_release_changelog() {
         return 2
     fi
     out="$(_ci_capture 0 _ci_git_as_bot commit -q -m "docs: update ${file} for ${tag}" -- "${file}")" || return 2
-    out="$(_ci_retry git-push git push -q "${remote}" "HEAD:refs/heads/${branch}")" || return 2
+    url="$(_ci_pat_url)" || return 2
+    sha="$(_ci_capture 0 git rev-parse HEAD)" || return 2
+    out="$(_ci_retry git-push _ci_pat_git push -q "${url}" "HEAD:refs/heads/${branch}")" || return 2
+    # What: the branch tip must be the CHANGELOG commit
+    # Why: AG-WF-031: every GitHub write is read back
+    # From: Issue #1683 | PR #1858
+    tip="$(_ci_ref_tip "refs/heads/${branch}")" || return 2
+    if [ "${tip}" != "${sha}" ]; then
+        ci_log "[CI-ERROR-RELEASE-0057]" "branch=\"${branch}\" sha=\"${sha}\" found=\"${tip}\" reason=\"pushed CHANGELOG commit not read back\""
+        return 2
+    fi
     printf 'release-changelog=written tag=%s branch=%s\n' "${tag}" "${branch}"
 }
 
@@ -7651,24 +7661,44 @@ _ci_next_patch_tag() {
     printf '%s.%s\n' "${tag%.*}" "$(( 10#${tag##*.} + 1 ))"
 }
 
+# What: the repo URL every PAT git call talks to
+# Why: one URL for the PAT header and the push target
+# From: Issue #1683 | PR #1858
+_ci_pat_url() {
+    local srv repo
+    srv="$(_ci_env_required GITHUB_SERVER_URL)" || return 2
+    repo="$(_ci_env_required GITHUB_REPOSITORY)" || return 2
+    printf '%s/%s.git\n' "${srv}" "${repo}"
+}
+
+# What: git with PROJECT_AUTOMATION_PAT as the only auth
+# Why: rulesets refuse GITHUB_TOKEN branch pushes
+# From: Issue #1683 | PR #1858
+_ci_pat_git() {
+    local pat srv
+    pat="$(_ci_env_required PROJECT_AUTOMATION_PAT)" || return 2
+    srv="$(_ci_env_required GITHUB_SERVER_URL)" || return 2
+    # What: empty value drops the checkout's token header
+    # Why: else git sends two AUTHORIZATION headers
+    # From: Issue #1683 | PR #1858
+    git -c "http.${srv}/.extraheader=" \
+        -c "http.${srv}/.extraheader=AUTHORIZATION: basic $(printf '%s' "x-access-token:${pat}" | base64 -w0)" "$@"
+}
+
 # What: push the PAT-authored tag, then read it back
 # Why: a GITHUB_TOKEN tag push starts no release run
 # From: Issue #1683 | PR #1858
 _ci_push_release_tag() {
-    local tag="$1" sha="$2" pat srv repo url hdr raw got
-    pat="$(_ci_env_required PROJECT_AUTOMATION_PAT)" || return 2
-    srv="$(_ci_env_required GITHUB_SERVER_URL)" || return 2
-    repo="$(_ci_env_required GITHUB_REPOSITORY)" || return 2
-    url="${srv}/${repo}.git"
-    hdr="http.${url}.extraheader=AUTHORIZATION: basic $(printf '%s' "x-access-token:${pat}" | base64 -w0)"
+    local tag="$1" sha="$2" url raw got
+    url="$(_ci_pat_url)" || return 2
     _ci_run "[CI-ERROR-RELEASE-0026]" "tag=\"${tag}\" sha=\"${sha}\" reason=\"annotated tag not created\"" \
         _ci_git_as_bot tag -a "${tag}" "${sha}" -m "Patch release ${tag}" || return 2
     _ci_run "[CI-ERROR-RELEASE-0027]" "tag=\"${tag}\" url=\"${url}\" reason=\"release tag push failed\"" \
-        git -c "${hdr}" push "${url}" "refs/tags/${tag}" || return 2
+        _ci_pat_git push "${url}" "refs/tags/${tag}" || return 2
     # What: the remote tag must peel to the cut commit
     # Why: AG-WF-031: every GitHub write is read back
     # From: Issue #1683 | PR #1858
-    raw="$(_ci_capture 0 git -c "${hdr}" ls-remote --tags "${url}" "refs/tags/${tag}" "refs/tags/${tag}^{}")" || return 2
+    raw="$(_ci_capture 0 _ci_pat_git ls-remote --tags "${url}" "refs/tags/${tag}" "refs/tags/${tag}^{}")" || return 2
     got="$(awk -v r="refs/tags/${tag}" '$2 == r "^{}" { p = $1 } $2 == r { d = $1 } END { print (p != "" ? p : d) }' <<< "${raw}")"
     if [ "${got}" != "${sha}" ]; then
         ci_error "[CI-ERROR-RELEASE-0048]" "tag=\"${tag}\" sha=\"${sha}\" found=\"${got}\" reason=\"pushed tag not read back at the cut commit\"" "${raw}"
