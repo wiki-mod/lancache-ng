@@ -535,6 +535,15 @@ runtime:
     - SETUP_STATUS_LOG_LINES=30
     - SETUP_LOGBUNDLE_LOG_LINES=2000
     - SETUP_UI_USER_DEFAULT=admin
+    # What: setup.sh health gate waits, samples and probe name.
+    # Why: setup.sh reads them here; no literal in its code.
+    # From: Issue #1683 | PR #1858
+    - SETUP_HEALTH_WAIT_SERVICES_SECONDS=180
+    - SETUP_HEALTH_WAIT_UI_SECONDS=120
+    - SETUP_HEALTH_POLL_SECONDS=3
+    - SETUP_HEALTH_BASELINE_SAMPLES=3
+    - SETUP_HEALTH_BASELINE_INTERVAL_SECONDS=2
+    - SETUP_DNS_PROBE_NAME=content1.steampowered.com
     # What: the project address the ui links to.
     # Why: setup.sh bootstrap copy; ci.sh checks both.
     # From: Issue #1683 | PR #1912

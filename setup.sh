@@ -4624,8 +4624,9 @@ EOF
 Usage: ./setup.sh update-ip [install-dir]
 
 Interactively changes the HTTP and HTTPS listener IP addresses for an
-existing installation, then restarts its stack. If [install-dir] is omitted,
-${DEFAULT_INSTALL_DIR} is used.
+existing installation. The stack then restarts through the same health-gated
+steps as ./setup.sh update; if it does not become healthy, the previous IPs
+are restored. If [install-dir] is omitted, ${DEFAULT_INSTALL_DIR} is used.
 
 Compatibility: ./setup.sh --reconfigure still works and runs this command.
 EOF
@@ -4912,7 +4913,7 @@ verify_stack_functional_health() {
     # What: dig an exact, non-wildcard cdn-domains.txt host
     # Why: wildcard-only RPZ entries never match their apex
     # From: Issue #1149 | PR #1150
-    test_fqdn="content1.steampowered.com"
+    test_fqdn=$(prod_env_default SETUP_DNS_PROBE_NAME) || exit $?
     if [[ -n "$ip_http" ]]; then
         require_functional_check_tool dig "the DNS resolution probe" || return 1
         if ! resolved=$(dns_short_answer "$ip_http" "" A "$test_fqdn"); then
@@ -4924,17 +4925,17 @@ verify_stack_functional_health() {
     return 0
 }
 
-# What: sample count and interval for the health baseline
-# Why: one healthy read can hit a crash-loop window
-_UPDATE_HEALTH_BASELINE_SAMPLES=3
-_UPDATE_HEALTH_BASELINE_SAMPLE_INTERVAL=2
-
 # What: records pre-update health of each named service
-# Why: gate fails only on regressions; 3 stable reads
+# Why: gate fails only on regressions; several stable reads
 capture_stack_health_baseline() {
     local -a services=("$@")
-    local svc container_id sample healthy_streak
+    local svc container_id sample healthy_streak samples interval
 
+    # What: sample count and interval from the SOT defaults
+    # Why: one healthy read can hit a crash-loop window
+    # From: Issue #1683 | PR #1858
+    samples=$(prod_env_default SETUP_HEALTH_BASELINE_SAMPLES) || exit $?
+    interval=$(prod_env_default SETUP_HEALTH_BASELINE_INTERVAL_SECONDS) || exit $?
     _UPDATE_HEALTH_BASELINE=()
     for svc in "${services[@]}"; do
         container_id=$(service_container_id "$svc") \
@@ -4946,13 +4947,12 @@ capture_stack_health_baseline() {
         fi
 
         healthy_streak=1
-        for (( sample = 0; sample < _UPDATE_HEALTH_BASELINE_SAMPLES; sample++ )); do
+        for (( sample = 0; sample < samples; sample++ )); do
             if ! service_container_is_healthy "$svc"; then
                 healthy_streak=0
                 break
             fi
-            (( sample < _UPDATE_HEALTH_BASELINE_SAMPLES - 1 )) \
-                && sleep "$_UPDATE_HEALTH_BASELINE_SAMPLE_INTERVAL"
+            (( sample < samples - 1 )) && sleep "$interval"
         done
         _UPDATE_HEALTH_BASELINE["$svc"]="$healthy_streak"
     done
@@ -4964,8 +4964,10 @@ wait_for_stack_health() {
     local timeout_seconds="$1"
     shift
     local -a services=("$@")
-    local interval_seconds=3 elapsed=0 svc all_healthy baseline
+    local interval_seconds elapsed=0 svc all_healthy baseline
     local -a regressed_services pre_existing_unhealthy_services
+
+    interval_seconds=$(prod_env_default SETUP_HEALTH_POLL_SECONDS) || exit $?
 
     while (( elapsed < timeout_seconds )); do
         all_healthy=1
@@ -4995,7 +4997,7 @@ wait_for_stack_health() {
     if (( ${#regressed_services[@]} > 0 )); then
         print_error "Service(s) regressed from healthy to unhealthy during this update: ${regressed_services[*]}"
         # What: dumps each regressed service's recent logs
-        # Why: CI and operators need the cause
+        # Why: the operator needs the cause
         local log_lines
         log_lines=$(prod_env_default SETUP_REGRESSION_LOG_LINES) || exit $?
         for svc in "${regressed_services[@]}"; do
@@ -5058,8 +5060,10 @@ apply_stack_update_ordered() {
     local install_dir="$1"
     local -a all_services non_ui_services rollback=("${@:2}")
     [[ "${#rollback[@]}" -gt 0 ]] || rollback=(rollback_stack_update "$install_dir")
-    local svc services
+    local svc services wait_services wait_ui
 
+    wait_services=$(prod_env_default SETUP_HEALTH_WAIT_SERVICES_SECONDS) || exit $?
+    wait_ui=$(prod_env_default SETUP_HEALTH_WAIT_UI_SECONDS) || exit $?
     services=$(stack_compose "$install_dir" "$_UPDATE_ENV_FILE" config --services) \
         || die "Cannot list the services of $install_dir (exit $?); nothing was started."
     mapfile -t all_services <<< "$services"
@@ -5078,11 +5082,11 @@ apply_stack_update_ordered() {
     if stack_update_step "Starting non-UI services" "Failed to start non-UI services." \
             stack_compose "$install_dir" "$_UPDATE_ENV_FILE" up -d --remove-orphans "${non_ui_services[@]}" \
         && stack_update_step "Verifying non-UI services are healthy" "Non-UI services did not become healthy in time." \
-            wait_for_stack_health 180 "${non_ui_services[@]}" \
+            wait_for_stack_health "$wait_services" "${non_ui_services[@]}" \
         && stack_update_step "Starting Admin UI (last)" "Failed to start the Admin UI." \
             stack_compose "$install_dir" "$_UPDATE_ENV_FILE" up -d --remove-orphans ui \
         && stack_update_step "Verifying the whole stack is healthy" "Admin UI did not become healthy in time." \
-            wait_for_stack_health 120 ui; then
+            wait_for_stack_health "$wait_ui" ui; then
         print_ok "Whole stack verified healthy"
         return 0
     fi
@@ -6384,6 +6388,24 @@ reset_dns_to_last_known_good_config() {
 }
 
 # ── update-ip subcommand ───────────────────────────────────────────────────────
+# What: writes the previous .env back and restarts the stack
+# Why: IPs that fail the health gate must not stay active
+# From: Issue #1683 | PR #1858
+restore_update_ip_env() {
+    local install_dir="$1" env_file="$2" saved="$3" rc=0
+    write_file_atomically "$env_file" <<< "$saved" || rc=$?
+    if [[ "$rc" -ne 0 ]]; then
+        print_error "Failed to write the previous $env_file back (exit $rc)."
+        return 1
+    fi
+    stack_compose "$install_dir" "$env_file" up -d || rc=$?
+    if [[ "$rc" -ne 0 ]]; then
+        print_error "Failed to restart the stack with the previous IPs (exit $rc)."
+        return 1
+    fi
+    print_warn "The previous IPs are active again"
+}
+
 # What: reconfigures IPs of an existing install
 # Why: uses the install's directory, not the repo
 cmd_update_ip() {
@@ -6448,6 +6470,21 @@ cmd_update_ip() {
 
     confirm "Apply changes? [y/N]" "N" || { printf "\n  Cancelled.\n\n"; exit 0; }
 
+    # What: the same baseline and gate as ./setup.sh update
+    # Why: new IPs that fail the gate must not stay active
+    # From: Issue #1683 | PR #1858
+    local services saved_env apply_rc=0
+    local -a all_services
+    install_missing_tools curl dig jq
+    _UPDATE_ENV_FILE="$deploy_env"
+    _UPDATE_STACK_DIR="$install_dir"
+    print_step "Capturing health baseline"
+    services=$(stack_compose "$install_dir" "$deploy_env" config --services) \
+        || die "Cannot list the services of $install_dir (exit $?); nothing was changed."
+    mapfile -t all_services <<< "$services"
+    capture_stack_health_baseline "${all_services[@]}"
+    saved_env=$(cat -- "$deploy_env") || die "Cannot read $deploy_env (exit $?); nothing was changed."
+
     print_step "Updating configuration files"
 
     set_env_key IP_HTTP "$new_ip_http" "$deploy_env"
@@ -6477,13 +6514,13 @@ cmd_update_ip() {
 
     print_step "Restarting containers"
 
-    # What: restart failure is checked explicitly
-    # Why: a bare && is exempt from set -e here
-    if stack_compose "$install_dir" "$deploy_env" up -d; then
-        print_ok "Stack restarted"
-    else
-        die "Failed to restart the stack: 'docker compose up -d' exited non-zero. The .env files were already updated with the new IPs, but the running containers may still be bound to the old ones -- fix the issue (e.g. confirm the new IP is assigned to this host) and rerun: $SCRIPT_DIR/setup.sh compose $install_dir up -d"
-    fi
+    apply_stack_update_ordered "$install_dir" restore_update_ip_env "$install_dir" "$deploy_env" "$saved_env" \
+        || apply_rc=$?
+    case "$apply_rc" in
+        0) ;;
+        1) die "The new IPs failed the health gate; the previous IPs are active again. Check that the new IPs are assigned to this host." ;;
+        *) die "The new IPs failed the health gate, and restoring the previous ones failed too. Check: $SCRIPT_DIR/setup.sh compose $install_dir logs" ;;
+    esac
 
     printf "\n"
     printf '%s%s════════════════════════════════════════%s\n' "${BOLD}" "${GREEN}" "${RESET}"
@@ -7663,10 +7700,6 @@ fi
 print_step "Writing .env"
 
 env_file="$ENV_LOCAL"
-
-if [[ -f "$env_file" ]]; then
-    confirm "Overwrite .env.local? [y/N]" "N" || die "Cancelled."
-fi
 
 # What: from here on, the real install mutations run
 # Why: introspection mode must leave the host untouched
