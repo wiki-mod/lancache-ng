@@ -3204,14 +3204,12 @@ lancache_sot_list() {
     lancache_sot_read list "$1" "$2"
 }
 
-# What: sets the helper image to the SOT's pinned alpine
-# Why: AG-CI-008: one owner, never a mutable alpine tag
+# What: sets the helper image to the SOT's alpine
+# Why: one owner; #1683 5997738274: latest, no pin
 # From: Issue #1683 | PR #1858
 require_helper_image() {
     [[ -z "$LANCACHE_HELPER_IMAGE" ]] || return 0
     LANCACHE_HELPER_IMAGE=$(lancache_sot_value alpine base_images) || exit $?
-    [[ "$LANCACHE_HELPER_IMAGE" == *@sha256:* ]] \
-        || die "base_images.alpine in the SOT is not digest-pinned: $LANCACHE_HELPER_IMAGE"
 }
 
 # What: true while the channel's promote lock ref exists

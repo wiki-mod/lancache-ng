@@ -196,7 +196,7 @@ jobs:
       # From: Issue #1683 | PR #1858
       - &gha_export
         name: Export the GHA cache runtime
-        uses: docker://mirror.gcr.io/library/alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
+        uses: docker://mirror.gcr.io/library/alpine:latest
         with:
           entrypoint: timeout
           args: ${{ steps.gha-runtime.outputs.args }}

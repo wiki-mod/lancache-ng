@@ -4192,7 +4192,7 @@ _ci_oci_labels() {
     source="$(_ci_env_required GITHUB_SERVER_URL)" || return 2
     source="${source}/${repo}"
     final="$(_ci_required_field "${service}" final_base)" || return 2
-    base="$(_ci_block_entry_field base_images "" "${final}")" || return 2
+    base="$(_ci_base_image "${final}" "[CI-ERROR-BUILD-0014]" "service=\"${service}\" key=\"base_images.${final}\" reason=\"no final base in SOT\"")" || return 2
     head="$(_ci_head_commit)" || return 2
     desc="$(_ci_required_field "${service}" description)" || return 2
     created="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -4206,10 +4206,6 @@ _ci_oci_labels() {
     printf 'org.opencontainers.image.vendor=%s\n' "${repo%%/*}"
     printf 'org.opencontainers.image.title=%s\n' "${service}"
     printf 'org.opencontainers.image.description=%s\n' "${desc}"
-    if [ -z "${base}" ]; then
-        ci_log "[CI-ERROR-BUILD-0014]" "service=\"${service}\" key=\"base_images.${final}\" reason=\"final base not pinned in SOT\""
-        return 2
-    fi
     printf 'org.opencontainers.image.base.name=%s\n' "${base%@*}"
     printf 'org.opencontainers.image.base.digest=%s\n' "${base#*@}"
 }
@@ -4230,11 +4226,7 @@ _ci_build_cache_ref() {
 _ci_buildx_start() {
     local name="$1" img names n v conf
     local -a opts=()
-    img="$(_ci_block_entry_field base_images "" buildkit)" || return 2
-    if [ -z "${img}" ]; then
-        ci_log "[CI-ERROR-BUILD-0024]" "key=\"base_images.buildkit\" reason=\"no BuildKit pin in SOT\""
-        return 2
-    fi
+    img="$(_ci_base_image buildkit "[CI-ERROR-BUILD-0024]" "key=\"base_images.buildkit\" reason=\"no BuildKit image in SOT\"")" || return 2
     opts+=(--driver-opt "image=${img}")
     # What: the job proxy reaches the BuildKit daemon.
     # Why: AG-CI-009; the daemon pulls and caches itself.
@@ -4500,7 +4492,25 @@ ci_cmd_apk_setup() {
         name="${kv%=*}"; name="${name##*/}"
         _ci_fetch_verified "${kv%=*}" "${kv##*=}" "${root}/etc/apk/keys/${name}" || return 2
     done
-    for kv in ${APK_TAGGED_REPOS:-}; do
+    # What: @ALPINE_BRANCH@ is vX.Y of this image's alpine.
+    # Why: the base is latest; the image knows its branch.
+    # From: Issue #1683 | PR #1858
+    local tagged="${APK_TAGGED_REPOS:-}" rel
+    case "${tagged}" in
+        *@ALPINE_BRANCH@*)
+            if ! rel="$(cat "${root}/etc/alpine-release" 2>&1)"; then
+                ci_error "[CI-ERROR-APKSETUP-0006]" "path=\"${root}/etc/alpine-release\" reason=\"no alpine release; no repo branch\"" "${rel}"
+                return 2
+            fi
+            if [[ ! "${rel}" =~ ^([0-9]+\.[0-9]+)\. ]]; then
+                ci_log "[CI-ERROR-APKSETUP-0007]" "release=\"${rel}\" reason=\"alpine release is not X.Y.Z; no repo branch\""
+                return 2
+            fi
+            _ci_fill "${tagged}" "ALPINE_BRANCH=v${BASH_REMATCH[1]}" || return 2
+            tagged="${REPLY}"
+            ;;
+    esac
+    for kv in ${tagged}; do
         kv="@${kv%%=*} ${kv#*=}"
         if ! out="$(printf '%s\n' "${kv}" 2>&1 >> "${repos}")"; then
             ci_error "[CI-ERROR-APKSETUP-0004]" "repo=\"${kv}\" reason=\"tagged repo not added\"" "${out}"
@@ -8733,7 +8743,7 @@ _ci_validate_teardown() {
         # Why: services write as root; runner user cannot.
         # From: Issue #1683
         local base
-        if ! base="$(_ci_alpine_image "[CI-ERROR-VALIDATE-0102]" "key=\"base_images.alpine\" reason=\"no alpine base to clear the state root\"")"; then
+        if ! base="$(_ci_base_image alpine "[CI-ERROR-VALIDATE-0102]" "key=\"base_images.alpine\" reason=\"no alpine base to clear the state root\"")"; then
             rc=2
         elif ! out="$(_ci_bounded_run "${LANCACHE_STATE_DIR}:/s" "${base}" \
                 find /s -mindepth 1 -delete 2>&1 && rmdir "${LANCACHE_STATE_DIR}" 2>&1)"; then
@@ -10566,23 +10576,8 @@ ci_cmd_build_args() {
 # Why: each target resolves with its own repos only.
 # From: Issue #1683
 _ci_apk_repositories() {
-    local out tag
+    local out
     out="$(_ci_target_list "$1" apk_repositories)" || return 2
-    # What: @ALPINE_BRANCH@ becomes vX.Y of the alpine pin.
-    # Why: the SOT pin owns the version; repos only follow.
-    # From: Issue #1683 | PR #1858
-    case "${out}" in
-        *@ALPINE_BRANCH@*)
-            tag="$(_ci_alpine_image "[CI-ERROR-BUILDARGS-0019]" "target=\"$1\" key=\"base_images.alpine\" reason=\"no alpine pin; no repo branch\"")" || return 2
-            tag="${tag%@*}"; tag="${tag##*:}"
-            if [[ ! "${tag}" =~ ^[0-9]+\.[0-9]+$ ]]; then
-                ci_log "[CI-ERROR-BUILDARGS-0016]" "tag=\"${tag}\" reason=\"alpine pin tag is not major.minor; no repo branch\""
-                return 2
-            fi
-            _ci_fill "${out}" "ALPINE_BRANCH=v${tag}" || return 2
-            out="${REPLY}"
-            ;;
-    esac
     printf '%s' "${out//$'\n'/ }"
 }
 
@@ -10757,25 +10752,38 @@ ci_cmd_build_tools() {
 # VERSION MANAGEMENT
 # =========================================================
 
-# What: SOT alpine base ref; empty logs caller id + text.
-# Why: one pin for every alpine consumer; each own id.
+# What: SOT base image $1 as ref@digest of this run.
+# Why: #1683 5997738274: no pin; the run resolves latest.
 # From: Issue #1683 | PR #1858
-_ci_alpine_image() {
-    local id="$1" ctx="$2" val
-    val="$(_ci_block_entry_field base_images "" alpine)" || return 2
+_ci_base_image() {
+    local key="$1" id="$2" ctx="$3" val digest memo="" out
+    # What: one job resolves a base once, in RUNNER_TEMP.
+    # Why: build arg, labels and id name the same digest.
+    # From: Issue #1683 | PR #1858
+    [ -z "${RUNNER_TEMP:-}" ] || memo="${RUNNER_TEMP}/base-image-${key}.ref"
+    if [ -n "${memo}" ] && [ -s "${memo}" ]; then
+        printf '%s\n' "$(<"${memo}")"
+        return 0
+    fi
+    val="$(_ci_block_entry_field base_images "" "${key}")" || return 2
     if [ -z "${val}" ]; then
         ci_log "${id}" "${ctx}"
         return 2
     fi
-    printf '%s\n' "${val}"
+    digest="$(_ci_registry_digest "${val}")" || return 2
+    if [ -n "${memo}" ] && ! out="$(printf '%s@%s\n' "${val}" "${digest}" 2>&1 > "${memo}")"; then
+        ci_error "[CI-ERROR-RESOLVE-0012]" "path=\"${memo}\" reason=\"resolved base not kept for the job\"" "${out}"
+        return 2
+    fi
+    printf '%s@%s\n' "${val}" "${digest}"
 }
 
 # What: The SOT alpine base as ALPINE_IMAGE, fail-closed.
-# Why: every target's final stage pins this one owner.
+# Why: every target's final stage uses this one owner.
 # From: Issue #1683 | PR #1858
 _ci_alpine_build_arg() {
     local prefix="$1" val
-    val="$(_ci_alpine_image "[CI-ERROR-BUILDARGS-0003]" "arg=\"ALPINE_IMAGE\" key=\"base_images.alpine\" reason=\"missing central base image; FAIL CLOSED\"")" || return 2
+    val="$(_ci_base_image alpine "[CI-ERROR-BUILDARGS-0003]" "arg=\"ALPINE_IMAGE\" key=\"base_images.alpine\" reason=\"missing central base image; FAIL CLOSED\"")" || return 2
     printf '%sALPINE_IMAGE=%s\n' "${prefix}" "${val}"
 }
 
@@ -13975,8 +13983,8 @@ _ci_check_pr_title() {
     return 1
 }
 
-# What: External deploy images must be digest-pinned + SOT.
-# Why: A floating external tag breaks reproducibility.
+# What: an external deploy image must be a SOT base image.
+# Why: one owner per external image; no copy elsewhere.
 # From: Issue #1683
 _ci_check_stable_external_images() {
     local -a dirs=("$@")
@@ -13986,7 +13994,7 @@ _ci_check_stable_external_images() {
         dirs=("${dep%/*}")
     fi
     local -a viol=()
-    # What: the exact SOT base image pins.
+    # What: the exact SOT base image values.
     # Why: compose must match them; other values are drift.
     # From: Issue #1683 | PR #1858
     local keys val
@@ -14006,24 +14014,20 @@ _ci_check_stable_external_images() {
         while IFS= read -r line; do
             img="${line#*image:}"; img="${img#"${img%%[![:space:]]*}"}"
             # What: only ${LANCACHE_*} own images skip.
-            # Why: any literal host (ghcr too) is pinned.
+            # Why: any literal host (ghcr too) is SOT.
             # From: Issue #1683 | PR #1858
             case "${img}" in
                 *"\${LANCACHE"*|'') continue ;;
             esac
             img="${img%\"}"; img="${img#\"}"
-            case "${img}" in
-                *@sha256:*) ;;
-                *) viol+=("${d}: external not digest-pinned: ${img}"); continue ;;
-            esac
             case "${allowed}" in
                 *" ${img} "*) ;;
-                *) viol+=("${d}: external pin is not a SOT pin: ${img}") ;;
+                *) viol+=("${d}: external image is not a SOT base image: ${img}") ;;
             esac
         done <<<"${produced}"
     done
     if [ "${#viol[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0014]" "reason=\"external image not digest-pinned or not in SOT\"" "$(printf '%s\n' "${viol[@]}")"
+        ci_error "[CI-ERROR-CHECK-0014]" "reason=\"external image not in SOT\"" "$(printf '%s\n' "${viol[@]}")"
         return 1
     fi
     printf 'stable-external-images=clean\n'
@@ -14682,8 +14686,8 @@ _ci_check_action_node_versions() {
             viol+=("local action '${v}' (in: $(_ci_ando_reffiles "${v}")); CI 2.0 has no composite actions")
             continue
         fi
-        # What: a docker:// step must pin a SOT base image.
-        # Why: the workflow literal is no second pin owner.
+        # What: a docker:// step must name a SOT base image.
+        # Why: the workflow literal is no second owner.
         # From: Issue #1683 | PR #1858
         if [[ "${v}" == docker://* ]]; then
             local bkeys bk bv bhit=0
@@ -14692,7 +14696,7 @@ _ci_check_action_node_versions() {
                 bv="$(_ci_block_entry_field base_images "" "${bk}")" || return 2
                 [ "${bv}" != "${v#docker://}" ] || bhit=1
             done
-            [ "${bhit}" -eq 1 ] || viol+=("docker step '${v}' (in: $(_ci_ando_reffiles "${v}")) is not a SOT base_images pin")
+            [ "${bhit}" -eq 1 ] || viol+=("docker step '${v}' (in: $(_ci_ando_reffiles "${v}")) is not a SOT base_images value")
             continue
         fi
         # What: own repo needs a ref; others unsupported.

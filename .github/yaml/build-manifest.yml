@@ -109,7 +109,7 @@ services:
       - openssl
       - nginx@nginx
     # What: nginx.org mainline repo for the base's branch.
-    # Why: ci.sh fills @ALPINE_BRANCH@ from the alpine pin.
+    # Why: apk-setup fills @ALPINE_BRANCH@ from the image.
     # From: Issue #1683 | PR #1858
     apk_repositories:
       - nginx=http://nginx.org/packages/mainline/alpine/@ALPINE_BRANCH@/main
@@ -332,15 +332,15 @@ build_toolchain:
       - 'm="$(gcc -dumpmachine)" && [[ "${m}" == *-musl ]]'
       - java -version
 
-# What: Pinned external base images by full digest.
-# Why: Single owner of the alpine pin, no per-file copies.
+# What: external base images, latest; the run resolves them.
+# Why: #1683 5997738274 forbids pins; one owner per image.
 # From: Issue #1683
 base_images:
-  alpine: "mirror.gcr.io/library/alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a"
+  alpine: "mirror.gcr.io/library/alpine:latest"
   # What: BuildKit daemon image of the image builds.
   # Why: §35 cache export needs a docker-container builder.
   # From: Issue #1683 | PR #1912
-  buildkit: "mirror.gcr.io/moby/buildkit:v0.33.1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea"
+  buildkit: "mirror.gcr.io/moby/buildkit:latest"
 
 # What: pinned external actions: uses, commit SHA, tag.
 # Why: uses: reads no SOT; ci.sh checks each workflow pin.
