@@ -1149,10 +1149,6 @@ ci_variables:
   # Why: AG-CI-016; 2 minutes is the limit DoMe agreed on.
   # From: Issue #1683 | PR #1858
   CI_CONTAINER_CMD_TIMEOUT: 120
-  # What: prod compose; setup.sh installs, CI checks it.
-  # Why: AG-KD-008 one deploy profile; one path owner.
-  # From: Issue #1683 | PR #1858
-  CI_COMPOSE_FILE: deploy/prod/docker-compose.yml
   # What: workspace toml and the lock ci.sh generates.
   # Why: no lock in git; cargo resolves the latest.
   # From: Issue #1683 | PR #1858
@@ -1276,10 +1272,6 @@ ci_variables:
   # Why: AG-CI-020: GitHub Actions polls >= 300 s apart.
   # From: Issue #1683 | PR #1912
   CI_RUN_STATE_POLL_SECONDS: 300
-  # What: ref prefix of the per-channel promote lock.
-  # Why: promote and the installer read one lock location.
-  # From: Issue #1683 | PR #1858
-  CI_PROMOTE_LOCK_REF: refs/ci/promote-lock
   # What: runner daemon.json path, GC reserve, log policy.
   # Why: AG-CI-016: one owner for the runner Docker limits.
   # From: Issue #1255 | PR #1349
@@ -1680,7 +1672,7 @@ validation:
   # Why: Only HTTP is cached; a real HIT proves the path.
   # From: Issue #1683 | PR #1858
   proxy_cache_probe_url: http://deb.debian.org/debian/dists/stable/InRelease
-  # What: compose files checked besides CI_COMPOSE_FILE.
+  # What: compose files besides runtime.compose_file.
   # Why: each renders clean in all of its own profiles.
   # From: Issue #1683 | PR #1858
   compose_targets: deploy/secondary/docker-compose.yml

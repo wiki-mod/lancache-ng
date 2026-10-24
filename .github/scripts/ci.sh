@@ -6847,7 +6847,7 @@ _ci_stack_validated() {
 # From: Issue #1683
 _ci_promote_lock_ref() {
     local prefix
-    prefix="$(_ci_variable CI_PROMOTE_LOCK_REF)" || return 2
+    prefix="$(_ci_required_field release promote_lock_ref block)" || return 2
     printf '%s/%s' "${prefix}" "$1"
 }
 
@@ -8555,7 +8555,7 @@ _ci_validate_shared_dir() {
 # From: Issue #1683 | PR #1912
 _ci_validate_stage() {
     local dest="$1" file cfg srcs rel out
-    file="$(_ci_variable CI_COMPOSE_FILE)" || return 2
+    file="$(_ci_compose_file)" || return 2
     cfg="$(_ci_validate_config_json)" || return 2
     if ! srcs="$(jq -r --arg root "${CI_REPO_ROOT}/" \
         '.services[].volumes[]? | select(.type == "bind") | .source | select(startswith($root)) | ltrimstr($root)' <<< "${cfg}" 2>&1)"; then
@@ -8774,7 +8774,7 @@ _ci_validate_project() {
 _ci_validate_config_json() {
     local file
     local -a pf=()
-    file="$(_ci_variable CI_COMPOSE_FILE)" || return 2
+    file="$(_ci_compose_file)" || return 2
     _ci_compose_profile_flags "${file}" pf || return 2
     _ci_run "[CI-ERROR-VALIDATE-0086]" "file=\"${file}\" profiles=\"${pf[*]}\" reason=\"docker compose config failed\"" \
         docker compose -f "${file}" "${pf[@]}" config --format json
@@ -8914,7 +8914,7 @@ _ci_validate_teardown() {
     # What: no compose file: skip down, sweep leftovers.
     # Why: the label sweep frees the slot without the file.
     # From: Issue #1683 | PR #1858
-    if compose="$(_ci_variable CI_COMPOSE_FILE)"; then
+    if compose="$(_ci_compose_file)"; then
         out="$(docker compose -p "${project}" \
             -f "${compose}" \
             down -v --remove-orphans 2>&1)" || {
@@ -8999,7 +8999,7 @@ _ci_validate_compose() {
     local project="$1" net_override="$2" pin_override="$3" file
     local -a pf=()
     shift 3
-    file="$(_ci_variable CI_COMPOSE_FILE)" || return 2
+    file="$(_ci_compose_file)" || return 2
     _ci_compose_profile_flags "${file}" pf || return 2
     docker compose -p "${project}" -f "${file}" \
         -f "${net_override}" -f "${pin_override}" "${pf[@]}" "$@"
@@ -9402,7 +9402,7 @@ _ci_validate_setup_rollback() {
         return 2
     fi
     _ci_sr_env="LANCACHE_STATE_DIR=${LANCACHE_STATE_DIR}${_ci_sr_env:+$'\n'${_ci_sr_env}}"
-    _ci_sr_compose="$(_ci_variable CI_COMPOSE_FILE)" || return 2
+    _ci_sr_compose="$(_ci_compose_file)" || return 2
     _ci_sr_su="$(_ci_installer)" || return 2
     _ci_sr_inst="$(dirname "${_ci_sr_compose}")"
     _ci_validate_env_local "${_ci_sr_inst}" "${_ci_sr_env}" || return 2
@@ -10127,12 +10127,12 @@ _ci_validate_stack() {
     # What: compose runs on a copy in the shared dir.
     # Why: relative binds then name paths the daemon has.
     # From: Issue #1683 | PR #1912
-    compose_copy="$(_ci_repo_path CI_COMPOSE_FILE "${LANCACHE_STATE_DIR}/repo")" || { _ci_validate_teardown "${holder}" "${project}"; return 2; }
+    compose_copy="$(_ci_compose_path "${LANCACHE_STATE_DIR}/repo")" || { _ci_validate_teardown "${holder}" "${project}"; return 2; }
     if ! _ci_validate_stage "${LANCACHE_STATE_DIR}/repo"; then
         _ci_validate_teardown "${holder}" "${project}"
         return 2
     fi
-    export CI_COMPOSE_FILE="${compose_copy}"
+    export CI_COMPOSE_COPY="${compose_copy}"
     if ! net_ovr="$(_ci_mktemp "${CI_TMPDIR}/ci-validate-net.XXXXXX.yml")" \
         || ! pin_ovr="$(_ci_mktemp "${CI_TMPDIR}/ci-validate-pin.XXXXXX.yml")"; then
         rm -f "${net_ovr:-}"
@@ -14167,7 +14167,7 @@ _ci_check_stable_external_images() {
     local -a dirs=("$@")
     local d line img k allowed=" " dep
     if [ "${#dirs[@]}" -eq 0 ]; then
-        dep="$(_ci_repo_path CI_COMPOSE_FILE)" || return 2
+        dep="$(_ci_compose_path)" || return 2
         dirs=("${dep%/*}")
     fi
     local -a viol=()
@@ -15319,7 +15319,7 @@ _ci_viol_lines() {
 # From: Issue #1683 | PR #1858
 _ci_check_naming_consistency() {
     local root="${1:-${CI_REPO_ROOT}}" dep
-    dep="$(_ci_repo_path CI_COMPOSE_FILE "${root}")" || return 2
+    dep="$(_ci_compose_path "${root}")" || return 2
     local -a compose_files=("${dep}")
     local -a viol=()
     local cf cfg line
@@ -15362,7 +15362,7 @@ _ci_check_compose_healthchecks() {
     local -a files=("$@")
     if [ "${#files[@]}" -eq 0 ]; then
         local f dep top
-        dep="$(_ci_repo_path CI_COMPOSE_FILE)" || return 2
+        dep="$(_ci_compose_path)" || return 2
         top="${dep%/*}"; top="${top%/*}"
         for f in "${top}"/*/"${dep##*/}"; do
             [ -f "${f}" ] && files+=("${f}")
@@ -15438,7 +15438,7 @@ _ci_check_proxy_cache_env_doc_drift() {
         # What: values compose gives proxy, SOT fixture env
         # Why: an empty one falls back to runtime.defaults
         # From: Issue #1683 | PR #1912
-        dep="$(_ci_repo_path CI_COMPOSE_FILE)" || return 2
+        dep="$(_ci_compose_path)" || return 2
         if ! raw="$(_ci_compose_query "${dep}" "" config --format json 2>&1)"; then
             ci_error "[CI-ERROR-CHECK-0110]" "file=\"${dep#"${CI_REPO_ROOT}/"}\" reason=\"deploy compose not renderable with the SOT fixture env\"" "${raw}"
             return 2
@@ -15530,7 +15530,7 @@ _ci_dockerfile_logical_lines() {
 _ci_check_prebuilt_prod() {
     local repo_root="${1:-${CI_REPO_ROOT}}" dep
     local -a viol=()
-    dep="$(_ci_repo_path CI_COMPOSE_FILE "${repo_root}")" || return 2
+    dep="$(_ci_compose_path "${repo_root}")" || return 2
     dep="${dep%/*}"
     local hit
     hit="$(_ci_capture 1 grep -RInE '^[[:space:]]+build:' "${dep}")" || return 2
@@ -15556,7 +15556,7 @@ _ci_check_prebuilt_prod() {
 # From: Issue #1683 | PR #1858
 _ci_check_prod_state_wiring() {
     local repo_root="${1:-${CI_REPO_ROOT}}" dep compose
-    compose="$(_ci_repo_path CI_COMPOSE_FILE "${repo_root}")" || return 2
+    compose="$(_ci_compose_path "${repo_root}")" || return 2
     dep="${compose#"${repo_root}/"}"
     local doc doc_rel
     doc_rel="$(_ci_variable CI_BACKUP_RESTORE_DOC)" || return 2
@@ -15723,6 +15723,26 @@ PROG
 _ci_repo_path() {
     local name="$1" root="${2:-${CI_REPO_ROOT:-.}}" rel
     rel="$(_ci_variable "${name}")" || return 2
+    printf '%s/%s\n' "${root}" "${rel}"
+}
+
+# What: prod compose file: the run copy, else SOT runtime.
+# Why: runtime.compose_file is the one owner with setup.sh
+# From: Issue #1683 | PR #1858
+_ci_compose_file() {
+    if [ -n "${CI_COMPOSE_COPY:-}" ]; then
+        printf '%s\n' "${CI_COMPOSE_COPY}"
+        return 0
+    fi
+    _ci_required_field runtime compose_file block
+}
+
+# What: repo root joined with the prod compose file.
+# Why: one join rule for every compose reader.
+# From: Issue #1683 | PR #1858
+_ci_compose_path() {
+    local root="${1:-${CI_REPO_ROOT:-.}}" rel
+    rel="$(_ci_compose_file)" || return 2
     printf '%s/%s\n' "${root}" "${rel}"
 }
 
@@ -15922,7 +15942,7 @@ _ci_stack_compose_files() {
     local -n _ci_scf_out="$1"
     local _ci_scf_dep _ci_scf_targets
     _ci_scf_out=()
-    _ci_scf_dep="$(_ci_variable CI_COMPOSE_FILE)" || return 2
+    _ci_scf_dep="$(_ci_compose_file)" || return 2
     _ci_scf_targets="$(_ci_block_entry_field validation "" compose_targets)" || return 2
     if [ -z "${_ci_scf_targets}" ]; then
         ci_error "[CI-ERROR-CHECK-0044]" "reason=\"no compose_targets in SOT\"" "manifest=${CI_MANIFEST}"
@@ -15980,7 +16000,7 @@ _ci_check_compose_config() {
 _ci_check_netdata_isolation() {
     local repo_root="${1:-${CI_REPO_ROOT}}" dep cfg out line nd_url
     local -a viol=()
-    dep="$(_ci_repo_path CI_COMPOSE_FILE "${repo_root}")" || return 2
+    dep="$(_ci_compose_path "${repo_root}")" || return 2
     nd_url="$(_ci_runtime_default NETDATA_URL)" || return 2
     cfg="$(_ci_compose_json "${dep}")" || return 2
     dep="${dep#"${repo_root}/"}"
@@ -16269,7 +16289,7 @@ _ci_check_image_channel_resolution() {
     local su sec prod dep start_out
     su="$(_ci_installer "${repo_root}")" || return 2
     sec="$(_ci_service_path ui src/main.rs "${repo_root}")" || return 2
-    prod="$(_ci_repo_path CI_COMPOSE_FILE "${repo_root}")" || return 2
+    prod="$(_ci_compose_path "${repo_root}")" || return 2
     dep="${prod#"${repo_root}/"}"
     local -a viol=()
     local f
@@ -16589,7 +16609,7 @@ _ci_check_logging_matrix() {
     # What: only the primary stack compose is matched.
     # Why: the secondary dns logs locally (driver: local).
     # From: Issue #1683 | PR #1912
-    cf="$(_ci_repo_path CI_COMPOSE_FILE "${repo_root}")" || return 2
+    cf="$(_ci_compose_path "${repo_root}")" || return 2
     raw_services="$(_ci_compose_service_names "${cf}")" || {
         ci_log "[CI-ERROR-CHECK-0034]" "path=\"${cf}\" reason=\"compose service lookup failed (raw above)\""; return 2; }
     mapfile -t services <<< "${raw_services}"
