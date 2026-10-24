@@ -24,53 +24,53 @@ version = "0.3.0"
 license = "AGPL-3.0-or-later"
 edition = "2024"
 
-# What: canonical owner of shared direct rust dep versions.
-# Why: consumers derive; one owner ends per-crate drift.
+# What: shared direct rust deps, any version.
+# Why: no third-party pin; the lock takes the latest.
 # From: Issue #1683
 [workspace.dependencies]
-anyhow = "1"
-argon2 = "0.6"
-async-nats = "0.50"
-axum = "0.8"
-base64 = "0.23"
-chacha20poly1305 = "0.10"
-data-encoding = "2"
-dhcproto = "0.15"
-form_urlencoded = "1"
-futures = "0.3"
-futures-util = "0.3"
-hex = "0.4"
+anyhow = "*"
+argon2 = "*"
+async-nats = "*"
+axum = "*"
+base64 = "*"
+chacha20poly1305 = "*"
+data-encoding = "*"
+dhcproto = "*"
+form_urlencoded = "*"
+futures = "*"
+futures-util = "*"
+hex = "*"
 # What: liblzma with the bundled, static xz library.
 # Why: logs rotate as xz; no system liblzma link.
-liblzma = { version = "0.4", features = ["static"] }
+liblzma = { version = "*", features = ["static"] }
 # What: nkeys with the xkeys (X25519) feature.
 # Why: the auth callout response is encrypted with an XKey.
-nkeys = { version = "0.4", features = ["xkeys"] }
-rand = "0.10"
-regex = "1"
+nkeys = { version = "*", features = ["xkeys"] }
+rand = "*"
+regex = "*"
 # What: reqwest without default features, on rustls.
 # Why: AG-REL-003 forbids openssl-sys; json decodes bodies.
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+reqwest = { version = "*", default-features = false, features = ["json", "rustls"] }
 # What: rusqlite with the bundled SQLite.
 # Why: SQLite is compiled in; no system libsqlite3 link.
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { version = "*", features = ["bundled"] }
 # What: rustix with fs and process, no default features.
 # Why: safe statvfs and SIGTERM; std has neither on stable.
 # From: Issue #1683 | PR #1912
-rustix = { version = "1", default-features = false, features = ["std", "fs", "process"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-sha2 = "0.11"
-subtle = "2"
-tera = "2"
+rustix = { version = "*", default-features = false, features = ["std", "fs", "process"] }
+serde = { version = "*", features = ["derive"] }
+serde_json = "*"
+sha2 = "*"
+subtle = "*"
+tera = "*"
 # What: time without default features, formatting only.
 # Why: crates add macros/parsing themselves where needed.
-time = { version = "0.3", default-features = false, features = ["formatting"] }
+time = { version = "*", default-features = false, features = ["formatting"] }
 # What: tokio with all features.
 # Why: one feature set; net, process, sync, time are used.
-tokio = { version = "1", features = ["full"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tokio = { version = "*", features = ["full"] }
+tracing = "*"
+tracing-subscriber = { version = "*", features = ["env-filter"] }
 
 # What: no lto/codegen-units keys in [profile.release] here.
 # Why: set via CARGO_PROFILE_RELEASE_LTO/_CODEGEN_UNITS env.
