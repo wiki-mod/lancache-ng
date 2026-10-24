@@ -1,8 +1,8 @@
 
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# What: Dependabot updates for Actions, Cargo and Docker.
-# Why: regular updates target current_dev; one group each.
+# What: Dependabot updates for GitHub Actions only.
+# Why: crates and base images resolve the latest per run.
 version: 2
 updates:
   # What: one grouped actions PR per branch, root only.
@@ -14,33 +14,4 @@ updates:
       interval: weekly
     groups:
       actions:
-        patterns: ["*"]
-
-  # What: one cargo entry, the workspace root (/).
-  # Why: Dependabot resolves the workspace root's lockfile.
-  # From: Issue #1095
-  - package-ecosystem: cargo
-    directories:
-      - /
-    target-branch: current_dev
-    schedule:
-      interval: weekly
-    groups:
-      rust-deps:
-        patterns: ["*"]
-
-  # What: one grouped docker PR per branch, five dirs.
-  # Why: all five services share one ALPINE_IMAGE base.
-  - package-ecosystem: docker
-    directories:
-      - /services/proxy
-      - /services/dns
-      - /services/watchdog
-      - /services/dhcp
-      - /services/ui
-    target-branch: current_dev
-    schedule:
-      interval: weekly
-    groups:
-      docker-base-images:
         patterns: ["*"]

@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
 # What: root Cargo workspace for 5 first-party crates.
-# Why: unifies lockfiles; ends cross-service version drift.
+# Why: one workspace; ci.sh makes one lock per run.
 # From: Issue #1095
 
 [workspace]
