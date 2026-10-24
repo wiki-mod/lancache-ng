@@ -15755,7 +15755,7 @@ PROG
 # Why: a bare return skips the ACL; ignored headers leak.
 # From: Issue #1683 | PR #1858
 _ci_check_proxy_nginx_policy() {
-    local repo_root="${1:-${CI_REPO_ROOT}}" f out line pp first="" blocks=0 b h a d al r px hk hu hp="" hq pn lb fb hv sv sp bn
+    local repo_root="${1:-${CI_REPO_ROOT}}" f out line pp blocks=0 b h a d al r px hk hu hp="" hq pn lb fb hv sv sp bn
     local -a viol=() bnt
     px="$(_ci_service_path proxy "" "${repo_root}")" || return 2
     px="${px%/}"
@@ -15794,7 +15794,11 @@ _ci_check_proxy_nginx_policy() {
             || viol+=("DOCKER_BRIDGE_NET holds ${h}, which is no PRIVATE_NETS member")
     done
     lb="\${LOOPBACK_BIND_IP}/32 \${DOCKER_BRIDGE_NET}"
-    for f in "${px}"/conf.d/*.conf; do
+    pp="${px}/proxy-params.conf"
+    # What: one /healthz block, in proxy-params.conf only.
+    # Why: both servers include it; a copy is a 2nd owner.
+    # From: Issue #1683 | PR #1858
+    for f in "${px}"/conf.d/*.conf "${pp}"; do
         out="$(_ci_capture 0 awk -v "P=${hp}" "$(cat <<'PROG'
             $1 == "location" && $2 == "=" && $3 == P && $4 == "{" { inb = 1; n++; body = ""; a = 0; d = 0; al = 0; r = 0; next }
             inb && /^[[:space:]]*\}/ {
@@ -15815,10 +15819,12 @@ PROG
             IFS='|' read -r a d al r <<<"${line}"
             [ "${a}" -ge 1 ] && [ "${d}" -eq 1 ] || viol+=("${f#"${repo_root}/"}: ${hp} needs allow lines followed by deny all")
             [ "${al}" -eq 1 ] && [ "${r}" -eq 0 ] || viol+=("${f#"${repo_root}/"}: ${hp} must serve via alias, never return (return skips the ACL)")
-            [ -n "${first}" ] || first="${b}"
-            [ "${b}" = "${first}" ] || viol+=("${f#"${repo_root}/"}: ${hp} differs from the first block")
         done <<<"${out}"
-        [ "${fb}" -gt 0 ] || viol+=("${f#"${repo_root}/"}: no ${hp} block found")
+        if [ "${f}" = "${pp}" ]; then
+            [ "${fb}" -eq 1 ] || viol+=("${f#"${repo_root}/"}: needs exactly one ${hp} block, found ${fb}")
+        else
+            [ "${fb}" -eq 0 ] || viol+=("${f#"${repo_root}/"}: ${hp} block belongs in proxy-params.conf only")
+        fi
         # What: the allow lines of every location.
         # Why: a location with allow lines is an ACL.
         # From: Issue #1683 | PR #1912
@@ -15847,7 +15853,6 @@ PROG
             fi
         done <<<"${out}"
     done
-    pp="${px}/proxy-params.conf"
     out="$(_ci_capture 0 awk "$(cat <<'PROG'
         $1 == "proxy_ignore_headers" { for (i = 2; i <= NF; i++) { h = $i; sub(/;$/, "", h); ign[h] = 1 } }
         $1 == "proxy_hide_header" { h = $2; sub(/;$/, "", h); hid[h] = 1 }

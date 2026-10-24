@@ -4409,6 +4409,21 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
     } else {
         NGINX_GENERATED.to_string()
     };
+    // What: proxy-params values: server plus cache keys.
+    // Why: its nested /healthz names the server keys.
+    // From: Issue #1683 | PR #1858
+    let mut params = server_values.to_vec();
+    params.extend([
+        value("CACHE_SLICE_SIZE")?,
+        value("CACHE_VALID_HIT")?,
+        value("CACHE_VALID_ANY")?,
+        value("NGINX_UPSTREAM_CONNECT_TIMEOUT")?,
+        value("NGINX_UPSTREAM_IDLE_TIMEOUT")?,
+        value("NGINX_CACHE_LOCK_TIMEOUT")?,
+        value("NGINX_SSL_VERIFY_DEPTH")?,
+        value("NGINX_MAX_TEMP_FILE_SIZE")?,
+        value("NGINX_TEMP_FILE_WRITE_SIZE")?,
+    ]);
     let files = vec![
         (
             conf.clone(),
@@ -4427,20 +4442,7 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
         ),
         (
             dir.join("proxy-params.conf"),
-            fill(
-                &read(&dir.join("proxy-params.conf.template"))?,
-                &[
-                    value("CACHE_SLICE_SIZE")?,
-                    value("CACHE_VALID_HIT")?,
-                    value("CACHE_VALID_ANY")?,
-                    value("NGINX_UPSTREAM_CONNECT_TIMEOUT")?,
-                    value("NGINX_UPSTREAM_IDLE_TIMEOUT")?,
-                    value("NGINX_CACHE_LOCK_TIMEOUT")?,
-                    value("NGINX_SSL_VERIFY_DEPTH")?,
-                    value("NGINX_MAX_TEMP_FILE_SIZE")?,
-                    value("NGINX_TEMP_FILE_WRITE_SIZE")?,
-                ],
-            ),
+            fill(&read(&dir.join("proxy-params.conf.template"))?, &params),
         ),
         (
             dir.join(NGINX_HTTPS_MAP),
