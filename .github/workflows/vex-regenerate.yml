@@ -195,11 +195,9 @@ jobs:
 
           if [ "$status" = "success" ]; then
             # --- Step 2: fetch (or self-bootstrap) CI-Automation/vex ---
-            # Snapshot the two current_dev inputs into a tmp dir BEFORE switching
-            # branches below: the switch (or --orphan + `git rm -rf .`) replaces
-            # $GITHUB_WORKSPACE's contents with CI-Automation/vex's own tree, which
-            # has neither .trivyignore.yaml nor generate-vex.sh -- Step 3 below needs
-            # a still-reachable copy of both to redo the comparison regeneration.
+            # What: CI-Automation/vex in its own worktree.
+            # Why: a local action's post step needs the workspace.
+            # From: Issue #1683
             tmp_root="${RUNNER_TEMP:-/var/tmp}"
             tmp_dir="$(mktemp -d "$tmp_root/vex-regenerate.XXXXXX")"
             vex_fetch_error="$tmp_root/vex-fetch.err"
@@ -220,12 +218,22 @@ jobs:
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
+            vex_dir="$tmp_dir/vex"
+            git worktree prune 2>"$vex_switch_error" || fail "Could not prune stale worktrees: $(cat "$vex_switch_error")"
             if [ "$branch_exists" -eq 1 ]; then
-              git switch -C "vex-work" "origin/$VEX_BRANCH" 2>"$vex_switch_error" || fail "Could not switch to existing origin/$VEX_BRANCH: $(cat "$vex_switch_error")"
+              git worktree add -B "vex-work" "$vex_dir" "origin/$VEX_BRANCH" 2>"$vex_switch_error" || fail "Could not check out existing origin/$VEX_BRANCH: $(cat "$vex_switch_error")"
             else
               echo "::notice::origin/$VEX_BRANCH does not exist yet -- bootstrapping it as a fresh orphan branch."
-              git switch --orphan "vex-work" || fail "Could not create orphan branch for $VEX_BRANCH."
-              git rm -rf . >/dev/null 2>&1 || true
+              # What: drop a vex-work branch left by an earlier run.
+              # Why: --orphan refuses a branch name that exists.
+              # From: Issue #1683
+              if git show-ref --verify --quiet refs/heads/vex-work; then
+                git branch -D vex-work 2>"$vex_switch_error" || fail "Could not drop the old vex-work branch: $(cat "$vex_switch_error")"
+              fi
+              git worktree add --orphan -b "vex-work" "$vex_dir" 2>"$vex_switch_error" || fail "Could not create orphan branch for $VEX_BRANCH: $(cat "$vex_switch_error")"
+            fi
+            if [ "$status" = "success" ]; then
+              cd "$vex_dir" || fail "Could not enter the $VEX_BRANCH worktree $vex_dir."
             fi
           fi
 
