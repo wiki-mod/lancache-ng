@@ -1,6 +1,6 @@
 {
   "@context": "https://openvex.dev/ns/v0.2.0",
-  "@id": "https://github.com/wiki-mod/lancache-ng/vex/lancache-ng-2026-10-12T08:13:53Z",
+  "@id": "https://github.com/wiki-mod/lancache-ng/vex/lancache-ng-2026-10-24T10:52:47Z",
   "author": "lancache-ng release automation (https://github.com/wiki-mod/lancache-ng)",
   "statements": [
     {
@@ -12,7 +12,7 @@
         }
       ],
       "status": "affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-14456"
       }
@@ -34,7 +34,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-34040"
       }
@@ -56,7 +56,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-41567"
       }
@@ -78,7 +78,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-42306"
       }
@@ -97,7 +97,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-17106"
       }
@@ -111,7 +111,7 @@
         }
       ],
       "status": "affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-12064"
       }
@@ -125,7 +125,7 @@
         }
       ],
       "status": "affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-8286"
       }
@@ -139,7 +139,7 @@
         }
       ],
       "status": "affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-8458"
       }
@@ -153,7 +153,7 @@
         }
       ],
       "status": "affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-8927"
       }
@@ -167,7 +167,7 @@
         }
       ],
       "status": "affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-8932"
       }
@@ -181,7 +181,7 @@
         }
       ],
       "status": "affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-9079"
       }
@@ -195,7 +195,7 @@
         }
       ],
       "status": "affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-9080"
       }
@@ -209,7 +209,7 @@
         }
       ],
       "status": "affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-9545"
       }
@@ -223,13 +223,13 @@
         }
       ],
       "status": "affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-10536"
       }
     },
     {
-      "impact_statement": "What: Marks CVE-2011-4116 (`perl-base`'s `File::Temp` module creating temporary files insecurely) as not exploitable in `services/ui` and `tools/build-tools`. Anchor entry for a 30-ID group spanning the Debian `perl-base`, util-linux, ncurses, `gzip`, and `libacl1` package groups. Why: All 30 are `Priority: required`/`Essential: yes` Debian packages or their hard link-time dependents, so none can be purged; \"not exploitable\" is the only available disposition short of migrating the image off Debian. Neither image invokes Perl at all (grep-confirmed; re-verified 2026-08-19 against the current tree; re-confirmed 2026-08-27 via a fresh grep against origin/current_dev: zero `perl`/`setfacl`/`getfacl`/`chfn`/`chsh`/`gzexe`/`mount` invocations in `services/ui`/`tools/build-tools`; no ncurses-linked crate in `services/ui/Cargo.toml`/`Cargo.lock`; `services/ui`'s privilege drop uses `setpriv`, confirmed live in `services/ui/docker-entrypoint.sh`). Applicability flag (found 2026-08-27, not resolved here): `services/ui/Dockerfile`'s final stage is `FROM mirror.gcr.io/library/alpine:3.24`, and every Trivy scan of a first-party service in this repo's CI (`trivy-scan-exact-digest` in build-push.yml/build-push-hosted-fallback.yml) targets the exact pushed final-stage digest, never an intermediate build stage. A live scan of `ui:nightly` confirms Trivy detects it as `alpine 3.24.1`, not Debian -- none of this 30-ID group's Debian package names can appear in that scan's `os-pkgs` findings at all. This group may therefore no longer need `services/ui` in its applicability claim (only `tools/build-tools`, confirmed Debian and confirmed still matching several of these IDs live, e.g. CVE-2026-13221/CVE-2026-8376/CVE-2026-42496/CVE-2026-42497/ CVE-2026-9538/CVE-2026-54369/CVE-2025-69720/CVE-2026-41992 in a 2026-08-27 full-severity, no-ignorefile scan of `build-tools: nightly`) -- not changed in this pass since it doesn't affect whether these 30 entries stay or go, flagged for the maintainer to confirm/correct the wording. From: Issue #815, PR #1454, Issue #1598",
+      "impact_statement": "What: Marks CVE-2011-4116 (`perl-base`'s `File::Temp` module creating temporary files insecurely) as not exploitable in `services/ui` and `tools/build-tools`. Anchor entry for a 30-ID group spanning the Debian `perl-base`, util-linux, ncurses, `gzip`, and `libacl1` package groups. Why: All 30 are `Priority: required`/`Essential: yes` Debian packages or their hard link-time dependents, so none can be purged; \"not exploitable\" is the only available disposition short of migrating the image off Debian. Neither image invokes Perl at all (grep-confirmed; re-verified 2026-08-19 against the current tree; re-confirmed 2026-08-27 via a fresh grep against origin/current_dev: zero `perl`/`setfacl`/`getfacl`/`chfn`/`chsh`/`gzexe`/`mount` invocations in `services/ui`/`tools/build-tools`; no ncurses-linked crate in `services/ui/Cargo.toml` or `cargo tree`; `services/ui`'s privilege drop uses `setpriv`, confirmed live in `services/ui/docker-entrypoint.sh`). Applicability flag (found 2026-08-27, not resolved here): `services/ui/Dockerfile`'s final stage is `FROM mirror.gcr.io/library/alpine:3.24`, and every Trivy scan of a first-party service in this repo's CI (`trivy-scan-exact-digest` in build-push.yml/build-push-hosted-fallback.yml) targets the exact pushed final-stage digest, never an intermediate build stage. A live scan of `ui:nightly` confirms Trivy detects it as `alpine 3.24.1`, not Debian -- none of this 30-ID group's Debian package names can appear in that scan's `os-pkgs` findings at all. This group may therefore no longer need `services/ui` in its applicability claim (only `tools/build-tools`, confirmed Debian and confirmed still matching several of these IDs live, e.g. CVE-2026-13221/CVE-2026-8376/CVE-2026-42496/CVE-2026-42497/ CVE-2026-9538/CVE-2026-54369/CVE-2025-69720/CVE-2026-41992 in a 2026-08-27 full-severity, no-ignorefile scan of `build-tools: nightly`) -- not changed in this pass since it doesn't affect whether these 30 entries stay or go, flagged for the maintainer to confirm/correct the wording. From: Issue #815, PR #1454, Issue #1598",
       "justification": "vulnerable_code_not_present",
       "products": [
         {
@@ -238,7 +238,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2011-4116"
       }
@@ -253,7 +253,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2025-15649"
       }
@@ -268,7 +268,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-12087"
       }
@@ -283,7 +283,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-13221"
       }
@@ -298,7 +298,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-42496"
       }
@@ -313,7 +313,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-42497"
       }
@@ -328,7 +328,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-48959"
       }
@@ -343,7 +343,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-48961"
       }
@@ -358,7 +358,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-48962"
       }
@@ -373,7 +373,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-57432"
       }
@@ -388,7 +388,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-57433"
       }
@@ -403,7 +403,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-7010"
       }
@@ -418,7 +418,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-7017"
       }
@@ -433,7 +433,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-8376"
       }
@@ -448,7 +448,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-9538"
       }
@@ -463,7 +463,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2022-0563"
       }
@@ -478,7 +478,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2025-14104"
       }
@@ -493,7 +493,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-13595"
       }
@@ -508,7 +508,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-27456"
       }
@@ -523,7 +523,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-3184"
       }
@@ -538,7 +538,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-53612"
       }
@@ -553,7 +553,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-53613"
       }
@@ -568,7 +568,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-53614"
       }
@@ -583,7 +583,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-53615"
       }
@@ -598,7 +598,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-76642"
       }
@@ -613,7 +613,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-78408"
       }
@@ -628,7 +628,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-78409"
       }
@@ -643,7 +643,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-78410"
       }
@@ -658,7 +658,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2025-6141"
       }
@@ -673,7 +673,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2025-69720"
       }
@@ -688,7 +688,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-54369"
       }
@@ -703,7 +703,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-54370"
       }
@@ -717,7 +717,7 @@
         }
       ],
       "status": "affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-41991"
       }
@@ -731,7 +731,7 @@
         }
       ],
       "status": "affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-41992"
       }
@@ -750,7 +750,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-27145"
       }
@@ -769,7 +769,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-32280"
       }
@@ -788,7 +788,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-32281"
       }
@@ -807,7 +807,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-32283"
       }
@@ -826,7 +826,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-33810"
       }
@@ -845,7 +845,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-33811"
       }
@@ -864,7 +864,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-33814"
       }
@@ -883,7 +883,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-33818"
       }
@@ -902,7 +902,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-39820"
       }
@@ -921,7 +921,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-39821"
       }
@@ -940,7 +940,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-39822"
       }
@@ -959,7 +959,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-39836"
       }
@@ -978,7 +978,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-42499"
       }
@@ -997,7 +997,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-42504"
       }
@@ -1016,7 +1016,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-46600"
       }
@@ -1035,7 +1035,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-56853"
       }
@@ -1054,7 +1054,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-56858"
       }
@@ -1073,7 +1073,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-56859"
       }
@@ -1092,7 +1092,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-56860"
       }
@@ -1111,7 +1111,7 @@
         }
       ],
       "status": "not_affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-56862"
       }
@@ -1125,7 +1125,7 @@
         }
       ],
       "status": "affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-19666"
       }
@@ -1139,7 +1139,7 @@
         }
       ],
       "status": "affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-19667"
       }
@@ -1153,7 +1153,7 @@
         }
       ],
       "status": "affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-76163"
       }
@@ -1167,7 +1167,7 @@
         }
       ],
       "status": "affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-77692"
       }
@@ -1181,7 +1181,7 @@
         }
       ],
       "status": "affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-80274"
       }
@@ -1195,7 +1195,7 @@
         }
       ],
       "status": "affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-81563"
       }
@@ -1209,7 +1209,7 @@
         }
       ],
       "status": "affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-81736"
       }
@@ -1223,7 +1223,7 @@
         }
       ],
       "status": "affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-103111"
       }
@@ -1237,7 +1237,7 @@
         }
       ],
       "status": "affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-19553"
       }
@@ -1251,7 +1251,7 @@
         }
       ],
       "status": "affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-82049"
       }
@@ -1265,7 +1265,7 @@
         }
       ],
       "status": "affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-77214"
       }
@@ -1279,12 +1279,12 @@
         }
       ],
       "status": "affected",
-      "timestamp": "2026-10-12T08:13:53Z",
+      "timestamp": "2026-10-24T10:52:47Z",
       "vulnerability": {
         "name": "CVE-2026-78669"
       }
     }
   ],
-  "timestamp": "2026-10-12T08:13:53Z",
+  "timestamp": "2026-10-24T10:52:47Z",
   "version": 1
 }
