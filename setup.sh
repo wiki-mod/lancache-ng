@@ -5416,8 +5416,14 @@ logbundle_redact_env_file() {
 # rather than copying a pre-existing three-way chain that does not exist
 # yet. gzip is always available on every Debian host this project targets,
 # so this chain always terminates. Prints one of zst/bz2/gz.
+# What: zst only when tar itself accepts --zstd.
+# Why: BusyBox tar has zstd but rejects --zstd.
+# From: Issue #1931
 logbundle_select_compressor() {
-    if command -v zstd >/dev/null 2>&1; then
+    local tar_version
+    tar_version="$(tar --zstd --version 2>&1)" || tar_version=""
+    if command -v zstd >/dev/null 2>&1 \
+        && [[ "$tar_version" =~ (GNU tar|bsdtar) ]]; then
         printf 'zst\n'
     elif command -v bzip2 >/dev/null 2>&1; then
         printf 'bz2\n'
@@ -5628,7 +5634,7 @@ EOF
         zst) tar -C "$dest_root" --zstd -cf "$archive" "$(basename "$dest")" ;;
         bz2) tar -C "$dest_root" -cjf "$archive" "$(basename "$dest")" ;;
         *)   tar -C "$dest_root" -czf "$archive" "$(basename "$dest")" ;;
-    esac
+    esac || die "Could not write the diagnostic archive $archive."
     chmod 600 "$archive"
 
     logbundle_cleanup
