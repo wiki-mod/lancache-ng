@@ -1114,16 +1114,17 @@ _ci_fetch_drop() {
 }
 
 # What: GET one GitHub API URL; a token goes in on stdin.
-# Why: curl -H would show the token in the process list.
+# Why: curl -H would show the token in the process list;
+#      an error body (rate limit) stays the raw output.
 # From: Issue #1683 | PR #1858
 _ci_github_get() {
     local tok="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
     if [ -z "${tok}" ]; then
-        curl -fsSL -H 'Accept: application/vnd.github+json' "$1"
+        curl --fail-with-body -sSL -H 'Accept: application/vnd.github+json' "$1"
         return
     fi
     printf 'header = "Authorization: Bearer %s"\n' "${tok}" \
-        | curl -fsSL --config - -H 'Accept: application/vnd.github+json' "$1"
+        | curl --fail-with-body -sSL --config - -H 'Accept: application/vnd.github+json' "$1"
 }
 
 # What: latest release of a SOT tool: tag, asset, url, sha.
