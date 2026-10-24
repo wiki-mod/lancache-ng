@@ -63,6 +63,7 @@ x-environment:
     DDNS_TSIG_KEY: ${DDNS_TSIG_KEY}
   dns-dhcp-ui: &env-dns-dhcp-ui
     DHCP_DOMAIN: ${DHCP_DOMAIN:-}
+    DNS_LOCAL_REVERSE_ZONES: ${DNS_LOCAL_REVERSE_ZONES:-}
   dns-ui: &env-dns-ui
     PDNS_API_KEY: ${PDNS_API_KEY}
     NATS_UI_PASSWORD: ${NATS_UI_PASSWORD:-}

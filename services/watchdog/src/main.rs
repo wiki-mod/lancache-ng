@@ -1284,12 +1284,14 @@ fn fingerprint(files: &[PathBuf]) -> Vec<Option<(u64, i64, i64)>> {
 const SYSLOG_NG_DESTINATION: &str = "d_store";
 
 // What: the zones with snapshots, for the SOT's local zone.
-// Why: DHCP_DOMAIN names the local zone; no literal here.
+// Why: DHCP_DOMAIN names it; the switch adds reverse zones.
 // From: Issue #1683 | PR #1912
 fn rollback_zones() -> Result<Vec<String>, String> {
-    Ok(config::rollback_zones(&config::lan_zone(
-        &config::process_env,
-    )?))
+    let env = &config::process_env;
+    Ok(config::rollback_zones(
+        &config::lan_zone(env)?,
+        config::local_reverse(env)?,
+    ))
 }
 
 // What: env var that hands the AAAA marker path to the lua.
@@ -3572,7 +3574,14 @@ fn kea_dhcp_ddns(ctx: &Ctx) -> Result<Run, String> {
         "port": env_port(AUTH_PORT_KEY)?
     }]);
     let domain = |name: String| serde_json::json!({"name": name, "key-name": id.name, "dns-servers": server});
-    let reverse: Vec<Value> = config::reverse_zones().into_iter().map(domain).collect();
+    // What: PTR updates only when dns serves reverse zones.
+    // Why: without those zones every PTR update is refused.
+    // From: Issue #1918 | PR #1858
+    let reverse: Vec<Value> = if config::local_reverse(&config::process_env)? {
+        config::reverse_zones().into_iter().map(domain).collect()
+    } else {
+        Vec::new()
+    };
     let conf = serde_json::json!({
         "DhcpDdns": {
             "ip-address": config::loopback()?,

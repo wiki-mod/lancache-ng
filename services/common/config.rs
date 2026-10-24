@@ -647,25 +647,32 @@ pub fn reverse_zones() -> Vec<String> {
     fixed.into_iter().chain(rfc1918).collect()
 }
 
+// What: DNS_LOCAL_REVERSE_ZONES: serve private PTR zones.
+// Why: off by default; else PTR asks reach the LAN router.
+// From: Issue #1918 | PR #1858
+pub fn local_reverse(get: &dyn Fn(&str) -> Option<String>) -> Result<bool, String> {
+    need_flag(get, "DNS_LOCAL_REVERSE_ZONES")
+}
+
 // What: zones with snapshots and rollbacks, dotted form.
-// Why: dns creates, snapshots and rolls back these.
+// Why: dns creates these; reverse ones only if switched on
 // From: Issue #1683 | PR #1905
-pub fn rollback_zones(lan_zone: &str) -> Vec<String> {
+pub fn rollback_zones(lan_zone: &str, reverse: bool) -> Vec<String> {
     let lan = canonical_zone(lan_zone);
     let local = format!("local.{lan}");
-    let ipv6 = ["c.f.ip6.arpa.", "d.f.ip6.arpa."];
+    let ipv6 = ["c.f.ip6.arpa.", "d.f.ip6.arpa."].map(str::to_string);
+    let private = reverse_zones().into_iter().chain(ipv6);
     std::iter::once(lan)
         .chain(std::iter::once(local))
-        .chain(reverse_zones())
-        .chain(ipv6.iter().map(|z| z.to_string()))
+        .chain(private.filter(|_| reverse))
         .collect()
 }
 
 // What: true for a zone with snapshots and rollback.
 // Why: rpz and unknown zones must never be rolled back.
 // From: Issue #1683 | PR #1905
-pub fn is_rollback_zone(lan_zone: &str, zone: &str) -> bool {
-    rollback_zones(lan_zone).iter().any(|z| z == zone)
+pub fn is_rollback_zone(lan_zone: &str, reverse: bool, zone: &str) -> bool {
+    rollback_zones(lan_zone, reverse).iter().any(|z| z == zone)
 }
 
 // What: zone name in dotted form, as snapshot paths use it.

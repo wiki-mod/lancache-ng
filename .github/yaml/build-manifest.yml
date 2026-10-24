@@ -457,6 +457,10 @@ runtime:
     - DNS_UPSTREAM_UNSIGNED_ZONES=
     - DHCP_DOMAIN=lan
     - DHCP_DDNS_ENABLED=false
+    # What: private PTR zones; 1 only with own Kea DDNS.
+    # Why: off, PTR asks stay with the LAN router.
+    # From: Issue #1918 | PR #1858
+    - DNS_LOCAL_REVERSE_ZONES=0
     - KEA_CTRL_USER=admin
     - KEA_CTRL_PORT=8000
     - KEA_CONFIG_SNAPSHOT_DIR=@KEA_DATA_DIR@/config-snapshots

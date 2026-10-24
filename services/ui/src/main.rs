@@ -128,6 +128,10 @@ struct Config {
     // Why: the SOT owns it; the ui holds no literal.
     // From: Issue #1683 | PR #1912
     lan_zone: String,
+    // What: DNS_LOCAL_REVERSE_ZONES, reverse zone switch.
+    // Why: PTR rows and writes exist only with those zones.
+    // From: Issue #1918 | PR #1858
+    local_reverse: bool,
     // What: the UDP port the NTP server answers on.
     // Why: the ntp page names it; the SOT owns it.
     // From: Issue #1683 | PR #1912
@@ -389,6 +393,7 @@ impl Config {
             cdn_domains_file: need("CDN_DOMAINS_FILE")?,
             proxy_log_dir,
             lan_zone: config::lan_zone(env)?,
+            local_reverse: config::local_reverse(env)?,
             ntp_port: need("NTP_PORT")?,
             setup_script_url: format!(
                 "{}/{}",
@@ -4691,7 +4696,8 @@ async fn cleanup_lease_records(state: &AppState, ip: Ipv4Addr, hostname: Option<
     // What: the reverse record only in a provisioned zone.
     // Why: no PowerDNS zone exists for other addresses.
     // From: Issue #1683 | PR #1858
-    if let Some(zone) = reverse_zone_for_ipv4(ip) {
+    let served = reverse_zone_for_ipv4(ip).filter(|_| state.config.local_reverse);
+    if let Some(zone) = served {
         publish_delete(state, &zone, &ptr_name_for_ipv4(ip), "PTR").await;
     }
 }
@@ -5659,7 +5665,9 @@ fn ptr_rows(rrsets: &[Value]) -> Vec<PtrRow> {
 // Why: up to 18 zones are read at once; one by one is slow.
 // From: Issue #1683 | PR #1858
 async fn fetch_ptr_records(state: &AppState) -> Vec<PtrRow> {
-    let zones = reverse_zones().into_iter();
+    let zones = reverse_zones()
+        .into_iter()
+        .filter(|_| state.config.local_reverse);
     let per_zone = futures_util::future::join_all(zones.map(|zone| async move {
         let rrsets = state
             .pdns
@@ -5869,8 +5877,13 @@ async fn domains_page(
     // Why: common config.rs owns them; no copy in markup.
     // From: Issue #1683 | PR #1912
     ctx.insert("lan_zone", &canonical_zone(&cfg.lan_zone));
-    ctx.insert("reverse_zones", &reverse_zones());
-    ctx.insert("rollback_zones", &config::rollback_zones(&cfg.lan_zone));
+    let served: Vec<String> = reverse_zones()
+        .into_iter()
+        .filter(|_| cfg.local_reverse)
+        .collect();
+    ctx.insert("reverse_zones", &served);
+    let rollback = config::rollback_zones(&cfg.lan_zone, cfg.local_reverse);
+    ctx.insert("rollback_zones", &rollback);
     render(&state, "domains.html", &ctx)
 }
 
@@ -6065,7 +6078,7 @@ async fn add_ptr_record(State(state): Shared, Form(f): Form<Fields>) -> Redirect
     // Why: only provisioned zones and real hosts are valid.
     // From: Issue #1683 | PR #1912
     let (Some((zone, name)), Some(target), true) = (
-        ptr_location(f.get("ip")),
+        ptr_location(f.get("ip")).filter(|_| state.config.local_reverse),
         normalize_ptr_target(f.get("hostname")),
         (1..=MAX_TTL).contains(&ttl),
     ) else {
@@ -6083,7 +6096,8 @@ async fn remove_ptr_record(State(state): Shared, Form(f): Form<Fields>) -> Redir
     // What: an address outside reverse zones is refused.
     // Why: PowerDNS has no zone to delete the PTR from.
     // From: Issue #1683 | PR #1912
-    let Some((zone, name)) = ptr_location(f.get("ip")) else {
+    let served = ptr_location(f.get("ip")).filter(|_| state.config.local_reverse);
+    let Some((zone, name)) = served else {
         tracing::warn!(ip = %f.get("ip"), "Rejected invalid PTR delete");
         return Redirect::to(PAGE_DOMAINS);
     };
@@ -7296,8 +7310,9 @@ mod tests {
     // What: flag keys the ui config needs to load.
     // Why: each must be present and a valid boolean.
     // From: Issue #1683 | PR #1912
-    const FLAG_KEYS: [&str; 11] = [
+    const FLAG_KEYS: [&str; 12] = [
         "HTTPS_ENABLED",
+        "DNS_LOCAL_REVERSE_ZONES",
         "UI_SECURITY_HEADERS",
         "LANCACHE_DEV_MODE",
         "AUTO_UPDATE_ENABLED",

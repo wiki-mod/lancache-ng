@@ -37,6 +37,10 @@ services:
       - DNS_UPSTREAM_SERVERS=${DNS_UPSTREAM_SERVERS:-}
       - DNS_UPSTREAM_ZONES=${DNS_UPSTREAM_ZONES:-}
       - DNS_UPSTREAM_UNSIGNED_ZONES=${DNS_UPSTREAM_UNSIGNED_ZONES:-}
+      # What: the reverse zone switch; same as the primary.
+      # Why: the replica takes the primary's zones.
+      # From: Issue #1918 | PR #1858
+      - DNS_LOCAL_REVERSE_ZONES=${DNS_LOCAL_REVERSE_ZONES:-}
       - LISTEN_IP=${LISTEN_IP:?LISTEN_IP is required}
       - LISTEN_IP_HTTPS=${LISTEN_IP_HTTPS:?LISTEN_IP_HTTPS is required}
     volumes:

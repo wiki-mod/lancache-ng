@@ -20,8 +20,8 @@ use futures::StreamExt;
 use futures::future::join_all;
 use lancache_ng::config::{
     DEFAULT_RECORD_TTL, NATS_STREAM_DNS, NATS_SUBJECT_DNS, NATS_SUBJECT_FLUSH, NATS_SUBJECT_RECORD,
-    canonical_zone, env_opt, is_dns_name, is_rollback_zone, keep_known_good, lan_zone, need,
-    parse_bool, process_env, rollback_zones, zone_url,
+    canonical_zone, env_opt, is_dns_name, is_rollback_zone, keep_known_good, lan_zone,
+    local_reverse, need, parse_bool, process_env, rollback_zones, zone_url,
 };
 use lancache_ng::{
     Backoff, DnsRecord, FlushRequest, PowerDns, SnapshotStore, ct_eq, die, http_client,
@@ -124,6 +124,10 @@ struct Ctx {
     // Why: the SOT owns it; no literal in this crate.
     // From: Issue #1683 | PR #1912
     lan_zone: String,
+    // What: DNS_LOCAL_REVERSE_ZONES, reverse zone switch.
+    // Why: rollback and snapshots follow the served zones.
+    // From: Issue #1918 | PR #1858
+    reverse: bool,
     lock: tokio::sync::Mutex<()>,
     js: jetstream::Context,
 }
@@ -150,6 +154,7 @@ impl Ctx {
             snapshot_file: need(get, "DNS_ZONE_SNAPSHOT_FILE")?,
             keep_n: keep_known_good(get)?,
             lan_zone: lan_zone(get)?,
+            reverse: local_reverse(get)?,
             lock: tokio::sync::Mutex::new(()),
             js,
         })
@@ -366,7 +371,7 @@ fn changed_names(patch: &Value) -> Vec<String> {
 // Why: also covers Kea DDNS writes that bypass NATS.
 // From: Issue #628
 async fn snapshot_zone(ctx: &Ctx, zone: &str) {
-    if !is_rollback_zone(&ctx.lan_zone, zone) {
+    if !is_rollback_zone(&ctx.lan_zone, ctx.reverse, zone) {
         return;
     }
     let store = ctx.store(zone);
@@ -396,7 +401,7 @@ async fn snapshot_watcher(ctx: Arc<Ctx>) {
     let mut interval = tokio::time::interval(ctx.times.tick);
     loop {
         interval.tick().await;
-        for zone in rollback_zones(&ctx.lan_zone) {
+        for zone in rollback_zones(&ctx.lan_zone, ctx.reverse) {
             snapshot_zone(&ctx, &zone).await;
         }
     }
@@ -810,7 +815,7 @@ async fn list_snapshots(State(ctx): State<Arc<Ctx>>, headers: HeaderMap) -> Resp
         return failure(StatusCode::UNAUTHORIZED, "missing or invalid X-API-Key").into_response();
     }
     let mut zones = HashMap::new();
-    for zone in rollback_zones(&ctx.lan_zone) {
+    for zone in rollback_zones(&ctx.lan_zone, ctx.reverse) {
         // What: an unlisted store fails the whole request.
         // Why: an error must not show as "no snapshots".
         // From: Issue #1683 | PR #1912
@@ -898,7 +903,7 @@ async fn publish_patch(js: &jetstream::Context, lan_zone: &str, patch: &Value) -
 // From: Issue #628
 async fn rollback(ctx: &Ctx, request: RollbackRequest) -> Result<Value, (StatusCode, Json<Value>)> {
     let zone = canonical_zone(&request.zone);
-    if !is_rollback_zone(&ctx.lan_zone, &zone) {
+    if !is_rollback_zone(&ctx.lan_zone, ctx.reverse, &zone) {
         let message = format!("zone {zone} is not managed by this rollback mechanism");
         return Err(failure(StatusCode::BAD_REQUEST, message));
     }
