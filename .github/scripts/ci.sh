@@ -1332,12 +1332,10 @@ ci_cmd_plan_matrix() {
     # Why: pins live in SOT; identity decides BUILD.
     # From: Issue #1683 | PR #1858
     for f in "${changed[@]}"; do [ "${f}" = "${CI_MANIFEST_REL}" ] && sot_changed=true; done
-    # What: audit only when the lockfile changed.
-    # Why: any other change leaves the audit result as is.
+    # What: audit when a Rust service is a candidate.
+    # Why: its generated lock is the audit input.
     # From: Issue #1683 | PR #1858
-    local rust_audit=false lock
-    lock="$(_ci_variable CI_CARGO_LOCK)" || return 2
-    for f in "${changed[@]}"; do [ "${f}" = "${lock}" ] && rust_audit=true; done
+    local rust_audit=false
     # What: build product services and the toolchain.
     # Why: build-tools generic pipeline, separate assembly.
     # From: Issue #1683
@@ -1367,6 +1365,7 @@ ci_cmd_plan_matrix() {
         svc_type="$(_ci_required_field "${service}" build_type)" || return 2
         [ "${path_cand}" = true ] && [ "${svc_type}" = rust ] \
             && test_services="${test_services} ${service}"
+        [ "${svc_type}" != rust ] || rust_audit=true
         # What: auth once, only when a candidate exists.
         # Why: docs-only NOOP: registry zero touches (§63).
         # From: Issue #1683
@@ -1874,12 +1873,33 @@ _ci_listing_blob() {
     _ci_identity_git "${line%%$'\t'*}" "${ref}" cat-file blob "${line#*$'\t'}"
 }
 
+# What: generate the workspace lock, once per job.
+# Why: no third-party pin; cargo resolves the latest.
+# From: Issue #1683 | PR #1858
+_ci_cargo_lock() {
+    local lock memo="" out
+    lock="$(_ci_repo_path CI_CARGO_LOCK)" || return 2
+    [ -z "${RUNNER_TEMP:-}" ] || memo="${RUNNER_TEMP}/cargo-lock.done"
+    if [ -n "${memo}" ] && [ -e "${memo}" ] && [ -s "${lock}" ]; then
+        return 0
+    fi
+    if ! out="$(cd "${CI_REPO_ROOT:-.}" && _ci_retry cargo cargo generate-lockfile)"; then
+        ci_error "[CI-ERROR-RESOLVE-0013]" "path=\"${lock}\" reason=\"workspace lock not generated\"" "${out}"
+        return 2
+    fi
+    [ -z "${out}" ] || printf '%s\n' "${out}" >&2
+    if [ -n "${memo}" ] && ! out="$(printf '%s\n' "${lock}" 2>&1 > "${memo}")"; then
+        ci_error "[CI-ERROR-RESOLVE-0014]" "path=\"${memo}\" reason=\"generated lock not kept for the job\"" "${out}"
+        return 2
+    fi
+}
+
 # What: Rust id lines; $3 text: the reached item texts.
 # Why: 64.4: only what the service reaches is input.
 # From: Issue #1683 | PR #1912
 _ci_rust_content() {
     local service="$1" ref="${2:-}" mode="${3:-id}" crates rows lock dir bin crate src listing line blob items
-    local roots="" pkgs lib sel h refs
+    local roots="" pkgs lib sel h refs lockf
     crates="$(_ci_required_field "${service}" crates list)" || return 2
     crates=" ${crates//$'\n'/ } "
     lock="$(_ci_variable CI_CARGO_LOCK)" || return 2
@@ -1898,13 +1918,12 @@ _ci_rust_content() {
             [ "${mode}" != text ] || printf '%s\n' "${items}"
         done <<< "${listing}"
     done <<< "${rows}"
-    listing="$(_ci_tracked_listing "${lock}" "${ref}")" || return 2
-    if [ -z "${listing}" ]; then
-        ci_log "[CI-ERROR-IDENTITY-0013]" "path=\"${lock}\" ref=\"${ref}\" reason=\"no tracked lock file\""
-        return 2
-    fi
-    blob="$(_ci_listing_blob "${listing}" "${ref}")" || return 2
-    pkgs="$(_ci_run "[CI-ERROR-IDENTITY-0011]" "path=\"${lock}\" reason=\"lock closure not read\"" awk -v roots="${crates}" "${_CI_AWK_LOCK_CLOSURE}" <<< "${blob}")" || return 2
+    # What: every ref reads this job's generated lock.
+    # Why: a resolved input, like a base image digest.
+    # From: Issue #1683 | PR #1858
+    _ci_cargo_lock || return 2
+    lockf="$(_ci_repo_path CI_CARGO_LOCK)" || return 2
+    pkgs="$(_ci_run "[CI-ERROR-IDENTITY-0011]" "path=\"${lock}\" reason=\"lock closure not read\"" awk -v roots="${crates}" "${_CI_AWK_LOCK_CLOSURE}" "${lockf}")" || return 2
     if [ "${mode}" != text ]; then
         h="$(_ci_sha256_hex <<< "${pkgs}")" || return 2
         printf '%s\t%s\n' "${lock}" "${h}"
@@ -6081,6 +6100,7 @@ _ci_test_rust() {
     local -a picks=()
     for c in ${ctx}; do picks+=(-p "${c}"); done
     ctx="${ctx//$'\n'/ }"
+    _ci_cargo_lock || return 2
     ( _ci_sccache_env "${service}" || exit "${setup_rc}"
         trap _ci_sccache_stop EXIT
         cd "${CI_REPO_ROOT:-.}" \
@@ -10852,31 +10872,14 @@ _ci_cargo_ws_value() {
     _ci_capture 0 env K="$2" yq -p toml -oy '.workspace.package[strenv(K)]' "$1"
 }
 
-# What: package names of a workspace's own members.
-# Why: their Cargo.lock entries carry release.version.
-# From: Issue #1683 | PR #1858
-_ci_cargo_member_names() {
-    local rows dir bin crate
-    rows="$(_ci_workspace_rows "${CI_REPO_ROOT:-.}")" || return 2
-    while IFS='|' read -r dir bin crate; do
-        [ -n "${dir}" ] || continue
-        if [ -z "${crate}" ]; then
-            ci_log "[CI-ERROR-VERSION-0030]" "member=\"${dir}\" bin=\"${bin}\" reason=\"member manifest missing or has no package name\""
-            return 2
-        fi
-        printf '%s\n' "${crate}"
-    done <<< "${rows}"
-}
-
-# What: set 5 vars: version, license, edition, lock, toml.
+# What: set 4 vars: version, license, edition, toml.
 # Why: sync and verify read the same SOT values once.
 # From: Issue #1683 | PR #1912
 _ci_version_inputs() {
-    local -n _vi_want="$1" _vi_lic="$2" _vi_ed="$3" _vi_lock="$4" _vi_cargo="$5"
+    local -n _vi_want="$1" _vi_lic="$2" _vi_ed="$3" _vi_cargo="$4"
     _vi_want="$(_ci_release_value version)" || return 2
     _vi_lic="$(_ci_release_value license)" || return 2
     _vi_ed="$(_ci_release_value rust_edition)" || return 2
-    _vi_lock="$(_ci_repo_path CI_CARGO_LOCK)" || return 2
     _vi_cargo="$(_ci_repo_path CI_CARGO_MANIFEST)" || return 2
 }
 
@@ -10884,28 +10887,22 @@ _ci_version_inputs() {
 # Why: copies are synced on demand, idempotent, not by hand.
 # From: Issue #1683 | PR #1858
 _ci_version_release_sync() {
-    local want lic ed lock cargo names f tmp out wrote=0
-    _ci_version_inputs want lic ed lock cargo || return 2
-    names="$(_ci_cargo_member_names)" || return 2
-    for f in "${cargo}" "${lock}"; do
-        tmp="$(_ci_mktemp "${CI_TMPDIR}/ci-vsync.XXXXXX")" || return 2
-        case "${f}" in
-            "${cargo}") out="$(awk -v v="${want}" -v l="${lic}" -v e="${ed}" '/^\[workspace\.package\]/ { on = 1; print; next } /^\[/ { on = 0 }
-                on && $1 == "version" { print "version = \"" v "\""; next }
-                on && $1 == "license" { print "license = \"" l "\""; next }
-                on && $1 == "edition" { print "edition = \"" e "\""; next } { print }' "${f}" 2>&1 > "${tmp}")" ;;
-            "${lock}") out="$(awk -v v="${want}" -v names="${names//$'\n'/ }" 'BEGIN { split(names, a, " "); for (i in a) own[a[i]] = 1 }
-                /^name = / { x = $0; sub(/^name = "/, "", x); sub(/"$/, "", x); hit = (x in own) }
-                hit && /^version = / { print "version = \"" v "\""; hit = 0; next } { print }' "${f}" 2>&1 > "${tmp}")" ;;
-        esac || { ci_error "[CI-ERROR-VERSION-0026]" "path=\"${f}\" reason=\"derived copy not rendered\"" "${out}"; rm -f "${tmp}"; return 2; }
-        if ! out="$(_ci_copy_if_changed "${tmp}" "${f}")"; then
-            ci_error "[CI-ERROR-VERSION-0027]" "path=\"${f}\" reason=\"derived copy not written\"" "${out}"
-            rm -f "${tmp}"
-            return 2
-        fi
-        [ "${out}" = unchanged ] || wrote=$((wrote + 1))
+    local want lic ed cargo f tmp out wrote=0
+    _ci_version_inputs want lic ed cargo || return 2
+    f="${cargo}"
+    tmp="$(_ci_mktemp "${CI_TMPDIR}/ci-vsync.XXXXXX")" || return 2
+    out="$(awk -v v="${want}" -v l="${lic}" -v e="${ed}" '/^\[workspace\.package\]/ { on = 1; print; next } /^\[/ { on = 0 }
+        on && $1 == "version" { print "version = \"" v "\""; next }
+        on && $1 == "license" { print "license = \"" l "\""; next }
+        on && $1 == "edition" { print "edition = \"" e "\""; next } { print }' "${f}" 2>&1 > "${tmp}")" \
+        || { ci_error "[CI-ERROR-VERSION-0026]" "path=\"${f}\" reason=\"derived copy not rendered\"" "${out}"; rm -f "${tmp}"; return 2; }
+    if ! out="$(_ci_copy_if_changed "${tmp}" "${f}")"; then
+        ci_error "[CI-ERROR-VERSION-0027]" "path=\"${f}\" reason=\"derived copy not written\"" "${out}"
         rm -f "${tmp}"
-    done
+        return 2
+    fi
+    [ "${out}" = unchanged ] || wrote=1
+    rm -f "${tmp}"
     printf 'sync=release-version version=%s changed=%s\n' "${want}" "${wrote}"
 }
 
@@ -10913,8 +10910,8 @@ _ci_version_release_sync() {
 # Why: one release version owner; consumers must not drift.
 # From: Issue #1683 | PR #1858
 _ci_version_release() {
-    local want lic ed got lock cargo members m mf n k rc=0
-    _ci_version_inputs want lic ed lock cargo || return 2
+    local want lic ed got cargo members m mf k rc=0
+    _ci_version_inputs want lic ed cargo || return 2
     got="$(_ci_cargo_ws_value "${cargo}" version)" || return 2
     if [ "${got}" != "${want}" ]; then
         ci_log "[CI-ERROR-VERSION-0021]" "path=\"${cargo}\" got=\"${got}\" want=\"${want}\" reason=\"workspace.package.version is not SOT release.version\""
@@ -10947,14 +10944,6 @@ _ci_version_release() {
             esac
         done
     done <<< "${members}"
-    m="$(_ci_cargo_member_names)" || return 2
-    while IFS= read -r n; do
-        got="$(_ci_capture 0 env N="${n}" yq -p toml -oy '.package[] | select(.name == strenv(N)) | .version' "${lock}")" || return 2
-        if [ "${got}" != "${want}" ]; then
-            ci_log "[CI-ERROR-VERSION-0025]" "path=\"${lock}\" package=\"${n}\" got=\"${got}\" want=\"${want}\" reason=\"lock entry is not SOT release.version\""
-            rc=1
-        fi
-    done <<< "${m}"
     [ "${rc}" -eq 0 ] && printf 'release-version=%s consumers=clean\n' "${want}"
     return "${rc}"
 }
@@ -16846,7 +16835,10 @@ _ci_check_actionlint() {
 # From: Issue #1683
 _ci_check_cargo_audit() {
     local lock="${1:-}" out rc=0
-    [ -n "${lock}" ] || lock="$(_ci_variable CI_CARGO_LOCK)" || return 2
+    if [ -z "${lock}" ]; then
+        _ci_cargo_lock || return 2
+        lock="$(_ci_repo_path CI_CARGO_LOCK)" || return 2
+    fi
     out="$(cargo audit --deny warnings --file "${lock}" 2>&1)" || rc=$?
     # What: advisories/warnings fail (belt+braces).
     # Why: --deny warnings catches; never pass.

@@ -1120,8 +1120,8 @@ ci_variables:
   # Why: AG-KD-008 one deploy profile; one path owner.
   # From: Issue #1683 | PR #1858
   CI_COMPOSE_FILE: deploy/prod/docker-compose.yml
-  # What: the workspace lockfile cargo-audit reads.
-  # Why: plan audits only when this file changed.
+  # What: workspace toml and the lock ci.sh generates.
+  # Why: no lock in git; cargo resolves the latest.
   # From: Issue #1683 | PR #1858
   CI_CARGO_MANIFEST: Cargo.toml
   CI_CARGO_LOCK: Cargo.lock

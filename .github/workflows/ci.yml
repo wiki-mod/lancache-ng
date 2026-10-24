@@ -227,8 +227,8 @@ jobs:
           CI_RUN_IDENTITIES: *run_ids
         run: bash .github/scripts/ci.sh ship-release "${SERVICE}" "${PLATFORM}"
 
-  # What: audit rust dependencies when Cargo.lock changed
-  # Why: lockfile is its input; nightly gets new advisories
+  # What: audit the generated lock of rust candidates
+  # Why: latest crates each run; nightly sees new advisories
   # From: Issue #1683 | PR #1858
   cargo-audit:
     name: cargo-audit

@@ -37,3 +37,8 @@ Thumbs.db
 *.swo
 .idea/
 .vscode/
+
+# What: the workspace lock ci.sh generates per job.
+# Why: no third-party pin; cargo resolves the latest.
+# From: Issue #1683 | PR #1858
+/Cargo.lock
