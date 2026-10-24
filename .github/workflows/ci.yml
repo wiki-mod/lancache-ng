@@ -85,11 +85,12 @@ jobs:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      # What: shallow checkout of the event commit.
-      # Why: no inline script; this uses: is the one ref
+      # What: shallow x64 checkout of the event commit.
+      # Why: GitHub runs JS actions in Alpine on x64 only.
       # From: Issue #1683 | PR #1858
       - &bootstrap
         name: Check out the event commit
+        if: runner.arch != 'ARM64'
         uses: actions/checkout@v7
         with:
           ref: ${{ github.sha }}
@@ -180,18 +181,9 @@ jobs:
       SCCACHE_REDIS_URL: ${{ secrets.SCCACHE_REDIS_URL }}
       SCCACHE_DIST_AUTH_TOKEN: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
     steps:
-      # What: x64 checkout of the event commit.
-      # Why: GitHub runs JS actions in Alpine on x64 only.
-      # From: Issue #1683 | PR #1858
-      - name: Check out the event commit
-        if: runner.arch != 'ARM64'
-        uses: actions/checkout@v7
-        with:
-          ref: ${{ github.sha }}
-          fetch-depth: 1
+      - *bootstrap
       # What: arm64 checkout by git in a container step.
-      # Why: actions/checkout fails there; push auth is
-      #      CI_GIT_TOKEN in ci.sh.
+      # Why: no actions/checkout; push auth is CI_GIT_TOKEN.
       # From: Issue #1683 | PR #1858
       - name: Check out the event commit on arm64
         if: runner.arch == 'ARM64'

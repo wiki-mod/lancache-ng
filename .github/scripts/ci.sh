@@ -328,8 +328,7 @@ _ci_git_auth_header() {
 }
 
 # What: trust the checkout; CI_GIT_TOKEN as push auth.
-# Why: container user is not the checkout owner; the
-#      arm64 git checkout step leaves no token header.
+# Why: foreign checkout owner; arm64 clone has no token.
 # From: Issue #1683 | PR #1858
 _ci_git_trust_init() {
     local dir="${GITHUB_WORKSPACE:-}" n="${GIT_CONFIG_COUNT:-0}"
@@ -17113,7 +17112,7 @@ _ci_check_cargo_audit() {
 # Why: a stop (2) must not read as a finding (1) (§68).
 # From: Issue #1683 | PR #1912
 ci_cmd_check_all() {
-    local -a changed=() names=() skipped=()
+    local -a changed=() names=() skipped=() failed=() stopped=()
     _ci_collect_changed changed "$@" || return 2
     local raw sub r rc=0 scope why state invoked=0 diff_seen="all files"
     raw="$(printf '%s\n' "${!CI_CHECKS[@]}" | LC_ALL=C sort)" || return 2
@@ -17147,6 +17146,14 @@ ci_cmd_check_all() {
         else
             invoked=$((invoked + 1))
         fi
+        # What: name each check with a finding or a stop.
+        # Why: the last line says which checks are red.
+        # From: Issue #1683 | PR #1858
+        case "${r}" in
+            0) ;;
+            1) failed+=("${sub}") ;;
+            *) stopped+=("${sub}") ;;
+        esac
         [ "${r}" -le "${rc}" ] || rc="${r}"
     done
     case "${rc}" in
@@ -17154,7 +17161,7 @@ ci_cmd_check_all() {
         1) state=findings ;;
         *) state=stopped ;;
     esac
-    printf 'check-all=%s rc=%s invoked=%s not-run=%s diff-scope="%s" not-run-checks="%s"\n' "${state}" "${rc}" "${invoked}" "${#skipped[@]}" "${diff_seen}" "${skipped[*]:-}"
+    printf 'check-all=%s rc=%s invoked=%s not-run=%s diff-scope="%s" finding-checks="%s" stopped-checks="%s" not-run-checks="%s"\n' "${state}" "${rc}" "${invoked}" "${#skipped[@]}" "${diff_seen}" "${failed[*]:-}" "${stopped[*]:-}" "${skipped[*]:-}"
     return "${rc}"
 }
 
