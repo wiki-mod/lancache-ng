@@ -210,7 +210,7 @@ Read-only modes first; every destructive mode needs its `CONFIRM_*=yes`.
 | `clean` (`CONFIRM_CLEAN=yes`) | Stop and disable inherited units, remove runner dirs proven foreign. Archives are only listed. |
 | `clean-archive <path>...` | Remove the exact archive paths that `check` lists. |
 | `host-prep` | Idempotent: sudoers rule, docker group, `/opt` ownership, hooks, `apt-listchanges` purge, backports pin (Debian trixie only), cleanup timer. Never touches `daemon.json` or runner registration. |
-| `runner-fetch <dir> [version]` | Download, sha256-verify and extract a runner release into a new or empty dir directly under `/opt`; writes the hook wiring. Does not register or start it. |
+| `runner-fetch <dir>` | Download, sha256-verify and extract the latest runner release into a new or empty dir directly under `/opt`; writes the hook wiring. Does not register or start it. |
 | `runner-hook-env <dir>` | Re-write the hook lines in `.env`; run after `config.sh`, which truncates it. |
 | `runner-restart-policy` | `Restart=on-failure` drop-in on every `actions.runner.*` unit; run after `svc.sh install`. |
 | `full-reset-check` / `full-reset-clean` (`CONFIRM_FULL_RESET=yes`) | Survey, then truncate shell history and `known_hosts`, regenerate hostid, machine-id and SSH host keys, remove stale journal dirs and allowlisted template scripts. `authorized_keys`, `id_*` keys, orphaned `/home` dirs and apt history are reported, never changed. |

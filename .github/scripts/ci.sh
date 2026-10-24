@@ -1055,20 +1055,36 @@ _ci_fetch_drop() {
     fi
 }
 
+# What: GET one GitHub API URL; a token goes in on stdin.
+# Why: curl -H would show the token in the process list.
+# From: Issue #1683 | PR #1858
+_ci_github_get() {
+    local tok="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
+    if [ -z "${tok}" ]; then
+        curl -fsSL -H 'Accept: application/vnd.github+json' "$1"
+        return
+    fi
+    printf 'header = "Authorization: Bearer %s"\n' "${tok}" \
+        | curl -fsSL --config - -H 'Accept: application/vnd.github+json' "$1"
+}
+
 # What: latest release of a SOT tool: tag, asset, url, sha.
 # Why: no third-party pin; GitHub names tag and sha256.
 # From: Issue #1683 | PR #1858
 _ci_tool_latest() {
-    local key="$1" repo asset rel tag ver name digest sha="" url
+    local key="$1" repo asset api json rel tag ver name digest link sha="" url=""
     _ci_block_entry_fields external_versions "${key}" repository repo asset asset || return 2
     if [ -z "${repo}" ] || [ -z "${asset}" ]; then
         ci_log "[CI-ERROR-FETCH-0005]" "key=\"external_versions.${key}\" reason=\"repository/asset missing; FAIL CLOSED\""
         return 2
     fi
-    if ! rel="$(_ci_retry github-read gh api --jq '.tag_name, (.assets[] | "\(.name)\t\(.digest // "")")' "repos/${repo}/releases/latest")"; then
-        ci_error "[CI-ERROR-FETCH-0006]" "repo=\"${repo}\" reason=\"latest release not read\"" "${rel}"
+    api="$(_ci_variable CI_GITHUB_API_URL)" || return 2
+    if ! json="$(_ci_retry github-read _ci_github_get "${api}/repos/${repo}/releases/latest")"; then
+        ci_error "[CI-ERROR-FETCH-0006]" "repo=\"${repo}\" reason=\"latest release not read\"" "${json}"
         return 2
     fi
+    rel="$(_ci_run "[CI-ERROR-FETCH-0008]" "repo=\"${repo}\" reason=\"release JSON not parsed\"" \
+        jq -r '.tag_name, (.assets[] | "\(.name)\t\(.digest // "")\t\(.browser_download_url)")' <<< "${json}")" || return 2
     tag="${rel%%$'\n'*}"
     # What: @VERSION@ is the tag after its last v.
     # Why: v0.74.0 and codeql-bundle-v2.27.1 give X.Y.Z.
@@ -1076,16 +1092,16 @@ _ci_tool_latest() {
     ver="${tag##*v}"
     _ci_fill "${asset}" "VERSION=${ver}" || return 2
     asset="${REPLY}"
-    while IFS=$'\t' read -r name digest; do
+    while IFS=$'\t' read -r name digest link; do
         [ "${name}" = "${asset}" ] || continue
         sha="${digest#sha256:}"
+        url="${link}"
     done <<< "${rel#*$'\n'}"
-    if [[ ! "${sha}" =~ ^[0-9a-f]{64}$ ]]; then
-        ci_error "[CI-ERROR-FETCH-0007]" "repo=\"${repo}\" tag=\"${tag}\" asset=\"${asset}\" reason=\"asset or its sha256 digest not in the release\"" "${rel}"
+    if [[ ! "${sha}" =~ ^[0-9a-f]{64}$ ]] || [ -z "${url}" ]; then
+        ci_error "[CI-ERROR-FETCH-0007]" "repo=\"${repo}\" tag=\"${tag}\" asset=\"${asset}\" reason=\"asset, sha256 digest or url not in the release\"" "${rel}"
         return 2
     fi
-    url="$(_ci_env_required GITHUB_SERVER_URL)" || return 2
-    printf '%s\t%s\t%s\t%s\n' "${tag}" "${asset}" "${url}/${repo}/releases/download/${tag}/${asset}" "${sha}"
+    printf '%s\t%s\t%s\t%s\n' "${tag}" "${asset}" "${url}" "${sha}"
 }
 
 # What: Fetch the latest CodeQL bundle; print binary.
@@ -12435,24 +12451,16 @@ _ci_rh_hook_env_lines() {
 # Why: a new host needs a runner that was checked first.
 # From: Issue #1622 | PR #1624
 _ci_rh_runner_fetch() {
-    local inst="${1:-}" ver="${2:-}" root user group tar url dir digest tmp api envf lang
+    local inst="${1:-}" root user group rel ver tar url dir digest tmp envf lang
     if [ -z "${inst}" ]; then
         ci_log "[CI-ERROR-RUNNER-0084]" "reason=\"runner-fetch needs an instance dir\""
         return 2
     fi
-    [ -n "${ver}" ] || ver="$(_ci_rh_val runner_version)" || return 2
     root="$(_ci_rh_val opt_root)" || return 2
     user="$(_ci_rh_val user)" || return 2
     group="$(_ci_rh_group "${user}")" || return 2
-    tar="$(_ci_rh_val runner_tar)" || return 2
-    _ci_fill "${tar}" "VERSION=${ver}" || return 2
-    tar="${REPLY}"
-    url="$(_ci_rh_val runner_release_url)" || return 2
-    _ci_fill "${url}" "VERSION=${ver}"$'\n'"TAR=${tar}" || return 2
-    url="${REPLY}"
-    api="$(_ci_rh_val runner_api_url)" || return 2
-    _ci_fill "${api}" "VERSION=${ver}" || return 2
-    api="${REPLY}"
+    rel="$(_ci_tool_latest runner)" || return 2
+    IFS=$'\t' read -r ver tar url digest <<< "${rel}"
     envf="$(_ci_rh_val runner_env_file)" || return 2
     lang="$(_ci_rh_val runner_env_lang)" || return 2
     # What: accept only a new or empty dir under the root.
@@ -12468,16 +12476,7 @@ _ci_rh_runner_fetch() {
         return 2
     fi
     tmp="$(_ci_mktemp "${CI_TMPDIR}/${tar}.XXXXXX")" || return 2
-    printf 'Fetching the expected checksum of v%s...\n' "${ver}"
-    digest="$(_ci_retry download curl -fsSL "${api}")" || { rm -f "${tmp}"; return 2; }
-    digest="$(_ci_capture 0 jq -r --arg n "${tar}" ".assets[] | select(.name == \$n) | .digest" <<< "${digest}")" || { rm -f "${tmp}"; return 2; }
-    digest="${digest#sha256:}"
-    if [ -z "${digest}" ]; then
-        rm -f "${tmp}"
-        ci_log "[CI-ERROR-RUNNER-0087]" "tarball=\"${tar}\" reason=\"no sha256 digest from the GitHub API; not installing unverified\""
-        return 2
-    fi
-    printf 'Downloading %s ...\n' "${url}"
+    printf 'Downloading %s (latest %s) ...\n' "${url}" "${ver}"
     _ci_fetch_verified "${url}" "${digest}" "${tmp}" || return 2
     printf 'Checksum verified: %s\n' "${digest}"
     _ci_run "[CI-ERROR-RUNNER-0089]" "dir=\"${dir}\" reason=\"dir not created\"" _ci_rh_root mkdir -p "${dir}" || { rm -f "${tmp}"; return 2; }
@@ -12489,7 +12488,7 @@ _ci_rh_runner_fetch() {
     # From: Issue #1622 | PR #1624
     { printf '%s\n' "${lang}"; _ci_rh_hook_env_lines; } | _ci_rh_put "${dir}/${envf}" || return 2
     _ci_run "[CI-ERROR-RUNNER-0092]" "dir=\"${dir}\" file=\"${envf}\" reason=\"env file owner not set\"" _ci_rh_root chown "${user}:${group}" "${dir}/${envf}" || return 2
-    printf 'Extracted actions-runner v%s into %s and wrote its hook wiring. NOT registered.\n' "${ver}" "${dir}"
+    printf 'Extracted actions-runner %s into %s and wrote its hook wiring. NOT registered.\n' "${ver}" "${dir}"
     printf "Next: config.sh by hand (token via stdin, --name \$(hostname) exactly), then runner-hook-env %s,\\nthen svc.sh install, then runner-restart-policy; start the service only after the go-ahead.\\n" "${dir}"
 }
 

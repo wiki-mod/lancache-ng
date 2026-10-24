@@ -797,6 +797,12 @@ external_versions:
   trivy-arm64:
     repository: aquasecurity/trivy
     asset: trivy_@VERSION@_Linux-ARM64.tar.gz
+  # What: Actions runner a new self-hosted host installs.
+  # Why: runner-fetch takes the latest release, verified.
+  # From: Issue #1622 | PR #1624
+  runner:
+    repository: actions/runner
+    asset: actions-runner-linux-x64-@VERSION@.tar.gz
 
 # What: The one authoritative platform list for all targets.
 # Why: Platform is a parameter, not a twin/list.
@@ -1074,6 +1080,10 @@ ci_variables:
   # Why: nothing below Node 24; a name list misses names.
   # From: Issue #1683 | PR #1858
   CI_ACTION_NODE_MIN: "24"
+  # What: GitHub REST API base for release lookups.
+  # Why: one owner; host and job use the same base.
+  # From: Issue #1683 | PR #1858
+  CI_GITHUB_API_URL: https://api.github.com
   # What: backtrace switch of the CI cargo test run.
   # Why: a panicking test shows where (AG-INT-002).
   # From: Issue #1683 | PR #1912
@@ -1316,10 +1326,9 @@ runner_host:
   timer_delay: 900
   unit_dir: /etc/systemd/system
   unit_name: lancache-ci-cleanup
-  # What: runner release and restart policy.
-  # Why: new hosts get a verified runner; crashes recover.
+  # What: runner restart delay in seconds.
+  # Why: a crashed runner recovers without a hand.
   # From: Issue #1622 | PR #1624
-  runner_version: 2.336.0
   restart_sec: 10
   # What: the Debian suite host-prep writes backports for.
   # Why: a wrong suite would mix distribution archives.
@@ -1518,12 +1527,6 @@ runner_host:
   # From: Issue #1683 | PR #1912
   apt_env: DEBIAN_FRONTEND=noninteractive
   heavy_host_pattern: heavy
-  # What: runner tarball and its release and digest URLs.
-  # Why: AG-CI-006: download coordinates have one owner.
-  # From: Issue #1683 | PR #1912
-  runner_tar: "actions-runner-linux-x64-@VERSION@.tar.gz"
-  runner_release_url: "https://github.com/actions/runner/releases/download/v@VERSION@/@TAR@"
-  runner_api_url: "https://api.github.com/repos/actions/runner/releases/tags/v@VERSION@"
   # What: restart drop-in, sccache dist mode and leftovers.
   # Why: AG-CI-006: unit and dir contracts have one owner.
   # From: Issue #1683 | PR #1912
