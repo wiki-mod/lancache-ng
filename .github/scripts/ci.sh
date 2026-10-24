@@ -1112,33 +1112,58 @@ _ci_fetch_drop() {
     fi
 }
 
-# What: GET a GitHub API URL; token on stdin, body on fail.
-# Why: -H shows the token in ps; a 403 body is raw output.
+# What: GET a public GitHub API URL, without a token.
+# Why: an org IP allow list refuses the job token (403).
 # From: Issue #1683 | PR #1858
 _ci_github_get() {
-    local tok="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
-    if [ -z "${tok}" ]; then
-        curl --fail-with-body -sSL -H 'Accept: application/vnd.github+json' "$1"
-        return
+    curl --fail-with-body -sSL -H 'Accept: application/vnd.github+json' "$1"
+}
+
+# What: print memo $1 of this job; 1 when there is none.
+# Why: one RUNNER_TEMP memo owner; GitHub clears it.
+# From: Issue #1683 | PR #1858
+_ci_job_memo_get() {
+    if [ -z "${RUNNER_TEMP:-}" ] || [ ! -s "${RUNNER_TEMP}/$1" ]; then
+        return 1
     fi
-    printf 'header = "Authorization: Bearer %s"\n' "${tok}" \
-        | curl --fail-with-body -sSL --config - -H 'Accept: application/vnd.github+json' "$1"
+    printf '%s\n' "$(<"${RUNNER_TEMP}/$1")"
+}
+
+# What: keep value $2 as memo $1 of this job.
+# Why: outside a GitHub job there is no memo to keep.
+# From: Issue #1683 | PR #1858
+_ci_job_memo_put() {
+    local out
+    if [ -z "${RUNNER_TEMP:-}" ]; then
+        return 0
+    fi
+    if ! out="$(printf '%s\n' "$2" 2>&1 > "${RUNNER_TEMP}/$1")"; then
+        ci_error "[CI-ERROR-RESOLVE-0012]" "path=\"${RUNNER_TEMP}/$1\" reason=\"value not kept for the job\"" "${out}"
+        return 2
+    fi
 }
 
 # What: latest release of a SOT tool: tag, asset, url, sha.
 # Why: no third-party pin; GitHub names tag and sha256.
 # From: Issue #1683 | PR #1858
 _ci_tool_latest() {
-    local key="$1" repo asset api json rel tag ver name digest link sha="" url=""
+    local key="$1" repo asset api json rel tag ver name digest link sha="" url="" memo
     _ci_block_entry_fields external_versions "${key}" repository repo asset asset || return 2
     if [ -z "${repo}" ] || [ -z "${asset}" ]; then
         ci_log "[CI-ERROR-FETCH-0005]" "key=\"external_versions.${key}\" reason=\"repository/asset missing; FAIL CLOSED\""
         return 2
     fi
     api="$(_ci_variable CI_GITHUB_API_URL)" || return 2
-    if ! json="$(_ci_retry github-read _ci_github_get "${api}/repos/${repo}/releases/latest")"; then
-        ci_error "[CI-ERROR-FETCH-0006]" "repo=\"${repo}\" reason=\"latest release not read\"" "${json}"
-        return 2
+    # What: one anonymous read per job and repository.
+    # Why: anonymous reads have a small hourly limit.
+    # From: Issue #1683 | PR #1858
+    memo="latest-${repo//\//-}.json"
+    if ! json="$(_ci_job_memo_get "${memo}")"; then
+        if ! json="$(_ci_retry github-read _ci_github_get "${api}/repos/${repo}/releases/latest")"; then
+            ci_error "[CI-ERROR-FETCH-0006]" "repo=\"${repo}\" reason=\"latest release not read\"" "${json}"
+            return 2
+        fi
+        _ci_job_memo_put "${memo}" "${json}" || return 2
     fi
     rel="$(_ci_run "[CI-ERROR-FETCH-0008]" "repo=\"${repo}\" reason=\"release JSON not parsed\"" \
         jq -r '.tag_name, (.assets[] | "\(.name)\t\(.digest // "")\t\(.browser_download_url)")' <<< "${json}")" || return 2
@@ -1934,10 +1959,9 @@ _ci_listing_blob() {
 # Why: no third-party pin; cargo resolves the latest.
 # From: Issue #1683 | PR #1858
 _ci_cargo_lock() {
-    local lock memo="" out
+    local lock seen out
     lock="$(_ci_repo_path CI_CARGO_LOCK)" || return 2
-    [ -z "${RUNNER_TEMP:-}" ] || memo="${RUNNER_TEMP}/cargo-lock.done"
-    if [ -n "${memo}" ] && [ -e "${memo}" ] && [ -s "${lock}" ]; then
+    if seen="$(_ci_job_memo_get cargo-lock.done)" && [ "${seen}" = "${lock}" ] && [ -s "${lock}" ]; then
         return 0
     fi
     if ! out="$(cd "${CI_REPO_ROOT:-.}" && _ci_retry cargo cargo generate-lockfile)"; then
@@ -1945,10 +1969,7 @@ _ci_cargo_lock() {
         return 2
     fi
     [ -z "${out}" ] || printf '%s\n' "${out}" >&2
-    if [ -n "${memo}" ] && ! out="$(printf '%s\n' "${lock}" 2>&1 > "${memo}")"; then
-        ci_error "[CI-ERROR-RESOLVE-0014]" "path=\"${memo}\" reason=\"generated lock not kept for the job\"" "${out}"
-        return 2
-    fi
+    _ci_job_memo_put cargo-lock.done "${lock}"
 }
 
 # What: Rust id lines; $3 text: the reached item texts.
@@ -11108,13 +11129,12 @@ ci_cmd_build_tools() {
 # Why: no third-party pin; the run resolves latest.
 # From: Issue #1683 | PR #1858
 _ci_base_image() {
-    local key="$1" id="$2" ctx="$3" val digest memo="" out
+    local key="$1" id="$2" ctx="$3" val digest memo
     # What: one job resolves a base once, in RUNNER_TEMP.
     # Why: build arg, labels and id name the same digest.
     # From: Issue #1683 | PR #1858
-    [ -z "${RUNNER_TEMP:-}" ] || memo="${RUNNER_TEMP}/base-image-${key}.ref"
-    if [ -n "${memo}" ] && [ -s "${memo}" ]; then
-        printf '%s\n' "$(<"${memo}")"
+    if memo="$(_ci_job_memo_get "base-image-${key}.ref")"; then
+        printf '%s\n' "${memo}"
         return 0
     fi
     val="$(_ci_block_entry_field base_images "" "${key}")" || return 2
@@ -11123,10 +11143,7 @@ _ci_base_image() {
         return 2
     fi
     digest="$(_ci_registry_digest "${val}")" || return 2
-    if [ -n "${memo}" ] && ! out="$(printf '%s@%s\n' "${val}" "${digest}" 2>&1 > "${memo}")"; then
-        ci_error "[CI-ERROR-RESOLVE-0012]" "path=\"${memo}\" reason=\"resolved base not kept for the job\"" "${out}"
-        return 2
-    fi
+    _ci_job_memo_put "base-image-${key}.ref" "${val}@${digest}" || return 2
     printf '%s@%s\n' "${val}" "${digest}"
 }
 
