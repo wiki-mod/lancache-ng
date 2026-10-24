@@ -307,8 +307,8 @@ jobs:
           CI_RUN_IDENTITIES: *run_ids
         run: bash .github/scripts/ci.sh validate
 
-  # What: audit Cargo.lock against new advisories
-  # Why: advisory data moves daily; PRs audit lock changes
+  # What: audit the generated lock for new advisories
+  # Why: advisory data moves daily; PRs audit candidates
   # From: Issue #1683 | PR #1858
   cargo-audit:
     name: cargo-audit
