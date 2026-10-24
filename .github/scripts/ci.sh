@@ -320,6 +320,16 @@ _ci_runner_self_hosted() {
     [ "${RUNNER_ENVIRONMENT:-}" = self-hosted ]
 }
 
+# What: trust the job checkout for git in this process.
+# Why: container user is not the checkout owner.
+# From: Issue #1683 | PR #1858
+_ci_git_trust_init() {
+    local dir="${GITHUB_WORKSPACE:-}" n="${GIT_CONFIG_COUNT:-0}"
+    [ -n "${dir}" ] || return 0
+    export "GIT_CONFIG_KEY_${n}=safe.directory" "GIT_CONFIG_VALUE_${n}=${dir}"
+    export GIT_CONFIG_COUNT="$((n + 1))"
+}
+
 # What: Export the LAN proxy on self-hosted runners only.
 # Why: AG-CI-009 proxy; hosted runners have no LAN route.
 # From: Issue #1683 | PR #1858
@@ -12882,6 +12892,7 @@ ci_main() {
     case "${command}" in have-command) "${fn}" "$@"; return "$?" ;; esac
     _ci_tmp_init || return "$?"
     _ci_proxy_init || return "$?"
+    _ci_git_trust_init
     # What: skip manifest for build-only commands
     # Why: bind-mounted stage has no SOT present
     # From: Issue #1683
