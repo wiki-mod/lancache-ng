@@ -1027,6 +1027,14 @@ release:
   retention:
     deletion_policy: manual-or-approved-automation-only
     unaggregated_grace_minutes: 1440
+    # What: newest vX.Y release lines whose tags GC keeps.
+    # Why: maintainer 24.10.: newest line and the one below.
+    # From: Issue #1683 | PR #1858
+    keep_release_lines: 2
+    # What: release tags GC never deletes (migration steps).
+    # Why: an upgrade path from an old line must stay.
+    # From: Issue #1683 | PR #1858
+    migration_releases: []
 
 # What: path classes for PR labels and validation layers
 # Why: service/toolchain labels apply under their context.

@@ -7721,11 +7721,11 @@ _ci_release_vex_in() {
     printf 'release=vex tag=%s\n' "${tag}"
 }
 
-# What: highest plain vX.Y.Z tag (below $1 if given).
-# Why: ls-remote skips deep fetch; empty pre-1.0.
-# From: Issue #1683
-_ci_last_release_tag() {
-    local below="${1:-}" refs tags="" t remote sorted
+# What: every plain vX.Y.Z tag, in version order.
+# Why: one tag reader for release notes and GC roots.
+# From: Issue #1683 | PR #1858
+_ci_release_tags() {
+    local refs tags="" t remote
     remote="$(_ci_git_remote)" || return 2
     refs="$(_ci_capture 0 git ls-remote --tags --refs "${remote}")" || return 2
     # What: loads the SOT once before the per-tag subshells
@@ -7740,12 +7740,21 @@ _ci_last_release_tag() {
         if [ "$(_ci_release_tag_kind "${t}")" = false ]; then tags="${tags}${t}"$'\n'; fi
     done <<<"${refs}"
     tags="${tags%$'\n'}"
+    [ -n "${tags}" ] || return 0
+    _ci_capture 0 sort -V <<<"${tags}"
+}
+
+# What: highest plain vX.Y.Z tag (below $1 if given).
+# Why: ls-remote skips deep fetch; empty pre-1.0.
+# From: Issue #1683
+_ci_last_release_tag() {
+    local below="${1:-}" tags
+    tags="$(_ci_release_tags)" || return 2
     if [ -z "${tags}" ]; then
         return 0
     fi
     if [ -z "${below}" ]; then
-        sorted="$(_ci_capture 0 sort -V <<<"${tags}")" || return 2
-        printf '%s\n' "${sorted##*$'\n'}"
+        printf '%s\n' "${tags##*$'\n'}"
         return 0
     fi
     # What: an rc tag counts as its base vX.Y.Z here.
@@ -7859,6 +7868,49 @@ _ci_deletion_policy() {
     _ci_block_entry_field release retention deletion_policy
 }
 
+# What: release tags GC keeps: newest lines + migrations.
+# Why: lines are counted as they exist, 19.9 or 18.88.
+# From: Issue #1683 | PR #1858
+_ci_gc_release_tags() {
+    local n tags t line prev="" lines="" keep mig
+    n="$(_ci_block_entry_field release retention keep_release_lines)" || return 2
+    case "${n}" in
+        ''|*[!0-9]*|0*)
+            ci_log "[CI-ERROR-GC-0042]" "value=\"${n}\" reason=\"keep_release_lines not a positive integer\""
+            return 2
+            ;;
+    esac
+    tags="$(_ci_release_tags)" || return 2
+    # What: vX.Y lines in version order, newest last.
+    # Why: sorted tags group each line; one pass dedups.
+    # From: Issue #1683 | PR #1858
+    while IFS= read -r t; do
+        [ -n "${t}" ] || continue
+        line="${t%.*}"
+        [ "${line}" = "${prev}" ] || lines="${lines}${line}"$'\n'
+        prev="${line}"
+    done <<<"${tags}"
+    keep="$(awk -v n="${n}" 'NF { l[++c] = $0 } END { for (i = c - n + 1; i <= c; i++) if (i > 0) print l[i] }' <<<"${lines}")"
+    while IFS= read -r t; do
+        [ -n "${t}" ] || continue
+        case $'\n'"${keep}"$'\n' in
+            *$'\n'"${t%.*}"$'\n'*) printf '%s\n' "${t}" ;;
+        esac
+    done <<<"${tags}"
+    mig="$(_ci_block_entry_list release retention migration_releases)" || return 2
+    # What: a migration entry must be a plain vX.Y.Z tag.
+    # Why: a typo would silently protect nothing.
+    # From: Issue #1683 | PR #1858
+    while IFS= read -r t; do
+        [ -n "${t}" ] || continue
+        if [ "$(_ci_release_tag_kind "${t}")" != false ]; then
+            ci_log "[CI-ERROR-GC-0043]" "tag=\"${t}\" reason=\"migration_releases entry is not a plain vX.Y.Z tag\""
+            return 2
+        fi
+        printf '%s\n' "${t}"
+    done <<<"${mig}"
+}
+
 # What: Emit the transitive protected-root digest set.
 # Why: Ledger + channels + their index children (§75).
 # From: Issue #1683
@@ -7879,9 +7931,10 @@ _ci_gc_roots() {
     # Why: PRODUCED_UNVERIFIED is pending, not garbage.
     # From: Issue #1683
     [ "${rc}" -eq 0 ] && pairs="$(printf '%s\n' "${blob}" | awk -F'\t' 'NF>=5 && $2!="" && $5!="" {print $2"\t"$5}')"
-    local targets targets_rc=0
+    local targets targets_rc=0 reltags
     targets="$(ci_build_targets)" || targets_rc=$?
     _ci_producer_ok "${targets_rc}" 0 || return 2
+    reltags="$(_ci_gc_release_tags)" || return 2
     # What: every build target's channels are roots.
     # Why: GC candidates include build-tools; skip = orphan.
     # From: Issue #1683 | PR #1858
@@ -7897,9 +7950,12 @@ _ci_gc_roots() {
             # What: A transient probe refuses the run.
             # Why: A flaky miss must not drop a channel.
             # From: Issue #1683
-            [ "${prc}" -eq 2 ] && { ci_log "[CI-ERROR-GC-0013]" "service=\"${svc}\" channel=\"${channel}\" reason=\"channel probe UNKNOWN; refusing roots\""; return 2; }
+            [ "${prc}" -eq 2 ] && { ci_log "[CI-ERROR-GC-0013]" "service=\"${svc}\" tag=\"${channel}\" reason=\"channel or release tag probe UNKNOWN; refusing roots\""; return 2; }
             [ "${prc}" -eq 0 ] && pairs="${pairs}"$'\n'"${svc}"$'\t'"${dig}"
-        done <<<"${produced}"
+        # What: kept release tags share the channel probe.
+        # Why: one probe owner for every protected tag.
+        # From: Issue #1683 | PR #1858
+        done <<<"${produced}"$'\n'"${reltags}"
         # What: each layer cache tag of a target is a root.
         # Why: §35 cache is live; §77 owns its GC.
         # From: Issue #1683 | PR #1912
