@@ -5,6 +5,31 @@ All notable changes to lancache-ng are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.2] - 2026-10-23
+
+### Added
+
+- DNS: upstream resolver for names outside the LAN zones (`DNS_UPSTREAM_SERVERS`, `DNS_UPSTREAM_ZONES`, `DNS_UPSTREAM_UNSIGNED_ZONES`). (#1918, #1920)
+- setup.sh: external DNS server prompt during install and `configure-upstream-dns` command. (#1920)
+
+### Fixed
+
+- DNS: `NGINX_UPSTREAM_DNS` and `UPSTREAM_DNS` had no effect; upstream forwarding is configured through the variables above. (#1918, #1920)
+- CI: automated patch release tag failed on GitHub-hosted runners. (#1928)
+- CI: release tag runs used the `nightly` build-tools image. (#1929)
+
+### Changed
+
+- CI: GitHub-hosted runners by default; self-hosted only with `PROJECT_SELFHOSTED_RUNNER_USAGE_CI=true`. (#1927)
+- CI: Full-Setup Deep Validate runs on manual dispatch only. (#1929)
+- CI: container-scan no longer rebuilds changed images. (#1929)
+- CI: full-setup simulations run in parallel. (#1929)
+- CI: CodeQL Rust analysis runs only on Rust changes. (#1929)
+
+### Notes
+
+- Tag `v0.3.1` exists without a GitHub release.
+
 ## Pending stable release (live on dev)
 
 Covers all work merged into `v0.2.0` since the `v0.1.0` tag (2026-07-06). Not yet
