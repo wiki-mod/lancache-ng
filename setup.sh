@@ -7547,6 +7547,12 @@ cmd_secondary() {
     response_image_prefix=$(json_value .image_prefix "$response") || die "$bad_response"
     response_image_channel=$(json_value .image_channel "$response") || die "$bad_response"
     response_image_tag=$(json_value .image_tag "$response") || die "$bad_response"
+    # What: the secondary takes the primary's PTR switch
+    # Why: both must serve the same private reverse zones
+    # From: Issue #1918 | PR #1858
+    local local_reverse
+    local_reverse=$(json_value .dns_local_reverse_zones "$response") || die "$bad_response"
+    validate_env_value DNS_LOCAL_REVERSE_ZONES "$local_reverse"
 
     die_if_any_empty "Invalid response from primary server; missing field(s)" \
         "nats_url=$nats_url" "nats_user=$nats_user" "nats_password=$nats_password" \
@@ -7688,6 +7694,7 @@ NATS_USER=${nats_user}
 NATS_PASSWORD=${nats_password}
 NATS_CONSUMER=${consumer_name}
 KEEP_KNOWN_GOOD_CONFIGS=${keep_known_good_configs}
+DNS_LOCAL_REVERSE_ZONES=${local_reverse}
 ${upstream_rows}LANCACHE_IMAGE_REGISTRY=${lancache_image_registry}
 LANCACHE_IMAGE_PREFIX=${lancache_image_prefix}
 LANCACHE_IMAGE_CHANNEL=${lancache_image_channel}
