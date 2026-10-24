@@ -13624,9 +13624,9 @@ _ci_check_language_policy() {
     printf 'language-policy=clean files=%s\n' "${#files[@]}"
 }
 
-# What: Fail on a mutable image reference (actions: 0095).
-# Why: digest or tag pinned only, no :latest, no bare image.
-# From: Issue #1683
+# What: Fail on an image ref the SOT does not own.
+# Why: base_images and ci.sh own images (actions: 0095).
+# From: Issue #1683 | PR #1858
 _ci_check_mutable_refs() {
     local -a _ci_override=("$@") files=() yml=() dock=() viol=()
     _ci_scan_files files _ci_override '.github/workflows/*.yml' "${CI_DOCKERFILE_SPECS[@]}" || return 2
@@ -13650,20 +13650,24 @@ _ci_check_mutable_refs() {
         done <<< "${out}"
     fi
     if [ "${#dock[@]}" -gt 0 ]; then
-        out="$(_ci_capture 1 grep -nHE '^FROM .+:latest' -- "${dock[@]}")" || return 2
-        while IFS= read -r row; do [ -z "${row}" ] || viol+=("${row%%:*} FROM-latest: ${row#*:}"); done <<< "${out}"
-        out="$(_ci_capture 1 grep -nHE '^FROM [a-z0-9./]+$' -- "${dock[@]}")" || return 2
-        while IFS= read -r row; do [ -z "${row}" ] || viol+=("${row%%:*} FROM-untagged: ${row#*:}"); done <<< "${out}"
-        # What: # syntax= needs an @sha256 pin.
-        # Why: unpinned is pulled anew each build.
+        # What: FROM is an ARG, a stage alias or scratch.
+        # Why: base_images owns each image; no pin here.
         # From: Issue #1683 | PR #1858
-        out="$(_ci_capture 1 grep -niHE '^#[[:space:]]*syntax[[:space:]]*=' -- "${dock[@]}")" || return 2
-        while IFS= read -r row; do
-            [[ -z "${row}" || "${row}" =~ @${CI_DIGEST_RE} ]] || viol+=("${row%%:*} syntax-unpinned: ${row#*:}")
-        done <<< "${out}"
+        out="$(_ci_capture 0 awk "$(cat <<'PROG'
+            FNR == 1 { delete alias }
+            tolower($0) ~ /^#[[:space:]]*syntax[[:space:]]*=/ { print FILENAME ":" FNR " syntax-image: " $0; next }
+            toupper($1) == "FROM" {
+                i = 2; while ($i ~ /^--/) i++
+                img = tolower($i)
+                if (img !~ /^\$\{/ && img != "scratch" && !(img in alias)) print FILENAME ":" FNR " FROM-literal: " $0
+                if (toupper($(i + 1)) == "AS") alias[tolower($(i + 2))] = 1
+            }
+PROG
+        )" "${dock[@]}")" || return 2
+        while IFS= read -r row; do [ -z "${row}" ] || viol+=("${row}"); done <<< "${out}"
     fi
     if [ "${#viol[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0008]" "reason=\"mutable image/action reference\"" "$(printf '%s\n' "${viol[@]}")"
+        ci_error "[CI-ERROR-CHECK-0008]" "reason=\"image reference outside the SOT\"" "$(printf '%s\n' "${viol[@]}")"
         return 1
     fi
     printf 'mutable-refs=clean files=%s\n' "${#files[@]}"
