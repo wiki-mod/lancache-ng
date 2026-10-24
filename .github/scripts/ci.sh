@@ -11002,7 +11002,7 @@ _ci_alpine_build_arg() {
 
 
 # What: one SOT release scalar; empty is an error.
-# Why: one reader for version, license, verify and sync.
+# Why: one reader for channel, license and edition.
 # From: Issue #1683 | PR #1858
 _ci_release_value() {
     local want
@@ -15653,12 +15653,15 @@ _ci_validation_images() {
     local reg repo tag svc names
     reg="$(_ci_registry)" || return 2
     repo="$(_ci_repo)" || return 2
-    tag="$(_ci_release_value version)" || return 2
+    # What: the tag is the install channel setup.sh offers.
+    # Why: no version in the SOT; PROJECT_RELEASE_VERSION
+    # From: Issue #1683 | PR #1858
+    tag="$(_ci_release_value install_channel)" || return 2
     names="$(ci_services)" || return 2
-    printf 'LANCACHE_IMAGE_REGISTRY=%s\nLANCACHE_IMAGE_PREFIX=%s\nLANCACHE_IMAGE_TAG=v%s\n' "${reg}" "${repo}" "${tag}"
+    printf 'LANCACHE_IMAGE_REGISTRY=%s\nLANCACHE_IMAGE_PREFIX=%s\nLANCACHE_IMAGE_TAG=%s\n' "${reg}" "${repo}" "${tag}"
     while IFS= read -r svc; do
         [ -n "${svc}" ] || continue
-        printf 'LANCACHE_IMAGE_REF_%s=%s/%s/%s:v%s\n' "${svc^^}" "${reg}" "${repo}" "${svc}" "${tag}"
+        printf 'LANCACHE_IMAGE_REF_%s=%s/%s/%s:%s\n' "${svc^^}" "${reg}" "${repo}" "${svc}" "${tag}"
     done <<<"${names}"
 }
 
