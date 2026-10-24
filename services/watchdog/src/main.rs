@@ -2690,10 +2690,14 @@ fn upstream_zones(key: &str, local: &[String]) -> Result<Vec<String>, String> {
         } else {
             lower.trim_end_matches('.').to_string()
         };
-        if zone != "." && !config::is_dns_name(&zone, true, false) {
+        if zone != "." && !config::is_dns_name(&zone, false, false) {
             return Err(format!("{key} entry {raw} is no DNS zone name"));
         }
-        if local.contains(&config::canonical_zone(&zone)) {
+        let dotted = config::canonical_zone(&zone);
+        if local
+            .iter()
+            .any(|l| dotted == *l || dotted.ends_with(&format!(".{l}")))
+        {
             return Err(format!(
                 "{key} entry {raw} is served by the local auth server"
             ));
