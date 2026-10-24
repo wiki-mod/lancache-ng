@@ -320,14 +320,37 @@ _ci_runner_self_hosted() {
     [ "${RUNNER_ENVIRONMENT:-}" = self-hosted ]
 }
 
-# What: trust the job checkout for git in this process.
-# Why: container user is not the checkout owner.
+# What: git http header value for token $1.
+# Why: one owner for the PAT and the job token header.
+# From: Issue #1683 | PR #1858
+_ci_git_auth_header() {
+    printf 'AUTHORIZATION: basic %s' "$(printf '%s' "x-access-token:$1" | base64 -w0)"
+}
+
+# What: trust the checkout; CI_GIT_TOKEN as push auth.
+# Why: container user is not the checkout owner; the
+#      arm64 git checkout step leaves no token header.
 # From: Issue #1683 | PR #1858
 _ci_git_trust_init() {
     local dir="${GITHUB_WORKSPACE:-}" n="${GIT_CONFIG_COUNT:-0}"
-    [ -n "${dir}" ] || return 0
+    local token="${CI_GIT_TOKEN:-}" srv key
+    if [ -z "${dir}" ]; then
+        return 0
+    fi
     export "GIT_CONFIG_KEY_${n}=safe.directory" "GIT_CONFIG_VALUE_${n}=${dir}"
-    export GIT_CONFIG_COUNT="$((n + 1))"
+    n=$((n + 1))
+    if [ -n "${token}" ]; then
+        srv="$(_ci_env_required GITHUB_SERVER_URL)" || return 2
+        key="http.${srv}/.extraheader"
+        # What: empty value drops checkout's token header
+        # Why: else git sends two AUTHORIZATION headers
+        # From: Issue #1683 | PR #1858
+        export "GIT_CONFIG_KEY_${n}=${key}" "GIT_CONFIG_VALUE_${n}="
+        n=$((n + 1))
+        export "GIT_CONFIG_KEY_${n}=${key}" "GIT_CONFIG_VALUE_${n}=$(_ci_git_auth_header "${token}")"
+        n=$((n + 1))
+    fi
+    export GIT_CONFIG_COUNT="${n}"
 }
 
 # What: Export the LAN proxy on self-hosted runners only.
@@ -7875,7 +7898,7 @@ _ci_pat_git() {
     # Why: else git sends two AUTHORIZATION headers
     # From: Issue #1683 | PR #1858
     git -c "http.${srv}/.extraheader=" \
-        -c "http.${srv}/.extraheader=AUTHORIZATION: basic $(printf '%s' "x-access-token:${pat}" | base64 -w0)" "$@"
+        -c "http.${srv}/.extraheader=$(_ci_git_auth_header "${pat}")" "$@"
 }
 
 # What: push the PAT-authored tag, then read it back
@@ -12892,7 +12915,7 @@ ci_main() {
     case "${command}" in have-command) "${fn}" "$@"; return "$?" ;; esac
     _ci_tmp_init || return "$?"
     _ci_proxy_init || return "$?"
-    _ci_git_trust_init
+    _ci_git_trust_init || return "$?"
     # What: skip manifest for build-only commands
     # Why: bind-mounted stage has no SOT present
     # From: Issue #1683

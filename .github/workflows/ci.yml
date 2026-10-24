@@ -180,10 +180,24 @@ jobs:
       SCCACHE_REDIS_URL: ${{ secrets.SCCACHE_REDIS_URL }}
       SCCACHE_DIST_AUTH_TOKEN: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
     steps:
-      # What: fetch base for impact assessment
-      # Why: build must prove semantic impact vs base
+      # What: x64 checkout of the event commit.
+      # Why: GitHub runs JS actions in Alpine on x64 only.
       # From: Issue #1683 | PR #1858
-      - *bootstrap
+      - name: Check out the event commit
+        if: runner.arch != 'ARM64'
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+      # What: arm64 checkout by git in a container step.
+      # Why: actions/checkout fails there; push auth is
+      #      CI_GIT_TOKEN in ci.sh.
+      # From: Issue #1683 | PR #1858
+      - name: Check out the event commit on arm64
+        if: runner.arch == 'ARM64'
+        uses: docker://mirror.gcr.io/alpine/git:latest
+        with:
+          args: -c safe.directory=/github/workspace clone --quiet --depth 1 --revision=${{ github.sha }} ${{ github.server_url }}/${{ github.repository }} /github/workspace
       # What: export args for the GHA cache runtime step.
       # Why: ci.sh owns the kill timeout and the var list.
       # From: Issue #1683 | PR #1858
@@ -215,6 +229,10 @@ jobs:
           # Why: one run, one id; ci.sh fails on a gap.
           # From: Issue #1683 | PR #1912
           CI_RUN_IDENTITIES: &run_ids ${{ needs.plan.outputs.identities }}
+          # What: job token for the build lock ref pushes.
+          # Why: the arm64 checkout leaves no git auth.
+          # From: Issue #1683 | PR #1858
+          CI_GIT_TOKEN: &git_token ${{ secrets.GITHUB_TOKEN }}
         run: bash .github/scripts/ci.sh ship "${SERVICE}" "${PLATFORM}"
       # What: frees this run's build lock after a cancel.
       # Why: a cancel stops the step; no signal reaches bash
@@ -225,6 +243,7 @@ jobs:
           SERVICE: ${{ matrix.service }}
           PLATFORM: ${{ matrix.platform }}
           CI_RUN_IDENTITIES: *run_ids
+          CI_GIT_TOKEN: *git_token
         run: bash .github/scripts/ci.sh ship-release "${SERVICE}" "${PLATFORM}"
 
   # What: audit the generated lock of rust candidates
