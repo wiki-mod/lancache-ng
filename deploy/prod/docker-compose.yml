@@ -199,7 +199,7 @@ services:
       NATS_PASSWORD: ${NATS_DNS_WRITER_PASSWORD:-}
       LOG_QUERIES: ${LOG_QUERIES:-}
       ROOT_ZONE_MIRROR: ${ROOT_ZONE_MIRROR:-}
-      # What: optional upstream resolver; empty = SOT default.
+      # What: optional upstream resolver; empty = SOT.
       # Why: a router may know names LanCache does not.
       # From: Issue #1918 | PR #1858
       DNS_UPSTREAM_SERVERS: ${DNS_UPSTREAM_SERVERS:-}

@@ -2663,7 +2663,11 @@ fn upstream_server(entry: &str, own: std::net::Ipv4Addr) -> Result<String, Strin
         Ok(ip) => (ip, ip.to_string()),
         Err(_) => match entry.parse::<std::net::SocketAddr>() {
             Ok(addr) if addr.port() != 0 => (addr.ip(), addr.to_string()),
-            _ => return Err(format!("DNS_UPSTREAM_SERVERS entry {entry} is no IP or IP:port")),
+            _ => {
+                return Err(format!(
+                    "DNS_UPSTREAM_SERVERS entry {entry} is no IP or IP:port"
+                ));
+            }
         },
     };
     if ip.is_loopback() || ip.is_unspecified() || ip == own || is_lancache_ip(&ip.to_string()) {
@@ -2690,7 +2694,9 @@ fn upstream_zones(key: &str, local: &[String]) -> Result<Vec<String>, String> {
             return Err(format!("{key} entry {raw} is no DNS zone name"));
         }
         if local.contains(&config::canonical_zone(&zone)) {
-            return Err(format!("{key} entry {raw} is served by the local auth server"));
+            return Err(format!(
+                "{key} entry {raw} is served by the local auth server"
+            ));
         }
         if !zones.contains(&zone) {
             zones.push(zone);
@@ -2914,11 +2920,13 @@ fn recursor(ctx: &Ctx, rec: &Recursor) -> Result<Run, String> {
             upstream,
         )
     };
-    // What: a snapshot without recursor.lua predates #1918.
+    // What: a snapshot without recursor.lua is an old one.
     // Why: its lua had no upstream; rebuild it that way.
     // From: Issue #1918 | PR #1858
     let plain_lua = lua(&Upstream::default());
-    let lua_name = lua_file.file_name().map(|n| n.to_string_lossy().into_owned());
+    let lua_name = lua_file
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned());
     let backfill =
         |_: &Value, file: &str| (lua_name.as_deref() == Some(file)).then(|| plain_lua.clone());
     log(&format!("{}: RPZ holds {count} records", rec.name));
