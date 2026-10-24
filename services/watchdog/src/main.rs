@@ -4212,15 +4212,28 @@ fn nginx_https_dispatch(
     out
 }
 
-// What: replace each ${KEY} of a template with its value.
-// Why: the image templates name .env values; one filler.
-// From: Issue #1683
-fn fill(template: &str, values: &[(&str, String)]) -> String {
-    values
+// What: replace each ${KEY}; a key left over is an error.
+// Why: a missing value must stop here, not in nginx later.
+// From: Issue #1683 | PR #1858
+fn fill(template: &str, values: &[(&str, String)]) -> Result<String, String> {
+    let text = values
         .iter()
         .fold(template.to_string(), |text, (key, value)| {
             text.replace(&format!("${{{key}}}"), value)
-        })
+        });
+    for (at, _) in text.match_indices("${") {
+        let rest = &text[at + 2..];
+        let Some(end) = rest.find('}') else { continue };
+        let key = &rest[..end];
+        if !key.is_empty()
+            && key
+                .bytes()
+                .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+        {
+            return Err(format!("template key ${{{key}}} has no value"));
+        }
+    }
+    Ok(text)
 }
 
 // What: a resolver token without brackets or port.
@@ -4591,7 +4604,7 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
         if !on {
             continue;
         }
-        let text = fill(&read(&dir.join(template))?, &server_values);
+        let text = fill(&read(&dir.join(template))?, &server_values)?;
         write_file(&out, text.as_bytes(), 0o640, Place::Replace)
             .map_err(|e| format!("cannot write {}: {e}", out.display()))?;
     }
@@ -4654,11 +4667,11 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
                     ("NGINX_DIR", dir.display().to_string()),
                     ("NGINX_CACHE_DIR", ctx.need("NGINX_CACHE_DIR")?),
                 ],
-            ),
+            )?,
         ),
         (
             dir.join("proxy-params.conf"),
-            fill(&read(&dir.join("proxy-params.conf.template"))?, &params),
+            fill(&read(&dir.join("proxy-params.conf.template"))?, &params)?,
         ),
         (
             dir.join(NGINX_HTTPS_MAP),
@@ -5961,8 +5974,10 @@ mod tests {
                 &format!("a ${{{key}}} $host ${{{key}}}"),
                 &[(key.as_str(), value.clone())]
             ),
-            format!("a {value} $host {value}")
+            Ok(format!("a {value} $host {value}"))
         );
+        assert!(fill(&format!("a ${{{key}}}"), &[]).is_err());
+        assert_eq!(fill("${host}", &[]), Ok("${host}".to_string()));
         let ip = gen_ipv4().to_string();
         assert_eq!(resolver_host(&format!("{ip}:53")), ip);
         assert_eq!(resolver_host("[2001:db8::1]:53"), "2001:db8::1");
