@@ -1112,9 +1112,8 @@ _ci_fetch_drop() {
     fi
 }
 
-# What: GET one GitHub API URL; a token goes in on stdin.
-# Why: curl -H would show the token in the process list;
-#      an error body (rate limit) stays the raw output.
+# What: GET a GitHub API URL; token on stdin, body on fail.
+# Why: -H shows the token in ps; a 403 body is raw output.
 # From: Issue #1683 | PR #1858
 _ci_github_get() {
     local tok="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
