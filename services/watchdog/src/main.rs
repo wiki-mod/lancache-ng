@@ -4573,8 +4573,14 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
         ("PROXY_HTTP_PORT", env_port("PROXY_HTTP_PORT")?.to_string()),
         ("NGINX_SSL_PROTOCOLS", ctx.need("NGINX_SSL_PROTOCOLS")?),
         ("NGINX_SSL_CIPHERS", ctx.need("NGINX_SSL_CIPHERS")?),
-        ("NGINX_SSL_SESSION_CACHE", ctx.need("NGINX_SSL_SESSION_CACHE")?),
-        ("NGINX_SSL_SESSION_TIMEOUT", ctx.need("NGINX_SSL_SESSION_TIMEOUT")?),
+        (
+            "NGINX_SSL_SESSION_CACHE",
+            ctx.need("NGINX_SSL_SESSION_CACHE")?,
+        ),
+        (
+            "NGINX_SSL_SESSION_TIMEOUT",
+            ctx.need("NGINX_SSL_SESSION_TIMEOUT")?,
+        ),
         ("DOCKER_BRIDGE_NET", ctx.need("DOCKER_BRIDGE_NET")?),
         ("LOOPBACK_BIND_IP", loopback.clone()),
     ];
