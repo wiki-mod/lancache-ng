@@ -79,7 +79,7 @@ jobs:
         password: ${{ secrets.GITHUB_TOKEN }}
     steps:
       # What: shallow checkout of the event commit.
-      # Why: no inline script; ref from SOT github_actions
+      # Why: no inline script; this uses: is the one ref
       # From: Issue #1683 | PR #1858
       - &bootstrap
         name: Check out the event commit
@@ -324,6 +324,12 @@ jobs:
       - *channel_pin
       - name: Audit rust dependencies
         run: bash .github/scripts/ci.sh check cargo-audit
+      # What: warn when an action has a newer major tag.
+      # Why: maintainer 24.10.: once a night, only warns.
+      # From: Issue #1683 | PR #1858
+      - name: Warn on newer action major tags
+        if: ${{ !cancelled() }}
+        run: bash .github/scripts/ci.sh check action-majors
 
   # What: promote validated current_dev
   # Why: nightly reuses; never rebuilds

@@ -342,22 +342,18 @@ base_images:
   # From: Issue #1683 | PR #1912
   buildkit: "mirror.gcr.io/moby/buildkit:latest"
 
-# What: external actions: uses and major tag (vN).
-# Why: uses: reads no SOT; ci.sh checks each workflow ref.
+# What: external actions a workflow may use.
+# Why: the vN tag lives in uses:, which Dependabot moves.
 # From: Issue #1683 | PR #1912
 github_actions:
   attest:
     uses: actions/attest
-    tag: v4
   checkout:
     uses: actions/checkout
-    tag: v7
   claude-code:
     uses: anthropics/claude-code-action
-    tag: v1
   docker-login:
     uses: docker/login-action
-    tag: v4
 
 # What: the runtime group id the containers share.
 # Why: ci.sh bakes it into each image; one owner.

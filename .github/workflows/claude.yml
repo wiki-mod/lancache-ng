@@ -39,8 +39,8 @@ jobs:
       id-token: write
       actions: read
     steps:
-      # What: uses: refs copy SOT github_actions entries.
-      # Why: uses: reads no SOT; ci.sh checks the major tag.
+      # What: uses: refs name SOT github_actions entries.
+      # Why: GitHub reads uses: only; ci.sh checks vN.
       # From: Issue #1683 | PR #1912
       - name: Checkout repository
         uses: actions/checkout@v7

@@ -86,7 +86,7 @@ jobs:
         password: ${{ secrets.GITHUB_TOKEN }}
     steps:
       # What: shallow checkout of the event commit.
-      # Why: no inline script; ref from SOT github_actions
+      # Why: no inline script; this uses: is the one ref
       # From: Issue #1683 | PR #1858
       - &bootstrap
         name: Check out the event commit

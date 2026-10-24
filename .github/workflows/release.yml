@@ -69,7 +69,7 @@ jobs:
       timeouts: ${{ steps.jobs.outputs.timeouts }}
     steps:
       # What: shallow checkout of the event commit.
-      # Why: no inline script; ref from SOT github_actions
+      # Why: no inline script; this uses: is the one ref
       # From: Issue #1683 | PR #1858
       - &bootstrap
         name: Check out the event commit
@@ -147,8 +147,8 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.release.outputs.images) }}
     steps:
-      # What: uses: refs copy SOT github_actions entries.
-      # Why: uses: reads no SOT; ci.sh checks the major tag.
+      # What: uses: refs name SOT github_actions entries.
+      # Why: GitHub reads uses: only; ci.sh checks vN.
       # From: Issue #1683 | PR #1912
       - name: Log in to the registry
         uses: docker/login-action@v4

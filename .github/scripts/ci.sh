@@ -89,7 +89,7 @@ declare -gA CI_CHECKS=(
     [bats-and-chain]="diff _ci_check_bats_and_chain" [exit-evidence]="diff _ci_check_exit_evidence"
     [ci-bats]="diff _ci_check_ci_bats"
     [governance-guards]="diff _ci_check_governance_guards" [changelog-direct-edit]="diff _ci_check_changelog_direct_edit"
-    [action-node-versions]="repo _ci_check_action_node_versions"
+    [action-node-versions]="repo _ci_check_action_node_versions" [action-majors]="job _ci_check_action_majors"
     [naming-consistency]="repo _ci_check_naming_consistency" [workflow-line-limit]="repo _ci_check_workflow_line_limit"
     [stable-external-images]="repo _ci_check_stable_external_images" [compose-healthchecks]="repo _ci_check_compose_healthchecks"
     [proxy-cache-env-doc-drift]="repo _ci_check_proxy_cache_env_doc_drift" [prebuilt-prod]="repo _ci_check_prebuilt_prod"
@@ -14773,7 +14773,7 @@ _ci_check_action_node_versions() {
     # Why: external manifests come via raw tag reads.
     # From: Issue #1683 | PR #1858
     local v using owner repo subpath ref res marker meta
-    local entry tag used_entries=" " node_min
+    local entry used_entries=" " node_min
     node_min="$(_ci_variable CI_ACTION_NODE_MIN)" || return 2
     if [[ ! "${node_min}" =~ ^[0-9]+$ ]]; then
         ci_log "[CI-ERROR-CHECK-0142]" "got=\"${node_min}\" key=\"CI_ACTION_NODE_MIN\" reason=\"not a whole number\""
@@ -14821,17 +14821,15 @@ _ci_check_action_node_versions() {
             viol+=("external action '${v}' (in: $(_ci_ando_reffiles "${v}")) must use a major tag vN")
             continue
         fi
-        # What: an external ref must equal its SOT entry.
-        # Why: uses: reads no SOT; the SOT owns the tag.
-        # From: Issue #1683 | PR #1912
+        # What: an external action must have a SOT entry.
+        # Why: GitHub reads uses: only, so it owns the tag.
+        # From: Issue #1683 | PR #1858
         entry="$(_ci_action_sot_entry "${key}")" || return 2
         if [ -z "${entry}" ]; then
             viol+=("external action '${key}' (in: $(_ci_ando_reffiles "${v}")) has no SOT github_actions entry")
             continue
         fi
         used_entries+="${entry} "
-        tag="$(_ci_block_entry_field github_actions "${entry}" tag)" || return 2
-        [ "${ref}" = "${tag}" ] || viol+=("'${v}' (in: $(_ci_ando_reffiles "${v}")) differs from SOT github_actions.${entry}.tag ${tag}")
         owner="${key%%/*}"; repo="${key#*/}"; subpath=""
         [[ "${repo}" != */* ]] || { subpath="${repo#*/}"; repo="${repo%%/*}"; }
         res="$(_ci_fetch_action_manifest "${owner}" "${repo}" "${subpath}" "${ref}")" || return 2
@@ -14885,6 +14883,48 @@ _ci_check_action_node_versions() {
         return 1
     fi
     printf 'action-node-versions=clean pins=%s\n' "${#uses_values[@]}"
+}
+
+# What: warn when an action has a newer major tag.
+# Why: maintainer 24.10.: once a night; a gone tag fails
+# in action-node-versions on every PR (broken pin).
+# From: Issue #1683 | PR #1858
+_ci_check_action_majors() {
+    local wf_dir srv entries e u cur repo refs t max warn=0 rc
+    local -a files=()
+    wf_dir="$(_ci_repo_path CI_WORKFLOW_DIR)" || return 2
+    _ci_workflow_files files "${wf_dir}" || return 2
+    srv="$(_ci_env_required GITHUB_SERVER_URL)" || return 2
+    entries="$(_ci_block_keys github_actions)" || return 2
+    for e in ${entries}; do
+        u="$(_ci_block_entry_field github_actions "${e}" uses)" || return 2
+        # What: the vN ref of this action in the workflows.
+        # Why: action-node-versions keeps it one ref.
+        # From: Issue #1683 | PR #1858
+        rc=0
+        cur="$(grep -h -o -E "uses:[[:space:]]*${u}@v[0-9]+" "${files[@]}")" || rc=$?
+        _ci_producer_ok "${rc}" 1 || return 2
+        cur="${cur%%$'\n'*}"; cur="${cur##*@v}"
+        [ -n "${cur}" ] || continue
+        repo="${u#*/}"; repo="${repo%%/*}"
+        rc=0
+        refs="$(_ci_retry github-read git ls-remote --tags --refs "${srv}/${u%%/*}/${repo}")" || rc=$?
+        if [ "${rc}" -ne 0 ]; then
+            ci_error "[CI-ERROR-CHECK-0199]" "action=\"${u}\" reason=\"tag list not readable\"" "${refs}"
+            return 2
+        fi
+        max=0
+        while IFS= read -r t; do
+            t="${t##*refs/tags/}"
+            [[ "${t}" =~ ^v([0-9]+)(\.[0-9]+)*$ ]] || continue
+            [ "${BASH_REMATCH[1]}" -le "${max}" ] || max="${BASH_REMATCH[1]}"
+        done <<< "${refs}"
+        if [ "${max}" -gt "${cur}" ]; then
+            ci_log "[CI-WARN-CHECK-0198]" "action=\"${u}\" used=\"v${cur}\" newest=\"v${max}\" reason=\"newer major tag exists\""
+            warn=$((warn + 1))
+        fi
+    done
+    printf 'action-majors=clean newer=%s\n' "${warn}"
 }
 
 # What: Print "<issue|pr>\t<open|closed>" for a number.
