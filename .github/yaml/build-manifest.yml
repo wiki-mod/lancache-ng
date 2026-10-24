@@ -1013,6 +1013,10 @@ release:
   # Why: AG-REL-009 pre-stable default; no ci.sh literal.
   # From: Issue #1683
   default_channel: nightly
+  # What: channel setup.sh install offers as its default.
+  # Why: maintainer 24.10.: stable default, nightly warns.
+  # From: Issue #1683 | PR #1858
+  install_channel: stable
   # What: GC grace window and the delete policy gate
   # Why: §76: unreachable versions go only after the grace
   # From: Issue #1683 | PR #1858

@@ -29,6 +29,12 @@ BACKUP_ROOT="${LANCACHE_BACKUP_ROOT:-/var/backups/lancache-ng}"
 # Why: curl | bash clones before any SOT file exists
 # From: Issue #1683 | PR #1912
 LANCACHE_REPO_URL="https://github.com/wiki-mod/lancache-ng"
+# What: tag of a source archive; git fills it at export
+# Why: an archive has no .git; the tag is its version
+# From: Issue #1683 | PR #1858
+read -r LANCACHE_ARCHIVE_REF <<'EOF'
+$Format:%(describe:tags=true)$
+EOF
 # What: Docker's repo root and Docker CE package names
 # Why: apt, rpm, conflict guard and prompts share them
 # From: Issue #1683 | PR #1858
@@ -2326,7 +2332,7 @@ EOF
 # Why: the local symref avoids a network call when it is set
 # From: Issue #1683 | PR #1858
 git_default_branch_name() {
-    local repo_dir="$1" default_branch="" rc=0 remote ref
+    local repo_dir="$1" default_branch="" rc=0 remote ref refs release
 
     default_branch=$(git -C "$repo_dir" symbolic-ref --quiet --short refs/remotes/origin/HEAD) || rc=$?
     [[ "$rc" -le 1 ]] || die "Failed to read origin/HEAD of $repo_dir (exit $rc)."
@@ -2336,10 +2342,15 @@ git_default_branch_name() {
             || die "Failed to read the remote origin of $repo_dir (exit $?)."
         default_branch=$(awk '/HEAD branch/ && $NF != "(unknown)" {print $NF; exit}' <<< "$remote")
     fi
+    # What: the ref of the release_tags channel in the SOT
+    # Why: setup.sh reads the SOT itself; it never runs ci.sh
+    # From: Issue #1683 | PR #1858
     if [[ -z "$default_branch" ]]; then
-        ref=$(env -u CI_MANIFEST -u CI_REPO_ROOT bash "$repo_dir/.github/scripts/ci.sh" release-ref) \
-            || die "Failed to read the release branch from the SOT of $repo_dir (exit $?); set LANCACHE_SETUP_GIT_REF."
-        [[ "$ref" == refs/heads/?* ]] || die "The SOT of $repo_dir names no release branch ref: '$ref'."
+        release=$(lancache_release_rows release) || exit $?
+        refs=$(lancache_release_rows ref) || exit $?
+        ref=$(awk -v c="$release" '$1 == c { print $2; exit }' <<< "$refs")
+        [[ "$ref" == refs/heads/?* ]] \
+            || die "The SOT names no release branch ref for channel $release: '$ref'; set LANCACHE_SETUP_GIT_REF."
         default_branch="${ref#refs/heads/}"
     fi
 
@@ -2946,7 +2957,7 @@ validate_lancache_image_tag() {
 }
 
 # What: SOT release rows of one kind, fields after it
-# Why: AG-REL-010; hosts lack yq, so ci.sh cannot read it
+# Why: AG-REL-010; hosts lack yq; one awk reader
 # From: Issue #1683 | PR #1858
 lancache_release_rows() {
     local kind="$1" sot="$LANCACHE_SOT" text="$LANCACHE_SOT_TEXT" rows counts n_channel n_release n_pinned
@@ -2959,6 +2970,7 @@ lancache_release_rows() {
         depth == 4 && sec == "channels" { ch = key; print "channel", ch; next }
         depth == 4 && sec == "retired_channels" { gsub(/^"|"$/, "", val); print "retired", key, val; next }
         depth == 6 && sec == "channels" && key == "release_tags" && val == "true" { print "release", ch; next }
+        depth == 6 && sec == "channels" && key == "ref" { print "ref", ch, val; next }
         depth == 6 && sec == "channels" && key == "aliases" {
             gsub(/^\[|\] *$/, "", val); n = split(val, list, / *, */)
             for (i = 1; i <= n; i++) if (list[i] != "") print "alias", list[i], ch
@@ -2998,7 +3010,7 @@ validate_lancache_image_channel() {
     die "LANCACHE_IMAGE_CHANNEL must be one of: $valid."
 }
 
-# What: vX.Y.Z[-rc.N] from git tag or SOT release.version
+# What: vX.Y.Z[-rc.N] from the git tag or the archive tag
 # Why: rc 1 means no tag; rc 2 means found but malformed
 # From: Issue #1683 | PR #1912
 derive_release_archive_image_tag() {
@@ -3026,7 +3038,7 @@ derive_release_archive_image_tag() {
                 safe_dir_opt=(-c "safe.directory=$dubious_path")
                 printf 'Note: %s has different file ownership than the current user; trusting it for this run only (see: git help safe.directory).\n' "$dubious_path" >&2
             else
-                printf 'Warning: %s contains a .git directory but git rejected it:\n%s\nFalling back to the SOT release.version, which may be unpublished. Set LANCACHE_IMAGE_TAG or LANCACHE_IMAGE_CHANNEL to override.\n' "$SCRIPT_DIR" "$git_stderr" >&2
+                printf 'Warning: %s contains a .git directory but git rejected it:\n%s\nSet LANCACHE_IMAGE_TAG or LANCACHE_IMAGE_CHANNEL to override.\n' "$SCRIPT_DIR" "$git_stderr" >&2
             fi
         fi
 
@@ -3051,17 +3063,17 @@ derive_release_archive_image_tag() {
             printf '%s\n' "$tag"
             return 0
         fi
-        # What: falls through to the SOT release.version
+        # What: falls through to the archive tag below
         # Why: git still refuses the .git after the retry
-        printf 'Warning: git still rejects %s:\n%s\nFalling back to the SOT release.version.\n' "$SCRIPT_DIR" "$git_stderr" >&2
+        printf 'Warning: git still rejects %s:\n%s\nUsing the archive tag, if any.\n' "$SCRIPT_DIR" "$git_stderr" >&2
     fi
 
-    version=$(lancache_sot_value version release) || exit $?
-    tag="v${version#v}"
-    if ! is_release_tag "$tag"; then
-        printf 'Invalid release image tag derived from release.version: %s\n' "$tag" >&2
-        return 2
-    fi
+    # What: the tag git wrote into this source archive
+    # Why: the version is the tag; no SOT copy of it
+    # From: Issue #1683 | PR #1858
+    tag="$LANCACHE_ARCHIVE_REF"
+    [[ "$tag" != *"Format:"* ]] || return 1
+    is_release_tag "$tag" || return 1
     printf '%s\n' "$tag"
 }
 
@@ -3242,19 +3254,16 @@ lancache_channel_ref_pass() {
 
 ${RED}✗${RESET} Cannot resolve the '${alias:-$release}' release channel (published as the '${release}' pointer image).
 
-This project is currently in active development (pre-1.0). While images are published
-to the '${testing}' testing channel from current_dev (built once daily plus on-demand,
-gated on a full green build+scan), a formal stable release with a published
-'${release}' channel tag has not yet been created.
-
 To proceed, choose one of these options:
 
-  1. Use the '${testing}' testing channel (pre-release, may change frequently):
-     LANCACHE_IMAGE_CHANNEL=${testing} ./setup.sh install
+  1. Check the network access to the registry, then run setup.sh again.
 
   2. Pin to a specific release version or commit (immutable):
-     LANCACHE_IMAGE_TAG=vX.Y.Z ./setup.sh install        # once a stable release is tagged
-     LANCACHE_IMAGE_TAG=sha-<40-hex commit SHA> ./setup.sh install   # specific commit build
+     LANCACHE_IMAGE_TAG=vX.Y.Z ./setup.sh install
+     LANCACHE_IMAGE_TAG=sha-<40-hex commit SHA> ./setup.sh install
+
+  3. Use the '${testing}' channel (untested daily builds, may break):
+     LANCACHE_IMAGE_CHANNEL=${testing} ./setup.sh install
 
 For details on release channels and their stability, see:
   docs/release-versioning.md
@@ -5352,8 +5361,8 @@ lancache_ui_channel_override_is_valid() {
     list_has_line "$1" "$selectable"
 }
 
-# What: channels the wizard offers; first = default
-# Why: the pre-stable channels, then the release name
+# What: channels the wizard offers, release name last
+# Why: the testing channels, then the release alias
 # From: Issue #1683 | PR #1858
 lancache_selectable_channels() {
     local channels release aliases
@@ -7301,39 +7310,41 @@ done
 print_step "Release channel"
 
 # What: a pre-set LANCACHE_IMAGE_CHANNEL skips the prompt
-# Why: CI and non-interactive installs rely on the value
+# Why: the operator chose the channel before the start
 if [[ -n "${LANCACHE_IMAGE_CHANNEL:-}" ]]; then
     validate_lancache_image_channel "$LANCACHE_IMAGE_CHANNEL"
     print_ok "Using the channel already set via LANCACHE_IMAGE_CHANNEL=${LANCACHE_IMAGE_CHANNEL}."
 else
     selectable=$(lancache_selectable_channels) || exit $?
-    pre_stable="${selectable%%$'\n'*}"
-    stable_name="${selectable##*$'\n'}"
     retired=$(lancache_release_rows retired) || exit $?
-    printf "  %s — the most recently built channel from active development.\n" "$pre_stable"
-    printf "            Refreshes continuously from current_dev. Currently the\n"
-    printf "            practical default: this project is pre-1.0 and has not cut\n"
-    printf "            a stable release yet (see below), so this is what most new\n"
-    printf "            installs should pick.\n"
-    printf "  %s — the channel promoted after the full release validation gate,\n" "$stable_name"
-    printf "           once a stable release exists. NOT YET AVAILABLE: no stable\n"
-    printf "           release has been cut for this project yet, so choosing it now\n"
-    printf "           will fail during image pull with an explanation of how to\n"
-    printf "           proceed instead. Once a stable release ships, this becomes the\n"
-    printf "           recommended default again.\n\n"
+    # What: the default is SOT release.install_channel
+    # Why: maintainer 24.10.: stable, never nightly unwarned
+    # From: Issue #1683 | PR #1858
+    install_channel=$(lancache_sot_value install_channel release) || exit $?
+    list_has_line "$install_channel" "$selectable" \
+        || die "SOT release.install_channel '$install_channel' is not a channel setup.sh offers."
+    while IFS= read -r offered; do
+        if [[ "$offered" = "$install_channel" ]]; then
+            printf "  %s — tested releases; the recommended default.\n" "$offered"
+        else
+            printf "  %s — untested daily builds; they may break the stack.\n" "$offered"
+        fi
+    done <<< "$selectable"
+    printf "\n"
 
-    # What: writes the prompt's LANCACHE_IMAGE_CHANNEL
-    # Why: the pre-stable channel is the pre-1.0 default
     channel_hint=$(paste -sd/ <<< "$selectable")
     while true; do
-        ask "Release channel [$channel_hint]" "$pre_stable"
+        ask "Release channel [$channel_hint]" "$install_channel"
         if list_has_line "${REPLY,,}" "$selectable"; then
             LANCACHE_IMAGE_CHANNEL="${REPLY,,}"
-            if [[ "$LANCACHE_IMAGE_CHANNEL" = "$pre_stable" ]]; then
-                print_ok "Using the $LANCACHE_IMAGE_CHANNEL channel (recommended pre-1.0)."
-            else
-                print_warn "Using the $LANCACHE_IMAGE_CHANNEL channel -- this will fail during image pull unless a stable release already exists."
+            # What: any other channel needs a second yes
+            # Why: untested builds are never installed unwarned
+            # From: Issue #1683 | PR #1858
+            if [[ "$LANCACHE_IMAGE_CHANNEL" != "$install_channel" ]]; then
+                print_warn "The $LANCACHE_IMAGE_CHANNEL channel holds untested daily builds; they may break the stack."
+                confirm "Install from $LANCACHE_IMAGE_CHANNEL anyway? [y/N]" "N" || continue
             fi
+            print_ok "Using the $LANCACHE_IMAGE_CHANNEL channel."
             break
         fi
         # What: a retired name shows why it went
