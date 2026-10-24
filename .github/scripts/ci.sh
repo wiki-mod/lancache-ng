@@ -9951,26 +9951,22 @@ _ci_validate_kea_agent() {
 }
 
 # What: One Kea Control Agent command; prints the reply.
-# Why: setup.sh owns the sender; ci.sh adds none
+# Why: the product API as the ui sends it; no setup.sh load
 # From: Issue #763 | PR #1858
 _ci_validate_kea_cmd() {
-    (
-        export CI_KEA_TOKEN="$3"
-        _ci_run "[CI-ERROR-VALIDATE-0133]" "url=\"$1\" reason=\"Kea Control Agent command failed\"" bash -c "$(cat <<'PROG'
-source "$1" && kea_ctrl_send "$2" "$3" "${CI_KEA_TOKEN}" "$4"
-PROG
-            )" _ "${CI_REPO_ROOT}/setup.sh" "$1/" "$2" "$4"
-    )
+    _ci_run "[CI-ERROR-VALIDATE-0133]" "url=\"$1\" reason=\"Kea Control Agent command failed\"" \
+        _ci_curl_secret user "$2:$3" --fail-with-body -sS -X POST -H 'Content-Type: application/json' -d "$4" "$1/"
 }
 
 # What: fail unless a Kea reply carries result 0
-# Why: setup.sh owns the judgement; ci.sh adds none
-# From: Issue #1683 | PR #1912
+# Why: Kea answers per service; result 0 means success
+# From: Issue #1683 | PR #1858
 _ci_kea_reply_check() {
-    _ci_run "$1" "$2" bash -c "$(cat <<'PROG'
-source "$1" && kea_reply_check "$2"
-PROG
-        )" _ "${CI_REPO_ROOT}/setup.sh" "$3"
+    local code
+    if ! code="$(jq -r 'if type == "array" then .[0] else . end | .result' <<< "$3" 2>&1)" || [ "${code}" != 0 ]; then
+        ci_error "$1" "$2 result=\"${code}\"" "$3"
+        return 1
+    fi
 }
 
 # What: Kea snapshot ids under <snapshot dir>, oldest first.
