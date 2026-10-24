@@ -5,14 +5,8 @@
 # What: Trivy ignore list; statements use What/Why/From.
 # Why: Omitted status = tracked risk; no expiry field used.
 vulnerabilities:
-  - id: CVE-2026-77214
+  - id: CVE-2026-92392
     statement: >-
-      What: libexpat 2.8.5 heap over-read, build-tools only
-      Why: no fixed v3.24 pkg; drop once it ships 2.9.0
-      From: Issue #1683 | PR #1906
-
-  - id: CVE-2026-78669
-    statement: >-
-      What: docker-cli 29.8.2 HTTP/2 DoS, build-tools only
-      Why: no fixed v3.24 pkg; drop once it ships 29.9.0
-      From: Issue #1913 | PR #1915
+      What: curl 8.22.0 HTTP/2 use-after-free, Alpine images
+      Why: no fixed v3.24 pkg; drop once it ships 8.23.0
+      From: Issue #1931 | PR #1933
