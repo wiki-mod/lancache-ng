@@ -3549,11 +3549,11 @@ lancache_sot_read() {
     printf '%s\n' "$value"
 }
 
-# What: one value of a CI SOT block (default ci_variables)
-# Why: installer reads CI-owned values, never copies
+# What: one value of KEY in a named SOT block
+# Why: setup.sh reads product values, never copies them
 # From: Issue #1683 | PR #1858
 lancache_sot_value() {
-    lancache_sot_read value "$1" "${2:-ci_variables}"
+    lancache_sot_read value "$1" "$2"
 }
 
 # What: the entries of one SOT block list, one per line
