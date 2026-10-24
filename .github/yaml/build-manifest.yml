@@ -360,6 +360,10 @@ github_actions:
 # From: Issue #1683 | PR #1912
 runtime:
   gid: 10001
+  # What: the prod compose file, relative to the checkout.
+  # Why: setup.sh starts the stack from this one file.
+  # From: Issue #1683 | PR #1858
+  compose_file: deploy/prod/docker-compose.yml
   # What: KEY=value defaults; @KEY@ names another entry.
   # Why: images bake them; no .env template holds any.
   # From: Issue #1683 | PR #1912
@@ -1033,6 +1037,15 @@ release:
   # Why: maintainer 24.10.: stable default, nightly warns.
   # From: Issue #1683 | PR #1858
   install_channel: stable
+  # What: ref prefix of the per-channel promote lock.
+  # Why: setup.sh waits while promote moves channel tags.
+  # From: Issue #1683 | PR #1858
+  promote_lock_ref: refs/ci/promote-lock
+  # What: setup.sh lock checks and seconds between them.
+  # Why: an install must not mix tags of a running promote.
+  # From: Issue #1683 | PR #1858
+  install_lock_tries: 30
+  install_lock_poll_seconds: 10
   # What: GC grace window and the delete policy gate
   # Why: §76: unreachable versions go only after the grace
   # From: Issue #1683 | PR #1858
@@ -1255,10 +1268,9 @@ ci_variables:
   # Why: §34: self-hosted keeps this one builder per host.
   # From: Issue #1683 | PR #1912
   CI_BUILDX_BUILDER: lancache-ci
-  # What: installer tries; poll secs of every lock wait.
+  # What: poll seconds of every CI lock wait.
   # Why: AG-CI-006: lock timing has one owner.
   # From: Issue #1683 | PR #1858
-  CI_PROMOTE_LOCK_MAX: 30
   CI_LOCK_POLL_SECONDS: 10
   # What: min seconds between two reads of a run's state.
   # Why: AG-CI-020: GitHub Actions polls >= 300 s apart.

@@ -3639,12 +3639,12 @@ lancache_channel_image_refs() {
         || die "Cannot resolve the image prefix for channel ${channel} (exit $?)."
     vars=$(lancache_image_ref_vars) \
         || die "Cannot list the first-party images for channel ${channel} (exit $?)."
-    max=$(lancache_sot_value CI_PROMOTE_LOCK_MAX) \
-        || die "Cannot read CI_PROMOTE_LOCK_MAX (exit $?)."
-    backoff=$(lancache_sot_value CI_LOCK_POLL_SECONDS) \
-        || die "Cannot read CI_LOCK_POLL_SECONDS (exit $?)."
-    lock_ref=$(lancache_sot_value CI_PROMOTE_LOCK_REF) \
-        || die "Cannot read CI_PROMOTE_LOCK_REF (exit $?)."
+    max=$(lancache_sot_value install_lock_tries release) \
+        || die "Cannot read release.install_lock_tries (exit $?)."
+    backoff=$(lancache_sot_value install_lock_poll_seconds release) \
+        || die "Cannot read release.install_lock_poll_seconds (exit $?)."
+    lock_ref=$(lancache_sot_value promote_lock_ref release) \
+        || die "Cannot read release.promote_lock_ref (exit $?)."
     lock_ref="${lock_ref}/${pointer_channel}"
 
     command_available docker \
@@ -7594,10 +7594,10 @@ EOF
 LANCACHE_SOT=.github/yaml/build-manifest.yml
 LANCACHE_SOT_TEXT=$(lancache_repo_file_text "$LANCACHE_SOT") || exit $?
 
-# What: the prod compose file, SOT CI_COMPOSE_FILE
+# What: the prod compose file, SOT runtime.compose_file
 # Why: one owner; setup.sh and CI name the same file
-# From: Issue #1683 | PR #1912
-PROD_COMPOSE="$SCRIPT_DIR/$(lancache_sot_value CI_COMPOSE_FILE)" || exit $?
+# From: Issue #1683 | PR #1858
+PROD_COMPOSE="$SCRIPT_DIR/$(lancache_sot_value compose_file runtime)" || exit $?
 
 # What: a sourced setup.sh stops here: functions, no run
 # Why: tests load every function from the real file
