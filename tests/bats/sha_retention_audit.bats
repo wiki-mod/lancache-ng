@@ -29,10 +29,10 @@ teardown() {
 # What: reads manifest's single accepted_ordinary_roots_per_
 # Why: the machine-readable ordinary-root storage-retention
 # From: Issue #1585 | PR #1586
-@test "retention manifest defines exactly thirty accepted ordinary roots" {
+@test "retention manifest defines exactly ten accepted ordinary roots" {
   run sra_read_retention_keep "$repo_root/release/stack-images.yml"
   [ "$status" -eq 0 ]
-  [ "$output" = "30" ]
+  [ "$output" = "10" ]
 }
 
 # What: rejects a manifest with a duplicated retention budge

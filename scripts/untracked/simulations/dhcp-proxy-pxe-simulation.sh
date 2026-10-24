@@ -195,10 +195,10 @@ echo "dhcp-proxy is up (subnet: 172.29.${octet}.0, PXE boot server: $pxe_boot_se
 
 echo "== Compiling the synthetic PXE client probe (tools/pxe-client-probe) with the build-tools image =="
 # What: Mount repo; pass cargo build env vars.
-# Why: Workspace needs root Cargo.lock.
+# Why: cargo writes the workspace lock; mount is rw.
 # From: Issue #1095
 docker run --rm \
-    -v "$repo_root:/repo:ro" \
+    -v "$repo_root:/repo" \
     -v "$work_dir:/out" \
     -e CARGO_TARGET_DIR=/build-target \
     -e CARGO_PROFILE_RELEASE_LTO="$project_cargo_lto" \
@@ -214,7 +214,7 @@ docker run --rm \
     -v "${LANCACHE_SCCACHE_CONF:?LANCACHE_SCCACHE_CONF is required}:/run/lancache/sccache.conf:ro" \
     -v "${LANCACHE_PROXY_CA_FILE:?LANCACHE_PROXY_CA_FILE is required}:/run/lancache/proxy-ca.pem:ro" \
     "$client_tool_image" \
-    bash -c 'set -euo pipefail; cargo build --release --locked --manifest-path /repo/tools/pxe-client-probe/Cargo.toml -p pxe-client-probe; cp /build-target/release/pxe-client-probe /out/pxe-client-probe'
+    bash -c 'set -euo pipefail; cargo build --release --manifest-path /repo/tools/pxe-client-probe/Cargo.toml -p pxe-client-probe; cp /build-target/release/pxe-client-probe /out/pxe-client-probe'
 
 echo "== Starting the synthetic PXE client container =="
 # What: Add NET_RAW/NET_ADMIN capabilities.

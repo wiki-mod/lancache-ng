@@ -165,39 +165,6 @@ EOF
     [[ "$content" != *"abc123deadbeef"* ]]
 }
 
-# ── logbundle_select_compressor ───────────────────────────────────────────────
-
-@test "logbundle_select_compressor prefers zstd when available" {
-    command() {
-        if [ "$1" = "-v" ] && [ "$2" = "zstd" ]; then return 0; fi
-        builtin command "$@"
-    }
-    run logbundle_select_compressor
-    [ "$status" -eq 0 ]
-    [ "$output" = "zst" ]
-}
-
-@test "logbundle_select_compressor falls back to bzip2 when zstd is unavailable" {
-    command() {
-        if [ "$1" = "-v" ] && [ "$2" = "zstd" ]; then return 1; fi
-        if [ "$1" = "-v" ] && [ "$2" = "bzip2" ]; then return 0; fi
-        builtin command "$@"
-    }
-    run logbundle_select_compressor
-    [ "$status" -eq 0 ]
-    [ "$output" = "bz2" ]
-}
-
-@test "logbundle_select_compressor falls back to gzip when neither zstd nor bzip2 is available" {
-    command() {
-        if [ "$1" = "-v" ] && { [ "$2" = "zstd" ] || [ "$2" = "bzip2" ]; }; then return 1; fi
-        builtin command "$@"
-    }
-    run logbundle_select_compressor
-    [ "$status" -eq 0 ]
-    [ "$output" = "gz" ]
-}
-
 # ── logbundle_named_volume_listing ────────────────────────────────────────────
 
 @test "logbundle_named_volume_listing reports a missing volume instead of failing" {

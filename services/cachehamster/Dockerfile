@@ -32,7 +32,7 @@ RUN set -eu; \
 
 ARG SCCACHE_REDIS_MODE=off
 WORKDIR /build
-COPY Cargo.toml Cargo.lock ./
+COPY Cargo.toml ./
 COPY src/ ./src/
 # What: exports CC/GCC/CXX/GXX explicitly before the build, matching
 #   services/dns/Dockerfile, services/ui/Dockerfile, and
@@ -79,7 +79,7 @@ RUN --mount=type=secret,id=project_selfhosted_proxy_ca \
     fi; \
     export CC=cc GCC=gcc CXX=c++ GXX=g++; \
     musl_target="$(cat /tmp/musl-target)"; \
-    cargo build --release --locked --target "$musl_target"; \
+    cargo build --release --target "$musl_target"; \
     cp "target/${musl_target}/release/lancache-cachehamster" /build/lancache-cachehamster-out; \
     if [ -s /run/secrets/project_selfhosted_proxy_ca ]; then mv /tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
 

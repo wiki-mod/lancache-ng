@@ -287,8 +287,8 @@ up`.
 This section documents how the project selects, obtains, and tracks its
 dependencies, across every ecosystem this repository uses.
 
-- **Rust crates** (`services/ui`, `services/dns/nats-subscriber`): pinned
-  via each crate's `Cargo.lock`, committed to the repository. New
+- **Rust crates** (`services/ui`, `services/dns/nats-subscriber`): not
+  pinned; no `Cargo.lock` is committed, each build resolves the latest. New
   dependencies are added deliberately per change, preferring
   well-maintained crates already in the Rust ecosystem's common use (see
   `AGENTS.md`'s **AG-REL-003** for one concrete selection constraint:
@@ -391,8 +391,8 @@ the build-tools container. The UI service lives in `services/ui`. The DNS crate 
 
 ```bash
 BUILD_TOOLS_IMAGE="$(bash scripts/untracked/select-build-tools-image.sh)"
-docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work:ro" -w /work "$BUILD_TOOLS_IMAGE" \
-  bash -lc 'cargo test --locked --manifest-path services/ui/Cargo.toml && cargo test --locked --manifest-path services/dns/nats-subscriber/Cargo.toml'
+docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work" -w /work "$BUILD_TOOLS_IMAGE" \
+  bash -lc 'cargo test --manifest-path services/ui/Cargo.toml && cargo test --manifest-path services/dns/nats-subscriber/Cargo.toml'
 ```
 
 If you cannot run a relevant check locally (for example, if Docker is unavailable),

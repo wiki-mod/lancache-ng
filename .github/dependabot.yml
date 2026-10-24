@@ -28,7 +28,7 @@ updates:
         patterns: ["*"]
 
   # What: one workspace root, not 3 member directories.
-  # Why: Dependabot resolves the workspace root's lockfile.
+  # Why: Dependabot raises the workspace manifest ranges.
   # From: Issue #1095
   - package-ecosystem: cargo
     directories:

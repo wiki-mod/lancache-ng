@@ -2269,7 +2269,7 @@ jobs:
             -v "${LANCACHE_PROXY_CA_FILE:?LANCACHE_PROXY_CA_FILE is required}:/run/lancache/proxy-ca.pem:ro"
             -v "$PWD:/work" -w /work
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}"
-            cargo clippy --locked --all-targets --manifest-path services/dns/nats-subscriber/Cargo.toml -- -D warnings
+            cargo clippy --all-targets --manifest-path services/dns/nats-subscriber/Cargo.toml -- -D warnings
       - uses: wiki-mod/lancache-ng/.github/actions/release-checkout-lock@current_dev
         if: always()
   ui_rust_quality:
@@ -2349,7 +2349,7 @@ jobs:
             -v "${LANCACHE_PROXY_CA_FILE:?LANCACHE_PROXY_CA_FILE is required}:/run/lancache/proxy-ca.pem:ro"
             -v "$PWD:/work" -w /work
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}"
-            cargo clippy --locked --all-targets --manifest-path services/ui/Cargo.toml -- -D warnings
+            cargo clippy --all-targets --manifest-path services/ui/Cargo.toml -- -D warnings
       - uses: wiki-mod/lancache-ng/.github/actions/release-checkout-lock@current_dev
         if: always()
   watchdog_rust_quality:
@@ -2429,7 +2429,7 @@ jobs:
             -v "${LANCACHE_PROXY_CA_FILE:?LANCACHE_PROXY_CA_FILE is required}:/run/lancache/proxy-ca.pem:ro"
             -v "$PWD:/work" -w /work
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}"
-            cargo clippy --locked --all-targets --manifest-path services/watchdog/Cargo.toml -- -D warnings
+            cargo clippy --all-targets --manifest-path services/watchdog/Cargo.toml -- -D warnings
       - uses: wiki-mod/lancache-ng/.github/actions/release-checkout-lock@current_dev
         if: always()
   dns_test:
@@ -2511,7 +2511,7 @@ jobs:
             -v "${LANCACHE_PROXY_CA_FILE:?LANCACHE_PROXY_CA_FILE is required}:/run/lancache/proxy-ca.pem:ro"
             -v "$PWD:/work" -w /work
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}"
-            cargo test --locked --manifest-path services/dns/nats-subscriber/Cargo.toml
+            cargo test --manifest-path services/dns/nats-subscriber/Cargo.toml
       - uses: wiki-mod/lancache-ng/.github/actions/release-checkout-lock@current_dev
         if: always()
   ui_test:
@@ -2593,7 +2593,7 @@ jobs:
             -v "${LANCACHE_PROXY_CA_FILE:?LANCACHE_PROXY_CA_FILE is required}:/run/lancache/proxy-ca.pem:ro"
             -v "$PWD:/work" -w /work
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}"
-            cargo test --locked --manifest-path services/ui/Cargo.toml
+            cargo test --manifest-path services/ui/Cargo.toml
       - uses: wiki-mod/lancache-ng/.github/actions/release-checkout-lock@current_dev
         if: always()
   watchdog_test:
@@ -2682,7 +2682,7 @@ jobs:
             -v "${LANCACHE_PROXY_CA_FILE:?LANCACHE_PROXY_CA_FILE is required}:/run/lancache/proxy-ca.pem:ro"
             -v "$PWD:/work" -w /work
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}"
-            cargo test --locked --manifest-path services/watchdog/Cargo.toml
+            cargo test --manifest-path services/watchdog/Cargo.toml
       - uses: wiki-mod/lancache-ng/.github/actions/release-checkout-lock@current_dev
         if: always()
   cargo_audit:
@@ -2732,13 +2732,14 @@ jobs:
             --user "$(id -u):$(id -g)" \
             -e HOME=/var/tmp \
             -e CARGO_HOME=/var/tmp/cargo-home \
-            -v "$PWD:/work:ro" \
+            -v "$PWD:/work" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             timeout --kill-after=30 --signal=KILL 900 \
             bash -c 'set -euo pipefail
               audit_log="$(mktemp)"
               trap '"'"'rm -f "$audit_log"'"'"' EXIT
+              cargo generate-lockfile
               if ! cargo audit --deny warnings --file Cargo.lock >"$audit_log" 2>&1; then
                 cat "$audit_log"
                 exit 1

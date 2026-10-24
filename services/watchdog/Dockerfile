@@ -55,7 +55,7 @@ ARG PROJECT_CARGO_CODEGENUNIT=
 ARG BUILD_TOOLS_IMAGE
 
 WORKDIR /build
-COPY Cargo.toml Cargo.lock ./
+COPY Cargo.toml ./
 COPY services/watchdog/Cargo.toml services/watchdog/Cargo.toml
 COPY services/ui/Cargo.toml services/ui/Cargo.toml
 COPY services/cachehamster/Cargo.toml services/cachehamster/Cargo.toml
@@ -285,7 +285,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
     run_cargo_build() { \
       cargo_log="$(mktemp)"; \
       cargo_status_file="$(mktemp)"; \
-      { set +e; cargo build -j "$cargo_jobs" --release --locked --target "$musl_target" -p lancache-watchdog 2>&1; echo "$?" >"$cargo_status_file"; set -e; } | tee "$cargo_log"; \
+      { set +e; cargo build -j "$cargo_jobs" --release --target "$musl_target" -p lancache-watchdog 2>&1; echo "$?" >"$cargo_status_file"; set -e; } | tee "$cargo_log"; \
       cargo_status="$(cat "$cargo_status_file")"; \
       rm -f "$cargo_status_file"; \
       if [ "$cargo_status" = "0" ]; then rm -f "$cargo_log"; return 0; fi; \
@@ -293,7 +293,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
         disable_ccache; \
         echo "[INFO] ccache build path unavailable; retrying with plain distcc (no cache layer)." >&2; \
         ccache_retry_status_file="$(mktemp)"; \
-        { set +e; cargo build -j "$cargo_jobs" --release --locked --target "$musl_target" -p lancache-watchdog 2>&1; echo "$?" >"$ccache_retry_status_file"; set -e; } | tee -a "$cargo_log"; \
+        { set +e; cargo build -j "$cargo_jobs" --release --target "$musl_target" -p lancache-watchdog 2>&1; echo "$?" >"$ccache_retry_status_file"; set -e; } | tee -a "$cargo_log"; \
         cargo_status="$(cat "$ccache_retry_status_file")"; \
         rm -f "$ccache_retry_status_file"; \
         if [ "$cargo_status" = "0" ]; then \
@@ -308,7 +308,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
         disable_distcc; \
         unset RUSTC_WRAPPER SCCACHE_REDIS SCCACHE_CONF SCCACHE_REDIS_KEY_PREFIX; \
         echo "[INFO] distcc build path unavailable; retrying with normal local C compiler." >&2; \
-        if cargo build -j "$cargo_jobs" --release --locked --target "$musl_target" -p lancache-watchdog; then \
+        if cargo build -j "$cargo_jobs" --release --target "$musl_target" -p lancache-watchdog; then \
           echo "[INFO] normal local C compiler fallback completed." >&2; \
           rm -f "$cargo_log"; \
           return 0; \
@@ -321,7 +321,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
         unset RUSTC_WRAPPER SCCACHE_REDIS SCCACHE_CONF SCCACHE_REDIS_KEY_PREFIX; \
         echo "[INFO] sccache build path unavailable; retrying with sccache disabled." >&2; \
         rm -f "$cargo_log"; \
-        if cargo build -j "$cargo_jobs" --release --locked --target "$musl_target" -p lancache-watchdog; then \
+        if cargo build -j "$cargo_jobs" --release --target "$musl_target" -p lancache-watchdog; then \
           echo "[INFO] sccache-disabled fallback completed." >&2; \
           return 0; \
         fi; \

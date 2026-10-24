@@ -34,9 +34,9 @@ Run from the repository root:
 The script runs, in this order:
 
 - `cargo fmt --all --manifest-path services/ui/Cargo.toml -- --check`
-- `cargo clippy --locked --manifest-path services/ui/Cargo.toml -- -D warnings`
-- `cargo test --locked --manifest-path services/ui/Cargo.toml`
-- `cargo build --locked --release --manifest-path services/ui/Cargo.toml`
+- `cargo clippy --manifest-path services/ui/Cargo.toml -- -D warnings`
+- `cargo test --manifest-path services/ui/Cargo.toml`
+- `cargo build --release --manifest-path services/ui/Cargo.toml`
 
 You can override the image for investigation:
 

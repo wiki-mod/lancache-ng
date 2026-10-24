@@ -45,6 +45,10 @@ Thumbs.db
 # Why: a real workspace builds into one shared target dir.
 # From: Issue #1095
 /target/
+# What: no committed Cargo lock in any directory.
+# Why: no third-party pin; each build takes the latest.
+# From: Issue #1931
+Cargo.lock
 
 # Editor
 *.swp

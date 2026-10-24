@@ -96,7 +96,7 @@ dhcproto = { version = "0.15", optional = true }
 # empirically: an earlier `| date(...)` template filter failed a real
 # `cargo test` run with "Unknown filter `date`", not assumed from docs).
 # Already resolved as a transitive dependency at this same version (pulled
-# in by the rustls/hickory chain, see Cargo.lock) -- promoting it to a
+# in by the rustls/hickory chain, see `cargo tree`) -- promoting it to a
 # direct dependency for this one formatting call adds no new crate to the
 # build, only a manifest declaration, so this is not the kind of new
 # dependency AG-REL-001 asks for approval on. "formatting" is the minimum
