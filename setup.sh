@@ -206,12 +206,11 @@ require_value() {
     fi
 }
 
+# What: true for a dotted IPv4, each octet 0 to 255
+# Why: values are written to Docker and DNS config
+# From: Issue #1683 | PR #1858
 is_valid_ipv4() {
     local ip="$1"
-
-    # What: one regex range-checks each IPv4 octet
-    # Why: values are written to Docker and DNS config
-    # From: Issue #1683 | PR #1858
     local octet='(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])'
     [[ "$ip" =~ ^${octet}\.${octet}\.${octet}\.${octet}$ ]]
 }
@@ -246,6 +245,9 @@ is_valid_dhcp_proxy_interface() {
     [[ "${1:-}" =~ ^[A-Za-z0-9._-]{1,64}$ ]]
 }
 
+# What: true for a DNS name; labels 1-63, total up to 253
+# Why: dnsmasq writes the proxy domain into its config
+# From: Issue #450
 is_valid_dhcp_proxy_domain() {
     local domain="${1:-}"
     [[ -n "$domain" && "${#domain}" -le 253 ]] || return 1
@@ -496,6 +498,9 @@ prompt_dns_local_reverse_zones() {
     DNS_LOCAL_REVERSE_ZONES=$(yn_flag "$REPLY")
 }
 
+# What: true for a boot filename without blank or comma
+# Why: dnsmasq dhcp-boot splits its fields at commas
+# From: Issue #450
 is_valid_dhcp_proxy_boot_filename() {
     local filename="${1:-}"
     [[ -n "$filename" && "${#filename}" -le 255 ]] || return 1
@@ -880,7 +885,6 @@ install_required_command() {
 install_curl() {
     install_required_command curl "curl is missing." curl
 }
-
 install_git() {
     install_required_command git "git is missing." git
 }
@@ -1377,11 +1381,13 @@ ensure_stack_requirements_installed() {
         || die "Docker Compose plugin still missing after installing Docker requirements (exit $?): $out"
 }
 
+# What: installs curl, jq, Docker, Compose; prints next step
+# Why: a host gets its requirements before any install
+# From: Issue #1068
 cmd_install_requirements_primary() {
     ensure_stack_requirements_installed
     print_ok "Primary node requirements installed (curl, jq, Docker, Docker Compose v2). Run ./setup.sh install next."
 }
-
 cmd_install_requirements_secondary() {
     ensure_stack_requirements_installed
     print_ok "Secondary node requirements installed (curl, jq, Docker, Docker Compose v2). Next: ./setup.sh secondary --help shows the registration command."
@@ -1778,6 +1784,9 @@ append_required_env_migrated_assignment_if_empty_or_missing() {
     env_assign_from_source_or_fallback "$target_key" "$source_key" "$fallback_value" "$env_file"
 }
 
+# What: sets strict proxy mode to default if no allowlist
+# Why: no allowlist means no strict policy to preserve
+# From: Issue #563 | PR #572
 migrate_proxy_security_mode_for_update() {
     local env_file="$1" proxy_security_mode proxy_allowed_client_cidrs default_mode
 
@@ -1785,9 +1794,6 @@ migrate_proxy_security_mode_for_update() {
     default_mode=$(prod_env_default PROXY_SECURITY_MODE) || exit $?
     proxy_allowed_client_cidrs=$(get_env_var PROXY_ALLOWED_CLIENT_CIDRS "$env_file") || exit $?
 
-    # What: resets strict to the default with no allowlist
-    # Why: no allowlist means no strict policy to preserve
-    # From: Issue #1683 | PR #1858
     if [[ "$proxy_security_mode" = "strict" && -z "$proxy_allowed_client_cidrs" ]]; then
         set_env_key PROXY_SECURITY_MODE "$default_mode" "$env_file"
         print_ok "Migrated legacy PROXY_SECURITY_MODE=strict without PROXY_ALLOWED_CLIENT_CIDRS to $default_mode"
@@ -2605,21 +2611,45 @@ git_repo_is_clean() {
 }
 
 # What: hard-resets a checkout to origin's default branch
-# Why: refuses dirty trees, so local edits survive
+# Why: install without LANCACHE_SETUP_GIT_REF uses it
 # From: Issue #1683 | PR #1858
 sync_repo_to_default_branch() {
     local repo_dir="$1" default_branch
 
     default_branch=$(git_default_branch_name "$repo_dir")
+    sync_repo_to_branch "$repo_dir" "$default_branch"
+}
+
+# What: hard-resets a checkout to one origin branch
+# Why: refuses dirty trees, so local edits survive
+# From: Issue #1683 | PR #1858
+sync_repo_to_branch() {
+    local repo_dir="$1" branch="$2"
+
     git_repo_is_clean "$repo_dir" \
         || die "Existing repository at $repo_dir has local changes. Clean it first or remove $repo_dir, then rerun setup.sh."
 
     git -C "$repo_dir" fetch --prune origin \
         || die "Failed to refresh repository metadata for $repo_dir."
-    git -C "$repo_dir" show-ref --verify --quiet "refs/remotes/origin/$default_branch" \
-        || die "Remote branch origin/$default_branch is unavailable for $repo_dir."
-    git -C "$repo_dir" checkout -B "$default_branch" "origin/$default_branch" \
-        || die "Failed to reset $repo_dir to origin/$default_branch."
+    git -C "$repo_dir" show-ref --verify --quiet "refs/remotes/origin/$branch" \
+        || die "Remote branch origin/$branch is unavailable for $repo_dir."
+    git -C "$repo_dir" checkout -B "$branch" "origin/$branch" \
+        || die "Failed to reset $repo_dir to origin/$branch."
+}
+
+# What: detaches a clean checkout at a tag or commit
+# Why: a pinned channel runs the code of its image tag
+# From: Issue #1683 | PR #1858
+sync_repo_to_commit() {
+    local repo_dir="$1" ref="$2"
+
+    git_repo_is_clean "$repo_dir" \
+        || die "Existing repository at $repo_dir has local changes. Clean it first or remove $repo_dir, then rerun setup.sh."
+
+    git -C "$repo_dir" fetch --prune --tags origin \
+        || die "Failed to refresh repository metadata for $repo_dir."
+    git -C "$repo_dir" checkout --detach "${ref}^{commit}" \
+        || die "Tag or commit '$ref' is not on origin of $repo_dir; check LANCACHE_IMAGE_TAG."
 }
 
 # What: returns LANCACHE_SETUP_GIT_REF, empty if unset
@@ -3326,6 +3356,7 @@ lancache_release_rows() {
         depth == 4 && sec == "retired_channels" { gsub(/^"|"$/, "", val); print "retired", key, val; next }
         depth == 6 && sec == "channels" && key == "release_tags" && val == "true" { print "release", ch; next }
         depth == 6 && sec == "channels" && key == "ref" { print "ref", ch, val; next }
+        depth == 6 && sec == "channels" && key == "source_ref" { print "source", ch, val; next }
         depth == 6 && sec == "channels" && key == "aliases" {
             gsub(/^\[|\] *$/, "", val); n = split(val, list, / *, */)
             for (i = 1; i <= n; i++) if (list[i] != "") print "alias", list[i], ch
@@ -3532,6 +3563,35 @@ lancache_stack_pointer_channel_for() {
     aliases=$(lancache_release_rows alias) || exit $?
     target=$(awk -v a="$channel" '$1 == a { print $2; exit }' <<< "$aliases")
     printf '%s\n' "${target:-$channel}"
+}
+
+# What: the source branches of the SOT channels
+# Why: only these branches does an update move
+# From: Issue #1683 | PR #1858
+lancache_channel_branches() {
+    local sources
+    sources=$(lancache_release_rows source) || exit $?
+    awk '{ sub(/^refs\/heads\//, "", $2); print $2 }' <<< "$sources"
+}
+
+# What: git branch, tag or commit of a channel's code
+# Why: AG-REL-009: compose and images from one ref
+# From: Issue #1683 | PR #1858
+lancache_channel_code_ref() {
+    local channel="$1" tag="$2" pinned sources ref
+    pinned=$(lancache_release_rows pinned) || exit $?
+    if [[ "$channel" = "$pinned" ]]; then
+        # What: sha-<commit> is a commit, vX.Y.Z a tag
+        # Why: the image tag says which tree built it
+        # From: Issue #1683 | PR #1858
+        printf '%s\n' "${tag#sha-}"
+        return 0
+    fi
+    channel=$(lancache_stack_pointer_channel_for "$channel") || exit $?
+    sources=$(lancache_release_rows source) || exit $?
+    ref=$(awk -v c="$channel" '$1 == c { print $2; exit }' <<< "$sources")
+    [[ -n "$ref" ]] || die "${LANCACHE_SOT} defines no release.channels.${channel}.source_ref."
+    printf '%s\n' "${ref#refs/heads/}"
 }
 
 # What: ref variable and slug of each first-party image
@@ -4729,7 +4789,6 @@ EOF
 # What: moves stale .env.local aside when archive lacks one
 # Why: prefers .env.local over .env, so it must go
 # From: Issue #1683 | PR #1858
-
 restore_clear_stale_env_local_if_unarchived() {
     local archived_install_root="$1" install_dir="$2" stale_target
 
@@ -5293,6 +5352,9 @@ proxy_health_path() {
     printf '/%s\n' "${rest#*/}"
 }
 
+# What: checks port, proxy binding and /healthz of one IP
+# Why: an open port may belong to another container
+# From: Issue #849
 _verify_healthz_endpoint() {
     local ip="$1" proxy_container_id port
 
@@ -5477,7 +5539,12 @@ rollback_stack_update() {
     # Why: old config on new compose would be a mixed stack
     # From: Issue #1683 | PR #1858
     if [[ -n "${LANCACHE_UPDATE_OLD_SHA:-}" ]]; then
-        git -C "$LANCACHE_UPDATE_REPO" checkout -q -f -B "$LANCACHE_UPDATE_BRANCH" "$LANCACHE_UPDATE_OLD_SHA" \
+        # What: no branch = a detached pinned checkout
+        # Why: -B needs a name; --detach restores it
+        # From: Issue #1683 | PR #1858
+        local -a back=(-B "${LANCACHE_UPDATE_BRANCH:-}")
+        [[ -n "${LANCACHE_UPDATE_BRANCH:-}" ]] || back=(--detach)
+        git -C "$LANCACHE_UPDATE_REPO" checkout -q -f "${back[@]}" "$LANCACHE_UPDATE_OLD_SHA" \
             || { print_error "Failed to return $LANCACHE_UPDATE_REPO to $LANCACHE_UPDATE_OLD_SHA (exit $?). Manual recovery required."; return 1; }
         print_warn "Returned $LANCACHE_UPDATE_REPO to $LANCACHE_UPDATE_OLD_SHA"
     fi
@@ -5556,7 +5623,8 @@ stack_update_step() {
 # Why: compose, templates and setup.sh must move together
 # From: Issue #1683 | PR #1858
 update_repo_and_resume() {
-    local install_dir="$1" repo_dir="$1" branch="" default changes old new baseline="" svc rc=0 exec_rc
+    local install_dir="$1" repo_dir="$1" branch="" branches channel tag target changes old new baseline="" svc
+    local rc=0 exec_rc
     is_deploy_prod_install_dir "$install_dir" && repo_dir=$(deploy_prod_repo_root "$install_dir")
     if [[ ! -e "$repo_dir/.git" ]]; then
         print_ok "$repo_dir is not a git checkout; its files stay as they are"
@@ -5564,12 +5632,20 @@ update_repo_and_resume() {
     fi
     branch=$(git -C "$repo_dir" symbolic-ref --quiet --short HEAD) || rc=$?
     [[ "$rc" -le 1 ]] || die "Failed to read the branch of $repo_dir (exit $rc)."
-    default=$(git_default_branch_name "$repo_dir")
-    # What: a pinned or foreign ref is never moved
+    branches=$(lancache_channel_branches) || exit $?
+    # What: a branch outside the channel branches stays
     # Why: the operator chose that revision (AG-OP-009)
     # From: Issue #1683 | PR #1858
-    if [[ "$rc" -eq 1 || "$branch" != "$default" ]]; then
-        print_warn "Checkout $repo_dir is on ${branch:-a pinned commit}, not $default; repository not updated."
+    if [[ "$rc" -eq 0 ]] && ! list_has_line "$branch" "$branches"; then
+        print_warn "Checkout $repo_dir is on $branch, no channel branch; repository not updated."
+        return 0
+    fi
+    channel=$(resolve_lancache_image_channel "$_UPDATE_ENV_FILE") || exit $?
+    tag="${LANCACHE_IMAGE_TAG:-}"
+    [[ -n "$tag" ]] || tag=$(get_env_var LANCACHE_IMAGE_TAG "$_UPDATE_ENV_FILE") || exit $?
+    target=$(lancache_channel_code_ref "$channel" "$tag") || exit $?
+    if [[ -z "$target" ]]; then
+        print_warn "Channel $channel has no LANCACHE_IMAGE_TAG; repository not updated."
         return 0
     fi
     changes=$(git -C "$repo_dir" status --porcelain) || die "Failed to read the git status of $repo_dir (exit $?)."
@@ -5578,8 +5654,15 @@ update_repo_and_resume() {
         return 0
     fi
     old=$(git -C "$repo_dir" rev-parse HEAD) || die "Failed to read HEAD of $repo_dir (exit $?)."
-    print_step "Updating repo"
-    sync_repo_to_default_branch "$repo_dir"
+    print_step "Updating repo to $target (channel $channel)"
+    # What: a channel follows its branch, pinned its tag
+    # Why: nightly code is current_dev, stable code master
+    # From: Issue #1683 | PR #1858
+    if list_has_line "$target" "$branches"; then
+        sync_repo_to_branch "$repo_dir" "$target"
+    else
+        sync_repo_to_commit "$repo_dir" "$target"
+    fi
     new=$(git -C "$repo_dir" rev-parse HEAD) || die "Failed to read HEAD of $repo_dir (exit $?)."
     if [[ "$new" = "$old" ]]; then
         print_ok "Repository already at $new"
@@ -5977,6 +6060,9 @@ fold_ui_setting_into_env() {
     fi
 }
 
+# What: copies valid Admin UI settings into .env per tick
+# Why: the next compose up must use the UI choice
+# From: Issue #819 | PR #831
 cmd_converge_reconcile() {
     ensure_default_install_dir
     local install_dir="${1:-$DEFAULT_INSTALL_DIR}" env_file
