@@ -8939,7 +8939,7 @@ _ci_validate_dns() {
 # From: Issue #1683 | PR #1858
 _ci_validate_proxy() {
     local project="$1" url ip_std host h1 h2 port
-    port="$(_ci_service_port http)" || return 2
+    port="$(_ci_runtime_default PROXY_HTTP_PORT)" || return 2
     url="$(_ci_validation_proxy_probe_url)" || return 2
     ip_std="$(_ci_validate_container_ip "${project}" proxy)"
     host="${url#http://}"; host="${host%%/*}"
@@ -9021,7 +9021,7 @@ _ci_validate_https_mitm() {
     local project="$1" ip cid domain ca_subj issuer tmp out cert tls_err ca ca_file port
     ca="$(_ci_nginx_subdir NGINX_SUBDIR_CA)" || return 2
     ca_file="$(_ci_runtime_default CA_CERT_FILE)" || return 2
-    port="$(_ci_service_port https)" || return 2
+    port="$(_ci_runtime_default PROXY_HTTPS_PORT)" || return 2
     ip="$(_ci_validate_container_ip "${project}" proxy)"
     cid="$(_ci_validate_cid "${project}" proxy)" || return 2
     domain="$(_ci_validation_dns_domain)"

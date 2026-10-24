@@ -4856,10 +4856,11 @@ proxy_health_path() {
 }
 
 _verify_healthz_endpoint() {
-    local ip="$1" proxy_container_id
+    local ip="$1" proxy_container_id port
 
-    if ! _tcp_port_reachable "$ip" 80; then
-        print_error "Functional check failed: TCP connect to ${ip}:80"
+    port=$(prod_env_default PROXY_HTTP_PORT) || exit $?
+    if ! _tcp_port_reachable "$ip" "$port"; then
+        print_error "Functional check failed: TCP connect to ${ip}:${port}"
         return 1
     fi
 
@@ -4869,8 +4870,8 @@ _verify_healthz_endpoint() {
         return 1
     fi
 
-    if ! _proxy_container_publishes_port "$proxy_container_id" "$ip" 80; then
-        print_error "Functional check failed: the 'proxy' container's own Docker port binding does not include ${ip}:80 -- the published port may be mapped to a different service"
+    if ! _proxy_container_publishes_port "$proxy_container_id" "$ip" "$port"; then
+        print_error "Functional check failed: the 'proxy' container's own Docker port binding does not include ${ip}:${port} -- the published port may be mapped to a different service"
         return 1
     fi
 

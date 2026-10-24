@@ -77,7 +77,7 @@
     </form>
   </div>
 
-  <!-- What: router DNAT commands for port 80 to http_ip
+  <!-- What: router DNAT of port 80 to http_ip:http_port
        Why: caches all LAN devices, no client setup -->
   <div class="card space-y-4">
     <div>
@@ -98,7 +98,7 @@
       <div class="relative">
         <pre class="bg-slate-950 rounded-lg px-4 py-3 text-xs text-slate-300 font-mono overflow-x-auto leading-relaxed" id="cmd-iptables"># Transparenter HTTP-Cache — alle LAN-Anfragen auf Port 80 abfangen
 iptables -t nat -A PREROUTING -i LAN_INTERFACE -p tcp --dport 80 \
-  ! -d {{ http_ip }} -j DNAT --to-destination {{ http_ip }}:80
+  ! -d {{ http_ip }} -j DNAT --to-destination {{ http_ip }}:{{ http_port }}
 
 # Beim Neustart persistent machen (Debian/Ubuntu)
 apt install iptables-persistent
@@ -117,7 +117,7 @@ nft add chain ip lancache prerouting \
 nft add rule ip lancache prerouting \
   iifname "LAN_INTERFACE" tcp dport 80 \
   ip daddr != {{ http_ip }} \
-  dnat to {{ http_ip }}:80</pre>
+  dnat to {{ http_ip }}:{{ http_port }}</pre>
         {{ <copy_button target="cmd-nftables"/> }}
       </div>
     </div>
@@ -126,7 +126,7 @@ nft add rule ip lancache prerouting \
       <summary class="cursor-pointer hover:text-slate-300">Rückgängig machen (iptables)</summary>
       <div class="relative mt-2">
         <pre class="bg-slate-950 rounded-lg px-4 py-3 text-xs text-slate-300 font-mono" id="cmd-iptables-del">iptables -t nat -D PREROUTING -i LAN_INTERFACE -p tcp --dport 80 \
-  ! -d {{ http_ip }} -j DNAT --to-destination {{ http_ip }}:80</pre>
+  ! -d {{ http_ip }} -j DNAT --to-destination {{ http_ip }}:{{ http_port }}</pre>
         {{ <copy_button target="cmd-iptables-del"/> }}
       </div>
     </details>

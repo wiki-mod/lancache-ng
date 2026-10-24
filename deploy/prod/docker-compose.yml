@@ -175,13 +175,13 @@ services:
       - proxy-cache:${SOT_NGINX_CACHE_DIR}
       - proxy-certs:${SOT_NGINX_DIR}/${SOT_NGINX_SUBDIR_CERTS}
       - proxy-config-snapshots:${SOT_PROXY_SNAPSHOT_MOUNT}
-    # What: port 80 on both IPs; 443 passthrough or MITM.
+    # What: HTTP port on both IPs; HTTPS relayed or MITM.
     # Why: IP_HTTP relays TLS, IP_HTTPS intercepts it.
     ports:
-      - "${IP_HTTP}:80:80"
-      - "${IP_HTTP}:443:${SOT_NGINX_PASSTHROUGH_PORT}"
-      - "${IP_HTTPS}:80:80"
-      - "${IP_HTTPS}:443:443"
+      - "${IP_HTTP}:${SOT_PROXY_HTTP_PORT}:${SOT_PROXY_HTTP_PORT}"
+      - "${IP_HTTP}:${SOT_PROXY_HTTPS_PORT}:${SOT_NGINX_PASSTHROUGH_PORT}"
+      - "${IP_HTTPS}:${SOT_PROXY_HTTP_PORT}:${SOT_PROXY_HTTP_PORT}"
+      - "${IP_HTTPS}:${SOT_PROXY_HTTPS_PORT}:${SOT_PROXY_HTTPS_PORT}"
 
   # What: PowerDNS auth, dns-http, dns-https, NATS.
   # Why: one container answers on IP_HTTP and IP_HTTPS.

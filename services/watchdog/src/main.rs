@@ -3930,6 +3930,11 @@ fn nginx_refuse(loopback: &str) -> String {
 // From: Issue #1683 | PR #1912
 const NGINX_DISCARD_PORT: u16 = 9;
 
+// What: the CDN origin's HTTPS port that passthrough uses.
+// Why: the protocol fixes it; it is no deployment value.
+// From: Issue #1683 | PR #1858
+const NGINX_ORIGIN_PASS: &str = "$ssl_preread_server_name:443";
+
 // What: loopback ports and relay timeouts of https.
 // Why: the SOT owns them; dispatch and listens use them.
 // From: Issue #1683 | PR #1912
@@ -3939,6 +3944,7 @@ struct NginxPorts {
     mitm_relay: u16,
     passthrough_relay: u16,
     passthrough: u16,
+    https: u16,
     connect_secs: u64,
     idle_secs: u64,
 }
@@ -3951,6 +3957,7 @@ impl NginxPorts {
             mitm_relay: env_port("NGINX_MITM_RELAY_PORT")?,
             passthrough_relay: env_port("NGINX_PASSTHROUGH_RELAY_PORT")?,
             passthrough: env_port("NGINX_PASSTHROUGH_PORT")?,
+            https: env_port("PROXY_HTTPS_PORT")?,
             connect_secs: secs("NGINX_UPSTREAM_CONNECT_TIMEOUT")?,
             idle_secs: secs("NGINX_UPSTREAM_IDLE_TIMEOUT")?,
         })
@@ -4074,7 +4081,7 @@ fn nginx_stream_targets(
     acl: &Path,
     ports: NginxPorts,
 ) -> String {
-    let pass = "$ssl_preread_server_name:443";
+    let pass = NGINX_ORIGIN_PASS;
     let refuse = nginx_refuse(loopback);
     let mut out = format!(
         "{NGINX_GENERATED}map $ssl_preread_server_name $stream_backend {{\n    hostnames;\n{}",
@@ -4134,7 +4141,7 @@ fn nginx_https_listen(loopback: &str, mitm_port: u16, health_port: u16) -> Strin
     )
 }
 
-// What: the :443 dispatcher: MITM, passthrough, refuse.
+// What: the HTTPS port dispatcher: MITM, relay, refuse.
 // Why: a cert covers one label; deeper names pass through.
 // From: Issue #1683 | PR #1912
 fn nginx_https_dispatch(
@@ -4188,18 +4195,18 @@ fn nginx_https_dispatch(
     // What: locals feed the template as plain captures.
     // Why: CodeQL misses captures beside named args.
     // From: Issue #1683 | PR #1912
-    let (acl, mitm_port) = (acl.display(), ports.mitm);
+    let (acl, mitm_port, https) = (acl.display(), ports.mitm, ports.https);
     let timeouts = nginx_relay_timeouts(ports);
     out.push_str(&format!(
         "    default {default};\n}}\n\n\
-         server {{\n    listen 443;\n    listen [::]:443;\n    include {acl};\n    \
+         server {{\n    listen {https};\n    listen [::]:{https};\n    include {acl};\n    \
          ssl_preread on;\n    proxy_pass $https_dispatch_backend;\n    proxy_protocol on;\n\
          {timeouts}}}\n\n\
          server {{\n    listen {mitm} proxy_protocol;\n    set_real_ip_from {loopback};\n    \
          proxy_protocol on;\n    proxy_pass {loopback}:{mitm_port};\n\
          {timeouts}}}\n\n\
          server {{\n    listen {passthrough} proxy_protocol;\n    set_real_ip_from {loopback};\n    \
-         ssl_preread on;\n    proxy_pass $ssl_preread_server_name:443;\n\
+         ssl_preread on;\n    proxy_pass {NGINX_ORIGIN_PASS};\n\
          {timeouts}}}\n"
     ));
     out
@@ -4563,6 +4570,7 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
         ("NGINX_HEALTHZ_FILE", healthz_file.clone()),
         ("PROXY_HEALTH_PATH", ctx.need("PROXY_HEALTH_PATH")?),
         ("PROXY_STATUS_PATH", ctx.need("PROXY_STATUS_PATH")?),
+        ("PROXY_HTTP_PORT", env_port("PROXY_HTTP_PORT")?.to_string()),
         ("DOCKER_BRIDGE_NET", ctx.need("DOCKER_BRIDGE_NET")?),
         ("LOOPBACK_BIND_IP", loopback.clone()),
     ];

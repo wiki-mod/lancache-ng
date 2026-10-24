@@ -164,6 +164,7 @@ struct Config {
     // From: Issue #1683 | PR #1912
     dhcp_lease_limits: LeaseLimits,
     http_ip: String,
+    http_port: u16,
     https_ip: String,
     pdns_auth_port: u16,
     retry_backoff: Backoff,
@@ -424,6 +425,7 @@ impl Config {
             dhcp_lease_time,
             dhcp_lease_limits,
             http_ip,
+            http_port: config::port(env, "PROXY_HTTP_PORT")?,
             https_ip,
             pdns_auth_port: config::port(env, "PDNS_AUTH_PORT")?,
             retry_backoff: Backoff::load(env)?,
@@ -6430,6 +6432,7 @@ async fn setup_page(State(state): Shared, headers: HeaderMap) -> Response {
     let cfg = &state.config;
     let mut ctx = page_ctx(&headers, "setup");
     ctx.insert("http_ip", &cfg.http_ip);
+    ctx.insert("http_port", &cfg.http_port);
     ctx.insert("https_ip", &cfg.https_ip);
     ctx.insert("ca_cert_file", &cfg.ca_cert_file);
     ctx.insert(
@@ -7262,7 +7265,7 @@ mod tests {
     // What: numeric keys with values unlike the SOT's.
     // Why: tests must not copy SOT values (AG-CODE-010).
     // From: Issue #1683 | PR #1912
-    const NUMBER_KEYS: [(&str, &str); 24] = [
+    const NUMBER_KEYS: [(&str, &str); 25] = [
         ("UI_WATCHDOG_REFRESH_SECONDS", "11"),
         ("UI_DASHBOARD_REFRESH_SECONDS", "12"),
         ("UI_STATS_REFRESH_SECONDS", "13"),
@@ -7274,6 +7277,7 @@ mod tests {
         ("DHCP_MAX_LEASE_FACTOR", "4"),
         ("PDNS_AUTH_PORT", "5301"),
         ("DNS_PORT", "5354"),
+        ("PROXY_HTTP_PORT", "8079"),
         ("PDNS_AUTH_API_PORT", "8181"),
         ("PDNS_HTTP_API_PORT", "8182"),
         ("DNS_ROLLBACK_PORT", "8183"),
