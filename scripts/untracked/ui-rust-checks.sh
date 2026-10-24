@@ -42,7 +42,7 @@ Options:
   --clippy                  Run cargo clippy -- -D warnings (default)
   --no-clippy               Skip cargo clippy
   --no-test                 Skip cargo test
-  --no-build                Skip cargo build --locked --release
+  --no-build                Skip cargo build --release
   --sccache                 Enable sccache for rustc invocation
   --sccache-redis <url>     Set SCCACHE_REDIS URL for cache sharing
   --with-redis              Start a temporary Redis container for sccache
@@ -218,7 +218,7 @@ fi
 
 DOCKER_RUN_ARGS=(
   run --rm
-  -v "${ROOT_DIR}:/workspace:ro"
+  -v "${ROOT_DIR}:/workspace"
   -w /workspace
   "${DOCKER_ENVS[@]}"
   -e "UI_MANIFEST=${UI_MANIFEST}"
@@ -264,13 +264,13 @@ if [[ ${RUN_FMT_CHECK} -eq 1 ]]; then
   CONTAINER_CMD+="cargo fmt --all --manifest-path ${UI_MANIFEST} -- --check"$'\n'
 fi
 if [[ ${RUN_CLIPPY} -eq 1 ]]; then
-  CONTAINER_CMD+="cargo clippy --locked --manifest-path ${UI_MANIFEST} -- -D warnings"$'\n'
+  CONTAINER_CMD+="cargo clippy --manifest-path ${UI_MANIFEST} -- -D warnings"$'\n'
 fi
 if [[ ${RUN_TEST} -eq 1 ]]; then
-  CONTAINER_CMD+="cargo test --locked --manifest-path ${UI_MANIFEST}"$'\n'
+  CONTAINER_CMD+="cargo test --manifest-path ${UI_MANIFEST}"$'\n'
 fi
 if [[ ${RUN_BUILD} -eq 1 ]]; then
-  CONTAINER_CMD+="cargo build --locked --release --manifest-path ${UI_MANIFEST}"$'\n'
+  CONTAINER_CMD+="cargo build --release --manifest-path ${UI_MANIFEST}"$'\n'
 fi
 
 echo "Running local Rust UI checks in ${RUST_IMAGE} ..."

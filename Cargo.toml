@@ -2,7 +2,7 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # What: root Cargo workspace for 5 first-party crates.
-# Why: unifies lockfiles; ends cross-service version drift.
+# Why: one workspace; cargo resolves one lock per build.
 # From: Issue #1095
 
 [workspace]
@@ -16,7 +16,7 @@ members = [
 ]
 
 # What: no [workspace.dependencies] table added here.
-# Why: scope is lockfile unification, not a dep refactor.
+# Why: members keep their own dependency entries.
 # From: Issue #1095
 
 # What: no lto/codegen-units keys in [profile.release] here.

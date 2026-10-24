@@ -286,7 +286,7 @@ vulnerabilities:
       re-confirmed 2026-08-27 via a fresh grep against origin/current_dev:
       zero `perl`/`setfacl`/`getfacl`/`chfn`/`chsh`/`gzexe`/`mount`
       invocations in `services/ui`/`tools/build-tools`; no ncurses-linked
-      crate in `services/ui/Cargo.toml`/`Cargo.lock`; `services/ui`'s
+      crate in `services/ui/Cargo.toml` or `cargo tree`; `services/ui`'s
       privilege drop uses `setpriv`, confirmed live in
       `services/ui/docker-entrypoint.sh`).
 
