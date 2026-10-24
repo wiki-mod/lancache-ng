@@ -2633,10 +2633,118 @@ fn cdn_rows(domains: &str) -> (Vec<(String, bool)>, Vec<String>) {
     (rows, invalid)
 }
 
+// What: the optional upstream resolver of the recursors.
+// Why: a router may know LAN names LanCache cannot.
+// From: Issue #1918 | PR #1858
+#[derive(Debug, Default)]
+struct Upstream {
+    servers: Vec<String>,
+    zones: Vec<String>,
+    unsigned: Vec<String>,
+}
+
+// What: one DNS_UPSTREAM_* list, space or comma split.
+// Why: setup.sh and operators write either separator.
+// From: Issue #1918 | PR #1858
+fn upstream_list(key: &str) -> Vec<String> {
+    env_opt(key)
+        .unwrap_or_default()
+        .split([' ', ','])
+        .filter(|item| !item.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+// What: one forwarder as ip or ip:port, checked.
+// Why: this host, its container or LanCache would loop.
+// From: Issue #1918 | PR #1858
+fn upstream_server(entry: &str, own: std::net::Ipv4Addr) -> Result<String, String> {
+    let (ip, text) = match entry.parse::<std::net::IpAddr>() {
+        Ok(ip) => (ip, ip.to_string()),
+        Err(_) => match entry.parse::<std::net::SocketAddr>() {
+            Ok(addr) if addr.port() != 0 => (addr.ip(), addr.to_string()),
+            _ => return Err(format!("DNS_UPSTREAM_SERVERS entry {entry} is no IP or IP:port")),
+        },
+    };
+    if ip.is_loopback() || ip.is_unspecified() || ip == own || is_lancache_ip(&ip.to_string()) {
+        return Err(format!(
+            "DNS_UPSTREAM_SERVERS entry {entry} is this host or LanCache and would loop"
+        ));
+    }
+    Ok(text)
+}
+
+// What: one zone list, lower case, without duplicates.
+// Why: local zones stay with the local auth server.
+// From: Issue #1918 | PR #1858
+fn upstream_zones(key: &str, local: &[String]) -> Result<Vec<String>, String> {
+    let mut zones: Vec<String> = Vec::new();
+    for raw in upstream_list(key) {
+        let lower = raw.to_ascii_lowercase();
+        let zone = if lower == "." {
+            lower
+        } else {
+            lower.trim_end_matches('.').to_string()
+        };
+        if zone != "." && !config::is_dns_name(&zone, true, false) {
+            return Err(format!("{key} entry {raw} is no DNS zone name"));
+        }
+        if local.contains(&config::canonical_zone(&zone)) {
+            return Err(format!("{key} entry {raw} is served by the local auth server"));
+        }
+        if !zones.contains(&zone) {
+            zones.push(zone);
+        }
+    }
+    Ok(zones)
+}
+
+// What: DNS_UPSTREAM_* as forwarders and zone lists.
+// Why: a bad value must never reach recursor.conf.
+// From: Issue #1918 | PR #1858
+fn upstream(local: &[String]) -> Result<Upstream, String> {
+    let entries = upstream_list("DNS_UPSTREAM_SERVERS");
+    if entries.is_empty() {
+        return Ok(Upstream::default());
+    }
+    let own = own_address()?;
+    let servers = entries
+        .iter()
+        .map(|entry| upstream_server(entry, own))
+        .collect::<Result<Vec<_>, _>>()?;
+    let zones = upstream_zones("DNS_UPSTREAM_ZONES", local)?;
+    if zones.is_empty() {
+        return Err(config::not_set("DNS_UPSTREAM_ZONES"));
+    }
+    let unsigned = upstream_zones("DNS_UPSTREAM_UNSIGNED_ZONES", local)?;
+    let inside = |name: &str| {
+        name != "."
+            && zones
+                .iter()
+                .any(|z| z == "." || z == name || name.ends_with(&format!(".{z}")))
+    };
+    if let Some(bad) = unsigned.iter().find(|name| !inside(name)) {
+        return Err(format!(
+            "DNS_UPSTREAM_UNSIGNED_ZONES entry {bad} is \".\" or outside DNS_UPSTREAM_ZONES"
+        ));
+    }
+    Ok(Upstream {
+        servers,
+        zones,
+        unsigned,
+    })
+}
+
 // What: recursor.lua: RPZ, LAN trust anchors, root copy.
 // Why: one render per recursor; the RPZ path differs.
 // From: Issue #1683
-fn recursor_lua(rpz: &str, zones: &[String], root_mirror: bool, knobs: &DnsKnobs) -> String {
+fn recursor_lua(
+    rpz: &str,
+    zones: &[String],
+    root_mirror: bool,
+    knobs: &DnsKnobs,
+    upstream: &Upstream,
+) -> String {
     let mut lua = format!("rpzFile(\"{rpz}\", {{ policyName=\"lancache-rpz\" }})\n");
     for zone in zones {
         lua.push_str(&format!(
@@ -2644,7 +2752,18 @@ fn recursor_lua(rpz: &str, zones: &[String], root_mirror: bool, knobs: &DnsKnobs
             zone.trim_end_matches('.')
         ));
     }
-    if root_mirror {
+    // What: NTA only for the private upstream zones.
+    // Why: forwarded public names stay validated.
+    // From: Issue #1918 | PR #1858
+    for zone in &upstream.unsigned {
+        lua.push_str(&format!(
+            "addNTA(\"{zone}\", \"lancache-ng: unsigned zone of the upstream resolver\")\n"
+        ));
+    }
+    // What: no root copy while "." goes to the upstream.
+    // Why: the copy would answer what the upstream should.
+    // From: Issue #1918 | PR #1858
+    if root_mirror && !upstream.zones.iter().any(|z| z == ".") {
         for ip in &knobs.root_servers {
             lua.push_str(&format!(
                 "zoneToCache(\".\", \"axfr\", \"{ip}\", {{ refreshPeriod={}, retryOnError={} }})\n",
@@ -2671,11 +2790,12 @@ struct RecursorConf<'a> {
     loopback: &'a str,
     any: &'a str,
     knobs: &'a DnsKnobs,
+    upstream: &'a Upstream,
 }
 
 impl RecursorConf<'_> {
     fn render(&self) -> String {
-        let forwards: String = self
+        let mut forwards: String = self
             .zones
             .iter()
             .map(|z| {
@@ -2687,6 +2807,24 @@ impl RecursorConf<'_> {
                 )
             })
             .collect();
+        // What: forward_zones_recurse only with servers.
+        // Why: no setting keeps resolving from the roots.
+        // From: Issue #1918 | PR #1858
+        if !self.upstream.servers.is_empty() {
+            let servers = self
+                .upstream
+                .servers
+                .iter()
+                .map(|s| format!("\"{s}\""))
+                .collect::<Vec<_>>()
+                .join(", ");
+            forwards.push_str("  forward_zones_recurse:\n");
+            for zone in &self.upstream.zones {
+                forwards.push_str(&format!(
+                    "    - zone: \"{zone}\"\n      forwarders: [{servers}]\n"
+                ));
+            }
+        }
         // What: locals feed the template as plain captures.
         // Why: CodeQL misses captures beside named args.
         // From: Issue #1683 | PR #1912
@@ -2755,21 +2893,34 @@ fn recursor(ctx: &Ctx, rec: &Recursor) -> Result<Run, String> {
     let rpz_file = dir.join("rpz.zone");
     let lua_file = dir.join("recursor.lua");
     let zones = rollback_zones()?;
-    for (path, body) in [
-        (&rpz_file, rpz),
-        (
-            &lua_file,
-            recursor_lua(
-                &rpz_file.display().to_string(),
-                &zones,
-                flag("ROOT_ZONE_MIRROR") != Some(false),
-                &knobs,
-            ),
-        ),
-    ] {
-        write_file(path, body.as_bytes(), 0o644, Place::Replace)
-            .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
-    }
+    // What: a bad DNS_UPSTREAM_* starts without upstream.
+    // Why: a typo must not take DNS away; the log names it.
+    // From: Issue #1918 | PR #1858
+    let upstream = upstream(&zones).unwrap_or_else(|e| {
+        log_err(&format!(
+            "ERROR: {e}; starting WITHOUT an upstream resolver. \
+             Fix it with: ./setup.sh configure-upstream-dns"
+        ));
+        Upstream::default()
+    });
+    write_file(&rpz_file, rpz.as_bytes(), 0o644, Place::Replace)
+        .map_err(|e| format!("cannot write {}: {e}", rpz_file.display()))?;
+    let lua = |upstream: &Upstream| {
+        recursor_lua(
+            &rpz_file.display().to_string(),
+            &zones,
+            flag("ROOT_ZONE_MIRROR") != Some(false),
+            &knobs,
+            upstream,
+        )
+    };
+    // What: a snapshot without recursor.lua predates #1918.
+    // Why: its lua had no upstream; rebuild it that way.
+    // From: Issue #1918 | PR #1858
+    let plain_lua = lua(&Upstream::default());
+    let lua_name = lua_file.file_name().map(|n| n.to_string_lossy().into_owned());
+    let backfill =
+        |_: &Value, file: &str| (lua_name.as_deref() == Some(file)).then(|| plain_lua.clone());
     log(&format!("{}: RPZ holds {count} records", rec.name));
     let lua_dns = ctx.need("PDNS_LUA_DNS_SCRIPT")?;
     let any = config::any_bind(&config::process_env)?;
@@ -2787,6 +2938,7 @@ fn recursor(ctx: &Ctx, rec: &Recursor) -> Result<Run, String> {
         lua_dns: &lua_dns,
         zones: &zones,
         knobs: &knobs,
+        upstream: &upstream,
     };
     let store = lancache_ng::SnapshotStore::new(
         PathBuf::from(ctx.need("DNS_CONFIG_SNAPSHOT_DIR")?).join(rec.name),
@@ -2795,12 +2947,18 @@ fn recursor(ctx: &Ctx, rec: &Recursor) -> Result<Run, String> {
     );
     let restamp = |old: &str| restamp_lines(old, &[("api_key:", format!("  api_key: {api_key}"))]);
     let config_dir = pdns_config_dir(&dir);
+    // What: recursor.lua joins the checked snapshot set.
+    // Why: a rollback must restore conf and lua together.
+    // From: Issue #1918 | PR #1858
     checked_files(
-        &[(dir.join("recursor.conf"), conf.render())],
+        &[
+            (dir.join("recursor.conf"), conf.render()),
+            (lua_file.clone(), lua(&upstream)),
+        ],
         &pdns_check("pdns_recursor", &config_dir),
         &store,
         &restamp,
-        &no_backfill,
+        &backfill,
         true,
     )?;
     Ok(Run {
@@ -4059,6 +4217,21 @@ fn resolver_host(token: &str) -> &str {
     }
 }
 
+// What: true for an IP that LanCache DNS answers on.
+// Why: nginx and recursor upstreams there would loop.
+// From: Issue #1918 | PR #1858
+fn is_lancache_ip(host: &str) -> bool {
+    let parsed = host.parse::<std::net::IpAddr>().ok();
+    let same = |own: String| match (own.parse::<std::net::IpAddr>().ok(), parsed) {
+        (Some(own), Some(host)) => own == host,
+        _ => own == host,
+    };
+    ["IP_HTTP", "IP_HTTPS", "LISTEN_IP", "LISTEN_IP_HTTPS"]
+        .into_iter()
+        .filter_map(env_opt)
+        .any(same)
+}
+
 // What: the numeric id of a passwd or group entry.
 // Why: chown takes ids; the image names user and group.
 // From: Issue #1683
@@ -4287,7 +4460,10 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
     let read = |path: &Path| {
         fs::read_to_string(path).map_err(|e| format!("cannot read {}: {e}", path.display()))
     };
-    let ip_http = ctx.need("IP_HTTP")?;
+    // What: IP_HTTP must be set for the loop check below.
+    // Why: an unset IP would let a LanCache resolver pass.
+    // From: Issue #1918 | PR #1858
+    ctx.need("IP_HTTP")?;
     let ip_https = env_opt("IP_HTTPS").unwrap_or_default();
     let https_on =
         config::parse_bool(&ctx.need("HTTPS_ENABLED")?).ok_or("HTTPS_ENABLED is no boolean")?;
@@ -4296,7 +4472,7 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
     // Why: the LanCache DNS would loop back.
     // From: Issue #1683 | PR #1912
     for token in resolver.split_whitespace().map(resolver_host) {
-        if token == ip_http || (!ip_https.is_empty() && token == ip_https) {
+        if is_lancache_ip(token) {
             return Err(format!(
                 "NGINX_UPSTREAM_RESOLVER must not point to a LanCache IP ({token})"
             ));

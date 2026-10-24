@@ -31,6 +31,14 @@ services:
       - NATS_CONSUMER=${NATS_CONSUMER:?NATS_CONSUMER is required}
       - NATS_RECORD_WRITES=0
       - KEEP_KNOWN_GOOD_CONFIGS=${KEEP_KNOWN_GOOD_CONFIGS:-}
+      # What: optional upstream resolver; empty = SOT default.
+      # Why: the own listen IPs feed the loop check.
+      # From: Issue #1918 | PR #1858
+      - DNS_UPSTREAM_SERVERS=${DNS_UPSTREAM_SERVERS:-}
+      - DNS_UPSTREAM_ZONES=${DNS_UPSTREAM_ZONES:-}
+      - DNS_UPSTREAM_UNSIGNED_ZONES=${DNS_UPSTREAM_UNSIGNED_ZONES:-}
+      - LISTEN_IP=${LISTEN_IP:?LISTEN_IP is required}
+      - LISTEN_IP_HTTPS=${LISTEN_IP_HTTPS:?LISTEN_IP_HTTPS is required}
     volumes:
       - pdns-data:${SOT_PDNS_DATA_DIR}
       - pdns-filter-state:${SOT_DNS_STATE_DIR}
