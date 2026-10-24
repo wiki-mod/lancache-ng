@@ -206,12 +206,11 @@ require_value() {
     fi
 }
 
+# What: true for a dotted IPv4, each octet 0 to 255
+# Why: values are written to Docker and DNS config
+# From: Issue #1683 | PR #1858
 is_valid_ipv4() {
     local ip="$1"
-
-    # What: one regex range-checks each IPv4 octet
-    # Why: values are written to Docker and DNS config
-    # From: Issue #1683 | PR #1858
     local octet='(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])'
     [[ "$ip" =~ ^${octet}\.${octet}\.${octet}\.${octet}$ ]]
 }
@@ -246,6 +245,9 @@ is_valid_dhcp_proxy_interface() {
     [[ "${1:-}" =~ ^[A-Za-z0-9._-]{1,64}$ ]]
 }
 
+# What: true for a DNS name; labels 1-63, total up to 253
+# Why: dnsmasq writes the proxy domain into its config
+# From: Issue #450
 is_valid_dhcp_proxy_domain() {
     local domain="${1:-}"
     [[ -n "$domain" && "${#domain}" -le 253 ]] || return 1
@@ -496,6 +498,9 @@ prompt_dns_local_reverse_zones() {
     DNS_LOCAL_REVERSE_ZONES=$(yn_flag "$REPLY")
 }
 
+# What: true for a boot filename without blank or comma
+# Why: dnsmasq dhcp-boot splits its fields at commas
+# From: Issue #450
 is_valid_dhcp_proxy_boot_filename() {
     local filename="${1:-}"
     [[ -n "$filename" && "${#filename}" -le 255 ]] || return 1
@@ -880,7 +885,6 @@ install_required_command() {
 install_curl() {
     install_required_command curl "curl is missing." curl
 }
-
 install_git() {
     install_required_command git "git is missing." git
 }
@@ -1377,11 +1381,13 @@ ensure_stack_requirements_installed() {
         || die "Docker Compose plugin still missing after installing Docker requirements (exit $?): $out"
 }
 
+# What: installs curl, jq, Docker, Compose; prints next step
+# Why: a host gets its requirements before any install
+# From: Issue #1068
 cmd_install_requirements_primary() {
     ensure_stack_requirements_installed
     print_ok "Primary node requirements installed (curl, jq, Docker, Docker Compose v2). Run ./setup.sh install next."
 }
-
 cmd_install_requirements_secondary() {
     ensure_stack_requirements_installed
     print_ok "Secondary node requirements installed (curl, jq, Docker, Docker Compose v2). Next: ./setup.sh secondary --help shows the registration command."
@@ -1778,6 +1784,9 @@ append_required_env_migrated_assignment_if_empty_or_missing() {
     env_assign_from_source_or_fallback "$target_key" "$source_key" "$fallback_value" "$env_file"
 }
 
+# What: sets strict proxy mode to default if no allowlist
+# Why: no allowlist means no strict policy to preserve
+# From: Issue #563 | PR #572
 migrate_proxy_security_mode_for_update() {
     local env_file="$1" proxy_security_mode proxy_allowed_client_cidrs default_mode
 
@@ -1785,9 +1794,6 @@ migrate_proxy_security_mode_for_update() {
     default_mode=$(prod_env_default PROXY_SECURITY_MODE) || exit $?
     proxy_allowed_client_cidrs=$(get_env_var PROXY_ALLOWED_CLIENT_CIDRS "$env_file") || exit $?
 
-    # What: resets strict to the default with no allowlist
-    # Why: no allowlist means no strict policy to preserve
-    # From: Issue #1683 | PR #1858
     if [[ "$proxy_security_mode" = "strict" && -z "$proxy_allowed_client_cidrs" ]]; then
         set_env_key PROXY_SECURITY_MODE "$default_mode" "$env_file"
         print_ok "Migrated legacy PROXY_SECURITY_MODE=strict without PROXY_ALLOWED_CLIENT_CIDRS to $default_mode"
@@ -4729,7 +4735,6 @@ EOF
 # What: moves stale .env.local aside when archive lacks one
 # Why: prefers .env.local over .env, so it must go
 # From: Issue #1683 | PR #1858
-
 restore_clear_stale_env_local_if_unarchived() {
     local archived_install_root="$1" install_dir="$2" stale_target
 
@@ -5293,6 +5298,9 @@ proxy_health_path() {
     printf '/%s\n' "${rest#*/}"
 }
 
+# What: checks port, proxy binding and /healthz of one IP
+# Why: an open port may belong to another container
+# From: Issue #849
 _verify_healthz_endpoint() {
     local ip="$1" proxy_container_id port
 
@@ -5977,6 +5985,9 @@ fold_ui_setting_into_env() {
     fi
 }
 
+# What: copies valid Admin UI settings into .env per tick
+# Why: the next compose up must use the UI choice
+# From: Issue #819 | PR #831
 cmd_converge_reconcile() {
     ensure_default_install_dir
     local install_dir="${1:-$DEFAULT_INSTALL_DIR}" env_file
