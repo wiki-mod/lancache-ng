@@ -2561,7 +2561,7 @@ git_default_branch_name() {
         default_branch=$(awk '/HEAD branch/ && $NF != "(unknown)" {print $NF; exit}' <<< "$remote")
     fi
     # What: the ref of the release_tags channel in the SOT
-    # Why: setup.sh reads the SOT itself; it never runs ci.sh
+    # Why: setup.sh reads the SOT; it never runs ci.sh
     # From: Issue #1683 | PR #1858
     if [[ -z "$default_branch" ]]; then
         release=$(lancache_release_rows release) || exit $?
@@ -7927,7 +7927,7 @@ else
         if list_has_line "${REPLY,,}" "$selectable"; then
             LANCACHE_IMAGE_CHANNEL="${REPLY,,}"
             # What: any other channel needs a second yes
-            # Why: untested builds are never installed unwarned
+            # Why: untested builds never install unwarned
             # From: Issue #1683 | PR #1858
             if [[ "$LANCACHE_IMAGE_CHANNEL" != "$install_channel" ]]; then
                 print_warn "The $LANCACHE_IMAGE_CHANNEL channel holds untested daily builds; they may break the stack."
