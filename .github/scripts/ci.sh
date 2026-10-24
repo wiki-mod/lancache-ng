@@ -16237,7 +16237,7 @@ PROG
     if [ -n "${pause_out}" ]; then
         viol+=("update must pause the convergence timer before mutating install state"$'\n'"${pause_out}")
     fi
-    _ci_file_match "[CI-ERROR-CHECK-0185]" "reason=\"service stop not searched\"" "${su}" "systemctl stop \"\$CONVERGE_SERVICE_UNIT\"" -F \
+    _ci_file_match "[CI-ERROR-CHECK-0185]" "reason=\"service stop not searched\"" "${su}" "host_unit_action \"\$CONVERGE_SERVICE_UNIT\" stop" -F \
         || { [ "$?" -eq 1 ] || return 2; viol+=("update must stop the active convergence service before mutating install state"); }
     restore_out="$(_ci_capture 0 awk "$(cat <<'PROG'
 /if ! \( cmd_backup --config "\$install_dir" \); then/{b=1;next} b&&/resume_lancache_convergence_after_update true/{r=1} b&&/die "Pre-update rollback backup failed/{d=1;b=0} END{if (!(r&&d)) print "missing"}
