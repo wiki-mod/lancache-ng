@@ -1055,18 +1055,47 @@ _ci_fetch_drop() {
     fi
 }
 
-# What: Fetch the SOT-pinned CodeQL bundle; print binary.
-# Why: SOT owns tag+sha256; no action pin in the YAML.
+# What: latest release of a SOT tool: tag, asset, url, sha.
+# Why: no third-party pin; GitHub names tag and sha256.
 # From: Issue #1683 | PR #1858
-_ci_codeql_fetch() {
-    local work="$1" repo tag asset url raw sha
-    _ci_block_entry_fields external_versions codeql repository repo release_tag tag asset asset sha256 sha || return 2
-    if [ -z "${repo}" ] || [ -z "${tag}" ] || [ -z "${asset}" ]; then
-        ci_log "[CI-ERROR-CODEQL-0005]" "key=\"external_versions.codeql\" reason=\"repository/release_tag/asset missing; FAIL CLOSED\""
+_ci_tool_latest() {
+    local key="$1" repo asset rel tag ver name digest sha="" url
+    _ci_block_entry_fields external_versions "${key}" repository repo asset asset || return 2
+    if [ -z "${repo}" ] || [ -z "${asset}" ]; then
+        ci_log "[CI-ERROR-FETCH-0005]" "key=\"external_versions.${key}\" reason=\"repository/asset missing; FAIL CLOSED\""
+        return 2
+    fi
+    if ! rel="$(_ci_retry github-read gh api --jq '.tag_name, (.assets[] | "\(.name)\t\(.digest // "")")' "repos/${repo}/releases/latest")"; then
+        ci_error "[CI-ERROR-FETCH-0006]" "repo=\"${repo}\" reason=\"latest release not read\"" "${rel}"
+        return 2
+    fi
+    tag="${rel%%$'\n'*}"
+    # What: @VERSION@ is the tag after its last v.
+    # Why: v0.74.0 and codeql-bundle-v2.27.1 give X.Y.Z.
+    # From: Issue #1683 | PR #1858
+    ver="${tag##*v}"
+    _ci_fill "${asset}" "VERSION=${ver}" || return 2
+    asset="${REPLY}"
+    while IFS=$'\t' read -r name digest; do
+        [ "${name}" = "${asset}" ] || continue
+        sha="${digest#sha256:}"
+    done <<< "${rel#*$'\n'}"
+    if [[ ! "${sha}" =~ ^[0-9a-f]{64}$ ]]; then
+        ci_error "[CI-ERROR-FETCH-0007]" "repo=\"${repo}\" tag=\"${tag}\" asset=\"${asset}\" reason=\"asset or its sha256 digest not in the release\"" "${rel}"
         return 2
     fi
     url="$(_ci_env_required GITHUB_SERVER_URL)" || return 2
-    url="${url}/${repo}/releases/download/${tag}/${asset}"
+    printf '%s\t%s\t%s\t%s\n' "${tag}" "${asset}" "${url}/${repo}/releases/download/${tag}/${asset}" "${sha}"
+}
+
+# What: Fetch the latest CodeQL bundle; print binary.
+# Why: the SOT names the tool; no action in the YAML.
+# From: Issue #1683 | PR #1858
+_ci_codeql_fetch() {
+    local work="$1" rel tag asset url raw sha
+    rel="$(_ci_tool_latest codeql)" || return 2
+    IFS=$'\t' read -r tag asset url sha <<< "${rel}"
+    printf 'codeql bundle: %s\n' "${tag}" >&2
     _ci_fetch_verified "${url}" "${sha}" "${work}/${asset}" || return 2
     if ! raw="$(tar --no-same-owner -xzf "${work}/${asset}" -C "${work}" 2>&1)"; then
         ci_error "[CI-ERROR-CODEQL-0007]" "asset=\"${asset}\" reason=\"bundle extract failed\"" "${raw}"
@@ -5308,24 +5337,23 @@ _ci_host_arch() {
     return 2
 }
 
-# What: Fetch the SOT-pinned trivy once per run; print path.
-# Why: AG-VAL-017: trivy is external; the SOT owns the pin.
+# What: Fetch the latest trivy once per tag; print path.
+# Why: AG-VAL-017: trivy is external; the SOT names it.
 # From: Issue #1683
 _ci_trivy_bin() {
-    local dir="${CI_TMPDIR}/trivy-bin" bin err arch repo tag asset sha url
+    local dir bin err arch rel tag asset sha url
+    arch="$(_ci_host_arch)" || return 2
+    rel="$(_ci_tool_latest "trivy-${arch}")" || return 2
+    IFS=$'\t' read -r tag asset url sha <<< "${rel}"
+    # What: the kept binary is the one of the latest tag.
+    # Why: a kept older trivy must not stand in for latest.
+    # From: Issue #1683 | PR #1858
+    dir="${CI_TMPDIR}/trivy-${tag}"
     bin="${dir}/trivy"
     if [ -x "${bin}" ]; then
         printf '%s\n' "${bin}"
         return 0
     fi
-    arch="$(_ci_host_arch)" || return 2
-    _ci_block_entry_fields external_versions "trivy-${arch}" repository repo release_tag tag asset asset sha256 sha || return 2
-    if [ -z "${repo}" ] || [ -z "${tag}" ] || [ -z "${asset}" ]; then
-        ci_log "[CI-ERROR-SCAN-0037]" "key=\"external_versions.trivy-${arch}\" reason=\"repository/release_tag/asset missing; FAIL CLOSED\""
-        return 2
-    fi
-    url="$(_ci_env_required GITHUB_SERVER_URL)" || return 2
-    url="${url}/${repo}/releases/download/${tag}/${asset}"
     if ! err="$(mkdir -p "${dir}" 2>&1)"; then
         ci_error "[CI-ERROR-SCAN-0038]" "dir=\"${dir}\" reason=\"trivy dir not created\"" "${err}"
         return 2

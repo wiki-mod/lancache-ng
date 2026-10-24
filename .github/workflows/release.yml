@@ -46,7 +46,7 @@ env:
   CI_VARIABLES: ${{ toJSON(vars) }}
 jobs:
   # What: resolve build-tools image for the SBOM job.
-  # Why: ci.sh fetches trivy at its pin; the image has none.
+  # Why: ci.sh fetches the latest trivy; the image has none.
   # From: Issue #1683
   resolve-build-tools:
     name: resolve build-tools
