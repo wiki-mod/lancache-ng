@@ -60,7 +60,7 @@ fn seal(master: &[u8; MASTER_LEN], plaintext: &[u8]) -> Result<Sealed> {
     let salt: [u8; SALT_LEN] = rand::random();
     let nonce: [u8; NONCE_LEN] = rand::random();
     let ciphertext = cipher_for(master, &salt)?
-        .encrypt(XNonce::from_slice(&nonce), plaintext)
+        .encrypt(&XNonce::from(nonce), plaintext)
         .map_err(|e| anyhow::anyhow!("credential encryption failed: {e}"))?;
     Ok(Sealed {
         salt: salt.to_vec(),
@@ -72,14 +72,10 @@ fn seal(master: &[u8; MASTER_LEN], plaintext: &[u8]) -> Result<Sealed> {
 // What: open a sealed credential; it stays in memory.
 // Why: the AEAD tag rejects a wrong secret or tampering.
 fn open(master: &[u8; MASTER_LEN], sealed: &Sealed) -> Result<Vec<u8>> {
-    if sealed.nonce.len() != NONCE_LEN {
-        bail!("persisted credential has a malformed nonce");
-    }
+    let nonce = XNonce::try_from(sealed.nonce.as_slice())
+        .map_err(|_| anyhow::anyhow!("persisted credential has a malformed nonce"))?;
     cipher_for(master, &sealed.salt)?
-        .decrypt(
-            XNonce::from_slice(&sealed.nonce),
-            sealed.ciphertext.as_ref(),
-        )
+        .decrypt(&nonce, sealed.ciphertext.as_ref())
         .map_err(|e| {
             anyhow::anyhow!(
                 "credential decryption failed (wrong master secret, or data corrupted): {e}"

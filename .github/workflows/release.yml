@@ -120,7 +120,7 @@ jobs:
         env:
           PROJECT_AUTOMATION_PAT: ${{ secrets.PROJECT_AUTOMATION_PAT }}
         run: bash .github/scripts/ci.sh release-changelog "${RELEASE_TAG}"
-      # What: set PROJECT_RELEASE_VERSION from the stable tag
+      # What: PROJECT_RELEASE_VERSION from the stable tag
       # Why: GITHUB_TOKEN cannot write repo variables
       # From: Issue #1683 | PR #1858
       - name: Set the release version variable
