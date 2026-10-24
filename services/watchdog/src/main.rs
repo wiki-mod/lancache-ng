@@ -2803,6 +2803,10 @@ struct RecursorConf<'a> {
     any: &'a str,
     knobs: &'a DnsKnobs,
     upstream: &'a Upstream,
+    // What: serve_rfc1918, true only with local PTR zones.
+    // Why: when off, private PTR asks go to the upstream.
+    // From: Issue #1918 | PR #1858
+    reverse: bool,
 }
 
 impl RecursorConf<'_> {
@@ -2850,6 +2854,7 @@ impl RecursorConf<'_> {
             lua_dns,
             any,
             knobs: k,
+            reverse: rfc1918,
             ..
         } = *self;
         let (query, api) = (yaml_rows(&k.query_allow), yaml_rows(&k.api_allow));
@@ -2859,7 +2864,8 @@ impl RecursorConf<'_> {
         let servfail = k.servfail_ttl;
         format!(
             "incoming:\n  listen:\n    - {any}\n  port: {port}\n  allow_from:\n{query}\
-             recursor:\n  forward_zones:\n{forwards}  lua_config_file: {lua_config}\n\
+             recursor:\n  serve_rfc1918: {rfc1918}\n  forward_zones:\n{forwards}\
+             \x20 lua_config_file: {lua_config}\n\
              \x20 lua_dns_script: {lua_dns}\n  minimum_ttl_override: {min_ttl}\n\
              recordcache:\n  max_entries: {rc_max}\n  refresh_on_ttl_perc: {perc}\n\
              \x20 serve_stale_extensions: {stale}\n  max_negative_ttl: {ttl}\n\
@@ -2953,6 +2959,7 @@ fn recursor(ctx: &Ctx, rec: &Recursor) -> Result<Run, String> {
         zones: &zones,
         knobs: &knobs,
         upstream: &upstream,
+        reverse: config::local_reverse(&config::process_env)?,
     };
     let store = lancache_ng::SnapshotStore::new(
         PathBuf::from(ctx.need("DNS_CONFIG_SNAPSHOT_DIR")?).join(rec.name),
