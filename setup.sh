@@ -478,6 +478,24 @@ prompt_dns_upstream() {
     DNS_UPSTREAM_UNSIGNED_ZONES=$(dns_upstream_join "${entries[@]}")
 }
 
+# What: asks for local private PTR zones; kea needs them on
+# Why: off sends PTR lookups on like every other name
+# From: Issue #1918 | PR #1858
+prompt_dns_local_reverse_zones() {
+    local current="$1" dhcp_mode="$2" yn="N"
+    if [[ "$dhcp_mode" = "kea" ]]; then
+        DNS_LOCAL_REVERSE_ZONES=1
+        print_ok "Local reverse zones on: Kea writes PTR records for its leases"
+        return 0
+    fi
+    [[ "$current" != 1 ]] || yn="Y"
+    printf "  Reverse lookups (IP to name, PTR) of private networks go to\n"
+    printf "  the external DNS server or the internet. LanCache-NG can\n"
+    printf "  answer them itself instead, from its own reverse zones.\n\n"
+    ask "Answer private reverse lookups locally? $(yn_hint "$yn")" "$yn"
+    DNS_LOCAL_REVERSE_ZONES=$(yn_flag "$REPLY")
+}
+
 is_valid_dhcp_proxy_boot_filename() {
     local filename="${1:-}"
     [[ -n "$filename" && "${#filename}" -le 255 ]] || return 1
@@ -5038,7 +5056,9 @@ EOF
 Usage: ./setup.sh configure-upstream-dns [install-dir]
 
 Shows the external DNS setting of an existing primary installation and lets
-you set, change or remove it. The answers are checked while you type. The
+you set, change or remove it. It also asks whether LanCache-NG answers
+reverse lookups (PTR) of private networks itself; with Kea as DHCP server
+this stays on. The answers are checked while you type. The
 stack then restarts through the same health-gated steps as ./setup.sh update;
 if it does not become healthy, the previous setting is restored. If
 [install-dir] is omitted, ${DEFAULT_INSTALL_DIR} is used.
@@ -7069,6 +7089,7 @@ restore_dns_upstream() {
     set_env_key DNS_UPSTREAM_SERVERS "$3" "$env_file"
     set_env_key DNS_UPSTREAM_ZONES "$4" "$env_file"
     set_env_key DNS_UPSTREAM_UNSIGNED_ZONES "$5" "$env_file"
+    set_env_key DNS_LOCAL_REVERSE_ZONES "$6" "$env_file"
     stack_compose "$install_dir" "$env_file" up -d dns || rc=$?
     if [[ "$rc" -ne 0 ]]; then
         print_error "Failed to restart dns with the previous external DNS setting (exit $rc)."
@@ -7122,13 +7143,15 @@ cmd_configure_upstream_dns() {
     print_step "Reading current configuration"
 
     local env_file ip_http ip_https lan services apply_rc=0
-    local old_servers old_zones old_unsigned
+    local old_servers old_zones old_unsigned old_reverse dhcp_mode
     local -a all_services
     env_file=$(runtime_env_file_for_install_dir "$install_dir")
     [[ -f "$env_file" ]] || die "Configuration not found: $env_file"
     old_servers=$(get_env_var DNS_UPSTREAM_SERVERS "$env_file") || exit $?
     old_zones=$(get_env_var DNS_UPSTREAM_ZONES "$env_file") || exit $?
     old_unsigned=$(get_env_var DNS_UPSTREAM_UNSIGNED_ZONES "$env_file") || exit $?
+    old_reverse=$(env_or_sot_default DNS_LOCAL_REVERSE_ZONES "$env_file") || exit $?
+    dhcp_mode=$(env_or_sot_default DHCP_MODE "$env_file") || exit $?
     ip_http=$(get_env_var IP_HTTP "$env_file") || exit $?
     ip_https=$(get_env_var IP_HTTPS "$env_file") || exit $?
     lan=$(env_or_sot_default DHCP_DOMAIN "$env_file") || exit $?
@@ -7136,13 +7159,16 @@ cmd_configure_upstream_dns() {
     printf '\n  %sCurrent configuration:%s\n' "${BOLD}" "${RESET}"
     printf "    DNS servers:        %s\n" "${old_servers:-none (LanCache-NG resolves names itself)}"
     printf "    Forwarded domains:  %s\n" "${old_zones:-all}"
-    printf "    No DNSSEC:          %s\n\n" "${old_unsigned:-none}"
+    printf "    No DNSSEC:          %s\n" "${old_unsigned:-none}"
+    printf "    Local PTR zones:    %s\n\n" "$([[ "$old_reverse" = 1 ]] && echo on || echo off)"
 
     print_step "Prompt for the new setting"
 
     prompt_dns_upstream "$old_servers" "$old_zones" "$old_unsigned" "${ip_http},${ip_https}" "$lan"
+    prompt_dns_local_reverse_zones "$old_reverse" "$dhcp_mode"
     if [[ "$DNS_UPSTREAM_SERVERS" = "$old_servers" && "$DNS_UPSTREAM_ZONES" = "$old_zones" \
-        && "$DNS_UPSTREAM_UNSIGNED_ZONES" = "$old_unsigned" ]]; then
+        && "$DNS_UPSTREAM_UNSIGNED_ZONES" = "$old_unsigned" \
+        && "$DNS_LOCAL_REVERSE_ZONES" = "$old_reverse" ]]; then
         print_ok "No change. Nothing was written and no container was restarted."
         exit 0
     fi
@@ -7150,7 +7176,8 @@ cmd_configure_upstream_dns() {
     printf '\n  %sNew configuration:%s\n' "${BOLD}" "${RESET}"
     printf "    DNS servers:        %s\n" "${DNS_UPSTREAM_SERVERS:-none (LanCache-NG resolves names itself)}"
     printf "    Forwarded domains:  %s\n" "${DNS_UPSTREAM_ZONES:-all}"
-    printf "    No DNSSEC:          %s\n\n" "${DNS_UPSTREAM_UNSIGNED_ZONES:-none}"
+    printf "    No DNSSEC:          %s\n" "${DNS_UPSTREAM_UNSIGNED_ZONES:-none}"
+    printf "    Local PTR zones:    %s\n\n" "$([[ "$DNS_LOCAL_REVERSE_ZONES" = 1 ]] && echo on || echo off)"
 
     confirm "Apply changes? [y/N]" "N" || { printf "\n  Cancelled.\n\n"; exit 0; }
 
@@ -7170,17 +7197,18 @@ cmd_configure_upstream_dns() {
     set_env_key DNS_UPSTREAM_SERVERS "$DNS_UPSTREAM_SERVERS" "$env_file"
     set_env_key DNS_UPSTREAM_ZONES "$DNS_UPSTREAM_ZONES" "$env_file"
     set_env_key DNS_UPSTREAM_UNSIGNED_ZONES "$DNS_UPSTREAM_UNSIGNED_ZONES" "$env_file"
+    set_env_key DNS_LOCAL_REVERSE_ZONES "$DNS_LOCAL_REVERSE_ZONES" "$env_file"
     print_ok "Saved in $env_file"
 
     apply_stack_update_ordered "$install_dir" restore_dns_upstream "$install_dir" "$env_file" \
-        "$old_servers" "$old_zones" "$old_unsigned" || apply_rc=$?
+        "$old_servers" "$old_zones" "$old_unsigned" "$old_reverse" || apply_rc=$?
     case "$apply_rc" in
         0) ;;
         1) die "The new external DNS setting failed the health gate; the previous setting is active again." ;;
         *) die "The new setting failed the health gate, and restoring the previous one failed too. Check: $SCRIPT_DIR/setup.sh compose $install_dir logs dns" ;;
     esac
     if ! dns_upstream_is_live "$install_dir" "$env_file" "$DNS_UPSTREAM_SERVERS"; then
-        restore_dns_upstream "$install_dir" "$env_file" "$old_servers" "$old_zones" "$old_unsigned" \
+        restore_dns_upstream "$install_dir" "$env_file" "$old_servers" "$old_zones" "$old_unsigned" "$old_reverse" \
             || die "The dns container rejected the new setting, and restoring the previous one failed. Check: $SCRIPT_DIR/setup.sh compose $install_dir logs dns"
         die "The dns container rejected the new setting (see: $SCRIPT_DIR/setup.sh compose $install_dir logs dns); the previous setting is active again."
     fi
@@ -8174,6 +8202,13 @@ else
     print_ok "DHCP skipped — existing router DHCP remains active"
 fi
 
+# What: step 7a: local private PTR zones, SOT default off
+# Why: kea DDNS writes PTR records into these zones
+# From: Issue #1918 | PR #1858
+print_step "Reverse lookups (PTR)"
+install_reverse_zones=$(prod_env_default DNS_LOCAL_REVERSE_ZONES) || exit $?
+prompt_dns_local_reverse_zones "$install_reverse_zones" "$DHCP_MODE"
+
 # What: step 7b: asks for the NTP start value
 # Why: the watchdog runs chronyd in the services container
 # From: Issue #1683 | PR #1912
@@ -8404,6 +8439,11 @@ AUTO_UPDATE_ENABLED=${AUTO_UPDATE_ENABLED}
 DNS_UPSTREAM_SERVERS=${DNS_UPSTREAM_SERVERS}
 DNS_UPSTREAM_ZONES=${DNS_UPSTREAM_ZONES}
 DNS_UPSTREAM_UNSIGNED_ZONES=${DNS_UPSTREAM_UNSIGNED_ZONES}
+
+# What: 1 = LanCache-NG answers private PTR lookups itself
+# Why: 0 sends them on like every other name; kea needs 1
+# From: Issue #1918 | PR #1858
+DNS_LOCAL_REVERSE_ZONES=${DNS_LOCAL_REVERSE_ZONES}
 
 # What: Admin UI login; empty only with ALLOW_INSECURE_UI
 # Why: an open Admin UI controls the whole stack
