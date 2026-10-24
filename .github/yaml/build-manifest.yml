@@ -539,7 +539,7 @@ runtime:
     - SETUP_STATUS_LOG_LINES=30
     - SETUP_LOGBUNDLE_LOG_LINES=2000
     - SETUP_UI_USER_DEFAULT=admin
-    # What: setup.sh health gate waits, samples and probe name.
+    # What: health gate waits, samples, DNS probe name.
     # Why: setup.sh reads them here; no literal in its code.
     # From: Issue #1683 | PR #1858
     - SETUP_HEALTH_WAIT_SERVICES_SECONDS=180
