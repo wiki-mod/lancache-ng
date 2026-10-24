@@ -14479,11 +14479,6 @@ _ci_check_orphaned_branches() {
     return 1
 }
 
-# What: Node runtimes GitHub Actions has retired.
-# Why: a pin on an EoL runtime breaks once GitHub drops it.
-# From: Issue #1683 | PR #1858
-_ci_action_deprecated_runtimes=" node6 node10 node12 node16 node20 "
-
 # What: print top-level runs.using from an action manifest.
 # Why: one parser for each fetched action.yml body.
 # From: Issue #1683 | PR #1858
@@ -14675,7 +14670,12 @@ _ci_check_action_node_versions() {
     # Why: external manifests come via raw tag reads.
     # From: Issue #1683 | PR #1858
     local v using owner repo subpath ref res marker meta
-    local entry tag used_entries=" "
+    local entry tag used_entries=" " node_min
+    node_min="$(_ci_variable CI_ACTION_NODE_MIN)" || return 2
+    if [[ ! "${node_min}" =~ ^[0-9]+$ ]]; then
+        ci_log "[CI-ERROR-CHECK-0142]" "got=\"${node_min}\" key=\"CI_ACTION_NODE_MIN\" reason=\"not a whole number\""
+        return 2
+    fi
     for v in "${uses_values[@]}"; do
         [ -n "${v}" ] || continue
         # What: a local uses: ./ path fails; workflows pass.
@@ -14739,8 +14739,8 @@ _ci_check_action_node_versions() {
                 using="$(_ci_action_runs_using <<<"${meta}")"
                 if [ -z "${using}" ]; then
                     viol+=("'${v}' has no parseable runs.using")
-                elif case "${_ci_action_deprecated_runtimes}" in *" ${using} "*) true ;; *) false ;; esac; then
-                    viol+=("'${v}' (in: $(_ci_ando_reffiles "${v}")) declares runs.using: ${using}, a deprecated Node runtime")
+                elif [[ "${using}" =~ ^node([0-9]+)$ ]] && [ "${BASH_REMATCH[1]}" -lt "${node_min}" ]; then
+                    viol+=("'${v}' (in: $(_ci_ando_reffiles "${v}")) declares runs.using: ${using}, below node${node_min}")
                 fi ;;
             NOTFOUND)
                 viol+=("no action.yml/action.yaml for '${v}' at ref '${ref}' (in: $(_ci_ando_reffiles "${v}")); broken pin") ;;
