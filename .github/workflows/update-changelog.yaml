@@ -35,6 +35,11 @@ jobs:
           # whatever ref triggered this event, so the commit below lands on
           # the right branch.
           ref: ${{ github.event.release.target_commitish }}
+          # master accepts a direct push only from an admin: the PR ruleset
+          # and the classic required status checks reject GITHUB_TOKEN
+          # (GH013, v0.3.0 run 30793393851). git-auto-commit-action pushes
+          # with the credentials this checkout stores.
+          token: ${{ secrets.PROJECT_AUTOMATION_PAT }}
 
       - name: Update Changelog
         uses: stefanzweifel/changelog-updater-action@a938690fad7edf25368f37e43a1ed1b34303eb36 # v1.12.0
