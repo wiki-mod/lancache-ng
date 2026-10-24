@@ -2515,6 +2515,13 @@ _ci_classify_failure() {
         esac
         return 0
     fi
+    # What: op=cargo: only a network failure is transient.
+    # Why: a missing crate or bad manifest fails again.
+    # From: Issue #1683 | PR #1858
+    if [ "${op}" = cargo ]; then
+        if _ci_failure_is_network "${low}"; then printf 'transient\n'; else printf 'permanent\n'; fi
+        return 0
+    fi
     # What: op=validate-net: pool/address contention only.
     # Why: a slot collision is no image or config failure.
     # From: Issue #1683 | PR #1858
