@@ -60,8 +60,8 @@ jobs:
         password: ${{ secrets.GITHUB_TOKEN }}
     outputs:
       matrix: ${{ steps.impact.outputs.codeql-matrix }}
+      codeql-runner: ${{ steps.impact.outputs.codeql-runner }}
       image: ${{ steps.resolve.outputs.image }}
-      runner: ${{ steps.jobs.outputs.runner }}
       timeouts: ${{ steps.jobs.outputs.timeouts }}
     steps:
       # What: shallow checkout of the event commit.
@@ -98,7 +98,10 @@ jobs:
     permissions:
       contents: read
       security-events: write
-    runs-on: ${{ needs.impact.outputs.runner }}
+    # What: always the GitHub-hosted runner from ci.sh.
+    # Why: CodeQL needs 4-8 GB RAM; the fleet has less.
+    # From: Issue #1683 | PR #1858
+    runs-on: ${{ needs.impact.outputs.codeql-runner }}
     container:
       image: ${{ needs.impact.outputs.image }}
       credentials: *ghcr_credentials

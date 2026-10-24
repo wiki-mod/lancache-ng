@@ -855,6 +855,15 @@ _ci_runner_label() {
     _ci_platform_field "${platform}" "${field}" "${id}" "${ctx}"
 }
 
+# What: GitHub-hosted label of the first platform.
+# Why: jobs that must never run on the fleet use it.
+# From: Issue #1683 | PR #1858
+_ci_hosted_runner() {
+    local id="$1" plat
+    plat="$(_ci_build_matrix_platforms)" || return 2
+    _ci_platform_field "${plat%%$'\n'*}" runner "${id}" "reason=\"no GitHub-hosted runner for the first build_matrix platform\""
+}
+
 # =========================================================
 # IMPACT ENGINE
 # =========================================================
@@ -982,6 +991,12 @@ ci_cmd_codeql_impact() {
         [ "${hit}" = true ] && { include="$(_ci_matrix_append "${include}" language="${lang}")" || return 2; }
     done <<< "${langs}"
     printf 'codeql-matrix=%s\n' "$(_ci_matrix_doc "${include}")"
+    # What: analyze always on the GitHub-hosted runner.
+    # Why: CodeQL needs 4-8 GB RAM; the fleet has less.
+    # From: Issue #1683 | PR #1858
+    local runner
+    runner="$(_ci_hosted_runner "[CI-ERROR-CODEQL-0019]")" || return 2
+    printf 'codeql-runner=%s\n' "${runner}"
     n="$(_ci_capture 0 jq -r 'length' <<< "${include}")" || return 2
     ci_log "[CI-INFO-CODEQL-0001]" "phase=codeql-impact langs=${n} changed=${#changed[@]}"
 }
@@ -6596,7 +6611,7 @@ ci_cmd_channel_checkout() {
 # Why: the SOT owns both; CHECK_CHANNEL narrows a dispatch.
 # From: Issue #1683 | PR #1858
 ci_cmd_channel_matrix() {
-    local want="${CHECK_CHANNEL:-}" list plat runner json vrc=0
+    local want="${CHECK_CHANNEL:-}" list runner json vrc=0
     local -a chans=()
     if [ -n "${want}" ]; then
         _ci_valid_channel "${want}" || vrc=$?
@@ -6614,8 +6629,7 @@ ci_cmd_channel_matrix() {
         return 2
     fi
     json="$(_ci_capture 0 jq -cn "\$ARGS.positional" --args "${chans[@]}")" || return 2
-    plat="$(_ci_build_matrix_platforms)" || return 2
-    runner="$(_ci_platform_field "${plat%%$'\n'*}" runner "[CI-ERROR-PROMOTE-0027]" "reason=\"no GitHub-hosted runner for the first build_matrix platform\"")" || return 2
+    runner="$(_ci_hosted_runner "[CI-ERROR-PROMOTE-0027]")" || return 2
     _ci_step_output "[CI-ERROR-PROMOTE-0028]" channels "${json}" || return 2
     _ci_step_output "[CI-ERROR-PROMOTE-0029]" runner "${runner}" || return 2
     printf 'channels=%s runner=%s\n' "${json}" "${runner}"
