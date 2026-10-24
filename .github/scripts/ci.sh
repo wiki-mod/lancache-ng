@@ -9453,7 +9453,7 @@ _ci_validate_env_local() {
 # From: Issue #1683
 _ci_validate_dns_rollback() {
     local project="$1" ip cid key jar csrf snap resp code rc=0 last
-    local zone label old new dns_wait ucid base lbase tries pause
+    local zone label old new dns_wait ucid base lbase tries pause decoy
     ip="$(_ci_validate_container_ip "${project}" dns)"
     cid="$(_ci_validate_cid "${project}" dns)" || return 2
     if [ -z "${ip}" ] || [ -z "${cid}" ]; then
@@ -9516,7 +9516,8 @@ _ci_validate_dns_rollback() {
     # What: setup.sh rollback, wrong host PDNS_API_KEY.
     # Why: the key must be resolved inside the container.
     # From: Issue #836
-    COMPOSE_PROJECT_NAME="${project}" PDNS_API_KEY=CHANGE_ME_host_side_key_never_used \
+    decoy="$(_ci_variable CI_VALIDATE_DECOY_API_KEY)" || return 2
+    COMPOSE_PROJECT_NAME="${project}" PDNS_API_KEY="${decoy}" \
         _ci_validate_setup_rollback resp rc "" dns "${zone}" "${snap}" || return 2
     case "${rc}:${resp}" in
         *"cache-flush publishes failed"*) rc=1 ;;
