@@ -9546,12 +9546,38 @@ _ci_validate_ui_login() {
     return "${_ci_ul_rc}"
 }
 
+# What: setup.sh args on a one-run .env.local; @INST@=dir.
+# Why: ci.sh runs setup.sh commands; it loads none of it.
+# From: Issue #1683 | PR #1858
+_ci_setup_run() {   # out rc errfile ("" = merge) env args
+    local -n _ci_su_out="$1" _ci_su_rc="$2"
+    local _ci_su_err="$3" _ci_su_env="$4" _ci_su_c _ci_su_bin _ci_su_inst _ci_su_a
+    local -a _ci_su_args=()
+    shift 4
+    _ci_su_rc=0
+    _ci_su_c="$(_ci_compose_file)" || return 2
+    case "${_ci_su_c}" in /*) ;; *) _ci_su_c="${CI_REPO_ROOT}/${_ci_su_c}" ;; esac
+    _ci_su_bin="$(_ci_installer)" || return 2
+    _ci_su_inst="$(dirname "${_ci_su_c}")"
+    for _ci_su_a in "$@"; do
+        [ "${_ci_su_a}" != @INST@ ] || _ci_su_a="${_ci_su_inst}"
+        _ci_su_args+=("${_ci_su_a}")
+    done
+    _ci_validate_env_local "${_ci_su_inst}" "${_ci_su_env}" || return 2
+    if [ -n "${_ci_su_err}" ]; then
+        _ci_su_out="$(bash "${_ci_su_bin}" "${_ci_su_args[@]}" 2>"${_ci_su_err}")" || _ci_su_rc=$?
+    else
+        _ci_su_out="$(bash "${_ci_su_bin}" "${_ci_su_args[@]}" 2>&1)" || _ci_su_rc=$?
+    fi
+    rm -f "${_ci_su_inst}/.env.local"
+}
+
 # What: setup.sh rollback around a one-run .env.local.
 # Why: one owner for the dns and Kea rollback legs.
 # From: Issue #1683 | PR #1912
 _ci_validate_setup_rollback() {
     local -n _ci_sr_out="$1" _ci_sr_rc="$2"
-    local _ci_sr_env="$3" _ci_sr_svc="$4" _ci_sr_compose _ci_sr_su _ci_sr_inst
+    local _ci_sr_env="$3" _ci_sr_svc="$4"
     shift 4
     _ci_sr_rc=0
     # What: the run's state root leads the one-run env file
@@ -9562,12 +9588,8 @@ _ci_validate_setup_rollback() {
         return 2
     fi
     _ci_sr_env="LANCACHE_STATE_DIR=${LANCACHE_STATE_DIR}${_ci_sr_env:+$'\n'${_ci_sr_env}}"
-    _ci_sr_compose="$(_ci_compose_file)" || return 2
-    _ci_sr_su="$(_ci_installer)" || return 2
-    _ci_sr_inst="$(dirname "${_ci_sr_compose}")"
-    _ci_validate_env_local "${_ci_sr_inst}" "${_ci_sr_env}" || return 2
-    _ci_sr_out="$(bash "${_ci_sr_su}" reset-to-last-known-good-config "${_ci_sr_svc}" "${_ci_sr_inst}" "$@" --yes 2>&1)" || _ci_sr_rc=$?
-    rm -f "${_ci_sr_inst}/.env.local"
+    _ci_setup_run _ci_sr_out _ci_sr_rc "" "${_ci_sr_env}" \
+        reset-to-last-known-good-config "${_ci_sr_svc}" @INST@ "$@" --yes
 }
 
 # What: POST one LAN A record through the ui (303 on ok)
@@ -15715,17 +15737,13 @@ _ci_check_prod_state_wiring() {
     doc_rel="$(_ci_variable CI_BACKUP_RESTORE_DOC)" || return 2
     doc="${repo_root}/${doc_rel}"
     local -a viol=()
-    local key f keys su
+    local key f keys
     for f in "${compose}" "${doc}"; do
         [ -f "${f}" ] || { ci_log "[CI-ERROR-CHECK-0043]" "path=\"${f}\" reason=\"required prod-state-wiring input missing\""; return 2; }
     done
-    # What: state keys come from setup.sh prod_state_keys.
-    # Why: one key list owner; a fixed copy goes stale.
-    # From: Issue #1683
-    su="$(_ci_installer "${repo_root}")" || return 2
-    keys="$(_ci_capture 0 bash -c "set -euo pipefail; . \"\$1\"; prod_state_keys" _ "${su}")" || return 2
+    keys="$(_ci_state_keys)" || return 2
     if [ -z "${keys}" ]; then
-        ci_log "[CI-ERROR-CHECK-0174]" "path=\"${su}\" reason=\"prod_state_keys returned no state key\""
+        ci_log "[CI-ERROR-CHECK-0174]" "reason=\"SOT runtime.state_dir_keys names no state key\""
         return 2
     fi
     # What: a key counts only as a whole word, not a prefix.
@@ -15789,14 +15807,49 @@ _ci_validate_host_tools() {
     fi
 }
 
-# What: compose env rows from setup.sh sot_compose_env.
-# Why: the one owner; $1 env file or "", $2 state root.
-# From: Issue #1683 | PR #1912
+# What: the state keys of SOT runtime.state_dir_keys.
+# Why: the SOT owns the list; ci.sh loads no setup.sh.
+# From: Issue #1683 | PR #1858
+_ci_state_keys() {
+    local rows key sub
+    rows="$(_ci_required_field runtime state_dir_keys blocklist)" || return 2
+    while read -r key sub; do
+        [ -z "${key}" ] || printf '%s\n' "${key}"
+    done <<< "${rows}"
+}
+
+# What: SOT_ and state-dir rows setup.sh compose sets.
+# Why: setup.sh owns them; ci.sh runs it, $1 = .env.local.
+# From: Issue #1683 | PR #1858
 _ci_sot_compose_env() {
-    _ci_capture 0 bash -c "$(cat <<'PROG'
-source "$1" && sot_compose_env "$2" "$3"
-PROG
-        )" _ "${CI_REPO_ROOT}/setup.sh" "${1:-}" "${2:-}"
+    local out rc err keys line k miss=""
+    keys="$(_ci_state_keys)" || return 2
+    err="$(_ci_mktemp "${CI_TMPDIR}/ci-setup-err.XXXXXX")" || return 2
+    _ci_setup_run out rc "${err}" "$1" compose @INST@ config --environment || { rm -f "${err}"; return 2; }
+    # What: stderr only as raw; stdout holds all env values.
+    # Why: a warning fails; secrets must not reach the log.
+    # From: Issue #1683 | PR #1858
+    if [ "${rc}" -ne 0 ] || [ -s "${err}" ]; then
+        ci_error "[CI-ERROR-VALIDATE-0134]" "rc=${rc} reason=\"setup.sh compose config --environment failed or wrote stderr\"" "$(<"${err}")"
+        rm -f "${err}"
+        return 2
+    fi
+    rm -f "${err}"
+    local -A seen=()
+    while IFS= read -r line; do
+        k="${line%%=*}"
+        case "${k}" in
+            SOT_*) printf '%s\n' "${line}" ;;
+            *) [[ $'\n'"${keys}"$'\n' != *$'\n'"${k}"$'\n'* ]] || { printf '%s\n' "${line}"; seen["${k}"]=1; } ;;
+        esac
+    done <<< "${out}"
+    while IFS= read -r k; do
+        [ -n "${seen[${k}]:-}" ] || miss+=" ${k}"
+    done <<< "${keys}"
+    if [ -n "${miss}" ]; then
+        ci_log "[CI-ERROR-VALIDATE-0135]" "keys=\"${miss# }\" reason=\"setup.sh compose set no such state dir\""
+        return 2
+    fi
 }
 
 # What: image coordinates of the compose images, KEY=VALUE.
@@ -15822,7 +15875,7 @@ _ci_validation_images() {
 # Why: one owner for check and validate; $1 = state root.
 # From: Issue #1683 | PR #1858
 _ci_validation_env() {
-    local fx kind owner secrets k v n=0 rows
+    local fx kind owner secrets k v n=0 rows state body=""
     local -a pairs=()
     fx="$(_ci_block_entry_list validation "" compose_validation_env)" || return 2
     if [ -z "${fx}" ]; then
@@ -15839,12 +15892,12 @@ _ci_validation_env() {
             *=*) _ci_fill "${k}" "${rows}" || return 2; v="${REPLY}" ;;
             *) v="$(_ci_default_in "${rows}" "${k}")" || return 2; v="${k}=${v}" ;;
         esac
-        printf '%s\n' "${v}"
+        body+="${v}"$'\n'
     done <<< "${fx}"
-    v="${1:-}"
-    [ -n "${v}" ] || v="$(_ci_default_in "${rows}" LANCACHE_STATE_DIR)" || return 2
-    _ci_sot_compose_env "" "${v}" || return 2
-    _ci_validation_images || return 2
+    state="${1:-}"
+    [ -n "${state}" ] || state="$(_ci_default_in "${rows}" LANCACHE_STATE_DIR)" || return 2
+    v="$(_ci_validation_images)" || return 2
+    body+="${v}"$'\n'
     # What: a fresh value per secret key, setup.sh format.
     # Why: a fixed key in the SOT is a hardcoded credential.
     # From: Issue #1683 | PR #1858
@@ -15857,7 +15910,11 @@ _ci_validation_env() {
     # What: one setup.sh load makes every secret.
     # Why: a load per key cost 10 loads per env.
     # From: Issue #1683 | PR #1912
-    [ "${n}" -eq 0 ] || _ci_run "[CI-ERROR-VALIDATE-0100]" "keys=${n} reason=\"secret not generated\"" \
+    if [ "${n}" -eq 0 ]; then
+        ci_log "[CI-ERROR-VALIDATE-0101]" "reason=\"no SOT runtime.managed_secrets stack or secondary row\""
+        return 2
+    fi
+    v="$(_ci_run "[CI-ERROR-VALIDATE-0100]" "keys=${n} reason=\"secret not generated\"" \
         bash -c "$(cat <<'PROG'
 source "$1" || exit 2; shift
             while [ "$#" -gt 1 ]; do
@@ -15866,11 +15923,13 @@ source "$1" || exit 2; shift
                 shift 2
             done
 PROG
-            )" _ "${CI_REPO_ROOT}/setup.sh" "${pairs[@]}" || return 2
-    if [ "${n}" -eq 0 ]; then
-        ci_log "[CI-ERROR-VALIDATE-0101]" "reason=\"no SOT runtime.managed_secrets stack or secondary row\""
-        return 2
-    fi
+            )" _ "${CI_REPO_ROOT}/setup.sh" "${pairs[@]}")" || return 2
+    body+="${v}"
+    # What: setup.sh compose adds the SOT_ and state rows.
+    # Why: the .env.local holds every fixture value first.
+    # From: Issue #1683 | PR #1858
+    v="$(_ci_sot_compose_env "LANCACHE_STATE_DIR=${state}"$'\n'"${body}")" || return 2
+    printf '%s\n%s\n' "${body}" "${v}"
 }
 
 # What: repo root joined with a SOT path variable.
@@ -16012,7 +16071,8 @@ _ci_compose_run() {
         names="$(_ci_run "[CI-ERROR-CORE-0145]" "env_file=\"${env_file}\" reason=\"compose variable names unreadable\"" \
             jq -r 'keys[]' <<< "${vars}")" || return 2
         [ -z "${names}" ] || mapfile -t unsetv <<< "${names}"
-        fx="$(_ci_sot_compose_env "${env_file}")" || return 2
+        fx="$(_ci_capture 0 cat "${env_file}")" || return 2
+        fx="$(_ci_sot_compose_env "${fx}")" || return 2
         pre=(--env-file "${env_file}")
     else
         fx="$(_ci_validation_env)" || return 2
