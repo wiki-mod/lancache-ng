@@ -14712,7 +14712,7 @@ _ci_check_action_node_versions() {
         fi
         ref="${v##*@}"; key="${v%@*}"
         # What: an external ref must be a major tag vN.
-        # Why: no third-party pin; the major tag moves forward.
+        # Why: no third-party pin; the tag moves forward.
         # From: Issue #1683 | PR #1858
         if [[ ! "${ref}" =~ ^v[0-9]+$ ]]; then
             viol+=("external action '${v}' (in: $(_ci_ando_reffiles "${v}")) must use a major tag vN")
