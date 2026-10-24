@@ -3000,6 +3000,10 @@ struct RegisterResponse {
     image_prefix: String,
     image_channel: String,
     image_tag: String,
+    // What: the primary's DNS_LOCAL_REVERSE_ZONES, 0 or 1.
+    // Why: the replica serves the same zones by AXFR.
+    // From: Issue #1918 | PR #1858
+    dns_local_reverse_zones: String,
 }
 
 // What: one registered secondary for the page.
@@ -3183,6 +3187,7 @@ async fn register_secondary(
         image_prefix: state.config.lancache_image_prefix.clone(),
         image_channel: state.config.lancache_image_channel.clone(),
         image_tag: state.config.lancache_image_tag.clone(),
+        dns_local_reverse_zones: bool_text(state.config.local_reverse),
     }))
 }
 
