@@ -270,6 +270,24 @@ vulnerabilities:
 
       From: Issue #1304, PR #1661
 
+  - id: CVE-2026-92392
+    statement: >-
+      What: Accepts CVE-2026-92392 (an HTTP/2 upload use-after-free in
+      curl) as tracked risk for the Alpine `curl`/`libcurl` packages in
+      every Alpine-based first-party image; Trivy found it in
+      `build-tools` (Alpine 3.24.2, `8.22.0-r0`, `FixedVersion:
+      8.23.0-r0`).
+
+      Why: Time-boxed maintainer-authorized exception (2026-10-24):
+      Alpine v3.24/main ships only `8.22.0-r0`, the fix `8.23.0-r0` is
+      only in edge/main (APKINDEX read 2026-10-24 13:52 CEST). A fresh
+      build-tools rebuild (run 40089331322) already takes the newest
+      v3.24 package, so no rebuild can clear it. No `paths:` scoping
+      applies since Trivy's Alpine os-pkgs finding class carries no
+      PkgPath. Drop once it ships in v3.24/main.
+
+      From: Issue #1931
+
   - id: CVE-2011-4116
     statement: >-
       What: Marks CVE-2011-4116 (`perl-base`'s `File::Temp` module
