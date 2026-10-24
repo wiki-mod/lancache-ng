@@ -544,6 +544,13 @@ runtime:
     - SETUP_HEALTH_BASELINE_SAMPLES=3
     - SETUP_HEALTH_BASELINE_INTERVAL_SECONDS=2
     - SETUP_DNS_PROBE_NAME=content1.steampowered.com
+    # What: host service paths for systemd and OpenRC.
+    # Why: setup.sh reads them here; no path in its code.
+    # From: Issue #1683 | PR #1858
+    - SYSTEMD_UNIT_DIR=/etc/systemd/system
+    - OPENRC_INIT_DIR=/etc/init.d
+    - OPENRC_LOG_DIR=/var/log
+    - OPENRC_STOP_TIMEOUT_SECONDS=600
     # What: the project address the ui links to.
     # Why: setup.sh bootstrap copy; ci.sh checks both.
     # From: Issue #1683 | PR #1912

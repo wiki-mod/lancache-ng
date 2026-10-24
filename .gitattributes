@@ -1,10 +1,12 @@
 
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# Force LF line endings — all files run inside Linux containers
+# What: every text file is checked out with LF line ends
+# Why: all files run inside Linux containers
 * text=auto eol=lf
 
-# Binary files — no line ending conversion
+# What: certificate and key files are never converted
+# Why: a changed byte breaks a certificate or key
 *.crt binary
 *.key binary
 *.pem binary
