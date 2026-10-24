@@ -559,6 +559,10 @@ runtime:
     - OPENRC_INIT_DIR=/etc/init.d
     - OPENRC_LOG_DIR=/var/log
     - OPENRC_STOP_TIMEOUT_SECONDS=600
+    # What: 1 = dns answers private PTR zones itself.
+    # Why: maintainer 24.10.: PTR zones are off by default.
+    # From: Issue #1918 | PR #1858
+    - DNS_LOCAL_REVERSE_ZONES=0
     # What: the project address the ui links to.
     # Why: setup.sh bootstrap copy; ci.sh checks both.
     # From: Issue #1683 | PR #1912
