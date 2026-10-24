@@ -1668,6 +1668,7 @@ _ci_norm_grammar() {
         *.rs) printf 'rust\n' ;;
         *.sh|*.bash|*.bats) printf 'shell\n' ;;
         Dockerfile|Dockerfile.*|*.Dockerfile) printf 'dockerfile\n' ;;
+        *.toml) printf 'toml\n' ;;
         *) return 1 ;;
     esac
 }
@@ -1737,6 +1738,12 @@ _ci_norm_content() {
             lex($0)
             if (subst || ticks % 2 || (bad && q != "")) exit 1
             subst = 0; ticks = 0; bad = 0
+            print
+            next
+        }
+        g == "toml" {
+            if ($0 ~ /"""|\047\047\047/) exit 1
+            if ($0 ~ /^[[:space:]]*(#|$)/) next
             print
             next
         }
