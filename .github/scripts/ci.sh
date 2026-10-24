@@ -5316,8 +5316,18 @@ _ci_registry_read() {
     [ "${view}" = raw ] || how=(--format '{{.Manifest.Digest}}')
     out="$(_ci_retry registry-read docker buildx imagetools inspect "${ref}" "${how[@]}")" || rc=$?
     if [ "${rc}" -eq 0 ]; then
-        if [ "${view}" = raw ] || [[ "${out}" =~ ^${CI_DIGEST_RE}$ ]]; then
+        if [ "${view}" = raw ]; then
             printf '%s\n' "${out}"
+            return 0
+        fi
+        # What: the value is the one digest line read.
+        # Why: buildx warns on stderr for cache manifests.
+        # From: Issue #1683 | PR #1858
+        local dig
+        dig="$(_ci_capture 1 grep -xE -- "${CI_DIGEST_RE}" <<< "${out}")" || return 2
+        if [[ "${dig}" =~ ^${CI_DIGEST_RE}$ ]]; then
+            [ "${dig}" = "${out}" ] || printf '%s\n' "${out}" >&2
+            printf '%s\n' "${dig}"
             return 0
         fi
         ci_error "${id}" "ref=\"${ref}\" reason=\"registry read gave no digest\"" "${out}"
