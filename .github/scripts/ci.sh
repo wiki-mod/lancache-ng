@@ -3311,7 +3311,7 @@ ci_cmd_aggregate_stack() {
 # Why: SCAN before ACCEPT; thin YAML, iteration in ci.sh.
 # From: Issue #1683
 ci_cmd_scan_stack() {
-    local matrix="${CI_BUILD_MATRIX:-}" svc plat digest pairs rc=0 crc drc failed="" passed='[]'
+    local matrix="${CI_BUILD_MATRIX:-}" svc plat digest pairs rc=0 crc drc failed="" unbuilt="" passed='[]'
     [ -n "${matrix}" ] || { ci_log "[CI-ERROR-SCAN-0016]" "reason=\"CI_BUILD_MATRIX required\""; return 2; }
     pairs="$(_ci_matrix_pairs "${matrix}")" || return 2
     _ci_require_ghcr_auth || return "$?"
@@ -3321,13 +3321,12 @@ ci_cmd_scan_stack() {
     while read -r svc plat; do
         [ -n "${svc}" ] || continue
         drc=0; digest="$(_ci_published_digest "${svc}" "${plat}" ok)" || drc=$?
-        # What: a pair without an image fails; others go on
-        # Why: unscanned is no pass (AG-VAL-001)
-        # From: Issue #1683 | PR #1912
+        # What: an unbuilt pair is skipped, never passed
+        # Why: its build is red; unscanned is never accepted
+        # From: Issue #1683 | PR #1858
         if [ "${drc}" -eq 1 ]; then
-            ci_log "[CI-ERROR-SCAN-0025]" "service=\"${svc}\" platform=\"${plat}\" reason=\"no published image; its build failed, not scanned\""
-            failed="${failed} ${svc}/${plat}"
-            rc=2
+            ci_log "[CI-WARN-SCAN-0025]" "service=\"${svc}\" platform=\"${plat}\" reason=\"no published image; its build failed, not scanned, not accepted\""
+            unbuilt="${unbuilt} ${svc}/${plat}"
             continue
         fi
         if [ "${drc}" -ne 0 ]; then
@@ -3372,7 +3371,7 @@ ci_cmd_scan_stack() {
     # Why: what no scan needs any more must go (DoMe)
     # From: Issue #1683 | PR #1912
     if [ "${CI_SCAN_FULL:-}" = 1 ]; then
-        if [ "${rc}" -eq 0 ]; then
+        if [ "${rc}" -eq 0 ] && [ -z "${unbuilt}" ]; then
             _ci_trivyignore_stale || rc=$?
         else
             ci_log "[CI-WARN-SCAN-0042]" "ignore-stale=NOT-RUN reason=\"a pair failed, so not every image was scanned\""
@@ -6446,48 +6445,72 @@ _ci_normalize_platform_digests() {
 # From: Issue #1683
 _ci_index_lookup() {
     local service="$1"
-    local name sha tag idx grc=0 raw plats
+    local name sha tag idx grc=0 plats
     name="$(_ci_image_ref "${service}")" || return 2
     sha="$(_ci_head_commit)" || return 2
     tag="${name}:sha-${sha}"
     idx="$(_ci_registry_probe "${tag}")" || grc=$?
     [ "${grc}" -eq 0 ] || return "${grc}"
-    raw="$(_ci_index_raw "${tag}")" || return "$?"
-    if ! plats="$(jq -r '.manifests[]? | select(.platform.os!="unknown" and .platform.architecture!="unknown") | "\(.platform.os)/\(.platform.architecture)=\(.digest)"' <<< "${raw}" 2>&1)"; then
-        ci_error "[CI-ERROR-ASSEMBLE-0010]" "service=\"${service}\" tag=\"${tag}\" reason=\"existing index unparseable; UNKNOWN\"" "${plats}"$'\n'"index: ${raw}"
-        return 2
-    fi
+    plats="$(_ci_index_children "${tag}")" || return "$?"
     plats="$(tr '\n' ' ' <<< "${plats}")"
     printf '%s %s\n' "${idx}" "${plats% }"
 }
 
+# What: platform=digest lines of the index at ref $1.
+# Why: one child reader for assemble and promote.
+# From: Issue #1683 | PR #1858
+_ci_index_children() {
+    local raw plats
+    raw="$(_ci_index_raw "$1")" || return "$?"
+    if ! plats="$(jq -r '.manifests[]? | select(.platform.os!="unknown" and .platform.architecture!="unknown") | "\(.platform.os)/\(.platform.architecture)=\(.digest)"' <<< "${raw}" 2>&1)"; then
+        ci_error "[CI-ERROR-ASSEMBLE-0010]" "ref=\"$1\" reason=\"existing index unparseable; UNKNOWN\"" "${plats}"$'\n'"index: ${raw}"
+        return 2
+    fi
+    [ -z "${plats}" ] || printf '%s\n' "${plats}"
+}
+
 # What: Collect a target's accepted per-platform digests.
-# Why: A non-accepted platform blocks assembly, no rebuild.
-# From: Issue #1683
+# Why: DoMe: a red platform leaves the others assembled.
+# From: Issue #1683 | PR #1858
 _ci_collect_accepted_digests() {
-    local service="$1" plats p line state digest
+    local service="$1" plats p line state digest n=0
     plats="$(_ci_platforms "${service}")" || return "$?"
     while IFS= read -r p; do
         [ -n "${p}" ] || continue
         line="$(_ci_resolve_one "${service}" "${p}")" || return "$?"
         state="$(_ci_record_field "${line}" state)" || return 2
-        if [ "${state}" != "PRESENT_ACCEPTED" ]; then
-            ci_error "[CI-ERROR-ASSEMBLE-0002]" "service=\"${service}\" platform=\"${p}\" reason=\"platform not ACCEPTED; not assembling, not rebuilding\" state=\"${state}\"" "resolve: ${line}"
-            return 2
-        fi
+        case "${state}" in
+            PRESENT_ACCEPTED) ;;
+            # What: a platform not accepted stays out.
+            # Why: its channels keep the old image (DoMe).
+            # From: Issue #1683 | PR #1858
+            MISSING_CONFIRMED|PRODUCED_UNVERIFIED)
+                ci_log "[CI-WARN-ASSEMBLE-0013]" "service=\"${service}\" platform=\"${p}\" state=\"${state}\" reason=\"platform not accepted; left out of the index\""
+                continue
+                ;;
+            *)
+                ci_error "[CI-ERROR-ASSEMBLE-0002]" "service=\"${service}\" platform=\"${p}\" reason=\"platform state not decidable; not assembling, not rebuilding\" state=\"${state}\"" "resolve: ${line}"
+                return 2
+                ;;
+        esac
         if ! digest="$(_ci_accepted_digest "${service}" "${p}")"; then
             ci_log "[CI-ERROR-ASSEMBLE-0003]" "service=\"${service}\" platform=\"${p}\" reason=\"no accepted digest for an ACCEPTED platform\""
             return 2
         fi
         printf '%s=%s\n' "${p}" "${digest}"
+        n=$((n + 1))
     done <<< "${plats}"
+    if [ "${n}" -eq 0 ]; then
+        ci_log "[CI-ERROR-ASSEMBLE-0014]" "service=\"${service}\" reason=\"no platform accepted; nothing to assemble\""
+        return 2
+    fi
 }
 
 # What: Reuse an identical index or reject a divergent one.
 # Why: Idempotent retry; never overwrite an index.
 # From: Issue #1683
 _ci_reconcile_index() {
-    local service="$1" want="$2" existing ex_digest ex_have lrc=0
+    local service="$1" want="$2" existing ex_digest ex_have lrc=0 kv sub=1 wl
     existing="$(_ci_index_lookup "${service}")" || lrc=$?
     case "${lrc}" in
         0) ;;
@@ -6501,6 +6524,17 @@ _ci_reconcile_index() {
     ex_have="$(_ci_normalize_platform_digests "${existing#* }")"
     if [ "${want}" = "${ex_have}" ]; then
         printf '%s\n' "${ex_digest}"
+        return 0
+    fi
+    # What: an index may gain a platform, never change one.
+    # Why: a rebuilt red platform completes the sha index.
+    # From: Issue #1683 | PR #1858
+    wl="$(tr ' ' '\n' <<< "${want}")"
+    for kv in ${ex_have}; do
+        _ci_list_has "${kv}" "${wl}" || sub=0
+    done
+    if [ "${sub}" -eq 1 ]; then
+        ci_log "[CI-INFO-ASSEMBLE-0015]" "service=\"${service}\" existing=\"${ex_digest}\" reason=\"index lacks a platform accepted now; completing it\""
         return 0
     fi
     ci_error "[CI-ERROR-ASSEMBLE-0004]" "service=\"${service}\" reason=\"existing index has different platform digests; refusing to overwrite\" existing=\"${ex_digest}\"" "existing: ${existing#* }"
@@ -6525,8 +6559,8 @@ _ci_docker_assemble() {
 }
 
 # What: Assemble accepted per-platform digests.
-# Why: Index only when every platform is ACCEPTED.
-# From: Issue #1683
+# Why: accepted platforms only; a gap opens an issue.
+# From: Issue #1683 | PR #1858
 ci_cmd_assemble() {
     local service="${1:-}"
     [ -n "${service}" ] || { ci_log "[CI-ERROR-ASSEMBLE-0001]" "reason=\"service arg required\""; return 2; }
@@ -6541,7 +6575,8 @@ ci_cmd_assemble() {
     fi
     if [ -n "${reused}" ]; then
         printf 'service=%s result=reuse-index assembled=%s platforms=%s\n' "${service}" "${reused}" "${count}"
-        return 0
+        _ci_assemble_report "${service}" "${inputs}"
+        return "$?"
     fi
     _ci_require_ghcr_auth || return "$?"
     if ! index="$(_ci_docker_assemble "${service}" "${input_list[@]}")"; then
@@ -6549,6 +6584,27 @@ ci_cmd_assemble() {
         return 2
     fi
     printf 'service=%s result=assembled assembled=%s platforms=%s\n' "${service}" "${index}" "${count}"
+    _ci_assemble_report "${service}" "${inputs}"
+}
+
+# What: file or close the platform-mismatch case per arch.
+# Why: DoMe: a platform left out opens an issue.
+# From: Issue #1683 | PR #1858
+_ci_assemble_report() {
+    local svc="$1" inputs="$2" why plats p outcome rc=0
+    why="$(_ci_status_readonly_reason)" || return 2
+    if [ -n "${why}" ]; then
+        printf 'assemble-report=NOT-RUN service=%s reason="%s"\n' "${svc}" "${why}"
+        return 0
+    fi
+    plats="$(_ci_platforms "${svc}")" || return 2
+    while IFS= read -r p; do
+        [ -n "${p}" ] || continue
+        outcome=success
+        _ci_text_has "^${p}=" "${inputs}" || outcome=failure
+        _ci_status_case platform-mismatch "${outcome}" "${svc}" "${p#*/}" "accepted: ${inputs}" || rc=2
+    done <<< "${plats}"
+    return "${rc}"
 }
 
 # =========================================================
@@ -6782,31 +6838,32 @@ _ci_candidate_index() {
     printf '%s\n' "${idx}"
 }
 
-# What: toolchain promote candidates if fully accepted.
+# What: toolchain candidates of the accepted platforms.
 # Why: promote is the one channel mover (AG-REL-009).
 # From: Issue #1683 | PR #1858
 _ci_toolchain_candidate() {
-    local service idx p st all plats tools
+    local service idx p st busy acc plats tools
     tools="$(_ci_block_keys build_toolchain)" || return 2
     while IFS= read -r service; do
         [ -n "${service}" ] || continue
-        all=1
+        busy=0 acc=0
         plats="$(_ci_platforms "${service}")" || return "$?"
         while IFS= read -r p; do
             [ -n "${p}" ] || continue
             st="$(_ci_resolve_one "${service}" "${p}")" || return "$?"
             st="$(_ci_record_field "${st}" state)" || return 2
             case "${st}" in
-                PRESENT_ACCEPTED) ;;
+                PRESENT_ACCEPTED) acc=$((acc + 1)) ;;
+                MISSING_CONFIRMED|PRODUCED_UNVERIFIED) ;;
                 UNKNOWN|MISMATCH)
                     ci_log "[CI-ERROR-CANDIDATE-0003]" "service=\"${service}\" platform=\"${p}\" state=\"${st}\" reason=\"toolchain state not decidable; no promotion\""
                     return 2
                     ;;
-                *) all=0 ;;
+                *) busy=1 ;;
             esac
         done <<< "${plats}"
-        if [ "${all}" -eq 0 ]; then
-            ci_log "[CI-INFO-CANDIDATE-0004]" "service=\"${service}\" reason=\"toolchain not accepted on every platform; channel unchanged\""
+        if [ "${busy}" -eq 1 ] || [ "${acc}" -eq 0 ]; then
+            ci_log "[CI-INFO-CANDIDATE-0004]" "service=\"${service}\" reason=\"toolchain still building or accepted nowhere; channel unchanged\""
             continue
         fi
         idx="$(_ci_candidate_index "${service}")" || return "$?"
@@ -6904,13 +6961,54 @@ _ci_promote_unlock() {
     _ci_lock_release "${remote}" "${ref}" "$(_ci_lock_note promote "$1")"
 }
 
-# What: Default channel move: point svc:channel at digest.
+# What: point svc:channel at digest plus kept children $4.
 # Why: shares the one index writer; moves, never builds.
-# From: Issue #1683
+# From: Issue #1683 | PR #1858
 _ci_promote_move() {
-    local svc="$1" channel="$2" digest="$3" name
+    local svc="$1" channel="$2" digest="$3" kept="${4:-}" name kv
     name="$(_ci_image_ref "${svc}")" || return 2
-    _ci_imagetools_create "${name}:${channel}" "${name}@${digest}" >&2
+    local -a srcs=("${name}@${digest}")
+    for kv in ${kept}; do
+        srcs+=("${name}@${kv#*=}")
+    done
+    _ci_imagetools_create "${name}:${channel}" "${srcs[@]}" >&2
+}
+
+# What: channel children of the platforms digest $3 lacks.
+# Why: DoMe: a platform red in this run keeps its image.
+# From: Issue #1683 | PR #1858
+_ci_promote_kept() {
+    local svc="$1" channel="$2" digest="$3" name have old plats p line rc=0 kept=""
+    name="$(_ci_image_ref "${svc}")" || return 2
+    have="$(_ci_index_children "${name}@${digest}")" || return 2
+    old="$(_ci_index_children "${name}:${channel}")" || rc=$?
+    [ "${rc}" -le 1 ] || return 2
+    plats="$(_ci_platforms "${svc}")" || return 2
+    while IFS= read -r p; do
+        [ -n "${p}" ] || continue
+        if _ci_text_has "^${p}=" "${have}"; then continue; fi
+        line="$(awk -F= -v p="${p}" '$1 == p { print; exit }' <<< "${old}")"
+        if [ -z "${line}" ]; then
+            ci_log "[CI-WARN-PROMOTE-0025]" "service=\"${svc}\" channel=\"${channel}\" platform=\"${p}\" reason=\"candidate and channel both lack this platform\""
+            continue
+        fi
+        ci_log "[CI-INFO-PROMOTE-0026]" "service=\"${svc}\" channel=\"${channel}\" platform=\"${p}\" kept=\"${line#*=}\" reason=\"platform not in the candidate; channel keeps its image\""
+        kept="${kept} ${line}"
+    done <<< "${plats}"
+    printf '%s\n' "${kept# }"
+}
+
+# What: 0 if the channel holds digest children plus kept.
+# Why: a merged channel index has a digest of its own.
+# From: Issue #1683 | PR #1858
+_ci_channel_matches() {
+    local svc="$1" channel="$2" digest="$3" kept="$4" name want seen
+    name="$(_ci_image_ref "${svc}")" || return 2
+    want="$(_ci_index_children "${name}@${digest}")" || return 2
+    seen="$(_ci_index_children "${name}:${channel}")" || return "$?"
+    want="$(_ci_normalize_platform_digests "${want} ${kept}")"
+    seen="$(_ci_normalize_platform_digests "${seen}")"
+    [ "${want}" = "${seen}" ]
 }
 
 # What: Channel readback; -p digest only, 1 absent.
@@ -6962,10 +7060,15 @@ _ci_index_complete() {
 # Why: One locked section; the caller always unlocks.
 # From: Issue #1683
 _ci_promote_move_all() {
-    local channel="$1" cand="$2" line svc digest seen prev moved="" prc
+    local channel="$1" cand="$2" line svc digest seen prev moved="" prc kept mrc
     while IFS= read -r line; do
         [ -n "${line}" ] || continue
         svc="${line%%=*}"; digest="${line#*=}"
+        if ! kept="$(_ci_promote_kept "${svc}" "${channel}" "${digest}")"; then
+            ci_log "[CI-ERROR-PROMOTE-0027]" "service=\"${svc}\" channel=\"${channel}\" reason=\"kept platforms unreadable; blocking\""
+            _ci_promote_rollback "${channel}" "${moved}"
+            return 2
+        fi
         # What: read the earlier digest; absent = first.
         # Why: an unreadable state cannot be rolled back.
         # From: Issue #1683 | PR #1912
@@ -6976,7 +7079,7 @@ _ci_promote_move_all() {
             _ci_promote_rollback "${channel}" "${moved}"
             return 2
         fi
-        if ! _ci_promote_move "${svc}" "${channel}" "${digest}"; then
+        if ! _ci_promote_move "${svc}" "${channel}" "${digest}" "${kept}"; then
             ci_log "[CI-ERROR-PROMOTE-0007]" "service=\"${svc}\" channel=\"${channel}\" reason=\"channel ref move failed\""
             _ci_promote_rollback "${channel}" "${moved}"
             return 2
@@ -6987,8 +7090,9 @@ _ci_promote_move_all() {
             _ci_promote_rollback "${channel}" "${moved}"
             return 2
         fi
-        if [ "${seen}" != "${digest}" ]; then
-            ci_error "[CI-ERROR-PROMOTE-0009]" "service=\"${svc}\" channel=\"${channel}\" reason=\"readback MISMATCH; rolling the moved services back\" expected=\"${digest}\"" "readback=${seen}"
+        mrc=0; _ci_channel_matches "${svc}" "${channel}" "${digest}" "${kept}" || mrc=$?
+        if [ "${mrc}" -ne 0 ]; then
+            ci_error "[CI-ERROR-PROMOTE-0009]" "service=\"${svc}\" channel=\"${channel}\" rc=${mrc} reason=\"readback MISMATCH; rolling the moved services back\" expected=\"${digest} ${kept}\"" "readback=${seen}"
             _ci_promote_rollback "${channel}" "${moved}"
             return 2
         fi
@@ -7032,16 +7136,19 @@ _ci_promote_stack_complete() {
 # Why: A re-run needs no lock or move; rc 2 unknown.
 # From: Issue #1683
 _ci_promote_all_current() {
-    local channel="$1" cand="$2" line svc digest seen name rc
+    local channel="$1" cand="$2" line svc digest seen name rc kept
     while IFS= read -r line; do
         [ -n "${line}" ] || continue
         svc="${line%%=*}"; digest="${line#*=}"
         rc=0
         seen="$(_ci_channel_readback -p "${svc}" "${channel}")" || rc=$?
         [ "${rc}" -le 1 ] || return 2
-        [ "${seen}" = "${digest}" ] || return 1
+        [ "${rc}" -eq 0 ] || return 1
+        kept="$(_ci_promote_kept "${svc}" "${channel}" "${digest}")" || return 2
+        rc=0; _ci_channel_matches "${svc}" "${channel}" "${digest}" "${kept}" || rc=$?
+        [ "${rc}" -eq 0 ] || return "${rc}"
         name="$(_ci_image_ref "${svc}")" || return 2
-        _ci_index_complete "${name}" "${digest}" || return 2
+        _ci_index_complete "${name}" "${seen}" || return 2
     done <<< "${cand}"
 }
 

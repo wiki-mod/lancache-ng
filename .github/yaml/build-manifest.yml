@@ -917,6 +917,12 @@ status_reports:
   channel-check:
     label: channel-check
     scope: "daily pull by tag and start of one mutable channel"
+  # What: a platform left out of a service index.
+  # Why: DoMe: platforms ship alone; a gap opens an issue.
+  # From: Issue #1683 | PR #1858
+  platform-mismatch:
+    label: platform-mismatch
+    scope: "@SERVICE@ (@ARCH@) not accepted in this run; its channels keep the earlier @ARCH@ image"
 
 # What: Build-identity inputs per build type (§7).
 # Why: Impact is content-identity, never path-touched alone.
