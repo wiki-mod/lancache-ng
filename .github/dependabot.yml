@@ -1,23 +1,12 @@
 
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# Dependabot configuration for automated dependency updates (GitHub Actions, Rust, Docker)
-#
-# Regular updates target current_dev so they follow the same promotion path
-# as application changes. Archived branches remain locked, while security
-# updates follow GitHub's default-branch behavior independently of these
-# regular-update entries.
-#
-# Each ecosystem uses one catch-all group to prevent directory-level update
-# fan-out. `schedule.day` is left unset (Dependabot's shared implicit
-# default, Monday) on all three blocks: staggering the *open* day was
-# considered but rejected -- it does not bound same-day *merges*, which is
-# the actual runner-pool-contention risk (AG-CI-016/AG-CI-017), so it would
-# have been a cheap-but-ineffective partial mitigation rather than a real
-# fix.
+# What: Dependabot updates for GitHub Actions only.
+# Why: crates and base images resolve the latest per run.
 version: 2
 updates:
-  # GitHub Actions -- one grouped PR per target branch (single directory: /).
+  # What: one grouped actions PR per branch, root only.
+  # Why: the root directory covers every workflow.
   - package-ecosystem: github-actions
     directory: /
     target-branch: current_dev
@@ -25,38 +14,4 @@ updates:
       interval: weekly
     groups:
       actions:
-        patterns: ["*"]
-
-  # What: one workspace root, not 3 member directories.
-  # Why: Dependabot raises the workspace manifest ranges.
-  # From: Issue #1095
-  - package-ecosystem: cargo
-    directories:
-      - /
-    target-branch: current_dev
-    schedule:
-      interval: weekly
-    groups:
-      rust-deps:
-        patterns: ["*"]
-
-  # Docker base images -- all service Dockerfiles collapse into ONE grouped PR
-  # per target branch. Every listed service pins the identical Alpine base
-  # image (`alpine:3.24`), so a single upstream digest bump previously opened
-  # six near-identical
-  # per-service PRs per branch; the multi-`directories` group makes it one
-  # cross-service PR.
-  - package-ecosystem: docker
-    directories:
-      - /services/proxy
-      - /services/dns
-      - /services/watchdog
-      - /services/dhcp
-      - /services/dhcp-proxy
-      - /services/ui
-    target-branch: current_dev
-    schedule:
-      interval: weekly
-    groups:
-      docker-base-images:
         patterns: ["*"]

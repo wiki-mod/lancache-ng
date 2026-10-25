@@ -83,8 +83,8 @@ This section documents intentional security design decisions and known tradeoffs
 - Document the CA installation process for clients
 
 **When to use**: 
-- SSL mode (`192.168.1.11` DNS) is designed for maximum caching benefit
-- Clients that cannot or will not trust the CA can use standard mode instead
+- HTTPS mode (`192.168.1.11` DNS) is designed for maximum caching benefit
+- Clients that cannot or will not trust the CA can use HTTP mode instead
 
 ### 2. DNS Spoofing of CDN Domains
 
@@ -96,23 +96,23 @@ This section documents intentional security design decisions and known tradeoffs
 - Only known CDN domains are spoofed; see `services/dns/cdn-domains.txt`
 - Gaming consoles (PS5, Xbox) are explicitly excluded to prevent breakage
 - The spoofing scope is limited to a curated list; arbitrary domains are not affected
-- Clients can opt out by using standard mode (passthrough HTTPS) or external DNS
+- Clients can opt out by using HTTP mode (passthrough HTTPS) or external DNS
 
 **What is spoofed**: Game CDNs (Steam, Epic, Blizzard, etc.) and software distributors.
 
 **What is not spoofed**: Web browsers, corporate networks, banking, or other general-purpose traffic.
 
-### 3. Docker Socket Mount in UI Container
+### 3. Docker Socket Mount in the services Container
 
-**Design**: The Admin UI container mounts the Docker daemon socket (`/var/run/docker.sock`) to allow container management.
+**Design**: The `services` container mounts the Docker daemon socket (SOT `DOCKER_SOCKET`, read-write, no socket proxy) for its watchdog process, the only Docker API client (`DockerApi` in `services/common/shared.rs`); it lists the stack's containers, inspects them and restarts a failing one. The Admin UI container has no socket; it writes the desired state (`DESIRED_STATE_FILE`) that the supervisor inside the supervised containers reads to run or stop its own processes, with no Docker call.
 
-**Known Risk**: The Docker socket is a privileged interface — any process with access can run arbitrary containers with full host privileges.
+**Known Risk**: The Docker socket is a privileged interface — any process with access can run arbitrary containers with full host privileges. The mount is visible to the whole `services` container (watchdog, syslog-ng, chronyd, netdata, retention), so a compromise of that container is a host compromise.
 
 **Mitigation**:
-- Enable authentication for the Admin UI before production deployment
+- The `services` container drops all capabilities except the list in `deploy/prod/docker-compose.yml`
+- The Admin UI cannot reach Docker; enable its authentication before production deployment
 - Configure Docker rootless mode on the host if available
-- Restrict network access to the Admin UI (do not expose to untrusted networks)
-- Use network policies or firewall rules to limit Admin UI access to trusted IPs
+- Restrict network access to the Admin UI and the `services` ports (do not expose them to untrusted networks)
 
 ### 4. Admin UI Authentication Must Be Explicit
 
@@ -140,7 +140,7 @@ This section documents intentional security design decisions and known tradeoffs
 
 ### 6. Upstream TLS Verification in nginx
 
-**Design**: nginx proxies cached HTTP and SSL-mode requests to the real CDN over HTTPS and validates the upstream certificate chain (`proxy_ssl_verify on`).
+**Design**: nginx proxies cached HTTP and HTTPS-mode requests to the real CDN over HTTPS and validates the upstream certificate chain (`proxy_ssl_verify on`).
 
 **Reason**: The proxy resolves upstream CDN hostnames with public DNS resolvers configured in nginx, not the local DNS-spoofing recursor, so certificate verification can validate the real origin.
 
@@ -175,8 +175,8 @@ lancache-ng install -- the local CA key, `PDNS_API_KEY`, `KEA_CTRL_TOKEN`,
 - **Storing**: written to the operator's own `.env` file (gitignored) or, for
   values shared across containers, a shared-secrets Docker volume (see
   `docs/threat-model.md` T4/T5/T12 for the exact mechanism per secret).
-  `ca.key` lives under `<install>/certs/` and is gitignored (`AGENTS.md`
-  `AG-KD-002`).
+  `ca.key` lives in the CA state directory (`CA_DIR`), outside the
+  checkout (`AGENTS.md` `AG-KD-002`).
 - **Accessing**: each service's entrypoint resolves only the specific
   secret(s) it needs from `.env`/the shared-secrets volume at startup; no
   service is handed a shared "all secrets" credential set.
@@ -203,9 +203,10 @@ Static Application Security Testing (SAST) remediation policy.
 
 ### SCA (dependency vulnerability) findings
 
-- **Tooling**: `cargo audit` runs against both first-party Rust crates
-  (`services/ui`, `services/dns/nats-subscriber`) on every pull request and
-  push, using `cargo audit --deny warnings` -- this denies on **any** reported
+- **Tooling**: `bash .github/scripts/ci.sh check cargo-audit` runs
+  `cargo audit --deny warnings` against the workspace lockfile
+  (`CI_CARGO_LOCK`): in `ci.yml` when the plan sees that lockfile change, and
+  daily in `nightly.yml` -- this denies on **any** reported
   advisory, not only Critical/High severity. Container base images and their
   OS packages are scanned with Trivy at image-build time.
 - **Threshold**: zero-tolerance by default. Any `cargo audit` finding, or any
@@ -220,22 +221,21 @@ Static Application Security Testing (SAST) remediation policy.
 - **License findings**: dependency license compliance is not currently
   automated by a dedicated SCA license-scanning tool (e.g. `cargo-deny`'s
   license checks). This is a known gap; license review today is manual.
-- **Enforcement status**: the `cargo-audit (dns/nats-subscriber)` and
-  `cargo-audit (ui)` jobs run on every pull request and push to `current_dev`
-  (the active development branch, per issue #825's branch-model decision) and
-  feed into the `CI scope policy` job in `.github/workflows/build-push.yml`.
-  `CI scope policy` **is** a required branch-protection status check on
-  `master` -- but `master` receives only occasional stable-release promotions,
-  not day-to-day merges. **`current_dev`, where pull requests actually land,
-  currently has no branch protection rule at all** (confirmed via
+- **Enforcement status**: the `cargo-audit` job of `.github/workflows/ci.yml`
+  runs `ci.sh check cargo-audit` when a change touches the workspace lockfile
+  (SOT `CI_CARGO_LOCK`), and the `cargo-audit` job of
+  `.github/workflows/nightly.yml` runs it once a day against new advisory
+  data. In `ci.yml` it feeds the `result` job, the always-present aggregate
+  check meant for branch protection. **`current_dev`, where pull requests
+  actually land, had no branch protection rule** when last checked (via
   `gh api repos/wiki-mod/lancache-ng/branches/current_dev/protection`, which
-  returns 404 "Branch not protected"). In practice this means a failing
+  returned 404 "Branch not protected"). In that state a failing
   `cargo-audit` result is clearly visible as a red check on a `current_dev`
-  PR, but nothing in GitHub's own repository configuration currently stops
-  that PR from being merged anyway. Closing this gap requires enabling branch
-  protection on `current_dev` with `CI scope policy` (or an equivalent
-  aggregate check) as a required status check -- a repository-settings change
-  for the maintainer to make, tracked as a Level 3 follow-up in issue #1130.
+  PR, but nothing in GitHub's own repository configuration stops that PR
+  from being merged anyway. Closing this gap requires enabling branch
+  protection on `current_dev` with `result` as a required status check -- a
+  repository-settings change for the maintainer to make, tracked as a Level 3
+  follow-up in issue #1130.
 
 ### SAST (static analysis) findings
 
@@ -257,7 +257,7 @@ Static Application Security Testing (SAST) remediation policy.
   are visible as GitHub code scanning alerts. Two things still need to happen
   before a CodeQL finding actually blocks a merge, both tracked as Level 3
   follow-ups in issue #1130: (1) the CodeQL analysis result is not yet fed
-  into the `CI scope policy` gate (or an equivalent check) the way
+  into the `result` gate (or an equivalent check) the way
   `cargo-audit` is, and (2) as described just above, `current_dev` has no
   branch protection at all today, so even a check that is technically
   required would not yet be enforced there. Until both land, enforcement of

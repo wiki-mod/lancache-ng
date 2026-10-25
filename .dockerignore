@@ -2,7 +2,7 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # What: root build-context ignore for Rust service builds.
-# Why: dns/ui/watchdog now build from repo root context.
+# Why: the five Rust service images build from repo root.
 # From: Issue #1095
 
 # Keep Docker build contexts small and deterministic.

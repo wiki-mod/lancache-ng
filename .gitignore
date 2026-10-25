@@ -9,29 +9,16 @@ data/
 /kea/
 /nats/
 /nats-conf/
-/pdns-standard/
-/pdns-ssl/
+/pdns/
 /pdns-filter-state/
-
-# Generated certificates (keep only the CA template, not issued certs)
-certs/*.crt
-certs/*.key
-certs/*.pem
-!certs/.gitkeep
-
-# Generated BIND9 keys (auto-created at container startup)
-services/dns/keys/
-
-# Generated Kea secrets (auto-created at container startup)
-services/dhcp/keys/
+/ntp/
+/syslog-ng/
+/cachehamster/
 
 # Environment files with secrets (root-level only)
 /.env
-/.env.dev
-/.env.prod
 deploy/prod/.env.local
-
-# config/*.env files are committed (no secrets, just operational config)
+config/prod/*.local.env
 
 # Claude Code project settings
 .claude/
@@ -40,18 +27,18 @@ deploy/prod/.env.local
 .DS_Store
 Thumbs.db
 
-# Rust build artifacts
-# What: one root /target/, replacing 4 per-crate entries.
-# Why: a real workspace builds into one shared target dir.
+# What: ignores the one workspace build dir /target/.
+# Why: the Cargo workspace builds into one target dir.
 # From: Issue #1095
 /target/
-# What: no committed Cargo lock in any directory.
-# Why: no third-party pin; each build takes the latest.
-# From: Issue #1931
-Cargo.lock
 
 # Editor
 *.swp
 *.swo
 .idea/
 .vscode/
+
+# What: the workspace lock ci.sh generates per job.
+# Why: no third-party pin; cargo resolves the latest.
+# From: Issue #1683 | PR #1858
+/Cargo.lock

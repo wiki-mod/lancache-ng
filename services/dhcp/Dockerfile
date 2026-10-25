@@ -1,156 +1,137 @@
 
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-#
-# Kea DHCP image: DHCPv4 server, control agent (API on :8000), and DHCP-DDNS
-# service for lancache-ng managed networks.
-#
-# Alpine base (issue #815, staged Alpine migration, Kea second): no builder
-# stage or compiled binary here either, so this is also an apt->apk package
-# swap, pinned to Alpine's kea 3.0.3 LTS line (matching Debian trixie's own
-# 2.6.3 -> next-LTS direction; Alpine tracks the upstream 3.0.x LTS branch
-# through June 2028). One real, non-obvious packaging difference from
-# Debian found and verified here: Debian's kea-dhcp4-server package bundles
-# every hook library (including libdhcp_lease_cmds.so) directly, but
-# Alpine's aports split each Kea hook into its own separate package
-# (`kea-hook-<name>`) -- `kea-dhcp4` alone does NOT ship
-# /usr/lib/kea/hooks/libdhcp_lease_cmds.so; the dedicated `kea-hook-lease-cmds`
-# package is required too, or entrypoint.sh's fail-closed
-# `find /usr/lib -maxdepth 5 -name libdhcp_lease_cmds.so` check (needed for
-# lease4-del, used by the Admin UI's release-lease route) exits 1 at
-# startup. `bash` is installed explicitly for the same reason as
-# services/dhcp-proxy/Dockerfile: entrypoint.sh uses real Bash-only syntax
-# Alpine's default ash shell does not support. `envsubst` ships in the
-# separate `gettext-envsubst` package here too, same as dhcp-proxy.
-#
-# Alpine analogue of the project-wide Debian trixie-backports + dist-upgrade
-# policy (2026-07-30, maintainer decision): plain `apk add --no-cache` does
-# implicitly fetch a fresh package index each time (no persistent index
-# cache is left in the image layer, unlike a bare `apt-get install` without
-# a preceding `apt-get update`), so newly-added packages here already land
-# on a reasonably current version. But it does NOT touch packages already
-# baked into the alpine:3.24 base image layer itself (musl, busybox,
-# apk-tools, ...) -- those stay frozen at whatever version the pinned base
-# digest shipped with unless an explicit `apk upgrade` runs. Alpine has no
-# backports equivalent to Debian's (security fixes land in-place within the
-# current release branch's own repo, closer to Ubuntu's model), so the fix
-# is narrower than the Debian side: `apk update && apk upgrade` before the
-# package install, in the same layer so it costs no extra image size.
-# Verified for real on a pinned alpine:3.24 pull (2026-07-30): `apk-tools`/
-# `libapk` were baked in at 3.0.6-r0 but 3.0.7-r0 was already available in
-# the branch's own repo -- `apk upgrade --no-cache` picked it up
-# immediately, while a plain `apk add --no-cache <pkg>` with no preceding
-# upgrade step would have left the stale 3.0.6-r0 in place indefinitely.
-# `--no-cache` on `update`/`upgrade` mirrors the same flag already used on
-# `add` below: it keeps the fetched index out of `/var/cache/apk` instead
-# of leaving a persistent cache in the image layer.
-#
-# `findutils` (issue #840, found while validating a later, unrelated Alpine
-# migration for services/watchdog -- PR #1346): this Dockerfile's original
-# Alpine migration (this PR) omitted it, and entrypoint.sh's own
-# `list_kea_snapshot_ids()` (used by the Kea config-validation-rollback path,
-# #763/docs/known-good-config-snapshots.md) uses `find ... -printf '%f\n'`
-# to sort known-good snapshot ids by name. Confirmed live on a real
-# `alpine:3.24` container: BusyBox's bundled `find` does not support the
-# GNU-findutils-only `-printf` action at all ("find: unrecognized:
-# -printf"), fails with exit 1, and writes that error to stderr -- which the
-# function's own `2>/dev/null` silently swallows, leaving `sort` with empty
-# input and the function silently returning an empty snapshot list
-# (indistinguishable from "no snapshots exist yet"). `apk add findutils`
-# installs GNU `find`/`xargs` at `/usr/bin/find`, ahead of BusyBox's own
-# `find` applet earlier in `$PATH` -- the same fix already verified and
-# shipped for `services/watchdog` (PR #1346): `findutils`, not `coreutils`,
-# since `find` is a GNU findutils binary, not a GNU coreutils one. This
-# Dockerfile's other `find` call (`KEA_LEASE_CMDS_HOOK_PATH`'s
-# `find /usr/lib -maxdepth 5 -name libdhcp_lease_cmds.so` fail-closed check,
-# documented above) was never broken by BusyBox -- it only uses portable
-# `-maxdepth`/`-name` actions, no `-printf` -- and is unaffected by this
-# change: confirmed on the real built image that it still resolves the
-# real hook path with GNU `find` now ahead of BusyBox's own in `$PATH`.
 
-FROM mirror.gcr.io/library/alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
+# What: Kea or dnsmasq proxy/relay plus the DHCP probe.
+# Why: one supervisor runs every program of the image.
+# From: Issue #1683
 
-LABEL org.opencontainers.image.description="Kea DHCP, control-agent, and DHCP-DDNS service for lancache-ng managed networks."
+# What: base image pin, supplied by ci.sh from the SOT.
+# Why: SOT base_images.alpine is the sole owner (AG-CI-006).
+# From: Issue #1683
+ARG ALPINE_IMAGE
 
-# What: explicit proxy build-args, no default value set
-# Why: routes self-hosted downloads via the LAN proxy
-# From: Issue #1781 | PR #1783
-# What: shared version-banner script, not a per-service copy.
-# Why: named build context avoids duplicating it per service.
-# From: Issue #1781 | PR #1783
-COPY --from=shared-scripts verify-version-banner.sh /usr/local/bin/verify-version-banner.sh
+# What: builder image, supplied by ci.sh from the SOT.
+# Why: no mutable default; CI resolves the immutable ref.
+# From: Issue #1683
+ARG BUILD_TOOLS_IMAGE
+# What: scratch only when ci.sh passed no image arg.
+# Why: no baked image; a missing arg fails the build.
+# From: Issue #1683 | PR #1858
+FROM ${BUILD_TOOLS_IMAGE:-scratch} AS dhcp-builder
 
-# What: switches apk's own repositories to plain http.
-# Why: Squid caches http; signed indices keep integrity.
-# From: Issue #1095
-RUN sed -i 's|^https://|http://|' /etc/apk/repositories
+# What: musl cross-target, supplied by ci.sh per platform.
+# Why: ci.sh owns arch mapping; no uname -m in the image.
+# From: Issue #1683
+ARG MUSL_TARGET
+# What: workspace crates, supplied by ci.sh from the SOT.
+# Why: the SOT owns the crates; rust-build receives them.
+# From: Issue #1683 | PR #1858
+ARG RUST_CRATES
 
-# What: declare APT_CACHE_BUST before RUN for cache busting.
-# Why: prevents BuildKit from replaying stale apk upgrade.
-# From: Issue #1095
-ARG APT_CACHE_BUST=""
-# What: trusts the proxy's CA for this RUN, never in a layer.
-# Why: a secret mount never persists; bundle restored below.
-# From: Issue #1781 | PR #1783
-RUN --mount=type=secret,id=proxy_ca \
-    if [ -s /run/secrets/proxy_ca ]; then \
-      cp /etc/ssl/certs/ca-certificates.crt /tmp/ca-bundle.orig && \
-      cat /run/secrets/proxy_ca >> /etc/ssl/certs/ca-certificates.crt; \
-    fi && \
-    : "apt-cache-bust=${APT_CACHE_BUST}" && apk update --no-cache && apk upgrade --no-cache && apk add --no-cache \
-    kea-dhcp4 \
-    kea-ctrl-agent \
-    kea-dhcp-ddns \
-    kea-admin \
-    kea-hook-lease-cmds \
-    bash \
-    nmap \
-    openssl \
-    jq \
-    iptables \
-    nano \
-    curl \
-    findutils \
-    gettext-envsubst \
-    lsof \
-    ripgrep && \
-    if [ -s /run/secrets/proxy_ca ]; then mv /tmp/ca-bundle.orig /etc/ssl/certs/ca-certificates.crt; fi
+# What: cargo tuning args, consumed by ci.sh rust-build.
+# Why: PROJECT_CARGO_*/CARGO_BUILD_JOBS own these.
+# From: Issue #1683
+ARG CARGO_BUILD_JOBS=
+ARG PROJECT_CARGO_LTO=
+ARG PROJECT_CARGO_CODEGENUNIT=
+# What: redeclare BUILD_TOOLS_IMAGE for the RUN stage.
+# Why: ci.sh rust-build folds it into the ccache key.
+# From: Issue #1683
+ARG BUILD_TOOLS_IMAGE
+# What: compiler pairs and cache key prefix, from ci.sh.
+# Why: the builder has no SOT; rust-build reads the env.
+# From: Issue #1683 | PR #1912
+ARG CI_TOOLCHAIN_COMPILERS
+ARG CI_CACHE_PREFIX
+# What: cargo home, root of the cargo cache mounts.
+# Why: §39 registry and git caches; the SOT owns it.
+# From: Issue #1683 | PR #1912
+ARG CI_CARGO_HOME
 
-# nano: in-container troubleshooting tool -- see services/proxy/Dockerfile's
-# identical comment for the full rationale; lsof/ripgrep are apk-installed
-# above but serve the same troubleshooting purpose.
+WORKDIR /build
+COPY Cargo.toml Cargo.lock ./
+COPY services/dns/nats-subscriber/Cargo.toml services/dns/nats-subscriber/Cargo.toml
+COPY services/ui/Cargo.toml services/ui/Cargo.toml
+COPY services/cachehamster/Cargo.toml services/cachehamster/Cargo.toml
+COPY services/watchdog/Cargo.toml services/watchdog/Cargo.toml
+# What: shared crate manifest and sources, copied whole.
+# Why: real sources before any build; no stale stub rlib.
+# From: Issue #1683 | PR #1858
+COPY services/common services/common
+COPY services/watchdog/src services/watchdog/src
+# What: retry policy for ci.sh, from SOT stage_variables
+# Why: this stage has no SOT; ci.sh reads them from env
+# From: Issue #1683 | PR #1858
+ARG CI_RETRY_MAX_ATTEMPTS
+ARG CI_RETRY_BACKOFF_BASE_SECONDS
+# What: ci.sh owns the rust build accel policy (one owner).
+# Why: AG-CI-005/022/023; bind-mounted, never baked in.
+# From: Issue #1683
+RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
+    --mount=type=secret,id=sccache_redis_url \
+    --mount=type=secret,id=sccache_policy \
+    --mount=type=secret,id=sccache_gha \
+    --mount=type=secret,id=sccache_dist_config \
+    --mount=type=secret,id=distcc_potential_hosts \
+    --mount=type=secret,id=ccache_redis_url \
+    --mount=type=secret,id=project_selfhosted_proxy_ca \
+    --mount=type=cache,target=${CI_CARGO_HOME}/registry,sharing=locked \
+    --mount=type=cache,target=${CI_CARGO_HOME}/git,sharing=locked \
+    bash /usr/local/bin/ci.sh rust-build dhcp "${RUST_CRATES}"
 
-# What: verifies apk-installed binaries execute, not just exist.
-# Why: missing library dependencies fail at runtime, not apk add.
-# From: Issue #1613 | Issue #1781 | PR #1783
-RUN set -euo pipefail; \
-    find . -maxdepth 0 -printf '%f\n' >/dev/null; \
-    printf '%s' '$FOO' | FOO=bar envsubst >/dev/null; \
-    rg --version >/dev/null; \
-    curl --version >/dev/null; \
-    sh /usr/local/bin/verify-version-banner.sh "lsof version information" lsof -v
+# What: scratch only when ci.sh passed no image arg.
+# Why: no baked image; a missing arg fails the build.
+# From: Issue #1683 | PR #1858
+FROM ${ALPINE_IMAGE:-scratch}
 
-ENV EDITOR=nano
-ENV VISUAL=$EDITOR
+# What: build identity keys the cache of later layers.
+# Why: a new package set must not reuse a stale apk layer.
+# From: Issue #1683 | PR #1858
+ARG BUILD_IDENTITY
+# What: apk package list, supplied from the SOT.
+# Why: the SOT owns the list; this stage only consumes it.
+# From: Issue #1683
+ARG APK_PACKAGES
+# What: bootstrap apk list, supplied from the SOT.
+# Why: AG-REL-001 forbids ash; ci.sh apk-setup needs bash.
+# From: Issue #1683 | PR #1912
+ARG APK_BOOTSTRAP
+RUN apk add --no-cache ${APK_BOOTSTRAP}
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+# What: retry policy for ci.sh, from SOT stage_variables
+# Why: this stage has no SOT; ci.sh reads them from env
+# From: Issue #1683 | PR #1858
+ARG CI_RETRY_MAX_ATTEMPTS
+ARG CI_RETRY_BACKOFF_BASE_SECONDS
+# What: shared package setup via ci.sh.
+# Why: ci.sh owns repos, proxy CA, update+upgrade, add.
+# From: Issue #1683 | PR #1858
+RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
+    --mount=type=secret,id=project_selfhosted_proxy_ca \
+    bash /usr/local/bin/ci.sh apk-setup ${APK_PACKAGES}
 
-# Config templates — expanded once into /var/lib/kea/ on first boot
-COPY kea-dhcp4.conf /etc/kea/kea-dhcp4.conf.template
-COPY kea-ctrl-agent.conf /etc/kea/kea-ctrl-agent.conf.template
-COPY kea-dhcp-ddns.conf /etc/kea/kea-dhcp-ddns.conf.template
-COPY entrypoint.sh /entrypoint.sh
+COPY --from=dhcp-builder /build/lancache-watchdog-out /usr/local/bin/lancache-watchdog
 
-# /run/kea holds Kea's unix-domain control-channel sockets (kea4.sock,
-# kea-ddns.sock, per the *.conf "socket-name" entries above) -- mode 750
-# (owner rwx, group rx, no world access) keeps that directory readable only
-# to root and its own group, since these sockets are container-internal
-# control channels, not something any other local user needs to reach.
-RUN chmod +x /entrypoint.sh && mkdir -p /var/lib/kea && install -d -m 750 /run/kea
+# What: processes the supervisor runs, from the SOT.
+# Why: ci.sh passes the list; the image holds no copy.
+# From: Issue #1683
+ARG LANCACHE_PROCESSES
+ENV LANCACHE_PROCESSES=${LANCACHE_PROCESSES}
 
-# What: final apk upgrade pass, no packages added.
-# Why: patches CVEs fixed after this file's package installs.
-# From: Issue #1781 | PR #1783
-RUN apk upgrade --no-cache
+# What: the shared gid of the stack's secret files.
+# Why: ci.sh passes it from the SOT; compose names none.
+# From: Issue #1683 | PR #1912
+ARG LANCACHE_RUNTIME_GID
+ENV LANCACHE_RUNTIME_GID=${LANCACHE_RUNTIME_GID}
 
-EXPOSE 67/udp 8000
+# What: the SOT default values, one pipe-joined list.
+# Why: ci.sh passes the list; binaries read it as env.
+# From: Issue #1683 | PR #1912
+ARG LANCACHE_RUNTIME_DEFAULTS
+ENV LANCACHE_RUNTIME_DEFAULTS=${LANCACHE_RUNTIME_DEFAULTS}
 
-ENTRYPOINT ["/entrypoint.sh"]
+# What: the supervisor binary; no argument means supervise.
+# Why: compose and setup.sh add healthcheck or probe.
+# From: Issue #1683 | PR #1912
+ENTRYPOINT ["/usr/local/bin/lancache-watchdog"]
