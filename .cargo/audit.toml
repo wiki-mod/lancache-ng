@@ -1,0 +1,22 @@
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# cargo-audit settings read by the cargo audit steps.
+
+[advisories]
+# What: zstd 0.13 / zstd-safe 7.3.0 advisories of 2026-10-16.
+# Why: maintainer kept an exception next to the "*" upgrade.
+# From: Issue #1683 | PR #1956
+ignore = [
+    "RUSTSEC-2026-0391",
+    "RUSTSEC-2026-0395",
+    "RUSTSEC-2026-0396",
+    "RUSTSEC-2026-0397",
+    "RUSTSEC-2026-0398",
+    "RUSTSEC-2026-0399",
+    "RUSTSEC-2026-0400",
+    "RUSTSEC-2026-0401",
+    "RUSTSEC-2026-0402",
+    "RUSTSEC-2026-0403",
+    "RUSTSEC-2026-0404",
+    "RUSTSEC-2026-0405",
+    "RUSTSEC-2026-0406",
+]
