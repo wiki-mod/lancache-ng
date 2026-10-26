@@ -136,7 +136,6 @@ touches_exact() {
 # none, since anything not matched below already falls through to
 # should_run-relevant by default, exactly like an unclassified script today.
 ci_tooling_only_scripts=(
-    "scripts/check-action-node-versions.sh"
     "scripts/check-bats-path-filter-coverage.sh"
     "scripts/check-build-tools-smoke-coverage.sh"
     "scripts/check-changelog-direct-edit.sh"

@@ -41,6 +41,10 @@ Thumbs.db
 # Rust build artifacts
 services/ui/target/
 services/dns/nats-subscriber/target/
+# What: no committed Cargo lock in any directory.
+# Why: no third-party pin; each build takes the latest.
+# From: Issue #1683 | PR #1956
+Cargo.lock
 
 # Editor
 *.swp

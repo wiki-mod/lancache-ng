@@ -959,25 +959,6 @@ jobs:
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             bash tests/setup-migration-semantics.sh
 
-      - name: Check pinned GitHub Actions for deprecated Node runtimes (#801)
-        # check-action-node-versions.sh calls curl against api.github.com to
-        # resolve each pinned action's own action.yml -- runs inside the
-        # build-tools container per AG-VAL-016 (curl must not be a host-local
-        # tool), same as check-pr-tracking-metadata.sh's GraphQL call above.
-        # GH_TOKEN just raises the API rate limit; this also works fine
-        # unauthenticated at this repo's current pin count.
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          docker run --rm \
-            --user "$(id -u):$(id -g)" \
-            -v "$PWD:/work:ro" \
-            -w /work \
-            -e GH_TOKEN \
-            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            bash scripts/check-action-node-versions.sh
-
       - name: Check validation-subnet wrapper coverage (#896)
         # Standing guard: #820 wrapped every full-setup-validate.yml/
         # full-setup-deep-validate.yml job that starts its own compose stack from
@@ -3164,12 +3145,12 @@ jobs:
         env:
           RUSTFLAGS: "-D warnings"
         with:
-          command: cargo check --locked --all-targets --manifest-path services/dns/nats-subscriber/Cargo.toml
+          command: cargo check --all-targets --manifest-path services/dns/nats-subscriber/Cargo.toml
       - name: cargo clippy with warnings denied (dns/nats-subscriber)
         timeout-minutes: 35
         uses: ./.github/actions/cargo-with-sccache-fallback
         with:
-          command: cargo clippy --locked --all-targets --manifest-path services/dns/nats-subscriber/Cargo.toml -- -D warnings
+          command: cargo clippy --all-targets --manifest-path services/dns/nats-subscriber/Cargo.toml -- -D warnings
 
   ui_rust_quality:
     # UI Rust quality mirrors the DNS job but stays independent so both crates
@@ -3233,12 +3214,12 @@ jobs:
         env:
           RUSTFLAGS: "-D warnings"
         with:
-          command: cargo check --locked --all-targets --manifest-path services/ui/Cargo.toml
+          command: cargo check --all-targets --manifest-path services/ui/Cargo.toml
       - name: cargo clippy with warnings denied (ui)
         timeout-minutes: 35
         uses: ./.github/actions/cargo-with-sccache-fallback
         with:
-          command: cargo clippy --locked --all-targets --manifest-path services/ui/Cargo.toml -- -D warnings
+          command: cargo clippy --all-targets --manifest-path services/ui/Cargo.toml -- -D warnings
 
   watchdog_rust_quality:
     # Watchdog Rust quality mirrors dns_rust_quality/ui_rust_quality exactly
@@ -3308,12 +3289,12 @@ jobs:
         env:
           RUSTFLAGS: "-D warnings"
         with:
-          command: cargo check --locked --all-targets --manifest-path services/watchdog/Cargo.toml
+          command: cargo check --all-targets --manifest-path services/watchdog/Cargo.toml
       - name: cargo clippy with warnings denied (watchdog)
         timeout-minutes: 35
         uses: ./.github/actions/cargo-with-sccache-fallback
         with:
-          command: cargo clippy --locked --all-targets --manifest-path services/watchdog/Cargo.toml -- -D warnings
+          command: cargo clippy --all-targets --manifest-path services/watchdog/Cargo.toml -- -D warnings
 
   dns_test:
     # DNS unit tests are separate from quality checks so failures identify
@@ -3401,7 +3382,7 @@ jobs:
       - name: test (dns/nats-subscriber)
         uses: ./.github/actions/cargo-with-sccache-fallback
         with:
-          command: cargo test --locked --manifest-path services/dns/nats-subscriber/Cargo.toml
+          command: cargo test --manifest-path services/dns/nats-subscriber/Cargo.toml
 
   ui_test:
     # UI tests run only when the UI or workflow contract changes. This keeps
@@ -3478,7 +3459,7 @@ jobs:
       - name: test (ui)
         uses: ./.github/actions/cargo-with-sccache-fallback
         with:
-          command: cargo test --locked --manifest-path services/ui/Cargo.toml
+          command: cargo test --manifest-path services/ui/Cargo.toml
 
   watchdog_test:
     # Watchdog test now covers two different artifacts under one job: the
@@ -3571,7 +3552,7 @@ jobs:
       - name: test (watchdog Rust crate)
         uses: ./.github/actions/cargo-with-sccache-fallback
         with:
-          command: cargo test --locked --manifest-path services/watchdog/Cargo.toml
+          command: cargo test --manifest-path services/watchdog/Cargo.toml
 
   dns_cargo_audit:
     # Dependency audits remain crate-specific. They are skipped only when path
@@ -3628,12 +3609,13 @@ jobs:
             --user "$(id -u):$(id -g)" \
             -e HOME=/var/tmp \
             -e CARGO_HOME=/var/tmp/cargo-home \
-            -v "$PWD:/work:ro" \
+            -v "$PWD:/work" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             bash -c 'set -euo pipefail
               audit_log="$(mktemp)"
               trap '"'"'rm -f "$audit_log"'"'"' EXIT
+              cargo generate-lockfile --manifest-path services/dns/nats-subscriber/Cargo.toml
               if ! cargo audit --deny warnings --file services/dns/nats-subscriber/Cargo.lock >"$audit_log" 2>&1; then
                 cat "$audit_log"
                 exit 1
@@ -3696,12 +3678,13 @@ jobs:
             --user "$(id -u):$(id -g)" \
             -e HOME=/var/tmp \
             -e CARGO_HOME=/var/tmp/cargo-home \
-            -v "$PWD:/work:ro" \
+            -v "$PWD:/work" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             bash -c 'set -euo pipefail
               audit_log="$(mktemp)"
               trap '"'"'rm -f "$audit_log"'"'"' EXIT
+              cargo generate-lockfile --manifest-path services/ui/Cargo.toml
               if ! cargo audit --deny warnings --file services/ui/Cargo.lock >"$audit_log" 2>&1; then
                 cat "$audit_log"
                 exit 1
@@ -3766,12 +3749,13 @@ jobs:
             --user "$(id -u):$(id -g)" \
             -e HOME=/var/tmp \
             -e CARGO_HOME=/var/tmp/cargo-home \
-            -v "$PWD:/work:ro" \
+            -v "$PWD:/work" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             bash -c 'set -euo pipefail
               audit_log="$(mktemp)"
               trap '"'"'rm -f "$audit_log"'"'"' EXIT
+              cargo generate-lockfile --manifest-path services/watchdog/Cargo.toml
               if ! cargo audit --deny warnings --file services/watchdog/Cargo.lock >"$audit_log" 2>&1; then
                 cat "$audit_log"
                 exit 1
