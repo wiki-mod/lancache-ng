@@ -78,22 +78,24 @@ jobs:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      # What: shallow x64 checkout of the event commit.
-      # Why: GitHub runs JS actions in Alpine on x64 only.
+      # What: shallow x64 checkout of the nightly branch.
+      # Why: schedule starts on master; master has no ci.sh.
       # From: Issue #1683 | PR #1858
       - &bootstrap
-        name: Check out the event commit
+        name: Check out the nightly branch
         if: runner.arch != 'ARM64'
         uses: actions/checkout@v7
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ vars.PROJECT_NIGHTLY_REF }}
           fetch-depth: 1
       # What: switch to the nightly source ref from the SOT
-      # Why: a schedule run checks out the default branch
+      # Why: the repo variable must equal the SOT source_ref
       # From: Issue #1683 | PR #1858
       - &nightly_source
         name: Check out the nightly source ref
         id: source
+        env:
+          CI_BOOTSTRAP_REF_VARIABLE: PROJECT_NIGHTLY_REF
         run: bash .github/scripts/ci.sh channel-checkout nightly
       - name: Resolve the build-tools image
         id: resolve
@@ -191,14 +193,14 @@ jobs:
       SCCACHE_DIST_AUTH_TOKEN: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
     steps:
       - *bootstrap
-      # What: arm64 checkout by git in a container step.
+      # What: arm64 checkout of the nightly branch by git.
       # Why: no actions/checkout; push auth is CI_GIT_TOKEN.
       # From: Issue #1683 | PR #1858
-      - name: Check out the event commit on arm64
+      - name: Check out the nightly branch on arm64
         if: runner.arch == 'ARM64'
         uses: docker://mirror.gcr.io/alpine/git:latest
         with:
-          args: -c safe.directory=/github/workspace clone --quiet --depth 1 --revision=${{ github.sha }} ${{ github.server_url }}/${{ github.repository }} /github/workspace
+          args: -c safe.directory=/github/workspace clone --quiet --depth 1 --branch=${{ vars.PROJECT_NIGHTLY_REF }} ${{ github.server_url }}/${{ github.repository }} /github/workspace
       - *channel_pin
       # What: export args for the GHA cache runtime step.
       # Why: ci.sh owns the kill timeout and the var list.
