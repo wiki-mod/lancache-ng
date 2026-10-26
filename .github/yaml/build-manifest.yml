@@ -1,0 +1,1726 @@
+
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+# What: Single source of truth for CI 2.0 build inputs.
+# Why: One list ends the copied-in-many-places drift.
+# From: Issue #1683
+schema: build-manifest/v1
+
+# What: runtime apk packages and smoke every image gets
+# Why: CI tools belong to build-tools, not product images
+# From: Issue #1683 | PR #1858
+image_base:
+  # What: apk packages each Dockerfile adds before ci.sh.
+  # Why: ci.sh is bash; alpine has none (AG-REL-001).
+  # From: Issue #1683 | PR #1912
+  bootstrap:
+    - bash
+  packages:
+    - ca-certificates
+    - coreutils
+    - curl
+    - findutils
+    - gettext-envsubst
+    - grep
+    - jq
+    - sed
+    - util-linux
+    - zstd
+  smoke:
+    - bash --version
+    - curl --version
+    - envsubst --version
+    - find --version
+    - grep --version
+    - jq --version
+    - sed --version
+    - zstd --version
+
+# What: The product services this repository builds.
+# Why: One list; matrices/scans/release derive from it.
+# From: Issue #1683
+services:
+  # What: one image for watchdog, syslog, NTP and netdata.
+  # Why: the watchdog owns the services image.
+  # From: Issue #1683
+  services:
+    context: services/watchdog
+    labels: [services, watchdog, syslog, ntp, netdata]
+    # What: the image.description label ci.sh sets.
+    # Why: the Dockerfile holds no label text (AG-CI-023).
+    # From: Issue #1683 | PR #1912
+    description: "LanCache-NG services: supervisor for watchdog, retention, syslog-ng, chrony and Netdata."
+    build_type: rust
+    # What: crates (cargo -p) the services image builds.
+    # Why: supervisor and cachehamster run in one container.
+    # From: Issue #1683
+    crates: [lancache-watchdog, lancache-cachehamster]
+    # What: processes lancache-watchdog supervise runs.
+    # Why: ci.sh bakes them as LANCACHE_PROCESSES; one list.
+    # From: Issue #1683
+    processes: [watch, retention, syslog-ng, chronyd, netdata]
+    # What: accounts and dirs ci.sh image-setup creates.
+    # Why: no RUN logic in the Dockerfile; @KEY@ = default.
+    # From: Issue #1683 | PR #1912
+    setup:
+      - group=@LOG_READER_GROUP@:@GID@
+      - member=netdata:@LOG_READER_GROUP@
+    final_base: alpine
+    # What: final-image apk packages; the SOT owns the list.
+    # Why: consumers derive; no hardcoding (AG-CI-006)
+    # From: Issue #1683
+    packages:
+      - syslog-ng
+      - chrony-nts
+      - netdata
+      - netdata-go-plugins
+      - tzdata
+    # What: execute-smoke checks run post-build by ci.sh.
+    # Why: prove apk binaries run, not just exist
+    # From: Issue #1613
+    smoke:
+      - syslog-ng --version
+      - chronyd -v
+      - netdata -v
+  proxy:
+    context: services/proxy
+    labels: [proxy, nginx]
+    description: "LanCache-NG proxy: nginx cache for HTTP and TLS-interception traffic."
+    build_type: rust
+    # What: crates the proxy image builds.
+    # Why: the supervisor renders, certifies and runs nginx.
+    # From: Issue #1683
+    crates: [lancache-watchdog]
+    processes: [nginx]
+    # What: runtime defaults the Dockerfile takes as args.
+    # Why: the image builds with the value; it names none.
+    # From: Issue #1683 | PR #1912
+    default_args: [NGINX_DIR]
+    setup:
+      - dir=@NGINX_DIR@/@NGINX_SUBDIR_CA@
+      - dir=@NGINX_DIR@/@NGINX_SUBDIR_CERTS@
+      - dir=@NGINX_CACHE_DIR@
+    final_base: alpine
+    # What: final-image apk packages; nginx from nginx.org.
+    # Why: AG-KD-007: stream module only in nginx.org build.
+    # From: Issue #1683 | PR #1858
+    packages:
+      - openssl
+      - nginx@nginx
+    # What: nginx.org mainline repo for the base's branch.
+    # Why: apk-setup fills @ALPINE_BRANCH@ from the image.
+    # From: Issue #1683 | PR #1858
+    apk_repositories:
+      - nginx=http://nginx.org/packages/mainline/alpine/@ALPINE_BRANCH@/main
+    # What: the repo signing key and its sha256 pin.
+    # Why: the tagged repo is trusted only with this key.
+    # From: Issue #1683 | PR #1858
+    apk_keys:
+      - https://nginx.org/keys/nginx_signing.rsa.pub=ff7cf138acc09f2a5029300ab713fe6a1440605fca72e2bab76a4da9206fec87
+    smoke:
+      - 'v="$(nginx -V 2>&1)" && grep -q -- --with-stream_ssl_preread_module <<< "${v}"'
+  dns:
+    context: services/dns
+    labels: [dns, pdns, nats]
+    description: "LanCache-NG dns: PowerDNS auth, dns-http and dns-https recursors, NATS server and subscriber."
+    build_type: rust
+    # What: crates the dns image builds.
+    # Why: subscriber and supervisor run in one container.
+    # From: Issue #1683
+    crates: [nats-subscriber, lancache-watchdog]
+    processes: [pdns, dns-http, dns-https, nats-server, nats-subscriber, soa]
+    default_args: [PDNS_LUA_DNS_SCRIPT, PDNS_SCHEMA_FILE]
+    setup:
+      - dir=@PDNS_CONF_DIR@/auth
+      - dir=@PDNS_DATA_DIR@:pdns
+      - dir=@PDNS_RUN_DIR@:pdns
+    final_base: alpine
+    packages:
+      - pdns
+      - pdns-backend-sqlite3
+      - pdns-recursor-luajit
+      - nats-server
+      - bind-tools
+      - sqlite
+      - iproute2
+    smoke:
+      - nats-server --version
+  dhcp:
+    context: services/dhcp
+    labels: [dhcp, kea, dnsmasq]
+    description: "LanCache-NG dhcp: Kea DHCP with control agent and DDNS, or dnsmasq proxy/relay, plus the DHCP probe."
+    build_type: rust
+    # What: crates the dhcp image builds.
+    # Why: the supervisor switches Kea and dnsmasq modes.
+    # From: Issue #1683
+    crates: [lancache-watchdog]
+    processes: [kea-dhcp4, kea-ctrl-agent, kea-dhcp-ddns, dnsmasq, dhcp-probe]
+    final_base: alpine
+    packages:
+      - kea-dhcp4
+      - kea-ctrl-agent
+      - kea-dhcp-ddns
+      - kea-admin
+      - kea-hook-lease-cmds
+      - dnsmasq
+      - openssl
+      - iptables
+    smoke:
+      - kea-dhcp4 -v
+      - lancache-watchdog probe
+      - dnsmasq --version
+  ui:
+    context: services/ui
+    labels: [admin-ui]
+    description: "lancache-ng Admin UI and control-plane service for cache, DNS, DHCP, and secondary management."
+    build_type: rust
+    # What: crates the ui image builds.
+    # Why: rust checks target crates, not the build context
+    # From: Issue #1683 | PR #1858
+    crates: [lancache-ui]
+    default_args: [TEMPLATE_DIR, UI_LISTEN_PORT]
+    setup:
+      - group=@LOG_READER_GROUP@:@GID@
+      - user=@LOG_READER_GROUP@:@GID@:@LOG_READER_GROUP@
+    final_base: alpine
+
+# What: The toolchain image that builds the product stack.
+# Why: built by generic pipeline; not in stack
+# From: Issue #1683
+build_toolchain:
+  build-tools:
+    context: .github/build-tools
+    labels: [build-tools]
+    description: "Prebuilt lancache-ng CI and developer validation toolchain image (Alpine)."
+    build_type: toolchain
+    final_base: alpine
+    # What: apk packages installed into the toolchain image.
+    # Why: one list; gawk, parallel serve bats --jobs.
+    # From: Issue #1683 | PR #1912
+    packages:
+      - actionlint
+      - bats
+      - bc
+      - bind-tools
+      - build-base
+      - cargo
+      - cargo-audit
+      - ccache
+      - clang22
+      - cmake
+      - distcc
+      - distcc-pump
+      - docker-cli
+      - docker-cli-buildx
+      - docker-cli-compose
+      - expect
+      - gawk
+      - gcompat
+      - gettext
+      - git
+      - github-cli
+      - gnupg
+      - iproute2
+      - lld22
+      - lsof
+      - make
+      - musl-dev
+      - nano
+      - nodejs
+      - npm
+      - openjdk21-jre-headless
+      - openssl
+      - openssl-dev
+      - openssl-libs-static
+      - parallel
+      - perl
+      - pkgconf
+      - procps-ng
+      - python3
+      - ripgrep
+      - rsync
+      - run-parts
+      - rust
+      - rust-clippy
+      - rustfmt
+      - sccache
+      - shellcheck
+      - shfmt
+      - sqlite
+      - tcpdump
+      - tzdata
+      - xz
+      - yq-go
+      - zlib-dev
+      - zlib-static
+    # What: tools only checked on PATH, with no run.
+    # Why: a tool has one smoke entry, here or in runs.
+    # From: Issue #1683
+    smoke_tools:
+      - ar
+      - awk
+      - basename
+      - cargo-audit
+      - cat
+      - chgrp
+      - chmod
+      - chown
+      - clang
+      - clippy-driver
+      - cmake
+      - cp
+      - dig
+      - dirname
+      - distcc
+      - flock
+      - getent
+      - gzip
+      - install
+      - ip
+      - ld.lld
+      - make
+      - mkdir
+      - mktemp
+      - mv
+      - node
+      - npm
+      - openssl
+      - pkg-config
+      - ps
+      - pump
+      - rm
+      - rsync
+      - rustc
+      - rustfmt
+      - sha256sum
+      - sort
+      - tar
+      - tcpdump
+      - tee
+      - timeout
+      - xargs
+    # What: Commands the toolchain smoke must run clean.
+    # Why: present is not runnable; one owner of the runs.
+    # From: Issue #1683 | PR #1858
+    smoke_runs:
+      - cargo --version
+      - cargo fmt --version
+      - cargo clippy --version
+      - cargo audit --version
+      - 'c="$(rustc --print cfg)" && grep -qx target_env=.musl. <<< "${c}"'
+      - sccache --version
+      - ccache --version
+      - bc --version
+      - docker --version
+      - expect -v
+      - gettext --version
+      - gh --version
+      - git --version
+      - gpg --version
+      - lsof -v
+      - parallel --version
+      - rg --version
+      - xz --version
+      - actionlint --version
+      - bats --version
+      - shellcheck --version
+      - shfmt --version
+      - yq --version
+      - docker compose version
+      - docker buildx version
+      - 'm="$(gcc -dumpmachine)" && [[ "${m}" == *-musl ]]'
+      - java -version
+
+# What: external base images, latest; the run resolves them.
+# Why: no third-party pin; one owner per image.
+# From: Issue #1683
+base_images:
+  alpine: "mirror.gcr.io/library/alpine:latest"
+  # What: BuildKit daemon image of the image builds.
+  # Why: §35 cache export needs a docker-container builder.
+  # From: Issue #1683 | PR #1912
+  buildkit: "mirror.gcr.io/moby/buildkit:latest"
+  # What: git image of the arm64 checkout step.
+  # Why: actions/checkout needs x64 node in Alpine.
+  # From: Issue #1683 | PR #1858
+  git: "mirror.gcr.io/alpine/git:latest"
+
+# What: external actions a workflow may use.
+# Why: the vN tag lives in uses:, which Dependabot moves.
+# From: Issue #1683 | PR #1912
+github_actions:
+  attest:
+    uses: actions/attest
+  checkout:
+    uses: actions/checkout
+  claude-code:
+    uses: anthropics/claude-code-action
+  docker-login:
+    uses: docker/login-action
+
+# What: the runtime group id the containers share.
+# Why: ci.sh bakes it into each image; one owner.
+# From: Issue #1683 | PR #1912
+runtime:
+  gid: 10001
+  # What: the prod compose file, relative to the checkout.
+  # Why: setup.sh starts the stack from this one file.
+  # From: Issue #1683 | PR #1858
+  compose_file: deploy/prod/docker-compose.yml
+  # What: KEY=value defaults; @KEY@ names another entry.
+  # Why: images bake them; no .env template holds any.
+  # From: Issue #1683 | PR #1912
+  defaults:
+    - PDNS_AUTH_API_PORT=8081
+    - PDNS_HTTP_API_PORT=8082
+    - PDNS_HTTPS_API_PORT=8084
+    - DNS_ROLLBACK_PORT=8083
+    - PDNS_SOA_REFRESH=30
+    - PDNS_SOA_RETRY=10
+    - PDNS_SOA_RESYNC_INTERVAL=3600
+    - PDNS_XFR_CYCLE_INTERVAL=15
+    - PDNS_SOA_MNAME=localhost.
+    - PDNS_SOA_RNAME=admin.@
+    - PDNS_SOA_EXPIRE=604800
+    - PDNS_SOA_MINIMUM=3600
+    - PDNS_AUTH_LOGLEVEL=3
+    - PRIVATE_NETS=10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 127.0.0.0/8
+    - DNS_API_ALLOW_FROM=@PRIVATE_NETS@
+    - DNS_QUERY_ALLOW_FROM=@PRIVATE_NETS@ fc00::/7
+    - LOOPBACK_NETS=127.0.0.0/8 ::1
+    - RPZ_SOA_RNAME=admin.rpz.
+    - RPZ_TTL=60
+    - RPZ_SOA_REFRESH=3600
+    - RPZ_SOA_RETRY=900
+    - ROOT_ZONE_MIRROR_SERVERS=199.9.14.201 192.33.4.12 192.5.5.241
+    - ROOT_ZONE_MIRROR_REFRESH=3600
+    - ROOT_ZONE_MIRROR_RETRY=3600
+    - RECURSOR_MINIMUM_TTL_OVERRIDE=60
+    - RECURSOR_RECORDCACHE_MAX_ENTRIES=1000000
+    - RECURSOR_REFRESH_ON_TTL_PERC=10
+    - RECURSOR_SERVE_STALE_EXTENSIONS=120
+    - RECURSOR_MAX_NEGATIVE_TTL=120
+    - RECURSOR_PACKETCACHE_MAX_ENTRIES=500000
+    - RECURSOR_PACKETCACHE_TTL=3600
+    - RECURSOR_SERVFAIL_TTL=30
+    - RECURSOR_LOGLEVEL=3
+    - RECURSOR_LOGLEVEL_QUERIES=6
+    - CHECK_INTERVAL=30
+    - RESTART_AFTER=3
+    - DISK_WARN_PCT=85
+    - DISK_ALARM_PCT=95
+    - DOCKER_API_TIMEOUT=5
+    - DOCKER_RESTART_TIMEOUT=30
+    - DOCKER_RESTART_GRACE=2
+    - SUPERVISE_TICK=2
+    - RETRY_BACKOFF_START=1
+    - RETRY_BACKOFF_MAX=30
+    - SUPERVISE_BACKOFF_RESET=60
+    - SUPERVISE_STOP_GRACE=8
+    - SUPERVISE_STATUS_MAX_AGE=30
+    - DHCP_PROBE_WINDOW=5
+    - DHCP_PROBE_REQUEST_TIMEOUT=3
+    - DHCP_PROBE_RETRANSMITS=3
+    - PDNS_SOA_COLD_RETRY=5
+    - NATS_RECONNECT_DELAY=3
+    - NATS_NAK_DELAY_MS=100
+    - DNS_CONFIRM_PAUSE_MS=100
+    - NATS_FETCH_WAIT=5
+    - DNS_SYNC_TICK=60
+    - PDNS_ZONE_CHECK_TIMEOUT=10
+    - DNS_FLUSH_TIMEOUT=3
+    - NATS_DNS_STREAM_MAX_AGE=604800
+    - SYSLOG_TIME_REAP=30
+    - HTTP_CLIENT_TIMEOUT=10
+    - HTTP_POOL_IDLE_TIMEOUT=90
+    - HTTP_TCP_KEEPALIVE=60
+    - HEALTH_PROBE_TIMEOUT=2
+    - HEALTHCHECK_INTERVAL=30s
+    - HEALTHCHECK_TIMEOUT=5s
+    - HEALTHCHECK_RETRIES=3
+    - HEALTHCHECK_START_PERIOD=20s
+    - SYSLOG_PRUNE_RETRY_COOLDOWN=3600
+    - CACHEHAMSTER_CONCURRENCY=4
+    - DHCP_LEASE_TIME=86400
+    - DHCP_LEASE_TIME_MIN=60
+    - DHCP_LEASE_TIME_MAX=604800
+    - DHCP_MAX_LEASE_FACTOR=2
+    - CACHE_SLICE_SIZE=8m
+    - CACHE_VALID_HIT=@CACHE_VALID_DAYS@d
+    - CACHE_VALID_ANY=1m
+    - CACHE_INACTIVE=@CACHE_VALID_DAYS@d
+    - CACHE_MIN_FREE=1g
+    - CACHE_VALID_DAYS=365
+    - SYSLOG_MAX_GB=10
+    - SYSLOG_RETENTION_DAYS=30
+    - LOG_QUERIES=0
+    - ROOT_ZONE_MIRROR=1
+    - DNS_UPSTREAM_SERVERS=
+    - DNS_UPSTREAM_ZONES=.
+    - DNS_UPSTREAM_UNSIGNED_ZONES=
+    - DHCP_DOMAIN=lan
+    - DHCP_DDNS_ENABLED=false
+    - KEA_CTRL_USER=admin
+    - KEA_CTRL_PORT=8000
+    - KEA_CONFIG_SNAPSHOT_DIR=@KEA_DATA_DIR@/config-snapshots
+    - KEA_CONFIG_SNAPSHOT_FILE=dhcp4.json
+    - KEEP_KNOWN_GOOD_CONFIGS=3
+    - NATS_UI_USER=lancache-ui
+    - NATS_DNS_WRITER_USER=lancache-dns-writer
+    - NATS_CALLOUT_USER=lancache-nats-callout
+    - NATS_SYS_USER=lancache-nats-sys
+    - LANCACHE_LOG_PORT=5514
+    - LOGGING_PROXY_ENABLED=1
+    - LOGGING_DNS_ENABLED=1
+    - LOGGING_DHCP_ENABLED=1
+    - LOGGING_UI_ENABLED=1
+    - NGINX_UPSTREAM_RESOLVER=8.8.8.8 8.8.4.4 [2001:4860:4860::8888] [2001:4860:4860::8844]
+    - PROXY_SECURITY_MODE=lazy
+    - NTP_UPSTREAM_SERVERS=0.debian.pool.ntp.org 1.debian.pool.ntp.org 2.debian.pool.ntp.org 3.debian.pool.ntp.org time.cloudflare.com
+    - CACHE_MAX_SIZE=50g
+    - CACHE_MEM_MB=512
+    - DHCP_SUBNET=10.0.0.0/24
+    - DHCP_RANGE_START=10.0.0.128
+    - DHCP_RANGE_END=10.0.0.254
+    - DHCP_GATEWAY=10.0.0.1
+    - DHCP_NTP_SERVERS=debian.pool.ntp.org,time.nist.gov
+    - ALLOW_INSECURE_UI=false
+    - SUPERVISE_RUN_DIR=/run/lancache
+    - LANCACHE_SHARED_SECRET_DIR=/var/lib/lancache-secrets
+    - UI_DATA_DIR=/data
+    - DESIRED_STATE_FILE=@UI_DATA_DIR@/desired-state.json
+    - UI_SETTINGS_FILE=@UI_DATA_DIR@/lancache-ui-settings.env
+    - DHCP_PROBE_REQUEST_FILE=@UI_DATA_DIR@/dhcp-probe-request
+    - DHCP_PROBE_RESULT_FILE=@KEA_DATA_DIR@/dhcp-probe-result.json
+    - UI_SESSION_SECRET_FILE=@UI_DATA_DIR@/lancache-ui-session.secret
+    - SECONDARY_REGISTRATION_TOKEN_FILE=@UI_DATA_DIR@/lancache-secondary-registration.token
+    - NETDATA_ALARMS_FILE=@UI_DATA_DIR@/netdata-alarms.json
+    - NATS_ISSUER_SEED_PATH=@UI_DATA_DIR@/lancache-nats-issuer.seed
+    - NATS_XKEY_SEED_PATH=@UI_DATA_DIR@/lancache-nats-xkey.seed
+    - UI_DATABASE_FILE=@UI_DATA_DIR@/lancache-ui.db
+    - UI_LOG_FILE=/var/log/lancache-ui/ui.log
+    - UI_LISTEN_PORT=8080
+    - UI_LOGS_MAX_ENTRIES=200
+    - UI_SESSION_TTL_SECONDS=86400
+    # What: URL paths of ui routes setup.sh and ci.sh call.
+    # Why: shell reads the path here; no literal copy.
+    # From: Issue #1683 | PR #1912
+    - UI_PAGE_DOMAINS=/domains
+    - UI_ROUTE_LAN_ADD=/domains/lan/add
+    - UI_ROUTE_STATIC_ADD=/dhcp/static/add
+    - UI_ROUTE_SECONDARY_REGISTER=/api/secondary/register
+    # What: ui page refresh timings, in seconds.
+    # Why: templates read the value; no literal in markup.
+    # From: Issue #1683 | PR #1912
+    - UI_WATCHDOG_REFRESH_SECONDS=10
+    - UI_DASHBOARD_REFRESH_SECONDS=10
+    - UI_STATS_REFRESH_SECONDS=3
+    # What: restart page poll gap and first wait, seconds.
+    # Why: the page script reads them; no literal in markup.
+    # From: Issue #1683 | PR #1912
+    - UI_RESTART_POLL_INTERVAL_SECONDS=1
+    - UI_RESTART_POLL_FIRST_DELAY_SECONDS=2
+    # What: samples the stats page charts keep per series.
+    # Why: one value for the chart size and the query.
+    # From: Issue #1683 | PR #1912
+    - UI_STATS_POINTS=60
+    # What: minutes between host convergence runs.
+    # Why: setup.sh timer and ui texts read one value.
+    # From: Issue #1683 | PR #1912
+    - CONVERGE_TIMER_INTERVAL_MINUTES=5
+    # What: other timings of the host units setup.sh writes.
+    # Why: setup.sh reads them here; no unit text literal.
+    # From: Issue #819 | PR #1912
+    - CONVERGE_TIMER_BOOT_DELAY_MINUTES=2
+    - STACK_UNIT_RESTART_SECONDS=10
+    - AUTO_UPDATE_TIMER_CALENDAR=daily
+    - AUTO_UPDATE_TIMER_SPREAD=1h
+    # What: setup.sh log line counts and wizard user name.
+    # Why: setup.sh reads them here; no literal in its code.
+    # From: Issue #1683 | PR #1912
+    - SETUP_REGRESSION_LOG_LINES=50
+    - SETUP_STATUS_LOG_LINES=30
+    - SETUP_LOGBUNDLE_LOG_LINES=2000
+    - SETUP_UI_USER_DEFAULT=admin
+    # What: health gate waits, samples, DNS probe name.
+    # Why: setup.sh reads them here; no literal in its code.
+    # From: Issue #1683 | PR #1858
+    - SETUP_HEALTH_WAIT_SERVICES_SECONDS=180
+    - SETUP_HEALTH_WAIT_UI_SECONDS=120
+    - SETUP_HEALTH_POLL_SECONDS=3
+    - SETUP_HEALTH_BASELINE_SAMPLES=3
+    - SETUP_HEALTH_BASELINE_INTERVAL_SECONDS=2
+    - SETUP_DNS_PROBE_NAME=content1.steampowered.com
+    # What: host service paths for systemd and OpenRC.
+    # Why: setup.sh reads them here; no path in its code.
+    # From: Issue #1683 | PR #1858
+    - SYSTEMD_UNIT_DIR=/etc/systemd/system
+    - OPENRC_INIT_DIR=/etc/init.d
+    - OPENRC_LOG_DIR=/var/log
+    - OPENRC_STOP_TIMEOUT_SECONDS=600
+    # What: 1 = dns answers private PTR zones itself.
+    # Why: maintainer 24.10.: PTR zones are off by default.
+    # From: Issue #1918 | PR #1858
+    - DNS_LOCAL_REVERSE_ZONES=0
+    # What: the project address the ui links to.
+    # Why: setup.sh bootstrap copy; ci.sh checks both.
+    # From: Issue #1683 | PR #1912
+    - LANCACHE_REPO_URL=https://github.com/wiki-mod/lancache-ng
+    - KEA_DATA_DIR=/var/lib/kea
+    - KEA_LEASE_FILE=@KEA_DATA_DIR@/kea-leases4.csv
+    - KEA_SOCKET_DIR=/run/kea
+    - KEA4_SOCKET=@KEA_SOCKET_DIR@/kea4.sock
+    - KEA_DDNS_SOCKET=@KEA_SOCKET_DIR@/kea-ddns.sock
+    # What: TSIG key name and algorithm of DDNS and AXFR.
+    # Why: dns and Kea sign with one name; no Rust literal.
+    # From: Issue #858 | PR #1858
+    - DDNS_TSIG_NAME=lancache-ddns-key
+    - DDNS_TSIG_ALGORITHM=hmac-sha256
+    # What: the Docker bridge range of internal clients.
+    # Why: Kea control and proxy ACLs admit the same range.
+    # From: Issue #1683 | PR #1912
+    - DOCKER_BRIDGE_NET=172.16.0.0/12
+    - KEA_CTRL_ALLOW_FROM=@DOCKER_BRIDGE_NET@ 127.0.0.0/8
+    - KEA_CTRL_CHAIN=LANCACHE_KEA_CTRL
+    - KEA_CTRL_REALM=kea-control
+    - KEA_HOOKS_ROOT=/usr/lib
+    - KEA_LEASE_CMDS_HOOK=libdhcp_lease_cmds.so
+    - KEA_HOOKS_SEARCH_DEPTH=5
+    - KEA_NCR_MAX_QUEUE=1024
+    - KEA_DDNS_GENERATED_PREFIX=dhcp
+    - KEA_DDNS_REPLACE_CLIENT_NAME=when-present
+    - KEA_LOG_SEVERITY=INFO
+    - KEA_DHCP4_PACKET_LOG_SEVERITY=ERROR
+    - KEA_LOG_DEBUGLEVEL=0
+    - DHCP_SNAPSHOT_MOUNT=/var/lib/lancache-dhcp
+    - DHCP_CONFIG_SNAPSHOT_DIR=@DHCP_SNAPSHOT_MOUNT@/config-snapshots
+    - DHCP_CONFIG_SNAPSHOT_FILE=dnsmasq.conf
+    - DNS_SNAPSHOT_MOUNT=/var/lib/lancache-dns
+    - DNS_CONFIG_SNAPSHOT_DIR=@DNS_SNAPSHOT_MOUNT@/config-snapshots
+    - DNS_AUTH_CONFIG_SNAPSHOT_FILE=pdns.conf
+    - DNS_RECURSOR_CONFIG_SNAPSHOT_FILE=recursor.conf
+    - DNS_ZONE_SNAPSHOT_FILE=zone.json
+    - PROXY_SNAPSHOT_MOUNT=/var/lib/lancache-proxy
+    - PROXY_CONFIG_SNAPSHOT_DIR=@PROXY_SNAPSHOT_MOUNT@/config-snapshots
+    - PROXY_CONFIG_SNAPSHOT_FILE=nginx.json
+    - DNS_STATE_DIR=/var/lib/powerdns-state
+    - PDNS_DATA_DIR=/var/lib/powerdns
+    - NATS_CONF_MOUNT=/etc/nats
+    - NATS_CONF_PATH=@NATS_CONF_MOUNT@/nats.conf
+    - NATS_AUTH_CALLOUT_PATH=@NATS_CONF_MOUNT@/auth_callout.conf
+    - NATS_STORE_DIR=/var/lib/nats
+    - NATS_PORT=4222
+    - NATS_MONITOR_PORT=8222
+    - NATS_URL=nats://dns:@NATS_PORT@
+    - NATS_CONSUMER=dns
+    - NATS_RECONCILER=1
+    - NATS_PASSWORD_SHARED_SECRET=nats-dns-writer-password
+    - DNS_REPLICATION_ROLE=primary
+    - RAW_CONTENT_URL=https://raw.githubusercontent.com
+    - SETUP_SCRIPT_PATH=wiki-mod/lancache-ng/master/setup.sh
+    - DNS_REPLICATION_ROLE_SECONDARY=secondary
+    - SECONDARY_RUNTIME_GID=0
+    - SECONDARY_LOOPBACK_CANDIDATES=10
+    - SECONDARY_SHARED_SECRET_DIR=@DNS_SNAPSHOT_MOUNT@/secrets
+    - CONTAINER_NAME_PREFIX=LanCache-NG
+    - CONTAINER_NAME_SERVICES=@CONTAINER_NAME_PREFIX@-services
+    - CONTAINER_NAME_PROXY=@CONTAINER_NAME_PREFIX@-proxy
+    - CONTAINER_NAME_DNS=@CONTAINER_NAME_PREFIX@-dns
+    - CONTAINER_NAME_DHCP=@CONTAINER_NAME_PREFIX@-dhcp
+    - CONTAINER_NAME_UI=@CONTAINER_NAME_PREFIX@-ui
+    - CDN_DOMAINS_FILE=/etc/lancache/cdn-domains.txt
+    - CACHEHAMSTER_DATA_DIR=/var/lib/lancache-cachehamster
+    - CACHE_DIR=/var/cache/lancache
+    - CACHE_DIR_ALLOWED_PREFIX=/var/cache
+    - DOCKER_SOCKET=/var/run/docker.sock
+    - NETDATA_CONFIG_DIR=/etc/netdata
+    - NETDATA_LIB_DIR=/var/lib/netdata
+    - NETDATA_CACHE_DIR=/var/cache/netdata
+    - NETDATA_URL=http://services:19999
+    - NETDATA_ALARM_UI_URL=http://ui:@UI_LISTEN_PORT@
+    - NETDATA_ALARM_MAX_TIME=15
+    - NETDATA_ALARM_RECIPIENT=lancache-ui
+    - NTP_STATE_DIR=/var/lib/chrony
+    - NTP_DRIFT_FILE=@NTP_STATE_DIR@/drift
+    - NTP_ENABLED=0
+    - AUTO_UPDATE_ENABLED=0
+    - NTP_AUTO_DHCP=0
+    - UI_SECURITY_HEADERS=true
+    - LANCACHE_DEV_MODE=false
+    - RETENTION_STATE_DIR=/var/lib/lancache-retention-state
+    - PURGE_STAMP=@RETENTION_STATE_DIR@/purge.stamp
+    - SYSLOG_PRUNE_STAMP=@RETENTION_STATE_DIR@/syslog-prune.stamp
+    - STATUS_DIR=/var/run/watchdog
+    - STATUS_FILE=@STATUS_DIR@/status.json
+    - SYSLOG_LOG_ROOT=/var/log/lancache-syslog-ng
+    - SYSLOG_LOG_ROOT_ALLOWED_PREFIX=/var/log
+    - PROXY_STATUS_PATH=/nginx_status
+    - PROXY_STATUS_URL=http://proxy@PROXY_STATUS_PATH@
+    - DHCP_API_HOST=host.docker.internal
+    - DNS_URL=http://dns
+    - HTTPS_ENABLED=1
+    - DHCP_MODE=disabled
+    - LOG_READER_GROUP=lancache
+    - LANCACHE_STATE_DIR=/opt/lancache-ng
+    - TEMPLATE_DIR=/templates
+    - PDNS_CONF_DIR=/etc/pdns
+    - PDNS_RUN_DIR=/var/run/pdns
+    - PDNS_LUA_DNS_SCRIPT=@PDNS_CONF_DIR@/filter-aaaa.lua
+    - PDNS_SCHEMA_FILE=/usr/share/lancache-ng/schema.sqlite3.sql
+    - NGINX_DIR=/etc/nginx
+    - NGINX_SUBDIR_CA=ssl/ca
+    - NGINX_SUBDIR_CERTS=ssl/certs
+    - CA_CERT_FILE=ca.crt
+    - CA_KEY_FILE=ca.key
+    - CA_SERIAL_FILE=ca.srl
+    - CA_SUBJECT=/CN=LanCache-NG CA/O=LanCache-NG/C=DE
+    - CA_KEY_TYPE=rsa:4096
+    - CA_DAYS=3650
+    - LEAF_KEY_TYPE=rsa:2048
+    - LEAF_SUBJECT=/CN=lancache-ng
+    - LEAF_DAYS=3650
+    - DEFAULT_CERT_NAME=default
+    - DEFAULT_CERT_DNS=lancache-default
+    - NGINX_CACHE_DIR=/var/cache/nginx/lancache
+    - PROXY_HEALTH_PATH=/healthz
+    - PROXY_HEALTH_URL=http://@LOOPBACK_BIND_IP@:@PROXY_HTTP_PORT@@PROXY_HEALTH_PATH@
+    - PROXY_HEALTH_HTTPS_URL=https://@LOOPBACK_BIND_IP@:@NGINX_HEALTH_HTTPS_PORT@@PROXY_HEALTH_PATH@
+    - PROXY_HTTP_PORT=80
+    - PROXY_HTTPS_PORT=443
+    - NGINX_HEALTH_HTTPS_PORT=8445
+    - NGINX_MITM_PORT=8444
+    - NGINX_MITM_RELAY_PORT=9445
+    - NGINX_PASSTHROUGH_RELAY_PORT=9446
+    - NGINX_PASSTHROUGH_PORT=8443
+    - NGINX_UPSTREAM_CONNECT_TIMEOUT=30
+    - NGINX_UPSTREAM_IDLE_TIMEOUT=3600
+    - NGINX_CACHE_LOCK_TIMEOUT=2h
+    - NGINX_SSL_VERIFY_DEPTH=2
+    - NGINX_SSL_PROTOCOLS=TLSv1.2 TLSv1.3
+    - NGINX_SSL_CIPHERS=HIGH:!aNULL:!MD5
+    - NGINX_SSL_SESSION_CACHE=shared:SSL:10m
+    - NGINX_SSL_SESSION_TIMEOUT=1d
+    - NGINX_MAX_TEMP_FILE_SIZE=51200m
+    - NGINX_TEMP_FILE_WRITE_SIZE=8m
+    - NGINX_WORKER_RLIMIT_NOFILE=65535
+    - NGINX_THREAD_POOL_THREADS=32
+    - NGINX_THREAD_POOL_MAX_QUEUE=65536
+    - NGINX_WORKER_CONNECTIONS=4096
+    - NGINX_MAP_HASH_BUCKET_SIZE=512
+    - NGINX_MAP_HASH_MAX_SIZE=2048
+    - NGINX_KEEPALIVE_TIMEOUT=65
+    - NGINX_DIRECTIO=4m
+    - NGINX_RESOLVER_VALID=300s
+    - NGINX_RESOLVER_TIMEOUT=5s
+    - KEA_NCR_PORT=53001
+    - NGINX_HTTPS_LISTEN_FILE=conf.d/https-listen.inc
+    - NGINX_HEALTHZ_FILE=lancache-healthz-body.txt
+    - DNS_PORT=53
+    - DNS_HTTPS_PORT=1053
+    - PDNS_AUTH_PORT=5300
+    - NTP_PORT=123
+    - LOOPBACK_BIND_IP=127.0.0.1
+    - ANY_BIND_IP=0.0.0.0
+    - ROUTE_PROBE_TARGET=1.1.1.1:53
+    - UI_SESSION_TTL_MAX_SECONDS=31536000
+    - STATE_SUBDIR_SYSLOG_NG=syslog-ng
+    - STATE_SUBDIR_NTP=ntp
+    - STATE_SUBDIR_CACHEHAMSTER=cachehamster
+    - STATE_SUBDIR_PDNS=pdns
+    - STATE_SUBDIR_PDNS_FILTER=pdns-filter-state
+    - STATE_SUBDIR_NATS=nats
+    - STATE_SUBDIR_NATS_CONF=nats-conf
+    - STATE_SUBDIR_KEA=kea
+    - STATE_SUBDIR_CACHE=cache
+    - STATE_SUBDIR_CA=ca
+  # What: defaults compose interpolates as SOT_<KEY>.
+  # Why: setup.sh and ci.sh export them; no clash with .env.
+  # From: Issue #1683 | PR #1912
+  compose_keys: LANCACHE_LOG_PORT SUPERVISE_RUN_DIR LANCACHE_SHARED_SECRET_DIR UI_DATA_DIR STATUS_DIR CACHE_DIR SYSLOG_LOG_ROOT RETENTION_STATE_DIR NTP_STATE_DIR CACHEHAMSTER_DATA_DIR NETDATA_CONFIG_DIR NETDATA_LIB_DIR NETDATA_CACHE_DIR DOCKER_SOCKET CDN_DOMAINS_FILE PDNS_DATA_DIR DNS_STATE_DIR NATS_STORE_DIR NATS_CONF_MOUNT DNS_SNAPSHOT_MOUNT DHCP_SNAPSHOT_MOUNT PROXY_SNAPSHOT_MOUNT KEA_DATA_DIR NATS_PORT UI_LISTEN_PORT DNS_PORT DNS_HTTPS_PORT PDNS_AUTH_PORT NTP_PORT PROXY_HTTP_PORT PROXY_HTTPS_PORT NGINX_PASSTHROUGH_PORT NGINX_DIR NGINX_SUBDIR_CA NGINX_SUBDIR_CERTS NGINX_CACHE_DIR LOOPBACK_BIND_IP DHCP_API_HOST DNS_REPLICATION_ROLE_SECONDARY SECONDARY_RUNTIME_GID SECONDARY_SHARED_SECRET_DIR CONTAINER_NAME_SERVICES CONTAINER_NAME_PROXY CONTAINER_NAME_DNS CONTAINER_NAME_DHCP CONTAINER_NAME_UI HEALTHCHECK_INTERVAL HEALTHCHECK_TIMEOUT HEALTHCHECK_RETRIES HEALTHCHECK_START_PERIOD
+  # What: managed secrets as "KEY generator owner".
+  # Why: setup.sh and ci.sh filter one list.
+  # From: Issue #1683 | PR #1912
+  managed_secrets:
+    - KEA_CTRL_TOKEN hex32 stack
+    - NATS_CALLOUT_PASSWORD hex32 stack
+    - NATS_DNS_WRITER_PASSWORD hex32 stack
+    - NATS_SYS_PASSWORD hex32 stack
+    - NATS_UI_PASSWORD hex32 stack
+    - NETDATA_ALARM_TOKEN hex32 stack
+    - PDNS_API_KEY hex32 stack
+    - SECONDARY_REGISTRATION_TOKEN hex32 stack
+    - DDNS_TSIG_KEY base64_32 stack
+    - NATS_PASSWORD hex32 secondary
+    - UI_AUTH_PASSWORD alnum20 ui
+    - UI_AUTH_PASSWORD_HASH argon2id ui
+  # What: .env keys of a current_dev quickstart install.
+  # Why: update turns their relative paths absolute.
+  # From: Issue #1683 | PR #1912
+  quickstart_path_keys:
+    - CACHE_DIR
+    - KEA_DATA_DIR
+    - NTP_DATA_DIR
+    - CACHEHAMSTER_DATA_DIR
+  # What: helper files a quickstart install copied in.
+  # Why: the migration removes them last.
+  # From: Issue #1683 | PR #1912
+  quickstart_bundle_copies:
+    - scripts/shared-secret-bootstrap.sh
+    - scripts/untracked/docker-socket-proxy.sh
+  # What: quickstart volume and its prod state-dir key.
+  # Why: prod binds these as dirs, not as named volumes.
+  # From: Issue #1683 | PR #1912
+  quickstart_volume_keys:
+    - pdns-data-standard PDNS_DIR
+    - pdns-filter-state PDNS_FILTER_STATE_DIR
+    - nats-data NATS_DATA_DIR
+    - nats-conf NATS_CONF_DIR
+    - logs-syslog-ng SYSLOG_NG_LOG_DIR
+  # What: prod state dir keys as "KEY STATE_SUBDIR_NAME".
+  # Why: shell reads this list, not the compose text.
+  # From: Issue #1683 | PR #1912
+  state_dir_keys:
+    - SYSLOG_NG_LOG_DIR STATE_SUBDIR_SYSLOG_NG
+    - NTP_DATA_DIR STATE_SUBDIR_NTP
+    - CACHEHAMSTER_DATA_DIR STATE_SUBDIR_CACHEHAMSTER
+    - CA_DIR STATE_SUBDIR_CA
+    - PDNS_DIR STATE_SUBDIR_PDNS
+    - PDNS_FILTER_STATE_DIR STATE_SUBDIR_PDNS_FILTER
+    - NATS_DATA_DIR STATE_SUBDIR_NATS
+    - NATS_CONF_DIR STATE_SUBDIR_NATS_CONF
+    - KEA_DATA_DIR STATE_SUBDIR_KEA
+    - CACHE_DIR STATE_SUBDIR_CACHE
+  # What: archive compressors, best first: ext command args.
+  # Why: logbundle takes the first present; tar writes it.
+  # From: Issue #1683 | PR #1912
+  archive_compressors:
+    - zst zstd -q -c
+    - bz2 bzip2 -c
+    - gz gzip -c
+
+# What: external tools: repository, asset; latest release.
+# Why: no third-party pin; ci.sh resolves tag and sha256.
+# From: Issue #1683
+external_versions:
+  # What: CodeQL CLI bundle the codeql job downloads.
+  # Why: the only owner; codeql.yml names no version.
+  # From: Issue #1683 | PR #1858
+  codeql:
+    repository: github/codeql-action
+    asset: codeql-bundle-linux64.tar.gz
+  # What: Trivy CLI for amd64 hosts, fetched by ci.sh.
+  # Why: AG-VAL-017: external, never bundled; one owner.
+  # From: Issue #1683
+  trivy-amd64:
+    repository: aquasecurity/trivy
+    asset: trivy_@VERSION@_Linux-64bit.tar.gz
+  # What: Trivy CLI for arm64 hosts, fetched by ci.sh.
+  # Why: same release as trivy-amd64; the asset differs.
+  # From: Issue #1683
+  trivy-arm64:
+    repository: aquasecurity/trivy
+    asset: trivy_@VERSION@_Linux-ARM64.tar.gz
+  # What: Actions runner a new self-hosted host installs.
+  # Why: runner-fetch takes the latest release, verified.
+  # From: Issue #1622 | PR #1624
+  runner:
+    repository: actions/runner
+    asset: actions-runner-linux-x64-@VERSION@.tar.gz
+
+# What: The one authoritative platform list for all targets.
+# Why: Platform is a parameter, not a twin/list.
+# From: Issue #1683
+build_matrix:
+  platforms: [linux/amd64, linux/arm64]
+
+# What: per-arch apk arch, rust target, both runner labels.
+# Why: one SOT owner; no platform case dup in ci.sh.
+# From: Issue #1683 | PR #1912
+platform_arch:
+  # What: runner = GitHub-hosted; runner_self_hosted = fleet
+  # Why: the fleet builds on lancache-heavy; no arm64 host.
+  # From: Issue #1683 | PR #1912
+  amd64:
+    apk: x86_64
+    runner: ubuntu-latest
+    runner_self_hosted: lancache-heavy
+    rust_target: x86_64-alpine-linux-musl
+  arm64:
+    apk: aarch64
+    runner: ubuntu-24.04-arm
+    runner_self_hosted: ubuntu-24.04-arm
+    rust_target: aarch64-alpine-linux-musl
+
+# What: timeout minutes per workflow job id; one owner
+# Why: jobs that run before platform keep their own literal
+# From: Issue #1683 | PR #1858
+ci_job_timeouts:
+  aggregate: 30
+  analyze: 120
+  assemble: 30
+  build: 90
+  cargo-audit: 30
+  channel-check: 60
+  checks: 30
+  cut-release-tag: 15
+  gc: 60
+  lint: 30
+  nightly: 30
+  orphaned-branches: 15
+  plan: 30
+  project-board: 15
+  promote: 30
+  release: 30
+  release-provenance: 30
+  release-sbom: 60
+  scan: 60
+  test: 45
+  validate: 60
+
+# What: CI phases that must run and succeed on every run.
+# Why: §62: a skipped plan or checks would hide a red run.
+# From: Issue #1683 | PR #1858
+ci_result_gate:
+  required: [platform, plan, checks]
+
+# What: standing tracking issues the CI files and closes.
+# Why: one owner for label, scope and the jobs a kind reads.
+# From: Issue #1683 | PR #1912
+status_reports:
+  # What: the trivy kinds get -<service>-<arch> appended.
+  # Why: one issue per service, architecture and cause.
+  # From: Issue #1683 | PR #1912
+  trivy-finding:
+    label: trivy-finding
+    scope: "Trivy HIGH/CRITICAL finding in @SERVICE@ (@ARCH@) not covered by @{ci_variables.CI_TRIVY_IGNORE}"
+  trivy-db-unavailable:
+    label: trivy-db-unavailable
+    scope: "Trivy vulnerability DB missing or stale for @SERVICE@ (@ARCH@) after every retry"
+  trivy-scan-error:
+    label: trivy-scan-error
+    scope: "Trivy scan of @SERVICE@ (@ARCH@) gave no report while its DB was present (pull, auth, config or scanner error)"
+  # What: one repository issue, no service or arch suffix.
+  # Why: every image shares the one ignore file.
+  # From: Issue #1683 | PR #1858
+  trivy-ignore-stale:
+    label: trivy-ignore-stale
+    scope: "@{ci_variables.CI_TRIVY_IGNORE} holds ids no full scan matched; remove them"
+  # What: the nightly kinds name the jobs they judge.
+  # Why: the report job reads the needs; no job id in code.
+  # From: Issue #1683 | PR #1912
+  nightly-cargo-audit:
+    label: nightly-cargo-audit
+    scope: "nightly cargo-audit of @{ci_variables.CI_CARGO_LOCK}"
+    jobs: [cargo-audit]
+  nightly-promote:
+    label: nightly-promote
+    scope: "nightly validate and promote of the accepted stack"
+    jobs: [platform, plan, validate, nightly]
+  # What: one issue per channel; -<channel> is appended.
+  # Why: nightly (current_dev) and latest (master) differ.
+  # From: Issue #1683 | PR #1858
+  channel-check:
+    label: channel-check
+    scope: "daily pull by tag and start of one mutable channel"
+  # What: a platform left out of a service index.
+  # Why: DoMe: platforms ship alone; a gap opens an issue.
+  # From: Issue #1683 | PR #1858
+  platform-mismatch:
+    label: platform-mismatch
+    scope: "@SERVICE@ (@ARCH@) not accepted in this run; its channels keep the earlier @ARCH@ image"
+
+# What: Build-identity inputs per build type (§7).
+# Why: Impact is content-identity, never path-touched alone.
+# From: Issue #1683
+build_identity:
+  rust:
+    inputs: [source_sha, toolchain_digest, base_digest, build_variables, package_refresh]
+  toolchain:
+    inputs: [toolchain_source_sha, base_digest, package_refresh]
+
+# What: the events §17 names as a controlled refresh.
+# Why: such a run has no base; missing then proves BUILD.
+# From: Issue #1683 | PR #1912
+build_admission:
+  refresh_events: [workflow_dispatch, schedule]
+
+# What: apk packages every image of a build type needs.
+# Why: musl rust binaries link libgcc_s.so.1 dynamically.
+# From: Issue #1683 | PR #1858
+build_runtime:
+  rust:
+    packages: [libgcc]
+    # What: ldd the crate binary; the binary never runs.
+    # Why: a missing .so must fail verify, not validate.
+    # From: Issue #1683 | PR #1858
+    smoke:
+      - ldd /usr/local/bin/@CRATE@
+
+# What: CodeQL query suites and ignored paths.
+# Why: One SOT owner; codeql.yml/ci.sh derive, no dup.
+# From: Issue #1683
+codeql:
+  queries: [security-extended, security-and-quality]
+  paths_ignore: ["**/target/**"]
+
+# What: Analyzed paths per CodeQL language (entry=language).
+# Why: read like services; generic block reader, no dup.
+# From: Issue #1683
+codeql_languages:
+  actions:
+    paths: ["@{ci_variables.CI_WORKFLOW_DIR}"]
+  rust:
+    files: ["*.rs"]
+    # What: @rust_workspace = the Cargo.toml member dirs.
+    # Why: the member list has one owner, Cargo.toml.
+    # From: Issue #1683 | PR #1912
+    paths: ["@rust_workspace"]
+
+# What: release channels, validation and GC inputs
+# Why: AG-REL-010; the version is PROJECT_RELEASE_VERSION
+# From: Issue #1683 | PR #1858
+release:
+  registry: ghcr.io
+  # What: release tag grammar, final and prerelease.
+  # Why: setup.sh and ci.sh read it; no regex copies.
+  # From: Issue #1683 | PR #1912
+  tag_final: ^v[0-9]+\.[0-9]+\.[0-9]+$
+  tag_prerelease: ^v[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$
+  # What: grammar of a commit image tag: sha-<40 hex>.
+  # Why: AG-REL-015 full SHA; setup.sh pins only these.
+  # From: Issue #1683 | PR #1912
+  tag_commit: ^sha-[0-9a-f]{40}$
+  # What: prefix of the per-identity, per-arch image tag.
+  # Why: sha- names a commit only (AG-REL-015).
+  # From: Issue #1683 | PR #1912
+  tag_identity_prefix: identity-
+  # What: SPDX license of the whole project.
+  # Why: crates and image labels read it; no literal copies.
+  # From: Issue #1683 | PR #1858
+  license: AGPL-3.0-or-later
+  # What: Rust edition of every first-party crate.
+  # Why: Cargo.toml is synced from it; no literal copy.
+  # From: Issue #1683 | PR #1858
+  rust_edition: 2024
+  # What: validation record and its full-invalidation paths.
+  # Why: AG-REL-011 gate reads them; no ci.sh literal.
+  # From: Issue #1683
+  validation_state: docs/validation-state.json
+  governance_paths: [AGENTS.md, .github/AGENTS.md]
+  # What: the pr_labels path class each layer record covers
+  # Why: setup.sh, deploy and ci.sh changes stale a layer
+  # From: Issue #1683 | PR #1858
+  validation_layers:
+    stack: setup
+    ci: ci
+  channels:
+    nightly:
+      mutable: true
+      # What: the ref a nightly run checks out and builds
+      # Why: AG-REL-009: nightly comes from current_dev only
+      # From: Issue #1683 | PR #1858
+      source_ref: refs/heads/current_dev
+    latest:
+      mutable: true
+      # What: pushes to this ref move the channel.
+      # Why: one ref->channel owner; ci.sh has no literal.
+      # From: Issue #1683
+      ref: refs/heads/master
+      # What: the tree the channel check starts latest from.
+      # Why: its compose must match the images latest holds.
+      # From: Issue #1683 | PR #1858
+      source_ref: refs/heads/master
+      # What: final vX.Y.Z tags also move this channel.
+      # Why: AG-REL-009 stable channel; read by ci.sh.
+      # From: Issue #1683
+      release_tags: true
+      # What: other names setup.sh accepts for it.
+      # Why: release-versioning names stable for it
+      # From: Issue #1683 | PR #1858
+      aliases: [stable]
+  # What: the install mode that pins one fixed tag.
+  # Why: release-versioning: pinned stays a channel value.
+  # From: Issue #1683 | PR #1858
+  pinned_channel: pinned
+  # What: refused channel names and why they went.
+  # Why: release-versioning: a clear error, no fallback.
+  # From: Issue #1683 | PR #1858
+  retired_channels:
+    edge: "renamed to nightly in v0.3.0"
+    dev: "retired in v0.3.0"
+  # What: channel a ref without its own channel uses.
+  # Why: AG-REL-009 pre-stable default; no ci.sh literal.
+  # From: Issue #1683
+  default_channel: nightly
+  # What: channel setup.sh install offers as its default.
+  # Why: maintainer 24.10.: stable default, nightly warns.
+  # From: Issue #1683 | PR #1858
+  install_channel: stable
+  # What: ref prefix of the per-channel promote lock.
+  # Why: setup.sh waits while promote moves channel tags.
+  # From: Issue #1683 | PR #1858
+  promote_lock_ref: refs/ci/promote-lock
+  # What: setup.sh lock checks and seconds between them.
+  # Why: an install must not mix tags of a running promote.
+  # From: Issue #1683 | PR #1858
+  install_lock_tries: 30
+  install_lock_poll_seconds: 10
+  # What: GC grace window and the delete policy gate
+  # Why: §76: unreachable versions go only after the grace
+  # From: Issue #1683 | PR #1858
+  retention:
+    deletion_policy: manual-or-approved-automation-only
+    unaggregated_grace_minutes: 1440
+    # What: newest vX.Y release lines whose tags GC keeps.
+    # Why: maintainer 24.10.: newest line and the one below.
+    # From: Issue #1683 | PR #1858
+    keep_release_lines: 2
+    # What: release tags GC never deletes (migration steps).
+    # Why: an upgrade path from an old line must stay.
+    # From: Issue #1683 | PR #1858
+    migration_releases: []
+
+# What: path classes for PR labels and validation layers
+# Why: service/toolchain labels apply under their context.
+# From: Issue #1683 | PR #1858
+pr_labels:
+  setup: [setup.sh, "deploy/**"]
+  docker: ["deploy/**", "**/Dockerfile"]
+  rust: ["**/*.rs"]
+  ci: ["@{ci_variables.CI_WORKFLOW_DIR}/**", ".github/scripts/**", ".github/yaml/**"]
+  github_actions: ["@{ci_variables.CI_WORKFLOW_DIR}/**"]
+  documentation: ["docs/**", "**/*.md"]
+
+# What: Release notes: PR section, skip label, fallback.
+# Why: one owner for release-publish and CHANGELOG.md.
+# From: Issue #894 | PR #1858
+release_notes:
+  pr_section: Changelog
+  skip_label: skip-changelog
+  other_title: Other
+  # What: PR label that marks a deliberate CHANGELOG.md edit
+  # Why: the release flow owns the file; a label opts in
+  # From: Issue #1683 | PR #1858
+  changelog_edit_label: release
+
+# What: Release-notes groups: PR label -> heading.
+# Why: grouping is data; the first matching label wins.
+# From: Issue #894 | PR #1858
+release_notes_categories:
+  bug:
+    title: Fixed
+  enhancement:
+    title: Added
+  documentation:
+    title: Documentation
+  dependencies:
+    title: Dependencies
+  chore:
+    title: Chore / CI
+  ci:
+    title: Chore / CI
+
+# What: CI runtime variables with their fallback defaults.
+# Why: No hardcode, like CARGO_BUILD_JOBS (AG-CI-006).
+# From: Issue #1683
+ci_variables:
+  # What: cargo fmt/clippy/test in CI; off unless "true".
+  # Why: AG-VAL-008: a variable, disabled by default.
+  # From: Issue #1683
+  CI_RUST_VALIDATION: "false"
+  # What: lowest Node major an action may run on.
+  # Why: nothing below Node 24; a name list misses names.
+  # From: Issue #1683 | PR #1858
+  CI_ACTION_NODE_MIN: "24"
+  # What: GitHub REST API base for release lookups.
+  # Why: one owner; host and job use the same base.
+  # From: Issue #1683 | PR #1858
+  CI_GITHUB_API_URL: https://api.github.com
+  # What: backtrace switch of the CI cargo test run.
+  # Why: a panicking test shows where (AG-INT-002).
+  # From: Issue #1683 | PR #1912
+  RUST_BACKTRACE: "1"
+  # What: sccache cache mode: required, optional or off.
+  # Why: AG-CI-004 mode; required fails closed (AG-CI-011).
+  # From: Issue #1683 | PR #1858
+  SCCACHE_REDIS_MODE: required
+  # What: sccache Redis key prefix; ci.sh adds -<service>.
+  # Why: one owner for the project's shared cache namespace.
+  # From: Issue #1683 | PR #1912
+  CI_CACHE_PREFIX: lancache-ng
+  # What: CARGO_HOME of rust-build; cache mount root.
+  # Why: §39 Cargo registry and git caches as mounts.
+  # From: Issue #1683 | PR #1912
+  CI_CARGO_HOME: /root/.cargo
+  # What: sccache dist toolchain cache size in bytes.
+  # Why: AG-CI-006: no size literal in the dist config.
+  # From: Issue #1683 | PR #1858
+  CI_SCCACHE_DIST_TOOLCHAIN_CACHE_SIZE: 5368709120
+  # What: compiler VAR=driver pairs; the first is default.
+  # Why: distcc, ccache and smoke read one compiler list.
+  # From: Issue #1683 | PR #1858
+  CI_TOOLCHAIN_COMPILERS: CC=cc GCC=gcc CXX=c++ GXX=g++
+  # What: kill timeout (s) of the GHA runtime export step.
+  # Why: AG-CI-016: every container command is bounded.
+  # From: Issue #1683 | PR #1858
+  CI_GHA_RUNTIME_EXPORT_TIMEOUT: 30
+  # What: kill timeout (s) of a docker run/exec CI command.
+  # Why: AG-CI-016; 2 minutes is the limit DoMe agreed on.
+  # From: Issue #1683 | PR #1858
+  CI_CONTAINER_CMD_TIMEOUT: 120
+  # What: workspace toml and the lock ci.sh generates.
+  # Why: no lock in git; cargo resolves the latest.
+  # From: Issue #1683 | PR #1858
+  CI_CARGO_MANIFEST: Cargo.toml
+  CI_CARGO_LOCK: Cargo.lock
+  # What: the installer script the stack checks read.
+  # Why: one path owner; ci.sh holds no installer literal.
+  # From: Issue #1683 | PR #1858
+  CI_INSTALLER: setup.sh
+  # What: the trivy ignore list scans and VEX read.
+  # Why: one path owner for scan, release VEX, vex-drift.
+  # From: Issue #1683 | PR #1858
+  CI_TRIVY_IGNORE: .trivyignore.yaml
+  # What: color of a created status label.
+  # Why: one owner for the tracking labels' look.
+  # From: Issue #1683 | PR #1912
+  CI_STATUS_LABEL_COLOR: b60205
+  # What: raw evidence bytes one status issue carries.
+  # Why: GitHub caps a body; the run log holds the rest.
+  # From: Issue #1683 | PR #1912
+  CI_STATUS_EVIDENCE_BYTES: 20000
+  # What: log lines a failed validation run container ships.
+  # Why: the cause sits at the log end; the rest is run log.
+  # From: Issue #1683 | PR #1912
+  CI_VALIDATE_RUN_LOG_TAIL: 80
+  # What: PR actors whose token cannot write issues.
+  # Why: a status write would fail; the report says NOT-RUN.
+  # From: Issue #1683 | PR #1912
+  CI_READONLY_TOKEN_ACTORS: dependabot[bot]
+  # What: repo paths the checks read; one owner each.
+  # Why: ci.sh joins them via _ci_repo_path, no literals.
+  # From: Issue #1683 | PR #1858
+  CI_WORKFLOW_DIR: .github/workflows
+  CI_PR_TEMPLATE: .github/pull_request_template.md
+  CI_CHANGELOG: CHANGELOG.md
+  CI_README: README.md
+  CI_ARCH_DOC: docs/architecture-ng.md
+  CI_BACKUP_RESTORE_DOC: docs/backup-restore.md
+  CI_DOCS_DIR: docs
+  # What: attempts and backoff base of the retry owner.
+  # Why: AG-CI-006: a retry/timeout value has one owner.
+  # From: Issue #1683 | PR #1858
+  CI_RETRY_MAX_ATTEMPTS: 4
+  CI_RETRY_BACKOFF_BASE_SECONDS: 1
+  # What: connect and total seconds of one raw content read.
+  # Why: AG-CI-006: a timeout value has one owner.
+  # From: Issue #1683 | PR #1912
+  CI_RAW_GET_CONNECT_TIMEOUT: 10
+  CI_RAW_GET_MAX_TIME: 30
+  # What: exactly true moves CI jobs to runner_self_hosted.
+  # Why: GitHub-hosted is the default; a repo var switches.
+  # From: Issue #1683 | PR #1912
+  PROJECT_SELFHOSTED_RUNNER_USAGE_CI: "false"
+  # What: trivy scanners and the shared DB dir.
+  # Why: AG-CI-006: scan policy values have one owner.
+  # From: Issue #1683 | PR #1858
+  CI_TRIVY_SCANNERS: vuln,secret
+  CI_TRIVY_SHARED_DIR: /mnt/trivy-db
+  # What: the validate slot count.
+  # Why: AG-CI-006: the slot limit has one owner.
+  # From: Issue #1683 | PR #1858
+  CI_VALIDATE_MAX_SLOTS: 10
+  # What: validation address pool and slot prefix length
+  # Why: AG-CI-006 one owner for the slot every run takes
+  # From: Issue #1683 | PR #1858
+  CI_VALIDATE_SUBNET_POOL: 172.16.0.0/12
+  CI_VALIDATE_SLOT_PREFIX: 27
+  # What: host dir shared with the validate job container
+  # Why: same path both sides; the daemon binds host paths
+  # From: Issue #1683 | PR #1912
+  CI_VALIDATE_SHARED_DIR: /var/tmp/ci-validate
+  # What: DNS probe label, TEST-NET net, TTL, waits, polls
+  # Why: AG-CI-006: probe values and waits have one owner.
+  # From: Issue #1683 | PR #1858
+  CI_VALIDATE_PROBE_LABEL: ci-probe
+  CI_VALIDATE_PROBE_NET: 203.0.113.0/24
+  CI_VALIDATE_PROBE_TTL: 60
+  CI_VALIDATE_DNS_WAIT: 15
+  CI_VALIDATE_SNAPSHOT_POLL_ATTEMPTS: 15
+  CI_VALIDATE_SNAPSHOT_POLL_PAUSE: 1
+  CI_VALIDATE_PROBE_MAC: "02:00:00:00:07:00"
+  # What: decoy host PDNS_API_KEY for the setup.sh rollback
+  # Why: setup.sh must read the key in the container
+  # From: Issue #1683 | PR #1858
+  CI_VALIDATE_DECOY_API_KEY: CHANGE_ME_host_side_key_never_used
+  # What: in-container limit of one image smoke and grace.
+  # Why: AG-CI-016 kill timeout; AG-CI-006 one owner.
+  # From: Issue #1683 | PR #1858
+  CI_SMOKE_TIMEOUT: 14m
+  CI_SMOKE_KILL_AFTER: 30s
+  # What: workflow file and run-block size ceilings.
+  # Why: AG-CI-006: the YAML-stays-thin limits, one owner.
+  # From: Issue #1683 | PR #1858
+  MAX_WORKFLOW_LINES: 8999
+  MAX_WORKFLOW_BYTES: 512000
+  MAX_RUN_BLOCK_BYTES: 74000
+  # What: ledger ref + file; the remote git ops use.
+  # Why: AG-CI-006: one owner for ledger ref, file, remote.
+  # From: Issue #1683 | PR #1858
+  CI_LEDGER_REF: refs/ci/acceptance/ledger
+  CI_LEDGER_FILE: records
+  CI_GIT_REMOTE: origin
+  # What: ref + file of the §17 apk refresh records.
+  # Why: a refresh run writes them; every id reads them.
+  # From: Issue #1683 | PR #1858
+  CI_REFRESH_REF: refs/ci/refresh/packages
+  CI_REFRESH_FILE: records
+  # What: layer cache tag stem; ci.sh appends -<arch>.
+  # Why: §35: one registry cache per service and arch.
+  # From: Issue #1683 | PR #1912
+  CI_BUILD_CACHE_TAG: buildcache
+  # What: BuildKit builder name; hosted runs add the pid.
+  # Why: §34: self-hosted keeps this one builder per host.
+  # From: Issue #1683 | PR #1912
+  CI_BUILDX_BUILDER: lancache-ci
+  # What: poll seconds of every CI lock wait.
+  # Why: AG-CI-006: lock timing has one owner.
+  # From: Issue #1683 | PR #1858
+  CI_LOCK_POLL_SECONDS: 10
+  # What: min seconds between two reads of a run's state.
+  # Why: AG-CI-020: GitHub Actions polls >= 300 s apart.
+  # From: Issue #1683 | PR #1912
+  CI_RUN_STATE_POLL_SECONDS: 300
+  # What: runner daemon.json path, GC reserve, log policy.
+  # Why: AG-CI-016: one owner for the runner Docker limits.
+  # From: Issue #1255 | PR #1349
+  CI_DAEMON_JSON: /etc/docker/daemon.json
+  CI_BUILDER_GC_RESERVED_SPACE: 20GB
+  CI_DAEMON_LOG_MAX_SIZE: 10m
+  CI_DAEMON_LOG_MAX_FILE: 3
+  CI_DAEMON_LOG_DRIVER: json-file
+  # What: daemon-config stage and backup file suffixes.
+  # Why: AG-CI-006: file names have one owner.
+  # From: Issue #1683 | PR #1912
+  CI_DAEMON_STAGED_SUFFIX: .staged
+  CI_DAEMON_BACKUP_SUFFIX: .bak.
+  # What: ref prefix of the per-identity build lock.
+  # Why: one build per identity (§20); frees on run end.
+  # From: Issue #1683 | PR #1912
+  CI_BUILD_LOCK_REF: refs/ci/build-lock
+  # What: ref prefix of the verified-digest marks.
+  # Why: only a digest a build verified may be accepted.
+  # From: Issue #1683 | PR #1912
+  CI_VERIFIED_REF: refs/ci/verified
+  # What: ref prefix of the last green run mark per PR.
+  # Why: the same tree and digests need no second run.
+  # From: Issue #1683 | PR #1858
+  CI_GREEN_REF: refs/ci/green
+  # What: PR title lint mode (warn|block).
+  # Why: AG-GH-018: the mode is a value, default warn.
+  # From: Issue #1683 | PR #1858
+  PR_TITLE_LINT_MODE: warn
+
+# What: runner host values: paths, ages, units, packages.
+# Why: AG-CI-016: ci.sh runner-host reads them; no copy.
+# From: Issue #1622 | PR #1624
+runner_host:
+  # What: runner install root, hooks dir, runner account.
+  # Why: every runner host uses the same layout.
+  # From: Issue #1622 | PR #1624
+  opt_root: /opt
+  hooks_dir: "@{runner_host.opt_root}/lancache-ci-hooks"
+  user: codex
+  # What: archives from this size up are clone leftovers.
+  # Why: clone leftover archives are GB-sized.
+  # From: Issue #1622 | PR #1912
+  stray_archive_min_bytes: 1073741824
+  # What: cleanup log, its size cap, reap ages in hours.
+  # Why: AG-CI-016: a timer run has no terminal; bound all.
+  # From: Issue #1255 | PR #1349
+  cleanup_log: /var/log/lancache-ci-cleanup.log
+  cleanup_log_max_bytes: 5242880
+  # What: filesystem the cleanup measures before and after.
+  # Why: AG-CI-006: the measured path has one owner.
+  # From: Issue #1683 | PR #1912
+  disk_path: /
+  reap_build_tools_hours: 2
+  reap_validation_hours: 2
+  reap_buildx_hours: 3
+  build_tools_match: build-tools
+  buildx_match: buildx_buildkit_builder-
+  # What: CI 1.x validate project prefix on shared hosts.
+  # Why: AG-CI-016; 1.x runs until cutover (Arch Phase 15).
+  # From: Issue #1683 | PR #1912
+  legacy_validation_prefix: lancache-ng-validation-
+  # What: CI 1.x Trivy cache root and its max age.
+  # Why: dirs of dead branches are never reused.
+  # From: Issue #1255 | PR #1334
+  trivy_leftover_root: /var/tmp/lancache-ng-trivy-cache
+  trivy_leftover_days: 1
+  # What: grace seconds before an empty validate net goes.
+  # Why: a sibling job may not have attached a container.
+  # From: Issue #1095 | PR #1426
+  hook_network_min_age: 120
+  # What: cleanup timer schedule and systemd unit location.
+  # Why: units are generated from ci.sh with these values.
+  # From: Issue #1255 | PR #1349
+  timer_calendar: "*-*-* 04:00:00"
+  timer_delay: 900
+  unit_dir: /etc/systemd/system
+  unit_name: lancache-ci-cleanup
+  # What: runner restart delay in seconds.
+  # Why: a crashed runner recovers without a hand.
+  # From: Issue #1622 | PR #1624
+  restart_sec: 10
+  # What: the Debian suite host-prep writes backports for.
+  # Why: a wrong suite would mix distribution archives.
+  # From: Issue #1622 | PR #1624
+  debian_suite: trixie
+  # What: ERE per naming scheme; group 1 = host number.
+  # Why: a loose match could take the instance suffix.
+  # From: Issue #1622 | PR #1624
+  fleet_name_patterns:
+    - "gh-lancache-[a-z]+-[A-Za-z0-9]+-([0-9]+)"
+    - "[a-z]-lancache-runner-([0-9]+)"
+  # What: /root template scripts that full-reset removes.
+  # Why: an allowlist; a glob would delete other scripts.
+  # From: Issue #1622 | PR #1624
+  template_scripts: [prepare-proxmox-template.sh]
+  # What: nested Proxmox VE packages purge-pve removes.
+  # Why: the kernel and firmware packages are never listed.
+  # From: Issue #1622 | PR #1624
+  pve_packages:
+    - corosync
+    - libcorosync-common4
+    - libproxmox-acme-perl
+    - libproxmox-acme-plugins
+    - libproxmox-backup-qemu0
+    - libproxmox-rs-perl
+    - libpve-access-control
+    - libpve-apiclient-perl
+    - libpve-cluster-api-perl
+    - libpve-cluster-perl
+    - libpve-common-perl
+    - libpve-guest-common-perl
+    - libpve-http-server-perl
+    - libpve-network-api-perl
+    - libpve-network-perl
+    - libpve-notify-perl
+    - libpve-rs-perl
+    - libpve-storage-perl
+    - proxmox-backup-client
+    - proxmox-backup-file-restore
+    - proxmox-backup-restore-image
+    - proxmox-firewall
+    - proxmox-mail-forward
+    - proxmox-mini-journalreader
+    - proxmox-offline-mirror-docs
+    - proxmox-offline-mirror-helper
+    - proxmox-termproxy
+    - proxmox-ve
+    - proxmox-websocket-tunnel
+    - proxmox-widget-toolkit
+    - pve-cluster
+    - pve-container
+    - pve-docs
+    - pve-esxi-import-tools
+    - pve-firewall
+    - pve-ha-manager
+    - pve-i18n
+    - pve-lxc-syscalld
+    - pve-manager
+    - pve-nvidia-vgpu-helper
+    - pve-qemu-kvm
+    - pve-xtermjs
+    - pve-yew-mobile-gui
+    - pve-yew-mobile-i18n
+    - proxmox-enterprise-support-keyring
+  # What: units purge-pve stops before the purge.
+  # Why: stop first so dpkg prerm does not race the daemons.
+  # From: Issue #1622 | PR #1624
+  pve_services: [pveproxy, pvedaemon, pvestatd, pvescheduler, spiceproxy, pve-ha-crm, pve-ha-lrm, pve-firewall, proxmox-firewall, pve-lxc-syscalld, qmeventd, pve-cluster, corosync, pvefw-logger, proxmox-firewall.timer, watchdog-mux]
+  # What: package name parts that must never be purged.
+  # Why: purging the only kernel leaves the host unbootable.
+  # From: Issue #1622 | PR #1624
+  pve_keep: [proxmox-kernel, proxmox-default-kernel, proxmox-kernel-helper, pve-firmware, pve-edk2-firmware]
+  # What: package name families the PVE inventory matches.
+  # Why: dpkg greps and the purge check share one list.
+  # From: Issue #1683 | PR #1912
+  pve_package_families: [pve-, proxmox-, pmxcfs, corosync]
+  # What: unit and mount name families of the PVE stack.
+  # Why: the inventory greps units, mounts and fstab by it.
+  # From: Issue #1683 | PR #1912
+  pve_unit_families: [pve, corosync, proxmox, pmxcfs]
+  # What: PVE config and cron dirs the purge check scans.
+  # Why: open files or cron jobs on the stack block a purge.
+  # From: Issue #1622 | PR #1912
+  pve_config_dir: /etc/pve
+  pve_cron_dirs: [/etc/cron.d, /etc/cron.daily, /etc/cron.hourly]
+  # What: process name families gone after the purge.
+  # Why: a running daemon means the purge did not finish.
+  # From: Issue #1683 | PR #1912
+  pve_process_families: [pve, pmxcfs, corosync, spiceproxy, qmeventd]
+  # What: package families autoremove may take after purge.
+  # Why: autoremove must stay inside the PVE set.
+  # From: Issue #1683 | PR #1912
+  pve_autoremove_families: [pve-, proxmox-, libpve-, libproxmox-, pmxcfs, corosync, spice]
+  # What: the file that lets apt remove proxmox-ve.
+  # Why: pve-apt-hook refuses the removal without it.
+  # From: Issue #1683 | PR #1912
+  pve_apt_override: /please-remove-proxmox-ve
+  # What: sccache client files required on heavy hosts.
+  # Why: Rust CI on heavy hosts fails without the client.
+  # From: Issue #1622 | PR #1624
+  sccache_bins: [sccache, sccache-dist]
+  # What: the directory the sccache client binaries live in.
+  # Why: ci.sh joins it with each name; no path copy.
+  # From: Issue #1683 | PR #1912
+  sccache_bin_dir: /usr/local/bin
+  # What: file mode of the installed sccache binaries.
+  # Why: AG-CI-006: no mode literal in ci.sh.
+  # From: Issue #1683 | PR #1912
+  sccache_bin_mode: "0755"
+  # What: staged name beside the live binary; @FILE@ = name.
+  # Why: mv in one dir is atomic; no name literal in ci.sh.
+  # From: Issue #1683 | PR #1912
+  sccache_staged_name: ".@FILE@.new"
+  sccache_dist_dir: "@{runner_host.opt_root}/sccache/dist-client"
+  # What: unit file texts of the cleanup run, one line each.
+  # Why: AG-CI-006: unit text is data; ci.sh fills keys.
+  # From: Issue #1683 | PR #1912
+  service_unit:
+    - "[Unit]"
+    - Description=lancache-ng CI runner host docker cleanup
+    - After=docker.service
+    - Requires=docker.service
+    - "[Service]"
+    - Type=oneshot
+    - Environment=GITHUB_REPOSITORY=@REPO@
+    - ExecStart=/usr/bin/env bash @SCRIPT_DIR@/ci.sh runner-host cleanup
+  timer_unit:
+    - "[Unit]"
+    - Description=Daily lancache-ng CI runner host docker cleanup
+    - "[Timer]"
+    - OnCalendar=@CALENDAR@
+    - RandomizedDelaySec=@DELAY@
+    - Persistent=true
+    - "[Install]"
+    - WantedBy=timers.target
+  # What: runner file, dir and unit names.
+  # Why: AG-CI-006: host names and globs have one owner.
+  # From: Issue #1683 | PR #1912
+  runner_dir_glob: "actions-runner*"
+  runner_unit_glob: "actions.runner.*.service"
+  stray_archive_globs: ["*.tgz", "*.tar.gz"]
+  runner_file: .runner
+  runner_credential_files: [.credentials, .credentials_rsaparams]
+  runner_agent_field: agentName
+  runner_env_file: .env
+  runner_env_lang: LANG=C
+  # What: sudoers file, rule, mode, docker group, hooks.
+  # Why: AG-CI-006: the access contract has one owner.
+  # From: Issue #1683 | PR #1912
+  sudoers_dir: /etc/sudoers.d
+  sudoers_suffix: -nopasswd
+  sudoers_rule: "@USER@ ALL=(ALL) NOPASSWD:ALL"
+  sudoers_mode: "0440"
+  docker_group: docker
+  hook_pre_name: pre-job-cleanup.sh
+  hook_post_name: post-job-cleanup.sh
+  hook_mode: "0755"
+  hook_env_started: ACTIONS_RUNNER_HOOK_JOB_STARTED
+  hook_env_completed: ACTIONS_RUNNER_HOOK_JOB_COMPLETED
+  opt_root_mode: g+s
+  # What: clone identity files, journals, hosts, ssh, logs.
+  # Why: AG-CI-006: every host path has one owner.
+  # From: Issue #1683 | PR #1912
+  root_home: /root
+  home_root: /home
+  history_file: .bash_history
+  lesshst_file: /root/.lesshst
+  known_hosts_file: .ssh/known_hosts
+  ssh_dir: .ssh
+  authorized_keys_file: .ssh/authorized_keys
+  ssh_private_key_glob: "id_*"
+  ssh_public_key_glob: "*.pub"
+  ssh_host_key_glob: /etc/ssh/ssh_host_*
+  ssh_units: [ssh, sshd]
+  machine_id_file: /etc/machine-id
+  dbus_machine_id_file: /var/lib/dbus/machine-id
+  hostid_file: /etc/hostid
+  zgenhostid_bin: /usr/sbin/zgenhostid
+  journal_dir: /var/log/journal
+  journald_unit: systemd-journald
+  hosts_file: /etc/hosts
+  hosts_self_ip: 127.0.1.1
+  fstab_file: /etc/fstab
+  apt_log_globs: [/var/log/apt/history.log*, /var/log/dpkg.log*]
+  # What: Debian backports files and apt-listchanges.
+  # Why: AG-CI-006: the apt layout has one owner.
+  # From: Issue #1683 | PR #1912
+  os_release_file: /etc/os-release
+  backports_list: /etc/apt/sources.list.d/backports.list
+  backports_pref: /etc/apt/preferences.d/backports
+  backports_repo: "deb http://deb.debian.org/debian @SUITE@-backports main"
+  backports_pin: ["Package: *", "Pin: release a=stable-backports", "Pin-Priority: 500"]
+  apt_listchanges_pkg: apt-listchanges
+  # What: env every unattended apt-get call runs with.
+  # Why: no prompt may block a host run (AG-CI-006).
+  # From: Issue #1683 | PR #1912
+  apt_env: DEBIAN_FRONTEND=noninteractive
+  heavy_host_pattern: heavy
+  # What: restart drop-in, sccache dist mode and leftovers.
+  # Why: AG-CI-006: unit and dir contracts have one owner.
+  # From: Issue #1683 | PR #1912
+  restart_policy: on-failure
+  restart_dropin: override.conf
+  sccache_dist_mode: "2775"
+  sccache_stale_files: [.config/sccache/config, sccache-dist/client.conf]
+  sccache_stale_dirs: [.config/sccache, sccache-dist]
+
+# What: header text and the globs the comment check skips.
+# Why: vendored, binary or prose files carry no header.
+# From: Issue #1683 | PR #1912
+file_headers:
+  project: "LanCache-NG (https://github.com/wiki-mod/lancache-ng)"
+  spdx: "SPDX-License-Identifier: AGPL-3.0-or-later"
+  exempt:
+    - "*.md"
+    - "*.png"
+    - "*.ico"
+    - LICENSE
+    - Cargo.lock
+    - services/ui/src/static/chart.umd.min.js
+    - services/ui/src/static/admin.css
+    - services/proxy/public_suffix_list.dat
+    - services/dns/schema.sqlite3.sql
+
+# What: CI variables each build type passes as build-args.
+# Why: builders read repo/org vars; no YAML or literal copy.
+# From: Issue #1683 | PR #1858
+build_variables:
+  rust: [CARGO_BUILD_JOBS, PROJECT_CARGO_LTO, PROJECT_CARGO_CODEGENUNIT, CI_TOOLCHAIN_COMPILERS, CI_CACHE_PREFIX, CI_CARGO_HOME]
+
+# What: CI variables every ci.sh build stage reads
+# Why: a stage has no SOT; these never key an identity
+# From: Issue #1683 | PR #1858
+stage_variables:
+  ci_sh: [CI_RETRY_MAX_ATTEMPTS, CI_RETRY_BACKOFF_BASE_SECONDS]
+
+# What: PR title taxonomy and project board for PR checks.
+# Why: AG-GH-018/008 name one CI policy owner for them.
+# From: Issue #1683 | PR #1858
+pr_policy:
+  title_types: [feat, fix, docs, refactor, perf, test, build, ci, chore, style, revert, security]
+  # What: PR-title scopes beyond the build targets.
+  # Why: cross-cutting areas own no image of their own.
+  # From: Issue #1683 | PR #1858
+  title_scopes_extra: [setup, ci, governance, docs, scripts, tests]
+  project_number: 6
+  # What: PR-template heading close-linked-issues reads.
+  # Why: the template heading is a contract, not a literal.
+  # From: Issue #1683 | PR #1858
+  linked_section: Linked Issues
+  # What: PR-template heading that needs a marked checkbox
+  # Why: the template heading is a contract, not a literal
+  # From: Issue #1683 | PR #1858
+  checkbox_section: Type of change
+  # What: PR authors the title and template checks skip
+  # Why: bot PRs carry generated titles and bodies
+  # From: Issue #1683 | PR #1858
+  check_exempt_authors:
+    - dependabot[bot]
+  # What: welcome text for a first issue, one line per item
+  # Why: ci.sh welcome posts it; the text is data, not code
+  # From: Issue #1683 | PR #1858
+  welcome_issue:
+    - Thanks for opening your first issue in lancache-ng.
+    - ""
+    - "Please make sure the issue includes:"
+    - "- expected behavior"
+    - "- actual behavior"
+    - "- logs or reproduction steps"
+    - "- relevant configuration without secrets"
+    - ""
+    - Do not post private keys, tokens, passwords, personal data, or private infrastructure details.
+    - Security-sensitive reports should use the project's private security reporting channel.
+  # What: welcome text for a first PR, one line per item
+  # Why: same path as welcome_issue; data, not code
+  # From: Issue #1683 | PR #1858
+  welcome_pr:
+    - Thanks for opening your first pull request in lancache-ng.
+    - ""
+    - "Please make sure the pull request:"
+    - "- links the related issue"
+    - "- explains the user-visible behavior change"
+    - "- lists the validation that was run"
+    - "- does not include private keys, tokens, passwords, personal data, or private infrastructure details"
+    - ""
+    - Security-sensitive reports should use the project's private security reporting channel.
+
+# What: Orphan-branch sweep inputs (AG-GH-017).
+# Why: age gate and long-lived refs are data, not code.
+# From: Issue #1683 | PR #1858
+branch_policy:
+  orphan_min_age_seconds: 3600
+  # What: long-lived refs besides the channel refs.
+  # Why: release.channels owns master and current_dev.
+  # From: Issue #1683 | PR #1858
+  long_lived: [badges]
+  # What: POSIX ERE for long-lived ref families.
+  # Why: release branches and the VEX automation branch.
+  # From: Issue #1683 | PR #1858
+  long_lived_regex:
+    - "^v[0-9]"
+    - "^CI-Automation/"
+
+# What: Stack-validation check parameters (data, not logic).
+# Why: One SOT for check inputs; logic stays in ci.sh.
+# From: Issue #1683 | PR #1858
+validation:
+  # What: tools validate needs inside the build-tools job.
+  # Why: AG-CI-001: verified fail-closed, never assumed.
+  # From: Issue #1683
+  host_tools: [bash, docker, jq, curl, dig, git, awk, sed, find, flock, openssl, getent]
+  # What: CDN domains that resolve from validation hosts.
+  # Why: Real dig targets; some Steam domains fail.
+  # From: Issue #1683 | PR #1858
+  dns_test_domains: [deb.debian.org, download.epicgames.com]
+  # What: Cacheable HTTP URL for the proxy MISS/HIT probe.
+  # Why: Only HTTP is cached; a real HIT proves the path.
+  # From: Issue #1683 | PR #1858
+  proxy_cache_probe_url: http://deb.debian.org/debian/dists/stable/InRelease
+  # What: compose files besides runtime.compose_file.
+  # Why: each renders clean in all of its own profiles.
+  # From: Issue #1683 | PR #1858
+  compose_targets: deploy/secondary/docker-compose.yml
+  # What: peer address of a secondary validation.
+  # Why: one RFC 5737 address; the env rows name it.
+  # From: Issue #1683 | PR #1912
+  peer_ip: 192.0.2.10
+  # What: compose env rows; a bare KEY takes its default.
+  # Why: operator keys are :?-required; one owner.
+  # From: Issue #1683 | PR #1858
+  compose_validation_env:
+    - DNS_XFR_PRIMARY=@{validation.peer_ip}:@PDNS_AUTH_PORT@
+    - IP_HTTPS=127.0.0.2
+    - IP_HTTP=@LOOPBACK_BIND_IP@
+    - LISTEN_IP=127.0.0.3
+    - LISTEN_IP_HTTPS=@LOOPBACK_BIND_IP@
+    - DNS_HTTPS_HOST_PORT=
+    - ALLOW_INSECURE_UI=true
+    - NATS_CONSUMER=ci-secondary
+    - NATS_USER=ci-nats-user
+    - NATS_ADVERTISE_URL=nats://@{validation.peer_ip}:@NATS_PORT@
+    - NATS_URL=nats://@LOOPBACK_BIND_IP@:@NATS_PORT@
+    - NGINX_UPSTREAM_RESOLVER
+    - CACHE_MAX_SIZE
+    - CACHE_MEM_MB
+    - DHCP_SUBNET
+    - LANCACHE_STATE_DIR
+  # What: required keys setup.sh repairs
+  # Why: empty required key breaks the stack
+  # From: Issue #1683 | PR #1858
+  setup_required_repairs: DDNS_TSIG_KEY KEA_CTRL_TOKEN LANCACHE_IMAGE_CHANNEL LANCACHE_IMAGE_PREFIX LANCACHE_IMAGE_REGISTRY LANCACHE_IMAGE_TAG NATS_DNS_WRITER_PASSWORD NATS_CALLOUT_PASSWORD NATS_SYS_PASSWORD NATS_UI_PASSWORD PDNS_API_KEY SECONDARY_REGISTRATION_TOKEN
