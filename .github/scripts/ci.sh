@@ -5381,18 +5381,32 @@ ci_cmd_rust_build() {
     fi
 }
 
-# What: Inspect a ref's digest or raw index; 1 = absent.
+# What: a ref's digest, revision or raw index; 1 = absent
 # Why: one reader; transient retries; callers own the id.
 # From: Issue #1683 | PR #1858
 _ci_registry_read() {
     local ref="$1" view="$2" id="$3" absent="$4" out cls rc=0
     local -a how=(--raw)
-    [ "${view}" = raw ] || how=(--format '{{.Manifest.Digest}}')
+    case "${view}" in
+        digest) how=(--format '{{.Manifest.Digest}}') ;;
+        revision) how=(--format '{{index .Image.Config.Labels "org.opencontainers.image.revision"}}') ;;
+    esac
     out="$(_ci_retry registry-read docker buildx imagetools inspect "${ref}" "${how[@]}")" || rc=$?
     if [ "${rc}" -eq 0 ]; then
         if [ "${view}" = raw ]; then
             printf '%s\n' "${out}"
             return 0
+        fi
+        # What: the revision label names the build commit.
+        # Why: §28: an index stays under its build commit.
+        # From: Issue #1683 | PR #1858
+        if [ "${view}" = revision ]; then
+            if [[ "${out}" =~ ^[0-9a-f]{40}$ ]]; then
+                printf '%s\n' "${out}"
+                return 0
+            fi
+            ci_error "${id}" "ref=\"${ref}\" reason=\"image has no full 40-hex revision label\"" "${out}"
+            return 2
         fi
         # What: the value is the one digest line read.
         # Why: buildx warns on stderr for cache manifests.
@@ -6468,20 +6482,38 @@ _ci_normalize_platform_digests() {
     printf '%s\n' "${input}" | tr ' ' '\n' | awk 'NF' | LC_ALL=C sort | tr '\n' ' '
 }
 
-# What: Look up an existing multi-arch index.
-# Why: Idempotency: reuse an identical index.
-# From: Issue #1683
+# What: index of the accepted digests, found by content
+# Why: §28: an unchanged service keeps its build commit
+# From: Issue #1683 | PR #1858
 _ci_index_lookup() {
-    local service="$1"
-    local name sha tag idx grc=0 plats
+    local service="$1" want="$2"
+    local name head kv rev revs tag idx grc plats have found=""
     name="$(_ci_image_ref "${service}")" || return 2
-    sha="$(_ci_head_commit)" || return 2
-    tag="${name}:sha-${sha}"
-    idx="$(_ci_registry_probe "${tag}")" || grc=$?
-    [ "${grc}" -eq 0 ] || return "${grc}"
-    plats="$(_ci_index_children "${tag}")" || return "$?"
-    plats="$(tr '\n' ' ' <<< "${plats}")"
-    printf '%s %s\n' "${idx}" "${plats% }"
+    head="$(_ci_head_commit)" || return 2
+    revs="${head}"
+    for kv in ${want}; do
+        rev="$(_ci_registry_read "${name}@${kv#*=}" revision "[CI-ERROR-ASSEMBLE-0016]" fail)" || return 2
+        _ci_list_has "${rev}" "${revs}" || revs="${revs}"$'\n'"${rev}"
+    done
+    while IFS= read -r rev; do
+        tag="${name}:sha-${rev}"
+        grc=0; idx="$(_ci_registry_probe "${tag}")" || grc=$?
+        [ "${grc}" -ne 1 ] || continue
+        [ "${grc}" -eq 0 ] || return "${grc}"
+        plats="$(_ci_index_children "${tag}")" || return "$?"
+        plats="$(tr '\n' ' ' <<< "${plats}")"
+        have="$(_ci_normalize_platform_digests "${plats}")"
+        if [ "${have}" = "${want}" ]; then
+            printf '%s %s\n' "${idx}" "${plats% }"
+            return 0
+        fi
+        # What: a head index that differs goes to reconcile.
+        # Why: reconcile completes or refuses it (§45).
+        # From: Issue #1683 | PR #1858
+        [ "${rev}" != "${head}" ] || found="${idx} ${plats% }"
+    done <<< "${revs}"
+    [ -n "${found}" ] || return 1
+    printf '%s\n' "${found}"
 }
 
 # What: platform=digest lines of the index at ref $1.
@@ -6539,7 +6571,7 @@ _ci_collect_accepted_digests() {
 # From: Issue #1683
 _ci_reconcile_index() {
     local service="$1" want="$2" existing ex_digest ex_have lrc=0 kv sub=1 wl
-    existing="$(_ci_index_lookup "${service}")" || lrc=$?
+    existing="$(_ci_index_lookup "${service}" "${want}")" || lrc=$?
     case "${lrc}" in
         0) ;;
         1) return 0 ;;
