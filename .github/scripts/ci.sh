@@ -4170,10 +4170,11 @@ _ci_env_required() {
 # Why: YAML only calls ci.sh; one writer, caller's id.
 # From: Issue #1683 | PR #1858
 _ci_step_output() {
-    local id="$1" key="$2" value="$3" err
-    [ -n "${GITHUB_OUTPUT:-}" ] || return 0
-    if ! err="$(printf '%s=%s\n' "${key}" "${value}" 2>&1 >> "${GITHUB_OUTPUT}")"; then
-        ci_error "${id}" "file=\"${GITHUB_OUTPUT}\" key=\"${key}\" reason=\"step output not written\"" "${err}"
+    local id="$1" key="$2" value="$3" var="${4:-GITHUB_OUTPUT}" file err
+    file="${!var:-}"
+    [ -n "${file}" ] || return 0
+    if ! err="$(printf '%s=%s\n' "${key}" "${value}" 2>&1 >> "${file}")"; then
+        ci_error "${id}" "file=\"${file}\" key=\"${key}\" reason=\"step output not written\"" "${err}"
         return 2
     fi
 }
@@ -6727,6 +6728,10 @@ ci_cmd_channel_checkout() {
         git -C "${CI_REPO_ROOT}" checkout -q FETCH_HEAD || return 2
     sha="$(_ci_head_commit)" || return 2
     _ci_step_output "[CI-ERROR-PROMOTE-0021]" commit "${sha}" || return 2
+    # What: later steps of this job see the checked-out ref.
+    # Why: a master-started run must use current_dev tools.
+    # From: Issue #1683 | PR #1858
+    _ci_step_output "[CI-ERROR-PROMOTE-0038]" CI_SOURCE_REF "${ref#refs/heads/}" GITHUB_ENV || return 2
     printf 'channel=%s source_ref=%s commit=%s\n' "${channel}" "${ref}" "${sha}"
 }
 
@@ -11100,7 +11105,10 @@ _ci_matrix_doc() {
 # From: Issue #1683
 _ci_build_tools_resolve_image() {
     local ref channel image digest
-    ref="${GITHUB_BASE_REF:-${GITHUB_REF_NAME:-}}"
+    # What: a channel-checkout ref wins over the event ref.
+    # Why: nightly starts on master but runs current_dev.
+    # From: Issue #1683 | PR #1858
+    ref="${CI_SOURCE_REF:-${GITHUB_BASE_REF:-${GITHUB_REF_NAME:-}}}"
     # What: consume the channel a push to this branch moves.
     # Why: one ref->channel owner (promote); else nightly.
     # From: Issue #1683 | PR #1858
