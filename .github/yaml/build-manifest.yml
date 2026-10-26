@@ -900,6 +900,12 @@ status_reports:
   trivy-scan-error:
     label: trivy-scan-error
     scope: "Trivy scan of @SERVICE@ (@ARCH@) gave no report while its DB was present (pull, auth, config or scanner error)"
+  # What: one repository issue, no service or arch suffix.
+  # Why: every image shares the one ignore file.
+  # From: Issue #1683 | PR #1858
+  trivy-ignore-stale:
+    label: trivy-ignore-stale
+    scope: "@{ci_variables.CI_TRIVY_IGNORE} holds ids no full scan matched; remove them"
   # What: the nightly kinds name the jobs they judge.
   # Why: the report job reads the needs; no job id in code.
   # From: Issue #1683 | PR #1912
