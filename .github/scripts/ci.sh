@@ -6685,7 +6685,7 @@ _ci_release_ref() {
 # Why: a schedule run starts on the default branch
 # From: Issue #1683 | PR #1858
 ci_cmd_channel_checkout() {
-    local channel="${1:-}" pin="${2:-}" rows ref remote want sha
+    local channel="${1:-}" pin="${2:-}" rows ref remote want sha boot
     if [ -z "${channel}" ]; then
         ci_log "[CI-ERROR-PROMOTE-0017]" "reason=\"channel arg required\""
         return 2
@@ -6695,6 +6695,20 @@ ci_cmd_channel_checkout() {
     if [ -z "${ref}" ]; then
         ci_log "[CI-ERROR-PROMOTE-0018]" "channel=\"${channel}\" reason=\"SOT release.channels has no source_ref for this channel\""
         return 2
+    fi
+    # What: the branch name the bootstrap checked out.
+    # Why: YAML read it before ci.sh; it must match the SOT.
+    # From: Issue #1683 | PR #1858
+    if [ -n "${CI_BOOTSTRAP_REF_VARIABLE:-}" ]; then
+        boot="$(_ci_variable_env "${CI_BOOTSTRAP_REF_VARIABLE}")" || return 2
+        if [ -z "${boot}" ]; then
+            ci_log "[CI-ERROR-PROMOTE-0036]" "name=\"${CI_BOOTSTRAP_REF_VARIABLE}\" want=\"${ref}\" reason=\"repo variable not set\""
+            return 2
+        fi
+        if [ "${boot}" != "${ref#refs/heads/}" ]; then
+            ci_log "[CI-ERROR-PROMOTE-0037]" "name=\"${CI_BOOTSTRAP_REF_VARIABLE}\" got=\"${boot}\" want=\"${ref}\" reason=\"repo variable differs from the SOT source_ref\""
+            return 2
+        fi
     fi
     # What: a later job checks out the first job's commit
     # Why: all jobs of one run validate and promote one tree
