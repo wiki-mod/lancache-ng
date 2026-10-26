@@ -3401,14 +3401,13 @@ ci_cmd_scan_stack() {
     return "${rc}"
 }
 
-# What: fail on ignore-file ids no scan of the run matched
-# Why: an entry that hides nothing is not valid any more
-# From: Issue #1683 | PR #1912
+# What: issue for ignore-file ids no scan of the run matched
+# Why: DoMe: an issue, no red scan; reruns keep one issue
+# From: Issue #1683 | PR #1858
 _ci_trivyignore_stale() {
-    local ignore fields matched="" n kind id stale="" count=0 file="${CI_TMPDIR}/${_CI_TRIVY_MATCHED}"
+    local ignore fields="" matched="" n kind id stale="" count=0 file="${CI_TMPDIR}/${_CI_TRIVY_MATCHED}" why outcome=success
     ignore="$(_ci_repo_path CI_TRIVY_IGNORE)" || return 2
-    [ -f "${ignore}" ] || return 0
-    fields="$(_ci_trivyignore_fields "${ignore}")" || return 2
+    [ ! -f "${ignore}" ] || fields="$(_ci_trivyignore_fields "${ignore}")" || return 2
     [ ! -f "${file}" ] || matched="$(< "${file}")"
     while IFS=$'\t' read -r n kind id; do
         [ "${kind}" = id ] || continue
@@ -3416,10 +3415,17 @@ _ci_trivyignore_stale() {
         _ci_list_has "${id}" "${matched}" || stale="${stale} ${id}"
     done <<< "${fields}"
     if [ -n "${stale}" ]; then
-        ci_log "[CI-ERROR-SCAN-0041]" "path=\"${ignore}\" stale=\"${stale# }\" reason=\"no scan of this run matched these entries; remove them\""
-        return 1
+        outcome=failure
+        ci_log "[CI-WARN-SCAN-0041]" "path=\"${ignore}\" stale=\"${stale# }\" reason=\"no scan of this run matched these entries; the issue asks to remove them\""
+    else
+        printf 'ignore-stale=clean entries=%s\n' "${count}"
     fi
-    printf 'ignore-stale=clean entries=%s\n' "${count}"
+    why="$(_ci_status_readonly_reason)" || return 2
+    if [ -n "${why}" ]; then
+        printf 'ignore-stale-report=NOT-RUN reason="%s"\n' "${why}"
+        return 0
+    fi
+    _ci_status_issue_kind trivy-ignore-stale "${outcome}" "${stale:+path=${ignore} stale=${stale# }}"
 }
 
 # What: load the history a diff needs, plus refs named
