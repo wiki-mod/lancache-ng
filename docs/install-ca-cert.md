@@ -3,9 +3,9 @@
 The LAN cache intercepts HTTPS connections to cache content.
 A custom CA certificate must be installed once on each device.
 
-The file `ca.crt` is located in the `certs/` directory of the project after the
-first start (for a standard `/opt/lancache-ng` install:
-`/opt/lancache-ng/certs/ca.crt`). See
+The file `ca.crt` is in the CA state directory after the first start:
+`CA_DIR`, by default the `STATE_SUBDIR_CA` folder of `build-manifest.yml`
+below `LANCACHE_STATE_DIR`. `setup.sh` prints the full path. See
 [Getting the `ca.crt` onto client devices](#getting-the-cacrt-onto-client-devices)
 for how to distribute it to every device without server access.
 
@@ -18,6 +18,12 @@ for how to distribute it to every device without server access.
 3. "Local machine" → "Next"
 4. "Place all certificates in the following store" → "Browse"
 5. "Trusted root certification authorities" → OK → Next → Finish
+
+Or, in an elevated PowerShell next to `ca.crt`:
+
+```powershell
+Import-Certificate -FilePath .\ca.crt -CertStoreLocation Cert:\LocalMachine\Root
+```
 
 ---
 
@@ -63,7 +69,7 @@ sudo trust anchor --store ca.crt
 
 Consoles (PS5, Xbox, Nintendo Switch) have no way to install a custom CA
 certificate — the capability simply does not exist on those platforms. So they
-can never trust the LAN cache's CA, and SSL-mode interception can never work for
+can never trust the LAN cache's CA, and HTTPS-mode interception can never work for
 them.
 
 **You do not need to do anything, and you should not point consoles somewhere
@@ -86,36 +92,44 @@ still cached as usual. In short: leave consoles pointed at the LanCache NG DNS �
 they get full functionality, just without the caching benefit.
 
 > If you run a LAN with **no** consoles and want to cache Xbox-on-PC (Game Pass
-> for PC) downloads, you can opt in by adding the Xbox CDN domains manually — see
-> the note at the bottom of `services/dns/cdn-domains.txt`. Do **not** do this if
-> any real Xbox console shares the network, or that console's downloads will
-> break.
+> for PC) downloads, you can opt in by adding the Xbox CDN domains below to
+> `services/dns/cdn-domains.txt` or through the Admin UI's CDN domain list. Do
+> **not** do this if any real Xbox console shares the network, or that console's
+> downloads will break.
+>
+> - Xbox on PC: `assets1.xboxlive.com`, `xvcf1.xboxlive.com`,
+>   `xvcf2.xboxlive.com`
+>
+> The same applies to Nintendo Switch caching on a LAN with **no** Switch
+> consoles:
+>
+> - Nintendo: `.hac.lp1.d4c.nintendo.net`, `.hac.lp1.eshop.nintendo.net`,
+>   `.wup.eshop.nintendo.net`, `.wup.shop.nintendo.net`,
+>   `ccs.cdn.wup.shop.nintendo.net.edgesuite.net`,
+>   `ecs-lp1.hac.shop.nintendo.net`, `geisha-wup.cdn.nintendo.net`,
+>   `geisha-wup.cdn.nintendo.net.edgekey.net`, `idbe-wup.cdn.nintendo.net`,
+>   `idbe-wup.cdn.nintendo.net.edgekey.net`, `receive-lp1.dg.srv.nintendo.net`
 
 ---
 
 ## Getting the `ca.crt` onto client devices
 
 `ca.crt` is a **public** certificate (only the matching `ca.key` is secret, and
-that never leaves the server). For a standard production install under
-`/opt/lancache-ng`, the file lives on the host at:
-
-```
-/opt/lancache-ng/certs/ca.crt
-```
-
-`setup.sh` prints this exact path after the first start. The open question this
+that never leaves the server). The file lives on the host in the CA state
+directory (`$CA_DIR` in the commands below); `setup.sh` prints this exact path after the first
+start. The open question this
 section addresses is how to get that file onto **every** client device — phones,
 laptops, Steam Decks — without SSH-ing into the server for each one.
 
 ### Manual distribution
 
 The admin serves the file ad hoc — but **never** point `python3 -m http.server`
-at the `certs/` directory itself: it serves the entire current directory, and
-`certs/` also holds `ca.key`, the private CA key. Copy just `ca.crt` into a
+at the CA state directory itself: it serves the entire current directory, and
+that directory also holds `ca.key`, the private CA key. Copy just `ca.crt` into a
 freshly created throwaway directory first, then serve *that*:
 
 ```bash
-( serve_dir="$(mktemp -d)" && trap 'rm -rf "$serve_dir"' EXIT && cp /opt/lancache-ng/certs/ca.crt "$serve_dir/" && cd "$serve_dir" && python3 -m http.server 8000 )
+( serve_dir="$(mktemp -d)" && trap 'rm -rf "$serve_dir"' EXIT && cp "$CA_DIR/ca.crt" "$serve_dir/" && cd "$serve_dir" && python3 -m http.server 8000 )
 # clients then browse to http://<lancache-lan-ip>:8000/ca.crt, then Ctrl-C when done --
 # the throwaway directory is removed automatically, no separate cleanup step needed
 ```
@@ -145,7 +159,7 @@ not a secret, so this is a tidiness gap, not a security one.
 or copies it off with `scp`:
 
 ```bash
-scp user@<lancache-lan-ip>:/opt/lancache-ng/certs/ca.crt .
+scp "user@<lancache-lan-ip>:$CA_DIR/ca.crt" .
 ```
 
 - **Pro:** zero code, works today.

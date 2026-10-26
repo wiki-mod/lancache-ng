@@ -1,8 +1,9 @@
 
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
+
 # What: root Cargo workspace for 5 first-party crates.
-# Why: one workspace; cargo resolves one lock per build.
+# Why: one workspace; ci.sh makes one lock per run.
 # From: Issue #1095
 
 [workspace]
@@ -12,14 +13,65 @@ members = [
     "services/ui",
     "services/cachehamster",
     "services/watchdog",
-    "tools/pxe-client-probe",
+    "services/common",
 ]
 
-# What: no [workspace.dependencies] table added here.
-# Why: members keep their own dependency entries.
-# From: Issue #1095
+# What: license, edition from SOT release; no version.
+# Why: PROJECT_RELEASE_VERSION owns it; no Rust reads it.
+# From: Issue #1683 | PR #1858
+[workspace.package]
+license = "AGPL-3.0-or-later"
+edition = "2024"
+
+# What: shared direct rust deps, any version.
+# Why: no third-party pin; the lock takes the latest.
+# From: Issue #1683
+[workspace.dependencies]
+anyhow = "*"
+argon2 = "*"
+async-nats = "*"
+axum = "*"
+base64 = "*"
+chacha20poly1305 = "*"
+data-encoding = "*"
+dhcproto = "*"
+form_urlencoded = "*"
+futures = "*"
+futures-util = "*"
+hex = "*"
+# What: liblzma with the bundled, static xz library.
+# Why: logs rotate as xz; no system liblzma link.
+liblzma = { version = "*", features = ["static"] }
+# What: nkeys with the xkeys (X25519) feature.
+# Why: the auth callout response is encrypted with an XKey.
+nkeys = { version = "*", features = ["xkeys"] }
+rand = "*"
+regex = "*"
+# What: reqwest without default features, on rustls.
+# Why: AG-REL-003 forbids openssl-sys; json decodes bodies.
+reqwest = { version = "*", default-features = false, features = ["json", "rustls"] }
+# What: rusqlite with the bundled SQLite.
+# Why: SQLite is compiled in; no system libsqlite3 link.
+rusqlite = { version = "*", features = ["bundled"] }
+# What: rustix with fs and process, no default features.
+# Why: safe statvfs and SIGTERM; std has neither on stable.
+# From: Issue #1683 | PR #1912
+rustix = { version = "*", default-features = false, features = ["std", "fs", "process"] }
+serde = { version = "*", features = ["derive"] }
+serde_json = "*"
+sha2 = "*"
+subtle = "*"
+tera = "*"
+# What: time without default features, formatting only.
+# Why: crates add macros/parsing themselves where needed.
+time = { version = "*", default-features = false, features = ["formatting"] }
+# What: tokio with all features.
+# Why: one feature set; net, process, sync, time are used.
+tokio = { version = "*", features = ["full"] }
+tracing = "*"
+tracing-subscriber = { version = "*", features = ["env-filter"] }
 
 # What: no lto/codegen-units keys in [profile.release] here.
-# Why: sourced from CARGO_PROFILE_RELEASE_LTO/_CODEGEN_UNITS env vars.
+# Why: set via CARGO_PROFILE_RELEASE_LTO/_CODEGEN_UNITS env.
 # From: Issue #1095
 [profile.release]

@@ -1,418 +1,167 @@
 # Naming Conventions
 
-This document is the single, authoritative naming contract for every
-runtime object lancache-ng creates: Compose project/service names, Docker
-container names, Docker volumes, host bind-mount directories, GHCR
-image/package names, environment variables that refer to services or
-containers, the Docker socket proxy's security allowlist, and backup/restore
-paths. It exists because those names are declared in many independent
-places (three Compose files, two service source trees, several shell
-scripts, several env-file templates) with no single owner, and a silent
-mismatch between any two of them is a security or availability bug, not a
-cosmetic one — see "Why this document exists" below.
+This document is the naming contract for every runtime object lancache-ng
+creates: the Compose project and service names, Docker container names,
+Docker volumes, host bind-mount directories, GHCR image and package names,
+environment variables that refer to services or containers, and
+backup/restore paths. `ci.sh check naming-consistency` (part of `ci.sh check
+all`, see "CI guard" below) checks the parts that a script can check; it
+does not replace reading this document.
 
-If you add a new service, volume, environment variable, or allowlist entry,
-follow the rule for its category below, and update every place listed under
-"Where each name actually lives" for that category. `scripts/tracked/check-naming-consistency.sh`
-(wired into CI, see "CI guard" below) checks the parts of this contract that
-are mechanically checkable; it does not replace reading this document.
+If you add a new service, volume or environment variable, follow the rule
+for its category below and update every place listed under "Where each name
+actually lives".
 
 ## Why this document exists
 
-This came out of issue #454, itself a follow-up from hardening the Docker
-socket proxy in #377. The socket proxy's HAProxy allowlist
-(`scripts/untracked/docker-socket-proxy.sh`) only allows Docker API calls against a
-fixed list of container names. Every other layer that talks about "the proxy
-container" or "the DNS-standard container" — the Admin UI's Docker API
-client, the watchdog's health-check loop, each Compose file's
-`container_name:` — has to agree on the *exact same strings* for that
-allowlist to mean anything. Before this document, that agreement was
-de-facto (everything happened to line up) rather than contract-enforced
-(nothing said it had to, and nothing would fail CI if it stopped). A drift
-here is not cosmetic: if the Admin UI's container-name literal for "restart
-the proxy" drifted from the allowlist's literal, the restart button would
-silently start failing closed (safe, but broken) or — if the drift went the
-other way (allowlist tightened past what the code sends) — the specific
-failure mode security review already assumed, not a novel one.
+A name is read in more than one place. Two examples:
+- The container name is the Docker `syslog` tag (`tag: "{{.Name}}"` in
+  `x-logging` of `deploy/prod/docker-compose.yml`), so it is the syslog-ng
+  program name and the log store directory (`LanCache-NG-proxy/`, see the
+  logging matrix in `docs/architecture-ng.md`). The per-service logging
+  switches name the container through its SOT key (`LOG_SWITCHES` in
+  `services/common/config.rs`: `LOGGING_PROXY_ENABLED` to
+  `CONTAINER_NAME_PROXY`, and so on).
+- The watchdog keys `status.json` by the Compose service label of each
+  container (`com.docker.compose.service`), and the Admin UI dashboard shows
+  those keys.
 
-## Two separate name namespaces — do not conflate them
+A drift between two places silently breaks a log switch, a log directory or
+a dashboard row.
 
-There are two genuinely different kinds of "name a service" in this stack,
-and they intentionally use different literal values:
+## Two separate name namespaces; do not conflate them
 
-1. **Compose service name** (e.g. `proxy`, `dns-standard`, `dns-ssl`,
-   `nats`). This is the DNS alias Docker's embedded resolver gives every
-   container on a Compose network. Code that builds an HTTP URL to reach
-   another container in the same stack (e.g. the Admin UI calling
-   `http://dns-standard:8081`) uses this name.
-2. **Container name** (e.g. `lancache-proxy`, `lancache-dns-standard`).
-   This is the literal Docker Engine object name, used wherever code talks
-   to the **Docker Engine API** — `GET /containers/<name>/json`,
-   `POST /containers/<name>/restart`, etc. The Docker Engine API has no
-   concept of a Compose service name; it only knows container names/IDs.
-   The Admin UI's Docker socket calls (`services/ui/src/docker_client.rs`),
-   the watchdog's health/restart loop (`services/watchdog/watchdog.sh`), and
-   the socket proxy's allowlist (`scripts/untracked/docker-socket-proxy.sh`) all
-   operate in this namespace.
+1. **Compose service name** (`services`, `proxy`, `dns`, `dhcp`, `ui`). It
+   is the key under `services:` in the Compose file and the DNS alias that
+   Docker's embedded resolver gives the container on a Compose network.
+2. **Container name** (`LanCache-NG-proxy`, `LanCache-NG-dns`, and so on).
+   It is the Docker Engine object name: the name `docker ps` shows, the
+   syslog tag, and the name the Docker Engine API uses. The watchdog finds
+   the stack's containers by the compose project label of its own container,
+   not by a list of names (`own_project` and `project_containers` in
+   `services/watchdog/src/main.rs`).
 
-**Do not "fix" the difference between these two by unifying them.** Making
-`PROXY_SERVICE` equal `lancache-proxy` would break Docker DNS resolution
-(compose networks do not add `lancache-`-prefixed aliases automatically);
-making `CONTAINER_PROXY` equal `proxy` would break the Docker Engine API
-calls (a bare `proxy` is not that container's actual Docker name unless
-`container_name:` is also changed to match, which would then break the
-socket-proxy allowlist regex on every other Compose file). The two
-namespaces are related by a fixed rule (see below) but are not
-interchangeable strings.
+The two are related by a fixed rule (see below) but are not the same string.
 
 ## Category rules
 
 ### Compose project name
 
-Rule: every top-level, human-run deployment mode (`deploy/prod`,
-`deploy/quickstart`) declares `name: lancache-ng` at the top
-of its `docker-compose.yml`. This fixes the Compose project name so
-generated resource names (`lancache-ng-<service>-1` for anything without an
-explicit `container_name:`, network names, the implicit default network)
-are stable and predictable across `docker compose up`/`down`/`restart`
-invocations, regardless of the checkout directory name.
+Rule: `deploy/prod/docker-compose.yml`, the one deployment profile
+(AG-KD-008), declares `name: lancache-ng`. This fixes the project label, the
+network names and the names of the named volumes across `docker compose
+up`, `down` and `restart`, whatever the checkout directory is called.
 
-Documented exceptions:
-
-- `deploy/full-setup/docker-compose.yml` uses `name: lancache-ng-validation`
-  deliberately — it is a CI-only harness with dummy images
-  (`docs/release-versioning.md`, `release/stack-images.yml`), never a real
-  deployment, and must never collide with a real `lancache-ng` project on
-  the same Docker host/runner.
-- `deploy/secondary/docker-compose.yml` sets no project name. It is
-  generated by `setup.sh secondary` onto a remote host that runs nothing
-  else from this project, is a single-service file, and is never reachable
-  through the Docker socket proxy trust boundary described below — a fixed
-  project name has no correctness benefit there. If a secondary node is
-  ever colocated with another lancache-ng deployment, revisit this
-  exception.
+Documented exception: `deploy/secondary/docker-compose.yml` sets no project
+name. `setup.sh secondary` writes it onto a remote host that runs nothing
+else from this project; it has one service (`dns`).
 
 ### Compose service names
 
-Rule: lowercase, hyphen-separated, one word per logical responsibility —
-`proxy`, `dns-standard`, `dns-ssl`, `dhcp`, `dhcp-proxy`, `dhcp-probe`,
-`ntp`, `nats`, `docker-socket-proxy`, `watchdog`, `ui`, `netdata`, `syslog`,
-`cachehamster`.
-This list never carried a separate `syslog-ng` entry even while a real
-`syslog-ng` Compose service existed (issue #453/#633 through the
-syslog+fluent-bit consolidation PR) -- a pre-existing documentation gap this
-project never revisited, not a deliberate decision. The consolidation
-merging `syslog` (fluent-bit) and `syslog-ng` into one combined-container
-`syslog` service genuinely closes that gap rather than papering over it:
-this list is now accurate again by construction, since there is only one
-logical central-logging service left to name. These names are also the DNS aliases used for
-service-to-service HTTP calls inside a Compose network (see "Two separate
-name namespaces" above). They must be identical across `deploy/prod`
-and `deploy/quickstart` for the same logical service — a
-service must not be called `dns-standard` in one file and `dns_standard` or
-`standard-dns` in another.
+Rule: lowercase, one word per container: `services`, `proxy`, `dns`,
+`dhcp`, `ui` in `deploy/prod`, and `dns` in `deploy/secondary`. A service
+keeps the same name in every file; it must not be `dns` in one file and
+`dns_server` in another.
 
 ### Container names (`container_name:`)
 
-Rule: every service defined in `deploy/prod` and
-`deploy/quickstart` gets an explicit `container_name: lancache-<service>`
-(the Compose service name, prefixed with `lancache-`; `dns-standard`
-becomes `lancache-dns-standard`, not `lancache-dnsstandard` or
-`lancache_dns_standard`). Do not leave `container_name:` unset and rely on
-Compose's auto-generated `<project>-<service>-<n>` name.
-
-Two reasons this must be explicit for **every** service, not only the ones
-the Docker socket proxy currently allowlists:
-
-1. **Docker socket proxy allowlist targets.** Any container the Admin UI or
-   watchdog can start/stop/restart/inspect through
-   `scripts/untracked/docker-socket-proxy.sh` must have a name that exactly matches
-   the allowlist regex, or the request is denied (fails closed, but that's
-   still a bug). Today that set is `lancache-proxy`,
-   `lancache-dns-standard`, `lancache-dns-ssl`, `lancache-dhcp`,
-   `lancache-dhcp-proxy`, `lancache-dhcp-probe`, `lancache-nats` — all of
-   which already had explicit `container_name:` values before this change.
-2. **Operator-visible consistency.** At the time this rule was written,
-   `docker-socket-proxy`, `watchdog`, `ui`, and `netdata` were not allowlist
-   targets (nothing called the Docker API to manage them by name) -- this
-   is **no longer true for `ui`/`netdata`**: issue #842/#849 (2026-08-05)
-   added both, plus `syslog` (at the time, two separate services/containers,
-   `syslog` and `syslog-ng`, each added individually; the syslog+fluent-bit
-   consolidation PR merged concurrently reduced that to the one `syslog`
-   name that remains), to `safe_container_inspect`/
-   `lancache_container` (inspect-only, for watchdog's Rust rewrite's
-   alert-only monitoring -- see `docs/architecture-ng.md`'s "Auto-restart"
-   section for the full list and reasoning). **Corrected 2026-08-19 (issue
-   #1486): `ui` is no longer inspect-only.** It additionally gained its own
-   narrow `safe_ui_restart` grant (restart-only, never start/stop) for the
-   Admin UI's own operator-initiated self-restart control -- `netdata` and
-   `syslog` remain inspect-only exactly as before. `docker-socket-proxy` and
-   `watchdog` remain the only two of this original four still deliberately
-   absent from the allowlist (a service never needs Docker-API access to
-   itself). Before this section's original change, none of the four had a
-   `container_name:` either, so `docker ps` showed them as
-   `lancache-ng-ui-1`, `lancache-ng-watchdog-1`, etc. — a project name plus
-   an implementation detail (the numeric Compose replica suffix) an
-   operator has to mentally parse, and a naming rule with silent,
-   unexplained exceptions. This PR adds explicit `container_name:` values
-   for these four (`lancache-docker-socket-proxy`, `lancache-watchdog`,
-   `lancache-ui`, `lancache-netdata`) and for the `syslog` service (Compose-
-   profile-gated; on by default since issue #1343 for `setup.sh`-managed
-   installs, not "optional" in the off-by-default sense the original wording
-   implied -- a from-scratch manual `deploy/prod` install still starts with
-   it off, matching its `dhcp-kea`/`dhcp-proxy`/`ntp` sibling profiles) where
-   present (and,
-   at the time, the since-removed `watchtower` service --
-   see #819), so "every lancache-ng service has a stable, predictable name"
-   is a rule without exceptions instead of a rule with four undocumented
-   ones. See "Migration impact" below — this is a
-   one-time container recreation, not a data migration.
-
-`netdata` additionally sets `hostname: lancache-netdata` (the in-container
-`/etc/hostname` value, unrelated to the Docker-level container name) — this
-predates this change and is now consistent with its new `container_name:`.
-
-#### `LANCACHE_CONTAINER_SUFFIX` (quickstart only, issue #1415)
-
-Every `container_name:` in `deploy/quickstart/docker-compose.yml` (only —
-`deploy/prod` is unaffected) is actually
-`lancache-<service>${LANCACHE_CONTAINER_SUFFIX:-}`. This does **not**
-relax the "explicit, fixed `container_name:` for every service" rule
-above: `LANCACHE_CONTAINER_SUFFIX` is unset for every real single-host
-install, which makes every name byte-identical to before this variable
-existed, and there is no supported way for an operator to set it — the
-existing `CONTAINER_PROXY`/`CONTAINER_DNS_STANDARD`/`CONTAINER_DNS_SSL`/
-`CONTAINER_NATS` overrides already FATAL if they don't resolve to exactly
-`lancache-<service>${LANCACHE_CONTAINER_SUFFIX:-}` for whatever suffix
-watchdog itself was given, so a mismatched or ad-hoc rename is rejected
-exactly as before (issue #849 finding #5's single-stack-per-host design is
-unchanged).
-
-The variable exists only so CI can start more than one quickstart-compose
-stack concurrently on the same physical self-hosted runner host (several
-runner instances can share one Docker daemon). `COMPOSE_PROJECT_NAME`
-already gives each CI run a unique value (`scripts/untracked/simulations/setup-cli-simulation.sh`'s
-`sim_compose_project_name()`), but an explicit `container_name:` overrides
-Compose's own project-name-based isolation entirely — that mismatch is
-exactly what let two CI runs with distinct project names collide on the
-identical fixed container name (issue #1415). A CI caller that wants
-isolated container names must derive `LANCACHE_CONTAINER_SUFFIX` from that
-same per-run uniqueness and export it before driving this compose file.
-
-Three consumers besides the compose file itself must agree on the suffix
-actually in effect for a given run, or the mismatch FATALs/denies exactly
-as an unrelated rename would:
-
-1. `scripts/untracked/docker-socket-proxy.sh` reads `LANCACHE_CONTAINER_SUFFIX` at
-   container startup and appends it to every name in its own generated
-   HAProxy allowlist (a runtime transform of the *generated* config, never
-   of this script's own checked-in source — see that script's own comment
-   for why, and `scripts/tracked/check-naming-consistency.sh`'s matching
-   quickstart-specific literal-suffix expectation).
-2. `services/watchdog/watchdog.sh` must receive the same
-   `LANCACHE_CONTAINER_SUFFIX`, plus `CONTAINER_PROXY`/etc. already carrying
-   that suffix, so its FATAL guard's "expected" value and the container
-   names it actually probes both agree with reality.
-3. `services/watchdog/src/config.rs` — the not-yet-live Rust rewrite of the
-   same guard — mirrors this for the eventual `watchdog.sh` → Rust cutover,
-   even though it isn't the running entrypoint today (see its own module
-   doc comment).
-
-`services/ui/src/docker_client.rs`'s `container_name_for_service()` is
-**deliberately not wired to this suffix**: no CI simulation drives the
-Admin UI's Docker-API-backed restart/start/stop routes today (verified by
-grepping every `scripts/untracked/simulations/*-simulation.sh` for a call
-into those routes), and
-a real production install never sets a suffix, so there is no reachable
-path where this gap could produce incorrect behavior. Revisit this if a
-future simulation starts exercising those routes.
+Rule: every service sets `container_name: ${SOT_CONTAINER_NAME_<SERVICE>}`.
+The SOT (`.github/yaml/build-manifest.yml`) owns the values:
+`CONTAINER_NAME_PREFIX=LanCache-NG` and
+`CONTAINER_NAME_<SERVICE>=@CONTAINER_NAME_PREFIX@-<service>`, so `dns`
+becomes `LanCache-NG-dns`. Do not leave `container_name:` unset and rely on
+Compose's generated `<project>-<service>-<n>` name, and do not write a name
+literal into a Compose file or into code.
 
 ### Docker volumes
 
-Rule for new volumes: lowercase, hyphen-separated, named for what they hold,
-no service prefix required when the volume is already scoped inside a
-service-named block in the Compose file (e.g. `proxy-cache`,
-`proxy-config-snapshots`, `dhcp-proxy-config-snapshots`, `watchdog-status`,
-`ui-data`, `pdns-filter-state`).
+Rule for new volumes: lowercase, hyphen-separated, named for what they hold
+(for example `proxy-cache`, `proxy-config-snapshots`, `watchdog-status`,
+`retention-state`, `ui-data`, `shared-secrets`).
 
-Documented exception (grandfathered, not changing here): the three Netdata
-volumes — `netdataconfig`, `netdatalib`, `netdatacache` — are missing the
-hyphen this convention otherwise uses everywhere else
-(`netdata-config`/`netdata-lib`/`netdata-cache` would match the pattern).
-These are **not** renamed by this change: Docker named volumes carry real
-persisted state, and renaming a volume means either data loss or a
-migration step in `setup.sh`, which is a deliberate, human-approved
-decision outside the scope of a naming-documentation pass. This exception
-is permanent rather than a placeholder awaiting a fix, unless a future,
-explicitly scoped change adds the volume migration logic.
+Documented exception: the three Netdata volumes `netdataconfig`,
+`netdatalib` and `netdatacache` have no hyphen. They are not renamed:
+Docker named volumes hold persisted state, and a rename means data loss or a
+migration step in `setup.sh`, which needs a decision of its own.
 
 ### Host bind-mount directories
 
-Rule: everything under the shared `LANCACHE_STATE_DIR` (default
-`/opt/lancache-ng`) uses lowercase, hyphen-separated subdirectory names that
-match the service that owns them: `cache`, `pdns-standard`, `pdns-ssl`,
-`pdns-filter-state`, `nats`, `nats-conf`, `kea`, `ntp`. See `docs/backup-restore.md`
-and `docs/how-to-change-ip.md` for the full `LANCACHE_STATE_DIR` contract
-and its override variables (`PDNS_STANDARD_DIR`, `PDNS_SSL_DIR`,
-`PDNS_FILTER_STATE_DIR`, `NATS_DATA_DIR`, `NATS_CONF_DIR`, `KEA_DATA_DIR`,
-`NTP_DATA_DIR`).
-This document does not duplicate that contract; it only asserts that new
-state directories must follow the same naming shape.
+Rule: each host directory is set by one operator variable that
+`deploy/prod/docker-compose.yml` requires (`CACHE_DIR`, `CA_DIR`,
+`PDNS_DIR`, `PDNS_FILTER_STATE_DIR`, `NATS_DATA_DIR`, `NATS_CONF_DIR`,
+`KEA_DATA_DIR`, `NTP_DATA_DIR`, `CACHEHAMSTER_DATA_DIR`,
+`SYSLOG_NG_LOG_DIR`). A new state directory gets its own variable of the
+same shape and a lowercase, hyphen-separated directory name. See
+`docs/backup-restore.md` and `docs/how-to-change-ip.md` for the
+`LANCACHE_STATE_DIR` contract; this document does not repeat it.
 
 ### GHCR image/package names
 
 Rule: `ghcr.io/wiki-mod/lancache-ng/<service>` for every first-party image,
 where `<service>` is the same lowercase-hyphenated name as the Compose
-service (`proxy`, `dns`, `watchdog`, `dhcp`, `dhcp-proxy`, `ntp`, `ui`,
-`build-tools`, `cachehamster`, `stack`). This is already fully governed by
-`release/stack-images.yml` (the machine-readable inventory) and
-`docs/release-versioning.md` — this document does not duplicate that
+service and its key in the `services:` block of
+`.github/yaml/build-manifest.yml` (plus `build-tools`). This is already
+fully governed by `.github/yaml/build-manifest.yml` (the machine-readable
+inventory) and `docs/release-versioning.md` — this document does not duplicate that
 contract, it only asserts that the image name always matches the service
 name it packages. `LANCACHE_IMAGE_REGISTRY`, `LANCACHE_IMAGE_PREFIX`,
 `LANCACHE_IMAGE_TAG`, and `LANCACHE_IMAGE_CHANNEL` are the fixed
 environment variable names every service/script uses to assemble an image
 reference; do not introduce a second set of image-location variables.
 
+### GHCR image tags
+
+Rule: the prefix `sha-` names a commit and nothing else. A per-commit tag is
+`sha-<full 40-hex commit SHA>` (AG-REL-015, `docs/release-versioning.md`).
+A tag that names a build identity (the 64-hex hash of a service's build
+inputs, `docs/ci-2.0-architecture.md`) is
+`<release.tag_identity_prefix><build identity>-<arch>`, with the prefix
+`identity-` owned by `.github/yaml/build-manifest.yml` (`release:`) and
+written and read only through `_ci_image_tag` in `.github/scripts/ci.sh`.
+An identity tag never starts with `sha-`, so no commit-tag reader, pin
+check or retention rank can mistake it for a commit.
+
 ### Environment variables that refer to services or containers
 
-Rule: which namespace (see above) an env var's default value must match is
-determined by what the variable is used for, not by convention alone —
-document the mapping explicitly rather than leaving it implicit:
-
-| Variable | Default | Namespace | Used for |
-|---|---|---|---|
-| `PROXY_SERVICE` | `proxy` | Compose service name | Building `PROXY_STANDARD_URL`/`PROXY_SSL_URL` defaults (`http://proxy`) |
-| `PROXY_SSL_SERVICE` | `proxy` (inherits `PROXY_SERVICE`'s resolved value, not an independent literal) | Compose service name, also fed into `container_name_for_service()` | Restarting the proxy for a domain-list reload (`services/ui/src/routes/domains.rs`) |
-| `DNS_STANDARD_SERVICE` | `dns-standard` | Compose service name | UI-internal service identification, dashboard labels |
-| `DNS_SSL_SERVICE` | `dns-ssl` | Compose service name | Same as above |
-| `NATS_SERVICE` | `nats` | Compose service name, also fed into `container_name_for_service()` | Restarting NATS after a secondary registration rewrites `nats.conf` (`services/ui/src/routes/secondaries.rs`) |
-| `CONTAINER_PROXY` | `lancache-proxy` | Container name | Watchdog health/restart calls through the socket proxy |
-| `CONTAINER_DNS_STANDARD` | `lancache-dns-standard` | Container name | Same as above |
-| `CONTAINER_DNS_SSL` | `lancache-dns-ssl` | Container name | Same as above |
-| `DOCKER_PROXY_URL` | `http://docker-socket-proxy:2375` | Compose service name (URL host) | Admin UI/watchdog's Docker API entry point |
-
-`PROXY_SSL_SERVICE` and `NATS_SERVICE` sit at the seam between the two
-namespaces: their *default value* is a Compose service name, but both are
-also passed straight into `container_name_for_service()` (see below), which
-accepts either a bare service name or a `lancache-`-prefixed container name
-and resolves either one to the real container name before the Docker API
-call. That dual acceptance is what lets a Compose-service-name default work
-correctly as a Docker-API restart target without a separate, redundant
-`CONTAINER_*` variable for the proxy and NATS restart paths.
-
-`services/ui/src/docker_client.rs`'s `container_name_for_service()` mirrors
-the container-name namespace directly (it accepts either the bare Compose
-service name or the `lancache-`-prefixed container name as input, and
-always resolves to the container name before calling the Docker API) — it
-is not driven by an environment variable because the socket-proxy allowlist
-it must match is also a fixed, non-configurable set of strings.
-
-### Docker socket proxy allowlist
-
-Rule: `scripts/untracked/docker-socket-proxy.sh` is the **single source of truth**
-for the allowlist. It is mounted read-only into the `docker-socket-proxy`
-container identically from `deploy/prod` and
-`deploy/quickstart` — there is exactly one copy of the allowlist logic, not
-one per Compose file. Every container name in the allowlist regexes must be
-a real `container_name:` declared in the same Compose file that mounts this
-script. Every container-name literal the Admin UI sends to the Docker API
-(`services/ui/src/docker_client.rs`) and every `CONTAINER_*` default the
-watchdog uses (`services/watchdog/watchdog.sh`) must be a subset of this
-allowlist — code must never assume it can act on a name the allowlist
-doesn't grant, even if that assumption happens to be harmless today.
-
-Issue #1170 Part 1 note: watchdog's `probe_docker_socket_proxy` function
-calls `GET /_ping` on `docker-socket-proxy` directly by URL (`DOCKER_PROXY_URL`),
-not a `/containers/<name>/...` Docker-API call built from a `CONTAINER_*`
-default. Its `C_DOCKER_PROXY="lancache-docker-socket-proxy"` label is
-therefore a plain literal, not a `${CONTAINER_*:-lancache-*}`-shaped
-default — `scripts/tracked/check-naming-consistency.sh`'s `watchdog_names`
-extraction (which greps for exactly that shape) correctly never sees it, and
-it correctly is not, and must not become, an allowlist entry (see
-"Operator-visible consistency" above: `docker-socket-proxy` has a real
-`container_name` but is deliberately not an allowlist target).
-
-Historical note: earlier revisions of this project also carried three
-near-identical copies of this HAProxy config as an unused Compose YAML
-anchor (`x-docker-socket-proxy-command`) at the top of each of the three
-Compose files, left over from before the config was extracted into
-`scripts/untracked/docker-socket-proxy.sh` and mounted in. Those anchors were never
-referenced by anything (`grep` for `*docker-socket-proxy-command` found no
-alias use) — they were dead, unreachable duplicates of the real allowlist
-that could silently drift from it without any functional effect, which is
-exactly the kind of accidental multi-copy naming surface this document
-exists to eliminate. This change deletes them; see "Migration impact"
-below.
+Rule: no operator environment variable names a service or a container. The
+ui has no Docker access: it writes settings, marker and request files, and
+the supervisor in the owning container restarts its own program when a
+watched file changes. Only the watchdog in `services` talks to Docker, and
+it finds the stack by its compose project label, not by a name list. The
+SOT `CONTAINER_NAME_*` keys are the one place a container name is written.
 
 ### Backup/restore paths that depend on these names
 
-Rule: `setup.sh`'s `compose_volume_names()`/`backup_compose_volumes()`/
+Rule: `setup.sh`'s `compose_volume_names()`, `backup_compose_volumes()` and
 `restore_compose_volumes()` (see `docs/backup-restore.md`) discover Docker
-volumes generically by inspecting the running containers, so they do not
-hardcode volume names — a new volume that follows the naming rule above is
-automatically included without a `setup.sh` change. The one place names are
-hardcoded is the `deploy_prod_repo_input_paths()` allowlist of repo-root
-paths reached via `../../` from `deploy/prod` (certs, `config/prod`,
-`services/dns/cdn-domains.txt`, `scripts/untracked/docker-socket-proxy.sh`) — any new
-repo-root file a production Compose service reads via a relative bind mount
-must be added there too, or a config-mode backup/restore silently misses
-it.
+volumes by inspecting the running containers, so a new volume that follows
+the rule above is included without a `setup.sh` change. Repo files that a
+Compose service mounts through `../../` are found the same way:
+`deploy_prod_repo_input_paths()` in `setup.sh` reads every `../../` path from
+the Compose files and keeps the ones that exist in the checkout (today
+`services/dns/cdn-domains.txt`). There is no hand-kept list.
 
 ## Where each name actually lives
 
 | Category | Canonical source | Also appears in |
 |---|---|---|
-| Compose project name | `deploy/{prod,quickstart}/docker-compose.yml` `name:` | — |
-| Compose service names | `deploy/{prod,quickstart}/docker-compose.yml` service keys | `services/ui/src/config.rs` (`*_SERVICE` defaults), `deploy/{prod,quickstart}/docker-compose.yml` env values that build internal URLs |
-| Container names | `deploy/{prod,quickstart}/docker-compose.yml` `container_name:` | `scripts/untracked/docker-socket-proxy.sh` (allowlist), `services/ui/src/docker_client.rs` (`container_name_for_service`), `services/watchdog/watchdog.sh` and `services/watchdog/src/config.rs` (`CONTAINER_*` defaults/guard), `config/prod/watchdog.env` and `deploy/quickstart/docker-compose.yml` (`CONTAINER_*` overrides) |
-| `LANCACHE_CONTAINER_SUFFIX` (quickstart only) | `deploy/quickstart/docker-compose.yml` `container_name:`/environment entries | `scripts/untracked/docker-socket-proxy.sh` (runtime allowlist suffix), `services/watchdog/watchdog.sh` (guard), `scripts/tracked/check-naming-consistency.sh` (quickstart-specific literal-suffix check) — see "`LANCACHE_CONTAINER_SUFFIX` (quickstart only, issue #1415)" above |
-| Docker volumes | `deploy/{prod,quickstart}/docker-compose.yml` `volumes:` top-level block | Service-level `volumes:` mount lists in the same files |
-| Host bind-mount directories | `docs/backup-restore.md`, `docs/how-to-change-ip.md` | `deploy/prod/docker-compose.yml`, `setup.sh` |
-| GHCR image/package names | `release/stack-images.yml` | `docs/release-versioning.md`, both Compose files' `image:` lines |
-| Service-referring env vars | See table above | `services/ui/src/config.rs`, `services/watchdog/watchdog.sh`, `config/prod/*.env` |
-| Socket proxy allowlist | `scripts/untracked/docker-socket-proxy.sh` | (mounted read-only, unchanged, into both Compose files' `docker-socket-proxy` service) |
+| Compose project name | `deploy/prod/docker-compose.yml` `name:` | the compose project label the watchdog reads |
+| Compose service names | `deploy/prod/docker-compose.yml` and `deploy/secondary/docker-compose.yml` service keys | the `status.json` keys the watchdog writes |
+| Container names | `.github/yaml/build-manifest.yml` (`CONTAINER_NAME_PREFIX`, `CONTAINER_NAME_*`) | `container_name:` of both Compose files, `LOG_SWITCHES` in `services/common/config.rs` |
+| Docker volumes | `deploy/prod/docker-compose.yml` top-level `volumes:` block | the service `volumes:` lists in the same file |
+| Host bind-mount directories | the required variables of `deploy/prod/docker-compose.yml` | `docs/backup-restore.md`, `docs/how-to-change-ip.md`, `setup.sh` |
+| GHCR image/package names | `.github/yaml/build-manifest.yml` (`services:`) | `docs/release-versioning.md`, the `image:` lines of `deploy/prod` and `deploy/secondary` |
 
 ## CI guard
 
-`scripts/tracked/check-naming-consistency.sh` runs as part of the `validate-compose`
-job in `.github/workflows/build-push.yml` on every PR and checks the parts
-of this contract that are mechanically verifiable:
-
-- Every allowlist container name in `scripts/untracked/docker-socket-proxy.sh` has a
-  matching `container_name:` in `deploy/prod` and
-  `deploy/quickstart`.
-- Every container-name literal `services/ui/src/docker_client.rs` can
-  resolve to is a subset of that same allowlist.
-- Every `CONTAINER_*` default in `services/watchdog/watchdog.sh` is a
-  subset of that same allowlist.
-- The `*_SERVICE` defaults in `services/ui/src/config.rs` match a real
-  Compose service name (not a container name) in both Compose files.
-- `deploy/prod` and `deploy/quickstart` both declare
-  `name: lancache-ng`.
+`ci.sh check naming-consistency` (`_ci_check_naming_consistency` in
+`.github/scripts/ci.sh`) renders `deploy/prod/docker-compose.yml` and fails
+when:
+- a service has no `container_name:`;
+- a `container_name:` does not end in `-<service>`;
+- the services use more than one container name prefix;
+- the prefix is not the Compose project name (compared without case).
 
 It does not (and cannot) verify the human-judgment parts of this document —
 whether a *new* category of name follows the rule is a code-review
 question, not a script's job.
-
-## Migration impact
-
-This change is a documentation-and-consistency pass, not a data migration.
-Nothing that persists state (volume names, bind-mount paths, `LANCACHE_STATE_DIR`
-layout, backup archive format) changes.
-
-The one runtime-visible effect: `docker-socket-proxy`, `watchdog`, `ui`, and
-`netdata` (and `syslog` where present) now have an explicit
-`container_name:` where they previously had none. On the next
-`docker compose up -d` after upgrading, Compose recreates exactly these
-containers (new fixed name assigned) because their config changed — this is
-the same kind of one-time recreation any `container_name:`/image-tag change
-already causes, not a new class of behavior. No named volume is renamed,
-removed, or recreated; a container recreation does not touch volume
-contents. Expect a few seconds of downtime for these four/six containers
-during the update, same as any other rolling update. `proxy`, `dns-standard`,
-`dns-ssl`, `dhcp`, `dhcp-proxy`, `dhcp-probe`, and `nats` already had
-explicit `container_name:` values and are unaffected by this change.
-
-The deleted `x-docker-socket-proxy-command` YAML anchors were dead
-(unreferenced) content with no runtime effect — removing them changes
-nothing at deploy time.

@@ -43,13 +43,13 @@ duplicate, their acceptance criteria):
   (per `AGENTS.md`'s "Feature Completeness" section — a backend capability
   without UI exposure is treated as delivery debt, not as done).
 - **DNS resilience** (#1164): native PowerDNS AXFR/NOTIFY primary/secondary
-  replication for `dns-standard`/`dns-ssl`, superseding the earlier #770
+  replication for `dns`, superseding the earlier #770
   design.
 - **DHCP consolidation** (#840): umbrella for scattered Kea/dnsmasq-proxy
   feature and bug work; includes replacing the EOL `dhclient` + `nmap`
   DHCP-probe tooling with a native Rust implementation (#1288).
 - **Watchdog coverage** (#842, #1170): the watchdog currently only monitors
-  `proxy`/`dns-standard`/`dns-ssl` despite its name implying stack-wide
+  `proxy`/`dns` despite its name implying stack-wide
   coverage; also adding self-healing for a hung `docker-socket-proxy`.
 - **Release automation** (#819, #850): move the fully-manual `vX.Y.Z` semver
   bump decision toward automation, once the tag/PR-title mechanics it depends
@@ -63,9 +63,10 @@ duplicate, their acceptance criteria):
 - **Undocumented-vs-real-capability audits** (#843, #871): reconcile
   documentation that describes capabilities against what actually exists in
   the codebase today — e.g. CacheHamster (Cache-Prefill), whose mechanism is
-  now decided (stream-and-discard prefill, not steamcmd, per #871) and
-  infra-integrated (CI build/publish, opt-in Compose profile), but whose
-  Steam control-plane/depot integration is not yet built.
+  now decided (stream-and-discard prefill, not steamcmd, per #871) and built
+  as the `lancache-cachehamster` crate of the services image (no supervised
+  program, started by hand), but whose Steam control-plane/depot integration
+  is not yet built.
 - **CI/tooling health**: several open `ci`/`tooling`-labeled issues (e.g.
   #1014 consolidating workflow files, #1065's runner-pool saturation,
   #1253/#1290 narrowing build-tools rebuild triggers) reduce CI cost and

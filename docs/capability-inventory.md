@@ -30,7 +30,7 @@ is authoritative and this document should be corrected.
 | Admin UI           | Web control plane and configuration management                    | Rust                      | Production               |
 | Watchdog           | Service health monitoring and recovery                            | Rust                      | Production               |
 | Netdata            | Runtime metrics and system observability                          | Netdata                   | Production               |
-| Central Logging    | Log collection, normalization and retention                       | syslog-ng, Fluent Bit     | Production               |
+| Central Logging    | Log collection, normalization and retention                       | syslog-ng                | Production               |
 | NTP                | LAN time service and optional host clock discipline               | chrony                    | Optional production mode |
 | CacheHamster       | Future Steam cache-prefill engine                                 | Rust                      | Scaffold only            |
 | setup.sh           | Installation and lifecycle orchestration                          | Bash                      | Production               |
@@ -50,8 +50,8 @@ than being implemented as separate proxy images.
 The proxy provides:
 
 * HTTP content caching.
-* Standard-mode HTTPS forwarding through nginx stream and SNI inspection.
-* SSL-mode TLS interception using the LanCache-NG local certificate authority.
+* HTTP-mode HTTPS forwarding through nginx stream and SNI inspection.
+* HTTPS-mode TLS interception using the LanCache-NG local certificate authority.
 * Automatic certificate generation for configured cache domains.
 * Cache-domain matching based on `services/dns/cdn-domains.txt`.
 * Public-suffix-aware certificate and domain handling.
@@ -66,12 +66,12 @@ The proxy provides:
 * Admin UI visibility for cache status, requests and cache utilization.
 
 The current image uses Alpine and nginx.org's mainline nginx package. The
-stream and SSL preread modules required by standard mode are compiled directly
+stream and SSL preread modules required by HTTP mode are compiled directly
 into that nginx build.
 
-### Standard mode
+### HTTP mode
 
-Standard mode does not terminate the client TLS connection.
+HTTP mode does not terminate the client TLS connection.
 
 nginx inspects the requested SNI name and forwards the encrypted connection to
 the requested upstream host. No locally generated certificate is presented to
@@ -81,9 +81,9 @@ This mode avoids installing the LanCache-NG CA on clients but can only cache
 traffic that is available through non-intercepted HTTP paths or other supported
 cache flows.
 
-### SSL mode
+### HTTPS mode
 
-SSL mode terminates client TLS using certificates generated from the local
+HTTPS mode terminates client TLS using certificates generated from the local
 LanCache-NG CA.
 
 The client must trust that CA.
@@ -125,14 +125,15 @@ The service combines:
 
 ### DNS instances
 
-The normal deployment contains two logical DNS instances:
+The normal deployment contains one DNS container:
 
-* `dns-standard`
-* `dns-ssl`
+* `dns`
 
-`dns-standard` is the writable authoritative primary.
+`dns` is the writable authoritative primary. It serves the http and the https
+side from the same container.
 
-`dns-ssl` operates as a PowerDNS secondary for replicated authoritative data.
+Remote secondary nodes (`setup.sh secondary`) operate as PowerDNS secondaries
+for the replicated authoritative data.
 
 This replaces the older model where both instances independently received and
 applied the same record mutations.
@@ -145,8 +146,8 @@ operation.
 The implementation includes:
 
 * TSIG-protected AXFR and NOTIFY.
-* `dns-standard` as the single writable primary.
-* `dns-ssl` as a secondary.
+* `dns` as the single writable primary.
+* Remote `dns` nodes as secondaries.
 * Kea DDNS writes directed to the primary.
 * Secondary-side NATS record writes disabled to maintain the single-writer
   model.
@@ -222,8 +223,8 @@ The service runs:
 * Kea Control Agent.
 * Kea DHCP-DDNS.
 
-The entrypoint owns configuration rendering, migrations, secret handling and
-process supervision.
+The supervisor binary (`services/watchdog`) owns configuration rendering,
+migrations, secret handling and process supervision.
 
 ### Admin UI capabilities
 
@@ -300,7 +301,7 @@ current exposed product surface.
 
 ### Purpose
 
-`services/dhcp-proxy` uses dnsmasq for two distinct modes:
+The `dhcp` image (`services/dhcp`) also runs dnsmasq for two distinct modes:
 
 * ProxyDHCP and PXE assistance alongside an existing DHCP server.
 * Real DHCP relay operation toward an upstream DHCP server.
@@ -360,8 +361,8 @@ configuration than full first-class UI controls.
 
 ### Purpose
 
-`services/nats` is the internal messaging and authentication backbone used by
-multiple LanCache-NG components.
+nats-server inside the `dns` container is the internal messaging and
+authentication backbone used by multiple LanCache-NG components.
 
 It is not an operator-facing message broker for arbitrary application traffic.
 
@@ -408,8 +409,9 @@ credential.
 
 ### Generated NATS configuration
 
-The UI generates the static NATS configuration required for the server,
-including the authentication callout and internal roles.
+The supervisor renders the static NATS configuration from the internal roles
+in `services/common/config.rs`; the UI writes only the authentication-callout
+fragment.
 
 Normal secondary registration, rotation and removal no longer require
 regenerating the entire NATS configuration for each credential change.
@@ -511,9 +513,7 @@ identity.
 
 `services/watchdog` provides stack health monitoring and controlled recovery.
 
-The production watchdog is implemented in Rust. The older Bash watchdog is
-historical implementation material and is not the current production control
-loop.
+The watchdog is implemented in Rust.
 
 ### Current capabilities
 
@@ -545,18 +545,12 @@ Destructive retention and pruning work is separated from the Rust health loop.
 The retention path has its own narrowly-scoped runtime environment instead of
 giving the main watchdog broad file-system mutation access.
 
-### Legacy Bash implementation
-
-`services/watchdog/watchdog.sh` remains in the repository for historical and
-supporting context, but the compiled Rust implementation is the production
-watchdog entrypoint.
-
 ## Netdata
 
 ### Purpose
 
-`services/netdata` provides system and service metrics used by the Admin UI and
-for direct operational diagnostics.
+Netdata inside the `services` container provides system and service metrics
+used by the Admin UI and for direct operational diagnostics.
 
 ### Current capabilities
 
@@ -578,11 +572,9 @@ treated as a general public API.
 
 ### Purpose
 
-`services/syslog` provides centralized collection and processing of logs from
-LanCache-NG services.
-
-The service combines syslog-ng and Fluent Bit related functionality with
-health and data-loss detection.
+syslog-ng inside the `services` container provides centralized collection of
+logs from LanCache-NG services. The watchdog renders its configuration and
+supervises it.
 
 ### Current capabilities
 
@@ -593,9 +585,8 @@ The logging path provides:
 * Proxy request log processing.
 * Inputs used by the Admin UI log viewer.
 * Input for Netdata's nginx `web_log` collector.
-* Health checking.
-* Detection of logging-path data loss.
-* Log retention and compression support.
+* Logging switches per service (proxy, dns, dhcp, ui) in the Admin UI.
+* Log retention (age and size budget).
 
 Service logs remain useful through their normal container output as well. The
 central logging path is an additional consolidated operator view rather than a
@@ -605,14 +596,14 @@ reason for individual services to become silent.
 
 ### Purpose
 
-`services/ntp` provides a LAN NTP server using chrony.
+chronyd inside the `services` container provides a LAN NTP server.
 
 It can synchronize against configured upstream time sources and serve time to
 LAN clients on UDP port 123.
 
 ### Current implementation
 
-The image uses Alpine and the `chrony-nts` package.
+The `services` image installs Alpine's `chrony-nts` package.
 
 Installing the NTS-capable package preserves cryptographic NTS capability for
 future use even though the current LanCache-NG chrony configuration does not
@@ -726,8 +717,8 @@ The script handles:
 
 ### Deployment layouts
 
-The current repository uses the production, quickstart, full-setup and
-secondary deployment layouts where appropriate.
+The current repository uses the production, full-setup and secondary
+deployment layouts where appropriate.
 
 The former permanent `deploy/dev` environment has been retired. Development no
 longer depends on maintaining a second parallel copy of the complete runtime
@@ -788,9 +779,9 @@ upstream source and stores eligible content.
 Client
   -> Kea DHCPv4
   -> Kea DDNS
-  -> dns-standard
+  -> dns
   -> PowerDNS native replication
-  -> dns-ssl / secondary DNS nodes
+  -> remote secondary DNS nodes
 ```
 
 The writable DNS primary is the single authority for replicated zone changes.
@@ -801,7 +792,7 @@ The writable DNS primary is the single authority for replicated zone changes.
 Operator
   -> Admin UI
   -> DNS control plane
-  -> dns-standard
+  -> dns
   -> PowerDNS replication
   -> DNS secondaries
 ```
@@ -879,7 +870,6 @@ alone is not sufficient evidence that a network service works.
 Representative validation includes:
 
 * Rust unit and integration tests.
-* Bats tests for shell and configuration behavior.
 * Compose configuration validation.
 * Real nginx configuration validation.
 * Real HTTP cache simulations.

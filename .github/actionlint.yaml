@@ -4,7 +4,4 @@
 # Configuration for actionlint GitHub Actions linter
 self-hosted-runner:
   labels:
-    - lancache
     - lancache-heavy
-    - lancache-light
-    - codeql

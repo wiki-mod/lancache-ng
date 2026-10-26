@@ -15,18 +15,20 @@ Every number and configuration state below was captured live via SSH against
 this project's real self-hosted CI runner fleet, not assumed or copied from
 generic tuning guides:
 
-- `192.168.1.229`, `192.168.1.241`, `192.168.1.243` -- reachable, inspected
-  2026-08-05 (~19:15-19:35 UTC).
-- `192.168.1.240` -- unreachable (`ssh` connection timed out on repeated
-  attempts at the time of writing); not inspected. Re-verify separately
-  before assuming any of this document's per-host numbers also hold there.
+- `H1`, `H2`, `H3` -- three self-hosted runner hosts, reachable, inspected
+  2026-08-05 (~21:15-21:35 CEST). The names stand for the hosts; this
+  document keeps no LAN address.
+- `H4` -- a fourth runner host, unreachable (`ssh` connection timed out on
+  repeated attempts at the time of writing); not inspected. Re-verify
+  separately before assuming any of this document's per-host numbers also
+  hold there.
 
 **Important caveat, load-bearing for how to read every measurement below:**
 these three hosts are this project's **CI runner fleet**, not a deployed
 LanCache-NG production stack. At the time of inspection they were running
-only transient `full-setup` validation containers (each torn down within
-minutes of starting) plus CI build/validation infrastructure (`buildx`
-builders, `lancache-ng-validation-*` shim containers) -- no long-lived,
+only transient CI validation containers (each torn down within
+minutes of starting) plus CI build infrastructure (`buildx`
+builders) -- no long-lived,
 real-traffic LanCache-NG deployment exists on any of them today. Numbers
 like conntrack table utilization are therefore facts about an **idle CI
 runner**, not evidence about production cache-proxy conntrack pressure under
@@ -53,9 +55,9 @@ this and which are directly applicable to a real deployment host.
 
 | Host | `userland-proxy` key | `ipv6` key | Storage driver |
 |---|---|---|---|
-| `.229` | not set (Docker default: `true`) | not set | `overlay2` |
-| `.241` | not set (Docker default: `true`) | not set | `overlay2` |
-| `.243` | not set (Docker default: `true`) | not set | `overlayfs` |
+| `H1` | not set (Docker default: `true`) | not set | `overlay2` |
+| `H2` | not set (Docker default: `true`) | not set | `overlay2` |
+| `H3` | not set (Docker default: `true`) | not set | `overlayfs` |
 
 None of the three hosts' `/etc/docker/daemon.json` sets `userland-proxy` at
 all, so Docker's compiled-in default (`true`) is in effect everywhere. None
@@ -87,7 +89,7 @@ is worth testing for this project specifically, beyond generic "less
 overhead" advice.
 
 **Confirmed live** (`deploy/prod/docker-compose.yml`): the `proxy` service
-publishes ports via `ports: ["${IP_STANDARD}:80:80", ...]` on Docker's
+publishes ports via `ports: ["${IP_HTTP}:80:80", ...]` on Docker's
 default bridge network -- it does **not** use `network_mode: host` and
 does not use macvlan/ipvlan. Every published port on that service goes
 through whichever port-publishing path `userland-proxy` selects.
@@ -98,14 +100,19 @@ Test `"userland-proxy": false` in `/etc/docker/daemon.json` on a
 **LanCache-NG deployment host** (not a shared, actively-CI-busy runner --
 changing this setting requires a full Docker daemon restart, which would
 kill every in-flight build/validation container on a runner; this was
-deliberately **not** applied to any of `.229`/`.241`/`.243` during this
+deliberately **not** applied to any of `H1`/`H2`/`H3` during this
 investigation since all three had live CI containers running at inspection
 time). Verification recipe for whoever runs this test:
+
+nginx writes its access log to stdout (`access_log /dev/stdout` in
+`services/proxy/nginx.conf`); Docker's `syslog` driver hands it to syslog-ng
+in `services`, which stores it under `SYSLOG_NG_LOG_DIR` in the directory
+named after the proxy container (logging switch `LOGGING_PROXY_ENABLED` on).
 
 ```sh
 # Before: capture a real client request's $remote_addr as nginx sees it.
 curl -s http://<lancache-host>/some/cached/path -o /dev/null
-docker exec lancache-proxy tail -5 /var/log/nginx/access.log   # note $remote_addr
+tail -5 "${SYSLOG_NG_LOG_DIR}/LanCache-NG-proxy/$(date +%Y%m%d).log"   # note $remote_addr
 
 # Apply the change (requires a Docker daemon restart -- disruptive):
 sudo vi /etc/docker/daemon.json     # add "userland-proxy": false
@@ -114,7 +121,7 @@ docker compose -f deploy/prod/docker-compose.yml up -d
 
 # After: repeat the same request from the same real client and compare.
 curl -s http://<lancache-host>/some/cached/path -o /dev/null
-docker exec lancache-proxy tail -5 /var/log/nginx/access.log   # compare $remote_addr
+tail -5 "${SYSLOG_NG_LOG_DIR}/LanCache-NG-proxy/$(date +%Y%m%d).log"   # compare $remote_addr
 ```
 
 If `$remote_addr` already shows the real client IP with `userland-proxy:
@@ -130,7 +137,7 @@ not applied in this pass.
 ### TSO/GSO/GRO -- measured, not assumed
 
 `ethtool` is not installed on any of these runner images by default; it was
-installed temporarily on `.243` for this one diagnostic pass and purged
+installed temporarily on `H3` for this one diagnostic pass and purged
 again immediately afterward (confirmed via `which ethtool` returning
 nothing after cleanup -- no lasting footprint left on the runner).
 
@@ -173,7 +180,7 @@ applying.
 
 ### The honest headline finding: there is no real NIC on this CI fleet
 
-`sudo ethtool -i eth0` on `.243` reports `driver: veth` -- this interface
+`sudo ethtool -i eth0` on `H3` reports `driver: veth` -- this interface
 is a virtual veth pair (one end in the LXC container, one end on the
 Proxmox host's bridge), not a physical network card. `readlink -f
 /sys/class/net/eth0/device` resolves to `/sys/devices/virtual/net/eth0` --
@@ -196,7 +203,7 @@ $ ls /sys/class/net/eth0/queues/
 rx-0  tx-0
 ```
 
-Every host checked (`.229`, `.241`, `.243`) has exactly one RX queue and
+Every host checked (`H1`, `H2`, `H3`) has exactly one RX queue and
 one TX queue on `eth0`. RSS (Receive Side Scaling, spreading interrupt
 processing across multiple hardware queues/CPUs) requires multiple queues
 to have anything to distribute across -- with a single queue, RSS is not
@@ -212,7 +219,7 @@ This item turned out to be answerable with real evidence rather than left
 as "needs testing in the abstract":
 
 - **Kernel support**: `/sys/module/tls` and `/proc/modules` both show the
-  `tls` kernel module loaded on `.243` (`tls 147456 1 bonding, Live`) --
+  `tls` kernel module loaded on `H3` (`tls 147456 1 bonding, Live`) --
   visible from inside the container because LXC containers share the
   host's kernel and loaded-module list. kTLS is available at the kernel
   level on this fleet.
@@ -267,14 +274,14 @@ container or bare metal.
 
 On macvlan/ipvlan vs. the current default bridge networking: the `proxy`
 service's current bridge-mode setup (published ports bound to
-`IP_STANDARD`/`IP_SSL`) matches this project's documented architecture
+`IP_HTTP`/`IP_HTTPS`) matches this project's documented architecture
 rationale (Rule-Ref: AG-KD-004 -- nginx reads `Host`/SNI directly rather
 than needing a DNAT-preserved original destination, which is exactly what
 macvlan/ipvlan would otherwise be useful for in a Squid-style
 transparent-proxy design this project deliberately does not use). Moving
 to macvlan/ipvlan or `network_mode: host` for the proxy service would be a
 non-trivial architecture change (different IP/MAC exposure on the LAN,
-different interaction with the existing two-IP `IP_STANDARD`/`IP_SSL`
+different interaction with the existing two-IP `IP_HTTP`/`IP_HTTPS`
 design, broadcast/multicast handling differences) with real security and
 operational tradeoffs that were not evaluated in depth here -- this is
 flagged as an open question for the maintainer rather than a recommendation
@@ -286,9 +293,9 @@ either way; the current bridge-mode setup is not identified as a defect.
 
 | Host | `nf_conntrack_count` | `nf_conntrack_max` | Utilization |
 |---|---|---|---|
-| `.229` | 175 | 262144 | 0.07% |
-| `.241` | 126 | 262144 | 0.05% |
-| `.243` | 313 | 262144 | 0.12% |
+| `H1` | 175 | 262144 | 0.07% |
+| `H2` | 126 | 262144 | 0.05% |
+| `H3` | 313 | 262144 | 0.12% |
 
 Command used (works identically on a real deployment host, run it there
 for the number that actually matters):
@@ -307,7 +314,7 @@ new, invalid, ignore, delete counters) does **not** exist inside any of
 these containers' network namespaces -- confirmed by direct `cat`, not
 assumed.
 
-### Does any monitoring/alerting for this already exist? Yes, by default -- with one real gap
+### Does any monitoring/alerting for this already exist? Yes -- with one open namespace question
 
 Per Rule-Ref: AG-VAL-023 (check upstream docs/source before assuming
 behavior), this was verified against netdata's actual upstream source
@@ -315,9 +322,11 @@ rather than guessed:
 
 - Netdata's `proc.plugin` conntrack collector
   (`proc_net_stat_conntrack.c`) is **enabled by default**
-  (`inicfg_get_boolean(..., CONFIG_BOOLEAN_YES)`), and this project's
-  `services/netdata/entrypoint.sh` does not disable or override it (it
-  only overrides the `[logs]` section).
+  (`inicfg_get_boolean(..., CONFIG_BOOLEAN_YES)`). netdata runs as a
+  process inside the `services` container (`.github/yaml/build-manifest.yml`
+  build target `services`, `docs/ci-2.0-architecture.md`); the watchdog
+  writes its `netdata.conf`, which only sets the `[logs]` section
+  (`services/watchdog/src/main.rs`, `NETDATA_CONF`), so the collector stays on.
 - The collector **gracefully degrades**: if `/proc/net/stat/nf_conntrack`
   fails to open (exactly the case measured above -- it does not exist in
   these containers), the collector does not disable itself; it falls back
@@ -327,69 +336,42 @@ rather than guessed:
   them.
 - Netdata ships a **default health alarm**, `netfilter_conntrack_full`
   (`health.d/netfilter.conf`), attached to that exact chart: warning at
-  90% utilization, critical at 95%, re-evaluated every 10 seconds, routed
-  to the `sysadmin` notification role by default.
+  90% utilization, critical at 95%, re-evaluated every 10 seconds.
+- **Alarm delivery exists**: the watchdog writes
+  `health_alarm_notify.conf` with a `custom_sender` that POSTs every alarm
+  to the Admin UI's `POST /api/netdata-alarms`
+  (`services/watchdog/src/main.rs`, `alarm_notify_conf`;
+  `services/common/shared.rs`, `ALARM_INGEST_PATH`). The dashboard lists
+  the received alarms (`services/ui/src/templates/dashboard.html`, card
+  `netdata-alarms-card`).
 
-So the collector and the alarm both already exist, are already enabled,
-and already tolerate this containerized environment's missing detailed
-stat file -- **no new collector code is needed for the basic utilization
-chart and alarm to exist.**
+So the collector, the alarm and its delivery to the Admin UI all exist --
+**no new collector code is needed for the basic utilization chart and
+alarm.**
 
-**Network namespace check -- verified, not assumed, and the result is good
-news:** the initial working hypothesis for this section was that
-`netdata`'s conntrack collector would be observing its own isolated
-container network namespace rather than the host's, since the `netdata`
-service in `deploy/prod/docker-compose.yml` sets `pid: host` but not
-`network_mode: host`. Reading the rest of that service's actual `volumes:`
-block (not just the part read on the first pass) disproves that
-hypothesis: it mounts `- /proc:/host/proc:ro` and `- /sys:/host/sys:ro`.
-Netdata's own official Docker entrypoint (`packaging/docker/run.sh`,
-checked directly against its upstream source) execs the daemon with a
-**hardcoded** `-s /host` host-prefix flag unconditionally (it does not
-conditionally detect the mount and does not need to -- the flag is always
-passed). With `-s /host` and a real `/proc:/host/proc:ro` bind mount in
-place, netdata's `/proc/sys/net/netfilter/nf_conntrack_count`/`_max` reads
-resolve through that bind-mounted procfs instance -- i.e. the **real host
-network namespace's** conntrack counters (in this fleet, the LXC
-container's own root netns, the exact same one this investigation queried
-directly via SSH above), not netdata's own container-local, isolated
-bridge-network namespace. Network namespace isolation between containers
-does not change this, because a bind-mounted `/proc` reflects whichever
-namespace it was mounted *from*, independent of which namespace the
-*reading* process itself lives in. **So the conntrack chart and its alarm
-already observe the right, host-level, aggregate numbers today, with no
-`network_mode: host` needed and no code change required** -- the opposite
-of this section's original working hypothesis, corrected here before
-publication rather than shipped as a wrong claim.
-
-Separately, still a real and unresolved gap: `grep`-ing this repository
-for any netdata alerting/notification wiring (`health_alarm_notify.conf`,
-`SEND_EMAIL`, webhook config, etc.) found nothing -- the default
-`netfilter_conntrack_full` alarm, confirmed above to observe the right
-namespace, still has no configured notification channel today. It would be
-visible on netdata's own dashboard (port 19999) to someone actively
-looking, but would not proactively alert anyone.
+**Open namespace question:** the `services` service in
+`deploy/prod/docker-compose.yml` publishes ports on the default bridge
+network, sets no `network_mode: host` and mounts no host `/proc`, and the
+watchdog starts netdata as `netdata -D` without a `-s /host` prefix. The
+conntrack counters netdata reads are therefore those of the `services`
+container's own network namespace, not the host's aggregate and not the
+`proxy` container's. This was derived from the compose file and the
+watchdog source; it was not measured on a deployment host.
 
 ### Structured decision for the maintainer
 
-- [ ] **Netdata alarm notifications**: should this project wire up a
-      notification channel (`health_alarm_notify.conf`) for netdata's
-      existing default alarms (including `netfilter_conntrack_full`,
-      confirmed above to already observe the correct host-level
-      namespace), or is dashboard-only visibility (port 19999) considered
-      sufficient for now?
+- [ ] **Host-level conntrack visibility**: should netdata see the host's
+      conntrack counters (for example through a read-only host `/proc`
+      mount and `-s /host`), or is the `services` container's own
+      namespace enough? Both change the `services` container's
+      exposure, so this is a security trade-off, not a tuning detail.
 - [ ] **Watchdog's own conntrack visibility**: separately from netdata,
-      should the Rust watchdog (issue #842, still not stack-wide) surface
-      conntrack pressure itself, or is relying on netdata's existing
-      collector/alarm (already confirmed correctly scoped, see above)
-      sufficient, avoiding duplicate monitoring logic?
+      should the Rust watchdog surface conntrack pressure itself, or is
+      netdata's existing collector and alarm sufficient, avoiding
+      duplicate monitoring logic?
 
-No code change is included in this pass for item 14: the collector and
-its alarm are already correctly configured and already observe the right
-namespace by virtue of the existing `/proc:/host/proc:ro` mount -- the
-only open question is notification wiring, which is a maintainer policy
-decision (does this project want proactive alerting at all, and through
-which channel), not a technical gap in the monitoring itself.
+No code change is included in this pass for item 14: the open point is
+which namespace the chart should observe, which is a maintainer decision.
 
 ## Item 15: RPS tuning -- the actual commands, computed, not copied
 
@@ -405,11 +387,11 @@ project's own runner fleet.
 cat /sys/devices/system/cpu/online
 ```
 
-On `.243` this returned `0-7` (8 online CPUs, contiguous from 0 -- but
+On `H3` this returned `0-7` (8 online CPUs, contiguous from 0 -- but
 `lscpu` on the same host reports 16 total CPUs with 8-15 offline, so the
 *total* CPU count is not always the same as the *online range*; always
 parse `/sys/devices/system/cpu/online` rather than assuming
-`0..nproc-1`). On `.229`, `nproc` reports 8; on `.241`, `nproc` reports 7 --
+`0..nproc-1`). On `H1`, `nproc` reports 8; on `H2`, `nproc` reports 7 --
 per-host CPU allocation genuinely differs across this fleet, another
 reason not to copy one host's bitmask onto another.
 
@@ -445,7 +427,7 @@ the CPU currently handling the interface's hardware interrupt from its own
 RPS mask comes from avoiding that CPU doing both top-half (hardware IRQ)
 and bottom-half (RPS-steered softirq) work for the same queue. That
 convention does **not mechanically apply here**: `grep -iE 'eth0|veth'
-/proc/interrupts` on `.243` returned nothing at all -- this virtual `veth`
+/proc/interrupts` on `H3` returned nothing at all -- this virtual `veth`
 interface has no hardware interrupt line to exclude a CPU from. Inventing
 a `0xfe`-style "skip CPU0" mask anyway, with no IRQ evidence to justify it,
 would be exactly the "blindly copy the example value" failure this item
@@ -464,7 +446,7 @@ for q in /sys/class/net/"$IFACE"/queues/rx-*; do
 done
 ```
 
-### What actually happened when this was run against `.243`
+### What actually happened when this was run against `H3`
 
 - `rps_cpus` for `rx-0` read as `0000` (RPS currently disabled) before any
   change.
