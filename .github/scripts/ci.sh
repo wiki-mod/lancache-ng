@@ -15926,9 +15926,9 @@ PROG
             )" _ "${CI_REPO_ROOT}/setup.sh" "${pairs[@]}")" || return 2
     body+="${v}"
     # What: setup.sh compose adds the SOT_ and state rows.
-    # Why: the .env.local holds every fixture value first.
-    # From: Issue #1683 | PR #1858
-    v="$(_ci_sot_compose_env "LANCACHE_STATE_DIR=${state}"$'\n'"${body}")" || return 2
+    # Why: per-run state overrides its SOT default.
+    # From: Issue #1683 | PR #1951
+    v="$(_ci_sot_compose_env "${body}"$'\n'"LANCACHE_STATE_DIR=${state}")" || return 2
     printf '%s\n%s\n' "${body}" "${v}"
 }
 
