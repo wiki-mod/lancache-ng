@@ -264,19 +264,19 @@ jobs:
         if: matrix.language == 'rust' && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.rust_relevant == 'true')
         uses: ./.github/actions/cargo-with-sccache-fallback
         with:
-          command: cargo build --locked --manifest-path services/dns/nats-subscriber/Cargo.toml
+          command: cargo build --manifest-path services/dns/nats-subscriber/Cargo.toml
 
       - name: Build UI Rust crate for CodeQL
         if: matrix.language == 'rust' && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.rust_relevant == 'true')
         uses: ./.github/actions/cargo-with-sccache-fallback
         with:
-          command: cargo build --locked --manifest-path services/ui/Cargo.toml
+          command: cargo build --manifest-path services/ui/Cargo.toml
 
       - name: Build watchdog Rust crate for CodeQL
         if: matrix.language == 'rust' && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.rust_relevant == 'true')
         uses: ./.github/actions/cargo-with-sccache-fallback
         with:
-          command: cargo build --locked --manifest-path services/watchdog/Cargo.toml
+          command: cargo build --manifest-path services/watchdog/Cargo.toml
 
       - name: Perform CodeQL Analysis
         # Same gate as Initialize CodeQL above: skip the 'rust' analysis when
