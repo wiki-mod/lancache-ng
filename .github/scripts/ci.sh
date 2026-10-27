@@ -3646,9 +3646,10 @@ ci_cmd_board_add() {
 # Why: one owner chooses each service once.
 # From: Issue #1683
 ci_cmd_assemble_stack() {
-    local matrix="${CI_BUILD_MATRIX:-}" svc svcs rc=0 arc failed="" products=""
+    local matrix="${CI_BUILD_MATRIX:-}" svc svcs rc=0 arc failed="" products="" tools=""
     if [ "${1:-}" = --with-products ]; then
         products="$(ci_services)" || return 2
+        tools="$(_ci_accepted_toolchains)" || return 2
     fi
     if [ -n "${matrix}" ]; then
         if ! svcs="$(jq -r '[.include[].service] | unique | .[]' <<< "${matrix}" 2>&1)"; then
@@ -3659,7 +3660,7 @@ ci_cmd_assemble_stack() {
         ci_log "[CI-ERROR-ASSEMBLE-0006]" "reason=\"CI_BUILD_MATRIX required\""
         return 2
     fi
-    svcs="$(printf '%s\n%s\n' "${products}" "${svcs:-}" | awk 'NF' | LC_ALL=C sort -u)"
+    svcs="$(printf '%s\n%s\n%s\n' "${products}" "${tools}" "${svcs:-}" | awk 'NF' | LC_ALL=C sort -u)"
     # What: assembles all services, lists failures last
     # Why: a service lacking a platform blocks no other one
     # From: Issue #1683 | PR #1912
@@ -6933,11 +6934,11 @@ _ci_candidate_index() {
     printf '%s\n' "${idx}"
 }
 
-# What: toolchain candidates of the accepted platforms.
-# Why: promote is the one channel mover (AG-REL-009).
-# From: Issue #1683 | PR #1858
-_ci_toolchain_candidate() {
-    local service idx p st busy acc plats tools
+# What: toolchains with accepted platform artifacts.
+# Why: assembly and promotion share the selection.
+# From: Issue #1683
+_ci_accepted_toolchains() {
+    local service p st busy acc plats tools
     tools="$(_ci_block_keys build_toolchain)" || return 2
     while IFS= read -r service; do
         [ -n "${service}" ] || continue
@@ -6952,8 +6953,7 @@ _ci_toolchain_candidate() {
                 MISSING_CONFIRMED|PRODUCED_UNVERIFIED) ;;
                 UNKNOWN|MISMATCH)
                     ci_log "[CI-ERROR-CANDIDATE-0003]" "service=\"${service}\" platform=\"${p}\" state=\"${st}\" reason=\"toolchain state not decidable; no promotion\""
-                    return 2
-                    ;;
+                    return 2 ;;
                 *) busy=1 ;;
             esac
         done <<< "${plats}"
@@ -6961,6 +6961,18 @@ _ci_toolchain_candidate() {
             ci_log "[CI-INFO-CANDIDATE-0004]" "service=\"${service}\" reason=\"toolchain still building or accepted nowhere; channel unchanged\""
             continue
         fi
+        printf '%s\n' "${service}"
+    done <<< "${tools}"
+}
+
+# What: toolchain candidates of the accepted platforms.
+# Why: promote is the one channel mover (AG-REL-009).
+# From: Issue #1683 | PR #1858
+_ci_toolchain_candidate() {
+    local service idx tools
+    tools="$(_ci_accepted_toolchains)" || return "$?"
+    while IFS= read -r service; do
+        [ -n "${service}" ] || continue
         idx="$(_ci_candidate_index "${service}")" || return "$?"
         printf '%s=%s\n' "${service}" "${idx}"
     done <<< "${tools}"
