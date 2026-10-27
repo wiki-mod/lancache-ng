@@ -8474,6 +8474,7 @@ _ci_gc_reachable() {
 # From: Issue #1683
 _ci_gc_accepted_index() {
     local candidate="$1" digest tags service prefix tag name children kv child hit count=0
+    local normalized expected expected_plats actual_plats
     digest="$(printf '%s' "${candidate}" | awk -F'\t' '{print $1}')"
     tags="$(printf '%s' "${candidate}" | awk -F'\t' '{print $4}')"
     service="$(printf '%s' "${candidate}" | awk -F'\t' '{print $5}')"
@@ -8487,6 +8488,13 @@ _ci_gc_accepted_index() {
     [ "${found}" -eq 1 ] || return 1
     name="$(_ci_image_ref "${service}")" || return 2
     children="$(_ci_index_children "${name}@${digest}")" || return 2
+    normalized="$(_ci_normalize_platform_digests "${children}")"
+    expected="$(_ci_assembly_tag "${service}" "${normalized}")" || return 2
+    _ci_list_has "${expected##*:}" "${tags//,/$'\n'}" || return 2
+    expected_plats="$(_ci_platforms "${service}")" || return 2
+    expected_plats="$(printf '%s\n' "${expected_plats}" | awk 'NF' | LC_ALL=C sort)"
+    actual_plats="$(printf '%s\n' "${children}" | awk -F= 'NF>1 {print $1}' | LC_ALL=C sort)"
+    [ -n "${expected_plats}" ] && [ "${expected_plats}" = "${actual_plats}" ] || return 2
     while IFS= read -r kv; do
         [ -n "${kv}" ] || continue
         child="${kv#*=}"
