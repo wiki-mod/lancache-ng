@@ -3642,16 +3642,25 @@ ci_cmd_board_add() {
     printf 'board-add=added project=%s %s=%s\n' "${number}" "${kind}" "${item}"
 }
 
-# What: assemble product services from build matrix.
-# Why: one matrix walk; iteration in ci.sh (AG-CODE-011).
+# What: assemble selected and accepted product images.
+# Why: one owner chooses each service once.
 # From: Issue #1683
 ci_cmd_assemble_stack() {
-    local matrix="${CI_BUILD_MATRIX:-}" svc svcs rc=0 arc failed=""
-    [ -n "${matrix}" ] || { ci_log "[CI-ERROR-ASSEMBLE-0006]" "reason=\"CI_BUILD_MATRIX required\""; return 2; }
-    if ! svcs="$(jq -r '[.include[].service] | unique | .[]' <<< "${matrix}" 2>&1)"; then
-        ci_error "[CI-ERROR-ASSEMBLE-0011]" "reason=\"CI_BUILD_MATRIX unreadable; no service assembled\"" "${svcs}"$'\n'"matrix: ${matrix}"
+    local matrix="${CI_BUILD_MATRIX:-}" svc svcs rc=0 arc failed="" products="" tools=""
+    if [ "${1:-}" = --with-products ]; then
+        products="$(ci_services)" || return 2
+        tools="$(_ci_accepted_toolchains)" || return 2
+    fi
+    if [ -n "${matrix}" ]; then
+        if ! svcs="$(jq -r '[.include[].service] | unique | .[]' <<< "${matrix}" 2>&1)"; then
+            ci_error "[CI-ERROR-ASSEMBLE-0011]" "reason=\"CI_BUILD_MATRIX unreadable; no service assembled\"" "${svcs}"$'\n'"matrix: ${matrix}"
+            return 2
+        fi
+    elif [ -z "${products}" ]; then
+        ci_log "[CI-ERROR-ASSEMBLE-0006]" "reason=\"CI_BUILD_MATRIX required\""
         return 2
     fi
+    svcs="$(printf '%s\n%s\n%s\n' "${products}" "${tools}" "${svcs:-}" | awk 'NF' | LC_ALL=C sort -u)"
     # What: assembles all services, lists failures last
     # Why: a service lacking a platform blocks no other one
     # From: Issue #1683 | PR #1912
@@ -6494,21 +6503,58 @@ _ci_assembly_tag() {
     printf '%s:%s%s\n' "${name}" "${prefix}" "${hash}"
 }
 
+# What: compare a tag's immutable index to its inputs.
+# Why: tag movement must not change the verified bytes.
+# From: Issue #1683
+_ci_index_match() {
+    local tag="$1" want="$2" idx rc=0 plats have
+    idx="$(_ci_registry_probe "${tag}")" || rc=$?
+    [ "${rc}" -eq 0 ] || return "${rc}"
+    plats="$(_ci_index_children "${tag%:*}@${idx}")" || return 2
+    have="$(_ci_normalize_platform_digests "${plats}")"
+    [ "${want}" = "${have}" ] || return 3
+    printf '%s\n' "${idx}"
+}
+
 # What: resolve an index by its accepted platforms.
 # Why: commit tags cannot identify refreshed inputs.
 # From: Issue #1683
 _ci_index_lookup() {
-    local service="$1" want="$2" tag idx plats have rc=0
+    local service="$1" want="$2" tag idx rc=0
     tag="$(_ci_assembly_tag "${service}" "${want}")" || return 2
-    idx="$(_ci_registry_probe "${tag}")" || rc=$?
-    [ "${rc}" -eq 0 ] || return "${rc}"
-    plats="$(_ci_index_children "${tag}")" || return 2
-    have="$(_ci_normalize_platform_digests "${plats}")"
-    if [ "${want}" != "${have}" ]; then
-        ci_error "[CI-ERROR-ASSEMBLE-0004]" "service=\"${service}\" reason=\"assembly tag has different platform digests\"" "expected: ${want}"$'\n'"actual: ${have}"
-        return 2
-    fi
-    printf '%s\n' "${idx}"
+    idx="$(_ci_index_match "${tag}" "${want}")" || rc=$?
+    case "${rc}" in
+        0) printf '%s\n' "${idx}" ;;
+        1) _ci_legacy_index_lookup "${service}" "${want}" ;;
+        3)
+            ci_log "[CI-ERROR-ASSEMBLE-0004]" "service=\"${service}\" reason=\"assembly tag has different platform digests\""
+            return 2 ;;
+        *) return 2 ;;
+    esac
+}
+
+# What: find a matching pre-assembly-tag index.
+# Why: accepted older artifacts remain reusable.
+# From: Issue #1683
+_ci_legacy_index_lookup() {
+    local service="$1" want="$2" name head kv rev revs tag idx rc
+    name="$(_ci_image_ref "${service}")" || return 2
+    head="$(_ci_head_commit)" || return 2
+    revs="${head}"
+    for kv in ${want}; do
+        rev="$(_ci_registry_read "${name}@${kv#*=}" revision "[CI-ERROR-ASSEMBLE-0016]" fail)" || return 2
+        _ci_list_has "${rev}" "${revs}" || revs="${revs}"$'\n'"${rev}"
+    done
+    while IFS= read -r rev; do
+        tag="${name}:sha-${rev}"
+        rc=0; idx="$(_ci_index_match "${tag}" "${want}")" || rc=$?
+        case "${rc}" in
+            0) printf '%s\n' "${idx}"; return 0 ;;
+            1|3) continue ;;
+            *) return 2 ;;
+        esac
+    done <<< "${revs}"
+    return 1
 }
 
 # What: platform=digest lines of the index at ref $1.
@@ -6745,11 +6791,11 @@ ci_cmd_channel_checkout() {
     printf 'channel=%s source_ref=%s commit=%s\n' "${channel}" "${ref}" "${sha}"
 }
 
-# What: channels and GitHub-hosted runner for channel-check
-# Why: the SOT owns both; CHECK_CHANNEL narrows a dispatch.
+# What: channel set and hosted runner for channel-check.
+# Why: SOT source_ref or CHECK_CHANNEL selects channels.
 # From: Issue #1683 | PR #1858
 ci_cmd_channel_matrix() {
-    local want="${CHECK_CHANNEL:-}" list runner json vrc=0
+    local want="${CHECK_CHANNEL:-}" list runner json vrc=0 source_ref
     local -a chans=()
     if [ -n "${want}" ]; then
         _ci_valid_channel "${want}" || vrc=$?
@@ -6759,7 +6805,26 @@ ci_cmd_channel_matrix() {
         fi
         list="${want}"
     else
-        list="$(_ci_mutable_channels)" || return 2
+        # What: select channels for the checked-out source.
+        # Why: Nightly skips stable channel tags.
+        # From: Issue #1683
+        if [ -n "${CI_SOURCE_REF:-}" ]; then
+            source_ref="${CI_SOURCE_REF}"
+            # What: normalize a branch name to the SOT ref.
+            # Why: source_ref values use full Git refs.
+            # From: Issue #1683
+            case "${source_ref}" in
+                refs/heads/*) ;;
+                *) source_ref="refs/heads/${source_ref}" ;;
+            esac
+            list="$(_ci_channels_where source_ref "${source_ref}")" || return 2
+            if [ -z "${list}" ]; then
+                ci_log "[CI-ERROR-PROMOTE-0040]" "source_ref=\"${source_ref}\" reason=\"no channel maps to the checked-out source\""
+                return 2
+            fi
+        else
+            list="$(_ci_mutable_channels)" || return 2
+        fi
     fi
     [ -z "${list}" ] || mapfile -t chans <<< "${list}"
     if [ "${#chans[@]}" -eq 0 ]; then
@@ -6888,11 +6953,11 @@ _ci_candidate_index() {
     printf '%s\n' "${idx}"
 }
 
-# What: toolchain candidates of the accepted platforms.
-# Why: promote is the one channel mover (AG-REL-009).
-# From: Issue #1683 | PR #1858
-_ci_toolchain_candidate() {
-    local service idx p st busy acc plats tools
+# What: toolchains with accepted platform artifacts.
+# Why: assembly and promotion share the selection.
+# From: Issue #1683
+_ci_accepted_toolchains() {
+    local service p st busy acc plats tools
     tools="$(_ci_block_keys build_toolchain)" || return 2
     while IFS= read -r service; do
         [ -n "${service}" ] || continue
@@ -6907,8 +6972,7 @@ _ci_toolchain_candidate() {
                 MISSING_CONFIRMED|PRODUCED_UNVERIFIED) ;;
                 UNKNOWN|MISMATCH)
                     ci_log "[CI-ERROR-CANDIDATE-0003]" "service=\"${service}\" platform=\"${p}\" state=\"${st}\" reason=\"toolchain state not decidable; no promotion\""
-                    return 2
-                    ;;
+                    return 2 ;;
                 *) busy=1 ;;
             esac
         done <<< "${plats}"
@@ -6916,6 +6980,18 @@ _ci_toolchain_candidate() {
             ci_log "[CI-INFO-CANDIDATE-0004]" "service=\"${service}\" reason=\"toolchain still building or accepted nowhere; channel unchanged\""
             continue
         fi
+        printf '%s\n' "${service}"
+    done <<< "${tools}"
+}
+
+# What: toolchain candidates of the accepted platforms.
+# Why: promote is the one channel mover (AG-REL-009).
+# From: Issue #1683 | PR #1858
+_ci_toolchain_candidate() {
+    local service idx tools
+    tools="$(_ci_accepted_toolchains)" || return "$?"
+    while IFS= read -r service; do
+        [ -n "${service}" ] || continue
         idx="$(_ci_candidate_index "${service}")" || return "$?"
         printf '%s=%s\n' "${service}" "${idx}"
     done <<< "${tools}"
@@ -6958,12 +7034,78 @@ _ci_stack_candidate() {
     [ -z "${out}" ] || printf '%s\n' "${out}"
 }
 
-# What: read the accepted stack candidate for this event.
-# Why: exact-digest candidate (§48); a PR reads its own.
+# What: decode one validated product candidate.
+# Why: promotion must use the validated digest set.
+# From: Issue #1683
+_ci_validated_candidate_rows() {
+    local value="$1" rows="" line service expected count=0
+    # What: reject an empty or ambiguous candidate output.
+    # Why: separators must name every product exactly once.
+    # From: Issue #1683
+    if [ -z "${value}" ] || [[ "${value}" == ,* || "${value}" == *, || "${value}" == *,,* ]]; then
+        ci_log "[CI-ERROR-CANDIDATE-0007]" "reason=\"validated candidate output is empty or malformed\""
+        return 2
+    fi
+    value="$(printf '%s' "${value}" | tr ',' '\n')"
+    while IFS= read -r line; do
+        [ -n "${line}" ] || continue
+        if [[ ! "${line}" =~ ^[a-z0-9][a-z0-9._-]*=${CI_DIGEST_RE}$ ]]; then
+            ci_log "[CI-ERROR-CANDIDATE-0008]" "reason=\"validated candidate contains an invalid service digest\""
+            return 2
+        fi
+        service="${line%%=*}"
+        if _ci_text_has "^${service}=" "${rows}"; then
+            ci_log "[CI-ERROR-CANDIDATE-0009]" "service=\"${service}\" reason=\"validated candidate duplicates a product\""
+            return 2
+        fi
+        rows+="${line}"$'\n'
+        count=$((count + 1))
+    done <<< "${value}"
+    expected="$(ci_services)" || return 2
+    # What: require one candidate row for every product.
+    # Why: partial stacks cannot pass promotion.
+    # From: Issue #1683
+    if [ "${count}" -ne "$(_ci_count_lines "${expected}")" ]; then
+        ci_log "[CI-ERROR-CANDIDATE-0010]" "reason=\"validated candidate does not contain the complete product stack\""
+        return 2
+    fi
+    # What: verify candidate membership against the SOT.
+    # Why: row count alone does not prove service coverage.
+    # From: Issue #1683
+    while IFS= read -r service; do
+        [ -n "${service}" ] || continue
+        if ! _ci_text_has "^${service}=" "${rows}"; then
+            ci_log "[CI-ERROR-CANDIDATE-0012]" "service=\"${service}\" reason=\"validated candidate does not contain the complete product stack\""
+            return 2
+        fi
+    done <<< "${expected}"
+    printf '%s\n' "${rows%$'\n'}"
+}
+
+# What: read the event's exact stack candidate.
+# Why: promotion reuses validated digests (§48).
 # From: Issue #1683
 _ci_stack_candidate_source() {
+    local pinned current pinned_sorted current_sorted
     if [ "${GITHUB_EVENT_NAME:-}" = pull_request ]; then
         _ci_stack_candidate_pr
+        return "$?"
+    fi
+    if [ -n "${CI_VALIDATED_CANDIDATE+x}" ]; then
+        pinned="$(_ci_validated_candidate_rows "${CI_VALIDATED_CANDIDATE}")" || return 2
+        current="$(_ci_stack_candidate_ledger)" || return 2
+        # What: compare validation with current acceptance.
+        # Why: digest changes invalidate validation.
+        # From: Issue #1683
+        pinned_sorted="$(printf '%s\n' "${pinned}" | LC_ALL=C sort)"
+        current_sorted="$(printf '%s\n' "${current}" | LC_ALL=C sort)"
+        if [ "${pinned_sorted}" != "${current_sorted}" ]; then
+            ci_log "[CI-ERROR-CANDIDATE-0011]" "reason=\"accepted candidate changed after validation; promotion blocked\""
+            return 2
+        fi
+        printf '%s\n' "${pinned}"
+        [ "${1:-}" = --with-toolchain ] || return 0
+        _ci_toolchain_candidate
         return "$?"
     fi
     _ci_stack_candidate_ledger || return "$?"
@@ -6974,11 +7116,11 @@ _ci_stack_candidate_source() {
     _ci_toolchain_candidate
 }
 
-# What: True only if the stack validated (docs section 50).
-# Why: Fail-closed without validate; never assume success.
+# What: require the validated candidate marker.
+# Why: success alone does not bind promotion to validation.
 # From: Issue #1683
 _ci_stack_validated() {
-    [ "${CI_STACK_VALIDATED:-}" = "SUCCESS" ]
+    [ "${CI_STACK_VALIDATED:-}" = "SUCCESS" ] && [ -n "${CI_VALIDATED_CANDIDATE:-}" ]
 }
 
 # What: The per-channel promotion lock ref.
@@ -7052,8 +7194,16 @@ _ci_promote_kept() {
 # Why: a merged channel index has a digest of its own.
 # From: Issue #1683 | PR #1858
 _ci_channel_matches() {
-    local svc="$1" channel="$2" digest="$3" kept="$4" name want seen
+    local svc="$1" channel="$2" digest="$3" kept="$4" name want seen seen_digest
     name="$(_ci_image_ref "${svc}")" || return 2
+    # What: keep the validated index digest for products.
+    # Why: equal children can hide different index bytes.
+    # From: Issue #1683
+    if _ci_list_has "${svc}" "$(ci_services)"; then
+        seen_digest="$(_ci_registry_digest "${name}:${channel}")" || return 2
+        [ "${seen_digest}" = "${digest}" ]
+        return "$?"
+    fi
     want="$(_ci_index_children "${name}@${digest}")" || return 2
     seen="$(_ci_index_children "${name}:${channel}")" || return "$?"
     want="$(_ci_normalize_platform_digests "${want} ${kept}")"
@@ -7212,7 +7362,7 @@ ci_cmd_promote() {
         ci_log "[CI-ERROR-PROMOTE-0002]" "channel=\"${channel}\" reason=\"not a mutable channel or a vX.Y.Z release tag\""
         return 2
     fi
-    local cand arc=0
+    local cand locked_cand arc=0
     if ! cand="$(_ci_stack_candidate --with-toolchain)"; then
         ci_log "[CI-ERROR-PROMOTE-0003]" "channel=\"${channel}\" reason=\"no accepted stack candidate\""
         return 2
@@ -7233,12 +7383,20 @@ ci_cmd_promote() {
         ci_log "[CI-ERROR-PROMOTE-0010]" "channel=\"${channel}\" reason=\"could not acquire promotion lock\""
         return 2
     fi
+    # What: recheck acceptance while holding the lock.
+    # Why: the candidate may change after validation.
+    # From: Issue #1683
+    if ! locked_cand="$(_ci_stack_candidate --with-toolchain)" || [ "${locked_cand}" != "${cand}" ]; then
+        ci_log "[CI-ERROR-PROMOTE-0039]" "channel=\"${channel}\" reason=\"accepted candidate changed under promotion lock\""
+        _ci_promote_unlock "${channel}" || ci_log "[CI-ERROR-PROMOTE-0011]" "channel=\"${channel}\" reason=\"lock release failed\""
+        return 2
+    fi
     # What: capture rc so the unlock still runs on failure.
     # Why: a failed move must never leak the promotion lock.
     local rc
     if _ci_promote_move_all "${channel}" "${cand}"; then rc=0; else rc=$?; fi
     _ci_promote_unlock "${channel}" || {
-        ci_error "[CI-ERROR-PROMOTE-0011]" "channel=\"${channel}\" reason=\"lock release failed\"" "${channel}"
+        ci_error "[CI-ERROR-PROMOTE-0041]" "channel=\"${channel}\" reason=\"lock release failed\"" "${channel}"
         [ "${rc}" -ne 0 ] || rc=2
     }
     [ "${rc}" -eq 0 ] || return "${rc}"
@@ -8383,6 +8541,16 @@ _ci_gc_reachable() {
         root_hit="$(_ci_capture 1 grep -xF -- "${subj}" "${CI_GC_ROOTS_FILE}")" || return 2
         [ -z "${root_hit}" ] || { printf '%s\n' "${_CI_GC_REFERENCED}"; return 0; }
     done
+    # What: keep an index of rooted platform artifacts.
+    # Why: validation may precede channel promotion.
+    # From: Issue #1683
+    local index_rc=0
+    _ci_gc_accepted_index "${candidate}" || index_rc=$?
+    case "${index_rc}" in
+        0) printf '%s\n' "${_CI_GC_REFERENCED}"; return 0 ;;
+        1) ;;
+        *) return 2 ;;
+    esac
     # What: Fail closed unless grace is a positive integer.
     # Why: Empty grace makes floor=now and deletes all.
     # From: Issue #1683
@@ -8412,6 +8580,43 @@ _ci_gc_reachable() {
     floor=$(( now - window * 60 ))
     [ "${created_epoch}" -ge "${floor}" ] && { printf '%s\n' "${_CI_GC_REFERENCED}"; return 0; }
     printf '%s\n' "${_CI_GC_UNREACHABLE}"
+}
+
+# What: protect indexes whose children are all rooted.
+# Why: accepted candidates may precede channel promotion.
+# From: Issue #1683
+_ci_gc_accepted_index() {
+    local candidate="$1" digest tags service prefix tag name children kv child hit count=0
+    local normalized expected expected_plats actual_plats
+    digest="$(printf '%s' "${candidate}" | awk -F'\t' '{print $1}')"
+    tags="$(printf '%s' "${candidate}" | awk -F'\t' '{print $4}')"
+    service="$(printf '%s' "${candidate}" | awk -F'\t' '{print $5}')"
+    prefix="$(_ci_required_field release tag_assembly_prefix block)" || return 2
+    local found=0
+    while IFS= read -r tag; do
+        [[ "${tag}" == "${prefix}"* ]] || continue
+        [[ "${tag#"${prefix}"}" =~ ^[0-9a-f]{64}$ ]] || continue
+        found=1
+    done <<< "${tags//,/$'\n'}"
+    [ "${found}" -eq 1 ] || return 1
+    name="$(_ci_image_ref "${service}")" || return 2
+    children="$(_ci_index_children "${name}@${digest}")" || return 2
+    normalized="$(_ci_normalize_platform_digests "${children}")"
+    expected="$(_ci_assembly_tag "${service}" "${normalized}")" || return 2
+    _ci_list_has "${expected##*:}" "${tags//,/$'\n'}" || return 2
+    expected_plats="$(_ci_platforms "${service}")" || return 2
+    expected_plats="$(printf '%s\n' "${expected_plats}" | awk 'NF' | LC_ALL=C sort)"
+    actual_plats="$(printf '%s\n' "${children}" | awk -F= 'NF>1 {print $1}' | LC_ALL=C sort)"
+    [ -n "${expected_plats}" ] && [ "${expected_plats}" = "${actual_plats}" ] || return 2
+    while IFS= read -r kv; do
+        [ -n "${kv}" ] || continue
+        child="${kv#*=}"
+        [[ "${child}" =~ ^${CI_DIGEST_RE}$ ]] || return 2
+        hit="$(_ci_capture 1 grep -xF -- "${child}" "${CI_GC_ROOTS_FILE}")" || return 2
+        [ -n "${hit}" ] || return 1
+        count=$((count + 1))
+    done <<< "${children}"
+    [ "${count}" -gt 0 ] || return 2
 }
 
 # What: Classify one candidate KEEP / DELETE / fail.
@@ -10384,7 +10589,7 @@ _ci_validate_run() {
 # Why: promote needs a validated stack first (§49/§50).
 # From: Issue #1683
 ci_cmd_validate() {
-    local cand shared
+    local cand shared output rc=0
     _ci_validate_host_tools || return 2
     shared="$(_ci_validate_shared_dir)" || return 2
     printf 'validate shared_dir=%s\n' "${shared}"
@@ -10397,7 +10602,14 @@ ci_cmd_validate() {
         return 2
     fi
     _ci_require_ghcr_auth || return 2
-    _ci_validate_run "${cand}"
+    _ci_validate_run "${cand}" || rc=$?
+    [ "${rc}" -eq 0 ] || return "${rc}"
+    # What: expose the candidate only after full validation.
+    # Why: promotion must consume these same digests.
+    # From: Issue #1683
+    output="${cand//$'\n'/,}"
+    _ci_step_output "[CI-ERROR-VALIDATE-0070]" candidate "${output}" || return 2
+    printf 'validate candidate=%s\n' "${output}"
 }
 
 # What: Required-check gate over the needs results (§62).

@@ -348,14 +348,16 @@ jobs:
         run: bash .github/scripts/ci.sh aggregate-stack
 
   # What: merge platform digests into multi-arch index
-  # Why: ci.sh owns merge; a red platform is left out
+  # Why: each accepted product needs an exact index
   # From: Issue #1683 | PR #1858
   assemble:
     name: assemble
     needs: [platform, plan, scan, aggregate]
     if: >-
-      !cancelled() && needs.aggregate.result == 'success' &&
-      needs.plan.outputs.any-build == 'true' && github.event_name != 'pull_request'
+      !cancelled() && github.event_name != 'pull_request' &&
+      needs.plan.result == 'success' && needs.plan.outputs.validate == 'true' &&
+      (needs.plan.outputs.any-build == 'false' ||
+      (needs.scan.result == 'success' && needs.aggregate.result == 'success'))
     runs-on: ${{ needs.platform.outputs.runner }}
     timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['assemble'] }}
     container: *bt_platform
@@ -374,19 +376,21 @@ jobs:
         env:
           CI_BUILD_MATRIX: ${{ needs.scan.outputs.passed }}
           CI_RUN_IDENTITIES: *run_ids
-        run: bash .github/scripts/ci.sh assemble-stack
+        run: bash .github/scripts/ci.sh assemble-stack --with-products
 
   # What: validate full stack; a red build stops a PR only.
   # Why: a push validates what assemble accepted (DoMe).
   # From: Issue #1683 | PR #1858
   validate:
     name: validate
+    outputs:
+      candidate: ${{ steps.validate.outputs.candidate }}
     needs: [platform, plan, build, scan, aggregate, assemble]
     if: >-
       !cancelled() && needs.plan.outputs.validate == 'true' &&
-      (needs.plan.outputs.any-build == 'false' ||
-      (github.event_name == 'pull_request' && needs.build.result == 'success') ||
-      (needs.scan.result == 'success' && needs.assemble.result == 'success'))
+      ((github.event_name == 'pull_request' &&
+      (needs.plan.outputs.any-build == 'false' || needs.build.result == 'success')) ||
+      (github.event_name != 'pull_request' && needs.assemble.result == 'success'))
     # What: build-tools container, one shared host dir.
     # Why: AG-VAL-016; same path both sides for binds.
     # From: Issue #1683 | PR #1912
@@ -403,6 +407,7 @@ jobs:
     steps:
       - *bootstrap
       - name: Validate the accepted stack candidate
+        id: validate
         env:
           CI_RUN_IDENTITIES: *run_ids
         run: bash .github/scripts/ci.sh validate
@@ -422,6 +427,7 @@ jobs:
     permissions: *ship_write
     env:
       CI_STACK_VALIDATED: SUCCESS
+      CI_VALIDATED_CANDIDATE: ${{ needs.validate.outputs.candidate }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       CI_RUN_IDENTITIES: *run_ids
     steps:
