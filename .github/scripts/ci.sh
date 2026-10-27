@@ -3646,12 +3646,20 @@ ci_cmd_board_add() {
 # Why: one matrix walk; iteration in ci.sh (AG-CODE-011).
 # From: Issue #1683
 ci_cmd_assemble_stack() {
-    local matrix="${CI_BUILD_MATRIX:-}" svc svcs rc=0 arc failed=""
-    [ -n "${matrix}" ] || { ci_log "[CI-ERROR-ASSEMBLE-0006]" "reason=\"CI_BUILD_MATRIX required\""; return 2; }
-    if ! svcs="$(jq -r '[.include[].service] | unique | .[]' <<< "${matrix}" 2>&1)"; then
-        ci_error "[CI-ERROR-ASSEMBLE-0011]" "reason=\"CI_BUILD_MATRIX unreadable; no service assembled\"" "${svcs}"$'\n'"matrix: ${matrix}"
+    local matrix="${CI_BUILD_MATRIX:-}" svc svcs rc=0 arc failed="" products=""
+    if [ "${1:-}" = --with-products ]; then
+        products="$(ci_services)" || return 2
+    fi
+    if [ -n "${matrix}" ]; then
+        if ! svcs="$(jq -r '[.include[].service] | unique | .[]' <<< "${matrix}" 2>&1)"; then
+            ci_error "[CI-ERROR-ASSEMBLE-0011]" "reason=\"CI_BUILD_MATRIX unreadable; no service assembled\"" "${svcs}"$'\n'"matrix: ${matrix}"
+            return 2
+        fi
+    elif [ -z "${products}" ]; then
+        ci_log "[CI-ERROR-ASSEMBLE-0006]" "reason=\"CI_BUILD_MATRIX required\""
         return 2
     fi
+    svcs="$(printf '%s\n%s\n' "${products}" "${svcs:-}" | awk 'NF' | LC_ALL=C sort -u)"
     # What: assembles all services, lists failures last
     # Why: a service lacking a platform blocks no other one
     # From: Issue #1683 | PR #1912
@@ -6501,6 +6509,10 @@ _ci_index_lookup() {
     local service="$1" want="$2" tag idx plats have rc=0
     tag="$(_ci_assembly_tag "${service}" "${want}")" || return 2
     idx="$(_ci_registry_probe "${tag}")" || rc=$?
+    if [ "${rc}" -eq 1 ]; then
+        _ci_legacy_index_lookup "${service}" "${want}"
+        return "$?"
+    fi
     [ "${rc}" -eq 0 ] || return "${rc}"
     plats="$(_ci_index_children "${tag}")" || return 2
     have="$(_ci_normalize_platform_digests "${plats}")"
@@ -6509,6 +6521,33 @@ _ci_index_lookup() {
         return 2
     fi
     printf '%s\n' "${idx}"
+}
+
+# What: find a matching pre-assembly-tag index.
+# Why: accepted older artifacts remain reusable.
+# From: Issue #1683
+_ci_legacy_index_lookup() {
+    local service="$1" want="$2" name head kv rev revs tag idx rc plats have
+    name="$(_ci_image_ref "${service}")" || return 2
+    head="$(_ci_head_commit)" || return 2
+    revs="${head}"
+    for kv in ${want}; do
+        rev="$(_ci_registry_read "${name}@${kv#*=}" revision "[CI-ERROR-ASSEMBLE-0016]" fail)" || return 2
+        _ci_list_has "${rev}" "${revs}" || revs="${revs}"$'\n'"${rev}"
+    done
+    while IFS= read -r rev; do
+        tag="${name}:sha-${rev}"
+        rc=0; idx="$(_ci_registry_probe "${tag}")" || rc=$?
+        [ "${rc}" -ne 1 ] || continue
+        [ "${rc}" -eq 0 ] || return "${rc}"
+        plats="$(_ci_index_children "${tag}")" || return 2
+        have="$(_ci_normalize_platform_digests "${plats}")"
+        if [ "${have}" = "${want}" ]; then
+            printf '%s\n' "${idx}"
+            return 0
+        fi
+    done <<< "${revs}"
+    return 1
 }
 
 # What: platform=digest lines of the index at ref $1.
