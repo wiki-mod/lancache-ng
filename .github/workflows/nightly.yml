@@ -303,6 +303,8 @@ jobs:
   # From: Issue #1683 | PR #1912
   validate:
     name: validate
+    outputs:
+      candidate: ${{ steps.validate.outputs.candidate }}
     needs: [platform, plan, build, scan, aggregate, assemble]
     # What: validate only after assembly succeeds.
     # Why: every accepted product needs an index.
@@ -320,6 +322,7 @@ jobs:
       - *bootstrap
       - *channel_pin
       - name: Validate the accepted stack candidate
+        id: validate
         env:
           # What: the plan job's pair ids for this run.
           # Why: a live re-read can differ; a gap fails.
@@ -373,6 +376,7 @@ jobs:
         if: needs.validate.result == 'success'
         env:
           CI_STACK_VALIDATED: SUCCESS
+          CI_VALIDATED_CANDIDATE: ${{ needs.validate.outputs.candidate }}
           CI_RUN_IDENTITIES: *run_ids
         run: bash .github/scripts/ci.sh promote nightly
 

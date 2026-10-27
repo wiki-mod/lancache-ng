@@ -383,6 +383,8 @@ jobs:
   # From: Issue #1683 | PR #1858
   validate:
     name: validate
+    outputs:
+      candidate: ${{ steps.validate.outputs.candidate }}
     needs: [platform, plan, build, scan, aggregate, assemble]
     if: >-
       !cancelled() && needs.plan.outputs.validate == 'true' &&
@@ -405,6 +407,7 @@ jobs:
     steps:
       - *bootstrap
       - name: Validate the accepted stack candidate
+        id: validate
         env:
           CI_RUN_IDENTITIES: *run_ids
         run: bash .github/scripts/ci.sh validate
@@ -424,6 +427,7 @@ jobs:
     permissions: *ship_write
     env:
       CI_STACK_VALIDATED: SUCCESS
+      CI_VALIDATED_CANDIDATE: ${{ needs.validate.outputs.candidate }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       CI_RUN_IDENTITIES: *run_ids
     steps:
