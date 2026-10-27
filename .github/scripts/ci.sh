@@ -6791,11 +6791,11 @@ ci_cmd_channel_checkout() {
     printf 'channel=%s source_ref=%s commit=%s\n' "${channel}" "${ref}" "${sha}"
 }
 
-# What: channels and GitHub-hosted runner for channel-check
-# Why: the SOT owns both; CHECK_CHANNEL narrows a dispatch.
+# What: channel set and hosted runner for channel-check.
+# Why: SOT source_ref or CHECK_CHANNEL selects channels.
 # From: Issue #1683 | PR #1858
 ci_cmd_channel_matrix() {
-    local want="${CHECK_CHANNEL:-}" list runner json vrc=0
+    local want="${CHECK_CHANNEL:-}" list runner json vrc=0 source_ref
     local -a chans=()
     if [ -n "${want}" ]; then
         _ci_valid_channel "${want}" || vrc=$?
@@ -6805,7 +6805,26 @@ ci_cmd_channel_matrix() {
         fi
         list="${want}"
     else
-        list="$(_ci_mutable_channels)" || return 2
+        # What: select channels owned by the checked-out source.
+        # Why: Nightly must not validate stable channel tags.
+        # From: Issue #1683
+        if [ -n "${CI_SOURCE_REF:-}" ]; then
+            source_ref="${CI_SOURCE_REF}"
+            # What: normalize a branch name to the SOT ref.
+            # Why: source_ref values use full Git refs.
+            # From: Issue #1683
+            case "${source_ref}" in
+                refs/heads/*) ;;
+                *) source_ref="refs/heads/${source_ref}" ;;
+            esac
+            list="$(_ci_channels_where source_ref "${source_ref}")" || return 2
+            if [ -z "${list}" ]; then
+                ci_log "[CI-ERROR-PROMOTE-0040]" "source_ref=\"${source_ref}\" reason=\"no channel maps to the checked-out source\""
+                return 2
+            fi
+        else
+            list="$(_ci_mutable_channels)" || return 2
+        fi
     fi
     [ -z "${list}" ] || mapfile -t chans <<< "${list}"
     if [ "${#chans[@]}" -eq 0 ]; then
