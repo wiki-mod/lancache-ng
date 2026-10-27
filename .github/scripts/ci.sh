@@ -7095,7 +7095,7 @@ _ci_stack_candidate_source() {
         pinned="$(_ci_validated_candidate_rows "${CI_VALIDATED_CANDIDATE}")" || return 2
         current="$(_ci_stack_candidate_ledger)" || return 2
         # What: compare validation with current acceptance.
-        # Why: accepted digest changes invalidate validation.
+        # Why: digest changes invalidate validation.
         # From: Issue #1683
         pinned_sorted="$(printf '%s\n' "${pinned}" | LC_ALL=C sort)"
         current_sorted="$(printf '%s\n' "${current}" | LC_ALL=C sort)"
