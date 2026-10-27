@@ -995,6 +995,10 @@ release:
   # Why: sha- names a commit only (AG-REL-015).
   # From: Issue #1683 | PR #1912
   tag_identity_prefix: identity-
+  # What: lookup prefix for accepted platform digests.
+  # Why: one commit can yield multiple valid indexes.
+  # From: Issue #1683
+  tag_assembly_prefix: assembly-
   # What: SPDX license of the whole project.
   # Why: crates and image labels read it; no literal copies.
   # From: Issue #1683 | PR #1858

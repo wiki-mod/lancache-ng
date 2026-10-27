@@ -3642,16 +3642,24 @@ ci_cmd_board_add() {
     printf 'board-add=added project=%s %s=%s\n' "${number}" "${kind}" "${item}"
 }
 
-# What: assemble product services from build matrix.
-# Why: one matrix walk; iteration in ci.sh (AG-CODE-011).
+# What: assemble selected and accepted product images.
+# Why: one owner chooses each service once.
 # From: Issue #1683
 ci_cmd_assemble_stack() {
-    local matrix="${CI_BUILD_MATRIX:-}" svc svcs rc=0 arc failed=""
-    [ -n "${matrix}" ] || { ci_log "[CI-ERROR-ASSEMBLE-0006]" "reason=\"CI_BUILD_MATRIX required\""; return 2; }
-    if ! svcs="$(jq -r '[.include[].service] | unique | .[]' <<< "${matrix}" 2>&1)"; then
-        ci_error "[CI-ERROR-ASSEMBLE-0011]" "reason=\"CI_BUILD_MATRIX unreadable; no service assembled\"" "${svcs}"$'\n'"matrix: ${matrix}"
+    local matrix="${CI_BUILD_MATRIX:-}" svc svcs rc=0 arc failed="" products=""
+    if [ "${1:-}" = --with-products ]; then
+        products="$(ci_services)" || return 2
+    fi
+    if [ -n "${matrix}" ]; then
+        if ! svcs="$(jq -r '[.include[].service] | unique | .[]' <<< "${matrix}" 2>&1)"; then
+            ci_error "[CI-ERROR-ASSEMBLE-0011]" "reason=\"CI_BUILD_MATRIX unreadable; no service assembled\"" "${svcs}"$'\n'"matrix: ${matrix}"
+            return 2
+        fi
+    elif [ -z "${products}" ]; then
+        ci_log "[CI-ERROR-ASSEMBLE-0006]" "reason=\"CI_BUILD_MATRIX required\""
         return 2
     fi
+    svcs="$(printf '%s\n%s\n' "${products}" "${svcs:-}" | awk 'NF' | LC_ALL=C sort -u)"
     # What: assembles all services, lists failures last
     # Why: a service lacking a platform blocks no other one
     # From: Issue #1683 | PR #1912
@@ -6482,12 +6490,44 @@ _ci_normalize_platform_digests() {
     printf '%s\n' "${input}" | tr ' ' '\n' | awk 'NF' | LC_ALL=C sort | tr '\n' ' '
 }
 
-# What: index of the accepted digests, found by content
-# Why: §28: an unchanged service keeps its build commit
-# From: Issue #1683 | PR #1858
+# What: lookup for an exact set of platform digests.
+# Why: one Git commit can yield different artifacts.
+# From: Issue #1683
+_ci_assembly_tag() {
+    local service="$1" want="$2" name prefix hash
+    name="$(_ci_image_ref "${service}")" || return 2
+    prefix="$(_ci_required_field release tag_assembly_prefix block)" || return 2
+    hash="$(printf '%s' "${want}" | _ci_sha256_hex)" || return 2
+    [[ "${hash}" =~ ^[0-9a-f]{64}$ ]] || return 2
+    printf '%s:%s%s\n' "${name}" "${prefix}" "${hash}"
+}
+
+# What: resolve an index by its accepted platforms.
+# Why: commit tags cannot identify refreshed inputs.
+# From: Issue #1683
 _ci_index_lookup() {
-    local service="$1" want="$2"
-    local name head kv rev revs tag idx grc plats have found=""
+    local service="$1" want="$2" tag idx plats have rc=0
+    tag="$(_ci_assembly_tag "${service}" "${want}")" || return 2
+    idx="$(_ci_registry_probe "${tag}")" || rc=$?
+    if [ "${rc}" -eq 1 ]; then
+        _ci_legacy_index_lookup "${service}" "${want}"
+        return "$?"
+    fi
+    [ "${rc}" -eq 0 ] || return "${rc}"
+    plats="$(_ci_index_children "${tag}")" || return 2
+    have="$(_ci_normalize_platform_digests "${plats}")"
+    if [ "${want}" != "${have}" ]; then
+        ci_error "[CI-ERROR-ASSEMBLE-0004]" "service=\"${service}\" reason=\"assembly tag has different platform digests\"" "expected: ${want}"$'\n'"actual: ${have}"
+        return 2
+    fi
+    printf '%s\n' "${idx}"
+}
+
+# What: find a matching pre-assembly-tag index.
+# Why: accepted older artifacts remain reusable.
+# From: Issue #1683
+_ci_legacy_index_lookup() {
+    local service="$1" want="$2" name head kv rev revs tag idx rc plats have
     name="$(_ci_image_ref "${service}")" || return 2
     head="$(_ci_head_commit)" || return 2
     revs="${head}"
@@ -6497,23 +6537,17 @@ _ci_index_lookup() {
     done
     while IFS= read -r rev; do
         tag="${name}:sha-${rev}"
-        grc=0; idx="$(_ci_registry_probe "${tag}")" || grc=$?
-        [ "${grc}" -ne 1 ] || continue
-        [ "${grc}" -eq 0 ] || return "${grc}"
-        plats="$(_ci_index_children "${tag}")" || return "$?"
-        plats="$(tr '\n' ' ' <<< "${plats}")"
+        rc=0; idx="$(_ci_registry_probe "${tag}")" || rc=$?
+        [ "${rc}" -ne 1 ] || continue
+        [ "${rc}" -eq 0 ] || return "${rc}"
+        plats="$(_ci_index_children "${tag}")" || return 2
         have="$(_ci_normalize_platform_digests "${plats}")"
         if [ "${have}" = "${want}" ]; then
-            printf '%s %s\n' "${idx}" "${plats% }"
+            printf '%s\n' "${idx}"
             return 0
         fi
-        # What: a head index that differs goes to reconcile.
-        # Why: reconcile completes or refuses it (§45).
-        # From: Issue #1683 | PR #1858
-        [ "${rev}" != "${head}" ] || found="${idx} ${plats% }"
     done <<< "${revs}"
-    [ -n "${found}" ] || return 1
-    printf '%s\n' "${found}"
+    return 1
 }
 
 # What: platform=digest lines of the index at ref $1.
@@ -6545,8 +6579,8 @@ _ci_collect_accepted_digests() {
             # Why: its channels keep the old image (DoMe).
             # From: Issue #1683 | PR #1858
             MISSING_CONFIRMED|PRODUCED_UNVERIFIED)
-                ci_log "[CI-WARN-ASSEMBLE-0013]" "service=\"${service}\" platform=\"${p}\" state=\"${state}\" reason=\"platform not accepted; left out of the index\""
-                continue
+                ci_log "[CI-WARN-ASSEMBLE-0013]" "service=\"${service}\" platform=\"${p}\" state=\"${state}\" reason=\"platform not accepted; index incomplete\""
+                return 1
                 ;;
             *)
                 ci_error "[CI-ERROR-ASSEMBLE-0002]" "service=\"${service}\" platform=\"${p}\" reason=\"platform state not decidable; not assembling, not rebuilding\" state=\"${state}\"" "resolve: ${line}"
@@ -6566,56 +6600,33 @@ _ci_collect_accepted_digests() {
     fi
 }
 
-# What: Reuse an identical index or reject a divergent one.
-# Why: Idempotent retry; never overwrite an index.
+# What: reuse only the index for this exact platform set.
+# Why: unknown or mismatching state fails closed.
 # From: Issue #1683
 _ci_reconcile_index() {
-    local service="$1" want="$2" existing ex_digest ex_have lrc=0 kv sub=1 wl
-    existing="$(_ci_index_lookup "${service}" "${want}")" || lrc=$?
-    case "${lrc}" in
-        0) ;;
+    local rc=0 result
+    result="$(_ci_index_lookup "$1" "$2")" || rc=$?
+    case "${rc}" in
+        0) printf '%s\n' "${result}" ;;
         1) return 0 ;;
-        *)
-            ci_log "[CI-ERROR-ASSEMBLE-0007]" "service=\"${service}\" rc=${lrc} reason=\"existing index state UNKNOWN (raw above); not assembling over it\""
-            return 2
-            ;;
+        *) return 2 ;;
     esac
-    ex_digest="${existing%% *}"
-    ex_have="$(_ci_normalize_platform_digests "${existing#* }")"
-    if [ "${want}" = "${ex_have}" ]; then
-        printf '%s\n' "${ex_digest}"
-        return 0
-    fi
-    # What: an index may gain a platform, never change one.
-    # Why: a rebuilt red platform completes the sha index.
-    # From: Issue #1683 | PR #1858
-    wl="$(tr ' ' '\n' <<< "${want}")"
-    for kv in ${ex_have}; do
-        _ci_list_has "${kv}" "${wl}" || sub=0
-    done
-    if [ "${sub}" -eq 1 ]; then
-        ci_log "[CI-INFO-ASSEMBLE-0015]" "service=\"${service}\" existing=\"${ex_digest}\" reason=\"index lacks a platform accepted now; completing it\""
-        return 0
-    fi
-    ci_error "[CI-ERROR-ASSEMBLE-0004]" "service=\"${service}\" reason=\"existing index has different platform digests; refusing to overwrite\" existing=\"${ex_digest}\"" "existing: ${existing#* }"
-    return 2
 }
 
-# What: Merge accepted per-platform digests into an index.
-# Why: Default assemble backend; shares the index writer.
+# What: publish and read back an index of accepted digests.
+# Why: the lookup identity must describe the exact inputs.
 # From: Issue #1683
 _ci_docker_assemble() {
     local service="$1"; shift
-    local name sha target kv
+    local name target kv want result
     name="$(_ci_image_ref "${service}")" || return 2
-    sha="$(_ci_head_commit)" || return 2
-    target="${name}:sha-${sha}"
+    want="$(_ci_normalize_platform_digests "$*")"
+    target="$(_ci_assembly_tag "${service}" "${want}")" || return 2
     local -a srcs=()
-    for kv; do
-        srcs+=("${name}@${kv#*=}")
-    done
+    for kv; do srcs+=("${name}@${kv#*=}"); done
     _ci_imagetools_create "${target}" "${srcs[@]}" >&2 || return "$?"
-    _ci_registry_digest "${target}"
+    result="$(_ci_index_lookup "${service}" "${want}")" || return 2
+    printf '%s\n' "${result}"
 }
 
 # What: Assemble accepted per-platform digests.
@@ -8411,6 +8422,16 @@ _ci_gc_reachable() {
         root_hit="$(_ci_capture 1 grep -xF -- "${subj}" "${CI_GC_ROOTS_FILE}")" || return 2
         [ -z "${root_hit}" ] || { printf '%s\n' "${_CI_GC_REFERENCED}"; return 0; }
     done
+    # What: keep an index of rooted platform artifacts.
+    # Why: validation may precede channel promotion.
+    # From: Issue #1683
+    local index_rc=0
+    _ci_gc_accepted_index "${candidate}" || index_rc=$?
+    case "${index_rc}" in
+        0) printf '%s\n' "${_CI_GC_REFERENCED}"; return 0 ;;
+        1) ;;
+        *) return 2 ;;
+    esac
     # What: Fail closed unless grace is a positive integer.
     # Why: Empty grace makes floor=now and deletes all.
     # From: Issue #1683
@@ -8440,6 +8461,35 @@ _ci_gc_reachable() {
     floor=$(( now - window * 60 ))
     [ "${created_epoch}" -ge "${floor}" ] && { printf '%s\n' "${_CI_GC_REFERENCED}"; return 0; }
     printf '%s\n' "${_CI_GC_UNREACHABLE}"
+}
+
+# What: protect indexes whose children are all rooted.
+# Why: accepted candidates may precede channel promotion.
+# From: Issue #1683
+_ci_gc_accepted_index() {
+    local candidate="$1" digest tags service prefix tag name children kv child hit count=0
+    digest="$(printf '%s' "${candidate}" | awk -F'\t' '{print $1}')"
+    tags="$(printf '%s' "${candidate}" | awk -F'\t' '{print $4}')"
+    service="$(printf '%s' "${candidate}" | awk -F'\t' '{print $5}')"
+    prefix="$(_ci_required_field release tag_assembly_prefix block)" || return 2
+    local found=0
+    while IFS= read -r tag; do
+        [[ "${tag}" == "${prefix}"* ]] || continue
+        [[ "${tag#"${prefix}"}" =~ ^[0-9a-f]{64}$ ]] || continue
+        found=1
+    done <<< "${tags//,/$'\n'}"
+    [ "${found}" -eq 1 ] || return 1
+    name="$(_ci_image_ref "${service}")" || return 2
+    children="$(_ci_index_children "${name}@${digest}")" || return 2
+    while IFS= read -r kv; do
+        [ -n "${kv}" ] || continue
+        child="${kv#*=}"
+        [[ "${child}" =~ ^${CI_DIGEST_RE}$ ]] || return 2
+        hit="$(_ci_capture 1 grep -xF -- "${child}" "${CI_GC_ROOTS_FILE}")" || return 2
+        [ -n "${hit}" ] || return 1
+        count=$((count + 1))
+    done <<< "${children}"
+    [ "${count}" -gt 0 ] || return 2
 }
 
 # What: Classify one candidate KEEP / DELETE / fail.
