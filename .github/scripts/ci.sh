@@ -3642,8 +3642,8 @@ ci_cmd_board_add() {
     printf 'board-add=added project=%s %s=%s\n' "${number}" "${kind}" "${item}"
 }
 
-# What: assemble product services from build matrix.
-# Why: one matrix walk; iteration in ci.sh (AG-CODE-011).
+# What: assemble selected and accepted product images.
+# Why: one owner chooses each service once.
 # From: Issue #1683
 ci_cmd_assemble_stack() {
     local matrix="${CI_BUILD_MATRIX:-}" svc svcs rc=0 arc failed="" products=""
@@ -8422,6 +8422,16 @@ _ci_gc_reachable() {
         root_hit="$(_ci_capture 1 grep -xF -- "${subj}" "${CI_GC_ROOTS_FILE}")" || return 2
         [ -z "${root_hit}" ] || { printf '%s\n' "${_CI_GC_REFERENCED}"; return 0; }
     done
+    # What: keep an index of rooted platform artifacts.
+    # Why: validation may precede channel promotion.
+    # From: Issue #1683
+    local index_rc=0
+    _ci_gc_accepted_index "${candidate}" || index_rc=$?
+    case "${index_rc}" in
+        0) printf '%s\n' "${_CI_GC_REFERENCED}"; return 0 ;;
+        1) ;;
+        *) return 2 ;;
+    esac
     # What: Fail closed unless grace is a positive integer.
     # Why: Empty grace makes floor=now and deletes all.
     # From: Issue #1683
@@ -8451,6 +8461,35 @@ _ci_gc_reachable() {
     floor=$(( now - window * 60 ))
     [ "${created_epoch}" -ge "${floor}" ] && { printf '%s\n' "${_CI_GC_REFERENCED}"; return 0; }
     printf '%s\n' "${_CI_GC_UNREACHABLE}"
+}
+
+# What: protect indexes whose children are all rooted.
+# Why: accepted candidates may precede channel promotion.
+# From: Issue #1683
+_ci_gc_accepted_index() {
+    local candidate="$1" digest tags service prefix tag name children kv child hit count=0
+    digest="$(printf '%s' "${candidate}" | awk -F'\t' '{print $1}')"
+    tags="$(printf '%s' "${candidate}" | awk -F'\t' '{print $4}')"
+    service="$(printf '%s' "${candidate}" | awk -F'\t' '{print $5}')"
+    prefix="$(_ci_required_field release tag_assembly_prefix block)" || return 2
+    local found=0
+    while IFS= read -r tag; do
+        [[ "${tag}" == "${prefix}"* ]] || continue
+        [[ "${tag#"${prefix}"}" =~ ^[0-9a-f]{64}$ ]] || continue
+        found=1
+    done <<< "${tags//,/$'\n'}"
+    [ "${found}" -eq 1 ] || return 1
+    name="$(_ci_image_ref "${service}")" || return 2
+    children="$(_ci_index_children "${name}@${digest}")" || return 2
+    while IFS= read -r kv; do
+        [ -n "${kv}" ] || continue
+        child="${kv#*=}"
+        [[ "${child}" =~ ^${CI_DIGEST_RE}$ ]] || return 2
+        hit="$(_ci_capture 1 grep -xF -- "${child}" "${CI_GC_ROOTS_FILE}")" || return 2
+        [ -n "${hit}" ] || return 1
+        count=$((count + 1))
+    done <<< "${children}"
+    [ "${count}" -gt 0 ] || return 2
 }
 
 # What: Classify one candidate KEEP / DELETE / fail.
