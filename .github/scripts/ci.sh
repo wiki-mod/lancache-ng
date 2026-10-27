@@ -6482,38 +6482,33 @@ _ci_normalize_platform_digests() {
     printf '%s\n' "${input}" | tr ' ' '\n' | awk 'NF' | LC_ALL=C sort | tr '\n' ' '
 }
 
-# What: index of the accepted digests, found by content
-# Why: §28: an unchanged service keeps its build commit
-# From: Issue #1683 | PR #1858
-_ci_index_lookup() {
-    local service="$1" want="$2"
-    local name head kv rev revs tag idx grc plats have found=""
+# What: lookup for an exact set of platform digests.
+# Why: one Git commit can yield different artifacts.
+# From: Issue #1683
+_ci_assembly_tag() {
+    local service="$1" want="$2" name prefix hash
     name="$(_ci_image_ref "${service}")" || return 2
-    head="$(_ci_head_commit)" || return 2
-    revs="${head}"
-    for kv in ${want}; do
-        rev="$(_ci_registry_read "${name}@${kv#*=}" revision "[CI-ERROR-ASSEMBLE-0016]" fail)" || return 2
-        _ci_list_has "${rev}" "${revs}" || revs="${revs}"$'\n'"${rev}"
-    done
-    while IFS= read -r rev; do
-        tag="${name}:sha-${rev}"
-        grc=0; idx="$(_ci_registry_probe "${tag}")" || grc=$?
-        [ "${grc}" -ne 1 ] || continue
-        [ "${grc}" -eq 0 ] || return "${grc}"
-        plats="$(_ci_index_children "${tag}")" || return "$?"
-        plats="$(tr '\n' ' ' <<< "${plats}")"
-        have="$(_ci_normalize_platform_digests "${plats}")"
-        if [ "${have}" = "${want}" ]; then
-            printf '%s %s\n' "${idx}" "${plats% }"
-            return 0
-        fi
-        # What: a head index that differs goes to reconcile.
-        # Why: reconcile completes or refuses it (§45).
-        # From: Issue #1683 | PR #1858
-        [ "${rev}" != "${head}" ] || found="${idx} ${plats% }"
-    done <<< "${revs}"
-    [ -n "${found}" ] || return 1
-    printf '%s\n' "${found}"
+    prefix="$(_ci_required_field release tag_assembly_prefix block)" || return 2
+    hash="$(printf '%s' "${want}" | _ci_sha256_hex)" || return 2
+    [[ "${hash}" =~ ^[0-9a-f]{64}$ ]] || return 2
+    printf '%s:%s%s\n' "${name}" "${prefix}" "${hash}"
+}
+
+# What: resolve an index by its accepted platforms.
+# Why: commit tags cannot identify refreshed inputs.
+# From: Issue #1683
+_ci_index_lookup() {
+    local service="$1" want="$2" tag idx plats have rc=0
+    tag="$(_ci_assembly_tag "${service}" "${want}")" || return 2
+    idx="$(_ci_registry_probe "${tag}")" || rc=$?
+    [ "${rc}" -eq 0 ] || return "${rc}"
+    plats="$(_ci_index_children "${tag}")" || return 2
+    have="$(_ci_normalize_platform_digests "${plats}")"
+    if [ "${want}" != "${have}" ]; then
+        ci_error "[CI-ERROR-ASSEMBLE-0004]" "service=\"${service}\" reason=\"assembly tag has different platform digests\"" "expected: ${want}"$'\n'"actual: ${have}"
+        return 2
+    fi
+    printf '%s\n' "${idx}"
 }
 
 # What: platform=digest lines of the index at ref $1.
@@ -6545,8 +6540,8 @@ _ci_collect_accepted_digests() {
             # Why: its channels keep the old image (DoMe).
             # From: Issue #1683 | PR #1858
             MISSING_CONFIRMED|PRODUCED_UNVERIFIED)
-                ci_log "[CI-WARN-ASSEMBLE-0013]" "service=\"${service}\" platform=\"${p}\" state=\"${state}\" reason=\"platform not accepted; left out of the index\""
-                continue
+                ci_log "[CI-WARN-ASSEMBLE-0013]" "service=\"${service}\" platform=\"${p}\" state=\"${state}\" reason=\"platform not accepted; index incomplete\""
+                return 1
                 ;;
             *)
                 ci_error "[CI-ERROR-ASSEMBLE-0002]" "service=\"${service}\" platform=\"${p}\" reason=\"platform state not decidable; not assembling, not rebuilding\" state=\"${state}\"" "resolve: ${line}"
@@ -6566,56 +6561,33 @@ _ci_collect_accepted_digests() {
     fi
 }
 
-# What: Reuse an identical index or reject a divergent one.
-# Why: Idempotent retry; never overwrite an index.
+# What: reuse only the index for this exact platform set.
+# Why: unknown or mismatching state fails closed.
 # From: Issue #1683
 _ci_reconcile_index() {
-    local service="$1" want="$2" existing ex_digest ex_have lrc=0 kv sub=1 wl
-    existing="$(_ci_index_lookup "${service}" "${want}")" || lrc=$?
-    case "${lrc}" in
-        0) ;;
+    local rc=0 result
+    result="$(_ci_index_lookup "$1" "$2")" || rc=$?
+    case "${rc}" in
+        0) printf '%s\n' "${result}" ;;
         1) return 0 ;;
-        *)
-            ci_log "[CI-ERROR-ASSEMBLE-0007]" "service=\"${service}\" rc=${lrc} reason=\"existing index state UNKNOWN (raw above); not assembling over it\""
-            return 2
-            ;;
+        *) return 2 ;;
     esac
-    ex_digest="${existing%% *}"
-    ex_have="$(_ci_normalize_platform_digests "${existing#* }")"
-    if [ "${want}" = "${ex_have}" ]; then
-        printf '%s\n' "${ex_digest}"
-        return 0
-    fi
-    # What: an index may gain a platform, never change one.
-    # Why: a rebuilt red platform completes the sha index.
-    # From: Issue #1683 | PR #1858
-    wl="$(tr ' ' '\n' <<< "${want}")"
-    for kv in ${ex_have}; do
-        _ci_list_has "${kv}" "${wl}" || sub=0
-    done
-    if [ "${sub}" -eq 1 ]; then
-        ci_log "[CI-INFO-ASSEMBLE-0015]" "service=\"${service}\" existing=\"${ex_digest}\" reason=\"index lacks a platform accepted now; completing it\""
-        return 0
-    fi
-    ci_error "[CI-ERROR-ASSEMBLE-0004]" "service=\"${service}\" reason=\"existing index has different platform digests; refusing to overwrite\" existing=\"${ex_digest}\"" "existing: ${existing#* }"
-    return 2
 }
 
-# What: Merge accepted per-platform digests into an index.
-# Why: Default assemble backend; shares the index writer.
+# What: publish and read back an index of accepted digests.
+# Why: the lookup identity must describe the exact inputs.
 # From: Issue #1683
 _ci_docker_assemble() {
     local service="$1"; shift
-    local name sha target kv
+    local name target kv want result
     name="$(_ci_image_ref "${service}")" || return 2
-    sha="$(_ci_head_commit)" || return 2
-    target="${name}:sha-${sha}"
+    want="$(_ci_normalize_platform_digests "$*")"
+    target="$(_ci_assembly_tag "${service}" "${want}")" || return 2
     local -a srcs=()
-    for kv; do
-        srcs+=("${name}@${kv#*=}")
-    done
+    for kv; do srcs+=("${name}@${kv#*=}"); done
     _ci_imagetools_create "${target}" "${srcs[@]}" >&2 || return "$?"
-    _ci_registry_digest "${target}"
+    result="$(_ci_index_lookup "${service}" "${want}")" || return 2
+    printf '%s\n' "${result}"
 }
 
 # What: Assemble accepted per-platform digests.
