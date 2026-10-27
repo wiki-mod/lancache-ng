@@ -6482,8 +6482,8 @@ _ci_normalize_platform_digests() {
     printf '%s\n' "${input}" | tr ' ' '\n' | awk 'NF' | LC_ALL=C sort | tr '\n' ' '
 }
 
-# What: stable registry lookup for an exact set of platform digests.
-# Why: a Git commit can produce different accepted artifacts over time.
+# What: lookup for an exact set of platform digests.
+# Why: one Git commit can yield different artifacts.
 # From: Issue #1683
 _ci_assembly_tag() {
     local service="$1" want="$2" name prefix hash
@@ -6494,8 +6494,8 @@ _ci_assembly_tag() {
     printf '%s:%s%s\n' "${name}" "${prefix}" "${hash}"
 }
 
-# What: resolve an index by its complete accepted platform set.
-# Why: a commit tag cannot identify refreshed external inputs.
+# What: resolve an index by its accepted platforms.
+# Why: commit tags cannot identify refreshed inputs.
 # From: Issue #1683
 _ci_index_lookup() {
     local service="$1" want="$2" tag idx plats have rc=0
@@ -6562,7 +6562,7 @@ _ci_collect_accepted_digests() {
 }
 
 # What: reuse only the index for this exact platform set.
-# Why: unknown or mismatching registry state must fail closed.
+# Why: unknown or mismatching state fails closed.
 # From: Issue #1683
 _ci_reconcile_index() {
     local rc=0 result
