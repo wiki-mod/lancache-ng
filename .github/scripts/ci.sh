@@ -6805,8 +6805,8 @@ ci_cmd_channel_matrix() {
         fi
         list="${want}"
     else
-        # What: select channels owned by the checked-out source.
-        # Why: Nightly must not validate stable channel tags.
+        # What: select channels for the checked-out source.
+        # Why: Nightly skips stable channel tags.
         # From: Issue #1683
         if [ -n "${CI_SOURCE_REF:-}" ]; then
             source_ref="${CI_SOURCE_REF}"
@@ -7075,7 +7075,7 @@ _ci_validated_candidate_rows() {
     while IFS= read -r service; do
         [ -n "${service}" ] || continue
         if ! _ci_text_has "^${service}=" "${rows}"; then
-            ci_log "[CI-ERROR-CANDIDATE-0010]" "service=\"${service}\" reason=\"validated candidate does not contain the complete product stack\""
+            ci_log "[CI-ERROR-CANDIDATE-0012]" "service=\"${service}\" reason=\"validated candidate does not contain the complete product stack\""
             return 2
         fi
     done <<< "${expected}"
@@ -7095,7 +7095,7 @@ _ci_stack_candidate_source() {
         pinned="$(_ci_validated_candidate_rows "${CI_VALIDATED_CANDIDATE}")" || return 2
         current="$(_ci_stack_candidate_ledger)" || return 2
         # What: compare validation with current acceptance.
-        # Why: changed accepted digests invalidate validation.
+        # Why: accepted digest changes invalidate validation.
         # From: Issue #1683
         pinned_sorted="$(printf '%s\n' "${pinned}" | LC_ALL=C sort)"
         current_sorted="$(printf '%s\n' "${current}" | LC_ALL=C sort)"
@@ -7396,7 +7396,7 @@ ci_cmd_promote() {
     local rc
     if _ci_promote_move_all "${channel}" "${cand}"; then rc=0; else rc=$?; fi
     _ci_promote_unlock "${channel}" || {
-        ci_error "[CI-ERROR-PROMOTE-0011]" "channel=\"${channel}\" reason=\"lock release failed\"" "${channel}"
+        ci_error "[CI-ERROR-PROMOTE-0041]" "channel=\"${channel}\" reason=\"lock release failed\"" "${channel}"
         [ "${rc}" -ne 0 ] || rc=2
     }
     [ "${rc}" -eq 0 ] || return "${rc}"
@@ -10608,7 +10608,7 @@ ci_cmd_validate() {
     # Why: promotion must consume these same digests.
     # From: Issue #1683
     output="${cand//$'\n'/,}"
-    _ci_step_output "[CI-ERROR-VALIDATE-0053]" candidate "${output}" || return 2
+    _ci_step_output "[CI-ERROR-VALIDATE-0070]" candidate "${output}" || return 2
     printf 'validate candidate=%s\n' "${output}"
 }
 
