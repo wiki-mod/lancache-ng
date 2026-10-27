@@ -7015,12 +7015,78 @@ _ci_stack_candidate() {
     [ -z "${out}" ] || printf '%s\n' "${out}"
 }
 
-# What: read the accepted stack candidate for this event.
-# Why: exact-digest candidate (§48); a PR reads its own.
+# What: decode one validated product candidate.
+# Why: promotion must use the validated digest set.
+# From: Issue #1683
+_ci_validated_candidate_rows() {
+    local value="$1" rows="" line service expected count=0
+    # What: reject an empty or ambiguous candidate output.
+    # Why: separators must name every product exactly once.
+    # From: Issue #1683
+    if [ -z "${value}" ] || [[ "${value}" == ,* || "${value}" == *, || "${value}" == *,,* ]]; then
+        ci_log "[CI-ERROR-CANDIDATE-0007]" "reason=\"validated candidate output is empty or malformed\""
+        return 2
+    fi
+    value="$(printf '%s' "${value}" | tr ',' '\n')"
+    while IFS= read -r line; do
+        [ -n "${line}" ] || continue
+        if [[ ! "${line}" =~ ^[a-z0-9][a-z0-9._-]*=${CI_DIGEST_RE}$ ]]; then
+            ci_log "[CI-ERROR-CANDIDATE-0008]" "reason=\"validated candidate contains an invalid service digest\""
+            return 2
+        fi
+        service="${line%%=*}"
+        if _ci_text_has "^${service}=" "${rows}"; then
+            ci_log "[CI-ERROR-CANDIDATE-0009]" "service=\"${service}\" reason=\"validated candidate duplicates a product\""
+            return 2
+        fi
+        rows+="${line}"$'\n'
+        count=$((count + 1))
+    done <<< "${value}"
+    expected="$(ci_services)" || return 2
+    # What: require one candidate row for every product.
+    # Why: partial stacks cannot pass promotion.
+    # From: Issue #1683
+    if [ "${count}" -ne "$(_ci_count_lines "${expected}")" ]; then
+        ci_log "[CI-ERROR-CANDIDATE-0010]" "reason=\"validated candidate does not contain the complete product stack\""
+        return 2
+    fi
+    # What: verify candidate membership against the SOT.
+    # Why: row count alone does not prove service coverage.
+    # From: Issue #1683
+    while IFS= read -r service; do
+        [ -n "${service}" ] || continue
+        if ! _ci_text_has "^${service}=" "${rows}"; then
+            ci_log "[CI-ERROR-CANDIDATE-0010]" "service=\"${service}\" reason=\"validated candidate does not contain the complete product stack\""
+            return 2
+        fi
+    done <<< "${expected}"
+    printf '%s\n' "${rows%$'\n'}"
+}
+
+# What: read the event's exact stack candidate.
+# Why: promotion reuses validated digests (§48).
 # From: Issue #1683
 _ci_stack_candidate_source() {
+    local pinned current pinned_sorted current_sorted
     if [ "${GITHUB_EVENT_NAME:-}" = pull_request ]; then
         _ci_stack_candidate_pr
+        return "$?"
+    fi
+    if [ -n "${CI_VALIDATED_CANDIDATE+x}" ]; then
+        pinned="$(_ci_validated_candidate_rows "${CI_VALIDATED_CANDIDATE}")" || return 2
+        current="$(_ci_stack_candidate_ledger)" || return 2
+        # What: compare validation with current acceptance.
+        # Why: changed accepted digests invalidate validation.
+        # From: Issue #1683
+        pinned_sorted="$(printf '%s\n' "${pinned}" | LC_ALL=C sort)"
+        current_sorted="$(printf '%s\n' "${current}" | LC_ALL=C sort)"
+        if [ "${pinned_sorted}" != "${current_sorted}" ]; then
+            ci_log "[CI-ERROR-CANDIDATE-0011]" "reason=\"accepted candidate changed after validation; promotion blocked\""
+            return 2
+        fi
+        printf '%s\n' "${pinned}"
+        [ "${1:-}" = --with-toolchain ] || return 0
+        _ci_toolchain_candidate
         return "$?"
     fi
     _ci_stack_candidate_ledger || return "$?"
@@ -7031,11 +7097,11 @@ _ci_stack_candidate_source() {
     _ci_toolchain_candidate
 }
 
-# What: True only if the stack validated (docs section 50).
-# Why: Fail-closed without validate; never assume success.
+# What: require the validated candidate marker.
+# Why: success alone does not bind promotion to validation.
 # From: Issue #1683
 _ci_stack_validated() {
-    [ "${CI_STACK_VALIDATED:-}" = "SUCCESS" ]
+    [ "${CI_STACK_VALIDATED:-}" = "SUCCESS" ] && [ -n "${CI_VALIDATED_CANDIDATE:-}" ]
 }
 
 # What: The per-channel promotion lock ref.
@@ -7109,8 +7175,16 @@ _ci_promote_kept() {
 # Why: a merged channel index has a digest of its own.
 # From: Issue #1683 | PR #1858
 _ci_channel_matches() {
-    local svc="$1" channel="$2" digest="$3" kept="$4" name want seen
+    local svc="$1" channel="$2" digest="$3" kept="$4" name want seen seen_digest
     name="$(_ci_image_ref "${svc}")" || return 2
+    # What: keep the validated index digest for products.
+    # Why: equal children can hide different index bytes.
+    # From: Issue #1683
+    if _ci_list_has "${svc}" "$(ci_services)"; then
+        seen_digest="$(_ci_registry_digest "${name}:${channel}")" || return 2
+        [ "${seen_digest}" = "${digest}" ]
+        return "$?"
+    fi
     want="$(_ci_index_children "${name}@${digest}")" || return 2
     seen="$(_ci_index_children "${name}:${channel}")" || return "$?"
     want="$(_ci_normalize_platform_digests "${want} ${kept}")"
@@ -7269,7 +7343,7 @@ ci_cmd_promote() {
         ci_log "[CI-ERROR-PROMOTE-0002]" "channel=\"${channel}\" reason=\"not a mutable channel or a vX.Y.Z release tag\""
         return 2
     fi
-    local cand arc=0
+    local cand locked_cand arc=0
     if ! cand="$(_ci_stack_candidate --with-toolchain)"; then
         ci_log "[CI-ERROR-PROMOTE-0003]" "channel=\"${channel}\" reason=\"no accepted stack candidate\""
         return 2
@@ -7288,6 +7362,14 @@ ci_cmd_promote() {
     [ "${arc}" -eq 1 ] || return "${arc}"
     if ! _ci_promote_lock "${channel}"; then
         ci_log "[CI-ERROR-PROMOTE-0010]" "channel=\"${channel}\" reason=\"could not acquire promotion lock\""
+        return 2
+    fi
+    # What: recheck acceptance while holding the lock.
+    # Why: the candidate may change after validation.
+    # From: Issue #1683
+    if ! locked_cand="$(_ci_stack_candidate --with-toolchain)" || [ "${locked_cand}" != "${cand}" ]; then
+        ci_log "[CI-ERROR-PROMOTE-0039]" "channel=\"${channel}\" reason=\"accepted candidate changed under promotion lock\""
+        _ci_promote_unlock "${channel}" || ci_log "[CI-ERROR-PROMOTE-0011]" "channel=\"${channel}\" reason=\"lock release failed\""
         return 2
     fi
     # What: capture rc so the unlock still runs on failure.
@@ -10488,7 +10570,7 @@ _ci_validate_run() {
 # Why: promote needs a validated stack first (§49/§50).
 # From: Issue #1683
 ci_cmd_validate() {
-    local cand shared
+    local cand shared output rc=0
     _ci_validate_host_tools || return 2
     shared="$(_ci_validate_shared_dir)" || return 2
     printf 'validate shared_dir=%s\n' "${shared}"
@@ -10501,7 +10583,14 @@ ci_cmd_validate() {
         return 2
     fi
     _ci_require_ghcr_auth || return 2
-    _ci_validate_run "${cand}"
+    _ci_validate_run "${cand}" || rc=$?
+    [ "${rc}" -eq 0 ] || return "${rc}"
+    # What: expose the candidate only after full validation.
+    # Why: promotion must consume these same digests.
+    # From: Issue #1683
+    output="${cand//$'\n'/,}"
+    _ci_step_output "[CI-ERROR-VALIDATE-0053]" candidate "${output}" || return 2
+    printf 'validate candidate=%s\n' "${output}"
 }
 
 # What: Required-check gate over the needs results (§62).
