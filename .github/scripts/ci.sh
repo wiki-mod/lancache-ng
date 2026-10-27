@@ -6502,32 +6502,41 @@ _ci_assembly_tag() {
     printf '%s:%s%s\n' "${name}" "${prefix}" "${hash}"
 }
 
+# What: compare a tag's immutable index to its inputs.
+# Why: tag movement must not change the verified bytes.
+# From: Issue #1683
+_ci_index_match() {
+    local tag="$1" want="$2" idx rc=0 plats have
+    idx="$(_ci_registry_probe "${tag}")" || rc=$?
+    [ "${rc}" -eq 0 ] || return "${rc}"
+    plats="$(_ci_index_children "${tag%:*}@${idx}")" || return 2
+    have="$(_ci_normalize_platform_digests "${plats}")"
+    [ "${want}" = "${have}" ] || return 3
+    printf '%s\n' "${idx}"
+}
+
 # What: resolve an index by its accepted platforms.
 # Why: commit tags cannot identify refreshed inputs.
 # From: Issue #1683
 _ci_index_lookup() {
-    local service="$1" want="$2" tag idx plats have rc=0
+    local service="$1" want="$2" tag idx rc=0
     tag="$(_ci_assembly_tag "${service}" "${want}")" || return 2
-    idx="$(_ci_registry_probe "${tag}")" || rc=$?
-    if [ "${rc}" -eq 1 ]; then
-        _ci_legacy_index_lookup "${service}" "${want}"
-        return "$?"
-    fi
-    [ "${rc}" -eq 0 ] || return "${rc}"
-    plats="$(_ci_index_children "${tag}")" || return 2
-    have="$(_ci_normalize_platform_digests "${plats}")"
-    if [ "${want}" != "${have}" ]; then
-        ci_error "[CI-ERROR-ASSEMBLE-0004]" "service=\"${service}\" reason=\"assembly tag has different platform digests\"" "expected: ${want}"$'\n'"actual: ${have}"
-        return 2
-    fi
-    printf '%s\n' "${idx}"
+    idx="$(_ci_index_match "${tag}" "${want}")" || rc=$?
+    case "${rc}" in
+        0) printf '%s\n' "${idx}" ;;
+        1) _ci_legacy_index_lookup "${service}" "${want}" ;;
+        3)
+            ci_log "[CI-ERROR-ASSEMBLE-0004]" "service=\"${service}\" reason=\"assembly tag has different platform digests\""
+            return 2 ;;
+        *) return 2 ;;
+    esac
 }
 
 # What: find a matching pre-assembly-tag index.
 # Why: accepted older artifacts remain reusable.
 # From: Issue #1683
 _ci_legacy_index_lookup() {
-    local service="$1" want="$2" name head kv rev revs tag idx rc plats have
+    local service="$1" want="$2" name head kv rev revs tag idx rc
     name="$(_ci_image_ref "${service}")" || return 2
     head="$(_ci_head_commit)" || return 2
     revs="${head}"
@@ -6537,15 +6546,12 @@ _ci_legacy_index_lookup() {
     done
     while IFS= read -r rev; do
         tag="${name}:sha-${rev}"
-        rc=0; idx="$(_ci_registry_probe "${tag}")" || rc=$?
-        [ "${rc}" -ne 1 ] || continue
-        [ "${rc}" -eq 0 ] || return "${rc}"
-        plats="$(_ci_index_children "${tag}")" || return 2
-        have="$(_ci_normalize_platform_digests "${plats}")"
-        if [ "${have}" = "${want}" ]; then
-            printf '%s\n' "${idx}"
-            return 0
-        fi
+        rc=0; idx="$(_ci_index_match "${tag}" "${want}")" || rc=$?
+        case "${rc}" in
+            0) printf '%s\n' "${idx}"; return 0 ;;
+            1|3) continue ;;
+            *) return 2 ;;
+        esac
     done <<< "${revs}"
     return 1
 }
