@@ -15209,11 +15209,11 @@ _ci_check_action_node_versions() {
     local f
     _ci_workflow_files scan_files "${wf_dir}" || return 2
 
-    local -a viol=() xv=() infra=() uses_entries=() literal_entries=() cmt_entries=()
+    local -a viol=() xv=() infra=() uses_entries=() literal_entries=()
     # What: collect every uses: step, resolve anchors.
     # Why: alias not duplicate; only literals count.
     # From: Issue #1683 | PR #1858
-    local sf line raw resolved anchor cmt
+    local sf line raw resolved anchor
     for sf in "${scan_files[@]}"; do
         local -A anchors=()
         local produced produced_rc=0
@@ -15221,16 +15221,12 @@ _ci_check_action_node_versions() {
         _ci_producer_ok "${produced_rc}" 1 || return 2
         while IFS= read -r line; do
             [ -n "${line}" ] || continue
-            raw="${line#*uses:}"; cmt=""
-            [[ "${raw}" != *"#"* ]] || cmt="${raw#*#}"
-            raw="${raw%%#*}"
-            cmt="${cmt#"${cmt%%[![:space:]]*}"}"; cmt="${cmt%"${cmt##*[![:space:]]}"}"
+            raw="${line#*uses:}"; raw="${raw%%#*}"
             raw="${raw#"${raw%%[![:space:]]*}"}"; raw="${raw%"${raw##*[![:space:]]}"}"
             resolved="${raw}"
             if [[ "${raw}" =~ ^\&([A-Za-z0-9_-]+)[[:space:]]+(.+)$ ]]; then
                 anchor="${BASH_REMATCH[1]}"; resolved="${BASH_REMATCH[2]}"
                 anchors["${anchor}"]="${resolved}"
-                cmt_entries+=("${resolved}"$'\t'"${cmt}")
                 literal_entries+=("${sf}"$'\t'"${resolved}")
             elif [[ "${raw}" =~ ^\*([A-Za-z0-9_-]+)$ ]]; then
                 anchor="${BASH_REMATCH[1]}"
@@ -15240,7 +15236,6 @@ _ci_check_action_node_versions() {
                 fi
                 resolved="${anchors[${anchor}]}"
             else
-                cmt_entries+=("${resolved}"$'\t'"${cmt}")
                 literal_entries+=("${sf}"$'\t'"${resolved}")
             fi
             uses_entries+=("${sf}"$'\t'"${resolved}")
@@ -15308,7 +15303,7 @@ _ci_check_action_node_versions() {
     # Why: external manifests come via raw tag reads.
     # From: Issue #1683 | PR #1858
     local v using owner repo subpath ref res marker meta
-    local entry used_entries=" " node_min want_sha want_ver cm
+    local entry used_entries=" " node_min
     node_min="$(_ci_variable CI_ACTION_NODE_MIN)" || return 2
     if [[ ! "${node_min}" =~ ^[0-9]+$ ]]; then
         ci_log "[CI-ERROR-CHECK-0142]" "got=\"${node_min}\" key=\"CI_ACTION_NODE_MIN\" reason=\"not a whole number\""
@@ -15349,15 +15344,15 @@ _ci_check_action_node_versions() {
             continue
         fi
         ref="${v##*@}"; key="${v%@*}"
-        # What: an external ref must be a full commit SHA.
-        # Why: AG-CI-001: a tag or branch moves under the pin.
+        # What: an external ref must be a major tag vN.
+        # Why: no third-party pin; the tag moves forward.
         # From: Issue #1683 | PR #1858
-        if [[ ! "${ref}" =~ ^[0-9a-f]{40}$ ]]; then
-            viol+=("external action '${v}' (in: $(_ci_ando_reffiles "${v}")) must pin the full 40-hex commit SHA")
+        if [[ ! "${ref}" =~ ^v[0-9]+$ ]]; then
+            viol+=("external action '${v}' (in: $(_ci_ando_reffiles "${v}")) must use a major tag vN")
             continue
         fi
         # What: an external action must have a SOT entry.
-        # Why: GitHub reads uses: only, so the SOT owns the pin.
+        # Why: GitHub reads uses: only, so it owns the tag.
         # From: Issue #1683 | PR #1858
         entry="$(_ci_action_sot_entry "${key}")" || return 2
         if [ -z "${entry}" ]; then
@@ -15365,19 +15360,6 @@ _ci_check_action_node_versions() {
             continue
         fi
         used_entries+="${entry} "
-        # What: uses: SHA and version comment equal the SOT.
-        # Why: AG-CI-006: the SOT owns the pin; uses: derives.
-        # From: Issue #1683 | PR #1858
-        want_sha="$(_ci_block_entry_field github_actions "${entry}" sha)" || return 2
-        want_ver="$(_ci_block_entry_field github_actions "${entry}" version)" || return 2
-        if [ "${ref}" != "${want_sha}" ]; then
-            viol+=("external action '${v}' (in: $(_ci_ando_reffiles "${v}")) differs from SOT github_actions.${entry}.sha ${want_sha}")
-            continue
-        fi
-        for cm in "${cmt_entries[@]}"; do
-            [ "${cm%%$'\t'*}" = "${v}" ] || continue
-            [ "${cm#*$'\t'}" = "${want_ver}" ] || viol+=("external action '${v}' (in: $(_ci_ando_reffiles "${v}")) version comment '${cm#*$'\t'}' differs from SOT github_actions.${entry}.version ${want_ver}")
-        done
         owner="${key%%/*}"; repo="${key#*/}"; subpath=""
         [[ "${repo}" != */* ]] || { subpath="${repo#*/}"; repo="${repo%%/*}"; }
         res="$(_ci_fetch_action_manifest "${owner}" "${repo}" "${subpath}" "${ref}")" || return 2
@@ -15438,16 +15420,21 @@ _ci_check_action_node_versions() {
 # in action-node-versions on every PR (broken pin).
 # From: Issue #1683 | PR #1858
 _ci_check_action_majors() {
-    local srv entries e u cur repo refs t max warn=0 rc
+    local wf_dir srv entries e u cur repo refs t max warn=0 rc
+    local -a files=()
+    wf_dir="$(_ci_repo_path CI_WORKFLOW_DIR)" || return 2
+    _ci_workflow_files files "${wf_dir}" || return 2
     srv="$(_ci_env_required GITHUB_SERVER_URL)" || return 2
     entries="$(_ci_block_keys github_actions)" || return 2
     for e in ${entries}; do
         u="$(_ci_block_entry_field github_actions "${e}" uses)" || return 2
-        # What: the major of this action's SOT version.
-        # Why: the SOT owns the pin; uses: derives from it.
+        # What: the vN ref of this action in the workflows.
+        # Why: action-node-versions keeps it one ref.
         # From: Issue #1683 | PR #1858
-        cur="$(_ci_block_entry_field github_actions "${e}" version)" || return 2
-        cur="${cur#v}"; cur="${cur%%.*}"
+        rc=0
+        cur="$(grep -h -o -E "uses:[[:space:]]*${u}@v[0-9]+" "${files[@]}")" || rc=$?
+        _ci_producer_ok "${rc}" 1 || return 2
+        cur="${cur%%$'\n'*}"; cur="${cur##*@v}"
         [ -n "${cur}" ] || continue
         repo="${u#*/}"; repo="${repo%%/*}"
         rc=0
