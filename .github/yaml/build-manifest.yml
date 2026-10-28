@@ -346,18 +346,26 @@ base_images:
   # From: Issue #1683 | PR #1858
   git: "mirror.gcr.io/alpine/git:latest"
 
-# What: external actions a workflow may use.
-# Why: the vN tag lives in uses:, which Dependabot moves.
+# What: external actions a workflow may use, each pinned.
+# Why: AG-CI-001: full commit SHA; uses: must match it.
 # From: Issue #1683 | PR #1912
 github_actions:
   attest:
     uses: actions/attest
+    version: v4.2.2
+    sha: 1e69f48acb82d1966a394da916b4c1698aa569d6
   checkout:
     uses: actions/checkout
+    version: v7.0.1
+    sha: 3d3c42e5aac5ba805825da76410c181273ba90b1
   claude-code:
     uses: anthropics/claude-code-action
+    version: v1.0.264
+    sha: d70510b174a1244958df0b03166a54912811f3e6
   docker-login:
     uses: docker/login-action
+    version: v4.7.0
+    sha: 81c6f93d4bc991e510b342a00b419b3bb4efc5c6
 
 # What: the runtime group id the containers share.
 # Why: ci.sh bakes it into each image; one owner.

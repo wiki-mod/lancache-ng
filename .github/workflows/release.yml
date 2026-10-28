@@ -73,7 +73,7 @@ jobs:
       # From: Issue #1683 | PR #1858
       - &bootstrap
         name: Check out the event commit
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           fetch-depth: 1
@@ -155,16 +155,16 @@ jobs:
       matrix: ${{ fromJSON(needs.release.outputs.images) }}
     steps:
       # What: uses: refs name SOT github_actions entries.
-      # Why: GitHub reads uses: only; ci.sh checks vN.
+      # Why: GitHub reads uses: only; ci.sh checks the SHA.
       # From: Issue #1683 | PR #1912
       - name: Log in to the registry
-        uses: docker/login-action@v4
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ${{ matrix.registry }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Attest the image provenance
-        uses: actions/attest@v4
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-name: ${{ matrix.name }}
           subject-digest: ${{ matrix.digest }}
