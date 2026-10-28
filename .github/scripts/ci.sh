@@ -970,22 +970,6 @@ _ci_plan_candidate() {
     return 1
 }
 
-# What: rc 0 if a target's test identity changed.
-# Why: §29: build inputs with tests; no runtime file (F).
-# From: Issue #1683 | PR #1858
-_ci_target_content_changed() {
-    local refs base head a b
-    refs="$(_ci_diff_refs)" || return 2
-    read -r base head <<<"${refs}"
-    if [ -z "${base}" ]; then
-        ci_log "[CI-INFO-IMPACT-0013]" "service=\"$1\" reason=\"no base ref for this event; test identity counts as changed\""
-        return 0
-    fi
-    a="$(_ci_identity_content "$1" "${base}" "")" || return 2
-    b="$(_ci_identity_content "$1" "${head}" "")" || return 2
-    [ "${a}" != "${b}" ]
-}
-
 # What: Plan phase: pick rebuild CANDIDATES per service.
 # Why: Path picks candidates; identity/CAS decides build.
 # From: Issue #1683
@@ -1007,21 +991,24 @@ ci_cmd_plan() {
     ci_log "[CI-INFO-PLAN-0001]" "phase=plan changed=${#changed[@]} note=\"candidates only; identity/CAS decides build\""
 }
 
-# What: rc 0 if content under path changed base..head.
+# What: rc 0 if reader $1 for $2 differs base..head.
 # Why: comment-only edits keep identity (§11.1/§12.5).
-# From: Issue #1683
-_ci_path_content_changed() {
-    local path="$1" base="${2:-}" head="${3:-}" a b refs
+# From: Issue #1683 | PR #1858
+_ci_content_changed() {
+    local reader="$1" subject="$2" base="${3:-}" head="${4:-}" a b refs
     if [ -z "${base}" ]; then
         refs="$(_ci_diff_refs)" || return 2
         read -r base head <<<"${refs}"
     fi
     if [ -z "${base}" ]; then
-        ci_log "[CI-INFO-IMPACT-0012]" "path=\"${path}\" reason=\"no base ref for this event; content counts as changed\""
+        ci_log "[CI-INFO-IMPACT-0012]" "reader=\"${reader}\" subject=\"${subject}\" reason=\"no base ref for this event; content counts as changed\""
         return 0
     fi
-    a="$(_ci_tracked_content_ids "${path}" "${base}")" || return 2
-    b="$(_ci_tracked_content_ids "${path}" "${head}")" || return 2
+    # What: the readers take subject, ref and mode "".
+    # Why: path ids and the §29 test identity, one rule.
+    # From: Issue #1683 | PR #1858
+    a="$("${reader}" "${subject}" "${base}" "")" || return 2
+    b="$("${reader}" "${subject}" "${head}" "")" || return 2
     [ "${a}" != "${b}" ]
 }
 
@@ -1040,7 +1027,7 @@ ci_cmd_codeql_impact() {
         while IFS= read -r p; do
             [ -n "${p}" ] || continue
             _ci_paths_touch "${p}" "${changed[@]}" || continue
-            rc=0; _ci_path_content_changed "${p}" || rc=$?
+            rc=0; _ci_content_changed _ci_tracked_content_ids "${p}" || rc=$?
             case "${rc}" in 0) hit=true; break ;; 1) ;; *) return 2 ;; esac
         done <<< "${paths}"
         [ "${hit}" = true ] && { include="$(_ci_matrix_append "${include}" language="${lang}")" || return 2; }
@@ -1472,7 +1459,7 @@ ci_cmd_plan_matrix() {
         # Why: §29 §64: equal content, equal test identity.
         # From: Issue #1683 | PR #1858
         if [ "${svc_type}" = rust ]; then
-            rc=0; _ci_target_content_changed "${service}" || rc=$?
+            rc=0; _ci_content_changed _ci_identity_content "${service}" || rc=$?
             case "${rc}" in
                 0)
                     [ "${path_cand}" = false ] || test_services="${test_services} ${service}"
@@ -7588,7 +7575,7 @@ _ci_release_record_stale() {
             ;;
     esac
     for p in "${gov[@]}"; do
-        rc=0; _ci_path_content_changed "${p}" "${commit}" "${target}" || rc=$?
+        rc=0; _ci_content_changed _ci_tracked_content_ids "${p}" "${commit}" "${target}" || rc=$?
         case "${rc}" in
             0) printf '%s: governance %s changed since %s\n' "${name}" "${p}" "${commit}"; return 0 ;;
             1) ;;
@@ -7596,7 +7583,7 @@ _ci_release_record_stale() {
         esac
     done
     for p in "${paths[@]}"; do
-        rc=0; _ci_path_content_changed "${p}" "${commit}" "${target}" || rc=$?
+        rc=0; _ci_content_changed _ci_tracked_content_ids "${p}" "${commit}" "${target}" || rc=$?
         case "${rc}" in
             0) printf '%s: %s changed since %s\n' "${name}" "${p}" "${commit}"; return 0 ;;
             1) ;;
