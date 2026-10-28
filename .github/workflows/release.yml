@@ -189,7 +189,15 @@ jobs:
       images: ${{ steps.images.outputs.matrix }}
     steps:
       - *bootstrap
+      # What: name every released image digest
+      # Why: §82: the tag resolves once; later steps reuse
+      # From: Issue #1683 | PR #1912
+      - name: Resolve the released image digests
+        id: images
+        run: bash .github/scripts/ci.sh release-images "${CI_RELEASE_TAG}"
       - name: Publish the GitHub release
+        env:
+          CI_RELEASE_IMAGES: ${{ steps.images.outputs.matrix }}
         run: bash .github/scripts/ci.sh release-publish "${CI_RELEASE_TAG}"
       - name: Attach the OpenVEX document
         run: bash .github/scripts/ci.sh release-vex "${CI_RELEASE_TAG}"
@@ -207,12 +215,6 @@ jobs:
         env:
           PROJECT_AUTOMATION_PAT: ${{ secrets.PROJECT_AUTOMATION_PAT }}
         run: bash .github/scripts/ci.sh release-variable "${CI_RELEASE_TAG}"
-      # What: name every released image digest
-      # Why: ci.sh owns the list; the matrix reads it
-      # From: Issue #1683 | PR #1912
-      - name: Resolve the released image digests
-        id: images
-        run: bash .github/scripts/ci.sh release-images "${CI_RELEASE_TAG}"
 
   # What: attest the provenance of each released digest.
   # Why: §59: provenance names the exact digest, no tag.
@@ -262,6 +264,7 @@ jobs:
     permissions: *release_write
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      CI_RELEASE_IMAGES: ${{ needs.release.outputs.images }}
     steps:
       - *bootstrap
       - name: Attach a CycloneDX SBOM per published image

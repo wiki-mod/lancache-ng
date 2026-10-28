@@ -7995,11 +7995,25 @@ ci_cmd_release_images() {
     printf 'release-images=%s tag=%s\n' "${n}" "${tag}"
 }
 
+# What: one image's digest from the release-images matrix.
+# Why: §82: the tag resolves once; notes and SBOM reuse it.
+# From: Issue #1683 | PR #1858
+_ci_release_digest() {
+    local img="$1" matrix dig
+    matrix="$(_ci_env_required CI_RELEASE_IMAGES)" || return 2
+    dig="$(_ci_capture 0 jq -r --arg n "${img}" '.include[] | select(.name == $n) | .digest' <<< "${matrix}")" || return 2
+    if [[ ! "${dig}" =~ ^${CI_DIGEST_RE}$ ]]; then
+        ci_error "[CI-ERROR-RELEASE-0061]" "image=\"${img}\" reason=\"not exactly one digest in CI_RELEASE_IMAGES\"" "${matrix}"
+        return 2
+    fi
+    printf '%s\n' "${dig}"
+}
+
 # What: Render the marker-delimited image provenance block.
 # Why: Records every shipped digest; SOT list, no hardcode.
 # From: Issue #1683
 _ci_release_notes_block() {
-    local tag="$1" base target img dig head
+    local tag="$1" base target dig head
     base="$(_ci_image_ref)" || return 2
     head="$(_ci_head_commit)" || return 2
     _ci_release_marker start || return 2
@@ -8010,9 +8024,8 @@ _ci_release_notes_block() {
     local targets
     targets="$(ci_build_targets)" || return 2
     for target in ${targets}; do
-        img="${base}/${target}:${tag}"
-        dig="$(_ci_registry_digest "${img}")" || return "$?"
-        printf -- '- %s -> %s\n' "${img}" "${dig}"
+        dig="$(_ci_release_digest "${base}/${target}")" || return "$?"
+        printf -- '- %s:%s -> %s\n' "${base}/${target}" "${tag}" "${dig}"
     done
     printf '\nProvenance attestations and CycloneDX SBOMs attach per image.\n'
     printf 'OpenVEX from .trivyignore.yaml attaches as vex.openvex.json.\n'
@@ -8082,7 +8095,6 @@ ci_cmd_release_publish() {
     repo="$(_ci_env_required GITHUB_REPOSITORY)" || return 2
     sha="$(_ci_head_commit)" || return 2
     pre="$(_ci_release_prerelease "${tag}")" || return "$?"
-    _ci_require_ghcr_auth || return "$?"
     want="$(_ci_release_notes_block "${tag}")" || return "$?"
     state="$(_ci_release_state "${repo}" "${tag}")" || rc=$?
     [ "${rc}" -le 1 ] || return 2
@@ -8133,7 +8145,7 @@ ci_cmd_release_sbom() {
     _ci_require_ghcr_auth || return "$?"
     local name digest
     name="$(_ci_image_ref "${service}")" || return 2
-    digest="$(_ci_registry_digest "${name}:${tag}")" || return "$?"
+    digest="$(_ci_release_digest "${name}")" || return "$?"
     _ci_with_workdir ci-sbom _ci_release_sbom_in "${service}" "${tag}" "${digest}"
 }
 
