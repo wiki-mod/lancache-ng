@@ -1240,16 +1240,12 @@ _ci_codeql_run() {
         ci_error "[CI-ERROR-CODEQL-0016]" "language=\"${lang}\" file=\"${work}/config.yml\" reason=\"CodeQL config not written\"" "${raw}"
         return 2
     fi
-    if ! raw="$("${codeql}" database create "${work}/db" --language="${lang}" --build-mode=none \
-            --source-root="${CI_REPO_ROOT:-.}" --codescanning-config="${work}/config.yml" 2>&1)"; then
-        ci_error "[CI-ERROR-CODEQL-0009]" "language=\"${lang}\" reason=\"database create failed\"" "${raw}"
-        return 2
-    fi
-    if ! raw="$("${codeql}" database analyze "${work}/db" --format=sarif-latest \
-            --sarif-category="/language:${lang}" --output="${work}/result.sarif" 2>&1)"; then
-        ci_error "[CI-ERROR-CODEQL-0010]" "language=\"${lang}\" reason=\"database analyze failed\"" "${raw}"
-        return 2
-    fi
+    _ci_run "[CI-ERROR-CODEQL-0009]" "language=\"${lang}\" reason=\"database create failed\"" \
+        "${codeql}" database create "${work}/db" --language="${lang}" --build-mode=none \
+        --source-root="${CI_REPO_ROOT:-.}" --codescanning-config="${work}/config.yml" >&2 || return 2
+    _ci_run "[CI-ERROR-CODEQL-0010]" "language=\"${lang}\" reason=\"database analyze failed\"" \
+        "${codeql}" database analyze "${work}/db" --format=sarif-latest \
+        --sarif-category="/language:${lang}" --output="${work}/result.sarif" >&2 || return 2
     if ! _ci_retry github-api "${codeql}" github upload-results --repository="${GITHUB_REPOSITORY}" \
             --ref="${GITHUB_REF}" --commit="${GITHUB_SHA}" --sarif="${work}/result.sarif" >&2; then
         ci_log "[CI-ERROR-CODEQL-0014]" "language=\"${lang}\" reason=\"SARIF upload failed\""
