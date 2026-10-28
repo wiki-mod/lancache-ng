@@ -5660,34 +5660,23 @@ _ci_trivy_dir_writable() {
         && rm -rf "${subdir}"; } 2>&1
 }
 
-# What: Resolve a persistent Trivy DB cache-dir.
-# Why: NFS-shared or real local disk, never tmpfs/tmp.
-# From: Issue #1683
+# What: the Trivy DB dir inside the job container.
+# Why: nothing writes on the runner; never tmpfs /tmp.
+# From: Issue #1683 | PR #1858
 _ci_trivy_cache_dir() {
-    local shared
-    shared="$(_ci_variable CI_TRIVY_SHARED_DIR)" || return 2
-    local fallback="${CI_TRIVY_FALLBACK_DIR:-${CI_TMPDIR}/trivy-cache-fallback}"
-    case "${shared}" in
-        /tmp|/tmp/*) ci_log "[CI-ERROR-SCAN-0007]" "reason=\"shared trivy cache-dir must not be tmpfs /tmp\" got=\"${shared}\""; return 2 ;;
+    local dir="${CI_TMPDIR}/trivy-cache" probe_out mkerr
+    case "${dir}" in
+        /tmp|/tmp/*) ci_log "[CI-ERROR-SCAN-0018]" "reason=\"trivy cache-dir must not be tmpfs /tmp\" got=\"${dir}\""; return 2 ;;
     esac
-    case "${fallback}" in
-        /tmp|/tmp/*) ci_log "[CI-ERROR-SCAN-0018]" "reason=\"fallback trivy cache-dir must not be tmpfs /tmp\" got=\"${fallback}\""; return 2 ;;
-    esac
-    local probe_out mkerr
-    if probe_out="$(_ci_trivy_dir_writable "${shared}")"; then
-        printf 'dir=%s source=nfs-shared\n' "${shared}"
-        return 0
-    fi
-    ci_error "[CI-INFO-SCAN-0008]" "shared=\"${shared}\" reason=\"not mounted/writable; falling back to local disk\"" "${probe_out}"
-    if ! mkerr="$(mkdir -p "${fallback}" 2>&1)"; then
-        ci_error "[CI-ERROR-SCAN-0009]" "dir=\"${fallback}\" reason=\"could not create local fallback trivy cache-dir\"" "${mkerr}"
+    if ! mkerr="$(mkdir -p "${dir}" 2>&1)"; then
+        ci_error "[CI-ERROR-SCAN-0009]" "dir=\"${dir}\" reason=\"could not create the trivy cache-dir\"" "${mkerr}"
         return 2
     fi
-    if ! probe_out="$(_ci_trivy_dir_writable "${fallback}")"; then
-        ci_error "[CI-ERROR-SCAN-0019]" "dir=\"${fallback}\" reason=\"fallback trivy cache-dir failed write probe\"" "${probe_out}"
+    if ! probe_out="$(_ci_trivy_dir_writable "${dir}")"; then
+        ci_error "[CI-ERROR-SCAN-0019]" "dir=\"${dir}\" reason=\"trivy cache-dir failed write probe\"" "${probe_out}"
         return 2
     fi
-    printf 'dir=%s source=local-fallback\n' "${fallback}"
+    printf '%s\n' "${dir}"
 }
 
 # What: True if cache-dir's trivy.db is present and fresh.
@@ -5823,10 +5812,9 @@ _ci_trivy_suppressed_ids() {
 # From: Issue #1683 | PR #1858
 _ci_trivy_scan() {
     local service="$1" digest="$2" ref report rc=0 out
-    local cache_rec cache_dir fresh_rc=0
+    local cache_dir fresh_rc=0
     local -a targs
-    cache_rec="$(_ci_trivy_cache_dir)" || return 2
-    cache_dir="$(_ci_record_field "${cache_rec}" dir)" || return 2
+    cache_dir="$(_ci_trivy_cache_dir)" || return 2
     out="$(_ci_trivy_args "${cache_dir}")" || return 2
     _ci_trivy_db_ensure_fresh "${cache_dir}" || fresh_rc=$?
     [ "${fresh_rc}" -eq 0 ] || return "${fresh_rc}"
@@ -6543,11 +6531,10 @@ ci_cmd_test() {
 # Why: SBOM generate != vuln gate; shares the trivy cache.
 # From: Issue #1683
 _ci_trivy_sbom() {
-    local service="$1" digest="$2" out="$3" ref cache_rec cache_dir raw rc=0 bin
+    local service="$1" digest="$2" out="$3" ref cache_dir raw rc=0 bin
     ref="$(_ci_image_ref "${service}" "${digest}")" || return 2
     bin="$(_ci_trivy_bin)" || return 2
-    cache_rec="$(_ci_trivy_cache_dir)" || return 2
-    cache_dir="$(_ci_record_field "${cache_rec}" dir)" || return 2
+    cache_dir="$(_ci_trivy_cache_dir)" || return 2
     raw="$("${bin}" image --format cyclonedx --cache-dir "${cache_dir}" --output "${out}" "${ref}" 2>&1)" || rc=$?
     { [ "${rc}" -eq 0 ] && [ -s "${out}" ]; } && return 0
     printf '%s\n' "${raw}" >&2
