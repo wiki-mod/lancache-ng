@@ -9801,7 +9801,7 @@ _ci_https_dispatch_violations() {
 _ci_validate_proxy_stream_map() {
     local file port
     file="$(_ci_proxy_constant NGINX_STREAM_TARGETS)" || return 2
-    port="$(_ci_service_port https)" || return 2
+    port="$(_ci_runtime_default NGINX_ORIGIN_HTTPS_PORT)" || return 2
     _ci_validate_proxy_map "$1" "${file}" _ci_stream_map_violations "${port}" \
         "[CI-ERROR-VALIDATE-0022]" "no proxy container for stream-map check" \
         "[CI-ERROR-VALIDATE-0019]" "could not read proxy stream-target map" \
@@ -16489,20 +16489,6 @@ _ci_nginx_subdir() {
     local sub
     sub="$(_ci_runtime_default "$1")" || return 2
     _ci_nginx_path "${sub}"
-}
-
-# What: TCP port of a service name from the services db
-# Why: http/https ports belong to the OS, not to CI
-# From: Issue #1683 | PR #1858
-_ci_service_port() {
-    local name="$1" out port
-    out="$(_ci_capture 0 getent services "${name}/tcp")" || return 2
-    read -r _ port _ <<< "${out}"
-    if [[ ! "${port}" =~ ^([0-9]+)/tcp$ ]]; then
-        ci_error "[CI-ERROR-CORE-0130]" "service=\"${name}\" reason=\"no TCP port in the services db\"" "${out}"
-        return 2
-    fi
-    printf '%s\n' "${BASH_REMATCH[1]}"
 }
 
 # What: docker compose with the env the file renders under.

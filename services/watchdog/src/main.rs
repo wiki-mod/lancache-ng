@@ -3946,10 +3946,12 @@ fn nginx_refuse(loopback: &str) -> String {
 // From: Issue #1683 | PR #1912
 const NGINX_DISCARD_PORT: u16 = 9;
 
-// What: the CDN origin's HTTPS port that passthrough uses.
-// Why: the protocol fixes it; it is no deployment value.
+// What: the CDN origin target that passthrough uses.
+// Why: the SOT owns the port; ci.sh checks the same value.
 // From: Issue #1683 | PR #1858
-const NGINX_ORIGIN_PASS: &str = "$ssl_preread_server_name:443";
+fn nginx_origin_pass(ports: NginxPorts) -> String {
+    format!("$ssl_preread_server_name:{}", ports.origin)
+}
 
 // What: loopback ports and relay timeouts of https.
 // Why: the SOT owns them; dispatch and listens use them.
@@ -3961,6 +3963,7 @@ struct NginxPorts {
     passthrough_relay: u16,
     passthrough: u16,
     https: u16,
+    origin: u16,
     connect_secs: u64,
     idle_secs: u64,
 }
@@ -3974,6 +3977,7 @@ impl NginxPorts {
             passthrough_relay: env_port("NGINX_PASSTHROUGH_RELAY_PORT")?,
             passthrough: env_port("NGINX_PASSTHROUGH_PORT")?,
             https: env_port("PROXY_HTTPS_PORT")?,
+            origin: env_port("NGINX_ORIGIN_HTTPS_PORT")?,
             connect_secs: secs("NGINX_UPSTREAM_CONNECT_TIMEOUT")?,
             idle_secs: secs("NGINX_UPSTREAM_IDLE_TIMEOUT")?,
         })
@@ -4097,7 +4101,8 @@ fn nginx_stream_targets(
     acl: &Path,
     ports: NginxPorts,
 ) -> String {
-    let pass = NGINX_ORIGIN_PASS;
+    let pass = nginx_origin_pass(ports);
+    let pass = pass.as_str();
     let refuse = nginx_refuse(loopback);
     let mut out = format!(
         "{NGINX_GENERATED}map $ssl_preread_server_name $stream_backend {{\n    hostnames;\n{}",
@@ -4213,6 +4218,7 @@ fn nginx_https_dispatch(
     // From: Issue #1683 | PR #1912
     let (acl, mitm_port, https) = (acl.display(), ports.mitm, ports.https);
     let timeouts = nginx_relay_timeouts(ports);
+    let origin = nginx_origin_pass(ports);
     out.push_str(&format!(
         "    default {default};\n}}\n\n\
          server {{\n    listen {https};\n    listen [::]:{https};\n    include {acl};\n    \
@@ -4222,7 +4228,7 @@ fn nginx_https_dispatch(
          proxy_protocol on;\n    proxy_pass {loopback}:{mitm_port};\n\
          {timeouts}}}\n\n\
          server {{\n    listen {passthrough} proxy_protocol;\n    set_real_ip_from {loopback};\n    \
-         ssl_preread on;\n    proxy_pass {NGINX_ORIGIN_PASS};\n\
+         ssl_preread on;\n    proxy_pass {origin};\n\
          {timeouts}}}\n"
     ));
     out
