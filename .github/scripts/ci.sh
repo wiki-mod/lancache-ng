@@ -7314,9 +7314,10 @@ _ci_channel_readback() {
 # Why: an index digest alone does not prove a usable image.
 # From: Issue #1683 | PR #1858
 _ci_index_complete() {
-    local base="$1" digest="$2" child prc children
-    children="$(_ci_index_children "${base}@${digest}")" || return "$?"
-    # What: an index with no platform child is incomplete.
+    local base="$1" digest="$2" child prc children rc=0
+    children="$(_ci_index_children "${base}@${digest}")" || rc=$?
+    [ "${rc}" -le 1 ] || return 2
+    # What: an absent or childless index is incomplete.
     # Why: zero children must not read as all resolvable.
     # From: Issue #1683
     if [ -z "${children}" ]; then
