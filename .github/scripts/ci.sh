@@ -16610,6 +16610,8 @@ _ci_generate_vex() {
         jq -nR --arg repo "${repo}" --arg server "${server}" --arg ts "${ts}" "$(cat <<'PROG'
         def stmt($e; $p):
           ($e.statement // "") as $s
+          | if ($e.id // "") == "" then error("entry \($e.n): id is empty")
+            elif $s == "" then error("\($e.id): statement is empty") else . end
           | if ($e.status // "") == "not_affected" then
               (($e.justification // "vulnerable_code_not_present") as $j
                | if ($j | IN("component_not_present", "vulnerable_code_not_present",
@@ -16627,7 +16629,9 @@ _ci_generate_vex() {
         [inputs | select(. != "") | split("\t") | {n: (.[0] | tonumber), k: .[1], v: (.[2:] | join("\t") | gsub("\u001e"; "\n"))}]
         | group_by(.n)
         | map(reduce .[] as $f ({paths: []};
-            if $f.k == "path" then .paths += [$f.v] else .[$f.k] = $f.v end))
+            if $f.k == "path" then .paths += [$f.v] else .[$f.k] = $f.v end) + {n: .[0].n})
+        | ([group_by(.id)[] | select(length > 1) | .[0].id]) as $dup
+        | if $dup != [] then error("duplicate id: \($dup | join(", "))") else . end
         | {"@context": "https://openvex.dev/ns/v0.2.0",
            "@id": "\($server)/\($repo)/vex/\($repo | split("/")[1])-\($ts)",
            author: "\($repo | split("/")[1]) release automation (\($server)/\($repo))",
