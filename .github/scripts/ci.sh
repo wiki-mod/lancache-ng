@@ -3512,7 +3512,10 @@ _ci_diff_history() {
     [ "${#deep[@]}" -gt 0 ] || [ "${#need[@]}" -gt 0 ] || return 0
     head="$(_ci_head_commit)" || return 2
     remote="$(_ci_git_remote)" || return 2
-    (cd -- "${CI_REPO_ROOT}" && _ci_retry git-fetch git fetch -q --no-tags "${deep[@]}" "${remote}" "${head}" "${need[@]}") >&2 || return 2
+    # What: commits and trees only; blobs load on demand.
+    # Why: whole history with blobs cost 33 s (Fund 114).
+    # From: Issue #1683 | PR #1858
+    (cd -- "${CI_REPO_ROOT}" && _ci_retry git-fetch git fetch -q --no-tags --filter=blob:none "${deep[@]}" "${remote}" "${head}" "${need[@]}") >&2 || return 2
 }
 
 # What: This run's base and head diff refs, or empty.
@@ -3546,9 +3549,14 @@ ci_cmd_changed_files() {
     local out="${RUNNER_TEMP:-${CI_TMPDIR}}/changed-files.txt" base head refs
     refs="$(_ci_diff_refs)" || return 2
     read -r base head <<<"${refs}"
-    local list err
+    local list err stat
     if [ -n "${base}" ]; then
         list="$(_ci_run "[CI-ERROR-CORE-0117]" "base=\"${base}\" head=\"${head}\" repo=\"${CI_REPO_ROOT}\"" git -C "${CI_REPO_ROOT}" diff --name-only "${base}" "${head}")" || return 2
+        # What: load the changed files' blobs in one fetch.
+        # Why: blobless history reads them one by one else.
+        # From: Issue #1683 | PR #1858
+        stat="$(_ci_run "[CI-ERROR-CORE-0122]" "base=\"${base}\" head=\"${head}\" reason=\"changed blobs not loaded\"" git -C "${CI_REPO_ROOT}" diff --numstat "${base}" "${head}")" || return 2
+        ci_log "[CI-INFO-CORE-0124]" "base=\"${base}\" loaded=$(_ci_count_lines "${stat}")"
     else
         ci_log "[CI-INFO-CORE-0118]" "reason=\"no base ref for this event; every tracked file counts as changed\""
         list="$(_ci_run "[CI-ERROR-CORE-0119]" "repo=\"${CI_REPO_ROOT}\"" git -C "${CI_REPO_ROOT}" ls-files)" || return 2
