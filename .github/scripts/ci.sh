@@ -1402,6 +1402,27 @@ _ci_pr_green_reuse() {
     ci_log "[CI-INFO-PLAN-0013]" "ref=\"${ref}\" fingerprint=\"${fp}\" reason=\"last green run checked this tree and these digests; build, scan, test and validate NOT-RUN\""
 }
 
+# What: rc 0 if each release service has its index.
+# Why: DoMe: a red platform stays out, also on release.
+# From: Issue #1683 | PR #1858
+_ci_release_plan_gate() {
+    local doc="$1" svcs svc idx miss="" rc
+    svcs="$(_ci_capture 0 jq -r '.[].service' <<< "${doc}")" || return 2
+    svcs="$(LC_ALL=C sort -u <<< "${svcs}")"
+    while IFS= read -r svc; do
+        [ -n "${svc}" ] || continue
+        rc=0; idx="$(_ci_candidate_index "${svc}")" || rc=$?
+        if [ "${rc}" -eq 0 ]; then
+            ci_log "[CI-WARN-RELEASE-0063]" "tag=\"${CI_RELEASE_TAG}\" service=\"${svc}\" index=\"${idx}\" reason=\"a platform is not accepted; the release leaves it out\""
+            continue
+        fi
+        miss="${miss} ${svc}"
+    done <<< "${svcs}"
+    [ -n "${miss}" ] || return 0
+    ci_error "[CI-ERROR-RELEASE-0062]" "tag=\"${CI_RELEASE_TAG}\" services=\"${miss# }\" reason=\"no assembled index for the accepted platforms (raw above); run ci.yml by workflow_dispatch on the release branch, then publish the tag again\"" "$(_ci_matrix_doc "${doc}")"
+    return 2
+}
+
 # What: Emit a resolve-filtered matrix to GITHUB_OUTPUT.
 # Why: Base-CI builds only what identity proves needs work.
 # From: Issue #1683
@@ -1514,12 +1535,12 @@ ci_cmd_plan_matrix() {
             any=true
         done <<< "${plats}"
     done
-    # What: a release candidate must already be accepted.
+    # What: a release builds nothing; the gate decides.
     # Why: §82: release.yml never builds; ci.yml builds it.
     # From: Issue #1683 | PR #1858
     if [ -n "${CI_RELEASE_TAG:-}" ] && [ "${any}" = true ]; then
-        ci_error "[CI-ERROR-RELEASE-0062]" "tag=\"${CI_RELEASE_TAG}\" reason=\"release candidate not accepted; run ci.yml by workflow_dispatch on the release branch, then publish the tag again\"" "$(_ci_matrix_doc "${include}")"
-        return 2
+        _ci_release_plan_gate "${include}" || return "$?"
+        any=false include='[]'
     fi
     # What: emit the AG-VAL-008 rust validation decision.
     # Why: no test runner is booked while validation is off.
