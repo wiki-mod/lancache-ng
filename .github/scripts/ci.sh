@@ -5928,8 +5928,17 @@ _ci_package_refresh_pair() {
 # Why: create and cp read the image; it never runs here.
 # From: Issue #1683 | PR #1858
 _ci_image_files() {
-    local ref="$1" platform="$2" work="$3" cid f out rc=0
+    local ref="$1" platform="$2" work="$3" cid f out kids kid rc=0
     shift 3
+    # What: an index digest is read as its platform child.
+    # Why: one daemon keeps one platform per index digest.
+    # From: Issue #1683 | PR #1858
+    kids="$(_ci_index_children "${ref}")" || rc=$?
+    [ "${rc}" -le 1 ] || return 2
+    while IFS= read -r kid; do
+        [ "${kid%%=*}" != "${platform}" ] || ref="${ref%@*}@${kid#*=}"
+    done <<< "${kids}"
+    rc=0
     _ci_retry registry docker pull --platform "${platform}" "${ref}" >&2 || return 2
     cid="$(_ci_capture 0 docker create --platform "${platform}" --entrypoint /bin/true "${ref}")" || return 2
     for f in "$@"; do
