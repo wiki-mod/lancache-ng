@@ -11421,6 +11421,13 @@ _ci_build_tools_resolve_image() {
     # Why: nightly starts on master but runs current_dev.
     # From: Issue #1683 | PR #1858
     ref="${CI_SOURCE_REF:-${GITHUB_BASE_REF:-${GITHUB_REF_NAME:-}}}"
+    # What: a release tag run reads the release branch.
+    # Why: its ids must match the run that accepted them.
+    # From: Issue #1683 | PR #1858
+    if [ -n "${CI_RELEASE_TAG:-}" ]; then
+        ref="$(_ci_release_ref)" || return 2
+        ref="${ref#refs/heads/}"
+    fi
     # What: consume the channel a push to this branch moves.
     # Why: one ref->channel owner (promote); else nightly.
     # From: Issue #1683 | PR #1858

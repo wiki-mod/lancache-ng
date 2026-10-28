@@ -112,6 +112,7 @@ jobs:
         env:
           CHANGED_FILES: ${{ steps.changed.outputs.file }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CI_BUILD_TOOLS_IMAGE: ${{ needs.resolve-build-tools.outputs.image }}
         run: bash .github/scripts/ci.sh plan-matrix
 
   # What: validate the accepted stack of the release commit.
