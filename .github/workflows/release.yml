@@ -7,12 +7,8 @@
 # From: Issue #1683
 name: CI 2.0 Release
 on:
-  # What: start after CI 2.0 on the pushed tag completes.
-  # Why: AG-CI-010: its promote writes build-tools:<tag>.
-  # From: Issue #1683 | PR #1858
-  workflow_run:
-    workflows: [CI 2.0]
-    types: [completed]
+  push:
+    tags: ['v*']
   # What: publish a tag, or cut the next patch tag.
   # Why: AG-REL-013: a tag cut is its own dispatch.
   # From: Issue #1683 | PR #1858
@@ -29,7 +25,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: ci-2.0-release-${{ github.event.inputs.tag || github.event.workflow_run.head_branch }}
+  group: ci-2.0-release-${{ github.event.inputs.tag || github.ref_name }}
   cancel-in-progress: false
 defaults:
   run:
@@ -39,7 +35,7 @@ defaults:
 # From: Issue #1683
 env:
   GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-  RELEASE_TAG: ${{ github.event.inputs.tag || github.event.workflow_run.head_branch }}
+  RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
   # What: LAN proxy CA secret; ci.sh uses it self-hosted.
   # Why: secrets are not in CI_VARIABLES; vars are.
   # From: Issue #1683 | PR #1858
@@ -54,14 +50,6 @@ jobs:
   # From: Issue #1683
   resolve-build-tools:
     name: resolve build-tools
-    # What: run on dispatch, or after a green CI on a v-tag.
-    # Why: a red CI or a branch run must not release.
-    # From: Issue #1683 | PR #1858
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.event == 'push' &&
-      startsWith(github.event.workflow_run.head_branch, 'v'))
     # What: the one literal runner/timeout; emits the rest.
     # Why: ci.sh can only pick a runner once one runs it.
     # From: Issue #1683 | PR #1858
@@ -87,11 +75,11 @@ jobs:
         name: Check out the event commit
         uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          ref: ${{ github.sha }}
           fetch-depth: 1
       - name: Resolve the build-tools image
         id: resolve
-        run: bash .github/scripts/ci.sh build-tools resolve-image "${RELEASE_TAG}"
+        run: bash .github/scripts/ci.sh build-tools resolve-image
       - name: Resolve the job settings
         id: jobs
         run: bash .github/scripts/ci.sh job-settings

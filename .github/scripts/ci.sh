@@ -11380,19 +11380,15 @@ _ci_matrix_doc() {
 # Why: jobs pin toolchain by digest; no cascade.
 # From: Issue #1683
 _ci_build_tools_resolve_image() {
-    local tag="${1:-}" ref channel image digest
+    local ref channel image digest
     # What: a channel-checkout ref wins over the event ref.
     # Why: nightly starts on master but runs current_dev.
     # From: Issue #1683 | PR #1858
-    ref="refs/heads/${CI_SOURCE_REF:-${GITHUB_BASE_REF:-${GITHUB_REF_NAME:-}}}"
-    # What: a release tag resolves the image of that tag.
-    # Why: AG-CI-010: a release uses its tag's build-tools.
-    # From: Issue #1683 | PR #1858
-    [ -z "${tag}" ] || ref="refs/tags/${tag}"
-    # What: consume the channel a push to this ref moves.
+    ref="${CI_SOURCE_REF:-${GITHUB_BASE_REF:-${GITHUB_REF_NAME:-}}}"
+    # What: consume the channel a push to this branch moves.
     # Why: one ref->channel owner (promote); else nightly.
     # From: Issue #1683 | PR #1858
-    channel="$(GITHUB_REF="${ref}" CI_PROMOTE_REQUESTED_CHANNEL='' _ci_promote_targets_for_ref)" || return 2
+    channel="$(GITHUB_REF="refs/heads/${ref}" CI_PROMOTE_REQUESTED_CHANNEL='' _ci_promote_targets_for_ref)" || return 2
     channel="${channel%%$'\n'*}"
     [ -n "${channel}" ] || channel="$(_ci_block_entry_field release "" default_channel)" || return 2
     if [ -z "${channel}" ]; then
