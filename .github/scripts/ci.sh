@@ -8067,7 +8067,7 @@ _ci_release_provenance() {
     done <<< "${kids}"
     if ! out="$(jq -c -n --arg d "${dig}" --arg s "${source}" --arg h "${head}" --arg t "${tag}" --arg b "${type}" --argjson p "${plats}" \
         '{digest: $d, source: $s, release_commit: $h, release_tag: $t, build_type: $b, platforms: $p}' 2>&1)"; then
-        ci_error "[CI-ERROR-RELEASE-0066]" "image=\"${img}\" reason=\"provenance not encodable\"" "${out}"
+        ci_error "[CI-ERROR-RELEASE-0068]" "image=\"${img}\" reason=\"provenance not encodable\"" "${out}"
         return 2
     fi
     printf '%s\n' "${out}"
