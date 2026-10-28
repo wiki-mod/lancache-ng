@@ -8092,7 +8092,7 @@ _ci_release_provenance() {
 _ci_release_digest() {
     local img="$1" matrix dig
     matrix="$(_ci_env_required CI_RELEASE_IMAGES)" || return 2
-    dig="$(_ci_capture 0 jq -r --arg n "${img}" '.include[] | select(.name == $n) | .digest' <<< "${matrix}")" || return 2
+    dig="$(_ci_capture 0 jq -r --arg n "${img}" ".include[] | select(.name == \$n) | .digest" <<< "${matrix}")" || return 2
     if [[ ! "${dig}" =~ ^${CI_DIGEST_RE}$ ]]; then
         ci_error "[CI-ERROR-RELEASE-0061]" "image=\"${img}\" reason=\"not exactly one digest in CI_RELEASE_IMAGES\"" "${matrix}"
         return 2
