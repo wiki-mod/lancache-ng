@@ -16603,6 +16603,9 @@ _ci_generate_vex() {
     ts="${CI_VEX_TIMESTAMP:-}"
     [ -n "${ts}" ] || ts="$(_ci_capture 0 env TZ=UTC git -C "${CI_REPO_ROOT:-.}" log -1 \
         --date=format-local:%Y-%m-%dT%H:%M:%SZ --format=%cd)" || return 2
+    # What: an empty ignore list gives zero statements.
+    # Why: no exception is valid; <<< adds one empty line.
+    # From: Issue #1683 | PR #1858
     _ci_run "[CI-ERROR-RELEASE-0025]" "trivyignore=\"${trivyignore}\" reason=\"OpenVEX assembly failed\"" \
         jq -nR --arg repo "${repo}" --arg server "${server}" --arg ts "${ts}" "$(cat <<'PROG'
         def stmt($e; $p):
@@ -16621,7 +16624,7 @@ _ci_generate_vex() {
                | $p + {status: "affected",
                    action_statement: $s})
             else error("\($e.id): status \($e.status) is not supported (not_affected or none)") end;
-        [inputs | split("\t") | {n: (.[0] | tonumber), k: .[1], v: (.[2:] | join("\t") | gsub("\u001e"; "\n"))}]
+        [inputs | select(. != "") | split("\t") | {n: (.[0] | tonumber), k: .[1], v: (.[2:] | join("\t") | gsub("\u001e"; "\n"))}]
         | group_by(.n)
         | map(reduce .[] as $f ({paths: []};
             if $f.k == "path" then .paths += [$f.v] else .[$f.k] = $f.v end))
