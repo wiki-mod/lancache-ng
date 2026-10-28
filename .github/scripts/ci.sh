@@ -9467,7 +9467,7 @@ _ci_validate_dns() {
     for side in IP_HTTP IP_HTTPS; do
         port="$(_ci_validate_dns_port "${side}")" || return 2
         out="$(_ci_run -s "[CI-ERROR-VALIDATE-0117]" "domain=\"${domain}\" side=\"${side}\" reason=\"dig failed\"" \
-            dig +time=2 +tries=1 +short -p "${port}" "@${ip}" A "${domain}")" || return 2
+            _ci_validate_dig +short -p "${port}" "@${ip}" A "${domain}")" || return 2
         out="$(sort -u <<<"${out}")"
         if [ -z "${out}" ]; then
             ci_log "[CI-ERROR-VALIDATE-0011]" "domain=\"${domain}\" side=\"${side}\" reason=\"no DNS answer from a resolver side\""
@@ -9842,6 +9842,16 @@ _ci_validate_probe_mac() {
     printf '%s:%02x' "${mac%:*}" "${n}"
 }
 
+# What: dig with the SOT timeout and tries.
+# Why: AG-CI-006: one owner for every dig timing value.
+# From: Issue #1683 | PR #1858
+_ci_validate_dig() {
+    local wait tries
+    wait="$(_ci_variable CI_VALIDATE_DIG_TIMEOUT)" || return 2
+    tries="$(_ci_variable CI_VALIDATE_DIG_TRIES)" || return 2
+    dig "+time=${wait}" "+tries=${tries}" "$@"
+}
+
 # What: Poll one dns side until <fqdn> is <expected>.
 # Why: the NATS->PowerDNS write is async; prove it.
 # From: Issue #1683 | PR #1912
@@ -9853,21 +9863,22 @@ _ci_validate_dns_resolves() {
         return 2
     fi
     port="$(_ci_validate_dns_port "${side}")" || return 2
-    local out="" dig_err
+    local out="" dig_err pause
+    pause="$(_ci_variable CI_VALIDATE_DIG_PAUSE)" || return 2
     # What: dig stderr kept apart from the compared answer.
     # Why: a warning must not turn a match into a mismatch.
     # From: Issue #1683 | PR #1858
     dig_err="$(_ci_mktemp "${CI_TMPDIR}/ci-dig-err.XXXXXX")" || return 2
     for (( i = 1; i <= attempts; i++ )); do
         got=""
-        if out="$(dig +time=2 +tries=1 +short -p "${port}" "@${ip}" A "${fqdn}" 2>"${dig_err}")"; then
+        if out="$(_ci_validate_dig +short -p "${port}" "@${ip}" A "${fqdn}" 2>"${dig_err}")"; then
             got="$(sort -u <<<"${out}")"
         fi
         if [ "${got}" = "${expected}" ]; then
             rm -f "${dig_err}"
             return 0
         fi
-        sleep 1
+        sleep "${pause}"
     done
     # What: full answer, zone SOA and the service's logs.
     # Why: +short hides NXDOMAIN vs empty vs SERVFAIL.
@@ -9875,9 +9886,9 @@ _ci_validate_dns_resolves() {
     ci_error "[CI-ERROR-VALIDATE-0036]" "side=\"${side}\" fqdn=\"${fqdn}\" expected=\"${expected}\" got=\"${got:-}\" reason=\"record did not resolve as expected\"" \
         "${out}$(cat "${dig_err}")
 full answer:
-$(dig +time=2 +tries=1 -p "${port}" "@${ip}" A "${fqdn}" 2>&1)
+$(_ci_validate_dig -p "${port}" "@${ip}" A "${fqdn}" 2>&1)
 zone SOA:
-$(dig +time=2 +tries=1 +short -p "${port}" "@${ip}" SOA "${fqdn#*.}" 2>&1)
+$(_ci_validate_dig +short -p "${port}" "@${ip}" SOA "${fqdn#*.}" 2>&1)
 service:
 $(_ci_validate_service_evidence "${project}" dns)"
     rm -f "${dig_err}"
