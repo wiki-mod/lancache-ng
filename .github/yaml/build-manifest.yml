@@ -865,7 +865,6 @@ ci_job_timeouts:
   checks: 30
   cut-release-tag: 15
   gc: 60
-  lint: 30
   nightly: 30
   orphaned-branches: 15
   plan: 30

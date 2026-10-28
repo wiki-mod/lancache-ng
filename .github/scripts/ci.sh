@@ -3543,7 +3543,7 @@ _ci_diff_refs() {
 }
 
 # What: write/echo changed-file list path for this event.
-# Why: one git-walk owner; plan/lint/checks (AG-CODE-011).
+# Why: one git-walk owner; plan and checks (AG-CODE-011).
 # From: Issue #1683
 ci_cmd_changed_files() {
     local out="${RUNNER_TEMP:-${CI_TMPDIR}}/changed-files.txt" base head refs

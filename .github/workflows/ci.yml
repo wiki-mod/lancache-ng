@@ -140,7 +140,7 @@ jobs:
     steps:
       - *bootstrap
       # What: collect changed-file list via ci.sh
-      # Why: ci.sh sole owner; reused by plan/lint/checks
+      # Why: ci.sh sole owner; reused by plan and checks
       # From: Issue #1683
       - &collect_changed
         name: Collect changed files
@@ -272,26 +272,6 @@ jobs:
         env:
           TEST_SERVICES: ${{ needs.plan.outputs.test-services }}
         run: bash .github/scripts/ci.sh test-stack
-
-  # What: lint shell and workflow syntax
-  # Why: pinned linter versions in image, not runner
-  # From: Issue #1683
-  lint:
-    name: lint
-    needs: [platform, plan]
-    if: needs.plan.outputs.docs-only != 'true' && needs.plan.outputs.reuse != 'true'
-    runs-on: ${{ needs.platform.outputs.runner }}
-    timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['lint'] }}
-    container: *bt_platform
-    steps:
-      - *bootstrap
-      - *collect_changed
-      - name: shellcheck changed shell scripts
-        env:
-          CHANGED_FILES: ${{ steps.changed.outputs.file }}
-        run: bash .github/scripts/ci.sh check shellcheck
-      - name: actionlint workflows
-        run: bash .github/scripts/ci.sh check actionlint
 
   # What: scan all built images before ACCEPT
   # Why: ci.sh fetches the latest trivy; gates ACCEPT
@@ -534,13 +514,22 @@ jobs:
         env:
           CHANGED_FILES: ${{ steps.changed.outputs.file }}
         run: bash .github/scripts/ci.sh check all
+      # What: lint shell and workflow syntax here
+      # Why: no own job, no wait on plan (Fund 114)
+      # From: Issue #1683 | PR #1858
+      - name: shellcheck changed shell scripts
+        env:
+          CHANGED_FILES: ${{ steps.changed.outputs.file }}
+        run: bash .github/scripts/ci.sh check shellcheck
+      - name: actionlint workflows
+        run: bash .github/scripts/ci.sh check actionlint
 
   # What: always-present required check (branch protection).
   # Why: must appear always, even on NOOP
   # From: Issue #1683
   result:
     name: result
-    needs: [platform, plan, build, test, cargo-audit, lint, scan, aggregate, assemble, validate, promote, checks, close-linked-issues]
+    needs: [platform, plan, build, test, cargo-audit, scan, aggregate, assemble, validate, promote, checks, close-linked-issues]
     if: always() && github.event_name != 'issues'
     # What: platform's runner/timeout or the bootstrap pair.
     # Why: the required check must run when platform failed.
