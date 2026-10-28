@@ -14,7 +14,6 @@ on:
     types: [opened, synchronize, reopened, edited, ready_for_review, converted_to_draft, labeled, unlabeled, milestoned, demilestoned]
   push:
     branches: [current_dev, master]
-    tags: ['v*']
   # What: new issues only run the project-board job.
   # Why: AG-GH-008 board placement; maintainer 2026-10-03.
   # From: Issue #1683 | PR #1858

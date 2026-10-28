@@ -5834,6 +5834,10 @@ _ci_trivy_scan() {
 _ci_refresh_event() {
     local events event="${GITHUB_EVENT_NAME:-}"
     [ -n "${event}" ] || return 1
+    # What: a release run never refreshes packages.
+    # Why: release never builds (§51, §56); ids stay fixed.
+    # From: Issue #1683 | PR #1858
+    [ -z "${CI_RELEASE_TAG:-}" ] || return 1
     events="$(_ci_required_field build_admission refresh_events blocklist)" || return 2
     _ci_list_has "${event}" "${events}" || return 1
 }
@@ -7477,11 +7481,23 @@ ci_cmd_promote() {
     printf 'channel=%s result=promoted services=%s\n' "${channel}" "$(_ci_count_lines "${cand}")"
 }
 
+# What: the ref promotion reads: release tag, else event.
+# Why: a release dispatch runs on a branch ref (§56.1).
+# From: Issue #1683 | PR #1858
+_ci_promote_ref() {
+    if [ -n "${CI_RELEASE_TAG:-}" ]; then
+        printf 'refs/tags/%s\n' "${CI_RELEASE_TAG}"
+        return 0
+    fi
+    printf '%s\n' "${GITHUB_REF:-}"
+}
+
 # What: list promote targets for current git ref.
 # Why: ref-driven policy; no channel logic in YAML.
 # From: Issue #1683
 _ci_promote_targets_for_ref() {
-    local ref="${GITHUB_REF:-}" requested="${CI_PROMOTE_REQUESTED_CHANNEL:-}" tag prerelease
+    local ref requested="${CI_PROMOTE_REQUESTED_CHANNEL:-}" tag prerelease
+    ref="$(_ci_promote_ref)" || return 2
     {
         case "${ref}" in
             refs/heads/*) _ci_channels_where ref "${ref}" || return 2 ;;
@@ -7512,7 +7528,8 @@ _ci_ref_tip() {
 # Why: one ref entry, supersede-safe, single policy owner.
 # From: Issue #1683
 ci_cmd_promote_ref() {
-    local ref="${GITHUB_REF:-}" tip targets t head
+    local ref tip targets t head
+    ref="$(_ci_promote_ref)" || return 2
     targets="$(_ci_promote_targets_for_ref)" || return "$?"
     if [ -z "${targets}" ]; then
         printf 'promote=noop reason=no-targets ref=%s\n' "${ref}"
@@ -11388,7 +11405,7 @@ _ci_build_tools_resolve_image() {
     # What: consume the channel a push to this branch moves.
     # Why: one ref->channel owner (promote); else nightly.
     # From: Issue #1683 | PR #1858
-    channel="$(GITHUB_REF="refs/heads/${ref}" CI_PROMOTE_REQUESTED_CHANNEL='' _ci_promote_targets_for_ref)" || return 2
+    channel="$(GITHUB_REF="refs/heads/${ref}" CI_RELEASE_TAG='' CI_PROMOTE_REQUESTED_CHANNEL='' _ci_promote_targets_for_ref)" || return 2
     channel="${channel%%$'\n'*}"
     [ -n "${channel}" ] || channel="$(_ci_block_entry_field release "" default_channel)" || return 2
     if [ -z "${channel}" ]; then
