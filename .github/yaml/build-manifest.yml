@@ -142,6 +142,7 @@ services:
       - pdns-recursor-luajit
       - nats-server
       - bind-tools
+      - sqlite
       - iproute2
     smoke:
       - nats-server --version
@@ -225,6 +226,7 @@ build_toolchain:
       - lsof
       - make
       - musl-dev
+      - nano
       - nodejs
       - npm
       - openjdk21-jre-headless
@@ -245,6 +247,8 @@ build_toolchain:
       - sccache
       - shellcheck
       - shfmt
+      - sqlite
+      - tcpdump
       - tzdata
       - xz
       - yq-go
@@ -292,6 +296,7 @@ build_toolchain:
       - sha256sum
       - sort
       - tar
+      - tcpdump
       - tee
       - timeout
       - xargs
