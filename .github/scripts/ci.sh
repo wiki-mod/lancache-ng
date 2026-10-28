@@ -7354,13 +7354,15 @@ _ci_index_complete() {
 # Why: One locked section; the caller always unlocks.
 # From: Issue #1683
 _ci_promote_move_all() {
-    local channel="$1" cand="$2" line svc digest seen prev moved="" prc kept mrc
+    local channel="$1" cand="$2" line svc digest seen prev moved="" prc kept mrc plan=""
+    # What: read every service's state before any move.
+    # Why: a read error then stops with nothing moved (§50).
+    # From: Issue #1683 | PR #1858
     while IFS= read -r line; do
         [ -n "${line}" ] || continue
         svc="${line%%=*}"; digest="${line#*=}"
         if ! kept="$(_ci_promote_kept "${svc}" "${channel}" "${digest}")"; then
-            ci_log "[CI-ERROR-PROMOTE-0035]" "service=\"${svc}\" channel=\"${channel}\" reason=\"kept platforms unreadable; blocking\""
-            _ci_promote_rollback "${channel}" "${moved}"
+            ci_log "[CI-ERROR-PROMOTE-0035]" "service=\"${svc}\" channel=\"${channel}\" reason=\"kept platforms unreadable; blocking, nothing moved\""
             return 2
         fi
         # What: read the earlier digest; absent = first.
@@ -7369,10 +7371,13 @@ _ci_promote_move_all() {
         prc=0
         prev="$(_ci_channel_readback -p "${svc}" "${channel}")" || prc=$?
         if [ "${prc}" -gt 1 ]; then
-            ci_log "[CI-ERROR-PROMOTE-0024]" "service=\"${svc}\" channel=\"${channel}\" rc=${prc} reason=\"earlier digest unreadable; blocking\""
-            _ci_promote_rollback "${channel}" "${moved}"
+            ci_log "[CI-ERROR-PROMOTE-0024]" "service=\"${svc}\" channel=\"${channel}\" rc=${prc} reason=\"earlier digest unreadable; blocking, nothing moved\""
             return 2
         fi
+        plan+="${svc}|${digest}|${prev}|${kept}"$'\n'
+    done <<< "${cand}"
+    while IFS='|' read -r svc digest prev kept; do
+        [ -n "${svc}" ] || continue
         if ! _ci_promote_move "${svc}" "${channel}" "${digest}" "${kept}"; then
             ci_log "[CI-ERROR-PROMOTE-0007]" "service=\"${svc}\" channel=\"${channel}\" reason=\"channel ref move failed\""
             _ci_promote_rollback "${channel}" "${moved}"
@@ -7390,7 +7395,7 @@ _ci_promote_move_all() {
             _ci_promote_rollback "${channel}" "${moved}"
             return 2
         fi
-    done <<< "${cand}"
+    done <<< "${plan}"
 }
 
 # What: re-read the stack under the lock, then move it.
@@ -7419,11 +7424,11 @@ _ci_promote_rollback() {
         [ -n "${line}" ] || continue
         svc="${line%%=*}"; prev="${line#*=}"
         if [ -z "${prev}" ]; then
-            ci_log "[CI-ERROR-PROMOTE-0022]" "service=\"${svc}\" channel=\"${channel}\" reason=\"no earlier digest to restore; ref stays, channel is mixed\""
+            ci_log "[CI-ERROR-PROMOTE-0022]" "service=\"${svc}\" channel=\"${channel}\" reason=\"channel had no image before; ref stays, channel incomplete until a promote rerun\""
             continue
         fi
         if ! _ci_promote_move "${svc}" "${channel}" "${prev}"; then
-            ci_log "[CI-ERROR-PROMOTE-0023]" "service=\"${svc}\" channel=\"${channel}\" earlier=\"${prev}\" reason=\"rollback move failed; channel is mixed\""
+            ci_log "[CI-ERROR-PROMOTE-0023]" "service=\"${svc}\" channel=\"${channel}\" earlier=\"${prev}\" reason=\"rollback move failed; channel is mixed until a promote rerun\""
         fi
     done <<< "${moved}"
 }
