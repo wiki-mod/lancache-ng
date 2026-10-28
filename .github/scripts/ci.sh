@@ -4438,7 +4438,7 @@ _ci_build_tools_image() {
 # Why: Provenance labels set once, not per Dockerfile.
 # From: Issue #1683
 _ci_oci_labels() {
-    local service="$1" repo source base final created lic head
+    local service="$1" repo source base final created lic head desc
     repo="$(_ci_repo)" || return 2
     lic="$(_ci_release_value license)" || return 2
     source="$(_ci_env_required GITHUB_SERVER_URL)" || return 2
