@@ -9702,7 +9702,7 @@ _ci_validate_service_evidence() {
 _ci_validate_dns_port() {
     local side="$1" cfg dport port
     cfg="$(_ci_validate_config_json)" || return 2
-    dport="$(_ci_service_port domain)" || return 2
+    dport="$(_ci_runtime_default DNS_PORT)" || return 2
     port="$(_ci_capture 0 jq -r --arg v "${side}" --arg p "${dport}" "$(cat <<'PROG'
         .services.dns as $s | ($s.environment[$v] // "") as $ip
         | [$s.ports[]? | select($ip != "" and .host_ip == $ip
