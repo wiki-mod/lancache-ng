@@ -911,7 +911,11 @@ _ci_hosted_runner() {
 # Why: CHANGED_FILES (file) or args; no hidden git walk.
 # From: Issue #1683
 _ci_changed_files() {
-    if [ -n "${CHANGED_FILES:-}" ] && [ -f "${CHANGED_FILES}" ]; then
+    if [ -n "${CHANGED_FILES:-}" ]; then
+        # What: a set list path must be an existing file.
+        # Why: AG-VAL-002: a missing list is no empty diff.
+        # From: Issue #1683 | PR #1858
+        [ -f "${CHANGED_FILES}" ] || { printf 'CHANGED_FILES=%s: no such file\n' "${CHANGED_FILES}"; return 1; }
         cat -- "${CHANGED_FILES}"
         return 0
     fi
@@ -3651,7 +3655,7 @@ _ci_pr_labels_for() {
 # Why: AG-GH-008 labels; SOT owns the path->label rules.
 # From: Issue #1683 | PR #1858
 ci_cmd_pr_labels() {
-    local list labels l repo out stored
+    local labels l repo out stored
     local -a files=() args=() missing=()
     if _ci_skip_outside_pr pr-labels; then
         return 0
@@ -3660,12 +3664,11 @@ ci_cmd_pr_labels() {
         printf 'pr-labels=NOT-RUN reason="fork PR: token cannot write labels; label by hand (AG-GH-008)"\n'
         return 0
     fi
-    list="${CHANGED_FILES:-}"
-    if [ -z "${list}" ] || [ ! -f "${list}" ]; then
-        ci_log "[CI-ERROR-PRLABELS-0001]" "file=\"${list}\" reason=\"CHANGED_FILES list missing\""
+    if [ -z "${CHANGED_FILES:-}" ]; then
+        ci_log "[CI-ERROR-PRLABELS-0001]" "reason=\"CHANGED_FILES list missing\""
         return 2
     fi
-    mapfile -t files < "${list}"
+    _ci_collect_changed files || return 2
     labels="$(_ci_pr_labels_for "${files[@]}")" || return 2
     if [ -z "${labels}" ]; then
         printf 'pr-labels=none changed=%s\n' "${#files[@]}"
@@ -17591,10 +17594,10 @@ _ci_check_shellcheck() {
     for f in "${changed[@]}"; do
         case "${f##*/}" in .shellcheckrc|shellcheckrc) supp+=("${f}: shellcheck rc file") ;; esac
     done
-    # What: keep only real shell files; mixed.
-    # Why: shellcheck reads shell; yaml etc not input.
-    # From: Issue #1683
-    [ "${#changed[@]}" -eq 0 ] || _ci_shell_sources files changed || return 2
+    # What: shell files of the list; no list = all of them.
+    # Why: an empty list means all files, as in check all.
+    # From: Issue #1683 | PR #1858
+    _ci_shell_sources files changed || return 2
     # What: in-file disable, null source, no dataflow.
     # Why: each one hides findings; AG-VAL-007 forbids it.
     # From: Issue #1683 | PR #1912
@@ -17606,7 +17609,7 @@ _ci_check_shellcheck() {
         ci_error "[CI-ERROR-CHECK-0179]" "reason=\"shellcheck suppression found\"" "$(printf '%s\n' "${supp[@]}")"
         return 1
     fi
-    [ "${#files[@]}" -eq 0 ] && { printf 'shellcheck=noop\n'; return 0; }
+    [ "${#files[@]}" -eq 0 ] && { printf 'shellcheck=NOT-RUN reason="no shell file in the changed list"\n'; return 0; }
     # What: one shellcheck process per file.
     # Why: one call on all files needs ~5 GB peak RAM.
     # From: Issue #1683 | PR #1858
