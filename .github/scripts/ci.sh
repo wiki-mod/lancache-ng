@@ -2102,7 +2102,7 @@ _ci_service_smoke() {
 # Why: SOT names the inputs; the build must match the id.
 # From: Issue #1683 | PR #1858
 _ci_identity_pins() {
-    local service="$1" build_type="$2" platform="$3" inputs input tref
+    local service="$1" build_type="$2" platform="$3" inputs input entry
     inputs="$(_ci_block_entry_list build_identity "${build_type}" inputs)" || return 2
     if [ -z "${inputs}" ]; then
         ci_log "[CI-ERROR-IDENTITY-0004]" "build_type=\"${build_type}\" reason=\"no SOT build_identity inputs; FAIL CLOSED\""
@@ -2114,12 +2114,13 @@ _ci_identity_pins() {
             source_sha) : ;;
             build_variables) _ci_build_variable_args "${build_type}" || return 2 ;;
             toolchain_source_sha) _ci_build_tools_signature || return 2 ;;
-            toolchain_digest)
-                # What: digest of the build-tools image run.
-                # Why: §16/§17: id names the compiler.
-                # From: Issue #1683 | PR #1912
-                tref="$(_ci_build_tools_run_image)" || return 2
-                printf '%s\n' "${tref##*@}"
+            toolchain_packages)
+                # What: build-tools package versions used.
+                # Why: a python3 update rebuilds no service.
+                # From: Issue #1683 | PR #1858
+                entry="$(_ci_toolchain_entry "${build_type}" "${platform}")" || return 2
+                entry="${entry#*$'\t'}"
+                tr ' ' '\n' <<< "${entry#* }"
                 ;;
             base_digest)
                 if [ "${build_type}" = toolchain ]; then
@@ -5885,7 +5886,16 @@ _ci_package_refresh_all() {
 # Why: writes the caller's record list (dynamic scope).
 # From: Issue #1683 | PR #1858
 _ci_package_refresh_pair() {
-    local service="$1" platform="$2" id remote lrec rc=0 ref outdated value
+    local service="$1" platform="$2" id remote lrec rc=0 ref outdated value type entry
+    # What: keep the pair's toolchain packages as a record.
+    # Why: a later plan reads it; no build-tools pull there.
+    # From: Issue #1683 | PR #1858
+    type="$(_ci_required_field "${service}" build_type)" || return 2
+    value="$(_ci_block_entry_list build_identity "${type}" toolchain_packages)" || return 2
+    if [ -n "${value}" ]; then
+        entry="$(_ci_toolchain_entry "${type}" "${platform}")" || return 2
+        [[ $'\n'"${_ci_refresh_new}" == *$'\n'"${entry}"$'\n'* ]] || _ci_refresh_new+="${entry}"$'\n'
+    fi
     _ci_plan_record "${service}" "${platform}" || return "$?"
     id="$(_ci_identity_for "${service}" "${platform}")" || return "$?"
     remote="$(_ci_git_remote)" || return 2
@@ -5907,22 +5917,113 @@ _ci_package_refresh_pair() {
     _ci_refresh_new+="${service}@${platform}"$'\t'"${value}"$'\n'
 }
 
-# What: installed apk packages the index has newer.
+# What: copy files $4.. of image $1 ($2) into dir $3.
 # Why: create and cp read the image; it never runs here.
 # From: Issue #1683 | PR #1858
-_ci_apk_outdated() {
-    local ref="$1" platform="$2" work="$3" cid f out rc=0 arch line n=0
+_ci_image_files() {
+    local ref="$1" platform="$2" work="$3" cid f out rc=0
+    shift 3
     _ci_retry registry docker pull --quiet --platform "${platform}" "${ref}" >&2 || return 2
     cid="$(_ci_capture 0 docker create --platform "${platform}" --entrypoint /bin/true "${ref}")" || return 2
-    for f in /lib/apk/db/installed /etc/apk/repositories /etc/apk/arch; do
+    for f in "$@"; do
         if ! out="$(docker cp "${cid}:${f}" "${work}/${f##*/}" 2>&1)"; then
-            ci_error "[CI-ERROR-REFRESH-0002]" "image=\"${ref}\" file=\"${f}\" reason=\"apk state not read from the image\"" "${out}"
+            ci_error "[CI-ERROR-REFRESH-0002]" "image=\"${ref}\" file=\"${f}\" reason=\"file not read from the image\"" "${out}"
             rc=2
             break
         fi
     done
     _ci_capture 0 docker rm "${cid}" >&2 || rc=2
-    [ "${rc}" -eq 0 ] || return 2
+    return "${rc}"
+}
+
+# What: "key<TAB>digest name=version ..." of a toolchain.
+# Why: memo, refresh record and id read one value (§17).
+# From: Issue #1683 | PR #1858
+_ci_toolchain_entry() {
+    local build_type="$1" platform="$2" roots tref key memo val="" remote blob rc=0 k v
+    roots="$(_ci_block_entry_list build_identity "${build_type}" toolchain_packages)" || return 2
+    if [ -z "${roots}" ]; then
+        ci_log "[CI-ERROR-IDENTITY-0019]" "build_type=\"${build_type}\" reason=\"no SOT toolchain_packages; FAIL CLOSED\""
+        return 2
+    fi
+    tref="$(_ci_build_tools_run_image)" || return 2
+    key="toolchain@${platform}@${roots//$'\n'/,}"
+    memo="$(_ci_sha256_hex <<< "${key}@${tref##*@}")" || return 2
+    memo="toolchain-${memo}"
+    if val="$(_ci_job_memo_get "${memo}")"; then
+        printf '%s\t%s\n' "${key}" "${val}"
+        return 0
+    fi
+    # What: the record counts only for this run's image.
+    # Why: one record per platform; a new image replaces it.
+    # From: Issue #1683 | PR #1858
+    remote="$(_ci_git_remote)" || return 2
+    blob="$(_ci_ledger_blob "${remote}" CI_REFRESH_REF CI_REFRESH_FILE)" || rc=$?
+    case "${rc}" in
+        0)
+            while IFS=$'\t' read -r k v; do
+                [ "${k}" != "${key}" ] || [ "${v%% *}" != "${tref##*@}" ] || val="${v}"
+            done <<< "${blob}"
+            ;;
+        1) ;;
+        *) return 2 ;;
+    esac
+    if [ -z "${val}" ]; then
+        val="$(_ci_with_workdir ci-toolchain _ci_toolchain_closure "${tref}" "${platform}" "${roots}")" || return 2
+        val="${tref##*@} ${val//$'\n'/ }"
+        ci_log "[CI-INFO-IDENTITY-0021]" "key=\"${key}\" value=\"${val}\" reason=\"read from the image; no record for it\""
+    fi
+    _ci_job_memo_put "${memo}" "${val}" || return 2
+    printf '%s\t%s\n' "${key}" "${val}"
+}
+
+# What: apk packages reached from roots in an installed db.
+# Why: a D: entry names a package, a p: provide or a file.
+# From: Issue #1683 | PR #1858
+_CI_AWK_APK_CLOSURE="$(cat <<'PROG'
+function bare(t) { sub(/[<>=~].*$/, "", t); return t }
+/^P:/ { p = substr($0, 3); pkg[p] = 1; next }
+/^V:/ { ver[p] = substr($0, 3); next }
+/^D:/ { dep[p] = substr($0, 3); next }
+/^p:/ { k = split(substr($0, 3), a, " "); for (i = 1; i <= k; i++) own[bare(a[i])] = p; next }
+/^F:/ { dir = substr($0, 3); next }
+/^R:/ { own["/" dir "/" substr($0, 3)] = p; next }
+END {
+    qn = split(roots, q, " ")
+    for (h = 1; h <= qn; h++) {
+        t = q[h]
+        if (t in pkg) i = t
+        else if (t in own) i = own[t]
+        else { print "unresolved: " t; bad = 1; continue }
+        if (i in sel) continue
+        sel[i] = 1
+        k = split(dep[i], a, " ")
+        for (j = 1; j <= k; j++) if (a[j] !~ /^!/) q[++qn] = bare(a[j])
+    }
+    if (bad) exit 2
+    for (i in sel) print i "=" ver[i]
+}
+PROG
+)"
+readonly _CI_AWK_APK_CLOSURE
+
+# What: sorted name=version of roots $3 in image $1 ($2).
+# Why: the closure holds the libs and tools the roots run.
+# From: Issue #1683 | PR #1858
+_ci_toolchain_closure() {
+    local ref="$1" platform="$2" roots="$3" work="$4" out
+    _ci_image_files "${ref}" "${platform}" "${work}" /lib/apk/db/installed || return 2
+    out="$(_ci_run "[CI-ERROR-IDENTITY-0020]" "image=\"${ref}\" platform=\"${platform}\" reason=\"toolchain package closure not read\"" \
+        awk -v roots="${roots//$'\n'/ }" "${_CI_AWK_APK_CLOSURE}" "${work}/installed")" || return 2
+    printf '%s\n' "${out}" | LC_ALL=C sort
+}
+
+# What: installed apk packages the index has newer.
+# Why: the image files come from the one image reader.
+# From: Issue #1683 | PR #1858
+_ci_apk_outdated() {
+    local ref="$1" platform="$2" work="$3" out arch line n=0
+    _ci_image_files "${ref}" "${platform}" "${work}" /lib/apk/db/installed /etc/apk/repositories /etc/apk/arch || return 2
     arch="$(<"${work}/arch")"
     # What: one APKINDEX per repository line of the image.
     # Why: a tagged line is "@tag url"; the url is last.
@@ -11041,9 +11142,9 @@ _ci_service_build_args() {
     local own_type
     own_type="$(_ci_required_field "${service}" build_type)" || return 2
     if [ "${own_type}" = rust ]; then
-        # What: identity omits the ref; it keys the digest.
-        # Why: toolchain_digest is this ref's digest.
-        # From: Issue #1683 | PR #1912
+        # What: identity omits the ref and its digest.
+        # Why: toolchain_packages keys the packages it runs.
+        # From: Issue #1683 | PR #1858
         if [ "${with_toolchain}" = yes ]; then
             val="$(_ci_build_tools_run_image)" || return 2
             [ -n "${val}" ] || { ci_log "[CI-ERROR-BUILDARGS-0009]" "arg=\"${CI_ARG_TOOLCHAIN_IMAGE}\" service=\"${service}\" reason=\"empty resolved build-tools image; FAIL CLOSED\""; return 2; }

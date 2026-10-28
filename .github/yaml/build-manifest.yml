@@ -934,7 +934,11 @@ status_reports:
 # From: Issue #1683
 build_identity:
   rust:
-    inputs: [source_sha, toolchain_digest, base_digest, build_variables, package_refresh]
+    inputs: [source_sha, toolchain_packages, base_digest, build_variables, package_refresh]
+    # What: build-tools apk packages a rust build runs.
+    # Why: only they and their deps key the id (§39).
+    # From: Issue #1683 | PR #1858
+    toolchain_packages: [rust, cargo, build-base]
   toolchain:
     inputs: [toolchain_source_sha, base_digest, package_refresh]
 
@@ -1276,7 +1280,7 @@ ci_variables:
   CI_LEDGER_REF: refs/ci/acceptance/ledger
   CI_LEDGER_FILE: records
   CI_GIT_REMOTE: origin
-  # What: ref + file of the §17 apk refresh records.
+  # What: ref + file of §17 apk refresh, toolchain records.
   # Why: a refresh run writes them; every id reads them.
   # From: Issue #1683 | PR #1858
   CI_REFRESH_REF: refs/ci/refresh/packages
