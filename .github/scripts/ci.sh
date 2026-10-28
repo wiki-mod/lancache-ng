@@ -1514,6 +1514,13 @@ ci_cmd_plan_matrix() {
             any=true
         done <<< "${plats}"
     done
+    # What: a release candidate must already be accepted.
+    # Why: §82: release.yml never builds; ci.yml builds it.
+    # From: Issue #1683 | PR #1858
+    if [ -n "${CI_RELEASE_TAG:-}" ] && [ "${any}" = true ]; then
+        ci_error "[CI-ERROR-RELEASE-0062]" "tag=\"${CI_RELEASE_TAG}\" reason=\"release candidate not accepted; run ci.yml by workflow_dispatch on the release branch, then publish the tag again\"" "$(_ci_matrix_doc "${include}")"
+        return 2
+    fi
     # What: emit the AG-VAL-008 rust validation decision.
     # Why: no test runner is booked while validation is off.
     # From: Issue #1683
@@ -5835,7 +5842,7 @@ _ci_refresh_event() {
     local events event="${GITHUB_EVENT_NAME:-}"
     [ -n "${event}" ] || return 1
     # What: a release run never refreshes packages.
-    # Why: release never builds (§51, §56); ids stay fixed.
+    # Why: §82: release.yml never builds; ids stay fixed.
     # From: Issue #1683 | PR #1858
     [ -z "${CI_RELEASE_TAG:-}" ] || return 1
     events="$(_ci_required_field build_admission refresh_events blocklist)" || return 2
