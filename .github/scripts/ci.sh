@@ -8182,31 +8182,56 @@ ci_cmd_release_sbom() {
     _ci_with_workdir ci-sbom _ci_release_sbom_in "${service}" "${tag}" "${digest}"
 }
 
+# What: SBOM of release $1 into $2: 0 has $3, 1 none, 3 not
+# Why: one reader for this and the previous release.
+# From: Issue #1683 | PR #1858
+_ci_release_sbom_get() {
+    local tag="$1" out="$2" digest="$3" rc=0
+    _ci_release_asset_get "${tag}" "${out##*/}" "${out%/*}" || rc=$?
+    [ "${rc}" -eq 0 ] || return "${rc}"
+    _ci_file_match "[CI-ERROR-RELEASE-0056]" "tag=\"${tag}\"" "${out}" "${digest}" -F || rc=$?
+    [ "${rc}" -ne 1 ] || return 3
+    return "${rc}"
+}
+
 # What: reuse or make and attach one SBOM, work dir in $4.
 # Why: one owner removes the work dir, not this body.
 # From: Issue #1683 | PR #1858
 _ci_release_sbom_in() {
-    local service="$1" tag="$2" digest="$3" dir="$4" out rc=0
+    local service="$1" tag="$2" digest="$3" dir="$4" out prev rc=0
     out="${dir}/${service}.cdx.json"
     # What: an attached SBOM for this digest is reused
     # Why: architecture §57: one SBOM per digest, no rescan
     # From: Issue #1683 | PR #1858
-    _ci_release_asset_get "${tag}" "${out##*/}" "${dir}" || rc=$?
-    if [ "${rc}" -eq 0 ]; then
-        local mrc=0
-        _ci_file_match "[CI-ERROR-RELEASE-0056]" "service=\"${service}\" tag=\"${tag}\"" "${out}" "${digest}" -F || mrc=$?
-        case "${mrc}" in
+    _ci_release_sbom_get "${tag}" "${out}" "${digest}" || rc=$?
+    case "${rc}" in
+        0)
+            printf 'release=sbom-reused service=%s tag=%s digest=%s\n' "${service}" "${tag}" "${digest}"
+            return 0
+            ;;
+        1) ;;
+        3)
+            ci_error "[CI-ERROR-RELEASE-0046]" "service=\"${service}\" tag=\"${tag}\" digest=\"${digest}\" reason=\"attached SBOM is not bound to this digest\"" "digests the attached SBOM names: $(grep -o -E "${CI_DIGEST_RE}" "${out}" 2>&1 | LC_ALL=C sort -u | awk '{ printf "%s ", $0; n++ } END { if (!n) printf "none" }')"
+            return 2
+            ;;
+        *) return 2 ;;
+    esac
+    # What: the previous release's SBOM of this digest.
+    # Why: §57: an SBOM belongs to a digest, not a release.
+    # From: Issue #1683 | PR #1858
+    prev="$(_ci_last_release_tag "${tag}")" || return 2
+    if [ -n "${prev}" ]; then
+        rc=0; _ci_release_sbom_get "${prev}" "${out}" "${digest}" || rc=$?
+        case "${rc}" in
             0)
-                printf 'release=sbom-reused service=%s tag=%s digest=%s\n' "${service}" "${tag}" "${digest}"
+                _ci_release_asset_put "${tag}" "${out}" || return 2
+                printf 'release=sbom-reused service=%s tag=%s digest=%s from=%s\n' "${service}" "${tag}" "${digest}" "${prev}"
                 return 0
                 ;;
-            1) ;;
+            1 | 3) rm -f "${out}" ;;
             *) return 2 ;;
         esac
-        ci_error "[CI-ERROR-RELEASE-0046]" "service=\"${service}\" tag=\"${tag}\" digest=\"${digest}\" reason=\"attached SBOM is not bound to this digest\"" "digests the attached SBOM names: $(grep -o -E "${CI_DIGEST_RE}" "${out}" 2>&1 | LC_ALL=C sort -u | awk '{ printf "%s ", $0; n++ } END { if (!n) printf "none" }')"
-        return 2
     fi
-    [ "${rc}" -eq 1 ] || return 2
     rc=0
     _ci_trivy_sbom "${service}" "${digest}" "${out}" || rc=$?
     if [ "${rc}" -ne 0 ]; then
