@@ -963,20 +963,20 @@ _ci_plan_candidate() {
     return 1
 }
 
-# What: rc 0 if a target's normalized content changed.
-# Why: test/audit identity is content, no comments (§29).
+# What: rc 0 if a target's test identity changed.
+# Why: §29: build inputs with tests; no runtime file (F).
 # From: Issue #1683 | PR #1858
 _ci_target_content_changed() {
-    local paths p refs base head rc
-    paths="$(_ci_target_paths "$1")" || return 2
+    local refs base head a b
     refs="$(_ci_diff_refs)" || return 2
     read -r base head <<<"${refs}"
-    while IFS= read -r p; do
-        [ -n "${p}" ] || continue
-        rc=0; _ci_path_content_changed "${p}" "${base}" "${head}" || rc=$?
-        [ "${rc}" -eq 1 ] || return "${rc}"
-    done <<< "${paths}"
-    return 1
+    if [ -z "${base}" ]; then
+        ci_log "[CI-INFO-IMPACT-0013]" "service=\"$1\" reason=\"no base ref for this event; test identity counts as changed\""
+        return 0
+    fi
+    a="$(_ci_identity_content "$1" "${base}" "")" || return 2
+    b="$(_ci_identity_content "$1" "${head}" "")" || return 2
+    [ "${a}" != "${b}" ]
 }
 
 # What: Plan phase: pick rebuild CANDIDATES per service.
@@ -2163,16 +2163,16 @@ _ci_target_plain_paths() {
 }
 
 # What: normalized content ids of a target's SOT paths.
-# Why: one reader for the id and the base impact proof.
+# Why: one reader for build id, impact and test identity.
 # From: Issue #1683 | PR #1912
 _ci_identity_content() {
-    local service="$1" ref="${2:-}" paths p part buf="" type ctx
+    local service="$1" ref="${2:-}" mode="${3-build}" paths p part buf="" type ctx
     paths="$(_ci_target_plain_paths "${service}")" || return 2
     type="$(_ci_required_field "${service}" build_type)" || return 2
     ctx="$(_ci_required_field "${service}" context)" || return 2
     while IFS= read -r p; do
         [ -n "${p}" ] || continue
-        part="$(_ci_tracked_content_ids "${p}" "${ref}" build)" || return 2
+        part="$(_ci_tracked_content_ids "${p}" "${ref}" "${mode}")" || return 2
         if [ "${p}" = "${ctx}" ] && [ -n "${part}" ]; then
             part="$(_ci_context_build_rows "${service}" "${ref}" "${part}")" || return 2
         fi
