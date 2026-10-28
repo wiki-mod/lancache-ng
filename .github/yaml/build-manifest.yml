@@ -96,7 +96,7 @@ services:
     # What: runtime defaults the Dockerfile takes as args.
     # Why: the image builds with the value; it names none.
     # From: Issue #1683 | PR #1912
-    default_args: [NGINX_DIR]
+    default_args: [NGINX_DIR, NGINX_PSL_FILE]
     setup:
       - dir=@NGINX_DIR@/@NGINX_SUBDIR_CA@
       - dir=@NGINX_DIR@/@NGINX_SUBDIR_CERTS@
@@ -717,6 +717,7 @@ runtime:
     - KEA_NCR_PORT=53001
     - NGINX_HTTPS_LISTEN_FILE=conf.d/https-listen.inc
     - NGINX_HEALTHZ_FILE=lancache-healthz-body.txt
+    - NGINX_PSL_FILE=public_suffix_list.dat
     - DNS_PORT=53
     - DNS_HTTPS_PORT=1053
     - PDNS_AUTH_PORT=5300

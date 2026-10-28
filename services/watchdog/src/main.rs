@@ -4556,7 +4556,7 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
     let worker_gid = account_id("group", &worker)?;
     let hosts = cdn_hosts(
         &read(&domains_file)?,
-        &Psl::parse(&read(&dir.join("public_suffix_list.dat"))?),
+        &Psl::parse(&read(&dir.join(ctx.need("NGINX_PSL_FILE")?))?),
     );
     let https = dir.join("conf.d/https.conf");
     let listen_file = ctx.need("NGINX_HTTPS_LISTEN_FILE")?;
