@@ -9965,7 +9965,7 @@ _ci_validate_dns_resolves() {
     fi
     port="$(_ci_validate_dns_port "${side}")" || return 2
     local out="" dig_err pause
-    pause="$(_ci_variable CI_VALIDATE_DIG_PAUSE)" || return 2
+    pause="$(_ci_variable CI_VALIDATE_POLL_PAUSE)" || return 2
     # What: dig stderr kept apart from the compared answer.
     # Why: a warning must not turn a match into a mismatch.
     # From: Issue #1683 | PR #1858
@@ -10218,7 +10218,7 @@ _ci_validate_dns_rollback() {
     # From: Issue #628
     _ci_validate_dns_resolves "${project}" IP_HTTP "${label}.${zone}" "${old}" "${dns_wait}" || return $?
     tries="$(_ci_variable CI_VALIDATE_SNAPSHOT_POLL_ATTEMPTS)" || return 2
-    pause="$(_ci_variable CI_VALIDATE_SNAPSHOT_POLL_PAUSE)" || return 2
+    pause="$(_ci_variable CI_VALIDATE_POLL_PAUSE)" || return 2
     if ! resp="$(_ci_validate_poll "${tries}" "${pause}" _ci_validate_new_snapshot "${lbase}" "${key}" "${last}" "${zone}")"; then
         ci_error "[CI-ERROR-VALIDATE-0087]" "previous=\"${last}\" zone=\"${zone}\" reason=\"no new snapshot after the rollback\"" "${resp}"
         return 1
