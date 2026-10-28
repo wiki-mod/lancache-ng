@@ -102,15 +102,15 @@ Full semantic-equivalence normalization for four different grammars (shell, YAML
 ## 13. Dependency graph
 CI 2.0 knows real dependencies. Example from the current project:
 ```text
+services/common
+        |
+        +-> every image whose Dockerfile copies it
 services/dns/cdn-domains.txt
         |
-        +-> dns
-        |
-        +-> proxy
-            because proxy consumes this content
-            through a named build context
+        +-> no image: dns, proxy and ui mount it at
+            runtime (AG-CDN-001); a change builds nothing
 ```
-Therefore: file path != service boundary. The build graph is authoritative.
+Therefore: file path != service boundary. The build graph is authoritative. A file in a service directory that no Dockerfile copies is a runtime input, not a build input (maintainer decision 23.10.: reading the CDN list is no reason to build a container).
 ## 14. Identity domains
 At least the following identities are kept separate.
 ### 14.1 Git Identity
@@ -927,7 +927,7 @@ New CI becomes the sole required pipeline.
 ### Phase 15 — Delete CI 1.x
 Remove: old `build-push` logic, obsolete composite actions, obsolete helper scripts, duplicate service lists, old retry wrappers, old reuse paths, old retag paths, obsolete GC special-casing. Only after every necessary guard has been migrated to `ci.sh` or `ci.bats`.
 ## 85. Acceptance tests for CI 2.0
-CI 2.0 is not done until at least the following cases work. **Test A — README only:** README changed. Expected: planner runs, final required check runs, builds = 0, scans = 0, registry writes = 0, heavy runners = 0. **Test B — Dockerfile comment:** comment in `services/dns/Dockerfile` changed. Expected: semantic identity unchanged, NOOP. **Test C — Bats comment:** comment in `ci.bats` changed. Expected: test identity unchanged, NOOP. **Test D — Test logic:** a real test in `ci.bats` changed. Expected: affected tests run, container builds = 0. **Test E — DNS source:** DNS build input changed. Expected: DNS considered, unrelated services NOOP. **Test F — Shared proxy dependency:** `services/dns/cdn-domains.txt` changed. Expected: DNS impact calculated, proxy impact calculated, because proxy consumes this real build input. **Test G — Registry down:** desired-artifact lookup hits a registry timeout. Expected: UNKNOWN, retry, block/fail if exhausted, builds = 0. **Test H — Build already running:** runner A builds identity X, runner B requests identity X. Expected: runner B waits/resolves, duplicate builds = 0. **Test I — Publish failure:** build succeeds, push fails. Expected: retry push of the exact produced artifact, second build = 0. **Test J — Readback failure:** build succeeds, publish reports success, readback fails. Expected: `PRODUCED_UNVERIFIED`, retry readback/publish diagnosis, second build = 0. **Test K — Digest mismatch:** expected digest != registry digest. Expected: `MISMATCH`, FAIL, replacement build = 0. **Test L — One service fails:** services fails, other services accepted. Expected: promotion blocked, successful service artifacts remain reusable. **Test M — Nightly unchanged:** `current_dev` desired state unchanged. Expected: container builds = 0. **Test N — Release already accepted:** release points at a fully accepted candidate. Expected: container builds = 0, atomic promotion, release assets generated/reused. **Test O — Full SHA:** search the entire CI for abbreviated Git SHA (must be 0) and abbreviated OCI digest (must be 0).
+CI 2.0 is not done until at least the following cases work. **Test A — README only:** README changed. Expected: planner runs, final required check runs, builds = 0, scans = 0, registry writes = 0, heavy runners = 0. **Test B — Dockerfile comment:** comment in `services/dns/Dockerfile` changed. Expected: semantic identity unchanged, NOOP. **Test C — Bats comment:** comment in `ci.bats` changed. Expected: test identity unchanged, NOOP. **Test D — Test logic:** a real test in `ci.bats` changed. Expected: affected tests run, container builds = 0. **Test E — DNS source:** DNS build input changed. Expected: DNS considered, unrelated services NOOP. **Test F — Runtime-only file:** `services/dns/cdn-domains.txt` changed. Expected: DNS impact calculated, proxy impact calculated, both NOOP, because no Dockerfile copies this file; the stack mounts it at runtime (§13, AG-CDN-001). **Test G — Registry down:** desired-artifact lookup hits a registry timeout. Expected: UNKNOWN, retry, block/fail if exhausted, builds = 0. **Test H — Build already running:** runner A builds identity X, runner B requests identity X. Expected: runner B waits/resolves, duplicate builds = 0. **Test I — Publish failure:** build succeeds, push fails. Expected: retry push of the exact produced artifact, second build = 0. **Test J — Readback failure:** build succeeds, publish reports success, readback fails. Expected: `PRODUCED_UNVERIFIED`, retry readback/publish diagnosis, second build = 0. **Test K — Digest mismatch:** expected digest != registry digest. Expected: `MISMATCH`, FAIL, replacement build = 0. **Test L — One service fails:** services fails, other services accepted. Expected: promotion blocked, successful service artifacts remain reusable. **Test M — Nightly unchanged:** `current_dev` desired state unchanged. Expected: container builds = 0. **Test N — Release already accepted:** release points at a fully accepted candidate. Expected: container builds = 0, atomic promotion, release assets generated/reused. **Test O — Full SHA:** search the entire CI for abbreviated Git SHA (must be 0) and abbreviated OCI digest (must be 0).
 ## 86. Performance goals
 A normal PR with no build need: seconds to a few minutes. Not 30 minutes, 1 hour, 2 hours. Heavy runners should see almost exclusively real builds or real heavy tests.
 ## 87. Registry goal

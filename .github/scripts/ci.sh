@@ -2139,12 +2139,16 @@ _ci_target_plain_paths() {
 # Why: one reader for the id and the base impact proof.
 # From: Issue #1683 | PR #1912
 _ci_identity_content() {
-    local service="$1" ref="${2:-}" paths p part buf="" type
+    local service="$1" ref="${2:-}" paths p part buf="" type ctx
     paths="$(_ci_target_plain_paths "${service}")" || return 2
     type="$(_ci_required_field "${service}" build_type)" || return 2
+    ctx="$(_ci_required_field "${service}" context)" || return 2
     while IFS= read -r p; do
         [ -n "${p}" ] || continue
         part="$(_ci_tracked_content_ids "${p}" "${ref}" build)" || return 2
+        if [ "${p}" = "${ctx}" ] && [ -n "${part}" ]; then
+            part="$(_ci_context_build_rows "${service}" "${ref}" "${part}")" || return 2
+        fi
         [ -z "${part}" ] || buf+="${part}"$'\n'
     done <<< "${paths}"
     if [ "${type}" = rust ]; then
@@ -2152,6 +2156,44 @@ _ci_identity_content() {
         buf+="${part}"$'\n'
     fi
     printf '%s' "${buf}"
+}
+
+# What: context rows the Dockerfile copies, and itself.
+# Why: an uncopied runtime file is no build input (DoMe).
+# From: Issue #1683 | PR #1858
+_ci_context_build_rows() {
+    local service="$1" ref="$2" rows="$3" df text srcs src line path keep
+    df="$(_ci_service_path "${service}" Dockerfile "")" || return 2
+    text="$(_ci_identity_git "${df}" "${ref}" show "${ref}:${df}")" || return 2
+    srcs="$(_ci_dockerfile_copy_sources "${text}")" || return 2
+    while IFS= read -r line; do
+        [ -n "${line}" ] || continue
+        path="${line%%$'\t'*}"
+        keep=""
+        [ "${path}" != "${df}" ] || keep=1
+        while IFS= read -r src; do
+            [ -z "${keep}" ] || break
+            src="${src%/}"
+            [ -n "${src}" ] || continue
+            case "${path}" in "${src}" | "${src}"/*) keep=1 ;; esac
+        done <<< "${srcs}"
+        [ -z "${keep}" ] || printf '%s\n' "${line}"
+    done <<< "${rows}"
+}
+
+# What: COPY sources of a Dockerfile text, one per line.
+# Why: the identity and the Dockerfile check share it.
+# From: Issue #1683 | PR #1858
+_ci_dockerfile_copy_sources() {
+    _ci_capture 0 awk "$(cat <<'PROG'
+        /\\$/ { buf = buf substr($0, 1, length($0) - 1) " "; next }
+        { line = buf $0; buf = "" }
+        toupper(line) !~ /^[[:space:]]*COPY[[:space:]]/ || line ~ /--from=/ { next }
+        { k = 0; nw = split(line, w, /[[:space:]]+/)
+          for (i = 2; i <= nw; i++) if (w[i] != "" && w[i] !~ /^--/) a[++k] = w[i]
+          for (i = 1; i < k; i++) print a[i] }
+PROG
+        )" <<< "$1"
 }
 
 # What: context paths the Rust reader owns, space-framed.
@@ -17068,15 +17110,7 @@ PROG
         cl=()
         [ -z "${ctxs}" ] || mapfile -t cl <<< "${ctxs}"
         roots+=("${cl[@]}")
-        srcs="$(_ci_capture 0 awk "$(cat <<'PROG'
-            /\\$/ { buf = buf substr($0, 1, length($0) - 1) " "; next }
-            { line = buf $0; buf = "" }
-            toupper(line) !~ /^[[:space:]]*COPY[[:space:]]/ || line ~ /--from=/ { next }
-            { k = 0; nw = split(line, w, /[[:space:]]+/)
-              for (i = 2; i <= nw; i++) if (w[i] != "" && w[i] !~ /^--/) a[++k] = w[i]
-              for (i = 1; i < k; i++) print a[i] }
-PROG
-              )" "${df}")" || return 2
+        srcs="$(_ci_dockerfile_copy_sources "$(< "${df}")")" || return 2
         while IFS= read -r src; do
             [ -n "${src}" ] || continue
             ok=""
