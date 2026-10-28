@@ -7002,11 +7002,18 @@ _ci_stack_candidate_source() {
     _ci_toolchain_candidate
 }
 
-# What: True only if the stack validated (docs section 50).
-# Why: Fail-closed without validate; never assume success.
-# From: Issue #1683
+# What: 0 if the stack services equal the validated stack.
+# Why: promote moves only what validate checked (§48-§51).
+# From: Issue #1683 | PR #1858
 _ci_stack_validated() {
-    [ "${CI_STACK_VALIDATED:-}" = "SUCCESS" ]
+    local cand="$1" svcs line prod=""
+    svcs="$(ci_services)" || return 2
+    while IFS= read -r line; do
+        [ -n "${line}" ] || continue
+        _ci_list_has "${line%%=*}" "${svcs}" || continue
+        prod="${prod:+${prod} }${line}"
+    done <<< "${cand}"
+    [ -n "${CI_STACK_VALIDATED:-}" ] && [ "${prod}" = "${CI_STACK_VALIDATED}" ]
 }
 
 # What: The per-channel promotion lock ref.
@@ -7177,6 +7184,23 @@ _ci_promote_move_all() {
     done <<< "${cand}"
 }
 
+# What: re-read the stack under the lock, then move it.
+# Why: a stack accepted meanwhile was never validated.
+# From: Issue #1683 | PR #1858
+_ci_promote_locked() {
+    local channel="$1" cand="$2" now
+    if ! now="$(_ci_stack_candidate --with-toolchain)"; then
+        ci_log "[CI-ERROR-PROMOTE-0041]" "channel=\"${channel}\" reason=\"stack unreadable under the lock; blocking\""
+        return 2
+    fi
+    if [ "${now}" != "${cand}" ]; then
+        ci_error "[CI-ERROR-PROMOTE-0042]" "channel=\"${channel}\" reason=\"stack changed after validate; blocking\"" \
+            "validated=${cand}"$'\n'"now=${now}"
+        return 2
+    fi
+    _ci_promote_move_all "${channel}" "${cand}"
+}
+
 # What: Put moved services back on their earlier digests.
 # Why: a failed move must not leave a mixed channel (§50)
 # From: Issue #1683 | PR #1912
@@ -7240,14 +7264,17 @@ ci_cmd_promote() {
         ci_log "[CI-ERROR-PROMOTE-0002]" "channel=\"${channel}\" reason=\"not a mutable channel or a vX.Y.Z release tag\""
         return 2
     fi
-    local cand arc=0
+    local cand arc=0 vrc=0
     if ! cand="$(_ci_stack_candidate --with-toolchain)"; then
         ci_log "[CI-ERROR-PROMOTE-0003]" "channel=\"${channel}\" reason=\"no accepted stack candidate\""
         return 2
     fi
     _ci_promote_stack_complete "${channel}" "${cand}" || return "$?"
-    if ! _ci_stack_validated; then
-        ci_log "[CI-ERROR-PROMOTE-0005]" "channel=\"${channel}\" reason=\"stack not validated; promotion blocked\""
+    _ci_stack_validated "${cand}" || vrc=$?
+    if [ "${vrc}" -ne 0 ]; then
+        [ "${vrc}" -eq 1 ] || return 2
+        ci_error "[CI-ERROR-PROMOTE-0005]" "channel=\"${channel}\" reason=\"stack not the validated one; promotion blocked\"" \
+            "validated=${CI_STACK_VALIDATED:-}"$'\n'"candidate=${cand}"
         return 2
     fi
     _ci_require_ghcr_auth || return "$?"
@@ -7264,7 +7291,7 @@ ci_cmd_promote() {
     # What: capture rc so the unlock still runs on failure.
     # Why: a failed move must never leak the promotion lock.
     local rc
-    if _ci_promote_move_all "${channel}" "${cand}"; then rc=0; else rc=$?; fi
+    if _ci_promote_locked "${channel}" "${cand}"; then rc=0; else rc=$?; fi
     _ci_promote_unlock "${channel}" || {
         ci_error "[CI-ERROR-PROMOTE-0011]" "channel=\"${channel}\" reason=\"lock release failed\"" "${channel}"
         [ "${rc}" -ne 0 ] || rc=2
@@ -10396,7 +10423,7 @@ _ci_validate_stack() {
 }
 
 # What: run the stack validation, print the verdict.
-# Why: promote reads STACK_ACCEPTED; a failure keeps rc.
+# Why: a failure keeps its rc; no stack goes to promote.
 # From: Issue #1683 | PR #1858
 _ci_validate_run() {
     local cand="$1" rc=0
@@ -10425,7 +10452,11 @@ ci_cmd_validate() {
         return 2
     fi
     _ci_require_ghcr_auth || return 2
-    _ci_validate_run "${cand}"
+    _ci_validate_run "${cand}" || return "$?"
+    # What: hand the validated stack to the promote job.
+    # Why: promote moves only this exact stack (§48, §51).
+    # From: Issue #1683 | PR #1858
+    _ci_step_output "[CI-ERROR-VALIDATE-0136]" stack "${cand//$'\n'/ }"
 }
 
 # What: Required-check gate over the needs results (§62).

@@ -400,9 +400,12 @@ jobs:
     permissions: &packages_read
       contents: read
       packages: read
+    outputs:
+      stack: ${{ steps.validate.outputs.stack }}
     steps:
       - *bootstrap
       - name: Validate the accepted stack candidate
+        id: validate
         env:
           CI_RUN_IDENTITIES: *run_ids
         run: bash .github/scripts/ci.sh validate
@@ -421,7 +424,7 @@ jobs:
     container: *bt_platform
     permissions: *ship_write
     env:
-      CI_STACK_VALIDATED: SUCCESS
+      CI_STACK_VALIDATED: ${{ needs.validate.outputs.stack }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       CI_RUN_IDENTITIES: *run_ids
     steps:

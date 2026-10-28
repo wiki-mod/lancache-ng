@@ -316,10 +316,13 @@ jobs:
       credentials: *ghcr_credentials
       volumes:
         - ${{ needs.platform.outputs.validate-dir }}:${{ needs.platform.outputs.validate-dir }}
+    outputs:
+      stack: ${{ steps.validate.outputs.stack }}
     steps:
       - *bootstrap
       - *channel_pin
       - name: Validate the accepted stack candidate
+        id: validate
         env:
           # What: the plan job's pair ids for this run.
           # Why: a live re-read can differ; a gap fails.
@@ -372,7 +375,7 @@ jobs:
       - name: Promote the nightly channel
         if: needs.validate.result == 'success'
         env:
-          CI_STACK_VALIDATED: SUCCESS
+          CI_STACK_VALIDATED: ${{ needs.validate.outputs.stack }}
           CI_RUN_IDENTITIES: *run_ids
         run: bash .github/scripts/ci.sh promote nightly
 
