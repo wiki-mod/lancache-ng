@@ -1002,6 +1002,10 @@ release:
   # Why: crates and image labels read it; no literal copies.
   # From: Issue #1683 | PR #1858
   license: AGPL-3.0-or-later
+  # What: path of the §59 provenance predicate type URI.
+  # Why: ci.sh prefixes the repo URL; no YAML literal.
+  # From: Issue #1683 | PR #1858
+  provenance_predicate: ci-2.0/provenance/v1
   # What: Rust edition of every first-party crate.
   # Why: Cargo.toml is synced from it; no literal copy.
   # From: Issue #1683 | PR #1858

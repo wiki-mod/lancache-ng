@@ -172,7 +172,7 @@ jobs:
   # From: Issue #1683
   release:
     name: release
-    needs: [resolve-build-tools, promote]
+    needs: [resolve-build-tools, plan, promote]
     if: inputs.action != 'cut-patch'
     runs-on: ${{ needs.resolve-build-tools.outputs.runner }}
     timeout-minutes: ${{ fromJSON(needs.resolve-build-tools.outputs.timeouts)['release'] }}
@@ -190,11 +190,14 @@ jobs:
       images: ${{ steps.images.outputs.matrix }}
     steps:
       - *bootstrap
-      # What: name every released image digest
-      # Why: §82: the tag resolves once; later steps reuse
-      # From: Issue #1683 | PR #1912
+      # What: name every released digest and its provenance
+      # Why: §59 ids come from the plan's run record
+      # From: Issue #1683 | PR #1858
       - name: Resolve the released image digests
         id: images
+        env:
+          CI_RUN_IDENTITIES: *run_ids
+          CI_BUILD_TOOLS_IMAGE: ${{ needs.resolve-build-tools.outputs.image }}
         run: bash .github/scripts/ci.sh release-images "${CI_RELEASE_TAG}"
       - name: Publish the GitHub release
         env:
@@ -247,10 +250,21 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Attest the image provenance
-        uses: actions/attest@v4
+        uses: &attest actions/attest@v4
         with:
           subject-name: ${{ matrix.name }}
           subject-digest: ${{ matrix.digest }}
+          push-to-registry: true
+      # What: attest build, toolchain id and build commit.
+      # Why: §59; the step above names the release run only.
+      # From: Issue #1683 | PR #1858
+      - name: Attest the build and toolchain identity
+        uses: *attest
+        with:
+          subject-name: ${{ matrix.name }}
+          subject-digest: ${{ matrix.digest }}
+          predicate-type: ${{ matrix.predicate_type }}
+          predicate: ${{ matrix.predicate }}
           push-to-registry: true
 
   # What: attach a CycloneDX SBOM per first-party image.

@@ -2116,17 +2116,18 @@ _ci_service_smoke() {
     _ci_image_base_plus smoke "${own}"$'\n'"${runtime}"
 }
 
-# What: Print each SOT build_identity input of a type.
-# Why: SOT names the inputs; the build must match the id.
+# What: SOT build_identity inputs of a type; $4 = prefix.
+# Why: the id and the provenance toolchain read one list.
 # From: Issue #1683 | PR #1858
 _ci_identity_pins() {
-    local service="$1" build_type="$2" platform="$3" inputs input entry
+    local service="$1" build_type="$2" platform="$3" only="${4:-}" inputs input entry
     inputs="$(_ci_block_entry_list build_identity "${build_type}" inputs)" || return 2
     if [ -z "${inputs}" ]; then
         ci_log "[CI-ERROR-IDENTITY-0004]" "build_type=\"${build_type}\" reason=\"no SOT build_identity inputs; FAIL CLOSED\""
         return 2
     fi
     for input in ${inputs}; do
+        [[ "${input}" == "${only}"* ]] || continue
         printf 'input=%s\n' "${input}"
         case "${input}" in
             source_sha) : ;;
@@ -8012,20 +8013,74 @@ ci_cmd_release_variable() {
 # Why: the workflow attests each digest; no list in YAML.
 # From: Issue #1683 | PR #1912
 ci_cmd_release_images() {
-    local tag="${1:-}" base name names img dig n include="[]"
+    local tag="${1:-}" base name names img dig n include="[]" ptype repo ppath pred
     [ -n "${tag}" ] || { ci_log "[CI-ERROR-RELEASE-0053]" "reason=\"tag arg required\""; return 2; }
     _ci_require_ghcr_auth || return "$?"
     base="$(_ci_image_ref)" || return 2
     names="$(ci_build_targets)" || return 2
+    # What: predicate type = repo URL + SOT path.
+    # Why: §59 provenance has its own type; no YAML literal.
+    # From: Issue #1683 | PR #1858
+    ptype="$(_ci_env_required GITHUB_SERVER_URL)" || return 2
+    repo="$(_ci_repo)" || return 2
+    ppath="$(_ci_release_value provenance_predicate)" || return 2
+    ptype="${ptype}/${repo}/${ppath}"
     while IFS= read -r name; do
         [ -n "${name}" ] || continue
         img="${base}/${name}"
         dig="$(_ci_registry_digest "${img}:${tag}")" || return "$?"
-        include="$(_ci_matrix_append "${include}" registry="${img%%/*}" name="${img}" digest="${dig}")" || return 2
+        pred="$(_ci_release_provenance "${name}" "${img}" "${dig}" "${tag}")" || return "$?"
+        include="$(_ci_matrix_append "${include}" registry="${img%%/*}" name="${img}" digest="${dig}" predicate_type="${ptype}" predicate="${pred}")" || return 2
     done <<< "${names}"
     _ci_step_output "[CI-ERROR-RELEASE-0054]" matrix "$(_ci_matrix_doc "${include}")" || return 2
     n="$(_ci_capture 0 jq -r 'length' <<< "${include}")" || return 2
     printf 'release-images=%s tag=%s\n' "${n}" "${tag}"
+}
+
+# What: §59 provenance JSON of one released index digest.
+# Why: build and toolchain id per platform, no mutable tag.
+# From: Issue #1683 | PR #1858
+_ci_release_provenance() {
+    local service="$1" img="$2" dig="$3" tag="$4" source repo head type kids plat child id acc rev pins tid out plats="[]" rc
+    source="$(_ci_env_required GITHUB_SERVER_URL)" || return 2
+    repo="$(_ci_repo)" || return 2
+    source="${source}/${repo}"
+    head="$(_ci_head_commit)" || return 2
+    type="$(_ci_required_field "${service}" build_type)" || return 2
+    kids="$(_ci_index_children "${img}@${dig}")" || return 2
+    if [ -z "${kids}" ]; then
+        ci_log "[CI-ERROR-RELEASE-0067]" "image=\"${img}\" digest=\"${dig}\" reason=\"released index names no platform; no provenance\""
+        return 2
+    fi
+    while IFS= read -r plat; do
+        [ -n "${plat}" ] || continue
+        child="${plat#*=}"; plat="${plat%%=*}"
+        id="$(_ci_identity_for "${service}" "${plat}")" || return 2
+        # What: child must be this run's accepted digest.
+        # Why: else the id belongs to another image.
+        # From: Issue #1683 | PR #1858
+        rc=0; acc="$(_ci_accepted_digest "${service}" "${plat}")" || rc=$?
+        [ "${rc}" -le 1 ] || return 2
+        if [ "${rc}" -ne 0 ] || [ "${acc}" != "${child}" ]; then
+            ci_log "[CI-ERROR-RELEASE-0064]" "image=\"${img}\" platform=\"${plat}\" released=\"${child}\" accepted=\"${acc}\" identity=\"${id}\" reason=\"released child is not the accepted digest of this run's id; no provenance\""
+            return 2
+        fi
+        rev="$(_ci_registry_read "${img}@${child}" revision "[CI-ERROR-RELEASE-0065]" fail)" || return 2
+        pins="$(_ci_identity_pins "${service}" "${type}" "${plat}" toolchain_)" || return 2
+        tid="$(printf '%s\n' "${pins}" | _ci_sha256_hex)" || return 2
+        if ! out="$(jq -c --arg p "${plat}" --arg c "${child}" --arg r "${rev}" --arg i "${id}" --arg t "${tid}" --arg tc "${pins}" \
+            '. + [{platform: $p, digest: $c, source_commit: $r, build_identity: $i, toolchain_identity: $t, toolchain_inputs: ($tc | split("\n") | map(select(. != "")))}]' <<< "${plats}" 2>&1)"; then
+            ci_error "[CI-ERROR-RELEASE-0066]" "image=\"${img}\" platform=\"${plat}\" reason=\"provenance entry not encodable\"" "${out}"
+            return 2
+        fi
+        plats="${out}"
+    done <<< "${kids}"
+    if ! out="$(jq -c -n --arg d "${dig}" --arg s "${source}" --arg h "${head}" --arg t "${tag}" --arg b "${type}" --argjson p "${plats}" \
+        '{digest: $d, source: $s, release_commit: $h, release_tag: $t, build_type: $b, platforms: $p}' 2>&1)"; then
+        ci_error "[CI-ERROR-RELEASE-0066]" "image=\"${img}\" reason=\"provenance not encodable\"" "${out}"
+        return 2
+    fi
+    printf '%s\n' "${out}"
 }
 
 # What: one image's digest from the release-images matrix.
