@@ -7314,18 +7314,17 @@ _ci_channel_readback() {
 # Why: an index digest alone does not prove a usable image.
 # From: Issue #1683 | PR #1858
 _ci_index_complete() {
-    local base="$1" digest="$2" raw rc=0 child prc children
-    raw="$(_ci_index_raw "${base}@${digest}")" || rc=$?
-    [ "${rc}" -eq 0 ] || return "${rc}"
+    local base="$1" digest="$2" child prc children
+    children="$(_ci_index_children "${base}@${digest}")" || return "$?"
     # What: an index with no platform child is incomplete.
     # Why: zero children must not read as all resolvable.
     # From: Issue #1683
-    if ! children="$(jq -er '.manifests[]? | select(.platform.architecture!="unknown") | .digest' <<< "${raw}")"; then
+    if [ -z "${children}" ]; then
         ci_log "[CI-ERROR-PROMOTE-0015]" "image=\"${base}@${digest}\" reason=\"index has no readable platform child\""
         return 2
     fi
     while IFS= read -r child; do
-        [ -n "${child}" ] || continue
+        child="${child#*=}"
         prc=0
         _ci_registry_probe "${base}@${child}" >&2 || prc=$?
         if [ "${prc}" -ne 0 ]; then
@@ -8479,22 +8478,16 @@ _ci_gc_roots() {
         [ -n "${d}" ] || continue
         out="${out}${d}"$'\n'
         rc=0
-        raw="$(_ci_index_raw "${base}/${s}@${d}")" || rc=$?
-        # What: A transient child read refuses the run.
+        local kids kid
+        kids="$(_ci_index_children "${base}/${s}@${d}")" || rc=$?
+        # What: a failed child read refuses the run.
         # Why: Dropping children orphan-deletes arches.
         # From: Issue #1683
         [ "${rc}" -eq 2 ] && { ci_log "[CI-ERROR-GC-0014]" "service=\"${s}\" digest=\"${d}\" reason=\"index child read UNKNOWN; refusing roots\""; return 2; }
-        if [ "${rc}" -eq 0 ]; then
-            # What: children parsed+checked first.
-            # Why: lost children get deleted as dead.
-            # From: Issue #1683 | PR #1858
-            local kids
-            if ! kids="$(jq -r '.manifests[]? | select(.platform.architecture!="unknown") | .digest' <<< "${raw}" 2>&1)"; then
-                ci_error "[CI-ERROR-GC-0026]" "service=\"${s}\" digest=\"${d}\" reason=\"index children unparseable; refusing roots\"" "${kids}"$'\n'"index: ${raw}"
-                return 2
-            fi
-            out="${out}${kids}"$'\n'
-        fi
+        [ "${rc}" -eq 0 ] || continue
+        while IFS= read -r kid; do
+            out="${out}${kid#*=}"$'\n'
+        done <<< "${kids}"
     done <<< "${pairs}"
     printf '%s\n' "${out}" | awk 'NF>0' | LC_ALL=C sort -u
 }
