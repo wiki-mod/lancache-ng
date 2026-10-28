@@ -189,7 +189,7 @@ jobs:
         if: runner.arch == 'ARM64'
         uses: docker://mirror.gcr.io/alpine/git:latest
         with:
-          args: -c safe.directory=/github/workspace clone --quiet --depth 1 --revision=${{ github.sha }} ${{ github.server_url }}/${{ github.repository }} /github/workspace
+          args: -c safe.directory=/github/workspace clone --depth 1 --revision=${{ github.sha }} ${{ github.server_url }}/${{ github.repository }} /github/workspace
       # What: export args for the GHA cache runtime step.
       # Why: ci.sh owns the kill timeout and the var list.
       # From: Issue #1683 | PR #1858

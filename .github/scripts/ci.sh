@@ -139,6 +139,13 @@ _ci_capture() {
     _ci_run -m "${okmax}" -s "[CI-ERROR-CORE-0106]" "reason=\"command failed or wrote stderr\"" "$@"
 }
 
+# What: run git; its status text on stderr is raw output.
+# Why: git writes progress to stderr; only rc fails it.
+# From: Issue #1683 | PR #1858
+_ci_git_run() {
+    _ci_run "[CI-ERROR-CORE-0157]" "reason=\"git command failed\"" git "$@"
+}
+
 # What: run a command; failure = caller's id, ctx, rc, raw.
 # Why: one owner for coded command errors and their raw.
 # From: Issue #1683 | PR #1858
@@ -2847,9 +2854,9 @@ _ci_ref_subject() {
     # Why: shallow breaks the next push; loops retry above.
     # From: Issue #1683 | PR #1912
     if [ "${retry}" = 1 ]; then
-        _ci_retry git git fetch --quiet "${remote}" "${ref}" >&2 || return 2
+        _ci_retry git git fetch "${remote}" "${ref}" >&2 || return 2
     else
-        _ci_capture 0 git fetch --quiet "${remote}" "${ref}" || return 2
+        _ci_git_run fetch "${remote}" "${ref}" >&2 || return 2
     fi
     _ci_capture 0 git log -1 --format=%s FETCH_HEAD
 }
@@ -2919,7 +2926,7 @@ _ci_cas_push() {
 # Why: one owner for lease deletes of lock and mark refs.
 # From: Issue #1683 | PR #1858
 _ci_ref_delete() {
-    _ci_capture 0 git push --quiet --force-with-lease="$2:$3" "$1" ":$2"
+    _ci_git_run push --force-with-lease="$2:$3" "$1" ":$2" >&2
 }
 
 # What: log a failed CAS push; rc 2 race, rc 3 failure.
@@ -3196,7 +3203,7 @@ _ci_ledger_blob() {
     # What: this fetch has no retry level.
     # Why: op=git uses shared transient-signature truth.
     # From: Issue #1683
-    _ci_retry git git fetch --quiet --depth=1 "${remote}" "${ledger_ref}" >&2 || return 2
+    _ci_retry git git fetch --depth=1 "${remote}" "${ledger_ref}" >&2 || return 2
     local blob
     if ! blob="$(git cat-file -p "FETCH_HEAD:${file}" 2>&1)"; then
         ci_error "[CI-WARN-RESOLVE-0009]" "ref=\"${ledger_ref}\" file=\"${file}\" reason=\"ledger file unreadable; UNKNOWN\"" "${blob}"
@@ -3516,7 +3523,7 @@ _ci_diff_history() {
     # What: commits and trees only; blobs load on demand.
     # Why: whole history with blobs cost 33 s (Fund 114).
     # From: Issue #1683 | PR #1858
-    (cd -- "${CI_REPO_ROOT}" && _ci_retry git-fetch git fetch -q --no-tags --filter=blob:none "${deep[@]}" "${remote}" "${head}" "${need[@]}") >&2 || return 2
+    (cd -- "${CI_REPO_ROOT}" && _ci_retry git-fetch git fetch --no-tags --filter=blob:none "${deep[@]}" "${remote}" "${head}" "${need[@]}") >&2 || return 2
 }
 
 # What: This run's base and head diff refs, or empty.
@@ -5923,7 +5930,7 @@ _ci_package_refresh_pair() {
 _ci_image_files() {
     local ref="$1" platform="$2" work="$3" cid f out rc=0
     shift 3
-    _ci_retry registry docker pull --quiet --platform "${platform}" "${ref}" >&2 || return 2
+    _ci_retry registry docker pull --platform "${platform}" "${ref}" >&2 || return 2
     cid="$(_ci_capture 0 docker create --platform "${platform}" --entrypoint /bin/true "${ref}")" || return 2
     for f in "$@"; do
         if ! out="$(docker cp "${cid}:${f}" "${work}/${f##*/}" 2>&1)"; then
@@ -6939,9 +6946,9 @@ ci_cmd_channel_checkout() {
         want="${pin}"
     fi
     remote="$(_ci_git_remote)" || return 2
-    (cd -- "${CI_REPO_ROOT}" && _ci_retry git-fetch git fetch -q --no-tags --depth=1 "${remote}" "${want}") >&2 || return 2
+    (cd -- "${CI_REPO_ROOT}" && _ci_retry git-fetch git fetch --no-tags --depth=1 "${remote}" "${want}") >&2 || return 2
     _ci_run "[CI-ERROR-PROMOTE-0019]" "channel=\"${channel}\" ref=\"${want}\" reason=\"checkout of the fetched source failed\"" \
-        git -C "${CI_REPO_ROOT}" checkout -q FETCH_HEAD || return 2
+        git -C "${CI_REPO_ROOT}" checkout FETCH_HEAD || return 2
     sha="$(_ci_head_commit)" || return 2
     _ci_step_output "[CI-ERROR-PROMOTE-0021]" commit "${sha}" || return 2
     # What: later steps of this job see the checked-out ref.
@@ -7873,8 +7880,8 @@ ci_cmd_release_changelog() {
     fi
     changes="$(_ci_release_changes "${tag}")" || return 2
     remote="$(_ci_git_remote)" || return 2
-    out="$(_ci_retry git-fetch git fetch -q --no-tags "${remote}" "+refs/heads/${branch}:refs/remotes/${remote}/${branch}")" || return 2
-    out="$(_ci_capture 0 git checkout -q -B ci-release-changelog "${remote}/${branch}")" || return 2
+    _ci_retry git-fetch git fetch --no-tags "${remote}" "+refs/heads/${branch}:refs/remotes/${remote}/${branch}" >&2 || return 2
+    _ci_git_run checkout -B ci-release-changelog "${remote}/${branch}" >&2 || return 2
     out="$(_ci_capture 1 grep -nF -- "${head} " "${file}")" || return 2
     if [ -n "${out}" ]; then
         printf 'release-changelog=exists tag=%s line=%s\n' "${tag}" "${out%%:*}"
@@ -7892,10 +7899,10 @@ ci_cmd_release_changelog() {
         rm -f "${file}.new"
         return 2
     fi
-    out="$(_ci_capture 0 _ci_git_as_bot commit -q -m "docs: update ${file} for ${tag}" -- "${file}")" || return 2
+    _ci_capture 0 _ci_git_as_bot commit -m "docs: update ${file} for ${tag}" -- "${file}" >&2 || return 2
     url="$(_ci_pat_url)" || return 2
     sha="$(_ci_capture 0 git rev-parse HEAD)" || return 2
-    out="$(_ci_retry git-push _ci_pat_git push -q "${url}" "HEAD:refs/heads/${branch}")" || return 2
+    _ci_retry git-push _ci_pat_git push "${url}" "HEAD:refs/heads/${branch}" >&2 || return 2
     # What: the branch tip must be the CHANGELOG commit
     # Why: AG-WF-031: every GitHub write is read back
     # From: Issue #1683 | PR #1858
