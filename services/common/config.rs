@@ -495,19 +495,21 @@ fn nats_text_problem(label: &str, value: &str) -> Option<String> {
 // Why: bad values must fail before nats.conf is written.
 // From: Issue #1683 | PR #1912
 fn validate_nats_login(label: &str, login: &NatsLogin) -> Result<(), String> {
-    let problem = nats_text_problem("NATS username", &login.user)
+    let username_label = format!("{label} username");
+    let password_label = format!("{label} password");
+    let problem = nats_text_problem(&username_label, &login.user)
         .or_else(|| {
             let allowed = |c: char| c.is_ascii_alphanumeric() || "_.-".contains(c);
             (!login.user.chars().all(allowed)).then(|| {
                 format!(
-                    "NATS username contains invalid characters (allowed: [A-Za-z0-9_.-]), got: {}",
-                    login.user
+                    "{} contains invalid characters (allowed: [A-Za-z0-9_.-]), got: {}",
+                    username_label, login.user
                 )
             })
         })
         .or_else(|| match login.password.as_deref() {
-            Some(password) => nats_text_problem("NATS password", password),
-            None => Some("NATS password cannot be empty".to_string()),
+            Some(password) => nats_text_problem(&password_label, password),
+            None => Some(format!("{password_label} cannot be empty")),
         });
     problem.map_or(Ok(()), |p| Err(format!("Invalid {label} credentials: {p}")))
 }
