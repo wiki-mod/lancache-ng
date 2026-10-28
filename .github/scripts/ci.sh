@@ -13319,13 +13319,21 @@ ci_cmd_have_command() {
     _ci_command_available "$1"
 }
 
+# What: print one entry of a named table; none if unset.
+# Why: an empty key aborts bash with rc 1, not a stop.
+# From: Issue #1683 | PR #1858
+_ci_table_entry() {
+    local -n _ci_tab="$1"
+    [ -z "$2" ] || printf '%s' "${_ci_tab[$2]:-}"
+}
+
 # What: Route a subcommand to its engine function.
 # Why: One table is membership and dispatch; no second list.
 # From: Issue #1683
 ci_main() {
     local command="${1:-}" fn
     if [ "$#" -gt 0 ]; then shift; fi
-    fn="${CI_DISPATCH[${command}]:-}"
+    fn="$(_ci_table_entry CI_DISPATCH "${command}")" || return 2
     if [ -z "${fn}" ]; then
         ci_log "[CI-ERROR-CORE-0002]" "command=\"${command}\" reason=\"unknown subcommand\" known=\"${!CI_DISPATCH[*]}\""
         return 2
@@ -17563,7 +17571,7 @@ ci_cmd_check() {
         ci_cmd_check_all "$@"
         return
     fi
-    entry="${CI_CHECKS[${sub}]:-}"
+    entry="$(_ci_table_entry CI_CHECKS "${sub}")" || return 2
     if [ -z "${entry}" ]; then
         ci_log "[CI-ERROR-CHECK-0001]" "sub=\"${sub}\" reason=\"unknown check\" known=\"all ${!CI_CHECKS[*]}\""
         return 2
