@@ -963,6 +963,22 @@ _ci_plan_candidate() {
     return 1
 }
 
+# What: rc 0 if a target's normalized content changed.
+# Why: test/audit identity is content, no comments (§29).
+# From: Issue #1683 | PR #1858
+_ci_target_content_changed() {
+    local paths p refs base head rc
+    paths="$(_ci_target_paths "$1")" || return 2
+    refs="$(_ci_diff_refs)" || return 2
+    read -r base head <<<"${refs}"
+    while IFS= read -r p; do
+        [ -n "${p}" ] || continue
+        rc=0; _ci_path_content_changed "${p}" "${base}" "${head}" || rc=$?
+        [ "${rc}" -eq 1 ] || return "${rc}"
+    done <<< "${paths}"
+    return 1
+}
+
 # What: Plan phase: pick rebuild CANDIDATES per service.
 # Why: Path picks candidates; identity/CAS decides build.
 # From: Issue #1683
@@ -1445,9 +1461,20 @@ ci_cmd_plan_matrix() {
         # Why: tests run on change, even build reuse (§60).
         # From: Issue #1683
         svc_type="$(_ci_required_field "${service}" build_type)" || return 2
-        [ "${path_cand}" = true ] && [ "${svc_type}" = rust ] \
-            && test_services="${test_services} ${service}"
-        [ "${svc_type}" != rust ] || rust_audit=true
+        # What: tests and audit follow content, not paths.
+        # Why: §29 §64: equal content, equal test identity.
+        # From: Issue #1683 | PR #1858
+        if [ "${svc_type}" = rust ]; then
+            rc=0; _ci_target_content_changed "${service}" || rc=$?
+            case "${rc}" in
+                0)
+                    [ "${path_cand}" = false ] || test_services="${test_services} ${service}"
+                    rust_audit=true
+                    ;;
+                1) ;;
+                *) return 2 ;;
+            esac
+        fi
         # What: auth once, only when a candidate exists.
         # Why: docs-only NOOP: registry zero touches (§63).
         # From: Issue #1683
