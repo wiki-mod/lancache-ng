@@ -1529,6 +1529,21 @@ env_key_has_usable_secret() {
     ! secret_value_is_placeholder "$value"
 }
 
+# What: output of one SOT generator command, one line
+# Why: runtime.secret_generators; ci.sh runs the same row
+# From: Issue #1683 | PR #1858
+secret_generator_output() {
+    local name="$1" kind="$2" rows row value
+    local -a cmd
+    rows=$(lancache_sot_list secret_generators runtime) || exit $?
+    row=$(awk -v k="$kind" '$1 == k { print; exit }' <<< "$rows") \
+        || die "Failed to read the generator of $kind (exit $?)."
+    [[ -n "$row" ]] || die "Unknown secret generator for $name: $kind"
+    read -ra cmd <<< "${row#"$kind "}"
+    value=$("${cmd[@]}") || die "Failed to generate $name with ${cmd[0]} (exit $?)."
+    printf '%s\n' "${value//$'\n'/}"
+}
+
 # What: generate_secret_value fails on any generator error
 # Why: an empty secret must never be written
 # From: Issue #1683 | PR #1858
@@ -1542,27 +1557,20 @@ generate_secret_value() {
         || die "Secret $name is not in managed_secret_env_keys; add it there so log bundles redact it."
 
     case "$kind" in
-        hex32)
-            value=$(openssl rand -hex 32) \
-                || die "Failed to generate $name with openssl."
-            ;;
-        base64_32)
-            value=$(openssl rand -base64 32) \
-                || die "Failed to generate $name with openssl."
-            value="${value//$'\n'/}"
-            ;;
         alnum20)
+            # What: alnum20: letters, digits of base64_32
+            # Why: a UI password a person can type
+            # From: Issue #1683 | PR #1858
             value=""
             while (( ${#value} < 20 )); do
-                chunk=$(openssl rand -base64 32) \
-                    || die "Failed to generate $name with openssl."
+                chunk=$(secret_generator_output "$name" base64_32) || exit $?
                 chunk="${chunk//[^A-Za-z0-9]/}"
                 value+="$chunk"
             done
             value="${value:0:20}"
             ;;
         *)
-            die "Unknown secret generator for $name: $kind"
+            value=$(secret_generator_output "$name" "$kind") || exit $?
             ;;
     esac
 
@@ -6686,7 +6694,7 @@ compose_config_value() {
 }
 
 # What: one Kea Control Agent command, as the UI sends it
-# Why: the one sender; setup.sh and ci.sh share it
+# Why: the one sender in setup.sh; the UI sends the same
 # From: Issue #1683 | PR #1858
 kea_ctrl_send() {
     local kea_ctrl_url="$1" kea_ctrl_user="$2" kea_ctrl_token="$3" body="$4"
@@ -7755,13 +7763,6 @@ LANCACHE_SOT_TEXT=$(lancache_repo_file_text "$LANCACHE_SOT") || exit $?
 # Why: one owner; setup.sh and CI name the same file
 # From: Issue #1683 | PR #1858
 PROD_COMPOSE="$SCRIPT_DIR/$(lancache_sot_value compose_file runtime)" || exit $?
-
-# What: a sourced setup.sh stops here: functions, no run
-# Why: tests load every function from the real file
-# From: Issue #1683 | PR #1858
-if [[ -n "${BASH_SOURCE[0]:-}" && "${BASH_SOURCE[0]}" != "$0" ]]; then
-    return 0
-fi
 
 # What: runs the subcommand named in the first argument
 # Why: the install flow below runs only for install

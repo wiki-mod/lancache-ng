@@ -761,6 +761,12 @@ runtime:
     - NATS_PASSWORD hex32 secondary
     - UI_AUTH_PASSWORD alnum20 ui
     - UI_AUTH_PASSWORD_HASH argon2id ui
+  # What: "kind command" that makes one secret kind.
+  # Why: setup.sh and ci.sh run it; no generator copy.
+  # From: Issue #1683 | PR #1858
+  secret_generators:
+    - hex32 openssl rand -hex 32
+    - base64_32 openssl rand -base64 32
   # What: .env keys of a current_dev quickstart install.
   # Why: update turns their relative paths absolute.
   # From: Issue #1683 | PR #1912
