@@ -790,6 +790,19 @@ runtime:
     - nats-data NATS_DATA_DIR
     - nats-conf NATS_CONF_DIR
     - logs-syslog-ng SYSLOG_NG_LOG_DIR
+  # What: v0.3.2 quickstart volumes left as they are.
+  # Why: old logs and snapshots; prod has no home for them.
+  # From: Issue #1683 | PR #1858
+  quickstart_volumes_kept:
+    - logs
+    - dns-logs-standard
+    - nats-logs
+    - netdata-logs
+    - proxy-logs
+    - syslog-data
+    - ui-logs
+    - watchdog-logs
+    - pdns-config-snapshots-standard
   # What: prod state dir keys as "KEY STATE_SUBDIR_NAME".
   # Why: shell reads this list, not the compose text.
   # From: Issue #1683 | PR #1912

@@ -2279,7 +2279,7 @@ is_quickstart_install() {
 migrate_quickstart_install() (
     local old_dir="$1" stack_dir="${PROD_COMPOSE%/*}" env_local old_env record project key value volume dir copy f
     local services old_volumes prod_volumes rows missing copies keys old_raw new_raw old_value line path_keys bundle
-    local https_ip fresh
+    local https_ip fresh kept kept_list
     local -a service_list copy_lines path_key_list=()
     path_keys=$(lancache_sot_list quickstart_path_keys runtime) || exit $?
     path_keys="${path_keys//$'\n'/ }"
@@ -2375,11 +2375,19 @@ migrate_quickstart_install() (
     prod_volumes=$(stack_compose "$stack_dir" "$env_local" config --volumes) \
         || die "Cannot list the volumes of $PROD_COMPOSE (exit $?); the quickstart stack was not touched."
     rows=$(lancache_sot_list quickstart_volume_keys runtime) || exit $?
-    missing=""
+    kept_list=$(lancache_sot_list quickstart_volumes_kept runtime) || exit $?
+    missing="" kept=""
     while IFS= read -r volume; do
         [[ -n "$volume" ]] || continue
         list_has_line "$volume" "$prod_volumes" && continue
         awk -v v="$volume" '$1 == v { f = 1 } END { exit !f }' <<< "$rows" && continue
+        # What: SOT-listed log volumes stay, untouched
+        # Why: nothing is deleted; the operator decides
+        # From: Issue #1683 | PR #1858
+        if list_has_line "$volume" "$kept_list"; then
+            kept+=" ${project}_${volume}"
+            continue
+        fi
         missing+=" $volume"
     done <<< "$old_volumes"
     [[ -z "$missing" ]] || die "Quickstart volume(s)${missing} have no home in $PROD_COMPOSE; the quickstart stack was not touched."
@@ -2422,6 +2430,8 @@ migrate_quickstart_install() (
     resume_lancache_convergence_after_update
     UPDATE_CONVERGENCE_COMPLETED=1
     print_ok "Quickstart install migrated to $stack_dir; its old Docker volumes were kept"
+    [[ -z "$kept" ]] \
+        || print_warn "Old logs and snapshots without a place in the new stack stay in:${kept}. Remove them with docker volume rm when no longer needed."
 )
 
 # What: stops prod, moves copies aside, restarts quickstart
