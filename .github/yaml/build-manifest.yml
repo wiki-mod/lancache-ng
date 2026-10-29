@@ -905,7 +905,7 @@ status_reports:
   # From: Issue #1683 | PR #1912
   trivy-finding:
     label: trivy-finding
-    scope: "Trivy HIGH/CRITICAL finding in @SERVICE@ (@ARCH@) not covered by @{ci_variables.CI_TRIVY_IGNORE}"
+    scope: "Trivy @{ci_variables.CI_TRIVY_SEVERITY} finding in @SERVICE@ (@ARCH@) not covered by @{ci_variables.CI_TRIVY_IGNORE}"
   trivy-db-unavailable:
     label: trivy-db-unavailable
     scope: "Trivy vulnerability DB missing or stale for @SERVICE@ (@ARCH@) after every retry"
