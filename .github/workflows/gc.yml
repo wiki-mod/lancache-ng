@@ -12,7 +12,15 @@ on:
   # From: Issue #1683 | PR #1858
   schedule:
     - cron: "43 */3 * * *"
+  # What: hand start; deletes only with apply=true.
+  # Why: a hand start is a dry run unless asked (Fund 62).
+  # From: Issue #1683 | PR #1858
   workflow_dispatch:
+    inputs:
+      apply:
+        description: "delete for real; default is a dry run"
+        type: boolean
+        default: false
 permissions:
   contents: read
   packages: read
@@ -101,6 +109,7 @@ jobs:
       - name: Reap unreachable GHCR artifacts
         env:
           GH_TOKEN: ${{ secrets.GHCR_PACKAGE_DELETE_PAT }}
+          GC_APPLY: ${{ inputs.apply }}
         run: bash .github/scripts/ci.sh gc --apply
       # What: delete green refs of closed PRs, ended locks.
       # Why: nothing else deletes them after the run ends.
@@ -108,6 +117,7 @@ jobs:
       - name: Delete green refs of closed PRs and ended locks
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GC_APPLY: ${{ inputs.apply }}
         run: bash .github/scripts/ci.sh gc-refs --apply
 
   # What: AG-GH-017 sweep for branches with no PR or issue.

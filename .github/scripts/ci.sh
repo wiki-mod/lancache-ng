@@ -8980,20 +8980,36 @@ _ci_gc_classify() {
     esac
 }
 
-# What: Classify GC candidates; delete only when applied.
-# Why: Repo-wide reachability is the named §98 exception.
-# From: Issue #1683
-ci_cmd_gc() {
-    local mode="dry-run" arg roots rc=0
+# What: gc mode; a hand start applies only on GC_APPLY.
+# Why: one owner; a dispatch is a dry run by default.
+# From: Issue #1683 | PR #1858
+_ci_gc_mode() {
+    local code="$1" cmd="$2" arg
+    shift 2
+    REPLY="dry-run"
     for arg in "$@"; do
         case "${arg}" in
-            --apply) mode="apply" ;;
+            --apply) REPLY="apply" ;;
             *)
-                ci_log "[CI-ERROR-GC-0006]" "arg=\"${arg}\" reason=\"unknown gc argument\""
+                ci_log "[CI-ERROR-${code}]" "arg=\"${arg}\" reason=\"unknown ${cmd} argument\""
                 return 2
                 ;;
         esac
     done
+    if [ "${REPLY}" = apply ] && [ "${GITHUB_EVENT_NAME:-}" = workflow_dispatch ] \
+        && [ "${GC_APPLY:-}" != true ]; then
+        REPLY="dry-run"
+        ci_log "[CI-INFO-GC-0045]" "cmd=\"${cmd}\" event=workflow_dispatch apply=\"${GC_APPLY:-}\" reason=\"hand start without apply=true; dry run\""
+    fi
+}
+
+# What: Classify GC candidates; delete only when applied.
+# Why: Repo-wide reachability is the named §98 exception.
+# From: Issue #1683
+ci_cmd_gc() {
+    local mode roots rc=0
+    _ci_gc_mode GC-0006 gc "$@" || return 2
+    mode="${REPLY}"
     if ! roots="$(_ci_gc_roots)"; then
         ci_log "[CI-ERROR-GC-0028]" "mode=${mode} source=\"_ci_gc_roots\" reason=\"protected roots not derivable (raw above); no gc\""
         return 2
@@ -9106,17 +9122,10 @@ _ci_gc_ref_reap() {
 # Why: nothing else deletes them; dry-run only lists.
 # From: Issue #1683 | PR #1858
 ci_cmd_gc_refs() {
-    local mode="dry-run" arg remote prefix repo refs sha ref n state holder rc keep=0 del=0 deleted=0
+    local mode remote prefix repo refs sha ref n state holder rc keep=0 del=0 deleted=0
     local build_lock promote_lock
-    for arg in "$@"; do
-        case "${arg}" in
-            --apply) mode="apply" ;;
-            *)
-                ci_log "[CI-ERROR-GC-0036]" "arg=\"${arg}\" reason=\"unknown gc-refs argument\""
-                return 2
-                ;;
-        esac
-    done
+    _ci_gc_mode GC-0036 gc-refs "$@" || return 2
+    mode="${REPLY}"
     remote="$(_ci_git_remote)" || return 2
     prefix="$(_ci_variable CI_GREEN_REF)" || return 2
     repo="$(_ci_env_required GITHUB_REPOSITORY)" || return 2
