@@ -6213,7 +6213,7 @@ _ci_apk_outdated() {
 # Why: apk version -t owns the order; no own compare.
 # From: Issue #1683 | PR #1858
 _ci_apk_newer() {
-    local pairs name have cand order
+    local pairs name have cand order behind=""
     # What: P: then V: per record, in both file formats.
     # Why: the one P:/V: reader for the db and the index.
     # From: Issue #1683 | PR #1858
@@ -6225,8 +6225,9 @@ _ci_apk_newer() {
     while IFS=$'\t' read -r name have cand; do
         [ -n "${name}" ] || continue
         order="$(_ci_capture 0 apk version -t "${have}" "${cand}")" || return 2
-        [ "${order}" != "<" ] || printf '%s %s %s\n' "${name}" "${have}" "${cand}"
-    done <<< "${pairs}" | LC_ALL=C sort -u
+        [ "${order}" != "<" ] || behind+="${name} ${have} ${cand}"$'\n'
+    done <<< "${pairs}"
+    [ -z "${behind}" ] || _ci_capture 0 env LC_ALL=C sort -u <<< "${behind%$'\n'}"
 }
 
 # What: Read the semantic build-impact verdict, fail-closed.
@@ -7675,22 +7676,24 @@ _ci_promote_ref() {
 # Why: ref-driven policy; no channel logic in YAML.
 # From: Issue #1683
 _ci_promote_targets_for_ref() {
-    local ref requested="${CI_PROMOTE_REQUESTED_CHANNEL:-}" tag prerelease
+    local ref requested="${CI_PROMOTE_REQUESTED_CHANNEL:-}" tag prerelease items="" part
     ref="$(_ci_promote_ref)" || return 2
-    {
-        case "${ref}" in
-            refs/heads/*) _ci_channels_where ref "${ref}" || return 2 ;;
-            refs/tags/*)
-                tag="${ref#refs/tags/}"
-                prerelease="$(_ci_release_prerelease "${tag}")" || return "$?"
-                printf '%s\n' "${tag}"
-                if [ "${prerelease}" = false ]; then _ci_channels_where release_tags true || return 2; fi
-                ;;
-        esac
-        if [ -n "${requested}" ] && [ "${requested}" != none ]; then
-            printf '%s\n' "${requested}"
-        fi
-    } | awk 'NF && !seen[$0]++'
+    case "${ref}" in
+        refs/heads/*) items="$(_ci_channels_where ref "${ref}")" || return 2 ;;
+        refs/tags/*)
+            tag="${ref#refs/tags/}"
+            prerelease="$(_ci_release_prerelease "${tag}")" || return "$?"
+            items="${tag}"
+            if [ "${prerelease}" = false ]; then
+                part="$(_ci_channels_where release_tags true)" || return 2
+                items+=$'\n'"${part}"
+            fi
+            ;;
+    esac
+    if [ -n "${requested}" ] && [ "${requested}" != none ]; then
+        items+=$'\n'"${requested}"
+    fi
+    _ci_capture 0 awk "NF && !seen[\$0]++" <<< "${items}"
 }
 
 # What: Resolve a git ref's current remote tip SHA.
@@ -8721,7 +8724,9 @@ _ci_gc_roots() {
     # What: Every ledger record is a root, all states.
     # Why: PRODUCED_UNVERIFIED is pending, not garbage.
     # From: Issue #1683
-    [ "${rc}" -eq 0 ] && pairs="$(printf '%s\n' "${blob}" | awk -F'\t' 'NF>=5 && $2!="" && $5!="" {print $2"\t"$5}')"
+    if [ "${rc}" -eq 0 ]; then
+        pairs="$(_ci_capture 0 awk -F'\t' "NF>=5 && \$2!=\"\" && \$5!=\"\" {print \$2\"\t\"\$5}" <<< "${blob}")" || return 2
+    fi
     local targets targets_rc=0 reltags
     targets="$(ci_build_targets)" || targets_rc=$?
     _ci_producer_ok "${targets_rc}" 0 || return 2
@@ -8822,7 +8827,9 @@ _ci_gc_candidates() {
         # What: Append the service so delete can target it.
         # Why: Delete path is package-scoped, not id-only.
         # From: Issue #1683
-        [ -n "${vers}" ] && printf '%s\n' "${vers}" | awk -v s="${svc}" 'NF{print $0"\t"s}'
+        if [ -n "${vers}" ]; then
+            _ci_capture 0 awk -v s="${svc}" "NF{print \$0\"\t\"s}" <<< "${vers}" || return 2
+        fi
     done <<<"${produced}"
     # What: No package found anywhere is a config error.
     # Why: All-404 must refuse, not read as a clean noop.
@@ -15717,8 +15724,12 @@ _ci_check_action_node_versions() {
     done
 
     local -a uses_values=()
-    local produced produced_rc=0
-    produced="$(printf '%s\n' "${uses_entries[@]}" | sed $'s/^[^\t]*\t//' | sort -u)" || produced_rc=$?
+    local produced produced_rc=0 pairs_text
+    printf -v pairs_text '%s\n' "${uses_entries[@]}"
+    produced="$(_ci_capture 0 sed $'s/^[^\t]*\t//' <<< "${pairs_text%$'\n'}")" || produced_rc=$?
+    if [ "${produced_rc}" -eq 0 ]; then
+        produced="$(_ci_capture 0 sort -u <<< "${produced}")" || produced_rc=$?
+    fi
     _ci_producer_ok "${produced_rc}" 0 || return 2
     mapfile -t uses_values <<<"${produced}"
     # What: no uses: AND no fail is vacuous.
