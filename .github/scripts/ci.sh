@@ -9636,7 +9636,7 @@ _ci_validate_teardown() {
             rc=2
         fi
     fi
-    _ci_validate_release "${holder}"
+    _ci_validate_release "${holder}" || rc=2
     return "${rc}"
 }
 
@@ -10841,7 +10841,7 @@ _ci_validate_stack() {
     if ! net_ovr="$(_ci_mktemp "${CI_TMPDIR}/ci-validate-net.XXXXXX.yml")" \
         || ! pin_ovr="$(_ci_mktemp "${CI_TMPDIR}/ci-validate-pin.XXXXXX.yml")"; then
         rm -f "${net_ovr:-}"
-        _ci_validate_release "${holder}"
+        _ci_validate_teardown "${holder}" "${project}"
         return 2
     fi
     if _ci_validate_net_override "${subnet}" > "${net_ovr}" \
