@@ -12058,6 +12058,20 @@ _ci_rh_root() {
     fi
 }
 
+# What: test(1) as root: 0 yes, 1 no, 2 sudo/test failed.
+# Why: sudo -n also ends with 1; stderr tells it from "no".
+# From: Issue #1683 | PR #1858
+_ci_rh_test() {
+    local err rc=0
+    err="$(_ci_rh_root test "$@" 2>&1)" || rc=$?
+    [ "${rc}" -ne 0 ] || return 0
+    if [ "${rc}" -eq 1 ] && [ -z "${err}" ]; then
+        return 1
+    fi
+    ci_error "[CI-ERROR-RUNNER-0135]" "test=\"$*\" rc=${rc} reason=\"root test failed, not a plain no\"" "${err}"
+    return 2
+}
+
 # What: write stdin to a file as root; -a appends.
 # Why: one owner for root file writes; no echoed copy.
 # From: Issue #1683 | PR #1912
@@ -12574,10 +12588,12 @@ _ci_rh_check() {
         *) return 2 ;;
     esac
     printf '\n--- Sudoers and docker group for %s ---\n' "${user}"
-    if _ci_rh_root test -f "${sfile}"; then
+    if _ci_rh_test -f "${sfile}"; then
         printf '  %s: present\n' "${sfile}"
-    else
+    elif [ "$?" -eq 1 ]; then
         printf '  %s: MISSING\n' "${sfile}"
+    else
+        return 2
     fi
     groups=" $(_ci_run -m 1 "[CI-ERROR-RUNNER-0025]" "user=\"${user}\" reason=\"groups lookup failed\"" id -nG "${user}") "
     if [[ "${groups}" == *" ${dgroup} "* ]]; then
@@ -12802,13 +12818,13 @@ _ci_rh_full_reset_check() {
     printf 'Host: %s   own_host_token=%s\n\n--- Shell history and known_hosts (size only) ---\n' "$(_ci_capture 0 hostname)" "${mine:-<none>}"
     list="$(_ci_rh_state_files)" || return 2
     while IFS= read -r f; do
-        if _ci_rh_root test -s "${f}"; then printf '  %s: truncated by full-reset-clean\n' "${f}"; fi
+        if _ci_rh_test -s "${f}"; then printf '  %s: truncated by full-reset-clean\n' "${f}"; elif [ "$?" -ne 1 ]; then return 2; fi
     done <<< "${list}"
     printf '\n--- Private SSH client keys (report only; rotate by hand) ---\n'
     found=0
     list="$(_ci_rh_user_paths "${sshd}")" || return 2
     while IFS= read -r f; do
-        _ci_rh_root test -d "${f}" || continue
+        _ci_rh_test -d "${f}" || { [ "$?" -eq 1 ] || return 2; continue; }
         out="$(_ci_run -m 1 "[CI-ERROR-RUNNER-0035]" "dir=\"${f}\" reason=\"key search failed\"" _ci_rh_root find "${f}" -maxdepth 1 -type f -name "${privg}" ! -name "${pubg}")" || return 2
         while IFS= read -r ck; do
             [ -z "${ck}" ] || { found=1; printf '  %s: authenticates as the SOURCE host\n' "${ck}"; }
@@ -12819,7 +12835,7 @@ _ci_rh_full_reset_check() {
     found=0
     list="$(_ci_rh_user_paths "${aklist}")" || return 2
     while IFS= read -r f; do
-        _ci_rh_root test -f "${f}" || continue
+        _ci_rh_test -f "${f}" || { [ "$?" -eq 1 ] || return 2; continue; }
         out="$(_ci_capture 0 _ci_rh_root cat "${f}")" || return 2
         while IFS= read -r line; do
             [ -n "${line}" ] || continue
@@ -12838,7 +12854,7 @@ _ci_rh_full_reset_check() {
     found=0
     list="$(_ci_block_entry_list runner_host "" template_scripts)" || return 2
     while IFS= read -r f; do
-        if _ci_rh_root test -f "${rhome}/${f}"; then found=1; printf '  %s/%s: removed by full-reset-clean\n' "${rhome}" "${f}"; fi
+        if _ci_rh_test -f "${rhome}/${f}"; then found=1; printf '  %s/%s: removed by full-reset-clean\n' "${rhome}" "${f}"; elif [ "$?" -ne 1 ]; then return 2; fi
     done <<< "${list}"
     [ "${found}" -eq 1 ] || printf '  (none found)\n'
     printf '\n--- apt/dpkg history naming other fleet hosts (report only) ---\n'
@@ -12915,9 +12931,11 @@ _ci_rh_full_reset_clean() {
     _ci_rh_need_sudo || return 2
     list="$(_ci_rh_state_files)" || return 2
     while IFS= read -r f; do
-        if _ci_rh_root test -f "${f}"; then
+        if _ci_rh_test -f "${f}"; then
             _ci_run "[CI-ERROR-RUNNER-0047]" "file=\"${f}\" reason=\"not truncated\"" _ci_rh_root truncate -s0 "${f}" || return 2
             printf 'Truncated %s\n' "${f}"
+        elif [ "$?" -ne 1 ]; then
+            return 2
         fi
     done <<< "${list}"
     printf 'NOTE: an open login shell keeps its own history; run history -c there or reconnect.\n--- hostid and machine-id ---\n'
@@ -12932,9 +12950,11 @@ _ci_rh_full_reset_clean() {
     done <<< "${out}"
     list="$(_ci_block_entry_list runner_host "" template_scripts)" || return 2
     while IFS= read -r f; do
-        if _ci_rh_root test -f "${rhome}/${f}"; then
+        if _ci_rh_test -f "${rhome}/${f}"; then
             printf 'Removing template-authoring script: %s/%s\n' "${rhome}" "${f}"
             _ci_run "[CI-ERROR-RUNNER-0049]" "file=\"${rhome}/${f}\" reason=\"script not removed\"" _ci_rh_root rm -f -- "${rhome}/${f}" || return 2
+        elif [ "$?" -ne 1 ]; then
+            return 2
         fi
     done <<< "${list}"
     printf -- '--- hosts file self-reference ---\n'
@@ -13044,13 +13064,15 @@ _ci_rh_purge_pve_check() {
     if ! _ci_command_available lsof; then
         ci_error "[CI-ERROR-RUNNER-0119]" "dir=\"${pdir}\" reason=\"lsof not on PATH; open-file check not run\"" "${pdir}"
         return 2
-    elif _ci_rh_root test -d "${pdir}"; then
+    elif _ci_rh_test -d "${pdir}"; then
         open="$(_ci_run -m 1 "[CI-ERROR-RUNNER-0120]" "dir=\"${pdir}\" reason=\"lsof failed\"" _ci_rh_root lsof +D "${pdir}")" || return 2
         [ -z "${open}" ] || printf '  FOUND: open files under %s:\n%s\n' "${pdir}" "${open}"
+    elif [ "$?" -ne 1 ]; then
+        return 2
     fi
     while IFS= read -r d; do
         [ -n "${d}" ] || continue
-        _ci_rh_root test -d "${d}" || continue
+        _ci_rh_test -d "${d}" || { [ "$?" -eq 1 ] || return 2; continue; }
         hits="$(_ci_run -m 1 "[CI-ERROR-RUNNER-0121]" "dir=\"${d}\" reason=\"cron scan failed\"" _ci_rh_root grep -rliE "${units}" "${d}")" || return 2
         [ -z "${hits}" ] || printf '  FOUND: cron entries reference the stack:\n%s\n' "${hits}"
     done <<< "${crons}"
@@ -13215,13 +13237,15 @@ _ci_rh_access() {
     rule="${REPLY}"
     mode="$(_ci_rh_val sudoers_mode)" || return 2
     dgroup="$(_ci_rh_val docker_group)" || return 2
-    if _ci_rh_root test -f "${file}"; then
+    if _ci_rh_test -f "${file}"; then
         cur="$(_ci_capture 0 _ci_rh_root cat "${file}")" || return 2
         if [ "${cur}" != "${rule}" ] || ! _ci_rh_root visudo -cf "${file}" >&2; then
             ci_log "[CI-ERROR-RUNNER-0066]" "file=\"${file}\" reason=\"exists without exactly the expected rule or fails visudo; fix it by hand\""
             return 2
         fi
         printf '%s already holds the expected rule.\n' "${file}"
+    elif [ "$?" -ne 1 ]; then
+        return 2
     else
         printf '%s\n' "${rule}" | _ci_rh_put "${file}" || return 2
         _ci_run "[CI-ERROR-RUNNER-0067]" "file=\"${file}\" reason=\"mode not set\"" _ci_rh_root chmod "${mode}" "${file}" || return 2
@@ -13485,11 +13509,11 @@ _ci_rh_sccache_check() {
     stales="$(_ci_block_entry_list runner_host "" sccache_stale_files)" || return 2
     while IFS= read -r stale; do
         stale="${root}/${user}/${stale}"
-        _ci_rh_root test -f "${stale}" || continue
+        _ci_rh_test -f "${stale}" || { [ "$?" -eq 1 ] || return 2; continue; }
         st="$(_ci_run "[CI-ERROR-RUNNER-0122]" "file=\"${stale}\" reason=\"stat failed\"" _ci_rh_root stat -c '%a %U:%G' "${stale}")" || return 2
         printf '  STALE: %s still present (%s); sccache-fetch removes it\n' "${stale}" "${st}"
     done <<< "${stales}"
-    if _ci_rh_root test -d "${dist}"; then printf '  %s: present\n' "${dist}"; else printf '  %s: MISSING\n' "${dist}"; lack=1; fi
+    if _ci_rh_test -d "${dist}"; then printf '  %s: present\n' "${dist}"; elif [ "$?" -eq 1 ]; then printf '  %s: MISSING\n' "${dist}"; lack=1; else return 2; fi
     printf '\n--- Live check as %s ---\n' "${user}"
     main_bin="${bin_dir}/${list%%$'\n'*}"
     if [ -x "${main_bin}" ]; then
@@ -13551,7 +13575,7 @@ _ci_rh_sccache_fetch() {
     while IFS= read -r sf; do
         [ -n "${sf}" ] || continue
         old="${root}/${user}/${sf}"
-        _ci_rh_root test -d "${old}" || continue
+        _ci_rh_test -d "${old}" || { [ "$?" -eq 1 ] || return 2; continue; }
         _ci_run "[CI-ERROR-RUNNER-0109]" "dir=\"${old}\" reason=\"old credential dir not removed\"" _ci_rh_root rmdir --ignore-fail-on-non-empty "${old}" || return 2
     done <<< "${sdirs}"
     printf 'Installed the sccache client tooling. Verifying:\n'
