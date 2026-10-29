@@ -1680,6 +1680,20 @@ file_headers:
 build_variables:
   rust: [CARGO_BUILD_JOBS, PROJECT_CARGO_LTO, PROJECT_CARGO_CODEGENUNIT, CI_TOOLCHAIN_COMPILERS, CI_CACHE_PREFIX, CI_CARGO_HOME]
 
+# What: repo variables each ci.sh workflow passes by name.
+# Why: Fund 94: toJSON(vars) put LAN IPs in public logs.
+# From: Issue #1683 | PR #1858
+repo_variables:
+  # What: the switch that gates the self_hosted values.
+  # Why: GitHub-hosted runners have no LAN route.
+  # From: Issue #1683 | PR #1858
+  switch: PROJECT_SELFHOSTED_RUNNER_USAGE_CI
+  plain: [CARGO_BUILD_JOBS, PROJECT_CARGO_LTO, PROJECT_CARGO_CODEGENUNIT, PROJECT_NIGHTLY_REF, PROJECT_SELFHOSTED_RUNNER_USAGE_CI, SCCACHE_REDIS_MODE, CI_RUST_VALIDATION, PR_TITLE_LINT_MODE]
+  # What: values with LAN addresses; set only self-hosted.
+  # Why: a GitHub-hosted log must show no LAN address.
+  # From: Issue #1683 | PR #1858
+  self_hosted: [PROJECT_SELFHOSTED_PROXY_HTTP, PROJECT_SELFHOSTED_PROXY_HTTPS, PROJECT_SELFHOSTED_PROXY_EXCLUSION, SCCACHE_DIST_SCHEDULER_URL, DISTCC_POTENTIAL_HOSTS]
+
 # What: CI variables every ci.sh build stage reads
 # Why: a stage has no SOT; these never key an identity
 # From: Issue #1683 | PR #1858

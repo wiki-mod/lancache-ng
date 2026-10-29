@@ -381,7 +381,7 @@ _ci_git_trust_init() {
 _ci_proxy_init() {
     local http="" https="" exclusion=""
     # What: read the proxy values on self-hosted only.
-    # Why: CI_VARIABLES is the source; hosted needs no jq.
+    # Why: Fund 94: the workflow sets them self-hosted only.
     # From: Issue #1683 | PR #1912
     if _ci_runner_self_hosted; then
         http="$(_ci_variable_env PROJECT_SELFHOSTED_PROXY_HTTP)" || return 2
@@ -11297,31 +11297,19 @@ _ci_variable() {
     fi
     _ci_variable_value "${name}" || rc=$?
     [ "${rc}" -eq 0 ] && return 0
-    [ "${rc}" -eq 1 ] && ci_log "[CI-ERROR-VARIABLES-0001]" "name=\"${name}\" reason=\"no env value, no CI_VARIABLES entry and no SOT fallback\""
+    [ "${rc}" -eq 1 ] && ci_log "[CI-ERROR-VARIABLES-0001]" "name=\"${name}\" reason=\"no env value and no SOT fallback\""
     return 2
 }
 
-# What: env, then CI_VARIABLES json; empty when neither.
-# Why: GitHub vars arrive once as json; no per-name YAML.
+# What: a repo variable from env; empty when unset.
+# Why: Fund 94: workflows pass each var by name (SOT).
 # From: Issue #1683 | PR #1912
 _ci_variable_env() {
-    local name="$1" val="" rc=0
-    val="${!name:-}"
-    if [ -z "${val}" ] && [ -n "${CI_VARIABLES:-}" ]; then
-        val="$(jq -er --arg n "${name}" '.[$n] // ""' <<< "${CI_VARIABLES}" 2>&1)" || rc=$?
-        if [ "${rc}" -eq 127 ]; then
-            ci_error "[CI-ERROR-VARIABLES-0023]" "name=\"${name}\" reason=\"jq not found; CI_VARIABLES cannot be read\"" "${val}"$'\n'"PATH=${PATH}"
-            return 2
-        fi
-        if [ "${rc}" -ne 0 ]; then
-            ci_error "[CI-ERROR-VARIABLES-0015]" "name=\"${name}\" reason=\"CI_VARIABLES is not a json object\"" "${val}"
-            return 2
-        fi
-    fi
-    printf '%s\n' "${val}"
+    local name="$1"
+    printf '%s\n' "${!name:-}"
 }
 
-# What: env, then CI_VARIABLES json, then the SOT default.
+# What: env, then the SOT default.
 # Why: one value rule; the SOT is the last fallback.
 # From: Issue #1683 | PR #1858
 _ci_variable_value() {
@@ -11512,8 +11500,8 @@ _ci_set_runtime() {
         read -r mode chain <<< "${policy}"
         [ "${mode}" = off ] || sccache_enabled=1
     fi
-    # What: dist scheduler, distcc hosts via CI_VARIABLES.
-    # Why: repo variables reach ci.sh only as that json.
+    # What: dist scheduler and distcc hosts from env.
+    # Why: Fund 94: the workflow sets them self-hosted only.
     # From: Issue #1683 | PR #1858
     local sched="" hosts="" vrc=0
     # What: dist farm is read on self-hosted runners only.
@@ -17734,28 +17722,49 @@ _ci_workflow_scan_report() {
     done <<< "${out}"
 }
 
-# What: each workflow calling ci.sh passes CI_VARIABLES.
-# Why: else ci.sh misses repo/org vars; ids diverge.
+# What: each ci.sh workflow passes the SOT repo variables.
+# Why: else ci.sh misses a var; all-vars json leaks IPs.
 # From: Issue #1683 | PR #1858
 _ci_check_workflow_ci_variables() {
-    local repo_root="${1:-${CI_REPO_ROOT:-.}}" out="" callers=0 f row calls wired
+    local repo_root="${1:-${CI_REPO_ROOT:-.}}" out="" callers=0 f row calls alljson sw names lan n want envs line
     local -a viol=() files=()
+    local -A env_of=()
+    sw="$(_ci_required_field repo_variables switch block)" || return 2
+    names="$(_ci_required_field repo_variables plain blocklist)" || return 2
+    lan="$(_ci_required_field repo_variables self_hosted blocklist)" || return 2
     _ci_workflow_scan_files "${repo_root}" files || return 2
     for f in "${files[@]}"; do
-        # What: ci.sh calls and CI_VARIABLES wiring.
+        # What: ci.sh calls; strings holding toJSON(vars).
         # Why: yq reads the workflow; text matched comments.
         # From: Issue #1683 | PR #1858
         row="$(_ci_run "[CI-ERROR-CHECK-0203]" "file=\"${f}\" reason=\"workflow ci.sh calls not read\"" \
-            env W="\${{ toJSON(vars) }}" yq --yaml-fix-merge-anchor-to-spec=true -r '[([.. | select(tag == "!!map" and has("run")) | .run | select(tag == "!!str") | select(contains("scripts/ci.sh"))] | length > 0), ((.env.CI_VARIABLES // "") == strenv(W))] | @tsv' "${f}")" || return 2
-        read -r calls wired <<< "${row}"
+            env A="toJSON(vars)" yq --yaml-fix-merge-anchor-to-spec=true -r '[([.. | select(tag == "!!map" and has("run")) | .run | select(tag == "!!str") | select(contains("scripts/ci.sh"))] | length > 0), ([.. | select(tag == "!!str") | select(contains(strenv(A)))] | length)] | @tsv' "${f}")" || return 2
+        read -r calls alljson <<< "${row}"
         [ "${calls}" = true ] || continue
         callers=$(( callers + 1 ))
-        [ "${wired}" = true ] || out+="flag ${f}: calls ci.sh without top-level env CI_VARIABLES"$'\n'
+        [ "${alljson}" = 0 ] || out+="flag ${f}: passes the all-vars json toJSON(vars)"$'\n'
+        envs="$(_ci_run "[CI-ERROR-CHECK-0207]" "file=\"${f}\" reason=\"workflow env not read\"" \
+            yq --yaml-fix-merge-anchor-to-spec=true -r '(.env // {}) | to_entries | .[] | .key + "=" + (.value | tostring)' "${f}")" || return 2
+        env_of=()
+        while IFS= read -r line; do
+            [ -n "${line}" ] && env_of["${line%%=*}"]="${line#*=}"
+        done <<< "${envs}"
+        # What: plain names as is; LAN ones behind switch.
+        # Why: the SOT repo_variables lists own both sets.
+        # From: Issue #1683 | PR #1858
+        while IFS= read -r n; do
+            [ -n "${n}" ] || continue
+            want="\${{ vars.${n} }}"
+            if _ci_list_has "${n}" "${lan}"; then
+                want="\${{ vars.${sw} == 'true' && vars.${n} || '' }}"
+            fi
+            [ "${env_of[${n}]:-}" = "${want}" ] || out+="flag ${f}: top-level env ${n} must be ${want}"$'\n'
+        done <<< "${names}"$'\n'"${lan}"
     done
     out+="callers ${callers}"
     _ci_workflow_scan_report "${repo_root}" callers "${out}" viol callers
     if [ "${#viol[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0158]" "scanned=${#files[@]} callers=${callers} flagged=${#viol[@]} reason=\"ci.sh caller without CI_VARIABLES\"" "$(printf '%s\n' "${viol[@]}")"
+        ci_error "[CI-ERROR-CHECK-0158]" "scanned=${#files[@]} callers=${callers} flagged=${#viol[@]} reason=\"ci.sh caller without the SOT repo_variables lines\"" "$(printf '%s\n' "${viol[@]}")"
         return 1
     fi
     printf 'workflow-ci-variables=clean scanned=%s callers=%s\n' "${#files[@]}" "${callers}"
