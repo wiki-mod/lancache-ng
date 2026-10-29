@@ -2251,15 +2251,26 @@ _ci_context_build_rows() {
 # Why: the identity and the Dockerfile check share it.
 # From: Issue #1683 | PR #1858
 _ci_dockerfile_copy_sources() {
+    local lines
+    # What: logical lines come from the one line reader.
+    # Why: escape=, joins and heredoc rules live there.
+    # From: Issue #1683 | PR #1858
+    lines="$(_ci_capture 0 _ci_dockerfile_logical_lines - <<< "$1")" || return 2
     _ci_capture 0 awk "$(cat <<'PROG'
-        /\\$/ { buf = buf substr($0, 1, length($0) - 1) " "; next }
-        { line = buf $0; buf = "" }
-        toupper(line) !~ /^[[:space:]]*COPY[[:space:]]/ || line ~ /--from=/ { next }
-        { k = 0; nw = split(line, w, /[[:space:]]+/)
-          for (i = 2; i <= nw; i++) if (w[i] != "" && w[i] !~ /^--/) a[++k] = w[i]
+        toupper($0) !~ /^[[:space:]]*COPY[[:space:]]/ || $0 ~ /--from=/ { next }
+        { rest = $0; sub(/^[[:space:]]*[^[:space:]]+[[:space:]]+/, "", rest)
+          while (rest ~ /^--[^[:space:]]*[[:space:]]+/) sub(/^--[^[:space:]]*[[:space:]]+/, "", rest)
+          k = 0
+          if (rest ~ /^\[/) {
+              sub(/^\[[[:space:]]*"/, "", rest); sub(/"[[:space:]]*\][[:space:]]*$/, "", rest)
+              k = split(rest, a, /"[[:space:]]*,[[:space:]]*"/)
+          } else {
+              nw = split(rest, w, /[[:space:]]+/)
+              for (i = 1; i <= nw; i++) if (w[i] != "" && w[i] !~ /^<</) a[++k] = w[i]
+          }
           for (i = 1; i < k; i++) print a[i] }
 PROG
-        )" <<< "$1"
+        )" <<< "${lines}"
 }
 
 # What: context paths the Rust reader owns, space-framed.
@@ -2754,7 +2765,7 @@ _ci_classify_failure() {
             *"denied: "*|*"manifest invalid: "*|*"name invalid: "*|*"unsupported: "*) printf 'permanent\n'; return 0 ;;
         esac
     fi
-    # What: auth, malformed, compile, missing ref are permanent.
+    # What: auth, malformed, compile, no ref: permanent.
     # Why: retrying a fixed outcome wastes budget.
     # From: Issue #1683 | PR #1858
     case "${low}" in
@@ -5854,7 +5865,7 @@ _ci_trivy_db_record() {
 }
 
 # What: trivy image argv for one scan, one item per line
-# Why: one owner; a test runs it through the real trivy
+# Why: one owner of the scan flags; values come from the SOT
 # From: Issue #1683 | PR #1858
 _ci_trivy_args() {
     local cache_dir="$1" scanners severity scan_timeout ignore bin
@@ -6492,8 +6503,9 @@ _ci_test_rust() {
     # Why: build context is no crate; AG-VAL-008 per crate.
     # From: Issue #1683 | PR #1858
     local trc=0 c setup_rc=200 defaults rows kv
-    local -a picks=()
-    for c in ${ctx}; do picks+=(-p "${c}"); done
+    local -a picks=() crate_list=()
+    [ -z "${ctx}" ] || mapfile -t crate_list <<< "${ctx}"
+    for c in "${crate_list[@]}"; do picks+=(-p "${c}"); done
     ctx="${ctx//$'\n'/ }"
     # What: tests get the env the service container gets.
     # Why: no test invents a value (AG-CODE-010).
@@ -6619,13 +6631,17 @@ ci_cmd_test() {
 # Why: SBOM generate != vuln gate; shares the trivy cache.
 # From: Issue #1683
 _ci_trivy_sbom() {
-    local service="$1" digest="$2" out="$3" ref cache_dir raw rc=0 bin
+    local service="$1" digest="$2" out="$3" ref cache_dir rc=0 bin
     ref="$(_ci_image_ref "${service}" "${digest}")" || return 2
     bin="$(_ci_trivy_bin)" || return 2
     cache_dir="$(_ci_trivy_cache_dir)" || return 2
-    raw="$("${bin}" image --format cyclonedx --cache-dir "${cache_dir}" --output "${out}" "${ref}" 2>&1)" || rc=$?
+    # What: the DB is written only by the locked refresh.
+    # Why: the cache-dir is shared; this run only reads it.
+    # From: Issue #1683 | PR #1858
+    _ci_trivy_db_ensure_fresh "${cache_dir}" || return 2
+    _ci_retry trivy "${bin}" image --format cyclonedx --cache-dir "${cache_dir}" \
+        --skip-db-update --output "${out}" "${ref}" >&2 || rc=$?
     { [ "${rc}" -eq 0 ] && [ -s "${out}" ]; } && return 0
-    printf '%s\n' "${raw}" >&2
     return 1
 }
 
@@ -6779,7 +6795,9 @@ _ci_index_lookup() {
     name="$(_ci_image_ref "${service}")" || return 2
     head="$(_ci_head_commit)" || return 2
     revs="${head}"
-    for kv in ${want}; do
+    local -a want_list
+    read -ra want_list <<< "${want}"
+    for kv in "${want_list[@]}"; do
         rev="$(_ci_registry_read "${name}@${kv#*=}" revision "[CI-ERROR-ASSEMBLE-0016]" fail)" || return 2
         _ci_list_has "${rev}" "${revs}" || revs="${revs}"$'\n'"${rev}"
     done
@@ -6878,7 +6896,9 @@ _ci_reconcile_index() {
     # Why: a rebuilt red platform completes the sha index.
     # From: Issue #1683 | PR #1858
     wl="$(tr ' ' '\n' <<< "${want}")"
-    for kv in ${ex_have}; do
+    local -a have_list
+    read -ra have_list <<< "${ex_have}"
+    for kv in "${have_list[@]}"; do
         _ci_list_has "${kv}" "${wl}" || sub=0
     done
     if [ "${sub}" -eq 1 ]; then
@@ -7340,8 +7360,9 @@ _ci_promote_unlock() {
 _ci_promote_move() {
     local svc="$1" channel="$2" digest="$3" kept="${4:-}" name kv
     name="$(_ci_image_ref "${svc}")" || return 2
-    local -a srcs=("${name}@${digest}")
-    for kv in ${kept}; do
+    local -a srcs=("${name}@${digest}") kept_list
+    read -ra kept_list <<< "${kept}"
+    for kv in "${kept_list[@]}"; do
         srcs+=("${name}@${kv#*=}")
     done
     _ci_imagetools_create "${name}:${channel}" "${srcs[@]}" >&2
@@ -8195,13 +8216,18 @@ _ci_release_notes_block() {
     printf '\n## Images\n\n'
     printf 'Images published for %s (commit %s):\n\n' "${tag}" "${head}"
     local targets
+    local -a target_list=()
     targets="$(ci_build_targets)" || return 2
-    for target in ${targets}; do
+    [ -z "${targets}" ] || mapfile -t target_list <<< "${targets}"
+    for target in "${target_list[@]}"; do
         dig="$(_ci_release_digest "${base}/${target}")" || return "$?"
         printf -- '- %s:%s -> %s\n' "${base}/${target}" "${tag}" "${dig}"
     done
     printf '\nProvenance attestations and CycloneDX SBOMs attach per image.\n'
-    printf 'OpenVEX from .trivyignore.yaml attaches as vex.openvex.json.\n'
+    local ignore vex
+    ignore="$(_ci_variable CI_TRIVY_IGNORE)" || return 2
+    vex="$(_ci_variable CI_RELEASE_VEX_ASSET)" || return 2
+    printf 'OpenVEX from %s attaches as %s.\n' "${ignore}" "${vex}"
     _ci_release_marker end || return 2
 }
 
@@ -8386,7 +8412,9 @@ ci_cmd_release_sbom_stack() {
     local tag="${1:-}" svc targets
     [ -n "${tag}" ] || { ci_log "[CI-ERROR-RELEASE-0013]" "reason=\"tag arg required\""; return 2; }
     targets="$(ci_build_targets)" || return 2
-    for svc in ${targets}; do
+    local -a target_list=()
+    [ -z "${targets}" ] || mapfile -t target_list <<< "${targets}"
+    for svc in "${target_list[@]}"; do
         ci_cmd_release_sbom "${svc}" "${tag}" || return "$?"
     done
 }
@@ -8407,8 +8435,9 @@ ci_cmd_release_vex() {
 # Why: one owner removes the work dir, not this body.
 # From: Issue #1683 | PR #1858
 _ci_release_vex_in() {
-    local tag="$1" trivyignore="$2" dir="$3" adir out rc=0
-    out="${dir}/vex.openvex.json"
+    local tag="$1" trivyignore="$2" dir="$3" adir out vex rc=0
+    vex="$(_ci_variable CI_RELEASE_VEX_ASSET)" || return 2
+    out="${dir}/${vex}"
     _ci_generate_vex "${trivyignore}" > "${out}" || rc=$?
     if [ "${rc}" -ne 0 ] || [ ! -s "${out}" ]; then
         ci_log "[CI-ERROR-RELEASE-0012]" "tag=\"${tag}\" rc=${rc} reason=\"OpenVEX generation failed or empty (raw above)\""
@@ -12096,6 +12125,24 @@ _ci_rh_root() {
     fi
 }
 
+# What: root shell text of the apt history search.
+# Why: $1 the ERE, $2 the log globs; values stay arguments.
+# From: Issue #1683 | PR #1858
+_CI_RH_ZGREP_PROG="$(cat <<'PROG'
+zgrep -hEo "$1" $2
+PROG
+)"
+readonly _CI_RH_ZGREP_PROG
+
+# What: root shell text of the host key removal.
+# Why: $1 the glob; the root shell expands it, not ci.sh.
+# From: Issue #1683 | PR #1858
+_CI_RH_RM_PROG="$(cat <<'PROG'
+rm -f $1
+PROG
+)"
+readonly _CI_RH_RM_PROG
+
 # What: test(1) as root: 0 yes, 1 no, 2 sudo/test failed.
 # Why: sudo -n also ends with 1; stderr tells it from "no".
 # From: Issue #1683 | PR #1858
@@ -12898,7 +12945,7 @@ _ci_rh_full_reset_check() {
     printf '\n--- apt/dpkg history naming other fleet hosts (report only) ---\n'
     fleet_ere="$(_ci_rh_ere fleet_name_patterns)" || return 2
     logs="$(_ci_block_entry_list runner_host "" apt_log_globs | tr '\n' ' ')" || return 2
-    out="$(_ci_run -m 1 "[CI-ERROR-RUNNER-0036]" "reason=\"apt history search failed\"" _ci_rh_root bash -c "zgrep -hEo '${fleet_ere}' ${logs}")" || return 2
+    out="$(_ci_run -m 1 "[CI-ERROR-RUNNER-0036]" "reason=\"apt history search failed\"" _ci_rh_root bash -c "${_CI_RH_ZGREP_PROG}" _ "${fleet_ere}" "${logs}")" || return 2
     found=0
     while IFS= read -r line; do
         [ -n "${line}" ] || continue
@@ -12942,7 +12989,7 @@ _ci_rh_ssh_host_keys() {
     local pub glob units u fp ok=0
     glob="$(_ci_rh_val ssh_host_key_glob)" || return 2
     units="$(_ci_block_entry_list runner_host "" ssh_units)" || return 2
-    _ci_run "[CI-ERROR-RUNNER-0043]" "glob=\"${glob}\" reason=\"old host keys not removed\"" _ci_rh_root bash -c "rm -f ${glob}" || return 2
+    _ci_run "[CI-ERROR-RUNNER-0043]" "glob=\"${glob}\" reason=\"old host keys not removed\"" _ci_rh_root bash -c "${_CI_RH_RM_PROG}" _ "${glob}" || return 2
     _ci_run "[CI-ERROR-RUNNER-0044]" "reason=\"ssh-keygen -A failed; sshd may refuse to start\"" _ci_rh_root ssh-keygen -A || return 2
     while IFS= read -r u; do
         [ -z "${u}" ] || [ "${ok}" -eq 1 ] || ! _ci_rh_root systemctl restart "${u}" || ok=1
@@ -14178,22 +14225,22 @@ _CI_AWK_COMMENT_LEX="$(cat <<'PROG'
         mb = (length("é") == 1); lead_re = "^[\300-\367]$"; cont_re = "^[\200-\277]$"
     }
     { L[FNR] = $0; sub(/\r$/, "", L[FNR]); n = FNR }
-    # What: queue the heredoc delimiters a shell line opens.
+    # What: queue heredoc delimiters; quotes span lines.
     # Why: <<< , quoted or (( )) << open no here-document.
     # From: Issue #1683 | PR #1858
-    function cl_heredocs(s,  i, n, c, q, dep, rest, w) {
-        n = length(s); q = ""; dep = 0
+    function cl_heredocs(s,  i, n, c, rest, w) {
+        n = length(s)
         for (i = 1; i <= n; i++) {
             c = substr(s, i, 1)
-            if (q == sq) { if (c == sq) q = ""; continue }
+            if (hdq == sq) { if (c == sq) hdq = ""; continue }
             if (c == "\\") { i++; continue }
-            if (q == "\"") { if (c == "\"") q = ""; continue }
-            if (c == sq || c == "\"") { q = c; continue }
+            if (hdq == "\"") { if (c == "\"") hdq = ""; continue }
+            if (c == sq || c == "\"") { hdq = c; continue }
             if (c == "#" && (i == 1 || substr(s, i - 1, 1) ~ /[[:space:]]/)) break
-            if (substr(s, i, 2) == "((") { dep++; i++; continue }
-            if (substr(s, i, 2) == "))" && dep > 0) { dep--; i++; continue }
+            if (substr(s, i, 2) == "((") { hdd++; i++; continue }
+            if (substr(s, i, 2) == "))" && hdd > 0) { hdd--; i++; continue }
             if (substr(s, i, 3) == "<<<") { i += 2; continue }
-            if (substr(s, i, 2) != "<<" || dep > 0) continue
+            if (substr(s, i, 2) != "<<" || hdd > 0) continue
             rest = substr(s, i + 2)
             if (!match(rest, /^-?[[:space:]]*[^[:space:];|&<>()]+/)) continue
             w = substr(rest, 1, RLENGTH); i += 1 + RLENGTH
@@ -14204,7 +14251,7 @@ _CI_AWK_COMMENT_LEX="$(cat <<'PROG'
     # Why: heredoc/block-scalar bodies are data, not runs.
     # From: Issue #1683 | PR #1858
     function cl_hash(heredoc,  i, line, chk, iny, ind, t, sf, sb) {
-        hh = 1; ht = 0; sn = 0
+        hh = 1; ht = 0; sn = 0; hdq = ""; hdd = 0
         for (i = 1; i <= n; i++) {
             line = L[i]
             if (line ~ /^[[:space:]]*#/) { F[i] = 1; T[i] = line; sub(/^[[:space:]]*#[[:space:]]*/, "", T[i]) }
@@ -16556,10 +16603,10 @@ _ci_validation_env() {
             return 2
         fi
         read -ra cmd <<< "${row}"
-        v="$(_ci_run "[CI-ERROR-VALIDATE-0100]" "key=${k} reason=\"secret not generated\"" "${cmd[@]}")" || return 2
+        v="$(_ci_run "[CI-ERROR-VALIDATE-0141]" "key=${k} reason=\"secret not generated\"" "${cmd[@]}")" || return 2
         v="${v//$'\n'/}"
         if [ -z "${v}" ]; then
-            ci_log "[CI-ERROR-VALIDATE-0100]" "key=\"${k}\" kind=\"${kind}\" reason=\"generator wrote nothing\""
+            ci_log "[CI-ERROR-VALIDATE-0142]" "key=\"${k}\" kind=\"${kind}\" reason=\"generator wrote nothing\""
             return 2
         fi
         body+="${k}=${v}"$'\n'

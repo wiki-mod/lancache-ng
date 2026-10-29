@@ -905,7 +905,7 @@ status_reports:
   # From: Issue #1683 | PR #1912
   trivy-finding:
     label: trivy-finding
-    scope: "Trivy HIGH/CRITICAL finding in @SERVICE@ (@ARCH@) not covered by @{ci_variables.CI_TRIVY_IGNORE}"
+    scope: "Trivy @{ci_variables.CI_TRIVY_SEVERITY} finding in @SERVICE@ (@ARCH@) not covered by @{ci_variables.CI_TRIVY_IGNORE}"
   trivy-db-unavailable:
     label: trivy-db-unavailable
     scope: "Trivy vulnerability DB missing or stale for @SERVICE@ (@ARCH@) after every retry"
@@ -1217,6 +1217,10 @@ ci_variables:
   # Why: one path owner for scan, release VEX, vex-drift.
   # From: Issue #1683 | PR #1858
   CI_TRIVY_IGNORE: .trivyignore.yaml
+  # What: file name of the OpenVEX release asset.
+  # Why: one name owner for the asset and the notes.
+  # From: Issue #1683 | PR #1858
+  CI_RELEASE_VEX_ASSET: vex.openvex.json
   # What: color of a created status label.
   # Why: one owner for the tracking labels' look.
   # From: Issue #1683 | PR #1912
@@ -1261,7 +1265,7 @@ ci_variables:
   # Why: AG-CI-006: scan policy values have one owner.
   # From: Issue #1683 | PR #1858
   CI_TRIVY_SCANNERS: vuln,secret
-  # What: the severities a scan fails on and its run timeout.
+  # What: severities a scan fails on and its run timeout.
   # Why: AG-CI-006: scan policy values have one owner.
   # From: Issue #1683 | PR #1858
   CI_TRIVY_SEVERITY: HIGH,CRITICAL
