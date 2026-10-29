@@ -619,63 +619,6 @@ pub fn unique_temp_dir(tag: &str) -> PathBuf {
     dir
 }
 
-// What: a local HTTP server that answers canned replies.
-// Why: client code is tested without a network or Docker.
-// From: Issue #1683 | PR #1858
-pub fn serve_canned(
-    replies: Vec<(u16, Vec<u8>)>,
-) -> (String, std::thread::JoinHandle<Vec<String>>) {
-    use std::io::Read;
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a free local port");
-    listener.set_nonblocking(true).expect("non-blocking accept");
-    let base = format!("http://{}", listener.local_addr().expect("local address"));
-    let handle = std::thread::spawn(move || {
-        let mut seen = Vec::new();
-        for (status, body) in replies {
-            // What: give up when no client comes.
-            // Why: a skipped call fails the test; no hang.
-            // From: Issue #1683 | PR #1858
-            let deadline = std::time::Instant::now() + Duration::from_secs(3);
-            let mut stream = loop {
-                match listener.accept() {
-                    Ok((stream, _)) => break stream,
-                    Err(_) if std::time::Instant::now() < deadline => {
-                        std::thread::sleep(Duration::from_millis(5));
-                    }
-                    Err(_) => return seen,
-                }
-            };
-            stream.set_nonblocking(false).expect("blocking stream");
-            let mut request = Vec::new();
-            let mut byte = [0u8; 1];
-            while !request.ends_with(b"\r\n\r\n") {
-                if stream.read(&mut byte).unwrap_or(0) == 0 {
-                    break;
-                }
-                request.push(byte[0]);
-            }
-            let head = String::from_utf8_lossy(&request).to_lowercase();
-            let length = head
-                .lines()
-                .find_map(|line| line.strip_prefix("content-length: "))
-                .and_then(|n| n.trim().parse::<usize>().ok())
-                .unwrap_or(0);
-            let mut payload = vec![0u8; length];
-            let _ = stream.read_exact(&mut payload);
-            request.extend_from_slice(&payload);
-            seen.push(String::from_utf8_lossy(&request).into_owned());
-            let reply = format!(
-                "HTTP/1.1 {status} Canned\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                body.len()
-            );
-            let _ = stream.write_all(reply.as_bytes());
-            let _ = stream.write_all(&body);
-        }
-        seen
-    });
-    (base, handle)
-}
-
 // What: print a FATAL start error with its tag, exit 1.
 // Why: every service fails closed at start the same way.
 // From: Issue #1683 | PR #1858
