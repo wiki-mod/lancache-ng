@@ -104,12 +104,12 @@ services:
       CACHEHAMSTER_URLS: ${CACHEHAMSTER_URLS:-}
       CACHE_VALID_DAYS: ${CACHE_VALID_DAYS:-}
       NTP_UPSTREAM_SERVERS: ${NTP_UPSTREAM_SERVERS:-}
-    # What: the log input on loopback; NTP for the LAN.
-    # Why: only the local Docker daemon may send log lines.
-    # From: Issue #1683
+    # What: the log input on loopback; NTP on IP_HTTP.
+    # Why: Docker logs only; DHCP option 42 names IP_HTTP.
+    # From: Issue #1683 | PR #1858
     ports:
       - "${SOT_LOOPBACK_BIND_IP}:${SOT_LANCACHE_LOG_PORT}:${SOT_LANCACHE_LOG_PORT}/udp"
-      - "${SOT_NTP_PORT}:${SOT_NTP_PORT}/udp"
+      - "${IP_HTTP}:${SOT_NTP_PORT}:${SOT_NTP_PORT}/udp"
     volumes:
       # What: the Docker API for the watchdog process only.
       # Why: no socket proxy; the supervisor drops the rest.
