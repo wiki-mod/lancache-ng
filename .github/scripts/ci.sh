@@ -7791,10 +7791,19 @@ _ci_release_record_stale() {
 # Why: a layer owns a pr_labels class, a target its paths
 # From: Issue #1683 | PR #1858
 _ci_release_scope() {
-    local kind="$1" name="$2" class
+    local kind="$1" name="$2" class lock paths p
     if [ "${kind}" = target ]; then
-        _ci_target_paths "${name}"
-        return "$?"
+        # What: drop the generated lock from a target scope
+        # Why: CI_CARGO_LOCK is untracked; no git history
+        # From: Issue #1683 | PR #1858
+        lock="$(_ci_variable CI_CARGO_LOCK)" || return 2
+        paths="$(_ci_target_paths "${name}")" || return 2
+        while IFS= read -r p; do
+            if [ -n "${p}" ] && [ "${p}" != "${lock}" ]; then
+                printf '%s\n' "${p}"
+            fi
+        done <<< "${paths}"
+        return 0
     fi
     class="$(_ci_block_entry_field release validation_layers "${name}")" || return 2
     if [ -z "${class}" ]; then
