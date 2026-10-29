@@ -3344,6 +3344,21 @@ resume_lancache_convergence_after_failed_update() {
     exit "$exit_code"
 }
 
+# What: EXIT trap while .env is prepared for moved code
+# Why: units must not start new code with the old .env
+# From: Issue #1683 | PR #1858
+rollback_update_after_env_failure() {
+    local exit_code=$?
+
+    trap - EXIT
+    UPDATE_CONVERGENCE_COMPLETED=1
+    rollback_stack_update "$_UPDATE_ROLLBACK_DIR" \
+        || die_convergence_kept_paused "Preparing .env for the new code failed, and the rollback to the pre-update backup failed too."
+    resume_lancache_convergence_after_update
+    print_error "Preparing .env for the new code failed (exit $exit_code); the update was rolled back."
+    exit "$exit_code"
+}
+
 # What: dies; convergence stays paused, prints how to resume
 # Why: a timer `compose up` must not race manual recovery
 # From: Issue #1683 | PR #1858
@@ -6113,8 +6128,16 @@ perform_stack_update_flow() {
         update_repo_and_resume "$install_dir"
     fi
 
+    # What: after a code move a failed .env step rolls back
+    # Why: the moved code must not stay with the old stack
+    # From: Issue #1683 | PR #1858
+    if [[ -n "${LANCACHE_UPDATE_SWITCHED_FROM:-}${LANCACHE_UPDATE_OLD_SHA:-}" ]]; then
+        _UPDATE_ROLLBACK_DIR="$install_dir"
+        trap rollback_update_after_env_failure EXIT
+    fi
     migrate_env_for_update "$install_dir"
     validate_compose_config "$install_dir"
+    trap resume_lancache_convergence_after_failed_update EXIT
 
     print_step "Pulling selected images"
     if ! stack_compose "$install_dir" "$_UPDATE_ENV_FILE" pull; then
