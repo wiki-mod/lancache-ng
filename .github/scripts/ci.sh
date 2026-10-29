@@ -18164,14 +18164,24 @@ _ci_check_cargo_audit() {
 ci_cmd_check_all() {
     local -a changed=() names=() skipped=() failed=() stopped=()
     _ci_collect_changed changed "$@" || return 2
-    local raw sub r rc=0 scope why state invoked=0 diff_seen="all files" keys
+    local raw sub r rc=0 scope why state invoked=0 diff_seen="all files" keys t0
     printf -v keys '%s\n' "${!CI_CHECKS[@]}"
     raw="$(_ci_capture 0 env LC_ALL=C sort <<< "${keys%$'\n'}")" || return 2
     mapfile -t names <<< "${raw}"
     [ "${#changed[@]}" -eq 0 ] || diff_seen="${#changed[@]} changed paths"
+    # What: the paths the diff checks see, once, folded.
+    # Why: Fund 94: "files=34" alone names no file.
+    # From: Issue #1683 | PR #1858
+    ci_group "check all: ${diff_seen}"
+    [ "${#changed[@]}" -eq 0 ] || printf '%s\n' "${changed[@]}" >&2
     for sub in "${names[@]}"; do
         r=0 why=""
         scope="${CI_CHECKS[${sub}]%% *}"
+        # What: one folded group per check, then its time.
+        # Why: Fund 94: the old CI showed each check apart.
+        # From: Issue #1683 | PR #1858
+        [ "${scope}" = job ] || ci_group "check: ${sub} (${scope})"
+        t0="${EPOCHREALTIME/./}"
         # What: diff sees changed files; pr needs a real PR.
         # Why: no PR context on push; job has its own step.
         # From: Issue #1683 | PR #1912
@@ -18192,10 +18202,13 @@ ci_cmd_check_all() {
         # Why: AG-INT-002: a skip is stated with its reason.
         # From: Issue #1683 | PR #1912
         if [ -n "${why}" ]; then
+            [ "${scope}" = job ] || ci_group_end
             printf '%s=NOT-RUN scope=%s reason="%s"\n' "${sub}" "${scope}" "${why}"
             skipped+=("${sub}")
         else
             invoked=$((invoked + 1))
+            ci_group_end
+            ci_log "[CI-INFO-CHECK-0206]" "check=\"${sub}\" scope=${scope} rc=${r} ms=$(((${EPOCHREALTIME/./} - t0) / 1000))"
         fi
         # What: name each check with a finding or a stop.
         # Why: the last line says which checks are red.
@@ -18212,6 +18225,7 @@ ci_cmd_check_all() {
         1) state=findings ;;
         *) state=stopped ;;
     esac
+    ci_group_end
     printf 'check-all=%s rc=%s invoked=%s not-run=%s diff-scope="%s" finding-checks="%s" stopped-checks="%s" not-run-checks="%s"\n' "${state}" "${rc}" "${invoked}" "${#skipped[@]}" "${diff_seen}" "${failed[*]:-}" "${stopped[*]:-}" "${skipped[*]:-}"
     return "${rc}"
 }
