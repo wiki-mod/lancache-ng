@@ -2441,6 +2441,12 @@ migrate_quickstart_install() (
     print_ok "Quickstart install migrated to $stack_dir; its old Docker volumes were kept"
     [[ -z "$kept" ]] \
         || print_warn "Old logs and snapshots without a place in the new stack stay in:${kept}. Remove them with docker volume rm when no longer needed."
+    # What: names copies of earlier failed migration runs
+    # Why: nothing is deleted; the operator decides
+    # From: Issue #1683 | PR #1858
+    local -a aside=("$old_dir"/*.rolledback-*)
+    [[ ! -e "${aside[0]}" ]] \
+        || print_warn "Copies of earlier failed migration runs stay in: ${aside[*]}. Remove them when no longer needed."
 )
 
 # What: stops prod, moves copies aside, restarts quickstart
