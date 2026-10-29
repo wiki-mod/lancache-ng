@@ -3576,15 +3576,15 @@ ci_cmd_scan_stack() {
 # Why: an issue, no red scan; reruns keep one issue
 # From: Issue #1683 | PR #1858
 _ci_trivyignore_stale() {
-    local ignore fields="" matched="" n kind id stale="" count=0 file="${CI_TMPDIR}/${_CI_TRIVY_MATCHED}" why outcome=success
+    local ignore ids="" matched="" id stale="" count=0 file="${CI_TMPDIR}/${_CI_TRIVY_MATCHED}" why outcome=success
     ignore="$(_ci_repo_path CI_TRIVY_IGNORE)" || return 2
-    [ ! -f "${ignore}" ] || fields="$(_ci_trivyignore_fields "${ignore}")" || return 2
+    [ ! -f "${ignore}" ] || ids="$(_ci_trivyignore_ids "${ignore}")" || return 2
     [ ! -f "${file}" ] || matched="$(< "${file}")"
-    while IFS=$'\t' read -r n kind id; do
-        [ "${kind}" = id ] || continue
+    while IFS= read -r id; do
+        [ -n "${id}" ] || continue
         count=$((count + 1))
         _ci_list_has "${id}" "${matched}" || stale="${stale} ${id}"
-    done <<< "${fields}"
+    done <<< "${ids}"
     if [ -n "${stale}" ]; then
         outcome=failure
         ci_log "[CI-WARN-SCAN-0041]" "path=\"${ignore}\" stale=\"${stale# }\" reason=\"no scan of this run matched these entries; the issue asks to remove them\""
@@ -17324,6 +17324,17 @@ _ci_trivyignore_fields() {
     [ -z "${out}" ] || printf '%s\n' "${out}"
 }
 
+# What: the entry ids of a trivyignore file, one per line.
+# Why: the one id filter over the strict field reader.
+# From: Issue #1683 | PR #1858
+_ci_trivyignore_ids() {
+    local fields n kind id
+    fields="$(_ci_trivyignore_fields "$1")" || return 2
+    while IFS=$'\t' read -r n kind id; do
+        if [ "${kind}" = id ]; then printf '%s\n' "${id}"; fi
+    done <<< "${fields}"
+}
+
 # What: Fail unless the trivyignore yields full OpenVEX.
 # Why: a broken entry must fail here, not at release time.
 # From: Issue #1683 | PR #1858
@@ -17331,13 +17342,14 @@ _ci_check_vex_drift() {
     local repo_root="${1:-${CI_REPO_ROOT}}"
     local trivyignore
     trivyignore="$(_ci_repo_path CI_TRIVY_IGNORE "${repo_root}")" || return 2
-    local out entry_count statement_count
+    local out ids entry_count statement_count
     [ -f "${trivyignore}" ] || { ci_error "[CI-ERROR-CHECK-0050]" "path=\"${trivyignore}\" reason=\".trivyignore.yaml not found\"" "${trivyignore}"; return 2; }
     if ! out="$(_ci_generate_vex "${trivyignore}")"; then
         ci_log "[CI-ERROR-CHECK-0107]" "path=\"${trivyignore}\" reason=\"OpenVEX generation failed (raw above)\""
         return 1
     fi
-    entry_count="$(_ci_capture 1 grep -c '^  - id:' "${trivyignore}")" || return 2
+    ids="$(_ci_trivyignore_ids "${trivyignore}")" || return 2
+    entry_count="$(_ci_count_lines "${ids}")"
     statement_count="$(_ci_capture 0 jq '.statements | length' <<< "${out}")" || return 2
     if [ "${statement_count}" != "${entry_count}" ]; then
         ci_log "[CI-ERROR-CHECK-0109]" "entries=${entry_count} statements=${statement_count} reason=\"trivyignore entries and VEX statements differ\""
