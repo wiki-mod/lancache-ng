@@ -2754,7 +2754,7 @@ _ci_classify_failure() {
             *"denied: "*|*"manifest invalid: "*|*"name invalid: "*|*"unsupported: "*) printf 'permanent\n'; return 0 ;;
         esac
     fi
-    # What: auth, malformed, compile, missing ref are permanent.
+    # What: auth, malformed, compile, no ref: permanent.
     # Why: retrying a fixed outcome wastes budget.
     # From: Issue #1683 | PR #1858
     case "${low}" in
