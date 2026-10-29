@@ -1083,13 +1083,13 @@ release:
       # From: Issue #1683 | PR #1858
       source_ref: refs/heads/master
       # What: final vX.Y.Z tags also move this channel.
-      # Why: AG-REL-009 stable channel; read by ci.sh.
+      # Why: AG-REL-009 release channel; read by ci.sh.
       # From: Issue #1683
       release_tags: true
-      # What: other names setup.sh accepts for it.
-      # Why: release-versioning names stable for it
+      # What: old names of this channel in an install .env.
+      # Why: setup.sh update rewrites them; never offered.
       # From: Issue #1683 | PR #1858
-      aliases: [stable]
+      former_names: [stable]
   # What: the install mode that pins one fixed tag.
   # Why: release-versioning: pinned stays a channel value.
   # From: Issue #1683 | PR #1858
@@ -1101,13 +1101,13 @@ release:
     edge: "renamed to nightly in v0.3.0"
     dev: "retired in v0.3.0"
   # What: channel a ref without its own channel uses.
-  # Why: AG-REL-009 pre-stable default; no ci.sh literal.
+  # Why: AG-REL-009 pre-release default; no ci.sh literal.
   # From: Issue #1683
   default_channel: nightly
   # What: channel setup.sh install offers as its default.
-  # Why: stable is the default; nightly only with warning.
+  # Why: latest is the default; nightly only with warning.
   # From: Issue #1683 | PR #1858
-  install_channel: stable
+  install_channel: latest
   # What: ref prefix of the per-channel promote lock.
   # Why: setup.sh waits while promote moves channel tags.
   # From: Issue #1683 | PR #1858

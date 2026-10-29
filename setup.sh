@@ -3521,9 +3521,9 @@ lancache_release_rows() {
         depth == 6 && sec == "channels" && key == "release_tags" && val == "true" { print "release", ch; next }
         depth == 6 && sec == "channels" && key == "ref" { print "ref", ch, val; next }
         depth == 6 && sec == "channels" && key == "source_ref" { print "source", ch, val; next }
-        depth == 6 && sec == "channels" && key == "aliases" {
+        depth == 6 && sec == "channels" && key == "former_names" {
             gsub(/^\[|\] *$/, "", val); n = split(val, list, / *, */)
-            for (i = 1; i <= n; i++) if (list[i] != "") print "alias", list[i], ch
+            for (i = 1; i <= n; i++) if (list[i] != "") print "former", list[i], ch
         }' <<< "$text") || die "Failed to read the release block of ${sot}."
     counts=$(awk '$1 == "channel" { c++ } $1 == "release" { r++ } $1 == "pinned" { p++ }
         END { print c + 0, r + 0, p + 0 }' <<< "$rows") || die "Failed to count the release rows of ${sot}."
@@ -3533,18 +3533,18 @@ lancache_release_rows() {
     awk -v k="$kind" '$1 == k { sub(/^[^ ]+ /, ""); print }' <<< "$rows"
 }
 
-# What: the SOT channel names and their aliases
-# Why: a tag or channel word names a stack pointer
+# What: the SOT channel names and their former names
+# Why: an old .env must still name a stack pointer
 # From: Issue #1683 | PR #1858
 lancache_channel_words() {
-    local channels aliases
+    local channels formers
     channels=$(lancache_release_rows channel) || exit $?
-    aliases=$(lancache_release_rows alias) || exit $?
+    formers=$(lancache_release_rows former) || exit $?
     printf '%s\n' "$channels"
-    awk '{ print $1 }' <<< "$aliases"
+    awk '{ print $1 }' <<< "$formers"
 }
 
-# What: accepts SOT channels, their aliases, pinned
+# What: accepts SOT channels, former names, pinned
 # Why: retired names stop with their reason; no fallback
 # From: Issue #1683 | PR #1858
 validate_lancache_image_channel() {
@@ -3716,16 +3716,16 @@ resolve_lancache_image_channel() {
 
     channel="${channel:-$release}"
     validate_lancache_image_channel "$channel"
-    printf '%s\n' "$channel"
+    lancache_stack_pointer_channel_for "$channel"
 }
 
-# What: maps an alias to its channel; others pass through
-# Why: an alias has no stack tag of its own
+# What: maps a former name to its channel; others pass
+# Why: a former name has no stack tag of its own
 # From: Issue #1683 | PR #1858
 lancache_stack_pointer_channel_for() {
-    local channel="$1" aliases target
-    aliases=$(lancache_release_rows alias) || exit $?
-    target=$(awk -v a="$channel" '$1 == a { print $2; exit }' <<< "$aliases")
+    local channel="$1" formers target
+    formers=$(lancache_release_rows former) || exit $?
+    target=$(awk -v a="$channel" '$1 == a { print $2; exit }' <<< "$formers")
     printf '%s\n' "${target:-$channel}"
 }
 
@@ -3829,10 +3829,8 @@ lancache_promote_lock_held() {
 # From: Issue #1683 | PR #1858
 lancache_channel_ref_pass() {
     local registry="$1" prefix="$2" pointer_channel="$3" vars="$4" var slug ref digest
-    local release alias testing
+    local release testing
     release=$(lancache_release_rows release) || exit $?
-    alias=$(lancache_release_rows alias) || exit $?
-    alias=$(awk -v c="$release" '$2 == c { print $1; exit }' <<< "$alias")
     testing=$(lancache_release_rows channel) || exit $?
     testing=$(awk -v r="$release" '$0 != r { print; exit }' <<< "$testing")
     while read -r var slug; do
@@ -3841,7 +3839,7 @@ lancache_channel_ref_pass() {
             if [[ "$pointer_channel" = "$release" ]]; then
                 cat >&2 <<EOF
 
-${RED}✗${RESET} Cannot resolve the '${alias:-$release}' release channel (published as the '${release}' pointer image).
+${RED}✗${RESET} Cannot resolve the '${release}' release channel.
 
 To proceed, choose one of these options:
 
@@ -3858,7 +3856,7 @@ For details on release channels and their stability, see:
   docs/release-versioning.md
 
 EOF
-                die "Cannot resolve the ${alias:-$release} channel image ${ref} (${digest})."
+                die "Cannot resolve the ${release} channel image ${ref} (${digest})."
             fi
             die "Failed to resolve ${ref} to a digest (${digest}). Check registry access or set LANCACHE_IMAGE_TAG to an immutable sha-* / vX.Y.Z tag."
         fi
@@ -4189,6 +4187,16 @@ migrate_env_for_update() (
     set_env_key_if_empty_or_missing LANCACHE_IMAGE_REGISTRY "$lancache_image_registry" "$env_file"
     set_env_key_if_empty_or_missing LANCACHE_IMAGE_PREFIX "$lancache_image_prefix" "$env_file"
     set_env_key_if_empty_or_missing LANCACHE_IMAGE_CHANNEL "$lancache_image_channel" "$env_file"
+    # What: a former channel name in .env becomes current
+    # Why: maintainer 29.10.: only latest and nightly
+    # From: Issue #1683 | PR #1858
+    local env_channel current_channel
+    env_channel=$(get_env_var LANCACHE_IMAGE_CHANNEL "$env_file") || exit $?
+    current_channel=$(lancache_stack_pointer_channel_for "$env_channel") || exit $?
+    if [[ "$current_channel" != "$env_channel" ]]; then
+        set_env_key LANCACHE_IMAGE_CHANNEL "$current_channel" "$env_file"
+        print_ok "LANCACHE_IMAGE_CHANNEL=$env_channel is now $current_channel in $env_file"
+    fi
     set_env_key LANCACHE_IMAGE_TAG "$lancache_image_tag" "$env_file"
     [[ "$keep_image_refs" = "1" ]] || write_lancache_image_refs "$env_file" "$lancache_image_refs"
     adopt_moved_config_prod_keys "$install_dir" "$env_file" copy
@@ -5881,7 +5889,7 @@ channel_checkout_target() {
 }
 
 # What: a channel follows its branch, pinned its tag
-# Why: nightly code is current_dev, stable code master
+# Why: nightly code is current_dev, latest code master
 # From: Issue #1683 | PR #1858
 sync_repo_to_channel_ref() {
     local repo_dir="$1" target="$2" branches
@@ -6484,16 +6492,15 @@ lancache_ui_channel_override_is_valid() {
     list_has_line "$1" "$selectable"
 }
 
-# What: channels the wizard offers, release name last
-# Why: the testing channels, then the release alias
+# What: channels the wizard offers, release channel last
+# Why: only SOT channel names; former names never show
 # From: Issue #1683 | PR #1858
 lancache_selectable_channels() {
-    local channels release aliases
+    local channels release
     channels=$(lancache_release_rows channel) || exit $?
     release=$(lancache_release_rows release) || exit $?
-    aliases=$(lancache_release_rows alias) || exit $?
     awk -v r="$release" '$0 != r' <<< "$channels"
-    awk -v r="$release" '$2 == r { print $1; found = 1; exit } END { if (!found) print r }' <<< "$aliases"
+    printf '%s\n' "$release"
 }
 
 # What: true for a positive whole number of GiB
@@ -8388,12 +8395,20 @@ print_step "Release channel"
 # From: Issue #1683 | PR #1858
 if [[ -n "${LANCACHE_IMAGE_CHANNEL:-}" ]]; then
     validate_lancache_image_channel "$LANCACHE_IMAGE_CHANNEL"
+    # What: a former channel name is used under its new name
+    # Why: maintainer 29.10.: only latest and nightly
+    # From: Issue #1683 | PR #1858
+    current_channel=$(lancache_stack_pointer_channel_for "$LANCACHE_IMAGE_CHANNEL") || exit $?
+    if [[ "$current_channel" != "$LANCACHE_IMAGE_CHANNEL" ]]; then
+        print_warn "LANCACHE_IMAGE_CHANNEL=${LANCACHE_IMAGE_CHANNEL} is now called ${current_channel}; using ${current_channel}."
+        LANCACHE_IMAGE_CHANNEL="$current_channel"
+    fi
     print_ok "Using the channel already set via LANCACHE_IMAGE_CHANNEL=${LANCACHE_IMAGE_CHANNEL}."
 else
     selectable=$(lancache_selectable_channels) || exit $?
     retired=$(lancache_release_rows retired) || exit $?
     # What: the default is SOT release.install_channel
-    # Why: maintainer 24.10.: stable, never nightly unwarned
+    # Why: maintainer 29.10.: latest, never nightly unwarned
     # From: Issue #1683 | PR #1858
     install_channel=$(lancache_sot_value install_channel release) || exit $?
     list_has_line "$install_channel" "$selectable" \
