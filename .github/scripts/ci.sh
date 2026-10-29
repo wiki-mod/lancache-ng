@@ -10706,12 +10706,16 @@ _ci_validate_kea_rollback() {
 # Why: token-gated, no session/CSRF; reused per name.
 # From: Issue #583
 _ci_register_secondary() {
-    local base="$1" token="$2" name="$3" out code url
+    local base="$1" token="$2" name="$3" out code url body
     # What: the register route from the SOT defaults
     # Why: the ui path has one owner, build-manifest.yml
     # From: Issue #1683 | PR #1912
     url="${base}$(_ci_runtime_default UI_ROUTE_SECONDARY_REGISTER)" || return 2
-    out="$(_ci_capture 0 _ci_curl_secret data "{\"token\":\"${token}\",\"name\":\"${name}\"}" \
+    # What: jq encodes the body; the token comes via env.
+    # Why: a quote breaks pasted JSON; argv shows secrets.
+    # From: Issue #1683 | PR #1858
+    body="$(CI_REGISTER_TOKEN="${token}" _ci_capture 0 jq -cn --arg name "${name}" "{token: env.CI_REGISTER_TOKEN, name: \$name}")" || return 2
+    out="$(_ci_capture 0 _ci_curl_secret data "${body}" \
         -sS -w '\n%{http_code}' -H 'Content-Type: application/json' \
         "${url}")" || {
         ci_log "[CI-ERROR-VALIDATE-0083]" "url=\"${url}\" name=\"${name}\" reason=\"secondary register request failed (raw above)\""
