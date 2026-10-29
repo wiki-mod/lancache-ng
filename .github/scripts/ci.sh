@@ -15683,8 +15683,12 @@ _ci_check_action_node_versions() {
     done
 
     local -a uses_values=()
-    local produced produced_rc=0
-    produced="$(printf '%s\n' "${uses_entries[@]}" | sed $'s/^[^\t]*\t//' | sort -u)" || produced_rc=$?
+    local produced produced_rc=0 pairs_text
+    printf -v pairs_text '%s\n' "${uses_entries[@]}"
+    produced="$(_ci_capture 0 sed $'s/^[^\t]*\t//' <<< "${pairs_text%$'\n'}")" || produced_rc=$?
+    if [ "${produced_rc}" -eq 0 ]; then
+        produced="$(_ci_capture 0 sort -u <<< "${produced}")" || produced_rc=$?
+    fi
     _ci_producer_ok "${produced_rc}" 0 || return 2
     mapfile -t uses_values <<<"${produced}"
     # What: no uses: AND no fail is vacuous.
