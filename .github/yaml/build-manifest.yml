@@ -544,6 +544,10 @@ runtime:
     # Why: a burst of alarms must not grow the file unbounded.
     # From: Issue #1683 | PR #1858
     - UI_ALARMS_MAX=50
+    # What: cap of the buffered netdata chart answer, bytes.
+    # Why: a wide chart range must not exhaust memory.
+    # From: Issue #1683 | PR #1858
+    - UI_NETDATA_BODY_MAX=16777216
     # What: URL paths of ui routes setup.sh and ci.sh call.
     # Why: shell reads the path here; no literal copy.
     # From: Issue #1683 | PR #1912

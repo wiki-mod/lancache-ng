@@ -194,6 +194,10 @@ struct Config {
     // Why: a burst of alarms must not grow the file unbounded.
     // From: Issue #1683 | PR #1858
     alarms_max: usize,
+    // What: cap of the buffered netdata answer, bytes.
+    // Why: a wide chart range must not exhaust memory.
+    // From: Issue #1683 | PR #1858
+    netdata_body_max: usize,
     // What: wait for one secondary SOA answer.
     // Why: a silent host is a status, not a hang.
     // From: Issue #1683 | PR #1912
@@ -478,6 +482,8 @@ impl Config {
             secondary_probe_timeout: need_secs(env, "SECONDARY_PROBE_TIMEOUT")?,
             alarms_max: knob("UI_ALARMS_MAX", u32::MAX.into(), OutOfRange::Reject)? as usize,
             nats_kick_step: need_secs(env, "NATS_KICK_STEP_TIMEOUT")?,
+            netdata_body_max: knob("UI_NETDATA_BODY_MAX", u32::MAX.into(), OutOfRange::Reject)?
+                as usize,
             // What: missed watchdog cycles before stale.
             // Why: one owner with the restart rule.
             // From: Issue #1683 | PR #1912
@@ -2314,10 +2320,7 @@ async fn netdata_proxy(
     AxPath(path): AxPath<String>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Response, StatusCode> {
-    // What: cap the buffered upstream body.
-    // Why: a wide chart range must not exhaust memory.
-    // From: Issue #1683 | PR #1858
-    const MAX_BODY: usize = 16 * 1024 * 1024;
+    let max_body = state.config.netdata_body_max;
     if path.is_empty() || path.contains('/') || path.contains("..") {
         return Err(StatusCode::BAD_REQUEST);
     }
@@ -2364,11 +2367,11 @@ async fn netdata_proxy(
             tracing::warn!("Netdata {path} answer cut off: {e}");
             StatusCode::BAD_GATEWAY
         })?;
-        // What: an answer above MAX_BODY is a 502, logged.
+        // What: an answer above the body cap is a 502, logged.
         // Why: the operator sees why charts stay empty.
         // From: Issue #1683 | PR #1912
-        if body.len() + chunk.len() > MAX_BODY {
-            tracing::warn!("Netdata {path} answer above {MAX_BODY} bytes");
+        if body.len() + chunk.len() > max_body {
+            tracing::warn!("Netdata {path} answer above {max_body} bytes");
             return Err(StatusCode::BAD_GATEWAY);
         }
         body.extend_from_slice(&chunk);
