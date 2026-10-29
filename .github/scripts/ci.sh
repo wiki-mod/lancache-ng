@@ -7810,6 +7810,16 @@ _ci_release_tag_kind() {
     return 1
 }
 
+# What: rc 0 plain vX.Y.Z, 1 other tag, 2 SOT error.
+# Why: an SOT error must never read as "not stable".
+# From: Issue #1683 | PR #1858
+_ci_release_tag_final() {
+    local kind rc=0
+    kind="$(_ci_release_tag_kind "$1")" || rc=$?
+    [ "${rc}" -le 1 ] || return 2
+    [ "${kind}" = false ]
+}
+
 # What: Print the release-notes start or end marker.
 # Why: one marker owner for writer and replacer; no name.
 # From: Issue #1683
@@ -7944,12 +7954,11 @@ ci_cmd_release_changelog() {
     local tag="${1:-}" branch="${CI_DEFAULT_BRANCH:-}" changes file head out remote url sha tip
     [ -n "${tag}" ] || { ci_log "[CI-ERROR-RELEASE-0032]" "reason=\"tag arg required\""; return 2; }
     file="$(_ci_variable CI_CHANGELOG)" || return 2
-    local kind=""
-    if kind="$(_ci_release_tag_kind "${tag}")"; then :; fi
-    if [ "${kind}" != false ]; then
+    _ci_release_tag_final "${tag}" || {
+        [ "$?" -eq 1 ] || return 2
         printf 'release-changelog=skip tag=%s reason="not a stable vX.Y.Z tag"\n' "${tag}"
         return 0
-    fi
+    }
     head="## [${tag#"${tag%%[0-9]*}"}]"
     if [ -z "${branch}" ]; then
         ci_log "[CI-ERROR-RELEASE-0033]" "reason=\"CI_DEFAULT_BRANCH is required\""
@@ -8012,13 +8021,13 @@ _ci_release_variable_get() {
 # Why: AG-SEC-004: the version is a repo variable.
 # From: Issue #1683 | PR #1858
 ci_cmd_release_variable() {
-    local tag="${1:-}" kind="" repo pat name=PROJECT_RELEASE_VERSION want path got rc=0
+    local tag="${1:-}" repo pat name=PROJECT_RELEASE_VERSION want path got rc=0
     [ -n "${tag}" ] || { ci_log "[CI-ERROR-RELEASE-0059]" "reason=\"tag arg required\""; return 2; }
-    if kind="$(_ci_release_tag_kind "${tag}")"; then :; fi
-    if [ "${kind}" != false ]; then
+    _ci_release_tag_final "${tag}" || {
+        [ "$?" -eq 1 ] || return 2
         printf 'release-variable=skip tag=%s reason="not a stable vX.Y.Z tag"\n' "${tag}"
         return 0
-    fi
+    }
     repo="$(_ci_env_required GITHUB_REPOSITORY)" || return 2
     pat="$(_ci_env_required PROJECT_AUTOMATION_PAT)" || return 2
     want="${tag#v}"
@@ -8400,7 +8409,11 @@ _ci_release_tags() {
     # From: Issue #1683 | PR #1858
     while IFS= read -r t; do
         t="${t##*refs/tags/}"
-        if [ "$(_ci_release_tag_kind "${t}")" = false ]; then tags="${tags}${t}"$'\n'; fi
+        if _ci_release_tag_final "${t}"; then
+            tags="${tags}${t}"$'\n'
+        elif [ "$?" -ne 1 ]; then
+            return 2
+        fi
     done <<<"${refs}"
     tags="${tags%$'\n'}"
     [ -n "${tags}" ] || return 0
@@ -8432,12 +8445,12 @@ _ci_last_release_tag() {
 # Why: a patch tag bumps Z only, never rc, minor or major
 # From: Issue #1683
 _ci_next_patch_tag() {
-    local tag="$1" kind=""
-    if kind="$(_ci_release_tag_kind "${tag}")"; then :; fi
-    if [ "${kind}" != false ]; then
+    local tag="$1"
+    _ci_release_tag_final "${tag}" || {
+        [ "$?" -eq 1 ] || return 2
         ci_log "[CI-ERROR-RELEASE-0015]" "tag=\"${tag}\" reason=\"not a plain vX.Y.Z tag; no patch bump\""
         return 2
-    fi
+    }
     printf '%s.%s\n' "${tag%.*}" "$(( 10#${tag##*.} + 1 ))"
 }
 
@@ -8566,10 +8579,11 @@ _ci_gc_release_tags() {
     # From: Issue #1683 | PR #1858
     while IFS= read -r t; do
         [ -n "${t}" ] || continue
-        if [ "$(_ci_release_tag_kind "${t}")" != false ]; then
+        _ci_release_tag_final "${t}" || {
+            [ "$?" -eq 1 ] || return 2
             ci_log "[CI-ERROR-GC-0043]" "tag=\"${t}\" reason=\"migration_releases entry is not a plain vX.Y.Z tag\""
             return 2
-        fi
+        }
         printf '%s\n' "${t}"
     done <<<"${mig}"
 }
