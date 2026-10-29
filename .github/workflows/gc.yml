@@ -8,7 +8,7 @@
 name: CI 2.0 GC
 on:
   # What: GC every 3 hours, at minute 43.
-  # Why: maintainer 24.10.: GC every 3-4 hours.
+  # Why: stale refs and images are freed every 3-4 h.
   # From: Issue #1683 | PR #1858
   schedule:
     - cron: "43 */3 * * *"
@@ -102,13 +102,13 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GHCR_PACKAGE_DELETE_PAT }}
         run: bash .github/scripts/ci.sh gc --apply
-      # What: delete green run refs of closed PRs.
-      # Why: one ref per PR stays after merge otherwise.
+      # What: delete green refs of closed PRs, ended locks.
+      # Why: nothing else deletes them after the run ends.
       # From: Issue #1683 | PR #1858
-      - name: Delete green run refs of closed PRs
+      - name: Delete green refs of closed PRs and ended locks
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: bash .github/scripts/ci.sh gc-green-refs --apply
+        run: bash .github/scripts/ci.sh gc-refs --apply
 
   # What: AG-GH-017 sweep for branches with no PR or issue.
   # Why: reachability of refs; read-only repo token only.

@@ -565,7 +565,7 @@ runtime:
     - OPENRC_LOG_DIR=/var/log
     - OPENRC_STOP_TIMEOUT_SECONDS=600
     # What: 1 = dns answers private PTR zones itself.
-    # Why: maintainer 24.10.: PTR zones are off by default.
+    # Why: private PTR answers are opt-in.
     # From: Issue #1918 | PR #1858
     - DNS_LOCAL_REVERSE_ZONES=0
     # What: the project address the ui links to.
@@ -930,7 +930,7 @@ status_reports:
     label: channel-check
     scope: "daily pull by tag and start of one mutable channel"
   # What: a platform left out of a service index.
-  # Why: DoMe: platforms ship alone; a gap opens an issue.
+  # Why: platforms ship alone; a gap opens an issue.
   # From: Issue #1683 | PR #1858
   platform-mismatch:
     label: platform-mismatch
@@ -966,6 +966,21 @@ build_runtime:
     # From: Issue #1683 | PR #1858
     smoke:
       - ldd /usr/local/bin/@CRATE@
+
+# What: build-only secret mounts and their bake guard.
+# Why: set-runtime, mounts and the guard share one list.
+# From: Issue #1683 | PR #1858
+build_secrets:
+  mount_ids: [project_selfhosted_proxy_ca, sccache_policy, sccache_redis_url, ccache_redis_url, sccache_gha, sccache_dist_config, distcc_potential_hosts]
+  bake_env_prefixes: [HTTP_PROXY, HTTPS_PROXY, http_proxy, https_proxy, GOPROXY, SCCACHE_, CCACHE_, DISTCC_, ACTIONS_]
+  runtime_dir_name: ci-runtime-secrets
+
+# What: git identity of CI's own commits and tags.
+# Why: runners set no git user; one value owner.
+# From: Issue #1683 | PR #1858
+git_bot:
+  name: "github-actions[bot]"
+  email: "41898282+github-actions[bot]@users.noreply.github.com"
 
 # What: CodeQL query suites and ignored paths.
 # Why: One SOT owner; codeql.yml/ci.sh derive, no dup.
@@ -1068,7 +1083,7 @@ release:
   # From: Issue #1683
   default_channel: nightly
   # What: channel setup.sh install offers as its default.
-  # Why: maintainer 24.10.: stable default, nightly warns.
+  # Why: stable is the default; nightly only with warning.
   # From: Issue #1683 | PR #1858
   install_channel: stable
   # What: ref prefix of the per-channel promote lock.
@@ -1087,7 +1102,7 @@ release:
     deletion_policy: manual-or-approved-automation-only
     unaggregated_grace_minutes: 1440
     # What: newest vX.Y release lines whose tags GC keeps.
-    # Why: maintainer 24.10.: newest line and the one below.
+    # Why: newest release line and the one below stay.
     # From: Issue #1683 | PR #1858
     keep_release_lines: 2
     # What: release tags GC never deletes (migration steps).
@@ -1180,7 +1195,7 @@ ci_variables:
   # From: Issue #1683 | PR #1858
   CI_GHA_RUNTIME_EXPORT_TIMEOUT: 30
   # What: kill timeout (s) of a docker run/exec CI command.
-  # Why: AG-CI-016; 2 minutes is the limit DoMe agreed on.
+  # Why: AG-CI-016 needs an unignorable kill timeout.
   # From: Issue #1683 | PR #1858
   CI_CONTAINER_CMD_TIMEOUT: 120
   # What: workspace toml and the lock ci.sh generates.
@@ -1547,7 +1562,6 @@ runner_host:
   docker_group: docker
   hook_pre_name: pre-job-cleanup.sh
   hook_post_name: post-job-cleanup.sh
-  hook_mode: "0755"
   hook_env_started: ACTIONS_RUNNER_HOOK_JOB_STARTED
   hook_env_completed: ACTIONS_RUNNER_HOOK_JOB_COMPLETED
   opt_root_mode: g+s
@@ -1688,12 +1702,11 @@ branch_policy:
   # From: Issue #1683 | PR #1858
   long_lived: [badges, history/current_dev_old_ci_1.x]
   # What: POSIX ERE for long-lived ref families.
-  # Why: release branches and the VEX automation branch.
+  # Why: tags-as-branches and release branches.
   # From: Issue #1683 | PR #1858
   long_lived_regex:
     - "^v[0-9]"
     - "^release/v[0-9]"
-    - "^CI-Automation/"
 
 # What: Stack-validation check parameters (data, not logic).
 # Why: One SOT for check inputs; logic stays in ci.sh.

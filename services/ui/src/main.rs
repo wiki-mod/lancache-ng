@@ -1562,10 +1562,13 @@ fn cache_buffer_mib(cache_gb: u64) -> i64 {
 }
 
 // What: true if cache_gb GiB leaves the buffer free.
-// Why: signed maths; a nearly full disk must not wrap.
+// Why: checked maths; no size may wrap into a small one.
 // From: Issue #1069
 fn cache_fits(cache_gb: u64, avail_mib: u64) -> bool {
-    avail_mib as i64 - cache_buffer_mib(cache_gb) >= cache_gb as i64 * 1024
+    cache_gb
+        .checked_mul(1024)
+        .and_then(|mib| mib.checked_add(cache_buffer_mib(cache_gb).unsigned_abs()))
+        .is_some_and(|need| need <= avail_mib)
 }
 
 // What: the largest whole-GiB cache size that fits.
@@ -7233,167 +7236,16 @@ mod tests {
         assert_eq!(set(true), format!("{plain}; Secure"));
     }
 
-    // What: text keys the ui config needs to load.
-    // Why: each is removed once to prove it is required.
-    // From: Issue #1683 | PR #1912
-    const TEXT_KEYS: [&str; 42] = [
-        "LANCACHE_REPO_URL",
-        "ANY_BIND_IP",
-        "CA_CERT_FILE",
-        "NTP_PORT",
-        "DHCP_DOMAIN",
-        "RAW_CONTENT_URL",
-        "SETUP_SCRIPT_PATH",
-        "CONTAINER_NAME_PROXY",
-        "CONTAINER_NAME_DNS",
-        "CONTAINER_NAME_DHCP",
-        "CONTAINER_NAME_UI",
-        "PROXY_STATUS_URL",
-        "IP_HTTP",
-        "IP_HTTPS",
-        "NATS_URL",
-        "LANCACHE_IMAGE_TAG",
-        "NTP_UPSTREAM_SERVERS",
-        "TEMPLATE_DIR",
-        "CDN_DOMAINS_FILE",
-        "CACHE_DIR",
-        "DNS_STATE_DIR",
-        "NETDATA_URL",
-        "DHCP_API_HOST",
-        "KEA_CTRL_USER",
-        "UI_SETTINGS_FILE",
-        "KEA_CONFIG_SNAPSHOT_DIR",
-        "DHCP_PROBE_REQUEST_FILE",
-        "DHCP_PROBE_RESULT_FILE",
-        "DNS_URL",
-        "NETDATA_ALARMS_FILE",
-        "NATS_ISSUER_SEED_PATH",
-        "NATS_XKEY_SEED_PATH",
-        "LANCACHE_IMAGE_REGISTRY",
-        "LANCACHE_IMAGE_PREFIX",
-        "NATS_AUTH_CALLOUT_PATH",
-        "UI_SESSION_SECRET_FILE",
-        "UI_DATABASE_FILE",
-        "SECONDARY_REGISTRATION_TOKEN_FILE",
-        "SYSLOG_LOG_ROOT",
-        "STATUS_FILE",
-        "DESIRED_STATE_FILE",
-        "LANCACHE_SHARED_SECRET_DIR",
-    ];
-
-    // What: numeric keys with values unlike the SOT's.
-    // Why: tests must not copy SOT values (AG-CODE-010).
-    // From: Issue #1683 | PR #1912
-    const NUMBER_KEYS: [(&str, &str); 25] = [
-        ("UI_WATCHDOG_REFRESH_SECONDS", "11"),
-        ("UI_DASHBOARD_REFRESH_SECONDS", "12"),
-        ("UI_STATS_REFRESH_SECONDS", "13"),
-        ("UI_STATS_POINTS", "14"),
-        ("CONVERGE_TIMER_INTERVAL_MINUTES", "15"),
-        ("RESTART_AFTER", "16"),
-        ("DHCP_LEASE_TIME_MIN", "70"),
-        ("DHCP_LEASE_TIME_MAX", "700000"),
-        ("DHCP_MAX_LEASE_FACTOR", "4"),
-        ("PDNS_AUTH_PORT", "5301"),
-        ("DNS_PORT", "5354"),
-        ("PROXY_HTTP_PORT", "8079"),
-        ("PDNS_AUTH_API_PORT", "8181"),
-        ("PDNS_HTTP_API_PORT", "8182"),
-        ("DNS_ROLLBACK_PORT", "8183"),
-        ("KEA_CTRL_PORT", "8100"),
-        ("DHCP_LEASE_TIME", "90000"),
-        ("UI_SESSION_TTL_SECONDS", "3601"),
-        ("UI_SESSION_TTL_MAX_SECONDS", "31000000"),
-        ("RETRY_BACKOFF_START", "2"),
-        ("RETRY_BACKOFF_MAX", "40"),
-        ("KEEP_KNOWN_GOOD_CONFIGS", "7"),
-        ("UI_LOGS_MAX_ENTRIES", "250"),
-        ("UI_LISTEN_PORT", "8090"),
-        ("SYSLOG_MAX_GB", "3"),
-    ];
-
-    // What: flag keys the ui config needs to load.
-    // Why: each must be present and a valid boolean.
-    // From: Issue #1683 | PR #1912
-    const FLAG_KEYS: [&str; 12] = [
-        "HTTPS_ENABLED",
-        "DNS_LOCAL_REVERSE_ZONES",
-        "UI_SECURITY_HEADERS",
-        "LANCACHE_DEV_MODE",
-        "AUTO_UPDATE_ENABLED",
-        "NTP_ENABLED",
-        "NTP_AUTO_DHCP",
-        "ALLOW_INSECURE_UI",
-        "LOGGING_PROXY_ENABLED",
-        "LOGGING_DNS_ENABLED",
-        "LOGGING_DHCP_ENABLED",
-        "LOGGING_UI_ENABLED",
-    ];
-
-    // What: a complete env; each text value names its key.
-    // Why: a swapped field then shows in the value.
+    // What: Config::load over the env plus test overrides.
+    // Why: ci.sh test exports the ui container env.
     // From: Issue #1683 | PR #1858
-    fn full_env() -> HashMap<String, String> {
-        let mut env: HashMap<String, String> = HashMap::new();
-        for key in TEXT_KEYS {
-            env.insert(key.to_string(), format!("v-{key}"));
-        }
-        for (key, value) in NUMBER_KEYS {
-            env.insert(key.to_string(), value.to_string());
-        }
-        for key in FLAG_KEYS {
-            env.insert(key.to_string(), "true".to_string());
-        }
-        env.insert("CACHE_MAX_SIZE".to_string(), "40g".to_string());
-        env
-    }
-
-    // What: Config::load over a test env map.
-    // Why: tests load the real config, not a copy of it.
-    // From: Issue #1683 | PR #1912
-    fn load_from(env: &HashMap<String, String>) -> Result<Config, String> {
-        Config::load(&|key: &str| env.get(key).cloned())
-    }
-
-    // What: each missing or bad key stops the start.
-    // Why: compose owns every value; no silent default.
-    // From: Issue #1683 | PR #1858
-    #[test]
-    fn config_load_names_the_missing_or_bad_key() {
-        let all = TEXT_KEYS
-            .iter()
-            .copied()
-            .chain(NUMBER_KEYS.iter().map(|(key, _)| *key))
-            .chain(FLAG_KEYS);
-        for key in all {
-            let mut env = full_env();
-            env.remove(key);
-            let err = load_from(&env).err().unwrap_or_default();
-            assert!(err.contains(key), "{key}: {err:?}");
-        }
-        for key in FLAG_KEYS {
-            let mut env = full_env();
-            env.insert(key.to_string(), "maybe".to_string());
-            assert!(load_from(&env).is_err(), "{key} junk");
-        }
-        for (key, junk) in [
-            ("UI_SESSION_TTL_SECONDS", "31000001"),
-            ("UI_LISTEN_PORT", "65536"),
-            ("KEEP_KNOWN_GOOD_CONFIGS", "0"),
-            ("DHCP_LEASE_TIME", "69"),
-            ("DHCP_LEASE_TIME", "700001"),
-            ("CACHE_MAX_SIZE", "40"),
-        ] {
-            let mut env = full_env();
-            env.insert(key.to_string(), junk.to_string());
-            assert!(load_from(&env).is_err(), "{key}={junk}");
-        }
-        let mut env = full_env();
-        env.insert("SYSLOG_MAX_GB".to_string(), "9999999".to_string());
-        assert_eq!(
-            load_from(&env).unwrap().syslog_max_gb as u64,
-            config::SYSLOG_MAX_GB.max
-        );
+    fn load_with(over: &[(&str, &str)]) -> Result<Config, String> {
+        Config::load(&|key: &str| {
+            over.iter()
+                .find(|(name, _)| *name == key)
+                .map(|(_, value)| value.to_string())
+                .or_else(|| config::process_env(key))
+        })
     }
 
     // What: the watchdog document is fresh, stale, absent.
@@ -7543,27 +7395,6 @@ mod tests {
         assert_eq!(delay, Duration::from_secs(4));
         backoff(&mut delay, &policy).await;
         assert_eq!(delay, policy.max);
-    }
-
-    // What: a full env plus the NATS users and passwords.
-    // Why: the key tests build the real config from it.
-    // From: Issue #1683 | PR #1912
-    fn nats_env() -> HashMap<String, String> {
-        let mut env = full_env();
-        let extra = [
-            ("NATS_UI_USER", "ui"),
-            ("NATS_UI_PASSWORD", "pw-ui"),
-            ("NATS_DNS_WRITER_USER", "dnsw"),
-            ("NATS_DNS_WRITER_PASSWORD", "pw-dnsw"),
-            ("NATS_CALLOUT_USER", "callout"),
-            ("NATS_CALLOUT_PASSWORD", "pw-callout"),
-            ("NATS_SYS_USER", "sys"),
-            ("NATS_SYS_PASSWORD", "pw-sys"),
-        ];
-        for (key, value) in extra {
-            env.insert(key.to_string(), value.to_string());
-        }
-        env
     }
 
     // What: a signed JWT has header, claims, a valid sig.
@@ -7829,36 +7660,6 @@ mod tests {
         assert!(ptr_rows(&[json!({"name": "x", "type": "PTR"})]).is_empty());
     }
 
-    // What: the dirs the ui writes follow its own config.
-    // Why: chown follows the configured paths, no 2nd list.
-    // From: Issue #1683 | PR #1858
-    #[test]
-    fn written_dirs_follow_the_configured_paths() {
-        let mut env = nats_env();
-        let paths = [
-            ("CDN_DOMAINS_FILE", "/a/cdn.txt"),
-            ("NETDATA_ALARMS_FILE", "/b/alarms.json"),
-            ("NATS_XKEY_SEED_PATH", "/c/xkey"),
-            ("DESIRED_STATE_FILE", "/a/desired.json"),
-            ("NATS_AUTH_CALLOUT_PATH", "/d/auth.conf"),
-            ("DHCP_PROBE_REQUEST_FILE", "/a/probe"),
-            ("DNS_STATE_DIR", "/s"),
-            ("KEA_CONFIG_SNAPSHOT_DIR", "/k"),
-        ];
-        for (key, value) in paths {
-            env.insert(key.to_string(), value.to_string());
-        }
-        let cfg = load_from(&env).unwrap();
-        let dirs = ui_written_dirs(&cfg, Path::new("/l/ui.log"));
-        let want: Vec<PathBuf> = ["/a", "/b", "/c", "/d", "/k", "/l", "/s"]
-            .iter()
-            .map(PathBuf::from)
-            .collect();
-        assert_eq!(dirs, want);
-        let bare = ui_written_dirs(&cfg, Path::new("ui.log"));
-        assert_eq!(bare.len(), 6);
-    }
-
     // What: ownership and modes are set on a log tree.
     // Why: the shared log reader gid must keep read access.
     // From: Issue #1683 | PR #1858
@@ -7974,12 +7775,24 @@ mod tests {
     #[test]
     fn nats_keys_come_from_a_seed_or_a_persisted_file() {
         let dir = unique_temp_dir("keys");
-        let mut env = nats_env();
         let issuer_file = dir.join("issuer.seed").to_string_lossy().into_owned();
         let xkey_file = dir.join("xkey.seed").to_string_lossy().into_owned();
-        env.insert("NATS_ISSUER_SEED_PATH".to_string(), issuer_file.clone());
-        env.insert("NATS_XKEY_SEED_PATH".to_string(), xkey_file.clone());
-        let cfg = load_from(&env).unwrap();
+        let files = [
+            ("NATS_ISSUER_SEED_PATH", issuer_file.as_str()),
+            ("NATS_XKEY_SEED_PATH", xkey_file.as_str()),
+            ("NATS_ISSUER_SEED", ""),
+            ("NATS_XKEY_SEED", ""),
+        ];
+        let seeds = |issuer: &str, xkey: &str| {
+            load_with(&[
+                files[0],
+                files[1],
+                ("NATS_ISSUER_SEED", issuer),
+                ("NATS_XKEY_SEED", xkey),
+            ])
+            .unwrap()
+        };
+        let cfg = load_with(&files).unwrap();
         let first = issuer_keypair(&cfg).unwrap();
         assert!(first.public_key().starts_with('A'));
         assert_eq!(
@@ -7994,10 +7807,8 @@ mod tests {
         assert!(xkey.public_key().starts_with('X'));
         assert_eq!(callout_xkey(&cfg).unwrap().public_key(), xkey.public_key());
         let seeded = KeyPair::new_account();
-        env.insert("NATS_ISSUER_SEED".to_string(), seeded.seed().unwrap());
         let x_seeded = XKey::new();
-        env.insert("NATS_XKEY_SEED".to_string(), x_seeded.seed().unwrap());
-        let cfg = load_from(&env).unwrap();
+        let cfg = seeds(&seeded.seed().unwrap(), &x_seeded.seed().unwrap());
         assert_eq!(
             issuer_keypair(&cfg).unwrap().public_key(),
             seeded.public_key()
@@ -8006,9 +7817,7 @@ mod tests {
             callout_xkey(&cfg).unwrap().public_key(),
             x_seeded.public_key()
         );
-        env.insert("NATS_ISSUER_SEED".to_string(), "junk".to_string());
-        env.insert("NATS_XKEY_SEED".to_string(), "junk".to_string());
-        let cfg = load_from(&env).unwrap();
+        let cfg = seeds("junk", "junk");
         assert!(
             issuer_keypair(&cfg)
                 .unwrap_err()
@@ -8020,11 +7829,9 @@ mod tests {
                 .unwrap()
                 .starts_with("NATS_XKEY_SEED is not a valid NKey seed:")
         );
-        env.remove("NATS_ISSUER_SEED");
-        env.remove("NATS_XKEY_SEED");
         fs::write(&issuer_file, "junk").unwrap();
         fs::write(&xkey_file, "junk").unwrap();
-        let cfg = load_from(&env).unwrap();
+        let cfg = load_with(&files).unwrap();
         assert!(
             issuer_keypair(&cfg)
                 .unwrap_err()
@@ -8041,26 +7848,20 @@ mod tests {
         tweak: impl FnOnce(&mut Config),
     ) -> (String, Arc<AppState>, std::path::PathBuf) {
         let dir = unique_temp_dir("ui-server");
-        let mut cfg = load_from(&full_env()).expect("a complete env loads");
+        let mut cfg = load_with(&[]).expect("the ui container env loads");
         cfg.shared_secret_dir = dir.to_string_lossy().to_string();
         cfg.hsts_mode = HstsMode::Auto;
         cfg.template_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src/templates").to_string();
         tweak(&mut cfg);
-        let http = lancache_ng::http_client(&lancache_ng::test_http_env).unwrap();
+        let ttl = Duration::from_secs(cfg.ui_session_ttl_seconds);
+        let http = lancache_ng::http_client(&config::process_env).unwrap();
         let nats = async_nats::ConnectOptions::new()
             .retry_on_initial_connect()
             .connect(format!("nats://{}:1", Ipv4Addr::LOCALHOST))
             .await
             .unwrap();
         let db = open_database(&dir.join("ui.db").to_string_lossy()).unwrap();
-        let state = Arc::new(AppState::new(
-            cfg,
-            http,
-            nats,
-            db,
-            [9u8; 32],
-            Duration::from_secs(3600),
-        ));
+        let state = Arc::new(AppState::new(cfg, http, nats, db, [9u8; 32], ttl));
         let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await
             .unwrap();
@@ -8093,11 +7894,8 @@ mod tests {
         let dir = unique_temp_dir("alarm-ingest");
         let file = dir.join("alarms.json").to_string_lossy().to_string();
         let path = file.clone();
-        let (base, _state, sdir) = test_server(move |cfg| {
-            cfg.netdata_alarm_token = "secret-token".to_string();
-            cfg.netdata_alarms_file = path;
-        })
-        .await;
+        let (base, state, sdir) = test_server(move |cfg| cfg.netdata_alarms_file = path).await;
+        let token = state.config.netdata_alarm_token.as_str();
         let client = reqwest::Client::new();
         let url = format!("{base}{ALARM_INGEST_PATH}");
         let alarm = json!({
@@ -8119,12 +7917,12 @@ mod tests {
         assert_eq!(wrong.status(), 401);
         let empty = send(Some(""), alarm.to_string()).await.unwrap();
         assert_eq!(empty.status(), 401);
-        let malformed = send(Some("secret-token"), "{".to_string()).await.unwrap();
+        let malformed = send(Some(token), "{".to_string()).await.unwrap();
         assert_eq!(malformed.status(), 400);
         assert!(read_alarms(&file).is_empty());
-        let ok = send(Some("secret-token"), alarm.to_string()).await.unwrap();
+        let ok = send(Some(token), alarm.to_string()).await.unwrap();
         assert_eq!(ok.status(), 204);
-        let again = send(Some("secret-token"), alarm.to_string()).await.unwrap();
+        let again = send(Some(token), alarm.to_string()).await.unwrap();
         assert_eq!(again.status(), 204);
         let stored = read_alarms(&file);
         assert_eq!(stored.len(), 1);

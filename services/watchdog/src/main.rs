@@ -1555,7 +1555,7 @@ fn alarm_notify_conf(
         r#"SEND_CUSTOM="YES"
 DEFAULT_RECIPIENT_CUSTOM="{recipient}"
 _lancache_json_escape() {{
-  printf '%s' "$1" | tr -d '\n' | sed 's/\\/\\\\/g; s/"/\\"/g'
+  printf '%s' "$1" | tr -d '\000-\037' | sed 's/\\/\\\\/g; s/"/\\"/g'
 }}
 custom_sender() {{
   local token httpcode
