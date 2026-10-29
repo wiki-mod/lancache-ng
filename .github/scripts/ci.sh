@@ -17355,42 +17355,27 @@ PROG
 # From: Issue #1683 | PR #1858
 _ci_trivyignore_fields() {
     local file="$1" out
-    if ! out="$(awk '
-        function fail(m) { printf "line %d: %s: %s\n", NR, m, $0 > "/dev/stderr"; bad = 1; exit 3 }
-        function scalar(v) {
-            if (v ~ /^".*"$/ || v ~ /^\047.*\047$/) { v = substr(v, 2, length(v) - 2); if (v ~ /["\047\\]/) fail("escaped quoted scalar") }
-            else if (v ~ /(^| )#/ || v ~ /^[\[{&*!|>%@`]/) fail("unsupported plain scalar")
-            return v
-        }
-        function flush() { if (on) { print n "\tstatement\t" st; on = 0 } }
-        { match($0, /^ */); ind = RLENGTH; rest = substr($0, ind + 1) }
-        on && rest == "" { if (st != "") nl++; next }
-        on && ind == 6 {
-            if (st == "") st = rest
-            else if (nl) { while (nl-- > 0) st = st "\036"; st = st rest }
-            else st = st " " rest
-            nl = 0; next
-        }
-        on && ind > 6 { fail("more-indented folded line") }
-        on { flush() }
-        rest == "" || rest ~ /^#/ { next }
-        ind == 0 && rest == "vulnerabilities:" { sect = "v"; next }
-        ind == 0 && rest ~ /^[a-z_]+:[ \t]*$/ { sect = "o"; next }
-        ind == 0 { fail("unsupported top-level line") }
-        sect == "o" { next }
-        sect != "v" { fail("line outside a section") }
-        ind == 2 && rest ~ /^- id:/ { v = rest; sub(/^- id:[ \t]*/, "", v); n++; mode = ""; print n "\tid\t" scalar(v); next }
-        ind == 4 && n && rest ~ /^[a-z_]+:/ {
-            k = rest; sub(/:.*/, "", k); v = rest; sub(/^[a-z_]+:[ \t]*/, "", v); mode = ""
-            if (k == "paths" && v == "") { mode = "paths"; next }
-            if (k == "statement" && v == ">-") { on = 1; st = ""; nl = 0; next }
-            if (k == "statement" || k == "status" || k == "justification") { print n "\t" k "\t" scalar(v); next }
-            fail("unsupported entry key")
-        }
-        ind == 6 && mode == "paths" && rest ~ /^- / { v = rest; sub(/^-[ \t]*/, "", v); print n "\tpath\t" scalar(v); next }
-        { fail("unsupported line") }
-        END { flush(); if (bad) exit 3 }
-    ' "${file}" 2>&1)"; then
+    # What: yq turns the YAML into JSON; jq shapes the rows.
+    # Why: yq owns the YAML; jq checks every key and type.
+    # From: Issue #1683 | PR #1858
+    if ! out="$({ yq --yaml-fix-merge-anchor-to-spec=true -o=json '.vulnerabilities' "${file}" | jq -r "$(cat <<'PROG'
+        def str($k; $n): if has($k) then (.[$k] | if type == "null" then "" elif type == "string" then . else error("entry \($n): \($k) is not a string") end) else empty end;
+        (if . == null then [] else . end)
+        | if type != "array" then error("vulnerabilities is not a list") else . end
+        | to_entries[]
+        | (.key + 1) as $n
+        | .value
+        | if type != "object" then error("entry \($n) is not a mapping") else . end
+        | (keys - ["id", "statement", "status", "justification", "paths"]) as $bad
+        | if ($bad | length) > 0 then error("entry \($n): unsupported entry key \($bad[0])") else . end
+        | if has("id") then . else error("entry \($n): no id") end
+        | "\($n)\tid\t\(str("id"; $n))",
+          (str("statement"; $n) | "\($n)\tstatement\t\(gsub("\n"; "\u001e"))"),
+          (str("status"; $n) | "\($n)\tstatus\t\(.)"),
+          (str("justification"; $n) | "\($n)\tjustification\t\(.)"),
+          (if has("paths") then (.paths | if type == "array" then .[] | if type == "string" then "\($n)\tpath\t\(.)" else error("entry \($n): a path is not a string") end else error("entry \($n): paths is not a list") end) else empty end)
+PROG
+        )"; } 2>&1)"; then
         ci_error "[CI-ERROR-RELEASE-0035]" "file=\"${file}\" reason=\"trivyignore not in the supported shape\"" "${out}"
         return 2
     fi
@@ -17593,17 +17578,21 @@ _ci_workflow_scan_report() {
 # Why: else ci.sh misses repo/org vars; ids diverge.
 # From: Issue #1683 | PR #1858
 _ci_check_workflow_ci_variables() {
-    local repo_root="${1:-${CI_REPO_ROOT:-.}}" out callers=0
+    local repo_root="${1:-${CI_REPO_ROOT:-.}}" out="" callers=0 f row calls wired
     local -a viol=() files=()
     _ci_workflow_scan_files "${repo_root}" files || return 2
-    out="$(_ci_capture 0 awk "$(cat <<'PROG'
-        function rep() { if (c) { n++; if (!w) print "flag " f ": calls ci.sh without top-level env CI_VARIABLES" } }
-        FNR == 1 { if (f != "") rep(); f = FILENAME; c = w = 0 }
-        index($0, "scripts/ci.sh") { c = 1 }
-        $0 == "  CI_VARIABLES: ${{ toJSON(vars) }}" { w = 1 }
-        END { if (f != "") rep(); print "callers " n + 0 }
-PROG
-        )" "${files[@]}")" || return 2
+    for f in "${files[@]}"; do
+        # What: ci.sh calls and CI_VARIABLES wiring.
+        # Why: yq reads the workflow; text matched comments.
+        # From: Issue #1683 | PR #1858
+        row="$(_ci_run "[CI-ERROR-CHECK-0203]" "file=\"${f}\" reason=\"workflow ci.sh calls not read\"" \
+            env W="\${{ toJSON(vars) }}" yq --yaml-fix-merge-anchor-to-spec=true -r '[([.. | select(tag == "!!map" and has("run")) | .run | select(tag == "!!str") | select(contains("scripts/ci.sh"))] | length > 0), ((.env.CI_VARIABLES // "") == strenv(W))] | @tsv' "${f}")" || return 2
+        read -r calls wired <<< "${row}"
+        [ "${calls}" = true ] || continue
+        callers=$(( callers + 1 ))
+        [ "${wired}" = true ] || out+="flag ${f}: calls ci.sh without top-level env CI_VARIABLES"$'\n'
+    done
+    out+="callers ${callers}"
     _ci_workflow_scan_report "${repo_root}" callers "${out}" viol callers
     if [ "${#viol[@]}" -gt 0 ]; then
         ci_error "[CI-ERROR-CHECK-0158]" "scanned=${#files[@]} callers=${callers} flagged=${#viol[@]} reason=\"ci.sh caller without CI_VARIABLES\"" "$(printf '%s\n' "${viol[@]}")"
@@ -17616,57 +17605,62 @@ PROG
 # Why: AG-CI-006/016: one owner; every job has a timeout
 # From: Issue #1683 | PR #1858
 _ci_check_workflow_job_settings() {
-    local repo_root="${1:-${CI_REPO_ROOT:-.}}" out runner job tmap="" js_count=0
+    local repo_root="${1:-${CI_REPO_ROOT:-.}}" out="" runner job tmap="" js_count=0 f rows verdict hasjobs line
     local -a viol=() files=() js_jobs=()
     local -A js_min=()
     _ci_workflow_scan_files "${repo_root}" files || return 2
     _ci_job_settings_read runner js_jobs js_min || return 2
     for job in "${js_jobs[@]}"; do tmap+="${job}=${js_min[${job}]} "; done
-    out="$(_ci_capture 0 awk -v runner="${runner}" -v tmap="${tmap}" -v q="'" "$(cat <<'PROG'
-        function lit(v) { return v != "" && v !~ /^\$\{\{/ }
-        function val(s) { sub(/^[^:]*:[[:space:]]*/, "", s); sub(/[[:space:]]+#.*$/, "", s); gsub("^[\"" q "]|[\"" q "]$", "", s); return s }
-        function bad(m) { print "flag " f ": job " job ": " m }
-        function done_job(  k, want, shown) {
-            if (job == "" || uses) return
-            njob++
-            want = (job in T) ? T[job] : ""
-            if (to == "") bad("no timeout-minutes")
-            else if (want != "" && lit(to)) bad("timeout-minutes " to " (SOT ci_job_timeouts." job " owns it)")
-            else if (want == "" && !lit(to)) bad("timeout-minutes reads job-settings, SOT ci_job_timeouts has no " job)
-            if (nd) {
-                if (lit(ro)) bad("runs-on " ro " (a needs job reads job-settings)")
-            } else if (lit(ro) && ro != runner) bad("runs-on " ro " (SOT runner " runner ")")
-            k = ro
-            while (match(k, q "[^" q "]*" q)) {
-                if (substr(k, RSTART + 1, RLENGTH - 2) != runner) bad("runs-on fallback " substr(k, RSTART, RLENGTH) " (SOT runner " runner ")")
-                k = substr(k, RSTART + RLENGTH)
+    for f in "${files[@]}"; do
+        # What: has the workflow a jobs: map; its job rows.
+        # Why: yq reads the YAML; awk only judges the rows.
+        # From: Issue #1683 | PR #1858
+        hasjobs="$(_ci_run "[CI-ERROR-CHECK-0204]" "file=\"${f}\" reason=\"workflow jobs block not read\"" \
+            yq --yaml-fix-merge-anchor-to-spec=true -r '(.jobs | tag) == "!!map"' "${f}")" || return 2
+        if [ "${hasjobs}" != true ]; then
+            out+="flag ${f}: no top-level jobs: block"$'\n'
+            continue
+        fi
+        rows="$(_ci_run "[CI-ERROR-CHECK-0205]" "file=\"${f}\" reason=\"workflow job rows not read\"" \
+            yq --yaml-fix-merge-anchor-to-spec=true -r '.jobs | to_entries[] | [.key, (.value | has("uses")), (.value | has("needs")), ((.value["runs-on"] // "") | tostring), ((.value["timeout-minutes"] // "") | tostring)] | @tsv' "${f}")" || return 2
+        verdict="$(_ci_capture 0 awk -v f="${f}" -v runner="${runner}" -v tmap="${tmap}" -v q="'" "$(cat <<'PROG'
+            function lit(v) { return v != "" && v !~ /^\$\{\{/ }
+            function bad(m) { print "flag " f ": job " job ": " m }
+            function judge(  k, want) {
+                njob++
+                want = (job in T) ? T[job] : ""
+                if (to == "") bad("no timeout-minutes")
+                else if (want != "" && lit(to)) bad("timeout-minutes " to " (SOT ci_job_timeouts." job " owns it)")
+                else if (want == "" && !lit(to)) bad("timeout-minutes reads job-settings, SOT ci_job_timeouts has no " job)
+                if (nd) {
+                    if (lit(ro)) bad("runs-on " ro " (a needs job reads job-settings)")
+                } else if (lit(ro) && ro != runner) bad("runs-on " ro " (SOT runner " runner ")")
+                k = ro
+                while (match(k, q "[^" q "]*" q)) {
+                    if (substr(k, RSTART + 1, RLENGTH - 2) != runner) bad("runs-on fallback " substr(k, RSTART, RLENGTH) " (SOT runner " runner ")")
+                    k = substr(k, RSTART + RLENGTH)
+                }
+                if (match(to, /\|\|[[:space:]]*[0-9]+/)) bad("timeout fallback " substr(to, RSTART, RLENGTH) " (a literal is a second owner)")
+                if (match(to, "\\[" q "[^" q "]*" q "\\]")) {
+                    k = substr(to, RSTART + 2, RLENGTH - 4)
+                    if (k != job) bad("timeout-minutes reads key " k)
+                }
             }
-            if (match(to, /\|\|[[:space:]]*[0-9]+/)) bad("timeout fallback " substr(to, RSTART, RLENGTH) " (a literal is a second owner)")
-            if (match(to, "\\[" q "[^" q "]*" q "\\]")) {
-                k = substr(to, RSTART + 2, RLENGTH - 4)
-                if (k != job) bad("timeout-minutes reads key " k)
-            }
-        }
-        function end_file() {
-            done_job(); job = ""
-            if (f == "") return
-            if (!sawj) print "flag " f ": no top-level jobs: block"
-            else if (!nfile) print "flag " f ": jobs: block without a parsable job"
-        }
-        BEGIN { n = split(tmap, kv, " "); for (i = 1; i <= n; i++) { p = index(kv[i], "="); T[substr(kv[i], 1, p - 1)] = substr(kv[i], p + 1) } }
-        FNR == 1 { end_file(); f = FILENAME; inj = sawj = nfile = blk = 0 }
-        blk && /^      / { s = $0; sub(/^[[:space:]]+/, "", s); ro = ro " " s; next }
-        { blk = 0 }
-        /^jobs:[[:space:]]*$/ { inj = 1; sawj = 1; next }
-        inj && /^[^[:space:]#]/ { done_job(); job = ""; inj = 0 }
-        inj && /^  [A-Za-z0-9_-]+:[[:space:]]*$/ { done_job(); job = $1; sub(/:$/, "", job); ro = to = ""; nd = uses = 0; nfile++; next }
-        inj && /^    needs:/ { nd = 1 }
-        inj && /^    uses:/ { uses = 1 }
-        inj && /^    runs-on:/ { ro = val($0); if (ro == "") { ro = "[block]"; blk = 1 } }
-        inj && /^    timeout-minutes:/ { to = val($0) }
-        END { end_file(); print "jobs " njob + 0 }
+            BEGIN { FS = "\t"; n = split(tmap, kv, " "); for (i = 1; i <= n; i++) { p = index(kv[i], "="); T[substr(kv[i], 1, p - 1)] = substr(kv[i], p + 1) } }
+            NF == 0 { next }
+            { nfile++; job = $1; nd = ($3 == "true"); ro = $4; to = $5 }
+            $2 != "true" { judge() }
+            END { if (!nfile) print "flag " f ": jobs: block without a parsable job"; print "jobs " njob + 0 }
 PROG
-        )" "${files[@]}")" || return 2
+            )" <<< "${rows}")" || return 2
+        while IFS= read -r line; do
+            case "${line}" in
+                "jobs "*) js_count=$(( js_count + ${line#jobs} )) ;;
+                *) out+="${line}"$'\n' ;;
+            esac
+        done <<< "${verdict}"
+    done
+    out+="jobs ${js_count}"
     _ci_workflow_scan_report "${repo_root}" jobs "${out}" viol js_count
     if [ "${#viol[@]}" -gt 0 ]; then
         ci_error "[CI-ERROR-CHECK-0159]" "scanned=${#files[@]} jobs=${js_count} flagged=${#viol[@]} reason=\"job runner or timeout not from the SOT owner\"" "$(printf '%s\n' "${viol[@]}")"
