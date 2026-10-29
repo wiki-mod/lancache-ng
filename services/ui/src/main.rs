@@ -1562,10 +1562,13 @@ fn cache_buffer_mib(cache_gb: u64) -> i64 {
 }
 
 // What: true if cache_gb GiB leaves the buffer free.
-// Why: signed maths; a nearly full disk must not wrap.
+// Why: checked maths; no size may wrap into a small one.
 // From: Issue #1069
 fn cache_fits(cache_gb: u64, avail_mib: u64) -> bool {
-    avail_mib as i64 - cache_buffer_mib(cache_gb) >= cache_gb as i64 * 1024
+    cache_gb
+        .checked_mul(1024)
+        .and_then(|mib| mib.checked_add(cache_buffer_mib(cache_gb).unsigned_abs()))
+        .is_some_and(|need| need <= avail_mib)
 }
 
 // What: the largest whole-GiB cache size that fits.
