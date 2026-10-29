@@ -1970,36 +1970,43 @@ _ci_tracked_listing() {
 # Why: Content, not raw bytes or order, is the input.
 # From: Issue #1683
 _ci_tracked_content_ids() {
-    local root="$1" ref="${2:-}" mode="${3:-}" listing line path oid blob norm g nrc
+    local root="$1" ref="${2:-}" mode="${3:-}" listing line
     listing="$(_ci_tracked_listing "${root}" "${ref}")" || return 2
     [ -n "${listing}" ] || return 0
     while IFS= read -r line; do
         [ -n "${line}" ] || continue
-        path="${line%%$'\t'*}"
-        oid="${line#*$'\t'}"
-        if g="$(_ci_norm_grammar "${path}")"; then
-            blob="$(_ci_identity_git "${path}" "${ref}" cat-file blob "${oid}")" || return 2
-            nrc=0
-            # What: a build id drops Rust cfg(test) items.
-            # Why: 11.4: a test change builds no container.
-            # From: Issue #1683 | PR #1912
-            if [ "${g}" = rust ] && [ "${mode}" = build ]; then
-                norm="$(_ci_rust_norm "${blob}" drop)" || nrc=$?
-            else
-                norm="$(_ci_norm_content "${g}" "${blob}")" || nrc=$?
-            fi
-            case "${nrc}" in
-                0)
-                    norm="$(_ci_sha256_hex <<< "${norm}")" || return 2
-                    printf '%s\t%s\n' "${path}" "${norm}"
-                    continue
-                    ;;
-                1) ;;
-                *) return 2 ;;
-            esac
-        fi
-        printf '%s\t%s\n' "${path}" "${oid}"
+        _ci_content_id_row "${line}" "${ref}" "${mode}" || return 2
     done <<< "${listing}"
+}
+
+# What: path TAB normalized id of one listing row.
+# Why: one normalizer for plain paths and Rust libraries.
+# From: Issue #1683 | PR #1858
+_ci_content_id_row() {
+    local line="$1" ref="$2" mode="$3" path oid blob norm g nrc=0
+    path="${line%%$'\t'*}"
+    oid="${line#*$'\t'}"
+    if g="$(_ci_norm_grammar "${path}")"; then
+        blob="$(_ci_identity_git "${path}" "${ref}" cat-file blob "${oid}")" || return 2
+        # What: a build id drops Rust cfg(test) items.
+        # Why: 11.4: a test change builds no container.
+        # From: Issue #1683 | PR #1912
+        if [ "${g}" = rust ] && [ "${mode}" = build ]; then
+            norm="$(_ci_rust_norm "${blob}" drop)" || nrc=$?
+        else
+            norm="$(_ci_norm_content "${g}" "${blob}")" || nrc=$?
+        fi
+        case "${nrc}" in
+            0)
+                norm="$(_ci_sha256_hex <<< "${norm}")" || return 2
+                printf '%s\t%s\n' "${path}" "${norm}"
+                return 0
+                ;;
+            1) ;;
+            *) return 2 ;;
+        esac
+    fi
+    printf '%s\t%s\n' "${path}" "${oid}"
 }
 
 # What: one blob of a listing row at a ref.
@@ -2069,7 +2076,10 @@ _ci_rust_content() {
         while IFS= read -r line; do
             [ -n "${line}" ] || continue
             if [[ "${line%%$'\t'*}" != *.rs ]]; then
-                [ "${mode}" = text ] || printf '%s\n' "${line}"
+                # What: library manifests read normalized.
+                # Why: a comment line builds no container.
+                # From: Issue #1683 | PR #1858
+                [ "${mode}" = text ] || _ci_content_id_row "${line}" "${ref}" "" || return 2
                 continue
             fi
             blob="$(_ci_listing_blob "${line}" "${ref}")" || return 2
