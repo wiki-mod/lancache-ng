@@ -5835,14 +5835,15 @@ _ci_trivy_db_record() {
 # Why: one owner; a test runs it through the real trivy
 # From: Issue #1683 | PR #1858
 _ci_trivy_args() {
-    local cache_dir="$1" scanners ignore bin
+    local cache_dir="$1" scanners severity scan_timeout ignore bin
     bin="$(_ci_trivy_bin)" || return 2
     scanners="$(_ci_variable CI_TRIVY_SCANNERS)" || return 2
+    severity="$(_ci_variable CI_TRIVY_SEVERITY)" || return 2
+    scan_timeout="$(_ci_variable CI_TRIVY_TIMEOUT)" || return 2
     ignore="$(_ci_repo_path CI_TRIVY_IGNORE)" || return 2
-    printf '%s\n' "${bin}" image --severity HIGH,CRITICAL --exit-code "${_CI_TRIVY_FINDING_RC}" \
-        --scanners "${scanners}" --cache-dir "${cache_dir}" --skip-db-update
+    printf '%s\n' "${bin}" image --severity "${severity}" --exit-code "${_CI_TRIVY_FINDING_RC}" \
+        --scanners "${scanners}" --timeout "${scan_timeout}" --cache-dir "${cache_dir}" --skip-db-update
     [ ! -f "${ignore}" ] || printf '%s\n' --ignorefile "${ignore}"
-    [ -z "${CI_TRIVY_TIMEOUT:-}" ] || printf '%s\n' --timeout "${CI_TRIVY_TIMEOUT}"
 }
 
 # What: file name of the ignore ids a full run matched
