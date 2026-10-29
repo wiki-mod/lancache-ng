@@ -12125,6 +12125,24 @@ _ci_rh_root() {
     fi
 }
 
+# What: root shell text of the apt history search.
+# Why: $1 the ERE, $2 the log globs; values stay arguments.
+# From: Issue #1683 | PR #1858
+_CI_RH_ZGREP_PROG="$(cat <<'PROG'
+zgrep -hEo "$1" $2
+PROG
+)"
+readonly _CI_RH_ZGREP_PROG
+
+# What: root shell text of the host key removal.
+# Why: $1 the glob; the root shell expands it, not ci.sh.
+# From: Issue #1683 | PR #1858
+_CI_RH_RM_PROG="$(cat <<'PROG'
+rm -f $1
+PROG
+)"
+readonly _CI_RH_RM_PROG
+
 # What: test(1) as root: 0 yes, 1 no, 2 sudo/test failed.
 # Why: sudo -n also ends with 1; stderr tells it from "no".
 # From: Issue #1683 | PR #1858
@@ -12927,7 +12945,7 @@ _ci_rh_full_reset_check() {
     printf '\n--- apt/dpkg history naming other fleet hosts (report only) ---\n'
     fleet_ere="$(_ci_rh_ere fleet_name_patterns)" || return 2
     logs="$(_ci_block_entry_list runner_host "" apt_log_globs | tr '\n' ' ')" || return 2
-    out="$(_ci_run -m 1 "[CI-ERROR-RUNNER-0036]" "reason=\"apt history search failed\"" _ci_rh_root bash -c "zgrep -hEo '${fleet_ere}' ${logs}")" || return 2
+    out="$(_ci_run -m 1 "[CI-ERROR-RUNNER-0036]" "reason=\"apt history search failed\"" _ci_rh_root bash -c "${_CI_RH_ZGREP_PROG}" _ "${fleet_ere}" "${logs}")" || return 2
     found=0
     while IFS= read -r line; do
         [ -n "${line}" ] || continue
@@ -12971,7 +12989,7 @@ _ci_rh_ssh_host_keys() {
     local pub glob units u fp ok=0
     glob="$(_ci_rh_val ssh_host_key_glob)" || return 2
     units="$(_ci_block_entry_list runner_host "" ssh_units)" || return 2
-    _ci_run "[CI-ERROR-RUNNER-0043]" "glob=\"${glob}\" reason=\"old host keys not removed\"" _ci_rh_root bash -c "rm -f ${glob}" || return 2
+    _ci_run "[CI-ERROR-RUNNER-0043]" "glob=\"${glob}\" reason=\"old host keys not removed\"" _ci_rh_root bash -c "${_CI_RH_RM_PROG}" _ "${glob}" || return 2
     _ci_run "[CI-ERROR-RUNNER-0044]" "reason=\"ssh-keygen -A failed; sshd may refuse to start\"" _ci_rh_root ssh-keygen -A || return 2
     while IFS= read -r u; do
         [ -z "${u}" ] || [ "${ok}" -eq 1 ] || ! _ci_rh_root systemctl restart "${u}" || ok=1
