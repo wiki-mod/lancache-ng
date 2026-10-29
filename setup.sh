@@ -2886,6 +2886,25 @@ adopt_moved_config_prod_keys() {
         [[ "$raw" == "$current" ]] \
             || die "$key=$raw in $local_env differs from $target=$current in $env_file; both must be the same address. Set $target, remove $key from $local_env, then rerun setup.sh update."
     done <<< "$rows"
+    [[ "$step" = drop ]] || return 0
+    # What: an emptied legacy <svc>.local.env is deleted
+    # Why: AG-SETUP-001: config/prod files must be deleted
+    # From: Issue #1683 | PR #1858
+    local dir="$repo_root/config/prod" file left rest
+    [[ -d "$dir" ]] || return 0
+    for file in "$dir"/*.local.env; do
+        [[ -f "$file" ]] || continue
+        left=$(awk -F= '/^[A-Za-z_][A-Za-z0-9_]*=/ { print $1 }' "$file") \
+            || die "Failed to list the keys of $file (exit $?)."
+        if [[ -n "$left" ]]; then
+            print_warn "Kept ${file##*/}: it still sets ${left//$'\n'/, }, which no container reads. Move them into ${env_file##*/} or delete the file."
+            continue
+        fi
+        rm -f -- "$file" || die "Failed to delete $file (exit $?)."
+        print_ok "Deleted the emptied legacy file ${file##*/}"
+    done
+    rest=$(find "$dir" -mindepth 1 -print -quit) || die "Failed to list $dir (exit $?)."
+    [[ -n "$rest" ]] || rmdir -- "$dir" || die "Failed to delete the empty $dir (exit $?)."
 }
 
 # What: template edits move into <x>.local.env, newest wins
@@ -7439,6 +7458,12 @@ cmd_secondary() {
     # Why: a fetch failure must not follow a registration
     # From: Issue #1683 | PR #1858
     secondary_compose=$(lancache_repo_file_text deploy/secondary/docker-compose.yml) || exit $?
+    # What: the CDN list of the same ref as the compose
+    # Why: the secondary dns mounts it; missing = broken
+    # From: Issue #1683 | PR #1858
+    local cdn_file cdn_domains
+    cdn_file=$(prod_env_default SETUP_CDN_DOMAINS_REPO_FILE) || exit $?
+    cdn_domains=$(lancache_repo_file_text "$cdn_file") || exit $?
 
     secondary_dir="${name}"
     if [[ "$rotate" -eq 1 ]]; then
@@ -7667,6 +7692,8 @@ cmd_secondary() {
 
     write_file_atomically "${secondary_dir}/docker-compose.yml" <<< "$secondary_compose" \
         || die "Failed to write ${secondary_dir}/docker-compose.yml (exit $?)."
+    write_file_atomically "${secondary_dir}/${cdn_file##*/}" <<< "$cdn_domains" \
+        || die "Failed to write ${secondary_dir}/${cdn_file##*/} (exit $?)."
 
     secondary_env_file="$(realpath -m "${secondary_dir}/.env")"
 
