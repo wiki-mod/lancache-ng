@@ -1853,6 +1853,34 @@ _ci_norm_grammar() {
     esac
 }
 
+# What: awk hd_word/hd_scan: the word a << opens.
+# Why: one delimiter rule for the three heredoc readers.
+# From: Issue #1683 | PR #1858
+_CI_AWK_HEREDOC_WORD="$(cat <<'PROG'
+    # What: chars of a <<word at s (0: none); sets hdw, hdt.
+    # Why: <<< and a word that is no name open no heredoc.
+    # From: Issue #1683 | PR #1858
+    function hd_word(s,  w) {
+        if (substr(s, 1, 3) == "<<<" || substr(s, 1, 2) != "<<") return 0
+        if (!match(substr(s, 3), /^-?[[:space:]]*[\\\047"]?[A-Za-z_][A-Za-z0-9_]*[\047"]?/)) return 0
+        w = substr(s, 3, RLENGTH); hdt = (w ~ /^-/)
+        sub(/^-?[[:space:]]*/, "", w); gsub(/[\\\047"]/, "", w); hdw = w
+        return 2 + RLENGTH
+    }
+    # What: 1 if line l opens a heredoc; first word in hdw.
+    # Why: Dockerfile lines are read without quote state.
+    # From: Issue #1683 | PR #1858
+    function hd_scan(l,  i, n) {
+        n = length(l)
+        for (i = 1; i <= n; i++) {
+            if (substr(l, i, 3) == "<<<") { i += 2; continue }
+            if (hd_word(substr(l, i))) return 1
+        }
+        return 0
+    }
+PROG
+)"
+
 # What: v1 form of $2 in grammar $1; rc 1 = unsafe, use raw.
 # Why: string and heredoc lines stay; any doubt keeps raw.
 # From: Issue #1683 | PR #1858
@@ -1862,20 +1890,8 @@ _ci_norm_content() {
         _ci_rust_norm "$2" keep
         return "$?"
     fi
-    out="$(awk -v g="$1" '
-        function heredoc(l,   w, pre) {
-            while (match(l, /<<-?[[:space:]]*[\047"]?[A-Za-z_][A-Za-z0-9_]*[\047"]?/)) {
-                pre = (RSTART > 1) ? substr(l, RSTART - 1, 1) : ""
-                w = substr(l, RSTART, RLENGTH)
-                l = substr(l, RSTART + RLENGTH)
-                if (pre == "<") continue
-                tab = (w ~ /^<<-/)
-                sub(/^<<-?[[:space:]]*/, "", w)
-                gsub(/[\047"]/, "", w)
-                hd = w
-            }
-        }
-        function lex(l,   i, n, c) {
+    out="$(awk -v g="$1" "${_CI_AWK_HEREDOC_WORD}"'
+        function lex(l,   i, n, c, k) {
             n = length(l)
             for (i = 1; i <= n; i++) {
                 c = substr(l, i, 1)
@@ -1890,7 +1906,8 @@ _ci_norm_content() {
                 if (c == "\047") { q = (i > 1 && substr(l, i - 1, 1) == "$") ? "a" : "s"; continue }
                 if (c == "\"") { q = "d"; continue }
                 if (c == "#" && (i == 1 || substr(l, i - 1, 1) ~ /[[:space:];|&()]/)) return
-                if (substr(l, i, 2) == "<<") { heredoc(substr(l, i)); i++ }
+                if (substr(l, i, 3) == "<<<") { i += 2; continue }
+                if ((k = hd_word(substr(l, i)))) { hd = hdw; tab = hdt; i += k - 1 }
             }
         }
         { sub(/\r$/, "") }
@@ -1907,7 +1924,7 @@ _ci_norm_content() {
                 && tolower(k) ~ /^(syntax|escape|check)$/) { print; next }
             past = 1
             if ($0 ~ /^[[:space:]]*(#|$)/) next
-            heredoc($0)
+            if (hd_scan($0)) { hd = hdw; tab = hdt }
             print
             next
         }
@@ -14152,7 +14169,7 @@ _ci_check_comments() {
     # Why: AG-CODE-012 sets a character limit
     # From: Issue #1683 | PR #1858
     if [ "${#todo[@]}" -gt 0 ]; then
-        out="$(LC_ALL=C.UTF-8 awk -v hp="${project}" -v hs="${spdx}" "${_CI_AWK_COMMENTS}${_CI_AWK_COMMENT_LEX}" "${todo[@]}" 2>&1)" || arc=$?
+        out="$(LC_ALL=C.UTF-8 awk -v hp="${project}" -v hs="${spdx}" "${_CI_AWK_COMMENTS}${_CI_AWK_HEREDOC_WORD}${_CI_AWK_COMMENT_LEX}" "${todo[@]}" 2>&1)" || arc=$?
     fi
     while IFS= read -r line; do
         case "${line%%$'\t'*}" in
@@ -14210,7 +14227,7 @@ _CI_AWK_COMMENT_LEX="$(cat <<'PROG'
     # What: queue heredoc delimiters; quotes span lines.
     # Why: <<< , quoted or (( )) << open no here-document.
     # From: Issue #1683 | PR #1858
-    function cl_heredocs(s,  i, n, c, rest, w) {
+    function cl_heredocs(s,  i, n, c, k) {
         n = length(s)
         for (i = 1; i <= n; i++) {
             c = substr(s, i, 1)
@@ -14222,11 +14239,8 @@ _CI_AWK_COMMENT_LEX="$(cat <<'PROG'
             if (substr(s, i, 2) == "((") { hdd++; i++; continue }
             if (substr(s, i, 2) == "))" && hdd > 0) { hdd--; i++; continue }
             if (substr(s, i, 3) == "<<<") { i += 2; continue }
-            if (substr(s, i, 2) != "<<" || hdd > 0) continue
-            rest = substr(s, i + 2)
-            if (!match(rest, /^-?[[:space:]]*[^[:space:];|&<>()]+/)) continue
-            w = substr(rest, 1, RLENGTH); i += 1 + RLENGTH
-            hd[++ht] = (w ~ /^-/); sub(/^-?[[:space:]]*/, "", w); gsub(/["\047\\]/, "", w); hq[ht] = w
+            if (hdd > 0 || !(k = hd_word(substr(s, i)))) continue
+            i += k - 1; hd[++ht] = hdt; hq[ht] = hdw
         }
     }
     # What: hash/yaml lines; heredoc=0 tracks YAML blocks.
@@ -16308,20 +16322,14 @@ _ci_check_proxy_cache_env_doc_drift() {
 # Why: AG-VAL-036: heredoc/escape= change what a line is.
 # From: Issue #1683 | PR #1858
 _ci_dockerfile_logical_lines() {
-    awk '
-        function emit_logical(    candidate, owner, marker) {
+    awk "${_CI_AWK_HEREDOC_WORD}"'
+        function emit_logical(    candidate, owner) {
             print logical
             candidate = logical
             sub(/^[[:space:]]*/, "", candidate)
             owner = candidate
             sub(/[[:space:]].*$/, "", owner)
-            if ((tolower(owner) == "run" || tolower(owner) == "copy") &&
-                match(candidate, /<<-?[[:space:]]*["'"'"']?[A-Za-z_][A-Za-z0-9_]*["'"'"']?/)) {
-                marker = substr(candidate, RSTART, RLENGTH)
-                sub(/^<<-?[[:space:]]*/, "", marker)
-                gsub(/["'"'"']/, "", marker)
-                heredoc = marker
-            }
+            if ((tolower(owner) == "run" || tolower(owner) == "copy") && hd_scan(candidate)) heredoc = hdw
             logical = ""
         }
         heredoc != "" {
