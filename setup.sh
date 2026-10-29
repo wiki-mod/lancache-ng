@@ -147,8 +147,15 @@ ask() {
         wizard_introspect_record_prompt "$prompt" "$default"
         return
     fi
+    local tty_fd
+    # What: no terminal stops setup.sh with a clear error
+    # Why: a failed tty read took the default silently
+    # From: Issue #1683 | PR #1858
+    { exec {tty_fd}< /dev/tty; } 2>&- \
+        || die "setup.sh needs a terminal to ask '$prompt'; run it in an interactive shell (for SSH: ssh -t)."
     printf '  %s%s%s [%s]: ' "${BOLD}" "$prompt" "${RESET}" "$default"
-    read -r REPLY < /dev/tty
+    read -r REPLY <&"$tty_fd"
+    exec {tty_fd}<&-
     REPLY="${REPLY:-$default}"
 }
 
