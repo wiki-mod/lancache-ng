@@ -198,6 +198,10 @@ struct Config {
     // Why: a wide chart range must not exhaust memory.
     // From: Issue #1683 | PR #1858
     netdata_body_max: usize,
+    // What: ui wait limit for one DHCP probe answer.
+    // Why: the probe takes DHCP_PROBE_WINDOW plus the request wait.
+    // From: Issue #1683 | PR #1912
+    dhcp_probe_wait: Duration,
     // What: wait for one secondary SOA answer.
     // Why: a silent host is a status, not a hang.
     // From: Issue #1683 | PR #1912
@@ -484,6 +488,7 @@ impl Config {
             nats_kick_step: need_secs(env, "NATS_KICK_STEP_TIMEOUT")?,
             netdata_body_max: knob("UI_NETDATA_BODY_MAX", u32::MAX.into(), OutOfRange::Reject)?
                 as usize,
+            dhcp_probe_wait: need_secs(env, "DHCP_PROBE_WAIT_TIMEOUT")?,
             // What: missed watchdog cycles before stale.
             // Why: one owner with the restart rule.
             // From: Issue #1683 | PR #1912
@@ -5002,11 +5007,6 @@ async fn update_dhcp_relay(
     Ok(Redirect::to(PAGE_DHCP))
 }
 
-// What: ui wait limit for one probe answer.
-// Why: worst case is 8 s of probing; 30 s covers a tick.
-// From: Issue #1683 | PR #1912
-const PROBE_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
-
 // What: ask the dhcp supervisor for one probe run.
 // Why: the ui has no Docker; a request file starts it.
 // From: Issue #947 | PR #1912
@@ -5021,7 +5021,7 @@ async fn check_dhcp_conflict(State(state): Shared) -> Json<Value> {
     if let Err(e) = write_file(request, id.as_bytes(), 0o644, Place::Replace) {
         return unavailable(format!("cannot write {}: {e}", request.display()));
     }
-    let deadline = Instant::now() + PROBE_WAIT_TIMEOUT;
+    let deadline = Instant::now() + state.config.dhcp_probe_wait;
     // What: the last read or parse fault of the answer.
     // Why: the timeout message must name what went wrong.
     // From: Issue #1683 | PR #1912
@@ -5046,7 +5046,7 @@ async fn check_dhcp_conflict(State(state): Shared) -> Json<Value> {
     tracing::warn!("no DHCP probe answer{fault}");
     unavailable(format!(
         "no DHCP probe answer within {}s; is the dhcp container running?{fault}",
-        PROBE_WAIT_TIMEOUT.as_secs()
+        state.config.dhcp_probe_wait.as_secs()
     ))
 }
 // What: TTL limits for operator records, in seconds.

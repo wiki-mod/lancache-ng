@@ -434,6 +434,10 @@ runtime:
     - DHCP_PROBE_WINDOW=5
     - DHCP_PROBE_REQUEST_TIMEOUT=3
     - DHCP_PROBE_RETRANSMITS=3
+    # What: ui wait limit for one DHCP probe answer, seconds.
+    # Why: probe takes DHCP_PROBE_WINDOW plus the request wait.
+    # From: Issue #1683 | PR #1912
+    - DHCP_PROBE_WAIT_TIMEOUT=30
     - PDNS_SOA_COLD_RETRY=5
     - NATS_RECONNECT_DELAY=3
     - NATS_NAK_DELAY_MS=100
