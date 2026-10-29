@@ -4064,7 +4064,7 @@ migrate_env_for_update() (
             || die "Cannot pin the images of ${lancache_image_tag} for ${env_file}; it stays unchanged (exit $?)."
     fi
     # What: a restore skips the registry platform check
-    # Why: pins were checked once; rollback needs no registry
+    # Why: pins were checked once; a rollback needs no GHCR
     # From: Issue #1683 | PR #1858
     if [[ "$preserve_image_tag" != "1" ]]; then
         assert_resolved_image_tag_platform_supported \
@@ -5001,7 +5001,7 @@ cmd_restore() (
     # From: Issue #1683 | PR #1858
     if ! (
         # What: each step's failure ends the subshell
-        # Why: inside "if !" errexit is off; a failure went on
+        # Why: no errexit inside "if !"; failures went on
         # From: Issue #1683 | PR #1858
         migrate_env_for_update "$install_dir" 1 || exit $?
         if compose_stack_available "$install_dir"; then
