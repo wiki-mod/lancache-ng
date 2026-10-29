@@ -1091,7 +1091,17 @@ ci_cmd_codeql_config() {
 # Why: one curl call that _ci_retry can classify.
 # From: Issue #1683 | PR #1858
 _ci_http_download() {
-    curl -fsSL -o "$2" "$1"
+    _ci_download_curl -fsSL -o "$2" "$1"
+}
+
+# What: curl with the SOT connect and stall bounds.
+# Why: a stalled server ends the try, not the job.
+# From: Issue #1683 | PR #1858
+_ci_download_curl() {
+    local conn stall
+    conn="$(_ci_variable CI_DOWNLOAD_CONNECT_TIMEOUT)" || return 2
+    stall="$(_ci_variable CI_DOWNLOAD_STALL_SECONDS)" || return 2
+    curl --connect-timeout "${conn}" --speed-limit 1 --speed-time "${stall}" "$@"
 }
 
 # What: Download a URL and verify it against a sha256.
@@ -1129,7 +1139,7 @@ _ci_fetch_drop() {
 # Why: an org IP allow list refuses the job token (403).
 # From: Issue #1683 | PR #1858
 _ci_github_get() {
-    curl --fail-with-body -sSL -H 'Accept: application/vnd.github+json' "$1"
+    _ci_download_curl --fail-with-body -sSL -H 'Accept: application/vnd.github+json' "$1"
 }
 
 # What: print memo $1 of this job; 1 when there is none.
