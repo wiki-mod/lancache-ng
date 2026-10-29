@@ -3459,7 +3459,7 @@ ci_cmd_aggregate_stack() {
 # Why: SCAN before ACCEPT; thin YAML, iteration in ci.sh.
 # From: Issue #1683
 ci_cmd_scan_stack() {
-    local matrix="${CI_BUILD_MATRIX:-}" svc plat digest pairs rc=0 crc drc failed="" unbuilt="" passed='[]'
+    local matrix="${CI_BUILD_MATRIX:-}" svc plat digest pairs rc=0 crc drc vrc failed="" unbuilt="" passed='[]'
     [ -n "${matrix}" ] || { ci_log "[CI-ERROR-SCAN-0016]" "reason=\"CI_BUILD_MATRIX required\""; return 2; }
     pairs="$(_ci_matrix_pairs "${matrix}")" || return 2
     _ci_require_ghcr_auth || return "$?"
@@ -4692,7 +4692,7 @@ _ci_docker_build() {
     # What: SOT-owned named build contexts (name=path).
     # Why: Dockerfile COPY --from derives it; SOT owns list.
     # From: Issue #1683
-    local produced produced_rc=0
+    produced_rc=0
     produced="$(_ci_block_entry_list services "${service}" external_contexts)" || produced_rc=$?
     _ci_producer_ok "${produced_rc}" 0 || return 2
     while IFS= read -r a; do
@@ -14994,7 +14994,7 @@ _ci_md_strip_comments() {
 # Why: CONTRIBUTING.md requires all headings completed.
 # From: Issue #1683
 _ci_check_pr_template() {
-    local body="${PR_BODY:-}" ex=0 checkbox
+    local body="${PR_BODY:-}" ex=0 checkbox sec
     _ci_pr_check_exempt || ex=$?
     [ "${ex}" -ne 2 ] || return 2
     if [ "${ex}" -eq 0 ]; then
@@ -15018,7 +15018,7 @@ _ci_check_pr_template() {
         return 2
     fi
     local -a missing=()
-    local sec content stripped trimmed count
+    local content stripped trimmed count
     for sec in "${sections[@]}"; do
         content="$(_ci_pr_section "${body}" "${sec}")" || return 2
         count="${content%%$'\n'*}"
