@@ -73,7 +73,7 @@ declare -A CI_DISPATCH=(
     [assemble-stack]=ci_cmd_assemble_stack [test-stack]=ci_cmd_test_stack [nightly-report]=ci_cmd_nightly_report
     [validate]=ci_cmd_validate [result-gate]=ci_cmd_result_gate [promote]=ci_cmd_promote [promote-ref]=ci_cmd_promote_ref [channel-checkout]=ci_cmd_channel_checkout [channel-matrix]=ci_cmd_channel_matrix [channel-check]=ci_cmd_channel_check [channel-report]=ci_cmd_channel_report [release-validation]=_ci_release_validation_valid [release-ref]=_ci_release_ref
     [release-publish]=ci_cmd_release_publish [release-images]=ci_cmd_release_images [release-sbom-stack]=ci_cmd_release_sbom_stack [release-vex]=ci_cmd_release_vex [cut-release-tag]=ci_cmd_cut_release_tag [release-notes]=ci_cmd_release_notes [release-changelog]=ci_cmd_release_changelog [release-variable]=ci_cmd_release_variable
-    [gc]=ci_cmd_gc [gc-green-refs]=ci_cmd_gc_green_refs [check]=ci_cmd_check [close-linked-issues]=ci_cmd_close_linked_issues [pr-labels]=ci_cmd_pr_labels [board-add]=ci_cmd_board_add
+    [gc]=ci_cmd_gc [gc-refs]=ci_cmd_gc_refs [check]=ci_cmd_check [close-linked-issues]=ci_cmd_close_linked_issues [pr-labels]=ci_cmd_pr_labels [board-add]=ci_cmd_board_add
     [welcome]=ci_cmd_welcome [version]=ci_cmd_version [docker-daemon-config]=ci_cmd_docker_daemon_config [runner-host]=ci_cmd_runner_host
     [have-command]=ci_cmd_have_command [pr-green-mark]=ci_cmd_pr_green_mark
 )
@@ -2868,12 +2868,17 @@ _ci_bot_commit() {
 # Why: a lock frees when its holder ends; no age guess.
 # From: Issue #1683 | PR #1912
 _ci_lock_holder_ended() {
-    local note="$1" run attempt out
+    local note="$1" run attempt out rc=0
     [[ "${note}" =~ run=([0-9]+)\ attempt=([0-9]+) ]] || return 2
     run="${BASH_REMATCH[1]}"; attempt="${BASH_REMATCH[2]}"
     [ -n "${GITHUB_REPOSITORY:-}" ] || return 2
     out="$(_ci_retry github-read gh api --jq '"\(.status) \(.run_attempt)"' \
-        "repos/${GITHUB_REPOSITORY}/actions/runs/${run}")" || return 2
+        "repos/${GITHUB_REPOSITORY}/actions/runs/${run}")" || rc=$?
+    # What: a deleted run (HTTP 404) has ended.
+    # Why: a run that no longer exists holds nothing.
+    # From: Issue #1683 | PR #1858
+    [ "${rc}" -ne 1 ] || return 0
+    [ "${rc}" -eq 0 ] || return 2
     [[ "${out}" =~ ^([a-z_]+)\ ([0-9]+)$ ]] || return 2
     [ "${BASH_REMATCH[1]}" = completed ] && return 0
     [ "${BASH_REMATCH[2]}" -gt "${attempt}" ] && return 0
@@ -8912,16 +8917,36 @@ _ci_gc_run() {
     return 0
 }
 
-# What: delete green run refs of closed PRs; dry-run lists.
-# Why: one green ref per PR; nothing else deletes it.
+# What: delete ref $2 at $3 on $1; it must be gone after.
+# Why: AG-WF-031: check, never assume; one GC deleter.
 # From: Issue #1683 | PR #1858
-ci_cmd_gc_green_refs() {
-    local mode="dry-run" arg remote prefix repo refs sha ref n state out rc keep=0 del=0 deleted=0
+_ci_gc_ref_reap() {
+    local remote="$1" ref="$2" sha="$3" out rc=0
+    if ! _ci_ref_delete "${remote}" "${ref}" "${sha}"; then
+        ci_log "[CI-ERROR-GC-0039]" "ref=\"${ref}\" reason=\"ref delete failed (raw above)\""
+        return 2
+    fi
+    out="$(_ci_cas_ref_sha "${remote}" "${ref}")" || rc=$?
+    case "${rc}" in
+        1) return 0 ;;
+        0)
+            ci_log "[CI-ERROR-GC-0040]" "ref=\"${ref}\" sha=\"${out}\" reason=\"ref still present after the delete\""
+            return 2
+            ;;
+        *) return 2 ;;
+    esac
+}
+
+# What: delete green refs of closed PRs, ended locks.
+# Why: nothing else deletes them; dry-run only lists.
+# From: Issue #1683 | PR #1858
+ci_cmd_gc_refs() {
+    local mode="dry-run" arg remote prefix repo refs sha ref n state holder rc keep=0 del=0 deleted=0
     for arg in "$@"; do
         case "${arg}" in
             --apply) mode="apply" ;;
             *)
-                ci_log "[CI-ERROR-GC-0036]" "arg=\"${arg}\" reason=\"unknown gc-green-refs argument\""
+                ci_log "[CI-ERROR-GC-0036]" "arg=\"${arg}\" reason=\"unknown gc-refs argument\""
                 return 2
                 ;;
         esac
@@ -8944,28 +8969,14 @@ ci_cmd_gc_green_refs() {
         case "${state}" in
             open)
                 keep=$((keep + 1))
-                printf 'gc-green-refs ref=%s pr=%s state=open action=KEEP\n' "${ref}" "${n}"
+                printf 'gc-refs ref=%s pr=%s state=open action=KEEP\n' "${ref}" "${n}"
                 ;;
             closed)
                 del=$((del + 1))
-                printf 'gc-green-refs ref=%s pr=%s state=closed action=DELETE mode=%s\n' "${ref}" "${n}" "${mode}"
+                printf 'gc-refs ref=%s pr=%s state=closed action=DELETE mode=%s\n' "${ref}" "${n}" "${mode}"
                 [ "${mode}" = apply ] || continue
-                if ! _ci_ref_delete "${remote}" "${ref}" "${sha}"; then
-                    ci_log "[CI-ERROR-GC-0039]" "ref=\"${ref}\" reason=\"ref delete failed (raw above)\""
-                    return 2
-                fi
-                # What: deleted = absent on read back.
-                # Why: AG-WF-031: check, never assume.
-                # From: Issue #1683 | PR #1858
-                rc=0; out="$(_ci_cas_ref_sha "${remote}" "${ref}")" || rc=$?
-                case "${rc}" in
-                    1) deleted=$((deleted + 1)) ;;
-                    0)
-                        ci_log "[CI-ERROR-GC-0040]" "ref=\"${ref}\" sha=\"${out}\" reason=\"ref still present after the delete\""
-                        return 2
-                        ;;
-                    *) return 2 ;;
-                esac
+                _ci_gc_ref_reap "${remote}" "${ref}" "${sha}" || return 2
+                deleted=$((deleted + 1))
                 ;;
             *)
                 ci_log "[CI-ERROR-GC-0041]" "ref=\"${ref}\" pr=${n} state=\"${state}\" reason=\"unknown PR state; neither kept nor deleted\""
@@ -8973,7 +8984,36 @@ ci_cmd_gc_green_refs() {
                 ;;
         esac
     done <<< "${refs}"
-    printf 'gc-green-refs result=classified keep=%s delete=%s deleted=%s mode=%s\n' "${keep}" "${del}" "${deleted}" "${mode}"
+    # What: build and promote locks whose holder run ended.
+    # Why: a lost runner never frees its own lock.
+    # From: Issue #1683 | PR #1858
+    for prefix in "$(_ci_variable CI_BUILD_LOCK_REF)" "$(_ci_required_field release promote_lock_ref block)"; do
+        [ -n "${prefix}" ] || return 2
+        refs="$(_ci_capture 0 git ls-remote --refs "${remote}" "${prefix}/*")" || return 2
+        while IFS=$'\t' read -r sha ref; do
+            [ -n "${ref}" ] || continue
+            holder="$(_ci_ref_subject "${remote}" "${ref}" 1)" || return 2
+            rc=0; _ci_lock_holder_ended "${holder}" || rc=$?
+            case "${rc}" in
+                0)
+                    del=$((del + 1))
+                    printf 'gc-refs ref=%s holder="%s" state=ended action=DELETE mode=%s\n' "${ref}" "${holder}" "${mode}"
+                    [ "${mode}" = apply ] || continue
+                    _ci_gc_ref_reap "${remote}" "${ref}" "${sha}" || return 2
+                    deleted=$((deleted + 1))
+                    ;;
+                1)
+                    keep=$((keep + 1))
+                    printf 'gc-refs ref=%s holder="%s" state=running action=KEEP\n' "${ref}" "${holder}"
+                    ;;
+                *)
+                    ci_log "[CI-ERROR-GC-0044]" "ref=\"${ref}\" holder=\"${holder}\" reason=\"holder run state unknown; neither kept nor deleted\""
+                    return 2
+                    ;;
+            esac
+        done <<< "${refs}"
+    done
+    printf 'gc-refs result=classified keep=%s delete=%s deleted=%s mode=%s\n' "${keep}" "${del}" "${deleted}" "${mode}"
 }
 
 # =========================================================
