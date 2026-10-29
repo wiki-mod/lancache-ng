@@ -2251,15 +2251,26 @@ _ci_context_build_rows() {
 # Why: the identity and the Dockerfile check share it.
 # From: Issue #1683 | PR #1858
 _ci_dockerfile_copy_sources() {
+    local lines
+    # What: logical lines come from the one line reader.
+    # Why: escape=, joins and heredoc rules live there.
+    # From: Issue #1683 | PR #1858
+    lines="$(_ci_capture 0 _ci_dockerfile_logical_lines - <<< "$1")" || return 2
     _ci_capture 0 awk "$(cat <<'PROG'
-        /\\$/ { buf = buf substr($0, 1, length($0) - 1) " "; next }
-        { line = buf $0; buf = "" }
-        toupper(line) !~ /^[[:space:]]*COPY[[:space:]]/ || line ~ /--from=/ { next }
-        { k = 0; nw = split(line, w, /[[:space:]]+/)
-          for (i = 2; i <= nw; i++) if (w[i] != "" && w[i] !~ /^--/) a[++k] = w[i]
+        toupper($0) !~ /^[[:space:]]*COPY[[:space:]]/ || $0 ~ /--from=/ { next }
+        { rest = $0; sub(/^[[:space:]]*[^[:space:]]+[[:space:]]+/, "", rest)
+          while (rest ~ /^--[^[:space:]]*[[:space:]]+/) sub(/^--[^[:space:]]*[[:space:]]+/, "", rest)
+          k = 0
+          if (rest ~ /^\[/) {
+              sub(/^\[[[:space:]]*"/, "", rest); sub(/"[[:space:]]*\][[:space:]]*$/, "", rest)
+              k = split(rest, a, /"[[:space:]]*,[[:space:]]*"/)
+          } else {
+              nw = split(rest, w, /[[:space:]]+/)
+              for (i = 1; i <= nw; i++) if (w[i] != "" && w[i] !~ /^<</) a[++k] = w[i]
+          }
           for (i = 1; i < k; i++) print a[i] }
 PROG
-        )" <<< "$1"
+        )" <<< "${lines}"
 }
 
 # What: context paths the Rust reader owns, space-framed.
