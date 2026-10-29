@@ -35,11 +35,11 @@ function maintenance()
     -- What: logs and resets the count when it is non-zero
     -- Why: one bounded line per interval, not per query
     if suppressed_count > 0 then
-        -- What: logs count at loglevels.Warning
-        -- Why: shown from RECURSOR_LOGLEVEL 4 (warning) up
+        -- What: logs count at loglevels.Error (syslog 3)
+        -- Why: shown at the default RECURSOR_LOGLEVEL 3
         pdnslog(
             "[lancache-dns][filter-aaaa] suppressed " .. suppressed_count .. " AAAA response(s) since last report",
-            pdns.loglevels.Warning
+            pdns.loglevels.Error
         )
         suppressed_count = 0
     end
