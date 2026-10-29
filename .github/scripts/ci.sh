@@ -4073,11 +4073,18 @@ _ci_sccache_start() {
     SCCACHE_LOG=sccache=debug SCCACHE_ERROR_LOG="${log}" sccache --start-server 2>&1
 }
 
+# What: the chain without its first level, redis first.
+# Why: one owner of the level-drop step (AG-CODE-011).
+# From: Issue #1683 | PR #1858
+_ci_sccache_chain_next() {
+    case "$1" in redis,*) printf '%s' "${1#redis,}" ;; *) printf '' ;; esac
+}
+
 # What: sccache as rustc wrapper on the policy chain.
 # Why: AG-CI-009 levels; required fails closed (AG-CI-011).
 # From: Issue #1683 | PR #1912
 _ci_sccache_env() {
-    local service="$1" wrapper="${2:-sccache}" url="${SCCACHE_REDIS_URL:-}" sf policy mode chain prefix
+    local service="$1" wrapper="${2:-sccache}" url="${SCCACHE_REDIS_URL:-}" sf policy mode chain prefix next
     prefix="$(_ci_variable CI_CACHE_PREFIX)" || return 2
     prefix="${prefix}-${service}"
     # What: the runner policy file if mounted, else compute.
@@ -4092,6 +4099,21 @@ _ci_sccache_env() {
     export SCCACHE_REDIS_KEY_PREFIX="${prefix}"
     sf="$(_ci_secret_file sccache_redis_url)"
     if [ -s "${sf}" ]; then url="$(<"${sf}")"; fi
+    # What: a redis level needs a redis url; required fails.
+    # Why: policy sets redis only with a url; AG-INT-002.
+    # From: Issue #1683 | PR #1858
+    if [[ ",${chain}," == *,redis,* ]] && [ -z "${url}" ]; then
+        if [ "${mode}" = required ]; then
+            ci_log "[CI-ERROR-CACHE-0020]" "chain=\"${chain}\" file=\"${sf}\" reason=\"policy names redis but no redis url is set\""
+            return 2
+        fi
+        # What: optional drops the redis level.
+        # Why: AG-CI-011: optional mode keeps correctness.
+        # From: Issue #1683 | PR #1858
+        next="$(_ci_sccache_chain_next "${chain}")"
+        ci_log "[CI-WARN-CACHE-0021]" "chain=\"${chain}\" next=\"${next:-local}\" file=\"${sf}\" reason=\"policy names redis but no redis url is set; level dropped\""
+        chain="${next}"
+    fi
     _ci_secret_env "$(_ci_secret_file sccache_gha)" ACTIONS_RESULTS_URL ACTIONS_RUNTIME_TOKEN ACTIONS_CACHE_SERVICE_V2
     _ci_sccache_backend "${chain}" "${url}" "${mode}"
     if [ -n "${chain}" ]; then
@@ -4102,7 +4124,7 @@ _ci_sccache_env() {
     # What: own server socket; start it as the probe.
     # Why: a shared port lets parallel runs collide.
     # From: Issue #1683 | PR #1858
-    local probe prc=0 sock_dir step=1 next
+    local probe prc=0 sock_dir step=1
     sock_dir="$(_ci_mktemp -d "${CI_TMPDIR}/sccache-srv.XXXXXX")" || return 2
     export SCCACHE_SERVER_UDS="${sock_dir}/s${step}.sock"
     probe="$(_ci_sccache_start)" || prc=$?
@@ -4118,7 +4140,7 @@ _ci_sccache_env() {
     # Why: AG-CI-011: optional mode keeps correctness.
     # From: Issue #1683 | PR #1858
     while [ -n "${chain}" ]; do
-        case "${chain}" in redis,*) next="${chain#redis,}" ;; *) next="" ;; esac
+        next="$(_ci_sccache_chain_next "${chain}")"
         ci_error "[CI-WARN-CACHE-0003]" "prefix=\"${prefix}\" chain=\"${chain}\" next=\"${next:-local}\" rc=${prc} reason=\"sccache cache level unavailable\"" "${probe}"
         _ci_sccache_reap "${sock_dir}"
         chain="${next}"
