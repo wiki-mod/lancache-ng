@@ -5787,8 +5787,17 @@ perform_stack_update_flow() {
     validate_compose_config "$install_dir"
 
     print_step "Pulling selected images"
-    stack_compose "$install_dir" "$_UPDATE_ENV_FILE" pull \
-        || die "Failed to pull required container images. Check network access and GHCR authentication, then rerun setup.sh update."
+    if ! stack_compose "$install_dir" "$_UPDATE_ENV_FILE" pull; then
+        # What: a failed pull restores code and .env
+        # Why: new code with an old stack would mix
+        # From: Issue #1683 | PR #1858
+        trap - EXIT
+        UPDATE_CONVERGENCE_COMPLETED=1
+        rollback_stack_update "$install_dir" \
+            || die_convergence_kept_paused "Pulling the images failed, and the rollback to the pre-update backup failed too."
+        resume_lancache_convergence_after_update
+        die "Failed to pull required container images; the update was rolled back. Check network access and GHCR authentication, then rerun setup.sh update."
+    fi
 
     ensure_ui_password_hash "$install_dir" "$_UPDATE_ENV_FILE"
     validate_compose_config "$install_dir"
