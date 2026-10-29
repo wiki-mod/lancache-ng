@@ -1682,12 +1682,13 @@ branch_policy:
   # What: long-lived refs besides the channel refs.
   # Why: release.channels owns master and current_dev.
   # From: Issue #1683 | PR #1858
-  long_lived: [badges]
+  long_lived: [badges, history/current_dev_old_ci_1.x]
   # What: POSIX ERE for long-lived ref families.
   # Why: release branches and the VEX automation branch.
   # From: Issue #1683 | PR #1858
   long_lived_regex:
     - "^v[0-9]"
+    - "^release/v[0-9]"
     - "^CI-Automation/"
 
 # What: Stack-validation check parameters (data, not logic).
