@@ -134,7 +134,7 @@ ci_group_end() {
 }
 
 # What: Emit a command failure with its raw output.
-# Why: Command raw stderr MUST always show (Contract 55).
+# Why: AG-INT-002: command raw stderr MUST always show.
 # From: Issue #1683
 ci_error() {
     local message_id="$1" context="$2" raw="${3:-}"
@@ -18127,6 +18127,10 @@ _ci_check_actionlint() {
         ci_error "[CI-ERROR-CHECK-0057]" "reason=\"actionlint found issues\"" "${out}"
         return 1
     fi
+    # What: actionlint output is shown on a pass too.
+    # Why: AG-INT-002: raw evidence of a passed run too.
+    # From: Issue #1683 | PR #1858
+    [ -z "${out}" ] || printf 'raw:\n%s\n' "${out}" >&2
     printf 'actionlint=clean\n'
 }
 
@@ -18147,6 +18151,10 @@ _ci_check_cargo_audit() {
         ci_error "[CI-ERROR-CHECK-0055]" "reason=\"cargo audit found advisories or warnings\"" "${out}"
         return 1
     fi
+    # What: the clean report is shown, not only "clean".
+    # Why: AG-INT-002: raw evidence of a passed run too.
+    # From: Issue #1683 | PR #1858
+    printf 'raw:\n%s\n' "${out}" >&2
     printf 'cargo-audit=clean\n'
 }
 
