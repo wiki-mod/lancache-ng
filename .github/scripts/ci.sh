@@ -14207,22 +14207,22 @@ _CI_AWK_COMMENT_LEX="$(cat <<'PROG'
         mb = (length("é") == 1); lead_re = "^[\300-\367]$"; cont_re = "^[\200-\277]$"
     }
     { L[FNR] = $0; sub(/\r$/, "", L[FNR]); n = FNR }
-    # What: queue the heredoc delimiters a shell line opens.
+    # What: queue heredoc delimiters; quotes span lines.
     # Why: <<< , quoted or (( )) << open no here-document.
     # From: Issue #1683 | PR #1858
-    function cl_heredocs(s,  i, n, c, q, dep, rest, w) {
-        n = length(s); q = ""; dep = 0
+    function cl_heredocs(s,  i, n, c, rest, w) {
+        n = length(s)
         for (i = 1; i <= n; i++) {
             c = substr(s, i, 1)
-            if (q == sq) { if (c == sq) q = ""; continue }
+            if (hdq == sq) { if (c == sq) hdq = ""; continue }
             if (c == "\\") { i++; continue }
-            if (q == "\"") { if (c == "\"") q = ""; continue }
-            if (c == sq || c == "\"") { q = c; continue }
+            if (hdq == "\"") { if (c == "\"") hdq = ""; continue }
+            if (c == sq || c == "\"") { hdq = c; continue }
             if (c == "#" && (i == 1 || substr(s, i - 1, 1) ~ /[[:space:]]/)) break
-            if (substr(s, i, 2) == "((") { dep++; i++; continue }
-            if (substr(s, i, 2) == "))" && dep > 0) { dep--; i++; continue }
+            if (substr(s, i, 2) == "((") { hdd++; i++; continue }
+            if (substr(s, i, 2) == "))" && hdd > 0) { hdd--; i++; continue }
             if (substr(s, i, 3) == "<<<") { i += 2; continue }
-            if (substr(s, i, 2) != "<<" || dep > 0) continue
+            if (substr(s, i, 2) != "<<" || hdd > 0) continue
             rest = substr(s, i + 2)
             if (!match(rest, /^-?[[:space:]]*[^[:space:];|&<>()]+/)) continue
             w = substr(rest, 1, RLENGTH); i += 1 + RLENGTH
@@ -14233,7 +14233,7 @@ _CI_AWK_COMMENT_LEX="$(cat <<'PROG'
     # Why: heredoc/block-scalar bodies are data, not runs.
     # From: Issue #1683 | PR #1858
     function cl_hash(heredoc,  i, line, chk, iny, ind, t, sf, sb) {
-        hh = 1; ht = 0; sn = 0
+        hh = 1; ht = 0; sn = 0; hdq = ""; hdd = 0
         for (i = 1; i <= n; i++) {
             line = L[i]
             if (line ~ /^[[:space:]]*#/) { F[i] = 1; T[i] = line; sub(/^[[:space:]]*#[[:space:]]*/, "", T[i]) }
