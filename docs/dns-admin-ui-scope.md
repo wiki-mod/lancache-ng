@@ -64,7 +64,7 @@ rule, restart every consumer of a shared value, not just the DNS containers.
 | `ROOT_ZONE_MIRROR` | AXFR root zone mirror; `recursor` turns it on unless the value parses as false |
 | `DNS_REPLICATION_ROLE` / `DNS_XFR_PRIMARY` | Zone transfer role and primary endpoint, see 3a |
 | `NATS_BIND_IP` / `NATS_ADVERTISE_URL` | **Not PowerDNS-native secondary/AXFR wiring — see 3a below.** They only publish/advertise the NATS registration/event path for remote secondary setup |
-| `NATS_URL` / `NATS_USER` / `NATS_PASSWORD` / `NATS_TOKEN` / `NATS_CONSUMER` / `NATS_RECONCILER` / `NATS_RECORD_WRITES` | This node's own NATS connection identity and record-write switch for the `nats-subscriber` process |
+| `NATS_URL` / `NATS_USER` / `NATS_PASSWORD` / `NATS_TOKEN` / `NATS_CONSUMER` / `NATS_RECONCILER` / `NATS_RECORD_WRITES` | This node's own NATS connection identity, and the record-write switch for the `nats-subscriber` process (`NATS_RECORD_WRITES`, set by the watchdog from `DNS_REPLICATION_ROLE`) |
 | `KEEP_KNOWN_GOOD_CONFIGS` / `DNS_CONFIG_SNAPSHOT_DIR` | Known-good config snapshot retention/location (see #415) |
 
 These are intentionally config-file-only: they are either security-sensitive
@@ -79,7 +79,7 @@ made once at deploy time, not tuned routinely.
 |---|---|---|
 | CDN domain list (`cdn-domains.txt`) — add/remove, plain or wildcard-only (`.domain.com`) entries | `POST /domains/dns/add` (`add_dns`), `POST /domains/dns/remove` (`remove_dns`) | `edit_domains` takes the ui's file lock and writes the list through `write_file` (`services/common/shared.rs`): temp file plus rename, and on a file bind mount, which refuses the rename with `EBUSY`, a truncate-then-write of the same file. An add re-enables a disabled entry instead of repeating it; a removal also takes a malformed legacy line by its text. Then `after_domain_change` flushes the name from the recursors. The supervisor watches the list file for both `recursor` (which regenerates the RPZ through `rpz_zone`) and `nginx`, and restarts each program when the file changes, so no manual `dns` or `proxy` restart is needed |
 | CDN domain list — per-entry enable/disable toggle for pre-shipped "Default CDN" entries (#1073) | `POST /domains/dns/toggle` (`toggle_default_domain`) | `with_enabled` flips a leading `!` marker on the matching line; the entry stays in the file and the list, and `rpz_zone` and the nginx render skip `!` rows (`cdn_rows`). The first operator addition inserts the custom-domains marker line once (`with_added`); `domain_rows` treats rows before that marker as pre-shipped defaults (toggle-able) and rows after it as operator additions (removable only). Same flush and supervisor restart as add/remove |
-| LAN records in the LAN zone (A/AAAA/CNAME/MX/TXT) — add/remove | `POST /domains/lan/add`, `POST /domains/lan/remove` | `set_lan_record` publishes a record event (`publish_record`) to the `LANCACHE_DNS` JetStream stream; the primary's `nats-subscriber` applies it to its local PowerDNS through the API; secondaries acknowledge it without a local write (`NATS_RECORD_WRITES=0`, see 3b) and converge by AXFR |
+| LAN records in the LAN zone (A/AAAA/CNAME/MX/TXT) — add/remove | `POST /domains/lan/add`, `POST /domains/lan/remove` | `set_lan_record` publishes a record event (`publish_record`) to the `LANCACHE_DNS` JetStream stream; the primary's `nats-subscriber` applies it to its local PowerDNS through the API; secondaries acknowledge it without a local write (`NATS_RECORD_WRITES=false`, see 3b) and converge by AXFR |
 | Manual PTR records in the provisioned IPv4 reverse zones — add/remove | `POST /domains/ptr/add` (`add_ptr_record`), `POST /domains/ptr/remove` | `set_ptr_record` PATCHes the reverse zone directly on the primary's PowerDNS (`patch_reverse_zone`); the flush follows only an accepted write |
 | Global AAAA-response filter (suppress all AAAA answers) | `POST /domains/aaaa-filter` (`toggle_aaaa_filter`) | `set_markers` writes/removes a marker file in `DNS_STATE_DIR`; `recursor` passes its path to `filter-aaaa.lua`, whose `preresolve` hook reads it live — takes effect immediately, no restart |
 | `ddns-allow-unsigned-updates` toggle (issue #815 follow-up, default off) | `POST /domains/ddns-allow-unsigned-updates` (`toggle_ddns_allow_unsigned_updates`) | TSIG enforcement is active by default; this toggle lets an operator explicitly *relax* it. `set_markers` writes/removes the unsigned-updates marker in `DNS_STATE_DIR`; `pdns_auth` on a primary watches that marker, so the supervisor restarts PowerDNS and `ddns_tsig` sets the metadata with or without the key name. The route refuses to enable the toggle (redirect with an error) when `tsig_key_configured` finds no real `DDNS_TSIG_KEY`, because there would be no enforcement to relax |
@@ -162,15 +162,16 @@ shared TSIG key.
 needs for this path: the PowerDNS API key, the shared DDNS/transfer TSIG
 secret (registration is refused without it), and the primary transfer
 endpoint. A registered secondary also receives its per-node NATS credential,
-but `deploy/secondary/docker-compose.yml` sets `NATS_RECORD_WRITES=0`, so NATS
-record messages do not become a second local PowerDNS writer.
+but the watchdog derives `NATS_RECORD_WRITES` from `DNS_REPLICATION_ROLE`
+(`false` on a secondary), so NATS record messages do not become a second
+local PowerDNS writer.
 
 ### 3b. NATS-based secondary control/event path (#433/#583)
 
 **Current state (implemented):** secondary registration, credential rotation,
 credential revocation, flush events, and primary-side record publishing use
 NATS. Since #1164 secondaries do not apply record messages to their local
-PowerDNS databases: with `NATS_RECORD_WRITES=0` the `nats-subscriber`
+PowerDNS databases: with `NATS_RECORD_WRITES=false` the `nats-subscriber`
 acknowledges them without a write, and zone data converges through native
 PowerDNS AXFR/refresh.
 

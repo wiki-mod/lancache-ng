@@ -3065,6 +3065,14 @@ fn nats_subscriber(ctx: &Ctx) -> Result<Run, String> {
             ),
         ),
     ];
+    // What: record writes on unless node is a secondary
+    // Why: one owner, the role; a secondary copies by AXFR.
+    // From: Issue #1683 | PR #1858
+    let role = dns_role(&ctx.need("DNS_REPLICATION_ROLE")?)?;
+    env.push((
+        "NATS_RECORD_WRITES".to_string(),
+        (role == DnsRole::Primary).to_string(),
+    ));
     // What: writer's NATS password from the shared file.
     // Why: a remote secondary has its own; no file is used.
     // From: Issue #1683 | PR #1912

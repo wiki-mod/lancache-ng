@@ -21,7 +21,7 @@ use futures::future::join_all;
 use lancache_ng::config::{
     DEFAULT_RECORD_TTL, NATS_STREAM_DNS, NATS_SUBJECT_DNS, NATS_SUBJECT_FLUSH, NATS_SUBJECT_RECORD,
     canonical_zone, env_opt, is_dns_name, is_rollback_zone, keep_known_good, lan_zone,
-    local_reverse, need, parse_bool, process_env, rollback_zones, zone_url,
+    local_reverse, need, need_flag, process_env, rollback_zones, zone_url,
 };
 use lancache_ng::{
     Backoff, DnsRecord, FlushRequest, PowerDns, SnapshotStore, ct_eq, die, http_client,
@@ -766,7 +766,7 @@ async fn handle(
     if subject == NATS_SUBJECT_RECORD {
         if !record_writes {
             println!(
-                "Acking DNS record message without a local PowerDNS write: NATS_RECORD_WRITES is off"
+                "Acking DNS record message without a local PowerDNS write: secondary node, NATS_RECORD_WRITES is off"
             );
             return Outcome::Ack;
         }
@@ -1102,11 +1102,12 @@ fn required(name: &str) -> String {
 async fn main() {
     let nats_url = required("NATS_URL");
     let consumer_name = required("NATS_CONSUMER");
-    // What: only a clear "off" disables record writes.
-    // Why: an unknown spelling must keep replication on.
+    // What: record-write and reconciler switches, required
+    // Why: no hidden default; a bad value stops it
     // From: Issue #1683 | PR #1858
-    let record_writes = env_opt("NATS_RECORD_WRITES").is_none_or(|v| parse_bool(&v) != Some(false));
-    let reconcile = env_opt("NATS_RECONCILER").is_some_and(|v| parse_bool(&v) == Some(true));
+    let record_writes =
+        need_flag(&process_env, "NATS_RECORD_WRITES").unwrap_or_else(|e| die(TAG, &e));
+    let reconcile = need_flag(&process_env, "NATS_RECONCILER").unwrap_or_else(|e| die(TAG, &e));
     let times = Times::load(&process_env).unwrap_or_else(|error| die(TAG, &error));
     let rollback_addr = required("DNS_ROLLBACK_LISTEN_ADDR");
 
