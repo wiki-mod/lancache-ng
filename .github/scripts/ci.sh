@@ -11370,8 +11370,11 @@ _ci_service_compose_env() {
         ci_error "[CI-ERROR-CHECK-0110]" "file=\"${dep#"${CI_REPO_ROOT}/"}\" reason=\"deploy compose not renderable with the SOT fixture env\"" "${raw}"
         return 2
     fi
-    _ci_capture 0 jq -r --arg s "$1" '(.services[$s] // error("no compose service \($s)")).environment // {}
-        | to_entries[] | "\(.key)=\(.value // "")"' <<< "${raw}"
+    _ci_capture 0 jq -r --arg s "$1" "$(cat <<'PROG'
+(.services[$s] // error("no compose service \($s)")).environment // {}
+        | to_entries[] | "\(.key)=\(.value // "")"
+PROG
+        )" <<< "${raw}"
 }
 
 # What: Emit SOT build-args for one product service.
