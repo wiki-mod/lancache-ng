@@ -2634,13 +2634,14 @@ EOF
     systemctl daemon-reload || die "systemctl daemon-reload failed (exit $?)."
 }
 
-# What: true if git status shows no uncommitted changes
-# Why: a dirty tree must not be reset by an update
+# What: true if no tracked file has local changes
+# Why: untracked state (ca/, overrides) must not block;
+#      git checkout refuses to overwrite untracked files
 # From: Issue #1683 | PR #1858
 git_repo_is_clean() {
     local repo_dir="$1" out
 
-    out=$(git -C "$repo_dir" status --porcelain) \
+    out=$(git -C "$repo_dir" status --porcelain --untracked-files=no) \
         || die "Failed to read the git status of $repo_dir (exit $?)."
     [[ -z "$out" ]]
 }
@@ -5764,7 +5765,8 @@ channel_checkout_target() {
         print_warn "Channel $channel has no LANCACHE_IMAGE_TAG; repository not updated." >&2
         return 0
     fi
-    changes=$(git -C "$repo_dir" status --porcelain) || die "Failed to read the git status of $repo_dir (exit $?)."
+    changes=$(git -C "$repo_dir" status --porcelain --untracked-files=no) \
+        || die "Failed to read the git status of $repo_dir (exit $?)."
     if [[ -n "$changes" ]]; then
         print_warn "Checkout $repo_dir has local changes; repository not updated:"$'\n'"$changes" >&2
         return 0
