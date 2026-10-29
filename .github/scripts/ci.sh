@@ -12615,7 +12615,7 @@ _ci_rh_runner_dirs() {
     root="$(_ci_rh_val opt_root)" || return 2
     glob="$(_ci_rh_val runner_dir_glob)" || return 2
     out="$(_ci_capture 0 find "${root}" -maxdepth 1 -type d -name "${glob}")" || return 2
-    [ -z "${out}" ] || sort <<< "${out}"
+    [ -z "${out}" ] || _ci_capture 0 sort <<< "${out}"
 }
 
 # What: stray archives at or above the size threshold.
@@ -12630,7 +12630,7 @@ _ci_rh_stray_archives() {
         [ -z "${g}" ] || names+=("${names[@]:+-o}" -name "${g}")
     done <<< "${globs}"
     out="$(_ci_capture 0 find "${root}" -maxdepth 1 -type f '(' "${names[@]}" ')' -size "+${min}c")" || return 2
-    [ -z "${out}" ] || sort <<< "${out}"
+    [ -z "${out}" ] || _ci_capture 0 sort <<< "${out}"
 }
 
 # What: file match: rc 0 hit, 1 no hit, 2 unreadable.
@@ -15103,7 +15103,9 @@ _ci_check_pr_title() {
 # Why: one finder for the checks that read compose with yq.
 # From: Issue #1683 | PR #1858
 _ci_compose_dir_files() {
-    find "$1" -type f \( -name '*.yml' -o -name '*.yaml' \) | sort
+    local out
+    out="$(_ci_capture 0 find "$1" -type f \( -name '*.yml' -o -name '*.yaml' \))" || return 2
+    [ -z "${out}" ] || _ci_capture 0 sort <<< "${out}"
 }
 
 # What: an external deploy image must be a SOT base image.
