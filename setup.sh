@@ -6069,8 +6069,11 @@ lancache_read_ui_settings_override() {
     [[ "$rc" -eq 0 ]] || die "Cannot check the Docker volume $volume; the UI settings were not read."
     settings_file=$(prod_env_default UI_SETTINGS_FILE) || exit $?
     settings_file="${settings_file##*/}"
+    # What: the file name goes in as $1, not as code
+    # Why: a value inside sh -c text would run as shell
+    # From: Issue #1683 | PR #1858
     raw=$(docker run --rm -v "${volume}:/volume:ro" "$LANCACHE_HELPER_IMAGE" \
-        sh -c "if [ -e /volume/${settings_file} ]; then cat /volume/${settings_file}; fi") \
+        sh -c 'if [ -e "/volume/$1" ]; then cat "/volume/$1"; fi' sh "$settings_file") \
         || die "Failed to read the UI settings from Docker volume $volume (exit $?)."
     # What: the last KEY= line of $raw wins
     # Why: a loop reads it all; no early-exit pipe
