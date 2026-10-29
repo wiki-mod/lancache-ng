@@ -15048,6 +15048,13 @@ _ci_check_pr_title() {
     return 1
 }
 
+# What: the compose files of a dir, one per line, sorted.
+# Why: one finder for the checks that read compose with yq.
+# From: Issue #1683 | PR #1858
+_ci_compose_dir_files() {
+    find "$1" -type f \( -name '*.yml' -o -name '*.yaml' \) | sort
+}
+
 # What: an external deploy image must be a SOT base image.
 # Why: one owner per external image; no copy elsewhere.
 # From: Issue #1683
@@ -15074,7 +15081,7 @@ _ci_check_stable_external_images() {
             continue
         fi
         local files f produced
-        files="$(find "${d}" -type f \( -name '*.yml' -o -name '*.yaml' \) | sort)" || return 2
+        files="$(_ci_compose_dir_files "${d}")" || return 2
         if [ -z "${files}" ]; then
             viol+=("${d}: compose dir holds no compose file")
             continue
@@ -16399,8 +16406,21 @@ _ci_check_prebuilt_prod() {
     local -a viol=()
     dep="$(_ci_compose_path "${repo_root}")" || return 2
     dep="${dep%/*}"
-    local hit
-    hit="$(_ci_capture 1 grep -RInE '^[[:space:]]+build:' "${dep}")" || return 2
+    local hit="" files f one
+    files="$(_ci_compose_dir_files "${dep}")" || return 2
+    if [ -z "${files}" ]; then
+        viol+=("${dep}: compose dir holds no compose file")
+    fi
+    while IFS= read -r f; do
+        [ -n "${f}" ] || continue
+        # What: services with a build: key, read by yq.
+        # Why: yq owns YAML; grep read text inside strings.
+        # From: Issue #1683 | PR #1858
+        one="$(_ci_run "[CI-ERROR-CHECK-0202]" "file=\"${f}\" reason=\"compose build: not read\"" \
+            yq --yaml-fix-merge-anchor-to-spec=true -r '(.services // {}) | to_entries[] | select((.value | tag) == "!!map" and (.value | has("build"))) | .key + " (build: at line " + (.value.build | line | tostring) + ")"' "${f}")" || return 2
+        if [ -n "${one}" ]; then hit+="${f}: ${one}"$'\n'; fi
+    done <<<"${files}"
+    hit="${hit%$'\n'}"
     if [ -n "${hit}" ]; then
         viol+=("a stack compose declares build:; prod must run prebuilt images only" "${hit}")
     fi
