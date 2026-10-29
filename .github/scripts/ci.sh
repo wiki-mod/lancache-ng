@@ -329,7 +329,9 @@ _ci_runner_self_hosted() {
 # Why: one owner for the PAT and the job token header.
 # From: Issue #1683 | PR #1858
 _ci_git_auth_header() {
-    printf 'AUTHORIZATION: basic %s' "$(printf '%s' "x-access-token:$1" | base64 -w0)"
+    local enc
+    enc="$(printf '%s' "x-access-token:$1" | base64 -w0)" || return 2
+    printf 'AUTHORIZATION: basic %s' "${enc}"
 }
 
 # What: trust the checkout; CI_GIT_TOKEN as push auth.
@@ -337,7 +339,7 @@ _ci_git_auth_header() {
 # From: Issue #1683 | PR #1858
 _ci_git_trust_init() {
     local dir="${GITHUB_WORKSPACE:-}" n="${GIT_CONFIG_COUNT:-0}"
-    local token="${CI_GIT_TOKEN:-}" srv key
+    local token="${CI_GIT_TOKEN:-}" srv key header
     if [ -z "${dir}" ]; then
         return 0
     fi
@@ -351,7 +353,8 @@ _ci_git_trust_init() {
         # From: Issue #1683 | PR #1858
         export "GIT_CONFIG_KEY_${n}=${key}" "GIT_CONFIG_VALUE_${n}="
         n=$((n + 1))
-        export "GIT_CONFIG_KEY_${n}=${key}" "GIT_CONFIG_VALUE_${n}=$(_ci_git_auth_header "${token}")"
+        header="$(_ci_git_auth_header "${token}")" || return 2
+        export "GIT_CONFIG_KEY_${n}=${key}" "GIT_CONFIG_VALUE_${n}=${header}"
         n=$((n + 1))
     fi
     export GIT_CONFIG_COUNT="${n}"
@@ -3876,23 +3879,26 @@ _ci_for_test_services() {
 ci_cmd_test_stack() { _ci_for_test_services ci_cmd_test; }
 
 # What: label and scope of one SOT status kind.
-# Why: the SOT owns both; service, arch, severity fill in.
+# Why: the SOT owns both; service, arch, scan rows fill in.
 # From: Issue #1683 | PR #1912
 _ci_status_text() {
-    local kind="$1" svc="${2:-}" arch="${3:-}" label scope sev=""
+    local kind="$1" svc="${2:-}" arch="${3:-}" label scope sev="" ign=""
     label="$(_ci_block_entry_field status_reports "${kind}" label)" || return 2
     scope="$(_ci_block_entry_field status_reports "${kind}" scope)" || return 2
     if [ -z "${label}" ] || [ -z "${scope}" ]; then
         ci_log "[CI-ERROR-STATUS-0010]" "kind=\"${kind}\" reason=\"no SOT status_reports label and scope\""
         return 2
     fi
-    # What: the SEVERITY row, only for a scope naming it.
+    # What: SEVERITY and IGNORE rows, filled on use.
     # Why: scan args and issue text read one _ci_variable.
     # From: Issue #1683 | PR #1858
     case "${scope}" in
         *"@SEVERITY@"*) sev="$(_ci_variable CI_TRIVY_SEVERITY)" || return 2 ;;
     esac
-    _ci_fill "${scope}" "SERVICE=${svc}"$'\n'"ARCH=${arch}"$'\n'"SEVERITY=${sev}" || return 2
+    case "${scope}" in
+        *"@IGNORE@"*) ign="$(_ci_variable CI_TRIVY_IGNORE)" || return 2 ;;
+    esac
+    _ci_fill "${scope}" "SERVICE=${svc}"$'\n'"ARCH=${arch}"$'\n'"SEVERITY=${sev}"$'\n'"IGNORE=${ign}" || return 2
     printf '%s\n%s\n' "${label}${svc:+-${svc}}${arch:+-${arch}}" "${REPLY}"
 }
 
@@ -8575,14 +8581,15 @@ _ci_pat_url() {
 # Why: rulesets refuse GITHUB_TOKEN branch pushes
 # From: Issue #1683 | PR #1858
 _ci_pat_git() {
-    local pat srv
+    local pat srv header
     pat="$(_ci_env_required PROJECT_AUTOMATION_PAT)" || return 2
     srv="$(_ci_env_required GITHUB_SERVER_URL)" || return 2
+    header="$(_ci_git_auth_header "${pat}")" || return 2
     # What: empty value drops the checkout's token header
     # Why: else git sends two AUTHORIZATION headers
     # From: Issue #1683 | PR #1858
     git -c "http.${srv}/.extraheader=" \
-        -c "http.${srv}/.extraheader=$(_ci_git_auth_header "${pat}")" "$@"
+        -c "http.${srv}/.extraheader=${header}" "$@"
 }
 
 # What: push the PAT-authored tag, then read it back
