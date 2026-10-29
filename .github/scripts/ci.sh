@@ -16625,7 +16625,7 @@ _ci_validation_env() {
     # Why: per-run state overrides its SOT default.
     # From: Issue #1683 | PR #1951
     v="$(_ci_sot_compose_env "${body}"$'\n'"LANCACHE_STATE_DIR=${state}")" || return 2
-    printf '%s\n%s\n' "${body}" "${v}"
+    printf '%s%s\n' "${body}" "${v}"
 }
 
 # What: repo root joined with a SOT path variable.
