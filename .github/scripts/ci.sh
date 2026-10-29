@@ -10945,18 +10945,27 @@ _ci_validate_secondary_identity() {
 # Why: probes target the stack; a host proxy must not.
 # From: Issue #1683 | PR #1858
 _ci_validate_probes() {
-    local project="$1" net="$2" pin="$3" rc=0
+    local project="$1" net="$2" pin="$3" rc=0 p
     local -x NO_PROXY='*' no_proxy='*'
-    _ci_validate_dns "${project}" || rc=$?
-    [ "${rc}" -eq 0 ] && { _ci_validate_proxy "${project}" || rc=$?; }
-    [ "${rc}" -eq 0 ] && { _ci_validate_proxy_stream_map "${project}" || rc=$?; }
-    [ "${rc}" -eq 0 ] && { _ci_validate_https_mitm "${project}" || rc=$?; }
-    [ "${rc}" -eq 0 ] && { _ci_validate_https_dispatch_map "${project}" || rc=$?; }
-    [ "${rc}" -eq 0 ] && { _ci_validate_ui_nats_dns "${project}" || rc=$?; }
-    [ "${rc}" -eq 0 ] && { _ci_validate_dns_rollback "${project}" || rc=$?; }
-    [ "${rc}" -eq 0 ] && { _ci_validate_kea_rollback "${project}" "${net}" "${pin}" || rc=$?; }
-    [ "${rc}" -eq 0 ] && { _ci_validate_secondary_identity "${project}" || rc=$?; }
-    return "${rc}"
+    # What: one log line per passed probe, in probe order
+    # Why: a green log must show which probes ran (§79)
+    # From: Issue #1683 | PR #1858
+    for p in dns proxy proxy_stream_map https_mitm https_dispatch_map \
+        ui_nats_dns dns_rollback kea_rollback secondary_identity; do
+        case "${p}" in
+            dns) _ci_validate_dns "${project}" ;;
+            proxy) _ci_validate_proxy "${project}" ;;
+            proxy_stream_map) _ci_validate_proxy_stream_map "${project}" ;;
+            https_mitm) _ci_validate_https_mitm "${project}" ;;
+            https_dispatch_map) _ci_validate_https_dispatch_map "${project}" ;;
+            ui_nats_dns) _ci_validate_ui_nats_dns "${project}" ;;
+            dns_rollback) _ci_validate_dns_rollback "${project}" ;;
+            kea_rollback) _ci_validate_kea_rollback "${project}" "${net}" "${pin}" ;;
+            secondary_identity) _ci_validate_secondary_identity "${project}" ;;
+        esac || rc=$?
+        [ "${rc}" -eq 0 ] || return "${rc}"
+        ci_log "[CI-INFO-VALIDATE-0143]" "probe=\"${p}\" result=pass"
+    done
 }
 
 # What: Validate the candidate on one live prod stack.
