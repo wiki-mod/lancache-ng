@@ -17576,7 +17576,7 @@ _ci_check_workflow_ci_variables() {
         # Why: yq reads the workflow; text matched comments.
         # From: Issue #1683 | PR #1858
         row="$(_ci_run "[CI-ERROR-CHECK-0203]" "file=\"${f}\" reason=\"workflow ci.sh calls not read\"" \
-            yq --yaml-fix-merge-anchor-to-spec=true -r '[([.. | select(tag == "!!map" and has("run")) | .run | select(tag == "!!str") | select(contains("scripts/ci.sh"))] | length > 0), ((.env.CI_VARIABLES // "") == "${{ toJSON(vars) }}")] | @tsv' "${f}")" || return 2
+            env W="\${{ toJSON(vars) }}" yq --yaml-fix-merge-anchor-to-spec=true -r '[([.. | select(tag == "!!map" and has("run")) | .run | select(tag == "!!str") | select(contains("scripts/ci.sh"))] | length > 0), ((.env.CI_VARIABLES // "") == strenv(W))] | @tsv' "${f}")" || return 2
         read -r calls wired <<< "${row}"
         [ "${calls}" = true ] || continue
         callers=$(( callers + 1 ))
