@@ -2258,7 +2258,12 @@ migrate_legacy_ca() {
 resolve_stack_dir() {
     local dir="$1"
     local rel="${PROD_COMPOSE#"$SCRIPT_DIR/"}"
-    if [[ ! -f "$dir/docker-compose.yml" && -f "$dir/$rel" ]]; then
+    # What: <root>/current wins over an old root checkout
+    # Why: after a move, the old code must not run again
+    # From: Issue #1683 | PR #1858
+    if [[ ! -f "$dir/docker-compose.yml" && -f "$dir/current/$rel" ]]; then
+        printf '%s\n' "$dir/current/${rel%/*}"
+    elif [[ ! -f "$dir/docker-compose.yml" && -f "$dir/$rel" ]]; then
         printf '%s\n' "$dir/${rel%/*}"
     else
         printf '%s\n' "$dir"
@@ -2619,35 +2624,6 @@ EOF
     systemctl daemon-reload || die "systemctl daemon-reload failed (exit $?)."
 }
 
-# What: origin's default branch; else the SOT release branch
-# Why: the local symref avoids a network call when it is set
-# From: Issue #1683 | PR #1858
-git_default_branch_name() {
-    local repo_dir="$1" default_branch="" rc=0 remote ref refs release
-
-    default_branch=$(git -C "$repo_dir" symbolic-ref --quiet --short refs/remotes/origin/HEAD) || rc=$?
-    [[ "$rc" -le 1 ]] || die "Failed to read origin/HEAD of $repo_dir (exit $rc)."
-    default_branch="${default_branch#origin/}"
-    if [[ -z "$default_branch" ]]; then
-        remote=$(git -C "$repo_dir" remote show origin) \
-            || die "Failed to read the remote origin of $repo_dir (exit $?)."
-        default_branch=$(awk '/HEAD branch/ && $NF != "(unknown)" {print $NF; exit}' <<< "$remote")
-    fi
-    # What: the ref of the release_tags channel in the SOT
-    # Why: setup.sh reads the SOT; it never runs ci.sh
-    # From: Issue #1683 | PR #1858
-    if [[ -z "$default_branch" ]]; then
-        release=$(lancache_release_rows release) || exit $?
-        refs=$(lancache_release_rows ref) || exit $?
-        ref=$(awk -v c="$release" '$1 == c { print $2; exit }' <<< "$refs")
-        [[ "$ref" == refs/heads/?* ]] \
-            || die "The SOT names no release branch ref for channel $release: '$ref'; set LANCACHE_SETUP_GIT_REF."
-        default_branch="${ref#refs/heads/}"
-    fi
-
-    printf '%s\n' "$default_branch"
-}
-
 # What: true if git status shows no uncommitted changes
 # Why: a dirty tree must not be reset by an update
 # From: Issue #1683 | PR #1858
@@ -2657,16 +2633,6 @@ git_repo_is_clean() {
     out=$(git -C "$repo_dir" status --porcelain) \
         || die "Failed to read the git status of $repo_dir (exit $?)."
     [[ -z "$out" ]]
-}
-
-# What: hard-resets a checkout to origin's default branch
-# Why: install without LANCACHE_SETUP_GIT_REF uses it
-# From: Issue #1683 | PR #1858
-sync_repo_to_default_branch() {
-    local repo_dir="$1" default_branch
-
-    default_branch=$(git_default_branch_name "$repo_dir")
-    sync_repo_to_branch "$repo_dir" "$default_branch"
 }
 
 # What: hard-resets a checkout to one origin branch
@@ -5642,10 +5608,24 @@ rollback_stack_update() {
         return 1
     fi
 
+    # What: a channel switch goes back by the current link
+    # Why: the old dir kept its code; its backup restores
+    # From: Issue #1683 | PR #1858
+    if [[ -n "${LANCACHE_UPDATE_SWITCHED_FROM:-}" ]]; then
+        local link
+        link=$(channel_active_link) || exit $?
+        if is_channel_root_dir "$LANCACHE_UPDATE_SWITCHED_FROM"; then
+            rm -f -- "$link" || { print_error "Failed to remove $link (exit $?). Manual recovery required."; return 1; }
+        else
+            ln -sfn "${LANCACHE_UPDATE_SWITCHED_FROM##*/}" "$link" \
+                || { print_error "Failed to point $link back (exit $?). Manual recovery required."; return 1; }
+        fi
+        print_warn "Code of the stack is $LANCACHE_UPDATE_SWITCHED_FROM again"
+        install_dir="$LANCACHE_UPDATE_FROM_INSTALL"
     # What: the checkout returns to its pre-update revision
     # Why: old config on new compose would be a mixed stack
     # From: Issue #1683 | PR #1858
-    if [[ -n "${LANCACHE_UPDATE_OLD_SHA:-}" ]]; then
+    elif [[ -n "${LANCACHE_UPDATE_OLD_SHA:-}" ]]; then
         # What: no branch = a detached pinned checkout
         # Why: -B needs a name; --detach restores it
         # From: Issue #1683 | PR #1858
@@ -5780,40 +5760,215 @@ sync_repo_to_channel_ref() {
     fi
 }
 
-# What: install moves its checkout to the channel's code
+# What: <state root>/<pointer>: one code dir per channel
+# Why: maintainer 29.10.: latest and nightly side by side
+# From: Issue #1683 | PR #1858
+channel_code_dir() {
+    local pointer
+    ensure_default_install_dir
+    pointer=$(lancache_stack_pointer_channel_for "$1") || exit $?
+    printf '%s/%s\n' "$DEFAULT_INSTALL_DIR" "$pointer"
+}
+
+# What: <state root>/current links the running channel dir
+# Why: units and default commands follow it on a switch
+# From: Issue #1683 | PR #1858
+channel_active_link() {
+    ensure_default_install_dir
+    printf '%s/current\n' "$DEFAULT_INSTALL_DIR"
+}
+
+# What: true when a dir is the state root itself
+# Why: an old install cloned the code right into it
+# From: Issue #1683 | PR #1858
+is_channel_root_dir() {
+    ensure_default_install_dir
+    [[ "$(realpath -m "$1")" = "$(realpath -m "$DEFAULT_INSTALL_DIR")" ]]
+}
+
+# What: true for the state root or one of its channel dirs
+# Why: only that layout moves between channel dirs
+# From: Issue #1683 | PR #1858
+is_channel_layout_repo() {
+    local repo root pointers
+    repo=$(realpath -m "$1")
+    ensure_default_install_dir
+    root=$(realpath -m "$DEFAULT_INSTALL_DIR")
+    [[ "$repo" != "$root" ]] || return 0
+    [[ "${repo%/*}" = "$root" ]] || return 1
+    pointers=$(lancache_release_rows channel) || exit $?
+    list_has_line "${repo##*/}" "$pointers"
+}
+
+# What: clones or moves a channel dir to its code ref
+# Why: install and a channel switch share the git steps
+# From: Issue #1683 | PR #1858
+ensure_channel_checkout() {
+    local dir="$1" target="$2" branches
+    if [[ -e "$dir/.git" ]]; then
+        sync_repo_to_channel_ref "$dir" "$target"
+        return 0
+    fi
+    [[ ! -e "$dir" ]] || die "$dir exists but is no git checkout; move it away, then rerun setup.sh."
+    mkdir -p "${dir%/*}" || die "Failed to create ${dir%/*} (exit $?)."
+    branches=$(lancache_channel_branches) || exit $?
+    if list_has_line "$target" "$branches"; then
+        git clone --branch "$target" "${LANCACHE_REPO_URL}.git" "$dir" \
+            || die "Failed to clone $target into $dir (exit $?)."
+    else
+        git clone "${LANCACHE_REPO_URL}.git" "$dir" || die "Failed to clone into $dir (exit $?)."
+        sync_repo_to_commit "$dir" "$target"
+    fi
+}
+
+# What: points <state root>/current at one channel dir
+# Why: one place says which channel's code runs
+# From: Issue #1683 | PR #1858
+set_active_channel_dir() {
+    local dir="$1" link
+    link=$(channel_active_link) || exit $?
+    ln -sfn "${dir##*/}" "$link" || die "Failed to point $link at $dir (exit $?)."
+}
+
+# What: install runs from the chosen channel's dir
 # Why: compose files and images from one ref at once
 # From: Issue #1683 | PR #1858
 install_repo_follow_channel() {
-    local channel="$1" target old new exec_rc
+    local channel="$1" target dir link branch branches old="" new exec_rc
     shift
-    # What: LANCACHE_SETUP_GIT_REF keeps its checkout
+    # What: a named non-channel branch installs in place
     # Why: the operator chose that revision (AG-OP-009)
     # From: Issue #1683 | PR #1858
-    if [[ -n "${LANCACHE_SETUP_GIT_REF:-}" ]]; then
-        print_ok "Checkout stays on LANCACHE_SETUP_GIT_REF=${LANCACHE_SETUP_GIT_REF}"
+    if [[ -e "$SCRIPT_DIR/.git" ]]; then
+        branch=$(checkout_branch_name "$SCRIPT_DIR") || exit $?
+        branches=$(lancache_channel_branches) || exit $?
+        if [[ -n "$branch" ]] && ! list_has_line "$branch" "$branches"; then
+            print_warn "Checkout $SCRIPT_DIR is on $branch, no channel branch; installing from it."
+            return 0
+        fi
+    fi
+    dir=$(channel_code_dir "$channel") || exit $?
+    link=$(channel_active_link) || exit $?
+    target="${LANCACHE_SETUP_GIT_REF:-}"
+    [[ -n "$target" ]] || target=$(lancache_channel_code_ref "$channel" "${LANCACHE_IMAGE_TAG:-}") || exit $?
+    [[ -n "$target" ]] || die "Channel $channel needs LANCACHE_IMAGE_TAG to name its code."
+    [[ ! -e "$dir/.git" ]] || old=$(git -C "$dir" rev-parse HEAD) || die "Failed to read HEAD of $dir (exit $?)."
+    print_step "Code of channel $channel in $dir ($target)"
+    if [[ -n "${LANCACHE_SETUP_GIT_REF:-}" && -e "$dir/.git" ]]; then
+        sync_repo_to_ref "$dir" "$target"
+    elif [[ -n "${LANCACHE_SETUP_GIT_REF:-}" ]]; then
+        git clone --branch "$target" "${LANCACHE_REPO_URL}.git" "$dir" \
+            || die "Clone failed for LANCACHE_SETUP_GIT_REF='$target'. Check that it names a real branch or tag on origin."
+    else
+        ensure_channel_checkout "$dir" "$target"
+    fi
+    set_active_channel_dir "$dir"
+    new=$(git -C "$dir" rev-parse HEAD) || die "Failed to read HEAD of $dir (exit $?)."
+    # What: running from current at its HEAD goes on here
+    # Why: units then name current, the link, not a dir
+    # From: Issue #1683 | PR #1858
+    if [[ "$SCRIPT_DIR" = "$link" && "$new" = "$old" ]]; then
+        print_ok "Code of channel $channel is at $new"
         return 0
     fi
-    target=$(channel_checkout_target "$SCRIPT_DIR" "$channel" "${LANCACHE_IMAGE_TAG:-}") || exit $?
-    [[ -n "$target" ]] || return 0
-    old=$(git -C "$SCRIPT_DIR" rev-parse HEAD) || die "Failed to read HEAD of $SCRIPT_DIR (exit $?)."
-    print_step "Moving the checkout to $target (channel $channel)"
-    sync_repo_to_channel_ref "$SCRIPT_DIR" "$target"
-    new=$(git -C "$SCRIPT_DIR" rev-parse HEAD) || die "Failed to read HEAD of $SCRIPT_DIR (exit $?)."
-    if [[ "$new" = "$old" ]]; then
-        print_ok "Checkout already at $new"
-        return 0
-    fi
-    print_ok "Checkout moved $old -> $new; continuing with its setup.sh"
+    print_ok "Continuing with $link/setup.sh ($new)"
     # What: the new setup.sh keeps the chosen channel
     # Why: its channel prompt is then skipped, not repeated
     # From: Issue #1683 | PR #1858
     export LANCACHE_IMAGE_CHANNEL="$channel"
+    chmod +x "$dir/setup.sh" || die "Failed to make $dir/setup.sh executable (exit $?)."
     shopt -s execfail
     set +e
-    exec "$SCRIPT_DIR/setup.sh" "$@" || {
+    exec "$link/setup.sh" "$@" || {
         exec_rc=$?
         set -e
-        die "Failed to start $SCRIPT_DIR/setup.sh (exit $exec_rc); nothing was installed yet."
+        die "Failed to start $link/setup.sh (exit $exec_rc); nothing was installed yet."
+    }
+}
+
+# What: drops the git files of an old root checkout
+# Why: its code moved to a channel dir; data stays
+# From: Issue #1683 | PR #1858
+remove_root_checkout() {
+    local root="$1" changes list f d
+    local -a dirs=()
+    changes=$(git -C "$root" status --porcelain --untracked-files=no) \
+        || die "Failed to read the git status of $root (exit $?)."
+    # What: changed tracked files keep the whole old code
+    # Why: such a file may hold data; nothing is guessed
+    # From: Issue #1683 | PR #1858
+    if [[ -n "$changes" ]]; then
+        print_warn "Old code in $root stays; these tracked files differ:"$'\n'"$changes"
+        return 0
+    fi
+    list=$(mktemp) || die "Failed to create a temporary file (exit $?)."
+    git -C "$root" ls-files -z > "$list" || die "Failed to list the files of $root (exit $?)."
+    while IFS= read -r -d '' f; do
+        rm -f -- "$root/$f" || die "Failed to remove $root/$f (exit $?)."
+        [[ "$f" != */* ]] || dirs+=("${f%/*}")
+    done < "$list"
+    rm -f -- "$list" || die "Failed to remove $list (exit $?)."
+    rm -f -- "$root/deploy/prod/.env.local" || die "Failed to remove $root/deploy/prod/.env.local (exit $?)."
+    # What: drops emptied code dirs, deepest first
+    # Why: a dir with data or other files must stay
+    # From: Issue #1683 | PR #1858
+    while IFS= read -r d; do
+        [[ -n "$d" ]] || continue
+        while [[ -n "$d" ]]; do
+            if [[ -d "$root/$d" ]]; then
+                rmdir --ignore-fail-on-non-empty -- "$root/$d" || die "Failed to remove $root/$d (exit $?)."
+            fi
+            if [[ "$d" = */* ]]; then
+                d="${d%/*}"
+            else
+                d=""
+            fi
+        done
+    done < <(printf '%s\n' "${dirs[@]}" | sort -ru)
+    rm -rf -- "$root/.git" || die "Failed to remove $root/.git (exit $?)."
+    print_ok "Old code in $root removed; its data stays"
+}
+
+# What: update moves the stack to another channel's dir
+# Why: a channel change runs the code of the new channel
+# From: Issue #1683 | PR #1858
+switch_channel_dir_and_resume() {
+    local install_dir="$1" repo_dir="$2" channel="$3" target="$4" dir link old="" baseline="" svc exec_rc f
+    local -a files=(.env.local .env docker-compose.override.yml docker-compose.override.yaml)
+    dir=$(channel_code_dir "$channel") || exit $?
+    link=$(channel_active_link) || exit $?
+    [[ ! -e "$dir/.git" ]] || old=$(git -C "$dir" rev-parse HEAD) || die "Failed to read HEAD of $dir (exit $?)."
+    print_step "Moving the stack to $dir (channel $channel)"
+    # What: old copies of the stack files leave first
+    # Why: the running stack owns them; a copy is redone
+    # From: Issue #1683 | PR #1858
+    for f in "${files[@]}"; do
+        rm -f -- "$dir/deploy/prod/$f" || die "Failed to remove $dir/deploy/prod/$f (exit $?)."
+    done
+    ensure_channel_checkout "$dir" "$target"
+    for f in "${files[@]}"; do
+        [[ -f "$install_dir/$f" ]] || continue
+        cp -p -- "$install_dir/$f" "$dir/deploy/prod/$f" \
+            || die "Failed to copy $install_dir/$f to $dir/deploy/prod (exit $?)."
+    done
+    set_active_channel_dir "$dir"
+    for svc in "${!_UPDATE_HEALTH_BASELINE[@]}"; do baseline+="${svc}=${_UPDATE_HEALTH_BASELINE[$svc]} "; done
+    print_ok "Stack settings copied to $dir; continuing with its setup.sh"
+    # What: the switch is undone by the link, not by git
+    # Why: the old dir keeps its code; rollback starts it
+    # From: Issue #1683 | PR #1858
+    export LANCACHE_UPDATE_RESUMED=1 LANCACHE_UPDATE_REPO="$dir" LANCACHE_UPDATE_BRANCH="" \
+        LANCACHE_UPDATE_OLD_SHA="" LANCACHE_UPDATE_BASELINE="$baseline" LANCACHE_BACKUP_ROOT="$BACKUP_ROOT" \
+        LANCACHE_UPDATE_SWITCHED_FROM="$repo_dir" LANCACHE_UPDATE_FROM_INSTALL="$install_dir" \
+        CONVERGENCE_TIMER_WAS_ACTIVE CONVERGENCE_TIMER_WAS_ENABLED CONVERGENCE_SERVICE_WAS_ACTIVE
+    [[ -n "$old" ]] || print_ok "New channel dir $dir"
+    chmod +x "$dir/setup.sh" || die "Failed to make $dir/setup.sh executable (exit $?)."
+    shopt -s execfail
+    set +e
+    exec "$link/setup.sh" update "$link/deploy/prod" || {
+        exec_rc=$?
+        set -e
+        die "Failed to start $link/setup.sh (exit $exec_rc); the stack was not changed."
     }
 }
 
@@ -5822,11 +5977,26 @@ install_repo_follow_channel() {
 # From: Issue #1683 | PR #1858
 update_repo_and_resume() {
     local install_dir="$1" repo_dir="$1" branch channel tag target old new baseline="" svc
-    local exec_rc
+    local exec_rc dir branches
     is_deploy_prod_install_dir "$install_dir" && repo_dir=$(deploy_prod_repo_root "$install_dir")
     channel=$(resolve_lancache_image_channel "$_UPDATE_ENV_FILE") || exit $?
     tag="${LANCACHE_IMAGE_TAG:-}"
     [[ -n "$tag" ]] || tag=$(get_env_var LANCACHE_IMAGE_TAG "$_UPDATE_ENV_FILE") || exit $?
+    # What: another channel's dir or the old root moves
+    # Why: each channel runs the code of its own dir
+    # From: Issue #1683 | PR #1858
+    if [[ -e "$repo_dir/.git" ]] && is_channel_layout_repo "$repo_dir"; then
+        branch=$(checkout_branch_name "$repo_dir") || exit $?
+        dir=$(channel_code_dir "$channel") || exit $?
+        branches=$(lancache_channel_branches) || exit $?
+        if [[ -z "$branch" ]] || list_has_line "$branch" "$branches"; then
+            if [[ "$(realpath -m "$repo_dir")" != "$(realpath -m "$dir")" ]]; then
+                target=$(lancache_channel_code_ref "$channel" "$tag") || exit $?
+                [[ -n "$target" ]] || die "Channel $channel needs LANCACHE_IMAGE_TAG to name its code."
+                switch_channel_dir_and_resume "$install_dir" "$repo_dir" "$channel" "$target"
+            fi
+        fi
+    fi
     target=$(channel_checkout_target "$repo_dir" "$channel" "$tag") || exit $?
     [[ -n "$target" ]] || return 0
     branch=$(checkout_branch_name "$repo_dir") || exit $?
@@ -5970,6 +6140,15 @@ perform_stack_update_flow() {
     fi
 
     migrate_legacy_ca "$install_dir/../../certs" "$_UPDATE_ENV_FILE" 1
+    # What: a finished move from the old root cleans it up
+    # Why: units then start the code behind the current link
+    # From: Issue #1683 | PR #1858
+    if [[ -n "${LANCACHE_UPDATE_SWITCHED_FROM:-}" ]] && is_channel_root_dir "$LANCACHE_UPDATE_SWITCHED_FROM"; then
+        migrate_legacy_ca "$LANCACHE_UPDATE_SWITCHED_FROM/certs" "$_UPDATE_ENV_FILE" 1
+        write_lancache_host_services "$(channel_active_link)/deploy/prod" \
+            || print_warn "Neither systemd nor OpenRC found — host services were not written"
+        remove_root_checkout "$LANCACHE_UPDATE_SWITCHED_FROM"
+    fi
     trap - EXIT
     resume_lancache_convergence_after_update
     UPDATE_CONVERGENCE_COMPLETED=1
@@ -8025,29 +8204,12 @@ if [[ "$WIZARD_INTROSPECT_MODE" != "1" ]]; then
 
     ensure_stack_requirements_installed
 
+    # What: no checkout here: step 1b clones the code
+    # Why: it goes straight into the chosen channel's dir
+    # From: Issue #1683 | PR #1858
     if [[ ! -f "$PROD_COMPOSE" ]]; then
-        print_warn "No local repo found — cloning to ${DEFAULT_INSTALL_DIR}..."
-        if ! command_available git; then
-            install_git
-        fi
-        setup_bootstrap_ref=$(resolve_setup_bootstrap_ref) || exit $?
-        if [[ -d "$DEFAULT_INSTALL_DIR/.git" ]]; then
-            if [[ -n "$setup_bootstrap_ref" ]]; then
-                print_warn "Existing checkout found at ${DEFAULT_INSTALL_DIR} — syncing to LANCACHE_SETUP_GIT_REF=${setup_bootstrap_ref}..."
-                sync_repo_to_ref "$DEFAULT_INSTALL_DIR" "$setup_bootstrap_ref"
-            else
-                print_warn "Existing checkout found at ${DEFAULT_INSTALL_DIR} — syncing to the remote default branch..."
-                sync_repo_to_default_branch "$DEFAULT_INSTALL_DIR"
-            fi
-        elif [[ -n "$setup_bootstrap_ref" ]]; then
-            git clone --branch "$setup_bootstrap_ref" "${LANCACHE_REPO_URL}.git" "$DEFAULT_INSTALL_DIR" \
-                || die "Clone failed for LANCACHE_SETUP_GIT_REF='${setup_bootstrap_ref}'. Check that it names a real branch or tag on origin."
-        else
-            git clone "${LANCACHE_REPO_URL}.git" "$DEFAULT_INSTALL_DIR" \
-                || die "Clone failed."
-        fi
-        chmod +x "$DEFAULT_INSTALL_DIR/setup.sh"
-        exec "$DEFAULT_INSTALL_DIR/setup.sh" "$@"
+        print_warn "No local repo found — the code of the chosen channel goes to ${DEFAULT_INSTALL_DIR}/<channel>."
+        command_available git || install_git
     fi
 
     # What: version lines; an unknown version only warns
@@ -8122,7 +8284,7 @@ else
     done
 fi
 
-# What: step 1b: the checkout moves to the channel's code
+# What: step 1b: setup runs from the channel's dir
 # Why: compose files and images from one ref at once
 # From: Issue #1683 | PR #1858
 if [[ "$WIZARD_INTROSPECT_MODE" != "1" ]]; then
