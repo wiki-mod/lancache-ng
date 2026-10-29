@@ -329,7 +329,9 @@ _ci_runner_self_hosted() {
 # Why: one owner for the PAT and the job token header.
 # From: Issue #1683 | PR #1858
 _ci_git_auth_header() {
-    printf 'AUTHORIZATION: basic %s' "$(printf '%s' "x-access-token:$1" | base64 -w0)"
+    local enc
+    enc="$(printf '%s' "x-access-token:$1" | base64 -w0)" || return 2
+    printf 'AUTHORIZATION: basic %s' "${enc}"
 }
 
 # What: trust the checkout; CI_GIT_TOKEN as push auth.
@@ -337,7 +339,7 @@ _ci_git_auth_header() {
 # From: Issue #1683 | PR #1858
 _ci_git_trust_init() {
     local dir="${GITHUB_WORKSPACE:-}" n="${GIT_CONFIG_COUNT:-0}"
-    local token="${CI_GIT_TOKEN:-}" srv key
+    local token="${CI_GIT_TOKEN:-}" srv key header
     if [ -z "${dir}" ]; then
         return 0
     fi
@@ -351,7 +353,8 @@ _ci_git_trust_init() {
         # From: Issue #1683 | PR #1858
         export "GIT_CONFIG_KEY_${n}=${key}" "GIT_CONFIG_VALUE_${n}="
         n=$((n + 1))
-        export "GIT_CONFIG_KEY_${n}=${key}" "GIT_CONFIG_VALUE_${n}=$(_ci_git_auth_header "${token}")"
+        header="$(_ci_git_auth_header "${token}")" || return 2
+        export "GIT_CONFIG_KEY_${n}=${key}" "GIT_CONFIG_VALUE_${n}=${header}"
         n=$((n + 1))
     fi
     export GIT_CONFIG_COUNT="${n}"
@@ -1091,7 +1094,17 @@ ci_cmd_codeql_config() {
 # Why: one curl call that _ci_retry can classify.
 # From: Issue #1683 | PR #1858
 _ci_http_download() {
-    curl -fsSL -o "$2" "$1"
+    _ci_download_curl -fsSL -o "$2" "$1"
+}
+
+# What: curl with the SOT connect and stall bounds.
+# Why: a stalled server ends the try, not the job.
+# From: Issue #1683 | PR #1858
+_ci_download_curl() {
+    local conn stall
+    conn="$(_ci_variable CI_DOWNLOAD_CONNECT_TIMEOUT)" || return 2
+    stall="$(_ci_variable CI_DOWNLOAD_STALL_SECONDS)" || return 2
+    curl --connect-timeout "${conn}" --speed-limit 1 --speed-time "${stall}" "$@"
 }
 
 # What: Download a URL and verify it against a sha256.
@@ -1129,7 +1142,7 @@ _ci_fetch_drop() {
 # Why: an org IP allow list refuses the job token (403).
 # From: Issue #1683 | PR #1858
 _ci_github_get() {
-    curl --fail-with-body -sSL -H 'Accept: application/vnd.github+json' "$1"
+    _ci_download_curl --fail-with-body -sSL -H 'Accept: application/vnd.github+json' "$1"
 }
 
 # What: print memo $1 of this job; 1 when there is none.
@@ -3866,23 +3879,26 @@ _ci_for_test_services() {
 ci_cmd_test_stack() { _ci_for_test_services ci_cmd_test; }
 
 # What: label and scope of one SOT status kind.
-# Why: the SOT owns both; service, arch, severity fill in.
+# Why: the SOT owns both; service, arch, scan rows fill in.
 # From: Issue #1683 | PR #1912
 _ci_status_text() {
-    local kind="$1" svc="${2:-}" arch="${3:-}" label scope sev=""
+    local kind="$1" svc="${2:-}" arch="${3:-}" label scope sev="" ign=""
     label="$(_ci_block_entry_field status_reports "${kind}" label)" || return 2
     scope="$(_ci_block_entry_field status_reports "${kind}" scope)" || return 2
     if [ -z "${label}" ] || [ -z "${scope}" ]; then
         ci_log "[CI-ERROR-STATUS-0010]" "kind=\"${kind}\" reason=\"no SOT status_reports label and scope\""
         return 2
     fi
-    # What: the SEVERITY row, only for a scope naming it.
+    # What: SEVERITY and IGNORE rows, filled on use.
     # Why: scan args and issue text read one _ci_variable.
     # From: Issue #1683 | PR #1858
     case "${scope}" in
         *"@SEVERITY@"*) sev="$(_ci_variable CI_TRIVY_SEVERITY)" || return 2 ;;
     esac
-    _ci_fill "${scope}" "SERVICE=${svc}"$'\n'"ARCH=${arch}"$'\n'"SEVERITY=${sev}" || return 2
+    case "${scope}" in
+        *"@IGNORE@"*) ign="$(_ci_variable CI_TRIVY_IGNORE)" || return 2 ;;
+    esac
+    _ci_fill "${scope}" "SERVICE=${svc}"$'\n'"ARCH=${arch}"$'\n'"SEVERITY=${sev}"$'\n'"IGNORE=${ign}" || return 2
     printf '%s\n%s\n' "${label}${svc:+-${svc}}${arch:+-${arch}}" "${REPLY}"
 }
 
@@ -8568,14 +8584,15 @@ _ci_pat_url() {
 # Why: rulesets refuse GITHUB_TOKEN branch pushes
 # From: Issue #1683 | PR #1858
 _ci_pat_git() {
-    local pat srv
+    local pat srv header
     pat="$(_ci_env_required PROJECT_AUTOMATION_PAT)" || return 2
     srv="$(_ci_env_required GITHUB_SERVER_URL)" || return 2
+    header="$(_ci_git_auth_header "${pat}")" || return 2
     # What: empty value drops the checkout's token header
     # Why: else git sends two AUTHORIZATION headers
     # From: Issue #1683 | PR #1858
     git -c "http.${srv}/.extraheader=" \
-        -c "http.${srv}/.extraheader=$(_ci_git_auth_header "${pat}")" "$@"
+        -c "http.${srv}/.extraheader=${header}" "$@"
 }
 
 # What: push the PAT-authored tag, then read it back
@@ -9918,8 +9935,9 @@ PROG
 # Why: Real dig on both sides; the answers MUST differ.
 # From: Issue #1683 | PR #1912
 _ci_validate_dns() {
-    local project="$1" ip domain side port out a_http=""
-    ip="$(_ci_validate_container_ip "${project}" "$(_ci_validation_service dns)")"
+    local project="$1" ip domain side port out a_http="" svc
+    svc="$(_ci_validation_service dns)" || return 2
+    ip="$(_ci_validate_container_ip "${project}" "${svc}")"
     domain="$(_ci_validation_dns_domain)"
     if [ -z "${ip}" ] || [ -z "${domain}" ]; then
         ci_log "[CI-ERROR-VALIDATE-0010]" "reason=\"missing dns container IP or test domain\""
@@ -9950,21 +9968,22 @@ _ci_validate_dns() {
 # Why: Real cache behavior, not a port probe (AG-VAL-014).
 # From: Issue #1683 | PR #1858
 _ci_validate_proxy() {
-    local project="$1" url ip_std host h1 h2 port
+    local project="$1" url ip_std host h1 h2 port svc
     port="$(_ci_runtime_default PROXY_HTTP_PORT)" || return 2
     url="$(_ci_validation_proxy_probe_url)" || return 2
-    ip_std="$(_ci_validate_container_ip "${project}" "$(_ci_validation_service proxy)")"
+    svc="$(_ci_validation_service proxy)" || return 2
+    ip_std="$(_ci_validate_container_ip "${project}" "${svc}")"
     host="${url#http://}"; host="${host%%/*}"
     if [ -z "${ip_std}" ] || [ -z "${host}" ]; then
         ci_error "[CI-ERROR-VALIDATE-0012]" "url=\"${url}\" reason=\"missing proxy container IP or probe host\"" "${ip_std}"
         return 2
     fi
-    if ! h1="$(curl -fsS --resolve "${host}:${port}:${ip_std}" -D - "${url}" 2>&1)"; then
+    if ! h1="$(_ci_validate_curl -fsS --resolve "${host}:${port}:${ip_std}" -D - "${url}" 2>&1)"; then
         ci_log "[CI-ERROR-VALIDATE-0013]" "url=\"${url}\" reason=\"proxy MISS request failed\""
         printf 'raw:\n%s\n' "${h1}"
         return 1
     fi
-    if ! h2="$(curl -fsS --resolve "${host}:${port}:${ip_std}" -D - "${url}" 2>&1)"; then
+    if ! h2="$(_ci_validate_curl -fsS --resolve "${host}:${port}:${ip_std}" -D - "${url}" 2>&1)"; then
         ci_log "[CI-ERROR-VALIDATE-0065]" "url=\"${url}\" reason=\"proxy repeat request failed\""
         printf 'raw:\n%s\n' "${h2}"
         return 1
@@ -10009,8 +10028,9 @@ _ci_validate_proxy_stream_map() {
 # Why: both SNI map checks share one read and verdict.
 # From: Issue #1683 | PR #1912
 _ci_validate_proxy_map() {
-    local project="$1" file="$2" filter="$3" arg="$4" cid map bad
-    cid="$(_ci_validate_cid "${project}" "$(_ci_validation_service proxy)")" || return 2
+    local project="$1" file="$2" filter="$3" arg="$4" cid map bad svc
+    svc="$(_ci_validation_service proxy)" || return 2
+    cid="$(_ci_validate_cid "${project}" "${svc}")" || return 2
     if [ -z "${cid}" ]; then
         ci_log "$5" "reason=\"$6\""
         return 2
@@ -10030,12 +10050,14 @@ _ci_validate_proxy_map() {
 # Why: the proxy https port must show a cert we signed
 # From: Issue #1683
 _ci_validate_https_mitm() {
-    local project="$1" ip cid domain ca_subj issuer tmp out cert tls_err ca ca_file port
+    local project="$1" ip cid domain ca_subj issuer tmp out cert tls_err ca ca_file port svc max
+    max="$(_ci_variable CI_VALIDATE_HTTP_MAX_TIME)" || return 2
     ca="$(_ci_nginx_subdir NGINX_SUBDIR_CA)" || return 2
     ca_file="$(_ci_runtime_default CA_CERT_FILE)" || return 2
     port="$(_ci_runtime_default PROXY_HTTPS_PORT)" || return 2
-    ip="$(_ci_validate_container_ip "${project}" "$(_ci_validation_service proxy)")"
-    cid="$(_ci_validate_cid "${project}" "$(_ci_validation_service proxy)")" || return 2
+    svc="$(_ci_validation_service proxy)" || return 2
+    ip="$(_ci_validate_container_ip "${project}" "${svc}")"
+    cid="$(_ci_validate_cid "${project}" "${svc}")" || return 2
     domain="$(_ci_validation_dns_domain)"
     if [ -z "${ip}" ] || [ -z "${cid}" ] || [ -z "${domain}" ]; then
         ci_log "[CI-ERROR-VALIDATE-0023]" "reason=\"no proxy container/IP or test domain for https-mitm check\""
@@ -10054,7 +10076,7 @@ _ci_validate_https_mitm() {
     # Why: raw evidence when the issuer read fails.
     # From: Issue #1683 | PR #1858
     tls_err="$(_ci_mktemp "${CI_TMPDIR}/ci-tls-err.XXXXXX")" || { rm -f "${tmp}"; return 2; }
-    cert="$(printf '' | openssl s_client -connect "${ip}:${port}" -servername "${domain}" 2>"${tls_err}")"
+    cert="$(printf '' | timeout "${max}" openssl s_client -connect "${ip}:${port}" -servername "${domain}" 2>"${tls_err}")"
     issuer=""
     if [ -n "${cert}" ]; then
         issuer="$(openssl x509 -noout -issuer 2>>"${tls_err}" <<<"${cert}")"
@@ -10142,11 +10164,11 @@ _ci_validate_ui_session() {
     # What: one try; wait_healthy already saw ui healthy.
     # Why: its healthcheck asks the same server; no poll.
     # From: Issue #1683 | PR #1912
-    if ! last="$(curl -fsS -c "${jar}" "${url}" 2>&1)"; then
+    if ! last="$(_ci_validate_curl -fsS -c "${jar}" "${url}" 2>&1)"; then
         ci_error "[CI-ERROR-VALIDATE-0031]" "url=\"${url}\" reason=\"ui page did not answer\"" "${last}"
         return 1
     fi
-    page="$(_ci_capture 0 curl -fsS -b "${jar}" -c "${jar}" "${url}")" || return 2
+    page="$(_ci_capture 0 _ci_validate_curl -fsS -b "${jar}" -c "${jar}" "${url}")" || return 2
     csrf="$(_ci_capture 0 sed -n 's/.*name="csrf_token" value="\([^"]*\)".*/\1/p' <<< "${page}")" || return 2
     csrf="${csrf%%$'\n'*}"
     if [ -z "${csrf}" ]; then
@@ -10243,7 +10265,7 @@ _ci_validate_ui_post() {
         data+=(--data-urlencode "${field}")
     done
     body="$(_ci_mktemp "${CI_TMPDIR}/ci-ui-body.XXXXXX")" || return 2
-    code="$(_ci_capture 0 curl -sS -b "${jar}" -o "${body}" -w '%{http_code}' \
+    code="$(_ci_capture 0 _ci_validate_curl -sS -b "${jar}" -o "${body}" -w '%{http_code}' \
         "${data[@]}" "${base}${path}")" || {
         rm -f "${body}"
         ci_log "[CI-ERROR-VALIDATE-0082]" "url=\"${base}${path}\" reason=\"ui form post failed (raw above)\""
@@ -10317,8 +10339,9 @@ _ci_validate_dig() {
 # Why: the NATS->PowerDNS write is async; prove it.
 # From: Issue #1683 | PR #1912
 _ci_validate_dns_resolves() {
-    local project="$1" side="$2" fqdn="$3" expected="$4" attempts="$5" ip port
-    ip="$(_ci_validate_container_ip "${project}" "$(_ci_validation_service dns)")"
+    local project="$1" side="$2" fqdn="$3" expected="$4" attempts="$5" ip port svc
+    svc="$(_ci_validation_service dns)" || return 2
+    ip="$(_ci_validate_container_ip "${project}" "${svc}")"
     if [ -z "${ip}" ]; then
         ci_log "[CI-ERROR-VALIDATE-0035]" "side=\"${side}\" reason=\"no dns IP for resolve check\""
         return 2
@@ -10341,7 +10364,7 @@ $(_ci_validate_dig -p "${port}" "@${ip}" A "${fqdn}" 2>&1)
 zone SOA:
 $(_ci_validate_dig +short -p "${port}" "@${ip}" SOA "${fqdn#*.}" 2>&1)
 service:
-$(_ci_validate_service_evidence "${project}" "$(_ci_validation_service dns)")"
+$(_ci_validate_service_evidence "${project}" "${svc}")"
     return 1
 }
 
@@ -10362,8 +10385,9 @@ _ci_validate_dns_match() {
 # Why: Real end-to-end NATS ingest, not a mock.
 # From: Issue #1683 | PR #1912
 _ci_validate_ui_nats_dns() {
-    local project="$1" jar csrf cid base zone label ip dns_wait side rc=0
-    cid="$(_ci_validate_cid "${project}" "$(_ci_validation_service ui)")" || return 2
+    local project="$1" jar csrf cid base zone label ip dns_wait side rc=0 svc
+    svc="$(_ci_validation_service ui)" || return 2
+    cid="$(_ci_validate_cid "${project}" "${svc}")" || return 2
     base="$(_ci_validate_ui_base "${project}" "${cid}")" || return $?
     zone="$(_ci_validate_lan_zone)" || return 2
     label="$(_ci_variable CI_VALIDATE_PROBE_LABEL)" || return 2
@@ -10386,7 +10410,17 @@ _ci_curl_secret() {
     shift 2
     value="${value//\\/\\\\}"
     value="${value//\"/\\\"}"
-    printf '%s = "%s"\n' "${opt}" "${value}" | curl -K - "$@"
+    printf '%s = "%s"\n' "${opt}" "${value}" | _ci_validate_curl -K - "$@"
+}
+
+# What: curl bounded by the SOT validate HTTP timeouts.
+# Why: a hung service fails its probe, not the whole job.
+# From: Issue #1683 | PR #1858
+_ci_validate_curl() {
+    local conn max
+    conn="$(_ci_variable CI_VALIDATE_HTTP_CONNECT_TIMEOUT)" || return 2
+    max="$(_ci_variable CI_VALIDATE_HTTP_MAX_TIME)" || return 2
+    curl --connect-timeout "${conn}" --max-time "${max}" "$@"
 }
 
 # What: one shared secret read inside a running container
@@ -10503,9 +10537,11 @@ _ci_validate_env_local() {
 # From: Issue #1683
 _ci_validate_dns_rollback() {
     local project="$1" ip cid key jar csrf snap resp code rc=0 last
-    local zone label old new dns_wait ucid base lbase tries pause decoy
-    ip="$(_ci_validate_container_ip "${project}" "$(_ci_validation_service dns)")"
-    cid="$(_ci_validate_cid "${project}" "$(_ci_validation_service dns)")" || return 2
+    local zone label old new dns_wait ucid base lbase tries pause decoy dsvc usvc
+    dsvc="$(_ci_validation_service dns)" || return 2
+    usvc="$(_ci_validation_service ui)" || return 2
+    ip="$(_ci_validate_container_ip "${project}" "${dsvc}")"
+    cid="$(_ci_validate_cid "${project}" "${dsvc}")" || return 2
     if [ -z "${ip}" ] || [ -z "${cid}" ]; then
         ci_log "[CI-ERROR-VALIDATE-0037]" "reason=\"no dns container/IP for rollback check\""
         return 2
@@ -10519,7 +10555,7 @@ _ci_validate_dns_rollback() {
         ci_log "[CI-ERROR-VALIDATE-0038]" "reason=\"could not read PDNS_API_KEY from shared-secrets\""
         return 2
     fi
-    ucid="$(_ci_validate_cid "${project}" "$(_ci_validation_service ui)")" || return 2
+    ucid="$(_ci_validate_cid "${project}" "${usvc}")" || return 2
     lbase="$(_ci_validate_rollback_base "${ip}")" || return 2
     # What: one try; dns healthy means the listener accepts.
     # Why: the healthcheck connects to it; no poll.
@@ -10528,7 +10564,7 @@ _ci_validate_dns_rollback() {
         ci_error "[CI-ERROR-VALIDATE-0039]" "url=\"${lbase}\" reason=\"rollback listener did not accept\"" "${last}"
         return 1
     fi
-    resp="$(_ci_capture 0 curl -sS -w '\n%{http_code}' "${lbase}/snapshots")" || return 2
+    resp="$(_ci_capture 0 _ci_validate_curl -sS -w '\n%{http_code}' "${lbase}/snapshots")" || return 2
     code="${resp##*$'\n'}"
     if [ "${code}" != "401" ]; then
         ci_error "[CI-ERROR-VALIDATE-0040]" "code=\"${code}\" reason=\"/snapshots without X-API-Key not 401\"" "${resp}"
@@ -10568,7 +10604,7 @@ _ci_validate_dns_rollback() {
     # From: Issue #836
     decoy="$(_ci_variable CI_VALIDATE_DECOY_API_KEY)" || return 2
     COMPOSE_PROJECT_NAME="${project}" PDNS_API_KEY="${decoy}" \
-        _ci_validate_setup_rollback resp rc "" "$(_ci_validation_service dns)" "${zone}" "${snap}" || return 2
+        _ci_validate_setup_rollback resp rc "" "${dsvc}" "${zone}" "${snap}" || return 2
     case "${rc}:${resp}" in
         *"cache-flush publishes failed"*) rc=1 ;;
         0:*"rolled back to known-good snapshot ${snap}"*"${label}.${zone}"*) ;;
@@ -10769,18 +10805,20 @@ _ci_validate_rm_run() {
 # Why: dhcp is host-mode, so up never starts a Kea.
 # From: Issue #763 | PR #1858
 _ci_validate_kea_rollback() {
-    local project="$1" net="$2" pin="$3" kname uname kip kport tail_lines rc=0
+    local project="$1" net="$2" pin="$3" kname uname kip kport tail_lines rc=0 dsvc usvc
+    dsvc="$(_ci_validation_service dhcp)" || return 2
+    usvc="$(_ci_validation_service ui)" || return 2
     kname="${project}-kea"
     uname="${project}-kea-ui"
     kport="$(_ci_validate_kea_agent http-port)" || return 2
     tail_lines="$(_ci_variable CI_VALIDATE_RUN_LOG_TAIL)" || return 2
     _ci_run "[CI-ERROR-VALIDATE-0096]" "project=\"${project}\" service=\"dhcp\" reason=\"Kea run container not started\"" \
         _ci_validate_compose "${project}" "${net}" "${pin}" run -d --no-deps --name "${kname}" \
-            -e DHCP_MODE=kea "$(_ci_validation_service dhcp)" || return $?
+            -e DHCP_MODE=kea "${dsvc}" || return $?
     # What: both run containers must be healthy first.
     # Why: healthy means the Kea agent and ui accept.
     # From: Issue #1683 | PR #1912
-    if ! _ci_validate_wait_cid "$(_ci_validation_service dhcp)" "${kname}"; then
+    if ! _ci_validate_wait_cid "${dsvc}" "${kname}"; then
         ci_error "[CI-ERROR-VALIDATE-0129]" "service=\"dhcp\" container=\"${kname}\" reason=\"Kea run container not healthy (cause above)\"" \
             "$(docker logs --tail "${tail_lines}" "${kname}" 2>&1)"
         rc=1
@@ -10789,8 +10827,8 @@ _ci_validate_kea_rollback() {
         rc=2
     elif _ci_run "[CI-ERROR-VALIDATE-0098]" "project=\"${project}\" service=\"ui\" reason=\"Kea ui run container not started\"" \
         _ci_validate_compose "${project}" "${net}" "${pin}" run -d --no-deps --name "${uname}" \
-        -e DHCP_MODE=kea -e "DHCP_API_HOST=${kip}" "$(_ci_validation_service ui)"; then
-        _ci_validate_wait_cid "$(_ci_validation_service ui)" "${uname}" || rc=$?
+        -e DHCP_MODE=kea -e "DHCP_API_HOST=${kip}" "${usvc}"; then
+        _ci_validate_wait_cid "${usvc}" "${uname}" || rc=$?
         [ "${rc}" -ne 0 ] || _ci_validate_kea_round_trip "${project}" "${kip}" "${kport}" "${uname}" || rc=$?
         # What: a failed round trip ships both run logs.
         # Why: the ui answer alone does not name the cause.
@@ -10845,9 +10883,10 @@ _ci_validate_ui_token_file() {
 # Why: per-secondary NATS auth-callout, not shared token.
 # From: Issue #1683
 _ci_validate_secondary_identity() {
-    local project="$1" base cid token a b au bu ap bp trc=0 tf label
+    local project="$1" base cid token a b au bu ap bp trc=0 tf label svc
     label="$(_ci_variable CI_VALIDATE_PROBE_LABEL)" || return 2
-    cid="$(_ci_validate_cid "${project}" "$(_ci_validation_service ui)")" || return 2
+    svc="$(_ci_validation_service ui)" || return 2
+    cid="$(_ci_validate_cid "${project}" "${svc}")" || return 2
     if [ -z "${cid}" ] || ! base="$(_ci_validate_ui_base "${project}" "${cid}")"; then
         ci_log "[CI-ERROR-VALIDATE-0045]" "reason=\"no ui container/IP for secondary-identity check\""
         return 2
@@ -10877,10 +10916,10 @@ _ci_validate_secondary_identity() {
         ci_log "[CI-ERROR-VALIDATE-0047]" "reason=\"a secondary register did not return 200\""
         return 1
     fi
-    au="$(printf '%s' "${a}" | jq -r '.nats_user // empty')"
-    bu="$(printf '%s' "${b}" | jq -r '.nats_user // empty')"
-    ap="$(printf '%s' "${a}" | jq -r '.nats_password // empty')"
-    bp="$(printf '%s' "${b}" | jq -r '.nats_password // empty')"
+    au="$(_ci_capture 0 jq -r '.nats_user // empty' <<< "${a}")" || return 1
+    bu="$(_ci_capture 0 jq -r '.nats_user // empty' <<< "${b}")" || return 1
+    ap="$(_ci_capture 0 jq -r '.nats_password // empty' <<< "${a}")" || return 1
+    bp="$(_ci_capture 0 jq -r '.nats_password // empty' <<< "${b}")" || return 1
     if [ -z "${au}" ] || [ -z "${bu}" ] || [ -z "${ap}" ] || [ -z "${bp}" ]; then
         ci_log "[CI-ERROR-VALIDATE-0048]" "reason=\"register response missing nats_user/nats_password\""
         return 1
@@ -12719,7 +12758,8 @@ _ci_rh_check() {
     else
         return 2
     fi
-    groups=" $(_ci_run -m 1 "[CI-ERROR-RUNNER-0025]" "user=\"${user}\" reason=\"groups lookup failed\"" id -nG "${user}") "
+    groups="$(_ci_run -m 1 "[CI-ERROR-RUNNER-0025]" "user=\"${user}\" reason=\"groups lookup failed\"" id -nG "${user}")" || return 2
+    groups=" ${groups} "
     if [[ "${groups}" == *" ${dgroup} "* ]]; then
         printf '  %s in %s group: yes\n' "${user}" "${dgroup}"
     else
@@ -13380,7 +13420,8 @@ _ci_rh_access() {
         fi
         printf 'Installed %s\n' "${file}"
     fi
-    groups=" $(_ci_run -m 1 "[CI-ERROR-RUNNER-0069]" "user=\"${user}\" reason=\"groups lookup failed\"" id -nG "${user}") "
+    groups="$(_ci_run -m 1 "[CI-ERROR-RUNNER-0069]" "user=\"${user}\" reason=\"groups lookup failed\"" id -nG "${user}")" || return 2
+    groups=" ${groups} "
     if [[ "${groups}" == *" ${dgroup} "* ]]; then
         printf '%s is already in the %s group.\n' "${user}" "${dgroup}"
     else
@@ -13428,7 +13469,7 @@ _ci_rh_purge_listchanges() {
     local st pkg aenv
     pkg="$(_ci_rh_val apt_listchanges_pkg)" || return 2
     aenv="$(_ci_rh_val apt_env)" || return 2
-    st="$(_ci_run -m 1 "[CI-ERROR-RUNNER-0077]" "pkg=\"${pkg}\" reason=\"dpkg query failed\"" dpkg -l "${pkg}")"
+    st="$(_ci_run -m 1 "[CI-ERROR-RUNNER-0077]" "pkg=\"${pkg}\" reason=\"dpkg query failed\"" dpkg -l "${pkg}")" || return 2
     if _ci_text_has '^ii' "${st}"; then
         _ci_run "[CI-ERROR-RUNNER-0078]" "pkg=\"${pkg}\" reason=\"package not purged\"" _ci_rh_root env "${aenv}" apt-get purge -y "${pkg}" || return 2
         printf 'Purged %s.\n' "${pkg}"
@@ -15461,7 +15502,7 @@ _ci_check_orphaned_branches() {
         ci_error "[CI-ERROR-CHECK-0135]" "repo=\"${repo}\" reason=\"branch listing unparseable\"" "${rows}"$'\n'"response:"$'\n'"${raw}"
         return 2
     fi
-    now="$(date -u +%s)"
+    now="$(_ci_capture 0 date -u +%s)" || return 2
     local branch iso epoch prs author live scanned=0 old=0
     local -a noprs=()
     local -A when=() who=()

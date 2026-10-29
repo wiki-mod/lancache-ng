@@ -905,7 +905,7 @@ status_reports:
   # From: Issue #1683 | PR #1912
   trivy-finding:
     label: trivy-finding
-    scope: "Trivy @SEVERITY@ finding in @SERVICE@ (@ARCH@) not covered by @{ci_variables.CI_TRIVY_IGNORE}"
+    scope: "Trivy @SEVERITY@ finding in @SERVICE@ (@ARCH@) not covered by @IGNORE@"
   trivy-db-unavailable:
     label: trivy-db-unavailable
     scope: "Trivy vulnerability DB missing or stale for @SERVICE@ (@ARCH@) after every retry"
@@ -917,7 +917,7 @@ status_reports:
   # From: Issue #1683 | PR #1858
   trivy-ignore-stale:
     label: trivy-ignore-stale
-    scope: "@{ci_variables.CI_TRIVY_IGNORE} holds ids no full scan matched; remove them"
+    scope: "@IGNORE@ holds ids no full scan matched; remove them"
   # What: the nightly kinds name the jobs they judge.
   # Why: the report job reads the needs; no job id in code.
   # From: Issue #1683 | PR #1912
@@ -1257,6 +1257,11 @@ ci_variables:
   # From: Issue #1683 | PR #1912
   CI_RAW_GET_CONNECT_TIMEOUT: 10
   CI_RAW_GET_MAX_TIME: 30
+  # What: connect seconds and stall seconds of one download.
+  # Why: a stalled transfer ends; _ci_retry tries again.
+  # From: Issue #1683 | PR #1858
+  CI_DOWNLOAD_CONNECT_TIMEOUT: 10
+  CI_DOWNLOAD_STALL_SECONDS: 30
   # What: exactly true moves CI jobs to runner_self_hosted.
   # Why: GitHub-hosted is the default; a repo var switches.
   # From: Issue #1683 | PR #1912
@@ -1295,6 +1300,11 @@ ci_variables:
   # From: Issue #1683 | PR #1858
   CI_VALIDATE_DIG_TIMEOUT: 2
   CI_VALIDATE_DIG_TRIES: 1
+  # What: connect/total seconds of one HTTP or TLS probe.
+  # Why: a hung service fails its probe, not the whole job.
+  # From: Issue #1683 | PR #1858
+  CI_VALIDATE_HTTP_CONNECT_TIMEOUT: 10
+  CI_VALIDATE_HTTP_MAX_TIME: 60
   CI_VALIDATE_SNAPSHOT_POLL_ATTEMPTS: 15
   CI_VALIDATE_POLL_PAUSE: 1
   CI_VALIDATE_PROBE_MAC: "02:00:00:00:07:00"
