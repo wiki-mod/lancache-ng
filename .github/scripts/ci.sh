@@ -10215,42 +10215,44 @@ _ci_validate_dig() {
 # Why: the NATS->PowerDNS write is async; prove it.
 # From: Issue #1683 | PR #1912
 _ci_validate_dns_resolves() {
-    local project="$1" side="$2" fqdn="$3" expected="$4" attempts="$5" ip port got i
+    local project="$1" side="$2" fqdn="$3" expected="$4" attempts="$5" ip port
     ip="$(_ci_validate_container_ip "${project}" "$(_ci_validation_service dns)")"
     if [ -z "${ip}" ]; then
         ci_log "[CI-ERROR-VALIDATE-0035]" "side=\"${side}\" reason=\"no dns IP for resolve check\""
         return 2
     fi
     port="$(_ci_validate_dns_port "${side}")" || return 2
-    local out="" dig_err pause
+    local out pause
     pause="$(_ci_variable CI_VALIDATE_POLL_PAUSE)" || return 2
-    # What: dig stderr kept apart from the compared answer.
-    # Why: a warning must not turn a match into a mismatch.
+    # What: the one poll owner repeats one dig compare.
+    # Why: AG-CODE-011: no second poll loop in this file.
     # From: Issue #1683 | PR #1858
-    dig_err="$(_ci_mktemp "${CI_TMPDIR}/ci-dig-err.XXXXXX")" || return 2
-    for (( i = 1; i <= attempts; i++ )); do
-        got=""
-        if out="$(_ci_validate_dig +short -p "${port}" "@${ip}" A "${fqdn}" 2>"${dig_err}")"; then
-            got="$(sort -u <<<"${out}")"
-        fi
-        if [ "${got}" = "${expected}" ]; then
-            rm -f "${dig_err}"
-            return 0
-        fi
-        sleep "${pause}"
-    done
+    out="$(_ci_validate_poll "${attempts}" "${pause}" _ci_validate_dns_match "${port}" "${ip}" "${fqdn}" "${expected}")" && return 0
     # What: full answer, zone SOA and the service's logs.
     # Why: +short hides NXDOMAIN vs empty vs SERVFAIL.
     # From: Issue #1683 | PR #1858
-    ci_error "[CI-ERROR-VALIDATE-0036]" "side=\"${side}\" fqdn=\"${fqdn}\" expected=\"${expected}\" got=\"${got:-}\" reason=\"record did not resolve as expected\"" \
-        "${out}$(cat "${dig_err}")
+    ci_error "[CI-ERROR-VALIDATE-0036]" "side=\"${side}\" fqdn=\"${fqdn}\" expected=\"${expected}\" reason=\"record did not resolve as expected\"" \
+        "last try:
+${out}
 full answer:
 $(_ci_validate_dig -p "${port}" "@${ip}" A "${fqdn}" 2>&1)
 zone SOA:
 $(_ci_validate_dig +short -p "${port}" "@${ip}" SOA "${fqdn#*.}" 2>&1)
 service:
 $(_ci_validate_service_evidence "${project}" "$(_ci_validation_service dns)")"
-    rm -f "${dig_err}"
+    return 1
+}
+
+# What: one dig +short A answer against the expected set.
+# Why: dig stderr stays out of the compared answer.
+# From: Issue #1683 | PR #1858
+_ci_validate_dns_match() {
+    local port="$1" ip="$2" fqdn="$3" expected="$4" out got=""
+    if out="$(_ci_validate_dig +short -p "${port}" "@${ip}" A "${fqdn}")"; then
+        got="$(sort -u <<<"${out}")"
+    fi
+    [ "${got}" != "${expected}" ] || return 0
+    printf 'got=%s\n' "${got}"
     return 1
 }
 
