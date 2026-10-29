@@ -194,6 +194,10 @@ struct Config {
     // Why: a silent host is a status, not a hang.
     // From: Issue #1683 | PR #1912
     secondary_probe_timeout: Duration,
+    // What: wait per NATS system request of a kick.
+    // Why: a dead system connection must not hang a removal.
+    // From: Issue #681
+    nats_kick_step: Duration,
     watchdog_miss_limit: u32,
     security_headers_enabled: bool,
     hsts_mode: HstsMode,
@@ -468,6 +472,7 @@ impl Config {
                 OutOfRange::Reject,
             )? as i64,
             secondary_probe_timeout: need_secs(env, "SECONDARY_PROBE_TIMEOUT")?,
+            nats_kick_step: need_secs(env, "NATS_KICK_STEP_TIMEOUT")?,
             // What: missed watchdog cycles before stale.
             // Why: one owner with the restart rule.
             // From: Issue #1683 | PR #1912
@@ -2908,7 +2913,7 @@ async fn run_auth_callout(state: Arc<AppState>, issuer: KeyPair, xkey: XKey) {
 // Why: a removed secondary would keep its connection.
 // From: Issue #681
 async fn kick_secondary(state: &AppState, nats_user: &str) -> Result<usize, String> {
-    const STEP: Duration = Duration::from_secs(5);
+    let step = state.config.nats_kick_step;
     // What: no system user configured fails the kick.
     // Why: only the system account may list and kick.
     // From: Issue #1683 | PR #1912
@@ -2916,7 +2921,7 @@ async fn kick_secondary(state: &AppState, nats_user: &str) -> Result<usize, Stri
         return Err("NATS_SYS_USER is not configured".to_string());
     }
     let client = tokio::time::timeout(
-        STEP,
+        step,
         nats_connect(&state.config.nats_url, &state.config.nats.sys),
     )
     .await
@@ -2925,7 +2930,7 @@ async fn kick_secondary(state: &AppState, nats_user: &str) -> Result<usize, Stri
         let client = client.clone();
         async move {
             let reply = tokio::time::timeout(
-                STEP,
+                step,
                 client.request(subject, body.to_string().into_bytes().into()),
             )
             .await
