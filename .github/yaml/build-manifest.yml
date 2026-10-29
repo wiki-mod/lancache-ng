@@ -971,6 +971,13 @@ build_secrets:
   bake_env_prefixes: [HTTP_PROXY, HTTPS_PROXY, http_proxy, https_proxy, GOPROXY, SCCACHE_, CCACHE_, DISTCC_, ACTIONS_]
   runtime_dir_name: ci-runtime-secrets
 
+# What: git identity of CI's own commits and tags.
+# Why: runners set no git user; one value owner.
+# From: Issue #1683 | PR #1858
+git_bot:
+  name: "github-actions[bot]"
+  email: "41898282+github-actions[bot]@users.noreply.github.com"
+
 # What: CodeQL query suites and ignored paths.
 # Why: One SOT owner; codeql.yml/ci.sh derive, no dup.
 # From: Issue #1683

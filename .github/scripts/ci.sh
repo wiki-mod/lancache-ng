@@ -2850,11 +2850,14 @@ _ci_cas_ref_sha() {
 }
 
 # What: run git as the GitHub Actions bot identity
-# Why: runners set no git user; one identity owner
+# Why: AG-CI-006: name and e-mail live in SOT git_bot.
 # From: Issue #1683 | PR #1858
 _ci_git_as_bot() {
-    GIT_AUTHOR_NAME='github-actions[bot]' GIT_AUTHOR_EMAIL='41898282+github-actions[bot]@users.noreply.github.com' \
-    GIT_COMMITTER_NAME='github-actions[bot]' GIT_COMMITTER_EMAIL='41898282+github-actions[bot]@users.noreply.github.com' \
+    local name email
+    name="$(_ci_required_field git_bot name block)" || return 2
+    email="$(_ci_required_field git_bot email block)" || return 2
+    GIT_AUTHOR_NAME="${name}" GIT_AUTHOR_EMAIL="${email}" \
+    GIT_COMMITTER_NAME="${name}" GIT_COMMITTER_EMAIL="${email}" \
         git "$@"
 }
 
