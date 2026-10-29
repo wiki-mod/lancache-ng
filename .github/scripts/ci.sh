@@ -2503,7 +2503,7 @@ _ci_impact_run() {
 _ci_impact_classify() {
     local t="$1" p="$2" hid="$3" base="$4" base_manifest="$5" head="${6:-}" hc bc hs bs bt hi bi
     if [ -z "${hid}" ]; then
-        ci_log "[CI-INFO-IMPACT-0009]" "service=\"${t}\" platform=\"${p}\" reason=\"no head identity; UNKNOWN\""
+        ci_log "[CI-INFO-IMPACT-0009]" "service=\"${t}\" platform=\"${p}\" reason=\"head identity not computed (error above); UNKNOWN\""
         printf 'UNKNOWN\n'; return 0
     fi
     # What: head SOT paths, read in the head and base tree.
