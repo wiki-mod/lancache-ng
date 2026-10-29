@@ -765,7 +765,8 @@ ci_service_context_paths() {
     type="$(_ci_required_field "${svc}" build_type)" || return 2
     [ "${type}" = rust ] || return 0
     own="$(_ci_required_field "${svc}" context)" || return 2
-    crates=" $(_ci_required_field "${svc}" crates list | tr '\n' ' ')"
+    crates="$(_ci_required_field "${svc}" crates list)" || return 2
+    crates=" ${crates//$'\n'/ } "
     manifest="$(_ci_variable CI_CARGO_MANIFEST)" || return 2
     lock="$(_ci_variable CI_CARGO_LOCK)" || return 2
     rows="$(_ci_workspace_rows "${root}")" || return 2
@@ -3284,7 +3285,7 @@ _ci_ledger_upsert() {
     ledger_ref="$(_ci_variable "${refvar}")" || return 3
     file="$(_ci_variable "${filevar}")" || return 3
     new="$(cat)"
-    new="$(printf '%s\n' "${new}" | awk 'NF>0')"
+    new="$(_ci_capture 0 awk 'NF>0' <<< "${new}")" || return 3
     [ -n "${new}" ] || return 0
     blob="$(_ci_ledger_blob "${remote}" "${refvar}" "${filevar}")" || rc=$?
     if [ "${rc}" -eq 2 ]; then
@@ -3298,25 +3299,32 @@ _ci_ledger_upsert() {
     # What: mode replace: a new line replaces its key.
     # Why: a refresh record is a value, not an acceptance.
     # From: Issue #1683 | PR #1858
-    [ "${mode}" = replace ] \
-        || conflict="$(printf '%s\n%s\n' "${blob}" "${new}" | awk -F'\t' 'NF > 0 { if (($1 in seen) && seen[$1] != $0) print $1; seen[$1] = $0 }')"
+    if [ "${mode}" != replace ]; then
+        conflict="$(_ci_capture 0 awk -F'\t' "$(cat <<'PROG'
+            NF > 0 { if (($1 in seen) && seen[$1] != $0) print $1; seen[$1] = $0 }
+PROG
+            )" <<< "${blob}"$'\n'"${new}")" || return 3
+    fi
     if [ -n "${conflict}" ]; then
         ci_error "[CI-ERROR-LEDGER-0006]" "ref=\"${ledger_ref}\" reason=\"conflicting records for one identity; refusing to write\"" "${conflict}"
         return 3
     fi
-    ids="$(printf '%s\n' "${new}" | awk -F'\t' '{print $1}')"
+    ids="$(_ci_capture 0 cut -f1 <<< "${new}")" || return 3
     if [ "${rc}" -eq 1 ]; then
         kept=""
     else
         parent="$(_ci_capture 0 git rev-parse FETCH_HEAD)" || return 3
-        kept="$(printf '%s\n' "${blob}" | awk -F'\t' -v ids="${ids}" '
+        kept="$(_ci_capture 0 awk -F'\t' -v ids="${ids}" "$(cat <<'PROG'
             BEGIN { n = split(ids, a, "\n"); for (i = 1; i <= n; i++) drop[a[i]] = 1 }
-            NF > 0 && !($1 in drop)')"
+            NF > 0 && !($1 in drop)
+PROG
+            )" <<< "${blob}")" || return 3
     fi
     # What: sort the merged record set deterministically.
     # Why: same inputs -> same blob; §26.4 idempotency.
     # From: Issue #1683 | PR #1858
-    merged="$(printf '%s\n%s\n' "${kept}" "${new}" | awk 'NF>0' | LC_ALL=C sort -u)"
+    merged="$(_ci_capture 0 awk 'NF>0' <<< "${kept}"$'\n'"${new}")" || return 3
+    merged="$(_ci_capture 0 env LC_ALL=C sort -u <<< "${merged}")" || return 3
     # What: an unchanged record set writes no commit.
     # Why: a rerun converges on the same ref (§26.4).
     # From: Issue #1683 | PR #1858
@@ -3839,7 +3847,9 @@ _ci_status_text() {
 # From: Issue #1683 | PR #1912
 _ci_status_body() {
     local scope="$1" run_url="$2" sha="$3" evidence="$4" cap
-    printf '%s\n\nRun: %s\nCommit: %s\nEvent: %s\n' "${scope}" "${run_url}" "${sha}" "${GITHUB_EVENT_NAME}"
+    local event
+    event="$(_ci_env_required GITHUB_EVENT_NAME)" || return 2
+    printf '%s\n\nRun: %s\nCommit: %s\nEvent: %s\n' "${scope}" "${run_url}" "${sha}" "${event}"
     [ -z "${evidence}" ] && return 0
     cap="$(_ci_variable CI_STATUS_EVIDENCE_BYTES)" || return 2
     printf "\\nEvidence (first %s of %s bytes; the run log holds all):\\n\`\`\`text\\n%s\\n\`\`\`\\n" \
@@ -5319,7 +5329,12 @@ _ci_rb_ccache() {
         export CCACHE_DIR="${_CI_RB_ACC}/ccache"
         export CCACHE_PREFIX=distcc
         export CCACHE_COMPILERCHECK=content
-        _ci_rb_write "${local_id}" printf '%s' "${!CI_ARG_TOOLCHAIN_IMAGE:-}" || return 2
+        local tc_id="${!CI_ARG_TOOLCHAIN_IMAGE:-}"
+        if [ -z "${tc_id}" ]; then
+            ci_log "[CI-ERROR-RUSTBUILD-0067]" "name=\"${CI_ARG_TOOLCHAIN_IMAGE}\" reason=\"empty toolchain identity; the ccache key would miss a toolchain bump\""
+            return 2
+        fi
+        _ci_rb_write "${local_id}" printf '%s' "${tc_id}" || return 2
         export CCACHE_EXTRAFILES="${local_id}:${_CI_RB_REMOTE_ID}"
         export CCACHE_BASEDIR="${ccache_probe_dir}"
         local k
@@ -5463,9 +5478,12 @@ ci_cmd_rust_build() {
         _CI_RB_CA=1
         _ci_run "[CI-ERROR-RUSTBUILD-0058]" "reason=\"proxy CA not added to the trust store\"" update-ca-certificates || return 2
     fi
-    _ci_rb_sccache "${service}"
-    _ci_rb_distcc
-    _ci_rb_ccache
+    # What: an accelerator that fails stops the build.
+    # Why: AG-CI-007: a cache level has no silent fallback.
+    # From: Issue #1683 | PR #1858
+    _ci_rb_sccache "${service}" || return 2
+    _ci_rb_distcc || return 2
+    _ci_rb_ccache || return 2
     # What: cargo home from the SOT, the cache mount root.
     # Why: §39: registry and git caches live in the mounts.
     # From: Issue #1683 | PR #1912
@@ -5483,15 +5501,16 @@ ci_cmd_rust_build() {
                 cargo clean -p "${crate}" --release --target "${musl_target}" || return 2
         done
     fi
-    local stubs s
+    local stubs s brc=0
     stubs="$(_ci_rust_member_stubs)" || return 2
-    _ci_rust_cargo_build "${crates}" "${musl_target}" "${cargo_jobs}"
+    _ci_rust_cargo_build "${crates}" "${musl_target}" "${cargo_jobs}" || brc=$?
     # What: remove exactly the stub files this run created.
     # Why: a stub left behind would ship in the real build.
     # From: Issue #1683 | PR #1858
     while IFS= read -r s; do
         [ -z "${s}" ] || _ci_run "[CI-ERROR-RUSTBUILD-0044]" "file=\"${s}\" reason=\"stub not removed\"" rm -f -- "${s}" || return 2
     done <<< "${stubs}"
+    [ "${brc}" -eq 0 ] || return 2
     # What: show ccache stats; a Redis error fails.
     # Why: AG-CI-007: a dead cache level must not pass.
     # From: Issue #1683 | PR #1912
