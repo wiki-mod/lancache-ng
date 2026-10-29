@@ -2279,7 +2279,7 @@ is_quickstart_install() {
 migrate_quickstart_install() (
     local old_dir="$1" stack_dir="${PROD_COMPOSE%/*}" env_local old_env record project key value volume dir copy f
     local services old_volumes prod_volumes rows missing copies keys old_raw new_raw old_value line path_keys bundle
-    local https_ip
+    local https_ip fresh
     local -a service_list copy_lines path_key_list=()
     path_keys=$(lancache_sot_list quickstart_path_keys runtime) || exit $?
     path_keys="${path_keys//$'\n'/ }"
@@ -2315,8 +2315,22 @@ migrate_quickstart_install() (
         || die "Pre-migration backup of $old_dir failed; nothing was changed."
     project=$(compose_project_name "$old_dir" "$old_env") \
         || die "Cannot resolve the compose project of $old_dir (exit $?); nothing was changed."
-    if [[ ! -f "$env_local" ]]; then
+    # What: a retry without live copies starts afresh
+    # Why: a failed run's .env.local blocked every retry
+    # From: Issue #1683 | PR #1858
+    fresh=1
+    if [[ -f "$env_local" ]]; then
+        fresh=0
+        if [[ -f "$record" ]]; then
+            fresh=$(awk -F'|' '$1 == "envlocal" { m = 1 } $1 == "rolledback" { c = 0 }
+                $1 == "copied" { c = 1 } END { print (m && !c) ? 1 : 0 }' "$record") \
+                || die "Failed to read $record (exit $?)."
+        fi
+    fi
+    if [[ "$fresh" = 1 ]]; then
         install -m 0600 "$old_env" "$env_local" || die "Failed to create $env_local from $old_env."
+        printf 'envlocal|%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$record" \
+            || die "Failed to record the new $env_local in $record (exit $?)."
     fi
     if ! env_key_exists LANCACHE_STATE_DIR "$env_local"; then
         set_env_key LANCACHE_STATE_DIR "$old_dir" "$env_local"
