@@ -6301,7 +6301,7 @@ ci_cmd_publish() {
 # From: Issue #1683 | PR #1912
 _ci_ship_abort() {
     _ci_build_lock_drop "$1" "$2" || ci_log "[CI-ERROR-SHIP-0006]" "service=\"$1\" platform=\"$2\" reason=\"build lock not released on cancel\""
-    exit 130
+    exit "$3"
 }
 
 # What: ship one pair under the build lock of its identity.
@@ -6314,7 +6314,11 @@ ci_cmd_ship() {
         return 2
     fi
     _ci_build_lock_take "${service}" "${platform}" || return "$?"
-    trap '_ci_ship_abort "${service}" "${platform}"' INT TERM
+    # What: exit 128 + signal number per signal.
+    # Why: a TERM cancel must not read as INT.
+    # From: Issue #1683 | PR #1858
+    trap '_ci_ship_abort "${service}" "${platform}" 130' INT
+    trap '_ci_ship_abort "${service}" "${platform}" 143' TERM
     _ci_ship_chain "${service}" "${platform}" || rc=$?
     trap - INT TERM
     _ci_build_lock_drop "${service}" "${platform}" || lrc=$?
