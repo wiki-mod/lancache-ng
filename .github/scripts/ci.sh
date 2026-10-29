@@ -17345,42 +17345,27 @@ PROG
 # From: Issue #1683 | PR #1858
 _ci_trivyignore_fields() {
     local file="$1" out
-    if ! out="$(awk '
-        function fail(m) { printf "line %d: %s: %s\n", NR, m, $0 > "/dev/stderr"; bad = 1; exit 3 }
-        function scalar(v) {
-            if (v ~ /^".*"$/ || v ~ /^\047.*\047$/) { v = substr(v, 2, length(v) - 2); if (v ~ /["\047\\]/) fail("escaped quoted scalar") }
-            else if (v ~ /(^| )#/ || v ~ /^[\[{&*!|>%@`]/) fail("unsupported plain scalar")
-            return v
-        }
-        function flush() { if (on) { print n "\tstatement\t" st; on = 0 } }
-        { match($0, /^ */); ind = RLENGTH; rest = substr($0, ind + 1) }
-        on && rest == "" { if (st != "") nl++; next }
-        on && ind == 6 {
-            if (st == "") st = rest
-            else if (nl) { while (nl-- > 0) st = st "\036"; st = st rest }
-            else st = st " " rest
-            nl = 0; next
-        }
-        on && ind > 6 { fail("more-indented folded line") }
-        on { flush() }
-        rest == "" || rest ~ /^#/ { next }
-        ind == 0 && rest == "vulnerabilities:" { sect = "v"; next }
-        ind == 0 && rest ~ /^[a-z_]+:[ \t]*$/ { sect = "o"; next }
-        ind == 0 { fail("unsupported top-level line") }
-        sect == "o" { next }
-        sect != "v" { fail("line outside a section") }
-        ind == 2 && rest ~ /^- id:/ { v = rest; sub(/^- id:[ \t]*/, "", v); n++; mode = ""; print n "\tid\t" scalar(v); next }
-        ind == 4 && n && rest ~ /^[a-z_]+:/ {
-            k = rest; sub(/:.*/, "", k); v = rest; sub(/^[a-z_]+:[ \t]*/, "", v); mode = ""
-            if (k == "paths" && v == "") { mode = "paths"; next }
-            if (k == "statement" && v == ">-") { on = 1; st = ""; nl = 0; next }
-            if (k == "statement" || k == "status" || k == "justification") { print n "\t" k "\t" scalar(v); next }
-            fail("unsupported entry key")
-        }
-        ind == 6 && mode == "paths" && rest ~ /^- / { v = rest; sub(/^-[ \t]*/, "", v); print n "\tpath\t" scalar(v); next }
-        { fail("unsupported line") }
-        END { flush(); if (bad) exit 3 }
-    ' "${file}" 2>&1)"; then
+    # What: yq turns the YAML into JSON; jq shapes the rows.
+    # Why: yq owns the YAML; jq checks every key and type.
+    # From: Issue #1683 | PR #1858
+    if ! out="$({ yq --yaml-fix-merge-anchor-to-spec=true -o=json '.vulnerabilities' "${file}" | jq -r "$(cat <<'PROG'
+        def str($k; $n): if has($k) then (.[$k] | if type == "null" then "" elif type == "string" then . else error("entry \($n): \($k) is not a string") end) else empty end;
+        (if . == null then [] else . end)
+        | if type != "array" then error("vulnerabilities is not a list") else . end
+        | to_entries[]
+        | (.key + 1) as $n
+        | .value
+        | if type != "object" then error("entry \($n) is not a mapping") else . end
+        | (keys - ["id", "statement", "status", "justification", "paths"]) as $bad
+        | if ($bad | length) > 0 then error("entry \($n): unsupported entry key \($bad[0])") else . end
+        | if has("id") then . else error("entry \($n): no id") end
+        | "\($n)\tid\t\(str("id"; $n))",
+          (str("statement"; $n) | "\($n)\tstatement\t\(gsub("\n"; "\u001e"))"),
+          (str("status"; $n) | "\($n)\tstatus\t\(.)"),
+          (str("justification"; $n) | "\($n)\tjustification\t\(.)"),
+          (if has("paths") then (.paths | if type == "array" then .[] | if type == "string" then "\($n)\tpath\t\(.)" else error("entry \($n): a path is not a string") end else error("entry \($n): paths is not a list") end) else empty end)
+PROG
+        )"; } 2>&1)"; then
         ci_error "[CI-ERROR-RELEASE-0035]" "file=\"${file}\" reason=\"trivyignore not in the supported shape\"" "${out}"
         return 2
     fi
