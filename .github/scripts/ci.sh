@@ -2486,7 +2486,7 @@ _ci_impact_run() {
 # Why: 2.2 BUILD needs proof; 2.3 UNKNOWN != BUILD.
 # From: Issue #1683 | PR #1912
 _ci_impact_classify() {
-    local t="$1" p="$2" hid="$3" base="$4" base_manifest="$5" head="${6:-}" hc bc hs bs
+    local t="$1" p="$2" hid="$3" base="$4" base_manifest="$5" head="${6:-}" hc bc hs bs bt hi bi
     if [ -z "${hid}" ]; then
         ci_log "[CI-INFO-IMPACT-0009]" "service=\"${t}\" platform=\"${p}\" reason=\"no head identity; UNKNOWN\""
         printf 'UNKNOWN\n'; return 0
@@ -2500,6 +2500,19 @@ _ci_impact_classify() {
     fi
     if [ "${hc}" != "${bc}" ]; then
         ci_log "[CI-INFO-IMPACT-0015]" "service=\"${t}\" platform=\"${p}\" base=\"${base}\" reason=\"normalized build input differs from base; BUILD\""
+        printf 'BUILD\n'; return 0
+    fi
+    # What: a changed identity recipe is proven impact.
+    # Why: base pins would name inputs this code dropped.
+    # From: Issue #1683 | PR #1858
+    if ! bt="$(_ci_required_field "${t}" build_type)" \
+        || ! hi="$(_ci_block_entry_list build_identity "${bt}" inputs)" \
+        || ! bi="$(CI_MANIFEST="${base_manifest}" _ci_block_entry_list build_identity "${bt}" inputs)"; then
+        ci_log "[CI-INFO-IMPACT-0010]" "service=\"${t}\" platform=\"${p}\" base=\"${base}\" reason=\"identity inputs unreadable (error above); UNKNOWN\""
+        printf 'UNKNOWN\n'; return 0
+    fi
+    if [ "${hi}" != "${bi}" ]; then
+        ci_log "[CI-INFO-IMPACT-0017]" "service=\"${t}\" platform=\"${p}\" base=\"${base}\" reason=\"identity inputs changed from ${bi//$'\n'/ } to ${hi//$'\n'/ }; BUILD\""
         printf 'BUILD\n'; return 0
     fi
     # What: same inputs: only an SOT pin change is impact.
