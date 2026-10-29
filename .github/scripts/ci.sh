@@ -119,11 +119,26 @@ ci_log() {
     printf '%s %s\n' "${message_id}" "$*" >&2
 }
 
+# What: open a named log group; closes the open one.
+# Why: Fund 82: a long step shows its parts by name.
+# From: Issue #1683 | PR #1858
+ci_group() {
+    printf '::endgroup::\n::group::%s\n' "$*" >&2
+}
+
+# What: close the open log group.
+# Why: an error or the step end must not stay folded.
+# From: Issue #1683 | PR #1858
+ci_group_end() {
+    printf '::endgroup::\n' >&2
+}
+
 # What: Emit a command failure with its raw output.
 # Why: Command raw stderr MUST always show (Contract 55).
 # From: Issue #1683
 ci_error() {
     local message_id="$1" context="$2" raw="${3:-}"
+    ci_group_end
     ci_log "${message_id}" "${context}"
     printf 'raw:\n%s\n' "${raw}" >&2
 }
@@ -1472,6 +1487,7 @@ ci_cmd_plan_matrix() {
     rc=0; _ci_refresh_event || rc=$?
     case "${rc}" in
         0)
+            ci_group "plan: package refresh"
             _ci_require_ghcr_auth || return "$?"
             authed=true
             _ci_package_refresh_all || return "$?"
@@ -1480,6 +1496,7 @@ ci_cmd_plan_matrix() {
         *) return 2 ;;
     esac
     for service in ${targets}; do
+        ci_group "plan: ${service}"
         path_cand=false rc=0
         _ci_plan_candidate "${service}" "${changed[@]}" || rc=$?
         case "${rc}" in 0) path_cand=true ;; 1) ;; *) return 2 ;; esac
@@ -1518,6 +1535,7 @@ ci_cmd_plan_matrix() {
         plats="$(_ci_platforms "${service}")" || return "$?"
         while IFS= read -r platform; do
             [ -n "${platform}" ] || continue
+            ci_group "plan: ${service} ${platform}"
             # What: one id per pair, fixed once per run.
             # Why: later jobs read it; none recomputes.
             # From: Issue #1683 | PR #1912
@@ -1557,6 +1575,7 @@ ci_cmd_plan_matrix() {
             any=true
         done <<< "${plats}"
     done
+    ci_group "plan: release gate, promote, reuse"
     # What: a release builds nothing; the gate decides.
     # Why: §82: release.yml never builds; ci.yml builds it.
     # From: Issue #1683 | PR #1858
@@ -1613,6 +1632,7 @@ ci_cmd_plan_matrix() {
     fi
     validate="${any}"
     [ "${promote}" = false ] || validate=true
+    ci_group_end
     {
         printf 'any-build=%s\n' "${any}"
         printf 'promote=%s\n' "${promote}"
