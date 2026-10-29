@@ -65,7 +65,9 @@ It can:
 
 - check the required tools
 - ask before installing missing dependencies such as Docker, curl or git
-- clone the repository to `/opt/lancache-ng`
+- ask for the release channel first (`stable` or `nightly`)
+- clone the code of that channel to `/opt/lancache-ng/latest` (stable) or
+  `/opt/lancache-ng/nightly`
 - ask for the cache server IP
 - optionally enable HTTPS caching with a second IP
 - ask for cache directory and cache size
@@ -83,8 +85,15 @@ It can:
 Default installation path:
 
 ```text
-/opt/lancache-ng
+/opt/lancache-ng            data (cache, DNS, DHCP, NATS, CA, ...)
+/opt/lancache-ng/latest     code of the stable channel (master)
+/opt/lancache-ng/nightly    code of the nightly channel (current_dev)
+/opt/lancache-ng/current    link to the channel that runs
 ```
+
+One stack runs at a time: both channels use the same ports and data.
+`nightly` is experimental: untested daily builds that may break the stack;
+it is not for production use.
 
 After setup, open the Admin UI:
 
@@ -263,7 +272,8 @@ Example values:
 |---|---|
 | HTTP mode IP | `192.168.1.10` |
 | HTTPS mode IP | `192.168.1.11` |
-| install directory | `/opt/lancache-ng` |
+| data directory | `/opt/lancache-ng` |
+| code directory | `/opt/lancache-ng/current` |
 | cache directory (shared) | `/opt/lancache-ng/cache` |
 | cache size | `500` GiB |
 | Admin UI port | `8080` |
@@ -271,8 +281,7 @@ Example values:
 After setup, check the containers:
 
 ```bash
-cd /opt/lancache-ng
-docker compose ps
+sudo /opt/lancache-ng/current/setup.sh compose /opt/lancache-ng ps
 ```
 
 Open the Admin UI:
@@ -286,7 +295,7 @@ http://<http-ip>:8080
 If you installed with the setup script, update with:
 
 ```bash
-sudo /opt/lancache-ng/setup.sh update
+sudo /opt/lancache-ng/current/setup.sh update
 ```
 
 The update command can:
@@ -298,6 +307,17 @@ The update command can:
 - restart every service except the Admin UI first, verify the whole non-UI
   set is actually healthy, then restart the Admin UI last
 - automatically roll back to the pre-update backup if that health check fails
+- move the stack to the other code directory when the channel changed
+  (Admin UI Setup page, `LANCACHE_IMAGE_CHANNEL` in
+  `/opt/lancache-ng/current/deploy/prod/.env.local`, or
+  `sudo LANCACHE_IMAGE_CHANNEL=nightly /opt/lancache-ng/current/setup.sh update`);
+  the moved `.env.local` keeps the new channel, and a failed move points
+  `/opt/lancache-ng/current` back
+- move an old install cloned straight into `/opt/lancache-ng` to
+  `/opt/lancache-ng/latest` or `/opt/lancache-ng/nightly`; only its unchanged
+  code files are removed afterwards, its data stays. If that old checkout
+  still has an older `setup.sh`, run `sudo git -C /opt/lancache-ng pull` once
+  first, then `sudo /opt/lancache-ng/setup.sh update`
 
 Setup and update always consume prebuilt runtime images. They do not build the
 production stack locally, so host-side build acceleration is never a runtime
@@ -318,7 +338,7 @@ is a silent no-op, not a full restart on every tick. Manually trigger the same
 check with:
 
 ```bash
-sudo /opt/lancache-ng/setup.sh auto-update
+sudo /opt/lancache-ng/current/setup.sh auto-update
 ```
 
 **Update validation:** The update command validates your configuration during the process. If required config values are missing or invalid, the update will abort immediately rather than continuing with a partial or degraded configuration. If this happens, check that your `.env` and `config/*/` files exist and contain all required keys. See `docs/backup-restore.md` for rollback options.
@@ -326,14 +346,14 @@ sudo /opt/lancache-ng/setup.sh auto-update
 Create a manual backup with:
 
 ```bash
-sudo /opt/lancache-ng/setup.sh backup --config
-sudo /opt/lancache-ng/setup.sh backup --full
+sudo /opt/lancache-ng/current/setup.sh backup --config
+sudo /opt/lancache-ng/current/setup.sh backup --full
 ```
 
 Use `--config` for small update rollback backups. Use `--full` only when you also need cache objects, because full backups can be very large. Restore a backup with:
 
 ```bash
-sudo /opt/lancache-ng/setup.sh restore /var/backups/lancache-ng/lancache-ng-config-YYYYMMDDTHHMMSSZ.tar.gz /opt/lancache-ng
+sudo /opt/lancache-ng/current/setup.sh restore /var/backups/lancache-ng/lancache-ng-config-YYYYMMDDTHHMMSSZ.tar.gz /opt/lancache-ng
 ```
 
 See `docs/backup-restore.md` for backup scope, restore testing, secret handling, CA lifecycle notes, and rollback details.
@@ -369,29 +389,25 @@ The release workflow publishes service images with branch, tag, and SHA tags and
 
 ### Pinning the standalone installer's git ref
 
-The `curl | bash` one-liner above self-clones `/opt/lancache-ng` from
-origin's default branch (`master`) when run standalone with no local repo
-present. `LANCACHE_IMAGE_CHANNEL` already lets you pin which *image* channel
-gets pulled, but until now there was no equivalent for which *git ref* the
-installer bootstraps its own on-disk checkout from. Set
-`LANCACHE_SETUP_GIT_REF` to a branch, tag, or commit-ish to bootstrap from
-that ref instead, for example to validate a pre-release branch the same
-documented way:
+The installer clones the code of the chosen channel into its directory:
+`stable` from `master` into `/opt/lancache-ng/latest`, `nightly` from
+`current_dev` into `/opt/lancache-ng/nightly`. Set `LANCACHE_SETUP_GIT_REF`
+to a branch or tag to clone that ref into the channel's directory instead,
+for example to validate a pre-release branch:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/wiki-mod/lancache-ng/master/setup.sh | sudo LANCACHE_SETUP_GIT_REF=v0.2.0 bash
 ```
 
-Unset (the default) keeps today's behavior unchanged: the installer tracks
-origin's default branch, both for a fresh clone and when re-run against an
-existing `/opt/lancache-ng` checkout.
+A checkout on a branch that is no channel branch installs from where it is,
+with a warning.
 
 ## Debug information
 
 If something does not work, run:
 
 ```bash
-sudo /opt/lancache-ng/setup.sh debug
+sudo /opt/lancache-ng/current/setup.sh debug
 ```
 
 The debug command prints:
@@ -405,8 +421,7 @@ The debug command prints:
 You can also view live logs manually:
 
 ```bash
-cd /opt/lancache-ng
-docker compose logs -f
+sudo /opt/lancache-ng/current/setup.sh compose /opt/lancache-ng logs -f
 ```
 
 ### Reporting a bug
@@ -414,7 +429,7 @@ docker compose logs -f
 If you need to open a GitHub issue for something that isn't working, run:
 
 ```bash
-sudo /opt/lancache-ng/setup.sh create-logs-for-issue
+sudo /opt/lancache-ng/current/setup.sh create-logs-for-issue
 ```
 
 This bundles everything a maintainer needs to triage the report into one
@@ -611,8 +626,7 @@ After manual file changes in a repository-based setup, restart the affected
 services so they reload the mounted files:
 
 ```bash
-cd /opt/lancache-ng
-docker compose restart dns proxy
+sudo /opt/lancache-ng/current/setup.sh compose /opt/lancache-ng restart dns proxy
 ```
 
 Only add domains you understand.  
@@ -907,8 +921,7 @@ services/cachehamster/   CacheHamster scaffold, built into services
 Check that the container is running:
 
 ```bash
-cd /opt/lancache-ng
-docker compose ps
+sudo /opt/lancache-ng/current/setup.sh compose /opt/lancache-ng ps
 ```
 
 Check whether port `53` is already used by another service:
@@ -953,9 +966,8 @@ Check:
 Check:
 
 ```bash
-cd /opt/lancache-ng
-docker compose ps
-docker compose logs --tail=100 ui
+sudo /opt/lancache-ng/current/setup.sh compose /opt/lancache-ng ps
+sudo /opt/lancache-ng/current/setup.sh compose /opt/lancache-ng logs --tail=100 ui
 ```
 
 Common causes:
