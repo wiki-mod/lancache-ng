@@ -15239,7 +15239,10 @@ _ci_check_pr_template() {
     local -a sections=()
     if [ -f "${template}" ]; then
         local produced produced_rc=0
-        produced="$(grep -oE '^## .+' "${template}" | sed 's/^## //')" || produced_rc=$?
+        produced="$(_ci_capture 1 grep -oE '^## .+' "${template}")" || produced_rc=$?
+        if [ "${produced_rc}" -eq 0 ]; then
+            produced="$(_ci_capture 0 sed 's/^## //' <<< "${produced}")" || produced_rc=$?
+        fi
         _ci_producer_ok "${produced_rc}" 1 || return 2
         while IFS= read -r sec; do
             [ -n "${sec}" ] && sections+=("${sec}")
