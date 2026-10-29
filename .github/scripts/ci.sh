@@ -9899,8 +9899,9 @@ PROG
 # Why: Real dig on both sides; the answers MUST differ.
 # From: Issue #1683 | PR #1912
 _ci_validate_dns() {
-    local project="$1" ip domain side port out a_http=""
-    ip="$(_ci_validate_container_ip "${project}" "$(_ci_validation_service dns)")"
+    local project="$1" ip domain side port out a_http="" svc
+    svc="$(_ci_validation_service dns)" || return 2
+    ip="$(_ci_validate_container_ip "${project}" "${svc}")"
     domain="$(_ci_validation_dns_domain)"
     if [ -z "${ip}" ] || [ -z "${domain}" ]; then
         ci_log "[CI-ERROR-VALIDATE-0010]" "reason=\"missing dns container IP or test domain\""
@@ -9931,10 +9932,11 @@ _ci_validate_dns() {
 # Why: Real cache behavior, not a port probe (AG-VAL-014).
 # From: Issue #1683 | PR #1858
 _ci_validate_proxy() {
-    local project="$1" url ip_std host h1 h2 port
+    local project="$1" url ip_std host h1 h2 port svc
     port="$(_ci_runtime_default PROXY_HTTP_PORT)" || return 2
     url="$(_ci_validation_proxy_probe_url)" || return 2
-    ip_std="$(_ci_validate_container_ip "${project}" "$(_ci_validation_service proxy)")"
+    svc="$(_ci_validation_service proxy)" || return 2
+    ip_std="$(_ci_validate_container_ip "${project}" "${svc}")"
     host="${url#http://}"; host="${host%%/*}"
     if [ -z "${ip_std}" ] || [ -z "${host}" ]; then
         ci_error "[CI-ERROR-VALIDATE-0012]" "url=\"${url}\" reason=\"missing proxy container IP or probe host\"" "${ip_std}"
@@ -9990,8 +9992,9 @@ _ci_validate_proxy_stream_map() {
 # Why: both SNI map checks share one read and verdict.
 # From: Issue #1683 | PR #1912
 _ci_validate_proxy_map() {
-    local project="$1" file="$2" filter="$3" arg="$4" cid map bad
-    cid="$(_ci_validate_cid "${project}" "$(_ci_validation_service proxy)")" || return 2
+    local project="$1" file="$2" filter="$3" arg="$4" cid map bad svc
+    svc="$(_ci_validation_service proxy)" || return 2
+    cid="$(_ci_validate_cid "${project}" "${svc}")" || return 2
     if [ -z "${cid}" ]; then
         ci_log "$5" "reason=\"$6\""
         return 2
@@ -10011,12 +10014,13 @@ _ci_validate_proxy_map() {
 # Why: the proxy https port must show a cert we signed
 # From: Issue #1683
 _ci_validate_https_mitm() {
-    local project="$1" ip cid domain ca_subj issuer tmp out cert tls_err ca ca_file port
+    local project="$1" ip cid domain ca_subj issuer tmp out cert tls_err ca ca_file port svc
     ca="$(_ci_nginx_subdir NGINX_SUBDIR_CA)" || return 2
     ca_file="$(_ci_runtime_default CA_CERT_FILE)" || return 2
     port="$(_ci_runtime_default PROXY_HTTPS_PORT)" || return 2
-    ip="$(_ci_validate_container_ip "${project}" "$(_ci_validation_service proxy)")"
-    cid="$(_ci_validate_cid "${project}" "$(_ci_validation_service proxy)")" || return 2
+    svc="$(_ci_validation_service proxy)" || return 2
+    ip="$(_ci_validate_container_ip "${project}" "${svc}")"
+    cid="$(_ci_validate_cid "${project}" "${svc}")" || return 2
     domain="$(_ci_validation_dns_domain)"
     if [ -z "${ip}" ] || [ -z "${cid}" ] || [ -z "${domain}" ]; then
         ci_log "[CI-ERROR-VALIDATE-0023]" "reason=\"no proxy container/IP or test domain for https-mitm check\""
@@ -10298,8 +10302,9 @@ _ci_validate_dig() {
 # Why: the NATS->PowerDNS write is async; prove it.
 # From: Issue #1683 | PR #1912
 _ci_validate_dns_resolves() {
-    local project="$1" side="$2" fqdn="$3" expected="$4" attempts="$5" ip port
-    ip="$(_ci_validate_container_ip "${project}" "$(_ci_validation_service dns)")"
+    local project="$1" side="$2" fqdn="$3" expected="$4" attempts="$5" ip port svc
+    svc="$(_ci_validation_service dns)" || return 2
+    ip="$(_ci_validate_container_ip "${project}" "${svc}")"
     if [ -z "${ip}" ]; then
         ci_log "[CI-ERROR-VALIDATE-0035]" "side=\"${side}\" reason=\"no dns IP for resolve check\""
         return 2
@@ -10322,7 +10327,7 @@ $(_ci_validate_dig -p "${port}" "@${ip}" A "${fqdn}" 2>&1)
 zone SOA:
 $(_ci_validate_dig +short -p "${port}" "@${ip}" SOA "${fqdn#*.}" 2>&1)
 service:
-$(_ci_validate_service_evidence "${project}" "$(_ci_validation_service dns)")"
+$(_ci_validate_service_evidence "${project}" "${svc}")"
     return 1
 }
 
@@ -10343,8 +10348,9 @@ _ci_validate_dns_match() {
 # Why: Real end-to-end NATS ingest, not a mock.
 # From: Issue #1683 | PR #1912
 _ci_validate_ui_nats_dns() {
-    local project="$1" jar csrf cid base zone label ip dns_wait side rc=0
-    cid="$(_ci_validate_cid "${project}" "$(_ci_validation_service ui)")" || return 2
+    local project="$1" jar csrf cid base zone label ip dns_wait side rc=0 svc
+    svc="$(_ci_validation_service ui)" || return 2
+    cid="$(_ci_validate_cid "${project}" "${svc}")" || return 2
     base="$(_ci_validate_ui_base "${project}" "${cid}")" || return $?
     zone="$(_ci_validate_lan_zone)" || return 2
     label="$(_ci_variable CI_VALIDATE_PROBE_LABEL)" || return 2
@@ -10484,9 +10490,11 @@ _ci_validate_env_local() {
 # From: Issue #1683
 _ci_validate_dns_rollback() {
     local project="$1" ip cid key jar csrf snap resp code rc=0 last
-    local zone label old new dns_wait ucid base lbase tries pause decoy
-    ip="$(_ci_validate_container_ip "${project}" "$(_ci_validation_service dns)")"
-    cid="$(_ci_validate_cid "${project}" "$(_ci_validation_service dns)")" || return 2
+    local zone label old new dns_wait ucid base lbase tries pause decoy dsvc usvc
+    dsvc="$(_ci_validation_service dns)" || return 2
+    usvc="$(_ci_validation_service ui)" || return 2
+    ip="$(_ci_validate_container_ip "${project}" "${dsvc}")"
+    cid="$(_ci_validate_cid "${project}" "${dsvc}")" || return 2
     if [ -z "${ip}" ] || [ -z "${cid}" ]; then
         ci_log "[CI-ERROR-VALIDATE-0037]" "reason=\"no dns container/IP for rollback check\""
         return 2
@@ -10500,7 +10508,7 @@ _ci_validate_dns_rollback() {
         ci_log "[CI-ERROR-VALIDATE-0038]" "reason=\"could not read PDNS_API_KEY from shared-secrets\""
         return 2
     fi
-    ucid="$(_ci_validate_cid "${project}" "$(_ci_validation_service ui)")" || return 2
+    ucid="$(_ci_validate_cid "${project}" "${usvc}")" || return 2
     lbase="$(_ci_validate_rollback_base "${ip}")" || return 2
     # What: one try; dns healthy means the listener accepts.
     # Why: the healthcheck connects to it; no poll.
@@ -10549,7 +10557,7 @@ _ci_validate_dns_rollback() {
     # From: Issue #836
     decoy="$(_ci_variable CI_VALIDATE_DECOY_API_KEY)" || return 2
     COMPOSE_PROJECT_NAME="${project}" PDNS_API_KEY="${decoy}" \
-        _ci_validate_setup_rollback resp rc "" "$(_ci_validation_service dns)" "${zone}" "${snap}" || return 2
+        _ci_validate_setup_rollback resp rc "" "${dsvc}" "${zone}" "${snap}" || return 2
     case "${rc}:${resp}" in
         *"cache-flush publishes failed"*) rc=1 ;;
         0:*"rolled back to known-good snapshot ${snap}"*"${label}.${zone}"*) ;;
@@ -10749,18 +10757,20 @@ _ci_validate_rm_run() {
 # Why: dhcp is host-mode, so up never starts a Kea.
 # From: Issue #763 | PR #1858
 _ci_validate_kea_rollback() {
-    local project="$1" net="$2" pin="$3" kname uname kip kport tail_lines rc=0
+    local project="$1" net="$2" pin="$3" kname uname kip kport tail_lines rc=0 dsvc usvc
+    dsvc="$(_ci_validation_service dhcp)" || return 2
+    usvc="$(_ci_validation_service ui)" || return 2
     kname="${project}-kea"
     uname="${project}-kea-ui"
     kport="$(_ci_validate_kea_agent http-port)" || return 2
     tail_lines="$(_ci_variable CI_VALIDATE_RUN_LOG_TAIL)" || return 2
     _ci_run "[CI-ERROR-VALIDATE-0096]" "project=\"${project}\" service=\"dhcp\" reason=\"Kea run container not started\"" \
         _ci_validate_compose "${project}" "${net}" "${pin}" run -d --no-deps --name "${kname}" \
-            -e DHCP_MODE=kea "$(_ci_validation_service dhcp)" || return $?
+            -e DHCP_MODE=kea "${dsvc}" || return $?
     # What: both run containers must be healthy first.
     # Why: healthy means the Kea agent and ui accept.
     # From: Issue #1683 | PR #1912
-    if ! _ci_validate_wait_cid "$(_ci_validation_service dhcp)" "${kname}"; then
+    if ! _ci_validate_wait_cid "${dsvc}" "${kname}"; then
         ci_error "[CI-ERROR-VALIDATE-0129]" "service=\"dhcp\" container=\"${kname}\" reason=\"Kea run container not healthy (cause above)\"" \
             "$(docker logs --tail "${tail_lines}" "${kname}" 2>&1)"
         rc=1
@@ -10769,8 +10779,8 @@ _ci_validate_kea_rollback() {
         rc=2
     elif _ci_run "[CI-ERROR-VALIDATE-0098]" "project=\"${project}\" service=\"ui\" reason=\"Kea ui run container not started\"" \
         _ci_validate_compose "${project}" "${net}" "${pin}" run -d --no-deps --name "${uname}" \
-        -e DHCP_MODE=kea -e "DHCP_API_HOST=${kip}" "$(_ci_validation_service ui)"; then
-        _ci_validate_wait_cid "$(_ci_validation_service ui)" "${uname}" || rc=$?
+        -e DHCP_MODE=kea -e "DHCP_API_HOST=${kip}" "${usvc}"; then
+        _ci_validate_wait_cid "${usvc}" "${uname}" || rc=$?
         [ "${rc}" -ne 0 ] || _ci_validate_kea_round_trip "${project}" "${kip}" "${kport}" "${uname}" || rc=$?
         # What: a failed round trip ships both run logs.
         # Why: the ui answer alone does not name the cause.
@@ -10825,9 +10835,10 @@ _ci_validate_ui_token_file() {
 # Why: per-secondary NATS auth-callout, not shared token.
 # From: Issue #1683
 _ci_validate_secondary_identity() {
-    local project="$1" base cid token a b au bu ap bp trc=0 tf label
+    local project="$1" base cid token a b au bu ap bp trc=0 tf label svc
     label="$(_ci_variable CI_VALIDATE_PROBE_LABEL)" || return 2
-    cid="$(_ci_validate_cid "${project}" "$(_ci_validation_service ui)")" || return 2
+    svc="$(_ci_validation_service ui)" || return 2
+    cid="$(_ci_validate_cid "${project}" "${svc}")" || return 2
     if [ -z "${cid}" ] || ! base="$(_ci_validate_ui_base "${project}" "${cid}")"; then
         ci_log "[CI-ERROR-VALIDATE-0045]" "reason=\"no ui container/IP for secondary-identity check\""
         return 2
