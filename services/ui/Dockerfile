@@ -58,11 +58,13 @@ COPY services/dns/nats-subscriber/Cargo.toml services/dns/nats-subscriber/Cargo.
 # Why: real sources before any build; no stale stub rlib.
 # From: Issue #1683 | PR #1858
 COPY services/common services/common
-# What: retry policy for ci.sh, from SOT stage_variables
+# What: retry and download bounds, SOT stage_variables
 # Why: this stage has no SOT; ci.sh reads them from env
 # From: Issue #1683 | PR #1858
 ARG CI_RETRY_MAX_ATTEMPTS
 ARG CI_RETRY_BACKOFF_BASE_SECONDS
+ARG CI_DOWNLOAD_CONNECT_TIMEOUT
+ARG CI_DOWNLOAD_STALL_SECONDS
 # What: dep pre-cache; ci.sh stubs and removes the srcs.
 # Why: layer-caches deps so only real src changes rebuild.
 # From: Issue #1533 | PR #1858
@@ -112,11 +114,13 @@ ARG APK_PACKAGES
 ARG APK_BOOTSTRAP
 RUN apk add --no-cache ${APK_BOOTSTRAP}
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
-# What: retry policy for ci.sh, from SOT stage_variables
+# What: retry and download bounds, SOT stage_variables
 # Why: this stage has no SOT; ci.sh reads them from env
 # From: Issue #1683 | PR #1858
 ARG CI_RETRY_MAX_ATTEMPTS
 ARG CI_RETRY_BACKOFF_BASE_SECONDS
+ARG CI_DOWNLOAD_CONNECT_TIMEOUT
+ARG CI_DOWNLOAD_STALL_SECONDS
 # What: shared package setup via ci.sh.
 # Why: ci.sh owns repos, proxy CA, update+upgrade, add.
 # From: Issue #1683 | PR #1858

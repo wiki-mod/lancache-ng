@@ -1677,7 +1677,7 @@ build_variables:
 # Why: a stage has no SOT; these never key an identity
 # From: Issue #1683 | PR #1858
 stage_variables:
-  ci_sh: [CI_RETRY_MAX_ATTEMPTS, CI_RETRY_BACKOFF_BASE_SECONDS]
+  ci_sh: [CI_RETRY_MAX_ATTEMPTS, CI_RETRY_BACKOFF_BASE_SECONDS, CI_DOWNLOAD_CONNECT_TIMEOUT, CI_DOWNLOAD_STALL_SECONDS]
 
 # What: PR title taxonomy and project board for PR checks.
 # Why: AG-GH-018/008 name one CI policy owner for them.
