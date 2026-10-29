@@ -15053,7 +15053,7 @@ _ci_check_pr_title() {
 # From: Issue #1683
 _ci_check_stable_external_images() {
     local -a dirs=("$@")
-    local d line img k allowed=" " dep
+    local d img k allowed=" " dep
     if [ "${#dirs[@]}" -eq 0 ]; then
         dep="$(_ci_compose_path)" || return 2
         dirs=("${dep%/*}")
@@ -15073,23 +15073,31 @@ _ci_check_stable_external_images() {
             viol+=("${d}: compose dir missing")
             continue
         fi
-        local produced produced_rc=0
-        produced="$(grep -rhE '^[[:space:]]+image:[[:space:]]' "${d}")" || produced_rc=$?
-        _ci_producer_ok "${produced_rc}" 1 || return 2
-        while IFS= read -r line; do
-            img="${line#*image:}"; img="${img#"${img%%[![:space:]]*}"}"
-            # What: only ${LANCACHE_*} own images skip.
-            # Why: any literal host (ghcr too) is SOT.
+        local files f produced
+        files="$(find "${d}" -type f \( -name '*.yml' -o -name '*.yaml' \) | sort)" || return 2
+        if [ -z "${files}" ]; then
+            viol+=("${d}: compose dir holds no compose file")
+            continue
+        fi
+        while IFS= read -r f; do
+            # What: the image: of every service, read by yq.
+            # Why: yq owns YAML quoting and comments.
             # From: Issue #1683 | PR #1858
-            case "${img}" in
-                *"\${LANCACHE"*|'') continue ;;
-            esac
-            img="${img%\"}"; img="${img#\"}"
-            case "${allowed}" in
-                *" ${img} "*) ;;
-                *) viol+=("${d}: external image is not a SOT base image: ${img}") ;;
-            esac
-        done <<<"${produced}"
+            produced="$(_ci_run "[CI-ERROR-CHECK-0200]" "file=\"${f}\" reason=\"compose images not read\"" \
+                yq --yaml-fix-merge-anchor-to-spec=true -r '.services[]?.image | select(tag == "!!str")' "${f}")" || return 2
+            while IFS= read -r img; do
+                # What: only ${LANCACHE_*} own images skip.
+                # Why: any literal host (ghcr too) is SOT.
+                # From: Issue #1683 | PR #1858
+                case "${img}" in
+                    *"\${LANCACHE"*|'') continue ;;
+                esac
+                case "${allowed}" in
+                    *" ${img} "*) ;;
+                    *) viol+=("${f}: external image is not a SOT base image: ${img}") ;;
+                esac
+            done <<<"${produced}"
+        done <<<"${files}"
     done
     if [ "${#viol[@]}" -gt 0 ]; then
         ci_error "[CI-ERROR-CHECK-0014]" "reason=\"external image not in SOT\"" "$(printf '%s\n' "${viol[@]}")"
