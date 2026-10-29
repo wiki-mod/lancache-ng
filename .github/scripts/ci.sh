@@ -6597,13 +6597,17 @@ ci_cmd_test() {
 # Why: SBOM generate != vuln gate; shares the trivy cache.
 # From: Issue #1683
 _ci_trivy_sbom() {
-    local service="$1" digest="$2" out="$3" ref cache_dir raw rc=0 bin
+    local service="$1" digest="$2" out="$3" ref cache_dir rc=0 bin
     ref="$(_ci_image_ref "${service}" "${digest}")" || return 2
     bin="$(_ci_trivy_bin)" || return 2
     cache_dir="$(_ci_trivy_cache_dir)" || return 2
-    raw="$("${bin}" image --format cyclonedx --cache-dir "${cache_dir}" --output "${out}" "${ref}" 2>&1)" || rc=$?
+    # What: the DB is written only by the locked refresh.
+    # Why: the cache-dir is shared; this run only reads it.
+    # From: Issue #1683 | PR #1858
+    _ci_trivy_db_ensure_fresh "${cache_dir}" || return 2
+    _ci_retry trivy "${bin}" image --format cyclonedx --cache-dir "${cache_dir}" \
+        --skip-db-update --output "${out}" "${ref}" >&2 || rc=$?
     { [ "${rc}" -eq 0 ] && [ -s "${out}" ]; } && return 0
-    printf '%s\n' "${raw}" >&2
     return 1
 }
 
