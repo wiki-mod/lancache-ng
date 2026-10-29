@@ -2118,7 +2118,7 @@ _ci_rust_content() {
 _ci_image_base_plus() {
     local field="$1" own="$2" base
     base="$(_ci_block_entry_list image_base "" "${field}")" || return 2
-    printf '%s\n%s\n' "${base}" "${own}" | awk 'NF && !seen[$0]++'
+    _ci_capture 0 awk "NF && !seen[\$0]++" <<< "${base}"$'\n'"${own}"
 }
 
 # What: bootstrap, base, own and build-type apk lists.
@@ -3699,7 +3699,7 @@ _ci_glob_ere() {
 # Why: SOT pr_labels rules plus each target's labels.
 # From: Issue #1683 | PR #1858
 _ci_pr_labels_for() {
-    local label globs g re f t ctx tl keys targets
+    local label globs g re f t ctx tl keys targets labels
     local -A hit=()
     local -a res=()
     keys="$(_ci_block_keys pr_labels all)" || return 2
@@ -3726,7 +3726,10 @@ _ci_pr_labels_for() {
             done <<< "${tl}"
         done
     done
-    [ "${#hit[@]}" -eq 0 ] || printf '%s\n' "${!hit[@]}" | LC_ALL=C sort
+    if [ "${#hit[@]}" -gt 0 ]; then
+        printf -v labels '%s\n' "${!hit[@]}"
+        _ci_capture 0 env LC_ALL=C sort <<< "${labels%$'\n'}"
+    fi
 }
 
 # What: add the path labels to the current pull request.
@@ -6165,7 +6168,7 @@ _ci_toolchain_closure() {
     _ci_image_files "${ref}" "${platform}" "${work}" /lib/apk/db/installed || return 2
     out="$(_ci_run "[CI-ERROR-IDENTITY-0020]" "image=\"${ref}\" platform=\"${platform}\" reason=\"toolchain package closure not read\"" \
         awk -v roots="${roots//$'\n'/ }" "${_CI_AWK_APK_CLOSURE}" "${work}/installed")" || return 2
-    printf '%s\n' "${out}" | LC_ALL=C sort
+    _ci_capture 0 env LC_ALL=C sort <<< "${out}"
 }
 
 # What: installed apk packages the index has newer.
@@ -6805,8 +6808,11 @@ _ci_index_raw() {
 # Why: shared format for assemble/reconcile/candidate.
 # From: Issue #1683
 _ci_normalize_platform_digests() {
-    local input="$1"
-    printf '%s\n' "${input}" | tr ' ' '\n' | awk 'NF' | LC_ALL=C sort | tr '\n' ' '
+    local input="$1" lines
+    lines="$(_ci_capture 0 tr ' ' '\n' <<< "${input}")" || return 2
+    lines="$(_ci_capture 0 awk 'NF' <<< "${lines}")" || return 2
+    lines="$(_ci_capture 0 env LC_ALL=C sort <<< "${lines}")" || return 2
+    [ -z "${lines}" ] || _ci_capture 0 tr '\n' ' ' <<< "${lines}"
 }
 
 # What: index of the accepted digests, found by content
@@ -10620,7 +10626,7 @@ _ci_kea_reply_check() {
 # Why: the rollback target is the id a ui write added.
 # From: Issue #763 | PR #1858
 _ci_validate_kea_snapshots() {
-    local found p id file
+    local found p id file ids=""
     file="$(_ci_runtime_default KEA_CONFIG_SNAPSHOT_FILE)" || return 2
     if ! [[ "${file}" =~ ^[A-Za-z0-9._-]+$ ]]; then
         ci_log "[CI-ERROR-CHECK-0197]" "key=\"KEA_CONFIG_SNAPSHOT_FILE\" value=\"${file}\" reason=\"SOT snapshot file name is no plain file name\""
@@ -10631,9 +10637,10 @@ _ci_validate_kea_snapshots() {
         id="${p%/"${file}"}"
         id="${id##*/}"
         if [[ "${id}" =~ ^[0-9]+$ ]]; then
-            printf '%s\n' "${id}"
+            ids+="${id}"$'\n'
         fi
-    done <<< "${found}" | sort
+    done <<< "${found}"
+    [ -z "${ids}" ] || _ci_capture 0 sort <<< "${ids%$'\n'}"
 }
 
 # What: Count live Kea reservations for one MAC.
@@ -17910,8 +17917,9 @@ _ci_check_cargo_audit() {
 ci_cmd_check_all() {
     local -a changed=() names=() skipped=() failed=() stopped=()
     _ci_collect_changed changed "$@" || return 2
-    local raw sub r rc=0 scope why state invoked=0 diff_seen="all files"
-    raw="$(printf '%s\n' "${!CI_CHECKS[@]}" | LC_ALL=C sort)" || return 2
+    local raw sub r rc=0 scope why state invoked=0 diff_seen="all files" keys
+    printf -v keys '%s\n' "${!CI_CHECKS[@]}"
+    raw="$(_ci_capture 0 env LC_ALL=C sort <<< "${keys%$'\n'}")" || return 2
     mapfile -t names <<< "${raw}"
     [ "${#changed[@]}" -eq 0 ] || diff_seen="${#changed[@]} changed paths"
     for sub in "${names[@]}"; do
