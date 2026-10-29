@@ -10312,12 +10312,15 @@ _ci_runtime_defaults() {
 # Why: a bash read; no sed fork per key in env loops.
 # From: Issue #1683 | PR #1912
 _ci_default_in() {
-    local row val=""
+    local row val="" why="not in"
     while IFS= read -r row; do
-        [[ "${row}" != "$2="* ]] || { val="${row#*=}"; break; }
+        [[ "${row}" != "$2="* ]] || { val="${row#*=}"; why="empty in"; break; }
     done <<< "$1"
+    # What: a missing key and an empty value read apart.
+    # Why: an empty value must not send to add the key.
+    # From: Issue #1683 | PR #1858
     if [ -z "${val}" ]; then
-        ci_log "[CI-ERROR-VALIDATE-0125]" "key=\"$2\" reason=\"not in the SOT runtime.defaults\""
+        ci_log "[CI-ERROR-VALIDATE-0125]" "key=\"$2\" reason=\"${why} the SOT runtime.defaults\""
         return 2
     fi
     printf '%s' "${val}"
