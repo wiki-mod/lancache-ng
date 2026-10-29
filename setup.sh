@@ -2239,6 +2239,12 @@ migrate_legacy_ca() {
             cp -p -- "$f" "$dest/$to" \
                 || die "Failed to copy $f to $dest/$to (exit $?)."
         fi
+        # What: the serial counter is not compared
+        # Why: the running CA moves it on with each new cert
+        # From: Issue #1683 | PR #1858
+        if [[ "${f##*/}" = ca.srl ]]; then
+            continue
+        fi
         cmp -- "$f" "$dest/$to" \
             || die "Postcondition failed: $dest/$to is not the CA file $f; nothing counts as migrated."
     done
@@ -2282,7 +2288,7 @@ is_quickstart_install() {
 # Why: a git pull drops them; the old stack must restart
 # From: Issue #1683 | PR #1858
 restore_quickstart_mounts() {
-    local old_dir="$1" old_env="$2" record="$3" json sources src rel commit entry perms
+    local old_dir="$1" old_env="$2" record="$3" json sources src rel commit entry perms empty_dir inside
     [[ -e "$old_dir/.git" ]] || return 0
     install_missing_tools jq
     json=$(stack_compose "$old_dir" "$old_env" config --format json) \
@@ -2290,21 +2296,39 @@ restore_quickstart_mounts() {
     sources=$(jq -r '.services[].volumes[]? | select(.type == "bind") | .source' <<< "$json") \
         || die "Cannot list the bind mounts of $old_dir (exit $?); nothing was changed."
     while IFS= read -r src; do
-        [[ "$src" = "$old_dir"/* && ! -e "$src" ]] || continue
+        [[ "$src" = "$old_dir"/* ]] || continue
+        # What: an empty dir is missing if git had a file
+        # Why: docker makes a missing mount source a dir
+        # From: Issue #1683 | PR #1858
+        empty_dir=0
+        if [[ -d "$src" && ! -L "$src" ]]; then
+            inside=$(find "$src" -mindepth 1 -maxdepth 1 -print -quit) \
+                || die "Failed to list $src (exit $?)."
+            [[ -z "$inside" ]] || continue
+            empty_dir=1
+        elif [[ -e "$src" ]]; then
+            continue
+        fi
         rel="${src#"$old_dir"/}"
         # What: first-parent commit on HEAD that dropped it
         # Why: its parent holds the copy the old stack used
         # From: Issue #1683 | PR #1858
         commit=$(git -C "$old_dir" log -1 --format=%H -m --first-parent --diff-filter=D -- "$rel") \
             || die "Failed to search the git history of $old_dir for $rel (exit $?)."
-        [[ -n "$commit" ]] \
-            || die "$src is missing and git has no older copy; restore it, then rerun setup.sh update. Nothing was changed."
-        entry=$(git -C "$old_dir" ls-tree "${commit}^" -- "$rel") \
-            || die "Failed to read $rel in ${commit}^ (exit $?)."
-        [[ "$entry" = 100*" blob "* ]] \
-            || die "$src is missing and was no plain file in git; restore it, then rerun setup.sh update. Nothing was changed."
+        entry=""
+        if [[ -n "$commit" ]]; then
+            entry=$(git -C "$old_dir" ls-tree "${commit}^" -- "$rel") \
+                || die "Failed to read $rel in ${commit}^ (exit $?)."
+        fi
+        if [[ "$entry" != 100*" blob "* ]]; then
+            [[ "$empty_dir" = 0 ]] || continue
+            die "$src is missing and git has no older file copy; restore it, then rerun setup.sh update. Nothing was changed."
+        fi
         perms=0644
         [[ "$entry" != 100755* ]] || perms=0755
+        if [[ "$empty_dir" = 1 ]]; then
+            rmdir -- "$src" || die "Failed to remove the empty dir $src (exit $?)."
+        fi
         mkdir -p "${src%/*}" || die "Failed to create ${src%/*} (exit $?)."
         git -C "$old_dir" show "${commit}^:$rel" > "$src" || die "Failed to restore $src from git (exit $?)."
         chmod "$perms" "$src" || die "Failed to set the mode of $src (exit $?)."
