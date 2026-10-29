@@ -10868,10 +10868,10 @@ _ci_validate_secondary_identity() {
         ci_log "[CI-ERROR-VALIDATE-0047]" "reason=\"a secondary register did not return 200\""
         return 1
     fi
-    au="$(printf '%s' "${a}" | jq -r '.nats_user // empty')"
-    bu="$(printf '%s' "${b}" | jq -r '.nats_user // empty')"
-    ap="$(printf '%s' "${a}" | jq -r '.nats_password // empty')"
-    bp="$(printf '%s' "${b}" | jq -r '.nats_password // empty')"
+    au="$(_ci_capture 0 jq -r '.nats_user // empty' <<< "${a}")" || return 1
+    bu="$(_ci_capture 0 jq -r '.nats_user // empty' <<< "${b}")" || return 1
+    ap="$(_ci_capture 0 jq -r '.nats_password // empty' <<< "${a}")" || return 1
+    bp="$(_ci_capture 0 jq -r '.nats_password // empty' <<< "${b}")" || return 1
     if [ -z "${au}" ] || [ -z "${bu}" ] || [ -z "${ap}" ] || [ -z "${bp}" ]; then
         ci_log "[CI-ERROR-VALIDATE-0048]" "reason=\"register response missing nats_user/nats_password\""
         return 1
@@ -12710,7 +12710,8 @@ _ci_rh_check() {
     else
         return 2
     fi
-    groups=" $(_ci_run -m 1 "[CI-ERROR-RUNNER-0025]" "user=\"${user}\" reason=\"groups lookup failed\"" id -nG "${user}") "
+    groups="$(_ci_run -m 1 "[CI-ERROR-RUNNER-0025]" "user=\"${user}\" reason=\"groups lookup failed\"" id -nG "${user}")" || return 2
+    groups=" ${groups} "
     if [[ "${groups}" == *" ${dgroup} "* ]]; then
         printf '  %s in %s group: yes\n' "${user}" "${dgroup}"
     else
@@ -13371,7 +13372,8 @@ _ci_rh_access() {
         fi
         printf 'Installed %s\n' "${file}"
     fi
-    groups=" $(_ci_run -m 1 "[CI-ERROR-RUNNER-0069]" "user=\"${user}\" reason=\"groups lookup failed\"" id -nG "${user}") "
+    groups="$(_ci_run -m 1 "[CI-ERROR-RUNNER-0069]" "user=\"${user}\" reason=\"groups lookup failed\"" id -nG "${user}")" || return 2
+    groups=" ${groups} "
     if [[ "${groups}" == *" ${dgroup} "* ]]; then
         printf '%s is already in the %s group.\n' "${user}" "${dgroup}"
     else
@@ -13419,7 +13421,7 @@ _ci_rh_purge_listchanges() {
     local st pkg aenv
     pkg="$(_ci_rh_val apt_listchanges_pkg)" || return 2
     aenv="$(_ci_rh_val apt_env)" || return 2
-    st="$(_ci_run -m 1 "[CI-ERROR-RUNNER-0077]" "pkg=\"${pkg}\" reason=\"dpkg query failed\"" dpkg -l "${pkg}")"
+    st="$(_ci_run -m 1 "[CI-ERROR-RUNNER-0077]" "pkg=\"${pkg}\" reason=\"dpkg query failed\"" dpkg -l "${pkg}")" || return 2
     if _ci_text_has '^ii' "${st}"; then
         _ci_run "[CI-ERROR-RUNNER-0078]" "pkg=\"${pkg}\" reason=\"package not purged\"" _ci_rh_root env "${aenv}" apt-get purge -y "${pkg}" || return 2
         printf 'Purged %s.\n' "${pkg}"
@@ -15468,7 +15470,7 @@ _ci_check_orphaned_branches() {
         ci_error "[CI-ERROR-CHECK-0135]" "repo=\"${repo}\" reason=\"branch listing unparseable\"" "${rows}"$'\n'"response:"$'\n'"${raw}"
         return 2
     fi
-    now="$(date -u +%s)"
+    now="$(_ci_capture 0 date -u +%s)" || return 2
     local branch iso epoch prs author live scanned=0 old=0
     local -a noprs=()
     local -A when=() who=()
