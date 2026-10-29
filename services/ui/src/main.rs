@@ -190,6 +190,10 @@ struct Config {
     // Why: revocation is the per-connect DB check, not expiry.
     // From: Issue #1683 | PR #1858
     nats_user_jwt_ttl_secs: i64,
+    // What: wait for one secondary SOA answer.
+    // Why: a silent host is a status, not a hang.
+    // From: Issue #1683 | PR #1912
+    secondary_probe_timeout: Duration,
     watchdog_miss_limit: u32,
     security_headers_enabled: bool,
     hsts_mode: HstsMode,
@@ -463,6 +467,7 @@ impl Config {
                 i64::MAX as u64,
                 OutOfRange::Reject,
             )? as i64,
+            secondary_probe_timeout: need_secs(env, "SECONDARY_PROBE_TIMEOUT")?,
             // What: missed watchdog cycles before stale.
             // Why: one owner with the restart rule.
             // From: Issue #1683 | PR #1912
@@ -2535,8 +2540,13 @@ fn soa_query(id: u16, zone: &str) -> Vec<u8> {
 // What: ask addr:port for the LAN zone SOA over UDP.
 // Why: a silent host is a status, not an error.
 // From: Issue #1683 | PR #1912
-async fn probe_secondary_soa(any: &str, addr: Ipv4Addr, port: u16, lan_zone: &str) -> ProbeResult {
-    const TIMEOUT: Duration = Duration::from_secs(4);
+async fn probe_secondary_soa(
+    any: &str,
+    addr: Ipv4Addr,
+    port: u16,
+    lan_zone: &str,
+    timeout: Duration,
+) -> ProbeResult {
     let id: u16 = rand::random();
     let query = soa_query(id, lan_zone);
     let exchange = async {
@@ -2557,8 +2567,8 @@ async fn probe_secondary_soa(any: &str, addr: Ipv4Addr, port: u16, lan_zone: &st
         serial: None,
         detail,
     };
-    match tokio::time::timeout(TIMEOUT, exchange).await {
-        Err(_) => unreachable(format!("no response from {addr}:{port} within {TIMEOUT:?}")),
+    match tokio::time::timeout(timeout, exchange).await {
+        Err(_) => unreachable(format!("no response from {addr}:{port} within {timeout:?}")),
         Ok(Err(e)) => unreachable(format!("DNS query to {addr}:{port} failed: {e}")),
         Ok(Ok(result)) => result,
     }
@@ -3286,6 +3296,7 @@ async fn check_secondary_health(
         addr,
         state.config.dns_port,
         &state.config.lan_zone,
+        state.config.secondary_probe_timeout,
     )
     .await;
     if result.status == "ok" {

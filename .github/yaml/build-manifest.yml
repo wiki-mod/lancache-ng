@@ -520,6 +520,10 @@ runtime:
     # Why: revocation is the per-connect DB check, not expiry.
     # From: Issue #1683 | PR #1858
     - NATS_USER_JWT_TTL_SECONDS=7776000
+    # What: wait for one secondary SOA answer, seconds.
+    # Why: a silent secondary is a status, not a hang.
+    # From: Issue #1683 | PR #1912
+    - SECONDARY_PROBE_TIMEOUT=4
     # What: URL paths of ui routes setup.sh and ci.sh call.
     # Why: shell reads the path here; no literal copy.
     # From: Issue #1683 | PR #1912
