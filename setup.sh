@@ -2297,7 +2297,7 @@ migrate_quickstart_install() (
     trap resume_lancache_convergence_after_failed_update EXIT
     UPDATE_CONVERGENCE_PAUSED=1
     pause_lancache_convergence_for_update
-    _UPDATE_ENV_FILE="$old_env" _UPDATE_STACK_DIR="$old_dir" _QUICKSTART_STATE_DIR="$old_dir"
+    _UPDATE_ENV_FILE="$old_env" _UPDATE_STACK_DIR="$old_dir"
     services=$(stack_compose "$old_dir" "$old_env" config --services) \
         || die "Cannot list the services of $old_dir (exit $?); nothing was changed."
     mapfile -t service_list <<< "$services"
@@ -2855,10 +2855,10 @@ sot_compose() {
     # What: a quickstart .env may lack LANCACHE_STATE_DIR
     # Why: its state lives in the quickstart dir (v0.3.2)
     # From: Issue #1683 | PR #1858
-    if [[ -n "${_QUICKSTART_STATE_DIR:-}" ]]; then
+    if [[ "${env_file##*/}" = .env ]] && is_quickstart_install "${env_file%/*}"; then
         state=$(get_env_var LANCACHE_STATE_DIR "$env_file") \
             || die "Cannot read LANCACHE_STATE_DIR from $env_file (exit $?)."
-        [[ -n "$state" ]] || state="$_QUICKSTART_STATE_DIR"
+        [[ -n "$state" ]] || state="${env_file%/*}"
     fi
     rows=$(sot_compose_env "$env_file" "$state") || exit $?
     mapfile -t sot_env <<< "$rows"
@@ -3736,7 +3736,7 @@ To proceed, choose one of these options:
      LANCACHE_IMAGE_TAG=vX.Y.Z ./setup.sh install
      LANCACHE_IMAGE_TAG=sha-<40-hex commit SHA> ./setup.sh install
 
-  3. Use the '${testing}' channel (untested daily builds, may break):
+  3. Use the '${testing}' channel (experimental, may break, not for production):
      LANCACHE_IMAGE_CHANNEL=${testing} ./setup.sh install
 
 For details on release channels and their stability, see:
@@ -3759,6 +3759,7 @@ EOF
 lancache_channel_image_refs() {
     local env_file="$1" channel="$2"
     local registry prefix pointer_channel vars max backoff lock_ref buildx_out n=1 first second reason line changed
+    local install_channel
     pointer_channel=$(lancache_stack_pointer_channel_for "$channel") || exit $?
     registry=$(resolve_lancache_image_registry "$env_file") \
         || die "Cannot resolve the image registry for channel ${channel} (exit $?)."
@@ -3780,6 +3781,14 @@ lancache_channel_image_refs() {
         || die "docker buildx is required to resolve LANCACHE_IMAGE_CHANNEL=${channel} (exit $?: ${buildx_out}). Install the ${DOCKER_BUILDX_PLUGIN} package, then rerun setup.sh."
 
     printf '\n%s%s▶ Resolving image channel %s%s\n' "${BOLD}" "${CYAN}" "$channel" "${RESET}" >&2
+    # What: every non-default channel warns on each run
+    # Why: maintainer 29.10.: nightly is experimental
+    # From: Issue #1683 | PR #1858
+    install_channel=$(lancache_sot_value install_channel release) \
+        || die "Cannot read release.install_channel (exit $?)."
+    if [[ "$channel" != "$install_channel" ]]; then
+        print_warn "The $channel channel is experimental: untested daily builds that may break the stack; not for production use." >&2
+    fi
     while [[ "$n" -le "$max" ]]; do
         reason="promote lock ${lock_ref} is held"
         if ! lancache_promote_lock_held "$lock_ref"; then
@@ -8034,7 +8043,7 @@ else
         if [[ "$offered" = "$install_channel" ]]; then
             printf "  %s — tested releases; the recommended default.\n" "$offered"
         else
-            printf "  %s — untested daily builds; they may break the stack.\n" "$offered"
+            printf "  %s — experimental daily builds; they may break; not for production.\n" "$offered"
         fi
     done <<< "$selectable"
     printf "\n"
@@ -8048,7 +8057,7 @@ else
             # Why: untested builds never install unwarned
             # From: Issue #1683 | PR #1858
             if [[ "$LANCACHE_IMAGE_CHANNEL" != "$install_channel" ]]; then
-                print_warn "The $LANCACHE_IMAGE_CHANNEL channel holds untested daily builds; they may break the stack."
+                print_warn "The $LANCACHE_IMAGE_CHANNEL channel is experimental: untested daily builds that may break the stack; not for production use."
                 confirm "Install from $LANCACHE_IMAGE_CHANNEL anyway? [y/N]" "N" || continue
             fi
             print_ok "Using the $LANCACHE_IMAGE_CHANNEL channel."
