@@ -1471,7 +1471,13 @@ ci_cmd_plan_matrix() {
         path_cand=false rc=0
         _ci_plan_candidate "${service}" "${changed[@]}" || rc=$?
         case "${rc}" in 0) path_cand=true ;; 1) ;; *) return 2 ;; esac
-        [ "${path_cand}" = true ] || [ "${sot_changed}" = true ] || continue
+        # What: log a service with no changed input
+        # Why: §79: a skipped service names its reason
+        # From: Issue #1683 | PR #1858
+        if [ "${path_cand}" = false ] && [ "${sot_changed}" = false ]; then
+            ci_log "[CI-INFO-PLAN-0006]" "service=\"${service}\" action=skip reason=\"no input path and no SOT change\""
+            continue
+        fi
         # What: path-changed rust is test candidate (§60).
         # Why: tests run on change, even build reuse (§60).
         # From: Issue #1683
@@ -2594,18 +2600,21 @@ _ci_resolve_state() {
     printf 'PRODUCED_UNVERIFIED\n'
 }
 
-# What: Map a resolver state to its one action.
-# Why: MISMATCH fails; UNKNOWN escalates; neither builds.
-# From: Issue #1683
+# What: Map a resolver state to its action; log the reason.
+# Why: §79: each pair decision names state, action, reason.
+# From: Issue #1683 | PR #1858
 _ci_resolve_action() {
-    case "$1" in
-        PRESENT_ACCEPTED)   printf 'noop\n' ;;
-        MISSING_CONFIRMED)  printf 'build\n' ;;
-        MISMATCH)           printf 'fail\n' ;;
-        PRODUCED_UNVERIFIED) printf 'verify\n' ;;
-        BUILD_IN_PROGRESS)  printf 'wait\n' ;;
-        *)                  printf 'escalate\n' ;;
+    local state="$1" service="$2" platform="$3" action reason
+    case "${state}" in
+        PRESENT_ACCEPTED) action=noop reason="accepted exact result exists; reuse" ;;
+        MISSING_CONFIRMED) action=build reason="no artifact for this identity; impact decides" ;;
+        MISMATCH) action=fail reason="ledger and registry digest disagree" ;;
+        PRODUCED_UNVERIFIED) action=verify reason="artifact exists, not accepted; verify, no build" ;;
+        BUILD_IN_PROGRESS) action=wait reason="another run holds the build lock; no second build" ;;
+        *) action=escalate reason="UNKNOWN is never treated as build-needed" ;;
     esac
+    ci_log "[CI-INFO-RESOLVE-0005]" "service=\"${service}\" platform=\"${platform}\" state=${state} action=${action} reason=\"${reason}\""
+    printf '%s\n' "${action}"
 }
 
 # What: one key=value field of a record; absent key fails
@@ -2639,11 +2648,8 @@ _ci_resolve_one() {
             state="UNKNOWN"
             ;;
     esac
-    action="$(_ci_resolve_action "${state}")"
+    action="$(_ci_resolve_action "${state}" "${service}" "${platform}")"
     printf 'service=%s platform=%s state=%s action=%s identity=%s\n' "${service}" "${platform}" "${state}" "${action}" "${identity}"
-    if [ "${state}" = "UNKNOWN" ]; then
-        ci_log "[CI-INFO-RESOLVE-0003]" "service=\"${service}\" platform=\"${platform}\" state=UNKNOWN note=\"escalate; UNKNOWN is never treated as build-needed\""
-    fi
 }
 
 # What: Resolve a target per platform.
