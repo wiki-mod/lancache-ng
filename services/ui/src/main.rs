@@ -6498,7 +6498,7 @@ async fn setup_page(State(state): Shared, headers: HeaderMap) -> Response {
 // Why: pinned tags and the retired edge name are no choice.
 // From: Issue #819
 fn is_valid_ui_channel(value: &str) -> bool {
-    matches!(value, "stable" | "nightly")
+    matches!(value, "latest" | "nightly")
 }
 
 // What: save the release channel and the auto-update flag.
