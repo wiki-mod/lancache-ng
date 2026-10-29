@@ -2502,6 +2502,23 @@ migrate_quickstart_install() (
         [[ -n "$copy" ]] || continue
         rm -f "$old_dir/$copy" || die "Failed to remove the restored file $old_dir/$copy."
     done <<< "$restored"
+    # What: dirs these removals emptied go too
+    # Why: an empty scripts/ dir is a leftover
+    # From: Issue #1683 | PR #1858
+    while IFS= read -r copy; do
+        [[ "$copy" = */* ]] || continue
+        dir="${copy%/*}"
+        while [[ -n "$dir" ]]; do
+            if [[ -d "$old_dir/$dir" ]]; then
+                rmdir --ignore-fail-on-non-empty -- "$old_dir/$dir" || die "Failed to remove $old_dir/$dir (exit $?)."
+            fi
+            if [[ "$dir" = */* ]]; then
+                dir="${dir%/*}"
+            else
+                dir=""
+            fi
+        done
+    done <<< "$bundle"$'\n'"$restored"
     rm -f "$old_dir/docker-compose.yml" "$old_env" || die "Failed to remove the quickstart files in $old_dir."
     trap - EXIT
     resume_lancache_convergence_after_update
