@@ -12,13 +12,11 @@ set -euo pipefail
 # CONSTANTS / EXIT HANDLING
 # =========================================================
 
-# What: Absolute path of this script's directory.
-# Why: Find the SOT manifest from any CWD; no dirname.
-# From: Issue #1683
-case "${BASH_SOURCE[0]}" in
-    */*) CI_SCRIPT_DIR="$(cd -- "${BASH_SOURCE[0]%/*}" && pwd)" ;;
-    *) CI_SCRIPT_DIR="$(pwd)" ;;
-esac
+# What: real path of this script and its directory.
+# Why: a runner hook starts ci.sh through a symlink.
+# From: Issue #1683 | PR #1858
+CI_SCRIPT_PATH="$(readlink -f -- "${BASH_SOURCE[0]}")"
+CI_SCRIPT_DIR="${CI_SCRIPT_PATH%/*}"
 
 # What: The SOT's repo-relative path (git refs, diffs).
 # Why: base SOT reads and SOT-change detection share it.
@@ -1407,7 +1405,7 @@ _ci_pr_green_reuse() {
 }
 
 # What: rc 0 if each release service has its index.
-# Why: DoMe: a red platform stays out, also on release.
+# Why: a red platform stays out, also on release.
 # From: Issue #1683 | PR #1858
 _ci_release_plan_gate() {
     local doc="$1" svcs svc idx miss="" rc
@@ -2226,7 +2224,7 @@ _ci_identity_content() {
 }
 
 # What: context rows the Dockerfile copies, and itself.
-# Why: an uncopied runtime file is no build input (DoMe).
+# Why: an uncopied runtime file is no build input.
 # From: Issue #1683 | PR #1858
 _ci_context_build_rows() {
     local service="$1" ref="$2" rows="$3" df text srcs src line path keep
@@ -2757,6 +2755,7 @@ _ci_classify_failure() {
     fi
     # What: auth/malformed/compile are permanent.
     # Why: retrying a fixed outcome wastes budget.
+    # From: Issue #1683 | PR #1858
     case "${low}" in
         *"http 401"*|*"unauthorized"*|*"denied: requested access"*) printf 'permanent\n'; return 0 ;;
         *"http 400"*|*"http 422"*|*"invalid reference format"*) printf 'permanent\n'; return 0 ;;
@@ -2802,6 +2801,7 @@ _ci_classify_failure() {
     esac
     # What: an unclassified failure is transient.
     # Why: a missed transient is worse than a retry.
+    # From: Issue #1683 | PR #1858
     printf 'transient\n'
 }
 
@@ -3315,6 +3315,7 @@ _ci_ledger_upsert() {
     fi
     # What: sort the merged record set deterministically.
     # Why: same inputs -> same blob; §26.4 idempotency.
+    # From: Issue #1683 | PR #1858
     merged="$(printf '%s\n%s\n' "${kept}" "${new}" | awk 'NF>0' | LC_ALL=C sort -u)"
     # What: an unchanged record set writes no commit.
     # Why: a rerun converges on the same ref (§26.4).
@@ -3516,7 +3517,7 @@ ci_cmd_scan_stack() {
     fi
     [ "${rc}" -eq 0 ] || ci_log "[CI-ERROR-SCAN-0024]" "failed=\"${failed# }\" reason=\"scan failed for these pairs; the others were scanned\""
     # What: a full clean run checks for dead ignore ids.
-    # Why: what no scan needs any more must go (DoMe)
+    # Why: an ignore id no scan needs must go.
     # From: Issue #1683 | PR #1912
     if [ "${CI_SCAN_FULL:-}" = 1 ]; then
         if [ "${rc}" -eq 0 ] && [ -z "${unbuilt}" ]; then
@@ -3529,7 +3530,7 @@ ci_cmd_scan_stack() {
 }
 
 # What: issue for ignore-file ids no scan of the run matched
-# Why: DoMe: an issue, no red scan; reruns keep one issue
+# Why: an issue, no red scan; reruns keep one issue
 # From: Issue #1683 | PR #1858
 _ci_trivyignore_stale() {
     local ignore fields="" matched="" n kind id stale="" count=0 file="${CI_TMPDIR}/${_CI_TRIVY_MATCHED}" why outcome=success
@@ -6773,7 +6774,7 @@ _ci_index_children() {
 }
 
 # What: Collect a target's accepted per-platform digests.
-# Why: DoMe: a red platform leaves the others assembled.
+# Why: a red platform leaves the others assembled.
 # From: Issue #1683 | PR #1858
 _ci_collect_accepted_digests() {
     local service="$1" plats p line state digest n=0
@@ -6785,7 +6786,7 @@ _ci_collect_accepted_digests() {
         case "${state}" in
             PRESENT_ACCEPTED) ;;
             # What: a platform not accepted stays out.
-            # Why: its channels keep the old image (DoMe).
+            # Why: its channels keep the old image.
             # From: Issue #1683 | PR #1858
             MISSING_CONFIRMED|PRODUCED_UNVERIFIED)
                 ci_log "[CI-WARN-ASSEMBLE-0013]" "service=\"${service}\" platform=\"${p}\" state=\"${state}\" reason=\"platform not accepted; left out of the index\""
@@ -6891,7 +6892,7 @@ ci_cmd_assemble() {
 }
 
 # What: file or close the platform-mismatch case per arch.
-# Why: DoMe: a platform left out opens an issue.
+# Why: a platform left out opens an issue.
 # From: Issue #1683 | PR #1858
 _ci_assemble_report() {
     local svc="$1" inputs="$2" why plats p outcome rc=0
@@ -7303,7 +7304,7 @@ _ci_promote_move() {
 }
 
 # What: channel children of the platforms digest $3 lacks.
-# Why: DoMe: a platform red in this run keeps its image.
+# Why: a platform red in this run keeps its image.
 # From: Issue #1683 | PR #1858
 _ci_promote_kept() {
     local svc="$1" channel="$2" digest="$3" name have old plats p line rc=0 kept=""
@@ -7538,6 +7539,7 @@ ci_cmd_promote() {
     fi
     # What: capture rc so the unlock still runs on failure.
     # Why: a failed move must never leak the promotion lock.
+    # From: Issue #1683 | PR #1858
     local rc
     if _ci_promote_locked "${channel}" "${cand}"; then rc=0; else rc=$?; fi
     _ci_promote_unlock "${channel}" || {
@@ -12073,9 +12075,9 @@ _ci_rh_reap_containers() {
 # Why: an empty network may be mid-bringup, so age decides.
 # From: Issue #1095 | PR #1426
 _ci_rh_reap_networks() {
-    local match="$1" hours="$2" before names name row count created rrc rc=0
-    before=$(( $(date +%s) - hours * 3600 ))
-    printf -- '--- reap empty networks named %s older than %sh ---\n' "${match}" "${hours}"
+    local match="$1" secs="$2" before names name row count created rrc rc=0
+    before=$(( $(date +%s) - secs ))
+    printf -- '--- reap empty networks named %s older than %ss ---\n' "${match}" "${secs}"
     names="$(_ci_capture 0 docker network ls --filter "name=${match}" --format '{{.Name}}')" || return 2
     while IFS= read -r name; do
         [ -n "${name}" ] || continue
@@ -12149,9 +12151,9 @@ _ci_rh_cleanup_run() {
     before="$(awk 'NR == 2 { print $3 }' <<<"${before}")"
     _ci_rh_reap_containers build-tools image "${bt_match}" "${bt_hours}" || rc=2
     _ci_rh_reap_containers validation project "${prefix}" "${val_hours}" || rc=2
-    _ci_rh_reap_networks "${prefix}" "${val_hours}" || rc=2
+    _ci_rh_reap_networks "${prefix}" "$(( val_hours * 3600 ))" || rc=2
     _ci_rh_reap_containers legacy-validation project "${legacy}" "${val_hours}" || rc=2
-    _ci_rh_reap_networks "${legacy}" "${val_hours}" || rc=2
+    _ci_rh_reap_networks "${legacy}" "$(( val_hours * 3600 ))" || rc=2
     _ci_rh_reap_containers buildx-builder name "${bx_match}" "${bx_hours}" || rc=2
     _ci_rh_reap_trivy || rc=2
     printf -- '--- prune stopped containers, build cache, images ---\n'
@@ -12262,9 +12264,8 @@ _ci_rh_host_token() {
     printf '%s' "${BASH_REMATCH[1]}"
 }
 
-# What: the IPv4 that routes to the probe address, or none.
-# Why: no route is a normal answer on an isolated host;
-# the address is the host of ROUTE_PROBE_TARGET.
+# What: IPv4 routing to ROUTE_PROBE_TARGET, or none.
+# Why: no route is normal on an isolated host.
 # From: Issue #1622 | PR #1858
 _ci_rh_ipv4() {
     local out probe
@@ -12527,7 +12528,9 @@ _ci_rh_check() {
     fi
     printf '\n--- Job hooks in %s ---\n' "${hooks}"
     for f in "${hpre}" "${hpost}"; do
-        if [ -f "${hooks}/${f}" ]; then printf '  %s/%s: present\n' "${hooks}" "${f}"; else printf '  %s/%s: MISSING\n' "${hooks}" "${f}"; fi
+        if [ "$(readlink -f -- "${hooks}/${f}")" = "${CI_SCRIPT_PATH}" ]; then printf '  %s/%s: linked to %s\n' "${hooks}" "${f}" "${CI_SCRIPT_PATH}"
+        elif [ -e "${hooks}/${f}" ]; then printf '  %s/%s: NOT LINKED to %s, hooks replaces it\n' "${hooks}" "${f}" "${CI_SCRIPT_PATH}"
+        else printf '  %s/%s: MISSING\n' "${hooks}" "${f}"; fi
     done
     printf '\n--- %s timer ---\n' "${utim}"
     local tstate
@@ -13068,106 +13071,67 @@ _ci_rh_pve_purge_run() {
     _ci_run "[CI-ERROR-RUNNER-0062]" "reason=\"apt-get autoremove failed\"" _ci_rh_root env "${aenv}" apt-get autoremove -y
 }
 
-# What: text of the job-started hook (owner reset).
-# Why: a killed job leaves files checkout cannot delete.
-# From: Issue #1622 | PR #1624
-_ci_rh_hook_pre_text() {
-    cat <<'EOF'
-#!/bin/bash
-# What: resets the workspace owner at job start.
-# Why: a killed job leaves files checkout cannot remove.
-# From: Issue #1622 | PR #1912
-set -euo pipefail
-if [ -n "${GITHUB_WORKSPACE:-}" ] && [ -d "${GITHUB_WORKSPACE}" ]; then
-    if out=$(sudo -n chown -R "$(id -u):$(id -g)" "${GITHUB_WORKSPACE}" 2>&1); then
-        echo "[pre-job-hook] reset ownership of ${GITHUB_WORKSPACE}"
-    else
-        echo "[pre-job-hook] WARNING: ownership of ${GITHUB_WORKSPACE} not reset: ${out}"
+# What: the job workspace back to the runner account.
+# Why: a container leaves root files checkout cannot delete.
+# From: Issue #1622 | PR #1858
+_ci_rh_workspace_owner() {
+    local ws
+    ws="$(_ci_env_required GITHUB_WORKSPACE)" || return 2
+    if [ ! -d "${ws}" ]; then
+        printf 'workspace owner=NOT-RUN reason="no workspace dir yet" dir="%s"\n' "${ws}"
+        return 0
     fi
-fi
-EOF
+    _ci_run "[CI-ERROR-RUNNER-0132]" "dir=\"${ws}\" reason=\"workspace owner not reset\"" _ci_rh_root chown -R "$(id -u):$(id -g)" "${ws}" || return 2
+    printf 'workspace owner reset: %s\n' "${ws}"
 }
 
-# What: text of the job-done hook (net, owner reset).
+# What: job end: empty aged validate nets, then the owner.
 # Why: a cancelled job skips its own teardown step.
-# From: Issue #1622 | PR #1624
-_ci_rh_hook_post_text() {
-    local text min_age prefix legacy
-    text="$(cat <<'EOF'
-#!/bin/bash
-# What: removes orphaned validate nets, resets the owner.
-# Why: a killed job leaves a network and foreign files.
-# Only networks with ZERO containers older than the grace
-# window go: a sibling runner may be bringing its own up now.
-# From: Issue #1622 | PR #1912
-set -euo pipefail
-MIN_AGE=@MIN_AGE@
-nets=$(docker network ls --filter name=@PREFIX@ --filter name=@LEGACY@ --format '{{.Name}}')
-while IFS= read -r net; do
-    [ -n "$net" ] || continue
-    if ! containers=$(docker network inspect "$net" --format '{{len .Containers}}' 2>&1); then
-        echo "[cleanup-hook] leaving $net alone, not inspected: $containers"
-        continue
-    fi
-    if [ "$containers" -ne 0 ]; then
-        echo "[cleanup-hook] leaving $net alone, $containers container(s) attached"
-        continue
-    fi
-    if ! created=$(docker network inspect "$net" --format '{{.Created}}' 2>&1); then
-        echo "[cleanup-hook] leaving $net alone, not inspected: $created"
-        continue
-    fi
-    if ! created_epoch=$(date -d "$created" +%s 2>&1); then
-        echo "[cleanup-hook] leaving $net alone, bad creation time: $created_epoch"
-        continue
-    fi
-    age=$(( $(date +%s) - created_epoch ))
-    if [ "$age" -lt "$MIN_AGE" ]; then
-        echo "[cleanup-hook] leaving $net alone, created ${age}s ago (grace ${MIN_AGE}s)"
-        continue
-    fi
-    echo "[cleanup-hook] removing orphaned validate network: $net"
-    if ! out=$(docker network rm "$net" 2>&1); then
-        echo "[cleanup-hook] WARNING: failed to remove $net: $out"
-    fi
-done <<< "$nets"
-# Scoped to this job's workspace only: sibling runners share
-# this host. Best effort; never fails the job it cleans up after.
-if [ -n "${GITHUB_WORKSPACE:-}" ] && [ -d "${GITHUB_WORKSPACE}" ]; then
-    if out=$(sudo -n chown -R "$(id -u):$(id -g)" "${GITHUB_WORKSPACE}" 2>&1); then
-        echo "[cleanup-hook] reset ownership of ${GITHUB_WORKSPACE}"
-    else
-        echo "[cleanup-hook] WARNING: ownership of ${GITHUB_WORKSPACE} not reset: ${out}"
-    fi
-fi
-EOF
-)"
-    min_age="$(_ci_rh_val hook_network_min_age)" || return 2
+# From: Issue #1622 | PR #1858
+_ci_rh_job_completed() {
+    local secs prefix legacy rc=0
+    secs="$(_ci_rh_val hook_network_min_age)" || return 2
     prefix="$(_ci_validate_project "")" || return 2
     legacy="$(_ci_rh_val legacy_validation_prefix)" || return 2
-    _ci_fill "${text}" "MIN_AGE=${min_age}"$'\n'"PREFIX=${prefix}"$'\n'"LEGACY=${legacy}" || return 2
-    printf '%s\n' "${REPLY}"
+    _ci_rh_reap_networks "${prefix}" "${secs}" || rc=2
+    _ci_rh_reap_networks "${legacy}" "${secs}" || rc=2
+    _ci_rh_workspace_owner || rc=2
+    return "${rc}"
 }
 
-# What: install both job hooks owned by the runner account.
+# What: run the job hook whose link name is $1.
+# Why: the runner calls each hook by its SOT file name.
+# From: Issue #1622 | PR #1858
+_ci_rh_hook() {
+    local name="${1:-}" pre post
+    pre="$(_ci_rh_val hook_pre_name)" || return 2
+    post="$(_ci_rh_val hook_post_name)" || return 2
+    if [ "${name}" = "${pre}" ]; then
+        _ci_rh_workspace_owner
+    elif [ "${name}" = "${post}" ]; then
+        _ci_rh_job_completed
+    else
+        ci_log "[CI-ERROR-RUNNER-0133]" "name=\"${name}\" known=\"${pre} ${post}\" reason=\"not a SOT hook name\""
+        return 2
+    fi
+}
+
+# What: both job hooks as symlinks to this ci.sh.
 # Why: the runner env wires them to job start and finish.
-# From: Issue #1622 | PR #1624
+# From: Issue #1622 | PR #1858
 _ci_rh_hooks() {
-    local dir user group text pre post mode
+    local dir user group pre post link
     dir="$(_ci_rh_val hooks_dir)" || return 2
     user="$(_ci_rh_val user)" || return 2
     group="$(_ci_rh_group "${user}")" || return 2
     pre="${dir}/$(_ci_rh_val hook_pre_name)" || return 2
     post="${dir}/$(_ci_rh_val hook_post_name)" || return 2
-    mode="$(_ci_rh_val hook_mode)" || return 2
     _ci_run "[CI-ERROR-RUNNER-0063]" "dir=\"${dir}\" reason=\"hooks dir not created\"" _ci_rh_root mkdir -p "${dir}" || return 2
-    text="$(_ci_rh_hook_pre_text)" || return 2
-    printf '%s\n' "${text}" | _ci_rh_put "${pre}" || return 2
-    text="$(_ci_rh_hook_post_text)" || return 2
-    printf '%s\n' "${text}" | _ci_rh_put "${post}" || return 2
-    _ci_run "[CI-ERROR-RUNNER-0064]" "dir=\"${dir}\" reason=\"hooks not owned by the runner account\"" _ci_rh_root chown "${user}:${group}" "${pre}" "${post}" || return 2
-    _ci_run "[CI-ERROR-RUNNER-0065]" "dir=\"${dir}\" reason=\"hooks not executable\"" _ci_rh_root chmod "${mode}" "${pre}" "${post}" || return 2
-    printf 'Installed %s and %s\n' "${pre}" "${post}"
+    for link in "${pre}" "${post}"; do
+        _ci_run "[CI-ERROR-RUNNER-0065]" "link=\"${link}\" reason=\"hook link not created\"" _ci_rh_root ln -sfn "${CI_SCRIPT_PATH}" "${link}" || return 2
+    done
+    _ci_run "[CI-ERROR-RUNNER-0064]" "dir=\"${dir}\" reason=\"hooks not owned by the runner account\"" _ci_rh_root chown -h "${user}:${group}" "${pre}" "${post}" || return 2
+    printf 'Linked %s and %s to %s\n' "${pre}" "${post}" "${CI_SCRIPT_PATH}"
 }
 
 # What: the sudoers file path of the runner account.
@@ -13546,6 +13510,7 @@ ci_cmd_runner_host() {
         cleanup) _ci_rh_cleanup ;;
         units) _ci_rh_units ;;
         hooks) _ci_rh_hooks ;;
+        hook) _ci_rh_hook "$@" ;;
         check) _ci_rh_check ;;
         clean) _ci_rh_clean ;;
         clean-archive) _ci_rh_clean_archive "$@" ;;
@@ -13561,7 +13526,7 @@ ci_cmd_runner_host() {
         sccache-check) _ci_rh_sccache_check ;;
         sccache-fetch) _ci_rh_sccache_fetch "$@" ;;
         *)
-            ci_log "[CI-ERROR-RUNNER-0110]" "mode=\"${mode}\" reason=\"unknown mode\" known=\"cleanup units hooks check clean clean-archive host-prep runner-fetch runner-hook-env runner-restart-policy full-reset-check full-reset-clean set-hostname purge-pve-check purge-pve sccache-check sccache-fetch\""
+            ci_log "[CI-ERROR-RUNNER-0110]" "mode=\"${mode}\" reason=\"unknown mode\" known=\"cleanup units hooks hook check clean clean-archive host-prep runner-fetch runner-hook-env runner-restart-policy full-reset-check full-reset-clean set-hostname purge-pve-check purge-pve sccache-check sccache-fetch\""
             return 2
             ;;
     esac
@@ -15031,6 +14996,7 @@ _ci_check_pr_template() {
         fi
         # What: strip HTML comments and code fence markers
         # Why: detect empty vs placeholder-only sections
+        # From: Issue #1683 | PR #1858
         stripped="$(_ci_md_strip_comments "${content}")" || return 2
         stripped="$(_ci_capture 1 grep -v '^```' <<<"${stripped}")" || return 2
         trimmed="$(tr -d '[:space:]' <<<"${stripped}")"
@@ -15686,8 +15652,7 @@ _ci_check_action_node_versions() {
 }
 
 # What: warn when an action has a newer major tag.
-# Why: maintainer 24.10.: once a night; a gone tag fails
-# in action-node-versions on every PR (broken pin).
+# Why: nightly hint only; a gone tag fails node-versions.
 # From: Issue #1683 | PR #1858
 _ci_check_action_majors() {
     local wf_dir srv entries e u cur repo refs t max warn=0 rc
@@ -17826,5 +17791,12 @@ ci_cmd_check() {
 # Why: Lets ci.bats source the functions to test them.
 # From: Issue #1683
 if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
-    ci_main "$@"
+    # What: started via symlink = runner hook by link name.
+    # Why: the runner passes a hook path, never arguments.
+    # From: Issue #1683 | PR #1858
+    if [ -L "${0}" ]; then
+        ci_main runner-host hook "${0##*/}"
+    else
+        ci_main "$@"
+    fi
 fi
