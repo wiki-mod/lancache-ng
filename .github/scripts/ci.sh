@@ -8707,7 +8707,9 @@ _ci_gc_roots() {
     # What: Every ledger record is a root, all states.
     # Why: PRODUCED_UNVERIFIED is pending, not garbage.
     # From: Issue #1683
-    [ "${rc}" -eq 0 ] && pairs="$(printf '%s\n' "${blob}" | awk -F'\t' 'NF>=5 && $2!="" && $5!="" {print $2"\t"$5}')"
+    if [ "${rc}" -eq 0 ]; then
+        pairs="$(_ci_capture 0 awk -F'\t' "NF>=5 && \$2!=\"\" && \$5!=\"\" {print \$2\"\t\"\$5}" <<< "${blob}")" || return 2
+    fi
     local targets targets_rc=0 reltags
     targets="$(ci_build_targets)" || targets_rc=$?
     _ci_producer_ok "${targets_rc}" 0 || return 2
@@ -8808,7 +8810,9 @@ _ci_gc_candidates() {
         # What: Append the service so delete can target it.
         # Why: Delete path is package-scoped, not id-only.
         # From: Issue #1683
-        [ -n "${vers}" ] && printf '%s\n' "${vers}" | awk -v s="${svc}" 'NF{print $0"\t"s}'
+        if [ -n "${vers}" ]; then
+            _ci_capture 0 awk -v s="${svc}" "NF{print \$0\"\t\"s}" <<< "${vers}" || return 2
+        fi
     done <<<"${produced}"
     # What: No package found anywhere is a config error.
     # Why: All-404 must refuse, not read as a clean noop.
