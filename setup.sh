@@ -2333,7 +2333,7 @@ restore_quickstart_mounts() {
         git -C "$old_dir" show "${commit}^:$rel" > "$src" || die "Failed to restore $src from git (exit $?)."
         chmod "$perms" "$src" || die "Failed to set the mode of $src (exit $?)."
         printf 'restored|%s\n' "$rel" >> "$record" || die "Failed to record $rel in $record (exit $?)."
-        print_ok "Restored $rel for the old stack from git ${commit:0:12}^"
+        print_ok "Restored $rel for the old stack from git ${commit}^"
     done <<< "$sources"
 }
 
