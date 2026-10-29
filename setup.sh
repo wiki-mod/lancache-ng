@@ -6004,6 +6004,10 @@ switch_channel_dir_and_resume() {
         cp -p -- "$install_dir/$f" "$dir/deploy/prod/$f" \
             || die "Failed to copy $install_dir/$f to $dir/deploy/prod (exit $?)."
     done
+    # What: the copied .env names the new channel
+    # Why: else the next update moves the stack back
+    # From: Issue #1683 | PR #1858
+    set_env_key LANCACHE_IMAGE_CHANNEL "$channel" "$dir/deploy/prod/${_UPDATE_ENV_FILE##*/}"
     set_active_channel_dir "$dir"
     for svc in "${!_UPDATE_HEALTH_BASELINE[@]}"; do baseline+="${svc}=${_UPDATE_HEALTH_BASELINE[$svc]} "; done
     print_ok "Stack settings copied to $dir; continuing with its setup.sh"
