@@ -963,6 +963,14 @@ build_runtime:
     smoke:
       - ldd /usr/local/bin/@CRATE@
 
+# What: build-only secret mounts and their bake guard.
+# Why: set-runtime, mounts and the guard share one list.
+# From: Issue #1683 | PR #1858
+build_secrets:
+  mount_ids: [project_selfhosted_proxy_ca, sccache_policy, sccache_redis_url, ccache_redis_url, sccache_gha, sccache_dist_config, distcc_potential_hosts]
+  bake_env_prefixes: [HTTP_PROXY, HTTPS_PROXY, http_proxy, https_proxy, GOPROXY, SCCACHE_, CCACHE_, DISTCC_, ACTIONS_]
+  runtime_dir_name: ci-runtime-secrets
+
 # What: CodeQL query suites and ignored paths.
 # Why: One SOT owner; codeql.yml/ci.sh derive, no dup.
 # From: Issue #1683

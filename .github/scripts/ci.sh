@@ -11028,23 +11028,18 @@ _ci_variable_value() {
     printf '%s\n' "${val}"
 }
 
-# What: The build-time secret mount ids (one source).
-# Why: set-runtime, mounts and the guard share one list.
-# From: Issue #1683
+# What: The build-time secret mount ids (one reader).
+# Why: AG-CI-006: the list lives in SOT build_secrets.
+# From: Issue #1683 | PR #1858
 _ci_runtime_secret_ids() {
-    printf '%s\n' \
-        project_selfhosted_proxy_ca \
-        sccache_policy sccache_redis_url ccache_redis_url sccache_gha \
-        sccache_dist_config distcc_potential_hosts
+    _ci_required_field build_secrets mount_ids blocklist
 }
 
 # What: Forbidden env-key prefixes for the bake guard.
-# Why: One source the guard and set-runtime both use.
-# From: Issue #1683
+# Why: AG-CI-006: the list lives in SOT build_secrets.
+# From: Issue #1683 | PR #1858
 _ci_bake_env_patterns() {
-    printf '%s\n' \
-        HTTP_PROXY HTTPS_PROXY http_proxy https_proxy \
-        GOPROXY SCCACHE_ CCACHE_ DISTCC_ ACTIONS_
+    _ci_required_field build_secrets bake_env_prefixes blocklist
 }
 
 # What: env lines + count of the proxy CA in the bundle.
@@ -11121,9 +11116,15 @@ _ci_bake_check() {
 
 # What: Path of the dir holding runtime secret files.
 # Why: set-runtime writes here; clear-runtime removes it.
-# From: Issue #1683
+# From: Issue #1683 | PR #1858
 _ci_runtime_secret_dir() {
-    printf '%s\n' "${CI_RUNTIME_SECRET_DIR:-${RUNNER_TEMP:-${CI_TMPDIR}}/ci-runtime-secrets}"
+    local name
+    if [ -n "${CI_RUNTIME_SECRET_DIR:-}" ]; then
+        printf '%s\n' "${CI_RUNTIME_SECRET_DIR}"
+        return 0
+    fi
+    name="$(_ci_required_field build_secrets runtime_dir_name block)" || return 2
+    printf '%s\n' "${RUNNER_TEMP:-${CI_TMPDIR}}/${name}"
 }
 
 # What: Escape a value for a double-quoted TOML string.
@@ -11180,7 +11181,7 @@ _ci_write_dist_config() {
 # From: Issue #1683
 _ci_emit_secret_ref() {
     local dir="$1" id="$2" ids
-    ids="$(_ci_runtime_secret_ids)"
+    ids="$(_ci_runtime_secret_ids)" || return 2
     if ! _ci_list_has "${id}" "${ids}"; then
         ci_log "[CI-ERROR-VARIABLES-0014]" "id=\"${id}\" reason=\"secret id not in the central list\""
         return 2
@@ -11201,7 +11202,7 @@ _ci_emit_secret() {
 # From: Issue #1683 | PR #1858
 _ci_set_runtime() {
     local kind="${1:-rust}" dir policy="" mode=off chain="" sccache_enabled=0
-    dir="$(_ci_runtime_secret_dir)"
+    dir="$(_ci_runtime_secret_dir)" || return 2
     if [ "${kind}" = rust ]; then
         policy="$(_ci_sccache_policy)" || return 2
         read -r mode chain <<< "${policy}"
@@ -11301,7 +11302,7 @@ _ci_set_runtime() {
 # From: Issue #1683
 _ci_clear_runtime() {
     local dir out
-    dir="$(_ci_runtime_secret_dir)"
+    dir="$(_ci_runtime_secret_dir)" || return 2
     if ! out="$(rm -rf -- "${dir}" 2>&1)"; then
         ci_error "[CI-ERROR-VARIABLES-0022]" "dir=\"${dir}\" reason=\"runtime secret dir not removed\"" "${out}"
         return 2
