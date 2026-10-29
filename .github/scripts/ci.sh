@@ -6446,13 +6446,22 @@ _ci_test_rust() {
     # What: workspace-root cargo on the service's crates.
     # Why: build context is no crate; AG-VAL-008 per crate.
     # From: Issue #1683 | PR #1858
-    local trc=0 c setup_rc=200
+    local trc=0 c setup_rc=200 defaults rows kv
     local -a picks=()
     for c in ${ctx}; do picks+=(-p "${c}"); done
     ctx="${ctx//$'\n'/ }"
+    # What: tests get the env the service container gets.
+    # Why: no test invents a value (AG-CODE-010).
+    # From: Issue #1683 | PR #1858
+    defaults="$(_ci_service_defaults_arg "${service}")" || return 2
+    rows="$(_ci_service_compose_env "${service}")" || return 2
     _ci_cargo_lock || return 2
     ( _ci_sccache_env "${service}" || exit "${setup_rc}"
         trap _ci_sccache_stop EXIT
+        while IFS= read -r kv; do
+            [ -z "${kv}" ] || export "${kv?}"
+        done <<< "${rows}"
+        export "${CI_ARG_DEFAULTS}=${defaults}"
         cd "${CI_REPO_ROOT:-.}" \
             && cargo fmt --check "${picks[@]}" \
             && cargo clippy --locked --all-targets "${picks[@]}" -- -D warnings \
@@ -11340,6 +11349,29 @@ PROG
         <<< "${rows}"$'\n\001\n'"${text}"
 }
 
+# What: one image's SOT defaults as one pipe-joined list.
+# Why: the build arg and the test env carry one value.
+# From: Issue #1683 | PR #1858
+_ci_service_defaults_arg() {
+    local rows
+    rows="$(_ci_service_default_rows "$1")" || return 2
+    printf '%s' "${rows//$'\n'/|}"
+}
+
+# What: KEY=value rows compose gives one service.
+# Why: rendered with the SOT fixture env; one owner.
+# From: Issue #1683 | PR #1858
+_ci_service_compose_env() {
+    local dep raw
+    dep="$(_ci_compose_path)" || return 2
+    if ! raw="$(_ci_compose_query "${dep}" "" config --format json 2>&1)"; then
+        ci_error "[CI-ERROR-CHECK-0110]" "file=\"${dep#"${CI_REPO_ROOT}/"}\" reason=\"deploy compose not renderable with the SOT fixture env\"" "${raw}"
+        return 2
+    fi
+    _ci_capture 0 jq -r --arg s "$1" '(.services[$s] // error("no compose service \($s)")).environment // {}
+        | to_entries[] | "\(.key)=\(.value // "")"' <<< "${raw}"
+}
+
 # What: Emit SOT build-args for one product service.
 # Why: single base-image owner; Dockerfiles pin none.
 # From: Issue #1683
@@ -11396,8 +11428,8 @@ _ci_service_build_args() {
     # What: the SOT defaults this image reads.
     # Why: the Dockerfiles bake them; compose names none.
     # From: Issue #1683 | PR #1912
-    val="$(_ci_service_default_rows "${service}")" || return 2
-    out="${out}${prefix}${CI_ARG_DEFAULTS}=${val//$'\n'/|}"$'\n'
+    val="$(_ci_service_defaults_arg "${service}")" || return 2
+    out="${out}${prefix}${CI_ARG_DEFAULTS}=${val}"$'\n'
     # What: SOT defaults this Dockerfile takes as args.
     # Why: the image builds with the value; it names none.
     # From: Issue #1683 | PR #1912
@@ -16106,7 +16138,7 @@ _ci_check_compose_healthchecks() {
 # Why: a hand-copied doc default silently goes stale.
 # From: Issue #1683 | PR #1858
 _ci_check_proxy_cache_env_doc_drift() {
-    local defaults="${1:-}" dep raw
+    local defaults="${1:-}"
     local arch_doc="${2:-}"
     if [ -z "${arch_doc}" ]; then arch_doc="$(_ci_repo_path CI_ARCH_DOC)" || return 2; fi
     if [ ! -f "${arch_doc}" ]; then
@@ -16127,13 +16159,7 @@ _ci_check_proxy_cache_env_doc_drift() {
         # What: values compose gives proxy, SOT fixture env
         # Why: an empty one falls back to runtime.defaults
         # From: Issue #1683 | PR #1912
-        dep="$(_ci_compose_path)" || return 2
-        if ! raw="$(_ci_compose_query "${dep}" "" config --format json 2>&1)"; then
-            ci_error "[CI-ERROR-CHECK-0110]" "file=\"${dep#"${CI_REPO_ROOT}/"}\" reason=\"deploy compose not renderable with the SOT fixture env\"" "${raw}"
-            return 2
-        fi
-        produced="$(_ci_capture 0 jq -r '.services.proxy.environment // {} | to_entries[]
-            | select(.key | test("^CACHE_[A-Z_]+$")) | "\(.key)=\(.value)"' <<< "${raw}")" || return 2
+        produced="$(_ci_service_compose_env proxy)" || return 2
     fi
     while IFS='=' read -r key value; do
         [[ "${key}" =~ ^CACHE_[A-Z_]+$ ]] || continue

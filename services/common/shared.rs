@@ -619,19 +619,6 @@ pub fn unique_temp_dir(tag: &str) -> PathBuf {
     dir
 }
 
-// What: HTTP client times for tests, 7 s each.
-// Why: tests of several crates build an http_client.
-// From: Issue #1683 | PR #1912
-pub fn test_http_env(key: &str) -> Option<String> {
-    [
-        "HTTP_CLIENT_TIMEOUT",
-        "HTTP_POOL_IDLE_TIMEOUT",
-        "HTTP_TCP_KEEPALIVE",
-    ]
-    .contains(&key)
-    .then(|| "7".to_string())
-}
-
 // What: a local HTTP server that answers canned replies.
 // Why: client code is tested without a network or Docker.
 // From: Issue #1683 | PR #1858
