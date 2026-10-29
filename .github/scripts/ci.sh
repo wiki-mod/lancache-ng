@@ -1051,9 +1051,24 @@ ci_cmd_codeql_impact() {
             rc=0; _ci_content_changed _ci_tracked_content_ids "${p}" || rc=$?
             case "${rc}" in 0) hit=true; break ;; 1) ;; *) return 2 ;; esac
         done <<< "${paths}"
+        # What: a PR skips a marked language content.
+        # Why: §73 NOOP on a PR; pushes always analyze.
+        # From: Issue #1683 | PR #1858
+        if [ "${hit}" = true ] && [ "${GITHUB_EVENT_NAME:-}" = pull_request ]; then
+            rc=0; _ci_codeql_analyzed "${lang}" || rc=$?
+            case "${rc}" in 0) hit=false ;; 1) ;; *) return 2 ;; esac
+        fi
         [ "${hit}" = true ] && { include="$(_ci_matrix_append "${include}" language="${lang}")" || return 2; }
     done <<< "${langs}"
     printf 'codeql-matrix=%s\n' "$(_ci_matrix_doc "${include}")"
+    # What: read the CodeQL release once for all languages.
+    # Why: anonymous reads per job ran into the rate limit.
+    # From: Issue #1683 | PR #1858
+    local release=""
+    if [ "${include}" != '[]' ]; then
+        release="$(_ci_tool_latest codeql)" || return 2
+    fi
+    printf 'codeql-release=%s\n' "${release}"
     # What: analyze always on the GitHub-hosted runner.
     # Why: CodeQL needs 4-8 GB RAM; the fleet has less.
     # From: Issue #1683 | PR #1858
@@ -1157,7 +1172,21 @@ _ci_fetch_drop() {
 # Why: an org IP allow list refuses the job token (403).
 # From: Issue #1683 | PR #1858
 _ci_github_get() {
-    _ci_download_curl --fail-with-body -sSL -H 'Accept: application/vnd.github+json' "$1"
+    local out tok="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
+    if out="$(_ci_download_curl --fail-with-body -sSL -H 'Accept: application/vnd.github+json' "$1" 2>&1)"; then
+        printf '%s\n' "${out}"
+        return 0
+    fi
+    # What: rate limit: one more read with the job token.
+    # Why: hosted runners share IPs; 60 anonymous reads/h.
+    # From: Issue #1683 | PR #1858
+    if [[ "${out}" != *"API rate limit exceeded"* ]] || [ -z "${tok}" ]; then
+        printf '%s\n' "${out}"
+        return 1
+    fi
+    ci_log "[CI-INFO-FETCH-0009]" "url=\"$1\" reason=\"anonymous rate limit; one read with the job token\""
+    printf 'Authorization: Bearer %s\n' "${tok}" \
+        | _ci_download_curl --fail-with-body -sSL -H 'Accept: application/vnd.github+json' -H @- "$1" 2>&1
 }
 
 # What: print memo $1 of this job; 1 when there is none.
@@ -1232,7 +1261,13 @@ _ci_tool_latest() {
 # From: Issue #1683 | PR #1858
 _ci_codeql_fetch() {
     local work="$1" rel tag asset url raw sha
-    rel="$(_ci_tool_latest codeql)" || return 2
+    # What: take the release codeql-impact read once.
+    # Why: one anonymous read per run; a job each hit 403.
+    # From: Issue #1683 | PR #1858
+    rel="${CODEQL_RELEASE:-}"
+    if [ -z "${rel}" ]; then
+        rel="$(_ci_tool_latest codeql)" || return 2
+    fi
     IFS=$'\t' read -r tag asset url sha <<< "${rel}"
     printf 'codeql bundle: %s\n' "${tag}" >&2
     _ci_fetch_verified "${url}" "${sha}" "${work}/${asset}" || return 2
@@ -1283,6 +1318,67 @@ _ci_codeql_run() {
         return 2
     fi
     ci_log "[CI-INFO-CODEQL-0011]" "phase=codeql-analyze language=${lang} result=uploaded"
+    _ci_codeql_mark "${lang}"
+}
+
+# What: content id of one CodeQL language at HEAD.
+# Why: equal sources and config give equal results.
+# From: Issue #1683 | PR #1858
+_ci_codeql_content() {
+    local lang="$1" head paths p ids rows="" cfg
+    head="$(_ci_head_commit)" || return 2
+    paths="$(_ci_codeql_paths "${lang}")" || return 2
+    while IFS= read -r p; do
+        [ -n "${p}" ] || continue
+        ids="$(_ci_tracked_content_ids "${p}" "${head}" "")" || return 2
+        rows+="${ids}"$'\n'
+    done <<< "${paths}"
+    cfg="$(ci_cmd_codeql_config)" || return 2
+    printf '%s\n%s\n' "${rows}" "${cfg}" | _ci_sha256_hex
+}
+
+# What: ref of the CodeQL mark of one language.
+# Why: one ref per language keeps one value each.
+# From: Issue #1683 | PR #1858
+_ci_codeql_mark_ref() {
+    local prefix
+    prefix="$(_ci_variable CI_CODEQL_REF)" || return 2
+    printf '%s/%s' "${prefix}" "$1"
+}
+
+# What: subject of a CodeQL mark: language and content.
+# Why: codeql-impact and codeql-analyze compare one text.
+# From: Issue #1683 | PR #1858
+_ci_codeql_note() {
+    printf 'codeql %s %s' "$1" "$2"
+}
+
+# What: rc 0 if this language content was uploaded.
+# Why: §73: an analyzed content is NOOP on a PR run.
+# From: Issue #1683 | PR #1858
+_ci_codeql_analyzed() {
+    local id ref
+    id="$(_ci_codeql_content "$1")" || return 2
+    ref="$(_ci_codeql_mark_ref "$1")" || return 2
+    _ci_mark_has "${ref}" "$(_ci_codeql_note "$1" "${id}")" || return $?
+    ci_log "[CI-INFO-CODEQL-0020]" "language=\"$1\" ref=\"${ref}\" content=\"${id}\" reason=\"this content is analyzed and uploaded; NOOP\""
+}
+
+# What: mark a language content after its upload.
+# Why: a later PR run with this content is NOOP (§73).
+# From: Issue #1683 | PR #1858
+_ci_codeql_mark() {
+    local id ref note
+    if [ "${PR_IS_FORK:-false}" = true ]; then
+        ci_log "[CI-INFO-CODEQL-0021]" "language=\"$1\" reason=\"fork PR: the token cannot write refs; no mark\""
+        return 0
+    fi
+    id="$(_ci_codeql_content "$1")" || return 2
+    ref="$(_ci_codeql_mark_ref "$1")" || return 2
+    note="$(_ci_codeql_note "$1" "${id}")"
+    _ci_mark_write "${ref}" "${note}" "${note}" "[CI-ERROR-CODEQL-0022]" \
+        "language=\"$1\" content=\"${id}\" reason=\"CodeQL mark not written\"" || return 2
+    ci_log "[CI-INFO-CODEQL-0023]" "language=\"$1\" ref=\"${ref}\" content=\"${id}\" result=marked"
 }
 
 # What: Run CodeQL for one SOT language in a work dir.

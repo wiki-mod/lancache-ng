@@ -61,6 +61,7 @@ jobs:
     outputs:
       matrix: ${{ steps.impact.outputs.codeql-matrix }}
       codeql-runner: ${{ steps.impact.outputs.codeql-runner }}
+      codeql-release: ${{ steps.impact.outputs.codeql-release }}
       image: ${{ steps.resolve.outputs.image }}
       timeouts: ${{ steps.jobs.outputs.timeouts }}
     steps:
@@ -95,8 +96,11 @@ jobs:
     name: CodeQL ${{ matrix.language }}
     needs: impact
     if: ${{ fromJSON(needs.impact.outputs.matrix).include[0] != null }}
+    # What: write only for the analyzed-content mark ref.
+    # Why: §73: a later PR run with that content is NOOP.
+    # From: Issue #1683 | PR #1858
     permissions:
-      contents: read
+      contents: write
       security-events: write
     # What: always the GitHub-hosted runner from ci.sh.
     # Why: CodeQL needs 4-8 GB RAM; the fleet has less.
@@ -118,4 +122,9 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           LANGUAGE: ${{ matrix.language }}
+          # What: release read once; fork flag.
+          # Why: one API read per run; a fork marks nothing.
+          # From: Issue #1683 | PR #1858
+          CODEQL_RELEASE: ${{ needs.impact.outputs.codeql-release }}
+          PR_IS_FORK: ${{ github.event.pull_request.head.repo.fork }}
         run: bash .github/scripts/ci.sh codeql-analyze "${LANGUAGE}"
