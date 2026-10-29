@@ -2118,7 +2118,7 @@ _ci_rust_content() {
 _ci_image_base_plus() {
     local field="$1" own="$2" base
     base="$(_ci_block_entry_list image_base "" "${field}")" || return 2
-    printf '%s\n%s\n' "${base}" "${own}" | awk 'NF && !seen[$0]++'
+    _ci_capture 0 awk "NF && !seen[\$0]++" <<< "${base}"$'\n'"${own}"
 }
 
 # What: bootstrap, base, own and build-type apk lists.
@@ -3699,7 +3699,7 @@ _ci_glob_ere() {
 # Why: SOT pr_labels rules plus each target's labels.
 # From: Issue #1683 | PR #1858
 _ci_pr_labels_for() {
-    local label globs g re f t ctx tl keys targets
+    local label globs g re f t ctx tl keys targets labels
     local -A hit=()
     local -a res=()
     keys="$(_ci_block_keys pr_labels all)" || return 2
@@ -3726,7 +3726,10 @@ _ci_pr_labels_for() {
             done <<< "${tl}"
         done
     done
-    [ "${#hit[@]}" -eq 0 ] || printf '%s\n' "${!hit[@]}" | LC_ALL=C sort
+    if [ "${#hit[@]}" -gt 0 ]; then
+        printf -v labels '%s\n' "${!hit[@]}"
+        _ci_capture 0 env LC_ALL=C sort <<< "${labels%$'\n'}"
+    fi
 }
 
 # What: add the path labels to the current pull request.
@@ -5002,9 +5005,9 @@ _ci_sccache_count() {
 _ci_sccache_report() {
     local stats req hits miss errs="" label n
     stats="$(_ci_run "[CI-ERROR-CACHE-0012]" "reason=\"sccache stats not readable\"" sccache --show-stats)" || return 2
-    req="$(_ci_sccache_count "Compile requests" "${stats}")"
-    hits="$(_ci_sccache_count "Cache hits" "${stats}")"
-    miss="$(_ci_sccache_count "Cache misses" "${stats}")"
+    req="$(_ci_sccache_count "Compile requests" "${stats}")" || return 2
+    hits="$(_ci_sccache_count "Cache hits" "${stats}")" || return 2
+    miss="$(_ci_sccache_count "Cache misses" "${stats}")" || return 2
     # What: the full stats follow the counts as raw.
     # Why: hits=0 needs the error and non-cacheable rows.
     # From: Issue #1683 | PR #1912
@@ -5021,7 +5024,7 @@ _ci_sccache_report() {
     # Why: sccache turns each into a miss and compiles.
     # From: Issue #1683 | PR #1912
     for label in "Cache errors" "Cache read errors" "Cache timeouts"; do
-        n="$(_ci_sccache_count "${label}" "${stats}")"
+        n="$(_ci_sccache_count "${label}" "${stats}")" || return 2
         [ "${n}" = 0 ] || errs+=" ${label// /_}=${n:-none}"
     done
     # What: write errors by their cause in the server log.
@@ -5030,7 +5033,7 @@ _ci_sccache_report() {
     local log wr wlog wex=0 wrl=0 chk cause
     local ok='Error executing cache write: (AlreadyExists \(permanent\)|RateLimited \(temporary\))'
     log="$(_ci_sccache_log)"
-    wr="$(_ci_sccache_count "Cache write errors" "${stats}")"
+    wr="$(_ci_sccache_count "Cache write errors" "${stats}")" || return 2
     if [ "${wr}" != 0 ]; then
         wlog="$(_ci_capture 1 grep -c 'Error executing cache write:' "${log}")" || return 2
         wex="$(_ci_capture 1 grep -c 'Error executing cache write: AlreadyExists (permanent)' "${log}")" || return 2
@@ -6165,7 +6168,7 @@ _ci_toolchain_closure() {
     _ci_image_files "${ref}" "${platform}" "${work}" /lib/apk/db/installed || return 2
     out="$(_ci_run "[CI-ERROR-IDENTITY-0020]" "image=\"${ref}\" platform=\"${platform}\" reason=\"toolchain package closure not read\"" \
         awk -v roots="${roots//$'\n'/ }" "${_CI_AWK_APK_CLOSURE}" "${work}/installed")" || return 2
-    printf '%s\n' "${out}" | LC_ALL=C sort
+    _ci_capture 0 env LC_ALL=C sort <<< "${out}"
 }
 
 # What: installed apk packages the index has newer.
@@ -6805,8 +6808,11 @@ _ci_index_raw() {
 # Why: shared format for assemble/reconcile/candidate.
 # From: Issue #1683
 _ci_normalize_platform_digests() {
-    local input="$1"
-    printf '%s\n' "${input}" | tr ' ' '\n' | awk 'NF' | LC_ALL=C sort | tr '\n' ' '
+    local input="$1" lines
+    lines="$(_ci_capture 0 tr ' ' '\n' <<< "${input}")" || return 2
+    lines="$(_ci_capture 0 awk 'NF' <<< "${lines}")" || return 2
+    lines="$(_ci_capture 0 env LC_ALL=C sort <<< "${lines}")" || return 2
+    [ -z "${lines}" ] || _ci_capture 0 tr '\n' ' ' <<< "${lines}"
 }
 
 # What: index of the accepted digests, found by content
@@ -6831,7 +6837,7 @@ _ci_index_lookup() {
         [ "${grc}" -eq 0 ] || return "${grc}"
         plats="$(_ci_index_children "${tag}")" || return "$?"
         plats="$(_ci_capture 0 tr '\n' ' ' <<< "${plats}")" || return 2
-        have="$(_ci_normalize_platform_digests "${plats}")"
+        have="$(_ci_normalize_platform_digests "${plats}")" || return 2
         if [ "${have}" = "${want}" ]; then
             printf '%s %s\n' "${idx}" "${plats% }"
             return 0
@@ -6910,7 +6916,7 @@ _ci_reconcile_index() {
             ;;
     esac
     ex_digest="${existing%% *}"
-    ex_have="$(_ci_normalize_platform_digests "${existing#* }")"
+    ex_have="$(_ci_normalize_platform_digests "${existing#* }")" || return 2
     if [ "${want}" = "${ex_have}" ]; then
         printf '%s\n' "${ex_digest}"
         return 0
@@ -6957,7 +6963,7 @@ ci_cmd_assemble() {
     [ -n "${service}" ] || { ci_log "[CI-ERROR-ASSEMBLE-0001]" "reason=\"service arg required\""; return 2; }
     local inputs want count reused index
     inputs="$(_ci_collect_accepted_digests "${service}")" || return "$?"
-    want="$(_ci_normalize_platform_digests "${inputs}")"
+    want="$(_ci_normalize_platform_digests "${inputs}")" || return 2
     local -a input_list=()
     [ -z "${inputs}" ] || mapfile -t input_list <<< "${inputs}"
     count="$(_ci_capture 0 awk '/=/ {n++} END {print n+0}' <<< "${inputs}")" || return 2
@@ -7238,7 +7244,7 @@ _ci_stack_candidate_rows() {
 _ci_candidate_index() {
     local service="$1" inputs want idx
     inputs="$(_ci_collect_accepted_digests "${service}")" || return "$?"
-    want="$(_ci_normalize_platform_digests "${inputs}")"
+    want="$(_ci_normalize_platform_digests "${inputs}")" || return 2
     idx="$(_ci_reconcile_index "${service}" "${want}")" || return "$?"
     if [ -z "${idx}" ]; then
         ci_error "[CI-ERROR-CANDIDATE-0001]" "service=\"${service}\" reason=\"platforms accepted but no assembled multi-arch index; not candidate-ready\"" "accepted=${inputs}"
@@ -7423,8 +7429,8 @@ _ci_channel_matches() {
     name="$(_ci_image_ref "${svc}")" || return 2
     want="$(_ci_index_children "${name}@${digest}")" || return 2
     seen="$(_ci_index_children "${name}:${channel}")" || return "$?"
-    want="$(_ci_normalize_platform_digests "${want} ${kept}")"
-    seen="$(_ci_normalize_platform_digests "${seen}")"
+    want="$(_ci_normalize_platform_digests "${want} ${kept}")" || return 2
+    seen="$(_ci_normalize_platform_digests "${seen}")" || return 2
     [ "${want}" = "${seen}" ]
 }
 
@@ -8996,7 +9002,7 @@ _ci_gc_run() {
         return 0
     fi
     if [ "${mode}" = "apply" ]; then
-        policy="$(_ci_deletion_policy)"
+        policy="$(_ci_deletion_policy)" || return 2
         case "${policy}" in
             # What: Exact allow-list, not substring match.
             # Why: A negated policy must not pass the gate.
@@ -10628,7 +10634,7 @@ _ci_kea_reply_check() {
 # Why: the rollback target is the id a ui write added.
 # From: Issue #763 | PR #1858
 _ci_validate_kea_snapshots() {
-    local found p id file
+    local found p id file ids=""
     file="$(_ci_runtime_default KEA_CONFIG_SNAPSHOT_FILE)" || return 2
     if ! [[ "${file}" =~ ^[A-Za-z0-9._-]+$ ]]; then
         ci_log "[CI-ERROR-CHECK-0197]" "key=\"KEA_CONFIG_SNAPSHOT_FILE\" value=\"${file}\" reason=\"SOT snapshot file name is no plain file name\""
@@ -10639,9 +10645,10 @@ _ci_validate_kea_snapshots() {
         id="${p%/"${file}"}"
         id="${id##*/}"
         if [[ "${id}" =~ ^[0-9]+$ ]]; then
-            printf '%s\n' "${id}"
+            ids+="${id}"$'\n'
         fi
-    done <<< "${found}" | sort
+    done <<< "${found}"
+    [ -z "${ids}" ] || _ci_capture 0 sort <<< "${ids%$'\n'}"
 }
 
 # What: Count live Kea reservations for one MAC.
@@ -17923,8 +17930,9 @@ _ci_check_cargo_audit() {
 ci_cmd_check_all() {
     local -a changed=() names=() skipped=() failed=() stopped=()
     _ci_collect_changed changed "$@" || return 2
-    local raw sub r rc=0 scope why state invoked=0 diff_seen="all files"
-    raw="$(printf '%s\n' "${!CI_CHECKS[@]}" | LC_ALL=C sort)" || return 2
+    local raw sub r rc=0 scope why state invoked=0 diff_seen="all files" keys
+    printf -v keys '%s\n' "${!CI_CHECKS[@]}"
+    raw="$(_ci_capture 0 env LC_ALL=C sort <<< "${keys%$'\n'}")" || return 2
     mapfile -t names <<< "${raw}"
     [ "${#changed[@]}" -eq 0 ] || diff_seen="${#changed[@]} changed paths"
     for sub in "${names[@]}"; do
