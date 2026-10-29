@@ -190,6 +190,10 @@ struct Config {
     // Why: revocation is the per-connect DB check, not expiry.
     // From: Issue #1683 | PR #1858
     nats_user_jwt_ttl_secs: i64,
+    // What: stored alarm history cap, newest kept.
+    // Why: a burst of alarms must not grow the file unbounded.
+    // From: Issue #1683 | PR #1858
+    alarms_max: usize,
     // What: wait for one secondary SOA answer.
     // Why: a silent host is a status, not a hang.
     // From: Issue #1683 | PR #1912
@@ -472,6 +476,7 @@ impl Config {
                 OutOfRange::Reject,
             )? as i64,
             secondary_probe_timeout: need_secs(env, "SECONDARY_PROBE_TIMEOUT")?,
+            alarms_max: knob("UI_ALARMS_MAX", u32::MAX.into(), OutOfRange::Reject)? as usize,
             nats_kick_step: need_secs(env, "NATS_KICK_STEP_TIMEOUT")?,
             // What: missed watchdog cycles before stale.
             // Why: one owner with the restart rule.
@@ -2190,11 +2195,6 @@ fn syslog_stats(root: &str) -> SyslogStats {
     stats
 }
 
-// What: stored alarm history cap, newest kept.
-// Why: a burst of alarms must not grow the file unbounded.
-// From: Issue #1683 | PR #1858
-const MAX_ALARMS: usize = 50;
-
 // What: stored alarms; a failure is logged as empty.
 // Why: the dashboard must render even with a broken file.
 // From: Issue #1683 | PR #1912
@@ -2226,13 +2226,13 @@ fn load_alarms(path: &str) -> io::Result<Vec<NetdataAlarm>> {
 // What: store one alarm unless its unique_id is known.
 // Why: netdata resends; the caller holds the alarms lock.
 // From: Issue #1683 | PR #1912
-fn append_alarm(path: &str, alarm: NetdataAlarm) -> io::Result<()> {
+fn append_alarm(path: &str, alarm: NetdataAlarm, keep: usize) -> io::Result<()> {
     let mut alarms = load_alarms(path)?;
     if alarms.iter().any(|a| a.unique_id == alarm.unique_id) {
         return Ok(());
     }
     alarms.insert(0, alarm);
-    alarms.truncate(MAX_ALARMS);
+    alarms.truncate(keep);
     let json = serde_json::to_vec_pretty(&alarms).map_err(io::Error::other)?;
     write_if_changed(Path::new(path), &json, 0o644, None).map(|_| ())
 }
@@ -2284,7 +2284,11 @@ async fn ingest_alarm(State(state): Shared, headers: HeaderMap, body: Bytes) -> 
     // From: Issue #1683 | PR #1858
     let stored = {
         let _guard = hold(&state.netdata_alarms_lock);
-        append_alarm(&state.config.netdata_alarms_file, alarm)
+        append_alarm(
+            &state.config.netdata_alarms_file,
+            alarm,
+            state.config.alarms_max,
+        )
     };
     stored_status("netdata alarm", stored)
 }

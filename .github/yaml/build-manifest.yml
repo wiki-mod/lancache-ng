@@ -540,6 +540,10 @@ runtime:
     # Why: a dead system connection must not hang a removal.
     # From: Issue #681
     - NATS_KICK_STEP_TIMEOUT=5
+    # What: stored alarm history cap of the ui, newest kept.
+    # Why: a burst of alarms must not grow the file unbounded.
+    # From: Issue #1683 | PR #1858
+    - UI_ALARMS_MAX=50
     # What: URL paths of ui routes setup.sh and ci.sh call.
     # Why: shell reads the path here; no literal copy.
     # From: Issue #1683 | PR #1912
