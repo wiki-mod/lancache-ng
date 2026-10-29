@@ -2272,9 +2272,10 @@ is_quickstart_install() {
 migrate_quickstart_install() (
     local old_dir="$1" stack_dir="${PROD_COMPOSE%/*}" env_local old_env record project key value volume dir copy f
     local services old_volumes prod_volumes rows missing copies keys old_raw new_raw old_value line path_keys bundle
-    local -a service_list copy_lines
+    local -a service_list copy_lines path_key_list=()
     path_keys=$(lancache_sot_list quickstart_path_keys runtime) || exit $?
     path_keys="${path_keys//$'\n'/ }"
+    read -ra path_key_list <<< "$path_keys"
     bundle=$(lancache_sot_list quickstart_bundle_copies runtime) || exit $?
     env_local="$stack_dir/.env.local"
     old_env="$old_dir/.env"
@@ -2307,7 +2308,7 @@ migrate_quickstart_install() (
     # What: relative paths become absolute to old dir
     # Why: prod resolves them against deploy/prod instead
     # From: Issue #1683 | PR #1858
-    for key in $path_keys; do
+    for key in "${path_key_list[@]}"; do
         value=$(get_env_var "$key" "$env_local") || die "Cannot read $key from $env_local (exit $?)."
         [[ -n "$value" && "$value" != /* ]] || continue
         set_env_key "$key" "$(realpath -m "$old_dir/$value")" "$env_local"
@@ -2818,14 +2819,20 @@ runtime_default_in() {
 # From: Issue #1683 | PR #1912
 sot_compose_env() {
     local env_file="${1:-}" state="${2:-}" keys key value list dir
+    local -a words=()
     keys=$(lancache_sot_value compose_keys runtime) || exit $?
     list=$(runtime_defaults_list) || exit $?
-    for key in $keys; do
+    # What: key lists split by read -a, no glob
+    # Why: an unquoted loop word would expand * or ?
+    # From: Issue #1683 | PR #1858
+    read -ra words <<< "${keys//$'\n'/ }"
+    for key in "${words[@]}"; do
         value=$(runtime_default_in "$list" "$key") || exit $?
         printf 'SOT_%s=%s\n' "$key" "$value"
     done
     keys=$(prod_state_keys) || exit $?
-    for key in $keys; do
+    read -ra words <<< "${keys//$'\n'/ }"
+    for key in "${words[@]}"; do
         dir=$(prod_state_dir_for_key "$key" "$env_file" "$state") || exit $?
         printf '%s=%s\n' "$key" "$dir"
     done
@@ -3954,6 +3961,7 @@ migrate_env_for_update() (
     local state_dir ui_session_ttl
     local legacy_cache_http legacy_cache_https existing_image_tag
     local required_keys required_key required_value
+    local -a required_key_list=()
     local lancache_image_registry lancache_image_prefix lancache_image_channel lancache_image_tag
     env_file=$(runtime_env_file_for_install_dir "$install_dir")
 
@@ -4293,7 +4301,8 @@ migrate_env_for_update() (
     # Why: an empty required key breaks the stack at up
     # From: Issue #1683 | PR #1912
     required_keys=$(lancache_sot_value setup_required_repairs validation) || exit $?
-    for required_key in $required_keys; do
+    read -ra required_key_list <<< "${required_keys//$'\n'/ }"
+    for required_key in "${required_key_list[@]}"; do
         required_value=$(get_env_var "$required_key" "$env_file") || exit $?
         [[ -n "$required_value" ]] \
             || die "Required key $required_key is still empty in $env_file after the update."
@@ -5717,11 +5726,16 @@ update_repo_and_resume() {
 # From: Issue #1683 | PR #1858
 update_resume_handoff() {
     local pair
+    local -a pairs=()
     [[ -n "${CONVERGENCE_TIMER_WAS_ACTIVE:-}" && -n "${CONVERGENCE_TIMER_WAS_ENABLED:-}" \
         && -n "${CONVERGENCE_SERVICE_WAS_ACTIVE:-}" && -n "${LANCACHE_UPDATE_REPO:-}" ]] \
         || die "LANCACHE_UPDATE_RESUMED is set without the state of the paused update; rerun setup.sh update without it."
     _UPDATE_HEALTH_BASELINE=()
-    for pair in ${LANCACHE_UPDATE_BASELINE:-}; do
+    # What: read -a splits the pairs without glob expansion
+    # Why: an unquoted loop word would expand * or ?
+    # From: Issue #1683 | PR #1858
+    read -ra pairs <<< "${LANCACHE_UPDATE_BASELINE:-}"
+    for pair in "${pairs[@]}"; do
         _UPDATE_HEALTH_BASELINE["${pair%%=*}"]="${pair#*=}"
     done
     print_ok "Continuing the update with $LANCACHE_UPDATE_REPO/setup.sh"
