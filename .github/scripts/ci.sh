@@ -9954,12 +9954,12 @@ _ci_validate_proxy() {
         ci_error "[CI-ERROR-VALIDATE-0012]" "url=\"${url}\" reason=\"missing proxy container IP or probe host\"" "${ip_std}"
         return 2
     fi
-    if ! h1="$(curl -fsS --resolve "${host}:${port}:${ip_std}" -D - "${url}" 2>&1)"; then
+    if ! h1="$(_ci_validate_curl -fsS --resolve "${host}:${port}:${ip_std}" -D - "${url}" 2>&1)"; then
         ci_log "[CI-ERROR-VALIDATE-0013]" "url=\"${url}\" reason=\"proxy MISS request failed\""
         printf 'raw:\n%s\n' "${h1}"
         return 1
     fi
-    if ! h2="$(curl -fsS --resolve "${host}:${port}:${ip_std}" -D - "${url}" 2>&1)"; then
+    if ! h2="$(_ci_validate_curl -fsS --resolve "${host}:${port}:${ip_std}" -D - "${url}" 2>&1)"; then
         ci_log "[CI-ERROR-VALIDATE-0065]" "url=\"${url}\" reason=\"proxy repeat request failed\""
         printf 'raw:\n%s\n' "${h2}"
         return 1
@@ -10026,7 +10026,8 @@ _ci_validate_proxy_map() {
 # Why: the proxy https port must show a cert we signed
 # From: Issue #1683
 _ci_validate_https_mitm() {
-    local project="$1" ip cid domain ca_subj issuer tmp out cert tls_err ca ca_file port svc
+    local project="$1" ip cid domain ca_subj issuer tmp out cert tls_err ca ca_file port svc max
+    max="$(_ci_variable CI_VALIDATE_HTTP_MAX_TIME)" || return 2
     ca="$(_ci_nginx_subdir NGINX_SUBDIR_CA)" || return 2
     ca_file="$(_ci_runtime_default CA_CERT_FILE)" || return 2
     port="$(_ci_runtime_default PROXY_HTTPS_PORT)" || return 2
@@ -10051,7 +10052,7 @@ _ci_validate_https_mitm() {
     # Why: raw evidence when the issuer read fails.
     # From: Issue #1683 | PR #1858
     tls_err="$(_ci_mktemp "${CI_TMPDIR}/ci-tls-err.XXXXXX")" || { rm -f "${tmp}"; return 2; }
-    cert="$(printf '' | openssl s_client -connect "${ip}:${port}" -servername "${domain}" 2>"${tls_err}")"
+    cert="$(printf '' | timeout "${max}" openssl s_client -connect "${ip}:${port}" -servername "${domain}" 2>"${tls_err}")"
     issuer=""
     if [ -n "${cert}" ]; then
         issuer="$(openssl x509 -noout -issuer 2>>"${tls_err}" <<<"${cert}")"
@@ -10139,11 +10140,11 @@ _ci_validate_ui_session() {
     # What: one try; wait_healthy already saw ui healthy.
     # Why: its healthcheck asks the same server; no poll.
     # From: Issue #1683 | PR #1912
-    if ! last="$(curl -fsS -c "${jar}" "${url}" 2>&1)"; then
+    if ! last="$(_ci_validate_curl -fsS -c "${jar}" "${url}" 2>&1)"; then
         ci_error "[CI-ERROR-VALIDATE-0031]" "url=\"${url}\" reason=\"ui page did not answer\"" "${last}"
         return 1
     fi
-    page="$(_ci_capture 0 curl -fsS -b "${jar}" -c "${jar}" "${url}")" || return 2
+    page="$(_ci_capture 0 _ci_validate_curl -fsS -b "${jar}" -c "${jar}" "${url}")" || return 2
     csrf="$(_ci_capture 0 sed -n 's/.*name="csrf_token" value="\([^"]*\)".*/\1/p' <<< "${page}")" || return 2
     csrf="${csrf%%$'\n'*}"
     if [ -z "${csrf}" ]; then
@@ -10240,7 +10241,7 @@ _ci_validate_ui_post() {
         data+=(--data-urlencode "${field}")
     done
     body="$(_ci_mktemp "${CI_TMPDIR}/ci-ui-body.XXXXXX")" || return 2
-    code="$(_ci_capture 0 curl -sS -b "${jar}" -o "${body}" -w '%{http_code}' \
+    code="$(_ci_capture 0 _ci_validate_curl -sS -b "${jar}" -o "${body}" -w '%{http_code}' \
         "${data[@]}" "${base}${path}")" || {
         rm -f "${body}"
         ci_log "[CI-ERROR-VALIDATE-0082]" "url=\"${base}${path}\" reason=\"ui form post failed (raw above)\""
@@ -10385,7 +10386,17 @@ _ci_curl_secret() {
     shift 2
     value="${value//\\/\\\\}"
     value="${value//\"/\\\"}"
-    printf '%s = "%s"\n' "${opt}" "${value}" | curl -K - "$@"
+    printf '%s = "%s"\n' "${opt}" "${value}" | _ci_validate_curl -K - "$@"
+}
+
+# What: curl bounded by the SOT validate HTTP timeouts.
+# Why: a hung service fails its probe, not the whole job.
+# From: Issue #1683 | PR #1858
+_ci_validate_curl() {
+    local conn max
+    conn="$(_ci_variable CI_VALIDATE_HTTP_CONNECT_TIMEOUT)" || return 2
+    max="$(_ci_variable CI_VALIDATE_HTTP_MAX_TIME)" || return 2
+    curl --connect-timeout "${conn}" --max-time "${max}" "$@"
 }
 
 # What: one shared secret read inside a running container
@@ -10529,7 +10540,7 @@ _ci_validate_dns_rollback() {
         ci_error "[CI-ERROR-VALIDATE-0039]" "url=\"${lbase}\" reason=\"rollback listener did not accept\"" "${last}"
         return 1
     fi
-    resp="$(_ci_capture 0 curl -sS -w '\n%{http_code}' "${lbase}/snapshots")" || return 2
+    resp="$(_ci_capture 0 _ci_validate_curl -sS -w '\n%{http_code}' "${lbase}/snapshots")" || return 2
     code="${resp##*$'\n'}"
     if [ "${code}" != "401" ]; then
         ci_error "[CI-ERROR-VALIDATE-0040]" "code=\"${code}\" reason=\"/snapshots without X-API-Key not 401\"" "${resp}"
