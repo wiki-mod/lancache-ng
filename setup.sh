@@ -2635,8 +2635,7 @@ EOF
 }
 
 # What: true if no tracked file has local changes
-# Why: untracked state (ca/, overrides) must not block;
-#      git checkout refuses to overwrite untracked files
+# Why: untracked ca/ must not block; checkout guards it
 # From: Issue #1683 | PR #1858
 git_repo_is_clean() {
     local repo_dir="$1" out
