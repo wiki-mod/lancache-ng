@@ -2469,7 +2469,7 @@ _ci_impact_pair() {
         return 0
     fi
     hid="$(_ci_identity_compute "${t}" "${p}" "${head}")" || hid=""
-    v="$(_ci_impact_classify "${t}" "${p}" "${hid}" "${base}" "${base_manifest}" "${head}")"
+    v="$(_ci_impact_classify "${t}" "${p}" "${hid}" "${base}" "${base_manifest}" "${head}")" || return 2
     printf 'target=%s platform=%s impact=%s\n' "${t}" "${p}" "${v}"
     case "${v}" in
         NOOP) noop=$((noop+1)) ;;
@@ -6140,31 +6140,11 @@ _ci_apk_newer() {
 # From: Issue #1683
 _ci_semantic_impact() {
     local service="$1" platform="$2" identity="$3"
-    if [ -n "${CI_IMPACT_CMD:-}" ]; then
-        # What: Capture impact output; keep its exit code.
-        # Why: errexit must not skip rc check (AG-VAL-030).
-        # From: Issue #1683
-        local out rc=0
-        out="$("${CI_IMPACT_CMD}" "${service}" "${platform}" "${identity}")" || rc=$?
-        if [ "${rc}" -ne 0 ]; then
-            ci_error "[CI-WARN-IMPACT-0007]" "service=\"${service}\" platform=\"${platform}\" cmd=\"${CI_IMPACT_CMD}\" rc=${rc} reason=\"impact command failed; UNKNOWN\"" "${out}"
-            printf 'UNKNOWN\n'; return 0
-        fi
-        case "${out}" in
-            BUILD|NOOP|UNKNOWN) printf '%s\n' "${out}" ;;
-            *)
-                ci_error "[CI-WARN-IMPACT-0008]" "service=\"${service}\" platform=\"${platform}\" cmd=\"${CI_IMPACT_CMD}\" reason=\"impact command gave no BUILD/NOOP/UNKNOWN; UNKNOWN\"" "${out}"
-                printf 'UNKNOWN\n'
-                ;;
-        esac
-        return 0
-    fi
     local base head bm refs v=UNKNOWN
-    if ! refs="$(_ci_diff_refs)"; then
-        ci_log "[CI-INFO-IMPACT-0005]" "service=\"${service}\" platform=\"${platform}\" reason=\"diff refs lookup failed; UNKNOWN\""
-        printf 'UNKNOWN\n'
-        return 0
-    fi
+    # What: a failed lookup stops; its owner logs the code.
+    # Why: AG-INT-002: an error is no UNKNOWN verdict.
+    # From: Issue #1683 | PR #1858
+    refs="$(_ci_diff_refs)" || return 2
     read -r base head <<<"${refs}"
     if [ -z "${base}" ]; then
         # What: a refresh run has no base; missing is BUILD.
@@ -6179,15 +6159,15 @@ _ci_semantic_impact() {
                 return 0
                 ;;
             1) ;;
-            *) printf 'UNKNOWN\n'; return 0 ;;
+            *) return 2 ;;
         esac
         ci_log "[CI-INFO-IMPACT-0003]" "service=\"${service}\" platform=\"${platform}\" reason=\"no base ref for this event; UNKNOWN\""
         printf 'UNKNOWN\n'
         return 0
     fi
-    bm="$(_ci_mktemp -p "${CI_TMPDIR}")" || { printf 'UNKNOWN\n'; return 0; }
+    bm="$(_ci_mktemp -p "${CI_TMPDIR}")" || return 2
     if _ci_manifest_at "${base}" "${bm}" && [ -s "${bm}" ]; then
-        v="$(_ci_impact_classify "${service}" "${platform}" "${identity}" "${base}" "${bm}")"
+        v="$(_ci_impact_classify "${service}" "${platform}" "${identity}" "${base}" "${bm}")" || { rm -f "${bm}"; return 2; }
     else
         ci_log "[CI-INFO-IMPACT-0006]" "service=\"${service}\" platform=\"${platform}\" base=\"${base}\" reason=\"no SOT at base; UNKNOWN, escalate, BUILD DISACK\""
     fi
