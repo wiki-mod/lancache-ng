@@ -6469,8 +6469,9 @@ _ci_test_rust() {
     # Why: build context is no crate; AG-VAL-008 per crate.
     # From: Issue #1683 | PR #1858
     local trc=0 c setup_rc=200 defaults rows kv
-    local -a picks=()
-    for c in ${ctx}; do picks+=(-p "${c}"); done
+    local -a picks=() crate_list=()
+    [ -z "${ctx}" ] || mapfile -t crate_list <<< "${ctx}"
+    for c in "${crate_list[@]}"; do picks+=(-p "${c}"); done
     ctx="${ctx//$'\n'/ }"
     # What: tests get the env the service container gets.
     # Why: no test invents a value (AG-CODE-010).
@@ -6756,7 +6757,9 @@ _ci_index_lookup() {
     name="$(_ci_image_ref "${service}")" || return 2
     head="$(_ci_head_commit)" || return 2
     revs="${head}"
-    for kv in ${want}; do
+    local -a want_list
+    read -ra want_list <<< "${want}"
+    for kv in "${want_list[@]}"; do
         rev="$(_ci_registry_read "${name}@${kv#*=}" revision "[CI-ERROR-ASSEMBLE-0016]" fail)" || return 2
         _ci_list_has "${rev}" "${revs}" || revs="${revs}"$'\n'"${rev}"
     done
@@ -6855,7 +6858,9 @@ _ci_reconcile_index() {
     # Why: a rebuilt red platform completes the sha index.
     # From: Issue #1683 | PR #1858
     wl="$(tr ' ' '\n' <<< "${want}")"
-    for kv in ${ex_have}; do
+    local -a have_list
+    read -ra have_list <<< "${ex_have}"
+    for kv in "${have_list[@]}"; do
         _ci_list_has "${kv}" "${wl}" || sub=0
     done
     if [ "${sub}" -eq 1 ]; then
@@ -7317,8 +7322,9 @@ _ci_promote_unlock() {
 _ci_promote_move() {
     local svc="$1" channel="$2" digest="$3" kept="${4:-}" name kv
     name="$(_ci_image_ref "${svc}")" || return 2
-    local -a srcs=("${name}@${digest}")
-    for kv in ${kept}; do
+    local -a srcs=("${name}@${digest}") kept_list
+    read -ra kept_list <<< "${kept}"
+    for kv in "${kept_list[@]}"; do
         srcs+=("${name}@${kv#*=}")
     done
     _ci_imagetools_create "${name}:${channel}" "${srcs[@]}" >&2
@@ -8175,8 +8181,10 @@ _ci_release_notes_block() {
     printf '\n## Images\n\n'
     printf 'Images published for %s (commit %s):\n\n' "${tag}" "${head}"
     local targets
+    local -a target_list=()
     targets="$(ci_build_targets)" || return 2
-    for target in ${targets}; do
+    [ -z "${targets}" ] || mapfile -t target_list <<< "${targets}"
+    for target in "${target_list[@]}"; do
         dig="$(_ci_release_digest "${base}/${target}")" || return "$?"
         printf -- '- %s:%s -> %s\n' "${base}/${target}" "${tag}" "${dig}"
     done
@@ -8372,7 +8380,9 @@ ci_cmd_release_sbom_stack() {
     local tag="${1:-}" svc targets
     [ -n "${tag}" ] || { ci_log "[CI-ERROR-RELEASE-0013]" "reason=\"tag arg required\""; return 2; }
     targets="$(ci_build_targets)" || return 2
-    for svc in ${targets}; do
+    local -a target_list=()
+    [ -z "${targets}" ] || mapfile -t target_list <<< "${targets}"
+    for svc in "${target_list[@]}"; do
         ci_cmd_release_sbom "${svc}" "${tag}" || return "$?"
     done
 }
