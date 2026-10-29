@@ -5662,50 +5662,113 @@ stack_update_step() {
     return 1
 }
 
-# What: pulls the checkout and reruns the update from it
-# Why: compose, templates and setup.sh must move together
+# What: branch of a checkout; empty when detached
+# Why: a detached checkout may move, a named one may not
 # From: Issue #1683 | PR #1858
-update_repo_and_resume() {
-    local install_dir="$1" repo_dir="$1" branch="" branches channel tag target changes old new baseline="" svc
-    local rc=0 exec_rc
-    is_deploy_prod_install_dir "$install_dir" && repo_dir=$(deploy_prod_repo_root "$install_dir")
-    if [[ ! -e "$repo_dir/.git" ]]; then
-        print_ok "$repo_dir is not a git checkout; its files stay as they are"
-        return 0
-    fi
+checkout_branch_name() {
+    local repo_dir="$1" branch="" rc=0
     branch=$(git -C "$repo_dir" symbolic-ref --quiet --short HEAD) || rc=$?
     [[ "$rc" -le 1 ]] || die "Failed to read the branch of $repo_dir (exit $rc)."
+    printf '%s\n' "$branch"
+}
+
+# What: the code ref a checkout moves to; empty = stays
+# Why: install and update follow the channel the same way
+# From: Issue #1683 | PR #1858
+channel_checkout_target() {
+    local repo_dir="$1" channel="$2" tag="$3" branch branches target changes
+    if [[ ! -e "$repo_dir/.git" ]]; then
+        print_ok "$repo_dir is not a git checkout; its files stay as they are" >&2
+        return 0
+    fi
+    branch=$(checkout_branch_name "$repo_dir") || exit $?
     branches=$(lancache_channel_branches) || exit $?
     # What: a branch outside the channel branches stays
     # Why: the operator chose that revision (AG-OP-009)
     # From: Issue #1683 | PR #1858
-    if [[ "$rc" -eq 0 ]] && ! list_has_line "$branch" "$branches"; then
-        print_warn "Checkout $repo_dir is on $branch, no channel branch; repository not updated."
+    if [[ -n "$branch" ]] && ! list_has_line "$branch" "$branches"; then
+        print_warn "Checkout $repo_dir is on $branch, no channel branch; repository not updated." >&2
         return 0
     fi
-    channel=$(resolve_lancache_image_channel "$_UPDATE_ENV_FILE") || exit $?
-    tag="${LANCACHE_IMAGE_TAG:-}"
-    [[ -n "$tag" ]] || tag=$(get_env_var LANCACHE_IMAGE_TAG "$_UPDATE_ENV_FILE") || exit $?
     target=$(lancache_channel_code_ref "$channel" "$tag") || exit $?
     if [[ -z "$target" ]]; then
-        print_warn "Channel $channel has no LANCACHE_IMAGE_TAG; repository not updated."
+        print_warn "Channel $channel has no LANCACHE_IMAGE_TAG; repository not updated." >&2
         return 0
     fi
     changes=$(git -C "$repo_dir" status --porcelain) || die "Failed to read the git status of $repo_dir (exit $?)."
     if [[ -n "$changes" ]]; then
-        print_warn "Checkout $repo_dir has local changes; repository not updated:"$'\n'"$changes"
+        print_warn "Checkout $repo_dir has local changes; repository not updated:"$'\n'"$changes" >&2
         return 0
     fi
-    old=$(git -C "$repo_dir" rev-parse HEAD) || die "Failed to read HEAD of $repo_dir (exit $?)."
-    print_step "Updating repo to $target (channel $channel)"
-    # What: a channel follows its branch, pinned its tag
-    # Why: nightly code is current_dev, stable code master
-    # From: Issue #1683 | PR #1858
+    printf '%s\n' "$target"
+}
+
+# What: a channel follows its branch, pinned its tag
+# Why: nightly code is current_dev, stable code master
+# From: Issue #1683 | PR #1858
+sync_repo_to_channel_ref() {
+    local repo_dir="$1" target="$2" branches
+    branches=$(lancache_channel_branches) || exit $?
     if list_has_line "$target" "$branches"; then
         sync_repo_to_branch "$repo_dir" "$target"
     else
         sync_repo_to_commit "$repo_dir" "$target"
     fi
+}
+
+# What: install moves its checkout to the channel's code
+# Why: compose files and images from one ref at once
+# From: Issue #1683 | PR #1858
+install_repo_follow_channel() {
+    local channel="$1" target old new exec_rc
+    shift
+    # What: LANCACHE_SETUP_GIT_REF keeps its checkout
+    # Why: the operator chose that revision (AG-OP-009)
+    # From: Issue #1683 | PR #1858
+    if [[ -n "${LANCACHE_SETUP_GIT_REF:-}" ]]; then
+        print_ok "Checkout stays on LANCACHE_SETUP_GIT_REF=${LANCACHE_SETUP_GIT_REF}"
+        return 0
+    fi
+    target=$(channel_checkout_target "$SCRIPT_DIR" "$channel" "${LANCACHE_IMAGE_TAG:-}") || exit $?
+    [[ -n "$target" ]] || return 0
+    old=$(git -C "$SCRIPT_DIR" rev-parse HEAD) || die "Failed to read HEAD of $SCRIPT_DIR (exit $?)."
+    print_step "Moving the checkout to $target (channel $channel)"
+    sync_repo_to_channel_ref "$SCRIPT_DIR" "$target"
+    new=$(git -C "$SCRIPT_DIR" rev-parse HEAD) || die "Failed to read HEAD of $SCRIPT_DIR (exit $?)."
+    if [[ "$new" = "$old" ]]; then
+        print_ok "Checkout already at $new"
+        return 0
+    fi
+    print_ok "Checkout moved $old -> $new; continuing with its setup.sh"
+    # What: the new setup.sh keeps the chosen channel
+    # Why: its channel prompt is then skipped, not repeated
+    # From: Issue #1683 | PR #1858
+    export LANCACHE_IMAGE_CHANNEL="$channel"
+    shopt -s execfail
+    set +e
+    exec "$SCRIPT_DIR/setup.sh" "$@" || {
+        exec_rc=$?
+        set -e
+        die "Failed to start $SCRIPT_DIR/setup.sh (exit $exec_rc); nothing was installed yet."
+    }
+}
+
+# What: pulls the checkout and reruns the update from it
+# Why: compose, templates and setup.sh must move together
+# From: Issue #1683 | PR #1858
+update_repo_and_resume() {
+    local install_dir="$1" repo_dir="$1" branch channel tag target old new baseline="" svc
+    local exec_rc
+    is_deploy_prod_install_dir "$install_dir" && repo_dir=$(deploy_prod_repo_root "$install_dir")
+    channel=$(resolve_lancache_image_channel "$_UPDATE_ENV_FILE") || exit $?
+    tag="${LANCACHE_IMAGE_TAG:-}"
+    [[ -n "$tag" ]] || tag=$(get_env_var LANCACHE_IMAGE_TAG "$_UPDATE_ENV_FILE") || exit $?
+    target=$(channel_checkout_target "$repo_dir" "$channel" "$tag") || exit $?
+    [[ -n "$target" ]] || return 0
+    branch=$(checkout_branch_name "$repo_dir") || exit $?
+    old=$(git -C "$repo_dir" rev-parse HEAD) || die "Failed to read HEAD of $repo_dir (exit $?)."
+    print_step "Updating repo to $target (channel $channel)"
+    sync_repo_to_channel_ref "$repo_dir" "$target"
     new=$(git -C "$repo_dir" rev-parse HEAD) || die "Failed to read HEAD of $repo_dir (exit $?)."
     if [[ "$new" = "$old" ]]; then
         print_ok "Repository already at $new"
@@ -7939,6 +8002,69 @@ if [[ "$WIZARD_INTROSPECT_MODE" != "1" ]]; then
     fi
 fi
 
+# What: step 1a: the image channel to install
+# Why: first, so the checkout can follow it before asking
+# From: Issue #1683 | PR #1858
+print_step "Release channel"
+
+# What: a pre-set LANCACHE_IMAGE_CHANNEL skips the prompt
+# Why: the operator chose the channel before the start
+# From: Issue #1683 | PR #1858
+if [[ -n "${LANCACHE_IMAGE_CHANNEL:-}" ]]; then
+    validate_lancache_image_channel "$LANCACHE_IMAGE_CHANNEL"
+    print_ok "Using the channel already set via LANCACHE_IMAGE_CHANNEL=${LANCACHE_IMAGE_CHANNEL}."
+else
+    selectable=$(lancache_selectable_channels) || exit $?
+    retired=$(lancache_release_rows retired) || exit $?
+    # What: the default is SOT release.install_channel
+    # Why: maintainer 24.10.: stable, never nightly unwarned
+    # From: Issue #1683 | PR #1858
+    install_channel=$(lancache_sot_value install_channel release) || exit $?
+    list_has_line "$install_channel" "$selectable" \
+        || die "SOT release.install_channel '$install_channel' is not a channel setup.sh offers."
+    while IFS= read -r offered; do
+        if [[ "$offered" = "$install_channel" ]]; then
+            printf "  %s — tested releases; the recommended default.\n" "$offered"
+        else
+            printf "  %s — untested daily builds; they may break the stack.\n" "$offered"
+        fi
+    done <<< "$selectable"
+    printf "\n"
+
+    channel_hint=$(paste -sd/ <<< "$selectable")
+    while true; do
+        ask "Release channel [$channel_hint]" "$install_channel"
+        if list_has_line "${REPLY,,}" "$selectable"; then
+            LANCACHE_IMAGE_CHANNEL="${REPLY,,}"
+            # What: any other channel needs a second yes
+            # Why: untested builds never install unwarned
+            # From: Issue #1683 | PR #1858
+            if [[ "$LANCACHE_IMAGE_CHANNEL" != "$install_channel" ]]; then
+                print_warn "The $LANCACHE_IMAGE_CHANNEL channel holds untested daily builds; they may break the stack."
+                confirm "Install from $LANCACHE_IMAGE_CHANNEL anyway? [y/N]" "N" || continue
+            fi
+            print_ok "Using the $LANCACHE_IMAGE_CHANNEL channel."
+            break
+        fi
+        # What: a retired name shows why it went
+        # Why: release-versioning asks for a clear answer
+        # From: Issue #1683 | PR #1858
+        reason=$(awk -v c="${REPLY,,}" '$1 == c { sub(/^[^ ]+ /, ""); print; exit }' <<< "$retired")
+        if [[ -n "$reason" ]]; then
+            print_error "The '${REPLY,,}' channel is no longer supported ($reason). Please answer one of: $channel_hint."
+        else
+            print_error "Please answer one of: $channel_hint."
+        fi
+    done
+fi
+
+# What: step 1b: the checkout moves to the channel's code
+# Why: compose files and images from one ref at once
+# From: Issue #1683 | PR #1858
+if [[ "$WIZARD_INTROSPECT_MODE" != "1" ]]; then
+    install_repo_follow_channel "$LANCACHE_IMAGE_CHANNEL" "$@"
+fi
+
 # What: step 2: LAN IPs and HTTPS mode
 # Why: the DNS and proxy containers listen on these IPs
 # From: Issue #1683 | PR #1858
@@ -8073,62 +8199,6 @@ while true; do
     is_positive_integer "$CACHE_MEM_MB" && break
     print_error "Please enter a positive integer (e.g. 512)."
 done
-
-# What: step 5: the image channel to install
-# Why: stable is the default; other channels warn
-# From: Issue #1683 | PR #1858
-print_step "Release channel"
-
-# What: a pre-set LANCACHE_IMAGE_CHANNEL skips the prompt
-# Why: the operator chose the channel before the start
-# From: Issue #1683 | PR #1858
-if [[ -n "${LANCACHE_IMAGE_CHANNEL:-}" ]]; then
-    validate_lancache_image_channel "$LANCACHE_IMAGE_CHANNEL"
-    print_ok "Using the channel already set via LANCACHE_IMAGE_CHANNEL=${LANCACHE_IMAGE_CHANNEL}."
-else
-    selectable=$(lancache_selectable_channels) || exit $?
-    retired=$(lancache_release_rows retired) || exit $?
-    # What: the default is SOT release.install_channel
-    # Why: maintainer 24.10.: stable, never nightly unwarned
-    # From: Issue #1683 | PR #1858
-    install_channel=$(lancache_sot_value install_channel release) || exit $?
-    list_has_line "$install_channel" "$selectable" \
-        || die "SOT release.install_channel '$install_channel' is not a channel setup.sh offers."
-    while IFS= read -r offered; do
-        if [[ "$offered" = "$install_channel" ]]; then
-            printf "  %s — tested releases; the recommended default.\n" "$offered"
-        else
-            printf "  %s — untested daily builds; they may break the stack.\n" "$offered"
-        fi
-    done <<< "$selectable"
-    printf "\n"
-
-    channel_hint=$(paste -sd/ <<< "$selectable")
-    while true; do
-        ask "Release channel [$channel_hint]" "$install_channel"
-        if list_has_line "${REPLY,,}" "$selectable"; then
-            LANCACHE_IMAGE_CHANNEL="${REPLY,,}"
-            # What: any other channel needs a second yes
-            # Why: untested builds never install unwarned
-            # From: Issue #1683 | PR #1858
-            if [[ "$LANCACHE_IMAGE_CHANNEL" != "$install_channel" ]]; then
-                print_warn "The $LANCACHE_IMAGE_CHANNEL channel holds untested daily builds; they may break the stack."
-                confirm "Install from $LANCACHE_IMAGE_CHANNEL anyway? [y/N]" "N" || continue
-            fi
-            print_ok "Using the $LANCACHE_IMAGE_CHANNEL channel."
-            break
-        fi
-        # What: a retired name shows why it went
-        # Why: release-versioning asks for a clear answer
-        # From: Issue #1683 | PR #1858
-        reason=$(awk -v c="${REPLY,,}" '$1 == c { sub(/^[^ ]+ /, ""); print; exit }' <<< "$retired")
-        if [[ -n "$reason" ]]; then
-            print_error "The '${REPLY,,}' channel is no longer supported ($reason). Please answer one of: $channel_hint."
-        else
-            print_error "Please answer one of: $channel_hint."
-        fi
-    done
-fi
 
 # What: step 6: scheduled updates by a host service
 # Why: Watchtower cannot verify health or roll back
