@@ -3811,12 +3811,13 @@ lancache_channel_image_refs() {
         || die "docker buildx is required to resolve LANCACHE_IMAGE_CHANNEL=${channel} (exit $?: ${buildx_out}). Install the ${DOCKER_BUILDX_PLUGIN} package, then rerun setup.sh."
 
     printf '\n%s%s▶ Resolving image channel %s%s\n' "${BOLD}" "${CYAN}" "$channel" "${RESET}" >&2
-    # What: every non-default channel warns on each run
+    # What: every non-default pointer warns on each run
     # Why: maintainer 29.10.: nightly is experimental
     # From: Issue #1683 | PR #1858
     install_channel=$(lancache_sot_value install_channel release) \
         || die "Cannot read release.install_channel (exit $?)."
-    if [[ "$channel" != "$install_channel" ]]; then
+    install_channel=$(lancache_stack_pointer_channel_for "$install_channel") || exit $?
+    if [[ "$pointer_channel" != "$install_channel" ]]; then
         print_warn "The $channel channel is experimental: untested daily builds that may break the stack; not for production use." >&2
     fi
     while [[ "$n" -le "$max" ]]; do
@@ -4712,6 +4713,15 @@ restore_compose_volumes() {
     done <<< "$archives"
 }
 
+# What: true when both stack dirs are in the channel layout
+# Why: <state root>, latest and nightly hold one install
+# From: Issue #1683 | PR #1858
+is_same_channel_install() {
+    local a="$1" b="$2"
+    [[ "$a" = */deploy/prod && "$b" = */deploy/prod ]] || return 1
+    is_channel_layout_repo "${a%/deploy/prod}" && is_channel_layout_repo "${b%/deploy/prod}"
+}
+
 # What: blocks restore if other installs share the volumes
 # Why: project name is fixed, so volumes are shared
 # From: Issue #456 | PR #1673
@@ -4730,6 +4740,10 @@ guard_restore_shared_project_volumes() {
         [[ -n "$working_dir" ]] \
             || die "Refusing to restore: container $container of compose project '$project' has no working directory label, so its install cannot be attributed. Remove it with 'docker rm $container', then restore again."
         working_dir=$(realpath -m "$working_dir")
+        # What: root, latest and nightly are one install
+        # Why: their stack and data are one; a label may lag
+        # From: Issue #1683 | PR #1858
+        is_same_channel_install "$working_dir" "$install_dir" && continue
         if [[ "$working_dir" != "$install_dir" ]]; then
             die "Refusing to restore: compose project '$project' still has containers at $working_dir, which is not the restore target ($install_dir). Both installs share the same Docker-managed volumes because the compose project name is not per-install-dir. Remove the other install's containers first (cd \"$working_dir\" && docker compose down), or restore into $working_dir instead."
         fi
@@ -5646,6 +5660,14 @@ rollback_stack_update() {
                 || { print_error "Failed to point $link back (exit $?). Manual recovery required."; return 1; }
         fi
         print_warn "Code of the stack is $LANCACHE_UPDATE_SWITCHED_FROM again"
+        # What: the copied stack files leave the new dir
+        # Why: one copy of credentials; a switch recopies
+        # From: Issue #1683 | PR #1858
+        local f
+        for f in "${CHANNEL_STACK_FILES[@]}"; do
+            rm -f -- "$LANCACHE_UPDATE_REPO/deploy/prod/$f" \
+                || { print_error "Failed to remove $LANCACHE_UPDATE_REPO/deploy/prod/$f (exit $?)."; return 1; }
+        done
         install_dir="$LANCACHE_UPDATE_FROM_INSTALL"
     # What: the checkout returns to its pre-update revision
     # Why: old config on new compose would be a mixed stack
@@ -5795,6 +5817,11 @@ channel_code_dir() {
     pointer=$(lancache_stack_pointer_channel_for "$1") || exit $?
     printf '%s/%s\n' "$DEFAULT_INSTALL_DIR" "$pointer"
 }
+
+# What: stack files a channel switch carries along
+# Why: switch and rollback must name the same files
+# From: Issue #1683 | PR #1858
+CHANNEL_STACK_FILES=(.env.local .env docker-compose.override.yml docker-compose.override.yaml)
 
 # What: <state root>/current links the running channel dir
 # Why: units and default commands follow it on a switch
@@ -5960,7 +5987,7 @@ remove_root_checkout() {
 # From: Issue #1683 | PR #1858
 switch_channel_dir_and_resume() {
     local install_dir="$1" repo_dir="$2" channel="$3" target="$4" dir link old="" baseline="" svc exec_rc f
-    local -a files=(.env.local .env docker-compose.override.yml docker-compose.override.yaml)
+    local -a files=("${CHANNEL_STACK_FILES[@]}")
     dir=$(channel_code_dir "$channel") || exit $?
     link=$(channel_active_link) || exit $?
     [[ ! -e "$dir/.git" ]] || old=$(git -C "$dir" rev-parse HEAD) || die "Failed to read HEAD of $dir (exit $?)."
