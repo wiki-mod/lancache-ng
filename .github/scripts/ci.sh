@@ -3407,23 +3407,37 @@ _ci_head_commit() {
 # From: Issue #1683
 _ci_ledger_blob() {
     local remote="$1" rc=0 ledger_ref file
-    # What: $2/$3 name another ref and file variable.
+    # What: $2/$3 name another ref and file; $4 fetch.
     # Why: the refresh records reuse this one reader.
     # From: Issue #1683 | PR #1858
     ledger_ref="$(_ci_variable "${2:-CI_LEDGER_REF}")" || return 2
     file="$(_ci_variable "${3:-CI_LEDGER_FILE}")" || return 2
-    _ci_cas_ref_sha "${remote}" "${ledger_ref}" >&2 || rc=$?
+    local sha memo blob
+    sha="$(_ci_cas_ref_sha "${remote}" "${ledger_ref}")" || rc=$?
     [ "${rc}" -eq 1 ] && return 1
     [ "${rc}" -eq 0 ] || return 2
+    printf '%s\n' "${sha}" >&2
+    # What: a state read before in this job is not fetched.
+    # Why: plan read one state 30 times per run (DoMe).
+    # From: Issue #1683 | PR #1858
+    memo="ledger-${ledger_ref//\//-}-${sha}"
+    if [ "${4:-}" != fetch ] && blob="$(_ci_job_memo_get "${memo}")"; then
+        printf '%s\n' "${blob}"
+        return 0
+    fi
     # What: this fetch has no retry level.
     # Why: op=git uses shared transient-signature truth.
     # From: Issue #1683
     _ci_retry git git fetch --depth=1 "${remote}" "${ledger_ref}" >&2 || return 2
-    local blob
     if ! blob="$(git cat-file -p "FETCH_HEAD:${file}" 2>&1)"; then
         ci_error "[CI-WARN-RESOLVE-0009]" "ref=\"${ledger_ref}\" file=\"${file}\" reason=\"ledger file unreadable; UNKNOWN\"" "${blob}"
         return 2
     fi
+    # What: keep the text under the state it was read at.
+    # Why: a moved ref has a new state and is fetched anew.
+    # From: Issue #1683 | PR #1858
+    sha="$(_ci_capture 0 git rev-parse FETCH_HEAD)" || return 2
+    _ci_job_memo_put "ledger-${ledger_ref//\//-}-${sha}" "${blob}" || return 2
     printf '%s\n' "${blob}"
 }
 
@@ -3451,7 +3465,10 @@ _ci_ledger_upsert() {
     new="$(cat)"
     new="$(_ci_capture 0 awk 'NF>0' <<< "${new}")" || return 3
     [ -n "${new}" ] || return 0
-    blob="$(_ci_ledger_blob "${remote}" "${refvar}" "${filevar}")" || rc=$?
+    # What: the writer always fetches the ledger.
+    # Why: FETCH_HEAD below is the parent of the CAS write.
+    # From: Issue #1683 | PR #1858
+    blob="$(_ci_ledger_blob "${remote}" "${refvar}" "${filevar}" fetch)" || rc=$?
     if [ "${rc}" -eq 2 ]; then
         ci_log "[CI-ERROR-LEDGER-0001]" "ref=\"${ledger_ref}\" remote=\"${remote}\" reason=\"ledger read UNKNOWN (raw above); refusing to write\""
         return 3
