@@ -15,7 +15,7 @@ on:
   push:
     branches: [current_dev, master]
   # What: new issues only run the project-board job.
-  # Why: AG-GH-008 board placement; maintainer 2026-10-03.
+  # Why: AG-GH-008: a new issue lands on the board.
   # From: Issue #1683 | PR #1858
   issues:
     types: [opened]
@@ -339,7 +339,7 @@ jobs:
     timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['assemble'] }}
     container: *bt_platform
     # What: assemble files and closes the platform issues.
-    # Why: DoMe: a platform left out opens an issue.
+    # Why: a platform left out is tracked in an issue.
     # From: Issue #1683 | PR #1858
     permissions:
       contents: read
@@ -356,7 +356,7 @@ jobs:
         run: bash .github/scripts/ci.sh assemble-stack
 
   # What: validate full stack; a red build stops a PR only.
-  # Why: a push validates what assemble accepted (DoMe).
+  # Why: a push validates what assemble accepted.
   # From: Issue #1683 | PR #1858
   validate:
     name: validate

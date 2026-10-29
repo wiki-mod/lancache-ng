@@ -9181,7 +9181,7 @@ _ci_validate_subnet() {
         ci_log "[CI-ERROR-VALIDATE-0114]" "pool=\"${pool}\" slot=\"${slot}\" reason=\"SOT validation pool or slot prefix invalid\""
         return 2
     fi
-    base="$(_ci_ipv4_to_int "${pool%/*}")"
+    base="$(_ci_ipv4_to_int "${pool%/*}")" || return 2
     base=$(( base >> (32 - plen) << (32 - plen) ))
     h="$(printf '%s' "${seed}" | _ci_sha256_hex)" || return 2
     printf '%s/%s' "$(_ci_int_to_ipv4 $(( base + (16#${h:0:8} % (1 << (slot - plen))) * (1 << (32 - slot)) )))" "${slot}"
@@ -9332,8 +9332,17 @@ _ci_validate_release() {
 # Why: Integer masking proves a /27 overlap.
 # From: Issue #1683
 _ci_ipv4_to_int() {
-    local a b c d
+    local a b c d o
     IFS=. read -r a b c d <<< "$1"
+    # What: four octets 0-255, else a coded stop.
+    # Why: bad input would give a wrong base address.
+    # From: Issue #1683 | PR #1858
+    for o in "${a}" "${b}" "${c}" "${d}"; do
+        if ! [[ "${o}" =~ ^[0-9]{1,3}$ ]] || [ "$(( 10#${o} ))" -gt 255 ]; then
+            ci_log "[CI-ERROR-VALIDATE-0140]" "ip=\"$1\" reason=\"not an IPv4 dotted quad\""
+            return 2
+        fi
+    done
     printf '%s' "$(( (10#$a << 24) + (10#$b << 16) + (10#$c << 8) + 10#$d ))"
 }
 
@@ -9349,7 +9358,7 @@ _ci_int_to_ipv4() {
 # From: Issue #1683
 _ci_validate_subnet_conflicts() {
     local target="$1" tip tm net sub sip sm m nets
-    tip="$(_ci_ipv4_to_int "${target%/*}")"
+    tip="$(_ci_ipv4_to_int "${target%/*}")" || return 2
     tm="${target#*/}"
     # What: rc 2 when the network list is unknown.
     # Why: a failed docker call must not read as "free".
@@ -9369,7 +9378,7 @@ _ci_validate_subnet_conflicts() {
         while IFS= read -r sub; do
             case "${sub}" in
                 *.*.*.*/*)
-                    sip="$(_ci_ipv4_to_int "${sub%/*}")"
+                    sip="$(_ci_ipv4_to_int "${sub%/*}")" || return 2
                     sm="${sub#*/}"
                     m=$(( tm < sm ? tm : sm ))
                     if [ "$(( tip >> (32 - m) ))" = "$(( sip >> (32 - m) ))" ]; then
@@ -9472,7 +9481,7 @@ _ci_validate_net_override() {
     # What: default /28 plus one /29 per other network.
     # Why: an auto /16 pool could swallow the /27 slot.
     # From: Issue #1683 | PR #1858
-    base="$(_ci_ipv4_to_int "${subnet%/*}")"
+    base="$(_ci_ipv4_to_int "${subnet%/*}")" || return 2
     slot="${subnet#*/}"
     half=$(( 1 << (31 - slot) ))
     quarter=$(( half / 2 ))
@@ -10171,7 +10180,7 @@ _ci_validate_probe_ip() {
         ci_log "[CI-ERROR-VALIDATE-0105]" "net=\"${net}\" host=\"${n}\" reason=\"probe host outside the SOT probe net\""
         return 2
     fi
-    base="$(_ci_ipv4_to_int "${net%/*}")"
+    base="$(_ci_ipv4_to_int "${net%/*}")" || return 2
     _ci_int_to_ipv4 $(( base + n ))
 }
 
@@ -10610,7 +10619,7 @@ PROG
     # What: reservation IPs base+2/+3 of DHCP_SUBNET.
     # Why: Kea rejects a reservation outside its subnet.
     # From: Issue #763 | PR #1858
-    base="$(_ci_ipv4_to_int "${subnet%/*}")"
+    base="$(_ci_ipv4_to_int "${subnet%/*}")" || { rm -f "${jar}"; return 2; }
     snap="$(_ci_validate_kea_add "${ubase}" "${jar}" "${csrf}" "${sid}" "${mac_a}" \
         "$(_ci_int_to_ipv4 $(( base + 2 )))" "${label}-1" "${snaps}")" || { rc=$?; rm -f "${jar}"; return "${rc}"; }
     snap_b="$(_ci_validate_kea_add "${ubase}" "${jar}" "${csrf}" "${sid}" "${mac_b}" \

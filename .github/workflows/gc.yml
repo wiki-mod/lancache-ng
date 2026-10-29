@@ -8,7 +8,7 @@
 name: CI 2.0 GC
 on:
   # What: GC every 3 hours, at minute 43.
-  # Why: maintainer 24.10.: GC every 3-4 hours.
+  # Why: stale refs and images are freed every 3-4 h.
   # From: Issue #1683 | PR #1858
   schedule:
     - cron: "43 */3 * * *"
