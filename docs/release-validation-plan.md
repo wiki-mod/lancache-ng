@@ -220,6 +220,23 @@ stack itself.
   `services/dns/cdn-domains.txt` (or a scratch entry) and `dig` three names: the
   wildcard's bare root, a subdomain under it, and an unrelated domain. Pass: only the
   subdomain resolves to the proxy, unless the bare root is listed on its own.
+- **Upstream DNS change** (issue #1918): `DNS_UPSTREAM_SERVERS`,
+  `DNS_UPSTREAM_ZONES` and `DNS_UPSTREAM_UNSIGNED_ZONES` are set by
+  `setup.sh install` or `./setup.sh configure-upstream-dns`; the watchdog renders
+  them into the recursor config of `dns`. Run every case on the stack of §1 and
+  show the rendered `recursor.conf` and `recursor.lua`, the `dns` log line and the
+  `dig` answer:
+
+  | Case | Input | Pass |
+  |---|---|---|
+  | none | `DNS_UPSTREAM_SERVERS` empty | no `forward_zones_recurse`; `recursor.lua` has the `zoneToCache(".", ...)` lines; a public name resolves from the root servers |
+  | change | `./setup.sh configure-upstream-dns` with a LAN resolver, zones `.` | `.env.local` holds the three keys, `dns` is recreated, `dns_upstream_is_live` succeeds; `forward_zones_recurse` names `.` and the server, no `zoneToCache` line; a private name of that resolver answers |
+  | DNSSEC kept | as change, private zone unsigned, `DNS_UPSTREAM_UNSIGNED_ZONES` empty | the private name gives `SERVFAIL`; `dnssec-failed.org` gives `SERVFAIL` |
+  | unsigned zone | as before, `DNS_UPSTREAM_UNSIGNED_ZONES=<private zone>` | one extra `addNTA` for that zone; the private name answers; `dnssec-failed.org` still gives `SERVFAIL` |
+  | loop | `127.0.0.1` or `IP_HTTP` | log `ERROR: DNS_UPSTREAM_SERVERS entry ... would loop; starting WITHOUT an upstream resolver`; public names resolve as in none |
+  | no address | `not-an-ip` | log `... is no IP or IP:port; starting WITHOUT an upstream resolver`; as in none |
+  | bad unsigned zone | `DNS_UPSTREAM_UNSIGNED_ZONES=.` | log `... is "." or outside DNS_UPSTREAM_ZONES`; as in none |
+  | dead resolver | `configure-upstream-dns` with an address that runs no DNS | `setup.sh` reports the failed check and restores the three earlier values |
 
 ### 3. DHCP — all three modes
 
@@ -579,6 +596,8 @@ recurrence:
   check.
 - **GNU-only constructs in Alpine/BusyBox images** (AG-VAL-034): no check.
 - **Proxy `slice` with a cached 301/302**: no live harness.
+- **Upstream DNS not reaching the recursor, or a wrong value not falling back**
+  (issue #1918): the watchdog's upstream render; §2 is live only.
 - **Netdata alarm to Admin UI notification**: not exercised end to end.
 - **Concurrent BuildKit builds on a shared self-hosted daemon**: no source-level
   serialization in `ci.sh` (AG-CI-017).
@@ -603,7 +622,7 @@ live in Part B:
 
 - wire-level DHCP in all three modes, the lease effect of an Admin UI reservation and
   the dnsmasq sub-mode switch (§3);
-- the DNS half of the wildcard scope rule (§2);
+- the DNS half of the wildcard scope rule and the upstream DNS change (§2);
 - NATS rotation, active disconnect and xkey encryption (§5);
 - the watchdog card, cache resize, Admin UI self-restart and dock start/stop (§6);
 - watchdog hang detection and restart (§7);
