@@ -15533,11 +15533,7 @@ _ci_check_orphaned_branches() {
 # Why: one parser for each fetched action.yml body.
 # From: Issue #1683 | PR #1858
 _ci_action_runs_using() {
-    awk '
-        /^runs:/ { in_runs = 1; next }
-        in_runs && /^[^[:space:]]/ { exit }
-        in_runs && /^[[:space:]]*using:/ { print; exit }
-    ' | sed -E "s/.*using:[[:space:]]*//; s/[\"']//g; s/[[:space:]]*#.*\$//; s/[[:space:]]+\$//"
+    yq -r '.runs.using // ""' -
 }
 
 # What: GET one raw-content URL; body on 200.
@@ -15630,6 +15626,19 @@ _ci_action_ref_files() {
     printf '%s' "${m[*]}"
 }
 
+# What: uses: values of a workflow; resolved or literal.
+# Why: yq owns anchors, quotes, comments; one uses: reader.
+# From: Issue #1683 | PR #1858
+_ci_workflow_uses() {
+    local mode="$1" file="$2" expr
+    case "${mode}" in
+        resolved) expr='.. | select(tag == "!!map" and has("uses")) | .uses | explode(.) | select(tag == "!!str")' ;;
+        literal) expr='.. | select(tag == "!!map" and has("uses")) | .uses | select(tag == "!!str")' ;;
+        *) ci_log "[CI-ERROR-CHECK-0201]" "mode=\"${mode}\" reason=\"uses: mode is resolved or literal\""; return 2 ;;
+    esac
+    yq --yaml-fix-merge-anchor-to-spec=true -r "${expr}" "${file}"
+}
+
 # What: enforce Node runtime + ref hygiene on pins.
 # Why: single owner of action-pin policy.
 # From: Issue #1683 | PR #1858
@@ -15645,34 +15654,23 @@ _ci_check_action_node_versions() {
     # What: collect every uses: step, resolve anchors.
     # Why: alias not duplicate; only literals count.
     # From: Issue #1683 | PR #1858
-    local sf line raw resolved anchor
+    local sf line resolved literal rc
     for sf in "${scan_files[@]}"; do
-        local -A anchors=()
-        local produced produced_rc=0
-        produced="$(grep -E '^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*[^[:space:]]+' "${sf}")" || produced_rc=$?
-        _ci_producer_ok "${produced_rc}" 1 || return 2
+        rc=0
+        resolved="$(_ci_workflow_uses resolved "${sf}" 2>&1)" || rc=$?
+        if [ "${rc}" -ne 0 ]; then
+            xv+=("${sf}: uses: not readable: ${resolved}")
+            continue
+        fi
+        literal="$(_ci_workflow_uses literal "${sf}")" || return 2
         while IFS= read -r line; do
             [ -n "${line}" ] || continue
-            raw="${line#*uses:}"; raw="${raw%%#*}"
-            raw="${raw#"${raw%%[![:space:]]*}"}"; raw="${raw%"${raw##*[![:space:]]}"}"
-            resolved="${raw}"
-            if [[ "${raw}" =~ ^\&([A-Za-z0-9_-]+)[[:space:]]+(.+)$ ]]; then
-                anchor="${BASH_REMATCH[1]}"; resolved="${BASH_REMATCH[2]}"
-                anchors["${anchor}"]="${resolved}"
-                literal_entries+=("${sf}"$'\t'"${resolved}")
-            elif [[ "${raw}" =~ ^\*([A-Za-z0-9_-]+)$ ]]; then
-                anchor="${BASH_REMATCH[1]}"
-                if [ -z "${anchors[${anchor}]+x}" ]; then
-                    xv+=("${sf}: unresolved YAML alias '*${anchor}' in a uses: step")
-                    continue
-                fi
-                resolved="${anchors[${anchor}]}"
-            else
-                literal_entries+=("${sf}"$'\t'"${resolved}")
-            fi
-            uses_entries+=("${sf}"$'\t'"${resolved}")
-        done <<<"${produced}"
-        unset anchors
+            uses_entries+=("${sf}"$'\t'"${line}")
+        done <<<"${resolved}"
+        while IFS= read -r line; do
+            [ -n "${line}" ] || continue
+            literal_entries+=("${sf}"$'\t'"${line}")
+        done <<<"${literal}"
     done
 
     local -a uses_values=()
@@ -15785,7 +15783,8 @@ _ci_check_action_node_versions() {
         case "${marker}" in
             OK)
                 meta="${res#*$'\n'}"
-                using="$(_ci_action_runs_using <<<"${meta}")"
+                using="$(_ci_action_runs_using <<<"${meta}" 2>&1)" \
+                    || { viol+=("'${v}' action manifest is not readable YAML: ${using}"); continue; }
                 if [ -z "${using}" ]; then
                     viol+=("'${v}' has no parseable runs.using")
                 elif [[ "${using}" =~ ^node([0-9]+)$ ]] && [ "${BASH_REMATCH[1]}" -lt "${node_min}" ]; then
@@ -15811,6 +15810,10 @@ _ci_check_action_node_versions() {
     local entries
     entries="$(_ci_block_keys github_actions)" || return 2
     for entry in ${entries}; do
+        # What: an unread workflow skips the dead-pin pass.
+        # Why: its uses: are unknown, so no pin is dead.
+        # From: Issue #1683 | PR #1858
+        [ "${#xv[@]}" -eq 0 ] || break
         case "${used_entries}" in
             *" ${entry} "*) ;;
             *) viol+=("SOT github_actions.${entry} is used by no workflow") ;;
@@ -15836,21 +15839,25 @@ _ci_check_action_node_versions() {
 # Why: nightly hint only; a gone tag fails node-versions.
 # From: Issue #1683 | PR #1858
 _ci_check_action_majors() {
-    local wf_dir srv entries e u cur repo refs t max warn=0 rc
+    local wf_dir srv entries e u cur repo refs t max warn=0 rc wf used=""
     local -a files=()
     wf_dir="$(_ci_repo_path CI_WORKFLOW_DIR)" || return 2
     _ci_workflow_files files "${wf_dir}" || return 2
     srv="$(_ci_env_required GITHUB_SERVER_URL)" || return 2
     entries="$(_ci_block_keys github_actions)" || return 2
+    for wf in "${files[@]}"; do
+        t="$(_ci_workflow_uses resolved "${wf}")" || return 2
+        used+="${t}"$'\n'
+    done
     for e in ${entries}; do
         u="$(_ci_block_entry_field github_actions "${e}" uses)" || return 2
         # What: the vN ref of this action in the workflows.
         # Why: action-node-versions keeps it one ref.
         # From: Issue #1683 | PR #1858
-        rc=0
-        cur="$(grep -h -o -E "uses:[[:space:]]*${u}@v[0-9]+" "${files[@]}")" || rc=$?
-        _ci_producer_ok "${rc}" 1 || return 2
-        cur="${cur%%$'\n'*}"; cur="${cur##*@v}"
+        cur=""
+        while IFS= read -r t; do
+            if [[ "${t}" =~ ^"${u}"@v([0-9]+)$ ]]; then cur="${BASH_REMATCH[1]}"; break; fi
+        done <<< "${used}"
         [ -n "${cur}" ] || continue
         repo="${u#*/}"; repo="${repo%%/*}"
         rc=0
