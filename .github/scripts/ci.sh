@@ -11996,7 +11996,7 @@ _ci_daemon_restart() {
         ci_log "[CI-ERROR-DAEMON-0004]" "reason=\"restart stops every container; set CONFIRM_DOCKERD_RESTART=yes\""
         return 1
     fi
-    _ci_capture 0 systemctl restart docker || return 2
+    _ci_capture 0 _ci_rh_root systemctl restart docker || return 2
     # What: one probe; restart returns once dockerd is up
     # Why: docker.service is Type=notify; no guessed wait
     # From: Issue #1683 | PR #1912
