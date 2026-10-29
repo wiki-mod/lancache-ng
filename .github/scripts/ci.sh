@@ -6213,7 +6213,7 @@ _ci_apk_outdated() {
 # Why: apk version -t owns the order; no own compare.
 # From: Issue #1683 | PR #1858
 _ci_apk_newer() {
-    local pairs name have cand order
+    local pairs name have cand order behind=""
     # What: P: then V: per record, in both file formats.
     # Why: the one P:/V: reader for the db and the index.
     # From: Issue #1683 | PR #1858
@@ -6225,8 +6225,9 @@ _ci_apk_newer() {
     while IFS=$'\t' read -r name have cand; do
         [ -n "${name}" ] || continue
         order="$(_ci_capture 0 apk version -t "${have}" "${cand}")" || return 2
-        [ "${order}" != "<" ] || printf '%s %s %s\n' "${name}" "${have}" "${cand}"
-    done <<< "${pairs}" | LC_ALL=C sort -u
+        [ "${order}" != "<" ] || behind+="${name} ${have} ${cand}"$'\n'
+    done <<< "${pairs}"
+    [ -z "${behind}" ] || _ci_capture 0 env LC_ALL=C sort -u <<< "${behind%$'\n'}"
 }
 
 # What: Read the semantic build-impact verdict, fail-closed.
@@ -7675,22 +7676,24 @@ _ci_promote_ref() {
 # Why: ref-driven policy; no channel logic in YAML.
 # From: Issue #1683
 _ci_promote_targets_for_ref() {
-    local ref requested="${CI_PROMOTE_REQUESTED_CHANNEL:-}" tag prerelease
+    local ref requested="${CI_PROMOTE_REQUESTED_CHANNEL:-}" tag prerelease items="" part
     ref="$(_ci_promote_ref)" || return 2
-    {
-        case "${ref}" in
-            refs/heads/*) _ci_channels_where ref "${ref}" || return 2 ;;
-            refs/tags/*)
-                tag="${ref#refs/tags/}"
-                prerelease="$(_ci_release_prerelease "${tag}")" || return "$?"
-                printf '%s\n' "${tag}"
-                if [ "${prerelease}" = false ]; then _ci_channels_where release_tags true || return 2; fi
-                ;;
-        esac
-        if [ -n "${requested}" ] && [ "${requested}" != none ]; then
-            printf '%s\n' "${requested}"
-        fi
-    } | awk 'NF && !seen[$0]++'
+    case "${ref}" in
+        refs/heads/*) items="$(_ci_channels_where ref "${ref}")" || return 2 ;;
+        refs/tags/*)
+            tag="${ref#refs/tags/}"
+            prerelease="$(_ci_release_prerelease "${tag}")" || return "$?"
+            items="${tag}"
+            if [ "${prerelease}" = false ]; then
+                part="$(_ci_channels_where release_tags true)" || return 2
+                items+=$'\n'"${part}"
+            fi
+            ;;
+    esac
+    if [ -n "${requested}" ] && [ "${requested}" != none ]; then
+        items+=$'\n'"${requested}"
+    fi
+    _ci_capture 0 awk "NF && !seen[\$0]++" <<< "${items}"
 }
 
 # What: Resolve a git ref's current remote tip SHA.
@@ -8721,7 +8724,9 @@ _ci_gc_roots() {
     # What: Every ledger record is a root, all states.
     # Why: PRODUCED_UNVERIFIED is pending, not garbage.
     # From: Issue #1683
-    [ "${rc}" -eq 0 ] && pairs="$(printf '%s\n' "${blob}" | awk -F'\t' 'NF>=5 && $2!="" && $5!="" {print $2"\t"$5}')"
+    if [ "${rc}" -eq 0 ]; then
+        pairs="$(_ci_capture 0 awk -F'\t' "NF>=5 && \$2!=\"\" && \$5!=\"\" {print \$2\"\t\"\$5}" <<< "${blob}")" || return 2
+    fi
     local targets targets_rc=0 reltags
     targets="$(ci_build_targets)" || targets_rc=$?
     _ci_producer_ok "${targets_rc}" 0 || return 2
@@ -8822,7 +8827,9 @@ _ci_gc_candidates() {
         # What: Append the service so delete can target it.
         # Why: Delete path is package-scoped, not id-only.
         # From: Issue #1683
-        [ -n "${vers}" ] && printf '%s\n' "${vers}" | awk -v s="${svc}" 'NF{print $0"\t"s}'
+        if [ -n "${vers}" ]; then
+            _ci_capture 0 awk -v s="${svc}" "NF{print \$0\"\t\"s}" <<< "${vers}" || return 2
+        fi
     done <<<"${produced}"
     # What: No package found anywhere is a config error.
     # Why: All-404 must refuse, not read as a clean noop.
@@ -15089,6 +15096,13 @@ _ci_check_pr_title() {
     return 1
 }
 
+# What: the compose files of a dir, one per line, sorted.
+# Why: one finder for the checks that read compose with yq.
+# From: Issue #1683 | PR #1858
+_ci_compose_dir_files() {
+    find "$1" -type f \( -name '*.yml' -o -name '*.yaml' \) | sort
+}
+
 # What: an external deploy image must be a SOT base image.
 # Why: one owner per external image; no copy elsewhere.
 # From: Issue #1683
@@ -15115,7 +15129,7 @@ _ci_check_stable_external_images() {
             continue
         fi
         local files f produced
-        files="$(find "${d}" -type f \( -name '*.yml' -o -name '*.yaml' \) | sort)" || return 2
+        files="$(_ci_compose_dir_files "${d}")" || return 2
         if [ -z "${files}" ]; then
             viol+=("${d}: compose dir holds no compose file")
             continue
@@ -15574,11 +15588,7 @@ _ci_check_orphaned_branches() {
 # Why: one parser for each fetched action.yml body.
 # From: Issue #1683 | PR #1858
 _ci_action_runs_using() {
-    awk '
-        /^runs:/ { in_runs = 1; next }
-        in_runs && /^[^[:space:]]/ { exit }
-        in_runs && /^[[:space:]]*using:/ { print; exit }
-    ' | sed -E "s/.*using:[[:space:]]*//; s/[\"']//g; s/[[:space:]]*#.*\$//; s/[[:space:]]+\$//"
+    yq -r '.runs.using // ""' -
 }
 
 # What: GET one raw-content URL; body on 200.
@@ -15671,6 +15681,19 @@ _ci_action_ref_files() {
     printf '%s' "${m[*]}"
 }
 
+# What: uses: values of a workflow; resolved or literal.
+# Why: yq owns anchors, quotes, comments; one uses: reader.
+# From: Issue #1683 | PR #1858
+_ci_workflow_uses() {
+    local mode="$1" file="$2" expr
+    case "${mode}" in
+        resolved) expr='.. | select(tag == "!!map" and has("uses")) | .uses | explode(.) | select(tag == "!!str")' ;;
+        literal) expr='.. | select(tag == "!!map" and has("uses")) | .uses | select(tag == "!!str")' ;;
+        *) ci_log "[CI-ERROR-CHECK-0201]" "mode=\"${mode}\" reason=\"uses: mode is resolved or literal\""; return 2 ;;
+    esac
+    yq --yaml-fix-merge-anchor-to-spec=true -r "${expr}" "${file}"
+}
+
 # What: enforce Node runtime + ref hygiene on pins.
 # Why: single owner of action-pin policy.
 # From: Issue #1683 | PR #1858
@@ -15686,39 +15709,32 @@ _ci_check_action_node_versions() {
     # What: collect every uses: step, resolve anchors.
     # Why: alias not duplicate; only literals count.
     # From: Issue #1683 | PR #1858
-    local sf line raw resolved anchor
+    local sf line resolved literal rc
     for sf in "${scan_files[@]}"; do
-        local -A anchors=()
-        local produced produced_rc=0
-        produced="$(grep -E '^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*[^[:space:]]+' "${sf}")" || produced_rc=$?
-        _ci_producer_ok "${produced_rc}" 1 || return 2
+        rc=0
+        resolved="$(_ci_workflow_uses resolved "${sf}" 2>&1)" || rc=$?
+        if [ "${rc}" -ne 0 ]; then
+            xv+=("${sf}: uses: not readable: ${resolved}")
+            continue
+        fi
+        literal="$(_ci_workflow_uses literal "${sf}")" || return 2
         while IFS= read -r line; do
             [ -n "${line}" ] || continue
-            raw="${line#*uses:}"; raw="${raw%%#*}"
-            raw="${raw#"${raw%%[![:space:]]*}"}"; raw="${raw%"${raw##*[![:space:]]}"}"
-            resolved="${raw}"
-            if [[ "${raw}" =~ ^\&([A-Za-z0-9_-]+)[[:space:]]+(.+)$ ]]; then
-                anchor="${BASH_REMATCH[1]}"; resolved="${BASH_REMATCH[2]}"
-                anchors["${anchor}"]="${resolved}"
-                literal_entries+=("${sf}"$'\t'"${resolved}")
-            elif [[ "${raw}" =~ ^\*([A-Za-z0-9_-]+)$ ]]; then
-                anchor="${BASH_REMATCH[1]}"
-                if [ -z "${anchors[${anchor}]+x}" ]; then
-                    xv+=("${sf}: unresolved YAML alias '*${anchor}' in a uses: step")
-                    continue
-                fi
-                resolved="${anchors[${anchor}]}"
-            else
-                literal_entries+=("${sf}"$'\t'"${resolved}")
-            fi
-            uses_entries+=("${sf}"$'\t'"${resolved}")
-        done <<<"${produced}"
-        unset anchors
+            uses_entries+=("${sf}"$'\t'"${line}")
+        done <<<"${resolved}"
+        while IFS= read -r line; do
+            [ -n "${line}" ] || continue
+            literal_entries+=("${sf}"$'\t'"${line}")
+        done <<<"${literal}"
     done
 
     local -a uses_values=()
-    local produced produced_rc=0
-    produced="$(printf '%s\n' "${uses_entries[@]}" | sed $'s/^[^\t]*\t//' | sort -u)" || produced_rc=$?
+    local produced produced_rc=0 pairs_text
+    printf -v pairs_text '%s\n' "${uses_entries[@]}"
+    produced="$(_ci_capture 0 sed $'s/^[^\t]*\t//' <<< "${pairs_text%$'\n'}")" || produced_rc=$?
+    if [ "${produced_rc}" -eq 0 ]; then
+        produced="$(_ci_capture 0 sort -u <<< "${produced}")" || produced_rc=$?
+    fi
     _ci_producer_ok "${produced_rc}" 0 || return 2
     mapfile -t uses_values <<<"${produced}"
     # What: no uses: AND no fail is vacuous.
@@ -15826,7 +15842,8 @@ _ci_check_action_node_versions() {
         case "${marker}" in
             OK)
                 meta="${res#*$'\n'}"
-                using="$(_ci_action_runs_using <<<"${meta}")"
+                using="$(_ci_action_runs_using <<<"${meta}" 2>&1)" \
+                    || { viol+=("'${v}' action manifest is not readable YAML: ${using}"); continue; }
                 if [ -z "${using}" ]; then
                     viol+=("'${v}' has no parseable runs.using")
                 elif [[ "${using}" =~ ^node([0-9]+)$ ]] && [ "${BASH_REMATCH[1]}" -lt "${node_min}" ]; then
@@ -15852,6 +15869,10 @@ _ci_check_action_node_versions() {
     local entries
     entries="$(_ci_block_keys github_actions)" || return 2
     for entry in ${entries}; do
+        # What: an unread workflow skips the dead-pin pass.
+        # Why: its uses: are unknown, so no pin is dead.
+        # From: Issue #1683 | PR #1858
+        [ "${#xv[@]}" -eq 0 ] || break
         case "${used_entries}" in
             *" ${entry} "*) ;;
             *) viol+=("SOT github_actions.${entry} is used by no workflow") ;;
@@ -15877,21 +15898,25 @@ _ci_check_action_node_versions() {
 # Why: nightly hint only; a gone tag fails node-versions.
 # From: Issue #1683 | PR #1858
 _ci_check_action_majors() {
-    local wf_dir srv entries e u cur repo refs t max warn=0 rc
+    local wf_dir srv entries e u cur repo refs t max warn=0 rc wf used=""
     local -a files=()
     wf_dir="$(_ci_repo_path CI_WORKFLOW_DIR)" || return 2
     _ci_workflow_files files "${wf_dir}" || return 2
     srv="$(_ci_env_required GITHUB_SERVER_URL)" || return 2
     entries="$(_ci_block_keys github_actions)" || return 2
+    for wf in "${files[@]}"; do
+        t="$(_ci_workflow_uses resolved "${wf}")" || return 2
+        used+="${t}"$'\n'
+    done
     for e in ${entries}; do
         u="$(_ci_block_entry_field github_actions "${e}" uses)" || return 2
         # What: the vN ref of this action in the workflows.
         # Why: action-node-versions keeps it one ref.
         # From: Issue #1683 | PR #1858
-        rc=0
-        cur="$(grep -h -o -E "uses:[[:space:]]*${u}@v[0-9]+" "${files[@]}")" || rc=$?
-        _ci_producer_ok "${rc}" 1 || return 2
-        cur="${cur%%$'\n'*}"; cur="${cur##*@v}"
+        cur=""
+        while IFS= read -r t; do
+            if [[ "${t}" =~ ^"${u}"@v([0-9]+)$ ]]; then cur="${BASH_REMATCH[1]}"; break; fi
+        done <<< "${used}"
         [ -n "${cur}" ] || continue
         repo="${u#*/}"; repo="${repo%%/*}"
         rc=0
@@ -16433,8 +16458,21 @@ _ci_check_prebuilt_prod() {
     local -a viol=()
     dep="$(_ci_compose_path "${repo_root}")" || return 2
     dep="${dep%/*}"
-    local hit
-    hit="$(_ci_capture 1 grep -RInE '^[[:space:]]+build:' "${dep}")" || return 2
+    local hit="" files f one
+    files="$(_ci_compose_dir_files "${dep}")" || return 2
+    if [ -z "${files}" ]; then
+        viol+=("${dep}: compose dir holds no compose file")
+    fi
+    while IFS= read -r f; do
+        [ -n "${f}" ] || continue
+        # What: services with a build: key, read by yq.
+        # Why: yq owns YAML; grep read text inside strings.
+        # From: Issue #1683 | PR #1858
+        one="$(_ci_run "[CI-ERROR-CHECK-0202]" "file=\"${f}\" reason=\"compose build: not read\"" \
+            yq --yaml-fix-merge-anchor-to-spec=true -r '(.services // {}) | to_entries[] | select((.value | tag) == "!!map" and (.value | has("build"))) | .key + " (build: at line " + (.value.build | line | tostring) + ")"' "${f}")" || return 2
+        if [ -n "${one}" ]; then hit+="${f}: ${one}"$'\n'; fi
+    done <<<"${files}"
+    hit="${hit%$'\n'}"
     if [ -n "${hit}" ]; then
         viol+=("a stack compose declares build:; prod must run prebuilt images only" "${hit}")
     fi
