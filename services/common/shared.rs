@@ -1062,7 +1062,7 @@ fn legacy_id_nanos(name: &str) -> Option<u128> {
     let digits =
         |t: &str, n: usize| (t.len() == n && is_snapshot_id(t)).then(|| t.parse::<i64>().ok())?;
     let (y, m, d) = (
-        digits(&date[..4.min(date.len())], 4)?,
+        digits(date.get(..4)?, 4)?,
         digits(date.get(4..6)?, 2)?,
         digits(date.get(6..)?, 2)?,
     );
