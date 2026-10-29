@@ -27,11 +27,11 @@ use lancache_ng::config::{
 };
 use lancache_ng::{
     ALARM_INGEST_PATH, ALARM_TOKEN_HEADER, Backoff, DesiredRunState, DesiredState, DnsRecord,
-    FlushRequest, NetdataAlarm, Place, PowerDns, ProbeAnswer, ProbeReport, SnapshotStore,
-    WatchdogStatus, ct_eq, df, die, error_chain, files_under, hex32, http_client, is_placeholder,
-    load_or_create, load_or_create_hex, metadata_if_present, need_secs, own, probe_health,
-    resolve_shared_secret, shared_secret, shared_secret_file_name, snapshot_created_unix,
-    unix_secs, write_file, write_if_changed,
+    FlushRequest, NetdataAlarm, PDNS_API_KEY_HEADER, Place, PowerDns, ProbeAnswer, ProbeReport,
+    SnapshotStore, WatchdogStatus, ct_eq, df, die, error_chain, files_under, hex32, http_client,
+    is_placeholder, load_or_create, load_or_create_hex, metadata_if_present, need_secs, own,
+    probe_health, resolve_shared_secret, shared_secret, shared_secret_file_name,
+    snapshot_created_unix, unix_secs, write_file, write_if_changed,
 };
 use nkeys::{KeyPair, XKey};
 use regex::Regex;
@@ -5735,7 +5735,7 @@ async fn fetch_zone_groups(state: &AppState) -> Vec<ZoneSnapshotGroup> {
     let response = state
         .http_client
         .get(format!("{}/snapshots", state.config.dns_rollback_url))
-        .header("X-API-Key", &state.config.pdns_api_key)
+        .header(PDNS_API_KEY_HEADER, &state.config.pdns_api_key)
         .send()
         .await;
     let response = match response.and_then(reqwest::Response::error_for_status) {
@@ -5791,7 +5791,7 @@ async fn rollback_zone_snapshot(State(state): Shared, Form(f): Form<Fields>) -> 
     let result = state
         .http_client
         .post(format!("{}/rollback", state.config.dns_rollback_url))
-        .header("X-API-Key", &state.config.pdns_api_key)
+        .header(PDNS_API_KEY_HEADER, &state.config.pdns_api_key)
         .json(&json!({"zone": zone, "snapshot_id": snapshot_id}))
         .send()
         .await;

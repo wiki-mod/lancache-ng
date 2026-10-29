@@ -1513,6 +1513,11 @@ fn json_answer<T: serde::de::DeserializeOwned>(body: &[u8]) -> Result<T, DockerE
         .map_err(|e| DockerError::Transport(format!("the answer is no JSON: {e}")))
 }
 
+// What: the HTTP header that carries the PowerDNS API key.
+// Why: the calls to PowerDNS and the rollback listener name it alike.
+// From: Issue #1683 | PR #1858
+pub const PDNS_API_KEY_HEADER: &str = "X-API-Key";
+
 // What: client of PowerDNS's HTTP API with the API key.
 // Why: ui, watchdog and nats-subscriber share it.
 // From: Issue #1683 | PR #1912
@@ -1551,7 +1556,7 @@ impl PowerDns {
         let mut request = self
             .http
             .request(method, url)
-            .header("X-API-Key", &self.api_key);
+            .header(PDNS_API_KEY_HEADER, &self.api_key);
         // What: add a JSON content type only with a body.
         // Why: a bodiless GET claims no content type.
         // From: Issue #1683 | PR #1912

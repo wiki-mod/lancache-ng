@@ -24,8 +24,8 @@ use lancache_ng::config::{
     local_reverse, need, need_flag, process_env, rollback_zones, uint, zone_url,
 };
 use lancache_ng::{
-    Backoff, DnsRecord, FlushRequest, PowerDns, SnapshotStore, ct_eq, die, http_client,
-    need_millis, need_secs, snapshot_created_unix, unix_nanos,
+    Backoff, DnsRecord, FlushRequest, PDNS_API_KEY_HEADER, PowerDns, SnapshotStore, ct_eq, die,
+    http_client, need_millis, need_secs, snapshot_created_unix, unix_nanos,
 };
 use reqwest::Method;
 use serde::Deserialize;
@@ -781,7 +781,9 @@ async fn handle(
 // Why: the listener changes zone data; network is no trust.
 // From: Issue #1683 | PR #1858
 fn authorized(headers: &HeaderMap, key: &str) -> bool {
-    let sent = headers.get("X-API-Key").and_then(|v| v.to_str().ok());
+    let sent = headers
+        .get(PDNS_API_KEY_HEADER)
+        .and_then(|v| v.to_str().ok());
     sent.is_some_and(|sent| ct_eq(sent, key))
 }
 
