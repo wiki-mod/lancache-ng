@@ -3863,17 +3863,23 @@ _ci_for_test_services() {
 ci_cmd_test_stack() { _ci_for_test_services ci_cmd_test; }
 
 # What: label and scope of one SOT status kind.
-# Why: the SOT owns both; service and arch are filled in.
+# Why: the SOT owns both; service, arch, severity fill in.
 # From: Issue #1683 | PR #1912
 _ci_status_text() {
-    local kind="$1" svc="${2:-}" arch="${3:-}" label scope
+    local kind="$1" svc="${2:-}" arch="${3:-}" label scope sev=""
     label="$(_ci_block_entry_field status_reports "${kind}" label)" || return 2
     scope="$(_ci_block_entry_field status_reports "${kind}" scope)" || return 2
     if [ -z "${label}" ] || [ -z "${scope}" ]; then
         ci_log "[CI-ERROR-STATUS-0010]" "kind=\"${kind}\" reason=\"no SOT status_reports label and scope\""
         return 2
     fi
-    _ci_fill "${scope}" "SERVICE=${svc}"$'\n'"ARCH=${arch}" || return 2
+    # What: the SEVERITY row, only for a scope naming it.
+    # Why: scan args and issue text read one _ci_variable.
+    # From: Issue #1683 | PR #1858
+    case "${scope}" in
+        *"@SEVERITY@"*) sev="$(_ci_variable CI_TRIVY_SEVERITY)" || return 2 ;;
+    esac
+    _ci_fill "${scope}" "SERVICE=${svc}"$'\n'"ARCH=${arch}"$'\n'"SEVERITY=${sev}" || return 2
     printf '%s\n%s\n' "${label}${svc:+-${svc}}${arch:+-${arch}}" "${REPLY}"
 }
 
