@@ -2278,13 +2278,48 @@ is_quickstart_install() {
     ! is_deploy_prod_install_dir "$dir" && [[ -f "$dir/docker-compose.yml" && -f "$PROD_COMPOSE" ]]
 }
 
+# What: puts back deleted files the old stack bind-mounts
+# Why: a git pull drops them; the old stack must restart
+# From: Issue #1683 | PR #1858
+restore_quickstart_mounts() {
+    local old_dir="$1" old_env="$2" record="$3" json sources src rel commit entry perms
+    [[ -e "$old_dir/.git" ]] || return 0
+    install_missing_tools jq
+    json=$(stack_compose "$old_dir" "$old_env" config --format json) \
+        || die "Cannot read the compose config of $old_dir (exit $?); nothing was changed."
+    sources=$(jq -r '.services[].volumes[]? | select(.type == "bind") | .source' <<< "$json") \
+        || die "Cannot list the bind mounts of $old_dir (exit $?); nothing was changed."
+    while IFS= read -r src; do
+        [[ "$src" = "$old_dir"/* && ! -e "$src" ]] || continue
+        rel="${src#"$old_dir"/}"
+        # What: first-parent commit on HEAD that dropped it
+        # Why: its parent holds the copy the old stack used
+        # From: Issue #1683 | PR #1858
+        commit=$(git -C "$old_dir" log -1 --format=%H -m --first-parent --diff-filter=D -- "$rel") \
+            || die "Failed to search the git history of $old_dir for $rel (exit $?)."
+        [[ -n "$commit" ]] \
+            || die "$src is missing and git has no older copy; restore it, then rerun setup.sh update. Nothing was changed."
+        entry=$(git -C "$old_dir" ls-tree "${commit}^" -- "$rel") \
+            || die "Failed to read $rel in ${commit}^ (exit $?)."
+        [[ "$entry" = 100*" blob "* ]] \
+            || die "$src is missing and was no plain file in git; restore it, then rerun setup.sh update. Nothing was changed."
+        perms=0644
+        [[ "$entry" != 100755* ]] || perms=0755
+        mkdir -p "${src%/*}" || die "Failed to create ${src%/*} (exit $?)."
+        git -C "$old_dir" show "${commit}^:$rel" > "$src" || die "Failed to restore $src from git (exit $?)."
+        chmod "$perms" "$src" || die "Failed to set the mode of $src (exit $?)."
+        printf 'restored|%s\n' "$rel" >> "$record" || die "Failed to record $rel in $record (exit $?)."
+        print_ok "Restored $rel for the old stack from git ${commit:0:12}^"
+    done <<< "$sources"
+}
+
 # What: converts a quickstart install into deploy/prod
 # Why: AG-KD-008 one profile; AG-OP-007 convergence
 # From: Issue #1683 | PR #1858
 migrate_quickstart_install() (
     local old_dir="$1" stack_dir="${PROD_COMPOSE%/*}" env_local old_env record project key value volume dir copy f
     local services old_volumes prod_volumes rows missing copies keys old_raw new_raw old_value line path_keys bundle
-    local https_ip fresh kept kept_list
+    local https_ip fresh kept kept_list restored
     local -a service_list copy_lines path_key_list=()
     path_keys=$(lancache_sot_list quickstart_path_keys runtime) || exit $?
     path_keys="${path_keys//$'\n'/ }"
@@ -2303,6 +2338,7 @@ migrate_quickstart_install() (
     [[ -n "$https_ip" ]] \
         || die "The install at $old_dir has no second LAN IP (IP_HTTPS or IP_SSL in $old_env). LanCache-NG now needs one for HTTPS DNS and proxy: add a free LAN IP to this host, set IP_HTTPS=<that IP> in $old_env, then rerun setup.sh update. Nothing was changed."
     print_step "Migrating the quickstart install at $old_dir to $stack_dir"
+    restore_quickstart_mounts "$old_dir" "$old_env" "$record"
     # What: convergence paused for the whole migration
     # Why: the timer must not run compose mid-migration
     # From: Issue #1683 | PR #1858
@@ -2434,6 +2470,14 @@ migrate_quickstart_install() (
     while IFS= read -r copy; do
         rm -f "$old_dir/$copy" || die "Failed to remove the quickstart copy $old_dir/$copy."
     done <<< "$bundle"
+    # What: files put back for the old stack go too
+    # Why: only the old stack needed them
+    # From: Issue #1683 | PR #1858
+    restored=$(awk -F'|' '$1 == "restored" { print $2 }' "$record") || die "Failed to read $record (exit $?)."
+    while IFS= read -r copy; do
+        [[ -n "$copy" ]] || continue
+        rm -f "$old_dir/$copy" || die "Failed to remove the restored file $old_dir/$copy."
+    done <<< "$restored"
     rm -f "$old_dir/docker-compose.yml" "$old_env" || die "Failed to remove the quickstart files in $old_dir."
     trap - EXIT
     resume_lancache_convergence_after_update
