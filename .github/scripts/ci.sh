@@ -5865,7 +5865,7 @@ _ci_trivy_db_record() {
 }
 
 # What: trivy image argv for one scan, one item per line
-# Why: one owner; a test runs it through the real trivy
+# Why: one owner of the scan flags; values come from the SOT
 # From: Issue #1683 | PR #1858
 _ci_trivy_args() {
     local cache_dir="$1" scanners severity scan_timeout ignore bin
