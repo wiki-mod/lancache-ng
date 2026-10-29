@@ -2372,6 +2372,10 @@ migrate_quickstart_install() (
     # From: Issue #1683 | PR #1912
     migrate_env_for_update "$stack_dir" \
         || die "Cannot prepare $env_local for the prod stack (exit $?); the quickstart stack in $old_dir was not stopped."
+    # What: v0.3.2 plaintext UI password becomes a hash
+    # Why: the ui needs user and hash; no plaintext stays
+    # From: Issue #1683 | PR #1858
+    ensure_ui_password_hash "$stack_dir" "$env_local"
     # What: every quickstart volume has a home in prod
     # Why: data without a target would be left behind
     # From: Issue #1683 | PR #1858
