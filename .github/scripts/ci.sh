@@ -8181,7 +8181,10 @@ _ci_release_notes_block() {
         printf -- '- %s:%s -> %s\n' "${base}/${target}" "${tag}" "${dig}"
     done
     printf '\nProvenance attestations and CycloneDX SBOMs attach per image.\n'
-    printf 'OpenVEX from .trivyignore.yaml attaches as vex.openvex.json.\n'
+    local ignore vex
+    ignore="$(_ci_variable CI_TRIVY_IGNORE)" || return 2
+    vex="$(_ci_variable CI_RELEASE_VEX_ASSET)" || return 2
+    printf 'OpenVEX from %s attaches as %s.\n' "${ignore}" "${vex}"
     _ci_release_marker end || return 2
 }
 
@@ -8390,8 +8393,9 @@ ci_cmd_release_vex() {
 # Why: one owner removes the work dir, not this body.
 # From: Issue #1683 | PR #1858
 _ci_release_vex_in() {
-    local tag="$1" trivyignore="$2" dir="$3" adir out rc=0
-    out="${dir}/vex.openvex.json"
+    local tag="$1" trivyignore="$2" dir="$3" adir out vex rc=0
+    vex="$(_ci_variable CI_RELEASE_VEX_ASSET)" || return 2
+    out="${dir}/${vex}"
     _ci_generate_vex "${trivyignore}" > "${out}" || rc=$?
     if [ "${rc}" -ne 0 ] || [ ! -s "${out}" ]; then
         ci_log "[CI-ERROR-RELEASE-0012]" "tag=\"${tag}\" rc=${rc} reason=\"OpenVEX generation failed or empty (raw above)\""
