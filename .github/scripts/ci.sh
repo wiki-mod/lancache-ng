@@ -11475,7 +11475,8 @@ _ci_build_tools_build_args() {
     # What: append the SOT apk list as a build-arg.
     # Why: Dockerfile consumes it; it never owns the list.
     # From: Issue #1683
-    pkgs="$(_ci_build_tools_packages | tr '\n' ' ')" || return 2
+    pkgs="$(_ci_build_tools_packages)" || return 2
+    pkgs="$(_ci_capture 0 tr '\n' ' ' <<< "${pkgs}")" || return 2
     pkgs="${pkgs% }"
     out="${out}${prefix}APK_PACKAGES=${pkgs}"$'\n'
     pkgs="$(_ci_apk_bootstrap_arg "${prefix}")" || return 2
@@ -13025,7 +13026,8 @@ _ci_rh_full_reset_check() {
     [ "${found}" -eq 1 ] || printf '  (none found)\n'
     printf '\n--- apt/dpkg history naming other fleet hosts (report only) ---\n'
     fleet_ere="$(_ci_rh_ere fleet_name_patterns)" || return 2
-    logs="$(_ci_block_entry_list runner_host "" apt_log_globs | tr '\n' ' ')" || return 2
+    logs="$(_ci_block_entry_list runner_host "" apt_log_globs)" || return 2
+    logs="$(_ci_capture 0 tr '\n' ' ' <<< "${logs}")" || return 2
     out="$(_ci_run -m 1 "[CI-ERROR-RUNNER-0036]" "reason=\"apt history search failed\"" _ci_rh_root bash -c "${_CI_RH_ZGREP_PROG}" _ "${fleet_ere}" "${logs}")" || return 2
     found=0
     while IFS= read -r line; do
