@@ -1684,12 +1684,11 @@ branch_policy:
   # From: Issue #1683 | PR #1858
   long_lived: [badges, history/current_dev_old_ci_1.x]
   # What: POSIX ERE for long-lived ref families.
-  # Why: release branches and the VEX automation branch.
+  # Why: tags-as-branches and release branches.
   # From: Issue #1683 | PR #1858
   long_lived_regex:
     - "^v[0-9]"
     - "^release/v[0-9]"
-    - "^CI-Automation/"
 
 # What: Stack-validation check parameters (data, not logic).
 # Why: One SOT for check inputs; logic stays in ci.sh.
