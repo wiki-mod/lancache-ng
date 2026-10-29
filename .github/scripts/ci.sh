@@ -8026,14 +8026,11 @@ ci_cmd_release_changelog() {
 # Why: only gh's HTTP 404 means absent; else UNKNOWN.
 # From: Issue #1683 | PR #1858
 _ci_release_variable_get() {
-    local path="$1" pat="$2" out err emsg rc=0
-    err="$(_ci_mktemp "${CI_TMPDIR}/ci-release-var.XXXXXX")" || return 2
-    out="$(GH_TOKEN="${pat}" gh api -X GET --jq .value "${path}" 2>"${err}")" || rc=$?
-    emsg="$(<"${err}")"
-    rm -f "${err}"
+    local path="$1" pat="$2" out rc=0
+    out="$(GH_TOKEN="${pat}" _ci_retry github-read gh api -X GET --jq .value "${path}")" || rc=$?
     if [ "${rc}" -ne 0 ]; then
-        if [[ "${emsg}" == *"HTTP 404"* ]]; then return 1; fi
-        ci_error "[CI-ERROR-RELEASE-0058]" "path=\"${path}\" reason=\"repo variable not readable\"" "${emsg}"
+        if [ "${rc}" -eq 1 ] && [[ "${out}" == *"HTTP 404"* ]]; then return 1; fi
+        ci_error "[CI-ERROR-RELEASE-0058]" "path=\"${path}\" reason=\"repo variable not readable\"" "${out}"
         return 2
     fi
     printf '%s\n' "${out}"
@@ -8221,17 +8218,14 @@ _ci_release_asset_put() {
 # Why: the repeat check and the create read back agree
 # From: Issue #1683 | PR #1858
 _ci_release_state() {
-    local repo="$1" tag="$2" out err emsg rc=0
-    err="$(_ci_mktemp "${CI_TMPDIR}/ci-release-view.XXXXXX")" || return 2
-    out="$(gh release view "${tag}" --repo "${repo}" --json body,isPrerelease 2>"${err}")" || rc=$?
-    emsg="$(<"${err}")"
-    rm -f "${err}"
+    local repo="$1" tag="$2" out rc=0
+    out="$(_ci_retry github-read gh release view "${tag}" --repo "${repo}" --json body,isPrerelease)" || rc=$?
     # What: only gh's "release not found" means absent.
     # Why: auth/network errors are UNKNOWN, not "absent".
     # From: Issue #1683 | PR #1858
     if [ "${rc}" -ne 0 ]; then
-        if [[ "${emsg}" == *"release not found"* ]]; then return 1; fi
-        ci_error "[CI-ERROR-RELEASE-0020]" "tag=\"${tag}\" reason=\"gh release view failed\"" "${emsg}"
+        if [ "${rc}" -eq 1 ] && [[ "${out}" == *"release not found"* ]]; then return 1; fi
+        ci_error "[CI-ERROR-RELEASE-0020]" "tag=\"${tag}\" reason=\"gh release view failed\"" "${out}"
         return 2
     fi
     _ci_capture 0 jq -r '(.isPrerelease | tostring), (.body // "")' <<< "${out}"
