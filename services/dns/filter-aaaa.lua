@@ -36,7 +36,7 @@ function maintenance()
     -- Why: one bounded line per interval, not per query
     if suppressed_count > 0 then
         -- What: logs count at loglevels.Warning
-        -- Why: unverified loglevels may raise Lua error
+        -- Why: shown from RECURSOR_LOGLEVEL 4 (warning) up
         pdnslog(
             "[lancache-dns][filter-aaaa] suppressed " .. suppressed_count .. " AAAA response(s) since last report",
             pdns.loglevels.Warning
