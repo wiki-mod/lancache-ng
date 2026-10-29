@@ -65,8 +65,8 @@ It can:
 
 - check the required tools
 - ask before installing missing dependencies such as Docker, curl or git
-- ask for the release channel first (`stable` or `nightly`)
-- clone the code of that channel to `/opt/lancache-ng/latest` (stable) or
+- ask for the release channel first (`latest` or `nightly`)
+- clone the code of that channel to `/opt/lancache-ng/latest` or
   `/opt/lancache-ng/nightly`
 - ask for the cache server IP
 - optionally enable HTTPS caching with a second IP
@@ -86,7 +86,7 @@ Default installation path:
 
 ```text
 /opt/lancache-ng            data (cache, DNS, DHCP, NATS, CA, ...)
-/opt/lancache-ng/latest     code of the stable channel (master)
+/opt/lancache-ng/latest     code of the latest channel (master)
 /opt/lancache-ng/nightly    code of the nightly channel (current_dev)
 /opt/lancache-ng/current    link to the channel that runs
 ```
@@ -312,7 +312,8 @@ The update command can:
   `/opt/lancache-ng/current/deploy/prod/.env.local`, or
   `sudo LANCACHE_IMAGE_CHANNEL=nightly /opt/lancache-ng/current/setup.sh update`);
   the moved `.env.local` keeps the new channel, and a failed move points
-  `/opt/lancache-ng/current` back
+  `/opt/lancache-ng/current` back. `nightly` is experimental and not for
+  production; `setup.sh` warns when it is selected
 - move an old install cloned straight into `/opt/lancache-ng` to
   `/opt/lancache-ng/latest` or `/opt/lancache-ng/nightly`; only its unchanged
   code files are removed afterwards, its data stays. If that old checkout
@@ -363,24 +364,21 @@ See `docs/backup-restore.md` for backup scope, restore testing, secret handling,
 `LANCACHE_IMAGE_CHANNEL` selects the first-party image channel. `setup.sh`
 resolves mutable channels to the immutable `LANCACHE_IMAGE_TAG` used by Docker
 Compose. The interactive installer asks which channel to use, defaulting to
-`stable`.
+`latest`.
 
-- `stable` (default) is the channel promoted after the full release
-  validation gate. `LANCACHE_IMAGE_CHANNEL=latest` is the same channel under
-  its original name — both resolve to the identical published image.
-- `nightly` is the most recently built, less tested pre-stable channel, built
-  from `current_dev`'s tip once a day plus on-demand (renamed from `edge` in
-  v0.3.0; corrected from "published on every current_dev push" to this
-  once-daily/on-demand model in #1254/#1255). Opt in only if you want the
-  newest changes.
-- `vX.Y.Z` pins all stack services to an immutable stable release tag.
+- `latest` (default) is the channel from `master`, promoted after the full
+  release validation gate; release tags `vX.Y.Z` move it.
+- `nightly` is built from `current_dev`'s tip once a day plus on-demand
+  (renamed from `edge` in v0.3.0). It is experimental, may break the stack
+  and is not for production; `setup.sh` warns on install and on every update.
+- `vX.Y.Z` pins all stack services to an immutable release tag.
 - Branch and commit images are optional for development and testing.
   If CI has published them, valid examples are branch names (for branch pushes)
   and `sha-<commit>` tags (full commit SHA).
 
 Recommended for production:
 
-- Use `latest` for normal stable deployments.
+- Use `latest` for normal deployments.
 - Use a tagged release value (for example `v1.2.3`) for pinned deployments.
 - Use `nightly`, branch tags, or `sha-*` tags only for temporary test environments
   where intentional drift is acceptable.
@@ -390,7 +388,7 @@ The release workflow publishes service images with branch, tag, and SHA tags and
 ### Pinning the standalone installer's git ref
 
 The installer clones the code of the chosen channel into its directory:
-`stable` from `master` into `/opt/lancache-ng/latest`, `nightly` from
+`latest` from `master` into `/opt/lancache-ng/latest`, `nightly` from
 `current_dev` into `/opt/lancache-ng/nightly`. Set `LANCACHE_SETUP_GIT_REF`
 to a branch or tag to clone that ref into the channel's directory instead,
 for example to validate a pre-release branch:
@@ -721,15 +719,14 @@ PROXY_ALLOWED_CLIENT_CIDRS=
 CACHE_MAX_GB=50
 
 # First-party service image selector.
-# stable is the channel promoted after the full release validation gate
-# (latest is the same channel under its original name -- both resolve
-# identically). Use nightly only when you explicitly want the most recently
-# built, less tested pre-stable channel (formerly called edge).
+# latest is the channel from master, promoted after the full release
+# validation gate. nightly (formerly called edge) is experimental, may break
+# the stack and is not for production.
 # setup.sh resolves mutable channels to an immutable sha-* image tag before pull.
 # Do not change LANCACHE_IMAGE_TAG by hand unless LANCACHE_IMAGE_CHANNEL=pinned.
 LANCACHE_IMAGE_REGISTRY=ghcr.io
 LANCACHE_IMAGE_PREFIX=wiki-mod/lancache-ng
-LANCACHE_IMAGE_CHANNEL=stable
+LANCACHE_IMAGE_CHANNEL=latest
 LANCACHE_IMAGE_TAG=sha-<resolved-by-setup>
 ```
 
@@ -744,12 +741,12 @@ LANCACHE_IMAGE_TAG=sha-<resolved-by-setup>
 
 `KEEP_KNOWN_GOOD_CONFIGS` (default `3`) controls how many validated nginx/dnsmasq/PowerDNS configurations are kept for automatic rollback if a newly generated config fails validation at container startup. It also controls how many known-good Kea DHCP config snapshots the Admin UI keeps for operator-selected rollback (see the DHCP settings page). See [docs/known-good-config-snapshots.md](docs/known-good-config-snapshots.md).
 
-`LANCACHE_IMAGE_CHANNEL` controls the mutable stack channel. `nightly` (the
-pre-1.0 default, SOT `release.default_channel`; renamed from `edge` in v0.3.0)
-is the tested pre-stable channel from `current_dev`. `stable` and `latest`
-both mean the same released channel — `stable` is the friendlier name
-`setup.sh`'s interactive picker offers, `latest` is the original name and
-remains valid.
+`LANCACHE_IMAGE_CHANNEL` controls the mutable stack channel. `latest` (from
+`master`) is the install default (SOT `release.install_channel`); an older
+`.env` that still names another value for it is rewritten to `latest` on
+update. `nightly` (renamed from `edge` in v0.3.0) is built daily
+from `current_dev`; it is experimental, may break the stack and is not for
+production, and `setup.sh` warns on install and on every update with it.
 `setup.sh` resolves a mutable channel by reading every first-party image's
 channel digest twice while no promotion runs, and writes each image as
 `LANCACHE_IMAGE_REF_<NAME>=<image>@<digest>`, which Docker Compose pulls
