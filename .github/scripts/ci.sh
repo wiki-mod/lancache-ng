@@ -12086,6 +12086,16 @@ _ci_rh_reap_containers() {
     local label="$1" field="$2" pattern="$3" hours="$4"
     local before ids rows id image name project created value rrc rc=0
     local -a idl
+    # What: an unknown match field stops with a code.
+    # Why: a bare return 2 named no field and no reason.
+    # From: Issue #1683 | PR #1858
+    case "${field}" in
+        image | name | project) ;;
+        *)
+            ci_log "[CI-ERROR-RUNNER-0134]" "label=\"${label}\" field=\"${field}\" known=\"image name project\" reason=\"unknown field\""
+            return 2
+            ;;
+    esac
     before=$(( $(date +%s) - hours * 3600 ))
     printf -- '--- reap orphaned %s containers older than %sh ---\n' "${label}" "${hours}"
     ids="$(_ci_capture 0 docker ps -q)" || return 2
@@ -12096,8 +12106,7 @@ _ci_rh_reap_containers() {
         case "${field}" in
             image) value="${image}" ;;
             name) value="${name#/}" ;;
-            project) value="${project}" ;;
-            *) return 2 ;;
+            *) value="${project}" ;;
         esac
         [[ "${value}" == *"${pattern}"* ]] || continue
         rrc=0
