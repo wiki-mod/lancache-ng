@@ -8961,6 +8961,7 @@ _ci_gc_ref_reap() {
 # From: Issue #1683 | PR #1858
 ci_cmd_gc_refs() {
     local mode="dry-run" arg remote prefix repo refs sha ref n state holder rc keep=0 del=0 deleted=0
+    local build_lock promote_lock
     for arg in "$@"; do
         case "${arg}" in
             --apply) mode="apply" ;;
@@ -9006,8 +9007,9 @@ ci_cmd_gc_refs() {
     # What: build and promote locks whose holder run ended.
     # Why: a lost runner never frees its own lock.
     # From: Issue #1683 | PR #1858
-    for prefix in "$(_ci_variable CI_BUILD_LOCK_REF)" "$(_ci_required_field release promote_lock_ref block)"; do
-        [ -n "${prefix}" ] || return 2
+    build_lock="$(_ci_variable CI_BUILD_LOCK_REF)" || return 2
+    promote_lock="$(_ci_required_field release promote_lock_ref block)" || return 2
+    for prefix in "${build_lock}" "${promote_lock}"; do
         refs="$(_ci_capture 0 git ls-remote --refs "${remote}" "${prefix}/*")" || return 2
         while IFS=$'\t' read -r sha ref; do
             [ -n "${ref}" ] || continue
