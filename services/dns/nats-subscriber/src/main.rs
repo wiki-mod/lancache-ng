@@ -812,7 +812,11 @@ fn rejected(
 // From: Issue #1683 | PR #1858
 async fn list_snapshots(State(ctx): State<Arc<Ctx>>, headers: HeaderMap) -> Response {
     if !authorized(&headers, ctx.pdns.api_key()) {
-        return failure(StatusCode::UNAUTHORIZED, "missing or invalid X-API-Key").into_response();
+        return failure(
+            StatusCode::UNAUTHORIZED,
+            format!("missing or invalid {PDNS_API_KEY_HEADER}"),
+        )
+        .into_response();
     }
     let mut zones = HashMap::new();
     for zone in rollback_zones(&ctx.lan_zone, ctx.reverse) {
@@ -1047,7 +1051,11 @@ async fn rollback_handler(
     body: axum::body::Bytes,
 ) -> Response {
     if !authorized(&headers, ctx.pdns.api_key()) {
-        return failure(StatusCode::UNAUTHORIZED, "missing or invalid X-API-Key").into_response();
+        return failure(
+            StatusCode::UNAUTHORIZED,
+            format!("missing or invalid {PDNS_API_KEY_HEADER}"),
+        )
+        .into_response();
     }
     let request: RollbackRequest = match serde_json::from_slice(&body) {
         Ok(request) => request,
@@ -1125,8 +1133,6 @@ async fn main() {
     let user = env_opt("NATS_USER").or_else(|| env_opt("NATS_DNS_WRITER_USER"));
     if let (Some(user), Some(password)) = (user, env_opt("NATS_PASSWORD")) {
         options = options.user_and_password(user, password);
-    } else if let Some(token) = env_opt("NATS_TOKEN") {
-        options = options.token(token);
     }
     let client = options
         .connect(&nats_url)

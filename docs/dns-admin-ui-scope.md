@@ -64,7 +64,7 @@ rule, restart every consumer of a shared value, not just the DNS containers.
 | `ROOT_ZONE_MIRROR` | AXFR root zone mirror; `recursor` turns it on unless the value parses as false |
 | `DNS_REPLICATION_ROLE` / `DNS_XFR_PRIMARY` | Zone transfer role and primary endpoint, see 3a |
 | `NATS_BIND_IP` / `NATS_ADVERTISE_URL` | **Not PowerDNS-native secondary/AXFR wiring — see 3a below.** They only publish/advertise the NATS registration/event path for remote secondary setup |
-| `NATS_URL` / `NATS_USER` / `NATS_PASSWORD` / `NATS_TOKEN` / `NATS_CONSUMER` / `NATS_RECONCILER` / `NATS_RECORD_WRITES` | This node's own NATS connection identity, and the record-write switch for the `nats-subscriber` process (`NATS_RECORD_WRITES`, set by the watchdog from `DNS_REPLICATION_ROLE`) |
+| `NATS_URL` / `NATS_USER` / `NATS_PASSWORD` / `NATS_CONSUMER` / `NATS_RECONCILER` / `NATS_RECORD_WRITES` | This node's own NATS connection identity, and the record-write switch for the `nats-subscriber` process (`NATS_RECORD_WRITES`, set by the watchdog from `DNS_REPLICATION_ROLE`) |
 | `KEEP_KNOWN_GOOD_CONFIGS` / `DNS_CONFIG_SNAPSHOT_DIR` | Known-good config snapshot retention/location (see #415) |
 
 These are intentionally config-file-only: they are either security-sensitive
