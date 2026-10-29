@@ -15631,6 +15631,21 @@ _ci_action_sot_entry() {
     done
 }
 
+# What: names the files a resolved ref appears in.
+# Why: violation messages point at the real call sites.
+# From: Issue #1683 | PR #1858
+_ci_action_ref_files() {
+    local needle="$1" e file val; local -a m=()
+    shift
+    for e in "$@"; do
+        file="${e%%$'\t'*}"; val="${e#*$'\t'}"
+        [ "${val}" = "${needle}" ] || continue
+        case " ${m[*]} " in *" ${file} "*) ;; *) m+=("${file}") ;; esac
+    done
+    [ "${#m[@]}" -eq 0 ] && { printf '<none>'; return; }
+    printf '%s' "${m[*]}"
+}
+
 # What: enforce Node runtime + ref hygiene on pins.
 # Why: single owner of action-pin policy.
 # From: Issue #1683 | PR #1858
@@ -15688,20 +15703,6 @@ _ci_check_action_node_versions() {
         ci_log "[CI-ERROR-CHECK-0094]" "reason=\"no uses: steps extracted; scan vacuous\""; return 2
     fi
 
-    # What: names the files a resolved ref appears in.
-    # Why: violation messages point at the real call sites.
-    # From: Issue #1683 | PR #1858
-    _ci_ando_reffiles() {
-        local needle="$1" e file val; local -a m=()
-        for e in "${uses_entries[@]}"; do
-            file="${e%%$'\t'*}"; val="${e#*$'\t'}"
-            [ "${val}" = "${needle}" ] || continue
-            case " ${m[*]} " in *" ${file} "*) ;; *) m+=("${file}") ;; esac
-        done
-        [ "${#m[@]}" -eq 0 ] && { printf '<none>'; return; }
-        printf '%s' "${m[*]}"
-    }
-
     # What: per-file literal ref counts + per-key ref drift.
     # Why: a repeated literal or split ref both fail closed.
     # From: Issue #1683 | PR #1858
@@ -15749,7 +15750,7 @@ _ci_check_action_node_versions() {
         # From: Issue #1683 | PR #1858
         if [[ "${v}" == ./* ]]; then
             case "${v}" in *.yml|*.yaml) continue ;; esac
-            viol+=("local action '${v}' (in: $(_ci_ando_reffiles "${v}")); CI 2.0 has no composite actions")
+            viol+=("local action '${v}' (in: $(_ci_action_ref_files "${v}" "${uses_entries[@]}")); CI 2.0 has no composite actions")
             continue
         fi
         # What: a docker:// step must name a SOT base image.
@@ -15762,7 +15763,7 @@ _ci_check_action_node_versions() {
                 bv="$(_ci_block_entry_field base_images "" "${bk}")" || return 2
                 [ "${bv}" != "${v#docker://}" ] || bhit=1
             done
-            [ "${bhit}" -eq 1 ] || viol+=("docker step '${v}' (in: $(_ci_ando_reffiles "${v}")) is not a SOT base_images value")
+            [ "${bhit}" -eq 1 ] || viol+=("docker step '${v}' (in: $(_ci_action_ref_files "${v}" "${uses_entries[@]}")) is not a SOT base_images value")
             continue
         fi
         # What: own repo needs a ref; others unsupported.
@@ -15773,7 +15774,7 @@ _ci_check_action_node_versions() {
             continue
         fi
         if ! _ci_action_ref_is_external "${v}"; then
-            viol+=("unsupported action reference '${v}' (in: $(_ci_ando_reffiles "${v}"))")
+            viol+=("unsupported action reference '${v}' (in: $(_ci_action_ref_files "${v}" "${uses_entries[@]}"))")
             continue
         fi
         ref="${v##*@}"; key="${v%@*}"
@@ -15781,7 +15782,7 @@ _ci_check_action_node_versions() {
         # Why: no third-party pin; the tag moves forward.
         # From: Issue #1683 | PR #1858
         if [[ ! "${ref}" =~ ^v[0-9]+$ ]]; then
-            viol+=("external action '${v}' (in: $(_ci_ando_reffiles "${v}")) must use a major tag vN")
+            viol+=("external action '${v}' (in: $(_ci_action_ref_files "${v}" "${uses_entries[@]}")) must use a major tag vN")
             continue
         fi
         # What: an external action must have a SOT entry.
@@ -15789,7 +15790,7 @@ _ci_check_action_node_versions() {
         # From: Issue #1683 | PR #1858
         entry="$(_ci_action_sot_entry "${key}")" || return 2
         if [ -z "${entry}" ]; then
-            viol+=("external action '${key}' (in: $(_ci_ando_reffiles "${v}")) has no SOT github_actions entry")
+            viol+=("external action '${key}' (in: $(_ci_action_ref_files "${v}" "${uses_entries[@]}")) has no SOT github_actions entry")
             continue
         fi
         used_entries+="${entry} "
@@ -15804,15 +15805,14 @@ _ci_check_action_node_versions() {
                 if [ -z "${using}" ]; then
                     viol+=("'${v}' has no parseable runs.using")
                 elif [[ "${using}" =~ ^node([0-9]+)$ ]] && [ "${BASH_REMATCH[1]}" -lt "${node_min}" ]; then
-                    viol+=("'${v}' (in: $(_ci_ando_reffiles "${v}")) declares runs.using: ${using}, below node${node_min}")
+                    viol+=("'${v}' (in: $(_ci_action_ref_files "${v}" "${uses_entries[@]}")) declares runs.using: ${using}, below node${node_min}")
                 fi ;;
             NOTFOUND)
-                viol+=("no action.yml/action.yaml for '${v}' at ref '${ref}' (in: $(_ci_ando_reffiles "${v}")); broken pin") ;;
+                viol+=("no action.yml/action.yaml for '${v}' at ref '${ref}' (in: $(_ci_action_ref_files "${v}" "${uses_entries[@]}")); broken pin") ;;
             *)
                 infra+=("${v} (${marker})"$'\n'"${res#*$'\n'}") ;;
         esac
     done
-    unset -f _ci_ando_reffiles
     # What: an unresolved pin fails closed, never clean.
     # Why: an unverified runtime must not pass the gate.
     # From: Issue #1683 | PR #1858
