@@ -2508,7 +2508,7 @@ _ci_impact_classify() {
     if ! bt="$(_ci_required_field "${t}" build_type)" \
         || ! hi="$(_ci_block_entry_list build_identity "${bt}" inputs)" \
         || ! bi="$(CI_MANIFEST="${base_manifest}" _ci_block_entry_list build_identity "${bt}" inputs)"; then
-        ci_log "[CI-INFO-IMPACT-0010]" "service=\"${t}\" platform=\"${p}\" base=\"${base}\" reason=\"identity inputs unreadable (error above); UNKNOWN\""
+        ci_log "[CI-INFO-IMPACT-0018]" "service=\"${t}\" platform=\"${p}\" base=\"${base}\" reason=\"identity inputs unreadable (error above); UNKNOWN\""
         printf 'UNKNOWN\n'; return 0
     fi
     if [ "${hi}" != "${bi}" ]; then
