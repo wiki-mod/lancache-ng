@@ -7049,7 +7049,7 @@ _ci_channel_field() {
 _ci_channels_where() {
     local rows
     rows="$(_ci_channel_field "$1")" || return 2
-    awk -v v="$2" '$2 == v { print $1 }' <<< "${rows}"
+    _ci_capture 0 awk -v v="$2" "\$2 == v { print \$1 }" <<< "${rows}"
 }
 
 # What: Print the SOT's mutable release channels.
@@ -9553,7 +9553,9 @@ _ci_validate_reserve() {
 _ci_validate_project() {
     local repo
     repo="$(_ci_repo)" || return 2
-    printf '%s-validate-%s' "${repo##*/}" "$(printf '%s' "${1}" | tr './' '__')"
+    local name
+    name="$(_ci_capture 0 tr './' '__' <<< "${1}")" || return 2
+    printf '%s-validate-%s' "${repo##*/}" "${name}"
 }
 
 # What: The resolved compose config as JSON.
@@ -13169,7 +13171,8 @@ _ci_rh_set_hostname() {
 _ci_rh_ere() {
     local list
     list="$(_ci_block_entry_list runner_host "" "$1")" || return 2
-    tr '\n' '|' <<< "${list}" | sed 's/|$//'
+    list="$(_ci_capture 0 tr '\n' '|' <<< "${list}")" || return 2
+    _ci_capture 0 sed 's/|$//' <<< "${list}"
 }
 
 # What: the kernel/firmware name parts as one ERE.
