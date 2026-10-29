@@ -3238,15 +3238,20 @@ host_unit_enabled() {
 # Why: systemd and OpenRC share one call per unit action
 # From: Issue #1683 | PR #1858
 host_unit_action() {
-    local unit="$1" action="$2" manager name out rc=0
+    local unit="$1" action="$2" manager name out rc=0 limit
     manager=$(host_service_manager)
+    # What: a start or stop ends after the SOT stop limit
+    # Why: a hung stop held setup.sh update without a word
+    # From: Issue #1683 | PR #1858
+    limit=$(prod_env_default OPENRC_STOP_TIMEOUT_SECONDS) || exit $?
+    limit=$(( limit + 60 ))
     case "$manager" in
-        systemd) out=$(systemctl "$action" "$unit" 2>&1) || rc=$? ;;
+        systemd) out=$(timeout "$limit" systemctl "$action" "$unit" 2>&1) || rc=$? ;;
         openrc)
             name=$(openrc_service_for_unit "$unit")
             [[ -n "$name" ]] || die "No OpenRC service stands for $unit."
             case "$action" in
-                start|stop) out=$(rc-service "$name" "$action" 2>&1) || rc=$? ;;
+                start|stop) out=$(timeout "$limit" rc-service "$name" "$action" 2>&1) || rc=$? ;;
                 enable) out=$(rc-update add "$name" default 2>&1) || rc=$? ;;
                 disable) out=$(rc-update del "$name" default 2>&1) || rc=$? ;;
                 *) die "Unknown service action: $action" ;;
@@ -3254,6 +3259,7 @@ host_unit_action() {
             ;;
         *) die "Neither systemd nor OpenRC runs here; cannot $action $unit." ;;
     esac
+    [[ "$rc" -ne 124 ]] || die "Could not $action $unit within $limit s: $out"
     [[ "$rc" -eq 0 ]] || die "Failed to $action $unit (exit $rc): $out"
 }
 
