@@ -2754,7 +2754,7 @@ _ci_classify_failure() {
             *"denied: "*|*"manifest invalid: "*|*"name invalid: "*|*"unsupported: "*) printf 'permanent\n'; return 0 ;;
         esac
     fi
-    # What: auth/malformed/compile are permanent.
+    # What: auth, malformed, compile, missing ref are permanent.
     # Why: retrying a fixed outcome wastes budget.
     # From: Issue #1683 | PR #1858
     case "${low}" in
@@ -2762,7 +2762,7 @@ _ci_classify_failure() {
         *"http 400"*|*"http 422"*|*"invalid reference format"*) printf 'permanent\n'; return 0 ;;
         *"pull access denied"*) printf 'permanent\n'; return 0 ;;
         *"error: could not compile"*|*"dockerfile parse error"*|*"failed to solve"*"parse"*|*"lint violation found"*) printf 'permanent\n'; return 0 ;;
-        *"couldn't find remote ref"*|*"fatal: repository"*"not found"*) printf 'permanent\n'; return 0 ;;
+        *"couldn't find remote ref"*|*"not our ref"*|*"fatal: repository"*"not found"*) printf 'permanent\n'; return 0 ;;
     esac
     # What: a local image that does not exist is permanent.
     # Why: pushing a missing local tag never heals on retry.
