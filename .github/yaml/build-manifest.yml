@@ -439,6 +439,18 @@ runtime:
     - NATS_NAK_DELAY_MS=100
     - DNS_CONFIRM_PAUSE_MS=100
     - NATS_FETCH_WAIT=5
+    # What: messages per NATS fetch of the DNS subscriber.
+    # Why: bounds a batch; NATS_FETCH_WAIT ends an idle fetch.
+    # From: Issue #1683 | PR #1912
+    - NATS_FETCH_BATCH=10
+    # What: in-process zone confirmation tries before a Nak.
+    # Why: a longer sleep holds the message past ack_wait.
+    # From: Issue #1095
+    - DNS_CONFIRM_TRIES=3
+    # What: deliveries after which a flush no longer waits.
+    # Why: bounds a retry loop that has no max_deliver.
+    # From: Issue #1095
+    - DNS_CONFIRM_MAX_DELIVERIES=100
     - DNS_SYNC_TICK=60
     - PDNS_ZONE_CHECK_TIMEOUT=10
     - DNS_FLUSH_TIMEOUT=3

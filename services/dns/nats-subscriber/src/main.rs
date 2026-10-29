@@ -21,7 +21,7 @@ use futures::future::join_all;
 use lancache_ng::config::{
     DEFAULT_RECORD_TTL, NATS_STREAM_DNS, NATS_SUBJECT_DNS, NATS_SUBJECT_FLUSH, NATS_SUBJECT_RECORD,
     canonical_zone, env_opt, is_dns_name, is_rollback_zone, keep_known_good, lan_zone,
-    local_reverse, need, need_flag, process_env, rollback_zones, zone_url,
+    local_reverse, need, need_flag, process_env, rollback_zones, uint, zone_url,
 };
 use lancache_ng::{
     Backoff, DnsRecord, FlushRequest, PowerDns, SnapshotStore, ct_eq, die, http_client,
@@ -35,19 +35,6 @@ use serde_json::{Value, json};
 // Why: the log shows which service refused to start.
 // From: Issue #1683 | PR #1858
 const TAG: &str = "nats-subscriber";
-// What: messages per fetch.
-// Why: bounds a batch; NATS_FETCH_WAIT ends an idle fetch.
-// From: Issue #1683 | PR #1912
-const FETCH_BATCH: usize = 10;
-// What: in-process confirmation tries before a Nak.
-// Why: a longer sleep holds the message past ack_wait.
-// From: Issue #1095
-const CONFIRM_TRIES: u32 = 3;
-// What: deliveries after which a flush no longer waits.
-// Why: bounds a retry loop that has no max_deliver.
-// From: Issue #1095
-const CONFIRM_MAX_DELIVERIES: i64 = 100;
-
 // What: the subscriber's waits, from the SOT defaults.
 // Why: no wait is a literal; the image bakes each value.
 // From: Issue #1683 | PR #1912
@@ -117,6 +104,14 @@ struct Ctx {
     pdns_auth_url: String,
     pdns_rec_urls: Vec<String>,
     pdns_auth_config_dir: String,
+    // What: in-process confirmation tries before a Nak.
+    // Why: a longer sleep holds the message past ack_wait.
+    // From: Issue #1095
+    confirm_tries: u32,
+    // What: deliveries after which a flush no longer waits.
+    // Why: bounds a retry loop that has no max_deliver.
+    // From: Issue #1095
+    confirm_max_deliveries: i64,
     snapshot_dir: PathBuf,
     snapshot_file: String,
     keep_n: u32,
@@ -150,6 +145,9 @@ impl Ctx {
                 .map(str::to_string)
                 .collect(),
             pdns_auth_config_dir: need(get, "PDNS_AUTH_CONFIG_DIR")?,
+            confirm_tries: uint(get, "DNS_CONFIRM_TRIES", 1, u32::MAX.into())? as u32,
+            confirm_max_deliveries: uint(get, "DNS_CONFIRM_MAX_DELIVERIES", 1, i64::MAX as u64)?
+                as i64,
             snapshot_dir: PathBuf::from(need(get, "DNS_CONFIG_SNAPSHOT_DIR")?),
             snapshot_file: need(get, "DNS_ZONE_SNAPSHOT_FILE")?,
             keep_n: keep_known_good(get)?,
@@ -680,7 +678,7 @@ async fn apply_flush(ctx: &Ctx, msg: &jetstream::Message) -> Outcome {
             return Outcome::Ack;
         }
         let mut confirmed = false;
-        for _ in 0..CONFIRM_TRIES {
+        for _ in 0..ctx.confirm_tries {
             // What: a failed zone read counts unconfirmed.
             // Why: "absent" must not come from an error.
             // From: Issue #1683 | PR #1858
@@ -713,7 +711,7 @@ async fn apply_flush(ctx: &Ctx, msg: &jetstream::Message) -> Outcome {
                     0
                 }
             };
-            if delivered < CONFIRM_MAX_DELIVERIES {
+            if delivered < ctx.confirm_max_deliveries {
                 println!(
                     "Deferring recursor flush for {domain} ({kind}): zone not yet confirmed (delivery {delivered})"
                 );
@@ -1109,6 +1107,11 @@ async fn main() {
         need_flag(&process_env, "NATS_RECORD_WRITES").unwrap_or_else(|e| die(TAG, &e));
     let reconcile = need_flag(&process_env, "NATS_RECONCILER").unwrap_or_else(|e| die(TAG, &e));
     let times = Times::load(&process_env).unwrap_or_else(|error| die(TAG, &error));
+    // What: messages per fetch.
+    // Why: bounds a batch; NATS_FETCH_WAIT ends an idle fetch.
+    // From: Issue #1683 | PR #1912
+    let fetch_batch = uint(&process_env, "NATS_FETCH_BATCH", 1, u32::MAX.into())
+        .unwrap_or_else(|e| die(TAG, &e)) as usize;
     let rollback_addr = required("DNS_ROLLBACK_LISTEN_ADDR");
 
     let mut options = async_nats::ConnectOptions::new()
@@ -1174,7 +1177,7 @@ async fn main() {
     loop {
         let fetched = consumer
             .fetch()
-            .max_messages(FETCH_BATCH)
+            .max_messages(fetch_batch)
             .expires(times.fetch_wait)
             .messages()
             .await;
