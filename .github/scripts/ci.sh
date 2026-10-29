@@ -1955,7 +1955,7 @@ _ci_tracked_listing() {
     # Why: ls-tree ignores globs; diff-tree honours them.
     # From: Issue #1683
     if [ -n "${ref}" ]; then
-        empty="$(printf '' | _ci_identity_git "${root}" "${ref}" hash-object -t tree --stdin)" || return 2
+        empty="$(cd -- "${CI_REPO_ROOT}" && _ci_empty_tree)" || return 2
         raw="$(_ci_identity_git "${root}" "${ref}" diff-tree -r --raw "${empty}" "${ref}" -- "${root}")" || return 2
         listing="$(_ci_capture 0 awk -F'\t' "NF { split(\$1, a, \" \"); print \$2 \"\\t\" a[4] }" <<< "${raw}")" || return 2
     else
@@ -2830,10 +2830,12 @@ _ci_failure_is_network() {
 # GIT-REF CAS (coordination lock; §20/§52)
 # =========================================================
 
-# What: Empty tree object a CAS head points at.
-# Why: A lock head carries a note, not tracked content.
-# From: Issue #1683
-CI_CAS_EMPTY_TREE="4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+# What: object id of the empty tree in the cwd repo.
+# Why: computed, so sha1 and sha256 repos both match.
+# From: Issue #1683 | PR #1858
+_ci_empty_tree() {
+    printf '' | _ci_capture 0 git hash-object -t tree --stdin
+}
 
 # What: Print a ref's remote sha; 1 absent, 2 unknown.
 # Why: A failed query is UNKNOWN, never a free lock.
@@ -2863,9 +2865,11 @@ _ci_git_as_bot() {
 
 # What: Build an empty-tree commit carrying a note.
 # Why: A lock head carries a note, not a real tree.
-# From: Issue #1683
+# From: Issue #1683 | PR #1858
 _ci_cas_note_commit() {
-    _ci_bot_commit "${CI_CAS_EMPTY_TREE}" "" "$1"
+    local tree
+    tree="$(_ci_empty_tree)" || return 2
+    _ci_bot_commit "${tree}" "" "$1"
 }
 
 # What: bot commit of a tree, optional parent, message.
