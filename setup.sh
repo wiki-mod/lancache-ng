@@ -2239,6 +2239,12 @@ migrate_legacy_ca() {
             cp -p -- "$f" "$dest/$to" \
                 || die "Failed to copy $f to $dest/$to (exit $?)."
         fi
+        # What: the serial counter is not compared
+        # Why: the running CA moves it on with each new cert
+        # From: Issue #1683 | PR #1858
+        if [[ "${f##*/}" = ca.srl ]]; then
+            continue
+        fi
         cmp -- "$f" "$dest/$to" \
             || die "Postcondition failed: $dest/$to is not the CA file $f; nothing counts as migrated."
     done
@@ -2278,13 +2284,66 @@ is_quickstart_install() {
     ! is_deploy_prod_install_dir "$dir" && [[ -f "$dir/docker-compose.yml" && -f "$PROD_COMPOSE" ]]
 }
 
+# What: puts back deleted files the old stack bind-mounts
+# Why: a git pull drops them; the old stack must restart
+# From: Issue #1683 | PR #1858
+restore_quickstart_mounts() {
+    local old_dir="$1" old_env="$2" record="$3" json sources src rel commit entry perms empty_dir inside
+    [[ -e "$old_dir/.git" ]] || return 0
+    install_missing_tools jq
+    json=$(stack_compose "$old_dir" "$old_env" config --format json) \
+        || die "Cannot read the compose config of $old_dir (exit $?); nothing was changed."
+    sources=$(jq -r '.services[].volumes[]? | select(.type == "bind") | .source' <<< "$json") \
+        || die "Cannot list the bind mounts of $old_dir (exit $?); nothing was changed."
+    while IFS= read -r src; do
+        [[ "$src" = "$old_dir"/* ]] || continue
+        # What: an empty dir is missing if git had a file
+        # Why: docker makes a missing mount source a dir
+        # From: Issue #1683 | PR #1858
+        empty_dir=0
+        if [[ -d "$src" && ! -L "$src" ]]; then
+            inside=$(find "$src" -mindepth 1 -maxdepth 1 -print -quit) \
+                || die "Failed to list $src (exit $?)."
+            [[ -z "$inside" ]] || continue
+            empty_dir=1
+        elif [[ -e "$src" ]]; then
+            continue
+        fi
+        rel="${src#"$old_dir"/}"
+        # What: first-parent commit on HEAD that dropped it
+        # Why: its parent holds the copy the old stack used
+        # From: Issue #1683 | PR #1858
+        commit=$(git -C "$old_dir" log -1 --format=%H -m --first-parent --diff-filter=D -- "$rel") \
+            || die "Failed to search the git history of $old_dir for $rel (exit $?)."
+        entry=""
+        if [[ -n "$commit" ]]; then
+            entry=$(git -C "$old_dir" ls-tree "${commit}^" -- "$rel") \
+                || die "Failed to read $rel in ${commit}^ (exit $?)."
+        fi
+        if [[ "$entry" != 100*" blob "* ]]; then
+            [[ "$empty_dir" = 0 ]] || continue
+            die "$src is missing and git has no older file copy; restore it, then rerun setup.sh update. Nothing was changed."
+        fi
+        perms=0644
+        [[ "$entry" != 100755* ]] || perms=0755
+        if [[ "$empty_dir" = 1 ]]; then
+            rmdir -- "$src" || die "Failed to remove the empty dir $src (exit $?)."
+        fi
+        mkdir -p "${src%/*}" || die "Failed to create ${src%/*} (exit $?)."
+        git -C "$old_dir" show "${commit}^:$rel" > "$src" || die "Failed to restore $src from git (exit $?)."
+        chmod "$perms" "$src" || die "Failed to set the mode of $src (exit $?)."
+        printf 'restored|%s\n' "$rel" >> "$record" || die "Failed to record $rel in $record (exit $?)."
+        print_ok "Restored $rel for the old stack from git ${commit}^"
+    done <<< "$sources"
+}
+
 # What: converts a quickstart install into deploy/prod
 # Why: AG-KD-008 one profile; AG-OP-007 convergence
 # From: Issue #1683 | PR #1858
 migrate_quickstart_install() (
     local old_dir="$1" stack_dir="${PROD_COMPOSE%/*}" env_local old_env record project key value volume dir copy f
     local services old_volumes prod_volumes rows missing copies keys old_raw new_raw old_value line path_keys bundle
-    local https_ip fresh kept kept_list
+    local https_ip fresh kept kept_list restored
     local -a service_list copy_lines path_key_list=()
     path_keys=$(lancache_sot_list quickstart_path_keys runtime) || exit $?
     path_keys="${path_keys//$'\n'/ }"
@@ -2303,6 +2362,7 @@ migrate_quickstart_install() (
     [[ -n "$https_ip" ]] \
         || die "The install at $old_dir has no second LAN IP (IP_HTTPS or IP_SSL in $old_env). LanCache-NG now needs one for HTTPS DNS and proxy: add a free LAN IP to this host, set IP_HTTPS=<that IP> in $old_env, then rerun setup.sh update. Nothing was changed."
     print_step "Migrating the quickstart install at $old_dir to $stack_dir"
+    restore_quickstart_mounts "$old_dir" "$old_env" "$record"
     # What: convergence paused for the whole migration
     # Why: the timer must not run compose mid-migration
     # From: Issue #1683 | PR #1858
@@ -2434,6 +2494,31 @@ migrate_quickstart_install() (
     while IFS= read -r copy; do
         rm -f "$old_dir/$copy" || die "Failed to remove the quickstart copy $old_dir/$copy."
     done <<< "$bundle"
+    # What: files put back for the old stack go too
+    # Why: only the old stack needed them
+    # From: Issue #1683 | PR #1858
+    restored=$(awk -F'|' '$1 == "restored" { print $2 }' "$record") || die "Failed to read $record (exit $?)."
+    while IFS= read -r copy; do
+        [[ -n "$copy" ]] || continue
+        rm -f "$old_dir/$copy" || die "Failed to remove the restored file $old_dir/$copy."
+    done <<< "$restored"
+    # What: dirs these removals emptied go too
+    # Why: an empty scripts/ dir is a leftover
+    # From: Issue #1683 | PR #1858
+    while IFS= read -r copy; do
+        [[ "$copy" = */* ]] || continue
+        dir="${copy%/*}"
+        while [[ -n "$dir" ]]; do
+            if [[ -d "$old_dir/$dir" ]]; then
+                rmdir --ignore-fail-on-non-empty -- "$old_dir/$dir" || die "Failed to remove $old_dir/$dir (exit $?)."
+            fi
+            if [[ "$dir" = */* ]]; then
+                dir="${dir%/*}"
+            else
+                dir=""
+            fi
+        done
+    done <<< "$bundle"$'\n'"$restored"
     rm -f "$old_dir/docker-compose.yml" "$old_env" || die "Failed to remove the quickstart files in $old_dir."
     trap - EXIT
     resume_lancache_convergence_after_update
