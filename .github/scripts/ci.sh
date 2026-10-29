@@ -16574,10 +16574,10 @@ _ci_validation_env() {
             return 2
         fi
         read -ra cmd <<< "${row}"
-        v="$(_ci_run "[CI-ERROR-VALIDATE-0100]" "key=${k} reason=\"secret not generated\"" "${cmd[@]}")" || return 2
+        v="$(_ci_run "[CI-ERROR-VALIDATE-0141]" "key=${k} reason=\"secret not generated\"" "${cmd[@]}")" || return 2
         v="${v//$'\n'/}"
         if [ -z "${v}" ]; then
-            ci_log "[CI-ERROR-VALIDATE-0100]" "key=\"${k}\" kind=\"${kind}\" reason=\"generator wrote nothing\""
+            ci_log "[CI-ERROR-VALIDATE-0142]" "key=\"${k}\" kind=\"${kind}\" reason=\"generator wrote nothing\""
             return 2
         fi
         body+="${k}=${v}"$'\n'
