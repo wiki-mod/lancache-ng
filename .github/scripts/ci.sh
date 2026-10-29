@@ -11250,7 +11250,13 @@ _ci_set_runtime() {
         _ci_emit_secret "${dir}" ccache_redis_url "${SCCACHE_REDIS_URL:-}" || return "$?"
     fi
     if [[ ",${chain}," == *,gha,* ]]; then
-        local gha="ACTIONS_RESULTS_URL=${ACTIONS_RESULTS_URL}"$'\n'"ACTIONS_RUNTIME_TOKEN=${ACTIONS_RUNTIME_TOKEN}"
+        # What: both runner values via the one env reader.
+        # Why: a bare read stops under set -u with no code.
+        # From: Issue #1683 | PR #1858
+        local gha url tok
+        url="$(_ci_env_required ACTIONS_RESULTS_URL)" || return 2
+        tok="$(_ci_env_required ACTIONS_RUNTIME_TOKEN)" || return 2
+        gha="ACTIONS_RESULTS_URL=${url}"$'\n'"ACTIONS_RUNTIME_TOKEN=${tok}"
         # What: v2 cache flag on github.com and *.ghe.com.
         # Why: container steps never get it; v1 answers 404.
         # From: Issue #1683 | PR #1912
