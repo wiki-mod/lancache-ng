@@ -4063,8 +4063,13 @@ migrate_env_for_update() (
         lancache_image_refs=$(lancache_image_refs_for_tag "$env_file" "$lancache_image_tag") \
             || die "Cannot pin the images of ${lancache_image_tag} for ${env_file}; it stays unchanged (exit $?)."
     fi
-    assert_resolved_image_tag_platform_supported \
-        "$lancache_image_registry" "$lancache_image_prefix" "$lancache_image_tag"
+    # What: a restore skips the registry platform check
+    # Why: pins were checked once; rollback needs no registry
+    # From: Issue #1683 | PR #1858
+    if [[ "$preserve_image_tag" != "1" ]]; then
+        assert_resolved_image_tag_platform_supported \
+            "$lancache_image_registry" "$lancache_image_prefix" "$lancache_image_tag"
+    fi
     set_env_key_if_empty_or_missing LANCACHE_IMAGE_REGISTRY "$lancache_image_registry" "$env_file"
     set_env_key_if_empty_or_missing LANCACHE_IMAGE_PREFIX "$lancache_image_prefix" "$env_file"
     set_env_key_if_empty_or_missing LANCACHE_IMAGE_CHANNEL "$lancache_image_channel" "$env_file"
@@ -4995,7 +5000,10 @@ cmd_restore() (
     # Why: a die must not skip the stack_stopped reset
     # From: Issue #1683 | PR #1858
     if ! (
-        migrate_env_for_update "$install_dir" 1
+        # What: each step's failure ends the subshell
+        # Why: inside "if !" errexit is off; a failure went on
+        # From: Issue #1683 | PR #1858
+        migrate_env_for_update "$install_dir" 1 || exit $?
         if compose_stack_available "$install_dir"; then
             validate_compose_config "$install_dir"
         else
