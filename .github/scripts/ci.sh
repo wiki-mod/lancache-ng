@@ -1189,6 +1189,11 @@ _ci_github_get() {
         | _ci_download_curl --fail-with-body -sSL -H 'Accept: application/vnd.github+json' -H @- "$1" 2>&1
 }
 
+# What: names a memo that only this ci.sh call may read.
+# Why: RUNNER_TEMP spans the job; a step may change it.
+# From: Issue #1683 | PR #1858
+_CI_CALL_KEY="$$-${EPOCHREALTIME/./}"
+
 # What: print memo $1 of this job; 1 when there is none.
 # Why: one RUNNER_TEMP memo owner; GitHub clears it.
 # From: Issue #1683 | PR #1858
@@ -2351,7 +2356,16 @@ _ci_target_plain_paths() {
 # Why: one reader for build id, impact and test identity.
 # From: Issue #1683 | PR #1912
 _ci_identity_content() {
-    local service="$1" ref="${2:-}" mode="${3-build}" paths p part buf="" type ctx
+    local service="$1" ref="${2:-}" mode="${3-build}" paths p part buf="" type ctx memo
+    # What: one call reads a target's content once per ref.
+    # Why: plan read it per platform, 2-3 s each (Fund 94).
+    # From: Issue #1683 | PR #1858
+    memo="content-${_CI_CALL_KEY}-${service}-${ref:-tree}-${mode:-none}"
+    if buf="$(_ci_job_memo_get "${memo//\//-}")"; then
+        printf '%s\n' "${buf}"
+        return 0
+    fi
+    buf=""
     paths="$(_ci_target_plain_paths "${service}")" || return 2
     type="$(_ci_required_field "${service}" build_type)" || return 2
     ctx="$(_ci_required_field "${service}" context)" || return 2
@@ -2367,6 +2381,7 @@ _ci_identity_content() {
         part="$(_ci_rust_content "${service}" "${ref}")" || return 2
         buf+="${part}"$'\n'
     fi
+    _ci_job_memo_put "${memo//\//-}" "${buf}" || return 2
     printf '%s' "${buf}"
 }
 
@@ -3412,10 +3427,18 @@ _ci_ledger_blob() {
     # From: Issue #1683 | PR #1858
     ledger_ref="$(_ci_variable "${2:-CI_LEDGER_REF}")" || return 2
     file="$(_ci_variable "${3:-CI_LEDGER_FILE}")" || return 2
-    local sha memo blob
-    sha="$(_ci_cas_ref_sha "${remote}" "${ledger_ref}")" || rc=$?
-    [ "${rc}" -eq 1 ] && return 1
-    [ "${rc}" -eq 0 ] || return 2
+    local sha memo blob state
+    # What: this call asks the remote for a ref state once.
+    # Why: plan asked 24 times, 0.5-0.8 s each (Fund 94).
+    # From: Issue #1683 | PR #1858
+    state="state-${_CI_CALL_KEY}-${ledger_ref//\//-}"
+    if [ "${4:-}" = fetch ] || ! sha="$(_ci_job_memo_get "${state}")"; then
+        sha="$(_ci_cas_ref_sha "${remote}" "${ledger_ref}")" || rc=$?
+        [ "${rc}" -le 1 ] || return 2
+        [ "${rc}" -eq 0 ] || sha=absent
+        _ci_job_memo_put "${state}" "${sha}" || return 2
+    fi
+    [ "${sha}" != absent ] || return 1
     printf '%s\n' "${sha}" >&2
     # What: a state read before in this job is not fetched.
     # Why: plan read one state 30 times per run (DoMe).
@@ -3525,6 +3548,10 @@ PROG
     rc=0; raw="$(_ci_cas_push "${remote}" "${ledger_ref}" "${commitsha}" "${parent}")" || rc=$?
     if [ "${rc}" -eq 0 ]; then
         ci_log "[CI-INFO-LEDGER-0004]" "ref=\"${ledger_ref}\" commit=\"${commitsha}\" parent=\"${parent:-none}\" records=$(wc -l <<< "${merged}") reason=\"ledger written\""
+        # What: a later read of this call sees the write.
+        # Why: the reader keeps one ref state per call.
+        # From: Issue #1683 | PR #1858
+        _ci_job_memo_put "state-${_CI_CALL_KEY}-${ledger_ref//\//-}" "${commitsha}" || return 3
         return 0
     fi
     _ci_cas_push_failed ledger "${ledger_ref}" "${rc}" "${raw}"
