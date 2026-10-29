@@ -2279,6 +2279,7 @@ is_quickstart_install() {
 migrate_quickstart_install() (
     local old_dir="$1" stack_dir="${PROD_COMPOSE%/*}" env_local old_env record project key value volume dir copy f
     local services old_volumes prod_volumes rows missing copies keys old_raw new_raw old_value line path_keys bundle
+    local https_ip
     local -a service_list copy_lines path_key_list=()
     path_keys=$(lancache_sot_list quickstart_path_keys runtime) || exit $?
     path_keys="${path_keys//$'\n'/ }"
@@ -2288,6 +2289,14 @@ migrate_quickstart_install() (
     old_env="$old_dir/.env"
     record="$old_dir/.quickstart-migration"
     [[ -f "$old_env" ]] || die "Cannot migrate $old_dir: $old_env is missing."
+    # What: a one-IP quickstart stops before any change
+    # Why: prod always binds a second LAN IP (IP_HTTPS)
+    # From: Issue #1683 | PR #1858
+    https_ip=$(get_env_var IP_HTTPS "$old_env") || die "Cannot read IP_HTTPS from $old_env (exit $?)."
+    [[ -n "$https_ip" ]] || https_ip=$(get_env_var IP_SSL "$old_env") \
+        || die "Cannot read IP_SSL from $old_env (exit $?)."
+    [[ -n "$https_ip" ]] \
+        || die "The install at $old_dir has no second LAN IP (IP_HTTPS or IP_SSL in $old_env). LanCache-NG now needs one for HTTPS DNS and proxy: add a free LAN IP to this host, set IP_HTTPS=<that IP> in $old_env, then rerun setup.sh update. Nothing was changed."
     print_step "Migrating the quickstart install at $old_dir to $stack_dir"
     # What: convergence paused for the whole migration
     # Why: the timer must not run compose mid-migration
