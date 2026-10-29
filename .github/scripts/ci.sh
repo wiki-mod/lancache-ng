@@ -6061,13 +6061,22 @@ _ci_toolchain_entry() {
     printf '%s\t%s\n' "${key}" "${val}"
 }
 
+# What: P: name and V: version of an apk db record.
+# Why: one reader; each program defines pv(name, version).
+# From: Issue #1683 | PR #1858
+_CI_AWK_APK_PV="$(cat <<'PROG'
+/^P:/ { p = substr($0, 3); next }
+/^V:/ { pv(p, substr($0, 3)); next }
+PROG
+)"
+readonly _CI_AWK_APK_PV
+
 # What: apk packages reached from roots in an installed db.
 # Why: a D: entry names a package, a p: provide or a file.
 # From: Issue #1683 | PR #1858
-_CI_AWK_APK_CLOSURE="$(cat <<'PROG'
+_CI_AWK_APK_CLOSURE="${_CI_AWK_APK_PV}"$'\n'"$(cat <<'PROG'
+function pv(n, v) { pkg[n] = 1; ver[n] = v }
 function bare(t) { sub(/[<>=~].*$/, "", t); return t }
-/^P:/ { p = substr($0, 3); pkg[p] = 1; next }
-/^V:/ { ver[p] = substr($0, 3); next }
 /^D:/ { dep[p] = substr($0, 3); next }
 /^p:/ { k = split(substr($0, 3), a, " "); for (i = 1; i <= k; i++) own[bare(a[i])] = p; next }
 /^F:/ { dir = substr($0, 3); next }
@@ -6130,11 +6139,13 @@ _ci_apk_outdated() {
 _ci_apk_newer() {
     local pairs name have cand order
     # What: P: then V: per record, in both file formats.
-    # Why: one parser for the installed db and the index.
+    # Why: the one P:/V: reader for the db and the index.
     # From: Issue #1683 | PR #1858
-    pairs="$(awk 'FNR == 1 { file++ } /^P:/ { p = substr($0, 3) } /^V:/ { v = substr($0, 3)
-        if (file == 1) have[p] = v
-        else if ((p in have) && v != have[p]) print p "\t" have[p] "\t" v }' "$1" "$2")"
+    pairs="$(_ci_capture 0 awk 'function pv(n, v) {
+        if (file == 1) have[n] = v
+        else if ((n in have) && v != have[n]) print n "\t" have[n] "\t" v }
+        FNR == 1 { file++ }
+        '"${_CI_AWK_APK_PV}" "$1" "$2")" || return 2
     while IFS=$'\t' read -r name have cand; do
         [ -n "${name}" ] || continue
         order="$(_ci_capture 0 apk version -t "${have}" "${cand}")" || return 2
