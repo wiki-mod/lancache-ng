@@ -16524,8 +16524,8 @@ _ci_validation_images() {
 # Why: one owner for check and validate; $1 = state root.
 # From: Issue #1683 | PR #1858
 _ci_validation_env() {
-    local fx kind owner secrets k v n=0 rows state body=""
-    local -a pairs=()
+    local fx kind owner secrets gens gen rest row k v i n=0 rows state body=""
+    local -a pairs=() cmd=()
     fx="$(_ci_block_entry_list validation "" compose_validation_env)" || return 2
     if [ -z "${fx}" ]; then
         ci_log "[CI-ERROR-VALIDATE-0054]" "reason=\"no SOT validation.compose_validation_env\""
@@ -16556,24 +16556,32 @@ _ci_validation_env() {
         pairs+=("${k}" "${kind}")
         n=$((n + 1))
     done <<< "${secrets}"
-    # What: one setup.sh load makes every secret.
-    # Why: a load per key cost 10 loads per env.
-    # From: Issue #1683 | PR #1912
     if [ "${n}" -eq 0 ]; then
         ci_log "[CI-ERROR-VALIDATE-0101]" "reason=\"no SOT runtime.managed_secrets stack or secondary row\""
         return 2
     fi
-    v="$(_ci_run "[CI-ERROR-VALIDATE-0100]" "keys=${n} reason=\"secret not generated\"" \
-        bash -c "$(cat <<'PROG'
-source "$1" || exit 2; shift
-            while [ "$#" -gt 1 ]; do
-                v="$(generate_secret_value "$1" "$2")" || exit 2
-                printf "%s=%s\n" "$1" "${v}"
-                shift 2
-            done
-PROG
-            )" _ "${CI_REPO_ROOT}/setup.sh" "${pairs[@]}")" || return 2
-    body+="${v}"
+    # What: each kind runs its SOT generator command.
+    # Why: SOT secret_generators; no setup.sh load.
+    # From: Issue #1683 | PR #1858
+    gens="$(_ci_required_field runtime secret_generators blocklist)" || return 2
+    for ((i = 0; i < ${#pairs[@]}; i += 2)); do
+        k="${pairs[i]}" kind="${pairs[i + 1]}" row=""
+        while read -r gen rest; do
+            [ "${gen}" != "${kind}" ] || { row="${rest}"; break; }
+        done <<< "${gens}"
+        if [ -z "${row}" ]; then
+            ci_log "[CI-ERROR-VALIDATE-0100]" "key=\"${k}\" kind=\"${kind}\" reason=\"no SOT runtime.secret_generators row\""
+            return 2
+        fi
+        read -ra cmd <<< "${row}"
+        v="$(_ci_run "[CI-ERROR-VALIDATE-0100]" "key=${k} reason=\"secret not generated\"" "${cmd[@]}")" || return 2
+        v="${v//$'\n'/}"
+        if [ -z "${v}" ]; then
+            ci_log "[CI-ERROR-VALIDATE-0100]" "key=\"${k}\" kind=\"${kind}\" reason=\"generator wrote nothing\""
+            return 2
+        fi
+        body+="${k}=${v}"$'\n'
+    done
     # What: setup.sh compose adds the SOT_ and state rows.
     # Why: per-run state overrides its SOT default.
     # From: Issue #1683 | PR #1951

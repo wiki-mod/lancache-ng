@@ -553,6 +553,10 @@ runtime:
     - SETUP_HEALTH_BASELINE_SAMPLES=3
     - SETUP_HEALTH_BASELINE_INTERVAL_SECONDS=2
     - SETUP_DNS_PROBE_NAME=content1.steampowered.com
+    # What: repo path of the CDN list a secondary copies.
+    # Why: the secondary compose mounts it from its dir.
+    # From: Issue #1683 | PR #1858
+    - SETUP_CDN_DOMAINS_REPO_FILE=services/dns/cdn-domains.txt
     # What: host service paths for systemd and OpenRC.
     # Why: setup.sh reads them here; no path in its code.
     # From: Issue #1683 | PR #1858
@@ -757,6 +761,12 @@ runtime:
     - NATS_PASSWORD hex32 secondary
     - UI_AUTH_PASSWORD alnum20 ui
     - UI_AUTH_PASSWORD_HASH argon2id ui
+  # What: "kind command" that makes one secret kind.
+  # Why: setup.sh and ci.sh run it; no generator copy.
+  # From: Issue #1683 | PR #1858
+  secret_generators:
+    - hex32 openssl rand -hex 32
+    - base64_32 openssl rand -base64 32
   # What: .env keys of a current_dev quickstart install.
   # Why: update turns their relative paths absolute.
   # From: Issue #1683 | PR #1912

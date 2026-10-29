@@ -147,8 +147,15 @@ ask() {
         wizard_introspect_record_prompt "$prompt" "$default"
         return
     fi
+    local tty_fd
+    # What: no terminal stops setup.sh with a clear error
+    # Why: a failed tty read took the default silently
+    # From: Issue #1683 | PR #1858
+    { exec {tty_fd}< /dev/tty; } 2>&- \
+        || die "setup.sh needs a terminal to ask '$prompt'; run it in an interactive shell (for SSH: ssh -t)."
     printf '  %s%s%s [%s]: ' "${BOLD}" "$prompt" "${RESET}" "$default"
-    read -r REPLY < /dev/tty
+    read -r REPLY <&"$tty_fd"
+    exec {tty_fd}<&-
     REPLY="${REPLY:-$default}"
 }
 
@@ -1529,6 +1536,21 @@ env_key_has_usable_secret() {
     ! secret_value_is_placeholder "$value"
 }
 
+# What: output of one SOT generator command, one line
+# Why: runtime.secret_generators; ci.sh runs the same row
+# From: Issue #1683 | PR #1858
+secret_generator_output() {
+    local name="$1" kind="$2" rows row value
+    local -a cmd
+    rows=$(lancache_sot_list secret_generators runtime) || exit $?
+    row=$(awk -v k="$kind" '$1 == k { print; exit }' <<< "$rows") \
+        || die "Failed to read the generator of $kind (exit $?)."
+    [[ -n "$row" ]] || die "Unknown secret generator for $name: $kind"
+    read -ra cmd <<< "${row#"$kind "}"
+    value=$("${cmd[@]}") || die "Failed to generate $name with ${cmd[0]} (exit $?)."
+    printf '%s\n' "${value//$'\n'/}"
+}
+
 # What: generate_secret_value fails on any generator error
 # Why: an empty secret must never be written
 # From: Issue #1683 | PR #1858
@@ -1542,27 +1564,20 @@ generate_secret_value() {
         || die "Secret $name is not in managed_secret_env_keys; add it there so log bundles redact it."
 
     case "$kind" in
-        hex32)
-            value=$(openssl rand -hex 32) \
-                || die "Failed to generate $name with openssl."
-            ;;
-        base64_32)
-            value=$(openssl rand -base64 32) \
-                || die "Failed to generate $name with openssl."
-            value="${value//$'\n'/}"
-            ;;
         alnum20)
+            # What: alnum20: letters, digits of base64_32
+            # Why: a UI password a person can type
+            # From: Issue #1683 | PR #1858
             value=""
             while (( ${#value} < 20 )); do
-                chunk=$(openssl rand -base64 32) \
-                    || die "Failed to generate $name with openssl."
+                chunk=$(secret_generator_output "$name" base64_32) || exit $?
                 chunk="${chunk//[^A-Za-z0-9]/}"
                 value+="$chunk"
             done
             value="${value:0:20}"
             ;;
         *)
-            die "Unknown secret generator for $name: $kind"
+            value=$(secret_generator_output "$name" "$kind") || exit $?
             ;;
     esac
 
@@ -2264,9 +2279,10 @@ is_quickstart_install() {
 migrate_quickstart_install() (
     local old_dir="$1" stack_dir="${PROD_COMPOSE%/*}" env_local old_env record project key value volume dir copy f
     local services old_volumes prod_volumes rows missing copies keys old_raw new_raw old_value line path_keys bundle
-    local -a service_list copy_lines
+    local -a service_list copy_lines path_key_list=()
     path_keys=$(lancache_sot_list quickstart_path_keys runtime) || exit $?
     path_keys="${path_keys//$'\n'/ }"
+    read -ra path_key_list <<< "$path_keys"
     bundle=$(lancache_sot_list quickstart_bundle_copies runtime) || exit $?
     env_local="$stack_dir/.env.local"
     old_env="$old_dir/.env"
@@ -2299,7 +2315,7 @@ migrate_quickstart_install() (
     # What: relative paths become absolute to old dir
     # Why: prod resolves them against deploy/prod instead
     # From: Issue #1683 | PR #1858
-    for key in $path_keys; do
+    for key in "${path_key_list[@]}"; do
         value=$(get_env_var "$key" "$env_local") || die "Cannot read $key from $env_local (exit $?)."
         [[ -n "$value" && "$value" != /* ]] || continue
         set_env_key "$key" "$(realpath -m "$old_dir/$value")" "$env_local"
@@ -2810,14 +2826,20 @@ runtime_default_in() {
 # From: Issue #1683 | PR #1912
 sot_compose_env() {
     local env_file="${1:-}" state="${2:-}" keys key value list dir
+    local -a words=()
     keys=$(lancache_sot_value compose_keys runtime) || exit $?
     list=$(runtime_defaults_list) || exit $?
-    for key in $keys; do
+    # What: key lists split by read -a, no glob
+    # Why: an unquoted loop word would expand * or ?
+    # From: Issue #1683 | PR #1858
+    read -ra words <<< "${keys//$'\n'/ }"
+    for key in "${words[@]}"; do
         value=$(runtime_default_in "$list" "$key") || exit $?
         printf 'SOT_%s=%s\n' "$key" "$value"
     done
     keys=$(prod_state_keys) || exit $?
-    for key in $keys; do
+    read -ra words <<< "${keys//$'\n'/ }"
+    for key in "${words[@]}"; do
         dir=$(prod_state_dir_for_key "$key" "$env_file" "$state") || exit $?
         printf '%s=%s\n' "$key" "$dir"
     done
@@ -2886,6 +2908,25 @@ adopt_moved_config_prod_keys() {
         [[ "$raw" == "$current" ]] \
             || die "$key=$raw in $local_env differs from $target=$current in $env_file; both must be the same address. Set $target, remove $key from $local_env, then rerun setup.sh update."
     done <<< "$rows"
+    [[ "$step" = drop ]] || return 0
+    # What: an emptied legacy <svc>.local.env is deleted
+    # Why: AG-SETUP-001: config/prod files must be deleted
+    # From: Issue #1683 | PR #1858
+    local dir="$repo_root/config/prod" file left rest
+    [[ -d "$dir" ]] || return 0
+    for file in "$dir"/*.local.env; do
+        [[ -f "$file" ]] || continue
+        left=$(awk -F= '/^[A-Za-z_][A-Za-z0-9_]*=/ { print $1 }' "$file") \
+            || die "Failed to list the keys of $file (exit $?)."
+        if [[ -n "$left" ]]; then
+            print_warn "Kept ${file##*/}: it still sets ${left//$'\n'/, }, which no container reads. Move them into ${env_file##*/} or delete the file."
+            continue
+        fi
+        rm -f -- "$file" || die "Failed to delete $file (exit $?)."
+        print_ok "Deleted the emptied legacy file ${file##*/}"
+    done
+    rest=$(find "$dir" -mindepth 1 -print -quit) || die "Failed to list $dir (exit $?)."
+    [[ -n "$rest" ]] || rmdir -- "$dir" || die "Failed to delete the empty $dir (exit $?)."
 }
 
 # What: template edits move into <x>.local.env, newest wins
@@ -3927,6 +3968,7 @@ migrate_env_for_update() (
     local state_dir ui_session_ttl
     local legacy_cache_http legacy_cache_https existing_image_tag
     local required_keys required_key required_value
+    local -a required_key_list=()
     local lancache_image_registry lancache_image_prefix lancache_image_channel lancache_image_tag
     env_file=$(runtime_env_file_for_install_dir "$install_dir")
 
@@ -4266,7 +4308,8 @@ migrate_env_for_update() (
     # Why: an empty required key breaks the stack at up
     # From: Issue #1683 | PR #1912
     required_keys=$(lancache_sot_value setup_required_repairs validation) || exit $?
-    for required_key in $required_keys; do
+    read -ra required_key_list <<< "${required_keys//$'\n'/ }"
+    for required_key in "${required_key_list[@]}"; do
         required_value=$(get_env_var "$required_key" "$env_file") || exit $?
         [[ -n "$required_value" ]] \
             || die "Required key $required_key is still empty in $env_file after the update."
@@ -5690,11 +5733,16 @@ update_repo_and_resume() {
 # From: Issue #1683 | PR #1858
 update_resume_handoff() {
     local pair
+    local -a pairs=()
     [[ -n "${CONVERGENCE_TIMER_WAS_ACTIVE:-}" && -n "${CONVERGENCE_TIMER_WAS_ENABLED:-}" \
         && -n "${CONVERGENCE_SERVICE_WAS_ACTIVE:-}" && -n "${LANCACHE_UPDATE_REPO:-}" ]] \
         || die "LANCACHE_UPDATE_RESUMED is set without the state of the paused update; rerun setup.sh update without it."
     _UPDATE_HEALTH_BASELINE=()
-    for pair in ${LANCACHE_UPDATE_BASELINE:-}; do
+    # What: read -a splits the pairs without glob expansion
+    # Why: an unquoted loop word would expand * or ?
+    # From: Issue #1683 | PR #1858
+    read -ra pairs <<< "${LANCACHE_UPDATE_BASELINE:-}"
+    for pair in "${pairs[@]}"; do
         _UPDATE_HEALTH_BASELINE["${pair%%=*}"]="${pair#*=}"
     done
     print_ok "Continuing the update with $LANCACHE_UPDATE_REPO/setup.sh"
@@ -5768,8 +5816,17 @@ perform_stack_update_flow() {
     validate_compose_config "$install_dir"
 
     print_step "Pulling selected images"
-    stack_compose "$install_dir" "$_UPDATE_ENV_FILE" pull \
-        || die "Failed to pull required container images. Check network access and GHCR authentication, then rerun setup.sh update."
+    if ! stack_compose "$install_dir" "$_UPDATE_ENV_FILE" pull; then
+        # What: a failed pull restores code and .env
+        # Why: new code with an old stack would mix
+        # From: Issue #1683 | PR #1858
+        trap - EXIT
+        UPDATE_CONVERGENCE_COMPLETED=1
+        rollback_stack_update "$install_dir" \
+            || die_convergence_kept_paused "Pulling the images failed, and the rollback to the pre-update backup failed too."
+        resume_lancache_convergence_after_update
+        die "Failed to pull required container images; the update was rolled back. Check network access and GHCR authentication, then rerun setup.sh update."
+    fi
 
     ensure_ui_password_hash "$install_dir" "$_UPDATE_ENV_FILE"
     validate_compose_config "$install_dir"
@@ -6658,7 +6715,7 @@ compose_config_value() {
 }
 
 # What: one Kea Control Agent command, as the UI sends it
-# Why: the one sender; setup.sh and ci.sh share it
+# Why: the one sender in setup.sh; the UI sends the same
 # From: Issue #1683 | PR #1858
 kea_ctrl_send() {
     local kea_ctrl_url="$1" kea_ctrl_user="$2" kea_ctrl_token="$3" body="$4"
@@ -7439,6 +7496,12 @@ cmd_secondary() {
     # Why: a fetch failure must not follow a registration
     # From: Issue #1683 | PR #1858
     secondary_compose=$(lancache_repo_file_text deploy/secondary/docker-compose.yml) || exit $?
+    # What: the CDN list of the same ref as the compose
+    # Why: the secondary dns mounts it; missing = broken
+    # From: Issue #1683 | PR #1858
+    local cdn_file cdn_domains
+    cdn_file=$(prod_env_default SETUP_CDN_DOMAINS_REPO_FILE) || exit $?
+    cdn_domains=$(lancache_repo_file_text "$cdn_file") || exit $?
 
     secondary_dir="${name}"
     if [[ "$rotate" -eq 1 ]]; then
@@ -7667,6 +7730,8 @@ cmd_secondary() {
 
     write_file_atomically "${secondary_dir}/docker-compose.yml" <<< "$secondary_compose" \
         || die "Failed to write ${secondary_dir}/docker-compose.yml (exit $?)."
+    write_file_atomically "${secondary_dir}/${cdn_file##*/}" <<< "$cdn_domains" \
+        || die "Failed to write ${secondary_dir}/${cdn_file##*/} (exit $?)."
 
     secondary_env_file="$(realpath -m "${secondary_dir}/.env")"
 
@@ -7719,13 +7784,6 @@ LANCACHE_SOT_TEXT=$(lancache_repo_file_text "$LANCACHE_SOT") || exit $?
 # Why: one owner; setup.sh and CI name the same file
 # From: Issue #1683 | PR #1858
 PROD_COMPOSE="$SCRIPT_DIR/$(lancache_sot_value compose_file runtime)" || exit $?
-
-# What: a sourced setup.sh stops here: functions, no run
-# Why: tests load every function from the real file
-# From: Issue #1683 | PR #1858
-if [[ -n "${BASH_SOURCE[0]:-}" && "${BASH_SOURCE[0]}" != "$0" ]]; then
-    return 0
-fi
 
 # What: runs the subcommand named in the first argument
 # Why: the install flow below runs only for install
