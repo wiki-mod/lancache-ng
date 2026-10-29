@@ -382,8 +382,8 @@ record changes, or subscribes to read cache/DNS metadata.
   documented gap.** The DB-level revocation above only ever took effect on a
   secondary's *next reconnect* — a secondary already holding its streaming
   NATS connection open at the moment it was removed/rotated kept using its
-  already-issued user JWT (90-day TTL, `USER_JWT_TTL_SECS` in
-  `services/ui/src/main.rs`) until it happened to reconnect on its own. Both
+  already-issued user JWT (`NATS_USER_JWT_TTL_SECONDS`, 90 days, in
+  `.github/yaml/build-manifest.yml`) until it happened to reconnect on its own. Both
   `remove_secondary` and `rotate_token` (`services/ui/src/main.rs`) now additionally force-disconnect that secondary's current
   live connection immediately after committing the DB write, via
   `services/ui/src/main.rs` (NATS's `$SYS.REQ.SERVER.*` system-services

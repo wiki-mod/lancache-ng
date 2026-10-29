@@ -186,6 +186,10 @@ struct Config {
     auth_password_hash: Option<String>,
     allow_insecure_ui: bool,
     ui_session_ttl_seconds: u64,
+    // What: lifetime of an issued user JWT, seconds.
+    // Why: revocation is the per-connect DB check, not expiry.
+    // From: Issue #1683 | PR #1858
+    nats_user_jwt_ttl_secs: i64,
     watchdog_miss_limit: u32,
     security_headers_enabled: bool,
     hsts_mode: HstsMode,
@@ -454,6 +458,11 @@ impl Config {
                 .transpose()?,
             allow_insecure_ui: need_flag("ALLOW_INSECURE_UI")?,
             ui_session_ttl_seconds: ttl,
+            nats_user_jwt_ttl_secs: knob(
+                "NATS_USER_JWT_TTL_SECONDS",
+                i64::MAX as u64,
+                OutOfRange::Reject,
+            )? as i64,
             // What: missed watchdog cycles before stale.
             // Why: one owner with the restart rule.
             // From: Issue #1683 | PR #1912
@@ -2559,11 +2568,6 @@ async fn probe_secondary_soa(any: &str, addr: Ipv4Addr, port: u16, lan_zone: &st
 // From: Issue #1683 | PR #1858
 const TARGET_ACCOUNT: &str = "$G";
 
-// What: lifetime of an issued user JWT.
-// Why: revocation is the per-connect DB check, not expiry.
-// From: Issue #1683 | PR #1858
-const USER_JWT_TTL_SECS: i64 = 90 * 24 * 60 * 60;
-
 // What: sleep, then take the next Backoff delay.
 // Why: one backoff step for every NATS retry loop.
 // From: Issue #849 | PR #1912
@@ -2747,6 +2751,7 @@ fn auth_callout_response(
     server_id: &str,
     user_nkey: &str,
     authorized: Option<&str>,
+    ttl_secs: i64,
 ) -> Result<String, String> {
     let now = unix_secs() as i64;
     // What: refuse to sign with a clock at the epoch.
@@ -2764,7 +2769,7 @@ fn auth_callout_response(
                     "aud": TARGET_ACCOUNT,
                     "name": name,
                     "iat": now,
-                    "exp": now + USER_JWT_TTL_SECS,
+                    "exp": now + ttl_secs,
                     "nats": {
                         "pub": {"allow": dns_reader_publish()},
                         "sub": {"allow": dns_subscribe()},
@@ -2837,6 +2842,7 @@ async fn answer_auth_callout(
         &field(&nats["server_id"]["id"]),
         &field(&nats["user_nkey"]),
         authorized.as_deref(),
+        state.config.nats_user_jwt_ttl_secs,
     )?;
     let payload = match &sender {
         Some(sender) => xkey
