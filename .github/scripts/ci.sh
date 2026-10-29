@@ -5002,9 +5002,9 @@ _ci_sccache_count() {
 _ci_sccache_report() {
     local stats req hits miss errs="" label n
     stats="$(_ci_run "[CI-ERROR-CACHE-0012]" "reason=\"sccache stats not readable\"" sccache --show-stats)" || return 2
-    req="$(_ci_sccache_count "Compile requests" "${stats}")"
-    hits="$(_ci_sccache_count "Cache hits" "${stats}")"
-    miss="$(_ci_sccache_count "Cache misses" "${stats}")"
+    req="$(_ci_sccache_count "Compile requests" "${stats}")" || return 2
+    hits="$(_ci_sccache_count "Cache hits" "${stats}")" || return 2
+    miss="$(_ci_sccache_count "Cache misses" "${stats}")" || return 2
     # What: the full stats follow the counts as raw.
     # Why: hits=0 needs the error and non-cacheable rows.
     # From: Issue #1683 | PR #1912
@@ -5021,7 +5021,7 @@ _ci_sccache_report() {
     # Why: sccache turns each into a miss and compiles.
     # From: Issue #1683 | PR #1912
     for label in "Cache errors" "Cache read errors" "Cache timeouts"; do
-        n="$(_ci_sccache_count "${label}" "${stats}")"
+        n="$(_ci_sccache_count "${label}" "${stats}")" || return 2
         [ "${n}" = 0 ] || errs+=" ${label// /_}=${n:-none}"
     done
     # What: write errors by their cause in the server log.
@@ -5030,7 +5030,7 @@ _ci_sccache_report() {
     local log wr wlog wex=0 wrl=0 chk cause
     local ok='Error executing cache write: (AlreadyExists \(permanent\)|RateLimited \(temporary\))'
     log="$(_ci_sccache_log)"
-    wr="$(_ci_sccache_count "Cache write errors" "${stats}")"
+    wr="$(_ci_sccache_count "Cache write errors" "${stats}")" || return 2
     if [ "${wr}" != 0 ]; then
         wlog="$(_ci_capture 1 grep -c 'Error executing cache write:' "${log}")" || return 2
         wex="$(_ci_capture 1 grep -c 'Error executing cache write: AlreadyExists (permanent)' "${log}")" || return 2
@@ -6831,7 +6831,7 @@ _ci_index_lookup() {
         [ "${grc}" -eq 0 ] || return "${grc}"
         plats="$(_ci_index_children "${tag}")" || return "$?"
         plats="$(_ci_capture 0 tr '\n' ' ' <<< "${plats}")" || return 2
-        have="$(_ci_normalize_platform_digests "${plats}")"
+        have="$(_ci_normalize_platform_digests "${plats}")" || return 2
         if [ "${have}" = "${want}" ]; then
             printf '%s %s\n' "${idx}" "${plats% }"
             return 0
@@ -6910,7 +6910,7 @@ _ci_reconcile_index() {
             ;;
     esac
     ex_digest="${existing%% *}"
-    ex_have="$(_ci_normalize_platform_digests "${existing#* }")"
+    ex_have="$(_ci_normalize_platform_digests "${existing#* }")" || return 2
     if [ "${want}" = "${ex_have}" ]; then
         printf '%s\n' "${ex_digest}"
         return 0
@@ -6957,7 +6957,7 @@ ci_cmd_assemble() {
     [ -n "${service}" ] || { ci_log "[CI-ERROR-ASSEMBLE-0001]" "reason=\"service arg required\""; return 2; }
     local inputs want count reused index
     inputs="$(_ci_collect_accepted_digests "${service}")" || return "$?"
-    want="$(_ci_normalize_platform_digests "${inputs}")"
+    want="$(_ci_normalize_platform_digests "${inputs}")" || return 2
     local -a input_list=()
     [ -z "${inputs}" ] || mapfile -t input_list <<< "${inputs}"
     count="$(_ci_capture 0 awk '/=/ {n++} END {print n+0}' <<< "${inputs}")" || return 2
@@ -7238,7 +7238,7 @@ _ci_stack_candidate_rows() {
 _ci_candidate_index() {
     local service="$1" inputs want idx
     inputs="$(_ci_collect_accepted_digests "${service}")" || return "$?"
-    want="$(_ci_normalize_platform_digests "${inputs}")"
+    want="$(_ci_normalize_platform_digests "${inputs}")" || return 2
     idx="$(_ci_reconcile_index "${service}" "${want}")" || return "$?"
     if [ -z "${idx}" ]; then
         ci_error "[CI-ERROR-CANDIDATE-0001]" "service=\"${service}\" reason=\"platforms accepted but no assembled multi-arch index; not candidate-ready\"" "accepted=${inputs}"
@@ -7423,8 +7423,8 @@ _ci_channel_matches() {
     name="$(_ci_image_ref "${svc}")" || return 2
     want="$(_ci_index_children "${name}@${digest}")" || return 2
     seen="$(_ci_index_children "${name}:${channel}")" || return "$?"
-    want="$(_ci_normalize_platform_digests "${want} ${kept}")"
-    seen="$(_ci_normalize_platform_digests "${seen}")"
+    want="$(_ci_normalize_platform_digests "${want} ${kept}")" || return 2
+    seen="$(_ci_normalize_platform_digests "${seen}")" || return 2
     [ "${want}" = "${seen}" ]
 }
 
@@ -8996,7 +8996,7 @@ _ci_gc_run() {
         return 0
     fi
     if [ "${mode}" = "apply" ]; then
-        policy="$(_ci_deletion_policy)"
+        policy="$(_ci_deletion_policy)" || return 2
         case "${policy}" in
             # What: Exact allow-list, not substring match.
             # Why: A negated policy must not pass the gate.
