@@ -7049,7 +7049,7 @@ _ci_channel_field() {
 _ci_channels_where() {
     local rows
     rows="$(_ci_channel_field "$1")" || return 2
-    awk -v v="$2" '$2 == v { print $1 }' <<< "${rows}"
+    _ci_capture 0 awk -v v="$2" "\$2 == v { print \$1 }" <<< "${rows}"
 }
 
 # What: Print the SOT's mutable release channels.
@@ -9553,7 +9553,9 @@ _ci_validate_reserve() {
 _ci_validate_project() {
     local repo
     repo="$(_ci_repo)" || return 2
-    printf '%s-validate-%s' "${repo##*/}" "$(printf '%s' "${1}" | tr './' '__')"
+    local name
+    name="$(_ci_capture 0 tr './' '__' <<< "${1}")" || return 2
+    printf '%s-validate-%s' "${repo##*/}" "${name}"
 }
 
 # What: The resolved compose config as JSON.
@@ -11473,7 +11475,8 @@ _ci_build_tools_build_args() {
     # What: append the SOT apk list as a build-arg.
     # Why: Dockerfile consumes it; it never owns the list.
     # From: Issue #1683
-    pkgs="$(_ci_build_tools_packages | tr '\n' ' ')" || return 2
+    pkgs="$(_ci_build_tools_packages)" || return 2
+    pkgs="$(_ci_capture 0 tr '\n' ' ' <<< "${pkgs}")" || return 2
     pkgs="${pkgs% }"
     out="${out}${prefix}APK_PACKAGES=${pkgs}"$'\n'
     pkgs="$(_ci_apk_bootstrap_arg "${prefix}")" || return 2
@@ -12613,7 +12616,7 @@ _ci_rh_runner_dirs() {
     root="$(_ci_rh_val opt_root)" || return 2
     glob="$(_ci_rh_val runner_dir_glob)" || return 2
     out="$(_ci_capture 0 find "${root}" -maxdepth 1 -type d -name "${glob}")" || return 2
-    [ -z "${out}" ] || sort <<< "${out}"
+    [ -z "${out}" ] || _ci_capture 0 sort <<< "${out}"
 }
 
 # What: stray archives at or above the size threshold.
@@ -12628,7 +12631,7 @@ _ci_rh_stray_archives() {
         [ -z "${g}" ] || names+=("${names[@]:+-o}" -name "${g}")
     done <<< "${globs}"
     out="$(_ci_capture 0 find "${root}" -maxdepth 1 -type f '(' "${names[@]}" ')' -size "+${min}c")" || return 2
-    [ -z "${out}" ] || sort <<< "${out}"
+    [ -z "${out}" ] || _ci_capture 0 sort <<< "${out}"
 }
 
 # What: file match: rc 0 hit, 1 no hit, 2 unreadable.
@@ -13023,7 +13026,8 @@ _ci_rh_full_reset_check() {
     [ "${found}" -eq 1 ] || printf '  (none found)\n'
     printf '\n--- apt/dpkg history naming other fleet hosts (report only) ---\n'
     fleet_ere="$(_ci_rh_ere fleet_name_patterns)" || return 2
-    logs="$(_ci_block_entry_list runner_host "" apt_log_globs | tr '\n' ' ')" || return 2
+    logs="$(_ci_block_entry_list runner_host "" apt_log_globs)" || return 2
+    logs="$(_ci_capture 0 tr '\n' ' ' <<< "${logs}")" || return 2
     out="$(_ci_run -m 1 "[CI-ERROR-RUNNER-0036]" "reason=\"apt history search failed\"" _ci_rh_root bash -c "${_CI_RH_ZGREP_PROG}" _ "${fleet_ere}" "${logs}")" || return 2
     found=0
     while IFS= read -r line; do
@@ -13169,7 +13173,8 @@ _ci_rh_set_hostname() {
 _ci_rh_ere() {
     local list
     list="$(_ci_block_entry_list runner_host "" "$1")" || return 2
-    tr '\n' '|' <<< "${list}" | sed 's/|$//'
+    list="$(_ci_capture 0 tr '\n' '|' <<< "${list}")" || return 2
+    _ci_capture 0 sed 's/|$//' <<< "${list}"
 }
 
 # What: the kernel/firmware name parts as one ERE.
@@ -15100,7 +15105,9 @@ _ci_check_pr_title() {
 # Why: one finder for the checks that read compose with yq.
 # From: Issue #1683 | PR #1858
 _ci_compose_dir_files() {
-    find "$1" -type f \( -name '*.yml' -o -name '*.yaml' \) | sort
+    local out
+    out="$(_ci_capture 0 find "$1" -type f \( -name '*.yml' -o -name '*.yaml' \))" || return 2
+    [ -z "${out}" ] || _ci_capture 0 sort <<< "${out}"
 }
 
 # What: an external deploy image must be a SOT base image.
@@ -15232,7 +15239,10 @@ _ci_check_pr_template() {
     local -a sections=()
     if [ -f "${template}" ]; then
         local produced produced_rc=0
-        produced="$(grep -oE '^## .+' "${template}" | sed 's/^## //')" || produced_rc=$?
+        produced="$(_ci_capture 1 grep -oE '^## .+' "${template}")" || produced_rc=$?
+        if [ "${produced_rc}" -eq 0 ]; then
+            produced="$(_ci_capture 0 sed 's/^## //' <<< "${produced}")" || produced_rc=$?
+        fi
         _ci_producer_ok "${produced_rc}" 1 || return 2
         while IFS= read -r sec; do
             [ -n "${sec}" ] && sections+=("${sec}")
