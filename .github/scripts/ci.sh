@@ -15217,44 +15217,20 @@ _ci_check_pr_template() {
     printf 'pr-template=ok\n'
 }
 
-# What: file, start line, byte size of each run: block
-# Why: awk length counts chars; LC_ALL=C makes it bytes
+# What: file, line, byte size of each run: string
+# Why: yq reads the YAML; wc -c counts the bytes of the text
 # From: Issue #1683
 _ci_measure_run_blocks() {
-    LC_ALL=C awk '
-        function leadspace(s) { match(s, /^[ \t]*/); return RLENGTH }
-        function flush_block() {
-            if (started) printf "%s\t%d\t%d\n", fname, block_start, block_bytes
-            in_block = 0; started = 0
-        }
-        FNR == 1 { flush_block(); fname = FILENAME }
-        {
-            line = $0
-            if (in_block) {
-                tmp = line; sub(/^[ \t]*/, "", tmp)
-                if (length(tmp) == 0) { block_bytes += length(line) + 1; next }
-                ind = leadspace(line)
-                if (!started) {
-                    if (ind > key_indent) {
-                        started = 1; content_indent = ind
-                        block_bytes += length(line) + 1; next
-                    }
-                } else if (ind >= content_indent) {
-                    block_bytes += length(line) + 1; next
-                }
-                flush_block()
-            }
-            if (!in_block && match(line, /^[ ]*(- )?run:[ ]*[|>][+-]?[0-9]?[+-]?[ ]*(#.*)?$/)) {
-                match(line, /^[ ]*(- )?run:/); key_indent = RLENGTH - 4
-                match(line, /[|>][+-]?[0-9]?[+-]?/)
-                digit = substr(line, RSTART, RLENGTH); gsub(/[^0-9]/, "", digit)
-                in_block = 1; block_start = FNR + 1; block_bytes = 0
-                if (digit != "") { started = 1; content_indent = key_indent + digit }
-                else { started = 0; content_indent = 0 }
-            }
-        }
-        END { flush_block() }
-    ' "$@"
+    local f rows line b64 bytes
+    for f in "$@"; do
+        rows="$(yq --yaml-fix-merge-anchor-to-spec=true -r \
+            '.. | select(tag == "!!map" and has("run")) | .run | select(tag == "!!str") | [line, @base64] | @tsv' "${f}")" || return 2
+        while IFS=$'\t' read -r line b64; do
+            [ -n "${line}" ] || continue
+            bytes="$(printf '%s' "${b64}" | base64 -d | wc -c)" || return 2
+            printf '%s\t%s\t%s\n' "${f}" "${line}" "${bytes//[[:space:]]/}"
+        done <<<"${rows}"
+    done
 }
 
 # What: list the workflow files of a directory.
