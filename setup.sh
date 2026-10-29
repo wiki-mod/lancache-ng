@@ -2297,7 +2297,7 @@ migrate_quickstart_install() (
     trap resume_lancache_convergence_after_failed_update EXIT
     UPDATE_CONVERGENCE_PAUSED=1
     pause_lancache_convergence_for_update
-    _UPDATE_ENV_FILE="$old_env" _UPDATE_STACK_DIR="$old_dir"
+    _UPDATE_ENV_FILE="$old_env" _UPDATE_STACK_DIR="$old_dir" _QUICKSTART_STATE_DIR="$old_dir"
     services=$(stack_compose "$old_dir" "$old_env" config --services) \
         || die "Cannot list the services of $old_dir (exit $?); nothing was changed."
     mapfile -t service_list <<< "$services"
@@ -2849,10 +2849,18 @@ sot_compose_env() {
 # Why: compose names no path, port or default of its own
 # From: Issue #1683 | PR #1912
 sot_compose() {
-    local env_file="$1" rows
+    local env_file="$1" rows state=""
     local -a sot_env=()
     shift
-    rows=$(sot_compose_env "$env_file") || exit $?
+    # What: a quickstart .env may lack LANCACHE_STATE_DIR
+    # Why: its state lives in the quickstart dir (v0.3.2)
+    # From: Issue #1683 | PR #1858
+    if [[ -n "${_QUICKSTART_STATE_DIR:-}" ]]; then
+        state=$(get_env_var LANCACHE_STATE_DIR "$env_file") \
+            || die "Cannot read LANCACHE_STATE_DIR from $env_file (exit $?)."
+        [[ -n "$state" ]] || state="$_QUICKSTART_STATE_DIR"
+    fi
+    rows=$(sot_compose_env "$env_file" "$state") || exit $?
     mapfile -t sot_env <<< "$rows"
     env "${sot_env[@]}" docker compose --env-file "$env_file" "$@"
 }
