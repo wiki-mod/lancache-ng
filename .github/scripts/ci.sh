@@ -11128,7 +11128,16 @@ _ci_runtime_secret_dir() {
 # Why: Scheduler URL and token go into the dist config.
 # From: Issue #1683
 _ci_toml_escape() {
-    printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+    local v="$1"
+    # What: a control character (tab aside) stops the write.
+    # Why: TOML basic strings forbid them; config breaks.
+    # From: Issue #1683 | PR #1858
+    if [[ "${v//$'\t'/}" == *[[:cntrl:]]* ]]; then
+        ci_log "[CI-ERROR-VARIABLES-0025]" "bytes=${#v} reason=\"control character in a TOML value\""
+        return 2
+    fi
+    v="${v//\\/\\\\}"
+    printf '%s' "${v//\"/\\\"}"
 }
 
 # What: Write a secret value to a 0600 file.
@@ -11149,16 +11158,18 @@ _ci_write_secret() {
 # Why: One place builds it; token stays out of logs.
 # From: Issue #1683
 _ci_write_dist_config() {
-    local path="$1"
+    local path="$1" url tok
+    url="$(_ci_toml_escape "$3")" || return 2
+    tok="$(_ci_toml_escape "${SCCACHE_DIST_AUTH_TOKEN:-}")" || return 2
     ( umask 077
       {
         printf '[dist]\n'
-        printf 'scheduler_url = "%s"\n' "$(_ci_toml_escape "$3")"
+        printf 'scheduler_url = "%s"\n' "${url}"
         printf 'toolchains = []\n'
         printf 'toolchain_cache_size = %s\n' "$2"
         printf '\n[dist.auth]\n'
         printf 'type = "token"\n'
-        printf 'token = "%s"\n' "$(_ci_toml_escape "${SCCACHE_DIST_AUTH_TOKEN:-}")"
+        printf 'token = "%s"\n' "${tok}"
       } > "${path}" )
 }
 
