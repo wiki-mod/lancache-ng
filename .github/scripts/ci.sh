@@ -3576,15 +3576,15 @@ ci_cmd_scan_stack() {
 # Why: an issue, no red scan; reruns keep one issue
 # From: Issue #1683 | PR #1858
 _ci_trivyignore_stale() {
-    local ignore fields="" matched="" n kind id stale="" count=0 file="${CI_TMPDIR}/${_CI_TRIVY_MATCHED}" why outcome=success
+    local ignore ids="" matched="" id stale="" count=0 file="${CI_TMPDIR}/${_CI_TRIVY_MATCHED}" why outcome=success
     ignore="$(_ci_repo_path CI_TRIVY_IGNORE)" || return 2
-    [ ! -f "${ignore}" ] || fields="$(_ci_trivyignore_fields "${ignore}")" || return 2
+    [ ! -f "${ignore}" ] || ids="$(_ci_trivyignore_ids "${ignore}")" || return 2
     [ ! -f "${file}" ] || matched="$(< "${file}")"
-    while IFS=$'\t' read -r n kind id; do
-        [ "${kind}" = id ] || continue
+    while IFS= read -r id; do
+        [ -n "${id}" ] || continue
         count=$((count + 1))
         _ci_list_has "${id}" "${matched}" || stale="${stale} ${id}"
-    done <<< "${fields}"
+    done <<< "${ids}"
     if [ -n "${stale}" ]; then
         outcome=failure
         ci_log "[CI-WARN-SCAN-0041]" "path=\"${ignore}\" stale=\"${stale# }\" reason=\"no scan of this run matched these entries; the issue asks to remove them\""
@@ -15066,7 +15066,7 @@ _ci_check_pr_title() {
 # From: Issue #1683
 _ci_check_stable_external_images() {
     local -a dirs=("$@")
-    local d line img k allowed=" " dep
+    local d img k allowed=" " dep
     if [ "${#dirs[@]}" -eq 0 ]; then
         dep="$(_ci_compose_path)" || return 2
         dirs=("${dep%/*}")
@@ -15086,23 +15086,31 @@ _ci_check_stable_external_images() {
             viol+=("${d}: compose dir missing")
             continue
         fi
-        local produced produced_rc=0
-        produced="$(grep -rhE '^[[:space:]]+image:[[:space:]]' "${d}")" || produced_rc=$?
-        _ci_producer_ok "${produced_rc}" 1 || return 2
-        while IFS= read -r line; do
-            img="${line#*image:}"; img="${img#"${img%%[![:space:]]*}"}"
-            # What: only ${LANCACHE_*} own images skip.
-            # Why: any literal host (ghcr too) is SOT.
+        local files f produced
+        files="$(find "${d}" -type f \( -name '*.yml' -o -name '*.yaml' \) | sort)" || return 2
+        if [ -z "${files}" ]; then
+            viol+=("${d}: compose dir holds no compose file")
+            continue
+        fi
+        while IFS= read -r f; do
+            # What: the image: of every service, read by yq.
+            # Why: yq owns YAML quoting and comments.
             # From: Issue #1683 | PR #1858
-            case "${img}" in
-                *"\${LANCACHE"*|'') continue ;;
-            esac
-            img="${img%\"}"; img="${img#\"}"
-            case "${allowed}" in
-                *" ${img} "*) ;;
-                *) viol+=("${d}: external image is not a SOT base image: ${img}") ;;
-            esac
-        done <<<"${produced}"
+            produced="$(_ci_run "[CI-ERROR-CHECK-0200]" "file=\"${f}\" reason=\"compose images not read\"" \
+                yq --yaml-fix-merge-anchor-to-spec=true -r '.services[]?.image | select(tag == "!!str")' "${f}")" || return 2
+            while IFS= read -r img; do
+                # What: only ${LANCACHE_*} own images skip.
+                # Why: any literal host (ghcr too) is SOT.
+                # From: Issue #1683 | PR #1858
+                case "${img}" in
+                    *"\${LANCACHE"*|'') continue ;;
+                esac
+                case "${allowed}" in
+                    *" ${img} "*) ;;
+                    *) viol+=("${f}: external image is not a SOT base image: ${img}") ;;
+                esac
+            done <<<"${produced}"
+        done <<<"${files}"
     done
     if [ "${#viol[@]}" -gt 0 ]; then
         ci_error "[CI-ERROR-CHECK-0014]" "reason=\"external image not in SOT\"" "$(printf '%s\n' "${viol[@]}")"
@@ -15222,44 +15230,20 @@ _ci_check_pr_template() {
     printf 'pr-template=ok\n'
 }
 
-# What: file, start line, byte size of each run: block
-# Why: awk length counts chars; LC_ALL=C makes it bytes
+# What: file, line, byte size of each run: string
+# Why: yq reads the YAML; wc -c counts the bytes of the text
 # From: Issue #1683
 _ci_measure_run_blocks() {
-    LC_ALL=C awk '
-        function leadspace(s) { match(s, /^[ \t]*/); return RLENGTH }
-        function flush_block() {
-            if (started) printf "%s\t%d\t%d\n", fname, block_start, block_bytes
-            in_block = 0; started = 0
-        }
-        FNR == 1 { flush_block(); fname = FILENAME }
-        {
-            line = $0
-            if (in_block) {
-                tmp = line; sub(/^[ \t]*/, "", tmp)
-                if (length(tmp) == 0) { block_bytes += length(line) + 1; next }
-                ind = leadspace(line)
-                if (!started) {
-                    if (ind > key_indent) {
-                        started = 1; content_indent = ind
-                        block_bytes += length(line) + 1; next
-                    }
-                } else if (ind >= content_indent) {
-                    block_bytes += length(line) + 1; next
-                }
-                flush_block()
-            }
-            if (!in_block && match(line, /^[ ]*(- )?run:[ ]*[|>][+-]?[0-9]?[+-]?[ ]*(#.*)?$/)) {
-                match(line, /^[ ]*(- )?run:/); key_indent = RLENGTH - 4
-                match(line, /[|>][+-]?[0-9]?[+-]?/)
-                digit = substr(line, RSTART, RLENGTH); gsub(/[^0-9]/, "", digit)
-                in_block = 1; block_start = FNR + 1; block_bytes = 0
-                if (digit != "") { started = 1; content_indent = key_indent + digit }
-                else { started = 0; content_indent = 0 }
-            }
-        }
-        END { flush_block() }
-    ' "$@"
+    local f rows line b64 bytes
+    for f in "$@"; do
+        rows="$(yq --yaml-fix-merge-anchor-to-spec=true -r \
+            '.. | select(tag == "!!map" and has("run")) | .run | select(tag == "!!str") | [line, @base64] | @tsv' "${f}")" || return 2
+        while IFS=$'\t' read -r line b64; do
+            [ -n "${line}" ] || continue
+            bytes="$(printf '%s' "${b64}" | base64 -d | wc -c)" || return 2
+            printf '%s\t%s\t%s\n' "${f}" "${line}" "${bytes//[[:space:]]/}"
+        done <<<"${rows}"
+    done
 }
 
 # What: list the workflow files of a directory.
@@ -15644,6 +15628,21 @@ _ci_action_sot_entry() {
     done
 }
 
+# What: names the files a resolved ref appears in.
+# Why: violation messages point at the real call sites.
+# From: Issue #1683 | PR #1858
+_ci_action_ref_files() {
+    local needle="$1" e file val; local -a m=()
+    shift
+    for e in "$@"; do
+        file="${e%%$'\t'*}"; val="${e#*$'\t'}"
+        [ "${val}" = "${needle}" ] || continue
+        case " ${m[*]} " in *" ${file} "*) ;; *) m+=("${file}") ;; esac
+    done
+    [ "${#m[@]}" -eq 0 ] && { printf '<none>'; return; }
+    printf '%s' "${m[*]}"
+}
+
 # What: enforce Node runtime + ref hygiene on pins.
 # Why: single owner of action-pin policy.
 # From: Issue #1683 | PR #1858
@@ -15701,20 +15700,6 @@ _ci_check_action_node_versions() {
         ci_log "[CI-ERROR-CHECK-0094]" "reason=\"no uses: steps extracted; scan vacuous\""; return 2
     fi
 
-    # What: names the files a resolved ref appears in.
-    # Why: violation messages point at the real call sites.
-    # From: Issue #1683 | PR #1858
-    _ci_ando_reffiles() {
-        local needle="$1" e file val; local -a m=()
-        for e in "${uses_entries[@]}"; do
-            file="${e%%$'\t'*}"; val="${e#*$'\t'}"
-            [ "${val}" = "${needle}" ] || continue
-            case " ${m[*]} " in *" ${file} "*) ;; *) m+=("${file}") ;; esac
-        done
-        [ "${#m[@]}" -eq 0 ] && { printf '<none>'; return; }
-        printf '%s' "${m[*]}"
-    }
-
     # What: per-file literal ref counts + per-key ref drift.
     # Why: a repeated literal or split ref both fail closed.
     # From: Issue #1683 | PR #1858
@@ -15762,7 +15747,7 @@ _ci_check_action_node_versions() {
         # From: Issue #1683 | PR #1858
         if [[ "${v}" == ./* ]]; then
             case "${v}" in *.yml|*.yaml) continue ;; esac
-            viol+=("local action '${v}' (in: $(_ci_ando_reffiles "${v}")); CI 2.0 has no composite actions")
+            viol+=("local action '${v}' (in: $(_ci_action_ref_files "${v}" "${uses_entries[@]}")); CI 2.0 has no composite actions")
             continue
         fi
         # What: a docker:// step must name a SOT base image.
@@ -15775,7 +15760,7 @@ _ci_check_action_node_versions() {
                 bv="$(_ci_block_entry_field base_images "" "${bk}")" || return 2
                 [ "${bv}" != "${v#docker://}" ] || bhit=1
             done
-            [ "${bhit}" -eq 1 ] || viol+=("docker step '${v}' (in: $(_ci_ando_reffiles "${v}")) is not a SOT base_images value")
+            [ "${bhit}" -eq 1 ] || viol+=("docker step '${v}' (in: $(_ci_action_ref_files "${v}" "${uses_entries[@]}")) is not a SOT base_images value")
             continue
         fi
         # What: own repo needs a ref; others unsupported.
@@ -15786,7 +15771,7 @@ _ci_check_action_node_versions() {
             continue
         fi
         if ! _ci_action_ref_is_external "${v}"; then
-            viol+=("unsupported action reference '${v}' (in: $(_ci_ando_reffiles "${v}"))")
+            viol+=("unsupported action reference '${v}' (in: $(_ci_action_ref_files "${v}" "${uses_entries[@]}"))")
             continue
         fi
         ref="${v##*@}"; key="${v%@*}"
@@ -15794,7 +15779,7 @@ _ci_check_action_node_versions() {
         # Why: no third-party pin; the tag moves forward.
         # From: Issue #1683 | PR #1858
         if [[ ! "${ref}" =~ ^v[0-9]+$ ]]; then
-            viol+=("external action '${v}' (in: $(_ci_ando_reffiles "${v}")) must use a major tag vN")
+            viol+=("external action '${v}' (in: $(_ci_action_ref_files "${v}" "${uses_entries[@]}")) must use a major tag vN")
             continue
         fi
         # What: an external action must have a SOT entry.
@@ -15802,7 +15787,7 @@ _ci_check_action_node_versions() {
         # From: Issue #1683 | PR #1858
         entry="$(_ci_action_sot_entry "${key}")" || return 2
         if [ -z "${entry}" ]; then
-            viol+=("external action '${key}' (in: $(_ci_ando_reffiles "${v}")) has no SOT github_actions entry")
+            viol+=("external action '${key}' (in: $(_ci_action_ref_files "${v}" "${uses_entries[@]}")) has no SOT github_actions entry")
             continue
         fi
         used_entries+="${entry} "
@@ -15817,15 +15802,14 @@ _ci_check_action_node_versions() {
                 if [ -z "${using}" ]; then
                     viol+=("'${v}' has no parseable runs.using")
                 elif [[ "${using}" =~ ^node([0-9]+)$ ]] && [ "${BASH_REMATCH[1]}" -lt "${node_min}" ]; then
-                    viol+=("'${v}' (in: $(_ci_ando_reffiles "${v}")) declares runs.using: ${using}, below node${node_min}")
+                    viol+=("'${v}' (in: $(_ci_action_ref_files "${v}" "${uses_entries[@]}")) declares runs.using: ${using}, below node${node_min}")
                 fi ;;
             NOTFOUND)
-                viol+=("no action.yml/action.yaml for '${v}' at ref '${ref}' (in: $(_ci_ando_reffiles "${v}")); broken pin") ;;
+                viol+=("no action.yml/action.yaml for '${v}' at ref '${ref}' (in: $(_ci_action_ref_files "${v}" "${uses_entries[@]}")); broken pin") ;;
             *)
                 infra+=("${v} (${marker})"$'\n'"${res#*$'\n'}") ;;
         esac
     done
-    unset -f _ci_ando_reffiles
     # What: an unresolved pin fails closed, never clean.
     # Why: an unverified runtime must not pass the gate.
     # From: Issue #1683 | PR #1858
@@ -17337,6 +17321,17 @@ _ci_trivyignore_fields() {
     [ -z "${out}" ] || printf '%s\n' "${out}"
 }
 
+# What: the entry ids of a trivyignore file, one per line.
+# Why: the one id filter over the strict field reader.
+# From: Issue #1683 | PR #1858
+_ci_trivyignore_ids() {
+    local fields n kind id
+    fields="$(_ci_trivyignore_fields "$1")" || return 2
+    while IFS=$'\t' read -r n kind id; do
+        if [ "${kind}" = id ]; then printf '%s\n' "${id}"; fi
+    done <<< "${fields}"
+}
+
 # What: Fail unless the trivyignore yields full OpenVEX.
 # Why: a broken entry must fail here, not at release time.
 # From: Issue #1683 | PR #1858
@@ -17344,13 +17339,14 @@ _ci_check_vex_drift() {
     local repo_root="${1:-${CI_REPO_ROOT}}"
     local trivyignore
     trivyignore="$(_ci_repo_path CI_TRIVY_IGNORE "${repo_root}")" || return 2
-    local out entry_count statement_count
+    local out ids entry_count statement_count
     [ -f "${trivyignore}" ] || { ci_error "[CI-ERROR-CHECK-0050]" "path=\"${trivyignore}\" reason=\".trivyignore.yaml not found\"" "${trivyignore}"; return 2; }
     if ! out="$(_ci_generate_vex "${trivyignore}")"; then
         ci_log "[CI-ERROR-CHECK-0107]" "path=\"${trivyignore}\" reason=\"OpenVEX generation failed (raw above)\""
         return 1
     fi
-    entry_count="$(_ci_capture 1 grep -c '^  - id:' "${trivyignore}")" || return 2
+    ids="$(_ci_trivyignore_ids "${trivyignore}")" || return 2
+    entry_count="$(_ci_count_lines "${ids}")"
     statement_count="$(_ci_capture 0 jq '.statements | length' <<< "${out}")" || return 2
     if [ "${statement_count}" != "${entry_count}" ]; then
         ci_log "[CI-ERROR-CHECK-0109]" "entries=${entry_count} statements=${statement_count} reason=\"trivyignore entries and VEX statements differ\""
