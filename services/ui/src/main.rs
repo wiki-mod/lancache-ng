@@ -6414,11 +6414,7 @@ async fn ntp_page(State(state): Shared, headers: HeaderMap) -> Response {
 // Why: chrony must get at least one valid server.
 // From: Issue #1683 | PR #1912
 fn ntp_upstream_servers(raw: &str) -> Result<String, String> {
-    let entries: Vec<&str> = raw
-        .split([',', ' ', '\n', '\t'])
-        .map(str::trim)
-        .filter(|entry| !entry.is_empty())
-        .collect();
+    let entries: Vec<&str> = config::list_items(raw).collect();
     if entries.is_empty() {
         return Err(
             "At least one upstream NTP server is required; LanCache-NG-NTP never \

@@ -24,6 +24,14 @@ pub fn opt(get: &dyn Fn(&str) -> Option<String>, name: &str) -> Option<String> {
 // From: Issue #1683 | PR #1912
 pub const RUNTIME_DEFAULTS_KEY: &str = "LANCACHE_RUNTIME_DEFAULTS";
 
+// What: the items of a list set apart by commas or blanks.
+// Why: one splitter for every env list; empty items drop.
+// From: Issue #1683
+pub fn list_items(raw: &str) -> impl Iterator<Item = &str> {
+    raw.split([',', ' ', '\r', '\n', '\t'])
+        .filter(|item| !item.is_empty())
+}
+
 // What: one name's value in a KEY=value list, if listed.
 // Why: the SOT defaults travel as one pipe-joined list.
 // From: Issue #1683 | PR #1912

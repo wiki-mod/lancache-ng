@@ -2000,10 +2000,8 @@ fn endpoint(raw: &str, key: &'static str) -> Result<std::net::SocketAddrV4, Stri
 // Why: a primary notifies and allows AXFR to each one.
 // From: Issue #1683 | PR #1912
 fn notify_targets() -> Result<Vec<std::net::SocketAddrV4>, String> {
-    env_opt("DNS_XFR_NOTIFY_TARGETS")
-        .unwrap_or_default()
-        .split([',', ' '])
-        .filter(|t| !t.is_empty())
+    let raw = env_opt("DNS_XFR_NOTIFY_TARGETS").unwrap_or_default();
+    config::list_items(&raw)
         .map(|t| endpoint(t, "DNS_XFR_NOTIFY_TARGETS"))
         .collect()
 }
@@ -2654,10 +2652,7 @@ struct Upstream {
 // Why: setup.sh and operators write either separator.
 // From: Issue #1918 | PR #1858
 fn upstream_list(key: &str) -> Vec<String> {
-    env_opt(key)
-        .unwrap_or_default()
-        .split([' ', ','])
-        .filter(|item| !item.is_empty())
+    config::list_items(&env_opt(key).unwrap_or_default())
         .map(str::to_string)
         .collect()
 }
@@ -3279,8 +3274,7 @@ fn find_file(dir: &Path, name: &str, depth: u32) -> Option<PathBuf> {
 // From: Issue #1683
 fn dhcp_ntp_servers(raw: &str, port: u16) -> Result<Vec<std::net::Ipv4Addr>, String> {
     use std::net::ToSocketAddrs as _;
-    raw.split([',', ' '])
-        .filter(|s| !s.is_empty())
+    config::list_items(raw)
         .map(|host| {
             if let Ok(ip) = host.parse() {
                 return Ok(ip);
