@@ -53,31 +53,6 @@ use tera::{Context, Tera};
 use tracing_subscriber::layer::SubscriberExt as _;
 use tracing_subscriber::util::SubscriberInitExt as _;
 
-// What: UI-settings keys, in the order the file lists them.
-// Why: every save rewrites the file; setup.sh reads it.
-// From: Issue #819
-const SETTING_KEYS: [&str; 19] = [
-    "DHCP_MODE",
-    "DHCP_SUBNET_START",
-    "DHCP_DNS_PRIMARY",
-    "DHCP_DNS_SECONDARY",
-    "UPSTREAM_DHCP_IP",
-    "DHCP_RELAY_LOCAL_ADDR",
-    "DHCP_NTP_SERVERS",
-    "DHCP_PROXY_INTERFACE",
-    "DHCP_PROXY_ROUTER",
-    "DHCP_PROXY_DOMAIN",
-    "DHCP_PROXY_BOOT_FILENAME",
-    "DHCP_PROXY_BOOT_SERVER",
-    "DHCP_PROXY_CUSTOM_OPTIONS",
-    "LANCACHE_IMAGE_CHANNEL",
-    "AUTO_UPDATE_ENABLED",
-    "NTP_ENABLED",
-    "NTP_UPSTREAM_SERVERS",
-    "NTP_AUTO_DHCP",
-    "CACHE_MAX_GB",
-];
-
 // What: shared-secret variables the ui reads or creates.
 // Why: one inventory for the root start and the reader.
 // From: Issue #858
@@ -177,7 +152,10 @@ struct Config {
     dhcp_api_token: String,
     dhcp_api_user: String,
     ui_settings_file: String,
-    startup_settings: HashMap<&'static str, String>,
+    // What: UI-settings keys with their start values, in file order.
+    // Why: one list for the start value and the saved file; setup.sh reads it.
+    // From: Issue #819
+    startup_settings: Vec<(&'static str, String)>,
     kea_config_snapshot_dir: String,
     dhcp_probe_request_file: String,
     dhcp_probe_result_file: String,
@@ -367,7 +345,7 @@ impl Config {
         let dhcp_lease_time = dhcp_lease_limits.lease(env, "DHCP_LEASE_TIME")?;
         let ttl_max = config::uint(env, "UI_SESSION_TTL_MAX_SECONDS", 1, u64::MAX)?;
         let ttl = knob("UI_SESSION_TTL_SECONDS", ttl_max, OutOfRange::Reject)?;
-        let startup_settings = HashMap::from([
+        let mut startup_settings = vec![
             ("DHCP_MODE", dhcp_mode.as_str().to_string()),
             ("DHCP_SUBNET_START", text("DHCP_SUBNET_START", "")),
             ("DHCP_DNS_PRIMARY", dhcp_dns("DHCP_DNS_PRIMARY")),
@@ -399,14 +377,13 @@ impl Config {
             ("NTP_UPSTREAM_SERVERS", need("NTP_UPSTREAM_SERVERS")?),
             ("NTP_AUTO_DHCP", bool_text(need_flag("NTP_AUTO_DHCP")?)),
             ("CACHE_MAX_GB", cache_max_gb.to_string()),
-        ]);
+        ];
         // What: the logging switches, from the strict env.
         // Why: the SOT owns the default; no typo may flip.
         // From: Issue #1683 | PR #1912
-        let mut startup_settings = startup_settings;
         let mut log_programs = Vec::new();
         for (key, program_key) in config::LOG_SWITCHES {
-            startup_settings.insert(key, bool_text(need_flag(key)?));
+            startup_settings.push((key, bool_text(need_flag(key)?)));
             log_programs.push(need(program_key)?);
         }
         let proxy_log_dir = config::proxy_log_dir(env)?;
@@ -552,7 +529,13 @@ impl Config {
                 tracing::warn!("{key} not read from the settings file: {e}");
                 None
             });
-        saved.unwrap_or_else(|| self.startup_settings.get(key).cloned().unwrap_or_default())
+        saved.unwrap_or_else(|| {
+            self.startup_settings
+                .iter()
+                .find(|(name, _)| *name == key)
+                .map(|(_, value)| value.clone())
+                .unwrap_or_default()
+        })
     }
 
     // What: a setting stored as 1 for on.
@@ -594,8 +577,7 @@ impl Config {
     fn save_settings(&self, changes: &[(&str, String)]) -> io::Result<()> {
         let mut content = String::new();
         let file = Path::new(&self.ui_settings_file);
-        let log_keys = config::LOG_SWITCHES.iter().map(|(key, _)| *key);
-        for key in SETTING_KEYS.into_iter().chain(log_keys) {
+        for key in self.startup_settings.iter().map(|(key, _)| *key) {
             let value = match changes.iter().find(|(name, _)| *name == key) {
                 Some((_, value)) => value.clone(),
                 // What: an unreadable file stops the save.
