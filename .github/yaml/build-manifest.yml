@@ -1455,6 +1455,10 @@ ci_variables:
   # Why: §34: self-hosted keeps this one builder per host.
   # From: Issue #1683 | PR #1912
   CI_BUILDX_BUILDER: lancache-ci
+  # What: layer compression of every built image.
+  # Why: A3: gzip unpack took 12 s per job container.
+  # From: Issue #1683 | PR #1858
+  CI_IMAGE_COMPRESSION: zstd
   # What: poll seconds of every CI lock wait.
   # Why: AG-CI-006: lock timing has one owner.
   # From: Issue #1683 | PR #1858

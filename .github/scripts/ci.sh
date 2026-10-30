@@ -5614,8 +5614,12 @@ _ci_docker_build() {
     # What: self-hosted: the host builder; hosted: own one.
     # Why: §34 keeps host state; a hosted VM ends anyway.
     # From: Issue #1683 | PR #1912
-    local own=1
+    local own=1 comp
     builder="$(_ci_variable CI_BUILDX_BUILDER)" || { _ci_clear_runtime >&2; return 2; }
+    # What: load into Docker with the SOT layer compression.
+    # Why: A3: gzip unpack took 12 s per job container.
+    # From: Issue #1683 | PR #1858
+    comp="$(_ci_variable CI_IMAGE_COMPRESSION)" || { _ci_clear_runtime >&2; return 2; }
     if _ci_runner_self_hosted; then
         own=0
         _ci_buildx_host "${builder}" || { _ci_clear_runtime >&2; return 2; }
@@ -5627,7 +5631,7 @@ _ci_docker_build() {
     # Why: ci_error already shows raw; avoid double output.
     # From: Issue #1683
     local buildlog rc=0 crc=0 brc=0
-    buildlog="$(_ci_retry buildx docker buildx build --builder "${builder}" --load --platform "${platform}" --tag "${tag}" "${args[@]}" "${context}")" || rc=$?
+    buildlog="$(_ci_retry buildx docker buildx build --builder "${builder}" --output "type=docker,compression=${comp},force-compression=true" --platform "${platform}" --tag "${tag}" "${args[@]}" "${context}")" || rc=$?
     [ "${own}" -eq 0 ] || _ci_buildx_stop "${builder}" || brc=$?
     _ci_clear_runtime >&2 || crc=$?
     if [ "${rc}" -ne 0 ]; then
