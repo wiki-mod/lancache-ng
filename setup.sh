@@ -5777,6 +5777,14 @@ rollback_stack_update() {
     fi
     print_warn "Rolling back to pre-update backup: $latest_backup"
     if cmd_restore "$latest_backup" "$install_dir"; then
+        # What: the restored .env names the old channel
+        # Why: the backup holds the asked one, not the run
+        # From: Issue #1683 | PR #1858
+        if [[ -n "${LANCACHE_UPDATE_SWITCHED_FROM:-}" ]] && ! is_channel_root_dir "$LANCACHE_UPDATE_SWITCHED_FROM"; then
+            local old_channel="${LANCACHE_UPDATE_SWITCHED_FROM##*/}"
+            set_env_key LANCACHE_IMAGE_CHANNEL "$old_channel" "$install_dir/${_UPDATE_ENV_FILE##*/}"
+            print_warn "LANCACHE_IMAGE_CHANNEL is $old_channel again; set it anew and run update to retry the switch"
+        fi
         print_ok "Rollback completed; stack restored to its pre-update state."
         return 0
     fi
