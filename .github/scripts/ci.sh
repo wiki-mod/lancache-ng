@@ -3593,9 +3593,38 @@ _ci_mark_write() {
 # Why: a pushed image is not an accepted image (B20).
 # From: Issue #1683 | PR #1912
 _ci_verified_has() {
-    local ref
+    local ref marks
     ref="$(_ci_verified_ref "$1" "$2" "$3")" || return 2
-    _ci_mark_has "${ref}" "$(_ci_verified_note "$1" "$2" "$3")"
+    marks="$(_ci_verified_marks)" || return 2
+    case $'\n'"${marks}"$'\n' in
+        *$'\n'"${ref}"$'\t'"$(_ci_verified_note "$1" "$2" "$3")"$'\n'*) return 0 ;;
+    esac
+    return 1
+}
+
+# What: all verified marks as ref, tab, subject; once.
+# Why: A3: plan fetched one mark per pair, 1.4 s each.
+# From: Issue #1683 | PR #1858
+_ci_verified_marks() {
+    local memo="verified-marks-${_CI_CALL_KEY}" remote prefix dest out
+    if out="$(_ci_job_memo_get "${memo}")"; then
+        printf '%s\n' "${out}"
+        return 0
+    fi
+    remote="$(_ci_git_remote)" || return 2
+    prefix="$(_ci_variable CI_VERIFIED_REF)" || return 2
+    dest="refs/ci-memo/${_CI_CALL_KEY}"
+    _ci_retry git git fetch --no-tags "${remote}" "+${prefix}/*:${dest}/*" >&2 || return 2
+    out="$(_ci_capture 0 git for-each-ref --format='%(refname)%09%(contents:subject)' "${dest}/")" || return 2
+    # What: the local copies go; the list keeps the marks.
+    # Why: refs/ci-memo is scratch of this one call only.
+    # From: Issue #1683 | PR #1858
+    if [ -n "${out}" ]; then
+        _ci_git_run update-ref --stdin <<< "$(_ci_capture 0 git for-each-ref --format='delete %(refname)' "${dest}/")" || return 2
+    fi
+    out="marks ${prefix}"$'\n'"${out//"${dest}/"/${prefix}/}"
+    _ci_job_memo_put "${memo}" "${out}" || return 2
+    printf '%s\n' "${out}"
 }
 
 # What: mark a digest verified after its smoke test.
