@@ -3,9 +3,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Git ignore patterns for build artifacts, secrets, and generated files
 
-# What: state dirs an install keeps in the checkout
-# Why: runtime state and leases do not belong in git
+# What: SOT state dirs of a checkout in its state root
+# Why: state, leases and the CA key do not belong in git
 data/
+/ca/
 /cache/
 /kea/
 /nats/
