@@ -1962,6 +1962,17 @@ ci_cmd_plan_matrix() {
         # Why: tests run on change, even build reuse (§60).
         # From: Issue #1683
         svc_type="$(_ci_required_field "${service}" build_type)" || return 2
+        # What: auth once, only when a candidate exists.
+        # Why: docs-only NOOP: registry zero touches (§63).
+        # From: Issue #1683
+        if [ "${authed}" = false ]; then
+            _ci_require_ghcr_auth || return "$?"
+            authed=true
+            # What: read the final base while the ids run.
+            # Why: A3: its registry read held pass 1 5-7 s.
+            # From: Issue #1683 | PR #1858
+            _ci_base_image_prefetch _ci_alpine_build_arg "" || return 2
+        fi
         # What: tests and audit follow content, not paths.
         # Why: §29 §64: equal content, equal test identity.
         # From: Issue #1683 | PR #1858
@@ -1974,13 +1985,6 @@ ci_cmd_plan_matrix() {
                 1) ;;
                 *) return 2 ;;
             esac
-        fi
-        # What: auth once, only when a candidate exists.
-        # Why: docs-only NOOP: registry zero touches (§63).
-        # From: Issue #1683
-        if [ "${authed}" = false ]; then
-            _ci_require_ghcr_auth || return "$?"
-            authed=true
         fi
         plats="$(_ci_platforms "${service}")" || return "$?"
         while IFS= read -r platform; do
@@ -12795,14 +12799,27 @@ ci_cmd_build_tools() {
 # Why: no third-party pin; the run resolves latest.
 # From: Issue #1683 | PR #1858
 _ci_base_image() {
-    local key="$1" id="$2" ctx="$3" val digest memo
+    local key="$1" id="$2" ctx="$3" val digest memo wait="" err
+    local lock="${RUNNER_TEMP:-}/base-image.lock"
+    # What: a running background read: wait once, reread.
+    # Why: one read per base; no second read beside it.
+    # From: Issue #1683 | PR #1858
+    [ -z "${RUNNER_TEMP:-}" ] || [ -n "${_CI_BASE_LOCK_HELD:-}" ] || [ ! -e "${lock}" ] || wait=1
     # What: one job resolves a base once, in RUNNER_TEMP.
     # Why: build arg, labels and id name the same digest.
     # From: Issue #1683 | PR #1858
-    if memo="$(_ci_job_memo_get "base-image-${key}.ref")"; then
-        printf '%s\n' "${memo}"
-        return 0
-    fi
+    while :; do
+        if memo="$(_ci_job_memo_get "base-image-${key}.ref")"; then
+            printf '%s\n' "${memo}"
+            return 0
+        fi
+        [ -n "${wait}" ] || break
+        if ! err="$(flock -s "${lock}" true 2>&1)"; then
+            ci_error "[CI-ERROR-RESOLVE-0014]" "lock=\"${lock}\" reason=\"wait on the base image read failed\"" "${err}"
+            return 2
+        fi
+        wait=""
+    done
     val="$(_ci_block_entry_field base_images "" "${key}")" || return 2
     if [ -z "${val}" ]; then
         ci_log "${id}" "${ctx}"
@@ -12811,6 +12828,26 @@ _ci_base_image() {
     digest="$(_ci_registry_digest "${val}")" || return 2
     _ci_job_memo_put "base-image-${key}.ref" "${val}@${digest}" || return 2
     printf '%s@%s\n' "${val}" "${digest}"
+}
+
+# What: run base reader "$@" in the background, locked.
+# Why: A3: the base read held the plan ids 5-7 s.
+# From: Issue #1683 | PR #1858
+_ci_base_image_prefetch() {
+    local lock fd err
+    [ -n "${RUNNER_TEMP:-}" ] || return 0
+    lock="${RUNNER_TEMP}/base-image.lock"
+    exec {fd}>"${lock}"
+    if ! err="$(flock -x "${fd}" 2>&1)"; then
+        exec {fd}>&-
+        ci_error "[CI-ERROR-RESOLVE-0015]" "lock=\"${lock}\" reason=\"lock for the base image read failed\"" "${err}"
+        return 2
+    fi
+    # What: the child keeps the lock until it exits.
+    # Why: a reader waits on the lock, never on a clock.
+    # From: Issue #1683 | PR #1858
+    _CI_BASE_LOCK_HELD=1 "$@" > "${lock}.out" &
+    exec {fd}>&-
 }
 
 # What: The SOT alpine base as ALPINE_IMAGE, fail-closed.
