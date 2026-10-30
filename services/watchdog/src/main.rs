@@ -95,7 +95,7 @@ fn read_knob(
 }
 
 // What: settings from an env reader, plus startup warnings.
-// Why: Err is fatal; a reader arg keeps tests env-free.
+// Why: Err is fatal; the reader is injected, not read here.
 // From: Issue #849 | PR #1912
 fn load_settings(env: impl Fn(&str) -> Option<String>) -> Result<(Settings, Vec<String>), String> {
     let get = |name: &str| config::opt(&env, name);
@@ -5546,7 +5546,7 @@ async fn healthcheck() -> Result<(), String> {
 }
 
 // What: the verdict for one status at one time.
-// Why: pure, so tests feed it any status and clock.
+// Why: pure; the caller supplies status and clock.
 // From: Issue #1683 | PR #1912
 fn health_verdict(status: &SuperviseStatus, now: u64, max_age: u64) -> Result<(), String> {
     let age = now.saturating_sub(status.updated);
