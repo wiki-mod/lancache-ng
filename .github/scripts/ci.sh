@@ -884,9 +884,39 @@ _ci_required_field() {
 # Why: Cargo.toml owns the members; the SOT copies none.
 # From: Issue #1683 | PR #1912
 _ci_workspace_rows() {
-    local root="${1:-${CI_REPO_ROOT:-.}}" manifest members m row mf
+    local root="${1:-${CI_REPO_ROOT:-.}}" manifest members m mf text="" key memo out line
+    local -a mfs=()
+    local -A row=()
     manifest="$(_ci_repo_path CI_CARGO_MANIFEST "${root}")" || return 2
     members="$(_ci_cargo_members "${manifest}")" || return 2
+    # What: rows are kept per member list and manifest text.
+    # Why: A3: plan read every manifest per service and ref.
+    # From: Issue #1683 | PR #1858
+    while IFS= read -r m; do
+        [ -n "${m}" ] || continue
+        mf="$(_ci_repo_path CI_CARGO_MANIFEST "${root}/${m}")" || return 2
+        text+="${m}"$'\n'
+        [ -f "${mf}" ] || continue
+        mfs+=("${mf}")
+        text+="$(<"${mf}")"$'\n'
+    done <<< "${members}"
+    key="$(printf '%s' "${text}" | _ci_sha256_hex)" || return 2
+    memo="workspace-rows-${key}"
+    if out="$(_ci_job_memo_get "${memo}")"; then
+        printf '%s\n' "${out}"
+        return 0
+    fi
+    # What: one yq call reads every member manifest.
+    # Why: one program run instead of one per member.
+    # From: Issue #1683 | PR #1858
+    if [ "${#mfs[@]}" -gt 0 ]; then
+        out="$(_ci_capture 0 yq -p toml -oy 'filename + "|" + (.bin[0].path // "") + "|" + .package.name' "${mfs[@]}")" || return 2
+        while IFS= read -r line; do
+            [ -n "${line}" ] || continue
+            row["${line%%|*}"]="${line#*|}"
+        done <<< "${out}"
+    fi
+    out=""
     # What: a member without [[bin]] is a library.
     # Why: a library counts with its whole dir.
     # From: Issue #1683 | PR #1912
@@ -896,13 +926,11 @@ _ci_workspace_rows() {
         # Why: the dir then fails the dead-path gate.
         # From: Issue #1683 | PR #1912
         mf="$(_ci_repo_path CI_CARGO_MANIFEST "${root}/${m}")" || return 2
-        if [ ! -f "${mf}" ]; then
-            printf '%s||\n' "${m}"
-            continue
-        fi
-        row="$(_ci_capture 0 yq -p toml -oy '(.bin[0].path // "") + "|" + .package.name' "${mf}")" || return 2
-        printf '%s|%s\n' "${m}" "${row}"
+        out+="${m}|${row["${mf}"]:-|}"$'\n'
     done <<< "${members}"
+    out="${out%$'\n'}"
+    [ -z "${out}" ] || _ci_job_memo_put "${memo}" "${out}" || return 2
+    printf '%s\n' "${out}"
 }
 
 # What: the source dir of a bin: its path's directory.
@@ -5925,7 +5953,20 @@ SH
 # Why: one reader for rows and version-drift.
 # From: Issue #1683 | PR #1858
 _ci_cargo_members() {
-    _ci_capture 0 yq -p toml -oy '.workspace.members[]' "$1"
+    local key="" out
+    # What: the list is kept per manifest text.
+    # Why: A3: plan parsed one manifest 80 times.
+    # From: Issue #1683 | PR #1858
+    if [ -f "$1" ]; then
+        key="$(printf '%s' "$(<"$1")" | _ci_sha256_hex)" || return 2
+        if out="$(_ci_job_memo_get "cargo-members-${key}")"; then
+            printf '%s\n' "${out}"
+            return 0
+        fi
+    fi
+    out="$(_ci_capture 0 yq -p toml -oy '.workspace.members[]' "$1")" || return 2
+    [ -z "${key}" ] || [ -z "${out}" ] || _ci_job_memo_put "cargo-members-${key}" "${out}" || return 2
+    printf '%s\n' "${out}"
 }
 
 # What: export each SOT compiler var as its driver name.
