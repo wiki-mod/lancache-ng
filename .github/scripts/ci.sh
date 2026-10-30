@@ -3597,11 +3597,16 @@ _ci_ledger_upsert() {
         kept=""
     else
         parent="$(_ci_capture 0 git rev-parse FETCH_HEAD)" || return 3
-        kept="$(_ci_capture 0 awk -F'\t' -v ids="${ids}" "$(cat <<'PROG'
-            BEGIN { n = split(ids, a, "\n"); for (i = 1; i <= n; i++) drop[a[i]] = 1 }
-            NF > 0 && !($1 in drop)
-PROG
-            )" <<< "${blob}")" || return 3
+        local -A drop=()
+        local id line
+        [ -z "${ids}" ] || while IFS= read -r id; do drop["k${id}"]=1; done <<< "${ids}"
+        kept=""
+        while IFS= read -r line; do
+            [ -n "${line}" ] || continue
+            [ -z "${drop["k${line%%$'\t'*}"]+x}" ] || continue
+            kept="${kept}${line}"$'\n'
+        done <<< "${blob}"
+        kept="${kept%$'\n'}"
     fi
     # What: sort the merged record set deterministically.
     # Why: same inputs -> same blob; §26.4 idempotency.
