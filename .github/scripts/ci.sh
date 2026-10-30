@@ -3722,7 +3722,7 @@ ci_cmd_aggregate_stack() {
 # Why: SCAN before ACCEPT; thin YAML, iteration in ci.sh.
 # From: Issue #1683
 ci_cmd_scan_stack() {
-    local matrix="${CI_BUILD_MATRIX:-}" svc plat digest pairs rc=0 crc drc vrc failed="" unbuilt="" passed='[]'
+    local matrix="${CI_BUILD_MATRIX:-}" svc plat digest pairs rc=0 crc drc vrc failed="" unbuilt="" passed='[]' sid
     [ -n "${matrix}" ] || { ci_log "[CI-ERROR-SCAN-0016]" "reason=\"CI_BUILD_MATRIX required\""; return 2; }
     pairs="$(_ci_matrix_pairs "${matrix}")" || return 2
     _ci_require_ghcr_auth || return "$?"
@@ -3762,8 +3762,27 @@ ci_cmd_scan_stack() {
             rc=2
             continue
         fi
+        # What: an unchanged scan identity is not rescanned.
+        # Why: §30: same digest, DB and policy, same result.
+        # From: Issue #1683 | PR #1858
+        sid=""
+        if [ "${CI_SCAN_FULL:-}" != 1 ]; then
+            crc=0; sid="$(_ci_scan_identity "${digest}")" || crc=$?
+            [ "${crc}" -ne 0 ] || { _ci_scan_mark "${svc}" "${plat}" "${digest}" "${sid}" has || crc=$?; }
+            if [ "${crc}" -eq 0 ]; then
+                ci_log "[CI-INFO-SCAN-0044]" "service=\"${svc}\" platform=\"${plat}\" digest=\"${digest}\" scan_identity=\"${sid}\" reason=\"this scan identity was scanned clean; no rescan (§30)\""
+                passed="$(_ci_matrix_append "${passed}" service="${svc}" platform="${plat}")" || return 2
+                continue
+            fi
+            if [ "${crc}" -ne 1 ]; then
+                failed="${failed} ${svc}/${plat}"
+                [ "${crc}" -le "${rc}" ] || rc="${crc}"
+                continue
+            fi
+        fi
         crc=0
         ci_cmd_scan "${svc}" "${digest}" "${plat}" || crc=$?
+        [ "${crc}" -ne 0 ] || [ -z "${sid}" ] || _ci_scan_mark "${svc}" "${plat}" "${digest}" "${sid}" write || crc=$?
         if [ "${crc}" -ne 0 ]; then
             failed="${failed} ${svc}/${plat}"
             [ "${crc}" -le "${rc}" ] || rc="${crc}"
@@ -6116,6 +6135,46 @@ _ci_trivy_db_record() {
         return 2
     fi
     printf 'trivy-db version=%s updated_at=%s sha256=%s\n' "${ver}" "${upd}" "${sum}"
+}
+
+# What: scan identity: digest, trivy, DB and policy.
+# Why: §30: an equal identity gives an equal scan result.
+# From: Issue #1683 | PR #1858
+_ci_scan_identity() {
+    local cache_dir db bin bsum sev scn ignore isum=none rc=0
+    cache_dir="$(_ci_trivy_cache_dir)" || return 2
+    _ci_trivy_db_ensure_fresh "${cache_dir}" || rc=$?
+    [ "${rc}" -eq 0 ] || return "${rc}"
+    db="$(_ci_trivy_db_record "${cache_dir}")" || return 2
+    bin="$(_ci_trivy_bin)" || return 2
+    bsum="$(_ci_sha256_hex < "${bin}")" || return 2
+    sev="$(_ci_variable CI_TRIVY_SEVERITY)" || return 2
+    scn="$(_ci_variable CI_TRIVY_SCANNERS)" || return 2
+    ignore="$(_ci_repo_path CI_TRIVY_IGNORE)" || return 2
+    if [ -f "${ignore}" ]; then
+        isum="$(_ci_sha256_hex < "${ignore}")" || return 2
+    fi
+    printf '%s\n' "$1" "${bsum}" "${db}" "${sev}" "${scn}" "${isum}" | _ci_sha256_hex
+}
+
+# What: read (has) or write the clean-scan mark of a pair.
+# Why: one ref per pair, like the verified mark.
+# From: Issue #1683 | PR #1858
+_ci_scan_mark() {
+    local prefix ref note
+    prefix="$(_ci_variable CI_SCANNED_REF)" || return 2
+    ref="${prefix}/$1-${2//\//-}"
+    note="scanned $1 $2 $3 $4"
+    if [ "$5" = has ]; then
+        _ci_mark_has "${ref}" "${note}"
+        return
+    fi
+    if [ "${PR_IS_FORK:-false}" = true ]; then
+        ci_log "[CI-INFO-SCAN-0046]" "service=\"$1\" platform=\"$2\" reason=\"fork PR: the token cannot write refs; no scan mark\""
+        return 0
+    fi
+    _ci_mark_write "${ref}" "${note}" "${note}" "[CI-ERROR-SCAN-0045]" \
+        "service=\"$1\" platform=\"$2\" digest=\"$3\" reason=\"scan mark not written\""
 }
 
 # What: trivy image argv for one scan, one item per line

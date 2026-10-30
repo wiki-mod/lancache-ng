@@ -314,15 +314,19 @@ jobs:
     runs-on: ${{ needs.platform.outputs.runner }}
     timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['scan'] }}
     container: *bt_platform
-    # What: the scan files and closes its status issues.
-    # Why: issues: write only here; packages stay read.
-    # From: Issue #1683 | PR #1912
+    # What: status issues and the clean-scan mark ref.
+    # Why: §30: the mark spares a rescan; packages read.
+    # From: Issue #1683 | PR #1858
     permissions:
-      contents: read
+      contents: write
       packages: read
       issues: write
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # What: a fork PR token cannot write the scan mark.
+      # Why: ci.sh logs it and writes no mark then.
+      # From: Issue #1683 | PR #1858
+      PR_IS_FORK: ${{ github.event.pull_request.head.repo.fork }}
     outputs:
       passed: ${{ steps.scan.outputs.passed }}
     steps:

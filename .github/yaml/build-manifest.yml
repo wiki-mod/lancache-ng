@@ -1389,6 +1389,10 @@ ci_variables:
   # Why: only a digest a build verified may be accepted.
   # From: Issue #1683 | PR #1912
   CI_VERIFIED_REF: refs/ci/verified
+  # What: ref prefix of the clean-scan marks per pair.
+  # Why: §30: same scan identity, same result; no rescan.
+  # From: Issue #1683 | PR #1858
+  CI_SCANNED_REF: refs/ci/scanned
   # What: ref prefix of the last green run mark per PR.
   # Why: the same tree and digests need no second run.
   # From: Issue #1683 | PR #1858
