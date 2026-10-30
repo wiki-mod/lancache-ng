@@ -2595,23 +2595,24 @@ _ci_content_id_row() {
     path="${line%%$'\t'*}"
     oid="${line#*$'\t'}"
     if g="$(_ci_norm_grammar "${path}")"; then
-        # What: one id per grammar, mode and blob.
-        # Why: A3: a blob never changes; refs share it.
+        # What: a build id drops Rust cfg(test) items.
+        # Why: 11.4: a test change builds no container.
+        # From: Issue #1683 | PR #1912
+        view=keep
+        [ "${mode}" != build ] || view=drop
+        # What: one id per grammar, view and blob.
+        # Why: A3: only Rust ids depend on the mode.
         # From: Issue #1683 | PR #1858
-        memo="content-id-${g}-${mode:-plain}-${oid}"
+        [ "${g}" = rust ] || view=all
+        memo="content-id-${g}-${view}-${oid}"
         if id="$(_ci_job_memo_get "${memo}")"; then
             printf '%s\t%s\n' "${path}" "${id}"
             return 0
         fi
-        # What: a build id drops Rust cfg(test) items.
-        # Why: 11.4: a test change builds no container.
-        # From: Issue #1683 | PR #1912
         if [ "${g}" = rust ]; then
             # What: both Rust views read the items memo.
             # Why: A3: plan parsed each Rust blob twice.
             # From: Issue #1683 | PR #1858
-            view=keep
-            [ "${mode}" != build ] || view=drop
             if items="$(_ci_listing_items "${line}" "${ref}" "${view}")"; then
                 norm="$(_ci_rust_norm_items "${items}")" || return 2
             else
