@@ -3818,16 +3818,6 @@ fn is_custom_option(option: &Value) -> bool {
         && option.get("data").is_some_and(Value::is_string)
 }
 
-// What: split a Kea option list at commas and spaces.
-// Why: Kea writes commas; operators paste whitespace lists.
-// From: Issue #1683 | PR #1858
-fn split_list(raw: &str) -> Vec<String> {
-    raw.split(|c: char| c == ',' || c.is_whitespace())
-        .filter(|item| !item.is_empty())
-        .map(str::to_string)
-        .collect()
-}
-
 // What: a subnet4 entry as the page read-model.
 // Why: options are found by name or code; both are legal.
 // From: Issue #1683 | PR #1858
@@ -3845,7 +3835,8 @@ fn read_subnet(subnet: &Value, default_lease: u32) -> Subnet {
             .map_or("", |o| text_of(o, "data", ""))
             .to_string()
     };
-    let dns = split_list(&option(OPTION_DNS));
+    let dns_text = option(OPTION_DNS);
+    let dns: Vec<&str> = config::list_items(&dns_text).collect();
     let custom_options = subnet
         .get("option-data")
         .and_then(Value::as_array)
@@ -3865,8 +3856,8 @@ fn read_subnet(subnet: &Value, default_lease: u32) -> Subnet {
         pool_start: pool_start.trim().to_string(),
         pool_end: pool_end.trim().to_string(),
         gateway: option(OPTION_ROUTERS),
-        dns_primary: dns.first().cloned().unwrap_or_default(),
-        dns_secondary: dns.get(1).cloned().unwrap_or_default(),
+        dns_primary: dns.first().copied().unwrap_or_default().to_string(),
+        dns_secondary: dns.get(1).copied().unwrap_or_default().to_string(),
         ntp_servers: option(OPTION_NTP),
         // What: default lease time if the subnet sets none.
         // Why: the page shows what dhcp would hand out.
@@ -4120,7 +4111,7 @@ fn validate_subnet(f: &Fields, limits: &LeaseLimits) -> Result<(u32, (u32, u32))
     // Why: a list of separators only names no server.
     // From: Issue #1683 | PR #1912
     let ntp = f.get("ntp_servers");
-    if !ntp.is_empty() && split_list(ntp).is_empty() {
+    if !ntp.is_empty() && config::list_items(ntp).next().is_none() {
         return Err("Invalid NTP servers: use a list of addresses or host names.".into());
     }
     // What: a set domain must be a plain DNS name.
@@ -4148,7 +4139,7 @@ fn validate_subnet(f: &Fields, limits: &LeaseLimits) -> Result<(u32, (u32, u32))
 // From: Issue #670
 async fn resolve_ntp_servers(raw: &str) -> Result<String, String> {
     let mut resolved = Vec::new();
-    for entry in split_list(raw) {
+    for entry in config::list_items(raw) {
         let address = match entry.parse::<Ipv4Addr>() {
             Ok(address) => address,
             // What: reject non-address dotted digits.
