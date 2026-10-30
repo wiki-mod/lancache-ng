@@ -3599,7 +3599,7 @@ PROG
     # What: sort the merged record set deterministically.
     # Why: same inputs -> same blob; §26.4 idempotency.
     # From: Issue #1683 | PR #1858
-    merged="$(_ci_capture 0 awk 'NF>0' <<< "${kept}"$'\n'"${new}")" || return 3
+    merged="$(_ci_nonblank_lines "${kept}"$'\n'"${new}")" || return 3
     merged="$(_ci_capture 0 env LC_ALL=C sort -u <<< "${merged}")" || return 3
     # What: an unchanged record set writes no commit.
     # Why: a rerun converges on the same ref (§26.4).
