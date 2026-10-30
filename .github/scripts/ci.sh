@@ -3576,10 +3576,17 @@ _ci_ledger_upsert() {
     # Why: a refresh record is a value, not an acceptance.
     # From: Issue #1683 | PR #1858
     if [ "${mode}" != replace ]; then
-        conflict="$(_ci_capture 0 awk -F'\t' "$(cat <<'PROG'
-            NF > 0 { if (($1 in seen) && seen[$1] != $0) print $1; seen[$1] = $0 }
-PROG
-            )" <<< "${blob}"$'\n'"${new}")" || return 3
+        local -A seen=()
+        local line key
+        while IFS= read -r line; do
+            [ -n "${line}" ] || continue
+            key="k${line%%$'\t'*}"
+            if [ -n "${seen[${key}]+x}" ] && [ "${seen[${key}]}" != "${line}" ]; then
+                conflict="${conflict}${key#k}"$'\n'
+            fi
+            seen[${key}]="${line}"
+        done <<< "${blob}"$'\n'"${new}"
+        conflict="${conflict%$'\n'}"
     fi
     if [ -n "${conflict}" ]; then
         ci_error "[CI-ERROR-LEDGER-0006]" "ref=\"${ledger_ref}\" reason=\"conflicting records for one identity; refusing to write\"" "${conflict}"
