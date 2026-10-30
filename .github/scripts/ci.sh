@@ -812,33 +812,41 @@ _ci_toolchain_target() {
 # Why: One SOT index, no per-block duplicate.
 # From: Issue #1683 | PR #1858
 _ci_block_entry_field() {
-    local block="$1" entry="$2" field="$3" kp p="" ctx
-    ctx="block=\"${block}\" entry=\"${entry}\" field=\"${field}\" manifest=\"${CI_MANIFEST}\" reason=\"SOT field unreadable\""
-    if ! _ci_sot_view "${block}${entry:+/${entry}}" kp; then
-        ci_error "[CI-ERROR-CORE-0107]" "${ctx}" "${_CI_SOT_RAW_ERR}"
+    local _ci_bf_block="$1" _ci_bf_entry="$2" _ci_bf_field="$3" _ci_bf_var="${4:-}"
+    local _ci_bf_kp _ci_bf_p="" _ci_bf_ctx
+    # What: $4 names a variable; it gets the value.
+    # Why: A3: a $(...) per SOT read cost one fork, 2-6 ms.
+    # From: Issue #1683 | PR #1858
+    [ -z "${_ci_bf_var}" ] || printf -v "${_ci_bf_var}" '%s' ""
+    _ci_bf_ctx="block=\"${_ci_bf_block}\" entry=\"${_ci_bf_entry}\" field=\"${_ci_bf_field}\" manifest=\"${CI_MANIFEST}\" reason=\"SOT field unreadable\""
+    if ! _ci_sot_view "${_ci_bf_block}${_ci_bf_entry:+/${_ci_bf_entry}}" _ci_bf_kp; then
+        ci_error "[CI-ERROR-CORE-0107]" "${_ci_bf_ctx}" "${_CI_SOT_RAW_ERR}"
         return 2
     fi
     # What: entry="" reads a block-level scalar.
     # Why: base_images has no entry level; one reader.
     # From: Issue #1683 | PR #1858
-    if [ -z "${entry}" ]; then
-        [ "${_CI_SOT["${kp}k:${block}"]:-}" != c ] || p="${block}/${field}"
-    elif [ "${_CI_SOT["${kp}k:${block}/${entry}"]:-}" = c ]; then
-        p="${_CI_SOT["${kp}f:${block}/${entry}/${field}"]:-}"
+    if [ -z "${_ci_bf_entry}" ]; then
+        [ "${_CI_SOT["${_ci_bf_kp}k:${_ci_bf_block}"]:-}" != c ] || _ci_bf_p="${_ci_bf_block}/${_ci_bf_field}"
+    elif [ "${_CI_SOT["${_ci_bf_kp}k:${_ci_bf_block}/${_ci_bf_entry}"]:-}" = c ]; then
+        _ci_bf_p="${_CI_SOT["${_ci_bf_kp}f:${_ci_bf_block}/${_ci_bf_entry}/${_ci_bf_field}"]:-}"
     fi
-    [ -n "${p}" ] && [ -n "${_CI_SOT["${kp}k:${p}"]+set}" ] || return 0
-    [ -z "${_CI_SOT["${kp}v:${p}"]}" ] || printf '%s\n' "${_CI_SOT["${kp}v:${p}"]}"
+    [ -n "${_ci_bf_p}" ] && [ -n "${_CI_SOT["${_ci_bf_kp}k:${_ci_bf_p}"]+set}" ] || return 0
+    if [ -n "${_ci_bf_var}" ]; then
+        printf -v "${_ci_bf_var}" '%s' "${_CI_SOT["${_ci_bf_kp}v:${_ci_bf_p}"]}"
+        return 0
+    fi
+    [ -z "${_CI_SOT["${_ci_bf_kp}v:${_ci_bf_p}"]}" ] || printf '%s\n' "${_CI_SOT["${_ci_bf_kp}v:${_ci_bf_p}"]}"
 }
 
 # What: read entry fields: block entry field var ... pairs.
 # Why: one owner for the field-by-field SOT read.
 # From: Issue #1683 | PR #1912
 _ci_block_entry_fields() {
-    local block="$1" entry="$2" v
+    local _ci_bfs_block="$1" _ci_bfs_entry="$2"
     shift 2
     while [ "$#" -gt 0 ]; do
-        v="$(_ci_block_entry_field "${block}" "${entry}" "$1")" || return 2
-        printf -v "$2" '%s' "${v}"
+        _ci_block_entry_field "${_ci_bfs_block}" "${_ci_bfs_entry}" "$1" "$2" || return 2
         shift 2
     done
 }
@@ -866,7 +874,7 @@ _ci_block_entry_list() {
 # From: Issue #1683
 ci_service_field() {
     local v
-    v="$(_ci_block_entry_field "services" "$1" "$2")" || return 2
+    _ci_block_entry_field "services" "$1" "$2" v || return 2
     [ -n "${v}" ] && { printf '%s\n' "${v}"; return 0; }
     _ci_block_entry_field "build_toolchain" "$1" "$2"
 }
@@ -12061,8 +12069,15 @@ _ci_variable() {
 # Why: Fund 94: workflows pass each var by name (SOT).
 # From: Issue #1683 | PR #1912
 _ci_variable_env() {
-    local name="$1"
-    printf '%s\n' "${!name:-}"
+    local _ci_ve_name="$1"
+    # What: $2 names a variable; it gets the value.
+    # Why: A3: no fork per variable read in a hot path.
+    # From: Issue #1683 | PR #1858
+    if [ -n "${2:-}" ]; then
+        printf -v "$2" '%s' "${!_ci_ve_name:-}"
+        return 0
+    fi
+    printf '%s\n' "${!_ci_ve_name:-}"
 }
 
 # What: env, then the SOT default.
@@ -12070,8 +12085,8 @@ _ci_variable_env() {
 # From: Issue #1683 | PR #1858
 _ci_variable_value() {
     local name="$1" val=""
-    val="$(_ci_variable_env "${name}")" || return 2
-    [ -n "${val}" ] || val="$(_ci_block_entry_field ci_variables "" "${name}")" || return 2
+    _ci_variable_env "${name}" val
+    [ -n "${val}" ] || _ci_block_entry_field ci_variables "" "${name}" val || return 2
     [ -n "${val}" ] || return 1
     printf '%s\n' "${val}"
 }
