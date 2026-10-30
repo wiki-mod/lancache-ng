@@ -1398,10 +1398,15 @@ _CI_CALL_KEY="$$-${EPOCHREALTIME/./}"
 # Why: one RUNNER_TEMP memo owner; GitHub clears it.
 # From: Issue #1683 | PR #1858
 _ci_job_memo_get() {
-    if [ -z "${RUNNER_TEMP:-}" ] || [ ! -s "${RUNNER_TEMP}/$1" ]; then
-        return 1
-    fi
+    _ci_job_memo_has "$1" || return 1
     printf '%s\n' "$(<"${RUNNER_TEMP}/$1")"
+}
+
+# What: rc 0 if memo $1 of this job is kept.
+# Why: A3: a check without a fork; get prints it.
+# From: Issue #1683 | PR #1858
+_ci_job_memo_has() {
+    [ -n "${RUNNER_TEMP:-}" ] && [ -s "${RUNNER_TEMP}/$1" ]
 }
 
 # What: keep value $2 as memo $1 of this job.
@@ -2422,13 +2427,22 @@ _ci_rust_norm_items() {
 # Why: A§12.5 v1 drops comment and blank lines (Test B/C).
 # From: Issue #1683 | PR #1858
 _ci_norm_grammar() {
+    local _ci_ng
     case "${1##*/}" in
-        *.rs) printf 'rust\n' ;;
-        *.sh|*.bash|*.bats) printf 'shell\n' ;;
-        Dockerfile|Dockerfile.*|*.Dockerfile) printf 'dockerfile\n' ;;
-        *.toml) printf 'toml\n' ;;
+        *.rs) _ci_ng=rust ;;
+        *.sh|*.bash|*.bats) _ci_ng=shell ;;
+        Dockerfile|Dockerfile.*|*.Dockerfile) _ci_ng=dockerfile ;;
+        *.toml) _ci_ng=toml ;;
         *) return 1 ;;
     esac
+    # What: $2 names a variable that takes the grammar.
+    # Why: A3: a row loop forked once per file for it.
+    # From: Issue #1683 | PR #1858
+    if [ -n "${2:-}" ]; then
+        printf -v "$2" '%s' "${_ci_ng}"
+    else
+        printf '%s\n' "${_ci_ng}"
+    fi
 }
 
 # What: awk hd_word/hd_scan: the word a << opens.
@@ -2459,16 +2473,41 @@ _CI_AWK_HEREDOC_WORD="$(cat <<'PROG'
 PROG
 )"
 
-# What: v1 form of $2 in grammar $1; rc 1 = unsafe, use raw.
-# Why: string and heredoc lines stay; any doubt keeps raw.
+# What: awk v1 normalizer; b=1 reads one file per blob.
+# Why: A3: one awk for all blobs of a listing; one program.
 # From: Issue #1683 | PR #1858
-_ci_norm_content() {
-    local out rc=0
-    if [ "$1" = rust ]; then
-        _ci_rust_norm "$2" keep
-        return "$?"
-    fi
-    out="$(awk -v g="$1" "${_CI_AWK_HEREDOC_WORD}"'
+_CI_AWK_NORM_V1="$(cat <<'PROG'
+        # What: batch: a new blob file; g from its name.
+        # Why: each blob starts with fresh lexer state.
+        # From: Issue #1683 | PR #1858
+        function start(f,  n, p) {
+            cur = f; n = split(f, p, "/"); g = p[n]; sub(/\..*/, "", g)
+            outf = f; sub(/\.in$/, ".out", outf)
+            q = ""; hd = ""; tab = 0; past = 0; subst = 0; ticks = 0; bad = 0
+            dead = 0; pend = 0; seen = 0; v = 0
+        }
+        # What: rc c ends one text; batch marks the blob.
+        # Why: one blob in doubt keeps raw, not the batch.
+        # From: Issue #1683 | PR #1858
+        function stop(c) { if (!b) exit c; if (!dead) v = c; dead = 1 }
+        # What: print a line; batch drops trailing blanks.
+        # Why: as $( ) strips them for one text (same id).
+        # From: Issue #1683 | PR #1858
+        function emit(s) {
+            if (!b) { print s; return }
+            if (s == "") { pend++; return }
+            for (; pend > 0; pend--) print "" > outf
+            print s > outf; seen = 1
+        }
+        # What: batch: verdict line "file TAB rc" per blob.
+        # Why: the caller hashes rc 0, keeps raw for rc 1.
+        # From: Issue #1683 | PR #1858
+        function finish() {
+            if (!dead && (q != "" || hd != "")) v = 1
+            if (!seen) print "" > outf
+            close(outf)
+            print cur "\t" v
+        }
         function lex(l,   i, n, c, k) {
             n = length(l)
             for (i = 1; i <= n; i++) {
@@ -2488,43 +2527,60 @@ _ci_norm_content() {
                 if ((k = hd_word(substr(l, i)))) { hd = hdw; tab = hdt; i += k - 1 }
             }
         }
+        b && FNR == 1 { if (cur != "") finish(); start(FILENAME) }
+        dead { next }
         { sub(/\r$/, "") }
         hd != "" {
             t = $0
             if (tab) sub(/^\t+/, "", t)
-            print
+            emit($0)
             if (t == hd) hd = ""
             next
         }
         g == "dockerfile" {
             k = $0
             if (!past && sub(/^#[[:space:]]*/, "", k) && sub(/[[:space:]]*=.*/, "", k) \
-                && tolower(k) ~ /^(syntax|escape|check)$/) { print; next }
+                && tolower(k) ~ /^(syntax|escape|check)$/) { emit($0); next }
             past = 1
             if ($0 ~ /^[[:space:]]*(#|$)/) next
             if (hd_scan($0)) { hd = hdw; tab = hdt }
-            print
+            emit($0)
             next
         }
         g == "shell" {
-            if (FNR == 1 && $0 ~ /^#!/) { print; next }
-            if (q == "" && $0 ~ /^[[:space:]]*#[[:space:]]*shellcheck[[:space:]]/) { print; next }
+            if (FNR == 1 && $0 ~ /^#!/) { emit($0); next }
+            if (q == "" && $0 ~ /^[[:space:]]*#[[:space:]]*shellcheck[[:space:]]/) { emit($0); next }
             if (q == "" && $0 ~ /^[[:space:]]*(#|$)/) next
             lex($0)
-            if (subst || ticks % 2 || (bad && q != "")) exit 1
+            if (subst || ticks % 2 || (bad && q != "")) { stop(1); next }
             subst = 0; ticks = 0; bad = 0
-            print
+            emit($0)
             next
         }
         g == "toml" {
-            if ($0 ~ /"""|\047\047\047/) exit 1
+            if ($0 ~ /"""|\047\047\047/) { stop(1); next }
             if ($0 ~ /^[[:space:]]*(#|$)/) next
-            print
+            emit($0)
             next
         }
-        { exit 3 }
-        END { if (q != "" || hd != "") exit 1 }
-    ' <<< "$2" 2>&1)" || rc=$?
+        { stop(3); next }
+        END {
+            if (b) { if (cur != "") finish(); exit 0 }
+            if (q != "" || hd != "") exit 1
+        }
+PROG
+)"
+
+# What: v1 form of $2 in grammar $1; rc 1 = unsafe, use raw.
+# Why: string and heredoc lines stay; any doubt keeps raw.
+# From: Issue #1683 | PR #1858
+_ci_norm_content() {
+    local out rc=0
+    if [ "$1" = rust ]; then
+        _ci_rust_norm "$2" keep
+        return "$?"
+    fi
+    out="$(awk -v g="$1" "${_CI_AWK_HEREDOC_WORD}${_CI_AWK_NORM_V1}" <<< "$2" 2>&1)" || rc=$?
     _ci_awk_verdict "[CI-ERROR-IDENTITY-0008]" "grammar=\"$1\" rc=${rc} reason=\"v1 normalizer failed\"" "${rc}" "${out}"
 }
 
@@ -2581,10 +2637,148 @@ _ci_tracked_content_ids() {
     local root="$1" ref="${2:-}" mode="${3:-}" listing line
     listing="$(_ci_tracked_listing "${root}" "${ref}")" || return 2
     [ -n "${listing}" ] || return 0
+    _ci_content_id_prefill "${listing}" "${ref}" || return 2
     while IFS= read -r line; do
         [ -n "${line}" ] || continue
         _ci_content_id_row "${line}" "${ref}" "${mode}" || return 2
     done <<< "${listing}"
+}
+
+# What: set variable $1 to the content id memo name.
+# Why: one name for the row and the batch fill.
+# From: Issue #1683 | PR #1858
+_ci_content_id_key() {
+    printf -v "$1" 'content-id-%s-%s-%s' "$2" "$3" "$4"
+}
+
+# What: awk: cut a cat-file --batch file into blob files.
+# Why: one file per blob, as $( ) and <<< hand it on.
+# From: Issue #1683 | PR #1858
+_CI_AWK_BATCH_CUT="$(cat <<'PROG'
+    # What: write the blob without trailing blank lines.
+    # Why: $( ) strips trailing LF; <<< adds one LF.
+    # From: Issue #1683 | PR #1858
+    function done(  i, last) {
+        last = 0
+        for (i = 1; i <= m; i++) if (line[i] != "") last = i
+        for (i = 1; i <= last; i++) printf "%s\n", line[i] > f
+        if (!last) printf "\n" > f
+        close(f); state = 0; m = 0
+    }
+    NR == FNR { name[++n] = $0; next }
+    state == 0 {
+        if (++i > n) { bad = "extra blob"; exit }
+        o = name[i]; sub(/^[^.]*\./, "", o)
+        if ($0 !~ ("^" o " blob [0-9]+$")) { bad = "header " i; exit }
+        size = $3 + 0; got = 0; m = 0; f = dir "/" name[i] ".in"
+        state = size ? 1 : 2
+        next
+    }
+    state == 1 {
+        got += length($0) + 1
+        line[++m] = $0
+        if (got == size) state = 2
+        else if (got == size + 1) done()
+        else if (got > size + 1) { bad = "size " i; exit }
+        next
+    }
+    state == 2 { if ($0 != "") { bad = "end " i; exit } done(); next }
+    END {
+        if (bad == "" && (state != 0 || i != n)) bad = "short"
+        print (bad == "" ? "ok" : bad)
+    }
+PROG
+)"
+
+# What: content id memos of a listing's plain-grammar blobs.
+# Why: A3: one git read, one awk, one hash for all blobs.
+# From: Issue #1683 | PR #1858
+_ci_content_id_prefill() {
+    local listing="$1" ref="$2" line path oid g key dir blist="" oids="" n=0 split
+    local out f v sums sum id rest
+    local -A fillkey=() fillid=()
+    local -a ins=() outs=()
+    [ -n "${RUNNER_TEMP:-}" ] || return 0
+    while IFS= read -r line; do
+        [ -n "${line}" ] || continue
+        path="${line%%$'\t'*}"
+        oid="${line#*$'\t'}"
+        _ci_norm_grammar "${path}" g || continue
+        [ "${g}" != rust ] || continue
+        [ -z "${fillkey[${g}.${oid}]:-}" ] || continue
+        _ci_content_id_key key "${g}" all "${oid}"
+        ! _ci_job_memo_has "${key}" || continue
+        fillkey["${g}.${oid}"]="${key}"
+        blist+="${g}.${oid}"$'\n'
+        oids+="${oid}"$'\n'
+        n=$((n + 1))
+    done <<< "${listing}"
+    # What: one blob costs the row read no more.
+    # Why: the batch pays a fixed set of commands.
+    # From: Issue #1683 | PR #1858
+    [ "${n}" -gt 1 ] || return 0
+    dir="${RUNNER_TEMP}/norm-${_CI_CALL_KEY}-${BASHPID}"
+    _ci_capture 0 mkdir -p -- "${dir}" || return 2
+    printf '%s' "${blist}" > "${dir}/names" || return 2
+    printf '%s' "${oids}" > "${dir}/oids" || return 2
+    _ci_run -o "${dir}/batch" -s "[CI-ERROR-IDENTITY-0007]" "ref=\"${ref}\" reason=\"identity input not readable\"" \
+        git -C "${CI_REPO_ROOT}" cat-file --batch < "${dir}/oids" || return 2
+    # What: drop NUL bytes before the cut.
+    # Why: a NUL blob then misses its size: rows instead.
+    # From: Issue #1683 | PR #1858
+    _ci_run -o "${dir}/text" -s "[CI-ERROR-IDENTITY-0023]" "ref=\"${ref}\" reason=\"blob batch not read\"" \
+        tr -d '\000' < "${dir}/batch" || return 2
+    # What: C locale: length() counts bytes, as git does.
+    # Why: the cut follows the byte size in each header.
+    # From: Issue #1683 | PR #1858
+    split="$(LC_ALL=C _ci_capture 0 awk -v dir="${dir}" "${_CI_AWK_BATCH_CUT}" "${dir}/names" "${dir}/text")" || return 2
+    # What: a cut out of step leaves the rows to read alone.
+    # Why: a dropped NUL shifts the byte count of its blob.
+    # From: Issue #1683 | PR #1858
+    if [ "${split}" != ok ]; then
+        ci_log "[CI-INFO-IDENTITY-0024]" "ref=\"${ref}\" blobs=${n} split=\"${split}\" reason=\"batch not used; rows read one by one\""
+        _ci_capture 0 rm -rf -- "${dir}" || return 2
+        return 0
+    fi
+    while IFS= read -r line; do
+        [ -n "${line}" ] || continue
+        ins+=("${line}.in")
+    done <<< "${blist}"
+    out="$(cd -- "${dir}" && _ci_capture 0 awk -v b=1 "${_CI_AWK_HEREDOC_WORD}${_CI_AWK_NORM_V1}" "${ins[@]}")" || return 2
+    while IFS=$'\t' read -r f v; do
+        [ -n "${f}" ] || continue
+        case "${v}" in
+            0) outs+=("${f%.in}.out") ;;
+            1) fillid["${f%.in}"]=raw ;;
+            *)
+                ci_log "[CI-ERROR-IDENTITY-0023]" "ref=\"${ref}\" blob=\"${f%.in}\" rc=${v} reason=\"v1 normalizer failed\""
+                return 2
+                ;;
+        esac
+    done <<< "${out}"
+    if [ "${#outs[@]}" -gt 0 ]; then
+        sums="$(cd -- "${dir}" && _ci_capture 0 sha256sum -- "${outs[@]}")" || return 2
+        while IFS= read -r line; do
+            [ -n "${line}" ] || continue
+            sum="${line%% *}"
+            rest="${line#* }"
+            rest="${rest# }"
+            fillid["${rest%.out}"]="${sum}"
+        done <<< "${sums}"
+    fi
+    # What: every blob needs a verdict and an id, else fail.
+    # Why: a lost line must not drop a memo silently.
+    # From: Issue #1683 | PR #1858
+    for f in "${!fillkey[@]}"; do
+        id="${fillid[${f}]:-}"
+        if [ -z "${id}" ]; then
+            ci_log "[CI-ERROR-IDENTITY-0023]" "ref=\"${ref}\" blob=\"${f}\" reason=\"no verdict or hash for the blob\""
+            return 2
+        fi
+        [ "${id}" != raw ] || id="${f#*.}"
+        _ci_job_memo_put "${fillkey[${f}]}" "${id}" || return 2
+    done
+    _ci_capture 0 rm -rf -- "${dir}" || return 2
 }
 
 # What: path TAB normalized id of one listing row.
@@ -2594,7 +2788,7 @@ _ci_content_id_row() {
     local line="$1" ref="$2" mode="$3" path oid blob norm g nrc=0 memo id items view
     path="${line%%$'\t'*}"
     oid="${line#*$'\t'}"
-    if g="$(_ci_norm_grammar "${path}")"; then
+    if _ci_norm_grammar "${path}" g; then
         # What: a build id drops Rust cfg(test) items.
         # Why: 11.4: a test change builds no container.
         # From: Issue #1683 | PR #1912
@@ -2604,7 +2798,7 @@ _ci_content_id_row() {
         # Why: A3: only Rust ids depend on the mode.
         # From: Issue #1683 | PR #1858
         [ "${g}" = rust ] || view=all
-        memo="content-id-${g}-${view}-${oid}"
+        _ci_content_id_key memo "${g}" "${view}" "${oid}"
         if id="$(_ci_job_memo_get "${memo}")"; then
             printf '%s\t%s\n' "${path}" "${id}"
             return 0
