@@ -1965,13 +1965,16 @@ ci_cmd_plan_matrix() {
             # Why: later jobs read it; none recomputes.
             # From: Issue #1683 | PR #1912
             _ci_plan_record "${service}" "${platform}" || return "$?"
-            _ci_registry_probe_start "${service}" "${platform}" || return "$?"
             pairs+="${service} ${platform} ${svc_type}"$'\n'
         done <<< "${plats}"
     done
-    # What: each pair reads the probe started for it.
-    # Why: A3: 14 probes ran one after another, 13.4 s.
+    # What: all pair probes start after the ids, at once.
+    # Why: A3: beside the id work they slowed it (+7 s).
     # From: Issue #1683 | PR #1858
+    while read -r service platform svc_type; do
+        [ -n "${service}" ] || continue
+        _ci_registry_probe_start "${service}" "${platform}" || return "$?"
+    done <<< "${pairs}"
     _ci_registry_probe_collect
     while read -r service platform svc_type; do
         [ -n "${service}" ] || continue
