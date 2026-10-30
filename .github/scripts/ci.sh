@@ -18592,10 +18592,12 @@ _ci_check_shellcheck() {
     # What: one shellcheck process per file.
     # Why: one call on all files needs ~5 GB peak RAM.
     # From: Issue #1683 | PR #1858
-    local sc_out="" sc_one sc_rc sc_found=0 sc_broken=0
+    local sc_out="" sc_one sc_rc sc_found=0 sc_broken=0 t0
     for f in "${files[@]}"; do
         sc_rc=0
+        t0="${EPOCHREALTIME/./}"
         sc_one="$(shellcheck --norc "${f}" 2>&1)" || sc_rc=$?
+        _ci_cmd_time "${t0}" "${sc_rc}" shellcheck
         # What: rc 1 = findings; any other rc = no result.
         # Why: a killed run (137) must not read as findings.
         # From: Issue #1683 | PR #1858
@@ -18613,7 +18615,7 @@ _ci_check_shellcheck() {
         ci_error "[CI-ERROR-CHECK-0056]" "reason=\"shellcheck found issues\"" "${sc_out}"
         return 1
     fi
-    printf 'shellcheck=clean files=%s\n' "${#files[@]}"
+    printf 'shellcheck=clean files=%s checked="%s"\n' "${#files[@]}" "${files[*]}"
 }
 
 # What: actionlint workflow files (§98 exception).
@@ -18621,11 +18623,13 @@ _ci_check_shellcheck() {
 # From: Issue #1683
 _ci_check_actionlint() {
     local repo_root="${1:-${CI_REPO_ROOT:-.}}" out rc=0
-    local wf
+    local wf t0
     local -a wfs=()
     wf="$(_ci_repo_path CI_WORKFLOW_DIR "${repo_root}")" || return 2
     _ci_workflow_files wfs "${wf}" || return 2
+    t0="${EPOCHREALTIME/./}"
     out="$(actionlint "${wfs[@]}" 2>&1)" || rc=$?
+    _ci_cmd_time "${t0}" "${rc}" actionlint
     if [ "${rc}" -ne 0 ]; then
         ci_error "[CI-ERROR-CHECK-0057]" "reason=\"actionlint found issues\"" "${out}"
         return 1
@@ -18634,7 +18638,7 @@ _ci_check_actionlint() {
     # Why: AG-INT-002: raw evidence of a passed run too.
     # From: Issue #1683 | PR #1858
     [ -z "${out}" ] || printf 'raw:\n%s\n' "${out}" >&2
-    printf 'actionlint=clean\n'
+    printf 'actionlint=clean files=%s checked="%s"\n' "${#wfs[@]}" "${wfs[*]}"
 }
 
 # What: Fail on a vulnerable or yanked Rust dependency.
