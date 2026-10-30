@@ -119,18 +119,30 @@ ci_log() {
     printf '%s %s\n' "${message_id}" "$*" >&2
 }
 
+# What: name and start of the open log group.
+# Why: A7: each part of a step shows its own time.
+# From: Issue #1683 | PR #1858
+_CI_GROUP_NAME=""
+_CI_GROUP_T0=0
+
 # What: open a named log group; closes the open one.
 # Why: Fund 82: a long step shows its parts by name.
 # From: Issue #1683 | PR #1858
 ci_group() {
-    printf '::endgroup::\n::group::%s\n' "$*" >&2
+    ci_group_end
+    _CI_GROUP_NAME="$*"
+    _CI_GROUP_T0="${EPOCHREALTIME/./}"
+    printf '::group::%s\n' "$*" >&2
 }
 
-# What: close the open log group.
-# Why: an error or the step end must not stay folded.
+# What: close the open log group; log its time.
+# Why: no fold stays open; A7: one owner of part time.
 # From: Issue #1683 | PR #1858
 ci_group_end() {
     printf '::endgroup::\n' >&2
+    [ -n "${_CI_GROUP_NAME}" ] || return 0
+    ci_log "[CI-INFO-CORE-0158]" "group=\"${_CI_GROUP_NAME}\" ms=$(((${EPOCHREALTIME/./} - _CI_GROUP_T0) / 1000))"
+    _CI_GROUP_NAME=""
 }
 
 # What: Emit a command failure with its raw output.
@@ -3939,6 +3951,7 @@ ci_cmd_aggregate_stack() {
     # What: accept each built, verified pair; no scan wait.
     # Why: DoMe 30.10.: the nightly run scans once a day.
     # From: Issue #1683 | PR #1858
+    ci_group "aggregate: accept built and verified pairs"
     while read -r svc plat; do
         [ -n "${svc}" ] || continue
         drc=0; digest="$(_ci_built_digest "${svc}" "${plat}")" || drc=$?
@@ -3953,12 +3966,14 @@ ci_cmd_aggregate_stack() {
         passed="$(_ci_matrix_append "${passed}" service="${svc}" platform="${plat}")" || return 2
     done <<< "${pairs}"
     if [ "${passed}" != '[]' ]; then
+        ci_group "aggregate: record the accepted stack"
         ci_cmd_aggregate "${dir}" || return "$?"
         # What: the accepted pairs go to assemble.
         # Why: a red pair must not block the good ones.
         # From: Issue #1683 | PR #1858
         _ci_step_output "[CI-ERROR-AGGREGATE-0007]" passed "$(_ci_matrix_doc "${passed}")" || return 2
     fi
+    ci_group_end
     [ "${rc}" -eq 0 ] || ci_log "[CI-ERROR-AGGREGATE-0008]" "failed=\"${failed# }\" reason=\"these pairs were not accepted; the others were\""
     return "${rc}"
 }
@@ -4342,16 +4357,18 @@ ci_cmd_assemble_stack() {
         ci_error "[CI-ERROR-ASSEMBLE-0011]" "reason=\"CI_BUILD_MATRIX unreadable; no service assembled\"" "${svcs}"$'\n'"matrix: ${matrix}"
         return 2
     fi
-    # What: assembles all services, lists failures last
-    # Why: a service lacking a platform blocks no other one
+    # What: assembles each service in its own log group
+    # Why: one blocks no other; A7: parts show by name
     # From: Issue #1683 | PR #1912
     for svc in ${svcs}; do
+        ci_group "assemble: ${svc}"
         arc=0; ci_cmd_assemble "${svc}" || arc=$?
         if [ "${arc}" -ne 0 ]; then
             failed="${failed} ${svc}"
             [ "${arc}" -le "${rc}" ] || rc="${arc}"
         fi
     done
+    ci_group_end
     [ "${rc}" -eq 0 ] || ci_log "[CI-ERROR-ASSEMBLE-0012]" "failed=\"${failed# }\" reason=\"assemble failed for these services; the others were assembled\""
     return "${rc}"
 }
@@ -4368,9 +4385,14 @@ _ci_for_test_services() {
         ci_log "[CI-ERROR-TEST-0012]" "fn=\"${fn}\" reason=\"TEST_SERVICES empty; nothing would run\""
         return 2
     fi
+    # What: one timed log group per tested service.
+    # Why: A7 (Fund 82a): the step shows its parts by name.
+    # From: Issue #1683 | PR #1858
     for svc in ${list}; do
+        ci_group "test: ${svc}"
         "${fn}" "${svc}" || return "$?"
     done
+    ci_group_end
 }
 ci_cmd_test_stack() { _ci_for_test_services ci_cmd_test; }
 
@@ -6897,6 +6919,10 @@ ci_cmd_ship() {
         ci_log "[CI-ERROR-SHIP-0001]" "reason=\"service and platform args required\""
         return 2
     fi
+    # What: each ship part in its own timed log group.
+    # Why: A7 (Fund 82a): the step shows its parts by name.
+    # From: Issue #1683 | PR #1858
+    ci_group "ship: take build lock"
     _ci_build_lock_take "${service}" "${platform}" || return "$?"
     # What: exit 128 + signal number per signal.
     # Why: a TERM cancel must not read as INT.
@@ -6905,11 +6931,13 @@ ci_cmd_ship() {
     trap '_ci_ship_abort "${service}" "${platform}" 143' TERM
     _ci_ship_chain "${service}" "${platform}" || rc=$?
     trap - INT TERM
+    ci_group "ship: release build lock"
     _ci_build_lock_drop "${service}" "${platform}" || lrc=$?
     if [ "${lrc}" -ne 0 ]; then
         ci_log "[CI-ERROR-SHIP-0005]" "service=\"${service}\" platform=\"${platform}\" rc=${lrc} reason=\"build lock not released\""
         [ "${rc}" -ne 0 ] || rc=2
     fi
+    ci_group_end
     return "${rc}"
 }
 
@@ -6930,6 +6958,7 @@ ci_cmd_ship_release() {
 # From: Issue #1683 | PR #1858
 _ci_ship_chain() {
     local service="${1:-}" platform="${2:-}" out digest result
+    ci_group "ship: build or reuse"
     out="$(ci_cmd_build "${service}" "${platform}")" || return "$?"
     printf '%s\n' "${out}"
     result="$(_ci_record_field "${out}" result)" || return 2
@@ -6937,6 +6966,7 @@ _ci_ship_chain() {
     # Why: PRODUCED_UNVERIFIED needs verify, no rebuild
     # From: Issue #1683 | PR #1912
     if [ "${result}" = verify ]; then
+        ci_group "ship: verify and smoke"
         _ci_require_ghcr_auth || return "$?"
         digest="$(_ci_published_digest "${service}" "${platform}")" || {
             ci_log "[CI-ERROR-SHIP-0004]" "service=\"${service}\" platform=\"${platform}\" reason=\"no registry digest to verify\""
@@ -6955,7 +6985,9 @@ _ci_ship_chain() {
         ci_error "[CI-ERROR-SHIP-0003]" "service=\"${service}\" platform=\"${platform}\" reason=\"built image tag not derivable; no bake check, no publish\"" "${tag}"
         return 2
     fi
+    ci_group "ship: bake check"
     _ci_bake_check "${tag}" || return "$?"
+    ci_group "ship: publish"
     out="$(ci_cmd_publish "${service}" "${platform}")" || return "$?"
     printf '%s\n' "${out}"
     digest="$(_ci_record_field "${out}" published)" || return 2
@@ -6963,6 +6995,7 @@ _ci_ship_chain() {
         ci_error "[CI-ERROR-SHIP-0002]" "service=\"${service}\" platform=\"${platform}\" reason=\"publish reported no digest\"" "${out}"
         return 2
     fi
+    ci_group "ship: verify and smoke"
     _ci_verify_and_mark "${service}" "${digest}" "${platform}"
 }
 
@@ -8201,6 +8234,10 @@ _ci_ref_tip() {
 # From: Issue #1683
 ci_cmd_promote_ref() {
     local ref tip targets t head
+    # What: each promote part in its own timed log group.
+    # Why: A7 (Fund 82a): the step shows its parts by name.
+    # From: Issue #1683 | PR #1858
+    ci_group "promote: targets and gates"
     ref="$(_ci_promote_ref)" || return 2
     targets="$(_ci_promote_targets_for_ref)" || return "$?"
     if [ -z "${targets}" ]; then
@@ -8230,8 +8267,10 @@ ci_cmd_promote_ref() {
     fi
     while IFS= read -r t; do
         [ -n "${t}" ] || continue
+        ci_group "promote: ${t}"
         ci_cmd_promote "${t}" || return "$?"
     done <<< "${targets}"
+    ci_group_end
 }
 
 # =========================================================
@@ -11472,6 +11511,10 @@ _ci_validate_probes() {
 _ci_validate_stack() {
     local candidate="$1" reservation subnet holder project rc=0 up_out
     local net_ovr pin_ovr shared compose_copy state
+    # What: each validate part in its own timed log group.
+    # Why: A7 (Fund 82a): the step shows its parts by name.
+    # From: Issue #1683 | PR #1858
+    ci_group "validate: reserve a subnet"
     reservation="$(_ci_validate_reserve)" || rc=$?
     if [ "${rc}" -ne 0 ]; then
         [ "${rc}" -eq 2 ] || ci_log "[CI-ERROR-VALIDATE-0015]" "reason=\"no free validation /27 after slot retries\""
@@ -11484,6 +11527,7 @@ _ci_validate_stack() {
     # Why: isolate runs; never touch a host's real state.
     # From: Issue #1683
     shared="$(_ci_validate_shared_dir)" || { _ci_validate_release "${holder}"; return 2; }
+    ci_group "validate: stage state and compose"
     # What: the SOT fixture env for every compose call.
     # Why: no .env exists; compose reads the process env.
     # From: Issue #1683 | PR #1912
@@ -11519,10 +11563,18 @@ _ci_validate_stack() {
     fi
     if _ci_validate_net_override "${subnet}" > "${net_ovr}" \
         && _ci_validate_pin_override "${candidate}" > "${pin_ovr}"; then
+        ci_group "validate: stack up"
         if up_out="$(_ci_validate_up "${project}" "${net_ovr}" "${pin_ovr}" 2>&1)"; then
+            ci_group "validate: attach runner"
             _ci_validate_attach "${project}" || rc=$?
-            [ "${rc}" -ne 0 ] || _ci_validate_wait_healthy "${project}" || rc=$?
-            [ "${rc}" -eq 0 ] && { _ci_validate_probes "${project}" "${net_ovr}" "${pin_ovr}" || rc=$?; }
+            if [ "${rc}" -eq 0 ]; then
+                ci_group "validate: wait healthy"
+                _ci_validate_wait_healthy "${project}" || rc=$?
+            fi
+            if [ "${rc}" -eq 0 ]; then
+                ci_group "validate: probes"
+                _ci_validate_probes "${project}" "${net_ovr}" "${pin_ovr}" || rc=$?
+            fi
         elif [ "$(_ci_classify_failure "${up_out}" validate-net)" = collision ]; then
             ci_error "[CI-ERROR-VALIDATE-0016]" "reason=\"subnet/port collision after slot reservation\"" "${up_out}"
             rc=1
@@ -11533,8 +11585,10 @@ _ci_validate_stack() {
     else
         rc=$?
     fi
+    ci_group "validate: teardown"
     _ci_validate_teardown "${holder}" "${project}" || { [ "${rc}" -ne 0 ] || rc=2; }
     rm -f "${net_ovr}" "${pin_ovr}"
+    ci_group_end
     return "${rc}"
 }
 
@@ -11556,6 +11610,7 @@ _ci_validate_run() {
 # From: Issue #1683
 ci_cmd_validate() {
     local cand shared
+    ci_group "validate: host tools and stack candidate"
     _ci_validate_host_tools || return 2
     shared="$(_ci_validate_shared_dir)" || return 2
     printf 'validate shared_dir=%s\n' "${shared}"
@@ -18532,7 +18587,7 @@ _ci_check_cargo_audit() {
 ci_cmd_check_all() {
     local -a changed=() names=() skipped=() failed=() stopped=()
     _ci_collect_changed changed "$@" || return 2
-    local raw sub r rc=0 scope why state invoked=0 diff_seen="all files" keys t0
+    local raw sub r rc=0 scope why state invoked=0 diff_seen="all files" keys
     printf -v keys '%s\n' "${!CI_CHECKS[@]}"
     raw="$(_ci_capture 0 env LC_ALL=C sort <<< "${keys%$'\n'}")" || return 2
     mapfile -t names <<< "${raw}"
@@ -18556,7 +18611,6 @@ ci_cmd_check_all() {
         # Why: Fund 94: the old CI showed each check apart.
         # From: Issue #1683 | PR #1858
         case "${scope}" in job | plan) ;; *) ci_group "check: ${sub} (${scope})" ;; esac
-        t0="${EPOCHREALTIME/./}"
         # What: diff sees changed files; job runs alone.
         # Why: PR text runs as pr-meta, files here (§10).
         # From: Issue #1683 | PR #1912
@@ -18577,7 +18631,7 @@ ci_cmd_check_all() {
         else
             invoked=$((invoked + 1))
             ci_group_end
-            ci_log "[CI-INFO-CHECK-0206]" "check=\"${sub}\" scope=${scope} rc=${r} ms=$(((${EPOCHREALTIME/./} - t0) / 1000))"
+            ci_log "[CI-INFO-CHECK-0206]" "check=\"${sub}\" scope=${scope} rc=${r}"
         fi
         # What: name each check with a finding or a stop.
         # Why: the last line says which checks are red.
