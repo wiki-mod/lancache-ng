@@ -9036,7 +9036,7 @@ _ci_gc_roots() {
             out="${out}${kid#*=}"$'\n'
         done <<< "${kids}"
     done <<< "${pairs}"
-    out="$(_ci_capture 0 awk 'NF>0' <<< "${out}")" || return 2
+    out="$(_ci_nonblank_lines "${out}")" || return 2
     [ -z "${out}" ] || _ci_capture 0 env LC_ALL=C sort -u <<< "${out}"
 }
 
