@@ -2545,7 +2545,18 @@ _ci_identity_git() {
 # Why: one listing for content ids and the Rust reader.
 # From: Issue #1683
 _ci_tracked_listing() {
-    local root="$1" ref="${2:-}" raw listing empty
+    local root="$1" ref="${2:-}" raw listing empty memo="" key
+    # What: a commit's listing is kept for the job.
+    # Why: A3: plan listed one root per service and ref.
+    # From: Issue #1683 | PR #1858
+    if [[ "${ref}" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]; then
+        key="${root//%/%25}"
+        memo="listing-${ref}-${key//\//%2F}"
+        if listing="$(_ci_job_memo_get "${memo}")"; then
+            printf '%s\n' "${listing}"
+            return 0
+        fi
+    fi
     # What: git pathspec selects files in both modes alike.
     # Why: ls-tree ignores globs; diff-tree honours them.
     # From: Issue #1683
@@ -2557,7 +2568,10 @@ _ci_tracked_listing() {
         raw="$(_ci_identity_git "${root}" "" ls-files -s -- "${root}")" || return 2
         listing="$(_ci_capture 0 awk -F'\t' "NF { split(\$1, a, \" \"); print \$2 \"\\t\" a[2] }" <<< "${raw}")" || return 2
     fi
-    LC_ALL=C _ci_capture 0 sort <<< "${listing}"
+    listing="$(LC_ALL=C _ci_capture 0 sort <<< "${listing}")" || return 2
+    [ -n "${listing}" ] || return 0
+    [ -z "${memo}" ] || _ci_job_memo_put "${memo}" "${listing}" || return 2
+    printf '%s\n' "${listing}"
 }
 
 # What: Emit path-keyed content ids of tracked files.
