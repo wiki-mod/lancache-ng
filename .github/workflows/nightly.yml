@@ -158,6 +158,8 @@ jobs:
       identities: ${{ steps.plan.outputs.identities }}
       matrix: ${{ steps.plan.outputs.matrix }}
       any-build: ${{ steps.plan.outputs.any-build }}
+      any-runner: ${{ steps.plan.outputs.any-runner }}
+      runners: ${{ steps.plan.outputs.runners }}
     steps:
       - *bootstrap
       # What: check out the commit the platform job resolved
@@ -190,13 +192,16 @@ jobs:
   build:
     name: build ${{ matrix.service }} ${{ matrix.arch }}
     needs: [platform, plan]
-    if: needs.plan.outputs.any-build == 'true'
+    # What: only pairs that need a platform runner.
+    # Why: §70 §71: a verified digest books no runner.
+    # From: Issue #1683 | PR #1858
+    if: needs.plan.outputs.any-runner == 'true'
     # What: each target and platform builds to its end.
     # Why: one red build must not cancel the other targets.
     # From: Issue #1683 | PR #1912
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+      matrix: ${{ fromJSON(needs.plan.outputs.runners) }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['build'] }}
     container:

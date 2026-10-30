@@ -1593,6 +1593,7 @@ ci_cmd_plan_matrix() {
     _ci_docs_only "${changed[@]}" || drc=$?
     case "${drc}" in 0) docs_only=true ;; 1) ;; *) return 2 ;; esac
     local service platform include='[]' any=false resolved paction pident pimpact runner authed=false test_services=''
+    local runners='[]' any_runner=false pdig vrc
     local _ci_plan_ids=""
     local sot_changed=false f path_cand rc plats unknown=""
     # What: SOT change makes every target id candidate.
@@ -1700,6 +1701,23 @@ ci_cmd_plan_matrix() {
             runner="$(_ci_runner_label "${platform}" "[CI-ERROR-PLAN-0002]" "service=\"${service}\" reason=\"no runner label for platform\"")" || return 2
             include="$(_ci_matrix_append "${include}" service="${service}" arch="${platform##*/}" runner="${runner}" platform="${platform}")" || return 2
             any=true
+            # What: a verified digest gets no build runner.
+            # Why: §70 §71: a runner only for real work.
+            # From: Issue #1683 | PR #1858
+            if [ "${paction}" = verify ]; then
+                pdig="$(_ci_published_digest "${service}" "${platform}")" || return 2
+                vrc=0; _ci_verified_has "${service}" "${platform}" "${pdig}" || vrc=$?
+                case "${vrc}" in
+                    0)
+                        ci_log "[CI-INFO-PLAN-0015]" "service=\"${service}\" platform=\"${platform}\" digest=\"${pdig}\" action=no-runner reason=\"digest already verified; scan and accept only\""
+                        continue
+                        ;;
+                    1) ;;
+                    *) return 2 ;;
+                esac
+            fi
+            runners="$(_ci_matrix_append "${runners}" service="${service}" arch="${platform##*/}" runner="${runner}" platform="${platform}")" || return 2
+            any_runner=true
         done <<< "${plats}"
     done
     ci_group "plan: release gate, promote, reuse"
@@ -1708,7 +1726,7 @@ ci_cmd_plan_matrix() {
     # From: Issue #1683 | PR #1858
     if [ -n "${CI_RELEASE_TAG:-}" ] && [ "${any}" = true ]; then
         _ci_release_plan_gate "${include}" || return "$?"
-        any=false include='[]'
+        any=false include='[]' any_runner=false runners='[]'
     fi
     # What: emit the AG-VAL-008 rust validation decision.
     # Why: no test runner is booked while validation is off.
@@ -1731,7 +1749,7 @@ ci_cmd_plan_matrix() {
     if [ "${any}" = true ] && [ -z "${ptargets}" ]; then
         rc=0; _ci_pr_green_reuse || rc=$?
         case "${rc}" in
-            0) reuse=true any=false include='[]' test_services='' rust_audit=false ;;
+            0) reuse=true any=false include='[]' any_runner=false runners='[]' test_services='' rust_audit=false ;;
             1) ;;
             *) return "${rc}" ;;
         esac
@@ -1765,6 +1783,8 @@ ci_cmd_plan_matrix() {
         printf 'promote=%s\n' "${promote}"
         printf 'validate=%s\n' "${validate}"
         printf 'matrix=%s\n' "$(_ci_matrix_doc "${include}")"
+        printf 'any-runner=%s\n' "${any_runner}"
+        printf 'runners=%s\n' "$(_ci_matrix_doc "${runners}")"
         printf 'test-services=%s\n' "${test_services# }"
         printf 'rust-validation=%s\n' "${rust_validation}"
         printf 'rust-audit=%s\n' "${rust_audit}"

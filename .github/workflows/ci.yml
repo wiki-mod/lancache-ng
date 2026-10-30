@@ -156,6 +156,8 @@ jobs:
       promote: ${{ steps.plan.outputs.promote }}
       validate: ${{ steps.plan.outputs.validate }}
       matrix: ${{ steps.plan.outputs.matrix }}
+      any-runner: ${{ steps.plan.outputs.any-runner }}
+      runners: ${{ steps.plan.outputs.runners }}
       test-services: ${{ steps.plan.outputs.test-services }}
       rust-validation: ${{ steps.plan.outputs.rust-validation }}
       rust-audit: ${{ steps.plan.outputs.rust-audit }}
@@ -185,13 +187,16 @@ jobs:
   build:
     name: build ${{ matrix.service }} ${{ matrix.arch }}
     needs: [platform, plan]
-    if: needs.plan.outputs.any-build == 'true'
+    # What: only pairs that need a platform runner.
+    # Why: §70 §71: a verified digest books no runner.
+    # From: Issue #1683 | PR #1858
+    if: needs.plan.outputs.any-runner == 'true'
     # What: each target and platform builds to its end
     # Why: one red build must not cancel the other targets
     # From: Issue #1683 | PR #1858
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+      matrix: ${{ fromJSON(needs.plan.outputs.runners) }}
     runs-on: ${{ matrix.runner }}
     # What: contents write for the ci.sh build lock refs.
     # Why: the lock is a ci.sh git ref, no YAML group.
@@ -390,7 +395,9 @@ jobs:
     if: >-
       !cancelled() && needs.plan.outputs.validate == 'true' &&
       (needs.plan.outputs.any-build == 'false' ||
-      (github.event_name == 'pull_request' && needs.build.result == 'success') ||
+      (github.event_name == 'pull_request' &&
+      (needs.build.result == 'success' ||
+      needs.build.result == 'skipped')) ||
       (needs.scan.result == 'success' && needs.assemble.result == 'success'))
     # What: build-tools container, one shared host dir.
     # Why: AG-VAL-016; same path both sides for binds.
