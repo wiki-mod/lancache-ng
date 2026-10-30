@@ -2,8 +2,8 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-# What: Admin UI Rust binary plus Tera templates, Alpine.
-# Why: the binary reads its templates from TEMPLATE_DIR.
+# What: Admin UI Rust binary on Alpine.
+# Why: compose mounts its templates at TEMPLATE_DIR.
 
 # What: base image pin, supplied by ci.sh from the SOT.
 # Why: SOT base_images.alpine is the sole owner (AG-CI-006).
@@ -117,11 +117,6 @@ RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
     bash /usr/local/bin/ci.sh image-setup
 
 COPY --from=builder /build/lancache-ui-out /usr/local/bin/lancache-ui
-# What: the templates dir, from the SOT.
-# Why: the COPY fills it; the binary reads the same value.
-# From: Issue #1683 | PR #1912
-ARG TEMPLATE_DIR
-COPY services/ui/src/templates ${TEMPLATE_DIR}
 
 # What: one runtime uid/gid for the user and the binary.
 # Why: nginx logs share it; the root start drops to it.

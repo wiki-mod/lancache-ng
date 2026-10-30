@@ -121,17 +121,6 @@ RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
 
 COPY --from=proxy-builder /build/lancache-watchdog-out /usr/local/bin/lancache-watchdog
 
-# What: static nginx inputs in the dir the SOT names.
-# Why: the supervisor renders from the same NGINX_DIR.
-# From: Issue #1683 | PR #1912
-ARG NGINX_DIR
-ARG NGINX_PSL_FILE
-COPY services/proxy/nginx.conf ${NGINX_DIR}/nginx.conf.template
-COPY services/proxy/conf.d/http.conf ${NGINX_DIR}/http.conf.template
-COPY services/proxy/conf.d/https.conf ${NGINX_DIR}/https.conf.template
-COPY services/proxy/proxy-params.conf ${NGINX_DIR}/proxy-params.conf.template
-COPY services/proxy/public_suffix_list.dat ${NGINX_DIR}/${NGINX_PSL_FILE}
-
 # What: the SOT default values, one pipe-joined list.
 # Why: ci.sh passes the list; binaries read it as env.
 # From: Issue #1683 | PR #1912

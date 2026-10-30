@@ -120,12 +120,6 @@ RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
 COPY --from=dns-builder /build/nats-subscriber-out /usr/local/bin/nats-subscriber
 COPY --from=dns-builder /build/lancache-watchdog-out /usr/local/bin/lancache-watchdog
 
-# What: static inputs at the paths the SOT names.
-# Why: the supervisor reads the same paths.
-# From: Issue #1683 | PR #1912
-ARG PDNS_LUA_DNS_SCRIPT
-COPY services/dns/filter-aaaa.lua ${PDNS_LUA_DNS_SCRIPT}
-
 # What: processes the supervisor runs, from the SOT.
 # Why: ci.sh passes the list; the image holds no copy.
 # From: Issue #1683

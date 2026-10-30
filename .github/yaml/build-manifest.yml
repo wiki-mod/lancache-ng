@@ -102,10 +102,6 @@ services:
     # From: Issue #1683
     crates: [lancache-watchdog]
     processes: [nginx]
-    # What: runtime defaults the Dockerfile takes as args.
-    # Why: the image builds with the value; it names none.
-    # From: Issue #1683 | PR #1912
-    default_args: [NGINX_DIR, NGINX_PSL_FILE]
     setup:
       - dir=@NGINX_DIR@/@NGINX_SUBDIR_CA@
       - dir=@NGINX_DIR@/@NGINX_SUBDIR_CERTS@
@@ -139,7 +135,6 @@ services:
     # From: Issue #1683
     crates: [nats-subscriber, lancache-watchdog]
     processes: [pdns, dns-http, dns-https, nats-server, nats-subscriber, soa]
-    default_args: [PDNS_LUA_DNS_SCRIPT]
     setup:
       - dir=@PDNS_CONF_DIR@/auth
       - dir=@PDNS_DATA_DIR@:pdns
@@ -189,7 +184,10 @@ services:
     # Why: rust checks target crates, not the build context
     # From: Issue #1683 | PR #1858
     crates: [lancache-ui]
-    default_args: [TEMPLATE_DIR, UI_LISTEN_PORT]
+    # What: runtime defaults the Dockerfile takes as args.
+    # Why: the image builds with the value; it names none.
+    # From: Issue #1683 | PR #1912
+    default_args: [UI_LISTEN_PORT]
     setup:
       - group=@LOG_READER_GROUP@:@GID@
       - user=@LOG_READER_GROUP@:@GID@:@LOG_READER_GROUP@
@@ -567,10 +565,10 @@ runtime:
     - SETUP_HEALTH_BASELINE_SAMPLES=3
     - SETUP_HEALTH_BASELINE_INTERVAL_SECONDS=2
     - SETUP_DNS_PROBE_NAME=content1.steampowered.com
-    # What: repo path of the CDN list a secondary copies.
-    # Why: the secondary compose mounts it from its dir.
+    # What: repo files a secondary keeps in its compose dir.
+    # Why: Fund 148: its compose mounts them from its dir.
     # From: Issue #1683 | PR #1858
-    - SETUP_CDN_DOMAINS_REPO_FILE=services/dns/cdn-domains.txt
+    - SETUP_SECONDARY_REPO_FILES=services/dns/cdn-domains.txt services/dns/filter-aaaa.lua
     # What: host service paths for systemd and OpenRC.
     # Why: setup.sh reads them here; no path in its code.
     # From: Issue #1683 | PR #1858
@@ -758,7 +756,7 @@ runtime:
   # What: defaults compose interpolates as SOT_<KEY>.
   # Why: setup.sh and ci.sh export them; no clash with .env.
   # From: Issue #1683 | PR #1912
-  compose_keys: LANCACHE_LOG_PORT SUPERVISE_RUN_DIR LANCACHE_SHARED_SECRET_DIR UI_DATA_DIR STATUS_DIR CACHE_DIR SYSLOG_LOG_ROOT RETENTION_STATE_DIR NTP_STATE_DIR CACHEHAMSTER_DATA_DIR NETDATA_CONFIG_DIR NETDATA_LIB_DIR NETDATA_CACHE_DIR DOCKER_SOCKET CDN_DOMAINS_FILE PDNS_DATA_DIR DNS_STATE_DIR NATS_STORE_DIR NATS_CONF_MOUNT DNS_SNAPSHOT_MOUNT DHCP_SNAPSHOT_MOUNT PROXY_SNAPSHOT_MOUNT KEA_DATA_DIR NATS_PORT UI_LISTEN_PORT DNS_PORT DNS_HTTPS_PORT PDNS_AUTH_PORT NTP_PORT PROXY_HTTP_PORT PROXY_HTTPS_PORT NGINX_PASSTHROUGH_PORT NGINX_DIR NGINX_SUBDIR_CA NGINX_SUBDIR_CERTS NGINX_CACHE_DIR LOOPBACK_BIND_IP DHCP_API_HOST DNS_REPLICATION_ROLE_SECONDARY SECONDARY_RUNTIME_GID SECONDARY_SHARED_SECRET_DIR CONTAINER_NAME_SERVICES CONTAINER_NAME_PROXY CONTAINER_NAME_DNS CONTAINER_NAME_DHCP CONTAINER_NAME_UI HEALTHCHECK_INTERVAL HEALTHCHECK_TIMEOUT HEALTHCHECK_RETRIES HEALTHCHECK_START_PERIOD
+  compose_keys: LANCACHE_LOG_PORT SUPERVISE_RUN_DIR LANCACHE_SHARED_SECRET_DIR UI_DATA_DIR STATUS_DIR CACHE_DIR SYSLOG_LOG_ROOT RETENTION_STATE_DIR NTP_STATE_DIR CACHEHAMSTER_DATA_DIR NETDATA_CONFIG_DIR NETDATA_LIB_DIR NETDATA_CACHE_DIR DOCKER_SOCKET CDN_DOMAINS_FILE PDNS_DATA_DIR DNS_STATE_DIR NATS_STORE_DIR NATS_CONF_MOUNT DNS_SNAPSHOT_MOUNT DHCP_SNAPSHOT_MOUNT PROXY_SNAPSHOT_MOUNT KEA_DATA_DIR NATS_PORT UI_LISTEN_PORT DNS_PORT DNS_HTTPS_PORT PDNS_AUTH_PORT NTP_PORT PROXY_HTTP_PORT PROXY_HTTPS_PORT NGINX_PASSTHROUGH_PORT NGINX_DIR NGINX_SUBDIR_CA NGINX_SUBDIR_CERTS NGINX_CACHE_DIR NGINX_PSL_FILE PDNS_LUA_DNS_SCRIPT TEMPLATE_DIR LOOPBACK_BIND_IP DHCP_API_HOST DNS_REPLICATION_ROLE_SECONDARY SECONDARY_RUNTIME_GID SECONDARY_SHARED_SECRET_DIR CONTAINER_NAME_SERVICES CONTAINER_NAME_PROXY CONTAINER_NAME_DNS CONTAINER_NAME_DHCP CONTAINER_NAME_UI HEALTHCHECK_INTERVAL HEALTHCHECK_TIMEOUT HEALTHCHECK_RETRIES HEALTHCHECK_START_PERIOD
   # What: managed secrets as "KEY generator owner".
   # Why: setup.sh and ci.sh filter one list.
   # From: Issue #1683 | PR #1912

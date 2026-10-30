@@ -7970,12 +7970,16 @@ cmd_secondary() {
     # Why: a fetch failure must not follow a registration
     # From: Issue #1683 | PR #1858
     secondary_compose=$(lancache_repo_file_text deploy/secondary/docker-compose.yml) || exit $?
-    # What: the CDN list of the same ref as the compose
-    # Why: the secondary dns mounts it; missing = broken
+    # What: the runtime files of the same ref as the compose
+    # Why: the secondary dns mounts them; missing = broken
     # From: Issue #1683 | PR #1858
-    local cdn_file cdn_domains
-    cdn_file=$(prod_env_default SETUP_CDN_DOMAINS_REPO_FILE) || exit $?
-    cdn_domains=$(lancache_repo_file_text "$cdn_file") || exit $?
+    local repo_list repo_i
+    local -a repo_files=() repo_texts=()
+    repo_list=$(prod_env_default SETUP_SECONDARY_REPO_FILES) || exit $?
+    read -ra repo_files <<< "$repo_list"
+    for repo_i in "${!repo_files[@]}"; do
+        repo_texts[repo_i]=$(lancache_repo_file_text "${repo_files[repo_i]}") || exit $?
+    done
 
     secondary_dir="${name}"
     if [[ "$rotate" -eq 1 ]]; then
@@ -8204,8 +8208,10 @@ cmd_secondary() {
 
     write_file_atomically "${secondary_dir}/docker-compose.yml" <<< "$secondary_compose" \
         || die "Failed to write ${secondary_dir}/docker-compose.yml (exit $?)."
-    write_file_atomically "${secondary_dir}/${cdn_file##*/}" <<< "$cdn_domains" \
-        || die "Failed to write ${secondary_dir}/${cdn_file##*/} (exit $?)."
+    for repo_i in "${!repo_files[@]}"; do
+        write_file_atomically "${secondary_dir}/${repo_files[repo_i]##*/}" <<< "${repo_texts[repo_i]}" \
+            || die "Failed to write ${secondary_dir}/${repo_files[repo_i]##*/} (exit $?)."
+    done
 
     secondary_env_file="$(realpath -m "${secondary_dir}/.env")"
 

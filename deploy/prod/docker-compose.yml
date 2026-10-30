@@ -176,6 +176,14 @@ services:
       - proxy-cache:${SOT_NGINX_CACHE_DIR}
       - proxy-certs:${SOT_NGINX_DIR}/${SOT_NGINX_SUBDIR_CERTS}
       - proxy-config-snapshots:${SOT_PROXY_SNAPSHOT_MOUNT}
+      # What: nginx templates and the PSL from the checkout.
+      # Why: Fund 148: runtime files, no image rebuild.
+      # From: Issue #1683 | PR #1858
+      - ../../services/proxy/nginx.conf:${SOT_NGINX_DIR}/nginx.conf.template:ro
+      - ../../services/proxy/conf.d/http.conf:${SOT_NGINX_DIR}/http.conf.template:ro
+      - ../../services/proxy/conf.d/https.conf:${SOT_NGINX_DIR}/https.conf.template:ro
+      - ../../services/proxy/proxy-params.conf:${SOT_NGINX_DIR}/proxy-params.conf.template:ro
+      - ../../services/proxy/public_suffix_list.dat:${SOT_NGINX_DIR}/${SOT_NGINX_PSL_FILE}:ro
     # What: HTTP port on both IPs; HTTPS relayed or MITM.
     # Why: IP_HTTP relays TLS, IP_HTTPS intercepts it.
     ports:
@@ -214,6 +222,10 @@ services:
       - ${NATS_DATA_DIR:?NATS_DATA_DIR is required}:${SOT_NATS_STORE_DIR}
       - &mount-nats-conf ${NATS_CONF_DIR:?NATS_CONF_DIR is required}:${SOT_NATS_CONF_MOUNT}
       - dns-config-snapshots:${SOT_DNS_SNAPSHOT_MOUNT}
+      # What: the recursor Lua script from the checkout.
+      # Why: Fund 148: a runtime file, no image rebuild.
+      # From: Issue #1683 | PR #1858
+      - ../../services/dns/filter-aaaa.lua:${SOT_PDNS_LUA_DNS_SCRIPT}:ro
     # What: dns-http on IP_HTTP, dns-https on IP_HTTPS.
     # Why: one container port each keeps the caches apart.
     # From: Issue #1683
@@ -300,6 +312,10 @@ services:
       - *mount-kea-data
       - ${SYSLOG_NG_LOG_DIR:?SYSLOG_NG_LOG_DIR is required}:${SOT_SYSLOG_LOG_ROOT}:ro
       - watchdog-status:${SOT_STATUS_DIR}:ro
+      # What: the Tera templates from the checkout.
+      # Why: Fund 148: runtime files, no image rebuild.
+      # From: Issue #1683 | PR #1858
+      - ../../services/ui/src/templates:${SOT_TEMPLATE_DIR}:ro
     # What: Admin UI on UI_BIND_IP, default IP_HTTP.
     # Why: UI_BIND_IP narrows the LAN exposure of the UI.
     # From: Issue #1683 | PR #1912

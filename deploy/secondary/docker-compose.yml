@@ -50,6 +50,10 @@ services:
       - pdns-filter-state:${SOT_DNS_STATE_DIR}
       - dns-config-snapshots:${SOT_DNS_SNAPSHOT_MOUNT}
       - ./cdn-domains.txt:${SOT_CDN_DOMAINS_FILE}
+      # What: the recursor Lua script setup.sh copies here.
+      # Why: Fund 148: a runtime file, not in the image.
+      # From: Issue #1683 | PR #1858
+      - ./filter-aaaa.lua:${SOT_PDNS_LUA_DNS_SCRIPT}:ro
     tmpfs:
       - ${SOT_SUPERVISE_RUN_DIR}
     # What: dns-https binds its own IP and host port.
