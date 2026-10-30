@@ -12100,8 +12100,16 @@ _ci_service_setup() {
 # Why: 64.4: a default rebuilds only images that read it.
 # From: Issue #1683 | PR #1912
 _ci_service_default_rows() {
-    local service="$1" rows type text="" paths p part field tracked
+    local service="$1" rows type text="" paths p part field tracked memo out=""
     local -a specs=() files=()
+    # What: one call builds a service's rows once.
+    # Why: A3: plan built them per platform, 2.1 s each.
+    # From: Issue #1683 | PR #1858
+    memo="default-rows-${_CI_CALL_KEY}-${service}"
+    if out="$(_ci_job_memo_get "${memo}")"; then
+        printf '%s\n' "${out}"
+        return 0
+    fi
     rows="$(_ci_runtime_defaults)" || return 2
     type="$(_ci_required_field "${service}" build_type)" || return 2
     if [ "${type}" = rust ]; then
@@ -12144,8 +12152,11 @@ _ci_service_default_rows() {
     done <<< "${words}"
     while IFS= read -r row; do
         [ -n "${row}" ] || continue
-        [ -z "${used["${row%%=*}"]+x}" ] || printf '%s\n' "${row}"
+        [ -z "${used["${row%%=*}"]+x}" ] || out+="${row}"$'\n'
     done <<< "${rows}"
+    [ -n "${out}" ] || return 0
+    _ci_job_memo_put "${memo}" "${out%$'\n'}" || return 2
+    printf '%s' "${out}"
 }
 
 # What: one image's SOT defaults as one pipe-joined list.
