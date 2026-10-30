@@ -11748,15 +11748,20 @@ _ci_service_default_rows() {
         part="$(_ci_target_list "${service}" "${field}")" || return 2
         text+=$'\n'"${part}"
     done
-    _ci_run "[CI-ERROR-BUILDARGS-0021]" "service=\"${service}\" reason=\"read default keys not found\"" \
-        awk "$(cat <<'PROG'
-sep { s = $0; while (match(s, /[A-Z][A-Z0-9_]*/)) { t[substr(s, RSTART, RLENGTH)] = 1; s = substr(s, RSTART + RLENGTH) }; next }
-            $0 == "\001" { sep = 1; next }
-            { r[++n] = $0 }
-            END { for (i = 1; i <= n; i++) if (substr(r[i], 1, index(r[i], "=") - 1) in t) print r[i] }
-PROG
-            )" \
-        <<< "${rows}"$'\n\001\n'"${text}"
+    # What: every upper-case word of the image text.
+    # Why: grep finds them; no awk program (AG-REL-001).
+    # From: Issue #1683 | PR #1858
+    local words w row
+    local -A used=()
+    words="$(_ci_run -m 1 "[CI-ERROR-BUILDARGS-0021]" "service=\"${service}\" reason=\"read default keys not found\"" \
+        grep -o -E '[A-Z][A-Z0-9_]*' <<< "${text}")" || return 2
+    while IFS= read -r w; do
+        [ -z "${w}" ] || used["${w}"]=1
+    done <<< "${words}"
+    while IFS= read -r row; do
+        [ -n "${row}" ] || continue
+        [ -z "${used["${row%%=*}"]+x}" ] || printf '%s\n' "${row}"
+    done <<< "${rows}"
 }
 
 # What: one image's SOT defaults as one pipe-joined list.
@@ -11778,11 +11783,9 @@ _ci_service_compose_env() {
         ci_error "[CI-ERROR-CHECK-0110]" "file=\"${dep#"${CI_REPO_ROOT}/"}\" reason=\"deploy compose not renderable with the SOT fixture env\"" "${raw}"
         return 2
     fi
-    _ci_capture 0 jq -r --arg s "$1" "$(cat <<'PROG'
-(.services[$s] // error("no compose service \($s)")).environment // {}
-        | to_entries[] | "\(.key)=\(.value // "")"
-PROG
-        )" <<< "${raw}"
+    _ci_capture 0 jq -r --arg s "$1" \
+        "(.services[\$s] // error(\"no compose service \(\$s)\")).environment // {} | to_entries[] | \"\(.key)=\(.value // \"\")\"" \
+        <<< "${raw}"
 }
 
 # What: Emit SOT build-args for one product service.
