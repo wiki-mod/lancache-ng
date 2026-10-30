@@ -189,7 +189,15 @@ _ci_run() {
     done
     id="$1" ctx="$2"
     shift 2
-    err="$(_ci_mktemp "${CI_TMPDIR}/ci-run.XXXXXX")" || return 2
+    # What: one err file per process/depth in RUNNER_TEMP.
+    # Why: A3: mktemp and rm per command cost 10 ms each.
+    # From: Issue #1683 | PR #1858
+    local _CI_RUN_DEPTH=$((${_CI_RUN_DEPTH:-0} + 1))
+    if [ -n "${RUNNER_TEMP:-}" ]; then
+        err="${RUNNER_TEMP}/run-err-${_CI_CALL_KEY}-${BASHPID}-${_CI_RUN_DEPTH}"
+    else
+        err="$(_ci_mktemp "${CI_TMPDIR}/ci-run.XXXXXX")" || return 2
+    fi
     t0="${EPOCHREALTIME/./}"
     if [ -n "${ofile}" ]; then
         "$@" > "${ofile}" 2>"${err}" || rc=$?
@@ -199,11 +207,11 @@ _ci_run() {
     _ci_timed_here "$1" || _ci_cmd_time "${t0}" "${rc}" "$@"
     if [ "${rc}" -gt "${okmax}" ] || { [ -n "${strict}" ] && [ -s "${err}" ]; }; then
         ci_error "${id}" "${ctx} cmd=\"$1\" rc=${rc}" "$(cat "${err}"; [ -z "${out}" ] || printf 'stdout:\n%s\n' "${out}")"
-        rm -f "${err}"
+        [ -n "${RUNNER_TEMP:-}" ] || rm -f "${err}"
         return 2
     fi
     [ ! -s "${err}" ] || cat "${err}" >&2
-    rm -f "${err}"
+    [ -n "${RUNNER_TEMP:-}" ] || rm -f "${err}"
     [ -z "${out}" ] || printf '%s\n' "${out}"
 }
 
@@ -230,7 +238,15 @@ _ci_cmd_time() {
 # Why: a caller that reads stderr never sees the line.
 # From: Issue #1683 | PR #1858
 _ci_cmd_time_init() {
+    local list fn
     exec {_CI_CMD_FD}>&2
+    # What: note each defined program wrapper once.
+    # Why: A3: type -t forked once per command (2 ms).
+    # From: Issue #1683 | PR #1858
+    list="$(compgen -A function)" || return 2
+    while read -r fn; do
+        case "${fn}" in _ci_* | ci_*) ;; *) _CI_TIMED_FN["${fn}"]=1 ;; esac
+    done <<< "${list}"
 }
 
 # What: run program $1 and log its time line.
@@ -247,8 +263,16 @@ _ci_timed() {
 # What: rc 0 if $1 is a program that logs its own time.
 # Why: a runner adds no second line for it.
 # From: Issue #1683 | PR #1858
+declare -gA _CI_TIMED_FN=()
 _ci_timed_here() {
     case "$1" in _ci_* | ci_*) return 1 ;; esac
+    # What: the noted table; before its init, type -t.
+    # Why: have-command runs before _ci_cmd_time_init.
+    # From: Issue #1683 | PR #1858
+    if [ "${#_CI_TIMED_FN[@]}" -gt 0 ]; then
+        [ -n "${_CI_TIMED_FN[$1]+x}" ]
+        return
+    fi
     [ "$(type -t "$1")" = function ]
 }
 
