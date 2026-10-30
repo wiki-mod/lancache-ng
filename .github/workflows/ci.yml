@@ -560,8 +560,11 @@ jobs:
     # From: Issue #1683 | PR #1858
     runs-on: ${{ needs.plan.outputs.runner || 'ubuntu-latest' }}
     timeout-minutes: 15
+    # What: cloud run without a build: no container.
+    # Why: A3: it needs git, jq, yq only; init took 27 s.
+    # From: Issue #1683 | PR #1858
     container:
-      image: ${{ needs.plan.outputs.image || format('ghcr.io/{0}/build-tools:nightly', github.repository) }}
+      image: ${{ (needs.plan.outputs.any-build == 'true' || vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true') && (needs.plan.outputs.image || format('ghcr.io/{0}/build-tools:nightly', github.repository)) || '' }}
       credentials: *ghcr_credentials
     # What: contents write for the green run mark ref.
     # Why: the mark is a ci.sh git ref; images read only.
