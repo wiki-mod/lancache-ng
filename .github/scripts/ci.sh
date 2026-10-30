@@ -2481,10 +2481,18 @@ _ci_tracked_content_ids() {
 # Why: one normalizer for plain paths and Rust libraries.
 # From: Issue #1683 | PR #1858
 _ci_content_id_row() {
-    local line="$1" ref="$2" mode="$3" path oid blob norm g nrc=0
+    local line="$1" ref="$2" mode="$3" path oid blob norm g nrc=0 memo id
     path="${line%%$'\t'*}"
     oid="${line#*$'\t'}"
     if g="$(_ci_norm_grammar "${path}")"; then
+        # What: one id per grammar, mode and blob.
+        # Why: A3: a blob never changes; refs share it.
+        # From: Issue #1683 | PR #1858
+        memo="content-id-${g}-${mode:-plain}-${oid}"
+        if id="$(_ci_job_memo_get "${memo}")"; then
+            printf '%s\t%s\n' "${path}" "${id}"
+            return 0
+        fi
         blob="$(_ci_identity_git "${path}" "${ref}" cat-file blob "${oid}")" || return 2
         # What: a build id drops Rust cfg(test) items.
         # Why: 11.4: a test change builds no container.
@@ -2495,14 +2503,13 @@ _ci_content_id_row() {
             norm="$(_ci_norm_content "${g}" "${blob}")" || nrc=$?
         fi
         case "${nrc}" in
-            0)
-                norm="$(_ci_sha256_hex <<< "${norm}")" || return 2
-                printf '%s\t%s\n' "${path}" "${norm}"
-                return 0
-                ;;
-            1) ;;
+            0) id="$(_ci_sha256_hex <<< "${norm}")" || return 2 ;;
+            1) id="${oid}" ;;
             *) return 2 ;;
         esac
+        _ci_job_memo_put "${memo}" "${id}" || return 2
+        printf '%s\t%s\n' "${path}" "${id}"
+        return 0
     fi
     printf '%s\t%s\n' "${path}" "${oid}"
 }
