@@ -196,7 +196,7 @@ _ci_run() {
     else
         out="$("$@" 2>"${err}")" || rc=$?
     fi
-    _ci_cmd_time "${t0}" "${rc}" "$@"
+    _ci_timed_here "$1" || _ci_cmd_time "${t0}" "${rc}" "$@"
     if [ "${rc}" -gt "${okmax}" ] || { [ -n "${strict}" ] && [ -s "${err}" ]; }; then
         ci_error "${id}" "${ctx} cmd=\"$1\" rc=${rc}" "$(cat "${err}"; [ -z "${out}" ] || printf 'stdout:\n%s\n' "${out}")"
         rm -f "${err}"
@@ -221,7 +221,7 @@ _ci_cmd_time() {
         if [[ "${a}" =~ ^[a-z][a-z-]*$ ]]; then sub=" ${a}"; break; fi
     done
     for a in "${FUNCNAME[@]:1}"; do
-        case "${a}" in _ci_run | _ci_capture | _ci_git_run | _ci_retry) ;; *) fn="${a}"; break ;; esac
+        case "${a}" in _ci_run | _ci_capture | _ci_git_run | _ci_retry | _ci_timed) ;; _ci_* | ci_*) fn="${a}"; break ;; esac
     done
     ci_log "[CI-INFO-CORE-0159]" "fn=${fn} cmd=\"$3${sub}\" rc=$2 ms=${ms}" 2>&"${_CI_CMD_FD}"
 }
@@ -233,12 +233,89 @@ _ci_cmd_time_init() {
     exec {_CI_CMD_FD}>&2
 }
 
+# What: run program $1 and log its time line.
+# Why: A7: a direct call shows rc and time too.
+# From: Issue #1683 | PR #1858
+_ci_timed() {
+    local t0 rc=0
+    t0="${EPOCHREALTIME/./}"
+    command "$@" || rc=$?
+    _ci_cmd_time "${t0}" "${rc}" "$@"
+    return "${rc}"
+}
+
+# What: rc 0 if $1 is a program that logs its own time.
+# Why: a runner adds no second line for it.
+# From: Issue #1683 | PR #1858
+_ci_timed_here() {
+    case "$1" in _ci_* | ci_*) return 1 ;; esac
+    [ "$(type -t "$1")" = function ]
+}
+
+# What: each program ci.sh calls, timed by _ci_timed.
+# Why: AG-INT-002: no program runs without its line.
+# From: Issue #1683 | PR #1858
+actionlint() { _ci_timed actionlint "$@"; }
+addgroup() { _ci_timed addgroup "$@"; }
+adduser() { _ci_timed adduser "$@"; }
+apk() { _ci_timed apk "$@"; }
+awk() { _ci_timed awk "$@"; }
+base64() { _ci_timed base64 "$@"; }
+bash() { _ci_timed bash "$@"; }
+cargo() { _ci_timed cargo "$@"; }
+cat() { _ci_timed cat "$@"; }
+cc() { _ci_timed cc "$@"; }
+ccache() { _ci_timed ccache "$@"; }
+chown() { _ci_timed chown "$@"; }
+cmp() { _ci_timed cmp "$@"; }
+cp() { _ci_timed cp "$@"; }
+curl() { _ci_timed curl "$@"; }
+date() { _ci_timed date "$@"; }
+dig() { _ci_timed dig "$@"; }
+diff() { _ci_timed diff "$@"; }
+dirname() { _ci_timed dirname "$@"; }
+docker() { _ci_timed docker "$@"; }
+dockerd() { _ci_timed dockerd "$@"; }
+env() { _ci_timed env "$@"; }
+flock() { _ci_timed flock "$@"; }
+getent() { _ci_timed getent "$@"; }
+git() { _ci_timed git "$@"; }
+grep() { _ci_timed grep "$@"; }
+id() { _ci_timed id "$@"; }
+jq() { _ci_timed jq "$@"; }
+ls() { _ci_timed ls "$@"; }
+mkdir() { _ci_timed mkdir "$@"; }
+mountpoint() { _ci_timed mountpoint "$@"; }
+mv() { _ci_timed mv "$@"; }
+openssl() { _ci_timed openssl "$@"; }
+pump() { _ci_timed pump "$@"; }
+readlink() { _ci_timed readlink "$@"; }
+realpath() { _ci_timed realpath "$@"; }
+rm() { _ci_timed rm "$@"; }
+rmdir() { _ci_timed rmdir "$@"; }
+rustc() { _ci_timed rustc "$@"; }
+sccache() { _ci_timed sccache "$@"; }
+sed() { _ci_timed sed "$@"; }
+sha256sum() { _ci_timed sha256sum "$@"; }
+shellcheck() { _ci_timed shellcheck "$@"; }
+sleep() { _ci_timed sleep "$@"; }
+sort() { _ci_timed sort "$@"; }
+sudo() { _ci_timed sudo "$@"; }
+systemctl() { _ci_timed systemctl "$@"; }
+tar() { _ci_timed tar "$@"; }
+tee() { _ci_timed tee "$@"; }
+timeout() { _ci_timed timeout "$@"; }
+touch() { _ci_timed touch "$@"; }
+tr() { _ci_timed tr "$@"; }
+wc() { _ci_timed wc "$@"; }
+yq() { _ci_timed yq "$@"; }
+
 # What: mktemp with its args; coded error, dir and raw.
 # Why: one temp owner; a failure names the path it tried.
 # From: Issue #1683 | PR #1858
 _ci_mktemp() {
     local out
-    if ! out="$(mktemp "$@" 2>&1)"; then
+    if ! out="$(_ci_timed mktemp "$@" 2>&1)"; then
         ci_error "[CI-ERROR-CORE-0110]" "args=\"$*\" tmpdir=\"${CI_TMPDIR}\" reason=\"temp path not created\"" "${out}"
         return 2
     fi
@@ -261,7 +338,7 @@ _ci_with_workdir() {
 # Why: one owner for command lookup; callers report absence.
 # From: Issue #1683 | PR #1912
 _ci_command_path() {
-    command -v "$1"
+    type -P "$1"
 }
 
 # What: true if the command resolves on PATH.
@@ -5089,7 +5166,7 @@ _ci_retry() {
         t0="${EPOCHREALTIME/./}"
         rc=0
         raw="$("$@" 2>&1)" || rc=$?
-        _ci_cmd_time "${t0}" "${rc}" "$@"
+        _ci_timed_here "$1" || _ci_cmd_time "${t0}" "${rc}" "$@"
         if [ "${rc}" -eq 0 ]; then
             [ "${n}" -eq 1 ] || ci_log "[CI-INFO-BUILD-0017]" "op=${op} cmd=\"$1\" attempt=${n}/${max} reason=\"succeeded after retry\""
             [ -z "${raw}" ] || printf '%s\n' "${raw}"
@@ -5580,7 +5657,7 @@ _ci_rust_build_cleanup() {
     if [ "${_CI_RB_CA}" = 1 ]; then
         _CI_RB_CA=0
         rm -f "${_CI_RB_CA_FILE}"
-        if ! out="$(update-ca-certificates 2>&1)"; then
+        if ! out="$(_ci_timed update-ca-certificates 2>&1)"; then
             ci_error "[CI-ERROR-RUSTBUILD-0008]" "reason=\"proxy CA not removed from the trust store\"" "${out}"
             failed=1
         fi
@@ -10000,7 +10077,7 @@ _ci_validate_stage() {
 # From: Issue #1683 | PR #1912
 _ci_validate_attach() {
     local project="$1" out
-    out="$(docker network connect "${project}_default" "$(hostname)" 2>&1)" || {
+    out="$(docker network connect "${project}_default" "$(_ci_timed hostname)" 2>&1)" || {
         ci_error "[CI-ERROR-VALIDATE-0120]" "network=\"${project}_default\" reason=\"job container not joined to the stack network\"" "${out}"
         return 2
     }
@@ -10011,7 +10088,7 @@ _ci_validate_attach() {
 # From: Issue #1683 | PR #1912
 _ci_validate_detach() {
     local project="$1" out
-    out="$(docker network disconnect -f "${project}_default" "$(hostname)" 2>&1)" && return 0
+    out="$(docker network disconnect -f "${project}_default" "$(_ci_timed hostname)" 2>&1)" && return 0
     case "${out}" in
         *"not found"*|*"is not connected"*) return 0 ;;
     esac
@@ -18611,12 +18688,10 @@ _ci_check_shellcheck() {
     # What: one shellcheck process per file.
     # Why: one call on all files needs ~5 GB peak RAM.
     # From: Issue #1683 | PR #1858
-    local sc_out="" sc_one sc_rc sc_found=0 sc_broken=0 t0
+    local sc_out="" sc_one sc_rc sc_found=0 sc_broken=0
     for f in "${files[@]}"; do
         sc_rc=0
-        t0="${EPOCHREALTIME/./}"
         sc_one="$(shellcheck --norc "${f}" 2>&1)" || sc_rc=$?
-        _ci_cmd_time "${t0}" "${sc_rc}" shellcheck
         # What: rc 1 = findings; any other rc = no result.
         # Why: a killed run (137) must not read as findings.
         # From: Issue #1683 | PR #1858
@@ -18642,13 +18717,11 @@ _ci_check_shellcheck() {
 # From: Issue #1683
 _ci_check_actionlint() {
     local repo_root="${1:-${CI_REPO_ROOT:-.}}" out rc=0
-    local wf t0
+    local wf
     local -a wfs=()
     wf="$(_ci_repo_path CI_WORKFLOW_DIR "${repo_root}")" || return 2
     _ci_workflow_files wfs "${wf}" || return 2
-    t0="${EPOCHREALTIME/./}"
     out="$(actionlint "${wfs[@]}" 2>&1)" || rc=$?
-    _ci_cmd_time "${t0}" "${rc}" actionlint
     if [ "${rc}" -ne 0 ]; then
         ci_error "[CI-ERROR-CHECK-0057]" "reason=\"actionlint found issues\"" "${out}"
         return 1
