@@ -1623,8 +1623,8 @@ ci_cmd_plan_matrix() {
     # Why: pins live in SOT; identity decides BUILD.
     # From: Issue #1683 | PR #1858
     for f in "${changed[@]}"; do [ "${f}" = "${CI_MANIFEST_REL}" ] && sot_changed=true; done
-    # What: audit when a Rust service is a candidate.
-    # Why: its generated lock is the audit input.
+    # What: audit only when a Rust pair gets a runner.
+    # Why: no Rust build means no new lock to audit.
     # From: Issue #1683 | PR #1858
     local rust_audit=false
     # What: build product services and the toolchain.
@@ -1670,7 +1670,6 @@ ci_cmd_plan_matrix() {
             case "${rc}" in
                 0)
                     [ "${path_cand}" = false ] || test_services="${test_services} ${service}"
-                    rust_audit=true
                     ;;
                 1) ;;
                 *) return 2 ;;
@@ -1722,25 +1721,31 @@ ci_cmd_plan_matrix() {
             [ "${pimpact}" != UNKNOWN ] || unknown+="${service}/${platform} impact"$'\n'
             [ "${pimpact}" = BUILD ] || continue
             runner="$(_ci_runner_label "${platform}" "[CI-ERROR-PLAN-0002]" "service=\"${service}\" reason=\"no runner label for platform\"")" || return 2
-            include="$(_ci_matrix_append "${include}" service="${service}" arch="${platform##*/}" runner="${runner}" platform="${platform}")" || return 2
-            any=true
             # What: a verified digest gets no build runner.
             # Why: §70 §71: a runner only for real work.
             # From: Issue #1683 | PR #1858
+            vrc=1
             if [ "${paction}" = verify ]; then
                 pdig="$(_ci_published_digest "${service}" "${platform}")" || return 2
                 vrc=0; _ci_verified_has "${service}" "${platform}" "${pdig}" || vrc=$?
-                case "${vrc}" in
-                    0)
-                        ci_log "[CI-INFO-PLAN-0015]" "service=\"${service}\" platform=\"${platform}\" digest=\"${pdig}\" action=no-runner reason=\"digest already verified; scan and accept only\""
-                        continue
-                        ;;
-                    1) ;;
-                    *) return 2 ;;
-                esac
+                [ "${vrc}" -le 1 ] || return 2
+            fi
+            # What: a PR leaves a verified pair out fully.
+            # Why: a PR accepts nothing; §30 §63: no rescan.
+            # From: Issue #1683 | PR #1858
+            if [ "${vrc}" -eq 0 ] && [ "${GITHUB_EVENT_NAME:-}" = pull_request ]; then
+                ci_log "[CI-INFO-PLAN-0016]" "service=\"${service}\" platform=\"${platform}\" digest=\"${pdig}\" action=skip reason=\"digest already verified; a PR accepts nothing, so no scan and no validate\""
+                continue
+            fi
+            include="$(_ci_matrix_append "${include}" service="${service}" arch="${platform##*/}" runner="${runner}" platform="${platform}")" || return 2
+            any=true
+            if [ "${vrc}" -eq 0 ]; then
+                ci_log "[CI-INFO-PLAN-0015]" "service=\"${service}\" platform=\"${platform}\" digest=\"${pdig}\" action=no-runner reason=\"digest already verified; scan and accept only\""
+                continue
             fi
             runners="$(_ci_matrix_append "${runners}" service="${service}" arch="${platform##*/}" runner="${runner}" platform="${platform}")" || return 2
             any_runner=true
+            [ "${svc_type}" != rust ] || rust_audit=true
         done <<< "${plats}"
     done
     ci_group "plan: release gate, promote, reuse"
