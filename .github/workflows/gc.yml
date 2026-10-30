@@ -119,7 +119,7 @@ jobs:
     steps:
       - *bootstrap
       # What: delete only unreachable artifacts (§97).
-      # Why: SQLite is candidate-only; delete needs the PAT.
+      # Why: protected roots decide; delete needs the PAT.
       # From: Issue #1683
       - name: Reap unreachable GHCR artifacts
         env:
