@@ -355,6 +355,10 @@ base_images:
   # Why: actions/checkout needs x64 node in Alpine.
   # From: Issue #1683 | PR #1858
   git: "mirror.gcr.io/alpine/git:latest"
+  # What: official Trivy image; ci.sh copies trivy out.
+  # Why: AG-VAL-017 external; no GitHub API read limit.
+  # From: Issue #1683 | PR #1858
+  trivy: "mirror.gcr.io/aquasec/trivy:latest"
 
 # What: external actions a workflow may use.
 # Why: the vN tag lives in uses:, which Dependabot moves.
@@ -848,18 +852,6 @@ external_versions:
   codeql:
     repository: github/codeql-action
     asset: codeql-bundle-linux64.tar.gz
-  # What: Trivy CLI for amd64 hosts, fetched by ci.sh.
-  # Why: AG-VAL-017: external, never bundled; one owner.
-  # From: Issue #1683
-  trivy-amd64:
-    repository: aquasecurity/trivy
-    asset: trivy_@VERSION@_Linux-64bit.tar.gz
-  # What: Trivy CLI for arm64 hosts, fetched by ci.sh.
-  # Why: same release as trivy-amd64; the asset differs.
-  # From: Issue #1683
-  trivy-arm64:
-    repository: aquasecurity/trivy
-    asset: trivy_@VERSION@_Linux-ARM64.tar.gz
   # What: Actions runner a new self-hosted host installs.
   # Why: runner-fetch takes the latest release, verified.
   # From: Issue #1622 | PR #1624

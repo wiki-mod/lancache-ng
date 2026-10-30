@@ -5909,18 +5909,28 @@ _ci_host_arch() {
     return 2
 }
 
-# What: Fetch the latest trivy once per tag; print path.
-# Why: AG-VAL-017: trivy is external; the SOT names it.
-# From: Issue #1683
+# What: trivy out of the SOT trivy image; print path.
+# Why: AG-VAL-017 external; a registry has no API limit.
+# From: Issue #1683 | PR #1858
 _ci_trivy_bin() {
-    local dir bin err arch rel tag asset sha url
+    local dir bin err arch ref p plats platform=""
     arch="$(_ci_host_arch)" || return 2
-    rel="$(_ci_tool_latest "trivy-${arch}")" || return 2
-    IFS=$'\t' read -r tag asset url sha <<< "${rel}"
-    # What: the kept binary is the one of the latest tag.
+    plats="$(_ci_build_matrix_platforms)" || return 2
+    # What: the build_matrix platform of the host arch.
+    # Why: the copied binary must run on this host.
+    # From: Issue #1683 | PR #1858
+    while IFS= read -r p; do
+        [ "${p##*/}" != "${arch}" ] || platform="${p}"
+    done <<< "${plats}"
+    if [ -z "${platform}" ]; then
+        ci_log "[CI-ERROR-SCAN-0043]" "arch=\"${arch}\" reason=\"no build_matrix platform for this host\""
+        return 2
+    fi
+    ref="$(_ci_base_image trivy "[CI-ERROR-SCAN-0039]" "key=\"base_images.trivy\" reason=\"no trivy image in SOT\"")" || return 2
+    # What: the kept binary is the one of this digest.
     # Why: a kept older trivy must not stand in for latest.
     # From: Issue #1683 | PR #1858
-    dir="${CI_TMPDIR}/trivy-${tag}"
+    dir="${CI_TMPDIR}/trivy-${ref##*:}"
     bin="${dir}/trivy"
     if [ -x "${bin}" ]; then
         printf '%s\n' "${bin}"
@@ -5930,13 +5940,9 @@ _ci_trivy_bin() {
         ci_error "[CI-ERROR-SCAN-0038]" "dir=\"${dir}\" reason=\"trivy dir not created\"" "${err}"
         return 2
     fi
-    _ci_fetch_verified "${url}" "${sha}" "${dir}/${asset}" || return 2
-    if ! err="$(tar --no-same-owner -xzf "${dir}/${asset}" -C "${dir}" trivy 2>&1)"; then
-        ci_error "[CI-ERROR-SCAN-0039]" "asset=\"${asset}\" reason=\"trivy extract failed\"" "${err}"
-        return 2
-    fi
+    _ci_image_files "${ref}" "${platform}" "${dir}" /usr/local/bin/trivy >&2 || return 2
     if [ ! -x "${bin}" ]; then
-        ci_log "[CI-ERROR-SCAN-0040]" "asset=\"${asset}\" reason=\"archive has no executable trivy\""
+        ci_log "[CI-ERROR-SCAN-0040]" "image=\"${ref}\" reason=\"image has no executable trivy\""
         return 2
     fi
     printf '%s\n' "${bin}"

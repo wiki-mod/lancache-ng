@@ -120,7 +120,7 @@ jobs:
         id: jobs
         run: bash .github/scripts/ci.sh job-settings
       # What: read each SOT tool release once for the run.
-      # Why: self-hosted jobs share one IP and its limit.
+      # Why: hosted jobs share IPs and one anonymous limit.
       # From: Issue #1683 | PR #1858
       - name: Read the tool releases
         id: releases
