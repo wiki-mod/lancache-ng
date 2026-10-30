@@ -17619,8 +17619,15 @@ _ci_validation_images() {
 # Why: one owner for check and validate; $1 = state root.
 # From: Issue #1683 | PR #1858
 _ci_validation_env() {
-    local fx kind owner secrets gens gen rest row k v i n=0 rows state body=""
+    local fx kind owner secrets gens gen rest row k v i n=0 rows state body="" memo=""
     local -a pairs=() cmd=()
+    # What: without $1 one ci.sh call renders it once.
+    # Why: A3: checks ran setup.sh 31 times, 10.2 s.
+    # From: Issue #1683 | PR #1858
+    if [ -z "${1:-}" ]; then
+        memo="validation-env-${_CI_CALL_KEY}"
+        if _ci_job_memo_get "${memo}"; then return 0; fi
+    fi
     fx="$(_ci_block_entry_list validation "" compose_validation_env)" || return 2
     if [ -z "${fx}" ]; then
         ci_log "[CI-ERROR-VALIDATE-0054]" "reason=\"no SOT validation.compose_validation_env\""
@@ -17681,6 +17688,7 @@ _ci_validation_env() {
     # Why: per-run state overrides its SOT default.
     # From: Issue #1683 | PR #1951
     v="$(_ci_sot_compose_env "${body}"$'\n'"LANCACHE_STATE_DIR=${state}")" || return 2
+    [ -z "${memo}" ] || _ci_job_memo_put "${memo}" "${body}${v}" || return 2
     printf '%s%s\n' "${body}" "${v}"
 }
 
