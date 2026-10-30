@@ -24,18 +24,27 @@ image_base:
     - gettext-envsubst
     - grep
     - jq
+    - lsof
+    - nano
+    - ripgrep
     - sed
     - util-linux
     - zstd
+  # What: smoke runs; a one-word run gets --version.
+  # Why: ci.sh _ci_image_smoke adds it; one rule.
+  # From: Issue #1683 | PR #1858
   smoke:
-    - bash --version
-    - curl --version
-    - envsubst --version
-    - find --version
-    - grep --version
-    - jq --version
-    - sed --version
-    - zstd --version
+    - bash
+    - curl
+    - envsubst
+    - find
+    - grep
+    - jq
+    - lsof -v
+    - nano
+    - rg
+    - sed
+    - zstd
 
 # What: The product services this repository builds.
 # Why: One list; matrices/scans/release derive from it.
@@ -80,7 +89,7 @@ services:
     # Why: prove apk binaries run, not just exist
     # From: Issue #1613
     smoke:
-      - syslog-ng --version
+      - syslog-ng
       - chronyd -v
       - netdata -v
   proxy:
@@ -145,7 +154,7 @@ services:
       - sqlite
       - iproute2
     smoke:
-      - nats-server --version
+      - nats-server
   dhcp:
     context: services/dhcp
     labels: [dhcp, kea, dnsmasq]
@@ -169,7 +178,7 @@ services:
     smoke:
       - kea-dhcp4 -v
       - lancache-watchdog probe
-      - dnsmasq --version
+      - dnsmasq
   ui:
     context: services/ui
     labels: [admin-ui]
@@ -304,29 +313,29 @@ build_toolchain:
     # Why: present is not runnable; one owner of the runs.
     # From: Issue #1683 | PR #1858
     smoke_runs:
-      - cargo --version
+      - cargo
       - cargo fmt --version
       - cargo clippy --version
       - cargo audit --version
       - 'c="$(rustc --print cfg)" && grep -qx target_env=.musl. <<< "${c}"'
-      - sccache --version
-      - ccache --version
-      - bc --version
-      - docker --version
+      - sccache
+      - ccache
+      - bc
+      - docker
       - expect -v
-      - gettext --version
-      - gh --version
-      - git --version
-      - gpg --version
+      - gettext
+      - gh
+      - git
+      - gpg
       - lsof -v
-      - parallel --version
-      - rg --version
-      - xz --version
-      - actionlint --version
-      - bats --version
-      - shellcheck --version
-      - shfmt --version
-      - yq --version
+      - parallel
+      - rg
+      - xz
+      - actionlint
+      - bats
+      - shellcheck
+      - shfmt
+      - yq
       - docker compose version
       - docker buildx version
       - 'm="$(gcc -dumpmachine)" && [[ "${m}" == *-musl ]]'

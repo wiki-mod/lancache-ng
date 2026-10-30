@@ -6787,13 +6787,14 @@ _ci_image_smoke() {
     limit="$(_ci_variable CI_SMOKE_TIMEOUT)" || return 2
     grace="$(_ci_variable CI_SMOKE_KILL_AFTER)" || return 2
     while IFS= read -r t; do [ -n "${t}" ] && tl+=("${t}"); done <<< "${tools}"
-    # What: tools go as args; runs on stdin, one a line.
-    # Why: a run holds spaces/pipes; stdin keeps it intact.
+    # What: tools as args, runs on stdin, one per line.
+    # Why: stdin keeps a run whole; one word gets --version.
     # From: Issue #1683 | PR #1858
     if ! out="$(docker run --rm -i --init --entrypoint timeout "${image}" -k "${grace}" -s TERM "${limit}" \
         bash -c "${lookup}"$'\n''for t in "$@"; do _ci_command_available "$t" || { echo "missing $t"; exit 1; }; done
             while IFS= read -r r; do
                 [ -n "${r}" ] || continue
+                case "${r}" in *[[:space:]]*) ;; *) r="${r} --version" ;; esac
                 o="$(bash -o pipefail -c "${r}" 2>&1)" || { printf "failed: %s\n%s\n" "${r}" "${o}"; exit 1; }
             done' _ "${tl[@]}" <<< "${runs}" 2>&1)"; then
         t="${out%%$'\n'*}"
