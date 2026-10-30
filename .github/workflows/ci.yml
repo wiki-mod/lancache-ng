@@ -498,21 +498,6 @@ jobs:
           CHANGED_FILES: ${{ steps.changed.outputs.file }}
           CI_CHECKS_SELECTED: ${{ needs.plan.outputs.check-list }}
         run: bash .github/scripts/ci.sh check all
-      # What: lint shell and workflow syntax here
-      # Why: no own job, no wait on plan (Fund 114)
-      # From: Issue #1683 | PR #1858
-      - name: shellcheck changed shell scripts
-        if: >-
-          !cancelled() && needs.plan.outputs.checks == 'true' &&
-          contains(format(' {0} ', needs.plan.outputs.check-list), ' shellcheck ')
-        env:
-          CHANGED_FILES: ${{ steps.changed.outputs.file }}
-        run: bash .github/scripts/ci.sh check shellcheck
-      - name: actionlint workflows
-        if: >-
-          !cancelled() && needs.plan.outputs.checks == 'true' &&
-          contains(format(' {0} ', needs.plan.outputs.check-list), ' actionlint ')
-        run: bash .github/scripts/ci.sh check actionlint
 
   # What: labels and board; GitHub admin, no CI path.
   # Why: §6: admin automation stays out of the job chain.

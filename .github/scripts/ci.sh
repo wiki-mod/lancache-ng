@@ -102,8 +102,8 @@ declare -gA CI_CHECKS=(
     [codeql-coverage]="repo _ci_check_codeql_coverage"
     [version-drift]="repo _ci_version_release"
     [pr-title]="job _ci_check_pr_title" [pr-template]="job _ci_check_pr_template" [pr-tracking-metadata]="job _ci_check_pr_tracking_metadata"
-    [cargo-audit]="job _ci_check_cargo_audit" [shellcheck]="job _ci_check_shellcheck"
-    [actionlint]="job _ci_check_actionlint" [orphaned-branches]="job _ci_check_orphaned_branches"
+    [cargo-audit]="job _ci_check_cargo_audit" [shellcheck]="diff _ci_check_shellcheck"
+    [actionlint]="repo _ci_check_actionlint" [orphaned-branches]="job _ci_check_orphaned_branches"
 )
 
 # =========================================================
