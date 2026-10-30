@@ -175,7 +175,7 @@ _ci_git_run() {
 # Why: one owner for coded command errors and their raw.
 # From: Issue #1683 | PR #1858
 _ci_run() {
-    local okmax=0 strict="" ofile="" id ctx err out="" rc=0
+    local okmax=0 strict="" ofile="" id ctx err out="" rc=0 t0
     # What: -m N: rc to N ok; -s: stderr fails; -o F: to F
     # Why: grep rc 1 is a miss; big trees skip bash strings
     # From: Issue #1683 | PR #1858
@@ -190,11 +190,13 @@ _ci_run() {
     id="$1" ctx="$2"
     shift 2
     err="$(_ci_mktemp "${CI_TMPDIR}/ci-run.XXXXXX")" || return 2
+    t0="${EPOCHREALTIME/./}"
     if [ -n "${ofile}" ]; then
         "$@" > "${ofile}" 2>"${err}" || rc=$?
     else
         out="$("$@" 2>"${err}")" || rc=$?
     fi
+    _ci_cmd_time "${t0}" "${rc}" "$@"
     if [ "${rc}" -gt "${okmax}" ] || { [ -n "${strict}" ] && [ -s "${err}" ]; }; then
         ci_error "${id}" "${ctx} cmd=\"$1\" rc=${rc}" "$(cat "${err}"; [ -z "${out}" ] || printf 'stdout:\n%s\n' "${out}")"
         rm -f "${err}"
@@ -203,6 +205,32 @@ _ci_run() {
     [ ! -s "${err}" ] || cat "${err}" >&2
     rm -f "${err}"
     [ -z "${out}" ] || printf '%s\n' "${out}"
+}
+
+# What: log every command: function, name, rc, time.
+# Why: A7, AG-INT-002: no command runs unseen, no filter.
+# From: Issue #1683 | PR #1858
+_ci_cmd_time() {
+    local ms fn="" sub="" a
+    [ -n "${_CI_CMD_FD:-}" ] || return 0
+    ms=$(((${EPOCHREALTIME/./} - $1) / 1000))
+    # What: first plain word after the command, no paths.
+    # Why: names git fetch, docker pull; no value leaks.
+    # From: Issue #1683 | PR #1858
+    for a in "${@:4}"; do
+        if [[ "${a}" =~ ^[a-z][a-z-]*$ ]]; then sub=" ${a}"; break; fi
+    done
+    for a in "${FUNCNAME[@]:1}"; do
+        case "${a}" in _ci_run | _ci_capture | _ci_git_run | _ci_retry) ;; *) fn="${a}"; break ;; esac
+    done
+    ci_log "[CI-INFO-CORE-0159]" "fn=${fn} cmd=\"$3${sub}\" rc=$2 ms=${ms}" 2>&"${_CI_CMD_FD}"
+}
+
+# What: open the command log as a copy of stderr.
+# Why: a caller that reads stderr never sees the line.
+# From: Issue #1683 | PR #1858
+_ci_cmd_time_init() {
+    exec {_CI_CMD_FD}>&2
 }
 
 # What: mktemp with its args; coded error, dir and raw.
@@ -5040,12 +5068,16 @@ _ci_registry() {
 # From: Issue #1683
 _ci_retry() {
     local op="$1"; shift
-    local n=0 max backoff raw cls
+    local n=0 max backoff raw cls t0 rc
     max="$(_ci_variable CI_RETRY_MAX_ATTEMPTS)" || return 2
     backoff="$(_ci_variable CI_RETRY_BACKOFF_BASE_SECONDS)" || return 2
     while :; do
         n=$((n + 1))
-        if raw="$("$@" 2>&1)"; then
+        t0="${EPOCHREALTIME/./}"
+        rc=0
+        raw="$("$@" 2>&1)" || rc=$?
+        _ci_cmd_time "${t0}" "${rc}" "$@"
+        if [ "${rc}" -eq 0 ]; then
             [ "${n}" -eq 1 ] || ci_log "[CI-INFO-BUILD-0017]" "op=${op} cmd=\"$1\" attempt=${n}/${max} reason=\"succeeded after retry\""
             [ -z "${raw}" ] || printf '%s\n' "${raw}"
             return 0
@@ -14429,6 +14461,10 @@ ci_main() {
     # Why: a git hook has no manifest, temp root or network.
     # From: Issue #1683 | PR #1912
     case "${command}" in have-command) "${fn}" "$@"; return "$?" ;; esac
+    # What: every command logs its time from here on.
+    # Why: A7 and AG-INT-002 for every subcommand.
+    # From: Issue #1683 | PR #1858
+    _ci_cmd_time_init
     _ci_tmp_init || return "$?"
     _ci_proxy_init || return "$?"
     _ci_git_trust_init || return "$?"
