@@ -1869,7 +1869,8 @@ ci_cmd_plan_matrix() {
             # From: Issue #1683 | PR #1858
             vrc=1
             if [ "${paction}" = verify ]; then
-                pdig="$(_ci_published_digest "${service}" "${platform}")" || return 2
+                pdig="$(_ci_record_field "${resolved}" digest)" || return 2
+                [ "${pdig}" != none ] || pdig="$(_ci_published_digest "${service}" "${platform}")" || return 2
                 vrc=0; _ci_verified_has "${service}" "${platform}" "${pdig}" || vrc=$?
                 [ "${vrc}" -le 1 ] || return 2
             fi
@@ -3021,7 +3022,7 @@ _ci_resolve_state() {
             esac
             return 0
         fi
-        printf 'PRODUCED_UNVERIFIED\n'
+        printf 'PRODUCED_UNVERIFIED %s\n' "${gdig}"
         return 0
     fi
     lstate="${lrec%%$'\t'*}"
@@ -3032,11 +3033,11 @@ _ci_resolve_state() {
             printf 'MISMATCH\n'
             return 0
         fi
-        [ "${gdig}" = "${ldig}" ] && { printf 'PRESENT_ACCEPTED\n'; return 0; }
+        [ "${gdig}" = "${ldig}" ] && { printf 'PRESENT_ACCEPTED %s\n' "${gdig}"; return 0; }
         printf 'MISMATCH\n'
         return 0
     fi
-    printf 'PRODUCED_UNVERIFIED\n'
+    printf 'PRODUCED_UNVERIFIED %s\n' "${gdig:-none}"
 }
 
 # What: Map a resolver state to its action; log the reason.
@@ -3077,9 +3078,12 @@ _ci_record_field() {
 # From: Issue #1683
 _ci_resolve_one() {
     local service="$1" platform="$2"
-    local identity state action
+    local identity state action digest
     identity="$(_ci_identity_for "${service}" "${platform}")" || return "$?"
-    state="$(_ci_resolve_state "${service}" "${identity}" "${platform}")"
+    # What: the state may carry the digest it read.
+    # Why: A3: plan read the same tag twice, 0.8 s each.
+    # From: Issue #1683 | PR #1858
+    read -r state digest <<< "$(_ci_resolve_state "${service}" "${identity}" "${platform}")"
     case "${state}" in
         PRESENT_ACCEPTED|MISSING_CONFIRMED|MISMATCH|PRODUCED_UNVERIFIED|BUILD_IN_PROGRESS|UNKNOWN) ;;
         *)
@@ -3088,7 +3092,7 @@ _ci_resolve_one() {
             ;;
     esac
     action="$(_ci_resolve_action "${state}" "${service}" "${platform}")"
-    printf 'service=%s platform=%s state=%s action=%s identity=%s\n' "${service}" "${platform}" "${state}" "${action}" "${identity}"
+    printf 'service=%s platform=%s state=%s action=%s identity=%s digest=%s\n' "${service}" "${platform}" "${state}" "${action}" "${identity}" "${digest:-none}"
 }
 
 # What: Resolve a target per platform.
