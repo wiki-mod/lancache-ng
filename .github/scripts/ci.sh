@@ -286,6 +286,16 @@ _ci_count_lines() {
     printf '%s\n' "${n}"
 }
 
+# What: the lines that hold a non-space character.
+# Why: one blank-line owner; no awk (AG-REL-001, Fund 136).
+# From: Issue #1683 | PR #1858
+_ci_nonblank_lines() {
+    local line
+    while IFS= read -r line; do
+        if [[ "${line}" =~ [^[:space:]] ]]; then printf '%s\n' "${line}"; fi
+    done <<< "$1"
+}
+
 # What: line 2 of the text; nothing when it has one line.
 # Why: one second-line owner; no external line cutter.
 # From: Issue #1683 | PR #1912
@@ -9259,7 +9269,7 @@ ci_cmd_gc() {
     CI_GC_ROOTS_FILE="$(_ci_mktemp "${CI_TMPDIR}/ci-gc-roots.XXXXXX")" || return 2
     export CI_GC_ROOTS_FILE
     local werr
-    if ! werr="$(awk 'NF>0' <<< "${roots}" 2>&1 > "${CI_GC_ROOTS_FILE}")"; then
+    if ! werr="$(_ci_nonblank_lines "${roots}" 2>&1 > "${CI_GC_ROOTS_FILE}")"; then
         ci_error "[CI-ERROR-GC-0029]" "file=\"${CI_GC_ROOTS_FILE}\" reason=\"roots file not written; no gc\"" "${werr}"
         rm -f "${CI_GC_ROOTS_FILE}"
         return 2
