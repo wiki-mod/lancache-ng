@@ -296,6 +296,19 @@ _ci_nonblank_lines() {
     done <<< "$1"
 }
 
+# What: field N (from 1) of one tab-separated line.
+# Why: no awk (Fund 136); keeps empty fields unlike read.
+# From: Issue #1683 | PR #1858
+_ci_tab_field() {
+    local rest="$1" n="$2"
+    while [ "${n}" -gt 1 ]; do
+        [[ "${rest}" == *$'\t'* ]] || { rest=""; break; }
+        rest="${rest#*$'\t'}"
+        n=$((n - 1))
+    done
+    printf '%s' "${rest%%$'\t'*}"
+}
+
 # What: line 2 of the text; nothing when it has one line.
 # Why: one second-line owner; no external line cutter.
 # From: Issue #1683 | PR #1912
@@ -9108,8 +9121,8 @@ _ci_gc_candidates() {
 # From: Issue #1683
 _ci_gc_delete() {
     local candidate="$1" id svc prefix owner pkgbase path out rc
-    id="$(_ci_capture 0 awk -F'\t' "{print \$2}" <<< "${candidate}")" || return 2
-    svc="$(_ci_capture 0 awk -F'\t' "{print \$5}" <<< "${candidate}")" || return 2
+    id="$(_ci_tab_field "${candidate}" 2)" || return 2
+    svc="$(_ci_tab_field "${candidate}" 5)" || return 2
     case "${id}" in
         ''|*[!0-9]*)
             ci_log "[CI-ERROR-GC-0019]" "candidate=\"${candidate}\" reason=\"no numeric version id\""
@@ -9159,8 +9172,8 @@ readonly _CI_GC_REFERENCED=referenced _CI_GC_UNREACHABLE=unreachable
 # From: Issue #1683
 _ci_gc_reachable() {
     local candidate="$1" digest created window created_epoch now floor
-    digest="$(_ci_capture 0 awk -F'\t' "{print \$1}" <<< "${candidate}")" || return 2
-    created="$(_ci_capture 0 awk -F'\t' "{print \$3}" <<< "${candidate}")" || return 2
+    digest="$(_ci_tab_field "${candidate}" 1)" || return 2
+    created="$(_ci_tab_field "${candidate}" 3)" || return 2
     # What: Roots must be materialized by the caller.
     # Why: No roots file means we cannot judge; refuse.
     # From: Issue #1683
@@ -9173,7 +9186,7 @@ _ci_gc_reachable() {
     # From: Issue #1683
     local tags tag subj root_hit
     local -a probes=("${digest}")
-    tags="$(_ci_capture 0 awk -F'\t' "{print \$4}" <<< "${candidate}")" || return 2
+    tags="$(_ci_tab_field "${candidate}" 4)" || return 2
     if [ -n "${tags}" ]; then
         while IFS= read -r tag; do
             case "${tag}" in
