@@ -947,6 +947,64 @@ ci_job_timeouts:
 ci_result_gate:
   required: [plan]
 
+# What: input globs per check; @shell = shell sources.
+# Why: §98: plan runs a check only if an input changed.
+# From: Issue #1683 | PR #1858
+ci_check_inputs:
+  action-node-versions: ["@{ci_variables.CI_WORKFLOW_DIR}/**"]
+  actionlint: ["@{ci_variables.CI_WORKFLOW_DIR}/**"]
+  bats-and-chain: [".github/scripts/*.bats"]
+  cargo-profile-tuning: ["**/Cargo.toml"]
+  changelog-direct-edit: ["@{ci_variables.CI_CHANGELOG}"]
+  ci-bats: [".github/scripts/*.bats"]
+  codeql-coverage: ["**/*.rs", "**/Cargo.toml"]
+  comments: ["**"]
+  compose-config: ["deploy/**"]
+  compose-healthchecks: ["deploy/**"]
+  deny-short-sha:
+    - "@shell"
+    - "**/Dockerfile"
+    - "@{ci_variables.CI_WORKFLOW_DIR}/*.yml"
+    - "**/*.rs"
+  dockerfiles: ["**/Dockerfile"]
+  executable-bits: []
+  exit-evidence: []
+  governance-guards: ["**"]
+  image-channel-resolution:
+    - "deploy/**"
+    - "@{services.ui.context}/src/main.rs"
+  language-policy: ["**"]
+  line-endings: ["**"]
+  logging-matrix: ["deploy/**", "@{ci_variables.CI_ARCH_DOC}"]
+  mutable-refs:
+    - "@{ci_variables.CI_WORKFLOW_DIR}/*.yml"
+    - "**/Dockerfile"
+  naming-consistency: ["deploy/**"]
+  netdata-isolation: ["deploy/**"]
+  prebuilt-prod:
+    - "deploy/**"
+    - "@{ci_variables.CI_README}"
+    - "@{ci_variables.CI_INSTALLER}"
+  prod-state-wiring:
+    - "deploy/**"
+    - "@{ci_variables.CI_BACKUP_RESTORE_DOC}"
+  proxy-cache-env-doc-drift:
+    - "deploy/**"
+    - "@{ci_variables.CI_ARCH_DOC}"
+    - "@{ci_variables.CI_INSTALLER}"
+  proxy-cert-volume: ["deploy/**", "@{services.proxy.context}/**"]
+  proxy-nginx-policy: ["@{services.proxy.context}/**"]
+  setup-update-safety: ["@{ci_variables.CI_INSTALLER}"]
+  shell-guards: ["@shell", "**/Dockerfile"]
+  shellcheck: ["@shell"]
+  sot-identity-inputs: []
+  stable-external-images: ["deploy/**"]
+  version-drift: ["**/Cargo.toml"]
+  vex-drift: ["@{ci_variables.CI_TRIVY_IGNORE}"]
+  workflow-ci-variables: ["@{ci_variables.CI_WORKFLOW_DIR}/**"]
+  workflow-job-settings: ["@{ci_variables.CI_WORKFLOW_DIR}/**"]
+  workflow-line-limit: ["@{ci_variables.CI_WORKFLOW_DIR}/**"]
+
 # What: standing tracking issues the CI files and closes.
 # Why: one owner for label, scope and the jobs a kind reads.
 # From: Issue #1683 | PR #1912

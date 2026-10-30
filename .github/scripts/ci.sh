@@ -1584,6 +1584,60 @@ _ci_checks_reuse() {
     ci_log "[CI-INFO-PLAN-0017]" "ref=\"${ref}\" note=\"${note}\" reason=\"a green run checked this tree and base; checks NOT-RUN\""
 }
 
+# What: the checks a changed path is an SOT input of.
+# Why: §98: a check runs only if one of its inputs changed.
+# From: Issue #1683 | PR #1858
+_ci_checks_select() {
+    local keys k sub scope globs g re f own hit raw
+    local -a files=("$@") shell=() names=()
+    local -A has=()
+    keys="$(_ci_block_keys ci_check_inputs all)" || return 2
+    for k in ${keys}; do has["${k}"]=1; done
+    own="${CI_SCRIPT_DIR#"${CI_REPO_ROOT}/"}/ci.sh"
+    # What: the shell sources among the changed paths.
+    # Why: @shell has one owner; a shebang file has no glob.
+    # From: Issue #1683 | PR #1858
+    [ "${#files[@]}" -eq 0 ] || _ci_shell_sources shell files || return 2
+    printf -v raw '%s\n' "${!CI_CHECKS[@]}"
+    raw="$(_ci_capture 0 env LC_ALL=C sort <<< "${raw%$'\n'}")" || return 2
+    mapfile -t names <<< "${raw}"
+    for sub in "${names[@]}"; do
+        scope="${CI_CHECKS[${sub}]%% *}"
+        # What: diff and repo checks need an inputs entry.
+        # Why: without one it never runs; fail closed.
+        # From: Issue #1683 | PR #1858
+        if [ -z "${has[${sub}]:-}" ]; then
+            [ "${scope}" = job ] && continue
+            ci_log "[CI-ERROR-PLAN-0022]" "check=\"${sub}\" scope=${scope} reason=\"no SOT ci_check_inputs entry\""
+            return 2
+        fi
+        # What: no list, ci.sh or the SOT: every check runs.
+        # Why: the check code and its SOT are inputs of all.
+        # From: Issue #1683 | PR #1858
+        hit=""
+        [ "${#files[@]}" -gt 0 ] || hit=1
+        for f in "${files[@]}"; do
+            case "${f}" in "${own}" | "${CI_MANIFEST_REL}") hit=1; break ;; esac
+        done
+        if [ -z "${hit}" ]; then
+            globs="$(_ci_block_entry_list ci_check_inputs "" "${sub}")" || return 2
+            while IFS= read -r g; do
+                [ -n "${g}" ] || continue
+                if [ "${g}" = "@shell" ]; then
+                    [ "${#shell[@]}" -eq 0 ] || hit=1
+                else
+                    re="$(_ci_glob_ere "${g}")"
+                    for f in "${files[@]}"; do
+                        [[ ! "${f}" =~ ${re} ]] || { hit=1; break; }
+                    done
+                fi
+                [ -z "${hit}" ] || break
+            done <<< "${globs}"
+        fi
+        [ -z "${hit}" ] || printf '%s\n' "${sub}"
+    done
+}
+
 # What: subject of a PR text mark: hash of its inputs.
 # Why: equal text, labels and policy give equal results.
 # From: Issue #1683 | PR #1858
@@ -1885,15 +1939,29 @@ ci_cmd_plan_matrix() {
     # What: file checks need a reason like a build.
     # Why: §2.1 §98: a checked green tree is NOOP.
     # From: Issue #1683 | PR #1858
-    local checks=true work=false
+    local checks=false work=false check_list=""
     rc=0; _ci_checks_reuse || rc=$?
-    case "${rc}" in 0) checks=false ;; 1) ;; *) return 2 ;; esac
+    case "${rc}" in
+        0) ;;
+        1)
+            check_list="$(_ci_checks_select "${changed[@]}")" || return 2
+            check_list="${check_list//$'\n'/ }"
+            if [ -n "${check_list}" ]; then
+                checks=true
+                ci_log "[CI-INFO-PLAN-0023]" "checks=\"${check_list}\" reason=\"an input of these checks changed\""
+            else
+                ci_log "[CI-INFO-PLAN-0024]" "reason=\"no changed path is an input of a check; checks NOT-RUN\""
+            fi
+            ;;
+        *) return 2 ;;
+    esac
     if [ "${checks}" = true ] || [ "${validate}" = true ] || [ -n "${test_services# }" ] || [ "${rust_audit}" = true ]; then
         work=true
     fi
     ci_group_end
     {
         printf 'checks=%s\n' "${checks}"
+        printf 'check-list=%s\n' "${check_list}"
         printf 'work=%s\n' "${work}"
         printf 'any-build=%s\n' "${any}"
         printf 'promote=%s\n' "${promote}"
@@ -18477,15 +18545,23 @@ ci_cmd_check_all() {
     for sub in "${names[@]}"; do
         r=0 why=""
         scope="${CI_CHECKS[${sub}]%% *}"
+        # What: a set plan list runs only its checks.
+        # Why: §98: plan found no changed input of the rest.
+        # From: Issue #1683 | PR #1858
+        if [ "${scope}" != job ] && [ -n "${CI_CHECKS_SELECTED+set}" ] \
+            && [[ " ${CI_CHECKS_SELECTED} " != *" ${sub} "* ]]; then
+            scope="plan"
+        fi
         # What: one folded group per check, then its time.
         # Why: Fund 94: the old CI showed each check apart.
         # From: Issue #1683 | PR #1858
-        [ "${scope}" = job ] || ci_group "check: ${sub} (${scope})"
+        case "${scope}" in job | plan) ;; *) ci_group "check: ${sub} (${scope})" ;; esac
         t0="${EPOCHREALTIME/./}"
         # What: diff sees changed files; job runs alone.
         # Why: PR text runs as pr-meta, files here (§10).
         # From: Issue #1683 | PR #1912
         case "${scope}" in
+            plan) why="plan: no changed path is an input of this check (§98)" ;;
             diff) CI_SCAN_SCOPE_FILTER=1 ci_cmd_check "${sub}" "${changed[@]}" || r=$? ;;
             repo) ci_cmd_check "${sub}" || r=$? ;;
             job) why="job scope: the workflow step of its own job runs it; run it by name, check all does not" ;;
@@ -18495,7 +18571,7 @@ ci_cmd_check_all() {
         # Why: AG-INT-002: a skip is stated with its reason.
         # From: Issue #1683 | PR #1912
         if [ -n "${why}" ]; then
-            [ "${scope}" = job ] || ci_group_end
+            case "${scope}" in job | plan) ;; *) ci_group_end ;; esac
             printf '%s=NOT-RUN scope=%s reason="%s"\n' "${sub}" "${scope}" "${why}"
             skipped+=("${sub}")
         else

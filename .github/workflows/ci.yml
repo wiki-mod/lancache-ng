@@ -111,6 +111,7 @@ jobs:
       validate-dir: ${{ steps.jobs.outputs.validate-dir }}
       releases: ${{ steps.releases.outputs.releases }}
       checks: ${{ steps.plan.outputs.checks }}
+      check-list: ${{ steps.plan.outputs.check-list }}
       meta: ${{ steps.meta.outputs.meta }}
       any-build: ${{ steps.plan.outputs.any-build }}
       promote: ${{ steps.plan.outputs.promote }}
@@ -488,21 +489,29 @@ jobs:
         id: changed
         if: ${{ !cancelled() && needs.plan.outputs.checks == 'true' }}
         run: bash .github/scripts/ci.sh changed-files
+      # What: only the checks plan listed (§98).
+      # Why: a check without a changed input is NOOP.
+      # From: Issue #1683 | PR #1858
       - name: Run the file check set
         if: ${{ !cancelled() && needs.plan.outputs.checks == 'true' }}
         env:
           CHANGED_FILES: ${{ steps.changed.outputs.file }}
+          CI_CHECKS_SELECTED: ${{ needs.plan.outputs.check-list }}
         run: bash .github/scripts/ci.sh check all
       # What: lint shell and workflow syntax here
       # Why: no own job, no wait on plan (Fund 114)
       # From: Issue #1683 | PR #1858
       - name: shellcheck changed shell scripts
-        if: ${{ !cancelled() && needs.plan.outputs.checks == 'true' }}
+        if: >-
+          !cancelled() && needs.plan.outputs.checks == 'true' &&
+          contains(format(' {0} ', needs.plan.outputs.check-list), ' shellcheck ')
         env:
           CHANGED_FILES: ${{ steps.changed.outputs.file }}
         run: bash .github/scripts/ci.sh check shellcheck
       - name: actionlint workflows
-        if: ${{ !cancelled() && needs.plan.outputs.checks == 'true' }}
+        if: >-
+          !cancelled() && needs.plan.outputs.checks == 'true' &&
+          contains(format(' {0} ', needs.plan.outputs.check-list), ' actionlint ')
         run: bash .github/scripts/ci.sh check actionlint
 
   # What: labels and board; GitHub admin, no CI path.
