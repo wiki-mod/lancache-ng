@@ -1408,11 +1408,16 @@ _ci_job_memo_get() {
 # Why: outside a GitHub job there is no memo to keep.
 # From: Issue #1683 | PR #1858
 _ci_job_memo_put() {
-    local out
+    local out tmp
     if [ -z "${RUNNER_TEMP:-}" ]; then
         return 0
     fi
-    if ! out="$(printf '%s\n' "$2" 2>&1 > "${RUNNER_TEMP}/$1")"; then
+    # What: write a temp file, then rename it in place.
+    # Why: a parallel check never reads a half memo.
+    # From: Issue #1683 | PR #1858
+    tmp="${RUNNER_TEMP}/$1.${BASHPID}"
+    if ! out="$(printf '%s\n' "$2" 2>&1 > "${tmp}" && mv -f "${tmp}" "${RUNNER_TEMP}/$1" 2>&1)"; then
+        rm -f "${tmp}"
         ci_error "[CI-ERROR-RESOLVE-0012]" "path=\"${RUNNER_TEMP}/$1\" reason=\"value not kept for the job\"" "${out}"
         return 2
     fi
@@ -11097,6 +11102,7 @@ _ci_validate_ui_login() {
 _ci_setup_run() {   # out rc errfile ("" = merge) env args
     local -n _ci_su_out="$1" _ci_su_rc="$2"
     local _ci_su_err="$3" _ci_su_env="$4" _ci_su_c _ci_su_bin _ci_su_inst _ci_su_a
+    local _ci_su_fd _ci_su_lk
     local -a _ci_su_args=()
     shift 4
     _ci_su_rc=0
@@ -11108,13 +11114,23 @@ _ci_setup_run() {   # out rc errfile ("" = merge) env args
         [ "${_ci_su_a}" != @INST@ ] || _ci_su_a="${_ci_su_inst}"
         _ci_su_args+=("${_ci_su_a}")
     done
-    _ci_validate_env_local "${_ci_su_inst}" "${_ci_su_env}" || return 2
+    # What: one setup.sh run at a time holds .env.local.
+    # Why: parallel checks share the one install dir.
+    # From: Issue #1683 | PR #1858
+    exec {_ci_su_fd}>"${CI_TMPDIR}/setup-run.lock"
+    if ! _ci_su_lk="$(flock -x "${_ci_su_fd}" 2>&1)"; then
+        exec {_ci_su_fd}>&-
+        ci_error "[CI-ERROR-CORE-0160]" "lock=\"${CI_TMPDIR}/setup-run.lock\" reason=\"lock for the setup.sh run failed\"" "${_ci_su_lk}"
+        return 2
+    fi
+    _ci_validate_env_local "${_ci_su_inst}" "${_ci_su_env}" || { exec {_ci_su_fd}>&-; return 2; }
     if [ -n "${_ci_su_err}" ]; then
         _ci_su_out="$(bash "${_ci_su_bin}" "${_ci_su_args[@]}" 2>"${_ci_su_err}")" || _ci_su_rc=$?
     else
         _ci_su_out="$(bash "${_ci_su_bin}" "${_ci_su_args[@]}" 2>&1)" || _ci_su_rc=$?
     fi
     rm -f "${_ci_su_inst}/.env.local"
+    exec {_ci_su_fd}>&-
 }
 
 # What: setup.sh rollback around a one-run .env.local.
@@ -18997,6 +19013,24 @@ _ci_check_cargo_audit() {
     printf 'cargo-audit=clean\n'
 }
 
+# What: one check in its own group; log and rc to $1.
+# Why: check all runs checks side by side, prints later.
+# From: Issue #1683 | PR #1858
+_ci_check_one() {
+    local dir="$1" sub="$2" scope="$3" r=0
+    shift 3
+    {
+        ci_group "check: ${sub} (${scope})"
+        if [ "${scope}" = diff ]; then
+            CI_SCAN_SCOPE_FILTER=1 ci_cmd_check "${sub}" "$@" || r=$?
+        else
+            ci_cmd_check "${sub}" || r=$?
+        fi
+        ci_group_end
+    } > "${dir}/${sub}.log" 2>&1
+    printf '%s\n' "${r}" > "${dir}/${sub}.rc"
+}
+
 # What: run CI_CHECKS by scope, keep the worst exit (§98).
 # Why: a stop (2) must not read as a finding (1) (§68).
 # From: Issue #1683 | PR #1912
@@ -19004,6 +19038,8 @@ ci_cmd_check_all() {
     local -a changed=() names=() skipped=() failed=() stopped=()
     _ci_collect_changed changed "$@" || return 2
     local raw sub r rc=0 scope why state invoked=0 diff_seen="all files" keys
+    local dir cpus live=0 t0
+    local -A scopes=()
     printf -v keys '%s\n' "${!CI_CHECKS[@]}"
     raw="$(_ci_capture 0 env LC_ALL=C sort <<< "${keys%$'\n'}")" || return 2
     mapfile -t names <<< "${raw}"
@@ -19013,8 +19049,12 @@ ci_cmd_check_all() {
     # From: Issue #1683 | PR #1858
     ci_group "check all: ${diff_seen}"
     [ "${#changed[@]}" -eq 0 ] || printf '%s\n' "${changed[@]}" >&2
+    ci_group_end
+    dir="$(_ci_mktemp -d "${CI_TMPDIR}/ci-checks.XXXXXX")" || return 2
+    cpus="$(_ci_parallel_jobs)" || return 2
+    cpus="${cpus#* }"
+    t0="${EPOCHREALTIME/./}"
     for sub in "${names[@]}"; do
-        r=0 why=""
         scope="${CI_CHECKS[${sub}]%% *}"
         # What: a set plan list runs only its checks.
         # Why: §98: plan found no changed input of the rest.
@@ -19023,17 +19063,42 @@ ci_cmd_check_all() {
             && [[ " ${CI_CHECKS_SELECTED} " != *" ${sub} "* ]]; then
             scope="plan"
         fi
-        # What: one folded group per check, then its time.
-        # Why: Fund 94: the old CI showed each check apart.
+        scopes["${sub}"]="${scope}"
+        # What: diff and repo checks run side by side.
+        # Why: A3: in a row they took 33-45 s.
         # From: Issue #1683 | PR #1858
-        case "${scope}" in job | plan) ;; *) ci_group "check: ${sub} (${scope})" ;; esac
+        case "${scope}" in
+            diff | repo)
+                # What: wait -n frees one slot only.
+                # Why: the rc is in a file; set -e.
+                # From: Issue #1683 | PR #1858
+                if [ "${live}" -ge "${cpus}" ]; then
+                    if ! wait -n; then :; fi
+                    live=$((live - 1))
+                fi
+                _ci_check_one "${dir}" "${sub}" "${scope}" "${changed[@]}" &
+                live=$((live + 1)) ;;
+        esac
+    done
+    wait
+    for sub in "${names[@]}"; do
+        r=0 why="" scope="${scopes[${sub}]}"
         # What: diff sees changed files; job runs alone.
         # Why: PR text runs as pr-meta, files here (§10).
         # From: Issue #1683 | PR #1912
         case "${scope}" in
             plan) why="plan: no changed path is an input of this check (§98)" ;;
-            diff) CI_SCAN_SCOPE_FILTER=1 ci_cmd_check "${sub}" "${changed[@]}" || r=$? ;;
-            repo) ci_cmd_check "${sub}" || r=$? ;;
+            diff | repo)
+                # What: its log as one block, in name order.
+                # Why: Fund 94: each check shown apart.
+                # From: Issue #1683 | PR #1858
+                [ ! -s "${dir}/${sub}.log" ] || printf '%s\n' "$(<"${dir}/${sub}.log")" >&2
+                if [ -s "${dir}/${sub}.rc" ]; then
+                    r="$(<"${dir}/${sub}.rc")"
+                else
+                    ci_log "[CI-ERROR-CHECK-0208]" "check=\"${sub}\" reason=\"check ended without an exit code\""
+                    r=2
+                fi ;;
             job) why="job scope: the workflow step of its own job runs it; run it by name, check all does not" ;;
             *) ci_log "[CI-ERROR-CHECK-0173]" "sub=\"${sub}\" entry=\"${CI_CHECKS[${sub}]}\" reason=\"scope must be diff, repo or job\""; r=2 ;;
         esac
@@ -19041,12 +19106,10 @@ ci_cmd_check_all() {
         # Why: AG-INT-002: a skip is stated with its reason.
         # From: Issue #1683 | PR #1912
         if [ -n "${why}" ]; then
-            case "${scope}" in job | plan) ;; *) ci_group_end ;; esac
             printf '%s=NOT-RUN scope=%s reason="%s"\n' "${sub}" "${scope}" "${why}"
             skipped+=("${sub}")
         else
             invoked=$((invoked + 1))
-            ci_group_end
             ci_log "[CI-INFO-CHECK-0206]" "check=\"${sub}\" scope=${scope} rc=${r}"
         fi
         # What: name each check with a finding or a stop.
@@ -19064,8 +19127,8 @@ ci_cmd_check_all() {
         1) state=findings ;;
         *) state=stopped ;;
     esac
-    ci_group_end
-    printf 'check-all=%s rc=%s invoked=%s not-run=%s diff-scope="%s" finding-checks="%s" stopped-checks="%s" not-run-checks="%s"\n' "${state}" "${rc}" "${invoked}" "${#skipped[@]}" "${diff_seen}" "${failed[*]:-}" "${stopped[*]:-}" "${skipped[*]:-}"
+    rm -rf "${dir}"
+    printf 'check-all=%s rc=%s invoked=%s not-run=%s diff-scope="%s" finding-checks="%s" stopped-checks="%s" not-run-checks="%s" parallel=%s ms=%s\n' "${state}" "${rc}" "${invoked}" "${#skipped[@]}" "${diff_seen}" "${failed[*]:-}" "${stopped[*]:-}" "${skipped[*]:-}" "${cpus}" "$(((${EPOCHREALTIME/./} - t0) / 1000))"
     return "${rc}"
 }
 
