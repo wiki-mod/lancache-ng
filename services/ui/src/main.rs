@@ -3162,8 +3162,7 @@ async fn register_secondary(
     // What: refuse without the shared DDNS TSIG key.
     // Why: the secondary needs it; fail before DB write.
     // From: Issue #1683 | PR #1912
-    let tsig_path =
-        Path::new(&state.config.shared_secret_dir).join(shared_secret_file_name("DDNS_TSIG_KEY"));
+    let tsig_path = tsig_key_path(&state.config);
     let ddns_tsig_key = fs::read_to_string(&tsig_path)
         .map(|key| key.trim().to_string())
         .map_err(|e| e.to_string())
@@ -5907,11 +5906,18 @@ async fn domains_page(
     render(&state, "domains.html", &ctx)
 }
 
+// What: the shared file of the DDNS TSIG key.
+// Why: the registration and the domains page read one path.
+// From: Issue #858
+fn tsig_key_path(config: &Config) -> PathBuf {
+    Path::new(&config.shared_secret_dir).join(shared_secret_file_name("DDNS_TSIG_KEY"))
+}
+
 // What: true when a real DDNS TSIG key file exists.
 // Why: the dns side writes it; an empty file is void.
 // From: Issue #858
 fn tsig_key_configured(config: &Config) -> bool {
-    let path = Path::new(&config.shared_secret_dir).join(shared_secret_file_name("DDNS_TSIG_KEY"));
+    let path = tsig_key_path(config);
     // What: no file means no key; other errors are logged.
     // Why: a missing key is normal, a denied one not.
     // From: Issue #1683 | PR #1912
