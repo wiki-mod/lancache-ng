@@ -308,49 +308,14 @@ jobs:
           TEST_SERVICES: ${{ needs.plan.outputs.test-services }}
         run: bash .github/scripts/ci.sh test-stack
 
-  # What: scan all built images before ACCEPT
-  # Why: ci.sh fetches the latest trivy; gates ACCEPT
-  # From: Issue #1683
-  scan:
-    name: scan
-    needs: [platform, plan, build]
-    if: >-
-      !cancelled() && needs.plan.outputs.any-build == 'true'
-    runs-on: ${{ needs.platform.outputs.runner }}
-    timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['scan'] }}
-    container: *bt_platform
-    # What: status issues and the clean-scan mark ref.
-    # Why: §30: the mark spares a rescan; packages read.
-    # From: Issue #1683 | PR #1858
-    permissions:
-      contents: write
-      packages: read
-      issues: write
-    env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      # What: a fork PR token cannot write the scan mark.
-      # Why: ci.sh logs it and writes no mark then.
-      # From: Issue #1683 | PR #1858
-      PR_IS_FORK: ${{ github.event.pull_request.head.repo.fork }}
-    outputs:
-      passed: ${{ steps.scan.outputs.passed }}
-    steps:
-      - *bootstrap
-      - name: Scan the built images by digest
-        id: scan
-        env:
-          CI_BUILD_MATRIX: ${{ needs.plan.outputs.matrix }}
-          CI_RUN_IDENTITIES: *run_ids
-        run: bash .github/scripts/ci.sh scan-stack
-
-  # What: aggregate acceptance to ledger
-  # Why: one aggregator, one CAS commit; push only
-  # From: Issue #1683
+  # What: aggregate acceptance to ledger; no Trivy here.
+  # Why: one CAS commit; the nightly run scans daily.
+  # From: Issue #1683 | PR #1858
   aggregate:
     name: aggregate
-    needs: [platform, plan, scan]
+    needs: [platform, plan, build]
     if: >-
-      !cancelled() && needs.scan.outputs.passed != '' &&
+      !cancelled() &&
       needs.plan.outputs.any-build == 'true' && github.event_name != 'pull_request'
     runs-on: ${{ needs.platform.outputs.runner }}
     timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['aggregate'] }}
@@ -358,11 +323,14 @@ jobs:
     permissions:
       contents: write
       packages: read
+    outputs:
+      passed: ${{ steps.aggregate.outputs.passed }}
     steps:
       - *bootstrap
       - name: Aggregate acceptance into the ledger
+        id: aggregate
         env:
-          CI_BUILD_MATRIX: ${{ needs.scan.outputs.passed }}
+          CI_BUILD_MATRIX: ${{ needs.plan.outputs.matrix }}
           CI_RUN_IDENTITIES: *run_ids
         run: bash .github/scripts/ci.sh aggregate-stack
 
@@ -371,9 +339,9 @@ jobs:
   # From: Issue #1683 | PR #1858
   assemble:
     name: assemble
-    needs: [platform, plan, scan, aggregate]
+    needs: [platform, plan, aggregate]
     if: >-
-      !cancelled() && needs.aggregate.result == 'success' &&
+      !cancelled() && needs.aggregate.outputs.passed != '' &&
       needs.plan.outputs.any-build == 'true' && github.event_name != 'pull_request'
     runs-on: ${{ needs.platform.outputs.runner }}
     timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['assemble'] }}
@@ -391,7 +359,7 @@ jobs:
       - *bootstrap
       - name: Assemble multi-arch indexes
         env:
-          CI_BUILD_MATRIX: ${{ needs.scan.outputs.passed }}
+          CI_BUILD_MATRIX: ${{ needs.aggregate.outputs.passed }}
           CI_RUN_IDENTITIES: *run_ids
         run: bash .github/scripts/ci.sh assemble-stack
 
@@ -400,14 +368,14 @@ jobs:
   # From: Issue #1683 | PR #1858
   validate:
     name: validate
-    needs: [platform, plan, build, scan, aggregate, assemble]
+    needs: [platform, plan, build, aggregate, assemble]
     if: >-
       !cancelled() && needs.plan.outputs.validate == 'true' &&
       (needs.plan.outputs.any-build == 'false' ||
       (github.event_name == 'pull_request' &&
       (needs.build.result == 'success' ||
       needs.build.result == 'skipped')) ||
-      (needs.scan.result == 'success' && needs.assemble.result == 'success'))
+      (needs.aggregate.result == 'success' && needs.assemble.result == 'success'))
     # What: build-tools container, one shared host dir.
     # Why: AG-VAL-016; same path both sides for binds.
     # From: Issue #1683 | PR #1912
@@ -574,7 +542,7 @@ jobs:
   # From: Issue #1683
   result:
     name: result
-    needs: [platform, plan, build, test, cargo-audit, scan, aggregate, assemble, validate, promote, checks, close-linked-issues]
+    needs: [platform, plan, build, test, cargo-audit, aggregate, assemble, validate, promote, checks, close-linked-issues]
     if: always() && github.event_name != 'issues'
     # What: platform's runner/timeout or the bootstrap pair.
     # Why: the required check must run when platform failed.

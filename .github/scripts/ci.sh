@@ -3763,22 +3763,75 @@ _ci_matrix_pairs() {
 # Why: emit each pair then one CAS commit (§26.1); thin.
 # From: Issue #1683
 ci_cmd_aggregate_stack() {
-    local matrix="${CI_BUILD_MATRIX:-}" dir svc plat pairs
+    local matrix="${CI_BUILD_MATRIX:-}" dir svc plat pairs digest drc rc=0 failed="" passed='[]'
     [ -n "${matrix}" ] || { ci_log "[CI-ERROR-AGGREGATE-0005]" "reason=\"CI_BUILD_MATRIX required\""; return 2; }
     pairs="$(_ci_matrix_pairs "${matrix}")" || return 2
+    _ci_require_ghcr_auth || return "$?"
     dir="$(_ci_mktemp -d "${CI_TMPDIR}/ci-results.XXXXXX")" || return 2
+    # What: accept each built, verified pair; no scan wait.
+    # Why: DoMe 30.10.: the nightly run scans once a day.
+    # From: Issue #1683 | PR #1858
     while read -r svc plat; do
         [ -n "${svc}" ] || continue
+        drc=0; digest="$(_ci_built_digest "${svc}" "${plat}")" || drc=$?
+        [ "${drc}" -ne 1 ] || continue
+        if [ "${drc}" -ne 0 ]; then
+            failed="${failed} ${svc}/${plat}"
+            rc=2
+            continue
+        fi
+        ci_log "[CI-INFO-AGGREGATE-0009]" "service=\"${svc}\" platform=\"${plat}\" digest=\"${digest}\" reason=\"built and verified; accepted, the nightly run scans it\""
         ci_cmd_emit_result "${svc}" "${plat}" > "${dir}/${svc}-${plat//\//-}.json" || return "$?"
+        passed="$(_ci_matrix_append "${passed}" service="${svc}" platform="${plat}")" || return 2
     done <<< "${pairs}"
-    ci_cmd_aggregate "${dir}"
+    if [ "${passed}" != '[]' ]; then
+        ci_cmd_aggregate "${dir}" || return "$?"
+        # What: the accepted pairs go to assemble.
+        # Why: a red pair must not block the good ones.
+        # From: Issue #1683 | PR #1858
+        _ci_step_output "[CI-ERROR-AGGREGATE-0007]" passed "$(_ci_matrix_doc "${passed}")" || return 2
+    fi
+    [ "${rc}" -eq 0 ] || ci_log "[CI-ERROR-AGGREGATE-0008]" "failed=\"${failed# }\" reason=\"these pairs were not accepted; the others were\""
+    return "${rc}"
+}
+
+# What: verified digest of one built pair, or rc 1/2.
+# Why: one owner for scan-stack and aggregate-stack.
+# From: Issue #1683 | PR #1858
+_ci_built_digest() {
+    local svc="$1" plat="$2" digest drc=0 vrc=0
+    digest="$(_ci_published_digest "${svc}" "${plat}" ok)" || drc=$?
+    # What: an unbuilt pair is skipped, never passed
+    # Why: its build is red; it is never accepted
+    # From: Issue #1683 | PR #1858
+    if [ "${drc}" -eq 1 ]; then
+        ci_log "[CI-WARN-SCAN-0025]" "service=\"${svc}\" platform=\"${plat}\" reason=\"no published image; its build failed, not accepted\""
+        return 1
+    fi
+    if [ "${drc}" -ne 0 ]; then
+        ci_log "[CI-ERROR-SCAN-0017]" "service=\"${svc}\" platform=\"${plat}\" reason=\"no published digest readable\""
+        return 2
+    fi
+    # What: an unverified digest fails; others go on
+    # Why: its readback or smoke test failed (B20)
+    # From: Issue #1683 | PR #1912
+    _ci_verified_has "${svc}" "${plat}" "${digest}" || vrc=$?
+    if [ "${vrc}" -eq 1 ]; then
+        ci_log "[CI-ERROR-SCAN-0031]" "service=\"${svc}\" platform=\"${plat}\" digest=\"${digest}\" reason=\"no build verified this digest\""
+        return 2
+    fi
+    if [ "${vrc}" -ne 0 ]; then
+        ci_log "[CI-ERROR-SCAN-0032]" "service=\"${svc}\" platform=\"${plat}\" digest=\"${digest}\" reason=\"verified mark unreadable\""
+        return 2
+    fi
+    printf '%s\n' "${digest}"
 }
 
 # What: scan each built pair by published digest (§7).
 # Why: SCAN before ACCEPT; thin YAML, iteration in ci.sh.
 # From: Issue #1683
 ci_cmd_scan_stack() {
-    local matrix="${CI_BUILD_MATRIX:-}" svc plat digest pairs rc=0 crc drc vrc failed="" unbuilt="" passed='[]' sid
+    local matrix="${CI_BUILD_MATRIX:-}" svc plat digest pairs rc=0 crc drc failed="" unbuilt="" passed='[]' sid
     [ -n "${matrix}" ] || { ci_log "[CI-ERROR-SCAN-0016]" "reason=\"CI_BUILD_MATRIX required\""; return 2; }
     pairs="$(_ci_matrix_pairs "${matrix}")" || return 2
     _ci_require_ghcr_auth || return "$?"
@@ -3787,33 +3840,12 @@ ci_cmd_scan_stack() {
     # From: Issue #1683 | PR #1912
     while read -r svc plat; do
         [ -n "${svc}" ] || continue
-        drc=0; digest="$(_ci_published_digest "${svc}" "${plat}" ok)" || drc=$?
-        # What: an unbuilt pair is skipped, never passed
-        # Why: its build is red; unscanned is never accepted
-        # From: Issue #1683 | PR #1858
+        drc=0; digest="$(_ci_built_digest "${svc}" "${plat}")" || drc=$?
         if [ "${drc}" -eq 1 ]; then
-            ci_log "[CI-WARN-SCAN-0025]" "service=\"${svc}\" platform=\"${plat}\" reason=\"no published image; its build failed, not scanned, not accepted\""
             unbuilt="${unbuilt} ${svc}/${plat}"
             continue
         fi
         if [ "${drc}" -ne 0 ]; then
-            ci_log "[CI-ERROR-SCAN-0017]" "service=\"${svc}\" platform=\"${plat}\" reason=\"no published digest to scan\""
-            failed="${failed} ${svc}/${plat}"
-            rc=2
-            continue
-        fi
-        # What: an unverified digest fails; others go on
-        # Why: its readback or smoke test failed (B20)
-        # From: Issue #1683 | PR #1912
-        vrc=0; _ci_verified_has "${svc}" "${plat}" "${digest}" || vrc=$?
-        if [ "${vrc}" -eq 1 ]; then
-            ci_log "[CI-ERROR-SCAN-0031]" "service=\"${svc}\" platform=\"${plat}\" digest=\"${digest}\" reason=\"no build verified this digest; not scanned\""
-            failed="${failed} ${svc}/${plat}"
-            rc=2
-            continue
-        fi
-        if [ "${vrc}" -ne 0 ]; then
-            ci_log "[CI-ERROR-SCAN-0032]" "service=\"${svc}\" platform=\"${plat}\" digest=\"${digest}\" reason=\"verified mark unreadable\""
             failed="${failed} ${svc}/${plat}"
             rc=2
             continue
