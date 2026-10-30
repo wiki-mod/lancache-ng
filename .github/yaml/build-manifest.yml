@@ -139,7 +139,7 @@ services:
     # From: Issue #1683
     crates: [nats-subscriber, lancache-watchdog]
     processes: [pdns, dns-http, dns-https, nats-server, nats-subscriber, soa]
-    default_args: [PDNS_LUA_DNS_SCRIPT, PDNS_SCHEMA_FILE]
+    default_args: [PDNS_LUA_DNS_SCRIPT]
     setup:
       - dir=@PDNS_CONF_DIR@/auth
       - dir=@PDNS_DATA_DIR@:pdns
@@ -148,6 +148,7 @@ services:
     packages:
       - pdns
       - pdns-backend-sqlite3
+      - pdns-doc
       - pdns-recursor-luajit
       - nats-server
       - bind-tools
@@ -681,7 +682,7 @@ runtime:
     - PDNS_CONF_DIR=/etc/pdns
     - PDNS_RUN_DIR=/var/run/pdns
     - PDNS_LUA_DNS_SCRIPT=@PDNS_CONF_DIR@/filter-aaaa.lua
-    - PDNS_SCHEMA_FILE=/usr/share/lancache-ng/schema.sqlite3.sql
+    - PDNS_SCHEMA_FILE=/usr/share/doc/pdns/schema.sqlite3.sql
     - NGINX_DIR=/etc/nginx
     - NGINX_SUBDIR_CA=ssl/ca
     - NGINX_SUBDIR_CERTS=ssl/certs
@@ -1681,7 +1682,6 @@ file_headers:
     - services/ui/src/static/chart.umd.min.js
     - services/ui/src/static/admin.css
     - services/proxy/public_suffix_list.dat
-    - services/dns/schema.sqlite3.sql
 
 # What: CI variables each build type passes as build-args.
 # Why: builders read repo/org vars; no YAML or literal copy.

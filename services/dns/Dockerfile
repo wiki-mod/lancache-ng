@@ -130,9 +130,7 @@ COPY --from=dns-builder /build/lancache-watchdog-out /usr/local/bin/lancache-wat
 # Why: the supervisor reads the same paths.
 # From: Issue #1683 | PR #1912
 ARG PDNS_LUA_DNS_SCRIPT
-ARG PDNS_SCHEMA_FILE
 COPY services/dns/filter-aaaa.lua ${PDNS_LUA_DNS_SCRIPT}
-COPY services/dns/schema.sqlite3.sql ${PDNS_SCHEMA_FILE}
 
 # What: processes the supervisor runs, from the SOT.
 # Why: ci.sh passes the list; the image holds no copy.
