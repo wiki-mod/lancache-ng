@@ -73,7 +73,7 @@ declare -A CI_DISPATCH=(
     [release-publish]=ci_cmd_release_publish [release-images]=ci_cmd_release_images [release-sbom-stack]=ci_cmd_release_sbom_stack [release-vex]=ci_cmd_release_vex [cut-release-tag]=ci_cmd_cut_release_tag [release-notes]=ci_cmd_release_notes [release-changelog]=ci_cmd_release_changelog [release-variable]=ci_cmd_release_variable
     [gc]=ci_cmd_gc [gc-refs]=ci_cmd_gc_refs [check]=ci_cmd_check [close-linked-issues]=ci_cmd_close_linked_issues [pr-labels]=ci_cmd_pr_labels [board-add]=ci_cmd_board_add
     [welcome]=ci_cmd_welcome [version]=ci_cmd_version [docker-daemon-config]=ci_cmd_docker_daemon_config [runner-host]=ci_cmd_runner_host
-    [have-command]=ci_cmd_have_command [pr-green-mark]=ci_cmd_pr_green_mark
+    [have-command]=ci_cmd_have_command [pr-green-mark]=ci_cmd_pr_green_mark [pr-meta]=ci_cmd_pr_meta
 )
 
 # What: check name -> "scope function" for ci.sh check.
@@ -101,7 +101,7 @@ declare -gA CI_CHECKS=(
     [workflow-job-settings]="repo _ci_check_workflow_job_settings" [cargo-profile-tuning]="repo _ci_check_cargo_profile_tuning"
     [codeql-coverage]="repo _ci_check_codeql_coverage"
     [version-drift]="repo _ci_version_release"
-    [pr-title]="pr _ci_check_pr_title" [pr-template]="pr _ci_check_pr_template" [pr-tracking-metadata]="job _ci_check_pr_tracking_metadata"
+    [pr-title]="job _ci_check_pr_title" [pr-template]="job _ci_check_pr_template" [pr-tracking-metadata]="job _ci_check_pr_tracking_metadata"
     [cargo-audit]="job _ci_check_cargo_audit" [shellcheck]="job _ci_check_shellcheck"
     [actionlint]="job _ci_check_actionlint" [orphaned-branches]="job _ci_check_orphaned_branches"
 )
@@ -1548,18 +1548,95 @@ _ci_pr_fingerprint_pair() {
     esac
 }
 
-# What: ref of the last green run mark of one PR.
-# Why: one ref per PR keeps one value per PR.
+# What: ref of a green run mark of one PR; $1 a kind.
+# Why: one ref per PR and kind keeps one value each.
 # From: Issue #1683 | PR #1858
 _ci_green_ref() {
-    local prefix n
+    local prefix n kind="${1:-}"
     n="$(_ci_env_required PR_NUMBER)" || return 2
     if [[ ! "${n}" =~ ^[1-9][0-9]*$ ]]; then
         ci_log "[CI-ERROR-PLAN-0012]" "pr=\"${n}\" reason=\"PR_NUMBER is no PR number\""
         return 2
     fi
     prefix="$(_ci_variable CI_GREEN_REF)" || return 2
-    printf '%s/pr-%s' "${prefix}" "${n}"
+    printf '%s/pr-%s%s' "${prefix}" "${n}" "${kind:+-${kind}}"
+}
+
+# What: subject of a checks mark: tree and diff base.
+# Why: equal tree and base give equal check results.
+# From: Issue #1683 | PR #1858
+_ci_checks_note() {
+    local tree
+    tree="$(_ci_capture 0 git -C "${CI_REPO_ROOT}" rev-parse 'HEAD^{tree}')" || return 2
+    printf 'checks-green %s %s' "${tree}" "${BASE_SHA:-}"
+}
+
+# What: rc 0 if a green run checked this PR tree.
+# Why: §2.1 §3: a checked tree needs no second check.
+# From: Issue #1683 | PR #1858
+_ci_checks_reuse() {
+    local ref note rc=0
+    [ "${GITHUB_EVENT_NAME:-}" = pull_request ] || return 1
+    ref="$(_ci_green_ref checks)" || return 2
+    note="$(_ci_checks_note)" || return 2
+    _ci_mark_has "${ref}" "${note}" || rc=$?
+    [ "${rc}" -eq 0 ] || return "${rc}"
+    ci_log "[CI-INFO-PLAN-0017]" "ref=\"${ref}\" note=\"${note}\" reason=\"a green run checked this tree and base; checks NOT-RUN\""
+}
+
+# What: subject of a PR text mark: hash of its inputs.
+# Why: equal text, labels and policy give equal results.
+# From: Issue #1683 | PR #1858
+_ci_meta_note() {
+    local tpl blobs hash
+    tpl="$(_ci_variable CI_PR_TEMPLATE)" || return 2
+    blobs="$(_ci_capture 0 git -C "${CI_REPO_ROOT}" rev-parse "HEAD:${CI_MANIFEST_REL}" "HEAD:${tpl}")" || return 2
+    hash="$(printf '%s\n' "${PR_TITLE:-}" "${PR_BODY:-}" "${PR_AUTHOR:-}" "${PR_DRAFT:-}" \
+        "${PR_LABELS_JSON:-}" "${PR_MILESTONE_TITLE:-}" "${blobs}" | _ci_sha256_hex)" || return 2
+    printf 'meta-green %s' "${hash}"
+}
+
+# What: plan: decide the PR text check; check: run it.
+# Why: §2.1 §10: plan decides; unchanged text is NOOP.
+# From: Issue #1683 | PR #1858
+ci_cmd_pr_meta() {
+    local mode="${1:-}" out ref note sub r rc=0 meta=true
+    case "${mode}" in
+        plan | check) ;;
+        *)
+            ci_log "[CI-ERROR-PLAN-0020]" "mode=\"${mode}\" reason=\"pr-meta needs plan or check\""
+            return 2
+            ;;
+    esac
+    ref="$(_ci_green_ref meta)" || return 2
+    note="$(_ci_meta_note)" || return 2
+    if [ "${mode}" = plan ]; then
+        out="$(_ci_env_required GITHUB_OUTPUT)" || return 2
+        _ci_mark_has "${ref}" "${note}" || rc=$?
+        case "${rc}" in
+            0)
+                meta=false
+                ci_log "[CI-INFO-PLAN-0021]" "ref=\"${ref}\" note=\"${note}\" reason=\"this PR text and metadata passed before; check NOT-RUN\""
+                ;;
+            1) ;;
+            *) return 2 ;;
+        esac
+        printf 'meta=%s\n' "${meta}" >> "${out}"
+        printf 'pr-meta=%s\n' "${meta}"
+        return 0
+    fi
+    for sub in pr-title pr-template pr-tracking-metadata; do
+        r=0; ci_cmd_check "${sub}" || r=$?
+        [ "${r}" -le "${rc}" ] || rc="${r}"
+    done
+    [ "${rc}" -eq 0 ] || return "${rc}"
+    if [ "${PR_IS_FORK:-false}" = true ]; then
+        printf 'pr-meta=clean mark=NOT-RUN reason="fork PR: the token cannot write refs"\n'
+        return 0
+    fi
+    _ci_mark_write "${ref}" "${note}" "${note}"$'\n\n'"$(_ci_lock_note run)" "[CI-ERROR-PLAN-0019]" \
+        "note=\"${note}\" reason=\"PR text mark not written\"" || return 2
+    printf 'pr-meta=clean mark=written ref=%s\n' "${ref}"
 }
 
 # What: subject of a green run mark for fingerprint $1.
@@ -1805,8 +1882,19 @@ ci_cmd_plan_matrix() {
     fi
     validate="${any}"
     [ "${promote}" = false ] || validate=true
+    # What: file checks need a reason like a build.
+    # Why: §2.1 §98: a checked green tree is NOOP.
+    # From: Issue #1683 | PR #1858
+    local checks=true work=false
+    rc=0; _ci_checks_reuse || rc=$?
+    case "${rc}" in 0) checks=false ;; 1) ;; *) return 2 ;; esac
+    if [ "${checks}" = true ] || [ "${validate}" = true ] || [ -n "${test_services# }" ] || [ "${rust_audit}" = true ]; then
+        work=true
+    fi
     ci_group_end
     {
+        printf 'checks=%s\n' "${checks}"
+        printf 'work=%s\n' "${work}"
         printf 'any-build=%s\n' "${any}"
         printf 'promote=%s\n' "${promote}"
         printf 'validate=%s\n' "${validate}"
@@ -3463,6 +3551,18 @@ ci_cmd_pr_green_mark() {
         printf 'pr-green-mark=NOT-RUN reason="fork PR: the token cannot write refs"\n'
         return 0
     fi
+    # What: mark the tree when checks ran green here.
+    # Why: a later run of this tree skips checks (§2.1).
+    # From: Issue #1683 | PR #1858
+    if [ "${CI_CHECKS_RESULT:-}" = success ]; then
+        ref="$(_ci_green_ref checks)" || return 2
+        note="$(_ci_checks_note)" || return 2
+        _ci_mark_write "${ref}" "${note}" "${note}"$'\n\n'"$(_ci_lock_note run)" "[CI-ERROR-PLAN-0018]" \
+            "note=\"${note}\" reason=\"checks mark not written\"" || return 2
+        printf 'pr-checks-mark=written ref=%s note=%s\n' "${ref}" "${note}"
+    else
+        printf 'pr-checks-mark=NOT-RUN reason="checks did not run green in this run" checks="%s"\n' "${CI_CHECKS_RESULT:-}"
+    fi
     if [ "${CI_PLAN_ANY_BUILD:-}" != true ]; then
         printf 'pr-green-mark=NOT-RUN reason="plan had no build or verify pair; nothing to carry over" any-build="%s"\n' "${CI_PLAN_ANY_BUILD:-}"
         return 0
@@ -4083,8 +4183,8 @@ ci_cmd_pr_labels() {
     fi
     while IFS= read -r l; do args+=(-f "labels[]=${l}"); done <<< "${labels}"
     repo="$(_ci_repo)" || return 2
-    out="$(_ci_run "[CI-ERROR-PRLABELS-0002]" "pr=\"${PR_NUMBER}\" labels=\"${labels//$'\n'/ }\" reason=\"labels not added\"" \
-        gh api -X POST "repos/${repo}/issues/${PR_NUMBER}/labels" "${args[@]}")" || return 2
+    out="$(_ci_run "[CI-ERROR-PRLABELS-0002]" "pr=\"${PR_NUMBER:-}\" labels=\"${labels//$'\n'/ }\" reason=\"labels not added\"" \
+        gh api -X POST "repos/${repo}/issues/${PR_NUMBER:-}/labels" "${args[@]}")" || return 2
     # What: each added label is in the label list returned
     # Why: AG-WF-031: every GitHub write is read back
     # From: Issue #1683 | PR #1858
@@ -4112,6 +4212,21 @@ ci_cmd_board_add() {
     if [ -z "${item}" ]; then
         printf 'board-add=NOT-RUN reason="not a pull request or issue"\n'
         return 0
+    fi
+    # What: a PR goes on the board when opened or reopened.
+    # Why: a later PR event would only repeat the same add.
+    # From: Issue #1683 | PR #1858
+    if [ "${kind}" = pull ]; then
+        local event action
+        event="$(_ci_env_required GITHUB_EVENT_PATH)" || return 2
+        action="$(_ci_capture 0 jq -r '.action // empty' "${event}")" || return 2
+        case "${action}" in
+            opened | reopened) ;;
+            *)
+                printf 'board-add=NOT-RUN action="%s" reason="the PR was added when opened"\n' "${action}"
+                return 0
+                ;;
+        esac
     fi
     if [ "${PR_IS_FORK:-false}" = true ] || [ -z "${GH_TOKEN:-}" ]; then
         printf 'board-add=NOT-RUN reason="no project token (fork or unset); add by hand (AG-GH-008)"\n'
@@ -9440,8 +9555,9 @@ ci_cmd_gc_refs() {
     while IFS=$'\t' read -r sha ref; do
         [ -n "${ref}" ] || continue
         n="${ref#"${prefix}/pr-"}"
+        n="${n%%-*}"
         if [[ ! "${n}" =~ ^[1-9][0-9]*$ ]]; then
-            ci_log "[CI-ERROR-GC-0037]" "ref=\"${ref}\" reason=\"not of the form ${prefix}/pr-<number>\""
+            ci_log "[CI-ERROR-GC-0037]" "ref=\"${ref}\" reason=\"not of the form ${prefix}/pr-<number>[-<kind>]\""
             return 2
         fi
         if ! state="$(_ci_retry github-read gh api --jq .state "repos/${repo}/pulls/${n}")"; then
@@ -17946,7 +18062,7 @@ _ci_check_workflow_ci_variables() {
 }
 
 # What: SOT-owned jobs read job-settings, others a literal
-# Why: AG-CI-006/016: one owner; every job has a timeout
+# Why: AG-CI-006/016: one owner; a literal must match it
 # From: Issue #1683 | PR #1858
 _ci_check_workflow_job_settings() {
     local repo_root="${1:-${CI_REPO_ROOT:-.}}" out="" runner job tmap="" js_count=0 f rows verdict hasjobs line
@@ -17974,7 +18090,7 @@ _ci_check_workflow_job_settings() {
                 njob++
                 want = (job in T) ? T[job] : ""
                 if (to == "") bad("no timeout-minutes")
-                else if (want != "" && lit(to)) bad("timeout-minutes " to " (SOT ci_job_timeouts." job " owns it)")
+                else if (want != "" && lit(to) && to != want) bad("timeout-minutes " to " differs from SOT ci_job_timeouts." job " " want)
                 else if (want == "" && !lit(to)) bad("timeout-minutes reads job-settings, SOT ci_job_timeouts has no " job)
                 if (nd) {
                     if (lit(ro)) bad("runs-on " ro " (a needs job reads job-settings)")
@@ -18366,21 +18482,14 @@ ci_cmd_check_all() {
         # From: Issue #1683 | PR #1858
         [ "${scope}" = job ] || ci_group "check: ${sub} (${scope})"
         t0="${EPOCHREALTIME/./}"
-        # What: diff sees changed files; pr needs a real PR.
-        # Why: no PR context on push; job has its own step.
+        # What: diff sees changed files; job runs alone.
+        # Why: PR text runs as pr-meta, files here (§10).
         # From: Issue #1683 | PR #1912
         case "${scope}" in
             diff) CI_SCAN_SCOPE_FILTER=1 ci_cmd_check "${sub}" "${changed[@]}" || r=$? ;;
             repo) ci_cmd_check "${sub}" || r=$? ;;
-            pr)
-                if [ -n "${PR_NUMBER:-}" ]; then
-                    ci_cmd_check "${sub}" || r=$?
-                else
-                    why="PR_NUMBER unset, so this run has no pull request; it runs when PR_NUMBER is set"
-                fi
-                ;;
             job) why="job scope: the workflow step of its own job runs it; run it by name, check all does not" ;;
-            *) ci_log "[CI-ERROR-CHECK-0173]" "sub=\"${sub}\" entry=\"${CI_CHECKS[${sub}]}\" reason=\"scope must be diff, repo, pr or job\""; r=2 ;;
+            *) ci_log "[CI-ERROR-CHECK-0173]" "sub=\"${sub}\" entry=\"${CI_CHECKS[${sub}]}\" reason=\"scope must be diff, repo or job\""; r=2 ;;
         esac
         # What: a check check all did not run says NOT-RUN.
         # Why: AG-INT-002: a skip is stated with its reason.

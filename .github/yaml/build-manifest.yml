@@ -918,7 +918,7 @@ platform_arch:
     rust_target: aarch64-alpine-linux-musl
 
 # What: timeout minutes per workflow job id; one owner
-# Why: jobs that run before platform keep their own literal
+# Why: a job before job-settings repeats it as literal
 # From: Issue #1683 | PR #1858
 ci_job_timeouts:
   aggregate: 30
@@ -933,7 +933,6 @@ ci_job_timeouts:
   nightly: 30
   orphaned-branches: 15
   plan: 30
-  project-board: 15
   promote: 30
   release: 30
   release-provenance: 30
@@ -943,10 +942,10 @@ ci_job_timeouts:
   validate: 60
 
 # What: CI phases that must run and succeed on every run.
-# Why: §62: a skipped plan or checks would hide a red run.
+# Why: §62: plan always runs; others green or skipped.
 # From: Issue #1683 | PR #1858
 ci_result_gate:
-  required: [platform, plan, checks]
+  required: [plan]
 
 # What: standing tracking issues the CI files and closes.
 # Why: one owner for label, scope and the jobs a kind reads.
