@@ -25,7 +25,8 @@ use lancache_ng::config::{
 };
 use lancache_ng::{
     Backoff, DnsRecord, FlushRequest, PDNS_API_KEY_HEADER, PowerDns, SnapshotStore, ct_eq, die,
-    http_client, need_millis, need_secs, snapshot_created_unix, unix_nanos,
+    http_client, need_millis, need_secs, rrset_delete, rrset_replace, rrsets_patch,
+    snapshot_created_unix, unix_nanos,
 };
 use reqwest::Method;
 use serde::Deserialize;
@@ -252,19 +253,17 @@ fn rrset_record(action: &str, zone: &str, rrset: &Value) -> Option<DnsRecord> {
 // Why: unknown actions fail before anything is sent.
 // From: Issue #1683 | PR #1858
 fn patch_body(record: &DnsRecord) -> Result<Value, String> {
-    let mut rrset = json!({"name": record.name, "type": record.record_type});
-    match record.action.as_str() {
-        "delete" => rrset["changetype"] = json!("DELETE"),
-        "replace" => {
-            rrset["changetype"] = json!("REPLACE");
-            rrset["ttl"] = json!(record.ttl.unwrap_or(DEFAULT_RECORD_TTL));
-            if let Some(records) = &record.records {
-                rrset["records"] = json!(records);
-            }
-        }
+    let rrset = match record.action.as_str() {
+        "delete" => rrset_delete(&record.name, &record.record_type),
+        "replace" => rrset_replace(
+            &record.name,
+            &record.record_type,
+            record.ttl.unwrap_or(DEFAULT_RECORD_TTL),
+            record.records.as_ref().map(|records| json!(records)),
+        ),
         other => return Err(format!("unknown action: {other}")),
-    }
-    Ok(json!({"rrsets": [rrset]}))
+    };
+    Ok(rrsets_patch(vec![rrset]))
 }
 
 // What: rrsets without SOA and NS.
@@ -346,10 +345,10 @@ fn rollback_patch(snapshot: &Value, current: &Value) -> Value {
     for rrset in &current {
         let (name, record_type) = rrset_key(rrset);
         if !snapshot_keys.contains(&(name.clone(), record_type.clone())) {
-            out.push(json!({"name": name, "type": record_type, "changetype": "DELETE"}));
+            out.push(rrset_delete(&name, &record_type));
         }
     }
-    json!({"rrsets": out})
+    rrsets_patch(out)
 }
 
 // What: names a patch touches, first occurrence only.

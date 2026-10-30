@@ -26,8 +26,8 @@ use lancache_ng::{
     DesiredState, Detail, DiskHealth, DiskInfo, DockerApi, NetdataAlarm, Place, ProbeAnswer,
     ProbeReport, ServiceHealth, WatchdogStatus, df, ensure_secret, files_under, hex32,
     metadata_if_present, need_secs, openssl_ca, openssl_leaf, openssl_x509, own, probe_health,
-    probe_health_tls, run_program, sha256_hex, shared_secret_file_name, terminate, unix_nanos,
-    unix_secs, write_file, write_if_changed,
+    probe_health_tls, rrset_replace, rrsets_patch, run_program, sha256_hex,
+    shared_secret_file_name, terminate, unix_nanos, unix_secs, write_file, write_if_changed,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -3119,11 +3119,13 @@ async fn soa_bump(
         .parse()
         .map_err(|e| format!("{zone} SOA minimum {minimum} is no number: {e}"))?;
     let name = config::canonical_zone(zone);
-    let body = serde_json::json!({"rrsets": [{
-        "name": name, "type": "SOA", "ttl": ttl, "changetype": "REPLACE",
-        "records": [{"content": format!("{mname} {rname} {next} {refresh} {retry} {expire} {minimum}"),
-                     "disabled": false}]
-    }]});
+    let content = format!("{mname} {rname} {next} {refresh} {retry} {expire} {minimum}");
+    let body = rrsets_patch(vec![rrset_replace(
+        &name,
+        "SOA",
+        ttl,
+        Some(serde_json::json!([{"content": content, "disabled": false}])),
+    )]);
     let url = config::zone_url(root, zone);
     let response = pdns
         .call(reqwest::Method::PATCH, &url, Some(body.to_string()))

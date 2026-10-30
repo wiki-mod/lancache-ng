@@ -30,8 +30,8 @@ use lancache_ng::{
     FlushRequest, NetdataAlarm, PDNS_API_KEY_HEADER, Place, PowerDns, ProbeAnswer, ProbeReport,
     SnapshotStore, WatchdogStatus, ct_eq, df, die, ensure_secret, error_chain, files_under, hex32,
     http_client, is_placeholder, load_or_create, load_or_create_hex, metadata_if_present,
-    need_secs, own, probe_health, shared_secret, shared_secret_file_name, snapshot_created_unix,
-    unix_secs, write_file, write_if_changed,
+    need_secs, own, probe_health, rrset_delete, rrset_replace, rrsets_patch, shared_secret,
+    shared_secret_file_name, snapshot_created_unix, unix_secs, write_file, write_if_changed,
 };
 use nkeys::{KeyPair, XKey};
 use regex::Regex;
@@ -5506,13 +5506,15 @@ async fn set_ptr_record(
     name: String,
     value: Option<(String, u32)>,
 ) {
-    let body = match &value {
-        Some((target, ttl)) => json!({"rrsets": [{
-            "name": name, "type": "PTR", "ttl": ttl, "changetype": "REPLACE",
-            "records": [{"content": target, "disabled": false}]
-        }]}),
-        None => json!({"rrsets": [{"name": name, "type": "PTR", "changetype": "DELETE"}]}),
-    };
+    let body = rrsets_patch(vec![match &value {
+        Some((target, ttl)) => rrset_replace(
+            &name,
+            "PTR",
+            ttl,
+            Some(json!([{"content": target, "disabled": false}])),
+        ),
+        None => rrset_delete(&name, "PTR"),
+    }]);
     let action = if value.is_some() { "add" } else { "delete" };
     if patch_reverse_zone(state, &zone, body).await {
         let flush = record_flush(&name, zone, "PTR".into(), value);

@@ -1614,6 +1614,38 @@ impl PowerDns {
     }
 }
 
+// What: the PowerDNS PATCH body that carries rrset changes.
+// Why: ui, watchdog and nats-subscriber send one API shape.
+// From: Issue #1683
+pub fn rrsets_patch(rrsets: Vec<Value>) -> Value {
+    serde_json::json!({ "rrsets": rrsets })
+}
+
+// What: an rrset change that removes a name and type.
+// Why: the delete form of the PowerDNS rrset API.
+// From: Issue #1683
+pub fn rrset_delete(name: &str, record_type: &str) -> Value {
+    serde_json::json!({"name": name, "type": record_type, "changetype": "DELETE"})
+}
+
+// What: an rrset change that replaces a name and type.
+// Why: records stay absent when the caller has none to set.
+// From: Issue #1683
+pub fn rrset_replace(
+    name: &str,
+    record_type: &str,
+    ttl: impl Serialize,
+    records: Option<Value>,
+) -> Value {
+    let mut rrset = serde_json::json!({
+        "name": name, "type": record_type, "ttl": ttl, "changetype": "REPLACE"
+    });
+    if let Some(records) = records {
+        rrset["records"] = records;
+    }
+    rrset
+}
+
 // What: the label compose sets to the project name.
 // Why: the watchdog finds its stack by this label.
 // From: Issue #1683
