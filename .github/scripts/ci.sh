@@ -2193,7 +2193,7 @@ ci_cmd_plan_matrix() {
 # Why: one Rust lexer for norm, build id and lib closure.
 # From: Issue #1683 | PR #1912
 _CI_AWK_RUST_ITEMS="$(cat <<'PROG'
-function flush(   h, kind, name, attach, t, refs, seen, w, n, i, a) {
+function flush(   h, kind, name, attach, t, refs, seen, w, n, i, a, tst) {
     t = cur; r = code
     sub(/^ +/, "", t); sub(/ +$/, "", t)
     cur = ""; code = ""; hdr = ""; need_semi = 0
@@ -2210,7 +2210,7 @@ function flush(   h, kind, name, attach, t, refs, seen, w, n, i, a) {
         attrs = attrs substr(h, 1, i)
         h = substr(h, i + 1); sub(/^ +/, "", h)
     }
-    if (tests == "drop" && (attrs ~ /cfg\(test\)/ || attrs ~ /#\[test\]/)) return
+    tst = (attrs ~ /cfg\(test\)/ || attrs ~ /#\[test\]/)
     head = h; gsub(/pub\([^)]*\)/, "pub", head)
     sub(/[{;=(].*$/, "", head)
     kind = "header"; name = ""; attach = ""
@@ -2227,6 +2227,10 @@ function flush(   h, kind, name, attach, t, refs, seen, w, n, i, a) {
     }
     refs = idents(r)
     gsub(/\\/, "\\\\", t); gsub(/\n/, "\\n", t); gsub(/\t/, "\\t", t)
+    # What: tests=both adds column 6: t on a test item.
+    # Why: A3: one parse serves the keep and drop views.
+    # From: Issue #1683 | PR #1858
+    if (tests == "both") t = t "\t" (tst ? "t" : "")
     printf "%s\t%s\t%s\t%s\t%s\n", kind, name, attach, refs, t
 }
 function idents(s,   out, seen, tok) {
@@ -2389,7 +2393,7 @@ _ci_awk_verdict() {
     esac
 }
 
-# What: item records of Rust text $1; $2 keep|drop tests.
+# What: item records of Rust text $1; $2 keep|both.
 # Why: rc 1 = unterminated text; the caller keeps raw.
 # From: Issue #1683 | PR #1912
 _ci_rust_items() {
@@ -2573,7 +2577,7 @@ _ci_tracked_content_ids() {
 # Why: one normalizer for plain paths and Rust libraries.
 # From: Issue #1683 | PR #1858
 _ci_content_id_row() {
-    local line="$1" ref="$2" mode="$3" path oid blob norm g nrc=0 memo id items
+    local line="$1" ref="$2" mode="$3" path oid blob norm g nrc=0 memo id items view
     path="${line%%$'\t'*}"
     oid="${line#*$'\t'}"
     if g="$(_ci_norm_grammar "${path}")"; then
@@ -2588,11 +2592,13 @@ _ci_content_id_row() {
         # What: a build id drops Rust cfg(test) items.
         # Why: 11.4: a test change builds no container.
         # From: Issue #1683 | PR #1912
-        if [ "${g}" = rust ] && [ "${mode}" = build ]; then
-            # What: the drop items come from the items memo.
+        if [ "${g}" = rust ]; then
+            # What: both Rust views read the items memo.
             # Why: A3: plan parsed each Rust blob twice.
             # From: Issue #1683 | PR #1858
-            if items="$(_ci_listing_items "${line}" "${ref}")"; then
+            view=keep
+            [ "${mode}" != build ] || view=drop
+            if items="$(_ci_listing_items "${line}" "${ref}" "${view}")"; then
                 norm="$(_ci_rust_norm_items "${items}")" || return 2
             else
                 nrc=$?
@@ -2621,22 +2627,37 @@ _ci_listing_blob() {
     _ci_identity_git "${line%%$'\t'*}" "${ref}" cat-file blob "${line#*$'\t'}"
 }
 
-# What: drop-mode Rust items of a listing row's blob.
+# What: Rust items of a listing row's blob; $3 keep|drop.
 # Why: A3: plan read each library per service and ref.
 # From: Issue #1683 | PR #1858
 _ci_listing_items() {
-    local memo="rust-items-${1#*$'\t'}" blob items
-    if items="$(_ci_job_memo_get "${memo}")"; then
-        printf '%s\n' "${items}"
+    local oid="${1#*$'\t'}" mode="${3:-drop}" blob out row keep="" drop=""
+    if out="$(_ci_job_memo_get "rust-${mode}-${oid}")"; then
+        printf '%s\n' "${out}"
         return 0
     fi
     blob="$(_ci_listing_blob "$1" "$2")" || return 2
     # What: rc 1 (unfinished text) reaches the caller.
-    # Why: the build id keeps the raw blob id then.
+    # Why: the id keeps the raw blob id then.
     # From: Issue #1683 | PR #1858
-    items="$(_ci_rust_items "${blob}" drop)" || return "$?"
-    [ -z "${items}" ] || _ci_job_memo_put "${memo}" "${items}" || return 2
-    printf '%s\n' "${items}"
+    out="$(_ci_rust_items "${blob}" both)" || return "$?"
+    # What: one parse fills the keep and the drop memo.
+    # Why: A3: plan parsed each blob once per view.
+    # From: Issue #1683 | PR #1858
+    while IFS= read -r row; do
+        [ -n "${row}" ] || continue
+        keep+="${row%$'\t'*}"$'\n'
+        [[ "${row}" == *$'\t't ]] || drop+="${row%$'\t'*}"$'\n'
+    done <<< "${out}"
+    keep="${keep%$'\n'}"
+    drop="${drop%$'\n'}"
+    [ -z "${keep}" ] || _ci_job_memo_put "rust-keep-${oid}" "${keep}" || return 2
+    [ -z "${drop}" ] || _ci_job_memo_put "rust-drop-${oid}" "${drop}" || return 2
+    if [ "${mode}" = keep ]; then
+        printf '%s\n' "${keep}"
+    else
+        printf '%s\n' "${drop}"
+    fi
 }
 
 # What: generate the workspace lock, once per job.
