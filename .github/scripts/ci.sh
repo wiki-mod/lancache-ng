@@ -2695,7 +2695,7 @@ PROG
 # From: Issue #1683 | PR #1858
 _ci_content_id_prefill() {
     local listing="$1" ref="$2" line path oid g key dir blist="" oids="" n=0 split
-    local out f v sums sum id rest
+    local out f v sums sum id rest fk
     local -A fillkey=() fillid=()
     local -a ins=() outs=()
     [ -n "${RUNNER_TEMP:-}" ] || return 0
@@ -2705,10 +2705,11 @@ _ci_content_id_prefill() {
         oid="${line#*$'\t'}"
         _ci_norm_grammar "${path}" g || continue
         [ "${g}" != rust ] || continue
-        [ -z "${fillkey[${g}.${oid}]:-}" ] || continue
+        fk="${g}.${oid}"
+        [ -z "${fillkey[${fk}]:-}" ] || continue
         _ci_content_id_key key "${g}" all "${oid}"
         ! _ci_job_memo_has "${key}" || continue
-        fillkey["${g}.${oid}"]="${key}"
+        fillkey["${fk}"]="${key}"
         blist+="${g}.${oid}"$'\n'
         oids+="${oid}"$'\n'
         n=$((n + 1))
@@ -2721,7 +2722,7 @@ _ci_content_id_prefill() {
     _ci_capture 0 mkdir -p -- "${dir}" || return 2
     printf '%s' "${blist}" > "${dir}/names" || return 2
     printf '%s' "${oids}" > "${dir}/oids" || return 2
-    _ci_run -o "${dir}/batch" -s "[CI-ERROR-IDENTITY-0007]" "ref=\"${ref}\" reason=\"identity input not readable\"" \
+    _ci_run -o "${dir}/batch" -s "[CI-ERROR-IDENTITY-0025]" "ref=\"${ref}\" reason=\"identity input not readable\"" \
         git -C "${CI_REPO_ROOT}" cat-file --batch < "${dir}/oids" || return 2
     # What: drop NUL bytes before the cut.
     # Why: a NUL blob then misses its size: rows instead.
@@ -2751,7 +2752,7 @@ _ci_content_id_prefill() {
             0) outs+=("${f%.in}.out") ;;
             1) fillid["${f%.in}"]=raw ;;
             *)
-                ci_log "[CI-ERROR-IDENTITY-0023]" "ref=\"${ref}\" blob=\"${f%.in}\" rc=${v} reason=\"v1 normalizer failed\""
+                ci_log "[CI-ERROR-IDENTITY-0026]" "ref=\"${ref}\" blob=\"${f%.in}\" rc=${v} reason=\"v1 normalizer failed\""
                 return 2
                 ;;
         esac
@@ -2772,7 +2773,7 @@ _ci_content_id_prefill() {
     for f in "${!fillkey[@]}"; do
         id="${fillid[${f}]:-}"
         if [ -z "${id}" ]; then
-            ci_log "[CI-ERROR-IDENTITY-0023]" "ref=\"${ref}\" blob=\"${f}\" reason=\"no verdict or hash for the blob\""
+            ci_log "[CI-ERROR-IDENTITY-0027]" "ref=\"${ref}\" blob=\"${f}\" reason=\"no verdict or hash for the blob\""
             return 2
         fi
         [ "${id}" != raw ] || id="${f#*.}"
@@ -6718,8 +6719,8 @@ _ci_registry_head_digest() {
         if [[ "${_ci_hau}" =~ scope=\"([^\"]+)\" ]]; then scope="${BASH_REMATCH[1]}"; fi
         [ -n "${scope}" ] || return 1
         tok="$(_ci_download_curl -fsS -G --data-urlencode "service=${service}" --data-urlencode "scope=${scope}" "${realm}" 2>&1)" || return 1
-        tok="$(jq -r '.token // .access_token // empty' <<< "${tok}" 2>&1)" || return 1
-        [ -n "${tok}" ] || return 1
+        [[ "${tok}" =~ \"(access_)?token\":\ *\"([^\"]+)\" ]] || return 1
+        tok="${BASH_REMATCH[2]}"
         hdr="$(printf 'Authorization: Bearer %s\n' "${tok}" | _ci_download_curl -sS -I -H "${acc}" -H @- "${url}" 2>&1)" || return 1
         _ci_registry_head_fields "${hdr}"
     fi
