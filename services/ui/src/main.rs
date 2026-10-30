@@ -633,7 +633,7 @@ fn derive_image_channel(tag: &str) -> String {
             .and_then(|rest| rest.chars().next())
             .is_some_and(|c| c.is_ascii_digit());
     match tag {
-        "dev" | "nightly" | "latest" => tag.to_string(),
+        "nightly" | "latest" => tag.to_string(),
         _ if pinned => "pinned".to_string(),
         _ => "latest".to_string(),
     }
