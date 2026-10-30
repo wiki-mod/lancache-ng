@@ -10130,13 +10130,11 @@ _ci_validate_dns_port() {
     local side="$1" cfg dport port
     cfg="$(_ci_validate_config_json)" || return 2
     dport="$(_ci_runtime_default DNS_PORT)" || return 2
-    port="$(_ci_capture 0 jq -r --arg v "${side}" --arg p "${dport}" "$(cat <<'PROG'
-        .services.dns as $s | ($s.environment[$v] // "") as $ip
-        | [$s.ports[]? | select($ip != "" and .host_ip == $ip
-            and .published == $p and .protocol == "udp") | .target]
-        | unique[]
-PROG
-        )" <<<"${cfg}")" || return 2
+    port="$(_ci_capture 0 jq -r --arg v "${side}" --arg p "${dport}" \
+        ".services.dns as \$s | (\$s.environment[\$v] // \"\") as \$ip
+        | [\$s.ports[]? | select(\$ip != \"\" and .host_ip == \$ip
+            and .published == \$p and .protocol == \"udp\") | .target]
+        | unique[]" <<<"${cfg}")" || return 2
     if [[ ! "${port}" =~ ^[0-9]+$ ]]; then
         ci_error "[CI-ERROR-VALIDATE-0116]" "side=\"${side}\" reason=\"not one dns udp port for this side\"" "${port}"
         return 2
