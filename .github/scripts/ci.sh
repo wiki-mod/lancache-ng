@@ -7072,7 +7072,7 @@ _ci_index_raw() {
 _ci_normalize_platform_digests() {
     local input="$1" lines
     lines="$(_ci_capture 0 tr ' ' '\n' <<< "${input}")" || return 2
-    lines="$(_ci_capture 0 awk 'NF' <<< "${lines}")" || return 2
+    lines="$(_ci_nonblank_lines "${lines}")" || return 2
     lines="$(_ci_capture 0 env LC_ALL=C sort <<< "${lines}")" || return 2
     [ -z "${lines}" ] || _ci_capture 0 tr '\n' ' ' <<< "${lines}"
 }
