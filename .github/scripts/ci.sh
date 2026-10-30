@@ -5256,7 +5256,7 @@ _ci_rust_cargo_build() {
         # Why: the classifier needs the whole cargo log.
         # From: Issue #1683 | PR #1912
         pst=(0 0)
-        cargo build -j "${cargo_jobs}" --release --locked --target "${musl_target}" "${picks[@]}" 2>&1 \
+        cargo build -j "${cargo_jobs}" --release --target "${musl_target}" "${picks[@]}" 2>&1 \
             | tee "${cargo_log}" || pst=("${PIPESTATUS[@]}")
         if [ "${pst[1]}" -ne 0 ]; then
             rm -f "${cargo_log}"
@@ -6724,8 +6724,8 @@ _ci_test_rust() {
         export "${CI_ARG_DEFAULTS}=${defaults}"
         cd "${CI_REPO_ROOT:-.}" \
             && cargo fmt --check "${picks[@]}" \
-            && cargo clippy --locked --all-targets "${picks[@]}" -- -D warnings \
-            && RUST_BACKTRACE="${bt}" cargo test --locked "${picks[@]}" ) || trc=$?
+            && cargo clippy --all-targets "${picks[@]}" -- -D warnings \
+            && RUST_BACKTRACE="${bt}" cargo test "${picks[@]}" ) || trc=$?
     # What: setup_rc: sccache setup error, rc 2, not FAIL.
     # Why: §72: infra UNKNOWN never reads as a test FAIL.
     # From: Issue #1683 | PR #1912
