@@ -1206,6 +1206,10 @@ ci_variables:
   # Why: §39 Cargo registry and git caches as mounts.
   # From: Issue #1683 | PR #1912
   CI_CARGO_HOME: /root/.cargo
+  # What: mount point of the build context in rust-build.
+  # Why: Fund 147: the tree is mounted, not copied.
+  # From: Issue #1683 | PR #1858
+  CI_RUST_SOURCE_DIR: /src
   # What: sccache dist toolchain cache size in bytes.
   # Why: AG-CI-006: no size literal in the dist config.
   # From: Issue #1683 | PR #1858
@@ -1683,7 +1687,7 @@ file_headers:
 # Why: builders read repo/org vars; no YAML or literal copy.
 # From: Issue #1683 | PR #1858
 build_variables:
-  rust: [CARGO_BUILD_JOBS, PROJECT_CARGO_LTO, PROJECT_CARGO_CODEGENUNIT, CI_TOOLCHAIN_COMPILERS, CI_CACHE_PREFIX, CI_CARGO_HOME]
+  rust: [CARGO_BUILD_JOBS, PROJECT_CARGO_LTO, PROJECT_CARGO_CODEGENUNIT, CI_TOOLCHAIN_COMPILERS, CI_CACHE_PREFIX, CI_CARGO_HOME, CI_RUST_SOURCE_DIR]
 
 # What: repo variables each ci.sh workflow passes by name.
 # Why: Fund 94: toJSON(vars) put LAN IPs in public logs.

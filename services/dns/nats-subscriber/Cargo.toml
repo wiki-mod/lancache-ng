@@ -11,7 +11,7 @@ edition.workspace = true
 license.workspace = true
 
 # What: explicit bin target, same as cargo's default
-# Why: manifest-only build stages stub declared targets
+# Why: ci.sh tells a bin crate from a library by it
 # From: Issue #1683 | PR #1905
 [[bin]]
 name = "nats-subscriber"

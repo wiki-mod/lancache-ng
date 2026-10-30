@@ -2435,10 +2435,26 @@ _ci_identity_content() {
 # Why: an uncopied runtime file is no build input.
 # From: Issue #1683 | PR #1858
 _ci_context_build_rows() {
-    local service="$1" ref="$2" rows="$3" df text srcs src line path keep
+    local service="$1" ref="$2" rows="$3" df text srcs src line path keep type
+    local crates manifest wrows dir bin crate
     df="$(_ci_service_path "${service}" Dockerfile "")" || return 2
     text="$(_ci_identity_git "${df}" "${ref}" show "${ref}:${df}")" || return 2
     srcs="$(_ci_dockerfile_copy_sources "${text}")" || return 2
+    # What: a Rust service's own bin crates count as copied.
+    # Why: rust-build mounts the tree; cargo reads them.
+    # From: Issue #1683 | PR #1858
+    type="$(_ci_required_field "${service}" build_type)" || return 2
+    if [ "${type}" = rust ]; then
+        crates="$(_ci_required_field "${service}" crates list)" || return 2
+        crates=" ${crates//$'\n'/ } "
+        manifest="$(_ci_variable CI_CARGO_MANIFEST)" || return 2
+        wrows="$(_ci_workspace_rows "${CI_REPO_ROOT:-.}")" || return 2
+        while IFS='|' read -r dir bin crate; do
+            [ -n "${bin}" ] || continue
+            [[ "${crates}" == *" ${crate} "* ]] || continue
+            srcs+=$'\n'"${dir}/${manifest}"$'\n'"$(_ci_workspace_src_dir "${dir}" "${bin}")"
+        done <<< "${wrows}"
+    fi
     while IFS= read -r line; do
         [ -n "${line}" ] || continue
         path="${line%%$'\t'*}"
@@ -5467,48 +5483,10 @@ SH
 }
 
 # What: print the workspace members of a Cargo manifest.
-# Why: one reader for rows, stubs and version-drift.
+# Why: one reader for rows and version-drift.
 # From: Issue #1683 | PR #1858
 _ci_cargo_members() {
     _ci_capture 0 yq -p toml -oy '.workspace.members[]' "$1"
-}
-
-# What: stub missing bin/lib targets of workspace members.
-# Why: cargo loads every member; images copy manifests only.
-# From: Issue #1683 | PR #1858
-_ci_rust_member_stubs() {
-    local members m sec p f targets
-    members="$(_ci_cargo_members Cargo.toml)" || return 2
-    if [ -z "${members}" ]; then
-        ci_log "[CI-ERROR-RUSTBUILD-0042]" "dir=\"${PWD}\" reason=\"no workspace members in Cargo.toml\""
-        return 2
-    fi
-    while IFS= read -r m; do
-        if [ ! -f "${m}/Cargo.toml" ]; then
-            ci_log "[CI-ERROR-RUSTBUILD-0043]" "member=\"${m}\" reason=\"member manifest missing\""
-            return 2
-        fi
-        targets="$(_ci_capture 0 awk "$(cat <<'PROG'
-/^\[\[bin\]\]/ { s = "bin"; next } /^\[lib\]/ { s = "lib"; next } /^\[/ { s = ""; next }
-            s != "" && /^path *=/ { v = $0; sub(/^path *= *"/, "", v); sub(/".*$/, "", v); print s "\t" v }
-PROG
-            )" "${m}/Cargo.toml")" || return 2
-        # What: a member with no declared target path stops
-        # Why: cargo fails on a member with no stub
-        # From: Issue #1683 | PR #1905
-        if [ -z "${targets}" ]; then
-            ci_log "[CI-ERROR-RUSTBUILD-0049]" "member=\"${m}\" reason=\"no [lib] or [[bin]] path declared; a manifest-only stage cannot stub it\""
-            return 2
-        fi
-        while IFS=$'\t' read -r sec p; do
-            [ -n "${p}" ] || continue
-            f="${m}/${p}"
-            [ -e "${f}" ] && continue
-            mkdir -p "${f%/*}" || return 2
-            if [ "${sec}" = bin ]; then printf 'fn main() {}\n' > "${f}"; else : > "${f}"; fi
-            printf '%s\n' "${f}"
-        done <<< "${targets}"
-    done <<< "${members}"
 }
 
 # What: export each SOT compiler var as its driver name.
@@ -5721,7 +5699,7 @@ _ci_rb_write() {
 # Why: one owner for every rust builder stage.
 # From: Issue #1683 | PR #1912
 ci_cmd_rust_build() {
-    local service="${1:-}" crates="${2:-}" mode="${3:-build}" crate
+    local service="${1:-}" crates="${2:-}" crate out="${PWD}" src
     local -a cl=()
     [ -n "${service}" ] || { ci_log "[CI-ERROR-RUSTBUILD-0001]" "reason=\"service arg required\""; return 2; }
     [ -n "${crates}" ] || { ci_log "[CI-ERROR-RUSTBUILD-0002]" "reason=\"crates arg required\""; return 2; }
@@ -5729,10 +5707,6 @@ ci_cmd_rust_build() {
     # Why: read -a splits words without glob expansion.
     # From: Issue #1683 | PR #1912
     read -ra cl <<< "${crates}"
-    # What: mode build (real+cp) or deps (pre-cache, no cp).
-    # Why: services with stub-src dep-cache stage call deps.
-    # From: Issue #1683 | PR #1858
-    case "${mode}" in build|deps) ;; *) ci_log "[CI-ERROR-RUSTBUILD-0005]" "mode=\"${mode}\" reason=\"mode must be build or deps\""; return 2 ;; esac
     local musl_target="${!CI_ARG_TARGET:-}"
     [ -n "${musl_target}" ] || { ci_log "[CI-ERROR-RUSTBUILD-0003]" "arg=\"${CI_ARG_TARGET}\" reason=\"build arg env required\""; return 2; }
     # What: the target must be the build-tools rustc host.
@@ -5799,25 +5773,16 @@ ci_cmd_rust_build() {
     _ci_rb_cargo_profile || return 2
     local cargo_jobs
     cargo_jobs="$(_ci_rb_cargo_jobs)" || return 2
-    # What: drop each crate's stale artifact first.
-    # Why: dep pre-cache stub rlib outdates COPYed src.
+    # What: build in the mounted tree; target in WORKDIR.
+    # Why: Fund 147: no COPY; output outside the mount.
     # From: Issue #1683 | PR #1858
-    if [ "${mode}" = "build" ]; then
-        for crate in "${cl[@]}"; do
-            _ci_run "[CI-ERROR-RUSTBUILD-0059]" "crate=\"${crate}\" reason=\"cargo clean failed\"" \
-                cargo clean -p "${crate}" --release --target "${musl_target}" || return 2
-        done
+    src="$(_ci_variable CI_RUST_SOURCE_DIR)" || return 2
+    if ! cd "${src}"; then
+        ci_log "[CI-ERROR-RUSTBUILD-0068]" "dir=\"${src}\" reason=\"mounted source tree not reachable\""
+        return 2
     fi
-    local stubs s brc=0
-    stubs="$(_ci_rust_member_stubs)" || return 2
-    _ci_rust_cargo_build "${crates}" "${musl_target}" "${cargo_jobs}" || brc=$?
-    # What: remove exactly the stub files this run created.
-    # Why: a stub left behind would ship in the real build.
-    # From: Issue #1683 | PR #1858
-    while IFS= read -r s; do
-        [ -z "${s}" ] || _ci_run "[CI-ERROR-RUSTBUILD-0044]" "file=\"${s}\" reason=\"stub not removed\"" rm -f -- "${s}" || return 2
-    done <<< "${stubs}"
-    [ "${brc}" -eq 0 ] || return 2
+    export CARGO_TARGET_DIR="${out}/target"
+    _ci_rust_cargo_build "${crates}" "${musl_target}" "${cargo_jobs}" || return 2
     # What: show ccache stats; a Redis error fails.
     # Why: AG-CI-007: a dead cache level must not pass.
     # From: Issue #1683 | PR #1912
@@ -5832,14 +5797,12 @@ ci_cmd_rust_build() {
         fi
     fi
     # What: copy each binary to <crate>-out in the WORKDIR.
-    # Why: the final stage COPYs it; deps builds ship none.
+    # Why: the final stage COPYs it from the builder.
     # From: Issue #1683 | PR #1912
-    if [ "${mode}" = "build" ]; then
-        for crate in "${cl[@]}"; do
-            _ci_run "[CI-ERROR-RUSTBUILD-0060]" "crate=\"${crate}\" reason=\"built binary not copied out\"" \
-                cp "target/${musl_target}/release/${crate}" "${PWD}/${crate}-out" || return 2
-        done
-    fi
+    for crate in "${cl[@]}"; do
+        _ci_run "[CI-ERROR-RUSTBUILD-0060]" "crate=\"${crate}\" reason=\"built binary not copied out\"" \
+            cp "${CARGO_TARGET_DIR}/${musl_target}/release/${crate}" "${out}/${crate}-out" || return 2
+    done
 }
 
 # What: a ref's digest, revision or raw index; 1 = absent
