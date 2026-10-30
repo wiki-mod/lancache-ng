@@ -22,8 +22,9 @@ use lancache_ng::config::{
     DhcpMode, KEA_MANAGED_CODES, LeaseLimits, MANAGED_OPTIONS, ManagedOption, NATS_SUBJECT_FLUSH,
     NATS_SUBJECT_RECORD, NatsLogin, NatsRoles, OPTION_CODE_MAX, OPTION_CODE_MIN, OPTION_DNS,
     OPTION_DOMAIN, OPTION_NTP, OPTION_ROUTERS, OPTION_SEARCH, OutOfRange, PDNS_API_PATH,
-    PROXY_ACCESS_LOG_PATTERN, Uint, canonical_zone, dns_reader_publish, dns_subscribe, is_dns_name,
-    option_code, option_data, parse_bool, parse_custom_options, reverse_zones, zone_url,
+    PROXY_ACCESS_LOG_PATTERN, SYSLOG_LINE_PATTERN, Uint, canonical_zone, dns_reader_publish,
+    dns_subscribe, is_dns_name, option_code, option_data, parse_bool, parse_custom_options,
+    reverse_zones, zone_url,
 };
 use lancache_ng::{
     ALARM_INGEST_PATH, ALARM_TOKEN_HEADER, Backoff, DesiredRunState, DesiredState, DnsRecord,
@@ -1980,8 +1981,7 @@ fn parse_syslog_line(host: &str, line: &str) -> Option<SyslogEntry> {
     if line.trim().is_empty() {
         return None;
     }
-    let re = SYSLOG_LINE
-        .get_or_init(|| Regex::new(r"^(\S+)\s+\S+\s+([^:]+):\s(.*)$").expect("syslog regex"));
+    let re = SYSLOG_LINE.get_or_init(|| Regex::new(SYSLOG_LINE_PATTERN).expect("syslog regex"));
     Some(match re.captures(line) {
         Some(c) => SyslogEntry {
             timestamp: c[1].to_string(),

@@ -17,8 +17,8 @@ use dhcproto::v4::{DhcpOption, Flags, Message, MessageType, OptionCode};
 use dhcproto::{Decodable, Decoder, Encodable, Encoder};
 
 use lancache_ng::config::{
-    self, DhcpMode, NatsLogin, NatsRoles, OutOfRange, PROXY_ACCESS_LOG_PATTERN, Uint, env_opt,
-    render_nats_conf,
+    self, DhcpMode, NatsLogin, NatsRoles, OutOfRange, PROXY_ACCESS_LOG_PATTERN,
+    SYSLOG_LINE_TEMPLATE, Uint, env_opt, render_nats_conf,
 };
 use lancache_ng::{
     ALARM_INGEST_PATH, ALARM_TOKEN_HEADER, Backoff, COMPOSE_PROJECT_LABEL, COMPOSE_SERVICE_LABEL,
@@ -1462,7 +1462,7 @@ fn syslog_ng_conf(
 options {{ create-dirs(yes); dir-group("{group}"); dir-perm(0750); group("{group}"); perm(0640); keep-hostname(yes); time-reap({reap}); }};
 source s_docker {{ network(transport("udp") port({port}) flags(syslog-protocol)); }};
 filter f_named {{ program("^[A-Za-z0-9_-]+$" type(pcre)){skip}; }};
-destination {SYSLOG_NG_DESTINATION} {{ file("{root}/${{PROGRAM}}/${{YEAR}}${{MONTH}}${{DAY}}.log" template("${{ISODATE}} ${{HOST}} ${{PROGRAM}}: ${{MSGONLY}}\n")); }};
+destination {SYSLOG_NG_DESTINATION} {{ file("{root}/${{PROGRAM}}/${{YEAR}}${{MONTH}}${{DAY}}.log" template("{SYSLOG_LINE_TEMPLATE}")); }};
 log {{ source(s_docker); filter(f_named); destination({SYSLOG_NG_DESTINATION}); }};
 "#
     ))
