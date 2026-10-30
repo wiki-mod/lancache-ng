@@ -6721,6 +6721,12 @@ _ci_toolchain_entry() {
         val="$(_ci_with_workdir ci-toolchain _ci_toolchain_closure "${tref}" "${platform}" "${roots}")" || return 2
         val="${tref##*@} ${val//$'\n'/ }"
         ci_log "[CI-INFO-IDENTITY-0021]" "key=\"${key}\" value=\"${val}\" reason=\"read from the image; no record for it\""
+        # What: keep the read value as the record for it.
+        # Why: A3: a digest never changes; one pull each.
+        # From: Issue #1683 | PR #1858
+        rc=0
+        printf '%s\t%s\n' "${key}" "${val}" | _ci_ledger_upsert "${remote}" CI_REFRESH_REF CI_REFRESH_FILE replace || rc=$?
+        [ "${rc}" -eq 0 ] || ci_log "[CI-WARN-IDENTITY-0022]" "key=\"${key}\" rc=${rc} reason=\"record not written (raw above); the read value counts\""
     fi
     _ci_job_memo_put "${memo}" "${val}" || return 2
     printf '%s\t%s\n' "${key}" "${val}"
