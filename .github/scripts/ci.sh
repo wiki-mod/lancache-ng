@@ -201,6 +201,12 @@ _ci_run() {
     t0="${EPOCHREALTIME/./}"
     if [ -n "${ofile}" ]; then
         "$@" > "${ofile}" 2>"${err}" || rc=$?
+    elif [ -n "${RUNNER_TEMP:-}" ] && _ci_timed_here "$1"; then
+        # What: a program writes to a file; $(< f) reads it.
+        # Why: no subshell fork; plan ran 1074 programs.
+        # From: Issue #1683 | PR #1858
+        "$@" > "${err}.out" 2>"${err}" || rc=$?
+        out="$(< "${err}.out")"
     else
         out="$("$@" 2>"${err}")" || rc=$?
     fi
