@@ -153,8 +153,8 @@ struct Config {
     dhcp_api_token: String,
     dhcp_api_user: String,
     ui_settings_file: String,
-    // What: UI-settings keys with their start values, in file order.
-    // Why: one list for the start value and the saved file; setup.sh reads it.
+    // What: UI-settings keys with start values, file order.
+    // Why: one list for start value and file (setup.sh).
     // From: Issue #819
     startup_settings: Vec<(&'static str, String)>,
     kea_config_snapshot_dir: String,
@@ -166,11 +166,11 @@ struct Config {
     allow_insecure_ui: bool,
     ui_session_ttl_seconds: u64,
     // What: lifetime of an issued user JWT, seconds.
-    // Why: revocation is the per-connect DB check, not expiry.
+    // Why: revoked via per-connect DB check, not expiry.
     // From: Issue #1683 | PR #1858
     nats_user_jwt_ttl_secs: i64,
     // What: stored alarm history cap, newest kept.
-    // Why: a burst of alarms must not grow the file unbounded.
+    // Why: an alarm burst must not grow the file unbounded.
     // From: Issue #1683 | PR #1858
     alarms_max: usize,
     // What: cap of the buffered netdata answer, bytes.
@@ -178,7 +178,7 @@ struct Config {
     // From: Issue #1683 | PR #1858
     netdata_body_max: usize,
     // What: ui wait limit for one DHCP probe answer.
-    // Why: the probe takes DHCP_PROBE_WINDOW plus the request wait.
+    // Why: probe = DHCP_PROBE_WINDOW plus request wait.
     // From: Issue #1683 | PR #1912
     dhcp_probe_wait: Duration,
     // What: wait for one secondary SOA answer.
@@ -186,7 +186,7 @@ struct Config {
     // From: Issue #1683 | PR #1912
     secondary_probe_timeout: Duration,
     // What: wait per NATS system request of a kick.
-    // Why: a dead system connection must not hang a removal.
+    // Why: a dead system connection must not hang removal.
     // From: Issue #681
     nats_kick_step: Duration,
     watchdog_miss_limit: u32,
@@ -2344,7 +2344,7 @@ async fn netdata_proxy(
             tracing::warn!("Netdata {path} answer cut off: {e}");
             StatusCode::BAD_GATEWAY
         })?;
-        // What: an answer above the body cap is a 502, logged.
+        // What: answer over body cap is a 502, logged.
         // Why: the operator sees why charts stay empty.
         // From: Issue #1683 | PR #1912
         if body.len() + chunk.len() > max_body {

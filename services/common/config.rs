@@ -405,12 +405,12 @@ impl DhcpMode {
 }
 
 // What: the syslog-ng template of every stored log line.
-// Why: the watchdog writes the lines; the ui parses them below.
+// Why: the watchdog writes the lines; the ui parses them.
 // From: Issue #1683
 pub const SYSLOG_LINE_TEMPLATE: &str = r"${ISODATE} ${HOST} ${PROGRAM}: ${MSGONLY}\n";
 
 // What: a stored syslog line as time, program and message.
-// Why: the reverse of SYSLOG_LINE_TEMPLATE; one owner for both.
+// Why: reverse of SYSLOG_LINE_TEMPLATE; one owner for both.
 // From: Issue #1683
 pub const SYSLOG_LINE_PATTERN: &str = r"^(\S+)\s+\S+\s+([^:]+):\s(.*)$";
 

@@ -1530,8 +1530,8 @@ fn syslog_ng(ctx: &Ctx) -> Result<Run, String> {
 const NETDATA_CONF: &str =
     "[logs]\n    daemon = stderr\n    health = stderr\n    collector = off\n    access = off\n";
 
-// What: file name of the alarm token in netdata's config dir.
-// Why: the sender conf reads it and the supervisor writes it.
+// What: alarm token file name in the netdata config dir.
+// Why: sender conf reads it; the supervisor writes it.
 // From: Issue #858
 const NETDATA_TOKEN_FILE: &str = ".netdata-alarm-token";
 

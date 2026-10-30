@@ -1354,8 +1354,8 @@ pub struct NetdataAlarm {
     pub duration: i64,
 }
 
-// What: the shared secret file of one variable, read or made.
-// Why: a placeholder env value counts as unset; every starter agrees.
+// What: shared secret file of one variable, read or made.
+// Why: a placeholder env value counts as unset everywhere.
 // From: Issue #858
 pub fn ensure_secret(
     dir: &Path,
@@ -1533,7 +1533,7 @@ fn json_answer<T: serde::de::DeserializeOwned>(body: &[u8]) -> Result<T, DockerE
 }
 
 // What: the HTTP header that carries the PowerDNS API key.
-// Why: the calls to PowerDNS and the rollback listener name it alike.
+// Why: PowerDNS calls and rollback listener use one name.
 // From: Issue #1683 | PR #1858
 pub const PDNS_API_KEY_HEADER: &str = "X-API-Key";
 

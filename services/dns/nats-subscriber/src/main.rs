@@ -1117,7 +1117,7 @@ async fn main() {
     let reconcile = need_flag(&process_env, "NATS_RECONCILER").unwrap_or_else(|e| die(TAG, &e));
     let times = Times::load(&process_env).unwrap_or_else(|error| die(TAG, &error));
     // What: messages per fetch.
-    // Why: bounds a batch; NATS_FETCH_WAIT ends an idle fetch.
+    // Why: caps a batch; NATS_FETCH_WAIT ends idle fetch.
     // From: Issue #1683 | PR #1912
     let fetch_batch = uint(&process_env, "NATS_FETCH_BATCH", 1, u32::MAX.into())
         .unwrap_or_else(|e| die(TAG, &e)) as usize;

@@ -434,8 +434,8 @@ runtime:
     - DHCP_PROBE_WINDOW=5
     - DHCP_PROBE_REQUEST_TIMEOUT=3
     - DHCP_PROBE_RETRANSMITS=3
-    # What: ui wait limit for one DHCP probe answer, seconds.
-    # Why: probe takes DHCP_PROBE_WINDOW plus the request wait.
+    # What: ui wait for one DHCP probe answer, seconds.
+    # Why: probe = DHCP_PROBE_WINDOW plus request wait.
     # From: Issue #1683 | PR #1912
     - DHCP_PROBE_WAIT_TIMEOUT=30
     - PDNS_SOA_COLD_RETRY=5
@@ -444,7 +444,7 @@ runtime:
     - DNS_CONFIRM_PAUSE_MS=100
     - NATS_FETCH_WAIT=5
     # What: messages per NATS fetch of the DNS subscriber.
-    # Why: bounds a batch; NATS_FETCH_WAIT ends an idle fetch.
+    # Why: caps a batch; NATS_FETCH_WAIT ends idle fetch.
     # From: Issue #1683 | PR #1912
     - NATS_FETCH_BATCH=10
     # What: in-process zone confirmation tries before a Nak.
@@ -532,20 +532,20 @@ runtime:
     - UI_LISTEN_PORT=8080
     - UI_LOGS_MAX_ENTRIES=200
     - UI_SESSION_TTL_SECONDS=86400
-    # What: lifetime of an issued secondary user JWT, seconds.
-    # Why: revocation is the per-connect DB check, not expiry.
+    # What: lifetime of a secondary user JWT, seconds.
+    # Why: revoked via per-connect DB check, not expiry.
     # From: Issue #1683 | PR #1858
     - NATS_USER_JWT_TTL_SECONDS=7776000
     # What: wait for one secondary SOA answer, seconds.
     # Why: a silent secondary is a status, not a hang.
     # From: Issue #1683 | PR #1912
     - SECONDARY_PROBE_TIMEOUT=4
-    # What: wait per NATS system request when a secondary is kicked.
+    # What: wait per NATS system request on a kick.
     # Why: a dead system connection must not hang a removal.
     # From: Issue #681
     - NATS_KICK_STEP_TIMEOUT=5
     # What: stored alarm history cap of the ui, newest kept.
-    # Why: a burst of alarms must not grow the file unbounded.
+    # Why: an alarm burst must not grow the file unbounded.
     # From: Issue #1683 | PR #1858
     - UI_ALARMS_MAX=50
     # What: cap of the buffered netdata chart answer, bytes.
