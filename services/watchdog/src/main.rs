@@ -1039,13 +1039,20 @@ struct Timing {
 }
 
 impl Timing {
+    // What: the supervisor tick from the env, seconds.
+    // Why: the loop and the dhcp probe poll by one period.
+    // From: Issue #1683 | PR #1912
+    fn read_tick() -> Result<Duration, String> {
+        bounded("SUPERVISE_TICK", 1, u32::MAX.into()).map(Duration::from_secs)
+    }
+
     // What: every supervisor time from the env, seconds.
     // Why: a missing or junk value stops the supervisor.
     // From: Issue #1683 | PR #1912
     fn load() -> Result<Self, String> {
         let secs = |key| bounded(key, 1, u32::MAX.into()).map(Duration::from_secs);
         Ok(Self {
-            tick: secs("SUPERVISE_TICK")?,
+            tick: Self::read_tick()?,
             backoff: Backoff::load(&config::process_env)?,
             backoff_reset: secs("SUPERVISE_BACKOFF_RESET")?,
             stop_grace: secs("SUPERVISE_STOP_GRACE")?,
@@ -3173,6 +3180,11 @@ async fn soa_upkeep() -> Result<(), String> {
 // From: Issue #1683 | PR #1912
 const KEA4_SOCKET_KEY: &str = "KEA4_SOCKET";
 
+// What: env key of the Kea Control Agent port.
+// Why: the agent config and the healthcheck name one port.
+// From: Issue #1683 | PR #1912
+const KEA_CTRL_PORT_KEY: &str = "KEA_CTRL_PORT";
+
 // What: Kea render values: sockets, hook, fence, logs.
 // Why: the SOT owns each value; Rust names only keys.
 // From: Issue #1683 | PR #1912
@@ -3550,7 +3562,7 @@ fn kea_ctrl_agent(ctx: &Ctx) -> Result<Run, String> {
         &shared_secret_file_name("KEA_CTRL_TOKEN"),
         hex32,
     )?;
-    let port_number = env_port("KEA_CTRL_PORT")?;
+    let port_number = env_port(KEA_CTRL_PORT_KEY)?;
     let port = port_number.to_string();
     kea_ctrl_fence(&port, &kea)?;
     let conf = serde_json::json!({
@@ -5191,7 +5203,7 @@ async fn probe_upkeep() -> Result<(), String> {
             .ok()
             .map(|a| a.id)
     };
-    let tick = bounded("SUPERVISE_TICK", 1, u32::MAX.into()).map(Duration::from_secs)?;
+    let tick = Timing::read_tick()?;
     let mut answered = read_id();
     loop {
         tokio::time::sleep(tick).await;
@@ -5498,7 +5510,7 @@ async fn healthcheck() -> Result<(), String> {
     // From: Issue #1683 | PR #1912
     for (kind, key) in [
         (Kind::NatsSubscriber, ROLLBACK_PORT_KEY),
-        (Kind::KeaCtrlAgent, "KEA_CTRL_PORT"),
+        (Kind::KeaCtrlAgent, KEA_CTRL_PORT_KEY),
     ] {
         if status.running.iter().any(|name| name == kind.name()) {
             let addr = format!("{}:{}", config::loopback()?, env_port(key)?);
