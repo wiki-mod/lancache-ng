@@ -5156,8 +5156,17 @@ _ci_dockerhub_login() {
 # Why: retried; a token never reaches argv or a log line
 # From: Issue #1683 | PR #1858
 _ci_registry_login_once() {
-    local registry="$1" user_var="$2" token_var="$3"
-    printf '%s' "${!token_var}" | docker login ${registry:+"${registry}"} -u "${!user_var}" --password-stdin
+    local registry="$1" user_var="$2" token_var="$3" memo seen
+    # What: a job logs in once per registry and user.
+    # Why: A3: each step logged in again, 0.5 s each.
+    # From: Issue #1683 | PR #1858
+    memo="registry-login-${registry:-docker.io}-${!user_var}"
+    if seen="$(_ci_job_memo_get "${memo}")"; then
+        printf 'login=reused memo=%s state=%s\n' "${memo}" "${seen}"
+        return 0
+    fi
+    printf '%s' "${!token_var}" | docker login ${registry:+"${registry}"} -u "${!user_var}" --password-stdin || return "$?"
+    _ci_job_memo_put "${memo}" logged-in
 }
 
 # What: print a required runner env value; else coded fail.
