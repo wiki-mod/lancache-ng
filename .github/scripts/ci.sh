@@ -6616,6 +6616,13 @@ ci_cmd_rust_build() {
 _ci_registry_read() {
     local ref="$1" view="$2" id="$3" absent="$4" out cls rc=0
     local -a how=(--raw)
+    # What: a digest first by one HTTP HEAD; else buildx.
+    # Why: buildx read one public base digest in 6.7 s.
+    # From: Issue #1683 | PR #1858
+    if [ "${view}" = digest ] && out="$(_ci_registry_head_digest "${ref}")"; then
+        printf '%s\n' "${out}"
+        return 0
+    fi
     case "${view}" in
         digest) how=(--format '{{.Manifest.Digest}}') ;;
         revision) how=(--format '{{index .Image.Config.Labels "org.opencontainers.image.revision"}}') ;;
@@ -6654,6 +6661,70 @@ _ci_registry_read() {
     cls="$(_ci_classify_failure "${out}" registry-read)"
     ci_error "${id}" "ref=\"${ref}\" cls=${cls} reason=\"registry read failed\"" "${out}"
     return 2
+}
+
+# What: last reply of a curl -I text: status, digest.
+# Why: a proxy CONNECT reply comes first in the text.
+# From: Issue #1683 | PR #1858
+_ci_registry_head_fields() {
+    local line
+    _ci_hst="" _ci_hdg="" _ci_hau=""
+    while IFS= read -r line; do
+        line="${line%$'\r'}"
+        case "${line,,}" in
+            http/*)
+                _ci_hst="${line#* }"
+                _ci_hst="${_ci_hst%% *}"
+                _ci_hdg="" _ci_hau=""
+                ;;
+            docker-content-digest:*) _ci_hdg="${line#*: }" ;;
+            www-authenticate:*) _ci_hau="${line#*: }" ;;
+        esac
+    done <<< "$1"
+}
+
+# What: tag digest by HTTP HEAD, anonymous token only.
+# Why: rc 1 = no answer here; the caller asks buildx.
+# From: Issue #1683 | PR #1858
+_ci_registry_head_digest() {
+    local ref="$1" host rest repo tag url acc hdr tok realm
+    local service="" scope="" _ci_hst _ci_hdg _ci_hau
+    host="${ref%%/*}"
+    rest="${ref#*/}"
+    tag="${rest##*:}"
+    repo="${rest%:*}"
+    # What: host.tld/repo:tag only; other refs use buildx.
+    # Why: a short, digest or port ref has no plain URL.
+    # From: Issue #1683 | PR #1858
+    case "${host}" in *.*) ;; *) return 1 ;; esac
+    case "${host}${rest}" in *@* | *:*:*) return 1 ;; esac
+    if [ "${rest}" = "${ref}" ] || [ "${repo}" = "${rest}" ] || [ -z "${tag}" ] || [[ "${tag}" == */* ]]; then
+        return 1
+    fi
+    url="https://${host}/v2/${repo}/manifests/${tag}"
+    acc="Accept: application/vnd.oci.image.index.v1+json"
+    acc+=", application/vnd.docker.distribution.manifest.list.v2+json"
+    acc+=", application/vnd.oci.image.manifest.v1+json"
+    acc+=", application/vnd.docker.distribution.manifest.v2+json"
+    hdr="$(_ci_download_curl -sS -I -H "${acc}" "${url}" 2>&1)" || return 1
+    _ci_registry_head_fields "${hdr}"
+    if [ "${_ci_hst}" = 401 ]; then
+        # What: a public pull token from the named realm.
+        # Why: ghcr.io and docker.io answer 401 first.
+        # From: Issue #1683 | PR #1858
+        [[ "${_ci_hau}" =~ realm=\"([^\"]+)\" ]] || return 1
+        realm="${BASH_REMATCH[1]}"
+        if [[ "${_ci_hau}" =~ service=\"([^\"]+)\" ]]; then service="${BASH_REMATCH[1]}"; fi
+        if [[ "${_ci_hau}" =~ scope=\"([^\"]+)\" ]]; then scope="${BASH_REMATCH[1]}"; fi
+        [ -n "${scope}" ] || return 1
+        tok="$(_ci_download_curl -fsS -G --data-urlencode "service=${service}" --data-urlencode "scope=${scope}" "${realm}" 2>&1)" || return 1
+        tok="$(jq -r '.token // .access_token // empty' <<< "${tok}" 2>&1)" || return 1
+        [ -n "${tok}" ] || return 1
+        hdr="$(printf 'Authorization: Bearer %s\n' "${tok}" | _ci_download_curl -sS -I -H "${acc}" -H @- "${url}" 2>&1)" || return 1
+        _ci_registry_head_fields "${hdr}"
+    fi
+    [ "${_ci_hst}" = 200 ] && [[ "${_ci_hdg}" =~ ^${CI_DIGEST_RE}$ ]] || return 1
+    printf '%s\n' "${_ci_hdg}"
 }
 
 # What: Read a pushed tag's immutable registry digest.
