@@ -2438,6 +2438,21 @@ _ci_listing_blob() {
     _ci_identity_git "${line%%$'\t'*}" "${ref}" cat-file blob "${line#*$'\t'}"
 }
 
+# What: drop-mode Rust items of a listing row's blob.
+# Why: A3: plan read each library per service and ref.
+# From: Issue #1683 | PR #1858
+_ci_listing_items() {
+    local memo="rust-items-${1#*$'\t'}" blob items
+    if items="$(_ci_job_memo_get "${memo}")"; then
+        printf '%s\n' "${items}"
+        return 0
+    fi
+    blob="$(_ci_listing_blob "$1" "$2")" || return 2
+    items="$(_ci_rust_items "${blob}" drop)" || return 2
+    [ -z "${items}" ] || _ci_job_memo_put "${memo}" "${items}" || return 2
+    printf '%s\n' "${items}"
+}
+
 # What: generate the workspace lock, once per job.
 # Why: no third-party pin; cargo resolves the latest.
 # From: Issue #1683 | PR #1858
@@ -2459,7 +2474,7 @@ _ci_cargo_lock() {
 # Why: 64.4: only what the service reaches is input.
 # From: Issue #1683 | PR #1912
 _ci_rust_content() {
-    local service="$1" ref="${2:-}" mode="${3:-id}" crates rows lock dir bin crate src listing line blob items
+    local service="$1" ref="${2:-}" mode="${3:-id}" crates rows lock dir bin crate src listing line items
     local roots="" pkgs lib sel h refs lockf
     crates="$(_ci_required_field "${service}" crates list)" || return 2
     crates=" ${crates//$'\n'/ } "
@@ -2472,8 +2487,7 @@ _ci_rust_content() {
         listing="$(_ci_tracked_listing "${src}" "${ref}")" || return 2
         while IFS= read -r line; do
             [[ "${line%%$'\t'*}" == *.rs ]] || continue
-            blob="$(_ci_listing_blob "${line}" "${ref}")" || return 2
-            items="$(_ci_rust_items "${blob}" drop)" || return 2
+            items="$(_ci_listing_items "${line}" "${ref}")" || return 2
             refs="$(_ci_capture 0 cut -f4 <<< "${items}")" || return 2
             roots+=" ${refs//$'\n'/ }"
             [ "${mode}" != text ] || printf '%s\n' "${items}"
@@ -2503,8 +2517,7 @@ _ci_rust_content() {
                 [ "${mode}" = text ] || _ci_content_id_row "${line}" "${ref}" "" || return 2
                 continue
             fi
-            blob="$(_ci_listing_blob "${line}" "${ref}")" || return 2
-            items="$(_ci_rust_items "${blob}" drop)" || return 2
+            items="$(_ci_listing_items "${line}" "${ref}")" || return 2
             lib+="${items}"$'\n'
         done <<< "${listing}"
         sel="$(_ci_run "[CI-ERROR-IDENTITY-0012]" "dir=\"${dir}\" reason=\"library closure not read\"" awk -v roots="${roots}" "${_CI_AWK_RUST_CLOSURE}" <<< "${lib}")" || return 2
