@@ -65,7 +65,7 @@ CI_ARG_DEFAULTS=LANCACHE_RUNTIME_DEFAULTS
 declare -A CI_DISPATCH=(
     [plan]=ci_cmd_plan [plan-matrix]=ci_cmd_plan_matrix [impact]=ci_cmd_impact [codeql-impact]=ci_cmd_codeql_impact [codeql-analyze]=ci_cmd_codeql_analyze [identity]=ci_cmd_identity
     [resolve]=ci_cmd_resolve [build]=ci_cmd_build [rust-build]=ci_cmd_rust_build [apk-setup]=ci_cmd_apk_setup [image-setup]=ci_cmd_image_setup
-    [build-tools]=ci_cmd_build_tools [job-settings]=ci_cmd_job_settings [publish]=ci_cmd_publish [verify]=ci_cmd_verify [ship]=ci_cmd_ship [ship-release]=ci_cmd_ship_release [gha-runtime-args]=ci_cmd_gha_runtime_args
+    [build-tools]=ci_cmd_build_tools [job-settings]=ci_cmd_job_settings [tool-releases]=ci_cmd_tool_releases [publish]=ci_cmd_publish [verify]=ci_cmd_verify [ship]=ci_cmd_ship [ship-release]=ci_cmd_ship_release [gha-runtime-args]=ci_cmd_gha_runtime_args
     [test]=ci_cmd_test [scan-channel]=ci_cmd_scan_channel [assemble]=ci_cmd_assemble
     [aggregate-stack]=ci_cmd_aggregate_stack [scan-stack]=ci_cmd_scan_stack [changed-files]=ci_cmd_changed_files
     [assemble-stack]=ci_cmd_assemble_stack [test-stack]=ci_cmd_test_stack [nightly-report]=ci_cmd_nightly_report
@@ -1228,6 +1228,17 @@ _ci_tool_latest() {
         ci_log "[CI-ERROR-FETCH-0005]" "key=\"external_versions.${key}\" reason=\"repository/asset missing; FAIL CLOSED\""
         return 2
     fi
+    # What: the line the platform job read for this run.
+    # Why: one anonymous read per run, not one per job.
+    # From: Issue #1683 | PR #1858
+    if [ -n "${CI_TOOL_RELEASES:-}" ]; then
+        rel="$(_ci_run "[CI-ERROR-FETCH-0010]" "key=\"${key}\" reason=\"CI_TOOL_RELEASES not parsed\"" \
+            jq -r --arg k "${key}" ".[\$k] // empty" <<< "${CI_TOOL_RELEASES}")" || return 2
+        if [ -n "${rel}" ]; then
+            printf '%s\n' "${rel}"
+            return 0
+        fi
+    fi
     api="$(_ci_variable CI_GITHUB_API_URL)" || return 2
     # What: one anonymous read per job and repository.
     # Why: anonymous reads have a small hourly limit.
@@ -1259,6 +1270,21 @@ _ci_tool_latest() {
         return 2
     fi
     printf '%s\t%s\t%s\t%s\n' "${tag}" "${asset}" "${url}" "${sha}"
+}
+
+# What: every SOT external release, read once, as JSON.
+# Why: later jobs take it as CI_TOOL_RELEASES (Fund 146).
+# From: Issue #1683 | PR #1858
+ci_cmd_tool_releases() {
+    local keys key line json='{}'
+    keys="$(_ci_block_keys external_versions)" || return 2
+    while IFS= read -r key; do
+        [ -n "${key}" ] || continue
+        line="$(_ci_tool_latest "${key}")" || return 2
+        json="$(_ci_capture 0 jq -c --arg k "${key}" --arg v "${line}" ". + {(\$k): \$v}" <<< "${json}")" || return 2
+    done <<< "${keys}"
+    _ci_step_output "[CI-ERROR-FETCH-0011]" releases "${json}" || return 2
+    printf 'releases=%s\n' "${json}"
 }
 
 # What: Fetch the latest CodeQL bundle; print binary.

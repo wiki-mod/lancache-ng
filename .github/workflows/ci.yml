@@ -90,6 +90,7 @@ jobs:
       runner: ${{ steps.jobs.outputs.runner }}
       timeouts: ${{ steps.jobs.outputs.timeouts }}
       validate-dir: ${{ steps.jobs.outputs.validate-dir }}
+      releases: ${{ steps.releases.outputs.releases }}
     # What: one mutable entry: the current_dev channel.
     # Why: ci.sh needs a container before any steps run
     # From: Issue #1683 | PR #1858
@@ -115,6 +116,12 @@ jobs:
       - name: Resolve the job settings
         id: jobs
         run: bash .github/scripts/ci.sh job-settings
+      # What: read each SOT tool release once for the run.
+      # Why: self-hosted jobs share one IP and its limit.
+      # From: Issue #1683 | PR #1858
+      - name: Read the tool releases
+        id: releases
+        run: bash .github/scripts/ci.sh tool-releases
 
   # What: emit identity-filtered build matrices
   # Why: path picks candidates; ci.sh resolves build
@@ -140,6 +147,10 @@ jobs:
       # From: Issue #1683 | PR #1912
       env:
         CI_BUILD_TOOLS_IMAGE: ${{ needs.platform.outputs.image }}
+        # What: the tool releases the platform job read.
+        # Why: no later job reads the API again (Fund 146).
+        # From: Issue #1683 | PR #1858
+        CI_TOOL_RELEASES: ${{ needs.platform.outputs.releases }}
     outputs:
       any-build: ${{ steps.plan.outputs.any-build }}
       promote: ${{ steps.plan.outputs.promote }}

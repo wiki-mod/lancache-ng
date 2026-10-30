@@ -84,6 +84,7 @@ jobs:
       validate-dir: ${{ steps.jobs.outputs.validate-dir }}
       check-channels: ${{ steps.channels.outputs.channels }}
       check-runner: ${{ steps.channels.outputs.runner }}
+      releases: ${{ steps.releases.outputs.releases }}
     # What: one mutable entry: the current_dev channel.
     # Why: ci.sh needs a container before steps run
     # From: Issue #1683 | PR #1858
@@ -118,6 +119,12 @@ jobs:
       - name: Resolve the job settings
         id: jobs
         run: bash .github/scripts/ci.sh job-settings
+      # What: read each SOT tool release once for the run.
+      # Why: self-hosted jobs share one IP and its limit.
+      # From: Issue #1683 | PR #1858
+      - name: Read the tool releases
+        id: releases
+        run: bash .github/scripts/ci.sh tool-releases
       # What: channels and hosted runner of the check.
       # Why: ci.sh reads the SOT; YAML names no channel.
       # From: Issue #1683 | PR #1858
@@ -464,6 +471,10 @@ jobs:
       credentials: *ghcr_credentials
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # What: the tool releases the platform job read.
+      # Why: no later job reads the API again (Fund 146).
+      # From: Issue #1683 | PR #1858
+      CI_TOOL_RELEASES: ${{ needs.platform.outputs.releases }}
     outputs:
       passed: ${{ steps.scan.outputs.passed }}
     steps:
