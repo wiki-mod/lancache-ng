@@ -1354,6 +1354,25 @@ pub struct NetdataAlarm {
     pub duration: i64,
 }
 
+// What: the shared secret file of one variable, read or made.
+// Why: a placeholder env value counts as unset; every starter agrees.
+// From: Issue #858
+pub fn ensure_secret(
+    dir: &Path,
+    var: &str,
+    file: &str,
+    gid: u32,
+    make: fn() -> String,
+) -> Result<String, String> {
+    let configured = crate::config::env_opt(var).unwrap_or_default();
+    let current = if is_placeholder(&configured) {
+        ""
+    } else {
+        configured.as_str()
+    };
+    resolve_shared_secret(dir, file, current, gid, make).map_err(|e| format!("{var}: {e}"))
+}
+
 // What: first-writer-wins read-or-create of a secret file.
 // Why: independent starters must not split-brain a secret.
 // From: Issue #858

@@ -24,10 +24,10 @@ use lancache_ng::{
     ALARM_INGEST_PATH, ALARM_TOKEN_HEADER, Backoff, COMPOSE_PROJECT_LABEL, COMPOSE_SERVICE_LABEL,
     CaFiles, CertSpec, ClientCheck, ConflictCheck, DOCKER_UNIX_PREFIX, DesiredRunState,
     DesiredState, Detail, DiskHealth, DiskInfo, DockerApi, NetdataAlarm, Place, ProbeAnswer,
-    ProbeReport, ServiceHealth, WatchdogStatus, df, files_under, hex32, is_placeholder,
+    ProbeReport, ServiceHealth, WatchdogStatus, df, ensure_secret, files_under, hex32,
     metadata_if_present, need_secs, openssl_ca, openssl_leaf, openssl_x509, own, probe_health,
-    probe_health_tls, resolve_shared_secret, run_program, sha256_hex, shared_secret_file_name,
-    terminate, unix_nanos, unix_secs, write_file, write_if_changed,
+    probe_health_tls, run_program, sha256_hex, shared_secret_file_name, terminate, unix_nanos,
+    unix_secs, write_file, write_if_changed,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -1917,14 +1917,7 @@ fn stack_secret(var: &str, file: &str, make: fn() -> String) -> Result<String, S
     let need = |key: &str| config::need(&config::process_env, key);
     let dir = need("LANCACHE_SHARED_SECRET_DIR")?;
     let gid = config::runtime_gid()?;
-    let configured = env_opt(var).unwrap_or_default();
-    let current = if is_placeholder(&configured) {
-        ""
-    } else {
-        configured.as_str()
-    };
-    resolve_shared_secret(Path::new(&dir), file, current, gid, make)
-        .map_err(|e| format!("{var}: {e}"))
+    ensure_secret(Path::new(&dir), var, file, gid, make)
 }
 
 // What: the PowerDNS API key, at least 16 characters.

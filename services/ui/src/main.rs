@@ -28,10 +28,10 @@ use lancache_ng::config::{
 use lancache_ng::{
     ALARM_INGEST_PATH, ALARM_TOKEN_HEADER, Backoff, DesiredRunState, DesiredState, DnsRecord,
     FlushRequest, NetdataAlarm, PDNS_API_KEY_HEADER, Place, PowerDns, ProbeAnswer, ProbeReport,
-    SnapshotStore, WatchdogStatus, ct_eq, df, die, error_chain, files_under, hex32, http_client,
-    is_placeholder, load_or_create, load_or_create_hex, metadata_if_present, need_secs, own,
-    probe_health, resolve_shared_secret, shared_secret, shared_secret_file_name,
-    snapshot_created_unix, unix_secs, write_file, write_if_changed,
+    SnapshotStore, WatchdogStatus, ct_eq, df, die, ensure_secret, error_chain, files_under, hex32,
+    http_client, is_placeholder, load_or_create, load_or_create_hex, metadata_if_present,
+    need_secs, own, probe_health, shared_secret, shared_secret_file_name, snapshot_created_unix,
+    unix_secs, write_file, write_if_changed,
 };
 use nkeys::{KeyPair, XKey};
 use regex::Regex;
@@ -722,23 +722,13 @@ fn nats_port(nats_url: &str) -> Option<&str> {
 // From: Issue #858
 fn ensure_shared_secrets(dir: &str, gid: u32, prefix: &str) -> Result<(), String> {
     for var in SHARED_SECRET_VARS.iter().filter(|v| v.starts_with(prefix)) {
-        let configured = config::env_opt(var).unwrap_or_default();
-        // What: a placeholder is no configured value.
-        // Why: a placeholder must never be a secret.
-        // From: Issue #1683 | PR #1912
-        let current = if is_placeholder(&configured) {
-            ""
-        } else {
-            configured.as_str()
-        };
-        resolve_shared_secret(
+        ensure_secret(
             Path::new(dir),
+            var,
             &shared_secret_file_name(var),
-            current,
             gid,
             hex32,
-        )
-        .map_err(|e| format!("{var}: {e}"))?;
+        )?;
     }
     Ok(())
 }
