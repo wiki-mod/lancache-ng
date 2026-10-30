@@ -4209,10 +4209,11 @@ _ci_ledger_blob() {
         printf '%s\n' "${blob}"
         return 0
     fi
-    # What: this fetch has no retry level.
-    # Why: op=git uses shared transient-signature truth.
-    # From: Issue #1683
-    _ci_retry git git fetch --depth=1 "${remote}" "${ledger_ref}" >&2 || return 2
+    # What: no retry level; no clone blob filter.
+    # Why: op=git retry truth; blob:none cost a lazy fetch.
+    # From: Issue #1683 | PR #1858
+    _ci_retry git git -c "remote.${remote}.partialclonefilter=" \
+        fetch --depth=1 "${remote}" "${ledger_ref}" >&2 || return 2
     if ! blob="$(git cat-file -p "FETCH_HEAD:${file}" 2>&1)"; then
         ci_error "[CI-WARN-RESOLVE-0009]" "ref=\"${ledger_ref}\" file=\"${file}\" reason=\"ledger file unreadable; UNKNOWN\"" "${blob}"
         return 2
