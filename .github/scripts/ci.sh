@@ -4331,8 +4331,16 @@ _ci_trivyignore_stale() {
 # Why: workflows check out one commit; ci.sh owns the diff.
 # From: Issue #1683 | PR #1858
 _ci_diff_history() {
-    local shallow have="" remote head
+    local shallow have="" remote head memo="" seen
     local -a deep=() need=("$@")
+    head="$(_ci_head_commit)" || return 2
+    # What: a call without refs loads history once per job.
+    # Why: A3: plan fetched HEAD again after changed-files.
+    # From: Issue #1683 | PR #1858
+    [ "$#" -gt 0 ] || memo="diff-history-${head}"
+    if [ -n "${memo}" ] && seen="$(_ci_job_memo_get "${memo}")" && [ "${seen}" = "${head}" ]; then
+        return 0
+    fi
     shallow="$(cd -- "${CI_REPO_ROOT}" && _ci_capture 0 git rev-parse --is-shallow-repository)" || return 2
     [ "${shallow}" = true ] && deep=(--unshallow)
     if [ "${GITHUB_EVENT_NAME:-}" = pull_request ] && [ -n "${BASE_SHA:-}" ]; then
@@ -4340,12 +4348,12 @@ _ci_diff_history() {
         [ -n "${have}" ] || need+=("${BASE_SHA}")
     fi
     [ "${#deep[@]}" -gt 0 ] || [ "${#need[@]}" -gt 0 ] || return 0
-    head="$(_ci_head_commit)" || return 2
     remote="$(_ci_git_remote)" || return 2
     # What: commits and trees only; blobs load on demand.
     # Why: whole history with blobs cost 33 s (Fund 114).
     # From: Issue #1683 | PR #1858
     (cd -- "${CI_REPO_ROOT}" && _ci_retry git-fetch git fetch --no-tags --filter=blob:none "${deep[@]}" "${remote}" "${head}" "${need[@]}") >&2 || return 2
+    [ -z "${memo}" ] || _ci_job_memo_put "${memo}" "${head}"
 }
 
 # What: This run's base and head diff refs, or empty.
