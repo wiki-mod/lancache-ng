@@ -1523,6 +1523,11 @@ fn syslog_ng(ctx: &Ctx) -> Result<Run, String> {
 const NETDATA_CONF: &str =
     "[logs]\n    daemon = stderr\n    health = stderr\n    collector = off\n    access = off\n";
 
+// What: file name of the alarm token in netdata's config dir.
+// Why: the sender conf reads it and the supervisor writes it.
+// From: Issue #858
+const NETDATA_TOKEN_FILE: &str = ".netdata-alarm-token";
+
 // What: netdata custom_sender that POSTs alarms to the ui.
 // Why: fields come from NetdataAlarm; no second list.
 // From: Issue #858
@@ -1590,7 +1595,7 @@ fn web_log_conf(path: &str) -> Result<String, String> {
 // From: Issue #1683
 fn netdata(ctx: &Ctx) -> Result<Run, String> {
     let dir = PathBuf::from(ctx.need("NETDATA_CONFIG_DIR")?);
-    let token_file = dir.join(".netdata-alarm-token");
+    let token_file = dir.join(NETDATA_TOKEN_FILE);
     let sender = alarm_notify_conf(
         &ctx.need("NETDATA_ALARM_UI_URL")?,
         &token_file.display().to_string(),
@@ -1612,7 +1617,7 @@ fn netdata(ctx: &Ctx) -> Result<Run, String> {
             .map_err(|e| format!("cannot write {}: {e}", path.display()))
             .map(|_| path)
     };
-    let token_file = put(".netdata-alarm-token", &token, 0o600)?;
+    let token_file = put(NETDATA_TOKEN_FILE, &token, 0o600)?;
     own(
         &token_file,
         Some(account_id("passwd", "netdata")?),
