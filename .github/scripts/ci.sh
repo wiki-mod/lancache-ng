@@ -3354,13 +3354,13 @@ _ci_build_lock_busy() {
     esac
 }
 
-# What: ref that holds the last verified digest of a pair.
-# Why: one ref per pair keeps the ref count bounded.
-# From: Issue #1683 | PR #1912
+# What: ref of the verified mark of one digest of a pair.
+# Why: a pair-wide ref let the nightly evict a PR's mark.
+# From: Issue #1683 | PR #1858
 _ci_verified_ref() {
     local prefix
     prefix="$(_ci_variable CI_VERIFIED_REF)" || return 2
-    printf '%s/%s-%s' "${prefix}" "$1" "${2//\//-}"
+    printf '%s/%s-%s-%s' "${prefix}" "$1" "${2//\//-}" "${3#sha256:}"
 }
 
 # What: note a verified mark carries for one digest.
@@ -3408,7 +3408,7 @@ _ci_mark_write() {
 # From: Issue #1683 | PR #1912
 _ci_verified_has() {
     local ref
-    ref="$(_ci_verified_ref "$1" "$2")" || return 2
+    ref="$(_ci_verified_ref "$1" "$2" "$3")" || return 2
     _ci_mark_has "${ref}" "$(_ci_verified_note "$1" "$2" "$3")"
 }
 
@@ -3417,7 +3417,7 @@ _ci_verified_has() {
 # From: Issue #1683 | PR #1912
 _ci_verified_mark() {
     local ref note
-    ref="$(_ci_verified_ref "$1" "$2")" || return 2
+    ref="$(_ci_verified_ref "$1" "$2" "$3")" || return 2
     note="$(_ci_verified_note "$1" "$2" "$3")"
     _ci_mark_write "${ref}" "${note}" "${note}" "[CI-ERROR-SHIP-0007]" \
         "service=\"$1\" platform=\"$2\" digest=\"$3\" reason=\"verified mark not written\""
@@ -6131,7 +6131,7 @@ _ci_scan_identity() {
 }
 
 # What: read (has) or write the clean-scan mark of a pair.
-# Why: one ref per pair, like the verified mark.
+# Why: one ref per pair; a lost mark only rescans.
 # From: Issue #1683 | PR #1858
 _ci_scan_mark() {
     local prefix ref note
