@@ -125,6 +125,11 @@ jobs:
       - name: Read the tool releases
         id: releases
         run: bash .github/scripts/ci.sh tool-releases
+        # What: the job token for the API fallback read.
+        # Why: anonymous reads hit the shared-IP rate limit.
+        # From: Issue #1683 | PR #1858
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       # What: channels and hosted runner of the check.
       # Why: ci.sh reads the SOT; YAML names no channel.
       # From: Issue #1683 | PR #1858
