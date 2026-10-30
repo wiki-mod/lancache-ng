@@ -3558,7 +3558,7 @@ _ci_ledger_upsert() {
     ledger_ref="$(_ci_variable "${refvar}")" || return 3
     file="$(_ci_variable "${filevar}")" || return 3
     new="$(cat)"
-    new="$(_ci_capture 0 awk 'NF>0' <<< "${new}")" || return 3
+    new="$(_ci_nonblank_lines "${new}")" || return 3
     [ -n "${new}" ] || return 0
     # What: the writer always fetches the ledger.
     # Why: FETCH_HEAD below is the parent of the CAS write.
