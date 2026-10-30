@@ -2347,7 +2347,14 @@ _ci_rust_items() {
 _ci_rust_norm() {
     local items
     items="$(_ci_rust_items "$1" "$2")" || return "$?"
-    _ci_capture 0 cut -f1,2,5 <<< "${items}"
+    _ci_rust_norm_items "${items}"
+}
+
+# What: kind, name and text columns of item records $1.
+# Why: one projection for fresh and kept item records.
+# From: Issue #1683 | PR #1858
+_ci_rust_norm_items() {
+    _ci_capture 0 cut -f1,2,5 <<< "$1"
 }
 
 # What: the v1 normalizer grammar of a path; rc 1 = raw.
@@ -2509,7 +2516,7 @@ _ci_tracked_content_ids() {
 # Why: one normalizer for plain paths and Rust libraries.
 # From: Issue #1683 | PR #1858
 _ci_content_id_row() {
-    local line="$1" ref="$2" mode="$3" path oid blob norm g nrc=0 memo id
+    local line="$1" ref="$2" mode="$3" path oid blob norm g nrc=0 memo id items
     path="${line%%$'\t'*}"
     oid="${line#*$'\t'}"
     if g="$(_ci_norm_grammar "${path}")"; then
@@ -2521,13 +2528,20 @@ _ci_content_id_row() {
             printf '%s\t%s\n' "${path}" "${id}"
             return 0
         fi
-        blob="$(_ci_identity_git "${path}" "${ref}" cat-file blob "${oid}")" || return 2
         # What: a build id drops Rust cfg(test) items.
         # Why: 11.4: a test change builds no container.
         # From: Issue #1683 | PR #1912
         if [ "${g}" = rust ] && [ "${mode}" = build ]; then
-            norm="$(_ci_rust_norm "${blob}" drop)" || nrc=$?
+            # What: the drop items come from the items memo.
+            # Why: A3: plan parsed each Rust blob twice.
+            # From: Issue #1683 | PR #1858
+            if items="$(_ci_listing_items "${line}" "${ref}")"; then
+                norm="$(_ci_rust_norm_items "${items}")" || return 2
+            else
+                nrc=$?
+            fi
         else
+            blob="$(_ci_identity_git "${path}" "${ref}" cat-file blob "${oid}")" || return 2
             norm="$(_ci_norm_content "${g}" "${blob}")" || nrc=$?
         fi
         case "${nrc}" in
@@ -2560,7 +2574,10 @@ _ci_listing_items() {
         return 0
     fi
     blob="$(_ci_listing_blob "$1" "$2")" || return 2
-    items="$(_ci_rust_items "${blob}" drop)" || return 2
+    # What: rc 1 (unfinished text) reaches the caller.
+    # Why: the build id keeps the raw blob id then.
+    # From: Issue #1683 | PR #1858
+    items="$(_ci_rust_items "${blob}" drop)" || return "$?"
     [ -z "${items}" ] || _ci_job_memo_put "${memo}" "${items}" || return 2
     printf '%s\n' "${items}"
 }
