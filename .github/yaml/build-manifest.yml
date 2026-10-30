@@ -872,7 +872,7 @@ runtime:
   # Why: logbundle takes the first present; tar writes it.
   # From: Issue #1683 | PR #1912
   archive_compressors:
-    - zst zstd -q -c
+    - zst zstd -T0 -q -c
     - bz2 bzip2 -c
     - gz gzip -c
 
