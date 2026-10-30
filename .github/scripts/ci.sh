@@ -1892,7 +1892,7 @@ ci_cmd_plan_matrix() {
     _ci_docs_only "${changed[@]}" || drc=$?
     case "${drc}" in 0) docs_only=true ;; 1) ;; *) return 2 ;; esac
     local service platform include='[]' any=false resolved paction pident pimpact runner authed=false test_services=''
-    local runners='[]' any_runner=false pdig vrc
+    local runners='[]' any_runner=false pdig vrc pairs=""
     local _ci_plan_ids=""
     local sot_changed=false f path_cand rc plats unknown=""
     # What: SOT change makes every target id candidate.
@@ -1961,70 +1961,83 @@ ci_cmd_plan_matrix() {
         plats="$(_ci_platforms "${service}")" || return "$?"
         while IFS= read -r platform; do
             [ -n "${platform}" ] || continue
-            ci_group "plan: ${service} ${platform}"
             # What: one id per pair, fixed once per run.
             # Why: later jobs read it; none recomputes.
             # From: Issue #1683 | PR #1912
             _ci_plan_record "${service}" "${platform}" || return "$?"
-            resolved="$(_ci_resolve_one "${service}" "${platform}")" || return "$?"
-            paction="$(_ci_record_field "${resolved}" action)" || return 2
-            # What: MISMATCH state fails the plan
-            # Why: a contradiction must not look green
-            # From: Issue #1683 | PR #1912
-            if [ "${paction}" = fail ]; then
-                ci_error "[CI-ERROR-PLAN-0005]" "service=\"${service}\" platform=\"${platform}\" reason=\"ledger and registry digest disagree; no build, no accept\"" "${resolved}"
-                return 2
-            fi
-            # What: UNKNOWN pairs are kept for escalation.
-            # Why: 2.3: UNKNOWN never builds, never silent.
-            # From: Issue #1683 | PR #1912
-            if [ "${paction}" = escalate ]; then
-                unknown+="${service}/${platform} resolve"$'\n'
-                continue
-            fi
-            # What: unverified artifacts join the matrix
-            # Why: ship verifies, scan accepts; no rebuild
-            # From: Issue #1683 | PR #1912
-            [ "${paction}" = build ] || [ "${paction}" = verify ] || [ "${paction}" = wait ] || continue
-            # What: matrix holds targets with proven impact.
-            # Why: MISSING_CONFIRMED must not build alone.
-            # From: Issue #1683 | PR #1858
-            pident="$(_ci_record_field "${resolved}" identity)" || return 2
-            pimpact=BUILD
-            if [ "${paction}" = build ]; then
-                pimpact="$(_ci_semantic_impact "${service}" "${platform}" "${pident}")" || return 2
-            fi
-            [ "${pimpact}" != UNKNOWN ] || unknown+="${service}/${platform} impact"$'\n'
-            [ "${pimpact}" = BUILD ] || continue
-            runner="$(_ci_runner_label "${platform}" "[CI-ERROR-PLAN-0002]" "service=\"${service}\" reason=\"no runner label for platform\"")" || return 2
-            # What: a verified digest gets no build runner.
-            # Why: §70 §71: a runner only for real work.
-            # From: Issue #1683 | PR #1858
-            vrc=1
-            if [ "${paction}" = verify ]; then
-                pdig="$(_ci_record_field "${resolved}" digest)" || return 2
-                [ "${pdig}" != none ] || pdig="$(_ci_published_digest "${service}" "${platform}")" || return 2
-                vrc=0; _ci_verified_has "${service}" "${platform}" "${pdig}" || vrc=$?
-                [ "${vrc}" -le 1 ] || return 2
-            fi
-            # What: a PR leaves a verified pair out fully.
-            # Why: a PR accepts nothing; §30 §63: no rescan.
-            # From: Issue #1683 | PR #1858
-            if [ "${vrc}" -eq 0 ] && [ "${GITHUB_EVENT_NAME:-}" = pull_request ]; then
-                ci_log "[CI-INFO-PLAN-0016]" "service=\"${service}\" platform=\"${platform}\" digest=\"${pdig}\" action=skip reason=\"digest already verified; a PR accepts nothing, so no scan and no validate\""
-                continue
-            fi
-            include="$(_ci_matrix_append "${include}" service="${service}" arch="${platform##*/}" runner="${runner}" platform="${platform}")" || return 2
-            any=true
-            if [ "${vrc}" -eq 0 ]; then
-                ci_log "[CI-INFO-PLAN-0015]" "service=\"${service}\" platform=\"${platform}\" digest=\"${pdig}\" action=no-runner reason=\"digest already verified; scan and accept only\""
-                continue
-            fi
-            runners="$(_ci_matrix_append "${runners}" service="${service}" arch="${platform##*/}" runner="${runner}" platform="${platform}")" || return 2
-            any_runner=true
-            [ "${svc_type}" != rust ] || rust_audit=true
+            _ci_registry_probe_start "${service}" "${platform}" || return "$?"
+            pairs+="${service} ${platform} ${svc_type}"$'\n'
         done <<< "${plats}"
     done
+    # What: each pair reads the probe started for it.
+    # Why: A3: 14 probes ran one after another, 13.4 s.
+    # From: Issue #1683 | PR #1858
+    _ci_registry_probe_collect
+    while read -r service platform svc_type; do
+        [ -n "${service}" ] || continue
+        ci_group "plan: ${service} ${platform}"
+        resolved="$(_ci_resolve_one "${service}" "${platform}")" || return "$?"
+        paction="$(_ci_record_field "${resolved}" action)" || return 2
+        # What: MISMATCH state fails the plan
+        # Why: a contradiction must not look green
+        # From: Issue #1683 | PR #1912
+        if [ "${paction}" = fail ]; then
+            ci_error "[CI-ERROR-PLAN-0005]" "service=\"${service}\" platform=\"${platform}\" reason=\"ledger and registry digest disagree; no build, no accept\"" "${resolved}"
+            return 2
+        fi
+        # What: UNKNOWN pairs are kept for escalation.
+        # Why: 2.3: UNKNOWN never builds, never silent.
+        # From: Issue #1683 | PR #1912
+        if [ "${paction}" = escalate ]; then
+            unknown+="${service}/${platform} resolve"$'\n'
+            continue
+        fi
+        # What: unverified artifacts join the matrix
+        # Why: ship verifies, scan accepts; no rebuild
+        # From: Issue #1683 | PR #1912
+        [ "${paction}" = build ] || [ "${paction}" = verify ] || [ "${paction}" = wait ] || continue
+        # What: matrix holds targets with proven impact.
+        # Why: MISSING_CONFIRMED must not build alone.
+        # From: Issue #1683 | PR #1858
+        pident="$(_ci_record_field "${resolved}" identity)" || return 2
+        pimpact=BUILD
+        if [ "${paction}" = build ]; then
+            pimpact="$(_ci_semantic_impact "${service}" "${platform}" "${pident}")" || return 2
+        fi
+        [ "${pimpact}" != UNKNOWN ] || unknown+="${service}/${platform} impact"$'\n'
+        [ "${pimpact}" = BUILD ] || continue
+        runner="$(_ci_runner_label "${platform}" "[CI-ERROR-PLAN-0002]" "service=\"${service}\" reason=\"no runner label for platform\"")" || return 2
+        # What: a verified digest gets no build runner.
+        # Why: §70 §71: a runner only for real work.
+        # From: Issue #1683 | PR #1858
+        vrc=1
+        if [ "${paction}" = verify ]; then
+            pdig="$(_ci_record_field "${resolved}" digest)" || return 2
+            [ "${pdig}" != none ] || pdig="$(_ci_published_digest "${service}" "${platform}")" || return 2
+            vrc=0; _ci_verified_has "${service}" "${platform}" "${pdig}" || vrc=$?
+            [ "${vrc}" -le 1 ] || return 2
+        fi
+        # What: a PR leaves a verified pair out fully.
+        # Why: a PR accepts nothing; §30 §63: no rescan.
+        # From: Issue #1683 | PR #1858
+        if [ "${vrc}" -eq 0 ] && [ "${GITHUB_EVENT_NAME:-}" = pull_request ]; then
+            ci_log "[CI-INFO-PLAN-0016]" "service=\"${service}\" platform=\"${platform}\" digest=\"${pdig}\" action=skip reason=\"digest already verified; a PR accepts nothing, so no scan and no validate\""
+            continue
+        fi
+        include="$(_ci_matrix_append "${include}" service="${service}" arch="${platform##*/}" runner="${runner}" platform="${platform}")" || return 2
+        any=true
+        if [ "${vrc}" -eq 0 ]; then
+            ci_log "[CI-INFO-PLAN-0015]" "service=\"${service}\" platform=\"${platform}\" digest=\"${pdig}\" action=no-runner reason=\"digest already verified; scan and accept only\""
+            continue
+        fi
+        runners="$(_ci_matrix_append "${runners}" service="${service}" arch="${platform##*/}" runner="${runner}" platform="${platform}")" || return 2
+        any_runner=true
+        [ "${svc_type}" != rust ] || rust_audit=true
+    done <<< "${pairs}"
+    # What: drop the kept probes once plan has used them.
+    # Why: §26: a later read in this call asks the registry.
+    # From: Issue #1683 | PR #1858
+    _CI_PROBE_KEPT=() _CI_PROBE_ERR=()
     ci_group "plan: release gate, promote, reuse"
     # What: a release builds nothing; the gate decides.
     # Why: §82: release.yml never builds; ci.yml builds it.
@@ -3176,7 +3189,7 @@ _ci_resolve_state() {
     lrec="$(_ci_ledger_read "${remote}" "${identity}")" || lrc=$?
     [ "${lrc}" -eq 2 ] && { printf 'UNKNOWN\n'; return 0; }
     tag="$(_ci_image_tag "${service}" "${platform}" "${identity}")" || { printf 'UNKNOWN\n'; return 0; }
-    gdig="$(_ci_registry_probe "${tag}")" || grc=$?
+    gdig="$(_ci_registry_probe_kept "${tag}")" || grc=$?
     [ "${grc}" -eq 2 ] && { printf 'UNKNOWN\n'; return 0; }
     if [ "${lrc}" -eq 1 ]; then
         # What: MISSING while another run builds is a wait.
@@ -6360,6 +6373,64 @@ _ci_registry_digest() {
 # From: Issue #1683
 _ci_registry_probe() {
     _ci_registry_read "$1" digest "[CI-WARN-RESOLVE-0007]" ok
+}
+
+# What: plan probe results of this ci.sh call, by tag.
+# Why: A3: plan starts all probes at once, reads each once.
+# From: Issue #1683 | PR #1858
+declare -gA _CI_PROBE_KEPT=() _CI_PROBE_ERR=()
+declare -ga _CI_PROBE_PIDS=() _CI_PROBE_TAGS=()
+
+# What: start one plan pair's tag probe in the background.
+# Why: a probe waits ~1 s on the registry; 14 add up.
+# From: Issue #1683 | PR #1858
+_ci_registry_probe_start() {
+    local id tag file
+    [ -n "${RUNNER_TEMP:-}" ] || return 0
+    id="$(_ci_identity_recorded "${_ci_plan_ids}" "$1" "$2")" || return 2
+    tag="$(_ci_image_tag "$1" "$2" "${id}")" || return 2
+    file="${RUNNER_TEMP}/probe-${_CI_CALL_KEY}-${#_CI_PROBE_TAGS[@]}"
+    {
+        local prc=0 dig
+        dig="$(_ci_registry_probe "${tag}")" || prc=$?
+        printf '%s %s\n' "${prc}" "${dig}"
+    } > "${file}.out" 2> "${file}.err" &
+    _CI_PROBE_PIDS+=("$!")
+    _CI_PROBE_TAGS+=("${tag}")
+}
+
+# What: wait for the plan probes; keep each result by tag.
+# Why: a lost result keeps nothing; resolve probes live.
+# From: Issue #1683 | PR #1858
+_ci_registry_probe_collect() {
+    local i file wrc prc dig
+    for i in "${!_CI_PROBE_PIDS[@]}"; do
+        file="${RUNNER_TEMP}/probe-${_CI_CALL_KEY}-${i}"
+        wrc=0; wait "${_CI_PROBE_PIDS[$i]}" || wrc=$?
+        if [ "${wrc}" -ne 0 ] || [ ! -s "${file}.out" ]; then
+            continue
+        fi
+        read -r prc dig < "${file}.out" || continue
+        case "${prc}" in 0 | 1 | 2) ;; *) continue ;; esac
+        _CI_PROBE_KEPT["${_CI_PROBE_TAGS[$i]}"]="${prc} ${dig}"
+        _CI_PROBE_ERR["${_CI_PROBE_TAGS[$i]}"]="$(<"${file}.err")"
+    done
+    _CI_PROBE_PIDS=() _CI_PROBE_TAGS=()
+}
+
+# What: a tag's kept plan probe, else a live probe.
+# Why: rc and raw lines as the live probe; shown per pair.
+# From: Issue #1683 | PR #1858
+_ci_registry_probe_kept() {
+    local prc dig
+    if [ -z "${_CI_PROBE_KEPT[$1]+x}" ]; then
+        _ci_registry_probe "$1" || return "$?"
+        return 0
+    fi
+    [ -z "${_CI_PROBE_ERR[$1]}" ] || printf '%s\n' "${_CI_PROBE_ERR[$1]}" >&2
+    read -r prc dig <<< "${_CI_PROBE_KEPT[$1]}"
+    [ -z "${dig}" ] || printf '%s\n' "${dig}"
+    return "${prc}"
 }
 
 # What: Create or update a multi-arch index from sources.
