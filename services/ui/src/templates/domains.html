@@ -20,9 +20,6 @@
   <div>
     <p class="eyebrow">Settings → DNS</p>
     <h1 class="page-title">DNS</h1>
-    <p class="page-sub">
-      CDN-Domains und LAN-Records können ohne Container-Neustart live geändert werden.
-    </p>
   </div>
 
   {# What: banner for a rejected CDN-domain add, fixed text
@@ -47,98 +44,79 @@
   <div class="space-y-6">
     {# What: CDN domain list: add, switch, remove
        Why: one list cdn-domains.txt; certs follow it
-       From: Issue #1683 | PR #1912 #}
-    <section data-dns-panel="cdn" class="card flex flex-col gap-4">
-      {# What: how an entry matches, in plain words
-         Why: mockup hint; a leading dot means subdomains
-         From: Issue #1683 | PR #1858 #}
-      <div class="hint">
-        <span class="glyph">◈</span>
-        <div><b>Jeder Eintrag passt auf genau eine Sache, nie auf eine Mischung:</b>
-          <code>steamcontent.com</code> passt nur auf genau diese Domain.
-          <code>.steamcontent.com</code> (mit Punkt am Anfang) passt auf jede Subdomain wie
-          <code>cdn.steamcontent.com</code>, aber nicht auf die Domain selbst. Mehrere
-          Domains trägst du einzeln ein.</div>
-      </div>
-      <div>
-        <h2 class="font-semibold text-slate-200">CDN-Domains</h2>
-        <p class="text-xs text-slate-500 mt-0.5">cdn-domains.txt · Hosts die auf den Cache-DNS zeigen. HTTPS-Zertifikate für passende Root-Domains werden automatisch abgeleitet, kein separater Eintrag nötig.</p>
-        <p class="text-xs text-slate-500 mt-0.5">
-          Vorkonfigurierte Standard-Domains lassen sich über den Schalter aktivieren/deaktivieren, ohne aus der Liste zu verschwinden.
-          Selbst hinzugefügte Domains werden weiterhin über "Entfernen" verwaltet.
-        </p>
+       From: Issue #1683 | PR #1976 #}
+    <section data-dns-panel="cdn">
+      <div class="subtabs" style="margin-bottom:22px;">
+        <button type="button" class="subtab cdn-sub-btn active" data-cdn-sub="custom">Custom domains</button>
+        <button type="button" class="subtab cdn-sub-btn" data-cdn-sub="default">Default CDN</button>
       </div>
 
-      <form action="{{ routes.dns_add | safe }}" method="post" class="flex gap-2">
-        {{ <csrf_field csrf_token={csrf_token}/> }}
-        {# What: one domain per submit, one input
-           Why: each add runs after_domain_change
-           From: Issue #1683 | PR #1912 #}
-        <input type="text" name="domain" placeholder="z.B. steamcontent.com"
-               required
-               class="flex-1 bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500">
-        <button type="submit"
-                class="btn btn-blue">
-          Hinzufügen
-        </button>
-      </form>
-
-      <div class="space-y-1 max-h-[28rem] overflow-y-auto">
-        {% if dns_domains %}
-        {% for domain in dns_domains %}
-        <div class="list-row group {% if not domain.enabled %}opacity-50{% endif %}">
-          <div class="flex items-center gap-2 min-w-0">
-            <span class="font-mono text-sm text-slate-300 truncate">{{ domain.display }}</span>
-            <span class="text-xs text-slate-500 flex-shrink-0">{% if domain.display is starting_with(pat=".") %}alle Subdomains{% else %}nur diese Domain{% endif %}</span>
-            {% if domain.is_default %}
-            <span class="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-slate-600 text-slate-300 flex-shrink-0">Standard</span>
-            {% else %}
-            <span class="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-blue-900 text-blue-300 flex-shrink-0">Eigene</span>
-            {% endif %}
-            {% if not domain.enabled %}
-            <span class="text-[10px] px-1.5 py-0.5 rounded bg-red-900 text-red-300 flex-shrink-0">Deaktiviert</span>
-            {% endif %}
-          </div>
-
-          {% if domain.is_default and domain.is_valid %}
-          {# What: on/off switch for default rows
-             Why: a "!" prefix marks a disabled row
-             From: Issue #1683 | PR #1912 #}
-          <form action="{{ routes.dns_toggle | safe }}" method="post" class="flex items-center gap-2 flex-shrink-0">
-            {{ <csrf_field csrf_token={csrf_token}/> }}
-            <input type="hidden" name="domain" value="{{ domain.display }}">
-            <label class="flex items-center gap-1.5 cursor-pointer select-none">
-              <input type="checkbox" name="enabled" value="1"
-                     {% if domain.enabled %}checked{% endif %}
-                     onchange="this.form.requestSubmit()"
-                     class="w-4 h-4 rounded border-slate-600 bg-slate-700 text-green-600 focus:ring-2 focus:ring-green-500 cursor-pointer">
-              <span class="text-xs {% if domain.enabled %}text-green-400{% else %}text-slate-500{% endif %}">
-                {% if domain.enabled %}Aktiv{% else %}Deaktiviert{% endif %}
-              </span>
-            </label>
-          </form>
-          {% else %}
-          <form action="{{ routes.dns_remove | safe }}" method="post" class="opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0">
-            {{ <csrf_field csrf_token={csrf_token}/> }}
-            {# What: hidden value is the raw file entry
-               Why: removal keys on the raw entry
-               From: Issue #1683 | PR #1912 #}
-            <input type="hidden" name="domain" value="{{ domain.raw }}">
-            <button type="submit"
-                    onclick="return confirm('{{ domain.display }} aus der Domain-Liste entfernen?\nDer Proxy wird ggf. neu gestartet, falls der HTTPS-Modus aktiv ist.')"
-                    class="btn btn-sm btn-ghost-red">
-              Entfernen
-            </button>
-          </form>
-          {% endif %}
+      <div data-cdn-panel="custom">
+        <div class="hint">
+          <span class="glyph">◈</span>
+          <div><b>Each entry matches exactly one thing, never a combination:</b> <code>steamcontent.com</code> matches only that exact domain. <code>.steamcontent.com</code> (leading dot) matches every subdomain, like <code>cdn.steamcontent.com</code>, but not the bare domain itself. <code>cdn.steamcontent.com</code> written out matches only that one exact subdomain, nothing beneath it. Add each form separately if you need more than one.</div>
         </div>
-        {% endfor %}
-        {% else %}
-        <p class="text-slate-500 text-sm px-3 py-2">Liste ist leer.</p>
-        {% endif %}
+
+        <form action="{{ routes.dns_add | safe }}" method="post" class="field-row">
+          {{ <csrf_field csrf_token={csrf_token}/> }}
+          <div class="field" style="margin-bottom:0;">
+            <label for="new-domain">Add a domain</label>
+            <input type="text" id="new-domain" name="domain" placeholder="steamcontent.com" required>
+          </div>
+          <button type="submit" class="btn" style="margin-top:22px;">Add domain</button>
+        </form>
+
+        <table style="margin-top:8px;">
+          <tr><th>Domain</th><th>Matches</th><th></th></tr>
+          {% set_global custom_count = 0 %}
+          {% for domain in dns_domains %}
+          {% if not domain.is_default %}
+          {% set_global custom_count = custom_count + 1 %}
+          <tr>
+            <td class="mono">{{ domain.display }}</td>
+            <td>{% if domain.display is starting_with(pat=".") %}All subdomains{% else %}Exact domain only{% endif %}</td>
+            <td>
+              <form action="{{ routes.dns_remove | safe }}" method="post">
+                {{ <csrf_field csrf_token={csrf_token}/> }}
+                <input type="hidden" name="domain" value="{{ domain.raw }}">
+                <button type="submit" class="btn ghost" onclick="return confirm('Remove {{ domain.display }}?')">Remove</button>
+              </form>
+            </td>
+          </tr>
+          {% endif %}
+          {% endfor %}
+          {% if custom_count == 0 %}
+          <tr class="empty-row"><td colspan="3" style="color:var(--mist); font-style:italic; text-align:center;">No custom domains added yet.</td></tr>
+          {% endif %}
+        </table>
       </div>
 
-      <p class="text-xs text-slate-500">{{ dns_domains | length }} {% if dns_domains | length == 1 %}Eintrag{% else %}Einträge{% endif %}</p>
+      <div data-cdn-panel="default" class="hidden">
+        <div class="hint">
+          <span class="glyph">◈</span>
+          <div>These ship with LanCache-NG and cover common game/software CDNs out of the box. Turn one off if you don't want that CDN cached, without losing your place in the list.</div>
+        </div>
+        <table style="margin-top:8px;">
+          <tr><th>Domain</th><th>Matches</th><th>Enabled</th></tr>
+          {% for domain in dns_domains %}
+          {% if domain.is_default %}
+          <tr>
+            <td class="mono">{{ domain.display }}</td>
+            <td>{% if domain.display is starting_with(pat=".") %}All subdomains{% else %}Exact domain only{% endif %}</td>
+            <td>
+              {% if domain.is_valid %}
+              <form action="{{ routes.dns_toggle | safe }}" method="post">
+                {{ <csrf_field csrf_token={csrf_token}/> }}
+                <input type="hidden" name="domain" value="{{ domain.display }}">
+                <label class="toggle"><input type="checkbox" name="enabled" value="1" {% if domain.enabled %}checked{% endif %} onchange="this.form.requestSubmit()"><span class="track"></span><span class="knob"></span></label>
+              </form>
+              {% endif %}
+            </td>
+          </tr>
+          {% endif %}
+          {% endfor %}
+        </table>
+      </div>
     </section>
 
     {# What: LAN records in PowerDNS: add form and list
@@ -590,6 +568,18 @@
 
 {% block scripts %}
 <script>
+  // What: switches the Custom and Default CDN lists
+  // Why: the mockup shows one list at a time
+  // From: Issue #1683 | PR #1976
+  document.querySelectorAll('.cdn-sub-btn').forEach((b) => {
+    b.addEventListener('click', () => {
+      document.querySelectorAll('.cdn-sub-btn').forEach((o) => o.classList.toggle('active', o === b));
+      document.querySelectorAll('[data-cdn-panel]').forEach((p) => {
+        p.classList.toggle('hidden', p.dataset.cdnPanel !== b.dataset.cdnSub);
+      });
+    });
+  });
+
   // What: shows one DNS panel and marks its tab button
   // Why: tabs switch client-side; no reload per tab
   // From: Issue #1683 | PR #1912
