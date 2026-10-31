@@ -48,6 +48,7 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 use tera::{Context, Tera};
@@ -780,6 +781,18 @@ const ADMIN_UI_CSP: &str = "default-src 'self'; base-uri 'self'; object-src 'non
      style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; \
      font-src 'self' data:";
 
+// What: progress counters of the running or last prefill.
+// Why: the task writes them; the Steam page reads them.
+// From: Issue #816 | PR #1976
+#[derive(Default)]
+struct PrefillRun {
+    running: AtomicBool,
+    total: AtomicU64,
+    done: AtomicU64,
+    failed: AtomicU64,
+    bytes: AtomicU64,
+}
+
 // What: everything the handlers share.
 // Why: one state value behind an Arc serves all requests.
 // From: Issue #1683 | PR #1858
@@ -796,6 +809,7 @@ struct AppState {
     db: Mutex<Connection>,
     ui_session_secret: [u8; 32],
     ui_session_ttl: Duration,
+    prefill: Arc<PrefillRun>,
 }
 
 impl AppState {
@@ -822,6 +836,7 @@ impl AppState {
             db: Mutex::new(db),
             ui_session_secret,
             ui_session_ttl,
+            prefill: Arc::default(),
             config,
         }
     }
@@ -1102,6 +1117,7 @@ async fn basic_auth(State(state): Shared, mut req: Request, next: Next) -> Respo
 const PAGE_DASHBOARD: &str = "/";
 const PAGE_DHCP: &str = "/dhcp";
 const PAGE_CACHEHAMSTER: &str = "/cachehamster";
+const ROUTE_PREFILL: &str = "/cachehamster/prefill";
 const PAGE_DOMAINS: &str = "/domains";
 const PAGE_STATS: &str = "/stats";
 const PAGE_LOGS: &str = "/logs";
@@ -1224,7 +1240,7 @@ fn page_ctx(headers: &HeaderMap, active: &str) -> Context {
     // What: each route path from its one Rust owner.
     // Why: forms and scripts follow the router path.
     // From: Issue #1683 | PR #1912
-    const ROUTES: [(&str, &str); 44] = [
+    const ROUTES: [(&str, &str); 45] = [
         ("health", ROUTE_HEALTH),
         ("secondary_register", ROUTE_SECONDARY_REGISTER),
         ("favicon", ROUTE_FAVICON),
@@ -1256,6 +1272,7 @@ fn page_ctx(headers: &HeaderMap, active: &str) -> Context {
         ("zone_rollback", ROUTE_ZONE_ROLLBACK),
         ("logs_settings", ROUTE_LOGS_SETTINGS),
         ("logs_forward", ROUTE_LOGS_FORWARD),
+        ("prefill", ROUTE_PREFILL),
         ("setup_update", ROUTE_SETUP_UPDATE),
         ("password", ROUTE_PASSWORD),
         ("restart_ui", ROUTE_RESTART_UI),
@@ -1340,6 +1357,11 @@ struct ErrorArea {
 // What: the error-page areas of HtmlError.
 // Why: each area names its title and back link.
 // From: Issue #1683 | PR #1858
+const PREFILL_AREA: ErrorArea = ErrorArea {
+    title: "Prefill Error",
+    href: PAGE_CACHEHAMSTER,
+    back: "Return to Steam",
+};
 const CACHE_AREA: ErrorArea = ErrorArea {
     title: "Cache Resize Error",
     href: PAGE_DASHBOARD,
@@ -6456,15 +6478,106 @@ async fn resize_cache(State(state): Shared, Form(f): Form<Fields>) -> Result<Red
     Ok(Redirect::to(PAGE_DASHBOARD))
 }
 
-// What: the CacheHamster page for game-platform prefill.
-// Why: the mockup places prefill under Gaming, not NTP.
-// From: Issue #816 | PR #1858
+// What: the CacheHamster page with the prefill state.
+// Why: the form posts addresses; counters show progress.
+// From: Issue #816 | PR #1976
 async fn cachehamster_page(State(state): Shared, headers: HeaderMap) -> Response {
-    render(
-        &state,
-        "cachehamster.html",
-        &page_ctx(&headers, "cachehamster"),
-    )
+    let run = &state.prefill;
+    let mut ctx = page_ctx(&headers, "cachehamster");
+    ctx.insert("prefill_running", &run.running.load(Ordering::Relaxed));
+    ctx.insert("prefill_total", &run.total.load(Ordering::Relaxed));
+    ctx.insert("prefill_done", &run.done.load(Ordering::Relaxed));
+    ctx.insert("prefill_failed", &run.failed.load(Ordering::Relaxed));
+    ctx.insert(
+        "prefill_mb",
+        &(run.bytes.load(Ordering::Relaxed) / 1_000_000),
+    );
+    render(&state, "cachehamster.html", &ctx)
+}
+
+// What: one address read through the proxy, bytes dropped.
+// Why: the proxy keeps the bytes; Host names the site.
+// From: Issue #816 | PR #1976
+async fn prefill_one(
+    client: &reqwest::Client,
+    proxy: &reqwest::Url,
+    target: &reqwest::Url,
+    run: &PrefillRun,
+) -> Result<(), reqwest::Error> {
+    let mut via = proxy.clone();
+    via.set_path(target.path());
+    via.set_query(target.query());
+    let host = match target.port() {
+        Some(port) => format!("{}:{port}", target.host_str().unwrap_or_default()),
+        None => target.host_str().unwrap_or_default().to_string(),
+    };
+    let mut body = client
+        .get(via)
+        .header(reqwest::header::HOST, host)
+        .send()
+        .await?
+        .error_for_status()?
+        .bytes_stream();
+    while let Some(chunk) = body.next().await {
+        run.bytes.fetch_add(chunk?.len() as u64, Ordering::Relaxed);
+    }
+    Ok(())
+}
+
+// What: start a prefill of the listed http addresses.
+// Why: one run at a time; the proxy caches what it reads.
+// From: Issue #816 | PR #1976
+async fn start_prefill(State(state): Shared, Form(f): Form<Fields>) -> Result<Redirect, HtmlError> {
+    let area = &PREFILL_AREA;
+    let bad = |message: &str| HtmlError::new(StatusCode::BAD_REQUEST, area, message);
+    let targets: Vec<reqwest::Url> = f
+        .get("urls")
+        .split_whitespace()
+        .map(|raw| {
+            reqwest::Url::parse(raw)
+                .ok()
+                .filter(|u| u.scheme() == "http" && u.host_str().is_some())
+                .ok_or_else(|| bad("Each address must be a full http:// address."))
+        })
+        .collect::<Result<_, _>>()?;
+    if targets.is_empty() {
+        return Err(bad("Enter at least one address."));
+    }
+    if targets.len() > 200 {
+        return Err(bad("At most 200 addresses per run."));
+    }
+    let mut proxy = reqwest::Url::parse(&state.config.proxy_status_url)
+        .ok()
+        .ok_or_else(|| bad("The proxy address is not configured."))?;
+    proxy
+        .set_port(Some(state.config.http_port))
+        .map_err(|()| bad("The proxy address cannot take a port."))?;
+    let run = Arc::clone(&state.prefill);
+    if run.running.swap(true, Ordering::AcqRel) {
+        return Err(HtmlError::new(
+            StatusCode::CONFLICT,
+            area,
+            "A prefill is already running.",
+        ));
+    }
+    run.total.store(targets.len() as u64, Ordering::Relaxed);
+    for counter in [&run.done, &run.failed, &run.bytes] {
+        counter.store(0, Ordering::Relaxed);
+    }
+    let client = state.http_client.clone();
+    tokio::spawn(async move {
+        for target in &targets {
+            match prefill_one(&client, &proxy, target, &run).await {
+                Ok(()) => run.done.fetch_add(1, Ordering::Relaxed),
+                Err(e) => {
+                    tracing::error!(%target, error = %e, "prefill fetch failed");
+                    run.failed.fetch_add(1, Ordering::Relaxed)
+                }
+            };
+        }
+        run.running.store(false, Ordering::Release);
+    });
+    Ok(Redirect::to(PAGE_CACHEHAMSTER))
 }
 
 // What: normalize the upstream NTP list to spaces.
@@ -7147,6 +7260,7 @@ fn router(state: Arc<AppState>) -> Router {
         (PAGE_STATS, get(stats_page)),
         (PAGE_LOGS, get(logs_page)),
         (ROUTE_LOGS_SETTINGS, post(update_logging_settings)),
+        (ROUTE_PREFILL, post(start_prefill)),
         (ROUTE_LOGS_FORWARD, post(update_syslog_forward)),
         (PAGE_SETUP, get(setup_page)),
         (ROUTE_SETUP_UPDATE, post(update_stack_settings)),

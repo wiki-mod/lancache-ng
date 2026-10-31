@@ -22,6 +22,24 @@
   </div>
 
   <div class="subtab5-panel active" data-ch-panel="overview">
+    <div class="section-title" style="margin-top:0;">Warm addresses</div>
+    <p class="section-sub">One http:// address per line. The proxy downloads each one and keeps it in the cache; nothing is stored here.</p>
+    <form action="{{ routes.prefill | safe }}" method="post">
+      {{ <csrf_field csrf_token={csrf_token}/> }}
+      <div class="field">
+        <label for="prefill-urls">Addresses</label>
+        <textarea id="prefill-urls" name="urls" rows="5" placeholder="http://deb.debian.org/debian/pool/main/m/mesa/mesa_26.1.5.orig.tar.xz" required style="width:100%; padding:9px 11px; border-radius:8px; border:1px solid var(--navy-600); background:var(--navy-900); color:var(--foam); font-family:var(--font-mono); font-size:13px;"></textarea>
+      </div>
+      <button type="submit" class="btn" {% if prefill_running %}disabled{% endif %}>Warm cache</button>
+    </form>
+    {% if prefill_total > 0 %}
+    <p class="status-line" style="margin-top:14px;">
+      <span class="beam-light {% if prefill_running %}on{% else %}off{% endif %}"></span>
+      {% if prefill_running %}Running{% else %}Last run finished{% endif %}:
+      {{ prefill_done }} of {{ prefill_total }} done, {{ prefill_failed }} failed, {{ prefill_mb }} MB read.
+      {% if prefill_running %}<a href="" style="margin-left:8px;">Refresh</a>{% endif %}
+    </p>
+    {% endif %}
     <div class="placeholder-panel">
       <div class="ph-tag">Placeholder</div>
       <div class="glyph">⇓</div>
