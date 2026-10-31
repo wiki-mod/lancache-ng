@@ -376,10 +376,21 @@ fn disk_info(dir: &Path, warn_pct: u32, alarm_pct: u32) -> DiskHealth {
     let unknown = DiskHealth {
         pct: 0,
         status: "unknown".to_string(),
+        used_bytes: 0,
     };
     if !dir_present(dir) {
         return unknown;
     }
+    // What: sum of the cache file sizes; 0 if unread.
+    // Why: watchdog may read nginx's 0700 cache dirs.
+    // From: Issue #1683 | PR #1858
+    let used_bytes = match files_under(dir) {
+        Ok(files) => files.iter().map(|(_, meta)| meta.len()).sum(),
+        Err(e) => {
+            log_err(&format!("WARNING: cache size unknown: {e}"));
+            0
+        }
+    };
     // What: a failed df is unknown, logged with its cause.
     // Why: "unknown" alone does not say what went wrong.
     // From: Issue #1683 | PR #1912
@@ -387,6 +398,7 @@ fn disk_info(dir: &Path, warn_pct: u32, alarm_pct: u32) -> DiskHealth {
         Ok(d) => DiskHealth {
             pct: d.used_pct,
             status: disk_status(d.used_pct, warn_pct, alarm_pct).to_string(),
+            used_bytes,
         },
         Err(e) => {
             log_err(&format!("WARNING: cache disk use unknown: {e}"));
