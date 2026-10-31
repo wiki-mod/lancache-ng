@@ -299,11 +299,11 @@ checks below need a real LAN.
   HTTP-mode HTTPS — there is nothing to observe.
 - HTTPS/MITM-mode intercepted HTTPS **is** cached (confirmed live: a real MISS-then-HIT with
   byte-identical bodies, same as the HTTP case above) — nginx genuinely terminates TLS here,
-  so the request reaches the normal HTTP proxy/cache layer. Confirmed also that the cache is
-  shared across all three reachable paths (HTTP-mode HTTP, HTTPS/MITM HTTP, HTTPS/MITM
-  HTTPS) since the cache key is `$host$uri` regardless of scheme or which mode's listener
-  received the request — a request already cached via one path can come back as an
-  immediate HIT via a different path for the same host+URI.
+  so the request reaches the normal HTTP proxy/cache layer. HTTP-mode HTTP and HTTPS/MITM
+  HTTP share one cache key (`$host$uri`), so a request cached via one of them comes back as
+  an immediate HIT via the other. HTTPS/MITM HTTPS keys carry an `https:` prefix
+  (`$cache_scheme`): the origin is fetched with the client's scheme, and an object fetched
+  over plain HTTP must never answer an HTTPS client.
 
 ### 5. NATS — secondary lifecycle
 

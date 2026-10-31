@@ -171,7 +171,7 @@ injects malicious content that the proxy caches and serves to every client.
 **Likelihood**: Low · **Impact**: High
 
 **Mitigations**:
-- The proxy fetches origins over TLS with `proxy_ssl_verify on` and the container's system CA
+- The proxy fetches HTTPS-mode origins over TLS with `proxy_ssl_verify on` and the container's system CA
   bundle (`proxy_ssl_trusted_certificate`, `/etc/ssl/certs/ca-certificates.crt` on
   this service's current Alpine base, issue #815 -- the same path the prior
   Debian base also used); see also T8.
@@ -179,7 +179,8 @@ injects malicious content that the proxy caches and serves to every client.
   never the LAN spoof DNS — the supervisor's nginx render (`nginx` in
   `services/watchdog/src/main.rs`) refuses to start nginx if the resolver names a
   LanCache IP, preventing a resolve-to-self loop.
-- Cache key is `$host$uri` (query-string signatures stripped), so a per-request
+- Cache key is `$host$uri`, with an `https:` prefix for HTTPS clients
+  (query-string signatures stripped), so a per-request
   signature cannot be used to smuggle a distinct poisoned object under a shared
   key without also passing origin validation.
 
@@ -512,7 +513,7 @@ the cache.
 **Likelihood**: Low · **Impact**: High
 
 **Mitigations**:
-- `proxy_ssl_verify on` with the container's system CA bundle for all origin connections.
+- `proxy_ssl_verify on` with the container's system CA bundle for every HTTPS origin connection; HTTP clients fetch over HTTP.
 - Origin names resolve via real upstream DNS, never the spoof DNS (see T1).
 
 **Residual risk**: Medium — verification reduces MITM risk but cannot stop a real
