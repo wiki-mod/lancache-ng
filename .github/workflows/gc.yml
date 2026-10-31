@@ -8,11 +8,19 @@
 name: CI 2.0 GC
 on:
   # What: GC every 3 hours, at minute 43.
-  # Why: maintainer 24.10.: GC every 3-4 hours.
+  # Why: stale refs and images are freed every 3-4 h.
   # From: Issue #1683 | PR #1858
   schedule:
     - cron: "43 */3 * * *"
+  # What: hand start; deletes only with apply=true.
+  # Why: a hand start is a dry run unless asked (Fund 62).
+  # From: Issue #1683 | PR #1858
   workflow_dispatch:
+    inputs:
+      apply:
+        description: "delete for real; default is a dry run"
+        type: boolean
+        default: false
 permissions:
   contents: read
   packages: read
@@ -28,13 +36,28 @@ defaults:
 env:
   GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   # What: LAN proxy CA secret; ci.sh uses it self-hosted.
-  # Why: secrets are not in CI_VARIABLES; vars are.
+  # Why: a secret is masked; ci.sh reads it by name.
   # From: Issue #1683 | PR #1858
   PROJECT_SELFHOSTED_PROXY_CA: ${{ secrets.PROJECT_SELFHOSTED_PROXY_CA }}
-  # What: all repo/org variables once, as json, for ci.sh.
-  # Why: ci.sh reads vars by name; YAML lists none of them.
+  # What: the repo variables ci.sh reads, one by name.
+  # Why: Fund 94: the all-vars json put LAN IPs in logs.
   # From: Issue #1683 | PR #1858
-  CI_VARIABLES: ${{ toJSON(vars) }}
+  CARGO_BUILD_JOBS: ${{ vars.CARGO_BUILD_JOBS }}
+  PROJECT_CARGO_LTO: ${{ vars.PROJECT_CARGO_LTO }}
+  PROJECT_CARGO_CODEGENUNIT: ${{ vars.PROJECT_CARGO_CODEGENUNIT }}
+  PROJECT_NIGHTLY_REF: ${{ vars.PROJECT_NIGHTLY_REF }}
+  PROJECT_SELFHOSTED_RUNNER_USAGE_CI: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI }}
+  SCCACHE_REDIS_MODE: ${{ vars.SCCACHE_REDIS_MODE }}
+  CI_RUST_VALIDATION: ${{ vars.CI_RUST_VALIDATION }}
+  PR_TITLE_LINT_MODE: ${{ vars.PR_TITLE_LINT_MODE }}
+  # What: LAN values only when self-hosted runners run.
+  # Why: a GitHub-hosted log must show no LAN address.
+  # From: Issue #1683 | PR #1858
+  PROJECT_SELFHOSTED_PROXY_HTTP: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && vars.PROJECT_SELFHOSTED_PROXY_HTTP || '' }}
+  PROJECT_SELFHOSTED_PROXY_HTTPS: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && vars.PROJECT_SELFHOSTED_PROXY_HTTPS || '' }}
+  PROJECT_SELFHOSTED_PROXY_EXCLUSION: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && vars.PROJECT_SELFHOSTED_PROXY_EXCLUSION || '' }}
+  SCCACHE_DIST_SCHEDULER_URL: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && vars.SCCACHE_DIST_SCHEDULER_URL || '' }}
+  DISTCC_POTENTIAL_HOSTS: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && vars.DISTCC_POTENTIAL_HOSTS || '' }}
 jobs:
   # What: resolve the build-tools channel to a digest.
   # Why: gc runs in build-tools, never on the runner.
@@ -96,19 +119,21 @@ jobs:
     steps:
       - *bootstrap
       # What: delete only unreachable artifacts (§97).
-      # Why: SQLite is candidate-only; delete needs the PAT.
+      # Why: protected roots decide; delete needs the PAT.
       # From: Issue #1683
       - name: Reap unreachable GHCR artifacts
         env:
           GH_TOKEN: ${{ secrets.GHCR_PACKAGE_DELETE_PAT }}
+          GC_APPLY: ${{ inputs.apply }}
         run: bash .github/scripts/ci.sh gc --apply
-      # What: delete green run refs of closed PRs.
-      # Why: one ref per PR stays after merge otherwise.
+      # What: delete green refs of closed PRs, ended locks.
+      # Why: nothing else deletes them after the run ends.
       # From: Issue #1683 | PR #1858
-      - name: Delete green run refs of closed PRs
+      - name: Delete green refs of closed PRs and ended locks
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: bash .github/scripts/ci.sh gc-green-refs --apply
+          GC_APPLY: ${{ inputs.apply }}
+        run: bash .github/scripts/ci.sh gc-refs --apply
 
   # What: AG-GH-017 sweep for branches with no PR or issue.
   # Why: reachability of refs; read-only repo token only.

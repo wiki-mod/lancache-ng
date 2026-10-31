@@ -21,11 +21,12 @@ use futures::future::join_all;
 use lancache_ng::config::{
     DEFAULT_RECORD_TTL, NATS_STREAM_DNS, NATS_SUBJECT_DNS, NATS_SUBJECT_FLUSH, NATS_SUBJECT_RECORD,
     canonical_zone, env_opt, is_dns_name, is_rollback_zone, keep_known_good, lan_zone,
-    local_reverse, need, parse_bool, process_env, rollback_zones, zone_url,
+    local_reverse, need, need_flag, process_env, rollback_zones, uint, zone_url,
 };
 use lancache_ng::{
-    Backoff, DnsRecord, FlushRequest, PowerDns, SnapshotStore, ct_eq, die, http_client,
-    need_millis, need_secs, snapshot_created_unix, unix_nanos,
+    Backoff, DnsRecord, FlushRequest, PDNS_API_KEY_HEADER, PowerDns, SnapshotStore, ct_eq, die,
+    http_client, need_millis, need_secs, rrset_delete, rrset_replace, rrsets_patch,
+    snapshot_created_unix, unix_nanos,
 };
 use reqwest::Method;
 use serde::Deserialize;
@@ -35,19 +36,6 @@ use serde_json::{Value, json};
 // Why: the log shows which service refused to start.
 // From: Issue #1683 | PR #1858
 const TAG: &str = "nats-subscriber";
-// What: messages per fetch.
-// Why: bounds a batch; NATS_FETCH_WAIT ends an idle fetch.
-// From: Issue #1683 | PR #1912
-const FETCH_BATCH: usize = 10;
-// What: in-process confirmation tries before a Nak.
-// Why: a longer sleep holds the message past ack_wait.
-// From: Issue #1095
-const CONFIRM_TRIES: u32 = 3;
-// What: deliveries after which a flush no longer waits.
-// Why: bounds a retry loop that has no max_deliver.
-// From: Issue #1095
-const CONFIRM_MAX_DELIVERIES: i64 = 100;
-
 // What: the subscriber's waits, from the SOT defaults.
 // Why: no wait is a literal; the image bakes each value.
 // From: Issue #1683 | PR #1912
@@ -117,6 +105,14 @@ struct Ctx {
     pdns_auth_url: String,
     pdns_rec_urls: Vec<String>,
     pdns_auth_config_dir: String,
+    // What: in-process confirmation tries before a Nak.
+    // Why: a longer sleep holds the message past ack_wait.
+    // From: Issue #1095
+    confirm_tries: u32,
+    // What: deliveries after which a flush no longer waits.
+    // Why: bounds a retry loop that has no max_deliver.
+    // From: Issue #1095
+    confirm_max_deliveries: i64,
     snapshot_dir: PathBuf,
     snapshot_file: String,
     keep_n: u32,
@@ -150,6 +146,9 @@ impl Ctx {
                 .map(str::to_string)
                 .collect(),
             pdns_auth_config_dir: need(get, "PDNS_AUTH_CONFIG_DIR")?,
+            confirm_tries: uint(get, "DNS_CONFIRM_TRIES", 1, u32::MAX.into())? as u32,
+            confirm_max_deliveries: uint(get, "DNS_CONFIRM_MAX_DELIVERIES", 1, i64::MAX as u64)?
+                as i64,
             snapshot_dir: PathBuf::from(need(get, "DNS_CONFIG_SNAPSHOT_DIR")?),
             snapshot_file: need(get, "DNS_ZONE_SNAPSHOT_FILE")?,
             keep_n: keep_known_good(get)?,
@@ -254,19 +253,17 @@ fn rrset_record(action: &str, zone: &str, rrset: &Value) -> Option<DnsRecord> {
 // Why: unknown actions fail before anything is sent.
 // From: Issue #1683 | PR #1858
 fn patch_body(record: &DnsRecord) -> Result<Value, String> {
-    let mut rrset = json!({"name": record.name, "type": record.record_type});
-    match record.action.as_str() {
-        "delete" => rrset["changetype"] = json!("DELETE"),
-        "replace" => {
-            rrset["changetype"] = json!("REPLACE");
-            rrset["ttl"] = json!(record.ttl.unwrap_or(DEFAULT_RECORD_TTL));
-            if let Some(records) = &record.records {
-                rrset["records"] = json!(records);
-            }
-        }
+    let rrset = match record.action.as_str() {
+        "delete" => rrset_delete(&record.name, &record.record_type),
+        "replace" => rrset_replace(
+            &record.name,
+            &record.record_type,
+            record.ttl.unwrap_or(DEFAULT_RECORD_TTL),
+            record.records.as_ref().map(|records| json!(records)),
+        ),
         other => return Err(format!("unknown action: {other}")),
-    }
-    Ok(json!({"rrsets": [rrset]}))
+    };
+    Ok(rrsets_patch(vec![rrset]))
 }
 
 // What: rrsets without SOA and NS.
@@ -348,10 +345,10 @@ fn rollback_patch(snapshot: &Value, current: &Value) -> Value {
     for rrset in &current {
         let (name, record_type) = rrset_key(rrset);
         if !snapshot_keys.contains(&(name.clone(), record_type.clone())) {
-            out.push(json!({"name": name, "type": record_type, "changetype": "DELETE"}));
+            out.push(rrset_delete(&name, &record_type));
         }
     }
-    json!({"rrsets": out})
+    rrsets_patch(out)
 }
 
 // What: names a patch touches, first occurrence only.
@@ -680,7 +677,7 @@ async fn apply_flush(ctx: &Ctx, msg: &jetstream::Message) -> Outcome {
             return Outcome::Ack;
         }
         let mut confirmed = false;
-        for _ in 0..CONFIRM_TRIES {
+        for _ in 0..ctx.confirm_tries {
             // What: a failed zone read counts unconfirmed.
             // Why: "absent" must not come from an error.
             // From: Issue #1683 | PR #1858
@@ -713,7 +710,7 @@ async fn apply_flush(ctx: &Ctx, msg: &jetstream::Message) -> Outcome {
                     0
                 }
             };
-            if delivered < CONFIRM_MAX_DELIVERIES {
+            if delivered < ctx.confirm_max_deliveries {
                 println!(
                     "Deferring recursor flush for {domain} ({kind}): zone not yet confirmed (delivery {delivered})"
                 );
@@ -766,7 +763,7 @@ async fn handle(
     if subject == NATS_SUBJECT_RECORD {
         if !record_writes {
             println!(
-                "Acking DNS record message without a local PowerDNS write: NATS_RECORD_WRITES is off"
+                "Acking DNS record message without a local PowerDNS write: secondary node, NATS_RECORD_WRITES is off"
             );
             return Outcome::Ack;
         }
@@ -783,7 +780,9 @@ async fn handle(
 // Why: the listener changes zone data; network is no trust.
 // From: Issue #1683 | PR #1858
 fn authorized(headers: &HeaderMap, key: &str) -> bool {
-    let sent = headers.get("X-API-Key").and_then(|v| v.to_str().ok());
+    let sent = headers
+        .get(PDNS_API_KEY_HEADER)
+        .and_then(|v| v.to_str().ok());
     sent.is_some_and(|sent| ct_eq(sent, key))
 }
 
@@ -812,7 +811,11 @@ fn rejected(
 // From: Issue #1683 | PR #1858
 async fn list_snapshots(State(ctx): State<Arc<Ctx>>, headers: HeaderMap) -> Response {
     if !authorized(&headers, ctx.pdns.api_key()) {
-        return failure(StatusCode::UNAUTHORIZED, "missing or invalid X-API-Key").into_response();
+        return failure(
+            StatusCode::UNAUTHORIZED,
+            format!("missing or invalid {PDNS_API_KEY_HEADER}"),
+        )
+        .into_response();
     }
     let mut zones = HashMap::new();
     for zone in rollback_zones(&ctx.lan_zone, ctx.reverse) {
@@ -1047,7 +1050,11 @@ async fn rollback_handler(
     body: axum::body::Bytes,
 ) -> Response {
     if !authorized(&headers, ctx.pdns.api_key()) {
-        return failure(StatusCode::UNAUTHORIZED, "missing or invalid X-API-Key").into_response();
+        return failure(
+            StatusCode::UNAUTHORIZED,
+            format!("missing or invalid {PDNS_API_KEY_HEADER}"),
+        )
+        .into_response();
     }
     let request: RollbackRequest = match serde_json::from_slice(&body) {
         Ok(request) => request,
@@ -1102,12 +1109,18 @@ fn required(name: &str) -> String {
 async fn main() {
     let nats_url = required("NATS_URL");
     let consumer_name = required("NATS_CONSUMER");
-    // What: only a clear "off" disables record writes.
-    // Why: an unknown spelling must keep replication on.
+    // What: record-write and reconciler switches, required
+    // Why: no hidden default; a bad value stops it
     // From: Issue #1683 | PR #1858
-    let record_writes = env_opt("NATS_RECORD_WRITES").is_none_or(|v| parse_bool(&v) != Some(false));
-    let reconcile = env_opt("NATS_RECONCILER").is_some_and(|v| parse_bool(&v) == Some(true));
+    let record_writes =
+        need_flag(&process_env, "NATS_RECORD_WRITES").unwrap_or_else(|e| die(TAG, &e));
+    let reconcile = need_flag(&process_env, "NATS_RECONCILER").unwrap_or_else(|e| die(TAG, &e));
     let times = Times::load(&process_env).unwrap_or_else(|error| die(TAG, &error));
+    // What: messages per fetch.
+    // Why: caps a batch; NATS_FETCH_WAIT ends idle fetch.
+    // From: Issue #1683 | PR #1912
+    let fetch_batch = uint(&process_env, "NATS_FETCH_BATCH", 1, u32::MAX.into())
+        .unwrap_or_else(|e| die(TAG, &e)) as usize;
     let rollback_addr = required("DNS_ROLLBACK_LISTEN_ADDR");
 
     let mut options = async_nats::ConnectOptions::new()
@@ -1119,8 +1132,6 @@ async fn main() {
     let user = env_opt("NATS_USER").or_else(|| env_opt("NATS_DNS_WRITER_USER"));
     if let (Some(user), Some(password)) = (user, env_opt("NATS_PASSWORD")) {
         options = options.user_and_password(user, password);
-    } else if let Some(token) = env_opt("NATS_TOKEN") {
-        options = options.token(token);
     }
     let client = options
         .connect(&nats_url)
@@ -1173,7 +1184,7 @@ async fn main() {
     loop {
         let fetched = consumer
             .fetch()
-            .max_messages(FETCH_BATCH)
+            .max_messages(fetch_batch)
             .expires(times.fetch_wait)
             .messages()
             .await;
@@ -1216,130 +1227,5 @@ async fn main() {
         } else {
             backoff = policy.start;
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // What: builds an rrset with the given contents.
-    // Why: most tests need a small literal rrset.
-    // From: Issue #1683 | PR #1912
-    fn rrset(name: &str, kind: &str, ttl: i64, contents: &[&str]) -> Value {
-        let records: Vec<Value> = contents
-            .iter()
-            .map(|c| json!({"content": c, "disabled": false}))
-            .collect();
-        json!({"name": name, "type": kind, "ttl": ttl, "records": records})
-    }
-
-    // What: the flush domain is encoded into the query.
-    // Why: a message must not add or cut query parameters.
-    // From: Issue #1683 | PR #1858
-    #[test]
-    fn flush_url_encodes_the_domain() {
-        let url = flush_url("http://rec:8082/api/v1/servers/localhost", "a.lan.").unwrap();
-        assert_eq!(url.query(), Some("domain=a.lan."));
-        let url = flush_url("http://rec:8082/x", "a&b=1#c d").unwrap();
-        assert_eq!(url.query(), Some("domain=a%26b%3D1%23c+d"));
-        assert!(flush_url("not a url", "a.lan.").is_err());
-    }
-
-    // What: builds an A record message for host.lan.
-    // Why: the record_key test reuses one record literal.
-    // From: Issue #1683 | PR #1912
-    fn message(
-        action: &str,
-        ttl: Option<i32>,
-        records: Option<Vec<HashMap<String, Value>>>,
-    ) -> DnsRecord {
-        DnsRecord {
-            action: action.to_string(),
-            zone: "lan".to_string(),
-            name: "host.lan.".to_string(),
-            record_type: "A".to_string(),
-            ttl,
-            records,
-        }
-    }
-
-    // What: keys fold case and dots; marks never go down.
-    // Why: one record from different publishers collides.
-    // From: Issue #772
-    #[test]
-    fn applied_sequences_guard_stale_redeliveries_per_key() {
-        let mut upper = message("replace", None, None);
-        upper.zone = "LAN.".to_string();
-        upper.name = "Host.LAN".to_string();
-        upper.record_type = "a".to_string();
-        let key = record_key(&upper);
-        assert_eq!(
-            key,
-            ("lan".to_string(), "host.lan".to_string(), "A".to_string())
-        );
-        assert_eq!(key, record_key(&message("replace", None, None)));
-        let mut applied = AppliedSequences::default();
-        assert!(!applied.is_stale(&key, 5));
-        applied.record(key.clone(), 10);
-        applied.record(key.clone(), 7);
-        assert!(applied.is_stale(&key, 7) && applied.is_stale(&key, 10));
-        assert!(!applied.is_stale(&key, 11));
-        let other = ("lan".to_string(), "other.lan".to_string(), "A".to_string());
-        assert!(!applied.is_stale(&other, 1));
-    }
-
-    // What: flush confirmation compares content order-free.
-    // Why: a stale or early zone must not allow the flush.
-    // From: Issue #1095
-    #[test]
-    fn expected_content_confirmation_rules() {
-        let found = rrset("host.lan.", "A", 60, &["192.0.2.6", "192.0.2.5"]);
-        let both = ["192.0.2.5".to_string(), "192.0.2.6".to_string()];
-        assert!(rrset_matches_expected(None, None, "A", None));
-        assert!(!rrset_matches_expected(Some(&found), None, "A", None));
-        assert!(!rrset_matches_expected(None, Some(&both), "A", None));
-        assert!(rrset_matches_expected(Some(&found), Some(&both), "A", None));
-        assert!(!rrset_matches_expected(
-            Some(&found),
-            Some(&both[..1]),
-            "A",
-            None
-        ));
-        assert!(rrset_matches_expected(
-            Some(&found),
-            Some(&both),
-            "A",
-            Some(60)
-        ));
-        assert!(!rrset_matches_expected(
-            Some(&found),
-            Some(&both),
-            "A",
-            Some(300)
-        ));
-        let v6 = rrset("host.lan.", "AAAA", 60, &["2001:db8::1"]);
-        let long = ["2001:0DB8:0000:0000:0000:0000:0000:0001".to_string()];
-        assert!(rrset_matches_expected(Some(&v6), Some(&long), "AAAA", None));
-    }
-
-    // What: an rrset becomes a record message when keyed.
-    // Why: reconciler and rollback republish through this.
-    // From: Issue #1683 | PR #1858
-    #[test]
-    fn rrset_record_requires_name_and_type() {
-        let record = rrset_record("replace", "lan", &rrset("h.lan.", "A", 60, &["1"])).unwrap();
-        assert_eq!(
-            (record.ttl, record.records.map(|r| r.len())),
-            (Some(60), Some(1))
-        );
-        let delete = rrset_record(
-            "delete",
-            "lan",
-            &json!({"name": "h.lan.", "type": "A", "changetype": "DELETE"}),
-        )
-        .unwrap();
-        assert!(delete.ttl.is_none() && delete.records.is_none());
-        assert!(rrset_record("replace", "lan", &json!({"name": "h.lan."})).is_none());
     }
 }

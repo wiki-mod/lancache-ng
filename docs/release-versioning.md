@@ -38,11 +38,13 @@ and docs must stay consistent with it.
 | Channel | Meaning | Mutability | Intended use |
 | --- | --- | --- | --- |
 | `sha-<commit>` | Immutable tag for a source commit, always the full 40-hex SHA (`release.tag_commit`; `setup.sh` rejects a short SHA) | Immutable | Debugging, rollback, provenance, and promotion source |
-| `nightly` | Tested pre-stable integration channel, moved by `nightly.yml` (schedule `23 3 * * *` plus dispatch) to the accepted `current_dev` stack after `validate`; never rebuilt | Mutable | Operators who explicitly opt into pre-stable builds |
+| `nightly` | Experimental integration channel from `current_dev`, moved by `nightly.yml` (schedule `23 3 * * *` plus dispatch) to the accepted `current_dev` stack after `validate`; never rebuilt; may break, not for production | Mutable | Operators who explicitly opt in (warned on install and update) |
 | `vX.Y.Z-rc.N` | Release candidate | Immutable | Pre-release validation; GitHub release must be marked prerelease |
-| `vX.Y.Z` | Stable release | Immutable | Production release pinning |
-| `latest` | Latest stable release, published continuously from `master` | Mutable | Default stable install path |
-| `stable` | Operator-facing name for the same channel `latest` publishes | Mutable | `setup.sh`'s interactive channel picker (#819); no separate `stable` GHCR tag exists -- `stable` is the SOT alias of `latest` (`release.channels.latest.aliases`) and resolves to the same tags |
+| `vX.Y.Z` | Release | Immutable | Production release pinning |
+| `latest` | Channel from `master`; release tags `vX.Y.Z` move it | Mutable | Default install path (SOT `release.install_channel`) |
+
+There are exactly two mutable channels, `latest` and `nightly`. No other
+channel name exists.
 
 `nightly`'s history: renamed from `edge` in v0.3.0 (#1056); re-pointed from
 `master` to `current_dev` in v0.3.0 (#825/#1141); changed from "republished on
@@ -51,8 +53,8 @@ every `current_dev` push" to the once-daily/on-demand model below in
 
 ### Branch/channel model
 
-Decided 2026-07-23 (#825/#1141): "master = stable, current_dev = nightly,
-vY.X.Z = archived release, ganz simpel."
+Decided 2026-07-23 (#825/#1141): `master` = `latest`, `current_dev` =
+`nightly`, `vY.X.Z` = archived release.
 
 - **`master`** publishes `latest` continuously after the required checks
   pass. This is its sole, permanent role, not an exception needing separate
@@ -60,8 +62,8 @@ vY.X.Z = archived release, ganz simpel."
 - **`vY.X.Z` branches** (e.g. `v0.2.0`) are archived release freezes: they
   still take deliberate backports, exactly as before, but publish no live
   channel at all -- nothing tracks them as a rolling install target.
-- **Stable release tags** (`vX.Y.Z`) publish the matching immutable tag and
-  move `latest` (and, being the same pointer, `stable`) to the same digest.
+- **Release tags** (`vX.Y.Z`) publish the matching immutable tag and move
+  `latest` to the same digest.
 
 ### `current_dev` -> `nightly` publishing model
 
@@ -118,7 +120,7 @@ operator to switch to `nightly`, rather than being silently accepted.
   rename precedent above. An install still carrying
   `LANCACHE_IMAGE_CHANNEL=dev` is rejected by `setup.sh` with a clear error
   directing the operator to `nightly` (ongoing development, now from
-  `current_dev`) or `stable`/`latest` (the stable release), rather than
+  `current_dev`) or `latest` (from `master`), rather than
   being silently accepted against an increasingly stale image. `dev` was
   never offered by `setup.sh`'s interactive picker or the Admin UI's channel
   control, so this cut affects only operators who set
@@ -128,30 +130,19 @@ operator to switch to `nightly`, rather than being silently accepted.
 ### Operator-facing channel picker
 
 `setup.sh`'s interactive install flow offers exactly two operator-facing
-channel names: `nightly` (default pre-1.0) and `stable`, each with an inline
-explanation of what it means.
+channel names: `latest` (the default, SOT `release.install_channel`) and
+`nightly` (experimental, with a warning), each with an inline explanation of
+what it means. An older `.env` that names another value for `latest` is
+rewritten to `latest` on update.
 
-- `stable` is not a new GHCR tag -- `setup.sh` maps it onto the `latest`
-  tags before pulling (SOT `release.channels.latest.aliases`), so
-  introducing it required no change to the promotion/release pipeline.
 - `pinned` remains a valid `LANCACHE_IMAGE_CHANNEL` value (env var / `.env`,
   or the secondary-node registration flow) but is not offered by the
   interactive picker -- it is a request for one specific immutable tag, not
   a moving channel choice.
 
-**Pre-1.0 default (#1068).** The picker's default answer and "recommended"
-label were originally on `stable`, matching the plan when this channel was
-introduced (#819) for a project expected to soon cut a stable release. In
-practice, pre-1.0 lasted long enough that this silently walked a new
-operator's "just press enter" choice into a `docker pull` failure
-(no `latest` tag exists yet, and `stable` maps to it). The default and
-recommendation were changed to `nightly` for as long as this project has no
-stable release; `stable` remains a fully valid, non-removed answer --
-choosing it explicitly pre-1.0 still hits `setup.sh`'s clear explanation
-("Cannot resolve the 'stable' release channel") rather than a raw Docker
-error, and it automatically becomes the right default again once a
-real `vX.Y.Z` stable release exists and moves `latest`. The Admin UI's own
-channel selector (`services/ui/src/main.rs` / `setup.html`) needs no
+**Default.** The picker's default answer is `latest`; `nightly` is offered
+only with the experimental warning, shown again on every update. The Admin
+UI's own channel selector (`services/ui/src/main.rs` / `setup.html`) needs no
 equivalent change: it only ever displays and edits an *existing* install's
 already-resolved channel value, so it has no "default a new choice" moment.
 
@@ -201,13 +192,10 @@ Dev/CI accelerators are not part of the install contract.
 
 Default behavior:
 
-- fresh installs use `LANCACHE_IMAGE_CHANNEL=nightly` by default pre-1.0
-  (written by `setup.sh`'s interactive picker's default answer -- see the
-  "Pre-1.0 default" note above); an operator can still explicitly choose
-  `stable` at the same prompt, or set `LANCACHE_IMAGE_CHANNEL=stable`/`latest`
-  directly, once a stable release exists
-- `LANCACHE_IMAGE_CHANNEL=latest` remains valid and resolves identically to
-  `stable` for existing installs and manual overrides
+- fresh installs use `LANCACHE_IMAGE_CHANNEL=latest` by default (SOT
+  `release.install_channel`, the interactive picker's default answer); an
+  operator can explicitly choose `nightly` at the same prompt, which is
+  experimental and not for production and warns on install and update
 - release archives use their matching `vX.Y.Z` or `vX.Y.Z-rc.N` tag
 - `setup.sh update` preserves the selected channel and refreshes the resolved
   `LANCACHE_IMAGE_TAG`
@@ -279,9 +267,9 @@ no-op (`::notice::`, not a failure) rather than guessing a starting version.
 Tags matching `vX.Y.Z-rc.N` are release candidates. They must create or update a
 GitHub prerelease. A release candidate must not move `latest`.
 
-## Stable Releases
+## Releases
 
-Tags matching `vX.Y.Z` are stable releases. They must create or update a normal
+Tags matching `vX.Y.Z` are releases. They must create or update a normal
 GitHub release. They may move `latest` after the full package set has passed the
 release gate.
 

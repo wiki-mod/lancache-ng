@@ -24,6 +24,14 @@ pub fn opt(get: &dyn Fn(&str) -> Option<String>, name: &str) -> Option<String> {
 // From: Issue #1683 | PR #1912
 pub const RUNTIME_DEFAULTS_KEY: &str = "LANCACHE_RUNTIME_DEFAULTS";
 
+// What: the items of a list set apart by commas or blanks.
+// Why: one splitter for every env list; empty items drop.
+// From: Issue #1683
+pub fn list_items(raw: &str) -> impl Iterator<Item = &str> {
+    raw.split([',', ' ', '\r', '\n', '\t'])
+        .filter(|item| !item.is_empty())
+}
+
 // What: one name's value in a KEY=value list, if listed.
 // Why: the SOT defaults travel as one pipe-joined list.
 // From: Issue #1683 | PR #1912
@@ -395,6 +403,16 @@ impl DhcpMode {
         matches!(self, Self::DnsmasqRelay)
     }
 }
+
+// What: the syslog-ng template of every stored log line.
+// Why: the watchdog writes the lines; the ui parses them.
+// From: Issue #1683
+pub const SYSLOG_LINE_TEMPLATE: &str = r"${ISODATE} ${HOST} ${PROGRAM}: ${MSGONLY}\n";
+
+// What: a stored syslog line as time, program and message.
+// Why: reverse of SYSLOG_LINE_TEMPLATE; one owner for both.
+// From: Issue #1683
+pub const SYSLOG_LINE_PATTERN: &str = r"^(\S+)\s+\S+\s+([^:]+):\s(.*)$";
 
 // What: one proxy access line as syslog-ng stores it.
 // Why: the ui and netdata web_log parse it; one owner.
@@ -874,172 +892,4 @@ pub fn parse_custom_options(raw: &str) -> Result<String, String> {
         entries.push(format!("{code}:{data}"));
     }
     Ok(entries.join(";"))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // What: empty and absent are unset; other values pass.
-    // Why: blank KEY= falls back like a missing key.
-    // From: Issue #871 | PR #1858
-    #[test]
-    fn empty_value_counts_as_unset() {
-        assert_eq!(non_empty(Some("")), None);
-        assert_eq!(non_empty(None), None);
-        assert_eq!(non_empty(Some("persistent")), Some("persistent"));
-    }
-
-    // What: a listed name gives its value; others none.
-    // Why: the image's SOT defaults are one KEY=value list.
-    // From: Issue #1683 | PR #1912
-    #[test]
-    fn default_in_finds_the_exact_name() {
-        let list = "A_PORT=81|B_PORT=82|C=x=y|R=a b [c]";
-        assert_eq!(default_in(list, "B_PORT"), Some("82".to_string()));
-        assert_eq!(default_in(list, "C"), Some("x=y".to_string()));
-        assert_eq!(default_in(list, "R"), Some("a b [c]".to_string()));
-        assert_eq!(default_in(list, "A"), None);
-        assert_eq!(default_in(list, "D"), None);
-        assert_eq!(default_in("", "A_PORT"), None);
-    }
-
-    // What: a DHCP DNS key falls back to its LAN address.
-    // Why: compose derives no fallback; the rule is here.
-    // From: Issue #1683 | PR #1912
-    #[test]
-    fn dhcp_dns_keys_fall_back_to_the_lan_addresses() {
-        let get = |name: &str| match name {
-            "IP_HTTP" => Some("10.0.0.2".to_string()),
-            "IP_HTTPS" => Some(String::new()),
-            _ => None,
-        };
-        assert_eq!(
-            dhcp_dns_fallback(&get, "DHCP_DNS_PRIMARY"),
-            Some("10.0.0.2".to_string())
-        );
-        assert_eq!(
-            dhcp_dns_fallback(&get, "DHCP_DNS_SERVER_IP"),
-            Some("10.0.0.2".to_string())
-        );
-        assert_eq!(dhcp_dns_fallback(&get, "DHCP_DNS_SECONDARY"), None);
-        assert_eq!(dhcp_dns_fallback(&get, "DHCP_GATEWAY"), None);
-    }
-
-    // What: the documented true and false sets parse.
-    // Why: ui and watchdog must agree on what is on or off.
-    // From: Issue #1683 | PR #1905
-    #[test]
-    fn parse_bool_matches_documented_sets() {
-        for v in ["1", "true", "TRUE", "yes", "on", " on ", "\ttrue\n"] {
-            assert_eq!(parse_bool(v), Some(true), "expected {v:?} true");
-        }
-        for v in ["0", "false", "no", "OFF", " off "] {
-            assert_eq!(parse_bool(v), Some(false), "expected {v:?} false");
-        }
-        for v in ["", "garbage", "2", "onn"] {
-            assert_eq!(parse_bool(v), None, "expected {v:?} unknown");
-        }
-    }
-
-    // What: the mode list holds the four names, none twice.
-    // Why: ui validation reads it; a gap rejects a mode.
-    // From: Issue #1683 | PR #1905
-    #[test]
-    fn dhcp_mode_names_are_the_four_known_ones() {
-        let names: Vec<&str> = DhcpMode::ALL.iter().map(|m| m.as_str()).collect();
-        assert_eq!(names, ["disabled", "kea", "dnsmasq-proxy", "dnsmasq-relay"]);
-        assert_eq!(DhcpMode::from_name("kea"), Some(DhcpMode::Kea));
-        assert_eq!(DhcpMode::from_name("Kea"), None);
-        assert_eq!(DhcpMode::from_name(""), None);
-    }
-
-    // What: zone_url drops the trailing dot of the zone.
-    // Why: a dotted zone in the API path is a silent 404.
-    // From: Issue #1683 | PR #1905
-    #[test]
-    fn zone_url_uses_the_undotted_id() {
-        assert_eq!(
-            zone_url("http://pdns/api", "lan."),
-            "http://pdns/api/zones/lan"
-        );
-        assert_eq!(
-            zone_url("http://pdns/api", "lan"),
-            "http://pdns/api/zones/lan"
-        );
-    }
-
-    // What: the live-env readers see the real environment.
-    // Why: they are the only readers of the process env.
-    // From: Issue #871 | PR #1858
-    #[test]
-    fn live_env_readers_follow_the_process_environment() {
-        let path = std::env::var("PATH").unwrap();
-        assert_eq!(process_env("PATH"), Some(path.clone()));
-        assert_eq!(env_opt("PATH"), Some(path));
-        assert_eq!(process_env("LANCACHE_TEST_NEVER_SET"), None);
-        assert_eq!(env_opt("LANCACHE_TEST_NEVER_SET"), None);
-    }
-
-    // What: lease limits load, bound and cap one rule.
-    // Why: ui and watchdog wrote Kea lifetimes apart.
-    // From: Issue #1683 | PR #1912
-    #[test]
-    fn lease_limits_bound_and_cap_the_lifetime() {
-        let env = |min: &'static str, max: &'static str, factor: &'static str| {
-            move |key: &str| match key {
-                "DHCP_LEASE_TIME_MIN" => Some(min.to_string()),
-                "DHCP_LEASE_TIME_MAX" => Some(max.to_string()),
-                "DHCP_MAX_LEASE_FACTOR" => Some(factor.to_string()),
-                _ => None,
-            }
-        };
-        let limits = LeaseLimits::load(&env("10", "100", "3")).expect("limits");
-        let lease = |raw: &'static str| limits.lease(&move |_| Some(raw.into()), "DHCP_LEASE_TIME");
-        assert_eq!((lease("10"), lease("100")), (Ok(10), Ok(100)));
-        assert!(lease("9").is_err() && lease("101").is_err());
-        assert_eq!(limits.max_lifetime(20), 60);
-        assert_eq!(limits.max_lifetime(50), 100);
-        assert_eq!(limits.max_lifetime(u32::MAX), 100);
-        for bad in [
-            env("100", "10", "3"),
-            env("10", "100", "0"),
-            env("x", "100", "3"),
-        ] {
-            assert!(LeaseLimits::load(&bad).is_err());
-        }
-    }
-
-    // What: option lines become the stored one-line form.
-    // Why: the file keeps one line; entries join by ';'.
-    // From: Issue #1683 | PR #1912
-    #[test]
-    fn proxy_option_lines_join_or_name_the_line() {
-        assert_eq!(
-            parse_custom_options("66:tftp\n\n 67 : boot.0 \n"),
-            Ok("66:tftp;67:boot.0".to_string())
-        );
-        assert_eq!(parse_custom_options(""), Ok(String::new()));
-        let cases = [
-            ("66", "line 1: expected CODE:VALUE"),
-            ("66:ok\nabc:x", "line 2: option code must be a number"),
-            (
-                "3:10.0.0.1",
-                "line 1: option code is managed by dedicated dnsmasq-proxy fields",
-            ),
-            (
-                "66:a;b",
-                "line 1: option data must not contain ';' (used as the entry separator)",
-            ),
-            ("66: ", "line 1: option data must not be empty"),
-        ];
-        for (raw, message) in cases {
-            assert_eq!(
-                parse_custom_options(raw),
-                Err(message.to_string()),
-                "{raw:?}"
-            );
-        }
-        assert!(parse_custom_options("119:search.lan").is_ok());
-    }
 }

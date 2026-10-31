@@ -50,25 +50,22 @@ ARG CI_CACHE_PREFIX
 ARG CI_CARGO_HOME
 
 WORKDIR /build
-COPY Cargo.toml Cargo.lock ./
-COPY services/dns/nats-subscriber/Cargo.toml services/dns/nats-subscriber/Cargo.toml
-COPY services/ui/Cargo.toml services/ui/Cargo.toml
-COPY services/cachehamster/Cargo.toml services/cachehamster/Cargo.toml
-COPY services/watchdog/Cargo.toml services/watchdog/Cargo.toml
-# What: shared crate manifest and sources, copied whole.
-# Why: real sources before any build; no stale stub rlib.
+# What: mount point of the build context, from the SOT.
+# Why: rust-build reads the tree there; no COPY list.
 # From: Issue #1683 | PR #1858
-COPY services/common services/common
-COPY services/watchdog/src services/watchdog/src
-# What: retry policy for ci.sh, from SOT stage_variables
+ARG CI_RUST_SOURCE_DIR
+# What: retry and download bounds, SOT stage_variables
 # Why: this stage has no SOT; ci.sh reads them from env
 # From: Issue #1683 | PR #1858
 ARG CI_RETRY_MAX_ATTEMPTS
 ARG CI_RETRY_BACKOFF_BASE_SECONDS
+ARG CI_DOWNLOAD_CONNECT_TIMEOUT
+ARG CI_DOWNLOAD_STALL_SECONDS
 # What: ci.sh owns the rust build accel policy (one owner).
 # Why: AG-CI-005/022/023; bind-mounted, never baked in.
 # From: Issue #1683
 RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
+    --mount=type=bind,target=${CI_RUST_SOURCE_DIR},rw \
     --mount=type=secret,id=sccache_redis_url \
     --mount=type=secret,id=sccache_policy \
     --mount=type=secret,id=sccache_gha \
@@ -101,11 +98,13 @@ ARG APK_KEYS
 ARG APK_BOOTSTRAP
 RUN apk add --no-cache ${APK_BOOTSTRAP}
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
-# What: retry policy for ci.sh, from SOT stage_variables
+# What: retry and download bounds, SOT stage_variables
 # Why: this stage has no SOT; ci.sh reads them from env
 # From: Issue #1683 | PR #1858
 ARG CI_RETRY_MAX_ATTEMPTS
 ARG CI_RETRY_BACKOFF_BASE_SECONDS
+ARG CI_DOWNLOAD_CONNECT_TIMEOUT
+ARG CI_DOWNLOAD_STALL_SECONDS
 # What: shared package setup via ci.sh.
 # Why: ci.sh owns repos, keys, proxy CA and apk steps.
 # From: Issue #1683 | PR #1858
@@ -121,16 +120,6 @@ RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
     bash /usr/local/bin/ci.sh image-setup
 
 COPY --from=proxy-builder /build/lancache-watchdog-out /usr/local/bin/lancache-watchdog
-
-# What: static nginx inputs in the dir the SOT names.
-# Why: the supervisor renders from the same NGINX_DIR.
-# From: Issue #1683 | PR #1912
-ARG NGINX_DIR
-COPY services/proxy/nginx.conf ${NGINX_DIR}/nginx.conf.template
-COPY services/proxy/conf.d/http.conf ${NGINX_DIR}/http.conf.template
-COPY services/proxy/conf.d/https.conf ${NGINX_DIR}/https.conf.template
-COPY services/proxy/proxy-params.conf ${NGINX_DIR}/proxy-params.conf.template
-COPY services/proxy/public_suffix_list.dat ${NGINX_DIR}/public_suffix_list.dat
 
 # What: the SOT default values, one pipe-joined list.
 # Why: ci.sh passes the list; binaries read it as env.

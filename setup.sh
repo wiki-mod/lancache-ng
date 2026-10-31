@@ -147,8 +147,15 @@ ask() {
         wizard_introspect_record_prompt "$prompt" "$default"
         return
     fi
+    local tty_fd
+    # What: no terminal stops setup.sh with a clear error
+    # Why: a failed tty read took the default silently
+    # From: Issue #1683 | PR #1858
+    { exec {tty_fd}< /dev/tty; } 2>&- \
+        || die "setup.sh needs a terminal to ask '$prompt'; run it in an interactive shell (for SSH: ssh -t)."
     printf '  %s%s%s [%s]: ' "${BOLD}" "$prompt" "${RESET}" "$default"
-    read -r REPLY < /dev/tty
+    read -r REPLY <&"$tty_fd"
+    exec {tty_fd}<&-
     REPLY="${REPLY:-$default}"
 }
 
@@ -1529,6 +1536,21 @@ env_key_has_usable_secret() {
     ! secret_value_is_placeholder "$value"
 }
 
+# What: output of one SOT generator command, one line
+# Why: runtime.secret_generators; ci.sh runs the same row
+# From: Issue #1683 | PR #1858
+secret_generator_output() {
+    local name="$1" kind="$2" rows row value
+    local -a cmd
+    rows=$(lancache_sot_list secret_generators runtime) || exit $?
+    row=$(awk -v k="$kind" '$1 == k { print; exit }' <<< "$rows") \
+        || die "Failed to read the generator of $kind (exit $?)."
+    [[ -n "$row" ]] || die "Unknown secret generator for $name: $kind"
+    read -ra cmd <<< "${row#"$kind "}"
+    value=$("${cmd[@]}") || die "Failed to generate $name with ${cmd[0]} (exit $?)."
+    printf '%s\n' "${value//$'\n'/}"
+}
+
 # What: generate_secret_value fails on any generator error
 # Why: an empty secret must never be written
 # From: Issue #1683 | PR #1858
@@ -1542,27 +1564,20 @@ generate_secret_value() {
         || die "Secret $name is not in managed_secret_env_keys; add it there so log bundles redact it."
 
     case "$kind" in
-        hex32)
-            value=$(openssl rand -hex 32) \
-                || die "Failed to generate $name with openssl."
-            ;;
-        base64_32)
-            value=$(openssl rand -base64 32) \
-                || die "Failed to generate $name with openssl."
-            value="${value//$'\n'/}"
-            ;;
         alnum20)
+            # What: alnum20: letters, digits of base64_32
+            # Why: a UI password a person can type
+            # From: Issue #1683 | PR #1858
             value=""
             while (( ${#value} < 20 )); do
-                chunk=$(openssl rand -base64 32) \
-                    || die "Failed to generate $name with openssl."
+                chunk=$(secret_generator_output "$name" base64_32) || exit $?
                 chunk="${chunk//[^A-Za-z0-9]/}"
                 value+="$chunk"
             done
             value="${value:0:20}"
             ;;
         *)
-            die "Unknown secret generator for $name: $kind"
+            value=$(secret_generator_output "$name" "$kind") || exit $?
             ;;
     esac
 
@@ -2224,6 +2239,12 @@ migrate_legacy_ca() {
             cp -p -- "$f" "$dest/$to" \
                 || die "Failed to copy $f to $dest/$to (exit $?)."
         fi
+        # What: the serial counter is not compared
+        # Why: the running CA moves it on with each new cert
+        # From: Issue #1683 | PR #1858
+        if [[ "${f##*/}" = ca.srl ]]; then
+            continue
+        fi
         cmp -- "$f" "$dest/$to" \
             || die "Postcondition failed: $dest/$to is not the CA file $f; nothing counts as migrated."
     done
@@ -2243,7 +2264,12 @@ migrate_legacy_ca() {
 resolve_stack_dir() {
     local dir="$1"
     local rel="${PROD_COMPOSE#"$SCRIPT_DIR/"}"
-    if [[ ! -f "$dir/docker-compose.yml" && -f "$dir/$rel" ]]; then
+    # What: <root>/current wins over an old root checkout
+    # Why: after a move, the old code must not run again
+    # From: Issue #1683 | PR #1858
+    if [[ ! -f "$dir/docker-compose.yml" && -f "$dir/current/$rel" ]]; then
+        printf '%s\n' "$dir/current/${rel%/*}"
+    elif [[ ! -f "$dir/docker-compose.yml" && -f "$dir/$rel" ]]; then
         printf '%s\n' "$dir/${rel%/*}"
     else
         printf '%s\n' "$dir"
@@ -2258,21 +2284,85 @@ is_quickstart_install() {
     ! is_deploy_prod_install_dir "$dir" && [[ -f "$dir/docker-compose.yml" && -f "$PROD_COMPOSE" ]]
 }
 
+# What: puts back deleted files the old stack bind-mounts
+# Why: a git pull drops them; the old stack must restart
+# From: Issue #1683 | PR #1858
+restore_quickstart_mounts() {
+    local old_dir="$1" old_env="$2" record="$3" json sources src rel commit entry perms empty_dir inside
+    [[ -e "$old_dir/.git" ]] || return 0
+    install_missing_tools jq
+    json=$(stack_compose "$old_dir" "$old_env" config --format json) \
+        || die "Cannot read the compose config of $old_dir (exit $?); nothing was changed."
+    sources=$(jq -r '.services[].volumes[]? | select(.type == "bind") | .source' <<< "$json") \
+        || die "Cannot list the bind mounts of $old_dir (exit $?); nothing was changed."
+    while IFS= read -r src; do
+        [[ "$src" = "$old_dir"/* ]] || continue
+        # What: an empty dir is missing if git had a file
+        # Why: docker makes a missing mount source a dir
+        # From: Issue #1683 | PR #1858
+        empty_dir=0
+        if [[ -d "$src" && ! -L "$src" ]]; then
+            inside=$(find "$src" -mindepth 1 -maxdepth 1 -print -quit) \
+                || die "Failed to list $src (exit $?)."
+            [[ -z "$inside" ]] || continue
+            empty_dir=1
+        elif [[ -e "$src" ]]; then
+            continue
+        fi
+        rel="${src#"$old_dir"/}"
+        # What: first-parent commit on HEAD that dropped it
+        # Why: its parent holds the copy the old stack used
+        # From: Issue #1683 | PR #1858
+        commit=$(git -C "$old_dir" log -1 --format=%H -m --first-parent --diff-filter=D -- "$rel") \
+            || die "Failed to search the git history of $old_dir for $rel (exit $?)."
+        entry=""
+        if [[ -n "$commit" ]]; then
+            entry=$(git -C "$old_dir" ls-tree "${commit}^" -- "$rel") \
+                || die "Failed to read $rel in ${commit}^ (exit $?)."
+        fi
+        if [[ "$entry" != 100*" blob "* ]]; then
+            [[ "$empty_dir" = 0 ]] || continue
+            die "$src is missing and git has no older file copy; restore it, then rerun setup.sh update. Nothing was changed."
+        fi
+        perms=0644
+        [[ "$entry" != 100755* ]] || perms=0755
+        if [[ "$empty_dir" = 1 ]]; then
+            rmdir -- "$src" || die "Failed to remove the empty dir $src (exit $?)."
+        fi
+        mkdir -p "${src%/*}" || die "Failed to create ${src%/*} (exit $?)."
+        git -C "$old_dir" show "${commit}^:$rel" > "$src" || die "Failed to restore $src from git (exit $?)."
+        chmod "$perms" "$src" || die "Failed to set the mode of $src (exit $?)."
+        printf 'restored|%s\n' "$rel" >> "$record" || die "Failed to record $rel in $record (exit $?)."
+        print_ok "Restored $rel for the old stack from git ${commit}^"
+    done <<< "$sources"
+}
+
 # What: converts a quickstart install into deploy/prod
 # Why: AG-KD-008 one profile; AG-OP-007 convergence
 # From: Issue #1683 | PR #1858
 migrate_quickstart_install() (
     local old_dir="$1" stack_dir="${PROD_COMPOSE%/*}" env_local old_env record project key value volume dir copy f
     local services old_volumes prod_volumes rows missing copies keys old_raw new_raw old_value line path_keys bundle
-    local -a service_list copy_lines
+    local https_ip fresh kept kept_list restored
+    local -a service_list copy_lines path_key_list=()
     path_keys=$(lancache_sot_list quickstart_path_keys runtime) || exit $?
     path_keys="${path_keys//$'\n'/ }"
+    read -ra path_key_list <<< "$path_keys"
     bundle=$(lancache_sot_list quickstart_bundle_copies runtime) || exit $?
     env_local="$stack_dir/.env.local"
     old_env="$old_dir/.env"
     record="$old_dir/.quickstart-migration"
     [[ -f "$old_env" ]] || die "Cannot migrate $old_dir: $old_env is missing."
+    # What: a one-IP quickstart stops before any change
+    # Why: prod always binds a second LAN IP (IP_HTTPS)
+    # From: Issue #1683 | PR #1858
+    https_ip=$(get_env_var IP_HTTPS "$old_env") || die "Cannot read IP_HTTPS from $old_env (exit $?)."
+    [[ -n "$https_ip" ]] || https_ip=$(get_env_var IP_SSL "$old_env") \
+        || die "Cannot read IP_SSL from $old_env (exit $?)."
+    [[ -n "$https_ip" ]] \
+        || die "The install at $old_dir has no second LAN IP (IP_HTTPS or IP_SSL in $old_env). LanCache-NG now needs one for HTTPS DNS and proxy: add a free LAN IP to this host, set IP_HTTPS=<that IP> in $old_env, then rerun setup.sh update. Nothing was changed."
     print_step "Migrating the quickstart install at $old_dir to $stack_dir"
+    restore_quickstart_mounts "$old_dir" "$old_env" "$record"
     # What: convergence paused for the whole migration
     # Why: the timer must not run compose mid-migration
     # From: Issue #1683 | PR #1858
@@ -2290,8 +2380,22 @@ migrate_quickstart_install() (
         || die "Pre-migration backup of $old_dir failed; nothing was changed."
     project=$(compose_project_name "$old_dir" "$old_env") \
         || die "Cannot resolve the compose project of $old_dir (exit $?); nothing was changed."
-    if [[ ! -f "$env_local" ]]; then
+    # What: a retry without live copies starts afresh
+    # Why: a failed run's .env.local blocked every retry
+    # From: Issue #1683 | PR #1858
+    fresh=1
+    if [[ -f "$env_local" ]]; then
+        fresh=0
+        if [[ -f "$record" ]]; then
+            fresh=$(awk -F'|' '$1 == "envlocal" { m = 1 } $1 == "rolledback" { c = 0 }
+                $1 == "copied" { c = 1 } END { print (m && !c) ? 1 : 0 }' "$record") \
+                || die "Failed to read $record (exit $?)."
+        fi
+    fi
+    if [[ "$fresh" = 1 ]]; then
         install -m 0600 "$old_env" "$env_local" || die "Failed to create $env_local from $old_env."
+        printf 'envlocal|%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$record" \
+            || die "Failed to record the new $env_local in $record (exit $?)."
     fi
     if ! env_key_exists LANCACHE_STATE_DIR "$env_local"; then
         set_env_key LANCACHE_STATE_DIR "$old_dir" "$env_local"
@@ -2299,7 +2403,7 @@ migrate_quickstart_install() (
     # What: relative paths become absolute to old dir
     # Why: prod resolves them against deploy/prod instead
     # From: Issue #1683 | PR #1858
-    for key in $path_keys; do
+    for key in "${path_key_list[@]}"; do
         value=$(get_env_var "$key" "$env_local") || die "Cannot read $key from $env_local (exit $?)."
         [[ -n "$value" && "$value" != /* ]] || continue
         set_env_key "$key" "$(realpath -m "$old_dir/$value")" "$env_local"
@@ -2328,6 +2432,10 @@ migrate_quickstart_install() (
     # From: Issue #1683 | PR #1912
     migrate_env_for_update "$stack_dir" \
         || die "Cannot prepare $env_local for the prod stack (exit $?); the quickstart stack in $old_dir was not stopped."
+    # What: v0.3.2 plaintext UI password becomes a hash
+    # Why: the ui needs user and hash; no plaintext stays
+    # From: Issue #1683 | PR #1858
+    ensure_ui_password_hash "$stack_dir" "$env_local"
     # What: every quickstart volume has a home in prod
     # Why: data without a target would be left behind
     # From: Issue #1683 | PR #1858
@@ -2336,11 +2444,19 @@ migrate_quickstart_install() (
     prod_volumes=$(stack_compose "$stack_dir" "$env_local" config --volumes) \
         || die "Cannot list the volumes of $PROD_COMPOSE (exit $?); the quickstart stack was not touched."
     rows=$(lancache_sot_list quickstart_volume_keys runtime) || exit $?
-    missing=""
+    kept_list=$(lancache_sot_list quickstart_volumes_kept runtime) || exit $?
+    missing="" kept=""
     while IFS= read -r volume; do
         [[ -n "$volume" ]] || continue
         list_has_line "$volume" "$prod_volumes" && continue
         awk -v v="$volume" '$1 == v { f = 1 } END { exit !f }' <<< "$rows" && continue
+        # What: SOT-listed log volumes stay, untouched
+        # Why: nothing is deleted; the operator decides
+        # From: Issue #1683 | PR #1858
+        if list_has_line "$volume" "$kept_list"; then
+            kept+=" ${project}_${volume}"
+            continue
+        fi
         missing+=" $volume"
     done <<< "$old_volumes"
     [[ -z "$missing" ]] || die "Quickstart volume(s)${missing} have no home in $PROD_COMPOSE; the quickstart stack was not touched."
@@ -2378,11 +2494,44 @@ migrate_quickstart_install() (
     while IFS= read -r copy; do
         rm -f "$old_dir/$copy" || die "Failed to remove the quickstart copy $old_dir/$copy."
     done <<< "$bundle"
+    # What: files put back for the old stack go too
+    # Why: only the old stack needed them
+    # From: Issue #1683 | PR #1858
+    restored=$(awk -F'|' '$1 == "restored" { print $2 }' "$record") || die "Failed to read $record (exit $?)."
+    while IFS= read -r copy; do
+        [[ -n "$copy" ]] || continue
+        rm -f "$old_dir/$copy" || die "Failed to remove the restored file $old_dir/$copy."
+    done <<< "$restored"
+    # What: dirs these removals emptied go too
+    # Why: an empty scripts/ dir is a leftover
+    # From: Issue #1683 | PR #1858
+    while IFS= read -r copy; do
+        [[ "$copy" = */* ]] || continue
+        dir="${copy%/*}"
+        while [[ -n "$dir" ]]; do
+            if [[ -d "$old_dir/$dir" ]]; then
+                rmdir --ignore-fail-on-non-empty -- "$old_dir/$dir" || die "Failed to remove $old_dir/$dir (exit $?)."
+            fi
+            if [[ "$dir" = */* ]]; then
+                dir="${dir%/*}"
+            else
+                dir=""
+            fi
+        done
+    done <<< "$bundle"$'\n'"$restored"
     rm -f "$old_dir/docker-compose.yml" "$old_env" || die "Failed to remove the quickstart files in $old_dir."
     trap - EXIT
     resume_lancache_convergence_after_update
     UPDATE_CONVERGENCE_COMPLETED=1
     print_ok "Quickstart install migrated to $stack_dir; its old Docker volumes were kept"
+    [[ -z "$kept" ]] \
+        || print_warn "Old logs and snapshots without a place in the new stack stay in:${kept}. Remove them with docker volume rm when no longer needed."
+    # What: names copies of earlier failed migration runs
+    # Why: nothing is deleted; the operator decides
+    # From: Issue #1683 | PR #1858
+    local -a aside=("$old_dir"/*.rolledback-*)
+    [[ ! -e "${aside[0]}" ]] \
+        || print_warn "Copies of earlier failed migration runs stay in: ${aside[*]}. Remove them when no longer needed."
 )
 
 # What: stops prod, moves copies aside, restarts quickstart
@@ -2570,54 +2719,15 @@ EOF
     systemctl daemon-reload || die "systemctl daemon-reload failed (exit $?)."
 }
 
-# What: origin's default branch; else the SOT release branch
-# Why: the local symref avoids a network call when it is set
-# From: Issue #1683 | PR #1858
-git_default_branch_name() {
-    local repo_dir="$1" default_branch="" rc=0 remote ref refs release
-
-    default_branch=$(git -C "$repo_dir" symbolic-ref --quiet --short refs/remotes/origin/HEAD) || rc=$?
-    [[ "$rc" -le 1 ]] || die "Failed to read origin/HEAD of $repo_dir (exit $rc)."
-    default_branch="${default_branch#origin/}"
-    if [[ -z "$default_branch" ]]; then
-        remote=$(git -C "$repo_dir" remote show origin) \
-            || die "Failed to read the remote origin of $repo_dir (exit $?)."
-        default_branch=$(awk '/HEAD branch/ && $NF != "(unknown)" {print $NF; exit}' <<< "$remote")
-    fi
-    # What: the ref of the release_tags channel in the SOT
-    # Why: setup.sh reads the SOT; it never runs ci.sh
-    # From: Issue #1683 | PR #1858
-    if [[ -z "$default_branch" ]]; then
-        release=$(lancache_release_rows release) || exit $?
-        refs=$(lancache_release_rows ref) || exit $?
-        ref=$(awk -v c="$release" '$1 == c { print $2; exit }' <<< "$refs")
-        [[ "$ref" == refs/heads/?* ]] \
-            || die "The SOT names no release branch ref for channel $release: '$ref'; set LANCACHE_SETUP_GIT_REF."
-        default_branch="${ref#refs/heads/}"
-    fi
-
-    printf '%s\n' "$default_branch"
-}
-
-# What: true if git status shows no uncommitted changes
-# Why: a dirty tree must not be reset by an update
+# What: true if no tracked file has local changes
+# Why: untracked ca/ must not block; checkout guards it
 # From: Issue #1683 | PR #1858
 git_repo_is_clean() {
     local repo_dir="$1" out
 
-    out=$(git -C "$repo_dir" status --porcelain) \
+    out=$(git -C "$repo_dir" status --porcelain --untracked-files=no) \
         || die "Failed to read the git status of $repo_dir (exit $?)."
     [[ -z "$out" ]]
-}
-
-# What: hard-resets a checkout to origin's default branch
-# Why: install without LANCACHE_SETUP_GIT_REF uses it
-# From: Issue #1683 | PR #1858
-sync_repo_to_default_branch() {
-    local repo_dir="$1" default_branch
-
-    default_branch=$(git_default_branch_name "$repo_dir")
-    sync_repo_to_branch "$repo_dir" "$default_branch"
 }
 
 # What: hard-resets a checkout to one origin branch
@@ -2810,14 +2920,20 @@ runtime_default_in() {
 # From: Issue #1683 | PR #1912
 sot_compose_env() {
     local env_file="${1:-}" state="${2:-}" keys key value list dir
+    local -a words=()
     keys=$(lancache_sot_value compose_keys runtime) || exit $?
     list=$(runtime_defaults_list) || exit $?
-    for key in $keys; do
+    # What: key lists split by read -a, no glob
+    # Why: an unquoted loop word would expand * or ?
+    # From: Issue #1683 | PR #1858
+    read -ra words <<< "${keys//$'\n'/ }"
+    for key in "${words[@]}"; do
         value=$(runtime_default_in "$list" "$key") || exit $?
         printf 'SOT_%s=%s\n' "$key" "$value"
     done
     keys=$(prod_state_keys) || exit $?
-    for key in $keys; do
+    read -ra words <<< "${keys//$'\n'/ }"
+    for key in "${words[@]}"; do
         dir=$(prod_state_dir_for_key "$key" "$env_file" "$state") || exit $?
         printf '%s=%s\n' "$key" "$dir"
     done
@@ -2827,10 +2943,18 @@ sot_compose_env() {
 # Why: compose names no path, port or default of its own
 # From: Issue #1683 | PR #1912
 sot_compose() {
-    local env_file="$1" rows
+    local env_file="$1" rows state=""
     local -a sot_env=()
     shift
-    rows=$(sot_compose_env "$env_file") || exit $?
+    # What: a quickstart .env may lack LANCACHE_STATE_DIR
+    # Why: its state lives in the quickstart dir (v0.3.2)
+    # From: Issue #1683 | PR #1858
+    if [[ "${env_file##*/}" = .env ]] && is_quickstart_install "${env_file%/*}"; then
+        state=$(get_env_var LANCACHE_STATE_DIR "$env_file") \
+            || die "Cannot read LANCACHE_STATE_DIR from $env_file (exit $?)."
+        [[ -n "$state" ]] || state="${env_file%/*}"
+    fi
+    rows=$(sot_compose_env "$env_file" "$state") || exit $?
     mapfile -t sot_env <<< "$rows"
     env "${sot_env[@]}" docker compose --env-file "$env_file" "$@"
 }
@@ -2886,6 +3010,25 @@ adopt_moved_config_prod_keys() {
         [[ "$raw" == "$current" ]] \
             || die "$key=$raw in $local_env differs from $target=$current in $env_file; both must be the same address. Set $target, remove $key from $local_env, then rerun setup.sh update."
     done <<< "$rows"
+    [[ "$step" = drop ]] || return 0
+    # What: an emptied legacy <svc>.local.env is deleted
+    # Why: AG-SETUP-001: config/prod files must be deleted
+    # From: Issue #1683 | PR #1858
+    local dir="$repo_root/config/prod" file left rest
+    [[ -d "$dir" ]] || return 0
+    for file in "$dir"/*.local.env; do
+        [[ -f "$file" ]] || continue
+        left=$(awk -F= '/^[A-Za-z_][A-Za-z0-9_]*=/ { print $1 }' "$file") \
+            || die "Failed to list the keys of $file (exit $?)."
+        if [[ -n "$left" ]]; then
+            print_warn "Kept ${file##*/}: it still sets ${left//$'\n'/, }, which no container reads. Move them into ${env_file##*/} or delete the file."
+            continue
+        fi
+        rm -f -- "$file" || die "Failed to delete $file (exit $?)."
+        print_ok "Deleted the emptied legacy file ${file##*/}"
+    done
+    rest=$(find "$dir" -mindepth 1 -print -quit) || die "Failed to list $dir (exit $?)."
+    [[ -n "$rest" ]] || rmdir -- "$dir" || die "Failed to delete the empty $dir (exit $?)."
 }
 
 # What: template edits move into <x>.local.env, newest wins
@@ -3166,15 +3309,20 @@ host_unit_enabled() {
 # Why: systemd and OpenRC share one call per unit action
 # From: Issue #1683 | PR #1858
 host_unit_action() {
-    local unit="$1" action="$2" manager name out rc=0
+    local unit="$1" action="$2" manager name out rc=0 limit
     manager=$(host_service_manager)
+    # What: a start or stop ends after the SOT stop limit
+    # Why: a hung stop held setup.sh update without a word
+    # From: Issue #1683 | PR #1858
+    limit=$(prod_env_default OPENRC_STOP_TIMEOUT_SECONDS) || exit $?
+    limit=$(( limit + 60 ))
     case "$manager" in
-        systemd) out=$(systemctl "$action" "$unit" 2>&1) || rc=$? ;;
+        systemd) out=$(timeout "$limit" systemctl "$action" "$unit" 2>&1) || rc=$? ;;
         openrc)
             name=$(openrc_service_for_unit "$unit")
             [[ -n "$name" ]] || die "No OpenRC service stands for $unit."
             case "$action" in
-                start|stop) out=$(rc-service "$name" "$action" 2>&1) || rc=$? ;;
+                start|stop) out=$(timeout "$limit" rc-service "$name" "$action" 2>&1) || rc=$? ;;
                 enable) out=$(rc-update add "$name" default 2>&1) || rc=$? ;;
                 disable) out=$(rc-update del "$name" default 2>&1) || rc=$? ;;
                 *) die "Unknown service action: $action" ;;
@@ -3182,6 +3330,7 @@ host_unit_action() {
             ;;
         *) die "Neither systemd nor OpenRC runs here; cannot $action $unit." ;;
     esac
+    [[ "$rc" -ne 124 ]] || die "Could not $action $unit within $limit s: $out"
     [[ "$rc" -eq 0 ]] || die "Failed to $action $unit (exit $rc): $out"
 }
 
@@ -3286,6 +3435,21 @@ resume_lancache_convergence_after_failed_update() {
     exit "$exit_code"
 }
 
+# What: EXIT trap while .env is prepared for moved code
+# Why: units must not start new code with the old .env
+# From: Issue #1683 | PR #1858
+rollback_update_after_env_failure() {
+    local exit_code=$?
+
+    trap - EXIT
+    UPDATE_CONVERGENCE_COMPLETED=1
+    rollback_stack_update "$_UPDATE_ROLLBACK_DIR" \
+        || die_convergence_kept_paused "Preparing .env for the new code failed, and the rollback to the pre-update backup failed too."
+    resume_lancache_convergence_after_update
+    print_error "Preparing .env for the new code failed (exit $exit_code); the update was rolled back."
+    exit "$exit_code"
+}
+
 # What: dies; convergence stays paused, prints how to resume
 # Why: a timer `compose up` must not race manual recovery
 # From: Issue #1683 | PR #1858
@@ -3357,9 +3521,9 @@ lancache_release_rows() {
         depth == 6 && sec == "channels" && key == "release_tags" && val == "true" { print "release", ch; next }
         depth == 6 && sec == "channels" && key == "ref" { print "ref", ch, val; next }
         depth == 6 && sec == "channels" && key == "source_ref" { print "source", ch, val; next }
-        depth == 6 && sec == "channels" && key == "aliases" {
+        depth == 6 && sec == "channels" && key == "former_names" {
             gsub(/^\[|\] *$/, "", val); n = split(val, list, / *, */)
-            for (i = 1; i <= n; i++) if (list[i] != "") print "alias", list[i], ch
+            for (i = 1; i <= n; i++) if (list[i] != "") print "former", list[i], ch
         }' <<< "$text") || die "Failed to read the release block of ${sot}."
     counts=$(awk '$1 == "channel" { c++ } $1 == "release" { r++ } $1 == "pinned" { p++ }
         END { print c + 0, r + 0, p + 0 }' <<< "$rows") || die "Failed to count the release rows of ${sot}."
@@ -3369,18 +3533,18 @@ lancache_release_rows() {
     awk -v k="$kind" '$1 == k { sub(/^[^ ]+ /, ""); print }' <<< "$rows"
 }
 
-# What: the SOT channel names and their aliases
-# Why: a tag or channel word names a stack pointer
+# What: the SOT channel names and their former names
+# Why: an old .env must still name a stack pointer
 # From: Issue #1683 | PR #1858
 lancache_channel_words() {
-    local channels aliases
+    local channels formers
     channels=$(lancache_release_rows channel) || exit $?
-    aliases=$(lancache_release_rows alias) || exit $?
+    formers=$(lancache_release_rows former) || exit $?
     printf '%s\n' "$channels"
-    awk '{ print $1 }' <<< "$aliases"
+    awk '{ print $1 }' <<< "$formers"
 }
 
-# What: accepts SOT channels, their aliases, pinned
+# What: accepts SOT channels, former names, pinned
 # Why: retired names stop with their reason; no fallback
 # From: Issue #1683 | PR #1858
 validate_lancache_image_channel() {
@@ -3552,16 +3716,16 @@ resolve_lancache_image_channel() {
 
     channel="${channel:-$release}"
     validate_lancache_image_channel "$channel"
-    printf '%s\n' "$channel"
+    lancache_stack_pointer_channel_for "$channel"
 }
 
-# What: maps an alias to its channel; others pass through
-# Why: an alias has no stack tag of its own
+# What: maps a former name to its channel; others pass
+# Why: a former name has no stack tag of its own
 # From: Issue #1683 | PR #1858
 lancache_stack_pointer_channel_for() {
-    local channel="$1" aliases target
-    aliases=$(lancache_release_rows alias) || exit $?
-    target=$(awk -v a="$channel" '$1 == a { print $2; exit }' <<< "$aliases")
+    local channel="$1" formers target
+    formers=$(lancache_release_rows former) || exit $?
+    target=$(awk -v a="$channel" '$1 == a { print $2; exit }' <<< "$formers")
     printf '%s\n' "${target:-$channel}"
 }
 
@@ -3665,10 +3829,8 @@ lancache_promote_lock_held() {
 # From: Issue #1683 | PR #1858
 lancache_channel_ref_pass() {
     local registry="$1" prefix="$2" pointer_channel="$3" vars="$4" var slug ref digest
-    local release alias testing
+    local release testing
     release=$(lancache_release_rows release) || exit $?
-    alias=$(lancache_release_rows alias) || exit $?
-    alias=$(awk -v c="$release" '$2 == c { print $1; exit }' <<< "$alias")
     testing=$(lancache_release_rows channel) || exit $?
     testing=$(awk -v r="$release" '$0 != r { print; exit }' <<< "$testing")
     while read -r var slug; do
@@ -3677,7 +3839,7 @@ lancache_channel_ref_pass() {
             if [[ "$pointer_channel" = "$release" ]]; then
                 cat >&2 <<EOF
 
-${RED}✗${RESET} Cannot resolve the '${alias:-$release}' release channel (published as the '${release}' pointer image).
+${RED}✗${RESET} Cannot resolve the '${release}' release channel.
 
 To proceed, choose one of these options:
 
@@ -3687,14 +3849,14 @@ To proceed, choose one of these options:
      LANCACHE_IMAGE_TAG=vX.Y.Z ./setup.sh install
      LANCACHE_IMAGE_TAG=sha-<40-hex commit SHA> ./setup.sh install
 
-  3. Use the '${testing}' channel (untested daily builds, may break):
+  3. Use the '${testing}' channel (experimental, may break, not for production):
      LANCACHE_IMAGE_CHANNEL=${testing} ./setup.sh install
 
 For details on release channels and their stability, see:
   docs/release-versioning.md
 
 EOF
-                die "Cannot resolve the ${alias:-$release} channel image ${ref} (${digest})."
+                die "Cannot resolve the ${release} channel image ${ref} (${digest})."
             fi
             die "Failed to resolve ${ref} to a digest (${digest}). Check registry access or set LANCACHE_IMAGE_TAG to an immutable sha-* / vX.Y.Z tag."
         fi
@@ -3710,6 +3872,7 @@ EOF
 lancache_channel_image_refs() {
     local env_file="$1" channel="$2"
     local registry prefix pointer_channel vars max backoff lock_ref buildx_out n=1 first second reason line changed
+    local install_channel
     pointer_channel=$(lancache_stack_pointer_channel_for "$channel") || exit $?
     registry=$(resolve_lancache_image_registry "$env_file") \
         || die "Cannot resolve the image registry for channel ${channel} (exit $?)."
@@ -3731,6 +3894,15 @@ lancache_channel_image_refs() {
         || die "docker buildx is required to resolve LANCACHE_IMAGE_CHANNEL=${channel} (exit $?: ${buildx_out}). Install the ${DOCKER_BUILDX_PLUGIN} package, then rerun setup.sh."
 
     printf '\n%s%s▶ Resolving image channel %s%s\n' "${BOLD}" "${CYAN}" "$channel" "${RESET}" >&2
+    # What: every non-default pointer warns on each run
+    # Why: maintainer 29.10.: nightly is experimental
+    # From: Issue #1683 | PR #1858
+    install_channel=$(lancache_sot_value install_channel release) \
+        || die "Cannot read release.install_channel (exit $?)."
+    install_channel=$(lancache_stack_pointer_channel_for "$install_channel") || exit $?
+    if [[ "$pointer_channel" != "$install_channel" ]]; then
+        print_warn "The $channel channel is experimental: untested daily builds that may break the stack; not for production use." >&2
+    fi
     while [[ "$n" -le "$max" ]]; do
         reason="promote lock ${lock_ref} is held"
         if ! lancache_promote_lock_held "$lock_ref"; then
@@ -3927,6 +4099,7 @@ migrate_env_for_update() (
     local state_dir ui_session_ttl
     local legacy_cache_http legacy_cache_https existing_image_tag
     local required_keys required_key required_value
+    local -a required_key_list=()
     local lancache_image_registry lancache_image_prefix lancache_image_channel lancache_image_tag
     env_file=$(runtime_env_file_for_install_dir "$install_dir")
 
@@ -4004,11 +4177,26 @@ migrate_env_for_update() (
         lancache_image_refs=$(lancache_image_refs_for_tag "$env_file" "$lancache_image_tag") \
             || die "Cannot pin the images of ${lancache_image_tag} for ${env_file}; it stays unchanged (exit $?)."
     fi
-    assert_resolved_image_tag_platform_supported \
-        "$lancache_image_registry" "$lancache_image_prefix" "$lancache_image_tag"
+    # What: a restore skips the registry platform check
+    # Why: pins were checked once; a rollback needs no GHCR
+    # From: Issue #1683 | PR #1858
+    if [[ "$preserve_image_tag" != "1" ]]; then
+        assert_resolved_image_tag_platform_supported \
+            "$lancache_image_registry" "$lancache_image_prefix" "$lancache_image_tag"
+    fi
     set_env_key_if_empty_or_missing LANCACHE_IMAGE_REGISTRY "$lancache_image_registry" "$env_file"
     set_env_key_if_empty_or_missing LANCACHE_IMAGE_PREFIX "$lancache_image_prefix" "$env_file"
     set_env_key_if_empty_or_missing LANCACHE_IMAGE_CHANNEL "$lancache_image_channel" "$env_file"
+    # What: a former channel name in .env becomes current
+    # Why: maintainer 29.10.: only latest and nightly
+    # From: Issue #1683 | PR #1858
+    local env_channel current_channel
+    env_channel=$(get_env_var LANCACHE_IMAGE_CHANNEL "$env_file") || exit $?
+    current_channel=$(lancache_stack_pointer_channel_for "$env_channel") || exit $?
+    if [[ "$current_channel" != "$env_channel" ]]; then
+        set_env_key LANCACHE_IMAGE_CHANNEL "$current_channel" "$env_file"
+        print_ok "LANCACHE_IMAGE_CHANNEL=$env_channel is now $current_channel in $env_file"
+    fi
     set_env_key LANCACHE_IMAGE_TAG "$lancache_image_tag" "$env_file"
     [[ "$keep_image_refs" = "1" ]] || write_lancache_image_refs "$env_file" "$lancache_image_refs"
     adopt_moved_config_prod_keys "$install_dir" "$env_file" copy
@@ -4266,7 +4454,8 @@ migrate_env_for_update() (
     # Why: an empty required key breaks the stack at up
     # From: Issue #1683 | PR #1912
     required_keys=$(lancache_sot_value setup_required_repairs validation) || exit $?
-    for required_key in $required_keys; do
+    read -ra required_key_list <<< "${required_keys//$'\n'/ }"
+    for required_key in "${required_key_list[@]}"; do
         required_value=$(get_env_var "$required_key" "$env_file") || exit $?
         [[ -n "$required_value" ]] \
             || die "Required key $required_key is still empty in $env_file after the update."
@@ -4617,6 +4806,15 @@ restore_compose_volumes() {
     done <<< "$archives"
 }
 
+# What: true when both stack dirs are in the channel layout
+# Why: <state root>, latest and nightly hold one install
+# From: Issue #1683 | PR #1858
+is_same_channel_install() {
+    local a="$1" b="$2"
+    [[ "$a" = */deploy/prod && "$b" = */deploy/prod ]] || return 1
+    is_channel_layout_repo "${a%/deploy/prod}" && is_channel_layout_repo "${b%/deploy/prod}"
+}
+
 # What: blocks restore if other installs share the volumes
 # Why: project name is fixed, so volumes are shared
 # From: Issue #456 | PR #1673
@@ -4635,6 +4833,10 @@ guard_restore_shared_project_volumes() {
         [[ -n "$working_dir" ]] \
             || die "Refusing to restore: container $container of compose project '$project' has no working directory label, so its install cannot be attributed. Remove it with 'docker rm $container', then restore again."
         working_dir=$(realpath -m "$working_dir")
+        # What: root, latest and nightly are one install
+        # Why: their stack and data are one; a label may lag
+        # From: Issue #1683 | PR #1858
+        is_same_channel_install "$working_dir" "$install_dir" && continue
         if [[ "$working_dir" != "$install_dir" ]]; then
             die "Refusing to restore: compose project '$project' still has containers at $working_dir, which is not the restore target ($install_dir). Both installs share the same Docker-managed volumes because the compose project name is not per-install-dir. Remove the other install's containers first (cd \"$working_dir\" && docker compose down), or restore into $working_dir instead."
         fi
@@ -4935,7 +5137,10 @@ cmd_restore() (
     # Why: a die must not skip the stack_stopped reset
     # From: Issue #1683 | PR #1858
     if ! (
-        migrate_env_for_update "$install_dir" 1
+        # What: each step's failure ends the subshell
+        # Why: no errexit inside "if !"; failures went on
+        # From: Issue #1683 | PR #1858
+        migrate_env_for_update "$install_dir" 1 || exit $?
         if compose_stack_available "$install_dir"; then
             validate_compose_config "$install_dir"
         else
@@ -5535,10 +5740,32 @@ rollback_stack_update() {
         return 1
     fi
 
+    # What: a channel switch goes back by the current link
+    # Why: the old dir kept its code; its backup restores
+    # From: Issue #1683 | PR #1858
+    if [[ -n "${LANCACHE_UPDATE_SWITCHED_FROM:-}" ]]; then
+        local link
+        link=$(channel_active_link) || exit $?
+        if is_channel_root_dir "$LANCACHE_UPDATE_SWITCHED_FROM"; then
+            rm -f -- "$link" || { print_error "Failed to remove $link (exit $?). Manual recovery required."; return 1; }
+        else
+            ln -sfn "${LANCACHE_UPDATE_SWITCHED_FROM##*/}" "$link" \
+                || { print_error "Failed to point $link back (exit $?). Manual recovery required."; return 1; }
+        fi
+        print_warn "Code of the stack is $LANCACHE_UPDATE_SWITCHED_FROM again"
+        # What: the copied stack files leave the new dir
+        # Why: one copy of credentials; a switch recopies
+        # From: Issue #1683 | PR #1858
+        local f
+        for f in "${CHANNEL_STACK_FILES[@]}"; do
+            rm -f -- "$LANCACHE_UPDATE_REPO/deploy/prod/$f" \
+                || { print_error "Failed to remove $LANCACHE_UPDATE_REPO/deploy/prod/$f (exit $?)."; return 1; }
+        done
+        install_dir="$LANCACHE_UPDATE_FROM_INSTALL"
     # What: the checkout returns to its pre-update revision
     # Why: old config on new compose would be a mixed stack
     # From: Issue #1683 | PR #1858
-    if [[ -n "${LANCACHE_UPDATE_OLD_SHA:-}" ]]; then
+    elif [[ -n "${LANCACHE_UPDATE_OLD_SHA:-}" ]]; then
         # What: no branch = a detached pinned checkout
         # Why: -B needs a name; --detach restores it
         # From: Issue #1683 | PR #1858
@@ -5550,6 +5777,14 @@ rollback_stack_update() {
     fi
     print_warn "Rolling back to pre-update backup: $latest_backup"
     if cmd_restore "$latest_backup" "$install_dir"; then
+        # What: the restored .env names the old channel
+        # Why: the backup holds the asked one, not the run
+        # From: Issue #1683 | PR #1858
+        if [[ -n "${LANCACHE_UPDATE_SWITCHED_FROM:-}" ]] && ! is_channel_root_dir "$LANCACHE_UPDATE_SWITCHED_FROM"; then
+            local old_channel="${LANCACHE_UPDATE_SWITCHED_FROM##*/}"
+            set_env_key LANCACHE_IMAGE_CHANNEL "$old_channel" "$install_dir/${_UPDATE_ENV_FILE##*/}"
+            print_warn "LANCACHE_IMAGE_CHANNEL is $old_channel again; set it anew and run update to retry the switch"
+        fi
         print_ok "Rollback completed; stack restored to its pre-update state."
         return 0
     fi
@@ -5619,50 +5854,313 @@ stack_update_step() {
     return 1
 }
 
-# What: pulls the checkout and reruns the update from it
-# Why: compose, templates and setup.sh must move together
+# What: branch of a checkout; empty when detached
+# Why: a detached checkout may move, a named one may not
 # From: Issue #1683 | PR #1858
-update_repo_and_resume() {
-    local install_dir="$1" repo_dir="$1" branch="" branches channel tag target changes old new baseline="" svc
-    local rc=0 exec_rc
-    is_deploy_prod_install_dir "$install_dir" && repo_dir=$(deploy_prod_repo_root "$install_dir")
-    if [[ ! -e "$repo_dir/.git" ]]; then
-        print_ok "$repo_dir is not a git checkout; its files stay as they are"
-        return 0
-    fi
+checkout_branch_name() {
+    local repo_dir="$1" branch="" rc=0
     branch=$(git -C "$repo_dir" symbolic-ref --quiet --short HEAD) || rc=$?
     [[ "$rc" -le 1 ]] || die "Failed to read the branch of $repo_dir (exit $rc)."
+    printf '%s\n' "$branch"
+}
+
+# What: the code ref a checkout moves to; empty = stays
+# Why: install and update follow the channel the same way
+# From: Issue #1683 | PR #1858
+channel_checkout_target() {
+    local repo_dir="$1" channel="$2" tag="$3" branch branches target changes
+    if [[ ! -e "$repo_dir/.git" ]]; then
+        print_ok "$repo_dir is not a git checkout; its files stay as they are" >&2
+        return 0
+    fi
+    branch=$(checkout_branch_name "$repo_dir") || exit $?
     branches=$(lancache_channel_branches) || exit $?
     # What: a branch outside the channel branches stays
     # Why: the operator chose that revision (AG-OP-009)
     # From: Issue #1683 | PR #1858
-    if [[ "$rc" -eq 0 ]] && ! list_has_line "$branch" "$branches"; then
-        print_warn "Checkout $repo_dir is on $branch, no channel branch; repository not updated."
+    if [[ -n "$branch" ]] && ! list_has_line "$branch" "$branches"; then
+        print_warn "Checkout $repo_dir is on $branch, no channel branch; repository not updated." >&2
         return 0
     fi
-    channel=$(resolve_lancache_image_channel "$_UPDATE_ENV_FILE") || exit $?
-    tag="${LANCACHE_IMAGE_TAG:-}"
-    [[ -n "$tag" ]] || tag=$(get_env_var LANCACHE_IMAGE_TAG "$_UPDATE_ENV_FILE") || exit $?
     target=$(lancache_channel_code_ref "$channel" "$tag") || exit $?
     if [[ -z "$target" ]]; then
-        print_warn "Channel $channel has no LANCACHE_IMAGE_TAG; repository not updated."
+        print_warn "Channel $channel has no LANCACHE_IMAGE_TAG; repository not updated." >&2
         return 0
     fi
-    changes=$(git -C "$repo_dir" status --porcelain) || die "Failed to read the git status of $repo_dir (exit $?)."
+    changes=$(git -C "$repo_dir" status --porcelain --untracked-files=no) \
+        || die "Failed to read the git status of $repo_dir (exit $?)."
     if [[ -n "$changes" ]]; then
-        print_warn "Checkout $repo_dir has local changes; repository not updated:"$'\n'"$changes"
+        print_warn "Checkout $repo_dir has local changes; repository not updated:"$'\n'"$changes" >&2
         return 0
     fi
-    old=$(git -C "$repo_dir" rev-parse HEAD) || die "Failed to read HEAD of $repo_dir (exit $?)."
-    print_step "Updating repo to $target (channel $channel)"
-    # What: a channel follows its branch, pinned its tag
-    # Why: nightly code is current_dev, stable code master
-    # From: Issue #1683 | PR #1858
+    printf '%s\n' "$target"
+}
+
+# What: a channel follows its branch, pinned its tag
+# Why: nightly code is current_dev, latest code master
+# From: Issue #1683 | PR #1858
+sync_repo_to_channel_ref() {
+    local repo_dir="$1" target="$2" branches
+    branches=$(lancache_channel_branches) || exit $?
     if list_has_line "$target" "$branches"; then
         sync_repo_to_branch "$repo_dir" "$target"
     else
         sync_repo_to_commit "$repo_dir" "$target"
     fi
+}
+
+# What: <state root>/<pointer>: one code dir per channel
+# Why: maintainer 29.10.: latest and nightly side by side
+# From: Issue #1683 | PR #1858
+channel_code_dir() {
+    local pointer
+    ensure_default_install_dir
+    pointer=$(lancache_stack_pointer_channel_for "$1") || exit $?
+    printf '%s/%s\n' "$DEFAULT_INSTALL_DIR" "$pointer"
+}
+
+# What: stack files a channel switch carries along
+# Why: switch and rollback must name the same files
+# From: Issue #1683 | PR #1858
+CHANNEL_STACK_FILES=(.env.local .env docker-compose.override.yml docker-compose.override.yaml)
+
+# What: <state root>/current links the running channel dir
+# Why: units and default commands follow it on a switch
+# From: Issue #1683 | PR #1858
+channel_active_link() {
+    ensure_default_install_dir
+    printf '%s/current\n' "$DEFAULT_INSTALL_DIR"
+}
+
+# What: true when a dir is the state root itself
+# Why: an old install cloned the code right into it
+# From: Issue #1683 | PR #1858
+is_channel_root_dir() {
+    ensure_default_install_dir
+    [[ "$(realpath -m "$1")" = "$(realpath -m "$DEFAULT_INSTALL_DIR")" ]]
+}
+
+# What: true for the state root or one of its channel dirs
+# Why: only that layout moves between channel dirs
+# From: Issue #1683 | PR #1858
+is_channel_layout_repo() {
+    local repo root pointers
+    repo=$(realpath -m "$1")
+    ensure_default_install_dir
+    root=$(realpath -m "$DEFAULT_INSTALL_DIR")
+    [[ "$repo" != "$root" ]] || return 0
+    [[ "${repo%/*}" = "$root" ]] || return 1
+    pointers=$(lancache_release_rows channel) || exit $?
+    list_has_line "${repo##*/}" "$pointers"
+}
+
+# What: clones or moves a channel dir to its code ref
+# Why: install and a channel switch share the git steps
+# From: Issue #1683 | PR #1858
+ensure_channel_checkout() {
+    local dir="$1" target="$2" branches
+    if [[ -e "$dir/.git" ]]; then
+        sync_repo_to_channel_ref "$dir" "$target"
+        return 0
+    fi
+    [[ ! -e "$dir" ]] || die "$dir exists but is no git checkout; move it away, then rerun setup.sh."
+    mkdir -p "${dir%/*}" || die "Failed to create ${dir%/*} (exit $?)."
+    branches=$(lancache_channel_branches) || exit $?
+    if list_has_line "$target" "$branches"; then
+        git clone --branch "$target" "${LANCACHE_REPO_URL}.git" "$dir" \
+            || die "Failed to clone $target into $dir (exit $?)."
+    else
+        git clone "${LANCACHE_REPO_URL}.git" "$dir" || die "Failed to clone into $dir (exit $?)."
+        sync_repo_to_commit "$dir" "$target"
+    fi
+}
+
+# What: points <state root>/current at one channel dir
+# Why: one place says which channel's code runs
+# From: Issue #1683 | PR #1858
+set_active_channel_dir() {
+    local dir="$1" link
+    link=$(channel_active_link) || exit $?
+    ln -sfn "${dir##*/}" "$link" || die "Failed to point $link at $dir (exit $?)."
+}
+
+# What: install runs from the chosen channel's dir
+# Why: compose files and images from one ref at once
+# From: Issue #1683 | PR #1858
+install_repo_follow_channel() {
+    local channel="$1" target dir link branch branches old="" new exec_rc
+    shift
+    # What: a named non-channel branch installs in place
+    # Why: the operator chose that revision (AG-OP-009)
+    # From: Issue #1683 | PR #1858
+    if [[ -e "$SCRIPT_DIR/.git" ]]; then
+        branch=$(checkout_branch_name "$SCRIPT_DIR") || exit $?
+        branches=$(lancache_channel_branches) || exit $?
+        if [[ -n "$branch" ]] && ! list_has_line "$branch" "$branches"; then
+            print_warn "Checkout $SCRIPT_DIR is on $branch, no channel branch; installing from it."
+            return 0
+        fi
+    fi
+    dir=$(channel_code_dir "$channel") || exit $?
+    link=$(channel_active_link) || exit $?
+    target="${LANCACHE_SETUP_GIT_REF:-}"
+    [[ -n "$target" ]] || target=$(lancache_channel_code_ref "$channel" "${LANCACHE_IMAGE_TAG:-}") || exit $?
+    [[ -n "$target" ]] || die "Channel $channel needs LANCACHE_IMAGE_TAG to name its code."
+    [[ ! -e "$dir/.git" ]] || old=$(git -C "$dir" rev-parse HEAD) || die "Failed to read HEAD of $dir (exit $?)."
+    print_step "Code of channel $channel in $dir ($target)"
+    if [[ -n "${LANCACHE_SETUP_GIT_REF:-}" && -e "$dir/.git" ]]; then
+        sync_repo_to_ref "$dir" "$target"
+    elif [[ -n "${LANCACHE_SETUP_GIT_REF:-}" ]]; then
+        git clone --branch "$target" "${LANCACHE_REPO_URL}.git" "$dir" \
+            || die "Clone failed for LANCACHE_SETUP_GIT_REF='$target'. Check that it names a real branch or tag on origin."
+    else
+        ensure_channel_checkout "$dir" "$target"
+    fi
+    set_active_channel_dir "$dir"
+    new=$(git -C "$dir" rev-parse HEAD) || die "Failed to read HEAD of $dir (exit $?)."
+    # What: running from current at its HEAD goes on here
+    # Why: units then name current, the link, not a dir
+    # From: Issue #1683 | PR #1858
+    if [[ "$SCRIPT_DIR" = "$link" && "$new" = "$old" ]]; then
+        print_ok "Code of channel $channel is at $new"
+        return 0
+    fi
+    print_ok "Continuing with $link/setup.sh ($new)"
+    # What: the new setup.sh keeps the chosen channel
+    # Why: its channel prompt is then skipped, not repeated
+    # From: Issue #1683 | PR #1858
+    export LANCACHE_IMAGE_CHANNEL="$channel"
+    chmod +x "$dir/setup.sh" || die "Failed to make $dir/setup.sh executable (exit $?)."
+    shopt -s execfail
+    set +e
+    exec "$link/setup.sh" "$@" || {
+        exec_rc=$?
+        set -e
+        die "Failed to start $link/setup.sh (exit $exec_rc); nothing was installed yet."
+    }
+}
+
+# What: drops the git files of an old root checkout
+# Why: its code moved to a channel dir; data stays
+# From: Issue #1683 | PR #1858
+remove_root_checkout() {
+    local root="$1" changes list f d
+    local -a dirs=()
+    changes=$(git -C "$root" status --porcelain --untracked-files=no) \
+        || die "Failed to read the git status of $root (exit $?)."
+    # What: changed tracked files keep the whole old code
+    # Why: such a file may hold data; nothing is guessed
+    # From: Issue #1683 | PR #1858
+    if [[ -n "$changes" ]]; then
+        print_warn "Old code in $root stays; these tracked files differ:"$'\n'"$changes"
+        return 0
+    fi
+    list=$(mktemp) || die "Failed to create a temporary file (exit $?)."
+    git -C "$root" ls-files -z > "$list" || die "Failed to list the files of $root (exit $?)."
+    while IFS= read -r -d '' f; do
+        rm -f -- "$root/$f" || die "Failed to remove $root/$f (exit $?)."
+        [[ "$f" != */* ]] || dirs+=("${f%/*}")
+    done < "$list"
+    rm -f -- "$list" || die "Failed to remove $list (exit $?)."
+    rm -f -- "$root/deploy/prod/.env.local" || die "Failed to remove $root/deploy/prod/.env.local (exit $?)."
+    # What: drops emptied code dirs, deepest first
+    # Why: a dir with data or other files must stay
+    # From: Issue #1683 | PR #1858
+    while IFS= read -r d; do
+        [[ -n "$d" ]] || continue
+        while [[ -n "$d" ]]; do
+            if [[ -d "$root/$d" ]]; then
+                rmdir --ignore-fail-on-non-empty -- "$root/$d" || die "Failed to remove $root/$d (exit $?)."
+            fi
+            if [[ "$d" = */* ]]; then
+                d="${d%/*}"
+            else
+                d=""
+            fi
+        done
+    done < <(printf '%s\n' "${dirs[@]}" | sort -ru)
+    rm -rf -- "$root/.git" || die "Failed to remove $root/.git (exit $?)."
+    print_ok "Old code in $root removed; its data stays"
+}
+
+# What: update moves the stack to another channel's dir
+# Why: a channel change runs the code of the new channel
+# From: Issue #1683 | PR #1858
+switch_channel_dir_and_resume() {
+    local install_dir="$1" repo_dir="$2" channel="$3" target="$4" dir link old="" baseline="" svc exec_rc f
+    local -a files=("${CHANNEL_STACK_FILES[@]}")
+    dir=$(channel_code_dir "$channel") || exit $?
+    link=$(channel_active_link) || exit $?
+    [[ ! -e "$dir/.git" ]] || old=$(git -C "$dir" rev-parse HEAD) || die "Failed to read HEAD of $dir (exit $?)."
+    print_step "Moving the stack to $dir (channel $channel)"
+    # What: old copies of the stack files leave first
+    # Why: the running stack owns them; a copy is redone
+    # From: Issue #1683 | PR #1858
+    for f in "${files[@]}"; do
+        rm -f -- "$dir/deploy/prod/$f" || die "Failed to remove $dir/deploy/prod/$f (exit $?)."
+    done
+    ensure_channel_checkout "$dir" "$target"
+    for f in "${files[@]}"; do
+        [[ -f "$install_dir/$f" ]] || continue
+        cp -p -- "$install_dir/$f" "$dir/deploy/prod/$f" \
+            || die "Failed to copy $install_dir/$f to $dir/deploy/prod (exit $?)."
+    done
+    # What: the copied .env names the new channel
+    # Why: else the next update moves the stack back
+    # From: Issue #1683 | PR #1858
+    set_env_key LANCACHE_IMAGE_CHANNEL "$channel" "$dir/deploy/prod/${_UPDATE_ENV_FILE##*/}"
+    set_active_channel_dir "$dir"
+    for svc in "${!_UPDATE_HEALTH_BASELINE[@]}"; do baseline+="${svc}=${_UPDATE_HEALTH_BASELINE[$svc]} "; done
+    print_ok "Stack settings copied to $dir; continuing with its setup.sh"
+    # What: the switch is undone by the link, not by git
+    # Why: the old dir keeps its code; rollback starts it
+    # From: Issue #1683 | PR #1858
+    export LANCACHE_UPDATE_RESUMED=1 LANCACHE_UPDATE_REPO="$dir" LANCACHE_UPDATE_BRANCH="" \
+        LANCACHE_UPDATE_OLD_SHA="" LANCACHE_UPDATE_BASELINE="$baseline" LANCACHE_BACKUP_ROOT="$BACKUP_ROOT" \
+        LANCACHE_UPDATE_SWITCHED_FROM="$repo_dir" LANCACHE_UPDATE_FROM_INSTALL="$install_dir" \
+        CONVERGENCE_TIMER_WAS_ACTIVE CONVERGENCE_TIMER_WAS_ENABLED CONVERGENCE_SERVICE_WAS_ACTIVE
+    [[ -n "$old" ]] || print_ok "New channel dir $dir"
+    chmod +x "$dir/setup.sh" || die "Failed to make $dir/setup.sh executable (exit $?)."
+    shopt -s execfail
+    set +e
+    exec "$link/setup.sh" update "$link/deploy/prod" || {
+        exec_rc=$?
+        set -e
+        die "Failed to start $link/setup.sh (exit $exec_rc); the stack was not changed."
+    }
+}
+
+# What: pulls the checkout and reruns the update from it
+# Why: compose, templates and setup.sh must move together
+# From: Issue #1683 | PR #1858
+update_repo_and_resume() {
+    local install_dir="$1" repo_dir="$1" branch channel tag target old new baseline="" svc
+    local exec_rc dir branches
+    is_deploy_prod_install_dir "$install_dir" && repo_dir=$(deploy_prod_repo_root "$install_dir")
+    channel=$(resolve_lancache_image_channel "$_UPDATE_ENV_FILE") || exit $?
+    tag="${LANCACHE_IMAGE_TAG:-}"
+    [[ -n "$tag" ]] || tag=$(get_env_var LANCACHE_IMAGE_TAG "$_UPDATE_ENV_FILE") || exit $?
+    # What: another channel's dir or the old root moves
+    # Why: each channel runs the code of its own dir
+    # From: Issue #1683 | PR #1858
+    if [[ -e "$repo_dir/.git" ]] && is_channel_layout_repo "$repo_dir"; then
+        branch=$(checkout_branch_name "$repo_dir") || exit $?
+        dir=$(channel_code_dir "$channel") || exit $?
+        branches=$(lancache_channel_branches) || exit $?
+        if [[ -z "$branch" ]] || list_has_line "$branch" "$branches"; then
+            if [[ "$(realpath -m "$repo_dir")" != "$(realpath -m "$dir")" ]]; then
+                target=$(lancache_channel_code_ref "$channel" "$tag") || exit $?
+                [[ -n "$target" ]] || die "Channel $channel needs LANCACHE_IMAGE_TAG to name its code."
+                switch_channel_dir_and_resume "$install_dir" "$repo_dir" "$channel" "$target"
+            fi
+        fi
+    fi
+    target=$(channel_checkout_target "$repo_dir" "$channel" "$tag") || exit $?
+    [[ -n "$target" ]] || return 0
+    branch=$(checkout_branch_name "$repo_dir") || exit $?
+    old=$(git -C "$repo_dir" rev-parse HEAD) || die "Failed to read HEAD of $repo_dir (exit $?)."
+    print_step "Updating repo to $target (channel $channel)"
+    sync_repo_to_channel_ref "$repo_dir" "$target"
     new=$(git -C "$repo_dir" rev-parse HEAD) || die "Failed to read HEAD of $repo_dir (exit $?)."
     if [[ "$new" = "$old" ]]; then
         print_ok "Repository already at $new"
@@ -5690,11 +6188,16 @@ update_repo_and_resume() {
 # From: Issue #1683 | PR #1858
 update_resume_handoff() {
     local pair
+    local -a pairs=()
     [[ -n "${CONVERGENCE_TIMER_WAS_ACTIVE:-}" && -n "${CONVERGENCE_TIMER_WAS_ENABLED:-}" \
         && -n "${CONVERGENCE_SERVICE_WAS_ACTIVE:-}" && -n "${LANCACHE_UPDATE_REPO:-}" ]] \
         || die "LANCACHE_UPDATE_RESUMED is set without the state of the paused update; rerun setup.sh update without it."
     _UPDATE_HEALTH_BASELINE=()
-    for pair in ${LANCACHE_UPDATE_BASELINE:-}; do
+    # What: read -a splits the pairs without glob expansion
+    # Why: an unquoted loop word would expand * or ?
+    # From: Issue #1683 | PR #1858
+    read -ra pairs <<< "${LANCACHE_UPDATE_BASELINE:-}"
+    for pair in "${pairs[@]}"; do
         _UPDATE_HEALTH_BASELINE["${pair%%=*}"]="${pair#*=}"
     done
     print_ok "Continuing the update with $LANCACHE_UPDATE_REPO/setup.sh"
@@ -5764,12 +6267,29 @@ perform_stack_update_flow() {
         update_repo_and_resume "$install_dir"
     fi
 
+    # What: after a code move a failed .env step rolls back
+    # Why: the moved code must not stay with the old stack
+    # From: Issue #1683 | PR #1858
+    if [[ -n "${LANCACHE_UPDATE_SWITCHED_FROM:-}${LANCACHE_UPDATE_OLD_SHA:-}" ]]; then
+        _UPDATE_ROLLBACK_DIR="$install_dir"
+        trap rollback_update_after_env_failure EXIT
+    fi
     migrate_env_for_update "$install_dir"
     validate_compose_config "$install_dir"
+    trap resume_lancache_convergence_after_failed_update EXIT
 
     print_step "Pulling selected images"
-    stack_compose "$install_dir" "$_UPDATE_ENV_FILE" pull \
-        || die "Failed to pull required container images. Check network access and GHCR authentication, then rerun setup.sh update."
+    if ! stack_compose "$install_dir" "$_UPDATE_ENV_FILE" pull; then
+        # What: a failed pull restores code and .env
+        # Why: new code with an old stack would mix
+        # From: Issue #1683 | PR #1858
+        trap - EXIT
+        UPDATE_CONVERGENCE_COMPLETED=1
+        rollback_stack_update "$install_dir" \
+            || die_convergence_kept_paused "Pulling the images failed, and the rollback to the pre-update backup failed too."
+        resume_lancache_convergence_after_update
+        die "Failed to pull required container images; the update was rolled back. Check network access and GHCR authentication, then rerun setup.sh update."
+    fi
 
     ensure_ui_password_hash "$install_dir" "$_UPDATE_ENV_FILE"
     validate_compose_config "$install_dir"
@@ -5786,6 +6306,15 @@ perform_stack_update_flow() {
     fi
 
     migrate_legacy_ca "$install_dir/../../certs" "$_UPDATE_ENV_FILE" 1
+    # What: a finished move from the old root cleans it up
+    # Why: units then start the code behind the current link
+    # From: Issue #1683 | PR #1858
+    if [[ -n "${LANCACHE_UPDATE_SWITCHED_FROM:-}" ]] && is_channel_root_dir "$LANCACHE_UPDATE_SWITCHED_FROM"; then
+        migrate_legacy_ca "$LANCACHE_UPDATE_SWITCHED_FROM/certs" "$_UPDATE_ENV_FILE" 1
+        write_lancache_host_services "$(channel_active_link)/deploy/prod" \
+            || print_warn "Neither systemd nor OpenRC found — host services were not written"
+        remove_root_checkout "$LANCACHE_UPDATE_SWITCHED_FROM"
+    fi
     trap - EXIT
     resume_lancache_convergence_after_update
     UPDATE_CONVERGENCE_COMPLETED=1
@@ -5971,16 +6500,15 @@ lancache_ui_channel_override_is_valid() {
     list_has_line "$1" "$selectable"
 }
 
-# What: channels the wizard offers, release name last
-# Why: the testing channels, then the release alias
+# What: channels the wizard offers, release channel last
+# Why: only SOT channel names; former names never show
 # From: Issue #1683 | PR #1858
 lancache_selectable_channels() {
-    local channels release aliases
+    local channels release
     channels=$(lancache_release_rows channel) || exit $?
     release=$(lancache_release_rows release) || exit $?
-    aliases=$(lancache_release_rows alias) || exit $?
     awk -v r="$release" '$0 != r' <<< "$channels"
-    awk -v r="$release" '$2 == r { print $1; found = 1; exit } END { if (!found) print r }' <<< "$aliases"
+    printf '%s\n' "$release"
 }
 
 # What: true for a positive whole number of GiB
@@ -6012,8 +6540,11 @@ lancache_read_ui_settings_override() {
     [[ "$rc" -eq 0 ]] || die "Cannot check the Docker volume $volume; the UI settings were not read."
     settings_file=$(prod_env_default UI_SETTINGS_FILE) || exit $?
     settings_file="${settings_file##*/}"
+    # What: the file name goes in as $1, not as code
+    # Why: a value inside sh -c text would run as shell
+    # From: Issue #1683 | PR #1858
     raw=$(docker run --rm -v "${volume}:/volume:ro" "$LANCACHE_HELPER_IMAGE" \
-        sh -c "if [ -e /volume/${settings_file} ]; then cat /volume/${settings_file}; fi") \
+        sh -c 'if [ -e "/volume/$1" ]; then cat "/volume/$1"; fi' sh "$settings_file") \
         || die "Failed to read the UI settings from Docker volume $volume (exit $?)."
     # What: the last KEY= line of $raw wins
     # Why: a loop reads it all; no early-exit pipe
@@ -6658,7 +7189,7 @@ compose_config_value() {
 }
 
 # What: one Kea Control Agent command, as the UI sends it
-# Why: the one sender; setup.sh and ci.sh share it
+# Why: the one sender in setup.sh; the UI sends the same
 # From: Issue #1683 | PR #1858
 kea_ctrl_send() {
     local kea_ctrl_url="$1" kea_ctrl_user="$2" kea_ctrl_token="$3" body="$4"
@@ -7439,6 +7970,16 @@ cmd_secondary() {
     # Why: a fetch failure must not follow a registration
     # From: Issue #1683 | PR #1858
     secondary_compose=$(lancache_repo_file_text deploy/secondary/docker-compose.yml) || exit $?
+    # What: the runtime files of the same ref as the compose
+    # Why: the secondary dns mounts them; missing = broken
+    # From: Issue #1683 | PR #1858
+    local repo_list repo_i
+    local -a repo_files=() repo_texts=()
+    repo_list=$(prod_env_default SETUP_SECONDARY_REPO_FILES) || exit $?
+    read -ra repo_files <<< "$repo_list"
+    for repo_i in "${!repo_files[@]}"; do
+        repo_texts[repo_i]=$(lancache_repo_file_text "${repo_files[repo_i]}") || exit $?
+    done
 
     secondary_dir="${name}"
     if [[ "$rotate" -eq 1 ]]; then
@@ -7667,6 +8208,10 @@ cmd_secondary() {
 
     write_file_atomically "${secondary_dir}/docker-compose.yml" <<< "$secondary_compose" \
         || die "Failed to write ${secondary_dir}/docker-compose.yml (exit $?)."
+    for repo_i in "${!repo_files[@]}"; do
+        write_file_atomically "${secondary_dir}/${repo_files[repo_i]##*/}" <<< "${repo_texts[repo_i]}" \
+            || die "Failed to write ${secondary_dir}/${repo_files[repo_i]##*/} (exit $?)."
+    done
 
     secondary_env_file="$(realpath -m "${secondary_dir}/.env")"
 
@@ -7719,13 +8264,6 @@ LANCACHE_SOT_TEXT=$(lancache_repo_file_text "$LANCACHE_SOT") || exit $?
 # Why: one owner; setup.sh and CI name the same file
 # From: Issue #1683 | PR #1858
 PROD_COMPOSE="$SCRIPT_DIR/$(lancache_sot_value compose_file runtime)" || exit $?
-
-# What: a sourced setup.sh stops here: functions, no run
-# Why: tests load every function from the real file
-# From: Issue #1683 | PR #1858
-if [[ -n "${BASH_SOURCE[0]:-}" && "${BASH_SOURCE[0]}" != "$0" ]]; then
-    return 0
-fi
 
 # What: runs the subcommand named in the first argument
 # Why: the install flow below runs only for install
@@ -7837,29 +8375,12 @@ if [[ "$WIZARD_INTROSPECT_MODE" != "1" ]]; then
 
     ensure_stack_requirements_installed
 
+    # What: no checkout here: step 1b clones the code
+    # Why: it goes straight into the chosen channel's dir
+    # From: Issue #1683 | PR #1858
     if [[ ! -f "$PROD_COMPOSE" ]]; then
-        print_warn "No local repo found — cloning to ${DEFAULT_INSTALL_DIR}..."
-        if ! command_available git; then
-            install_git
-        fi
-        setup_bootstrap_ref=$(resolve_setup_bootstrap_ref) || exit $?
-        if [[ -d "$DEFAULT_INSTALL_DIR/.git" ]]; then
-            if [[ -n "$setup_bootstrap_ref" ]]; then
-                print_warn "Existing checkout found at ${DEFAULT_INSTALL_DIR} — syncing to LANCACHE_SETUP_GIT_REF=${setup_bootstrap_ref}..."
-                sync_repo_to_ref "$DEFAULT_INSTALL_DIR" "$setup_bootstrap_ref"
-            else
-                print_warn "Existing checkout found at ${DEFAULT_INSTALL_DIR} — syncing to the remote default branch..."
-                sync_repo_to_default_branch "$DEFAULT_INSTALL_DIR"
-            fi
-        elif [[ -n "$setup_bootstrap_ref" ]]; then
-            git clone --branch "$setup_bootstrap_ref" "${LANCACHE_REPO_URL}.git" "$DEFAULT_INSTALL_DIR" \
-                || die "Clone failed for LANCACHE_SETUP_GIT_REF='${setup_bootstrap_ref}'. Check that it names a real branch or tag on origin."
-        else
-            git clone "${LANCACHE_REPO_URL}.git" "$DEFAULT_INSTALL_DIR" \
-                || die "Clone failed."
-        fi
-        chmod +x "$DEFAULT_INSTALL_DIR/setup.sh"
-        exec "$DEFAULT_INSTALL_DIR/setup.sh" "$@"
+        print_warn "No local repo found — the code of the chosen channel goes to ${DEFAULT_INSTALL_DIR}/<channel>."
+        command_available git || install_git
     fi
 
     # What: version lines; an unknown version only warns
@@ -7876,6 +8397,77 @@ if [[ "$WIZARD_INTROSPECT_MODE" != "1" ]]; then
     else
         print_warn "Docker Compose version unavailable (exit $?)"
     fi
+fi
+
+# What: step 1a: the image channel to install
+# Why: first, so the checkout can follow it before asking
+# From: Issue #1683 | PR #1858
+print_step "Release channel"
+
+# What: a pre-set LANCACHE_IMAGE_CHANNEL skips the prompt
+# Why: the operator chose the channel before the start
+# From: Issue #1683 | PR #1858
+if [[ -n "${LANCACHE_IMAGE_CHANNEL:-}" ]]; then
+    validate_lancache_image_channel "$LANCACHE_IMAGE_CHANNEL"
+    # What: a former channel name is used under its new name
+    # Why: maintainer 29.10.: only latest and nightly
+    # From: Issue #1683 | PR #1858
+    current_channel=$(lancache_stack_pointer_channel_for "$LANCACHE_IMAGE_CHANNEL") || exit $?
+    if [[ "$current_channel" != "$LANCACHE_IMAGE_CHANNEL" ]]; then
+        print_warn "LANCACHE_IMAGE_CHANNEL=${LANCACHE_IMAGE_CHANNEL} is now called ${current_channel}; using ${current_channel}."
+        LANCACHE_IMAGE_CHANNEL="$current_channel"
+    fi
+    print_ok "Using the channel already set via LANCACHE_IMAGE_CHANNEL=${LANCACHE_IMAGE_CHANNEL}."
+else
+    selectable=$(lancache_selectable_channels) || exit $?
+    retired=$(lancache_release_rows retired) || exit $?
+    # What: the default is SOT release.install_channel
+    # Why: maintainer 29.10.: latest, never nightly unwarned
+    # From: Issue #1683 | PR #1858
+    install_channel=$(lancache_sot_value install_channel release) || exit $?
+    list_has_line "$install_channel" "$selectable" \
+        || die "SOT release.install_channel '$install_channel' is not a channel setup.sh offers."
+    while IFS= read -r offered; do
+        if [[ "$offered" = "$install_channel" ]]; then
+            printf "  %s — tested releases; the recommended default.\n" "$offered"
+        else
+            printf "  %s — experimental daily builds; they may break; not for production.\n" "$offered"
+        fi
+    done <<< "$selectable"
+    printf "\n"
+
+    channel_hint=$(paste -sd/ <<< "$selectable")
+    while true; do
+        ask "Release channel [$channel_hint]" "$install_channel"
+        if list_has_line "${REPLY,,}" "$selectable"; then
+            LANCACHE_IMAGE_CHANNEL="${REPLY,,}"
+            # What: any other channel needs a second yes
+            # Why: untested builds never install unwarned
+            # From: Issue #1683 | PR #1858
+            if [[ "$LANCACHE_IMAGE_CHANNEL" != "$install_channel" ]]; then
+                print_warn "The $LANCACHE_IMAGE_CHANNEL channel is experimental: untested daily builds that may break the stack; not for production use."
+                confirm "Install from $LANCACHE_IMAGE_CHANNEL anyway? [y/N]" "N" || continue
+            fi
+            print_ok "Using the $LANCACHE_IMAGE_CHANNEL channel."
+            break
+        fi
+        # What: a retired name shows why it went
+        # Why: release-versioning asks for a clear answer
+        # From: Issue #1683 | PR #1858
+        reason=$(awk -v c="${REPLY,,}" '$1 == c { sub(/^[^ ]+ /, ""); print; exit }' <<< "$retired")
+        if [[ -n "$reason" ]]; then
+            print_error "The '${REPLY,,}' channel is no longer supported ($reason). Please answer one of: $channel_hint."
+        else
+            print_error "Please answer one of: $channel_hint."
+        fi
+    done
+fi
+
+# What: step 1b: setup runs from the channel's dir
+# Why: compose files and images from one ref at once
+# From: Issue #1683 | PR #1858
+if [[ "$WIZARD_INTROSPECT_MODE" != "1" ]]; then
+    install_repo_follow_channel "$LANCACHE_IMAGE_CHANNEL" "$@"
 fi
 
 # What: step 2: LAN IPs and HTTPS mode
@@ -8012,62 +8604,6 @@ while true; do
     is_positive_integer "$CACHE_MEM_MB" && break
     print_error "Please enter a positive integer (e.g. 512)."
 done
-
-# What: step 5: the image channel to install
-# Why: stable is the default; other channels warn
-# From: Issue #1683 | PR #1858
-print_step "Release channel"
-
-# What: a pre-set LANCACHE_IMAGE_CHANNEL skips the prompt
-# Why: the operator chose the channel before the start
-# From: Issue #1683 | PR #1858
-if [[ -n "${LANCACHE_IMAGE_CHANNEL:-}" ]]; then
-    validate_lancache_image_channel "$LANCACHE_IMAGE_CHANNEL"
-    print_ok "Using the channel already set via LANCACHE_IMAGE_CHANNEL=${LANCACHE_IMAGE_CHANNEL}."
-else
-    selectable=$(lancache_selectable_channels) || exit $?
-    retired=$(lancache_release_rows retired) || exit $?
-    # What: the default is SOT release.install_channel
-    # Why: maintainer 24.10.: stable, never nightly unwarned
-    # From: Issue #1683 | PR #1858
-    install_channel=$(lancache_sot_value install_channel release) || exit $?
-    list_has_line "$install_channel" "$selectable" \
-        || die "SOT release.install_channel '$install_channel' is not a channel setup.sh offers."
-    while IFS= read -r offered; do
-        if [[ "$offered" = "$install_channel" ]]; then
-            printf "  %s — tested releases; the recommended default.\n" "$offered"
-        else
-            printf "  %s — untested daily builds; they may break the stack.\n" "$offered"
-        fi
-    done <<< "$selectable"
-    printf "\n"
-
-    channel_hint=$(paste -sd/ <<< "$selectable")
-    while true; do
-        ask "Release channel [$channel_hint]" "$install_channel"
-        if list_has_line "${REPLY,,}" "$selectable"; then
-            LANCACHE_IMAGE_CHANNEL="${REPLY,,}"
-            # What: any other channel needs a second yes
-            # Why: untested builds never install unwarned
-            # From: Issue #1683 | PR #1858
-            if [[ "$LANCACHE_IMAGE_CHANNEL" != "$install_channel" ]]; then
-                print_warn "The $LANCACHE_IMAGE_CHANNEL channel holds untested daily builds; they may break the stack."
-                confirm "Install from $LANCACHE_IMAGE_CHANNEL anyway? [y/N]" "N" || continue
-            fi
-            print_ok "Using the $LANCACHE_IMAGE_CHANNEL channel."
-            break
-        fi
-        # What: a retired name shows why it went
-        # Why: release-versioning asks for a clear answer
-        # From: Issue #1683 | PR #1858
-        reason=$(awk -v c="${REPLY,,}" '$1 == c { sub(/^[^ ]+ /, ""); print; exit }' <<< "$retired")
-        if [[ -n "$reason" ]]; then
-            print_error "The '${REPLY,,}' channel is no longer supported ($reason). Please answer one of: $channel_hint."
-        else
-            print_error "Please answer one of: $channel_hint."
-        fi
-    done
-fi
 
 # What: step 6: scheduled updates by a host service
 # Why: Watchtower cannot verify health or roll back

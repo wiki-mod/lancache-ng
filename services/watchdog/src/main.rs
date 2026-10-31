@@ -17,17 +17,17 @@ use dhcproto::v4::{DhcpOption, Flags, Message, MessageType, OptionCode};
 use dhcproto::{Decodable, Decoder, Encodable, Encoder};
 
 use lancache_ng::config::{
-    self, DhcpMode, NatsLogin, NatsRoles, OutOfRange, PROXY_ACCESS_LOG_PATTERN, Uint, env_opt,
-    render_nats_conf,
+    self, DhcpMode, NatsLogin, NatsRoles, OutOfRange, PROXY_ACCESS_LOG_PATTERN,
+    SYSLOG_LINE_TEMPLATE, Uint, env_opt, render_nats_conf,
 };
 use lancache_ng::{
     ALARM_INGEST_PATH, ALARM_TOKEN_HEADER, Backoff, COMPOSE_PROJECT_LABEL, COMPOSE_SERVICE_LABEL,
     CaFiles, CertSpec, ClientCheck, ConflictCheck, DOCKER_UNIX_PREFIX, DesiredRunState,
     DesiredState, Detail, DiskHealth, DiskInfo, DockerApi, NetdataAlarm, Place, ProbeAnswer,
-    ProbeReport, ServiceHealth, WatchdogStatus, df, files_under, hex32, is_placeholder,
+    ProbeReport, ServiceHealth, WatchdogStatus, df, ensure_secret, files_under, hex32,
     metadata_if_present, need_secs, openssl_ca, openssl_leaf, openssl_x509, own, probe_health,
-    probe_health_tls, resolve_shared_secret, run_program, sha256_hex, shared_secret_file_name,
-    terminate, unix_nanos, unix_secs, write_file, write_if_changed,
+    probe_health_tls, rrset_replace, rrsets_patch, run_program, sha256_hex,
+    shared_secret_file_name, terminate, unix_nanos, unix_secs, write_file, write_if_changed,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -95,7 +95,7 @@ fn read_knob(
 }
 
 // What: settings from an env reader, plus startup warnings.
-// Why: Err is fatal; a reader arg keeps tests env-free.
+// Why: Err is fatal; the reader is injected, not read here.
 // From: Issue #849 | PR #1912
 fn load_settings(env: impl Fn(&str) -> Option<String>) -> Result<(Settings, Vec<String>), String> {
     let get = |name: &str| config::opt(&env, name);
@@ -1039,13 +1039,20 @@ struct Timing {
 }
 
 impl Timing {
+    // What: the supervisor tick from the env, seconds.
+    // Why: the loop and the dhcp probe poll by one period.
+    // From: Issue #1683 | PR #1912
+    fn read_tick() -> Result<Duration, String> {
+        bounded("SUPERVISE_TICK", 1, u32::MAX.into()).map(Duration::from_secs)
+    }
+
     // What: every supervisor time from the env, seconds.
     // Why: a missing or junk value stops the supervisor.
     // From: Issue #1683 | PR #1912
     fn load() -> Result<Self, String> {
         let secs = |key| bounded(key, 1, u32::MAX.into()).map(Duration::from_secs);
         Ok(Self {
-            tick: secs("SUPERVISE_TICK")?,
+            tick: Self::read_tick()?,
             backoff: Backoff::load(&config::process_env)?,
             backoff_reset: secs("SUPERVISE_BACKOFF_RESET")?,
             stop_grace: secs("SUPERVISE_STOP_GRACE")?,
@@ -1455,7 +1462,7 @@ fn syslog_ng_conf(
 options {{ create-dirs(yes); dir-group("{group}"); dir-perm(0750); group("{group}"); perm(0640); keep-hostname(yes); time-reap({reap}); }};
 source s_docker {{ network(transport("udp") port({port}) flags(syslog-protocol)); }};
 filter f_named {{ program("^[A-Za-z0-9_-]+$" type(pcre)){skip}; }};
-destination {SYSLOG_NG_DESTINATION} {{ file("{root}/${{PROGRAM}}/${{YEAR}}${{MONTH}}${{DAY}}.log" template("${{ISODATE}} ${{HOST}} ${{PROGRAM}}: ${{MSGONLY}}\n")); }};
+destination {SYSLOG_NG_DESTINATION} {{ file("{root}/${{PROGRAM}}/${{YEAR}}${{MONTH}}${{DAY}}.log" template("{SYSLOG_LINE_TEMPLATE}")); }};
 log {{ source(s_docker); filter(f_named); destination({SYSLOG_NG_DESTINATION}); }};
 "#
     ))
@@ -1523,6 +1530,11 @@ fn syslog_ng(ctx: &Ctx) -> Result<Run, String> {
 const NETDATA_CONF: &str =
     "[logs]\n    daemon = stderr\n    health = stderr\n    collector = off\n    access = off\n";
 
+// What: alarm token file name in the netdata config dir.
+// Why: sender conf reads it; the supervisor writes it.
+// From: Issue #858
+const NETDATA_TOKEN_FILE: &str = ".netdata-alarm-token";
+
 // What: netdata custom_sender that POSTs alarms to the ui.
 // Why: fields come from NetdataAlarm; no second list.
 // From: Issue #858
@@ -1555,7 +1567,7 @@ fn alarm_notify_conf(
         r#"SEND_CUSTOM="YES"
 DEFAULT_RECIPIENT_CUSTOM="{recipient}"
 _lancache_json_escape() {{
-  printf '%s' "$1" | tr -d '\n' | sed 's/\\/\\\\/g; s/"/\\"/g'
+  printf '%s' "$1" | tr -d '\000-\037' | sed 's/\\/\\\\/g; s/"/\\"/g'
 }}
 custom_sender() {{
   local token httpcode
@@ -1590,7 +1602,7 @@ fn web_log_conf(path: &str) -> Result<String, String> {
 // From: Issue #1683
 fn netdata(ctx: &Ctx) -> Result<Run, String> {
     let dir = PathBuf::from(ctx.need("NETDATA_CONFIG_DIR")?);
-    let token_file = dir.join(".netdata-alarm-token");
+    let token_file = dir.join(NETDATA_TOKEN_FILE);
     let sender = alarm_notify_conf(
         &ctx.need("NETDATA_ALARM_UI_URL")?,
         &token_file.display().to_string(),
@@ -1612,7 +1624,7 @@ fn netdata(ctx: &Ctx) -> Result<Run, String> {
             .map_err(|e| format!("cannot write {}: {e}", path.display()))
             .map(|_| path)
     };
-    let token_file = put(".netdata-alarm-token", &token, 0o600)?;
+    let token_file = put(NETDATA_TOKEN_FILE, &token, 0o600)?;
     own(
         &token_file,
         Some(account_id("passwd", "netdata")?),
@@ -1905,14 +1917,7 @@ fn stack_secret(var: &str, file: &str, make: fn() -> String) -> Result<String, S
     let need = |key: &str| config::need(&config::process_env, key);
     let dir = need("LANCACHE_SHARED_SECRET_DIR")?;
     let gid = config::runtime_gid()?;
-    let configured = env_opt(var).unwrap_or_default();
-    let current = if is_placeholder(&configured) {
-        ""
-    } else {
-        configured.as_str()
-    };
-    resolve_shared_secret(Path::new(&dir), file, current, gid, make)
-        .map_err(|e| format!("{var}: {e}"))
+    ensure_secret(Path::new(&dir), var, file, gid, make)
 }
 
 // What: the PowerDNS API key, at least 16 characters.
@@ -1995,10 +2000,8 @@ fn endpoint(raw: &str, key: &'static str) -> Result<std::net::SocketAddrV4, Stri
 // Why: a primary notifies and allows AXFR to each one.
 // From: Issue #1683 | PR #1912
 fn notify_targets() -> Result<Vec<std::net::SocketAddrV4>, String> {
-    env_opt("DNS_XFR_NOTIFY_TARGETS")
-        .unwrap_or_default()
-        .split([',', ' '])
-        .filter(|t| !t.is_empty())
+    let raw = env_opt("DNS_XFR_NOTIFY_TARGETS").unwrap_or_default();
+    config::list_items(&raw)
         .map(|t| endpoint(t, "DNS_XFR_NOTIFY_TARGETS"))
         .collect()
 }
@@ -2649,10 +2652,7 @@ struct Upstream {
 // Why: setup.sh and operators write either separator.
 // From: Issue #1918 | PR #1858
 fn upstream_list(key: &str) -> Vec<String> {
-    env_opt(key)
-        .unwrap_or_default()
-        .split([' ', ','])
-        .filter(|item| !item.is_empty())
+    config::list_items(&env_opt(key).unwrap_or_default())
         .map(str::to_string)
         .collect()
 }
@@ -3065,6 +3065,14 @@ fn nats_subscriber(ctx: &Ctx) -> Result<Run, String> {
             ),
         ),
     ];
+    // What: record writes on unless node is a secondary
+    // Why: one owner, the role; a secondary copies by AXFR.
+    // From: Issue #1683 | PR #1858
+    let role = dns_role(&ctx.need("DNS_REPLICATION_ROLE")?)?;
+    env.push((
+        "NATS_RECORD_WRITES".to_string(),
+        (role == DnsRole::Primary).to_string(),
+    ));
     // What: writer's NATS password from the shared file.
     // Why: a remote secondary has its own; no file is used.
     // From: Issue #1683 | PR #1912
@@ -3111,11 +3119,13 @@ async fn soa_bump(
         .parse()
         .map_err(|e| format!("{zone} SOA minimum {minimum} is no number: {e}"))?;
     let name = config::canonical_zone(zone);
-    let body = serde_json::json!({"rrsets": [{
-        "name": name, "type": "SOA", "ttl": ttl, "changetype": "REPLACE",
-        "records": [{"content": format!("{mname} {rname} {next} {refresh} {retry} {expire} {minimum}"),
-                     "disabled": false}]
-    }]});
+    let content = format!("{mname} {rname} {next} {refresh} {retry} {expire} {minimum}");
+    let body = rrsets_patch(vec![rrset_replace(
+        &name,
+        "SOA",
+        ttl,
+        Some(serde_json::json!([{"content": content, "disabled": false}])),
+    )]);
     let url = config::zone_url(root, zone);
     let response = pdns
         .call(reqwest::Method::PATCH, &url, Some(body.to_string()))
@@ -3164,6 +3174,11 @@ async fn soa_upkeep() -> Result<(), String> {
 // Why: the healthcheck and the configs name one socket.
 // From: Issue #1683 | PR #1912
 const KEA4_SOCKET_KEY: &str = "KEA4_SOCKET";
+
+// What: env key of the Kea Control Agent port.
+// Why: the agent config and the healthcheck name one port.
+// From: Issue #1683 | PR #1912
+const KEA_CTRL_PORT_KEY: &str = "KEA_CTRL_PORT";
 
 // What: Kea render values: sockets, hook, fence, logs.
 // Why: the SOT owns each value; Rust names only keys.
@@ -3266,8 +3281,7 @@ fn find_file(dir: &Path, name: &str, depth: u32) -> Option<PathBuf> {
 // From: Issue #1683
 fn dhcp_ntp_servers(raw: &str, port: u16) -> Result<Vec<std::net::Ipv4Addr>, String> {
     use std::net::ToSocketAddrs as _;
-    raw.split([',', ' '])
-        .filter(|s| !s.is_empty())
+    config::list_items(raw)
         .map(|host| {
             if let Ok(ip) = host.parse() {
                 return Ok(ip);
@@ -3543,7 +3557,7 @@ fn kea_ctrl_agent(ctx: &Ctx) -> Result<Run, String> {
         &shared_secret_file_name("KEA_CTRL_TOKEN"),
         hex32,
     )?;
-    let port_number = env_port("KEA_CTRL_PORT")?;
+    let port_number = env_port(KEA_CTRL_PORT_KEY)?;
     let port = port_number.to_string();
     kea_ctrl_fence(&port, &kea)?;
     let conf = serde_json::json!({
@@ -3946,10 +3960,12 @@ fn nginx_refuse(loopback: &str) -> String {
 // From: Issue #1683 | PR #1912
 const NGINX_DISCARD_PORT: u16 = 9;
 
-// What: the CDN origin's HTTPS port that passthrough uses.
-// Why: the protocol fixes it; it is no deployment value.
+// What: the CDN origin target that passthrough uses.
+// Why: the SOT owns the port; ci.sh checks the same value.
 // From: Issue #1683 | PR #1858
-const NGINX_ORIGIN_PASS: &str = "$ssl_preread_server_name:443";
+fn nginx_origin_pass(ports: NginxPorts) -> String {
+    format!("$ssl_preread_server_name:{}", ports.origin)
+}
 
 // What: loopback ports and relay timeouts of https.
 // Why: the SOT owns them; dispatch and listens use them.
@@ -3961,6 +3977,7 @@ struct NginxPorts {
     passthrough_relay: u16,
     passthrough: u16,
     https: u16,
+    origin: u16,
     connect_secs: u64,
     idle_secs: u64,
 }
@@ -3974,6 +3991,7 @@ impl NginxPorts {
             passthrough_relay: env_port("NGINX_PASSTHROUGH_RELAY_PORT")?,
             passthrough: env_port("NGINX_PASSTHROUGH_PORT")?,
             https: env_port("PROXY_HTTPS_PORT")?,
+            origin: env_port("NGINX_ORIGIN_HTTPS_PORT")?,
             connect_secs: secs("NGINX_UPSTREAM_CONNECT_TIMEOUT")?,
             idle_secs: secs("NGINX_UPSTREAM_IDLE_TIMEOUT")?,
         })
@@ -4097,7 +4115,8 @@ fn nginx_stream_targets(
     acl: &Path,
     ports: NginxPorts,
 ) -> String {
-    let pass = NGINX_ORIGIN_PASS;
+    let pass = nginx_origin_pass(ports);
+    let pass = pass.as_str();
     let refuse = nginx_refuse(loopback);
     let mut out = format!(
         "{NGINX_GENERATED}map $ssl_preread_server_name $stream_backend {{\n    hostnames;\n{}",
@@ -4213,6 +4232,7 @@ fn nginx_https_dispatch(
     // From: Issue #1683 | PR #1912
     let (acl, mitm_port, https) = (acl.display(), ports.mitm, ports.https);
     let timeouts = nginx_relay_timeouts(ports);
+    let origin = nginx_origin_pass(ports);
     out.push_str(&format!(
         "    default {default};\n}}\n\n\
          server {{\n    listen {https};\n    listen [::]:{https};\n    include {acl};\n    \
@@ -4222,7 +4242,7 @@ fn nginx_https_dispatch(
          proxy_protocol on;\n    proxy_pass {loopback}:{mitm_port};\n\
          {timeouts}}}\n\n\
          server {{\n    listen {passthrough} proxy_protocol;\n    set_real_ip_from {loopback};\n    \
-         ssl_preread on;\n    proxy_pass {NGINX_ORIGIN_PASS};\n\
+         ssl_preread on;\n    proxy_pass {origin};\n\
          {timeouts}}}\n"
     ));
     out
@@ -4550,7 +4570,7 @@ fn nginx(ctx: &Ctx) -> Result<Run, String> {
     let worker_gid = account_id("group", &worker)?;
     let hosts = cdn_hosts(
         &read(&domains_file)?,
-        &Psl::parse(&read(&dir.join("public_suffix_list.dat"))?),
+        &Psl::parse(&read(&dir.join(ctx.need("NGINX_PSL_FILE")?))?),
     );
     let https = dir.join("conf.d/https.conf");
     let listen_file = ctx.need("NGINX_HTTPS_LISTEN_FILE")?;
@@ -5178,7 +5198,7 @@ async fn probe_upkeep() -> Result<(), String> {
             .ok()
             .map(|a| a.id)
     };
-    let tick = bounded("SUPERVISE_TICK", 1, u32::MAX.into()).map(Duration::from_secs)?;
+    let tick = Timing::read_tick()?;
     let mut answered = read_id();
     loop {
         tokio::time::sleep(tick).await;
@@ -5485,7 +5505,7 @@ async fn healthcheck() -> Result<(), String> {
     // From: Issue #1683 | PR #1912
     for (kind, key) in [
         (Kind::NatsSubscriber, ROLLBACK_PORT_KEY),
-        (Kind::KeaCtrlAgent, "KEA_CTRL_PORT"),
+        (Kind::KeaCtrlAgent, KEA_CTRL_PORT_KEY),
     ] {
         if status.running.iter().any(|name| name == kind.name()) {
             let addr = format!("{}:{}", config::loopback()?, env_port(key)?);
@@ -5532,7 +5552,7 @@ async fn healthcheck() -> Result<(), String> {
 }
 
 // What: the verdict for one status at one time.
-// Why: pure, so tests feed it any status and clock.
+// Why: pure; the caller supplies status and clock.
 // From: Issue #1683 | PR #1912
 fn health_verdict(status: &SuperviseStatus, now: u64, max_age: u64) -> Result<(), String> {
     let age = now.saturating_sub(status.updated);
@@ -5574,501 +5594,5 @@ async fn main() {
     if let Err(e) = result {
         log_err(&format!("FATAL: {e}"));
         std::process::exit(1);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // What: syslog-ng time-reap seconds of the tests.
-    // Why: the render copies it; any value does.
-    // From: Issue #1683 | PR #1912
-    const REAP: u64 = 7;
-
-    // What: a fresh random number in [lo, hi].
-    // Why: no fixed value in a test; each run differs.
-    // From: Issue #1683 | PR #1858
-    fn rnd(lo: u64, hi: u64) -> u64 {
-        use std::hash::{BuildHasher as _, Hasher as _};
-        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
-        h.write_u128(lancache_ng::unix_nanos());
-        match (hi - lo).checked_add(1) {
-            Some(span) => lo + h.finish() % span,
-            None => h.finish(),
-        }
-    }
-
-    // What: a fresh name, never a fixed word.
-    // Why: no test value stands in for an owner's value.
-    // From: Issue #1683 | PR #1858
-    fn gen_name() -> String {
-        format!("v{:x}", rnd(0, u64::MAX))
-    }
-
-    // What: deleting or packing old logs is no loss.
-    // Why: only a plain-file write clears the loss alarm.
-    // From: Issue #1428 | PR #1912
-    #[test]
-    fn newest_write_ignores_deleted_old_files() {
-        let root = scratch();
-        let (old, new) = (root.join(gen_name()), root.join(gen_name()));
-        fs::write(&old, gen_name()).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(20));
-        fs::write(&new, gen_name()).unwrap();
-        let before = newest_write(&root);
-        assert!(before > 0);
-        fs::remove_file(&old).unwrap();
-        assert_eq!(newest_write(&root), before);
-        std::thread::sleep(std::time::Duration::from_millis(20));
-        let packed = root.join(format!("{}{XZ_SUFFIX}", gen_name()));
-        fs::write(&packed, gen_name()).unwrap();
-        assert_eq!(newest_write(&root), before);
-        std::thread::sleep(std::time::Duration::from_millis(20));
-        fs::write(&new, gen_name()).unwrap();
-        assert!(newest_write(&root) > before);
-        assert_eq!(newest_write(&root.join(gen_name())), 0);
-        fs::remove_dir_all(&root).unwrap();
-    }
-
-    // What: restart at threshold; inert reads never count.
-    // Why: restarting an unreachable service is unsafe.
-    // From: Issue #1683 | PR #1858
-    #[test]
-    fn counters_restart_at_threshold_and_recover_once() {
-        let n = rnd(2, u8::MAX.into()) as u32;
-        let inert = [
-            Reading::Starting,
-            Reading::None,
-            Reading::Unreachable,
-            Reading::Degraded,
-        ];
-        for reading in inert {
-            let mut counter = Counter(n - 1);
-            assert_eq!(counter.observe(&reading, n), Event::None);
-            assert_eq!(counter.0, n - 1);
-        }
-        let mut counter = Counter::default();
-        for i in 1..n {
-            assert_eq!(counter.observe(&Reading::Unhealthy, n), Event::Failing(i));
-        }
-        assert_eq!(counter.observe(&Reading::Unhealthy, n), Event::Restart);
-        assert_eq!(counter.0, 0);
-        counter.0 = n - 1;
-        assert_eq!(counter.observe(&Reading::Healthy, n), Event::Recovered);
-        assert_eq!(counter.observe(&Reading::Healthy, n), Event::None);
-
-        let k = rnd(1, u8::MAX.into()) as u32;
-        for i in 1..=k {
-            assert_eq!(counter.observe_alert(false), Event::Failing(i));
-        }
-        assert_eq!(counter.observe_alert(true), Event::Recovered);
-        assert_eq!(counter.observe_alert(true), Event::None);
-    }
-
-    // What: chronyd follows the saved flag and the dock.
-    // Why: the ui is dumb; the supervisor converges NTP.
-    // From: Issue #1437 | PR #1912
-    #[test]
-    fn chronyd_follows_the_setting_and_desired_state() {
-        let root = scratch();
-        let ctx = Ctx {
-            run_dir: root.join(gen_name()),
-            settings_file: Some(root.join(gen_name())),
-            desired_file: Some(root.join(gen_name())),
-        };
-        let set = |on: bool, desired: &str| {
-            fs::write(
-                ctx.settings_file.as_ref().expect("settings path"),
-                format!("NTP_ENABLED={}\n", u8::from(on)),
-            )
-            .expect("settings");
-            fs::write(ctx.desired_file.as_ref().expect("desired path"), desired).expect("desired");
-            Kind::Chronyd.wanted(&ctx)
-        };
-        assert!(set(true, "{}"));
-        assert!(set(true, r#"{"ntp":"running"}"#));
-        assert!(!set(true, r#"{"ntp":"stopped"}"#));
-        assert!(!set(false, r#"{"ntp":"running"}"#));
-        assert!(Kind::SyslogNg.wanted(&ctx) && Kind::Netdata.wanted(&ctx));
-    }
-
-    // What: web_log job parses the proxy's syslog lines.
-    // Why: a wrong pattern collects nothing, fails quiet.
-    // From: Issue #1683 | PR #1912
-    #[test]
-    fn web_log_job_reads_the_proxy_syslog_files() {
-        let path = format!("/{}/{}/*.log", gen_name(), gen_name());
-        let conf = web_log_conf(&path).expect("conf");
-        assert!(conf.contains(&format!("    path: {path}\n    log_type: regexp\n")));
-        assert!(conf.contains(&format!("      pattern: '{PROXY_ACCESS_LOG_PATTERN}'\n")));
-        let nginx =
-            fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../proxy/nginx.conf"))
-                .expect("nginx.conf");
-        assert!(nginx.contains(
-            "log_format cache '$remote_addr - [$time_local] \"$request\" '\n                     '$status $body_bytes_sent '\n                     '\"$upstream_cache_status\" \"$host\"';"
-        ));
-        assert!(nginx.contains("access_log /dev/stdout cache;"));
-        let syslog = syslog_ng_conf(514, "/r", "g", &[], REAP).expect("conf");
-        assert!(syslog.contains(r#"template("${ISODATE} ${HOST} ${PROGRAM}: ${MSGONLY}\n")"#));
-        for bad in ["relative.log", "/a b", "/a'b", "/a\nb"] {
-            assert!(web_log_conf(bad).is_err(), "{bad:?}");
-        }
-    }
-
-    // What: health is red when stale or a program is down.
-    // Why: Docker health must cover every program inside.
-    // From: Issue #1683
-    #[test]
-    fn health_needs_a_fresh_status_and_no_program_down() {
-        let max_age = rnd(1, DAY);
-        let now = rnd(max_age + 1, DAY + max_age);
-        let fresh = SuperviseStatus {
-            updated: now - rnd(0, max_age),
-            ..SuperviseStatus::default()
-        };
-        assert!(health_verdict(&fresh, now, max_age).is_ok());
-        let stale = SuperviseStatus {
-            updated: now - max_age - 1,
-            ..SuperviseStatus::default()
-        };
-        assert!(health_verdict(&stale, now, max_age).is_err());
-        let name = gen_name();
-        let down = SuperviseStatus {
-            down: vec![name.clone()],
-            ..fresh
-        };
-        assert!(
-            health_verdict(&down, now, max_age)
-                .expect_err("down")
-                .contains(&name)
-        );
-    }
-
-    // What: disk colors follow the warn and alarm limits.
-    // Why: alarm outranks warn; equal to a limit counts.
-    // From: Issue #1683 | PR #1858
-    #[test]
-    fn disk_status_follows_the_limits() {
-        let warn = rnd(1, u64::from(u32::MAX) / 2) as u32;
-        let alarm = rnd(u64::from(warn) + 1, u64::from(u32::MAX) - 1) as u32;
-        assert_eq!(disk_status(warn - 1, warn, alarm), "green");
-        assert_eq!(disk_status(warn, warn, alarm), "yellow");
-        assert_eq!(disk_status(alarm - 1, warn, alarm), "yellow");
-        assert_eq!(disk_status(alarm, warn, alarm), "red");
-        assert_eq!(disk_status(alarm + 1, warn, alarm), "red");
-    }
-
-    // What: the timestamp keeps its fixed UTC shape.
-    // Why: status.json's `updated` field is a contract.
-    // From: Issue #1683 | PR #1858
-    #[test]
-    fn stamp_has_the_fixed_shape() {
-        let secs = rnd(0, i32::MAX as u64) as i64;
-        let at = OffsetDateTime::from_unix_timestamp(secs).expect("time");
-        let want = format!(
-            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-            at.year(),
-            u8::from(at.month()),
-            at.day(),
-            at.hour(),
-            at.minute(),
-            at.second()
-        );
-        assert_eq!(stamp(at), want);
-    }
-
-    // What: a canonical scratch root for one test.
-    // Why: targets resolve symlinks; the prefix must too.
-    // From: Issue #1683 | PR #1858
-    fn scratch() -> PathBuf {
-        fs::canonicalize(lancache_ng::unique_temp_dir(&gen_name())).expect("scratch root")
-    }
-
-    // What: retention settings on a scratch tree.
-    // Why: each test owns its paths and fresh limits.
-    // From: Issue #1683 | PR #1858
-    fn scratch_retention(root: &Path) -> Retention {
-        let max_days = unix_secs() / DAY / 2;
-        let under = |prefix: &Path| prefix.join(gen_name()).display().to_string();
-        let (cache, syslog) = (root.join(gen_name()), root.join(gen_name()));
-        Retention {
-            interval: Duration::from_secs(rnd(DAY, 2 * DAY)),
-            cache_dir: under(&cache),
-            cache_prefix: cache,
-            cache_valid_days: rnd(1, max_days),
-            purge_stamp: root.join(gen_name()),
-            syslog_root: under(&syslog),
-            syslog_prefix: syslog,
-            syslog_days: rnd(1, max_days),
-            syslog_max_bytes: rnd(4, u16::MAX.into()),
-            syslog_cooldown: rnd(0, DAY),
-            syslog_stamp: root.join(gen_name()),
-        }
-    }
-
-    // What: a file of len bytes with mtime at epoch secs.
-    // Why: age tests need a known mtime, not a sleep.
-    // From: Issue #1683 | PR #1858
-    fn file_at(path: &Path, len: u64, mtime: u64) {
-        fs::create_dir_all(path.parent().expect("parent")).expect("parent dir");
-        fs::write(path, vec![0; len as usize]).expect("write");
-        let at = SystemTime::UNIX_EPOCH + Duration::from_secs(mtime);
-        fs::File::options()
-            .write(true)
-            .open(path)
-            .and_then(|f| f.set_modified(at))
-            .expect("set mtime");
-    }
-
-    // What: seconds that put a file past days whole days.
-    // Why: find -mtime +N needs more than N whole days.
-    // From: Issue #1683 | PR #1858
-    fn past(days: u64) -> u64 {
-        (days + 1) * DAY + rnd(1, DAY - 1)
-    }
-
-    // What: the stamp a run left, as a number.
-    // Why: the daily gate and retry read this value.
-    // From: Issue #1683 | PR #1858
-    fn stamp_of(path: &Path) -> u64 {
-        fs::read_to_string(path)
-            .expect("stamp")
-            .trim()
-            .parse()
-            .expect("number")
-    }
-
-    // What: purge deletes files past the limit, once a day.
-    // Why: newer files stay; a broken stamp must not block.
-    // From: Issue #1683 | PR #1858
-    #[test]
-    fn purge_deletes_past_the_limit_once_a_day() {
-        let root = scratch();
-        let r = scratch_retention(&root);
-        let dir = PathBuf::from(&r.cache_dir);
-        let old = dir.join(gen_name()).join(gen_name());
-        let new = dir.join(gen_name()).join(gen_name());
-        let (days, now) = (r.cache_valid_days, unix_secs());
-        file_at(&old, rnd(1, u8::MAX.into()), now - past(days));
-        file_at(
-            &new,
-            rnd(1, u8::MAX.into()),
-            now - days * DAY - rnd(0, DAY - 1),
-        );
-        purge_cache(&r, now);
-        assert!(!old.exists() && new.exists(), "wrong files purged");
-        assert_eq!(stamp_of(&r.purge_stamp), now);
-        file_at(&old, rnd(1, u8::MAX.into()), now - past(days));
-        purge_cache(&r, now + rnd(0, DAY - 1));
-        assert!(old.exists(), "a second purge within a day ran");
-        for broken in [gen_name(), (now + rnd(1, DAY)).to_string()] {
-            fs::write(&r.purge_stamp, &broken).expect("stamp");
-            purge_cache(&r, now);
-            assert!(!old.exists(), "stamp {broken} blocked the purge");
-            file_at(&old, rnd(1, u8::MAX.into()), now - past(days));
-        }
-        fs::remove_dir_all(&root).expect("remove scratch dir");
-    }
-
-    // What: age floor, then oldest-first to the budget.
-    // Why: a file written today stays even over budget.
-    // From: Issue #1683 | PR #1858
-    #[test]
-    fn syslog_prune_keeps_floor_budget_and_today() {
-        let root = scratch();
-        let r = scratch_retention(&root);
-        let dir = PathBuf::from(&r.syslog_root).join(gen_name());
-        let (aged, live) = (dir.join(gen_name()), dir.join(gen_name()));
-        let (older, newer) = (dir.join(gen_name()), dir.join(gen_name()));
-        let budget = r.syslog_max_bytes;
-        let live_len = rnd(1, budget / 2);
-        let newer_len = rnd(1, budget - live_len);
-        let older_len = rnd(budget - live_len - newer_len + 1, budget);
-        let quarter = DAY / 4;
-        let midnight = (unix_secs() / DAY - 1) * DAY;
-        let now = midnight + rnd(DAY / 2, DAY - 1);
-        let newer_at = midnight - rnd(1, quarter);
-        file_at(&aged, rnd(1, u8::MAX.into()), now - past(r.syslog_days));
-        file_at(&live, live_len, rnd(midnight, now));
-        file_at(&newer, newer_len, newer_at);
-        file_at(&older, older_len, newer_at - rnd(1, quarter));
-        prune_syslog(&r, now);
-        assert!(
-            !aged.exists() && !older.exists(),
-            "floor or budget not applied"
-        );
-        assert!(live.exists() && newer.exists(), "pruned beyond the budget");
-        assert_eq!(stamp_of(&r.syslog_stamp), now);
-        fs::remove_file(&newer).expect("remove");
-        let later = now + DAY + rnd(0, DAY);
-        file_at(
-            &live,
-            budget + rnd(1, budget),
-            rnd(later - later % DAY, later),
-        );
-        prune_syslog(&r, later);
-        assert!(live.exists(), "the file written today was pruned");
-        assert_eq!(stamp_of(&r.syslog_stamp), later + r.syslog_cooldown - DAY);
-        fs::remove_dir_all(&root).expect("remove scratch dir");
-    }
-
-    // What: closed files become .xz; today's stay plain.
-    // Why: syslog-ng still writes today's program files.
-    // From: Issue #1683 | PR #1912
-    #[test]
-    fn syslog_files_compress_to_xz_except_today() {
-        let root = scratch();
-        let r = scratch_retention(&root);
-        let dir = PathBuf::from(&r.syslog_root).join(gen_name());
-        let (closed, live) = (dir.join(gen_name()), dir.join(gen_name()));
-        let midnight = unix_secs() / DAY * DAY;
-        let now = midnight + rnd(1, DAY - 1);
-        let content: Vec<u8> = (0..rnd(1, u16::MAX.into()))
-            .map(|_| rnd(0, u8::MAX.into()) as u8)
-            .collect();
-        fs::create_dir_all(&dir).expect("dir");
-        fs::write(&closed, &content).expect("closed");
-        let at = SystemTime::UNIX_EPOCH + Duration::from_secs(midnight - rnd(1, DAY));
-        fs::File::options()
-            .write(true)
-            .open(&closed)
-            .and_then(|f| f.set_modified(at))
-            .expect("set mtime");
-        file_at(&live, rnd(1, u8::MAX.into()), rnd(midnight, now));
-        compress_syslog(&r, now);
-        let mut packed = closed.as_os_str().to_owned();
-        packed.push(XZ_SUFFIX);
-        let packed = PathBuf::from(packed);
-        assert!(!closed.exists() && live.exists(), "wrong file compressed");
-        let mut decoded = Vec::new();
-        let file = fs::File::open(&packed).expect("xz file");
-        io::Read::read_to_end(&mut liblzma::read::XzDecoder::new(file), &mut decoded)
-            .expect("xz decode");
-        assert_eq!(decoded, content);
-        compress_syslog(&r, now);
-        assert!(packed.exists(), "an .xz file was compressed again");
-    }
-
-    // What: the loop ends when stop fires mid-sleep
-    // Why: docker stop sends TERM; a hang ends in a kill
-    // From: Issue #1683 | PR #1858
-    #[tokio::test]
-    async fn retention_stops_at_once_mid_sleep() {
-        let r = scratch_retention(&scratch());
-        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
-        let run = tokio::spawn(async move {
-            run_retention(&r, async {
-                let _ = rx.await;
-            })
-            .await;
-        });
-        tokio::time::sleep(Duration::from_millis(rnd(1, u8::MAX.into()))).await;
-        tx.send(()).expect("stop");
-        tokio::time::timeout(Duration::from_secs(rnd(1, u8::MAX.into())), run)
-            .await
-            .expect("still running after stop")
-            .expect("retention task");
-    }
-
-    // What: a random IPv4 address for a proxy IP.
-    // Why: render tests must not depend on one address.
-    // From: Issue #1683 | PR #1912
-    fn gen_ipv4() -> std::net::Ipv4Addr {
-        std::net::Ipv4Addr::from(rnd(1, u32::MAX.into()) as u32)
-    }
-
-    // What: template keys, resolver tokens, account ids.
-    // Why: each feeds nginx or chown verbatim.
-    // From: Issue #1683 | PR #1912
-    #[test]
-    fn nginx_helpers_fill_strip_and_look_up() {
-        let [key, value] = std::array::from_fn(|_| gen_name());
-        let key = key.to_uppercase();
-        assert_eq!(
-            fill(
-                &format!("a ${{{key}}} $host ${{{key}}}"),
-                &[(key.as_str(), value.clone())]
-            ),
-            Ok(format!("a {value} $host {value}"))
-        );
-        assert!(fill(&format!("a ${{{key}}}"), &[]).is_err());
-        assert_eq!(fill("${host}", &[]), Ok("${host}".to_string()));
-        let ip = gen_ipv4().to_string();
-        assert_eq!(resolver_host(&format!("{ip}:53")), ip);
-        assert_eq!(resolver_host("[2001:db8::1]:53"), "2001:db8::1");
-        assert_eq!(resolver_host("2001:db8::1"), "2001:db8::1");
-        assert_eq!(account_id("passwd", "root"), Ok(0));
-        assert!(account_id("group", &gen_name()).is_err());
-    }
-
-    // What: restamp swaps keyed lines, keeps the rest.
-    // Why: a restored snapshot must use this start's key.
-    // From: Issue #1683 | PR #1912
-    #[test]
-    fn restamp_replaces_only_keyed_lines() {
-        let (old, new, other) = (gen_name(), gen_name(), gen_name());
-        let text = format!("a={other}\n  api_key: {old}\nb=1");
-        let out = restamp_lines(&text, &[("api_key:", format!("  api_key: {new}"))]);
-        assert_eq!(out, format!("a={other}\n  api_key: {new}\nb=1\n"));
-    }
-
-    // What: roles and IPv4 endpoints parse; others fail.
-    // Why: an unknown role or bad endpoint must not start.
-    // From: Issue #1683 | PR #1912
-    #[test]
-    fn dns_role_and_endpoint_parse() {
-        assert_eq!(dns_role("primary"), Ok(DnsRole::Primary));
-        assert_eq!(dns_role("secondary"), Ok(DnsRole::Secondary));
-        assert!(dns_role(&gen_name()).is_err());
-        let ip = gen_ipv4();
-        let port = rnd(1, u16::MAX.into()) as u16;
-        let got = endpoint(&format!("{ip}:{port}"), "K").expect("endpoint");
-        assert_eq!(got, std::net::SocketAddrV4::new(ip, port));
-        assert!(endpoint(&ip.to_string(), "K").is_err());
-        assert!(endpoint(&format!("{ip}:x"), "K").is_err());
-    }
-
-    // What: the date serial is YYMMDD000 below 2^31.
-    // Why: RFC 1982 compares serials in 32-bit space.
-    // From: Issue #1683 | PR #1912
-    #[test]
-    fn date_serial_has_the_date_shape() {
-        let serial = date_serial();
-        assert_eq!(serial % 1000, 0);
-        assert!(serial < 1 << 31);
-        let day = (serial / 1000) % 100;
-        let month = (serial / 100_000) % 100;
-        assert!((1..=31).contains(&day) && (1..=12).contains(&month));
-    }
-
-    // What: a changed watched file changes the print.
-    // Why: that difference is what restarts a program.
-    // From: Issue #1683 | PR #1912
-    #[test]
-    fn fingerprint_sees_a_changed_file() {
-        let dir = scratch();
-        let file = dir.join(gen_name());
-        let files = vec![file.clone()];
-        let absent = fingerprint(&files);
-        fs::write(&file, gen_name()).expect("write");
-        let first = fingerprint(&files);
-        assert_ne!(absent, first);
-        fs::write(&file, format!("{}{}", gen_name(), gen_name())).expect("write");
-        assert_ne!(first, fingerprint(&files));
-    }
-
-    // What: files are found below a dir, depth limited.
-    // Why: the Kea hook path differs per build.
-    // From: Issue #1683 | PR #1912
-    #[test]
-    fn find_file_walks_down_to_its_depth() {
-        let root = scratch();
-        let deep = root.join("a").join("b");
-        fs::create_dir_all(&deep).expect("dirs");
-        let name = gen_name();
-        fs::write(deep.join(&name), "").expect("file");
-        assert_eq!(find_file(&root, &name, 2), Some(deep.join(&name)));
-        assert_eq!(find_file(&root, &name, 1), None);
     }
 }

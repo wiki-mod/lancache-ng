@@ -402,13 +402,13 @@ SOT `.github/yaml/build-manifest.yml` (services, `build_toolchain`,
 Required rules:
 
 - first-party runtime images are promoted as one stack package set
-- `latest` means the latest stable release only
-- `nightly` is the tested pre-stable channel from `current_dev`, moved once a
+- `latest` is the channel from `master`; release tags `vX.Y.Z` move it
+- `nightly` is the experimental channel from `current_dev`, moved once a
   day and on demand by `.github/workflows/nightly.yml` after validation, never
   rebuilt there (formerly `edge`; see `docs/release-versioning.md`, the
   authoritative source for this channel's semantics, for the full history)
 - release candidates use `vX.Y.Z-rc.N` and must be GitHub prereleases
-- stable releases use `vX.Y.Z` and may move `latest`
+- releases use `vX.Y.Z` and may move `latest`
 - every job after the first runs in the build-tools image the first job
   resolved to a digest (`ci.sh build-tools resolve-image`); only that first job
   and the jobs that must run when it failed name the mutable

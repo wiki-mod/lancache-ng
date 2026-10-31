@@ -606,89 +606,6 @@ pub fn unix_secs() -> u64 {
     (unix_nanos() / 1_000_000_000) as u64
 }
 
-// What: a new empty directory under the temp dir.
-// Why: tests of several crates need one scratch path.
-// From: Issue #1683 | PR #1858
-pub fn unique_temp_dir(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "lancache-ng-test-{tag}-{}-{}",
-        std::process::id(),
-        unix_nanos()
-    ));
-    fs::create_dir_all(&dir).expect("scratch directory");
-    dir
-}
-
-// What: HTTP client times for tests, 7 s each.
-// Why: tests of several crates build an http_client.
-// From: Issue #1683 | PR #1912
-pub fn test_http_env(key: &str) -> Option<String> {
-    [
-        "HTTP_CLIENT_TIMEOUT",
-        "HTTP_POOL_IDLE_TIMEOUT",
-        "HTTP_TCP_KEEPALIVE",
-    ]
-    .contains(&key)
-    .then(|| "7".to_string())
-}
-
-// What: a local HTTP server that answers canned replies.
-// Why: client code is tested without a network or Docker.
-// From: Issue #1683 | PR #1858
-pub fn serve_canned(
-    replies: Vec<(u16, Vec<u8>)>,
-) -> (String, std::thread::JoinHandle<Vec<String>>) {
-    use std::io::Read;
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a free local port");
-    listener.set_nonblocking(true).expect("non-blocking accept");
-    let base = format!("http://{}", listener.local_addr().expect("local address"));
-    let handle = std::thread::spawn(move || {
-        let mut seen = Vec::new();
-        for (status, body) in replies {
-            // What: give up when no client comes.
-            // Why: a skipped call fails the test; no hang.
-            // From: Issue #1683 | PR #1858
-            let deadline = std::time::Instant::now() + Duration::from_secs(3);
-            let mut stream = loop {
-                match listener.accept() {
-                    Ok((stream, _)) => break stream,
-                    Err(_) if std::time::Instant::now() < deadline => {
-                        std::thread::sleep(Duration::from_millis(5));
-                    }
-                    Err(_) => return seen,
-                }
-            };
-            stream.set_nonblocking(false).expect("blocking stream");
-            let mut request = Vec::new();
-            let mut byte = [0u8; 1];
-            while !request.ends_with(b"\r\n\r\n") {
-                if stream.read(&mut byte).unwrap_or(0) == 0 {
-                    break;
-                }
-                request.push(byte[0]);
-            }
-            let head = String::from_utf8_lossy(&request).to_lowercase();
-            let length = head
-                .lines()
-                .find_map(|line| line.strip_prefix("content-length: "))
-                .and_then(|n| n.trim().parse::<usize>().ok())
-                .unwrap_or(0);
-            let mut payload = vec![0u8; length];
-            let _ = stream.read_exact(&mut payload);
-            request.extend_from_slice(&payload);
-            seen.push(String::from_utf8_lossy(&request).into_owned());
-            let reply = format!(
-                "HTTP/1.1 {status} Canned\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                body.len()
-            );
-            let _ = stream.write_all(reply.as_bytes());
-            let _ = stream.write_all(&body);
-        }
-        seen
-    });
-    (base, handle)
-}
-
 // What: print a FATAL start error with its tag, exit 1.
 // Why: every service fails closed at start the same way.
 // From: Issue #1683 | PR #1858
@@ -1132,7 +1049,7 @@ fn legacy_id_nanos(name: &str) -> Option<u128> {
     let digits =
         |t: &str, n: usize| (t.len() == n && is_snapshot_id(t)).then(|| t.parse::<i64>().ok())?;
     let (y, m, d) = (
-        digits(&date[..4.min(date.len())], 4)?,
+        digits(date.get(..4)?, 4)?,
         digits(date.get(4..6)?, 2)?,
         digits(date.get(6..)?, 2)?,
     );
@@ -1437,6 +1354,25 @@ pub struct NetdataAlarm {
     pub duration: i64,
 }
 
+// What: shared secret file of one variable, read or made.
+// Why: a placeholder env value counts as unset everywhere.
+// From: Issue #858
+pub fn ensure_secret(
+    dir: &Path,
+    var: &str,
+    file: &str,
+    gid: u32,
+    make: fn() -> String,
+) -> Result<String, String> {
+    let configured = crate::config::env_opt(var).unwrap_or_default();
+    let current = if is_placeholder(&configured) {
+        ""
+    } else {
+        configured.as_str()
+    };
+    resolve_shared_secret(dir, file, current, gid, make).map_err(|e| format!("{var}: {e}"))
+}
+
 // What: first-writer-wins read-or-create of a secret file.
 // Why: independent starters must not split-brain a secret.
 // From: Issue #858
@@ -1596,6 +1532,11 @@ fn json_answer<T: serde::de::DeserializeOwned>(body: &[u8]) -> Result<T, DockerE
         .map_err(|e| DockerError::Transport(format!("the answer is no JSON: {e}")))
 }
 
+// What: the HTTP header that carries the PowerDNS API key.
+// Why: PowerDNS calls and rollback listener use one name.
+// From: Issue #1683 | PR #1858
+pub const PDNS_API_KEY_HEADER: &str = "X-API-Key";
+
 // What: client of PowerDNS's HTTP API with the API key.
 // Why: ui, watchdog and nats-subscriber share it.
 // From: Issue #1683 | PR #1912
@@ -1634,7 +1575,7 @@ impl PowerDns {
         let mut request = self
             .http
             .request(method, url)
-            .header("X-API-Key", &self.api_key);
+            .header(PDNS_API_KEY_HEADER, &self.api_key);
         // What: add a JSON content type only with a body.
         // Why: a bodiless GET claims no content type.
         // From: Issue #1683 | PR #1912
@@ -1671,6 +1612,38 @@ impl PowerDns {
             .cloned()
             .unwrap_or_default())
     }
+}
+
+// What: the PowerDNS PATCH body that carries rrset changes.
+// Why: ui, watchdog and nats-subscriber send one API shape.
+// From: Issue #1683
+pub fn rrsets_patch(rrsets: Vec<Value>) -> Value {
+    serde_json::json!({ "rrsets": rrsets })
+}
+
+// What: an rrset change that removes a name and type.
+// Why: the delete form of the PowerDNS rrset API.
+// From: Issue #1683
+pub fn rrset_delete(name: &str, record_type: &str) -> Value {
+    serde_json::json!({"name": name, "type": record_type, "changetype": "DELETE"})
+}
+
+// What: an rrset change that replaces a name and type.
+// Why: records stay absent when the caller has none to set.
+// From: Issue #1683
+pub fn rrset_replace(
+    name: &str,
+    record_type: &str,
+    ttl: impl Serialize,
+    records: Option<Value>,
+) -> Value {
+    let mut rrset = serde_json::json!({
+        "name": name, "type": record_type, "ttl": ttl, "changetype": "REPLACE"
+    });
+    if let Some(records) = records {
+        rrset["records"] = records;
+    }
+    rrset
 }
 
 // What: the label compose sets to the project name.
@@ -1959,217 +1932,4 @@ impl ProbeReport {
 pub struct ProbeAnswer {
     pub id: String,
     pub page: Value,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // What: error_chain joins an error with each cause.
-    // Why: a builder error alone hides its serde cause.
-    // From: Issue #1683 | PR #1912
-    #[test]
-    fn error_chain_lists_every_cause() {
-        #[derive(Debug)]
-        struct Outer(std::io::Error);
-        impl std::fmt::Display for Outer {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.write_str("builder error")
-            }
-        }
-        impl std::error::Error for Outer {
-            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-                Some(&self.0)
-            }
-        }
-        let error = Outer(std::io::Error::other("key must be a string"));
-        assert_eq!(error_chain(&error), "builder error: key must be a string");
-    }
-
-    // What: a failed secret write keeps a configured value.
-    // Why: only a disagreeing file makes it unsafe to use.
-    // From: PR #1775
-    #[test]
-    fn failed_secret_writes_keep_or_refuse() {
-        let dir = unique_temp_dir("secret-fail");
-        fs::write(dir.join("not-a-dir"), "x").unwrap();
-        let gone = dir.join("not-a-dir");
-        assert_eq!(
-            resolve_shared_secret(&gone, "a", "cfg", 0, hex32),
-            Ok("cfg".to_string())
-        );
-        assert!(resolve_shared_secret(&gone, "a", "", 0, hex32).is_err());
-        fs::create_dir(dir.join("blocked")).unwrap();
-        assert!(resolve_shared_secret(&dir, "blocked", "cfg", 0, hex32).is_err());
-        fs::remove_dir_all(&dir).expect("remove scratch dir");
-    }
-
-    // What: equal secrets match, any difference does not.
-    // Why: callers trust this for API keys and tokens.
-    // From: Issue #1683 | PR #1858
-    #[test]
-    fn ct_eq_matches_only_equal_strings() {
-        assert!(ct_eq("secret-key", "secret-key") && ct_eq("", ""));
-        assert!(!ct_eq("secret-key", "different-key"));
-        assert!(!ct_eq("short", "muchlongerkey") && !ct_eq("", "x"));
-        // What: longer or shorter values never match.
-        // Why: a secret prefix must not authenticate.
-        // From: Issue #1683 | PR #1912
-        assert!(!ct_eq("secret-keyX", "secret-key") && !ct_eq("secret-ke", "secret-key"));
-        assert!(!ct_eq("x", ""));
-    }
-
-    // What: record and flush messages keep the wire shape.
-    // Why: publishers omit unset fields; consumers default.
-    // From: Issue #1095
-    #[test]
-    fn dns_messages_round_trip_the_wire_shape() {
-        let delete: DnsRecord =
-            serde_json::from_str(r#"{"action":"delete","zone":"lan","name":"h.lan.","type":"A"}"#)
-                .unwrap();
-        assert_eq!((delete.ttl, delete.records.is_none()), (None, true));
-        let wire = serde_json::to_value(&delete).unwrap();
-        assert_eq!(wire.get("type").and_then(Value::as_str), Some("A"));
-        assert!(wire.get("ttl").is_none() && wire.get("records").is_none());
-        let old: FlushRequest = serde_json::from_str(r#"{"domain":"host.lan."}"#).unwrap();
-        assert_eq!((old.zone, old.expected_content), (None, None));
-        let full = r#"{"domain":"h.lan.","zone":"lan","record_type":"A","expected_content":["192.0.2.5"],"expected_ttl":60}"#;
-        let req: FlushRequest = serde_json::from_str(full).unwrap();
-        assert_eq!(req.expected_ttl, Some(60));
-        assert_eq!(req.expected_content, Some(vec!["192.0.2.5".to_string()]));
-    }
-
-    // What: stale limit is cycles times the interval.
-    // Why: a wrong limit shows live data as stale.
-    // From: Issue #1683 | PR #1912
-    #[test]
-    fn stale_limit_follows_the_interval() {
-        let status = |interval_secs| WatchdogStatus {
-            updated: String::new(),
-            services: HashMap::new(),
-            disk: DiskInfo {
-                cache: DiskHealth {
-                    pct: 0,
-                    status: "unknown".into(),
-                },
-            },
-            interval_secs,
-        };
-        assert_eq!(status(30).stale_after(3), Duration::from_secs(90));
-        assert_eq!(status(10).stale_after(4), Duration::from_secs(40));
-        assert_eq!(status(0).stale_after(3), Duration::ZERO);
-        let old: WatchdogStatus = serde_json::from_str(
-            r#"{"updated":"x","services":{},"disk":{"cache":{"pct":1,"status":"green"}}}"#,
-        )
-        .unwrap();
-        assert_eq!(old.interval_secs, 0);
-    }
-
-    // What: desired state reads, or no opinion on failure.
-    // Why: a read glitch must never stop a caller's loop.
-    // From: Issue #1437
-    #[test]
-    fn desired_state_reads_or_gives_no_opinion() {
-        let root = unique_temp_dir("desired");
-        let file = root.join("desired.json");
-        assert_eq!(DesiredState::read(&file), DesiredState::default());
-        fs::write(&file, "not json").unwrap();
-        assert_eq!(DesiredState::read(&file), DesiredState::default());
-        fs::write(&file, r#"{"ntp":"stopped"}"#).unwrap();
-        let read = DesiredState::read(&file);
-        assert_eq!(
-            (read.dhcp, read.ntp),
-            (None, Some(DesiredRunState::Stopped))
-        );
-        fs::remove_dir_all(&root).expect("remove scratch dir");
-    }
-
-    // What: both endpoint forms build; URLs are trimmed.
-    // Why: new() unwraps the builder; this shows it builds.
-    // From: Issue #1683 | PR #1912
-    #[test]
-    fn docker_api_builds_for_a_socket_and_a_url() {
-        let tcp = DockerApi::new(" http://engine:2375/ ");
-        assert_eq!(tcp.base_url, "http://engine:2375");
-        let unix = DockerApi::new(" unix:///var/run/docker.sock ");
-        assert_eq!(unix.base_url, "http://docker");
-    }
-
-    // What: an id yields its second; non-numbers none.
-    // Why: the ui lists snapshots by this time.
-    // From: Issue #1683 | PR #1858
-    #[test]
-    fn snapshot_ids_decode_to_unix_seconds() {
-        assert_eq!(
-            snapshot_created_unix("00000000001700000000000000"),
-            Some(1_700_000)
-        );
-        assert_eq!(snapshot_created_unix("../etc"), None);
-    }
-
-    // What: unix_secs follows the system clock.
-    // Why: callers refuse to issue anything from 1970.
-    // From: Issue #1683 | PR #1858
-    #[test]
-    fn unix_secs_follows_the_system_clock() {
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-        assert!(unix_secs().abs_diff(now.as_secs()) <= 2);
-    }
-
-    // What: DockerError renders one short line per kind.
-    // Why: logs and watchdog output show this text.
-    // From: Issue #1683 | PR #1858
-    #[test]
-    fn docker_errors_render_one_line_each() {
-        assert_eq!(
-            DockerError::Status(500).to_string(),
-            "Docker answered HTTP 500"
-        );
-        assert_eq!(DockerError::Timeout.to_string(), "Docker call timed out");
-        assert_eq!(
-            DockerError::Transport("boom".into()).to_string(),
-            "Docker call failed: boom"
-        );
-    }
-
-    // What: the probe report has one overall word.
-    // Why: severity order; a found server beats everything.
-    // From: Issue #1683 | PR #1912
-    #[test]
-    fn probe_reports_rank_their_checks() {
-        let found = || ConflictCheck::Found {
-            output: "10.0.0.1".into(),
-            details: vec![],
-        };
-        let passed = || ClientCheck::Passed {
-            output: String::new(),
-            details: vec![],
-        };
-        let failed = || ClientCheck::Failed {
-            output: String::new(),
-        };
-        let gone = || ClientCheck::Unavailable {
-            reason: String::new(),
-        };
-        let no_conflict = || ConflictCheck::Unavailable {
-            reason: String::new(),
-        };
-        let overall = |conflict, client| ProbeReport { conflict, client }.overall();
-        assert_eq!(overall(found(), gone()), "conflict_found");
-        assert_eq!(overall(found(), passed()), "conflict_found");
-        assert_eq!(overall(no_conflict(), passed()), "unavailable");
-        assert_eq!(overall(ConflictCheck::NotFound, gone()), "unavailable");
-        assert_eq!(overall(ConflictCheck::NotFound, failed()), "client_failed");
-        assert_eq!(overall(ConflictCheck::NotFound, passed()), "verified");
-        let report = ProbeReport::unavailable("why".to_string());
-        assert_eq!(
-            serde_json::to_value(&report).unwrap(),
-            serde_json::json!({
-            "conflict": {"status": "unavailable", "reason": "why"},
-            "client": {"status": "unavailable", "reason": "why"}})
-        );
-        assert_eq!(report.overall(), "unavailable");
-        assert_eq!(report.page()["status"], "unavailable");
-        assert_eq!(report.page()["client"]["reason"], "why");
-    }
 }

@@ -3,8 +3,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Git ignore patterns for build artifacts, secrets, and generated files
 
-# Cache data - never commit
+# What: SOT state dirs of a checkout in its state root
+# Why: state, leases and the CA key do not belong in git
 data/
+/ca/
 /cache/
 /kea/
 /nats/
@@ -15,15 +17,18 @@ data/
 /syslog-ng/
 /cachehamster/
 
-# Environment files with secrets (root-level only)
+# What: install env files that hold credentials
+# Why: AG-SEC-003: credentials are never committed
 /.env
 deploy/prod/.env.local
 config/prod/*.local.env
 
-# Claude Code project settings
+# What: local Claude Code settings
+# Why: per-user tool state, not project content
 .claude/
 
-# OS
+# What: metadata files of the OS file browser
+# Why: macOS and Windows write them, not the project
 .DS_Store
 Thumbs.db
 
@@ -32,7 +37,8 @@ Thumbs.db
 # From: Issue #1095
 /target/
 
-# Editor
+# What: editor swap files and IDE settings
+# Why: per-user editor state, not project content
 *.swp
 *.swo
 .idea/

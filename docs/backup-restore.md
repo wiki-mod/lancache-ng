@@ -19,14 +19,16 @@ available for manual recovery.
 The setup script includes three backup-related flows:
 
 ```bash
-sudo /opt/lancache-ng/setup.sh update [install-dir]
-sudo /opt/lancache-ng/setup.sh backup [--config|--full] [install-dir] [--dest /backup/path]
-sudo /opt/lancache-ng/setup.sh restore <backup.tar.gz> [install-dir]
+sudo /opt/lancache-ng/current/setup.sh update [install-dir]
+sudo /opt/lancache-ng/current/setup.sh backup [--config|--full] [install-dir] [--dest /backup/path]
+sudo /opt/lancache-ng/current/setup.sh restore <backup.tar.gz> [install-dir]
 ```
 
 Archives go to `/var/backups/lancache-ng` unless `--dest` is given. Set `LANCACHE_BACKUP_ROOT` to move that default for every command, including the automatic pre-update backup that `update` and `auto-update` roll back from.
 
-`update` also updates the repository checkout itself when it sits on its default branch with no local changes: it takes the pre-update backup first, pulls, and continues with the pulled `setup.sh`. A failed update returns the checkout to its previous revision along with the restored configuration. A checkout on a tag, commit or other branch, or with local changes, is left where it is and the update says so.
+`update` also updates the repository checkout itself when it sits on its channel's branch with no changed tracked files (untracked state such as `ca/` does not count): it takes the pre-update backup first, pulls, and continues with the pulled `setup.sh`. A failed update returns the checkout to its previous revision along with the restored configuration. A checkout on another branch, or with changed tracked files, is left where it is and the update says so.
+
+The code of each channel has its own directory below the state root: `/opt/lancache-ng/latest` (from `master`) and `/opt/lancache-ng/nightly` (from `current_dev`); `/opt/lancache-ng/current` points to the one in use. When the channel changes, `update` moves the stack to the other directory and copies `deploy/prod/.env.local` and a compose override along. A failed move points `current` back, restores the pre-update backup and removes the copied files from the new directory. An old checkout cloned straight into `/opt/lancache-ng` moves the same way; after a successful move only its unchanged tracked files are removed, its data stays. If such a checkout still runs an older `setup.sh`, run `git -C /opt/lancache-ng pull` once before `setup.sh update`.
 
 The script verifies that required archive tools are present before running backup or restore. If `tar` or `rsync` is missing on an `apt-get` based system, the script installs the missing tool before it touches backup data. `restore` additionally requires `openssl`, since converging a legacy or incomplete `.env` (see "Restore also re-converges `.env`" below) can generate missing service secrets, which shells out to `openssl rand`.
 
@@ -71,17 +73,16 @@ The backup command stops the compose stack before copying mutable databases and 
 2. Restore the selected backup:
 
    ```bash
-   sudo /opt/lancache-ng/setup.sh restore /var/backups/lancache-ng/lancache-ng-config-YYYYMMDDTHHMMSSZ.tar.gz /opt/lancache-ng
+   sudo /opt/lancache-ng/current/setup.sh restore /var/backups/lancache-ng/lancache-ng-config-YYYYMMDDTHHMMSSZ.tar.gz /opt/lancache-ng
    ```
 
 3. Check the stack:
 
    ```bash
-   cd /opt/lancache-ng
-   sudo docker compose ps
+   sudo /opt/lancache-ng/current/setup.sh compose /opt/lancache-ng ps
    ```
 
-If a scheduled automatic update caused the failure, disable it first (set `AUTO_UPDATE_ENABLED=0` in `.env`, or answer "N" if re-running `setup.sh install`'s interactive prompt) before starting again, so the same update is not retried immediately -- the orchestrator's own health gate and automatic rollback should already have restored a known-good state, but this avoids the timer immediately re-triggering another attempt while you investigate. If the failure was caused by a bad first-party image, `restore`'s `.env` convergence step (see "Restore also re-converges `.env`" below) already keeps the backup's own `LANCACHE_IMAGE_TAG` instead of re-resolving it, so restoring the automatic pre-update backup restarts the stack on the previous known-good tag automatically. To roll back to a *different* revision than the one in that backup, inspect `image-revisions.txt` inside the restored archive and set `LANCACHE_IMAGE_TAG` in `.env` to the desired `sha-*`, release candidate, or stable release tag, then run `setup.sh update [install-dir]` to apply it.
+If a scheduled automatic update caused the failure, disable it first (set `AUTO_UPDATE_ENABLED=0` in `.env`, or answer "N" if re-running `setup.sh install`'s interactive prompt) before starting again, so the same update is not retried immediately -- the orchestrator's own health gate and automatic rollback should already have restored a known-good state, but this avoids the timer immediately re-triggering another attempt while you investigate. If the failure was caused by a bad first-party image, `restore`'s `.env` convergence step (see "Restore also re-converges `.env`" below) already keeps the backup's own `LANCACHE_IMAGE_TAG` instead of re-resolving it, so restoring the automatic pre-update backup restarts the stack on the previous known-good tag automatically. To roll back to a *different* revision than the one in that backup, inspect `image-revisions.txt` inside the restored archive and set `LANCACHE_IMAGE_TAG` in `.env` to the desired `sha-*`, release candidate, or `vX.Y.Z` release tag, then run `setup.sh update [install-dir]` to apply it.
 
 ## Restore also re-converges `.env`
 

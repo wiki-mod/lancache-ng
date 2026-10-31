@@ -9,7 +9,6 @@ use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use argon2::Argon2;
@@ -17,7 +16,7 @@ use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use futures_util::{StreamExt, stream};
 use lancache_ng::config::{env_opt, need, process_env, uint};
-use lancache_ng::{Place, is_placeholder, load_or_create_hex, write_file};
+use lancache_ng::{Place, is_placeholder, load_or_create_hex, need_secs, write_file};
 use serde::{Deserialize, Serialize};
 
 // What: sizes of master secret, salt and nonce in bytes.
@@ -30,10 +29,6 @@ const NONCE_LEN: usize = 24;
 // Why: persisted files must be found again after a restart.
 const MASTER_FILE: &str = "lancache-cachehamster-master.secret";
 const CREDENTIAL_FILE: &str = "lancache-cachehamster-credential.json";
-
-// What: throughput log period, 10 s; a justified literal.
-// Why: no config owner exists; it only paces a readout.
-const THROUGHPUT_EVERY: Duration = Duration::from_secs(10);
 
 // What: a credential as stored: salt, nonce, ciphertext.
 // Why: the plaintext must never reach the disk.
@@ -179,6 +174,11 @@ async fn main() -> Result<()> {
     // From: Issue #1683 | PR #1912
     let limit = uint(&process_env, "CACHEHAMSTER_CONCURRENCY", 1, u32::MAX.into())
         .map_err(anyhow::Error::msg)?;
+    // What: the throughput log period in seconds.
+    // Why: the SOT owns the period; Rust only reads it.
+    // From: Issue #871 | PR #1858
+    let every =
+        need_secs(&process_env, "CACHEHAMSTER_THROUGHPUT_INTERVAL").map_err(anyhow::Error::msg)?;
     let total = Arc::new(AtomicU64::new(0));
     // What: a client without a total request timeout.
     // Why: a large body streams longer than a 10 s limit.
@@ -199,7 +199,7 @@ async fn main() -> Result<()> {
         })
         .collect::<Vec<_>>();
     tokio::pin!(fetch);
-    let mut ticker = tokio::time::interval(THROUGHPUT_EVERY);
+    let mut ticker = tokio::time::interval(every);
     ticker.tick().await;
     let mut last = 0u64;
     let results = loop {
@@ -207,7 +207,7 @@ async fn main() -> Result<()> {
             results = &mut fetch => break results,
             _ = ticker.tick() => {
                 let now = total.load(Ordering::Relaxed);
-                let mbit = (now - last) as f64 * 8.0 / THROUGHPUT_EVERY.as_secs_f64() / 1_000_000.0;
+                let mbit = (now - last) as f64 * 8.0 / every.as_secs_f64() / 1_000_000.0;
                 tracing::info!(
                     bytes_total = now,
                     bytes_since_last = now - last,

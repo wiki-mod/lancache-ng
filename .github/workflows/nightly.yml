@@ -43,13 +43,28 @@ env:
   DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
   DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
   # What: LAN proxy CA secret; ci.sh uses it self-hosted.
-  # Why: secrets are not in CI_VARIABLES; vars are.
+  # Why: a secret is masked; ci.sh reads it by name.
   # From: Issue #1683 | PR #1858
   PROJECT_SELFHOSTED_PROXY_CA: ${{ secrets.PROJECT_SELFHOSTED_PROXY_CA }}
-  # What: all repo/org variables once, as json, for ci.sh.
-  # Why: ci.sh reads vars by name; YAML lists none of them.
+  # What: the repo variables ci.sh reads, one by name.
+  # Why: Fund 94: the all-vars json put LAN IPs in logs.
   # From: Issue #1683 | PR #1858
-  CI_VARIABLES: ${{ toJSON(vars) }}
+  CARGO_BUILD_JOBS: ${{ vars.CARGO_BUILD_JOBS }}
+  PROJECT_CARGO_LTO: ${{ vars.PROJECT_CARGO_LTO }}
+  PROJECT_CARGO_CODEGENUNIT: ${{ vars.PROJECT_CARGO_CODEGENUNIT }}
+  PROJECT_NIGHTLY_REF: ${{ vars.PROJECT_NIGHTLY_REF }}
+  PROJECT_SELFHOSTED_RUNNER_USAGE_CI: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI }}
+  SCCACHE_REDIS_MODE: ${{ vars.SCCACHE_REDIS_MODE }}
+  CI_RUST_VALIDATION: ${{ vars.CI_RUST_VALIDATION }}
+  PR_TITLE_LINT_MODE: ${{ vars.PR_TITLE_LINT_MODE }}
+  # What: LAN values only when self-hosted runners run.
+  # Why: a GitHub-hosted log must show no LAN address.
+  # From: Issue #1683 | PR #1858
+  PROJECT_SELFHOSTED_PROXY_HTTP: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && vars.PROJECT_SELFHOSTED_PROXY_HTTP || '' }}
+  PROJECT_SELFHOSTED_PROXY_HTTPS: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && vars.PROJECT_SELFHOSTED_PROXY_HTTPS || '' }}
+  PROJECT_SELFHOSTED_PROXY_EXCLUSION: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && vars.PROJECT_SELFHOSTED_PROXY_EXCLUSION || '' }}
+  SCCACHE_DIST_SCHEDULER_URL: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && vars.SCCACHE_DIST_SCHEDULER_URL || '' }}
+  DISTCC_POTENTIAL_HOSTS: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && vars.DISTCC_POTENTIAL_HOSTS || '' }}
 jobs:
   # What: resolve build-tools digest for nightly job
   # Why: nightly runs in build-tools, never on the runner.
@@ -69,6 +84,7 @@ jobs:
       validate-dir: ${{ steps.jobs.outputs.validate-dir }}
       check-channels: ${{ steps.channels.outputs.channels }}
       check-runner: ${{ steps.channels.outputs.runner }}
+      releases: ${{ steps.releases.outputs.releases }}
     # What: one mutable entry: the current_dev channel.
     # Why: ci.sh needs a container before steps run
     # From: Issue #1683 | PR #1858
@@ -103,6 +119,17 @@ jobs:
       - name: Resolve the job settings
         id: jobs
         run: bash .github/scripts/ci.sh job-settings
+      # What: read each SOT tool release once for the run.
+      # Why: hosted jobs share IPs and one anonymous limit.
+      # From: Issue #1683 | PR #1858
+      - name: Read the tool releases
+        id: releases
+        run: bash .github/scripts/ci.sh tool-releases
+        # What: the job token for the API fallback read.
+        # Why: anonymous reads hit the shared-IP rate limit.
+        # From: Issue #1683 | PR #1858
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       # What: channels and hosted runner of the check.
       # Why: ci.sh reads the SOT; YAML names no channel.
       # From: Issue #1683 | PR #1858
@@ -136,6 +163,8 @@ jobs:
       identities: ${{ steps.plan.outputs.identities }}
       matrix: ${{ steps.plan.outputs.matrix }}
       any-build: ${{ steps.plan.outputs.any-build }}
+      any-runner: ${{ steps.plan.outputs.any-runner }}
+      runners: ${{ steps.plan.outputs.runners }}
     steps:
       - *bootstrap
       # What: check out the commit the platform job resolved
@@ -168,13 +197,16 @@ jobs:
   build:
     name: build ${{ matrix.service }} ${{ matrix.arch }}
     needs: [platform, plan]
-    if: needs.plan.outputs.any-build == 'true'
+    # What: only pairs that need a platform runner.
+    # Why: §70 §71: a verified digest books no runner.
+    # From: Issue #1683 | PR #1858
+    if: needs.plan.outputs.any-runner == 'true'
     # What: each target and platform builds to its end.
     # Why: one red build must not cancel the other targets.
     # From: Issue #1683 | PR #1912
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+      matrix: ${{ fromJSON(needs.plan.outputs.runners) }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['build'] }}
     container:
@@ -186,7 +218,7 @@ jobs:
       env:
         CI_BUILD_TOOLS_IMAGE: ${{ needs.platform.outputs.image }}
     # What: cache secrets the build's set-runtime needs.
-    # Why: secrets never reach ci.sh through CI_VARIABLES.
+    # Why: secrets reach ci.sh only by name, masked.
     # From: Issue #1683 | PR #1912
     env:
       SCCACHE_REDIS_URL: ${{ secrets.SCCACHE_REDIS_URL }}
@@ -200,7 +232,7 @@ jobs:
         if: runner.arch == 'ARM64'
         uses: docker://mirror.gcr.io/alpine/git:latest
         with:
-          args: -c safe.directory=/github/workspace clone --quiet --depth 1 --branch=${{ vars.PROJECT_NIGHTLY_REF }} ${{ github.server_url }}/${{ github.repository }} /github/workspace
+          args: -c safe.directory=/github/workspace clone --depth 1 --branch=${{ vars.PROJECT_NIGHTLY_REF }} ${{ github.server_url }}/${{ github.repository }} /github/workspace
       - *channel_pin
       # What: export args for the GHA cache runtime step.
       # Why: ci.sh owns the kill timeout and the var list.
@@ -269,23 +301,21 @@ jobs:
         run: bash .github/scripts/ci.sh aggregate-stack
 
   # What: merge the platform digests into one index.
-  # Why: each accepted product needs an exact index.
+  # Why: ci.sh owns the merge; a red platform stays out.
   # From: Issue #1683 | PR #1858
   assemble:
     name: assemble
     needs: [platform, plan, build, scan, aggregate]
     if: >-
-      !cancelled() && needs.plan.result == 'success' &&
-      needs.scan.result == 'success' &&
-      (needs.plan.outputs.any-build == 'false' ||
-      needs.aggregate.result == 'success')
+      !cancelled() && needs.aggregate.result == 'success' &&
+      needs.plan.outputs.any-build == 'true'
     runs-on: ${{ needs.platform.outputs.runner }}
     timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['assemble'] }}
     container:
       image: ${{ needs.platform.outputs.image }}
       credentials: *ghcr_credentials
     # What: token for the platform-mismatch issues.
-    # Why: DoMe: a platform left out opens an issue.
+    # Why: a platform left out is tracked in an issue.
     # From: Issue #1683 | PR #1858
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -296,21 +326,21 @@ jobs:
         env:
           CI_BUILD_MATRIX: ${{ needs.scan.outputs.passed }}
           CI_RUN_IDENTITIES: *run_ids
-        run: bash .github/scripts/ci.sh assemble-stack --with-products
+        run: bash .github/scripts/ci.sh assemble-stack
 
   # What: validate full stack of accepted candidate
   # Why: AG-VAL-016; the shared dir keeps host paths.
   # From: Issue #1683 | PR #1912
   validate:
     name: validate
-    outputs:
-      candidate: ${{ steps.validate.outputs.candidate }}
     needs: [platform, plan, build, scan, aggregate, assemble]
-    # What: validate only after assembly succeeds.
-    # Why: every accepted product needs an index.
+    # What: quiet night, or what assemble accepted.
+    # Why: §54.1; a red platform blocks no other.
     # From: Issue #1683 | PR #1858
     if: >-
-      !cancelled() && needs.assemble.result == 'success'
+      !cancelled() &&
+      (needs.plan.outputs.any-build == 'false' ||
+      needs.assemble.result == 'success')
     runs-on: ${{ needs.platform.outputs.runner }}
     timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['validate'] }}
     container:
@@ -318,6 +348,8 @@ jobs:
       credentials: *ghcr_credentials
       volumes:
         - ${{ needs.platform.outputs.validate-dir }}:${{ needs.platform.outputs.validate-dir }}
+    outputs:
+      stack: ${{ steps.validate.outputs.stack }}
     steps:
       - *bootstrap
       - *channel_pin
@@ -348,7 +380,7 @@ jobs:
       - name: Audit rust dependencies
         run: bash .github/scripts/ci.sh check cargo-audit
       # What: warn when an action has a newer major tag.
-      # Why: maintainer 24.10.: once a night, only warns.
+      # Why: one check a night; a newer major only warns.
       # From: Issue #1683 | PR #1858
       - name: Warn on newer action major tags
         if: ${{ !cancelled() }}
@@ -375,8 +407,7 @@ jobs:
       - name: Promote the nightly channel
         if: needs.validate.result == 'success'
         env:
-          CI_STACK_VALIDATED: SUCCESS
-          CI_VALIDATED_CANDIDATE: ${{ needs.validate.outputs.candidate }}
+          CI_STACK_VALIDATED: ${{ needs.validate.outputs.stack }}
           CI_RUN_IDENTITIES: *run_ids
         run: bash .github/scripts/ci.sh promote nightly
 
@@ -450,6 +481,10 @@ jobs:
       credentials: *ghcr_credentials
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # What: the tool releases the platform job read.
+      # Why: no later job reads the API again (Fund 146).
+      # From: Issue #1683 | PR #1858
+      CI_TOOL_RELEASES: ${{ needs.platform.outputs.releases }}
     outputs:
       passed: ${{ steps.scan.outputs.passed }}
     steps:

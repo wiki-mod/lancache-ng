@@ -2,8 +2,8 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-# What: Admin UI Rust binary plus Tera templates, Alpine.
-# Why: the binary reads its templates from TEMPLATE_DIR.
+# What: Admin UI Rust binary on Alpine.
+# Why: compose mounts its templates at TEMPLATE_DIR.
 
 # What: base image pin, supplied by ci.sh from the SOT.
 # Why: SOT base_images.alpine is the sole owner (AG-CI-006).
@@ -49,39 +49,22 @@ ARG CI_CACHE_PREFIX
 ARG CI_CARGO_HOME
 
 WORKDIR /build
-COPY Cargo.toml Cargo.lock ./
-COPY services/ui/Cargo.toml services/ui/Cargo.toml
-COPY services/watchdog/Cargo.toml services/watchdog/Cargo.toml
-COPY services/cachehamster/Cargo.toml services/cachehamster/Cargo.toml
-COPY services/dns/nats-subscriber/Cargo.toml services/dns/nats-subscriber/Cargo.toml
-# What: shared crate manifest and sources, copied whole.
-# Why: real sources before any build; no stale stub rlib.
+# What: mount point of the build context, from the SOT.
+# Why: rust-build reads the tree there; no COPY list.
 # From: Issue #1683 | PR #1858
-COPY services/common services/common
-# What: retry policy for ci.sh, from SOT stage_variables
+ARG CI_RUST_SOURCE_DIR
+# What: retry and download bounds, SOT stage_variables
 # Why: this stage has no SOT; ci.sh reads them from env
 # From: Issue #1683 | PR #1858
 ARG CI_RETRY_MAX_ATTEMPTS
 ARG CI_RETRY_BACKOFF_BASE_SECONDS
-# What: dep pre-cache; ci.sh stubs and removes the srcs.
-# Why: layer-caches deps so only real src changes rebuild.
-# From: Issue #1533 | PR #1858
-RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
-    --mount=type=secret,id=sccache_redis_url \
-    --mount=type=secret,id=sccache_policy \
-    --mount=type=secret,id=sccache_gha \
-    --mount=type=secret,id=sccache_dist_config \
-    --mount=type=secret,id=distcc_potential_hosts \
-    --mount=type=secret,id=ccache_redis_url \
-    --mount=type=secret,id=project_selfhosted_proxy_ca \
-    --mount=type=cache,target=${CI_CARGO_HOME}/registry,sharing=locked \
-    --mount=type=cache,target=${CI_CARGO_HOME}/git,sharing=locked \
-    bash /usr/local/bin/ci.sh rust-build ui "${RUST_CRATES}" deps
-COPY services/ui/src ./services/ui/src
+ARG CI_DOWNLOAD_CONNECT_TIMEOUT
+ARG CI_DOWNLOAD_STALL_SECONDS
 # What: ci.sh owns the rust build accel policy (one owner).
 # Why: AG-CI-005/022/023; bind-mounted, never baked in.
 # From: Issue #1683
 RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
+    --mount=type=bind,target=${CI_RUST_SOURCE_DIR},rw \
     --mount=type=secret,id=sccache_redis_url \
     --mount=type=secret,id=sccache_policy \
     --mount=type=secret,id=sccache_gha \
@@ -112,11 +95,13 @@ ARG APK_PACKAGES
 ARG APK_BOOTSTRAP
 RUN apk add --no-cache ${APK_BOOTSTRAP}
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
-# What: retry policy for ci.sh, from SOT stage_variables
+# What: retry and download bounds, SOT stage_variables
 # Why: this stage has no SOT; ci.sh reads them from env
 # From: Issue #1683 | PR #1858
 ARG CI_RETRY_MAX_ATTEMPTS
 ARG CI_RETRY_BACKOFF_BASE_SECONDS
+ARG CI_DOWNLOAD_CONNECT_TIMEOUT
+ARG CI_DOWNLOAD_STALL_SECONDS
 # What: shared package setup via ci.sh.
 # Why: ci.sh owns repos, proxy CA, update+upgrade, add.
 # From: Issue #1683 | PR #1858
@@ -132,11 +117,6 @@ RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
     bash /usr/local/bin/ci.sh image-setup
 
 COPY --from=builder /build/lancache-ui-out /usr/local/bin/lancache-ui
-# What: the templates dir, from the SOT.
-# Why: the COPY fills it; the binary reads the same value.
-# From: Issue #1683 | PR #1912
-ARG TEMPLATE_DIR
-COPY services/ui/src/templates ${TEMPLATE_DIR}
 
 # What: one runtime uid/gid for the user and the binary.
 # Why: nginx logs share it; the root start drops to it.
