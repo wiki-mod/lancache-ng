@@ -491,14 +491,19 @@
   <div class="card flex flex-col gap-4">
     <div>
       <h2 class="font-semibold text-slate-200">Neuen Secondary registrieren</h2>
-      <p class="text-xs text-slate-500 mt-0.5">Befehl auf dem Secondary-Host ausführen — ersetzt <code class="text-slate-300">myname</code> durch einen eindeutigen Namen. Der Installer bindet standardmäßig an die erkannte LAN-IP des Hosts; wenn Port 53 dort bereits belegt ist, zeigt er den belegenden Socket an und fragt nach einer alternativen <code class="text-slate-300">--listen-ip</code>. Optional für HTTPS-DNS: <code class="text-slate-300">--ip-https</code> und <code class="text-slate-300">--listen-ip-https</code> zusammen angeben (zweite Bind-IP, derselbe Container).</p>
+      <p class="text-xs text-slate-500 mt-0.5">Name des neuen Secondary eintragen (Buchstaben, Ziffern, Bindestriche), dann den Befehl auf dem Secondary-Host ausführen. Der Installer bindet standardmäßig an die erkannte LAN-IP des Hosts; wenn Port 53 dort bereits belegt ist, zeigt er den belegenden Socket an und fragt nach einer alternativen <code class="text-slate-300">--listen-ip</code>. Optional für HTTPS-DNS: <code class="text-slate-300">--ip-https</code> und <code class="text-slate-300">--listen-ip-https</code> zusammen angeben (zweite Bind-IP, derselbe Container).</p>
+    </div>
+
+    <div class="field" style="max-width:320px; margin-bottom:0;">
+      <label for="secondary-name">Name des Secondary</label>
+      <input type="text" id="secondary-name" maxlength="63" pattern="[A-Za-z0-9-]+" placeholder="z. B. dns-keller" autocomplete="off">
     </div>
 
     <div class="relative group">
       <div id="install-cmd" class="bg-slate-900 rounded-lg p-4 font-mono text-xs text-slate-300 overflow-x-auto whitespace-pre select-all">bash &lt;(curl -fsSL {{ setup_script_url }}) secondary \
   --primary {{ primary_url }} \
   --token {{ registration_token }} \
-  --name myname \
+  --name <span id="secondary-name-out">NAME</span> \
   --ip-http {{ primary_ip }}</div>
       {{ <copy_button target="install-cmd" extra_class="hover:text-white opacity-0 group-hover:opacity-100"/> }}
     </div>
@@ -606,6 +611,20 @@
     });
     try { sessionStorage.setItem('dnsTab', tabName); } catch (e) { /* storage blocked */ }
   }
+
+  // What: puts the typed name into the install command
+  // Why: no placeholder is left in the copied command
+  // From: Issue #1683 | PR #1858
+  (function () {
+    const input = document.getElementById('secondary-name');
+    const out = document.getElementById('secondary-name-out');
+    if (!input || !out) return;
+    input.addEventListener('input', () => {
+      const name = input.value.replace(/[^A-Za-z0-9-]/g, '');
+      if (name !== input.value) input.value = name;
+      out.textContent = name || 'NAME';
+    });
+  })();
 
   // What: confirm() with record name and type
   // Why: values come from data-*, not inline JS strings
