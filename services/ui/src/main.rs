@@ -6220,9 +6220,8 @@ async fn proxy_statuses(state: &AppState) -> (Option<NginxStatus>, Option<NginxS
 // From: Issue #1683 | PR #1858
 async fn dashboard(State(state): Shared, headers: HeaderMap) -> Response {
     let cfg = &state.config;
-    let (proxy, cache_used_gb, stats, recent, syslog_gb, syslog, alarms) = tokio::join!(
+    let (proxy, stats, recent, syslog_gb, syslog, alarms) = tokio::join!(
         proxy_statuses(&state),
-        blocking(&state, |s| du_gb(&s.config.cache_dir)),
         blocking(&state, |s| log_stats(&s.config.proxy_log_dir)),
         blocking(&state, |s| parse_log_tail(
             &s.config.proxy_log_dir,
@@ -6232,6 +6231,15 @@ async fn dashboard(State(state): Shared, headers: HeaderMap) -> Response {
         blocking(&state, |s| syslog_stats(&s.config.syslog_log_root)),
         blocking(&state, |s| read_alarms(&s.config.netdata_alarms_file)),
     );
+    // What: cache size from the watchdog status document.
+    // Why: nginx cache dirs are 0700; the ui cannot walk.
+    // From: Issue #1683 | PR #1858
+    let watchdog = watchdog_json(&cfg.watchdog_status_file, cfg.watchdog_miss_limit);
+    let cache_used_gb = watchdog
+        .pointer("/disk/cache/used_bytes")
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as f64
+        / GIB as f64;
     // What: the cache bar follows the running size.
     // Why: a pending resize must not look applied.
     // From: Issue #1683 | PR #1858
@@ -6267,10 +6275,7 @@ async fn dashboard(State(state): Shared, headers: HeaderMap) -> Response {
     ctx.insert("syslog_size_gb", &format!("{syslog_gb:.1}"));
     ctx.insert("syslog_max_gb", &cfg.syslog_max_gb);
     ctx.insert("syslog_stats", &syslog);
-    ctx.insert(
-        "watchdog_status",
-        &watchdog_json(&cfg.watchdog_status_file, cfg.watchdog_miss_limit),
-    );
+    ctx.insert("watchdog_status", &watchdog);
     ctx.insert("netdata_alarms", &alarm_views(&alarms));
     // What: the Netdata port the dashboard note names.
     // Why: NETDATA_URL owns the address; no port in markup.

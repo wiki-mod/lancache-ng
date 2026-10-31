@@ -43,6 +43,11 @@ pub struct ServiceHealth {
 pub struct DiskHealth {
     pub pct: u32,
     pub status: String,
+    // What: bytes of all cache files, summed by watchdog.
+    // Why: nginx makes cache dirs 0700; the ui cannot read.
+    // From: Issue #1683 | PR #1858
+    #[serde(default)]
+    pub used_bytes: u64,
 }
 
 // What: disk section of status.json; the cache volume.
