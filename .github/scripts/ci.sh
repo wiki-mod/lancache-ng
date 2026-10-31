@@ -5873,10 +5873,10 @@ _ci_rust_bin_put() {
     done < "${df}"
     _ci_local_image_files "${tag}" "${platform}" "${dir}/image" "${from[@]}" || return 2
     for line in "${!from[@]}"; do
-        _ci_run "[CI-ERROR-BUILD-0032]" "path=\"${from[line]}\" reason=\"binary not placed for the cache\"" \
+        _ci_run "[CI-ERROR-BUILD-0034]" "path=\"${from[line]}\" reason=\"binary not placed for the cache\"" \
             mv "${dir}/image/${from[line]##*/}" "${dir}${to[line]}" || return 2
     done
-    _ci_run "[CI-ERROR-BUILD-0032]" "dir=\"${dir}\" reason=\"binaries not packed\"" tar -czf "${dir}.tgz" -C "${dir}" build || return 2
+    _ci_run "[CI-ERROR-BUILD-0035]" "dir=\"${dir}\" reason=\"binaries not packed\"" tar -czf "${dir}.tgz" -C "${dir}" build || return 2
     # What: an existing entry answers already_exists.
     # Why: a parallel job stored the same binaries first.
     # From: Issue #1683 | PR #1858
@@ -5896,10 +5896,10 @@ _ci_rust_bin_put() {
         --data-binary "@${dir}.tgz" "${up}" >&2 || return 2
     size="$(_ci_capture 0 stat -c %s "${dir}.tgz")" || return 2
     reply="$(_ci_gha_cache_call FinalizeCacheEntryUpload "{\"key\":\"${key}\",\"version\":\"${ver}\",\"size_bytes\":${size}}")" || {
-        ci_error "[CI-ERROR-BUILD-0033]" "key=\"${key}\" reason=\"Actions cache upload not finalized\"" "${reply}"
+        ci_error "[CI-ERROR-BUILD-0036]" "key=\"${key}\" reason=\"Actions cache upload not finalized\"" "${reply}"
         return 2
     }
-    ci_log "[CI-INFO-BUILD-0019]" "key=\"${key}\" bytes=${size} reason=\"binaries stored in the Actions cache\""
+    ci_log "[CI-INFO-BUILD-0037]" "key=\"${key}\" bytes=${size} reason=\"binaries stored in the Actions cache\""
 }
 
 # What: Build one service image once and load it locally.
@@ -5938,7 +5938,7 @@ _ci_docker_build() {
     # From: Issue #1683 | PR #1858
     args+=(--build-context "ci-scripts=${CI_SCRIPT_DIR}")
     # What: cached binaries replace the builder stage.
-    # Why: §2.1 NOOP: an unchanged Rust input never compiles.
+    # Why: §2.1 NOOP: unchanged Rust input never compiles.
     # From: Issue #1683 | PR #1858
     local bkey="" bdir="" bstage hrc=0
     if [ "${build_type}" = rust ]; then
@@ -5948,10 +5948,10 @@ _ci_docker_build() {
         _ci_rust_bin_get "${bkey}" "${bdir}/get" || hrc=$?
         case "${hrc}" in
             0)
-                ci_log "[CI-INFO-BUILD-0020]" "service=\"${service}\" platform=\"${platform}\" key=\"${bkey}\" reason=\"Rust unchanged; binaries from the Actions cache, no compile\""
+                ci_log "[CI-INFO-BUILD-0038]" "service=\"${service}\" platform=\"${platform}\" key=\"${bkey}\" reason=\"Rust unchanged; binaries from the Actions cache, no compile\""
                 args+=(--build-context "${bstage}=${bdir}/get")
                 ;;
-            1) ci_log "[CI-INFO-BUILD-0021]" "service=\"${service}\" platform=\"${platform}\" key=\"${bkey}\" reason=\"Rust input not cached; compiling\"" ;;
+            1) ci_log "[CI-INFO-BUILD-0039]" "service=\"${service}\" platform=\"${platform}\" key=\"${bkey}\" reason=\"Rust input not cached; compiling\"" ;;
             *) return 2 ;;
         esac
     fi
@@ -6073,7 +6073,7 @@ _ci_docker_build() {
     if [ -n "${bkey}" ] && [ ! -d "${bdir}/get" ]; then
         _ci_rust_bin_put "${bkey}" "${df}" "${tag}" "${platform}" "${bdir}/put" || return 2
     fi
-    [ -z "${bdir}" ] || _ci_run "[CI-ERROR-BUILD-0032]" "dir=\"${bdir}\" reason=\"binary dir not removed\"" rm -rf "${bdir}" || return 2
+    [ -z "${bdir}" ] || _ci_run "[CI-ERROR-BUILD-0040]" "dir=\"${bdir}\" reason=\"binary dir not removed\"" rm -rf "${bdir}" || return 2
     printf '%s\n' "${tag}"
 }
 
