@@ -211,12 +211,12 @@ async function refresh() {
     push(netChart, parseFloat(rxMB), parseFloat(txMB));
 
     // What: disk KiB/s to MB/s: times 1024, divide by 1e6.
-    // Why: system.io units are KiB/s; writes are negative.
+    // Why: system.io is KiB/s; labels reads and writes.
     // From: Issue #1683 | PR #1912
     const disk = await fetchChart('data?chart=system.io');
     const diskRow = newestRow(disk);
-    const readMB  = diskRow ? Math.abs(diskRow[column(disk, 'in')] * 1.024 / 1000).toFixed(2) : 0;
-    const writeMB = diskRow ? Math.abs(diskRow[column(disk, 'out')] * 1.024 / 1000).toFixed(2) : 0;
+    const readMB  = diskRow ? Math.abs(diskRow[column(disk, 'reads')] * 1.024 / 1000).toFixed(2) : 0;
+    const writeMB = diskRow ? Math.abs(diskRow[column(disk, 'writes')] * 1.024 / 1000).toFixed(2) : 0;
     push(diskChart, parseFloat(readMB), parseFloat(writeMB));
 
     document.getElementById('netdata-error').classList.add('hidden');
