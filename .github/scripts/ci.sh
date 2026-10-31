@@ -67,7 +67,7 @@ declare -A CI_DISPATCH=(
     [resolve]=ci_cmd_resolve [build]=ci_cmd_build [rust-build]=ci_cmd_rust_build [apk-setup]=ci_cmd_apk_setup [image-setup]=ci_cmd_image_setup
     [build-tools]=ci_cmd_build_tools [job-settings]=ci_cmd_job_settings [tool-releases]=ci_cmd_tool_releases [publish]=ci_cmd_publish [verify]=ci_cmd_verify [ship]=ci_cmd_ship [ship-release]=ci_cmd_ship_release [gha-runtime-args]=ci_cmd_gha_runtime_args
     [test]=ci_cmd_test [scan-channel]=ci_cmd_scan_channel [assemble]=ci_cmd_assemble
-    [aggregate-stack]=ci_cmd_aggregate_stack [scan-stack]=ci_cmd_scan_stack [changed-files]=ci_cmd_changed_files [checks-plan]=ci_cmd_checks_plan
+    [aggregate-stack]=ci_cmd_aggregate_stack [scan-stack]=ci_cmd_scan_stack [changed-files]=ci_cmd_changed_files [checks-plan]=ci_cmd_checks_plan [rust-memo]=ci_cmd_rust_memo
     [assemble-stack]=ci_cmd_assemble_stack [test-stack]=ci_cmd_test_stack [nightly-report]=ci_cmd_nightly_report
     [validate]=ci_cmd_validate [result-gate]=ci_cmd_result_gate [promote]=ci_cmd_promote [promote-ref]=ci_cmd_promote_ref [channel-checkout]=ci_cmd_channel_checkout [channel-matrix]=ci_cmd_channel_matrix [channel-check]=ci_cmd_channel_check [channel-report]=ci_cmd_channel_report [release-validation]=_ci_release_validation_valid [release-ref]=_ci_release_ref
     [release-publish]=ci_cmd_release_publish [release-images]=ci_cmd_release_images [release-sbom-stack]=ci_cmd_release_sbom_stack [release-vex]=ci_cmd_release_vex [cut-release-tag]=ci_cmd_cut_release_tag [release-notes]=ci_cmd_release_notes [release-changelog]=ci_cmd_release_changelog [release-variable]=ci_cmd_release_variable
@@ -2862,6 +2862,41 @@ _ci_listing_blob() {
     _ci_identity_git "${line%%$'\t'*}" "${ref}" cat-file blob "${line#*$'\t'}"
 }
 
+# What: the dir of Rust item rows kept across runs.
+# Why: rows are a function of blob and reader program.
+# From: Issue #1683 | PR #1858
+_ci_rust_memo_dir() {
+    printf '%s/rust-memo' "${RUNNER_TEMP}"
+}
+
+# What: keep the item rows $2 of blob $1 for the cache.
+# Why: a temp file and a rename; no half file is read.
+# From: Issue #1683 | PR #1858
+_ci_rust_memo_keep() {
+    local dir out tmp
+    [ -n "${RUNNER_TEMP:-}" ] || return 0
+    dir="$(_ci_rust_memo_dir)"
+    tmp="${dir}/$1.${BASHPID}"
+    if ! out="$(mkdir -p -- "${dir}" 2>&1 && printf '%s\n' "$2" 2>&1 > "${tmp}" && mv -f -- "${tmp}" "${dir}/$1" 2>&1)"; then
+        rm -f -- "${tmp}"
+        ci_error "[CI-ERROR-RESOLVE-0016]" "path=\"${dir}/$1\" reason=\"Rust item rows not kept for the cache\"" "${out}"
+        return 2
+    fi
+}
+
+# What: cache key and dir of the Rust item rows.
+# Why: the key holds the reader program; a new one misses.
+# From: Issue #1683 | PR #1858
+ci_cmd_rust_memo() {
+    local out sha tree
+    out="$(_ci_env_required GITHUB_OUTPUT)" || return 2
+    [ -n "$(_ci_env_required RUNNER_TEMP)" ] || return 2
+    sha="$(_ci_sha256_hex <<< "${_CI_AWK_RUST_ITEMS}")" || return 2
+    tree="$(_ci_capture 0 git -C "${CI_REPO_ROOT}" rev-parse 'HEAD^{tree}')" || return 2
+    printf 'key=rust-items-%s-%s\nprefix=rust-items-%s-\ndir=%s\n' "${sha}" "${tree}" "${sha}" "$(_ci_rust_memo_dir)" >> "${out}"
+    printf 'rust-memo key=rust-items-%s-%s dir=%s\n' "${sha}" "${tree}" "$(_ci_rust_memo_dir)"
+}
+
 # What: Rust items of a listing row's blob; $3 keep|drop.
 # Why: A3: plan read each library per service and ref.
 # From: Issue #1683 | PR #1858
@@ -2871,11 +2906,16 @@ _ci_listing_items() {
         printf '%s\n' "${out}"
         return 0
     fi
-    blob="$(_ci_listing_blob "$1" "$2")" || return 2
-    # What: rc 1 (unfinished text) reaches the caller.
-    # Why: the id keeps the raw blob id then.
+    # What: the rows of a blob the cache kept, else parse.
+    # Why: §26: a hosted job restores what a run parsed.
     # From: Issue #1683 | PR #1858
-    out="$(_ci_rust_items "${blob}" both)" || return "$?"
+    if [ -n "${RUNNER_TEMP:-}" ] && [ -f "$(_ci_rust_memo_dir)/${oid}" ]; then
+        out="$(<"$(_ci_rust_memo_dir)/${oid}")"
+    else
+        blob="$(_ci_listing_blob "$1" "$2")" || return 2
+        out="$(_ci_rust_items "${blob}" both)" || return "$?"
+        _ci_rust_memo_keep "${oid}" "${out}" || return 2
+    fi
     # What: one parse fills the keep and the drop memo.
     # Why: A3: plan parsed each blob once per view.
     # From: Issue #1683 | PR #1858

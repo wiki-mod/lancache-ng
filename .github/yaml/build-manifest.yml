@@ -364,6 +364,8 @@ base_images:
 github_actions:
   attest:
     uses: actions/attest
+  cache:
+    uses: actions/cache
   checkout:
     uses: actions/checkout
   claude-code:
