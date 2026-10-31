@@ -145,6 +145,18 @@ jobs:
       - name: Collect changed files
         id: changed
         run: bash .github/scripts/ci.sh changed-files
+      - name: Name the Rust item cache
+        id: memo
+        run: bash .github/scripts/ci.sh rust-memo
+      # What: Rust item rows of earlier runs, saved anew.
+      # Why: §26: hosted jobs keep no disk; rows cost 17 s.
+      # From: Issue #1683 | PR #1858
+      - name: Restore the Rust item rows
+        uses: actions/cache@v6
+        with:
+          path: ${{ steps.memo.outputs.dir }}
+          key: ${{ steps.memo.outputs.key }}
+          restore-keys: ${{ steps.memo.outputs.prefix }}
       - name: Plan the jobs of this run
         id: plan
         env:
