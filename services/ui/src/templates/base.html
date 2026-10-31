@@ -879,7 +879,7 @@
         wrap.appendChild(dot);
         wrap.appendChild(document.createTextNode(svc.name + ' '));
         // What: bold status word after the service name
-        // Why: the mockup shows name plus state, not a dot only
+        // Why: the mockup shows name plus state
         // From: Issue #1683 | PR #1858
         const word = { green: 'läuft', yellow: 'eingeschränkt', amber: 'eingeschränkt', red: 'gestört', gray: 'aus' };
         const state = document.createElement('b');
