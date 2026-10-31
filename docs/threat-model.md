@@ -175,7 +175,7 @@ injects malicious content that the proxy caches and serves to every client.
   bundle (`proxy_ssl_trusted_certificate`, `/etc/ssl/certs/ca-certificates.crt` on
   this service's current Alpine base, issue #815 -- the same path the prior
   Debian base also used); see also T8.
-- Upstream resolution uses `NGINX_UPSTREAM_RESOLVER` (default `8.8.8.8 8.8.4.4 [2001:4860:4860::8888] [2001:4860:4860::8844]`),
+- Upstream resolution uses `NGINX_UPSTREAM_RESOLVER` (default `8.8.8.8 8.8.4.4`, IPv4 only),
   never the LAN spoof DNS — the supervisor's nginx render (`nginx` in
   `services/watchdog/src/main.rs`) refuses to start nginx if the resolver names a
   LanCache IP, preventing a resolve-to-self loop.

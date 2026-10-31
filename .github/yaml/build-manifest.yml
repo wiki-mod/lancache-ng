@@ -506,7 +506,7 @@ runtime:
     - LOGGING_DNS_ENABLED=1
     - LOGGING_DHCP_ENABLED=1
     - LOGGING_UI_ENABLED=1
-    - NGINX_UPSTREAM_RESOLVER=8.8.8.8 8.8.4.4 [2001:4860:4860::8888] [2001:4860:4860::8844]
+    - NGINX_UPSTREAM_RESOLVER=8.8.8.8 8.8.4.4
     - PROXY_SECURITY_MODE=lazy
     - NTP_UPSTREAM_SERVERS=0.debian.pool.ntp.org 1.debian.pool.ntp.org 2.debian.pool.ntp.org 3.debian.pool.ntp.org time.cloudflare.com
     - CACHE_MAX_SIZE=50g
