@@ -96,6 +96,10 @@ jobs:
         id: impact
         env:
           CHANGED_FILES: ${{ steps.changed.outputs.file }}
+          # What: job token for the CodeQL release read.
+          # Why: anonymous reads hit the 403 rate limit.
+          # From: Issue #1683 | PR #1858
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bash .github/scripts/ci.sh codeql-impact >> "$GITHUB_OUTPUT"
       - name: Resolve the build-tools image
         id: resolve

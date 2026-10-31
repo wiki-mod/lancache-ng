@@ -2884,17 +2884,34 @@ _ci_rust_memo_keep() {
     fi
 }
 
-# What: cache key and dir of the Rust item rows.
+# What: restore or save the Rust item rows; $1 the mode.
 # Why: the key holds the reader program; a new one misses.
 # From: Issue #1683 | PR #1858
 ci_cmd_rust_memo() {
-    local out sha tree
-    out="$(_ci_env_required GITHUB_OUTPUT)" || return 2
+    local mode="${1:-}" dir sha tree key rc=0
     [ -n "$(_ci_env_required RUNNER_TEMP)" ] || return 2
+    dir="$(_ci_rust_memo_dir)"
     sha="$(_ci_sha256_hex <<< "${_CI_AWK_RUST_ITEMS}")" || return 2
     tree="$(_ci_capture 0 git -C "${CI_REPO_ROOT}" rev-parse 'HEAD^{tree}')" || return 2
-    printf 'key=rust-items-%s-%s\nprefix=rust-items-%s-\ndir=%s\n' "${sha}" "${tree}" "${sha}" "$(_ci_rust_memo_dir)" >> "${out}"
-    printf 'rust-memo key=rust-items-%s-%s dir=%s\n' "${sha}" "${tree}" "$(_ci_rust_memo_dir)"
+    key="rust-items-${sha}-${tree}"
+    case "${mode}" in
+        restore)
+            _ci_gha_cache_get "${key}" "rust-items-${sha}-" "${sha}" "${dir}" || rc=$?
+            case "${rc}" in
+                0) ci_log "[CI-INFO-CACHE-0029]" "key=\"${key}\" reason=\"Rust item rows restored\"" ;;
+                1) ci_log "[CI-INFO-CACHE-0030]" "key=\"${key}\" reason=\"no Rust item rows cached; plan parses\"" ;;
+                *) return 2 ;;
+            esac
+            ;;
+        save)
+            [ -d "${dir}" ] || return 0
+            _ci_gha_cache_put "${key}" "${sha}" "${dir}"
+            ;;
+        *)
+            ci_log "[CI-ERROR-CACHE-0031]" "got=\"${mode}\" reason=\"rust-memo needs restore or save\""
+            return 2
+            ;;
+    esac
 }
 
 # What: Rust items of a listing row's blob; $3 keep|drop.
@@ -5791,6 +5808,126 @@ _ci_build_variable_args() {
     done <<< "${vnames}"
 }
 
+# What: Actions cache key of a service's Rust binaries.
+# Why: Rust files, lock, toolchain, target; nothing else.
+# From: Issue #1683 | PR #1858
+_ci_rust_bin_key() {
+    local service="$1" platform="$2" crates content vargs tools h
+    crates="$(_ci_required_field "${service}" crates list)" || return 2
+    content="$(_ci_rust_content "${service}")" || return 2
+    vargs="$(_ci_build_variable_args rust)" || return 2
+    # What: the job count is left out of the key.
+    # Why: it changes the build time, never the binary.
+    # From: Issue #1683 | PR #1858
+    vargs="$(_ci_capture 1 grep -v '^CARGO_BUILD_JOBS=' <<< "${vargs}")" || return 2
+    tools="$(_ci_env_required CI_BUILD_TOOLS_IMAGE)" || return 2
+    h="$(printf '%s\n' "tools=${tools}" "platform=${platform}" "crates=${crates//$'\n'/ }" "${vargs}" "${content}" | _ci_sha256_hex)" || return 2
+    printf 'rust-bin-%s-%s-%s\n' "${service}" "${platform//\//-}" "${h}"
+}
+
+# What: one Actions cache v2 call; JSON body, JSON reply.
+# Why: arm64 jobs run no JS action; ci.sh owns the cache.
+# From: Issue #1683 | PR #1858
+_ci_gha_cache_call() {
+    local method="$1" body="$2" url tok
+    url="$(_ci_env_required ACTIONS_RESULTS_URL)" || return 2
+    tok="$(_ci_env_required ACTIONS_RUNTIME_TOKEN)" || return 2
+    printf 'header = "Authorization: Bearer %s"\n' "${tok}" \
+        | _ci_download_curl --fail-with-body -sS -K - -X POST -H 'Content-Type: application/json' \
+            --data "${body}" "${url%/}/twirp/github.actions.results.api.v1.CacheService/${method}"
+}
+
+# What: the builder stage a Dockerfile COPYs binaries from.
+# Why: a cache hit replaces exactly this stage.
+# From: Issue #1683 | PR #1858
+_ci_rust_bin_stage() {
+    local df="$1" line stage=""
+    while IFS= read -r line; do
+        [[ "${line}" =~ ^COPY\ --from=([A-Za-z0-9_-]+)\ /build/[A-Za-z0-9_-]+-out\  ]] || continue
+        if [ -n "${stage}" ] && [ "${stage}" != "${BASH_REMATCH[1]}" ]; then
+            ci_log "[CI-ERROR-BUILD-0028]" "dockerfile=\"${df}\" reason=\"binaries come from more than one stage\""
+            return 2
+        fi
+        stage="${BASH_REMATCH[1]}"
+    done < "${df}"
+    if [ -z "${stage}" ]; then
+        ci_log "[CI-ERROR-BUILD-0029]" "dockerfile=\"${df}\" reason=\"no COPY of a built binary\""
+        return 2
+    fi
+    printf '%s\n' "${stage}"
+}
+
+# What: unpack entry $1, else newest of prefix $2, to $4.
+# Why: one cache reader; busybox tar; rc 1 = not cached.
+# From: Issue #1683 | PR #1858
+_ci_gha_cache_get() {
+    local key="$1" prefix="$2" ver="$3" dir="$4" keys="[]" reply dl out
+    [ -z "${prefix}" ] || keys="[\"${prefix}\"]"
+    if ! reply="$(_ci_gha_cache_call GetCacheEntryDownloadURL "{\"key\":\"${key}\",\"restore_keys\":${keys},\"version\":\"${ver}\"}")"; then
+        [[ "${reply}" != *not_found* ]] || return 1
+        ci_error "[CI-ERROR-CACHE-0022]" "key=\"${key}\" reason=\"Actions cache lookup failed\"" "${reply}"
+        return 2
+    fi
+    dl="$(_ci_capture 0 jq -r 'select(.ok == true) | .signed_download_url // empty' <<< "${reply}")" || return 2
+    [ -n "${dl}" ] || return 1
+    _ci_retry download _ci_http_download "${dl}" "${dir}.tgz" >&2 || return 2
+    if ! out="$(mkdir -p "${dir}" 2>&1 && tar -xzf "${dir}.tgz" -C "${dir}" 2>&1 && rm -f "${dir}.tgz" 2>&1)"; then
+        ci_error "[CI-ERROR-CACHE-0023]" "key=\"${key}\" reason=\"cache entry not unpacked\"" "${out}"
+        return 2
+    fi
+}
+
+# What: store dir $3 as Actions cache entry $1.
+# Why: one cache writer; an entry never changes once set.
+# From: Issue #1683 | PR #1858
+_ci_gha_cache_put() {
+    local key="$1" ver="$2" dir="$3" reply up size
+    _ci_run "[CI-ERROR-CACHE-0024]" "dir=\"${dir}\" reason=\"cache entry not packed\"" tar -czf "${dir}.tgz" -C "${dir}" . || return 2
+    # What: an existing entry answers already_exists.
+    # Why: a parallel job stored the same entry first.
+    # From: Issue #1683 | PR #1858
+    if ! reply="$(_ci_gha_cache_call CreateCacheEntry "{\"key\":\"${key}\",\"version\":\"${ver}\"}")"; then
+        if [[ "${reply}" != *already_exists* ]]; then
+            ci_error "[CI-ERROR-CACHE-0025]" "key=\"${key}\" reason=\"Actions cache entry not created\"" "${reply}"
+            return 2
+        fi
+        reply='{"ok":false}'
+    fi
+    up="$(_ci_capture 0 jq -r 'select(.ok == true) | .signed_upload_url // empty' <<< "${reply}")" || return 2
+    if [ -z "${up}" ]; then
+        ci_log "[CI-INFO-CACHE-0026]" "key=\"${key}\" reason=\"entry already stored\""
+        return 0
+    fi
+    _ci_retry download _ci_download_curl -fsS -X PUT -H 'x-ms-blob-type: BlockBlob' -H 'x-ms-version: 2020-04-08' \
+        --data-binary "@${dir}.tgz" "${up}" >&2 || return 2
+    size="$(_ci_capture 0 stat -c %s "${dir}.tgz")" || return 2
+    reply="$(_ci_gha_cache_call FinalizeCacheEntryUpload "{\"key\":\"${key}\",\"version\":\"${ver}\",\"size_bytes\":${size}}")" || {
+        ci_error "[CI-ERROR-CACHE-0027]" "key=\"${key}\" reason=\"Actions cache upload not finalized\"" "${reply}"
+        return 2
+    }
+    ci_log "[CI-INFO-CACHE-0028]" "key=\"${key}\" bytes=${size} reason=\"stored in the Actions cache\""
+}
+
+# What: store the built binaries of an image under key.
+# Why: the next build with the same Rust input reuses them.
+# From: Issue #1683 | PR #1858
+_ci_rust_bin_put() {
+    local key="$1" df="$2" tag="$3" platform="$4" dir="$5" line
+    local -a from=() to=()
+    _ci_run "[CI-ERROR-BUILD-0032]" "dir=\"${dir}\" reason=\"binary dir not created\"" mkdir -p "${dir}/build" "${dir}.image" || return 2
+    while IFS= read -r line; do
+        [[ "${line}" =~ ^COPY\ --from=[A-Za-z0-9_-]+\ (/build/[A-Za-z0-9_-]+-out)\ (/[^ ]+)$ ]] || continue
+        to+=("${BASH_REMATCH[1]}")
+        from+=("${BASH_REMATCH[2]}")
+    done < "${df}"
+    _ci_local_image_files "${tag}" "${platform}" "${dir}.image" "${from[@]}" || return 2
+    for line in "${!from[@]}"; do
+        _ci_run "[CI-ERROR-BUILD-0034]" "path=\"${from[line]}\" reason=\"binary not placed for the cache\"" \
+            mv "${dir}.image/${from[line]##*/}" "${dir}${to[line]}" || return 2
+    done
+    _ci_gha_cache_put "${key}" "${key##*-}" "${dir}"
+}
+
 # What: Build one service image once and load it locally.
 # Why: BUILD != PUBLISH; a push failure must not rebuild.
 # From: Issue #1683
@@ -5826,6 +5963,24 @@ _ci_docker_build() {
     # Why: one mount form for apk-setup and rust-build.
     # From: Issue #1683 | PR #1858
     args+=(--build-context "ci-scripts=${CI_SCRIPT_DIR}")
+    # What: cached binaries replace the builder stage.
+    # Why: §2.1 NOOP: unchanged Rust input never compiles.
+    # From: Issue #1683 | PR #1858
+    local bkey="" bdir="" bstage hrc=0
+    if [ "${build_type}" = rust ]; then
+        bkey="$(_ci_rust_bin_key "${service}" "${platform}")" || return 2
+        bstage="$(_ci_rust_bin_stage "${df}")" || return 2
+        bdir="$(_ci_mktemp -d "${CI_TMPDIR}/rust-bin.XXXXXX")" || return 2
+        _ci_gha_cache_get "${bkey}" "" "${bkey##*-}" "${bdir}/get" || hrc=$?
+        case "${hrc}" in
+            0)
+                ci_log "[CI-INFO-BUILD-0038]" "service=\"${service}\" platform=\"${platform}\" key=\"${bkey}\" reason=\"Rust unchanged; binaries from the Actions cache, no compile\""
+                args+=(--build-context "${bstage}=${bdir}/get")
+                ;;
+            1) ci_log "[CI-INFO-BUILD-0039]" "service=\"${service}\" platform=\"${platform}\" key=\"${bkey}\" reason=\"Rust input not cached; compiling\"" ;;
+            *) return 2 ;;
+        esac
+    fi
     # What: capture labels + build-args before reading them.
     # Why: < <(...) drops a failure; never build without.
     # From: Issue #1683 | PR #1858
@@ -5938,6 +6093,13 @@ _ci_docker_build() {
     [ "${crc}" -eq 0 ] || return 2
     [ "${brc}" -eq 0 ] || return 2
     printf '%s\n' "${buildlog}" >&2
+    # What: a compiled set goes into the Actions cache.
+    # Why: the next image with this Rust input skips cargo.
+    # From: Issue #1683 | PR #1858
+    if [ -n "${bkey}" ] && [ ! -d "${bdir}/get" ]; then
+        _ci_rust_bin_put "${bkey}" "${df}" "${tag}" "${platform}" "${bdir}/put" || return 2
+    fi
+    [ -z "${bdir}" ] || _ci_run "[CI-ERROR-BUILD-0040]" "dir=\"${bdir}\" reason=\"binary dir not removed\"" rm -rf "${bdir}" || return 2
     printf '%s\n' "${tag}"
 }
 
@@ -7307,7 +7469,7 @@ _ci_package_refresh_pair() {
 # Why: create and cp read the image; it never runs here.
 # From: Issue #1683 | PR #1858
 _ci_image_files() {
-    local ref="$1" platform="$2" work="$3" cid f out kids kid rc=0
+    local ref="$1" platform="$2" work="$3" kids kid rc=0
     shift 3
     # What: an index digest is read as its platform child.
     # Why: one daemon keeps one platform per index digest.
@@ -7317,8 +7479,16 @@ _ci_image_files() {
     while IFS= read -r kid; do
         [ "${kid%%=*}" != "${platform}" ] || ref="${ref%@*}@${kid#*=}"
     done <<< "${kids}"
-    rc=0
     _ci_retry registry docker pull --platform "${platform}" "${ref}" >&2 || return 2
+    _ci_local_image_files "${ref}" "${platform}" "${work}" "$@"
+}
+
+# What: copy files $4.. of local image $1 ($2) into dir $3.
+# Why: one reader for registry and freshly built images.
+# From: Issue #1683 | PR #1858
+_ci_local_image_files() {
+    local ref="$1" platform="$2" work="$3" cid f out rc=0
+    shift 3
     cid="$(_ci_capture 0 docker create --platform "${platform}" --entrypoint /bin/true "${ref}")" || return 2
     for f in "$@"; do
         if ! out="$(docker cp "${cid}:${f}" "${work}/${f##*/}" 2>&1)"; then
