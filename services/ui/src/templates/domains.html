@@ -34,34 +34,14 @@
   </div>
   {% endif %}
 
-  {# What: one tab button per data-dns-panel section below
-     Why: setActiveDnsTab maps data-dns-tab to the panel
-     From: Issue #1683 | PR #1912 #}
+  {# What: four tab buttons; each shows one or two panels
+     Why: setActiveDnsTab maps a panel to its tab button
+     From: Issue #1683 | PR #1858 #}
   <div class="subtabs">
-    <button type="button" data-dns-tab="cdn"
-            class="subtab dns-tab-btn">
-      CDN-Domains
-    </button>
-    <button type="button" data-dns-tab="lan"
-            class="subtab dns-tab-btn">
-      LAN
-    </button>
-    <button type="button" data-dns-tab="ptr"
-            class="subtab dns-tab-btn">
-      PTR (Reverse)
-    </button>
-    <button type="button" data-dns-tab="settings"
-            class="subtab dns-tab-btn">
-      Settings
-    </button>
-    <button type="button" data-dns-tab="zones"
-            class="subtab dns-tab-btn">
-      Zone-Snapshots
-    </button>
-    <button type="button" data-dns-tab="secondary"
-            class="subtab dns-tab-btn">
-      Secondary
-    </button>
+    <button type="button" data-dns-tab="cdn" class="subtab dns-tab-btn">Cached Domains</button>
+    <button type="button" data-dns-tab="primary" class="subtab dns-tab-btn">Primary DNS</button>
+    <button type="button" data-dns-tab="secondary" class="subtab dns-tab-btn">Secondary DNS</button>
+    <button type="button" data-dns-tab="settings" class="subtab dns-tab-btn">Settings</button>
   </div>
 
   <div class="space-y-6">
@@ -601,9 +581,13 @@
   // What: shows one DNS panel and marks its tab button
   // Why: tabs switch client-side; no reload per tab
   // From: Issue #1683 | PR #1912
+  const DNS_PANEL_TAB = {
+    cdn: 'cdn', lan: 'primary', ptr: 'primary',
+    settings: 'settings', zones: 'settings', secondary: 'secondary',
+  };
   function setActiveDnsTab(tabName) {
     document.querySelectorAll('[data-dns-panel]').forEach((panel) => {
-      panel.classList.toggle('hidden', panel.dataset.dnsPanel !== tabName);
+      panel.classList.toggle('hidden', DNS_PANEL_TAB[panel.dataset.dnsPanel] !== tabName);
     });
 
     document.querySelectorAll('.dns-tab-btn').forEach((button) => {
@@ -672,7 +656,7 @@
   // From: Issue #1683 | PR #1912
   let startTab = 'cdn';
   try { startTab = sessionStorage.getItem('dnsTab') || 'cdn'; } catch (e) { /* storage blocked */ }
-  if (!document.querySelector('[data-dns-panel="' + startTab + '"]')) startTab = 'cdn';
+  if (!document.querySelector('[data-dns-tab="' + startTab + '"]')) startTab = 'cdn';
   setActiveDnsTab(startTab);
 
   // What: POST to the rotate route of one secondary
