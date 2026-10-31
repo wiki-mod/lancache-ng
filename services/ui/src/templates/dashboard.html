@@ -5,7 +5,7 @@
 {# Why: extends base.html for the shared layout #}
 {# From: Issue #1683 | PR #1912 #}
 {% extends "base.html" %}
-{# What: one proxy card (HTTP or HTTPS), three counters #}
+{# What: the proxy card, three counters #}
 {# Why: one copy; ids prefix-* feed the refresh script #}
 {# From: Issue #1683 | PR #1912 #}
 {% component proxy_card(title, subtitle, prefix, status, enabled) %}<div class="card">
@@ -18,7 +18,7 @@
       <p class="section-sub">{{ title }} disabled</p>
       {% elif status %}
       <div class="grid grid-cols-3 gap-2 text-center" id="{{ prefix }}-metrics">
-        {% for cell in [["active", "Connections"], ["requests", "Requests"], ["waiting", "Waiting"]] %}
+        {% for cell in [["active", "Connections"], ["requests", "Requests (all, incl. checks)"], ["waiting", "Waiting"]] %}
         <div>
           <p class="stat-num" id="{{ prefix }}-{{ cell[0] }}">{{ status[cell[0]] }}</p>
           <p class="stat-label">{{ cell[1] }}</p>
@@ -141,12 +141,11 @@
     </div>
   </div>
 
-  <!-- What: per-side numbers, live via the script below
-       Why: both URLs may point at one stub_status
+  <!-- What: one proxy counter card, live via the script below
+       Why: one nginx serves both sides; no split counts
        From: Issue #1683 | PR #1912 -->
-  <div class="grid-2" style="grid-template-columns: 1fr 1fr; margin-bottom:16px;">
-    {{ <proxy_card title="HTTP mode" subtitle="HTTP · SNI passthrough" prefix="http" status={http_status} enabled={true}/> }}
-    {{ <proxy_card title="HTTPS mode" subtitle="HTTP + HTTPS · MITM" prefix="https" status={https_status} enabled={https_enabled}/> }}
+  <div style="margin-bottom:16px;">
+    {{ <proxy_card title="Proxy (nginx)" subtitle="HTTP + HTTPS · one shared counter" prefix="http" status={http_status} enabled={true}/> }}
   </div>
 
   <!-- What: active DHCP mode and what the UI controls in it
@@ -309,12 +308,6 @@
       }
       const data = await response.json();
       updateMetricsSection('http', data.http);
-      // What: https counters only when HTTPS is enabled
-      // Why: the disabled HTTPS card has no counters
-      // From: Issue #1683 | PR #1912
-      if (data.https_enabled) {
-        updateMetricsSection('https', data.https);
-      }
     } catch (err) {
       // What: reports the error, keeps last values
       // Why: a proxy outage is transient; retried later
