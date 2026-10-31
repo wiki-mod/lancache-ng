@@ -13,6 +13,14 @@
   <h1 class="page-title">Logs</h1>
   <p class="page-sub">Letzte {{ logs_max_entries }} Einträge aus dem zentralen Syslog-Speicher.</p>
 
+  <!-- What: two tabs, Logs and Syslog
+       Why: the Syslog tab holds the log settings -->
+  <div class="subtabs">
+    <button type="button" data-logs-tab="logs" class="subtab logs-tab-btn">Logs</button>
+    <button type="button" data-logs-tab="syslog" class="subtab logs-tab-btn">Syslog</button>
+  </div>
+
+  <div data-logs-panel="logs">
   <!-- What: host filter reloads the page with ?host=
        Why: parse_syslog_tail reads that host only -->
   <div class="field-row" style="max-width:none; margin-bottom:18px;">
@@ -31,6 +39,66 @@
          Why: the table below is rendered server-side -->
     <button type="button" class="btn ghost" onclick="location.reload()" style="margin-top:23px;">Aktualisieren</button>
   </div>
+
+  <!-- What: syslog lines of the selected host or all hosts
+       Why: rendered server-side; reload shows new lines -->
+  <div class="card">
+    <div class="card-body" style="padding:0; overflow-x:auto;">
+      <table id="syslog-table" style="font-family:var(--font-mono); font-size:12.5px;">
+        <tr>
+          <th style="padding:12px 18px 10px;">Zeit</th>
+          <th style="padding:12px 18px 10px;">Quelle</th>
+          <th style="padding:12px 18px 10px;">Nachricht</th>
+        </tr>
+        {% if syslog_logs %}
+        {% for entry in syslog_logs %}
+        <tr class="log-line">
+          <td style="padding:6px 18px; color:var(--mist-dim);"><time data-iso="{{ entry.timestamp }}">{{ entry.timestamp }}</time></td>
+          <td style="padding:6px 18px;"><span class="tag off">{{ entry.host }}</span>{% if entry.program != entry.host %} {{ entry.program }}{% endif %}</td>
+          <td style="padding:6px 18px;">{{ entry.message }}</td>
+        </tr>
+        {% endfor %}
+        {% else %}
+        <tr><td colspan="3" class="empty-state">Noch keine Log-Einträge</td></tr>
+        {% endif %}
+      </table>
+    </div>
+  </div>
+  </div>
+
+  <div data-logs-panel="syslog">
+  <!-- What: send the central log on to an external server
+       Why: the ui saves; the watchdog applies it -->
+  <form method="post" action="{{ routes.logs_forward | safe }}" class="card" style="margin-bottom:16px;">
+    {{ <csrf_field csrf_token={csrf_token}/> }}
+    <div class="card-head">
+      <h3>Weiterleitung an einen externen Syslog-Server</h3>
+    </div>
+    <div class="card-body">
+      <p class="section-sub">
+        Alle Einträge des zentralen Syslogs werden zusätzlich an diesen Server gesendet.
+        Ohne Host ist die Weiterleitung aus.
+      </p>
+      <div class="field-row" style="max-width:none;">
+        <div class="field" style="max-width:260px;">
+          <label for="forward_host">Host oder IP</label>
+          <input type="text" id="forward_host" name="forward_host" value="{{ forward_host }}" placeholder="z. B. 192.168.1.50">
+        </div>
+        <div class="field" style="max-width:120px;">
+          <label for="forward_port">Port</label>
+          <input type="number" id="forward_port" name="forward_port" value="{{ forward_port }}" min="1" max="65535">
+        </div>
+        <div class="field" style="max-width:120px;">
+          <label for="forward_proto">Protokoll</label>
+          <select id="forward_proto" name="forward_proto" style="width:100%; padding:9px 11px; border-radius:8px; border:1px solid var(--navy-600); background:var(--navy-900); color:var(--foam); font-size:13.5px;">
+            <option value="udp" {% if forward_proto == "udp" %}selected{% endif %}>udp</option>
+            <option value="tcp" {% if forward_proto == "tcp" %}selected{% endif %}>tcp</option>
+          </select>
+        </div>
+      </div>
+      <button type="submit" class="btn" style="margin-top:12px;">Speichern</button>
+    </div>
+  </form>
 
   <!-- What: per-service logging switches.
        Why: the ui saves; the watchdog applies. -->
@@ -58,29 +126,6 @@
     </div>
   </form>
 
-  <!-- What: syslog lines of the selected host or all hosts
-       Why: rendered server-side; reload shows new lines -->
-  <div class="card">
-    <div class="card-body" style="padding:0; overflow-x:auto;">
-      <table id="syslog-table" style="font-family:var(--font-mono); font-size:12.5px;">
-        <tr>
-          <th style="padding:12px 18px 10px;">Zeit</th>
-          <th style="padding:12px 18px 10px;">Quelle</th>
-          <th style="padding:12px 18px 10px;">Nachricht</th>
-        </tr>
-        {% if syslog_logs %}
-        {% for entry in syslog_logs %}
-        <tr class="log-line">
-          <td style="padding:6px 18px; color:var(--mist-dim);"><time data-iso="{{ entry.timestamp }}">{{ entry.timestamp }}</time></td>
-          <td style="padding:6px 18px;"><span class="tag off">{{ entry.host }}</span>{% if entry.program != entry.host %} {{ entry.program }}{% endif %}</td>
-          <td style="padding:6px 18px;">{{ entry.message }}</td>
-        </tr>
-        {% endfor %}
-        {% else %}
-        <tr><td colspan="3" class="empty-state">Noch keine Log-Einträge</td></tr>
-        {% endif %}
-      </table>
-    </div>
   </div>
 </section>
 {% endblock %}
@@ -94,5 +139,24 @@
     const d = new Date(el.dataset.iso);
     if (!isNaN(d)) el.textContent = d.toLocaleString('de-DE');
   });
+
+  // What: shows one tab panel, keeps it in the URL hash
+  // Why: a form post returns to the Syslog tab
+  // From: Issue #1683 | PR #1858
+  function setLogsTab(name) {
+    document.querySelectorAll('[data-logs-panel]').forEach((panel) => {
+      panel.classList.toggle('hidden', panel.dataset.logsPanel !== name);
+    });
+    document.querySelectorAll('.logs-tab-btn').forEach((button) => {
+      button.classList.toggle('active', button.dataset.logsTab === name);
+    });
+  }
+  document.querySelectorAll('.logs-tab-btn').forEach((button) => {
+    button.addEventListener('click', () => {
+      history.replaceState(null, '', button.dataset.logsTab === 'syslog' ? '#syslog' : location.pathname + location.search);
+      setLogsTab(button.dataset.logsTab);
+    });
+  });
+  setLogsTab(location.hash === '#syslog' ? 'syslog' : 'logs');
 </script>
 {% endblock %}

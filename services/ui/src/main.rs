@@ -367,6 +367,9 @@ impl Config {
                 text("DHCP_PROXY_CUSTOM_OPTIONS", ""),
             ),
             ("LANCACHE_IMAGE_CHANNEL", channel.clone()),
+            ("SYSLOG_FORWARD_HOST", text("SYSLOG_FORWARD_HOST", "")),
+            ("SYSLOG_FORWARD_PORT", text("SYSLOG_FORWARD_PORT", "")),
+            ("SYSLOG_FORWARD_PROTO", text("SYSLOG_FORWARD_PROTO", "")),
             // What: switches; SOT default is in the image.
             // Why: no Rust fallback; no typo flips one.
             // From: Issue #1683 | PR #1912
@@ -544,6 +547,36 @@ impl Config {
     // From: Issue #1683 | PR #1858
     fn flag(&self, key: &str) -> bool {
         self.setting(key).trim() == "1"
+    }
+
+    // What: where the changed login hash is saved.
+    // Why: next to the settings file, owner-only mode.
+    // From: Issue #1683 | PR #1858
+    fn password_file(&self) -> PathBuf {
+        Path::new(&self.ui_settings_file).with_file_name("lancache-ui-password.hash")
+    }
+
+    // What: the login hash in effect now.
+    // Why: a saved hash fits only the env hash it replaced.
+    // From: Issue #1683 | PR #1858
+    fn login_hash(&self) -> Option<String> {
+        let base = self.auth_password_hash.as_ref()?;
+        let saved = match fs::read_to_string(self.password_file()) {
+            Ok(text) => text,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Some(base.clone()),
+            Err(e) => {
+                tracing::warn!("saved login hash not read, env hash used: {e}");
+                return Some(base.clone());
+            }
+        };
+        // What: line 1 old env hash, line 2 the new hash.
+        // Why: a new env hash (a reset) wins over the file.
+        // From: Issue #1683 | PR #1858
+        let mut lines = saved.lines();
+        match (lines.next(), lines.next()) {
+            (Some(old), Some(new)) if old == base.as_str() => Some(new.to_string()),
+            _ => Some(base.clone()),
+        }
     }
 
     // What: the DHCP mode in effect now.
@@ -969,7 +1002,7 @@ async fn security_headers(State(state): Shared, req: Request, next: Next) -> Res
 // Why: auth is checked per request; the cookie binds CSRF.
 // From: Issue #1683 | PR #1858
 async fn basic_auth(State(state): Shared, mut req: Request, next: Next) -> Response {
-    if let (Some(user), Some(hash)) = (&state.config.auth_user, &state.config.auth_password_hash) {
+    if let (Some(user), Some(hash)) = (&state.config.auth_user, state.config.login_hash()) {
         let presented = req
             .headers()
             .get(header::AUTHORIZATION)
@@ -1107,7 +1140,9 @@ const ROUTE_AAAA_FILTER: &str = "/domains/aaaa-filter";
 const ROUTE_DDNS_UNSIGNED: &str = "/domains/ddns-allow-unsigned-updates";
 const ROUTE_ZONE_ROLLBACK: &str = "/domains/zones/rollback";
 const ROUTE_LOGS_SETTINGS: &str = "/logs/settings";
+const ROUTE_LOGS_FORWARD: &str = "/logs/forward";
 const ROUTE_SETUP_UPDATE: &str = "/setup/update";
+const ROUTE_PASSWORD: &str = "/setup/password";
 const ROUTE_RESTART_UI: &str = "/setup/restart-ui";
 const ROUTE_DESIRED_STATE: &str = "/api/services/{service}/desired-state";
 const ROUTE_CACHE_RESIZE: &str = "/cache/resize";
@@ -1190,7 +1225,7 @@ fn page_ctx(headers: &HeaderMap, active: &str) -> Context {
     // What: each route path from its one Rust owner.
     // Why: forms and scripts follow the router path.
     // From: Issue #1683 | PR #1912
-    const ROUTES: [(&str, &str); 43] = [
+    const ROUTES: [(&str, &str); 45] = [
         ("health", ROUTE_HEALTH),
         ("secondary_register", ROUTE_SECONDARY_REGISTER),
         ("favicon", ROUTE_FAVICON),
@@ -1221,7 +1256,9 @@ fn page_ctx(headers: &HeaderMap, active: &str) -> Context {
         ("ddns_unsigned", ROUTE_DDNS_UNSIGNED),
         ("zone_rollback", ROUTE_ZONE_ROLLBACK),
         ("logs_settings", ROUTE_LOGS_SETTINGS),
+        ("logs_forward", ROUTE_LOGS_FORWARD),
         ("setup_update", ROUTE_SETUP_UPDATE),
+        ("password", ROUTE_PASSWORD),
         ("restart_ui", ROUTE_RESTART_UI),
         ("desired_state", ROUTE_DESIRED_STATE),
         ("cache_resize", ROUTE_CACHE_RESIZE),
@@ -6286,6 +6323,12 @@ async fn logs_page(
         })
         .collect();
     ctx.insert("log_switches", &switches);
+    ctx.insert("forward_host", &state.config.setting("SYSLOG_FORWARD_HOST"));
+    ctx.insert("forward_port", &state.config.setting("SYSLOG_FORWARD_PORT"));
+    ctx.insert(
+        "forward_proto",
+        &state.config.setting("SYSLOG_FORWARD_PROTO"),
+    );
     render(&state, "logs.html", &ctx)
 }
 
@@ -6303,7 +6346,53 @@ async fn update_logging_settings(
     state.config.save_settings(&changes).map_err(|e| {
         HtmlError::new(StatusCode::INTERNAL_SERVER_ERROR, &LOGS_AREA, e.to_string())
     })?;
-    Ok(Redirect::to(PAGE_LOGS))
+    Ok(Redirect::to("/logs#syslog"))
+}
+
+// What: save the external syslog target; empty host = off.
+// Why: the ui only writes; the watchdog applies it.
+// From: Issue #1683 | PR #1858
+async fn update_syslog_forward(
+    State(state): Shared,
+    Form(f): Form<Fields>,
+) -> Result<Redirect, HtmlError> {
+    let bad = |message: &str| HtmlError::new(StatusCode::BAD_REQUEST, &LOGS_AREA, message);
+    let host = f.get("forward_host");
+    let (port, proto) = if host.is_empty() {
+        (String::new(), String::new())
+    } else {
+        // What: a host name or IP, no other characters.
+        // Why: the value lands in a syslog-ng config.
+        // From: Issue #1683 | PR #1858
+        if host.len() > 253
+            || !host
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || ".-:".contains(c))
+        {
+            return Err(bad(
+                "The host may hold letters, digits, dot, dash and colon.",
+            ));
+        }
+        let Some(port) = f.number::<u16>("forward_port").filter(|p| *p > 0) else {
+            return Err(bad("The port must be a number from 1 to 65535."));
+        };
+        let proto = f.get("forward_proto");
+        if !["udp", "tcp"].contains(&proto) {
+            return Err(bad("The protocol must be udp or tcp."));
+        }
+        (port.to_string(), proto.to_string())
+    };
+    state
+        .config
+        .save_settings(&[
+            ("SYSLOG_FORWARD_HOST", host.to_string()),
+            ("SYSLOG_FORWARD_PORT", port),
+            ("SYSLOG_FORWARD_PROTO", proto),
+        ])
+        .map_err(|e| {
+            HtmlError::new(StatusCode::INTERNAL_SERVER_ERROR, &LOGS_AREA, e.to_string())
+        })?;
+    Ok(Redirect::to("/logs#syslog"))
 }
 
 // What: the refusal text for a cache size that won't fit.
@@ -6435,6 +6524,56 @@ async fn update_ntp_settings(
     Ok(Redirect::to(PAGE_SETUP))
 }
 
+// What: change the login password after the old one.
+// Why: the env hash stays; a saved hash replaces it.
+// From: Issue #1683 | PR #1858
+async fn update_password(
+    State(state): Shared,
+    Form(f): Form<Fields>,
+) -> Result<Redirect, HtmlError> {
+    let bad = |message: &str| HtmlError::new(StatusCode::BAD_REQUEST, &SETTINGS_AREA, message);
+    let fail = |message: String| {
+        HtmlError::new(StatusCode::INTERNAL_SERVER_ERROR, &SETTINGS_AREA, message)
+    };
+    let cfg = &state.config;
+    let (Some(base), Some(current)) = (cfg.auth_password_hash.clone(), cfg.login_hash()) else {
+        return Err(bad("The login is off, there is no password to change."));
+    };
+    // What: passwords read raw, not trimmed.
+    // Why: the login compares the raw text too.
+    // From: Issue #1683 | PR #1858
+    let raw = |key: &str| f.0.get(key).cloned().unwrap_or_default();
+    let (old, new, again) = (
+        raw("current_password"),
+        raw("new_password"),
+        raw("confirm_password"),
+    );
+    if new != again {
+        return Err(bad("The two new passwords are not the same."));
+    }
+    if new.chars().count() < 12 {
+        return Err(bad("The new password needs at least 12 characters."));
+    }
+    let matches = tokio::task::spawn_blocking(move || password_matches(&current, &old))
+        .await
+        .unwrap_or(false);
+    if !matches {
+        return Err(bad("The current password is wrong."));
+    }
+    let hash = tokio::task::spawn_blocking(move || hash_password(&new))
+        .await
+        .map_err(|e| fail(e.to_string()))?
+        .map_err(fail)?;
+    write_file(
+        &cfg.password_file(),
+        format!("{base}\n{hash}\n").as_bytes(),
+        0o600,
+        Place::Replace,
+    )
+    .map_err(|e| fail(e.to_string()))?;
+    Ok(Redirect::to(PAGE_SETUP))
+}
+
 // What: the setup page with network hints and updates.
 // Why: operators copy the client settings from here.
 // From: Issue #1683 | PR #1858
@@ -6453,6 +6592,7 @@ async fn setup_page(State(state): Shared, headers: HeaderMap) -> Response {
     ctx.insert("ntp_enabled", &cfg.flag("NTP_ENABLED"));
     ctx.insert("ntp_upstream_servers", &cfg.setting("NTP_UPSTREAM_SERVERS"));
     ctx.insert("ntp_auto_dhcp", &cfg.flag("NTP_AUTO_DHCP"));
+    ctx.insert("login_enabled", &cfg.auth_password_hash.is_some());
     ctx.insert("ntp_port", &cfg.ntp_port);
     insert_dhcp_mode(&mut ctx, cfg.dhcp_mode());
     render(&state, "setup.html", &ctx)
@@ -7002,8 +7142,10 @@ fn router(state: Arc<AppState>) -> Router {
         (PAGE_STATS, get(stats_page)),
         (PAGE_LOGS, get(logs_page)),
         (ROUTE_LOGS_SETTINGS, post(update_logging_settings)),
+        (ROUTE_LOGS_FORWARD, post(update_syslog_forward)),
         (PAGE_SETUP, get(setup_page)),
         (ROUTE_SETUP_UPDATE, post(update_stack_settings)),
+        (ROUTE_PASSWORD, post(update_password)),
         (ROUTE_RESTART_UI, post(restart_ui_service)),
         (ROUTE_DESIRED_STATE, post(set_service_desired_state)),
         (ROUTE_CACHE_RESIZE, post(resize_cache)),
