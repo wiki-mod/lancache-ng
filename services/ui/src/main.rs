@@ -48,6 +48,7 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 use tera::{Context, Tera};
@@ -367,6 +368,9 @@ impl Config {
                 text("DHCP_PROXY_CUSTOM_OPTIONS", ""),
             ),
             ("LANCACHE_IMAGE_CHANNEL", channel.clone()),
+            ("SYSLOG_FORWARD_HOST", text("SYSLOG_FORWARD_HOST", "")),
+            ("SYSLOG_FORWARD_PORT", text("SYSLOG_FORWARD_PORT", "")),
+            ("SYSLOG_FORWARD_PROTO", text("SYSLOG_FORWARD_PROTO", "")),
             // What: switches; SOT default is in the image.
             // Why: no Rust fallback; no typo flips one.
             // From: Issue #1683 | PR #1912
@@ -544,6 +548,36 @@ impl Config {
     // From: Issue #1683 | PR #1858
     fn flag(&self, key: &str) -> bool {
         self.setting(key).trim() == "1"
+    }
+
+    // What: where the changed login hash is saved.
+    // Why: next to the settings file, owner-only mode.
+    // From: Issue #1683 | PR #1858
+    fn password_file(&self) -> PathBuf {
+        Path::new(&self.ui_settings_file).with_file_name("lancache-ui-password.hash")
+    }
+
+    // What: the login hash in effect now.
+    // Why: a saved hash fits only the env hash it replaced.
+    // From: Issue #1683 | PR #1858
+    fn login_hash(&self) -> Option<String> {
+        let base = self.auth_password_hash.as_ref()?;
+        let saved = match fs::read_to_string(self.password_file()) {
+            Ok(text) => text,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Some(base.clone()),
+            Err(e) => {
+                tracing::warn!("saved login hash not read, env hash used: {e}");
+                return Some(base.clone());
+            }
+        };
+        // What: line 1 old env hash, line 2 the new hash.
+        // Why: a new env hash (a reset) wins over the file.
+        // From: Issue #1683 | PR #1858
+        let mut lines = saved.lines();
+        match (lines.next(), lines.next()) {
+            (Some(old), Some(new)) if old == base.as_str() => Some(new.to_string()),
+            _ => Some(base.clone()),
+        }
     }
 
     // What: the DHCP mode in effect now.
@@ -733,8 +767,7 @@ const TEMPLATE_NAMES: &[&str] = &[
     "dashboard.html",
     "dhcp.html",
     "domains.html",
-    "ntp.html",
-    "secondaries.html",
+    "cachehamster.html",
     "stats.html",
     "logs.html",
     "setup.html",
@@ -747,6 +780,18 @@ const ADMIN_UI_CSP: &str = "default-src 'self'; base-uri 'self'; object-src 'non
      frame-ancestors 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; \
      style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; \
      font-src 'self' data:";
+
+// What: progress counters of the running or last prefill.
+// Why: the task writes them; the Steam page reads them.
+// From: Issue #816 | PR #1976
+#[derive(Default)]
+struct PrefillRun {
+    running: AtomicBool,
+    total: AtomicU64,
+    done: AtomicU64,
+    failed: AtomicU64,
+    bytes: AtomicU64,
+}
 
 // What: everything the handlers share.
 // Why: one state value behind an Arc serves all requests.
@@ -764,6 +809,7 @@ struct AppState {
     db: Mutex<Connection>,
     ui_session_secret: [u8; 32],
     ui_session_ttl: Duration,
+    prefill: Arc<PrefillRun>,
 }
 
 impl AppState {
@@ -790,6 +836,7 @@ impl AppState {
             db: Mutex::new(db),
             ui_session_secret,
             ui_session_ttl,
+            prefill: Arc::default(),
             config,
         }
     }
@@ -970,7 +1017,7 @@ async fn security_headers(State(state): Shared, req: Request, next: Next) -> Res
 // Why: auth is checked per request; the cookie binds CSRF.
 // From: Issue #1683 | PR #1858
 async fn basic_auth(State(state): Shared, mut req: Request, next: Next) -> Response {
-    if let (Some(user), Some(hash)) = (&state.config.auth_user, &state.config.auth_password_hash) {
+    if let (Some(user), Some(hash)) = (&state.config.auth_user, state.config.login_hash()) {
         let presented = req
             .headers()
             .get(header::AUTHORIZATION)
@@ -1069,9 +1116,9 @@ async fn basic_auth(State(state): Shared, mut req: Request, next: Next) -> Respo
 // From: Issue #1683 | PR #1912
 const PAGE_DASHBOARD: &str = "/";
 const PAGE_DHCP: &str = "/dhcp";
-const PAGE_NTP: &str = "/ntp";
+const PAGE_CACHEHAMSTER: &str = "/cachehamster";
+const ROUTE_PREFILL: &str = "/cachehamster/prefill";
 const PAGE_DOMAINS: &str = "/domains";
-const PAGE_SECONDARIES: &str = "/secondaries";
 const PAGE_STATS: &str = "/stats";
 const PAGE_LOGS: &str = "/logs";
 const PAGE_SETUP: &str = "/setup";
@@ -1109,7 +1156,9 @@ const ROUTE_AAAA_FILTER: &str = "/domains/aaaa-filter";
 const ROUTE_DDNS_UNSIGNED: &str = "/domains/ddns-allow-unsigned-updates";
 const ROUTE_ZONE_ROLLBACK: &str = "/domains/zones/rollback";
 const ROUTE_LOGS_SETTINGS: &str = "/logs/settings";
+const ROUTE_LOGS_FORWARD: &str = "/logs/forward";
 const ROUTE_SETUP_UPDATE: &str = "/setup/update";
+const ROUTE_PASSWORD: &str = "/setup/password";
 const ROUTE_RESTART_UI: &str = "/setup/restart-ui";
 const ROUTE_DESIRED_STATE: &str = "/api/services/{service}/desired-state";
 const ROUTE_CACHE_RESIZE: &str = "/cache/resize";
@@ -1117,7 +1166,6 @@ const ROUTE_METRICS: &str = "/api/metrics";
 const ROUTE_WATCHDOG_STATUS: &str = "/api/watchdog-status";
 const ROUTE_NETDATA: &str = "/api/netdata/{*path}";
 const ROUTE_ADMIN_CSS: &str = "/static/admin.css";
-const ROUTE_CHART_JS: &str = "/static/chart.umd.min.js";
 const ROUTE_SECONDARY: &str = "/api/secondary/{name}";
 const ROUTE_SECONDARY_ROTATE: &str = "/api/secondary/{name}/rotate-token";
 const ROUTE_SECONDARY_HEALTH: &str = "/api/secondary/{name}/health";
@@ -1180,12 +1228,11 @@ fn page_ctx(headers: &HeaderMap, active: &str) -> Context {
     // What: each page path from its one Rust owner.
     // Why: nav and links follow the router path.
     // From: Issue #1683 | PR #1912
-    const PAGES: [(&str, &str); 8] = [
+    const PAGES: [(&str, &str); 7] = [
         ("dashboard", PAGE_DASHBOARD),
         ("dhcp", PAGE_DHCP),
-        ("ntp", PAGE_NTP),
+        ("cachehamster", PAGE_CACHEHAMSTER),
         ("domains", PAGE_DOMAINS),
-        ("secondaries", PAGE_SECONDARIES),
         ("stats", PAGE_STATS),
         ("logs", PAGE_LOGS),
         ("setup", PAGE_SETUP),
@@ -1193,7 +1240,7 @@ fn page_ctx(headers: &HeaderMap, active: &str) -> Context {
     // What: each route path from its one Rust owner.
     // Why: forms and scripts follow the router path.
     // From: Issue #1683 | PR #1912
-    const ROUTES: [(&str, &str); 43] = [
+    const ROUTES: [(&str, &str); 45] = [
         ("health", ROUTE_HEALTH),
         ("secondary_register", ROUTE_SECONDARY_REGISTER),
         ("favicon", ROUTE_FAVICON),
@@ -1224,7 +1271,10 @@ fn page_ctx(headers: &HeaderMap, active: &str) -> Context {
         ("ddns_unsigned", ROUTE_DDNS_UNSIGNED),
         ("zone_rollback", ROUTE_ZONE_ROLLBACK),
         ("logs_settings", ROUTE_LOGS_SETTINGS),
+        ("logs_forward", ROUTE_LOGS_FORWARD),
+        ("prefill", ROUTE_PREFILL),
         ("setup_update", ROUTE_SETUP_UPDATE),
+        ("password", ROUTE_PASSWORD),
         ("restart_ui", ROUTE_RESTART_UI),
         ("desired_state", ROUTE_DESIRED_STATE),
         ("cache_resize", ROUTE_CACHE_RESIZE),
@@ -1232,7 +1282,6 @@ fn page_ctx(headers: &HeaderMap, active: &str) -> Context {
         ("watchdog_status", ROUTE_WATCHDOG_STATUS),
         ("netdata", ROUTE_NETDATA),
         ("admin_css", ROUTE_ADMIN_CSS),
-        ("chart_js", ROUTE_CHART_JS),
         ("secondary", ROUTE_SECONDARY),
         ("secondary_rotate", ROUTE_SECONDARY_ROTATE),
         ("secondary_health", ROUTE_SECONDARY_HEALTH),
@@ -1256,7 +1305,16 @@ fn render(state: &AppState, name: &str, ctx: &Context) -> Response {
         page.insert(*key, value);
     }
     page.insert("repo_url", &state.config.repo_url);
-    page.insert("desired_services", &DesiredState::SERVICES);
+    // What: no dock button for dhcp in mode disabled.
+    // Why: nothing runs there; Stopp would do nothing.
+    // From: Issue #1437 | PR #1858
+    let dock: Vec<&str> = DesiredState::SERVICES
+        .into_iter()
+        .filter(|name| {
+            *name != DesiredState::DHCP || !matches!(state.config.dhcp_mode(), DhcpMode::Disabled)
+        })
+        .collect();
+    page.insert("desired_services", &dock);
     match state.templates.render(name, &page) {
         Ok(html) => Html(html).into_response(),
         Err(e) => {
@@ -1299,6 +1357,11 @@ struct ErrorArea {
 // What: the error-page areas of HtmlError.
 // Why: each area names its title and back link.
 // From: Issue #1683 | PR #1858
+const PREFILL_AREA: ErrorArea = ErrorArea {
+    title: "Prefill Error",
+    href: PAGE_CACHEHAMSTER,
+    back: "Return to Steam",
+};
 const CACHE_AREA: ErrorArea = ErrorArea {
     title: "Cache Resize Error",
     href: PAGE_DASHBOARD,
@@ -1306,8 +1369,8 @@ const CACHE_AREA: ErrorArea = ErrorArea {
 };
 const NTP_AREA: ErrorArea = ErrorArea {
     title: "NTP Configuration Error",
-    href: PAGE_NTP,
-    back: "Return to NTP settings",
+    href: PAGE_SETUP,
+    back: "Return to setup",
 };
 const DHCP_AREA: ErrorArea = ErrorArea {
     title: "DHCP Configuration Error",
@@ -1390,17 +1453,6 @@ async fn admin_css() -> Response {
         "text/css; charset=utf-8",
         false,
         include_bytes!("static/admin.css"),
-    )
-}
-
-// What: serve the compiled-in chart script.
-// Why: assets ship in the binary; no file read at runtime.
-// From: Issue #1683 | PR #1858
-async fn chart_js() -> Response {
-    asset(
-        "application/javascript; charset=utf-8",
-        true,
-        include_bytes!("static/chart.umd.min.js"),
     )
 }
 
@@ -2289,8 +2341,28 @@ fn stored_status(what: &str, written: io::Result<()>) -> StatusCode {
     }
 }
 
+// What: netdata path to its upstream segments, or None.
+// Why: fixed shapes only; no client-chosen path is relayed.
+// From: Issue #1683 | PR #1858
+fn netdata_segments(path: &str) -> Option<Vec<&str>> {
+    let name_ok = |name: &str| {
+        !name.is_empty()
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+    };
+    let parts: Vec<&str> = path.split('/').collect();
+    match parts.as_slice() {
+        ["data" | "charts"] => Some(vec!["api", "v1", parts[0]]),
+        ["dashboard.js" | "dashboard_info.js"] => Some(parts),
+        ["api", "v1", "data" | "chart" | "charts" | "info"] => Some(parts),
+        ["lib" | "css" | "fonts" | "images", file] if name_ok(file) => Some(parts),
+        _ => None,
+    }
+}
+
 // What: forward a chart request to netdata.
-// Why: only data and charts, never a client-chosen path.
+// Why: the chart script and its data, fixed path shapes.
 // From: Issue #1683 | PR #1858
 async fn netdata_proxy(
     State(state): Shared,
@@ -2298,12 +2370,10 @@ async fn netdata_proxy(
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Response, StatusCode> {
     let max_body = state.config.netdata_body_max;
-    if path.is_empty() || path.contains('/') || path.contains("..") {
+    if path.is_empty() || path.contains("..") || path.contains("//") {
         return Err(StatusCode::BAD_REQUEST);
     }
-    if !["data", "charts"].contains(&path.as_str()) {
-        return Err(StatusCode::NOT_FOUND);
-    }
+    let segments = netdata_segments(&path).ok_or(StatusCode::NOT_FOUND)?;
     let mut url = state
         .config
         .netdata_base()
@@ -2317,7 +2387,7 @@ async fn netdata_proxy(
             StatusCode::INTERNAL_SERVER_ERROR
         })?
         .pop_if_empty()
-        .extend(["api", "v1", &path]);
+        .extend(segments);
     let mut pairs: Vec<(&String, &String)> = params.iter().collect();
     pairs.sort();
     url.query_pairs_mut().extend_pairs(pairs);
@@ -2328,7 +2398,7 @@ async fn netdata_proxy(
     })?;
     let status = upstream.status().as_u16();
     // What: an absent content type is sent as JSON.
-    // Why: both allowed netdata paths answer JSON.
+    // Why: upstream names the type; JSON is the data.
     // From: Issue #1683 | PR #1858
     let content_type = upstream
         .headers()
@@ -3061,14 +3131,11 @@ fn new_nats_password() -> String {
     hex32()
 }
 
-// What: render the secondaries page.
-// Why: operators see registrations and probe status here.
+// What: the registered secondaries, newest first.
+// Why: the DNS page lists them in its Secondary tab.
 // From: Issue #1683 | PR #1858
-async fn secondaries_page(
-    State(state): Shared,
-    headers: HeaderMap,
-) -> Result<Response, StatusCode> {
-    let secondaries = with_db(&state, |db| {
+fn load_secondaries(state: &AppState) -> Vec<Secondary> {
+    with_db(state, |db| {
         db.prepare(
             "SELECT name, consumer_name, registered_at, last_seen, address \
              FROM secondaries ORDER BY registered_at DESC",
@@ -3090,23 +3157,7 @@ async fn secondaries_page(
     .unwrap_or_else(|e| {
         tracing::error!("secondaries not read: {e}");
         Vec::new()
-    });
-    let mut ctx = page_ctx(&headers, "secondaries");
-    ctx.insert("secondaries", &secondaries);
-    ctx.insert(
-        "primary_url",
-        &format!(
-            "http://{}:{}",
-            state.config.http_ip, state.config.listen_port
-        ),
-    );
-    ctx.insert("primary_ip", &state.config.http_ip);
-    ctx.insert("setup_script_url", &state.config.setup_script_url);
-    ctx.insert(
-        "registration_token",
-        &state.config.secondary_registration_token,
-    );
-    Ok(render(&state, "secondaries.html", &ctx))
+    })
 }
 
 // What: register a secondary and hand out its NATS login.
@@ -5857,6 +5908,7 @@ async fn domains_page(
         })
     };
     let mut ctx = page_ctx(&headers, "domains");
+    insert_dhcp_mode(&mut ctx, cfg.dhcp_mode());
     ctx.insert("dns_domains", &rows);
     ctx.insert("lan_records", &lan);
     ctx.insert("ptr_records", &ptr);
@@ -5885,6 +5937,14 @@ async fn domains_page(
     ctx.insert("reverse_zones", &served);
     let rollback = config::rollback_zones(&cfg.lan_zone, cfg.local_reverse);
     ctx.insert("rollback_zones", &rollback);
+    ctx.insert("secondaries", &load_secondaries(&state));
+    ctx.insert(
+        "primary_url",
+        &format!("http://{}:{}", cfg.http_ip, cfg.listen_port),
+    );
+    ctx.insert("primary_ip", &cfg.http_ip);
+    ctx.insert("setup_script_url", &cfg.setup_script_url);
+    ctx.insert("registration_token", &cfg.secondary_registration_token);
     render(&state, "domains.html", &ctx)
 }
 
@@ -6290,6 +6350,12 @@ async fn logs_page(
         })
         .collect();
     ctx.insert("log_switches", &switches);
+    ctx.insert("forward_host", &state.config.setting("SYSLOG_FORWARD_HOST"));
+    ctx.insert("forward_port", &state.config.setting("SYSLOG_FORWARD_PORT"));
+    ctx.insert(
+        "forward_proto",
+        &state.config.setting("SYSLOG_FORWARD_PROTO"),
+    );
     render(&state, "logs.html", &ctx)
 }
 
@@ -6307,7 +6373,53 @@ async fn update_logging_settings(
     state.config.save_settings(&changes).map_err(|e| {
         HtmlError::new(StatusCode::INTERNAL_SERVER_ERROR, &LOGS_AREA, e.to_string())
     })?;
-    Ok(Redirect::to(PAGE_LOGS))
+    Ok(Redirect::to("/logs#syslog"))
+}
+
+// What: save the external syslog target; empty host = off.
+// Why: the ui only writes; the watchdog applies it.
+// From: Issue #1683 | PR #1858
+async fn update_syslog_forward(
+    State(state): Shared,
+    Form(f): Form<Fields>,
+) -> Result<Redirect, HtmlError> {
+    let bad = |message: &str| HtmlError::new(StatusCode::BAD_REQUEST, &LOGS_AREA, message);
+    let host = f.get("forward_host");
+    let (port, proto) = if host.is_empty() {
+        (String::new(), String::new())
+    } else {
+        // What: a host name or IP, no other characters.
+        // Why: the value lands in a syslog-ng config.
+        // From: Issue #1683 | PR #1858
+        if host.len() > 253
+            || !host
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || ".-:".contains(c))
+        {
+            return Err(bad(
+                "The host may hold letters, digits, dot, dash and colon.",
+            ));
+        }
+        let Some(port) = f.number::<u16>("forward_port").filter(|p| *p > 0) else {
+            return Err(bad("The port must be a number from 1 to 65535."));
+        };
+        let proto = f.get("forward_proto");
+        if !["udp", "tcp"].contains(&proto) {
+            return Err(bad("The protocol must be udp or tcp."));
+        }
+        (port.to_string(), proto.to_string())
+    };
+    state
+        .config
+        .save_settings(&[
+            ("SYSLOG_FORWARD_HOST", host.to_string()),
+            ("SYSLOG_FORWARD_PORT", port),
+            ("SYSLOG_FORWARD_PROTO", proto),
+        ])
+        .map_err(|e| {
+            HtmlError::new(StatusCode::INTERNAL_SERVER_ERROR, &LOGS_AREA, e.to_string())
+        })?;
+    Ok(Redirect::to("/logs#syslog"))
 }
 
 // What: the refusal text for a cache size that won't fit.
@@ -6366,19 +6478,107 @@ async fn resize_cache(State(state): Shared, Form(f): Form<Fields>) -> Result<Red
     Ok(Redirect::to(PAGE_DASHBOARD))
 }
 
-// What: the NTP settings page.
-// Why: shows the saved values, not the startup ones.
-// From: Issue #1683 | PR #1858
-async fn ntp_page(State(state): Shared, headers: HeaderMap) -> Response {
-    let cfg = &state.config;
-    let mut ctx = page_ctx(&headers, "ntp");
-    ctx.insert("ntp_enabled", &cfg.flag("NTP_ENABLED"));
-    ctx.insert("ntp_upstream_servers", &cfg.setting("NTP_UPSTREAM_SERVERS"));
-    ctx.insert("ntp_auto_dhcp", &cfg.flag("NTP_AUTO_DHCP"));
-    ctx.insert("http_ip", &cfg.http_ip);
-    ctx.insert("ntp_port", &cfg.ntp_port);
-    insert_dhcp_mode(&mut ctx, cfg.dhcp_mode());
-    render(&state, "ntp.html", &ctx)
+// What: the CacheHamster page with the prefill state.
+// Why: the form posts addresses; counters show progress.
+// From: Issue #816 | PR #1976
+async fn cachehamster_page(State(state): Shared, headers: HeaderMap) -> Response {
+    let run = &state.prefill;
+    let mut ctx = page_ctx(&headers, "cachehamster");
+    ctx.insert("prefill_running", &run.running.load(Ordering::Relaxed));
+    ctx.insert("prefill_total", &run.total.load(Ordering::Relaxed));
+    ctx.insert("prefill_done", &run.done.load(Ordering::Relaxed));
+    ctx.insert("prefill_failed", &run.failed.load(Ordering::Relaxed));
+    ctx.insert(
+        "prefill_mb",
+        &(run.bytes.load(Ordering::Relaxed) / 1_000_000),
+    );
+    render(&state, "cachehamster.html", &ctx)
+}
+
+// What: one address read through the proxy, bytes dropped.
+// Why: the proxy keeps the bytes; Host names the site.
+// From: Issue #816 | PR #1976
+async fn prefill_one(
+    client: &reqwest::Client,
+    proxy: &reqwest::Url,
+    target: &reqwest::Url,
+    run: &PrefillRun,
+) -> Result<(), reqwest::Error> {
+    let mut via = proxy.clone();
+    via.set_path(target.path());
+    via.set_query(target.query());
+    let host = match target.port() {
+        Some(port) => format!("{}:{port}", target.host_str().unwrap_or_default()),
+        None => target.host_str().unwrap_or_default().to_string(),
+    };
+    let mut body = client
+        .get(via)
+        .header(reqwest::header::HOST, host)
+        .send()
+        .await?
+        .error_for_status()?
+        .bytes_stream();
+    while let Some(chunk) = body.next().await {
+        run.bytes.fetch_add(chunk?.len() as u64, Ordering::Relaxed);
+    }
+    Ok(())
+}
+
+// What: start a prefill of the listed http addresses.
+// Why: one run at a time; the proxy caches what it reads.
+// From: Issue #816 | PR #1976
+async fn start_prefill(State(state): Shared, Form(f): Form<Fields>) -> Result<Redirect, HtmlError> {
+    let area = &PREFILL_AREA;
+    let bad = |message: &str| HtmlError::new(StatusCode::BAD_REQUEST, area, message);
+    let targets: Vec<reqwest::Url> = f
+        .get("urls")
+        .split_whitespace()
+        .map(|raw| {
+            reqwest::Url::parse(raw)
+                .ok()
+                .filter(|u| u.scheme() == "http" && u.host_str().is_some())
+                .ok_or_else(|| bad("Each address must be a full http:// address."))
+        })
+        .collect::<Result<_, _>>()?;
+    if targets.is_empty() {
+        return Err(bad("Enter at least one address."));
+    }
+    if targets.len() > 200 {
+        return Err(bad("At most 200 addresses per run."));
+    }
+    let mut proxy = reqwest::Url::parse(&state.config.proxy_status_url)
+        .ok()
+        .ok_or_else(|| bad("The proxy address is not configured."))?;
+    proxy
+        .set_port(Some(state.config.http_port))
+        .map_err(|()| bad("The proxy address cannot take a port."))?;
+    let run = Arc::clone(&state.prefill);
+    if run.running.swap(true, Ordering::AcqRel) {
+        return Err(HtmlError::new(
+            StatusCode::CONFLICT,
+            area,
+            "A prefill is already running.",
+        ));
+    }
+    run.total.store(targets.len() as u64, Ordering::Relaxed);
+    for counter in [&run.done, &run.failed, &run.bytes] {
+        counter.store(0, Ordering::Relaxed);
+    }
+    let client = state.http_client.clone();
+    tokio::spawn(async move {
+        for target in &targets {
+            match prefill_one(&client, &proxy, target, &run).await {
+                Ok(()) => run.done.fetch_add(1, Ordering::Relaxed),
+                Err(e) => {
+                    let reason = e.to_string();
+                    tracing::error!(%target, %reason, "prefill fetch failed");
+                    run.failed.fetch_add(1, Ordering::Relaxed)
+                }
+            };
+        }
+        run.running.store(false, Ordering::Release);
+    });
+    Ok(Redirect::to(PAGE_CACHEHAMSTER))
 }
 
 // What: normalize the upstream NTP list to spaces.
@@ -6440,7 +6640,57 @@ async fn update_ntp_settings(
     } else if was_auto {
         sync_subnet_ntp(&state, false).await.map_err(fail)?;
     }
-    Ok(Redirect::to(PAGE_NTP))
+    Ok(Redirect::to(PAGE_SETUP))
+}
+
+// What: change the login password after the old one.
+// Why: the env hash stays; a saved hash replaces it.
+// From: Issue #1683 | PR #1858
+async fn update_password(
+    State(state): Shared,
+    Form(f): Form<Fields>,
+) -> Result<Redirect, HtmlError> {
+    let bad = |message: &str| HtmlError::new(StatusCode::BAD_REQUEST, &SETTINGS_AREA, message);
+    let fail = |message: String| {
+        HtmlError::new(StatusCode::INTERNAL_SERVER_ERROR, &SETTINGS_AREA, message)
+    };
+    let cfg = &state.config;
+    let (Some(base), Some(current)) = (cfg.auth_password_hash.clone(), cfg.login_hash()) else {
+        return Err(bad("The login is off, there is no password to change."));
+    };
+    // What: passwords read raw, not trimmed.
+    // Why: the login compares the raw text too.
+    // From: Issue #1683 | PR #1858
+    let raw = |key: &str| f.0.get(key).cloned().unwrap_or_default();
+    let (old, new, again) = (
+        raw("current_password"),
+        raw("new_password"),
+        raw("confirm_password"),
+    );
+    if new != again {
+        return Err(bad("The two new passwords are not the same."));
+    }
+    if new.chars().count() < 12 {
+        return Err(bad("The new password needs at least 12 characters."));
+    }
+    let matches = tokio::task::spawn_blocking(move || password_matches(&current, &old))
+        .await
+        .unwrap_or(false);
+    if !matches {
+        return Err(bad("The current password is wrong."));
+    }
+    let hash = tokio::task::spawn_blocking(move || hash_password(&new))
+        .await
+        .map_err(|e| fail(e.to_string()))?
+        .map_err(fail)?;
+    write_file(
+        &cfg.password_file(),
+        format!("{base}\n{hash}\n").as_bytes(),
+        0o600,
+        Place::Replace,
+    )
+    .map_err(|e| fail(e.to_string()))?;
+    Ok(Redirect::to(PAGE_SETUP))
 }
 
 // What: the setup page with network hints and updates.
@@ -6458,6 +6708,12 @@ async fn setup_page(State(state): Shared, headers: HeaderMap) -> Response {
         &cfg.setting("LANCACHE_IMAGE_CHANNEL"),
     );
     ctx.insert("auto_update_enabled", &cfg.flag("AUTO_UPDATE_ENABLED"));
+    ctx.insert("ntp_enabled", &cfg.flag("NTP_ENABLED"));
+    ctx.insert("ntp_upstream_servers", &cfg.setting("NTP_UPSTREAM_SERVERS"));
+    ctx.insert("ntp_auto_dhcp", &cfg.flag("NTP_AUTO_DHCP"));
+    ctx.insert("login_enabled", &cfg.auth_password_hash.is_some());
+    ctx.insert("ntp_port", &cfg.ntp_port);
+    insert_dhcp_mode(&mut ctx, cfg.dhcp_mode());
     render(&state, "setup.html", &ctx)
 }
 
@@ -6986,7 +7242,7 @@ fn router(state: Arc<AppState>) -> Router {
         (ROUTE_LEASE_RELEASE, post(release_lease)),
         (ROUTE_KEA_ROLLBACK, post(rollback_kea_snapshot)),
         (ROUTE_DHCP_CHECK, post(check_dhcp_conflict)),
-        (PAGE_NTP, get(ntp_page)),
+        (PAGE_CACHEHAMSTER, get(cachehamster_page)),
         (ROUTE_NTP_SETTINGS, post(update_ntp_settings)),
         (PAGE_DOMAINS, get(domains_page)),
         (ROUTE_DNS_ADD, post(add_dns)),
@@ -7005,8 +7261,11 @@ fn router(state: Arc<AppState>) -> Router {
         (PAGE_STATS, get(stats_page)),
         (PAGE_LOGS, get(logs_page)),
         (ROUTE_LOGS_SETTINGS, post(update_logging_settings)),
+        (ROUTE_PREFILL, post(start_prefill)),
+        (ROUTE_LOGS_FORWARD, post(update_syslog_forward)),
         (PAGE_SETUP, get(setup_page)),
         (ROUTE_SETUP_UPDATE, post(update_stack_settings)),
+        (ROUTE_PASSWORD, post(update_password)),
         (ROUTE_RESTART_UI, post(restart_ui_service)),
         (ROUTE_DESIRED_STATE, post(set_service_desired_state)),
         (ROUTE_CACHE_RESIZE, post(resize_cache)),
@@ -7014,8 +7273,6 @@ fn router(state: Arc<AppState>) -> Router {
         (ROUTE_WATCHDOG_STATUS, get(watchdog_status_api)),
         (ROUTE_NETDATA, get(netdata_proxy)),
         (ROUTE_ADMIN_CSS, get(admin_css)),
-        (ROUTE_CHART_JS, get(chart_js)),
-        (PAGE_SECONDARIES, get(secondaries_page)),
         (ROUTE_SECONDARY, delete(remove_secondary)),
         (ROUTE_SECONDARY_ROTATE, post(rotate_token)),
         (ROUTE_SECONDARY_HEALTH, post(check_secondary_health)),

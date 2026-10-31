@@ -1,0 +1,99 @@
+
+{# LanCache-NG (https://github.com/wiki-mod/lancache-ng) #}
+{# SPDX-License-Identifier: AGPL-3.0-or-later #}
+{# What: CacheHamster page: prefill tabs, placeholders #}
+{# Why: mockup Gaming page; nothing here is built yet #}
+{# From: Issue #816 | PR #1858 #}
+{% extends "base.html" %}
+{% block title %} – Steam{% endblock %}
+
+{% block content %}
+<section>
+  <p class="eyebrow">Gaming → Steam</p>
+  <h1 class="page-title">Steam</h1>
+  <p class="page-sub">Proactive cache warming for game platforms such as Steam (prefill). It streams depot data through this box's own proxy and discards it locally; it never installs games here. Everything below is placeholder scaffolding, not a finished design.</p>
+
+  <div class="subtabs">
+    <div class="subtab active" data-ch-tab="overview">Overview</div>
+    <div class="subtab" data-ch-tab="library">Library</div>
+    <div class="subtab" data-ch-tab="schedule">Schedule</div>
+    <div class="subtab" data-ch-tab="credentials">Credentials</div>
+    <div class="subtab" data-ch-tab="settings">Settings</div>
+  </div>
+
+  <div class="subtab5-panel active" data-ch-panel="overview">
+    <div class="section-title" style="margin-top:0;">Warm addresses</div>
+    <p class="section-sub">One http:// address per line. The proxy downloads each one and keeps it in the cache; nothing is stored here.</p>
+    <form action="{{ routes.prefill | safe }}" method="post">
+      {{ <csrf_field csrf_token={csrf_token}/> }}
+      <div class="field">
+        <label for="prefill-urls">Addresses</label>
+        <textarea id="prefill-urls" name="urls" rows="5" placeholder="http://deb.debian.org/debian/pool/main/m/mesa/mesa_26.1.5.orig.tar.xz" required style="width:100%; padding:9px 11px; border-radius:8px; border:1px solid var(--navy-600); background:var(--navy-900); color:var(--foam); font-family:var(--font-mono); font-size:13px;"></textarea>
+      </div>
+      <button type="submit" class="btn" {% if prefill_running %}disabled{% endif %}>Warm cache</button>
+    </form>
+    {% if prefill_total > 0 %}
+    <p class="status-line" style="margin-top:14px;">
+      <span class="beam-light {% if prefill_running %}on{% else %}off{% endif %}"></span>
+      {% if prefill_running %}Running{% else %}Last run finished{% endif %}:
+      {{ prefill_done }} of {{ prefill_total }} done, {{ prefill_failed }} failed, {{ prefill_mb }} MB read.
+      {% if prefill_running %}<a href="" style="margin-left:8px;">Refresh</a>{% endif %}
+    </p>
+    {% endif %}
+    <div class="placeholder-panel">
+      <div class="ph-tag">Placeholder</div>
+      <div class="glyph">⇓</div>
+      <p>Status of prefill jobs (running/last completed, chunks streamed through the proxy). The real shape depends on what the eventual Rust implementation exposes. Not yet built.</p>
+    </div>
+  </div>
+  <div class="subtab5-panel" data-ch-panel="library">
+    <div class="placeholder-panel">
+      <div class="ph-tag">Placeholder</div>
+      <div class="glyph">⇓</div>
+      <p>Manage the configurable list of App IDs to prefill (the project plan). Whether this gets a name-search convenience (e.g. against the public Steam Web API) or stays a plain App-ID list is not yet decided.</p>
+    </div>
+  </div>
+  <div class="subtab5-panel" data-ch-panel="schedule">
+    <div class="placeholder-panel">
+      <div class="ph-tag">Placeholder</div>
+      <div class="glyph">⇓</div>
+      <p>When prefill jobs run (e.g. off-peak hours). Not yet designed.</p>
+    </div>
+  </div>
+  <div class="subtab5-panel" data-ch-panel="credentials">
+    <div class="placeholder-panel">
+      <div class="ph-tag">Placeholder</div>
+      <div class="glyph">⇓</div>
+      <p>The real open decision of this project: anonymous Steam login only covers free-to-play/tools titles, so prefilling an operator's actual library needs a real account + Steam Guard 2FA. Owner still needs to decide: dedicated/throwaway account vs. main account, and where those credentials live.</p>
+    </div>
+  </div>
+  <div class="subtab5-panel" data-ch-panel="settings">
+    <div class="placeholder-panel">
+      <div class="ph-tag">Placeholder</div>
+      <div class="glyph">⇓</div>
+      <p>No disk-space setting here by design: the non-negotiable requirement is that this never writes game content to local disk; it streams through the proxy and discards. Settings here would cover things like which App IDs are enabled and prefill cadence, not storage.</p>
+    </div>
+  </div>
+</section>
+{% endblock %}
+
+{# What: tab script after base.html's script #}
+{# Why: tabs switch panels without a page reload #}
+{# From: Issue #816 | PR #1858 #}
+{% block scripts %}
+<script>
+  // What: shows the panel of the clicked tab, marks the tab
+  // Why: one data-ch-tab name maps to one data-ch-panel
+  // From: Issue #816 | PR #1858
+  document.querySelectorAll('[data-ch-tab]').forEach(function (tab) {
+    tab.addEventListener('click', function () {
+      document.querySelectorAll('[data-ch-tab]').forEach(function (other) {
+        other.classList.toggle('active', other === tab);
+      });
+      document.querySelectorAll('[data-ch-panel]').forEach(function (panel) {
+        panel.classList.toggle('active', panel.dataset.chPanel === tab.dataset.chTab);
+      });
+    });
+  });
+</script>
+{% endblock %}

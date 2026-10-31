@@ -5,18 +5,6 @@
 {# Why: child templates extend it and override the blocks #}
 {# From: Issue #1683 | PR #1912 #}
 
-{# What: one link of the section tab bar #}
-{# Why: one class string and active rule for all tabs #}
-{# From: Issue #1683 | PR #1912 #}
-{% component section_tab(href, label, active) %}<a href="{{ href | safe }}"
-       class="tab {% if active %}active{% endif %}">{{ label }}</a>{% endcomponent section_tab %}
-{# What: tab bar of the DHCP, DNS and Secondary pages #}
-{# Why: one copy; Secondary tab same on each page #}
-{# From: Issue #1683 | PR #1912 #}
-{% component section_tabs(main_href, main_label, main_page, active_page, secondaries_href) %}<div class="flex items-center gap-2 border-b border-slate-700">
-    {{ <section_tab href={main_href} label={main_label} active={active_page == main_page}/> }}
-    {{ <section_tab href={secondaries_href} label="Secondary" active={active_page == "secondaries"}/> }}
-  </div>{% endcomponent section_tabs %}
 {# What: hidden csrf_token field of every POST form #}
 {# Why: one markup; main.rs CSRF_FORM_FIELD reads it #}
 {# From: Issue #1683 | PR #1912 #}
@@ -38,18 +26,12 @@
 {# Why: one markup for the DHCP-DDNS and NTP state #}
 {# From: Issue #1683 | PR #1912 #}
 {% component on_off_badge(on) %}<span class="{% if on %}badge-on{% else %}badge-off{% endif %}">{% if on %}aktiv{% else %}inaktiv{% endif %}</span>{% endcomponent on_off_badge %}
-{# What: one sidebar link: icon path(s), label, active #}
-{# Why: one markup and active rule for all eight links #}
-{# From: Issue #1683 | PR #1912 #}
-{% component nav_link(href, label, active, d, d2="") %}<a href="{{ href | safe }}" class="nav-link {% if active %}active{% endif %}">
-        <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="{{ d }}"/>
-          {% if d2 %}<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="{{ d2 }}"/>{% endif %}
-        </svg>
-        {{ label }}
-      </a>{% endcomponent nav_link %}
+{# What: one sidebar link with dot, glyph and label #}
+{# Why: one markup and active rule for every menu entry #}
+{# From: Issue #1437 | PR #1858 #}
+{% component nav_link(href, label, active, glyph) %}<a href="{{ href | safe }}" class="nav-item {% if active %}active{% endif %}"><span class="nav-dot"></span><span class="nav-icon">{{ glyph }}</span> {{ label }}</a>{% endcomponent nav_link %}
 <!DOCTYPE html>
-<html lang="de" class="h-full">
+<html lang="de">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -57,174 +39,583 @@
   <link rel="icon" type="image/x-icon" href="{{ routes.favicon | safe }}">
   <link rel="stylesheet" href="{{ routes.admin_css | safe }}">
   <style>
-    /* What: CSS tokens; dark values on :root
-       Why: dark is the default; light needs an override
-       From: Issue #1437 */
-    :root {
-      --color-bg: #0b1220;
-      --color-surface: #111c33;
-      --color-surface-raised: #16213f;
-      --color-border: #253258;
-      --color-text: #e6e9f2;
-      --color-text-muted: #93a0c0;
-      --color-accent-gold: #e8c468;
-      --color-accent-gold-soft: rgba(232, 196, 104, 0.16);
-      --color-accent-coral: #ff7a63;
-      --color-accent-coral-soft: rgba(255, 122, 99, 0.16);
-      --font-display: Georgia, Cambria, "Times New Roman", serif;
-      --font-body: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-    }
-    /* What: light tokens when data-theme is "light"
-       Why: the head script sets it from storage or OS
-       From: Issue #1437 | PR #1912 */
-    :root[data-theme="light"] {
-      --color-bg: #f6f4ec;
-      --color-surface: #ffffff;
-      --color-surface-raised: #fbf9f2;
-      --color-border: #e4e0d0;
-      --color-text: #1c2333;
-      --color-text-muted: #5b6478;
-      --color-accent-gold: #a97c1f;
-      --color-accent-gold-soft: rgba(169, 124, 31, 0.12);
-      --color-accent-coral: #c8462f;
-      --color-accent-coral-soft: rgba(200, 70, 47, 0.12);
-    }
-    /* What: body font and colours, display font for titles
-       Why: fonts and colours come from the :root tokens
-       From: Issue #1683 | PR #1912 */
-    body { font-family: var(--font-body); background: var(--color-bg); color: var(--color-text); }
-    main h1 { font-family: var(--font-display); }
-    .stat-num { font-family: var(--font-display); }
+  /* What: CSS tokens, dark values on :root
+     Why: Mockup palette; data-theme light overrides below
+     From: Issue #1437 | PR #1858 */
+  :root {
+    --navy-950: #0a1220;
+    --navy-900: #101c30;
+    --navy-850: #13213a;
+    --navy-800: #17253d;
+    --navy-700: #22314f;
+    --navy-600: #34456a;
+    --beam: #f7b955;
+    --beam-dim: #f7b95533;
+    --coral: #ff7a5c;
+    --foam: #eef4fb;
+    --mist: #92a2ba;
+    --mist-dim: #5f7089;
+    --tide: #34d0a6;
+    --danger: #ef5a5a;
+    --font-display: Georgia, "Iowan Old Style", "Palatino Linotype", ui-serif, serif;
+    --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    --font-mono: ui-monospace, "SFMono-Regular", "IBM Plex Mono", Consolas, monospace;
+  }
 
-    /* What: slate classes and hovers to light theme tokens
-       Why: admin.css colors are fixed, not theme variables
-       From: Issue #1437 | PR #1912 */
-    :root[data-theme="light"] .text-white,
-    :root[data-theme="light"] .text-slate-100,
-    :root[data-theme="light"] .text-slate-200,
-    :root[data-theme="light"] .text-slate-300,
-    :root[data-theme="light"] .hover\:text-white:hover,
-    :root[data-theme="light"] .hover\:text-slate-300:hover { color: var(--color-text); }
-    :root[data-theme="light"] .text-slate-400,
-    :root[data-theme="light"] .text-slate-500 { color: var(--color-text-muted); }
-    :root[data-theme="light"] .bg-slate-900,
-    :root[data-theme="light"] .bg-slate-950 { background-color: var(--color-bg); }
-    :root[data-theme="light"] .bg-slate-800,
-    :root[data-theme="light"] .bg-slate-750 { background-color: var(--color-surface); }
-    :root[data-theme="light"] .bg-slate-600,
-    :root[data-theme="light"] .bg-slate-700,
-    :root[data-theme="light"] .hover\:bg-slate-600:hover { background-color: var(--color-surface-raised); }
-    :root[data-theme="light"] .border-slate-400,
-    :root[data-theme="light"] .border-slate-500,
-    :root[data-theme="light"] .border-slate-600,
-    :root[data-theme="light"] .border-slate-700,
-    :root[data-theme="light"] .hover\:border-slate-400:hover { border-color: var(--color-border); }
+  /* What: light values of the same tokens
+     Why: head script sets data-theme before paint
+     From: Issue #1437 | PR #1858 */
+  :root[data-theme="light"] {
+    --navy-950: #eef2f8;
+    --navy-900: #ffffff;
+    --navy-850: #ffffff;
+    --navy-800: #ffffff;
+    --navy-700: #d7e0ee;
+    --navy-600: #b9c6dc;
+    --foam: #16233a;
+    --mist: #51617c;
+    --mist-dim: #64748f;
+    --beam: #a8670d;
+    --tide: #0a8f6e;
+  }
 
-    /* What: dock, nav link, card, badge, scrollbar styles
-       Why: same look on every page; tokens set colours
-       From: Issue #1683 | PR #1912 */
-    .dock { background: var(--color-surface); border-right: 1px solid var(--color-border); }
-    .nav-link {
-      display: flex; align-items: center; gap: 0.625rem;
-      padding: 0.5rem 0.75rem; border-radius: 0.5rem;
-      font-size: 0.875rem; color: var(--color-text-muted);
-      border-left: 3px solid transparent;
-      transition: background-color 0.15s, color 0.15s, border-color 0.15s;
-      text-decoration: none;
-    }
-    .nav-link:hover { background: var(--color-surface-raised); color: var(--color-text); }
-    .nav-link.active {
-      background: var(--color-accent-gold-soft); color: var(--color-accent-gold);
-      border-left-color: var(--color-accent-gold); font-weight: 600;
-    }
-    .card { background: var(--color-surface); border-radius: 0.75rem; border: 1px solid var(--color-border); padding: 1.25rem; }
-    .badge-hit, .badge-on { background: rgba(16,185,129,0.2); color: #34d399; }
-    .badge-miss    { background: var(--color-accent-coral-soft); color: var(--color-accent-coral); }
-    .badge-expired { background: rgba(234,179,8,0.2);  color: #facc15; }
-    .badge-other, .badge-off { background: rgba(100,116,139,0.2); color: var(--color-text-muted); }
-    .badge-hit, .badge-miss, .badge-expired, .badge-other, .badge-on, .badge-off {
-      font-size: 0.7rem; font-weight: 700; padding: 0.15rem 0.45rem;
-      border-radius: 0.25rem; display: inline-block; line-height: 1.4;
-    }
-    ::-webkit-scrollbar { width: 6px; height: 6px; }
-    ::-webkit-scrollbar-track { background: var(--color-surface); }
-    ::-webkit-scrollbar-thumb { background: var(--color-border); border-radius: 3px; }
+  /* What: page reset and base text
+     Why: one font, background and colour for all pages
+     From: Issue #1437 | PR #1858 */
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; min-height: 100%;
+    background: var(--navy-950);
+    color: var(--foam);
+    font-family: var(--font-ui);
+    -webkit-font-smoothing: antialiased;
+  }
+  body { font-size: 14px; line-height: normal; }
+  body { overflow-x: hidden; }
 
-    /* What: slim top bar showing live per-service health
-       Why: rendered by base.html, so on every page
-       From: Issue #1437 */
-    .beambar {
-      position: relative; overflow: hidden;
-      background: var(--color-surface); border-bottom: 1px solid var(--color-border);
-      display: flex; align-items: center; justify-content: space-between;
-      padding: 0.5rem 1rem; gap: 1rem; flex-wrap: wrap;
-    }
-    .beambar::before {
-      content: ""; position: absolute; top: 0; left: 0; right: 0; height: 2px;
-      background: linear-gradient(90deg, var(--color-accent-gold), var(--color-accent-coral), var(--color-accent-gold));
-      background-size: 200% 100%;
-      animation: beambar-sweep 6s linear infinite;
-    }
-    @keyframes beambar-sweep {
-      0% { background-position: 0% 0; }
-      100% { background-position: 200% 0; }
-    }
-    .beambar-services { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; font-size: 0.75rem; color: var(--color-text-muted); }
-    .beambar-dot { width: 0.5rem; height: 0.5rem; border-radius: 9999px; display: inline-block; margin-right: 0.35rem; }
-    .beambar-dot.green  { background: #34d399; }
-    .beambar-dot.amber  { background: var(--color-accent-gold); }
-    .beambar-dot.yellow { background: #facc15; }
-    .beambar-dot.red    { background: var(--color-accent-coral); }
-    .beambar-dot.gray   { background: var(--color-text-muted); }
-    .theme-toggle {
-      font-size: 0.75rem; color: var(--color-text-muted); background: transparent;
-      border: 1px solid var(--color-border); border-radius: 0.5rem; padding: 0.25rem 0.6rem;
-      cursor: pointer;
-    }
-    .theme-toggle:hover { color: var(--color-text); border-color: var(--color-accent-gold); }
+  a { color: inherit; }
+  button { font-family: inherit; }
 
-    /* What: buttons, tabs, table heads, rows, list rows
-       Why: one owner for styles repeated across the pages
-       From: Issue #1683 | PR #1912 */
-    .btn {
-      display: inline-block; font-size: 0.875rem; line-height: 1.25rem; font-weight: 500;
-      padding: 0.5rem 1rem; border-radius: 0.5rem; color: #ffffff;
-      transition: background-color 0.15s, color 0.15s;
-    }
-    .btn-sm { font-size: 0.75rem; line-height: 1rem; font-weight: 400; padding: 0.25rem 0.5rem; border-radius: 0.25rem; }
-    .btn-blue  { background: #2563eb; } .btn-blue:hover  { background: #3b82f6; }
-    .btn-green { background: #16a34a; } .btn-green:hover { background: #22c55e; }
-    .btn-amber { background: #d97706; } .btn-amber:hover { background: #f59e0b; }
-    .btn-sky   { background: #0284c7; } .btn-sky:hover   { background: #0ea5e9; }
-    .btn-slate { background: #475569; } .btn-slate:hover { background: #64748b; }
-    .btn-danger { background: #7f1d1d; color: #fecaca; } .btn-danger:hover { background: #991b1b; }
-    .btn-warn   { background: #78350f; color: #fef3c7; } .btn-warn:hover   { background: #92400e; }
-    .btn-ghost-red   { background: transparent; color: #f87171; }
-    .btn-ghost-red:hover   { background: rgba(239, 68, 68, 0.1); color: #fca5a5; }
-    .btn-ghost-amber { background: transparent; color: #fbbf24; }
-    .btn-ghost-amber:hover { background: rgba(245, 158, 11, 0.1); color: #fcd34d; }
-    .btn:disabled { opacity: 0.4; cursor: not-allowed; }
-    .btn-blue:disabled:hover { background: #2563eb; }
-    .tab {
-      padding: 0.5rem 1rem; font-size: 0.875rem; line-height: 1.25rem; font-weight: 500;
-      border-bottom: 2px solid transparent; color: var(--color-text-muted);
-    }
-    .tab:hover { color: var(--color-text); }
-    .tab.active { border-bottom-color: #3b82f6; color: #93c5fd; }
-    .th { text-align: left; padding-top: 0.5rem; padding-bottom: 0.5rem; font-weight: 500; color: #cbd5e1; border-bottom: 1px solid #334155; }
-    .rows > tr + tr { border-top: 1px solid rgba(51, 65, 85, 0.5); }
-    .rows > tr { transition: background-color 0.15s; }
-    .rows > tr:hover { background-color: rgba(51, 65, 85, 0.3); }
-    .list-row {
-      display: flex; align-items: center; justify-content: space-between;
-      padding: 0.5rem 0.75rem; border-radius: 0.5rem;
-    }
-    .list-row:hover { background-color: rgba(51, 65, 85, 0.5); }
-    :root[data-theme="light"] .btn-slate { background-color: var(--color-surface-raised); color: var(--color-text); }
-    :root[data-theme="light"] .th { color: var(--color-text); border-bottom-color: var(--color-border); }
-    :root[data-theme="light"] .rows > tr + tr { border-top-color: var(--color-border); }
-    :root[data-theme="light"] .rows > tr:hover,
-    :root[data-theme="light"] .list-row:hover { background-color: var(--color-surface-raised); }
+  /* What: faint logo behind the page
+     Why: fixed to the page centre, no pointer events
+     From: Issue #1437 | PR #1858 */
+  .watermark {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: min(55%, 640px);
+    height: auto;
+    aspect-ratio: 353 / 360;
+    object-fit: contain;
+    opacity: 0.05;
+    pointer-events: none;
+    z-index: 0;
+  }
+  :root[data-theme="light"] .watermark { opacity: 0.06; }
+
+  /* What: app shell: dock plus main column
+     Why: flex row; stacks below 880px
+     From: Issue #1437 | PR #1858 */
+  .shell { position: relative; z-index: 1; display: flex; min-height: 100vh; }
+
+  /* What: sidebar with logo and menu groups
+     Why: same menu on every page
+     From: Issue #1437 | PR #1858 */
+  .dock {
+    width: 232px;
+    flex: 0 0 auto;
+    background: var(--navy-900);
+    border-right: 1px solid var(--navy-700);
+    display: flex;
+    flex-direction: column;
+    padding: 20px 14px;
+    gap: 4px;
+  }
+  .brand {
+    display: flex;
+    justify-content: center;
+    padding: 4px 8px 18px;
+    margin-bottom: 8px;
+    border-bottom: 1px solid var(--navy-700);
+  }
+  .brand-mark {
+    width: 100%; max-width: 176px; height: auto; flex: none;
+    object-fit: contain;
+  }
+
+  .nav-group-label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--mist-dim);
+    padding: 16px 10px 6px;
+  }
+  .nav-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 9px 10px;
+    border-radius: 8px;
+    font-size: 14px;
+    color: var(--mist);
+    cursor: pointer;
+    border: 1px solid transparent;
+    transition: background 0.12s ease, color 0.12s ease;
+  }
+  .nav-item:hover { background: var(--navy-800); color: var(--foam); }
+  .nav-item.active {
+    background: var(--navy-800);
+    color: var(--foam);
+    border-color: var(--navy-600);
+  }
+  .nav-item.active .nav-dot { background: var(--tide); box-shadow: 0 0 0 3px #34d0a626; }
+  .nav-dot { display: inline-block; width: 6px; height: 6px; border-radius: 999px; background: var(--mist-dim); flex: none; }
+  .nav-icon { display: inline-block; width: 16px; text-align: center; flex: none; opacity: 0.9; }
+
+  .dock-footer {
+    margin-top: auto;
+    padding-top: 14px;
+    border-top: 1px solid var(--navy-700);
+    font-size: 12px;
+    color: var(--mist-dim);
+  }
+
+  /* What: main column holding beambar and content
+     Why: min-width 0 lets tables shrink
+     From: Issue #1437 | PR #1858 */
+  .main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; }
+
+  /* What: top status bar with sweeping beam
+     Why: signature element of the mockup
+     From: Issue #1437 | PR #1858 */
+  .beambar {
+    position: relative;
+    height: 46px;
+    flex: none;
+    background: var(--navy-900);
+    border-bottom: 1px solid var(--navy-700);
+    display: flex;
+    align-items: center;
+    padding: 0 22px;
+    gap: 18px;
+    overflow: hidden;
+  }
+  .beambar::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(100deg, transparent 0%, var(--beam-dim) 45%, transparent 60%);
+    background-size: 220% 100%;
+    animation: sweep 6s linear infinite;
+    pointer-events: none;
+  }
+  @media (prefers-reduced-motion: reduce) { .beambar::before { animation: none; } }
+  @keyframes sweep {
+    0% { background-position: 140% 0; }
+    100% { background-position: -60% 0; }
+  }
+  .beam-station { display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--mist); white-space: nowrap; }
+  .beam-station b { color: var(--foam); font-weight: 600; }
+  .beam-light { display: inline-block; width: 7px; height: 7px; border-radius: 999px; background: var(--tide); box-shadow: 0 0 8px 1px #34d0a680; vertical-align: middle; }
+  .beam-light.warn { background: var(--coral); box-shadow: 0 0 8px 1px #ff7a5c80; }
+  .beam-light.off { background: var(--mist-dim); box-shadow: none; }
+  .beam-spacer { flex: 1; }
+  .lang-switch {
+    display: flex; align-items: center; gap: 6px;
+    font-size: 12.5px; color: var(--mist);
+    border: 1px solid var(--navy-600); border-radius: 999px;
+    padding: 5px 12px; cursor: pointer; background: var(--navy-850);
+  }
+  .lang-switch:hover { color: var(--foam); border-color: var(--mist-dim); }
+  .lang-switch select { background: transparent; border: 0; color: inherit; font: inherit; cursor: pointer; }
+  .lang-switch select option { background: var(--navy-850); color: var(--foam); }
+  .theme-btn {
+    border: 1px solid var(--navy-600); border-radius: 999px;
+    padding: 5px 10px; cursor: pointer; background: var(--navy-850); color: var(--mist); font-size: 13px;
+  }
+  .theme-btn:hover { color: var(--foam); }
+
+  /* What: page content box and entry animation
+     Why: max width keeps lines readable
+     From: Issue #1437 | PR #1858 */
+  .content { position: relative; flex: 1 1 auto; padding: 30px 34px 60px; max-width: 1180px; }
+  .view { display: none; }
+  .view.active { display: block; animation: rise 0.28s ease both; }
+  @keyframes rise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+
+  /* What: page heading, eyebrow and subtitle
+     Why: display font only on the page title
+     From: Issue #1437 | PR #1858 */
+  .eyebrow { font-size: 12px; letter-spacing: 0.09em; text-transform: uppercase; color: var(--mist-dim); margin: 0 0 6px; }
+  h1.page-title {
+    font-family: var(--font-display);
+    font-weight: 600;
+    font-size: 30px;
+    margin: 0 0 8px;
+    letter-spacing: 0.01em;
+    text-wrap: balance;
+  }
+  .page-sub { color: var(--mist); font-size: 14.5px; max-width: 62ch; line-height: 1.5; margin: 0 0 28px; }
+
+  /* What: stat cards, cards, pills, tables, tags
+     Why: building blocks shared by all pages
+     From: Issue #1437 | PR #1858 */
+  .stat-row { display: grid; grid-template-columns: repeat(5, 1fr); gap: 14px; margin-bottom: 22px; }
+  .stat-card {
+    background: var(--navy-850); border: 1px solid var(--navy-700); border-radius: 12px;
+    padding: 16px 18px;
+  }
+  .stat-num { font-family: var(--font-display); font-size: 27px; font-weight: 600; line-height: 1; font-variant-numeric: tabular-nums; margin-top: 6px; }
+  .stat-num .unit { font-size: 14px; color: var(--mist); font-family: var(--font-ui); margin-left: 4px; font-weight: 400; }
+  .stat-label { font-size: 12.5px; color: var(--mist); text-transform: uppercase; letter-spacing: 0.04em; }
+  .stat-card.accent .stat-num { color: var(--tide); }
+
+  /* What: .hidden hides an element until a script shows it.
+     Why: stats and dhcp toggle it; no utility CSS here. */
+  .hidden { display: none !important; }
+
+  .grid-2 { display: grid; grid-template-columns: 1.1fr 1.5fr; gap: 16px; align-items: start; }
+  .card { background: var(--navy-850); border: 1px solid var(--navy-700); border-radius: 12px; overflow: hidden; }
+  .card-head { padding: 15px 18px; border-bottom: 1px solid var(--navy-700); display: flex; align-items: center; justify-content: space-between; }
+  .card-head h3 { margin: 0; font-size: 14.5px; font-weight: 600; text-wrap: balance; }
+  .card-body { padding: 14px; }
+  .pill { font-size: 11px; padding: 3px 9px; border-radius: 999px; font-weight: 600; letter-spacing: 0.02em; }
+  .pill.on { background: #34d0a61f; color: var(--tide); }
+  .pill.off { background: #92a2ba1f; color: var(--mist); }
+
+  /* What: mode buttons, storage bar, log lines
+     Why: building blocks of dashboard and settings
+     From: Issue #1437 | PR #1858 */
+  .mode-switchrow { display: flex; gap: 8px; }
+  .mode-btn {
+    flex: 1; text-align: center; padding: 8px 10px; border-radius: 8px; font-size: 12.5px;
+    border: 1px solid var(--navy-600); color: var(--mist); cursor: pointer; background: transparent;
+  }
+  .mode-btn.selected { border-color: var(--beam); color: var(--foam); background: #f7b95514; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; font-weight: 600; color: var(--mist-dim); font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.05em; padding: 0 6px 10px; }
+  td { padding: 9px 6px; border-top: 1px solid var(--navy-700); vertical-align: middle; }
+  td.mono, .mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+  .tag { font-size: 11px; padding: 2px 7px; border-radius: 5px; font-weight: 600; }
+  .tag.hit { background: #34d0a61f; color: var(--tide); }
+  .tag.miss { background: #92a2ba1f; color: var(--mist); }
+  .tag.off { background: var(--navy-700); color: var(--mist-dim); }
+
+  .storage-bar { height: 10px; border-radius: 999px; background: var(--navy-700); overflow: hidden; }
+  .storage-fill { height: 100%; border-radius: 999px; background: linear-gradient(90deg, var(--beam), var(--coral)); }
+  .storage-meta { display: flex; justify-content: space-between; font-size: 12.5px; color: var(--mist); margin-top: 8px; }
+  .storage-meta b { color: var(--foam); font-family: var(--font-display); font-size: 15px; }
+  .log-line { padding: 3px 0; border-bottom: 1px solid var(--navy-700); }
+  .log-line:last-child { border-bottom: none; }
+
+  /* What: empty state and hint box
+     Why: explains a blank area instead of hiding it
+     From: Issue #1437 | PR #1858 */
+  .empty-state {
+    text-align: center; padding: 34px 20px 30px; color: var(--mist);
+  }
+  .empty-state .glyph { font-size: 26px; margin-bottom: 10px; opacity: 0.7; }
+  .empty-state p { margin: 0 auto 14px; max-width: 34ch; font-size: 13.5px; line-height: 1.5; }
+  .empty-state button {
+    background: var(--beam); color: #241705; border: none; border-radius: 8px;
+    padding: 8px 16px; font-size: 13px; font-weight: 600; cursor: pointer;
+  }
+
+  .hint {
+    display: flex; gap: 10px; align-items: flex-start;
+    background: #f7b9550f; border: 1px solid #f7b95533; border-radius: 10px;
+    padding: 12px 14px; font-size: 13px; color: var(--mist); line-height: 1.55;
+    margin-bottom: 16px;
+  }
+  .hint .glyph { flex: none; color: var(--beam); }
+  .hint b { color: var(--foam); }
+  .hint > div { max-width: 62ch; }
+
+  /* What: DHCP mode cards, errors, compare table
+     Why: building blocks of the DHCP page
+     From: Issue #1437 | PR #1858 */
+  .dhcp-modes { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 22px; }
+  .status-line { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--mist); margin-bottom: 14px; }
+  .errbox {
+    background: #ef5a5a14; border: 1px solid #ef5a5a44; border-radius: 10px; padding: 14px 16px; margin-top: 14px;
+    font-size: 13px; color: var(--foam); line-height: 1.55; max-width: 62ch;
+  }
+  .errbox .errtitle { display: flex; align-items: center; gap: 8px; font-weight: 600; color: var(--danger); margin-bottom: 6px; }
+  .errbox a.retry { color: var(--beam); font-weight: 600; text-decoration: none; }
+  .errbox a.retry:hover { text-decoration: underline; }
+
+  .advanced-toggle {
+    font-size: 12px; color: var(--mist-dim); cursor: pointer; display: inline-flex; align-items: center; gap: 5px; margin-top: 8px;
+  }
+  .advanced-toggle:hover { color: var(--mist); }
+
+  .compare-toggle {
+    font-size: 13px; font-weight: 600; color: var(--mist); cursor: pointer;
+    display: inline-flex; align-items: center; gap: 6px; margin-bottom: 16px;
+  }
+  .compare-toggle:hover { color: var(--foam); }
+  .compare-card { margin-bottom: 22px; }
+  .compare-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .compare-table th {
+    text-align: left; font-weight: 600; color: var(--mist-dim); font-size: 11.5px;
+    text-transform: uppercase; letter-spacing: 0.05em; padding: 12px 16px 10px;
+    border-bottom: 1px solid var(--navy-700);
+  }
+  .compare-table th:not(:first-child), .compare-table td:not(:first-child) { text-align: center; width: 30%; }
+  .compare-table td { padding: 11px 16px; border-top: 1px solid var(--navy-700); color: var(--mist); }
+  .compare-table td:first-child { color: var(--foam); }
+  .compare-table td.yes { color: var(--tide); font-weight: 600; }
+  .compare-table td.no { color: var(--mist-dim); font-size: 12.5px; }
+  .compare-table td.partial { color: var(--beam); font-size: 12.5px; }
+  .compare-footnote {
+    font-size: 12px; color: var(--mist-dim); padding: 12px 16px; border-top: 1px solid var(--navy-700);
+  }
+
+  .footnote { color: var(--mist-dim); font-size: 12px; margin-top: 40px; line-height: 1.6; border-top: 1px solid var(--navy-700); padding-top: 16px; }
+
+  /* What: form fields, buttons, toggles, toast, copy row
+     Why: one markup for every settings form
+     From: Issue #1437 | PR #1858 */
+  .field { margin-bottom: 12px; max-width: 480px; }
+  .field label { display: block; font-size: 13px; font-weight: 600; margin-bottom: 5px; }
+  .field .field-hint { font-size: 12px; color: var(--mist); margin-top: 5px; line-height: 1.5; max-width: 62ch; }
+
+  .info-tip {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 15px; height: 15px; border-radius: 50%; background: var(--navy-700);
+    color: var(--mist); font-size: 10.5px; font-weight: 700; cursor: help;
+    margin-left: 5px; vertical-align: middle; position: relative;
+  }
+  .info-tip:hover, .info-tip:focus { background: var(--navy-600); color: var(--foam); outline: none; }
+  .info-tip:hover::after, .info-tip:focus::after {
+    content: attr(data-tip);
+    position: absolute; bottom: 130%; left: 0; transform: none;
+    background: var(--navy-900); color: var(--foam); border: 1px solid var(--navy-600);
+    padding: 7px 10px; border-radius: 6px; font-size: 12px; font-weight: 400;
+    white-space: normal; width: max-content; max-width: 260px; line-height: 1.5;
+    box-shadow: 0 4px 14px rgba(0,0,0,0.35); z-index: 20;
+  }
+  .field input[type="text"], .field input[type="number"] {
+    width: 100%; padding: 9px 11px; border-radius: 8px; border: 1px solid var(--navy-600);
+    background: var(--navy-900); color: var(--foam); font-size: 13.5px; font-family: var(--font-mono);
+  }
+  .field input[type="text"]:focus, .field input[type="number"]:focus { outline: 2px solid var(--beam); outline-offset: 1px; border-color: var(--beam); }
+  .field input.invalid { border-color: var(--danger); }
+  .field-error { display: none; color: var(--danger); font-size: 12.5px; margin-top: 6px; }
+  .field-error.show { display: block; }
+  .field-row { display: flex; gap: 10px; align-items: flex-start; max-width: 480px; }
+  .field-row .field { flex: 1; }
+  .btn {
+    padding: 9px 16px; border-radius: 8px; font-size: 13.5px; font-weight: 600; cursor: pointer; border: none;
+    background: var(--beam); color: #241705; white-space: nowrap;
+  }
+  .btn.ghost { background: transparent; border: 1px solid var(--navy-600); color: var(--mist); }
+  .btn:focus-visible { outline: 2px solid var(--beam); outline-offset: 2px; }
+
+  .toggle-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 9px 0; border-top: 1px solid var(--navy-700); }
+  .toggle-row:first-child { border-top: none; }
+  .toggle-row .t-label { font-size: 13.5px; font-weight: 600; }
+  .toggle-row .t-desc { font-size: 12.5px; color: var(--mist); margin-top: 3px; max-width: 62ch; }
+  .toggle { display: inline-block; position: relative; width: 40px; height: 23px; flex: none; vertical-align: middle; cursor: pointer; }
+  .toggle input { position: absolute; opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; }
+  .toggle .track {
+    position: absolute; inset: 0; background: var(--navy-600); border-radius: 999px; transition: background 0.15s ease;
+  }
+  .toggle .knob {
+    position: absolute; top: 2.5px; left: 2.5px; width: 18px; height: 18px; border-radius: 999px;
+    background: var(--foam); transition: transform 0.15s ease;
+  }
+  .toggle input:checked ~ .track { background: var(--tide); }
+  .toggle input:checked ~ .knob { transform: translateX(17px); }
+  .toggle input:focus-visible ~ .track { outline: 2px solid var(--beam); outline-offset: 2px; }
+
+  .toast {
+    display: none; align-items: center; gap: 8px; font-size: 12.5px; color: var(--tide);
+    background: #34d0a614; border: 1px solid #34d0a63d; border-radius: 8px; padding: 7px 12px; margin-top: 10px;
+  }
+  .toast.show { display: inline-flex; }
+
+  .copy-row {
+    display: flex; align-items: center; gap: 10px; background: var(--navy-900); border: 1px solid var(--navy-700);
+    border-radius: 8px; padding: 10px 12px; font-family: var(--font-mono); font-size: 13px; max-width: 480px;
+  }
+  .copy-row code { flex: 1; overflow-x: auto; white-space: nowrap; }
+  .copy-row button {
+    flex: none; background: var(--navy-800); border: 1px solid var(--navy-600); color: var(--mist);
+    border-radius: 6px; padding: 5px 10px; font-size: 12px; cursor: pointer;
+  }
+  .copy-row button:hover { color: var(--foam); }
+  .copy-row button.copied { color: var(--tide); border-color: #34d0a655; }
+
+  /* What: snapshot rows, subtabs and tab panels
+     Why: building blocks of backup and DNS pages
+     From: Issue #1437 | PR #1858 */
+  .snapshot-row {
+    display: flex; align-items: center; justify-content: space-between; padding: 11px 0; border-top: 1px solid var(--navy-700); font-size: 13px;
+  }
+  .snapshot-row:first-of-type { border-top: none; }
+  .snapshot-row .s-meta { color: var(--mist); font-size: 12px; margin-top: 2px; }
+  .snapshot-actions { display: flex; gap: 14px; font-size: 12.5px; }
+  .snapshot-actions a { color: var(--beam); text-decoration: none; }
+  .snapshot-actions a:hover { text-decoration: underline; }
+
+  .subtabs { display: flex; gap: 22px; border-bottom: 1px solid var(--navy-700); margin-bottom: 26px; }
+  .subtab {
+    padding: 0 0 10px; font-size: 13.5px; font-weight: 600; color: var(--mist); cursor: pointer;
+    border-bottom: 2px solid transparent; margin-bottom: -1px;
+  }
+  .subtab:hover { color: var(--foam); }
+  .subtab.active { color: var(--foam); border-bottom-color: var(--beam); }
+  .subtab-panel { display: none; }
+  .subtab-panel.active { display: block; }
+  .subtab2-panel { display: none; }
+  .subtab2-panel.active { display: block; }
+  .subtab3-panel { display: none; }
+  .subtab3-panel.active { display: block; }
+  .subtab4-panel { display: none; }
+  .subtab4-panel.active { display: block; }
+  .subtab5-panel { display: none; }
+  .subtab5-panel.active { display: block; }
+
+  /* What: placeholder panel for unbuilt tabs
+     Why: marks Steam tabs as not yet real
+     From: Issue #1437 | PR #1858 */
+  .placeholder-panel {
+    text-align: center; padding: 46px 20px 42px; color: var(--mist);
+    border: 1px dashed var(--navy-600); border-radius: 12px;
+  }
+  .placeholder-panel .glyph { font-size: 22px; margin-bottom: 10px; opacity: 0.6; }
+  .placeholder-panel p { margin: 0 auto; max-width: 40ch; font-size: 13px; line-height: 1.55; }
+  .placeholder-panel .ph-tag {
+    display: inline-block; margin-bottom: 10px; font-size: 11px; font-weight: 700;
+    letter-spacing: 0.05em; text-transform: uppercase; color: var(--mist-dim);
+    background: var(--navy-800); border-radius: 999px; padding: 3px 10px;
+  }
+
+  /* What: section title and setup steps
+     Why: building blocks of settings pages
+     From: Issue #1437 | PR #1858 */
+  .section-title { font-size: 15px; font-weight: 600; margin: 20px 0 4px; }
+  .section-title:first-of-type { margin-top: 0; }
+  .section-sub { font-size: 13px; color: var(--mist); margin: 0 0 10px; max-width: 62ch; line-height: 1.5; }
+
+  .setup-steps { display: flex; flex-direction: column; gap: 18px; max-width: 480px; }
+  .setup-step { display: flex; gap: 14px; }
+  .setup-step-num {
+    flex: none; width: 22px; height: 22px; border-radius: 999px; background: var(--navy-700);
+    color: var(--foam); font-size: 12px; font-weight: 700; display: flex; align-items: center; justify-content: center;
+  }
+
+  /* What: phone layout: slim menu strip on top
+     Why: the full dock used a third of a phone screen
+     From: Issue #1683 | PR #1858 */
+  @media (max-width: 880px) {
+    .shell { flex-direction: column; }
+    .dock { position: sticky; top: 0; z-index: 5; width: 100%; height: auto; flex-direction: row; align-items: center; gap: 4px; padding: 6px 8px; overflow-x: auto; border-right: none; border-bottom: 1px solid var(--navy-700); }
+    .dock .brand { padding: 0 6px; margin: 0; border: none; flex: none; }
+    .dock .brand-mark { width: 34px; height: 34px; object-fit: contain; }
+    .dock .nav-group-label, .dock .dock-footer, .dock .nav-dot { display: none; }
+    .dock .nav-item { flex: none; white-space: nowrap; padding: 9px 12px; margin: 0; }
+    .beambar { overflow-x: auto; padding: 8px 12px; }
+    .content { padding: 18px 14px 48px; }
+    .page-title { font-size: 28px; }
+    .subtabs { gap: 16px; overflow-x: auto; white-space: nowrap; }
+    .stat-row, .grid-2, .dhcp-modes { grid-template-columns: 1fr; }
+  }
+
+  /* What: old --color-* tokens point at the mockup tokens
+     Why: page templates still read them in inline styles
+     From: Issue #1437 | PR #1858 */
+  :root {
+    --color-bg: var(--navy-950);
+    --color-surface: var(--navy-900);
+    --color-surface-raised: var(--navy-800);
+    --color-border: var(--navy-700);
+    --color-text: var(--foam);
+    --color-text-muted: var(--mist);
+    --color-accent-gold: var(--beam);
+    --color-accent-gold-soft: var(--beam-dim);
+    --color-accent-coral: var(--coral);
+    --color-accent-coral-soft: #ff7a5c29;
+  }
+
+  /* What: slate utility classes use the mockup tokens
+     Why: admin.css colours are fixed; pages not yet moved
+     From: Issue #1437 | PR #1858 */
+  :root .text-white, :root .text-slate-100, :root .text-slate-200,
+  :root .text-slate-300, :root .hover\:text-white:hover,
+  :root .hover\:text-slate-300:hover { color: var(--foam); }
+  :root .text-slate-400, :root .text-slate-500 { color: var(--mist); }
+  :root .bg-slate-900, :root .bg-slate-950 { background-color: var(--navy-950); }
+  :root .bg-slate-800, :root .bg-slate-750 { background-color: var(--navy-850); }
+  :root .bg-slate-700, :root .bg-slate-600,
+  :root .hover\:bg-slate-600:hover { background-color: var(--navy-800); }
+  :root .border-slate-400, :root .border-slate-500, :root .border-slate-600,
+  :root .border-slate-700, :root .hover\:border-slate-400:hover { border-color: var(--navy-700); }
+
+  /* What: card without card-body keeps its own padding
+     Why: pages not yet on card-head/card-body need spacing
+     From: Issue #1437 | PR #1858 */
+  .card:not(:has(> .card-body)) { padding: 18px; }
+
+  /* What: old button variants map to the mockup buttons
+     Why: one button look; primary is .btn, quiet is ghost
+     From: Issue #1437 | PR #1858 */
+  a.btn, button.btn { display: inline-block; text-decoration: none; }
+  .btn-sm { font-size: 12px; padding: 5px 10px; border-radius: 6px; }
+  .btn-slate, .btn-ghost-red, .btn-ghost-amber {
+    background: transparent; border: 1px solid var(--navy-600); color: var(--mist);
+  }
+  .btn-slate:hover { color: var(--foam); border-color: var(--mist-dim); }
+  .btn-danger, .btn-ghost-red {
+    background: #ef5a5a14; border: 1px solid #ef5a5a44; color: var(--danger);
+  }
+  .btn-warn, .btn-ghost-amber {
+    background: #f7b9550f; border: 1px solid #f7b95533; color: var(--beam);
+  }
+  .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  /* What: old badges use the mockup tag and pill colours
+     Why: one status colour set across all pages
+     From: Issue #1437 | PR #1858 */
+  .badge-hit, .badge-miss, .badge-expired, .badge-other, .badge-on, .badge-off {
+    font-size: 11px; padding: 2px 7px; border-radius: 5px; font-weight: 600; display: inline-block;
+  }
+  .badge-hit, .badge-on { background: #34d0a61f; color: var(--tide); }
+  .badge-miss { background: #ff7a5c29; color: var(--coral); }
+  .badge-expired { background: #f7b9551f; color: var(--beam); }
+  .badge-other, .badge-off { background: #92a2ba1f; color: var(--mist); }
+
+  /* What: old tab, table head and row use mockup tones
+     Why: pages not yet on subtabs and table still use them
+     From: Issue #1437 | PR #1858 */
+  .tab { padding: 0 0 10px; font-size: 13.5px; font-weight: 600; color: var(--mist); text-decoration: none; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+  .tab:hover { color: var(--foam); }
+  .tab.active { color: var(--foam); border-bottom-color: var(--beam); }
+  .th { text-align: left; font-weight: 600; color: var(--mist-dim); font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.05em; padding: 0 6px 10px; }
+  .rows > tr + tr { border-top: 1px solid var(--navy-700); }
+  .list-row { display: flex; align-items: center; justify-content: space-between; padding: 8px 10px; border-radius: 8px; }
+  .list-row:hover { background-color: var(--navy-800); }
+
+  /* What: tab links and buttons look like mockup subtabs
+     Why: section tabs are links, DNS tabs are buttons
+     From: Issue #1437 | PR #1858 */
+  a.subtab { text-decoration: none; }
+  button.subtab { background: transparent; border: 0; border-bottom: 2px solid transparent; font: inherit; font-size: 13.5px; font-weight: 600; cursor: pointer; }
+
+  /* What: watchdog dots in the mockup beam-light look
+     Why: JS paints one class per status on every page
+     From: Issue #1437 | PR #1858 */
+  .beambar-dot { display: inline-block; width: 7px; height: 7px; border-radius: 999px; vertical-align: middle; margin-right: 7px; }
+  .beambar-dot.green { background: var(--tide); box-shadow: 0 0 8px 1px #34d0a680; }
+  .beambar-dot.amber, .beambar-dot.yellow { background: var(--beam); box-shadow: 0 0 8px 1px #f7b95580; }
+  .beambar-dot.red { background: var(--coral); box-shadow: 0 0 8px 1px #ff7a5c80; }
+  .beambar-dot.gray { background: var(--mist-dim); }
+  .beambar-services { display: flex; align-items: center; gap: 18px; font-size: 12.5px; color: var(--mist); white-space: nowrap; }
+  .beambar-end { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+  .dock a.nav-item, .dock a.nav-item:hover { text-decoration: none; }
   </style>
   <script>
     // What: SOT seconds as the milliseconds JS timers take
@@ -257,6 +648,25 @@
       }
       apply();
       osLight.addEventListener('change', apply);
+      // What: Setup page switch: follow the OS theme or not
+      // Why: the mockup has a Match system theme toggle
+      // From: Issue #1683 | PR #1858
+      window.LancacheUi.followSystem = function (on) {
+        stored = on ? null : root.getAttribute('data-theme');
+        apply();
+        try {
+          if (on) {
+            localStorage.removeItem(STORAGE_KEY);
+          } else {
+            localStorage.setItem(STORAGE_KEY, stored);
+          }
+        } catch (err) {
+          reportError(err);
+        }
+      };
+      window.LancacheUi.followsSystem = function () {
+        return !(stored === 'light' || stored === 'dark');
+      };
       document.addEventListener('DOMContentLoaded', function () {
         document.getElementById('theme-toggle').addEventListener('click', function () {
           stored = root.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
@@ -274,69 +684,60 @@
     })();
   </script>
 </head>
-<body class="h-full flex">
-
-  <!-- What: sidebar with logo, nav links and image info
+<body>
+  <!-- What: faint logo behind the page content
+       Why: mockup watermark; same image as the sidebar logo
+       From: Issue #1437 | PR #1858 -->
+  <img class="watermark" alt="" src="{{ routes.logo_icon | safe }}">
+  <div class="shell">
+  <!-- What: sidebar with logo, menu groups and image info
        Why: one layout, same navigation on every page
-       From: Issue #1683 | PR #1912 -->
-  <aside class="dock w-52 shrink-0 flex flex-col">
-    <div class="px-4 py-5" style="border-bottom: 1px solid var(--color-border);">
-      <div class="flex items-center gap-2">
-        <img src="{{ routes.logo_icon | safe }}" alt="LanCache-NG Logo" class="w-8 h-8 rounded-full">
-        <div>
-          <p class="font-bold leading-none" style="color: var(--color-text);">LanCache-NG</p>
-          <p class="text-xs mt-0.5" style="color: var(--color-text-muted);">Admin Interface</p>
-        </div>
-      </div>
+       From: Issue #1437 | PR #1858 -->
+  <nav class="dock">
+    <div class="brand">
+      <img class="brand-mark" alt="LanCache-NG" src="{{ routes.logo_icon | safe }}?v={{ lancache_image_tag() }}">
     </div>
 
-    <nav class="flex-1 p-3 space-y-0.5">
-      {{ <nav_link href={pages.dashboard} label="Dashboard" active={active_page == "dashboard"} d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"/> }}
-      {{ <nav_link href={pages.dhcp} label="DHCP" active={active_page == "dhcp"} d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-2-4h.01M17 16h.01"/> }}
-      {{ <nav_link href={pages.ntp} label="NTP" active={active_page == "ntp"} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/> }}
-      {{ <nav_link href={pages.domains} label="DNS" active={active_page == "domains"} d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9"/> }}
-      {{ <nav_link href={pages.secondaries} label="Secondary" active={active_page == "secondaries"} d="M9 12l2 2 4-4m7.538-4.854a.75.75 0 00-1.054-1.054l-5.5 5.5a1 1 0 01-1.414 0l-2.5-2.5a.75.75 0 00-1.06 1.061l2.5 2.5a1 1 0 001.414 0l5.5-5.5zm0 7a.75.75 0 00-1.054-1.054l-5.5 5.5a1 1 0 01-1.414 0l-2.5-2.5a.75.75 0 10-1.06 1.061l2.5 2.5a1 1 0 001.414 0l5.5-5.5z"/> }}
-      {{ <nav_link href={pages.stats} label="Statistiken" active={active_page == "stats"} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/> }}
-      {{ <nav_link href={pages.logs} label="Logs" active={active_page == "logs"} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/> }}
-      {{ <nav_link href={pages.setup} label="Einrichtung" active={active_page == "setup"} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" d2="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/> }}
-    </nav>
+    <div class="nav-group-label">📊 Overview</div>
+    {{ <nav_link href={pages.dashboard} label="Dashboard" active={active_page == "dashboard"} glyph="◧"/> }}
+    {{ <nav_link href={pages.logs} label="Logs" active={active_page == "logs"} glyph="▤"/> }}
 
-    <div class="p-4" style="border-top: 1px solid var(--color-border);">
-      <p class="text-[0.65rem] uppercase tracking-wide" style="color: var(--color-text-muted);">Runtime Image</p>
-      <p class="mt-1 text-xs font-semibold truncate" style="color: var(--color-text);"
-         title="{{ lancache_image_registry() }}/{{ lancache_image_prefix() }}:{{ lancache_image_tag() }}">
-        {{ lancache_image_tag() }}
-      </p>
-      <p class="mt-0.5 text-[0.7rem]" style="color: var(--color-text-muted);">
-        Channel: {{ lancache_image_channel() }}
-      </p>
-      <p class="mt-3 text-xs" style="color: var(--color-text-muted);">Netdata läuft intern<br>und speist die Graphen.</p>
+    <div class="nav-group-label">🎮 Gaming</div>
+    {{ <nav_link href={pages.cachehamster} label="Steam" active={active_page == "cachehamster"} glyph="⇓"/> }}
+
+    <div class="nav-group-label">⚙ Settings</div>
+    {{ <nav_link href={pages.domains} label="DNS" active={active_page == "domains"} glyph="⌘"/> }}
+    {{ <nav_link href={pages.dhcp} label="DHCP" active={active_page == "dhcp"} glyph="⇄"/> }}
+    <a href="{{ pages.logs | safe }}#syslog" class="nav-item"><span class="nav-dot"></span><span class="nav-icon">☍</span> Syslog</a>
+    {{ <nav_link href={pages.setup} label="General" active={active_page == "setup"} glyph="◐"/> }}
+
+    <div class="dock-footer">
+      <span title="{{ lancache_image_registry() }}/{{ lancache_image_prefix() }}:{{ lancache_image_tag() }}">{{ lancache_image_tag() }} · {{ lancache_image_channel() }}</span><br>
       <!-- What: link to the project repository page
            Why: address only from the SOT, escaped by tera
            From: Issue #1683 | PR #1912 -->
-      <p class="mt-3 text-xs">
-        <a href="{{ repo_url }}" target="_blank" rel="noopener noreferrer"
-           class="underline" style="color: var(--color-text-muted);">Projektseite</a>
-      </p>
+      <a href="{{ repo_url }}" target="_blank" rel="noopener noreferrer" style="color: inherit;">Projektseite</a>
     </div>
-  </aside>
+  </nav>
 
-  <div class="flex-1 flex flex-col overflow-hidden">
+  <div class="main">
     <!-- What: health bar and theme toggle in the header
          Why: base.html renders it on every page
          From: Issue #1437 -->
     <header class="beambar" id="beambar">
       <div class="beambar-services" id="beambar-services">
-        <span style="color: var(--color-text-muted);">Service health: laden…</span>
+        <span>Service health: laden…</span>
       </div>
-      <div class="flex items-center gap-2">
-        {{ <restart_ui_form action={routes.restart_ui} csrf_token={csrf_token} button_class="theme-toggle" label="⟳ UI" title="Admin-UI neu starten"/> }}
-        <button type="button" class="theme-toggle" id="theme-toggle" title="Toggle light/dark theme">🌓 Theme</button>
+      <div class="beambar-end">
+        <label class="lang-switch">🌐 <select id="lang-select" aria-label="Language"></select></label>
+        {{ <restart_ui_form action={routes.restart_ui} csrf_token={csrf_token} button_class="theme-btn" label="⟳ UI" title="Admin-UI neu starten"/> }}
+        <button type="button" class="theme-btn" id="theme-toggle" title="Toggle light/dark theme">◐</button>
       </div>
     </header>
-    <main class="flex-1 overflow-y-auto p-6">
+    <main class="content">
       {% block content %}{% endblock %}
     </main>
+  </div>
   </div>
 
   <script>
@@ -501,11 +902,19 @@
       // From: Issue #1683 | PR #1912
       function serviceEntry(svc) {
         const wrap = document.createElement('span');
+        wrap.className = 'beam-station';
         wrap.title = svc.health || '';
         const dot = document.createElement('span');
         window.LancacheWatchdog.paintDot(dot, svc.status);
         wrap.appendChild(dot);
-        wrap.appendChild(document.createTextNode(svc.name));
+        wrap.appendChild(document.createTextNode(svc.name + ' '));
+        // What: bold status word after the service name
+        // Why: the mockup shows name plus state
+        // From: Issue #1683 | PR #1858
+        const word = { green: 'läuft', yellow: 'eingeschränkt', amber: 'eingeschränkt', red: 'gestört', gray: 'aus' };
+        const state = document.createElement('b');
+        state.textContent = word[svc.status] || svc.status || '';
+        wrap.appendChild(state);
         if (DOCK_CONTROLLABLE_SERVICES.includes(svc.name)) {
           // What: Start for red or gray, otherwise Stopp
           // Why: status.json has no running/stopped field
@@ -513,7 +922,7 @@
           const running = svc.status !== 'red' && svc.status !== 'gray';
           const button = document.createElement('button');
           button.type = 'button';
-          button.className = 'theme-toggle';
+          button.className = 'theme-btn';
           button.style.marginLeft = '0.35rem';
           button.style.padding = '0 0.4rem';
           button.textContent = running ? 'Stopp' : 'Start';
@@ -567,6 +976,211 @@
         el.textContent = formatter.format(new Date(window.LancacheUi.ms(epoch)));
         el.title = 'Unix: ' + el.dataset.epoch;
       });
+    })();
+  </script>
+
+  <!-- What: language catalog, one block per language
+       Why: a new language is one more block, no other edit
+       From: Issue #1683 | PR #1858 -->
+  <script>
+    (function () {
+      const base = 'en';
+      const catalog = {
+        de: { name: 'Deutsch', t: {
+          overview: '📊 Overview', stats: 'Statistiken',
+          settings: '⚙ Settings', setup: 'Einrichtung',
+          project: 'Projektseite', language: 'Sprache',
+          channel: 'Release-Kanal', auto: 'Automatische Updates',
+          auto_on: 'Automatische Updates aktiv',
+          auto_off: 'Automatische Updates deaktiviert',
+          password: 'Passwort ändern', save: 'Speichern',
+          cancel: 'Abbrechen', delete: 'Löschen',
+          add: 'Hinzufügen', loading: 'laden…',
+          time: 'Zeit', source: 'Quelle', message: 'Nachricht',
+          protocol: 'Protokoll', sys_stats: 'Systemstatistiken',
+          ram: 'RAM-Nutzung', net: 'Netzwerkdurchsatz',
+          disk_io: 'Festplatten-I/O',
+          log_per_service: 'Protokollierung je Dienst',
+          no_logs: 'Noch keine Log-Einträge',
+          host_or_ip: 'Host oder IP',
+          active_leases: 'Aktive DHCP-Leases',
+          active_mode: 'Aktiver DHCP-Modus',
+          dhcp_mode: 'DHCP-Modus',
+          dns_mgmt: 'DNS-Verwaltung',
+          lan_entries: 'LAN-Einträge',
+          mac: 'MAC-Adresse',
+          ip: 'IP-Adresse',
+          created: 'Erstellt',
+          enabled: 'Aktiviert',
+          disabled: 'Deaktiviert',
+          actions: 'Aktionen',
+          check: 'Prüfen',
+          snapshots: 'Konfigurations-Snapshots',
+          new_subnet: 'Neues Subnet',
+          no_secondaries: 'Keine Secondaries registriert.',
+          new_secondary: 'Neuen Secondary registrieren',
+          secondary_name: 'Name des Secondary',
+          no_leases: 'Keine aktiven Leases',
+          no_subnets: 'Keine Subnetze konfiguriert',
+          no_reservations: 'Keine Reservierungen vorhanden',
+          no_lan: 'Keine LAN-Einträge vorhanden.',
+          empty_list: 'Liste ist leer.',
+          dns_status: 'DNS-Status',
+          hit_rate: 'Cache-Trefferquote',
+          hits: 'Cache-Treffer',
+          data_served: 'Ausgelieferte Daten',
+          total_requests: 'Anfragen gesamt',
+          recent_requests: 'Letzte Anfragen',
+          today: 'Heute',
+          days: 'Tage',
+          files: 'Dateien',
+          library: 'Bibliothek',
+          cache_storage: 'Cache-Speicher',
+          caching_mode: 'Cache-Modus',
+          resize_cache: 'Cache vergrößern',
+          new_cache_size: 'Neue Cache-Größe (GB)',
+          netdata_alarms: 'Netdata-Alarme',
+          no_alarms: 'Noch keine Netdata-Alarme empfangen.',
+          no_requests: 'Noch keine Anfragen protokolliert.',
+          proxy_down: 'Proxy nicht erreichbar',
+          service_health: 'Dienst-Status',
+          current_password: 'Aktuelles Passwort',
+          new_password: 'Neues Passwort',
+          repeat_password: 'Neues Passwort wiederholen',
+          refresh: 'Aktualisieren',
+          recommended: 'Empfohlen',
+          restart_ui: 'Admin-UI neu starten',
+          current_state: 'Aktueller Stand:',
+          general: 'Allgemein',
+          sign_in: 'Anmeldung',
+          check_updates: 'Automatisch nach Updates suchen',
+          appearance: 'Darstellung',
+          match_system: 'System-Design übernehmen',
+          match_system_desc: 'Folgt automatisch der Hell/Dunkel-Einstellung deines Geräts.'
+        } },
+        en: { name: 'English', t: {
+          overview: '📊 Overview', stats: 'Statistics',
+          settings: '⚙ Settings', setup: 'Setup',
+          project: 'Project page', language: 'Language',
+          channel: 'Release channel', auto: 'Automatic updates',
+          auto_on: 'Automatic updates on',
+          auto_off: 'Automatic updates off',
+          password: 'Change password', save: 'Save',
+          cancel: 'Cancel', delete: 'Delete',
+          add: 'Add', loading: 'loading…',
+          time: 'Time', source: 'Source', message: 'Message',
+          protocol: 'Protocol', sys_stats: 'System statistics',
+          ram: 'RAM usage', net: 'Network throughput',
+          disk_io: 'Disk I/O',
+          log_per_service: 'Logging per service',
+          no_logs: 'No log entries yet',
+          host_or_ip: 'Host or IP',
+          active_leases: 'Active DHCP leases',
+          active_mode: 'Active DHCP mode',
+          dhcp_mode: 'DHCP mode',
+          dns_mgmt: 'DNS management',
+          lan_entries: 'LAN entries',
+          mac: 'MAC address',
+          ip: 'IP address',
+          created: 'Created',
+          enabled: 'Enabled',
+          disabled: 'Disabled',
+          actions: 'Actions',
+          check: 'Check',
+          snapshots: 'Configuration snapshots',
+          new_subnet: 'New subnet',
+          no_secondaries: 'No secondaries registered.',
+          new_secondary: 'Register new secondary',
+          secondary_name: 'Secondary name',
+          no_leases: 'No active leases',
+          no_subnets: 'No subnets configured',
+          no_reservations: 'No reservations',
+          no_lan: 'No LAN entries.',
+          empty_list: 'List is empty.',
+          dns_status: 'DNS status',
+          hit_rate: 'Cache hit rate',
+          hits: 'Cache HITs',
+          data_served: 'Data served',
+          total_requests: 'Total requests',
+          recent_requests: 'Recent requests',
+          today: 'Today',
+          days: 'Days',
+          files: 'Files',
+          library: 'Library',
+          cache_storage: 'Cache storage',
+          caching_mode: 'Caching mode',
+          resize_cache: 'Resize cache',
+          new_cache_size: 'New cache size (GB)',
+          netdata_alarms: 'Netdata alarms',
+          no_alarms: 'No Netdata alarms received yet.',
+          no_requests: 'No requests logged yet.',
+          proxy_down: 'Proxy unreachable',
+          service_health: 'Service health',
+          current_password: 'Current password',
+          new_password: 'New password',
+          repeat_password: 'Repeat new password',
+          refresh: 'Refresh',
+          recommended: 'Recommended',
+          restart_ui: 'Restart Admin UI',
+          current_state: 'Current state:',
+          general: 'General',
+          sign_in: 'Sign-in',
+          check_updates: 'Check for updates automatically',
+          appearance: 'Appearance',
+          match_system: 'Match system theme',
+          match_system_desc: 'Follows your device light/dark setting automatically.'
+        } }
+      };
+      const read = function () {
+        const m = document.cookie.match(/(?:^|; )lc_lang=([a-z]{2,8})/);
+        return m && catalog[m[1]] ? m[1] : base;
+      };
+      const lang = read();
+      const keyOf = new Map();
+      Object.keys(catalog).forEach(function (code) {
+        Object.keys(catalog[code].t).forEach(function (key) {
+          keyOf.set(catalog[code].t[key], key);
+        });
+      });
+      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+      let node;
+      while ((node = walker.nextNode())) {
+        const text = node.nodeValue.trim();
+        const key = keyOf.get(text);
+        const out = key ? catalog[lang].t[key] : undefined;
+        if (out !== undefined && out !== text) {
+          node.nodeValue = node.nodeValue.replace(text, out);
+        }
+      }
+      document.documentElement.lang = lang;
+      const pick = document.getElementById('lang-select');
+      if (pick) {
+        Object.keys(catalog).forEach(function (code) {
+          const o = document.createElement('option');
+          o.value = code;
+          o.textContent = catalog[code].name;
+          o.selected = code === lang;
+          pick.appendChild(o);
+        });
+        pick.addEventListener('change', function () {
+          document.cookie = 'lc_lang=' + pick.value + '; path=/; max-age=31536000; samesite=strict';
+          location.reload();
+        });
+      }
+      const row = document.getElementById('lang-row');
+      if (row) {
+        Object.keys(catalog).forEach(function (code) {
+          const b = document.createElement('button');
+          b.type = 'button';
+          b.className = 'mode-btn' + (code === lang ? ' selected' : '');
+          b.textContent = catalog[code].name;
+          b.addEventListener('click', function () {
+            document.cookie = 'lc_lang=' + code + '; path=/; max-age=31536000; samesite=strict';
+            location.reload();
+          });
+          row.appendChild(b);
+        });
+      }
     })();
   </script>
 

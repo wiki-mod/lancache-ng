@@ -241,6 +241,10 @@ untrusted network · **Impact**: High
   **refuses to start** unless the operator has *explicitly* set
   `ALLOW_INSECURE_UI=true`. A partial config (only one of the two) is a hard
   startup error. There is no silent unauthenticated default.
+- A password changed on the Setup page needs the old password, at least 12
+  characters, and is stored only as an Argon2id hash in a 0600 file next to
+  the settings file. A new `UI_AUTH_PASSWORD_HASH` in `.env` wins over that
+  file, so the reset path stays with the host operator.
 - A valid session cookie never substitutes for required Basic auth on protected
   routes (regression-tested).
 - Startup also fails closed if `SECONDARY_REGISTRATION_TOKEN` is empty (an empty

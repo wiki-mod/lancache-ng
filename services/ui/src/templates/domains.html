@@ -8,20 +8,18 @@
 {# What: TTL input of the LAN and PTR record forms #}
 {# Why: one copy of default, limits and help text #}
 {# From: Issue #1683 | PR #1912 #}
-{% component ttl_input(ttl_default, ttl_max) %}<input type="number" name="ttl" value="{{ ttl_default }}" placeholder="TTL (Sekunden)"
+{% component ttl_input(ttl_default, ttl_max) %}<label class="flex items-center gap-2 text-xs text-slate-400">TTL (Sek.) <input type="number" name="ttl" value="{{ ttl_default }}"
                  required min="1" max="{{ ttl_max }}"
                  title="TTL must be between 1 and {{ ttl_max }} seconds (RFC 2181)."
-                 class="w-24 bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-green-500">{% endcomponent ttl_input %}
+                 class="w-24 bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-green-500"></label>{% endcomponent ttl_input %}
 {% block title %} – DNS{% endblock %}
 
 {% block content %}
-<div class="max-w-5xl mx-auto space-y-6">
+<div class="space-y-6">
 
   <div>
-    <h1 class="text-xl font-bold text-white">DNS-Verwaltung</h1>
-    <p class="text-sm text-slate-400 mt-1">
-      CDN-Domains und LAN-Records können ohne Container-Neustart live geändert werden.
-    </p>
+    <p class="eyebrow">Settings → DNS</p>
+    <h1 class="page-title">DNS</h1>
   </div>
 
   {# What: banner for a rejected CDN-domain add, fixed text
@@ -33,196 +31,155 @@
   </div>
   {% endif %}
 
-  {{ <section_tabs main_href={pages.domains} main_label="DNS" main_page="domains" active_page={active_page} secondaries_href={pages.secondaries}/> }}
-
-  {# What: one tab button per data-dns-panel section below
-     Why: setActiveDnsTab maps data-dns-tab to the panel
-     From: Issue #1683 | PR #1912 #}
-  <div class="flex flex-wrap items-center gap-2 border-b border-slate-700">
-    <button type="button" data-dns-tab="cdn"
-            class="tab dns-tab-btn">
-      CDN-Domains
-    </button>
-    <button type="button" data-dns-tab="lan"
-            class="tab dns-tab-btn">
-      LAN
-    </button>
-    <button type="button" data-dns-tab="ptr"
-            class="tab dns-tab-btn">
-      PTR (Reverse)
-    </button>
-    <button type="button" data-dns-tab="settings"
-            class="tab dns-tab-btn">
-      Settings
-    </button>
-    <button type="button" data-dns-tab="zones"
-            class="tab dns-tab-btn">
-      Zone-Snapshots
-    </button>
+  {# What: four tab buttons; each shows one or two panels
+     Why: setActiveDnsTab maps a panel to its tab button
+     From: Issue #1683 | PR #1858 #}
+  <div class="subtabs">
+    <button type="button" data-dns-tab="cdn" class="subtab dns-tab-btn">Cached Domains</button>
+    <button type="button" data-dns-tab="primary" class="subtab dns-tab-btn">Primary DNS</button>
+    <button type="button" data-dns-tab="secondary" class="subtab dns-tab-btn">Secondary DNS</button>
+    <button type="button" data-dns-tab="settings" class="subtab dns-tab-btn">Settings</button>
   </div>
 
   <div class="space-y-6">
     {# What: CDN domain list: add, switch, remove
        Why: one list cdn-domains.txt; certs follow it
-       From: Issue #1683 | PR #1912 #}
-    <section data-dns-panel="cdn" class="card flex flex-col gap-4">
-      <div>
-        <h2 class="font-semibold text-slate-200">CDN-Domains</h2>
-        <p class="text-xs text-slate-500 mt-0.5">cdn-domains.txt · Hosts die auf den Cache-DNS zeigen. HTTPS-Zertifikate für passende Root-Domains werden automatisch abgeleitet, kein separater Eintrag nötig.</p>
-        <p class="text-xs text-slate-500 mt-0.5">
-          Vorkonfigurierte Standard-Domains lassen sich über den Schalter aktivieren/deaktivieren, ohne aus der Liste zu verschwinden.
-          Selbst hinzugefügte Domains werden weiterhin über "Entfernen" verwaltet.
-        </p>
+       From: Issue #1683 | PR #1976 #}
+    <section data-dns-panel="cdn">
+      <div class="subtabs" style="margin-bottom:22px;">
+        <button type="button" class="subtab cdn-sub-btn active" data-cdn-sub="custom">Custom domains</button>
+        <button type="button" class="subtab cdn-sub-btn" data-cdn-sub="default">Default CDN</button>
       </div>
 
-      <form action="{{ routes.dns_add | safe }}" method="post" class="flex gap-2">
-        {{ <csrf_field csrf_token={csrf_token}/> }}
-        {# What: one domain per submit, one input
-           Why: each add runs after_domain_change
-           From: Issue #1683 | PR #1912 #}
-        <input type="text" name="domain" placeholder="z.B. steamcontent.com"
-               required
-               class="flex-1 bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500">
-        <button type="submit"
-                class="btn btn-blue">
-          Hinzufügen
-        </button>
-      </form>
-
-      <div class="space-y-1 max-h-[28rem] overflow-y-auto">
-        {% if dns_domains %}
-        {% for domain in dns_domains %}
-        <div class="list-row group {% if not domain.enabled %}opacity-50{% endif %}">
-          <div class="flex items-center gap-2 min-w-0">
-            <span class="font-mono text-sm text-slate-300 truncate">{{ domain.display }}</span>
-            {% if domain.is_default %}
-            <span class="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-slate-600 text-slate-300 flex-shrink-0">Standard</span>
-            {% else %}
-            <span class="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-blue-900 text-blue-300 flex-shrink-0">Eigene</span>
-            {% endif %}
-            {% if not domain.enabled %}
-            <span class="text-[10px] px-1.5 py-0.5 rounded bg-red-900 text-red-300 flex-shrink-0">Deaktiviert</span>
-            {% endif %}
-          </div>
-
-          {% if domain.is_default and domain.is_valid %}
-          {# What: on/off switch for default rows
-             Why: a "!" prefix marks a disabled row
-             From: Issue #1683 | PR #1912 #}
-          <form action="{{ routes.dns_toggle | safe }}" method="post" class="flex items-center gap-2 flex-shrink-0">
-            {{ <csrf_field csrf_token={csrf_token}/> }}
-            <input type="hidden" name="domain" value="{{ domain.display }}">
-            <label class="flex items-center gap-1.5 cursor-pointer select-none">
-              <input type="checkbox" name="enabled" value="1"
-                     {% if domain.enabled %}checked{% endif %}
-                     onchange="this.form.requestSubmit()"
-                     class="w-4 h-4 rounded border-slate-600 bg-slate-700 text-green-600 focus:ring-2 focus:ring-green-500 cursor-pointer">
-              <span class="text-xs {% if domain.enabled %}text-green-400{% else %}text-slate-500{% endif %}">
-                {% if domain.enabled %}Aktiv{% else %}Deaktiviert{% endif %}
-              </span>
-            </label>
-          </form>
-          {% else %}
-          <form action="{{ routes.dns_remove | safe }}" method="post" class="opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0">
-            {{ <csrf_field csrf_token={csrf_token}/> }}
-            {# What: hidden value is the raw file entry
-               Why: removal keys on the raw entry
-               From: Issue #1683 | PR #1912 #}
-            <input type="hidden" name="domain" value="{{ domain.raw }}">
-            <button type="submit"
-                    onclick="return confirm('{{ domain.display }} aus der Domain-Liste entfernen?\nDer Proxy wird ggf. neu gestartet, falls der HTTPS-Modus aktiv ist.')"
-                    class="btn btn-sm btn-ghost-red">
-              Entfernen
-            </button>
-          </form>
-          {% endif %}
+      <div data-cdn-panel="custom">
+        <div class="hint">
+          <span class="glyph">◈</span>
+          <div><b>Each entry matches exactly one thing, never a combination:</b> <code>steamcontent.com</code> matches only that exact domain. <code>.steamcontent.com</code> (leading dot) matches every subdomain, like <code>cdn.steamcontent.com</code>, but not the bare domain itself. <code>cdn.steamcontent.com</code> written out matches only that one exact subdomain, nothing beneath it. Add each form separately if you need more than one.</div>
         </div>
-        {% endfor %}
-        {% else %}
-        <p class="text-slate-500 text-sm px-3 py-2">Liste ist leer.</p>
-        {% endif %}
+
+        <form action="{{ routes.dns_add | safe }}" method="post" class="field-row">
+          {{ <csrf_field csrf_token={csrf_token}/> }}
+          <div class="field" style="margin-bottom:0;">
+            <label for="new-domain">Add a domain</label>
+            <input type="text" id="new-domain" name="domain" placeholder="steamcontent.com" required>
+          </div>
+          <button type="submit" class="btn" style="margin-top:22px;">Add domain</button>
+        </form>
+
+        <table style="margin-top:8px;">
+          <tr><th>Domain</th><th>Matches</th><th></th></tr>
+          {% set_global custom_count = 0 %}
+          {% for domain in dns_domains %}
+          {% if not domain.is_default %}
+          {% set_global custom_count = custom_count + 1 %}
+          <tr>
+            <td class="mono">{{ domain.display }}</td>
+            <td>{% if domain.display is starting_with(pat=".") %}All subdomains{% else %}Exact domain only{% endif %}</td>
+            <td>
+              <form action="{{ routes.dns_remove | safe }}" method="post">
+                {{ <csrf_field csrf_token={csrf_token}/> }}
+                <input type="hidden" name="domain" value="{{ domain.raw }}">
+                <button type="submit" class="btn ghost" onclick="return confirm('Remove {{ domain.display }}?')">Remove</button>
+              </form>
+            </td>
+          </tr>
+          {% endif %}
+          {% endfor %}
+          {% if custom_count == 0 %}
+          <tr class="empty-row"><td colspan="3" style="color:var(--mist); font-style:italic; text-align:center;">No custom domains added yet.</td></tr>
+          {% endif %}
+        </table>
       </div>
 
-      <p class="text-xs text-slate-500">{{ dns_domains | length }} Einträge</p>
+      <div data-cdn-panel="default" class="hidden">
+        <div class="hint">
+          <span class="glyph">◈</span>
+          <div>These ship with LanCache-NG and cover common game/software CDNs out of the box. Turn one off if you don't want that CDN cached, without losing your place in the list.</div>
+        </div>
+        <table style="margin-top:8px;">
+          <tr><th>Domain</th><th>Matches</th><th>Enabled</th></tr>
+          {% for domain in dns_domains %}
+          {% if domain.is_default %}
+          <tr>
+            <td class="mono">{{ domain.display }}</td>
+            <td>{% if domain.display is starting_with(pat=".") %}All subdomains{% else %}Exact domain only{% endif %}</td>
+            <td>
+              {% if domain.is_valid %}
+              <form action="{{ routes.dns_toggle | safe }}" method="post">
+                {{ <csrf_field csrf_token={csrf_token}/> }}
+                <input type="hidden" name="domain" value="{{ domain.display }}">
+                <label class="toggle"><input type="checkbox" name="enabled" value="1" {% if domain.enabled %}checked{% endif %} onchange="this.form.requestSubmit()"><span class="track"></span><span class="knob"></span></label>
+              </form>
+              {% endif %}
+            </td>
+          </tr>
+          {% endif %}
+          {% endfor %}
+        </table>
+      </div>
     </section>
 
     {# What: LAN records in PowerDNS: add form and list
        Why: changes apply live, no container restart
        From: Issue #1683 | PR #1912 #}
-    <section data-dns-panel="lan" class="card flex flex-col gap-4 hidden">
-      <div>
-        <h2 class="font-semibold text-slate-200">LAN-Einträge</h2>
-        <p class="text-xs text-slate-500 mt-0.5">PowerDNS Authoritative Server · Lokale DNS-Records für das LAN</p>
-      </div>
-
-      <form action="{{ routes.lan_add | safe }}" method="post" class="flex flex-col gap-3" data-lan-record-form>
+    <section data-dns-panel="lan" class="hidden">
+      <div class="section-title" style="margin-top:0;">LAN zone records</div>
+      <p class="section-sub">Custom records for names under your local domain, for anything auto-discovery doesn't already cover.</p>
+      {# What: record name, type, content, TTL, Add
+         Why: type and content not parsed together
+         From: Issue #1683 | PR #1976 #}
+      <form action="{{ routes.lan_add | safe }}" method="post" class="field-row" style="max-width:none; align-items:flex-end;" data-lan-record-form>
         {{ <csrf_field csrf_token={csrf_token}/> }}
-        {# What: record name, type, content fields
-           Why: type and content not parsed together
-           From: Issue #1683 | PR #1912 #}
-        <div class="flex gap-2">
-          <input type="text" name="name" placeholder="z.B. myserver.{{ lan_zone }}"
-                 required
-                 class="flex-1 bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-green-500">
-          <select name="record_type" required data-lan-record-type
-                  class="bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-green-500">
-            <option value="">Typ wählen</option>
-            {# What: one option per LAN_RECORD_TYPES entry
-               Why: the form offers what validation accepts
-               From: Issue #1683 | PR #1912 #}
+        <div class="field" style="margin-bottom:0; max-width:180px;">
+          <label for="lan-name">Name</label>
+          <input type="text" id="lan-name" name="name" placeholder="printer.{{ lan_zone }}" required>
+        </div>
+        <div class="field" style="margin-bottom:0; max-width:110px;">
+          <label for="lan-type">Type</label>
+          <select id="lan-type" name="record_type" required data-lan-record-type style="width:100%; padding:9px 11px; border-radius:8px; border:1px solid var(--navy-600); background:var(--navy-900); color:var(--foam); font-size:13.5px;">
             {% for record_type in lan_record_types %}
             <option value="{{ record_type }}">{{ record_type }}</option>
             {% endfor %}
           </select>
         </div>
-        <div class="flex gap-2">
-          {{ <ttl_input ttl_default={record_ttl_default} ttl_max={ttl_max}/> }}
-          <input type="text" name="content" placeholder="z.B. 192.168.1.10 oder mail.example.com"
-                 required data-lan-record-content
-                 class="flex-1 bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-green-500">
-          <button type="submit"
-                  class="btn btn-green">
-            Hinzufügen
-          </button>
+        <div class="field" style="margin-bottom:0; flex:1;">
+          <label for="lan-content">Content</label>
+          <input type="text" id="lan-content" name="content" placeholder="192.168.1.50" required data-lan-record-content>
         </div>
+        <div class="field" style="margin-bottom:0; max-width:90px;">
+          <label for="lan-ttl">TTL</label>
+          <input type="number" id="lan-ttl" name="ttl" value="{{ record_ttl_default }}" required min="1" max="{{ ttl_max }}">
+        </div>
+        <button type="submit" class="btn" style="margin-bottom:0;">Add</button>
       </form>
 
-      <div class="space-y-1 max-h-[28rem] overflow-y-auto">
-        {% if lan_records %}
+      <table style="margin-top:4px;">
+        <tr><th>Name</th><th>Type</th><th>Content</th><th>TTL</th><th></th></tr>
+        {% set_global lan_shown = 0 %}
         {% for record in lan_records %}
-        <div class="list-row group">
-          <div class="flex-1 min-w-0">
-            <div class="flex gap-2 items-center">
-              <span class="font-mono text-sm text-slate-300">{{ record.name }}</span>
-              <span class="text-xs px-2 py-0.5 rounded bg-slate-600 text-slate-300">{{ record.type }}</span>
-              <span class="text-xs text-slate-500">TTL: {{ record.ttl }}</span>
-            </div>
-            <div class="text-xs text-slate-400 mt-0.5 font-mono">{% for content in record.records %}{{ content.content }}{% if not loop.last %}<br>{% endif %}{% endfor %}</div>
-          </div>
-          <form action="{{ routes.lan_remove | safe }}" method="post" class="opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0 ml-2">
-            {{ <csrf_field csrf_token={csrf_token}/> }}
-            {# What: hidden name, type and joined content
-               Why: removal targets the RRset
-               From: Issue #1683 | PR #1912 #}
-            <input type="hidden" name="name" value="{{ record.name }}">
-            <input type="hidden" name="record_type" value="{{ record.type }}">
-            <input type="hidden" name="content" value="{% for c in record.records %}{{ c.content }}{% if not loop.last %};{% endif %}{% endfor %}">
-            <button type="submit"
-                    data-record-name="{{ record.name }}"
-                    data-record-type="{{ record.type }}"
-                    onclick="return confirmRemoveRecord(this)"
-                    class="btn btn-sm btn-ghost-red">
-              Entfernen
-            </button>
-          </form>
-        </div>
-        {% endfor %}
-        {% else %}
-        <p class="text-slate-500 text-sm px-3 py-2">Keine LAN-Einträge vorhanden.</p>
+        {% if record.type != "SOA" and record.type != "NS" %}
+        {% set_global lan_shown = lan_shown + 1 %}
+        <tr>
+          <td class="mono">{{ record.name }}</td>
+          <td><span class="tag off">{{ record.type }}</span></td>
+          <td class="mono">{% for content in record.records %}{{ content.content }}{% if not loop.last %}<br>{% endif %}{% endfor %}</td>
+          <td class="mono">{{ record.ttl }}</td>
+          <td>
+            <form action="{{ routes.lan_remove | safe }}" method="post">
+              {{ <csrf_field csrf_token={csrf_token}/> }}
+              <input type="hidden" name="name" value="{{ record.name }}">
+              <input type="hidden" name="record_type" value="{{ record.type }}">
+              <input type="hidden" name="content" value="{% for c in record.records %}{{ c.content }}{% if not loop.last %};{% endif %}{% endfor %}">
+              <button type="submit" data-record-name="{{ record.name }}" data-record-type="{{ record.type }}" onclick="return confirmRemoveRecord(this)" style="background:none; border:0; cursor:pointer; color:var(--danger); font-size:12.5px;">Remove</button>
+            </form>
+          </td>
+        </tr>
         {% endif %}
-      </div>
-
-      <p class="text-xs text-slate-500">{% if lan_records %}{{ lan_records | length }} Einträge{% else %}0 Einträge{% endif %}</p>
+        {% endfor %}
+        {% if lan_shown == 0 %}
+        <tr class="empty-row"><td colspan="5" style="color:var(--mist); font-style:italic; text-align:center;">No LAN records yet.</td></tr>
+        {% endif %}
+      </table>
     </section>
 
     {# What: PTR records of the private reverse zones
@@ -232,14 +189,17 @@
       <div>
         <h2 class="font-semibold text-slate-200">PTR / Reverse-DNS</h2>
         <p class="text-xs text-slate-500 mt-0.5">
-          PowerDNS Authoritative Server · Reverse-Lookups (IP&nbsp;→&nbsp;Hostname) für die privaten Reverse-Zonen
-          (<span class="font-mono">{{ reverse_zones | join(sep=", ") }}</span>).
+          Zeigt zu einer IP-Adresse den Namen des Geräts an, zum Beispiel in Logs.
         </p>
+        {% if dhcp_mode == "kea" %}
         <p class="text-xs text-amber-300/90 mt-1 leading-relaxed">
-          Hinweis: Automatisch von Kea (DHCP-DDNS) angelegte PTR-Einträge sind technisch nicht von manuell
-          angelegten unterscheidbar und werden hier gemeinsam angezeigt. Wird ein von DHCP verwalteter Eintrag
-          entfernt, kann Kea ihn beim nächsten Lease-Ereignis erneut anlegen.
+          Hinweis: Vom DHCP-Server angelegte Einträge stehen hier mit den manuellen zusammen. Entfernst du einen davon, kann DHCP ihn beim nächsten Lease wieder anlegen.
         </p>
+        {% endif %}
+        <details class="text-xs text-slate-500 mt-1">
+          <summary class="cursor-pointer">Betroffene Reverse-Zonen</summary>
+          <span class="font-mono">{{ reverse_zones | join(sep=", ") }}</span>
+        </details>
       </div>
 
       <form action="{{ routes.ptr_add | safe }}" method="post" class="flex flex-col gap-3">
@@ -297,47 +257,28 @@
         {% endif %}
       </div>
 
-      <p class="text-xs text-slate-500">{% if ptr_records %}{{ ptr_records | length }} Einträge{% else %}0 Einträge{% endif %}</p>
+      <p class="text-xs text-slate-500">{% if ptr_records %}{{ ptr_records | length }} {% if ptr_records | length == 1 %}Eintrag{% else %}Einträge{% endif %}{% endif %}</p>
     </section>
 
     {# What: global IPv4-only switch (AAAA filter)
        Why: clients then use IPv4 and reach the cache
        From: Issue #1683 | PR #1912 #}
-    <section data-dns-panel="settings" class="card flex flex-col gap-4 hidden">
-      <div>
-        <h2 class="font-semibold text-slate-200">Settings / IPv4-only Modus</h2>
-        <p class="text-xs text-slate-500 mt-0.5">
-          Unterdrückt IPv6-Antworten für alle Domains — Clients nutzen dann IPv4 und landen im Cache.
-          Wird per Lua im PowerDNS Recursor umgesetzt, kein DNS-Neustart nötig.
-        </p>
-      </div>
-
-      <form action="{{ routes.aaaa_filter | safe }}" method="post" class="flex items-center gap-4">
+    <section data-dns-panel="settings" class="hidden">
+      <div class="section-title" style="margin-top:0;">Network mode</div>
+      <p class="section-sub">Changes here save immediately and stay on this page. No DNS restart is needed.</p>
+      <form action="{{ routes.aaaa_filter | safe }}" method="post">
         {{ <csrf_field csrf_token={csrf_token}/> }}
-        {# What: global AAAA filter, stored as a marker
-           Why: the domain rows above are not edited
-           From: Issue #1683 | PR #1912 #}
-        <div class="flex items-center gap-2">
-          <input type="checkbox" id="aaaa-enabled" name="enabled" value="1"
-                 {% if aaaa_filter_enabled %}checked{% endif %}
-                 class="w-5 h-5 rounded border-slate-600 bg-slate-700 text-blue-600 focus:ring-2 focus:ring-blue-500 cursor-pointer">
-          <label for="aaaa-enabled" class="text-sm text-slate-300 cursor-pointer">
-            IPv4-only aktivieren
+        <div class="toggle-row">
+          <div>
+            <div class="t-label">IPv4 only</div>
+            <div class="t-desc">Turn this on if devices on your network don't use IPv6. Off by default.</div>
+          </div>
+          <label class="toggle">
+            <input type="checkbox" name="enabled" value="1" {% if aaaa_filter_enabled %}checked{% endif %} onchange="this.form.requestSubmit()">
+            <span class="track"></span><span class="knob"></span>
           </label>
         </div>
-        <button type="submit"
-                class="btn btn-blue">
-          Speichern
-        </button>
       </form>
-
-      <p class="text-xs text-slate-500">
-        {% if aaaa_filter_enabled %}
-        Status: <span class="text-green-400 font-semibold">Aktiviert</span>
-        {% else %}
-        Status: <span class="text-slate-400">Deaktiviert</span>
-        {% endif %}
-      </p>
     </section>
 
     {# What: toggle that allows DNS updates without TSIG.
@@ -470,6 +411,61 @@
       </p>
       {% endif %}
     </section>
+
+    {# What: registration and list of secondary DNS nodes
+       Why: one DNS page; formerly its own page
+       From: Issue #1683 | PR #1858 #}
+    <section data-dns-panel="secondary">
+      <div class="subtabs" style="margin-bottom:22px;">
+        <button type="button" class="subtab sec-sub-btn active" data-sec-sub="settings">Settings</button>
+        <button type="button" class="subtab sec-sub-btn" data-sec-sub="add">Add Secondary</button>
+      </div>
+
+      {# What: registered secondaries with their actions #}
+      {# Why: health, address, token and removal per row #}
+      <div data-sec-panel="settings">
+        <div class="section-title" style="margin-top:0;">Connected secondaries</div>
+        {% if secondaries %}
+        {% for secondary in secondaries %}
+        <div class="snapshot-row">
+          <div>
+            <div>{{ secondary.name }}</div>
+            <div class="s-meta">{% if secondary.address %}{{ secondary.address }}{% else %}no address{% endif %} · registered <time data-epoch="{{ secondary.registered_at }}">{{ secondary.registered_at }}</time>{% if secondary.last_seen %} · last seen <time data-epoch="{{ secondary.last_seen }}">{{ secondary.last_seen }}</time>{% endif %}</div>
+          </div>
+          <div class="snapshot-actions">
+            <span class="tag off" id="health-{{ secondary.name }}">–</span>
+            <a href="#" onclick="checkSecondaryHealth('{{ secondary.name }}'); return false;">Check</a>
+            <a href="#" onclick="editSecondaryAddress('{{ secondary.name }}', '{{ secondary.address | default(value='') }}'); return false;">Edit address</a>
+            <a href="#" onclick="rotateToken('{{ secondary.name }}'); return false;" style="color:var(--mist);">Rotate token</a>
+            <a href="#" style="color:var(--danger);" onclick="removeSecondary('{{ secondary.name }}'); return false;">Disconnect</a>
+          </div>
+        </div>
+        {% endfor %}
+        {% else %}
+        <p class="section-sub">No secondaries registered yet.</p>
+        {% endif %}
+      </div>
+
+      {# What: install command for a new secondary #}
+      {# Why: main.rs renders the token and primary URL #}
+      <div data-sec-panel="add" class="hidden">
+        <div class="section-title" style="margin-top:0;">Run this on the secondary box</div>
+        <p class="section-sub">One command installs it, registers it with this primary, and starts it. Enter a name for that location (letters, digits, hyphens).</p>
+        <div class="field" style="max-width:320px;">
+          <label for="secondary-name">Name</label>
+          <input type="text" id="secondary-name" maxlength="63" pattern="[A-Za-z0-9-]+" placeholder="garage" autocomplete="off">
+        </div>
+        <div class="copy-row" style="max-width:none; align-items:flex-start; font-size:12.5px;">
+          <code id="install-cmd" style="white-space:pre-wrap; overflow-x:visible;">bash &lt;(curl -fsSL {{ setup_script_url }}) secondary \
+  --primary {{ primary_url }} \
+  --token {{ registration_token }} \
+  --name <span id="secondary-name-out">NAME</span> \
+  --ip-http {{ primary_ip }}</code>
+          <button type="button" onclick="copyText('install-cmd', this)">Copy</button>
+        </div>
+        <p class="field-hint">If port 53 on that box is already used by something else, pass a free address with <code>--listen-ip</code>; the installer shows the conflict instead of failing partway through.</p>
+      </div>
+    </section>
   </div>
 
 </div>
@@ -478,18 +474,61 @@
 
 {% block scripts %}
 <script>
+  // What: switches the Custom and Default CDN lists
+  // Why: the mockup shows one list at a time
+  // From: Issue #1683 | PR #1976
+  document.querySelectorAll('.cdn-sub-btn').forEach((b) => {
+    b.addEventListener('click', () => {
+      document.querySelectorAll('.cdn-sub-btn').forEach((o) => o.classList.toggle('active', o === b));
+      document.querySelectorAll('[data-cdn-panel]').forEach((p) => {
+        p.classList.toggle('hidden', p.dataset.cdnPanel !== b.dataset.cdnSub);
+      });
+    });
+  });
+
+  // What: switches Settings and Add Secondary
+  // Why: the mockup shows one secondary panel at a time
+  // From: Issue #1683 | PR #1976
+  document.querySelectorAll('.sec-sub-btn').forEach((b) => {
+    b.addEventListener('click', () => {
+      document.querySelectorAll('.sec-sub-btn').forEach((o) => o.classList.toggle('active', o === b));
+      document.querySelectorAll('[data-sec-panel]').forEach((p) => {
+        p.classList.toggle('hidden', p.dataset.secPanel !== b.dataset.secSub);
+      });
+    });
+  });
+
   // What: shows one DNS panel and marks its tab button
   // Why: tabs switch client-side; no reload per tab
   // From: Issue #1683 | PR #1912
+  const DNS_PANEL_TAB = {
+    cdn: 'cdn', lan: 'primary', ptr: 'primary',
+    settings: 'settings', zones: 'settings', secondary: 'secondary',
+  };
   function setActiveDnsTab(tabName) {
     document.querySelectorAll('[data-dns-panel]').forEach((panel) => {
-      panel.classList.toggle('hidden', panel.dataset.dnsPanel !== tabName);
+      panel.classList.toggle('hidden', DNS_PANEL_TAB[panel.dataset.dnsPanel] !== tabName);
     });
 
     document.querySelectorAll('.dns-tab-btn').forEach((button) => {
       button.classList.toggle('active', button.dataset.dnsTab === tabName);
     });
+    try { sessionStorage.setItem('dnsTab', tabName); } catch (e) { /* storage blocked */ }
   }
+
+  // What: puts the typed name into the install command
+  // Why: no placeholder is left in the copied command
+  // From: Issue #1683 | PR #1858
+  (function () {
+    const input = document.getElementById('secondary-name');
+    const out = document.getElementById('secondary-name-out');
+    if (!input || !out) return;
+    input.addEventListener('input', () => {
+      const name = input.value.replace(/[^A-Za-z0-9-]/g, '');
+      if (name !== input.value) input.value = name;
+      out.textContent = name || 'NAME';
+    });
+  })();
 
   // What: confirm() with record name and type
   // Why: values come from data-*, not inline JS strings
@@ -532,9 +571,145 @@
   document.querySelector('[data-lan-record-content]').addEventListener('input', validateLanTxtContent);
   document.querySelector('[data-lan-record-form]').addEventListener('submit', validateLanTxtContent);
 
-  // What: opens the CDN tab on page load
-  // Why: marks its button; markup sets no active class
+  // What: reopens the last used tab on page load
+  // Why: a form post reloads; the tab must not jump to CDN
   // From: Issue #1683 | PR #1912
-  setActiveDnsTab('cdn');
+  let startTab = 'cdn';
+  try { startTab = sessionStorage.getItem('dnsTab') || 'cdn'; } catch (e) { /* storage blocked */ }
+  if (!document.querySelector('[data-dns-tab="' + startTab + '"]')) startTab = 'cdn';
+  setActiveDnsTab(startTab);
+
+  // What: POST to the rotate route of one secondary
+  // Why: server rotates; alert shows the result
+  async function rotateToken(name) {
+    try {
+      const response = await fetch('{{ routes.secondary_rotate | safe }}'.replace('{name}', name), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-CSRF-Token': CSRF_TOKEN
+        },
+        body: JSON.stringify({
+          token: "{{ registration_token }}"
+        })
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        alert(`Token erfolgreich rotiert für ${name}`);
+      } else {
+        alert(`Fehler beim Rotieren des Tokens: ${response.statusText}`);
+      }
+    } catch (error) {
+      alert(`Fehler: ${error.message}`);
+    }
+  }
+
+  // What: DELETE of one secondary after confirm()
+  // Why: removal cannot be undone; the page then reloads
+  async function removeSecondary(name) {
+    if (!confirm(`${name} wirklich entfernen?`)) {
+      return;
+    }
+
+    try {
+      const response = await fetch('{{ routes.secondary | safe }}'.replace('{name}', name), {
+        method: 'DELETE',
+        headers: {
+          'X-CSRF-Token': CSRF_TOKEN
+        }
+      });
+
+      if (response.ok) {
+        alert(`${name} erfolgreich entfernt.`);
+        location.reload();
+      } else {
+        alert(`Fehler beim Entfernen: ${response.statusText}`);
+      }
+    } catch (error) {
+      alert(`Fehler: ${error.message}`);
+    }
+  }
+
+  // What: probe status code to German label and colour
+  // Why: renderHealth() shows one label per probe result
+  // From: Issue #1084
+  const HEALTH_LABELS = {
+    ok: ['OK (autoritativ)', 'text-green-400'],
+    not_authoritative: ['Nicht autoritativ', 'text-amber-400'],
+    no_zone: ['Zone fehlt (REFUSED)', 'text-red-400'],
+    broken: ['Fehler (SERVFAIL)', 'text-red-400'],
+    unreachable: ['Nicht erreichbar', 'text-red-400'],
+    no_address: ['Keine Adresse', 'text-slate-500'],
+    error: ['Unerwartete Antwort', 'text-amber-400'],
+  };
+
+  // What: writes label, serial and detail of one probe
+  // Why: one renderer for the click and the page-load run
+  function renderHealth(span, data) {
+    const [label, cls] = HEALTH_LABELS[data.status] || ['Unbekannt', 'text-slate-500'];
+    span.className = cls;
+    span.textContent = data.serial != null ? `${label} · Serial ${data.serial}` : label;
+    if (data.detail) span.title = data.detail;
+  }
+
+  // What: POST health probe of one secondary, shows status
+  // Why: the DNS probe runs on the server, not in the page
+  async function checkSecondaryHealth(name) {
+    const span = document.getElementById('health-' + name);
+    if (span) { span.className = 'text-slate-400'; span.textContent = 'Prüfe…'; }
+    try {
+      const response = await fetch('{{ routes.secondary_health | safe }}'.replace('{name}', name), {
+        method: 'POST',
+        headers: { 'X-CSRF-Token': CSRF_TOKEN }
+      });
+      if (response.ok) {
+        renderHealth(span, await response.json());
+      } else if (span) {
+        span.className = 'text-red-400';
+        span.textContent = `Fehler (${response.status})`;
+      }
+    } catch (error) {
+      if (span) { span.className = 'text-red-400'; span.textContent = `Fehler: ${error.message}`; }
+    }
+  }
+
+  // What: prompt() for a new address, POST, then reload
+  // Why: the server checks it; 400 means not a private IPv4
+  async function editSecondaryAddress(name, current) {
+    const input = prompt(`Adresse (private IPv4) für ${name}:`, current || '');
+    if (input === null) return;
+    try {
+      const response = await fetch('{{ routes.secondary_address | safe }}'.replace('{name}', name), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF_TOKEN },
+        body: JSON.stringify({ address: input.trim() })
+      });
+      if (response.ok) {
+        location.reload();
+      } else if (response.status === 400) {
+        alert('Ungültige Adresse: nur private IPv4-Adressen (10.x, 172.16–31.x, 192.168.x) sind erlaubt.');
+      } else {
+        alert(`Fehler beim Speichern der Adresse: ${response.statusText}`);
+      }
+    } catch (error) {
+      alert(`Fehler: ${error.message}`);
+    }
+  }
+
+  // What: runs the health check of every row on page load
+  // Why: first open of the tab; no probe per page load
+  let secondaryHealthRan = false;
+  document.querySelector('[data-dns-tab="secondary"]').addEventListener('click', () => {
+    if (secondaryHealthRan) return;
+    secondaryHealthRan = true;
+    document.querySelectorAll('[id^="health-"]').forEach((span) => {
+      checkSecondaryHealth(span.id.slice('health-'.length));
+    });
+  });
+
+  // What: runs the Secondary probes if that tab reopened
+  // Why: the listener above exists only from here on
+  if (startTab === 'secondary') document.querySelector('[data-dns-tab="secondary"]').click();
 </script>
 {% endblock %}

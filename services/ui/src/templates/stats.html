@@ -2,240 +2,56 @@
 {# LanCache-NG (https://github.com/wiki-mod/lancache-ng) #}
 {# SPDX-License-Identifier: AGPL-3.0-or-later #}
 {# What: system stats page: CPU, RAM, network, disk I/O
-   Why: Netdata is not published; the ui proxies its data
+   Why: Netdata draws its own charts; the ui proxies it
    From: Issue #1683 | PR #1912 #}
 {% extends "base.html" %}
 {% block title %} – Statistiken{% endblock %}
 
 {% block content %}
-<div class="max-w-6xl mx-auto space-y-6">
+<section>
 
   <div>
-    <h1 class="text-xl font-bold text-white">Systemstatistiken</h1>
-    <p class="text-sm text-slate-400 mt-1">Live-Daten via Netdata (automatisch aktualisiert)</p>
+    <p class="eyebrow">Overview → Statistiken</p>
+    <h1 class="page-title">Systemstatistiken</h1>
+    <p class="page-sub">Live-Daten via Netdata (automatisch aktualisiert)</p>
   </div>
 
-  <!-- What: grid holding the four chart cards -->
-  <!-- Why: one column below lg, two columns from lg -->
-  <!-- From: Issue #1683 | PR #1912 -->
-  <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+  <!-- What: four Netdata charts in the card grid -->
+  <!-- Why: Netdata draws them; the page only names them -->
+  <!-- From: Issue #1683 | PR #1858 -->
+  <div class="grid-2" style="grid-template-columns:1fr 1fr;">
 
     <div class="card">
-      <h3 class="font-semibold text-slate-200 mb-3">CPU-Auslastung</h3>
-      <canvas id="cpuChart" height="160"></canvas>
+      <h3>CPU-Auslastung</h3>
+      <div data-netdata="system.cpu" data-chart-library="dygraph" data-width="100%" data-height="160px" data-after="-300"></div>
     </div>
 
     <div class="card">
-      <h3 class="font-semibold text-slate-200 mb-3">RAM-Nutzung</h3>
-      <canvas id="ramChart" height="160"></canvas>
+      <h3>RAM-Nutzung</h3>
+      <div data-netdata="system.ram" data-chart-library="dygraph" data-width="100%" data-height="160px" data-after="-300"></div>
     </div>
 
     <div class="card">
-      <h3 class="font-semibold text-slate-200 mb-3">Netzwerkdurchsatz</h3>
-      <canvas id="netChart" height="160"></canvas>
+      <h3>Netzwerkdurchsatz</h3>
+      <div data-netdata="system.net" data-chart-library="dygraph" data-width="100%" data-height="160px" data-after="-300"></div>
     </div>
 
     <div class="card">
-      <h3 class="font-semibold text-slate-200 mb-3">Festplatten-I/O</h3>
-      <canvas id="diskChart" height="160"></canvas>
+      <h3>Festplatten-I/O</h3>
+      <div data-netdata="system.io" data-chart-library="dygraph" data-width="100%" data-height="160px" data-after="-300"></div>
     </div>
 
   </div>
 
-  <div id="netdata-error" class="hidden bg-yellow-500/10 border border-yellow-500/30 rounded-xl p-4 text-sm text-yellow-300">
-    Netdata-Verbindung nicht verfügbar. Netdata läuft im Dienst
-    <code class="font-mono text-xs">services</code>; seinen Zustand zeigt die Leiste oben.
-  </div>
-
-</div>
+</section>
 {% endblock %}
 
 {% block scripts %}
-<script src="{{ routes.chart_js | safe }}"></script>
 <script>
-// What: netdata proxy route; {*path} is the chart path
-// Why: main.rs owns the route string
-// From: Issue #1683 | PR #1912
-const NETDATA = '{{ routes.netdata | safe }}';
-// What: sample count per chart and netdata request
-// Why: bounds chart array length and request size
-// From: Issue #1683 | PR #1912
-const POINTS  = {{ stats_points }};
-// What: refresh() interval; SOT seconds as setInterval ms
-// Why: each tick fetches every chart from netdata
-// From: Issue #1683 | PR #1912
-const REFRESH  = window.LancacheUi.ms({{ stats_refresh_seconds }});
-
-// What: shared line-chart options for all four charts
-// Why: one look; no animation keeps each tick cheap
-// From: Issue #1683 | PR #1912
-const chartDefaults = {
-  type: 'line',
-  options: {
-    responsive: true,
-    maintainAspectRatio: true,
-    animation: false,
-    plugins: { legend: { labels: { color: '#94a3b8', boxWidth: 12, font: { size: 11 } } } },
-    scales: {
-      x: { display: false },
-      y: {
-        grid: { color: '#334155' },
-        ticks: { color: '#94a3b8', font: { size: 11 } }
-      }
-    }
-  }
-};
-
-// What: builds a chart with POINTS empty labels
-// Why: the x axis has a fixed length from the start
-// From: Issue #1683 | PR #1912
-function makeChart(id, labels, datasets) {
-  const ctx = document.getElementById(id);
-  return new Chart(ctx, {
-    ...chartDefaults,
-    data: { labels: Array(POINTS).fill(''), datasets }
-  });
-}
-
-// What: the CPU, RAM, network and disk charts
-// Why: each canvas id above gets one chart
-// From: Issue #1683 | PR #1912
-const cpuChart = makeChart('cpuChart', [], [{
-  label: 'CPU %', data: [], fill: true,
-  borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,0.1)',
-  tension: 0.3, pointRadius: 0, borderWidth: 2
-}]);
-
-const ramChart = makeChart('ramChart', [], [{
-  label: 'Belegt (GB)', data: [], fill: true,
-  borderColor: '#a855f7', backgroundColor: 'rgba(168,85,247,0.1)',
-  tension: 0.3, pointRadius: 0, borderWidth: 2
-}]);
-
-const netChart = makeChart('netChart', [], [
-  { label: 'Empfangen (MB/s)', data: [], fill: false, borderColor: '#10b981', tension: 0.3, pointRadius: 0, borderWidth: 2 },
-  { label: 'Gesendet (MB/s)',  data: [], fill: false, borderColor: '#f59e0b', tension: 0.3, pointRadius: 0, borderWidth: 2 },
-]);
-
-const diskChart = makeChart('diskChart', [], [
-  { label: 'Lesen (MB/s)',    data: [], fill: false, borderColor: '#06b6d4', tension: 0.3, pointRadius: 0, borderWidth: 2 },
-  { label: 'Schreiben (MB/s)',data: [], fill: false, borderColor: '#f43f5e', tension: 0.3, pointRadius: 0, borderWidth: 2 },
-]);
-
-// What: appends one value per dataset, drops the oldest
-// Why: keeps every dataset at POINTS entries
-// From: Issue #1683 | PR #1912
-function push(chart, ...values) {
-  values.forEach((v, i) => {
-    chart.data.datasets[i].data.push(v);
-    if (chart.data.datasets[i].data.length > POINTS)
-      chart.data.datasets[i].data.shift();
-  });
-  chart.data.labels = Array(chart.data.datasets[0].data.length).fill('');
-  chart.update('none');
-}
-
-// What: fetches one netdata chart for POINTS samples
-// Why: average grouping fits the chart length
-// From: Issue #1683 | PR #1912
-async function fetchChart(path) {
-  const res = await fetch(`${NETDATA.replace('{*path}', path)}&points=${POINTS}&group=average&format=json`);
-  // What: throws on a non-2xx netdata response.
-  // Why: refresh() turns the throw into the error banner.
-  // From: Issue #1683 | PR #1912
-  if (!res.ok) throw new Error(`netdata ${path}: HTTP ${res.status}`);
-  return res.json();
-}
-
-// What: newest non-null row of a netdata reply, or null.
-// Why: rows come newest first; the oldest rows can be null.
-// From: Issue #1683 | PR #1912
-function newestRow(reply) {
-  const rows = reply.data.filter(r => r.slice(1).some(v => v !== null));
-  return rows.length ? rows.reduce((a, b) => (b[0] > a[0] ? b : a)) : null;
-}
-
-// What: the column of a netdata reply by its label.
-// Why: a position changes with the netdata version.
-// From: Issue #1683 | PR #1912
-function column(reply, label) {
-  const at = reply.labels.indexOf(label);
-  if (at < 1) throw new Error(`no ${label} column`);
-  return at;
-}
-
-// What: true while the error banner is shown
-// Why: refresh() shows the banner once per failure run
-// From: Issue #849 | PR #1460
-let errorShown = false;
-
-// What: fetches all four charts and pushes new values
-// Why: one tick updates every chart together
-// From: Issue #1683 | PR #1912
-async function refresh() {
-  try {
-    // What: busy % = sum of the system.cpu state columns.
-    // Why: system.cpu has no idle column; last is iowait.
-    // From: Issue #1683 | PR #1912
-    const cpu = await fetchChart('data?chart=system.cpu');
-    const cpuRow = newestRow(cpu);
-    const cpuPct = cpuRow
-      ? Math.min(100, cpuRow.slice(1).reduce((a, v) => a + (v ?? 0), 0)).toFixed(1) : 0;
-    push(cpuChart, parseFloat(cpuPct));
-    cpuChart.options.scales.y.max = 100;
-
-    // What: used RAM in GB via the "used" label.
-    // Why: column 1 is free, not used; values are MiB.
-    // From: Issue #1683 | PR #1912
-    const ram = await fetchChart('data?chart=system.ram');
-    const ramRow = newestRow(ram);
-    const usedGB = ramRow ? (ramRow[column(ram, 'used')] / 1024).toFixed(2) : 0;
-    push(ramChart, parseFloat(usedGB));
-
-    // What: net.eth0; on error report, try net.eth1.
-    // Why: interface names differ between hosts.
-    // From: Issue #1683 | PR #1912
-    let net;
-    try { net = await fetchChart('data?chart=net.eth0'); }
-    catch (err) {
-      reportError(err);
-      net = await fetchChart('data?chart=net.eth1');
-    }
-    // What: net kilobits/s to MB/s: divide by 8000.
-    // Why: net.* units are kilobits/s; sent is negative.
-    // From: Issue #1683 | PR #1912
-    const netRow = newestRow(net);
-    const rxMB = netRow ? Math.abs(netRow[column(net, 'received')] / 8000).toFixed(2) : 0;
-    const txMB = netRow ? Math.abs(netRow[column(net, 'sent')] / 8000).toFixed(2) : 0;
-    push(netChart, parseFloat(rxMB), parseFloat(txMB));
-
-    // What: disk KiB/s to MB/s: times 1024, divide by 1e6.
-    // Why: system.io units are KiB/s; writes are negative.
-    // From: Issue #1683 | PR #1912
-    const disk = await fetchChart('data?chart=system.io');
-    const diskRow = newestRow(disk);
-    const readMB  = diskRow ? Math.abs(diskRow[column(disk, 'in')] * 1.024 / 1000).toFixed(2) : 0;
-    const writeMB = diskRow ? Math.abs(diskRow[column(disk, 'out')] * 1.024 / 1000).toFixed(2) : 0;
-    push(diskChart, parseFloat(readMB), parseFloat(writeMB));
-
-    document.getElementById('netdata-error').classList.add('hidden');
-    // What: resets errorShown after a successful refresh.
-    // Why: otherwise the banner only shows once per page.
-    // From: Issue #849 | PR #1460
-    errorShown = false;
-  } catch (e) {
-    reportError(e);
-    if (!errorShown) {
-      document.getElementById('netdata-error').classList.remove('hidden');
-      errorShown = true;
-    }
-  }
-}
-
-// What: first refresh now, then every REFRESH ms
-// Why: the charts fill without waiting one interval
-// From: Issue #1683 | PR #1912
-refresh();
-setInterval(refresh, REFRESH);
+// What: netdata base URL for its chart script
+// Why: main.rs owns the route string; no own drawing code
+// From: Issue #1683 | PR #1858
+var netdataServer = '{{ routes.netdata | safe }}'.replace('/{*path}', '');
 </script>
+<script src="{{ routes.netdata | safe | replace(from="{*path}", to="dashboard.js") }}"></script>
 {% endblock %}

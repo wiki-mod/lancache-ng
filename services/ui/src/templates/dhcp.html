@@ -47,27 +47,62 @@
 {# Why: add-subnet and reservation forms share one tone #}
 {# From: Issue #1683 | PR #1912 #}
 {% set raised_tone = "bg-slate-600 border-slate-500" %}
-<div class="max-w-5xl mx-auto space-y-6">
+<div class="space-y-6">
 
   <div>
-    <h1 class="text-xl font-bold text-white">DHCP-Verwaltung</h1>
-    <p class="text-sm text-slate-400 mt-1">
-      DHCP-Modus, Kea-Subnetze, Reservierungen und Leases werden hier gemeinsam verwaltet.
-    </p>
+    <p class="eyebrow">Settings → DHCP</p>
+    <h1 class="page-title">DHCP</h1>
   </div>
 
-  {{ <section_tabs main_href={pages.dhcp} main_label="DHCP" main_page="dhcp" active_page={active_page} secondaries_href={pages.secondaries}/> }}
+  {# What: capability table of the three DHCP modes
+     Why: copied from the mockup; folds away
+     From: Issue #1683 | PR #1976 #}
+  <div class="compare-toggle" id="compare-toggle">
+    <span id="compare-caret">▸</span> Compare DHCP-Server, DHCP-Proxy, and DHCP-Relay
+  </div>
+  <div class="card compare-card" id="compare-card" style="display:none;">
+    <div class="card-body" style="padding:0;">
+      <table class="compare-table">
+        <tr>
+          <th>Capability</th>
+          <th>DHCP-Server</th>
+          <th>DHCP-Proxy</th>
+          <th>DHCP-Relay</th>
+        </tr>
+        <tr><td>Issues IP addresses to devices</td><td class="yes">✓</td><td class="no">Supplemental only</td><td class="no">— (forwards to another server)</td></tr>
+        <tr><td>Static reservations (always the same address for one device)</td><td class="yes">✓</td><td class="no">—</td><td class="no">—</td></tr>
+        <tr><td>Lease time control</td><td class="yes">✓</td><td class="no">— (issues no lease of its own)</td><td class="no">— (issues no lease of its own)</td></tr>
+        <tr><td>DNS, gateway, NTP, domain options</td><td class="yes">✓</td><td class="partial">✓ for PXE/network-boot devices only</td><td class="no">— (comes from the remote server)</td></tr>
+        <tr><td>PXE / network-boot options</td><td class="yes">✓</td><td class="yes">✓</td><td class="no">—</td></tr>
+        <tr><td>Works alongside another DHCP server on the network</td><td class="no">— (conflicts by design)</td><td class="yes">✓</td><td class="yes">✓ (that's its whole purpose)</td></tr>
+        <tr><td>Relays requests to a DHCP server on a different subnet or VLAN</td><td class="no">—</td><td class="no">—</td><td class="yes">✓</td></tr>
+      </table>
+      <div class="compare-footnote">Reflects what today's Admin UI exposes for each mode. DHCP-Server and DHCP-Proxy are mutually exclusive on the same interface. DHCP-Relay exists but is greyed out -- not stable/production-ready yet.</div>
+    </div>
+  </div>
 
+  {# What: five tabs; each shows one panel
+     Why: the mockup groups DHCP by mode
+     From: Issue #1683 | PR #1976 #}
+  <div class="subtabs">
+    <button type="button" data-dhcp-tab="server" class="subtab dhcp-tab-btn">DHCP-Server</button>
+    <button type="button" data-dhcp-tab="proxy" class="subtab dhcp-tab-btn">DHCP-Proxy</button>
+    <button type="button" data-dhcp-tab="relay" class="subtab dhcp-tab-btn">DHCP-Relay</button>
+    <button type="button" data-dhcp-tab="precheck" class="subtab dhcp-tab-btn">DHCP-Precheck</button>
+    <button type="button" data-dhcp-tab="settings" class="subtab dhcp-tab-btn">Settings</button>
+  </div>
+
+  <div data-dhcp-panel="settings" class="hidden">
   {# What: DHCP mode select, form of the active mode #}
   {# Why: proxy and relay values exist only in their mode #}
   {# From: Issue #1683 | PR #1912 #}
   <div class="card space-y-4">
     <div class="flex flex-wrap items-center justify-between gap-3">
       <div>
-        <h2 class="font-semibold text-slate-200">DHCP mode</h2>
-        <p class="text-xs text-slate-500 mt-0.5">Der Modus wird live aus der UI-Konfiguration gelesen und persistent in `/data` gespeichert.</p>
+        <div class="section-title" style="margin-top:0;">DHCP-Modus</div>
+        <p class="text-xs text-slate-500 mt-0.5">Wird sofort übernommen und dauerhaft gespeichert.</p>
       </div>
-      <span class="text-xs px-2 py-1 rounded bg-slate-700 text-slate-200">{{ dhcp_mode }}</span>
+      <span class="beambar-dot" data-dot-status="{% if dhcp_mode == "disabled" %}gray{% else %}green{% endif %}"></span>
     </div>
 
     <form method="post" action="{{ routes.dhcp_mode | safe }}" class="grid gap-3 md:grid-cols-2 items-end">
@@ -90,6 +125,13 @@
       </button>
     </form>
 
+    {% if not dhcp_is_dnsmasq and not dhcp_is_relay and not dhcp_has_kea %}
+      <p class="text-sm text-slate-400">DHCP management is disabled. The configuration area stays visible so the mode can be re-enabled later, but no active DHCP service is running.</p>
+    {% endif %}
+  </div>
+  </div>
+
+  <div data-dhcp-panel="proxy" class="hidden">
     {% if dhcp_is_dnsmasq and not dhcp_is_relay %}
       {# What: ProxyDHCP values and their edit form #}
       {# Why: options reach only PXE clients in this mode #}
@@ -133,8 +175,13 @@
             Proxy-Werte speichern
           </button>
         </form>
-      </div>
-    {% elif dhcp_is_relay %}
+    {% else %}
+    <p class="section-sub">DHCP-Proxy is not the active mode. Choose it under Settings.</p>
+    {% endif %}
+  </div>
+
+  <div data-dhcp-panel="relay" class="hidden">
+    {% if dhcp_is_relay %}
       {# What: real DHCP relay to the upstream server #}
       {# Why: client broadcasts cannot reach upstream #}
       {# From: Issue #844 #}
@@ -156,25 +203,13 @@
             Relay-Werte speichern
           </button>
         </form>
-      </div>
-    {% elif dhcp_has_kea %}
-      {# What: Kea mode summary of the managed values #}
-      {# Why: lists what the subnet editor below manages #}
-      {# From: Issue #1683 | PR #1912 #}
-      <div class="text-sm text-green-400 space-y-2">
-        <p>Kea mode is active. The configuration area below is visible and editable with direct fields for gateway, DNS, NTP, reservations, and subnet details.</p>
-        <ul class="list-disc pl-5 space-y-1 text-green-300">
-          <li>Managed subnet values: gateway, pool, DNS servers, NTP servers, lease time, and domain-related DHCP options</li>
-          <li>Current Kea subnet editor preserves unmanaged <code>option-data</code> entries on save, but exposes only simple fields here</li>
-          <li>Static reservations and live leases are available below</li>
-        </ul>
-      </div>
     {% else %}
-      <p class="text-sm text-slate-400">DHCP management is disabled. The configuration area stays visible so the mode can be re-enabled later, but no active DHCP service is running.</p>
+    <p class="section-sub">DHCP-Relay is not the active mode. Choose it under Settings.</p>
     {% endif %}
   </div>
 
-  {% if dhcp_has_kea %}
+  <div data-dhcp-panel="precheck" class="hidden">
+    {% if dhcp_has_kea %}
   <!-- What: status card for the DHCP conflict probe -->
   <!-- Why: element ids are read by checkDhcpConflict() -->
   <!-- From: Issue #1683 | PR #1912 -->
@@ -199,7 +234,26 @@
       </button>
     </div>
   </div>
+    {% else %}
+    <p class="section-sub">The precheck needs the DHCP-Server mode.</p>
+    {% endif %}
+  </div>
 
+  <div data-dhcp-panel="server" class="hidden">
+    {% if dhcp_has_kea and not dhcp_is_dnsmasq and not dhcp_is_relay %}
+      {# What: Kea mode summary of the managed values #}
+      {# Why: lists what the subnet editor below manages #}
+      {# From: Issue #1683 | PR #1912 #}
+      <div class="text-sm text-green-400 space-y-2">
+        <p>Kea mode is active. The configuration area below is visible and editable with direct fields for gateway, DNS, NTP, reservations, and subnet details.</p>
+        <ul class="list-disc pl-5 space-y-1 text-green-300">
+          <li>Managed subnet values: gateway, pool, DNS servers, NTP servers, lease time, and domain-related DHCP options</li>
+          <li>Current Kea subnet editor preserves unmanaged <code>option-data</code> entries on save, but exposes only simple fields here</li>
+          <li>Static reservations and live leases are available below</li>
+        </ul>
+      </div>
+    {% endif %}
+    {% if dhcp_has_kea %}
   {# What: toggles Kea dhcp-ddns.enable-updates live #}
   {# Why: DNS writes are a separate decision from DHCP #}
   {# From: Issue #1076 #}
@@ -247,7 +301,7 @@
       <h3 class="text-sm font-medium text-white mb-3">Neues Subnet</h3>
       <form method="POST" action="{{ routes.subnet_add | safe }}" class="space-y-3">
         {{ <csrf_field csrf_token={csrf_token}/> }}
-        {{ <subnet_fields tone={raised_tone} ntp_auto={ntp_auto_dhcp_active} ntp_url={pages.ntp} dns_primary={dhcp_dns_primary} dns_secondary={dhcp_dns_secondary} lease_time={default_lease_time} domain={dhcp_domain} ntp_servers={dhcp_ntp_servers}/> }}
+        {{ <subnet_fields tone={raised_tone} ntp_auto={ntp_auto_dhcp_active} ntp_url={pages.setup} dns_primary={dhcp_dns_primary} dns_secondary={dhcp_dns_secondary} lease_time={default_lease_time} domain={dhcp_domain} ntp_servers={dhcp_ntp_servers}/> }}
         <div class="flex gap-2">
           <button type="submit" class="btn btn-blue">
             Hinzufügen
@@ -292,7 +346,7 @@
         <form method="POST" action="{{ routes.subnet_update | safe }}" class="space-y-3">
           {{ <csrf_field csrf_token={csrf_token}/> }}
           <input type="hidden" name="id" value="{{ subnet.id }}">
-          {{ <subnet_fields tone="bg-slate-700 border-slate-600" ntp_auto={ntp_auto_dhcp_active} ntp_url={pages.ntp} subnet={subnet.subnet} gateway={subnet.gateway} dns_primary={subnet.dns_primary} dns_secondary={subnet.dns_secondary} pool_start={subnet.pool_start} pool_end={subnet.pool_end} lease_time={subnet.lease_time} domain={subnet.domain} ntp_servers={subnet.ntp_servers}/> }}
+          {{ <subnet_fields tone="bg-slate-700 border-slate-600" ntp_auto={ntp_auto_dhcp_active} ntp_url={pages.setup} subnet={subnet.subnet} gateway={subnet.gateway} dns_primary={subnet.dns_primary} dns_secondary={subnet.dns_secondary} pool_start={subnet.pool_start} pool_end={subnet.pool_end} lease_time={subnet.lease_time} domain={subnet.domain} ntp_servers={subnet.ntp_servers}/> }}
           <div class="flex gap-2">
             <button type="submit" class="btn btn-blue">
               Speichern
@@ -508,11 +562,45 @@
     </div>
   </div>
 
-  {% endif %}
+    {% else %}
+    <p class="section-sub">DHCP-Server is not the active mode. Choose it under Settings.</p>
+    {% endif %}
+  </div>
 </div>
 {% endblock %}
 
 {% block scripts %}
+<script>
+  // What: shows one DHCP panel and marks its tab
+  // Why: tabs switch client-side; no reload per tab
+  // From: Issue #1683 | PR #1976
+  function setDhcpTab(name) {
+    document.querySelectorAll('[data-dhcp-panel]').forEach((p) => {
+      p.classList.toggle('hidden', p.dataset.dhcpPanel !== name);
+    });
+    document.querySelectorAll('.dhcp-tab-btn').forEach((b) => {
+      b.classList.toggle('active', b.dataset.dhcpTab === name);
+    });
+    try { sessionStorage.setItem('dhcpTab', name); } catch (e) { /* blocked */ }
+  }
+  document.querySelectorAll('.dhcp-tab-btn').forEach((b) => {
+    b.addEventListener('click', () => setDhcpTab(b.dataset.dhcpTab));
+  });
+  let first = 'server';
+  try { first = sessionStorage.getItem('dhcpTab') || first; } catch (e) { /* blocked */ }
+  setDhcpTab(first);
+</script>
+<script>
+  // What: folds the mode comparison open and shut
+  // Why: the mockup keeps it closed until asked for
+  // From: Issue #1683 | PR #1976
+  document.getElementById('compare-toggle').addEventListener('click', () => {
+    const card = document.getElementById('compare-card');
+    const open = card.style.display === 'none';
+    card.style.display = open ? '' : 'none';
+    document.getElementById('compare-caret').textContent = open ? '▾' : '▸';
+  });
+</script>
 {% if dhcp_has_kea %}
 <script>
 // What: shows or hides the new-subnet form

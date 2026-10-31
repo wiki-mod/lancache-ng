@@ -4,229 +4,135 @@
 {# What: setup page: proxy and client commands #}
 {# Why: commands embed the server's LAN addresses #}
 {% extends "base.html" %}
-{% block title %} – Einrichtung{% endblock %}
+{% block title %} – General{% endblock %}
 
 {% block content %}
-<div class="max-w-3xl mx-auto space-y-8">
+<div class="space-y-6">
 
   <div>
-    <h1 class="text-xl font-bold text-white">Einrichtung</h1>
-    <p class="text-sm text-slate-400 mt-1">
-      Transparenter HTTP-Proxy und Client-Konfiguration.
-    </p>
+    <p class="eyebrow">Settings → General</p>
+    <h1 class="page-title">General</h1>
   </div>
 
-  <!-- What: release channel and auto-update form
-       Why: the host convergence timer reads these values
-       From: Issue #819 -->
-  <div class="card space-y-4">
-    <div>
-      <h2 class="font-semibold text-slate-200">Update-Kanal &amp; automatische Updates</h2>
-      <p class="text-xs text-slate-400 mt-1">
-        Diese Einstellung wirkt nicht sofort: sie wird vom Host-seitigen Konvergenz-Timer
-        gelesen, der derzeit alle {{ converge_minutes }} Minuten läuft. Eine Änderung hier greift also spätestens
-        innerhalb dieses Zeitfensters, nicht augenblicklich.
-      </p>
-    </div>
-
-    <!-- What: read-only status of auto_update_enabled
-         Why: the form below submits, this only displays -->
-    <div class="bg-slate-900/50 border border-slate-700 rounded-lg px-4 py-3 flex flex-wrap items-center gap-x-6 gap-y-2 text-xs">
-      <span class="text-slate-400">Aktueller Stand:</span>
-      <span class="text-slate-200">
-        Kanal <span class="font-mono px-1.5 py-0.5 rounded bg-slate-700">{{ lancache_image_channel }}</span>
-      </span>
-      <span class="flex items-center gap-1.5">
-        {% if auto_update_enabled %}
-        <span class="beambar-dot" data-dot-status="green"></span>
-        <span class="text-green-400">Automatische Updates aktiv</span>
-        {% else %}
-        <span class="beambar-dot" data-dot-status="gray"></span>
-        <span class="text-slate-400">Automatische Updates deaktiviert</span>
-        {% endif %}
-      </span>
-    </div>
-
-    <form method="post" action="{{ routes.setup_update | safe }}" class="grid gap-4 md:grid-cols-2 items-end">
+  <!-- What: General page, markup copied from the mockup
+       Why: DoMe wants the artifact 1:1; values are bound
+       From: Issue #819 | PR #1858 -->
+  <div>
+    <form method="post" action="{{ routes.setup_update | safe }}">
       {{ <csrf_field csrf_token={csrf_token}/> }}
-      <div>
-        <label class="block text-xs text-slate-400 mb-1">Release-Kanal</label>
-        <select name="lancache_image_channel"
-                class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-blue-500">
-          <option value="latest" {% if lancache_image_channel == "latest" %}selected{% endif %}>latest</option>
-          <option value="nightly" {% if lancache_image_channel == "nightly" %}selected{% endif %}>nightly</option>
-        </select>
-        <p class="text-xs text-slate-500 mt-1">
-          <strong>latest</strong>: getestete Releases, empfohlen für die meisten Installationen.
-          <strong>nightly</strong>: getesteter Vorab-Stand aus current_dev, einmal täglich
-          und bei Bedarf veröffentlicht — kann gelegentlich instabil sein.
-        </p>
+      <div class="section-title" style="margin-top:0;">Release channel</div>
+      <p class="section-sub">Which set of images this box installs updates from.</p>
+      <div class="field-row" style="align-items:center;">
+        <div class="mode-switchrow" style="max-width:320px;" id="channel-row">
+          {% for ch in ["nightly", "latest"] %}
+          <label class="mode-btn {% if lancache_image_channel == ch %}selected{% endif %}" style="position:relative;">
+            <input type="radio" name="lancache_image_channel" value="{{ ch }}"
+                   {% if lancache_image_channel == ch %}checked{% endif %}
+                   style="position:absolute; opacity:0; pointer-events:none;">{{ ch }}
+          </label>
+          {% endfor %}
+        </div>
       </div>
-      <div class="flex items-center gap-2">
-        <input type="checkbox" id="auto_update_enabled" name="auto_update_enabled" value="1"
-               {% if auto_update_enabled %}checked{% endif %}
-               class="rounded border-slate-600 bg-slate-700 text-blue-500 focus:ring-blue-500">
-        <label for="auto_update_enabled" class="text-sm text-slate-300">
-          Geplante automatische Updates aktivieren (täglich, geordnet, mit Gesundheitsprüfung)
+      <p class="field-hint">latest is the tested release. Nightly is the experimental build from current_dev; it can be broken and is not for production.</p>
+
+      <div class="section-title">Automatic updates</div>
+      <div class="toggle-row">
+        <div>
+          <div class="t-label">Check for updates automatically</div>
+          <div class="t-desc">Applied within {{ converge_minutes }} minutes of saving.</div>
+        </div>
+        <label class="toggle">
+          <input type="checkbox" id="auto_update_enabled" name="auto_update_enabled" value="1"
+                 {% if auto_update_enabled %}checked{% endif %}>
+          <span class="track"></span><span class="knob"></span>
         </label>
       </div>
-      <button type="submit"
-              class="btn btn-blue">
-        Speichern
-      </button>
+      <button type="submit" class="btn" style="margin-top:14px; margin-bottom:6px;">Save</button>
     </form>
-  </div>
 
-  <!-- What: router DNAT of port 80 to http_ip:http_port
-       Why: caches all LAN devices, no client setup -->
-  <div class="card space-y-4">
-    <div>
-      <h2 class="font-semibold text-slate-200">Transparenter HTTP-Proxy <span class="ml-2 text-xs font-normal px-2 py-0.5 rounded-full bg-green-500/20 text-green-400">Empfohlen</span></h2>
-      <p class="text-xs text-slate-400 mt-1">
-        Auf dem Router/Gateway einrichten — alle HTTP-Downloads aller LAN-Geräte werden automatisch gecacht,
-        ohne dass auf den Clients etwas konfiguriert werden muss. Gilt auch für Geräte ohne Proxy-Unterstützung.
-      </p>
-    </div>
+    <div class="section-title">Language</div>
+    <p class="section-sub">Changes the language of this interface, including tooltips and error messages.</p>
+    <div class="mode-switchrow" style="max-width:320px;" id="lang-row"></div>
 
-    <div class="bg-amber-500/10 border border-amber-500/30 rounded-lg px-4 py-3 text-xs text-amber-300">
-      <strong>HTTP-Modus ({{ http_ip }}):</strong> HTTP wird gecacht, HTTPS wird transparent durchgeleitet.
-      Kein CA-Zertifikat auf den Clients nötig.
-    </div>
-
-    <div>
-      <p class="text-xs font-medium text-slate-400 mb-2">iptables (auf dem Router/Gateway als root ausführen)</p>
-      <div class="relative">
-        <pre class="bg-slate-950 rounded-lg px-4 py-3 text-xs text-slate-300 font-mono overflow-x-auto leading-relaxed" id="cmd-iptables"># Transparenter HTTP-Cache — alle LAN-Anfragen auf Port 80 abfangen
-iptables -t nat -A PREROUTING -i LAN_INTERFACE -p tcp --dport 80 \
-  ! -d {{ http_ip }} -j DNAT --to-destination {{ http_ip }}:{{ http_port }}
-
-# Beim Neustart persistent machen (Debian/Ubuntu)
-apt install iptables-persistent
-netfilter-persistent save</pre>
-        {{ <copy_button target="cmd-iptables"/> }}
-      </div>
-      <p class="text-xs text-slate-500 mt-1"><code class="text-slate-400">LAN_INTERFACE</code> durch das interne Netz-Interface ersetzen (z. B. <code class="text-slate-400">eth1</code>, <code class="text-slate-400">br0</code>).</p>
-    </div>
-
-    <div>
-      <p class="text-xs font-medium text-slate-400 mb-2">nftables (moderner Ersatz für iptables)</p>
-      <div class="relative">
-        <pre class="bg-slate-950 rounded-lg px-4 py-3 text-xs text-slate-300 font-mono overflow-x-auto leading-relaxed" id="cmd-nftables">nft add table ip lancache
-nft add chain ip lancache prerouting \
-  '{ type nat hook prerouting priority -100; }'
-nft add rule ip lancache prerouting \
-  iifname "LAN_INTERFACE" tcp dport 80 \
-  ip daddr != {{ http_ip }} \
-  dnat to {{ http_ip }}:{{ http_port }}</pre>
-        {{ <copy_button target="cmd-nftables"/> }}
-      </div>
-    </div>
-
-    <details class="text-xs text-slate-400">
-      <summary class="cursor-pointer hover:text-slate-300">Rückgängig machen (iptables)</summary>
-      <div class="relative mt-2">
-        <pre class="bg-slate-950 rounded-lg px-4 py-3 text-xs text-slate-300 font-mono" id="cmd-iptables-del">iptables -t nat -D PREROUTING -i LAN_INTERFACE -p tcp --dport 80 \
-  ! -d {{ http_ip }} -j DNAT --to-destination {{ http_ip }}:{{ http_port }}</pre>
-        {{ <copy_button target="cmd-iptables-del"/> }}
-      </div>
-    </details>
-  </div>
-
-  <!-- What: per-client proxy commands for package managers
-       Why: for when the router cannot be changed -->
-  <div class="card space-y-4">
-    <div>
-      <h2 class="font-semibold text-slate-200">Client-seitige Proxy-Einstellung <span class="ml-2 text-xs font-normal px-2 py-0.5 rounded-full bg-slate-600/50 text-slate-400">Alternativ</span></h2>
-      <p class="text-xs text-slate-400 mt-1">
-        Ohne Router-Zugang: Proxy direkt im Paketmanager oder als Systemvariable konfigurieren.
-        Muss auf jedem Gerät einzeln eingerichtet werden.
-      </p>
-    </div>
-
-    <div class="grid grid-cols-1 gap-3">
-
+    <div class="section-title">Appearance</div>
+    <div class="toggle-row">
       <div>
-        <p class="text-xs font-medium text-slate-400 mb-1.5">apt (Debian · Ubuntu · Pop!_OS · Mint)</p>
-        <div class="relative">
-          <pre class="bg-slate-950 rounded-lg px-4 py-3 text-xs text-slate-300 font-mono" id="cmd-apt">echo 'Acquire::http::Proxy "http://{{ http_ip }}/";' \
-  | sudo tee /etc/apt/apt.conf.d/01lancache</pre>
-          {{ <copy_button target="cmd-apt"/> }}
-        </div>
+        <div class="t-label">Match system theme</div>
+        <div class="t-desc">Follows your device's light/dark setting automatically.</div>
       </div>
+      <label class="toggle">
+        <input type="checkbox" id="follow-system-theme">
+        <span class="track"></span><span class="knob"></span>
+      </label>
+    </div>
 
+    <div class="section-title">Sign-in</div>
+    {% if login_enabled %}
+    <p class="section-sub">This Admin UI requires a username and password unless you've explicitly turned that off for a trusted network.</p>
+    <button type="button" class="btn ghost" id="password-open">Change password</button>
+    <div id="password-card" class="card hidden" style="margin-top:14px; max-width:480px;">
+      <p class="section-sub">At least 12 characters. The browser asks for the password once more after saving.</p>
+      <form method="post" action="{{ routes.password | safe }}" autocomplete="off"
+          style="display:grid; gap:12px; max-width:420px;">
+      {{ <csrf_field csrf_token={csrf_token}/> }}
       <div>
-        <p class="text-xs font-medium text-slate-400 mb-1.5">pacman / yay (Arch · CachyOS · Garuda · Manjaro)</p>
-        <div class="relative">
-          <pre class="bg-slate-950 rounded-lg px-4 py-3 text-xs text-slate-300 font-mono" id="cmd-pacman">echo 'http_proxy=http://{{ http_ip }}' | sudo tee -a /etc/environment
-echo 'https_proxy=http://{{ http_ip }}' | sudo tee -a /etc/environment</pre>
-          {{ <copy_button target="cmd-pacman"/> }}
-        </div>
-        <p class="text-xs text-slate-500 mt-1">pacman hat keinen eingebauten Proxy — die Env-Variable wird vom Downloader (curl/wget) ausgewertet.</p>
+        <label class="block text-xs text-slate-400 mb-1" for="current_password">Aktuelles Passwort</label>
+        <input type="password" id="current_password" name="current_password" required
+               autocomplete="current-password" style="width:100%;">
       </div>
-
       <div>
-        <p class="text-xs font-medium text-slate-400 mb-1.5">dnf (Fedora · Nobara · AlmaLinux · Rocky)</p>
-        <div class="relative">
-          <pre class="bg-slate-950 rounded-lg px-4 py-3 text-xs text-slate-300 font-mono" id="cmd-dnf">echo 'proxy=http://{{ http_ip }}' | sudo tee -a /etc/dnf/dnf.conf</pre>
-          {{ <copy_button target="cmd-dnf"/> }}
-        </div>
+        <label class="block text-xs text-slate-400 mb-1" for="new_password">Neues Passwort</label>
+        <input type="password" id="new_password" name="new_password" required minlength="12"
+               autocomplete="new-password" style="width:100%;">
       </div>
-
       <div>
-        <p class="text-xs font-medium text-slate-400 mb-1.5">pip (Python-Pakete)</p>
-        <div class="relative">
-          <pre class="bg-slate-950 rounded-lg px-4 py-3 text-xs text-slate-300 font-mono" id="cmd-pip">pip config set global.proxy http://{{ http_ip }}</pre>
-          {{ <copy_button target="cmd-pip"/> }}
-        </div>
+        <label class="block text-xs text-slate-400 mb-1" for="confirm_password">Neues Passwort wiederholen</label>
+        <input type="password" id="confirm_password" name="confirm_password" required minlength="12"
+               autocomplete="new-password" style="width:100%;">
       </div>
-
+      <button type="submit" class="btn btn-blue">Passwort ändern</button>
+    </form>
     </div>
+    {% else %}
+    <p class="section-sub">Sign-in is turned off for this Admin UI.</p>
+    {% endif %}
   </div>
-
-  <!-- What: CA install commands for the HTTPS mode
-       Why: MITM caching needs the CA on every client -->
-  <div class="card space-y-4">
-    <div>
-      <h2 class="font-semibold text-slate-200">HTTPS-Modus ({{ https_ip }}) — auch HTTPS cachen</h2>
-      <p class="text-xs text-slate-400 mt-1">
-        Clients müssen das CA-Zertifikat einmalig installieren. Danach werden auch HTTPS-Downloads gecacht.
-        DNS-Server auf <code class="text-slate-300">{{ https_ip }}</code> setzen (statt {{ http_ip }}).
-      </p>
-    </div>
-    <div>
-      <p class="text-xs font-medium text-slate-400 mb-2">CA-Zertifikat installieren</p>
-      <div class="relative">
-        <pre class="bg-slate-950 rounded-lg px-4 py-3 text-xs text-slate-300 font-mono overflow-x-auto leading-relaxed" id="cmd-ca-linux"># Linux (systemweit)
-sudo cp {{ ca_cert_file }} /usr/local/share/ca-certificates/lancache-{{ ca_cert_file }}
-sudo update-ca-certificates
-
-# Arch / CachyOS / Garuda (trust-store)
-sudo trust anchor --store {{ ca_cert_file }}</pre>
-        {{ <copy_button target="cmd-ca-linux"/> }}
-      </div>
-      <p class="text-xs text-slate-500 mt-2">
-        Vollständige Anleitung für alle Betriebssysteme:
-        <code class="text-slate-300">docs/install-ca-cert.md</code> im LanCache-NG-Repository
-      </p>
-    </div>
-  </div>
-
-  <!-- What: Admin UI restart card
-       Why: restarts only the UI container
-       From: Issue #1486 -->
-  <div class="card space-y-4">
-    <div>
-      <h2 class="font-semibold text-slate-200">Admin-UI neu starten</h2>
-      <p class="text-xs text-slate-400 mt-1">
-        Startet nur den Admin-UI-Container selbst neu — kein anderer Dienst ist betroffen.
-        Diese Seite wird danach kurz nicht erreichbar sein und automatisch weiterleiten, sobald
-        die Admin-UI wieder antwortet. Ist die Admin-UI bereits nicht mehr erreichbar, hilft
-        dieser Schalter nicht — er benötigt eine funktionierende Verbindung, um den Neustart
-        überhaupt anzustoßen.
-      </p>
-    </div>
-    {{ <restart_ui_form action={routes.restart_ui} csrf_token={csrf_token} button_class="btn btn-amber" label="Admin-UI neu starten"/> }}
-  </div>
-
 </div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  // What: shows the password form on a click
+  // Why: the mockup has a button, the form sits behind it
+  // From: Issue #1683 | PR #1858
+  (function () {
+    const open = document.getElementById('password-open');
+    if (!open) return;
+    open.addEventListener('click', () => {
+      document.getElementById('password-card').classList.toggle('hidden');
+    });
+  })();
+</script>
+<script>
+  // What: theme switch of the Setup page
+  // Why: it calls the one theme code in base.html
+  // From: Issue #1683 | PR #1858
+  (function () {
+    const box = document.getElementById('follow-system-theme');
+    box.checked = window.LancacheUi.followsSystem();
+    box.addEventListener('change', () => window.LancacheUi.followSystem(box.checked));
+  })();
+</script>
+<script>
+  // What: marks the chosen channel button
+  // Why: the radio itself is hidden; the label shows state
+  // From: Issue #1683 | PR #1858
+  document.querySelectorAll('#channel-row input').forEach((radio) => {
+    radio.addEventListener('change', () => {
+      document.querySelectorAll('#channel-row .mode-btn').forEach((label) => {
+        label.classList.toggle('selected', label.contains(radio) && radio.checked);
+      });
+    });
+  });
+</script>
 {% endblock %}

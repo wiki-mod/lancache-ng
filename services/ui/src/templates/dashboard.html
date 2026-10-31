@@ -1,414 +1,119 @@
 
 {# LanCache-NG (https://github.com/wiki-mod/lancache-ng) #}
 {# SPDX-License-Identifier: AGPL-3.0-or-later #}
-{# What: dashboard page: health, DHCP, cache, logs #}
-{# Why: extends base.html for the shared layout #}
-{# From: Issue #1683 | PR #1912 #}
+{# What: dashboard page: counters, cache, requests #}
+{# Why: copied from the mockup Today view #}
+{# From: Issue #1683 | PR #1976 #}
 {% extends "base.html" %}
-{# What: one proxy card (HTTP or HTTPS), three counters #}
-{# Why: one copy; ids prefix-* feed the refresh script #}
-{# From: Issue #1683 | PR #1912 #}
-{% component proxy_card(title, subtitle, prefix, status, enabled) %}<div class="card">
-      <div class="flex items-center justify-between mb-3">
-        <h2 class="font-semibold text-slate-200">{{ title }}</h2>
-        <span class="text-xs text-slate-500">{{ subtitle }}</span>
-      </div>
-      {% if not enabled %}
-      <p class="text-sm text-slate-500 mt-3">{{ title }} disabled</p>
-      {% elif status %}
-      <div class="grid grid-cols-3 gap-2 text-center mt-3" id="{{ prefix }}-metrics">
-        {% for cell in [["active", "Connections"], ["requests", "Requests"], ["waiting", "Waiting"]] %}
-        <div>
-          <p class="stat-num text-2xl font-bold text-white" id="{{ prefix }}-{{ cell[0] }}">{{ status[cell[0]] }}</p>
-          <p class="text-xs text-slate-400">{{ cell[1] }}</p>
-        </div>
-        {% endfor %}
-      </div>
-      {% else %}
-      <p class="text-sm text-slate-500 mt-3">Proxy unreachable</p>
-      {% endif %}
-    </div>{% endcomponent proxy_card %}
 {% block title %} – Dashboard{% endblock %}
 
 {% block content %}
-<div class="max-w-6xl mx-auto space-y-6">
+<section>
+  <p class="eyebrow">Overview</p>
+  <h1 class="page-title">Today</h1>
+  <p class="page-sub">What's moved through the cache, and what still needs your attention.</p>
 
-  <h1 class="text-xl font-bold text-white">Dashboard</h1>
-
-  <!-- What: active DHCP mode and what the UI controls in it
-       Why: Kea settings apply only in Kea mode
+  <!-- What: hit rate and totals from log_stats
+       Why: parsed from log lines, not nginx status
        From: Issue #1683 | PR #1912 -->
-  <div class="card space-y-2">
-    <div class="flex items-center justify-between">
-      <h2 class="font-semibold text-slate-200">DHCP mode</h2>
-      <span class="text-xs text-slate-500">{{ dhcp_mode }}</span>
+  <div class="stat-row">
+    <div class="stat-card accent">
+      <div class="stat-label">Data served</div>
+      <div class="stat-num">{{ log_stats.total_bytes_gb | round(precision=1) }}<span class="unit">GB</span></div>
     </div>
-    {% if dhcp_has_kea %}
-      <p class="text-sm text-slate-400">Kea is active and controls subnets, options, and leases.</p>
-      <p class="text-xs text-slate-500">DHCP API configuration is available in the Admin UI.</p>
-    {% elif dhcp_is_relay %}
-      <p class="text-sm text-slate-400">dnsmasq relay mode forwards every DHCP request to the upstream DHCP server, which owns leases and options.</p>
-      <p class="text-xs text-amber-400">Kea-specific UI configuration is inactive in this mode.</p>
-    {% elif dhcp_is_dnsmasq %}
-      <p class="text-sm text-slate-400">dnsmasq proxy mode only serves proxy-DHCP/PXE clients and does not reliably replace DNS options from a normal router DHCP server.</p>
-      <p class="text-xs text-amber-400">Kea-specific UI configuration is inactive in this mode.</p>
-    {% else %}
-      <p class="text-sm text-slate-400">DHCP is disabled.</p>
-    {% endif %}
-  </div>
-
-  <!-- What: one dot per watchdog service and the cache disk
-       Why: base.html's LancacheWatchdog updates them
-       From: Issue #1683 | PR #1912 -->
-  <div class="card" id="watchdog-status-card">
-    <div class="flex items-center justify-between mb-3">
-      <h2 class="font-semibold text-slate-200">Service health</h2>
-      <span class="text-xs text-slate-500" id="watchdog-status-note">
-        {% if watchdog_status.state == "stale" %}stale ({{ watchdog_status.age_seconds }}s old)
-        {% elif watchdog_status.state == "unavailable" %}watchdog status unavailable
-        {% else %}live
-        {% endif %}
-      </span>
+    <div class="stat-card">
+      <div class="stat-label">Cache hit rate</div>
+      <div class="stat-num">{{ log_stats.hit_pct | round(precision=1) }}<span class="unit">%</span></div>
     </div>
-    {% if watchdog_status.state == "unavailable" %}
-    <p class="text-sm text-slate-500" id="watchdog-status-empty">Watchdog has not reported a status yet, or the status file could not be read.</p>
-    {% else %}
-    <div class="flex flex-wrap gap-x-6 gap-y-2" id="watchdog-services">
-      {% for svc in watchdog_status.services %}
-      <div class="flex items-center gap-2" data-service="{{ svc.name }}">
-        {# What: service dot; base.html paints its status
-           Why: the colour alone does not say what failed
-           From: Issue #1683 | PR #1912 #}
-        <span class="beambar-dot" data-role="dot" data-dot-status="{{ svc.status }}" title="{{ svc.health }}"></span>
-        <span class="text-sm text-slate-300">{{ svc.name }}</span>
-        {% if svc.failures > 0 %}
-        <span class="text-xs text-amber-400" data-role="failures">({{ svc.failures }} failures)</span>
-        {% endif %}
-      </div>
-      {% endfor %}
-      <div class="flex items-center gap-2" data-service="disk-cache">
-        <span class="beambar-dot" data-role="dot" data-dot-status="{{ watchdog_status.disk.cache.status }}"></span>
-        <span class="text-sm text-slate-300">Cache disk: {{ watchdog_status.disk.cache.pct }}% used</span>
-      </div>
+    <div class="stat-card">
+      <div class="stat-label">Total requests</div>
+      <div class="stat-num">{{ log_stats.total_requests }}</div>
     </div>
-    {% endif %}
-  </div>
-
-  <!-- What: Netdata alarms from main.rs, shown on load
-       Why: alarms are events; no live polling
-       From: Issue #1683 | PR #1912 -->
-  <div class="card" id="netdata-alarms-card">
-    <div class="flex items-center justify-between mb-3">
-      <h2 class="font-semibold text-slate-200">Netdata alarms</h2>
-      <span class="text-xs text-slate-500">{{ netdata_alarms | length }} recent</span>
+    <div class="stat-card">
+      <div class="stat-label">Cache HITs</div>
+      <div class="stat-num">{{ log_stats.hits }}</div>
     </div>
-    {% if netdata_alarms | length == 0 %}
-    <p class="text-sm text-slate-500" id="netdata-alarms-empty">No Netdata alarms received yet.</p>
-    {% else %}
-    <div class="space-y-2" id="netdata-alarms-list">
-      {% for alarm in netdata_alarms %}
-      <div class="flex items-center gap-2 text-sm" data-unique-id="{{ alarm.unique_id }}">
-        {# What: Netdata alarm status to a colour token
-           Why: base.html paintDot owns token-to-colour
-           From: Issue #1683 | PR #1912 #}
-        <span class="beambar-dot shrink-0" data-role="dot" data-dot-status="{% if alarm.status == "CRITICAL" %}red{% elif alarm.status == "WARNING" %}yellow{% elif alarm.status == "CLEAR" %}green{% endif %}"></span>
-        <span class="text-xs text-slate-500 shrink-0">{{ alarm.when_display }}</span>
-        <span class="text-slate-300 font-medium">{{ alarm.name }}</span>
-        <span class="text-xs text-slate-500">({{ alarm.chart }})</span>
-        <span class="text-xs text-slate-400 truncate">{{ alarm.info }}</span>
-      </div>
-      {% endfor %}
+    <div class="stat-card">
+      <div class="stat-label">Caching mode</div>
+      <div class="stat-num" style="font-size:20px;">{% if https_enabled %}HTTP + HTTPS{% else %}HTTP{% endif %}</div>
     </div>
-    {% endif %}
-    <p class="text-xs text-slate-500 mt-3">Netdata's own dashboard{% if netdata_port %} (port {{ netdata_port }}){% endif %} is intentionally not published outside this host; this card only forwards the alarms it fires, not its full metrics UI.</p>
   </div>
 
   <!-- What: cache figures from one shared CACHE_DIR
        Why: http and https share one cache; no per-side size
        From: Issue #1683 | PR #1912 -->
-  <div class="card">
-    <div class="flex items-center justify-between mb-3">
-      <div>
-        <h2 class="font-semibold text-slate-200">Shared proxy cache</h2>
-        <span class="text-xs text-slate-500">HTTP + HTTPS · one cache</span>
-      </div>
-      <span class="text-xs text-slate-500 font-mono">{{ cache_dir }}</span>
+  <div class="card" style="margin-bottom:16px;">
+    <div class="card-head">
+      <h3>Cache storage</h3>
+      <span class="mono" style="font-size:12px;color:var(--mist-dim);">{{ cache_dir }}</span>
     </div>
-    <div class="mb-3">
-      <div class="flex justify-between text-sm mb-1">
-        <span class="text-slate-400">Storage</span>
-        <span class="text-white font-mono">{{ cache_used_gb }} / {{ cache_max_gb }} GB</span>
+    <div class="card-body">
+      <div class="storage-bar"><div class="storage-fill" style="width:{{ cache_pct }}%;"></div></div>
+      <div class="storage-meta">
+        <span><b>{{ cache_used_gb }} GB</b> used</span>
+        <span>{{ cache_max_gb }} GB total</span>
       </div>
-      <div class="w-full bg-slate-700 rounded-full h-2">
-        <div class="bg-blue-500 h-2 rounded-full transition-all" style="width: {{ cache_pct }}%"></div>
-      </div>
-      <p class="text-xs text-slate-500 mt-1">{{ cache_pct }}% used</p>
-    </div>
+      <p class="field-hint" style="margin-top:12px;">Total reflects the cache size configured for this LanCache-NG instance. Oldest, least-requested files are removed automatically; you don't need to clear this yourself.</p>
 
-    <!-- What: resize saves CACHE_MAX_GB, host applies it
-         Why: proxy container restarts; no live reload
-         From: Issue #1683 | PR #1912 -->
-    {% if cache_resize_pending %}
-    <div class="bg-amber-500/10 border border-amber-500/30 rounded-lg px-3 py-2 text-xs text-amber-300 mb-3">
-      Resize to {{ effective_cache_max_gb }} GB requested. This takes effect within the next
-      few minutes (the host convergence timer runs every {{ converge_minutes }} minutes) and briefly restarts the
-      proxy container.
-    </div>
-    {% endif %}
-    <form method="post" action="{{ routes.cache_resize | safe }}" class="flex flex-wrap items-end gap-3">
-      {{ <csrf_field csrf_token={csrf_token}/> }}
-      <div>
-        <label class="block text-xs text-slate-400 mb-1">New cache size (GB)</label>
-        <input type="number" name="cache_gb" min="1" step="1" placeholder="{{ cache_max_gb }}"
-               class="w-32 bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-blue-500">
+      <!-- What: resize saves CACHE_MAX_GB, host applies it
+           Why: proxy container restarts; no live reload
+           From: Issue #1683 | PR #1912 -->
+      {% if cache_resize_pending %}
+      <div class="hint">
+        <span class="glyph">◌</span>
+        <div>Resize to <b>{{ effective_cache_max_gb }} GB</b> requested. This takes effect within the next
+        few minutes (the host convergence timer runs every {{ converge_minutes }} minutes) and briefly restarts the
+        proxy container.</div>
       </div>
-      <button type="submit"
-              class="btn btn-blue">
-        Resize cache
-      </button>
-    </form>
-  </div>
-  <!-- What: per-side numbers, live via the script below
-       Why: both URLs may point at one stub_status
-       From: Issue #1683 | PR #1912 -->
-  <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-    {{ <proxy_card title="HTTP mode" subtitle="HTTP · SNI passthrough" prefix="http" status={http_status} enabled={true}/> }}
-
-    {{ <proxy_card title="HTTPS mode" subtitle="HTTP + HTTPS · MITM" prefix="https" status={https_status} enabled={https_enabled}/> }}
-  </div>
-
-  <!-- What: hit rate and totals from log_stats
-       Why: parsed from log lines, not nginx status
-       From: Issue #1683 | PR #1912 -->
-  <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
-    <div class="card text-center">
-      <p class="stat-num text-3xl font-bold text-emerald-400">{{ log_stats.hit_pct | round(precision=1) }}%</p>
-      <p class="text-sm text-slate-400 mt-1">Cache hit rate</p>
+      {% endif %}
+      <form method="post" action="{{ routes.cache_resize | safe }}" style="margin-top:14px;">
+        {{ <csrf_field csrf_token={csrf_token}/> }}
+        <div class="field-row">
+          <div class="field">
+            <label for="cache_gb">New cache size (GB)</label>
+            <input type="number" id="cache_gb" name="cache_gb" min="1" step="1" placeholder="{{ cache_max_gb }}">
+          </div>
+          <button type="submit" class="btn" style="margin-top:23px;">Resize cache</button>
+        </div>
+      </form>
     </div>
-    <div class="card text-center">
-      <p class="stat-num text-3xl font-bold text-white">{{ log_stats.total_requests }}</p>
-      <p class="text-sm text-slate-400 mt-1">Total requests</p>
-    </div>
-    <div class="card text-center">
-      <p class="stat-num text-3xl font-bold text-emerald-400">{{ log_stats.hits }}</p>
-      <p class="text-sm text-slate-400 mt-1">Cache HITs</p>
-    </div>
-    <div class="card text-center">
-      <p class="stat-num text-3xl font-bold text-white">{{ log_stats.total_bytes_gb | round(precision=1) }} GB</p>
-      <p class="text-sm text-slate-400 mt-1">Data served</p>
-    </div>
-  </div>
-
-  <!-- What: size and file totals of the syslog store
-       Why: watchdog owns retention; card only reports
-       From: Issue #1683 | PR #1912 -->
-  <div class="card">
-    <div class="flex items-center justify-between mb-3">
-      <div>
-        <h2 class="font-semibold text-slate-200">Central syslog store</h2>
-        <span class="text-xs text-slate-500">{{ syslog_stats.hosts | length }} hosts · {{ syslog_stats.total_files }} files</span>
-      </div>
-      <span class="text-xs text-slate-500 font-mono">{{ syslog_size_gb }} / {{ syslog_max_gb }} GB</span>
-    </div>
-    <!-- What: per-host table from syslog_stats (main.rs)
-         Why: shows per-host data, not only the totals
-         From: Issue #1683 | PR #1912 -->
-    {% if syslog_stats.hosts %}
-    <div class="overflow-x-auto">
-      <table class="w-full text-xs">
-        <thead>
-          <tr>
-            <th class="th pr-4">Host</th>
-            <th class="th pr-4">Files</th>
-            <th class="th pr-4">Days</th>
-            <th class="th">Size</th>
-          </tr>
-        </thead>
-        <tbody class="rows">
-          {% for host in syslog_stats.hosts %}
-          <tr>
-            <td class="py-1 pr-4 text-blue-400 font-mono">{{ host.host }}</td>
-            <td class="py-1 pr-4 text-slate-300 font-mono">{{ host.files }}</td>
-            <td class="py-1 pr-4 text-slate-300 font-mono">{{ host.days }}</td>
-            <td class="py-1 text-slate-300 font-mono">{{ host.size_human }}</td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-    </div>
-    {% endif %}
-    <p class="text-xs text-slate-500 mt-2">Storage-budget retention is watchdog's responsibility, not this page's.</p>
   </div>
 
   <!-- What: newest proxy access lines from syslog-ng
        Why: nginx logs to stdout; syslog-ng keeps them
        From: Issue #1683 | PR #1912 -->
-  <div class="card">
-    <div class="flex items-center justify-between mb-3">
-      <h2 class="font-semibold text-slate-200">Recent requests (proxy)</h2>
-      <span class="text-xs text-slate-500" title="This tile reads the proxy's access lines from syslog-ng. The view of every container is on the Logs page.">proxy access log · see <a href="{{ pages.logs | safe }}" class="underline hover:text-slate-300">Logs</a> for the syslog-ng view</span>
+  <div class="card" style="margin-bottom:16px;">
+    <div class="card-head">
+      <h3>Recent requests</h3>
+      <span class="pill on" title="This tile reads the proxy's access lines from syslog-ng. The view of every container is on the Logs page.">Live</span>
     </div>
-    {% if recent_logs %}
-    <div class="overflow-x-auto">
-      <table class="w-full text-sm">
-        <thead>
-          <tr>
-            <th class="th pr-4">Host</th>
-            <th class="th pr-4">Path</th>
-            <th class="th pr-4">Status</th>
-            <th class="th pr-4">Size</th>
-            <th class="th">Cache</th>
-          </tr>
-        </thead>
-        <tbody class="rows">
-          {% for entry in recent_logs %}
-          <tr>
-            <td class="py-1.5 pr-4 text-blue-400 font-mono text-xs">{{ entry.host }}</td>
-            <td class="py-1.5 pr-4 text-slate-300 font-mono text-xs max-w-xs truncate">{{ entry.path }}</td>
-            <td class="py-1.5 pr-4">
-              {% if entry.status < 300 %}
-              <span class="text-emerald-400 font-mono text-xs">{{ entry.status }}</span>
-              {% elif entry.status < 400 %}
-              <span class="text-blue-400 font-mono text-xs">{{ entry.status }}</span>
-              {% else %}
-              <span class="text-red-400 font-mono text-xs">{{ entry.status }}</span>
-              {% endif %}
-            </td>
-            <td class="py-1.5 pr-4 text-slate-400 font-mono text-xs">{{ entry.bytes_human }}</td>
-            <td class="py-1.5">
-              {% if entry.cache_status == "HIT" %}<span class="badge-hit">HIT</span>
-              {% elif entry.cache_status == "MISS" %}<span class="badge-miss">MISS</span>
-              {% elif entry.cache_status == "EXPIRED" %}<span class="badge-expired">EXPIRED</span>
-              {% else %}<span class="badge-other">{{ entry.cache_status }}</span>
-              {% endif %}
-            </td>
-          </tr>
-          {% endfor %}
-        </tbody>
+    <div class="card-body" style="padding-top:6px;">
+      {% if recent_logs %}
+      <table>
+        <tr><th>Host</th><th>Path</th><th>Status</th><th>Size</th><th>Result</th></tr>
+        {% for entry in recent_logs %}
+        <tr>
+          <td class="mono">{{ entry.host }}</td>
+          <td class="mono">{{ entry.path }}</td>
+          <td class="mono">{{ entry.status }}</td>
+          <td class="mono">{{ entry.bytes_human }}</td>
+          <td>
+            {% if entry.cache_status == "HIT" %}<span class="tag hit">cache hit</span>
+            {% elif entry.cache_status == "MISS" %}<span class="tag miss">first download</span>
+            {% elif entry.cache_status == "EXPIRED" %}<span class="tag off">expired</span>
+            {% else %}<span class="tag off">{{ entry.cache_status }}</span>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
       </table>
+      {% else %}
+      <div class="empty-state">
+        <div class="glyph">◌</div>
+        <p>No requests logged yet.</p>
+      </div>
+      {% endif %}
     </div>
-    {% else %}
-    <p class="text-slate-500 text-sm">No requests logged yet.</p>
-    {% endif %}
   </div>
-
-</div>
-{% endblock %}
-
-{# What: page script after base.html's script
-   Why: it uses window.LancacheWatchdog from base.html
-   From: Issue #1683 | PR #1912 #}
-{% block scripts %}
-<script>
-  // What: writes the three counters of one proxy card
-  // Why: http and https cards share one id scheme
-  // From: Issue #1683 | PR #1912
-  function updateMetricsSection(prefix, status) {
-    // What: a null status leaves the card unchanged
-    // Why: an unreachable proxy reports null
-    // From: Issue #1683 | PR #1912
-    if (!status) {
-      return;
-    }
-    const active = document.getElementById(prefix + '-active');
-    const requests = document.getElementById(prefix + '-requests');
-    const waiting = document.getElementById(prefix + '-waiting');
-    // What: skips counters the card did not render
-    // Why: disabled or unreachable cards lack counter ids
-    // From: Issue #1683 | PR #1912
-    if (active) active.textContent = status.active;
-    if (requests) requests.textContent = status.requests;
-    if (waiting) waiting.textContent = status.waiting;
-  }
-
-  // What: fetches the metrics route, patches the counters
-  // Why: a reload also recomputes cache and log stats
-  // From: Issue #1683 | PR #1912
-  async function refreshDashboardMetrics() {
-    try {
-      const response = await fetch('{{ routes.metrics | safe }}');
-      if (!response.ok) {
-        throw new Error('metrics: HTTP ' + response.status);
-      }
-      const data = await response.json();
-      updateMetricsSection('http', data.http);
-      // What: https counters only when HTTPS is enabled
-      // Why: the disabled HTTPS card has no counters
-      // From: Issue #1683 | PR #1912
-      if (data.https_enabled) {
-        updateMetricsSection('https', data.https);
-      }
-    } catch (err) {
-      // What: reports the error, keeps last values
-      // Why: a proxy outage is transient; retried later
-      // From: Issue #1683 | PR #1912
-      reportError(err);
-    }
-  }
-
-  // What: reruns refreshDashboardMetrics per SOT interval
-  // Why: counters stay live without a page reload
-  // From: Issue #1683 | PR #1912
-  setInterval(refreshDashboardMetrics, window.LancacheUi.ms({{ dashboard_refresh_seconds }}));
-
-  // What: skip title update when health is omitted
-  // Why: the disk-cache dot has no health string to show
-  // From: Issue #1437
-  function setWatchdogDotColor(dot, status, health) {
-    // What: no dot element means nothing to paint
-    // Why: a service row may lack a rendered dot
-    // From: Issue #1683 | PR #1912
-    if (!dot) {
-      return;
-    }
-    window.LancacheWatchdog.paintDot(dot, status);
-    if (health !== undefined) {
-      dot.setAttribute('title', health);
-    }
-  }
-
-  // What: repaints note and dots on each watchdog update
-  // Why: base.html polls; this page only renders the data
-  // From: Issue #1683 | PR #1912
-  window.LancacheWatchdog.onUpdate(function (data) {
-    const note = document.getElementById('watchdog-status-note');
-    // What: note text from the watchdog document state
-    // Why: same three states the server-side note shows
-    // From: Issue #1683 | PR #1912
-    if (note) {
-      if (data.state === 'stale') {
-        note.textContent = 'stale (' + data.age_seconds + 's old)';
-      } else if (data.state === 'unavailable') {
-        note.textContent = 'watchdog status unavailable';
-      } else {
-        note.textContent = 'live';
-      }
-    }
-    // What: no dots to repaint while status is unavailable
-    // Why: the document then carries no service list
-    // From: Issue #1683 | PR #1912
-    if (data.state === 'unavailable') {
-      return;
-    }
-    (data.services || []).forEach(function (svc) {
-      const row = document.querySelector('[data-service="' + svc.name + '"]');
-      // What: skips services without a row on this page
-      // Why: rows exist only for services rendered at load
-      // From: Issue #1683 | PR #1912
-      if (!row) {
-        return;
-      }
-      setWatchdogDotColor(row.querySelector('[data-role="dot"]'), svc.status, svc.health);
-    });
-    // What: repaints the cache-disk dot when both exist
-    // Why: the disk block or its row can be absent
-    // From: Issue #1683 | PR #1912
-    if (data.disk && data.disk.cache) {
-      const diskRow = document.querySelector('[data-service="disk-cache"]');
-      if (diskRow) {
-        setWatchdogDotColor(diskRow.querySelector('[data-role="dot"]'), data.disk.cache.status);
-      }
-    }
-  });
-</script>
+</section>
 {% endblock %}
