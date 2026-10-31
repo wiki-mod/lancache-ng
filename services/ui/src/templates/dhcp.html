@@ -51,9 +51,9 @@
 
   <div>
     <p class="eyebrow">Settings → DHCP</p>
-    <h1 class="page-title">DHCP-Verwaltung</h1>
+    <h1 class="page-title">DHCP</h1>
     <p class="page-sub">
-      DHCP-Modus, Kea-Subnetze, Reservierungen und Leases werden hier gemeinsam verwaltet.
+      DHCP-Server (Kea), DHCP-Proxy und DHCP-Relay: ein Modus ist aktiv.
     </p>
   </div>
 
@@ -63,10 +63,10 @@
   <div class="card space-y-4">
     <div class="flex flex-wrap items-center justify-between gap-3">
       <div>
-        <h2 class="font-semibold text-slate-200">DHCP mode</h2>
-        <p class="text-xs text-slate-500 mt-0.5">Der Modus wird live aus der UI-Konfiguration gelesen und persistent in `/data` gespeichert.</p>
+        <div class="section-title" style="margin-top:0;">DHCP-Modus</div>
+        <p class="text-xs text-slate-500 mt-0.5">Wird sofort übernommen und dauerhaft gespeichert.</p>
       </div>
-      <span class="text-xs px-2 py-1 rounded bg-slate-700 text-slate-200">{{ dhcp_mode }}</span>
+      <span class="beambar-dot" data-dot-status="{% if dhcp_mode == "disabled" %}gray{% else %}green{% endif %}"></span>
     </div>
 
     <form method="post" action="{{ routes.dhcp_mode | safe }}" class="grid gap-3 md:grid-cols-2 items-end">
