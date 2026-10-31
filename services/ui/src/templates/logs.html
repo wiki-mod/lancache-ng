@@ -8,93 +8,81 @@
 {% block title %} – Logs{% endblock %}
 
 {% block content %}
-<div class="max-w-7xl mx-auto space-y-4">
-
-  <div class="flex items-center justify-between">
-    <div>
-      <h1 class="text-xl font-bold text-white">Syslog</h1>
-      <p class="text-sm text-slate-400 mt-1">
-        Letzte {{ logs_max_entries }} Einträge aus dem zentralen Syslog-Speicher
-      </p>
-    </div>
-    <!-- What: reloads the page for new log lines
-         Why: the table below is rendered server-side -->
-    <button onclick="location.reload()"
-            class="text-sm text-slate-400 hover:text-white border border-slate-600 hover:border-slate-400 px-3 py-1.5 rounded-lg transition-colors">
-      Aktualisieren
-    </button>
-  </div>
+<section>
+  <p class="eyebrow">Overview → Logs</p>
+  <h1 class="page-title">Logs</h1>
+  <p class="page-sub">Letzte {{ logs_max_entries }} Einträge aus dem zentralen Syslog-Speicher.</p>
 
   <!-- What: host filter reloads the page with ?host=
        Why: parse_syslog_tail reads that host only -->
-  <div class="flex gap-3 flex-wrap">
-    <select id="syslog-host-filter"
-            onchange="location.href = this.value ? ('{{ pages.logs | safe }}?host=' + encodeURIComponent(this.value)) : '{{ pages.logs | safe }}'"
-            class="bg-slate-800 border border-slate-600 rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:ring-1 focus:ring-blue-500">
-      <option value="" {% if not selected_host %}selected{% endif %}>Alle Hosts</option>
-      {% for h in syslog_hosts %}
-      <option value="{{ h }}" {% if selected_host and h == selected_host %}selected{% endif %}>{{ h }}</option>
-      {% endfor %}
-    </select>
+  <div class="field-row" style="max-width:none; margin-bottom:18px;">
+    <div class="field" style="margin-bottom:0; max-width:220px;">
+      <label for="syslog-host-filter">Host</label>
+      <select id="syslog-host-filter"
+              onchange="location.href = this.value ? ('{{ pages.logs | safe }}?host=' + encodeURIComponent(this.value)) : '{{ pages.logs | safe }}'"
+              style="width:100%; padding:9px 11px; border-radius:8px; border:1px solid var(--navy-600); background:var(--navy-900); color:var(--foam); font-size:13.5px;">
+        <option value="" {% if not selected_host %}selected{% endif %}>Alle Hosts</option>
+        {% for h in syslog_hosts %}
+        <option value="{{ h }}" {% if selected_host and h == selected_host %}selected{% endif %}>{{ h }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <!-- What: reloads the page for new log lines
+         Why: the table below is rendered server-side -->
+    <button type="button" class="btn ghost" onclick="location.reload()" style="margin-top:23px;">Aktualisieren</button>
   </div>
 
   <!-- What: per-service logging switches.
        Why: the ui saves; the watchdog applies. -->
-  <form method="post" action="{{ routes.logs_settings | safe }}" class="card space-y-3">
+  <form method="post" action="{{ routes.logs_settings | safe }}" class="card" style="margin-bottom:16px;">
     {{ <csrf_field csrf_token={csrf_token}/> }}
-    <div>
-      <h2 class="font-semibold text-slate-200">Protokollierung je Dienst</h2>
-      <p class="text-xs text-slate-400 mt-1">
+    <div class="card-head">
+      <h3>Protokollierung je Dienst</h3>
+    </div>
+    <div class="card-body">
+      <p class="section-sub">
         Abgeschaltete Dienste schreiben nichts mehr in den zentralen Syslog. Der Watchdog
         (Container „services“) protokolliert immer. Die Änderung gilt nach wenigen Sekunden.
         Ohne Proxy-Protokoll zeigen Statistik und Dashboard keine neuen Zugriffe.
       </p>
-    </div>
-    <div class="flex flex-wrap gap-x-6 gap-y-2">
       {% for sw in log_switches %}
-      <label class="flex items-center gap-2 text-sm text-slate-300">
-        <input type="checkbox" name="{{ sw.key }}" value="1" {% if sw.on %}checked{% endif %}
-               class="rounded border-slate-600 bg-slate-700 text-blue-500 focus:ring-blue-500">
-        {{ sw.program }}
-      </label>
+      <div class="toggle-row">
+        <div class="t-label">{{ sw.program }}</div>
+        <label class="toggle">
+          <input type="checkbox" name="{{ sw.key }}" value="1" {% if sw.on %}checked{% endif %}>
+          <span class="track"></span><span class="knob"></span>
+        </label>
+      </div>
       {% endfor %}
+      <button type="submit" class="btn" style="margin-top:12px;">Speichern</button>
     </div>
-    <button type="submit"
-            class="btn btn-blue">
-      Speichern
-    </button>
   </form>
 
   <!-- What: syslog lines of the selected host or all hosts
        Why: rendered server-side; reload shows new lines -->
-  <div class="card p-0 overflow-hidden">
-    <div class="overflow-x-auto">
-      <table class="w-full text-xs" id="syslog-table">
-        <thead>
-          <tr>
-            <th class="th px-4 w-48">Zeit</th>
-            <th class="th px-4 w-40">Host</th>
-            <th class="th px-4 w-32">Programm</th>
-            <th class="th px-4">Nachricht</th>
-          </tr>
-        </thead>
-        <tbody class="rows">
-          {% if syslog_logs %}
-          {% for entry in syslog_logs %}
-          <tr>
-            <td class="px-4 py-2 text-slate-500 font-mono">{{ entry.timestamp }}</td>
-            <td class="px-4 py-2 text-blue-400 font-mono">{{ entry.host }}</td>
-            <td class="px-4 py-2 text-slate-300 font-mono">{{ entry.program }}</td>
-            <td class="px-4 py-2 text-slate-300 font-mono">{{ entry.message }}</td>
-          </tr>
-          {% endfor %}
-          {% else %}
-          <tr><td colspan="4" class="px-4 py-8 text-center text-slate-500">Noch keine Log-Einträge</td></tr>
-          {% endif %}
-        </tbody>
+  <div class="card">
+    <div class="card-body" style="padding:0; overflow-x:auto;">
+      <table id="syslog-table" style="font-family:var(--font-mono); font-size:12.5px;">
+        <tr>
+          <th style="padding:12px 18px 10px;">Zeit</th>
+          <th style="padding:12px 18px 10px;">Host</th>
+          <th style="padding:12px 18px 10px;">Programm</th>
+          <th style="padding:12px 18px 10px;">Nachricht</th>
+        </tr>
+        {% if syslog_logs %}
+        {% for entry in syslog_logs %}
+        <tr class="log-line">
+          <td style="padding:6px 18px; color:var(--mist-dim);">{{ entry.timestamp }}</td>
+          <td style="padding:6px 18px;"><span class="tag off">{{ entry.host }}</span></td>
+          <td style="padding:6px 18px;">{{ entry.program }}</td>
+          <td style="padding:6px 18px;">{{ entry.message }}</td>
+        </tr>
+        {% endfor %}
+        {% else %}
+        <tr><td colspan="4" class="empty-state">Noch keine Log-Einträge</td></tr>
+        {% endif %}
       </table>
     </div>
   </div>
-
-</div>
+</section>
 {% endblock %}
