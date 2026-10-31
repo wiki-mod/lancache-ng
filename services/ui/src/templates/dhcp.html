@@ -81,6 +81,18 @@
     </div>
   </div>
 
+  {# What: five tabs; each shows one panel
+     Why: the mockup groups DHCP by mode
+     From: Issue #1683 | PR #1976 #}
+  <div class="subtabs">
+    <button type="button" data-dhcp-tab="server" class="subtab dhcp-tab-btn">DHCP-Server</button>
+    <button type="button" data-dhcp-tab="proxy" class="subtab dhcp-tab-btn">DHCP-Proxy</button>
+    <button type="button" data-dhcp-tab="relay" class="subtab dhcp-tab-btn">DHCP-Relay</button>
+    <button type="button" data-dhcp-tab="precheck" class="subtab dhcp-tab-btn">DHCP-Precheck</button>
+    <button type="button" data-dhcp-tab="settings" class="subtab dhcp-tab-btn">Settings</button>
+  </div>
+
+  <div data-dhcp-panel="settings" class="hidden">
   {# What: DHCP mode select, form of the active mode #}
   {# Why: proxy and relay values exist only in their mode #}
   {# From: Issue #1683 | PR #1912 #}
@@ -113,6 +125,13 @@
       </button>
     </form>
 
+    {% if not dhcp_is_dnsmasq and not dhcp_is_relay and not dhcp_has_kea %}
+      <p class="text-sm text-slate-400">DHCP management is disabled. The configuration area stays visible so the mode can be re-enabled later, but no active DHCP service is running.</p>
+    {% endif %}
+  </div>
+  </div>
+
+  <div data-dhcp-panel="proxy" class="hidden">
     {% if dhcp_is_dnsmasq and not dhcp_is_relay %}
       {# What: ProxyDHCP values and their edit form #}
       {# Why: options reach only PXE clients in this mode #}
@@ -156,8 +175,13 @@
             Proxy-Werte speichern
           </button>
         </form>
-      </div>
-    {% elif dhcp_is_relay %}
+    {% else %}
+    <p class="section-sub">DHCP-Proxy is not the active mode. Choose it under Settings.</p>
+    {% endif %}
+  </div>
+
+  <div data-dhcp-panel="relay" class="hidden">
+    {% if dhcp_is_relay %}
       {# What: real DHCP relay to the upstream server #}
       {# Why: client broadcasts cannot reach upstream #}
       {# From: Issue #844 #}
@@ -179,25 +203,13 @@
             Relay-Werte speichern
           </button>
         </form>
-      </div>
-    {% elif dhcp_has_kea %}
-      {# What: Kea mode summary of the managed values #}
-      {# Why: lists what the subnet editor below manages #}
-      {# From: Issue #1683 | PR #1912 #}
-      <div class="text-sm text-green-400 space-y-2">
-        <p>Kea mode is active. The configuration area below is visible and editable with direct fields for gateway, DNS, NTP, reservations, and subnet details.</p>
-        <ul class="list-disc pl-5 space-y-1 text-green-300">
-          <li>Managed subnet values: gateway, pool, DNS servers, NTP servers, lease time, and domain-related DHCP options</li>
-          <li>Current Kea subnet editor preserves unmanaged <code>option-data</code> entries on save, but exposes only simple fields here</li>
-          <li>Static reservations and live leases are available below</li>
-        </ul>
-      </div>
     {% else %}
-      <p class="text-sm text-slate-400">DHCP management is disabled. The configuration area stays visible so the mode can be re-enabled later, but no active DHCP service is running.</p>
+    <p class="section-sub">DHCP-Relay is not the active mode. Choose it under Settings.</p>
     {% endif %}
   </div>
 
-  {% if dhcp_has_kea %}
+  <div data-dhcp-panel="precheck" class="hidden">
+    {% if dhcp_has_kea %}
   <!-- What: status card for the DHCP conflict probe -->
   <!-- Why: element ids are read by checkDhcpConflict() -->
   <!-- From: Issue #1683 | PR #1912 -->
@@ -222,7 +234,26 @@
       </button>
     </div>
   </div>
+    {% else %}
+    <p class="section-sub">The precheck needs the DHCP-Server mode.</p>
+    {% endif %}
+  </div>
 
+  <div data-dhcp-panel="server" class="hidden">
+    {% if dhcp_has_kea and not dhcp_is_dnsmasq and not dhcp_is_relay %}
+      {# What: Kea mode summary of the managed values #}
+      {# Why: lists what the subnet editor below manages #}
+      {# From: Issue #1683 | PR #1912 #}
+      <div class="text-sm text-green-400 space-y-2">
+        <p>Kea mode is active. The configuration area below is visible and editable with direct fields for gateway, DNS, NTP, reservations, and subnet details.</p>
+        <ul class="list-disc pl-5 space-y-1 text-green-300">
+          <li>Managed subnet values: gateway, pool, DNS servers, NTP servers, lease time, and domain-related DHCP options</li>
+          <li>Current Kea subnet editor preserves unmanaged <code>option-data</code> entries on save, but exposes only simple fields here</li>
+          <li>Static reservations and live leases are available below</li>
+        </ul>
+      </div>
+    {% endif %}
+    {% if dhcp_has_kea %}
   {# What: toggles Kea dhcp-ddns.enable-updates live #}
   {# Why: DNS writes are a separate decision from DHCP #}
   {# From: Issue #1076 #}
@@ -531,11 +562,34 @@
     </div>
   </div>
 
-  {% endif %}
+    {% else %}
+    <p class="section-sub">DHCP-Server is not the active mode. Choose it under Settings.</p>
+    {% endif %}
+  </div>
 </div>
 {% endblock %}
 
 {% block scripts %}
+<script>
+  // What: shows one DHCP panel and marks its tab
+  // Why: tabs switch client-side; no reload per tab
+  // From: Issue #1683 | PR #1976
+  function setDhcpTab(name) {
+    document.querySelectorAll('[data-dhcp-panel]').forEach((p) => {
+      p.classList.toggle('hidden', p.dataset.dhcpPanel !== name);
+    });
+    document.querySelectorAll('.dhcp-tab-btn').forEach((b) => {
+      b.classList.toggle('active', b.dataset.dhcpTab === name);
+    });
+    try { sessionStorage.setItem('dhcpTab', name); } catch (e) { /* blocked */ }
+  }
+  document.querySelectorAll('.dhcp-tab-btn').forEach((b) => {
+    b.addEventListener('click', () => setDhcpTab(b.dataset.dhcpTab));
+  });
+  let first = 'server';
+  try { first = sessionStorage.getItem('dhcpTab') || first; } catch (e) { /* blocked */ }
+  setDhcpTab(first);
+</script>
 <script>
   // What: folds the mode comparison open and shut
   // Why: the mockup keeps it closed until asked for
