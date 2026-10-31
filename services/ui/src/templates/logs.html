@@ -11,7 +11,6 @@
 <section>
   <p class="eyebrow">Overview → Logs</p>
   <h1 class="page-title">Logs</h1>
-  <p class="page-sub">Letzte {{ logs_max_entries }} Einträge aus dem zentralen Syslog-Speicher.</p>
 
   <!-- What: two tabs, Logs and Syslog
        Why: the Syslog tab holds the log settings -->
@@ -21,49 +20,40 @@
   </div>
 
   <div data-logs-panel="logs">
-  <!-- What: host filter reloads the page with ?host=
-       Why: parse_syslog_tail reads that host only -->
   <div class="field-row" style="max-width:none; margin-bottom:18px;">
     <div class="field" style="margin-bottom:0; max-width:220px;">
-      <label for="syslog-host-filter">Host</label>
-      <select id="syslog-host-filter"
-              onchange="location.href = this.value ? ('{{ pages.logs | safe }}?host=' + encodeURIComponent(this.value)) : '{{ pages.logs | safe }}'"
-              style="width:100%; padding:9px 11px; border-radius:8px; border:1px solid var(--navy-600); background:var(--navy-900); color:var(--foam); font-size:13.5px;">
-        <option value="" {% if not selected_host %}selected{% endif %}>Alle Hosts</option>
+      <label for="log-service">Service</label>
+      <select id="log-service" onchange="filterLogs()" style="width:100%; padding:9px 11px; border-radius:8px; border:1px solid var(--navy-600); background:var(--navy-900); color:var(--foam); font-size:13.5px;">
+        <option value="">All services</option>
         {% for h in syslog_hosts %}
-        <option value="{{ h }}" {% if selected_host and h == selected_host %}selected{% endif %}>{{ h }}</option>
+        <option value="{{ h }}">{{ h }}</option>
         {% endfor %}
       </select>
     </div>
-    <!-- What: reloads the page for new log lines
-         Why: the table below is rendered server-side -->
-    <button type="button" class="btn ghost" onclick="location.reload()" style="margin-top:23px;">Aktualisieren</button>
-  </div>
-
-  <!-- What: syslog lines of the selected host or all hosts
-       Why: rendered server-side; reload shows new lines -->
-  <div class="card">
-    <div class="card-body" style="padding:0; overflow-x:auto;">
-      <table id="syslog-table" style="font-family:var(--font-mono); font-size:12.5px;">
-        <tr>
-          <th style="padding:12px 18px 10px;">Zeit</th>
-          <th style="padding:12px 18px 10px;">Quelle</th>
-          <th style="padding:12px 18px 10px;">Nachricht</th>
-        </tr>
-        {% if syslog_logs %}
-        {% for entry in syslog_logs %}
-        <tr class="log-line">
-          <td style="padding:6px 18px; color:var(--mist-dim);"><time data-iso="{{ entry.timestamp }}">{{ entry.timestamp }}</time></td>
-          <td style="padding:6px 18px;"><span class="tag off">{{ entry.host }}</span>{% if entry.program != entry.host %} {{ entry.program }}{% endif %}</td>
-          <td style="padding:6px 18px;">{{ entry.message }}</td>
-        </tr>
-        {% endfor %}
-        {% else %}
-        <tr><td colspan="3" class="empty-state">Noch keine Log-Einträge</td></tr>
-        {% endif %}
-      </table>
+    <div class="field" style="margin-bottom:0; flex:1;">
+      <label for="log-search">Search</label>
+      <input type="text" id="log-search" placeholder="Filter by text…" oninput="filterLogs()">
     </div>
   </div>
+
+  <div class="card">
+    <div class="card-body" style="padding:0;">
+      <div id="log-lines" style="font-family:var(--font-mono); font-size:12.5px; line-height:1.9; padding:14px 18px; max-height:420px; overflow-y:auto;">
+        {% if syslog_logs %}
+        {% for entry in syslog_logs %}
+        <div class="log-line" data-service="{{ entry.host }}">
+          <span class="mono" style="color:var(--mist-dim);"><time data-iso="{{ entry.timestamp }}">{{ entry.timestamp }}</time></span>
+          <span class="tag off" style="margin:0 8px;">{{ entry.host }}</span>
+          {{ entry.message }}
+        </div>
+        {% endfor %}
+        {% else %}
+        <div class="empty-state">No log entries yet</div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+  <p class="field-hint" style="margin-top:8px;">Last {{ logs_max_entries }} entries from the central syslog store.</p>
   </div>
 
   <div data-logs-panel="syslog">
@@ -138,6 +128,18 @@
 
 {% block scripts %}
 <script>
+  // What: hides log lines not matching service or text
+  // Why: the mockup filters the list in the browser
+  // From: Issue #1683 | PR #1976
+  function filterLogs() {
+    const svc = document.getElementById('log-service').value;
+    const q = document.getElementById('log-search').value.toLowerCase();
+    document.querySelectorAll('#log-lines .log-line').forEach((l) => {
+      const ok = (!svc || l.dataset.service === svc) && (!q || l.textContent.toLowerCase().includes(q));
+      l.style.display = ok ? '' : 'none';
+    });
+  }
+
   // What: shows each log time in the browser's local time
   // Why: the server sends UTC; operators read local time
   // From: Issue #1683 | PR #1858
