@@ -949,6 +949,55 @@
     })();
   </script>
 
+  <!-- What: English or German text swap, kept in a cookie
+       Why: the mockup offers a language choice
+       From: Issue #1683 | PR #1858 -->
+  <script>
+    (function () {
+      const pairs = [
+        ['📊 Übersicht', '📊 Overview'], ['Statistiken', 'Statistics'],
+        ['⚙ Einstellungen', '⚙ Settings'], ['Einrichtung', 'Setup'],
+        ['Projektseite', 'Project page'], ['Sprache', 'Language'],
+        ['Release-Kanal', 'Release channel'],
+        ['Automatische Updates', 'Automatic updates'],
+        ['Automatische Updates aktiv', 'Automatic updates on'],
+        ['Automatische Updates deaktiviert', 'Automatic updates off'],
+        ['Passwort ändern', 'Change password'],
+        ['Speichern', 'Save'], ['Abbrechen', 'Cancel'],
+        ['Löschen', 'Delete'], ['Hinzufügen', 'Add'],
+        ['laden…', 'loading…'], ['Aktiv', 'Active'],
+        ['Aus', 'Off'], ['Ein', 'On']
+      ];
+      const read = function () {
+        const m = document.cookie.match(/(?:^|; )lc_lang=(en|de)/);
+        return m ? m[1] : 'de';
+      };
+      const apply = function (lang) {
+        const from = lang === 'en' ? 0 : 1;
+        const map = new Map(pairs.map(function (p) { return [p[from], p[1 - from]]; }));
+        const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+        let node;
+        while ((node = walker.nextNode())) {
+          const key = node.nodeValue.trim();
+          if (map.has(key)) {
+            node.nodeValue = node.nodeValue.replace(key, map.get(key));
+          }
+        }
+        document.documentElement.lang = lang;
+        document.querySelectorAll('[data-lang]').forEach(function (b) {
+          b.classList.toggle('selected', b.dataset.lang === lang);
+        });
+      };
+      document.querySelectorAll('[data-lang]').forEach(function (b) {
+        b.addEventListener('click', function () {
+          document.cookie = 'lc_lang=' + b.dataset.lang + '; path=/; max-age=31536000; samesite=strict';
+          location.reload();
+        });
+      });
+      apply(read());
+    })();
+  </script>
+
   {% block scripts %}{% endblock %}
 </body>
 </html>
