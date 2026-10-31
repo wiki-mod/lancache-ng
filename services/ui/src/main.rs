@@ -6570,7 +6570,8 @@ async fn start_prefill(State(state): Shared, Form(f): Form<Fields>) -> Result<Re
             match prefill_one(&client, &proxy, target, &run).await {
                 Ok(()) => run.done.fetch_add(1, Ordering::Relaxed),
                 Err(e) => {
-                    tracing::error!(%target, error = %e, "prefill fetch failed");
+                    let reason = e.to_string();
+                    tracing::error!(%target, %reason, "prefill fetch failed");
                     run.failed.fetch_add(1, Ordering::Relaxed)
                 }
             };
