@@ -192,15 +192,16 @@
           {# What: service dot; base.html paints its status
              Why: the colour alone does not say what failed
              From: Issue #1683 | PR #1912 #}
-          <span class="beambar-dot" data-role="dot" data-dot-status="{{ svc.status }}" title="{{ svc.health }}"></span>
+          <span class="beambar-dot" data-role="dot" data-dot-status="{{ svc.status }}" title="{{ svc.health }}" style="margin-right:6px;"></span>
           <span>{{ svc.name }}</span>
+          <span data-role="health" style="color:var(--mist-dim);font-size:12px;margin-left:6px;">{% if svc.status != "green" %}{{ svc.health }}{% endif %}</span>
           {% if svc.failures > 0 %}
           <span class="tag miss" data-role="failures" style="margin-left:6px;">{{ svc.failures }} failures</span>
           {% endif %}
         </div>
         {% endfor %}
         <div class="flex items-center" data-service="disk-cache">
-          <span class="beambar-dot" data-role="dot" data-dot-status="{{ watchdog_status.disk.cache.status }}"></span>
+          <span class="beambar-dot" data-role="dot" data-dot-status="{{ watchdog_status.disk.cache.status }}" style="margin-right:6px;"></span>
           <span>Cache disk: {{ watchdog_status.disk.cache.pct }}% used</span>
         </div>
       </div>
@@ -370,6 +371,13 @@
         return;
       }
       setWatchdogDotColor(row.querySelector('[data-role="dot"]'), svc.status, svc.health);
+      // What: shows the health text next to a non-green service
+      // Why: the reason must be visible without hovering
+      // From: Issue #1683 | PR #1858
+      const healthText = row.querySelector('[data-role="health"]');
+      if (healthText) {
+        healthText.textContent = svc.status !== 'green' ? (svc.health || '') : '';
+      }
     });
     // What: repaints the cache-disk dot when both exist
     // Why: the disk block or its row can be absent
