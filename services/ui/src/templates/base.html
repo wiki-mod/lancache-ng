@@ -5,18 +5,6 @@
 {# Why: child templates extend it and override the blocks #}
 {# From: Issue #1683 | PR #1912 #}
 
-{# What: one link of the section tab bar #}
-{# Why: one class string and active rule for all tabs #}
-{# From: Issue #1683 | PR #1912 #}
-{% component section_tab(href, label, active) %}<a href="{{ href | safe }}"
-       class="subtab {% if active %}active{% endif %}">{{ label }}</a>{% endcomponent section_tab %}
-{# What: tab bar of the DHCP, DNS and Secondary pages #}
-{# Why: one copy; Secondary tab same on each page #}
-{# From: Issue #1683 | PR #1912 #}
-{% component section_tabs(main_href, main_label, main_page, active_page, secondaries_href) %}<div class="subtabs">
-    {{ <section_tab href={main_href} label={main_label} active={active_page == main_page}/> }}
-    {{ <section_tab href={secondaries_href} label="Secondary" active={active_page == "secondaries"}/> }}
-  </div>{% endcomponent section_tabs %}
 {# What: hidden csrf_token field of every POST form #}
 {# Why: one markup; main.rs CSRF_FORM_FIELD reads it #}
 {# From: Issue #1683 | PR #1912 #}
@@ -687,7 +675,6 @@
 
     <div class="nav-group-label">⚙ Einstellungen</div>
     {{ <nav_link href={pages.domains} label="DNS" active={active_page == "domains"} glyph="⌘"/> }}
-    {{ <nav_link href={pages.secondaries} label="Secondary" active={active_page == "secondaries"} glyph="⇆"/> }}
     {{ <nav_link href={pages.dhcp} label="DHCP" active={active_page == "dhcp"} glyph="⇄"/> }}
     {{ <nav_link href={pages.setup} label="Einrichtung" active={active_page == "setup"} glyph="◐"/> }}
 

@@ -34,8 +34,6 @@
   </div>
   {% endif %}
 
-  {{ <section_tabs main_href={pages.domains} main_label="DNS" main_page="domains" active_page={active_page} secondaries_href={pages.secondaries}/> }}
-
   {# What: one tab button per data-dns-panel section below
      Why: setActiveDnsTab maps data-dns-tab to the panel
      From: Issue #1683 | PR #1912 #}
@@ -59,6 +57,10 @@
     <button type="button" data-dns-tab="zones"
             class="subtab dns-tab-btn">
       Zone-Snapshots
+    </button>
+    <button type="button" data-dns-tab="secondary"
+            class="subtab dns-tab-btn">
+      Secondary
     </button>
   </div>
 
@@ -471,6 +473,110 @@
       </p>
       {% endif %}
     </section>
+
+    {# What: registration and list of secondary DNS nodes
+       Why: one DNS page; formerly its own page
+       From: Issue #1683 | PR #1858 #}
+    <section data-dns-panel="secondary" class="flex flex-col gap-6">
+  {# What: install command for a new secondary, copyable #}
+  {# Why: token and primary URL are rendered by main.rs #}
+  <div class="card flex flex-col gap-4">
+    <div>
+      <h2 class="font-semibold text-slate-200">Neuen Secondary registrieren</h2>
+      <p class="text-xs text-slate-500 mt-0.5">Befehl auf dem Secondary-Host ausführen — ersetzt <code class="text-slate-300">myname</code> durch einen eindeutigen Namen. Der Installer bindet standardmäßig an die erkannte LAN-IP des Hosts; wenn Port 53 dort bereits belegt ist, zeigt er den belegenden Socket an und fragt nach einer alternativen <code class="text-slate-300">--listen-ip</code>. Optional für HTTPS-DNS: <code class="text-slate-300">--ip-https</code> und <code class="text-slate-300">--listen-ip-https</code> zusammen angeben (zweite Bind-IP, derselbe Container).</p>
+    </div>
+
+    <div class="relative group">
+      <div id="install-cmd" class="bg-slate-900 rounded-lg p-4 font-mono text-xs text-slate-300 overflow-x-auto whitespace-pre select-all">bash &lt;(curl -fsSL {{ setup_script_url }}) secondary \
+  --primary {{ primary_url }} \
+  --token {{ registration_token }} \
+  --name myname \
+  --ip-http {{ primary_ip }}</div>
+      {{ <copy_button target="install-cmd" extra_class="hover:text-white opacity-0 group-hover:opacity-100"/> }}
+    </div>
+
+    <p class="text-xs text-slate-500">
+      Der Befehl registriert den Secondary, generiert die benötigten Werte und startet den Container automatisch.
+    </p>
+
+    <p class="text-xs text-amber-300/90 leading-relaxed">
+      Hinweis für lokale Tests auf demselben Host: Wenn bereits ein Dienst Port 53 belegt, musst du eine freie
+      Bind-IP per <code class="text-slate-200">--listen-ip</code> angeben. Der Installer zeigt dir den Konflikt
+      dann direkt an, statt erst beim Docker-Start zu scheitern.
+    </p>
+
+    <p class="text-xs text-slate-500">
+      Zeitangaben werden als lokale Datum-/Uhrzeitangaben dargestellt, nicht als Unix-Zeitstempel.
+    </p>
+  </div>
+
+  {# What: table of registered secondaries with actions #}
+  {# Why: health, address, token and removal per row #}
+  <div class="card flex flex-col gap-4">
+    <div>
+      <h2 class="font-semibold text-slate-200">Registrierte Secondaries</h2>
+      <p class="text-xs text-slate-500 mt-0.5">Automatisch synchronisierte DNS-Instanzen</p>
+    </div>
+
+    {% if secondaries %}
+    <div class="overflow-x-auto">
+      <table class="w-full text-sm">
+        <thead>
+          <tr>
+            <th class="th px-3">Name</th>
+            <th class="th px-3">Consumer</th>
+            <th class="th px-3">Adresse</th>
+            <th class="th px-3">DNS-Status</th>
+            <th class="th px-3">Registriert</th>
+            <th class="th px-3">Zuletzt gesehen</th>
+            <th class="th px-3">Aktionen</th>
+          </tr>
+        </thead>
+        <tbody class="rows">
+          {% for secondary in secondaries %}
+          <tr>
+            <td class="px-3 py-2 text-slate-200 font-mono">{{ secondary.name }}</td>
+            <td class="px-3 py-2 text-slate-300">{{ secondary.consumer_name }}</td>
+            <td class="px-3 py-2 text-slate-300 text-xs">
+              <span class="font-mono">{% if secondary.address %}{{ secondary.address }}{% else %}<span class="text-slate-500">—</span>{% endif %}</span>
+              <button onclick="editSecondaryAddress('{{ secondary.name }}', '{{ secondary.address | default(value='') }}')"
+                      class="text-blue-400 hover:text-blue-300 ml-1 text-[11px]">Ändern</button>
+            </td>
+            <td class="px-3 py-2 text-xs">
+              <span id="health-{{ secondary.name }}" class="text-slate-500">–</span>
+              <button onclick="checkSecondaryHealth('{{ secondary.name }}')"
+                      class="text-blue-400 hover:text-blue-300 ml-1 text-[11px]">Prüfen</button>
+            </td>
+            <td class="px-3 py-2 text-slate-400 text-xs">
+              <time data-epoch="{{ secondary.registered_at }}">{{ secondary.registered_at }}</time>
+            </td>
+            <td class="px-3 py-2 text-slate-400 text-xs">
+              {% if secondary.last_seen %}
+                <time data-epoch="{{ secondary.last_seen }}">{{ secondary.last_seen }}</time>
+              {% else %}
+                <span class="text-slate-500">Noch nicht erfasst</span>
+              {% endif %}
+            </td>
+            <td class="px-3 py-2 space-x-2">
+              <button onclick="rotateToken('{{ secondary.name }}')"
+                      class="btn btn-sm btn-ghost-amber">
+                Token rotieren
+              </button>
+              <button onclick="removeSecondary('{{ secondary.name }}')"
+                      class="btn btn-sm btn-ghost-red">
+                Entfernen
+              </button>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <p class="text-slate-500 text-sm px-3 py-2">Keine Secondaries registriert.</p>
+    {% endif %}
+  </div>
+    </section>
   </div>
 
 </div>
@@ -537,5 +643,134 @@
   // Why: marks its button; markup sets no active class
   // From: Issue #1683 | PR #1912
   setActiveDnsTab('cdn');
+
+  // What: POST to the rotate route of one secondary
+  // Why: server rotates; alert shows the result
+  async function rotateToken(name) {
+    try {
+      const response = await fetch('{{ routes.secondary_rotate | safe }}'.replace('{name}', name), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-CSRF-Token': CSRF_TOKEN
+        },
+        body: JSON.stringify({
+          token: "{{ registration_token }}"
+        })
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        alert(`Token erfolgreich rotiert für ${name}`);
+      } else {
+        alert(`Fehler beim Rotieren des Tokens: ${response.statusText}`);
+      }
+    } catch (error) {
+      alert(`Fehler: ${error.message}`);
+    }
+  }
+
+  // What: DELETE of one secondary after confirm()
+  // Why: removal cannot be undone; the page then reloads
+  async function removeSecondary(name) {
+    if (!confirm(`${name} wirklich entfernen?`)) {
+      return;
+    }
+
+    try {
+      const response = await fetch('{{ routes.secondary | safe }}'.replace('{name}', name), {
+        method: 'DELETE',
+        headers: {
+          'X-CSRF-Token': CSRF_TOKEN
+        }
+      });
+
+      if (response.ok) {
+        alert(`${name} erfolgreich entfernt.`);
+        location.reload();
+      } else {
+        alert(`Fehler beim Entfernen: ${response.statusText}`);
+      }
+    } catch (error) {
+      alert(`Fehler: ${error.message}`);
+    }
+  }
+
+  // What: probe status code to German label and colour
+  // Why: renderHealth() shows one label per probe result
+  // From: Issue #1084
+  const HEALTH_LABELS = {
+    ok: ['OK (autoritativ)', 'text-green-400'],
+    not_authoritative: ['Nicht autoritativ', 'text-amber-400'],
+    no_zone: ['Zone fehlt (REFUSED)', 'text-red-400'],
+    broken: ['Fehler (SERVFAIL)', 'text-red-400'],
+    unreachable: ['Nicht erreichbar', 'text-red-400'],
+    no_address: ['Keine Adresse', 'text-slate-500'],
+    error: ['Unerwartete Antwort', 'text-amber-400'],
+  };
+
+  // What: writes label, serial and detail of one probe
+  // Why: one renderer for the click and the page-load run
+  function renderHealth(span, data) {
+    const [label, cls] = HEALTH_LABELS[data.status] || ['Unbekannt', 'text-slate-500'];
+    span.className = cls;
+    span.textContent = data.serial != null ? `${label} · Serial ${data.serial}` : label;
+    if (data.detail) span.title = data.detail;
+  }
+
+  // What: POST health probe of one secondary, shows status
+  // Why: the DNS probe runs on the server, not in the page
+  async function checkSecondaryHealth(name) {
+    const span = document.getElementById('health-' + name);
+    if (span) { span.className = 'text-slate-400'; span.textContent = 'Prüfe…'; }
+    try {
+      const response = await fetch('{{ routes.secondary_health | safe }}'.replace('{name}', name), {
+        method: 'POST',
+        headers: { 'X-CSRF-Token': CSRF_TOKEN }
+      });
+      if (response.ok) {
+        renderHealth(span, await response.json());
+      } else if (span) {
+        span.className = 'text-red-400';
+        span.textContent = `Fehler (${response.status})`;
+      }
+    } catch (error) {
+      if (span) { span.className = 'text-red-400'; span.textContent = `Fehler: ${error.message}`; }
+    }
+  }
+
+  // What: prompt() for a new address, POST, then reload
+  // Why: the server checks it; 400 means not a private IPv4
+  async function editSecondaryAddress(name, current) {
+    const input = prompt(`Adresse (private IPv4) für ${name}:`, current || '');
+    if (input === null) return;
+    try {
+      const response = await fetch('{{ routes.secondary_address | safe }}'.replace('{name}', name), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF_TOKEN },
+        body: JSON.stringify({ address: input.trim() })
+      });
+      if (response.ok) {
+        location.reload();
+      } else if (response.status === 400) {
+        alert('Ungültige Adresse: nur private IPv4-Adressen (10.x, 172.16–31.x, 192.168.x) sind erlaubt.');
+      } else {
+        alert(`Fehler beim Speichern der Adresse: ${response.statusText}`);
+      }
+    } catch (error) {
+      alert(`Fehler: ${error.message}`);
+    }
+  }
+
+  // What: runs the health check of every row on page load
+  // Why: first open of the tab; no probe per page load
+  let secondaryHealthRan = false;
+  document.querySelector('[data-dns-tab="secondary"]').addEventListener('click', () => {
+    if (secondaryHealthRan) return;
+    secondaryHealthRan = true;
+    document.querySelectorAll('[id^="health-"]').forEach((span) => {
+      checkSecondaryHealth(span.id.slice('health-'.length));
+    });
+  });
 </script>
 {% endblock %}

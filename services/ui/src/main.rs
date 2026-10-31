@@ -734,7 +734,6 @@ const TEMPLATE_NAMES: &[&str] = &[
     "dhcp.html",
     "domains.html",
     "cachehamster.html",
-    "secondaries.html",
     "stats.html",
     "logs.html",
     "setup.html",
@@ -1071,7 +1070,6 @@ const PAGE_DASHBOARD: &str = "/";
 const PAGE_DHCP: &str = "/dhcp";
 const PAGE_CACHEHAMSTER: &str = "/cachehamster";
 const PAGE_DOMAINS: &str = "/domains";
-const PAGE_SECONDARIES: &str = "/secondaries";
 const PAGE_STATS: &str = "/stats";
 const PAGE_LOGS: &str = "/logs";
 const PAGE_SETUP: &str = "/setup";
@@ -1180,12 +1178,11 @@ fn page_ctx(headers: &HeaderMap, active: &str) -> Context {
     // What: each page path from its one Rust owner.
     // Why: nav and links follow the router path.
     // From: Issue #1683 | PR #1912
-    const PAGES: [(&str, &str); 8] = [
+    const PAGES: [(&str, &str); 7] = [
         ("dashboard", PAGE_DASHBOARD),
         ("dhcp", PAGE_DHCP),
         ("cachehamster", PAGE_CACHEHAMSTER),
         ("domains", PAGE_DOMAINS),
-        ("secondaries", PAGE_SECONDARIES),
         ("stats", PAGE_STATS),
         ("logs", PAGE_LOGS),
         ("setup", PAGE_SETUP),
@@ -3061,14 +3058,11 @@ fn new_nats_password() -> String {
     hex32()
 }
 
-// What: render the secondaries page.
-// Why: operators see registrations and probe status here.
+// What: the registered secondaries, newest first.
+// Why: the DNS page lists them in its Secondary tab.
 // From: Issue #1683 | PR #1858
-async fn secondaries_page(
-    State(state): Shared,
-    headers: HeaderMap,
-) -> Result<Response, StatusCode> {
-    let secondaries = with_db(&state, |db| {
+fn load_secondaries(state: &AppState) -> Vec<Secondary> {
+    with_db(state, |db| {
         db.prepare(
             "SELECT name, consumer_name, registered_at, last_seen, address \
              FROM secondaries ORDER BY registered_at DESC",
@@ -3090,23 +3084,7 @@ async fn secondaries_page(
     .unwrap_or_else(|e| {
         tracing::error!("secondaries not read: {e}");
         Vec::new()
-    });
-    let mut ctx = page_ctx(&headers, "secondaries");
-    ctx.insert("secondaries", &secondaries);
-    ctx.insert(
-        "primary_url",
-        &format!(
-            "http://{}:{}",
-            state.config.http_ip, state.config.listen_port
-        ),
-    );
-    ctx.insert("primary_ip", &state.config.http_ip);
-    ctx.insert("setup_script_url", &state.config.setup_script_url);
-    ctx.insert(
-        "registration_token",
-        &state.config.secondary_registration_token,
-    );
-    Ok(render(&state, "secondaries.html", &ctx))
+    })
 }
 
 // What: register a secondary and hand out its NATS login.
@@ -5885,6 +5863,14 @@ async fn domains_page(
     ctx.insert("reverse_zones", &served);
     let rollback = config::rollback_zones(&cfg.lan_zone, cfg.local_reverse);
     ctx.insert("rollback_zones", &rollback);
+    ctx.insert("secondaries", &load_secondaries(&state));
+    ctx.insert(
+        "primary_url",
+        &format!("http://{}:{}", cfg.http_ip, cfg.listen_port),
+    );
+    ctx.insert("primary_ip", &cfg.http_ip);
+    ctx.insert("setup_script_url", &cfg.setup_script_url);
+    ctx.insert("registration_token", &cfg.secondary_registration_token);
     render(&state, "domains.html", &ctx)
 }
 
@@ -7016,7 +7002,6 @@ fn router(state: Arc<AppState>) -> Router {
         (ROUTE_NETDATA, get(netdata_proxy)),
         (ROUTE_ADMIN_CSS, get(admin_css)),
         (ROUTE_CHART_JS, get(chart_js)),
-        (PAGE_SECONDARIES, get(secondaries_page)),
         (ROUTE_SECONDARY, delete(remove_secondary)),
         (ROUTE_SECONDARY_ROTATE, post(rotate_token)),
         (ROUTE_SECONDARY_HEALTH, post(check_secondary_health)),
