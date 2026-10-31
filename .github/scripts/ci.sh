@@ -6144,23 +6144,23 @@ _ci_sccache_report() {
         [ "${n}" = 0 ] || errs+=" ${label// /_}=${n:-none}"
     done
     # What: write errors by their cause in the server log.
-    # Why: 409 exists and 429 skipped keep the level alive.
-    # From: Issue #1683 | PR #1912
-    local log wr wlog wex=0 wrl=0 chk cause
-    local ok='Error executing cache write: (AlreadyExists \(permanent\)|RateLimited \(temporary\))'
+    # Why: exists or temporary keep it; all failed = down.
+    # From: Issue #1683 | PR #1858
+    local log wr wlog wex=0 wtmp=0 chk cause
+    local ok='Error executing cache write: (AlreadyExists \(permanent\)|[A-Za-z]+ \(temporary\))'
     log="$(_ci_sccache_log)"
     wr="$(_ci_sccache_count "Cache write errors" "${stats}")" || return 2
     if [ "${wr}" != 0 ]; then
         wlog="$(_ci_capture 1 grep -c 'Error executing cache write:' "${log}")" || return 2
         wex="$(_ci_capture 1 grep -c 'Error executing cache write: AlreadyExists (permanent)' "${log}")" || return 2
-        wrl="$(_ci_capture 1 grep -c 'Error executing cache write: RateLimited (temporary)' "${log}")" || return 2
-        [ "${wr}" = "${wlog}" ] && [ "${wlog}" = "$(( wex + wrl ))" ] \
-            || errs+=" Cache_write_errors=${wr:-none} exists=${wex} rate_limited=${wrl}"
+        wtmp="$(_ci_capture 1 grep -cE 'Error executing cache write: [A-Za-z]+ \(temporary\)' "${log}")" || return 2
+        [ "${wr}" = "${wlog}" ] && [ "${wlog}" = "$(( wex + wtmp ))" ] && [ "${wtmp}" -lt "${miss:-0}" ] \
+            || errs+=" Cache_write_errors=${wr:-none} exists=${wex} temporary=${wtmp} misses=${miss:-none}"
         chk="$(_ci_capture 1 grep -o 'storage check result: [A-Za-z]*' "${log}")" || return 2
         case "${chk}" in *ReadOnly*) errs+=" storage=ReadOnly" ;; esac
     fi
     if [ -z "${errs}" ]; then
-        [ "${wr}" = 0 ] || ci_log "[CI-INFO-CACHE-0018]" "write_exists=${wex} write_rate_limited=${wrl} reason=\"writes skipped; entries exist or retry later\""
+        [ "${wr}" = 0 ] || ci_log "[CI-INFO-CACHE-0018]" "write_exists=${wex} write_temporary=${wtmp} reason=\"writes skipped; entries exist or a temporary fault\""
         return 0
     fi
     # What: the error lines of the sccache server log.
