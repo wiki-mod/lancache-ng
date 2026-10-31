@@ -65,24 +65,34 @@
       <table id="syslog-table" style="font-family:var(--font-mono); font-size:12.5px;">
         <tr>
           <th style="padding:12px 18px 10px;">Zeit</th>
-          <th style="padding:12px 18px 10px;">Host</th>
-          <th style="padding:12px 18px 10px;">Programm</th>
+          <th style="padding:12px 18px 10px;">Quelle</th>
           <th style="padding:12px 18px 10px;">Nachricht</th>
         </tr>
         {% if syslog_logs %}
         {% for entry in syslog_logs %}
         <tr class="log-line">
-          <td style="padding:6px 18px; color:var(--mist-dim);">{{ entry.timestamp }}</td>
-          <td style="padding:6px 18px;"><span class="tag off">{{ entry.host }}</span></td>
-          <td style="padding:6px 18px;">{{ entry.program }}</td>
+          <td style="padding:6px 18px; color:var(--mist-dim);"><time data-iso="{{ entry.timestamp }}">{{ entry.timestamp }}</time></td>
+          <td style="padding:6px 18px;"><span class="tag off">{{ entry.host }}</span>{% if entry.program != entry.host %} {{ entry.program }}{% endif %}</td>
           <td style="padding:6px 18px;">{{ entry.message }}</td>
         </tr>
         {% endfor %}
         {% else %}
-        <tr><td colspan="4" class="empty-state">Noch keine Log-Einträge</td></tr>
+        <tr><td colspan="3" class="empty-state">Noch keine Log-Einträge</td></tr>
         {% endif %}
       </table>
     </div>
   </div>
 </section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  // What: shows each log time in the browser's local time
+  // Why: the server sends UTC; operators read local time
+  // From: Issue #1683 | PR #1858
+  document.querySelectorAll('time[data-iso]').forEach((el) => {
+    const d = new Date(el.dataset.iso);
+    if (!isNaN(d)) el.textContent = d.toLocaleString('de-DE');
+  });
+</script>
 {% endblock %}

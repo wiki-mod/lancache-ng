@@ -227,8 +227,9 @@
              Why: base.html paintDot owns token-to-colour
              From: Issue #1683 | PR #1912 #}
           <span class="beambar-dot shrink-0" data-role="dot" data-dot-status="{% if alarm.status == "CRITICAL" %}red{% elif alarm.status == "WARNING" %}yellow{% elif alarm.status == "CLEAR" %}green{% endif %}"></span>
-          <span class="mono" style="color:var(--mist-dim);font-size:12px;">{{ alarm.when_display }}</span>
-          <span style="font-weight:600;">{{ alarm.name }}</span>
+          <span class="mono" style="color:var(--mist-dim);font-size:12px;"><time data-iso="{{ alarm.when_display }}">{{ alarm.when_display }}</time></span>
+          <span style="font-size:12px;">{% if alarm.status == "CRITICAL" %}Kritisch{% elif alarm.status == "WARNING" %}Warnung{% elif alarm.status == "CLEAR" %}Behoben{% else %}{{ alarm.status }}{% endif %}</span>
+          <span style="font-weight:600;">{{ alarm.name | replace(from="_", to=" ") }}</span>
           <span style="color:var(--mist-dim);font-size:12px;">({{ alarm.chart }})</span>
           <span style="color:var(--mist);font-size:12px;" class="truncate">{{ alarm.info }}</span>
         </div>
@@ -379,6 +380,14 @@
         setWatchdogDotColor(diskRow.querySelector('[data-role="dot"]'), data.disk.cache.status);
       }
     }
+  });
+
+  // What: shows alarm times in the browser's local time
+  // Why: the server sends UTC; operators read local time
+  // From: Issue #1683 | PR #1858
+  document.querySelectorAll('time[data-iso]').forEach((el) => {
+    const d = new Date(el.dataset.iso);
+    if (!isNaN(d)) el.textContent = d.toLocaleString('de-DE');
   });
 </script>
 {% endblock %}
