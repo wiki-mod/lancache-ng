@@ -258,8 +258,8 @@ async function useNativeNetdata() {
   document.querySelectorAll('.nd').forEach((d) => d.classList.remove('hidden'));
 }
 
-// What: no netdata script: refresh now, then each REFRESH ms
-// Why: the Chart.js charts fill without waiting one interval
+// What: no netdata script: refresh now and per REFRESH
+// Why: Chart.js charts fill without a wait
 // From: Issue #1683 | PR #1912
 useNativeNetdata().catch((err) => {
   reportError(err);
