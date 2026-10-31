@@ -8,10 +8,10 @@
 {# What: TTL input of the LAN and PTR record forms #}
 {# Why: one copy of default, limits and help text #}
 {# From: Issue #1683 | PR #1912 #}
-{% component ttl_input(ttl_default, ttl_max) %}<input type="number" name="ttl" value="{{ ttl_default }}" placeholder="TTL (Sekunden)"
+{% component ttl_input(ttl_default, ttl_max) %}<label class="flex items-center gap-2 text-xs text-slate-400">TTL (Sek.) <input type="number" name="ttl" value="{{ ttl_default }}"
                  required min="1" max="{{ ttl_max }}"
                  title="TTL must be between 1 and {{ ttl_max }} seconds (RFC 2181)."
-                 class="w-24 bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-green-500">{% endcomponent ttl_input %}
+                 class="w-24 bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-green-500"></label>{% endcomponent ttl_input %}
 {% block title %} – DNS{% endblock %}
 
 {% block content %}
@@ -146,7 +146,7 @@
         {% endif %}
       </div>
 
-      <p class="text-xs text-slate-500">{{ dns_domains | length }} Einträge</p>
+      <p class="text-xs text-slate-500">{{ dns_domains | length }} {% if dns_domains | length == 1 %}Eintrag{% else %}Einträge{% endif %}</p>
     </section>
 
     {# What: LAN records in PowerDNS: add form and list
@@ -155,7 +155,7 @@
     <section data-dns-panel="lan" class="card flex flex-col gap-4 hidden">
       <div>
         <h2 class="font-semibold text-slate-200">LAN-Einträge</h2>
-        <p class="text-xs text-slate-500 mt-0.5">PowerDNS Authoritative Server · Lokale DNS-Records für das LAN</p>
+        <p class="text-xs text-slate-500 mt-0.5">Eigene Namen für Geräte im Heimnetz, zum Beispiel <span class="font-mono">nas.{{ lan_zone }}</span> zeigt auf <span class="font-mono">192.168.1.50</span>. Typ A ist die normale Wahl für eine IPv4-Adresse, CNAME verweist auf einen anderen Namen. Die TTL sagt, wie viele Sekunden sich Geräte die Antwort merken.</p>
       </div>
 
       <form action="{{ routes.lan_add | safe }}" method="post" class="flex flex-col gap-3" data-lan-record-form>
@@ -169,7 +169,7 @@
                  class="flex-1 bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-green-500">
           <select name="record_type" required data-lan-record-type
                   class="bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-green-500">
-            <option value="">Typ wählen</option>
+            <option value="">Typ (A = IPv4-Adresse)</option>
             {# What: one option per LAN_RECORD_TYPES entry
                Why: the form offers what validation accepts
                From: Issue #1683 | PR #1912 #}
@@ -192,7 +192,10 @@
 
       <div class="space-y-1 max-h-[28rem] overflow-y-auto">
         {% if lan_records %}
+        {% set_global lan_shown = 0 %}
         {% for record in lan_records %}
+        {% if record.type != "SOA" and record.type != "NS" %}
+        {% set_global lan_shown = lan_shown + 1 %}
         <div class="list-row group">
           <div class="flex-1 min-w-0">
             <div class="flex gap-2 items-center">
@@ -219,13 +222,15 @@
             </button>
           </form>
         </div>
+        {% endif %}
         {% endfor %}
+        {% if lan_shown == 0 %}<p class="text-slate-500 text-sm px-3 py-2">Keine LAN-Einträge vorhanden.</p>{% endif %}
         {% else %}
         <p class="text-slate-500 text-sm px-3 py-2">Keine LAN-Einträge vorhanden.</p>
         {% endif %}
       </div>
 
-      <p class="text-xs text-slate-500">{% if lan_records %}{{ lan_records | length }} Einträge{% else %}0 Einträge{% endif %}</p>
+      <p class="text-xs text-slate-500">{% if lan_records %}{{ lan_shown }} {% if lan_shown == 1 %}Eintrag{% else %}Einträge{% endif %} (die technischen Zonen-Einträge SOA und NS sind ausgeblendet){% endif %}</p>
     </section>
 
     {# What: PTR records of the private reverse zones
@@ -235,14 +240,17 @@
       <div>
         <h2 class="font-semibold text-slate-200">PTR / Reverse-DNS</h2>
         <p class="text-xs text-slate-500 mt-0.5">
-          PowerDNS Authoritative Server · Reverse-Lookups (IP&nbsp;→&nbsp;Hostname) für die privaten Reverse-Zonen
-          (<span class="font-mono">{{ reverse_zones | join(sep=", ") }}</span>).
+          Zeigt zu einer IP-Adresse den Namen des Geräts an, zum Beispiel in Logs.
         </p>
+        {% if dhcp_mode == "kea" %}
         <p class="text-xs text-amber-300/90 mt-1 leading-relaxed">
-          Hinweis: Automatisch von Kea (DHCP-DDNS) angelegte PTR-Einträge sind technisch nicht von manuell
-          angelegten unterscheidbar und werden hier gemeinsam angezeigt. Wird ein von DHCP verwalteter Eintrag
-          entfernt, kann Kea ihn beim nächsten Lease-Ereignis erneut anlegen.
+          Hinweis: Vom DHCP-Server angelegte Einträge stehen hier mit den manuellen zusammen. Entfernst du einen davon, kann DHCP ihn beim nächsten Lease wieder anlegen.
         </p>
+        {% endif %}
+        <details class="text-xs text-slate-500 mt-1">
+          <summary class="cursor-pointer">Betroffene Reverse-Zonen</summary>
+          <span class="font-mono">{{ reverse_zones | join(sep=", ") }}</span>
+        </details>
       </div>
 
       <form action="{{ routes.ptr_add | safe }}" method="post" class="flex flex-col gap-3">
@@ -300,7 +308,7 @@
         {% endif %}
       </div>
 
-      <p class="text-xs text-slate-500">{% if ptr_records %}{{ ptr_records | length }} Einträge{% else %}0 Einträge{% endif %}</p>
+      <p class="text-xs text-slate-500">{% if ptr_records %}{{ ptr_records | length }} {% if ptr_records | length == 1 %}Eintrag{% else %}Einträge{% endif %}{% endif %}</p>
     </section>
 
     {# What: global IPv4-only switch (AAAA filter)

@@ -5835,6 +5835,7 @@ async fn domains_page(
         })
     };
     let mut ctx = page_ctx(&headers, "domains");
+    insert_dhcp_mode(&mut ctx, cfg.dhcp_mode());
     ctx.insert("dns_domains", &rows);
     ctx.insert("lan_records", &lan);
     ctx.insert("ptr_records", &ptr);
