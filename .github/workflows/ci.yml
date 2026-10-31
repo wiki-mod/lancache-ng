@@ -75,7 +75,7 @@ env:
   SCCACHE_DIST_SCHEDULER_URL: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && vars.SCCACHE_DIST_SCHEDULER_URL || '' }}
   DISTCC_POTENTIAL_HOSTS: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && vars.DISTCC_POTENTIAL_HOSTS || '' }}
 jobs:
-  # What: the first job; it decides every later job.
+  # What: the first job; it decides the build chain jobs.
   # Why: §10: plan first; §2.1 §70: no job without reason.
   # From: Issue #1683 | PR #1858
   plan:
@@ -110,9 +110,6 @@ jobs:
       timeouts: ${{ steps.jobs.outputs.timeouts }}
       validate-dir: ${{ steps.jobs.outputs.validate-dir }}
       releases: ${{ steps.releases.outputs.releases }}
-      checks: ${{ steps.plan.outputs.checks }}
-      check-list: ${{ steps.plan.outputs.check-list }}
-      meta: ${{ steps.meta.outputs.meta }}
       any-build: ${{ steps.plan.outputs.any-build }}
       promote: ${{ steps.plan.outputs.promote }}
       validate: ${{ steps.plan.outputs.validate }}
@@ -164,21 +161,6 @@ jobs:
         run: bash .github/scripts/ci.sh tool-releases
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      # What: decide the PR text check; unchanged is NOOP.
-      # Why: Fund 94: PR text only in the step reading it.
-      # From: Issue #1683 | PR #1858
-      - name: Decide the PR text check
-        id: meta
-        if: github.event_name == 'pull_request'
-        env: &pr_text
-          GH_TOKEN: ${{ secrets.PROJECT_AUTOMATION_PAT }}
-          PR_TITLE: ${{ github.event.pull_request.title }}
-          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
-          PR_BODY: ${{ github.event.pull_request.body }}
-          PR_DRAFT: ${{ github.event.pull_request.draft }}
-          PR_LABELS_JSON: ${{ toJSON(github.event.pull_request.labels.*.name) }}
-          PR_MILESTONE_TITLE: ${{ github.event.pull_request.milestone.title }}
-        run: bash .github/scripts/ci.sh pr-meta plan
 
   # What: build, publish, verify one target per platform
   # Why: ci.sh owns identity, publish, readback lifecycle
@@ -457,16 +439,20 @@ jobs:
       - name: Close the issues the merged PR links
         run: bash .github/scripts/ci.sh close-linked-issues
 
-  # What: checks, each only with a reason from plan.
-  # Why: §2.1 §98: a tree or PR text checked green is NOOP.
-  # From: Issue #1683
+  # What: checks beside plan; each runs only with a reason.
+  # Why: §2.1 §98: a green tree or PR text is NOOP; -75 s.
+  # From: Issue #1683 | PR #1858
   checks:
     name: checks
-    needs: plan
-    if: needs.plan.outputs.checks == 'true' || needs.plan.outputs.meta == 'true'
-    runs-on: ${{ needs.plan.outputs.runner }}
-    timeout-minutes: ${{ fromJSON(needs.plan.outputs.timeouts)['checks'] }}
-    container: *bt_platform
+    if: github.event_name != 'issues'
+    # What: literal runner; timeout equals SOT checks value
+    # Why: no plan job before it names a runner.
+    # From: Issue #1683 | PR #1858
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    container:
+      image: ghcr.io/${{ github.repository }}/build-tools:nightly
+      credentials: *ghcr_credentials
     permissions:
       contents: write
       packages: read
@@ -476,27 +462,60 @@ jobs:
       PR_NUMBER: *pr_number
       PR_IS_FORK: *pr_is_fork
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    # What: did this job run a check; result reads it.
+    # Why: a job with no check is no green check mark.
+    # From: Issue #1683 | PR #1858
+    outputs:
+      ran: ${{ steps.pick.outputs.checks == 'true' || steps.meta.outputs.meta == 'true' }}
     steps:
       - *bootstrap
+      # What: the build-tools ref that plan also resolves.
+      # Why: checks read ids with the run's toolchain ref.
+      # From: Issue #1683 | PR #1858
+      - name: Resolve the build-tools image
+        id: resolve
+        run: bash .github/scripts/ci.sh build-tools resolve-image
+      # What: decide the PR text check; unchanged is NOOP.
+      # Why: Fund 94: PR text only in the step reading it.
+      # From: Issue #1683 | PR #1858
+      - name: Decide the PR text check
+        id: meta
+        if: github.event_name == 'pull_request'
+        env: &pr_text
+          GH_TOKEN: ${{ secrets.PROJECT_AUTOMATION_PAT }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_DRAFT: ${{ github.event.pull_request.draft }}
+          PR_LABELS_JSON: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          PR_MILESTONE_TITLE: ${{ github.event.pull_request.milestone.title }}
+        run: bash .github/scripts/ci.sh pr-meta plan
       # What: PR title, template, labels and milestone.
-      # Why: plan found this PR text not yet checked green.
+      # Why: this PR text is not yet checked green.
       # From: Issue #1683 | PR #1858
       - name: Check the PR text and tracking metadata
-        if: needs.plan.outputs.meta == 'true'
+        if: steps.meta.outputs.meta == 'true'
         env: *pr_text
         run: bash .github/scripts/ci.sh pr-meta check
       - name: Collect changed files
         id: changed
-        if: ${{ !cancelled() && needs.plan.outputs.checks == 'true' }}
+        if: ${{ !cancelled() }}
         run: bash .github/scripts/ci.sh changed-files
-      # What: only the checks plan listed (§98).
+      # What: the checks a changed input asks for (§98).
       # Why: a check without a changed input is NOOP.
       # From: Issue #1683 | PR #1858
-      - name: Run the file check set
-        if: ${{ !cancelled() && needs.plan.outputs.checks == 'true' }}
+      - name: Decide the file checks
+        id: pick
+        if: ${{ !cancelled() }}
         env:
           CHANGED_FILES: ${{ steps.changed.outputs.file }}
-          CI_CHECKS_SELECTED: ${{ needs.plan.outputs.check-list }}
+        run: bash .github/scripts/ci.sh checks-plan
+      - name: Run the file check set
+        if: ${{ !cancelled() && steps.pick.outputs.checks == 'true' }}
+        env:
+          CHANGED_FILES: ${{ steps.changed.outputs.file }}
+          CI_CHECKS_SELECTED: ${{ steps.pick.outputs.check-list }}
+          CI_BUILD_TOOLS_IMAGE: ${{ steps.resolve.outputs.image }}
         run: bash .github/scripts/ci.sh check all
 
   # What: labels and board; GitHub admin, no CI path.
@@ -589,6 +608,6 @@ jobs:
           PR_NUMBER: *pr_number
           PR_IS_FORK: *pr_is_fork
           CI_PLAN_ANY_BUILD: ${{ needs.plan.outputs.any-build }}
-          CI_CHECKS_RESULT: ${{ needs.checks.result }}
+          CI_CHECKS_RESULT: ${{ needs.checks.outputs.ran == 'true' && needs.checks.result || 'skipped' }}
           CI_RUN_IDENTITIES: *run_ids
         run: bash .github/scripts/ci.sh pr-green-mark

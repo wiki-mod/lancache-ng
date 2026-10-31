@@ -67,7 +67,7 @@ declare -A CI_DISPATCH=(
     [resolve]=ci_cmd_resolve [build]=ci_cmd_build [rust-build]=ci_cmd_rust_build [apk-setup]=ci_cmd_apk_setup [image-setup]=ci_cmd_image_setup
     [build-tools]=ci_cmd_build_tools [job-settings]=ci_cmd_job_settings [tool-releases]=ci_cmd_tool_releases [publish]=ci_cmd_publish [verify]=ci_cmd_verify [ship]=ci_cmd_ship [ship-release]=ci_cmd_ship_release [gha-runtime-args]=ci_cmd_gha_runtime_args
     [test]=ci_cmd_test [scan-channel]=ci_cmd_scan_channel [assemble]=ci_cmd_assemble
-    [aggregate-stack]=ci_cmd_aggregate_stack [scan-stack]=ci_cmd_scan_stack [changed-files]=ci_cmd_changed_files
+    [aggregate-stack]=ci_cmd_aggregate_stack [scan-stack]=ci_cmd_scan_stack [changed-files]=ci_cmd_changed_files [checks-plan]=ci_cmd_checks_plan
     [assemble-stack]=ci_cmd_assemble_stack [test-stack]=ci_cmd_test_stack [nightly-report]=ci_cmd_nightly_report
     [validate]=ci_cmd_validate [result-gate]=ci_cmd_result_gate [promote]=ci_cmd_promote [promote-ref]=ci_cmd_promote_ref [channel-checkout]=ci_cmd_channel_checkout [channel-matrix]=ci_cmd_channel_matrix [channel-check]=ci_cmd_channel_check [channel-report]=ci_cmd_channel_report [release-validation]=_ci_release_validation_valid [release-ref]=_ci_release_ref
     [release-publish]=ci_cmd_release_publish [release-images]=ci_cmd_release_images [release-sbom-stack]=ci_cmd_release_sbom_stack [release-vex]=ci_cmd_release_vex [cut-release-tag]=ci_cmd_cut_release_tag [release-notes]=ci_cmd_release_notes [release-changelog]=ci_cmd_release_changelog [release-variable]=ci_cmd_release_variable
@@ -1843,6 +1843,33 @@ _ci_meta_note() {
     printf 'meta-green %s' "${hash}"
 }
 
+# What: the file checks this run needs, as step outputs.
+# Why: checks start beside plan; §2.1 §98 stay the rule.
+# From: Issue #1683 | PR #1858
+ci_cmd_checks_plan() {
+    local out checks=false check_list="" rc=0
+    local -a changed=()
+    out="$(_ci_env_required GITHUB_OUTPUT)" || return 2
+    _ci_collect_changed changed "$@" || return 2
+    _ci_checks_reuse || rc=$?
+    case "${rc}" in
+        0) ;;
+        1)
+            check_list="$(_ci_checks_select "${changed[@]}")" || return 2
+            check_list="${check_list//$'\n'/ }"
+            if [ -n "${check_list}" ]; then
+                checks=true
+                ci_log "[CI-INFO-PLAN-0023]" "checks=\"${check_list}\" reason=\"an input of these checks changed\""
+            else
+                ci_log "[CI-INFO-PLAN-0024]" "reason=\"no changed path is an input of a check; checks NOT-RUN\""
+            fi
+            ;;
+        *) return 2 ;;
+    esac
+    printf 'checks=%s\ncheck-list=%s\n' "${checks}" "${check_list}" >> "${out}"
+    printf 'checks=%s check-list="%s"\n' "${checks}" "${check_list}"
+}
+
 # What: plan: decide the PR text check; check: run it.
 # Why: §2.1 §10: plan decides; unchanged text is NOOP.
 # From: Issue #1683 | PR #1858
@@ -2150,32 +2177,12 @@ ci_cmd_plan_matrix() {
     fi
     validate="${any}"
     [ "${promote}" = false ] || validate=true
-    # What: file checks need a reason like a build.
-    # Why: §2.1 §98: a checked green tree is NOOP.
-    # From: Issue #1683 | PR #1858
-    local checks=false work=false check_list=""
-    rc=0; _ci_checks_reuse || rc=$?
-    case "${rc}" in
-        0) ;;
-        1)
-            check_list="$(_ci_checks_select "${changed[@]}")" || return 2
-            check_list="${check_list//$'\n'/ }"
-            if [ -n "${check_list}" ]; then
-                checks=true
-                ci_log "[CI-INFO-PLAN-0023]" "checks=\"${check_list}\" reason=\"an input of these checks changed\""
-            else
-                ci_log "[CI-INFO-PLAN-0024]" "reason=\"no changed path is an input of a check; checks NOT-RUN\""
-            fi
-            ;;
-        *) return 2 ;;
-    esac
-    if [ "${checks}" = true ] || [ "${validate}" = true ] || [ -n "${test_services# }" ] || [ "${rust_audit}" = true ]; then
+    local work=false
+    if [ "${validate}" = true ] || [ -n "${test_services# }" ] || [ "${rust_audit}" = true ]; then
         work=true
     fi
     ci_group_end
     {
-        printf 'checks=%s\n' "${checks}"
-        printf 'check-list=%s\n' "${check_list}"
         printf 'work=%s\n' "${work}"
         printf 'any-build=%s\n' "${any}"
         printf 'promote=%s\n' "${promote}"
