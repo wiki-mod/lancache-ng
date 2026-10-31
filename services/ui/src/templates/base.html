@@ -696,18 +696,18 @@
       <img class="brand-mark" alt="LanCache-NG" src="{{ routes.logo_icon | safe }}?v={{ lancache_image_tag() }}">
     </div>
 
-    <div class="nav-group-label">📊 Übersicht</div>
+    <div class="nav-group-label">📊 Overview</div>
     {{ <nav_link href={pages.dashboard} label="Dashboard" active={active_page == "dashboard"} glyph="◧"/> }}
-    {{ <nav_link href={pages.stats} label="Statistiken" active={active_page == "stats"} glyph="◔"/> }}
     {{ <nav_link href={pages.logs} label="Logs" active={active_page == "logs"} glyph="▤"/> }}
 
     <div class="nav-group-label">🎮 Gaming</div>
-    {{ <nav_link href={pages.cachehamster} label="CacheHamster" active={active_page == "cachehamster"} glyph="⇓"/> }}
+    {{ <nav_link href={pages.cachehamster} label="Steam" active={active_page == "cachehamster"} glyph="⇓"/> }}
 
-    <div class="nav-group-label">⚙ Einstellungen</div>
+    <div class="nav-group-label">⚙ Settings</div>
     {{ <nav_link href={pages.domains} label="DNS" active={active_page == "domains"} glyph="⌘"/> }}
     {{ <nav_link href={pages.dhcp} label="DHCP" active={active_page == "dhcp"} glyph="⇄"/> }}
-    {{ <nav_link href={pages.setup} label="Einrichtung" active={active_page == "setup"} glyph="◐"/> }}
+    <a href="{{ pages.logs | safe }}#syslog" class="nav-item"><span class="nav-dot"></span><span class="nav-icon">☍</span> Syslog</a>
+    {{ <nav_link href={pages.setup} label="General" active={active_page == "setup"} glyph="◐"/> }}
 
     <div class="dock-footer">
       <span title="{{ lancache_image_registry() }}/{{ lancache_image_prefix() }}:{{ lancache_image_tag() }}">{{ lancache_image_tag() }} · {{ lancache_image_channel() }}</span><br>
@@ -984,8 +984,8 @@
       const base = 'en';
       const catalog = {
         de: { name: 'Deutsch', t: {
-          overview: '📊 Übersicht', stats: 'Statistiken',
-          settings: '⚙ Einstellungen', setup: 'Einrichtung',
+          overview: '📊 Overview', stats: 'Statistiken',
+          settings: '⚙ Settings', setup: 'Einrichtung',
           project: 'Projektseite', language: 'Sprache',
           channel: 'Release-Kanal', auto: 'Automatische Updates',
           auto_on: 'Automatische Updates aktiv',
