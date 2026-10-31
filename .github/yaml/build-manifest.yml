@@ -256,12 +256,14 @@ build_toolchain:
       - shellcheck
       - shfmt
       - sqlite
+      - tar
       - tcpdump
       - tzdata
       - xz
       - yq-go
       - zlib-dev
       - zlib-static
+      - zstd
     # What: tools only checked on PATH, with no run.
     # Why: a tool has one smoke entry, here or in runs.
     # From: Issue #1683
