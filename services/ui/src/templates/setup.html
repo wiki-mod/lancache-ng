@@ -32,7 +32,7 @@
 
     <!-- What: read-only status of auto_update_enabled
          Why: the form below submits, this only displays -->
-    <div class="bg-slate-900/50 border border-slate-700 rounded-lg px-4 py-3 flex flex-wrap items-center gap-x-6 gap-y-2 text-xs">
+    <div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px 24px;" class="bg-slate-900/50 border border-slate-700 rounded-lg px-4 py-3 flex flex-wrap items-center gap-x-6 gap-y-2 text-xs">
       <span class="text-slate-400">Aktueller Stand:</span>
       <span class="text-slate-200">
         Kanal <span class="font-mono px-1.5 py-0.5 rounded bg-slate-700">{{ lancache_image_channel }}</span>
@@ -59,8 +59,8 @@
         </select>
         <p class="text-xs text-slate-500 mt-1">
           <strong>latest</strong>: getestete Releases, empfohlen für die meisten Installationen.
-          <strong>nightly</strong>: getesteter Vorab-Stand aus current_dev, einmal täglich
-          und bei Bedarf veröffentlicht — kann gelegentlich instabil sein.
+          <strong>nightly</strong>: experimenteller Stand aus current_dev. Er kann kaputt
+          sein und ist nicht für den Produktivbetrieb gedacht.
         </p>
       </div>
       <div class="flex items-center gap-2">
