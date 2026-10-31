@@ -2884,17 +2884,34 @@ _ci_rust_memo_keep() {
     fi
 }
 
-# What: cache key and dir of the Rust item rows.
+# What: restore or save the Rust item rows; $1 the mode.
 # Why: the key holds the reader program; a new one misses.
 # From: Issue #1683 | PR #1858
 ci_cmd_rust_memo() {
-    local out sha tree
-    out="$(_ci_env_required GITHUB_OUTPUT)" || return 2
+    local mode="${1:-}" dir sha tree key rc=0
     [ -n "$(_ci_env_required RUNNER_TEMP)" ] || return 2
+    dir="$(_ci_rust_memo_dir)"
     sha="$(_ci_sha256_hex <<< "${_CI_AWK_RUST_ITEMS}")" || return 2
     tree="$(_ci_capture 0 git -C "${CI_REPO_ROOT}" rev-parse 'HEAD^{tree}')" || return 2
-    printf 'key=rust-items-%s-%s\nprefix=rust-items-%s-\ndir=%s\n' "${sha}" "${tree}" "${sha}" "$(_ci_rust_memo_dir)" >> "${out}"
-    printf 'rust-memo key=rust-items-%s-%s dir=%s\n' "${sha}" "${tree}" "$(_ci_rust_memo_dir)"
+    key="rust-items-${sha}-${tree}"
+    case "${mode}" in
+        restore)
+            _ci_gha_cache_get "${key}" "rust-items-${sha}-" "${sha}" "${dir}" || rc=$?
+            case "${rc}" in
+                0) ci_log "[CI-INFO-CACHE-0029]" "key=\"${key}\" reason=\"Rust item rows restored\"" ;;
+                1) ci_log "[CI-INFO-CACHE-0030]" "key=\"${key}\" reason=\"no Rust item rows cached; plan parses\"" ;;
+                *) return 2 ;;
+            esac
+            ;;
+        save)
+            [ -d "${dir}" ] || return 0
+            _ci_gha_cache_put "${key}" "${sha}" "${dir}"
+            ;;
+        *)
+            ci_log "[CI-ERROR-CACHE-0031]" "got=\"${mode}\" reason=\"rust-memo needs restore or save\""
+            return 2
+            ;;
+    esac
 }
 
 # What: Rust items of a listing row's blob; $3 keep|drop.
@@ -5840,66 +5857,75 @@ _ci_rust_bin_stage() {
     printf '%s\n' "${stage}"
 }
 
-# What: fetch cached binaries into $2; rc 1 = not cached.
-# Why: an unchanged Rust input never compiles again.
+# What: unpack entry $1, else newest of prefix $2, to $4.
+# Why: one cache reader; busybox tar; rc 1 = not cached.
 # From: Issue #1683 | PR #1858
-_ci_rust_bin_get() {
-    local key="$1" dir="$2" reply dl out
-    if ! reply="$(_ci_gha_cache_call GetCacheEntryDownloadURL "{\"key\":\"${key}\",\"restore_keys\":[],\"version\":\"${key##*-}\"}")"; then
+_ci_gha_cache_get() {
+    local key="$1" prefix="$2" ver="$3" dir="$4" keys="[]" reply dl out
+    [ -z "${prefix}" ] || keys="[\"${prefix}\"]"
+    if ! reply="$(_ci_gha_cache_call GetCacheEntryDownloadURL "{\"key\":\"${key}\",\"restore_keys\":${keys},\"version\":\"${ver}\"}")"; then
         [[ "${reply}" != *not_found* ]] || return 1
-        ci_error "[CI-ERROR-BUILD-0030]" "key=\"${key}\" reason=\"Actions cache lookup failed\"" "${reply}"
+        ci_error "[CI-ERROR-CACHE-0022]" "key=\"${key}\" reason=\"Actions cache lookup failed\"" "${reply}"
         return 2
     fi
-    dl="$(_ci_capture 0 jq -r 'select(.ok == true and .matched_key == "'"${key}"'") | .signed_download_url // empty' <<< "${reply}")" || return 2
+    dl="$(_ci_capture 0 jq -r 'select(.ok == true) | .signed_download_url // empty' <<< "${reply}")" || return 2
     [ -n "${dl}" ] || return 1
     _ci_retry download _ci_http_download "${dl}" "${dir}.tgz" >&2 || return 2
     if ! out="$(mkdir -p "${dir}" 2>&1 && tar -xzf "${dir}.tgz" -C "${dir}" 2>&1 && rm -f "${dir}.tgz" 2>&1)"; then
-        ci_error "[CI-ERROR-BUILD-0031]" "key=\"${key}\" reason=\"cached binaries not unpacked\"" "${out}"
+        ci_error "[CI-ERROR-CACHE-0023]" "key=\"${key}\" reason=\"cache entry not unpacked\"" "${out}"
         return 2
     fi
 }
 
-# What: store the built binaries of an image under key.
-# Why: the next build with the same Rust input reuses them.
+# What: store dir $3 as Actions cache entry $1.
+# Why: one cache writer; an entry never changes once set.
 # From: Issue #1683 | PR #1858
-_ci_rust_bin_put() {
-    local key="$1" df="$2" tag="$3" platform="$4" dir="$5" ver="${1##*-}" line reply up size
-    local -a from=() to=()
-    _ci_run "[CI-ERROR-BUILD-0032]" "dir=\"${dir}\" reason=\"binary dir not created\"" mkdir -p "${dir}/build" "${dir}/image" || return 2
-    while IFS= read -r line; do
-        [[ "${line}" =~ ^COPY\ --from=[A-Za-z0-9_-]+\ (/build/[A-Za-z0-9_-]+-out)\ (/[^ ]+)$ ]] || continue
-        to+=("${BASH_REMATCH[1]}")
-        from+=("${BASH_REMATCH[2]}")
-    done < "${df}"
-    _ci_local_image_files "${tag}" "${platform}" "${dir}/image" "${from[@]}" || return 2
-    for line in "${!from[@]}"; do
-        _ci_run "[CI-ERROR-BUILD-0034]" "path=\"${from[line]}\" reason=\"binary not placed for the cache\"" \
-            mv "${dir}/image/${from[line]##*/}" "${dir}${to[line]}" || return 2
-    done
-    _ci_run "[CI-ERROR-BUILD-0035]" "dir=\"${dir}\" reason=\"binaries not packed\"" tar -czf "${dir}.tgz" -C "${dir}" build || return 2
+_ci_gha_cache_put() {
+    local key="$1" ver="$2" dir="$3" reply up size
+    _ci_run "[CI-ERROR-CACHE-0024]" "dir=\"${dir}\" reason=\"cache entry not packed\"" tar -czf "${dir}.tgz" -C "${dir}" . || return 2
     # What: an existing entry answers already_exists.
-    # Why: a parallel job stored the same binaries first.
+    # Why: a parallel job stored the same entry first.
     # From: Issue #1683 | PR #1858
     if ! reply="$(_ci_gha_cache_call CreateCacheEntry "{\"key\":\"${key}\",\"version\":\"${ver}\"}")"; then
         if [[ "${reply}" != *already_exists* ]]; then
-            ci_error "[CI-ERROR-BUILD-0033]" "key=\"${key}\" reason=\"Actions cache entry not created\"" "${reply}"
+            ci_error "[CI-ERROR-CACHE-0025]" "key=\"${key}\" reason=\"Actions cache entry not created\"" "${reply}"
             return 2
         fi
         reply='{"ok":false}'
     fi
     up="$(_ci_capture 0 jq -r 'select(.ok == true) | .signed_upload_url // empty' <<< "${reply}")" || return 2
     if [ -z "${up}" ]; then
-        ci_log "[CI-INFO-BUILD-0018]" "key=\"${key}\" reason=\"another job stores these binaries\""
+        ci_log "[CI-INFO-CACHE-0026]" "key=\"${key}\" reason=\"entry already stored\""
         return 0
     fi
     _ci_retry download _ci_download_curl -fsS -X PUT -H 'x-ms-blob-type: BlockBlob' -H 'x-ms-version: 2020-04-08' \
         --data-binary "@${dir}.tgz" "${up}" >&2 || return 2
     size="$(_ci_capture 0 stat -c %s "${dir}.tgz")" || return 2
     reply="$(_ci_gha_cache_call FinalizeCacheEntryUpload "{\"key\":\"${key}\",\"version\":\"${ver}\",\"size_bytes\":${size}}")" || {
-        ci_error "[CI-ERROR-BUILD-0036]" "key=\"${key}\" reason=\"Actions cache upload not finalized\"" "${reply}"
+        ci_error "[CI-ERROR-CACHE-0027]" "key=\"${key}\" reason=\"Actions cache upload not finalized\"" "${reply}"
         return 2
     }
-    ci_log "[CI-INFO-BUILD-0037]" "key=\"${key}\" bytes=${size} reason=\"binaries stored in the Actions cache\""
+    ci_log "[CI-INFO-CACHE-0028]" "key=\"${key}\" bytes=${size} reason=\"stored in the Actions cache\""
+}
+
+# What: store the built binaries of an image under key.
+# Why: the next build with the same Rust input reuses them.
+# From: Issue #1683 | PR #1858
+_ci_rust_bin_put() {
+    local key="$1" df="$2" tag="$3" platform="$4" dir="$5" line
+    local -a from=() to=()
+    _ci_run "[CI-ERROR-BUILD-0032]" "dir=\"${dir}\" reason=\"binary dir not created\"" mkdir -p "${dir}/build" "${dir}.image" || return 2
+    while IFS= read -r line; do
+        [[ "${line}" =~ ^COPY\ --from=[A-Za-z0-9_-]+\ (/build/[A-Za-z0-9_-]+-out)\ (/[^ ]+)$ ]] || continue
+        to+=("${BASH_REMATCH[1]}")
+        from+=("${BASH_REMATCH[2]}")
+    done < "${df}"
+    _ci_local_image_files "${tag}" "${platform}" "${dir}.image" "${from[@]}" || return 2
+    for line in "${!from[@]}"; do
+        _ci_run "[CI-ERROR-BUILD-0034]" "path=\"${from[line]}\" reason=\"binary not placed for the cache\"" \
+            mv "${dir}.image/${from[line]##*/}" "${dir}${to[line]}" || return 2
+    done
+    _ci_gha_cache_put "${key}" "${key##*-}" "${dir}"
 }
 
 # What: Build one service image once and load it locally.
@@ -5945,7 +5971,7 @@ _ci_docker_build() {
         bkey="$(_ci_rust_bin_key "${service}" "${platform}")" || return 2
         bstage="$(_ci_rust_bin_stage "${df}")" || return 2
         bdir="$(_ci_mktemp -d "${CI_TMPDIR}/rust-bin.XXXXXX")" || return 2
-        _ci_rust_bin_get "${bkey}" "${bdir}/get" || hrc=$?
+        _ci_gha_cache_get "${bkey}" "" "${bkey##*-}" "${bdir}/get" || hrc=$?
         case "${hrc}" in
             0)
                 ci_log "[CI-INFO-BUILD-0038]" "service=\"${service}\" platform=\"${platform}\" key=\"${bkey}\" reason=\"Rust unchanged; binaries from the Actions cache, no compile\""
