@@ -49,6 +49,17 @@
        Why: one list cdn-domains.txt; certs follow it
        From: Issue #1683 | PR #1912 #}
     <section data-dns-panel="cdn" class="card flex flex-col gap-4">
+      {# What: how an entry matches, in plain words
+         Why: mockup hint; a leading dot means subdomains
+         From: Issue #1683 | PR #1858 #}
+      <div class="hint">
+        <span class="glyph">◈</span>
+        <div><b>Jeder Eintrag passt auf genau eine Sache, nie auf eine Mischung:</b>
+          <code>steamcontent.com</code> passt nur auf genau diese Domain.
+          <code>.steamcontent.com</code> (mit Punkt am Anfang) passt auf jede Subdomain wie
+          <code>cdn.steamcontent.com</code>, aber nicht auf die Domain selbst. Mehrere
+          Domains trägst du einzeln ein.</div>
+      </div>
       <div>
         <h2 class="font-semibold text-slate-200">CDN-Domains</h2>
         <p class="text-xs text-slate-500 mt-0.5">cdn-domains.txt · Hosts die auf den Cache-DNS zeigen. HTTPS-Zertifikate für passende Root-Domains werden automatisch abgeleitet, kein separater Eintrag nötig.</p>
@@ -78,6 +89,7 @@
         <div class="list-row group {% if not domain.enabled %}opacity-50{% endif %}">
           <div class="flex items-center gap-2 min-w-0">
             <span class="font-mono text-sm text-slate-300 truncate">{{ domain.display }}</span>
+            <span class="text-xs text-slate-500 flex-shrink-0">{% if domain.display is starting_with(pat=".") %}alle Subdomains{% else %}nur diese Domain{% endif %}</span>
             {% if domain.is_default %}
             <span class="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-slate-600 text-slate-300 flex-shrink-0">Standard</span>
             {% else %}
