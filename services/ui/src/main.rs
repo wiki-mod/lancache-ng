@@ -1253,7 +1253,16 @@ fn render(state: &AppState, name: &str, ctx: &Context) -> Response {
         page.insert(*key, value);
     }
     page.insert("repo_url", &state.config.repo_url);
-    page.insert("desired_services", &DesiredState::SERVICES);
+    // What: no dock button for dhcp while its mode is disabled.
+    // Why: nothing runs there; Stopp would do nothing.
+    // From: Issue #1437 | PR #1858
+    let dock: Vec<&str> = DesiredState::SERVICES
+        .into_iter()
+        .filter(|name| {
+            *name != DesiredState::DHCP || !matches!(state.config.dhcp_mode(), DhcpMode::Disabled)
+        })
+        .collect();
+    page.insert("desired_services", &dock);
     match state.templates.render(name, &page) {
         Ok(html) => Html(html).into_response(),
         Err(e) => {
