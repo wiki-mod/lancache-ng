@@ -693,7 +693,7 @@
        From: Issue #1437 | PR #1858 -->
   <nav class="dock">
     <div class="brand">
-      <img class="brand-mark" alt="LanCache-NG" src="{{ routes.logo_icon | safe }}">
+      <img class="brand-mark" alt="LanCache-NG" src="{{ routes.logo_icon | safe }}?v={{ lancache_image_tag() }}">
     </div>
 
     <div class="nav-group-label">📊 Übersicht</div>
@@ -981,7 +981,7 @@
        From: Issue #1683 | PR #1858 -->
   <script>
     (function () {
-      const base = 'de';
+      const base = 'en';
       const catalog = {
         de: { name: 'Deutsch', t: {
           overview: '📊 Übersicht', stats: 'Statistiken',
@@ -1048,6 +1048,9 @@
           recommended: 'Empfohlen',
           restart_ui: 'Admin-UI neu starten',
           current_state: 'Aktueller Stand:',
+          general: 'Allgemein',
+          sign_in: 'Anmeldung',
+          check_updates: 'Automatisch nach Updates suchen',
           appearance: 'Darstellung',
           match_system: 'System-Design übernehmen',
           match_system_desc: 'Folgt automatisch der Hell/Dunkel-Einstellung deines Geräts.'
@@ -1117,6 +1120,9 @@
           recommended: 'Recommended',
           restart_ui: 'Restart Admin UI',
           current_state: 'Current state:',
+          general: 'General',
+          sign_in: 'Sign-in',
+          check_updates: 'Check for updates automatically',
           appearance: 'Appearance',
           match_system: 'Match system theme',
           match_system_desc: 'Follows your device light/dark setting automatically.'
