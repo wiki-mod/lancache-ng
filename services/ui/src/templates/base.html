@@ -9,11 +9,11 @@
 {# Why: one class string and active rule for all tabs #}
 {# From: Issue #1683 | PR #1912 #}
 {% component section_tab(href, label, active) %}<a href="{{ href | safe }}"
-       class="tab {% if active %}active{% endif %}">{{ label }}</a>{% endcomponent section_tab %}
+       class="subtab {% if active %}active{% endif %}">{{ label }}</a>{% endcomponent section_tab %}
 {# What: tab bar of the DHCP, DNS and Secondary pages #}
 {# Why: one copy; Secondary tab same on each page #}
 {# From: Issue #1683 | PR #1912 #}
-{% component section_tabs(main_href, main_label, main_page, active_page, secondaries_href) %}<div class="flex items-center gap-2 border-b border-slate-700">
+{% component section_tabs(main_href, main_label, main_page, active_page, secondaries_href) %}<div class="subtabs">
     {{ <section_tab href={main_href} label={main_label} active={active_page == main_page}/> }}
     {{ <section_tab href={secondaries_href} label="Secondary" active={active_page == "secondaries"}/> }}
   </div>{% endcomponent section_tabs %}
@@ -596,6 +596,12 @@
   .rows > tr + tr { border-top: 1px solid var(--navy-700); }
   .list-row { display: flex; align-items: center; justify-content: space-between; padding: 8px 10px; border-radius: 8px; }
   .list-row:hover { background-color: var(--navy-800); }
+
+  /* What: tab links and buttons look like mockup subtabs
+     Why: section tabs are links, DNS tabs are buttons
+     From: Issue #1437 | PR #1858 */
+  a.subtab { text-decoration: none; }
+  button.subtab { background: transparent; border: 0; border-bottom: 2px solid transparent; font: inherit; font-size: 13.5px; font-weight: 600; cursor: pointer; }
 
   /* What: watchdog dots in the mockup beam-light look
      Why: JS paints one class per status on every page

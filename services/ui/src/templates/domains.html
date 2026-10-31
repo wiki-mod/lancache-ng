@@ -15,11 +15,12 @@
 {% block title %} – DNS{% endblock %}
 
 {% block content %}
-<div class="max-w-5xl mx-auto space-y-6">
+<div class="space-y-6">
 
   <div>
-    <h1 class="text-xl font-bold text-white">DNS-Verwaltung</h1>
-    <p class="text-sm text-slate-400 mt-1">
+    <p class="eyebrow">Settings → DNS</p>
+    <h1 class="page-title">DNS-Verwaltung</h1>
+    <p class="page-sub">
       CDN-Domains und LAN-Records können ohne Container-Neustart live geändert werden.
     </p>
   </div>
@@ -38,25 +39,25 @@
   {# What: one tab button per data-dns-panel section below
      Why: setActiveDnsTab maps data-dns-tab to the panel
      From: Issue #1683 | PR #1912 #}
-  <div class="flex flex-wrap items-center gap-2 border-b border-slate-700">
+  <div class="subtabs">
     <button type="button" data-dns-tab="cdn"
-            class="tab dns-tab-btn">
+            class="subtab dns-tab-btn">
       CDN-Domains
     </button>
     <button type="button" data-dns-tab="lan"
-            class="tab dns-tab-btn">
+            class="subtab dns-tab-btn">
       LAN
     </button>
     <button type="button" data-dns-tab="ptr"
-            class="tab dns-tab-btn">
+            class="subtab dns-tab-btn">
       PTR (Reverse)
     </button>
     <button type="button" data-dns-tab="settings"
-            class="tab dns-tab-btn">
+            class="subtab dns-tab-btn">
       Settings
     </button>
     <button type="button" data-dns-tab="zones"
-            class="tab dns-tab-btn">
+            class="subtab dns-tab-btn">
       Zone-Snapshots
     </button>
   </div>
