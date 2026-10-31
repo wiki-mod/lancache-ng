@@ -8,7 +8,7 @@
 {% block title %} – Statistiken{% endblock %}
 
 {% block content %}
-<div class="space-y-6">
+<section>
 
   <div>
     <p class="eyebrow">Overview → Statistiken</p>
@@ -19,36 +19,36 @@
   <!-- What: grid holding the four chart cards -->
   <!-- Why: one column below lg, two columns from lg -->
   <!-- From: Issue #1683 | PR #1912 -->
-  <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+  <div class="grid-2" style="grid-template-columns:1fr 1fr;">
 
     <div class="card">
-      <h3 class="font-semibold text-slate-200 mb-3">CPU-Auslastung</h3>
+      <h3>CPU-Auslastung</h3>
       <canvas id="cpuChart" height="160"></canvas>
     </div>
 
     <div class="card">
-      <h3 class="font-semibold text-slate-200 mb-3">RAM-Nutzung</h3>
+      <h3>RAM-Nutzung</h3>
       <canvas id="ramChart" height="160"></canvas>
     </div>
 
     <div class="card">
-      <h3 class="font-semibold text-slate-200 mb-3">Netzwerkdurchsatz</h3>
+      <h3>Netzwerkdurchsatz</h3>
       <canvas id="netChart" height="160"></canvas>
     </div>
 
     <div class="card">
-      <h3 class="font-semibold text-slate-200 mb-3">Festplatten-I/O</h3>
+      <h3>Festplatten-I/O</h3>
       <canvas id="diskChart" height="160"></canvas>
     </div>
 
   </div>
 
-  <div id="netdata-error" class="hidden bg-yellow-500/10 border border-yellow-500/30 rounded-xl p-4 text-sm text-yellow-300">
+  <div id="netdata-error" class="card hidden" style="margin-top:16px;">
     Netdata-Verbindung nicht verfügbar. Netdata läuft im Dienst
     <code class="font-mono text-xs">services</code>; seinen Zustand zeigt die Leiste oben.
   </div>
 
-</div>
+</section>
 {% endblock %}
 
 {% block scripts %}
