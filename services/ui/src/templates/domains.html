@@ -122,85 +122,64 @@
     {# What: LAN records in PowerDNS: add form and list
        Why: changes apply live, no container restart
        From: Issue #1683 | PR #1912 #}
-    <section data-dns-panel="lan" class="card flex flex-col gap-4 hidden">
-      <div>
-        <h2 class="font-semibold text-slate-200">LAN-Einträge</h2>
-        <p class="text-xs text-slate-500 mt-0.5">Eigene Namen für Geräte im Heimnetz, zum Beispiel <span class="font-mono">nas.{{ lan_zone }}</span> zeigt auf <span class="font-mono">192.168.1.50</span>. Typ A ist die normale Wahl für eine IPv4-Adresse, CNAME verweist auf einen anderen Namen. Die TTL sagt, wie viele Sekunden sich Geräte die Antwort merken.</p>
-      </div>
-
-      <form action="{{ routes.lan_add | safe }}" method="post" class="flex flex-col gap-3" data-lan-record-form>
+    <section data-dns-panel="lan" class="hidden">
+      <div class="section-title" style="margin-top:0;">LAN zone records</div>
+      <p class="section-sub">Custom records for names under your local domain, for anything auto-discovery doesn't already cover.</p>
+      {# What: record name, type, content, TTL, Add
+         Why: type and content not parsed together
+         From: Issue #1683 | PR #1976 #}
+      <form action="{{ routes.lan_add | safe }}" method="post" class="field-row" style="max-width:none; align-items:flex-end;" data-lan-record-form>
         {{ <csrf_field csrf_token={csrf_token}/> }}
-        {# What: record name, type, content fields
-           Why: type and content not parsed together
-           From: Issue #1683 | PR #1912 #}
-        <div class="flex gap-2">
-          <input type="text" name="name" placeholder="z.B. myserver.{{ lan_zone }}"
-                 required
-                 class="flex-1 bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-green-500">
-          <select name="record_type" required data-lan-record-type
-                  class="bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-green-500">
-            <option value="">Typ (A = IPv4-Adresse)</option>
-            {# What: one option per LAN_RECORD_TYPES entry
-               Why: the form offers what validation accepts
-               From: Issue #1683 | PR #1912 #}
+        <div class="field" style="margin-bottom:0; max-width:180px;">
+          <label for="lan-name">Name</label>
+          <input type="text" id="lan-name" name="name" placeholder="printer.{{ lan_zone }}" required>
+        </div>
+        <div class="field" style="margin-bottom:0; max-width:110px;">
+          <label for="lan-type">Type</label>
+          <select id="lan-type" name="record_type" required data-lan-record-type style="width:100%; padding:9px 11px; border-radius:8px; border:1px solid var(--navy-600); background:var(--navy-900); color:var(--foam); font-size:13.5px;">
             {% for record_type in lan_record_types %}
             <option value="{{ record_type }}">{{ record_type }}</option>
             {% endfor %}
           </select>
         </div>
-        <div class="flex gap-2">
-          {{ <ttl_input ttl_default={record_ttl_default} ttl_max={ttl_max}/> }}
-          <input type="text" name="content" placeholder="z.B. 192.168.1.10 oder mail.example.com"
-                 required data-lan-record-content
-                 class="flex-1 bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-green-500">
-          <button type="submit"
-                  class="btn btn-green">
-            Hinzufügen
-          </button>
+        <div class="field" style="margin-bottom:0; flex:1;">
+          <label for="lan-content">Content</label>
+          <input type="text" id="lan-content" name="content" placeholder="192.168.1.50" required data-lan-record-content>
         </div>
+        <div class="field" style="margin-bottom:0; max-width:90px;">
+          <label for="lan-ttl">TTL</label>
+          <input type="number" id="lan-ttl" name="ttl" value="{{ record_ttl_default }}" required min="1" max="{{ ttl_max }}">
+        </div>
+        <button type="submit" class="btn" style="margin-bottom:0;">Add</button>
       </form>
 
-      <div class="space-y-1 max-h-[28rem] overflow-y-auto">
-        {% if lan_records %}
+      <table style="margin-top:4px;">
+        <tr><th>Name</th><th>Type</th><th>Content</th><th>TTL</th><th></th></tr>
         {% set_global lan_shown = 0 %}
         {% for record in lan_records %}
         {% if record.type != "SOA" and record.type != "NS" %}
         {% set_global lan_shown = lan_shown + 1 %}
-        <div class="list-row group">
-          <div class="flex-1 min-w-0">
-            <div class="flex gap-2 items-center">
-              <span class="font-mono text-sm text-slate-300">{{ record.name }}</span>
-              <span class="text-xs px-2 py-0.5 rounded bg-slate-600 text-slate-300">{{ record.type }}</span>
-              <span class="text-xs text-slate-500">TTL: {{ record.ttl }}</span>
-            </div>
-            <div class="text-xs text-slate-400 mt-0.5 font-mono">{% for content in record.records %}{{ content.content }}{% if not loop.last %}<br>{% endif %}{% endfor %}</div>
-          </div>
-          <form action="{{ routes.lan_remove | safe }}" method="post" class="opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0 ml-2">
-            {{ <csrf_field csrf_token={csrf_token}/> }}
-            {# What: hidden name, type and joined content
-               Why: removal targets the RRset
-               From: Issue #1683 | PR #1912 #}
-            <input type="hidden" name="name" value="{{ record.name }}">
-            <input type="hidden" name="record_type" value="{{ record.type }}">
-            <input type="hidden" name="content" value="{% for c in record.records %}{{ c.content }}{% if not loop.last %};{% endif %}{% endfor %}">
-            <button type="submit"
-                    data-record-name="{{ record.name }}"
-                    data-record-type="{{ record.type }}"
-                    onclick="return confirmRemoveRecord(this)"
-                    class="btn btn-sm btn-ghost-red">
-              Entfernen
-            </button>
-          </form>
-        </div>
+        <tr>
+          <td class="mono">{{ record.name }}</td>
+          <td><span class="tag off">{{ record.type }}</span></td>
+          <td class="mono">{% for content in record.records %}{{ content.content }}{% if not loop.last %}<br>{% endif %}{% endfor %}</td>
+          <td class="mono">{{ record.ttl }}</td>
+          <td>
+            <form action="{{ routes.lan_remove | safe }}" method="post">
+              {{ <csrf_field csrf_token={csrf_token}/> }}
+              <input type="hidden" name="name" value="{{ record.name }}">
+              <input type="hidden" name="record_type" value="{{ record.type }}">
+              <input type="hidden" name="content" value="{% for c in record.records %}{{ c.content }}{% if not loop.last %};{% endif %}{% endfor %}">
+              <button type="submit" data-record-name="{{ record.name }}" data-record-type="{{ record.type }}" onclick="return confirmRemoveRecord(this)" style="background:none; border:0; cursor:pointer; color:var(--danger); font-size:12.5px;">Remove</button>
+            </form>
+          </td>
+        </tr>
         {% endif %}
         {% endfor %}
-        {% if lan_shown == 0 %}<p class="text-slate-500 text-sm px-3 py-2">Keine LAN-Einträge vorhanden.</p>{% endif %}
-        {% else %}
-        <p class="text-slate-500 text-sm px-3 py-2">Keine LAN-Einträge vorhanden.</p>
+        {% if lan_shown == 0 %}
+        <tr class="empty-row"><td colspan="5" style="color:var(--mist); font-style:italic; text-align:center;">No LAN records yet.</td></tr>
         {% endif %}
-      </div>
-
-      <p class="text-xs text-slate-500">{% if lan_records %}{{ lan_shown }} {% if lan_shown == 1 %}Eintrag{% else %}Einträge{% endif %} (die technischen Zonen-Einträge SOA und NS sind ausgeblendet){% endif %}</p>
+      </table>
     </section>
 
     {# What: PTR records of the private reverse zones
