@@ -2332,8 +2332,28 @@ fn stored_status(what: &str, written: io::Result<()>) -> StatusCode {
     }
 }
 
+// What: netdata path to its upstream segments, or None.
+// Why: fixed shapes only; no client-chosen path is relayed.
+// From: Issue #1683 | PR #1858
+fn netdata_segments(path: &str) -> Option<Vec<&str>> {
+    let name_ok = |name: &str| {
+        !name.is_empty()
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+    };
+    let parts: Vec<&str> = path.split('/').collect();
+    match parts.as_slice() {
+        ["data" | "charts"] => Some(vec!["api", "v1", parts[0]]),
+        ["dashboard.js" | "dashboard_info.js"] => Some(parts),
+        ["api", "v1", "data" | "chart" | "charts" | "info"] => Some(parts),
+        ["lib" | "css" | "fonts" | "images", file] if name_ok(file) => Some(parts),
+        _ => None,
+    }
+}
+
 // What: forward a chart request to netdata.
-// Why: only data and charts, never a client-chosen path.
+// Why: the chart script and its data, fixed path shapes.
 // From: Issue #1683 | PR #1858
 async fn netdata_proxy(
     State(state): Shared,
@@ -2341,12 +2361,10 @@ async fn netdata_proxy(
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Response, StatusCode> {
     let max_body = state.config.netdata_body_max;
-    if path.is_empty() || path.contains('/') || path.contains("..") {
+    if path.is_empty() || path.contains("..") || path.contains("//") {
         return Err(StatusCode::BAD_REQUEST);
     }
-    if !["data", "charts"].contains(&path.as_str()) {
-        return Err(StatusCode::NOT_FOUND);
-    }
+    let segments = netdata_segments(&path).ok_or(StatusCode::NOT_FOUND)?;
     let mut url = state
         .config
         .netdata_base()
@@ -2360,7 +2378,7 @@ async fn netdata_proxy(
             StatusCode::INTERNAL_SERVER_ERROR
         })?
         .pop_if_empty()
-        .extend(["api", "v1", &path]);
+        .extend(segments);
     let mut pairs: Vec<(&String, &String)> = params.iter().collect();
     pairs.sort();
     url.query_pairs_mut().extend_pairs(pairs);
@@ -2371,7 +2389,7 @@ async fn netdata_proxy(
     })?;
     let status = upstream.status().as_u16();
     // What: an absent content type is sent as JSON.
-    // Why: both allowed netdata paths answer JSON.
+    // Why: upstream names the type; JSON is the data.
     // From: Issue #1683 | PR #1858
     let content_type = upstream
         .headers()
