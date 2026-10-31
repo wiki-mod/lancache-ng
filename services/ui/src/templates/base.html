@@ -949,52 +949,72 @@
     })();
   </script>
 
-  <!-- What: English or German text swap, kept in a cookie
-       Why: the mockup offers a language choice
+  <!-- What: language catalog, one block per language
+       Why: a new language is one more block, no other edit
        From: Issue #1683 | PR #1858 -->
   <script>
     (function () {
-      const pairs = [
-        ['📊 Übersicht', '📊 Overview'], ['Statistiken', 'Statistics'],
-        ['⚙ Einstellungen', '⚙ Settings'], ['Einrichtung', 'Setup'],
-        ['Projektseite', 'Project page'], ['Sprache', 'Language'],
-        ['Release-Kanal', 'Release channel'],
-        ['Automatische Updates', 'Automatic updates'],
-        ['Automatische Updates aktiv', 'Automatic updates on'],
-        ['Automatische Updates deaktiviert', 'Automatic updates off'],
-        ['Passwort ändern', 'Change password'],
-        ['Speichern', 'Save'], ['Abbrechen', 'Cancel'],
-        ['Löschen', 'Delete'], ['Hinzufügen', 'Add'],
-        ['laden…', 'loading…'], ['Aktiv', 'Active'],
-        ['Aus', 'Off'], ['Ein', 'On']
-      ];
+      const base = 'de';
+      const catalog = {
+        de: { name: 'Deutsch', t: {
+          overview: '📊 Übersicht', stats: 'Statistiken',
+          settings: '⚙ Einstellungen', setup: 'Einrichtung',
+          project: 'Projektseite', language: 'Sprache',
+          channel: 'Release-Kanal', auto: 'Automatische Updates',
+          auto_on: 'Automatische Updates aktiv',
+          auto_off: 'Automatische Updates deaktiviert',
+          password: 'Passwort ändern', save: 'Speichern',
+          cancel: 'Abbrechen', delete: 'Löschen',
+          add: 'Hinzufügen', loading: 'laden…'
+        } },
+        en: { name: 'English', t: {
+          overview: '📊 Overview', stats: 'Statistics',
+          settings: '⚙ Settings', setup: 'Setup',
+          project: 'Project page', language: 'Language',
+          channel: 'Release channel', auto: 'Automatic updates',
+          auto_on: 'Automatic updates on',
+          auto_off: 'Automatic updates off',
+          password: 'Change password', save: 'Save',
+          cancel: 'Cancel', delete: 'Delete',
+          add: 'Add', loading: 'loading…'
+        } }
+      };
       const read = function () {
-        const m = document.cookie.match(/(?:^|; )lc_lang=(en|de)/);
-        return m ? m[1] : 'de';
+        const m = document.cookie.match(/(?:^|; )lc_lang=([a-z]{2,8})/);
+        return m && catalog[m[1]] ? m[1] : base;
       };
-      const apply = function (lang) {
-        const from = lang === 'en' ? 0 : 1;
-        const map = new Map(pairs.map(function (p) { return [p[from], p[1 - from]]; }));
-        const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
-        let node;
-        while ((node = walker.nextNode())) {
-          const key = node.nodeValue.trim();
-          if (map.has(key)) {
-            node.nodeValue = node.nodeValue.replace(key, map.get(key));
-          }
-        }
-        document.documentElement.lang = lang;
-        document.querySelectorAll('[data-lang]').forEach(function (b) {
-          b.classList.toggle('selected', b.dataset.lang === lang);
-        });
-      };
-      document.querySelectorAll('[data-lang]').forEach(function (b) {
-        b.addEventListener('click', function () {
-          document.cookie = 'lc_lang=' + b.dataset.lang + '; path=/; max-age=31536000; samesite=strict';
-          location.reload();
+      const lang = read();
+      const keyOf = new Map();
+      Object.keys(catalog).forEach(function (code) {
+        Object.keys(catalog[code].t).forEach(function (key) {
+          keyOf.set(catalog[code].t[key], key);
         });
       });
-      apply(read());
+      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+      let node;
+      while ((node = walker.nextNode())) {
+        const text = node.nodeValue.trim();
+        const key = keyOf.get(text);
+        const out = key ? catalog[lang].t[key] : undefined;
+        if (out !== undefined && out !== text) {
+          node.nodeValue = node.nodeValue.replace(text, out);
+        }
+      }
+      document.documentElement.lang = lang;
+      const row = document.getElementById('lang-row');
+      if (row) {
+        Object.keys(catalog).forEach(function (code) {
+          const b = document.createElement('button');
+          b.type = 'button';
+          b.className = 'mode-btn' + (code === lang ? ' selected' : '');
+          b.textContent = catalog[code].name;
+          b.addEventListener('click', function () {
+            document.cookie = 'lc_lang=' + code + '; path=/; max-age=31536000; samesite=strict';
+            location.reload();
+          });
+          row.appendChild(b);
+        });
+      }
     })();
   </script>
 
