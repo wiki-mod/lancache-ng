@@ -1776,7 +1776,6 @@ file_headers:
     - "*.ico"
     - LICENSE
     - Cargo.lock
-    - services/ui/src/static/chart.umd.min.js
     - services/ui/src/static/admin.css
     - services/proxy/public_suffix_list.dat
 
