@@ -509,9 +509,20 @@
   /* What: narrow screens: dock becomes a top row
      Why: one column below 880px
      From: Issue #1437 | PR #1858 */
+  /* What: phone layout: slim menu strip on top
+     Why: the full dock used a third of a phone screen
+     From: Issue #1683 | PR #1858 */
   @media (max-width: 880px) {
     .shell { flex-direction: column; }
-    .dock { width: 100%; flex-direction: row; overflow-x: auto; border-right: none; border-bottom: 1px solid var(--navy-700); }
+    .dock { position: sticky; top: 0; z-index: 5; width: 100%; height: auto; flex-direction: row; align-items: center; gap: 4px; padding: 6px 8px; overflow-x: auto; border-right: none; border-bottom: 1px solid var(--navy-700); }
+    .dock .brand { padding: 0 6px; margin: 0; border: none; flex: none; }
+    .dock .brand-mark { width: 34px; height: 34px; object-fit: contain; }
+    .dock .nav-group-label, .dock .dock-footer, .dock .nav-dot { display: none; }
+    .dock .nav-item { flex: none; white-space: nowrap; padding: 9px 12px; margin: 0; }
+    .beambar { overflow-x: auto; padding: 8px 12px; }
+    .content { padding: 18px 14px 48px; }
+    .page-title { font-size: 28px; }
+    .subtabs { gap: 16px; overflow-x: auto; white-space: nowrap; }
     .stat-row, .grid-2, .dhcp-modes { grid-template-columns: 1fr; }
   }
 
