@@ -1150,7 +1150,6 @@ const ROUTE_METRICS: &str = "/api/metrics";
 const ROUTE_WATCHDOG_STATUS: &str = "/api/watchdog-status";
 const ROUTE_NETDATA: &str = "/api/netdata/{*path}";
 const ROUTE_ADMIN_CSS: &str = "/static/admin.css";
-const ROUTE_CHART_JS: &str = "/static/chart.umd.min.js";
 const ROUTE_SECONDARY: &str = "/api/secondary/{name}";
 const ROUTE_SECONDARY_ROTATE: &str = "/api/secondary/{name}/rotate-token";
 const ROUTE_SECONDARY_HEALTH: &str = "/api/secondary/{name}/health";
@@ -1225,7 +1224,7 @@ fn page_ctx(headers: &HeaderMap, active: &str) -> Context {
     // What: each route path from its one Rust owner.
     // Why: forms and scripts follow the router path.
     // From: Issue #1683 | PR #1912
-    const ROUTES: [(&str, &str); 45] = [
+    const ROUTES: [(&str, &str); 44] = [
         ("health", ROUTE_HEALTH),
         ("secondary_register", ROUTE_SECONDARY_REGISTER),
         ("favicon", ROUTE_FAVICON),
@@ -1266,7 +1265,6 @@ fn page_ctx(headers: &HeaderMap, active: &str) -> Context {
         ("watchdog_status", ROUTE_WATCHDOG_STATUS),
         ("netdata", ROUTE_NETDATA),
         ("admin_css", ROUTE_ADMIN_CSS),
-        ("chart_js", ROUTE_CHART_JS),
         ("secondary", ROUTE_SECONDARY),
         ("secondary_rotate", ROUTE_SECONDARY_ROTATE),
         ("secondary_health", ROUTE_SECONDARY_HEALTH),
@@ -1433,17 +1431,6 @@ async fn admin_css() -> Response {
         "text/css; charset=utf-8",
         false,
         include_bytes!("static/admin.css"),
-    )
-}
-
-// What: serve the compiled-in chart script.
-// Why: assets ship in the binary; no file read at runtime.
-// From: Issue #1683 | PR #1858
-async fn chart_js() -> Response {
-    asset(
-        "application/javascript; charset=utf-8",
-        true,
-        include_bytes!("static/chart.umd.min.js"),
     )
 }
 
@@ -7171,7 +7158,6 @@ fn router(state: Arc<AppState>) -> Router {
         (ROUTE_WATCHDOG_STATUS, get(watchdog_status_api)),
         (ROUTE_NETDATA, get(netdata_proxy)),
         (ROUTE_ADMIN_CSS, get(admin_css)),
-        (ROUTE_CHART_JS, get(chart_js)),
         (ROUTE_SECONDARY, delete(remove_secondary)),
         (ROUTE_SECONDARY_ROTATE, post(rotate_token)),
         (ROUTE_SECONDARY_HEALTH, post(check_secondary_health)),
