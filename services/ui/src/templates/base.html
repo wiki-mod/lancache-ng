@@ -638,6 +638,25 @@
       }
       apply();
       osLight.addEventListener('change', apply);
+      // What: Setup page switch: follow the OS theme or not
+      // Why: the mockup has a Match system theme toggle
+      // From: Issue #1683 | PR #1858
+      window.LancacheUi.followSystem = function (on) {
+        stored = on ? null : root.getAttribute('data-theme');
+        apply();
+        try {
+          if (on) {
+            localStorage.removeItem(STORAGE_KEY);
+          } else {
+            localStorage.setItem(STORAGE_KEY, stored);
+          }
+        } catch (err) {
+          reportError(err);
+        }
+      };
+      window.LancacheUi.followsSystem = function () {
+        return !(stored === 'light' || stored === 'dark');
+      };
       document.addEventListener('DOMContentLoaded', function () {
         document.getElementById('theme-toggle').addEventListener('click', function () {
           stored = root.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
@@ -1020,7 +1039,10 @@
           refresh: 'Aktualisieren',
           recommended: 'Empfohlen',
           restart_ui: 'Admin-UI neu starten',
-          current_state: 'Aktueller Stand:'
+          current_state: 'Aktueller Stand:',
+          appearance: 'Darstellung',
+          match_system: 'System-Design übernehmen',
+          match_system_desc: 'Folgt automatisch der Hell/Dunkel-Einstellung deines Geräts.'
         } },
         en: { name: 'English', t: {
           overview: '📊 Overview', stats: 'Statistics',
@@ -1086,7 +1108,10 @@
           refresh: 'Refresh',
           recommended: 'Recommended',
           restart_ui: 'Restart Admin UI',
-          current_state: 'Current state:'
+          current_state: 'Current state:',
+          appearance: 'Appearance',
+          match_system: 'Match system theme',
+          match_system_desc: 'Follows your device light/dark setting automatically.'
         } }
       };
       const read = function () {

@@ -74,6 +74,18 @@
       <div class="mode-switchrow" style="max-width:320px;" id="lang-row">
       </div>
 
+      <div class="section-title">Darstellung</div>
+      <div class="toggle-row">
+        <div>
+          <div class="t-label">System-Design übernehmen</div>
+          <div class="t-desc">Folgt automatisch der Hell/Dunkel-Einstellung deines Geräts.</div>
+        </div>
+        <label class="toggle">
+          <input type="checkbox" id="follow-system-theme">
+          <span class="track"></span><span class="knob"></span>
+        </label>
+      </div>
+
       <div class="section-title">Automatische Updates</div>
       <div class="toggle-row">
         <div>
@@ -353,6 +365,16 @@ sudo trust anchor --store {{ ca_cert_file }}</pre>
 {% endblock %}
 
 {% block scripts %}
+<script>
+  // What: theme switch of the Setup page
+  // Why: it calls the one theme code in base.html
+  // From: Issue #1683 | PR #1858
+  (function () {
+    const box = document.getElementById('follow-system-theme');
+    box.checked = window.LancacheUi.followsSystem();
+    box.addEventListener('change', () => window.LancacheUi.followSystem(box.checked));
+  })();
+</script>
 <script>
   // What: marks the chosen channel button
   // Why: the radio itself is hidden; the label shows state
