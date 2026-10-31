@@ -2270,9 +2270,12 @@ function captures(s,   out) {
     }
     return out
 }
-{ src = src $0 "\n" }
+# What: word, space, string runs and // comments in a step.
+# Why: one regex per run, not per byte (ui 187 -> 111 ms).
+# From: Issue #1683 | PR #1858
+{ src = src $0 "\n"; nl[NR] = length(src) }
 END {
-    n = length(src); st = "code"; depth = 0; cur = ""; bdepth = 0
+    n = length(src); st = "code"; depth = 0; cur = ""; bdepth = 0; ln = 1
     for (i = 1; i <= n; i++) {
         c = substr(src, i, 1)
         if (st == "line") { if (c == "\n") { st = "code"; emit(" ") } continue }
@@ -2282,17 +2285,21 @@ END {
             continue
         }
         if (st == "str") {
+            j = match(substr(src, i, 256), /^[^"\\]+/) ? i + RLENGTH : i
+            if (j > i) { w = substr(src, i, j - i); cur = cur w; lit = lit w; i = j - 1; continue }
             cur = cur c; lit = lit c
             if (c == "\\") { i++; cur = cur substr(src, i, 1); lit = lit substr(src, i, 1); continue }
             if (c == "\"") { st = "code"; code = code captures(lit) }
             continue
         }
         if (st == "raw") {
+            j = match(substr(src, i, 256), /^[^"]+/) ? i + RLENGTH : i
+            if (j > i) { w = substr(src, i, j - i); cur = cur w; lit = lit w; i = j - 1; continue }
             cur = cur c; lit = lit c
             if (c == "\"" && substr(src, i + 1, hashes) == rawend) { cur = cur rawend; i += hashes; st = "code"; code = code captures(lit) }
             continue
         }
-        if (c == "/" && substr(src, i + 1, 1) == "/") { st = "line"; i++; continue }
+        if (c == "/" && substr(src, i + 1, 1) == "/") { st = "line"; i++; while (nl[ln] <= i) ln++; i = nl[ln] - 1; continue }
         if (c == "/" && substr(src, i + 1, 1) == "*") { st = "block"; bdepth = 1; i++; continue }
         p = (i > 1) ? substr(src, i - 1, 1) : " "
         if ((c == "r" || (c == "b" && substr(src, i + 1, 1) == "r")) && p !~ /[A-Za-z0-9_]/) {
@@ -2313,7 +2320,8 @@ END {
             if (substr(src, i + 2, 1) == "\047") { cur = cur substr(src, i, 3); i += 2; continue }
             cur = cur c; continue
         }
-        if (c ~ /[ \t\r\n]/) { emit(" "); continue }
+        if (c ~ /[ \t\r\n]/) { if (match(substr(src, i, 256), /^[ \t\r\n]+/)) i += RLENGTH - 1; emit(" "); continue }
+        if (c ~ /[A-Za-z0-9_]/) { match(substr(src, i, 256), /^[A-Za-z0-9_]+/); w = substr(src, i, RLENGTH); cur = cur w; code = code w; i += RLENGTH - 1; continue }
         cur = cur c; code = code c
         if (c == "(" || c == "[") pdepth++
         else if (c == ")" || c == "]") pdepth--
