@@ -733,7 +733,7 @@ const TEMPLATE_NAMES: &[&str] = &[
     "dashboard.html",
     "dhcp.html",
     "domains.html",
-    "ntp.html",
+    "cachehamster.html",
     "secondaries.html",
     "stats.html",
     "logs.html",
@@ -1069,7 +1069,7 @@ async fn basic_auth(State(state): Shared, mut req: Request, next: Next) -> Respo
 // From: Issue #1683 | PR #1912
 const PAGE_DASHBOARD: &str = "/";
 const PAGE_DHCP: &str = "/dhcp";
-const PAGE_NTP: &str = "/ntp";
+const PAGE_CACHEHAMSTER: &str = "/cachehamster";
 const PAGE_DOMAINS: &str = "/domains";
 const PAGE_SECONDARIES: &str = "/secondaries";
 const PAGE_STATS: &str = "/stats";
@@ -1183,7 +1183,7 @@ fn page_ctx(headers: &HeaderMap, active: &str) -> Context {
     const PAGES: [(&str, &str); 8] = [
         ("dashboard", PAGE_DASHBOARD),
         ("dhcp", PAGE_DHCP),
-        ("ntp", PAGE_NTP),
+        ("cachehamster", PAGE_CACHEHAMSTER),
         ("domains", PAGE_DOMAINS),
         ("secondaries", PAGE_SECONDARIES),
         ("stats", PAGE_STATS),
@@ -1306,8 +1306,8 @@ const CACHE_AREA: ErrorArea = ErrorArea {
 };
 const NTP_AREA: ErrorArea = ErrorArea {
     title: "NTP Configuration Error",
-    href: PAGE_NTP,
-    back: "Return to NTP settings",
+    href: PAGE_SETUP,
+    back: "Return to setup",
 };
 const DHCP_AREA: ErrorArea = ErrorArea {
     title: "DHCP Configuration Error",
@@ -6366,19 +6366,15 @@ async fn resize_cache(State(state): Shared, Form(f): Form<Fields>) -> Result<Red
     Ok(Redirect::to(PAGE_DASHBOARD))
 }
 
-// What: the NTP settings page.
-// Why: shows the saved values, not the startup ones.
-// From: Issue #1683 | PR #1858
-async fn ntp_page(State(state): Shared, headers: HeaderMap) -> Response {
-    let cfg = &state.config;
-    let mut ctx = page_ctx(&headers, "ntp");
-    ctx.insert("ntp_enabled", &cfg.flag("NTP_ENABLED"));
-    ctx.insert("ntp_upstream_servers", &cfg.setting("NTP_UPSTREAM_SERVERS"));
-    ctx.insert("ntp_auto_dhcp", &cfg.flag("NTP_AUTO_DHCP"));
-    ctx.insert("http_ip", &cfg.http_ip);
-    ctx.insert("ntp_port", &cfg.ntp_port);
-    insert_dhcp_mode(&mut ctx, cfg.dhcp_mode());
-    render(&state, "ntp.html", &ctx)
+// What: the CacheHamster page for game-platform prefill.
+// Why: the mockup places prefill under Gaming, not NTP.
+// From: Issue #816 | PR #1858
+async fn cachehamster_page(State(state): Shared, headers: HeaderMap) -> Response {
+    render(
+        &state,
+        "cachehamster.html",
+        &page_ctx(&headers, "cachehamster"),
+    )
 }
 
 // What: normalize the upstream NTP list to spaces.
@@ -6440,7 +6436,7 @@ async fn update_ntp_settings(
     } else if was_auto {
         sync_subnet_ntp(&state, false).await.map_err(fail)?;
     }
-    Ok(Redirect::to(PAGE_NTP))
+    Ok(Redirect::to(PAGE_SETUP))
 }
 
 // What: the setup page with network hints and updates.
@@ -6458,6 +6454,11 @@ async fn setup_page(State(state): Shared, headers: HeaderMap) -> Response {
         &cfg.setting("LANCACHE_IMAGE_CHANNEL"),
     );
     ctx.insert("auto_update_enabled", &cfg.flag("AUTO_UPDATE_ENABLED"));
+    ctx.insert("ntp_enabled", &cfg.flag("NTP_ENABLED"));
+    ctx.insert("ntp_upstream_servers", &cfg.setting("NTP_UPSTREAM_SERVERS"));
+    ctx.insert("ntp_auto_dhcp", &cfg.flag("NTP_AUTO_DHCP"));
+    ctx.insert("ntp_port", &cfg.ntp_port);
+    insert_dhcp_mode(&mut ctx, cfg.dhcp_mode());
     render(&state, "setup.html", &ctx)
 }
 
@@ -6986,7 +6987,7 @@ fn router(state: Arc<AppState>) -> Router {
         (ROUTE_LEASE_RELEASE, post(release_lease)),
         (ROUTE_KEA_ROLLBACK, post(rollback_kea_snapshot)),
         (ROUTE_DHCP_CHECK, post(check_dhcp_conflict)),
-        (PAGE_NTP, get(ntp_page)),
+        (PAGE_CACHEHAMSTER, get(cachehamster_page)),
         (ROUTE_NTP_SETTINGS, post(update_ntp_settings)),
         (PAGE_DOMAINS, get(domains_page)),
         (ROUTE_DNS_ADD, post(add_dns)),

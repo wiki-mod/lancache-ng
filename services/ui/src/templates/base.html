@@ -682,11 +682,13 @@
     {{ <nav_link href={pages.stats} label="Statistiken" active={active_page == "stats"} glyph="◔"/> }}
     {{ <nav_link href={pages.logs} label="Logs" active={active_page == "logs"} glyph="▤"/> }}
 
+    <div class="nav-group-label">🎮 Gaming</div>
+    {{ <nav_link href={pages.cachehamster} label="CacheHamster" active={active_page == "cachehamster"} glyph="⇓"/> }}
+
     <div class="nav-group-label">⚙ Einstellungen</div>
     {{ <nav_link href={pages.domains} label="DNS" active={active_page == "domains"} glyph="⌘"/> }}
     {{ <nav_link href={pages.secondaries} label="Secondary" active={active_page == "secondaries"} glyph="⇆"/> }}
     {{ <nav_link href={pages.dhcp} label="DHCP" active={active_page == "dhcp"} glyph="⇄"/> }}
-    {{ <nav_link href={pages.ntp} label="NTP" active={active_page == "ntp"} glyph="◷"/> }}
     {{ <nav_link href={pages.setup} label="Einrichtung" active={active_page == "setup"} glyph="◐"/> }}
 
     <div class="dock-footer">

@@ -507,7 +507,7 @@ to verify clients actually receive the LanCache NG DNS servers.
 ## Optional NTP
 
 LanCache-NG-NTP is a small, self-contained NTP server (chrony) you can enable
-from the Admin UI's NTP page. It disciplines its own clock against a curated
+from the Admin UI's Setup page. It disciplines its own clock against a curated
 set of public NTP servers (never operating as a standalone/undisciplined time
 source) and serves that time to LAN clients on `123/udp`. The upstream server
 list is editable from the same page.

@@ -248,7 +248,7 @@
       <h3 class="text-sm font-medium text-white mb-3">Neues Subnet</h3>
       <form method="POST" action="{{ routes.subnet_add | safe }}" class="space-y-3">
         {{ <csrf_field csrf_token={csrf_token}/> }}
-        {{ <subnet_fields tone={raised_tone} ntp_auto={ntp_auto_dhcp_active} ntp_url={pages.ntp} dns_primary={dhcp_dns_primary} dns_secondary={dhcp_dns_secondary} lease_time={default_lease_time} domain={dhcp_domain} ntp_servers={dhcp_ntp_servers}/> }}
+        {{ <subnet_fields tone={raised_tone} ntp_auto={ntp_auto_dhcp_active} ntp_url={pages.setup} dns_primary={dhcp_dns_primary} dns_secondary={dhcp_dns_secondary} lease_time={default_lease_time} domain={dhcp_domain} ntp_servers={dhcp_ntp_servers}/> }}
         <div class="flex gap-2">
           <button type="submit" class="btn btn-blue">
             Hinzufügen
@@ -293,7 +293,7 @@
         <form method="POST" action="{{ routes.subnet_update | safe }}" class="space-y-3">
           {{ <csrf_field csrf_token={csrf_token}/> }}
           <input type="hidden" name="id" value="{{ subnet.id }}">
-          {{ <subnet_fields tone="bg-slate-700 border-slate-600" ntp_auto={ntp_auto_dhcp_active} ntp_url={pages.ntp} subnet={subnet.subnet} gateway={subnet.gateway} dns_primary={subnet.dns_primary} dns_secondary={subnet.dns_secondary} pool_start={subnet.pool_start} pool_end={subnet.pool_end} lease_time={subnet.lease_time} domain={subnet.domain} ntp_servers={subnet.ntp_servers}/> }}
+          {{ <subnet_fields tone="bg-slate-700 border-slate-600" ntp_auto={ntp_auto_dhcp_active} ntp_url={pages.setup} subnet={subnet.subnet} gateway={subnet.gateway} dns_primary={subnet.dns_primary} dns_secondary={subnet.dns_secondary} pool_start={subnet.pool_start} pool_end={subnet.pool_end} lease_time={subnet.lease_time} domain={subnet.domain} ntp_servers={subnet.ntp_servers}/> }}
           <div class="flex gap-2">
             <button type="submit" class="btn btn-blue">
               Speichern
