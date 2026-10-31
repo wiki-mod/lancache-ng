@@ -179,8 +179,7 @@ injects malicious content that the proxy caches and serves to every client.
   never the LAN spoof DNS — the supervisor's nginx render (`nginx` in
   `services/watchdog/src/main.rs`) refuses to start nginx if the resolver names a
   LanCache IP, preventing a resolve-to-self loop.
-- Cache key is `$host$uri`, with an `https:` prefix for HTTPS clients
-  (query-string signatures stripped), so a per-request
+- Cache key is `$host$uri` (query-string signatures stripped), so a per-request
   signature cannot be used to smuggle a distinct poisoned object under a shared
   key without also passing origin validation.
 

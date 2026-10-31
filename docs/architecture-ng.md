@@ -70,7 +70,7 @@ dashboard's resize control, issue #1069 part 3):**
 **Slice module** (for range requests in game downloads):
 ```nginx
 slice               $CACHE_SLICE_SIZE;
-proxy_cache_key     "$cache_scheme$host$uri$slice_range";
+proxy_cache_key     "$host$uri$slice_range";
 proxy_set_header    Range $slice_range;
 proxy_cache_valid   206 $CACHE_VALID_HIT;
 ```
