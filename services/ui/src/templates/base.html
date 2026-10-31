@@ -228,6 +228,8 @@
     padding: 5px 12px; cursor: pointer; background: var(--navy-850);
   }
   .lang-switch:hover { color: var(--foam); border-color: var(--mist-dim); }
+  .lang-switch select { background: transparent; border: 0; color: inherit; font: inherit; cursor: pointer; }
+  .lang-switch select option { background: var(--navy-850); color: var(--foam); }
   .theme-btn {
     border: 1px solid var(--navy-600); border-radius: 999px;
     padding: 5px 10px; cursor: pointer; background: var(--navy-850); color: var(--mist); font-size: 13px;
@@ -727,6 +729,7 @@
         <span>Service health: laden…</span>
       </div>
       <div class="beambar-end">
+        <label class="lang-switch">🌐 <select id="lang-select" aria-label="Language"></select></label>
         {{ <restart_ui_form action={routes.restart_ui} csrf_token={csrf_token} button_class="theme-btn" label="⟳ UI" title="Admin-UI neu starten"/> }}
         <button type="button" class="theme-btn" id="theme-toggle" title="Toggle light/dark theme">◐</button>
       </div>
@@ -1150,6 +1153,20 @@
         }
       }
       document.documentElement.lang = lang;
+      const pick = document.getElementById('lang-select');
+      if (pick) {
+        Object.keys(catalog).forEach(function (code) {
+          const o = document.createElement('option');
+          o.value = code;
+          o.textContent = catalog[code].name;
+          o.selected = code === lang;
+          pick.appendChild(o);
+        });
+        pick.addEventListener('change', function () {
+          document.cookie = 'lc_lang=' + pick.value + '; path=/; max-age=31536000; samesite=strict';
+          location.reload();
+        });
+      }
       const row = document.getElementById('lang-row');
       if (row) {
         Object.keys(catalog).forEach(function (code) {
