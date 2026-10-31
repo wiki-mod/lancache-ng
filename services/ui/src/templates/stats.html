@@ -237,9 +237,6 @@ async function refresh() {
   }
 }
 
-// What: first refresh now, then every REFRESH ms
-// Why: the charts fill without waiting one interval
-// From: Issue #1683 | PR #1912
 // What: try netdata's own charts first, else Chart.js
 // Why: DoMe wants native netdata graphs, no redraw
 // From: Issue #1683 | PR #1858
@@ -261,6 +258,9 @@ async function useNativeNetdata() {
   document.querySelectorAll('.nd').forEach((d) => d.classList.remove('hidden'));
 }
 
+// What: no netdata script: refresh now, then each REFRESH ms
+// Why: the Chart.js charts fill without waiting one interval
+// From: Issue #1683 | PR #1912
 useNativeNetdata().catch((err) => {
   reportError(err);
   refresh();
