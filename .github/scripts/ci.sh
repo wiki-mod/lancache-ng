@@ -2244,11 +2244,15 @@ function flush(   h, kind, name, attach, t, refs, seen, w, n, i, a, tst) {
     if (tests == "both") t = t "\t" (tst ? "t" : "")
     printf "%s\t%s\t%s\t%s\t%s\n", kind, name, attach, refs, t
 }
-function idents(s,   out, seen, tok) {
+# What: identifiers of s, first seen order, by one split.
+# Why: match+substr copied the rest per word (1.2 s ui).
+# From: Issue #1683 | PR #1858
+function idents(s,   out, seen, tok, w, n, i) {
     out = ""
-    while (match(s, /[A-Za-z_][A-Za-z0-9_]*/)) {
-        tok = substr(s, RSTART, RLENGTH)
-        s = substr(s, RSTART + RLENGTH)
+    n = split(s, w, /[^A-Za-z0-9_]+/)
+    for (i = 1; i <= n; i++) {
+        tok = w[i]; sub(/^[0-9]+/, "", tok)
+        if (tok == "") continue
         if (!(tok in seen)) { seen[tok] = 1; out = out (out == "" ? "" : " ") tok }
     }
     return out
