@@ -67,6 +67,10 @@
   </div>
 
   <div data-logs-panel="syslog">
+  {# What: forwarding card is off until syslog-ng applies it
+     Why: a setting without effect must not show
+     From: Issue #1683 | PR #1858 #}
+  {% if false %}
   <!-- What: send the central log on to an external server
        Why: the ui saves; the watchdog applies it -->
   <form method="post" action="{{ routes.logs_forward | safe }}" class="card" style="margin-bottom:16px;">
@@ -99,6 +103,8 @@
       <button type="submit" class="btn" style="margin-top:12px;">Speichern</button>
     </div>
   </form>
+
+  {% endif %}
 
   <!-- What: per-service logging switches.
        Why: the ui saves; the watchdog applies. -->
