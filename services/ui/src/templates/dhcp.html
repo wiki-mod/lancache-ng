@@ -52,9 +52,33 @@
   <div>
     <p class="eyebrow">Settings → DHCP</p>
     <h1 class="page-title">DHCP</h1>
-    <p class="page-sub">
-      DHCP-Server (Kea), DHCP-Proxy und DHCP-Relay: ein Modus ist aktiv.
-    </p>
+  </div>
+
+  {# What: capability table of the three DHCP modes
+     Why: copied from the mockup; folds away
+     From: Issue #1683 | PR #1976 #}
+  <div class="compare-toggle" id="compare-toggle">
+    <span id="compare-caret">▸</span> Compare DHCP-Server, DHCP-Proxy, and DHCP-Relay
+  </div>
+  <div class="card compare-card" id="compare-card" style="display:none;">
+    <div class="card-body" style="padding:0;">
+      <table class="compare-table">
+        <tr>
+          <th>Capability</th>
+          <th>DHCP-Server</th>
+          <th>DHCP-Proxy</th>
+          <th>DHCP-Relay</th>
+        </tr>
+        <tr><td>Issues IP addresses to devices</td><td class="yes">✓</td><td class="no">Supplemental only</td><td class="no">— (forwards to another server)</td></tr>
+        <tr><td>Static reservations (always the same address for one device)</td><td class="yes">✓</td><td class="no">—</td><td class="no">—</td></tr>
+        <tr><td>Lease time control</td><td class="yes">✓</td><td class="no">— (issues no lease of its own)</td><td class="no">— (issues no lease of its own)</td></tr>
+        <tr><td>DNS, gateway, NTP, domain options</td><td class="yes">✓</td><td class="partial">✓ for PXE/network-boot devices only</td><td class="no">— (comes from the remote server)</td></tr>
+        <tr><td>PXE / network-boot options</td><td class="yes">✓</td><td class="yes">✓</td><td class="no">—</td></tr>
+        <tr><td>Works alongside another DHCP server on the network</td><td class="no">— (conflicts by design)</td><td class="yes">✓</td><td class="yes">✓ (that's its whole purpose)</td></tr>
+        <tr><td>Relays requests to a DHCP server on a different subnet or VLAN</td><td class="no">—</td><td class="no">—</td><td class="yes">✓</td></tr>
+      </table>
+      <div class="compare-footnote">Reflects what today's Admin UI exposes for each mode. DHCP-Server and DHCP-Proxy are mutually exclusive on the same interface. DHCP-Relay exists but is greyed out -- not stable/production-ready yet.</div>
+    </div>
   </div>
 
   {# What: DHCP mode select, form of the active mode #}
@@ -512,6 +536,17 @@
 {% endblock %}
 
 {% block scripts %}
+<script>
+  // What: folds the mode comparison open and shut
+  // Why: the mockup keeps it closed until asked for
+  // From: Issue #1683 | PR #1976
+  document.getElementById('compare-toggle').addEventListener('click', () => {
+    const card = document.getElementById('compare-card');
+    const open = card.style.display === 'none';
+    card.style.display = open ? '' : 'none';
+    document.getElementById('compare-caret').textContent = open ? '▾' : '▸';
+  });
+</script>
 {% if dhcp_has_kea %}
 <script>
 // What: shows or hides the new-subnet form
