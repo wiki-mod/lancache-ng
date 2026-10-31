@@ -304,6 +304,25 @@ checks below need a real LAN.
   HTTPS) since the cache key is `$host$uri` regardless of scheme or which mode's listener
   received the request — a request already cached via one path can come back as an
   immediate HIT via a different path for the same host+URI.
+- **Hurdle: an HTTP-only origin must work (nginx fetches with the client's scheme).** A
+  user who only points DNS at the cache must never be blocked by a download that fails
+  at the proxy. Request a file from a host that offers no port 443 (or whose certificate
+  does not match its name) through port 80, twice. Pass: both responses are `200`, the
+  second is a **HIT**, bytes identical. Fail: any `502`, or `proxy_pass` fixed to
+  `https://` in `proxy-params.conf`/`http.conf`. Negative probe: set the scheme back to
+  `https://` on a scratch stack and confirm this step then fails.
+- **Hurdle: an origin error is never cached.** Make one request fail at the origin
+  (unreachable host), confirm the client sees the error, then confirm the next request
+  for the same URL reaches the origin again (no `HIT` on a `5xx`; only `404` may be
+  held, see `proxy_cache_valid`).
+- **Hurdle: the upstream resolver answers.** After a download run, the proxy log has no
+  `could not be resolved` and no `Network unreachable` for a resolver. The default
+  resolver list is IPv4 only (`NGINX_UPSTREAM_RESOLVER`, `ipv6=off`); a resolver address
+  the host cannot reach turns every uncached lookup into a timeout.
+- **Hurdle: the Admin UI shows the cache size.** After the cached download the
+  Dashboard "Cache storage" is greater than 0 GB. nginx creates the cache folders with
+  mode 0700, so the UI cannot walk them; the size comes from the watchdog status
+  (`disk.cache.used_bytes`). Fail: `0.0 GB` with a non-empty cache.
 
 ### 5. NATS — secondary lifecycle
 
