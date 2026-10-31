@@ -596,6 +596,7 @@
     document.querySelectorAll('.dns-tab-btn').forEach((button) => {
       button.classList.toggle('active', button.dataset.dnsTab === tabName);
     });
+    try { sessionStorage.setItem('dnsTab', tabName); } catch (e) { /* storage blocked */ }
   }
 
   // What: confirm() with record name and type
@@ -639,10 +640,13 @@
   document.querySelector('[data-lan-record-content]').addEventListener('input', validateLanTxtContent);
   document.querySelector('[data-lan-record-form]').addEventListener('submit', validateLanTxtContent);
 
-  // What: opens the CDN tab on page load
-  // Why: marks its button; markup sets no active class
+  // What: reopens the last used tab on page load
+  // Why: a form post reloads; the tab must not jump to CDN
   // From: Issue #1683 | PR #1912
-  setActiveDnsTab('cdn');
+  let startTab = 'cdn';
+  try { startTab = sessionStorage.getItem('dnsTab') || 'cdn'; } catch (e) { /* storage blocked */ }
+  if (!document.querySelector('[data-dns-panel="' + startTab + '"]')) startTab = 'cdn';
+  setActiveDnsTab(startTab);
 
   // What: POST to the rotate route of one secondary
   // Why: server rotates; alert shows the result
@@ -772,5 +776,9 @@
       checkSecondaryHealth(span.id.slice('health-'.length));
     });
   });
+
+  // What: runs the Secondary probes if that tab reopened
+  // Why: the listener above exists only from here on
+  if (startTab === 'secondary') document.querySelector('[data-dns-tab="secondary"]').click();
 </script>
 {% endblock %}
