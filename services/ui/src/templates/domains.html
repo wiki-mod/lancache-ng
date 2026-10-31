@@ -434,110 +434,56 @@
     {# What: registration and list of secondary DNS nodes
        Why: one DNS page; formerly its own page
        From: Issue #1683 | PR #1858 #}
-    <section data-dns-panel="secondary" class="flex flex-col gap-6">
-  {# What: install command for a new secondary, copyable #}
-  {# Why: token and primary URL are rendered by main.rs #}
-  <div class="card flex flex-col gap-4">
-    <div>
-      <h2 class="font-semibold text-slate-200">Neuen Secondary registrieren</h2>
-      <p class="text-xs text-slate-500 mt-0.5">Name des neuen Secondary eintragen (Buchstaben, Ziffern, Bindestriche), dann den Befehl auf dem Secondary-Host ausführen. Der Installer bindet standardmäßig an die erkannte LAN-IP des Hosts; wenn Port 53 dort bereits belegt ist, zeigt er den belegenden Socket an und fragt nach einer alternativen <code class="text-slate-300">--listen-ip</code>. Optional für HTTPS-DNS: <code class="text-slate-300">--ip-https</code> und <code class="text-slate-300">--listen-ip-https</code> zusammen angeben (zweite Bind-IP, derselbe Container).</p>
-    </div>
+    <section data-dns-panel="secondary">
+      <div class="subtabs" style="margin-bottom:22px;">
+        <button type="button" class="subtab sec-sub-btn active" data-sec-sub="settings">Settings</button>
+        <button type="button" class="subtab sec-sub-btn" data-sec-sub="add">Add Secondary</button>
+      </div>
 
-    <div class="field" style="max-width:320px; margin-bottom:0;">
-      <label for="secondary-name">Name des Secondary</label>
-      <input type="text" id="secondary-name" maxlength="63" pattern="[A-Za-z0-9-]+" placeholder="z. B. dns-keller" autocomplete="off">
-    </div>
+      {# What: registered secondaries with their actions #}
+      {# Why: health, address, token and removal per row #}
+      <div data-sec-panel="settings">
+        <div class="section-title" style="margin-top:0;">Connected secondaries</div>
+        {% if secondaries %}
+        {% for secondary in secondaries %}
+        <div class="snapshot-row">
+          <div>
+            <div>{{ secondary.name }}</div>
+            <div class="s-meta">{% if secondary.address %}{{ secondary.address }}{% else %}no address{% endif %} · registered <time data-epoch="{{ secondary.registered_at }}">{{ secondary.registered_at }}</time>{% if secondary.last_seen %} · last seen <time data-epoch="{{ secondary.last_seen }}">{{ secondary.last_seen }}</time>{% endif %}</div>
+          </div>
+          <div class="snapshot-actions">
+            <span class="tag off" id="health-{{ secondary.name }}">–</span>
+            <a href="#" onclick="checkSecondaryHealth('{{ secondary.name }}'); return false;">Check</a>
+            <a href="#" onclick="editSecondaryAddress('{{ secondary.name }}', '{{ secondary.address | default(value='') }}'); return false;">Edit address</a>
+            <a href="#" onclick="rotateToken('{{ secondary.name }}'); return false;" style="color:var(--mist);">Rotate token</a>
+            <a href="#" style="color:var(--danger);" onclick="removeSecondary('{{ secondary.name }}'); return false;">Disconnect</a>
+          </div>
+        </div>
+        {% endfor %}
+        {% else %}
+        <p class="section-sub">No secondaries registered yet.</p>
+        {% endif %}
+      </div>
 
-    <div class="relative group">
-      <div id="install-cmd" class="bg-slate-900 rounded-lg p-4 font-mono text-xs text-slate-300 overflow-x-auto whitespace-pre select-all">bash &lt;(curl -fsSL {{ setup_script_url }}) secondary \
+      {# What: install command for a new secondary, copyable #}
+      {# Why: token and primary URL are rendered by main.rs #}
+      <div data-sec-panel="add" class="hidden">
+        <div class="section-title" style="margin-top:0;">Run this on the secondary box</div>
+        <p class="section-sub">One command installs it, registers it with this primary, and starts it. Enter a name for that location (letters, digits, hyphens).</p>
+        <div class="field" style="max-width:320px;">
+          <label for="secondary-name">Name</label>
+          <input type="text" id="secondary-name" maxlength="63" pattern="[A-Za-z0-9-]+" placeholder="garage" autocomplete="off">
+        </div>
+        <div class="copy-row" style="max-width:none; align-items:flex-start; font-size:12.5px;">
+          <code id="install-cmd" style="white-space:pre-wrap; overflow-x:visible;">bash &lt;(curl -fsSL {{ setup_script_url }}) secondary \
   --primary {{ primary_url }} \
   --token {{ registration_token }} \
   --name <span id="secondary-name-out">NAME</span> \
-  --ip-http {{ primary_ip }}</div>
-      {{ <copy_button target="install-cmd" extra_class="hover:text-white opacity-0 group-hover:opacity-100"/> }}
-    </div>
-
-    <p class="text-xs text-slate-500">
-      Der Befehl registriert den Secondary, generiert die benötigten Werte und startet den Container automatisch.
-    </p>
-
-    <p class="text-xs text-amber-300/90 leading-relaxed">
-      Hinweis für lokale Tests auf demselben Host: Wenn bereits ein Dienst Port 53 belegt, musst du eine freie
-      Bind-IP per <code class="text-slate-200">--listen-ip</code> angeben. Der Installer zeigt dir den Konflikt
-      dann direkt an, statt erst beim Docker-Start zu scheitern.
-    </p>
-
-    <p class="text-xs text-slate-500">
-      Zeitangaben werden als lokale Datum-/Uhrzeitangaben dargestellt, nicht als Unix-Zeitstempel.
-    </p>
-  </div>
-
-  {# What: table of registered secondaries with actions #}
-  {# Why: health, address, token and removal per row #}
-  <div class="card flex flex-col gap-4">
-    <div>
-      <h2 class="font-semibold text-slate-200">Registrierte Secondaries</h2>
-      <p class="text-xs text-slate-500 mt-0.5">Automatisch synchronisierte DNS-Instanzen</p>
-    </div>
-
-    {% if secondaries %}
-    <div class="overflow-x-auto">
-      <table class="w-full text-sm">
-        <thead>
-          <tr>
-            <th class="th px-3">Name</th>
-            <th class="th px-3">Consumer</th>
-            <th class="th px-3">Adresse</th>
-            <th class="th px-3">DNS-Status</th>
-            <th class="th px-3">Registriert</th>
-            <th class="th px-3">Zuletzt gesehen</th>
-            <th class="th px-3">Aktionen</th>
-          </tr>
-        </thead>
-        <tbody class="rows">
-          {% for secondary in secondaries %}
-          <tr>
-            <td class="px-3 py-2 text-slate-200 font-mono">{{ secondary.name }}</td>
-            <td class="px-3 py-2 text-slate-300">{{ secondary.consumer_name }}</td>
-            <td class="px-3 py-2 text-slate-300 text-xs">
-              <span class="font-mono">{% if secondary.address %}{{ secondary.address }}{% else %}<span class="text-slate-500">—</span>{% endif %}</span>
-              <button onclick="editSecondaryAddress('{{ secondary.name }}', '{{ secondary.address | default(value='') }}')"
-                      class="text-blue-400 hover:text-blue-300 ml-1 text-[11px]">Ändern</button>
-            </td>
-            <td class="px-3 py-2 text-xs">
-              <span id="health-{{ secondary.name }}" class="text-slate-500">–</span>
-              <button onclick="checkSecondaryHealth('{{ secondary.name }}')"
-                      class="text-blue-400 hover:text-blue-300 ml-1 text-[11px]">Prüfen</button>
-            </td>
-            <td class="px-3 py-2 text-slate-400 text-xs">
-              <time data-epoch="{{ secondary.registered_at }}">{{ secondary.registered_at }}</time>
-            </td>
-            <td class="px-3 py-2 text-slate-400 text-xs">
-              {% if secondary.last_seen %}
-                <time data-epoch="{{ secondary.last_seen }}">{{ secondary.last_seen }}</time>
-              {% else %}
-                <span class="text-slate-500">Noch nicht erfasst</span>
-              {% endif %}
-            </td>
-            <td class="px-3 py-2 space-x-2">
-              <button onclick="rotateToken('{{ secondary.name }}')"
-                      class="btn btn-sm btn-ghost-amber">
-                Token rotieren
-              </button>
-              <button onclick="removeSecondary('{{ secondary.name }}')"
-                      class="btn btn-sm btn-ghost-red">
-                Entfernen
-              </button>
-            </td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-    </div>
-    {% else %}
-    <p class="text-slate-500 text-sm px-3 py-2">Keine Secondaries registriert.</p>
-    {% endif %}
-  </div>
+  --ip-http {{ primary_ip }}</code>
+          <button type="button" onclick="copyText('install-cmd', this)">Copy</button>
+        </div>
+        <p class="field-hint">If port 53 on that box is already used by something else, pass a free address with <code>--listen-ip</code>; the installer shows the conflict instead of failing partway through.</p>
+      </div>
     </section>
   </div>
 
@@ -555,6 +501,18 @@
       document.querySelectorAll('.cdn-sub-btn').forEach((o) => o.classList.toggle('active', o === b));
       document.querySelectorAll('[data-cdn-panel]').forEach((p) => {
         p.classList.toggle('hidden', p.dataset.cdnPanel !== b.dataset.cdnSub);
+      });
+    });
+  });
+
+  // What: switches Settings and Add Secondary
+  // Why: the mockup shows one secondary panel at a time
+  // From: Issue #1683 | PR #1976
+  document.querySelectorAll('.sec-sub-btn').forEach((b) => {
+    b.addEventListener('click', () => {
+      document.querySelectorAll('.sec-sub-btn').forEach((o) => o.classList.toggle('active', o === b));
+      document.querySelectorAll('[data-sec-panel]').forEach((p) => {
+        p.classList.toggle('hidden', p.dataset.secPanel !== b.dataset.secSub);
       });
     });
   });
