@@ -158,7 +158,6 @@ services:
       - iptables
     smoke:
       - kea-dhcp4 -v
-      - lancache-watchdog probe
       - dnsmasq
   ui:
     context: services/ui
