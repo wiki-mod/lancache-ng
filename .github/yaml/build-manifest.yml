@@ -668,7 +668,7 @@ runtime:
     - CONTAINER_NAME_DNS=@CONTAINER_NAME_PREFIX@-dns
     - CONTAINER_NAME_DHCP=@CONTAINER_NAME_PREFIX@-dhcp
     - CONTAINER_NAME_UI=@CONTAINER_NAME_PREFIX@-ui
-    - CDN_DOMAINS_FILE=/etc/lancache/cdn-domains.txt
+    - CDN_DOMAINS_FILE=/usr/share/lancache/cdn-domains.txt
     - CACHEHAMSTER_DATA_DIR=/var/lib/lancache-cachehamster
     - CACHE_DIR=/var/cache/lancache
     - CACHE_DIR_ALLOWED_PREFIX=/var/cache
