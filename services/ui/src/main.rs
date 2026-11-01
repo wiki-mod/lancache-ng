@@ -835,10 +835,6 @@ fn valid_peer_name(s: &Settings, name: &str) -> Result<bool, String> {
     Ok(!name.is_empty() && name.len() <= max && chars_ok)
 }
 
-fn env_or_empty(key: &str) -> String {
-    process_env(key).unwrap_or_default()
-}
-
 // What: everything a new secondary needs.
 // Why: setup.sh secondary writes it to its env.
 // From: Issue #1683 | PR #1858
@@ -853,10 +849,10 @@ fn peer_kit(s: &Settings) -> Result<Value, String> {
         "tsig_secret": sec.tsig_secret,
         "syslog_primary": format!("{primary}:{}", s.uint("LANCACHE_LOG_PORT")?),
         "dns_local_reverse_zones": s.text("DNS_LOCAL_REVERSE_ZONES").unwrap_or_default(),
-        "image_registry": env_or_empty("LANCACHE_IMAGE_REGISTRY"),
-        "image_prefix": env_or_empty("LANCACHE_IMAGE_PREFIX"),
-        "image_channel": env_or_empty("LANCACHE_IMAGE_CHANNEL"),
-        "image_tag": env_or_empty("LANCACHE_IMAGE_TAG"),
+        "image_registry": process_env("LANCACHE_IMAGE_REGISTRY").unwrap_or_default(),
+        "image_prefix": process_env("LANCACHE_IMAGE_PREFIX").unwrap_or_default(),
+        "image_channel": process_env("LANCACHE_IMAGE_CHANNEL").unwrap_or_default(),
+        "image_tag": process_env("LANCACHE_IMAGE_TAG").unwrap_or_default(),
     }))
 }
 
