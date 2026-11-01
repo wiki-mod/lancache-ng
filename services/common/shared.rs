@@ -1902,6 +1902,17 @@ pub mod pdns_conf {
         Ok(())
     }
 
+    // What: addresses of registered secondaries.
+    // Why: NOTIFY targets and AXFR rights derive from one list.
+    // From: Issue #1683 | PR #1858
+    pub fn secondary_ips(s: &Settings) -> Vec<String> {
+        s.list("DNS_SECONDARIES")
+            .iter()
+            .filter_map(|e| e.split_once('@').map(|(_, ip)| ip.to_string()))
+            .filter(|ip| ip.parse::<std::net::IpAddr>().is_ok())
+            .collect()
+    }
+
     // What: render pdns.conf for this node's role.
     // Why: primary sends NOTIFY; secondary pulls by AXFR.
     // From: Issue #1683 | PR #1858
@@ -1928,13 +1939,20 @@ pub mod pdns_conf {
             (
                 "also-notify",
                 if primary {
-                    s.list("DNS_NOTIFY_TARGETS").join(",")
+                    secondary_ips(s).join(",")
                 } else {
                     String::new()
                 },
             ),
             ("allow-notify-from", notify_from),
-            ("allow-axfr-ips", s.list("PDNS_AXFR_FROM").join(",")),
+            (
+                "allow-axfr-ips",
+                s.list("PDNS_AXFR_FROM")
+                    .into_iter()
+                    .chain(secondary_ips(s))
+                    .collect::<Vec<_>>()
+                    .join(","),
+            ),
             ("xfr-cycle-interval", s.uint("PDNS_XFR_CYCLE")?.to_string()),
             ("dnsupdate", yes(primary).to_string()),
             (

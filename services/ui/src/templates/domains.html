@@ -614,7 +614,7 @@
 
     try {
       const response = await fetch('{{ routes.secondary | safe }}'.replace('{name}', name), {
-        method: 'DELETE',
+        method: 'POST',
         headers: {
           'X-CSRF-Token': CSRF_TOKEN
         }

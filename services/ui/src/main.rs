@@ -570,6 +570,21 @@ async fn domains(State(app): Shared, axum::Extension(csrf): axum::Extension<Csrf
         .collect();
     ctx.insert("zone_snapshot_groups", &groups);
     ctx.insert("rollback_zones", &snapshot_zones(&s));
+    let list: Vec<serde_json::Value> = secondaries(&s)
+        .iter()
+        .map(|(n, a)| serde_json::json!({"name": n, "address": a}))
+        .collect();
+    ctx.insert("secondaries", &list);
+    ctx.insert(
+        "registration_token",
+        &registration_token(&s).unwrap_or_default(),
+    );
+    ctx.insert(
+        "setup_script_url",
+        &s.text("SETUP_SCRIPT_URL").unwrap_or_default(),
+    );
+    ctx.insert("primary_ip", &s.text("IP_HTTP").unwrap_or_default());
+    ctx.insert("primary_url", &s.text("UI_PUBLIC_URL").unwrap_or_default());
     ctx.insert(
         "zone_snapshot_retention",
         &s.uint("DNS_SNAPSHOT_KEEP").unwrap_or(0),
@@ -760,6 +775,203 @@ async fn ptr(s: &Settings, op: &str, get: &dyn Fn(&str) -> String) -> Result<(),
     snapshot(s, &api, &zone).await
 }
 
+// What: registration token for secondaries.
+// Why: stored like every secret; rotate replaces it.
+// From: Issue #1683 | PR #1858
+fn registration_token(s: &Settings) -> Result<String, String> {
+    let dir = PathBuf::from(s.text("SECRETS_DIR")?);
+    let keep = fs::Owner {
+        uid: None,
+        gid: None,
+    };
+    secret::resolve(None, &dir, "SECONDARY_REGISTRATION_TOKEN", keep).map_err(|e| e.to_string())
+}
+
+// What: secondaries as (name, address) pairs.
+// Why: one SOT list "name@ip" drives pdns and the ui.
+// From: Issue #1683 | PR #1858
+fn secondaries(s: &Settings) -> Vec<(String, String)> {
+    s.list("DNS_SECONDARIES")
+        .iter()
+        .filter_map(|e| {
+            e.split_once('@')
+                .map(|(n, a)| (n.to_string(), a.to_string()))
+        })
+        .collect()
+}
+
+// What: store the list after a change.
+// Why: pdns.conf and NOTIFY follow on the next apply.
+// From: Issue #1683 | PR #1858
+async fn store_secondaries(app: &App, list: &[(String, String)]) -> Result<(), String> {
+    let v: Vec<String> = list.iter().map(|(n, a)| format!("{n}@{a}")).collect();
+    commit(
+        app,
+        BTreeMap::from([("DNS_SECONDARIES".to_string(), v.join(" "))]),
+    )
+    .await
+}
+
+// What: request body of a secondary registration.
+// Why: token proves the admin handed out the command.
+// From: Issue #1683 | PR #1858
+#[derive(serde::Deserialize)]
+struct Register {
+    token: String,
+    name: String,
+    address: String,
+}
+
+// What: register a secondary (public, token checked).
+// Why: answer carries all a secondary needs to follow.
+// From: Issue #1683 | PR #1858
+async fn register(State(app): Shared, axum::Json(r): axum::Json<Register>) -> Response {
+    let s = app.settings();
+    let Ok(token) = registration_token(&s) else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    if !secret::equal(r.token.as_bytes(), token.as_bytes()) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let name_ok = !r.name.is_empty()
+        && r.name.len() <= 32
+        && r.name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-');
+    if !name_ok || r.address.parse::<std::net::IpAddr>().is_err() {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let mut list = secondaries(&s);
+    list.retain(|(n, _)| n != &r.name);
+    list.push((r.name.clone(), r.address.clone()));
+    if let Err(e) = store_secondaries(&app, &list).await {
+        eprintln!("ui: register {}: {e}", r.name);
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+    let sec = match secrets(&s) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("ui: register {}: {e}", r.name);
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+    let zones = snapshot_zones(&s);
+    axum::Json(serde_json::json!({
+        "primary": s.text("IP_HTTP").unwrap_or_default(),
+        "zones": zones,
+        "pdns_api_key": sec.pdns_api_key,
+        "tsig_name": sec.tsig_name,
+        "tsig_secret": sec.tsig_secret,
+        "syslog_primary": format!("{}:{}", s.text("IP_HTTP").unwrap_or_default(), s.uint("LANCACHE_LOG_PORT").unwrap_or(0)),
+    }))
+    .into_response()
+}
+
+// What: JSON body with a new address.
+// Why: the edit dialog posts {"address": "..."}.
+// From: Issue #1683 | PR #1858
+#[derive(serde::Deserialize)]
+struct Address {
+    address: String,
+}
+
+// What: secondary actions from the DNS page.
+// Why: rotate, remove, address and health in one place.
+// From: Issue #1683 | PR #1858
+async fn secondary_action(
+    State(app): Shared,
+    axum::Extension(csrf): axum::Extension<Csrf>,
+    axum::extract::Path((name, op)): axum::extract::Path<(String, String)>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    if !header_csrf_ok(&headers, &csrf) {
+        return (StatusCode::FORBIDDEN, "CSRF token mismatch").into_response();
+    }
+    let s = app.settings();
+    let mut list = secondaries(&s);
+    let Some(pos) = list.iter().position(|(n, _)| *n == name) else {
+        return (StatusCode::NOT_FOUND, "no such secondary").into_response();
+    };
+    match op.as_str() {
+        "remove" => {
+            list.remove(pos);
+            done(store_secondaries(&app, &list).await, "/domains")
+        }
+        "rotate" => {
+            let dir = PathBuf::from(s.text("SECRETS_DIR").unwrap_or_default());
+            let file = secret::file_of(&dir, "SECONDARY_REGISTRATION_TOKEN");
+            match std::fs::remove_file(&file) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("{}: {e}", file.display()),
+                    )
+                        .into_response();
+                }
+                _ => {}
+            }
+            match registration_token(&s) {
+                Ok(t) => axum::Json(serde_json::json!({"token": t})).into_response(),
+                Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+            }
+        }
+        "address" => {
+            let Ok(a) = serde_json::from_slice::<Address>(&body) else {
+                return (StatusCode::BAD_REQUEST, "body must be {\"address\": ...}")
+                    .into_response();
+            };
+            if a.address.parse::<std::net::IpAddr>().is_err() {
+                return (StatusCode::BAD_REQUEST, "no IP address").into_response();
+            }
+            list[pos].1 = a.address;
+            match store_secondaries(&app, &list).await {
+                Ok(()) => StatusCode::NO_CONTENT.into_response(),
+                Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+            }
+        }
+        "health" => axum::Json(secondary_health(&s, &list[pos].1).await).into_response(),
+        _ => (StatusCode::NOT_FOUND, "unknown action").into_response(),
+    }
+}
+
+// What: compare LAN zone serial primary vs secondary.
+// Why: shows a lost NOTIFY or broken AXFR (RFC 1982).
+// From: Issue #1683 | PR #1858
+async fn secondary_health(s: &Settings, address: &str) -> serde_json::Value {
+    let zone = lancache_ng::dns::canonical_zone(&s.text("DNS_LAN_ZONE").unwrap_or_default());
+    let (Ok(primary), Ok(sec), Ok(port), Ok(client)) = (
+        pdns_api(s),
+        secrets(s),
+        s.uint("PDNS_AUTH_API_PORT"),
+        lancache_ng::http::client(s),
+    ) else {
+        return serde_json::json!({"status": "error", "detail": "settings incomplete"});
+    };
+    let remote = lancache_ng::pdns::Api::new(
+        client,
+        &format!("http://{address}:{port}/api/v1/servers/localhost"),
+        &sec.pdns_api_key,
+    );
+    let serial = |zs: Vec<lancache_ng::pdns::Zone>| {
+        zs.into_iter().find(|z| z.name == zone).map(|z| z.serial)
+    };
+    match (
+        primary.zones().await.map(serial),
+        remote.zones().await.map(serial),
+    ) {
+        (Ok(Some(p)), Ok(Some(r))) => {
+            let state = lancache_ng::dns::sync_state(p, r);
+            serde_json::json!({"status": format!("{state:?}"), "serial": r})
+        }
+        (Ok(_), Ok(None)) => {
+            serde_json::json!({"status": "missing", "detail": "zone not on secondary"})
+        }
+        (Err(e), _) | (_, Err(e)) => serde_json::json!({"status": "unreachable", "detail": e}),
+        _ => serde_json::json!({"status": "error"}),
+    }
+}
+
 // What: render all configs, write changed files, act.
 // Why: only owners with changed keys or files are touched.
 // From: Issue #1683 | PR #1858
@@ -826,7 +1038,7 @@ const PAGES: [(&str, &str); 7] = [
     ("dhcp", "/dhcp"),
     ("setup", "/setup"),
 ];
-const ROUTES: [(&str, &str); 19] = [
+const ROUTES: [(&str, &str); 23] = [
     ("admin_css", "/static/admin.css"),
     ("favicon", "/favicon.ico"),
     ("logo_icon", "/static/logo-icon.png"),
@@ -846,6 +1058,10 @@ const ROUTES: [(&str, &str); 19] = [
     ("aaaa_filter", "/domains/aaaa-filter"),
     ("ddns_unsigned", "/domains/ddns-unsigned"),
     ("zone_rollback", "/domains/zone-rollback"),
+    ("secondary", "/api/secondary/{name}/remove"),
+    ("secondary_rotate", "/api/secondary/{name}/rotate"),
+    ("secondary_health", "/api/secondary/{name}/health"),
+    ("secondary_address", "/api/secondary/{name}/address"),
 ];
 
 // What: traffic-light colour of one container.
@@ -1074,6 +1290,7 @@ async fn main() -> Result<(), String> {
         .route("/logs", get(logs))
         .route("/domains", get(domains))
         .route("/domains/{op}", post(dns_action))
+        .route("/api/secondary/{name}/{op}", post(secondary_action))
         .route("/logs/save", post(logs_save))
         .route("/api/status", get(status))
         .route("/api/container/{service}", post(container_state))
@@ -1081,6 +1298,7 @@ async fn main() -> Result<(), String> {
         .layer(axum::middleware::from_fn_with_state(app.clone(), auth));
     let router = Router::new()
         .route("/healthz", get(health))
+        .route("/api/secondary/register", post(register))
         .route(
             "/static/admin.css",
             get(|| async { asset("text/css", ADMIN_CSS.as_bytes()) }),
