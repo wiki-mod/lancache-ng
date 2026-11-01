@@ -94,6 +94,11 @@ services:
       - lancache-config:${SOT_CONFIG_DIR}
       - ./cdn-domains.txt:${SOT_CDN_DOMAINS_FILE}:ro
     restart: "no"
+    # What: no probe; the run ends after one write.
+    # Why: dns waits for its exit code instead.
+    # From: Issue #1683 | PR #1980
+    healthcheck:
+      disable: true
     logging:
       driver: local
 
