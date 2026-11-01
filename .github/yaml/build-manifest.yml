@@ -192,6 +192,12 @@ services:
     # Why: the image builds with the value; it names none.
     # From: Issue #1683 | PR #1912
     default_args: [UI_LISTEN_PORT]
+    # What: final-image apk packages of the ui.
+    # Why: stats graphs run rrdtool and snmpget.
+    # From: Issue #1683 | PR #1980
+    packages:
+      - rrdtool
+      - net-snmp-tools
     setup:
       - group=@LOG_READER_GROUP@:@GID@
       - user=@LOG_READER_GROUP@:@GID@:@LOG_READER_GROUP@
