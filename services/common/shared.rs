@@ -1194,3 +1194,263 @@ pub mod dhcp {
         Ok((lease, lease.saturating_mul(factor).min(max)))
     }
 }
+
+// What: narrow Docker Engine API client.
+// Why: list, inspect, start, stop, restart only (AG-SEC).
+// From: Issue #1683 | PR #1858
+pub mod docker {
+    use serde_json::Value;
+    use std::path::PathBuf;
+    use std::time::Duration;
+
+    // What: label compose sets to the project name.
+    // Why: fixed by Docker Compose; finds our containers.
+    // From: Issue #1683 | PR #1858
+    pub const PROJECT_LABEL: &str = "com.docker.compose.project";
+
+    // What: label compose sets to the service name.
+    // Why: fixed by Docker Compose; names a container.
+    // From: Issue #1683 | PR #1858
+    pub const SERVICE_LABEL: &str = "com.docker.compose.service";
+
+    // What: host name used over a unix socket.
+    // Why: HTTP needs a host; the socket ignores it.
+    // From: Issue #1683 | PR #1858
+    const SOCKET_HOST: &str = "http://docker";
+
+    // What: why a Docker call failed.
+    // Why: timeouts and refusals lead to other actions.
+    // From: Issue #1683 | PR #1858
+    #[derive(Debug)]
+    pub enum Error {
+        Timeout,
+        Status(u16),
+        Transport(String),
+        Decode(String),
+    }
+
+    impl std::fmt::Display for Error {
+        // What: one-line text of the error.
+        // Why: logs and the ui show it as is.
+        // From: Issue #1683 | PR #1858
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                Self::Timeout => f.write_str("Docker API timed out"),
+                Self::Status(c) => write!(f, "Docker API answered HTTP {c}"),
+                Self::Transport(e) => write!(f, "Docker API: {e}"),
+                Self::Decode(e) => write!(f, "Docker API answer: {e}"),
+            }
+        }
+    }
+
+    // What: the actions a caller may run on a container.
+    // Why: no generic call; nothing else is reachable.
+    // From: Issue #1683 | PR #1858
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum Action {
+        Start,
+        Stop,
+        Restart,
+    }
+
+    // What: client of one Docker endpoint.
+    // Why: unix:// sockets and tcp endpoints both work.
+    // From: Issue #1683 | PR #1858
+    pub struct Api {
+        client: reqwest::Client,
+        base: String,
+    }
+
+    impl Api {
+        // What: a client for unix:///path or http://host.
+        // Why: the endpoint comes from the SOT.
+        // From: Issue #1683 | PR #1858
+        pub fn new(endpoint: &str) -> Result<Self, String> {
+            let builder = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
+            let (builder, base) = match endpoint.trim().strip_prefix("unix://") {
+                Some(sock) => (builder.unix_socket(PathBuf::from(sock)), SOCKET_HOST.to_string()),
+                None => (builder, endpoint.trim().trim_end_matches('/').to_string()),
+            };
+            let client = builder.build().map_err(|e| format!("Docker client: {e}"))?;
+            Ok(Self { client, base })
+        }
+
+        // What: one call with a limit; body as bytes.
+        // Why: every call shares error mapping.
+        // From: Issue #1683 | PR #1858
+        async fn call(
+            &self,
+            method: reqwest::Method,
+            path: &str,
+            limit: Duration,
+        ) -> Result<Vec<u8>, Error> {
+            let map = |e: reqwest::Error| {
+                if e.is_timeout() {
+                    Error::Timeout
+                } else {
+                    Error::Transport(e.to_string())
+                }
+            };
+            let resp = self
+                .client
+                .request(method, format!("{}{path}", self.base))
+                .timeout(limit)
+                .send()
+                .await
+                .map_err(map)?;
+            let status = resp.status();
+            // What: 304 means already in the wanted state.
+            // Why: starting a running container is no error.
+            // From: Issue #1683 | PR #1858
+            if !status.is_success() && status != reqwest::StatusCode::NOT_MODIFIED {
+                return Err(Error::Status(status.as_u16()));
+            }
+            resp.bytes().await.map(|b| b.to_vec()).map_err(map)
+        }
+
+        // What: all containers of one compose project.
+        // Why: the watchdog sees only its own stack.
+        // From: Issue #1683 | PR #1858
+        pub async fn project(&self, project: &str, limit: Duration) -> Result<Vec<Value>, Error> {
+            let filter = serde_json::json!({"label": [format!("{PROJECT_LABEL}={project}")]});
+            let url = reqwest::Url::parse_with_params(
+                &format!("{SOCKET_HOST}/containers/json"),
+                [("all", "1"), ("filters", filter.to_string().as_str())],
+            )
+            .map_err(|e| Error::Transport(e.to_string()))?;
+            let path = format!("{}?{}", url.path(), url.query().unwrap_or_default());
+            let body = self.call(reqwest::Method::GET, &path, limit).await?;
+            serde_json::from_slice(&body).map_err(|e| Error::Decode(e.to_string()))
+        }
+
+        // What: inspect one container.
+        // Why: health, restart count and state come from here.
+        // From: Issue #1683 | PR #1858
+        pub async fn inspect(&self, name: &str, limit: Duration) -> Result<Value, Error> {
+            let body = self
+                .call(reqwest::Method::GET, &format!("/containers/{name}/json"), limit)
+                .await?;
+            serde_json::from_slice(&body).map_err(|e| Error::Decode(e.to_string()))
+        }
+
+        // What: run one allowed action on a container.
+        // Why: grace seconds come from the SOT.
+        // From: Issue #1683 | PR #1858
+        pub async fn act(
+            &self,
+            name: &str,
+            action: Action,
+            grace: u32,
+            limit: Duration,
+        ) -> Result<(), Error> {
+            let verb = match action {
+                Action::Start => "start".to_string(),
+                Action::Stop => format!("stop?t={grace}"),
+                Action::Restart => format!("restart?t={grace}"),
+            };
+            self.call(reqwest::Method::POST, &format!("/containers/{name}/{verb}"), limit)
+                .await
+                .map(drop)
+        }
+    }
+}
+
+// What: stack CA and leaf certificates via openssl.
+// Why: one owner; CA serial persists beside the CA.
+// From: Issue #1683 | PR #1858
+pub mod cert {
+    use std::path::Path;
+    use std::process::Command;
+
+    // What: run openssl; non-zero exit is an error.
+    // Why: stderr explains every openssl refusal.
+    // From: Issue #1683 | PR #1858
+    fn openssl(args: &[&str]) -> Result<String, String> {
+        let out = Command::new("openssl")
+            .args(args)
+            .output()
+            .map_err(|e| format!("openssl: {e}"))?;
+        if out.status.success() {
+            Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+        } else {
+            Err(format!(
+                "openssl {}: {}",
+                args.first().unwrap_or(&""),
+                String::from_utf8_lossy(&out.stderr).trim()
+            ))
+        }
+    }
+
+    // What: a self-signed CA key and certificate.
+    // Why: days, bits and subject come from the SOT.
+    // From: Issue #1683 | PR #1858
+    pub fn make_ca(key: &Path, crt: &Path, subject: &str, days: u64, bits: u64) -> Result<(), String> {
+        let (k, c) = (key.display().to_string(), crt.display().to_string());
+        openssl(&[
+            "req", "-x509", "-newkey", &format!("rsa:{bits}"), "-nodes", "-keyout", &k,
+            "-out", &c, "-days", &days.to_string(), "-subj", subject,
+            "-addext", "basicConstraints=critical,CA:TRUE",
+            "-addext", "keyUsage=critical,keyCertSign,cRLSign",
+        ])
+        .map(drop)
+    }
+
+    // What: a CA-signed leaf for the given SAN names.
+    // Why: CN is fixed; identity lives in SAN (AG-KD-005).
+    // From: Issue #1683 | PR #1858
+    #[allow(clippy::too_many_arguments)]
+    pub fn make_leaf(
+        ca_key: &Path,
+        ca_crt: &Path,
+        ca_serial: &Path,
+        key: &Path,
+        crt: &Path,
+        cn: &str,
+        sans: &[String],
+        days: u64,
+        bits: u64,
+    ) -> Result<(), String> {
+        let csr = crt.with_extension("csr");
+        let ext = crt.with_extension("ext");
+        let san = sans
+            .iter()
+            .map(|n| format!("DNS:{n}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        std::fs::write(&ext, format!("subjectAltName={san}\nextendedKeyUsage=serverAuth\n"))
+            .map_err(|e| format!("{}: {e}", ext.display()))?;
+        let d = |p: &Path| p.display().to_string();
+        let result = openssl(&[
+            "req", "-new", "-newkey", &format!("rsa:{bits}"), "-nodes",
+            "-keyout", &d(key), "-out", &d(&csr), "-subj", &format!("/CN={cn}"),
+        ])
+        .and_then(|_| {
+            // What: -CAserial keeps the serial file stable.
+            // Why: AG-KD-002 needs it persistent beside the CA.
+            // From: Issue #1683 | PR #1858
+            openssl(&[
+                "x509", "-req", "-in", &d(&csr), "-CA", &d(ca_crt), "-CAkey", &d(ca_key),
+                "-CAserial", &d(ca_serial), "-CAcreateserial", "-out", &d(crt),
+                "-days", &days.to_string(), "-sha256", "-extfile", &d(&ext),
+            ])
+        });
+        for tmp in [&csr, &ext] {
+            if let Err(e) = std::fs::remove_file(tmp) {
+                eprintln!("[cert] WARNING: {} not removed: {e}", tmp.display());
+            }
+        }
+        result.map(drop)
+    }
+
+    // What: seconds until a certificate expires.
+    // Why: the watchdog alarms before expiry.
+    // From: Issue #1683 | PR #1858
+    pub fn valid_for(crt: &Path, within: u64) -> Result<bool, String> {
+        let out = Command::new("openssl")
+            .args(["x509", "-noout", "-checkend", &within.to_string(), "-in"])
+            .arg(crt)
+            .output()
+            .map_err(|e| format!("openssl: {e}"))?;
+        Ok(out.status.success())
+    }
+}
