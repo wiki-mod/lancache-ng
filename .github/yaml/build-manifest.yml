@@ -410,6 +410,7 @@ runtime:
     - RECURSOR_LOGLEVEL=3
     - RECURSOR_LOGLEVEL_QUERIES=6
     - CHECK_INTERVAL=30
+    - SERVICES_STOPPED=
     - RESTART_AFTER=3
     - DISK_WARN_PCT=85
     - DISK_ALARM_PCT=95
@@ -1099,6 +1100,7 @@ runtime:
     - WATCHDOG_CERT_WARN_SECS=uint;3600;31536000;live;services
     - WATCHDOG_DISK_MIN_FREE_PERCENT=uint;1;99;live;services
     - CHECK_INTERVAL=uint;5;3600;live;services
+    - SERVICES_STOPPED=list?;;;live;services
     - CACHE_DIR=path;;;container;services
     - RESTART_AFTER=uint;1;100;live;services
     - DISK_WARN_PCT=uint;1;100;live;services

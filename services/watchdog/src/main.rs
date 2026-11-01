@@ -169,6 +169,7 @@ async fn containers(s: &Settings, f: &mut Findings, m: &mut Memory) -> Result<()
     let grace = u32::try_from(s.uint("WATCHDOG_STOP_GRACE")?).map_err(|e| e.to_string())?;
     let after = s.uint("RESTART_AFTER")?;
     let project = s.text("COMPOSE_PROJECT")?;
+    let stopped = s.list("SERVICES_STOPPED");
     let dhcp_off = s.text("DHCP_MODE")? == "off";
     let dhcp_service = s.text("DHCP_SERVICE")?;
     for row in api.project(&project, limit).await.map_err(|e| e.to_string())? {
@@ -179,9 +180,11 @@ async fn containers(s: &Settings, f: &mut Findings, m: &mut Memory) -> Result<()
         let inspect = api.inspect(name, limit).await.map_err(|e| e.to_string())?;
         let health = Health::of(&inspect);
         let (word, colour) = health.word_and_colour();
-        let wanted = !(dhcp_off && service == dhcp_service);
+        let by_user = stopped.iter().any(|x| x == service);
+        let wanted = !by_user && !(dhcp_off && service == dhcp_service);
         f.containers.push(serde_json::json!({
-            "service": service, "name": name, "health": word, "colour": colour,
+            "service": service, "name": name, "health": word,
+            "colour": colour, "stopped_by_user": by_user,
         }));
         if health == Health::Degraded {
             f.warn(service, "running with reduced function");
