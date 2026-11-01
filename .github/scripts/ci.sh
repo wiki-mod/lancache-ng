@@ -1556,11 +1556,15 @@ _ci_codeql_run() {
             ci_error "[CI-ERROR-CODEQL-0024]" "language=rust reason=\"rustc --print sysroot failed\"" "${sysroot}"
             return 2
         fi
-        local -x CODEQL_EXTRACTOR_RUST_OPTION_SYSROOT="${sysroot}"
-        local -x CODEQL_EXTRACTOR_RUST_OPTION_SYSROOT_SRC="${sysroot}/lib/rustlib/src/rust/library"
-        if [ ! -d "${CODEQL_EXTRACTOR_RUST_OPTION_SYSROOT_SRC}" ]; then
-            ci_error "[CI-ERROR-CODEQL-0025]" "language=rust dir=\"${CODEQL_EXTRACTOR_RUST_OPTION_SYSROOT_SRC}\" reason=\"no std source; apk rust-src missing\"" "sysroot=${sysroot}"
-            return 2
+        local src="${sysroot}/lib/rustlib/src/rust/library"
+        # What: an image without rust-src warns, then runs.
+        # Why: CodeQL uses the nightly build-tools image.
+        # From: Issue #1683 | PR #1858
+        if [ -d "${src}" ]; then
+            local -x CODEQL_EXTRACTOR_RUST_OPTION_SYSROOT="${sysroot}"
+            local -x CODEQL_EXTRACTOR_RUST_OPTION_SYSROOT_SRC="${src}"
+        else
+            ci_log "[CI-WARN-CODEQL-0025]" "language=rust dir=\"${src}\" reason=\"no std source; apk rust-src not in this build-tools image yet\""
         fi
     fi
     codeql="$(_ci_codeql_fetch "${work}")" || return 2
