@@ -2865,3 +2865,33 @@ pub mod render {
         Ok(out)
     }
 }
+
+// What: one SNTP query (RFC 4330) to a time server.
+// Why: the ui shows whether chrony really answers.
+// From: Issue #1683 | PR #1858
+pub mod ntp {
+    use std::net::UdpSocket;
+    use std::time::Duration;
+
+    // What: true when a valid server reply arrives.
+    // Why: mode 4 (server) and stratum 1..15 mean usable.
+    // From: Issue #1683 | PR #1858
+    pub fn answers(host: &str, port: u64, wait: Duration) -> bool {
+        let Ok(sock) = UdpSocket::bind("0.0.0.0:0") else {
+            return false;
+        };
+        if sock.set_read_timeout(Some(wait)).is_err() {
+            return false;
+        }
+        let mut req = [0u8; 48];
+        req[0] = 0b0010_0011; // LI 0, version 4, mode 3 (client)
+        if sock.send_to(&req, format!("{host}:{port}")).is_err() {
+            return false;
+        }
+        let mut buf = [0u8; 48];
+        match sock.recv(&mut buf) {
+            Ok(n) if n >= 48 => buf[0] & 0b111 == 4 && (1..=15).contains(&buf[1]),
+            _ => false,
+        }
+    }
+}

@@ -18,16 +18,16 @@
        Why: DoMe wants the artifact 1:1; values are bound
        From: Issue #819 | PR #1858 -->
   <div>
-    <form method="post" action="{{ routes.setup_update | safe }}">
+    <form method="post" action="{{ routes.setup_save | safe }}">
       {{ <csrf_field csrf_token={csrf_token}/> }}
       <div class="section-title" style="margin-top:0;">Release channel</div>
       <p class="section-sub">Which set of images this box installs updates from.</p>
       <div class="field-row" style="align-items:center;">
         <div class="mode-switchrow" style="max-width:320px;" id="channel-row">
           {% for ch in ["nightly", "latest"] %}
-          <label class="mode-btn {% if lancache_image_channel == ch %}selected{% endif %}" style="position:relative;">
-            <input type="radio" name="lancache_image_channel" value="{{ ch }}"
-                   {% if lancache_image_channel == ch %}checked{% endif %}
+          <label class="mode-btn {% if v.LANCACHE_IMAGE_CHANNEL == ch %}selected{% endif %}" style="position:relative;">
+            <input type="radio" name="LANCACHE_IMAGE_CHANNEL" value="{{ ch }}"
+                   {% if v.LANCACHE_IMAGE_CHANNEL == ch %}checked{% endif %}
                    style="position:absolute; opacity:0; pointer-events:none;">{{ ch }}
           </label>
           {% endfor %}
@@ -39,11 +39,12 @@
       <div class="toggle-row">
         <div>
           <div class="t-label">Check for updates automatically</div>
-          <div class="t-desc">Applied within {{ converge_minutes }} minutes of saving.</div>
+          <div class="t-desc">Applied within {{ v.AUTO_UPDATE_INTERVAL_MINUTES }} minutes of saving.</div>
         </div>
         <label class="toggle">
-          <input type="checkbox" id="auto_update_enabled" name="auto_update_enabled" value="1"
-                 {% if auto_update_enabled %}checked{% endif %}>
+          <input type="hidden" name="AUTO_UPDATE_ENABLED" value="false">
+                 <input type="checkbox" id="auto_update_enabled" name="AUTO_UPDATE_ENABLED" value="true"
+                 {% if v.AUTO_UPDATE_ENABLED == "true" %}checked{% endif %}>
           <span class="track"></span><span class="knob"></span>
         </label>
       </div>
@@ -52,22 +53,23 @@
          Why: the NTP page is gone; settings need a home
          From: Issue #1683 | PR #1858 -->
       <div class="section-title">Time server (NTP)</div>
-      <p class="section-sub">Serves the time to LAN clients on UDP {{ ntp_port }}.</p>
+      <p class="section-sub">Serves the time to LAN clients on UDP {{ v.NTP_PORT }}.</p>
       <div class="toggle-row">
         <div>
           <div class="t-label">Run the time server</div>
           <div class="t-desc">Needs at least one upstream server (field below).</div>
-          {% if ntp_enabled %}<div class="t-desc" style="margin-top:4px;">{% if ntp_answers %}Status: answering on {{ http_ip }}:{{ ntp_port }}.{% else %}Status: no answer from {{ http_ip }}:{{ ntp_port }} yet.{% endif %}</div>{% endif %}
+          {% if v.NTP_ENABLED == "true" %}<div class="t-desc" style="margin-top:4px;">{% if ntp_answers %}Status: answering on {{ v.IP_HTTP }}:{{ v.NTP_PORT }}.{% else %}Status: no answer from {{ v.IP_HTTP }}:{{ v.NTP_PORT }} yet.{% endif %}</div>{% endif %}
         </div>
         <label class="toggle">
-          <input type="checkbox" id="ntp_enabled" name="ntp_enabled" value="1"
-                 {% if ntp_enabled %}checked{% endif %}>
+          <input type="hidden" name="NTP_ENABLED" value="false">
+                 <input type="checkbox" id="ntp_enabled" name="NTP_ENABLED" value="true"
+                 {% if v.NTP_ENABLED == "true" %}checked{% endif %}>
           <span class="track"></span><span class="knob"></span>
         </label>
       </div>
-      <p class="field-hint">Test from a PC in the LAN: <code>w32tm /stripchart /computer:{{ http_ip }} /samples:3 /dataonly</code> (Windows) or <code>ntpdate -q {{ http_ip }}</code> (Linux). A reply means the time server runs.</p>
+      <p class="field-hint">Test from a PC in the LAN: <code>w32tm /stripchart /computer:{{ v.IP_HTTP }} /samples:3 /dataonly</code> (Windows) or <code>ntpdate -q {{ v.IP_HTTP }}</code> (Linux). A reply means the time server runs.</p>
       <div class="field-row">
-        <textarea name="ntp_upstream_servers" rows="2" style="width:100%; padding:9px 11px; border-radius:8px; border:1px solid var(--navy-600); background:var(--navy-900); color:var(--foam); font-family:var(--font-mono); font-size:13px;">{{ ntp_upstream_servers }}</textarea>
+        <textarea name="NTP_UPSTREAM_SERVERS" rows="2" style="width:100%; padding:9px 11px; border-radius:8px; border:1px solid var(--navy-600); background:var(--navy-900); color:var(--foam); font-family:var(--font-mono); font-size:13px;">{{ v.NTP_UPSTREAM_SERVERS }}</textarea>
       </div>
       <p class="field-hint">At least one server. Names or IP addresses, separated by a space, comma or new line, for example <code>0.debian.pool.ntp.org time.cloudflare.com</code>.</p>
       <div class="toggle-row">
@@ -76,8 +78,9 @@
           <div class="t-desc">Needs the time server and the Kea DHCP server enabled.</div>
         </div>
         <label class="toggle">
-          <input type="checkbox" id="ntp_auto_dhcp" name="ntp_auto_dhcp" value="1"
-                 {% if ntp_auto_dhcp %}checked{% endif %}>
+          <input type="hidden" name="DHCP_NTP_AUTO" value="false">
+                 <input type="checkbox" id="ntp_auto_dhcp" name="DHCP_NTP_AUTO" value="true"
+                 {% if v.DHCP_NTP_AUTO == "true" %}checked{% endif %}>
           <span class="track"></span><span class="knob"></span>
         </label>
       </div>

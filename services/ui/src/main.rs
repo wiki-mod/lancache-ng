@@ -93,6 +93,16 @@ impl App {
         ctx.insert("page", name.trim_end_matches(".html"));
         let s = self.settings();
         ctx.insert("active_page", name.trim_end_matches(".html"));
+        let v: BTreeMap<String, String> = s
+            .specs()
+            .filter(|sp| !matches!(sp.kind, config::Kind::Secret))
+            .filter_map(|sp| s.text(&sp.key).ok().map(|t| (sp.key.clone(), t)))
+            .collect();
+        ctx.insert("v", &v);
+        ctx.insert(
+            "login_enabled",
+            &!s.text("UI_PASSWORD_HASH").unwrap_or_default().is_empty(),
+        );
         ctx.insert("pages", &PAGES.iter().copied().collect::<BTreeMap<_, _>>());
         ctx.insert(
             "routes",
@@ -160,12 +170,9 @@ async fn auth(State(app): Shared, mut req: Request, next: Next) -> Response {
         let ok = match given.as_deref().and_then(|c| c.split_once(':')) {
             Some((u, p)) => {
                 let (p, hash) = (p.to_string(), hash.clone());
-                let pass = tokio::task::spawn_blocking(move || {
-                    PasswordHash::new(&hash)
-                        .is_ok_and(|h| Argon2::default().verify_password(p.as_bytes(), &h).is_ok())
-                })
-                .await
-                .unwrap_or(false);
+                let pass = tokio::task::spawn_blocking(move || verify(&hash, &p))
+                    .await
+                    .unwrap_or(false);
                 pass & secret::equal(u.as_bytes(), user.as_bytes())
             }
             None => false,
@@ -235,45 +242,92 @@ async fn dashboard(State(app): Shared, axum::Extension(csrf): axum::Extension<Cs
     app.page("dashboard.html", ctx, &csrf.0)
 }
 
-// What: one setup row for the template.
-// Why: the form is built from the SOT schema, not by hand.
-// From: Issue #1683 | PR #1858
-#[derive(serde::Serialize)]
-struct Row {
-    key: String,
-    value: String,
-    kind: String,
-    owner: String,
-    effect: String,
-    secret: bool,
-}
-
-// What: setup page: every schema key as a form row.
-// Why: new SOT keys appear without ui code changes.
+// What: General page: channel, updates, NTP, login.
+// Why: design page; fields are SOT keys (v.KEY).
 // From: Issue #1683 | PR #1858
 async fn setup(State(app): Shared, axum::Extension(csrf): axum::Extension<Csrf>) -> Response {
     let s = app.settings();
-    let rows: Vec<Row> = s
-        .specs()
-        .map(|sp| {
-            let secret = matches!(sp.kind, config::Kind::Secret);
-            Row {
-                key: sp.key.clone(),
-                value: if secret {
-                    String::new()
-                } else {
-                    s.text(&sp.key).unwrap_or_default()
-                },
-                kind: format!("{:?}", sp.kind),
-                owner: sp.owner.clone(),
-                effect: format!("{:?}", sp.effect),
-                secret,
-            }
-        })
-        .collect();
     let mut ctx = Context::new();
-    ctx.insert("rows", &rows);
+    let on = s.flag("NTP_ENABLED").unwrap_or(false);
+    let answers = match (
+        on,
+        s.text("IP_HTTP"),
+        s.uint("NTP_PORT"),
+        s.uint("NTP_PROBE_WAIT_MS"),
+    ) {
+        (true, Ok(ip), Ok(port), Ok(ms)) => tokio::task::spawn_blocking(move || {
+            lancache_ng::ntp::answers(&ip, port, Duration::from_millis(ms))
+        })
+        .await
+        .unwrap_or(false),
+        _ => false,
+    };
+    ctx.insert("ntp_answers", &answers);
     app.page("setup.html", ctx, &csrf.0)
+}
+
+// What: change the ui password (Argon2id hash).
+// Why: only the hash is stored; current one must match.
+// From: Issue #1683 | PR #1858
+async fn password(
+    State(app): Shared,
+    axum::Extension(csrf): axum::Extension<Csrf>,
+    Form(form): Form<BTreeMap<String, String>>,
+) -> Response {
+    if !csrf_ok(&form, &csrf) {
+        return (StatusCode::FORBIDDEN, "CSRF token mismatch").into_response();
+    }
+    let field = |k: &str| form.get(k).cloned().unwrap_or_default();
+    let (cur, new, again) = (
+        field("current_password"),
+        field("new_password"),
+        field("confirm_password"),
+    );
+    if new != again {
+        return (StatusCode::BAD_REQUEST, "the two new passwords differ").into_response();
+    }
+    let s = app.settings();
+    let min = s.uint("UI_PASSWORD_MIN_LENGTH").unwrap_or(u64::MAX);
+    if u64::try_from(new.chars().count()).unwrap_or(0) < min {
+        return (
+            StatusCode::BAD_REQUEST,
+            format!("the password needs at least {min} characters"),
+        )
+            .into_response();
+    }
+    let old = s.text("UI_PASSWORD_HASH").unwrap_or_default();
+    let hashed = tokio::task::spawn_blocking(move || {
+        if !old.is_empty() && !verify(&old, &cur) {
+            return Err("the current password is wrong".to_string());
+        }
+        phc(&new)
+    })
+    .await
+    .unwrap_or_else(|e| Err(e.to_string()));
+    let hash = match hashed {
+        Ok(h) => h,
+        Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
+    };
+    let Some(path) = app.saved.clone() else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("{SETTINGS_FILE_ENV} is not set"),
+        )
+            .into_response();
+    };
+    let update = BTreeMap::from([("UI_PASSWORD_HASH".to_string(), hash)]);
+    if let Err(e) = config::store(&path, &s, &update) {
+        return (StatusCode::BAD_REQUEST, e).into_response();
+    }
+    match Settings::load(&process_env, Some(&path)) {
+        Ok(n) => {
+            if let Ok(mut cur) = app.settings.write() {
+                *cur = n;
+            }
+            Redirect::to("/setup").into_response()
+        }
+        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+    }
 }
 
 // What: save changed settings, render, write, apply.
@@ -390,13 +444,15 @@ const PAGES: [(&str, &str); 7] = [
     ("dhcp", "/dhcp"),
     ("setup", "/setup"),
 ];
-const ROUTES: [(&str, &str); 6] = [
+const ROUTES: [(&str, &str); 8] = [
     ("admin_css", "/static/admin.css"),
     ("favicon", "/favicon.ico"),
     ("logo_icon", "/static/logo-icon.png"),
     ("watchdog_status", "/api/status"),
     ("desired_state", "/api/container/{service}"),
     ("restart_ui", "/api/restart-ui"),
+    ("setup_save", "/setup/save"),
+    ("password", "/setup/password"),
 ];
 
 // What: traffic-light colour of one container.
@@ -544,6 +600,26 @@ fn asset(kind: &'static str, body: &'static [u8]) -> Response {
     ([(header::CONTENT_TYPE, kind)], body).into_response()
 }
 
+// What: check a password against a PHC hash.
+// Why: one owner for login and password change.
+// From: Issue #1683 | PR #1858
+fn verify(hash: &str, pw: &str) -> bool {
+    PasswordHash::new(hash)
+        .is_ok_and(|h| Argon2::default().verify_password(pw.as_bytes(), &h).is_ok())
+}
+
+// What: Argon2id PHC string of a password.
+// Why: one owner for setup.sh and the password page.
+// From: Issue #1683 | PR #1858
+fn phc(pw: &str) -> Result<String, String> {
+    let salt =
+        argon2::password_hash::SaltString::generate(&mut argon2::password_hash::rand_core::OsRng);
+    Argon2::default()
+        .hash_password(pw.as_bytes(), &salt)
+        .map(|h| h.to_string())
+        .map_err(|e| e.to_string())
+}
+
 // What: hash a password from stdin (PHC string).
 // Why: setup.sh stores only the hash, never the password.
 // From: Issue #1683 | PR #1858
@@ -556,12 +632,7 @@ fn hash_password() -> Result<(), String> {
     if pw.is_empty() {
         return Err("the password on stdin is empty".into());
     }
-    let salt =
-        argon2::password_hash::SaltString::generate(&mut argon2::password_hash::rand_core::OsRng);
-    let phc = Argon2::default()
-        .hash_password(pw.as_bytes(), &salt)
-        .map_err(|e| e.to_string())?;
-    println!("{phc}");
+    println!("{}", phc(pw)?);
     Ok(())
 }
 
@@ -606,6 +677,7 @@ async fn main() -> Result<(), String> {
         .route("/", get(dashboard))
         .route("/setup", get(setup))
         .route("/setup/save", post(save))
+        .route("/setup/password", post(password))
         .route("/api/status", get(status))
         .route("/api/container/{service}", post(container_state))
         .route("/api/restart-ui", post(restart_ui))
