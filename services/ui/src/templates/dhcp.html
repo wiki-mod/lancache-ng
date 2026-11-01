@@ -105,9 +105,9 @@
       <span class="beambar-dot" data-dot-status="{% if dhcp_mode == "disabled" %}gray{% else %}green{% endif %}"></span>
     </div>
 
-    <form method="post" action="{{ routes.dhcp_mode | safe }}" class="grid gap-3 md:grid-cols-2 items-end">
+    <form method="post" action="{{ routes.dhcp_mode | safe }}" class="flex flex-wrap items-end gap-3">
       {{ <csrf_field csrf_token={csrf_token}/> }}
-      <div>
+      <div style="min-width:220px; max-width:320px; flex:1 1 220px;">
         <label class="block text-xs text-slate-400 mb-1">Aktiver DHCP-Modus</label>
         <select name="dhcp_mode"
                 class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-blue-500">
@@ -120,7 +120,7 @@
         </select>
       </div>
       <button type="submit"
-              class="btn btn-blue">
+              class="btn btn-blue" style="width:auto;">
         Speichern
       </button>
     </form>
