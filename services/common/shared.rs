@@ -2627,10 +2627,13 @@ pub mod apply {
 
     // What: carry out the plan: HUP or restart.
     // Why: Live programs reread by themselves.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
+    // hup: owners whose main process takes SIGHUP;
+    // openrc-init ignores it, so others restart.
     pub async fn run(
         api: &Api,
         plan: &BTreeMap<String, Effect>,
+        hup: &[String],
         container_of: &(dyn Fn(&str) -> String + Sync),
         grace: u32,
         limit: Duration,
@@ -2640,6 +2643,13 @@ pub mod apply {
             let outcome = match action_of(effect) {
                 None if effect == Effect::Recreate => Outcome::NeedsRecreate,
                 None => Outcome::Live,
+                Some(Action::Reload) if !hup.contains(owner) => {
+                    let a = Action::Restart;
+                    match api.act(&container_of(owner), a, grace, limit).await {
+                        Ok(()) => Outcome::Done(a),
+                        Err(e) => Outcome::Failed(e),
+                    }
+                }
                 Some(a) => match api.act(&container_of(owner), a, grace, limit).await {
                     Ok(()) => Outcome::Done(a),
                     Err(e) => Outcome::Failed(e),

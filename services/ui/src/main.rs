@@ -1564,7 +1564,8 @@ async fn apply_all(app: &App, old: &Settings, new: &Settings) -> Result<Vec<Stri
         report.push(format!("{dhcp}: mode off, stop {r:?}"));
     }
     let lookup = |owner: &str| names.get(owner).cloned().unwrap_or_default();
-    for (owner, result) in apply::run(&app.docker, &plan, &lookup, grace, limit).await {
+    let hup = new.list("HUP_OWNERS");
+    for (owner, result) in apply::run(&app.docker, &plan, &hup, &lookup, grace, limit).await {
         report.push(format!("{owner}: {result:?}"));
     }
     Ok(report)

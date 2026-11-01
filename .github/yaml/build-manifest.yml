@@ -840,6 +840,7 @@ runtime:
     - RECURSOR_AAAA_LUA_FILE=@CONFIG_DIR@/dns/filter-aaaa.lua
     - CHRONY_CONF_FILE=@CONFIG_DIR@/services/chrony.conf
     - CONFIG_DIR=/etc/lancache
+    - HUP_OWNERS=proxy ui
     - NGINX_CONF_DIR=@CONFIG_DIR@/proxy
     - DNSMASQ_CONF_FILE=@CONFIG_DIR@/dhcp/dnsmasq.conf
     - KEA_CTRL_CONF_FILE=@CONFIG_DIR@/dhcp/kea-ctrl-agent.conf
@@ -1053,6 +1054,7 @@ runtime:
     - RECURSOR_AAAA_LUA_FILE=path;;;reload;dns
     - CHRONY_CONF_FILE=path;;;container;services
     - CONFIG_DIR=path;;;container;ui
+    - HUP_OWNERS=list;;;live;ui
     - NGINX_CONF_DIR=path;;;container;proxy
     - DNSMASQ_CONF_FILE=path;;;container;dhcp
     - KEA_CTRL_CONF_FILE=path;;;container;dhcp
