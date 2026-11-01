@@ -2296,13 +2296,21 @@ fn router(app: Arc<App>) -> Router {
 // From: Issue #1683 | PR #1980
 async fn secure(State(app): Shared, req: Request, next: Next) -> Response {
     let s = app.settings();
+    let https = req
+        .headers()
+        .get("x-forwarded-proto")
+        .is_some_and(|v| v.as_bytes().eq_ignore_ascii_case(b"https"));
     let mut res = next.run(req).await;
     for (name, key) in [
         (header::CONTENT_SECURITY_POLICY, "UI_CSP"),
         (header::X_FRAME_OPTIONS, "UI_FRAME_OPTIONS"),
         (header::REFERRER_POLICY, "UI_REFERRER_POLICY"),
         (header::X_CONTENT_TYPE_OPTIONS, "UI_CONTENT_TYPE_OPTIONS"),
+        (header::STRICT_TRANSPORT_SECURITY, "UI_HSTS"),
     ] {
+        if name == header::STRICT_TRANSPORT_SECURITY && !https {
+            continue;
+        }
         match s.text(key).map(|v| header::HeaderValue::from_str(&v)) {
             Ok(Ok(v)) => {
                 res.headers_mut().insert(name, v);

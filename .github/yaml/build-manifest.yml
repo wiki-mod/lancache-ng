@@ -847,6 +847,7 @@ runtime:
     - UI_CONTENT_TYPE_OPTIONS=nosniff
     - "UI_CSP=default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self' data:"
     - UI_FRAME_OPTIONS=DENY
+    - UI_HSTS=max-age=31536000; includeSubDomains
     - UI_REFERRER_POLICY=no-referrer
     - DHCP_MODE_FILE=@CONFIG_DIR@/dhcp/mode
     - HUP_OWNERS=proxy ui
@@ -1067,6 +1068,7 @@ runtime:
     - UI_CONTENT_TYPE_OPTIONS=text;;;live;ui
     - UI_CSP=text;;;live;ui
     - UI_FRAME_OPTIONS=text;;;live;ui
+    - UI_HSTS=text;;;live;ui
     - UI_REFERRER_POLICY=text;;;live;ui
     - DHCP_MODE_FILE=path;;;container;dhcp
     - HUP_OWNERS=list;;;live;ui
