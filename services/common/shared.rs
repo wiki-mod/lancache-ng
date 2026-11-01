@@ -8,6 +8,7 @@
 pub mod config;
 
 use anyhow::Context as _;
+use futures_util::StreamExt as _;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -17,6 +18,7 @@ use std::io::{self, Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use subtle::{Choice, ConstantTimeEq};
 
@@ -1937,4 +1939,21 @@ impl ProbeReport {
 pub struct ProbeAnswer {
     pub id: String,
     pub page: Value,
+}
+
+// What: send one request, drop the body chunk by chunk, count bytes.
+// Why: ui prefill and cachehamster drain the same way; one owner.
+// From: Issue #816 | PR #1976
+pub async fn drain_response(
+    request: reqwest::RequestBuilder,
+    total: &AtomicU64,
+) -> Result<u64, reqwest::Error> {
+    let mut body = request.send().await?.error_for_status()?.bytes_stream();
+    let mut bytes = 0u64;
+    while let Some(chunk) = body.next().await {
+        let len = chunk?.len() as u64;
+        bytes += len;
+        total.fetch_add(len, Ordering::Relaxed);
+    }
+    Ok(bytes)
 }

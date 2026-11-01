@@ -29,10 +29,11 @@ use lancache_ng::config::{
 use lancache_ng::{
     ALARM_INGEST_PATH, ALARM_TOKEN_HEADER, Backoff, DesiredRunState, DesiredState, DnsRecord,
     FlushRequest, NetdataAlarm, PDNS_API_KEY_HEADER, Place, PowerDns, ProbeAnswer, ProbeReport,
-    SnapshotStore, WatchdogStatus, ct_eq, df, die, ensure_secret, error_chain, files_under, hex32,
-    http_client, is_placeholder, load_or_create, load_or_create_hex, metadata_if_present,
-    need_secs, own, probe_health, rrset_delete, rrset_replace, rrsets_patch, shared_secret,
-    shared_secret_file_name, snapshot_created_unix, unix_secs, write_file, write_if_changed,
+    SnapshotStore, WatchdogStatus, ct_eq, df, die, drain_response, ensure_secret, error_chain,
+    files_under, hex32, http_client, is_placeholder, load_or_create, load_or_create_hex,
+    metadata_if_present, need_secs, own, probe_health, rrset_delete, rrset_replace, rrsets_patch,
+    shared_secret, shared_secret_file_name, snapshot_created_unix, unix_secs, write_file,
+    write_if_changed,
 };
 use nkeys::{KeyPair, XKey};
 use regex::Regex;
@@ -6516,17 +6517,12 @@ async fn prefill_one(
         Some(port) => format!("{}:{port}", target.host_str().unwrap_or_default()),
         None => target.host_str().unwrap_or_default().to_string(),
     };
-    let mut body = client
-        .get(via)
-        .header(reqwest::header::HOST, host)
-        .send()
-        .await?
-        .error_for_status()?
-        .bytes_stream();
-    while let Some(chunk) = body.next().await {
-        run.bytes.fetch_add(chunk?.len() as u64, Ordering::Relaxed);
-    }
-    Ok(())
+    drain_response(
+        client.get(via).header(reqwest::header::HOST, host),
+        &run.bytes,
+    )
+    .await
+    .map(|_| ())
 }
 
 // What: start a prefill of the listed http addresses.
