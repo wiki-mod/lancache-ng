@@ -303,8 +303,9 @@ on a secondary until the next good transfer)
 
 **Mitigations**:
 - Secondaries replicate with native PowerDNS NOTIFY + AXFR. Every transfer is
-  signed with the TSIG key (`DDNS_TSIG_NAME`/`DDNS_TSIG_SECRET`); unsigned
-  transfers are refused.
+  signed with the TSIG key (`DDNS_TSIG_NAME`/`DDNS_TSIG_KEY`), bound per zone
+  (`TSIG-ALLOW-AXFR` / `AXFR-MASTER-TSIG`); `allow-axfr-ips` holds only the
+  optional `PDNS_AXFR_FROM` hosts, so a secondary without the key gets nothing.
 - The TSIG key reaches a secondary only through the authenticated
   registration answer (`/api/secondary/register`, see T14).
 - Record changes are written only by the Admin UI through the PowerDNS API
@@ -582,7 +583,9 @@ copy of all zones)
 - A registered secondary receives the TSIG key and the primary address; it
   then pulls zones by signed AXFR only (T5). It cannot publish DNS records.
 - A secondary can be removed (`DELETE /api/secondary/{name}`) without
-  affecting the others; rotate the TSIG key if a secondary was forged.
+  affecting the others; removal renews the TSIG key at once, so the
+  removed node can no longer transfer zones. The DNS page can renew it
+  any time ("TSIG-Schlüssel erneuern").
 
 **Residual risk**: Low–Medium — bounded by keeping the registration token and
 the TSIG key secret.

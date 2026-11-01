@@ -620,6 +620,31 @@ pub mod pdns {
                 .map(drop)
         }
 
+        // What: create or replace one TSIG key by name.
+        // Why: rotation reuses the name; PUT fails if absent.
+        // From: Issue #1683 | PR #1858
+        pub async fn set_tsigkey(&self, name: &str, algorithm: &str, secret: &str) -> Result<(), String> {
+            let body = json!({"name": name, "algorithm": algorithm, "key": secret});
+            let path = format!("/tsigkeys/{}", zone_id(name));
+            if self.call(reqwest::Method::PUT, &path, Some(body.clone())).await.is_ok() {
+                return Ok(());
+            }
+            self.call(reqwest::Method::POST, "/tsigkeys", Some(body))
+                .await
+                .map(drop)
+        }
+
+        // What: set one metadata kind of a zone.
+        // Why: TSIG-ALLOW-AXFR and AXFR-MASTER-TSIG bind keys.
+        // From: Issue #1683 | PR #1858
+        pub async fn set_metadata(&self, zone: &str, kind: &str, values: &[String]) -> Result<(), String> {
+            let path = format!("/zones/{}/metadata/{kind}", zone_id(zone));
+            let body = json!({"kind": kind, "metadata": values});
+            self.call(reqwest::Method::PUT, &path, Some(body))
+                .await
+                .map(drop)
+        }
+
         // What: all zones with serial and check times.
         // Why: the sync check reads these fields only.
         // From: Issue #1683 | PR #1858
@@ -1971,7 +1996,7 @@ pub mod pdns_conf {
     }
 
     // What: addresses of registered secondaries.
-    // Why: NOTIFY and AXFR rights use one list.
+    // Why: NOTIFY goes to every registered secondary.
     // From: Issue #1683 | PR #1858
     pub fn secondary_ips(s: &Settings) -> Vec<String> {
         s.list("DNS_SECONDARIES")
@@ -2013,14 +2038,10 @@ pub mod pdns_conf {
                 },
             ),
             ("allow-notify-from", notify_from),
-            (
-                "allow-axfr-ips",
-                s.list("PDNS_AXFR_FROM")
-                    .into_iter()
-                    .chain(secondary_ips(s))
-                    .collect::<Vec<_>>()
-                    .join(","),
-            ),
+            // What: AXFR by IP only for extra SOT hosts.
+            // Why: secondaries need the TSIG key (zone metadata).
+            // From: Issue #1683 | PR #1858
+            ("allow-axfr-ips", s.list("PDNS_AXFR_FROM").join(",")),
             ("xfr-cycle-interval", s.uint("PDNS_XFR_CYCLE")?.to_string()),
             ("dnsupdate", yes(primary).to_string()),
             (
@@ -2321,7 +2342,7 @@ pub mod kea_conf {
         Ok(json!({"DhcpDdns": {
             "ip-address": s.text("KEA_DDNS_ADDRESS")?,
             "port": s.uint("KEA_DDNS_PORT")?,
-            "tsig-keys": [{"name": tsig_name, "algorithm": "HMAC-SHA256", "secret": tsig_secret}],
+            "tsig-keys": [{"name": tsig_name, "algorithm": s.text("DDNS_TSIG_ALGORITHM")?, "secret": tsig_secret}],
             "forward-ddns": {"ddns-domains": fwd},
             "reverse-ddns": {"ddns-domains": rev},
             "loggers": loggers(s, &["kea-dhcp-ddns"])?

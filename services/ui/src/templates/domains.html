@@ -314,6 +314,18 @@
       </p>
       {% endif %}
 
+      {# What: new TSIG key for DDNS and zone transfer
+         Why: locks out a removed or leaked secondary
+         From: Issue #1683 | PR #1858 #}
+      <form action="{{ routes.tsig_rotate | safe }}" method="post" class="flex items-center gap-4">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button type="submit" class="btn">TSIG-Schlüssel erneuern</button>
+        <p class="text-xs text-slate-500">
+          Danach jeden Secondary mit <code>./setup.sh secondary --rotate</code> neu anmelden.
+          Beim Entfernen eines Secondary passiert das Erneuern automatisch.
+        </p>
+      </form>
+
       <form action="{{ routes.ddns_unsigned | safe }}" method="post" class="flex items-center gap-4">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <div class="flex items-center gap-2">

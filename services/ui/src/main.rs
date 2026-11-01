@@ -662,6 +662,7 @@ async fn dns_action(
         "record-add" | "record-remove" => record(&s, &op, &get).await,
         "ptr-add" | "ptr-remove" => ptr(&s, &op, &get).await,
         "zone-rollback" => rollback(&s, &get).await,
+        "tsig-rotate" => rotate_tsig(&app).await,
         _ => Err(format!("unknown DNS action {op}")),
     };
     done(result, "/domains")
@@ -928,7 +929,11 @@ async fn secondary_action(
     match op.as_str() {
         "remove" => {
             list.remove(pos);
-            done(store_secondaries(&app, &list).await, "/domains")
+            let res = match store_secondaries(&app, &list).await {
+                Ok(()) => rotate_tsig(&app).await,
+                Err(e) => Err(e),
+            };
+            done(res, "/domains")
         }
         "rotate" => {
             let dir = PathBuf::from(s.text("SECRETS_DIR").unwrap_or_default());
@@ -1647,6 +1652,7 @@ async fn apply_all(app: &App, old: &Settings, new: &Settings) -> Result<Vec<Stri
     if new.text("DNS_REPLICATION_ROLE").as_deref() == Ok("secondary") {
         ensure_secondary_zones(new).await?;
     }
+    ensure_tsig(new).await?;
     let plan = apply::plan(&changes);
     let (grace, limit) = app.limits(new)?;
     let project = new.text("COMPOSE_PROJECT")?;
@@ -1669,6 +1675,26 @@ async fn apply_all(app: &App, old: &Settings, new: &Settings) -> Result<Vec<Stri
         .collect())
 }
 
+
+// What: TSIG key in PowerDNS, bound to every zone.
+// Why: AXFR needs the key, not only an allowed IP.
+// From: Issue #1683 | PR #1858
+async fn ensure_tsig(s: &Settings) -> Result<(), String> {
+    let sec = secrets(s)?;
+    let api = pdns_api(s)?;
+    api.set_tsigkey(&sec.tsig_name, &s.text("DDNS_TSIG_ALGORITHM")?, &sec.tsig_secret)
+        .await?;
+    let kind = if s.text("DNS_REPLICATION_ROLE")? == "secondary" {
+        "AXFR-MASTER-TSIG"
+    } else {
+        "TSIG-ALLOW-AXFR"
+    };
+    let key = vec![sec.tsig_name.clone()];
+    for z in api.zones().await? {
+        api.set_metadata(&z.name, kind, &key).await?;
+    }
+    Ok(())
+}
 // What: create missing secondary zones on this node.
 // Why: zones come from the primary's registration answer.
 // From: Issue #1683 | PR #1858
@@ -1685,6 +1711,60 @@ async fn ensure_secondary_zones(s: &Settings) -> Result<(), String> {
     Ok(())
 }
 
+
+// What: the TSIG secret (base64); a rotated file wins.
+// Why: rotation in the ui must beat the setup.sh value.
+// From: Issue #1683 | PR #1858
+fn tsig_secret(s: &Settings) -> Result<String, String> {
+    let dir = PathBuf::from(s.text("SECRETS_DIR")?);
+    let file = secret::file_of(&dir, "DDNS_TSIG_KEY");
+    if !file.exists() {
+        if let Some(v) = process_env("DDNS_TSIG_KEY").filter(|v| !v.is_empty()) {
+            return Ok(v);
+        }
+    }
+    let keep = fs::Owner {
+        uid: None,
+        gid: None,
+    };
+    secret::load_or_create(&file, new_tsig, keep).map_err(|e| format!("DDNS_TSIG_KEY: {e}"))
+}
+
+// What: a fresh 32-byte TSIG secret in base64.
+// Why: PowerDNS and Kea both take base64 secrets.
+// From: Issue #1683 | PR #1858
+fn new_tsig() -> String {
+    let hex = secret::random_hex(32);
+    let raw: Vec<u8> = (0..hex.len() / 2)
+        .filter_map(|i| u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).ok())
+        .collect();
+    base64::engine::general_purpose::STANDARD.encode(raw)
+}
+
+// What: replace the TSIG secret and apply it.
+// Why: locks out a removed or leaked secondary.
+// From: Issue #1683 | PR #1858
+async fn rotate_tsig(app: &App) -> Result<(), String> {
+    let s = app.settings();
+    let dir = PathBuf::from(s.text("SECRETS_DIR")?);
+    let file = secret::file_of(&dir, "DDNS_TSIG_KEY");
+    match std::fs::remove_file(&file) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            return Err(format!("{}: {e}", file.display()));
+        }
+        _ => {}
+    }
+    let keep = fs::Owner {
+        uid: None,
+        gid: None,
+    };
+    secret::load_or_create(&file, new_tsig, keep).map_err(|e| format!("DDNS_TSIG_KEY: {e}"))?;
+    let report = apply_all(app, &s, &s).await?;
+    for line in &report {
+        eprintln!("ui: tsig rotate: {line}");
+    }
+    Ok(())
+}
 // What: secrets the configs embed, read or created once.
 // Why: restarts never rotate a stored secret.
 // From: Issue #1683 | PR #1858
@@ -1701,7 +1781,7 @@ fn secrets(s: &Settings) -> Result<render::Secrets, String> {
         pdns_api_key: get("PDNS_API_KEY")?,
         recursor_api_key: get("RECURSOR_API_KEY")?,
         tsig_name: s.text("DDNS_TSIG_NAME")?,
-        tsig_secret: base64::engine::general_purpose::STANDARD.encode(get("DDNS_TSIG_SECRET")?),
+        tsig_secret: tsig_secret(s)?,
     })
 }
 
@@ -1717,7 +1797,7 @@ const PAGES: [(&str, &str); 7] = [
     ("dhcp", "/dhcp"),
     ("setup", "/setup"),
 ];
-const ROUTES: [(&str, &str); 44] = [
+const ROUTES: [(&str, &str); 45] = [
     ("hamster_add", "/cachehamster/add"),
     ("hamster_start", "/cachehamster/start"),
     ("hamster_cancel", "/cachehamster/cancel"),
@@ -1743,6 +1823,7 @@ const ROUTES: [(&str, &str); 44] = [
     ("aaaa_filter", "/domains/aaaa-filter"),
     ("ddns_unsigned", "/domains/ddns-unsigned"),
     ("zone_rollback", "/domains/zone-rollback"),
+    ("tsig_rotate", "/domains/tsig-rotate"),
     ("secondary", "/api/secondary/{name}/remove"),
     ("secondary_rotate", "/api/secondary/{name}/rotate"),
     ("secondary_health", "/api/secondary/{name}/health"),
