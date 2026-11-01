@@ -68,7 +68,12 @@ services:
     # What: processes lancache-watchdog supervise runs.
     # Why: ci.sh bakes them as LANCACHE_PROCESSES; one list.
     # From: Issue #1683
-    processes: [watch, retention, syslog-ng, chronyd]
+    processes:
+      - lancache-watchdog=/usr/local/bin/lancache-watchdog
+      - lancache-cachehamster=/usr/local/bin/lancache-cachehamster,daemon
+      - syslog-ng=/usr/sbin/syslog-ng,-F,-f,@SYSLOG_CONF_FILE@
+      - chronyd=/usr/sbin/chronyd,-d,-f,@CHRONY_CONF_FILE@
+      - snmpd=/usr/sbin/snmpd,-f,-C,-c,@SNMPD_CONF_FILE@
     # What: accounts and dirs ci.sh image-setup creates.
     # Why: no RUN logic in the Dockerfile; @KEY@ = default.
     # From: Issue #1683 | PR #1912
@@ -82,6 +87,7 @@ services:
       - openrc
       - syslog-ng
       - chrony-nts
+      - net-snmp
       - xz
       - tzdata
     # What: execute-smoke checks run post-build by ci.sh.
@@ -124,7 +130,10 @@ services:
     labels: [dns, pdns]
     description: "LanCache-NG dns: PowerDNS auth, dns-http and dns-https recursors."
     build_type: apk
-    processes: [pdns, dns-http, dns-https, soa]
+    processes:
+      - pdns=/usr/sbin/pdns_server,--config-dir=@CONFIG_DIR@/dns,--guardian=no,--daemon=no
+      - dns-http=/usr/sbin/pdns_recursor,--config-dir=@CONFIG_DIR@/dns,--config-name=http,--daemon=no
+      - dns-https=/usr/sbin/pdns_recursor,--config-dir=@CONFIG_DIR@/dns,--config-name=https,--daemon=no
     setup:
       - dir=@PDNS_CONF_DIR@/auth
       - dir=@PDNS_DATA_DIR@:pdns
@@ -145,7 +154,13 @@ services:
     labels: [dhcp, kea, dnsmasq]
     description: "LanCache-NG dhcp: Kea DHCP with control agent and DDNS, or dnsmasq proxy/relay, plus the DHCP probe."
     build_type: apk
-    processes: [kea-dhcp4, kea-ctrl-agent, kea-dhcp-ddns, dnsmasq, dhcp-probe]
+    processes:
+      - "off:"
+      - kea:kea-dhcp4=/usr/sbin/kea-dhcp4,-c,@KEA_DHCP4_CONF_FILE@
+      - kea:kea-ctrl-agent=/usr/sbin/kea-ctrl-agent,-c,@KEA_CTRL_CONF_FILE@
+      - kea:kea-dhcp-ddns=/usr/sbin/kea-dhcp-ddns,-c,@KEA_DDNS_CONF_FILE@
+      - dnsmasq-proxy:dnsmasq=/usr/sbin/dnsmasq,-k,-C,@DNSMASQ_CONF_FILE@
+      - dnsmasq-relay:dnsmasq=/usr/sbin/dnsmasq,-k,-C,@DNSMASQ_CONF_FILE@
     final_base: alpine
     packages:
       - openrc
@@ -794,7 +809,7 @@ runtime:
     - KEA_CTRL_URL=http://@DHCP_API_HOST@:@KEA_CTRL_PORT@/
     - KEA_DDNS_ADDRESS=@LOOPBACK_BIND_IP@
     - KEA_DDNS_PORT=53001
-    - KEA_DHCP4_CONF_FILE=/etc/kea/kea-dhcp4.conf
+    - KEA_DHCP4_CONF_FILE=@CONFIG_DIR@/dhcp/kea-dhcp4.conf
     - KEA_DHCP4_SOCKET=/run/kea/kea4-ctrl-socket
     - KEA_SNAPSHOT_DIR=@KEA_DATA_DIR@/snapshots
     - KEA_SNAPSHOT_KEEP=20
@@ -822,7 +837,21 @@ runtime:
     - PDNS_XFR_CYCLE=60
     - PROXY_ALLOWED_CLIENT_CIDRS=@PRIVATE_NETS@ fc00::/7
     - PROXY_LOG_PROGRAM=nginx
-    - RECURSOR_AAAA_LUA_FILE=/etc/pdns-recursor/filter-aaaa.lua
+    - RECURSOR_AAAA_LUA_FILE=@CONFIG_DIR@/dns/filter-aaaa.lua
+    - CHRONY_CONF_FILE=@CONFIG_DIR@/services/chrony.conf
+    - CONFIG_DIR=/etc/lancache
+    - DNSMASQ_CONF_FILE=@CONFIG_DIR@/dhcp/dnsmasq.conf
+    - KEA_CTRL_CONF_FILE=@CONFIG_DIR@/dhcp/kea-ctrl-agent.conf
+    - KEA_DDNS_CONF_FILE=@CONFIG_DIR@/dhcp/kea-dhcp-ddns.conf
+    - PDNS_CONF_FILE=@CONFIG_DIR@/dns/pdns.conf
+    - RECURSOR_HTTP_CONF_FILE=@CONFIG_DIR@/dns/recursor-http.yml
+    - RECURSOR_HTTP_LUA_FILE=@CONFIG_DIR@/dns/http.lua
+    - RECURSOR_HTTP_RPZ_FILE=@CONFIG_DIR@/dns/http.rpz
+    - RECURSOR_HTTPS_CONF_FILE=@CONFIG_DIR@/dns/recursor-https.yml
+    - RECURSOR_HTTPS_LUA_FILE=@CONFIG_DIR@/dns/https.lua
+    - RECURSOR_HTTPS_RPZ_FILE=@CONFIG_DIR@/dns/https.rpz
+    - SNMPD_CONF_FILE=@CONFIG_DIR@/services/snmpd.conf
+    - SYSLOG_CONF_FILE=@CONFIG_DIR@/services/syslog-ng.conf
     - RECURSOR_API_URLS=http://@LOOPBACK_BIND_IP@:@PDNS_HTTP_API_PORT@ http://@LOOPBACK_BIND_IP@:@PDNS_HTTPS_API_PORT@
     - REPO_URL=https://github.com/wiki-mod/lancache-ng
     - SECRETS_DIR=@LANCACHE_SHARED_SECRET_DIR@
@@ -879,7 +908,7 @@ runtime:
     - UI_PORT=@UI_LISTEN_PORT@
     - UI_PUBLIC_URL=
     - UI_RECENT_REQUESTS=50
-    - UI_SERVICES=dns:pdns dns:pdns-recursor services:syslog-ng services:chronyd services:snmpd services:lancache-cachehamster
+    - UI_SERVICES=dns:pdns dns:dns-http dns:dns-https services:syslog-ng services:chronyd services:snmpd services:lancache-cachehamster
     - UI_STATUS_REFRESH=10
     - UI_USER=admin
     - UPSTREAM_DHCP_IP=
@@ -1021,6 +1050,20 @@ runtime:
     - PROXY_LOG_PROGRAM=text;;;live;ui
     - PROXY_SECURITY_MODE=choice;lazy strict;;reload;proxy
     - RECURSOR_AAAA_LUA_FILE=path;;;reload;dns
+    - CHRONY_CONF_FILE=path;;;container;services
+    - CONFIG_DIR=path;;;container;ui
+    - DNSMASQ_CONF_FILE=path;;;container;dhcp
+    - KEA_CTRL_CONF_FILE=path;;;container;dhcp
+    - KEA_DDNS_CONF_FILE=path;;;container;dhcp
+    - PDNS_CONF_FILE=path;;;container;dns
+    - RECURSOR_HTTP_CONF_FILE=path;;;container;dns
+    - RECURSOR_HTTP_LUA_FILE=path;;;container;dns
+    - RECURSOR_HTTP_RPZ_FILE=path;;;container;dns
+    - RECURSOR_HTTPS_CONF_FILE=path;;;container;dns
+    - RECURSOR_HTTPS_LUA_FILE=path;;;container;dns
+    - RECURSOR_HTTPS_RPZ_FILE=path;;;container;dns
+    - SNMPD_CONF_FILE=path;;;container;services
+    - SYSLOG_CONF_FILE=path;;;container;services
     - RPZ_TTL=uint;1;86400;reload;dns
     - RPZ_SOA_MNAME=text;;;reload;dns
     - RPZ_SOA_RNAME=text;;;reload;dns
@@ -1127,7 +1170,7 @@ runtime:
   # What: defaults compose interpolates as SOT_<KEY>.
   # Why: setup.sh and ci.sh export them; no clash with .env.
   # From: Issue #1683 | PR #1912
-  compose_keys: LANCACHE_LOG_PORT SUPERVISE_RUN_DIR LANCACHE_SHARED_SECRET_DIR UI_DATA_DIR STATUS_DIR CACHE_DIR SYSLOG_LOG_ROOT RETENTION_STATE_DIR NTP_STATE_DIR CACHEHAMSTER_DATA_DIR DOCKER_SOCKET CDN_DOMAINS_FILE PDNS_DATA_DIR DNS_STATE_DIR DNS_SNAPSHOT_MOUNT DHCP_SNAPSHOT_MOUNT PROXY_SNAPSHOT_MOUNT KEA_DATA_DIR UI_LISTEN_PORT DNS_PORT DNS_HTTPS_PORT PDNS_AUTH_PORT NTP_PORT PROXY_HTTP_PORT PROXY_HTTPS_PORT NGINX_PASSTHROUGH_PORT NGINX_DIR NGINX_SUBDIR_CA NGINX_SUBDIR_CERTS NGINX_CACHE_DIR NGINX_PSL_FILE PDNS_LUA_DNS_SCRIPT TEMPLATE_DIR STATIC_DIR LOOPBACK_BIND_IP DHCP_API_HOST DNS_REPLICATION_ROLE_SECONDARY SECONDARY_RUNTIME_GID SECONDARY_SHARED_SECRET_DIR CONTAINER_NAME_SERVICES CONTAINER_NAME_PROXY CONTAINER_NAME_DNS CONTAINER_NAME_DHCP CONTAINER_NAME_UI HEALTHCHECK_INTERVAL HEALTHCHECK_TIMEOUT HEALTHCHECK_RETRIES HEALTHCHECK_START_PERIOD PROXY_HEALTH_PATH SETUP_DNS_PROBE_NAME
+  compose_keys: LANCACHE_LOG_PORT SUPERVISE_RUN_DIR LANCACHE_SHARED_SECRET_DIR UI_DATA_DIR STATUS_DIR CACHE_DIR SYSLOG_LOG_ROOT RETENTION_STATE_DIR NTP_STATE_DIR CACHEHAMSTER_DATA_DIR DOCKER_SOCKET CDN_DOMAINS_FILE PDNS_DATA_DIR DNS_STATE_DIR DNS_SNAPSHOT_MOUNT DHCP_SNAPSHOT_MOUNT PROXY_SNAPSHOT_MOUNT KEA_DATA_DIR UI_LISTEN_PORT DNS_PORT DNS_HTTPS_PORT PDNS_AUTH_PORT NTP_PORT PROXY_HTTP_PORT PROXY_HTTPS_PORT NGINX_PASSTHROUGH_PORT NGINX_DIR NGINX_SUBDIR_CA NGINX_SUBDIR_CERTS NGINX_CACHE_DIR NGINX_PSL_FILE PDNS_LUA_DNS_SCRIPT TEMPLATE_DIR STATIC_DIR LOOPBACK_BIND_IP DHCP_API_HOST DNS_REPLICATION_ROLE_SECONDARY SECONDARY_RUNTIME_GID SECONDARY_SHARED_SECRET_DIR CONTAINER_NAME_SERVICES CONTAINER_NAME_PROXY CONTAINER_NAME_DNS CONTAINER_NAME_DHCP CONTAINER_NAME_UI HEALTHCHECK_INTERVAL HEALTHCHECK_TIMEOUT HEALTHCHECK_RETRIES HEALTHCHECK_START_PERIOD PROXY_HEALTH_PATH SETUP_DNS_PROBE_NAME CONFIG_DIR DHCP_MODE
   # What: managed secrets as "KEY generator owner".
   # Why: setup.sh and ci.sh filter one list.
   # From: Issue #1683 | PR #1912

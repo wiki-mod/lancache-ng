@@ -1941,7 +1941,7 @@ pub mod recursor_conf {
         } else {
             String::new()
         };
-        let negttl = u("RECURSOR_NEGATIVE_TTL")?;
+        let negttl = u("RECURSOR_MAX_NEGATIVE_TTL")?;
         let mut y = String::new();
         y += "incoming:\n  listen:\n";
         y += &rows(&s.list(&which.key("LISTEN")), "    ")?;
@@ -1951,11 +1951,11 @@ pub mod recursor_conf {
         y += &format!("  forward_zones:\n{local}{recurse}");
         y += &format!("  lua_config_file: \"{lua_file}\"\n{aaaa}");
         y += &format!("  minimum_ttl_override: {}\n", u("RECURSOR_MINIMUM_TTL_OVERRIDE")?);
-        y += &format!("recordcache:\n  max_entries: {}\n", u("RECURSOR_RECORDCACHE_MAX")?);
+        y += &format!("recordcache:\n  max_entries: {}\n", u("RECURSOR_RECORDCACHE_MAX_ENTRIES")?);
         y += &format!("  refresh_on_ttl_perc: {}\n", u("RECURSOR_REFRESH_ON_TTL_PERC")?);
         y += &format!("  serve_stale_extensions: {}\n", u("RECURSOR_SERVE_STALE_EXTENSIONS")?);
         y += &format!("  max_negative_ttl: {negttl}\n");
-        y += &format!("packetcache:\n  max_entries: {}\n", u("RECURSOR_PACKETCACHE_MAX")?);
+        y += &format!("packetcache:\n  max_entries: {}\n", u("RECURSOR_PACKETCACHE_MAX_ENTRIES")?);
         y += &format!("  ttl: {}\n  negative_ttl: {negttl}\n", u("RECURSOR_PACKETCACHE_TTL")?);
         y += &format!("  servfail_ttl: {}\n", u("RECURSOR_SERVFAIL_TTL")?);
         y += &format!("webservice:\n  webserver: true\n  address: \"{}\"\n", s.text("PDNS_API_LISTEN")?);
@@ -2456,7 +2456,7 @@ pub mod nginx_conf {
             mitm: s.uint("NGINX_MITM_PORT")?,
             mitm_relay: at("NGINX_MITM_RELAY_PORT")?,
             pass_relay: at("NGINX_PASSTHROUGH_RELAY_PORT")?,
-            health: s.uint("NGINX_HEALTH_TLS_PORT")?,
+            health: s.uint("NGINX_HEALTH_HTTPS_PORT")?,
             lo,
         })
     }
@@ -2707,9 +2707,9 @@ pub mod render {
 
     fn dns_files(o: &mut Out, sec: &Secrets, names: &[String], serial: u32) {
         let s = o.s;
-        o.put("dns", "CHRONY_CONF_FILE", chrony::conf(s));
-        o.put("dns", "SYSLOG_CONF_FILE", log::conf(s));
-        o.put("dns", "SNMPD_CONF_FILE", crate::snmp::conf(s, &[], &[]));
+        o.put("services", "CHRONY_CONF_FILE", chrony::conf(s));
+        o.put("services", "SYSLOG_CONF_FILE", log::conf(s));
+        o.put("services", "SNMPD_CONF_FILE", crate::snmp::conf(s, &[], &[]));
         o.put("dns", "PDNS_CONF_FILE", pdns_conf::auth(s, &sec.pdns_api_key));
         for (which, ip_key) in [(Which::Http, "IP_HTTP"), (Which::Https, "IP_HTTPS")] {
             let Ok(answer) = s.text(ip_key) else { continue };
