@@ -1207,6 +1207,7 @@ runtime:
   managed_secrets:
     - KEA_CTRL_TOKEN hex32 stack
     - PDNS_API_KEY hex32 stack
+    - SNMP_COMMUNITY hex32 stack
     - SECONDARY_REGISTRATION_TOKEN hex32 stack
     - DDNS_TSIG_KEY base64_32 stack
     - UI_AUTH_PASSWORD alnum20 ui

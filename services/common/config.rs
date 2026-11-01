@@ -346,6 +346,19 @@ impl Settings {
             }
             set.specs.insert(spec.key.clone(), spec);
         }
+        // What: SOT defaults without a schema row, as text.
+        // Why: templates read fixed keys; env still wins.
+        // From: Issue #1683 | PR #1980
+        for (key, value) in &defaults {
+            if set.specs.contains_key(*key) {
+                continue;
+            }
+            let raw = env(key).filter(|v| !v.is_empty());
+            let raw = raw.unwrap_or_else(|| value.to_string());
+            if !raw.is_empty() {
+                set.values.insert(key.to_string(), Value::Text(raw));
+            }
+        }
         if errors.is_empty() {
             Ok(set)
         } else {

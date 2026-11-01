@@ -348,6 +348,10 @@ async fn dashboard(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page
     if let Some(live) = fetch_proxy_live(&s).await {
         ctx.insert("proxy_live", &live);
     }
+    // What: zero fill when the cache dir is unreadable.
+    // Why: the template always reads cache_pct.
+    // From: Issue #1683 | PR #1980
+    ctx.insert("cache_pct", &0u64);
     if let Ok(sp) = fs::space(Path::new(&s.text("NGINX_CACHE_DIR")?)) {
         let used = sp.total.saturating_sub(sp.free);
         ctx.insert("cache_used_human", &human::bytes(used));
