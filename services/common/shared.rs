@@ -2711,3 +2711,157 @@ pub mod apply {
         out
     }
 }
+
+// What: every config file of the stack from settings.
+// Why: the ui calls one function; paths from the SOT.
+// From: Issue #1683 | PR #1858
+pub mod render {
+    use crate::config::Settings;
+    use crate::recursor_conf::Which;
+    use crate::{chrony, dhcp, dnsmasq_conf, kea_conf, log, nginx_conf, pdns_conf, recursor_conf};
+    use std::path::PathBuf;
+
+    // What: secrets the configs embed.
+    // Why: read by the caller from the secret store.
+    // From: Issue #1683 | PR #1858
+    pub struct Secrets {
+        pub pdns_api_key: String,
+        pub recursor_api_key: String,
+        pub tsig_name: String,
+        pub tsig_secret: String,
+    }
+
+    // What: one file to write and its owning container.
+    // Why: apply::plan needs the owner of each change.
+    // From: Issue #1683 | PR #1858
+    pub struct File {
+        pub owner: &'static str,
+        pub path: PathBuf,
+        pub body: String,
+    }
+
+    // What: render all files; collect every error.
+    // Why: one bad value names itself; nothing half-written.
+    // From: Issue #1683 | PR #1858
+    pub fn all(s: &Settings, sec: &Secrets, serial: u32) -> Result<Vec<File>, Vec<String>> {
+        let mut out = Vec::new();
+        let mut errs = Vec::new();
+        let mut jobs: Vec<(&'static str, String, Result<String, String>)> = Vec::new();
+        let mut add = |owner: &'static str, key: &str, body: Result<String, String>| {
+            jobs.push((owner, key.to_string(), body));
+        };
+        let json = |v: Result<serde_json::Value, String>| {
+            v.and_then(|v| serde_json::to_string_pretty(&v).map_err(|e| e.to_string()))
+        };
+        add("dns", "CHRONY_CONF_FILE", chrony::conf(s));
+        add("dns", "SYSLOG_CONF_FILE", log::conf(s));
+        add(
+            "dns",
+            "PDNS_CONF_FILE",
+            pdns_conf::auth(s, &sec.pdns_api_key),
+        );
+        let domains = s
+            .text("CDN_DOMAINS_FILE")
+            .and_then(|p| std::fs::read_to_string(&p).map_err(|e| format!("{p}: {e}")));
+        let list: Vec<String> = domains
+            .as_deref()
+            .unwrap_or_default()
+            .lines()
+            .filter_map(crate::dns::cdn_entry)
+            .map(|(n, _)| n)
+            .collect();
+        for (which, ip_key) in [(Which::Http, "IP_HTTP"), (Which::Https, "IP_HTTPS")] {
+            let Ok(ip) = s.text(ip_key) else { continue };
+            let rpz_path = s.text(&which.key("RPZ_FILE"));
+            let lua_path = s.text(&which.key("LUA_FILE"));
+            add(
+                "dns",
+                &which.key("RPZ_FILE"),
+                recursor_conf::rpz(&list, &ip, serial),
+            );
+            add(
+                "dns",
+                &which.key("LUA_FILE"),
+                rpz_path.clone().and_then(|p| recursor_conf::lua(&p)),
+            );
+            add(
+                "dns",
+                &which.key("CONF_FILE"),
+                lua_path.and_then(|l| recursor_conf::yaml(s, which, &sec.recursor_api_key, &l)),
+            );
+        }
+        match dhcp::Mode::from_settings(s) {
+            Ok(dhcp::Mode::Kea) => {
+                add("dhcp", "KEA_DHCP4_CONF_FILE", json(kea_conf::dhcp4(s)));
+                add("dhcp", "KEA_CTRL_CONF_FILE", json(kea_conf::ctrl_agent(s)));
+                add(
+                    "dhcp",
+                    "KEA_DDNS_CONF_FILE",
+                    json(kea_conf::ddns(s, &sec.tsig_name, &sec.tsig_secret)),
+                );
+            }
+            Ok(m @ (dhcp::Mode::DnsmasqProxy | dhcp::Mode::DnsmasqRelay)) => {
+                add("dhcp", "DNSMASQ_CONF_FILE", dnsmasq_conf::conf(s, m));
+            }
+            Ok(dhcp::Mode::Off) => {}
+            Err(e) => add("dhcp", "DHCP_MODE", Err(e)),
+        }
+        drop(add);
+        for (owner, key, body) in jobs {
+            match (s.text(&key), body) {
+                (Ok(p), Ok(b)) => out.push(File {
+                    owner,
+                    path: PathBuf::from(p),
+                    body: b,
+                }),
+                (Err(e), _) | (_, Err(e)) => errs.push(e),
+            }
+        }
+        match nginx_files(s, domains.as_deref().unwrap_or_default()) {
+            Ok(files) => out.extend(files),
+            Err(e) => errs.push(e),
+        }
+        if let Err(e) = domains {
+            errs.push(e);
+        }
+        if errs.is_empty() {
+            Ok(out)
+        } else {
+            Err(errs)
+        }
+    }
+
+    // What: nginx templates plus generated includes.
+    // Why: templates ship in the ui image; dir from SOT.
+    // From: Issue #1683 | PR #1858
+    fn nginx_files(s: &Settings, domains: &str) -> Result<Vec<File>, String> {
+        let src = PathBuf::from(s.text("NGINX_TEMPLATE_DIR")?);
+        let dst = PathBuf::from(s.text("NGINX_DIR")?);
+        let psl_path = src.join(s.text("NGINX_PSL_FILE")?);
+        let psl = std::fs::read_to_string(&psl_path)
+            .map_err(|e| format!("{}: {e}", psl_path.display()))?;
+        let hosts = nginx_conf::hosts(domains, &nginx_conf::Psl::parse(&psl))?;
+        let https = s.flag("HTTPS_ENABLED")?;
+        let mut out = Vec::new();
+        for name in s.list("NGINX_TEMPLATES") {
+            if !https && name.ends_with("https.conf") {
+                continue;
+            }
+            let p = src.join(&name);
+            let text = std::fs::read_to_string(&p).map_err(|e| format!("{}: {e}", p.display()))?;
+            out.push(File {
+                owner: "proxy",
+                path: dst.join(&name),
+                body: nginx_conf::template(&text, s)?,
+            });
+        }
+        for (rel, body) in nginx_conf::files(s, &hosts, https)? {
+            out.push(File {
+                owner: "proxy",
+                path: dst.join(rel),
+                body,
+            });
+        }
+        Ok(out)
+    }
+}
