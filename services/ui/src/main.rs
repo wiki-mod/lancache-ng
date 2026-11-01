@@ -1939,8 +1939,21 @@ async fn command(s: &Settings, args: &[String]) -> Option<Result<(), String>> {
             _ => Err("usage: zone-rollback <zone> <snapshot-id>".into()),
         }),
         Some("healthcheck") => Some(healthcheck(s).await),
+        Some("render-dns") => Some(render_dns(s)),
         _ => None,
     }
+}
+
+// What: write the dns configs once, then exit.
+// Why: a secondary has no ui server to render them.
+// From: Issue #1683 | PR #1980
+fn render_dns(s: &Settings) -> Result<(), String> {
+    let sec = secrets(s)?;
+    let serial = u32::try_from(clock::unix_secs() % u64::from(u32::MAX)).unwrap_or(1);
+    let files = render::dns_only(s, &sec, serial).map_err(|e| e.join("; "))?;
+    let changed = write_files(s, &files)?;
+    println!("{}", json!({"written": files.len(), "changed": changed.len()}));
+    Ok(())
 }
 
 async fn healthcheck(s: &Settings) -> Result<(), String> {

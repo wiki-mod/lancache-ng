@@ -2814,6 +2814,26 @@ pub mod render {
             Err(o.errs)
         }
     }
+
+    // What: only the dns files, for a secondary.
+    // Why: a secondary runs only the dns container.
+    // From: Issue #1683 | PR #1980
+    pub fn dns_only(s: &Settings, sec: &Secrets, serial: u32) -> Result<Vec<File>, Vec<String>> {
+        let mut o = Out { s, files: Vec::new(), errs: Vec::new() };
+        let domains = crate::cdn::effective(s).map_err(|e| vec![e])?;
+        let names: Vec<String> = domains
+            .lines()
+            .filter_map(crate::dns::cdn_entry)
+            .map(|(n, _)| n)
+            .collect();
+        dns_files(&mut o, sec, &names, serial);
+        o.files.retain(|f| f.owner == "dns");
+        if o.errs.is_empty() {
+            Ok(o.files)
+        } else {
+            Err(o.errs)
+        }
+    }
 }
 
 // What: one SNTP query (RFC 4330).

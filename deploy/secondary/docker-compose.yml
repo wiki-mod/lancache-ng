@@ -12,7 +12,7 @@ services:
   dns:
     container_name: ${SOT_CONTAINER_NAME_DNS}
     image: ${LANCACHE_IMAGE_REF_DNS:?LANCACHE_IMAGE_REF_DNS is required}
-    environment:
+    environment: &dns-env
       - IP_HTTP=${IP_HTTP:?IP_HTTP is required}
       - IP_HTTPS=${IP_HTTPS:-}
       - PDNS_API_KEY=${PDNS_API_KEY}
@@ -49,6 +49,10 @@ services:
       # Why: Fund 148: a runtime file, not in the image.
       # From: Issue #1683 | PR #1858
       - ./filter-aaaa.lua:${SOT_PDNS_LUA_DNS_SCRIPT}:ro
+      # What: dns configs the render step wrote.
+      # Why: one owner writes; the dns only reads.
+      # From: Issue #1683 | PR #1980
+      - lancache-config:${SOT_CONFIG_DIR}:ro
     # What: dns-https binds its own IP and host port.
     # Why: setup.sh writes both; compose derives none.
     # From: Issue #1683 | PR #1912
@@ -67,13 +71,34 @@ services:
       retries: ${SOT_HEALTHCHECK_RETRIES:?SOT_HEALTHCHECK_RETRIES is required}
       start_period: ${SOT_HEALTHCHECK_START_PERIOD:?SOT_HEALTHCHECK_START_PERIOD is required}
     restart: always
+    # What: start only after the configs are written.
+    # Why: the dns programs read them at start.
+    # From: Issue #1683 | PR #1980
+    depends_on:
+      render:
+        condition: service_completed_successfully
     # What: Docker's local driver; it rotates by itself.
     # Why: no services container, so no syslog-ng here.
     # From: Issue #1683
     logging:
       driver: local
 
+  # What: one-shot ui run that writes the dns configs.
+  # Why: a secondary has no ui server; same renderer.
+  # From: Issue #1683 | PR #1980
+  render:
+    image: ${LANCACHE_IMAGE_REF_UI:?LANCACHE_IMAGE_REF_UI is required}
+    command: ["render-dns"]
+    environment: *dns-env
+    volumes:
+      - lancache-config:${SOT_CONFIG_DIR}
+      - ./cdn-domains.txt:${SOT_CDN_DOMAINS_FILE}:ro
+    restart: "no"
+    logging:
+      driver: local
+
 volumes:
+  lancache-config:
   pdns-data:
   pdns-filter-state:
   dns-config-snapshots:
