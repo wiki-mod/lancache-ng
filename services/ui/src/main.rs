@@ -2138,15 +2138,10 @@ fn hash_password() -> Result<(), String> {
     Ok(())
 }
 
-// What: compile all templates at start.
-// Why: a broken template stops the start.
-// From: Issue #1683 | PR #1858
-fn templates() -> Result<Tera, String> {
-    let mut t = Tera::default();
-    t.autoescape_on(vec!["html"]);
-    // What: image identity for the page footer.
-    // Why: base.html calls these four functions.
-    // From: Issue #1683 | PR #1980
+// What: image identity functions for the page footer.
+// Why: Tera checks calls when a template is added.
+// From: Issue #1683 | PR #1980
+fn register_image_functions(t: &mut Tera) {
     for (func, key) in [
         ("lancache_image_registry", "LANCACHE_IMAGE_REGISTRY"),
         ("lancache_image_prefix", "LANCACHE_IMAGE_PREFIX"),
@@ -2157,6 +2152,15 @@ fn templates() -> Result<Tera, String> {
             process_env(key).unwrap_or_default()
         });
     }
+}
+
+// What: compile all templates at start.
+// Why: a broken template stops the start.
+// From: Issue #1683 | PR #1858
+fn templates() -> Result<Tera, String> {
+    let mut t = Tera::default();
+    t.autoescape_on(vec!["html"]);
+    register_image_functions(&mut t);
     for (name, body) in TEMPLATES {
         t.add_raw_template(name, body)
             .map_err(|e| format!("template {name}: {e}"))?;
