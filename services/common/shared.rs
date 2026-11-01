@@ -2128,7 +2128,7 @@ pub mod recursor_conf {
         );
         for d in domains {
             let d = d.trim_end_matches('.');
-            if !crate::dns::is_dns_name(d) {
+            if !crate::dns::is_dns_name(d, false, true) {
                 return Err(format!("cache domain {d:?} is no DNS name"));
             }
             out.push_str(&format!("{d} {kind} {answer}\n*.{d} {kind} {answer}\n"));

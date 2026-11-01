@@ -79,6 +79,7 @@ services:
     # Why: consumers derive; no hardcoding (AG-CI-006)
     # From: Issue #1683
     packages:
+      - openrc
       - syslog-ng
       - chrony-nts
       - tzdata
@@ -129,6 +130,7 @@ services:
       - dir=@PDNS_RUN_DIR@:pdns
     final_base: alpine
     packages:
+      - openrc
       - pdns
       - pdns-backend-sqlite3
       - pdns-doc
@@ -145,6 +147,7 @@ services:
     processes: [kea-dhcp4, kea-ctrl-agent, kea-dhcp-ddns, dnsmasq, dhcp-probe]
     final_base: alpine
     packages:
+      - openrc
       - kea-dhcp4
       - kea-ctrl-agent
       - kea-dhcp-ddns
