@@ -1677,3 +1677,254 @@ pub mod snapshot {
         }
     }
 }
+
+// What: DHCP precheck: find servers, try a full lease.
+// Why: runs on demand in any mode; no idle polling.
+// From: Issue #1683 | PR #1858
+pub mod dhcp_probe {
+    use crate::config::Settings;
+    use dhcproto::v4::{
+        Decoder, DhcpOption, Encodable, Encoder, Flags, Message, MessageType, OptionCode,
+    };
+    use dhcproto::Decodable;
+    use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
+    use std::time::{Duration, Instant};
+
+    // What: DHCP client and server ports (RFC 2131).
+    // Why: protocol numbers, not project settings.
+    // From: Issue #1683 | PR #1858
+    const CLIENT_PORT: u16 = 68;
+    const SERVER_PORT: u16 = 67;
+
+    // What: one label/value row shown in the ui.
+    // Why: the ui renders offers as a table.
+    // From: Issue #1683 | PR #1858
+    #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+    pub struct Detail {
+        pub label: String,
+        pub value: String,
+    }
+
+    // What: one DHCP server that answered.
+    // Why: several servers on one LAN is the main finding.
+    // From: Issue #1683 | PR #1858
+    #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+    pub struct Server {
+        pub server: Option<Ipv4Addr>,
+        pub address: Option<Ipv4Addr>,
+        pub details: Vec<Detail>,
+    }
+
+    // What: result of one precheck run.
+    // Why: the ui shows servers and the lease try.
+    // From: Issue #1683 | PR #1858
+    #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+    pub struct Report {
+        pub servers: Vec<Server>,
+        pub lease_ok: bool,
+        pub lease_text: String,
+        pub error: Option<String>,
+    }
+
+    // What: options shown per offer, label and code.
+    // Why: codes fixed by RFC 2132; labels for the ui.
+    // From: Issue #1683 | PR #1858
+    const FIELDS: [(&str, OptionCode); 8] = [
+        ("Server", OptionCode::ServerIdentifier),
+        ("Subnet mask", OptionCode::SubnetMask),
+        ("Router", OptionCode::Router),
+        ("DNS", OptionCode::DomainNameServer),
+        ("Domain", OptionCode::DomainName),
+        ("Lease time", OptionCode::AddressLeaseTime),
+        ("Renewal", OptionCode::Renewal),
+        ("Broadcast", OptionCode::BroadcastAddr),
+    ];
+
+    // What: read address, server id and rows of a reply.
+    // Why: offers and ACKs carry the same fields.
+    // From: Issue #1683 | PR #1858
+    fn read(msg: &Message) -> Server {
+        let opts = msg.opts();
+        let text = |code: OptionCode| -> Option<String> {
+            Some(match opts.get(code)? {
+                DhcpOption::ServerIdentifier(a)
+                | DhcpOption::SubnetMask(a)
+                | DhcpOption::BroadcastAddr(a) => a.to_string(),
+                DhcpOption::AddressLeaseTime(s) | DhcpOption::Renewal(s) => s.to_string(),
+                DhcpOption::Router(l) | DhcpOption::DomainNameServer(l) => {
+                    l.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
+                }
+                DhcpOption::DomainName(n) => n.clone(),
+                _ => return None,
+            })
+        };
+        let address = Some(msg.yiaddr()).filter(|a| !a.is_unspecified());
+        let mut details: Vec<Detail> = address
+            .map(|a| Detail { label: "Address".into(), value: a.to_string() })
+            .into_iter()
+            .collect();
+        details.extend(FIELDS.iter().filter_map(|(label, code)| {
+            text(*code).map(|value| Detail { label: (*label).into(), value })
+        }));
+        let server = match opts.get(OptionCode::ServerIdentifier) {
+            Some(DhcpOption::ServerIdentifier(a)) => Some(*a),
+            _ => None,
+        };
+        Server { server, address, details }
+    }
+
+    // What: true when a reply has the given message type.
+    // Why: offers, ACKs and NAKs share one socket.
+    // From: Issue #1683 | PR #1858
+    fn is(msg: &Message, kind: MessageType) -> bool {
+        matches!(msg.opts().get(OptionCode::MessageType),
+            Some(DhcpOption::MessageType(t)) if *t == kind)
+    }
+
+    // What: build one client message.
+    // Why: broadcast flag except for RELEASE (RFC 2131).
+    // From: Issue #1683 | PR #1858
+    fn message(xid: u32, mac: &[u8; 6], ci: Ipv4Addr, kind: MessageType, opts: Vec<DhcpOption>) -> Message {
+        let none = Ipv4Addr::UNSPECIFIED;
+        let mut msg = Message::new_with_id(xid, ci, none, none, none, mac);
+        if kind != MessageType::Release {
+            msg.set_flags(Flags::default().set_broadcast());
+        }
+        msg.opts_mut().insert(DhcpOption::MessageType(kind));
+        let wanted = FIELDS.iter().map(|(_, c)| *c).filter(|c| *c != OptionCode::ServerIdentifier);
+        msg.opts_mut().insert(DhcpOption::ParameterRequestList(wanted.collect()));
+        for o in opts {
+            msg.opts_mut().insert(o);
+        }
+        msg
+    }
+
+    // What: encode and send one message.
+    // Why: one send path for every step.
+    // From: Issue #1683 | PR #1858
+    fn send(sock: &UdpSocket, msg: &Message, to: SocketAddrV4) -> Result<(), String> {
+        let mut buf = Vec::new();
+        msg.encode(&mut Encoder::new(&mut buf)).map_err(|e| e.to_string())?;
+        sock.send_to(&buf, to).map(drop).map_err(|e| e.to_string())
+    }
+
+    // What: read replies for xid until done or deadline.
+    // Why: the handler returns true to stop early.
+    // From: Issue #1683 | PR #1858
+    fn listen(sock: &UdpSocket, xid: u32, until: Instant, mut f: impl FnMut(&Message) -> bool) -> Result<(), String> {
+        let mut buf = [0u8; 1500];
+        loop {
+            let left = until.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Ok(());
+            }
+            sock.set_read_timeout(Some(left)).map_err(|e| e.to_string())?;
+            match sock.recv_from(&mut buf) {
+                Ok((n, _)) => {
+                    if let Ok(msg) = Message::decode(&mut Decoder::new(&buf[..n])) {
+                        if msg.xid() == xid && f(&msg) {
+                            return Ok(());
+                        }
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {
+                    return Ok(());
+                }
+                Err(e) => return Err(e.to_string()),
+            }
+        }
+    }
+
+    // What: DISCOVER, collect offers, REQUEST, RELEASE.
+    // Why: shows every server and proves a lease works.
+    // From: Issue #1683 | PR #1858
+    pub fn run(s: &Settings) -> Report {
+        let fail = |e: String| Report { servers: Vec::new(), lease_ok: false, lease_text: String::new(), error: Some(e) };
+        let (window, wait, sends) = match (
+            s.uint("DHCP_PROBE_WINDOW_MS"),
+            s.uint("DHCP_PROBE_ACK_WAIT_MS"),
+            s.uint("DHCP_PROBE_SENDS"),
+        ) {
+            (Ok(a), Ok(b), Ok(c)) => (Duration::from_millis(a), Duration::from_millis(b), c.max(1) as u32),
+            (a, b, c) => return fail([a.err(), b.err(), c.err()].into_iter().flatten().collect::<Vec<_>>().join("; ")),
+        };
+        let sock = match UdpSocket::bind((Ipv4Addr::UNSPECIFIED, CLIENT_PORT))
+            .and_then(|s| s.set_broadcast(true).map(|()| s))
+        {
+            Ok(s) => s,
+            Err(e) => return fail(format!("DHCP socket: {e}")),
+        };
+        let bcast = SocketAddrV4::new(Ipv4Addr::BROADCAST, SERVER_PORT);
+        let xid: u32 = rand::random();
+        // What: random locally administered unicast MAC.
+        // Why: the probe must not take a real host's lease.
+        // From: Issue #1683 | PR #1858
+        let mut mac: [u8; 6] = rand::random();
+        mac[0] = (mac[0] | 0x02) & !0x01;
+        let discover = message(xid, &mac, Ipv4Addr::UNSPECIFIED, MessageType::Discover, vec![]);
+        let end = Instant::now() + window;
+        let mut servers: Vec<Server> = Vec::new();
+        for i in 1..=sends {
+            if let Err(e) = send(&sock, &discover, bcast) {
+                return fail(format!("DHCPDISCOVER: {e}"));
+            }
+            let until = if i == sends { end } else { (Instant::now() + window / sends).min(end) };
+            if let Err(e) = listen(&sock, xid, until, |m| {
+                if is(m, MessageType::Offer) {
+                    let o = read(m);
+                    if !servers.iter().any(|x| x.server.is_some() && x.server == o.server) {
+                        servers.push(o);
+                    }
+                }
+                false
+            }) {
+                eprintln!("[dhcp_probe] read {i} failed: {e}");
+            }
+        }
+        let Some(first) = servers.first().cloned() else {
+            return Report { servers, lease_ok: false, lease_text: format!("no offer within {} ms", window.as_millis()), error: None };
+        };
+        let (Some(addr), Some(server)) = (first.address, first.server) else {
+            return Report { servers, lease_ok: false, lease_text: "offer without address or server id".into(), error: None };
+        };
+        let req = message(xid, &mac, Ipv4Addr::UNSPECIFIED, MessageType::Request,
+            vec![DhcpOption::RequestedIpAddress(addr), DhcpOption::ServerIdentifier(server)]);
+        if let Err(e) = send(&sock, &req, bcast) {
+            return Report { servers, lease_ok: false, lease_text: String::new(), error: Some(format!("DHCPREQUEST: {e}")) };
+        }
+        let mut verdict: Result<Server, String> = Err("no ACK before timeout".into());
+        if let Err(e) = listen(&sock, xid, Instant::now() + wait, |m| {
+            if is(m, MessageType::Ack) {
+                let a = read(m);
+                if a.server == Some(server) {
+                    verdict = Ok(a);
+                    return true;
+                }
+            } else if is(m, MessageType::Nak) {
+                verdict = Err("server sent DHCPNAK".into());
+                return true;
+            }
+            false
+        }) {
+            return Report { servers, lease_ok: false, lease_text: String::new(), error: Some(e) };
+        }
+        match verdict {
+            Ok(ack) => {
+                // What: give the test lease back at once.
+                // Why: the probe must not keep a pool address.
+                // From: Issue #1683 | PR #1858
+                if let Some(ip) = ack.address {
+                    let rel = message(rand::random(), &mac, ip, MessageType::Release,
+                        vec![DhcpOption::ServerIdentifier(server)]);
+                    if let Err(e) = send(&sock, &rel, SocketAddrV4::new(server, SERVER_PORT)) {
+                        eprintln!("[dhcp_probe] release to {server} failed: {e}");
+                    }
+                }
+                let text = ack.address.map_or("lease granted".into(), |ip| format!("lease {ip} granted by {server}"));
+                Report { servers, lease_ok: true, lease_text: text, error: None }
+            }
+            Err(t) => Report { servers, lease_ok: false, lease_text: t, error: None },
+        }
+    }
+}
