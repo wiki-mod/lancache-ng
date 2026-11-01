@@ -2222,6 +2222,7 @@ pub mod recursor_conf {
             "recursor:\n  serve_rfc1918: {}\n",
             s.flag("DNS_SERVE_RFC1918")?
         );
+        y += &format!("  socket_dir: \"{}\"\n", s.text("RECURSOR_RUN_DIR")?);
         y += &format!("  forward_zones:\n{local}{recurse}");
         y += &format!("  lua_config_file: \"{lua_file}\"\n{aaaa}");
         y += &format!(

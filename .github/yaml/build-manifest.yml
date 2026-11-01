@@ -139,6 +139,7 @@ services:
       - dir=@PDNS_CONF_DIR@/auth
       - dir=@PDNS_DATA_DIR@:pdns
       - dir=@PDNS_RUN_DIR@:pdns
+      - dir=@RECURSOR_RUN_DIR@
     final_base: alpine
     packages:
       - openrc
@@ -842,6 +843,7 @@ runtime:
     - PROXY_ALLOWED_CLIENT_CIDRS=@PRIVATE_NETS@ fc00::/7
     - PROXY_LOG_PROGRAM=nginx
     - RECURSOR_AAAA_LUA_FILE=@CONFIG_DIR@/dns/filter-aaaa.lua
+    - RECURSOR_RUN_DIR=/var/run/pdns-recursor
     - CHRONY_CONF_FILE=@CONFIG_DIR@/services/chrony.conf
     - CONFIG_DIR=/etc/lancache
     - UI_CONTENT_TYPE_OPTIONS=nosniff
@@ -1065,6 +1067,7 @@ runtime:
     - PROXY_LOG_PROGRAM=text;;;live;ui
     - PROXY_SECURITY_MODE=choice;lazy,strict;;reload;proxy
     - RECURSOR_AAAA_LUA_FILE=path;;;reload;dns
+    - RECURSOR_RUN_DIR=path;;;restart;dns
     - CHRONY_CONF_FILE=path;;;container;services
     - CONFIG_DIR=path;;;container;ui
     - UI_CONTENT_TYPE_OPTIONS=text;;;live;ui
