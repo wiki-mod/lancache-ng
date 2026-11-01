@@ -6,7 +6,7 @@
 // From: Issue #1683 | PR #1858
 
 use lancache_ng::config::{process_env, Settings};
-use lancache_ng::{cert, clock, dns, docker, fs, http, pdns, proc, state};
+use lancache_ng::{cert, clock, dns, docker, fs, http, pdns};
 use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -90,8 +90,8 @@ impl Watch {
         alarms
     }
 
-    // What: container state via Docker plus status files.
-    // Why: dead, unhealthy or stale containers get restarted.
+    // What: container state and health via Docker.
+    // Why: dead or unhealthy containers get restarted.
     // From: Issue #1683 | PR #1858
     async fn containers(&mut self, alarms: &mut Vec<Alarm>) {
         let limit = match self.secs("DOCKER_TIMEOUT") {
@@ -105,14 +105,6 @@ impl Watch {
         let list = match self.docker.project(&project, limit).await {
             Ok(v) => v,
             Err(e) => return alarms.push(crit("docker", e.to_string())),
-        };
-        let state_dir = match self.settings.text("WATCHDOG_STATE_DIR") {
-            Ok(v) => PathBuf::from(v),
-            Err(e) => return alarms.push(crit("watchdog", e)),
-        };
-        let max_age = match self.settings.uint("WATCHDOG_STATE_MAX_AGE") {
-            Ok(v) => v,
-            Err(e) => return alarms.push(crit("watchdog", e)),
         };
         for c in &list {
             let Some(service) = c["Labels"][docker::SERVICE_LABEL].as_str() else {
@@ -132,10 +124,6 @@ impl Watch {
                 .is_some_and(|s| s.contains("(unhealthy)"))
             {
                 reasons.push("health check unhealthy".to_string());
-            }
-            if run == "running" {
-                let file = state_dir.join(format!("{service}.json"));
-                reasons.extend(status_findings(&file, max_age, alarms, service));
             }
             if reasons.is_empty() {
                 continue;
@@ -277,44 +265,6 @@ impl Watch {
         fs::write(&path, &body, 0o644, fs::Place::Replace, keep)
             .map_err(|e| format!("{}: {e}", path.display()))
     }
-}
-
-// What: findings from one container status file.
-// Why: stale file = hung; failed program = broken inside.
-// From: Issue #1683 | PR #1858
-fn status_findings(
-    path: &Path,
-    max_age: u64,
-    alarms: &mut Vec<Alarm>,
-    service: &str,
-) -> Vec<String> {
-    let c = match state::read(path) {
-        Ok(c) => c,
-        Err(e) => {
-            alarms.push(warn(service, e));
-            return Vec::new();
-        }
-    };
-    let mut out = Vec::new();
-    let age = clock::unix_secs().saturating_sub(c.written);
-    if age > max_age {
-        out.push(format!("status file {age} s old"));
-    }
-    for p in &c.programs {
-        match &p.state {
-            proc::State::Failed { reason } if p.want == proc::Want::Run => {
-                out.push(format!("{} failed: {reason}", p.name));
-            }
-            proc::State::Backoff { attempt } => {
-                alarms.push(warn(
-                    service,
-                    format!("{} in backoff, try {attempt}", p.name),
-                ));
-            }
-            _ => {}
-        }
-    }
-    out
 }
 
 // What: warn alarm.
