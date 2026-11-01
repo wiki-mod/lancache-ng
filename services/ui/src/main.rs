@@ -995,6 +995,9 @@ async fn apply_all(app: &App, old: &Settings, new: &Settings) -> Result<Vec<Stri
             });
         }
     }
+    if new.text("DNS_REPLICATION_ROLE").as_deref() == Ok("secondary") {
+        ensure_secondary_zones(new).await?;
+    }
     let plan = apply::plan(&changes);
     let (grace, limit) = app.limits(new)?;
     let project = new.text("COMPOSE_PROJECT")?;
@@ -1004,6 +1007,22 @@ async fn apply_all(app: &App, old: &Settings, new: &Settings) -> Result<Vec<Stri
         .into_iter()
         .map(|(o, r)| format!("{o}: {r:?}"))
         .collect())
+}
+
+// What: create missing secondary zones on this node.
+// Why: zones come from the primary's registration answer.
+// From: Issue #1683 | PR #1858
+async fn ensure_secondary_zones(s: &Settings) -> Result<(), String> {
+    let api = pdns_api(s)?;
+    let have: Vec<String> = api.zones().await?.into_iter().map(|z| z.name).collect();
+    let masters = vec![s.text("DNS_XFR_PRIMARY")?];
+    for z in s.list("DNS_SECONDARY_ZONES") {
+        let id = lancache_ng::pdns::zone_id(&z);
+        if !have.contains(&id) {
+            api.create_secondary(&id, &masters).await?;
+        }
+    }
+    Ok(())
 }
 
 // What: secrets the configs embed, read or created once.

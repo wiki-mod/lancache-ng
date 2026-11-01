@@ -610,6 +610,16 @@ pub mod pdns {
             .map(drop)
         }
 
+        // What: create a secondary zone pulling from masters.
+        // Why: a secondary copies zones by AXFR (kind Slave).
+        // From: Issue #1683 | PR #1858
+        pub async fn create_secondary(&self, zone: &str, masters: &[String]) -> Result<(), String> {
+            let body = json!({"name": zone_id(zone), "kind": "Slave", "masters": masters});
+            self.call(reqwest::Method::POST, "/zones", Some(body))
+                .await
+                .map(drop)
+        }
+
         // What: all zones with serial and check times.
         // Why: the sync check reads these fields only.
         // From: Issue #1683 | PR #1858
