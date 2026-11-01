@@ -1,7 +1,7 @@
 //!
 //! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 //! SPDX-License-Identifier: AGPL-3.0-or-later
-//! What: cachehamster: prefill queue and Steam QR login.
+//! What: cachehamster: prefill queue, Steam QR and depots.
 //! Why: warm the proxy cache now, later or on a schedule.
 //! From: Issue #871 | PR #1858
 
@@ -613,16 +613,333 @@ async fn run_urls(
     }
 }
 
-// What: the Steam depot step of an app job.
-// Why: manifest request codes need a CM connection; the
-//      Web API has no such method (HTTP 404, 01.11.).
+// What: what the Steam step needs, cloned per job.
+// Why: a job task outlives the daemon round.
 // From: Issue #871 | PR #1858
-fn steam_app_state(logged_in: bool) -> State {
-    if logged_in {
-        State::Blocked("Steam depot download needs the CM connection; not built yet".into())
-    } else {
-        State::Blocked("Steam login missing; scan the QR code first".into())
+#[derive(Clone)]
+struct SteamCfg {
+    dir: PathBuf,
+    cdn_host: String,
+    proxy: std::net::SocketAddr,
+    branch: String,
+    os: String,
+}
+
+impl SteamCfg {
+    fn load(c: &Ctx) -> Result<Self, String> {
+        let addr = format!("{}:{}", c.s.text("IP_HTTP")?, c.s.uint("PROXY_HTTP_PORT")?);
+        Ok(Self {
+            dir: c.dir.clone(),
+            cdn_host: c.s.text("STEAM_CDN_HOST")?,
+            proxy: addr.parse().map_err(|e| format!("{addr}: {e}"))?,
+            branch: c.s.text("STEAM_BRANCH")?,
+            os: c.s.text("STEAM_OS")?,
+        })
     }
+
+    // What: a client that sends the CDN host to the proxy.
+    // Why: the proxy caches by Host; DNS is not needed.
+    fn client(&self) -> Result<reqwest::Client, String> {
+        reqwest::Client::builder()
+            .resolve(&self.cdn_host, self.proxy)
+            .build()
+            .map_err(|e| format!("CDN client: {e}"))
+    }
+}
+
+// What: a minimal text KeyValues (VDF) tree.
+// Why: PICS app info arrives as text KeyValues.
+// From: Issue #871 | PR #1858
+#[derive(Debug, Default)]
+struct Kv(Vec<(String, KvValue)>);
+
+#[derive(Debug)]
+enum KvValue {
+    Text(String),
+    Node(Kv),
+}
+
+impl Kv {
+    fn get(&self, key: &str) -> Option<&KvValue> {
+        self.0
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(key))
+            .map(|(_, v)| v)
+    }
+
+    fn node(&self, key: &str) -> Option<&Kv> {
+        match self.get(key)? {
+            KvValue::Node(n) => Some(n),
+            KvValue::Text(_) => None,
+        }
+    }
+
+    fn text(&self, key: &str) -> Option<&str> {
+        match self.get(key)? {
+            KvValue::Text(t) => Some(t),
+            KvValue::Node(_) => None,
+        }
+    }
+}
+
+// What: parse quoted tokens and braces into a Kv tree.
+// Why: only the subset Steam sends; escapes are kept.
+// From: Issue #871 | PR #1858
+fn parse_kv(text: &str) -> Result<Kv, String> {
+    let mut tokens: Vec<Option<String>> = Vec::new();
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => {
+                let mut s = String::new();
+                while let Some(c) = chars.next() {
+                    match c {
+                        '\\' => s.extend(chars.next()),
+                        '"' => break,
+                        _ => s.push(c),
+                    }
+                }
+                tokens.push(Some(s));
+            }
+            '{' => tokens.push(None),
+            '}' => tokens.push(Some("\u{0}}".into())),
+            _ => {}
+        }
+    }
+    let mut stack: Vec<(String, Kv)> = vec![(String::new(), Kv::default())];
+    let mut key: Option<String> = None;
+    for t in tokens {
+        match (t, key.take()) {
+            (None, Some(k)) => stack.push((k, Kv::default())),
+            (Some(close), None) if close == "\u{0}}" => {
+                let (k, node) = stack.pop().ok_or("KeyValues: stray }")?;
+                let parent = stack.last_mut().ok_or("KeyValues: stray }")?;
+                parent.1 .0.push((k, KvValue::Node(node)));
+            }
+            (Some(v), Some(k)) => {
+                let top = stack.last_mut().ok_or("KeyValues: empty")?;
+                top.1 .0.push((k, KvValue::Text(v)));
+            }
+            (Some(k), None) => key = Some(k),
+            (None, None) => return Err("KeyValues: { without key".into()),
+        }
+    }
+    let (_, root) = stack.pop().ok_or("KeyValues: empty")?;
+    Ok(root)
+}
+
+// What: depot id and public manifest id per depot.
+// Why: only depots for STEAM_OS (or any OS) are warmed.
+// From: Issue #871 | PR #1858
+fn depots_of(app: &Kv, cfg: &SteamCfg) -> Vec<(u32, u64)> {
+    let Some(depots) = app.node("appinfo").unwrap_or(app).node("depots") else {
+        return Vec::new();
+    };
+    depots
+        .0
+        .iter()
+        .filter_map(|(id, v)| {
+            let KvValue::Node(d) = v else { return None };
+            let id: u32 = id.parse().ok()?;
+            let os_ok = d
+                .node("config")
+                .and_then(|c| c.text("oslist"))
+                .is_none_or(|l| l.is_empty() || l.split(',').any(|o| o == cfg.os));
+            let m = d.node("manifests")?;
+            let gid = match m.get(&cfg.branch)? {
+                KvValue::Text(t) => t.parse().ok()?,
+                KvValue::Node(n) => n.text("gid")?.parse().ok()?,
+            };
+            os_ok.then_some((id, gid))
+        })
+        .collect()
+}
+
+// What: log in on a CM server with the sealed session.
+// Why: PICS and manifest codes exist only on the CM.
+// From: Issue #871 | PR #1858
+async fn cm_login(cfg: &SteamCfg) -> Result<steam_vent::Connection, String> {
+    let key = {
+        let hex = secret::load_or_create(
+            &cfg.dir.join(KEY_FILE),
+            || secret::random_hex(32),
+            Owner::default(),
+        )
+        .map_err(|e| format!("{KEY_FILE}: {e}"))?;
+        secret::key_bytes(&hex)?
+    };
+    let sealed = std::fs::read(cfg.dir.join(TOKEN_FILE)).map_err(|e| format!("{TOKEN_FILE}: {e}"))?;
+    let s: Session = serde_json::from_slice(&secret::open(&key, &sealed)?)
+        .map_err(|e| format!("{TOKEN_FILE}: {e}"))?;
+    let servers = steam_vent::ServerList::discover()
+        .await
+        .map_err(|e| format!("CM server list: {e}"))?;
+    steam_vent::Connection::access(&servers, &s.account, &s.refresh_token)
+        .await
+        .map_err(|e| format!("CM login: {e}"))
+}
+
+// What: the app's KeyValues from PICS, with its token.
+// Why: owned apps need the PICS access token.
+// From: Issue #871 | PR #1858
+async fn app_info(conn: &steam_vent::Connection, app: u32) -> Result<Kv, String> {
+    use futures_util::TryStreamExt as _;
+    use steam_vent::ConnectionTrait as _;
+    use steam_vent_proto_steam::steammessages_clientserver_appinfo as pics;
+    let mut tok_req = pics::CMsgClientPICSAccessTokenRequest::new();
+    tok_req.appids.push(app);
+    let tok: pics::CMsgClientPICSAccessTokenResponse = conn
+        .job(tok_req)
+        .await
+        .map_err(|e| format!("PICS token: {e}"))?;
+    let mut a = pics::cmsg_client_picsproduct_info_request::AppInfo::new();
+    a.set_appid(app);
+    if let Some(t) = tok.app_access_tokens.iter().find(|t| t.appid() == app) {
+        a.set_access_token(t.access_token());
+    }
+    let mut req = pics::CMsgClientPICSProductInfoRequest::new();
+    req.apps.push(a);
+    req.set_single_response(true);
+    let answers: Vec<pics::CMsgClientPICSProductInfoResponse> = conn
+        .job_multi(req)
+        .try_collect()
+        .await
+        .map_err(|e| format!("PICS info: {e}"))?;
+    let buf = answers
+        .iter()
+        .flat_map(|r| r.apps.iter())
+        .find(|a| a.appid() == app)
+        .map(|a| a.buffer().to_vec())
+        .ok_or_else(|| format!("app {app}: no PICS info"))?;
+    parse_kv(&String::from_utf8_lossy(&buf))
+}
+
+// What: the manifest request code of one depot.
+// Why: Steam CDN serves manifests only with this code.
+// From: Issue #871 | PR #1858
+async fn request_code(
+    conn: &steam_vent::Connection,
+    app: u32,
+    depot: u32,
+    gid: u64,
+    branch: &str,
+) -> Result<u64, String> {
+    use steam_vent::ConnectionTrait as _;
+    use steam_vent_proto_steam::steammessages_contentsystem_steamclient as cs;
+    let mut req = cs::CContentServerDirectory_GetManifestRequestCode_Request::new();
+    req.set_app_id(app);
+    req.set_depot_id(depot);
+    req.set_manifest_id(gid);
+    req.set_app_branch(branch.to_string());
+    let rsp = conn
+        .service_method(req)
+        .await
+        .map_err(|e| format!("depot {depot}: manifest code: {e}"))?;
+    match rsp.manifest_request_code() {
+        0 => Err(format!("depot {depot}: no manifest code (not owned?)")),
+        code => Ok(code),
+    }
+}
+
+// What: chunk ids from a zipped binary manifest.
+// Why: the chunk SHA-1 names the CDN URL; files stay unread.
+// From: Issue #871 | PR #1858
+fn chunks_of(zipped: &[u8]) -> Result<Vec<String>, String> {
+    use std::io::Read as _;
+    use steam_vent_proto_common::protobuf::Message as _;
+    use steam_vent_proto_steam::content_manifest::ContentManifestPayload;
+    const PAYLOAD_MAGIC: u32 = 0x71F6_17D0;
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(zipped))
+        .map_err(|e| format!("manifest zip: {e}"))?;
+    let mut raw = Vec::new();
+    zip.by_index(0)
+        .map_err(|e| format!("manifest zip: {e}"))?
+        .read_to_end(&mut raw)
+        .map_err(|e| format!("manifest zip: {e}"))?;
+    let word = |at: usize| -> Result<u32, String> {
+        raw.get(at..at + 4)
+            .and_then(|b| b.try_into().ok())
+            .map(u32::from_le_bytes)
+            .ok_or_else(|| "manifest too short".to_string())
+    };
+    if word(0)? != PAYLOAD_MAGIC {
+        return Err("manifest payload magic missing".into());
+    }
+    let len = usize::try_from(word(4)?).map_err(|e| e.to_string())?;
+    let body = raw.get(8..8 + len).ok_or("manifest payload cut short")?;
+    let payload =
+        ContentManifestPayload::parse_from_bytes(body).map_err(|e| format!("manifest: {e}"))?;
+    let mut ids: Vec<String> = payload
+        .mappings
+        .iter()
+        .flat_map(|m| m.chunks.iter())
+        .map(|c| hex::encode(c.sha()))
+        .collect();
+    ids.sort();
+    ids.dedup();
+    Ok(ids)
+}
+
+// What: every chunk URL of an app's depots.
+// Why: the URL job warms them through the proxy.
+// From: Issue #871 | PR #1858
+async fn app_urls(cfg: &SteamCfg, app: u32) -> Result<Vec<String>, String> {
+    let conn = cm_login(cfg).await?;
+    let info = app_info(&conn, app).await?;
+    let client = cfg.client()?;
+    let mut urls = Vec::new();
+    for (depot, gid) in depots_of(&info, cfg) {
+        let code = match request_code(&conn, app, depot, gid, &cfg.branch).await {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("cachehamster: app {app}: {e}");
+                continue;
+            }
+        };
+        let url = format!("http://{}/depot/{depot}/manifest/{gid}/5/{code}", cfg.cdn_host);
+        let resp = client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| format!("{url}: {}", http::error_chain(&e)))?;
+        if !resp.status().is_success() {
+            eprintln!("cachehamster: {url}: HTTP {}", resp.status());
+            continue;
+        }
+        let body = resp.bytes().await.map_err(|e| format!("{url}: {e}"))?;
+        for sha in chunks_of(&body)? {
+            urls.push(format!("http://{}/depot/{depot}/chunk/{sha}", cfg.cdn_host));
+        }
+    }
+    if urls.is_empty() {
+        return Err(format!("app {app}: no depot of this account and OS"));
+    }
+    Ok(urls)
+}
+
+// What: run a Steam app job: resolve, then warm.
+// Why: same queue, connections and RAM sink as URLs.
+// From: Issue #871 | PR #1858
+async fn run_app(
+    cfg: SteamCfg,
+    app: u32,
+    connections: usize,
+    jobs: Arc<Mutex<Vec<Job>>>,
+    id: String,
+    rate: Arc<AtomicU64>,
+) -> State {
+    let urls = match app_urls(&cfg, app).await {
+        Ok(u) => u,
+        Err(e) => return State::Failed(e),
+    };
+    if let Some(j) = jobs.lock().await.iter_mut().find(|j| j.id == id) {
+        j.total = urls.len() as u64;
+    }
+    let client = match cfg.client() {
+        Ok(c) => c,
+        Err(e) => return State::Failed(e),
+    };
+    run_urls(client, urls, connections, jobs, id, rate).await
 }
 
 // What: one daemon round: orders in, due jobs out.
@@ -630,6 +947,7 @@ fn steam_app_state(logged_in: bool) -> State {
 // From: Issue #871 | PR #1858
 struct Runner {
     client: reqwest::Client,
+    steam: SteamCfg,
     queues: usize,
     connections: usize,
     jobs: Arc<Mutex<Vec<Job>>>,
@@ -660,27 +978,35 @@ impl Runner {
         let now = clock::unix_secs();
         let logged_in = c.path(TOKEN_FILE).exists();
         for j in list.iter_mut().filter(|j| due(j, now)) {
-            let urls = match &j.target {
-                Target::SteamApp(_) => {
-                    j.state = steam_app_state(logged_in);
-                    continue;
-                }
-                Target::Urls(urls) => urls.clone(),
-            };
+            if matches!(j.target, Target::SteamApp(_)) && !logged_in {
+                j.state = State::Blocked("Steam login missing; scan the QR code first".into());
+                continue;
+            }
             if self.running.len() >= self.queues {
                 break;
             }
             j.state = State::Running;
             (j.done, j.failed, j.bytes) = (0, 0, 0);
-            let task = run_urls(
-                self.client.clone(),
-                urls,
-                self.connections,
-                Arc::clone(&self.jobs),
-                j.id.clone(),
-                Arc::clone(&self.rate),
-            );
-            self.running.insert(j.id.clone(), tokio::spawn(task));
+            let (jobs, id, rate) = (Arc::clone(&self.jobs), j.id.clone(), Arc::clone(&self.rate));
+            let task = match &j.target {
+                Target::Urls(urls) => tokio::spawn(run_urls(
+                    self.client.clone(),
+                    urls.clone(),
+                    self.connections,
+                    jobs,
+                    id,
+                    rate,
+                )),
+                Target::SteamApp(app) => tokio::spawn(run_app(
+                    self.steam.clone(),
+                    *app,
+                    self.connections,
+                    jobs,
+                    id,
+                    rate,
+                )),
+            };
+            self.running.insert(j.id.clone(), task);
         }
         let body = serde_json::to_vec_pretty(&*list).map_err(|e| e.to_string())?;
         c.save(JOBS_FILE, &body)
@@ -710,6 +1036,7 @@ async fn daemon(c: Ctx) -> Result<(), String> {
     }
     let mut runner = Runner {
         client,
+        steam: SteamCfg::load(&c)?,
         queues,
         connections,
         jobs: Arc::new(Mutex::new(list)),

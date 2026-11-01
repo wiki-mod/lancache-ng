@@ -46,11 +46,15 @@ rustix = { version = "*", default-features = false, features = ["std", "fs", "pr
 serde = { version = "*", features = ["derive"] }
 serde_json = "*"
 sha2 = "*"
+steam-vent = "*"
+steam-vent-proto-common = "*"
+steam-vent-proto-steam = "*"
 subtle = "*"
 tera = "*"
 # What: tokio with all features.
 # Why: one feature set; net, process, sync, time are used.
 tokio = { version = "*", features = ["full"] }
+zip = { version = "*", default-features = false, features = ["deflate"] }
 
 # What: no lto/codegen-units keys in [profile.release] here.
 # Why: set via CARGO_PROFILE_RELEASE_LTO/_CODEGEN_UNITS env.
