@@ -496,6 +496,7 @@ runtime:
     - CACHE_MAX_SIZE=50g
     - CACHE_MEM_MB=512
     - DHCP_SUBNET=10.0.0.0/24
+    - DHCP_SUBNET_ID=1
     - DHCP_RANGE_START=10.0.0.128
     - DHCP_RANGE_END=10.0.0.254
     - DHCP_GATEWAY=10.0.0.1
@@ -734,6 +735,10 @@ runtime:
     - NGINX_HTTPS_LISTEN_FILE=conf.d/https-listen.inc
     - NGINX_HEALTHZ_FILE=lancache-healthz-body.txt
     - NGINX_PSL_FILE=public_suffix_list.dat
+    - NGINX_DISCARD_PORT=9
+    - NGINX_STREAM_TARGETS_FILE=stream.d/00-stream-targets.conf
+    - NGINX_HTTPS_MAP_FILE=conf.d/00-https-map.conf
+    - NGINX_HTTPS_DISPATCH_FILE=stream.d/01-https-dispatch.conf
     - DNS_PORT=53
     - DNS_HTTPS_PORT=1053
     - PDNS_AUTH_PORT=5300
@@ -922,6 +927,7 @@ runtime:
     - DHCP_RELAY_LOCAL_ADDR=text?;;;reload;dhcp
     - DHCP_SERVICE=text;;;live;services
     - DHCP_SUBNET=text;;;reload;dhcp
+    - DHCP_SUBNET_ID=uint;1;4294967294;reload;dhcp
     - DHCP_SUBNET_START=text?;;;reload;dhcp
     - DNS_FILTER_AAAA=bool;;;reload;dns
     - DNS_LAN_RECORD_TYPES=list;;;live;ui
@@ -972,6 +978,10 @@ runtime:
     - NGINX_DIR=path;;;container;proxy
     - NGINX_HTTPS_LISTEN_FILE=text;;;reload;proxy
     - NGINX_PSL_FILE=text;;;reload;proxy
+    - NGINX_DISCARD_PORT=uint;1;65535;reload;proxy
+    - NGINX_STREAM_TARGETS_FILE=text;;;reload;proxy
+    - NGINX_HTTPS_MAP_FILE=text;;;reload;proxy
+    - NGINX_HTTPS_DISPATCH_FILE=text;;;reload;proxy
     - NGINX_TEMPLATES=list;;;reload;proxy
     - NGINX_TEMPLATE_DIR=path;;;reload;proxy
     - NTP_ALLOWED_CLIENT_CIDRS=list;;;restart;services

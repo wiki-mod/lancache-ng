@@ -517,8 +517,8 @@ fn reverse_name(ip: &str) -> Result<String, String> {
 // What: reverse zone that holds a reverse name.
 // Why: PowerDNS needs the zone for the PATCH.
 // From: Issue #1683 | PR #1858
-fn reverse_zone(name: &str) -> Option<String> {
-    lancache_ng::dns::private_reverse_zones()
+fn reverse_zone(s: &Settings, name: &str) -> Option<String> {
+    lancache_ng::dns::private_reverse_zones(s)
         .into_iter()
         .filter(|z| name.ends_with(z.as_str()))
         .max_by_key(String::len)
@@ -540,7 +540,7 @@ async fn domains(State(app): Shared, axum::Extension(csrf): axum::Extension<Csrf
     match pdns_api(&s) {
         Ok(api) => {
             lan_records = api.rrsets(&lan).await.unwrap_or_default();
-            for z in lancache_ng::dns::private_reverse_zones() {
+            for z in lancache_ng::dns::private_reverse_zones(&s) {
                 for r in api.rrsets(&z).await.unwrap_or_default() {
                     if r["type"] == "PTR" {
                         ptr.push(serde_json::json!({
@@ -735,7 +735,7 @@ fn snapshot_zones(s: &Settings) -> Vec<String> {
     let mut z = vec![lancache_ng::dns::canonical_zone(
         &s.text("DNS_LAN_ZONE").unwrap_or_default(),
     )];
-    z.extend(lancache_ng::dns::private_reverse_zones());
+    z.extend(lancache_ng::dns::private_reverse_zones(s));
     z
 }
 
@@ -785,7 +785,7 @@ async fn ptr(s: &Settings, op: &str, get: &dyn Fn(&str) -> String) -> Result<(),
         reverse_name(&ip)?
     };
     let zone =
-        reverse_zone(&name).ok_or_else(|| format!("{name} is in no private reverse zone"))?;
+        reverse_zone(s, &name).ok_or_else(|| format!("{name} is in no private reverse zone"))?;
     let ttl = u32::try_from(s.uint("DNS_RECORD_TTL")?).map_err(|e| e.to_string())?;
     let contents = if op == "ptr-add" {
         let host = get("hostname");

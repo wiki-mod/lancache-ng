@@ -1,38 +1,38 @@
 //!
 //! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 //! SPDX-License-Identifier: AGPL-3.0-or-later
-//! What: shared owners every service binary calls.
-//! Why: one owner per capability; sections per topic.
-//! From: Issue #1683 | PR #1858
+
+// What: code all five images share.
+// Why: one owner per behaviour; crates stay thin.
+// From: Issue #1683 | PR #1858
 
 pub mod config;
 
-// What: clock helpers used by every section.
-// Why: one source for Unix time; no local copies.
+// What: wall-clock time since the Unix epoch.
+// Why: file names, ids and logs need a plain number.
 // From: Issue #1683 | PR #1858
 pub mod clock {
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    // What: nanoseconds since the Unix epoch.
-    // Why: a clock before 1970 counts as 0, never panics.
+    // What: nanoseconds since 1970; 0 if the clock is off.
+    // Why: a clock before 1970 must not panic.
     // From: Issue #1683 | PR #1858
     pub fn unix_nanos() -> u128 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
+            .map_or(0, |d| d.as_nanos())
     }
 
-    // What: whole seconds since the Unix epoch.
-    // Why: status files and snapshots store seconds.
+    // What: whole seconds since 1970.
+    // Why: retention and schedules count seconds.
     // From: Issue #1683 | PR #1858
     pub fn unix_secs() -> u64 {
-        (unix_nanos() / 1_000_000_000) as u64
+        u64::try_from(unix_nanos() / 1_000_000_000).unwrap_or(u64::MAX)
     }
 }
 
-// What: file writes, ownership, listing and free space.
-// Why: every service writes state through one path.
+// What: safe file writes, ownership and disk space.
+// Why: a crash or full disk never leaves half a file.
 // From: Issue #1683 | PR #1858
 pub mod fs {
     use std::fs::{self, File, OpenOptions};
@@ -40,8 +40,8 @@ pub mod fs {
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     use std::path::{Path, PathBuf};
 
-    // What: what to do when the target already exists.
-    // Why: secrets are made once; settings are replaced.
+    // What: replace a file, or create it only if new.
+    // Why: secrets are first-writer-wins; configs replace.
     // From: Issue #1683 | PR #1858
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub enum Place {
@@ -49,8 +49,8 @@ pub mod fs {
         Exclusive,
     }
 
-    // What: uid and gid to set; None keeps that field.
-    // Why: root programs hand files to a runtime id.
+    // What: optional uid and gid for a written file.
+    // Why: root writes files a service user must read.
     // From: Issue #1683 | PR #1858
     #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
     pub struct Owner {
@@ -58,28 +58,28 @@ pub mod fs {
         pub gid: Option<u32>,
     }
 
-    // What: chown an open file, then set its mode.
-    // Why: an open handle cannot be swapped by name.
+    // What: apply owner and mode on an open file.
+    // Why: fchown on the handle avoids a path race.
     // From: Issue #1683 | PR #1858
-    fn own_open(file: &File, owner: Owner, mode: Option<u32>) -> io::Result<()> {
+    fn set_owner(file: &File, owner: Owner, mode: Option<u32>) -> io::Result<()> {
         if owner.uid.is_some() || owner.gid.is_some() {
             std::os::unix::fs::fchown(file, owner.uid, owner.gid)?;
         }
-        if let Some(mode) = mode {
-            file.set_permissions(fs::Permissions::from_mode(mode))?;
+        match mode {
+            Some(m) => file.set_permissions(fs::Permissions::from_mode(m)),
+            None => Ok(()),
         }
-        Ok(())
     }
 
-    // What: set owner and mode of a path.
-    // Why: existing files converge to the wanted rights.
+    // What: set owner and mode of an existing path.
+    // Why: unchanged files still get the right owner.
     // From: Issue #1683 | PR #1858
     pub fn own(path: &Path, owner: Owner, mode: Option<u32>) -> io::Result<()> {
-        own_open(&File::open(path)?, owner, mode)
+        set_owner(&File::open(path)?, owner, mode)
     }
 
-    // What: write a whole file; readers see all or nothing.
-    // Why: one write path for secrets, settings and status.
+    // What: temp file beside target, synced, then moved.
+    // Why: readers see the old or the new file, never half.
     // From: Issue #1683 | PR #1858
     pub fn write(
         path: &Path,
@@ -88,62 +88,52 @@ pub mod fs {
         place: Place,
         owner: Owner,
     ) -> io::Result<()> {
-        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-            fs::create_dir_all(parent)?;
+        if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+            fs::create_dir_all(dir)?;
         }
         let name = path
             .file_name()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no file name"))?;
-        // What: a unique temp name beside the target.
-        // Why: link and rename need the same filesystem.
-        // From: Issue #1683 | PR #1858
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no file name"))?
+            .to_string_lossy();
         let tmp = path.with_file_name(format!(
-            ".{}.tmp-{}-{}",
-            name.to_string_lossy(),
+            ".{name}.{}.{}",
             std::process::id(),
             super::clock::unix_nanos()
         ));
-        let result = OpenOptions::new()
+        let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
             .mode(mode)
-            .open(&tmp)
-            .and_then(|mut file| {
-                file.write_all(contents)?;
-                own_open(&file, owner, None)?;
-                // What: flush before the name points at it.
-                // Why: a crash leaves no empty target.
-                // From: Issue #1683 | PR #1858
-                file.sync_all()
-            })
+            .open(&tmp)?;
+        let result = file
+            .write_all(contents)
+            .and_then(|()| set_owner(&file, owner, None))
+            .and_then(|()| file.sync_all())
             .and_then(|()| match place {
-                // What: link fails if the name exists.
-                // Why: first writer wins without a gap.
-                // From: Issue #1683 | PR #1858
                 Place::Exclusive => fs::hard_link(&tmp, path),
-                // What: a busy bind mount is overwritten.
-                // Why: a file bind mount refuses a rename.
-                // From: Issue #1683 | PR #1858
-                Place::Replace => match fs::rename(&tmp, path) {
-                    Err(e) if e.kind() == io::ErrorKind::ResourceBusy => {
-                        let mut file = OpenOptions::new().write(true).truncate(true).open(path)?;
-                        file.write_all(contents)?;
-                        file.sync_all()
+                Place::Replace => fs::rename(&tmp, path).or_else(|e| {
+                    // What: busy bind mount: write in place.
+                    // Why: rename onto a mount is EBUSY.
+                    // From: Issue #1683 | PR #1858
+                    if e.kind() != io::ErrorKind::ResourceBusy {
+                        return Err(e);
                     }
-                    other => other,
-                },
+                    let mut target = OpenOptions::new().write(true).truncate(true).open(path)?;
+                    target.write_all(contents)?;
+                    target.sync_all()
+                }),
             });
-        match fs::remove_file(&tmp) {
-            Err(e) if e.kind() != io::ErrorKind::NotFound => {
-                eprintln!("[fs] WARNING: {} not removed: {e}", tmp.display());
+        drop(file);
+        if let Err(e) = fs::remove_file(&tmp) {
+            if e.kind() != io::ErrorKind::NotFound {
+                eprintln!("fs: {} left behind: {e}", tmp.display());
             }
-            _ => {}
         }
         result
     }
 
-    // What: replace a file only when its bytes differ.
-    // Why: reruns write nothing; rights still converge.
+    // What: write only when content differs.
+    // Why: true tells the caller to reload the program.
     // From: Issue #1683 | PR #1858
     pub fn write_if_changed(
         path: &Path,
@@ -151,21 +141,21 @@ pub mod fs {
         mode: u32,
         owner: Owner,
     ) -> io::Result<bool> {
-        let changed = match fs::read(path) {
-            Ok(old) => old != contents,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => true,
+        let same = match fs::read(path) {
+            Ok(old) => old == contents,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => false,
             Err(e) => return Err(e),
         };
-        if changed {
-            write(path, contents, mode, Place::Replace, owner)?;
-        } else {
+        if same {
             own(path, owner, Some(mode))?;
+        } else {
+            write(path, contents, mode, Place::Replace, owner)?;
         }
-        Ok(changed)
+        Ok(!same)
     }
 
-    // What: metadata, or None when the path is absent.
-    // Why: absent is a state; other errors stay errors.
+    // What: metadata, or None if the path is absent.
+    // Why: absent is a normal state, not an error.
     // From: Issue #1683 | PR #1858
     pub fn metadata_if_present(path: &Path) -> io::Result<Option<fs::Metadata>> {
         match fs::symlink_metadata(path) {
@@ -175,33 +165,33 @@ pub mod fs {
         }
     }
 
-    // What: all regular files below a root, no symlinks.
-    // Why: retention must never follow a link outside.
+    // What: every regular file below root.
+    // Why: retention sums and prunes by size and age.
     // From: Issue #1683 | PR #1858
     pub fn files_under(root: &Path) -> io::Result<Vec<(PathBuf, fs::Metadata)>> {
-        let mut found = Vec::new();
-        let mut todo = vec![root.to_path_buf()];
-        while let Some(dir) = todo.pop() {
+        let mut out = Vec::new();
+        let mut dirs = vec![root.to_path_buf()];
+        while let Some(dir) = dirs.pop() {
             let entries = match fs::read_dir(&dir) {
-                Ok(entries) => entries,
+                Ok(e) => e,
                 Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
                 Err(e) => return Err(e),
             };
             for entry in entries {
-                let entry = entry?;
-                let meta = fs::symlink_metadata(entry.path())?;
+                let path = entry?.path();
+                let meta = fs::symlink_metadata(&path)?;
                 if meta.is_dir() {
-                    todo.push(entry.path());
+                    dirs.push(path);
                 } else if meta.is_file() {
-                    found.push((entry.path(), meta));
+                    out.push((path, meta));
                 }
             }
         }
-        Ok(found)
+        Ok(out)
     }
 
-    // What: size and free bytes of a filesystem.
-    // Why: disk alarms and retention read one source.
+    // What: total and free bytes of a filesystem.
+    // Why: cache size checks need the real free space.
     // From: Issue #1683 | PR #1858
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub struct Space {
@@ -209,8 +199,8 @@ pub mod fs {
         pub free: u64,
     }
 
-    // What: statvfs of the filesystem holding a path.
-    // Why: std has no free-space call.
+    // What: statvfs of the filesystem holding path.
+    // Why: free counts blocks a non-root user may use.
     // From: Issue #1683 | PR #1858
     pub fn space(path: &Path) -> io::Result<Space> {
         let st = rustix::fs::statvfs(path).map_err(io::Error::from)?;
@@ -221,8 +211,8 @@ pub mod fs {
     }
 }
 
-// What: secrets: read or create once, placeholders, seal.
-// Why: restarts must never rotate a stored secret.
+// What: generated secrets and sealed tokens.
+// Why: no secret is hardcoded or stored in plain text.
 // From: Issue #1683 | PR #1858
 pub mod secret {
     use super::fs::{self, Owner, Place};
@@ -232,31 +222,31 @@ pub mod secret {
     use std::path::{Path, PathBuf};
     use subtle::ConstantTimeEq;
 
-    // What: file mode of every stored secret.
-    // Why: only the owner may read a secret.
+    // What: file mode of every secret file.
+    // Why: only the owning user may read a secret.
     // From: Issue #1683 | PR #1858
     const MODE: u32 = 0o600;
 
     // What: nonce length of ChaCha20-Poly1305.
-    // Why: fixed by RFC 8439; not a project value.
+    // Why: fixed by the cipher (RFC 8439).
     // From: Issue #1683 | PR #1858
     const NONCE_LEN: usize = 12;
 
-    // What: true for empty or a checked-in placeholder.
-    // Why: CHANGE_ME and friends must never be live values.
+    // What: true for empty or template-like values.
+    // Why: a copied example value must never go live.
     // From: Issue #1683 | PR #1858
     pub fn is_placeholder(value: &str) -> bool {
-        let n = value.to_lowercase().replace('-', "_");
-        n.is_empty()
-            || n.contains("change_me")
-            || n.starts_with("changeme")
-            || n.starts_with("your_")
-            || n.ends_with("_here")
-            || (value.starts_with('<') && value.ends_with('>'))
+        let v = value.trim().to_ascii_lowercase().replace('-', "_");
+        v.is_empty()
+            || v.contains("change_me")
+            || v.starts_with("changeme")
+            || v.starts_with("your_")
+            || v.ends_with("_here")
+            || (v.starts_with('<') && v.ends_with('>'))
     }
 
-    // What: N random bytes as lowercase hex.
-    // Why: one generator for every created secret.
+    // What: n random bytes as lowercase hex.
+    // Why: tokens and keys come from the OS generator.
     // From: Issue #1683 | PR #1858
     pub fn random_hex(bytes: usize) -> String {
         let mut buf = vec![0u8; bytes];
@@ -264,46 +254,44 @@ pub mod secret {
         hex::encode(buf)
     }
 
-    // What: equal without timing that leaks the prefix.
-    // Why: passwords and tokens are compared this way only.
+    // What: compare two secrets in constant time.
+    // Why: timing must not leak how much matched.
     // From: Issue #1683 | PR #1858
     pub fn equal(presented: &str, expected: &str) -> bool {
-        bool::from(presented.as_bytes().ct_eq(expected.as_bytes()))
+        presented.as_bytes().ct_eq(expected.as_bytes()).into()
     }
 
-    // What: file of a variable in a secret dir.
-    // Why: every secret file name derives from its key.
+    // What: secret file of a key: A_B becomes a-b.
+    // Why: one naming rule for every secret file.
     // From: Issue #1683 | PR #1858
     pub fn file_of(dir: &Path, key: &str) -> PathBuf {
         dir.join(key.to_ascii_lowercase().replace('_', "-"))
     }
 
-    // What: read a secret file, or create it once.
-    // Why: the first writer wins; a bad file is an error.
+    // What: read the file, or create it once.
+    // Why: first writer wins; peers then read the same.
     // From: Issue #1683 | PR #1858
     pub fn load_or_create(
         path: &Path,
         create: impl FnOnce() -> String,
         owner: Owner,
     ) -> io::Result<String> {
-        let read = |p: &Path| std::fs::read_to_string(p).map(|t| t.trim().to_string());
-        let checked = |text: String| {
+        let read = || std::fs::read_to_string(path).map(|t| t.trim().to_string());
+        let usable = |text: String| {
             if is_placeholder(&text) {
-                Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("{} holds a placeholder", path.display()),
-                ))
+                let msg = format!("{} holds a placeholder", path.display());
+                Err(io::Error::new(io::ErrorKind::InvalidData, msg))
             } else {
                 Ok(text)
             }
         };
-        match read(path) {
-            Ok(text) => checked(text),
+        match read() {
+            Ok(text) => usable(text),
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 let text = create();
                 match fs::write(path, text.as_bytes(), MODE, Place::Exclusive, owner) {
                     Ok(()) => Ok(text),
-                    Err(e) if e.kind() == io::ErrorKind::AlreadyExists => checked(read(path)?),
+                    Err(e) if e.kind() == io::ErrorKind::AlreadyExists => usable(read()?),
                     Err(e) => Err(e),
                 }
             }
@@ -311,8 +299,8 @@ pub mod secret {
         }
     }
 
-    // What: a set env value, else the secret file.
-    // Why: an operator value wins; else the stored one.
+    // What: env value, else the shared secret file.
+    // Why: the operator may set it; else it is generated.
     // From: Issue #1683 | PR #1858
     pub fn resolve(
         env_value: Option<&str>,
@@ -330,79 +318,90 @@ pub mod secret {
         }
     }
 
-    // What: the 32-byte key from a hex secret.
-    // Why: seal and open take raw key bytes.
+    // What: 32 raw key bytes from 64 hex digits.
+    // Why: the cipher takes raw bytes.
     // From: Issue #1683 | PR #1858
     pub fn key_bytes(hex_key: &str) -> Result<[u8; 32], String> {
-        let raw = hex::decode(hex_key).map_err(|e| format!("key is not hex: {e}"))?;
-        raw.try_into()
+        hex::decode(hex_key)
+            .map_err(|e| format!("key is not hex: {e}"))?
+            .try_into()
             .map_err(|_| "key must be 32 bytes".to_string())
     }
 
-    // What: seal data with ChaCha20-Poly1305; nonce first.
+    // What: encrypt; output is nonce then ciphertext.
     // Why: stored login tokens are never plain text.
     // From: Issue #1683 | PR #1858
     pub fn seal(key: &[u8; 32], plain: &[u8]) -> Result<Vec<u8>, String> {
         let mut nonce = [0u8; NONCE_LEN];
         rand::fill(&mut nonce[..]);
-        let body = ChaCha20Poly1305::new(key.into())
-            .encrypt(&nonce.into(), plain)
-            .map_err(|_| "seal failed".to_string())?;
-        Ok([nonce.as_slice(), body.as_slice()].concat())
+        let mut out = nonce.to_vec();
+        out.extend(
+            ChaCha20Poly1305::new(key.into())
+                .encrypt(&nonce.into(), plain)
+                .map_err(|_| "seal failed".to_string())?,
+        );
+        Ok(out)
     }
 
-    // What: open sealed data; tampering is an error.
-    // Why: a changed file must never yield a token.
+    // What: decrypt what seal wrote.
+    // Why: a wrong key or damage is a clear error.
     // From: Issue #1683 | PR #1858
     pub fn open(key: &[u8; 32], sealed: &[u8]) -> Result<Vec<u8>, String> {
-        if sealed.len() < NONCE_LEN {
+        let Some((nonce, body)) = sealed.split_at_checked(NONCE_LEN) else {
             return Err("sealed data too short".into());
-        }
-        let (nonce, body) = sealed.split_at(NONCE_LEN);
+        };
         let nonce: [u8; NONCE_LEN] = nonce.try_into().map_err(|_| "bad nonce".to_string())?;
         ChaCha20Poly1305::new(key.into())
             .decrypt(&nonce.into(), body)
             .map_err(|_| "sealed data is damaged or the key is wrong".to_string())
     }
 }
-// What: one HTTP client rule, health probes, body drain.
-// Why: every service talks HTTP through one owner.
+
+// What: HTTP client, probe and drain.
+// Why: every crate uses the same timeouts from the SOT.
 // From: Issue #1683 | PR #1858
 pub mod http {
     use crate::config::Settings;
     use futures_util::StreamExt as _;
     use std::time::Duration;
 
-    // What: the general client; timeouts from the SOT.
-    // Why: no service keeps its own timeout literals.
+    // What: shared client with SOT timeouts.
+    // Why: no request may hang without a limit.
     // From: Issue #1683 | PR #1858
     pub fn client(s: &Settings) -> Result<reqwest::Client, String> {
+        let secs = |key: &str| s.uint(key).map(Duration::from_secs);
         reqwest::Client::builder()
-            .timeout(Duration::from_secs(s.uint("HTTP_CLIENT_TIMEOUT")?))
-            .pool_idle_timeout(Duration::from_secs(s.uint("HTTP_POOL_IDLE_TIMEOUT")?))
-            .tcp_keepalive(Duration::from_secs(s.uint("HTTP_TCP_KEEPALIVE")?))
+            .timeout(secs("HTTP_CLIENT_TIMEOUT")?)
+            .pool_idle_timeout(secs("HTTP_POOL_IDLE_TIMEOUT")?)
+            .tcp_keepalive(secs("HTTP_TCP_KEEPALIVE")?)
             .build()
             .map_err(|e| format!("HTTP client: {e}"))
     }
 
-    // What: an error and all causes on one line.
+    // What: error text with every source cause.
     // Why: reqwest hides the cause in source().
     // From: Issue #1683 | PR #1858
     pub fn error_chain(error: &dyn std::error::Error) -> String {
-        let mut text = error.to_string();
-        let mut cause = error.source();
-        while let Some(inner) = cause {
-            text.push_str(": ");
-            text.push_str(&inner.to_string());
-            cause = inner.source();
+        let mut parts = vec![error.to_string()];
+        let mut next = error.source();
+        while let Some(cause) = next {
+            parts.push(cause.to_string());
+            next = cause.source();
         }
-        text
+        parts.join(": ")
     }
 
-    // What: Ok when a GET answers 2xx.
-    // Why: http and https probes judge the same way.
+    // What: GET url; ok only on 2xx.
+    // Why: health probes of the proxy and the ui.
     // From: Issue #1683 | PR #1858
-    async fn expect_success(client: &reqwest::Client, url: &str) -> Result<(), String> {
+    pub async fn probe(url: &str, ca_pem: Option<&[u8]>, timeout: Duration) -> Result<(), String> {
+        let mut builder = reqwest::Client::builder().timeout(timeout).no_proxy();
+        if url.starts_with("https://") {
+            let pem = ca_pem.ok_or_else(|| format!("{url}: https probe needs the stack CA"))?;
+            let ca = reqwest::Certificate::from_pem(pem).map_err(|e| format!("CA: {e}"))?;
+            builder = builder.tls_certs_only([ca]);
+        }
+        let client = builder.build().map_err(|e| format!("probe client: {e}"))?;
         let status = client
             .get(url)
             .send()
@@ -416,22 +415,8 @@ pub mod http {
         }
     }
 
-    // What: health probe of a plain or TLS URL.
-    // Why: TLS trusts only the stack CA; no curl, no shell.
-    // From: Issue #1683 | PR #1858
-    pub async fn probe(url: &str, ca_pem: Option<&[u8]>, timeout: Duration) -> Result<(), String> {
-        let mut builder = reqwest::Client::builder().timeout(timeout).no_proxy();
-        if url.starts_with("https://") {
-            let pem = ca_pem.ok_or_else(|| format!("{url}: https probe needs the stack CA"))?;
-            let ca = reqwest::Certificate::from_pem(pem).map_err(|e| format!("CA: {e}"))?;
-            builder = builder.tls_certs_only([ca]);
-        }
-        let client = builder.build().map_err(|e| format!("probe client: {e}"))?;
-        expect_success(&client, url).await
-    }
-
-    // What: send a GET, read the body, keep only the count.
-    // Why: pre-caching fills the proxy; no disk IO here.
+    // What: GET url, count and drop the body.
+    // Why: prefill warms the cache; nothing is stored.
     // From: Issue #1683 | PR #1858
     pub async fn drain(client: &reqwest::Client, url: &str) -> Result<(u16, u64), String> {
         let resp = client
@@ -440,30 +425,31 @@ pub mod http {
             .await
             .map_err(|e| format!("{url}: {}", error_chain(&e)))?;
         let status = resp.status().as_u16();
-        let mut bytes = 0u64;
+        let mut total = 0u64;
         let mut body = resp.bytes_stream();
         while let Some(chunk) = body.next().await {
-            bytes += chunk
-                .map_err(|e| format!("{url}: {}", error_chain(&e)))?
-                .len() as u64;
+            let chunk = chunk.map_err(|e| format!("{url}: {}", error_chain(&e)))?;
+            total += chunk.len() as u64;
         }
-        Ok((status, bytes))
+        Ok((status, total))
     }
 }
 
-// What: PowerDNS authoritative and recursor API client.
-// Why: native API replaces NATS; one owner for both.
+// What: client of the PowerDNS HTTP API.
+// Why: the ui writes records; no message bus in between.
 // From: Issue #1683 | PR #1858
 pub mod pdns {
+    use reqwest::Method;
     use serde_json::{json, Value};
+    use std::collections::BTreeSet;
 
-    // What: header that carries the PowerDNS API key.
-    // Why: fixed by the PowerDNS HTTP API.
+    // What: auth header name of the PowerDNS API.
+    // Why: fixed by PowerDNS.
     // From: Issue #1683 | PR #1858
     const KEY_HEADER: &str = "X-API-Key";
 
-    // What: one zone row of the zone list.
-    // Why: serial fields drive the sync check (RFC 1982).
+    // What: the zone fields the sync check reads.
+    // Why: serial against notified serial shows lag.
     // From: Issue #1683 | PR #1858
     #[derive(Clone, Debug, serde::Deserialize)]
     pub struct Zone {
@@ -480,8 +466,8 @@ pub mod pdns {
         pub masters: Vec<String>,
     }
 
-    // What: client of one PowerDNS API base URL.
-    // Why: auth and recursor share key and error handling.
+    // What: one API endpoint with its key.
+    // Why: base is .../api/v1/servers/<id> from the SOT.
     // From: Issue #1683 | PR #1858
     #[derive(Clone)]
     pub struct Api {
@@ -490,16 +476,16 @@ pub mod pdns {
         key: String,
     }
 
-    // What: a zone name in API path form.
-    // Why: the API wants the dotted name with a final dot.
+    // What: name with exactly one final dot.
+    // Why: the API wants canonical names.
     // From: Issue #1683 | PR #1858
     pub fn zone_id(zone: &str) -> String {
         format!("{}.", zone.trim_end_matches('.'))
     }
 
     impl Api {
-        // What: a client; base is .../api/v1/servers/<id>.
-        // Why: the server id comes from the SOT URL.
+        // What: a client for one server base URL.
+        // Why: auth and recursor share this code.
         // From: Issue #1683 | PR #1858
         pub fn new(client: reqwest::Client, base: &str, key: &str) -> Self {
             Self {
@@ -509,20 +495,12 @@ pub mod pdns {
             }
         }
 
-        // What: one call; non-2xx is an error.
-        // Why: PowerDNS explains refusals in its JSON.
+        // What: one request; non-2xx is an error.
+        // Why: PowerDNS explains refusals in the body.
         // From: Issue #1683 | PR #1858
-        async fn call(
-            &self,
-            method: reqwest::Method,
-            path: &str,
-            body: Option<Value>,
-        ) -> Result<String, String> {
+        async fn call(&self, method: Method, path: &str, body: Option<Value>) -> Result<String, String> {
             let url = format!("{}{path}", self.base);
-            let mut req = self
-                .client
-                .request(method, &url)
-                .header(KEY_HEADER, &self.key);
+            let mut req = self.client.request(method, &url).header(KEY_HEADER, &self.key);
             if let Some(body) = body {
                 req = req.json(&body);
             }
@@ -539,8 +517,18 @@ pub mod pdns {
             }
         }
 
-        // What: replace or delete one rrset of a zone.
-        // Why: soa_edit_api raises the serial on change.
+        // What: PATCH a list of rrset changes.
+        // Why: soa-edit-api raises the serial once.
+        // From: Issue #1683 | PR #1858
+        async fn patch(&self, zone: &str, rrsets: Vec<Value>) -> Result<(), String> {
+            let path = format!("/zones/{}", zone_id(zone));
+            self.call(Method::PATCH, &path, Some(json!({ "rrsets": rrsets })))
+                .await
+                .map(drop)
+        }
+
+        // What: replace one rrset; empty deletes it.
+        // Why: a record edit is one PATCH.
         // From: Issue #1683 | PR #1858
         pub async fn set_rrset(
             &self,
@@ -550,88 +538,64 @@ pub mod pdns {
             ttl: u32,
             contents: &[String],
         ) -> Result<(), String> {
-            let rrset = if contents.is_empty() {
+            let change = if contents.is_empty() {
                 json!({"name": zone_id(name), "type": kind, "changetype": "DELETE"})
             } else {
-                let records: Vec<Value> = contents
-                    .iter()
-                    .map(|c| json!({"content": c, "disabled": false}))
-                    .collect();
+                let records: Vec<Value> =
+                    contents.iter().map(|c| json!({"content": c, "disabled": false})).collect();
                 json!({"name": zone_id(name), "type": kind, "ttl": ttl,
                        "changetype": "REPLACE", "records": records})
             };
-            let path = format!("/zones/{}", zone_id(zone));
-            self.call(
-                reqwest::Method::PATCH,
-                &path,
-                Some(json!({"rrsets": [rrset]})),
-            )
-            .await
-            .map(drop)
+            self.patch(zone, vec![change]).await
         }
 
-        // What: all RRsets of one zone.
-        // Why: the ui lists records straight from PowerDNS.
+        // What: all rrsets of a zone.
+        // Why: snapshots and lists read them.
         // From: Issue #1683 | PR #1858
         pub async fn rrsets(&self, zone: &str) -> Result<Vec<Value>, String> {
-            let path = format!("/zones/{}", zone_id(zone));
-            let text = self.call(reqwest::Method::GET, &path, None).await?;
+            let text = self.call(Method::GET, &format!("/zones/{}", zone_id(zone)), None).await?;
             let v: Value = serde_json::from_str(&text).map_err(|e| format!("zone {zone}: {e}"))?;
             Ok(v["rrsets"].as_array().cloned().unwrap_or_default())
         }
 
-        // What: set a zone back to saved RRsets.
-        // Why: SOA stays; serial rises via soa-edit-api.
+        // What: make the zone equal to saved rrsets.
+        // Why: rollback; SOA stays so the serial rises.
         // From: Issue #1683 | PR #1858
         pub async fn restore(&self, zone: &str, saved: &[Value]) -> Result<(), String> {
-            let key = |r: &Value| (r["name"].to_string(), r["type"].to_string());
-            let keep: std::collections::BTreeSet<_> = saved.iter().map(key).collect();
-            let mut rrsets: Vec<Value> = Vec::new();
-            for r in self.rrsets(zone).await? {
-                if r["type"] != "SOA" && !keep.contains(&key(&r)) {
-                    rrsets.push(
-                        json!({"name": r["name"], "type": r["type"], "changetype": "DELETE"}),
-                    );
-                }
-            }
-            for r in saved.iter().filter(|r| r["type"] != "SOA") {
-                rrsets.push(
-                    json!({"name": r["name"], "type": r["type"], "ttl": r["ttl"],
-                                   "changetype": "REPLACE", "records": r["records"]}),
-                );
-            }
-            let path = format!("/zones/{}", zone_id(zone));
-            self.call(
-                reqwest::Method::PATCH,
-                &path,
-                Some(json!({"rrsets": rrsets})),
-            )
-            .await
-            .map(drop)
+            let id = |r: &Value| (r["name"].to_string(), r["type"].to_string());
+            let wanted: BTreeSet<_> = saved.iter().map(id).collect();
+            let mut changes: Vec<Value> = self
+                .rrsets(zone)
+                .await?
+                .into_iter()
+                .filter(|r| r["type"] != "SOA" && !wanted.contains(&id(r)))
+                .map(|r| json!({"name": r["name"], "type": r["type"], "changetype": "DELETE"}))
+                .collect();
+            changes.extend(saved.iter().filter(|r| r["type"] != "SOA").map(|r| {
+                json!({"name": r["name"], "type": r["type"], "ttl": r["ttl"],
+                       "changetype": "REPLACE", "records": r["records"]})
+            }));
+            self.patch(zone, changes).await
         }
 
-        // What: create a secondary zone from masters.
-        // Why: secondary copies zones by AXFR (Slave).
+        // What: add a zone that pulls from masters.
+        // Why: a secondary copies zones by AXFR.
         // From: Issue #1683 | PR #1858
         pub async fn create_secondary(&self, zone: &str, masters: &[String]) -> Result<(), String> {
             let body = json!({"name": zone_id(zone), "kind": "Slave", "masters": masters});
-            self.call(reqwest::Method::POST, "/zones", Some(body))
-                .await
-                .map(drop)
+            self.call(Method::POST, "/zones", Some(body)).await.map(drop)
         }
 
-        // What: create or replace one TSIG key by name.
+        // What: create or replace one TSIG key.
         // Why: rotation keeps the name; PUT needs a key.
         // From: Issue #1683 | PR #1858
         pub async fn set_tsigkey(&self, name: &str, algorithm: &str, secret: &str) -> Result<(), String> {
             let body = json!({"name": name, "algorithm": algorithm, "key": secret});
             let path = format!("/tsigkeys/{}", zone_id(name));
-            if self.call(reqwest::Method::PUT, &path, Some(body.clone())).await.is_ok() {
+            if self.call(Method::PUT, &path, Some(body.clone())).await.is_ok() {
                 return Ok(());
             }
-            self.call(reqwest::Method::POST, "/tsigkeys", Some(body))
-                .await
-                .map(drop)
+            self.call(Method::POST, "/tsigkeys", Some(body)).await.map(drop)
         }
 
         // What: set one metadata kind of a zone.
@@ -640,157 +604,148 @@ pub mod pdns {
         pub async fn set_metadata(&self, zone: &str, kind: &str, values: &[String]) -> Result<(), String> {
             let path = format!("/zones/{}/metadata/{kind}", zone_id(zone));
             let body = json!({"kind": kind, "metadata": values});
-            self.call(reqwest::Method::PUT, &path, Some(body))
+            self.call(Method::PUT, &path, Some(body)).await.map(drop)
+        }
+
+        // What: all zones with serial and checks.
+        // Why: sync state compares primary and secondary.
+        // From: Issue #1683 | PR #1858
+        pub async fn zones(&self) -> Result<Vec<Zone>, String> {
+            let text = self.call(Method::GET, "/zones", None).await?;
+            serde_json::from_str(&text).map_err(|e| format!("zone list: {e}"))
+        }
+
+        // What: the zone as BIND zone-file text.
+        // Why: snapshots store what PowerDNS exports.
+        // From: Issue #1683 | PR #1858
+        pub async fn export(&self, zone: &str) -> Result<String, String> {
+            self.call(Method::GET, &format!("/zones/{}/export", zone_id(zone)), None)
+                .await
+        }
+
+        // What: send NOTIFY to all secondaries now.
+        // Why: a lagging secondary is pushed at once.
+        // From: Issue #1683 | PR #1858
+        pub async fn notify(&self, zone: &str) -> Result<(), String> {
+            self.call(Method::PUT, &format!("/zones/{}/notify", zone_id(zone)), None)
                 .await
                 .map(drop)
         }
 
-        // What: all zones with serial and check times.
-        // Why: the sync check reads these fields only.
-        // From: Issue #1683 | PR #1858
-        pub async fn zones(&self) -> Result<Vec<Zone>, String> {
-            let text = self.call(reqwest::Method::GET, "/zones", None).await?;
-            serde_json::from_str(&text).map_err(|e| format!("zone list: {e}"))
-        }
-
-        // What: the zone in AXFR text form.
-        // Why: snapshots store what PowerDNS exports.
-        // From: Issue #1683 | PR #1858
-        pub async fn export(&self, zone: &str) -> Result<String, String> {
-            let path = format!("/zones/{}/export", zone_id(zone));
-            self.call(reqwest::Method::GET, &path, None).await
-        }
-
-        // What: send NOTIFY for a zone to its secondaries.
-        // Why: secondaries pull at once, not at refresh.
-        // From: Issue #1683 | PR #1858
-        pub async fn notify(&self, zone: &str) -> Result<(), String> {
-            let path = format!("/zones/{}/notify", zone_id(zone));
-            self.call(reqwest::Method::PUT, &path, None).await.map(drop)
-        }
-
-        // What: pull a secondary zone from its primary now.
+        // What: pull a secondary zone now.
         // Why: a stale secondary resyncs without restart.
         // From: Issue #1683 | PR #1858
         pub async fn axfr_retrieve(&self, zone: &str) -> Result<(), String> {
             let path = format!("/zones/{}/axfr-retrieve", zone_id(zone));
-            self.call(reqwest::Method::PUT, &path, None).await.map(drop)
+            self.call(Method::PUT, &path, None).await.map(drop)
         }
 
-        // What: the server statistics as name -> value.
-        // Why: snmpd extend and the ui read these counters.
+        // What: name and value of each server counter.
+        // Why: the dashboard shows query counts.
         // From: Issue #1683 | PR #1858
         pub async fn statistics(&self) -> Result<Vec<(String, String)>, String> {
-            let text = self.call(reqwest::Method::GET, "/statistics", None).await?;
+            let text = self.call(Method::GET, "/statistics", None).await?;
             let rows: Vec<Value> =
                 serde_json::from_str(&text).map_err(|e| format!("statistics: {e}"))?;
             Ok(rows
                 .iter()
-                .filter_map(|r| {
-                    Some((
-                        r["name"].as_str()?.to_string(),
-                        r["value"].as_str()?.to_string(),
-                    ))
-                })
+                .filter_map(|r| Some((r["name"].as_str()?.into(), r["value"].as_str()?.into())))
                 .collect())
         }
 
-        // What: flush a name (and subtree) from a recursor.
-        // Why: changed records must not wait for their TTL.
+        // What: drop cached answers for a name.
+        // Why: a changed record answers at once.
         // From: Issue #1683 | PR #1858
         pub async fn flush(&self, name: &str, subtree: bool) -> Result<(), String> {
             let path = format!("/cache/flush?domain={}&subtree={subtree}", zone_id(name));
-            self.call(reqwest::Method::PUT, &path, None).await.map(drop)
+            self.call(Method::PUT, &path, None).await.map(drop)
         }
     }
 }
 
-// What: DNS name and zone rules, serial arithmetic.
-// Why: ui, dns, proxy and dhcp share one rule set.
+// What: DNS name rules, zones and serial math.
+// Why: ui, watchdog and renderers agree on one rule set.
 // From: Issue #1683 | PR #1858
 pub mod dns {
+    use crate::config::Settings;
     use std::cmp::Ordering;
 
-    // What: zone name in dotted form (trailing dot).
-    // Why: callers spell zones with and without the dot.
+    // What: lowercase zone name with one final dot.
+    // Why: zone names compare equal in one form.
     // From: Issue #1683 | PR #1858
     pub fn canonical_zone(zone: &str) -> String {
         format!("{}.", zone.trim_end_matches('.').to_ascii_lowercase())
     }
 
-    // What: DNS name syntax (RFC 1035 labels).
-    // Why: one rule for CDN, DHCP, LAN names and zones.
+    // What: RFC 1035 host name check.
+    // Why: SRV needs "_", RPZ wildcards need "*".
     // From: Issue #1683 | PR #1858
     pub fn is_dns_name(name: &str, underscore: bool, wildcard: bool) -> bool {
         let name = name.trim_end_matches('.');
+        let label_ok = |label: &str| {
+            (1..=63).contains(&label.len())
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || (underscore && b == b'_'))
+        };
         !name.is_empty()
             && name.len() <= 253
-            && name.split('.').enumerate().all(|(i, label)| {
-                (wildcard && i == 0 && label == "*")
-                    || (!label.is_empty()
-                        && label.len() <= 63
-                        && !label.starts_with('-')
-                        && !label.ends_with('-')
-                        && label.bytes().all(|b| {
-                            b.is_ascii_alphanumeric() || b == b'-' || (underscore && b == b'_')
-                        }))
-            })
+            && name
+                .split('.')
+                .enumerate()
+                .all(|(i, l)| (wildcard && i == 0 && l == "*") || label_ok(l))
     }
 
-    // What: a cdn-domains entry as (name, subdomains only).
-    // Why: a leading dot keeps its wildcard scope.
+    // What: CDN list row: ".name" is the whole subtree.
+    // Why: cdn-domains.txt uses this leading-dot form.
     // From: Issue #1683 | PR #1858
     pub fn cdn_entry(text: &str) -> Option<(String, bool)> {
-        let lower = text.trim().to_ascii_lowercase();
-        let (wild, name) = match lower.strip_prefix('.') {
+        let row = text.trim().to_ascii_lowercase();
+        let (subtree, name) = match row.strip_prefix('.') {
             Some(rest) => (true, rest.to_string()),
-            None => (false, lower.clone()),
+            None => (false, row),
         };
-        (name.contains('.') && is_dns_name(&name, false, false)).then_some((name, wild))
+        (name.contains('.') && is_dns_name(&name, false, false)).then_some((name, subtree))
     }
 
-    // What: IPv4 private reverse zones (RFC 1918).
-    // Why: fixed by the RFC; PTR for LAN hosts live there.
+    // What: private reverse zones from the SOT.
+    // Why: RFC 1918 and ULA ranges; no list in code.
     // From: Issue #1683 | PR #1858
-    pub fn private_reverse_zones() -> Vec<String> {
-        let fixed = ["10.in-addr.arpa.", "168.192.in-addr.arpa."].map(str::to_string);
-        let mid = (16..=31).map(|n| format!("{n}.172.in-addr.arpa."));
-        let ula = ["c.f.ip6.arpa.", "d.f.ip6.arpa."].map(str::to_string);
-        fixed.into_iter().chain(mid).chain(ula).collect()
+    pub fn private_reverse_zones(s: &Settings) -> Vec<String> {
+        s.list("DNS_PRIVATE_REVERSE_ZONES")
+            .iter()
+            .map(|z| canonical_zone(z))
+            .collect()
     }
 
-    // What: zones that get snapshots and rollback.
-    // Why: rpz and foreign zones are never rolled back.
+    // What: zones the stack serves itself.
+    // Why: LAN, local.LAN and optional reverse zones.
     // From: Issue #1683 | PR #1858
-    pub fn managed_zones(lan_zone: &str, reverse: bool) -> Vec<String> {
-        let lan = canonical_zone(lan_zone);
-        let mut zones = vec![lan.clone(), format!("local.{lan}")];
-        if reverse {
-            zones.extend(private_reverse_zones());
+    pub fn managed_zones(s: &Settings) -> Result<Vec<String>, String> {
+        let lan = canonical_zone(&s.text("DNS_LAN_ZONE")?);
+        let mut zones = vec![format!("local.{lan}"), lan];
+        if s.flag("DNS_SERVE_RFC1918")? {
+            zones.extend(private_reverse_zones(s));
         }
-        zones
+        Ok(zones)
     }
 
-    // What: compare two SOA serials (RFC 1982, 32 bit).
-    // Why: serials wrap; plain < is wrong after wrap.
+    // What: compare serials by RFC 1982.
+    // Why: serials wrap; half the space apart is unknown.
     // From: Issue #1683 | PR #1858
     pub fn serial_cmp(a: u32, b: u32) -> Option<Ordering> {
-        if a == b {
-            return Some(Ordering::Equal);
-        }
-        let d = b.wrapping_sub(a);
-        // What: exactly half the space apart is undefined.
-        // Why: RFC 1982 leaves 2^31 apart without an order.
-        // From: Issue #1683 | PR #1858
-        match d {
+        match b.wrapping_sub(a) {
+            0 => Some(Ordering::Equal),
             0x8000_0000 => None,
             d if d < 0x8000_0000 => Some(Ordering::Less),
             _ => Some(Ordering::Greater),
         }
     }
 
-    // What: sync state of a secondary against the primary.
-    // Why: the watchdog alarms on Behind for too long.
+    // What: replication state of a secondary zone.
+    // Why: the dashboard shows lost NOTIFY or AXFR.
     // From: Issue #1683 | PR #1858
     #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
     pub enum Sync {
@@ -800,8 +755,8 @@ pub mod dns {
         Unknown,
     }
 
-    // What: sync state from the two serials.
-    // Why: Ahead means a primary rollback or a bad bump.
+    // What: state from the two serials.
+    // Why: one rule for watchdog and ui.
     // From: Issue #1683 | PR #1858
     pub fn sync_state(primary: u32, secondary: u32) -> Sync {
         match serial_cmp(secondary, primary) {
@@ -813,14 +768,14 @@ pub mod dns {
     }
 }
 
-// What: DHCP modes, managed options and option checks.
-// Why: ui, Kea and dnsmasq start share one rule set.
+// What: DHCP mode and option rules.
+// Why: Kea and dnsmasq get the same checked input.
 // From: Issue #1683 | PR #1858
 pub mod dhcp {
     use crate::config::Settings;
 
-    // What: the DHCP mode; names come from the SOT choice.
-    // Why: logic branches by mode; the words live in SOT.
+    // What: the four DHCP modes of the SOT choice.
+    // Why: exactly one program serves DHCP.
     // From: Issue #1683 | PR #1858
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub enum Mode {
@@ -831,8 +786,8 @@ pub mod dhcp {
     }
 
     impl Mode {
-        // What: the mode from DHCP_MODE.
-        // Why: the SOT choice rejected unknown words.
+        // What: mode from DHCP_MODE.
+        // Why: an unknown word is an error.
         // From: Issue #1683 | PR #1858
         pub fn from_settings(s: &Settings) -> Result<Self, String> {
             match s.text("DHCP_MODE")?.as_str() {
@@ -845,8 +800,8 @@ pub mod dhcp {
         }
     }
 
-    // What: one DHCPv4 option with a dedicated form field.
-    // Why: Kea names it; dnsmasq uses the code (RFC 2132).
+    // What: an option the ui sets by its own field.
+    // Why: custom rows must not override these.
     // From: Issue #1683 | PR #1858
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub struct Managed {
@@ -854,41 +809,26 @@ pub mod dhcp {
         pub code: u8,
     }
 
-    // What: managed options; codes fixed by RFC 2132/3397.
-    // Why: protocol numbers, not project settings.
+    // What: options with own fields (RFC 2132, 3397).
+    // Why: names and codes are fixed by the RFCs.
     // From: Issue #1683 | PR #1858
     pub const MANAGED: [Managed; 5] = [
-        Managed {
-            name: "routers",
-            code: 3,
-        },
-        Managed {
-            name: "domain-name-servers",
-            code: 6,
-        },
-        Managed {
-            name: "domain-name",
-            code: 15,
-        },
-        Managed {
-            name: "ntp-servers",
-            code: 42,
-        },
-        Managed {
-            name: "domain-search",
-            code: 119,
-        },
+        Managed { name: "routers", code: 3 },
+        Managed { name: "domain-name-servers", code: 6 },
+        Managed { name: "domain-name", code: 15 },
+        Managed { name: "ntp-servers", code: 42 },
+        Managed { name: "domain-search", code: 119 },
     ];
 
-    // What: one custom option code 1..=254.
-    // Why: 0 is padding and 255 the end (RFC 2132).
+    // What: check a custom option code.
+    // Why: 0 and 255 are pad/end; managed have fields.
     // From: Issue #1683 | PR #1858
     pub fn option_code(raw: &str) -> Result<u8, String> {
         let code: u8 = raw
             .trim()
             .parse()
             .map_err(|_| format!("option code {raw:?} must be 1..=254"))?;
-        if code == 0 || code == 255 {
+        if code == 0 || code == u8::MAX {
             return Err(format!("option code {code} is reserved"));
         }
         if MANAGED.iter().any(|m| m.code == code) {
@@ -897,72 +837,69 @@ pub mod dhcp {
         Ok(code)
     }
 
-    // What: custom "CODE:VALUE" lines, checked.
-    // Why: length limit from the SOT; one line per option.
+    // What: parse CODE:VALUE lines.
+    // Why: one checked list for Kea and dnsmasq.
     // From: Issue #1683 | PR #1858
     pub fn custom_options(s: &Settings, raw: &str) -> Result<Vec<(u8, String)>, String> {
-        let max = s.uint("DHCP_OPTION_DATA_MAX")? as usize;
+        let max = usize::try_from(s.uint("DHCP_OPTION_DATA_MAX")?).unwrap_or(usize::MAX);
         let mut out = Vec::new();
-        for (i, line) in raw.lines().map(str::trim).enumerate() {
+        for (n, line) in raw.lines().map(str::trim).enumerate() {
             if line.is_empty() {
                 continue;
             }
-            let at = |m: String| format!("line {}: {m}", i + 1);
+            let at = |m: String| format!("line {}: {m}", n + 1);
             let (code, data) = line
                 .split_once(':')
                 .ok_or_else(|| at("expected CODE:VALUE".into()))?;
             let data = data.trim();
             if data.is_empty() || data.len() > max || data.contains(['\n', '\r', ';']) {
-                return Err(at(format!(
-                    "value must be 1..={max} bytes, one line, no ';'"
-                )));
+                return Err(at(format!("value must be 1..={max} bytes, one line, no ';'")));
             }
             out.push((option_code(code).map_err(at)?, data.to_string()));
         }
         Ok(out)
     }
 
-    // What: lease time inside the SOT limits.
-    // Why: Kea max-valid-lifetime = lease * factor, capped.
+    // What: valid and max lifetime of a lease.
+    // Why: SOT bounds; max is a factor of valid.
     // From: Issue #1683 | PR #1858
     pub fn lease_limits(s: &Settings, lease: u64) -> Result<(u64, u64), String> {
-        let (min, max) = (
-            s.uint("DHCP_LEASE_TIME_MIN")?,
-            s.uint("DHCP_LEASE_TIME_MAX")?,
-        );
+        let min = s.uint("DHCP_LEASE_TIME_MIN")?;
+        let max = s.uint("DHCP_LEASE_TIME_MAX")?;
         if !(min..=max).contains(&lease) {
             return Err(format!("lease {lease} outside {min}..={max}"));
         }
-        let factor = s.uint("DHCP_MAX_LEASE_FACTOR")?;
-        Ok((lease, lease.saturating_mul(factor).min(max)))
+        let longest = lease.saturating_mul(s.uint("DHCP_MAX_LEASE_FACTOR")?).min(max);
+        Ok((lease, longest))
     }
 }
 
-// What: narrow Docker Engine API client.
-// Why: list, inspect, start, stop, restart only (AG-SEC).
+// What: minimal Docker Engine API client.
+// Why: ui and watchdog list, inspect, start and exec.
 // From: Issue #1683 | PR #1858
 pub mod docker {
-    use serde_json::Value;
+    use reqwest::Method;
+    use serde_json::{json, Value};
     use std::path::PathBuf;
     use std::time::Duration;
 
-    // What: label compose sets to the project name.
-    // Why: fixed by Docker Compose; finds our containers.
+    // What: compose label of the project name.
+    // Why: fixed by Docker Compose.
     // From: Issue #1683 | PR #1858
     pub const PROJECT_LABEL: &str = "com.docker.compose.project";
 
-    // What: label compose sets to the service name.
-    // Why: fixed by Docker Compose; names a container.
+    // What: compose label of the service name.
+    // Why: fixed by Docker Compose.
     // From: Issue #1683 | PR #1858
     pub const SERVICE_LABEL: &str = "com.docker.compose.service";
 
-    // What: host name used over a unix socket.
+    // What: URL host used over the unix socket.
     // Why: HTTP needs a host; the socket ignores it.
     // From: Issue #1683 | PR #1858
     const SOCKET_HOST: &str = "http://docker";
 
-    // What: why a Docker call failed.
-    // Why: timeouts and refusals lead to other actions.
+    // What: failure classes of an API call.
+    // Why: callers treat timeouts apart from refusals.
     // From: Issue #1683 | PR #1858
     #[derive(Debug)]
     pub enum Error {
@@ -973,21 +910,21 @@ pub mod docker {
     }
 
     impl std::fmt::Display for Error {
-        // What: one-line text of the error.
-        // Why: logs and the ui show it as is.
+        // What: readable text of an API error.
+        // Why: shown in logs and the ui.
         // From: Issue #1683 | PR #1858
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             match self {
                 Self::Timeout => f.write_str("Docker API timed out"),
-                Self::Status(c) => write!(f, "Docker API answered HTTP {c}"),
+                Self::Status(code) => write!(f, "Docker API answered HTTP {code}"),
                 Self::Transport(e) => write!(f, "Docker API: {e}"),
                 Self::Decode(e) => write!(f, "Docker API answer: {e}"),
             }
         }
     }
 
-    // What: the actions a caller may run on a container.
-    // Why: no generic call; nothing else is reachable.
+    // What: container actions.
+    // Why: Reload sends SIGHUP to PID 1.
     // From: Issue #1683 | PR #1858
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub enum Action {
@@ -997,54 +934,47 @@ pub mod docker {
         Reload,
     }
 
-    // What: client of one Docker endpoint.
-    // Why: unix:// sockets and tcp endpoints both work.
+    // What: one Docker endpoint.
+    // Why: unix:// socket or tcp URL from the SOT.
     // From: Issue #1683 | PR #1858
     pub struct Api {
         client: reqwest::Client,
         base: String,
     }
 
+    // What: JSON body of an answer.
+    // Why: one decode error type.
+    // From: Issue #1683 | PR #1858
+    fn decode(bytes: &[u8]) -> Result<Value, Error> {
+        serde_json::from_slice(bytes).map_err(|e| Error::Decode(e.to_string()))
+    }
+
     impl Api {
-        // What: a client for unix:///path or http://host.
-        // Why: the endpoint comes from the SOT.
+        // What: client for a socket path or URL.
+        // Why: no redirects; the engine never sends one.
         // From: Issue #1683 | PR #1858
         pub fn new(endpoint: &str) -> Result<Self, String> {
+            let endpoint = endpoint.trim();
             let builder = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
-            let (builder, base) = match endpoint.trim().strip_prefix("unix://") {
-                Some(sock) => (
-                    builder.unix_socket(PathBuf::from(sock)),
-                    SOCKET_HOST.to_string(),
-                ),
-                None => (builder, endpoint.trim().trim_end_matches('/').to_string()),
+            let (builder, base) = match endpoint.strip_prefix("unix://") {
+                Some(sock) => (builder.unix_socket(PathBuf::from(sock)), SOCKET_HOST.to_string()),
+                None => (builder, endpoint.trim_end_matches('/').to_string()),
             };
             let client = builder.build().map_err(|e| format!("Docker client: {e}"))?;
             Ok(Self { client, base })
         }
 
-        // What: one call with a limit; body as bytes.
-        // Why: every call shares error mapping.
+        // What: one request; 2xx and 304 count as ok.
+        // Why: 304 means already started or stopped.
         // From: Issue #1683 | PR #1858
         async fn call(
             &self,
-            method: reqwest::Method,
-            path: &str,
-            limit: Duration,
-        ) -> Result<Vec<u8>, Error> {
-            self.call_body(method, path, None, limit).await
-        }
-
-        // What: one API call with an optional JSON body.
-        // Why: exec needs a body; other calls send none.
-        // From: Issue #1683 | PR #1858
-        async fn call_body(
-            &self,
-            method: reqwest::Method,
+            method: Method,
             path: &str,
             body: Option<Value>,
             limit: Duration,
         ) -> Result<Vec<u8>, Error> {
-            let map = |e: reqwest::Error| {
+            let fail = |e: reqwest::Error| {
                 if e.is_timeout() {
                     Error::Timeout
                 } else {
@@ -1055,129 +985,96 @@ pub mod docker {
                 .client
                 .request(method, format!("{}{path}", self.base))
                 .timeout(limit);
-            if let Some(b) = body {
-                req = req.json(&b);
+            if let Some(body) = body {
+                req = req.json(&body);
             }
-            let resp = req.send().await.map_err(map)?;
+            let resp = req.send().await.map_err(fail)?;
             let status = resp.status();
-            // What: 304 means already in the wanted state.
-            // Why: starting a running one is no error.
-            // From: Issue #1683 | PR #1858
             if !status.is_success() && status != reqwest::StatusCode::NOT_MODIFIED {
                 return Err(Error::Status(status.as_u16()));
             }
-            resp.bytes().await.map(|b| b.to_vec()).map_err(map)
+            resp.bytes().await.map(|b| b.to_vec()).map_err(fail)
         }
 
-        // What: run a command in a container; exit code.
-        // Why: restart/reload via OpenRC rc-service.
+        // What: run a command in a container.
+        // Why: OpenRC rc-service and ui CLIs run this way.
         // From: Issue #1683 | PR #1858
-        pub async fn exec(
-            &self,
-            name: &str,
-            cmd: &[&str],
-            limit: Duration,
-        ) -> Result<(i64, String), Error> {
-            let body = serde_json::json!({"Cmd": cmd, "AttachStdout": true, "AttachStderr": true});
-            let created = self
-                .call_body(
-                    reqwest::Method::POST,
+        pub async fn exec(&self, name: &str, cmd: &[&str], limit: Duration) -> Result<(i64, String), Error> {
+            let made = self
+                .call(
+                    Method::POST,
                     &format!("/containers/{name}/exec"),
-                    Some(body),
+                    Some(json!({"Cmd": cmd, "AttachStdout": true, "AttachStderr": true})),
                     limit,
                 )
                 .await?;
-            let created: Value =
-                serde_json::from_slice(&created).map_err(|e| Error::Decode(e.to_string()))?;
-            let id = created["Id"]
+            let id = decode(&made)?["Id"]
                 .as_str()
                 .ok_or_else(|| Error::Decode("exec without Id".into()))?
                 .to_string();
-            let start = serde_json::json!({"Detach": false, "Tty": true});
             let out = self
-                .call_body(
-                    reqwest::Method::POST,
+                .call(
+                    Method::POST,
                     &format!("/exec/{id}/start"),
-                    Some(start),
+                    Some(json!({"Detach": false, "Tty": true})),
                     limit,
                 )
                 .await?;
-            let info = self
-                .call(reqwest::Method::GET, &format!("/exec/{id}/json"), limit)
-                .await?;
-            let info: Value =
-                serde_json::from_slice(&info).map_err(|e| Error::Decode(e.to_string()))?;
+            let info = decode(&self.call(Method::GET, &format!("/exec/{id}/json"), None, limit).await?)?;
             Ok((
                 info["ExitCode"].as_i64().unwrap_or(-1),
                 String::from_utf8_lossy(&out).trim().to_string(),
             ))
         }
 
-        // What: all containers of one compose project.
-        // Why: the watchdog sees only its own stack.
+        // What: all containers of a compose project.
+        // Why: the ui and watchdog see stopped ones too.
         // From: Issue #1683 | PR #1858
         pub async fn project(&self, project: &str, limit: Duration) -> Result<Vec<Value>, Error> {
-            let filter = serde_json::json!({"label": [format!("{PROJECT_LABEL}={project}")]});
+            let filter = json!({"label": [format!("{PROJECT_LABEL}={project}")]}).to_string();
             let url = reqwest::Url::parse_with_params(
                 &format!("{SOCKET_HOST}/containers/json"),
-                [("all", "1"), ("filters", filter.to_string().as_str())],
+                [("all", "1"), ("filters", filter.as_str())],
             )
             .map_err(|e| Error::Transport(e.to_string()))?;
             let path = format!("{}?{}", url.path(), url.query().unwrap_or_default());
-            let body = self.call(reqwest::Method::GET, &path, limit).await?;
+            let body = self.call(Method::GET, &path, None, limit).await?;
             serde_json::from_slice(&body).map_err(|e| Error::Decode(e.to_string()))
         }
 
-        // What: inspect one container.
+        // What: full state of one container.
         // Why: health, restarts and state come from here.
         // From: Issue #1683 | PR #1858
         pub async fn inspect(&self, name: &str, limit: Duration) -> Result<Value, Error> {
-            let body = self
-                .call(
-                    reqwest::Method::GET,
-                    &format!("/containers/{name}/json"),
-                    limit,
-                )
-                .await?;
-            serde_json::from_slice(&body).map_err(|e| Error::Decode(e.to_string()))
+            decode(&self.call(Method::GET, &format!("/containers/{name}/json"), None, limit).await?)
         }
 
-        // What: run one allowed action on a container.
-        // Why: grace seconds come from the SOT.
+        // What: start, stop, restart or HUP a container.
+        // Why: grace is the stop timeout in seconds.
         // From: Issue #1683 | PR #1858
-        pub async fn act(
-            &self,
-            name: &str,
-            action: Action,
-            grace: u32,
-            limit: Duration,
-        ) -> Result<(), Error> {
+        pub async fn act(&self, name: &str, action: Action, grace: u32, limit: Duration) -> Result<(), Error> {
             let verb = match action {
                 Action::Start => "start".to_string(),
                 Action::Stop => format!("stop?t={grace}"),
                 Action::Restart => format!("restart?t={grace}"),
                 Action::Reload => "kill?signal=HUP".to_string(),
             };
-            self.call(
-                reqwest::Method::POST,
-                &format!("/containers/{name}/{verb}"),
-                limit,
-            )
-            .await
-            .map(drop)
+            self.call(Method::POST, &format!("/containers/{name}/{verb}"), None, limit)
+                .await
+                .map(drop)
         }
     }
 }
 
 // What: stack CA and leaf certificates via openssl.
-// Why: one owner; CA serial persists beside the CA.
+// Why: native tool; no crypto crate for X.509.
 // From: Issue #1683 | PR #1858
 pub mod cert {
     use std::path::Path;
     use std::process::Command;
 
-    // What: run openssl; non-zero exit is an error.
-    // Why: stderr explains every openssl refusal.
+    // What: run openssl; stderr becomes the error.
+    // Why: a failed step names its subcommand.
     // From: Issue #1683 | PR #1858
     fn openssl(args: &[&str]) -> Result<String, String> {
         let out = Command::new("openssl")
@@ -1185,51 +1082,41 @@ pub mod cert {
             .output()
             .map_err(|e| format!("openssl: {e}"))?;
         if out.status.success() {
-            Ok(String::from_utf8_lossy(&out.stdout).into_owned())
-        } else {
-            Err(format!(
-                "openssl {}: {}",
-                args.first().unwrap_or(&""),
-                String::from_utf8_lossy(&out.stderr).trim()
-            ))
+            return Ok(String::from_utf8_lossy(&out.stdout).into_owned());
         }
+        Err(format!(
+            "openssl {}: {}",
+            args.first().copied().unwrap_or_default(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ))
     }
 
-    // What: a self-signed CA key and certificate.
-    // Why: days, bits and subject come from the SOT.
+    // What: path as an argument string.
+    // Why: openssl takes text arguments.
     // From: Issue #1683 | PR #1858
-    pub fn make_ca(
-        key: &Path,
-        crt: &Path,
-        subject: &str,
-        days: u64,
-        bits: u64,
-    ) -> Result<(), String> {
-        let (k, c) = (key.display().to_string(), crt.display().to_string());
+    fn arg(p: &Path) -> String {
+        p.display().to_string()
+    }
+
+    // What: self-signed CA key and certificate.
+    // Why: HTTPS mode signs leaves with this CA.
+    // From: Issue #1683 | PR #1858
+    pub fn make_ca(key: &Path, crt: &Path, subject: &str, days: u64, bits: u64) -> Result<(), String> {
         openssl(&[
-            "req",
-            "-x509",
-            "-newkey",
-            &format!("rsa:{bits}"),
-            "-nodes",
-            "-keyout",
-            &k,
-            "-out",
-            &c,
-            "-days",
-            &days.to_string(),
-            "-subj",
-            subject,
-            "-addext",
-            "basicConstraints=critical,CA:TRUE",
-            "-addext",
-            "keyUsage=critical,keyCertSign,cRLSign",
+            "req", "-x509", "-nodes",
+            "-newkey", &format!("rsa:{bits}"),
+            "-keyout", &arg(key),
+            "-out", &arg(crt),
+            "-days", &days.to_string(),
+            "-subj", subject,
+            "-addext", "basicConstraints=critical,CA:TRUE",
+            "-addext", "keyUsage=critical,keyCertSign,cRLSign",
         ])
         .map(drop)
     }
 
-    // What: a CA-signed leaf for the given SAN names.
-    // Why: CN is fixed; identity lives in SAN (AG-KD-005).
+    // What: leaf key and certificate signed by the CA.
+    // Why: one leaf per CDN name set in HTTPS mode.
     // From: Issue #1683 | PR #1858
     #[allow(clippy::too_many_arguments)]
     pub fn make_leaf(
@@ -1245,84 +1132,63 @@ pub mod cert {
     ) -> Result<(), String> {
         let csr = crt.with_extension("csr");
         let ext = crt.with_extension("ext");
-        let san = sans
-            .iter()
-            .map(|n| format!("DNS:{n}"))
-            .collect::<Vec<_>>()
-            .join(",");
+        let san: Vec<String> = sans.iter().map(|n| format!("DNS:{n}")).collect();
         std::fs::write(
             &ext,
-            format!("subjectAltName={san}\nextendedKeyUsage=serverAuth\n"),
+            format!("subjectAltName={}\nextendedKeyUsage=serverAuth\n", san.join(",")),
         )
         .map_err(|e| format!("{}: {e}", ext.display()))?;
-        let d = |p: &Path| p.display().to_string();
-        let result = openssl(&[
-            "req",
-            "-new",
-            "-newkey",
-            &format!("rsa:{bits}"),
-            "-nodes",
-            "-keyout",
-            &d(key),
-            "-out",
-            &d(&csr),
-            "-subj",
-            &format!("/CN={cn}"),
-        ])
-        .and_then(|_| {
-            // What: -CAserial keeps the serial file stable.
-            // Why: AG-KD-002: persistent beside the CA.
-            // From: Issue #1683 | PR #1858
+        let request = openssl(&[
+            "req", "-new", "-nodes",
+            "-newkey", &format!("rsa:{bits}"),
+            "-keyout", &arg(key),
+            "-out", &arg(&csr),
+            "-subj", &format!("/CN={cn}"),
+        ]);
+        let signed = request.and_then(|_| {
             openssl(&[
-                "x509",
-                "-req",
-                "-in",
-                &d(&csr),
-                "-CA",
-                &d(ca_crt),
-                "-CAkey",
-                &d(ca_key),
-                "-CAserial",
-                &d(ca_serial),
-                "-CAcreateserial",
-                "-out",
-                &d(crt),
-                "-days",
-                &days.to_string(),
-                "-sha256",
-                "-extfile",
-                &d(&ext),
+                "x509", "-req", "-sha256", "-CAcreateserial",
+                "-in", &arg(&csr),
+                "-CA", &arg(ca_crt),
+                "-CAkey", &arg(ca_key),
+                "-CAserial", &arg(ca_serial),
+                "-out", &arg(crt),
+                "-days", &days.to_string(),
+                "-extfile", &arg(&ext),
             ])
         });
         for tmp in [&csr, &ext] {
-            if let Err(e) = std::fs::remove_file(tmp) {
-                eprintln!("[cert] WARNING: {} not removed: {e}", tmp.display());
+            match std::fs::remove_file(tmp) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                    eprintln!("cert: {} left behind: {e}", tmp.display());
+                }
+                _ => {}
             }
         }
-        result.map(drop)
+        signed.map(drop)
     }
 
-    // What: seconds until a certificate expires.
-    // Why: the watchdog alarms before expiry.
+    // What: true if crt stays valid for within seconds.
+    // Why: renew before expiry, not after.
     // From: Issue #1683 | PR #1858
     pub fn valid_for(crt: &Path, within: u64) -> Result<bool, String> {
-        let out = Command::new("openssl")
+        Command::new("openssl")
             .args(["x509", "-noout", "-checkend", &within.to_string(), "-in"])
             .arg(crt)
-            .output()
-            .map_err(|e| format!("openssl: {e}"))?;
-        Ok(out.status.success())
+            .status()
+            .map(|s| s.success())
+            .map_err(|e| format!("openssl: {e}"))
     }
 }
 
-// What: syslog-ng config from settings, incl. forwarding.
-// Why: the ui setting drives destinations; one owner.
+// What: syslog-ng config: store per program, forward.
+// Why: every container logs here; one place to read.
 // From: Issue #1683 | PR #1858
 pub mod log {
     use crate::config::Settings;
 
-    // What: one forward target host:port over TCP.
-    // Why: TCP with disk buffer; nothing is lost silently.
+    // What: one forward target host:port.
+    // Why: a secondary also forwards to its primary.
     // From: Issue #1683 | PR #1858
     #[derive(Clone, Debug, Eq, PartialEq)]
     pub struct Target {
@@ -1330,15 +1196,14 @@ pub mod log {
         pub port: u16,
     }
 
-    // What: forward targets from SYSLOG_FORWARD (list).
-    // Why: a secondary always adds its primary (DoMe).
+    // What: primary first, then extra targets.
+    // Why: SYSLOG_PRIMARY is set only on a secondary.
     // From: Issue #1683 | PR #1858
     pub fn targets(s: &Settings) -> Result<Vec<Target>, String> {
-        let mut list = s.list("SYSLOG_FORWARD");
-        if let Ok(primary) = s.text("SYSLOG_PRIMARY") {
-            list.insert(0, primary);
-        }
-        list.iter()
+        let primary = s.text("SYSLOG_PRIMARY").ok();
+        primary
+            .into_iter()
+            .chain(s.list("SYSLOG_FORWARD"))
             .map(|t| {
                 let (host, port) = t
                     .rsplit_once(':')
@@ -1348,62 +1213,63 @@ pub mod log {
                     .ok()
                     .filter(|p| *p > 0)
                     .ok_or_else(|| format!("syslog target {t:?}: bad port"))?;
-                Ok(Target {
-                    host: host.to_string(),
-                    port,
-                })
+                Ok(Target { host: host.to_string(), port })
             })
             .collect()
     }
 
-    // What: syslog-ng destination and log blocks.
-    // Why: appended to the base config the services write.
+    // What: one destination and log path per target.
+    // Why: a disk buffer keeps lines while it is down.
     // From: Issue #1683 | PR #1858
-    pub fn forward_block(targets: &[Target], source: &str, buffer_dir: &str) -> String {
-        let mut out = String::new();
-        for (i, t) in targets.iter().enumerate() {
-            out.push_str(&format!(
-                "destination d_fwd{i} {{ network(\"{}\" port({}) transport(\"tcp\") \
-                 disk-buffer(reliable(yes) dir(\"{buffer_dir}\")) ); }};\n\
-                 log {{ source({source}); destination(d_fwd{i}); }};\n",
-                t.host, t.port
-            ));
-        }
-        out
+    pub fn forward_block(s: &Settings, targets: &[Target], source: &str) -> Result<String, String> {
+        let buffer = s.text("SYSLOG_BUFFER_DIR")?;
+        let transport = s.text("SYSLOG_FWD_TRANSPORT")?;
+        Ok(targets
+            .iter()
+            .enumerate()
+            .map(|(i, t)| {
+                format!(
+                    "destination d_fwd{i} {{ network(\"{}\" port({}) transport(\"{transport}\") \
+                     disk-buffer(reliable(yes) dir(\"{buffer}\")) ); }};\n\
+                     log {{ source({source}); destination(d_fwd{i}); }};\n",
+                    t.host, t.port
+                )
+            })
+            .collect())
     }
 
-    // What: name of the local file destination.
-    // Why: syslog-ng stats report its processed count.
+    // What: name of the local store destination.
+    // Why: muted programs skip it; logs page reads it.
     // From: Issue #1683 | PR #1858
     pub const STORE: &str = "d_store";
 
-    // What: full syslog-ng.conf: store plus forwarding.
-    // Why: muted programs skip store, not forward.
+    // What: plain name: letters, digits, _ and -.
+    // Why: values go into syslog-ng config text.
+    // From: Issue #1683 | PR #1858
+    fn plain(v: &str) -> bool {
+        !v.is_empty() && v.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    }
+
+    // What: full syslog-ng.conf.
+    // Why: the watchdog image runs syslog-ng.
     // From: Issue #1683 | PR #1858
     pub fn conf(s: &Settings) -> Result<String, String> {
         let root = s.text("SYSLOG_LOG_ROOT")?;
-        let group = s.text("LOG_READER_GROUP")?;
         let buffer = s.text("SYSLOG_BUFFER_DIR")?;
         let template = s.text("SYSLOG_LINE_TEMPLATE")?;
-        let port = s.uint("LANCACHE_LOG_PORT")?;
-        let reap = s.uint("SYSLOG_TIME_REAP")?;
+        let group = s.text("LOG_READER_GROUP")?;
         let muted = s.list("SYSLOG_MUTED");
-        let path_ok = |p: &str| p.starts_with('/') && !p.contains(['"', '\n', '\r', '$']);
-        if !path_ok(&root) || !path_ok(&buffer) {
-            return Err("SYSLOG_LOG_ROOT/SYSLOG_BUFFER_DIR must be plain absolute paths".into());
+        let safe_path = |p: &str| p.starts_with('/') && !p.contains(['"', '\n', '\r', '$']);
+        if !safe_path(&root) || !safe_path(&buffer) {
+            return Err("SYSLOG_LOG_ROOT and SYSLOG_BUFFER_DIR must be plain absolute paths".into());
         }
         if template.contains(['"', '\n', '\r']) {
-            return Err("SYSLOG_LINE_TEMPLATE has quote or newline".into());
+            return Err("SYSLOG_LINE_TEMPLATE holds a quote or line break".into());
         }
-        let name = |v: &str| {
-            !v.is_empty()
-                && v.chars()
-                    .all(|c| c.is_ascii_alphanumeric() || "_-".contains(c))
-        };
-        if !name(&group) {
+        if !plain(&group) {
             return Err(format!("LOG_READER_GROUP={group} is no group name"));
         }
-        if let Some(bad) = muted.iter().find(|m| !name(m)) {
+        if let Some(bad) = muted.iter().find(|m| !plain(m)) {
             return Err(format!("SYSLOG_MUTED entry {bad:?} is no plain name"));
         }
         let skip = if muted.is_empty() {
@@ -1413,26 +1279,31 @@ pub mod log {
         };
         let mut out = format!(
             r#"@version: current
-options {{ create-dirs(yes); dir-group("{group}"); dir-perm(0750); group("{group}"); perm(0640); keep-hostname(yes); time-reap({reap}); }};
-source s_docker {{ network(transport("udp") port({port}) flags(syslog-protocol)); }};
+options {{ create-dirs(yes); keep-hostname(yes); group("{group}"); dir-group("{group}"); perm({fperm}); dir-perm({dperm}); time-reap({reap}); }};
+source s_docker {{ network(transport("{inp}") port({port}) flags(syslog-protocol)); }};
 filter f_named {{ program("^[A-Za-z0-9_-]+$" type(pcre)){skip}; }};
 destination {STORE} {{ file("{root}/${{PROGRAM}}/${{YEAR}}${{MONTH}}${{DAY}}.log" template("{template}")); }};
 log {{ source(s_docker); filter(f_named); destination({STORE}); }};
-"#
+"#,
+            fperm = s.text("SYSLOG_FILE_PERM")?,
+            dperm = s.text("SYSLOG_DIR_PERM")?,
+            reap = s.uint("SYSLOG_TIME_REAP")?,
+            inp = s.text("SYSLOG_IN_TRANSPORT")?,
+            port = s.uint("LANCACHE_LOG_PORT")?,
         );
-        out.push_str(&forward_block(&targets(s)?, "s_docker", &buffer));
+        out.push_str(&forward_block(s, &targets(s)?, "s_docker")?);
         Ok(out)
     }
 }
 
-// What: snmpd.conf from settings: views, extends, alarms.
-// Why: replaces Netdata; thresholds come from the ui.
+// What: net-snmp snmpd.conf.
+// Why: statistics and alarms come from SNMP, not Netdata.
 // From: Issue #1683 | PR #1858
 pub mod snmp {
     use crate::config::Settings;
 
-    // What: one extend line: name and command.
-    // Why: service counters (pdns, nginx, kea) via extend.
+    // What: one extend command (custom OID).
+    // Why: stack counters beside the stock MIBs.
     // From: Issue #1683 | PR #1858
     #[derive(Clone, Debug)]
     pub struct Extend {
@@ -1440,8 +1311,8 @@ pub mod snmp {
         pub command: String,
     }
 
-    // What: one log pattern counted by logmatch.
-    // Why: error rates from logs without own code.
+    // What: one logmatch watch on a log file.
+    // Why: counts error lines per program.
     // From: Issue #1683 | PR #1858
     #[derive(Clone, Debug)]
     pub struct LogMatch {
@@ -1450,59 +1321,49 @@ pub mod snmp {
         pub regex: String,
     }
 
-    // What: the full snmpd.conf text of one container.
-    // Why: read-only community, listen and limits from SOT.
+    // What: full snmpd.conf from the SOT.
+    // Why: community, listen and limits are settings.
     // From: Issue #1683 | PR #1858
     pub fn conf(s: &Settings, extends: &[Extend], matches: &[LogMatch]) -> Result<String, String> {
-        let listen = s.text("SNMP_LISTEN")?;
         let community = s.text("SNMP_COMMUNITY")?;
-        let client = s.text("SNMP_ALLOW_FROM")?;
-        let interval = s.uint("SNMP_LOGMATCH_INTERVAL")?;
         let mut out = format!(
-            "agentAddress {listen}\nrocommunity {community} {client}\n\
-             includeAllDisks {}%\nload {} {} {}\n",
+            "agentAddress {}\nrocommunity {community} {}\nincludeAllDisks {}%\nload {} {} {}\n",
+            s.text("SNMP_LISTEN")?,
+            s.text("SNMP_ALLOW_FROM")?,
             s.uint("SNMP_DISK_MIN_FREE_PERCENT")?,
             s.uint("SNMP_LOAD_1")?,
             s.uint("SNMP_LOAD_5")?,
             s.uint("SNMP_LOAD_15")?,
         );
         if s.flag("SNMP_AGENTX")? {
-            out.push_str(&format!(
-                "master agentx\nagentXSocket {}\n",
-                s.text("SNMP_AGENTX_SOCKET")?
-            ));
+            out += &format!("master agentx\nagentXSocket {}\n", s.text("SNMP_AGENTX_SOCKET")?);
         }
         for e in extends {
-            out.push_str(&format!("extend {} {}\n", e.name, e.command));
+            out += &format!("extend {} {}\n", e.name, e.command);
         }
+        let every = s.uint("SNMP_LOGMATCH_INTERVAL")?;
         for m in matches {
-            out.push_str(&format!(
-                "logmatch {} {} {interval} {}\n",
-                m.name, m.file, m.regex
-            ));
+            out += &format!("logmatch {} {} {every} {}\n", m.name, m.file, m.regex);
         }
-        // What: traps only when the ui switched them on.
-        // Why: SNMP warnings are optional, beside ui.
-        // From: Issue #1683 | PR #1858
         if s.flag("SNMP_TRAPS")? {
-            out.push_str(&format!(
+            out += &format!(
                 "trap2sink {} {community}\ndefaultMonitors yes\nlinkUpDownNotifications yes\n",
                 s.text("SNMP_TRAP_SINK")?
-            ));
+            );
         }
         Ok(out)
     }
 }
 
-// What: known-good snapshots with rollback.
-// Why: DNS zones and Kea config return to a good state.
+// What: numbered known-good snapshots in one dir.
+// Why: zone and Kea rollbacks pick one by id.
 // From: Issue #1683 | PR #1858
 pub mod snapshot {
-    use crate::fs::{self, Owner};
-    use std::path::{Path, PathBuf};
+    use crate::fs::{self, Owner, Place};
+    use std::path::PathBuf;
 
-    // What: store of one document kind in one directory.
-    // Why: keep count comes from the SOT, at least 1.
+    // What: snapshot dir, how many to keep, owner.
+    // Why: retention per store from the SOT.
     // From: Issue #1683 | PR #1858
     pub struct Store {
         pub dir: PathBuf,
@@ -1510,66 +1371,68 @@ pub mod snapshot {
         pub owner: Owner,
     }
 
+    // What: an id is a non-empty digit string.
+    // Why: ids name files; no path can sneak in.
+    // From: Issue #1683 | PR #1858
+    fn is_id(name: &str) -> bool {
+        !name.is_empty() && name.bytes().all(|b| b.is_ascii_digit())
+    }
+
     impl Store {
-        // What: save a snapshot; id is creation time in ns.
-        // Why: ids sort by age; oldest are pruned.
+        // What: save body under a new time id.
+        // Why: exclusive create; then prune old ones.
         // From: Issue #1683 | PR #1858
         pub fn save(&self, body: &[u8]) -> Result<String, String> {
             let id = crate::clock::unix_nanos().to_string();
-            fs::write(
-                &self.dir.join(&id),
-                body,
-                0o600,
-                fs::Place::Exclusive,
-                self.owner,
-            )
-            .map_err(|e| format!("snapshot {id}: {e}"))?;
+            fs::write(&self.dir.join(&id), body, 0o600, Place::Exclusive, self.owner)
+                .map_err(|e| format!("snapshot {id}: {e}"))?;
             self.prune()?;
             Ok(id)
         }
 
-        // What: snapshot ids, newest first.
-        // Why: rollback takes the newest good one.
+        // What: ids, newest first.
+        // Why: longer digit string is newer, then text.
         // From: Issue #1683 | PR #1858
         pub fn list(&self) -> Result<Vec<String>, String> {
-            let mut ids: Vec<String> = match std::fs::read_dir(&self.dir) {
-                Ok(rd) => rd
-                    .filter_map(Result::ok)
-                    .filter_map(|e| e.file_name().into_string().ok())
-                    .filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
-                    .collect(),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            let entries = match std::fs::read_dir(&self.dir) {
+                Ok(rd) => rd,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
                 Err(e) => return Err(format!("{}: {e}", self.dir.display())),
             };
-            ids.sort_by(|a, b| b.len().cmp(&a.len()).then(b.cmp(a)));
+            let mut ids: Vec<String> = entries
+                .filter_map(Result::ok)
+                .filter_map(|e| e.file_name().into_string().ok())
+                .filter(|n| is_id(n))
+                .collect();
+            ids.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| b.cmp(a)));
             Ok(ids)
         }
 
         // What: body of one snapshot.
-        // Why: rollback restores exactly these bytes.
+        // Why: rollback restores exactly this.
         // From: Issue #1683 | PR #1858
         pub fn read(&self, id: &str) -> Result<Vec<u8>, String> {
-            if id.is_empty() || !id.bytes().all(|b| b.is_ascii_digit()) {
+            if !is_id(id) {
                 return Err(format!("bad snapshot id {id:?}"));
             }
             std::fs::read(self.dir.join(id)).map_err(|e| format!("snapshot {id}: {e}"))
         }
 
-        // What: drop snapshots beyond the keep count.
-        // Why: the disk must not grow without bound.
+        // What: drop all but the newest keep.
+        // Why: at least one stays to roll back to.
         // From: Issue #1683 | PR #1858
         fn prune(&self) -> Result<(), String> {
             for id in self.list()?.into_iter().skip(self.keep.max(1)) {
-                let path: &Path = &self.dir.join(&id);
-                std::fs::remove_file(path).map_err(|e| format!("{}: {e}", path.display()))?;
+                let path = self.dir.join(&id);
+                std::fs::remove_file(&path).map_err(|e| format!("{}: {e}", path.display()))?;
             }
             Ok(())
         }
     }
 }
 
-// What: DHCP precheck: find servers, try a full lease.
-// Why: runs on demand in any mode; no idle polling.
+// What: on-demand DHCP probe: DISCOVER, REQUEST, RELEASE.
+// Why: shows every DHCP server on the LAN and a real lease.
 // From: Issue #1683 | PR #1858
 pub mod dhcp_probe {
     use crate::config::Settings;
@@ -1577,17 +1440,23 @@ pub mod dhcp_probe {
         Decoder, DhcpOption, Encodable, Encoder, Flags, Message, MessageType, OptionCode,
     };
     use dhcproto::Decodable;
+    use std::io::ErrorKind;
     use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
     use std::time::{Duration, Instant};
 
-    // What: DHCP client and server ports (RFC 2131).
-    // Why: protocol numbers, not project settings.
+    // What: DHCP client and server ports.
+    // Why: fixed by RFC 2131.
     // From: Issue #1683 | PR #1858
     const CLIENT_PORT: u16 = 68;
     const SERVER_PORT: u16 = 67;
 
-    // What: one label/value row shown in the ui.
-    // Why: the ui renders offers as a table.
+    // What: largest UDP payload.
+    // Why: a receive buffer never truncates a reply.
+    // From: Issue #1683 | PR #1858
+    const UDP_MAX: usize = 65_535;
+
+    // What: one labelled value of an answer.
+    // Why: the ui prints a table per server.
     // From: Issue #1683 | PR #1858
     #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
     pub struct Detail {
@@ -1595,8 +1464,8 @@ pub mod dhcp_probe {
         pub value: String,
     }
 
-    // What: one DHCP server that answered.
-    // Why: several servers on one LAN is the main finding.
+    // What: one answering server.
+    // Why: competing servers must be visible.
     // From: Issue #1683 | PR #1858
     #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
     pub struct Server {
@@ -1605,8 +1474,8 @@ pub mod dhcp_probe {
         pub details: Vec<Detail>,
     }
 
-    // What: result of one precheck run.
-    // Why: the ui shows servers and the lease try.
+    // What: probe result for the ui.
+    // Why: offers, lease result and hard errors apart.
     // From: Issue #1683 | PR #1858
     #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
     pub struct Report {
@@ -1616,8 +1485,24 @@ pub mod dhcp_probe {
         pub error: Option<String>,
     }
 
-    // What: options shown per offer, label and code.
-    // Why: codes fixed by RFC 2132; labels for the ui.
+    impl Report {
+        // What: a report with offers and a lease text.
+        // Why: most exits differ only in these.
+        // From: Issue #1683 | PR #1858
+        fn lease(servers: Vec<Server>, ok: bool, text: impl Into<String>) -> Self {
+            Self { servers, lease_ok: ok, lease_text: text.into(), error: None }
+        }
+
+        // What: a report for a hard error.
+        // Why: socket or send failures.
+        // From: Issue #1683 | PR #1858
+        fn error(servers: Vec<Server>, e: String) -> Self {
+            Self { servers, lease_ok: false, lease_text: String::new(), error: Some(e) }
+        }
+    }
+
+    // What: the options shown, with labels.
+    // Why: option codes are fixed by RFC 2132.
     // From: Issue #1683 | PR #1858
     const FIELDS: [(&str, OptionCode); 8] = [
         ("Server", OptionCode::ServerIdentifier),
@@ -1630,370 +1515,257 @@ pub mod dhcp_probe {
         ("Broadcast", OptionCode::BroadcastAddr),
     ];
 
-    // What: read address, server id and rows of a reply.
-    // Why: offers and ACKs carry the same fields.
+    // What: text of one option, if shown.
+    // Why: lists join with a comma.
+    // From: Issue #1683 | PR #1858
+    fn option_text(opt: &DhcpOption) -> Option<String> {
+        Some(match opt {
+            DhcpOption::ServerIdentifier(a) | DhcpOption::SubnetMask(a) | DhcpOption::BroadcastAddr(a) => {
+                a.to_string()
+            }
+            DhcpOption::AddressLeaseTime(n) | DhcpOption::Renewal(n) => n.to_string(),
+            DhcpOption::Router(l) | DhcpOption::DomainNameServer(l) => {
+                l.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
+            }
+            DhcpOption::DomainName(n) => n.clone(),
+            _ => return None,
+        })
+    }
+
+    // What: server, address and details of a reply.
+    // Why: one reader for OFFER and ACK.
     // From: Issue #1683 | PR #1858
     fn read(msg: &Message) -> Server {
-        let opts = msg.opts();
-        let text = |code: OptionCode| -> Option<String> {
-            Some(match opts.get(code)? {
-                DhcpOption::ServerIdentifier(a)
-                | DhcpOption::SubnetMask(a)
-                | DhcpOption::BroadcastAddr(a) => a.to_string(),
-                DhcpOption::AddressLeaseTime(s) | DhcpOption::Renewal(s) => s.to_string(),
-                DhcpOption::Router(l) | DhcpOption::DomainNameServer(l) => l
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(", "),
-                DhcpOption::DomainName(n) => n.clone(),
-                _ => return None,
-            })
-        };
         let address = Some(msg.yiaddr()).filter(|a| !a.is_unspecified());
         let mut details: Vec<Detail> = address
-            .map(|a| Detail {
-                label: "Address".into(),
-                value: a.to_string(),
-            })
+            .map(|a| Detail { label: "Address".into(), value: a.to_string() })
             .into_iter()
             .collect();
-        details.extend(FIELDS.iter().filter_map(|(label, code)| {
-            text(*code).map(|value| Detail {
-                label: (*label).into(),
-                value,
-            })
-        }));
-        let server = match opts.get(OptionCode::ServerIdentifier) {
+        for (label, code) in FIELDS {
+            if let Some(value) = msg.opts().get(code).and_then(option_text) {
+                details.push(Detail { label: label.into(), value });
+            }
+        }
+        let server = match msg.opts().get(OptionCode::ServerIdentifier) {
             Some(DhcpOption::ServerIdentifier(a)) => Some(*a),
             _ => None,
         };
-        Server {
-            server,
-            address,
-            details,
-        }
+        Server { server, address, details }
     }
 
-    // What: true when a reply has the given message type.
-    // Why: offers, ACKs and NAKs share one socket.
+    // What: true if msg is of this DHCP type.
+    // Why: replies are filtered by type.
     // From: Issue #1683 | PR #1858
     fn is(msg: &Message, kind: MessageType) -> bool {
-        matches!(msg.opts().get(OptionCode::MessageType),
-            Some(DhcpOption::MessageType(t)) if *t == kind)
+        matches!(msg.opts().get(OptionCode::MessageType), Some(DhcpOption::MessageType(t)) if *t == kind)
     }
 
     // What: build one client message.
-    // Why: broadcast flag except for RELEASE (RFC 2131).
+    // Why: broadcast flag except for RELEASE.
     // From: Issue #1683 | PR #1858
-    fn message(
-        xid: u32,
-        mac: &[u8; 6],
-        ci: Ipv4Addr,
-        kind: MessageType,
-        opts: Vec<DhcpOption>,
-    ) -> Message {
-        let none = Ipv4Addr::UNSPECIFIED;
-        let mut msg = Message::new_with_id(xid, ci, none, none, none, mac);
+    fn message(xid: u32, mac: &[u8; 6], ci: Ipv4Addr, kind: MessageType, extra: Vec<DhcpOption>) -> Message {
+        let zero = Ipv4Addr::UNSPECIFIED;
+        let mut msg = Message::new_with_id(xid, ci, zero, zero, zero, mac);
         if kind != MessageType::Release {
             msg.set_flags(Flags::default().set_broadcast());
         }
-        msg.opts_mut().insert(DhcpOption::MessageType(kind));
-        let wanted = FIELDS
-            .iter()
-            .map(|(_, c)| *c)
-            .filter(|c| *c != OptionCode::ServerIdentifier);
-        msg.opts_mut()
-            .insert(DhcpOption::ParameterRequestList(wanted.collect()));
-        for o in opts {
-            msg.opts_mut().insert(o);
+        let opts = msg.opts_mut();
+        opts.insert(DhcpOption::MessageType(kind));
+        opts.insert(DhcpOption::ParameterRequestList(
+            FIELDS.iter().map(|(_, c)| *c).filter(|c| *c != OptionCode::ServerIdentifier).collect(),
+        ));
+        for o in extra {
+            opts.insert(o);
         }
         msg
     }
 
     // What: encode and send one message.
-    // Why: one send path for every step.
+    // Why: errors become text for the report.
     // From: Issue #1683 | PR #1858
     fn send(sock: &UdpSocket, msg: &Message, to: SocketAddrV4) -> Result<(), String> {
         let mut buf = Vec::new();
-        msg.encode(&mut Encoder::new(&mut buf))
-            .map_err(|e| e.to_string())?;
+        msg.encode(&mut Encoder::new(&mut buf)).map_err(|e| e.to_string())?;
         sock.send_to(&buf, to).map(drop).map_err(|e| e.to_string())
     }
 
-    // What: read replies for xid until done or deadline.
-    // Why: the handler returns true to stop early.
+    // What: read replies of xid until done or deadline.
+    // Why: f returns true when the wanted reply came.
     // From: Issue #1683 | PR #1858
-    fn listen(
-        sock: &UdpSocket,
-        xid: u32,
-        until: Instant,
-        mut f: impl FnMut(&Message) -> bool,
-    ) -> Result<(), String> {
-        let mut buf = [0u8; 1500];
+    fn listen(sock: &UdpSocket, xid: u32, until: Instant, mut f: impl FnMut(&Message) -> bool) -> Result<(), String> {
+        let mut buf = vec![0u8; UDP_MAX];
         loop {
             let left = until.saturating_duration_since(Instant::now());
             if left.is_zero() {
                 return Ok(());
             }
-            sock.set_read_timeout(Some(left))
-                .map_err(|e| e.to_string())?;
+            sock.set_read_timeout(Some(left)).map_err(|e| e.to_string())?;
             match sock.recv_from(&mut buf) {
                 Ok((n, _)) => {
-                    if let Ok(msg) = Message::decode(&mut Decoder::new(&buf[..n])) {
-                        if msg.xid() == xid && f(&msg) {
-                            return Ok(());
-                        }
+                    let done = Message::decode(&mut Decoder::new(&buf[..n]))
+                        .is_ok_and(|m| m.xid() == xid && f(&m));
+                    if done {
+                        return Ok(());
                     }
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(e)
-                    if matches!(
-                        e.kind(),
-                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                    ) =>
-                {
-                    return Ok(());
-                }
+                Err(e) if e.kind() == ErrorKind::Interrupted => {}
+                Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => return Ok(()),
                 Err(e) => return Err(e.to_string()),
             }
         }
     }
 
-    // What: DISCOVER, collect offers, REQUEST, RELEASE.
-    // Why: shows every server and proves a lease works.
+    // What: run the probe with SOT timings.
+    // Why: random xid and local MAC; lease is released.
     // From: Issue #1683 | PR #1858
     pub fn run(s: &Settings) -> Report {
-        let fail = |e: String| Report {
-            servers: Vec::new(),
-            lease_ok: false,
-            lease_text: String::new(),
-            error: Some(e),
+        let timing = || -> Result<(Duration, Duration, u32), String> {
+            Ok((
+                Duration::from_millis(s.uint("DHCP_PROBE_WINDOW_MS")?),
+                Duration::from_millis(s.uint("DHCP_PROBE_ACK_WAIT_MS")?),
+                u32::try_from(s.uint("DHCP_PROBE_SENDS")?.max(1)).unwrap_or(u32::MAX),
+            ))
         };
-        let (window, wait, sends) = match (
-            s.uint("DHCP_PROBE_WINDOW_MS"),
-            s.uint("DHCP_PROBE_ACK_WAIT_MS"),
-            s.uint("DHCP_PROBE_SENDS"),
-        ) {
-            (Ok(a), Ok(b), Ok(c)) => (
-                Duration::from_millis(a),
-                Duration::from_millis(b),
-                c.max(1) as u32,
-            ),
-            (a, b, c) => {
-                return fail(
-                    [a.err(), b.err(), c.err()]
-                        .into_iter()
-                        .flatten()
-                        .collect::<Vec<_>>()
-                        .join("; "),
-                )
-            }
+        let (window, wait, sends) = match timing() {
+            Ok(t) => t,
+            Err(e) => return Report::error(Vec::new(), e),
         };
         let sock = match UdpSocket::bind((Ipv4Addr::UNSPECIFIED, CLIENT_PORT))
-            .and_then(|s| s.set_broadcast(true).map(|()| s))
+            .and_then(|sock| sock.set_broadcast(true).map(|()| sock))
         {
-            Ok(s) => s,
-            Err(e) => return fail(format!("DHCP socket: {e}")),
+            Ok(sock) => sock,
+            Err(e) => return Report::error(Vec::new(), format!("DHCP socket: {e}")),
         };
         let bcast = SocketAddrV4::new(Ipv4Addr::BROADCAST, SERVER_PORT);
         let xid: u32 = rand::random();
-        // What: random locally administered unicast MAC.
-        // Why: the probe must not take a real host's lease.
-        // From: Issue #1683 | PR #1858
         let mut mac: [u8; 6] = rand::random();
+        // What: locally administered unicast MAC.
+        // Why: never collides with a real NIC (IEEE 802).
+        // From: Issue #1683 | PR #1858
         mac[0] = (mac[0] | 0x02) & !0x01;
-        let discover = message(
-            xid,
-            &mac,
-            Ipv4Addr::UNSPECIFIED,
-            MessageType::Discover,
-            vec![],
-        );
+        let discover = message(xid, &mac, Ipv4Addr::UNSPECIFIED, MessageType::Discover, vec![]);
         let end = Instant::now() + window;
         let mut servers: Vec<Server> = Vec::new();
-        for i in 1..=sends {
+        for round in 1..=sends {
             if let Err(e) = send(&sock, &discover, bcast) {
-                return fail(format!("DHCPDISCOVER: {e}"));
+                return Report::error(servers, format!("DHCPDISCOVER: {e}"));
             }
-            let until = if i == sends {
-                end
-            } else {
-                (Instant::now() + window / sends).min(end)
-            };
-            if let Err(e) = listen(&sock, xid, until, |m| {
+            let until = if round == sends { end } else { (Instant::now() + window / sends).min(end) };
+            let got = listen(&sock, xid, until, |m| {
                 if is(m, MessageType::Offer) {
-                    let o = read(m);
-                    if !servers
-                        .iter()
-                        .any(|x| x.server.is_some() && x.server == o.server)
-                    {
-                        servers.push(o);
+                    let offer = read(m);
+                    if offer.server.is_some() && !servers.iter().any(|x| x.server == offer.server) {
+                        servers.push(offer);
                     }
                 }
                 false
-            }) {
-                eprintln!("[dhcp_probe] read {i} failed: {e}");
+            });
+            if let Err(e) = got {
+                eprintln!("dhcp_probe: read {round}: {e}");
             }
         }
-        let Some(first) = servers.first().cloned() else {
-            return Report {
-                servers,
-                lease_ok: false,
-                lease_text: format!("no offer within {} ms", window.as_millis()),
-                error: None,
-            };
+        let Some(first) = servers.first() else {
+            return Report::lease(servers, false, format!("no offer within {} ms", window.as_millis()));
         };
         let (Some(addr), Some(server)) = (first.address, first.server) else {
-            return Report {
-                servers,
-                lease_ok: false,
-                lease_text: "offer without address or server id".into(),
-                error: None,
-            };
+            return Report::lease(servers, false, "offer without address or server id");
         };
-        let req = message(
+        let request = message(
             xid,
             &mac,
             Ipv4Addr::UNSPECIFIED,
             MessageType::Request,
-            vec![
-                DhcpOption::RequestedIpAddress(addr),
-                DhcpOption::ServerIdentifier(server),
-            ],
+            vec![DhcpOption::RequestedIpAddress(addr), DhcpOption::ServerIdentifier(server)],
         );
-        if let Err(e) = send(&sock, &req, bcast) {
-            return Report {
-                servers,
-                lease_ok: false,
-                lease_text: String::new(),
-                error: Some(format!("DHCPREQUEST: {e}")),
-            };
+        if let Err(e) = send(&sock, &request, bcast) {
+            return Report::error(servers, format!("DHCPREQUEST: {e}"));
         }
         let mut verdict: Result<Server, String> = Err("no ACK before timeout".into());
-        if let Err(e) = listen(&sock, xid, Instant::now() + wait, |m| {
-            if is(m, MessageType::Ack) {
-                let a = read(m);
-                if a.server == Some(server) {
-                    verdict = Ok(a);
-                    return true;
-                }
-            } else if is(m, MessageType::Nak) {
+        let heard = listen(&sock, xid, Instant::now() + wait, |m| {
+            if is(m, MessageType::Nak) {
                 verdict = Err("server sent DHCPNAK".into());
                 return true;
             }
-            false
-        }) {
-            return Report {
-                servers,
-                lease_ok: false,
-                lease_text: String::new(),
-                error: Some(e),
-            };
-        }
-        match verdict {
-            Ok(ack) => {
-                // What: give the test lease back at once.
-                // Why: the probe keeps no pool address.
-                // From: Issue #1683 | PR #1858
-                if let Some(ip) = ack.address {
-                    let rel = message(
-                        rand::random(),
-                        &mac,
-                        ip,
-                        MessageType::Release,
-                        vec![DhcpOption::ServerIdentifier(server)],
-                    );
-                    if let Err(e) = send(&sock, &rel, SocketAddrV4::new(server, SERVER_PORT)) {
-                        eprintln!("[dhcp_probe] release to {server} failed: {e}");
-                    }
+            let ack = is(m, MessageType::Ack).then(|| read(m)).filter(|a| a.server == Some(server));
+            match ack {
+                Some(a) => {
+                    verdict = Ok(a);
+                    true
                 }
-                let text = ack.address.map_or("lease granted".into(), |ip| {
-                    format!("lease {ip} granted by {server}")
-                });
-                Report {
-                    servers,
-                    lease_ok: true,
-                    lease_text: text,
-                    error: None,
-                }
+                None => false,
             }
-            Err(t) => Report {
-                servers,
-                lease_ok: false,
-                lease_text: t,
-                error: None,
-            },
+        });
+        if let Err(e) = heard {
+            return Report::error(servers, e);
         }
+        let ack = match verdict {
+            Ok(ack) => ack,
+            Err(text) => return Report::lease(servers, false, text),
+        };
+        let Some(ip) = ack.address else {
+            return Report::lease(servers, true, "lease granted");
+        };
+        let release = message(rand::random(), &mac, ip, MessageType::Release, vec![DhcpOption::ServerIdentifier(server)]);
+        if let Err(e) = send(&sock, &release, SocketAddrV4::new(server, SERVER_PORT)) {
+            eprintln!("dhcp_probe: release to {server}: {e}");
+        }
+        Report::lease(servers, true, format!("lease {ip} granted by {server}"))
     }
 }
 
-// What: chrony.conf from settings.
-// Why: one owner; the dns container start renders it.
+// What: chrony.conf for the stack NTP server.
+// Why: LAN clients get time from the appliance.
 // From: Issue #1683 | PR #1858
 pub mod chrony {
     use crate::config::Settings;
 
-    // What: only plain host, CIDR and path characters.
-    // Why: a value must never add a chrony directive.
+    // What: host, IP, CIDR or path characters only.
+    // Why: values go into a config file.
     // From: Issue #1683 | PR #1858
     fn plain(v: &str) -> bool {
-        !v.is_empty()
-            && v.chars()
-                .all(|c| c.is_ascii_alphanumeric() || ".:/-_".contains(c))
+        !v.is_empty() && v.chars().all(|c| c.is_ascii_alphanumeric() || ".:/-_".contains(c))
     }
 
-    // What: render chrony.conf.
-    // Why: IP = server, name = pool; empty CIDRs allow all.
+    // What: full chrony.conf.
+    // Why: upstream needed; only SOT CIDRs may ask.
     // From: Issue #1683 | PR #1858
     pub fn conf(s: &Settings) -> Result<String, String> {
-        let servers = s.list("NTP_UPSTREAM_SERVERS");
-        if servers.is_empty() {
+        let upstream = s.list("NTP_UPSTREAM_SERVERS");
+        if upstream.is_empty() {
             return Err("NTP_UPSTREAM_SERVERS is empty; NTP never runs alone".into());
         }
         let allowed = s.list("NTP_ALLOWED_CLIENT_CIDRS");
         let drift = s.text("NTP_DRIFT_FILE")?;
-        let port = s.uint("NTP_PORT")?;
-        if let Some(bad) = servers.iter().chain(&allowed).find(|v| !plain(v)) {
+        let makestep = s.text("NTP_MAKESTEP")?;
+        if let Some(bad) = upstream.iter().chain(&allowed).find(|v| !plain(v)) {
             return Err(format!("NTP value {bad:?} has unsafe characters"));
         }
         if !drift.starts_with('/') || !plain(&drift) {
             return Err(format!("NTP_DRIFT_FILE={drift} is no plain absolute path"));
         }
-        let mut out = format!("driftfile {drift}\nport {port}\nmakestep 1.0 3\nrtcsync\n");
-        for host in &servers {
-            let kind = if host.parse::<std::net::IpAddr>().is_ok() {
-                "server"
-            } else {
-                "pool"
-            };
-            out.push_str(&format!("{kind} {host} iburst\n"));
+        if makestep.contains(['\n', '\r']) {
+            return Err("NTP_MAKESTEP holds a line break".into());
         }
-        if allowed.is_empty() {
-            out.push_str("allow 0.0.0.0/0\nallow ::/0\n");
+        let mut out = format!(
+            "driftfile {drift}\nport {}\nmakestep {makestep}\nrtcsync\n",
+            s.uint("NTP_PORT")?
+        );
+        for host in &upstream {
+            let kind = if host.parse::<std::net::IpAddr>().is_ok() { "server" } else { "pool" };
+            out += &format!("{kind} {host} iburst\n");
         }
         for cidr in &allowed {
-            out.push_str(&format!("allow {cidr}\n"));
+            out += &format!("allow {cidr}\n");
         }
         Ok(out)
     }
 }
 
 // What: pdns.conf of the authoritative server.
-// Why: one owner; values from the SOT, key from secret.
+// Why: primary notifies; secondary pulls with TSIG.
 // From: Issue #1683 | PR #1858
 pub mod pdns_conf {
     use crate::config::Settings;
-
-    // What: values must not open a new config line.
-    // Why: a setting must never add a pdns directive.
-    // From: Issue #1683 | PR #1858
-    fn line_safe(key: &str, v: &str) -> Result<(), String> {
-        if v.contains(['\n', '\r']) {
-            return Err(format!("{key} contains a line break"));
-        }
-        Ok(())
-    }
 
     // What: addresses of registered secondaries.
     // Why: NOTIFY goes to every registered secondary.
@@ -2006,81 +1778,62 @@ pub mod pdns_conf {
             .collect()
     }
 
-    // What: render pdns.conf for this node's role.
-    // Why: primary sends NOTIFY; secondary pulls by AXFR.
+    // What: full pdns.conf for this node's role.
+    // Why: API on; AXFR by TSIG, not by IP list.
     // From: Issue #1683 | PR #1858
     pub fn auth(s: &Settings, api_key: &str) -> Result<String, String> {
-        let role = s.text("DNS_REPLICATION_ROLE")?;
-        let primary = match role.as_str() {
+        let primary = match s.text("DNS_REPLICATION_ROLE")?.as_str() {
             "primary" => true,
             "secondary" => false,
             other => return Err(format!("DNS_REPLICATION_ROLE={other} is unknown")),
         };
-        let yes = |on: bool| if on { "yes" } else { "no" };
-        let notify_from = if primary {
-            String::new()
-        } else {
-            s.text("DNS_XFR_PRIMARY")?
-        };
-        let pairs = [
-            ("local-address", s.list("PDNS_LISTEN").join(",")),
-            ("local-port", s.uint("PDNS_AUTH_PORT")?.to_string()),
-            ("launch", "gsqlite3".to_string()),
+        let yes = |on: bool| if on { "yes" } else { "no" }.to_string();
+        let joined = |key: &str| s.list(key).join(",");
+        let rows = [
+            ("launch", s.text("PDNS_LAUNCH")?),
             ("gsqlite3-database", s.text("PDNS_DATABASE")?),
-            ("primary", yes(primary).to_string()),
-            ("secondary", yes(!primary).to_string()),
-            (
-                "also-notify",
-                if primary {
-                    secondary_ips(s).join(",")
-                } else {
-                    String::new()
-                },
-            ),
-            ("allow-notify-from", notify_from),
-            // What: AXFR by IP only for extra SOT hosts.
-            // Why: secondaries need the TSIG key.
-            // From: Issue #1683 | PR #1858
-            ("allow-axfr-ips", s.list("PDNS_AXFR_FROM").join(",")),
+            ("local-address", joined("PDNS_LISTEN")),
+            ("local-port", s.uint("PDNS_AUTH_PORT")?.to_string()),
+            ("primary", yes(primary)),
+            ("secondary", yes(!primary)),
+            ("also-notify", if primary { secondary_ips(s).join(",") } else { String::new() }),
+            ("allow-notify-from", if primary { String::new() } else { s.text("DNS_XFR_PRIMARY")? }),
+            ("allow-axfr-ips", joined("PDNS_AXFR_FROM")),
             ("xfr-cycle-interval", s.uint("PDNS_XFR_CYCLE")?.to_string()),
-            ("dnsupdate", yes(primary).to_string()),
-            (
-                "allow-dnsupdate-from",
-                s.list("PDNS_DNSUPDATE_FROM").join(","),
-            ),
+            ("dnsupdate", yes(primary)),
+            ("allow-dnsupdate-from", joined("PDNS_DNSUPDATE_FROM")),
             ("default-soa-content", s.text("PDNS_DEFAULT_SOA")?),
-            ("webserver", "yes".to_string()),
+            ("api", yes(true)),
+            ("api-key", api_key.to_string()),
+            ("webserver", yes(true)),
             ("webserver-address", s.text("PDNS_API_LISTEN")?),
             ("webserver-port", s.uint("PDNS_AUTH_API_PORT")?.to_string()),
-            (
-                "webserver-allow-from",
-                s.list("PDNS_API_ALLOW_FROM").join(","),
-            ),
-            ("api", "yes".to_string()),
-            ("api-key", api_key.to_string()),
+            ("webserver-allow-from", joined("PDNS_API_ALLOW_FROM")),
             ("loglevel", s.uint("PDNS_AUTH_LOGLEVEL")?.to_string()),
-            ("guardian", "no".to_string()),
-            ("daemon", "no".to_string()),
+            ("guardian", yes(false)),
+            ("daemon", yes(false)),
         ];
         let mut out = String::new();
-        for (k, v) in pairs {
-            line_safe(k, &v)?;
-            if !v.is_empty() {
-                out.push_str(&format!("{k}={v}\n"));
+        for (key, value) in rows {
+            if value.contains(['\n', '\r']) {
+                return Err(format!("{key} contains a line break"));
+            }
+            if !value.is_empty() {
+                out += &format!("{key}={value}\n");
             }
         }
         Ok(out)
     }
 }
 
-// What: recursor.yml, lua and RPZ for http and https.
-// Why: both recursors differ only in keys; one owner.
+// What: recursor.yml, RPZ zone and Lua files.
+// Why: two recursors: HTTP mode and HTTPS mode.
 // From: Issue #1683 | PR #1858
 pub mod recursor_conf {
     use crate::config::Settings;
 
-    // What: which recursor: HTTP or HTTPS.
-    // Why: names the key suffix, e.g. RECURSOR_HTTP_PORT.
+    // What: which of the two recursors.
+    // Why: keys differ only by HTTP or HTTPS.
     // From: Issue #1683 | PR #1858
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub enum Which {
@@ -2089,381 +1842,377 @@ pub mod recursor_conf {
     }
 
     impl Which {
-        // What: key part of this recursor.
-        // Why: one schema row per recursor and setting.
+        // What: SOT key RECURSOR_<MODE>_<name>.
+        // Why: one naming rule for both recursors.
         // From: Issue #1683 | PR #1858
         pub fn key(self, name: &str) -> String {
-            let part = match self {
+            let mode = match self {
                 Self::Http => "HTTP",
                 Self::Https => "HTTPS",
             };
-            format!("RECURSOR_{part}_{name}")
+            format!("RECURSOR_{mode}_{name}")
         }
     }
 
-    // What: YAML list rows, quoted.
-    // Why: quoting keeps a value from breaking the YAML.
+    // What: YAML list rows of quoted items.
+    // Why: quotes or breaks would break the YAML.
     // From: Issue #1683 | PR #1858
     fn rows(items: &[String], indent: &str) -> Result<String, String> {
-        let mut out = String::new();
-        for i in items {
-            if i.contains(['"', '\\', '\n', '\r']) {
-                return Err(format!("value {i:?} has quote or line break"));
-            }
-            out.push_str(&format!("{indent}- \"{i}\"\n"));
-        }
-        Ok(out)
+        items
+            .iter()
+            .map(|i| {
+                if i.contains(['"', '\\', '\n', '\r']) {
+                    Err(format!("value {i:?} has quote or line break"))
+                } else {
+                    Ok(format!("{indent}- \"{i}\"\n"))
+                }
+            })
+            .collect()
     }
 
-    // What: RPZ zone that answers cache domains locally.
-    // Why: native recursor policy; no own DNS answers.
+    // What: RPZ zone: every cache domain to answer.
+    // Why: clients reach the proxy by DNS only.
     // From: Issue #1683 | PR #1858
-    pub fn rpz(domains: &[String], answer: &str, serial: u32) -> Result<String, String> {
+    pub fn rpz(s: &Settings, domains: &[String], answer: &str, serial: u32) -> Result<String, String> {
         if answer.parse::<std::net::IpAddr>().is_err() {
             return Err(format!("RPZ answer {answer:?} is no IP address"));
         }
         let kind = if answer.contains(':') { "AAAA" } else { "A" };
+        let mname = s.text("RPZ_SOA_MNAME")?;
         let mut out = format!(
-            "$TTL 60\n@ SOA localhost. hostmaster.localhost. {serial} 3600 600 86400 60\n@ NS localhost.\n"
+            "$TTL {}\n@ SOA {mname} {} {serial} {} {} {} {}\n@ NS {mname}\n",
+            s.uint("RPZ_TTL")?,
+            s.text("RPZ_SOA_RNAME")?,
+            s.uint("RPZ_SOA_REFRESH")?,
+            s.uint("RPZ_SOA_RETRY")?,
+            s.uint("RPZ_SOA_EXPIRE")?,
+            s.uint("RPZ_SOA_MINIMUM")?,
         );
         for d in domains {
             let d = d.trim_end_matches('.');
             if !crate::dns::is_dns_name(d, false, true) {
                 return Err(format!("cache domain {d:?} is no DNS name"));
             }
-            out.push_str(&format!("{d} {kind} {answer}\n*.{d} {kind} {answer}\n"));
+            out += &format!("{d} {kind} {answer}\n*.{d} {kind} {answer}\n");
         }
         Ok(out)
     }
 
-    // What: lua config: load the RPZ file.
-    // Why: rpzFile is the native recursor RPZ loader.
+    // What: Lua config that loads the RPZ file.
+    // Why: the recursor reads RPZ only via Lua.
     // From: Issue #1683 | PR #1858
-    pub fn lua(rpz_file: &str) -> Result<String, String> {
-        if rpz_file.contains(['"', '\\', '\n']) {
-            return Err(format!("RPZ path {rpz_file:?} is not plain"));
+    pub fn lua(s: &Settings, rpz_file: &str) -> Result<String, String> {
+        let policy = s.text("RPZ_POLICY_NAME")?;
+        if [rpz_file, policy.as_str()].iter().any(|v| v.contains(['"', '\\', '\n'])) {
+            return Err("RPZ path or policy name is not plain".into());
         }
-        Ok(format!(
-            "rpzFile(\"{rpz_file}\", {{ policyName=\"lancache-rpz\" }})\n"
-        ))
+        Ok(format!("rpzFile(\"{rpz_file}\", {{ policyName=\"{policy}\" }})\n"))
     }
 
-    // What: lua dns script answering AAAA with no data.
-    // Why: clients then use IPv4 and reach the cache.
+    // What: Lua hook: AAAA answers become empty.
+    // Why: keeps cache traffic on IPv4 when wanted.
     // From: Issue #1683 | PR #1858
     pub const AAAA_FILTER_LUA: &str = "function preresolve(dq)\n  if dq.qtype == pdns.AAAA then\n    dq.rcode = pdns.NOERROR\n    return true\n  end\n  return false\nend\n";
 
-    // What: recursor.yml for one recursor.
-    // Why: local zones to auth server, rest upstream.
+    // What: full recursor.yml (YAML settings).
+    // Why: local zones go to auth; rest upstream.
     // From: Issue #1683 | PR #1858
-    pub fn yaml(
-        s: &Settings,
-        which: Which,
-        api_key: &str,
-        lua_file: &str,
-    ) -> Result<String, String> {
-        let auth = format!(
-            "{}:{}",
-            s.text("PDNS_AUTH_ADDRESS")?,
-            s.uint("PDNS_AUTH_PORT")?
-        );
-        let mut fwd = String::new();
-        for z in crate::dns::managed_zones(&s.text("DNS_LAN_ZONE")?, s.flag("DNS_SERVE_RFC1918")?) {
-            fwd.push_str(&format!(
-                "    - zone: \"{}\"\n      forwarders: [\"{auth}\"]\n",
-                z.trim_end_matches('.')
-            ));
-        }
+    pub fn yaml(s: &Settings, which: Which, api_key: &str, lua_file: &str) -> Result<String, String> {
+        let u = |k: &str| s.uint(k).map(|v| v.to_string());
+        let auth = format!("{}:{}", s.text("PDNS_AUTH_ADDRESS")?, s.uint("PDNS_AUTH_PORT")?);
+        let local: String = crate::dns::managed_zones(s)?
+            .iter()
+            .map(|z| format!("    - zone: \"{}\"\n      forwarders: [\"{auth}\"]\n", z.trim_end_matches('.')))
+            .collect();
         let upstream = s.list("DNS_UPSTREAM_SERVERS");
-        let mut recurse = String::new();
-        if !upstream.is_empty() {
-            let list = upstream
-                .iter()
-                .map(|u| format!("\"{u}\""))
-                .collect::<Vec<_>>()
-                .join(", ");
-            recurse = format!(
-                "  forward_zones_recurse:\n    - zone: \".\"\n      forwarders: [{list}]\n"
-            );
-        }
-        let snmp = if s.flag("SNMP_AGENTX")? {
-            format!(
-                "snmp:\n  agent: true\n  daemon_socket: \"{}\"\n",
-                s.text("SNMP_AGENTX_SOCKET")?
-            )
+        let recurse = if upstream.is_empty() {
+            String::new()
+        } else {
+            let list: Vec<String> = upstream.iter().map(|u| format!("\"{u}\"")).collect();
+            format!("  forward_zones_recurse:\n    - zone: \".\"\n      forwarders: [{}]\n", list.join(", "))
+        };
+        let aaaa = if s.flag("DNS_FILTER_AAAA")? {
+            format!("  lua_dns_script: \"{}\"\n", s.text("RECURSOR_AAAA_LUA_FILE")?)
         } else {
             String::new()
         };
-        let u = |k: &str| s.uint(k).map(|v| v.to_string());
-        Ok(format!(
-            "incoming:\n  listen:\n{listen}  port: {port}\n  allow_from:\n{allow}\
-             recursor:\n  serve_rfc1918: {rfc}\n  forward_zones:\n{fwd}{recurse}\
-             \x20 lua_config_file: \"{lua_file}\"\n{dns_script}  minimum_ttl_override: {minttl}\n\
-             recordcache:\n  max_entries: {rcmax}\n  refresh_on_ttl_perc: {perc}\n\
-             \x20 serve_stale_extensions: {stale}\n  max_negative_ttl: {negttl}\n\
-             packetcache:\n  max_entries: {pcmax}\n  ttl: {pcttl}\n  negative_ttl: {negttl}\n\
-             \x20 servfail_ttl: {sfttl}\n\
-             webservice:\n  webserver: true\n  address: \"{apiaddr}\"\n  port: {apiport}\n\
-             \x20 allow_from:\n{apiallow}  api_key: \"{api_key}\"\n\
-             logging:\n  loglevel: {loglevel}\n{snmp}",
-            dns_script = if s.flag("DNS_FILTER_AAAA")? {
-                format!(
-                    "  lua_dns_script: \"{}\"\n",
-                    s.text("RECURSOR_AAAA_LUA_FILE")?
-                )
-            } else {
-                String::new()
-            },
-            listen = rows(&s.list(&which.key("LISTEN")), "    ")?,
-            port = u(&which.key("PORT"))?,
-            allow = rows(&s.list("DNS_QUERY_ALLOW_FROM"), "    ")?,
-            rfc = s.flag("DNS_SERVE_RFC1918")?,
-            minttl = u("RECURSOR_MINIMUM_TTL_OVERRIDE")?,
-            rcmax = u("RECURSOR_RECORDCACHE_MAX")?,
-            perc = u("RECURSOR_REFRESH_ON_TTL_PERC")?,
-            stale = u("RECURSOR_SERVE_STALE_EXTENSIONS")?,
-            negttl = u("RECURSOR_NEGATIVE_TTL")?,
-            pcmax = u("RECURSOR_PACKETCACHE_MAX")?,
-            pcttl = u("RECURSOR_PACKETCACHE_TTL")?,
-            sfttl = u("RECURSOR_SERVFAIL_TTL")?,
-            apiaddr = s.text("PDNS_API_LISTEN")?,
-            apiport = u(&which.key("API_PORT"))?,
-            apiallow = rows(&s.list("PDNS_API_ALLOW_FROM"), "    ")?,
-            loglevel = u("RECURSOR_LOGLEVEL")?,
-        ))
+        let snmp = if s.flag("SNMP_AGENTX")? {
+            format!("snmp:\n  agent: true\n  daemon_socket: \"{}\"\n", s.text("SNMP_AGENTX_SOCKET")?)
+        } else {
+            String::new()
+        };
+        let negttl = u("RECURSOR_NEGATIVE_TTL")?;
+        let mut y = String::new();
+        y += "incoming:\n  listen:\n";
+        y += &rows(&s.list(&which.key("LISTEN")), "    ")?;
+        y += &format!("  port: {}\n  allow_from:\n", u(&which.key("PORT"))?);
+        y += &rows(&s.list("DNS_QUERY_ALLOW_FROM"), "    ")?;
+        y += &format!("recursor:\n  serve_rfc1918: {}\n", s.flag("DNS_SERVE_RFC1918")?);
+        y += &format!("  forward_zones:\n{local}{recurse}");
+        y += &format!("  lua_config_file: \"{lua_file}\"\n{aaaa}");
+        y += &format!("  minimum_ttl_override: {}\n", u("RECURSOR_MINIMUM_TTL_OVERRIDE")?);
+        y += &format!("recordcache:\n  max_entries: {}\n", u("RECURSOR_RECORDCACHE_MAX")?);
+        y += &format!("  refresh_on_ttl_perc: {}\n", u("RECURSOR_REFRESH_ON_TTL_PERC")?);
+        y += &format!("  serve_stale_extensions: {}\n", u("RECURSOR_SERVE_STALE_EXTENSIONS")?);
+        y += &format!("  max_negative_ttl: {negttl}\n");
+        y += &format!("packetcache:\n  max_entries: {}\n", u("RECURSOR_PACKETCACHE_MAX")?);
+        y += &format!("  ttl: {}\n  negative_ttl: {negttl}\n", u("RECURSOR_PACKETCACHE_TTL")?);
+        y += &format!("  servfail_ttl: {}\n", u("RECURSOR_SERVFAIL_TTL")?);
+        y += &format!("webservice:\n  webserver: true\n  address: \"{}\"\n", s.text("PDNS_API_LISTEN")?);
+        y += &format!("  port: {}\n  allow_from:\n", u(&which.key("API_PORT"))?);
+        y += &rows(&s.list("PDNS_API_ALLOW_FROM"), "    ")?;
+        y += &format!("  api_key: \"{api_key}\"\n");
+        y += &format!("logging:\n  loglevel: {}\n{snmp}", u("RECURSOR_LOGLEVEL")?);
+        Ok(y)
     }
 }
 
-// What: Kea configs: dhcp4, ctrl-agent, dhcp-ddns.
-// Why: one owner; Kea reads them; values from the SOT.
+// What: Kea config files built from the settings.
+// Why: one place turns SOT values into Kea JSON.
 // From: Issue #1683 | PR #1858
 pub mod kea_conf {
     use crate::config::Settings;
-    use crate::dhcp;
     use serde_json::{json, Value};
 
-    // What: Kea logger rows to stdout.
-    // Why: Docker syslog driver sends stdout on.
+    // What: fixed Kea protocol words.
+    // Why: Kea accepts only these; not tunable.
     // From: Issue #1683 | PR #1858
-    fn loggers(s: &Settings, names: &[&str]) -> Result<Value, String> {
-        let severity = s.text("KEA_LOG_SEVERITY")?;
-        let debug = s.uint("KEA_LOG_DEBUGLEVEL")?;
-        Ok(names
+    const SOCKET_KIND: &str = "unix";
+    const LEASE_BACKEND: &str = "memfile";
+    const NCR_PROTOCOL: &str = "UDP";
+    const NCR_FORMAT: &str = "JSON";
+    const LOG_OUTPUT: &str = "stdout";
+
+    fn log_rows(s: &Settings, names: &[&str]) -> Result<Value, String> {
+        let level = s.text("KEA_LOG_SEVERITY")?;
+        let depth = s.uint("KEA_LOG_DEBUGLEVEL")?;
+        let rows: Vec<Value> = names
             .iter()
             .map(|n| {
-                json!({"name": n, "output-options": [{"output": "stdout"}],
-                       "severity": severity, "debuglevel": debug})
+                json!({"name": n, "severity": level, "debuglevel": depth,
+                       "output-options": [{"output": LOG_OUTPUT}]})
             })
-            .collect())
+            .collect();
+        Ok(Value::Array(rows))
     }
 
-    // What: kea-dhcp4.conf; subnets kept from the file.
-    // Why: ui edits subnets in Kea; SOT seeds first.
-    // From: Issue #1683 | PR #1858
-    pub fn dhcp4(s: &Settings, existing: Option<&Value>) -> Result<Value, String> {
-        let lease = s.uint("DHCP_LEASE_TIME")?;
-        let (valid, max) = dhcp::lease_limits(s, lease)?;
-        let domain = crate::dns::canonical_zone(&s.text("DNS_LAN_ZONE")?);
-        let domain = domain.trim_end_matches('.').to_string();
-        let mut options = vec![
-            json!({"name": "routers", "data": s.text("DHCP_GATEWAY")?}),
-            json!({"name": "domain-name-servers", "data": s.list("DHCP_DNS_SERVERS").join(", ")}),
-            json!({"name": "domain-name", "data": domain}),
-            json!({"name": "domain-search", "data": domain}),
-        ];
+    fn lan_domain(s: &Settings) -> Result<String, String> {
+        let zone = crate::dns::canonical_zone(&s.text("DNS_LAN_ZONE")?);
+        Ok(zone.trim_end_matches('.').to_string())
+    }
+
+    fn socket(s: &Settings) -> Result<Value, String> {
+        Ok(json!({"socket-type": SOCKET_KIND,
+                  "socket-name": s.text("KEA_DHCP4_SOCKET")?}))
+    }
+
+    fn option_rows(s: &Settings, domain: &str) -> Result<Vec<Value>, String> {
+        let mut rows = Vec::new();
+        rows.push(json!({"name": "routers", "data": s.text("DHCP_GATEWAY")?}));
+        let dns = s.list("DHCP_DNS_SERVERS").join(", ");
+        rows.push(json!({"name": "domain-name-servers", "data": dns}));
+        rows.push(json!({"name": "domain-name", "data": domain}));
+        rows.push(json!({"name": "domain-search", "data": domain}));
         let ntp = s.list("DHCP_NTP_SERVERS");
         if !ntp.is_empty() {
-            options.push(json!({"name": "ntp-servers", "data": ntp.join(", ")}));
+            rows.push(json!({"name": "ntp-servers", "data": ntp.join(", ")}));
         }
-        for (code, data) in
-            dhcp::custom_options(s, &s.text("DHCP_CUSTOM_OPTIONS").unwrap_or_default())?
-        {
-            options.push(json!({"code": code, "data": data}));
+        let raw = s.text("DHCP_CUSTOM_OPTIONS").unwrap_or_default();
+        for (code, data) in crate::dhcp::custom_options(s, &raw)? {
+            rows.push(json!({"code": code, "data": data}));
         }
-        let ddns = s.flag("DHCP_DDNS")?;
-        let mut out = json!({"Dhcp4": {
-            "interfaces-config": {"interfaces": s.list("DHCP_INTERFACES"), "re-detect": false},
-            "lease-database": {"type": "memfile", "persist": true, "name": s.text("KEA_LEASE_FILE")?},
-            "control-socket": {"socket-type": "unix", "socket-name": s.text("KEA_DHCP4_SOCKET")?},
-            "hooks-libraries": [{"library": s.text("KEA_LEASE_CMDS_HOOK")?}],
-            "subnet4": [{
-                "id": 1,
+        Ok(rows)
+    }
+
+    // What: kea-dhcp4.conf.
+    // Why: subnets edited in the ui survive a render.
+    // From: Issue #1683 | PR #1858
+    pub fn dhcp4(s: &Settings, existing: Option<&Value>) -> Result<Value, String> {
+        let domain = lan_domain(s)?;
+        let (valid, max) = crate::dhcp::lease_limits(s, s.uint("DHCP_LEASE_TIME")?)?;
+        let pool = format!(
+            "{} - {}",
+            s.text("DHCP_RANGE_START")?,
+            s.text("DHCP_RANGE_END")?
+        );
+        let subnets = match existing.and_then(|e| e.pointer("/Dhcp4/subnet4")) {
+            Some(kept) => kept.clone(),
+            None => json!([{
+                "id": s.uint("DHCP_SUBNET_ID")?,
                 "subnet": s.text("DHCP_SUBNET")?,
-                "pools": [{"pool": format!("{} - {}", s.text("DHCP_RANGE_START")?, s.text("DHCP_RANGE_END")?)}],
-                "option-data": options,
+                "pools": [{"pool": pool}],
+                "option-data": option_rows(s, &domain)?,
                 "valid-lifetime": valid,
                 "max-valid-lifetime": max
-            }],
+            }]),
+        };
+        let updates = s.flag("DHCP_DDNS")?;
+        Ok(json!({"Dhcp4": {
+            "interfaces-config": {
+                "interfaces": s.list("DHCP_INTERFACES"),
+                "re-detect": false
+            },
+            "lease-database": {
+                "type": LEASE_BACKEND,
+                "persist": true,
+                "name": s.text("KEA_LEASE_FILE")?
+            },
+            "control-socket": socket(s)?,
+            "hooks-libraries": [{"library": s.text("KEA_LEASE_CMDS_HOOK")?}],
+            "subnet4": subnets,
             "dhcp-ddns": {
-                "enable-updates": ddns,
+                "enable-updates": updates,
                 "server-ip": s.text("KEA_DDNS_ADDRESS")?,
                 "server-port": s.uint("KEA_DDNS_PORT")?,
                 "max-queue-size": s.uint("KEA_NCR_MAX_QUEUE")?,
-                "ncr-protocol": "UDP",
-                "ncr-format": "JSON"
+                "ncr-protocol": NCR_PROTOCOL,
+                "ncr-format": NCR_FORMAT
             },
-            "ddns-send-updates": ddns,
+            "ddns-send-updates": updates,
             "ddns-override-no-update": true,
             "ddns-override-client-update": true,
             "ddns-replace-client-name": s.text("KEA_DDNS_REPLACE_CLIENT_NAME")?,
             "ddns-generated-prefix": s.text("KEA_DDNS_GENERATED_PREFIX")?,
             "ddns-qualifying-suffix": format!("{domain}."),
-            "loggers": loggers(s, &["kea-dhcp4", "kea-dhcp4.packets"])?
-        }});
-        if let Some(subnets) = existing.and_then(|e| e.pointer("/Dhcp4/subnet4")) {
-            out["Dhcp4"]["subnet4"] = subnets.clone();
-        }
-        Ok(out)
+            "loggers": log_rows(s, &["kea-dhcp4", "kea-dhcp4.packets"])?
+        }}))
     }
 
     // What: kea-ctrl-agent.conf.
-    // Why: the ui reads leases through its REST port.
+    // Why: the ui reads leases over its REST port.
     // From: Issue #1683 | PR #1858
     pub fn ctrl_agent(s: &Settings) -> Result<Value, String> {
         Ok(json!({"Control-agent": {
             "http-host": s.text("KEA_CTRL_ADDRESS")?,
             "http-port": s.uint("KEA_CTRL_PORT")?,
-            "control-sockets": {"dhcp4": {"socket-type": "unix", "socket-name": s.text("KEA_DHCP4_SOCKET")?}},
-            "loggers": loggers(s, &["kea-ctrl-agent"])?
+            "control-sockets": {"dhcp4": socket(s)?},
+            "loggers": log_rows(s, &["kea-ctrl-agent"])?
         }}))
     }
 
-    // What: kea-dhcp-ddns.conf: forward and reverse.
-    // Why: DDNS goes to the local pdns with TSIG.
+    // What: kea-dhcp-ddns.conf, forward and reverse.
+    // Why: name updates go to local pdns with TSIG.
     // From: Issue #1683 | PR #1858
-    pub fn ddns(s: &Settings, tsig_name: &str, tsig_secret: &str) -> Result<Value, String> {
-        let server = json!([{"ip-address": s.text("PDNS_AUTH_ADDRESS")?, "port": s.uint("PDNS_AUTH_PORT")?}]);
-        let zone = crate::dns::canonical_zone(&s.text("DNS_LAN_ZONE")?);
-        let fwd = json!([{"name": zone, "key-name": tsig_name, "dns-servers": server}]);
-        let rev: Vec<Value> = crate::dns::private_reverse_zones()
+    pub fn ddns(s: &Settings, key: &str, secret: &str) -> Result<Value, String> {
+        let target = json!([{
+            "ip-address": s.text("PDNS_AUTH_ADDRESS")?,
+            "port": s.uint("PDNS_AUTH_PORT")?
+        }]);
+        let entry = |zone: &str| json!({"name": zone, "key-name": key, "dns-servers": target});
+        let lan = crate::dns::canonical_zone(&s.text("DNS_LAN_ZONE")?);
+        let reverse: Vec<Value> = crate::dns::private_reverse_zones(s)
             .iter()
-            .map(|z| json!({"name": z, "key-name": tsig_name, "dns-servers": server}))
+            .map(|z| entry(z))
             .collect();
         Ok(json!({"DhcpDdns": {
             "ip-address": s.text("KEA_DDNS_ADDRESS")?,
             "port": s.uint("KEA_DDNS_PORT")?,
-            "tsig-keys": [{"name": tsig_name, "algorithm": s.text("DDNS_TSIG_ALGORITHM")?, "secret": tsig_secret}],
-            "forward-ddns": {"ddns-domains": fwd},
-            "reverse-ddns": {"ddns-domains": rev},
-            "loggers": loggers(s, &["kea-dhcp-ddns"])?
+            "tsig-keys": [{
+                "name": key,
+                "algorithm": s.text("DDNS_TSIG_ALGORITHM")?,
+                "secret": secret
+            }],
+            "forward-ddns": {"ddns-domains": [entry(&lan)]},
+            "reverse-ddns": {"ddns-domains": reverse},
+            "loggers": log_rows(s, &["kea-dhcp-ddns"])?
         }}))
     }
 }
 
-// What: dnsmasq.conf for proxy-DHCP or relay mode.
-// Why: one owner; errors stop the render, never skip.
+// What: dnsmasq.conf for proxy-DHCP or relay.
+// Why: one owner; a bad value stops the render.
 // From: Issue #1683 | PR #1858
 pub mod dnsmasq_conf {
     use crate::config::Settings;
-    use crate::dhcp::{self, Mode};
+    use crate::dhcp::Mode;
 
-    // What: append one line; refuse line breaks.
-    // Why: a value must never add a dnsmasq directive.
-    // From: Issue #1683 | PR #1858
-    fn line(out: &mut String, l: String) -> Result<(), String> {
-        if l.contains(['\n', '\r']) {
-            return Err(format!("dnsmasq line {l:?} holds a line break"));
+    struct Conf(String);
+
+    impl Conf {
+        fn add(&mut self, row: &str) -> Result<(), String> {
+            if row.contains(['\n', '\r']) {
+                return Err(format!("dnsmasq row {row:?} has a line break"));
+            }
+            self.0.push_str(row);
+            self.0.push('\n');
+            Ok(())
         }
-        out.push_str(&l);
-        out.push('\n');
+        fn add_if(&mut self, prefix: &str, value: &str) -> Result<(), String> {
+            if value.is_empty() {
+                return Ok(());
+            }
+            self.add(&format!("{prefix}{value}"))
+        }
+    }
+
+    fn base(s: &Settings) -> Result<Conf, String> {
+        let mut c = Conf(String::new());
+        for row in ["port=0", "no-resolv", "no-poll", "log-facility=-"] {
+            c.add(row)?;
+        }
+        if s.flag("DHCP_LOG_PACKETS")? {
+            c.add("log-dhcp")?;
+        }
+        Ok(c)
+    }
+
+    fn pxe(s: &Settings, c: &mut Conf) -> Result<(), String> {
+        let get = |k: &str| s.text(k).unwrap_or_default();
+        let server = get("DHCP_PROXY_PXE_BOOT_SERVER");
+        let bios = get("DHCP_PROXY_PXE_BOOT_FILENAME_BIOS");
+        let uefi = get("DHCP_PROXY_PXE_BOOT_FILENAME_UEFI");
+        if server.is_empty() || (bios.is_empty() && uefi.is_empty()) {
+            return Ok(());
+        }
+        if bios.is_empty() {
+            c.add("pxe-service=IA64_EFI,\"lancache-ng PXE proxy active\",0")?;
+        } else {
+            let label = "\"lancache-ng PXE boot (BIOS)\"";
+            c.add(&format!("pxe-service=x86PC,{label},{bios},{server}"))?;
+            c.add("dhcp-match=set:pxe-bios,option:client-arch,0")?;
+            c.add(&format!("dhcp-boot=tag:pxe-bios,{bios},,{server}"))?;
+        }
+        if !uefi.is_empty() {
+            for arch in [7, 11] {
+                c.add(&format!("dhcp-match=set:pxe-uefi,option:client-arch,{arch}"))?;
+            }
+            c.add(&format!("dhcp-boot=tag:pxe-uefi,{uefi},,{server}"))?;
+        }
         Ok(())
     }
 
-    // What: render dnsmasq.conf for the mode.
-    // Why: Off and Kea run no dnsmasq; caller asks first.
+    // What: render dnsmasq.conf for one mode.
+    // Why: Off and Kea start no dnsmasq at all.
     // From: Issue #1683 | PR #1858
     pub fn conf(s: &Settings, mode: Mode) -> Result<String, String> {
-        let mut out = String::from("port=0\nno-resolv\nno-poll\nlog-facility=-\n");
-        if s.flag("DHCP_LOG_PACKETS")? {
-            out.push_str("log-dhcp\n");
+        let mut c = base(s)?;
+        if mode == Mode::DnsmasqRelay {
+            let local = s.text("DHCP_RELAY_LOCAL_ADDR")?;
+            let upstream = s.text("UPSTREAM_DHCP_IP")?;
+            c.add(&format!("dhcp-relay={local},{upstream}"))?;
+            return Ok(c.0);
         }
-        match mode {
-            Mode::DnsmasqRelay => {
-                let l = format!(
-                    "dhcp-relay={},{}",
-                    s.text("DHCP_RELAY_LOCAL_ADDR")?,
-                    s.text("UPSTREAM_DHCP_IP")?
-                );
-                line(&mut out, l)?;
-                return Ok(out);
-            }
-            Mode::DnsmasqProxy => {}
-            Mode::Off | Mode::Kea => return Err(format!("dnsmasq does not run in mode {mode:?}")),
+        if mode != Mode::DnsmasqProxy {
+            return Err(format!("no dnsmasq in DHCP mode {mode:?}"));
         }
-        line(
-            &mut out,
-            format!("dhcp-range={},proxy", s.text("DHCP_SUBNET_START")?),
-        )?;
-        line(
-            &mut out,
-            format!("dhcp-option-pxe=6,{}", s.list("DHCP_DNS_SERVERS").join(",")),
-        )?;
-        let opt = |k: &str| s.text(k).unwrap_or_default();
-        for (key, prefix) in [
-            ("DHCP_PROXY_INTERFACE", "interface="),
-            ("DHCP_PROXY_ROUTER", "dhcp-option-pxe=3,"),
-            ("DHCP_PROXY_DOMAIN", "dhcp-option-pxe=15,"),
-        ] {
-            let v = opt(key);
-            if !v.is_empty() {
-                line(&mut out, format!("{prefix}{v}"))?;
-            }
-        }
-        let ntp = s.list("DHCP_NTP_SERVERS");
-        if !ntp.is_empty() {
-            line(&mut out, format!("dhcp-option-pxe=42,{}", ntp.join(",")))?;
-        }
-        let (file, server) = (
-            opt("DHCP_PROXY_BOOT_FILENAME"),
-            opt("DHCP_PROXY_BOOT_SERVER"),
-        );
+        let get = |k: &str| s.text(k).unwrap_or_default();
+        c.add(&format!("dhcp-range={},proxy", s.text("DHCP_SUBNET_START")?))?;
+        c.add_if("interface=", &get("DHCP_PROXY_INTERFACE"))?;
+        c.add_if("dhcp-option-pxe=3,", &get("DHCP_PROXY_ROUTER"))?;
+        c.add_if("dhcp-option-pxe=6,", &s.list("DHCP_DNS_SERVERS").join(","))?;
+        c.add_if("dhcp-option-pxe=15,", &get("DHCP_PROXY_DOMAIN"))?;
+        c.add_if("dhcp-option-pxe=42,", &s.list("DHCP_NTP_SERVERS").join(","))?;
+        let file = get("DHCP_PROXY_BOOT_FILENAME");
         if !file.is_empty() {
-            line(&mut out, format!("dhcp-boot={file},,{server}"))?;
+            let server = get("DHCP_PROXY_BOOT_SERVER");
+            c.add(&format!("dhcp-boot={file},,{server}"))?;
         }
-        for (code, data) in dhcp::custom_options(s, &opt("DHCP_CUSTOM_OPTIONS"))? {
-            line(&mut out, format!("dhcp-option-pxe={code},{data}"))?;
+        let raw = get("DHCP_CUSTOM_OPTIONS");
+        for (code, data) in crate::dhcp::custom_options(s, &raw)? {
+            c.add(&format!("dhcp-option-pxe={code},{data}"))?;
         }
-        let pxe = opt("DHCP_PROXY_PXE_BOOT_SERVER");
-        let bios = opt("DHCP_PROXY_PXE_BOOT_FILENAME_BIOS");
-        let uefi = opt("DHCP_PROXY_PXE_BOOT_FILENAME_UEFI");
-        if pxe.is_empty() || (bios.is_empty() && uefi.is_empty()) {
-            return Ok(out);
-        }
-        if !bios.is_empty() {
-            line(
-                &mut out,
-                format!("pxe-service=x86PC,\"lancache-ng PXE boot (BIOS)\",{bios},{pxe}"),
-            )?;
-            line(
-                &mut out,
-                "dhcp-match=set:lancache-pxe-bios,option:client-arch,0".into(),
-            )?;
-            line(
-                &mut out,
-                format!("dhcp-boot=tag:lancache-pxe-bios,{bios},,{pxe}"),
-            )?;
-        }
-        if !uefi.is_empty() {
-            line(
-                &mut out,
-                "dhcp-match=set:lancache-pxe-uefi,option:client-arch,7".into(),
-            )?;
-            line(
-                &mut out,
-                "dhcp-match=set:lancache-pxe-uefi,option:client-arch,11".into(),
-            )?;
-            line(
-                &mut out,
-                format!("dhcp-boot=tag:lancache-pxe-uefi,{uefi},,{pxe}"),
-            )?;
-        }
-        if bios.is_empty() {
-            line(
-                &mut out,
-                "pxe-service=IA64_EFI,\"lancache-ng PXE proxy active\",0".into(),
-            )?;
-        }
-        Ok(out)
+        pxe(s, &mut c)?;
+        Ok(c.0)
     }
 }
 
@@ -2480,32 +2229,24 @@ pub mod nginx_conf {
     // From: Issue #1683 | PR #1858
     const HEAD: &str = "# Generated by LanCache-NG; do not edit\n";
 
-    // What: discard port answering refused names.
-    // Why: RFC 863 discard; TLS fails fast.
-    // From: Issue #1683 | PR #1858
-    const DISCARD_PORT: u16 = 9;
-
     // What: Public Suffix List rules.
     // Why: finds the registrable root of a CDN name.
     // From: Issue #1683 | PR #1858
+    #[derive(Default)]
     pub struct Psl {
-        rules: BTreeSet<String>,
+        plain: BTreeSet<String>,
         wild: BTreeSet<String>,
         except: BTreeSet<String>,
     }
 
     impl Psl {
-        // What: parse the PSL text format.
-        // Why: publicsuffix.org: rule, *.rule, !rule.
+        // What: read the PSL text format.
+        // Why: publicsuffix.org rows: x, *.x, !x.
         // From: Issue #1683 | PR #1858
         pub fn parse(text: &str) -> Self {
-            let mut p = Self {
-                rules: BTreeSet::new(),
-                wild: BTreeSet::new(),
-                except: BTreeSet::new(),
-            };
-            for l in text.lines().map(str::trim) {
-                let Some(rule) = l.split_whitespace().next() else {
+            let mut p = Psl::default();
+            for row in text.lines() {
+                let Some(rule) = row.split_whitespace().next() else {
                     continue;
                 };
                 if rule.starts_with("//") {
@@ -2513,41 +2254,44 @@ pub mod nginx_conf {
                 }
                 let rule = rule.to_ascii_lowercase();
                 if let Some(r) = rule.strip_prefix('!') {
-                    p.except.insert(r.to_string());
+                    p.except.insert(r.into());
                 } else if let Some(r) = rule.strip_prefix("*.") {
-                    p.wild.insert(r.to_string());
+                    p.wild.insert(r.into());
                 } else {
-                    p.rules.insert(rule);
+                    p.plain.insert(rule);
                 }
             }
             p
         }
 
-        // What: registrable root (suffix plus one label).
-        // Why: PSL rule; an unlisted TLD is a suffix.
+        fn suffix_labels(&self, labels: &[&str]) -> usize {
+            let n = labels.len();
+            let mut best = 1;
+            for i in 0..n {
+                let tail = labels[i..].join(".");
+                if self.except.contains(&tail) {
+                    return n - i - 1;
+                }
+                let wild_hit = i + 1 < n && self.wild.contains(&labels[i + 1..].join("."));
+                if self.plain.contains(&tail) || wild_hit {
+                    best = best.max(n - i);
+                }
+            }
+            best
+        }
+
+        // What: registrable root: suffix plus one label.
+        // Why: PSL rule; an unknown TLD counts as suffix.
         // From: Issue #1683 | PR #1858
         pub fn root(&self, name: &str) -> Option<String> {
             let labels: Vec<&str> = name.split('.').collect();
-            let mut suffix_len = 1;
-            for i in 0..labels.len() {
-                let cand = labels[i..].join(".");
-                if self.except.contains(&cand) {
-                    suffix_len = labels.len() - i - 1;
-                    break;
-                }
-                let parent = labels[i + 1..].join(".");
-                if self.rules.contains(&cand)
-                    || (i + 1 < labels.len() && self.wild.contains(&parent))
-                {
-                    suffix_len = suffix_len.max(labels.len() - i);
-                }
-            }
-            (labels.len() > suffix_len).then(|| labels[labels.len() - suffix_len - 1..].join("."))
+            let keep = self.suffix_labels(&labels) + 1;
+            (labels.len() >= keep).then(|| labels[labels.len() - keep..].join("."))
         }
     }
 
-    // What: CDN names sorted by how nginx must treat them.
-    // Why: roots get one cert; bases and exact names own.
+    // What: CDN names grouped by nginx handling.
+    // Why: roots share a cert; bases and exact own one.
     // From: Issue #1683 | PR #1858
     #[derive(Default)]
     pub struct Hosts {
@@ -2557,261 +2301,290 @@ pub mod nginx_conf {
         pub root_wild: BTreeSet<String>,
     }
 
-    // What: sort the cache domain list into Hosts.
-    // Why: invalid or rootless rows are errors, not skips.
+    fn add_once(list: &mut Vec<String>, name: &str) {
+        if !list.iter().any(|n| n == name) {
+            list.push(name.to_string());
+        }
+    }
+
+    // What: group the cache domain list into Hosts.
+    // Why: a bad or rootless row is an error, no skip.
     // From: Issue #1683 | PR #1858
     pub fn hosts(domains: &str, psl: &Psl) -> Result<Hosts, String> {
         let mut h = Hosts::default();
-        let push = |l: &mut Vec<String>, n: &str| {
-            if !l.iter().any(|k| k == n) {
-                l.push(n.to_string());
-            }
-        };
-        for row in domains
-            .lines()
-            .map(str::trim)
-            .filter(|r| !r.is_empty() && !r.starts_with('#'))
-        {
+        let rows = domains.lines().map(str::trim);
+        for row in rows.filter(|r| !r.is_empty() && !r.starts_with('#')) {
             let (name, wild) = crate::dns::cdn_entry(row)
                 .ok_or_else(|| format!("invalid domain entry {row:?}"))?;
             let root = psl
                 .root(&name)
                 .ok_or_else(|| format!("no registrable root for {name}"))?;
-            push(&mut h.roots, &root);
-            if wild && name == root {
-                h.root_wild.insert(root);
+            add_once(&mut h.roots, &root);
+            let parent = name.split_once('.').map(|(_, p)| p);
+            if name == root {
+                if wild {
+                    h.root_wild.insert(root);
+                }
             } else if wild {
-                push(&mut h.bases, &name);
-            } else if name != root && name.split_once('.').map(|(_, r)| r) != Some(root.as_str()) {
-                push(&mut h.exact, &name);
+                add_once(&mut h.bases, &name);
+            } else if parent != Some(root.as_str()) {
+                add_once(&mut h.exact, &name);
             }
         }
         Ok(h)
     }
 
-    // What: stable cert file name of one host.
+    // What: stable cert file name for one host.
     // Why: file names never carry raw host text.
     // From: Issue #1683 | PR #1858
-    fn cert_name(host: &str, kind: &str) -> String {
-        let d = Sha256::digest(format!("{kind}:{host}").as_bytes());
-        d.iter().take(16).map(|b| format!("{b:02x}")).collect()
+    fn cert_id(host: &str, kind: &str) -> String {
+        let sum = Sha256::digest(format!("{kind}:{host}").as_bytes());
+        sum[..16].iter().map(|b| format!("{b:02x}")).collect()
     }
 
     impl Hosts {
         // What: (server name key, cert name) pairs.
-        // Why: drives the cert map and allow map.
+        // Why: feeds the cert map and the allow map.
         // From: Issue #1683 | PR #1858
         pub fn keys(&self) -> Vec<(String, String)> {
-            let mut k = Vec::new();
+            let mut out = Vec::new();
             for r in &self.roots {
-                k.push((format!("*.{r}"), r.clone()));
-                k.push((r.clone(), r.clone()));
+                out.push((format!("*.{r}"), r.clone()));
+                out.push((r.clone(), r.clone()));
             }
             for b in &self.bases {
-                k.push((format!("*.{b}"), cert_name(b, "wildcard")));
+                out.push((format!("*.{b}"), cert_id(b, "wildcard")));
             }
             for e in &self.exact {
-                k.push((e.clone(), cert_name(e, "exact")));
+                out.push((e.clone(), cert_id(e, "exact")));
             }
-            k
+            out
         }
 
-        // What: certs to issue: name and SANs.
+        // What: certs to issue: file name and SANs.
         // Why: cert::make_leaf issues exactly these.
         // From: Issue #1683 | PR #1858
         pub fn certs(&self) -> Vec<(String, Vec<String>)> {
-            let mut c: Vec<(String, Vec<String>)> = self
-                .roots
-                .iter()
-                .map(|r| (r.clone(), vec![r.clone(), format!("*.{r}")]))
-                .collect();
-            c.extend(
-                self.bases
-                    .iter()
-                    .map(|b| (cert_name(b, "wildcard"), vec![format!("*.{b}")])),
-            );
-            c.extend(
-                self.exact
-                    .iter()
-                    .map(|e| (cert_name(e, "exact"), vec![e.clone()])),
-            );
-            c
+            let mut out = Vec::new();
+            for r in &self.roots {
+                out.push((r.clone(), vec![r.clone(), format!("*.{r}")]));
+            }
+            for b in &self.bases {
+                out.push((cert_id(b, "wildcard"), vec![format!("*.{b}")]));
+            }
+            for e in &self.exact {
+                out.push((cert_id(e, "exact"), vec![e.clone()]));
+            }
+            out
         }
     }
 
-    // What: one map row, aligned.
-    // Why: readable generated files.
-    // From: Issue #1683 | PR #1858
-    fn row(key: &str, value: &str) -> String {
-        format!("    {key:<45} {value};\n")
-    }
-
     // What: fill ${KEY} in a shipped nginx template.
-    // Why: settings live in the ui, not in the env.
+    // Why: values come from settings, not the env.
     // From: Issue #1683 | PR #1858
     pub fn template(text: &str, s: &Settings) -> Result<String, String> {
         let mut out = String::with_capacity(text.len());
         let mut rest = text;
-        while let Some(i) = rest.find("${") {
-            out.push_str(&rest[..i]);
-            let tail = &rest[i + 2..];
-            let end = tail.find('}').ok_or("unclosed ${ in nginx template")?;
-            let key = &tail[..end];
-            let v = s.text(key).map_err(|e| format!("nginx template: {e}"))?;
-            if v.contains(['\n', '\r', ';', '{', '}']) {
-                return Err(format!("{key} holds a character nginx treats as syntax"));
+        while let Some(at) = rest.find("${") {
+            out.push_str(&rest[..at]);
+            let after = &rest[at + 2..];
+            let close = after.find('}').ok_or("unclosed ${ in nginx template")?;
+            let key = &after[..close];
+            let value = s.text(key).map_err(|e| format!("nginx template: {e}"))?;
+            if value.contains(['\n', '\r', ';', '{', '}']) {
+                return Err(format!("{key} holds nginx syntax characters"));
             }
-            out.push_str(&v);
-            rest = &tail[end + 1..];
+            out.push_str(&value);
+            rest = &after[close + 1..];
         }
         out.push_str(rest);
         Ok(out)
     }
 
-    // What: all generated files: (relative path, body).
-    // Why: the ui writes them; nginx includes the paths.
+    fn map_row(out: &mut String, key: &str, value: &str) {
+        out.push_str(&format!("    {key:<45} {value};\n"));
+    }
+
+    fn ends_with_re(base: &str, one_label: bool) -> String {
+        let label = if one_label { "[^.]+" } else { ".+" };
+        format!("\"~^{label}\\.{}$\"", base.replace('.', "\\."))
+    }
+
+    // What: all settings the files need, read once.
+    // Why: one read; a missing key stops the render.
     // From: Issue #1683 | PR #1858
-    pub fn files(s: &Settings, h: &Hosts, https: bool) -> Result<Vec<(String, String)>, String> {
+    struct Plan {
+        strict: bool,
+        cidrs: Vec<String>,
+        lo: String,
+        refuse: String,
+        origin: String,
+        acl: String,
+        timeouts: String,
+        passthrough: u64,
+        https: u64,
+        mitm: u64,
+        mitm_relay: String,
+        pass_relay: String,
+        health: u64,
+    }
+
+    fn plan(s: &Settings) -> Result<Plan, String> {
         let strict = match s.text("PROXY_SECURITY_MODE")?.as_str() {
             "strict" => true,
             "lazy" => false,
-            o => {
-                return Err(format!(
-                    "PROXY_SECURITY_MODE={o} is neither lazy nor strict"
-                ))
-            }
+            other => return Err(format!("PROXY_SECURITY_MODE {other} is not lazy/strict")),
         };
-        let cidrs = s.list("PROXY_ALLOWED_CLIENT_CIDRS");
         let lo = s.text("LOOPBACK_BIND_IP")?;
-        let p = |k: &str| s.uint(k);
-        let (mitm, mitm_relay, pass_relay) = (
-            p("NGINX_MITM_PORT")?,
-            p("NGINX_MITM_RELAY_PORT")?,
-            p("NGINX_PASSTHROUGH_RELAY_PORT")?,
-        );
-        let (passthrough, https_port, origin_port, health) = (
-            p("NGINX_PASSTHROUGH_PORT")?,
-            p("PROXY_HTTPS_PORT")?,
-            p("NGINX_ORIGIN_HTTPS_PORT")?,
-            p("NGINX_HEALTH_TLS_PORT")?,
-        );
-        let timeouts = format!(
-            "    proxy_connect_timeout {}s;\n    proxy_timeout        {}s;\n",
-            p("NGINX_UPSTREAM_CONNECT_TIMEOUT")?,
-            p("NGINX_UPSTREAM_IDLE_TIMEOUT")?
-        );
-        let refuse = format!("{lo}:{DISCARD_PORT}");
-        let origin = format!("$ssl_preread_server_name:{origin_port}");
-        let acl_path = s.text("NGINX_CLIENT_ACL_FILE")?;
-        let keys = h.keys();
-        let mut out = Vec::new();
+        let at = |k: &str| -> Result<String, String> { Ok(format!("{lo}:{}", s.uint(k)?)) };
+        Ok(Plan {
+            strict,
+            cidrs: s.list("PROXY_ALLOWED_CLIENT_CIDRS"),
+            refuse: at("NGINX_DISCARD_PORT")?,
+            origin: format!(
+                "$ssl_preread_server_name:{}",
+                s.uint("NGINX_ORIGIN_HTTPS_PORT")?
+            ),
+            acl: s.text("NGINX_CLIENT_ACL_FILE")?,
+            timeouts: format!(
+                "    proxy_connect_timeout {}s;\n    proxy_timeout {}s;\n",
+                s.uint("NGINX_UPSTREAM_CONNECT_TIMEOUT")?,
+                s.uint("NGINX_UPSTREAM_IDLE_TIMEOUT")?
+            ),
+            passthrough: s.uint("NGINX_PASSTHROUGH_PORT")?,
+            https: s.uint("PROXY_HTTPS_PORT")?,
+            mitm: s.uint("NGINX_MITM_PORT")?,
+            mitm_relay: at("NGINX_MITM_RELAY_PORT")?,
+            pass_relay: at("NGINX_PASSTHROUGH_RELAY_PORT")?,
+            health: s.uint("NGINX_HEALTH_TLS_PORT")?,
+            lo,
+        })
+    }
 
-        let mut acl = HEAD.to_string();
-        if !cidrs.is_empty() {
-            for c in &cidrs {
-                acl.push_str(&format!("allow {c};\n"));
-            }
-            acl.push_str("deny all;\n");
+    fn acl_file(p: &Plan) -> String {
+        let mut out = HEAD.to_string();
+        for c in &p.cidrs {
+            out.push_str(&format!("allow {c};\n"));
         }
-        out.push((acl_path.clone(), acl));
+        if !p.cidrs.is_empty() {
+            out.push_str("deny all;\n");
+        }
+        out
+    }
 
-        let mut st = format!(
-            "{HEAD}map $ssl_preread_server_name $stream_backend {{\n    hostnames;\n{}",
-            row("\"\"", &refuse)
-        );
-        if strict {
-            st.push_str(&format!("    default {refuse};\n"));
-            for (k, _) in &keys {
-                st.push_str(&row(k, &origin));
-            }
-        } else {
-            st.push_str(&format!("    default {origin};\n"));
-        }
-        st.push_str(&format!(
-            "}}\n\nserver {{\n    listen {passthrough};\n    listen [::]:{passthrough};\n    include {acl_path};\n    ssl_preread on;\n    proxy_pass $stream_backend;\n{timeouts}}}\n"
-        ));
-        out.push(("stream.d/00-stream-targets.conf".into(), st));
-
-        if !https {
-            return Ok(out);
-        }
-        let default_cert = s.text("NGINX_DEFAULT_CERT")?;
-        let mut map = format!("{HEAD}map $ssl_server_name $https_cert_name {{\n    hostnames;\n");
-        for (k, c) in &keys {
-            map.push_str(&row(k, c));
-        }
-        map.push_str(&format!(
-            "    default {default_cert};\n}}\n\nmap $host $cdn_host_allowed {{\n    hostnames;\n"
-        ));
-        if strict {
-            map.push_str("    default 0;\n");
-            for (k, _) in &keys {
-                map.push_str(&row(k, "1"));
+    fn stream_file(p: &Plan, keys: &[(String, String)]) -> String {
+        let mut out = format!("{HEAD}map $ssl_preread_server_name $stream_backend {{\n");
+        out.push_str("    hostnames;\n");
+        map_row(&mut out, "\"\"", &p.refuse);
+        if p.strict {
+            out.push_str(&format!("    default {};\n", p.refuse));
+            for (k, _) in keys {
+                map_row(&mut out, k, &p.origin);
             }
         } else {
-            map.push_str("    default 1;\n");
+            out.push_str(&format!("    default {};\n", p.origin));
         }
-        map.push_str("}\n\ngeo $lancache_client_allowed {\n");
-        map.push_str(if cidrs.is_empty() {
-            "    default 1;\n"
-        } else {
-            "    default 0;\n"
-        });
-        for c in &cidrs {
-            map.push_str(&row(c, "1"));
+        out.push_str("}\n\nserver {\n");
+        out.push_str(&format!("    listen {0};\n    listen [::]:{0};\n", p.passthrough));
+        out.push_str(&format!("    include {};\n    ssl_preread on;\n", p.acl));
+        out.push_str("    proxy_pass $stream_backend;\n");
+        out.push_str(&p.timeouts);
+        out.push_str("}\n");
+        out
+    }
+
+    fn https_map(p: &Plan, keys: &[(String, String)], fallback: &str) -> String {
+        let mut out = format!("{HEAD}map $ssl_server_name $https_cert_name {{\n");
+        out.push_str("    hostnames;\n");
+        for (k, c) in keys {
+            map_row(&mut out, k, c);
         }
-        map.push_str("}\n");
-        out.push(("conf.d/00-https-map.conf".into(), map));
+        out.push_str(&format!("    default {fallback};\n}}\n\n"));
+        out.push_str("map $host $cdn_host_allowed {\n    hostnames;\n");
+        out.push_str(if p.strict { "    default 0;\n" } else { "    default 1;\n" });
+        if p.strict {
+            for (k, _) in keys {
+                map_row(&mut out, k, "1");
+            }
+        }
+        out.push_str("}\n\ngeo $lancache_client_allowed {\n");
+        let open = if p.cidrs.is_empty() { "1" } else { "0" };
+        out.push_str(&format!("    default {open};\n"));
+        for c in &p.cidrs {
+            map_row(&mut out, c, "1");
+        }
+        out.push_str("}\n");
+        out
+    }
 
-        out.push((
-            s.text("NGINX_HTTPS_LISTEN_FILE")?,
-            format!("{HEAD}listen {lo}:{mitm} ssl proxy_protocol default_server;\nlisten {lo}:{health} ssl;\n"),
-        ));
+    fn relay_server(p: &Plan, listen: &str, body: &str) -> String {
+        format!(
+            "server {{\n    listen {listen} proxy_protocol;\n    set_real_ip_from {};\n{body}{}}}\n",
+            p.lo, p.timeouts
+        )
+    }
 
-        let to_mitm = format!("{lo}:{mitm_relay}");
-        let to_pass = format!("{lo}:{pass_relay}");
-        let esc = |n: &str| n.replace('.', "\\.");
-        let one = |n: &str| format!("\"~^[^.]+\\.{}$\"", esc(n));
-        let mut bases: Vec<&String> = h
-            .bases
-            .iter()
-            .chain(h.roots.iter().filter(|r| h.root_wild.contains(*r)))
-            .collect();
-        bases.sort_by(|a, b| b.len().cmp(&a.len()).then(b.cmp(a)));
-        let mut d = format!(
-            "{HEAD}map $ssl_preread_server_name $https_dispatch_backend {{\n{}",
-            row("\"\"", &refuse)
-        );
+    fn dispatch_file(p: &Plan, h: &Hosts) -> String {
+        let mut out = format!("{HEAD}map $ssl_preread_server_name $https_dispatch_backend {{\n");
+        map_row(&mut out, "\"\"", &p.refuse);
         for r in &h.roots {
-            d.push_str(&row(r, &to_mitm));
+            map_row(&mut out, r, &p.mitm_relay);
             if !h.root_wild.contains(r) {
-                d.push_str(&row(&one(r), &to_mitm));
+                map_row(&mut out, &ends_with_re(r, true), &p.mitm_relay);
             }
         }
         for e in &h.exact {
-            d.push_str(&row(e, &to_mitm));
+            map_row(&mut out, e, &p.mitm_relay);
         }
+        let wild_roots = h.roots.iter().filter(|r| h.root_wild.contains(*r));
+        let mut bases: Vec<&String> = h.bases.iter().chain(wild_roots).collect();
+        bases.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| b.cmp(a)));
         for b in bases {
-            d.push_str(&row(&one(b), &to_mitm));
-            d.push_str(&row(&format!("\"~^.+\\.{}$\"", esc(b)), &to_pass));
+            map_row(&mut out, &ends_with_re(b, true), &p.mitm_relay);
+            map_row(&mut out, &ends_with_re(b, false), &p.pass_relay);
         }
-        let default = if strict { &refuse } else { &to_pass };
-        d.push_str(&format!(
-            "    default {default};\n}}\n\n\
-             server {{\n    listen {https_port};\n    listen [::]:{https_port};\n    include {acl_path};\n    \
-             ssl_preread on;\n    proxy_pass $https_dispatch_backend;\n    proxy_protocol on;\n{timeouts}}}\n\n\
-             server {{\n    listen {to_mitm} proxy_protocol;\n    set_real_ip_from {lo};\n    \
-             proxy_protocol on;\n    proxy_pass {lo}:{mitm};\n{timeouts}}}\n\n\
-             server {{\n    listen {to_pass} proxy_protocol;\n    set_real_ip_from {lo};\n    \
-             ssl_preread on;\n    proxy_pass {origin};\n{timeouts}}}\n"
-        ));
-        out.push(("stream.d/01-https-dispatch.conf".into(), d));
+        let fallback = if p.strict { &p.refuse } else { &p.pass_relay };
+        out.push_str(&format!("    default {fallback};\n}}\n\nserver {{\n"));
+        out.push_str(&format!("    listen {0};\n    listen [::]:{0};\n", p.https));
+        out.push_str(&format!("    include {};\n    ssl_preread on;\n", p.acl));
+        out.push_str("    proxy_pass $https_dispatch_backend;\n    proxy_protocol on;\n");
+        out.push_str(&p.timeouts);
+        out.push_str("}\n\n");
+        let to_mitm = format!("    proxy_protocol on;\n    proxy_pass {}:{};\n", p.lo, p.mitm);
+        out.push_str(&relay_server(p, &p.mitm_relay, &to_mitm));
+        out.push('\n');
+        let to_origin = format!("    ssl_preread on;\n    proxy_pass {};\n", p.origin);
+        out.push_str(&relay_server(p, &p.pass_relay, &to_origin));
+        out
+    }
+
+    // What: all generated files: (path, body).
+    // Why: the ui writes them; nginx includes them.
+    // From: Issue #1683 | PR #1858
+    pub fn files(s: &Settings, h: &Hosts, https: bool) -> Result<Vec<(String, String)>, String> {
+        let p = plan(s)?;
+        let keys = h.keys();
+        let mut out = vec![
+            (p.acl.clone(), acl_file(&p)),
+            (s.text("NGINX_STREAM_TARGETS_FILE")?, stream_file(&p, &keys)),
+        ];
+        if !https {
+            return Ok(out);
+        }
+        let fallback = s.text("NGINX_DEFAULT_CERT")?;
+        out.push((s.text("NGINX_HTTPS_MAP_FILE")?, https_map(&p, &keys, &fallback)));
+        let listen = format!(
+            "{HEAD}listen {0}:{1} ssl proxy_protocol default_server;\nlisten {0}:{2} ssl;\n",
+            p.lo, p.mitm, p.health
+        );
+        out.push((s.text("NGINX_HTTPS_LISTEN_FILE")?, listen));
+        out.push((s.text("NGINX_HTTPS_DISPATCH_FILE")?, dispatch_file(&p, h)));
         Ok(out)
     }
 }
 
-// What: apply saved setting changes to the containers.
-// Why: each owner gets only the strongest needed action.
+// What: apply saved setting changes to containers.
+// Why: each owner gets only the strongest action.
 // From: Issue #1683 | PR #1858
 pub mod apply {
     use crate::config::{Change, Effect};
@@ -2820,19 +2593,21 @@ pub mod apply {
     use std::time::Duration;
 
     // What: strongest effect per owning container.
-    // Why: one restart covers a reload of the same owner.
+    // Why: one restart already covers a reload.
     // From: Issue #1683 | PR #1858
     pub fn plan(changes: &[Change]) -> BTreeMap<String, Effect> {
-        let mut out: BTreeMap<String, Effect> = BTreeMap::new();
+        let mut out = BTreeMap::new();
         for c in changes {
             let e = out.entry(c.owner.clone()).or_insert(c.effect);
-            *e = (*e).max(c.effect);
+            if c.effect > *e {
+                *e = c.effect;
+            }
         }
         out
     }
 
-    // What: result of one owner's action.
-    // Why: Recreate needs compose; the ui shows it.
+    // What: result for one owner.
+    // Why: the ui shows it; Recreate needs compose.
     // From: Issue #1683 | PR #1858
     #[derive(Debug)]
     pub enum Outcome {
@@ -2842,8 +2617,16 @@ pub mod apply {
         Failed(Error),
     }
 
-    // What: run the plan: HUP, restart or report.
-    // Why: Live needs nothing; programs reread.
+    fn action_of(effect: Effect) -> Option<Action> {
+        match effect {
+            Effect::Live | Effect::Recreate => None,
+            Effect::Reload => Some(Action::Reload),
+            Effect::Restart | Effect::Container => Some(Action::Restart),
+        }
+    }
+
+    // What: carry out the plan: HUP or restart.
+    // Why: Live programs reread by themselves.
     // From: Issue #1683 | PR #1858
     pub async fn run(
         api: &Api,
@@ -2852,41 +2635,33 @@ pub mod apply {
         grace: u32,
         limit: Duration,
     ) -> Vec<(String, Outcome)> {
-        let mut out = Vec::new();
-        for (owner, effect) in plan {
-            let action = match effect {
-                Effect::Live => {
-                    out.push((owner.clone(), Outcome::Live));
-                    continue;
-                }
-                Effect::Recreate => {
-                    out.push((owner.clone(), Outcome::NeedsRecreate));
-                    continue;
-                }
-                Effect::Reload => Action::Reload,
-                Effect::Restart | Effect::Container => Action::Restart,
+        let mut out = Vec::with_capacity(plan.len());
+        for (owner, &effect) in plan {
+            let outcome = match action_of(effect) {
+                None if effect == Effect::Recreate => Outcome::NeedsRecreate,
+                None => Outcome::Live,
+                Some(a) => match api.act(&container_of(owner), a, grace, limit).await {
+                    Ok(()) => Outcome::Done(a),
+                    Err(e) => Outcome::Failed(e),
+                },
             };
-            let res = api.act(&container_of(owner), action, grace, limit).await;
-            out.push((
-                owner.clone(),
-                res.map_or_else(Outcome::Failed, |()| Outcome::Done(action)),
-            ));
+            out.push((owner.clone(), outcome));
         }
         out
     }
 }
 
-// What: every config file of the stack from settings.
-// Why: the ui calls one function; paths from the SOT.
+// What: every config file of the stack.
+// Why: the ui calls one function; paths from SOT.
 // From: Issue #1683 | PR #1858
 pub mod render {
     use crate::config::Settings;
-    use crate::recursor_conf::Which;
-    use crate::{chrony, dhcp, dnsmasq_conf, kea_conf, log, nginx_conf, pdns_conf, recursor_conf};
+    use crate::recursor_conf::{self, Which};
+    use crate::{chrony, dhcp, dnsmasq_conf, kea_conf, log, nginx_conf, pdns_conf};
     use std::path::PathBuf;
 
-    // What: secrets the configs embed.
-    // Why: read by the caller from the secret store.
+    // What: secrets the config files embed.
+    // Why: the caller reads them from the store.
     // From: Issue #1683 | PR #1858
     pub struct Secrets {
         pub pdns_api_key: String,
@@ -2895,8 +2670,8 @@ pub mod render {
         pub tsig_secret: String,
     }
 
-    // What: one file to write and its owning container.
-    // Why: apply::plan needs the owner of each change.
+    // What: one file and its owning container.
+    // Why: apply::plan needs the owner per change.
     // From: Issue #1683 | PR #1858
     pub struct File {
         pub owner: &'static str,
@@ -2904,186 +2679,177 @@ pub mod render {
         pub body: String,
     }
 
-    // What: render all files; collect every error.
-    // Why: a bad value names itself; no half write.
+    // What: collector of files and errors.
+    // Why: every bad value is named; nothing half done.
     // From: Issue #1683 | PR #1858
-    pub fn all(s: &Settings, sec: &Secrets, serial: u32) -> Result<Vec<File>, Vec<String>> {
-        let mut out = Vec::new();
-        let mut errs = Vec::new();
-        let mut jobs: Vec<(&'static str, String, Result<String, String>)> = Vec::new();
-        let mut add = |owner: &'static str, key: &str, body: Result<String, String>| {
-            jobs.push((owner, key.to_string(), body));
-        };
-        let json = |v: Result<serde_json::Value, String>| {
-            v.and_then(|v| serde_json::to_string_pretty(&v).map_err(|e| e.to_string()))
-        };
-        add("dns", "CHRONY_CONF_FILE", chrony::conf(s));
-        add("dns", "SYSLOG_CONF_FILE", log::conf(s));
-        add("dns", "SNMPD_CONF_FILE", crate::snmp::conf(s, &[], &[]));
-        add(
-            "dns",
-            "PDNS_CONF_FILE",
-            pdns_conf::auth(s, &sec.pdns_api_key),
-        );
-        let domains = crate::cdn::effective(s);
-        let list: Vec<String> = domains
-            .as_deref()
-            .unwrap_or_default()
-            .lines()
-            .filter_map(crate::dns::cdn_entry)
-            .map(|(n, _)| n)
-            .collect();
-        for (which, ip_key) in [(Which::Http, "IP_HTTP"), (Which::Https, "IP_HTTPS")] {
-            let Ok(ip) = s.text(ip_key) else { continue };
-            let rpz_path = s.text(&which.key("RPZ_FILE"));
-            let lua_path = s.text(&which.key("LUA_FILE"));
-            add(
-                "dns",
-                &which.key("RPZ_FILE"),
-                recursor_conf::rpz(&list, &ip, serial),
-            );
-            add(
-                "dns",
-                &which.key("LUA_FILE"),
-                rpz_path.clone().and_then(|p| recursor_conf::lua(&p)),
-            );
-            add(
-                "dns",
-                &which.key("CONF_FILE"),
-                lua_path.and_then(|l| recursor_conf::yaml(s, which, &sec.recursor_api_key, &l)),
-            );
-        }
-        if s.flag("DNS_FILTER_AAAA").unwrap_or(false) {
-            add(
-                "dns",
-                "RECURSOR_AAAA_LUA_FILE",
-                Ok(recursor_conf::AAAA_FILTER_LUA.to_string()),
-            );
-        }
-        match dhcp::Mode::from_settings(s) {
-            Ok(dhcp::Mode::Kea) => {
-                let current = s
-                    .text("KEA_DHCP4_CONF_FILE")
-                    .ok()
-                    .and_then(|p| std::fs::read(p).ok())
-                    .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
-                add(
-                    "dhcp",
-                    "KEA_DHCP4_CONF_FILE",
-                    json(kea_conf::dhcp4(s, current.as_ref())),
-                );
-                add("dhcp", "KEA_CTRL_CONF_FILE", json(kea_conf::ctrl_agent(s)));
-                add(
-                    "dhcp",
-                    "KEA_DDNS_CONF_FILE",
-                    json(kea_conf::ddns(s, &sec.tsig_name, &sec.tsig_secret)),
-                );
-            }
-            Ok(m @ (dhcp::Mode::DnsmasqProxy | dhcp::Mode::DnsmasqRelay)) => {
-                add("dhcp", "DNSMASQ_CONF_FILE", dnsmasq_conf::conf(s, m));
-            }
-            Ok(dhcp::Mode::Off) => {}
-            Err(e) => add("dhcp", "DHCP_MODE", Err(e)),
-        }
-        drop(add);
-        for (owner, key, body) in jobs {
-            match (s.text(&key), body) {
-                (Ok(p), Ok(b)) => out.push(File {
+    struct Out<'a> {
+        s: &'a Settings,
+        files: Vec<File>,
+        errs: Vec<String>,
+    }
+
+    impl Out<'_> {
+        fn put(&mut self, owner: &'static str, path_key: &str, body: Result<String, String>) {
+            match (self.s.text(path_key), body) {
+                (Ok(p), Ok(body)) => self.files.push(File {
                     owner,
                     path: PathBuf::from(p),
-                    body: b,
+                    body,
                 }),
-                (Err(e), _) | (_, Err(e)) => errs.push(e),
+                (Err(e), _) | (_, Err(e)) => self.errs.push(e),
             }
         }
-        match nginx_files(s, domains.as_deref().unwrap_or_default()) {
-            Ok(files) => out.extend(files),
-            Err(e) => errs.push(e),
-        }
-        if let Err(e) = domains {
-            errs.push(e);
-        }
-        if errs.is_empty() {
-            Ok(out)
-        } else {
-            Err(errs)
+        fn put_json(&mut self, owner: &'static str, key: &str, v: Result<serde_json::Value, String>) {
+            let body = v.and_then(|v| serde_json::to_string_pretty(&v).map_err(|e| e.to_string()));
+            self.put(owner, key, body);
         }
     }
 
-    // What: nginx templates plus generated includes.
-    // Why: templates ship in the ui image; dir from SOT.
-    // From: Issue #1683 | PR #1858
-    fn nginx_files(s: &Settings, domains: &str) -> Result<Vec<File>, String> {
+    fn dns_files(o: &mut Out, sec: &Secrets, names: &[String], serial: u32) {
+        let s = o.s;
+        o.put("dns", "CHRONY_CONF_FILE", chrony::conf(s));
+        o.put("dns", "SYSLOG_CONF_FILE", log::conf(s));
+        o.put("dns", "SNMPD_CONF_FILE", crate::snmp::conf(s, &[], &[]));
+        o.put("dns", "PDNS_CONF_FILE", pdns_conf::auth(s, &sec.pdns_api_key));
+        for (which, ip_key) in [(Which::Http, "IP_HTTP"), (Which::Https, "IP_HTTPS")] {
+            let Ok(answer) = s.text(ip_key) else { continue };
+            let rpz_key = which.key("RPZ_FILE");
+            let lua_key = which.key("LUA_FILE");
+            o.put("dns", &rpz_key, recursor_conf::rpz(s, names, &answer, serial));
+            let lua = s.text(&rpz_key).and_then(|p| recursor_conf::lua(s, &p));
+            o.put("dns", &lua_key, lua);
+            let yaml = s
+                .text(&lua_key)
+                .and_then(|l| recursor_conf::yaml(s, which, &sec.recursor_api_key, &l));
+            o.put("dns", &which.key("CONF_FILE"), yaml);
+        }
+        if s.flag("DNS_FILTER_AAAA").unwrap_or(false) {
+            let body = Ok(recursor_conf::AAAA_FILTER_LUA.to_string());
+            o.put("dns", "RECURSOR_AAAA_LUA_FILE", body);
+        }
+    }
+
+    fn dhcp_files(o: &mut Out, sec: &Secrets) {
+        let s = o.s;
+        match dhcp::Mode::from_settings(s) {
+            Ok(dhcp::Mode::Off) => {}
+            Ok(dhcp::Mode::Kea) => {
+                let kept = s
+                    .text("KEA_DHCP4_CONF_FILE")
+                    .ok()
+                    .and_then(|p| std::fs::read(p).ok())
+                    .and_then(|b| serde_json::from_slice(&b).ok());
+                o.put_json("dhcp", "KEA_DHCP4_CONF_FILE", kea_conf::dhcp4(s, kept.as_ref()));
+                o.put_json("dhcp", "KEA_CTRL_CONF_FILE", kea_conf::ctrl_agent(s));
+                let ddns = kea_conf::ddns(s, &sec.tsig_name, &sec.tsig_secret);
+                o.put_json("dhcp", "KEA_DDNS_CONF_FILE", ddns);
+            }
+            Ok(mode) => o.put("dhcp", "DNSMASQ_CONF_FILE", dnsmasq_conf::conf(s, mode)),
+            Err(e) => o.errs.push(e),
+        }
+    }
+
+    fn read(path: &PathBuf) -> Result<String, String> {
+        std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))
+    }
+
+    fn nginx_files(o: &mut Out, domains: &str) -> Result<(), String> {
+        let s = o.s;
         let src = PathBuf::from(s.text("NGINX_TEMPLATE_DIR")?);
         let dst = PathBuf::from(s.text("NGINX_DIR")?);
-        let psl_path = src.join(s.text("NGINX_PSL_FILE")?);
-        let psl = std::fs::read_to_string(&psl_path)
-            .map_err(|e| format!("{}: {e}", psl_path.display()))?;
-        let hosts = nginx_conf::hosts(domains, &nginx_conf::Psl::parse(&psl))?;
+        let psl = nginx_conf::Psl::parse(&read(&src.join(s.text("NGINX_PSL_FILE")?))?);
+        let hosts = nginx_conf::hosts(domains, &psl)?;
         let https = s.flag("HTTPS_ENABLED")?;
-        let mut out = Vec::new();
         for name in s.list("NGINX_TEMPLATES") {
             if !https && name.ends_with("https.conf") {
                 continue;
             }
-            let p = src.join(&name);
-            let text = std::fs::read_to_string(&p).map_err(|e| format!("{}: {e}", p.display()))?;
-            out.push(File {
-                owner: "proxy",
-                path: dst.join(&name),
-                body: nginx_conf::template(&text, s)?,
-            });
+            let body = nginx_conf::template(&read(&src.join(&name))?, s)?;
+            o.files.push(File { owner: "proxy", path: dst.join(&name), body });
         }
         for (rel, body) in nginx_conf::files(s, &hosts, https)? {
-            out.push(File {
-                owner: "proxy",
-                path: dst.join(rel),
-                body,
-            });
+            o.files.push(File { owner: "proxy", path: dst.join(rel), body });
         }
-        Ok(out)
+        Ok(())
+    }
+
+    // What: render all files; report every error.
+    // Why: one call for the ui; nothing half written.
+    // From: Issue #1683 | PR #1858
+    pub fn all(s: &Settings, sec: &Secrets, serial: u32) -> Result<Vec<File>, Vec<String>> {
+        let mut o = Out { s, files: Vec::new(), errs: Vec::new() };
+        let domains = match crate::cdn::effective(s) {
+            Ok(d) => d,
+            Err(e) => {
+                o.errs.push(e);
+                String::new()
+            }
+        };
+        let names: Vec<String> = domains
+            .lines()
+            .filter_map(crate::dns::cdn_entry)
+            .map(|(n, _)| n)
+            .collect();
+        dns_files(&mut o, sec, &names, serial);
+        dhcp_files(&mut o, sec);
+        if let Err(e) = nginx_files(&mut o, &domains) {
+            o.errs.push(e);
+        }
+        if o.errs.is_empty() {
+            Ok(o.files)
+        } else {
+            Err(o.errs)
+        }
     }
 }
 
-// What: one SNTP query (RFC 4330) to a time server.
-// Why: the ui shows whether chrony really answers.
+// What: one SNTP query (RFC 4330).
+// Why: the ui shows whether chrony answers.
 // From: Issue #1683 | PR #1858
 pub mod ntp {
     use std::net::UdpSocket;
     use std::time::Duration;
 
-    // What: true when a valid server reply arrives.
-    // Why: mode 4 (server) and stratum 1..15 mean usable.
+    // What: client request: version 4, mode 3.
+    // Why: RFC 4330 first byte; rest stays zero.
+    // From: Issue #1683 | PR #1858
+    const REQUEST_HEAD: u8 = 0x23;
+    const PACKET: usize = 48;
+    const MODE_SERVER: u8 = 4;
+
+    fn ask(host: &str, port: u64, wait: Duration) -> std::io::Result<[u8; PACKET]> {
+        let sock = UdpSocket::bind("0.0.0.0:0")?;
+        sock.set_read_timeout(Some(wait))?;
+        let mut req = [0u8; PACKET];
+        req[0] = REQUEST_HEAD;
+        sock.send_to(&req, format!("{host}:{port}"))?;
+        let mut reply = [0u8; PACKET];
+        let n = sock.recv(&mut reply)?;
+        if n < PACKET {
+            return Err(std::io::ErrorKind::UnexpectedEof.into());
+        }
+        Ok(reply)
+    }
+
+    // What: true on a usable server reply.
+    // Why: mode 4 and stratum 1..15 mean synced.
     // From: Issue #1683 | PR #1858
     pub fn answers(host: &str, port: u64, wait: Duration) -> bool {
-        let Ok(sock) = UdpSocket::bind("0.0.0.0:0") else {
-            return false;
-        };
-        if sock.set_read_timeout(Some(wait)).is_err() {
-            return false;
-        }
-        let mut req = [0u8; 48];
-        req[0] = 0b0010_0011; // LI 0, version 4, mode 3 (client)
-        if sock.send_to(&req, format!("{host}:{port}")).is_err() {
-            return false;
-        }
-        let mut buf = [0u8; 48];
-        match sock.recv(&mut buf) {
-            Ok(n) if n >= 48 => buf[0] & 0b111 == 4 && (1..=15).contains(&buf[1]),
-            _ => false,
-        }
+        ask(host, port, wait)
+            .map(|r| r[0] & 0x07 == MODE_SERVER && (1..=15).contains(&r[1]))
+            .unwrap_or(false)
     }
 }
 
-// What: proxy access log: last requests and hit stats.
-// Why: dashboard and logs page read one parser.
+// What: proxy access log: recent requests, totals.
+// Why: dashboard and logs page share one parser.
 // From: Issue #1683 | PR #1858
 pub mod access {
     use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
     use std::path::{Path, PathBuf};
 
-    // What: one parsed request of nginx log_format cache.
-    // Why: the ui shows host, path, status, size, cache.
+    // What: one request in nginx log_format cache.
+    // Why: the ui lists host, path, status, size.
     // From: Issue #1683 | PR #1858
     #[derive(Clone, Debug, Default, serde::Serialize)]
     pub struct Entry {
@@ -3097,97 +2863,91 @@ pub mod access {
         pub host: String,
     }
 
-    // What: parse one line; None if it is no cache line.
-    // Why: syslog prefix before the address is ignored.
+    // What: read one line; None when no cache row.
+    // Why: a syslog prefix before the IP is allowed.
     // From: Issue #1683 | PR #1858
     pub fn parse(line: &str) -> Option<Entry> {
-        let (head, rest) = line.split_once(" - [")?;
-        let ip = head.rsplit(' ').next()?.to_string();
-        let (time, rest) = rest.split_once("] \"")?;
-        let (request, rest) = rest.split_once("\" ")?;
-        let mut req = request.split(' ');
-        let (method, path) = (
-            req.next()?.to_string(),
-            req.next().unwrap_or_default().to_string(),
-        );
-        let mut f = rest.splitn(3, ' ');
-        let status = f.next()?.parse().ok()?;
-        let bytes = f.next()?.parse().ok()?;
-        let mut q = f.next()?.split('"').filter(|p| !p.trim().is_empty());
-        let cache_status = q.next()?.to_string();
-        let host = q.next().unwrap_or_default().to_string();
+        let (before, after) = line.split_once(" - [")?;
+        let (time, after) = after.split_once("] \"")?;
+        let (request, after) = after.split_once("\" ")?;
+        let (method, path) = request.split_once(' ').unwrap_or((request, ""));
+        let path = path.split(' ').next().unwrap_or_default();
+        let mut nums = after.splitn(3, ' ');
+        let status = nums.next()?.parse().ok()?;
+        let bytes = nums.next()?.parse().ok()?;
+        let mut quoted = nums.next()?.split('"').filter(|p| !p.trim().is_empty());
         Some(Entry {
-            ip,
-            time: time.to_string(),
-            method,
-            path,
+            ip: before.rsplit(' ').next()?.into(),
+            time: time.into(),
+            method: method.into(),
+            path: path.into(),
             status,
             bytes,
-            cache_status,
-            host,
+            cache_status: quoted.next()?.into(),
+            host: quoted.next().unwrap_or_default().into(),
         })
     }
 
-    // What: log files of the proxy, oldest first.
+    // What: proxy log files, oldest first.
     // Why: syslog-ng writes one file per day.
     // From: Issue #1683 | PR #1858
     pub fn files(dir: &Path) -> Vec<PathBuf> {
-        let mut out: Vec<PathBuf> = std::fs::read_dir(dir)
-            .map(|rd| rd.filter_map(|e| e.ok().map(|e| e.path())).collect())
-            .unwrap_or_default();
-        out.retain(|p| p.extension().is_some_and(|e| e == "log"));
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return Vec::new();
+        };
+        let mut out: Vec<PathBuf> = rd
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|x| x == "log"))
+            .collect();
         out.sort();
         out
     }
 
-    // What: last `limit` lines of the newest log file.
+    fn read_back(path: &Path, want: usize, chunk: u64) -> std::io::Result<(Vec<u8>, bool)> {
+        let mut f = std::fs::File::open(path)?;
+        let mut pos = f.seek(SeekFrom::End(0))?;
+        let step = chunk.max(1);
+        let mut buf = Vec::new();
+        while pos > 0 && buf.iter().filter(|&&b| b == b'\n').count() <= want {
+            let len = step.min(pos);
+            pos -= len;
+            let mut part = vec![0u8; usize::try_from(len).unwrap_or(0)];
+            f.seek(SeekFrom::Start(pos))?;
+            f.read_exact(&mut part)?;
+            part.append(&mut buf);
+            buf = part;
+        }
+        Ok((buf, pos > 0))
+    }
+
+    // What: last `limit` lines of the newest file.
     // Why: reads from the end; big logs stay cheap.
     // From: Issue #1683 | PR #1858
     pub fn tail_lines(dir: &Path, limit: usize, chunk: u64) -> Vec<String> {
         let Some(path) = files(dir).pop() else {
             return Vec::new();
         };
-        let Ok(mut file) = std::fs::File::open(&path) else {
+        let Ok((buf, cut)) = read_back(&path, limit, chunk) else {
             return Vec::new();
         };
-        let Ok(mut pos) = file.seek(SeekFrom::End(0)) else {
-            return Vec::new();
-        };
-        let mut buf: Vec<u8> = Vec::new();
-        while pos > 0 && buf.iter().filter(|b| **b == b'\n').count() <= limit {
-            let len = chunk.max(1).min(pos);
-            pos -= len;
-            let mut part = vec![0u8; usize::try_from(len).unwrap_or(0)];
-            if file.seek(SeekFrom::Start(pos)).is_err() || file.read_exact(&mut part).is_err() {
-                break;
-            }
-            part.extend_from_slice(&buf);
-            buf = part;
-        }
         let text = String::from_utf8_lossy(&buf);
-        let mut lines: Vec<String> = text
-            .lines()
-            .skip(usize::from(pos > 0))
-            .map(str::to_string)
-            .collect();
+        let lines: Vec<String> = text.lines().skip(usize::from(cut)).map(String::from).collect();
         let from = lines.len().saturating_sub(limit);
-        lines.split_off(from)
+        lines[from..].to_vec()
     }
 
     // What: last `limit` cache requests.
-    // Why: dashboard list; non-cache lines are skipped.
+    // Why: dashboard list; other lines are skipped.
     // From: Issue #1683 | PR #1858
     pub fn tail(dir: &Path, limit: usize, chunk: u64) -> Vec<Entry> {
-        let mut found: Vec<Entry> = tail_lines(dir, limit.saturating_mul(4), chunk)
-            .iter()
-            .filter_map(|l| parse(l))
-            .collect();
+        let lines = tail_lines(dir, limit.saturating_mul(4), chunk);
+        let found: Vec<Entry> = lines.iter().filter_map(|l| parse(l)).collect();
         let from = found.len().saturating_sub(limit);
-        found.split_off(from)
+        found[from..].to_vec()
     }
 
     // What: totals over all proxy log files.
-    // Why: hit rate and traffic for the dashboard.
+    // Why: hit rate and traffic on the dashboard.
     // From: Issue #1683 | PR #1858
     #[derive(Clone, Debug, Default, serde::Serialize)]
     pub struct Stats {
@@ -3199,68 +2959,70 @@ pub mod access {
         pub hit_pct: f64,
     }
 
+    impl Stats {
+        fn count(&mut self, e: &Entry) {
+            self.total_requests += 1;
+            self.total_bytes += e.bytes;
+            match e.cache_status.as_str() {
+                "HIT" => self.hits += 1,
+                "MISS" | "EXPIRED" => self.misses += 1,
+                _ => self.other += 1,
+            }
+        }
+    }
+
     // What: count requests, hits and bytes.
-    // Why: HIT counts as hit; MISS, EXPIRED as miss.
+    // Why: HIT is a hit; MISS and EXPIRED a miss.
     // From: Issue #1683 | PR #1858
     pub fn stats(dir: &Path) -> Stats {
-        let mut s = Stats::default();
+        let mut st = Stats::default();
         for path in files(dir) {
-            let Ok(file) = std::fs::File::open(&path) else {
-                continue;
-            };
-            for line in BufReader::new(file).lines().map_while(Result::ok) {
-                let Some(e) = parse(&line) else { continue };
-                s.total_requests += 1;
-                s.total_bytes += e.bytes;
-                match e.cache_status.as_str() {
-                    "HIT" => s.hits += 1,
-                    "MISS" | "EXPIRED" => s.misses += 1,
-                    _ => s.other += 1,
+            let Ok(f) = std::fs::File::open(&path) else { continue };
+            for line in BufReader::new(f).lines().map_while(Result::ok) {
+                if let Some(e) = parse(&line) {
+                    st.count(&e);
                 }
             }
         }
-        let base = s.hits + s.misses;
-        if base > 0 {
-            let pct = s.hits as f64 * 100.0 / base as f64;
-            s.hit_pct = pct;
+        let judged = st.hits + st.misses;
+        if judged > 0 {
+            st.hit_pct = st.hits as f64 * 100.0 / judged as f64;
         }
-        s
+        st
     }
 }
 
-// What: byte count as text with binary units.
-// Why: ui pages show sizes the same way everywhere.
+// What: byte count as text in binary units.
+// Why: all ui pages show sizes the same way.
 // From: Issue #1683 | PR #1858
 pub mod human {
-    // What: 1536 -> "1.5 KiB".
-    // Why: integer maths; one decimal is enough.
+    const UNITS: [&str; 6] = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
+
+    // What: 1536 becomes "1.5 KiB".
+    // Why: whole numbers only; one decimal is enough.
     // From: Issue #1683 | PR #1858
     pub fn bytes(n: u64) -> String {
-        const UNITS: [&str; 6] = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
-        let mut unit = 0;
-        let mut whole = n;
-        let mut tenth = 0;
-        while whole >= 1024 && unit + 1 < UNITS.len() {
+        let (mut whole, mut tenth, mut unit) = (n, 0, 0);
+        while whole >= 1024 && unit < UNITS.len() - 1 {
             tenth = (whole % 1024) * 10 / 1024;
             whole /= 1024;
             unit += 1;
         }
-        if unit == 0 {
-            format!("{n} B")
-        } else {
-            format!("{whole}.{tenth} {}", UNITS[unit])
+        match unit {
+            0 => format!("{n} B"),
+            _ => format!("{whole}.{tenth} {}", UNITS[unit]),
         }
     }
 }
 
 // What: effective cache domain list.
-// Why: shipped list minus disabled plus custom entries.
+// Why: shipped rows minus disabled plus custom.
 // From: Issue #1683 | PR #1858
 pub mod cdn {
     use crate::config::Settings;
 
     // What: one row of the domain table.
-    // Why: the ui shows default and custom rows apart.
+    // Why: the ui shows shipped and own rows apart.
     // From: Issue #1683 | PR #1858
     #[derive(Clone, Debug, serde::Serialize)]
     pub struct Row {
@@ -3270,63 +3032,68 @@ pub mod cdn {
         pub is_valid: bool,
     }
 
-    // What: shipped default rows from the image file.
-    // Why: the file ships; comments and blanks are skipped.
+    fn row(name: String, is_default: bool, enabled: bool) -> Row {
+        Row {
+            is_valid: crate::dns::cdn_entry(&name).is_some(),
+            display: name,
+            is_default,
+            enabled,
+        }
+    }
+
+    // What: shipped rows from the image file.
+    // Why: blanks and # comments are not domains.
     // From: Issue #1683 | PR #1858
     pub fn defaults(s: &Settings) -> Result<Vec<String>, String> {
         let path = s.text("CDN_DEFAULT_DOMAINS_FILE")?;
         let text = std::fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))?;
-        Ok(text
-            .lines()
-            .map(str::trim)
-            .filter(|l| !l.is_empty() && !l.starts_with('#'))
-            .map(str::to_ascii_lowercase)
-            .collect())
+        let keep = |l: &&str| !l.is_empty() && !l.starts_with('#');
+        Ok(text.lines().map(str::trim).filter(keep).map(str::to_ascii_lowercase).collect())
     }
 
     // What: all rows for the ui.
-    // Why: default rows carry their on/off state.
+    // Why: shipped rows carry their on/off state.
     // From: Issue #1683 | PR #1858
     pub fn rows(s: &Settings) -> Result<Vec<Row>, String> {
         let off = s.list("CDN_DISABLED_DOMAINS");
-        let mut out: Vec<Row> = defaults(s)?
-            .into_iter()
-            .map(|d| Row {
-                is_valid: crate::dns::cdn_entry(&d).is_some(),
-                enabled: !off.contains(&d),
-                display: d,
-                is_default: true,
-            })
-            .collect();
-        out.extend(s.list("CDN_CUSTOM_DOMAINS").into_iter().map(|d| Row {
-            is_valid: crate::dns::cdn_entry(&d).is_some(),
-            enabled: true,
-            display: d,
-            is_default: false,
-        }));
+        let mut out = Vec::new();
+        for d in defaults(s)? {
+            let on = !off.contains(&d);
+            out.push(row(d, true, on));
+        }
+        for d in s.list("CDN_CUSTOM_DOMAINS") {
+            out.push(row(d, false, true));
+        }
         Ok(out)
     }
 
-    // What: effective list as text, one entry per line.
-    // Why: input of RPZ and nginx host maps.
+    // What: enabled rows, one per line.
+    // Why: input of the RPZ and nginx host maps.
     // From: Issue #1683 | PR #1858
     pub fn effective(s: &Settings) -> Result<String, String> {
-        Ok(rows(s)?
-            .into_iter()
-            .filter(|r| r.enabled)
-            .map(|r| r.display + "\n")
-            .collect())
+        let mut out = String::new();
+        for r in rows(s)?.into_iter().filter(|r| r.enabled) {
+            out.push_str(&r.display);
+            out.push('\n');
+        }
+        Ok(out)
     }
 }
 
-// What: Kea Control Agent client (REST, JSON commands).
-// Why: leases, subnets and config go through Kea itself.
+// What: Kea Control Agent client (REST, JSON).
+// Why: leases and subnets go through Kea itself.
 // From: Issue #1683 | PR #1858
 pub mod kea {
     use serde_json::{json, Value};
 
-    // What: one control agent endpoint.
-    // Why: commands go to the dhcp4 service behind it.
+    // What: Kea result codes.
+    // Why: Kea docs: 0 success, 3 empty answer.
+    // From: Issue #1683 | PR #1858
+    const RESULT_OK: i64 = 0;
+    const RESULT_EMPTY: i64 = 3;
+
+    // What: one control agent address.
+    // Why: commands reach dhcp4 behind it.
     // From: Issue #1683 | PR #1858
     pub struct Api {
         client: reqwest::Client,
@@ -3334,92 +3101,91 @@ pub mod kea {
     }
 
     impl Api {
-        // What: client for http://host:port/.
-        // Why: one place builds the request.
+        // What: client for one agent URL.
+        // Why: the caller owns the shared client.
         // From: Issue #1683 | PR #1858
         pub fn new(client: reqwest::Client, url: &str) -> Self {
-            Self {
-                client,
-                url: url.to_string(),
-            }
+            Api { client, url: url.into() }
         }
 
-        // What: run one command; return its arguments.
-        // Why: result 0 ok, 3 empty; others are errors.
+        // What: send one command; return arguments.
+        // Why: 0 is ok, 3 is empty, rest is an error.
         // From: Issue #1683 | PR #1858
         pub async fn command(&self, command: &str, args: Option<Value>) -> Result<Value, String> {
+            let fail = |e: String| format!("kea {command}: {e}");
             let mut body = json!({"command": command, "service": ["dhcp4"]});
             if let Some(a) = args {
                 body["arguments"] = a;
             }
-            let resp = self
+            let reply = self
                 .client
                 .post(&self.url)
                 .json(&body)
                 .send()
                 .await
-                .map_err(|e| format!("kea {command}: {}", crate::http::error_chain(&e)))?;
-            let v: Value = resp
-                .json()
-                .await
-                .map_err(|e| format!("kea {command}: {e}"))?;
-            let first = v.get(0).cloned().unwrap_or(v);
-            match first["result"].as_i64() {
-                Some(0) => Ok(first["arguments"].clone()),
-                Some(3) => Ok(Value::Null),
-                _ => Err(format!(
-                    "kea {command}: {}",
-                    first["text"].as_str().unwrap_or("no result")
-                )),
+                .map_err(|e| fail(crate::http::error_chain(&e)))?;
+            let all: Value = reply.json().await.map_err(|e| fail(e.to_string()))?;
+            let answer = match all.get(0) {
+                Some(first) => first.clone(),
+                None => all,
+            };
+            match answer["result"].as_i64() {
+                Some(RESULT_OK) => Ok(answer["arguments"].clone()),
+                Some(RESULT_EMPTY) => Ok(Value::Null),
+                _ => Err(fail(answer["text"].as_str().unwrap_or("no result").into())),
             }
         }
 
-        // What: live config of kea-dhcp4.
-        // Why: subnets and reservations are edited in it.
+        // What: running kea-dhcp4 config.
+        // Why: subnets and reservations live there.
         // From: Issue #1683 | PR #1858
         pub async fn config(&self) -> Result<Value, String> {
             self.command("config-get", None).await
         }
 
-        // What: set and persist a new config.
+        // What: apply and save a new config.
         // Why: config-set applies; config-write saves.
         // From: Issue #1683 | PR #1858
         pub async fn set_config(&self, config: Value) -> Result<(), String> {
             self.command("config-set", Some(config)).await?;
-            self.command("config-write", Some(json!({})))
-                .await
-                .map(drop)
+            self.command("config-write", Some(json!({}))).await?;
+            Ok(())
         }
 
         // What: all IPv4 leases.
         // Why: lease_cmds hook; the ui lists them.
         // From: Issue #1683 | PR #1858
         pub async fn leases(&self) -> Result<Vec<Value>, String> {
-            let a = self.command("lease4-get-all", None).await?;
-            Ok(a["leases"].as_array().cloned().unwrap_or_default())
+            let args = self.command("lease4-get-all", None).await?;
+            Ok(args["leases"].as_array().cloned().unwrap_or_default())
         }
 
         // What: delete one lease by address.
         // Why: frees the address for the next client.
         // From: Issue #1683 | PR #1858
         pub async fn release(&self, ip: &str) -> Result<(), String> {
-            self.command("lease4-del", Some(json!({"ip-address": ip})))
-                .await
-                .map(drop)
+            let args = json!({"ip-address": ip});
+            self.command("lease4-del", Some(args)).await?;
+            Ok(())
         }
     }
 }
 
 // What: statistics: SNMP samples into RRD files.
-// Why: replaces Netdata; rrdtool and snmpget are native.
+// Why: replaces Netdata with native rrdtool.
 // From: Issue #1683 | PR #1858
 pub mod rrd {
     use crate::config::Settings;
     use std::path::{Path, PathBuf};
     use std::process::Command;
 
-    // What: one data source: name, SNMP OID, RRD type.
-    // Why: COUNTER for byte counters, GAUGE for levels.
+    // What: RRD data source types we accept.
+    // Why: rrdtool create: GAUGE, COUNTER, DERIVE.
+    // From: Issue #1683 | PR #1858
+    const KINDS: [&str; 3] = ["GAUGE", "COUNTER", "DERIVE"];
+
+    // What: one data source of a graph.
+    // Why: name, SNMP OID and RRD type.
     // From: Issue #1683 | PR #1858
     #[derive(Clone, Debug)]
     pub struct Source {
@@ -3428,8 +3194,8 @@ pub mod rrd {
         pub kind: String,
     }
 
-    // What: one graph = one RRD file.
-    // Why: SOT row name|title|ds=oid=TYPE,ds=oid=TYPE.
+    // What: one graph, stored in one RRD file.
+    // Why: SOT row name:ds=oid=TYPE+ds=oid=TYPE.
     // From: Issue #1683 | PR #1858
     #[derive(Clone, Debug)]
     pub struct Graph {
@@ -3438,74 +3204,63 @@ pub mod rrd {
         pub sources: Vec<Source>,
     }
 
+    fn plain(word: &str) -> bool {
+        !word.is_empty() && word.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    }
+
+    fn source(text: &str) -> Result<Source, String> {
+        let parts: Vec<&str> = text.split('=').collect();
+        match parts[..] {
+            [ds, oid, kind] if plain(ds) && KINDS.contains(&kind) => Ok(Source {
+                ds: ds.into(),
+                oid: oid.into(),
+                kind: kind.into(),
+            }),
+            _ => Err(format!("source {text:?} needs ds=oid=GAUGE|COUNTER|DERIVE")),
+        }
+    }
+
+    fn graph(row: &str) -> Result<Graph, String> {
+        let (name, list) = row
+            .split_once(':')
+            .ok_or_else(|| format!("STATS_GRAPHS row {row:?} needs name:sources"))?;
+        if !plain(name) {
+            return Err(format!("graph name {name:?} is not plain"));
+        }
+        let sources = list.split('+').map(source).collect::<Result<Vec<_>, _>>()?;
+        Ok(Graph {
+            name: name.into(),
+            title: name.replace('_', " "),
+            sources,
+        })
+    }
+
     // What: graphs from STATS_GRAPHS.
     // Why: a bad row is an error, never skipped.
     // From: Issue #1683 | PR #1858
     pub fn graphs(s: &Settings) -> Result<Vec<Graph>, String> {
-        s.list("STATS_GRAPHS")
-            .iter()
-            .map(|row| {
-                // What: row = name:ds=oid=TYPE+ds=oid=TYPE.
-                // Why: list items split on comma and space.
-                let Some((name, srcs)) = row.split_once(':') else {
-                    return Err(format!("STATS_GRAPHS row {row:?} needs name:sources"));
-                };
-                let title = name.replace('_', " ");
-                if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-                    return Err(format!("graph name {name:?} is not plain"));
-                }
-                let sources = srcs
-                    .split('+')
-                    .map(|x| {
-                        let v: Vec<&str> = x.split('=').collect();
-                        match v.as_slice() {
-                            [ds, oid, kind]
-                                if ds.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-                                    && ["GAUGE", "COUNTER", "DERIVE"].contains(kind) =>
-                            {
-                                Ok(Source {
-                                    ds: (*ds).into(),
-                                    oid: (*oid).into(),
-                                    kind: (*kind).into(),
-                                })
-                            }
-                            _ => Err(format!("source {x:?} needs ds=oid=GAUGE|COUNTER|DERIVE")),
-                        }
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(Graph {
-                    name: name.into(),
-                    title,
-                    sources,
-                })
-            })
-            .collect()
+        s.list("STATS_GRAPHS").iter().map(|r| graph(r)).collect()
     }
 
-    // What: RRD file path of a graph.
+    // What: RRD file of one graph.
     // Why: one file per graph under STATS_DIR.
     // From: Issue #1683 | PR #1858
     pub fn file(s: &Settings, g: &Graph) -> Result<PathBuf, String> {
-        Ok(Path::new(&s.text("STATS_DIR")?).join(format!("{}.rrd", g.name)))
+        let dir = s.text("STATS_DIR")?;
+        Ok(Path::new(&dir).join(format!("{}.rrd", g.name)))
     }
 
-    // What: run a tool; stdout or the error text.
-    // Why: the tools report errors on stderr.
-    // From: Issue #1683 | PR #1858
     fn run(cmd: &mut Command) -> Result<Vec<u8>, String> {
         let out = cmd.output().map_err(|e| format!("{cmd:?}: {e}"))?;
-        if out.status.success() {
-            Ok(out.stdout)
-        } else {
-            Err(format!(
-                "{cmd:?}: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            ))
+        if !out.status.success() {
+            let why = String::from_utf8_lossy(&out.stderr);
+            return Err(format!("{cmd:?}: {}", why.trim()));
         }
+        Ok(out.stdout)
     }
 
-    // What: create the RRD if it is missing.
-    // Why: step, heartbeat and RRAs from the SOT.
+    // What: create the RRD when it is missing.
+    // Why: step, heartbeat and archives from SOT.
     // From: Issue #1683 | PR #1858
     pub fn ensure(s: &Settings, g: &Graph) -> Result<(), String> {
         let path = file(s, g)?;
@@ -3515,61 +3270,47 @@ pub mod rrd {
         let step = s.uint("STATS_STEP")?;
         let beat = step.saturating_mul(s.uint("STATS_HEARTBEAT_STEPS")?);
         let mut cmd = Command::new("rrdtool");
-        cmd.arg("create")
-            .arg(&path)
-            .args(["--step", &step.to_string()]);
+        cmd.arg("create").arg(&path).arg("--step").arg(step.to_string());
         for src in &g.sources {
             cmd.arg(format!("DS:{}:{}:{beat}:0:U", src.ds, src.kind));
         }
         for rra in s.list("STATS_RRAS") {
             cmd.arg(format!("RRA:{rra}"));
         }
-        run(&mut cmd).map(drop)
+        run(&mut cmd)?;
+        Ok(())
     }
 
-    // What: one SNMP sample of all sources, then update.
+    fn number_or_unknown(line: &str) -> String {
+        match line.split_whitespace().next() {
+            Some(v) if v.parse::<f64>().is_ok() => v.into(),
+            _ => "U".into(),
+        }
+    }
+
+    // What: read all sources once, then store.
     // Why: snmpget -Oqv prints one value per line.
     // From: Issue #1683 | PR #1858
     pub fn sample(s: &Settings, g: &Graph) -> Result<(), String> {
         ensure(s, g)?;
-        let mut cmd = Command::new("snmpget");
-        cmd.args([
-            "-v2c",
-            "-Oqv",
-            "-c",
-            &s.text("SNMP_COMMUNITY")?,
-            &s.text("STATS_SNMP_TARGET")?,
-        ]);
-        cmd.args(g.sources.iter().map(|x| x.oid.as_str()));
-        let out = String::from_utf8_lossy(&run(&mut cmd)?).to_string();
-        let vals: Vec<String> = out
-            .lines()
-            .map(|l| {
-                let v = l.trim().split_whitespace().next().unwrap_or("U");
-                if v.parse::<f64>().is_ok() {
-                    v.to_string()
-                } else {
-                    "U".to_string()
-                }
-            })
-            .collect();
-        if vals.len() != g.sources.len() {
-            return Err(format!(
-                "{}: {} values for {} sources",
-                g.name,
-                vals.len(),
-                g.sources.len()
-            ));
+        let mut get = Command::new("snmpget");
+        get.args(["-v2c", "-Oqv", "-c"]);
+        get.arg(s.text("SNMP_COMMUNITY")?).arg(s.text("STATS_SNMP_TARGET")?);
+        get.args(g.sources.iter().map(|x| &x.oid));
+        let text = String::from_utf8_lossy(&run(&mut get)?).into_owned();
+        let values: Vec<String> = text.lines().map(number_or_unknown).collect();
+        if values.len() != g.sources.len() {
+            let (got, want) = (values.len(), g.sources.len());
+            return Err(format!("{}: {got} values for {want} sources", g.name));
         }
-        let mut up = Command::new("rrdtool");
-        up.arg("update")
-            .arg(file(s, g)?)
-            .arg(format!("N:{}", vals.join(":")));
-        run(&mut up).map(drop)
+        let mut put = Command::new("rrdtool");
+        put.arg("update").arg(file(s, g)?).arg(format!("N:{}", values.join(":")));
+        run(&mut put)?;
+        Ok(())
     }
 
     // What: PNG of one graph over a time range.
-    // Why: rrdtool draws; the page only shows the image.
+    // Why: rrdtool draws; the page shows the image.
     // From: Issue #1683 | PR #1858
     pub fn png(s: &Settings, g: &Graph, range: &str, dark: bool) -> Result<Vec<u8>, String> {
         if !s.list("STATS_RANGES").iter().any(|r| r == range) {
@@ -3577,35 +3318,24 @@ pub mod rrd {
         }
         let path = file(s, g)?;
         let mut cmd = Command::new("rrdtool");
-        cmd.args([
-            "graph",
-            "-",
-            "--imgformat",
-            "PNG",
-            "--start",
-            &format!("-{range}"),
-        ]);
-        cmd.args([
-            "--title",
-            &g.title,
-            "--width",
-            &s.text("STATS_WIDTH")?,
-            "--height",
-            &s.text("STATS_HEIGHT")?,
-        ]);
+        cmd.args(["graph", "-", "--imgformat", "PNG"]);
+        cmd.arg("--start").arg(format!("-{range}"));
+        cmd.arg("--title").arg(&g.title);
+        cmd.arg("--width").arg(s.text("STATS_WIDTH")?);
+        cmd.arg("--height").arg(s.text("STATS_HEIGHT")?);
         if dark {
             for c in s.list("STATS_DARK_COLOURS") {
-                cmd.args(["--color", &c]);
+                cmd.arg("--color").arg(c);
             }
         }
         let colours = s.list("STATS_LINE_COLOURS");
         for (i, src) in g.sources.iter().enumerate() {
-            let colour = colours
-                .get(i % colours.len().max(1))
-                .cloned()
-                .unwrap_or_default();
+            let colour = match colours.len() {
+                0 => String::new(),
+                n => colours[i % n].clone(),
+            };
             cmd.arg(format!("DEF:{0}={1}:{0}:AVERAGE", src.ds, path.display()));
-            cmd.arg(format!("LINE2:{}#{colour}:{}", src.ds, src.ds));
+            cmd.arg(format!("LINE2:{0}{colour}:{0}", src.ds));
         }
         run(&mut cmd)
     }
