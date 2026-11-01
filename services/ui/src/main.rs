@@ -1897,6 +1897,19 @@ fn templates() -> Result<Tera, String> {
     for (name, body) in TEMPLATES {
         t.add_raw_template(name, body).map_err(|e| format!("template {name}: {e}"))?;
     }
+    // What: image identity for the page footer.
+    // Why: base.html calls these four functions.
+    // From: Issue #1683 | PR #1980
+    for (func, key) in [
+        ("lancache_image_registry", "LANCACHE_IMAGE_REGISTRY"),
+        ("lancache_image_prefix", "LANCACHE_IMAGE_PREFIX"),
+        ("lancache_image_tag", "LANCACHE_IMAGE_TAG"),
+        ("lancache_image_channel", "LANCACHE_IMAGE_CHANNEL"),
+    ] {
+        t.register_function(func, move |_: &std::collections::HashMap<String, tera::Value>| {
+            Ok(tera::Value::String(process_env(key).unwrap_or_default()))
+        });
+    }
     Ok(t)
 }
 
