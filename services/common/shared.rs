@@ -768,17 +768,6 @@ pub mod dhcp {
                 other => Err(format!("DHCP_MODE {other:?} has no handler")),
             }
         }
-
-        // What: programs a mode needs in the dhcp container.
-        // Why: Off runs nothing; no idle program uses CPU.
-        // From: Issue #1683 | PR #1858
-        pub fn programs(self) -> &'static [&'static str] {
-            match self {
-                Self::Off => &[],
-                Self::Kea => &["kea-dhcp4", "kea-ctrl-agent", "kea-dhcp-ddns"],
-                Self::DnsmasqProxy | Self::DnsmasqRelay => &["dnsmasq"],
-            }
-        }
     }
 
     // What: one DHCPv4 option with a dedicated form field.
