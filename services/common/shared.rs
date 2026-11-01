@@ -970,3 +970,227 @@ pub mod pdns {
         }
     }
 }
+
+// What: DNS name and zone rules, serial arithmetic.
+// Why: ui, dns, proxy and dhcp share one rule set.
+// From: Issue #1683 | PR #1858
+pub mod dns {
+    use std::cmp::Ordering;
+
+    // What: zone name in dotted form (trailing dot).
+    // Why: callers spell zones with and without the dot.
+    // From: Issue #1683 | PR #1858
+    pub fn canonical_zone(zone: &str) -> String {
+        format!("{}.", zone.trim_end_matches('.').to_ascii_lowercase())
+    }
+
+    // What: DNS name syntax (RFC 1035 labels).
+    // Why: one rule for CDN, DHCP, LAN names and zones.
+    // From: Issue #1683 | PR #1858
+    pub fn is_dns_name(name: &str, underscore: bool, wildcard: bool) -> bool {
+        let name = name.trim_end_matches('.');
+        !name.is_empty()
+            && name.len() <= 253
+            && name.split('.').enumerate().all(|(i, label)| {
+                (wildcard && i == 0 && label == "*")
+                    || (!label.is_empty()
+                        && label.len() <= 63
+                        && !label.starts_with('-')
+                        && !label.ends_with('-')
+                        && label
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || (underscore && b == b'_')))
+            })
+    }
+
+    // What: a cdn-domains entry as (name, subdomains only).
+    // Why: a leading dot keeps its wildcard scope.
+    // From: Issue #1683 | PR #1858
+    pub fn cdn_entry(text: &str) -> Option<(String, bool)> {
+        let lower = text.trim().to_ascii_lowercase();
+        let (wild, name) = match lower.strip_prefix('.') {
+            Some(rest) => (true, rest.to_string()),
+            None => (false, lower.clone()),
+        };
+        (name.contains('.') && is_dns_name(&name, false, false)).then_some((name, wild))
+    }
+
+    // What: IPv4 private reverse zones (RFC 1918).
+    // Why: fixed by the RFC; PTR for LAN hosts live there.
+    // From: Issue #1683 | PR #1858
+    pub fn private_reverse_zones() -> Vec<String> {
+        let fixed = ["10.in-addr.arpa.", "168.192.in-addr.arpa."].map(str::to_string);
+        let mid = (16..=31).map(|n| format!("{n}.172.in-addr.arpa."));
+        let ula = ["c.f.ip6.arpa.", "d.f.ip6.arpa."].map(str::to_string);
+        fixed.into_iter().chain(mid).chain(ula).collect()
+    }
+
+    // What: zones that get snapshots and rollback.
+    // Why: rpz and foreign zones are never rolled back.
+    // From: Issue #1683 | PR #1858
+    pub fn managed_zones(lan_zone: &str, reverse: bool) -> Vec<String> {
+        let lan = canonical_zone(lan_zone);
+        let mut zones = vec![lan.clone(), format!("local.{lan}")];
+        if reverse {
+            zones.extend(private_reverse_zones());
+        }
+        zones
+    }
+
+    // What: compare two SOA serials (RFC 1982, 32 bit).
+    // Why: serials wrap; plain < is wrong after wrap.
+    // From: Issue #1683 | PR #1858
+    pub fn serial_cmp(a: u32, b: u32) -> Option<Ordering> {
+        if a == b {
+            return Some(Ordering::Equal);
+        }
+        let d = b.wrapping_sub(a);
+        // What: exactly half the space apart is undefined.
+        // Why: RFC 1982 leaves 2^31 apart without an order.
+        // From: Issue #1683 | PR #1858
+        match d {
+            0x8000_0000 => None,
+            d if d < 0x8000_0000 => Some(Ordering::Less),
+            _ => Some(Ordering::Greater),
+        }
+    }
+
+    // What: sync state of a secondary against the primary.
+    // Why: the watchdog alarms on Behind for too long.
+    // From: Issue #1683 | PR #1858
+    #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+    pub enum Sync {
+        InSync,
+        Behind,
+        Ahead,
+        Unknown,
+    }
+
+    // What: sync state from the two serials.
+    // Why: Ahead means a primary rollback or a bad bump.
+    // From: Issue #1683 | PR #1858
+    pub fn sync_state(primary: u32, secondary: u32) -> Sync {
+        match serial_cmp(secondary, primary) {
+            Some(Ordering::Equal) => Sync::InSync,
+            Some(Ordering::Less) => Sync::Behind,
+            Some(Ordering::Greater) => Sync::Ahead,
+            None => Sync::Unknown,
+        }
+    }
+}
+
+// What: DHCP modes, managed options and option checks.
+// Why: ui, Kea and dnsmasq start share one rule set.
+// From: Issue #1683 | PR #1858
+pub mod dhcp {
+    use crate::config::Settings;
+
+    // What: the DHCP mode; names come from the SOT choice.
+    // Why: logic branches by mode; the words live in SOT.
+    // From: Issue #1683 | PR #1858
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum Mode {
+        Off,
+        Kea,
+        DnsmasqProxy,
+        DnsmasqRelay,
+    }
+
+    impl Mode {
+        // What: the mode from DHCP_MODE.
+        // Why: the SOT choice already rejected unknown words.
+        // From: Issue #1683 | PR #1858
+        pub fn from_settings(s: &Settings) -> Result<Self, String> {
+            match s.text("DHCP_MODE")?.as_str() {
+                "off" => Ok(Self::Off),
+                "kea" => Ok(Self::Kea),
+                "dnsmasq-proxy" => Ok(Self::DnsmasqProxy),
+                "dnsmasq-relay" => Ok(Self::DnsmasqRelay),
+                other => Err(format!("DHCP_MODE {other:?} has no handler")),
+            }
+        }
+
+        // What: programs a mode needs in the dhcp container.
+        // Why: Off runs nothing; no idle program uses CPU.
+        // From: Issue #1683 | PR #1858
+        pub fn programs(self) -> &'static [&'static str] {
+            match self {
+                Self::Off => &[],
+                Self::Kea => &["kea-dhcp4", "kea-ctrl-agent", "kea-dhcp-ddns"],
+                Self::DnsmasqProxy | Self::DnsmasqRelay => &["dnsmasq"],
+            }
+        }
+    }
+
+    // What: one DHCPv4 option with a dedicated form field.
+    // Why: Kea names it; dnsmasq uses the code (RFC 2132).
+    // From: Issue #1683 | PR #1858
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub struct Managed {
+        pub name: &'static str,
+        pub code: u8,
+    }
+
+    // What: managed options; codes fixed by RFC 2132/3397.
+    // Why: protocol numbers, not project settings.
+    // From: Issue #1683 | PR #1858
+    pub const MANAGED: [Managed; 5] = [
+        Managed { name: "routers", code: 3 },
+        Managed { name: "domain-name-servers", code: 6 },
+        Managed { name: "domain-name", code: 15 },
+        Managed { name: "ntp-servers", code: 42 },
+        Managed { name: "domain-search", code: 119 },
+    ];
+
+    // What: one custom option code 1..=254.
+    // Why: 0 is padding and 255 the end (RFC 2132).
+    // From: Issue #1683 | PR #1858
+    pub fn option_code(raw: &str) -> Result<u8, String> {
+        let code: u8 = raw
+            .trim()
+            .parse()
+            .map_err(|_| format!("option code {raw:?} must be 1..=254"))?;
+        if code == 0 || code == 255 {
+            return Err(format!("option code {code} is reserved"));
+        }
+        if MANAGED.iter().any(|m| m.code == code) {
+            return Err(format!("option code {code} has its own field"));
+        }
+        Ok(code)
+    }
+
+    // What: custom "CODE:VALUE" lines, checked.
+    // Why: length limit from the SOT; one line per option.
+    // From: Issue #1683 | PR #1858
+    pub fn custom_options(s: &Settings, raw: &str) -> Result<Vec<(u8, String)>, String> {
+        let max = s.uint("DHCP_OPTION_DATA_MAX")? as usize;
+        let mut out = Vec::new();
+        for (i, line) in raw.lines().map(str::trim).enumerate() {
+            if line.is_empty() {
+                continue;
+            }
+            let at = |m: String| format!("line {}: {m}", i + 1);
+            let (code, data) = line
+                .split_once(':')
+                .ok_or_else(|| at("expected CODE:VALUE".into()))?;
+            let data = data.trim();
+            if data.is_empty() || data.len() > max || data.contains(['\n', '\r', ';']) {
+                return Err(at(format!("value must be 1..={max} bytes, one line, no ';'")));
+            }
+            out.push((option_code(code).map_err(at)?, data.to_string()));
+        }
+        Ok(out)
+    }
+
+    // What: lease time inside the SOT limits.
+    // Why: Kea max-valid-lifetime = lease * factor, capped.
+    // From: Issue #1683 | PR #1858
+    pub fn lease_limits(s: &Settings, lease: u64) -> Result<(u64, u64), String> {
+        let (min, max) = (s.uint("DHCP_LEASE_TIME_MIN")?, s.uint("DHCP_LEASE_TIME_MAX")?);
+        if !(min..=max).contains(&lease) {
+            return Err(format!("lease {lease} outside {min}..={max}"));
+        }
+        let factor = s.uint("DHCP_MAX_LEASE_FACTOR")?;
+        Ok((lease, lease.saturating_mul(factor).min(max)))
+    }
+}
