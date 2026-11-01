@@ -39,7 +39,7 @@ qrcode = { version = "*", default-features = false, features = ["svg"] }
 rand = "*"
 # What: reqwest without default features, on rustls.
 # Why: AG-REL-003 forbids openssl-sys; json decodes bodies.
-reqwest = { version = "*", default-features = false, features = ["json", "rustls"] }
+reqwest = { version = "*", default-features = false, features = ["json", "rustls", "form", "query"] }
 # What: rustix with fs and process, no default features.
 # Why: safe statvfs and SIGTERM; std has neither on stable.
 # From: Issue #1683 | PR #1912
