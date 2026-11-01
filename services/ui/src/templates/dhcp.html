@@ -81,18 +81,10 @@
     </div>
   </div>
 
-  {# What: five tabs; each shows one panel
-     Why: the mockup groups DHCP by mode
-     From: Issue #1683 | PR #1976 #}
-  <div class="subtabs">
-    <button type="button" data-dhcp-tab="server" class="subtab dhcp-tab-btn">DHCP-Server</button>
-    <button type="button" data-dhcp-tab="proxy" class="subtab dhcp-tab-btn">DHCP-Proxy</button>
-    <button type="button" data-dhcp-tab="relay" class="subtab dhcp-tab-btn">DHCP-Relay</button>
-    <button type="button" data-dhcp-tab="precheck" class="subtab dhcp-tab-btn">DHCP-Precheck</button>
-    <button type="button" data-dhcp-tab="settings" class="subtab dhcp-tab-btn">Settings</button>
-  </div>
-
-  <div data-dhcp-panel="settings" class="hidden">
+  {# What: mode choice sits above the mode tabs
+     Why: only one DHCP mode can be active at a time
+     From: Issue #1683 | PR #1858 #}
+  <div>
   {# What: DHCP mode select, form of the active mode #}
   {# Why: proxy and relay values exist only in their mode #}
   {# From: Issue #1683 | PR #1912 #}
@@ -130,6 +122,17 @@
     {% endif %}
   </div>
   </div>
+
+  {# What: five tabs; each shows one panel
+     Why: the mockup groups DHCP by mode
+     From: Issue #1683 | PR #1976 #}
+  <div class="subtabs">
+    {% if dhcp_has_kea %}<button type="button" data-dhcp-tab="server" class="subtab dhcp-tab-btn">DHCP-Server</button>{% endif %}
+    {% if dhcp_is_dnsmasq and not dhcp_is_relay %}<button type="button" data-dhcp-tab="proxy" class="subtab dhcp-tab-btn">DHCP-Proxy</button>{% endif %}
+    {% if dhcp_is_relay %}<button type="button" data-dhcp-tab="relay" class="subtab dhcp-tab-btn">DHCP-Relay</button>{% endif %}
+    <button type="button" data-dhcp-tab="precheck" class="subtab dhcp-tab-btn">DHCP-Precheck</button>
+  </div>
+
 
   <div data-dhcp-panel="proxy" class="hidden">
     {% if dhcp_is_dnsmasq and not dhcp_is_relay %}
@@ -176,7 +179,7 @@
           </button>
         </form>
     {% else %}
-    <p class="section-sub">DHCP-Proxy is not the active mode. Choose it under Settings.</p>
+    <p class="section-sub">DHCP-Proxy is not the active mode. Choose it in the DHCP mode box above.</p>
     {% endif %}
   </div>
 
@@ -204,12 +207,11 @@
           </button>
         </form>
     {% else %}
-    <p class="section-sub">DHCP-Relay is not the active mode. Choose it under Settings.</p>
+    <p class="section-sub">DHCP-Relay is not the active mode. Choose it in the DHCP mode box above.</p>
     {% endif %}
   </div>
 
   <div data-dhcp-panel="precheck" class="hidden">
-    {% if dhcp_has_kea %}
   <!-- What: status card for the DHCP conflict probe -->
   <!-- Why: element ids are read by checkDhcpConflict() -->
   <!-- From: Issue #1683 | PR #1912 -->
@@ -234,9 +236,6 @@
       </button>
     </div>
   </div>
-    {% else %}
-    <p class="section-sub">The precheck needs the DHCP-Server mode.</p>
-    {% endif %}
   </div>
 
   <div data-dhcp-panel="server" class="hidden">
@@ -563,7 +562,7 @@
   </div>
 
     {% else %}
-    <p class="section-sub">DHCP-Server is not the active mode. Choose it under Settings.</p>
+    <p class="section-sub">DHCP-Server is not the active mode. Choose it in the DHCP mode box above.</p>
     {% endif %}
   </div>
 </div>
@@ -586,12 +585,15 @@
   document.querySelectorAll('.dhcp-tab-btn').forEach((b) => {
     b.addEventListener('click', () => setDhcpTab(b.dataset.dhcpTab));
   });
-  // What: start tab is the active mode, else Settings.
+  // What: start tab is the active mode, else Precheck.
   // Why: DHCP off must not open on an inactive tab.
   // From: Issue #1683 | PR #1976
   const MODE_TAB = { kea: 'server', 'dnsmasq-proxy': 'proxy', 'dnsmasq-relay': 'relay' };
-  let first = MODE_TAB['{{ dhcp_mode }}'] || 'settings';
-  try { first = sessionStorage.getItem('dhcpTab') || first; } catch (e) { /* blocked */ }
+  let first = MODE_TAB['{{ dhcp_mode }}'] || 'precheck';
+  try {
+    const saved = sessionStorage.getItem('dhcpTab');
+    if (saved && document.querySelector('[data-dhcp-tab="' + saved + '"]')) first = saved;
+  } catch (e) { /* blocked */ }
   setDhcpTab(first);
 </script>
 <script>
