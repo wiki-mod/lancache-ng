@@ -132,13 +132,21 @@ ENV LANCACHE_RUNTIME_DEFAULTS=${LANCACHE_RUNTIME_DEFAULTS}
 COPY --from=services-builder /build/lancache-watchdog-out /usr/local/bin/lancache-watchdog
 COPY --from=services-builder /build/lancache-cachehamster-out /usr/local/bin/lancache-cachehamster
 
-# What: processes the supervisor runs, from the SOT.
-# Why: ci.sh passes the list; the image holds no copy.
-# From: Issue #1683
-ARG LANCACHE_PROCESSES
-ENV LANCACHE_PROCESSES=${LANCACHE_PROCESSES}
+# What: OpenRC runs both own binaries, list from SOT.
+# Why: no package init.d exists; supervise-daemon
+#      restarts them; env passes via rc_env_allow.
+# From: Issue #871 | PR #1858
+ARG OPENRC_SERVICES
+RUN sed -i -e 's/^#\?rc_sys=.*/rc_sys="docker"/' \
+      -e 's/^#\?rc_env_allow=.*/rc_env_allow="*"/' /etc/rc.conf \
+ && for s in ${OPENRC_SERVICES}; do \
+      printf '%s\n' '#!/sbin/openrc-run' 'supervisor=supervise-daemon' \
+        "command=/usr/local/bin/$s" 'output_log=/proc/1/fd/1' \
+        'error_log=/proc/1/fd/2' > "/etc/init.d/$s" \
+   && chmod 0755 "/etc/init.d/$s" && rc-update add "$s" default; \
+    done
 
-# What: the supervisor binary; no argument means supervise.
-# Why: compose and setup.sh add healthcheck or probe.
-# From: Issue #1683 | PR #1912
-ENTRYPOINT ["/usr/local/bin/lancache-watchdog"]
+# What: OpenRC as PID 1.
+# Why: native init; reaps children and stops on SIGTERM.
+# From: Issue #1683 | PR #1858
+ENTRYPOINT ["/sbin/openrc-init"]
