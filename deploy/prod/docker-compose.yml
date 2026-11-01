@@ -30,20 +30,11 @@ x-service: &service
   restart: always
   logging: *logging
 
-# What: tini and run tmpfs of the supervised images.
-# Why: lancache-watchdog supervise is no init process.
-# From: Issue #1683 | PR #1912
+# What: tini for the proxy; nginx is no init process.
+# Why: OpenRC images bring openrc-init as PID 1.
+# From: Issue #1683 | PR #1858
 x-supervised: &supervised
   init: true
-  tmpfs:
-    - ${SOT_SUPERVISE_RUN_DIR}
-
-# What: watchdog probe of the four supervised services.
-# Why: one probe text; each service merges it by name.
-# From: Issue #1683 | PR #1912
-x-watchdog-healthcheck: &watchdog-healthcheck
-  <<: *healthcheck-timing
-  test: ["CMD", "lancache-watchdog", "healthcheck"]
 
 # What: operator values; one map per set of consumers.
 # Why: a key two services read has one line to change.
@@ -55,7 +46,6 @@ x-environment:
     IP_HTTPS: ${IP_HTTPS:?IP_HTTPS is required}
   services-ui: &env-services-ui
     NTP_ALLOWED_CLIENT_CIDRS: ${NTP_ALLOWED_CLIENT_CIDRS:-}
-    NETDATA_ALARM_TOKEN: ${NETDATA_ALARM_TOKEN}
   proxy-ui: &env-proxy-ui
     HTTPS_ENABLED: ${HTTPS_ENABLED:-}
     CACHE_MAX_SIZE: ${CACHE_MAX_SIZE:-}
@@ -66,10 +56,6 @@ x-environment:
     DNS_LOCAL_REVERSE_ZONES: ${DNS_LOCAL_REVERSE_ZONES:-}
   dns-ui: &env-dns-ui
     PDNS_API_KEY: ${PDNS_API_KEY}
-    NATS_UI_PASSWORD: ${NATS_UI_PASSWORD:-}
-    NATS_DNS_WRITER_PASSWORD: ${NATS_DNS_WRITER_PASSWORD:-}
-    NATS_CALLOUT_PASSWORD: ${NATS_CALLOUT_PASSWORD:-}
-    NATS_SYS_PASSWORD: ${NATS_SYS_PASSWORD:-}
   dhcp-ui: &env-dhcp-ui
     DHCP_MODE: ${DHCP_MODE:-}
     DHCP_NTP_SERVERS: ${DHCP_NTP_SERVERS:-}
@@ -86,13 +72,14 @@ x-environment:
     DHCP_PROXY_CUSTOM_OPTIONS: ${DHCP_PROXY_CUSTOM_OPTIONS:-}
 
 services:
-  # What: watchdog, syslog-ng, chronyd, netdata, retention.
+  # What: watchdog, cachehamster, syslog-ng, chronyd, snmpd.
   # Why: one container for every stack-wide support task.
   # From: Issue #1683
   services:
-    <<: [*service, *supervised]
+    <<: *service
     healthcheck:
-      <<: *watchdog-healthcheck
+      <<: *healthcheck-timing
+      test: ["CMD", "rc-service", "lancache-watchdog", "status"]
     container_name: ${SOT_CONTAINER_NAME_SERVICES}
     image: ${LANCACHE_IMAGE_REF_SERVICES:?LANCACHE_IMAGE_REF_SERVICES is required}
     environment:
@@ -101,7 +88,6 @@ services:
       # Why: the SOT owns each default; no value copy here.
       # From: Issue #1683
       NTP_ENABLED: ${NTP_ENABLED:-}
-      CACHEHAMSTER_URLS: ${CACHEHAMSTER_URLS:-}
       CACHE_VALID_DAYS: ${CACHE_VALID_DAYS:-}
       NTP_UPSTREAM_SERVERS: ${NTP_UPSTREAM_SERVERS:-}
     # What: the log input on loopback; NTP on IP_HTTP.
@@ -126,9 +112,6 @@ services:
       - retention-state:${SOT_RETENTION_STATE_DIR}
       - ${NTP_DATA_DIR:?NTP_DATA_DIR is required}:${SOT_NTP_STATE_DIR}
       - ${CACHEHAMSTER_DATA_DIR:?CACHEHAMSTER_DATA_DIR is required}:${SOT_CACHEHAMSTER_DATA_DIR}
-      - netdataconfig:${SOT_NETDATA_CONFIG_DIR}
-      - netdatalib:${SOT_NETDATA_LIB_DIR}
-      - netdatacache:${SOT_NETDATA_CACHE_DIR}
     # What: no capabilities except the list below.
     # Why: the container holds the Docker socket.
     cap_drop:
@@ -152,8 +135,6 @@ services:
   # Why: the passthrough port relays SNI; 443 intercepts.
   proxy:
     <<: [*service, *supervised]
-    healthcheck:
-      <<: *watchdog-healthcheck
     container_name: ${SOT_CONTAINER_NAME_PROXY}
     image: ${LANCACHE_IMAGE_REF_PROXY:?LANCACHE_IMAGE_REF_PROXY is required}
     environment:
@@ -192,20 +173,18 @@ services:
       - "${IP_HTTPS}:${SOT_PROXY_HTTP_PORT}:${SOT_PROXY_HTTP_PORT}"
       - "${IP_HTTPS}:${SOT_PROXY_HTTPS_PORT}:${SOT_PROXY_HTTPS_PORT}"
 
-  # What: PowerDNS auth, dns-http, dns-https, NATS.
+  # What: PowerDNS auth and recursor, NOTIFY and AXFR.
   # Why: one container answers on IP_HTTP and IP_HTTPS.
   # From: Issue #1683
   dns:
-    <<: [*service, *supervised]
+    <<: *service
     healthcheck:
-      <<: *watchdog-healthcheck
+      <<: *healthcheck-timing
+      test: ["CMD", "rc-service", "pdns", "status"]
     container_name: ${SOT_CONTAINER_NAME_DNS}
     image: ${LANCACHE_IMAGE_REF_DNS:?LANCACHE_IMAGE_REF_DNS is required}
     environment:
       <<: [*env-stack, *env-dns-dhcp, *env-dns-dhcp-ui, *env-dns-ui]
-      # What: the dns NATS login is the DNS writer account.
-      # Why: the subscriber publishes zone writes as writer.
-      NATS_PASSWORD: ${NATS_DNS_WRITER_PASSWORD:-}
       LOG_QUERIES: ${LOG_QUERIES:-}
       ROOT_ZONE_MIRROR: ${ROOT_ZONE_MIRROR:-}
       # What: optional upstream resolver; empty = SOT.
@@ -219,8 +198,6 @@ services:
       - *mount-cdn-domains
       - ${PDNS_DIR:?PDNS_DIR is required}:${SOT_PDNS_DATA_DIR}
       - &mount-pdns-filter ${PDNS_FILTER_STATE_DIR:?PDNS_FILTER_STATE_DIR is required}:${SOT_DNS_STATE_DIR}
-      - ${NATS_DATA_DIR:?NATS_DATA_DIR is required}:${SOT_NATS_STORE_DIR}
-      - &mount-nats-conf ${NATS_CONF_DIR:?NATS_CONF_DIR is required}:${SOT_NATS_CONF_MOUNT}
       - dns-config-snapshots:${SOT_DNS_SNAPSHOT_MOUNT}
       # What: the recursor Lua script from the checkout.
       # Why: Fund 148: a runtime file, no image rebuild.
@@ -239,18 +216,16 @@ services:
       # From: Issue #1683 | PR #1912
       - "${IP_HTTP}:${SOT_PDNS_AUTH_PORT}:${SOT_PDNS_AUTH_PORT}/udp"
       - "${IP_HTTP}:${SOT_PDNS_AUTH_PORT}:${SOT_PDNS_AUTH_PORT}/tcp"
-      # What: NATS for secondaries; loopback by default.
-      # Why: NATS_BIND_IP opts in; no second compose file.
-      # From: Issue #1683 | PR #1912
-      - "${NATS_BIND_IP:-${SOT_LOOPBACK_BIND_IP}}:${SOT_NATS_PORT}:${SOT_NATS_PORT}"
 
   # What: Kea or dnsmasq proxy/relay, one mode at a time.
   # Why: DHCP needs the host network for broadcasts.
   # From: Issue #1683
   dhcp:
-    <<: [*service, *supervised]
-    healthcheck:
-      <<: *watchdog-healthcheck
+    <<: *service
+    # What: dhcp starts only with the dhcp profile.
+    # Why: DHCP_MODE off keeps the container off.
+    # From: Issue #1683 | PR #1858
+    profiles: ["dhcp"]
     container_name: ${SOT_CONTAINER_NAME_DHCP}
     image: ${LANCACHE_IMAGE_REF_DHCP:?LANCACHE_IMAGE_REF_DHCP is required}
     environment:
@@ -287,7 +262,7 @@ services:
     image: ${LANCACHE_IMAGE_REF_UI:?LANCACHE_IMAGE_REF_UI is required}
     environment:
       <<: [*env-stack, *env-services-ui, *env-proxy-ui, *env-dns-dhcp-ui, *env-dns-ui, *env-dhcp-ui]
-      # What: image identity, login, NATS and Kea values.
+      # What: image identity, login and Kea values.
       # Why: only the Admin UI reads these keys.
       CACHE_MAX_GB: ${CACHE_MAX_GB:-}
       # What: start values the UI shows from the install.
@@ -305,8 +280,6 @@ services:
       ALLOW_INSECURE_UI: ${ALLOW_INSECURE_UI:-}
       UI_SESSION_TTL_SECONDS: ${UI_SESSION_TTL_SECONDS:-}
       DHCP_API_TOKEN: ${KEA_CTRL_TOKEN}
-      NATS_BIND_IP: ${NATS_BIND_IP:-}
-      NATS_ADVERTISE_URL: ${NATS_ADVERTISE_URL:-}
       SECONDARY_REGISTRATION_TOKEN: ${SECONDARY_REGISTRATION_TOKEN}
     volumes:
       - *mount-secrets
@@ -314,7 +287,6 @@ services:
       - *mount-cdn-domains
       - proxy-cache:${SOT_CACHE_DIR}:ro
       - *mount-pdns-filter
-      - *mount-nats-conf
       - *mount-kea-data
       - ${SYSLOG_NG_LOG_DIR:?SYSLOG_NG_LOG_DIR is required}:${SOT_SYSLOG_LOG_ROOT}:ro
       - watchdog-status:${SOT_STATUS_DIR}:ro
@@ -354,7 +326,4 @@ volumes:
   dhcp-config-snapshots:
   watchdog-status:
   retention-state:
-  netdataconfig:
-  netdatalib:
-  netdatacache:
   ui-data:

@@ -14,7 +14,7 @@ use axum::routing::{get, post};
 use axum::Router;
 use base64::Engine as _;
 use lancache_ng::config::{self, process_env, Settings};
-use lancache_ng::{access, apply, clock, docker, fs, human, render, secret};
+use lancache_ng::{access, apply, clock, docker, fs, http, human, render, secret};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -1931,7 +1931,7 @@ fn templates() -> Result<Tera, String> {
 }
 
 // What: entry: subcommand or server.
-// Why: setup.sh uses hash-password; Docker runs the server.
+// Why: setup.sh hash-password; Docker healthcheck, server.
 // From: Issue #1683 | PR #1858
 #[tokio::main]
 async fn main() -> Result<(), String> {
@@ -1940,6 +1940,17 @@ async fn main() -> Result<(), String> {
     }
     let saved = process_env(SETTINGS_FILE_ENV).map(PathBuf::from);
     let s = Settings::load(&process_env, saved.as_deref())?;
+    // What: Docker healthcheck: GET /healthz on loopback.
+    // Why: no curl in the image; one probe owner.
+    if std::env::args().nth(1).as_deref() == Some("healthcheck") {
+        let url = format!(
+            "http://{}:{}/healthz",
+            s.text("LOOPBACK_BIND_IP")?,
+            s.uint("UI_PORT")?
+        );
+        let limit = std::time::Duration::from_secs(s.uint("HTTP_CLIENT_TIMEOUT")?);
+        return http::probe(&url, None, limit).await;
+    }
     let dir = PathBuf::from(s.text("SECRETS_DIR")?);
     let keep = fs::Owner {
         uid: None,
