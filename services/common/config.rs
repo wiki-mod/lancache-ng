@@ -246,6 +246,39 @@ fn saved(path: &Path) -> Result<BTreeMap<String, String>, String> {
         .collect())
 }
 
+// What: merge checked updates into the saved file.
+// Why: same KEY=VALUE format the reader above parses.
+// From: Issue #1683 | PR #1858
+pub fn store(
+    path: &Path,
+    current: &Settings,
+    updates: &BTreeMap<String, String>,
+) -> Result<(), String> {
+    let mut all = saved(path)?;
+    for (k, raw) in updates {
+        if raw.contains(['\n', '\r']) {
+            return Err(format!("{k}: line break not allowed"));
+        }
+        if !raw.is_empty() {
+            current.validate(k, raw)?;
+        }
+        all.insert(k.clone(), raw.clone());
+    }
+    let body: String = all.iter().map(|(k, v)| format!("{k}={v}\n")).collect();
+    let keep = crate::fs::Owner {
+        uid: None,
+        gid: None,
+    };
+    crate::fs::write(
+        path,
+        body.as_bytes(),
+        0o600,
+        crate::fs::Place::Replace,
+        keep,
+    )
+    .map_err(|e| format!("{}: {e}", path.display()))
+}
+
 // What: one loaded and checked settings set.
 // Why: every crate reads values only through this set.
 // From: Issue #1683 | PR #1858
