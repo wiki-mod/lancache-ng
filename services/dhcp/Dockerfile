@@ -92,7 +92,7 @@ RUN set -e; \
     done; \
     printf '%s\n' '#!/bin/bash' \
       "mode=\"\$(cat '${f}' 2>/dev/null || true)\"" \
-      "exec /sbin/openrc-init \"\${mode:-${v[DHCP_MODE]}}\"" \
+      "exec openrc-init \"\${mode:-${v[DHCP_MODE]}}\"" \
       > /usr/local/bin/lancache-init; \
     chmod 0755 /usr/local/bin/lancache-init
 

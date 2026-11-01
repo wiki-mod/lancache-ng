@@ -129,4 +129,4 @@ RUN set -e; \
 # What: OpenRC as PID 1; compose may name a runlevel.
 # Why: openrc-init reaps zombies and stops on SIGTERM.
 # From: Issue #1683 | PR #1980
-ENTRYPOINT ["/sbin/openrc-init"]
+ENTRYPOINT ["openrc-init"]
