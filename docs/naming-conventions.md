@@ -1,10 +1,11 @@
 # Naming Conventions
 
-This document is the naming contract for every runtime object lancache-ng
-creates: the Compose project and service names, Docker container names,
+This document is the naming contract for all project-defined names and
+identifiers (see [AG-CODE-014]). Runtime objects are covered first: the Compose project and service names, Docker container names,
 Docker volumes, host bind-mount directories, GHCR image and package names,
 environment variables that refer to services or containers, and
-backup/restore paths. `ci.sh check naming-consistency` (part of `ci.sh check
+backup/restore paths. Code identifiers are covered in "Code Naming
+Conventions" below. `ci.sh check naming-consistency` (part of `ci.sh check
 all`, see "CI guard" below) checks the parts that a script can check; it
 does not replace reading this document.
 
