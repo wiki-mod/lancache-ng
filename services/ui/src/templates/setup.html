@@ -50,6 +50,42 @@
       <button type="submit" class="btn" style="margin-top:14px; margin-bottom:6px;">Save</button>
     </form>
 
+    <!-- What: time server (NTP) controls on General
+         Why: the NTP page is gone; settings need a home
+         From: Issue #1683 | PR #1858 -->
+    <form method="post" action="{{ routes.ntp_settings | safe }}">
+      {{ <csrf_field csrf_token={csrf_token}/> }}
+      <div class="section-title">Time server (NTP)</div>
+      <p class="section-sub">Serves the time to LAN clients on UDP {{ ntp_port }}.</p>
+      <div class="toggle-row">
+        <div>
+          <div class="t-label">Run the time server</div>
+          <div class="t-desc">Needs at least one upstream server below.</div>
+        </div>
+        <label class="toggle">
+          <input type="checkbox" id="ntp_enabled" name="ntp_enabled" value="1"
+                 {% if ntp_enabled %}checked{% endif %}>
+          <span class="track"></span><span class="knob"></span>
+        </label>
+      </div>
+      <div class="field-row">
+        <textarea name="ntp_upstream_servers" rows="2" style="width:100%; padding:9px 11px; border-radius:8px; border:1px solid var(--navy-600); background:var(--navy-900); color:var(--foam); font-family:var(--font-mono); font-size:13px;">{{ ntp_upstream_servers }}</textarea>
+      </div>
+      <p class="field-hint">Upstream servers, separated by spaces or commas.</p>
+      <div class="toggle-row">
+        <div>
+          <div class="t-label">Hand this time server to DHCP clients</div>
+          <div class="t-desc">Needs the time server and the Kea DHCP server enabled.</div>
+        </div>
+        <label class="toggle">
+          <input type="checkbox" id="ntp_auto_dhcp" name="ntp_auto_dhcp" value="1"
+                 {% if ntp_auto_dhcp %}checked{% endif %}>
+          <span class="track"></span><span class="knob"></span>
+        </label>
+      </div>
+      <button type="submit" class="btn" style="margin-top:14px; margin-bottom:6px;">Save</button>
+    </form>
+
     <div class="section-title">Language</div>
     <p class="section-sub">Changes the language of this interface, including tooltips and error messages.</p>
     <div class="mode-switchrow" style="max-width:320px;" id="lang-row"></div>
