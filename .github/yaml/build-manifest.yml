@@ -808,10 +808,10 @@ runtime:
     - SETUP_SCRIPT_URL=https://raw.githubusercontent.com/wiki-mod/lancache-ng/master/setup.sh
     - SNMP_AGENTX=0
     - SNMP_AGENTX_SOCKET=/var/agentx/master
-    - SNMP_ALLOW_FROM=@LOOPBACK_BIND_IP@
+    - SNMP_ALLOW_FROM=default
     - SNMP_COMMUNITY=
     - SNMP_DISK_MIN_FREE_PERCENT=10
-    - SNMP_LISTEN=udp:@LOOPBACK_BIND_IP@:161
+    - SNMP_LISTEN=udp:@ANY_BIND_IP@:161
     - SNMP_LOAD_1=12
     - SNMP_LOAD_15=8
     - SNMP_LOAD_5=10
@@ -826,7 +826,7 @@ runtime:
     - "STATS_LINE_COLOURS=#2f81f7 #3fb950 #d29922 #f85149"
     - STATS_RANGES=1h 1d 1w 1m 1y
     - STATS_RRAS=AVERAGE:0.5:1:1440 AVERAGE:0.5:12:1680 AVERAGE:0.5:288:800 MAX:0.5:12:1680
-    - STATS_SNMP_TARGET=udp:@IP_HTTP@:161
+    - STATS_SNMP_TARGET=udp:@CACHEHAMSTER_SERVICE@:161
     - STATS_STEP=60
     - STATS_WIDTH=720
     - STEAM_API_URL=https://api.steampowered.com
