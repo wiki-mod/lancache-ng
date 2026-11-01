@@ -703,6 +703,29 @@ async fn rollback(s: &Settings, get: &dyn Fn(&str) -> String) -> Result<(), Stri
     pdns_api(s)?.restore(&zone, &saved).await
 }
 
+// What: print {"zones":{zone:[{id,created_unix}]}}.
+// Why: the shape setup.sh reset-config reads.
+// From: Issue #1683 | PR #1858
+fn zone_snapshots_cli(s: &Settings) -> Result<(), String> {
+    let mut zones = serde_json::Map::new();
+    for zone in snapshot_zones(s) {
+        let store = zone_store(s, &zone)?;
+        let mut rows = Vec::new();
+        for id in store.list()? {
+            let created = std::fs::metadata(store.dir.join(&id))
+                .and_then(|m| m.modified())
+                .map_err(|e| format!("{id}: {e}"))?
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|e| e.to_string())?
+                .as_secs();
+            rows.push(serde_json::json!({"id": id, "created_unix": created}));
+        }
+        zones.insert(zone, serde_json::Value::Array(rows));
+    }
+    println!("{}", serde_json::json!({"zones": zones}));
+    Ok(())
+}
+
 // What: zones that keep snapshots.
 // Why: LAN zone and the private reverse zones.
 // From: Issue #1683 | PR #1858
@@ -1947,6 +1970,26 @@ async fn main() -> Result<(), String> {
     }
     let saved = process_env(SETTINGS_FILE_ENV).map(PathBuf::from);
     let s = Settings::load(&process_env, saved.as_deref())?;
+    // What: zone snapshots and rollback without the web UI.
+    // Why: setup.sh reset-config works when pages fail.
+    match std::env::args().nth(1).as_deref() {
+        Some("zone-snapshots") => return zone_snapshots_cli(&s),
+        Some("zone-rollback") => {
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            let [zone, id] = args.as_slice() else {
+                return Err("usage: zone-rollback <zone> <snapshot-id>".into());
+            };
+            let get = |k: &str| match k {
+                "zone" => zone.clone(),
+                "snapshot_id" => id.clone(),
+                _ => String::new(),
+            };
+            rollback(&s, &get).await?;
+            println!("{}", serde_json::json!({"restored": zone, "snapshot": id}));
+            return Ok(());
+        }
+        _ => {}
+    }
     // What: Docker healthcheck: GET /healthz on loopback.
     // Why: no curl in the image; one probe owner.
     if std::env::args().nth(1).as_deref() == Some("healthcheck") {

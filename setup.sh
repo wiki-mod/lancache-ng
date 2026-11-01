@@ -5430,12 +5430,9 @@ Supported services:
                      (config-test -> config-set -> config-write), reading
                      snapshots from KEA_CONFIG_SNAPSHOT_DIR in the
                      KEA_DATA_DIR state dir.
-  dns, pdns          Rolls back a PowerDNS zone's record data via
-                     nats-subscriber's rollback listener (list snapshots ->
-                     diff -> PATCH -> check-zone -> flush -> re-publish),
-                     reached by execing curl inside the target container
-                     (its port is Compose-internal only, never published to
-                     the host). The dns container runs the one listener.
+  dns, pdns          Rolls back a PowerDNS zone via lancache-ui in the ui
+                     container (PowerDNS API restore; NOTIFY and AXFR
+                     reach the secondaries).
                      Unlike Kea, PowerDNS tracks snapshots per zone (lan.,
                      local.lan., and the private reverse zones), so a <zone>
                      argument is required -- omit it to list which zones
@@ -7396,68 +7393,13 @@ dns_zone_snapshot_entries() {
 # Why: the listener is not published to the host
 # From: Issue #1683 | PR #1858
 dns_rollback_exec() (
-    local install_dir="$1" env_file="$2" container="$3" method="$4" path="$5" body="${6:-}"
-    local project stdout_val rc=0 exec_err http_status response_body
-
+    local install_dir="$1" env_file="$2" project out rc=0
+    shift 2
     project=$(compose_project_name "$install_dir" "$env_file") \
         || die "Cannot determine the compose project of $install_dir (exit $?)."
-    err_file=$(mktemp) || die "Cannot create a temporary file for the exec errors (exit $?)."
-    # What: the subshell body's trap removes the error file
-    # Why: no exit path may leave the file behind
-    # From: Issue #1683 | PR #1858
-    trap 'rm -f -- "$err_file"' EXIT
-
-    local exec_script placeholder_fn
-    exec_script=$(cat <<'SCRIPT'
-            key="$PDNS_API_KEY"
-            ! secret_value_is_placeholder "$key" || key=""
-            secrets=$(lancache-watchdog get LANCACHE_SHARED_SECRET_DIR) || exit 7
-            if [ -z "$key" ] && [ -s "$secrets/pdns-api-key" ]; then
-                key=$(tr -d "\n" < "$secrets/pdns-api-key")
-            fi
-            if [ -z "$key" ]; then
-                echo "DNS_ROLLBACK_EXEC_NO_API_KEY"
-                exit 9
-            fi
-            port=$(lancache-watchdog get DNS_ROLLBACK_PORT) || exit 7
-            lo=$(lancache-watchdog get LOOPBACK_BIND_IP) || exit 7
-            m="$1"; p="$2"; b="$3"
-            if [ "$m" = "POST" ]; then
-                curl -sS -w "\n%{http_code}" -X POST \
-                    -H "X-API-Key: $key" -H "Content-Type: application/json" -d "$b" \
-                    "http://$lo:$port$p" || { echo "DNS_ROLLBACK_EXEC_CURL_FAILED"; exit 8; }
-            else
-                curl -sS -w "\n%{http_code}" \
-                    -H "X-API-Key: $key" "http://$lo:$port$p" || { echo "DNS_ROLLBACK_EXEC_CURL_FAILED"; exit 8; }
-            fi
-SCRIPT
-    ) || die "Cannot build the listener request script (exit $?)."
-    placeholder_fn=$(declare -f secret_value_is_placeholder) \
-        || die "Cannot read secret_value_is_placeholder (exit $?)."
-    exec_script="${placeholder_fn}"$'\n'"${exec_script}"
-    stdout_val=$(stack_compose "$install_dir" "$env_file" -p "$project" exec -T "$container" sh -c "$exec_script" sh "$method" "$path" "$body" 2>"$err_file") || rc=$?
-    exec_err=$(cat "$err_file") || die "Cannot read $err_file (exit $?)."
-
-    if [[ $rc -ne 0 ]]; then
-        case "$stdout_val" in
-            *DNS_ROLLBACK_EXEC_NO_API_KEY*)
-                die "PDNS_API_KEY could not be resolved inside the $container container (no usable value in its environment and nothing on the shared-secrets volume yet). Is the stack fully started?"
-                ;;
-            *DNS_ROLLBACK_EXEC_CURL_FAILED*)
-                die "Failed to reach the rollback listener inside $container (curl could not connect to its rollback port). Is nats-subscriber running there?"
-                ;;
-            *)
-                die "docker compose exec into $container failed (exit $rc): ${exec_err:-$stdout_val}"
-                ;;
-        esac
-    fi
-
-    split_http_response response_body http_status "$stdout_val" \
-        || die "Unexpected response from $container's rollback listener: $stdout_val"
-    if [[ ! "$http_status" =~ ^2 ]]; then
-        die "$container's rollback listener rejected the request with HTTP ${http_status}. Response: ${response_body}"
-    fi
-    printf '%s\n' "$response_body"
+    out=$(stack_compose "$install_dir" "$env_file" -p "$project" exec -T ui lancache-ui "$@" 2>&1) || rc=$?
+    [[ $rc -eq 0 ]] || die "lancache-ui $1 in the ui container failed (exit $rc): $out"
+    printf "%s\n" "$out" | tail -n 1
 )
 
 # What: rolls a DNS zone back to a chosen snapshot
@@ -7465,16 +7407,15 @@ SCRIPT
 # From: Issue #1683 | PR #1858
 reset_dns_to_last_known_good_config() {
     local container="$1" install_dir="$2" zone="$3" snapshot_id="$4" assume_yes="${5:-0}"
-    local env_file snapshots_body zone_canon rollback_body resp zone_list entry_list
+    local env_file snapshots_body zone_canon resp zone_list entry_list
     local -a zone_names=()
     local -a entries=()
     local idx n entry eid ecreated found zn
-    local applied zone_check_passed flush_ok republished changed_names flush_failed
 
     env_file=$(require_stack_env_file "$install_dir") || exit $?
     install_missing_tools jq
 
-    snapshots_body=$(dns_rollback_exec "$install_dir" "$env_file" "$container" GET /snapshots)
+    snapshots_body=$(dns_rollback_exec "$install_dir" "$env_file" zone-snapshots)
 
     if [[ -z "$zone" ]]; then
         zone_list=$(list_dns_zones_with_snapshots "$snapshots_body") \
@@ -7524,38 +7465,13 @@ reset_dns_to_last_known_good_config() {
 
     confirm_snapshot_rollback "$container's zone $zone_canon" "$snapshot_id" "$assume_yes"
 
-    # What: the request body is built by jq, not by printf
-    # Why: a quote in a user-given snapshot id breaks JSON
-    # From: Issue #1683 | PR #1858
-    rollback_body=$(jq -nc --arg zone "$zone_canon" --arg id "$snapshot_id" '{zone: $zone, snapshot_id: $id}') \
-        || die "Failed to build the rollback request (exit $?)."
-    print_step "Applying snapshot $snapshot_id for zone $zone_canon (rollback listener PATCH)"
-    resp=$(dns_rollback_exec "$install_dir" "$env_file" "$container" POST /rollback "$rollback_body")
-
-    applied=$(json_value .applied "$resp") || die "Unrecognized rollback response from $container: $resp"
-    zone_check_passed=$(json_value .zone_check_passed "$resp") || die "Unrecognized rollback response from $container: $resp"
-    flush_ok=$(json_value .flush_ok "$resp") || die "Unrecognized rollback response from $container: $resp"
-    republished=$(json_value .republished_to_nats "$resp") || die "Unrecognized rollback response from $container: $resp"
-    changed_names=$(json_value '.changed_names // [] | join(", ")' "$resp") \
-        || die "Unrecognized rollback response from $container: $resp"
-    flush_failed=$(json_value '.flush_failed_names // [] | join(", ")' "$resp") \
-        || die "Unrecognized rollback response from $container: $resp"
-
-    [[ "$applied" = "true" ]] \
-        || die "Rollback listener did not report applied=true: $resp"
+    print_step "Applying snapshot $snapshot_id for zone $zone_canon (PowerDNS API restore)"
+    resp=$(dns_rollback_exec "$install_dir" "$env_file" zone-rollback "$zone_canon" "$snapshot_id")
+    [[ -n "$(json_value .restored "$resp")" ]] \
+        || die "Unrecognized rollback answer: $resp"
 
     print_ok "Zone $zone_canon on $container rolled back to known-good snapshot $snapshot_id."
-    [[ -n "$changed_names" ]] && print_ok "Changed rrsets: ${changed_names}"
-    if [[ "$zone_check_passed" != "true" ]]; then
-        print_warn "Post-rollback pdnsutil check-zone reported a problem for $zone_canon -- the rollback was already applied and is NOT automatically reverted. Inspect the zone manually."
-    fi
-    if [[ "$flush_ok" != "true" ]]; then
-        print_warn "One or more recursor cache-flush publishes failed after rollback (${flush_failed:-see response}) -- affected clients may see stale answers until TTL expiry."
-    fi
-    if [[ "$zone_canon" = "lan." && "$republished" = "true" ]]; then
-        print_ok "Restored lan. records were re-published to NATS so secondary DNS nodes converge."
-    fi
-    print_ok "A fresh known-good snapshot of the restored state was recorded automatically (same as an Admin-UI-driven rollback)."
+    print_ok "PowerDNS sends NOTIFY; secondaries pull the zone by AXFR."
 }
 
 # What: writes the previous .env back and restarts the stack
