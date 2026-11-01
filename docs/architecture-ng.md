@@ -19,7 +19,8 @@ The program list of each image is the SOT field `processes`. Each row is
 OpenRC script with `supervise-daemon`, so a crashed program restarts by
 itself. `@KEY@` in a row is replaced by the SOT value at build time.
 
-The `dhcp` container starts `openrc-init` with the runlevel named by
+The `dhcp` container starts `openrc-init` with the runlevel named in
+`DHCP_MODE_FILE`, which the ui writes from
 `DHCP_MODE` (`off`, `kea`, `dnsmasq-proxy`, `dnsmasq-relay`). Each mode
 starts only its own programs; `off` starts none.
 
