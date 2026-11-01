@@ -222,10 +222,10 @@ services:
   # From: Issue #1683
   dhcp:
     <<: *service
-    # What: dhcp starts only with the dhcp profile.
-    # Why: DHCP_MODE off keeps the container off.
+    # What: a stop by the UI survives a Docker restart.
+    # Why: DHCP_MODE off keeps the container stopped.
     # From: Issue #1683 | PR #1858
-    profiles: ["dhcp"]
+    restart: unless-stopped
     container_name: ${SOT_CONTAINER_NAME_DHCP}
     image: ${LANCACHE_IMAGE_REF_DHCP:?LANCACHE_IMAGE_REF_DHCP is required}
     environment:
