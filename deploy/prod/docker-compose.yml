@@ -142,10 +142,11 @@ services:
   # Why: the passthrough port relays SNI; 443 intercepts.
   proxy:
     <<: [*service, *supervised]
-    # What: nginx reads the rendered main config.
-    # Why: the ui writes it into the config volume.
+    # What: wait for the rendered config, then run nginx.
+    # Why: the ui writes it; an early start would exit.
     # From: Issue #1683 | PR #1980
-    command: ["-c", "${SOT_NGINX_CONF_DIR}/nginx.conf"]
+    entrypoint: ["bash", "-c", "until [[ -f \"$$1\" ]]; do sleep \"$$2\"; done; exec nginx -g \"daemon off;\" -c \"$$1\"", "nginx"]
+    command: ["${SOT_NGINX_CONF_DIR}/nginx.conf", "${SOT_PROXY_CONFIG_WAIT_SECONDS}"]
     # What: a real HTTP request to the health path.
     # Why: only an answering nginx counts as healthy.
     # From: Issue #1683 | PR #1858
