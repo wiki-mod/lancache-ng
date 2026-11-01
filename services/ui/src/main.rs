@@ -2041,7 +2041,31 @@ fn router(app: Arc<App>) -> Router {
         .route("/favicon.ico", get(|| async { asset("image/x-icon", FAVICON) }))
         .route("/static/logo-icon.png", get(|| async { asset("image/png", LOGO) }))
         .merge(pages)
+        .layer(axum::middleware::from_fn_with_state(app.clone(), secure))
         .with_state(app)
+}
+
+// What: security headers on every answer, from SOT.
+// Why: no framing, no sniffing, no foreign scripts.
+// From: Issue #1683 | PR #1980
+async fn secure(State(app): Shared, req: Request, next: Next) -> Response {
+    let s = app.settings();
+    let mut res = next.run(req).await;
+    for (name, key) in [
+        (header::CONTENT_SECURITY_POLICY, "UI_CSP"),
+        (header::X_FRAME_OPTIONS, "UI_FRAME_OPTIONS"),
+        (header::REFERRER_POLICY, "UI_REFERRER_POLICY"),
+        (header::X_CONTENT_TYPE_OPTIONS, "UI_CONTENT_TYPE_OPTIONS"),
+    ] {
+        match s.text(key).map(|v| header::HeaderValue::from_str(&v)) {
+            Ok(Ok(v)) => {
+                res.headers_mut().insert(name, v);
+            }
+            Ok(Err(e)) => eprintln!("ui: {key}: {e}"),
+            Err(e) => eprintln!("ui: {e}"),
+        }
+    }
+    res
 }
 
 // What: entry: a command or the web server.

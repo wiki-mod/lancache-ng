@@ -844,6 +844,10 @@ runtime:
     - RECURSOR_AAAA_LUA_FILE=@CONFIG_DIR@/dns/filter-aaaa.lua
     - CHRONY_CONF_FILE=@CONFIG_DIR@/services/chrony.conf
     - CONFIG_DIR=/etc/lancache
+    - UI_CONTENT_TYPE_OPTIONS=nosniff
+    - UI_CSP=default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self' data:
+    - UI_FRAME_OPTIONS=DENY
+    - UI_REFERRER_POLICY=no-referrer
     - DHCP_MODE_FILE=@CONFIG_DIR@/dhcp/mode
     - HUP_OWNERS=proxy ui
     - NGINX_CONF_DIR=@CONFIG_DIR@/proxy
@@ -1060,6 +1064,10 @@ runtime:
     - RECURSOR_AAAA_LUA_FILE=path;;;reload;dns
     - CHRONY_CONF_FILE=path;;;container;services
     - CONFIG_DIR=path;;;container;ui
+    - UI_CONTENT_TYPE_OPTIONS=text;;;live;ui
+    - UI_CSP=text;;;live;ui
+    - UI_FRAME_OPTIONS=text;;;live;ui
+    - UI_REFERRER_POLICY=text;;;live;ui
     - DHCP_MODE_FILE=path;;;container;dhcp
     - HUP_OWNERS=list;;;live;ui
     - NGINX_CONF_DIR=path;;;container;proxy
