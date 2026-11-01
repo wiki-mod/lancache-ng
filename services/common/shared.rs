@@ -3126,6 +3126,14 @@ pub mod render {
                 body,
             });
         }
+        // What: the static health body nginx serves.
+        // Why: proxy-params.conf aliases it; ui owns files.
+        // From: Issue #1683 | PR #1980
+        o.files.push(File {
+            owner: "proxy",
+            path: dst.join(s.text("NGINX_HEALTHZ_FILE")?),
+            body: format!("{}\n", s.text("NGINX_HEALTHZ_BODY")?),
+        });
         Ok(())
     }
 

@@ -766,6 +766,7 @@ runtime:
     - KEA_NCR_PORT=53001
     - NGINX_HTTPS_LISTEN_FILE=conf.d/https-listen.inc
     - NGINX_HEALTHZ_FILE=lancache-healthz-body.txt
+    - NGINX_HEALTHZ_BODY=ok
     - NGINX_PSL_FILE=public_suffix_list.dat
     - NGINX_DISCARD_PORT=9
     - NGINX_STREAM_TARGETS_FILE=stream.d/00-stream-targets.conf
@@ -848,7 +849,7 @@ runtime:
     - PDNS_DEFAULT_SOA=ns1.@DHCP_DOMAIN@ hostmaster.@DHCP_DOMAIN@ 0 30 10 604800 300
     - PDNS_DNSUPDATE_FROM=@PRIVATE_NETS@
     - PDNS_LISTEN=0.0.0.0
-    - PDNS_PRIMARY_API_URL=
+    - PDNS_PRIMARY_API_URL=http://@CONTAINER_NAME_DNS@:@PDNS_AUTH_API_PORT@
     - PDNS_SECONDARY_API_URL=
     - PDNS_XFR_CYCLE=60
     - PROXY_ALLOWED_CLIENT_CIDRS=@PRIVATE_NETS@ fc00::/7
