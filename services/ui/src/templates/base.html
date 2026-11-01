@@ -892,6 +892,22 @@
     // Why: DesiredState::SERVICES, matched to status.json
     // From: Issue #1683 | PR #1912
     const DOCK_CONTROLLABLE_SERVICES = [{% for name in desired_services %}'{{ name }}',{% endfor %}];
+    // What: programs per container (container:program)
+    // Why: reload/restart one program via OpenRC
+    // From: Issue #1683 | PR #1858
+    const DOCK_PROGRAMS = [{% for p in programs %}'{{ p }}',{% endfor %}];
+    async function programAction(container, program, action, button) {
+      button.disabled = true;
+      try {
+        const url = '{{ routes.service_action | safe }}'
+          .replace('{container}', container).replace('{program}', program).replace('{action}', action);
+        const response = await fetch(url, { method: 'POST', headers: { 'X-CSRF-Token': CSRF_TOKEN } });
+        if (!response.ok) { throw new Error(action + ' ' + program + ': HTTP ' + response.status); }
+      } catch (err) {
+        reportError(err);
+      }
+      button.disabled = false;
+    }
 
     // What: render beambar service entries via DOM nodes
     // Why: no HTML is built from server-supplied strings
@@ -932,6 +948,20 @@
           });
           wrap.appendChild(button);
         }
+        DOCK_PROGRAMS.filter(function (p) { return p.split(':')[0] === svc.name; }).forEach(function (p) {
+          const program = p.split(':')[1];
+          [['reload', '↻'], ['restart', '⟳']].forEach(function (a) {
+            const b = document.createElement('button');
+            b.type = 'button';
+            b.className = 'theme-btn';
+            b.style.marginLeft = '0.25rem';
+            b.style.padding = '0 0.35rem';
+            b.title = program + ': ' + a[0];
+            b.textContent = a[1] + ' ' + program;
+            b.addEventListener('click', function () { programAction(svc.name, program, a[0], b); });
+            wrap.appendChild(b);
+          });
+        });
         return wrap;
       }
       // What: rebuilds the beambar from one status update

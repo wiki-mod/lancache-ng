@@ -117,8 +117,13 @@ impl Watch {
                 .as_str()
                 .unwrap_or(service)
                 .trim_start_matches('/');
-            let mut reasons = Vec::new();
             let run = c["State"].as_str().unwrap_or("unknown");
+            let dhcp_off = self.settings.text("DHCP_MODE").as_deref() == Ok("off")
+                && self.settings.text("DHCP_SERVICE").as_deref() == Ok(service);
+            if dhcp_off && run != "running" {
+                continue;
+            }
+            let mut reasons = Vec::new();
             if run != "running" {
                 reasons.push(format!("Docker state {run}"));
             }

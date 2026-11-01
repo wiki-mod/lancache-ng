@@ -1519,10 +1519,21 @@ async fn apply_all(app: &App, old: &Settings, new: &Settings) -> Result<Vec<Stri
     let (grace, limit) = app.limits(new)?;
     let project = new.text("COMPOSE_PROJECT")?;
     let name_of = |owner: &str| format!("{project}-{owner}-1");
+    let mut plan = plan;
+    let dhcp = new.text("DHCP_SERVICE")?;
+    let mut extra = Vec::new();
+    if new.text("DHCP_MODE")? == "off" {
+        plan.remove(&dhcp);
+        let r = app
+            .docker
+            .act(&name_of(&dhcp), docker::Action::Stop, grace, limit)
+            .await;
+        extra.push(format!("{dhcp}: off, stop {r:?}"));
+    }
     let done = apply::run(&app.docker, &plan, &name_of, grace, limit).await;
-    Ok(done
+    Ok(extra
         .into_iter()
-        .map(|(o, r)| format!("{o}: {r:?}"))
+        .chain(done.into_iter().map(|(o, r)| format!("{o}: {r:?}")))
         .collect())
 }
 
