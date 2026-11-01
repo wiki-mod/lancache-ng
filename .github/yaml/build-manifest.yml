@@ -439,6 +439,13 @@ runtime:
     - PDNS_ZONE_CHECK_TIMEOUT=10
     - DNS_FLUSH_TIMEOUT=3
     - SYSLOG_TIME_REAP=30
+    # What: syslog-ng store modes and transports.
+    # Why: readers get group read; forward is reliable.
+    # From: Issue #1683 | PR #1858
+    - SYSLOG_DIR_PERM=0750
+    - SYSLOG_FILE_PERM=0640
+    - SYSLOG_IN_TRANSPORT=udp
+    - SYSLOG_FWD_TRANSPORT=tcp
     - HTTP_CLIENT_TIMEOUT=10
     - HTTP_POOL_IDLE_TIMEOUT=90
     - HTTP_TCP_KEEPALIVE=60
@@ -1029,6 +1036,10 @@ runtime:
     - SYSLOG_PRIMARY=text?;;;restart;services
     - SYSLOG_PROGRAMS=list;;;live;ui
     - SYSLOG_TIME_REAP=uint;1;3600;restart;services
+    - SYSLOG_DIR_PERM=text;;;restart;services
+    - SYSLOG_FILE_PERM=text;;;restart;services
+    - SYSLOG_IN_TRANSPORT=choice;udp,tcp;;restart;services
+    - SYSLOG_FWD_TRANSPORT=choice;udp,tcp;;restart;services
     - UI_CONTROLLABLE_SERVICES=list;;;live;ui
     - UI_LISTEN=text;;;restart;ui
     - UI_LOG_LINES=uint;10;100000;live;ui
