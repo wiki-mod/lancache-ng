@@ -919,6 +919,7 @@ pub mod docker {
         Start,
         Stop,
         Restart,
+        Reload,
     }
 
     // What: client of one Docker endpoint.
@@ -1022,6 +1023,7 @@ pub mod docker {
                 Action::Start => "start".to_string(),
                 Action::Stop => format!("stop?t={grace}"),
                 Action::Restart => format!("restart?t={grace}"),
+                Action::Reload => "kill?signal=HUP".to_string(),
             };
             self.call(
                 reqwest::Method::POST,
@@ -2641,5 +2643,71 @@ pub mod nginx_conf {
         ));
         out.push(("stream.d/01-https-dispatch.conf".into(), d));
         Ok(out)
+    }
+}
+
+// What: apply saved setting changes to the containers.
+// Why: each owner gets only the strongest needed action.
+// From: Issue #1683 | PR #1858
+pub mod apply {
+    use crate::config::{Change, Effect};
+    use crate::docker::{Action, Api, Error};
+    use std::collections::BTreeMap;
+    use std::time::Duration;
+
+    // What: strongest effect per owning container.
+    // Why: one restart covers a reload of the same owner.
+    // From: Issue #1683 | PR #1858
+    pub fn plan(changes: &[Change]) -> BTreeMap<String, Effect> {
+        let mut out: BTreeMap<String, Effect> = BTreeMap::new();
+        for c in changes {
+            let e = out.entry(c.owner.clone()).or_insert(c.effect);
+            *e = (*e).max(c.effect);
+        }
+        out
+    }
+
+    // What: result of one owner's action.
+    // Why: Recreate needs compose; the ui shows it.
+    // From: Issue #1683 | PR #1858
+    #[derive(Debug)]
+    pub enum Outcome {
+        Live,
+        Done(Action),
+        NeedsRecreate,
+        Failed(Error),
+    }
+
+    // What: run the plan: HUP, restart or report.
+    // Why: Live needs nothing; programs reread on their own.
+    // From: Issue #1683 | PR #1858
+    pub async fn run(
+        api: &Api,
+        plan: &BTreeMap<String, Effect>,
+        container_of: &dyn Fn(&str) -> String,
+        grace: u32,
+        limit: Duration,
+    ) -> Vec<(String, Outcome)> {
+        let mut out = Vec::new();
+        for (owner, effect) in plan {
+            let action = match effect {
+                Effect::Live => {
+                    out.push((owner.clone(), Outcome::Live));
+                    continue;
+                }
+                Effect::Recreate => {
+                    out.push((owner.clone(), Outcome::NeedsRecreate));
+                    continue;
+                }
+                Effect::Reload => Action::Reload,
+                Effect::Restart | Effect::Container => Action::Restart,
+            };
+            let res = api.act(&container_of(owner), action, grace, limit).await;
+            out.push((
+                owner.clone(),
+                res.map_or_else(Outcome::Failed, |()| Outcome::Done(action)),
+            ));
+        }
+        out
     }
 }
