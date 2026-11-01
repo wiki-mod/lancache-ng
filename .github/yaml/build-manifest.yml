@@ -650,6 +650,10 @@ runtime:
     - DOCKER_SOCKET=/var/run/docker.sock
     - NTP_STATE_DIR=/var/lib/chrony
     - NTP_DRIFT_FILE=@NTP_STATE_DIR@/drift
+    # What: chrony makestep: threshold and count.
+    # Why: steps a bad clock only at start.
+    # From: Issue #1683 | PR #1858
+    - NTP_MAKESTEP=1.0 3
     - NTP_ENABLED=0
     - AUTO_UPDATE_ENABLED=0
     - NTP_AUTO_DHCP=0
@@ -795,6 +799,10 @@ runtime:
     - PDNS_AUTH_ADDRESS=@LOOPBACK_BIND_IP@
     - PDNS_AXFR_FROM=
     - PDNS_DATABASE=@PDNS_DATA_DIR@/pdns.sqlite3
+    # What: PowerDNS backend module.
+    # Why: sqlite file in PDNS_DATABASE.
+    # From: Issue #1683 | PR #1858
+    - PDNS_LAUNCH=gsqlite3
     - PDNS_DEFAULT_SOA=ns1.@DHCP_DOMAIN@ hostmaster.@DHCP_DOMAIN@ 0 30 10 604800 300
     - PDNS_DNSUPDATE_FROM=@PRIVATE_NETS@
     - PDNS_LISTEN=0.0.0.0
@@ -964,6 +972,7 @@ runtime:
     - NGINX_TEMPLATE_DIR=path;;;reload;proxy
     - NTP_ALLOWED_CLIENT_CIDRS=list;;;restart;services
     - NTP_DRIFT_FILE=path;;;restart;services
+    - NTP_MAKESTEP=text;;;restart;services
     - NTP_ENABLED=bool;;;restart;services
     - NTP_PORT=uint;1;65535;container;services
     - NTP_PROBE_WAIT_MS=uint;100;60000;live;ui
@@ -977,6 +986,7 @@ runtime:
     - PDNS_AUTH_PORT=uint;1;65535;container;dns
     - PDNS_AXFR_FROM=list?;;;reload;dns
     - PDNS_DATABASE=path;;;restart;dns
+    - PDNS_LAUNCH=text;;;restart;dns
     - PDNS_DEFAULT_SOA=text;;;reload;dns
     - PDNS_DNSUPDATE_FROM=list?;;;reload;dns
     - PDNS_LISTEN=list;;;restart;dns
