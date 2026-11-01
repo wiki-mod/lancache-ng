@@ -166,7 +166,12 @@ impl Spec {
             "list" => Kind::List,
             "path" => Kind::Path,
             "secret" => Kind::Secret,
-            "choice" => Kind::Choice(min.split(',').map(str::to_string).collect()),
+            "choice" => Kind::Choice(
+                min.split([',', ' '])
+                    .filter(|w| !w.is_empty())
+                    .map(str::to_string)
+                    .collect(),
+            ),
             other => return Err(format!("{key}: unknown kind {other:?}")),
         };
         Ok(Self {
