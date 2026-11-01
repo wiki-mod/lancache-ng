@@ -621,7 +621,7 @@ pub mod pdns {
         }
 
         // What: create or replace one TSIG key by name.
-        // Why: rotation reuses the name; PUT fails if absent.
+        // Why: rotation keeps the name; PUT needs a key.
         // From: Issue #1683 | PR #1858
         pub async fn set_tsigkey(&self, name: &str, algorithm: &str, secret: &str) -> Result<(), String> {
             let body = json!({"name": name, "algorithm": algorithm, "key": secret});
@@ -635,7 +635,7 @@ pub mod pdns {
         }
 
         // What: set one metadata kind of a zone.
-        // Why: TSIG-ALLOW-AXFR and AXFR-MASTER-TSIG bind keys.
+        // Why: per-zone metadata binds the TSIG key.
         // From: Issue #1683 | PR #1858
         pub async fn set_metadata(&self, zone: &str, kind: &str, values: &[String]) -> Result<(), String> {
             let path = format!("/zones/{}/metadata/{kind}", zone_id(zone));
@@ -2039,7 +2039,7 @@ pub mod pdns_conf {
             ),
             ("allow-notify-from", notify_from),
             // What: AXFR by IP only for extra SOT hosts.
-            // Why: secondaries need the TSIG key (zone metadata).
+            // Why: secondaries need the TSIG key.
             // From: Issue #1683 | PR #1858
             ("allow-axfr-ips", s.list("PDNS_AXFR_FROM").join(",")),
             ("xfr-cycle-interval", s.uint("PDNS_XFR_CYCLE")?.to_string()),
