@@ -11,7 +11,7 @@
 <section>
   <p class="eyebrow">Gaming → Steam</p>
   <h1 class="page-title">Steam</h1>
-  <p class="page-sub">Proactive cache warming for game platforms such as Steam (prefill). It streams depot data through this box's own proxy and discards it locally; it never installs games here. Everything below is placeholder scaffolding, not a finished design.</p>
+  <p class="page-sub">Pre-caching for game platforms such as Steam. It streams depot data through this box's own proxy and discards it locally; it never installs games here. Everything below is placeholder scaffolding, not a finished design.</p>
 
   <div class="subtabs">
     <div class="subtab active" data-ch-tab="overview">Overview</div>
@@ -22,7 +22,7 @@
   </div>
 
   <div class="subtab5-panel active" data-ch-panel="overview">
-    <div class="section-title" style="margin-top:0;">Warm addresses</div>
+    <div class="section-title" style="margin-top:0;">Pre-cache addresses</div>
     <p class="section-sub">One http:// address per line. The proxy downloads each one and keeps it in the cache; nothing is stored here.</p>
     <form action="{{ routes.prefill | safe }}" method="post">
       {{ <csrf_field csrf_token={csrf_token}/> }}
@@ -30,7 +30,7 @@
         <label for="prefill-urls">Addresses</label>
         <textarea id="prefill-urls" name="urls" rows="5" placeholder="http://deb.debian.org/debian/pool/main/m/mesa/mesa_26.1.5.orig.tar.xz" required style="width:100%; padding:9px 11px; border-radius:8px; border:1px solid var(--navy-600); background:var(--navy-900); color:var(--foam); font-family:var(--font-mono); font-size:13px;"></textarea>
       </div>
-      <button type="submit" class="btn" {% if prefill_running %}disabled{% endif %}>Warm cache</button>
+      <button type="submit" class="btn" {% if prefill_running %}disabled{% endif %}>Start pre-caching</button>
     </form>
     {% if prefill_total > 0 %}
     <p class="status-line" style="margin-top:14px;">
