@@ -176,8 +176,10 @@ Identifiers mandated by an external format, protocol or program
 (for example Kea `option-data`, PowerDNS settings, nginx directives,
 Docker labels) keep their external spelling. They are not project-defined.
 The project-side name that wraps or refers to them MUST follow this
-document. The exception for other AG rules in [AG-CODE-014] does not
-cover external identifiers; only this section does.
+document. This section records the binding external specifications
+referred to in [AG-CODE-014]. A more specific AG rule that
+requires a name takes precedence; it MUST be referenced here
+and MUST NOT become a second, separately maintained convention.
 
 ### Case
 
