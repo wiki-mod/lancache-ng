@@ -1232,7 +1232,9 @@ pub mod log {
                     "destination d_fwd{i} {{ network(\"{}\" port({}) transport(\"{transport}\") \
                      disk-buffer(reliable(yes) dir(\"{buffer}\")) ); }};\n\
                      log {{ source({source}); destination(d_fwd{i}); }};\n",
-                    t.host, t.port
+                    t.host,
+                    t.port,
+                    source = source
                 )
             })
             .collect())
@@ -1864,7 +1866,7 @@ pub mod recursor_conf {
                 if i.contains(['"', '\\', '\n', '\r']) {
                     Err(format!("value {i:?} has quote or line break"))
                 } else {
-                    Ok(format!("{indent}- \"{i}\"\n"))
+                    Ok(format!("{indent}- \"{i}\"\n", indent = indent))
                 }
             })
             .collect()
@@ -3536,7 +3538,7 @@ pub mod tidy {
     // From: Issue #1683 | PR #1858
     pub fn mark(stamp: &Path, at: u64) -> Result<(), String> {
         let made = stamp.parent().map_or(Ok(()), std::fs::create_dir_all);
-        let wrote = made.and_then(|()| std::fs::write(stamp, format!("{at}\n")));
+        let wrote = made.and_then(|()| std::fs::write(stamp, format!("{at}\n", at = at)));
         wrote.map_err(|e| format!("{}: {e}", stamp.display()))
     }
 
