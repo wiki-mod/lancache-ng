@@ -2107,8 +2107,6 @@ async fn secure(State(app): Shared, req: Request, next: Next) -> Response {
 // What: entry: a command or the web server.
 // Why: one binary for ui, setup.sh, healthcheck.
 // From: Issue #1683 | PR #1858
-// What: runs a CLI command or serves the ui.
-// Why: one binary also serves healthcheck and render.
 #[tokio::main]
 async fn main() -> Result<(), String> {
     let args: Vec<String> = std::env::args().skip(1).collect();

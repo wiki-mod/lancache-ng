@@ -439,11 +439,9 @@ fn healthcheck() -> Result<(), String> {
     Ok(())
 }
 
-// What: endless rounds until SIGTERM.
+// What: healthcheck command, else the check loop.
 // Why: settings are reread; a bad round never exits.
 // From: Issue #1683 | PR #1858
-// What: healthcheck command or the check loop.
-// Why: Docker runs the same binary for healthcheck.
 #[tokio::main]
 async fn main() -> Result<(), String> {
     if std::env::args().nth(1).as_deref() == Some("healthcheck") {

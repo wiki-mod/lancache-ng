@@ -1406,8 +1406,6 @@ async fn command(c: Ctx, args: &[String]) -> Result<Value, String> {
 // What: entry point; no argument runs the daemon.
 // Why: one binary for the daemon and UI commands.
 // From: Issue #871 | PR #1858
-// What: runs a CLI command or the daemon.
-// Why: one binary for the daemon and single commands.
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
