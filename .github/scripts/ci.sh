@@ -96,7 +96,7 @@ declare -gA CI_CHECKS=(
     [stable-external-images]="repo _ci_check_stable_external_images" [compose-healthchecks]="repo _ci_check_compose_healthchecks"
     [proxy-cache-env-doc-drift]="repo _ci_check_proxy_cache_env_doc_drift" [prebuilt-prod]="repo _ci_check_prebuilt_prod"
     [prod-state-wiring]="repo _ci_check_prod_state_wiring" [compose-config]="repo _ci_check_compose_config"
-    [netdata-isolation]="repo _ci_check_netdata_isolation" [proxy-cert-volume]="repo _ci_check_proxy_cert_volume"
+    [proxy-cert-volume]="repo _ci_check_proxy_cert_volume"
     [proxy-nginx-policy]="repo _ci_check_proxy_nginx_policy"
     [setup-update-safety]="repo _ci_check_setup_update_safety" [image-channel-resolution]="repo _ci_check_image_channel_resolution"
     [vex-drift]="repo _ci_check_vex_drift" [logging-matrix]="repo _ci_check_logging_matrix"
@@ -11702,7 +11702,7 @@ _ci_validate_setup_rollback() {
 }
 
 # What: POST one LAN A record through the ui (303 on ok)
-# Why: drives the real UI->NATS->PowerDNS write path
+# Why: drives the real UI->PowerDNS API write path
 # From: Issue #1683 | PR #1858
 _ci_validate_ui_add_record() {
     local base="$1" jar="$2" csrf="$3" name="$4" content="$5" ttl route
@@ -11801,7 +11801,7 @@ _ci_validate_dig() {
 }
 
 # What: Poll one dns side until <fqdn> is <expected>.
-# Why: the NATS->PowerDNS write is async; prove it.
+# Why: AXFR to the second side is async; prove it.
 # From: Issue #1683 | PR #1912
 _ci_validate_dns_resolves() {
     local project="$1" side="$2" fqdn="$3" expected="$4" attempts="$5" ip port svc
@@ -11846,10 +11846,10 @@ _ci_validate_dns_match() {
     return 1
 }
 
-# What: UI->NATS->PowerDNS writes reach both dns sides.
-# Why: Real end-to-end NATS ingest, not a mock.
+# What: UI->PowerDNS writes reach both dns sides.
+# Why: real end-to-end write, not a mock.
 # From: Issue #1683 | PR #1912
-_ci_validate_ui_nats_dns() {
+_ci_validate_ui_dns() {
     local project="$1" jar csrf cid base zone label ip dns_wait side rc=0 svc
     svc="$(_ci_validation_service ui)" || return 2
     cid="$(_ci_validate_cid "${project}" "${svc}")" || return 2
@@ -12344,8 +12344,8 @@ _ci_validate_ui_token_file() {
     _ci_runtime_default SECONDARY_REGISTRATION_TOKEN_FILE
 }
 
-# What: Prove each secondary gets unique identity.
-# Why: per-secondary NATS auth-callout, not shared token.
+# What: each secondary gets the transfer key.
+# Why: AXFR needs TSIG name, secret and primary.
 # From: Issue #1683
 _ci_validate_secondary_identity() {
     local project="$1" base cid token a b au bu ap bp trc=0 tf label svc
@@ -12381,16 +12381,12 @@ _ci_validate_secondary_identity() {
         ci_log "[CI-ERROR-VALIDATE-0047]" "reason=\"a secondary register did not return 200\""
         return 1
     fi
-    au="$(_ci_capture 0 jq -r '.nats_user // empty' <<< "${a}")" || return 1
-    bu="$(_ci_capture 0 jq -r '.nats_user // empty' <<< "${b}")" || return 1
-    ap="$(_ci_capture 0 jq -r '.nats_password // empty' <<< "${a}")" || return 1
-    bp="$(_ci_capture 0 jq -r '.nats_password // empty' <<< "${b}")" || return 1
+    au="$(_ci_capture 0 jq -r '.tsig_name // empty' <<< "${a}")" || return 1
+    bu="$(_ci_capture 0 jq -r '.tsig_name // empty' <<< "${b}")" || return 1
+    ap="$(_ci_capture 0 jq -r '.tsig_secret // empty' <<< "${a}")" || return 1
+    bp="$(_ci_capture 0 jq -r '.primary // empty' <<< "${b}")" || return 1
     if [ -z "${au}" ] || [ -z "${bu}" ] || [ -z "${ap}" ] || [ -z "${bp}" ]; then
-        ci_log "[CI-ERROR-VALIDATE-0048]" "reason=\"register response missing nats_user/nats_password\""
-        return 1
-    fi
-    if [ "${au}" = "${bu}" ] || [ "${ap}" = "${bp}" ]; then
-        ci_log "[CI-ERROR-VALIDATE-0049]" "reason=\"two secondaries got the same NATS identity (per-secondary identity lost)\""
+        ci_log "[CI-ERROR-VALIDATE-0048]" "reason=\"register response missing tsig_name/tsig_secret/primary\""
         return 1
     fi
 }
@@ -12405,14 +12401,14 @@ _ci_validate_probes() {
     # Why: a green log must show which probes ran (§79)
     # From: Issue #1683 | PR #1858
     for p in dns proxy proxy_stream_map https_mitm https_dispatch_map \
-        ui_nats_dns dns_rollback kea_rollback secondary_identity; do
+        ui_dns dns_rollback kea_rollback secondary_identity; do
         case "${p}" in
             dns) _ci_validate_dns "${project}" ;;
             proxy) _ci_validate_proxy "${project}" ;;
             proxy_stream_map) _ci_validate_proxy_stream_map "${project}" ;;
             https_mitm) _ci_validate_https_mitm "${project}" ;;
             https_dispatch_map) _ci_validate_https_dispatch_map "${project}" ;;
-            ui_nats_dns) _ci_validate_ui_nats_dns "${project}" ;;
+            ui_dns) _ci_validate_ui_dns "${project}" ;;
             dns_rollback) _ci_validate_dns_rollback "${project}" ;;
             kea_rollback) _ci_validate_kea_rollback "${project}" "${net}" "${pin}" ;;
             secondary_identity) _ci_validate_secondary_identity "${project}" ;;
@@ -18535,36 +18531,6 @@ _ci_check_compose_config() {
         return 1
     fi
     printf 'compose-config=clean checks=%s\n' "${count}"
-}
-
-# What: no service publishes the netdata API port.
-# Why: only stack peers may reach it; the ui proxies it.
-# From: Issue #1683 | PR #1858
-_ci_check_netdata_isolation() {
-    local repo_root="${1:-${CI_REPO_ROOT}}" dep cfg out line nd_url
-    local -a viol=()
-    dep="$(_ci_compose_path "${repo_root}")" || return 2
-    nd_url="$(_ci_runtime_default NETDATA_URL)" || return 2
-    cfg="$(_ci_compose_json "${dep}")" || return 2
-    dep="${dep#"${repo_root}/"}"
-    out="$(_ci_capture 0 jq -r --arg url "${nd_url}" "$(cat <<'PROG'
-        if ($url | test(":[0-9]+$") | not)
-            then "ui NETDATA_URL has no port (got: \($url))"
-          else ($url | sub(".*:"; "") | tonumber) as $port
-            | .services | to_entries[]
-            | select(any(.value.ports[]?; .target == $port))
-            | "\(.key) publishes the netdata port \($port)"
-          end
-PROG
-          )" <<<"${cfg}")" || return 2
-    while IFS= read -r line; do
-        [ -z "${line}" ] || viol+=("${dep}: ${line}")
-    done <<<"${out}"
-    if [ "${#viol[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0146]" "reason=\"netdata API is published\"" "$(printf '%s\n' "${viol[@]}")"
-        return 1
-    fi
-    printf 'netdata-isolation=clean\n'
 }
 
 # What: health ACL order and ignored-header hiding.

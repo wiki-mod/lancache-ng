@@ -50,16 +50,16 @@ image_base:
 # Why: One list; matrices/scans/release derive from it.
 # From: Issue #1683
 services:
-  # What: one image for watchdog, syslog, NTP and netdata.
+  # What: one image for watchdog, syslog and NTP.
   # Why: the watchdog owns the services image.
   # From: Issue #1683
   services:
     context: services/watchdog
-    labels: [services, watchdog, syslog, ntp, netdata]
+    labels: [services, watchdog, syslog, ntp]
     # What: the image.description label ci.sh sets.
     # Why: the Dockerfile holds no label text (AG-CI-023).
     # From: Issue #1683 | PR #1912
-    description: "LanCache-NG services: supervisor for watchdog, retention, syslog-ng, chrony and Netdata."
+    description: "LanCache-NG services: supervisor for watchdog, retention, syslog-ng and chrony."
     build_type: rust
     # What: crates (cargo -p) the services image builds.
     # Why: supervisor and cachehamster run in one container.
@@ -68,13 +68,12 @@ services:
     # What: processes lancache-watchdog supervise runs.
     # Why: ci.sh bakes them as LANCACHE_PROCESSES; one list.
     # From: Issue #1683
-    processes: [watch, retention, syslog-ng, chronyd, netdata]
+    processes: [watch, retention, syslog-ng, chronyd]
     # What: accounts and dirs ci.sh image-setup creates.
     # Why: no RUN logic in the Dockerfile; @KEY@ = default.
     # From: Issue #1683 | PR #1912
     setup:
       - group=@LOG_READER_GROUP@:@GID@
-      - member=netdata:@LOG_READER_GROUP@
     final_base: alpine
     # What: final-image apk packages; the SOT owns the list.
     # Why: consumers derive; no hardcoding (AG-CI-006)
@@ -82,8 +81,6 @@ services:
     packages:
       - syslog-ng
       - chrony-nts
-      - netdata
-      - netdata-go-plugins
       - tzdata
     # What: execute-smoke checks run post-build by ci.sh.
     # Why: prove apk binaries run, not just exist
@@ -91,7 +88,6 @@ services:
     smoke:
       - syslog-ng
       - chronyd -v
-      - netdata -v
   proxy:
     context: services/proxy
     labels: [proxy, nginx]
@@ -127,14 +123,14 @@ services:
       - 'v="$(nginx -V 2>&1)" && grep -q -- --with-stream_ssl_preread_module <<< "${v}"'
   dns:
     context: services/dns
-    labels: [dns, pdns, nats]
-    description: "LanCache-NG dns: PowerDNS auth, dns-http and dns-https recursors, NATS server and subscriber."
+    labels: [dns, pdns]
+    description: "LanCache-NG dns: PowerDNS auth, dns-http and dns-https recursors."
     build_type: rust
     # What: crates the dns image builds.
     # Why: subscriber and supervisor run in one container.
     # From: Issue #1683
-    crates: [nats-subscriber, lancache-watchdog]
-    processes: [pdns, dns-http, dns-https, nats-server, nats-subscriber, soa]
+    crates: [lancache-watchdog]
+    processes: [pdns, dns-http, dns-https, soa]
     setup:
       - dir=@PDNS_CONF_DIR@/auth
       - dir=@PDNS_DATA_DIR@:pdns
@@ -145,12 +141,10 @@ services:
       - pdns-backend-sqlite3
       - pdns-doc
       - pdns-recursor-luajit
-      - nats-server
       - bind-tools
       - sqlite
       - iproute2
     smoke:
-      - nats-server
   dhcp:
     context: services/dhcp
     labels: [dhcp, kea, dnsmasq]
@@ -441,14 +435,7 @@ runtime:
     # From: Issue #1683 | PR #1912
     - DHCP_PROBE_WAIT_TIMEOUT=30
     - PDNS_SOA_COLD_RETRY=5
-    - NATS_RECONNECT_DELAY=3
-    - NATS_NAK_DELAY_MS=100
     - DNS_CONFIRM_PAUSE_MS=100
-    - NATS_FETCH_WAIT=5
-    # What: messages per NATS fetch of the DNS subscriber.
-    # Why: caps a batch; NATS_FETCH_WAIT ends idle fetch.
-    # From: Issue #1683 | PR #1912
-    - NATS_FETCH_BATCH=10
     # What: in-process zone confirmation tries before a Nak.
     # Why: a longer sleep holds the message past ack_wait.
     # From: Issue #1095
@@ -460,7 +447,6 @@ runtime:
     - DNS_SYNC_TICK=60
     - PDNS_ZONE_CHECK_TIMEOUT=10
     - DNS_FLUSH_TIMEOUT=3
-    - NATS_DNS_STREAM_MAX_AGE=604800
     - SYSLOG_TIME_REAP=30
     - HTTP_CLIENT_TIMEOUT=10
     - HTTP_POOL_IDLE_TIMEOUT=90
@@ -497,10 +483,6 @@ runtime:
     - KEA_CONFIG_SNAPSHOT_DIR=@KEA_DATA_DIR@/config-snapshots
     - KEA_CONFIG_SNAPSHOT_FILE=dhcp4.json
     - KEEP_KNOWN_GOOD_CONFIGS=3
-    - NATS_UI_USER=lancache-ui
-    - NATS_DNS_WRITER_USER=lancache-dns-writer
-    - NATS_CALLOUT_USER=lancache-nats-callout
-    - NATS_SYS_USER=lancache-nats-sys
     - LANCACHE_LOG_PORT=5514
     - LOGGING_PROXY_ENABLED=1
     - LOGGING_DNS_ENABLED=1
@@ -526,34 +508,19 @@ runtime:
     - DHCP_PROBE_RESULT_FILE=@KEA_DATA_DIR@/dhcp-probe-result.json
     - UI_SESSION_SECRET_FILE=@UI_DATA_DIR@/lancache-ui-session.secret
     - SECONDARY_REGISTRATION_TOKEN_FILE=@UI_DATA_DIR@/lancache-secondary-registration.token
-    - NETDATA_ALARMS_FILE=@UI_DATA_DIR@/netdata-alarms.json
-    - NATS_ISSUER_SEED_PATH=@UI_DATA_DIR@/lancache-nats-issuer.seed
-    - NATS_XKEY_SEED_PATH=@UI_DATA_DIR@/lancache-nats-xkey.seed
     - UI_DATABASE_FILE=@UI_DATA_DIR@/lancache-ui.db
     - UI_LOG_FILE=/var/log/lancache-ui/ui.log
     - UI_LISTEN_PORT=8080
     - UI_LOGS_MAX_ENTRIES=200
     - UI_SESSION_TTL_SECONDS=86400
-    # What: lifetime of a secondary user JWT, seconds.
-    # Why: revoked via per-connect DB check, not expiry.
-    # From: Issue #1683 | PR #1858
-    - NATS_USER_JWT_TTL_SECONDS=7776000
     # What: wait for one secondary SOA answer, seconds.
     # Why: a silent secondary is a status, not a hang.
     # From: Issue #1683 | PR #1912
     - SECONDARY_PROBE_TIMEOUT=4
-    # What: wait per NATS system request on a kick.
-    # Why: a dead system connection must not hang a removal.
-    # From: Issue #681
-    - NATS_KICK_STEP_TIMEOUT=5
     # What: stored alarm history cap of the ui, newest kept.
     # Why: an alarm burst must not grow the file unbounded.
     # From: Issue #1683 | PR #1858
     - UI_ALARMS_MAX=50
-    # What: cap of the buffered netdata chart answer, bytes.
-    # Why: a wide chart range must not exhaust memory.
-    # From: Issue #1683 | PR #1858
-    - UI_NETDATA_BODY_MAX=16777216
     # What: URL paths of ui routes setup.sh and ci.sh call.
     # Why: shell reads the path here; no literal copy.
     # From: Issue #1683 | PR #1912
@@ -661,16 +628,6 @@ runtime:
     - PROXY_CONFIG_SNAPSHOT_FILE=nginx.json
     - DNS_STATE_DIR=/var/lib/powerdns-state
     - PDNS_DATA_DIR=/var/lib/powerdns
-    - NATS_CONF_MOUNT=/etc/nats
-    - NATS_CONF_PATH=@NATS_CONF_MOUNT@/nats.conf
-    - NATS_AUTH_CALLOUT_PATH=@NATS_CONF_MOUNT@/auth_callout.conf
-    - NATS_STORE_DIR=/var/lib/nats
-    - NATS_PORT=4222
-    - NATS_MONITOR_PORT=8222
-    - NATS_URL=nats://dns:@NATS_PORT@
-    - NATS_CONSUMER=dns
-    - NATS_RECONCILER=1
-    - NATS_PASSWORD_SHARED_SECRET=nats-dns-writer-password
     - DNS_REPLICATION_ROLE=primary
     - RAW_CONTENT_URL=https://raw.githubusercontent.com
     - SETUP_SCRIPT_PATH=wiki-mod/lancache-ng/master/setup.sh
@@ -689,13 +646,6 @@ runtime:
     - CACHE_DIR=/var/cache/lancache
     - CACHE_DIR_ALLOWED_PREFIX=/var/cache
     - DOCKER_SOCKET=/var/run/docker.sock
-    - NETDATA_CONFIG_DIR=/etc/netdata
-    - NETDATA_LIB_DIR=/var/lib/netdata
-    - NETDATA_CACHE_DIR=/var/cache/netdata
-    - NETDATA_URL=http://services:19999
-    - NETDATA_ALARM_UI_URL=http://ui:@UI_LISTEN_PORT@
-    - NETDATA_ALARM_MAX_TIME=15
-    - NETDATA_ALARM_RECIPIENT=lancache-ui
     - NTP_STATE_DIR=/var/lib/chrony
     - NTP_DRIFT_FILE=@NTP_STATE_DIR@/drift
     - NTP_ENABLED=0
@@ -787,8 +737,6 @@ runtime:
     - STATE_SUBDIR_CACHEHAMSTER=cachehamster
     - STATE_SUBDIR_PDNS=pdns
     - STATE_SUBDIR_PDNS_FILTER=pdns-filter-state
-    - STATE_SUBDIR_NATS=nats
-    - STATE_SUBDIR_NATS_CONF=nats-conf
     - STATE_SUBDIR_KEA=kea
     - STATE_SUBDIR_CACHE=cache
     - STATE_SUBDIR_CA=ca
@@ -1109,21 +1057,15 @@ runtime:
   # What: defaults compose interpolates as SOT_<KEY>.
   # Why: setup.sh and ci.sh export them; no clash with .env.
   # From: Issue #1683 | PR #1912
-  compose_keys: LANCACHE_LOG_PORT SUPERVISE_RUN_DIR LANCACHE_SHARED_SECRET_DIR UI_DATA_DIR STATUS_DIR CACHE_DIR SYSLOG_LOG_ROOT RETENTION_STATE_DIR NTP_STATE_DIR CACHEHAMSTER_DATA_DIR NETDATA_CONFIG_DIR NETDATA_LIB_DIR NETDATA_CACHE_DIR DOCKER_SOCKET CDN_DOMAINS_FILE PDNS_DATA_DIR DNS_STATE_DIR NATS_STORE_DIR NATS_CONF_MOUNT DNS_SNAPSHOT_MOUNT DHCP_SNAPSHOT_MOUNT PROXY_SNAPSHOT_MOUNT KEA_DATA_DIR NATS_PORT UI_LISTEN_PORT DNS_PORT DNS_HTTPS_PORT PDNS_AUTH_PORT NTP_PORT PROXY_HTTP_PORT PROXY_HTTPS_PORT NGINX_PASSTHROUGH_PORT NGINX_DIR NGINX_SUBDIR_CA NGINX_SUBDIR_CERTS NGINX_CACHE_DIR NGINX_PSL_FILE PDNS_LUA_DNS_SCRIPT TEMPLATE_DIR STATIC_DIR LOOPBACK_BIND_IP DHCP_API_HOST DNS_REPLICATION_ROLE_SECONDARY SECONDARY_RUNTIME_GID SECONDARY_SHARED_SECRET_DIR CONTAINER_NAME_SERVICES CONTAINER_NAME_PROXY CONTAINER_NAME_DNS CONTAINER_NAME_DHCP CONTAINER_NAME_UI HEALTHCHECK_INTERVAL HEALTHCHECK_TIMEOUT HEALTHCHECK_RETRIES HEALTHCHECK_START_PERIOD
+  compose_keys: LANCACHE_LOG_PORT SUPERVISE_RUN_DIR LANCACHE_SHARED_SECRET_DIR UI_DATA_DIR STATUS_DIR CACHE_DIR SYSLOG_LOG_ROOT RETENTION_STATE_DIR NTP_STATE_DIR CACHEHAMSTER_DATA_DIR DOCKER_SOCKET CDN_DOMAINS_FILE PDNS_DATA_DIR DNS_STATE_DIR DNS_SNAPSHOT_MOUNT DHCP_SNAPSHOT_MOUNT PROXY_SNAPSHOT_MOUNT KEA_DATA_DIR UI_LISTEN_PORT DNS_PORT DNS_HTTPS_PORT PDNS_AUTH_PORT NTP_PORT PROXY_HTTP_PORT PROXY_HTTPS_PORT NGINX_PASSTHROUGH_PORT NGINX_DIR NGINX_SUBDIR_CA NGINX_SUBDIR_CERTS NGINX_CACHE_DIR NGINX_PSL_FILE PDNS_LUA_DNS_SCRIPT TEMPLATE_DIR STATIC_DIR LOOPBACK_BIND_IP DHCP_API_HOST DNS_REPLICATION_ROLE_SECONDARY SECONDARY_RUNTIME_GID SECONDARY_SHARED_SECRET_DIR CONTAINER_NAME_SERVICES CONTAINER_NAME_PROXY CONTAINER_NAME_DNS CONTAINER_NAME_DHCP CONTAINER_NAME_UI HEALTHCHECK_INTERVAL HEALTHCHECK_TIMEOUT HEALTHCHECK_RETRIES HEALTHCHECK_START_PERIOD
   # What: managed secrets as "KEY generator owner".
   # Why: setup.sh and ci.sh filter one list.
   # From: Issue #1683 | PR #1912
   managed_secrets:
     - KEA_CTRL_TOKEN hex32 stack
-    - NATS_CALLOUT_PASSWORD hex32 stack
-    - NATS_DNS_WRITER_PASSWORD hex32 stack
-    - NATS_SYS_PASSWORD hex32 stack
-    - NATS_UI_PASSWORD hex32 stack
-    - NETDATA_ALARM_TOKEN hex32 stack
     - PDNS_API_KEY hex32 stack
     - SECONDARY_REGISTRATION_TOKEN hex32 stack
     - DDNS_TSIG_KEY base64_32 stack
-    - NATS_PASSWORD hex32 secondary
     - UI_AUTH_PASSWORD alnum20 ui
     - UI_AUTH_PASSWORD_HASH argon2id ui
   # What: "kind command" that makes one secret kind.
@@ -1152,8 +1094,6 @@ runtime:
   quickstart_volume_keys:
     - pdns-data-standard PDNS_DIR
     - pdns-filter-state PDNS_FILTER_STATE_DIR
-    - nats-data NATS_DATA_DIR
-    - nats-conf NATS_CONF_DIR
     - logs-syslog-ng SYSLOG_NG_LOG_DIR
   # What: v0.3.2 quickstart volumes left as they are.
   # Why: logs, snapshots, HTTPS DNS db; prod has no home.
@@ -1162,8 +1102,6 @@ runtime:
     - logs
     - dns-logs-standard
     - dns-logs-ssl
-    - nats-logs
-    - netdata-logs
     - proxy-logs
     - syslog-data
     - ui-logs
@@ -1181,8 +1119,6 @@ runtime:
     - CA_DIR STATE_SUBDIR_CA
     - PDNS_DIR STATE_SUBDIR_PDNS
     - PDNS_FILTER_STATE_DIR STATE_SUBDIR_PDNS_FILTER
-    - NATS_DATA_DIR STATE_SUBDIR_NATS
-    - NATS_CONF_DIR STATE_SUBDIR_NATS_CONF
     - KEA_DATA_DIR STATE_SUBDIR_KEA
     - CACHE_DIR STATE_SUBDIR_CACHE
   # What: archive compressors, best first: ext command args.
@@ -1297,7 +1233,6 @@ ci_check_inputs:
     - "@{ci_variables.CI_WORKFLOW_DIR}/*.yml"
     - "**/Dockerfile"
   naming-consistency: ["deploy/**"]
-  netdata-isolation: ["deploy/**"]
   prebuilt-prod:
     - "deploy/**"
     - "@{ci_variables.CI_README}"
@@ -2229,10 +2164,6 @@ validation:
     - LISTEN_IP_HTTPS=@LOOPBACK_BIND_IP@
     - DNS_HTTPS_HOST_PORT=
     - ALLOW_INSECURE_UI=true
-    - NATS_CONSUMER=ci-secondary
-    - NATS_USER=ci-nats-user
-    - NATS_ADVERTISE_URL=nats://@{validation.peer_ip}:@NATS_PORT@
-    - NATS_URL=nats://@LOOPBACK_BIND_IP@:@NATS_PORT@
     - NGINX_UPSTREAM_RESOLVER
     - CACHE_MAX_SIZE
     - CACHE_MEM_MB
@@ -2241,4 +2172,4 @@ validation:
   # What: required keys setup.sh repairs
   # Why: empty required key breaks the stack
   # From: Issue #1683 | PR #1858
-  setup_required_repairs: DDNS_TSIG_KEY KEA_CTRL_TOKEN LANCACHE_IMAGE_CHANNEL LANCACHE_IMAGE_PREFIX LANCACHE_IMAGE_REGISTRY LANCACHE_IMAGE_TAG NATS_DNS_WRITER_PASSWORD NATS_CALLOUT_PASSWORD NATS_SYS_PASSWORD NATS_UI_PASSWORD PDNS_API_KEY SECONDARY_REGISTRATION_TOKEN
+  setup_required_repairs: DDNS_TSIG_KEY KEA_CTRL_TOKEN LANCACHE_IMAGE_CHANNEL LANCACHE_IMAGE_PREFIX LANCACHE_IMAGE_REGISTRY LANCACHE_IMAGE_TAG PDNS_API_KEY SECONDARY_REGISTRATION_TOKEN
