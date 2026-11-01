@@ -321,7 +321,7 @@ services:
       # What: nginx templates and PSL from the checkout.
       # Why: the ui renders them; no image rebuild.
       # From: Issue #1683 | PR #1980
-      - ../../services/proxy:${SOT_NGINX_TEMPLATE_DIR}:ro
+      - ../../services/ui/nginx:${SOT_NGINX_TEMPLATE_DIR}:ro
       - *mount-secrets
       - ui-data:${SOT_UI_DATA_DIR}
       - *mount-cdn-domains

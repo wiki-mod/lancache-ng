@@ -105,7 +105,7 @@ investigation since all three had live CI containers running at inspection
 time). Verification recipe for whoever runs this test:
 
 nginx writes its access log to stdout (`access_log /dev/stdout` in
-`services/proxy/nginx.conf`); Docker's `syslog` driver hands it to syslog-ng
+`services/ui/nginx/nginx.conf`); Docker's `syslog` driver hands it to syslog-ng
 in `services`, which stores it under `SYSLOG_NG_LOG_DIR` in the directory
 named after the proxy container (logging switch `LOGGING_PROXY_ENABLED` on).
 
@@ -235,12 +235,12 @@ as "needs testing in the abstract":
   `--with-http_ssl_module`, `--with-stream_ssl_module` -- nginx has
   supported `ssl_conf_command Options KTLS;` since 1.21.4, well before this
   version.
-- **`sendfile`**: `services/proxy/nginx.conf` has `sendfile on;` -- kTLS
+- **`sendfile`**: `services/ui/nginx/nginx.conf` has `sendfile on;` -- kTLS
   only changes anything on the sendfile path (it lets the kernel handle
   TLS record framing for data served via `sendfile()`, avoiding a
   userspace copy/encrypt step for every cached-file response), so this
   project's actual configuration is exactly the shape that would benefit.
-- **Not currently enabled**: `services/proxy/conf.d/https.conf` has no
+- **Not currently enabled**: `services/ui/nginx/conf.d/https.conf` has no
   `ssl_conf_command Options KTLS;` directive today.
 
 All four preconditions are met; the only missing piece is the one-line
@@ -253,7 +253,7 @@ distinct, dedicated follow-up rather than bundled into this docs-only
 pass):
 
 ```sh
-# Add to services/proxy/conf.d/https.conf, inside the https server block:
+# Add to services/ui/nginx/conf.d/https.conf, inside the https server block:
 ssl_conf_command Options KTLS;
 
 # After deploying, verify it actually engaged (directive presence alone is not proof):

@@ -34,8 +34,8 @@ the top is a signal that its threats need re-checking.
 | Component | Primary source of truth | Last verified | Threats |
 |---|---|---|---|
 | DNS spoofing (PowerDNS RPZ) | `services/watchdog/src/main.rs` (`pdns_auth`, `rpz_zone`), `services/dns/cdn-domains.txt` | v0.2.0 | T1, T4, T11 |
-| TLS interception + local CA | `services/watchdog/src/main.rs` (`nginx`), `services/proxy/conf.d/https.conf` | v0.2.0 | T7, T8, T10 |
-| Proxy request policy (client CIDR + host allowlists) | `services/watchdog/src/main.rs` (`nginx`), `services/proxy/conf.d/http.conf` | v0.2.0 | T2, T9 |
+| TLS interception + local CA | `services/watchdog/src/main.rs` (`nginx`), `services/ui/nginx/conf.d/https.conf` | v0.2.0 | T7, T8, T10 |
+| Proxy request policy (client CIDR + host allowlists) | `services/watchdog/src/main.rs` (`nginx`), `services/ui/nginx/conf.d/http.conf` | v0.2.0 | T2, T9 |
 | Admin UI authentication | `services/ui/src/main.rs` | v0.2.0 | T3 |
 | Docker access (socket in the `services` container, watchdog client) | `deploy/prod/docker-compose.yml`, `services/common/shared.rs` (`DockerApi`) | `current_dev` (Issue #1683) | T6 |
 | DHCP — Kea mode | `services/watchdog/src/main.rs` (`kea_dhcp4`, `kea_ctrl_fence`, `kea_dhcp_ddns`), `docs/dhcp-modes.md` | v0.2.0 | T12 |
@@ -656,7 +656,7 @@ tagging each release, then update the top marker and the
    - `services/watchdog/src/main.rs` (every config render: `pdns_auth`,
      `rpz_zone`, `nginx`, `kea_dhcp4`, `kea_ctrl_fence`, `kea_dhcp_ddns`,
      `dnsmasq_conf`), `services/dns/cdn-domains.txt`,
-     `services/proxy/conf.d/*.conf`
+     `services/ui/nginx/conf.d/*.conf`
    - `services/ui/src/main.rs`
      (`preflight`, `ALLOW_INSECURE_UI`, startup guards)
    - `docs/dhcp-modes.md`

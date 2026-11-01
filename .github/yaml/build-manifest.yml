@@ -2182,7 +2182,7 @@ file_headers:
     - LICENSE
     - Cargo.lock
     - services/ui/src/static/admin.css
-    - services/proxy/public_suffix_list.dat
+    - services/ui/nginx/public_suffix_list.dat
 
 # What: CI variables each build type passes as build-args.
 # Why: builders read repo/org vars; no YAML or literal copy.
