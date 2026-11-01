@@ -16805,7 +16805,7 @@ _ci_generate_vex() {
                | $p + {status: "affected",
                    action_statement: $s})
             else error("\($e.id): status \($e.status) is not supported (not_affected or none)") end;
-        [inputs | split("\t") | {n: (.[0] | tonumber), k: .[1], v: (.[2:] | join("\t") | gsub("\u001e"; "\n"))}]
+        [inputs | select(. != "") | split("\t") | {n: (.[0] | tonumber), k: .[1], v: (.[2:] | join("\t") | gsub("\u001e"; "\n"))}]
         | group_by(.n)
         | map(reduce .[] as $f ({paths: []};
             if $f.k == "path" then .paths += [$f.v] else .[$f.k] = $f.v end))
