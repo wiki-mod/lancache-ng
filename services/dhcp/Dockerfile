@@ -51,7 +51,7 @@ ENV LANCACHE_RUNTIME_GID=${LANCACHE_RUNTIME_GID} \
     LANCACHE_RUNTIME_SCHEMA=${LANCACHE_RUNTIME_SCHEMA}
 
 # What: one supervise-daemon script per SOT process.
-# Why: rows level:name=cmd,arg; OpenRC restarts crashes.
+# Why: OpenRC restarts crashes; @KEY@ e.g. CONFIG_DIR.
 # From: Issue #1683 | PR #1980
 ARG LANCACHE_PROCESSES
 RUN set -e; \
@@ -79,7 +79,23 @@ RUN set -e; \
       rc-update add "${name}" "${level}"; \
     done
 
-# What: OpenRC as PID 1; compose may name a runlevel.
-# Why: openrc-init reaps zombies and stops on SIGTERM.
+# What: start script: runlevel from DHCP_MODE_FILE.
+# Why: the ui writes the mode; SOT DHCP_MODE if none.
 # From: Issue #1683 | PR #1980
-ENTRYPOINT ["/sbin/openrc-init"]
+RUN set -e; \
+    declare -A v; IFS='|' read -ra kv <<< "${LANCACHE_RUNTIME_DEFAULTS}"; \
+    for p in "${kv[@]}"; do v["${p%%=*}"]="${p#*=}"; done; \
+    f="${v[DHCP_MODE_FILE]}"; \
+    while [[ "${f}" =~ @([A-Z0-9_]+)@ ]]; do \
+      k="${BASH_REMATCH[1]}"; f="${f//@${k}@/${v[${k}]}}"; \
+    done; \
+    printf '%s\n' '#!/bin/bash' \
+      "mode=\"\$(cat '${f}' 2>/dev/null || true)\"" \
+      "exec /sbin/openrc-init \"\${mode:-${v[DHCP_MODE]}}\"" \
+      > /usr/local/sbin/lancache-init; \
+    chmod 0755 /usr/local/sbin/lancache-init
+
+# What: the start script runs openrc-init as PID 1.
+# Why: exec keeps zombie reaping and SIGTERM stop.
+# From: Issue #1683 | PR #1980
+ENTRYPOINT ["/usr/local/sbin/lancache-init"]

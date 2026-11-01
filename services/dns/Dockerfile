@@ -51,7 +51,7 @@ ENV LANCACHE_RUNTIME_GID=${LANCACHE_RUNTIME_GID} \
     LANCACHE_RUNTIME_SCHEMA=${LANCACHE_RUNTIME_SCHEMA}
 
 # What: one supervise-daemon script per SOT process.
-# Why: rows level:name=cmd,arg; OpenRC restarts crashes.
+# Why: OpenRC restarts crashes; @KEY@ e.g. CONFIG_DIR.
 # From: Issue #1683 | PR #1980
 ARG LANCACHE_PROCESSES
 RUN set -e; \

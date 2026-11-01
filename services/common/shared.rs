@@ -2741,6 +2741,11 @@ pub mod render {
 
     fn dhcp_files(o: &mut Out, sec: &Secrets) {
         let s = o.s;
+        // What: the mode file names the dhcp runlevel.
+        // Why: the dhcp entry reads it at every start.
+        // From: Issue #1683 | PR #1980
+        let mode = s.text("DHCP_MODE").map(|m| format!("{m}\n"));
+        o.put("dhcp", "DHCP_MODE_FILE", mode);
         match dhcp::Mode::from_settings(s) {
             Ok(dhcp::Mode::Off) => {}
             Ok(dhcp::Mode::Kea) => {

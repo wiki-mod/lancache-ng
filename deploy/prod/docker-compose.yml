@@ -242,10 +242,6 @@ services:
   # From: Issue #1683
   dhcp:
     <<: *service
-    # What: DHCP_MODE names the OpenRC runlevel.
-    # Why: each mode starts only its own programs.
-    # From: Issue #1683 | PR #1980
-    command: ["${DHCP_MODE:-${SOT_DHCP_MODE}}"]
     # What: a stop by the UI survives a Docker restart.
     # Why: DHCP_MODE off keeps the container stopped.
     # From: Issue #1683 | PR #1858
