@@ -301,6 +301,32 @@ async fn proxy_log(s: &Settings) -> Result<(Value, Vec<Value>), String> {
     Ok((totals, rows))
 }
 
+// What: active, requests, waiting from stub_status.
+// Why: live counters next to the log figures.
+// From: Issue #1683 | PR #1858
+async fn fetch_proxy_live(s: &Settings) -> Option<serde_json::Value> {
+    let url = s.text("PROXY_STATUS_URL").ok()?;
+    let resp = http::client(s).ok()?.get(&url).send().await.ok()?;
+    let body = resp.error_for_status().ok()?.text().await.ok()?;
+    parse_stub_status(&body)
+}
+
+// What: read the stub_status text into numbers.
+// Why: nginx gives plain text, the page needs fields.
+// From: nginx ngx_http_stub_status_module
+fn parse_stub_status(body: &str) -> Option<serde_json::Value> {
+    let nums: Vec<u64> = body
+        .split_whitespace()
+        .filter_map(|w| w.parse().ok())
+        .collect();
+    let [active, _, _, requests, _, _, waiting] = nums.as_slice() else {
+        return None;
+    };
+    Some(serde_json::json!({
+        "active": active, "requests": requests, "waiting": waiting
+    }))
+}
+
 // What: dashboard: alarms, containers, cache.
 // Why: first page; shows what needs a look.
 // From: Issue #1683 | PR #1858
@@ -319,6 +345,9 @@ async fn dashboard(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page
     let (totals, recent) = proxy_log(&s).await?;
     ctx.insert("log_stats", &totals);
     ctx.insert("recent_logs", &recent);
+    if let Some(live) = fetch_proxy_live(&s).await {
+        ctx.insert("proxy_live", &live);
+    }
     if let Ok(sp) = fs::space(Path::new(&s.text("NGINX_CACHE_DIR")?)) {
         let used = sp.total.saturating_sub(sp.free);
         ctx.insert("cache_used_human", &human::bytes(used));

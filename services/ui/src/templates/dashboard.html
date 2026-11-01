@@ -37,6 +37,16 @@
       <div class="stat-label">Caching mode</div>
       <div class="stat-num" style="font-size:20px;">{% if v.HTTPS_ENABLED == "true" %}HTTP + HTTPS{% else %}HTTP{% endif %}</div>
     </div>
+  {% if proxy_live %}
+    <div class="stat-card">
+      <div class="stat-label">Open connections</div>
+      <div class="stat-num">{{ proxy_live.active }}</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Waiting clients</div>
+      <div class="stat-num">{{ proxy_live.waiting }}</div>
+    </div>
+  {% endif %}
   </div>
 
   <!-- What: cache figures from one shared CACHE_DIR
