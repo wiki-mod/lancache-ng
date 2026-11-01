@@ -576,6 +576,10 @@ runtime:
     # Why: private PTR answers are opt-in.
     # From: Issue #1918 | PR #1858
     - DNS_LOCAL_REVERSE_ZONES=0
+    # What: private reverse zones the stack serves.
+    # Why: RFC 1918 and ULA ranges; no list in code.
+    # From: Issue #1683 | PR #1858
+    - DNS_PRIVATE_REVERSE_ZONES=10.in-addr.arpa. 168.192.in-addr.arpa. 16.172.in-addr.arpa. 17.172.in-addr.arpa. 18.172.in-addr.arpa. 19.172.in-addr.arpa. 20.172.in-addr.arpa. 21.172.in-addr.arpa. 22.172.in-addr.arpa. 23.172.in-addr.arpa. 24.172.in-addr.arpa. 25.172.in-addr.arpa. 26.172.in-addr.arpa. 27.172.in-addr.arpa. 28.172.in-addr.arpa. 29.172.in-addr.arpa. 30.172.in-addr.arpa. 31.172.in-addr.arpa. c.f.ip6.arpa. d.f.ip6.arpa.
     # What: the project address the ui links to.
     # Why: setup.sh bootstrap copy; ci.sh checks both.
     # From: Issue #1683 | PR #1912
@@ -904,6 +908,7 @@ runtime:
     - DNS_LAN_RECORD_TYPES=list;;;live;ui
     - DNS_LAN_ZONE=text;;;reload;dns
     - DNS_LOCAL_REVERSE_ZONES=bool;;;reload;dns
+    - DNS_PRIVATE_REVERSE_ZONES=list;;;reload;dns
     - DNS_QUERY_ALLOW_FROM=list;;;reload;dns
     - DNS_RECORD_TTL=uint;1;86400;live;ui
     - DNS_RECORD_TTL_MAX=uint;1;604800;live;ui
