@@ -18,7 +18,6 @@ name = "lancache_ng"
 path = "shared.rs"
 
 [dependencies]
-anyhow = { workspace = true }
 hex = { workspace = true }
 # What: ChaCha20-Poly1305 for sealed login tokens.
 # Why: one cipher owner; cachehamster used it already.
