@@ -1454,3 +1454,226 @@ pub mod cert {
         Ok(out.status.success())
     }
 }
+
+// What: status every container publishes for ui/watchdog.
+// Why: one schema; the watchdog reads, never guesses.
+// From: Issue #1683 | PR #1858
+pub mod state {
+    use crate::fs::{self, Owner};
+    use crate::proc::Status;
+    use std::path::Path;
+
+    // What: status of one container and its programs.
+    // Why: revision shows which config is live.
+    // From: Issue #1683 | PR #1858
+    #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+    pub struct Container {
+        pub name: String,
+        pub written: u64,
+        pub revision: String,
+        pub programs: Vec<Status>,
+    }
+
+    // What: write the status file atomically.
+    // Why: readers must never see half a file.
+    // From: Issue #1683 | PR #1858
+    pub fn publish(path: &Path, c: &Container, owner: Owner) -> Result<(), String> {
+        let body = serde_json::to_vec_pretty(c).map_err(|e| e.to_string())?;
+        fs::write(path, &body, 0o644, fs::Place::Replace, owner)
+            .map_err(|e| format!("{}: {e}", path.display()))
+    }
+
+    // What: read a status file; age decides staleness.
+    // Why: an old file means a hung or dead container.
+    // From: Issue #1683 | PR #1858
+    pub fn read(path: &Path) -> Result<Container, String> {
+        let text = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        serde_json::from_slice(&text).map_err(|e| format!("{}: {e}", path.display()))
+    }
+}
+
+// What: syslog-ng config from settings, incl. forwarding.
+// Why: the ui setting drives destinations; one owner.
+// From: Issue #1683 | PR #1858
+pub mod log {
+    use crate::config::Settings;
+
+    // What: one forward target host:port over TCP.
+    // Why: TCP with disk buffer; nothing is lost silently.
+    // From: Issue #1683 | PR #1858
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct Target {
+        pub host: String,
+        pub port: u16,
+    }
+
+    // What: forward targets from SYSLOG_FORWARD (list).
+    // Why: a secondary always adds its primary (DoMe).
+    // From: Issue #1683 | PR #1858
+    pub fn targets(s: &Settings) -> Result<Vec<Target>, String> {
+        let mut list = s.list("SYSLOG_FORWARD");
+        if let Ok(primary) = s.text("SYSLOG_PRIMARY") {
+            list.insert(0, primary);
+        }
+        list.iter()
+            .map(|t| {
+                let (host, port) = t
+                    .rsplit_once(':')
+                    .ok_or_else(|| format!("syslog target {t:?} needs host:port"))?;
+                let port = port
+                    .parse::<u16>()
+                    .ok()
+                    .filter(|p| *p > 0)
+                    .ok_or_else(|| format!("syslog target {t:?}: bad port"))?;
+                Ok(Target { host: host.to_string(), port })
+            })
+            .collect()
+    }
+
+    // What: syslog-ng destination and log blocks.
+    // Why: appended to the base config the services write.
+    // From: Issue #1683 | PR #1858
+    pub fn forward_block(targets: &[Target], source: &str, buffer_dir: &str) -> String {
+        let mut out = String::new();
+        for (i, t) in targets.iter().enumerate() {
+            out.push_str(&format!(
+                "destination d_fwd{i} {{ network(\"{}\" port({}) transport(\"tcp\") \
+                 disk-buffer(reliable(yes) dir(\"{buffer_dir}\")) ); }};\n\
+                 log {{ source({source}); destination(d_fwd{i}); }};\n",
+                t.host, t.port
+            ));
+        }
+        out
+    }
+}
+
+// What: snmpd.conf from settings: views, extends, alarms.
+// Why: replaces Netdata; thresholds come from the ui.
+// From: Issue #1683 | PR #1858
+pub mod snmp {
+    use crate::config::Settings;
+
+    // What: one extend line: name and command.
+    // Why: service counters (pdns, nginx, kea) via extend.
+    // From: Issue #1683 | PR #1858
+    #[derive(Clone, Debug)]
+    pub struct Extend {
+        pub name: String,
+        pub command: String,
+    }
+
+    // What: one log pattern counted by logmatch.
+    // Why: error rates from logs without own code.
+    // From: Issue #1683 | PR #1858
+    #[derive(Clone, Debug)]
+    pub struct LogMatch {
+        pub name: String,
+        pub file: String,
+        pub regex: String,
+    }
+
+    // What: the full snmpd.conf text of one container.
+    // Why: read-only community, listen and limits from SOT.
+    // From: Issue #1683 | PR #1858
+    pub fn conf(s: &Settings, extends: &[Extend], matches: &[LogMatch]) -> Result<String, String> {
+        let listen = s.text("SNMP_LISTEN")?;
+        let community = s.text("SNMP_COMMUNITY")?;
+        let client = s.text("SNMP_ALLOW_FROM")?;
+        let interval = s.uint("SNMP_LOGMATCH_INTERVAL")?;
+        let mut out = format!(
+            "agentAddress {listen}\nrocommunity {community} {client}\n\
+             includeAllDisks {}%\nload {} {} {}\n",
+            s.uint("SNMP_DISK_MIN_FREE_PERCENT")?,
+            s.uint("SNMP_LOAD_1")?,
+            s.uint("SNMP_LOAD_5")?,
+            s.uint("SNMP_LOAD_15")?,
+        );
+        if s.flag("SNMP_AGENTX")? {
+            out.push_str(&format!("master agentx\nagentXSocket {}\n", s.text("SNMP_AGENTX_SOCKET")?));
+        }
+        for e in extends {
+            out.push_str(&format!("extend {} {}\n", e.name, e.command));
+        }
+        for m in matches {
+            out.push_str(&format!("logmatch {} {} {interval} {}\n", m.name, m.file, m.regex));
+        }
+        // What: traps only when the ui switched them on.
+        // Why: SNMP warnings are optional, in addition to ui.
+        // From: Issue #1683 | PR #1858
+        if s.flag("SNMP_TRAPS")? {
+            out.push_str(&format!(
+                "trap2sink {} {community}\ndefaultMonitors yes\nlinkUpDownNotifications yes\n",
+                s.text("SNMP_TRAP_SINK")?
+            ));
+        }
+        Ok(out)
+    }
+}
+
+// What: known-good snapshots with rollback.
+// Why: DNS zones and Kea config return to a good state.
+// From: Issue #1683 | PR #1858
+pub mod snapshot {
+    use crate::fs::{self, Owner};
+    use std::path::{Path, PathBuf};
+
+    // What: store of one document kind in one directory.
+    // Why: keep count comes from the SOT, at least 1.
+    // From: Issue #1683 | PR #1858
+    pub struct Store {
+        pub dir: PathBuf,
+        pub keep: usize,
+        pub owner: Owner,
+    }
+
+    impl Store {
+        // What: save a snapshot; id is creation time in ns.
+        // Why: ids sort by age; oldest beyond keep are pruned.
+        // From: Issue #1683 | PR #1858
+        pub fn save(&self, body: &[u8]) -> Result<String, String> {
+            let id = crate::clock::unix_nanos().to_string();
+            fs::write(&self.dir.join(&id), body, 0o600, fs::Place::Exclusive, self.owner)
+                .map_err(|e| format!("snapshot {id}: {e}"))?;
+            self.prune()?;
+            Ok(id)
+        }
+
+        // What: snapshot ids, newest first.
+        // Why: rollback takes the newest good one.
+        // From: Issue #1683 | PR #1858
+        pub fn list(&self) -> Result<Vec<String>, String> {
+            let mut ids: Vec<String> = match std::fs::read_dir(&self.dir) {
+                Ok(rd) => rd
+                    .filter_map(Result::ok)
+                    .filter_map(|e| e.file_name().into_string().ok())
+                    .filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+                    .collect(),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+                Err(e) => return Err(format!("{}: {e}", self.dir.display())),
+            };
+            ids.sort_by(|a, b| b.len().cmp(&a.len()).then(b.cmp(a)));
+            Ok(ids)
+        }
+
+        // What: body of one snapshot.
+        // Why: rollback restores exactly these bytes.
+        // From: Issue #1683 | PR #1858
+        pub fn read(&self, id: &str) -> Result<Vec<u8>, String> {
+            if id.is_empty() || !id.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(format!("bad snapshot id {id:?}"));
+            }
+            std::fs::read(self.dir.join(id)).map_err(|e| format!("snapshot {id}: {e}"))
+        }
+
+        // What: drop snapshots beyond the keep count.
+        // Why: the disk must not grow without bound.
+        // From: Issue #1683 | PR #1858
+        fn prune(&self) -> Result<(), String> {
+            for id in self.list()?.into_iter().skip(self.keep.max(1)) {
+                let path: &Path = &self.dir.join(&id);
+                std::fs::remove_file(path).map_err(|e| format!("{}: {e}", path.display()))?;
+            }
+            Ok(())
+        }
+    }
+}
