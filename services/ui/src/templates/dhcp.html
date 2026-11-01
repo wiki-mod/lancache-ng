@@ -106,7 +106,7 @@
     </div>
 
     <form method="post" action="{{ routes.dhcp_mode | safe }}" class="grid gap-3 md:grid-cols-2 items-end">
-      {{ <csrf_field csrf_token={csrf_token}/> }}
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <div>
         <label class="block text-xs text-slate-400 mb-1">Aktiver DHCP-Modus</label>
         <select name="dhcp_mode"
@@ -151,7 +151,7 @@
           <div><span class="text-slate-400">DNS 2:</span> <span class="text-white">{{ dhcp_dns_secondary }}</span></div>
         </div>
         <form method="post" action="{{ routes.dhcp_proxy | safe }}" class="space-y-3 rounded border border-amber-500/30 bg-slate-900/50 p-4">
-          {{ <csrf_field csrf_token={csrf_token}/> }}
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <div class="grid gap-3 md:grid-cols-2">
             {{ <text_field label="Proxy subnet start" name="dhcp_subnet_start" value={dhcp_proxy_subnet_start} placeholder="10.0.0.0" required={true}/> }}
             {{ <text_field label="Upstream DHCP server (documentation only)" name="upstream_dhcp_ip" value={dhcp_upstream_dhcp_ip} placeholder="10.0.0.1" required={true} hint="ProxyDHCP mode never needs to contact this server to work; recorded so you and the DHCP conflict check agree on which server owns real leases."/> }}
@@ -193,7 +193,7 @@
           <li>No subnet/DNS/PXE fields here -- a relay injects nothing of its own. Use ProxyDHCP mode for PXE option injection, or Kea mode to own leases here.</li>
         </ul>
         <form method="post" action="{{ routes.dhcp_relay | safe }}" class="space-y-3 rounded border border-sky-500/30 bg-slate-900/50 p-4">
-          {{ <csrf_field csrf_token={csrf_token}/> }}
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <div class="grid gap-3 md:grid-cols-2">
             {{ <text_field label="Relay local address (this relay's client-facing IP)" name="dhcp_relay_local_addr" value={dhcp_relay_local_addr} placeholder="192.168.1.2" required={true} hint="The IP dnsmasq listens on for client DHCP broadcasts; forwarded as <code>giaddr</code> so the upstream server selects the right pool."/> }}
             {{ <text_field label="Upstream DHCP server" name="upstream_dhcp_ip" value={dhcp_upstream_dhcp_ip} placeholder="10.0.0.1" required={true} hint="The real DHCP server every relayed request is forwarded to."/> }}
@@ -270,7 +270,7 @@
       {{ <on_off_badge on={dhcp_ddns_enabled}/> }}
     </div>
     <form method="POST" action="{{ routes.dhcp_ddns | safe }}" class="mt-3 grid gap-3 md:grid-cols-[1fr_auto] items-end">
-      {{ <csrf_field csrf_token={csrf_token}/> }}
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <div>
         <label class="block text-xs text-slate-400 mb-1">DDNS-Updates aktivieren</label>
         <select name="enabled"
@@ -300,7 +300,7 @@
     <div id="add-subnet-form" class="hidden mb-6 p-4 bg-slate-700 rounded border border-slate-600">
       <h3 class="text-sm font-medium text-white mb-3">Neues Subnet</h3>
       <form method="POST" action="{{ routes.subnet_add | safe }}" class="space-y-3">
-        {{ <csrf_field csrf_token={csrf_token}/> }}
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         {{ <subnet_fields tone={raised_tone} ntp_auto={ntp_auto_dhcp_active} ntp_url={pages.setup} dns_primary={dhcp_dns_primary} dns_secondary={dhcp_dns_secondary} lease_time={default_lease_time} domain={dhcp_domain} ntp_servers={dhcp_ntp_servers}/> }}
         <div class="flex gap-2">
           <button type="submit" class="btn btn-blue">
@@ -333,7 +333,7 @@
           </button>
           <form method="POST" action="{{ routes.subnet_remove | safe }}" class="inline"
             onsubmit="return confirm('Subnet {{ subnet.subnet }} löschen?')">
-            {{ <csrf_field csrf_token={csrf_token}/> }}
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <input type="hidden" name="id" value="{{ subnet.id }}">
             <button type="submit" class="btn btn-sm btn-danger">
               Löschen
@@ -344,7 +344,7 @@
 
       <div id="edit-subnet-{{ subnet.id }}" class="hidden p-4 bg-slate-750 border-t border-slate-600">
         <form method="POST" action="{{ routes.subnet_update | safe }}" class="space-y-3">
-          {{ <csrf_field csrf_token={csrf_token}/> }}
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <input type="hidden" name="id" value="{{ subnet.id }}">
           {{ <subnet_fields tone="bg-slate-700 border-slate-600" ntp_auto={ntp_auto_dhcp_active} ntp_url={pages.setup} subnet={subnet.subnet} gateway={subnet.gateway} dns_primary={subnet.dns_primary} dns_secondary={subnet.dns_secondary} pool_start={subnet.pool_start} pool_end={subnet.pool_end} lease_time={subnet.lease_time} domain={subnet.domain} ntp_servers={subnet.ntp_servers}/> }}
           <div class="flex gap-2">
@@ -381,7 +381,7 @@
             </div>
             <form method="POST" action="{{ routes.subnet_option_remove | safe }}" class="inline"
               onsubmit="return confirm('DHCP-Option {{ option.code }} aus {{ subnet.subnet }} entfernen?')">
-              {{ <csrf_field csrf_token={csrf_token}/> }}
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
               <input type="hidden" name="subnet_id" value="{{ subnet.id }}">
               <input type="hidden" name="code" value="{{ option.code }}">
               <input type="hidden" name="data" value="{{ option.data }}">
@@ -397,7 +397,7 @@
         {% endif %}
 
         <form method="POST" action="{{ routes.subnet_option_add | safe }}" class="grid gap-3 md:grid-cols-[120px_1fr_auto] items-end">
-          {{ <csrf_field csrf_token={csrf_token}/> }}
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <input type="hidden" name="subnet_id" value="{{ subnet.id }}">
           {{ <text_field label="Options-Code" name="code" type="number" min={option_code_min} max={option_code_max} placeholder="66" required={true}/> }}
           {{ <text_field label="Wert" name="data" placeholder="192.168.1.10 oder bootfile.efi" required={true}/> }}
@@ -418,7 +418,7 @@
 
     {% if subnets | length > 0 %}
     <form method="POST" action="{{ routes.static_add | safe }}" class="mb-6 space-y-3 p-4 bg-slate-700 rounded">
-      {{ <csrf_field csrf_token={csrf_token}/> }}
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <div class="grid grid-cols-4 gap-3">
         <div>
           <label class="block text-xs text-slate-400 mb-1">Subnet</label>
@@ -449,7 +449,7 @@
           </div>
         </div>
         <form method="POST" action="{{ routes.static_remove | safe }}" class="inline">
-          {{ <csrf_field csrf_token={csrf_token}/> }}
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <input type="hidden" name="subnet_id" value="{{ res.subnet_id }}">
           <input type="hidden" name="mac" value="{{ res.mac }}">
           <button type="submit" class="btn btn-sm btn-danger">
@@ -494,7 +494,7 @@
             <td class="py-2">
               <form method="POST" action="{{ routes.lease_release | safe }}" class="inline"
                 onsubmit="return confirm('Lease {{ lease.ip }} freigeben?')">
-                {{ <csrf_field csrf_token={csrf_token}/> }}
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                 <input type="hidden" name="ip" value="{{ lease.ip }}">
                 <button type="submit" class="btn btn-sm btn-warn">
                   Freigeben
@@ -543,7 +543,7 @@
             <td class="py-2">
               <form method="POST" action="{{ routes.kea_rollback | safe }}" class="inline"
                 onsubmit="return confirm('Auf diesen Snapshot zurückrollen? Die aktuelle DHCP-Konfiguration wird ersetzt.')">
-                {{ <csrf_field csrf_token={csrf_token}/> }}
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                 <input type="hidden" name="snapshot_id" value="{{ snapshot.id }}">
                 <button type="submit" class="btn btn-sm btn-warn">
                   Zurückrollen

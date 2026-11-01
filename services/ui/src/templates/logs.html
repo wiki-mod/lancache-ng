@@ -60,7 +60,7 @@
   <!-- What: extra syslog targets (host:port, TCP)
        Why: a secondary always forwards to its primary too -->
   <form method="post" action="{{ routes.logs_save | safe }}" class="card" style="margin-bottom:16px;">
-    {{ <csrf_field csrf_token={csrf_token}/> }}
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <div class="card-head">
       <h3>Weiterleitung an weitere Syslog-Server</h3>
     </div>

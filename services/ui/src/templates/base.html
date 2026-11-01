@@ -14,7 +14,7 @@
 {# From: Issue #1683 | PR #1912 #}
 {% component restart_ui_form(action, csrf_token, button_class, label, title=none) %}<form method="post" action="{{ action | safe }}"
               onsubmit="return confirm('Admin-UI wirklich neu starten? Die Seite ist danach kurz nicht erreichbar.')">
-          {{ <csrf_field csrf_token={csrf_token}/> }}
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <button type="submit" class="{{ button_class }}"{% if title is not none %} title="{{ title }}"{% endif %}>{{ label }}</button>
         </form>{% endcomponent restart_ui_form %}
 {# What: "Kopieren" button; copyText() copies target #}

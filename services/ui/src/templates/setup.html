@@ -19,7 +19,7 @@
        From: Issue #819 | PR #1858 -->
   <div>
     <form method="post" action="{{ routes.setup_save | safe }}">
-      {{ <csrf_field csrf_token={csrf_token}/> }}
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <div class="section-title" style="margin-top:0;">Release channel</div>
       <p class="section-sub">Which set of images this box installs updates from.</p>
       <div class="field-row" style="align-items:center;">
@@ -111,7 +111,7 @@
       <p class="section-sub">At least 12 characters. The browser asks for the password once more after saving.</p>
       <form method="post" action="{{ routes.password | safe }}" autocomplete="off"
           style="display:grid; gap:12px; max-width:420px;">
-      {{ <csrf_field csrf_token={csrf_token}/> }}
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <div>
         <label class="block text-xs text-slate-400 mb-1" for="current_password">Aktuelles Passwort</label>
         <input type="password" id="current_password" name="current_password" required

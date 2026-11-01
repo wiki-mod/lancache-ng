@@ -1458,34 +1458,135 @@ async fn service_action(
     {
         return (StatusCode::NOT_FOUND, "program not offered").into_response();
     }
-    let (Ok((_, limit)), Ok(project)) = (app.limits(&s), s.text("COMPOSE_PROJECT")) else {
-        return (StatusCode::INTERNAL_SERVER_ERROR, "settings incomplete").into_response();
-    };
-    let list = app
-        .docker
-        .project(&project, limit)
-        .await
-        .unwrap_or_default();
-    let Some(name) = list
-        .iter()
-        .find(|c| c["Labels"][docker::SERVICE_LABEL].as_str() == Some(container.as_str()))
-        .and_then(|c| c["Names"][0].as_str())
-        .map(|n| n.trim_start_matches('/').to_string())
-    else {
-        return (StatusCode::NOT_FOUND, "no such container").into_response();
-    };
-    match app
-        .docker
-        .exec(&name, &["rc-service", &program, &action], limit)
-        .await
-    {
+    match exec_in(&app, &s, &container, &["rc-service", &program, &action]).await {
         Ok((0, _)) => StatusCode::NO_CONTENT.into_response(),
         Ok((code, out)) => (
             StatusCode::BAD_GATEWAY,
             format!("rc-service exit {code}: {out}"),
         )
             .into_response(),
-        Err(e) => (StatusCode::BAD_GATEWAY, e.to_string()).into_response(),
+        Err(e) => (StatusCode::BAD_GATEWAY, e).into_response(),
+    }
+}
+
+// What: run a command in the container of a service.
+// Why: one owner for name lookup and the exec limit.
+// From: Issue #1683 | PR #1858
+async fn exec_in(
+    app: &App,
+    s: &Settings,
+    service: &str,
+    cmd: &[&str],
+) -> Result<(i64, String), String> {
+    let (_, limit) = app.limits(s)?;
+    let project = s.text("COMPOSE_PROJECT")?;
+    let list = app
+        .docker
+        .project(&project, limit)
+        .await
+        .map_err(|e| e.to_string())?;
+    let name = list
+        .iter()
+        .find(|c| c["Labels"][docker::SERVICE_LABEL].as_str() == Some(service))
+        .and_then(|c| c["Names"][0].as_str())
+        .map(|n| n.trim_start_matches('/').to_string())
+        .ok_or_else(|| format!("no container for {service}"))?;
+    app.docker
+        .exec(&name, cmd, limit)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+// What: one cachehamster command; its JSON answer.
+// Why: the program runs in the services container.
+// From: Issue #871 | PR #1858
+async fn hamster(app: &App, args: &[&str]) -> Result<serde_json::Value, String> {
+    let s = app.settings();
+    let service = s.text("CACHEHAMSTER_SERVICE")?;
+    let program = s.text("CACHEHAMSTER_PROGRAM")?;
+    let mut cmd = vec![program.as_str()];
+    cmd.extend_from_slice(args);
+    let (code, out) = exec_in(app, &s, &service, &cmd).await?;
+    let line = out.lines().rev().find(|l| l.starts_with('{')).unwrap_or("");
+    let value: serde_json::Value =
+        serde_json::from_str(line).map_err(|e| format!("cachehamster answer: {e}: {out}"))?;
+    match (code, value.get("error").and_then(|e| e.as_str())) {
+        (0, None) => Ok(value),
+        (_, Some(e)) => Err(e.to_string()),
+        (c, None) => Err(format!("cachehamster exit {c}")),
+    }
+}
+
+// What: the cachehamster page: login, jobs, library.
+// Why: prefill is driven only from the UI.
+// From: Issue #871 | PR #1858
+async fn cachehamster(
+    State(app): Shared,
+    axum::Extension(csrf): axum::Extension<Csrf>,
+) -> Response {
+    let mut ctx = Context::new();
+    match hamster(&app, &["status"]).await {
+        Ok(v) => ctx.insert("hamster", &v),
+        Err(e) => ctx.insert("hamster_error", &e),
+    }
+    app.page("cachehamster.html", ctx, &csrf.0)
+}
+
+// What: form actions: add, start, cancel, remove, logout.
+// Why: each maps 1:1 to a cachehamster command.
+// From: Issue #871 | PR #1858
+async fn hamster_action(
+    State(app): Shared,
+    axum::Extension(csrf): axum::Extension<Csrf>,
+    axum::extract::Path(op): axum::extract::Path<String>,
+    Form(form): Form<BTreeMap<String, String>>,
+) -> Response {
+    if !csrf_ok(&form, &csrf) {
+        return (StatusCode::FORBIDDEN, "CSRF token mismatch").into_response();
+    }
+    let field = |k: &str| form.get(k).map(String::as_str).unwrap_or("").trim().to_string();
+    // What: the page sends the schedule as unix seconds.
+    // Why: the browser knows the local time zone.
+    let when = match field("when").as_str() {
+        "at" => match field("at").parse::<u64>() {
+            Ok(t) => format!("at:{t}"),
+            Err(_) => return (StatusCode::BAD_REQUEST, "time not understood").into_response(),
+        },
+        "later" => "later".to_string(),
+        _ => "now".to_string(),
+    };
+    let what = match field("app").as_str() {
+        "" => field("urls"),
+        id => format!("app:{id}"),
+    };
+    let (name, id) = (field("name"), field("id"));
+    let args: Vec<&str> = match op.as_str() {
+        "add" => vec!["add", &name, &when, &what],
+        "start" | "cancel" | "remove" => vec![op.as_str(), &id],
+        "logout" => vec!["logout"],
+        _ => return (StatusCode::NOT_FOUND, "no such action").into_response(),
+    };
+    done(hamster(&app, &args).await.map(|_| ()), "/cachehamster")
+}
+
+// What: JSON calls of the QR login and the library.
+// Why: the page polls the login without a reload.
+// From: Issue #871 | PR #1858
+async fn hamster_api(
+    State(app): Shared,
+    axum::Extension(csrf): axum::Extension<Csrf>,
+    axum::extract::Path(op): axum::extract::Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if !header_csrf_ok(&headers, &csrf) {
+        return (StatusCode::FORBIDDEN, "CSRF token mismatch").into_response();
+    }
+    if !["login-begin", "login-poll", "login-cancel", "library", "status"].contains(&op.as_str()) {
+        return (StatusCode::NOT_FOUND, "no such call").into_response();
+    }
+    match hamster(&app, &[op.as_str()]).await {
+        Ok(v) => axum::Json(v).into_response(),
+        Err(e) => (StatusCode::BAD_GATEWAY, e).into_response(),
     }
 }
 
@@ -1585,7 +1686,13 @@ const PAGES: [(&str, &str); 7] = [
     ("dhcp", "/dhcp"),
     ("setup", "/setup"),
 ];
-const ROUTES: [(&str, &str); 38] = [
+const ROUTES: [(&str, &str); 44] = [
+    ("hamster_add", "/cachehamster/add"),
+    ("hamster_start", "/cachehamster/start"),
+    ("hamster_cancel", "/cachehamster/cancel"),
+    ("hamster_remove", "/cachehamster/remove"),
+    ("hamster_logout", "/cachehamster/logout"),
+    ("hamster_api", "/api/cachehamster/{op}"),
     ("admin_css", "/static/admin.css"),
     ("favicon", "/favicon.ico"),
     ("logo_icon", "/static/logo-icon.png"),
@@ -1854,6 +1961,9 @@ async fn main() -> Result<(), String> {
         .route("/setup/save", post(save))
         .route("/setup/password", post(password))
         .route("/logs", get(logs))
+        .route("/cachehamster", get(cachehamster))
+        .route("/cachehamster/{op}", post(hamster_action))
+        .route("/api/cachehamster/{op}", post(hamster_api))
         .route("/domains", get(domains))
         .route("/domains/{op}", post(dns_action))
         .route("/dhcp", get(dhcp))
