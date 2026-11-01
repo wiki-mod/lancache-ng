@@ -468,8 +468,8 @@ pub mod proc {
     // Why: std only kills with SIGKILL.
     // From: Issue #1683 | PR #1858
     fn signal(pid: u32, sig: rustix::process::Signal) -> Result<(), String> {
-        let pid = rustix::process::Pid::from_raw(pid as i32)
-            .ok_or_else(|| format!("bad pid {pid}"))?;
+        let pid =
+            rustix::process::Pid::from_raw(pid as i32).ok_or_else(|| format!("bad pid {pid}"))?;
         rustix::process::kill_process(pid, sig).map_err(|e| e.to_string())
     }
 
@@ -609,7 +609,9 @@ pub mod proc {
             // Why: an exit decides restart, backoff or failed.
             // From: Issue #1683 | PR #1858
             for slot in slots.values_mut() {
-                let Some(child) = slot.child.as_mut() else { continue };
+                let Some(child) = slot.child.as_mut() else {
+                    continue;
+                };
                 let exit = match child.try_wait() {
                     Ok(Some(status)) => status.to_string(),
                     Ok(None) => continue,
@@ -696,7 +698,9 @@ pub mod proc {
             }
             let end = Instant::now() + grace;
             for slot in slots.values_mut() {
-                let Some(child) = slot.child.as_mut() else { continue };
+                let Some(child) = slot.child.as_mut() else {
+                    continue;
+                };
                 while Instant::now() < end {
                     if let Ok(Some(_)) = child.try_wait() {
                         break;
@@ -795,7 +799,9 @@ pub mod http {
         let mut bytes = 0u64;
         let mut body = resp.bytes_stream();
         while let Some(chunk) = body.next().await {
-            bytes += chunk.map_err(|e| format!("{url}: {}", error_chain(&e)))?.len() as u64;
+            bytes += chunk
+                .map_err(|e| format!("{url}: {}", error_chain(&e)))?
+                .len() as u64;
         }
         Ok((status, bytes))
     }
@@ -869,7 +875,10 @@ pub mod pdns {
             body: Option<Value>,
         ) -> Result<String, String> {
             let url = format!("{}{path}", self.base);
-            let mut req = self.client.request(method, &url).header(KEY_HEADER, &self.key);
+            let mut req = self
+                .client
+                .request(method, &url)
+                .header(KEY_HEADER, &self.key);
             if let Some(body) = body {
                 req = req.json(&body);
             }
@@ -908,9 +917,13 @@ pub mod pdns {
                        "changetype": "REPLACE", "records": records})
             };
             let path = format!("/zones/{}", zone_id(zone));
-            self.call(reqwest::Method::PATCH, &path, Some(json!({"rrsets": [rrset]})))
-                .await
-                .map(drop)
+            self.call(
+                reqwest::Method::PATCH,
+                &path,
+                Some(json!({"rrsets": [rrset]})),
+            )
+            .await
+            .map(drop)
         }
 
         // What: all zones with serial and check times.
@@ -954,7 +967,12 @@ pub mod pdns {
                 serde_json::from_str(&text).map_err(|e| format!("statistics: {e}"))?;
             Ok(rows
                 .iter()
-                .filter_map(|r| Some((r["name"].as_str()?.to_string(), r["value"].as_str()?.to_string())))
+                .filter_map(|r| {
+                    Some((
+                        r["name"].as_str()?.to_string(),
+                        r["value"].as_str()?.to_string(),
+                    ))
+                })
                 .collect())
         }
 
@@ -962,10 +980,7 @@ pub mod pdns {
         // Why: changed records must not wait for their TTL.
         // From: Issue #1683 | PR #1858
         pub async fn flush(&self, name: &str, subtree: bool) -> Result<(), String> {
-            let path = format!(
-                "/cache/flush?domain={}&subtree={subtree}",
-                zone_id(name)
-            );
+            let path = format!("/cache/flush?domain={}&subtree={subtree}", zone_id(name));
             self.call(reqwest::Method::PUT, &path, None).await.map(drop)
         }
     }
@@ -997,9 +1012,9 @@ pub mod dns {
                         && label.len() <= 63
                         && !label.starts_with('-')
                         && !label.ends_with('-')
-                        && label
-                            .bytes()
-                            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || (underscore && b == b'_')))
+                        && label.bytes().all(|b| {
+                            b.is_ascii_alphanumeric() || b == b'-' || (underscore && b == b'_')
+                        }))
             })
     }
 
@@ -1135,11 +1150,26 @@ pub mod dhcp {
     // Why: protocol numbers, not project settings.
     // From: Issue #1683 | PR #1858
     pub const MANAGED: [Managed; 5] = [
-        Managed { name: "routers", code: 3 },
-        Managed { name: "domain-name-servers", code: 6 },
-        Managed { name: "domain-name", code: 15 },
-        Managed { name: "ntp-servers", code: 42 },
-        Managed { name: "domain-search", code: 119 },
+        Managed {
+            name: "routers",
+            code: 3,
+        },
+        Managed {
+            name: "domain-name-servers",
+            code: 6,
+        },
+        Managed {
+            name: "domain-name",
+            code: 15,
+        },
+        Managed {
+            name: "ntp-servers",
+            code: 42,
+        },
+        Managed {
+            name: "domain-search",
+            code: 119,
+        },
     ];
 
     // What: one custom option code 1..=254.
@@ -1175,7 +1205,9 @@ pub mod dhcp {
                 .ok_or_else(|| at("expected CODE:VALUE".into()))?;
             let data = data.trim();
             if data.is_empty() || data.len() > max || data.contains(['\n', '\r', ';']) {
-                return Err(at(format!("value must be 1..={max} bytes, one line, no ';'")));
+                return Err(at(format!(
+                    "value must be 1..={max} bytes, one line, no ';'"
+                )));
             }
             out.push((option_code(code).map_err(at)?, data.to_string()));
         }
@@ -1186,7 +1218,10 @@ pub mod dhcp {
     // Why: Kea max-valid-lifetime = lease * factor, capped.
     // From: Issue #1683 | PR #1858
     pub fn lease_limits(s: &Settings, lease: u64) -> Result<(u64, u64), String> {
-        let (min, max) = (s.uint("DHCP_LEASE_TIME_MIN")?, s.uint("DHCP_LEASE_TIME_MAX")?);
+        let (min, max) = (
+            s.uint("DHCP_LEASE_TIME_MIN")?,
+            s.uint("DHCP_LEASE_TIME_MAX")?,
+        );
         if !(min..=max).contains(&lease) {
             return Err(format!("lease {lease} outside {min}..={max}"));
         }
@@ -1268,7 +1303,10 @@ pub mod docker {
         pub fn new(endpoint: &str) -> Result<Self, String> {
             let builder = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
             let (builder, base) = match endpoint.trim().strip_prefix("unix://") {
-                Some(sock) => (builder.unix_socket(PathBuf::from(sock)), SOCKET_HOST.to_string()),
+                Some(sock) => (
+                    builder.unix_socket(PathBuf::from(sock)),
+                    SOCKET_HOST.to_string(),
+                ),
                 None => (builder, endpoint.trim().trim_end_matches('/').to_string()),
             };
             let client = builder.build().map_err(|e| format!("Docker client: {e}"))?;
@@ -1328,7 +1366,11 @@ pub mod docker {
         // From: Issue #1683 | PR #1858
         pub async fn inspect(&self, name: &str, limit: Duration) -> Result<Value, Error> {
             let body = self
-                .call(reqwest::Method::GET, &format!("/containers/{name}/json"), limit)
+                .call(
+                    reqwest::Method::GET,
+                    &format!("/containers/{name}/json"),
+                    limit,
+                )
                 .await?;
             serde_json::from_slice(&body).map_err(|e| Error::Decode(e.to_string()))
         }
@@ -1348,9 +1390,13 @@ pub mod docker {
                 Action::Stop => format!("stop?t={grace}"),
                 Action::Restart => format!("restart?t={grace}"),
             };
-            self.call(reqwest::Method::POST, &format!("/containers/{name}/{verb}"), limit)
-                .await
-                .map(drop)
+            self.call(
+                reqwest::Method::POST,
+                &format!("/containers/{name}/{verb}"),
+                limit,
+            )
+            .await
+            .map(drop)
         }
     }
 }
@@ -1384,13 +1430,32 @@ pub mod cert {
     // What: a self-signed CA key and certificate.
     // Why: days, bits and subject come from the SOT.
     // From: Issue #1683 | PR #1858
-    pub fn make_ca(key: &Path, crt: &Path, subject: &str, days: u64, bits: u64) -> Result<(), String> {
+    pub fn make_ca(
+        key: &Path,
+        crt: &Path,
+        subject: &str,
+        days: u64,
+        bits: u64,
+    ) -> Result<(), String> {
         let (k, c) = (key.display().to_string(), crt.display().to_string());
         openssl(&[
-            "req", "-x509", "-newkey", &format!("rsa:{bits}"), "-nodes", "-keyout", &k,
-            "-out", &c, "-days", &days.to_string(), "-subj", subject,
-            "-addext", "basicConstraints=critical,CA:TRUE",
-            "-addext", "keyUsage=critical,keyCertSign,cRLSign",
+            "req",
+            "-x509",
+            "-newkey",
+            &format!("rsa:{bits}"),
+            "-nodes",
+            "-keyout",
+            &k,
+            "-out",
+            &c,
+            "-days",
+            &days.to_string(),
+            "-subj",
+            subject,
+            "-addext",
+            "basicConstraints=critical,CA:TRUE",
+            "-addext",
+            "keyUsage=critical,keyCertSign,cRLSign",
         ])
         .map(drop)
     }
@@ -1417,21 +1482,48 @@ pub mod cert {
             .map(|n| format!("DNS:{n}"))
             .collect::<Vec<_>>()
             .join(",");
-        std::fs::write(&ext, format!("subjectAltName={san}\nextendedKeyUsage=serverAuth\n"))
-            .map_err(|e| format!("{}: {e}", ext.display()))?;
+        std::fs::write(
+            &ext,
+            format!("subjectAltName={san}\nextendedKeyUsage=serverAuth\n"),
+        )
+        .map_err(|e| format!("{}: {e}", ext.display()))?;
         let d = |p: &Path| p.display().to_string();
         let result = openssl(&[
-            "req", "-new", "-newkey", &format!("rsa:{bits}"), "-nodes",
-            "-keyout", &d(key), "-out", &d(&csr), "-subj", &format!("/CN={cn}"),
+            "req",
+            "-new",
+            "-newkey",
+            &format!("rsa:{bits}"),
+            "-nodes",
+            "-keyout",
+            &d(key),
+            "-out",
+            &d(&csr),
+            "-subj",
+            &format!("/CN={cn}"),
         ])
         .and_then(|_| {
             // What: -CAserial keeps the serial file stable.
             // Why: AG-KD-002 needs it persistent beside the CA.
             // From: Issue #1683 | PR #1858
             openssl(&[
-                "x509", "-req", "-in", &d(&csr), "-CA", &d(ca_crt), "-CAkey", &d(ca_key),
-                "-CAserial", &d(ca_serial), "-CAcreateserial", "-out", &d(crt),
-                "-days", &days.to_string(), "-sha256", "-extfile", &d(&ext),
+                "x509",
+                "-req",
+                "-in",
+                &d(&csr),
+                "-CA",
+                &d(ca_crt),
+                "-CAkey",
+                &d(ca_key),
+                "-CAserial",
+                &d(ca_serial),
+                "-CAcreateserial",
+                "-out",
+                &d(crt),
+                "-days",
+                &days.to_string(),
+                "-sha256",
+                "-extfile",
+                &d(&ext),
             ])
         });
         for tmp in [&csr, &ext] {
@@ -1525,7 +1617,10 @@ pub mod log {
                     .ok()
                     .filter(|p| *p > 0)
                     .ok_or_else(|| format!("syslog target {t:?}: bad port"))?;
-                Ok(Target { host: host.to_string(), port })
+                Ok(Target {
+                    host: host.to_string(),
+                    port,
+                })
             })
             .collect()
     }
@@ -1544,6 +1639,58 @@ pub mod log {
             ));
         }
         out
+    }
+
+    // What: name of the local file destination.
+    // Why: syslog-ng stats report its processed count.
+    // From: Issue #1683 | PR #1858
+    pub const STORE: &str = "d_store";
+
+    // What: full syslog-ng.conf: store plus forwarding.
+    // Why: muted programs skip the store, never the forward.
+    // From: Issue #1683 | PR #1858
+    pub fn conf(s: &Settings) -> Result<String, String> {
+        let root = s.text("SYSLOG_LOG_ROOT")?;
+        let group = s.text("LOG_READER_GROUP")?;
+        let buffer = s.text("SYSLOG_BUFFER_DIR")?;
+        let template = s.text("SYSLOG_LINE_TEMPLATE")?;
+        let port = s.uint("LANCACHE_LOG_PORT")?;
+        let reap = s.uint("SYSLOG_TIME_REAP")?;
+        let muted = s.list("SYSLOG_MUTED");
+        let path_ok = |p: &str| p.starts_with('/') && !p.contains(['"', '\n', '\r', '$']);
+        if !path_ok(&root) || !path_ok(&buffer) {
+            return Err("SYSLOG_LOG_ROOT/SYSLOG_BUFFER_DIR must be plain absolute paths".into());
+        }
+        if template.contains(['"', '\n', '\r']) {
+            return Err("SYSLOG_LINE_TEMPLATE has quote or newline".into());
+        }
+        let name = |v: &str| {
+            !v.is_empty()
+                && v.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "_-".contains(c))
+        };
+        if !name(&group) {
+            return Err(format!("LOG_READER_GROUP={group} is no group name"));
+        }
+        if let Some(bad) = muted.iter().find(|m| !name(m)) {
+            return Err(format!("SYSLOG_MUTED entry {bad:?} is no plain name"));
+        }
+        let skip = if muted.is_empty() {
+            String::new()
+        } else {
+            format!(r#" and not program("^({})$" type(pcre))"#, muted.join("|"))
+        };
+        let mut out = format!(
+            r#"@version: current
+options {{ create-dirs(yes); dir-group("{group}"); dir-perm(0750); group("{group}"); perm(0640); keep-hostname(yes); time-reap({reap}); }};
+source s_docker {{ network(transport("udp") port({port}) flags(syslog-protocol)); }};
+filter f_named {{ program("^[A-Za-z0-9_-]+$" type(pcre)){skip}; }};
+destination {STORE} {{ file("{root}/${{PROGRAM}}/${{YEAR}}${{MONTH}}${{DAY}}.log" template("{template}")); }};
+log {{ source(s_docker); filter(f_named); destination({STORE}); }};
+"#
+        );
+        out.push_str(&forward_block(&targets(s)?, "s_docker", &buffer));
+        Ok(out)
     }
 }
 
@@ -1589,13 +1736,19 @@ pub mod snmp {
             s.uint("SNMP_LOAD_15")?,
         );
         if s.flag("SNMP_AGENTX")? {
-            out.push_str(&format!("master agentx\nagentXSocket {}\n", s.text("SNMP_AGENTX_SOCKET")?));
+            out.push_str(&format!(
+                "master agentx\nagentXSocket {}\n",
+                s.text("SNMP_AGENTX_SOCKET")?
+            ));
         }
         for e in extends {
             out.push_str(&format!("extend {} {}\n", e.name, e.command));
         }
         for m in matches {
-            out.push_str(&format!("logmatch {} {} {interval} {}\n", m.name, m.file, m.regex));
+            out.push_str(&format!(
+                "logmatch {} {} {interval} {}\n",
+                m.name, m.file, m.regex
+            ));
         }
         // What: traps only when the ui switched them on.
         // Why: SNMP warnings are optional, in addition to ui.
@@ -1632,8 +1785,14 @@ pub mod snapshot {
         // From: Issue #1683 | PR #1858
         pub fn save(&self, body: &[u8]) -> Result<String, String> {
             let id = crate::clock::unix_nanos().to_string();
-            fs::write(&self.dir.join(&id), body, 0o600, fs::Place::Exclusive, self.owner)
-                .map_err(|e| format!("snapshot {id}: {e}"))?;
+            fs::write(
+                &self.dir.join(&id),
+                body,
+                0o600,
+                fs::Place::Exclusive,
+                self.owner,
+            )
+            .map_err(|e| format!("snapshot {id}: {e}"))?;
             self.prune()?;
             Ok(id)
         }
@@ -1751,26 +1910,38 @@ pub mod dhcp_probe {
                 | DhcpOption::SubnetMask(a)
                 | DhcpOption::BroadcastAddr(a) => a.to_string(),
                 DhcpOption::AddressLeaseTime(s) | DhcpOption::Renewal(s) => s.to_string(),
-                DhcpOption::Router(l) | DhcpOption::DomainNameServer(l) => {
-                    l.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
-                }
+                DhcpOption::Router(l) | DhcpOption::DomainNameServer(l) => l
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", "),
                 DhcpOption::DomainName(n) => n.clone(),
                 _ => return None,
             })
         };
         let address = Some(msg.yiaddr()).filter(|a| !a.is_unspecified());
         let mut details: Vec<Detail> = address
-            .map(|a| Detail { label: "Address".into(), value: a.to_string() })
+            .map(|a| Detail {
+                label: "Address".into(),
+                value: a.to_string(),
+            })
             .into_iter()
             .collect();
         details.extend(FIELDS.iter().filter_map(|(label, code)| {
-            text(*code).map(|value| Detail { label: (*label).into(), value })
+            text(*code).map(|value| Detail {
+                label: (*label).into(),
+                value,
+            })
         }));
         let server = match opts.get(OptionCode::ServerIdentifier) {
             Some(DhcpOption::ServerIdentifier(a)) => Some(*a),
             _ => None,
         };
-        Server { server, address, details }
+        Server {
+            server,
+            address,
+            details,
+        }
     }
 
     // What: true when a reply has the given message type.
@@ -1784,15 +1955,25 @@ pub mod dhcp_probe {
     // What: build one client message.
     // Why: broadcast flag except for RELEASE (RFC 2131).
     // From: Issue #1683 | PR #1858
-    fn message(xid: u32, mac: &[u8; 6], ci: Ipv4Addr, kind: MessageType, opts: Vec<DhcpOption>) -> Message {
+    fn message(
+        xid: u32,
+        mac: &[u8; 6],
+        ci: Ipv4Addr,
+        kind: MessageType,
+        opts: Vec<DhcpOption>,
+    ) -> Message {
         let none = Ipv4Addr::UNSPECIFIED;
         let mut msg = Message::new_with_id(xid, ci, none, none, none, mac);
         if kind != MessageType::Release {
             msg.set_flags(Flags::default().set_broadcast());
         }
         msg.opts_mut().insert(DhcpOption::MessageType(kind));
-        let wanted = FIELDS.iter().map(|(_, c)| *c).filter(|c| *c != OptionCode::ServerIdentifier);
-        msg.opts_mut().insert(DhcpOption::ParameterRequestList(wanted.collect()));
+        let wanted = FIELDS
+            .iter()
+            .map(|(_, c)| *c)
+            .filter(|c| *c != OptionCode::ServerIdentifier);
+        msg.opts_mut()
+            .insert(DhcpOption::ParameterRequestList(wanted.collect()));
         for o in opts {
             msg.opts_mut().insert(o);
         }
@@ -1804,21 +1985,28 @@ pub mod dhcp_probe {
     // From: Issue #1683 | PR #1858
     fn send(sock: &UdpSocket, msg: &Message, to: SocketAddrV4) -> Result<(), String> {
         let mut buf = Vec::new();
-        msg.encode(&mut Encoder::new(&mut buf)).map_err(|e| e.to_string())?;
+        msg.encode(&mut Encoder::new(&mut buf))
+            .map_err(|e| e.to_string())?;
         sock.send_to(&buf, to).map(drop).map_err(|e| e.to_string())
     }
 
     // What: read replies for xid until done or deadline.
     // Why: the handler returns true to stop early.
     // From: Issue #1683 | PR #1858
-    fn listen(sock: &UdpSocket, xid: u32, until: Instant, mut f: impl FnMut(&Message) -> bool) -> Result<(), String> {
+    fn listen(
+        sock: &UdpSocket,
+        xid: u32,
+        until: Instant,
+        mut f: impl FnMut(&Message) -> bool,
+    ) -> Result<(), String> {
         let mut buf = [0u8; 1500];
         loop {
             let left = until.saturating_duration_since(Instant::now());
             if left.is_zero() {
                 return Ok(());
             }
-            sock.set_read_timeout(Some(left)).map_err(|e| e.to_string())?;
+            sock.set_read_timeout(Some(left))
+                .map_err(|e| e.to_string())?;
             match sock.recv_from(&mut buf) {
                 Ok((n, _)) => {
                     if let Ok(msg) = Message::decode(&mut Decoder::new(&buf[..n])) {
@@ -1828,7 +2016,12 @@ pub mod dhcp_probe {
                     }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
                     return Ok(());
                 }
                 Err(e) => return Err(e.to_string()),
@@ -1840,14 +2033,31 @@ pub mod dhcp_probe {
     // Why: shows every server and proves a lease works.
     // From: Issue #1683 | PR #1858
     pub fn run(s: &Settings) -> Report {
-        let fail = |e: String| Report { servers: Vec::new(), lease_ok: false, lease_text: String::new(), error: Some(e) };
+        let fail = |e: String| Report {
+            servers: Vec::new(),
+            lease_ok: false,
+            lease_text: String::new(),
+            error: Some(e),
+        };
         let (window, wait, sends) = match (
             s.uint("DHCP_PROBE_WINDOW_MS"),
             s.uint("DHCP_PROBE_ACK_WAIT_MS"),
             s.uint("DHCP_PROBE_SENDS"),
         ) {
-            (Ok(a), Ok(b), Ok(c)) => (Duration::from_millis(a), Duration::from_millis(b), c.max(1) as u32),
-            (a, b, c) => return fail([a.err(), b.err(), c.err()].into_iter().flatten().collect::<Vec<_>>().join("; ")),
+            (Ok(a), Ok(b), Ok(c)) => (
+                Duration::from_millis(a),
+                Duration::from_millis(b),
+                c.max(1) as u32,
+            ),
+            (a, b, c) => {
+                return fail(
+                    [a.err(), b.err(), c.err()]
+                        .into_iter()
+                        .flatten()
+                        .collect::<Vec<_>>()
+                        .join("; "),
+                )
+            }
         };
         let sock = match UdpSocket::bind((Ipv4Addr::UNSPECIFIED, CLIENT_PORT))
             .and_then(|s| s.set_broadcast(true).map(|()| s))
@@ -1862,18 +2072,31 @@ pub mod dhcp_probe {
         // From: Issue #1683 | PR #1858
         let mut mac: [u8; 6] = rand::random();
         mac[0] = (mac[0] | 0x02) & !0x01;
-        let discover = message(xid, &mac, Ipv4Addr::UNSPECIFIED, MessageType::Discover, vec![]);
+        let discover = message(
+            xid,
+            &mac,
+            Ipv4Addr::UNSPECIFIED,
+            MessageType::Discover,
+            vec![],
+        );
         let end = Instant::now() + window;
         let mut servers: Vec<Server> = Vec::new();
         for i in 1..=sends {
             if let Err(e) = send(&sock, &discover, bcast) {
                 return fail(format!("DHCPDISCOVER: {e}"));
             }
-            let until = if i == sends { end } else { (Instant::now() + window / sends).min(end) };
+            let until = if i == sends {
+                end
+            } else {
+                (Instant::now() + window / sends).min(end)
+            };
             if let Err(e) = listen(&sock, xid, until, |m| {
                 if is(m, MessageType::Offer) {
                     let o = read(m);
-                    if !servers.iter().any(|x| x.server.is_some() && x.server == o.server) {
+                    if !servers
+                        .iter()
+                        .any(|x| x.server.is_some() && x.server == o.server)
+                    {
                         servers.push(o);
                     }
                 }
@@ -1883,15 +2106,38 @@ pub mod dhcp_probe {
             }
         }
         let Some(first) = servers.first().cloned() else {
-            return Report { servers, lease_ok: false, lease_text: format!("no offer within {} ms", window.as_millis()), error: None };
+            return Report {
+                servers,
+                lease_ok: false,
+                lease_text: format!("no offer within {} ms", window.as_millis()),
+                error: None,
+            };
         };
         let (Some(addr), Some(server)) = (first.address, first.server) else {
-            return Report { servers, lease_ok: false, lease_text: "offer without address or server id".into(), error: None };
+            return Report {
+                servers,
+                lease_ok: false,
+                lease_text: "offer without address or server id".into(),
+                error: None,
+            };
         };
-        let req = message(xid, &mac, Ipv4Addr::UNSPECIFIED, MessageType::Request,
-            vec![DhcpOption::RequestedIpAddress(addr), DhcpOption::ServerIdentifier(server)]);
+        let req = message(
+            xid,
+            &mac,
+            Ipv4Addr::UNSPECIFIED,
+            MessageType::Request,
+            vec![
+                DhcpOption::RequestedIpAddress(addr),
+                DhcpOption::ServerIdentifier(server),
+            ],
+        );
         if let Err(e) = send(&sock, &req, bcast) {
-            return Report { servers, lease_ok: false, lease_text: String::new(), error: Some(format!("DHCPREQUEST: {e}")) };
+            return Report {
+                servers,
+                lease_ok: false,
+                lease_text: String::new(),
+                error: Some(format!("DHCPREQUEST: {e}")),
+            };
         }
         let mut verdict: Result<Server, String> = Err("no ACK before timeout".into());
         if let Err(e) = listen(&sock, xid, Instant::now() + wait, |m| {
@@ -1907,7 +2153,12 @@ pub mod dhcp_probe {
             }
             false
         }) {
-            return Report { servers, lease_ok: false, lease_text: String::new(), error: Some(e) };
+            return Report {
+                servers,
+                lease_ok: false,
+                lease_text: String::new(),
+                error: Some(e),
+            };
         }
         match verdict {
             Ok(ack) => {
@@ -1915,16 +2166,84 @@ pub mod dhcp_probe {
                 // Why: the probe must not keep a pool address.
                 // From: Issue #1683 | PR #1858
                 if let Some(ip) = ack.address {
-                    let rel = message(rand::random(), &mac, ip, MessageType::Release,
-                        vec![DhcpOption::ServerIdentifier(server)]);
+                    let rel = message(
+                        rand::random(),
+                        &mac,
+                        ip,
+                        MessageType::Release,
+                        vec![DhcpOption::ServerIdentifier(server)],
+                    );
                     if let Err(e) = send(&sock, &rel, SocketAddrV4::new(server, SERVER_PORT)) {
                         eprintln!("[dhcp_probe] release to {server} failed: {e}");
                     }
                 }
-                let text = ack.address.map_or("lease granted".into(), |ip| format!("lease {ip} granted by {server}"));
-                Report { servers, lease_ok: true, lease_text: text, error: None }
+                let text = ack.address.map_or("lease granted".into(), |ip| {
+                    format!("lease {ip} granted by {server}")
+                });
+                Report {
+                    servers,
+                    lease_ok: true,
+                    lease_text: text,
+                    error: None,
+                }
             }
-            Err(t) => Report { servers, lease_ok: false, lease_text: t, error: None },
+            Err(t) => Report {
+                servers,
+                lease_ok: false,
+                lease_text: t,
+                error: None,
+            },
         }
+    }
+}
+
+// What: chrony.conf from settings.
+// Why: one owner; the dns container start renders it.
+// From: Issue #1683 | PR #1858
+pub mod chrony {
+    use crate::config::Settings;
+
+    // What: only plain host, CIDR and path characters.
+    // Why: a value must never add a chrony directive.
+    // From: Issue #1683 | PR #1858
+    fn plain(v: &str) -> bool {
+        !v.is_empty()
+            && v.chars()
+                .all(|c| c.is_ascii_alphanumeric() || ".:/-_".contains(c))
+    }
+
+    // What: render chrony.conf.
+    // Why: IP = server, name = pool; empty CIDRs allow all.
+    // From: Issue #1683 | PR #1858
+    pub fn conf(s: &Settings) -> Result<String, String> {
+        let servers = s.list("NTP_UPSTREAM_SERVERS");
+        if servers.is_empty() {
+            return Err("NTP_UPSTREAM_SERVERS is empty; NTP never runs alone".into());
+        }
+        let allowed = s.list("NTP_ALLOWED_CLIENT_CIDRS");
+        let drift = s.text("NTP_DRIFT_FILE")?;
+        let port = s.uint("NTP_PORT")?;
+        if let Some(bad) = servers.iter().chain(&allowed).find(|v| !plain(v)) {
+            return Err(format!("NTP value {bad:?} has unsafe characters"));
+        }
+        if !drift.starts_with('/') || !plain(&drift) {
+            return Err(format!("NTP_DRIFT_FILE={drift} is no plain absolute path"));
+        }
+        let mut out = format!("driftfile {drift}\nport {port}\nmakestep 1.0 3\nrtcsync\n");
+        for host in &servers {
+            let kind = if host.parse::<std::net::IpAddr>().is_ok() {
+                "server"
+            } else {
+                "pool"
+            };
+            out.push_str(&format!("{kind} {host} iburst\n"));
+        }
+        if allowed.is_empty() {
+            out.push_str("allow 0.0.0.0/0\nallow ::/0\n");
+        }
+        for cidr in &allowed {
+            out.push_str(&format!("allow {cidr}\n"));
+        }
+        Ok(out)
     }
 }

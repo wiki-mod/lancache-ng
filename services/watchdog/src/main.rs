@@ -62,7 +62,12 @@ impl Watch {
     fn new(settings: Settings) -> Result<Self, String> {
         let docker = docker::Api::new(&settings.text("DOCKER_ENDPOINT")?)?;
         let http = http::client(&settings)?;
-        Ok(Self { settings, docker, http, restarts: BTreeMap::new() })
+        Ok(Self {
+            settings,
+            docker,
+            http,
+            restarts: BTreeMap::new(),
+        })
     }
 
     // What: seconds setting as Duration.
@@ -113,13 +118,19 @@ impl Watch {
             let Some(service) = c["Labels"][docker::SERVICE_LABEL].as_str() else {
                 continue;
             };
-            let name = c["Names"][0].as_str().unwrap_or(service).trim_start_matches('/');
+            let name = c["Names"][0]
+                .as_str()
+                .unwrap_or(service)
+                .trim_start_matches('/');
             let mut reasons = Vec::new();
             let run = c["State"].as_str().unwrap_or("unknown");
             if run != "running" {
                 reasons.push(format!("Docker state {run}"));
             }
-            if c["Status"].as_str().is_some_and(|s| s.contains("(unhealthy)")) {
+            if c["Status"]
+                .as_str()
+                .is_some_and(|s| s.contains("(unhealthy)"))
+            {
                 reasons.push("health check unhealthy".to_string());
             }
             if run == "running" {
@@ -148,7 +159,10 @@ impl Watch {
         let grace = u32::try_from(grace).map_err(|e| e.to_string())?;
         let now = clock::unix_secs();
         let seen = self.restarts.entry(name.to_string()).or_default();
-        while seen.front().is_some_and(|t| now.saturating_sub(*t) > window) {
+        while seen
+            .front()
+            .is_some_and(|t| now.saturating_sub(*t) > window)
+        {
             seen.pop_front();
         }
         if u64::try_from(seen.len()).unwrap_or(u64::MAX) >= max {
@@ -205,13 +219,17 @@ impl Watch {
     // Why: shows a lost NOTIFY or broken AXFR at once.
     // From: Issue #1683 | PR #1858
     async fn dns_sync(&self, alarms: &mut Vec<Alarm>) {
-        let secondary = self.settings.text("PDNS_SECONDARY_API_URL").unwrap_or_default();
+        let secondary = self
+            .settings
+            .text("PDNS_SECONDARY_API_URL")
+            .unwrap_or_default();
         if secondary.is_empty() {
             return;
         }
-        let (Ok(primary), Ok(key)) =
-            (self.settings.text("PDNS_PRIMARY_API_URL"), self.settings.text("PDNS_API_KEY"))
-        else {
+        let (Ok(primary), Ok(key)) = (
+            self.settings.text("PDNS_PRIMARY_API_URL"),
+            self.settings.text("PDNS_API_KEY"),
+        ) else {
             return alarms.push(crit("dns", "primary API URL or key not set".into()));
         };
         let p = pdns::Api::new(self.http.clone(), &primary, &key);
@@ -241,10 +259,21 @@ impl Watch {
     // From: Issue #1683 | PR #1858
     fn publish(&self, alarms: &[Alarm]) -> Result<(), String> {
         let path = PathBuf::from(self.settings.text("WATCHDOG_ALARM_FILE")?);
-        let restarts = self.restarts.iter().map(|(k, v)| (k.clone(), v.len())).collect();
-        let report = Report { written: clock::unix_secs(), alarms, restarts };
+        let restarts = self
+            .restarts
+            .iter()
+            .map(|(k, v)| (k.clone(), v.len()))
+            .collect();
+        let report = Report {
+            written: clock::unix_secs(),
+            alarms,
+            restarts,
+        };
         let body = serde_json::to_vec_pretty(&report).map_err(|e| e.to_string())?;
-        let keep = fs::Owner { uid: None, gid: None };
+        let keep = fs::Owner {
+            uid: None,
+            gid: None,
+        };
         fs::write(&path, &body, 0o644, fs::Place::Replace, keep)
             .map_err(|e| format!("{}: {e}", path.display()))
     }
@@ -277,7 +306,10 @@ fn status_findings(
                 out.push(format!("{} failed: {reason}", p.name));
             }
             proc::State::Backoff { attempt } => {
-                alarms.push(warn(service, format!("{} in backoff, try {attempt}", p.name)));
+                alarms.push(warn(
+                    service,
+                    format!("{} in backoff, try {attempt}", p.name),
+                ));
             }
             _ => {}
         }
@@ -289,14 +321,22 @@ fn status_findings(
 // Why: short constructor.
 // From: Issue #1683 | PR #1858
 fn warn(source: &str, text: String) -> Alarm {
-    Alarm { level: Level::Warn, source: source.to_string(), text }
+    Alarm {
+        level: Level::Warn,
+        source: source.to_string(),
+        text,
+    }
 }
 
 // What: crit alarm.
 // Why: short constructor.
 // From: Issue #1683 | PR #1858
 fn crit(source: &str, text: String) -> Alarm {
-    Alarm { level: Level::Crit, source: source.to_string(), text }
+    Alarm {
+        level: Level::Crit,
+        source: source.to_string(),
+        text,
+    }
 }
 
 // What: load settings from env and the saved file.

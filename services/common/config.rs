@@ -93,7 +93,10 @@ impl Spec {
             .ok_or_else(|| format!("schema entry without '=': {entry:?}"))?;
         let fields: Vec<&str> = rest.split(FIELD_SEP).collect();
         let [kind, min, max, effect, owner] = fields[..] else {
-            return Err(format!("{key}: schema needs 5 fields, got {}", fields.len()));
+            return Err(format!(
+                "{key}: schema needs 5 fields, got {}",
+                fields.len()
+            ));
         };
         let (kind, required) = match kind.strip_suffix('?') {
             Some(base) => (base, false),
@@ -114,7 +117,11 @@ impl Spec {
                 if min > max {
                     return Err(format!("{key}: min {min} above max {max}"));
                 }
-                Kind::Uint { min, max, clamp: kind == "uint~" }
+                Kind::Uint {
+                    min,
+                    max,
+                    clamp: kind == "uint~",
+                }
             }
             // What: a choice lists its words in the min field.
             // Why: max stays empty; the words are comma-joined.
@@ -208,7 +215,8 @@ fn check(spec: &Spec, raw: &str) -> Result<(Value, Option<String>), String> {
             if limit != n && !clamp {
                 return Err(format!("{key}={n} is outside {min}..={max}"));
             }
-            let note = (limit != n).then(|| format!("{key}={n} outside {min}..={max}; using {limit}"));
+            let note =
+                (limit != n).then(|| format!("{key}={n} outside {min}..={max}; using {limit}"));
             return Ok((Value::Uint(limit), note));
         }
     };
@@ -258,9 +266,8 @@ impl Settings {
     ) -> Result<Self, String> {
         let schema = env(SCHEMA_KEY).ok_or_else(|| format!("{SCHEMA_KEY} is not set"))?;
         let defaults = env(DEFAULTS_KEY).unwrap_or_default();
-        let defaults: BTreeMap<&str, &str> = pairs(&defaults)
-            .filter_map(|p| p.split_once('='))
-            .collect();
+        let defaults: BTreeMap<&str, &str> =
+            pairs(&defaults).filter_map(|p| p.split_once('=')).collect();
         let stored = match saved_file {
             Some(path) => saved(path)?,
             None => BTreeMap::new(),
@@ -385,7 +392,12 @@ impl Settings {
             if matches!(self.specs.get(key).map(|s| &s.kind), Some(Kind::Secret)) {
                 continue;
             }
-            for byte in key.bytes().chain([b'=']).chain(value.to_string().bytes()).chain([0]) {
+            for byte in key
+                .bytes()
+                .chain([b'='])
+                .chain(value.to_string().bytes())
+                .chain([0])
+            {
                 hash ^= u64::from(byte);
                 hash = hash.wrapping_mul(0x0100_0000_01b3);
             }
