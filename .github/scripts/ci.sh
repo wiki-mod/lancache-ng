@@ -1547,6 +1547,22 @@ _ci_codeql_run() {
         return 2
     fi
     local -x CODEQL_JAVA_HOME="${raw%/bin/java}"
+    # What: the Rust extractor gets rustc's sysroot.
+    # Why: without rustup it found no std; macros failed.
+    # From: Issue #1683 | PR #1858
+    if [ "${lang}" = rust ]; then
+        local sysroot
+        if ! sysroot="$(rustc --print sysroot 2>&1)"; then
+            ci_error "[CI-ERROR-CODEQL-0024]" "language=rust reason=\"rustc --print sysroot failed\"" "${sysroot}"
+            return 2
+        fi
+        local -x CODEQL_EXTRACTOR_RUST_OPTION_SYSROOT="${sysroot}"
+        local -x CODEQL_EXTRACTOR_RUST_OPTION_SYSROOT_SRC="${sysroot}/lib/rustlib/src/rust/library"
+        if [ ! -d "${CODEQL_EXTRACTOR_RUST_OPTION_SYSROOT_SRC}" ]; then
+            ci_error "[CI-ERROR-CODEQL-0025]" "language=rust dir=\"${CODEQL_EXTRACTOR_RUST_OPTION_SYSROOT_SRC}\" reason=\"no std source; apk rust-src missing\"" "sysroot=${sysroot}"
+            return 2
+        fi
+    fi
     codeql="$(_ci_codeql_fetch "${work}")" || return 2
     cfg="$(ci_cmd_codeql_config)" || return 2
     if ! raw="$(printf '%s' "${cfg}" 2>&1 > "${work}/config.yml")"; then
@@ -2177,6 +2193,19 @@ ci_cmd_plan_matrix() {
     fi
     validate="${any}"
     [ "${promote}" = false ] || validate=true
+    # What: a stack compose or SOT change validates too.
+    # Why: both change how the containers start.
+    # From: Issue #1683 | PR #1858
+    local -a stack=()
+    if [ "${validate}" = false ] && [ "${reuse}" = false ] && [ -z "${CI_RELEASE_TAG:-}" ]; then
+        [ "${sot_changed}" = false ] || validate=true
+        _ci_stack_compose_files stack || return 2
+        for f in "${changed[@]}"; do
+            for t in "${stack[@]}"; do
+                [ "${f}" != "${t}" ] || validate=true
+            done
+        done
+    fi
     local work=false
     if [ "${validate}" = true ] || [ -n "${test_services# }" ] || [ "${rust_audit}" = true ]; then
         work=true

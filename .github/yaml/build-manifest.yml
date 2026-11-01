@@ -251,6 +251,7 @@ build_toolchain:
       - run-parts
       - rust
       - rust-clippy
+      - rust-src
       - rustfmt
       - sccache
       - shellcheck
