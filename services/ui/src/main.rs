@@ -479,6 +479,214 @@ async fn logs_save(
     done(commit(&app, updates).await, "/logs#syslog")
 }
 
+// What: PowerDNS API client of this node.
+// Why: records go to PowerDNS directly; no own store.
+// From: Issue #1683 | PR #1858
+fn pdns_api(s: &Settings) -> Result<lancache_ng::pdns::Api, String> {
+    let key = secrets(s)?.pdns_api_key;
+    let client = lancache_ng::http::client(s)?;
+    Ok(lancache_ng::pdns::Api::new(
+        client,
+        &s.text("PDNS_PRIMARY_API_URL")?,
+        &key,
+    ))
+}
+
+// What: reverse name of an IPv4 or IPv6 address.
+// Why: PTR records live under in-addr.arpa / ip6.arpa.
+// From: Issue #1683 | PR #1858
+fn reverse_name(ip: &str) -> Result<String, String> {
+    match ip
+        .parse::<std::net::IpAddr>()
+        .map_err(|_| format!("{ip:?} is no IP address"))?
+    {
+        std::net::IpAddr::V4(v4) => {
+            let o = v4.octets();
+            Ok(format!("{}.{}.{}.{}.in-addr.arpa.", o[3], o[2], o[1], o[0]))
+        }
+        std::net::IpAddr::V6(v6) => {
+            let hex: String = v6.octets().iter().map(|b| format!("{b:02x}")).collect();
+            let nibbles: Vec<String> = hex.chars().rev().map(String::from).collect();
+            Ok(format!("{}.ip6.arpa.", nibbles.join(".")))
+        }
+    }
+}
+
+// What: reverse zone that holds a reverse name.
+// Why: PowerDNS needs the zone for the PATCH.
+// From: Issue #1683 | PR #1858
+fn reverse_zone(name: &str) -> Option<String> {
+    lancache_ng::dns::private_reverse_zones()
+        .into_iter()
+        .filter(|z| name.ends_with(z.as_str()))
+        .max_by_key(String::len)
+}
+
+// What: DNS page: domains, LAN records, PTR, switches.
+// Why: records are read live from PowerDNS.
+// From: Issue #1683 | PR #1858
+async fn domains(State(app): Shared, axum::Extension(csrf): axum::Extension<Csrf>) -> Response {
+    let s = app.settings();
+    let mut ctx = Context::new();
+    ctx.insert(
+        "dns_domains",
+        &lancache_ng::cdn::rows(&s).unwrap_or_default(),
+    );
+    let lan = lancache_ng::dns::canonical_zone(&s.text("DNS_LAN_ZONE").unwrap_or_default());
+    ctx.insert("lan_zone", lan.trim_end_matches('.'));
+    let (mut lan_records, mut ptr) = (Vec::new(), Vec::new());
+    match pdns_api(&s) {
+        Ok(api) => {
+            lan_records = api.rrsets(&lan).await.unwrap_or_default();
+            for z in lancache_ng::dns::private_reverse_zones() {
+                for r in api.rrsets(&z).await.unwrap_or_default() {
+                    if r["type"] == "PTR" {
+                        ptr.push(serde_json::json!({
+                            "ip": r["name"], "ttl": r["ttl"],
+                            "hostname": r["records"][0]["content"],
+                        }));
+                    }
+                }
+            }
+        }
+        Err(e) => ctx.insert("domain_error_message", &e),
+    }
+    ctx.insert("lan_records", &lan_records);
+    ctx.insert("ptr_records", &ptr);
+    ctx.insert("lan_record_types", &s.list("DNS_LAN_RECORD_TYPES"));
+    ctx.insert("record_ttl_default", &s.uint("DNS_RECORD_TTL").unwrap_or(0));
+    ctx.insert("ttl_max", &s.uint("DNS_RECORD_TTL_MAX").unwrap_or(0));
+    ctx.insert(
+        "aaaa_filter_enabled",
+        &s.flag("DNS_FILTER_AAAA").unwrap_or(false),
+    );
+    ctx.insert(
+        "ddns_unsigned_updates_allowed",
+        &s.flag("DDNS_ALLOW_UNSIGNED").unwrap_or(false),
+    );
+    ctx.insert("ddns_tsig_key_configured", &secrets(&s).is_ok());
+    app.page("domains.html", ctx, &csrf.0)
+}
+
+// What: one DNS page form action.
+// Why: every DNS form posts here with "op".
+// From: Issue #1683 | PR #1858
+async fn dns_action(
+    State(app): Shared,
+    axum::Extension(csrf): axum::Extension<Csrf>,
+    axum::extract::Path(op): axum::extract::Path<String>,
+    Form(f): Form<BTreeMap<String, String>>,
+) -> Response {
+    if !csrf_ok(&f, &csrf) {
+        return (StatusCode::FORBIDDEN, "CSRF token mismatch").into_response();
+    }
+    let s = app.settings();
+    let get = |k: &str| f.get(k).map(|v| v.trim().to_string()).unwrap_or_default();
+    let on = get("enabled") == "1" || get("enabled") == "true";
+    let list_with = |key: &str, item: &str, add: bool| {
+        let mut l = s.list(key);
+        l.retain(|x| x != item);
+        if add {
+            l.push(item.to_string());
+        }
+        BTreeMap::from([(key.to_string(), l.join(" "))])
+    };
+    let result = match op.as_str() {
+        "domain-add" => {
+            let d = get("domain").to_ascii_lowercase();
+            if lancache_ng::dns::cdn_entry(&d).is_none() {
+                Err(format!("{d:?} is no valid domain entry"))
+            } else {
+                commit(&app, list_with("CDN_CUSTOM_DOMAINS", &d, true)).await
+            }
+        }
+        "domain-remove" => {
+            commit(&app, list_with("CDN_CUSTOM_DOMAINS", &get("domain"), false)).await
+        }
+        "domain-toggle" => {
+            commit(&app, list_with("CDN_DISABLED_DOMAINS", &get("domain"), !on)).await
+        }
+        "aaaa-filter" => {
+            commit(
+                &app,
+                BTreeMap::from([("DNS_FILTER_AAAA".into(), on.to_string())]),
+            )
+            .await
+        }
+        "ddns-unsigned" => {
+            commit(
+                &app,
+                BTreeMap::from([("DDNS_ALLOW_UNSIGNED".into(), on.to_string())]),
+            )
+            .await
+        }
+        "record-add" | "record-remove" => record(&s, &op, &get).await,
+        "ptr-add" | "ptr-remove" => ptr(&s, &op, &get).await,
+        _ => Err(format!("unknown DNS action {op}")),
+    };
+    done(result, "/domains")
+}
+
+// What: add or remove one LAN record set.
+// Why: PATCH replaces or deletes; PowerDNS sends NOTIFY.
+// From: Issue #1683 | PR #1858
+async fn record(s: &Settings, op: &str, get: &dyn Fn(&str) -> String) -> Result<(), String> {
+    let api = pdns_api(s)?;
+    let zone = lancache_ng::dns::canonical_zone(&s.text("DNS_LAN_ZONE")?);
+    let (name, kind) = (get("name"), get("record_type"));
+    if !s.list("DNS_LAN_RECORD_TYPES").contains(&kind) {
+        return Err(format!("record type {kind} is not allowed"));
+    }
+    let fqdn = if name.ends_with('.') || name.ends_with(zone.trim_end_matches('.')) {
+        name
+    } else {
+        format!("{name}.{zone}")
+    };
+    let contents: Vec<String> = if op == "record-add" {
+        get("content")
+            .split(';')
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+            .map(String::from)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let ttl: u32 = get("ttl").parse().unwrap_or(0);
+    let max = s.uint("DNS_RECORD_TTL_MAX")?;
+    if op == "record-add" && (ttl == 0 || u64::from(ttl) > max) {
+        return Err(format!("TTL must be 1..={max}"));
+    }
+    api.set_rrset(&zone, &fqdn, &kind, ttl, &contents).await
+}
+
+// What: add or remove one PTR record.
+// Why: name from the IP; zone from the private list.
+// From: Issue #1683 | PR #1858
+async fn ptr(s: &Settings, op: &str, get: &dyn Fn(&str) -> String) -> Result<(), String> {
+    let api = pdns_api(s)?;
+    let ip = get("ip");
+    let name = if ip.ends_with(".arpa.") {
+        ip
+    } else {
+        reverse_name(&ip)?
+    };
+    let zone =
+        reverse_zone(&name).ok_or_else(|| format!("{name} is in no private reverse zone"))?;
+    let ttl = u32::try_from(s.uint("DNS_RECORD_TTL")?).map_err(|e| e.to_string())?;
+    let contents = if op == "ptr-add" {
+        let host = get("hostname");
+        vec![if host.ends_with('.') {
+            host
+        } else {
+            format!("{host}.")
+        }]
+    } else {
+        Vec::new()
+    };
+    api.set_rrset(&zone, &name, "PTR", ttl, &contents).await
+}
+
 // What: render all configs, write changed files, act.
 // Why: only owners with changed keys or files are touched.
 // From: Issue #1683 | PR #1858
@@ -545,7 +753,7 @@ const PAGES: [(&str, &str); 7] = [
     ("dhcp", "/dhcp"),
     ("setup", "/setup"),
 ];
-const ROUTES: [(&str, &str); 9] = [
+const ROUTES: [(&str, &str); 18] = [
     ("admin_css", "/static/admin.css"),
     ("favicon", "/favicon.ico"),
     ("logo_icon", "/static/logo-icon.png"),
@@ -555,6 +763,15 @@ const ROUTES: [(&str, &str); 9] = [
     ("setup_save", "/setup/save"),
     ("password", "/setup/password"),
     ("logs_save", "/logs/save"),
+    ("dns_add", "/domains/domain-add"),
+    ("dns_remove", "/domains/domain-remove"),
+    ("dns_toggle", "/domains/domain-toggle"),
+    ("lan_add", "/domains/record-add"),
+    ("lan_remove", "/domains/record-remove"),
+    ("ptr_add", "/domains/ptr-add"),
+    ("ptr_remove", "/domains/ptr-remove"),
+    ("aaaa_filter", "/domains/aaaa-filter"),
+    ("ddns_unsigned", "/domains/ddns-unsigned"),
 ];
 
 // What: traffic-light colour of one container.
@@ -781,6 +998,8 @@ async fn main() -> Result<(), String> {
         .route("/setup/save", post(save))
         .route("/setup/password", post(password))
         .route("/logs", get(logs))
+        .route("/domains", get(domains))
+        .route("/domains/{op}", post(dns_action))
         .route("/logs/save", post(logs_save))
         .route("/api/status", get(status))
         .route("/api/container/{service}", post(container_state))

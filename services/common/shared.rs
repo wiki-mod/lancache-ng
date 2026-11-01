@@ -570,6 +570,16 @@ pub mod pdns {
             .map(drop)
         }
 
+        // What: all RRsets of one zone.
+        // Why: the ui lists records straight from PowerDNS.
+        // From: Issue #1683 | PR #1858
+        pub async fn rrsets(&self, zone: &str) -> Result<Vec<Value>, String> {
+            let path = format!("/zones/{}", zone_id(zone));
+            let text = self.call(reqwest::Method::GET, &path, None).await?;
+            let v: Value = serde_json::from_str(&text).map_err(|e| format!("zone {zone}: {e}"))?;
+            Ok(v["rrsets"].as_array().cloned().unwrap_or_default())
+        }
+
         // What: all zones with serial and check times.
         // Why: the sync check reads these fields only.
         // From: Issue #1683 | PR #1858
@@ -2001,6 +2011,11 @@ pub mod recursor_conf {
         ))
     }
 
+    // What: lua dns script answering AAAA with no data.
+    // Why: clients then use IPv4 and reach the cache.
+    // From: Issue #1683 | PR #1858
+    pub const AAAA_FILTER_LUA: &str = "function preresolve(dq)\n  if dq.qtype == pdns.AAAA then\n    dq.rcode = pdns.NOERROR\n    return true\n  end\n  return false\nend\n";
+
     // What: recursor.yml for one recursor.
     // Why: local zones go to the auth server, rest upstream.
     // From: Issue #1683 | PR #1858
@@ -2046,7 +2061,7 @@ pub mod recursor_conf {
         Ok(format!(
             "incoming:\n  listen:\n{listen}  port: {port}\n  allow_from:\n{allow}\
              recursor:\n  serve_rfc1918: {rfc}\n  forward_zones:\n{fwd}{recurse}\
-             \x20 lua_config_file: \"{lua_file}\"\n  minimum_ttl_override: {minttl}\n\
+             \x20 lua_config_file: \"{lua_file}\"\n{dns_script}  minimum_ttl_override: {minttl}\n\
              recordcache:\n  max_entries: {rcmax}\n  refresh_on_ttl_perc: {perc}\n\
              \x20 serve_stale_extensions: {stale}\n  max_negative_ttl: {negttl}\n\
              packetcache:\n  max_entries: {pcmax}\n  ttl: {pcttl}\n  negative_ttl: {negttl}\n\
@@ -2054,6 +2069,14 @@ pub mod recursor_conf {
              webservice:\n  webserver: true\n  address: \"{apiaddr}\"\n  port: {apiport}\n\
              \x20 allow_from:\n{apiallow}  api_key: \"{api_key}\"\n\
              logging:\n  loglevel: {loglevel}\n{snmp}",
+            dns_script = if s.flag("DNS_FILTER_AAAA")? {
+                format!(
+                    "  lua_dns_script: \"{}\"\n",
+                    s.text("RECURSOR_AAAA_LUA_FILE")?
+                )
+            } else {
+                String::new()
+            },
             listen = rows(&s.list(&which.key("LISTEN")), "    ")?,
             port = u(&which.key("PORT"))?,
             allow = rows(&s.list("DNS_QUERY_ALLOW_FROM"), "    ")?,
@@ -2760,9 +2783,7 @@ pub mod render {
             "PDNS_CONF_FILE",
             pdns_conf::auth(s, &sec.pdns_api_key),
         );
-        let domains = s
-            .text("CDN_DOMAINS_FILE")
-            .and_then(|p| std::fs::read_to_string(&p).map_err(|e| format!("{p}: {e}")));
+        let domains = crate::cdn::effective(s);
         let list: Vec<String> = domains
             .as_deref()
             .unwrap_or_default()
@@ -2788,6 +2809,13 @@ pub mod render {
                 "dns",
                 &which.key("CONF_FILE"),
                 lua_path.and_then(|l| recursor_conf::yaml(s, which, &sec.recursor_api_key, &l)),
+            );
+        }
+        if s.flag("DNS_FILTER_AAAA").unwrap_or(false) {
+            add(
+                "dns",
+                "RECURSOR_AAAA_LUA_FILE",
+                Ok(recursor_conf::AAAA_FILTER_LUA.to_string()),
             );
         }
         match dhcp::Mode::from_settings(s) {
@@ -3071,5 +3099,71 @@ pub mod human {
         } else {
             format!("{whole}.{tenth} {}", UNITS[unit])
         }
+    }
+}
+
+// What: effective cache domain list.
+// Why: shipped list minus disabled plus custom entries.
+// From: Issue #1683 | PR #1858
+pub mod cdn {
+    use crate::config::Settings;
+
+    // What: one row of the domain table.
+    // Why: the ui shows default and custom rows apart.
+    // From: Issue #1683 | PR #1858
+    #[derive(Clone, Debug, serde::Serialize)]
+    pub struct Row {
+        pub display: String,
+        pub is_default: bool,
+        pub enabled: bool,
+        pub is_valid: bool,
+    }
+
+    // What: shipped default rows from the image file.
+    // Why: the file ships; comments and blanks are skipped.
+    // From: Issue #1683 | PR #1858
+    pub fn defaults(s: &Settings) -> Result<Vec<String>, String> {
+        let path = s.text("CDN_DEFAULT_DOMAINS_FILE")?;
+        let text = std::fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))?;
+        Ok(text
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .map(str::to_ascii_lowercase)
+            .collect())
+    }
+
+    // What: all rows for the ui.
+    // Why: default rows carry their on/off state.
+    // From: Issue #1683 | PR #1858
+    pub fn rows(s: &Settings) -> Result<Vec<Row>, String> {
+        let off = s.list("CDN_DISABLED_DOMAINS");
+        let mut out: Vec<Row> = defaults(s)?
+            .into_iter()
+            .map(|d| Row {
+                is_valid: crate::dns::cdn_entry(&d).is_some(),
+                enabled: !off.contains(&d),
+                display: d,
+                is_default: true,
+            })
+            .collect();
+        out.extend(s.list("CDN_CUSTOM_DOMAINS").into_iter().map(|d| Row {
+            is_valid: crate::dns::cdn_entry(&d).is_some(),
+            enabled: true,
+            display: d,
+            is_default: false,
+        }));
+        Ok(out)
+    }
+
+    // What: effective list as text, one entry per line.
+    // Why: input of RPZ and nginx host maps.
+    // From: Issue #1683 | PR #1858
+    pub fn effective(s: &Settings) -> Result<String, String> {
+        Ok(rows(s)?
+            .into_iter()
+            .filter(|r| r.enabled)
+            .map(|r| r.display + "\n")
+            .collect())
     }
 }

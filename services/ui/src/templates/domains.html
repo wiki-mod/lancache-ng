@@ -78,7 +78,7 @@
             <td>
               <form action="{{ routes.dns_remove | safe }}" method="post">
                 {{ <csrf_field csrf_token={csrf_token}/> }}
-                <input type="hidden" name="domain" value="{{ domain.raw }}">
+                <input type="hidden" name="domain" value="{{ domain.display }}">
                 <button type="submit" class="btn ghost" onclick="return confirm('Remove {{ domain.display }}?')">Remove</button>
               </form>
             </td>
