@@ -9,7 +9,6 @@
 [workspace]
 resolver = "3"
 members = [
-    "services/dns/nats-subscriber",
     "services/ui",
     "services/cachehamster",
     "services/watchdog",
