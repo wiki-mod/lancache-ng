@@ -167,7 +167,7 @@ impl Csrf {
     }
 
     fn matches(&self, given: &str) -> bool {
-        secret::equal(given.as_bytes(), self.0.as_bytes())
+        secret::equal(given, &self.0)
     }
 
     // What: form check; refuse without a match.
@@ -228,7 +228,7 @@ async fn login_ok(s: &Settings, headers: &HeaderMap) -> bool {
     let pass_ok = tokio::task::spawn_blocking(move || verify(&hash, &pass))
         .await
         .unwrap_or(false);
-    pass_ok & secret::equal(user.as_bytes(), want.as_bytes())
+    pass_ok & secret::equal(&user, &want)
 }
 
 // What: login, session cookie and CSRF token.
@@ -741,7 +741,7 @@ fn in_zone(name: &str, zone: &str) -> String {
 // What: add or remove one LAN record set.
 // Why: PATCH sets or deletes; NOTIFY follows.
 // From: Issue #1683 | PR #1858
-async fn record(s: &Settings, add: bool, get: &dyn Fn(&str) -> String) -> Result<(), String> {
+async fn record(s: &Settings, add: bool, get: &(dyn Fn(&str) -> String + Sync)) -> Result<(), String> {
     let zone = lan_zone(s)?;
     let kind = get("record_type");
     if !s.list("DNS_LAN_RECORD_TYPES").contains(&kind) {
@@ -767,7 +767,7 @@ async fn record(s: &Settings, add: bool, get: &dyn Fn(&str) -> String) -> Result
 // What: add or remove one PTR record.
 // Why: name from the IP; zone from the list.
 // From: Issue #1683 | PR #1858
-async fn ptr(s: &Settings, add: bool, get: &dyn Fn(&str) -> String) -> Result<(), String> {
+async fn ptr(s: &Settings, add: bool, get: &(dyn Fn(&str) -> String + Sync)) -> Result<(), String> {
     let ip = get("ip");
     let name = if ip.ends_with(".arpa.") { ip } else { reverse_name(&ip)? };
     let Some(zone) = reverse_zone(s, &name) else {
@@ -863,7 +863,7 @@ async fn register(State(app): Shared, axum::Json(r): axum::Json<Register>) -> Pa
     let s = app.settings();
     let token = registration_token(&s)
         .map_err(|e| Fail(StatusCode::SERVICE_UNAVAILABLE, e))?;
-    if !secret::equal(r.token.as_bytes(), token.as_bytes()) {
+    if !secret::equal(&r.token, &token) {
         return Err(Fail(StatusCode::UNAUTHORIZED, "wrong token".into()));
     }
     if !valid_peer_name(&s, &r.name)? || !is_ip(&r.address) {
@@ -1138,7 +1138,7 @@ async fn kea_edit(
 // What: Kea subnet from the subnet form.
 // Why: named options; code options and hosts kept.
 // From: Issue #1683 | PR #1858
-fn subnet_from(get: &dyn Fn(&str) -> String, id: u64, old: Option<&Value>) -> Value {
+fn subnet_from(get: &(dyn Fn(&str) -> String + Sync), id: u64, old: Option<&Value>) -> Value {
     let dns: Vec<String> = [get("dns_primary"), get("dns_secondary")]
         .into_iter()
         .filter(|d| !d.is_empty())
@@ -1201,7 +1201,7 @@ fn dnsmasq_fields(form: &Fields, proxy: bool) -> Fields {
 // What: Kea subnet, option and host edits.
 // Why: all go through kea_edit.
 // From: Issue #1683 | PR #1858
-async fn kea_action(s: &Settings, op: &str, get: &dyn Fn(&str) -> String) -> Result<(), String> {
+async fn kea_action(s: &Settings, op: &str, get: &(dyn Fn(&str) -> String + Sync)) -> Result<(), String> {
     let num = |k: &str| get(k).parse::<u64>().map_err(|_| format!("{k} must be a number"));
     match op {
         "subnet-add" => {
@@ -1834,9 +1834,7 @@ fn verify(hash: &str, pw: &str) -> bool {
 // Why: setup.sh and the page share it.
 // From: Issue #1683 | PR #1858
 fn phc(pw: &str) -> Result<String, String> {
-    use argon2::password_hash::{rand_core::OsRng, SaltString};
-    let salt = SaltString::generate(&mut OsRng);
-    let hash = Argon2::default().hash_password(pw.as_bytes(), &salt);
+    let hash: Result<PasswordHash, _> = Argon2::default().hash_password(pw.as_bytes());
     hash.map(|h| h.to_string()).map_err(|e| e.to_string())
 }
 

@@ -2631,7 +2631,7 @@ pub mod apply {
     pub async fn run(
         api: &Api,
         plan: &BTreeMap<String, Effect>,
-        container_of: &dyn Fn(&str) -> String,
+        container_of: &(dyn Fn(&str) -> String + Sync),
         grace: u32,
         limit: Duration,
     ) -> Vec<(String, Outcome)> {
