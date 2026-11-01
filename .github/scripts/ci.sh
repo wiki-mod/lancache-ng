@@ -58,6 +58,10 @@ CI_ARG_PROCESSES=LANCACHE_PROCESSES
 CI_ARG_GID=LANCACHE_RUNTIME_GID
 CI_ARG_IMAGE_SETUP=IMAGE_SETUP
 CI_ARG_DEFAULTS=LANCACHE_RUNTIME_DEFAULTS
+# What: build-arg and env name of the SOT settings schema.
+# Why: config.rs checks every value against it.
+# From: Issue #1683 | PR #1858
+CI_ARG_SCHEMA=LANCACHE_RUNTIME_SCHEMA
 
 # What: The ci.sh subcommand dispatch table.
 # Why: One table is membership, dispatch and error text.
@@ -7967,7 +7971,7 @@ _ci_test_rust() {
     # What: workspace-root cargo on the service's crates.
     # Why: build context is no crate; AG-VAL-008 per crate.
     # From: Issue #1683 | PR #1858
-    local trc=0 c setup_rc=200 defaults rows kv
+    local trc=0 c setup_rc=200 defaults schema rows kv
     local -a picks=() crate_list=()
     [ -z "${ctx}" ] || mapfile -t crate_list <<< "${ctx}"
     for c in "${crate_list[@]}"; do picks+=(-p "${c}"); done
@@ -7976,6 +7980,7 @@ _ci_test_rust() {
     # Why: no test invents a value (AG-CODE-010).
     # From: Issue #1683 | PR #1858
     defaults="$(_ci_service_defaults_arg "${service}")" || return 2
+    schema="$(_ci_service_schema_arg "${service}")" || return 2
     rows="$(_ci_service_compose_env "${service}")" || return 2
     _ci_cargo_lock || return 2
     ( _ci_sccache_env "${service}" || exit "${setup_rc}"
@@ -7984,6 +7989,7 @@ _ci_test_rust() {
             [ -z "${kv}" ] || export "${kv?}"
         done <<< "${rows}"
         export "${CI_ARG_DEFAULTS}=${defaults}"
+        export "${CI_ARG_SCHEMA}=${schema}"
         cd "${CI_REPO_ROOT:-.}" \
             && cargo fmt --check "${picks[@]}" \
             && cargo clippy --all-targets "${picks[@]}" -- -D warnings \
@@ -13053,6 +13059,21 @@ _ci_service_defaults_arg() {
     printf '%s' "${rows//$'\n'/|}"
 }
 
+# What: the SOT schema rows of the keys one image reads.
+# Why: config.rs needs a spec for every baked default.
+# From: Issue #1683 | PR #1858
+_ci_service_schema_arg() {
+    local rows schema keys out="" row
+    rows="$(_ci_service_default_rows "$1")" || return 2
+    schema="$(_ci_required_field runtime schema blocklist)" || return 2
+    keys=" $(printf '%s\n' "${rows}" | cut -d= -f1 | tr '\n' ' ')"
+    while IFS= read -r row; do
+        [ -n "${row}" ] || continue
+        case "${keys}" in *" ${row%%=*} "*) out="${out:+${out}|}${row}" ;; esac
+    done <<< "${schema}"
+    printf '%s' "${out}"
+}
+
 # What: KEY=value rows compose gives one service.
 # Why: rendered with the SOT fixture env; one owner.
 # From: Issue #1683 | PR #1858
@@ -13126,6 +13147,8 @@ _ci_service_build_args() {
     # From: Issue #1683 | PR #1912
     val="$(_ci_service_defaults_arg "${service}")" || return 2
     out="${out}${prefix}${CI_ARG_DEFAULTS}=${val}"$'\n'
+    val="$(_ci_service_schema_arg "${service}")" || return 2
+    out="${out}${prefix}${CI_ARG_SCHEMA}=${val}"$'\n'
     # What: SOT defaults this Dockerfile takes as args.
     # Why: the image builds with the value; it names none.
     # From: Issue #1683 | PR #1912

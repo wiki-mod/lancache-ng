@@ -59,6 +59,12 @@ RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
 ARG LANCACHE_RUNTIME_DEFAULTS
 ENV LANCACHE_RUNTIME_DEFAULTS=${LANCACHE_RUNTIME_DEFAULTS}
 
+# What: the SOT settings schema of the keys above.
+# Why: config.rs checks every value against it.
+# From: Issue #1683 | PR #1858
+ARG LANCACHE_RUNTIME_SCHEMA
+ENV LANCACHE_RUNTIME_SCHEMA=${LANCACHE_RUNTIME_SCHEMA}
+
 # What: nginx in the foreground as PID 1.
 # Why: config comes from the ui volume; HUP reloads it.
 # From: Issue #1683 | PR #1858

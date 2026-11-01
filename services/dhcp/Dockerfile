@@ -66,6 +66,12 @@ ENV LANCACHE_RUNTIME_GID=${LANCACHE_RUNTIME_GID}
 ARG LANCACHE_RUNTIME_DEFAULTS
 ENV LANCACHE_RUNTIME_DEFAULTS=${LANCACHE_RUNTIME_DEFAULTS}
 
+# What: the SOT settings schema of the keys above.
+# Why: config.rs checks every value against it.
+# From: Issue #1683 | PR #1858
+ARG LANCACHE_RUNTIME_SCHEMA
+ENV LANCACHE_RUNTIME_SCHEMA=${LANCACHE_RUNTIME_SCHEMA}
+
 # What: OpenRC as PID 1; compose passes DHCP_MODE.
 # Why: openrc-init takes the runlevel as argument.
 # From: Issue #1683 | PR #1858

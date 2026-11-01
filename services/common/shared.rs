@@ -3424,15 +3424,18 @@ pub mod rrd {
         s.list("STATS_GRAPHS")
             .iter()
             .map(|row| {
-                let mut p = row.split('|');
-                let (Some(name), Some(title), Some(srcs)) = (p.next(), p.next(), p.next()) else {
-                    return Err(format!("STATS_GRAPHS row {row:?} needs name|title|sources"));
+                // What: row = name:ds=oid=TYPE+ds=oid=TYPE.
+                // Why: list items split on comma and space; the
+                //      SOT list joins entries with a pipe.
+                let Some((name, srcs)) = row.split_once(':') else {
+                    return Err(format!("STATS_GRAPHS row {row:?} needs name:sources"));
                 };
+                let title = name.replace('_', " ");
                 if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
                     return Err(format!("graph name {name:?} is not plain"));
                 }
                 let sources = srcs
-                    .split(',')
+                    .split('+')
                     .map(|x| {
                         let v: Vec<&str> = x.split('=').collect();
                         match v.as_slice() {
@@ -3452,7 +3455,7 @@ pub mod rrd {
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok(Graph {
                     name: name.into(),
-                    title: title.replace('_', " "),
+                    title,
                     sources,
                 })
             })
