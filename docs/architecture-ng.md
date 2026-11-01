@@ -2,28 +2,19 @@
 
 ## Services
 
-Every service below (proxy, PowerDNS, Kea DHCP, dnsmasq DHCP, Watchdog, Admin UI)
-already existed before this project's first version tag (`v0.1.0`, cut
-2026-07-06) was created, so a per-service "included since vX.Y.Z" column
-would not actually differentiate anything -- every real row would read the
-same "v0.1.0" regardless of which service is genuinely older or newer
-(verified against each service directory's first commit in git history, not
-assumed). The one row below that a version field genuinely would
-differentiate is CacheHamster (the Cache-Prefill feature's service, issue
-#871), which is called out explicitly instead: it is not shipped in any
-tagged version, current or planned, and does not yet have real Steam
-depot-fetch capability.
+Exactly five containers. Programs inside a container start through OpenRC
+(`openrc-init` as PID 1, package init.d scripts) or, for the proxy, as the
+container's only process.
 
-| Service | Default | Replaces | Notes |
-|---|---|---|---|
-| nginx (proxy) | on | — | Mainline from nginx.org, Alpine base (issue #815) |
-| PowerDNS | on | dnsmasq | Authoritative + Recursor for DNS spoofing & recursion |
-| Kea DHCP / DHCP modes | off | — | Configurable four-state: `disabled` / `kea` / `dnsmasq-proxy` / `dnsmasq-relay` (#844); requires PowerDNS (DDNS via nsupdate) in `kea` mode. Kea and both dnsmasq modes run in the one `dhcp` container; its supervisor starts Kea or dnsmasq by `DHCP_MODE` (`disabled` in the SOT): `dnsmasq-proxy` injects PXE options alongside an existing server, `dnsmasq-relay` forwards DHCP to an upstream server on another segment. See [docs/dhcp-modes.md](dhcp-modes.md). |
-| NTP (chronyd inside `services`) | off (`NTP_ENABLED`) | — | The supervisor runs chronyd while `NTP_ENABLED` is true and the desired state of `ntp` is not `stopped` (see the Watchdog section). chrony-based NTP server, disciplined against public NTP servers, serving LAN clients on UDP/123; optional "auto-set as DHCP NTP server" toggle pushes its LAN address into Kea's `ntp-servers` option. See the "Kea DHCP" section below. |
-| Watchdog (inside `services`) | on | — | Supervisor of every supervised image, restart of an unhealthy container, retention; see the Watchdog section |
-| syslog-ng (inside `services`) | on; per-service switches `LOGGING_PROXY_ENABLED`, `LOGGING_DNS_ENABLED`, `LOGGING_DHCP_ENABLED`, `LOGGING_UI_ENABLED` (Admin UI `/logs`) | — | Central log receiver; every container logs to it through the Docker syslog driver — see the syslog-ng section's logging matrix below |
-| Admin UI | on | — | Axum/Rust, Tera, Tailwind, separate port |
-| CacheHamster (Cache-Prefill) | off (no supervised program) | — | **Built, functionally still a scaffold**: `services/cachehamster` (issue #871) is built into the `services` image as `lancache-cachehamster`; no supervisor starts it, an operator runs it by hand (`docker compose exec services lancache-cachehamster ...`). No real Steam depot-fetch capability yet -- credential-store + stream-fetch primitives only. Mechanism decided: stream-and-discard prefill, not SteamCMD; its own crate (not a `services/ui` module). See [docs/design-steam-prefill.md](design-steam-prefill.md) (issue #816, issue #871) for the current design plan and its one remaining open decision (credential strategy). Do not treat this row as a runnable feature until Steam control-plane/depot integration lands. |
+| Container | Programs | Start |
+|---|---|---|
+| proxy | nginx | nginx is the entrypoint |
+| dns | PowerDNS authoritative, PowerDNS Recursor | OpenRC (`OPENRC_SERVICES`) |
+| dhcp | Kea (dhcp4, ctrl-agent, ddns) or dnsmasq, by `DHCP_MODE` | OpenRC runlevel per mode (`OPENRC_RUNLEVELS`); mode off: the UI keeps the container stopped |
+| services | watchdog, cachehamster, syslog-ng, chronyd, snmpd | OpenRC; watchdog and cachehamster get generated openrc-run files with supervise-daemon |
+| ui | Admin UI (Axum, Tera), rrdtool graphs | the binary is the entrypoint |
+
+NATS, the `nats-subscriber` and Netdata are gone since 2.0 (PR #1858).
 
 ## nginx
 
@@ -151,117 +142,19 @@ real host:
 
 ## PowerDNS
 
-- Runs in two processes: authoritative (answering CDN zones) + recursor (recursive queries for clients)
-- Zone data from `/etc/pdns` directory: `cdn-domains.txt` compiled into PowerDNS zones
-- IPv4 + IPv6 everywhere (dual-stack)
-
-**Zones:**
-
-| Zone | Type | Purpose |
-|---|---|---|
-| `lan` | primary | LAN TLD |
-| `local.lan` | primary | LAN hosts (manageable via Admin UI) |
-| `10.in-addr.arpa` | primary | Reverse 10/8 |
-| `168.192.in-addr.arpa` | primary | Reverse 192.168/16 |
-| `16–31.172.in-addr.arpa` | primary | Reverse 172.16/12 |
-| `ip6.arpa` (ULA) | primary | IPv6 reverse |
-
-**Optional features (environment variables):**
-
-| Variable | Default | Meaning |
-|---|---|---|
-| `ROOT_ZONE_MIRROR` | SOT runtime default in `.github/yaml/build-manifest.yml`; the supervisor's `recursor` render (`services/watchdog/src/main.rs`) turns the mirror on unless the value parses as false | Root zone mirror (AXFR from root servers). Was previously documented here as `ENABLE_ROOT_MIRROR` — that name does not exist in code; `docs/dns-admin-ui-scope.md` already used the correct name. |
-| Global AAAA-response filter | off by default | Suppresses all AAAA answers for every client, regardless of address family. Not an env var/restart-time setting: toggled live via the Admin UI (`POST /domains/aaaa-filter`), which writes/removes a marker file on the shared `powerdns-state` volume, read live by `filter-aaaa.lua`'s recursor `preresolve` hook. (Previously documented here as two separate env vars, `FILTER_AAAA_V4`/`FILTER_AAAA_V6` — neither name appears anywhere in `services/dns/` or `services/ui/src`; see `docs/dns-admin-ui-scope.md` §1b for the real, shipped mechanism.) **Planned change, not yet implemented**: starting with v0.3.0, this filter is intended to default to **on** instead of off (maintainer decision recorded in issue #1068; no dedicated tracking issue exists yet for the code change itself). Current shipped behavior as of this writing is still off-by-default — do not treat this bullet as already-shipped. |
-| `DNS_REPLICATION_ROLE` | `native` | Selects whether a DNS container owns local zones normally (`native`), acts as the transfer primary (`primary`), or creates the fixed LAN/reverse zones as PowerDNS secondaries (`secondary`). Shipped production and full-setup topology sets `dns` to `primary`; remote secondaries (`setup.sh secondary`) use `secondary`. |
-| `DNS_XFR_PRIMARY` | — | Required when `DNS_REPLICATION_ROLE=secondary`; host:port endpoint of the PowerDNS primary used for native AXFR/refresh polling. Remote secondaries receive this from the Admin UI registration response. |
-| `DNS_XFR_NOTIFY_TARGETS` | — | Comma/space-separated NOTIFY targets for a primary. Shipped local topology notifies no local target; remote secondaries can still converge through PowerDNS's refresh polling when they are not listed here. |
-| `PDNS_SOA_REFRESH` | `30` (`build-manifest.yml` `runtime.defaults`) | Primary SOA `refresh` (seconds), seeded into `default-soa-content` and rewritten onto every zone by `run_soa_maintainer`. Short by design (issue #1095): it is the only convergence guarantee for a secondary that missed a single-shot UDP NOTIFY, replacing the old `10800`s (3h) drift window. |
-| `PDNS_SOA_RETRY` | `10` (`runtime.defaults`) | Primary SOA `retry` (seconds); must be `< PDNS_SOA_REFRESH` (RFC 1912). |
-| `PDNS_SOA_RESYNC_INTERVAL` | `3600` (`runtime.defaults`) | Primary-only cadence (seconds) at which `run_soa_maintainer` re-anchors the `YYMMDDxxx` date serial at day rollover and bumps + NOTIFYs as a generic force-resync safety net (issue #1095). |
-| `NATS_BIND_IP` | — | Trusted LAN/VPN interface for optional NATS host binding used by remote secondaries; the `dns` service publishes NATS on it (loopback when unset). Also drives the address the Admin UI hands out during secondary registration -- see below. |
-| `NATS_ADVERTISE_URL` | — | Explicit override for the NATS URL the Admin UI hands a remote secondary during registration (issue #866), for setups `NATS_BIND_IP` alone can't express (non-default port, `tls://` scheme, VPN hostname). Always wins over `NATS_BIND_IP` when set. |
-
-**allow-query / allow-recursion:** open to all RFC-1918 + IPv6 ULA by default
-
-### Remote secondary NATS access
-
-The production Compose file publishes the NATS port only on the SOT `LOOPBACK_BIND_IP` by default. This keeps the event bus closed for installations that do not use remote secondaries.
-
-Enable host binding for remote secondary DNS nodes only when you intentionally
-publish NATS to a trusted LAN or VPN interface. `ENABLE_SECONDARY` is not a
-runtime switch read by setup, Compose, DNS, or UI code; native zone replication
-is controlled by `DNS_REPLICATION_ROLE`/`DNS_XFR_PRIMARY`, while `NATS_BIND_IP`
-only publishes the NATS registration/event path.
-
-Example:
-
-```sh
-NATS_BIND_IP=192.168.1.5 \
-  docker compose --env-file deploy/prod/.env.local -f deploy/prod/docker-compose.yml up -d dns
-```
-
-Do not bind NATS to `0.0.0.0` unless an external firewall or VPN policy restricts access to trusted secondary nodes.
-
-**Registration hands out this same `NATS_BIND_IP` address (issue #866):** the
-Admin UI's `POST /api/secondary/register` used to always return the literal
-`nats://nats:4222` in its `nats_url` field -- correct for the primary's own
-internal services, but never reachable from a real remote secondary, since
-that address only resolves inside the primary's own Docker network.
-`setup.sh secondary` wrote that unreachable value straight into the
-secondary's `.env`, which then ran successfully and printed a false "is
-running" success message, while the `nats-subscriber` container silently
-retried a connection that could never succeed and no DNS record ever synced.
-As of #866, registration now returns `nats://<NATS_BIND_IP>:4222` whenever
-`NATS_BIND_IP` is set on the primary to a routable address -- the same value
-already required by the host-binding override above, so a primary that has
-that override active for the `dns` service gets a working registration
-response for free. An IPv6 `NATS_BIND_IP` literal is bracketed automatically
-(`nats://[2001:db8::5]:4222`), since an unbracketed IPv6 literal is not a
-parsable NATS URL; the same bracketing applies whether `NATS_BIND_IP` itself
-was written bracketed (`[2001:db8::5]`, Compose's own documented form for an
-IPv6 host-port field) or bare.
-`NATS_BIND_IP` is only ever echoed back when it is itself a routable IP
-literal. It is rejected (falls through to the HTTP 503 refusal described
-below, the same as leaving it unset) in every other case:
-- **Wildcard listen addresses** (`0.0.0.0` or `::`, bracketed or not) -- the
-  "external firewall/VPN" case described above -- are never echoed back,
-  since a wildcard is only meaningful as a bind address, never as something
-  a remote secondary could dial.
-- **Loopback addresses** (`127.0.0.1` or `::1`) are rejected the same way: a
-  genuinely remote secondary can never dial loopback on the primary, so
-  advertising it would silently reproduce the original #866 failure under a
-  configuration that merely looks valid.
-- **Hostnames** (anything that does not parse as an IP literal at all) are
-  also rejected: `NATS_BIND_IP` feeds Compose's port `HOST` field, which is
-  an IP/port bind, not a resolvable name, so there is no guarantee a
-  hostname value is reachable at the address `dns` actually publishes NATS on.
-All three cases need the explicit `NATS_ADVERTISE_URL` override instead, with
-the real routable LAN/VPN address, reverse-proxy hostname, non-default
-port, or `tls://` scheme that `NATS_BIND_IP` alone cannot express.
-`NATS_ADVERTISE_URL` always takes precedence over `NATS_BIND_IP` and is
-never reformatted or validated as an IP literal -- an operator who sets it
-explicitly is asserting the value is already correct and reachable.
-Neither variable has a default. If a primary has configured **neither** (or
-only a `NATS_BIND_IP` that falls into one of the three rejected cases above
-with no `NATS_ADVERTISE_URL`), registration now refuses the request outright
-with HTTP 503 instead of falling back to the unreachable `nats_url` --
-`setup.sh secondary` reports this clearly (rather than its generic "verify
-the token/name" message) and names the exact variable to set. This endpoint
-has no other legitimate caller: every real invocation is a genuine
-remote-secondary registration, so there is no "install that doesn't use
-remote secondaries" case that could be broken by refusing here -- an
-install that never runs `setup.sh secondary` never reaches this code path at
-all. See `services/ui/src/main.rs`'s `advertised_nats_url()` and its unit
-tests for the exact precedence and rejection rules.
-
-Note that setting `NATS_BIND_IP`/`NATS_ADVERTISE_URL` on the primary and
-restarting only the `ui` container is not, on its own, enough to make a
-registration attempt actually succeed end-to-end: the `dns` service, which
-runs NATS, must be recreated with `NATS_BIND_IP` set to publish the NATS port
-on that address in the first place. `ui` only computes what to *advertise*;
-it does not control what `dns` publishes.
-
-**nsupdate (RFC 2136):** TSIG-secured dynamic DNS channel into PowerDNS authoritative. Kea DHCP sends lease add/update/delete events through `kea-dhcp-ddns` to `dns` only; PowerDNS accepts those updates only for the LAN and private reverse zones that are explicitly mapped to the shared `DDNS_TSIG_KEY`. Registered remote DNS secondaries consume those same zone changes through native PowerDNS AXFR/NOTIFY, so DHCP-driven records have one writer and do not depend on Kea's `dns-servers` failover list behaving like fan-out.
+- Two programs: the authoritative server (LAN zone, private reverse zones,
+  RPZ from the CDN list) and the recursor (clients).
+- The Admin UI writes records through the native PowerDNS HTTP API (PATCH
+  rrsets). PowerDNS raises the serial and sends NOTIFY.
+- Secondaries pull the zones by AXFR. `DNS_SECONDARIES` ("name@ip") feeds
+  `also-notify` and `allow-axfr-ips`. DDNS needs TSIG unless
+  `DDNS_ALLOW_UNSIGNED` is on (`dnsupdate-require-tsig`).
+- On a secondary the watchdog compares serials and flushes the recursor
+  cache when a new zone arrived.
+- AAAA filter: `DNS_FILTER_AAAA`; the recursor Lua script answers AAAA with
+  no data.
+- Zone snapshots and rollback: see
+  [known-good-config-snapshots.md](known-good-config-snapshots.md).
 
 ## Kea DHCP
 
@@ -287,165 +180,18 @@ Keep `UI_HSTS_MODE=auto` for direct LAN HTTP access or TLS-terminating reverse p
 
 ## Watchdog
 
-`lancache-watchdog` (`services/watchdog/src/main.rs`) is the entry point of
-the four supervised images: `services`, `proxy`, `dns` and `dhcp`. The `ui`
-image has no supervisor. Every value below is an environment key that the
-SOT (`.github/yaml/build-manifest.yml`) bakes in; the binary has no defaults.
+The watchdog only watches. It reads states, raises alarms and restarts a
+container within limits. It renders no config and supervises no program.
 
-**Supervisor.** `lancache-watchdog supervise` (the default) reads
-`LANCACHE_PROCESSES`, which the image build bakes from the SOT `processes:`
-list of that image, and keeps each program running:
+| Check | Source | Action |
+|---|---|---|
+| Container state and health | Docker API | restart, at most `WATCHDOG_RESTART_LIMIT` per `WATCHDOG_RESTART_WINDOW` |
+| Free disk | `WATCHDOG_DISK_PATHS`, `WATCHDOG_DISK_MIN_FREE_PERCENT` | alarm |
+| Certificates | `WATCHDOG_CERT_FILES`, `WATCHDOG_CERT_WARN_SECS` | alarm |
+| Zone serial primary and secondary | DNS SOA | alarm; on a secondary a recursor cache flush |
+| DHCP mode off | `DHCP_MODE` | a stopped dhcp container is not an error |
 
-| Image | Programs |
-| --- | --- |
-| `services` | `watch`, `retention`, `syslog-ng`, `chronyd`, `netdata` |
-| `proxy` | `nginx` |
-| `dns` | `pdns`, `dns-http`, `dns-https`, `nats-server`, `nats-subscriber`, `soa` |
-| `dhcp` | `kea-dhcp4`, `kea-ctrl-agent`, `kea-dhcp-ddns`, `dnsmasq`, `dhcp-probe` |
-
-Every `SUPERVISE_TICK` seconds the supervisor:
-- starts a wanted program that is not running, after its backoff
-  (`RETRY_BACKOFF_START` doubling up to its maximum; a run of
-  `SUPERVISE_BACKOFF_RESET` seconds resets it);
-- stops a running program that is no longer wanted (TERM, then KILL after
-  `SUPERVISE_STOP_GRACE`);
-- restarts a running program whose watched input file changed (for example
-  the Admin UI settings file, `cdn-domains.txt` or the NATS config);
-- writes `supervise.json` into `SUPERVISE_RUN_DIR`.
-
-A program is wanted (`Kind::wanted`) by these rules:
-- `kea-dhcp4`, `kea-ctrl-agent` and `kea-dhcp-ddns` only in the Kea DHCP
-  mode, `dnsmasq` only in a dnsmasq mode, and both only while the desired
-  state of `dhcp` is not `stopped`;
-- `chronyd` only while `NTP_ENABLED` is true and the desired state of `ntp`
-  is not `stopped`;
-- `nats-server` and `soa` not on a DNS secondary;
-- `dns-https` only when `IP_HTTPS` is set;
-- every other program always.
-
-The desired state is `DESIRED_STATE_FILE`. The Admin UI writes it; the
-supervisor reads it on every tick. No Docker call is involved.
-
-**Healthcheck.** Compose runs `lancache-watchdog healthcheck` in the four
-supervised containers (`x-watchdog-healthcheck` in
-`deploy/prod/docker-compose.yml`). It fails when:
-- `supervise.json` is older than `SUPERVISE_STATUS_MAX_AGE` seconds;
-- a wanted program is not running;
-- a running `nats-subscriber` or `kea-ctrl-agent` does not accept a TCP
-  connection on its port, or a running `kea-dhcp4` does not accept one on
-  its control socket;
-- in the `proxy` container, nginx does not answer its health URL, and with
-  `HTTPS_ENABLED` also its HTTPS health URL checked against the stack CA.
-
-The `ui` container runs `lancache-ui healthcheck`. `ci.sh check
-compose-healthchecks` (part of `ci.sh check all`) fails for a compose service
-without a healthcheck, except a service named in the SOT field
-`validation.healthcheck_exempt`; the SOT has no such field today.
-
-**Watch (restart of an unhealthy container).** The `watch` task in the
-`services` container is the only Docker API client (`DockerApi` in
-`services/common/shared.rs`). It reaches the socket `DOCKER_SOCKET`, mounted
-read-write with no socket proxy (see `SECURITY.md` section 3). Every
-`CHECK_INTERVAL` seconds it:
-- lists the containers of its own compose project (the project label of its
-  own container);
-- inspects each container and counts `unhealthy` readings in a row;
-- restarts the container after `RESTART_AFTER` readings in a row
-  (`DOCKER_RESTART_GRACE`, `DOCKER_RESTART_TIMEOUT`); `starting`, no health,
-  unreachable and `degraded` readings do not count.
-
-Its own container is only reported, never restarted: a self-restart would end
-the restart call. The watchdog never starts or stops a container. Docker's
-`restart: always` restarts a container that exits.
-
-**Status.** The `watch` task writes `status.json` (`STATUS_FILE`, on the
-`watchdog-status` volume) every cycle:
-- one row per compose service: health text, color and failure count;
-- a `syslog-ng` row, red ("silent log loss") when syslog-ng processed
-  messages but no log file was written;
-- the cache disk color: yellow from `DISK_WARN_PCT`, red from
-  `DISK_ALARM_PCT`, `unknown` when `df` fails.
-
-The `ui` container mounts the volume read-only; the dashboard reads it through
-`GET /api/watchdog-status` (`ROUTE_WATCHDOG_STATUS` in
-`services/ui/src/main.rs`).
-
-**Retention.** The `retention` task in the `services` container runs every
-`CHECK_INTERVAL` seconds:
-- once a day it deletes cache files older than `CACHE_VALID_DAYS`
-  (`purge_cache`, stamp `PURGE_STAMP`);
-- it xz-compresses every closed syslog file (`compress_syslog`); today's
-  files stay open in syslog-ng;
-- once a day it deletes syslog files older than `SYSLOG_RETENTION_DAYS`,
-  then the oldest ones until the store fits `SYSLOG_MAX_GB`; today's files
-  stay, and an over-budget store is retried after
-  `SYSLOG_PRUNE_RETRY_COOLDOWN` (`prune_syslog`, stamp
-  `SYSLOG_PRUNE_STAMP`).
-
-Each target directory is resolved (symlinks and `..`) and must lie strictly
-inside `CACHE_DIR_ALLOWED_PREFIX` or `SYSLOG_LOG_ROOT_ALLOWED_PREFIX`;
-otherwise nothing is deleted and no stamp is written.
-
-**Other entry points.** `lancache-watchdog probe` prints one DHCP probe as
-JSON; `lancache-watchdog get KEY` prints one baked value.
-
-### Known benign startup/log messages (issue #849 item 8)
-
-Four log lines observed during real field testing (#1068 item 8) that read
-as alarming out of context but are expected, documented behavior once traced
-to their actual source -- collected here rather than left as unexplained
-"is this a problem?" notes:
-
-- **`Reconciler: published 0 records`** (`services/dns/nats-subscriber/src/main.rs`'s
-  `reconciler()`): a periodic (every `DNS_SYNC_TICK`, SOT runtime.defaults) full-resync pass that queries
-  PowerDNS's `lan.` zone via its REST API and re-publishes every non-SOA/NS
-  record over NATS, independent of the event-driven immediate-publish path
-  used when a record actually changes. **Expected** whenever the `lan.` zone
-  genuinely has no non-SOA/NS records yet -- a fresh install before any
-  DHCP-DDNS client has registered, an install with DHCP-DDNS disabled
-  entirely (`DHCP_DDNS_ENABLED=false`, the SOT default in `.github/yaml/build-manifest.yml`),
-  or any deployment that legitimately has zero dynamically-registered LAN
-  hosts. **Would be a real problem** only if DHCP-DDNS is enabled with active
-  leases and this line persists anyway -- that would point at a PowerDNS
-  API-connectivity or zone-content issue worth investigating directly (e.g.
-  `pdns_control` / the zone's REST endpoint), not this reconciler's own logic.
-- **NATS connection-refused-then-retry on `lancache-ui` startup**
-  (`services/ui/src/main.rs`'s `connect_nats_with_retry()`): the Admin UI's
-  `main()` awaits this function -- with a 1s-to-30s capped exponential
-  backoff loop that treats "not yet reachable" as its normal steady state --
-  *before* binding its own HTTP listener at all. Since Compose starts `ui`
-  and `dns` concurrently (no blocking `depends_on: condition:
-  service_healthy` between them), a connection-refused during `ui`'s first
-  few seconds while `nats-server` is still initializing is an expected,
-  self-resolving start-order race, confirmed harmless by design (the same
-  reasoning already documented on `services/ui/src/main.rs`'s
-  own unconditional reconnect loop, which treats "connection dropped, retry"
-  as its permanent steady state, not just a startup-only condition).
-- **netdata: permission-denied on `/host/proc/<pid>/io` for nginx, and a
-  missing `/etc/netdata/scripts.d`** -- two distinct findings bundled in the
-  original report:
-  - The `/host/proc` message came from the former separate netdata
-    container. netdata now runs as a process inside the `services`
-    container, which mounts no host `/proc` and has no `pid: host`
-    (`deploy/prod/docker-compose.yml`, service `services`; its `cap_add`
-    lists `SYS_PTRACE`). netdata's `apps.plugin` therefore reads only the
-    processes of the `services` container; the nginx processes of `proxy`
-    are in another PID namespace and are not shown.
-  - The missing `/etc/netdata/scripts.d` message is **netdata's own,
-    harmless, expected behavior for an unused optional collector**, verified
-    against netdata's own documentation (AG-VAL-023) rather than assumed:
-    `scripts.d.plugin` is a real, separate netdata external plugin that runs
-    Nagios-compatible/custom scripts, configured via `scripts.d/nagios.conf`
-    under that directory. This project configures no custom Nagios-style
-    scripts anywhere, so the directory is legitimately absent, and netdata
-    logs this the same way it reports any other optional, unconfigured
-    external plugin at startup -- informational, not an error, and not
-    something the `services` container needs to create or mount. An
-    operator who wants to silence the message specifically (not required for
-    correct operation) would disable `scripts.d.plugin` in the `[plugins]`
-    section of `netdata.conf`. The watchdog writes that file on every
-    netdata start (`NETDATA_CONF` in `services/watchdog/src/main.rs`), so the
-    change belongs there.
+Alarms go to `WATCHDOG_ALARM_FILE`; the Admin UI shows them.
 
 ## syslog-ng
 
@@ -476,83 +222,19 @@ Central log receiver for the stack. One syslog-ng runs inside the `services` con
 
 ## Cache Warming
 
-**Corrected 2026-08-29 (issue #871 decision-rework pass): the `steamcmd`-based engine this
-section previously described as the plan is retired.** The maintainer decided (recorded on
-issue #871) that the engine described below — `steamcmd` fetching a full local game install —
-conflicts with issue #816's non-negotiable stream-and-discard requirement and is not the
-direction this project takes. See
-[docs/design-steam-prefill.md](design-steam-prefill.md) (issue #816, issue #871) for the full
-design discussion and its still-open implementation decisions (credential strategy is
-unresolved; which-service-houses-the-engine is resolved below) before relying on any detail
-here.
+The cachehamster runs in the services container. The Admin UI drives it
+through `docker exec` (`lancache-cachehamster status`, `login-begin`,
+`login-poll`, `library`, `add`, `start`, `cancel`, `remove`).
 
-**Updated 2026-08-29 (issue #871, scaffold PR): `services/cachehamster` now
-exists as a Rust crate** (maintainer decision: a new, independently-switchable service, not a
-`services/ui` module — the operator must be able to turn CacheHamster off without affecting
-the rest of the stack). Implemented so far: the credential-store (Argon2id-as-KDF +
-XChaCha20-Poly1305 AEAD encryption of an operator-supplied Steam credential, with optional
-persistence — see "Credential handling" below) and the stream-fetch primitive
-(bounded-concurrency streaming GET into a discard sink, with throughput logging — see
-"Throughput display" below). **Not yet implemented**: the Steam control-plane login
-(`steam-vent`) and depot/manifest parsing (`steamroom`) that would resolve a real app ID into
-real CDN chunk URLs — this needs a real Steam account to test safely against and is
-deliberately deferred (see `services/cachehamster/src/main.rs`'s own module doc comment).
-
-**Infra integration (issue #871, issue #1683): built into `services`, functionally still
-inert.** `lancache-cachehamster` is a crate of the `services` image (`crates` of `services`
-in `.github/yaml/build-manifest.yml`), so CI builds, scans and publishes it with that image.
-It is no supervised program (`processes` of `services` does not list it), so nothing
-starts it; `deploy/prod/docker-compose.yml` passes `CACHEHAMSTER_URLS` and mounts
-`CACHEHAMSTER_DATA_DIR` into `services`. It has no full-stack CI check (AG-VAL-027): an
-inert scaffold with no real depot-fetch behavior and no CI-available Steam credential gives
-no testable claim. Do not treat this row as a runnable feature until the Steam
-control-plane/depot integration above lands.
-
-**Decision: stream-and-discard prefill, no SteamCMD.** `steamcmd` was rejected because
-`steamcmd app_update` performs a real local install — it downloads, verifies, decompresses, and
-writes the full depot content to disk on whatever host runs it, which is exactly the
-disk-space/SSD-wear cost this project does not want to impose on an operator's cachehamster
-host. The
-selected mechanism instead talks to Steam's CDN directly and streams each depot chunk's HTTP
-response body straight into a discard sink — the bytes exist only long enough to pass through
-lancache-ng's proxy (which is what actually caches them) and are never buffered to a file or
-held as a complete object in memory.
-
-**Planned workflow** (not yet implemented — design-only):
-1. Operator enters a Steam app ID (Admin UI or CLI, per the still-open "which service houses
-   this" decision).
-2. A depot/manifest layer resolves the app ID's depots and chunk list (control-plane login only
-   where required — see the credential-strategy decision below).
-3. Each chunk's CDN URL is fetched with a plain streaming HTTP GET, routed through the LAN's
-   http-mode DNS/proxy path so lancache-ng's own cache observes and stores it, and the
-   response body is drained directly into a discard sink as it arrives — never written to disk,
-   never fully buffered in memory.
-4. Progress (bytes/chunks fetched, current throughput) is displayed live to the operator.
-
-**Throughput display and safety margin:** the maintainer asked that the design consider
-`mbuffer` or `pv` between the download and the discard step, for (a) a speed readout in the
-log and (b) a safety net if the download ever outpaces the discard. In the Rust
-streaming-to-`tokio::io::sink()` design this decision selects, (b) does not apply structurally —
-there is no separate consumer stage that can fall behind; the network read itself is always the
-rate-limiting step, so nothing can back up behind a slower "discard" stage. (a) is still a real,
-worthwhile requirement and is satisfied natively: a byte counter around the copy loop, logged on
-a periodic interval, gives the same throughput visibility `pv` would, without needing an
-external process or an extra pipe stage. An external `mbuffer`/`pv` stage would only become
-relevant if a future revision of this design moves the fetch loop out of process (e.g. a shell
-pipeline instead of an in-process Rust stream); if that ever happens, verify package
-availability on this project's actual base images first (per AG-VAL-023) rather than assuming.
-The real lever for sustaining line-rate throughput at 1–10 Gbit/s is fetch concurrency (multiple
-chunks in flight at once), not buffering — a single HTTP stream rarely saturates a 10 GbE link
-against a real CDN.
-
-**Steam account:** credential strategy (dedicated/throwaway account vs. the operator's own,
-where credentials are stored) is still an open decision — see
-[docs/design-steam-prefill.md](design-steam-prefill.md). Whatever is decided, credentials are
-never committed to the repo or baked into an image.
-
-**Tracking:** planned: which app IDs were warmed + which CDN URLs belong to them → basis for targeted purging.
-
-Epic / GOG: not planned to be supported.
+- Jobs run now, later (started by hand) or at a set time. Up to
+  `CACHEHAMSTER_QUEUES` jobs run at once, each with
+  `CACHEHAMSTER_CONCURRENCY` connections.
+- Every body is read and dropped in memory; nothing is written to disk.
+- Steam: QR login through the Steam Web API. Only the sealed refresh token
+  is stored. An own CM connection (websocket) reads PICS app info and
+  manifest request codes. The zipped manifest is read in memory for chunk
+  ids only. Chunks are fetched through the proxy with Host
+  `STEAM_CDN_HOST`.
 
 ## Cache Retention & Cleanup
 
@@ -623,29 +305,11 @@ one) rather than being a given.
 
 ## Monitoring (Admin UI)
 
-- Netdata integrated (proxy via `/api/netdata`)
-- Statistics: CPU, RAM, network MB/s (realtime + history), disk I/O
-- Dashboard: cache fill level, hit/miss rate, active connections
-- Watchdog per-service traffic light bar: one indicator per service
-  (green/yellow/red) plus a cache-disk usage indicator, persistently visible
-  in the dashboard's "Service health" card, live-polled every 10 seconds
-  (issue #870; see the "Status" note under Watchdog above)
-- Netdata alarm forwarding (bug-hunt #849 observability pass,
-  finding #3): netdata's own `health.d` alarms (disk usage,
-  CPU, memory, ...) previously had no notification integration or Admin UI
-  surface of their own. The watchdog in the `services` container now writes
-  netdata's `health_alarm_notify.conf` with a `custom_sender()` that POSTs each
-  alarm event to the Admin UI's `POST /api/netdata-alarms`
-  (`alarm_notify_conf` in `services/watchdog/src/main.rs`,
-  `services/ui/src/main.rs`), gated by a shared
-  `NETDATA_ALARM_TOKEN` (issue #858 shared-secret pattern, same as
-  `PDNS_API_KEY`). The dashboard's "Netdata alarms" card
-  (`services/ui/src/main.rs`) shows the most recent alarms
-  server-rendered, not live-polled — an alarm is a discrete event, not a
-  continuously-changing gauge. This forwards alarm *events* only; Netdata's
-  full metrics dashboard (port 19999) remains unpublished, so deep
-  investigation of a forwarded alarm still needs direct Netdata access (see
-  `docs/threat-model.md`'s T9 for the residual-risk framing).
+- snmpd in the services container exposes host and service counters.
+- The Admin UI samples them every `STATS_STEP` into RRD files and draws the
+  graphs with rrdtool (`/stats`, ranges from `STATS_RANGES`).
+- The dashboard shows container states, watchdog alarms, cache fill level
+  and the recent requests.
 
 ## Admin UI
 
