@@ -2993,7 +2993,15 @@ _ci_rust_content() {
             items="$(_ci_listing_items "${line}" "${ref}")" || return 2
             refs="$(_ci_capture 0 cut -f4 <<< "${items}")" || return 2
             roots+=" ${refs//$'\n'/ }"
-            [ "${mode}" != text ] || printf '%s\n' "${items}"
+            if [ "${mode}" = text ]; then
+                printf '%s\n' "${items}"
+                continue
+            fi
+            # What: a binary file's items count in the id.
+            # Why: refs alone kept the key on main.rs edits.
+            # From: Issue #1683 | PR #1858
+            h="$(_ci_sha256_hex <<< "${items}")" || return 2
+            printf '%s\t%s\n' "${line%%$'\t'*}" "${h}"
         done <<< "${listing}"
     done <<< "${rows}"
     # What: every ref reads this job's generated lock.
