@@ -142,6 +142,10 @@ services:
   # Why: the passthrough port relays SNI; 443 intercepts.
   proxy:
     <<: [*service, *supervised]
+    # What: nginx reads the rendered main config.
+    # Why: the ui writes it into the config volume.
+    # From: Issue #1683 | PR #1980
+    command: ["-c", "${SOT_NGINX_CONF_DIR}/nginx.conf"]
     # What: a real HTTP request to the health path.
     # Why: only an answering nginx counts as healthy.
     # From: Issue #1683 | PR #1858
@@ -170,14 +174,10 @@ services:
       - proxy-cache:${SOT_NGINX_CACHE_DIR}
       - proxy-certs:${SOT_NGINX_DIR}/${SOT_NGINX_SUBDIR_CERTS}
       - proxy-config-snapshots:${SOT_PROXY_SNAPSHOT_MOUNT}
-      # What: nginx templates and the PSL from the checkout.
-      # Why: Fund 148: runtime files, no image rebuild.
-      # From: Issue #1683 | PR #1858
-      - ../../services/proxy/nginx.conf:${SOT_NGINX_DIR}/nginx.conf.template:ro
-      - ../../services/proxy/conf.d/http.conf:${SOT_NGINX_DIR}/http.conf.template:ro
-      - ../../services/proxy/conf.d/https.conf:${SOT_NGINX_DIR}/https.conf.template:ro
-      - ../../services/proxy/proxy-params.conf:${SOT_NGINX_DIR}/proxy-params.conf.template:ro
-      - ../../services/proxy/public_suffix_list.dat:${SOT_NGINX_DIR}/${SOT_NGINX_PSL_FILE}:ro
+      # What: nginx configs the ui rendered, read only.
+      # Why: the ui owns every config file; nginx reads.
+      # From: Issue #1683 | PR #1980
+      - lancache-config:${SOT_CONFIG_DIR}:ro
     # What: HTTP port on both IPs; HTTPS relayed or MITM.
     # Why: IP_HTTP relays TLS, IP_HTTPS intercepts it.
     ports:
@@ -320,6 +320,10 @@ services:
       # Why: one owner per file; programs read SOT paths.
       # From: Issue #1683 | PR #1980
       - lancache-config:${SOT_CONFIG_DIR}
+      # What: nginx templates and PSL from the checkout.
+      # Why: the ui renders them; no image rebuild.
+      # From: Issue #1683 | PR #1980
+      - ../../services/proxy:${SOT_NGINX_TEMPLATE_DIR}:ro
       - *mount-secrets
       - ui-data:${SOT_UI_DATA_DIR}
       - *mount-cdn-domains

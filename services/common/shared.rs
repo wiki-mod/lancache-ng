@@ -2756,7 +2756,7 @@ pub mod render {
     fn nginx_files(o: &mut Out, domains: &str) -> Result<(), String> {
         let s = o.s;
         let src = PathBuf::from(s.text("NGINX_TEMPLATE_DIR")?);
-        let dst = PathBuf::from(s.text("NGINX_DIR")?);
+        let dst = PathBuf::from(s.text("NGINX_CONF_DIR")?);
         let psl = nginx_conf::Psl::parse(&read(&src.join(s.text("NGINX_PSL_FILE")?))?);
         let hosts = nginx_conf::hosts(domains, &psl)?;
         let https = s.flag("HTTPS_ENABLED")?;
