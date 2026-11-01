@@ -26,7 +26,10 @@ image_base:
     - jq
     - lsof
     - nano
+    - net-snmp
+    - net-snmp-tools
     - ripgrep
+    - rrdtool
     - sed
     - util-linux
     - zstd
@@ -44,6 +47,7 @@ image_base:
     - nano
     - rg
     - sed
+    - snmpd -v
     - zstd
 
 # What: The product services this repository builds.
