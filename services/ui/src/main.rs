@@ -658,6 +658,16 @@ async fn domains(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     ctx.insert("zone_snapshot_groups", &groups);
     ctx.insert("rollback_zones", &snapshot_zones(&s)?);
     ctx.insert("zone_snapshot_retention", &s.uint("DNS_SNAPSHOT_KEEP")?);
+    // What: values the domains page also reads.
+    // Why: Tera stops on any missing variable.
+    // From: Issue #1683 | PR #1980
+    ctx.insert("dhcp_mode", &s.text("DHCP_MODE")?);
+    ctx.insert("txt_max_bytes", &s.uint("DNS_TXT_MAX_BYTES")?);
+    let reverse: Vec<String> = lancache_ng::dns::managed_zones(&s)?
+        .into_iter()
+        .filter(|z| z.ends_with(".arpa.") || z.ends_with(".arpa"))
+        .collect();
+    ctx.insert("reverse_zones", &reverse);
     let peers: Vec<Value> = secondaries(&s)
         .into_iter()
         .map(|(name, address)| json!({"name": name, "address": address}))
@@ -1093,6 +1103,55 @@ async fn dhcp(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     ctx.insert("dhcp_is_dnsmasq", &mode.starts_with("dnsmasq"));
     ctx.insert("dhcp_is_relay", &(mode == "dnsmasq-relay"));
     ctx.insert("dhcp_ddns_enabled", &s.flag("DHCP_DDNS")?);
+    // What: form values the dhcp page shows.
+    // Why: Tera stops on any missing variable.
+    // From: Issue #1683 | PR #1980
+    let opt = |k: &str| s.text(k).unwrap_or_default();
+    let dns = s.list("DHCP_DNS_SERVERS");
+    ctx.insert("dhcp_dns_primary", dns.first().map_or("", String::as_str));
+    ctx.insert("dhcp_dns_secondary", dns.get(1).map_or("", String::as_str));
+    ctx.insert("default_lease_time", &opt("DHCP_LEASE_TIME"));
+    ctx.insert("dhcp_domain", &opt("DHCP_DOMAIN"));
+    ctx.insert("dhcp_ntp_servers", &opt("DHCP_NTP_SERVERS"));
+    ctx.insert("dhcp_relay_local_addr", &opt("DHCP_RELAY_LOCAL_ADDR"));
+    ctx.insert("dhcp_proxy_subnet_start", &opt("DHCP_SUBNET_START"));
+    ctx.insert("dhcp_proxy_custom_options_form", &opt("DHCP_CUSTOM_OPTIONS"));
+    for k in ["BOOT_FILENAME", "BOOT_SERVER", "DOMAIN", "INTERFACE", "ROUTER"] {
+        let name = format!("dhcp_proxy_{}", k.to_ascii_lowercase());
+        ctx.insert(name, &opt(&format!("DHCP_PROXY_{k}")));
+    }
+    ctx.insert("dhcp_upstream_dhcp_ip", &opt("DHCP_UPSTREAM_DHCP_IP"));
+    ctx.insert("kea_snapshot_retention", &opt("KEA_SNAPSHOT_KEEP"));
+    ctx.insert("ntp_auto_dhcp_active", &s.flag("NTP_AUTO_DHCP").unwrap_or(false));
+    let codes: Vec<u8> = lancache_ng::dhcp::MANAGED.iter().map(|m| m.code).collect();
+    ctx.insert("kea_managed_codes", &codes);
+    ctx.insert("dnsmasq_managed_codes", &codes);
+    ctx.insert("option_code_min", &1);
+    ctx.insert("option_code_max", &(u8::MAX - 1));
+    // What: form values the dhcp page shows.
+    // Why: Tera stops on any missing variable.
+    // From: Issue #1683 | PR #1980
+    let opt = |k: &str| s.text(k).unwrap_or_default();
+    let dns = s.list("DHCP_DNS_SERVERS");
+    ctx.insert("dhcp_dns_primary", dns.first().map_or("", String::as_str));
+    ctx.insert("dhcp_dns_secondary", dns.get(1).map_or("", String::as_str));
+    ctx.insert("default_lease_time", &opt("DHCP_LEASE_TIME"));
+    ctx.insert("dhcp_domain", &opt("DHCP_DOMAIN"));
+    ctx.insert("dhcp_ntp_servers", &opt("DHCP_NTP_SERVERS"));
+    ctx.insert("dhcp_relay_local_addr", &opt("DHCP_RELAY_LOCAL_ADDR"));
+    ctx.insert("dhcp_proxy_subnet_start", &opt("DHCP_SUBNET_START"));
+    ctx.insert("dhcp_proxy_custom_options_form", &opt("DHCP_CUSTOM_OPTIONS"));
+    for k in ["BOOT_FILENAME", "BOOT_SERVER", "DOMAIN", "INTERFACE", "ROUTER"] {
+        ctx.insert(format!("dhcp_proxy_{}", k.to_ascii_lowercase()), &opt(&format!("DHCP_PROXY_{k}")));
+    }
+    ctx.insert("dhcp_upstream_dhcp_ip", &opt("DHCP_UPSTREAM_DHCP_IP"));
+    ctx.insert("kea_snapshot_retention", &opt("KEA_SNAPSHOT_KEEP"));
+    ctx.insert("ntp_auto_dhcp_active", &s.flag("NTP_AUTO_DHCP").unwrap_or(false));
+    let codes: Vec<u8> = dhcp::MANAGED.iter().map(|m| m.code).collect();
+    ctx.insert("kea_managed_codes", &codes);
+    ctx.insert("dnsmasq_managed_codes", &codes);
+    ctx.insert("option_code_min", &1);
+    ctx.insert("option_code_max", &(u8::MAX - 1));
     let (mut subnets, mut reservations, mut leases) = (Vec::new(), Vec::new(), Vec::new());
     if mode == "kea" {
         match kea_api(&s) {

@@ -798,6 +798,7 @@ runtime:
     - DNS_LAN_ZONE=@DHCP_DOMAIN@
     - DNS_RECORD_TTL=300
     - DNS_RECORD_TTL_MAX=86400
+    - DNS_TXT_MAX_BYTES=255
     - DNS_SECONDARIES=
     - DNS_SECONDARY_ZONES=
     - DNS_SERVE_RFC1918=1
@@ -978,6 +979,7 @@ runtime:
     - DNS_QUERY_ALLOW_FROM=list;;;reload;dns
     - DNS_RECORD_TTL=uint;1;86400;live;ui
     - DNS_RECORD_TTL_MAX=uint;1;604800;live;ui
+    - DNS_TXT_MAX_BYTES=uint;1;255;live;ui
     - DNS_REPLICATION_ROLE=choice;primary secondary;;recreate;dns
     - DNS_SECONDARIES=list?;;;reload;dns
     - DNS_SECONDARY_ZONES=list?;;;reload;dns
