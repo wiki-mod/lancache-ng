@@ -552,6 +552,28 @@ async fn domains(State(app): Shared, axum::Extension(csrf): axum::Extension<Csrf
         Err(e) => ctx.insert("domain_error_message", &e),
     }
     ctx.insert("lan_records", &lan_records);
+    let groups: Vec<serde_json::Value> = snapshot_zones(&s)
+        .iter()
+        .filter_map(|z| {
+            let ids = zone_store(&s, z).ok()?.list().ok()?;
+            (!ids.is_empty()).then(|| {
+                let snaps: Vec<serde_json::Value> = ids
+                    .iter()
+                    .map(|id| {
+                        let secs = id.parse::<u128>().unwrap_or(0) / 1_000_000_000;
+                        serde_json::json!({"id": id, "created_unix": secs.to_string()})
+                    })
+                    .collect();
+                serde_json::json!({"zone": z, "snapshots": snaps})
+            })
+        })
+        .collect();
+    ctx.insert("zone_snapshot_groups", &groups);
+    ctx.insert("rollback_zones", &snapshot_zones(&s));
+    ctx.insert(
+        "zone_snapshot_retention",
+        &s.uint("DNS_SNAPSHOT_KEEP").unwrap_or(0),
+    );
     ctx.insert("ptr_records", &ptr);
     ctx.insert("lan_record_types", &s.list("DNS_LAN_RECORD_TYPES"));
     ctx.insert("record_ttl_default", &s.uint("DNS_RECORD_TTL").unwrap_or(0));
@@ -622,9 +644,58 @@ async fn dns_action(
         }
         "record-add" | "record-remove" => record(&s, &op, &get).await,
         "ptr-add" | "ptr-remove" => ptr(&s, &op, &get).await,
+        "zone-rollback" => rollback(&s, &get).await,
         _ => Err(format!("unknown DNS action {op}")),
     };
     done(result, "/domains")
+}
+
+// What: snapshot store of one zone.
+// Why: rollback after a bad change; size from the SOT.
+// From: Issue #1683 | PR #1858
+fn zone_store(s: &Settings, zone: &str) -> Result<lancache_ng::snapshot::Store, String> {
+    Ok(lancache_ng::snapshot::Store {
+        dir: PathBuf::from(s.text("DNS_SNAPSHOT_DIR")?).join(zone.trim_end_matches('.')),
+        keep: usize::try_from(s.uint("DNS_SNAPSHOT_KEEP")?).map_err(|e| e.to_string())?,
+        owner: fs::Owner {
+            uid: None,
+            gid: None,
+        },
+    })
+}
+
+// What: save the zone's RRsets after a change.
+// Why: every change can be rolled back later.
+// From: Issue #1683 | PR #1858
+async fn snapshot(s: &Settings, api: &lancache_ng::pdns::Api, zone: &str) -> Result<(), String> {
+    let body = serde_json::to_vec(&api.rrsets(zone).await?).map_err(|e| e.to_string())?;
+    let store = zone_store(s, zone)?;
+    std::fs::create_dir_all(&store.dir).map_err(|e| format!("{}: {e}", store.dir.display()))?;
+    store.save(&body).map(drop)
+}
+
+// What: roll a zone back to one snapshot.
+// Why: PATCH restores RRsets; PowerDNS sends NOTIFY.
+// From: Issue #1683 | PR #1858
+async fn rollback(s: &Settings, get: &dyn Fn(&str) -> String) -> Result<(), String> {
+    let zone = get("zone");
+    if !snapshot_zones(s).contains(&zone) {
+        return Err(format!("zone {zone} has no snapshots"));
+    }
+    let body = zone_store(s, &zone)?.read(&get("snapshot_id"))?;
+    let saved: Vec<serde_json::Value> = serde_json::from_slice(&body).map_err(|e| e.to_string())?;
+    pdns_api(s)?.restore(&zone, &saved).await
+}
+
+// What: zones that keep snapshots.
+// Why: LAN zone and the private reverse zones.
+// From: Issue #1683 | PR #1858
+fn snapshot_zones(s: &Settings) -> Vec<String> {
+    let mut z = vec![lancache_ng::dns::canonical_zone(
+        &s.text("DNS_LAN_ZONE").unwrap_or_default(),
+    )];
+    z.extend(lancache_ng::dns::private_reverse_zones());
+    z
 }
 
 // What: add or remove one LAN record set.
@@ -657,7 +728,8 @@ async fn record(s: &Settings, op: &str, get: &dyn Fn(&str) -> String) -> Result<
     if op == "record-add" && (ttl == 0 || u64::from(ttl) > max) {
         return Err(format!("TTL must be 1..={max}"));
     }
-    api.set_rrset(&zone, &fqdn, &kind, ttl, &contents).await
+    api.set_rrset(&zone, &fqdn, &kind, ttl, &contents).await?;
+    snapshot(s, &api, &zone).await
 }
 
 // What: add or remove one PTR record.
@@ -684,7 +756,8 @@ async fn ptr(s: &Settings, op: &str, get: &dyn Fn(&str) -> String) -> Result<(),
     } else {
         Vec::new()
     };
-    api.set_rrset(&zone, &name, "PTR", ttl, &contents).await
+    api.set_rrset(&zone, &name, "PTR", ttl, &contents).await?;
+    snapshot(s, &api, &zone).await
 }
 
 // What: render all configs, write changed files, act.
@@ -753,7 +826,7 @@ const PAGES: [(&str, &str); 7] = [
     ("dhcp", "/dhcp"),
     ("setup", "/setup"),
 ];
-const ROUTES: [(&str, &str); 18] = [
+const ROUTES: [(&str, &str); 19] = [
     ("admin_css", "/static/admin.css"),
     ("favicon", "/favicon.ico"),
     ("logo_icon", "/static/logo-icon.png"),
@@ -772,6 +845,7 @@ const ROUTES: [(&str, &str); 18] = [
     ("ptr_remove", "/domains/ptr-remove"),
     ("aaaa_filter", "/domains/aaaa-filter"),
     ("ddns_unsigned", "/domains/ddns-unsigned"),
+    ("zone_rollback", "/domains/zone-rollback"),
 ];
 
 // What: traffic-light colour of one container.

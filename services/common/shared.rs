@@ -580,6 +580,36 @@ pub mod pdns {
             Ok(v["rrsets"].as_array().cloned().unwrap_or_default())
         }
 
+        // What: set a zone back to saved RRsets.
+        // Why: rollback; SOA stays, serial rises via soa-edit-api.
+        // From: Issue #1683 | PR #1858
+        pub async fn restore(&self, zone: &str, saved: &[Value]) -> Result<(), String> {
+            let key = |r: &Value| (r["name"].to_string(), r["type"].to_string());
+            let keep: std::collections::BTreeSet<_> = saved.iter().map(key).collect();
+            let mut rrsets: Vec<Value> = Vec::new();
+            for r in self.rrsets(zone).await? {
+                if r["type"] != "SOA" && !keep.contains(&key(&r)) {
+                    rrsets.push(
+                        json!({"name": r["name"], "type": r["type"], "changetype": "DELETE"}),
+                    );
+                }
+            }
+            for r in saved.iter().filter(|r| r["type"] != "SOA") {
+                rrsets.push(
+                    json!({"name": r["name"], "type": r["type"], "ttl": r["ttl"],
+                                   "changetype": "REPLACE", "records": r["records"]}),
+                );
+            }
+            let path = format!("/zones/{}", zone_id(zone));
+            self.call(
+                reqwest::Method::PATCH,
+                &path,
+                Some(json!({"rrsets": rrsets})),
+            )
+            .await
+            .map(drop)
+        }
+
         // What: all zones with serial and check times.
         // Why: the sync check reads these fields only.
         // From: Issue #1683 | PR #1858
