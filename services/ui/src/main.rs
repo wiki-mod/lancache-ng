@@ -91,6 +91,19 @@ impl App {
     fn page(&self, name: &str, mut ctx: Context, csrf: &str) -> Response {
         ctx.insert("csrf_token", csrf);
         ctx.insert("page", name.trim_end_matches(".html"));
+        let s = self.settings();
+        ctx.insert("active_page", name.trim_end_matches(".html"));
+        ctx.insert("pages", &PAGES.iter().copied().collect::<BTreeMap<_, _>>());
+        ctx.insert(
+            "routes",
+            &ROUTES.iter().copied().collect::<BTreeMap<_, _>>(),
+        );
+        ctx.insert("repo_url", &s.text("REPO_URL").unwrap_or_default());
+        ctx.insert("desired_services", &s.list("UI_CONTROLLABLE_SERVICES"));
+        ctx.insert(
+            "watchdog_refresh_seconds",
+            &s.uint("UI_STATUS_REFRESH").unwrap_or(1),
+        );
         match self.tera.render(name, &ctx) {
             Ok(html) => Html(html).into_response(),
             Err(e) => {
@@ -365,6 +378,158 @@ fn secrets(s: &Settings) -> Result<render::Secrets, String> {
     })
 }
 
+// What: menu and API paths every page uses.
+// Why: one table; templates never spell a path.
+// From: Issue #1683 | PR #1858
+const PAGES: [(&str, &str); 7] = [
+    ("dashboard", "/"),
+    ("logs", "/logs"),
+    ("stats", "/stats"),
+    ("cachehamster", "/cachehamster"),
+    ("domains", "/domains"),
+    ("dhcp", "/dhcp"),
+    ("setup", "/setup"),
+];
+const ROUTES: [(&str, &str); 6] = [
+    ("admin_css", "/static/admin.css"),
+    ("favicon", "/favicon.ico"),
+    ("logo_icon", "/static/logo-icon.png"),
+    ("watchdog_status", "/api/status"),
+    ("desired_state", "/api/container/{service}"),
+    ("restart_ui", "/api/restart-ui"),
+];
+
+// What: traffic-light colour of one container.
+// Why: beambar dots read green, yellow, red, gray.
+// From: Issue #1683 | PR #1858
+fn colour(c: &serde_json::Value) -> &'static str {
+    let status = c["Status"].as_str().unwrap_or_default();
+    match c["State"].as_str().unwrap_or_default() {
+        "running" if status.contains("(unhealthy)") => "red",
+        "running" if status.contains("(health: starting)") => "yellow",
+        "running" => "green",
+        "exited" | "created" => "gray",
+        _ => "red",
+    }
+}
+
+// What: container states for the beambar.
+// Why: Docker is the one source; no status files.
+// From: Issue #1683 | PR #1858
+async fn status(State(app): Shared) -> Response {
+    let s = app.settings();
+    let (Ok((_, limit)), Ok(project)) = (app.limits(&s), s.text("COMPOSE_PROJECT")) else {
+        return axum::Json(serde_json::json!({"state": "unavailable"})).into_response();
+    };
+    match app.docker.project(&project, limit).await {
+        Ok(list) => {
+            let services: Vec<serde_json::Value> = list
+                .iter()
+                .map(|c| {
+                    serde_json::json!({
+                        "name": c["Labels"][docker::SERVICE_LABEL],
+                        "status": colour(c),
+                        "health": c["Status"],
+                    })
+                })
+                .collect();
+            axum::Json(serde_json::json!({"state": "ok", "services": services})).into_response()
+        }
+        Err(e) => {
+            eprintln!("ui: status: {e}");
+            axum::Json(serde_json::json!({"state": "unavailable"})).into_response()
+        }
+    }
+}
+
+// What: wanted state from the beambar button.
+// Why: body {"state": "running"|"stopped"}.
+// From: Issue #1683 | PR #1858
+#[derive(serde::Deserialize)]
+struct Want {
+    state: String,
+}
+
+// What: start or stop one container of the stack.
+// Why: user action from the ui; the watchdog only watches.
+// From: Issue #1683 | PR #1858
+async fn container_state(
+    State(app): Shared,
+    axum::Extension(csrf): axum::Extension<Csrf>,
+    axum::extract::Path(service): axum::extract::Path<String>,
+    headers: HeaderMap,
+    axum::Json(want): axum::Json<Want>,
+) -> Response {
+    if !header_csrf_ok(&headers, &csrf) {
+        return (StatusCode::FORBIDDEN, "CSRF token mismatch").into_response();
+    }
+    let action = match want.state.as_str() {
+        "running" => docker::Action::Start,
+        "stopped" => docker::Action::Stop,
+        _ => return (StatusCode::BAD_REQUEST, "state must be running or stopped").into_response(),
+    };
+    act(&app, &service, action).await
+}
+
+// What: restart the ui container itself.
+// Why: Docker restarts it; the page reloads after.
+// From: Issue #1683 | PR #1858
+async fn restart_ui(
+    State(app): Shared,
+    axum::Extension(csrf): axum::Extension<Csrf>,
+    Form(form): Form<BTreeMap<String, String>>,
+) -> Response {
+    if !csrf_ok(&form, &csrf) {
+        return (StatusCode::FORBIDDEN, "CSRF token mismatch").into_response();
+    }
+    act(&app, "ui", docker::Action::Restart).await
+}
+
+// What: run one Docker action on a stack service.
+// Why: only names of this compose project are reachable.
+// From: Issue #1683 | PR #1858
+async fn act(app: &App, service: &str, action: docker::Action) -> Response {
+    let s = app.settings();
+    let (grace, limit) = match app.limits(&s) {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    };
+    let Ok(project) = s.text("COMPOSE_PROJECT") else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "COMPOSE_PROJECT is not set",
+        )
+            .into_response();
+    };
+    let list = app
+        .docker
+        .project(&project, limit)
+        .await
+        .unwrap_or_default();
+    let Some(name) = list
+        .iter()
+        .find(|c| c["Labels"][docker::SERVICE_LABEL].as_str() == Some(service))
+        .and_then(|c| c["Names"][0].as_str())
+        .map(|n| n.trim_start_matches('/').to_string())
+    else {
+        return (StatusCode::NOT_FOUND, "no such service in this stack").into_response();
+    };
+    match app.docker.act(&name, action, grace, limit).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => (StatusCode::BAD_GATEWAY, e.to_string()).into_response(),
+    }
+}
+
+// What: CSRF check for JSON calls via header.
+// Why: fetch() sends X-CSRF-Token, not a form field.
+// From: Issue #1683 | PR #1858
+fn header_csrf_ok(headers: &HeaderMap, csrf: &Csrf) -> bool {
+    headers
+        .get("x-csrf-token")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|t| secret::equal(t.as_bytes(), csrf.0.as_bytes()))
+}
+
 // What: liveness answer for Docker HEALTHCHECK.
 // Why: no auth; tells only that the ui answers.
 // From: Issue #1683 | PR #1858
@@ -441,6 +606,9 @@ async fn main() -> Result<(), String> {
         .route("/", get(dashboard))
         .route("/setup", get(setup))
         .route("/setup/save", post(save))
+        .route("/api/status", get(status))
+        .route("/api/container/{service}", post(container_state))
+        .route("/api/restart-ui", post(restart_ui))
         .layer(axum::middleware::from_fn_with_state(app.clone(), auth));
     let router = Router::new()
         .route("/healthz", get(health))
