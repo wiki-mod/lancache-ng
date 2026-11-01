@@ -1145,7 +1145,6 @@ const ROUTE_STATIC_REMOVE: &str = "/dhcp/static/remove";
 const ROUTE_LEASE_RELEASE: &str = "/dhcp/lease/release";
 const ROUTE_KEA_ROLLBACK: &str = "/dhcp/snapshot/rollback";
 const ROUTE_DHCP_CHECK: &str = "/api/dhcp/check";
-const ROUTE_NTP_SETTINGS: &str = "/ntp/settings";
 const ROUTE_DNS_ADD: &str = "/domains/dns/add";
 const ROUTE_DNS_REMOVE: &str = "/domains/dns/remove";
 const ROUTE_DNS_TOGGLE: &str = "/domains/dns/toggle";
@@ -1241,7 +1240,7 @@ fn page_ctx(headers: &HeaderMap, active: &str) -> Context {
     // What: each route path from its one Rust owner.
     // Why: forms and scripts follow the router path.
     // From: Issue #1683 | PR #1912
-    const ROUTES: [(&str, &str); 45] = [
+    const ROUTES: [(&str, &str); 44] = [
         ("health", ROUTE_HEALTH),
         ("secondary_register", ROUTE_SECONDARY_REGISTER),
         ("favicon", ROUTE_FAVICON),
@@ -1260,7 +1259,6 @@ fn page_ctx(headers: &HeaderMap, active: &str) -> Context {
         ("lease_release", ROUTE_LEASE_RELEASE),
         ("kea_rollback", ROUTE_KEA_ROLLBACK),
         ("dhcp_check", ROUTE_DHCP_CHECK),
-        ("ntp_settings", ROUTE_NTP_SETTINGS),
         ("dns_add", ROUTE_DNS_ADD),
         ("dns_remove", ROUTE_DNS_REMOVE),
         ("dns_toggle", ROUTE_DNS_TOGGLE),
@@ -6609,12 +6607,9 @@ fn ntp_upstream_servers(raw: &str) -> Result<String, String> {
 }
 
 // What: save the NTP settings and apply them.
-// Why: the watchdog reads the saved NTP keys.
+// Why: the General form calls it; one save for all.
 // From: Issue #1486
-async fn update_ntp_settings(
-    State(state): Shared,
-    Form(f): Form<Fields>,
-) -> Result<Redirect, HtmlError> {
+async fn apply_ntp_settings(state: &AppState, f: &Fields) -> Result<(), HtmlError> {
     let fail =
         |message: String| HtmlError::new(StatusCode::INTERNAL_SERVER_ERROR, &NTP_AREA, message);
     let servers = ntp_upstream_servers(f.get("ntp_upstream_servers"))
@@ -6637,11 +6632,11 @@ async fn update_ntp_settings(
     // Why: auto off before and after keeps subnet edits.
     // From: Issue #1683 | PR #1912
     if enabled && auto {
-        sync_subnet_ntp(&state, true).await.map_err(fail)?;
+        sync_subnet_ntp(state, true).await.map_err(fail)?;
     } else if was_auto {
-        sync_subnet_ntp(&state, false).await.map_err(fail)?;
+        sync_subnet_ntp(state, false).await.map_err(fail)?;
     }
-    Ok(Redirect::to(PAGE_SETUP))
+    Ok(())
 }
 
 // What: change the login password after the old one.
@@ -6725,8 +6720,8 @@ fn is_valid_ui_channel(value: &str) -> bool {
     matches!(value, "latest" | "nightly")
 }
 
-// What: save the release channel and the auto-update flag.
-// Why: the host's converge run applies both; no Docker.
+// What: save channel, auto-update flag and the NTP block.
+// Why: one Save on General; the host applies the rest.
 // From: Issue #819
 async fn update_stack_settings(
     State(state): Shared,
@@ -6757,6 +6752,7 @@ async fn update_stack_settings(
                 e.to_string(),
             )
         })?;
+    apply_ntp_settings(&state, &f).await?;
     Ok(Redirect::to(PAGE_SETUP))
 }
 
@@ -7244,7 +7240,6 @@ fn router(state: Arc<AppState>) -> Router {
         (ROUTE_KEA_ROLLBACK, post(rollback_kea_snapshot)),
         (ROUTE_DHCP_CHECK, post(check_dhcp_conflict)),
         (PAGE_CACHEHAMSTER, get(cachehamster_page)),
-        (ROUTE_NTP_SETTINGS, post(update_ntp_settings)),
         (PAGE_DOMAINS, get(domains_page)),
         (ROUTE_DNS_ADD, post(add_dns)),
         (ROUTE_DNS_REMOVE, post(remove_dns)),

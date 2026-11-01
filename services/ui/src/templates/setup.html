@@ -47,14 +47,10 @@
           <span class="track"></span><span class="knob"></span>
         </label>
       </div>
-      <button type="submit" class="btn" style="margin-top:14px; margin-bottom:6px;">Save</button>
-    </form>
 
-    <!-- What: time server (NTP) controls on General
+      <!-- What: time server (NTP) controls on General
          Why: the NTP page is gone; settings need a home
          From: Issue #1683 | PR #1858 -->
-    <form method="post" action="{{ routes.ntp_settings | safe }}">
-      {{ <csrf_field csrf_token={csrf_token}/> }}
       <div class="section-title">Time server (NTP)</div>
       <p class="section-sub">Serves the time to LAN clients on UDP {{ ntp_port }}.</p>
       <div class="toggle-row">
