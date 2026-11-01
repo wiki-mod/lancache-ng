@@ -2961,10 +2961,10 @@ pub mod access {
         out
     }
 
-    // What: last `limit` cache lines of the newest file.
+    // What: last `limit` lines of the newest log file.
     // Why: reads from the end; big logs stay cheap.
     // From: Issue #1683 | PR #1858
-    pub fn tail(dir: &Path, limit: usize, chunk: u64) -> Vec<Entry> {
+    pub fn tail_lines(dir: &Path, limit: usize, chunk: u64) -> Vec<String> {
         let Some(path) = files(dir).pop() else {
             return Vec::new();
         };
@@ -2975,9 +2975,8 @@ pub mod access {
             return Vec::new();
         };
         let mut buf: Vec<u8> = Vec::new();
-        let mut found = Vec::new();
-        while pos > 0 && found.len() < limit {
-            let len = chunk.min(pos);
+        while pos > 0 && buf.iter().filter(|b| **b == b'\n').count() <= limit {
+            let len = chunk.max(1).min(pos);
             pos -= len;
             let mut part = vec![0u8; usize::try_from(len).unwrap_or(0)];
             if file.seek(SeekFrom::Start(pos)).is_err() || file.read_exact(&mut part).is_err() {
@@ -2985,10 +2984,25 @@ pub mod access {
             }
             part.extend_from_slice(&buf);
             buf = part;
-            let text = String::from_utf8_lossy(&buf);
-            let skip_first = usize::from(pos > 0);
-            found = text.lines().skip(skip_first).filter_map(parse).collect();
         }
+        let text = String::from_utf8_lossy(&buf);
+        let mut lines: Vec<String> = text
+            .lines()
+            .skip(usize::from(pos > 0))
+            .map(str::to_string)
+            .collect();
+        let from = lines.len().saturating_sub(limit);
+        lines.split_off(from)
+    }
+
+    // What: last `limit` cache requests.
+    // Why: dashboard list; non-cache lines are skipped.
+    // From: Issue #1683 | PR #1858
+    pub fn tail(dir: &Path, limit: usize, chunk: u64) -> Vec<Entry> {
+        let mut found: Vec<Entry> = tail_lines(dir, limit.saturating_mul(4), chunk)
+            .iter()
+            .filter_map(|l| parse(l))
+            .collect();
         let from = found.len().saturating_sub(limit);
         found.split_off(from)
     }

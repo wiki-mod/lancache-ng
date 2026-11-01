@@ -57,63 +57,30 @@
   </div>
 
   <div data-logs-panel="syslog">
-  {# What: forwarding card is off until syslog-ng applies it
-     Why: a setting without effect must not show
-     From: Issue #1683 | PR #1858 #}
-  {% if false %}
-  <!-- What: send the central log on to an external server
-       Why: the ui saves; the watchdog applies it -->
-  <form method="post" action="{{ routes.logs_forward | safe }}" class="card" style="margin-bottom:16px;">
+  <!-- What: extra syslog targets (host:port, TCP)
+       Why: a secondary always forwards to its primary too -->
+  <form method="post" action="{{ routes.logs_save | safe }}" class="card" style="margin-bottom:16px;">
     {{ <csrf_field csrf_token={csrf_token}/> }}
     <div class="card-head">
-      <h3>Weiterleitung an einen externen Syslog-Server</h3>
+      <h3>Weiterleitung an weitere Syslog-Server</h3>
     </div>
     <div class="card-body">
       <p class="section-sub">
-        Alle Einträge des zentralen Syslogs werden zusätzlich an diesen Server gesendet.
-        Ohne Host ist die Weiterleitung aus.
+        Alle Einträge gehen zusätzlich per TCP an diese Server, mit Puffer auf der Platte.
+        Ein Secondary sendet immer auch an seinen Primary.
       </p>
-      <div class="field-row" style="max-width:none;">
-        <div class="field" style="max-width:260px;">
-          <label for="forward_host">Host oder IP</label>
-          <input type="text" id="forward_host" name="forward_host" value="{{ forward_host }}" placeholder="z. B. 192.168.1.50">
-        </div>
-        <div class="field" style="max-width:120px;">
-          <label for="forward_port">Port</label>
-          <input type="number" id="forward_port" name="forward_port" value="{{ forward_port }}" min="1" max="65535">
-        </div>
-        <div class="field" style="max-width:120px;">
-          <label for="forward_proto">Protokoll</label>
-          <select id="forward_proto" name="forward_proto" style="width:100%; padding:9px 11px; border-radius:8px; border:1px solid var(--navy-600); background:var(--navy-900); color:var(--foam); font-size:13.5px;">
-            <option value="udp" {% if forward_proto == "udp" %}selected{% endif %}>udp</option>
-            <option value="tcp" {% if forward_proto == "tcp" %}selected{% endif %}>tcp</option>
-          </select>
-        </div>
+      <div class="field" style="max-width:none;">
+        <label for="SYSLOG_FORWARD">Ziele (host:port, durch Leerzeichen oder Zeilen getrennt)</label>
+        <textarea id="SYSLOG_FORWARD" name="SYSLOG_FORWARD" rows="2" style="width:100%; padding:9px 11px; border-radius:8px; border:1px solid var(--navy-600); background:var(--navy-900); color:var(--foam); font-family:var(--font-mono); font-size:13px;">{{ v.SYSLOG_FORWARD }}</textarea>
       </div>
-      <button type="submit" class="btn" style="margin-top:12px;">Speichern</button>
-    </div>
-  </form>
+      <div class="section-title">Protokollierung je Dienst</div>
+      <p class="section-sub">Abgeschaltete Dienste schreiben nichts in den lokalen Speicher; die Weiterleitung bekommt weiter alles.</p>
 
-  {% endif %}
-
-  <!-- What: per-service logging switches.
-       Why: the ui saves; the watchdog applies. -->
-  <form method="post" action="{{ routes.logs_settings | safe }}" class="card" style="margin-bottom:16px;">
-    {{ <csrf_field csrf_token={csrf_token}/> }}
-    <div class="card-head">
-      <h3>Protokollierung je Dienst</h3>
-    </div>
-    <div class="card-body">
-      <p class="section-sub">
-        Abgeschaltete Dienste schreiben nichts mehr in den zentralen Syslog. Der Watchdog
-        (Container „services“) protokolliert immer. Die Änderung gilt nach wenigen Sekunden.
-        Ohne Proxy-Protokoll zeigen Statistik und Dashboard keine neuen Zugriffe.
-      </p>
       {% for sw in log_switches %}
       <div class="toggle-row">
         <div class="t-label">{{ sw.program }}</div>
         <label class="toggle">
-          <input type="checkbox" name="{{ sw.key }}" value="1" {% if sw.on %}checked{% endif %}>
+          <input type="checkbox" name="on_{{ sw.program }}" value="true" {% if sw.on %}checked{% endif %}>
           <span class="track"></span><span class="knob"></span>
         </label>
       </div>

@@ -344,46 +344,18 @@ async fn password(
         Ok(h) => h,
         Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
     };
-    let Some(path) = app.saved.clone() else {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("{SETTINGS_FILE_ENV} is not set"),
-        )
-            .into_response();
-    };
     let update = BTreeMap::from([("UI_PASSWORD_HASH".to_string(), hash)]);
-    if let Err(e) = config::store(&path, &s, &update) {
-        return (StatusCode::BAD_REQUEST, e).into_response();
-    }
-    match Settings::load(&process_env, Some(&path)) {
-        Ok(n) => {
-            if let Ok(mut cur) = app.settings.write() {
-                *cur = n;
-            }
-            Redirect::to("/setup").into_response()
-        }
-        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
-    }
+    done(commit(&app, update).await, "/setup")
 }
 
-// What: save changed settings, render, write, apply.
+// What: save, reload, render, write and apply.
 // Why: one path for every setting change in the ui.
 // From: Issue #1683 | PR #1858
-async fn save(
-    State(app): Shared,
-    axum::Extension(csrf): axum::Extension<Csrf>,
-    Form(form): Form<BTreeMap<String, String>>,
-) -> Response {
-    if !csrf_ok(&form, &csrf) {
-        return (StatusCode::FORBIDDEN, "CSRF token mismatch").into_response();
-    }
-    let Some(path) = app.saved.clone() else {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("{SETTINGS_FILE_ENV} is not set"),
-        )
-            .into_response();
-    };
+async fn commit(app: &App, form: BTreeMap<String, String>) -> Result<(), String> {
+    let path = app
+        .saved
+        .clone()
+        .ok_or_else(|| format!("{SETTINGS_FILE_ENV} is not set"))?;
     let old = app.settings();
     let updates: BTreeMap<String, String> = form
         .into_iter()
@@ -394,24 +366,117 @@ async fn save(
             })
         })
         .collect();
-    if let Err(e) = config::store(&path, &old, &updates) {
-        return (StatusCode::BAD_REQUEST, e).into_response();
+    if updates.is_empty() {
+        return Ok(());
     }
-    let new = match Settings::load(&process_env, Some(&path)) {
-        Ok(s) => s,
-        Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
-    };
-    let report = match apply_all(&app, &old, &new).await {
-        Ok(r) => r,
-        Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
-    };
+    config::store(&path, &old, &updates)?;
+    let new = Settings::load(&process_env, Some(&path))?;
+    let report = apply_all(app, &old, &new).await?;
     if let Ok(mut s) = app.settings.write() {
         *s = new;
     }
     for line in &report {
         eprintln!("ui: apply: {line}");
     }
-    Redirect::to("/setup").into_response()
+    Ok(())
+}
+
+// What: answer a commit with a redirect or the error.
+// Why: every form handler ends the same way.
+// From: Issue #1683 | PR #1858
+fn done(result: Result<(), String>, back: &str) -> Response {
+    match result {
+        Ok(()) => Redirect::to(back).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+    }
+}
+
+// What: General page form: save changed SOT keys.
+// Why: field names are the keys themselves.
+// From: Issue #1683 | PR #1858
+async fn save(
+    State(app): Shared,
+    axum::Extension(csrf): axum::Extension<Csrf>,
+    Form(form): Form<BTreeMap<String, String>>,
+) -> Response {
+    if !csrf_ok(&form, &csrf) {
+        return (StatusCode::FORBIDDEN, "CSRF token mismatch").into_response();
+    }
+    done(commit(&app, form).await, "/setup")
+}
+
+// What: logs page: newest lines of every program.
+// Why: reads the syslog-ng store, one folder per program.
+// From: Issue #1683 | PR #1858
+async fn logs(State(app): Shared, axum::Extension(csrf): axum::Extension<Csrf>) -> Response {
+    let s = app.settings();
+    let root = PathBuf::from(s.text("SYSLOG_LOG_ROOT").unwrap_or_default());
+    let max = usize::try_from(s.uint("UI_LOG_LINES").unwrap_or(0)).unwrap_or(0);
+    let chunk = s.uint("UI_LOG_TAIL_CHUNK").unwrap_or(0);
+    let programs = s.list("SYSLOG_PROGRAMS");
+    let muted = s.list("SYSLOG_MUTED");
+    let progs = programs.clone();
+    let lines = tokio::task::spawn_blocking(move || {
+        let mut all: Vec<(String, String)> = Vec::new();
+        for p in &progs {
+            for l in access::tail_lines(&root.join(p), max, chunk) {
+                all.push((p.clone(), l));
+            }
+        }
+        all.sort_by(|a, b| b.1.cmp(&a.1));
+        all.truncate(max);
+        all
+    })
+    .await
+    .unwrap_or_default();
+    let entries: Vec<serde_json::Value> = lines
+        .iter()
+        .map(|(p, l)| {
+            let (ts, msg) = l.split_once(' ').unwrap_or(("", l));
+            serde_json::json!({"host": p, "timestamp": ts, "message": msg})
+        })
+        .collect();
+    let switches: Vec<serde_json::Value> = programs
+        .iter()
+        .map(|p| serde_json::json!({"program": p, "on": !muted.contains(p)}))
+        .collect();
+    let mut ctx = Context::new();
+    ctx.insert("syslog_logs", &entries);
+    ctx.insert("syslog_hosts", &programs);
+    ctx.insert("log_switches", &switches);
+    ctx.insert("logs_max_entries", &max);
+    app.page("logs.html", ctx, &csrf.0)
+}
+
+// What: save forward targets and muted programs.
+// Why: switches arrive as on_<program>; rest is muted.
+// From: Issue #1683 | PR #1858
+async fn logs_save(
+    State(app): Shared,
+    axum::Extension(csrf): axum::Extension<Csrf>,
+    Form(form): Form<BTreeMap<String, String>>,
+) -> Response {
+    if !csrf_ok(&form, &csrf) {
+        return (StatusCode::FORBIDDEN, "CSRF token mismatch").into_response();
+    }
+    let s = app.settings();
+    let muted: Vec<String> = s
+        .list("SYSLOG_PROGRAMS")
+        .into_iter()
+        .filter(|p| form.get(&format!("on_{p}")).map(String::as_str) != Some("true"))
+        .collect();
+    let mut updates = BTreeMap::new();
+    updates.insert("SYSLOG_MUTED".to_string(), muted.join(" "));
+    updates.insert(
+        "SYSLOG_FORWARD".to_string(),
+        form.get("SYSLOG_FORWARD")
+            .cloned()
+            .unwrap_or_default()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" "),
+    );
+    done(commit(&app, updates).await, "/logs#syslog")
 }
 
 // What: render all configs, write changed files, act.
@@ -480,7 +545,7 @@ const PAGES: [(&str, &str); 7] = [
     ("dhcp", "/dhcp"),
     ("setup", "/setup"),
 ];
-const ROUTES: [(&str, &str); 8] = [
+const ROUTES: [(&str, &str); 9] = [
     ("admin_css", "/static/admin.css"),
     ("favicon", "/favicon.ico"),
     ("logo_icon", "/static/logo-icon.png"),
@@ -489,6 +554,7 @@ const ROUTES: [(&str, &str); 8] = [
     ("restart_ui", "/api/restart-ui"),
     ("setup_save", "/setup/save"),
     ("password", "/setup/password"),
+    ("logs_save", "/logs/save"),
 ];
 
 // What: traffic-light colour of one container.
@@ -714,6 +780,8 @@ async fn main() -> Result<(), String> {
         .route("/setup", get(setup))
         .route("/setup/save", post(save))
         .route("/setup/password", post(password))
+        .route("/logs", get(logs))
+        .route("/logs/save", post(logs_save))
         .route("/api/status", get(status))
         .route("/api/container/{service}", post(container_state))
         .route("/api/restart-ui", post(restart_ui))
