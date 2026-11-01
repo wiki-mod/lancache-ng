@@ -1857,7 +1857,7 @@ fn parse_log_tail(dir: &str, limit: usize) -> Vec<LogEntry> {
     let Some(newest) = proxy_log_files(dir).pop() else {
         return vec![];
     };
-    // What: read a wide tail, keep the last `limit` HTTP lines.
+    // What: read a wide tail, keep newest HTTP lines.
     // Why: stream and error lines must not hide them.
     // From: Issue #1683 | PR #1979
     let entries: Vec<LogEntry> = tail_lines(&newest.to_string_lossy(), limit * TAIL_WINDOW)
