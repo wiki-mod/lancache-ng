@@ -1940,8 +1940,8 @@ fn templates() -> Result<Tera, String> {
         ("lancache_image_tag", "LANCACHE_IMAGE_TAG"),
         ("lancache_image_channel", "LANCACHE_IMAGE_CHANNEL"),
     ] {
-        t.register_function(func, move |_: &std::collections::HashMap<String, tera::Value>| {
-            Ok(tera::Value::String(process_env(key).unwrap_or_default()))
+        t.register_function(func, move |_: tera::Kwargs, _: &tera::State| {
+            process_env(key).unwrap_or_default()
         });
     }
     Ok(t)
