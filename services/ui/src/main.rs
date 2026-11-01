@@ -864,6 +864,13 @@ async fn register(State(app): Shared, axum::Json(r): axum::Json<Register>) -> Re
         "tsig_name": sec.tsig_name,
         "tsig_secret": sec.tsig_secret,
         "syslog_primary": format!("{}:{}", s.text("IP_HTTP").unwrap_or_default(), s.uint("LANCACHE_LOG_PORT").unwrap_or(0)),
+        "dns_local_reverse_zones": s.text("DNS_LOCAL_REVERSE_ZONES").unwrap_or_default(),
+        // What: image identity of this install, from compose.
+        // Why: setup.sh pins the secondary to the same images.
+        "image_registry": process_env("LANCACHE_IMAGE_REGISTRY").unwrap_or_default(),
+        "image_prefix": process_env("LANCACHE_IMAGE_PREFIX").unwrap_or_default(),
+        "image_channel": process_env("LANCACHE_IMAGE_CHANNEL").unwrap_or_default(),
+        "image_tag": process_env("LANCACHE_IMAGE_TAG").unwrap_or_default(),
     }))
     .into_response()
 }

@@ -4125,11 +4125,16 @@ migrate_env_for_update() (
     append_env_migrated_assignment_if_missing IP_HTTPS IP_SSL "" "$env_file"
     remove_env_key IP_STANDARD "$env_file"
     remove_env_key IP_SSL "$env_file"
-    # What: drops the unused NATS DNS replica login.
-    # Why: no client uses it; it held DNS publish rights.
-    # From: Issue #1683 | PR #1912
-    remove_env_key NATS_DNS_REPLICA_USER "$env_file"
-    remove_env_key NATS_DNS_REPLICA_PASSWORD "$env_file"
+    # What: drops every NATS and Netdata key on update.
+    # Why: NATS and Netdata are gone from the stack.
+    # From: Issue #1683 | PR #1858
+    local retired
+    for retired in NATS_DNS_REPLICA_USER NATS_DNS_REPLICA_PASSWORD \
+        NATS_UI_PASSWORD NATS_DNS_WRITER_PASSWORD NATS_CALLOUT_PASSWORD \
+        NATS_SYS_PASSWORD NATS_BIND_IP NATS_ADVERTISE_URL NATS_DATA_DIR \
+        NATS_CONF_DIR NETDATA_ALARM_TOKEN CACHEHAMSTER_URLS; do
+        remove_env_key "$retired" "$env_file"
+    done
     require_env_value_for_update IP_HTTP "$env_file"
     # What: the second LAN IP must be set before any write
     # Why: prod always runs dns-https on it (AG-SETUP-001)
@@ -7865,7 +7870,7 @@ die_if_any_empty() {
 cmd_secondary() {
     local primary="" token="" name="" ip_http="" listen_ip="" ip_https="" listen_ip_https="" rotate=0
     local out http_status response secondary_dir cmd ddns_tsig_key dns_xfr_primary tag_input
-    local nats_url nats_user nats_password consumer_name pdns_api_key
+    local pdns_api_key tsig_name syslog_primary
     local response_image_registry response_image_prefix response_image_channel response_image_tag
     local existing_env_file lancache_image_registry lancache_image_prefix lancache_image_channel lancache_image_tag
     local explicit_lancache_image_tag keep_known_good_configs
@@ -8066,24 +8071,17 @@ cmd_secondary() {
     split_http_response response http_status "$out" \
         || die "Unrecognized response from primary server at ${primary}."
 
-    if [[ "$http_status" = "503" ]]; then
-        # What: 503 means primary lacks a reachable NATS URL
-        # Why: dns publishes NATS only with NATS_BIND_IP set
-        # From: Issue #1683 | PR #1858
-        die "Primary server at ${primary} is not configured to register remote secondaries (HTTP 503): it needs NATS_BIND_IP (or the more specific NATS_ADVERTISE_URL) set in its .env/.env.local to a NATS address this secondary can reach, AND its 'dns' service recreated -- e.g. docker compose up -d dns if the variable is in .env, or docker compose --env-file .env.local up -d dns if it is in .env.local (Compose does not auto-load .env.local) -- so NATS actually publishes that address; restarting only the ui container is not enough. See docs/architecture-ng.md's \"Remote secondary NATS access\" section."
-    elif [[ ! "$http_status" =~ ^2 ]]; then
+    if [[ ! "$http_status" =~ ^2 ]]; then
         die "Primary server rejected the registration request with HTTP ${http_status}. Verify the registration token, secondary name, and primary server logs."
     fi
     [[ -n "$response" ]] || die "Empty response from primary server after successful registration request"
 
     bad_response="Unrecognized response from primary server at ${primary}."
-    nats_url=$(json_value .nats_url "$response") || die "$bad_response"
-    nats_user=$(json_value .nats_user "$response") || die "$bad_response"
-    nats_password=$(json_value .nats_password "$response") || die "$bad_response"
-    consumer_name=$(json_value .consumer_name "$response") || die "$bad_response"
     pdns_api_key=$(json_value .pdns_api_key "$response") || die "$bad_response"
-    ddns_tsig_key=$(json_value .ddns_tsig_key "$response") || die "$bad_response"
-    dns_xfr_primary=$(json_value .dns_xfr_primary "$response") || die "$bad_response"
+    tsig_name=$(json_value .tsig_name "$response") || die "$bad_response"
+    ddns_tsig_key=$(json_value .tsig_secret "$response") || die "$bad_response"
+    dns_xfr_primary=$(json_value .primary "$response") || die "$bad_response"
+    syslog_primary=$(json_value .syslog_primary "$response") || die "$bad_response"
     response_image_registry=$(json_value .image_registry "$response") || die "$bad_response"
     response_image_prefix=$(json_value .image_prefix "$response") || die "$bad_response"
     response_image_channel=$(json_value .image_channel "$response") || die "$bad_response"
@@ -8096,9 +8094,9 @@ cmd_secondary() {
     validate_env_value DNS_LOCAL_REVERSE_ZONES "$local_reverse"
 
     die_if_any_empty "Invalid response from primary server; missing field(s)" \
-        "nats_url=$nats_url" "nats_user=$nats_user" "nats_password=$nats_password" \
-        "consumer_name=$consumer_name" "pdns_api_key=$pdns_api_key" \
-        "ddns_tsig_key=$ddns_tsig_key" "dns_xfr_primary=$dns_xfr_primary"
+        "pdns_api_key=$pdns_api_key" "tsig_name=$tsig_name" \
+        "ddns_tsig_key=$ddns_tsig_key" "dns_xfr_primary=$dns_xfr_primary" \
+        "syslog_primary=$syslog_primary"
 
     mkdir -p "$secondary_dir"
 
@@ -8234,10 +8232,8 @@ DNS_HTTPS_HOST_PORT=${dns_https_host_port}
 PDNS_API_KEY=${pdns_api_key}
 DDNS_TSIG_KEY=${ddns_tsig_key}
 DNS_XFR_PRIMARY=${dns_xfr_primary}
-NATS_URL=${nats_url}
-NATS_USER=${nats_user}
-NATS_PASSWORD=${nats_password}
-NATS_CONSUMER=${consumer_name}
+DDNS_TSIG_NAME=${tsig_name}
+SYSLOG_PRIMARY=${syslog_primary}
 KEEP_KNOWN_GOOD_CONFIGS=${keep_known_good_configs}
 DNS_LOCAL_REVERSE_ZONES=${local_reverse}
 ${upstream_rows}LANCACHE_IMAGE_REGISTRY=${lancache_image_registry}
@@ -8855,7 +8851,7 @@ NTP_ENABLED=$(yn_flag "$REPLY")
 ntp_subdir=$(prod_env_default STATE_SUBDIR_NTP) || exit $?
 NTP_DATA_DIR="$LANCACHE_STATE_DIR/$ntp_subdir"
 if [[ "$NTP_ENABLED" = "1" ]]; then
-    print_ok "LanCache-NG-NTP enabled — configure upstream servers and the DHCP auto-populate toggle from the Admin UI's NTP page"
+    print_ok "LanCache-NG-NTP enabled — configure upstream servers from the Admin UI setup page"
 else
     print_ok "LanCache-NG-NTP skipped — can be enabled later from the Admin UI"
 fi
@@ -9034,23 +9030,18 @@ DHCP_PROXY_PXE_BOOT_SERVER=${DHCP_PROXY_PXE_BOOT_SERVER}
 DHCP_PROXY_PXE_BOOT_FILENAME_BIOS=${DHCP_PROXY_PXE_BOOT_FILENAME_BIOS}
 DHCP_PROXY_PXE_BOOT_FILENAME_UEFI=${DHCP_PROXY_PXE_BOOT_FILENAME_UEFI}
 
-# What: start value; the Admin UI NTP page changes it later
+# What: start value; the Admin UI setup page changes it
 # Why: the watchdog runs chronyd in services only when 1
 # From: Issue #1683 | PR #1912
 NTP_ENABLED=${NTP_ENABLED}
 NTP_DATA_DIR=${NTP_DATA_DIR}
 
 # What: generated secrets; keep them unchanged
-# Why: DHCP, DNS, NATS and the Admin UI share these values
+# Why: DHCP, DNS and the Admin UI share these values
 # From: Issue #1683 | PR #1858
 KEA_CTRL_TOKEN=${KEA_CTRL_TOKEN?}
 DDNS_TSIG_KEY=${DDNS_TSIG_KEY?}
 PDNS_API_KEY=${PDNS_API_KEY?}
-NETDATA_ALARM_TOKEN=${NETDATA_ALARM_TOKEN}
-NATS_UI_PASSWORD=${NATS_UI_PASSWORD}
-NATS_DNS_WRITER_PASSWORD=${NATS_DNS_WRITER_PASSWORD}
-NATS_CALLOUT_PASSWORD=${NATS_CALLOUT_PASSWORD}
-NATS_SYS_PASSWORD=${NATS_SYS_PASSWORD}
 
 # What: token for ./setup.sh secondary registration
 # Why: whoever knows it can register a secondary
