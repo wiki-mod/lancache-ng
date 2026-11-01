@@ -1342,6 +1342,95 @@ async fn dhcp_check(
     }
 }
 
+// What: statistics page: one tab per time range.
+// Why: rrdtool draws PNGs; no chart script in the page.
+// From: Issue #1683 | PR #1858
+async fn stats(State(app): Shared, axum::Extension(csrf): axum::Extension<Csrf>) -> Response {
+    let s = app.settings();
+    let mut ctx = Context::new();
+    match lancache_ng::rrd::graphs(&s) {
+        Ok(g) => {
+            let rows: Vec<serde_json::Value> = g
+                .iter()
+                .map(|x| serde_json::json!({"name": x.name, "title": x.title}))
+                .collect();
+            ctx.insert("graphs", &rows);
+        }
+        Err(e) => ctx.insert("stats_error", &e),
+    }
+    ctx.insert("ranges", &s.list("STATS_RANGES"));
+    app.page("stats.html", ctx, &csrf.0)
+}
+
+// What: query of a graph image.
+// Why: dark=1 draws with the dark colour set.
+// From: Issue #1683 | PR #1858
+#[derive(serde::Deserialize)]
+struct GraphQuery {
+    range: String,
+    #[serde(default)]
+    dark: u8,
+}
+
+// What: one graph PNG.
+// Why: drawn on request; RRD files stay small.
+// From: Issue #1683 | PR #1858
+async fn graph(
+    State(app): Shared,
+    axum::extract::Path(name): axum::extract::Path<String>,
+    axum::extract::Query(q): axum::extract::Query<GraphQuery>,
+) -> Response {
+    let s = app.settings();
+    let Some(g) = lancache_ng::rrd::graphs(&s)
+        .ok()
+        .and_then(|l| l.into_iter().find(|g| g.name == name))
+    else {
+        return (StatusCode::NOT_FOUND, "no such graph").into_response();
+    };
+    match tokio::task::spawn_blocking(move || lancache_ng::rrd::png(&s, &g, &q.range, q.dark == 1))
+        .await
+    {
+        Ok(Ok(png)) => ([(header::CONTENT_TYPE, "image/png")], png).into_response(),
+        Ok(Err(e)) => (StatusCode::BAD_REQUEST, e).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+// What: background sampler: SNMP into RRD each step.
+// Why: the ui owns statistics; the watchdog only watches.
+// From: Issue #1683 | PR #1858
+async fn sampler(app: Arc<App>) {
+    loop {
+        let s = app.settings();
+        let step = s.uint("STATS_STEP").unwrap_or(0);
+        if step == 0 {
+            eprintln!("ui: stats: STATS_STEP is not set; sampler stops");
+            return;
+        }
+        let s2 = s.clone();
+        let res = tokio::task::spawn_blocking(move || {
+            let mut errs = Vec::new();
+            match lancache_ng::rrd::graphs(&s2) {
+                Ok(gs) => {
+                    for g in gs {
+                        if let Err(e) = lancache_ng::rrd::sample(&s2, &g) {
+                            errs.push(e);
+                        }
+                    }
+                }
+                Err(e) => errs.push(e),
+            }
+            errs
+        })
+        .await;
+        match res {
+            Ok(errs) => errs.iter().for_each(|e| eprintln!("ui: stats: {e}")),
+            Err(e) => eprintln!("ui: stats: {e}"),
+        }
+        tokio::time::sleep(Duration::from_secs(step)).await;
+    }
+}
+
 // What: render all configs, write changed files, act.
 // Why: only owners with changed keys or files are touched.
 // From: Issue #1683 | PR #1858
@@ -1685,6 +1774,7 @@ async fn main() -> Result<(), String> {
         saved,
         session_key,
     });
+    tokio::spawn(sampler(app.clone()));
     let pages = Router::new()
         .route("/", get(dashboard))
         .route("/setup", get(setup))
@@ -1694,6 +1784,8 @@ async fn main() -> Result<(), String> {
         .route("/domains", get(domains))
         .route("/domains/{op}", post(dns_action))
         .route("/dhcp", get(dhcp))
+        .route("/stats", get(stats))
+        .route("/stats/graph/{name}", get(graph))
         .route("/dhcp/check", post(dhcp_check))
         .route("/dhcp/{op}", post(dhcp_action))
         .route("/api/secondary/{name}/{op}", post(secondary_action))

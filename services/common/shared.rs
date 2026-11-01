@@ -2840,6 +2840,7 @@ pub mod render {
         };
         add("dns", "CHRONY_CONF_FILE", chrony::conf(s));
         add("dns", "SYSLOG_CONF_FILE", log::conf(s));
+        add("dns", "SNMPD_CONF_FILE", crate::snmp::conf(s, &[], &[]));
         add(
             "dns",
             "PDNS_CONF_FILE",
@@ -3327,5 +3328,204 @@ pub mod kea {
                 .await
                 .map(drop)
         }
+    }
+}
+
+// What: statistics: SNMP samples into RRD files.
+// Why: replaces Netdata; rrdtool and snmpget are native.
+// From: Issue #1683 | PR #1858
+pub mod rrd {
+    use crate::config::Settings;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+
+    // What: one data source: name, SNMP OID, RRD type.
+    // Why: COUNTER for byte counters, GAUGE for levels.
+    // From: Issue #1683 | PR #1858
+    #[derive(Clone, Debug)]
+    pub struct Source {
+        pub ds: String,
+        pub oid: String,
+        pub kind: String,
+    }
+
+    // What: one graph = one RRD file.
+    // Why: SOT row name|title|ds=oid=TYPE,ds=oid=TYPE.
+    // From: Issue #1683 | PR #1858
+    #[derive(Clone, Debug)]
+    pub struct Graph {
+        pub name: String,
+        pub title: String,
+        pub sources: Vec<Source>,
+    }
+
+    // What: graphs from STATS_GRAPHS.
+    // Why: a bad row is an error, never skipped.
+    // From: Issue #1683 | PR #1858
+    pub fn graphs(s: &Settings) -> Result<Vec<Graph>, String> {
+        s.list("STATS_GRAPHS")
+            .iter()
+            .map(|row| {
+                let mut p = row.split('|');
+                let (Some(name), Some(title), Some(srcs)) = (p.next(), p.next(), p.next()) else {
+                    return Err(format!("STATS_GRAPHS row {row:?} needs name|title|sources"));
+                };
+                if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                    return Err(format!("graph name {name:?} is not plain"));
+                }
+                let sources = srcs
+                    .split(',')
+                    .map(|x| {
+                        let v: Vec<&str> = x.split('=').collect();
+                        match v.as_slice() {
+                            [ds, oid, kind]
+                                if ds.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                                    && ["GAUGE", "COUNTER", "DERIVE"].contains(kind) =>
+                            {
+                                Ok(Source {
+                                    ds: (*ds).into(),
+                                    oid: (*oid).into(),
+                                    kind: (*kind).into(),
+                                })
+                            }
+                            _ => Err(format!("source {x:?} needs ds=oid=GAUGE|COUNTER|DERIVE")),
+                        }
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(Graph {
+                    name: name.into(),
+                    title: title.replace('_', " "),
+                    sources,
+                })
+            })
+            .collect()
+    }
+
+    // What: RRD file path of a graph.
+    // Why: one file per graph under STATS_DIR.
+    // From: Issue #1683 | PR #1858
+    pub fn file(s: &Settings, g: &Graph) -> Result<PathBuf, String> {
+        Ok(Path::new(&s.text("STATS_DIR")?).join(format!("{}.rrd", g.name)))
+    }
+
+    // What: run a tool; stdout or the error text.
+    // Why: the tools report errors on stderr.
+    // From: Issue #1683 | PR #1858
+    fn run(cmd: &mut Command) -> Result<Vec<u8>, String> {
+        let out = cmd.output().map_err(|e| format!("{cmd:?}: {e}"))?;
+        if out.status.success() {
+            Ok(out.stdout)
+        } else {
+            Err(format!(
+                "{cmd:?}: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ))
+        }
+    }
+
+    // What: create the RRD if it is missing.
+    // Why: step, heartbeat and RRAs from the SOT.
+    // From: Issue #1683 | PR #1858
+    pub fn ensure(s: &Settings, g: &Graph) -> Result<(), String> {
+        let path = file(s, g)?;
+        if path.exists() {
+            return Ok(());
+        }
+        let step = s.uint("STATS_STEP")?;
+        let beat = step.saturating_mul(s.uint("STATS_HEARTBEAT_STEPS")?);
+        let mut cmd = Command::new("rrdtool");
+        cmd.arg("create")
+            .arg(&path)
+            .args(["--step", &step.to_string()]);
+        for src in &g.sources {
+            cmd.arg(format!("DS:{}:{}:{beat}:0:U", src.ds, src.kind));
+        }
+        for rra in s.list("STATS_RRAS") {
+            cmd.arg(format!("RRA:{rra}"));
+        }
+        run(&mut cmd).map(drop)
+    }
+
+    // What: one SNMP sample of all sources, then update.
+    // Why: snmpget -Oqv prints one value per line.
+    // From: Issue #1683 | PR #1858
+    pub fn sample(s: &Settings, g: &Graph) -> Result<(), String> {
+        ensure(s, g)?;
+        let mut cmd = Command::new("snmpget");
+        cmd.args([
+            "-v2c",
+            "-Oqv",
+            "-c",
+            &s.text("SNMP_COMMUNITY")?,
+            &s.text("STATS_SNMP_TARGET")?,
+        ]);
+        cmd.args(g.sources.iter().map(|x| x.oid.as_str()));
+        let out = String::from_utf8_lossy(&run(&mut cmd)?).to_string();
+        let vals: Vec<String> = out
+            .lines()
+            .map(|l| {
+                let v = l.trim().split_whitespace().next().unwrap_or("U");
+                if v.parse::<f64>().is_ok() {
+                    v.to_string()
+                } else {
+                    "U".to_string()
+                }
+            })
+            .collect();
+        if vals.len() != g.sources.len() {
+            return Err(format!(
+                "{}: {} values for {} sources",
+                g.name,
+                vals.len(),
+                g.sources.len()
+            ));
+        }
+        let mut up = Command::new("rrdtool");
+        up.arg("update")
+            .arg(file(s, g)?)
+            .arg(format!("N:{}", vals.join(":")));
+        run(&mut up).map(drop)
+    }
+
+    // What: PNG of one graph over a time range.
+    // Why: rrdtool draws; the page only shows the image.
+    // From: Issue #1683 | PR #1858
+    pub fn png(s: &Settings, g: &Graph, range: &str, dark: bool) -> Result<Vec<u8>, String> {
+        if !s.list("STATS_RANGES").iter().any(|r| r == range) {
+            return Err(format!("range {range} is not offered"));
+        }
+        let path = file(s, g)?;
+        let mut cmd = Command::new("rrdtool");
+        cmd.args([
+            "graph",
+            "-",
+            "--imgformat",
+            "PNG",
+            "--start",
+            &format!("-{range}"),
+        ]);
+        cmd.args([
+            "--title",
+            &g.title,
+            "--width",
+            &s.text("STATS_WIDTH")?,
+            "--height",
+            &s.text("STATS_HEIGHT")?,
+        ]);
+        if dark {
+            for c in s.list("STATS_DARK_COLOURS") {
+                cmd.args(["--color", &c]);
+            }
+        }
+        let colours = s.list("STATS_LINE_COLOURS");
+        for (i, src) in g.sources.iter().enumerate() {
+            let colour = colours
+                .get(i % colours.len().max(1))
+                .cloned()
+                .unwrap_or_default();
+            cmd.arg(format!("DEF:{0}={1}:{0}:AVERAGE", src.ds, path.display()));
+            cmd.arg(format!("LINE2:{}#{colour}:{}", src.ds, src.ds));
+        }
+        run(&mut cmd)
     }
 }
