@@ -44,6 +44,7 @@ liblzma = { version = "*", features = ["static"] }
 # What: nkeys with the xkeys (X25519) feature.
 # Why: the auth callout response is encrypted with an XKey.
 nkeys = { version = "*", features = ["xkeys"] }
+qrcode = { version = "*", default-features = false, features = ["svg"] }
 rand = "*"
 regex = "*"
 # What: reqwest without default features, on rustls.
