@@ -2082,3 +2082,232 @@ pub mod recursor_conf {
         ))
     }
 }
+
+// What: Kea configs: dhcp4, ctrl-agent, dhcp-ddns.
+// Why: one owner; Kea reads them; values from the SOT.
+// From: Issue #1683 | PR #1858
+pub mod kea_conf {
+    use crate::config::Settings;
+    use crate::dhcp;
+    use serde_json::{json, Value};
+
+    // What: Kea logger rows to stdout.
+    // Why: Docker syslog driver carries stdout to syslog-ng.
+    // From: Issue #1683 | PR #1858
+    fn loggers(s: &Settings, names: &[&str]) -> Result<Value, String> {
+        let severity = s.text("KEA_LOG_SEVERITY")?;
+        let debug = s.uint("KEA_LOG_DEBUGLEVEL")?;
+        Ok(names
+            .iter()
+            .map(|n| {
+                json!({"name": n, "output-options": [{"output": "stdout"}],
+                       "severity": severity, "debuglevel": debug})
+            })
+            .collect())
+    }
+
+    // What: kea-dhcp4.conf.
+    // Why: managed options first, user options after.
+    // From: Issue #1683 | PR #1858
+    pub fn dhcp4(s: &Settings) -> Result<Value, String> {
+        let lease = s.uint("DHCP_LEASE_TIME")?;
+        let (valid, max) = dhcp::lease_limits(s, lease)?;
+        let domain = crate::dns::canonical_zone(&s.text("DNS_LAN_ZONE")?);
+        let domain = domain.trim_end_matches('.').to_string();
+        let mut options = vec![
+            json!({"name": "routers", "data": s.text("DHCP_GATEWAY")?}),
+            json!({"name": "domain-name-servers", "data": s.list("DHCP_DNS_SERVERS").join(", ")}),
+            json!({"name": "domain-name", "data": domain}),
+            json!({"name": "domain-search", "data": domain}),
+        ];
+        let ntp = s.list("DHCP_NTP_SERVERS");
+        if !ntp.is_empty() {
+            options.push(json!({"name": "ntp-servers", "data": ntp.join(", ")}));
+        }
+        for (code, data) in
+            dhcp::custom_options(s, &s.text("DHCP_CUSTOM_OPTIONS").unwrap_or_default())?
+        {
+            options.push(json!({"code": code, "data": data}));
+        }
+        let ddns = s.flag("DHCP_DDNS")?;
+        Ok(json!({"Dhcp4": {
+            "interfaces-config": {"interfaces": s.list("DHCP_INTERFACES"), "re-detect": false},
+            "lease-database": {"type": "memfile", "persist": true, "name": s.text("KEA_LEASE_FILE")?},
+            "control-socket": {"socket-type": "unix", "socket-name": s.text("KEA_DHCP4_SOCKET")?},
+            "hooks-libraries": [{"library": s.text("KEA_LEASE_CMDS_HOOK")?}],
+            "subnet4": [{
+                "id": 1,
+                "subnet": s.text("DHCP_SUBNET")?,
+                "pools": [{"pool": format!("{} - {}", s.text("DHCP_RANGE_START")?, s.text("DHCP_RANGE_END")?)}],
+                "option-data": options,
+                "valid-lifetime": valid,
+                "max-valid-lifetime": max
+            }],
+            "dhcp-ddns": {
+                "enable-updates": ddns,
+                "server-ip": s.text("KEA_DDNS_ADDRESS")?,
+                "server-port": s.uint("KEA_DDNS_PORT")?,
+                "max-queue-size": s.uint("KEA_NCR_MAX_QUEUE")?,
+                "ncr-protocol": "UDP",
+                "ncr-format": "JSON"
+            },
+            "ddns-send-updates": ddns,
+            "ddns-override-no-update": true,
+            "ddns-override-client-update": true,
+            "ddns-replace-client-name": s.text("KEA_DDNS_REPLACE_CLIENT_NAME")?,
+            "ddns-generated-prefix": s.text("KEA_DDNS_GENERATED_PREFIX")?,
+            "ddns-qualifying-suffix": format!("{domain}."),
+            "loggers": loggers(s, &["kea-dhcp4", "kea-dhcp4.packets"])?
+        }}))
+    }
+
+    // What: kea-ctrl-agent.conf.
+    // Why: the ui reads leases through its REST port.
+    // From: Issue #1683 | PR #1858
+    pub fn ctrl_agent(s: &Settings) -> Result<Value, String> {
+        Ok(json!({"Control-agent": {
+            "http-host": s.text("KEA_CTRL_ADDRESS")?,
+            "http-port": s.uint("KEA_CTRL_PORT")?,
+            "control-sockets": {"dhcp4": {"socket-type": "unix", "socket-name": s.text("KEA_DHCP4_SOCKET")?}},
+            "loggers": loggers(s, &["kea-ctrl-agent"])?
+        }}))
+    }
+
+    // What: kea-dhcp-ddns.conf: forward and reverse.
+    // Why: DDNS goes to the local pdns with TSIG.
+    // From: Issue #1683 | PR #1858
+    pub fn ddns(s: &Settings, tsig_name: &str, tsig_secret: &str) -> Result<Value, String> {
+        let server = json!([{"ip-address": s.text("PDNS_AUTH_ADDRESS")?, "port": s.uint("PDNS_AUTH_PORT")?}]);
+        let zone = crate::dns::canonical_zone(&s.text("DNS_LAN_ZONE")?);
+        let fwd = json!([{"name": zone, "key-name": tsig_name, "dns-servers": server}]);
+        let rev: Vec<Value> = crate::dns::private_reverse_zones()
+            .iter()
+            .map(|z| json!({"name": z, "key-name": tsig_name, "dns-servers": server}))
+            .collect();
+        Ok(json!({"DhcpDdns": {
+            "ip-address": s.text("KEA_DDNS_ADDRESS")?,
+            "port": s.uint("KEA_DDNS_PORT")?,
+            "tsig-keys": [{"name": tsig_name, "algorithm": "HMAC-SHA256", "secret": tsig_secret}],
+            "forward-ddns": {"ddns-domains": fwd},
+            "reverse-ddns": {"ddns-domains": rev},
+            "loggers": loggers(s, &["kea-dhcp-ddns"])?
+        }}))
+    }
+}
+
+// What: dnsmasq.conf for proxy-DHCP or relay mode.
+// Why: one owner; errors stop the render, never skip.
+// From: Issue #1683 | PR #1858
+pub mod dnsmasq_conf {
+    use crate::config::Settings;
+    use crate::dhcp::{self, Mode};
+
+    // What: append one line; refuse line breaks.
+    // Why: a value must never add a dnsmasq directive.
+    // From: Issue #1683 | PR #1858
+    fn line(out: &mut String, l: String) -> Result<(), String> {
+        if l.contains(['\n', '\r']) {
+            return Err(format!("dnsmasq line {l:?} holds a line break"));
+        }
+        out.push_str(&l);
+        out.push('\n');
+        Ok(())
+    }
+
+    // What: render dnsmasq.conf for the mode.
+    // Why: Off and Kea run no dnsmasq; caller asks first.
+    // From: Issue #1683 | PR #1858
+    pub fn conf(s: &Settings, mode: Mode) -> Result<String, String> {
+        let mut out = String::from("port=0\nno-resolv\nno-poll\nlog-facility=-\n");
+        if s.flag("DHCP_LOG_PACKETS")? {
+            out.push_str("log-dhcp\n");
+        }
+        match mode {
+            Mode::DnsmasqRelay => {
+                let l = format!(
+                    "dhcp-relay={},{}",
+                    s.text("DHCP_RELAY_LOCAL_ADDR")?,
+                    s.text("UPSTREAM_DHCP_IP")?
+                );
+                line(&mut out, l)?;
+                return Ok(out);
+            }
+            Mode::DnsmasqProxy => {}
+            Mode::Off | Mode::Kea => return Err(format!("dnsmasq does not run in mode {mode:?}")),
+        }
+        line(
+            &mut out,
+            format!("dhcp-range={},proxy", s.text("DHCP_SUBNET_START")?),
+        )?;
+        line(
+            &mut out,
+            format!("dhcp-option-pxe=6,{}", s.list("DHCP_DNS_SERVERS").join(",")),
+        )?;
+        let opt = |k: &str| s.text(k).unwrap_or_default();
+        for (key, prefix) in [
+            ("DHCP_PROXY_INTERFACE", "interface="),
+            ("DHCP_PROXY_ROUTER", "dhcp-option-pxe=3,"),
+            ("DHCP_PROXY_DOMAIN", "dhcp-option-pxe=15,"),
+        ] {
+            let v = opt(key);
+            if !v.is_empty() {
+                line(&mut out, format!("{prefix}{v}"))?;
+            }
+        }
+        let ntp = s.list("DHCP_NTP_SERVERS");
+        if !ntp.is_empty() {
+            line(&mut out, format!("dhcp-option-pxe=42,{}", ntp.join(",")))?;
+        }
+        let (file, server) = (
+            opt("DHCP_PROXY_BOOT_FILENAME"),
+            opt("DHCP_PROXY_BOOT_SERVER"),
+        );
+        if !file.is_empty() {
+            line(&mut out, format!("dhcp-boot={file},,{server}"))?;
+        }
+        for (code, data) in dhcp::custom_options(s, &opt("DHCP_CUSTOM_OPTIONS"))? {
+            line(&mut out, format!("dhcp-option-pxe={code},{data}"))?;
+        }
+        let pxe = opt("DHCP_PROXY_PXE_BOOT_SERVER");
+        let bios = opt("DHCP_PROXY_PXE_BOOT_FILENAME_BIOS");
+        let uefi = opt("DHCP_PROXY_PXE_BOOT_FILENAME_UEFI");
+        if pxe.is_empty() || (bios.is_empty() && uefi.is_empty()) {
+            return Ok(out);
+        }
+        if !bios.is_empty() {
+            line(
+                &mut out,
+                format!("pxe-service=x86PC,\"lancache-ng PXE boot (BIOS)\",{bios},{pxe}"),
+            )?;
+            line(
+                &mut out,
+                "dhcp-match=set:lancache-pxe-bios,option:client-arch,0".into(),
+            )?;
+            line(
+                &mut out,
+                format!("dhcp-boot=tag:lancache-pxe-bios,{bios},,{pxe}"),
+            )?;
+        }
+        if !uefi.is_empty() {
+            line(
+                &mut out,
+                "dhcp-match=set:lancache-pxe-uefi,option:client-arch,7".into(),
+            )?;
+            line(
+                &mut out,
+                "dhcp-match=set:lancache-pxe-uefi,option:client-arch,11".into(),
+            )?;
+            line(
+                &mut out,
+                format!("dhcp-boot=tag:lancache-pxe-uefi,{uefi},,{pxe}"),
+            )?;
+        }
+        if bios.is_empty() {
+            line(
+                &mut out,
+                "pxe-service=IA64_EFI,\"lancache-ng PXE proxy active\",0".into(),
+            )?;
+        }
+        Ok(out)
+    }
+}
