@@ -296,12 +296,19 @@ fn steam_id_of(token: &str) -> Result<String, String> {
 // What: the QR code of a challenge URL as inline SVG.
 // Why: the UI embeds it; no image file, no CDN.
 // From: Issue #871 | PR #1858
-fn qr_svg(url: &str) -> Result<String, String> {
+fn qr_svg(url: &str, size: u32) -> Result<String, String> {
     let code = qrcode::QrCode::new(url.as_bytes()).map_err(|e| format!("QR: {e}"))?;
     Ok(code
         .render::<qrcode::render::svg::Color<'_>>()
-        .min_dimensions(220, 220)
+        .min_dimensions(size, size)
         .build())
+}
+
+// What: QR edge length in pixels, from the SOT.
+// Why: no size literal in code.
+// From: Issue #871 | PR #1858
+fn qr_size(c: &Ctx) -> Result<u32, String> {
+    u32::try_from(c.s.uint("STEAM_QR_SIZE")?).map_err(|e| e.to_string())
 }
 
 // What: start a QR login; answers the QR as SVG.
@@ -319,14 +326,14 @@ async fn login_begin(c: &Ctx, client: &reqwest::Client) -> Result<Value, String>
     let pending = Pending {
         client_id: field(&r, "client_id").ok_or("no client_id")?,
         request_id: field(&r, "request_id").ok_or("no request_id")?,
-        interval: r.get("interval").and_then(Value::as_u64).unwrap_or(5),
+        interval: r.get("interval").and_then(Value::as_u64).ok_or("no interval")?,
     };
     let url = field(&r, "challenge_url").ok_or("no challenge_url")?;
     c.save(
         PENDING_FILE,
         &serde_json::to_vec(&pending).map_err(|e| e.to_string())?,
     )?;
-    Ok(json!({"state": "waiting", "svg": qr_svg(&url)?, "interval": pending.interval}))
+    Ok(json!({"state": "waiting", "svg": qr_svg(&url, qr_size(c)?)?, "interval": pending.interval}))
 }
 
 // What: one poll of a pending QR login.
@@ -359,7 +366,7 @@ async fn login_poll(c: &Ctx, client: &reqwest::Client) -> Result<Value, String> 
         p.client_id = new_id;
         c.save(PENDING_FILE, &serde_json::to_vec(&p).map_err(|e| e.to_string())?)?;
         if let Some(url) = field(&r, "new_challenge_url") {
-            return Ok(json!({"state": "waiting", "svg": qr_svg(&url)?, "interval": p.interval}));
+            return Ok(json!({"state": "waiting", "svg": qr_svg(&url, qr_size(c)?)?, "interval": p.interval}));
         }
     }
     let scanned = r
@@ -621,6 +628,11 @@ struct SteamCfg {
     dir: PathBuf,
     api: String,
     limit: Duration,
+    manifest_api: u64,
+    cell: String,
+    heartbeat: Duration,
+    // protocol version, package version, OS type, chat mode
+    logon: [u64; 4],
     cdn_host: String,
     proxy: std::net::SocketAddr,
     branch: String,
@@ -634,6 +646,15 @@ impl SteamCfg {
             dir: c.dir.clone(),
             api: c.api.clone(),
             limit: Duration::from_secs(c.s.uint("HTTP_CLIENT_TIMEOUT")?),
+            heartbeat: Duration::from_secs(c.s.uint("STEAM_HEARTBEAT_DEFAULT")?),
+            manifest_api: c.s.uint("STEAM_MANIFEST_API_VERSION")?,
+            cell: c.s.uint("STEAM_CELL_ID")?.to_string(),
+            logon: [
+                c.s.uint("STEAM_PROTOCOL_VERSION")?,
+                c.s.uint("STEAM_CLIENT_PACKAGE_VERSION")?,
+                c.s.uint("STEAM_CLIENT_OS_TYPE")?,
+                c.s.uint("STEAM_CHAT_MODE")?,
+            ],
             cdn_host: c.s.text("STEAM_CDN_HOST")?,
             proxy: addr.parse().map_err(|e| format!("{addr}: {e}"))?,
             branch: c.s.text("STEAM_BRANCH")?,
@@ -878,12 +899,8 @@ const EMSG_PICS_TOKEN_RESPONSE: u32 = 8906;
 // What: protobuf flag of the message number.
 // Why: every CM message sent here is protobuf.
 const PROTO_MASK: u32 = 0x8000_0000;
-// What: logon values the Steam client protocol expects.
-// Why: as in Steam's own client (protocol 65580).
-const PROTOCOL_VERSION: u64 = 65580;
-const CLIENT_OS_TYPE: u64 = 203;
-const CLIENT_PACKAGE_VERSION: u64 = 1771;
-const CHAT_MODE: u64 = 2;
+// What: Steam result code OK (EResult 1).
+// Why: fixed by the protocol, like an RFC constant.
 const ERESULT_OK: u64 = 1;
 
 type Ws = tokio_tungstenite::WebSocketStream<
@@ -923,7 +940,7 @@ impl Cm {
             .map_err(|e| format!("steam id: {e}"))?;
         let list: Value = client
             .get(format!("{}/ISteamDirectory/GetCMList/v1/", cfg.api))
-            .query(&[("cellid", "0")])
+            .query(&[("cellid", cfg.cell.as_str())])
             .send()
             .await
             .map_err(|e| format!("CM list: {}", http::error_chain(&e)))?
@@ -942,19 +959,19 @@ impl Cm {
             steam_id,
             session: 0,
             next_job: 1,
-            heartbeat: Duration::from_secs(30),
+            heartbeat: cfg.heartbeat,
             last_beat: std::time::Instant::now(),
             queue: Default::default(),
             limit: cfg.limit,
         };
         let ip = PbOut::default().fixed32(1, 0);
         let logon = PbOut::default()
-            .int(1, PROTOCOL_VERSION)
-            .int(5, CLIENT_PACKAGE_VERSION)
+            .int(1, cfg.logon[0])
+            .int(5, cfg.logon[1])
             .bytes(6, b"")
-            .int(7, CLIENT_OS_TYPE)
+            .int(7, cfg.logon[2])
             .bytes(11, &ip.0)
-            .int(33, CHAT_MODE)
+            .int(33, cfg.logon[3])
             .bytes(50, s.account.as_bytes())
             .int(95, 0)
             .bytes(96, b"")
@@ -1189,7 +1206,7 @@ async fn app_urls(cfg: &SteamCfg, app: u32) -> Result<Vec<String>, String> {
                 continue;
             }
         };
-        let url = format!("http://{}/depot/{depot}/manifest/{gid}/5/{code}", cfg.cdn_host);
+        let url = format!("http://{}/depot/{depot}/manifest/{gid}/{}/{code}", cfg.cdn_host, cfg.manifest_api);
         let resp = client
             .get(&url)
             .send()
