@@ -227,8 +227,11 @@ impl Spec {
 // What: non-empty rows of a baked list.
 // Why: an empty row is no entry.
 // From: Issue #1683 | PR #1858
-fn rows(baked: &str) -> impl Iterator<Item = &str> {
-    baked.split(ROW_SEP).map(str::trim).filter(|r| !r.is_empty())
+fn baked_rows(baked: &str) -> impl Iterator<Item = &str> {
+    baked
+        .split(ROW_SEP)
+        .map(str::trim)
+        .filter(|r| !r.is_empty())
 }
 
 // What: KEY=VALUE lines of the admin file.
@@ -272,8 +275,14 @@ pub fn store(
         uid: None,
         gid: None,
     };
-    crate::fs::write(path, body.as_bytes(), 0o600, crate::fs::Place::Replace, owner)
-        .map_err(|e| format!("{}: {e}", path.display()))
+    crate::fs::write(
+        path,
+        body.as_bytes(),
+        0o600,
+        crate::fs::Place::Replace,
+        owner,
+    )
+    .map_err(|e| format!("{}: {e}", path.display()))
 }
 
 // What: the checked settings of one process.
@@ -296,15 +305,16 @@ impl Settings {
     ) -> Result<Self, String> {
         let schema = env(SCHEMA_KEY).ok_or_else(|| format!("{SCHEMA_KEY} is not set"))?;
         let baked = env(DEFAULTS_KEY).unwrap_or_default();
-        let defaults: BTreeMap<&str, &str> =
-            rows(&baked).filter_map(|r| r.split_once('=')).collect();
+        let defaults: BTreeMap<&str, &str> = baked_rows(&baked)
+            .filter_map(|r| r.split_once('='))
+            .collect();
         let file = match saved_file {
             Some(path) => read_file(path)?,
             None => BTreeMap::new(),
         };
         let mut set = Self::default();
         let mut errors = Vec::new();
-        for row in rows(&schema) {
+        for row in baked_rows(&schema) {
             let spec = match Spec::parse(row) {
                 Ok(spec) => spec,
                 Err(e) => {

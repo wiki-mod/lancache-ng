@@ -155,8 +155,14 @@ impl Ctx {
     }
 
     fn save(&self, name: &str, body: &[u8]) -> Result<(), String> {
-        write(&self.path(name), body, MODE, Place::Replace, Owner::default())
-            .map_err(|e| format!("{name}: {e}"))
+        write(
+            &self.path(name),
+            body,
+            MODE,
+            Place::Replace,
+            Owner::default(),
+        )
+        .map_err(|e| format!("{name}: {e}"))
     }
 }
 
@@ -188,8 +194,12 @@ fn remove(path: &Path) -> Result<(), String> {
 // Why: created once in the data dir, mode 0600.
 // From: Issue #871 | PR #1858
 fn session_key(dir: &Path) -> Result<[u8; 32], String> {
-    let hex = secret::load_or_create(&dir.join(KEY_FILE), || secret::random_hex(32), Owner::default())
-        .map_err(|e| format!("{KEY_FILE}: {e}"))?;
+    let hex = secret::load_or_create(
+        &dir.join(KEY_FILE),
+        || secret::random_hex(32),
+        Owner::default(),
+    )
+    .map_err(|e| format!("{KEY_FILE}: {e}"))?;
     secret::key_bytes(&hex)
 }
 
@@ -285,7 +295,10 @@ fn field(v: &Value, key: &str) -> Option<String> {
 // Why: GetOwnedGames and token refresh need it.
 // From: Issue #871 | PR #1858
 fn steam_id_of(token: &str) -> Result<String, String> {
-    let payload = token.split('.').nth(1).ok_or("refresh token is not a JWT")?;
+    let payload = token
+        .split('.')
+        .nth(1)
+        .ok_or("refresh token is not a JWT")?;
     let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(payload.trim_end_matches('='))
         .map_err(|e| format!("refresh token payload: {e}"))?;
@@ -326,7 +339,10 @@ async fn login_begin(c: &Ctx, client: &reqwest::Client) -> Result<Value, String>
     let pending = Pending {
         client_id: field(&r, "client_id").ok_or("no client_id")?,
         request_id: field(&r, "request_id").ok_or("no request_id")?,
-        interval: r.get("interval").and_then(Value::as_u64).ok_or("no interval")?,
+        interval: r
+            .get("interval")
+            .and_then(Value::as_u64)
+            .ok_or("no interval")?,
     };
     let url = field(&r, "challenge_url").ok_or("no challenge_url")?;
     c.save(
@@ -364,9 +380,14 @@ async fn login_poll(c: &Ctx, client: &reqwest::Client) -> Result<Value, String> 
     // Why: the UI must show the new code, not a dead one.
     if let Some(new_id) = field(&r, "new_client_id") {
         p.client_id = new_id;
-        c.save(PENDING_FILE, &serde_json::to_vec(&p).map_err(|e| e.to_string())?)?;
+        c.save(
+            PENDING_FILE,
+            &serde_json::to_vec(&p).map_err(|e| e.to_string())?,
+        )?;
         if let Some(url) = field(&r, "new_challenge_url") {
-            return Ok(json!({"state": "waiting", "svg": qr_svg(&url, qr_size(c)?)?, "interval": p.interval}));
+            return Ok(
+                json!({"state": "waiting", "svg": qr_svg(&url, qr_size(c)?)?, "interval": p.interval}),
+            );
         }
     }
     let scanned = r
@@ -384,7 +405,10 @@ async fn access_token(c: &Ctx, client: &reqwest::Client, s: &Session) -> Result<
         client,
         c,
         "IAuthenticationService/GenerateAccessTokenForApp",
-        &[("refresh_token", &s.refresh_token), ("steamid", &s.steam_id)],
+        &[
+            ("refresh_token", &s.refresh_token),
+            ("steamid", &s.steam_id),
+        ],
     )
     .await?;
     field(&r, "access_token").ok_or_else(|| "Steam returned no access token".into())
@@ -548,7 +572,7 @@ fn apply_order(jobs: &mut Vec<Job>, order: Order) {
 // What: true when a waiting job may start now.
 // Why: later waits for Start; At waits for its time.
 // From: Issue #871 | PR #1858
-fn due(job: &Job, now: u64) -> bool {
+fn is_due(job: &Job, now: u64) -> bool {
     job.state == State::Waiting
         && match job.when {
             When::Now => true,
@@ -739,11 +763,11 @@ fn parse_kv(text: &str) -> Result<Kv, String> {
             (Some(close), None) if close == "\u{0}}" => {
                 let (k, node) = stack.pop().ok_or("KeyValues: stray }")?;
                 let parent = stack.last_mut().ok_or("KeyValues: stray }")?;
-                parent.1 .0.push((k, KvValue::Node(node)));
+                parent.1.0.push((k, KvValue::Node(node)));
             }
             (Some(v), Some(k)) => {
                 let top = stack.last_mut().ok_or("KeyValues: empty")?;
-                top.1 .0.push((k, KvValue::Text(v)));
+                top.1.0.push((k, KvValue::Text(v)));
             }
             (Some(k), None) => key = Some(k),
             (None, None) => return Err("KeyValues: { without key".into()),
@@ -853,7 +877,9 @@ fn pb_read(mut b: &[u8]) -> Result<Vec<(u32, Pb)>, String> {
         let field = u32::try_from(key >> 3).map_err(|e| e.to_string())?;
         let value = match key & 7 {
             0 => Pb::Int(varint(&mut b)?),
-            1 => Pb::Int(u64::from_le_bytes(take(&mut b, 8)?.try_into().map_err(|_| "fixed64")?)),
+            1 => Pb::Int(u64::from_le_bytes(
+                take(&mut b, 8)?.try_into().map_err(|_| "fixed64")?,
+            )),
             2 => {
                 let n = usize::try_from(varint(&mut b)?).map_err(|e| e.to_string())?;
                 Pb::Bytes(take(&mut b, n)?)
@@ -906,9 +932,8 @@ const PROTO_MASK: u32 = 0x8000_0000;
 // Why: fixed by the protocol, like an RFC constant.
 const ERESULT_OK: u64 = 1;
 
-type Ws = tokio_tungstenite::WebSocketStream<
-    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
->;
+type Ws =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 // What: one CM frame: message number, header, body.
 // Why: header fields route job answers.
@@ -989,7 +1014,10 @@ impl Cm {
         }
         cm.steam_id = pb_int(&f.header, 1).unwrap_or(steam_id);
         cm.session = pb_int(&f.header, 2).unwrap_or(0);
-        if let Some(secs) = pb_int(&body, 3).or_else(|| pb_int(&body, 2)).filter(|s| *s > 0) {
+        if let Some(secs) = pb_int(&body, 3)
+            .or_else(|| pb_int(&body, 2))
+            .filter(|s| *s > 0)
+        {
             cm.heartbeat = Duration::from_secs(secs);
         }
         Ok(cm)
@@ -1006,7 +1034,9 @@ impl Cm {
         frame.extend_from_slice(&header.0);
         frame.extend_from_slice(body);
         self.ws
-            .send(tokio_tungstenite::tungstenite::Message::Binary(frame.into()))
+            .send(tokio_tungstenite::tungstenite::Message::Binary(
+                frame.into(),
+            ))
             .await
             .map_err(|e| format!("CM send: {e}"))
     }
@@ -1039,7 +1069,10 @@ impl Cm {
             return Ok(());
         }
         let multi = pb_read(&body)?;
-        let packed = pb_all(&multi, 2).next().ok_or("Multi without body")?.to_vec();
+        let packed = pb_all(&multi, 2)
+            .next()
+            .ok_or("Multi without body")?
+            .to_vec();
         let data = if pb_int(&multi, 1).unwrap_or(0) > 0 {
             use std::io::Read as _;
             let mut out = Vec::new();
@@ -1053,7 +1086,10 @@ impl Cm {
         let mut at = 0;
         while at < data.len() {
             let n = usize::try_from(word(&data, at)?).map_err(|e| e.to_string())?;
-            let inner = data.get(at + 4..at + 4 + n).ok_or("Multi part cut")?.to_vec();
+            let inner = data
+                .get(at + 4..at + 4 + n)
+                .ok_or("Multi part cut")?
+                .to_vec();
             self.unpack(&inner)?;
             at += 4 + n;
         }
@@ -1084,7 +1120,13 @@ impl Cm {
 
     // What: send a job and wait for its answer frames.
     // Why: the answer carries our job id as jobid_target.
-    async fn job(&mut self, emsg: u32, name: Option<&str>, body: &[u8], answer: u32) -> Result<Frame, String> {
+    async fn job(
+        &mut self,
+        emsg: u32,
+        name: Option<&str>,
+        body: &[u8],
+        answer: u32,
+    ) -> Result<Frame, String> {
         let id = self.next_job;
         self.next_job += 1;
         let mut header = PbOut::default().fixed64(10, id);
@@ -1092,7 +1134,8 @@ impl Cm {
             header = header.bytes(12, n.as_bytes());
         }
         self.send(emsg, header, body).await?;
-        self.wait(|f| f.emsg == answer && pb_int(&f.header, 11) == Some(id)).await
+        self.wait(|f| f.emsg == answer && pb_int(&f.header, 11) == Some(id))
+            .await
     }
 }
 
@@ -1101,7 +1144,14 @@ impl Cm {
 // From: Issue #871 | PR #1858
 async fn app_info(cm: &mut Cm, app: u32) -> Result<Kv, String> {
     let req = PbOut::default().int(2, u64::from(app));
-    let f = cm.job(EMSG_PICS_TOKEN_REQUEST, None, &req.0, EMSG_PICS_TOKEN_RESPONSE).await?;
+    let f = cm
+        .job(
+            EMSG_PICS_TOKEN_REQUEST,
+            None,
+            &req.0,
+            EMSG_PICS_TOKEN_RESPONSE,
+        )
+        .await?;
     let tokens = pb_read(&f.body)?;
     let token = pb_all(&tokens, 3)
         .filter_map(|t| pb_read(t).ok())
@@ -1110,7 +1160,14 @@ async fn app_info(cm: &mut Cm, app: u32) -> Result<Kv, String> {
         .unwrap_or(0);
     let entry = PbOut::default().int(1, u64::from(app)).int(2, token);
     let req = PbOut::default().bytes(2, &entry.0).int(7, 1);
-    let mut f = cm.job(EMSG_PICS_INFO_REQUEST, None, &req.0, EMSG_PICS_INFO_RESPONSE).await?;
+    let mut f = cm
+        .job(
+            EMSG_PICS_INFO_REQUEST,
+            None,
+            &req.0,
+            EMSG_PICS_INFO_RESPONSE,
+        )
+        .await?;
     loop {
         let body = pb_read(&f.body)?;
         for a in pb_all(&body, 1) {
@@ -1131,7 +1188,13 @@ async fn app_info(cm: &mut Cm, app: u32) -> Result<Kv, String> {
 // What: the manifest request code of one depot.
 // Why: Steam CDN serves manifests only with this code.
 // From: Issue #871 | PR #1858
-async fn request_code(cm: &mut Cm, app: u32, depot: u32, gid: u64, branch: &str) -> Result<u64, String> {
+async fn request_code(
+    cm: &mut Cm,
+    app: u32,
+    depot: u32,
+    gid: u64,
+    branch: &str,
+) -> Result<u64, String> {
     let req = PbOut::default()
         .int(1, u64::from(app))
         .int(2, u64::from(depot))
@@ -1209,7 +1272,10 @@ async fn app_urls(cfg: &SteamCfg, app: u32) -> Result<Vec<String>, String> {
                 continue;
             }
         };
-        let url = format!("http://{}/depot/{depot}/manifest/{gid}/{}/{code}", cfg.cdn_host, cfg.manifest_api);
+        let url = format!(
+            "http://{}/depot/{depot}/manifest/{gid}/{}/{code}",
+            cfg.cdn_host, cfg.manifest_api
+        );
         let resp = client
             .get(&url)
             .send()
@@ -1290,7 +1356,7 @@ impl Runner {
         }
         let now = clock::unix_secs();
         let logged_in = c.path(TOKEN_FILE).exists();
-        for j in list.iter_mut().filter(|j| due(j, now)) {
+        for j in list.iter_mut().filter(|j| is_due(j, now)) {
             if matches!(j.target, Target::SteamApp(_)) && !logged_in {
                 j.state = State::Blocked("Steam login missing; scan the QR code first".into());
                 continue;
@@ -1397,9 +1463,11 @@ async fn command(c: Ctx, args: &[String]) -> Result<Value, String> {
             };
             submit(&c, &order)
         }
-        _ => Err("commands: daemon status login-begin login-poll login-cancel \
+        _ => Err(
+            "commands: daemon status login-begin login-poll login-cancel \
                   logout library add start cancel remove"
-            .into()),
+                .into(),
+        ),
     }
 }
 

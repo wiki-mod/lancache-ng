@@ -6,7 +6,7 @@
 // Why: the how lives in shared.rs; no config here.
 // From: Issue #1683 | PR #1858
 
-use lancache_ng::config::{process_env, Settings};
+use lancache_ng::config::{Settings, process_env};
 use lancache_ng::{cert, clock, dns, docker, fs, http, pdns, tidy};
 use serde::Serialize;
 use serde_json::Value;
@@ -51,7 +51,11 @@ struct Findings {
 impl Findings {
     fn add(&mut self, level: Level, source: &str, text: impl Into<String>) {
         let (source, text) = (source.to_string(), text.into());
-        self.alarms.push(Alarm { level, source, text });
+        self.alarms.push(Alarm {
+            level,
+            source,
+            text,
+        });
     }
     fn warn(&mut self, source: &str, text: impl Into<String>) {
         self.add(Level::Warn, source, text);
@@ -89,12 +93,14 @@ impl Health {
     // What: read docker inspect State.
     // Why: newest check output DEGRADED: refines ok.
     // From: Issue #1296
-    fn of(inspect: &Value) -> Self {
+    fn from_inspect(inspect: &Value) -> Self {
         let state = inspect.pointer("/State/Status").and_then(Value::as_str);
         if state != Some("running") {
             return Health::Stopped(state.unwrap_or("unknown").into());
         }
-        let status = inspect.pointer("/State/Health/Status").and_then(Value::as_str);
+        let status = inspect
+            .pointer("/State/Health/Status")
+            .and_then(Value::as_str);
         let last = inspect
             .pointer("/State/Health/Log")
             .and_then(Value::as_array)
@@ -174,13 +180,20 @@ async fn containers(s: &Settings, f: &mut Findings, m: &mut Memory) -> Result<()
     let stopped = s.list("SERVICES_STOPPED");
     let dhcp_off = s.text("DHCP_MODE")? == "off";
     let dhcp_service = s.text("DHCP_SERVICE")?;
-    for row in api.project(&project, limit).await.map_err(|e| e.to_string())? {
+    for row in api
+        .project(&project, limit)
+        .await
+        .map_err(|e| e.to_string())?
+    {
         let Some(service) = row["Labels"][docker::SERVICE_LABEL].as_str() else {
             continue;
         };
-        let name = row["Names"][0].as_str().unwrap_or(service).trim_start_matches('/');
+        let name = row["Names"][0]
+            .as_str()
+            .unwrap_or(service)
+            .trim_start_matches('/');
         let inspect = api.inspect(name, limit).await.map_err(|e| e.to_string())?;
-        let health = Health::of(&inspect);
+        let health = Health::from_inspect(&inspect);
         let (word, colour) = health.word_and_colour();
         let by_user = stopped.iter().any(|x| x == service);
         let wanted = !by_user && !(dhcp_off && service == dhcp_service);
@@ -219,7 +232,7 @@ async fn containers(s: &Settings, f: &mut Findings, m: &mut Memory) -> Result<()
 // From: Issue #1683 | PR #1858
 fn purge_cache(s: &Settings, f: &mut Findings, now: u64) -> Result<(), String> {
     let stamp = PathBuf::from(s.text("PURGE_STAMP")?);
-    if !tidy::due(&stamp, now) {
+    if !tidy::is_due(&stamp, now) {
         return Ok(());
     }
     let dir = tidy::inside(&s.text("CACHE_DIR")?, &s.text("CACHE_DIR_ALLOWED_PREFIX")?)?;
@@ -228,13 +241,16 @@ fn purge_cache(s: &Settings, f: &mut Findings, now: u64) -> Result<(), String> {
     for e in errs {
         f.warn("cache purge", e);
     }
-    tidy::mark(&stamp, now)
+    tidy::save_stamp(&stamp, now)
 }
 
 // What: log root, only inside the allowed prefix.
 // Why: cleanup must never delete outside the logs.
 fn log_root(s: &Settings) -> Result<PathBuf, String> {
-    tidy::inside(&s.text("SYSLOG_LOG_ROOT")?, &s.text("SYSLOG_LOG_ROOT_ALLOWED_PREFIX")?)
+    tidy::inside(
+        &s.text("SYSLOG_LOG_ROOT")?,
+        &s.text("SYSLOG_LOG_ROOT_ALLOWED_PREFIX")?,
+    )
 }
 
 // What: daily: log age limit, then size budget.
@@ -242,7 +258,7 @@ fn log_root(s: &Settings) -> Result<PathBuf, String> {
 // From: Issue #1683 | PR #1858
 fn prune_logs(s: &Settings, f: &mut Findings, now: u64) -> Result<(), String> {
     let stamp = PathBuf::from(s.text("SYSLOG_PRUNE_STAMP")?);
-    if !tidy::due(&stamp, now) {
+    if !tidy::is_due(&stamp, now) {
         return Ok(());
     }
     let root = log_root(s)?;
@@ -254,11 +270,11 @@ fn prune_logs(s: &Settings, f: &mut Findings, now: u64) -> Result<(), String> {
         f.warn("log prune", e);
     }
     if size <= budget {
-        return tidy::mark(&stamp, now);
+        return tidy::save_stamp(&stamp, now);
     }
     f.warn("logs", format!("log size {size} bytes is over the budget"));
     let wait = s.uint("SYSLOG_PRUNE_RETRY_COOLDOWN")?;
-    tidy::mark(&stamp, (now + wait).saturating_sub(tidy::DAY))
+    tidy::save_stamp(&stamp, (now + wait).saturating_sub(tidy::DAY))
 }
 
 // What: pack closed log files with xz.
@@ -277,10 +293,11 @@ fn pack_logs(s: &Settings, f: &mut Findings, now: u64) -> Result<(), String> {
 fn log_writing(s: &Settings, f: &mut Findings, m: &mut Memory) -> Result<(), String> {
     let newest = tidy::newest(Path::new(&s.text("SYSLOG_LOG_ROOT")?));
     let count = tidy::syslog_processed()?;
-    if let Some((was_count, was_newest)) = m.log_counter {
-        if count > was_count && newest == was_newest {
-            f.crit("logs", "messages arrive but no log file is written");
-        }
+    if let Some((was_count, was_newest)) = m.log_counter
+        && count > was_count
+        && newest == was_newest
+    {
+        f.crit("logs", "messages arrive but no log file is written");
     }
     m.log_counter = Some((count, newest));
     Ok(())
@@ -365,7 +382,10 @@ async fn dns_sync(s: &Settings, f: &mut Findings) -> Result<(), String> {
         };
         let state = dns::sync_state(z.serial, other);
         if state != dns::Sync::InSync {
-            f.warn(&z.name, format!("{state:?}: primary {} secondary {other}", z.serial));
+            f.warn(
+                &z.name,
+                format!("{state:?}: primary {} secondary {other}", z.serial),
+            );
         }
     }
     Ok(())
@@ -399,7 +419,8 @@ async fn round(s: &Settings, m: &mut Memory) -> Findings {
     if let Err(e) = dns_sync(s, &mut f).await {
         f.crit("dns", e);
     }
-    f.alarms.sort_by(|a, b| b.level.cmp(&a.level).then_with(|| a.source.cmp(&b.source)));
+    f.alarms
+        .sort_by(|a, b| b.level.cmp(&a.level).then_with(|| a.source.cmp(&b.source)));
     f
 }
 
@@ -417,7 +438,10 @@ fn publish(s: &Settings, f: &Findings) -> Result<(), String> {
         cache: &f.cache,
     };
     let body = serde_json::to_vec_pretty(&report).map_err(|e| e.to_string())?;
-    let owner = fs::Owner { uid: None, gid: None };
+    let owner = fs::Owner {
+        uid: None,
+        gid: None,
+    };
     fs::write(&path, &body, mode, fs::Place::Replace, owner)
         .map_err(|e| format!("{}: {e}", path.display()))
 }
@@ -451,7 +475,7 @@ async fn main() -> Result<(), String> {
         }
         return Ok(());
     }
-    use tokio::signal::unix::{signal, SignalKind};
+    use tokio::signal::unix::{SignalKind, signal};
     let mut settings = load()?;
     let mut pause = Duration::from_secs(settings.uint("CHECK_INTERVAL")?);
     let mut term = signal(SignalKind::terminate()).map_err(|e| e.to_string())?;

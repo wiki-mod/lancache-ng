@@ -8,15 +8,15 @@
 
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use axum::extract::{Form, Request, State};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Router};
 use base64::Engine as _;
-use lancache_ng::config::{self, process_env, Settings};
+use lancache_ng::config::{self, Settings, process_env};
 use lancache_ng::{access, apply, clock, docker, fs, http, human, render, secret};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -40,7 +40,10 @@ const TEMPLATES: [(&str, &str); 8] = [
     ("domains.html", include_str!("templates/domains.html")),
     ("stats.html", include_str!("templates/stats.html")),
     ("logs.html", include_str!("templates/logs.html")),
-    ("cachehamster.html", include_str!("templates/cachehamster.html")),
+    (
+        "cachehamster.html",
+        include_str!("templates/cachehamster.html"),
+    ),
 ];
 
 // What: static files built into the binary.
@@ -79,7 +82,7 @@ impl From<String> for Fail {
     }
 }
 
-fn bad(text: impl Into<String>) -> Fail {
+fn bad_request(text: impl Into<String>) -> Fail {
     Fail(StatusCode::BAD_REQUEST, text.into())
 }
 
@@ -159,7 +162,7 @@ impl App {
 struct Csrf(String);
 
 impl Csrf {
-    fn of(key: &[u8; 32], session: &str) -> Self {
+    fn from_session(key: &[u8; 32], session: &str) -> Self {
         let mut h = Sha256::new();
         h.update(key);
         h.update(session.as_bytes());
@@ -211,7 +214,9 @@ fn session_cookie(headers: &HeaderMap) -> Option<String> {
 fn basic_credentials(headers: &HeaderMap) -> Option<(String, String)> {
     let raw = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
     let encoded = raw.strip_prefix("Basic ")?;
-    let bytes = base64::engine::general_purpose::STANDARD.decode(encoded).ok()?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .ok()?;
     let text = String::from_utf8(bytes).ok()?;
     let (user, pass) = text.split_once(':')?;
     Some((user.to_string(), pass.to_string()))
@@ -246,7 +251,8 @@ async fn auth(State(app): Shared, mut req: Request, next: Next) -> Response {
     }
     let known = session_cookie(req.headers());
     let session = known.clone().unwrap_or_else(|| secret::random_hex(32));
-    req.extensions_mut().insert(Csrf::of(&app.session_key, &session));
+    req.extensions_mut()
+        .insert(Csrf::from_session(&app.session_key, &session));
     let mut res = next.run(req).await;
     if known.is_none() {
         let v = format!("{COOKIE}={session}; HttpOnly; SameSite=Strict; Path=/");
@@ -287,7 +293,11 @@ async fn proxy_log(s: &Settings) -> Result<(Value, Vec<Value>), String> {
     .await
     .map_err(|e| e.to_string())?;
     let totals = with_human(&stats, "total_bytes_human", stats.total_bytes);
-    let rows = recent.iter().rev().map(|e| with_human(e, "bytes_human", e.bytes)).collect();
+    let rows = recent
+        .iter()
+        .rev()
+        .map(|e| with_human(e, "bytes_human", e.bytes))
+        .collect();
     Ok((totals, rows))
 }
 
@@ -300,7 +310,11 @@ async fn dashboard(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page
     ctx.insert("alarms", &read_json(&s.text("WATCHDOG_ALARM_FILE")?));
     let (_, limit) = app.limits(&s)?;
     let project = s.text("COMPOSE_PROJECT")?;
-    let containers = app.docker.project(&project, limit).await.unwrap_or_default();
+    let containers = app
+        .docker
+        .project(&project, limit)
+        .await
+        .unwrap_or_default();
     ctx.insert("containers", &containers);
     let (totals, recent) = proxy_log(&s).await?;
     ctx.insert("log_stats", &totals);
@@ -324,7 +338,9 @@ async fn ntp_answers(s: &Settings) -> Result<bool, String> {
     let port = s.uint("NTP_PORT")?;
     let wait = Duration::from_millis(s.uint("NTP_PROBE_WAIT_MS")?);
     let probe = move || lancache_ng::ntp::answers(&ip, port, wait);
-    tokio::task::spawn_blocking(probe).await.map_err(|e| e.to_string())
+    tokio::task::spawn_blocking(probe)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 // What: General page.
@@ -349,12 +365,14 @@ async fn password(
     let get = |k: &str| form.get(k).cloned().unwrap_or_default();
     let (current, new) = (get("current_password"), get("new_password"));
     if new != get("confirm_password") {
-        return Err(bad("the two new passwords differ"));
+        return Err(bad_request("the two new passwords differ"));
     }
     let s = app.settings();
     let min = s.uint("UI_PASSWORD_MIN_LENGTH")?;
     if (new.chars().count() as u64) < min {
-        return Err(bad(format!("the password needs at least {min} characters")));
+        return Err(bad_request(format!(
+            "the password needs at least {min} characters"
+        )));
     }
     let old = s.text("UI_PASSWORD_HASH").unwrap_or_default();
     let hashed = tokio::task::spawn_blocking(move || {
@@ -365,7 +383,7 @@ async fn password(
     })
     .await
     .map_err(|e| e.to_string())?
-    .map_err(bad)?;
+    .map_err(bad_request)?;
     let change = Fields::from([("UI_PASSWORD_HASH".to_string(), hashed)]);
     finish(commit(&app, change).await, "/setup")
 }
@@ -416,7 +434,7 @@ async fn commit(app: &App, form: Fields) -> Result<(), String> {
 // Why: every form handler ends the same way.
 // From: Issue #1683 | PR #1858
 fn finish(result: Result<(), String>, back: &str) -> Page {
-    result.map_err(bad)?;
+    result.map_err(bad_request)?;
     Ok(Redirect::to(back).into_response())
 }
 
@@ -490,7 +508,11 @@ async fn logs_save(
     csrf.check(&form)?;
     let s = app.settings();
     let is_on = |p: &String| form.get(&format!("on_{p}")).is_some_and(|v| v == "true");
-    let muted: Vec<String> = s.list("SYSLOG_PROGRAMS").into_iter().filter(|p| !is_on(p)).collect();
+    let muted: Vec<String> = s
+        .list("SYSLOG_PROGRAMS")
+        .into_iter()
+        .filter(|p| !is_on(p))
+        .collect();
     let targets = form.get("SYSLOG_FORWARD").cloned().unwrap_or_default();
     let targets: Vec<&str> = targets.split_whitespace().collect();
     let mut change = Fields::new();
@@ -536,7 +558,10 @@ fn reverse_name(ip: &str) -> Result<String, String> {
 // From: Issue #1683 | PR #1858
 fn reverse_zone(s: &Settings, name: &str) -> Option<String> {
     let zones = lancache_ng::dns::private_reverse_zones(s);
-    zones.into_iter().filter(|z| name.ends_with(z.as_str())).max_by_key(String::len)
+    zones
+        .into_iter()
+        .filter(|z| name.ends_with(z.as_str()))
+        .max_by_key(String::len)
 }
 
 // What: LAN zone name in canonical form.
@@ -560,7 +585,10 @@ fn snapshot_zones(s: &Settings) -> Result<Vec<String>, String> {
 fn zone_store(s: &Settings, zone: &str) -> Result<lancache_ng::snapshot::Store, String> {
     let dir = Path::new(&s.text("DNS_SNAPSHOT_DIR")?).join(zone.trim_end_matches('.'));
     let keep = usize::try_from(s.uint("DNS_SNAPSHOT_KEEP")?).map_err(|e| e.to_string())?;
-    let owner = fs::Owner { uid: None, gid: None };
+    let owner = fs::Owner {
+        uid: None,
+        gid: None,
+    };
     Ok(lancache_ng::snapshot::Store { dir, keep, owner })
 }
 
@@ -581,7 +609,9 @@ async fn snapshot(s: &Settings, api: &lancache_ng::pdns::Api, zone: &str) -> Res
 fn created_unix(path: &Path) -> Result<u64, String> {
     let when = std::fs::metadata(path).and_then(|m| m.modified());
     let when = when.map_err(|e| format!("{}: {e}", path.display()))?;
-    let age = when.duration_since(std::time::UNIX_EPOCH).map_err(|e| e.to_string())?;
+    let age = when
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| e.to_string())?;
     Ok(age.as_secs())
 }
 
@@ -650,7 +680,7 @@ async fn domains(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     let s = app.settings();
     let lan = lan_zone(&s)?;
     let mut ctx = Context::new();
-    ctx.insert("dns_domains", &lancache_ng::cdn::rows(&s)?);
+    ctx.insert("dns_domains", &lancache_ng::cdn::parse_rows(&s)?);
     ctx.insert("lan_zone", lan.trim_end_matches('.'));
     let (mut lan_rows, mut ptr) = (Vec::new(), Vec::new());
     match pdns_api(&s) {
@@ -693,7 +723,10 @@ async fn domains(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     ctx.insert("record_ttl_default", &s.uint("DNS_RECORD_TTL")?);
     ctx.insert("ttl_max", &s.uint("DNS_RECORD_TTL_MAX")?);
     ctx.insert("aaaa_filter_enabled", &s.flag("DNS_FILTER_AAAA")?);
-    ctx.insert("ddns_unsigned_updates_allowed", &s.flag("DDNS_ALLOW_UNSIGNED")?);
+    ctx.insert(
+        "ddns_unsigned_updates_allowed",
+        &s.flag("DDNS_ALLOW_UNSIGNED")?,
+    );
     ctx.insert("ddns_tsig_key_configured", &tsig_secret(&s).is_ok());
     app.page("domains.html", ctx, &csrf)
 }
@@ -709,7 +742,7 @@ fn list_change(s: &Settings, key: &str, item: &str, present: bool) -> Fields {
     Fields::from([(key.to_string(), items.join(" "))])
 }
 
-fn one(key: &str, value: impl ToString) -> Fields {
+fn single_field(key: &str, value: impl ToString) -> Fields {
     Fields::from([(key.to_string(), value.to_string())])
 }
 
@@ -724,7 +757,11 @@ async fn dns_action(
 ) -> Page {
     csrf.check(&form)?;
     let s = app.settings();
-    let get = |k: &str| form.get(k).map(|v| v.trim().to_string()).unwrap_or_default();
+    let get = |k: &str| {
+        form.get(k)
+            .map(|v| v.trim().to_string())
+            .unwrap_or_default()
+    };
     let on = matches!(get("enabled").as_str(), "1" | "true");
     let domain = get("domain").to_ascii_lowercase();
     let result = match op.as_str() {
@@ -738,8 +775,8 @@ async fn dns_action(
         "domain-toggle" => {
             commit(&app, list_change(&s, "CDN_DISABLED_DOMAINS", &domain, !on)).await
         }
-        "aaaa-filter" => commit(&app, one("DNS_FILTER_AAAA", on)).await,
-        "ddns-unsigned" => commit(&app, one("DDNS_ALLOW_UNSIGNED", on)).await,
+        "aaaa-filter" => commit(&app, single_field("DNS_FILTER_AAAA", on)).await,
+        "ddns-unsigned" => commit(&app, single_field("DDNS_ALLOW_UNSIGNED", on)).await,
         "record-add" | "record-remove" => record(&s, op == "record-add", &get).await,
         "ptr-add" | "ptr-remove" => ptr(&s, op == "ptr-add", &get).await,
         "zone-rollback" => rollback(&s, &get("zone"), &get("snapshot_id")).await,
@@ -763,7 +800,11 @@ fn in_zone(name: &str, zone: &str) -> String {
 // What: add or remove one LAN record set.
 // Why: PATCH sets or deletes; NOTIFY follows.
 // From: Issue #1683 | PR #1858
-async fn record(s: &Settings, add: bool, get: &(dyn Fn(&str) -> String + Sync)) -> Result<(), String> {
+async fn record(
+    s: &Settings,
+    add: bool,
+    get: &(dyn Fn(&str) -> String + Sync),
+) -> Result<(), String> {
     let zone = lan_zone(s)?;
     let kind = get("record_type");
     if !s.list("DNS_LAN_RECORD_TYPES").contains(&kind) {
@@ -774,7 +815,12 @@ async fn record(s: &Settings, add: bool, get: &(dyn Fn(&str) -> String + Sync)) 
     let mut ttl = 0;
     if add {
         let raw = get("content");
-        contents = raw.split(';').map(str::trim).filter(|c| !c.is_empty()).map(String::from).collect();
+        contents = raw
+            .split(';')
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+            .map(String::from)
+            .collect();
         let max = s.uint("DNS_RECORD_TTL_MAX")?;
         ttl = get("ttl").parse::<u32>().unwrap_or(0);
         if ttl == 0 || u64::from(ttl) > max {
@@ -791,7 +837,11 @@ async fn record(s: &Settings, add: bool, get: &(dyn Fn(&str) -> String + Sync)) 
 // From: Issue #1683 | PR #1858
 async fn ptr(s: &Settings, add: bool, get: &(dyn Fn(&str) -> String + Sync)) -> Result<(), String> {
     let ip = get("ip");
-    let name = if ip.ends_with(".arpa.") { ip } else { reverse_name(&ip)? };
+    let name = if ip.ends_with(".arpa.") {
+        ip
+    } else {
+        reverse_name(&ip)?
+    };
     let Some(zone) = reverse_zone(s, &name) else {
         return Err(format!("{name} is in no private reverse zone"));
     };
@@ -799,7 +849,11 @@ async fn ptr(s: &Settings, add: bool, get: &(dyn Fn(&str) -> String + Sync)) -> 
     let mut contents = Vec::new();
     if add {
         let host = get("hostname");
-        contents.push(if host.ends_with('.') { host } else { format!("{host}.") });
+        contents.push(if host.ends_with('.') {
+            host
+        } else {
+            format!("{host}.")
+        });
     }
     let api = pdns_api(s)?;
     api.set_rrset(&zone, &name, "PTR", ttl, &contents).await?;
@@ -809,7 +863,10 @@ async fn ptr(s: &Settings, add: bool, get: &(dyn Fn(&str) -> String + Sync)) -> 
 // What: owner that leaves uid and gid unchanged.
 // Why: files keep the owner their reader expects.
 fn owner_keep() -> fs::Owner {
-    fs::Owner { uid: None, gid: None }
+    fs::Owner {
+        uid: None,
+        gid: None,
+    }
 }
 
 // What: token secondaries register with.
@@ -838,7 +895,7 @@ fn secondaries(s: &Settings) -> Vec<(String, String)> {
 // Why: one SOT key holds the whole list.
 async fn store_secondaries(app: &App, list: &[(String, String)]) -> Result<(), String> {
     let rows: Vec<String> = list.iter().map(|(n, a)| format!("{n}@{a}")).collect();
-    commit(app, one("DNS_SECONDARIES", rows.join(" "))).await
+    commit(app, single_field("DNS_SECONDARIES", rows.join(" "))).await
 }
 
 fn is_ip(text: &str) -> bool {
@@ -889,13 +946,12 @@ fn peer_kit(s: &Settings) -> Result<Value, String> {
 // From: Issue #1683 | PR #1858
 async fn register(State(app): Shared, axum::Json(r): axum::Json<Register>) -> Page {
     let s = app.settings();
-    let token = registration_token(&s)
-        .map_err(|e| Fail(StatusCode::SERVICE_UNAVAILABLE, e))?;
+    let token = registration_token(&s).map_err(|e| Fail(StatusCode::SERVICE_UNAVAILABLE, e))?;
     if !secret::equal(&r.token, &token) {
         return Err(Fail(StatusCode::UNAUTHORIZED, "wrong token".into()));
     }
     if !valid_peer_name(&s, &r.name)? || !is_ip(&r.address) {
-        return Err(bad("name or address is not valid"));
+        return Err(bad_request("name or address is not valid"));
     }
     let mut list = secondaries(&s);
     list.retain(|(n, _)| *n != r.name);
@@ -953,12 +1009,12 @@ async fn secondary_action(
         "rotate" => Ok(axum::Json(json!({"token": renew_token(&s)?})).into_response()),
         "address" => {
             let a: Address = serde_json::from_slice(&body)
-                .map_err(|_| bad("body must be {\"address\": ...}"))?;
+                .map_err(|_| bad_request("body must be {\"address\": ...}"))?;
             if !is_ip(&a.address) {
-                return Err(bad("no IP address"));
+                return Err(bad_request("no IP address"));
             }
             list[at].1 = a.address;
-            store_secondaries(&app, &list).await.map_err(bad)?;
+            store_secondaries(&app, &list).await.map_err(bad_request)?;
             Ok(StatusCode::NO_CONTENT.into_response())
         }
         "health" => Ok(axum::Json(secondary_health(&s, &list[at].1).await).into_response()),
@@ -1008,10 +1064,10 @@ async fn flush_on_transfer(app: Arc<App>) {
     loop {
         let s = app.settings();
         let wait = s.uint("UI_FLUSH_CHECK_SECONDS").unwrap_or(1).max(1);
-        if s.text("DNS_REPLICATION_ROLE").as_deref() == Ok("secondary") {
-            if let Err(e) = flush_round(&s, &mut seen).await {
-                eprintln!("ui: cache flush: {e}");
-            }
+        if s.text("DNS_REPLICATION_ROLE").as_deref() == Ok("secondary")
+            && let Err(e) = flush_round(&s, &mut seen).await
+        {
+            eprintln!("ui: cache flush: {e}");
         }
         tokio::time::sleep(Duration::from_secs(wait)).await;
     }
@@ -1039,7 +1095,10 @@ async fn flush_round(s: &Settings, seen: &mut BTreeMap<String, u32>) -> Result<(
 // Why: subnets, reservations, leases live in Kea.
 // From: Issue #1683 | PR #1858
 fn kea_api(s: &Settings) -> Result<lancache_ng::kea::Api, String> {
-    Ok(lancache_ng::kea::Api::new(http::client(s)?, &s.text("KEA_CTRL_URL")?))
+    Ok(lancache_ng::kea::Api::new(
+        http::client(s)?,
+        &s.text("KEA_CTRL_URL")?,
+    ))
 }
 
 // What: value of one Kea option in a subnet.
@@ -1047,7 +1106,9 @@ fn kea_api(s: &Settings) -> Result<lancache_ng::kea::Api, String> {
 fn option_data(sn: &Value, name: &str) -> String {
     let rows = sn["option-data"].as_array().cloned().unwrap_or_default();
     let hit = rows.iter().find(|o| o["name"] == name);
-    hit.and_then(|o| o["data"].as_str()).unwrap_or_default().to_string()
+    hit.and_then(|o| o["data"].as_str())
+        .unwrap_or_default()
+        .to_string()
 }
 
 // What: one Kea subnet as flat page fields.
@@ -1113,7 +1174,11 @@ async fn kea_view(api: &lancache_ng::kea::Api) -> (Vec<Value>, Vec<Value>, Vec<V
 fn kea_store(s: &Settings) -> Result<lancache_ng::snapshot::Store, String> {
     let dir = PathBuf::from(s.text("KEA_SNAPSHOT_DIR")?);
     let keep = usize::try_from(s.uint("KEA_SNAPSHOT_KEEP")?).map_err(|e| e.to_string())?;
-    Ok(lancache_ng::snapshot::Store { dir, keep, owner: owner_keep() })
+    Ok(lancache_ng::snapshot::Store {
+        dir,
+        keep,
+        owner: owner_keep(),
+    })
 }
 
 // What: DHCP page.
@@ -1141,14 +1206,26 @@ async fn dhcp(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     ctx.insert("dhcp_ntp_servers", &opt("DHCP_NTP_SERVERS"));
     ctx.insert("dhcp_relay_local_addr", &opt("DHCP_RELAY_LOCAL_ADDR"));
     ctx.insert("dhcp_proxy_subnet_start", &opt("DHCP_SUBNET_START"));
-    ctx.insert("dhcp_proxy_custom_options_form", &opt("DHCP_CUSTOM_OPTIONS"));
-    for k in ["BOOT_FILENAME", "BOOT_SERVER", "DOMAIN", "INTERFACE", "ROUTER"] {
+    ctx.insert(
+        "dhcp_proxy_custom_options_form",
+        &opt("DHCP_CUSTOM_OPTIONS"),
+    );
+    for k in [
+        "BOOT_FILENAME",
+        "BOOT_SERVER",
+        "DOMAIN",
+        "INTERFACE",
+        "ROUTER",
+    ] {
         let name = format!("dhcp_proxy_{}", k.to_ascii_lowercase());
         ctx.insert(name, &opt(&format!("DHCP_PROXY_{k}")));
     }
     ctx.insert("dhcp_upstream_dhcp_ip", &opt("DHCP_UPSTREAM_DHCP_IP"));
     ctx.insert("kea_snapshot_retention", &opt("KEA_SNAPSHOT_KEEP"));
-    ctx.insert("ntp_auto_dhcp_active", &s.flag("NTP_AUTO_DHCP").unwrap_or(false));
+    ctx.insert(
+        "ntp_auto_dhcp_active",
+        &s.flag("NTP_AUTO_DHCP").unwrap_or(false),
+    );
     let codes: Vec<u8> = lancache_ng::dhcp::MANAGED.iter().map(|m| m.code).collect();
     ctx.insert("kea_managed_codes", &codes);
     ctx.insert("dnsmasq_managed_codes", &codes);
@@ -1186,7 +1263,10 @@ async fn kea_edit(
     if let Some(top) = cfg.as_object_mut() {
         top.remove("hash");
     }
-    let mut subnets = cfg["Dhcp4"]["subnet4"].as_array().cloned().unwrap_or_default();
+    let mut subnets = cfg["Dhcp4"]["subnet4"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
     edit(&mut subnets)?;
     cfg["Dhcp4"]["subnet4"] = Value::Array(subnets);
     api.set_config(cfg.clone()).await?;
@@ -1247,11 +1327,17 @@ fn dnsmasq_fields(form: &Fields, proxy: bool) -> Fields {
         if !ours || k.starts_with("dhcp_dns_") {
             continue;
         }
-        let key = k.to_ascii_uppercase().replace("DHCP_PROXY_CUSTOM_OPTIONS", "DHCP_CUSTOM_OPTIONS");
+        let key = k
+            .to_ascii_uppercase()
+            .replace("DHCP_PROXY_CUSTOM_OPTIONS", "DHCP_CUSTOM_OPTIONS");
         out.insert(key, v.trim().to_string());
     }
     if proxy {
-        let get = |k: &str| form.get(k).map(|v| v.trim().to_string()).unwrap_or_default();
+        let get = |k: &str| {
+            form.get(k)
+                .map(|v| v.trim().to_string())
+                .unwrap_or_default()
+        };
         let dns: Vec<String> = [get("dhcp_dns_primary"), get("dhcp_dns_secondary")]
             .into_iter()
             .filter(|d| !d.is_empty())
@@ -1264,8 +1350,16 @@ fn dnsmasq_fields(form: &Fields, proxy: bool) -> Fields {
 // What: Kea subnet, option and host edits.
 // Why: all go through kea_edit.
 // From: Issue #1683 | PR #1858
-async fn kea_action(s: &Settings, op: &str, get: &(dyn Fn(&str) -> String + Sync)) -> Result<(), String> {
-    let num = |k: &str| get(k).parse::<u64>().map_err(|_| format!("{k} must be a number"));
+async fn kea_action(
+    s: &Settings,
+    op: &str,
+    get: &(dyn Fn(&str) -> String + Sync),
+) -> Result<(), String> {
+    let num = |k: &str| {
+        get(k)
+            .parse::<u64>()
+            .map_err(|_| format!("{k} must be a number"))
+    };
     match op {
         "subnet-add" => {
             kea_edit(s, |l| {
@@ -1293,7 +1387,10 @@ async fn kea_action(s: &Settings, op: &str, get: &(dyn Fn(&str) -> String + Sync
             .await
         }
         "option-add" | "option-remove" => {
-            let (id, code) = (num("subnet_id")?, lancache_ng::dhcp::option_code(&get("code"))?);
+            let (id, code) = (
+                num("subnet_id")?,
+                lancache_ng::dhcp::option_code(&get("code"))?,
+            );
             let data = get("data");
             kea_edit(s, |l| {
                 let sn = subnet_mut(l, id)?;
@@ -1344,11 +1441,15 @@ async fn dhcp_action(
 ) -> Page {
     csrf.check(&form)?;
     let s = app.settings();
-    let get = |k: &str| form.get(k).map(|v| v.trim().to_string()).unwrap_or_default();
+    let get = |k: &str| {
+        form.get(k)
+            .map(|v| v.trim().to_string())
+            .unwrap_or_default()
+    };
     let on = matches!(get("enabled").as_str(), "1" | "true");
     let result = match op.as_str() {
-        "mode" => commit(&app, one("DHCP_MODE", get("dhcp_mode"))).await,
-        "ddns" => commit(&app, one("DHCP_DDNS", on)).await,
+        "mode" => commit(&app, single_field("DHCP_MODE", get("dhcp_mode"))).await,
+        "ddns" => commit(&app, single_field("DHCP_DDNS", on)).await,
         "proxy" | "relay" => commit(&app, dnsmasq_fields(&form, op == "proxy")).await,
         _ => kea_action(&s, &op, &get).await,
     };
@@ -1358,11 +1459,17 @@ async fn dhcp_action(
 // What: DHCP precheck on demand.
 // Why: finds foreign servers; tests one lease.
 // From: Issue #1683 | PR #1858
-async fn dhcp_check(State(app): Shared, Extension(csrf): Extension<Csrf>, headers: HeaderMap) -> Page {
+async fn dhcp_check(
+    State(app): Shared,
+    Extension(csrf): Extension<Csrf>,
+    headers: HeaderMap,
+) -> Page {
     csrf.check_header(&headers)?;
     let s = app.settings();
     let probe = move || lancache_ng::dhcp_probe::run(&s);
-    let report = tokio::task::spawn_blocking(probe).await.map_err(|e| e.to_string())?;
+    let report = tokio::task::spawn_blocking(probe)
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(axum::Json(report).into_response())
 }
 
@@ -1374,8 +1481,10 @@ async fn stats(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     let mut ctx = Context::new();
     match lancache_ng::rrd::graphs(&s) {
         Ok(list) => {
-            let rows: Vec<Value> =
-                list.iter().map(|g| json!({"name": g.name, "title": g.title})).collect();
+            let rows: Vec<Value> = list
+                .iter()
+                .map(|g| json!({"name": g.name, "title": g.title}))
+                .collect();
             ctx.insert("graphs", &rows);
         }
         Err(e) => ctx.insert("stats_error", &e),
@@ -1408,7 +1517,10 @@ async fn graph(
         return Err(Fail(StatusCode::NOT_FOUND, "no such graph".into()));
     };
     let draw = move || lancache_ng::rrd::png(&s, &g, &q.range, q.dark == 1);
-    let png = tokio::task::spawn_blocking(draw).await.map_err(|e| e.to_string())?.map_err(bad)?;
+    let png = tokio::task::spawn_blocking(draw)
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(bad_request)?;
     Ok(([(header::CONTENT_TYPE, "image/png")], png).into_response())
 }
 
@@ -1418,7 +1530,10 @@ async fn graph(
 fn sample_all(s: &Settings) -> Vec<String> {
     match lancache_ng::rrd::graphs(s) {
         Err(e) => vec![e],
-        Ok(list) => list.iter().filter_map(|g| lancache_ng::rrd::sample(s, g).err()).collect(),
+        Ok(list) => list
+            .iter()
+            .filter_map(|g| lancache_ng::rrd::sample(s, g).err())
+            .collect(),
     }
 }
 
@@ -1450,7 +1565,9 @@ async fn container_of(app: &App, s: &Settings, service: &str) -> Result<String, 
     let (_, limit) = app.limits(s)?;
     let list = app.docker.project(&s.text("COMPOSE_PROJECT")?, limit).await;
     let list = list.map_err(|e| e.to_string())?;
-    let hit = list.iter().find(|c| c["Labels"][docker::SERVICE_LABEL].as_str() == Some(service));
+    let hit = list
+        .iter()
+        .find(|c| c["Labels"][docker::SERVICE_LABEL].as_str() == Some(service));
     let name = hit.and_then(|c| c["Names"][0].as_str());
     name.map(|n| n.trim_start_matches('/').to_string())
         .ok_or_else(|| format!("no container for {service}"))
@@ -1459,10 +1576,18 @@ async fn container_of(app: &App, s: &Settings, service: &str) -> Result<String, 
 // What: run a command in a service container.
 // Why: rc-service and cachehamster go this way.
 // From: Issue #1683 | PR #1858
-async fn exec_in(app: &App, s: &Settings, service: &str, cmd: &[&str]) -> Result<(i64, String), String> {
+async fn exec_in(
+    app: &App,
+    s: &Settings,
+    service: &str,
+    cmd: &[&str],
+) -> Result<(i64, String), String> {
     let name = container_of(app, s, service).await?;
     let (_, limit) = app.limits(s)?;
-    app.docker.exec(&name, cmd, limit).await.map_err(|e| e.to_string())
+    app.docker
+        .exec(&name, cmd, limit)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 // What: restart or reload one program.
@@ -1471,22 +1596,33 @@ async fn exec_in(app: &App, s: &Settings, service: &str, cmd: &[&str]) -> Result
 async fn service_action(
     State(app): Shared,
     Extension(csrf): Extension<Csrf>,
-    axum::extract::Path((container, program, action)): axum::extract::Path<(String, String, String)>,
+    axum::extract::Path((container, program, action)): axum::extract::Path<(
+        String,
+        String,
+        String,
+    )>,
     headers: HeaderMap,
 ) -> Page {
     csrf.check_header(&headers)?;
     if action != "restart" && action != "reload" {
-        return Err(bad("action must be restart or reload"));
+        return Err(bad_request("action must be restart or reload"));
     }
     let s = app.settings();
-    if !s.list("UI_SERVICES").contains(&format!("{container}:{program}")) {
+    if !s
+        .list("UI_SERVICES")
+        .contains(&format!("{container}:{program}"))
+    {
         return Err(Fail(StatusCode::NOT_FOUND, "program not offered".into()));
     }
     let cmd = ["rc-service", program.as_str(), action.as_str()];
-    let (code, out) = exec_in(&app, &s, &container, &cmd).await
+    let (code, out) = exec_in(&app, &s, &container, &cmd)
+        .await
         .map_err(|e| Fail(StatusCode::BAD_GATEWAY, e))?;
     if code != 0 {
-        return Err(Fail(StatusCode::BAD_GATEWAY, format!("rc-service exit {code}: {out}")));
+        return Err(Fail(
+            StatusCode::BAD_GATEWAY,
+            format!("rc-service exit {code}: {out}"),
+        ));
     }
     Ok(StatusCode::NO_CONTENT.into_response())
 }
@@ -1500,7 +1636,11 @@ async fn hamster(app: &App, args: &[&str]) -> Result<Value, String> {
     let mut cmd = vec![program.as_str()];
     cmd.extend_from_slice(args);
     let (code, out) = exec_in(app, &s, &s.text("CACHEHAMSTER_SERVICE")?, &cmd).await?;
-    let line = out.lines().rev().find(|l| l.starts_with('{')).unwrap_or_default();
+    let line = out
+        .lines()
+        .rev()
+        .find(|l| l.starts_with('{'))
+        .unwrap_or_default();
     let v: Value = serde_json::from_str(line).map_err(|e| format!("cachehamster: {e}: {out}"))?;
     if let Some(e) = v.get("error").and_then(Value::as_str) {
         return Err(e.to_string());
@@ -1528,7 +1668,10 @@ async fn cachehamster(State(app): Shared, Extension(csrf): Extension<Csrf>) -> P
 // From: Issue #871 | PR #1858
 fn job_time(when: &str, at: &str) -> Result<String, Fail> {
     match when {
-        "at" => at.parse::<u64>().map(|t| format!("at:{t}")).map_err(|_| bad("time not understood")),
+        "at" => at
+            .parse::<u64>()
+            .map(|t| format!("at:{t}"))
+            .map_err(|_| bad_request("time not understood")),
         "later" => Ok("later".into()),
         _ => Ok("now".into()),
     }
@@ -1544,7 +1687,11 @@ async fn hamster_action(
     Form(form): Form<Fields>,
 ) -> Page {
     csrf.check(&form)?;
-    let get = |k: &str| form.get(k).map(|v| v.trim().to_string()).unwrap_or_default();
+    let get = |k: &str| {
+        form.get(k)
+            .map(|v| v.trim().to_string())
+            .unwrap_or_default()
+    };
     let when = job_time(&get("when"), &get("at"))?;
     let what = match get("app").as_str() {
         "" => get("urls"),
@@ -1570,11 +1717,19 @@ async fn hamster_api(
     headers: HeaderMap,
 ) -> Page {
     csrf.check_header(&headers)?;
-    let allowed = ["login-begin", "login-poll", "login-cancel", "library", "status"];
+    let allowed = [
+        "login-begin",
+        "login-poll",
+        "login-cancel",
+        "library",
+        "status",
+    ];
     if !allowed.contains(&op.as_str()) {
         return Err(Fail(StatusCode::NOT_FOUND, "no such call".into()));
     }
-    let v = hamster(&app, &[op.as_str()]).await.map_err(|e| Fail(StatusCode::BAD_GATEWAY, e))?;
+    let v = hamster(&app, &[op.as_str()])
+        .await
+        .map_err(|e| Fail(StatusCode::BAD_GATEWAY, e))?;
     Ok(axum::Json(v).into_response())
 }
 
@@ -1627,7 +1782,10 @@ async fn apply_all(app: &App, old: &Settings, new: &Settings) -> Result<Vec<Stri
     let dhcp = new.text("DHCP_SERVICE")?;
     if new.text("DHCP_MODE")? == "off" && plan.remove(&dhcp).is_some() {
         let name = container_of(app, new, &dhcp).await?;
-        let r = app.docker.act(&name, docker::Action::Stop, grace, limit).await;
+        let r = app
+            .docker
+            .act(&name, docker::Action::Stop, grace, limit)
+            .await;
         report.push(format!("{dhcp}: mode off, stop {r:?}"));
     }
     let lookup = |owner: &str| names.get(owner).cloned().unwrap_or_default();
@@ -1643,14 +1801,25 @@ async fn apply_all(app: &App, old: &Settings, new: &Settings) -> Result<Vec<Stri
 // From: Issue #1683 | PR #1858
 async fn set_wanted(app: &App, service: &str, run: bool) -> Result<(), String> {
     let s = app.settings();
-    if !s.list("UI_CONTROLLABLE_SERVICES").iter().any(|x| x == service) {
+    if !s
+        .list("UI_CONTROLLABLE_SERVICES")
+        .iter()
+        .any(|x| x == service)
+    {
         return Err(format!("{service} cannot be switched here"));
     }
     commit(app, list_change(&s, "SERVICES_STOPPED", service, !run)).await?;
     let (grace, limit) = app.limits(&s)?;
     let name = container_of(app, &s, service).await?;
-    let action = if run { docker::Action::Start } else { docker::Action::Stop };
-    app.docker.act(&name, action, grace, limit).await.map_err(|e| e.to_string())
+    let action = if run {
+        docker::Action::Start
+    } else {
+        docker::Action::Stop
+    };
+    app.docker
+        .act(&name, action, grace, limit)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 // What: TSIG key in PowerDNS, bound to zones.
@@ -1660,7 +1829,8 @@ async fn ensure_tsig(s: &Settings) -> Result<(), String> {
     let sec = secrets(s)?;
     let api = pdns_api(s)?;
     let algorithm = s.text("DDNS_TSIG_ALGORITHM")?;
-    api.set_tsigkey(&sec.tsig_name, &algorithm, &sec.tsig_secret).await?;
+    api.set_tsigkey(&sec.tsig_name, &algorithm, &sec.tsig_secret)
+        .await?;
     let kind = match s.text("DNS_REPLICATION_ROLE")?.as_str() {
         "secondary" => "AXFR-MASTER-TSIG",
         _ => "TSIG-ALLOW-AXFR",
@@ -1691,7 +1861,10 @@ async fn ensure_secondary_zones(s: &Settings) -> Result<(), String> {
 // What: path of the DDNS TSIG secret file.
 // Why: Kea DDNS and PowerDNS share this key.
 fn tsig_file(s: &Settings) -> Result<PathBuf, String> {
-    Ok(secret::file_of(Path::new(&s.text("SECRETS_DIR")?), "DDNS_TSIG_KEY"))
+    Ok(secret::file_of(
+        Path::new(&s.text("SECRETS_DIR")?),
+        "DDNS_TSIG_KEY",
+    ))
 }
 
 // What: fresh 32-byte TSIG secret, base64.
@@ -1713,10 +1886,10 @@ fn new_tsig() -> String {
 // From: Issue #1683 | PR #1858
 fn tsig_secret(s: &Settings) -> Result<String, String> {
     let file = tsig_file(s)?;
-    if !file.exists() {
-        if let Some(v) = process_env("DDNS_TSIG_KEY").filter(|v| !v.is_empty()) {
-            return Ok(v);
-        }
+    if !file.exists()
+        && let Some(v) = process_env("DDNS_TSIG_KEY").filter(|v| !v.is_empty())
+    {
+        return Ok(v);
     }
     secret::load_or_create(&file, new_tsig, owner_keep()).map_err(|e| format!("DDNS_TSIG_KEY: {e}"))
 }
@@ -1733,7 +1906,8 @@ async fn rotate_tsig(app: &App) -> Result<(), String> {
         }
         _ => {}
     }
-    secret::load_or_create(&file, new_tsig, owner_keep()).map_err(|e| format!("DDNS_TSIG_KEY: {e}"))?;
+    secret::load_or_create(&file, new_tsig, owner_keep())
+        .map_err(|e| format!("DDNS_TSIG_KEY: {e}"))?;
     for line in apply_all(app, &s, &s).await? {
         eprintln!("ui: tsig rotate: {line}");
     }
@@ -1770,7 +1944,8 @@ fn nginx_bytes(text: &str) -> Result<u64, String> {
         _ => (t.as_str(), 0),
     };
     let n: u64 = num.parse().map_err(|_| format!("{text:?} is no size"))?;
-    n.checked_shl(shift).ok_or_else(|| format!("{text:?} is too big"))
+    n.checked_shl(shift)
+        .ok_or_else(|| format!("{text:?} is too big"))
 }
 
 // What: refuse a bigger cache without room.
@@ -1780,7 +1955,7 @@ fn cache_room(s: &Settings, form: &Fields) -> Result<(), Fail> {
     let Some(wanted) = form.get("CACHE_MAX_SIZE") else {
         return Ok(());
     };
-    let new = nginx_bytes(wanted).map_err(bad)?;
+    let new = nginx_bytes(wanted).map_err(bad_request)?;
     let old = nginx_bytes(&s.text("CACHE_MAX_SIZE")?)?;
     if new <= old {
         return Ok(());
@@ -1791,7 +1966,9 @@ fn cache_room(s: &Settings, form: &Fields) -> Result<(), Fail> {
     let reachable = sp.free.saturating_add(used.min(old));
     if new > reachable {
         let room = human::bytes(reachable);
-        return Err(bad(format!("cache size {wanted} does not fit; at most {room}")));
+        return Err(bad_request(format!(
+            "cache size {wanted} does not fit; at most {room}"
+        )));
     }
     Ok(())
 }
@@ -1826,7 +2003,9 @@ async fn status(State(app): Shared) -> Response {
     let rows: Vec<Value> = list
         .iter()
         .map(|c| {
-            let name = c["Labels"][docker::SERVICE_LABEL].as_str().unwrap_or_default();
+            let name = c["Labels"][docker::SERVICE_LABEL]
+                .as_str()
+                .unwrap_or_default();
             json!({"name": name, "status": colour(c), "health": c["Status"],
                    "stopped_by_user": stopped.iter().any(|x| x == name)})
         })
@@ -1856,9 +2035,11 @@ async fn container_state(
     let run = match want.state.as_str() {
         "running" => true,
         "stopped" => false,
-        _ => return Err(bad("state must be running or stopped")),
+        _ => return Err(bad_request("state must be running or stopped")),
     };
-    set_wanted(&app, &service, run).await.map_err(|e| Fail(StatusCode::BAD_GATEWAY, e))?;
+    set_wanted(&app, &service, run)
+        .await
+        .map_err(|e| Fail(StatusCode::BAD_GATEWAY, e))?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -1874,7 +2055,9 @@ async fn restart_ui(
     let s = app.settings();
     let (grace, limit) = app.limits(&s)?;
     let name = container_of(&app, &s, &s.text("UI_SERVICE")?).await?;
-    app.docker.act(&name, docker::Action::Restart, grace, limit).await
+    app.docker
+        .act(&name, docker::Action::Restart, grace, limit)
+        .await
         .map_err(|e| Fail(StatusCode::BAD_GATEWAY, e.to_string()))?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
@@ -1897,7 +2080,9 @@ fn verify(hash: &str, pw: &str) -> bool {
     let Ok(parsed) = PasswordHash::new(hash) else {
         return false;
     };
-    Argon2::default().verify_password(pw.as_bytes(), &parsed).is_ok()
+    Argon2::default()
+        .verify_password(pw.as_bytes(), &parsed)
+        .is_ok()
 }
 
 // What: Argon2id PHC string of a password.
@@ -1913,7 +2098,9 @@ fn phc(pw: &str) -> Result<String, String> {
 // From: Issue #1683 | PR #1858
 fn hash_password() -> Result<(), String> {
     let mut line = String::new();
-    std::io::stdin().read_line(&mut line).map_err(|e| e.to_string())?;
+    std::io::stdin()
+        .read_line(&mut line)
+        .map_err(|e| e.to_string())?;
     let pw = line.trim_end_matches(['\r', '\n']);
     if pw.is_empty() {
         return Err("the password on stdin is empty".into());
@@ -1929,7 +2116,8 @@ fn templates() -> Result<Tera, String> {
     let mut t = Tera::default();
     t.autoescape_on(vec!["html"]);
     for (name, body) in TEMPLATES {
-        t.add_raw_template(name, body).map_err(|e| format!("template {name}: {e}"))?;
+        t.add_raw_template(name, body)
+            .map_err(|e| format!("template {name}: {e}"))?;
     }
     // What: image identity for the page footer.
     // Why: base.html calls these four functions.
@@ -2005,7 +2193,10 @@ const ROUTES: [(&str, &str); 45] = [
     ("lease_release", "/dhcp/lease-release"),
     ("kea_rollback", "/dhcp/kea-rollback"),
     ("dhcp_check", "/dhcp/check"),
-    ("service_action", "/api/service/{container}/{program}/{action}"),
+    (
+        "service_action",
+        "/api/service/{container}/{program}/{action}",
+    ),
 ];
 
 // What: command line uses besides the server.
@@ -2034,12 +2225,19 @@ fn render_dns(s: &Settings) -> Result<(), String> {
     let serial = u32::try_from(clock::unix_secs() % u64::from(u32::MAX)).unwrap_or(1);
     let files = render::dns_only(s, &sec, serial).map_err(|e| e.join("; "))?;
     let changed = write_files(s, &files)?;
-    println!("{}", json!({"written": files.len(), "changed": changed.len()}));
+    println!(
+        "{}",
+        json!({"written": files.len(), "changed": changed.len()})
+    );
     Ok(())
 }
 
 async fn healthcheck(s: &Settings) -> Result<(), String> {
-    let url = format!("http://{}:{}/healthz", s.text("LOOPBACK_BIND_IP")?, s.uint("UI_PORT")?);
+    let url = format!(
+        "http://{}:{}/healthz",
+        s.text("LOOPBACK_BIND_IP")?,
+        s.uint("UI_PORT")?
+    );
     let limit = Duration::from_secs(s.uint("HTTP_CLIENT_TIMEOUT")?);
     http::probe(&url, None, limit).await
 }
@@ -2068,14 +2266,26 @@ fn router(app: Arc<App>) -> Router {
         .route("/api/status", get(status))
         .route("/api/container/{service}", post(container_state))
         .route("/api/restart-ui", post(restart_ui))
-        .route("/api/service/{container}/{program}/{action}", post(service_action))
+        .route(
+            "/api/service/{container}/{program}/{action}",
+            post(service_action),
+        )
         .layer(axum::middleware::from_fn_with_state(app.clone(), auth));
     Router::new()
         .route("/healthz", get(health))
         .route("/api/secondary/register", post(register))
-        .route("/static/admin.css", get(|| async { asset("text/css", ADMIN_CSS.as_bytes()) }))
-        .route("/favicon.ico", get(|| async { asset("image/x-icon", FAVICON) }))
-        .route("/static/logo-icon.png", get(|| async { asset("image/png", LOGO) }))
+        .route(
+            "/static/admin.css",
+            get(|| async { asset("text/css", ADMIN_CSS.as_bytes()) }),
+        )
+        .route(
+            "/favicon.ico",
+            get(|| async { asset("image/x-icon", FAVICON) }),
+        )
+        .route(
+            "/static/logo-icon.png",
+            get(|| async { asset("image/png", LOGO) }),
+        )
         .merge(pages)
         .layer(axum::middleware::from_fn_with_state(app.clone(), secure))
         .with_state(app)
@@ -2119,7 +2329,8 @@ async fn main() -> Result<(), String> {
         return done;
     }
     let dir = PathBuf::from(s.text("SECRETS_DIR")?);
-    let key = secret::resolve(None, &dir, "UI_SESSION_KEY", owner_keep()).map_err(|e| e.to_string())?;
+    let key =
+        secret::resolve(None, &dir, "UI_SESSION_KEY", owner_keep()).map_err(|e| e.to_string())?;
     let app = Arc::new(App {
         docker: docker::Api::new(&s.text("DOCKER_ENDPOINT")?)?,
         tera: templates()?,
@@ -2137,6 +2348,10 @@ async fn main() -> Result<(), String> {
     tokio::spawn(sampler(app.clone()));
     tokio::spawn(flush_on_transfer(app.clone()));
     let listen = format!("{}:{}", s.text("UI_LISTEN")?, s.uint("UI_PORT")?);
-    let sock = tokio::net::TcpListener::bind(&listen).await.map_err(|e| format!("{listen}: {e}"))?;
-    axum::serve(sock, router(app)).await.map_err(|e| e.to_string())
+    let sock = tokio::net::TcpListener::bind(&listen)
+        .await
+        .map_err(|e| format!("{listen}: {e}"))?;
+    axum::serve(sock, router(app))
+        .await
+        .map_err(|e| e.to_string())
 }
