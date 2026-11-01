@@ -2,14 +2,14 @@
 //! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 //! SPDX-License-Identifier: AGPL-3.0-or-later
 
-// What: watchdog: looks at the stack, writes alarms.
-// Why: it only watches; it starts and changes nothing.
+// What: watchdog: checks the stack, raises alarms.
+// Why: restarts sick containers; writes no config.
 // From: Issue #1683 | PR #1858
 
 use lancache_ng::config::{process_env, Settings};
 use lancache_ng::{cert, clock, dns, docker, fs, http, pdns};
 use serde::Serialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -70,12 +70,50 @@ fn load() -> Result<Settings, String> {
     Settings::load(&process_env, saved.as_deref())
 }
 
-// What: Docker state and health of each service.
-// Why: a stopped or sick container is an alarm.
+// What: restart times per container.
+// Why: a crash loop stops at the SOT limit.
 // From: Issue #1683 | PR #1858
-async fn containers(s: &Settings, f: &mut Findings) -> Result<(), String> {
+#[derive(Default)]
+struct Restarts(BTreeMap<String, VecDeque<u64>>);
+
+impl Restarts {
+    // What: may this container restart now.
+    // Why: at most LIMIT restarts per WINDOW.
+    // From: Issue #1683 | PR #1858
+    fn allow(&mut self, s: &Settings, name: &str) -> Result<bool, String> {
+        let max = s.uint("WATCHDOG_RESTART_LIMIT")?;
+        let window = s.uint("WATCHDOG_RESTART_WINDOW")?;
+        let now = clock::unix_secs();
+        let times = self.0.entry(name.to_string()).or_default();
+        times.retain(|t| now.saturating_sub(*t) <= window);
+        if times.len() as u64 >= max {
+            return Ok(false);
+        }
+        times.push_back(now);
+        Ok(true)
+    }
+}
+
+// What: why a container needs help, if at all.
+// Why: stopped or unhealthy; healthcheck = programs.
+// From: Issue #1683 | PR #1858
+fn trouble(c: &serde_json::Value) -> Option<String> {
+    let state = c["State"].as_str().unwrap_or("unknown");
+    let sick = c["Status"].as_str().unwrap_or_default().contains("(unhealthy)");
+    match (state == "running", sick) {
+        (true, false) => None,
+        (true, true) => Some("health check unhealthy".into()),
+        (false, _) => Some(format!("container is {state}")),
+    }
+}
+
+// What: watch containers; restart in trouble.
+// Why: keeps the stack up; loops become alarms.
+// From: Issue #1683 | PR #1858
+async fn containers(s: &Settings, f: &mut Findings, r: &mut Restarts) -> Result<(), String> {
     let api = docker::Api::new(&s.text("DOCKER_ENDPOINT")?)?;
     let limit = Duration::from_secs(s.uint("DOCKER_TIMEOUT")?);
+    let grace = u32::try_from(s.uint("WATCHDOG_STOP_GRACE")?).map_err(|e| e.to_string())?;
     let project = s.text("COMPOSE_PROJECT")?;
     let dhcp_off = s.text("DHCP_MODE")? == "off";
     let dhcp_service = s.text("DHCP_SERVICE")?;
@@ -84,13 +122,18 @@ async fn containers(s: &Settings, f: &mut Findings) -> Result<(), String> {
         let Some(service) = c["Labels"][docker::SERVICE_LABEL].as_str() else {
             continue;
         };
-        let state = c["State"].as_str().unwrap_or("unknown");
-        if state != "running" && !(dhcp_off && service == dhcp_service) {
-            f.crit(service, format!("container is {state}"));
+        let Some(why) = trouble(c) else { continue };
+        if dhcp_off && service == dhcp_service {
+            continue;
         }
-        let status = c["Status"].as_str().unwrap_or_default();
-        if status.contains("(unhealthy)") {
-            f.crit(service, "health check says unhealthy");
+        let name = c["Names"][0].as_str().unwrap_or(service).trim_start_matches('/');
+        if !r.allow(s, name)? {
+            f.crit(service, format!("{why}; restart limit reached"));
+            continue;
+        }
+        match api.act(name, docker::Action::Restart, grace, limit).await {
+            Ok(()) => f.warn(service, format!("{why}; restarted")),
+            Err(e) => f.crit(service, format!("{why}; restart failed: {e}")),
         }
     }
     Ok(())
@@ -163,9 +206,9 @@ async fn dns_sync(s: &Settings, f: &mut Findings) -> Result<(), String> {
 // What: run every check of one round.
 // Why: a broken check is itself an alarm.
 // From: Issue #1683 | PR #1858
-async fn round(s: &Settings) -> Findings {
+async fn round(s: &Settings, r: &mut Restarts) -> Findings {
     let mut f = Findings::default();
-    if let Err(e) = containers(s, &mut f).await {
+    if let Err(e) = containers(s, &mut f, r).await {
         f.crit("docker", e);
     }
     if let Err(e) = disks(s, &mut f) {
@@ -204,6 +247,7 @@ async fn main() -> Result<(), String> {
     let mut settings = load()?;
     let mut pause = Duration::from_secs(settings.uint("WATCHDOG_INTERVAL")?);
     let mut term = signal(SignalKind::terminate()).map_err(|e| e.to_string())?;
+    let mut restarts = Restarts::default();
     loop {
         match load() {
             Ok(s) => settings = s,
@@ -213,7 +257,7 @@ async fn main() -> Result<(), String> {
             Ok(v) => pause = Duration::from_secs(v),
             Err(e) => eprintln!("watchdog: interval kept: {e}"),
         }
-        let found = round(&settings).await;
+        let found = round(&settings, &mut restarts).await;
         for a in &found.0 {
             eprintln!("watchdog: {:?} {}: {}", a.level, a.source, a.text);
         }

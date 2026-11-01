@@ -882,11 +882,16 @@ runtime:
     - WATCHDOG_ALARM_FILE=@STATUS_DIR@/alarms.json
     - WATCHDOG_ALARM_FILE_MODE=0644
     - WATCHDOG_INTERVAL=30
+    - WATCHDOG_RESTART_LIMIT=3
+    - WATCHDOG_RESTART_WINDOW=900
+    - WATCHDOG_STOP_GRACE=10
     - WATCHDOG_CERT_FILES=@NGINX_DIR@/@NGINX_SUBDIR_CA@/ca.crt
     - WATCHDOG_CERT_WARN_SECS=2592000
     - WATCHDOG_DISK_MIN_FREE_PERCENT=10
     - WATCHDOG_DISK_PATHS=@CACHE_DIR@ @SYSLOG_LOG_ROOT@
-    - WATCHDOG_STOP_GRACE=10
+    - UI_STOP_GRACE=10
+    - UI_FLUSH_CHECK_SECONDS=5
+    - DNS_SECONDARY_NAME_MAX=32
   # What: key=kind;min;max;effect;owner; ? = optional.
   # Why: config.rs checks every value against it.
   # From: Issue #1683 | PR #1858
@@ -1087,11 +1092,16 @@ runtime:
     - WATCHDOG_ALARM_FILE=path;;;live;services
     - WATCHDOG_ALARM_FILE_MODE=text;;;live;services
     - WATCHDOG_INTERVAL=uint;5;3600;live;services
+    - WATCHDOG_RESTART_LIMIT=uint;1;100;live;services
+    - WATCHDOG_RESTART_WINDOW=uint;60;86400;live;services
+    - WATCHDOG_STOP_GRACE=uint;1;600;live;services
     - WATCHDOG_CERT_FILES=list?;;;live;services
     - WATCHDOG_CERT_WARN_SECS=uint;3600;31536000;live;services
     - WATCHDOG_DISK_MIN_FREE_PERCENT=uint;1;99;live;services
     - WATCHDOG_DISK_PATHS=list;;;live;services
-    - WATCHDOG_STOP_GRACE=uint;1;600;live;services
+    - UI_STOP_GRACE=uint;1;600;live;ui
+    - UI_FLUSH_CHECK_SECONDS=uint;1;3600;live;ui
+    - DNS_SECONDARY_NAME_MAX=uint;1;63;live;ui
   # What: defaults compose interpolates as SOT_<KEY>.
   # Why: setup.sh and ci.sh export them; no clash with .env.
   # From: Issue #1683 | PR #1912
