@@ -2178,10 +2178,10 @@ pub mod kea_conf {
             .collect())
     }
 
-    // What: kea-dhcp4.conf.
-    // Why: managed options first, user options after.
+    // What: kea-dhcp4.conf; subnets kept from the file.
+    // Why: the ui edits subnets in Kea; SOT seeds the first.
     // From: Issue #1683 | PR #1858
-    pub fn dhcp4(s: &Settings) -> Result<Value, String> {
+    pub fn dhcp4(s: &Settings, existing: Option<&Value>) -> Result<Value, String> {
         let lease = s.uint("DHCP_LEASE_TIME")?;
         let (valid, max) = dhcp::lease_limits(s, lease)?;
         let domain = crate::dns::canonical_zone(&s.text("DNS_LAN_ZONE")?);
@@ -2202,7 +2202,7 @@ pub mod kea_conf {
             options.push(json!({"code": code, "data": data}));
         }
         let ddns = s.flag("DHCP_DDNS")?;
-        Ok(json!({"Dhcp4": {
+        let mut out = json!({"Dhcp4": {
             "interfaces-config": {"interfaces": s.list("DHCP_INTERFACES"), "re-detect": false},
             "lease-database": {"type": "memfile", "persist": true, "name": s.text("KEA_LEASE_FILE")?},
             "control-socket": {"socket-type": "unix", "socket-name": s.text("KEA_DHCP4_SOCKET")?},
@@ -2230,7 +2230,11 @@ pub mod kea_conf {
             "ddns-generated-prefix": s.text("KEA_DDNS_GENERATED_PREFIX")?,
             "ddns-qualifying-suffix": format!("{domain}."),
             "loggers": loggers(s, &["kea-dhcp4", "kea-dhcp4.packets"])?
-        }}))
+        }});
+        if let Some(subnets) = existing.and_then(|e| e.pointer("/Dhcp4/subnet4")) {
+            out["Dhcp4"]["subnet4"] = subnets.clone();
+        }
+        Ok(out)
     }
 
     // What: kea-ctrl-agent.conf.
@@ -2878,7 +2882,16 @@ pub mod render {
         }
         match dhcp::Mode::from_settings(s) {
             Ok(dhcp::Mode::Kea) => {
-                add("dhcp", "KEA_DHCP4_CONF_FILE", json(kea_conf::dhcp4(s)));
+                let current = s
+                    .text("KEA_DHCP4_CONF_FILE")
+                    .ok()
+                    .and_then(|p| std::fs::read(p).ok())
+                    .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
+                add(
+                    "dhcp",
+                    "KEA_DHCP4_CONF_FILE",
+                    json(kea_conf::dhcp4(s, current.as_ref())),
+                );
                 add("dhcp", "KEA_CTRL_CONF_FILE", json(kea_conf::ctrl_agent(s)));
                 add(
                     "dhcp",
@@ -3223,5 +3236,96 @@ pub mod cdn {
             .filter(|r| r.enabled)
             .map(|r| r.display + "\n")
             .collect())
+    }
+}
+
+// What: Kea Control Agent client (REST, JSON commands).
+// Why: leases, subnets and config go through Kea itself.
+// From: Issue #1683 | PR #1858
+pub mod kea {
+    use serde_json::{json, Value};
+
+    // What: one control agent endpoint.
+    // Why: commands go to the dhcp4 service behind it.
+    // From: Issue #1683 | PR #1858
+    pub struct Api {
+        client: reqwest::Client,
+        url: String,
+    }
+
+    impl Api {
+        // What: client for http://host:port/.
+        // Why: one place builds the request.
+        // From: Issue #1683 | PR #1858
+        pub fn new(client: reqwest::Client, url: &str) -> Self {
+            Self {
+                client,
+                url: url.to_string(),
+            }
+        }
+
+        // What: run one command; return its arguments.
+        // Why: result 0 ok, 3 empty; others are errors.
+        // From: Issue #1683 | PR #1858
+        pub async fn command(&self, command: &str, args: Option<Value>) -> Result<Value, String> {
+            let mut body = json!({"command": command, "service": ["dhcp4"]});
+            if let Some(a) = args {
+                body["arguments"] = a;
+            }
+            let resp = self
+                .client
+                .post(&self.url)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| format!("kea {command}: {}", crate::http::error_chain(&e)))?;
+            let v: Value = resp
+                .json()
+                .await
+                .map_err(|e| format!("kea {command}: {e}"))?;
+            let first = v.get(0).cloned().unwrap_or(v);
+            match first["result"].as_i64() {
+                Some(0) => Ok(first["arguments"].clone()),
+                Some(3) => Ok(Value::Null),
+                _ => Err(format!(
+                    "kea {command}: {}",
+                    first["text"].as_str().unwrap_or("no result")
+                )),
+            }
+        }
+
+        // What: live config of kea-dhcp4.
+        // Why: subnets and reservations are edited in it.
+        // From: Issue #1683 | PR #1858
+        pub async fn config(&self) -> Result<Value, String> {
+            self.command("config-get", None).await
+        }
+
+        // What: set and persist a new config.
+        // Why: config-set applies; config-write keeps it on disk.
+        // From: Issue #1683 | PR #1858
+        pub async fn set_config(&self, config: Value) -> Result<(), String> {
+            self.command("config-set", Some(config)).await?;
+            self.command("config-write", Some(json!({})))
+                .await
+                .map(drop)
+        }
+
+        // What: all IPv4 leases.
+        // Why: lease_cmds hook; the ui lists them.
+        // From: Issue #1683 | PR #1858
+        pub async fn leases(&self) -> Result<Vec<Value>, String> {
+            let a = self.command("lease4-get-all", None).await?;
+            Ok(a["leases"].as_array().cloned().unwrap_or_default())
+        }
+
+        // What: delete one lease by address.
+        // Why: frees the address for the next client.
+        // From: Issue #1683 | PR #1858
+        pub async fn release(&self, ip: &str) -> Result<(), String> {
+            self.command("lease4-del", Some(json!({"ip-address": ip})))
+                .await
+                .map(drop)
+        }
     }
 }

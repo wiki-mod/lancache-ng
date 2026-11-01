@@ -972,6 +972,376 @@ async fn secondary_health(s: &Settings, address: &str) -> serde_json::Value {
     }
 }
 
+// What: Kea control agent client of this stack.
+// Why: subnets, reservations and leases live in Kea.
+// From: Issue #1683 | PR #1858
+fn kea_api(s: &Settings) -> Result<lancache_ng::kea::Api, String> {
+    Ok(lancache_ng::kea::Api::new(
+        lancache_ng::http::client(s)?,
+        &s.text("KEA_CTRL_URL")?,
+    ))
+}
+
+// What: one Kea subnet as template row.
+// Why: the page shows flat fields, Kea keeps option-data.
+// From: Issue #1683 | PR #1858
+fn subnet_row(sn: &serde_json::Value) -> serde_json::Value {
+    let opt = |name: &str| {
+        sn["option-data"]
+            .as_array()
+            .and_then(|a| a.iter().find(|o| o["name"] == name))
+            .and_then(|o| o["data"].as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
+    let dns: Vec<String> = opt("domain-name-servers")
+        .split(',')
+        .map(|x| x.trim().to_string())
+        .collect();
+    let pool = sn["pools"][0]["pool"].as_str().unwrap_or_default();
+    let (start, end) = pool
+        .split_once('-')
+        .map(|(a, b)| (a.trim(), b.trim()))
+        .unwrap_or(("", ""));
+    let custom: Vec<serde_json::Value> = sn["option-data"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter(|o| o.get("code").is_some() && o.get("name").is_none())
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    serde_json::json!({
+        "id": sn["id"], "subnet": sn["subnet"], "gateway": opt("routers"),
+        "dns_primary": dns.first().cloned().unwrap_or_default(),
+        "dns_secondary": dns.get(1).cloned().unwrap_or_default(),
+        "ntp_servers": opt("ntp-servers"), "pool_start": start, "pool_end": end,
+        "lease_time": sn["valid-lifetime"], "custom_options": custom,
+    })
+}
+
+// What: DHCP page: mode, proxy/relay, Kea data.
+// Why: Kea data is read live; nothing is cached.
+// From: Issue #1683 | PR #1858
+async fn dhcp(State(app): Shared, axum::Extension(csrf): axum::Extension<Csrf>) -> Response {
+    let s = app.settings();
+    let mut ctx = Context::new();
+    let mode = s.text("DHCP_MODE").unwrap_or_default();
+    ctx.insert("dhcp_mode", &mode);
+    ctx.insert(
+        "dhcp_modes",
+        &["off", "kea", "dnsmasq-proxy", "dnsmasq-relay"],
+    );
+    ctx.insert("dhcp_has_kea", &(mode == "kea"));
+    ctx.insert("dhcp_is_dnsmasq", &mode.starts_with("dnsmasq"));
+    ctx.insert("dhcp_is_relay", &(mode == "dnsmasq-relay"));
+    ctx.insert("dhcp_ddns_enabled", &s.flag("DHCP_DDNS").unwrap_or(false));
+    let (mut subnets, mut reservations, mut leases) = (Vec::new(), Vec::new(), Vec::new());
+    if mode == "kea" {
+        match kea_api(&s) {
+            Ok(api) => {
+                if let Ok(cfg) = api.config().await {
+                    for sn in cfg["Dhcp4"]["subnet4"]
+                        .as_array()
+                        .cloned()
+                        .unwrap_or_default()
+                    {
+                        for r in sn["reservations"].as_array().cloned().unwrap_or_default() {
+                            reservations.push(serde_json::json!({
+                                "subnet_id": sn["id"], "mac": r["hw-address"],
+                                "ip": r["ip-address"], "hostname": r["hostname"],
+                            }));
+                        }
+                        subnets.push(subnet_row(&sn));
+                    }
+                }
+                for l in api.leases().await.unwrap_or_default() {
+                    let end =
+                        l["cltt"].as_u64().unwrap_or(0) + l["valid-lft"].as_u64().unwrap_or(0);
+                    leases.push(serde_json::json!({
+                        "ip": l["ip-address"], "mac": l["hw-address"], "hostname": l["hostname"],
+                        "subnet_id": l["subnet-id"], "expires": end.to_string(),
+                    }));
+                }
+            }
+            Err(e) => ctx.insert("hint", &e),
+        }
+    }
+    ctx.insert("subnets", &subnets);
+    ctx.insert("reservations", &reservations);
+    ctx.insert("leases", &leases);
+    let snaps: Vec<serde_json::Value> = kea_store(&s)
+        .and_then(|st| st.list())
+        .unwrap_or_default()
+        .iter()
+        .map(|id| {
+            let secs = id.parse::<u128>().unwrap_or(0) / 1_000_000_000;
+            serde_json::json!({"id": id, "created_unix": secs.to_string()})
+        })
+        .collect();
+    ctx.insert("kea_snapshots", &snaps);
+    app.page("dhcp.html", ctx, &csrf.0)
+}
+
+// What: snapshot store of the Kea config.
+// Why: every subnet change can be rolled back.
+// From: Issue #1683 | PR #1858
+fn kea_store(s: &Settings) -> Result<lancache_ng::snapshot::Store, String> {
+    Ok(lancache_ng::snapshot::Store {
+        dir: PathBuf::from(s.text("KEA_SNAPSHOT_DIR")?),
+        keep: usize::try_from(s.uint("KEA_SNAPSHOT_KEEP")?).map_err(|e| e.to_string())?,
+        owner: fs::Owner {
+            uid: None,
+            gid: None,
+        },
+    })
+}
+
+// What: change the Kea config with a function.
+// Why: get, edit, set, write, snapshot; one path.
+// From: Issue #1683 | PR #1858
+async fn kea_edit(
+    s: &Settings,
+    edit: impl FnOnce(&mut Vec<serde_json::Value>) -> Result<(), String>,
+) -> Result<(), String> {
+    let api = kea_api(s)?;
+    let mut cfg = api.config().await?;
+    cfg.as_object_mut().map(|o| o.remove("hash"));
+    let mut subnets = cfg["Dhcp4"]["subnet4"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    edit(&mut subnets)?;
+    cfg["Dhcp4"]["subnet4"] = serde_json::Value::Array(subnets);
+    api.set_config(cfg.clone()).await?;
+    let store = kea_store(s)?;
+    std::fs::create_dir_all(&store.dir).map_err(|e| format!("{}: {e}", store.dir.display()))?;
+    store
+        .save(&serde_json::to_vec(&cfg).map_err(|e| e.to_string())?)
+        .map(drop)
+}
+
+// What: Kea subnet from the subnet form.
+// Why: managed options by name, as Kea expects.
+// From: Issue #1683 | PR #1858
+fn subnet_from(
+    get: &dyn Fn(&str) -> String,
+    id: u64,
+    keep: Option<&serde_json::Value>,
+) -> serde_json::Value {
+    let dns = [get("dns_primary"), get("dns_secondary")]
+        .into_iter()
+        .filter(|d| !d.is_empty())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut opts = vec![
+        serde_json::json!({"name": "routers", "data": get("gateway")}),
+        serde_json::json!({"name": "domain-name-servers", "data": dns}),
+    ];
+    for (name, key) in [("domain-name", "domain"), ("ntp-servers", "ntp_servers")] {
+        if !get(key).is_empty() {
+            opts.push(serde_json::json!({"name": name, "data": get(key)}));
+        }
+    }
+    if let Some(k) = keep {
+        opts.extend(
+            k["option-data"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|o| o.get("name").is_none()),
+        );
+    }
+    let mut sn = serde_json::json!({
+        "id": id, "subnet": get("subnet"),
+        "pools": [{"pool": format!("{} - {}", get("pool_start"), get("pool_end"))}],
+        "option-data": opts,
+    });
+    if let Ok(lt) = get("lease_time").parse::<u64>() {
+        sn["valid-lifetime"] = lt.into();
+    }
+    if let Some(r) = keep.and_then(|k| k.get("reservations")) {
+        sn["reservations"] = r.clone();
+    }
+    sn
+}
+
+// What: one DHCP page form action.
+// Why: SOT keys via commit; Kea data via kea_edit.
+// From: Issue #1683 | PR #1858
+async fn dhcp_action(
+    State(app): Shared,
+    axum::Extension(csrf): axum::Extension<Csrf>,
+    axum::extract::Path(op): axum::extract::Path<String>,
+    Form(f): Form<BTreeMap<String, String>>,
+) -> Response {
+    if !csrf_ok(&f, &csrf) {
+        return (StatusCode::FORBIDDEN, "CSRF token mismatch").into_response();
+    }
+    let s = app.settings();
+    let get = |k: &str| f.get(k).map(|v| v.trim().to_string()).unwrap_or_default();
+    let id_of = |k: &str| {
+        get(k)
+            .parse::<u64>()
+            .map_err(|_| format!("{k} must be a number"))
+    };
+    let result = match op.as_str() {
+        "mode" => {
+            commit(
+                &app,
+                BTreeMap::from([("DHCP_MODE".into(), get("dhcp_mode"))]),
+            )
+            .await
+        }
+        "ddns" => {
+            commit(
+                &app,
+                BTreeMap::from([(
+                    "DHCP_DDNS".into(),
+                    (get("enabled") == "1" || get("enabled") == "true").to_string(),
+                )]),
+            )
+            .await
+        }
+        "proxy" | "relay" => {
+            let mut up: BTreeMap<String, String> = f
+                .iter()
+                .filter(|(k, _)| k.starts_with("dhcp_") || k.starts_with("upstream_"))
+                .filter(|(k, _)| !k.starts_with("dhcp_dns_"))
+                .map(|(k, v)| {
+                    (
+                        k.to_ascii_uppercase()
+                            .replace("DHCP_PROXY_CUSTOM_OPTIONS", "DHCP_CUSTOM_OPTIONS"),
+                        v.trim().to_string(),
+                    )
+                })
+                .collect();
+            if op == "proxy" {
+                let dns = [get("dhcp_dns_primary"), get("dhcp_dns_secondary")]
+                    .into_iter()
+                    .filter(|d| !d.is_empty())
+                    .collect::<Vec<_>>();
+                up.insert("DHCP_DNS_SERVERS".into(), dns.join(" "));
+            }
+            commit(&app, up).await
+        }
+        "subnet-add" => {
+            kea_edit(&s, |l| {
+                let id = l.iter().filter_map(|x| x["id"].as_u64()).max().unwrap_or(0) + 1;
+                l.push(subnet_from(&get, id, None));
+                Ok(())
+            })
+            .await
+        }
+        "subnet-update" => match id_of("id") {
+            Ok(id) => {
+                kea_edit(&s, |l| {
+                    let p = l
+                        .iter()
+                        .position(|x| x["id"].as_u64() == Some(id))
+                        .ok_or("no such subnet")?;
+                    l[p] = subnet_from(&get, id, Some(&l[p].clone()));
+                    Ok(())
+                })
+                .await
+            }
+            Err(e) => Err(e),
+        },
+        "subnet-remove" => match id_of("id") {
+            Ok(id) => {
+                kea_edit(&s, |l| {
+                    l.retain(|x| x["id"].as_u64() != Some(id));
+                    Ok(())
+                })
+                .await
+            }
+            Err(e) => Err(e),
+        },
+        "option-add" | "option-remove" => match (
+            id_of("subnet_id"),
+            lancache_ng::dhcp::option_code(&get("code")),
+        ) {
+            (Ok(id), Ok(code)) => {
+                let data = get("data");
+                let add = op == "option-add";
+                kea_edit(&s, |l| {
+                    let sn = l
+                        .iter_mut()
+                        .find(|x| x["id"].as_u64() == Some(id))
+                        .ok_or("no such subnet")?;
+                    let mut opts = sn["option-data"].as_array().cloned().unwrap_or_default();
+                    opts.retain(|o| {
+                        o["code"].as_u64() != Some(u64::from(code)) || o.get("name").is_some()
+                    });
+                    if add {
+                        opts.push(serde_json::json!({"code": code, "data": data}));
+                    }
+                    sn["option-data"] = opts.into();
+                    Ok(())
+                })
+                .await
+            }
+            (Err(e), _) | (_, Err(e)) => Err(e),
+        },
+        "static-add" | "static-remove" => match id_of("subnet_id") {
+            Ok(id) => {
+                let (mac, ip, host, add) =
+                    (get("mac"), get("ip"), get("hostname"), op == "static-add");
+                kea_edit(&s, |l| {
+                    let sn = l.iter_mut().find(|x| x["id"].as_u64() == Some(id)).ok_or("no such subnet")?;
+                    let mut res = sn["reservations"].as_array().cloned().unwrap_or_default();
+                    res.retain(|r| r["hw-address"].as_str() != Some(mac.as_str()));
+                    if add {
+                        res.push(serde_json::json!({"hw-address": mac, "ip-address": ip, "hostname": host}));
+                    }
+                    sn["reservations"] = res.into();
+                    Ok(())
+                })
+                .await
+            }
+            Err(e) => Err(e),
+        },
+        "lease-release" => match kea_api(&s) {
+            Ok(api) => api.release(&get("ip")).await,
+            Err(e) => Err(e),
+        },
+        "kea-rollback" => match kea_store(&s).and_then(|st| st.read(&get("snapshot_id"))) {
+            Ok(body) => match (
+                serde_json::from_slice::<serde_json::Value>(&body),
+                kea_api(&s),
+            ) {
+                (Ok(cfg), Ok(api)) => api.set_config(cfg).await,
+                (Err(e), _) => Err(e.to_string()),
+                (_, Err(e)) => Err(e),
+            },
+            Err(e) => Err(e),
+        },
+        _ => Err(format!("unknown DHCP action {op}")),
+    };
+    done(result, "/dhcp")
+}
+
+// What: on-demand DHCP precheck in any mode.
+// Why: finds foreign servers and tests a lease; no polling.
+// From: Issue #1683 | PR #1858
+async fn dhcp_check(
+    State(app): Shared,
+    axum::Extension(csrf): axum::Extension<Csrf>,
+    headers: HeaderMap,
+) -> Response {
+    if !header_csrf_ok(&headers, &csrf) {
+        return (StatusCode::FORBIDDEN, "CSRF token mismatch").into_response();
+    }
+    let s = app.settings();
+    let report = tokio::task::spawn_blocking(move || lancache_ng::dhcp_probe::run(&s)).await;
+    match report {
+        Ok(r) => axum::Json(r).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
 // What: render all configs, write changed files, act.
 // Why: only owners with changed keys or files are touched.
 // From: Issue #1683 | PR #1858
@@ -1057,7 +1427,7 @@ const PAGES: [(&str, &str); 7] = [
     ("dhcp", "/dhcp"),
     ("setup", "/setup"),
 ];
-const ROUTES: [(&str, &str); 23] = [
+const ROUTES: [(&str, &str); 37] = [
     ("admin_css", "/static/admin.css"),
     ("favicon", "/favicon.ico"),
     ("logo_icon", "/static/logo-icon.png"),
@@ -1081,6 +1451,20 @@ const ROUTES: [(&str, &str); 23] = [
     ("secondary_rotate", "/api/secondary/{name}/rotate"),
     ("secondary_health", "/api/secondary/{name}/health"),
     ("secondary_address", "/api/secondary/{name}/address"),
+    ("dhcp_mode", "/dhcp/mode"),
+    ("dhcp_ddns", "/dhcp/ddns"),
+    ("dhcp_proxy", "/dhcp/proxy"),
+    ("dhcp_relay", "/dhcp/relay"),
+    ("subnet_add", "/dhcp/subnet-add"),
+    ("subnet_update", "/dhcp/subnet-update"),
+    ("subnet_remove", "/dhcp/subnet-remove"),
+    ("subnet_option_add", "/dhcp/option-add"),
+    ("subnet_option_remove", "/dhcp/option-remove"),
+    ("static_add", "/dhcp/static-add"),
+    ("static_remove", "/dhcp/static-remove"),
+    ("lease_release", "/dhcp/lease-release"),
+    ("kea_rollback", "/dhcp/kea-rollback"),
+    ("dhcp_check", "/dhcp/check"),
 ];
 
 // What: traffic-light colour of one container.
@@ -1309,6 +1693,9 @@ async fn main() -> Result<(), String> {
         .route("/logs", get(logs))
         .route("/domains", get(domains))
         .route("/domains/{op}", post(dns_action))
+        .route("/dhcp", get(dhcp))
+        .route("/dhcp/check", post(dhcp_check))
+        .route("/dhcp/{op}", post(dhcp_action))
         .route("/api/secondary/{name}/{op}", post(secondary_action))
         .route("/logs/save", post(logs_save))
         .route("/api/status", get(status))
