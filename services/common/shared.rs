@@ -2895,3 +2895,167 @@ pub mod ntp {
         }
     }
 }
+
+// What: proxy access log: last requests and hit stats.
+// Why: dashboard and logs page read one parser.
+// From: Issue #1683 | PR #1858
+pub mod access {
+    use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+    use std::path::{Path, PathBuf};
+
+    // What: one parsed request of nginx log_format cache.
+    // Why: the ui shows host, path, status, size, cache.
+    // From: Issue #1683 | PR #1858
+    #[derive(Clone, Debug, Default, serde::Serialize)]
+    pub struct Entry {
+        pub ip: String,
+        pub time: String,
+        pub method: String,
+        pub path: String,
+        pub status: u16,
+        pub bytes: u64,
+        pub cache_status: String,
+        pub host: String,
+    }
+
+    // What: parse one line; None if it is no cache line.
+    // Why: syslog prefix before the address is ignored.
+    // From: Issue #1683 | PR #1858
+    pub fn parse(line: &str) -> Option<Entry> {
+        let (head, rest) = line.split_once(" - [")?;
+        let ip = head.rsplit(' ').next()?.to_string();
+        let (time, rest) = rest.split_once("] \"")?;
+        let (request, rest) = rest.split_once("\" ")?;
+        let mut req = request.split(' ');
+        let (method, path) = (
+            req.next()?.to_string(),
+            req.next().unwrap_or_default().to_string(),
+        );
+        let mut f = rest.splitn(3, ' ');
+        let status = f.next()?.parse().ok()?;
+        let bytes = f.next()?.parse().ok()?;
+        let mut q = f.next()?.split('"').filter(|p| !p.trim().is_empty());
+        let cache_status = q.next()?.to_string();
+        let host = q.next().unwrap_or_default().to_string();
+        Some(Entry {
+            ip,
+            time: time.to_string(),
+            method,
+            path,
+            status,
+            bytes,
+            cache_status,
+            host,
+        })
+    }
+
+    // What: log files of the proxy, oldest first.
+    // Why: syslog-ng writes one file per day (YYYYMMDD.log).
+    // From: Issue #1683 | PR #1858
+    pub fn files(dir: &Path) -> Vec<PathBuf> {
+        let mut out: Vec<PathBuf> = std::fs::read_dir(dir)
+            .map(|rd| rd.filter_map(|e| e.ok().map(|e| e.path())).collect())
+            .unwrap_or_default();
+        out.retain(|p| p.extension().is_some_and(|e| e == "log"));
+        out.sort();
+        out
+    }
+
+    // What: last `limit` cache lines of the newest file.
+    // Why: reads from the end; big logs stay cheap.
+    // From: Issue #1683 | PR #1858
+    pub fn tail(dir: &Path, limit: usize, chunk: u64) -> Vec<Entry> {
+        let Some(path) = files(dir).pop() else {
+            return Vec::new();
+        };
+        let Ok(mut file) = std::fs::File::open(&path) else {
+            return Vec::new();
+        };
+        let Ok(mut pos) = file.seek(SeekFrom::End(0)) else {
+            return Vec::new();
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        let mut found = Vec::new();
+        while pos > 0 && found.len() < limit {
+            let len = chunk.min(pos);
+            pos -= len;
+            let mut part = vec![0u8; usize::try_from(len).unwrap_or(0)];
+            if file.seek(SeekFrom::Start(pos)).is_err() || file.read_exact(&mut part).is_err() {
+                break;
+            }
+            part.extend_from_slice(&buf);
+            buf = part;
+            let text = String::from_utf8_lossy(&buf);
+            let skip_first = usize::from(pos > 0);
+            found = text.lines().skip(skip_first).filter_map(parse).collect();
+        }
+        let from = found.len().saturating_sub(limit);
+        found.split_off(from)
+    }
+
+    // What: totals over all proxy log files.
+    // Why: hit rate and traffic for the dashboard.
+    // From: Issue #1683 | PR #1858
+    #[derive(Clone, Debug, Default, serde::Serialize)]
+    pub struct Stats {
+        pub hits: u64,
+        pub misses: u64,
+        pub other: u64,
+        pub total_requests: u64,
+        pub total_bytes: u64,
+        pub hit_pct: f64,
+    }
+
+    // What: count requests, hits and bytes.
+    // Why: HIT counts as hit; MISS, EXPIRED as miss.
+    // From: Issue #1683 | PR #1858
+    pub fn stats(dir: &Path) -> Stats {
+        let mut s = Stats::default();
+        for path in files(dir) {
+            let Ok(file) = std::fs::File::open(&path) else {
+                continue;
+            };
+            for line in BufReader::new(file).lines().map_while(Result::ok) {
+                let Some(e) = parse(&line) else { continue };
+                s.total_requests += 1;
+                s.total_bytes += e.bytes;
+                match e.cache_status.as_str() {
+                    "HIT" => s.hits += 1,
+                    "MISS" | "EXPIRED" => s.misses += 1,
+                    _ => s.other += 1,
+                }
+            }
+        }
+        let base = s.hits + s.misses;
+        if base > 0 {
+            let pct = s.hits as f64 * 100.0 / base as f64;
+            s.hit_pct = pct;
+        }
+        s
+    }
+}
+
+// What: byte count as text with binary units.
+// Why: ui pages show sizes the same way everywhere.
+// From: Issue #1683 | PR #1858
+pub mod human {
+    // What: 1536 -> "1.5 KiB".
+    // Why: integer maths; one decimal is enough.
+    // From: Issue #1683 | PR #1858
+    pub fn bytes(n: u64) -> String {
+        const UNITS: [&str; 6] = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
+        let mut unit = 0;
+        let mut whole = n;
+        let mut tenth = 0;
+        while whole >= 1024 && unit + 1 < UNITS.len() {
+            tenth = (whole % 1024) * 10 / 1024;
+            whole /= 1024;
+            unit += 1;
+        }
+        if unit == 0 {
+            format!("{n} B")
+        } else {
+            format!("{whole}.{tenth} {}", UNITS[unit])
+        }
+    }
+}

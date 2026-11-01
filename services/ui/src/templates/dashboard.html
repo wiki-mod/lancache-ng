@@ -19,7 +19,7 @@
   <div class="stat-row">
     <div class="stat-card accent">
       <div class="stat-label">Data served</div>
-      <div class="stat-num">{{ log_stats.total_bytes_gb | round(precision=1) }}<span class="unit">GB</span></div>
+      <div class="stat-num">{{ log_stats.total_bytes_human }}</div>
     </div>
     <div class="stat-card">
       <div class="stat-label">Cache hit rate</div>
@@ -35,7 +35,7 @@
     </div>
     <div class="stat-card">
       <div class="stat-label">Caching mode</div>
-      <div class="stat-num" style="font-size:20px;">{% if https_enabled %}HTTP + HTTPS{% else %}HTTP{% endif %}</div>
+      <div class="stat-num" style="font-size:20px;">{% if v.HTTPS_ENABLED == "true" %}HTTP + HTTPS{% else %}HTTP{% endif %}</div>
     </div>
   </div>
 
@@ -45,33 +45,21 @@
   <div class="card" style="margin-bottom:16px;">
     <div class="card-head">
       <h3>Cache storage</h3>
-      <span class="mono" style="font-size:12px;color:var(--mist-dim);">{{ cache_dir }}</span>
+      <span class="mono" style="font-size:12px;color:var(--mist-dim);">{{ v.NGINX_CACHE_DIR }}</span>
     </div>
     <div class="card-body">
       <div class="storage-bar"><div class="storage-fill" style="width:{{ cache_pct }}%;"></div></div>
       <div class="storage-meta">
-        <span><b>{{ cache_used_gb }} GB</b> used</span>
-        <span>{{ cache_max_gb }} GB total</span>
+        <span><b>{{ cache_used_human }}</b> used</span>
+        <span>{{ v.CACHE_MAX_SIZE }} configured</span>
       </div>
       <p class="field-hint" style="margin-top:12px;">Total reflects the cache size configured for this LanCache-NG instance. Oldest, least-requested files are removed automatically; you don't need to clear this yourself.</p>
-
-      <!-- What: resize saves CACHE_MAX_GB, host applies it
-           Why: proxy container restarts; no live reload
-           From: Issue #1683 | PR #1912 -->
-      {% if cache_resize_pending %}
-      <div class="hint">
-        <span class="glyph">◌</span>
-        <div>Resize to <b>{{ effective_cache_max_gb }} GB</b> requested. This takes effect within the next
-        few minutes (the host convergence timer runs every {{ converge_minutes }} minutes) and briefly restarts the
-        proxy container.</div>
-      </div>
-      {% endif %}
-      <form method="post" action="{{ routes.cache_resize | safe }}" style="margin-top:14px;">
+      <form method="post" action="{{ routes.setup_save | safe }}" style="margin-top:14px;">
         {{ <csrf_field csrf_token={csrf_token}/> }}
         <div class="field-row">
           <div class="field">
-            <label for="cache_gb">New cache size (GB)</label>
-            <input type="number" id="cache_gb" name="cache_gb" min="1" step="1" placeholder="{{ cache_max_gb }}">
+            <label for="cache_gb">New cache size (nginx size, e.g. 40g)</label>
+            <input type="text" id="cache_gb" name="CACHE_MAX_SIZE" placeholder="{{ v.CACHE_MAX_SIZE }}">
           </div>
           <button type="submit" class="btn" style="margin-top:23px;">Resize cache</button>
         </div>

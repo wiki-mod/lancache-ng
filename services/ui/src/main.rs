@@ -14,7 +14,7 @@ use axum::routing::{get, post};
 use axum::Router;
 use base64::Engine as _;
 use lancache_ng::config::{self, process_env, Settings};
-use lancache_ng::{apply, clock, docker, fs, render, secret};
+use lancache_ng::{access, apply, clock, docker, fs, human, render, secret};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -238,6 +238,42 @@ async fn dashboard(State(app): Shared, axum::Extension(csrf): axum::Extension<Cs
         _ => Vec::new(),
     };
     ctx.insert("containers", &containers);
+    let logs = PathBuf::from(s.text("SYSLOG_LOG_ROOT").unwrap_or_default())
+        .join(s.text("PROXY_LOG_PROGRAM").unwrap_or_default());
+    let (limit, chunk) = (
+        s.uint("UI_RECENT_REQUESTS").unwrap_or(0),
+        s.uint("UI_LOG_TAIL_CHUNK").unwrap_or(0),
+    );
+    let (stats, recent) = tokio::task::spawn_blocking(move || {
+        let n = usize::try_from(limit).unwrap_or(0);
+        (access::stats(&logs), access::tail(&logs, n, chunk))
+    })
+    .await
+    .unwrap_or_default();
+    let mut st = serde_json::to_value(&stats).unwrap_or_default();
+    st["total_bytes_human"] = human::bytes(stats.total_bytes).into();
+    ctx.insert("log_stats", &st);
+    let recent: Vec<serde_json::Value> = recent
+        .iter()
+        .rev()
+        .map(|e| {
+            let mut v = serde_json::to_value(e).unwrap_or_default();
+            v["bytes_human"] = human::bytes(e.bytes).into();
+            v
+        })
+        .collect();
+    ctx.insert("recent_logs", &recent);
+    if let Ok(space) = s
+        .text("NGINX_CACHE_DIR")
+        .and_then(|d| fs::space(std::path::Path::new(&d)).map_err(|e| e.to_string()))
+    {
+        let used = space.total.saturating_sub(space.free);
+        ctx.insert("cache_used_human", &human::bytes(used));
+        ctx.insert(
+            "cache_pct",
+            &(used.saturating_mul(100) / space.total.max(1)),
+        );
+    }
     ctx.insert("warnings", &s.warnings);
     app.page("dashboard.html", ctx, &csrf.0)
 }
