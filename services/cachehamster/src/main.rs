@@ -16,7 +16,9 @@ use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use futures_util::{StreamExt, stream};
 use lancache_ng::config::{env_opt, need, process_env, uint};
-use lancache_ng::{Place, is_placeholder, load_or_create_hex, need_secs, write_file};
+use lancache_ng::{
+    Place, drain_response, is_placeholder, load_or_create_hex, need_secs, write_file,
+};
 use serde::{Deserialize, Serialize};
 
 // What: sizes of master secret, salt and nonce in bytes.
@@ -126,19 +128,7 @@ fn seal_from_stdin() -> Result<()> {
 // Why: the proxy caches the bytes; none are kept here.
 // From: Issue #816
 async fn drain(client: &reqwest::Client, url: &str, total: &AtomicU64) -> Result<u64> {
-    let mut body = client
-        .get(url)
-        .send()
-        .await?
-        .error_for_status()?
-        .bytes_stream();
-    let mut bytes = 0u64;
-    while let Some(chunk) = body.next().await {
-        let len = chunk?.len() as u64;
-        bytes += len;
-        total.fetch_add(len, Ordering::Relaxed);
-    }
-    Ok(bytes)
+    Ok(drain_response(client.get(url), total).await?)
 }
 
 // What: check the stored credential, then drain every URL.

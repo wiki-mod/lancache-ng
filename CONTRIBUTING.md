@@ -298,9 +298,8 @@ dependencies, across every ecosystem this repository uses.
   fetched by Cargo from crates.io during the Docker build stage; no
   vendored/copied third-party Rust source is committed. The one
   documented exception is `services/proxy/public_suffix_list.dat` (the
-  vendored Mozilla Public Suffix List) and
-  `services/ui/src/static/chart.umd.min.js` (vendored Chart.js), both of
-  which carry their own upstream headers — see `AGENTS.md`'s
+  vendored Mozilla Public Suffix List)
+  which carries its own upstream header — see `AGENTS.md`'s
   **AG-HDR-004** for why these are excluded from the project's own file
   header requirement.
 

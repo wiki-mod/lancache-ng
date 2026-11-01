@@ -171,11 +171,11 @@ injects malicious content that the proxy caches and serves to every client.
 **Likelihood**: Low · **Impact**: High
 
 **Mitigations**:
-- The proxy fetches origins over TLS with `proxy_ssl_verify on` and the container's system CA
+- The proxy fetches HTTPS-mode origins over TLS with `proxy_ssl_verify on` and the container's system CA
   bundle (`proxy_ssl_trusted_certificate`, `/etc/ssl/certs/ca-certificates.crt` on
   this service's current Alpine base, issue #815 -- the same path the prior
   Debian base also used); see also T8.
-- Upstream resolution uses `NGINX_UPSTREAM_RESOLVER` (default `8.8.8.8 8.8.4.4 [2001:4860:4860::8888] [2001:4860:4860::8844]`),
+- Upstream resolution uses `NGINX_UPSTREAM_RESOLVER` (default `8.8.8.8 8.8.4.4`, IPv4 only),
   never the LAN spoof DNS — the supervisor's nginx render (`nginx` in
   `services/watchdog/src/main.rs`) refuses to start nginx if the resolver names a
   LanCache IP, preventing a resolve-to-self loop.
@@ -241,6 +241,10 @@ untrusted network · **Impact**: High
   **refuses to start** unless the operator has *explicitly* set
   `ALLOW_INSECURE_UI=true`. A partial config (only one of the two) is a hard
   startup error. There is no silent unauthenticated default.
+- A password changed on the Setup page needs the old password, at least 12
+  characters, and is stored only as an Argon2id hash in a 0600 file next to
+  the settings file. A new `UI_AUTH_PASSWORD_HASH` in `.env` wins over that
+  file, so the reset path stays with the host operator.
 - A valid session cookie never substitutes for required Basic auth on protected
   routes (regression-tested).
 - Startup also fails closed if `SECONDARY_REGISTRATION_TOKEN` is empty (an empty
@@ -508,7 +512,7 @@ the cache.
 **Likelihood**: Low · **Impact**: High
 
 **Mitigations**:
-- `proxy_ssl_verify on` with the container's system CA bundle for all origin connections.
+- `proxy_ssl_verify on` with the container's system CA bundle for every HTTPS origin connection; HTTP clients fetch over HTTP.
 - Origin names resolve via real upstream DNS, never the spoof DNS (see T1).
 
 **Residual risk**: Medium — verification reduces MITM risk but cannot stop a real

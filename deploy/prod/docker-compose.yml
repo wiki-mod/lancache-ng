@@ -290,6 +290,12 @@ services:
       # What: image identity, login, NATS and Kea values.
       # Why: only the Admin UI reads these keys.
       CACHE_MAX_GB: ${CACHE_MAX_GB:-}
+      # What: start values the UI shows from the install.
+      # Why: else the UI shows the SOT default instead.
+      # From: Issue #1683 | PR #1858
+      AUTO_UPDATE_ENABLED: ${AUTO_UPDATE_ENABLED:-}
+      NTP_ENABLED: ${NTP_ENABLED:-}
+      NTP_UPSTREAM_SERVERS: ${NTP_UPSTREAM_SERVERS:-}
       LANCACHE_IMAGE_REGISTRY: ${LANCACHE_IMAGE_REGISTRY:?LANCACHE_IMAGE_REGISTRY is required}
       LANCACHE_IMAGE_PREFIX: ${LANCACHE_IMAGE_PREFIX:?LANCACHE_IMAGE_PREFIX is required}
       LANCACHE_IMAGE_CHANNEL: ${LANCACHE_IMAGE_CHANNEL:-}
