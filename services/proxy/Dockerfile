@@ -21,6 +21,11 @@ FROM ${ALPINE_IMAGE:-scratch}
 # From: Issue #1683 | PR #1980
 ARG BUILD_IDENTITY
 ARG APK_PACKAGES
+# What: extra apk repos and keys (nginx.org), from SOT.
+# Why: apk-setup reads them; empty for other images.
+# From: Issue #1683 | PR #1980
+ARG APK_TAGGED_REPOS
+ARG APK_KEYS
 ARG APK_BOOTSTRAP
 # What: bash first; every later RUN uses it.
 # Why: ci.sh is bash; ash is not allowed.

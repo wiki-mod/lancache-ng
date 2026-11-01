@@ -93,10 +93,10 @@ RUN set -e; \
     printf '%s\n' '#!/bin/bash' \
       "mode=\"\$(cat '${f}' 2>/dev/null || true)\"" \
       "exec /sbin/openrc-init \"\${mode:-${v[DHCP_MODE]}}\"" \
-      > /usr/local/sbin/lancache-init; \
-    chmod 0755 /usr/local/sbin/lancache-init
+      > /usr/local/bin/lancache-init; \
+    chmod 0755 /usr/local/bin/lancache-init
 
 # What: the start script runs openrc-init as PID 1.
 # Why: exec keeps zombie reaping and SIGTERM stop.
 # From: Issue #1683 | PR #1980
-ENTRYPOINT ["/usr/local/sbin/lancache-init"]
+ENTRYPOINT ["/usr/local/bin/lancache-init"]
