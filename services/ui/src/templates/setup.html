@@ -42,9 +42,9 @@
           <div class="t-desc">Applied within {{ v.AUTO_UPDATE_INTERVAL_MINUTES }} minutes of saving.</div>
         </div>
         <label class="toggle">
-          <input type="hidden" name="AUTO_UPDATE_ENABLED" value="false">
-                 <input type="checkbox" id="auto_update_enabled" name="AUTO_UPDATE_ENABLED" value="true"
-                 {% if v.AUTO_UPDATE_ENABLED == "true" %}checked{% endif %}>
+          <input type="hidden" name="AUTO_UPDATE_ENABLED" value="0">
+                 <input type="checkbox" id="auto_update_enabled" name="AUTO_UPDATE_ENABLED" value="1"
+                 {% if v.AUTO_UPDATE_ENABLED == "1" or v.AUTO_UPDATE_ENABLED == "true" %}checked{% endif %}>
           <span class="track"></span><span class="knob"></span>
         </label>
       </div>
