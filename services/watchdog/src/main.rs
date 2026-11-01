@@ -53,6 +53,7 @@ struct Watch {
     docker: docker::Api,
     http: reqwest::Client,
     restarts: BTreeMap<String, VecDeque<u64>>,
+    serials: BTreeMap<String, u32>,
 }
 
 impl Watch {
@@ -67,6 +68,7 @@ impl Watch {
             docker,
             http,
             restarts: BTreeMap::new(),
+            serials: BTreeMap::new(),
         })
     }
 
@@ -86,6 +88,7 @@ impl Watch {
         self.disks(&mut alarms);
         self.certs(&mut alarms);
         self.dns_sync(&mut alarms).await;
+        self.secondary_flush(&mut alarms).await;
         alarms.sort_by(|a, b| b.level.cmp(&a.level).then(a.source.cmp(&b.source)));
         alarms
     }
@@ -242,6 +245,45 @@ impl Watch {
         }
     }
 
+    // What: flush recursor caches after a zone update.
+    // Why: secondary: AXFR raised the serial; old answers go.
+    // From: Issue #1683 | PR #1858
+    async fn secondary_flush(&mut self, alarms: &mut Vec<Alarm>) {
+        if self.settings.text("DNS_REPLICATION_ROLE").as_deref() != Ok("secondary") {
+            return;
+        }
+        let (Ok(local), Ok(key)) = (
+            self.settings.text("PDNS_PRIMARY_API_URL"),
+            self.settings.text("PDNS_API_KEY"),
+        ) else {
+            return alarms.push(crit("dns", "local API URL or key not set".into()));
+        };
+        let zones = match pdns::Api::new(self.http.clone(), &local, &key)
+            .zones()
+            .await
+        {
+            Ok(z) => z,
+            Err(e) => return alarms.push(crit("dns local", e)),
+        };
+        let recursors: Vec<pdns::Api> = self
+            .settings
+            .list("RECURSOR_API_URLS")
+            .iter()
+            .map(|u| pdns::Api::new(self.http.clone(), u, &key))
+            .collect();
+        for z in zones {
+            let before = self.serials.insert(z.name.clone(), z.serial);
+            if before.is_none_or(|b| b == z.serial) {
+                continue;
+            }
+            for r in &recursors {
+                if let Err(e) = r.flush(&z.name, true).await {
+                    alarms.push(warn(&z.name, format!("cache flush failed: {e}")));
+                }
+            }
+        }
+    }
+
     // What: write the alarm file for the ui.
     // Why: atomic replace; readers never see half a file.
     // From: Issue #1683 | PR #1858
@@ -310,6 +352,7 @@ async fn main() -> Result<(), String> {
             Ok(s) if s.revision() != watch.settings.revision() => match Watch::new(s) {
                 Ok(mut w) => {
                     w.restarts = std::mem::take(&mut watch.restarts);
+                    w.serials = std::mem::take(&mut watch.serials);
                     watch = w;
                 }
                 Err(e) => eprintln!("watchdog: settings: {e}"),
