@@ -16,7 +16,8 @@ pub mod clock {
 
     // What: nanoseconds since 1970; 0 if the clock is off.
     // Why: a clock before 1970 must not panic.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
+| PR #1858
     pub fn unix_nanos() -> u128 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -2626,10 +2627,8 @@ pub mod apply {
     }
 
     // What: carry out the plan: HUP or restart.
-    // Why: Live programs reread by themselves.
+    // Why: openrc-init drops HUP; only hup owners get it.
     // From: Issue #1683 | PR #1980
-    // hup: owners whose main process takes SIGHUP;
-    // openrc-init ignores it, so others restart.
     pub async fn run(
         api: &Api,
         plan: &BTreeMap<String, Effect>,

@@ -1,3 +1,4 @@
+
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
@@ -49,6 +50,21 @@ ARG LANCACHE_RUNTIME_SCHEMA
 ENV LANCACHE_RUNTIME_GID=${LANCACHE_RUNTIME_GID} \
     LANCACHE_RUNTIME_DEFAULTS=${LANCACHE_RUNTIME_DEFAULTS} \
     LANCACHE_RUNTIME_SCHEMA=${LANCACHE_RUNTIME_SCHEMA}
+
+# What: NGINX_DIR parts point into NGINX_CONF_DIR.
+# Why: the ui renders them into the CONFIG_DIR volume.
+# From: Issue #1683 | PR #1980
+RUN set -e; \
+    declare -A v; IFS='|' read -ra kv <<< "${LANCACHE_RUNTIME_DEFAULTS}"; \
+    for p in "${kv[@]}"; do v["${p%%=*}"]="${p#*=}"; done; \
+    x() { local t="$1" k; \
+      while [[ "${t}" =~ @([A-Z0-9_]+)@ ]]; do \
+        k="${BASH_REMATCH[1]}"; t="${t//@${k}@/${v[${k}]}}"; \
+      done; printf '%s' "${t}"; }; \
+    src="$(x "${v[NGINX_DIR]}")"; dst="$(x "${v[NGINX_CONF_DIR]}")"; \
+    for part in conf.d stream.d proxy-params.conf; do \
+      rm -rf "${src:?}/${part}"; ln -s "${dst}/${part}" "${src}/${part}"; \
+    done
 
 # What: nginx in the foreground as the main program.
 # Why: a crash ends the container; Docker restarts it.
