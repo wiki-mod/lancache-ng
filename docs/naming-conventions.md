@@ -170,6 +170,15 @@ including Rust, Shell, tests, internal APIs, public APIs, data structures,
 and generated interfaces. Language-specific native naming conventions MUST
 be respected.
 
+### External identifiers
+
+Identifiers mandated by an external format, protocol or program
+(for example Kea `option-data`, PowerDNS settings, nginx directives,
+Docker labels) keep their external spelling. They are not project-defined.
+The project-side name that wraps or refers to them MUST follow this
+document. The exception for other AG rules in [AG-CODE-014] does not
+cover external identifiers; only this section does.
+
 ### Case
 
 | Element | Convention | Example |
