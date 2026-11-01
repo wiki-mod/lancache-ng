@@ -2161,6 +2161,13 @@ fn templates() -> Result<Tera, String> {
     let mut t = Tera::default();
     t.autoescape_on(vec!["html"]);
     register_image_functions(&mut t);
+    // What: Tera 1 filter cachehamster.html uses.
+    // Why: Tera 2 has no filesizeformat; one byte format.
+    // From: Issue #1683 | PR #1980
+    t.register_filter(
+        "filesizeformat",
+        |v: u64, _: tera::Kwargs, _: &tera::State| human::bytes(v),
+    );
     for (name, body) in TEMPLATES {
         t.add_raw_template(name, body)
             .map_err(|e| format!("template {name}: {e}"))?;
