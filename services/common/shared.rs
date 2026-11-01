@@ -16,8 +16,7 @@ pub mod clock {
 
     // What: nanoseconds since 1970; 0 if the clock is off.
     // Why: a clock before 1970 must not panic.
-    // From: Issue #1683 | PR #1980
-| PR #1858
+    // From: Issue #1683 | PR #1858
     pub fn unix_nanos() -> u128 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
