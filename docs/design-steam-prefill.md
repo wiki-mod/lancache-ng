@@ -1,4 +1,4 @@
-# Steam Prefill (Proactive Cache Warming) — Design Plan
+# Steam Prefill (Proactive Pre-caching) — Design Plan
 
 **Status (updated 2026-08-29): mechanism decided, implementation started
 as a scaffold.** The maintainer has decided the engine: stream-and-discard,
@@ -178,7 +178,7 @@ actively conflicted.**
 
 [#871](https://github.com/wiki-mod/lancache-ng/issues/871) found that
 `docs/architecture-ng.md` documented an entire "CacheHamster" subsystem
-(top-of-file service table plus a `## Cache Warming` section) that did not
+(top-of-file service table plus a `## Pre-caching` section) that did not
 exist in the codebase anywhere at the time. As then documented, that
 subsystem was:
 
@@ -191,8 +191,8 @@ subsystem was:
 - optional Steam account credentials via `STEAM_USER`/`STEAM_PASS` env vars
 - app-ID-to-URL tracking as a basis for targeted cache purging
 
-That is a real, coherent design for the same "proactive Steam cache
-warming" goal this issue (#816) addresses — but it is built on `steamcmd`,
+That is a real, coherent design for the same "proactive Steam
+pre-caching" goal this issue (#816) addresses — but it is built on `steamcmd`,
 and `steamcmd` **installs the game**: it downloads, verifies, decompresses,
 and writes the full depot content to a local app directory on whatever host
 runs it. That is precisely what this issue's non-negotiable requirement
@@ -280,7 +280,7 @@ authors could resolve unilaterally.** Two honest framings were possible:
    streamed via `bytes_stream()`/`tokio::io::copy(..., tokio::io::sink())`,
    never written to a file, with a byte counter logged at a periodic
    interval as the throughput readout (see `docs/architecture-ng.md`'s
-   "Cache Warming" section for why an external `mbuffer`/`pv` stage is not
+   "Pre-caching" section for why an external `mbuffer`/`pv` stage is not
    needed for this in-process design). Use bounded concurrent fetches
    (multiple chunks in flight), not a single serial stream, to have any
    realistic chance of approaching multi-Gbit/s line rates. Verify

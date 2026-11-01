@@ -474,7 +474,7 @@ Central log receiver for the stack. One syslog-ng runs inside the `services` con
 | `dhcp` | Docker `syslog` driver (`x-logging`) → syslog-ng in `services` | `LanCache-NG-dhcp/` |
 | `ui` | Docker `syslog` driver (`x-logging`) → syslog-ng in `services` | `LanCache-NG-ui/` |
 
-## Cache Warming
+## Pre-caching
 
 **Corrected 2026-08-29 (issue #871 decision-rework pass): the `steamcmd`-based engine this
 section previously described as the plan is retired.** The maintainer decided (recorded on
@@ -550,7 +550,7 @@ where credentials are stored) is still an open decision — see
 [docs/design-steam-prefill.md](design-steam-prefill.md). Whatever is decided, credentials are
 never committed to the repo or baked into an image.
 
-**Tracking:** planned: which app IDs were warmed + which CDN URLs belong to them → basis for targeted purging.
+**Tracking:** planned: which app IDs were pre-cached + which CDN URLs belong to them → basis for targeted purging.
 
 Epic / GOG: not planned to be supported.
 
@@ -654,7 +654,7 @@ Runs on its own Axum webserver (port 8080) — independent from nginx. If nginx 
 - Two modes: **Beginner** (guided, no jargon) / **Expert** (technical direct)
 - DNS: create zones, host entries, PTR checkbox for LAN IPs
 - Kea: lease overview, create/edit static assignments
-- Cache: start warming, progress, purging, retention + slice/size settings
+- Cache: start pre-caching, progress, purging, retention + slice/size settings
 - Logs: filtered by host/service (implemented against the central syslog-ng path, #848); level-selectable filtering is not yet implemented (an open decision from #1343): syslog-ng stores every line with no severity filter, and nginx's access lines have no severity field at all
 - Advanced options (root mirror, filter AAAA, secondary, syslog forwarding) under "Advanced" (syslog forwarding configuration is not yet exposed in the UI; no open tracking issue as of this writing — see the syslog-ng section's "Not implemented yet" note above)
 
