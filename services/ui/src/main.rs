@@ -110,6 +110,7 @@ impl App {
         );
         ctx.insert("repo_url", &s.text("REPO_URL").unwrap_or_default());
         ctx.insert("desired_services", &s.list("UI_CONTROLLABLE_SERVICES"));
+        ctx.insert("programs", &s.list("UI_SERVICES"));
         ctx.insert(
             "watchdog_refresh_seconds",
             &s.uint("UI_STATUS_REFRESH").unwrap_or(1),
@@ -1431,6 +1432,63 @@ async fn sampler(app: Arc<App>) {
     }
 }
 
+// What: restart or reload one program in a container.
+// Why: OpenRC rc-service; only SOT-listed programs.
+// From: Issue #1683 | PR #1858
+async fn service_action(
+    State(app): Shared,
+    axum::Extension(csrf): axum::Extension<Csrf>,
+    axum::extract::Path((container, program, action)): axum::extract::Path<(
+        String,
+        String,
+        String,
+    )>,
+    headers: HeaderMap,
+) -> Response {
+    if !header_csrf_ok(&headers, &csrf) {
+        return (StatusCode::FORBIDDEN, "CSRF token mismatch").into_response();
+    }
+    if action != "restart" && action != "reload" {
+        return (StatusCode::BAD_REQUEST, "action must be restart or reload").into_response();
+    }
+    let s = app.settings();
+    if !s
+        .list("UI_SERVICES")
+        .contains(&format!("{container}:{program}"))
+    {
+        return (StatusCode::NOT_FOUND, "program not offered").into_response();
+    }
+    let (Ok((_, limit)), Ok(project)) = (app.limits(&s), s.text("COMPOSE_PROJECT")) else {
+        return (StatusCode::INTERNAL_SERVER_ERROR, "settings incomplete").into_response();
+    };
+    let list = app
+        .docker
+        .project(&project, limit)
+        .await
+        .unwrap_or_default();
+    let Some(name) = list
+        .iter()
+        .find(|c| c["Labels"][docker::SERVICE_LABEL].as_str() == Some(container.as_str()))
+        .and_then(|c| c["Names"][0].as_str())
+        .map(|n| n.trim_start_matches('/').to_string())
+    else {
+        return (StatusCode::NOT_FOUND, "no such container").into_response();
+    };
+    match app
+        .docker
+        .exec(&name, &["rc-service", &program, &action], limit)
+        .await
+    {
+        Ok((0, _)) => StatusCode::NO_CONTENT.into_response(),
+        Ok((code, out)) => (
+            StatusCode::BAD_GATEWAY,
+            format!("rc-service exit {code}: {out}"),
+        )
+            .into_response(),
+        Err(e) => (StatusCode::BAD_GATEWAY, e.to_string()).into_response(),
+    }
+}
+
 // What: render all configs, write changed files, act.
 // Why: only owners with changed keys or files are touched.
 // From: Issue #1683 | PR #1858
@@ -1516,7 +1574,7 @@ const PAGES: [(&str, &str); 7] = [
     ("dhcp", "/dhcp"),
     ("setup", "/setup"),
 ];
-const ROUTES: [(&str, &str); 37] = [
+const ROUTES: [(&str, &str); 38] = [
     ("admin_css", "/static/admin.css"),
     ("favicon", "/favicon.ico"),
     ("logo_icon", "/static/logo-icon.png"),
@@ -1554,6 +1612,10 @@ const ROUTES: [(&str, &str); 37] = [
     ("lease_release", "/dhcp/lease-release"),
     ("kea_rollback", "/dhcp/kea-rollback"),
     ("dhcp_check", "/dhcp/check"),
+    (
+        "service_action",
+        "/api/service/{container}/{program}/{action}",
+    ),
 ];
 
 // What: traffic-light colour of one container.
@@ -1793,6 +1855,10 @@ async fn main() -> Result<(), String> {
         .route("/api/status", get(status))
         .route("/api/container/{service}", post(container_state))
         .route("/api/restart-ui", post(restart_ui))
+        .route(
+            "/api/service/{container}/{program}/{action}",
+            post(service_action),
+        )
         .layer(axum::middleware::from_fn_with_state(app.clone(), auth));
     let router = Router::new()
         .route("/healthz", get(health))

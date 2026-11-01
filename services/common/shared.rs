@@ -1006,6 +1006,19 @@ pub mod docker {
             path: &str,
             limit: Duration,
         ) -> Result<Vec<u8>, Error> {
+            self.call_body(method, path, None, limit).await
+        }
+
+        // What: one API call with an optional JSON body.
+        // Why: exec needs a body; other calls send none.
+        // From: Issue #1683 | PR #1858
+        async fn call_body(
+            &self,
+            method: reqwest::Method,
+            path: &str,
+            body: Option<Value>,
+            limit: Duration,
+        ) -> Result<Vec<u8>, Error> {
             let map = |e: reqwest::Error| {
                 if e.is_timeout() {
                     Error::Timeout
@@ -1013,13 +1026,14 @@ pub mod docker {
                     Error::Transport(e.to_string())
                 }
             };
-            let resp = self
+            let mut req = self
                 .client
                 .request(method, format!("{}{path}", self.base))
-                .timeout(limit)
-                .send()
-                .await
-                .map_err(map)?;
+                .timeout(limit);
+            if let Some(b) = body {
+                req = req.json(&b);
+            }
+            let resp = req.send().await.map_err(map)?;
             let status = resp.status();
             // What: 304 means already in the wanted state.
             // Why: starting a running container is no error.
@@ -1028,6 +1042,50 @@ pub mod docker {
                 return Err(Error::Status(status.as_u16()));
             }
             resp.bytes().await.map(|b| b.to_vec()).map_err(map)
+        }
+
+        // What: run a command in a container; exit code.
+        // Why: service restart/reload via OpenRC rc-service.
+        // From: Issue #1683 | PR #1858
+        pub async fn exec(
+            &self,
+            name: &str,
+            cmd: &[&str],
+            limit: Duration,
+        ) -> Result<(i64, String), Error> {
+            let body = serde_json::json!({"Cmd": cmd, "AttachStdout": true, "AttachStderr": true});
+            let created = self
+                .call_body(
+                    reqwest::Method::POST,
+                    &format!("/containers/{name}/exec"),
+                    Some(body),
+                    limit,
+                )
+                .await?;
+            let created: Value =
+                serde_json::from_slice(&created).map_err(|e| Error::Decode(e.to_string()))?;
+            let id = created["Id"]
+                .as_str()
+                .ok_or_else(|| Error::Decode("exec without Id".into()))?
+                .to_string();
+            let start = serde_json::json!({"Detach": false, "Tty": true});
+            let out = self
+                .call_body(
+                    reqwest::Method::POST,
+                    &format!("/exec/{id}/start"),
+                    Some(start),
+                    limit,
+                )
+                .await?;
+            let info = self
+                .call(reqwest::Method::GET, &format!("/exec/{id}/json"), limit)
+                .await?;
+            let info: Value =
+                serde_json::from_slice(&info).map_err(|e| Error::Decode(e.to_string()))?;
+            Ok((
+                info["ExitCode"].as_i64().unwrap_or(-1),
+                String::from_utf8_lossy(&out).trim().to_string(),
+            ))
         }
 
         // What: all containers of one compose project.
