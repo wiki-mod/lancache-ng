@@ -1,36 +1,32 @@
 //!
 //! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 //! SPDX-License-Identifier: AGPL-3.0-or-later
-//! What: one typed settings model for every crate.
-//! Why: the SOT owns keys, types, ranges and effects.
-//! From: Issue #1683 | PR #1858
 
-use std::collections::BTreeMap;
+// What: settings from SOT schema, defaults, file, env.
+// Why: every crate reads values through one checked set.
+// From: Issue #1683 | PR #1858
+
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::Path;
 
-// What: env name of the SOT defaults baked into images.
-// Why: ci.sh writes it from build-manifest.yml runtime.
+// What: env key of the baked default rows.
+// Why: the SOT bakes defaults into each image.
 // From: Issue #1683 | PR #1858
 pub const DEFAULTS_KEY: &str = "LANCACHE_RUNTIME_DEFAULTS";
 
-// What: env name of the SOT schema baked into images.
-// Why: types, ranges and effects come from the SOT only.
+// What: env key of the baked schema rows.
+// Why: kind, range, effect and owner per key.
 // From: Issue #1683 | PR #1858
 pub const SCHEMA_KEY: &str = "LANCACHE_RUNTIME_SCHEMA";
 
-// What: separator between entries of a baked SOT list.
-// Why: ci.sh joins entries with it; values hold no pipe.
+// What: separator of baked rows.
+// Why: the SOT joins rows with a pipe.
 // From: Issue #1683 | PR #1858
-const ENTRY_SEP: char = '|';
+const ROW_SEP: char = '|';
 
-// What: separator between fields of one schema entry.
-// Why: the schema entry is KEY=kind;min;max;effect;owner.
-// From: Issue #1683 | PR #1858
-const FIELD_SEP: char = ';';
-
-// What: the type of one setting.
-// Why: one parser per type; no per-key parsing code.
+// What: type of a value.
+// Why: the schema kind decides parsing and the ui field.
 // From: Issue #1683 | PR #1858
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Kind {
@@ -43,8 +39,8 @@ pub enum Kind {
     Choice(Vec<String>),
 }
 
-// What: what a changed value needs to take effect.
-// Why: the ui shows it; only affected programs act.
+// What: what a change needs before it is live.
+// Why: only affected programs act on a change.
 // From: Issue #1683 | PR #1858
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum Effect {
@@ -55,24 +51,8 @@ pub enum Effect {
     Recreate,
 }
 
-impl Effect {
-    // What: the effect from its SOT word.
-    // Why: unknown words fail; a typo must not be Live.
-    // From: Issue #1683 | PR #1858
-    fn parse(raw: &str) -> Result<Self, String> {
-        match raw {
-            "live" => Ok(Self::Live),
-            "reload" => Ok(Self::Reload),
-            "restart" => Ok(Self::Restart),
-            "container" => Ok(Self::Container),
-            "recreate" => Ok(Self::Recreate),
-            other => Err(format!("unknown effect {other:?}")),
-        }
-    }
-}
-
-// What: one setting as the SOT schema declares it.
-// Why: key, type, need, effect and owner live together.
+// What: one schema row.
+// Why: the ui builds fields and the runner plans from it.
 // From: Issue #1683 | PR #1858
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Spec {
@@ -83,64 +63,8 @@ pub struct Spec {
     pub owner: String,
 }
 
-impl Spec {
-    // What: one entry KEY=kind;min;max;effect;owner.
-    // Why: a trailing ? on kind marks an optional key.
-    // From: Issue #1683 | PR #1858
-    fn parse(entry: &str) -> Result<Self, String> {
-        let (key, rest) = entry
-            .split_once('=')
-            .ok_or_else(|| format!("schema entry without '=': {entry:?}"))?;
-        let fields: Vec<&str> = rest.split(FIELD_SEP).collect();
-        let [kind, min, max, effect, owner] = fields[..] else {
-            return Err(format!(
-                "{key}: schema needs 5 fields, got {}",
-                fields.len()
-            ));
-        };
-        let (kind, required) = match kind.strip_suffix('?') {
-            Some(base) => (base, false),
-            None => (kind, true),
-        };
-        let number = |raw: &str| {
-            raw.parse::<u64>()
-                .map_err(|_| format!("{key}: bad limit {raw:?}"))
-        };
-        let kind = match kind {
-            "text" => Kind::Text,
-            "bool" => Kind::Bool,
-            "list" => Kind::List,
-            "path" => Kind::Path,
-            "secret" => Kind::Secret,
-            "uint" | "uint~" => {
-                let (min, max) = (number(min)?, number(max)?);
-                if min > max {
-                    return Err(format!("{key}: min {min} above max {max}"));
-                }
-                Kind::Uint {
-                    min,
-                    max,
-                    clamp: kind == "uint~",
-                }
-            }
-            // What: a choice lists words in the min field.
-            // Why: max stays empty; words comma-joined.
-            // From: Issue #1683 | PR #1858
-            "choice" => Kind::Choice(list_items(min).map(str::to_string).collect()),
-            other => return Err(format!("{key}: unknown kind {other:?}")),
-        };
-        Ok(Self {
-            key: key.to_string(),
-            kind,
-            required,
-            effect: Effect::parse(effect).map_err(|e| format!("{key}: {e}"))?,
-            owner: owner.to_string(),
-        })
-    }
-}
-
-// What: a checked value of one setting.
-// Why: callers get the type, not a string to reparse.
+// What: a checked value.
+// Why: callers never parse raw text again.
 // From: Issue #1683 | PR #1858
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Value {
@@ -151,136 +75,209 @@ pub enum Value {
 }
 
 impl fmt::Display for Value {
-    // What: the normal text form of a value.
-    // Why: revision and diff compare this form only.
+    // What: canonical text of a value.
+    // Why: revision and diff compare this text.
     // From: Issue #1683 | PR #1858
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Text(v) => f.write_str(v),
             Self::Bool(v) => write!(f, "{v}"),
             Self::Uint(v) => write!(f, "{v}"),
-            Self::List(v) => f.write_str(&v.join(",")),
+            Self::List(v) => f.write_str(&v.join(" ")),
         }
     }
 }
 
-// What: items of a list split by commas or blanks.
-// Why: one splitter for every list; empty items drop.
+// What: items of a list value.
+// Why: the SOT allows comma and blank as separators.
 // From: Issue #1683 | PR #1858
 pub fn list_items(raw: &str) -> impl Iterator<Item = &str> {
-    raw.split([',', ' ', '\r', '\n', '\t'])
+    raw.split(|c: char| c == ',' || c.is_whitespace())
         .filter(|item| !item.is_empty())
 }
 
-// What: 1/true/yes/on or 0/false/no/off, any case.
-// Why: one boolean grammar for every service.
+// What: a bool from its usual words.
+// Why: env and forms send true/false, 1/0, yes/no, on/off.
 // From: Issue #1683 | PR #1858
 pub fn parse_bool(raw: &str) -> Option<bool> {
     match raw.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" | "on" => Some(true),
-        "0" | "false" | "no" | "off" => Some(false),
+        "true" | "1" | "yes" | "on" => Some(true),
+        "false" | "0" | "no" | "off" => Some(false),
         _ => None,
     }
 }
 
-// What: one raw value checked against its spec.
-// Why: one check for every key; a warning on clamp.
+// What: a plain decimal number, digits only.
+// Why: "+5" or " 5" in a setting is a typo.
 // From: Issue #1683 | PR #1858
-fn check(spec: &Spec, raw: &str) -> Result<(Value, Option<String>), String> {
-    let key = &spec.key;
-    let raw = raw.trim();
-    let value = match &spec.kind {
-        Kind::Text | Kind::Path | Kind::Secret => Value::Text(raw.to_string()),
-        Kind::List => Value::List(list_items(raw).map(str::to_string).collect()),
-        Kind::Bool => Value::Bool(
-            parse_bool(raw).ok_or_else(|| format!("{key} must be a boolean, got {raw:?}"))?,
-        ),
-        Kind::Choice(words) => {
-            if !words.iter().any(|w| w == raw) {
-                return Err(format!("{key}={raw:?} is not one of {}", words.join(",")));
-            }
-            Value::Text(raw.to_string())
-        }
-        Kind::Uint { min, max, clamp } => {
-            // What: ASCII digits only.
-            // Why: u64 parsing accepts a leading plus.
-            // From: Issue #1683 | PR #1858
-            if raw.is_empty() || !raw.bytes().all(|b| b.is_ascii_digit()) {
-                return Err(format!("{key}={raw:?} is not an unsigned number"));
-            }
-            let n = raw
-                .parse::<u64>()
-                .map_err(|_| format!("{key}={raw} is too large"))?;
-            let limit = n.clamp(*min, *max);
-            if limit != n && !clamp {
-                return Err(format!("{key}={n} is outside {min}..={max}"));
-            }
-            let note =
-                (limit != n).then(|| format!("{key}={n} outside {min}..={max}; using {limit}"));
-            return Ok((Value::Uint(limit), note));
-        }
-    };
-    Ok((value, None))
+fn parse_uint(raw: &str) -> Option<u64> {
+    if raw.is_empty() || !raw.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    raw.parse().ok()
 }
 
-// What: KEY=value pairs of a baked SOT list.
-// Why: defaults and schema travel as one pipe-joined env.
-// From: Issue #1683 | PR #1858
-fn pairs(list: &str) -> impl Iterator<Item = &str> {
-    list.split(ENTRY_SEP).filter(|e| !e.trim().is_empty())
+impl Effect {
+    // What: effect from its SOT word.
+    // Why: an unknown word is an error, never Live.
+    // From: Issue #1683 | PR #1858
+    fn parse(word: &str) -> Result<Self, String> {
+        match word {
+            "live" => Ok(Self::Live),
+            "reload" => Ok(Self::Reload),
+            "restart" => Ok(Self::Restart),
+            "container" => Ok(Self::Container),
+            "recreate" => Ok(Self::Recreate),
+            other => Err(format!("unknown effect {other:?}")),
+        }
+    }
 }
 
-// What: the KEY=value lines of the ui settings file.
-// Why: the ui stores admin values; a missing file is empty.
+impl Spec {
+    // What: parse KEY=kind;min;max;effect;owner.
+    // Why: the SOT schema row format.
+    // From: Issue #1683 | PR #1858
+    fn parse(row: &str) -> Result<Self, String> {
+        let (key, rest) = row
+            .split_once('=')
+            .ok_or_else(|| format!("schema row {row:?} has no ="))?;
+        let fields: Vec<&str> = rest.split(';').collect();
+        let [kind, min, max, effect, owner] = fields[..] else {
+            return Err(format!("schema row {row:?} needs 5 fields"));
+        };
+        let (kind, required) = match kind.strip_suffix('?') {
+            Some(k) => (k, false),
+            None => (kind, true),
+        };
+        let bound = |word: &str, fallback: u64| -> Result<u64, String> {
+            if word.is_empty() {
+                return Ok(fallback);
+            }
+            parse_uint(word).ok_or_else(|| format!("{key}: bound {word:?} is no number"))
+        };
+        let kind = match kind {
+            "text" => Kind::Text,
+            "bool" => Kind::Bool,
+            "uint" | "uint~" => Kind::Uint {
+                min: bound(min, 0)?,
+                max: bound(max, u64::MAX)?,
+                clamp: kind == "uint~",
+            },
+            "list" => Kind::List,
+            "path" => Kind::Path,
+            "secret" => Kind::Secret,
+            "choice" => Kind::Choice(min.split(',').map(str::to_string).collect()),
+            other => return Err(format!("{key}: unknown kind {other:?}")),
+        };
+        Ok(Self {
+            key: key.to_string(),
+            kind,
+            required,
+            effect: Effect::parse(effect).map_err(|e| format!("{key}: {e}"))?,
+            owner: owner.to_string(),
+        })
+    }
+
+    // What: check raw text against this spec.
+    // Why: one check for env, file, defaults and forms.
+    // From: Issue #1683 | PR #1858
+    fn check(&self, raw: &str) -> Result<(Value, Option<String>), String> {
+        let key = &self.key;
+        match &self.kind {
+            Kind::Text | Kind::Secret => Ok((Value::Text(raw.to_string()), None)),
+            Kind::Path => {
+                if Path::new(raw).is_absolute() {
+                    Ok((Value::Text(raw.to_string()), None))
+                } else {
+                    Err(format!("{key}: path {raw:?} is not absolute"))
+                }
+            }
+            Kind::Bool => parse_bool(raw)
+                .map(|b| (Value::Bool(b), None))
+                .ok_or_else(|| format!("{key}: {raw:?} is no bool")),
+            Kind::List => Ok((
+                Value::List(list_items(raw).map(str::to_string).collect()),
+                None,
+            )),
+            Kind::Choice(words) => {
+                if words.iter().any(|w| w == raw) {
+                    Ok((Value::Text(raw.to_string()), None))
+                } else {
+                    Err(format!("{key}: {raw:?} is not one of {}", words.join(", ")))
+                }
+            }
+            Kind::Uint { min, max, clamp } => {
+                let n = parse_uint(raw).ok_or_else(|| format!("{key}: {raw:?} is no number"))?;
+                if (*min..=*max).contains(&n) {
+                    return Ok((Value::Uint(n), None));
+                }
+                if !clamp {
+                    return Err(format!("{key}: {n} is outside {min}..={max}"));
+                }
+                let fixed = n.clamp(*min, *max);
+                Ok((
+                    Value::Uint(fixed),
+                    Some(format!("{key}: {n} clamped to {fixed}")),
+                ))
+            }
+        }
+    }
+}
+
+// What: non-empty rows of a baked list.
+// Why: an empty row is no entry.
 // From: Issue #1683 | PR #1858
-fn saved(path: &Path) -> Result<BTreeMap<String, String>, String> {
+fn rows(baked: &str) -> impl Iterator<Item = &str> {
+    baked.split(ROW_SEP).map(str::trim).filter(|r| !r.is_empty())
+}
+
+// What: KEY=VALUE lines of the admin file.
+// Why: a missing file means no admin values yet.
+// From: Issue #1683 | PR #1858
+fn read_file(path: &Path) -> Result<BTreeMap<String, String>, String> {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
-        Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
+        Err(e) => return Err(format!("{}: {e}", path.display())),
     };
     Ok(text
         .lines()
-        .filter_map(|line| line.trim().split_once('='))
+        .filter_map(|line| line.split_once('='))
         .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
         .collect())
 }
 
-// What: merge checked updates into the saved file.
-// Why: same KEY=VALUE format the reader above parses.
+// What: write checked admin values to the file.
+// Why: empty value removes the admin override.
 // From: Issue #1683 | PR #1858
 pub fn store(
     path: &Path,
     current: &Settings,
     updates: &BTreeMap<String, String>,
 ) -> Result<(), String> {
-    let mut all = saved(path)?;
-    for (k, raw) in updates {
+    let mut all = read_file(path)?;
+    for (key, raw) in updates {
         if raw.contains(['\n', '\r']) {
-            return Err(format!("{k}: line break not allowed"));
+            return Err(format!("{key}: line break not allowed"));
         }
-        if !raw.is_empty() {
-            current.validate(k, raw)?;
+        if raw.is_empty() {
+            all.remove(key);
+            continue;
         }
-        all.insert(k.clone(), raw.clone());
+        current.validate(key, raw)?;
+        all.insert(key.clone(), raw.clone());
     }
     let body: String = all.iter().map(|(k, v)| format!("{k}={v}\n")).collect();
-    let keep = crate::fs::Owner {
+    let owner = crate::fs::Owner {
         uid: None,
         gid: None,
     };
-    crate::fs::write(
-        path,
-        body.as_bytes(),
-        0o600,
-        crate::fs::Place::Replace,
-        keep,
-    )
-    .map_err(|e| format!("{}: {e}", path.display()))
+    crate::fs::write(path, body.as_bytes(), 0o600, crate::fs::Place::Replace, owner)
+        .map_err(|e| format!("{}: {e}", path.display()))
 }
 
-// What: one loaded and checked settings set.
-// Why: every crate reads values only through this set.
+// What: the checked settings of one process.
+// Why: one load at start; reload builds a new set.
 // From: Issue #1683 | PR #1858
 #[derive(Clone, Debug, Default)]
 pub struct Settings {
@@ -290,25 +287,25 @@ pub struct Settings {
 }
 
 impl Settings {
-    // What: schema, then env over saved over SOT default.
-    // Why: admin value beats default; env beats both.
+    // What: load schema, then env > file > default.
+    // Why: env is the operator's word; the file the ui's.
     // From: Issue #1683 | PR #1858
     pub fn load(
         env: &dyn Fn(&str) -> Option<String>,
         saved_file: Option<&Path>,
     ) -> Result<Self, String> {
         let schema = env(SCHEMA_KEY).ok_or_else(|| format!("{SCHEMA_KEY} is not set"))?;
-        let defaults = env(DEFAULTS_KEY).unwrap_or_default();
+        let baked = env(DEFAULTS_KEY).unwrap_or_default();
         let defaults: BTreeMap<&str, &str> =
-            pairs(&defaults).filter_map(|p| p.split_once('=')).collect();
-        let stored = match saved_file {
-            Some(path) => saved(path)?,
+            rows(&baked).filter_map(|r| r.split_once('=')).collect();
+        let file = match saved_file {
+            Some(path) => read_file(path)?,
             None => BTreeMap::new(),
         };
         let mut set = Self::default();
         let mut errors = Vec::new();
-        for entry in pairs(&schema) {
-            let spec = match Spec::parse(entry) {
+        for row in rows(&schema) {
+            let spec = match Spec::parse(row) {
                 Ok(spec) => spec,
                 Err(e) => {
                     errors.push(e);
@@ -317,11 +314,15 @@ impl Settings {
             };
             let raw = env(&spec.key)
                 .filter(|v| !v.is_empty())
-                .or_else(|| stored.get(&spec.key).filter(|v| !v.is_empty()).cloned())
-                .or_else(|| defaults.get(spec.key.as_str()).map(|v| v.to_string()))
-                .filter(|v| !v.is_empty());
+                .or_else(|| file.get(&spec.key).filter(|v| !v.is_empty()).cloned())
+                .or_else(|| {
+                    defaults
+                        .get(spec.key.as_str())
+                        .filter(|v| !v.is_empty())
+                        .map(|v| v.to_string())
+                });
             match raw {
-                Some(raw) => match check(&spec, &raw) {
+                Some(raw) => match spec.check(&raw) {
                     Ok((value, note)) => {
                         set.warnings.extend(note);
                         set.values.insert(spec.key.clone(), value);
@@ -333,9 +334,6 @@ impl Settings {
             }
             set.specs.insert(spec.key.clone(), spec);
         }
-        // What: every problem at once, not only the first.
-        // Why: an admin fixes all keys in one pass.
-        // From: Issue #1683 | PR #1858
         if errors.is_empty() {
             Ok(set)
         } else {
@@ -343,29 +341,29 @@ impl Settings {
         }
     }
 
-    // What: the spec of one key, if the SOT declares it.
-    // Why: the ui builds its fields from the spec.
+    // What: the schema row of one key.
+    // Why: the ui needs kind and effect per field.
     // From: Issue #1683 | PR #1858
     pub fn spec(&self, key: &str) -> Option<&Spec> {
         self.specs.get(key)
     }
 
-    // What: every declared spec in key order.
-    // Why: the ui lists all settings without its own list.
+    // What: all schema rows in key order.
+    // Why: the setup page lists every setting.
     // From: Issue #1683 | PR #1858
     pub fn specs(&self) -> impl Iterator<Item = &Spec> {
         self.specs.values()
     }
 
-    // What: the checked value of one key, if set.
-    // Why: optional keys may be absent.
+    // What: the checked value of one key.
+    // Why: optional keys may have none.
     // From: Issue #1683 | PR #1858
     pub fn get(&self, key: &str) -> Option<&Value> {
         self.values.get(key)
     }
 
-    // What: a value as text; an unset key is an error.
-    // Why: callers that need a value fail with its name.
+    // What: value as text; missing is an error.
+    // Why: the error names the key.
     // From: Issue #1683 | PR #1858
     pub fn text(&self, key: &str) -> Result<String, String> {
         self.get(key)
@@ -373,64 +371,61 @@ impl Settings {
             .ok_or_else(|| format!("{key} is not set"))
     }
 
-    // What: a number value; other types are an error.
-    // Why: a wrong SOT kind must not read as zero.
+    // What: value as number.
+    // Why: only uint keys answer; others are errors.
     // From: Issue #1683 | PR #1858
     pub fn uint(&self, key: &str) -> Result<u64, String> {
         match self.get(key) {
             Some(Value::Uint(n)) => Ok(*n),
-            Some(_) => Err(format!("{key} is not a number in the SOT")),
+            Some(_) => Err(format!("{key} is no number")),
             None => Err(format!("{key} is not set")),
         }
     }
 
-    // What: a boolean value; other types are an error.
-    // Why: a wrong SOT kind must not read as false.
+    // What: value as bool.
+    // Why: only bool keys answer; others are errors.
     // From: Issue #1683 | PR #1858
     pub fn flag(&self, key: &str) -> Result<bool, String> {
         match self.get(key) {
             Some(Value::Bool(b)) => Ok(*b),
-            Some(_) => Err(format!("{key} is not a boolean in the SOT")),
+            Some(_) => Err(format!("{key} is no bool")),
             None => Err(format!("{key} is not set")),
         }
     }
 
-    // What: a list value; a text value splits as a list.
-    // Why: unset optional lists are empty.
+    // What: value as items; missing is empty.
+    // Why: an unset optional list means no entries.
     // From: Issue #1683 | PR #1858
     pub fn list(&self, key: &str) -> Vec<String> {
         match self.get(key) {
-            Some(Value::List(v)) => v.clone(),
+            Some(Value::List(items)) => items.clone(),
             Some(other) => list_items(&other.to_string()).map(str::to_string).collect(),
             None => Vec::new(),
         }
     }
 
-    // What: one admin value checked before it is stored.
-    // Why: the ui rejects bad input with the SOT rule.
+    // What: check one raw value for a key.
+    // Why: forms are checked before they are stored.
     // From: Issue #1683 | PR #1858
     pub fn validate(&self, key: &str, raw: &str) -> Result<Value, String> {
-        let spec = self
-            .spec(key)
-            .ok_or_else(|| format!("{key} is not a known setting"))?;
-        check(spec, raw).map(|(value, _)| value)
+        self.spec(key)
+            .ok_or_else(|| format!("{key} is not a known setting"))?
+            .check(raw)
+            .map(|(value, _)| value)
     }
 
-    // What: a stable id of all effective non-secret values.
-    // Why: shows which config is live without file times.
+    // What: FNV-1a id of all non-secret values.
+    // Why: shows which config is live.
     // From: Issue #1683 | PR #1858
     pub fn revision(&self) -> String {
         let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-        for (key, value) in &self.values {
-            if matches!(self.specs.get(key).map(|s| &s.kind), Some(Kind::Secret)) {
-                continue;
-            }
-            for byte in key
-                .bytes()
-                .chain([b'='])
-                .chain(value.to_string().bytes())
-                .chain([0])
-            {
+        let public = self
+            .values
+            .iter()
+            .filter(|(k, _)| !matches!(self.specs.get(*k).map(|s| &s.kind), Some(Kind::Secret)));
+        for (key, value) in public {
+            let line = format!("{key}={value}\0");
+            for byte in line.bytes() {
                 hash ^= u64::from(byte);
                 hash = hash.wrapping_mul(0x0100_0000_01b3);
             }
@@ -438,12 +433,11 @@ impl Settings {
         format!("{hash:016x}")
     }
 
-    // What: changed keys with their owner and effect.
-    // Why: only the owning programs reload or restart.
+    // What: keys whose value differs in newer.
+    // Why: the runner acts per owner and effect.
     // From: Issue #1683 | PR #1858
     pub fn diff(&self, newer: &Self) -> Vec<Change> {
-        let keys: std::collections::BTreeSet<&String> =
-            self.values.keys().chain(newer.values.keys()).collect();
+        let keys: BTreeSet<&String> = self.values.keys().chain(newer.values.keys()).collect();
         keys.into_iter()
             .filter(|k| self.values.get(*k) != newer.values.get(*k))
             .filter_map(|k| newer.specs.get(k).or_else(|| self.specs.get(k)))
@@ -456,8 +450,8 @@ impl Settings {
     }
 }
 
-// What: one changed key and what it needs.
-// Why: the ui and the process runner act on this list.
+// What: one changed key.
+// Why: owner and effect drive reload or restart.
 // From: Issue #1683 | PR #1858
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Change {
@@ -466,7 +460,7 @@ pub struct Change {
     pub effect: Effect,
 }
 
-// What: the live process environment as a reader.
+// What: reader for the process environment.
 // Why: Settings::load takes any reader.
 // From: Issue #1683 | PR #1858
 pub fn process_env(name: &str) -> Option<String> {
