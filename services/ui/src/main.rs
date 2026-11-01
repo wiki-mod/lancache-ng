@@ -2,8 +2,8 @@
 //! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 //! SPDX-License-Identifier: AGPL-3.0-or-later
 
-// What: admin ui: settings, configs, pages, actions.
-// Why: owns the settings; renders and applies configs.
+// What: admin ui: settings, pages and actions.
+// Why: owns settings; renders and applies configs.
 // From: Issue #1683 | PR #1858
 
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
@@ -12,24 +12,25 @@ use axum::http::{header, HeaderMap, StatusCode};
 use axum::middleware::Next;
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
-use axum::Router;
+use axum::{Extension, Router};
 use base64::Engine as _;
 use lancache_ng::config::{self, process_env, Settings};
 use lancache_ng::{access, apply, clock, docker, fs, http, human, render, secret};
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tera::{Context, Tera};
 
-// What: env name of the saved settings file path.
-// Why: settings load needs the path before settings exist.
+// What: env name of the saved settings file.
+// Why: needed before any setting can be read.
 // From: Issue #1683 | PR #1858
 const SETTINGS_FILE_ENV: &str = "LANCACHE_SETTINGS_FILE";
 
-// What: templates compiled into the binary.
-// Why: no template dir to mount or lose; one image.
+// What: page templates built into the binary.
+// Why: nothing to mount or lose; one image.
 // From: Issue #1683 | PR #1858
 const TEMPLATES: [(&str, &str); 8] = [
     ("base.html", include_str!("templates/base.html")),
@@ -39,26 +40,53 @@ const TEMPLATES: [(&str, &str); 8] = [
     ("domains.html", include_str!("templates/domains.html")),
     ("stats.html", include_str!("templates/stats.html")),
     ("logs.html", include_str!("templates/logs.html")),
-    (
-        "cachehamster.html",
-        include_str!("templates/cachehamster.html"),
-    ),
+    ("cachehamster.html", include_str!("templates/cachehamster.html")),
 ];
 
-// What: static files compiled into the binary.
-// Why: served with fixed types; nothing read at runtime.
+// What: static files built into the binary.
+// Why: fixed content types; no runtime reads.
 // From: Issue #1683 | PR #1858
 const ADMIN_CSS: &str = include_str!("static/admin.css");
 const FAVICON: &[u8] = include_bytes!("static/favicon.ico");
 const LOGO: &[u8] = include_bytes!("static/logo-icon.png");
 
-// What: name of the session cookie.
-// Why: one place; the CSRF token derives from it.
+// What: session cookie name.
+// Why: the CSRF token is derived from it.
 // From: Issue #1683 | PR #1858
 const COOKIE: &str = "lancache_session";
 
-// What: shared state of all handlers.
-// Why: settings swap atomically after a save.
+// What: form field that carries the CSRF token.
+// Why: templates and handlers share one name.
+// From: Issue #1683 | PR #1858
+const CSRF_FIELD: &str = "csrf_token";
+
+type Fields = BTreeMap<String, String>;
+
+// What: error page text with an HTTP status.
+// Why: handlers return Result and use the ? sign.
+// From: Issue #1683 | PR #1858
+struct Fail(StatusCode, String);
+
+impl IntoResponse for Fail {
+    fn into_response(self) -> Response {
+        (self.0, self.1).into_response()
+    }
+}
+
+impl From<String> for Fail {
+    fn from(e: String) -> Self {
+        Fail(StatusCode::INTERNAL_SERVER_ERROR, e)
+    }
+}
+
+fn bad(text: impl Into<String>) -> Fail {
+    Fail(StatusCode::BAD_REQUEST, text.into())
+}
+
+type Page = Result<Response, Fail>;
+
+// What: state shared by all handlers.
+// Why: settings swap whole after each save.
 // From: Issue #1683 | PR #1858
 struct App {
     settings: RwLock<Settings>,
@@ -71,131 +99,152 @@ struct App {
 type Shared = State<Arc<App>>;
 
 impl App {
-    // What: current settings snapshot.
-    // Why: a handler must never see half an update.
+    // What: copy of the current settings.
+    // Why: a handler never sees half an update.
     // From: Issue #1683 | PR #1858
     fn settings(&self) -> Settings {
-        self.settings.read().map(|s| s.clone()).unwrap_or_default()
+        match self.settings.read() {
+            Ok(s) => s.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
     }
 
-    // What: Docker timeout and stop grace from the SOT.
-    // Why: no hard-coded wait anywhere in the ui.
+    // What: Docker stop grace and call limit.
+    // Why: every wait comes from the SOT.
     // From: Issue #1683 | PR #1858
     fn limits(&self, s: &Settings) -> Result<(u32, Duration), String> {
-        let grace = u32::try_from(s.uint("WATCHDOG_STOP_GRACE")?).map_err(|e| e.to_string())?;
+        let grace = s.uint("UI_STOP_GRACE")?;
+        let grace = u32::try_from(grace).map_err(|e| e.to_string())?;
         Ok((grace, Duration::from_secs(s.uint("DOCKER_TIMEOUT")?)))
     }
 
-    // What: render one page with the common context.
-    // Why: every page gets csrf, menu and alarms.
+    // What: render a page with the shared context.
+    // Why: menu, csrf and values on every page.
     // From: Issue #1683 | PR #1858
-    fn page(&self, name: &str, mut ctx: Context, csrf: &str) -> Response {
-        ctx.insert("csrf_token", csrf);
-        ctx.insert("page", name.trim_end_matches(".html"));
+    fn page(&self, name: &str, mut ctx: Context, csrf: &Csrf) -> Page {
         let s = self.settings();
-        ctx.insert("active_page", name.trim_end_matches(".html"));
-        let v: BTreeMap<String, String> = s
+        let page = name.trim_end_matches(".html");
+        let values: BTreeMap<String, String> = s
             .specs()
             .filter(|sp| !matches!(sp.kind, config::Kind::Secret))
-            .filter_map(|sp| s.text(&sp.key).ok().map(|t| (sp.key.clone(), t)))
+            .filter_map(|sp| s.text(&sp.key).ok().map(|v| (sp.key.clone(), v)))
             .collect();
-        ctx.insert("v", &v);
-        ctx.insert(
-            "login_enabled",
-            &!s.text("UI_PASSWORD_HASH").unwrap_or_default().is_empty(),
-        );
-        ctx.insert("pages", &PAGES.iter().copied().collect::<BTreeMap<_, _>>());
-        ctx.insert(
-            "routes",
-            &ROUTES.iter().copied().collect::<BTreeMap<_, _>>(),
-        );
-        ctx.insert("repo_url", &s.text("REPO_URL").unwrap_or_default());
+        let login = !s.text("UI_PASSWORD_HASH").unwrap_or_default().is_empty();
+        let pages: BTreeMap<&str, &str> = PAGES.iter().copied().collect();
+        let routes: BTreeMap<&str, &str> = ROUTES.iter().copied().collect();
+        ctx.insert(CSRF_FIELD, &csrf.0);
+        ctx.insert("page", page);
+        ctx.insert("active_page", page);
+        ctx.insert("v", &values);
+        ctx.insert("login_enabled", &login);
+        ctx.insert("pages", &pages);
+        ctx.insert("routes", &routes);
+        ctx.insert("repo_url", &s.text("REPO_URL")?);
         ctx.insert("desired_services", &s.list("UI_CONTROLLABLE_SERVICES"));
         ctx.insert("programs", &s.list("UI_SERVICES"));
-        ctx.insert(
-            "watchdog_refresh_seconds",
-            &s.uint("UI_STATUS_REFRESH").unwrap_or(1),
-        );
-        match self.tera.render(name, &ctx) {
-            Ok(html) => Html(html).into_response(),
-            Err(e) => {
-                eprintln!("ui: template {name}: {e}");
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "template error, see the log",
-                )
-                    .into_response()
-            }
+        ctx.insert("watchdog_refresh_seconds", &s.uint("UI_STATUS_REFRESH")?);
+        ctx.insert("warnings", &s.warnings);
+        let html = self.tera.render(name, &ctx).map_err(|e| {
+            eprintln!("ui: template {name}: {e:?}");
+            format!("template {name} failed, see the log")
+        })?;
+        Ok(Html(html).into_response())
+    }
+}
+
+// What: CSRF token bound to the session.
+// Why: a foreign site cannot read the cookie.
+// From: Issue #1683 | PR #1858
+#[derive(Clone)]
+struct Csrf(String);
+
+impl Csrf {
+    fn of(key: &[u8; 32], session: &str) -> Self {
+        let mut h = Sha256::new();
+        h.update(key);
+        h.update(session.as_bytes());
+        Csrf(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
+    }
+
+    fn matches(&self, given: &str) -> bool {
+        secret::equal(given.as_bytes(), self.0.as_bytes())
+    }
+
+    // What: form check; refuse without a match.
+    // Why: each POST changes state.
+    // From: Issue #1683 | PR #1858
+    fn check(&self, form: &Fields) -> Result<(), Fail> {
+        match form.get(CSRF_FIELD) {
+            Some(t) if self.matches(t) => Ok(()),
+            _ => Err(Fail(StatusCode::FORBIDDEN, "CSRF token mismatch".into())),
+        }
+    }
+
+    // What: header check for script calls.
+    // Why: JSON calls send the token as a header.
+    // From: Issue #1683 | PR #1858
+    fn check_header(&self, headers: &HeaderMap) -> Result<(), Fail> {
+        let given = headers.get("x-csrf-token").and_then(|v| v.to_str().ok());
+        match given {
+            Some(t) if self.matches(t) => Ok(()),
+            _ => Err(Fail(StatusCode::FORBIDDEN, "CSRF token mismatch".into())),
         }
     }
 }
 
-// What: CSRF token bound to the session cookie.
-// Why: a foreign site cannot read the cookie value.
-// From: Issue #1683 | PR #1858
-fn csrf_of(key: &[u8; 32], session: &str) -> String {
-    let mut h = Sha256::new();
-    h.update(key);
-    h.update(session.as_bytes());
-    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+fn session_cookie(headers: &HeaderMap) -> Option<String> {
+    for value in headers.get_all(header::COOKIE) {
+        let Ok(text) = value.to_str() else { continue };
+        for part in text.split(';') {
+            if let Some((COOKIE, v)) = part.trim().split_once('=') {
+                return Some(v.to_string());
+            }
+        }
+    }
+    None
 }
 
-// What: session cookie value from the request.
-// Why: CSRF and login state read it.
-// From: Issue #1683 | PR #1858
-fn cookie(headers: &HeaderMap) -> Option<String> {
-    headers
-        .get_all(header::COOKIE)
-        .iter()
-        .filter_map(|v| v.to_str().ok())
-        .flat_map(|v| v.split(';'))
-        .filter_map(|p| p.trim().split_once('='))
-        .find(|(k, _)| *k == COOKIE)
-        .map(|(_, v)| v.to_string())
+fn basic_credentials(headers: &HeaderMap) -> Option<(String, String)> {
+    let raw = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
+    let encoded = raw.strip_prefix("Basic ")?;
+    let bytes = base64::engine::general_purpose::STANDARD.decode(encoded).ok()?;
+    let text = String::from_utf8(bytes).ok()?;
+    let (user, pass) = text.split_once(':')?;
+    Some((user.to_string(), pass.to_string()))
 }
 
-// What: Basic auth when a password hash is set.
-// Why: test stack runs without; production sets one.
+// What: Basic auth only when a hash is set.
+// Why: the test stack runs without a password.
+// From: Issue #1683 | PR #1858
+async fn login_ok(s: &Settings, headers: &HeaderMap) -> bool {
+    let hash = s.text("UI_PASSWORD_HASH").unwrap_or_default();
+    if hash.is_empty() {
+        return true;
+    }
+    let Some((user, pass)) = basic_credentials(headers) else {
+        return false;
+    };
+    let want = s.text("UI_USER").unwrap_or_default();
+    let pass_ok = tokio::task::spawn_blocking(move || verify(&hash, &pass))
+        .await
+        .unwrap_or(false);
+    pass_ok & secret::equal(user.as_bytes(), want.as_bytes())
+}
+
+// What: login, session cookie and CSRF token.
+// Why: runs before every protected handler.
 // From: Issue #1683 | PR #1858
 async fn auth(State(app): Shared, mut req: Request, next: Next) -> Response {
     let s = app.settings();
-    let hash = s.text("UI_PASSWORD_HASH").unwrap_or_default();
-    if !hash.is_empty() {
-        let user = s.text("UI_USER").unwrap_or_default();
-        let given = req
-            .headers()
-            .get(header::AUTHORIZATION)
-            .and_then(|h| h.to_str().ok())
-            .and_then(|h| h.strip_prefix("Basic "))
-            .and_then(|e| base64::engine::general_purpose::STANDARD.decode(e).ok())
-            .and_then(|d| String::from_utf8(d).ok());
-        let ok = match given.as_deref().and_then(|c| c.split_once(':')) {
-            Some((u, p)) => {
-                let (p, hash) = (p.to_string(), hash.clone());
-                let pass = tokio::task::spawn_blocking(move || verify(&hash, &p))
-                    .await
-                    .unwrap_or(false);
-                pass & secret::equal(u.as_bytes(), user.as_bytes())
-            }
-            None => false,
-        };
-        if !ok {
-            return (
-                StatusCode::UNAUTHORIZED,
-                [(header::WWW_AUTHENTICATE, "Basic realm=\"LanCache Admin\"")],
-                "Unauthorized",
-            )
-                .into_response();
-        }
+    if !login_ok(&s, req.headers()).await {
+        let realm = [(header::WWW_AUTHENTICATE, "Basic realm=\"LanCache Admin\"")];
+        return (StatusCode::UNAUTHORIZED, realm, "Unauthorized").into_response();
     }
-    let (session, fresh) = match cookie(req.headers()) {
-        Some(c) => (c, false),
-        None => (secret::random_hex(32), true),
-    };
-    req.extensions_mut()
-        .insert(Csrf(csrf_of(&app.session_key, &session)));
+    let known = session_cookie(req.headers());
+    let session = known.clone().unwrap_or_else(|| secret::random_hex(32));
+    req.extensions_mut().insert(Csrf::of(&app.session_key, &session));
     let mut res = next.run(req).await;
-    if fresh {
+    if known.is_none() {
         let v = format!("{COOKIE}={session}; HttpOnly; SameSite=Strict; Path=/");
         if let Ok(v) = v.parse() {
             res.headers_mut().append(header::SET_COOKIE, v);
@@ -204,642 +253,574 @@ async fn auth(State(app): Shared, mut req: Request, next: Next) -> Response {
     res
 }
 
-// What: CSRF token of this request.
-// Why: handlers read it from the request extensions.
-// From: Issue #1683 | PR #1858
-#[derive(Clone)]
-struct Csrf(String);
-
-// What: form check: CSRF token must match.
-// Why: every POST changes state; no token, no change.
-// From: Issue #1683 | PR #1858
-fn csrf_ok(form: &BTreeMap<String, String>, csrf: &Csrf) -> bool {
-    form.get("csrf_token")
-        .is_some_and(|t| secret::equal(t.as_bytes(), csrf.0.as_bytes()))
+fn read_json(path: &str) -> Value {
+    std::fs::read(path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or(Value::Null)
 }
 
-// What: dashboard: alarms and container states.
-// Why: first page; shows what needs attention.
+fn with_human(v: &impl serde::Serialize, field: &str, n: u64) -> Value {
+    let mut out = serde_json::to_value(v).unwrap_or(Value::Null);
+    out[field] = human::bytes(n).into();
+    out
+}
+
+// What: proxy request totals and recent rows.
+// Why: dashboard; read off the async threads.
 // From: Issue #1683 | PR #1858
-async fn dashboard(State(app): Shared, axum::Extension(csrf): axum::Extension<Csrf>) -> Response {
-    let s = app.settings();
-    let mut ctx = Context::new();
-    let alarms = s
-        .text("WATCHDOG_ALARM_FILE")
-        .ok()
-        .and_then(|p| std::fs::read(p).ok())
-        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
-        .unwrap_or_default();
-    ctx.insert("alarms", &alarms);
-    let containers = match (app.limits(&s), s.text("COMPOSE_PROJECT")) {
-        (Ok((_, limit)), Ok(project)) => app
-            .docker
-            .project(&project, limit)
-            .await
-            .unwrap_or_default(),
-        _ => Vec::new(),
-    };
-    ctx.insert("containers", &containers);
-    let logs = PathBuf::from(s.text("SYSLOG_LOG_ROOT").unwrap_or_default())
-        .join(s.text("PROXY_LOG_PROGRAM").unwrap_or_default());
-    let (limit, chunk) = (
-        s.uint("UI_RECENT_REQUESTS").unwrap_or(0),
-        s.uint("UI_LOG_TAIL_CHUNK").unwrap_or(0),
-    );
+async fn proxy_log(s: &Settings) -> Result<(Value, Vec<Value>), String> {
+    let dir = Path::new(&s.text("SYSLOG_LOG_ROOT")?).join(s.text("PROXY_LOG_PROGRAM")?);
+    let limit = usize::try_from(s.uint("UI_RECENT_REQUESTS")?).map_err(|e| e.to_string())?;
+    let chunk = s.uint("UI_LOG_TAIL_CHUNK")?;
     let (stats, recent) = tokio::task::spawn_blocking(move || {
-        let n = usize::try_from(limit).unwrap_or(0);
-        (access::stats(&logs), access::tail(&logs, n, chunk))
+        (access::stats(&dir), access::tail(&dir, limit, chunk))
     })
     .await
-    .unwrap_or_default();
-    let mut st = serde_json::to_value(&stats).unwrap_or_default();
-    st["total_bytes_human"] = human::bytes(stats.total_bytes).into();
-    ctx.insert("log_stats", &st);
-    let recent: Vec<serde_json::Value> = recent
-        .iter()
-        .rev()
-        .map(|e| {
-            let mut v = serde_json::to_value(e).unwrap_or_default();
-            v["bytes_human"] = human::bytes(e.bytes).into();
-            v
-        })
-        .collect();
-    ctx.insert("recent_logs", &recent);
-    if let Ok(space) = s
-        .text("NGINX_CACHE_DIR")
-        .and_then(|d| fs::space(std::path::Path::new(&d)).map_err(|e| e.to_string()))
-    {
-        let used = space.total.saturating_sub(space.free);
-        ctx.insert("cache_used_human", &human::bytes(used));
-        ctx.insert(
-            "cache_pct",
-            &(used.saturating_mul(100) / space.total.max(1)),
-        );
-    }
-    ctx.insert("warnings", &s.warnings);
-    app.page("dashboard.html", ctx, &csrf.0)
+    .map_err(|e| e.to_string())?;
+    let totals = with_human(&stats, "total_bytes_human", stats.total_bytes);
+    let rows = recent.iter().rev().map(|e| with_human(e, "bytes_human", e.bytes)).collect();
+    Ok((totals, rows))
 }
 
-// What: General page: channel, updates, NTP, login.
-// Why: design page; fields are SOT keys (v.KEY).
+// What: dashboard: alarms, containers, cache.
+// Why: first page; shows what needs a look.
 // From: Issue #1683 | PR #1858
-async fn setup(State(app): Shared, axum::Extension(csrf): axum::Extension<Csrf>) -> Response {
+async fn dashboard(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     let s = app.settings();
     let mut ctx = Context::new();
-    let on = s.flag("NTP_ENABLED").unwrap_or(false);
-    let answers = match (
-        on,
-        s.text("IP_HTTP"),
-        s.uint("NTP_PORT"),
-        s.uint("NTP_PROBE_WAIT_MS"),
-    ) {
-        (true, Ok(ip), Ok(port), Ok(ms)) => tokio::task::spawn_blocking(move || {
-            lancache_ng::ntp::answers(&ip, port, Duration::from_millis(ms))
-        })
-        .await
-        .unwrap_or(false),
-        _ => false,
-    };
-    ctx.insert("ntp_answers", &answers);
-    app.page("setup.html", ctx, &csrf.0)
+    ctx.insert("alarms", &read_json(&s.text("WATCHDOG_ALARM_FILE")?));
+    let (_, limit) = app.limits(&s)?;
+    let project = s.text("COMPOSE_PROJECT")?;
+    let containers = app.docker.project(&project, limit).await.unwrap_or_default();
+    ctx.insert("containers", &containers);
+    let (totals, recent) = proxy_log(&s).await?;
+    ctx.insert("log_stats", &totals);
+    ctx.insert("recent_logs", &recent);
+    if let Ok(sp) = fs::space(Path::new(&s.text("NGINX_CACHE_DIR")?)) {
+        let used = sp.total.saturating_sub(sp.free);
+        ctx.insert("cache_used_human", &human::bytes(used));
+        ctx.insert("cache_pct", &(used.saturating_mul(100) / sp.total.max(1)));
+    }
+    app.page("dashboard.html", ctx, &csrf)
 }
 
-// What: change the ui password (Argon2id hash).
-// Why: only the hash is stored; current one must match.
+// What: does our NTP server answer.
+// Why: General page shows the live state.
+// From: Issue #1683 | PR #1858
+async fn ntp_answers(s: &Settings) -> Result<bool, String> {
+    if !s.flag("NTP_ENABLED")? {
+        return Ok(false);
+    }
+    let ip = s.text("IP_HTTP")?;
+    let port = s.uint("NTP_PORT")?;
+    let wait = Duration::from_millis(s.uint("NTP_PROBE_WAIT_MS")?);
+    let probe = move || lancache_ng::ntp::answers(&ip, port, wait);
+    tokio::task::spawn_blocking(probe).await.map_err(|e| e.to_string())
+}
+
+// What: General page.
+// Why: channel, updates, NTP and login.
+// From: Issue #1683 | PR #1858
+async fn setup(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
+    let s = app.settings();
+    let mut ctx = Context::new();
+    ctx.insert("ntp_answers", &ntp_answers(&s).await?);
+    app.page("setup.html", ctx, &csrf)
+}
+
+// What: set a new ui password (Argon2id).
+// Why: only the hash is kept; old one must match.
 // From: Issue #1683 | PR #1858
 async fn password(
     State(app): Shared,
-    axum::Extension(csrf): axum::Extension<Csrf>,
-    Form(form): Form<BTreeMap<String, String>>,
-) -> Response {
-    if !csrf_ok(&form, &csrf) {
-        return (StatusCode::FORBIDDEN, "CSRF token mismatch").into_response();
-    }
-    let field = |k: &str| form.get(k).cloned().unwrap_or_default();
-    let (cur, new, again) = (
-        field("current_password"),
-        field("new_password"),
-        field("confirm_password"),
-    );
-    if new != again {
-        return (StatusCode::BAD_REQUEST, "the two new passwords differ").into_response();
+    Extension(csrf): Extension<Csrf>,
+    Form(form): Form<Fields>,
+) -> Page {
+    csrf.check(&form)?;
+    let get = |k: &str| form.get(k).cloned().unwrap_or_default();
+    let (current, new) = (get("current_password"), get("new_password"));
+    if new != get("confirm_password") {
+        return Err(bad("the two new passwords differ"));
     }
     let s = app.settings();
-    let min = s.uint("UI_PASSWORD_MIN_LENGTH").unwrap_or(u64::MAX);
-    if u64::try_from(new.chars().count()).unwrap_or(0) < min {
-        return (
-            StatusCode::BAD_REQUEST,
-            format!("the password needs at least {min} characters"),
-        )
-            .into_response();
+    let min = s.uint("UI_PASSWORD_MIN_LENGTH")?;
+    if (new.chars().count() as u64) < min {
+        return Err(bad(format!("the password needs at least {min} characters")));
     }
     let old = s.text("UI_PASSWORD_HASH").unwrap_or_default();
     let hashed = tokio::task::spawn_blocking(move || {
-        if !old.is_empty() && !verify(&old, &cur) {
+        if !old.is_empty() && !verify(&old, &current) {
             return Err("the current password is wrong".to_string());
         }
         phc(&new)
     })
     .await
-    .unwrap_or_else(|e| Err(e.to_string()));
-    let hash = match hashed {
-        Ok(h) => h,
-        Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
-    };
-    let update = BTreeMap::from([("UI_PASSWORD_HASH".to_string(), hash)]);
-    done(commit(&app, update).await, "/setup")
+    .map_err(|e| e.to_string())?
+    .map_err(bad)?;
+    let change = Fields::from([("UI_PASSWORD_HASH".to_string(), hashed)]);
+    finish(commit(&app, change).await, "/setup")
 }
 
-// What: save, reload, render, write and apply.
-// Why: one path for every setting change in the ui.
+// What: keep only real changes of known keys.
+// Why: an empty secret field means keep it.
 // From: Issue #1683 | PR #1858
-async fn commit(app: &App, form: BTreeMap<String, String>) -> Result<(), String> {
-    let path = app
-        .saved
-        .clone()
-        .ok_or_else(|| format!("{SETTINGS_FILE_ENV} is not set"))?;
+fn changes(old: &Settings, form: Fields) -> Fields {
+    let mut out = Fields::new();
+    for (key, value) in form {
+        let Some(spec) = old.spec(&key) else { continue };
+        let secret = matches!(spec.kind, config::Kind::Secret);
+        if secret && value.is_empty() {
+            continue;
+        }
+        if old.text(&key).ok().as_deref() != Some(value.as_str()) {
+            out.insert(key, value);
+        }
+    }
+    out
+}
+
+// What: save, reload, render, write, apply.
+// Why: one path for every setting change.
+// From: Issue #1683 | PR #1858
+async fn commit(app: &App, form: Fields) -> Result<(), String> {
+    let Some(path) = app.saved.clone() else {
+        return Err(format!("{SETTINGS_FILE_ENV} is not set"));
+    };
     let old = app.settings();
-    let updates: BTreeMap<String, String> = form
-        .into_iter()
-        .filter(|(k, v)| {
-            old.spec(k).is_some_and(|sp| {
-                let secret = matches!(sp.kind, config::Kind::Secret);
-                !(secret && v.is_empty()) && old.text(k).ok().as_deref() != Some(v.as_str())
-            })
-        })
-        .collect();
+    let updates = changes(&old, form);
     if updates.is_empty() {
         return Ok(());
     }
     config::store(&path, &old, &updates)?;
     let new = Settings::load(&process_env, Some(&path))?;
-    let report = apply_all(app, &old, &new).await?;
-    if let Ok(mut s) = app.settings.write() {
-        *s = new;
-    }
-    for line in &report {
+    for line in apply_all(app, &old, &new).await? {
         eprintln!("ui: apply: {line}");
+    }
+    match app.settings.write() {
+        Ok(mut s) => *s = new,
+        Err(poisoned) => *poisoned.into_inner() = new,
     }
     Ok(())
 }
 
-// What: answer a commit with a redirect or the error.
+// What: end a form: redirect back or show error.
 // Why: every form handler ends the same way.
 // From: Issue #1683 | PR #1858
-fn done(result: Result<(), String>, back: &str) -> Response {
-    match result {
-        Ok(()) => Redirect::to(back).into_response(),
-        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
-    }
+fn finish(result: Result<(), String>, back: &str) -> Page {
+    result.map_err(bad)?;
+    Ok(Redirect::to(back).into_response())
 }
 
-// What: General page form: save changed SOT keys.
-// Why: field names are the keys themselves.
+// What: General page form.
+// Why: field names are the SOT keys.
 // From: Issue #1683 | PR #1858
 async fn save(
     State(app): Shared,
-    axum::Extension(csrf): axum::Extension<Csrf>,
-    Form(form): Form<BTreeMap<String, String>>,
-) -> Response {
-    if !csrf_ok(&form, &csrf) {
-        return (StatusCode::FORBIDDEN, "CSRF token mismatch").into_response();
-    }
-    done(commit(&app, form).await, "/setup")
+    Extension(csrf): Extension<Csrf>,
+    Form(form): Form<Fields>,
+) -> Page {
+    csrf.check(&form)?;
+    cache_room(&app.settings(), &form)?;
+    finish(commit(&app, form).await, "/setup")
 }
 
-// What: logs page: newest lines of every program.
-// Why: reads the syslog-ng store, one folder per program.
+// What: newest lines of all programs, merged.
+// Why: syslog-ng keeps one folder per program.
 // From: Issue #1683 | PR #1858
-async fn logs(State(app): Shared, axum::Extension(csrf): axum::Extension<Csrf>) -> Response {
-    let s = app.settings();
-    let root = PathBuf::from(s.text("SYSLOG_LOG_ROOT").unwrap_or_default());
-    let max = usize::try_from(s.uint("UI_LOG_LINES").unwrap_or(0)).unwrap_or(0);
-    let chunk = s.uint("UI_LOG_TAIL_CHUNK").unwrap_or(0);
-    let programs = s.list("SYSLOG_PROGRAMS");
-    let muted = s.list("SYSLOG_MUTED");
-    let progs = programs.clone();
-    let lines = tokio::task::spawn_blocking(move || {
-        let mut all: Vec<(String, String)> = Vec::new();
-        for p in &progs {
-            for l in access::tail_lines(&root.join(p), max, chunk) {
-                all.push((p.clone(), l));
-            }
+fn newest_lines(root: &Path, programs: &[String], max: usize, chunk: u64) -> Vec<Value> {
+    let mut all = Vec::new();
+    for p in programs {
+        for line in access::tail_lines(&root.join(p), max, chunk) {
+            all.push((p.clone(), line));
         }
-        all.sort_by(|a, b| b.1.cmp(&a.1));
-        all.truncate(max);
-        all
-    })
-    .await
-    .unwrap_or_default();
-    let entries: Vec<serde_json::Value> = lines
-        .iter()
+    }
+    all.sort_by(|a, b| b.1.cmp(&a.1));
+    all.truncate(max);
+    all.into_iter()
         .map(|(p, l)| {
-            let (ts, msg) = l.split_once(' ').unwrap_or(("", l));
-            serde_json::json!({"host": p, "timestamp": ts, "message": msg})
-        })
-        .collect();
-    let switches: Vec<serde_json::Value> = programs
-        .iter()
-        .map(|p| serde_json::json!({"program": p, "on": !muted.contains(p)}))
-        .collect();
-    let mut ctx = Context::new();
-    ctx.insert("syslog_logs", &entries);
-    ctx.insert("syslog_hosts", &programs);
-    ctx.insert("log_switches", &switches);
-    ctx.insert("logs_max_entries", &max);
-    app.page("logs.html", ctx, &csrf.0)
-}
-
-// What: save forward targets and muted programs.
-// Why: switches arrive as on_<program>; rest is muted.
-// From: Issue #1683 | PR #1858
-async fn logs_save(
-    State(app): Shared,
-    axum::Extension(csrf): axum::Extension<Csrf>,
-    Form(form): Form<BTreeMap<String, String>>,
-) -> Response {
-    if !csrf_ok(&form, &csrf) {
-        return (StatusCode::FORBIDDEN, "CSRF token mismatch").into_response();
-    }
-    let s = app.settings();
-    let muted: Vec<String> = s
-        .list("SYSLOG_PROGRAMS")
-        .into_iter()
-        .filter(|p| form.get(&format!("on_{p}")).map(String::as_str) != Some("true"))
-        .collect();
-    let mut updates = BTreeMap::new();
-    updates.insert("SYSLOG_MUTED".to_string(), muted.join(" "));
-    updates.insert(
-        "SYSLOG_FORWARD".to_string(),
-        form.get("SYSLOG_FORWARD")
-            .cloned()
-            .unwrap_or_default()
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" "),
-    );
-    done(commit(&app, updates).await, "/logs#syslog")
-}
-
-// What: PowerDNS API client of this node.
-// Why: records go to PowerDNS directly; no own store.
-// From: Issue #1683 | PR #1858
-fn pdns_api(s: &Settings) -> Result<lancache_ng::pdns::Api, String> {
-    let key = secrets(s)?.pdns_api_key;
-    let client = lancache_ng::http::client(s)?;
-    Ok(lancache_ng::pdns::Api::new(
-        client,
-        &s.text("PDNS_PRIMARY_API_URL")?,
-        &key,
-    ))
-}
-
-// What: reverse name of an IPv4 or IPv6 address.
-// Why: PTR records live under in-addr.arpa / ip6.arpa.
-// From: Issue #1683 | PR #1858
-fn reverse_name(ip: &str) -> Result<String, String> {
-    match ip
-        .parse::<std::net::IpAddr>()
-        .map_err(|_| format!("{ip:?} is no IP address"))?
-    {
-        std::net::IpAddr::V4(v4) => {
-            let o = v4.octets();
-            Ok(format!("{}.{}.{}.{}.in-addr.arpa.", o[3], o[2], o[1], o[0]))
-        }
-        std::net::IpAddr::V6(v6) => {
-            let hex: String = v6.octets().iter().map(|b| format!("{b:02x}")).collect();
-            let nibbles: Vec<String> = hex.chars().rev().map(String::from).collect();
-            Ok(format!("{}.ip6.arpa.", nibbles.join(".")))
-        }
-    }
-}
-
-// What: reverse zone that holds a reverse name.
-// Why: PowerDNS needs the zone for the PATCH.
-// From: Issue #1683 | PR #1858
-fn reverse_zone(s: &Settings, name: &str) -> Option<String> {
-    lancache_ng::dns::private_reverse_zones(s)
-        .into_iter()
-        .filter(|z| name.ends_with(z.as_str()))
-        .max_by_key(String::len)
-}
-
-// What: DNS page: domains, LAN records, PTR, switches.
-// Why: records are read live from PowerDNS.
-// From: Issue #1683 | PR #1858
-async fn domains(State(app): Shared, axum::Extension(csrf): axum::Extension<Csrf>) -> Response {
-    let s = app.settings();
-    let mut ctx = Context::new();
-    ctx.insert(
-        "dns_domains",
-        &lancache_ng::cdn::rows(&s).unwrap_or_default(),
-    );
-    let lan = lancache_ng::dns::canonical_zone(&s.text("DNS_LAN_ZONE").unwrap_or_default());
-    ctx.insert("lan_zone", lan.trim_end_matches('.'));
-    let (mut lan_records, mut ptr) = (Vec::new(), Vec::new());
-    match pdns_api(&s) {
-        Ok(api) => {
-            lan_records = api.rrsets(&lan).await.unwrap_or_default();
-            for z in lancache_ng::dns::private_reverse_zones(&s) {
-                for r in api.rrsets(&z).await.unwrap_or_default() {
-                    if r["type"] == "PTR" {
-                        ptr.push(serde_json::json!({
-                            "ip": r["name"], "ttl": r["ttl"],
-                            "hostname": r["records"][0]["content"],
-                        }));
-                    }
-                }
-            }
-        }
-        Err(e) => ctx.insert("domain_error_message", &e),
-    }
-    ctx.insert("lan_records", &lan_records);
-    let groups: Vec<serde_json::Value> = snapshot_zones(&s)
-        .iter()
-        .filter_map(|z| {
-            let ids = zone_store(&s, z).ok()?.list().ok()?;
-            (!ids.is_empty()).then(|| {
-                let snaps: Vec<serde_json::Value> = ids
-                    .iter()
-                    .map(|id| {
-                        let secs = id.parse::<u128>().unwrap_or(0) / 1_000_000_000;
-                        serde_json::json!({"id": id, "created_unix": secs.to_string()})
-                    })
-                    .collect();
-                serde_json::json!({"zone": z, "snapshots": snaps})
-            })
-        })
-        .collect();
-    ctx.insert("zone_snapshot_groups", &groups);
-    ctx.insert("rollback_zones", &snapshot_zones(&s));
-    let list: Vec<serde_json::Value> = secondaries(&s)
-        .iter()
-        .map(|(n, a)| serde_json::json!({"name": n, "address": a}))
-        .collect();
-    ctx.insert("secondaries", &list);
-    ctx.insert(
-        "registration_token",
-        &registration_token(&s).unwrap_or_default(),
-    );
-    ctx.insert(
-        "setup_script_url",
-        &s.text("SETUP_SCRIPT_URL").unwrap_or_default(),
-    );
-    ctx.insert("primary_ip", &s.text("IP_HTTP").unwrap_or_default());
-    ctx.insert("primary_url", &s.text("UI_PUBLIC_URL").unwrap_or_default());
-    ctx.insert(
-        "zone_snapshot_retention",
-        &s.uint("DNS_SNAPSHOT_KEEP").unwrap_or(0),
-    );
-    ctx.insert("ptr_records", &ptr);
-    ctx.insert("lan_record_types", &s.list("DNS_LAN_RECORD_TYPES"));
-    ctx.insert("record_ttl_default", &s.uint("DNS_RECORD_TTL").unwrap_or(0));
-    ctx.insert("ttl_max", &s.uint("DNS_RECORD_TTL_MAX").unwrap_or(0));
-    ctx.insert(
-        "aaaa_filter_enabled",
-        &s.flag("DNS_FILTER_AAAA").unwrap_or(false),
-    );
-    ctx.insert(
-        "ddns_unsigned_updates_allowed",
-        &s.flag("DDNS_ALLOW_UNSIGNED").unwrap_or(false),
-    );
-    ctx.insert("ddns_tsig_key_configured", &secrets(&s).is_ok());
-    app.page("domains.html", ctx, &csrf.0)
-}
-
-// What: one DNS page form action.
-// Why: every DNS form posts here with "op".
-// From: Issue #1683 | PR #1858
-async fn dns_action(
-    State(app): Shared,
-    axum::Extension(csrf): axum::Extension<Csrf>,
-    axum::extract::Path(op): axum::extract::Path<String>,
-    Form(f): Form<BTreeMap<String, String>>,
-) -> Response {
-    if !csrf_ok(&f, &csrf) {
-        return (StatusCode::FORBIDDEN, "CSRF token mismatch").into_response();
-    }
-    let s = app.settings();
-    let get = |k: &str| f.get(k).map(|v| v.trim().to_string()).unwrap_or_default();
-    let on = get("enabled") == "1" || get("enabled") == "true";
-    let list_with = |key: &str, item: &str, add: bool| {
-        let mut l = s.list(key);
-        l.retain(|x| x != item);
-        if add {
-            l.push(item.to_string());
-        }
-        BTreeMap::from([(key.to_string(), l.join(" "))])
-    };
-    let result = match op.as_str() {
-        "domain-add" => {
-            let d = get("domain").to_ascii_lowercase();
-            if lancache_ng::dns::cdn_entry(&d).is_none() {
-                Err(format!("{d:?} is no valid domain entry"))
-            } else {
-                commit(&app, list_with("CDN_CUSTOM_DOMAINS", &d, true)).await
-            }
-        }
-        "domain-remove" => {
-            commit(&app, list_with("CDN_CUSTOM_DOMAINS", &get("domain"), false)).await
-        }
-        "domain-toggle" => {
-            commit(&app, list_with("CDN_DISABLED_DOMAINS", &get("domain"), !on)).await
-        }
-        "aaaa-filter" => {
-            commit(
-                &app,
-                BTreeMap::from([("DNS_FILTER_AAAA".into(), on.to_string())]),
-            )
-            .await
-        }
-        "ddns-unsigned" => {
-            commit(
-                &app,
-                BTreeMap::from([("DDNS_ALLOW_UNSIGNED".into(), on.to_string())]),
-            )
-            .await
-        }
-        "record-add" | "record-remove" => record(&s, &op, &get).await,
-        "ptr-add" | "ptr-remove" => ptr(&s, &op, &get).await,
-        "zone-rollback" => rollback(&s, &get).await,
-        "tsig-rotate" => rotate_tsig(&app).await,
-        _ => Err(format!("unknown DNS action {op}")),
-    };
-    done(result, "/domains")
-}
-
-// What: snapshot store of one zone.
-// Why: rollback after a bad change; size from the SOT.
-// From: Issue #1683 | PR #1858
-fn zone_store(s: &Settings, zone: &str) -> Result<lancache_ng::snapshot::Store, String> {
-    Ok(lancache_ng::snapshot::Store {
-        dir: PathBuf::from(s.text("DNS_SNAPSHOT_DIR")?).join(zone.trim_end_matches('.')),
-        keep: usize::try_from(s.uint("DNS_SNAPSHOT_KEEP")?).map_err(|e| e.to_string())?,
-        owner: fs::Owner {
-            uid: None,
-            gid: None,
-        },
-    })
-}
-
-// What: save the zone's RRsets after a change.
-// Why: every change can be rolled back later.
-// From: Issue #1683 | PR #1858
-async fn snapshot(s: &Settings, api: &lancache_ng::pdns::Api, zone: &str) -> Result<(), String> {
-    let body = serde_json::to_vec(&api.rrsets(zone).await?).map_err(|e| e.to_string())?;
-    let store = zone_store(s, zone)?;
-    std::fs::create_dir_all(&store.dir).map_err(|e| format!("{}: {e}", store.dir.display()))?;
-    store.save(&body).map(drop)
-}
-
-// What: roll a zone back to one snapshot.
-// Why: PATCH restores RRsets; PowerDNS sends NOTIFY.
-// From: Issue #1683 | PR #1858
-async fn rollback(s: &Settings, get: &dyn Fn(&str) -> String) -> Result<(), String> {
-    let zone = get("zone");
-    if !snapshot_zones(s).contains(&zone) {
-        return Err(format!("zone {zone} has no snapshots"));
-    }
-    let body = zone_store(s, &zone)?.read(&get("snapshot_id"))?;
-    let saved: Vec<serde_json::Value> = serde_json::from_slice(&body).map_err(|e| e.to_string())?;
-    pdns_api(s)?.restore(&zone, &saved).await
-}
-
-// What: print {"zones":{zone:[{id,created_unix}]}}.
-// Why: the shape setup.sh reset-config reads.
-// From: Issue #1683 | PR #1858
-fn zone_snapshots_cli(s: &Settings) -> Result<(), String> {
-    let mut zones = serde_json::Map::new();
-    for zone in snapshot_zones(s) {
-        let store = zone_store(s, &zone)?;
-        let mut rows = Vec::new();
-        for id in store.list()? {
-            let created = std::fs::metadata(store.dir.join(&id))
-                .and_then(|m| m.modified())
-                .map_err(|e| format!("{id}: {e}"))?
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_err(|e| e.to_string())?
-                .as_secs();
-            rows.push(serde_json::json!({"id": id, "created_unix": created}));
-        }
-        zones.insert(zone, serde_json::Value::Array(rows));
-    }
-    println!("{}", serde_json::json!({"zones": zones}));
-    Ok(())
-}
-
-// What: zones that keep snapshots.
-// Why: LAN zone and the private reverse zones.
-// From: Issue #1683 | PR #1858
-fn snapshot_zones(s: &Settings) -> Vec<String> {
-    let mut z = vec![lancache_ng::dns::canonical_zone(
-        &s.text("DNS_LAN_ZONE").unwrap_or_default(),
-    )];
-    z.extend(lancache_ng::dns::private_reverse_zones(s));
-    z
-}
-
-// What: add or remove one LAN record set.
-// Why: PATCH replaces or deletes; PowerDNS sends NOTIFY.
-// From: Issue #1683 | PR #1858
-async fn record(s: &Settings, op: &str, get: &dyn Fn(&str) -> String) -> Result<(), String> {
-    let api = pdns_api(s)?;
-    let zone = lancache_ng::dns::canonical_zone(&s.text("DNS_LAN_ZONE")?);
-    let (name, kind) = (get("name"), get("record_type"));
-    if !s.list("DNS_LAN_RECORD_TYPES").contains(&kind) {
-        return Err(format!("record type {kind} is not allowed"));
-    }
-    let fqdn = if name.ends_with('.') || name.ends_with(zone.trim_end_matches('.')) {
-        name
-    } else {
-        format!("{name}.{zone}")
-    };
-    let contents: Vec<String> = if op == "record-add" {
-        get("content")
-            .split(';')
-            .map(str::trim)
-            .filter(|c| !c.is_empty())
-            .map(String::from)
-            .collect()
-    } else {
-        Vec::new()
-    };
-    let ttl: u32 = get("ttl").parse().unwrap_or(0);
-    let max = s.uint("DNS_RECORD_TTL_MAX")?;
-    if op == "record-add" && (ttl == 0 || u64::from(ttl) > max) {
-        return Err(format!("TTL must be 1..={max}"));
-    }
-    api.set_rrset(&zone, &fqdn, &kind, ttl, &contents).await?;
-    snapshot(s, &api, &zone).await
-}
-
-// What: add or remove one PTR record.
-// Why: name from the IP; zone from the private list.
-// From: Issue #1683 | PR #1858
-async fn ptr(s: &Settings, op: &str, get: &dyn Fn(&str) -> String) -> Result<(), String> {
-    let api = pdns_api(s)?;
-    let ip = get("ip");
-    let name = if ip.ends_with(".arpa.") {
-        ip
-    } else {
-        reverse_name(&ip)?
-    };
-    let zone =
-        reverse_zone(s, &name).ok_or_else(|| format!("{name} is in no private reverse zone"))?;
-    let ttl = u32::try_from(s.uint("DNS_RECORD_TTL")?).map_err(|e| e.to_string())?;
-    let contents = if op == "ptr-add" {
-        let host = get("hostname");
-        vec![if host.ends_with('.') {
-            host
-        } else {
-            format!("{host}.")
-        }]
-    } else {
-        Vec::new()
-    };
-    api.set_rrset(&zone, &name, "PTR", ttl, &contents).await?;
-    snapshot(s, &api, &zone).await
-}
-
-// What: registration token for secondaries.
-// Why: stored like every secret; rotate replaces it.
-// From: Issue #1683 | PR #1858
-fn registration_token(s: &Settings) -> Result<String, String> {
-    let dir = PathBuf::from(s.text("SECRETS_DIR")?);
-    let keep = fs::Owner {
-        uid: None,
-        gid: None,
-    };
-    secret::resolve(None, &dir, "SECONDARY_REGISTRATION_TOKEN", keep).map_err(|e| e.to_string())
-}
-
-// What: secondaries as (name, address) pairs.
-// Why: one SOT list "name@ip" drives pdns and the ui.
-// From: Issue #1683 | PR #1858
-fn secondaries(s: &Settings) -> Vec<(String, String)> {
-    s.list("DNS_SECONDARIES")
-        .iter()
-        .filter_map(|e| {
-            e.split_once('@')
-                .map(|(n, a)| (n.to_string(), a.to_string()))
+            let (stamp, text) = l.split_once(' ').unwrap_or(("", l.as_str()));
+            json!({"host": p, "timestamp": stamp, "message": text})
         })
         .collect()
 }
 
-// What: store the list after a change.
-// Why: pdns.conf and NOTIFY follow on the next apply.
+// What: logs page.
+// Why: newest lines plus on/off per program.
 // From: Issue #1683 | PR #1858
-async fn store_secondaries(app: &App, list: &[(String, String)]) -> Result<(), String> {
-    let v: Vec<String> = list.iter().map(|(n, a)| format!("{n}@{a}")).collect();
-    commit(
-        app,
-        BTreeMap::from([("DNS_SECONDARIES".to_string(), v.join(" "))]),
-    )
-    .await
+async fn logs(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
+    let s = app.settings();
+    let root = PathBuf::from(s.text("SYSLOG_LOG_ROOT")?);
+    let max = usize::try_from(s.uint("UI_LOG_LINES")?).map_err(|e| e.to_string())?;
+    let chunk = s.uint("UI_LOG_TAIL_CHUNK")?;
+    let programs = s.list("SYSLOG_PROGRAMS");
+    let muted = s.list("SYSLOG_MUTED");
+    let names = programs.clone();
+    let lines = tokio::task::spawn_blocking(move || newest_lines(&root, &names, max, chunk))
+        .await
+        .map_err(|e| e.to_string())?;
+    let switches: Vec<Value> = programs
+        .iter()
+        .map(|p| json!({"program": p, "on": !muted.contains(p)}))
+        .collect();
+    let mut ctx = Context::new();
+    ctx.insert("syslog_logs", &lines);
+    ctx.insert("syslog_hosts", &programs);
+    ctx.insert("log_switches", &switches);
+    ctx.insert("logs_max_entries", &max);
+    app.page("logs.html", ctx, &csrf)
 }
 
-// What: request body of a secondary registration.
-// Why: token proves the admin handed out the command.
+// What: save forward targets and muted programs.
+// Why: switch on_<program>; missing means muted.
+// From: Issue #1683 | PR #1858
+async fn logs_save(
+    State(app): Shared,
+    Extension(csrf): Extension<Csrf>,
+    Form(form): Form<Fields>,
+) -> Page {
+    csrf.check(&form)?;
+    let s = app.settings();
+    let is_on = |p: &String| form.get(&format!("on_{p}")).is_some_and(|v| v == "true");
+    let muted: Vec<String> = s.list("SYSLOG_PROGRAMS").into_iter().filter(|p| !is_on(p)).collect();
+    let targets = form.get("SYSLOG_FORWARD").cloned().unwrap_or_default();
+    let targets: Vec<&str> = targets.split_whitespace().collect();
+    let mut change = Fields::new();
+    change.insert("SYSLOG_MUTED".into(), muted.join(" "));
+    change.insert("SYSLOG_FORWARD".into(), targets.join(" "));
+    finish(commit(&app, change).await, "/logs#syslog")
+}
+
+// What: PowerDNS API of this node.
+// Why: records live only in PowerDNS.
+// From: Issue #1683 | PR #1858
+fn pdns_api(s: &Settings) -> Result<lancache_ng::pdns::Api, String> {
+    let key = secrets(s)?.pdns_api_key;
+    let url = s.text("PDNS_PRIMARY_API_URL")?;
+    Ok(lancache_ng::pdns::Api::new(http::client(s)?, &url, &key))
+}
+
+// What: reverse DNS name of an address.
+// Why: PTR rows live in in-addr.arpa or ip6.arpa.
+// From: Issue #1683 | PR #1858
+fn reverse_name(ip: &str) -> Result<String, String> {
+    use std::net::IpAddr;
+    let addr: IpAddr = ip.parse().map_err(|_| format!("{ip:?} is no IP address"))?;
+    Ok(match addr {
+        IpAddr::V4(v4) => {
+            let mut o = v4.octets();
+            o.reverse();
+            format!("{}.{}.{}.{}.in-addr.arpa.", o[0], o[1], o[2], o[3])
+        }
+        IpAddr::V6(v6) => {
+            let mut nibbles = Vec::with_capacity(32);
+            for b in v6.octets().iter().rev() {
+                nibbles.push(format!("{:x}", b & 0x0f));
+                nibbles.push(format!("{:x}", b >> 4));
+            }
+            format!("{}.ip6.arpa.", nibbles.join("."))
+        }
+    })
+}
+
+// What: private reverse zone holding a name.
+// Why: the PowerDNS PATCH needs the zone.
+// From: Issue #1683 | PR #1858
+fn reverse_zone(s: &Settings, name: &str) -> Option<String> {
+    let zones = lancache_ng::dns::private_reverse_zones(s);
+    zones.into_iter().filter(|z| name.ends_with(z.as_str())).max_by_key(String::len)
+}
+
+fn lan_zone(s: &Settings) -> Result<String, String> {
+    Ok(lancache_ng::dns::canonical_zone(&s.text("DNS_LAN_ZONE")?))
+}
+
+// What: zones that keep snapshots.
+// Why: LAN zone plus the private reverse zones.
+// From: Issue #1683 | PR #1858
+fn snapshot_zones(s: &Settings) -> Result<Vec<String>, String> {
+    let mut zones = vec![lan_zone(s)?];
+    zones.extend(lancache_ng::dns::private_reverse_zones(s));
+    Ok(zones)
+}
+
+// What: snapshot store of one zone.
+// Why: undo a bad change; count from the SOT.
+// From: Issue #1683 | PR #1858
+fn zone_store(s: &Settings, zone: &str) -> Result<lancache_ng::snapshot::Store, String> {
+    let dir = Path::new(&s.text("DNS_SNAPSHOT_DIR")?).join(zone.trim_end_matches('.'));
+    let keep = usize::try_from(s.uint("DNS_SNAPSHOT_KEEP")?).map_err(|e| e.to_string())?;
+    let owner = fs::Owner { uid: None, gid: None };
+    Ok(lancache_ng::snapshot::Store { dir, keep, owner })
+}
+
+// What: keep the zone's records after a change.
+// Why: each change can be undone later.
+// From: Issue #1683 | PR #1858
+async fn snapshot(s: &Settings, api: &lancache_ng::pdns::Api, zone: &str) -> Result<(), String> {
+    let rows = api.rrsets(zone).await?;
+    let body = serde_json::to_vec(&rows).map_err(|e| e.to_string())?;
+    let store = zone_store(s, zone)?;
+    std::fs::create_dir_all(&store.dir).map_err(|e| format!("{}: {e}", store.dir.display()))?;
+    store.save(&body)?;
+    Ok(())
+}
+
+fn created_unix(path: &Path) -> Result<u64, String> {
+    let when = std::fs::metadata(path).and_then(|m| m.modified());
+    let when = when.map_err(|e| format!("{}: {e}", path.display()))?;
+    let age = when.duration_since(std::time::UNIX_EPOCH).map_err(|e| e.to_string())?;
+    Ok(age.as_secs())
+}
+
+// What: snapshots of all zones, newest first.
+// Why: DNS page and setup.sh show the same list.
+// From: Issue #1683 | PR #1858
+fn snapshot_list(s: &Settings) -> Result<Vec<(String, Vec<Value>)>, String> {
+    let mut out = Vec::new();
+    for zone in snapshot_zones(s)? {
+        let store = zone_store(s, &zone)?;
+        let mut rows = Vec::new();
+        for id in store.list().unwrap_or_default() {
+            let created = created_unix(&store.dir.join(&id))?;
+            rows.push(json!({"id": id, "created_unix": created}));
+        }
+        out.push((zone, rows));
+    }
+    Ok(out)
+}
+
+// What: print {"zones":{zone:[{id,created_unix}]}}.
+// Why: setup.sh reset-config reads this shape.
+// From: Issue #1683 | PR #1858
+fn zone_snapshots_cli(s: &Settings) -> Result<(), String> {
+    let zones: serde_json::Map<String, Value> = snapshot_list(s)?
+        .into_iter()
+        .map(|(z, rows)| (z, Value::Array(rows)))
+        .collect();
+    println!("{}", json!({"zones": zones}));
+    Ok(())
+}
+
+// What: put one zone back to a snapshot.
+// Why: PATCH restores; PowerDNS sends NOTIFY.
+// From: Issue #1683 | PR #1858
+async fn rollback(s: &Settings, zone: &str, id: &str) -> Result<(), String> {
+    if !snapshot_zones(s)?.iter().any(|z| z == zone) {
+        return Err(format!("zone {zone} keeps no snapshots"));
+    }
+    let body = zone_store(s, zone)?.read(id)?;
+    let rows: Vec<Value> = serde_json::from_slice(&body).map_err(|e| e.to_string())?;
+    pdns_api(s)?.restore(zone, &rows).await
+}
+
+// What: PTR rows of all private reverse zones.
+// Why: the DNS page lists them with the host.
+// From: Issue #1683 | PR #1858
+async fn ptr_rows(s: &Settings, api: &lancache_ng::pdns::Api) -> Vec<Value> {
+    let mut out = Vec::new();
+    for zone in lancache_ng::dns::private_reverse_zones(s) {
+        for r in api.rrsets(&zone).await.unwrap_or_default() {
+            if r["type"] != "PTR" {
+                continue;
+            }
+            let host = r["records"][0]["content"].clone();
+            out.push(json!({"ip": r["name"], "ttl": r["ttl"], "hostname": host}));
+        }
+    }
+    out
+}
+
+// What: DNS page.
+// Why: records are read live from PowerDNS.
+// From: Issue #1683 | PR #1858
+async fn domains(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
+    let s = app.settings();
+    let lan = lan_zone(&s)?;
+    let mut ctx = Context::new();
+    ctx.insert("dns_domains", &lancache_ng::cdn::rows(&s)?);
+    ctx.insert("lan_zone", lan.trim_end_matches('.'));
+    let (mut lan_rows, mut ptr) = (Vec::new(), Vec::new());
+    match pdns_api(&s) {
+        Ok(api) => {
+            lan_rows = api.rrsets(&lan).await.unwrap_or_default();
+            ptr = ptr_rows(&s, &api).await;
+        }
+        Err(e) => ctx.insert("domain_error_message", &e),
+    }
+    ctx.insert("lan_records", &lan_rows);
+    ctx.insert("ptr_records", &ptr);
+    let groups: Vec<Value> = snapshot_list(&s)?
+        .into_iter()
+        .filter(|(_, rows)| !rows.is_empty())
+        .map(|(zone, rows)| json!({"zone": zone, "snapshots": rows}))
+        .collect();
+    ctx.insert("zone_snapshot_groups", &groups);
+    ctx.insert("rollback_zones", &snapshot_zones(&s)?);
+    ctx.insert("zone_snapshot_retention", &s.uint("DNS_SNAPSHOT_KEEP")?);
+    let peers: Vec<Value> = secondaries(&s)
+        .into_iter()
+        .map(|(name, address)| json!({"name": name, "address": address}))
+        .collect();
+    ctx.insert("secondaries", &peers);
+    ctx.insert("registration_token", &registration_token(&s)?);
+    ctx.insert("setup_script_url", &s.text("SETUP_SCRIPT_URL")?);
+    ctx.insert("primary_ip", &s.text("IP_HTTP")?);
+    ctx.insert("primary_url", &s.text("UI_PUBLIC_URL").unwrap_or_default());
+    ctx.insert("lan_record_types", &s.list("DNS_LAN_RECORD_TYPES"));
+    ctx.insert("record_ttl_default", &s.uint("DNS_RECORD_TTL")?);
+    ctx.insert("ttl_max", &s.uint("DNS_RECORD_TTL_MAX")?);
+    ctx.insert("aaaa_filter_enabled", &s.flag("DNS_FILTER_AAAA")?);
+    ctx.insert("ddns_unsigned_updates_allowed", &s.flag("DDNS_ALLOW_UNSIGNED")?);
+    ctx.insert("ddns_tsig_key_configured", &tsig_secret(&s).is_ok());
+    app.page("domains.html", ctx, &csrf)
+}
+
+// What: list setting with one item in or out.
+// Why: domain add, remove and toggle share it.
+// From: Issue #1683 | PR #1858
+fn list_change(s: &Settings, key: &str, item: &str, present: bool) -> Fields {
+    let mut items: Vec<String> = s.list(key).into_iter().filter(|x| x != item).collect();
+    if present {
+        items.push(item.to_string());
+    }
+    Fields::from([(key.to_string(), items.join(" "))])
+}
+
+fn one(key: &str, value: impl ToString) -> Fields {
+    Fields::from([(key.to_string(), value.to_string())])
+}
+
+// What: one DNS page form, chosen by op.
+// Why: all DNS forms post to /domains/{op}.
+// From: Issue #1683 | PR #1858
+async fn dns_action(
+    State(app): Shared,
+    Extension(csrf): Extension<Csrf>,
+    axum::extract::Path(op): axum::extract::Path<String>,
+    Form(form): Form<Fields>,
+) -> Page {
+    csrf.check(&form)?;
+    let s = app.settings();
+    let get = |k: &str| form.get(k).map(|v| v.trim().to_string()).unwrap_or_default();
+    let on = matches!(get("enabled").as_str(), "1" | "true");
+    let domain = get("domain").to_ascii_lowercase();
+    let result = match op.as_str() {
+        "domain-add" if lancache_ng::dns::cdn_entry(&domain).is_none() => {
+            Err(format!("{domain:?} is no valid domain entry"))
+        }
+        "domain-add" => commit(&app, list_change(&s, "CDN_CUSTOM_DOMAINS", &domain, true)).await,
+        "domain-remove" => {
+            commit(&app, list_change(&s, "CDN_CUSTOM_DOMAINS", &domain, false)).await
+        }
+        "domain-toggle" => {
+            commit(&app, list_change(&s, "CDN_DISABLED_DOMAINS", &domain, !on)).await
+        }
+        "aaaa-filter" => commit(&app, one("DNS_FILTER_AAAA", on)).await,
+        "ddns-unsigned" => commit(&app, one("DDNS_ALLOW_UNSIGNED", on)).await,
+        "record-add" | "record-remove" => record(&s, op == "record-add", &get).await,
+        "ptr-add" | "ptr-remove" => ptr(&s, op == "ptr-add", &get).await,
+        "zone-rollback" => rollback(&s, &get("zone"), &get("snapshot_id")).await,
+        "tsig-rotate" => rotate_tsig(&app).await,
+        _ => Err(format!("unknown DNS action {op}")),
+    };
+    finish(result, "/domains")
+}
+
+// What: full name inside the LAN zone.
+// Why: a short name gets the zone appended.
+// From: Issue #1683 | PR #1858
+fn in_zone(name: &str, zone: &str) -> String {
+    if name.ends_with('.') || name.ends_with(zone.trim_end_matches('.')) {
+        name.to_string()
+    } else {
+        format!("{name}.{zone}")
+    }
+}
+
+// What: add or remove one LAN record set.
+// Why: PATCH sets or deletes; NOTIFY follows.
+// From: Issue #1683 | PR #1858
+async fn record(s: &Settings, add: bool, get: &dyn Fn(&str) -> String) -> Result<(), String> {
+    let zone = lan_zone(s)?;
+    let kind = get("record_type");
+    if !s.list("DNS_LAN_RECORD_TYPES").contains(&kind) {
+        return Err(format!("record type {kind} is not allowed"));
+    }
+    let name = in_zone(&get("name"), &zone);
+    let mut contents = Vec::new();
+    let mut ttl = 0;
+    if add {
+        let raw = get("content");
+        contents = raw.split(';').map(str::trim).filter(|c| !c.is_empty()).map(String::from).collect();
+        let max = s.uint("DNS_RECORD_TTL_MAX")?;
+        ttl = get("ttl").parse::<u32>().unwrap_or(0);
+        if ttl == 0 || u64::from(ttl) > max {
+            return Err(format!("TTL must be 1 to {max}"));
+        }
+    }
+    let api = pdns_api(s)?;
+    api.set_rrset(&zone, &name, &kind, ttl, &contents).await?;
+    snapshot(s, &api, &zone).await
+}
+
+// What: add or remove one PTR record.
+// Why: name from the IP; zone from the list.
+// From: Issue #1683 | PR #1858
+async fn ptr(s: &Settings, add: bool, get: &dyn Fn(&str) -> String) -> Result<(), String> {
+    let ip = get("ip");
+    let name = if ip.ends_with(".arpa.") { ip } else { reverse_name(&ip)? };
+    let Some(zone) = reverse_zone(s, &name) else {
+        return Err(format!("{name} is in no private reverse zone"));
+    };
+    let ttl = u32::try_from(s.uint("DNS_RECORD_TTL")?).map_err(|e| e.to_string())?;
+    let mut contents = Vec::new();
+    if add {
+        let host = get("hostname");
+        contents.push(if host.ends_with('.') { host } else { format!("{host}.") });
+    }
+    let api = pdns_api(s)?;
+    api.set_rrset(&zone, &name, "PTR", ttl, &contents).await?;
+    snapshot(s, &api, &zone).await
+}
+
+fn owner_keep() -> fs::Owner {
+    fs::Owner { uid: None, gid: None }
+}
+
+// What: token secondaries register with.
+// Why: kept like any secret; rotate renews it.
+// From: Issue #1683 | PR #1858
+fn registration_token(s: &Settings) -> Result<String, String> {
+    let dir = PathBuf::from(s.text("SECRETS_DIR")?);
+    let name = "SECONDARY_REGISTRATION_TOKEN";
+    secret::resolve(None, &dir, name, owner_keep()).map_err(|e| e.to_string())
+}
+
+// What: secondaries as (name, address).
+// Why: SOT list "name@ip" drives pdns and ui.
+// From: Issue #1683 | PR #1858
+fn secondaries(s: &Settings) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for row in s.list("DNS_SECONDARIES") {
+        if let Some((name, addr)) = row.split_once('@') {
+            out.push((name.to_string(), addr.to_string()));
+        }
+    }
+    out
+}
+
+async fn store_secondaries(app: &App, list: &[(String, String)]) -> Result<(), String> {
+    let rows: Vec<String> = list.iter().map(|(n, a)| format!("{n}@{a}")).collect();
+    commit(app, one("DNS_SECONDARIES", rows.join(" "))).await
+}
+
+fn is_ip(text: &str) -> bool {
+    text.parse::<std::net::IpAddr>().is_ok()
+}
+
+// What: body of a secondary registration.
+// Why: the token proves the admin gave the command.
 // From: Issue #1683 | PR #1858
 #[derive(serde::Deserialize)]
 struct Register {
@@ -848,559 +829,504 @@ struct Register {
     address: String,
 }
 
-// What: register a secondary (public, token checked).
-// Why: answer carries all a secondary needs to follow.
+fn valid_peer_name(s: &Settings, name: &str) -> Result<bool, String> {
+    let max = usize::try_from(s.uint("DNS_SECONDARY_NAME_MAX")?).map_err(|e| e.to_string())?;
+    let chars_ok = name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
+    Ok(!name.is_empty() && name.len() <= max && chars_ok)
+}
+
+fn env_or_empty(key: &str) -> String {
+    process_env(key).unwrap_or_default()
+}
+
+// What: everything a new secondary needs.
+// Why: setup.sh secondary writes it to its env.
 // From: Issue #1683 | PR #1858
-async fn register(State(app): Shared, axum::Json(r): axum::Json<Register>) -> Response {
-    let s = app.settings();
-    let Ok(token) = registration_token(&s) else {
-        return StatusCode::SERVICE_UNAVAILABLE.into_response();
-    };
-    if !secret::equal(r.token.as_bytes(), token.as_bytes()) {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-    let name_ok = !r.name.is_empty()
-        && r.name.len() <= 32
-        && r.name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-');
-    if !name_ok || r.address.parse::<std::net::IpAddr>().is_err() {
-        return StatusCode::BAD_REQUEST.into_response();
-    }
-    let mut list = secondaries(&s);
-    list.retain(|(n, _)| n != &r.name);
-    list.push((r.name.clone(), r.address.clone()));
-    if let Err(e) = store_secondaries(&app, &list).await {
-        eprintln!("ui: register {}: {e}", r.name);
-        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-    }
-    let sec = match secrets(&s) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("ui: register {}: {e}", r.name);
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-        }
-    };
-    let zones = snapshot_zones(&s);
-    axum::Json(serde_json::json!({
-        "primary": s.text("IP_HTTP").unwrap_or_default(),
-        "zones": zones,
+fn peer_kit(s: &Settings) -> Result<Value, String> {
+    let sec = secrets(s)?;
+    let primary = s.text("IP_HTTP")?;
+    Ok(json!({
+        "primary": primary,
+        "zones": snapshot_zones(s)?,
         "pdns_api_key": sec.pdns_api_key,
         "tsig_name": sec.tsig_name,
         "tsig_secret": sec.tsig_secret,
-        "syslog_primary": format!("{}:{}", s.text("IP_HTTP").unwrap_or_default(), s.uint("LANCACHE_LOG_PORT").unwrap_or(0)),
+        "syslog_primary": format!("{primary}:{}", s.uint("LANCACHE_LOG_PORT")?),
         "dns_local_reverse_zones": s.text("DNS_LOCAL_REVERSE_ZONES").unwrap_or_default(),
-        // What: image identity of this install.
-        // Why: setup.sh pins secondary to same images.
-        "image_registry": process_env("LANCACHE_IMAGE_REGISTRY").unwrap_or_default(),
-        "image_prefix": process_env("LANCACHE_IMAGE_PREFIX").unwrap_or_default(),
-        "image_channel": process_env("LANCACHE_IMAGE_CHANNEL").unwrap_or_default(),
-        "image_tag": process_env("LANCACHE_IMAGE_TAG").unwrap_or_default(),
+        "image_registry": env_or_empty("LANCACHE_IMAGE_REGISTRY"),
+        "image_prefix": env_or_empty("LANCACHE_IMAGE_PREFIX"),
+        "image_channel": env_or_empty("LANCACHE_IMAGE_CHANNEL"),
+        "image_tag": env_or_empty("LANCACHE_IMAGE_TAG"),
     }))
-    .into_response()
 }
 
-// What: JSON body with a new address.
-// Why: the edit dialog posts {"address": "..."}.
+// What: register a secondary (public route).
+// Why: token checked; reply has the whole kit.
+// From: Issue #1683 | PR #1858
+async fn register(State(app): Shared, axum::Json(r): axum::Json<Register>) -> Page {
+    let s = app.settings();
+    let token = registration_token(&s)
+        .map_err(|e| Fail(StatusCode::SERVICE_UNAVAILABLE, e))?;
+    if !secret::equal(r.token.as_bytes(), token.as_bytes()) {
+        return Err(Fail(StatusCode::UNAUTHORIZED, "wrong token".into()));
+    }
+    if !valid_peer_name(&s, &r.name)? || !is_ip(&r.address) {
+        return Err(bad("name or address is not valid"));
+    }
+    let mut list = secondaries(&s);
+    list.retain(|(n, _)| *n != r.name);
+    list.push((r.name.clone(), r.address.clone()));
+    store_secondaries(&app, &list).await?;
+    Ok(axum::Json(peer_kit(&app.settings())?).into_response())
+}
+
+// What: body with a new peer address.
+// Why: the edit dialog posts {"address": ...}.
 // From: Issue #1683 | PR #1858
 #[derive(serde::Deserialize)]
 struct Address {
     address: String,
 }
 
+// What: new registration token.
+// Why: drop the file; resolve makes a fresh one.
+// From: Issue #1683 | PR #1858
+fn renew_token(s: &Settings) -> Result<String, String> {
+    let dir = PathBuf::from(s.text("SECRETS_DIR")?);
+    let file = secret::file_of(&dir, "SECONDARY_REGISTRATION_TOKEN");
+    match std::fs::remove_file(&file) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            return Err(format!("{}: {e}", file.display()));
+        }
+        _ => {}
+    }
+    registration_token(s)
+}
+
 // What: secondary actions from the DNS page.
-// Why: rotate, remove, address and health in one place.
+// Why: remove, rotate, address and health.
 // From: Issue #1683 | PR #1858
 async fn secondary_action(
     State(app): Shared,
-    axum::Extension(csrf): axum::Extension<Csrf>,
+    Extension(csrf): Extension<Csrf>,
     axum::extract::Path((name, op)): axum::extract::Path<(String, String)>,
     headers: HeaderMap,
     body: axum::body::Bytes,
-) -> Response {
-    if !header_csrf_ok(&headers, &csrf) {
-        return (StatusCode::FORBIDDEN, "CSRF token mismatch").into_response();
-    }
+) -> Page {
+    csrf.check_header(&headers)?;
     let s = app.settings();
     let mut list = secondaries(&s);
-    let Some(pos) = list.iter().position(|(n, _)| *n == name) else {
-        return (StatusCode::NOT_FOUND, "no such secondary").into_response();
+    let Some(at) = list.iter().position(|(n, _)| *n == name) else {
+        return Err(Fail(StatusCode::NOT_FOUND, "no such secondary".into()));
     };
     match op.as_str() {
         "remove" => {
-            list.remove(pos);
-            let res = match store_secondaries(&app, &list).await {
-                Ok(()) => rotate_tsig(&app).await,
-                Err(e) => Err(e),
-            };
-            done(res, "/domains")
+            list.remove(at);
+            store_secondaries(&app, &list).await?;
+            rotate_tsig(&app).await?;
+            Ok(Redirect::to("/domains").into_response())
         }
-        "rotate" => {
-            let dir = PathBuf::from(s.text("SECRETS_DIR").unwrap_or_default());
-            let file = secret::file_of(&dir, "SECONDARY_REGISTRATION_TOKEN");
-            match std::fs::remove_file(&file) {
-                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("{}: {e}", file.display()),
-                    )
-                        .into_response();
-                }
-                _ => {}
-            }
-            match registration_token(&s) {
-                Ok(t) => axum::Json(serde_json::json!({"token": t})).into_response(),
-                Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
-            }
-        }
+        "rotate" => Ok(axum::Json(json!({"token": renew_token(&s)?})).into_response()),
         "address" => {
-            let Ok(a) = serde_json::from_slice::<Address>(&body) else {
-                return (StatusCode::BAD_REQUEST, "body must be {\"address\": ...}")
-                    .into_response();
-            };
-            if a.address.parse::<std::net::IpAddr>().is_err() {
-                return (StatusCode::BAD_REQUEST, "no IP address").into_response();
+            let a: Address = serde_json::from_slice(&body)
+                .map_err(|_| bad("body must be {\"address\": ...}"))?;
+            if !is_ip(&a.address) {
+                return Err(bad("no IP address"));
             }
-            list[pos].1 = a.address;
-            match store_secondaries(&app, &list).await {
-                Ok(()) => StatusCode::NO_CONTENT.into_response(),
-                Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
-            }
+            list[at].1 = a.address;
+            store_secondaries(&app, &list).await.map_err(bad)?;
+            Ok(StatusCode::NO_CONTENT.into_response())
         }
-        "health" => axum::Json(secondary_health(&s, &list[pos].1).await).into_response(),
-        _ => (StatusCode::NOT_FOUND, "unknown action").into_response(),
+        "health" => Ok(axum::Json(secondary_health(&s, &list[at].1).await).into_response()),
+        _ => Err(Fail(StatusCode::NOT_FOUND, "unknown action".into())),
     }
 }
 
-// What: compare LAN zone serial primary vs secondary.
-// Why: shows a lost NOTIFY or broken AXFR (RFC 1982).
+fn serial_of(zones: Vec<lancache_ng::pdns::Zone>, zone: &str) -> Option<u32> {
+    zones.into_iter().find(|z| z.name == zone).map(|z| z.serial)
+}
+
+// What: LAN zone serial, primary vs secondary.
+// Why: shows a lost NOTIFY or AXFR (RFC 1982).
 // From: Issue #1683 | PR #1858
-async fn secondary_health(s: &Settings, address: &str) -> serde_json::Value {
-    let zone = lancache_ng::dns::canonical_zone(&s.text("DNS_LAN_ZONE").unwrap_or_default());
-    let (Ok(primary), Ok(sec), Ok(port), Ok(client)) = (
-        pdns_api(s),
-        secrets(s),
-        s.uint("PDNS_AUTH_API_PORT"),
-        lancache_ng::http::client(s),
-    ) else {
-        return serde_json::json!({"status": "error", "detail": "settings incomplete"});
-    };
-    let remote = lancache_ng::pdns::Api::new(
-        client,
-        &format!("http://{address}:{port}/api/v1/servers/localhost"),
-        &sec.pdns_api_key,
-    );
-    let serial = |zs: Vec<lancache_ng::pdns::Zone>| {
-        zs.into_iter().find(|z| z.name == zone).map(|z| z.serial)
-    };
-    match (
-        primary.zones().await.map(serial),
-        remote.zones().await.map(serial),
-    ) {
-        (Ok(Some(p)), Ok(Some(r))) => {
+async fn peer_serials(s: &Settings, address: &str) -> Result<(Option<u32>, Option<u32>), String> {
+    let zone = lan_zone(s)?;
+    let port = s.uint("PDNS_AUTH_API_PORT")?;
+    let url = format!("http://{address}:{port}/api/v1/servers/localhost");
+    let key = secrets(s)?.pdns_api_key;
+    let remote = lancache_ng::pdns::Api::new(http::client(s)?, &url, &key);
+    let ours = pdns_api(s)?.zones().await?;
+    let theirs = remote.zones().await?;
+    Ok((serial_of(ours, &zone), serial_of(theirs, &zone)))
+}
+
+async fn secondary_health(s: &Settings, address: &str) -> Value {
+    match peer_serials(s, address).await {
+        Ok((Some(p), Some(r))) => {
             let state = lancache_ng::dns::sync_state(p, r);
-            serde_json::json!({"status": format!("{state:?}"), "serial": r})
+            json!({"status": format!("{state:?}"), "serial": r})
         }
-        (Ok(_), Ok(None)) => {
-            serde_json::json!({"status": "missing", "detail": "zone not on secondary"})
-        }
-        (Err(e), _) | (_, Err(e)) => serde_json::json!({"status": "unreachable", "detail": e}),
-        _ => serde_json::json!({"status": "error"}),
+        Ok((_, None)) => json!({"status": "missing", "detail": "zone not on secondary"}),
+        Ok((None, _)) => json!({"status": "error", "detail": "zone not on primary"}),
+        Err(e) => json!({"status": "unreachable", "detail": e}),
     }
 }
 
-// What: Kea control agent client of this stack.
-// Why: subnets, reservations and leases live in Kea.
+// What: on a secondary, flush caches on change.
+// Why: after AXFR old answers must go at once.
+// From: Issue #1683 | PR #1858
+async fn flush_on_transfer(app: Arc<App>) {
+    let mut seen: BTreeMap<String, u32> = BTreeMap::new();
+    loop {
+        let s = app.settings();
+        let wait = s.uint("UI_FLUSH_CHECK_SECONDS").unwrap_or(1).max(1);
+        if s.text("DNS_REPLICATION_ROLE").as_deref() == Ok("secondary") {
+            if let Err(e) = flush_round(&s, &mut seen).await {
+                eprintln!("ui: cache flush: {e}");
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(wait)).await;
+    }
+}
+
+async fn flush_round(s: &Settings, seen: &mut BTreeMap<String, u32>) -> Result<(), String> {
+    let key = secrets(s)?.pdns_api_key;
+    let client = http::client(s)?;
+    for zone in pdns_api(s)?.zones().await? {
+        let before = seen.insert(zone.name.clone(), zone.serial);
+        if before.is_none_or(|b| b == zone.serial) {
+            continue;
+        }
+        for url in s.list("RECURSOR_API_URLS") {
+            let r = lancache_ng::pdns::Api::new(client.clone(), &url, &key);
+            r.flush(&zone.name, true).await?;
+        }
+    }
+    Ok(())
+}
+
+// What: Kea control agent of this stack.
+// Why: subnets, reservations, leases live in Kea.
 // From: Issue #1683 | PR #1858
 fn kea_api(s: &Settings) -> Result<lancache_ng::kea::Api, String> {
-    Ok(lancache_ng::kea::Api::new(
-        lancache_ng::http::client(s)?,
-        &s.text("KEA_CTRL_URL")?,
-    ))
+    Ok(lancache_ng::kea::Api::new(http::client(s)?, &s.text("KEA_CTRL_URL")?))
 }
 
-// What: one Kea subnet as template row.
-// Why: the page shows flat fields, Kea keeps option-data.
+fn option_data(sn: &Value, name: &str) -> String {
+    let rows = sn["option-data"].as_array().cloned().unwrap_or_default();
+    let hit = rows.iter().find(|o| o["name"] == name);
+    hit.and_then(|o| o["data"].as_str()).unwrap_or_default().to_string()
+}
+
+// What: one Kea subnet as flat page fields.
+// Why: the page shows fields; Kea has option-data.
 // From: Issue #1683 | PR #1858
-fn subnet_row(sn: &serde_json::Value) -> serde_json::Value {
-    let opt = |name: &str| {
-        sn["option-data"]
-            .as_array()
-            .and_then(|a| a.iter().find(|o| o["name"] == name))
-            .and_then(|o| o["data"].as_str())
-            .unwrap_or_default()
-            .to_string()
-    };
-    let dns: Vec<String> = opt("domain-name-servers")
+fn subnet_row(sn: &Value) -> Value {
+    let dns: Vec<String> = option_data(sn, "domain-name-servers")
         .split(',')
         .map(|x| x.trim().to_string())
         .collect();
     let pool = sn["pools"][0]["pool"].as_str().unwrap_or_default();
-    let (start, end) = pool
-        .split_once('-')
-        .map(|(a, b)| (a.trim(), b.trim()))
-        .unwrap_or(("", ""));
-    let custom: Vec<serde_json::Value> = sn["option-data"]
+    let (start, end) = pool.split_once('-').unwrap_or(("", ""));
+    let custom: Vec<Value> = sn["option-data"]
         .as_array()
-        .map(|a| {
-            a.iter()
-                .filter(|o| o.get("code").is_some() && o.get("name").is_none())
-                .cloned()
-                .collect()
-        })
-        .unwrap_or_default();
-    serde_json::json!({
-        "id": sn["id"], "subnet": sn["subnet"], "gateway": opt("routers"),
+        .into_iter()
+        .flatten()
+        .filter(|o| o.get("code").is_some() && o.get("name").is_none())
+        .cloned()
+        .collect();
+    json!({
+        "id": sn["id"],
+        "subnet": sn["subnet"],
+        "gateway": option_data(sn, "routers"),
         "dns_primary": dns.first().cloned().unwrap_or_default(),
         "dns_secondary": dns.get(1).cloned().unwrap_or_default(),
-        "ntp_servers": opt("ntp-servers"), "pool_start": start, "pool_end": end,
-        "lease_time": sn["valid-lifetime"], "custom_options": custom,
+        "ntp_servers": option_data(sn, "ntp-servers"),
+        "pool_start": start.trim(),
+        "pool_end": end.trim(),
+        "lease_time": sn["valid-lifetime"],
+        "custom_options": custom,
     })
 }
 
-// What: DHCP page: mode, proxy/relay, Kea data.
-// Why: Kea data is read live; nothing is cached.
+// What: subnets, reservations, leases from Kea.
+// Why: read live; nothing is kept in the ui.
 // From: Issue #1683 | PR #1858
-async fn dhcp(State(app): Shared, axum::Extension(csrf): axum::Extension<Csrf>) -> Response {
+async fn kea_view(api: &lancache_ng::kea::Api) -> (Vec<Value>, Vec<Value>, Vec<Value>) {
+    let (mut subnets, mut reservations, mut leases) = (Vec::new(), Vec::new(), Vec::new());
+    if let Ok(cfg) = api.config().await {
+        for sn in cfg["Dhcp4"]["subnet4"].as_array().into_iter().flatten() {
+            for r in sn["reservations"].as_array().into_iter().flatten() {
+                reservations.push(json!({
+                    "subnet_id": sn["id"], "mac": r["hw-address"],
+                    "ip": r["ip-address"], "hostname": r["hostname"],
+                }));
+            }
+            subnets.push(subnet_row(sn));
+        }
+    }
+    for l in api.leases().await.unwrap_or_default() {
+        let ends = l["cltt"].as_u64().unwrap_or(0) + l["valid-lft"].as_u64().unwrap_or(0);
+        leases.push(json!({
+            "ip": l["ip-address"], "mac": l["hw-address"], "hostname": l["hostname"],
+            "subnet_id": l["subnet-id"], "expires": ends.to_string(),
+        }));
+    }
+    (subnets, reservations, leases)
+}
+
+// What: snapshot store of the Kea config.
+// Why: each subnet change can be undone.
+// From: Issue #1683 | PR #1858
+fn kea_store(s: &Settings) -> Result<lancache_ng::snapshot::Store, String> {
+    let dir = PathBuf::from(s.text("KEA_SNAPSHOT_DIR")?);
+    let keep = usize::try_from(s.uint("KEA_SNAPSHOT_KEEP")?).map_err(|e| e.to_string())?;
+    Ok(lancache_ng::snapshot::Store { dir, keep, owner: owner_keep() })
+}
+
+// What: DHCP page.
+// Why: mode, proxy, relay and live Kea data.
+// From: Issue #1683 | PR #1858
+async fn dhcp(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     let s = app.settings();
+    let mode = s.text("DHCP_MODE")?;
     let mut ctx = Context::new();
-    let mode = s.text("DHCP_MODE").unwrap_or_default();
     ctx.insert("dhcp_mode", &mode);
-    ctx.insert(
-        "dhcp_modes",
-        &["off", "kea", "dnsmasq-proxy", "dnsmasq-relay"],
-    );
+    ctx.insert("dhcp_modes", &s.list("DHCP_MODES"));
     ctx.insert("dhcp_has_kea", &(mode == "kea"));
     ctx.insert("dhcp_is_dnsmasq", &mode.starts_with("dnsmasq"));
     ctx.insert("dhcp_is_relay", &(mode == "dnsmasq-relay"));
-    ctx.insert("dhcp_ddns_enabled", &s.flag("DHCP_DDNS").unwrap_or(false));
+    ctx.insert("dhcp_ddns_enabled", &s.flag("DHCP_DDNS")?);
     let (mut subnets, mut reservations, mut leases) = (Vec::new(), Vec::new(), Vec::new());
     if mode == "kea" {
         match kea_api(&s) {
-            Ok(api) => {
-                if let Ok(cfg) = api.config().await {
-                    for sn in cfg["Dhcp4"]["subnet4"]
-                        .as_array()
-                        .cloned()
-                        .unwrap_or_default()
-                    {
-                        for r in sn["reservations"].as_array().cloned().unwrap_or_default() {
-                            reservations.push(serde_json::json!({
-                                "subnet_id": sn["id"], "mac": r["hw-address"],
-                                "ip": r["ip-address"], "hostname": r["hostname"],
-                            }));
-                        }
-                        subnets.push(subnet_row(&sn));
-                    }
-                }
-                for l in api.leases().await.unwrap_or_default() {
-                    let end =
-                        l["cltt"].as_u64().unwrap_or(0) + l["valid-lft"].as_u64().unwrap_or(0);
-                    leases.push(serde_json::json!({
-                        "ip": l["ip-address"], "mac": l["hw-address"], "hostname": l["hostname"],
-                        "subnet_id": l["subnet-id"], "expires": end.to_string(),
-                    }));
-                }
-            }
+            Ok(api) => (subnets, reservations, leases) = kea_view(&api).await,
             Err(e) => ctx.insert("hint", &e),
         }
     }
     ctx.insert("subnets", &subnets);
     ctx.insert("reservations", &reservations);
     ctx.insert("leases", &leases);
-    let snaps: Vec<serde_json::Value> = kea_store(&s)
-        .and_then(|st| st.list())
-        .unwrap_or_default()
-        .iter()
-        .map(|id| {
-            let secs = id.parse::<u128>().unwrap_or(0) / 1_000_000_000;
-            serde_json::json!({"id": id, "created_unix": secs.to_string()})
-        })
-        .collect();
+    let store = kea_store(&s)?;
+    let mut snaps = Vec::new();
+    for id in store.list().unwrap_or_default() {
+        let created = created_unix(&store.dir.join(&id))?;
+        snaps.push(json!({"id": id, "created_unix": created}));
+    }
     ctx.insert("kea_snapshots", &snaps);
-    app.page("dhcp.html", ctx, &csrf.0)
+    app.page("dhcp.html", ctx, &csrf)
 }
 
-// What: snapshot store of the Kea config.
-// Why: every subnet change can be rolled back.
-// From: Issue #1683 | PR #1858
-fn kea_store(s: &Settings) -> Result<lancache_ng::snapshot::Store, String> {
-    Ok(lancache_ng::snapshot::Store {
-        dir: PathBuf::from(s.text("KEA_SNAPSHOT_DIR")?),
-        keep: usize::try_from(s.uint("KEA_SNAPSHOT_KEEP")?).map_err(|e| e.to_string())?,
-        owner: fs::Owner {
-            uid: None,
-            gid: None,
-        },
-    })
-}
-
-// What: change the Kea config with a function.
+// What: change Kea subnets with a closure.
 // Why: get, edit, set, write, snapshot; one path.
 // From: Issue #1683 | PR #1858
 async fn kea_edit(
     s: &Settings,
-    edit: impl FnOnce(&mut Vec<serde_json::Value>) -> Result<(), String>,
+    edit: impl FnOnce(&mut Vec<Value>) -> Result<(), String>,
 ) -> Result<(), String> {
     let api = kea_api(s)?;
     let mut cfg = api.config().await?;
-    cfg.as_object_mut().map(|o| o.remove("hash"));
-    let mut subnets = cfg["Dhcp4"]["subnet4"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
+    if let Some(top) = cfg.as_object_mut() {
+        top.remove("hash");
+    }
+    let mut subnets = cfg["Dhcp4"]["subnet4"].as_array().cloned().unwrap_or_default();
     edit(&mut subnets)?;
-    cfg["Dhcp4"]["subnet4"] = serde_json::Value::Array(subnets);
+    cfg["Dhcp4"]["subnet4"] = Value::Array(subnets);
     api.set_config(cfg.clone()).await?;
     let store = kea_store(s)?;
     std::fs::create_dir_all(&store.dir).map_err(|e| format!("{}: {e}", store.dir.display()))?;
-    store
-        .save(&serde_json::to_vec(&cfg).map_err(|e| e.to_string())?)
-        .map(drop)
+    store.save(&serde_json::to_vec(&cfg).map_err(|e| e.to_string())?)?;
+    Ok(())
 }
 
 // What: Kea subnet from the subnet form.
-// Why: managed options by name, as Kea expects.
+// Why: named options; code options and hosts kept.
 // From: Issue #1683 | PR #1858
-fn subnet_from(
-    get: &dyn Fn(&str) -> String,
-    id: u64,
-    keep: Option<&serde_json::Value>,
-) -> serde_json::Value {
-    let dns = [get("dns_primary"), get("dns_secondary")]
+fn subnet_from(get: &dyn Fn(&str) -> String, id: u64, old: Option<&Value>) -> Value {
+    let dns: Vec<String> = [get("dns_primary"), get("dns_secondary")]
         .into_iter()
         .filter(|d| !d.is_empty())
-        .collect::<Vec<_>>()
-        .join(", ");
+        .collect();
     let mut opts = vec![
-        serde_json::json!({"name": "routers", "data": get("gateway")}),
-        serde_json::json!({"name": "domain-name-servers", "data": dns}),
+        json!({"name": "routers", "data": get("gateway")}),
+        json!({"name": "domain-name-servers", "data": dns.join(", ")}),
     ];
-    for (name, key) in [("domain-name", "domain"), ("ntp-servers", "ntp_servers")] {
-        if !get(key).is_empty() {
-            opts.push(serde_json::json!({"name": name, "data": get(key)}));
+    for (name, field) in [("domain-name", "domain"), ("ntp-servers", "ntp_servers")] {
+        let value = get(field);
+        if !value.is_empty() {
+            opts.push(json!({"name": name, "data": value}));
         }
     }
-    if let Some(k) = keep {
-        opts.extend(
-            k["option-data"]
-                .as_array()
-                .cloned()
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|o| o.get("name").is_none()),
-        );
+    if let Some(old) = old {
+        let coded = old["option-data"].as_array().into_iter().flatten();
+        opts.extend(coded.filter(|o| o.get("name").is_none()).cloned());
     }
-    let mut sn = serde_json::json!({
-        "id": id, "subnet": get("subnet"),
-        "pools": [{"pool": format!("{} - {}", get("pool_start"), get("pool_end"))}],
-        "option-data": opts,
-    });
-    if let Ok(lt) = get("lease_time").parse::<u64>() {
-        sn["valid-lifetime"] = lt.into();
+    let pool = format!("{} - {}", get("pool_start"), get("pool_end"));
+    let mut sn = json!({"id": id, "subnet": get("subnet"), "pools": [{"pool": pool}],
+                        "option-data": opts});
+    if let Ok(life) = get("lease_time").parse::<u64>() {
+        sn["valid-lifetime"] = life.into();
     }
-    if let Some(r) = keep.and_then(|k| k.get("reservations")) {
-        sn["reservations"] = r.clone();
+    if let Some(hosts) = old.and_then(|o| o.get("reservations")) {
+        sn["reservations"] = hosts.clone();
     }
     sn
 }
 
-// What: one DHCP page form action.
-// Why: SOT keys via commit; Kea data via kea_edit.
+fn subnet_mut(list: &mut [Value], id: u64) -> Result<&mut Value, String> {
+    let found = list.iter_mut().find(|x| x["id"].as_u64() == Some(id));
+    found.ok_or_else(|| format!("no subnet {id}"))
+}
+
+// What: SOT keys of the proxy and relay forms.
+// Why: field dhcp_x maps to key DHCP_X.
 // From: Issue #1683 | PR #1858
-async fn dhcp_action(
-    State(app): Shared,
-    axum::Extension(csrf): axum::Extension<Csrf>,
-    axum::extract::Path(op): axum::extract::Path<String>,
-    Form(f): Form<BTreeMap<String, String>>,
-) -> Response {
-    if !csrf_ok(&f, &csrf) {
-        return (StatusCode::FORBIDDEN, "CSRF token mismatch").into_response();
+fn dnsmasq_fields(form: &Fields, proxy: bool) -> Fields {
+    let mut out = Fields::new();
+    for (k, v) in form {
+        let ours = k.starts_with("dhcp_") || k.starts_with("upstream_");
+        if !ours || k.starts_with("dhcp_dns_") {
+            continue;
+        }
+        let key = k.to_ascii_uppercase().replace("DHCP_PROXY_CUSTOM_OPTIONS", "DHCP_CUSTOM_OPTIONS");
+        out.insert(key, v.trim().to_string());
     }
-    let s = app.settings();
-    let get = |k: &str| f.get(k).map(|v| v.trim().to_string()).unwrap_or_default();
-    let id_of = |k: &str| {
-        get(k)
-            .parse::<u64>()
-            .map_err(|_| format!("{k} must be a number"))
-    };
-    let result = match op.as_str() {
-        "mode" => {
-            commit(
-                &app,
-                BTreeMap::from([("DHCP_MODE".into(), get("dhcp_mode"))]),
-            )
-            .await
-        }
-        "ddns" => {
-            commit(
-                &app,
-                BTreeMap::from([(
-                    "DHCP_DDNS".into(),
-                    (get("enabled") == "1" || get("enabled") == "true").to_string(),
-                )]),
-            )
-            .await
-        }
-        "proxy" | "relay" => {
-            let mut up: BTreeMap<String, String> = f
-                .iter()
-                .filter(|(k, _)| k.starts_with("dhcp_") || k.starts_with("upstream_"))
-                .filter(|(k, _)| !k.starts_with("dhcp_dns_"))
-                .map(|(k, v)| {
-                    (
-                        k.to_ascii_uppercase()
-                            .replace("DHCP_PROXY_CUSTOM_OPTIONS", "DHCP_CUSTOM_OPTIONS"),
-                        v.trim().to_string(),
-                    )
-                })
-                .collect();
-            if op == "proxy" {
-                let dns = [get("dhcp_dns_primary"), get("dhcp_dns_secondary")]
-                    .into_iter()
-                    .filter(|d| !d.is_empty())
-                    .collect::<Vec<_>>();
-                up.insert("DHCP_DNS_SERVERS".into(), dns.join(" "));
-            }
-            commit(&app, up).await
-        }
+    if proxy {
+        let get = |k: &str| form.get(k).map(|v| v.trim().to_string()).unwrap_or_default();
+        let dns: Vec<String> = [get("dhcp_dns_primary"), get("dhcp_dns_secondary")]
+            .into_iter()
+            .filter(|d| !d.is_empty())
+            .collect();
+        out.insert("DHCP_DNS_SERVERS".into(), dns.join(" "));
+    }
+    out
+}
+
+// What: Kea subnet, option and host edits.
+// Why: all go through kea_edit.
+// From: Issue #1683 | PR #1858
+async fn kea_action(s: &Settings, op: &str, get: &dyn Fn(&str) -> String) -> Result<(), String> {
+    let num = |k: &str| get(k).parse::<u64>().map_err(|_| format!("{k} must be a number"));
+    match op {
         "subnet-add" => {
-            kea_edit(&s, |l| {
-                let id = l.iter().filter_map(|x| x["id"].as_u64()).max().unwrap_or(0) + 1;
-                l.push(subnet_from(&get, id, None));
+            kea_edit(s, |l| {
+                let next = l.iter().filter_map(|x| x["id"].as_u64()).max().unwrap_or(0) + 1;
+                l.push(subnet_from(get, next, None));
                 Ok(())
             })
             .await
         }
-        "subnet-update" => match id_of("id") {
-            Ok(id) => {
-                kea_edit(&s, |l| {
-                    let p = l
-                        .iter()
-                        .position(|x| x["id"].as_u64() == Some(id))
-                        .ok_or("no such subnet")?;
-                    l[p] = subnet_from(&get, id, Some(&l[p].clone()));
-                    Ok(())
-                })
-                .await
-            }
-            Err(e) => Err(e),
-        },
-        "subnet-remove" => match id_of("id") {
-            Ok(id) => {
-                kea_edit(&s, |l| {
-                    l.retain(|x| x["id"].as_u64() != Some(id));
-                    Ok(())
-                })
-                .await
-            }
-            Err(e) => Err(e),
-        },
-        "option-add" | "option-remove" => match (
-            id_of("subnet_id"),
-            lancache_ng::dhcp::option_code(&get("code")),
-        ) {
-            (Ok(id), Ok(code)) => {
-                let data = get("data");
-                let add = op == "option-add";
-                kea_edit(&s, |l| {
-                    let sn = l
-                        .iter_mut()
-                        .find(|x| x["id"].as_u64() == Some(id))
-                        .ok_or("no such subnet")?;
-                    let mut opts = sn["option-data"].as_array().cloned().unwrap_or_default();
-                    opts.retain(|o| {
-                        o["code"].as_u64() != Some(u64::from(code)) || o.get("name").is_some()
-                    });
-                    if add {
-                        opts.push(serde_json::json!({"code": code, "data": data}));
-                    }
-                    sn["option-data"] = opts.into();
-                    Ok(())
-                })
-                .await
-            }
-            (Err(e), _) | (_, Err(e)) => Err(e),
-        },
-        "static-add" | "static-remove" => match id_of("subnet_id") {
-            Ok(id) => {
-                let (mac, ip, host, add) =
-                    (get("mac"), get("ip"), get("hostname"), op == "static-add");
-                kea_edit(&s, |l| {
-                    let sn = l.iter_mut().find(|x| x["id"].as_u64() == Some(id)).ok_or("no such subnet")?;
-                    let mut res = sn["reservations"].as_array().cloned().unwrap_or_default();
-                    res.retain(|r| r["hw-address"].as_str() != Some(mac.as_str()));
-                    if add {
-                        res.push(serde_json::json!({"hw-address": mac, "ip-address": ip, "hostname": host}));
-                    }
-                    sn["reservations"] = res.into();
-                    Ok(())
-                })
-                .await
-            }
-            Err(e) => Err(e),
-        },
-        "lease-release" => match kea_api(&s) {
-            Ok(api) => api.release(&get("ip")).await,
-            Err(e) => Err(e),
-        },
-        "kea-rollback" => match kea_store(&s).and_then(|st| st.read(&get("snapshot_id"))) {
-            Ok(body) => match (
-                serde_json::from_slice::<serde_json::Value>(&body),
-                kea_api(&s),
-            ) {
-                (Ok(cfg), Ok(api)) => api.set_config(cfg).await,
-                (Err(e), _) => Err(e.to_string()),
-                (_, Err(e)) => Err(e),
-            },
-            Err(e) => Err(e),
-        },
+        "subnet-update" => {
+            let id = num("id")?;
+            kea_edit(s, |l| {
+                let sn = subnet_mut(l, id)?;
+                *sn = subnet_from(get, id, Some(&sn.clone()));
+                Ok(())
+            })
+            .await
+        }
+        "subnet-remove" => {
+            let id = num("id")?;
+            kea_edit(s, |l| {
+                l.retain(|x| x["id"].as_u64() != Some(id));
+                Ok(())
+            })
+            .await
+        }
+        "option-add" | "option-remove" => {
+            let (id, code) = (num("subnet_id")?, lancache_ng::dhcp::option_code(&get("code"))?);
+            let data = get("data");
+            kea_edit(s, |l| {
+                let sn = subnet_mut(l, id)?;
+                let mut opts = sn["option-data"].as_array().cloned().unwrap_or_default();
+                let same = |o: &Value| o["code"].as_u64() == Some(u64::from(code));
+                opts.retain(|o| !same(o) || o.get("name").is_some());
+                if op == "option-add" {
+                    opts.push(json!({"code": code, "data": data}));
+                }
+                sn["option-data"] = opts.into();
+                Ok(())
+            })
+            .await
+        }
+        "static-add" | "static-remove" => {
+            let id = num("subnet_id")?;
+            let (mac, ip, host) = (get("mac"), get("ip"), get("hostname"));
+            kea_edit(s, |l| {
+                let sn = subnet_mut(l, id)?;
+                let mut hosts = sn["reservations"].as_array().cloned().unwrap_or_default();
+                hosts.retain(|r| r["hw-address"].as_str() != Some(mac.as_str()));
+                if op == "static-add" {
+                    hosts.push(json!({"hw-address": mac, "ip-address": ip, "hostname": host}));
+                }
+                sn["reservations"] = hosts.into();
+                Ok(())
+            })
+            .await
+        }
+        "lease-release" => kea_api(s)?.release(&get("ip")).await,
+        "kea-rollback" => {
+            let body = kea_store(s)?.read(&get("snapshot_id"))?;
+            let cfg: Value = serde_json::from_slice(&body).map_err(|e| e.to_string())?;
+            kea_api(s)?.set_config(cfg).await
+        }
         _ => Err(format!("unknown DHCP action {op}")),
-    };
-    done(result, "/dhcp")
+    }
 }
 
-// What: on-demand DHCP precheck in any mode.
-// Why: finds foreign servers and tests a lease; no polling.
+// What: one DHCP page form, chosen by op.
+// Why: SOT keys via commit; Kea via kea_action.
 // From: Issue #1683 | PR #1858
-async fn dhcp_check(
+async fn dhcp_action(
     State(app): Shared,
-    axum::Extension(csrf): axum::Extension<Csrf>,
-    headers: HeaderMap,
-) -> Response {
-    if !header_csrf_ok(&headers, &csrf) {
-        return (StatusCode::FORBIDDEN, "CSRF token mismatch").into_response();
-    }
+    Extension(csrf): Extension<Csrf>,
+    axum::extract::Path(op): axum::extract::Path<String>,
+    Form(form): Form<Fields>,
+) -> Page {
+    csrf.check(&form)?;
     let s = app.settings();
-    let report = tokio::task::spawn_blocking(move || lancache_ng::dhcp_probe::run(&s)).await;
-    match report {
-        Ok(r) => axum::Json(r).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    }
+    let get = |k: &str| form.get(k).map(|v| v.trim().to_string()).unwrap_or_default();
+    let on = matches!(get("enabled").as_str(), "1" | "true");
+    let result = match op.as_str() {
+        "mode" => commit(&app, one("DHCP_MODE", get("dhcp_mode"))).await,
+        "ddns" => commit(&app, one("DHCP_DDNS", on)).await,
+        "proxy" | "relay" => commit(&app, dnsmasq_fields(&form, op == "proxy")).await,
+        _ => kea_action(&s, &op, &get).await,
+    };
+    finish(result, "/dhcp")
 }
 
-// What: statistics page: one tab per time range.
-// Why: rrdtool draws PNGs; no chart script in the page.
+// What: DHCP precheck on demand.
+// Why: finds foreign servers; tests one lease.
 // From: Issue #1683 | PR #1858
-async fn stats(State(app): Shared, axum::Extension(csrf): axum::Extension<Csrf>) -> Response {
+async fn dhcp_check(State(app): Shared, Extension(csrf): Extension<Csrf>, headers: HeaderMap) -> Page {
+    csrf.check_header(&headers)?;
+    let s = app.settings();
+    let probe = move || lancache_ng::dhcp_probe::run(&s);
+    let report = tokio::task::spawn_blocking(probe).await.map_err(|e| e.to_string())?;
+    Ok(axum::Json(report).into_response())
+}
+
+// What: statistics page, one tab per range.
+// Why: rrdtool draws; the page shows PNGs.
+// From: Issue #1683 | PR #1858
+async fn stats(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     let s = app.settings();
     let mut ctx = Context::new();
     match lancache_ng::rrd::graphs(&s) {
-        Ok(g) => {
-            let rows: Vec<serde_json::Value> = g
-                .iter()
-                .map(|x| serde_json::json!({"name": x.name, "title": x.title}))
-                .collect();
+        Ok(list) => {
+            let rows: Vec<Value> =
+                list.iter().map(|g| json!({"name": g.name, "title": g.title})).collect();
             ctx.insert("graphs", &rows);
         }
         Err(e) => ctx.insert("stats_error", &e),
     }
     ctx.insert("ranges", &s.list("STATS_RANGES"));
-    app.page("stats.html", ctx, &csrf.0)
+    app.page("stats.html", ctx, &csrf)
 }
 
-// What: query of a graph image.
-// Why: dark=1 draws with the dark colour set.
+// What: query of one graph image.
+// Why: dark=1 uses the dark colour set.
 // From: Issue #1683 | PR #1858
 #[derive(serde::Deserialize)]
 struct GraphQuery {
@@ -1409,301 +1335,288 @@ struct GraphQuery {
     dark: u8,
 }
 
-// What: one graph PNG.
+// What: one graph as PNG.
 // Why: drawn on request; RRD files stay small.
 // From: Issue #1683 | PR #1858
 async fn graph(
     State(app): Shared,
     axum::extract::Path(name): axum::extract::Path<String>,
     axum::extract::Query(q): axum::extract::Query<GraphQuery>,
-) -> Response {
+) -> Page {
     let s = app.settings();
-    let Some(g) = lancache_ng::rrd::graphs(&s)
-        .ok()
-        .and_then(|l| l.into_iter().find(|g| g.name == name))
-    else {
-        return (StatusCode::NOT_FOUND, "no such graph").into_response();
+    let all = lancache_ng::rrd::graphs(&s)?;
+    let Some(g) = all.into_iter().find(|g| g.name == name) else {
+        return Err(Fail(StatusCode::NOT_FOUND, "no such graph".into()));
     };
-    match tokio::task::spawn_blocking(move || lancache_ng::rrd::png(&s, &g, &q.range, q.dark == 1))
-        .await
-    {
-        Ok(Ok(png)) => ([(header::CONTENT_TYPE, "image/png")], png).into_response(),
-        Ok(Err(e)) => (StatusCode::BAD_REQUEST, e).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    let draw = move || lancache_ng::rrd::png(&s, &g, &q.range, q.dark == 1);
+    let png = tokio::task::spawn_blocking(draw).await.map_err(|e| e.to_string())?.map_err(bad)?;
+    Ok(([(header::CONTENT_TYPE, "image/png")], png).into_response())
+}
+
+// What: SNMP samples into RRD each step.
+// Why: the ui owns the statistics files.
+// From: Issue #1683 | PR #1858
+fn sample_all(s: &Settings) -> Vec<String> {
+    match lancache_ng::rrd::graphs(s) {
+        Err(e) => vec![e],
+        Ok(list) => list.iter().filter_map(|g| lancache_ng::rrd::sample(s, g).err()).collect(),
     }
 }
 
-// What: background sampler: SNMP into RRD each step.
-// Why: the ui owns statistics; the watchdog only watches.
-// From: Issue #1683 | PR #1858
 async fn sampler(app: Arc<App>) {
     loop {
         let s = app.settings();
-        let step = s.uint("STATS_STEP").unwrap_or(0);
-        if step == 0 {
-            eprintln!("ui: stats: STATS_STEP is not set; sampler stops");
-            return;
-        }
-        let s2 = s.clone();
-        let res = tokio::task::spawn_blocking(move || {
-            let mut errs = Vec::new();
-            match lancache_ng::rrd::graphs(&s2) {
-                Ok(gs) => {
-                    for g in gs {
-                        if let Err(e) = lancache_ng::rrd::sample(&s2, &g) {
-                            errs.push(e);
-                        }
-                    }
-                }
-                Err(e) => errs.push(e),
+        let step = match s.uint("STATS_STEP") {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("ui: stats stop: {e}");
+                return;
             }
-            errs
-        })
-        .await;
-        match res {
-            Ok(errs) => errs.iter().for_each(|e| eprintln!("ui: stats: {e}")),
+        };
+        let errs = tokio::task::spawn_blocking(move || sample_all(&s)).await;
+        match errs {
+            Ok(list) => list.iter().for_each(|e| eprintln!("ui: stats: {e}")),
             Err(e) => eprintln!("ui: stats: {e}"),
         }
         tokio::time::sleep(Duration::from_secs(step)).await;
     }
 }
 
-// What: restart or reload one program in a container.
-// Why: OpenRC rc-service; only SOT-listed programs.
+// What: container name of a compose service.
+// Why: Docker calls need the real name.
+// From: Issue #1683 | PR #1858
+async fn container_of(app: &App, s: &Settings, service: &str) -> Result<String, String> {
+    let (_, limit) = app.limits(s)?;
+    let list = app.docker.project(&s.text("COMPOSE_PROJECT")?, limit).await;
+    let list = list.map_err(|e| e.to_string())?;
+    let hit = list.iter().find(|c| c["Labels"][docker::SERVICE_LABEL].as_str() == Some(service));
+    let name = hit.and_then(|c| c["Names"][0].as_str());
+    name.map(|n| n.trim_start_matches('/').to_string())
+        .ok_or_else(|| format!("no container for {service}"))
+}
+
+// What: run a command in a service container.
+// Why: rc-service and cachehamster go this way.
+// From: Issue #1683 | PR #1858
+async fn exec_in(app: &App, s: &Settings, service: &str, cmd: &[&str]) -> Result<(i64, String), String> {
+    let name = container_of(app, s, service).await?;
+    let (_, limit) = app.limits(s)?;
+    app.docker.exec(&name, cmd, limit).await.map_err(|e| e.to_string())
+}
+
+// What: restart or reload one program.
+// Why: only through OpenRC; only listed ones.
 // From: Issue #1683 | PR #1858
 async fn service_action(
     State(app): Shared,
-    axum::Extension(csrf): axum::Extension<Csrf>,
-    axum::extract::Path((container, program, action)): axum::extract::Path<(
-        String,
-        String,
-        String,
-    )>,
+    Extension(csrf): Extension<Csrf>,
+    axum::extract::Path((container, program, action)): axum::extract::Path<(String, String, String)>,
     headers: HeaderMap,
-) -> Response {
-    if !header_csrf_ok(&headers, &csrf) {
-        return (StatusCode::FORBIDDEN, "CSRF token mismatch").into_response();
-    }
+) -> Page {
+    csrf.check_header(&headers)?;
     if action != "restart" && action != "reload" {
-        return (StatusCode::BAD_REQUEST, "action must be restart or reload").into_response();
+        return Err(bad("action must be restart or reload"));
     }
     let s = app.settings();
-    if !s
-        .list("UI_SERVICES")
-        .contains(&format!("{container}:{program}"))
-    {
-        return (StatusCode::NOT_FOUND, "program not offered").into_response();
+    if !s.list("UI_SERVICES").contains(&format!("{container}:{program}")) {
+        return Err(Fail(StatusCode::NOT_FOUND, "program not offered".into()));
     }
-    match exec_in(&app, &s, &container, &["rc-service", &program, &action]).await {
-        Ok((0, _)) => StatusCode::NO_CONTENT.into_response(),
-        Ok((code, out)) => (
-            StatusCode::BAD_GATEWAY,
-            format!("rc-service exit {code}: {out}"),
-        )
-            .into_response(),
-        Err(e) => (StatusCode::BAD_GATEWAY, e).into_response(),
+    let cmd = ["rc-service", program.as_str(), action.as_str()];
+    let (code, out) = exec_in(&app, &s, &container, &cmd).await
+        .map_err(|e| Fail(StatusCode::BAD_GATEWAY, e))?;
+    if code != 0 {
+        return Err(Fail(StatusCode::BAD_GATEWAY, format!("rc-service exit {code}: {out}")));
     }
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
-// What: run a command in the container of a service.
-// Why: one owner for name lookup and the exec limit.
-// From: Issue #1683 | PR #1858
-async fn exec_in(
-    app: &App,
-    s: &Settings,
-    service: &str,
-    cmd: &[&str],
-) -> Result<(i64, String), String> {
-    let (_, limit) = app.limits(s)?;
-    let project = s.text("COMPOSE_PROJECT")?;
-    let list = app
-        .docker
-        .project(&project, limit)
-        .await
-        .map_err(|e| e.to_string())?;
-    let name = list
-        .iter()
-        .find(|c| c["Labels"][docker::SERVICE_LABEL].as_str() == Some(service))
-        .and_then(|c| c["Names"][0].as_str())
-        .map(|n| n.trim_start_matches('/').to_string())
-        .ok_or_else(|| format!("no container for {service}"))?;
-    app.docker
-        .exec(&name, cmd, limit)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-// What: one cachehamster command; its JSON answer.
-// Why: the program runs in the services container.
+// What: one cachehamster command; JSON answer.
+// Why: it runs in the services container.
 // From: Issue #871 | PR #1858
-async fn hamster(app: &App, args: &[&str]) -> Result<serde_json::Value, String> {
+async fn hamster(app: &App, args: &[&str]) -> Result<Value, String> {
     let s = app.settings();
-    let service = s.text("CACHEHAMSTER_SERVICE")?;
     let program = s.text("CACHEHAMSTER_PROGRAM")?;
     let mut cmd = vec![program.as_str()];
     cmd.extend_from_slice(args);
-    let (code, out) = exec_in(app, &s, &service, &cmd).await?;
-    let line = out.lines().rev().find(|l| l.starts_with('{')).unwrap_or("");
-    let value: serde_json::Value =
-        serde_json::from_str(line).map_err(|e| format!("cachehamster answer: {e}: {out}"))?;
-    match (code, value.get("error").and_then(|e| e.as_str())) {
-        (0, None) => Ok(value),
-        (_, Some(e)) => Err(e.to_string()),
-        (c, None) => Err(format!("cachehamster exit {c}")),
+    let (code, out) = exec_in(app, &s, &s.text("CACHEHAMSTER_SERVICE")?, &cmd).await?;
+    let line = out.lines().rev().find(|l| l.starts_with('{')).unwrap_or_default();
+    let v: Value = serde_json::from_str(line).map_err(|e| format!("cachehamster: {e}: {out}"))?;
+    if let Some(e) = v.get("error").and_then(Value::as_str) {
+        return Err(e.to_string());
     }
+    if code != 0 {
+        return Err(format!("cachehamster exit {code}"));
+    }
+    Ok(v)
 }
 
-// What: the cachehamster page: login, jobs, library.
-// Why: prefill is driven only from the UI.
+// What: cachehamster page.
+// Why: prefill is driven from the ui only.
 // From: Issue #871 | PR #1858
-async fn cachehamster(
-    State(app): Shared,
-    axum::Extension(csrf): axum::Extension<Csrf>,
-) -> Response {
+async fn cachehamster(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     let mut ctx = Context::new();
     match hamster(&app, &["status"]).await {
         Ok(v) => ctx.insert("hamster", &v),
         Err(e) => ctx.insert("hamster_error", &e),
     }
-    app.page("cachehamster.html", ctx, &csrf.0)
+    app.page("cachehamster.html", ctx, &csrf)
 }
 
-// What: form actions: add, start, cancel, remove, logout.
-// Why: each maps 1:1 to a cachehamster command.
+// What: when a job runs, as a command word.
+// Why: the page sends unix seconds for "at".
+// From: Issue #871 | PR #1858
+fn job_time(when: &str, at: &str) -> Result<String, Fail> {
+    match when {
+        "at" => at.parse::<u64>().map(|t| format!("at:{t}")).map_err(|_| bad("time not understood")),
+        "later" => Ok("later".into()),
+        _ => Ok("now".into()),
+    }
+}
+
+// What: add, start, cancel, remove, logout.
+// Why: each maps to one cachehamster command.
 // From: Issue #871 | PR #1858
 async fn hamster_action(
     State(app): Shared,
-    axum::Extension(csrf): axum::Extension<Csrf>,
+    Extension(csrf): Extension<Csrf>,
     axum::extract::Path(op): axum::extract::Path<String>,
-    Form(form): Form<BTreeMap<String, String>>,
-) -> Response {
-    if !csrf_ok(&form, &csrf) {
-        return (StatusCode::FORBIDDEN, "CSRF token mismatch").into_response();
-    }
-    let field = |k: &str| form.get(k).map(String::as_str).unwrap_or("").trim().to_string();
-    // What: the page sends the schedule as unix seconds.
-    // Why: the browser knows the local time zone.
-    let when = match field("when").as_str() {
-        "at" => match field("at").parse::<u64>() {
-            Ok(t) => format!("at:{t}"),
-            Err(_) => return (StatusCode::BAD_REQUEST, "time not understood").into_response(),
-        },
-        "later" => "later".to_string(),
-        _ => "now".to_string(),
-    };
-    let what = match field("app").as_str() {
-        "" => field("urls"),
+    Form(form): Form<Fields>,
+) -> Page {
+    csrf.check(&form)?;
+    let get = |k: &str| form.get(k).map(|v| v.trim().to_string()).unwrap_or_default();
+    let when = job_time(&get("when"), &get("at"))?;
+    let what = match get("app").as_str() {
+        "" => get("urls"),
         id => format!("app:{id}"),
     };
-    let (name, id) = (field("name"), field("id"));
+    let (name, id) = (get("name"), get("id"));
     let args: Vec<&str> = match op.as_str() {
         "add" => vec!["add", &name, &when, &what],
         "start" | "cancel" | "remove" => vec![op.as_str(), &id],
         "logout" => vec!["logout"],
-        _ => return (StatusCode::NOT_FOUND, "no such action").into_response(),
+        _ => return Err(Fail(StatusCode::NOT_FOUND, "no such action".into())),
     };
-    done(hamster(&app, &args).await.map(|_| ()), "/cachehamster")
+    finish(hamster(&app, &args).await.map(drop), "/cachehamster")
 }
 
-// What: JSON calls of the QR login and the library.
-// Why: the page polls the login without a reload.
+// What: JSON calls: QR login and library.
+// Why: the page polls without a reload.
 // From: Issue #871 | PR #1858
 async fn hamster_api(
     State(app): Shared,
-    axum::Extension(csrf): axum::Extension<Csrf>,
+    Extension(csrf): Extension<Csrf>,
     axum::extract::Path(op): axum::extract::Path<String>,
     headers: HeaderMap,
-) -> Response {
-    if !header_csrf_ok(&headers, &csrf) {
-        return (StatusCode::FORBIDDEN, "CSRF token mismatch").into_response();
+) -> Page {
+    csrf.check_header(&headers)?;
+    let allowed = ["login-begin", "login-poll", "login-cancel", "library", "status"];
+    if !allowed.contains(&op.as_str()) {
+        return Err(Fail(StatusCode::NOT_FOUND, "no such call".into()));
     }
-    if !["login-begin", "login-poll", "login-cancel", "library", "status"].contains(&op.as_str()) {
-        return (StatusCode::NOT_FOUND, "no such call").into_response();
-    }
-    match hamster(&app, &[op.as_str()]).await {
-        Ok(v) => axum::Json(v).into_response(),
-        Err(e) => (StatusCode::BAD_GATEWAY, e).into_response(),
-    }
+    let v = hamster(&app, &[op.as_str()]).await.map_err(|e| Fail(StatusCode::BAD_GATEWAY, e))?;
+    Ok(axum::Json(v).into_response())
 }
 
-// What: render all configs, write changed files, act.
-// Why: only owners with changed keys or files are touched.
+fn file_mode(s: &Settings) -> Result<u32, String> {
+    let raw = s.text("UI_CONFIG_FILE_MODE")?;
+    u32::from_str_radix(&raw, 8).map_err(|e| format!("UI_CONFIG_FILE_MODE: {e}"))
+}
+
+// What: write rendered files; list the changed.
+// Why: an unchanged file never wakes its owner.
 // From: Issue #1683 | PR #1858
-async fn apply_all(app: &App, old: &Settings, new: &Settings) -> Result<Vec<String>, String> {
-    let sec = secrets(new)?;
-    let serial = u32::try_from(clock::unix_secs() % u64::from(u32::MAX)).unwrap_or(1);
-    let files = render::all(new, &sec, serial).map_err(|e| e.join("; "))?;
-    let keep = fs::Owner {
-        uid: None,
-        gid: None,
-    };
-    let mut changes = old.diff(new);
-    for f in &files {
-        let changed = fs::write_if_changed(&f.path, f.body.as_bytes(), 0o644, keep)
-            .map_err(|e| format!("{}: {e}", f.path.display()))?;
-        if changed {
-            changes.push(config::Change {
+fn write_files(s: &Settings, files: &[render::File]) -> Result<Vec<config::Change>, String> {
+    let mode = file_mode(s)?;
+    let mut out = Vec::new();
+    for f in files {
+        let changed = fs::write_if_changed(&f.path, f.body.as_bytes(), mode, owner_keep());
+        if changed.map_err(|e| format!("{}: {e}", f.path.display()))? {
+            out.push(config::Change {
                 key: f.path.display().to_string(),
                 owner: f.owner.to_string(),
                 effect: config::Effect::Reload,
             });
         }
     }
-    if new.text("DNS_REPLICATION_ROLE").as_deref() == Ok("secondary") {
+    Ok(out)
+}
+
+// What: render, write and wake the owners.
+// Why: only owners with changes are touched.
+// From: Issue #1683 | PR #1858
+async fn apply_all(app: &App, old: &Settings, new: &Settings) -> Result<Vec<String>, String> {
+    let sec = secrets(new)?;
+    let serial = u32::try_from(clock::unix_secs() % u64::from(u32::MAX)).unwrap_or(1);
+    let files = render::all(new, &sec, serial).map_err(|e| e.join("; "))?;
+    let mut changes = old.diff(new);
+    changes.extend(write_files(new, &files)?);
+    if new.text("DNS_REPLICATION_ROLE")? == "secondary" {
         ensure_secondary_zones(new).await?;
     }
     ensure_tsig(new).await?;
-    let plan = apply::plan(&changes);
+    let mut plan = apply::plan(&changes);
     let (grace, limit) = app.limits(new)?;
-    let project = new.text("COMPOSE_PROJECT")?;
-    let name_of = |owner: &str| format!("{project}-{owner}-1");
-    let mut plan = plan;
-    let dhcp = new.text("DHCP_SERVICE")?;
-    let mut extra = Vec::new();
-    if new.text("DHCP_MODE")? == "off" {
-        plan.remove(&dhcp);
-        let r = app
-            .docker
-            .act(&name_of(&dhcp), docker::Action::Stop, grace, limit)
-            .await;
-        extra.push(format!("{dhcp}: off, stop {r:?}"));
+    let mut names = BTreeMap::new();
+    for owner in plan.keys() {
+        names.insert(owner.clone(), container_of(app, new, owner).await?);
     }
-    let done = apply::run(&app.docker, &plan, &name_of, grace, limit).await;
-    Ok(extra
-        .into_iter()
-        .chain(done.into_iter().map(|(o, r)| format!("{o}: {r:?}")))
-        .collect())
+    let mut report = Vec::new();
+    let dhcp = new.text("DHCP_SERVICE")?;
+    if new.text("DHCP_MODE")? == "off" && plan.remove(&dhcp).is_some() {
+        let name = container_of(app, new, &dhcp).await?;
+        let r = app.docker.act(&name, docker::Action::Stop, grace, limit).await;
+        report.push(format!("{dhcp}: mode off, stop {r:?}"));
+    }
+    let lookup = |owner: &str| names.get(owner).cloned().unwrap_or_default();
+    for (owner, result) in apply::run(&app.docker, &plan, &lookup, grace, limit).await {
+        report.push(format!("{owner}: {result:?}"));
+    }
+    Ok(report)
 }
 
+// What: start or stop a container for the user.
+// Why: SERVICES_STOPPED is the wish the watchdog obeys.
+// From: Issue #1683 | PR #1858
+async fn set_wanted(app: &App, service: &str, run: bool) -> Result<(), String> {
+    let s = app.settings();
+    if !s.list("UI_CONTROLLABLE_SERVICES").iter().any(|x| x == service) {
+        return Err(format!("{service} cannot be switched here"));
+    }
+    commit(app, list_change(&s, "SERVICES_STOPPED", service, !run)).await?;
+    let (grace, limit) = app.limits(&s)?;
+    let name = container_of(app, &s, service).await?;
+    let action = if run { docker::Action::Start } else { docker::Action::Stop };
+    app.docker.act(&name, action, grace, limit).await.map_err(|e| e.to_string())
+}
 
-// What: TSIG key in PowerDNS, bound to every zone.
-// Why: AXFR needs the key, not only an allowed IP.
+// What: TSIG key in PowerDNS, bound to zones.
+// Why: AXFR needs the key, not only an address.
 // From: Issue #1683 | PR #1858
 async fn ensure_tsig(s: &Settings) -> Result<(), String> {
     let sec = secrets(s)?;
     let api = pdns_api(s)?;
-    api.set_tsigkey(&sec.tsig_name, &s.text("DDNS_TSIG_ALGORITHM")?, &sec.tsig_secret)
-        .await?;
-    let kind = if s.text("DNS_REPLICATION_ROLE")? == "secondary" {
-        "AXFR-MASTER-TSIG"
-    } else {
-        "TSIG-ALLOW-AXFR"
+    let algorithm = s.text("DDNS_TSIG_ALGORITHM")?;
+    api.set_tsigkey(&sec.tsig_name, &algorithm, &sec.tsig_secret).await?;
+    let kind = match s.text("DNS_REPLICATION_ROLE")?.as_str() {
+        "secondary" => "AXFR-MASTER-TSIG",
+        _ => "TSIG-ALLOW-AXFR",
     };
-    let key = vec![sec.tsig_name.clone()];
+    let key = vec![sec.tsig_name];
     for z in api.zones().await? {
         api.set_metadata(&z.name, kind, &key).await?;
     }
     Ok(())
 }
-// What: create missing secondary zones on this node.
-// Why: zones come from the primary's registration answer.
+
+// What: create missing zones on a secondary.
+// Why: the zone list comes from registration.
 // From: Issue #1683 | PR #1858
 async fn ensure_secondary_zones(s: &Settings) -> Result<(), String> {
     let api = pdns_api(s)?;
     let have: Vec<String> = api.zones().await?.into_iter().map(|z| z.name).collect();
     let masters = vec![s.text("DNS_XFR_PRIMARY")?];
-    for z in s.list("DNS_SECONDARY_ZONES") {
-        let id = lancache_ng::pdns::zone_id(&z);
+    for zone in s.list("DNS_SECONDARY_ZONES") {
+        let id = lancache_ng::pdns::zone_id(&zone);
         if !have.contains(&id) {
             api.create_secondary(&id, &masters).await?;
         }
@@ -1711,71 +1624,64 @@ async fn ensure_secondary_zones(s: &Settings) -> Result<(), String> {
     Ok(())
 }
 
+fn tsig_file(s: &Settings) -> Result<PathBuf, String> {
+    Ok(secret::file_of(Path::new(&s.text("SECRETS_DIR")?), "DDNS_TSIG_KEY"))
+}
 
-// What: the TSIG secret (base64); a rotated file wins.
-// Why: rotation in the ui must beat the setup.sh value.
+// What: fresh 32-byte TSIG secret, base64.
+// Why: PowerDNS and Kea both read base64.
+// From: Issue #1683 | PR #1858
+fn new_tsig() -> String {
+    let hex = secret::random_hex(32);
+    let bytes: Vec<u8> = hex
+        .as_bytes()
+        .chunks(2)
+        .filter_map(|p| std::str::from_utf8(p).ok())
+        .filter_map(|p| u8::from_str_radix(p, 16).ok())
+        .collect();
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+// What: TSIG secret; a rotated file wins.
+// Why: a ui rotation beats the setup.sh value.
 // From: Issue #1683 | PR #1858
 fn tsig_secret(s: &Settings) -> Result<String, String> {
-    let dir = PathBuf::from(s.text("SECRETS_DIR")?);
-    let file = secret::file_of(&dir, "DDNS_TSIG_KEY");
+    let file = tsig_file(s)?;
     if !file.exists() {
         if let Some(v) = process_env("DDNS_TSIG_KEY").filter(|v| !v.is_empty()) {
             return Ok(v);
         }
     }
-    let keep = fs::Owner {
-        uid: None,
-        gid: None,
-    };
-    secret::load_or_create(&file, new_tsig, keep).map_err(|e| format!("DDNS_TSIG_KEY: {e}"))
+    secret::load_or_create(&file, new_tsig, owner_keep()).map_err(|e| format!("DDNS_TSIG_KEY: {e}"))
 }
 
-// What: a fresh 32-byte TSIG secret in base64.
-// Why: PowerDNS and Kea both take base64 secrets.
-// From: Issue #1683 | PR #1858
-fn new_tsig() -> String {
-    let hex = secret::random_hex(32);
-    let raw: Vec<u8> = (0..hex.len() / 2)
-        .filter_map(|i| u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).ok())
-        .collect();
-    base64::engine::general_purpose::STANDARD.encode(raw)
-}
-
-// What: replace the TSIG secret and apply it.
-// Why: locks out a removed or leaked secondary.
+// What: replace the TSIG secret and apply.
+// Why: shuts out a removed or leaked secondary.
 // From: Issue #1683 | PR #1858
 async fn rotate_tsig(app: &App) -> Result<(), String> {
     let s = app.settings();
-    let dir = PathBuf::from(s.text("SECRETS_DIR")?);
-    let file = secret::file_of(&dir, "DDNS_TSIG_KEY");
+    let file = tsig_file(&s)?;
     match std::fs::remove_file(&file) {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
             return Err(format!("{}: {e}", file.display()));
         }
         _ => {}
     }
-    let keep = fs::Owner {
-        uid: None,
-        gid: None,
-    };
-    secret::load_or_create(&file, new_tsig, keep).map_err(|e| format!("DDNS_TSIG_KEY: {e}"))?;
-    let report = apply_all(app, &s, &s).await?;
-    for line in &report {
+    secret::load_or_create(&file, new_tsig, owner_keep()).map_err(|e| format!("DDNS_TSIG_KEY: {e}"))?;
+    for line in apply_all(app, &s, &s).await? {
         eprintln!("ui: tsig rotate: {line}");
     }
     Ok(())
 }
-// What: secrets the configs embed, read or created once.
-// Why: restarts never rotate a stored secret.
+
+// What: secrets the configs embed.
+// Why: made once; restarts never change them.
 // From: Issue #1683 | PR #1858
 fn secrets(s: &Settings) -> Result<render::Secrets, String> {
     let dir = PathBuf::from(s.text("SECRETS_DIR")?);
-    let keep = fs::Owner {
-        uid: None,
-        gid: None,
-    };
     let get = |k: &str| {
-        secret::resolve(process_env(k).as_deref(), &dir, k, keep).map_err(|e| format!("{k}: {e}"))
+        secret::resolve(process_env(k).as_deref(), &dir, k, owner_keep())
+            .map_err(|e| format!("{k}: {e}"))
     };
     Ok(render::Secrets {
         pdns_api_key: get("PDNS_API_KEY")?,
@@ -1785,8 +1691,187 @@ fn secrets(s: &Settings) -> Result<render::Secrets, String> {
     })
 }
 
-// What: menu and API paths every page uses.
-// Why: one table; templates never spell a path.
+// What: bytes of an nginx size like 50g.
+// Why: CACHE_MAX_SIZE uses nginx size units.
+// From: Issue #1069
+fn nginx_bytes(text: &str) -> Result<u64, String> {
+    let t = text.trim().to_ascii_lowercase();
+    let (num, shift) = match t.chars().last() {
+        Some('k') => (&t[..t.len() - 1], 10),
+        Some('m') => (&t[..t.len() - 1], 20),
+        Some('g') => (&t[..t.len() - 1], 30),
+        Some('t') => (&t[..t.len() - 1], 40),
+        _ => (t.as_str(), 0),
+    };
+    let n: u64 = num.parse().map_err(|_| format!("{text:?} is no size"))?;
+    n.checked_shl(shift).ok_or_else(|| format!("{text:?} is too big"))
+}
+
+// What: refuse a bigger cache without room.
+// Why: growth must fit the free disk space.
+// From: Issue #1069
+fn cache_room(s: &Settings, form: &Fields) -> Result<(), Fail> {
+    let Some(wanted) = form.get("CACHE_MAX_SIZE") else {
+        return Ok(());
+    };
+    let new = nginx_bytes(wanted).map_err(bad)?;
+    let old = nginx_bytes(&s.text("CACHE_MAX_SIZE")?)?;
+    if new <= old {
+        return Ok(());
+    }
+    let dir = s.text("NGINX_CACHE_DIR")?;
+    let sp = fs::space(Path::new(&dir)).map_err(|e| format!("{dir}: {e}"))?;
+    let used = sp.total.saturating_sub(sp.free);
+    let reachable = sp.free.saturating_add(used.min(old));
+    if new > reachable {
+        let room = human::bytes(reachable);
+        return Err(bad(format!("cache size {wanted} does not fit; at most {room}")));
+    }
+    Ok(())
+}
+
+// What: traffic-light colour of a container.
+// Why: the beambar shows green, yellow, red, gray.
+// From: Issue #1683 | PR #1858
+fn colour(c: &Value) -> &'static str {
+    let status = c["Status"].as_str().unwrap_or_default();
+    match c["State"].as_str().unwrap_or_default() {
+        "running" if status.contains("(unhealthy)") => "red",
+        "running" if status.contains("(health: starting)") => "yellow",
+        "running" => "green",
+        "exited" | "created" => "gray",
+        _ => "red",
+    }
+}
+
+// What: container states for the beambar.
+// Why: Docker is the source; no status files.
+// From: Issue #1683 | PR #1858
+async fn status(State(app): Shared) -> Response {
+    let s = app.settings();
+    let stopped = s.list("SERVICES_STOPPED");
+    let list = match (app.limits(&s), s.text("COMPOSE_PROJECT")) {
+        (Ok((_, limit)), Ok(project)) => app.docker.project(&project, limit).await.ok(),
+        _ => None,
+    };
+    let Some(list) = list else {
+        return axum::Json(json!({"state": "unavailable"})).into_response();
+    };
+    let rows: Vec<Value> = list
+        .iter()
+        .map(|c| {
+            let name = c["Labels"][docker::SERVICE_LABEL].as_str().unwrap_or_default();
+            json!({"name": name, "status": colour(c), "health": c["Status"],
+                   "stopped_by_user": stopped.iter().any(|x| x == name)})
+        })
+        .collect();
+    axum::Json(json!({"state": "ok", "services": rows})).into_response()
+}
+
+// What: wish from the beambar button.
+// Why: body {"state": "running" or "stopped"}.
+// From: Issue #1683 | PR #1858
+#[derive(serde::Deserialize)]
+struct Want {
+    state: String,
+}
+
+// What: start or stop one container.
+// Why: the wish is saved first; see set_wanted.
+// From: Issue #1683 | PR #1858
+async fn container_state(
+    State(app): Shared,
+    Extension(csrf): Extension<Csrf>,
+    axum::extract::Path(service): axum::extract::Path<String>,
+    headers: HeaderMap,
+    axum::Json(want): axum::Json<Want>,
+) -> Page {
+    csrf.check_header(&headers)?;
+    let run = match want.state.as_str() {
+        "running" => true,
+        "stopped" => false,
+        _ => return Err(bad("state must be running or stopped")),
+    };
+    set_wanted(&app, &service, run).await.map_err(|e| Fail(StatusCode::BAD_GATEWAY, e))?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+// What: restart the ui container itself.
+// Why: Docker restarts it; the page reloads.
+// From: Issue #1683 | PR #1858
+async fn restart_ui(
+    State(app): Shared,
+    Extension(csrf): Extension<Csrf>,
+    Form(form): Form<Fields>,
+) -> Page {
+    csrf.check(&form)?;
+    let s = app.settings();
+    let (grace, limit) = app.limits(&s)?;
+    let name = container_of(&app, &s, &s.text("UI_SERVICE")?).await?;
+    app.docker.act(&name, docker::Action::Restart, grace, limit).await
+        .map_err(|e| Fail(StatusCode::BAD_GATEWAY, e.to_string()))?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+// What: liveness answer for the healthcheck.
+// Why: no login; says only that the ui answers.
+// From: Issue #1683 | PR #1858
+async fn health() -> &'static str {
+    "ok"
+}
+
+fn asset(kind: &'static str, body: &'static [u8]) -> Response {
+    ([(header::CONTENT_TYPE, kind)], body).into_response()
+}
+
+// What: password against a PHC hash.
+// Why: one owner for login and change.
+// From: Issue #1683 | PR #1858
+fn verify(hash: &str, pw: &str) -> bool {
+    let Ok(parsed) = PasswordHash::new(hash) else {
+        return false;
+    };
+    Argon2::default().verify_password(pw.as_bytes(), &parsed).is_ok()
+}
+
+// What: Argon2id PHC string of a password.
+// Why: setup.sh and the page share it.
+// From: Issue #1683 | PR #1858
+fn phc(pw: &str) -> Result<String, String> {
+    use argon2::password_hash::{rand_core::OsRng, SaltString};
+    let salt = SaltString::generate(&mut OsRng);
+    let hash = Argon2::default().hash_password(pw.as_bytes(), &salt);
+    hash.map(|h| h.to_string()).map_err(|e| e.to_string())
+}
+
+// What: hash a password read from stdin.
+// Why: setup.sh keeps only the hash.
+// From: Issue #1683 | PR #1858
+fn hash_password() -> Result<(), String> {
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line).map_err(|e| e.to_string())?;
+    let pw = line.trim_end_matches(['\r', '\n']);
+    if pw.is_empty() {
+        return Err("the password on stdin is empty".into());
+    }
+    println!("{}", phc(pw)?);
+    Ok(())
+}
+
+// What: compile all templates at start.
+// Why: a broken template stops the start.
+// From: Issue #1683 | PR #1858
+fn templates() -> Result<Tera, String> {
+    let mut t = Tera::default();
+    t.autoescape_on(vec!["html"]);
+    for (name, body) in TEMPLATES {
+        t.add_raw_template(name, body).map_err(|e| format!("template {name}: {e}"))?;
+    }
+    Ok(t)
+}
+
+// What: menu pages and form paths.
+// Why: templates never spell a path.
 // From: Issue #1683 | PR #1858
 const PAGES: [(&str, &str); 7] = [
     ("dashboard", "/"),
@@ -1797,6 +1882,7 @@ const PAGES: [(&str, &str); 7] = [
     ("dhcp", "/dhcp"),
     ("setup", "/setup"),
 ];
+
 const ROUTES: [(&str, &str); 45] = [
     ("hamster_add", "/cachehamster/add"),
     ("hamster_start", "/cachehamster/start"),
@@ -1842,308 +1928,92 @@ const ROUTES: [(&str, &str); 45] = [
     ("lease_release", "/dhcp/lease-release"),
     ("kea_rollback", "/dhcp/kea-rollback"),
     ("dhcp_check", "/dhcp/check"),
-    (
-        "service_action",
-        "/api/service/{container}/{program}/{action}",
-    ),
+    ("service_action", "/api/service/{container}/{program}/{action}"),
 ];
 
-// What: traffic-light colour of one container.
-// Why: beambar dots read green, yellow, red, gray.
+// What: command line uses besides the server.
+// Why: setup.sh and the healthcheck need them.
 // From: Issue #1683 | PR #1858
-fn colour(c: &serde_json::Value) -> &'static str {
-    let status = c["Status"].as_str().unwrap_or_default();
-    match c["State"].as_str().unwrap_or_default() {
-        "running" if status.contains("(unhealthy)") => "red",
-        "running" if status.contains("(health: starting)") => "yellow",
-        "running" => "green",
-        "exited" | "created" => "gray",
-        _ => "red",
+async fn command(s: &Settings, args: &[String]) -> Option<Result<(), String>> {
+    match args.first().map(String::as_str) {
+        Some("zone-snapshots") => Some(zone_snapshots_cli(s)),
+        Some("zone-rollback") => Some(match &args[1..] {
+            [zone, id] => rollback(s, zone, id).await.map(|()| {
+                println!("{}", json!({"restored": zone, "snapshot": id}));
+            }),
+            _ => Err("usage: zone-rollback <zone> <snapshot-id>".into()),
+        }),
+        Some("healthcheck") => Some(healthcheck(s).await),
+        _ => None,
     }
 }
 
-// What: container states for the beambar.
-// Why: Docker is the one source; no status files.
-// From: Issue #1683 | PR #1858
-async fn status(State(app): Shared) -> Response {
-    let s = app.settings();
-    let (Ok((_, limit)), Ok(project)) = (app.limits(&s), s.text("COMPOSE_PROJECT")) else {
-        return axum::Json(serde_json::json!({"state": "unavailable"})).into_response();
-    };
-    match app.docker.project(&project, limit).await {
-        Ok(list) => {
-            let services: Vec<serde_json::Value> = list
-                .iter()
-                .map(|c| {
-                    serde_json::json!({
-                        "name": c["Labels"][docker::SERVICE_LABEL],
-                        "status": colour(c),
-                        "health": c["Status"],
-                    })
-                })
-                .collect();
-            axum::Json(serde_json::json!({"state": "ok", "services": services})).into_response()
-        }
-        Err(e) => {
-            eprintln!("ui: status: {e}");
-            axum::Json(serde_json::json!({"state": "unavailable"})).into_response()
-        }
-    }
+async fn healthcheck(s: &Settings) -> Result<(), String> {
+    let url = format!("http://{}:{}/healthz", s.text("LOOPBACK_BIND_IP")?, s.uint("UI_PORT")?);
+    let limit = Duration::from_secs(s.uint("HTTP_CLIENT_TIMEOUT")?);
+    http::probe(&url, None, limit).await
 }
 
-// What: wanted state from the beambar button.
-// Why: body {"state": "running"|"stopped"}.
-// From: Issue #1683 | PR #1858
-#[derive(serde::Deserialize)]
-struct Want {
-    state: String,
-}
-
-// What: start or stop one container of the stack.
-// Why: user action from the ui; the watchdog only watches.
-// From: Issue #1683 | PR #1858
-async fn container_state(
-    State(app): Shared,
-    axum::Extension(csrf): axum::Extension<Csrf>,
-    axum::extract::Path(service): axum::extract::Path<String>,
-    headers: HeaderMap,
-    axum::Json(want): axum::Json<Want>,
-) -> Response {
-    if !header_csrf_ok(&headers, &csrf) {
-        return (StatusCode::FORBIDDEN, "CSRF token mismatch").into_response();
-    }
-    let action = match want.state.as_str() {
-        "running" => docker::Action::Start,
-        "stopped" => docker::Action::Stop,
-        _ => return (StatusCode::BAD_REQUEST, "state must be running or stopped").into_response(),
-    };
-    act(&app, &service, action).await
-}
-
-// What: restart the ui container itself.
-// Why: Docker restarts it; the page reloads after.
-// From: Issue #1683 | PR #1858
-async fn restart_ui(
-    State(app): Shared,
-    axum::Extension(csrf): axum::Extension<Csrf>,
-    Form(form): Form<BTreeMap<String, String>>,
-) -> Response {
-    if !csrf_ok(&form, &csrf) {
-        return (StatusCode::FORBIDDEN, "CSRF token mismatch").into_response();
-    }
-    act(&app, "ui", docker::Action::Restart).await
-}
-
-// What: run one Docker action on a stack service.
-// Why: only names of this compose project are reachable.
-// From: Issue #1683 | PR #1858
-async fn act(app: &App, service: &str, action: docker::Action) -> Response {
-    let s = app.settings();
-    let (grace, limit) = match app.limits(&s) {
-        Ok(v) => v,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
-    };
-    let Ok(project) = s.text("COMPOSE_PROJECT") else {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "COMPOSE_PROJECT is not set",
-        )
-            .into_response();
-    };
-    let list = app
-        .docker
-        .project(&project, limit)
-        .await
-        .unwrap_or_default();
-    let Some(name) = list
-        .iter()
-        .find(|c| c["Labels"][docker::SERVICE_LABEL].as_str() == Some(service))
-        .and_then(|c| c["Names"][0].as_str())
-        .map(|n| n.trim_start_matches('/').to_string())
-    else {
-        return (StatusCode::NOT_FOUND, "no such service in this stack").into_response();
-    };
-    match app.docker.act(&name, action, grace, limit).await {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(e) => (StatusCode::BAD_GATEWAY, e.to_string()).into_response(),
-    }
-}
-
-// What: CSRF check for JSON calls via header.
-// Why: fetch() sends X-CSRF-Token, not a form field.
-// From: Issue #1683 | PR #1858
-fn header_csrf_ok(headers: &HeaderMap, csrf: &Csrf) -> bool {
-    headers
-        .get("x-csrf-token")
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|t| secret::equal(t.as_bytes(), csrf.0.as_bytes()))
-}
-
-// What: liveness answer for Docker HEALTHCHECK.
-// Why: no auth; tells only that the ui answers.
-// From: Issue #1683 | PR #1858
-async fn health() -> &'static str {
-    "ok"
-}
-
-// What: static file with fixed content type.
-// Why: the browser must not sniff types.
-// From: Issue #1683 | PR #1858
-fn asset(kind: &'static str, body: &'static [u8]) -> Response {
-    ([(header::CONTENT_TYPE, kind)], body).into_response()
-}
-
-// What: check a password against a PHC hash.
-// Why: one owner for login and password change.
-// From: Issue #1683 | PR #1858
-fn verify(hash: &str, pw: &str) -> bool {
-    PasswordHash::new(hash)
-        .is_ok_and(|h| Argon2::default().verify_password(pw.as_bytes(), &h).is_ok())
-}
-
-// What: Argon2id PHC string of a password.
-// Why: one owner for setup.sh and the password page.
-// From: Issue #1683 | PR #1858
-fn phc(pw: &str) -> Result<String, String> {
-    let salt =
-        argon2::password_hash::SaltString::generate(&mut argon2::password_hash::rand_core::OsRng);
-    Argon2::default()
-        .hash_password(pw.as_bytes(), &salt)
-        .map(|h| h.to_string())
-        .map_err(|e| e.to_string())
-}
-
-// What: hash a password from stdin (PHC string).
-// Why: setup.sh stores only the hash, never the password.
-// From: Issue #1683 | PR #1858
-fn hash_password() -> Result<(), String> {
-    let mut line = String::new();
-    std::io::stdin()
-        .read_line(&mut line)
-        .map_err(|e| e.to_string())?;
-    let pw = line.trim_end_matches(['\r', '\n']);
-    if pw.is_empty() {
-        return Err("the password on stdin is empty".into());
-    }
-    println!("{}", phc(pw)?);
-    Ok(())
-}
-
-// What: build the template set.
-// Why: a broken template stops the start, not a page.
-// From: Issue #1683 | PR #1858
-fn templates() -> Result<Tera, String> {
-    let mut t = Tera::default();
-    t.autoescape_on(vec!["html"]);
-    for (name, body) in TEMPLATES {
-        t.add_raw_template(name, body)
-            .map_err(|e| format!("template {name}: {e}"))?;
-    }
-    Ok(t)
-}
-
-// What: entry: subcommand or server.
-// Why: setup.sh hash-password; Docker healthcheck, server.
-// From: Issue #1683 | PR #1858
-#[tokio::main]
-async fn main() -> Result<(), String> {
-    if std::env::args().nth(1).as_deref() == Some("hash-password") {
-        return hash_password();
-    }
-    let saved = process_env(SETTINGS_FILE_ENV).map(PathBuf::from);
-    let s = Settings::load(&process_env, saved.as_deref())?;
-    // What: zone snapshots and rollback without the web UI.
-    // Why: setup.sh reset-config works when pages fail.
-    match std::env::args().nth(1).as_deref() {
-        Some("zone-snapshots") => return zone_snapshots_cli(&s),
-        Some("zone-rollback") => {
-            let args: Vec<String> = std::env::args().skip(2).collect();
-            let [zone, id] = args.as_slice() else {
-                return Err("usage: zone-rollback <zone> <snapshot-id>".into());
-            };
-            let get = |k: &str| match k {
-                "zone" => zone.clone(),
-                "snapshot_id" => id.clone(),
-                _ => String::new(),
-            };
-            rollback(&s, &get).await?;
-            println!("{}", serde_json::json!({"restored": zone, "snapshot": id}));
-            return Ok(());
-        }
-        _ => {}
-    }
-    // What: Docker healthcheck: GET /healthz on loopback.
-    // Why: no curl in the image; one probe owner.
-    if std::env::args().nth(1).as_deref() == Some("healthcheck") {
-        let url = format!(
-            "http://{}:{}/healthz",
-            s.text("LOOPBACK_BIND_IP")?,
-            s.uint("UI_PORT")?
-        );
-        let limit = std::time::Duration::from_secs(s.uint("HTTP_CLIENT_TIMEOUT")?);
-        return http::probe(&url, None, limit).await;
-    }
-    let dir = PathBuf::from(s.text("SECRETS_DIR")?);
-    let keep = fs::Owner {
-        uid: None,
-        gid: None,
-    };
-    let key = secret::resolve(None, &dir, "UI_SESSION_KEY", keep).map_err(|e| e.to_string())?;
-    let session_key = secret::key_bytes(&key)?;
-    let app = Arc::new(App {
-        docker: docker::Api::new(&s.text("DOCKER_ENDPOINT")?)?,
-        tera: templates()?,
-        settings: RwLock::new(s.clone()),
-        saved,
-        session_key,
-    });
-    tokio::spawn(sampler(app.clone()));
+fn router(app: Arc<App>) -> Router {
     let pages = Router::new()
         .route("/", get(dashboard))
         .route("/setup", get(setup))
         .route("/setup/save", post(save))
         .route("/setup/password", post(password))
         .route("/logs", get(logs))
+        .route("/logs/save", post(logs_save))
         .route("/cachehamster", get(cachehamster))
         .route("/cachehamster/{op}", post(hamster_action))
         .route("/api/cachehamster/{op}", post(hamster_api))
         .route("/domains", get(domains))
         .route("/domains/{op}", post(dns_action))
         .route("/dhcp", get(dhcp))
-        .route("/stats", get(stats))
-        .route("/stats/graph/{name}", get(graph))
         .route("/dhcp/check", post(dhcp_check))
         .route("/dhcp/{op}", post(dhcp_action))
+        .route("/stats", get(stats))
+        .route("/stats/graph/{name}", get(graph))
         .route("/api/secondary/{name}/{op}", post(secondary_action))
-        .route("/logs/save", post(logs_save))
         .route("/api/status", get(status))
         .route("/api/container/{service}", post(container_state))
         .route("/api/restart-ui", post(restart_ui))
-        .route(
-            "/api/service/{container}/{program}/{action}",
-            post(service_action),
-        )
+        .route("/api/service/{container}/{program}/{action}", post(service_action))
         .layer(axum::middleware::from_fn_with_state(app.clone(), auth));
-    let router = Router::new()
+    Router::new()
         .route("/healthz", get(health))
         .route("/api/secondary/register", post(register))
-        .route(
-            "/static/admin.css",
-            get(|| async { asset("text/css", ADMIN_CSS.as_bytes()) }),
-        )
-        .route(
-            "/favicon.ico",
-            get(|| async { asset("image/x-icon", FAVICON) }),
-        )
-        .route(
-            "/static/logo-icon.png",
-            get(|| async { asset("image/png", LOGO) }),
-        )
+        .route("/static/admin.css", get(|| async { asset("text/css", ADMIN_CSS.as_bytes()) }))
+        .route("/favicon.ico", get(|| async { asset("image/x-icon", FAVICON) }))
+        .route("/static/logo-icon.png", get(|| async { asset("image/png", LOGO) }))
         .merge(pages)
-        .with_state(app);
+        .with_state(app)
+}
+
+// What: entry: a command or the web server.
+// Why: one binary for ui, setup.sh, healthcheck.
+// From: Issue #1683 | PR #1858
+#[tokio::main]
+async fn main() -> Result<(), String> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("hash-password") {
+        return hash_password();
+    }
+    let saved = process_env(SETTINGS_FILE_ENV).map(PathBuf::from);
+    let s = Settings::load(&process_env, saved.as_deref())?;
+    if let Some(done) = command(&s, &args).await {
+        return done;
+    }
+    let dir = PathBuf::from(s.text("SECRETS_DIR")?);
+    let key = secret::resolve(None, &dir, "UI_SESSION_KEY", owner_keep()).map_err(|e| e.to_string())?;
+    let app = Arc::new(App {
+        docker: docker::Api::new(&s.text("DOCKER_ENDPOINT")?)?,
+        tera: templates()?,
+        settings: RwLock::new(s.clone()),
+        saved,
+        session_key: secret::key_bytes(&key)?,
+    });
+    tokio::spawn(sampler(app.clone()));
+    tokio::spawn(flush_on_transfer(app.clone()));
     let listen = format!("{}:{}", s.text("UI_LISTEN")?, s.uint("UI_PORT")?);
-    let sock = tokio::net::TcpListener::bind(&listen)
-        .await
-        .map_err(|e| format!("{listen}: {e}"))?;
-    axum::serve(sock, router).await.map_err(|e| e.to_string())
+    let sock = tokio::net::TcpListener::bind(&listen).await.map_err(|e| format!("{listen}: {e}"))?;
+    axum::serve(sock, router(app)).await.map_err(|e| e.to_string())
 }

@@ -870,6 +870,7 @@ runtime:
     - SYSLOG_PRIMARY=
     - SYSLOG_PROGRAMS=nginx pdns pdns_recursor kea-dhcp4 dnsmasq lancache-ui lancache-watchdog lancache-cachehamster chronyd snmpd
     - UI_CONTROLLABLE_SERVICES=proxy dns dhcp services
+    - DHCP_MODES=off kea dnsmasq-proxy dnsmasq-relay
     - UI_LISTEN=0.0.0.0
     - UI_LOG_LINES=500
     - UI_LOG_TAIL_CHUNK=65536
@@ -892,6 +893,8 @@ runtime:
     - WATCHDOG_DISK_MIN_FREE_PERCENT=10
     - WATCHDOG_DISK_PATHS=@CACHE_DIR@ @SYSLOG_LOG_ROOT@
     - UI_STOP_GRACE=10
+    - UI_CONFIG_FILE_MODE=0644
+    - UI_SERVICE=ui
     - UI_FLUSH_CHECK_SECONDS=5
     - DNS_SECONDARY_NAME_MAX=32
   # What: key=kind;min;max;effect;owner; ? = optional.
@@ -1079,6 +1082,7 @@ runtime:
     - SYSLOG_IN_TRANSPORT=choice;udp,tcp;;restart;services
     - SYSLOG_FWD_TRANSPORT=choice;udp,tcp;;restart;services
     - UI_CONTROLLABLE_SERVICES=list;;;live;ui
+    - DHCP_MODES=list;;;live;ui
     - UI_LISTEN=text;;;restart;ui
     - UI_LOG_LINES=uint;10;100000;live;ui
     - UI_LOG_TAIL_CHUNK=uint;1024;10485760;live;ui
@@ -1116,6 +1120,8 @@ runtime:
     - SYSLOG_XZ_PRESET=uint;0;9;live;services
     - WATCHDOG_DISK_PATHS=list;;;live;services
     - UI_STOP_GRACE=uint;1;600;live;ui
+    - UI_CONFIG_FILE_MODE=text;;;live;ui
+    - UI_SERVICE=text;;;live;ui
     - UI_FLUSH_CHECK_SECONDS=uint;1;3600;live;ui
     - DNS_SECONDARY_NAME_MAX=uint;1;63;live;ui
   # What: defaults compose interpolates as SOT_<KEY>.
