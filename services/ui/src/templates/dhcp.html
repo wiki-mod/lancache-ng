@@ -586,8 +586,8 @@
   document.querySelectorAll('.dhcp-tab-btn').forEach((b) => {
     b.addEventListener('click', () => setDhcpTab(b.dataset.dhcpTab));
   });
-  // What: start tab = the active mode; Settings if DHCP is off.
-  // Why: an off mode must not open on a tab that says "inactive".
+  // What: start tab is the active mode, else Settings.
+  // Why: DHCP off must not open on an inactive tab.
   // From: Issue #1683 | PR #1976
   const MODE_TAB = { kea: 'server', 'dnsmasq-proxy': 'proxy', 'dnsmasq-relay': 'relay' };
   let first = MODE_TAB['{{ dhcp_mode }}'] || 'settings';
