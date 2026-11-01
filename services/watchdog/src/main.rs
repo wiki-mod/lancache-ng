@@ -418,11 +418,35 @@ fn publish(s: &Settings, f: &Findings) -> Result<(), String> {
         .map_err(|e| format!("{}: {e}", path.display()))
 }
 
+// What: healthcheck mode for the container probe.
+// Why: fresh alarm file means the watch loop runs.
+// From: Issue #1683 | PR #1980
+fn healthcheck() -> Result<(), String> {
+    let s = load()?;
+    let limit = s.uint("CHECK_INTERVAL")? * s.uint("RESTART_AFTER")?.max(1);
+    let path = PathBuf::from(s.text("WATCHDOG_ALARM_FILE")?);
+    let raw = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let v: serde_json::Value = serde_json::from_slice(&raw).map_err(|e| e.to_string())?;
+    let written = v["written"].as_u64().ok_or("written missing")?;
+    let age = clock::unix_secs().saturating_sub(written);
+    if age > limit {
+        return Err(format!("alarm file {age}s old, limit {limit}s"));
+    }
+    Ok(())
+}
+
 // What: endless rounds until SIGTERM.
 // Why: settings are reread; a bad round never exits.
 // From: Issue #1683 | PR #1858
 #[tokio::main]
 async fn main() -> Result<(), String> {
+    if std::env::args().nth(1).as_deref() == Some("healthcheck") {
+        if let Err(e) = healthcheck() {
+            eprintln!("watchdog healthcheck: {e}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
     use tokio::signal::unix::{signal, SignalKind};
     let mut settings = load()?;
     let mut pause = Duration::from_secs(settings.uint("CHECK_INTERVAL")?);

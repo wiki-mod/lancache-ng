@@ -57,8 +57,11 @@ services:
       - "${LISTEN_IP:?LISTEN_IP is required}:${SOT_DNS_PORT}:${SOT_DNS_PORT}/tcp"
       - "${LISTEN_IP_HTTPS:?LISTEN_IP_HTTPS is required}:${DNS_HTTPS_HOST_PORT}:${SOT_DNS_HTTPS_PORT}/udp"
       - "${LISTEN_IP_HTTPS:?LISTEN_IP_HTTPS is required}:${DNS_HTTPS_HOST_PORT}:${SOT_DNS_HTTPS_PORT}/tcp"
+    # What: a real DNS query; any reply counts.
+    # Why: a dead upstream must not restart the dns.
+    # From: Issue #1683 | PR #1980
     healthcheck:
-      test: ["CMD", "rc-service", "pdns", "status"]
+      test: ["CMD-SHELL", "dig +time=2 +tries=1 -p ${SOT_DNS_PORT} @${SOT_LOOPBACK_BIND_IP} ${SOT_SETUP_DNS_PROBE_NAME} >/dev/null"]
       interval: ${SOT_HEALTHCHECK_INTERVAL:?SOT_HEALTHCHECK_INTERVAL is required}
       timeout: ${SOT_HEALTHCHECK_TIMEOUT:?SOT_HEALTHCHECK_TIMEOUT is required}
       retries: ${SOT_HEALTHCHECK_RETRIES:?SOT_HEALTHCHECK_RETRIES is required}
