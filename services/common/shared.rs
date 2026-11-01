@@ -3665,6 +3665,12 @@ pub mod rrd {
         if path.exists() {
             return Ok(());
         }
+        // What: create the stats dir before rrdtool runs.
+        // Why: an existing ui volume may lack the folder.
+        // From: Issue #1683 | PR #1980
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        }
         let step = s.uint("STATS_STEP")?;
         let beat = step.saturating_mul(s.uint("STATS_HEARTBEAT_STEPS")?);
         let mut cmd = Command::new("rrdtool");

@@ -201,6 +201,7 @@ services:
     setup:
       - group=@LOG_READER_GROUP@:@GID@
       - user=@LOG_READER_GROUP@:@GID@:@LOG_READER_GROUP@
+      - dir=@STATS_DIR@
     final_base: alpine
 
 # What: The toolchain image that builds the product stack.
