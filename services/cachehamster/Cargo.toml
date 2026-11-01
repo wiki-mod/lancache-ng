@@ -30,12 +30,14 @@ qrcode = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 hex = { workspace = true }
-# What: Steam CM connection (rustls, no openssl).
+# What: websocket to the Steam CM (rustls, no openssl).
 # Why: PICS and manifest codes exist only on the CM.
 # From: Issue #871 | PR #1858
-steam-vent = { workspace = true }
-steam-vent-proto-steam = { workspace = true }
-steam-vent-proto-common = { workspace = true }
+tokio-tungstenite = { workspace = true }
+# What: gzip of bundled CM messages (Multi).
+# Why: the CM packs many answers into one frame.
+# From: Issue #871 | PR #1858
+flate2 = { workspace = true }
 # What: unzip Steam depot manifests.
 # Why: the CDN sends each manifest as a zip file.
 # From: Issue #871 | PR #1858

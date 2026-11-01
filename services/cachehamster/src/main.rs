@@ -187,8 +187,8 @@ fn remove(path: &Path) -> Result<(), String> {
 // What: the 32-byte key that seals the session token.
 // Why: created once in the data dir, mode 0600.
 // From: Issue #871 | PR #1858
-fn session_key(c: &Ctx) -> Result<[u8; 32], String> {
-    let hex = secret::load_or_create(&c.path(KEY_FILE), || secret::random_hex(32), Owner::default())
+fn session_key(dir: &Path) -> Result<[u8; 32], String> {
+    let hex = secret::load_or_create(&dir.join(KEY_FILE), || secret::random_hex(32), Owner::default())
         .map_err(|e| format!("{KEY_FILE}: {e}"))?;
     secret::key_bytes(&hex)
 }
@@ -196,13 +196,13 @@ fn session_key(c: &Ctx) -> Result<[u8; 32], String> {
 // What: the stored session, opened in memory only.
 // Why: the plaintext token never touches the disk.
 // From: Issue #871 | PR #1858
-fn load_session(c: &Ctx) -> Result<Option<Session>, String> {
-    let sealed = match std::fs::read(c.path(TOKEN_FILE)) {
+fn load_session(dir: &Path) -> Result<Option<Session>, String> {
+    let sealed = match std::fs::read(dir.join(TOKEN_FILE)) {
         Ok(raw) => raw,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(format!("{TOKEN_FILE}: {e}")),
     };
-    let plain = secret::open(&session_key(c)?, &sealed)?;
+    let plain = secret::open(&session_key(dir)?, &sealed)?;
     serde_json::from_slice(&plain)
         .map(Some)
         .map_err(|e| format!("{TOKEN_FILE}: {e}"))
@@ -213,7 +213,7 @@ fn load_session(c: &Ctx) -> Result<Option<Session>, String> {
 // From: Issue #871 | PR #1858
 fn store_session(c: &Ctx, session: &Session) -> Result<(), String> {
     let plain = serde_json::to_vec(session).map_err(|e| e.to_string())?;
-    c.save(TOKEN_FILE, &secret::seal(&session_key(c)?, &plain)?)
+    c.save(TOKEN_FILE, &secret::seal(&session_key(&c.dir)?, &plain)?)
 }
 
 // What: POST a form to a Steam Web API method.
@@ -387,7 +387,7 @@ async fn access_token(c: &Ctx, client: &reqwest::Client, s: &Session) -> Result<
 // Why: the library tab picks apps from this list.
 // From: Issue #871 | PR #1858
 async fn library(c: &Ctx, client: &reqwest::Client) -> Result<Value, String> {
-    let s = load_session(c)?.ok_or("not logged in")?;
+    let s = load_session(&c.dir)?.ok_or("not logged in")?;
     let token = access_token(c, client, &s).await?;
     let r = steam_get(
         client,
@@ -464,7 +464,7 @@ fn parse_add(args: &[String]) -> Result<Order, String> {
 // Why: one JSON answer per page refresh.
 // From: Issue #871 | PR #1858
 fn status(c: &Ctx) -> Result<Value, String> {
-    let session = load_session(c)?;
+    let session = load_session(&c.dir)?;
     let jobs = read_json::<Vec<Job>>(&c.path(JOBS_FILE))?.unwrap_or_default();
     Ok(json!({
         "logged_in": session.is_some(),
@@ -619,6 +619,8 @@ async fn run_urls(
 #[derive(Clone)]
 struct SteamCfg {
     dir: PathBuf,
+    api: String,
+    limit: Duration,
     cdn_host: String,
     proxy: std::net::SocketAddr,
     branch: String,
@@ -630,6 +632,8 @@ impl SteamCfg {
         let addr = format!("{}:{}", c.s.text("IP_HTTP")?, c.s.uint("PROXY_HTTP_PORT")?);
         Ok(Self {
             dir: c.dir.clone(),
+            api: c.api.clone(),
+            limit: Duration::from_secs(c.s.uint("HTTP_CLIENT_TIMEOUT")?),
             cdn_host: c.s.text("STEAM_CDN_HOST")?,
             proxy: addr.parse().map_err(|e| format!("{addr}: {e}"))?,
             branch: c.s.text("STEAM_BRANCH")?,
@@ -755,89 +759,379 @@ fn depots_of(app: &Kv, cfg: &SteamCfg) -> Vec<(u32, u64)> {
         .collect()
 }
 
-// What: log in on a CM server with the sealed session.
-// Why: PICS and manifest codes exist only on the CM.
+// What: a decoded protobuf field value.
+// Why: the few Steam messages are coded by hand; a
+//      generator would need new files.
 // From: Issue #871 | PR #1858
-async fn cm_login(cfg: &SteamCfg) -> Result<steam_vent::Connection, String> {
-    let key = {
-        let hex = secret::load_or_create(
-            &cfg.dir.join(KEY_FILE),
-            || secret::random_hex(32),
-            Owner::default(),
-        )
-        .map_err(|e| format!("{KEY_FILE}: {e}"))?;
-        secret::key_bytes(&hex)?
+#[derive(Clone, Debug)]
+enum Pb {
+    Int(u64),
+    Bytes(Vec<u8>),
+}
+
+// What: protobuf writer for the fields Steam needs.
+// Why: varint, fixed32, fixed64 and length-delimited.
+// From: Issue #871 | PR #1858
+#[derive(Default)]
+struct PbOut(Vec<u8>);
+
+impl PbOut {
+    fn varint(&mut self, mut v: u64) {
+        while v >= 0x80 {
+            self.0.push((v as u8) | 0x80);
+            v >>= 7;
+        }
+        self.0.push(v as u8);
+    }
+    fn int(mut self, field: u32, v: u64) -> Self {
+        self.varint(u64::from(field) << 3);
+        self.varint(v);
+        self
+    }
+    fn fixed64(mut self, field: u32, v: u64) -> Self {
+        self.varint((u64::from(field) << 3) | 1);
+        self.0.extend_from_slice(&v.to_le_bytes());
+        self
+    }
+    fn fixed32(mut self, field: u32, v: u32) -> Self {
+        self.varint((u64::from(field) << 3) | 5);
+        self.0.extend_from_slice(&v.to_le_bytes());
+        self
+    }
+    fn bytes(mut self, field: u32, v: &[u8]) -> Self {
+        self.varint((u64::from(field) << 3) | 2);
+        self.varint(v.len() as u64);
+        self.0.extend_from_slice(v);
+        self
+    }
+}
+
+// What: decode one protobuf message into field pairs.
+// Why: readers pick fields by number.
+// From: Issue #871 | PR #1858
+fn pb_read(mut b: &[u8]) -> Result<Vec<(u32, Pb)>, String> {
+    fn varint(b: &mut &[u8]) -> Result<u64, String> {
+        let mut v = 0u64;
+        for shift in (0..64).step_by(7) {
+            let (&byte, rest) = b.split_first().ok_or("protobuf: cut varint")?;
+            *b = rest;
+            v |= u64::from(byte & 0x7f) << shift;
+            if byte < 0x80 {
+                return Ok(v);
+            }
+        }
+        Err("protobuf: long varint".into())
+    }
+    let take = |b: &mut &[u8], n: usize| -> Result<Vec<u8>, String> {
+        let (head, rest) = b.split_at_checked(n).ok_or("protobuf: cut field")?;
+        *b = rest;
+        Ok(head.to_vec())
     };
-    let sealed = std::fs::read(cfg.dir.join(TOKEN_FILE)).map_err(|e| format!("{TOKEN_FILE}: {e}"))?;
-    let s: Session = serde_json::from_slice(&secret::open(&key, &sealed)?)
-        .map_err(|e| format!("{TOKEN_FILE}: {e}"))?;
-    let servers = steam_vent::ServerList::discover()
-        .await
-        .map_err(|e| format!("CM server list: {e}"))?;
-    steam_vent::Connection::access(&servers, &s.account, &s.refresh_token)
-        .await
-        .map_err(|e| format!("CM login: {e}"))
+    let mut out = Vec::new();
+    while !b.is_empty() {
+        let key = varint(&mut b)?;
+        let field = u32::try_from(key >> 3).map_err(|e| e.to_string())?;
+        let value = match key & 7 {
+            0 => Pb::Int(varint(&mut b)?),
+            1 => Pb::Int(u64::from_le_bytes(take(&mut b, 8)?.try_into().map_err(|_| "fixed64")?)),
+            2 => {
+                let n = usize::try_from(varint(&mut b)?).map_err(|e| e.to_string())?;
+                Pb::Bytes(take(&mut b, n)?)
+            }
+            5 => Pb::Int(u64::from(u32::from_le_bytes(
+                take(&mut b, 4)?.try_into().map_err(|_| "fixed32")?,
+            ))),
+            w => return Err(format!("protobuf: wire type {w}")),
+        };
+        out.push((field, value));
+    }
+    Ok(out)
+}
+
+fn pb_int(f: &[(u32, Pb)], n: u32) -> Option<u64> {
+    f.iter().rev().find_map(|(k, v)| match v {
+        Pb::Int(i) if *k == n => Some(*i),
+        _ => None,
+    })
+}
+
+fn pb_all(f: &[(u32, Pb)], n: u32) -> impl Iterator<Item = &[u8]> {
+    f.iter().filter_map(move |(k, v)| match v {
+        Pb::Bytes(b) if *k == n => Some(b.as_slice()),
+        _ => None,
+    })
+}
+
+// What: Steam message numbers (EMsg) used here.
+// Why: values from Steam's enums_clientserver.proto.
+// From: Issue #871 | PR #1858
+const EMSG_MULTI: u32 = 1;
+const EMSG_SERVICE_RESPONSE: u32 = 147;
+const EMSG_SERVICE_CALL: u32 = 151;
+const EMSG_HEARTBEAT: u32 = 703;
+const EMSG_LOGON_RESPONSE: u32 = 751;
+const EMSG_LOGON: u32 = 5514;
+const EMSG_PICS_INFO_REQUEST: u32 = 8903;
+const EMSG_PICS_INFO_RESPONSE: u32 = 8904;
+const EMSG_PICS_TOKEN_REQUEST: u32 = 8905;
+const EMSG_PICS_TOKEN_RESPONSE: u32 = 8906;
+// What: protobuf flag of the message number.
+// Why: every CM message sent here is protobuf.
+const PROTO_MASK: u32 = 0x8000_0000;
+// What: logon values the Steam client protocol expects.
+// Why: as in Steam's own client (protocol 65580).
+const PROTOCOL_VERSION: u64 = 65580;
+const CLIENT_OS_TYPE: u64 = 203;
+const CLIENT_PACKAGE_VERSION: u64 = 1771;
+const CHAT_MODE: u64 = 2;
+const ERESULT_OK: u64 = 1;
+
+type Ws = tokio_tungstenite::WebSocketStream<
+    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+>;
+
+// What: one CM frame: message number, header, body.
+// Why: header fields route job answers.
+// From: Issue #871 | PR #1858
+struct Frame {
+    emsg: u32,
+    header: Vec<(u32, Pb)>,
+    body: Vec<u8>,
+}
+
+// What: our own CM session over a websocket.
+// Why: DoMe 18:18: no third-party Steam library.
+// From: Issue #871 | PR #1858
+struct Cm {
+    ws: Ws,
+    steam_id: u64,
+    session: u64,
+    next_job: u64,
+    heartbeat: Duration,
+    last_beat: std::time::Instant,
+    queue: std::collections::VecDeque<Frame>,
+    limit: Duration,
+}
+
+impl Cm {
+    // What: log in with the sealed QR session token.
+    // Why: Steam takes the refresh token as access_token.
+    async fn login(cfg: &SteamCfg, client: &reqwest::Client) -> Result<Self, String> {
+        let s = load_session(&cfg.dir)?.ok_or("Steam login missing")?;
+        let steam_id: u64 = steam_id_of(&s.refresh_token)?
+            .parse()
+            .map_err(|e| format!("steam id: {e}"))?;
+        let list: Value = client
+            .get(format!("{}/ISteamDirectory/GetCMList/v1/", cfg.api))
+            .query(&[("cellid", "0")])
+            .send()
+            .await
+            .map_err(|e| format!("CM list: {}", http::error_chain(&e)))?
+            .json()
+            .await
+            .map_err(|e| format!("CM list: {e}"))?;
+        let host = list["response"]["serverlist_websockets"][0]
+            .as_str()
+            .ok_or("CM list: no websocket server")?
+            .to_string();
+        let (ws, _) = tokio_tungstenite::connect_async(format!("wss://{host}/cmsocket/"))
+            .await
+            .map_err(|e| format!("CM {host}: {e}"))?;
+        let mut cm = Self {
+            ws,
+            steam_id,
+            session: 0,
+            next_job: 1,
+            heartbeat: Duration::from_secs(30),
+            last_beat: std::time::Instant::now(),
+            queue: Default::default(),
+            limit: cfg.limit,
+        };
+        let ip = PbOut::default().fixed32(1, 0);
+        let logon = PbOut::default()
+            .int(1, PROTOCOL_VERSION)
+            .int(5, CLIENT_PACKAGE_VERSION)
+            .bytes(6, b"")
+            .int(7, CLIENT_OS_TYPE)
+            .bytes(11, &ip.0)
+            .int(33, CHAT_MODE)
+            .bytes(50, s.account.as_bytes())
+            .int(95, 0)
+            .bytes(96, b"")
+            .int(102, 0)
+            .bytes(108, s.refresh_token.as_bytes());
+        cm.send(EMSG_LOGON, PbOut::default(), &logon.0).await?;
+        let f = cm.wait(|f| f.emsg == EMSG_LOGON_RESPONSE).await?;
+        let body = pb_read(&f.body)?;
+        match pb_int(&body, 1) {
+            Some(ERESULT_OK) => {}
+            r => return Err(format!("CM login refused, eresult {r:?}")),
+        }
+        cm.steam_id = pb_int(&f.header, 1).unwrap_or(steam_id);
+        cm.session = pb_int(&f.header, 2).unwrap_or(0);
+        if let Some(secs) = pb_int(&body, 3).or_else(|| pb_int(&body, 2)).filter(|s| *s > 0) {
+            cm.heartbeat = Duration::from_secs(secs);
+        }
+        Ok(cm)
+    }
+
+    // What: send one protobuf frame with our session.
+    // Why: frame = emsg|flag, header length, header, body.
+    async fn send(&mut self, emsg: u32, header: PbOut, body: &[u8]) -> Result<(), String> {
+        use futures_util::SinkExt as _;
+        let header = header.fixed64(1, self.steam_id).int(2, self.session);
+        let mut frame = Vec::with_capacity(8 + header.0.len() + body.len());
+        frame.extend_from_slice(&(emsg | PROTO_MASK).to_le_bytes());
+        frame.extend_from_slice(&(header.0.len() as u32).to_le_bytes());
+        frame.extend_from_slice(&header.0);
+        frame.extend_from_slice(body);
+        self.ws
+            .send(tokio_tungstenite::tungstenite::Message::Binary(frame.into()))
+            .await
+            .map_err(|e| format!("CM send: {e}"))
+    }
+
+    // What: a heartbeat when the interval has passed.
+    // Why: the CM drops a silent session.
+    async fn beat(&mut self) -> Result<(), String> {
+        if self.last_beat.elapsed() >= self.heartbeat {
+            self.last_beat = std::time::Instant::now();
+            self.send(EMSG_HEARTBEAT, PbOut::default(), &[]).await?;
+        }
+        Ok(())
+    }
+
+    // What: unpack one websocket message into frames.
+    // Why: Multi frames bundle many, maybe gzipped.
+    fn unpack(&mut self, raw: &[u8]) -> Result<(), String> {
+        let word = |b: &[u8], at: usize| -> Result<u32, String> {
+            b.get(at..at + 4)
+                .and_then(|w| w.try_into().ok())
+                .map(u32::from_le_bytes)
+                .ok_or_else(|| "CM frame too short".to_string())
+        };
+        let emsg = word(raw, 0)? & !PROTO_MASK;
+        let hlen = usize::try_from(word(raw, 4)?).map_err(|e| e.to_string())?;
+        let header = pb_read(raw.get(8..8 + hlen).ok_or("CM header cut")?)?;
+        let body = raw.get(8 + hlen..).ok_or("CM body cut")?.to_vec();
+        if emsg != EMSG_MULTI {
+            self.queue.push_back(Frame { emsg, header, body });
+            return Ok(());
+        }
+        let multi = pb_read(&body)?;
+        let packed = pb_all(&multi, 2).next().ok_or("Multi without body")?.to_vec();
+        let data = if pb_int(&multi, 1).unwrap_or(0) > 0 {
+            use std::io::Read as _;
+            let mut out = Vec::new();
+            flate2::read::GzDecoder::new(packed.as_slice())
+                .read_to_end(&mut out)
+                .map_err(|e| format!("Multi gzip: {e}"))?;
+            out
+        } else {
+            packed
+        };
+        let mut at = 0;
+        while at < data.len() {
+            let n = usize::try_from(word(&data, at)?).map_err(|e| e.to_string())?;
+            let inner = data.get(at + 4..at + 4 + n).ok_or("Multi part cut")?.to_vec();
+            self.unpack(&inner)?;
+            at += 4 + n;
+        }
+        Ok(())
+    }
+
+    // What: the next frame that matches, within the limit.
+    // Why: other frames (notices) are skipped.
+    async fn wait(&mut self, want: impl Fn(&Frame) -> bool) -> Result<Frame, String> {
+        use futures_util::StreamExt as _;
+        let deadline = tokio::time::Instant::now() + self.limit;
+        loop {
+            if let Some(pos) = self.queue.iter().position(&want) {
+                return self.queue.remove(pos).ok_or_else(|| "CM queue".to_string());
+            }
+            self.queue.clear();
+            self.beat().await?;
+            let msg = tokio::time::timeout_at(deadline, self.ws.next())
+                .await
+                .map_err(|_| "CM answer timed out".to_string())?
+                .ok_or("CM closed the connection")?
+                .map_err(|e| format!("CM read: {e}"))?;
+            if let tokio_tungstenite::tungstenite::Message::Binary(raw) = msg {
+                self.unpack(&raw)?;
+            }
+        }
+    }
+
+    // What: send a job and wait for its answer frames.
+    // Why: the answer carries our job id as jobid_target.
+    async fn job(&mut self, emsg: u32, name: Option<&str>, body: &[u8], answer: u32) -> Result<Frame, String> {
+        let id = self.next_job;
+        self.next_job += 1;
+        let mut header = PbOut::default().fixed64(10, id);
+        if let Some(n) = name {
+            header = header.bytes(12, n.as_bytes());
+        }
+        self.send(emsg, header, body).await?;
+        self.wait(|f| f.emsg == answer && pb_int(&f.header, 11) == Some(id)).await
+    }
 }
 
 // What: the app's KeyValues from PICS, with its token.
 // Why: owned apps need the PICS access token.
 // From: Issue #871 | PR #1858
-async fn app_info(conn: &steam_vent::Connection, app: u32) -> Result<Kv, String> {
-    use futures_util::TryStreamExt as _;
-    use steam_vent::ConnectionTrait as _;
-    use steam_vent_proto_steam::steammessages_clientserver_appinfo as pics;
-    let mut tok_req = pics::CMsgClientPICSAccessTokenRequest::new();
-    tok_req.appids.push(app);
-    let tok: pics::CMsgClientPICSAccessTokenResponse = conn
-        .job(tok_req)
-        .await
-        .map_err(|e| format!("PICS token: {e}"))?;
-    let mut a = pics::cmsg_client_picsproduct_info_request::AppInfo::new();
-    a.set_appid(app);
-    if let Some(t) = tok.app_access_tokens.iter().find(|t| t.appid() == app) {
-        a.set_access_token(t.access_token());
+async fn app_info(cm: &mut Cm, app: u32) -> Result<Kv, String> {
+    let req = PbOut::default().int(2, u64::from(app));
+    let f = cm.job(EMSG_PICS_TOKEN_REQUEST, None, &req.0, EMSG_PICS_TOKEN_RESPONSE).await?;
+    let tokens = pb_read(&f.body)?;
+    let token = pb_all(&tokens, 3)
+        .filter_map(|t| pb_read(t).ok())
+        .find(|t| pb_int(t, 1) == Some(u64::from(app)))
+        .and_then(|t| pb_int(&t, 2))
+        .unwrap_or(0);
+    let entry = PbOut::default().int(1, u64::from(app)).int(2, token);
+    let req = PbOut::default().bytes(2, &entry.0).int(7, 1);
+    let mut f = cm.job(EMSG_PICS_INFO_REQUEST, None, &req.0, EMSG_PICS_INFO_RESPONSE).await?;
+    loop {
+        let body = pb_read(&f.body)?;
+        for a in pb_all(&body, 1) {
+            let a = pb_read(a)?;
+            if pb_int(&a, 1) == Some(u64::from(app)) {
+                let buf = pb_all(&a, 5).next().ok_or("PICS app without buffer")?;
+                let text = String::from_utf8_lossy(buf);
+                return parse_kv(text.trim_end_matches('\0'));
+            }
+        }
+        if pb_int(&body, 6) != Some(1) {
+            return Err(format!("app {app}: no PICS info"));
+        }
+        f = cm.wait(|f| f.emsg == EMSG_PICS_INFO_RESPONSE).await?;
     }
-    let mut req = pics::CMsgClientPICSProductInfoRequest::new();
-    req.apps.push(a);
-    req.set_single_response(true);
-    let answers: Vec<pics::CMsgClientPICSProductInfoResponse> = conn
-        .job_multi(req)
-        .try_collect()
-        .await
-        .map_err(|e| format!("PICS info: {e}"))?;
-    let buf = answers
-        .iter()
-        .flat_map(|r| r.apps.iter())
-        .find(|a| a.appid() == app)
-        .map(|a| a.buffer().to_vec())
-        .ok_or_else(|| format!("app {app}: no PICS info"))?;
-    parse_kv(&String::from_utf8_lossy(&buf))
 }
 
 // What: the manifest request code of one depot.
 // Why: Steam CDN serves manifests only with this code.
 // From: Issue #871 | PR #1858
-async fn request_code(
-    conn: &steam_vent::Connection,
-    app: u32,
-    depot: u32,
-    gid: u64,
-    branch: &str,
-) -> Result<u64, String> {
-    use steam_vent::ConnectionTrait as _;
-    use steam_vent_proto_steam::steammessages_contentsystem_steamclient as cs;
-    let mut req = cs::CContentServerDirectory_GetManifestRequestCode_Request::new();
-    req.set_app_id(app);
-    req.set_depot_id(depot);
-    req.set_manifest_id(gid);
-    req.set_app_branch(branch.to_string());
-    let rsp = conn
-        .service_method(req)
-        .await
-        .map_err(|e| format!("depot {depot}: manifest code: {e}"))?;
-    match rsp.manifest_request_code() {
-        0 => Err(format!("depot {depot}: no manifest code (not owned?)")),
-        code => Ok(code),
+async fn request_code(cm: &mut Cm, app: u32, depot: u32, gid: u64, branch: &str) -> Result<u64, String> {
+    let req = PbOut::default()
+        .int(1, u64::from(app))
+        .int(2, u64::from(depot))
+        .int(3, gid)
+        .bytes(4, branch.as_bytes());
+    let f = cm
+        .job(
+            EMSG_SERVICE_CALL,
+            Some("ContentServerDirectory.GetManifestRequestCode#1"),
+            &req.0,
+            EMSG_SERVICE_RESPONSE,
+        )
+        .await?;
+    match pb_int(&f.header, 13) {
+        None | Some(ERESULT_OK) => {}
+        Some(r) => return Err(format!("depot {depot}: manifest code eresult {r}")),
+    }
+    match pb_int(&pb_read(&f.body)?, 1) {
+        None | Some(0) => Err(format!("depot {depot}: no manifest code (not owned?)")),
+        Some(code) => Ok(code),
     }
 }
 
@@ -846,8 +1140,6 @@ async fn request_code(
 // From: Issue #871 | PR #1858
 fn chunks_of(zipped: &[u8]) -> Result<Vec<String>, String> {
     use std::io::Read as _;
-    use steam_vent_proto_common::protobuf::Message as _;
-    use steam_vent_proto_steam::content_manifest::ContentManifestPayload;
     const PAYLOAD_MAGIC: u32 = 0x71F6_17D0;
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(zipped))
         .map_err(|e| format!("manifest zip: {e}"))?;
@@ -866,15 +1158,15 @@ fn chunks_of(zipped: &[u8]) -> Result<Vec<String>, String> {
         return Err("manifest payload magic missing".into());
     }
     let len = usize::try_from(word(4)?).map_err(|e| e.to_string())?;
-    let body = raw.get(8..8 + len).ok_or("manifest payload cut short")?;
-    let payload =
-        ContentManifestPayload::parse_from_bytes(body).map_err(|e| format!("manifest: {e}"))?;
-    let mut ids: Vec<String> = payload
-        .mappings
-        .iter()
-        .flat_map(|m| m.chunks.iter())
-        .map(|c| hex::encode(c.sha()))
-        .collect();
+    let payload = pb_read(raw.get(8..8 + len).ok_or("manifest payload cut short")?)?;
+    let mut ids = Vec::new();
+    for mapping in pb_all(&payload, 1) {
+        for chunk in pb_all(&pb_read(mapping)?, 6) {
+            if let Some(sha) = pb_all(&pb_read(chunk)?, 1).next() {
+                ids.push(hex::encode(sha));
+            }
+        }
+    }
     ids.sort();
     ids.dedup();
     Ok(ids)
@@ -884,12 +1176,13 @@ fn chunks_of(zipped: &[u8]) -> Result<Vec<String>, String> {
 // Why: the URL job warms them through the proxy.
 // From: Issue #871 | PR #1858
 async fn app_urls(cfg: &SteamCfg, app: u32) -> Result<Vec<String>, String> {
-    let conn = cm_login(cfg).await?;
-    let info = app_info(&conn, app).await?;
     let client = cfg.client()?;
+    let web = reqwest::Client::new();
+    let mut cm = Cm::login(cfg, &web).await?;
+    let info = app_info(&mut cm, app).await?;
     let mut urls = Vec::new();
     for (depot, gid) in depots_of(&info, cfg) {
-        let code = match request_code(&conn, app, depot, gid, &cfg.branch).await {
+        let code = match request_code(&mut cm, app, depot, gid, &cfg.branch).await {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("cachehamster: app {app}: {e}");
