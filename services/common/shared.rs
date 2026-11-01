@@ -1854,3 +1854,231 @@ pub mod chrony {
         Ok(out)
     }
 }
+
+// What: pdns.conf of the authoritative server.
+// Why: one owner; values from the SOT, key from secret.
+// From: Issue #1683 | PR #1858
+pub mod pdns_conf {
+    use crate::config::Settings;
+
+    // What: values must not open a new config line.
+    // Why: a setting must never add a pdns directive.
+    // From: Issue #1683 | PR #1858
+    fn line_safe(key: &str, v: &str) -> Result<(), String> {
+        if v.contains(['\n', '\r']) {
+            return Err(format!("{key} contains a line break"));
+        }
+        Ok(())
+    }
+
+    // What: render pdns.conf for this node's role.
+    // Why: primary sends NOTIFY; secondary pulls by AXFR.
+    // From: Issue #1683 | PR #1858
+    pub fn auth(s: &Settings, api_key: &str) -> Result<String, String> {
+        let role = s.text("DNS_REPLICATION_ROLE")?;
+        let primary = match role.as_str() {
+            "primary" => true,
+            "secondary" => false,
+            other => return Err(format!("DNS_REPLICATION_ROLE={other} is unknown")),
+        };
+        let yes = |on: bool| if on { "yes" } else { "no" };
+        let notify_from = if primary {
+            String::new()
+        } else {
+            s.text("DNS_XFR_PRIMARY")?
+        };
+        let pairs = [
+            ("local-address", s.list("PDNS_LISTEN").join(",")),
+            ("local-port", s.uint("PDNS_AUTH_PORT")?.to_string()),
+            ("launch", "gsqlite3".to_string()),
+            ("gsqlite3-database", s.text("PDNS_DATABASE")?),
+            ("primary", yes(primary).to_string()),
+            ("secondary", yes(!primary).to_string()),
+            (
+                "also-notify",
+                if primary {
+                    s.list("DNS_NOTIFY_TARGETS").join(",")
+                } else {
+                    String::new()
+                },
+            ),
+            ("allow-notify-from", notify_from),
+            ("allow-axfr-ips", s.list("PDNS_AXFR_FROM").join(",")),
+            ("xfr-cycle-interval", s.uint("PDNS_XFR_CYCLE")?.to_string()),
+            ("dnsupdate", yes(primary).to_string()),
+            (
+                "allow-dnsupdate-from",
+                s.list("PDNS_DNSUPDATE_FROM").join(","),
+            ),
+            ("default-soa-content", s.text("PDNS_DEFAULT_SOA")?),
+            ("webserver", "yes".to_string()),
+            ("webserver-address", s.text("PDNS_API_LISTEN")?),
+            ("webserver-port", s.uint("PDNS_AUTH_API_PORT")?.to_string()),
+            (
+                "webserver-allow-from",
+                s.list("PDNS_API_ALLOW_FROM").join(","),
+            ),
+            ("api", "yes".to_string()),
+            ("api-key", api_key.to_string()),
+            ("loglevel", s.uint("PDNS_AUTH_LOGLEVEL")?.to_string()),
+            ("guardian", "no".to_string()),
+            ("daemon", "no".to_string()),
+        ];
+        let mut out = String::new();
+        for (k, v) in pairs {
+            line_safe(k, &v)?;
+            if !v.is_empty() {
+                out.push_str(&format!("{k}={v}\n"));
+            }
+        }
+        Ok(out)
+    }
+}
+
+// What: recursor.yml, lua and RPZ for http and https.
+// Why: both recursors differ only in keys; one owner.
+// From: Issue #1683 | PR #1858
+pub mod recursor_conf {
+    use crate::config::Settings;
+
+    // What: which recursor: HTTP or HTTPS.
+    // Why: names the key suffix, e.g. RECURSOR_HTTP_PORT.
+    // From: Issue #1683 | PR #1858
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum Which {
+        Http,
+        Https,
+    }
+
+    impl Which {
+        // What: key part of this recursor.
+        // Why: one schema row per recursor and setting.
+        // From: Issue #1683 | PR #1858
+        pub fn key(self, name: &str) -> String {
+            let part = match self {
+                Self::Http => "HTTP",
+                Self::Https => "HTTPS",
+            };
+            format!("RECURSOR_{part}_{name}")
+        }
+    }
+
+    // What: YAML list rows, quoted.
+    // Why: quoting keeps a value from breaking the YAML.
+    // From: Issue #1683 | PR #1858
+    fn rows(items: &[String], indent: &str) -> Result<String, String> {
+        let mut out = String::new();
+        for i in items {
+            if i.contains(['"', '\\', '\n', '\r']) {
+                return Err(format!("value {i:?} has quote or line break"));
+            }
+            out.push_str(&format!("{indent}- \"{i}\"\n"));
+        }
+        Ok(out)
+    }
+
+    // What: RPZ zone that answers cache domains locally.
+    // Why: native recursor policy; no own DNS answers.
+    // From: Issue #1683 | PR #1858
+    pub fn rpz(domains: &[String], answer: &str, serial: u32) -> Result<String, String> {
+        if answer.parse::<std::net::IpAddr>().is_err() {
+            return Err(format!("RPZ answer {answer:?} is no IP address"));
+        }
+        let kind = if answer.contains(':') { "AAAA" } else { "A" };
+        let mut out = format!(
+            "$TTL 60\n@ SOA localhost. hostmaster.localhost. {serial} 3600 600 86400 60\n@ NS localhost.\n"
+        );
+        for d in domains {
+            let d = d.trim_end_matches('.');
+            if !crate::dns::is_dns_name(d) {
+                return Err(format!("cache domain {d:?} is no DNS name"));
+            }
+            out.push_str(&format!("{d} {kind} {answer}\n*.{d} {kind} {answer}\n"));
+        }
+        Ok(out)
+    }
+
+    // What: lua config: load the RPZ file.
+    // Why: rpzFile is the native recursor RPZ loader.
+    // From: Issue #1683 | PR #1858
+    pub fn lua(rpz_file: &str) -> Result<String, String> {
+        if rpz_file.contains(['"', '\\', '\n']) {
+            return Err(format!("RPZ path {rpz_file:?} is not plain"));
+        }
+        Ok(format!(
+            "rpzFile(\"{rpz_file}\", {{ policyName=\"lancache-rpz\" }})\n"
+        ))
+    }
+
+    // What: recursor.yml for one recursor.
+    // Why: local zones go to the auth server, rest upstream.
+    // From: Issue #1683 | PR #1858
+    pub fn yaml(
+        s: &Settings,
+        which: Which,
+        api_key: &str,
+        lua_file: &str,
+    ) -> Result<String, String> {
+        let auth = format!(
+            "{}:{}",
+            s.text("PDNS_AUTH_ADDRESS")?,
+            s.uint("PDNS_AUTH_PORT")?
+        );
+        let mut fwd = String::new();
+        for z in s.list("DNS_LOCAL_ZONES") {
+            fwd.push_str(&format!(
+                "    - zone: \"{}\"\n      forwarders: [\"{auth}\"]\n",
+                z.trim_end_matches('.')
+            ));
+        }
+        let upstream = s.list("DNS_UPSTREAM_SERVERS");
+        let mut recurse = String::new();
+        if !upstream.is_empty() {
+            let list = upstream
+                .iter()
+                .map(|u| format!("\"{u}\""))
+                .collect::<Vec<_>>()
+                .join(", ");
+            recurse = format!(
+                "  forward_zones_recurse:\n    - zone: \".\"\n      forwarders: [{list}]\n"
+            );
+        }
+        let snmp = if s.flag("SNMP_AGENTX")? {
+            format!(
+                "snmp:\n  agent: true\n  daemon_socket: \"{}\"\n",
+                s.text("SNMP_AGENTX_SOCKET")?
+            )
+        } else {
+            String::new()
+        };
+        let u = |k: &str| s.uint(k).map(|v| v.to_string());
+        Ok(format!(
+            "incoming:\n  listen:\n{listen}  port: {port}\n  allow_from:\n{allow}\
+             recursor:\n  serve_rfc1918: {rfc}\n  forward_zones:\n{fwd}{recurse}\
+             \x20 lua_config_file: \"{lua_file}\"\n  minimum_ttl_override: {minttl}\n\
+             recordcache:\n  max_entries: {rcmax}\n  refresh_on_ttl_perc: {perc}\n\
+             \x20 serve_stale_extensions: {stale}\n  max_negative_ttl: {negttl}\n\
+             packetcache:\n  max_entries: {pcmax}\n  ttl: {pcttl}\n  negative_ttl: {negttl}\n\
+             \x20 servfail_ttl: {sfttl}\n\
+             webservice:\n  webserver: true\n  address: \"{apiaddr}\"\n  port: {apiport}\n\
+             \x20 allow_from:\n{apiallow}  api_key: \"{api_key}\"\n\
+             logging:\n  loglevel: {loglevel}\n{snmp}",
+            listen = rows(&s.list(&which.key("LISTEN")), "    ")?,
+            port = u(&which.key("PORT"))?,
+            allow = rows(&s.list("DNS_QUERY_ALLOW_FROM"), "    ")?,
+            rfc = s.flag("DNS_SERVE_RFC1918")?,
+            minttl = u("RECURSOR_MINIMUM_TTL_OVERRIDE")?,
+            rcmax = u("RECURSOR_RECORDCACHE_MAX")?,
+            perc = u("RECURSOR_REFRESH_ON_TTL_PERC")?,
+            stale = u("RECURSOR_SERVE_STALE_EXTENSIONS")?,
+            negttl = u("RECURSOR_NEGATIVE_TTL")?,
+            pcmax = u("RECURSOR_PACKETCACHE_MAX")?,
+            pcttl = u("RECURSOR_PACKETCACHE_TTL")?,
+            sfttl = u("RECURSOR_SERVFAIL_TTL")?,
+            apiaddr = s.text("PDNS_API_LISTEN")?,
+            apiport = u(&which.key("API_PORT"))?,
+            apiallow = rows(&s.list("PDNS_API_ALLOW_FROM"), "    ")?,
+            loglevel = u("RECURSOR_LOGLEVEL")?,
+        ))
+    }
+}
