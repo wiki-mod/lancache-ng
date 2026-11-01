@@ -2025,7 +2025,7 @@ pub mod recursor_conf {
             s.uint("PDNS_AUTH_PORT")?
         );
         let mut fwd = String::new();
-        for z in s.list("DNS_LOCAL_ZONES") {
+        for z in crate::dns::managed_zones(&s.text("DNS_LAN_ZONE")?, s.flag("DNS_SERVE_RFC1918")?) {
             fwd.push_str(&format!(
                 "    - zone: \"{}\"\n      forwarders: [\"{auth}\"]\n",
                 z.trim_end_matches('.')
