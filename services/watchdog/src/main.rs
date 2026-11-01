@@ -2,13 +2,14 @@
 //! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 //! SPDX-License-Identifier: AGPL-3.0-or-later
 
-// What: watchdog: checks the stack, raises alarms.
-// Why: restarts sick containers; writes no config.
+// What: watchdog: decides when to check and tidy.
+// Why: the how lives in shared.rs; no config here.
 // From: Issue #1683 | PR #1858
 
 use lancache_ng::config::{process_env, Settings};
-use lancache_ng::{cert, clock, dns, docker, fs, http, pdns};
+use lancache_ng::{cert, clock, dns, docker, fs, http, pdns, tidy};
 use serde::Serialize;
+use serde_json::Value;
 use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -37,16 +38,20 @@ struct Alarm {
     text: String,
 }
 
-// What: findings of one round.
+// What: findings and facts of one round.
 // Why: a check adds rows and never stops others.
 // From: Issue #1683 | PR #1858
 #[derive(Default)]
-struct Findings(Vec<Alarm>);
+struct Findings {
+    alarms: Vec<Alarm>,
+    containers: Vec<Value>,
+    cache: Value,
+}
 
 impl Findings {
     fn add(&mut self, level: Level, source: &str, text: impl Into<String>) {
         let (source, text) = (source.to_string(), text.into());
-        self.0.push(Alarm { level, source, text });
+        self.alarms.push(Alarm { level, source, text });
     }
     fn warn(&mut self, source: &str, text: impl Into<String>) {
         self.add(Level::Warn, source, text);
@@ -63,28 +68,84 @@ impl Findings {
 struct Report<'a> {
     written: u64,
     alarms: &'a [Alarm],
+    containers: &'a [Value],
+    cache: &'a Value,
 }
 
-fn load() -> Result<Settings, String> {
-    let saved = process_env(SETTINGS_FILE_ENV).map(PathBuf::from);
-    Settings::load(&process_env, saved.as_deref())
+// What: Docker health of one container.
+// Why: degraded and starting are not failures.
+// From: Issue #1683 | PR #1858
+#[derive(Debug, PartialEq)]
+enum Health {
+    Healthy,
+    Degraded,
+    Starting,
+    Unhealthy,
+    Stopped(String),
+    Unknown(String),
 }
 
-// What: restart times per container.
-// Why: a crash loop stops at the SOT limit.
+impl Health {
+    // What: read docker inspect State.
+    // Why: newest check output DEGRADED: refines ok.
+    // From: Issue #1296
+    fn of(inspect: &Value) -> Self {
+        let state = inspect.pointer("/State/Status").and_then(Value::as_str);
+        if state != Some("running") {
+            return Health::Stopped(state.unwrap_or("unknown").into());
+        }
+        let status = inspect.pointer("/State/Health/Status").and_then(Value::as_str);
+        let last = inspect
+            .pointer("/State/Health/Log")
+            .and_then(Value::as_array)
+            .and_then(|log| log.last())
+            .and_then(|e| e["Output"].as_str())
+            .unwrap_or_default();
+        let degraded = last.lines().any(|l| l.starts_with("DEGRADED: "));
+        match status.unwrap_or("none") {
+            "healthy" if degraded => Health::Degraded,
+            "healthy" | "none" => Health::Healthy,
+            "starting" => Health::Starting,
+            "unhealthy" => Health::Unhealthy,
+            other => Health::Unknown(other.into()),
+        }
+    }
+
+    fn word_and_colour(&self) -> (String, &'static str) {
+        match self {
+            Health::Healthy => ("healthy".into(), "green"),
+            Health::Degraded => ("degraded".into(), "amber"),
+            Health::Starting => ("starting".into(), "yellow"),
+            Health::Unhealthy => ("unhealthy".into(), "red"),
+            Health::Stopped(s) => (s.clone(), "red"),
+            Health::Unknown(s) => (s.clone(), "yellow"),
+        }
+    }
+
+    fn failing(&self) -> bool {
+        matches!(self, Health::Unhealthy | Health::Stopped(_))
+    }
+}
+
+// What: failure streaks and restart times.
+// Why: restart after RESTART_AFTER misses, capped.
 // From: Issue #1683 | PR #1858
 #[derive(Default)]
-struct Restarts(BTreeMap<String, VecDeque<u64>>);
+struct Memory {
+    streak: BTreeMap<String, u64>,
+    restarts: BTreeMap<String, VecDeque<u64>>,
+    log_counter: Option<(u64, u64)>,
+}
 
-impl Restarts {
+impl Memory {
     // What: may this container restart now.
     // Why: at most LIMIT restarts per WINDOW.
     // From: Issue #1683 | PR #1858
-    fn allow(&mut self, s: &Settings, name: &str) -> Result<bool, String> {
+    fn restart_allowed(&mut self, s: &Settings, name: &str) -> Result<bool, String> {
         let max = s.uint("WATCHDOG_RESTART_LIMIT")?;
         let window = s.uint("WATCHDOG_RESTART_WINDOW")?;
         let now = clock::unix_secs();
-        let times = self.0.entry(name.to_string()).or_default();
+        let times = self.restarts.entry(name.to_string()).or_default();
         times.retain(|t| now.saturating_sub(*t) <= window);
         if times.len() as u64 >= max {
             return Ok(false);
@@ -94,53 +155,154 @@ impl Restarts {
     }
 }
 
-// What: why a container needs help, if at all.
-// Why: stopped or unhealthy; healthcheck = programs.
-// From: Issue #1683 | PR #1858
-fn trouble(c: &serde_json::Value) -> Option<String> {
-    let state = c["State"].as_str().unwrap_or("unknown");
-    let sick = c["Status"].as_str().unwrap_or_default().contains("(unhealthy)");
-    match (state == "running", sick) {
-        (true, false) => None,
-        (true, true) => Some("health check unhealthy".into()),
-        (false, _) => Some(format!("container is {state}")),
-    }
+fn load() -> Result<Settings, String> {
+    let saved = process_env(SETTINGS_FILE_ENV).map(PathBuf::from);
+    Settings::load(&process_env, saved.as_deref())
 }
 
-// What: watch containers; restart in trouble.
-// Why: keeps the stack up; loops become alarms.
+// What: check every container; heal on a streak.
+// Why: one miss is noise; RESTART_AFTER is a fault.
 // From: Issue #1683 | PR #1858
-async fn containers(s: &Settings, f: &mut Findings, r: &mut Restarts) -> Result<(), String> {
+async fn containers(s: &Settings, f: &mut Findings, m: &mut Memory) -> Result<(), String> {
     let api = docker::Api::new(&s.text("DOCKER_ENDPOINT")?)?;
     let limit = Duration::from_secs(s.uint("DOCKER_TIMEOUT")?);
     let grace = u32::try_from(s.uint("WATCHDOG_STOP_GRACE")?).map_err(|e| e.to_string())?;
+    let after = s.uint("RESTART_AFTER")?;
     let project = s.text("COMPOSE_PROJECT")?;
     let dhcp_off = s.text("DHCP_MODE")? == "off";
     let dhcp_service = s.text("DHCP_SERVICE")?;
-    let list = api.project(&project, limit).await.map_err(|e| e.to_string())?;
-    for c in &list {
-        let Some(service) = c["Labels"][docker::SERVICE_LABEL].as_str() else {
+    for row in api.project(&project, limit).await.map_err(|e| e.to_string())? {
+        let Some(service) = row["Labels"][docker::SERVICE_LABEL].as_str() else {
             continue;
         };
-        let Some(why) = trouble(c) else { continue };
-        if dhcp_off && service == dhcp_service {
+        let name = row["Names"][0].as_str().unwrap_or(service).trim_start_matches('/');
+        let inspect = api.inspect(name, limit).await.map_err(|e| e.to_string())?;
+        let health = Health::of(&inspect);
+        let (word, colour) = health.word_and_colour();
+        let wanted = !(dhcp_off && service == dhcp_service);
+        f.containers.push(serde_json::json!({
+            "service": service, "name": name, "health": word, "colour": colour,
+        }));
+        if health == Health::Degraded {
+            f.warn(service, "running with reduced function");
+        }
+        if !wanted || !health.failing() {
+            m.streak.remove(name);
             continue;
         }
-        let name = c["Names"][0].as_str().unwrap_or(service).trim_start_matches('/');
-        if !r.allow(s, name)? {
-            f.crit(service, format!("{why}; restart limit reached"));
+        let count = m.streak.entry(name.to_string()).or_default();
+        *count += 1;
+        if *count < after {
+            f.warn(service, format!("{word}, check {count} of {after}"));
+            continue;
+        }
+        *count = 0;
+        if !m.restart_allowed(s, name)? {
+            f.crit(service, format!("{word}; restart limit reached"));
             continue;
         }
         match api.act(name, docker::Action::Restart, grace, limit).await {
-            Ok(()) => f.warn(service, format!("{why}; restarted")),
-            Err(e) => f.crit(service, format!("{why}; restart failed: {e}")),
+            Ok(()) => f.warn(service, format!("{word}; restarted")),
+            Err(e) => f.crit(service, format!("{word}; restart failed: {e}")),
         }
     }
     Ok(())
 }
 
-// What: free space of each watched path.
-// Why: a full disk stops cache and logs.
+// What: daily: drop cache files past their days.
+// Why: CACHE_VALID_DAYS keeps the disk usable.
+// From: Issue #1683 | PR #1858
+fn purge_cache(s: &Settings, f: &mut Findings, now: u64) -> Result<(), String> {
+    let stamp = PathBuf::from(s.text("PURGE_STAMP")?);
+    if !tidy::due(&stamp, now) {
+        return Ok(());
+    }
+    let dir = tidy::inside(&s.text("CACHE_DIR")?, &s.text("CACHE_DIR_ALLOWED_PREFIX")?)?;
+    let (gone, errs) = tidy::drop_older(&dir, s.uint("CACHE_VALID_DAYS")?, now);
+    eprintln!("watchdog: cache purge removed {gone} files");
+    for e in errs {
+        f.warn("cache purge", e);
+    }
+    tidy::mark(&stamp, now)
+}
+
+fn log_root(s: &Settings) -> Result<PathBuf, String> {
+    tidy::inside(&s.text("SYSLOG_LOG_ROOT")?, &s.text("SYSLOG_LOG_ROOT_ALLOWED_PREFIX")?)
+}
+
+// What: daily: log age limit, then size budget.
+// Why: over budget retries after the cooldown.
+// From: Issue #1683 | PR #1858
+fn prune_logs(s: &Settings, f: &mut Findings, now: u64) -> Result<(), String> {
+    let stamp = PathBuf::from(s.text("SYSLOG_PRUNE_STAMP")?);
+    if !tidy::due(&stamp, now) {
+        return Ok(());
+    }
+    let root = log_root(s)?;
+    let budget = s.uint("SYSLOG_MAX_GB")?.saturating_mul(1 << 30);
+    let (_, mut errs) = tidy::drop_older(&root, s.uint("SYSLOG_RETENTION_DAYS")?, now);
+    let (size, more) = tidy::fit_budget(&root, budget, now);
+    errs.extend(more);
+    for e in errs {
+        f.warn("log prune", e);
+    }
+    if size <= budget {
+        return tidy::mark(&stamp, now);
+    }
+    f.warn("logs", format!("log size {size} bytes is over the budget"));
+    let wait = s.uint("SYSLOG_PRUNE_RETRY_COOLDOWN")?;
+    tidy::mark(&stamp, (now + wait).saturating_sub(tidy::DAY))
+}
+
+// What: pack closed log files with xz.
+// Why: saves log disk; open files stay plain.
+// From: Issue #1683 | PR #1858
+fn pack_logs(s: &Settings, f: &mut Findings, now: u64) -> Result<(), String> {
+    for e in tidy::pack_closed(&log_root(s)?, s.uint("SYSLOG_XZ_PRESET")?, now) {
+        f.warn("log pack", e);
+    }
+    Ok(())
+}
+
+// What: logs arrive but nothing is written.
+// Why: a full or read-only log disk hides itself.
+// From: Issue #1683 | PR #1858
+fn log_writing(s: &Settings, f: &mut Findings, m: &mut Memory) -> Result<(), String> {
+    let newest = tidy::newest(Path::new(&s.text("SYSLOG_LOG_ROOT")?));
+    let count = tidy::syslog_processed()?;
+    if let Some((was_count, was_newest)) = m.log_counter {
+        if count > was_count && newest == was_newest {
+            f.crit("logs", "messages arrive but no log file is written");
+        }
+    }
+    m.log_counter = Some((count, newest));
+    Ok(())
+}
+
+// What: cache disk use as a traffic light.
+// Why: the ui shows green, yellow or red.
+// From: Issue #1683 | PR #1858
+fn cache_light(s: &Settings, f: &mut Findings) -> Result<(), String> {
+    let dir = s.text("CACHE_DIR")?;
+    let sp = fs::space(Path::new(&dir)).map_err(|e| format!("{dir}: {e}"))?;
+    let used = sp.total.saturating_sub(sp.free);
+    let pct = used.saturating_mul(100) / sp.total.max(1);
+    let (warn, alarm) = (s.uint("DISK_WARN_PCT")?, s.uint("DISK_ALARM_PCT")?);
+    let colour = if pct >= alarm {
+        f.crit(&dir, format!("cache disk {pct}% full"));
+        "red"
+    } else if pct >= warn {
+        f.warn(&dir, format!("cache disk {pct}% full"));
+        "yellow"
+    } else {
+        "green"
+    };
+    f.cache = serde_json::json!({"pct": pct, "used_bytes": used, "status": colour});
+    Ok(())
+}
+
+// What: free space of each other watched path.
+// Why: a full log disk stops the logs.
 // From: Issue #1683 | PR #1858
 fn disks(s: &Settings, f: &mut Findings) -> Result<(), String> {
     let min = s.uint("WATCHDOG_DISK_MIN_FREE_PERCENT")?;
@@ -196,42 +358,57 @@ async fn dns_sync(s: &Settings, f: &mut Findings) -> Result<(), String> {
         };
         let state = dns::sync_state(z.serial, other);
         if state != dns::Sync::InSync {
-            let text = format!("{state:?}: primary {} secondary {other}", z.serial);
-            f.warn(&z.name, text);
+            f.warn(&z.name, format!("{state:?}: primary {} secondary {other}", z.serial));
         }
     }
     Ok(())
 }
 
-// What: run every check of one round.
-// Why: a broken check is itself an alarm.
+// What: run every duty of one round.
+// Why: a broken duty is itself an alarm.
 // From: Issue #1683 | PR #1858
-async fn round(s: &Settings, r: &mut Restarts) -> Findings {
+async fn round(s: &Settings, m: &mut Memory) -> Findings {
     let mut f = Findings::default();
-    if let Err(e) = containers(s, &mut f, r).await {
+    let now = clock::unix_secs();
+    if let Err(e) = containers(s, &mut f, m).await {
         f.crit("docker", e);
     }
-    if let Err(e) = disks(s, &mut f) {
-        f.crit("disks", e);
+    let steps: [(&str, Result<(), String>); 6] = [
+        ("cache", cache_light(s, &mut f)),
+        ("disks", disks(s, &mut f)),
+        ("certs", certs(s, &mut f)),
+        ("cache purge", purge_cache(s, &mut f, now)),
+        ("log prune", prune_logs(s, &mut f, now)),
+        ("log pack", pack_logs(s, &mut f, now)),
+    ];
+    for (name, result) in steps {
+        if let Err(e) = result {
+            f.crit(name, e);
+        }
     }
-    if let Err(e) = certs(s, &mut f) {
-        f.crit("certs", e);
+    if let Err(e) = log_writing(s, &mut f, m) {
+        f.crit("logs", e);
     }
     if let Err(e) = dns_sync(s, &mut f).await {
         f.crit("dns", e);
     }
-    f.0.sort_by(|a, b| b.level.cmp(&a.level).then_with(|| a.source.cmp(&b.source)));
+    f.alarms.sort_by(|a, b| b.level.cmp(&a.level).then_with(|| a.source.cmp(&b.source)));
     f
 }
 
 // What: write the alarm file for the ui.
 // Why: whole-file replace; no half reads.
 // From: Issue #1683 | PR #1858
-fn publish(s: &Settings, alarms: &[Alarm]) -> Result<(), String> {
+fn publish(s: &Settings, f: &Findings) -> Result<(), String> {
     let path = PathBuf::from(s.text("WATCHDOG_ALARM_FILE")?);
     let mode = u32::from_str_radix(&s.text("WATCHDOG_ALARM_FILE_MODE")?, 8)
         .map_err(|e| format!("WATCHDOG_ALARM_FILE_MODE: {e}"))?;
-    let report = Report { written: clock::unix_secs(), alarms };
+    let report = Report {
+        written: clock::unix_secs(),
+        alarms: &f.alarms,
+        containers: &f.containers,
+        cache: &f.cache,
+    };
     let body = serde_json::to_vec_pretty(&report).map_err(|e| e.to_string())?;
     let owner = fs::Owner { uid: None, gid: None };
     fs::write(&path, &body, mode, fs::Place::Replace, owner)
@@ -245,23 +422,23 @@ fn publish(s: &Settings, alarms: &[Alarm]) -> Result<(), String> {
 async fn main() -> Result<(), String> {
     use tokio::signal::unix::{signal, SignalKind};
     let mut settings = load()?;
-    let mut pause = Duration::from_secs(settings.uint("WATCHDOG_INTERVAL")?);
+    let mut pause = Duration::from_secs(settings.uint("CHECK_INTERVAL")?);
     let mut term = signal(SignalKind::terminate()).map_err(|e| e.to_string())?;
-    let mut restarts = Restarts::default();
+    let mut memory = Memory::default();
     loop {
         match load() {
             Ok(s) => settings = s,
             Err(e) => eprintln!("watchdog: settings kept: {e}"),
         }
-        match settings.uint("WATCHDOG_INTERVAL") {
+        match settings.uint("CHECK_INTERVAL") {
             Ok(v) => pause = Duration::from_secs(v),
             Err(e) => eprintln!("watchdog: interval kept: {e}"),
         }
-        let found = round(&settings, &mut restarts).await;
-        for a in &found.0 {
+        let found = round(&settings, &mut memory).await;
+        for a in &found.alarms {
             eprintln!("watchdog: {:?} {}: {}", a.level, a.source, a.text);
         }
-        if let Err(e) = publish(&settings, &found.0) {
+        if let Err(e) = publish(&settings, &found) {
             eprintln!("watchdog: alarm file: {e}");
         }
         tokio::select! {

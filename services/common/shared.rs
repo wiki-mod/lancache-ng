@@ -3340,3 +3340,194 @@ pub mod rrd {
         run(&mut cmd)
     }
 }
+
+// What: file tidying: safe paths, age, size, xz.
+// Why: the watchdog decides when; this does how.
+// From: Issue #1683 | PR #1858
+pub mod tidy {
+    use std::path::{Component, Path, PathBuf};
+    use std::process::Command;
+
+    // What: seconds of one day.
+    // Why: ages and daily stamps count in days.
+    // From: Issue #1683 | PR #1858
+    pub const DAY: u64 = 86_400;
+
+    fn resolved(path: &Path) -> std::io::Result<PathBuf> {
+        let mut out = PathBuf::from("/");
+        for part in path.components() {
+            match part {
+                Component::ParentDir => {
+                    out.pop();
+                }
+                Component::Normal(name) => {
+                    let next = out.join(name);
+                    out = match std::fs::canonicalize(&next) {
+                        Ok(real) => real,
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => next,
+                        Err(e) => return Err(e),
+                    };
+                }
+                _ => {}
+            }
+        }
+        Ok(out)
+    }
+
+    // What: real folder strictly inside prefix.
+    // Why: a bad setting must never clean elsewhere.
+    // From: Issue #1683 | PR #1858
+    pub fn inside(raw: &str, prefix: &str) -> Result<PathBuf, String> {
+        if !raw.starts_with('/') {
+            return Err(format!("{raw} is not an absolute path"));
+        }
+        let real = resolved(Path::new(raw)).map_err(|e| format!("{raw}: {e}"))?;
+        let prefix = Path::new(prefix);
+        if real == prefix || !real.starts_with(prefix) {
+            return Err(format!("{} is not inside {}", real.display(), prefix.display()));
+        }
+        Ok(real)
+    }
+
+    // What: one regular file with its facts.
+    // Why: links are never followed or removed.
+    // From: Issue #1683 | PR #1858
+    pub struct Item {
+        pub path: PathBuf,
+        pub size: u64,
+        pub mtime: u64,
+    }
+
+    fn mtime(meta: &std::fs::Metadata) -> u64 {
+        meta.modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_secs())
+    }
+
+    // What: all regular files below a folder.
+    // Why: base for age, size and pack runs.
+    // From: Issue #1683 | PR #1858
+    pub fn files(dir: &Path) -> Vec<Item> {
+        let mut out = Vec::new();
+        let mut todo = vec![dir.to_path_buf()];
+        while let Some(d) = todo.pop() {
+            let Ok(rd) = std::fs::read_dir(&d) else { continue };
+            for e in rd.flatten() {
+                let Ok(meta) = std::fs::symlink_metadata(e.path()) else { continue };
+                if meta.is_dir() {
+                    todo.push(e.path());
+                } else if meta.is_file() {
+                    out.push(Item { path: e.path(), size: meta.len(), mtime: mtime(&meta) });
+                }
+            }
+        }
+        out
+    }
+
+    // What: remove files older than days.
+    // Why: returns count removed and the errors.
+    // From: Issue #1683 | PR #1858
+    pub fn drop_older(dir: &Path, days: u64, now: u64) -> (usize, Vec<String>) {
+        let (mut gone, mut errs) = (0, Vec::new());
+        for f in files(dir) {
+            if now.saturating_sub(f.mtime) / DAY <= days {
+                continue;
+            }
+            match std::fs::remove_file(&f.path) {
+                Ok(()) => gone += 1,
+                Err(e) => errs.push(format!("{}: {e}", f.path.display())),
+            }
+        }
+        (gone, errs)
+    }
+
+    // What: remove oldest until under budget.
+    // Why: files written today stay; returns size.
+    // From: Issue #1683 | PR #1858
+    pub fn fit_budget(dir: &Path, budget: u64, now: u64) -> (u64, Vec<String>) {
+        let mut all = files(dir);
+        let mut size: u64 = all.iter().map(|f| f.size).sum();
+        all.sort_by_key(|f| f.mtime);
+        let today = now - now % DAY;
+        let mut errs = Vec::new();
+        for f in &all {
+            if size <= budget {
+                break;
+            }
+            if f.mtime >= today {
+                continue;
+            }
+            match std::fs::remove_file(&f.path) {
+                Ok(()) => size = size.saturating_sub(f.size),
+                Err(e) => errs.push(format!("{}: {e}", f.path.display())),
+            }
+        }
+        (size, errs)
+    }
+
+    // What: xz every file closed before today.
+    // Why: past days are never written again.
+    // From: Issue #1683 | PR #1858
+    pub fn pack_closed(dir: &Path, preset: u64, now: u64) -> Vec<String> {
+        let today = now - now % DAY;
+        let mut errs = Vec::new();
+        for f in files(dir) {
+            if f.mtime >= today || f.path.extension().is_some_and(|e| e == "xz") {
+                continue;
+            }
+            let run = Command::new("xz").arg(format!("-{preset}")).arg("--").arg(&f.path).output();
+            match run {
+                Ok(o) if o.status.success() => {}
+                Ok(o) => errs.push(String::from_utf8_lossy(&o.stderr).trim().to_string()),
+                Err(e) => errs.push(format!("xz: {e}")),
+            }
+        }
+        errs
+    }
+
+    // What: is a daily job due by its stamp.
+    // Why: a missing or future stamp means due.
+    // From: Issue #1683 | PR #1858
+    pub fn due(stamp: &Path, now: u64) -> bool {
+        let last = std::fs::read_to_string(stamp)
+            .ok()
+            .and_then(|t| t.trim().parse::<u64>().ok())
+            .filter(|t| *t <= now)
+            .unwrap_or(0);
+        now - last >= DAY
+    }
+
+    // What: write a stamp time.
+    // Why: next run waits a day from it.
+    // From: Issue #1683 | PR #1858
+    pub fn mark(stamp: &Path, at: u64) -> Result<(), String> {
+        let made = stamp.parent().map_or(Ok(()), std::fs::create_dir_all);
+        let wrote = made.and_then(|()| std::fs::write(stamp, format!("{at}\n")));
+        wrote.map_err(|e| format!("{}: {e}", stamp.display()))
+    }
+
+    // What: newest change time below a folder.
+    // Why: shows whether logs are still written.
+    // From: Issue #1683 | PR #1858
+    pub fn newest(dir: &Path) -> u64 {
+        files(dir).iter().map(|f| f.mtime).max().unwrap_or(0)
+    }
+
+    // What: processed count of syslog-ng file outputs.
+    // Why: syslog-ng-ctl stats lists dst.file rows.
+    // From: Issue #1683 | PR #1858
+    pub fn syslog_processed() -> Result<u64, String> {
+        let out = Command::new("syslog-ng-ctl").arg("stats").output();
+        let out = out.map_err(|e| format!("syslog-ng-ctl: {e}"))?;
+        let text = String::from_utf8_lossy(&out.stdout);
+        let mut total = 0;
+        for row in text.lines().filter(|l| l.starts_with("dst.file;")) {
+            let cols: Vec<&str> = row.split(';').collect();
+            if cols.get(4) == Some(&"processed") {
+                total += cols.get(5).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+            }
+        }
+        Ok(total)
+    }
+}
