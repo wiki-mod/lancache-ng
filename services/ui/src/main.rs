@@ -1845,6 +1845,11 @@ fn tail_lines(path: &str, limit: usize) -> Vec<String> {
     lines[start..].iter().map(|l| l.to_string()).collect()
 }
 
+// What: tail window as a multiple of the wanted entries.
+// Why: stream and error lines must not push HTTP lines out.
+// From: Issue #1683 | PR #1979
+const TAIL_WINDOW: usize = 100;
+
 // What: the last `limit` parsed access-log entries.
 // Why: oldest first, so callers reverse for newest-first.
 // From: Issue #1683 | PR #1858
@@ -1852,7 +1857,10 @@ fn parse_log_tail(dir: &str, limit: usize) -> Vec<LogEntry> {
     let Some(newest) = proxy_log_files(dir).pop() else {
         return vec![];
     };
-    tail_lines(&newest.to_string_lossy(), limit)
+    // What: read a wide tail, keep the last `limit` HTTP lines.
+    // Why: stream and error lines must not hide them.
+    // From: Issue #1683 | PR #1979
+    let entries: Vec<LogEntry> = tail_lines(&newest.to_string_lossy(), limit * TAIL_WINDOW)
         .iter()
         .filter_map(|line| {
             let caps = log_regex().captures(line)?;
@@ -1867,7 +1875,9 @@ fn parse_log_tail(dir: &str, limit: usize) -> Vec<LogEntry> {
                 cache_status: caps[7].to_string(),
             })
         })
-        .collect()
+        .collect();
+    let skip = entries.len().saturating_sub(limit);
+    entries.into_iter().skip(skip).collect()
 }
 
 // What: hit, miss and byte totals over the open days.
