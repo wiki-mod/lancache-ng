@@ -392,6 +392,10 @@ runtime:
     - RPZ_TTL=60
     - RPZ_SOA_REFRESH=3600
     - RPZ_SOA_RETRY=900
+    - RPZ_SOA_MNAME=localhost.
+    - RPZ_SOA_EXPIRE=86400
+    - RPZ_SOA_MINIMUM=60
+    - RPZ_POLICY_NAME=lancache-rpz
     - ROOT_ZONE_MIRROR_SERVERS=199.9.14.201 192.33.4.12 192.5.5.241
     - ROOT_ZONE_MIRROR_REFRESH=3600
     - ROOT_ZONE_MIRROR_RETRY=3600
@@ -998,6 +1002,14 @@ runtime:
     - PROXY_LOG_PROGRAM=text;;;live;ui
     - PROXY_SECURITY_MODE=choice;lazy strict;;reload;proxy
     - RECURSOR_AAAA_LUA_FILE=path;;;reload;dns
+    - RPZ_TTL=uint;1;86400;reload;dns
+    - RPZ_SOA_MNAME=text;;;reload;dns
+    - RPZ_SOA_RNAME=text;;;reload;dns
+    - RPZ_SOA_REFRESH=uint;1;;reload;dns
+    - RPZ_SOA_RETRY=uint;1;;reload;dns
+    - RPZ_SOA_EXPIRE=uint;1;;reload;dns
+    - RPZ_SOA_MINIMUM=uint;0;;reload;dns
+    - RPZ_POLICY_NAME=text;;;reload;dns
     - RECURSOR_API_URLS=list;;;live;services
     - REPO_URL=text;;;live;ui
     - SECRETS_DIR=path;;;container;services
