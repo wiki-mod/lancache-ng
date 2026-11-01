@@ -313,7 +313,7 @@ async fn fetch_proxy_live(s: &Settings) -> Option<serde_json::Value> {
 
 // What: read the stub_status text into numbers.
 // Why: nginx gives plain text, the page needs fields.
-// From: nginx ngx_http_stub_status_module
+// From: Issue #1683 | PR #1858
 fn parse_stub_status(body: &str) -> Option<serde_json::Value> {
     let nums: Vec<u64> = body
         .split_whitespace()
