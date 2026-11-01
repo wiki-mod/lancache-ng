@@ -967,7 +967,7 @@ runtime:
     - DHCP_LEASE_TIME_MIN=uint;1;604800;reload;dhcp
     - DHCP_LOG_PACKETS=bool;;;reload;dhcp
     - DHCP_MAX_LEASE_FACTOR=uint;1;100;reload;dhcp
-    - DHCP_MODE=choice;off kea dnsmasq-proxy dnsmasq-relay;;restart;dhcp
+    - DHCP_MODE=choice;off,kea,dnsmasq-proxy,dnsmasq-relay;;restart;dhcp
     - DHCP_NTP_SERVERS=list?;;;reload;dhcp
     - DHCP_OPTION_DATA_MAX=uint;1;65535;live;ui
     - DHCP_PROBE_ACK_WAIT_MS=uint;100;60000;live;ui
@@ -989,7 +989,7 @@ runtime:
     - DNS_RECORD_TTL=uint;1;86400;live;ui
     - DNS_RECORD_TTL_MAX=uint;1;604800;live;ui
     - DNS_TXT_MAX_BYTES=uint;1;255;live;ui
-    - DNS_REPLICATION_ROLE=choice;primary secondary;;recreate;dns
+    - DNS_REPLICATION_ROLE=choice;primary,secondary;;recreate;dns
     - DNS_SECONDARIES=list?;;;reload;dns
     - DNS_SECONDARY_ZONES=list?;;;reload;dns
     - DNS_SERVE_RFC1918=bool;;;reload;dns
@@ -1011,17 +1011,17 @@ runtime:
     - KEA_DDNS_ADDRESS=text;;;reload;dhcp
     - KEA_DDNS_GENERATED_PREFIX=text;;;reload;dhcp
     - KEA_DDNS_PORT=uint;1;65535;reload;dhcp
-    - KEA_DDNS_REPLACE_CLIENT_NAME=choice;never always when-present when-not-present;;reload;dhcp
+    - KEA_DDNS_REPLACE_CLIENT_NAME=choice;never,always,when-present,when-not-present;;reload;dhcp
     - KEA_DHCP4_CONF_FILE=path;;;reload;dhcp
     - KEA_DHCP4_SOCKET=path;;;reload;dhcp
     - KEA_LEASE_CMDS_HOOK=text;;;reload;dhcp
     - KEA_LEASE_FILE=path;;;reload;dhcp
     - KEA_LOG_DEBUGLEVEL=uint;0;99;reload;dhcp
-    - KEA_LOG_SEVERITY=choice;FATAL ERROR WARN INFO DEBUG;;reload;dhcp
+    - KEA_LOG_SEVERITY=choice;FATAL,ERROR,WARN,INFO,DEBUG;;reload;dhcp
     - KEA_NCR_MAX_QUEUE=uint;1;65535;reload;dhcp
     - KEA_SNAPSHOT_DIR=path;;;live;ui
     - KEA_SNAPSHOT_KEEP=uint;1;1000;live;ui
-    - LANCACHE_IMAGE_CHANNEL=choice;nightly latest;;live;ui
+    - LANCACHE_IMAGE_CHANNEL=choice;nightly,latest;;live;ui
     - LANCACHE_LOG_PORT=uint;1;65535;container;services
     - LOG_READER_GROUP=text;;;container;services
     - LOOPBACK_BIND_IP=text;;;container;services
@@ -1063,7 +1063,7 @@ runtime:
     - PROXY_ALLOWED_CLIENT_CIDRS=list;;;reload;proxy
     - PROXY_HTTP_PORT=uint;1;65535;container;proxy
     - PROXY_LOG_PROGRAM=text;;;live;ui
-    - PROXY_SECURITY_MODE=choice;lazy strict;;reload;proxy
+    - PROXY_SECURITY_MODE=choice;lazy,strict;;reload;proxy
     - RECURSOR_AAAA_LUA_FILE=path;;;reload;dns
     - CHRONY_CONF_FILE=path;;;container;services
     - CONFIG_DIR=path;;;container;ui
@@ -1132,7 +1132,7 @@ runtime:
     - STEAM_DEVICE_NAME=text;;;live;services
     - STEAM_HEARTBEAT_DEFAULT=uint;1;600;live;services
     - STEAM_MANIFEST_API_VERSION=uint;1;100;live;services
-    - STEAM_OS=choice;windows macos linux;;live;services
+    - STEAM_OS=choice;windows,macos,linux;;live;services
     - STEAM_PROTOCOL_VERSION=uint;1;1000000;live;services
     - STEAM_QR_SIZE=uint;100;1000;live;services
     - SYSLOG_BUFFER_DIR=path;;;restart;services
