@@ -716,3 +716,257 @@ pub mod proc {
         }
     }
 }
+
+// What: one HTTP client rule, health probes, body drain.
+// Why: every service talks HTTP through one owner.
+// From: Issue #1683 | PR #1858
+pub mod http {
+    use crate::config::Settings;
+    use futures_util::StreamExt as _;
+    use std::time::Duration;
+
+    // What: the general client; timeouts from the SOT.
+    // Why: no service keeps its own timeout literals.
+    // From: Issue #1683 | PR #1858
+    pub fn client(s: &Settings) -> Result<reqwest::Client, String> {
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(s.uint("HTTP_CLIENT_TIMEOUT")?))
+            .pool_idle_timeout(Duration::from_secs(s.uint("HTTP_POOL_IDLE_TIMEOUT")?))
+            .tcp_keepalive(Duration::from_secs(s.uint("HTTP_TCP_KEEPALIVE")?))
+            .build()
+            .map_err(|e| format!("HTTP client: {e}"))
+    }
+
+    // What: an error and all causes on one line.
+    // Why: reqwest hides the TLS or socket cause in source().
+    // From: Issue #1683 | PR #1858
+    pub fn error_chain(error: &dyn std::error::Error) -> String {
+        let mut text = error.to_string();
+        let mut cause = error.source();
+        while let Some(inner) = cause {
+            text.push_str(": ");
+            text.push_str(&inner.to_string());
+            cause = inner.source();
+        }
+        text
+    }
+
+    // What: Ok when a GET answers 2xx.
+    // Why: http and https probes judge the same way.
+    // From: Issue #1683 | PR #1858
+    async fn expect_success(client: &reqwest::Client, url: &str) -> Result<(), String> {
+        let status = client
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| format!("{url}: {}", error_chain(&e)))?
+            .status();
+        if status.is_success() {
+            Ok(())
+        } else {
+            Err(format!("{url}: HTTP {status}"))
+        }
+    }
+
+    // What: health probe of a plain or TLS URL.
+    // Why: TLS trusts only the stack CA; no curl, no shell.
+    // From: Issue #1683 | PR #1858
+    pub async fn probe(url: &str, ca_pem: Option<&[u8]>, timeout: Duration) -> Result<(), String> {
+        let mut builder = reqwest::Client::builder().timeout(timeout).no_proxy();
+        if url.starts_with("https://") {
+            let pem = ca_pem.ok_or_else(|| format!("{url}: https probe needs the stack CA"))?;
+            let ca = reqwest::Certificate::from_pem(pem).map_err(|e| format!("CA: {e}"))?;
+            builder = builder.tls_certs_only([ca]);
+        }
+        let client = builder.build().map_err(|e| format!("probe client: {e}"))?;
+        expect_success(&client, url).await
+    }
+
+    // What: send a GET, read the body, keep only the count.
+    // Why: pre-caching fills the proxy; no disk IO here.
+    // From: Issue #1683 | PR #1858
+    pub async fn drain(client: &reqwest::Client, url: &str) -> Result<(u16, u64), String> {
+        let resp = client
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| format!("{url}: {}", error_chain(&e)))?;
+        let status = resp.status().as_u16();
+        let mut bytes = 0u64;
+        let mut body = resp.bytes_stream();
+        while let Some(chunk) = body.next().await {
+            bytes += chunk.map_err(|e| format!("{url}: {}", error_chain(&e)))?.len() as u64;
+        }
+        Ok((status, bytes))
+    }
+}
+
+// What: PowerDNS authoritative and recursor API client.
+// Why: native API replaces NATS; one owner for both.
+// From: Issue #1683 | PR #1858
+pub mod pdns {
+    use serde_json::{json, Value};
+
+    // What: header that carries the PowerDNS API key.
+    // Why: fixed by the PowerDNS HTTP API.
+    // From: Issue #1683 | PR #1858
+    const KEY_HEADER: &str = "X-API-Key";
+
+    // What: one zone row of the zone list.
+    // Why: serial fields drive the sync check (RFC 1982).
+    // From: Issue #1683 | PR #1858
+    #[derive(Clone, Debug, serde::Deserialize)]
+    pub struct Zone {
+        pub id: String,
+        pub name: String,
+        pub kind: String,
+        #[serde(default)]
+        pub serial: u32,
+        #[serde(default)]
+        pub notified_serial: u32,
+        #[serde(default)]
+        pub last_check: u64,
+        #[serde(default)]
+        pub masters: Vec<String>,
+    }
+
+    // What: client of one PowerDNS API base URL.
+    // Why: auth and recursor share key and error handling.
+    // From: Issue #1683 | PR #1858
+    #[derive(Clone)]
+    pub struct Api {
+        client: reqwest::Client,
+        base: String,
+        key: String,
+    }
+
+    // What: a zone name in API path form.
+    // Why: the API wants the dotted name with a final dot.
+    // From: Issue #1683 | PR #1858
+    pub fn zone_id(zone: &str) -> String {
+        format!("{}.", zone.trim_end_matches('.'))
+    }
+
+    impl Api {
+        // What: a client; base is .../api/v1/servers/<id>.
+        // Why: the server id comes from the SOT URL.
+        // From: Issue #1683 | PR #1858
+        pub fn new(client: reqwest::Client, base: &str, key: &str) -> Self {
+            Self {
+                client,
+                base: base.trim_end_matches('/').to_string(),
+                key: key.to_string(),
+            }
+        }
+
+        // What: one call; non-2xx is an error with the body.
+        // Why: PowerDNS explains refusals in its JSON.
+        // From: Issue #1683 | PR #1858
+        async fn call(
+            &self,
+            method: reqwest::Method,
+            path: &str,
+            body: Option<Value>,
+        ) -> Result<String, String> {
+            let url = format!("{}{path}", self.base);
+            let mut req = self.client.request(method, &url).header(KEY_HEADER, &self.key);
+            if let Some(body) = body {
+                req = req.json(&body);
+            }
+            let resp = req
+                .send()
+                .await
+                .map_err(|e| format!("{url}: {}", super::http::error_chain(&e)))?;
+            let status = resp.status();
+            let text = resp.text().await.map_err(|e| format!("{url}: {e}"))?;
+            if status.is_success() {
+                Ok(text)
+            } else {
+                Err(format!("{url}: HTTP {status}: {text}"))
+            }
+        }
+
+        // What: replace or delete one rrset of a zone.
+        // Why: soa_edit_api raises the serial on change.
+        // From: Issue #1683 | PR #1858
+        pub async fn set_rrset(
+            &self,
+            zone: &str,
+            name: &str,
+            kind: &str,
+            ttl: u32,
+            contents: &[String],
+        ) -> Result<(), String> {
+            let rrset = if contents.is_empty() {
+                json!({"name": zone_id(name), "type": kind, "changetype": "DELETE"})
+            } else {
+                let records: Vec<Value> = contents
+                    .iter()
+                    .map(|c| json!({"content": c, "disabled": false}))
+                    .collect();
+                json!({"name": zone_id(name), "type": kind, "ttl": ttl,
+                       "changetype": "REPLACE", "records": records})
+            };
+            let path = format!("/zones/{}", zone_id(zone));
+            self.call(reqwest::Method::PATCH, &path, Some(json!({"rrsets": [rrset]})))
+                .await
+                .map(drop)
+        }
+
+        // What: all zones with serial and check times.
+        // Why: the sync check reads these fields only.
+        // From: Issue #1683 | PR #1858
+        pub async fn zones(&self) -> Result<Vec<Zone>, String> {
+            let text = self.call(reqwest::Method::GET, "/zones", None).await?;
+            serde_json::from_str(&text).map_err(|e| format!("zone list: {e}"))
+        }
+
+        // What: the zone in AXFR text form.
+        // Why: snapshots store what PowerDNS itself exports.
+        // From: Issue #1683 | PR #1858
+        pub async fn export(&self, zone: &str) -> Result<String, String> {
+            let path = format!("/zones/{}/export", zone_id(zone));
+            self.call(reqwest::Method::GET, &path, None).await
+        }
+
+        // What: send NOTIFY for a zone to its secondaries.
+        // Why: secondaries pull at once, not at refresh.
+        // From: Issue #1683 | PR #1858
+        pub async fn notify(&self, zone: &str) -> Result<(), String> {
+            let path = format!("/zones/{}/notify", zone_id(zone));
+            self.call(reqwest::Method::PUT, &path, None).await.map(drop)
+        }
+
+        // What: pull a secondary zone from its primary now.
+        // Why: a stale secondary resyncs without restart.
+        // From: Issue #1683 | PR #1858
+        pub async fn axfr_retrieve(&self, zone: &str) -> Result<(), String> {
+            let path = format!("/zones/{}/axfr-retrieve", zone_id(zone));
+            self.call(reqwest::Method::PUT, &path, None).await.map(drop)
+        }
+
+        // What: the server statistics as name -> value.
+        // Why: snmpd extend and the ui read these counters.
+        // From: Issue #1683 | PR #1858
+        pub async fn statistics(&self) -> Result<Vec<(String, String)>, String> {
+            let text = self.call(reqwest::Method::GET, "/statistics", None).await?;
+            let rows: Vec<Value> =
+                serde_json::from_str(&text).map_err(|e| format!("statistics: {e}"))?;
+            Ok(rows
+                .iter()
+                .filter_map(|r| Some((r["name"].as_str()?.to_string(), r["value"].as_str()?.to_string())))
+                .collect())
+        }
+
+        // What: flush a name (and subtree) from a recursor.
+        // Why: changed records must not wait for their TTL.
+        // From: Issue #1683 | PR #1858
+        pub async fn flush(&self, name: &str, subtree: bool) -> Result<(), String> {
+            let path = format!(
+                "/cache/flush?domain={}&subtree={subtree}",
+                zone_id(name)
+            );
+            self.call(reqwest::Method::PUT, &path, None).await.map(drop)
+        }
+    }
+}
