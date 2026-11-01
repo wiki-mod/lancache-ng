@@ -1845,6 +1845,11 @@ fn tail_lines(path: &str, limit: usize) -> Vec<String> {
     lines[start..].iter().map(|l| l.to_string()).collect()
 }
 
+// What: tail window as a multiple of the wanted entries.
+// Why: stream and error lines must not push HTTP lines out.
+// From: Issue #1683 | PR #1979
+const TAIL_WINDOW: usize = 100;
+
 // What: the last `limit` parsed access-log entries.
 // Why: oldest first, so callers reverse for newest-first.
 // From: Issue #1683 | PR #1858
@@ -1852,7 +1857,10 @@ fn parse_log_tail(dir: &str, limit: usize) -> Vec<LogEntry> {
     let Some(newest) = proxy_log_files(dir).pop() else {
         return vec![];
     };
-    tail_lines(&newest.to_string_lossy(), limit)
+    // What: read a wide tail, keep newest HTTP lines.
+    // Why: stream and error lines must not hide them.
+    // From: Issue #1683 | PR #1979
+    let entries: Vec<LogEntry> = tail_lines(&newest.to_string_lossy(), limit * TAIL_WINDOW)
         .iter()
         .filter_map(|line| {
             let caps = log_regex().captures(line)?;
@@ -1867,7 +1875,9 @@ fn parse_log_tail(dir: &str, limit: usize) -> Vec<LogEntry> {
                 cache_status: caps[7].to_string(),
             })
         })
-        .collect()
+        .collect();
+    let skip = entries.len().saturating_sub(limit);
+    entries.into_iter().skip(skip).collect()
 }
 
 // What: hit, miss and byte totals over the open days.
@@ -6689,6 +6699,26 @@ async fn update_password(
     Ok(Redirect::to(PAGE_SETUP))
 }
 
+// What: ask addr:port for the time over UDP, once.
+// Why: shows whether clients get an answer, not a setting.
+// From: Issue #1683 | PR #1979
+async fn probe_ntp(addr: &str, port: &str, timeout: Duration) -> bool {
+    let mut packet = [0u8; 48];
+    packet[0] = 0x23;
+    let exchange = async {
+        let socket = tokio::net::UdpSocket::bind(("0.0.0.0", 0)).await.ok()?;
+        socket
+            .connect((addr, port.parse::<u16>().ok()?))
+            .await
+            .ok()?;
+        socket.send(&packet).await.ok()?;
+        let mut buf = [0u8; 128];
+        let n = socket.recv(&mut buf).await.ok()?;
+        (n >= 48).then_some(())
+    };
+    matches!(tokio::time::timeout(timeout, exchange).await, Ok(Some(())))
+}
+
 // What: the setup page with network hints and updates.
 // Why: operators copy the client settings from here.
 // From: Issue #1683 | PR #1858
@@ -6709,6 +6739,12 @@ async fn setup_page(State(state): Shared, headers: HeaderMap) -> Response {
     ctx.insert("ntp_auto_dhcp", &cfg.flag("NTP_AUTO_DHCP"));
     ctx.insert("login_enabled", &cfg.auth_password_hash.is_some());
     ctx.insert("ntp_port", &cfg.ntp_port);
+    // What: live answer of the time server, if enabled.
+    // Why: the switch alone does not show it works.
+    // From: Issue #1683 | PR #1979
+    let ntp_answers = cfg.flag("NTP_ENABLED")
+        && probe_ntp(&cfg.http_ip, &cfg.ntp_port, Duration::from_secs(2)).await;
+    ctx.insert("ntp_answers", &ntp_answers);
     insert_dhcp_mode(&mut ctx, cfg.dhcp_mode());
     render(&state, "setup.html", &ctx)
 }
