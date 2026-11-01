@@ -287,7 +287,7 @@ operational tradeoffs that were not evaluated in depth here -- this is
 flagged as an open question for the maintainer rather than a recommendation
 either way; the current bridge-mode setup is not identified as a defect.
 
-## Item 14: Conntrack table utilization + Netdata monitoring
+## Item 14: Conntrack table utilization
 
 ### Measured utilization (2026-08-05, idle CI runners -- see caveat above)
 
@@ -314,64 +314,14 @@ new, invalid, ignore, delete counters) does **not** exist inside any of
 these containers' network namespaces -- confirmed by direct `cat`, not
 assumed.
 
-### Does any monitoring/alerting for this already exist? Yes -- with one open namespace question
+### Does any monitoring/alerting for this already exist? Not since Netdata was removed
 
-Per Rule-Ref: AG-VAL-023 (check upstream docs/source before assuming
-behavior), this was verified against netdata's actual upstream source
-rather than guessed:
+Netdata (and its `netfilter_conntrack_full` alarm) was removed on
+2026-11-01. Conntrack fill level is currently not watched. Open point: the
+watchdog could read `/proc/sys/net/netfilter/nf_conntrack_count` and
+`nf_conntrack_max` and show a warning on the dashboard; the namespace
+(host or `services` container) is a maintainer decision.
 
-- Netdata's `proc.plugin` conntrack collector
-  (`proc_net_stat_conntrack.c`) is **enabled by default**
-  (`inicfg_get_boolean(..., CONFIG_BOOLEAN_YES)`). netdata runs as a
-  process inside the `services` container (`.github/yaml/build-manifest.yml`
-  build target `services`, `docs/ci-2.0-architecture.md`); the watchdog
-  writes its `netdata.conf`, which only sets the `[logs]` section
-  (`services/watchdog/src/main.rs`, `NETDATA_CONF`), so the collector stays on.
-- The collector **gracefully degrades**: if `/proc/net/stat/nf_conntrack`
-  fails to open (exactly the case measured above -- it does not exist in
-  these containers), the collector does not disable itself; it falls back
-  to reading `/proc/sys/net/netfilter/nf_conntrack_count` and
-  `nf_conntrack_max` directly (the same two values in the table above) and
-  still produces a `netfilter.conntrack_sockets` utilization chart from
-  them.
-- Netdata ships a **default health alarm**, `netfilter_conntrack_full`
-  (`health.d/netfilter.conf`), attached to that exact chart: warning at
-  90% utilization, critical at 95%, re-evaluated every 10 seconds.
-- **Alarm delivery exists**: the watchdog writes
-  `health_alarm_notify.conf` with a `custom_sender` that POSTs every alarm
-  to the Admin UI's `POST /api/netdata-alarms`
-  (`services/watchdog/src/main.rs`, `alarm_notify_conf`;
-  `services/common/shared.rs`, `ALARM_INGEST_PATH`). The dashboard lists
-  the received alarms (`services/ui/src/templates/dashboard.html`, card
-  `netdata-alarms-card`).
-
-So the collector, the alarm and its delivery to the Admin UI all exist --
-**no new collector code is needed for the basic utilization chart and
-alarm.**
-
-**Open namespace question:** the `services` service in
-`deploy/prod/docker-compose.yml` publishes ports on the default bridge
-network, sets no `network_mode: host` and mounts no host `/proc`, and the
-watchdog starts netdata as `netdata -D` without a `-s /host` prefix. The
-conntrack counters netdata reads are therefore those of the `services`
-container's own network namespace, not the host's aggregate and not the
-`proxy` container's. This was derived from the compose file and the
-watchdog source; it was not measured on a deployment host.
-
-### Structured decision for the maintainer
-
-- [ ] **Host-level conntrack visibility**: should netdata see the host's
-      conntrack counters (for example through a read-only host `/proc`
-      mount and `-s /host`), or is the `services` container's own
-      namespace enough? Both change the `services` container's
-      exposure, so this is a security trade-off, not a tuning detail.
-- [ ] **Watchdog's own conntrack visibility**: separately from netdata,
-      should the Rust watchdog surface conntrack pressure itself, or is
-      netdata's existing collector and alarm sufficient, avoiding
-      duplicate monitoring logic?
-
-No code change is included in this pass for item 14: the open point is
-which namespace the chart should observe, which is a maintainer decision.
 
 ## Item 15: RPS tuning -- the actual commands, computed, not copied
 

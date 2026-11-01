@@ -46,7 +46,7 @@ CI_SERVICES=( services proxy dns dhcp ui )
 ```
 `build-tools` is not a product service; it is the separately owned CI build toolchain under `build_toolchain:` in the same SOT. No workflow contains a second product-service list. No scan contains a second list. No release contains a second list. No GC contains a second list. No multi-arch job contains a second list. No full-setup job contains a second list.
 
-`netdata` is not a separate image: by maintainer decision (five-container rule, 2026-10-10) it runs as a process inside the product service `services`, installed as an Alpine package. The SOT has no `external_services` entry for it.
+Netdata and NATS were removed (maintainer decision 2026-11-01). Statistics come from the watchdog; DNS replication uses native PowerDNS AXFR.
 ## 8. Central service metadata
 `build-manifest.yml` has exactly one product-service definition and a separate `build_toolchain` definition. `ci.sh` consumes this metadata; it does not maintain a second inventory. Conceptually: ```text service: name build context external build contexts platforms runner class compiler class build dependencies runtime dependencies test domains validation domains artifact repository ``` Example: ```text proxy: context = services/proxy external-context = services/dns platforms = amd64,arm64 runner = light dns: context = services/dns platforms = amd64,arm64 runner = heavy rust = true build_toolchain/build-tools: context = .github/build-tools platforms = amd64,arm64 runner = toolchain ``` GitHub matrices are derived from the SOT. Not the other way around.
 ## 9. Central CLI contract

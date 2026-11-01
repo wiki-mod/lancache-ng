@@ -12,9 +12,9 @@ coherent stack built from the same source commit and the same release gate.
 The first-party runtime package set is the SOT `services` list in
 `.github/yaml/build-manifest.yml`:
 
-- `services` (watchdog, syslog-ng, chrony, netdata, retention and cachehamster)
+- `services` (watchdog, syslog-ng, chrony, retention and cachehamster)
 - `proxy`
-- `dns` (PowerDNS, dns-http, dns-https and NATS)
+- `dns` (PowerDNS, dns-http, dns-https)
 - `dhcp` (Kea or dnsmasq proxy/relay, one mode at a time)
 - `ui`
 

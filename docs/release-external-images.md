@@ -35,7 +35,7 @@ Mutable external tags are not authoritative release records.
 | `base_images.alpine` | Final base of every first-party image and of the build-tools image; `setup.sh` helper image | Digest-pinned |
 | `base_images.buildkit` | BuildKit builder of the CI build step | Digest-pinned |
 
-nginx, PowerDNS, NATS, syslog-ng, chrony, netdata, Kea and dnsmasq are apk
+nginx, PowerDNS, syslog-ng, chrony, Kea and dnsmasq are apk
 packages inside the first-party images (nginx from the nginx.org Alpine
 repository), not separate external images; the per-image SBOM lists them.
 

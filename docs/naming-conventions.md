@@ -79,16 +79,11 @@ Rule for new volumes: lowercase, hyphen-separated, named for what they hold
 (for example `proxy-cache`, `proxy-config-snapshots`, `watchdog-status`,
 `retention-state`, `ui-data`, `shared-secrets`).
 
-Documented exception: the three Netdata volumes `netdataconfig`,
-`netdatalib` and `netdatacache` have no hyphen. They are not renamed:
-Docker named volumes hold persisted state, and a rename means data loss or a
-migration step in `setup.sh`, which needs a decision of its own.
-
 ### Host bind-mount directories
 
 Rule: each host directory is set by one operator variable that
 `deploy/prod/docker-compose.yml` requires (`CACHE_DIR`, `CA_DIR`,
-`PDNS_DIR`, `PDNS_FILTER_STATE_DIR`, `NATS_DATA_DIR`, `NATS_CONF_DIR`,
+`PDNS_DIR`, `PDNS_FILTER_STATE_DIR`,
 `KEA_DATA_DIR`, `NTP_DATA_DIR`, `CACHEHAMSTER_DATA_DIR`,
 `SYSLOG_NG_LOG_DIR`). A new state directory gets its own variable of the
 same shape and a lowercase, hyphen-separated directory name. See
