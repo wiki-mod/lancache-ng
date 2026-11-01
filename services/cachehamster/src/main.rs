@@ -868,6 +868,8 @@ fn pb_read(mut b: &[u8]) -> Result<Vec<(u32, Pb)>, String> {
     Ok(out)
 }
 
+// What: last integer of a protobuf field number.
+// Why: protobuf lets a later value override.
 fn pb_int(f: &[(u32, Pb)], n: u32) -> Option<u64> {
     f.iter().rev().find_map(|(k, v)| match v {
         Pb::Int(i) if *k == n => Some(*i),
@@ -875,6 +877,8 @@ fn pb_int(f: &[(u32, Pb)], n: u32) -> Option<u64> {
     })
 }
 
+// What: all byte values of a protobuf field.
+// Why: repeated fields appear more than once.
 fn pb_all(f: &[(u32, Pb)], n: u32) -> impl Iterator<Item = &[u8]> {
     f.iter().filter_map(move |(k, v)| match v {
         Pb::Bytes(b) if *k == n => Some(b.as_slice()),
@@ -1402,6 +1406,8 @@ async fn command(c: Ctx, args: &[String]) -> Result<Value, String> {
 // What: entry point; no argument runs the daemon.
 // Why: one binary for the daemon and UI commands.
 // From: Issue #871 | PR #1858
+// What: runs a CLI command or the daemon.
+// Why: one binary for the daemon and single commands.
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();

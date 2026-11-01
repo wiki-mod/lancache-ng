@@ -155,6 +155,8 @@ impl Memory {
     }
 }
 
+// What: settings from env and the saved file.
+// Why: ui changes reach the watchdog via the file.
 fn load() -> Result<Settings, String> {
     let saved = process_env(SETTINGS_FILE_ENV).map(PathBuf::from);
     Settings::load(&process_env, saved.as_deref())
@@ -229,6 +231,8 @@ fn purge_cache(s: &Settings, f: &mut Findings, now: u64) -> Result<(), String> {
     tidy::mark(&stamp, now)
 }
 
+// What: log root, only inside the allowed prefix.
+// Why: cleanup must never delete outside the logs.
 fn log_root(s: &Settings) -> Result<PathBuf, String> {
     tidy::inside(&s.text("SYSLOG_LOG_ROOT")?, &s.text("SYSLOG_LOG_ROOT_ALLOWED_PREFIX")?)
 }
@@ -438,6 +442,8 @@ fn healthcheck() -> Result<(), String> {
 // What: endless rounds until SIGTERM.
 // Why: settings are reread; a bad round never exits.
 // From: Issue #1683 | PR #1858
+// What: healthcheck command or the check loop.
+// Why: Docker runs the same binary for healthcheck.
 #[tokio::main]
 async fn main() -> Result<(), String> {
     if std::env::args().nth(1).as_deref() == Some("healthcheck") {
