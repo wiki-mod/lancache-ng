@@ -57,6 +57,7 @@
         <div>
           <div class="t-label">Run the time server</div>
           <div class="t-desc">Needs at least one upstream server (field below).</div>
+          {% if ntp_enabled %}<div class="t-desc" style="margin-top:4px;">{% if ntp_answers %}Status: answering on {{ http_ip }}:{{ ntp_port }}.{% else %}Status: no answer from {{ http_ip }}:{{ ntp_port }} yet.{% endif %}</div>{% endif %}
         </div>
         <label class="toggle">
           <input type="checkbox" id="ntp_enabled" name="ntp_enabled" value="1"

@@ -6699,6 +6699,26 @@ async fn update_password(
     Ok(Redirect::to(PAGE_SETUP))
 }
 
+// What: ask addr:port for the time over UDP, once.
+// Why: shows whether clients get an answer, not a setting.
+// From: Issue #1683 | PR #1979
+async fn probe_ntp(addr: &str, port: &str, timeout: Duration) -> bool {
+    let mut packet = [0u8; 48];
+    packet[0] = 0x23;
+    let exchange = async {
+        let socket = tokio::net::UdpSocket::bind(("0.0.0.0", 0)).await.ok()?;
+        socket
+            .connect((addr, port.parse::<u16>().ok()?))
+            .await
+            .ok()?;
+        socket.send(&packet).await.ok()?;
+        let mut buf = [0u8; 128];
+        let n = socket.recv(&mut buf).await.ok()?;
+        (n >= 48).then_some(())
+    };
+    matches!(tokio::time::timeout(timeout, exchange).await, Ok(Some(())))
+}
+
 // What: the setup page with network hints and updates.
 // Why: operators copy the client settings from here.
 // From: Issue #1683 | PR #1858
@@ -6719,6 +6739,12 @@ async fn setup_page(State(state): Shared, headers: HeaderMap) -> Response {
     ctx.insert("ntp_auto_dhcp", &cfg.flag("NTP_AUTO_DHCP"));
     ctx.insert("login_enabled", &cfg.auth_password_hash.is_some());
     ctx.insert("ntp_port", &cfg.ntp_port);
+    // What: live answer of the time server, if enabled.
+    // Why: the switch alone does not show it works.
+    // From: Issue #1683 | PR #1979
+    let ntp_answers = cfg.flag("NTP_ENABLED")
+        && probe_ntp(&cfg.http_ip, &cfg.ntp_port, Duration::from_secs(2)).await;
+    ctx.insert("ntp_answers", &ntp_answers);
     insert_dhcp_mode(&mut ctx, cfg.dhcp_mode());
     render(&state, "setup.html", &ctx)
 }
