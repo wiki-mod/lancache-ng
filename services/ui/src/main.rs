@@ -2144,10 +2144,6 @@ fn hash_password() -> Result<(), String> {
 fn templates() -> Result<Tera, String> {
     let mut t = Tera::default();
     t.autoescape_on(vec!["html"]);
-    for (name, body) in TEMPLATES {
-        t.add_raw_template(name, body)
-            .map_err(|e| format!("template {name}: {e}"))?;
-    }
     // What: image identity for the page footer.
     // Why: base.html calls these four functions.
     // From: Issue #1683 | PR #1980
@@ -2160,6 +2156,10 @@ fn templates() -> Result<Tera, String> {
         t.register_function(func, move |_: tera::Kwargs, _: &tera::State| {
             process_env(key).unwrap_or_default()
         });
+    }
+    for (name, body) in TEMPLATES {
+        t.add_raw_template(name, body)
+            .map_err(|e| format!("template {name}: {e}"))?;
     }
     Ok(t)
 }
