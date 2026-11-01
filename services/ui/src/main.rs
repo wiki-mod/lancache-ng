@@ -2005,6 +2005,13 @@ async fn main() -> Result<(), String> {
         saved,
         session_key: secret::key_bytes(&key)?,
     });
+    // What: render every config once at start.
+    // Why: owners read the config volume; it starts empty.
+    // From: Issue #1683 | PR #1980
+    match apply_all(&app, &s, &s).await {
+        Ok(lines) => lines.iter().for_each(|l| eprintln!("ui: start: {l}")),
+        Err(e) => eprintln!("ui: start render: {e}"),
+    }
     tokio::spawn(sampler(app.clone()));
     tokio::spawn(flush_on_transfer(app.clone()));
     let listen = format!("{}:{}", s.text("UI_LISTEN")?, s.uint("UI_PORT")?);
