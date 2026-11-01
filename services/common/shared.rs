@@ -112,7 +112,7 @@ pub mod fs {
             .and_then(|()| match place {
                 Place::Exclusive => fs::hard_link(&tmp, path),
                 Place::Replace => fs::rename(&tmp, path).or_else(|e| {
-                    // What: busy bind mount: write in place.
+                    // What: busy bind mount: write in place
                     // Why: rename onto a mount is EBUSY.
                     // From: Issue #1683 | PR #1858
                     if e.kind() != io::ErrorKind::ResourceBusy {
