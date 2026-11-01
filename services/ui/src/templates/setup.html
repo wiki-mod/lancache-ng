@@ -64,6 +64,7 @@
           <span class="track"></span><span class="knob"></span>
         </label>
       </div>
+      <p class="field-hint">Test from a PC in the LAN: <code>w32tm /stripchart /computer:{{ http_ip }} /samples:3 /dataonly</code> (Windows) or <code>ntpdate -q {{ http_ip }}</code> (Linux). A reply means the time server runs.</p>
       <div class="field-row">
         <textarea name="ntp_upstream_servers" rows="2" style="width:100%; padding:9px 11px; border-radius:8px; border:1px solid var(--navy-600); background:var(--navy-900); color:var(--foam); font-family:var(--font-mono); font-size:13px;">{{ ntp_upstream_servers }}</textarea>
       </div>
