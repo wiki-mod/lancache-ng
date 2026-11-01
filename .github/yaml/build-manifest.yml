@@ -1303,6 +1303,11 @@ build_identity:
     toolchain_packages: [rust, cargo, build-base]
   toolchain:
     inputs: [toolchain_source_sha, base_digest, package_refresh]
+  # What: apk-only images: no Rust, no toolchain.
+  # Why: source, base and package refresh key the id.
+  # From: Issue #1683 | PR #1858
+  apk:
+    inputs: [source_sha, base_digest, package_refresh]
 
 # What: the events §17 names as a controlled refresh.
 # Why: such a run has no base; missing then proves BUILD.
