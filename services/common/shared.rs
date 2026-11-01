@@ -1941,8 +1941,8 @@ pub struct ProbeAnswer {
     pub page: Value,
 }
 
-// What: send one request, drop the body chunk by chunk, count bytes.
-// Why: ui prefill and cachehamster drain the same way; one owner.
+// What: send a request, drop the body, count the bytes.
+// Why: prefill and cachehamster drain alike; one owner.
 // From: Issue #816 | PR #1976
 pub async fn drain_response(
     request: reqwest::RequestBuilder,
