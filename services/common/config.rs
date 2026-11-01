@@ -123,8 +123,8 @@ impl Spec {
                     clamp: kind == "uint~",
                 }
             }
-            // What: a choice lists its words in the min field.
-            // Why: max stays empty; the words are comma-joined.
+            // What: a choice lists words in the min field.
+            // Why: max stays empty; words comma-joined.
             // From: Issue #1683 | PR #1858
             "choice" => Kind::Choice(list_items(min).map(str::to_string).collect()),
             other => return Err(format!("{key}: unknown kind {other:?}")),
@@ -203,7 +203,7 @@ fn check(spec: &Spec, raw: &str) -> Result<(Value, Option<String>), String> {
         }
         Kind::Uint { min, max, clamp } => {
             // What: ASCII digits only.
-            // Why: u64 parsing alone accepts a leading plus.
+            // Why: u64 parsing accepts a leading plus.
             // From: Issue #1683 | PR #1858
             if raw.is_empty() || !raw.bytes().all(|b| b.is_ascii_digit()) {
                 return Err(format!("{key}={raw:?} is not an unsigned number"));
@@ -291,7 +291,7 @@ pub struct Settings {
 
 impl Settings {
     // What: schema, then env over saved over SOT default.
-    // Why: an admin value beats the default; env beats both.
+    // Why: admin value beats default; env beats both.
     // From: Issue #1683 | PR #1858
     pub fn load(
         env: &dyn Fn(&str) -> Option<String>,

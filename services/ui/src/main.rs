@@ -1,5 +1,6 @@
-// LanCache-NG (https://github.com/wiki-mod/lancache-ng)
-// SPDX-License-Identifier: AGPL-3.0-or-later
+//!
+//! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+//! SPDX-License-Identifier: AGPL-3.0-or-later
 
 // What: admin ui: settings, configs, pages, actions.
 // Why: owns the settings; renders and applies configs.
@@ -86,7 +87,7 @@ impl App {
     }
 
     // What: render one page with the common context.
-    // Why: every page gets csrf, menu and alarms the same way.
+    // Why: every page gets csrf, menu and alarms.
     // From: Issue #1683 | PR #1858
     fn page(&self, name: &str, mut ctx: Context, csrf: &str) -> Response {
         ctx.insert("csrf_token", csrf);
@@ -888,8 +889,8 @@ async fn register(State(app): Shared, axum::Json(r): axum::Json<Register>) -> Re
         "tsig_secret": sec.tsig_secret,
         "syslog_primary": format!("{}:{}", s.text("IP_HTTP").unwrap_or_default(), s.uint("LANCACHE_LOG_PORT").unwrap_or(0)),
         "dns_local_reverse_zones": s.text("DNS_LOCAL_REVERSE_ZONES").unwrap_or_default(),
-        // What: image identity of this install, from compose.
-        // Why: setup.sh pins the secondary to the same images.
+        // What: image identity of this install.
+        // Why: setup.sh pins secondary to same images.
         "image_registry": process_env("LANCACHE_IMAGE_REGISTRY").unwrap_or_default(),
         "image_prefix": process_env("LANCACHE_IMAGE_PREFIX").unwrap_or_default(),
         "image_channel": process_env("LANCACHE_IMAGE_CHANNEL").unwrap_or_default(),

@@ -135,6 +135,12 @@ services:
   # Why: the passthrough port relays SNI; 443 intercepts.
   proxy:
     <<: [*service, *supervised]
+    # What: nginx config must still parse.
+    # Why: nginx is PID 1; a bad reload stays visible.
+    # From: Issue #1683 | PR #1858
+    healthcheck:
+      <<: *healthcheck-timing
+      test: ["CMD", "nginx", "-t", "-q"]
     container_name: ${SOT_CONTAINER_NAME_PROXY}
     image: ${LANCACHE_IMAGE_REF_PROXY:?LANCACHE_IMAGE_REF_PROXY is required}
     environment:
@@ -226,6 +232,12 @@ services:
     # Why: DHCP_MODE off keeps the container stopped.
     # From: Issue #1683 | PR #1858
     restart: unless-stopped
+    # What: unhealthy when an OpenRC service crashed.
+    # Why: the DHCP mode picks the services; all count.
+    # From: Issue #1683 | PR #1858
+    healthcheck:
+      <<: *healthcheck-timing
+      test: ["CMD-SHELL", "! rc-status --crashed | grep -q ."]
     container_name: ${SOT_CONTAINER_NAME_DHCP}
     image: ${LANCACHE_IMAGE_REF_DHCP:?LANCACHE_IMAGE_REF_DHCP is required}
     environment:

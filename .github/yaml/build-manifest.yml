@@ -92,11 +92,7 @@ services:
     context: services/proxy
     labels: [proxy, nginx]
     description: "LanCache-NG proxy: nginx cache for HTTP and TLS-interception traffic."
-    build_type: rust
-    # What: crates the proxy image builds.
-    # Why: the supervisor renders, certifies and runs nginx.
-    # From: Issue #1683
-    crates: [lancache-watchdog]
+    build_type: apk
     processes: [nginx]
     setup:
       - dir=@NGINX_DIR@/@NGINX_SUBDIR_CA@
@@ -125,11 +121,7 @@ services:
     context: services/dns
     labels: [dns, pdns]
     description: "LanCache-NG dns: PowerDNS auth, dns-http and dns-https recursors."
-    build_type: rust
-    # What: crates the dns image builds.
-    # Why: subscriber and supervisor run in one container.
-    # From: Issue #1683
-    crates: [lancache-watchdog]
+    build_type: apk
     processes: [pdns, dns-http, dns-https, soa]
     setup:
       - dir=@PDNS_CONF_DIR@/auth
@@ -149,11 +141,7 @@ services:
     context: services/dhcp
     labels: [dhcp, kea, dnsmasq]
     description: "LanCache-NG dhcp: Kea DHCP with control agent and DDNS, or dnsmasq proxy/relay, plus the DHCP probe."
-    build_type: rust
-    # What: crates the dhcp image builds.
-    # Why: the supervisor switches Kea and dnsmasq modes.
-    # From: Issue #1683
-    crates: [lancache-watchdog]
+    build_type: apk
     processes: [kea-dhcp4, kea-ctrl-agent, kea-dhcp-ddns, dnsmasq, dhcp-probe]
     final_base: alpine
     packages:

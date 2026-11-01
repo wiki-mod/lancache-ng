@@ -781,8 +781,7 @@ fn depots_of(app: &Kv, cfg: &SteamCfg) -> Vec<(u32, u64)> {
 }
 
 // What: a decoded protobuf field value.
-// Why: the few Steam messages are coded by hand; a
-//      generator would need new files.
+// Why: few Steam messages; coded by hand, no generator.
 // From: Issue #871 | PR #1858
 #[derive(Clone, Debug)]
 enum Pb {
@@ -1153,7 +1152,7 @@ async fn request_code(cm: &mut Cm, app: u32, depot: u32, gid: u64, branch: &str)
 }
 
 // What: chunk ids from a zipped binary manifest.
-// Why: the chunk SHA-1 names the CDN URL; files stay unread.
+// Why: chunk SHA-1 names the CDN URL; data stays unread.
 // From: Issue #871 | PR #1858
 fn chunks_of(zipped: &[u8]) -> Result<Vec<String>, String> {
     use std::io::Read as _;

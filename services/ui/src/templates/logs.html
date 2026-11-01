@@ -58,7 +58,7 @@
 
   <div data-logs-panel="syslog">
   <!-- What: extra syslog targets (host:port, TCP)
-       Why: a secondary always forwards to its primary too -->
+       Why: a secondary forwards to its primary too -->
   <form method="post" action="{{ routes.logs_save | safe }}" class="card" style="margin-bottom:16px;">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <div class="card-head">

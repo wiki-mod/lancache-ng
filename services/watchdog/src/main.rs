@@ -1,5 +1,6 @@
-// LanCache-NG (https://github.com/wiki-mod/lancache-ng)
-// SPDX-License-Identifier: AGPL-3.0-or-later
+//!
+//! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+//! SPDX-License-Identifier: AGPL-3.0-or-later
 
 // What: watchdog: watches states, raises alarms, restarts.
 // Why: watcher only; starts no program, writes no config.
@@ -80,7 +81,7 @@ impl Watch {
     }
 
     // What: one full round of all checks.
-    // Why: each check fails alone; one never blocks another.
+    // Why: each check fails alone; none blocks.
     // From: Issue #1683 | PR #1858
     async fn round(&mut self) -> Vec<Alarm> {
         let mut alarms = Vec::new();
@@ -251,7 +252,7 @@ impl Watch {
     }
 
     // What: flush recursor caches after a zone update.
-    // Why: secondary: AXFR raised the serial; old answers go.
+    // Why: AXFR raised the serial; old answers go.
     // From: Issue #1683 | PR #1858
     async fn secondary_flush(&mut self, alarms: &mut Vec<Alarm>) {
         if self.settings.text("DNS_REPLICATION_ROLE").as_deref() != Ok("secondary") {

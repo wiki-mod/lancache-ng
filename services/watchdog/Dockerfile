@@ -139,8 +139,7 @@ COPY --from=services-builder /build/lancache-watchdog-out /usr/local/bin/lancach
 COPY --from=services-builder /build/lancache-cachehamster-out /usr/local/bin/lancache-cachehamster
 
 # What: OpenRC runs both own binaries, list from SOT.
-# Why: no package init.d exists; supervise-daemon
-#      restarts them; env passes via rc_env_allow.
+# Why: supervise-daemon restarts; rc_env_allow passes env.
 # From: Issue #871 | PR #1858
 ARG OPENRC_SERVICES
 RUN sed -i -e 's/^#\?rc_sys=.*/rc_sys="docker"/' \

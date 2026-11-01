@@ -50,7 +50,7 @@ pub mod fs {
     }
 
     // What: uid and gid to set; None keeps that field.
-    // Why: root-started programs hand files to a runtime id.
+    // Why: root programs hand files to a runtime id.
     // From: Issue #1683 | PR #1858
     #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
     pub struct Owner {
@@ -112,7 +112,7 @@ pub mod fs {
                 file.write_all(contents)?;
                 own_open(&file, owner, None)?;
                 // What: flush before the name points at it.
-                // Why: a crash must not leave an empty target.
+                // Why: a crash leaves no empty target.
                 // From: Issue #1683 | PR #1858
                 file.sync_all()
             })
@@ -121,7 +121,7 @@ pub mod fs {
                 // Why: first writer wins without a gap.
                 // From: Issue #1683 | PR #1858
                 Place::Exclusive => fs::hard_link(&tmp, path),
-                // What: a busy bind-mounted file is overwritten.
+                // What: a busy bind mount is overwritten.
                 // Why: a file bind mount refuses a rename.
                 // From: Issue #1683 | PR #1858
                 Place::Replace => match fs::rename(&tmp, path) {
@@ -271,7 +271,7 @@ pub mod secret {
         bool::from(presented.as_bytes().ct_eq(expected.as_bytes()))
     }
 
-    // What: file of a variable in a secret dir (A_B -> a-b).
+    // What: file of a variable in a secret dir.
     // Why: every secret file name derives from its key.
     // From: Issue #1683 | PR #1858
     pub fn file_of(dir: &Path, key: &str) -> PathBuf {
@@ -386,7 +386,7 @@ pub mod http {
     }
 
     // What: an error and all causes on one line.
-    // Why: reqwest hides the TLS or socket cause in source().
+    // Why: reqwest hides the cause in source().
     // From: Issue #1683 | PR #1858
     pub fn error_chain(error: &dyn std::error::Error) -> String {
         let mut text = error.to_string();
@@ -509,7 +509,7 @@ pub mod pdns {
             }
         }
 
-        // What: one call; non-2xx is an error with the body.
+        // What: one call; non-2xx is an error.
         // Why: PowerDNS explains refusals in its JSON.
         // From: Issue #1683 | PR #1858
         async fn call(
@@ -581,7 +581,7 @@ pub mod pdns {
         }
 
         // What: set a zone back to saved RRsets.
-        // Why: rollback; SOA stays, serial rises via soa-edit-api.
+        // Why: SOA stays; serial rises via soa-edit-api.
         // From: Issue #1683 | PR #1858
         pub async fn restore(&self, zone: &str, saved: &[Value]) -> Result<(), String> {
             let key = |r: &Value| (r["name"].to_string(), r["type"].to_string());
@@ -610,8 +610,8 @@ pub mod pdns {
             .map(drop)
         }
 
-        // What: create a secondary zone pulling from masters.
-        // Why: a secondary copies zones by AXFR (kind Slave).
+        // What: create a secondary zone from masters.
+        // Why: secondary copies zones by AXFR (Slave).
         // From: Issue #1683 | PR #1858
         pub async fn create_secondary(&self, zone: &str, masters: &[String]) -> Result<(), String> {
             let body = json!({"name": zone_id(zone), "kind": "Slave", "masters": masters});
@@ -629,7 +629,7 @@ pub mod pdns {
         }
 
         // What: the zone in AXFR text form.
-        // Why: snapshots store what PowerDNS itself exports.
+        // Why: snapshots store what PowerDNS exports.
         // From: Issue #1683 | PR #1858
         pub async fn export(&self, zone: &str) -> Result<String, String> {
             let path = format!("/zones/{}/export", zone_id(zone));
@@ -807,7 +807,7 @@ pub mod dhcp {
 
     impl Mode {
         // What: the mode from DHCP_MODE.
-        // Why: the SOT choice already rejected unknown words.
+        // Why: the SOT choice rejected unknown words.
         // From: Issue #1683 | PR #1858
         pub fn from_settings(s: &Settings) -> Result<Self, String> {
             match s.text("DHCP_MODE")?.as_str() {
@@ -1036,7 +1036,7 @@ pub mod docker {
             let resp = req.send().await.map_err(map)?;
             let status = resp.status();
             // What: 304 means already in the wanted state.
-            // Why: starting a running container is no error.
+            // Why: starting a running one is no error.
             // From: Issue #1683 | PR #1858
             if !status.is_success() && status != reqwest::StatusCode::NOT_MODIFIED {
                 return Err(Error::Status(status.as_u16()));
@@ -1045,7 +1045,7 @@ pub mod docker {
         }
 
         // What: run a command in a container; exit code.
-        // Why: service restart/reload via OpenRC rc-service.
+        // Why: restart/reload via OpenRC rc-service.
         // From: Issue #1683 | PR #1858
         pub async fn exec(
             &self,
@@ -1104,7 +1104,7 @@ pub mod docker {
         }
 
         // What: inspect one container.
-        // Why: health, restart count and state come from here.
+        // Why: health, restarts and state come from here.
         // From: Issue #1683 | PR #1858
         pub async fn inspect(&self, name: &str, limit: Duration) -> Result<Value, Error> {
             let body = self
@@ -1246,7 +1246,7 @@ pub mod cert {
         ])
         .and_then(|_| {
             // What: -CAserial keeps the serial file stable.
-            // Why: AG-KD-002 needs it persistent beside the CA.
+            // Why: AG-KD-002: persistent beside the CA.
             // From: Issue #1683 | PR #1858
             openssl(&[
                 "x509",
@@ -1353,7 +1353,7 @@ pub mod log {
     pub const STORE: &str = "d_store";
 
     // What: full syslog-ng.conf: store plus forwarding.
-    // Why: muted programs skip the store, never the forward.
+    // Why: muted programs skip store, not forward.
     // From: Issue #1683 | PR #1858
     pub fn conf(s: &Settings) -> Result<String, String> {
         let root = s.text("SYSLOG_LOG_ROOT")?;
@@ -1457,7 +1457,7 @@ pub mod snmp {
             ));
         }
         // What: traps only when the ui switched them on.
-        // Why: SNMP warnings are optional, in addition to ui.
+        // Why: SNMP warnings are optional, beside ui.
         // From: Issue #1683 | PR #1858
         if s.flag("SNMP_TRAPS")? {
             out.push_str(&format!(
@@ -1487,7 +1487,7 @@ pub mod snapshot {
 
     impl Store {
         // What: save a snapshot; id is creation time in ns.
-        // Why: ids sort by age; oldest beyond keep are pruned.
+        // Why: ids sort by age; oldest are pruned.
         // From: Issue #1683 | PR #1858
         pub fn save(&self, body: &[u8]) -> Result<String, String> {
             let id = crate::clock::unix_nanos().to_string();
@@ -1869,7 +1869,7 @@ pub mod dhcp_probe {
         match verdict {
             Ok(ack) => {
                 // What: give the test lease back at once.
-                // Why: the probe must not keep a pool address.
+                // Why: the probe keeps no pool address.
                 // From: Issue #1683 | PR #1858
                 if let Some(ip) = ack.address {
                     let rel = message(
@@ -1971,7 +1971,7 @@ pub mod pdns_conf {
     }
 
     // What: addresses of registered secondaries.
-    // Why: NOTIFY targets and AXFR rights derive from one list.
+    // Why: NOTIFY and AXFR rights use one list.
     // From: Issue #1683 | PR #1858
     pub fn secondary_ips(s: &Settings) -> Vec<String> {
         s.list("DNS_SECONDARIES")
@@ -2133,7 +2133,7 @@ pub mod recursor_conf {
     pub const AAAA_FILTER_LUA: &str = "function preresolve(dq)\n  if dq.qtype == pdns.AAAA then\n    dq.rcode = pdns.NOERROR\n    return true\n  end\n  return false\nend\n";
 
     // What: recursor.yml for one recursor.
-    // Why: local zones go to the auth server, rest upstream.
+    // Why: local zones to auth server, rest upstream.
     // From: Issue #1683 | PR #1858
     pub fn yaml(
         s: &Settings,
@@ -2222,7 +2222,7 @@ pub mod kea_conf {
     use serde_json::{json, Value};
 
     // What: Kea logger rows to stdout.
-    // Why: Docker syslog driver carries stdout to syslog-ng.
+    // Why: Docker syslog driver sends stdout on.
     // From: Issue #1683 | PR #1858
     fn loggers(s: &Settings, names: &[&str]) -> Result<Value, String> {
         let severity = s.text("KEA_LOG_SEVERITY")?;
@@ -2237,7 +2237,7 @@ pub mod kea_conf {
     }
 
     // What: kea-dhcp4.conf; subnets kept from the file.
-    // Why: the ui edits subnets in Kea; SOT seeds the first.
+    // Why: ui edits subnets in Kea; SOT seeds first.
     // From: Issue #1683 | PR #1858
     pub fn dhcp4(s: &Settings, existing: Option<&Value>) -> Result<Value, String> {
         let lease = s.uint("DHCP_LEASE_TIME")?;
@@ -2460,7 +2460,7 @@ pub mod nginx_conf {
     const HEAD: &str = "# Generated by LanCache-NG; do not edit\n";
 
     // What: discard port answering refused names.
-    // Why: RFC 863 discard; nothing listens, TLS fails fast.
+    // Why: RFC 863 discard; TLS fails fast.
     // From: Issue #1683 | PR #1858
     const DISCARD_PORT: u16 = 9;
 
@@ -2475,7 +2475,7 @@ pub mod nginx_conf {
 
     impl Psl {
         // What: parse the PSL text format.
-        // Why: publicsuffix.org format: rule, *.rule, !rule.
+        // Why: publicsuffix.org: rule, *.rule, !rule.
         // From: Issue #1683 | PR #1858
         pub fn parse(text: &str) -> Self {
             let mut p = Self {
@@ -2503,7 +2503,7 @@ pub mod nginx_conf {
         }
 
         // What: registrable root (suffix plus one label).
-        // Why: PSL algorithm; unlisted TLD counts as suffix.
+        // Why: PSL rule; an unlisted TLD is a suffix.
         // From: Issue #1683 | PR #1858
         pub fn root(&self, name: &str) -> Option<String> {
             let labels: Vec<&str> = name.split('.').collect();
@@ -2578,7 +2578,7 @@ pub mod nginx_conf {
 
     impl Hosts {
         // What: (server name key, cert name) pairs.
-        // Why: drives the cert map and the strict allow map.
+        // Why: drives the cert map and allow map.
         // From: Issue #1683 | PR #1858
         pub fn keys(&self) -> Vec<(String, String)> {
             let mut k = Vec::new();
@@ -2822,7 +2822,7 @@ pub mod apply {
     }
 
     // What: run the plan: HUP, restart or report.
-    // Why: Live needs nothing; programs reread on their own.
+    // Why: Live needs nothing; programs reread.
     // From: Issue #1683 | PR #1858
     pub async fn run(
         api: &Api,
@@ -2884,7 +2884,7 @@ pub mod render {
     }
 
     // What: render all files; collect every error.
-    // Why: one bad value names itself; nothing half-written.
+    // Why: a bad value names itself; no half write.
     // From: Issue #1683 | PR #1858
     pub fn all(s: &Settings, sec: &Secrets, serial: u32) -> Result<Vec<File>, Vec<String>> {
         let mut out = Vec::new();
@@ -3108,7 +3108,7 @@ pub mod access {
     }
 
     // What: log files of the proxy, oldest first.
-    // Why: syslog-ng writes one file per day (YYYYMMDD.log).
+    // Why: syslog-ng writes one file per day.
     // From: Issue #1683 | PR #1858
     pub fn files(dir: &Path) -> Vec<PathBuf> {
         let mut out: Vec<PathBuf> = std::fs::read_dir(dir)
@@ -3361,7 +3361,7 @@ pub mod kea {
         }
 
         // What: set and persist a new config.
-        // Why: config-set applies; config-write keeps it on disk.
+        // Why: config-set applies; config-write saves.
         // From: Issue #1683 | PR #1858
         pub async fn set_config(&self, config: Value) -> Result<(), String> {
             self.command("config-set", Some(config)).await?;
@@ -3425,8 +3425,7 @@ pub mod rrd {
             .iter()
             .map(|row| {
                 // What: row = name:ds=oid=TYPE+ds=oid=TYPE.
-                // Why: list items split on comma and space; the
-                //      SOT list joins entries with a pipe.
+                // Why: list items split on comma and space.
                 let Some((name, srcs)) = row.split_once(':') else {
                     return Err(format!("STATS_GRAPHS row {row:?} needs name:sources"));
                 };

@@ -18759,12 +18759,10 @@ _ci_check_image_channel_resolution() {
         viol+=("ui source missing: ${sec}")
     else
         for f in \
-            '    image_tag: String,' '    image_registry: String,' \
-            '    image_prefix: String,' '    image_channel: String,' \
-            'image_tag: state.config.lancache_image_tag.clone()' \
-            'image_registry: state.config.lancache_image_registry.clone()' \
-            'image_prefix: state.config.lancache_image_prefix.clone()' \
-            'image_channel: state.config.lancache_image_channel.clone()'; do
+            '"image_registry": process_env("LANCACHE_IMAGE_REGISTRY")' \
+            '"image_prefix": process_env("LANCACHE_IMAGE_PREFIX")' \
+            '"image_channel": process_env("LANCACHE_IMAGE_CHANNEL")' \
+            '"image_tag": process_env("LANCACHE_IMAGE_TAG")'; do
             _ci_file_match "[CI-ERROR-CHECK-0187]" "line=\"${f}\" reason=\"ui source not searched\"" "${sec}" "${f}" -F \
                 || { [ "$?" -eq 1 ] || return 2; viol+=("ui main.rs must expose/use ${f}"); }
         done
