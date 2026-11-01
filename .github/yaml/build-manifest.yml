@@ -845,7 +845,7 @@ runtime:
     - CHRONY_CONF_FILE=@CONFIG_DIR@/services/chrony.conf
     - CONFIG_DIR=/etc/lancache
     - UI_CONTENT_TYPE_OPTIONS=nosniff
-    - UI_CSP=default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self' data:
+    - "UI_CSP=default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self' data:"
     - UI_FRAME_OPTIONS=DENY
     - UI_REFERRER_POLICY=no-referrer
     - DHCP_MODE_FILE=@CONFIG_DIR@/dhcp/mode
