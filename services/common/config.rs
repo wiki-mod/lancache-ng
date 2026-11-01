@@ -296,8 +296,8 @@ pub struct Settings {
 }
 
 impl Settings {
-    // What: load schema, then env > file > default.
-    // Why: env is the operator's word; the file the ui's.
+    // What: load schema, then file > env > default.
+    // Why: a ui change is newer than the .env at start.
     // From: Issue #1683 | PR #1858
     pub fn load(
         env: &dyn Fn(&str) -> Option<String>,
@@ -322,9 +322,11 @@ impl Settings {
                     continue;
                 }
             };
-            let raw = env(&spec.key)
+            let raw = file
+                .get(&spec.key)
                 .filter(|v| !v.is_empty())
-                .or_else(|| file.get(&spec.key).filter(|v| !v.is_empty()).cloned())
+                .cloned()
+                .or_else(|| env(&spec.key).filter(|v| !v.is_empty()))
                 .or_else(|| {
                     defaults
                         .get(spec.key.as_str())
