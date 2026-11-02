@@ -127,11 +127,15 @@ impl App {
     fn page(&self, name: &str, mut ctx: Context, csrf: &Csrf) -> Page {
         let s = self.settings();
         let page = name.trim_end_matches(".html");
-        let values: BTreeMap<String, String> = s
+        // What: every spec key, unset ones as empty text.
+        // Why: templates read optional keys without a guard.
+        // From: Issue #1683 | PR #1980
+        let mut values: BTreeMap<String, String> = s
             .specs()
             .filter(|sp| !matches!(sp.kind, config::Kind::Secret))
-            .filter_map(|sp| s.text(&sp.key).ok().map(|v| (sp.key.clone(), v)))
+            .map(|sp| (sp.key.clone(), String::new()))
             .collect();
+        values.extend(s.texts().map(|(k, v)| (k.clone(), v)));
         let login = !s.text("UI_PASSWORD_HASH").unwrap_or_default().is_empty();
         let pages: BTreeMap<&str, &str> = PAGES.iter().copied().collect();
         let routes: BTreeMap<&str, &str> = ROUTES.iter().copied().collect();

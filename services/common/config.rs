@@ -387,6 +387,16 @@ impl Settings {
         self.values.get(key)
     }
 
+    // What: all loaded values, secrets left out.
+    // Why: templates show fixed SOT values as well.
+    // From: Issue #1683 | PR #1980
+    pub fn texts(&self) -> impl Iterator<Item = (&String, String)> {
+        self.values
+            .iter()
+            .filter(|(k, _)| !matches!(self.specs.get(*k).map(|sp| &sp.kind), Some(Kind::Secret)))
+            .map(|(k, v)| (k, v.to_string()))
+    }
+
     // What: value as text; missing is an error.
     // Why: the error names the key.
     // From: Issue #1683 | PR #1858

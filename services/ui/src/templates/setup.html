@@ -39,7 +39,7 @@
       <div class="toggle-row">
         <div>
           <div class="t-label">Check for updates automatically</div>
-          <div class="t-desc">Applied within {{ v.AUTO_UPDATE_INTERVAL_MINUTES }} minutes of saving.</div>
+          <div class="t-desc">Checked {{ v.AUTO_UPDATE_TIMER_CALENDAR }}, spread over {{ v.AUTO_UPDATE_TIMER_SPREAD }}.</div>
         </div>
         <label class="toggle">
           <input type="hidden" name="AUTO_UPDATE_ENABLED" value="0">
@@ -78,9 +78,9 @@
           <div class="t-desc">Needs the time server and the Kea DHCP server enabled.</div>
         </div>
         <label class="toggle">
-          <input type="hidden" name="DHCP_NTP_AUTO" value="false">
-                 <input type="checkbox" id="ntp_auto_dhcp" name="DHCP_NTP_AUTO" value="true"
-                 {% if v.DHCP_NTP_AUTO == "true" %}checked{% endif %}>
+          <input type="hidden" name="NTP_AUTO_DHCP" value="false">
+                 <input type="checkbox" id="ntp_auto_dhcp" name="NTP_AUTO_DHCP" value="true"
+                 {% if v.NTP_AUTO_DHCP == "true" %}checked{% endif %}>
           <span class="track"></span><span class="knob"></span>
         </label>
       </div>

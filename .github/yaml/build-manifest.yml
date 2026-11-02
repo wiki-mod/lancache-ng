@@ -966,6 +966,7 @@ runtime:
   # From: Issue #1683 | PR #1858
   schema:
     - AUTO_UPDATE_ENABLED=bool;;;live;ui
+    - NTP_AUTO_DHCP=bool;;;reload;dhcp
     - CACHEHAMSTER_CONCURRENCY=uint;1;1024;live;services
     - CACHEHAMSTER_DATA_DIR=path;;;container;services
     - CACHEHAMSTER_POLL_INTERVAL=uint;1;3600;live;services
