@@ -876,6 +876,15 @@ runtime:
     - RECURSOR_HTTPS_CONF_FILE=@CONFIG_DIR@/dns/recursor-https.yml
     - RECURSOR_HTTPS_LUA_FILE=@CONFIG_DIR@/dns/https.lua
     - RECURSOR_HTTPS_RPZ_FILE=@CONFIG_DIR@/dns/https.rpz
+    # What: listen address, DNS port and API port per recursor.
+    # Why: compose maps IP_HTTP and IP_HTTPS to these ports.
+    # From: Issue #1683 | PR #1980
+    - RECURSOR_HTTP_LISTEN=0.0.0.0
+    - RECURSOR_HTTP_PORT=@DNS_PORT@
+    - RECURSOR_HTTP_API_PORT=@PDNS_HTTP_API_PORT@
+    - RECURSOR_HTTPS_LISTEN=0.0.0.0
+    - RECURSOR_HTTPS_PORT=@DNS_HTTPS_PORT@
+    - RECURSOR_HTTPS_API_PORT=@PDNS_HTTPS_API_PORT@
     - SNMPD_CONF_FILE=@CONFIG_DIR@/services/snmpd.conf
     - SYSLOG_CONF_FILE=@CONFIG_DIR@/services/syslog-ng.conf
     - RECURSOR_API_URLS=http://@LOOPBACK_BIND_IP@:@PDNS_HTTP_API_PORT@ http://@LOOPBACK_BIND_IP@:@PDNS_HTTPS_API_PORT@
