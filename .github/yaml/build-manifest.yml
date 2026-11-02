@@ -27,6 +27,9 @@ image_base:
     - sed
     - util-linux
     - zstd
+    - tzdata
+    - xz
+    - lsof
   smoke:
     - bash --version
     - curl --version
