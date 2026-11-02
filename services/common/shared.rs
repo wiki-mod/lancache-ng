@@ -2080,15 +2080,26 @@ pub mod recursor_conf {
     }
 
     impl Which {
-        // What: SOT key RECURSOR_<MODE>_<name>.
-        // Why: one naming rule for both recursors.
-        // From: Issue #1683 | PR #1858
+        // What: SOT key RECURSOR_<MODE>_<name>, spelled out.
+        // Why: ci.sh bakes only keys the source names.
+        // From: Issue #1683 | PR #1980
         pub fn key(self, name: &str) -> String {
-            let mode = match self {
-                Self::Http => "HTTP",
-                Self::Https => "HTTPS",
-            };
-            format!("RECURSOR_{mode}_{name}")
+            match (self, name) {
+                (Self::Http, "API_PORT") => "RECURSOR_HTTP_API_PORT",
+                (Self::Https, "API_PORT") => "RECURSOR_HTTPS_API_PORT",
+                (Self::Http, "CONF_FILE") => "RECURSOR_HTTP_CONF_FILE",
+                (Self::Https, "CONF_FILE") => "RECURSOR_HTTPS_CONF_FILE",
+                (Self::Http, "LISTEN") => "RECURSOR_HTTP_LISTEN",
+                (Self::Https, "LISTEN") => "RECURSOR_HTTPS_LISTEN",
+                (Self::Http, "LUA_FILE") => "RECURSOR_HTTP_LUA_FILE",
+                (Self::Https, "LUA_FILE") => "RECURSOR_HTTPS_LUA_FILE",
+                (Self::Http, "PORT") => "RECURSOR_HTTP_PORT",
+                (Self::Https, "PORT") => "RECURSOR_HTTPS_PORT",
+                (Self::Http, "RPZ_FILE") => "RECURSOR_HTTP_RPZ_FILE",
+                (Self::Https, "RPZ_FILE") => "RECURSOR_HTTPS_RPZ_FILE",
+                _ => "",
+            }
+            .to_string()
         }
     }
 
