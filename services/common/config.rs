@@ -391,8 +391,12 @@ impl Settings {
     // Why: the error names the key.
     // From: Issue #1683 | PR #1858
     pub fn text(&self, key: &str) -> Result<String, String> {
+        // What: a compose-only key falls back to the env.
+        // Why: operator keys like IP_HTTPS have no SOT row.
+        // From: Issue #1683 | PR #1980
         self.get(key)
             .map(Value::to_string)
+            .or_else(|| std::env::var(key).ok().filter(|v| !v.is_empty()))
             .ok_or_else(|| format!("{key} is not set"))
     }
 
