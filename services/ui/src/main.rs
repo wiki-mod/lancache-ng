@@ -1801,17 +1801,24 @@ async fn apply_all(app: &App, old: &Settings, new: &Settings) -> Result<Vec<Stri
     let files = render::all(new, &sec, serial).map_err(|e| e.join("; "))?;
     let mut changes = old.diff(new);
     changes.extend(write_files(new, &files)?);
-    if new.text("DNS_REPLICATION_ROLE")? == "secondary" {
-        ensure_secondary_zones(new).await?;
+    // What: PowerDNS steps report, not abort.
+    // Why: pdns starts only after the restart below.
+    // From: Issue #1683 | PR #1980
+    let mut report = Vec::new();
+    if new.text("DNS_REPLICATION_ROLE")? == "secondary"
+        && let Err(e) = ensure_secondary_zones(new).await
+    {
+        report.push(format!("secondary zones: {e}"));
     }
-    ensure_tsig(new).await?;
+    if let Err(e) = ensure_tsig(new).await {
+        report.push(format!("tsig: {e}"));
+    }
     let mut plan = apply::plan(&changes);
     let (grace, limit) = app.limits(new)?;
     let mut names = BTreeMap::new();
     for owner in plan.keys() {
         names.insert(owner.clone(), container_of(app, new, owner).await?);
     }
-    let mut report = Vec::new();
     let dhcp = new.text("DHCP_SERVICE")?;
     if new.text("DHCP_MODE")? == "off" && plan.remove(&dhcp).is_some() {
         let name = container_of(app, new, &dhcp).await?;
