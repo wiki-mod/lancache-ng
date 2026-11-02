@@ -1023,6 +1023,7 @@ runtime:
     - DOCKER_ENDPOINT=text;;;container;services
     - DOCKER_TIMEOUT=uint;1;600;live;services
     - HTTPS_ENABLED=bool;;;reload;proxy
+    - CACHE_MAX_SIZE=text;;;reload;proxy
     - HTTP_CLIENT_TIMEOUT=uint;1;600;live;services
     - HTTP_POOL_IDLE_TIMEOUT=uint;1;3600;live;services
     - HTTP_TCP_KEEPALIVE=uint;1;3600;live;services
