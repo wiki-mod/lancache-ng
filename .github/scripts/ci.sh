@@ -13062,7 +13062,7 @@ _ci_service_default_rows() {
         [ -n "${row}" ] || continue
         [ -n "${used["${row%%=*}"]+x}" ] || continue
         # What: a schema row without default is optional.
-        # Why: compose or setup.sh sets it; load must not fail.
+        # Why: compose or setup.sh sets it; load holds.
         # From: Issue #1683 | PR #1980
         if [ "${want}" = schema ] && [ -z "${has_default["${row%%=*}"]+x}" ]; then
             k="${row#*=}"; k="${k%%;*}"
