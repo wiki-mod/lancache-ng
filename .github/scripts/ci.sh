@@ -5073,27 +5073,27 @@ _ci_status_apply() {
     sha="$(_ci_env_required GITHUB_SHA)" || return 2
     run_url="${srv}/${repo}/actions/runs/$(_ci_env_required GITHUB_RUN_ID)" || return 2
     ctx="repo=\"${repo}\" label=\"${label}\" outcome=${outcome}"
-    open="$(_ci_run "[CI-ERROR-STATUS-0003]" "${ctx} step=list" gh issue list --repo "${repo}" --label "${label}" --state open \
+    open="$(_ci_run "[CI-ERROR-STATUS-0003]" "${ctx} step=list" _ci_retry github-api gh issue list --repo "${repo}" --label "${label}" --state open \
         --json number --jq 'map(.number) | min // empty')" || return 2
     if [ "${outcome}" = success ]; then
         [ -n "${open}" ] || { printf 'status=noop label=%s\n' "${label}"; return 0; }
-        _ci_run "[CI-ERROR-STATUS-0004]" "${ctx} step=comment issue=${open}" gh issue comment "${open}" --repo "${repo}" \
+        _ci_run "[CI-ERROR-STATUS-0004]" "${ctx} step=comment issue=${open}" _ci_retry github-api gh issue comment "${open}" --repo "${repo}" \
             --body "Green again in ${run_url} at ${sha}. Closing; a new issue opens with this label if the case turns red." >&2 || return 2
-        _ci_run "[CI-ERROR-STATUS-0005]" "${ctx} step=close issue=${open}" gh issue close "${open}" --repo "${repo}" >&2 || return 2
+        _ci_run "[CI-ERROR-STATUS-0005]" "${ctx} step=close issue=${open}" _ci_retry github-api gh issue close "${open}" --repo "${repo}" >&2 || return 2
         printf 'status=closed label=%s issue=%s\n' "${label}" "${open}"
         return 0
     fi
     body="$(_ci_status_body "${scope}" "${run_url}" "${sha}" "${evidence}")" || return 2
     if [ -n "${open}" ]; then
-        _ci_run "[CI-ERROR-STATUS-0006]" "${ctx} step=comment issue=${open}" gh issue comment "${open}" --repo "${repo}" \
+        _ci_run "[CI-ERROR-STATUS-0006]" "${ctx} step=comment issue=${open}" _ci_retry github-api gh issue comment "${open}" --repo "${repo}" \
             --body "Still red.${body:+$'\n\n'}${body}" >&2 || return 2
         printf 'status=updated label=%s issue=%s\n' "${label}" "${open}"
         return 0
     fi
     color="$(_ci_variable CI_STATUS_LABEL_COLOR)" || return 2
-    _ci_run "[CI-ERROR-STATUS-0007]" "${ctx} step=label" gh label create "${label}" --repo "${repo}" --color "${color}" --force \
+    _ci_run "[CI-ERROR-STATUS-0007]" "${ctx} step=label" _ci_retry github-api gh label create "${label}" --repo "${repo}" --color "${color}" --force \
         --description "${scope:0:100}" >&2 || return 2
-    _ci_run "[CI-ERROR-STATUS-0008]" "${ctx} step=create" gh issue create --repo "${repo}" --label "${label}" \
+    _ci_run "[CI-ERROR-STATUS-0008]" "${ctx} step=create" _ci_retry github-api gh issue create --repo "${repo}" --label "${label}" \
         --title "[${label}] ${scope}" --body "${body}" >&2 || return 2
     printf 'status=opened label=%s\n' "${label}"
 }
