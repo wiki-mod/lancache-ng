@@ -327,6 +327,11 @@ services:
       # Why: the ui restarts owners after it writes files.
       # From: Issue #1683 | PR #1980
       - ${SOT_DOCKER_SOCKET}:${SOT_DOCKER_SOCKET}
+      # What: stack CA and leaf certs the ui issues.
+      # Why: the proxy reads them; the ui owns openssl.
+      # From: Issue #1683 | PR #1980
+      - ${CA_DIR:?CA_DIR is required}:${SOT_NGINX_DIR}/${SOT_NGINX_SUBDIR_CA}
+      - proxy-certs:${SOT_NGINX_DIR}/${SOT_NGINX_SUBDIR_CERTS}
       - *mount-secrets
       - ui-data:${SOT_UI_DATA_DIR}
       - *mount-cdn-domains

@@ -193,11 +193,12 @@ services:
     # From: Issue #1683 | PR #1912
     default_args: [UI_LISTEN_PORT]
     # What: final-image apk packages of the ui.
-    # Why: stats graphs run rrdtool and snmpget.
+    # Why: stats run rrdtool, snmpget; certs openssl.
     # From: Issue #1683 | PR #1980
     packages:
       - rrdtool
       - net-snmp-tools
+      - openssl
     setup:
       - group=@LOG_READER_GROUP@:@GID@
       - user=@LOG_READER_GROUP@:@GID@:@LOG_READER_GROUP@

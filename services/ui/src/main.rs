@@ -1829,6 +1829,21 @@ async fn apply_all(app: &App, old: &Settings, new: &Settings) -> Result<Vec<Stri
     if let Err(e) = ensure_tsig(new).await {
         report.push(format!("tsig: {e}"));
     }
+    // What: issue missing certs before the proxy wakes.
+    // Why: a cert the map names must exist on disk.
+    // From: Issue #1683 | PR #1980
+    match render::issue_certs(new) {
+        Ok(0) => {}
+        Ok(n) => {
+            report.push(format!("certs: {n} issued"));
+            changes.push(config::Change {
+                key: "certs".into(),
+                owner: "proxy".into(),
+                effect: config::Effect::Reload,
+            });
+        }
+        Err(e) => report.push(format!("certs: {e}")),
+    }
     let mut plan = apply::plan(&changes);
     let (grace, limit) = app.limits(new)?;
     let mut names = BTreeMap::new();

@@ -1195,14 +1195,14 @@ pub mod cert {
         crt: &Path,
         subject: &str,
         days: u64,
-        bits: u64,
+        key_type: &str,
     ) -> Result<(), String> {
         openssl(&[
             "req",
             "-x509",
             "-nodes",
             "-newkey",
-            &format!("rsa:{bits}"),
+            key_type,
             "-keyout",
             &arg(key),
             "-out",
@@ -1229,34 +1229,32 @@ pub mod cert {
         ca_serial: &Path,
         key: &Path,
         crt: &Path,
-        cn: &str,
+        subject: &str,
         sans: &[String],
         days: u64,
-        bits: u64,
+        key_type: &str,
     ) -> Result<(), String> {
         let csr = crt.with_extension("csr");
         let ext = crt.with_extension("ext");
         let san: Vec<String> = sans.iter().map(|n| format!("DNS:{n}")).collect();
-        std::fs::write(
-            &ext,
-            format!(
-                "subjectAltName={}\nextendedKeyUsage=serverAuth\n",
-                san.join(",")
-            ),
-        )
+        let mut body = String::from("extendedKeyUsage=serverAuth\n");
+        if !san.is_empty() {
+            body.push_str(&format!("subjectAltName={}\n", san.join(",")));
+        }
+        std::fs::write(&ext, body)
         .map_err(|e| format!("{}: {e}", ext.display()))?;
         let request = openssl(&[
             "req",
             "-new",
             "-nodes",
             "-newkey",
-            &format!("rsa:{bits}"),
+            key_type,
             "-keyout",
             &arg(key),
             "-out",
             &arg(&csr),
             "-subj",
-            &format!("/CN={cn}"),
+            subject,
         ]);
         let signed = request.and_then(|_| {
             openssl(&[
@@ -3163,6 +3161,60 @@ pub mod render {
             body: format!("{}\n", s.text("NGINX_HEALTHZ_BODY")?),
         });
         Ok(())
+    }
+
+    // What: make the CA and every missing leaf cert.
+    // Why: HTTPS mode needs one cert per map name.
+    // From: Issue #1683 | PR #1980
+    pub fn issue_certs(s: &Settings) -> Result<usize, String> {
+        if !s.flag("HTTPS_ENABLED")? {
+            return Ok(0);
+        }
+        let root = PathBuf::from(s.text("NGINX_DIR")?);
+        let ca = root.join(s.text("NGINX_SUBDIR_CA")?);
+        let dir = root.join(s.text("NGINX_SUBDIR_CERTS")?);
+        let (ca_key, ca_crt) = (
+            ca.join(s.text("CA_KEY_FILE")?),
+            ca.join(s.text("CA_CERT_FILE")?),
+        );
+        let serial = ca.join(s.text("CA_SERIAL_FILE")?);
+        for d in [&ca, &dir] {
+            std::fs::create_dir_all(d).map_err(|e| format!("{}: {e}", d.display()))?;
+        }
+        if !ca_crt.exists() {
+            crate::cert::make_ca(
+                &ca_key,
+                &ca_crt,
+                &s.text("CA_SUBJECT")?,
+                s.uint("CA_DAYS")?,
+                &s.text("CA_KEY_TYPE")?,
+            )?;
+        }
+        let tpl = PathBuf::from(s.text("NGINX_TEMPLATE_DIR")?);
+        let psl = nginx_conf::Psl::parse(&read(&tpl.join(s.text("NGINX_PSL_FILE")?))?);
+        let hosts = nginx_conf::hosts(&crate::cdn::effective(s)?, &psl)?;
+        let mut want = hosts.certs();
+        want.push((s.text("NGINX_DEFAULT_CERT")?, Vec::new()));
+        let mut made = 0;
+        for (name, sans) in want {
+            let crt = dir.join(format!("{name}.crt"));
+            if crt.exists() {
+                continue;
+            }
+            crate::cert::make_leaf(
+                &ca_key,
+                &ca_crt,
+                &serial,
+                &dir.join(format!("{name}.key")),
+                &crt,
+                &s.text("LEAF_SUBJECT")?,
+                &sans,
+                s.uint("LEAF_DAYS")?,
+                &s.text("LEAF_KEY_TYPE")?,
+            )?;
+            made += 1;
+        }
+        Ok(made)
     }
 
     // What: render all files; report every error.
