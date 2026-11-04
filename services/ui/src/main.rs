@@ -29,6 +29,11 @@ use tera::{Context, Tera};
 // From: Issue #1683 | PR #1858
 const SETTINGS_FILE_ENV: &str = "LANCACHE_SETTINGS_FILE";
 
+// What: page keys read from env, not from specs.
+// Why: compose sets them; no schema row exists.
+// From: Issue #1683 | PR #1980
+const ENV_ONLY_KEYS: [&str; 2] = ["IP_HTTP", "LANCACHE_IMAGE_CHANNEL"];
+
 // What: page templates built into the binary.
 // Why: nothing to mount or lose; one image.
 // From: Issue #1683 | PR #1858
@@ -136,13 +141,13 @@ impl App {
             .map(|sp| (sp.key.clone(), String::new()))
             .collect();
         values.extend(s.texts().map(|(k, v)| (k.clone(), v)));
-        // What: compose-only address for the NTP hints.
-        // Why: IP_HTTP lives in env, not in the spec list.
+        // What: env-only keys the pages show.
+        // Why: they live in env, not in the spec list.
         // From: Issue #1683 | PR #1980
-        if let Ok(ip) = s.text("IP_HTTP") {
-            values.entry("IP_HTTP".into()).or_insert(ip);
+        for key in ENV_ONLY_KEYS {
+            let val = s.text(key).unwrap_or_default();
+            values.entry(key.into()).or_insert(val);
         }
-        values.entry("IP_HTTP".into()).or_default();
         let login = !s.text("UI_PASSWORD_HASH").unwrap_or_default().is_empty();
         let pages: BTreeMap<&str, &str> = PAGES.iter().copied().collect();
         let routes: BTreeMap<&str, &str> = ROUTES.iter().copied().collect();
