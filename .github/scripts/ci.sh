@@ -4362,10 +4362,26 @@ _ci_ledger_read() {
     printf '%s\n' "${out}"
 }
 
+# What: a lost CAS race re-reads the ledger, then writes
+# Why: every writer merges the other writer's records
+# From: Issue #1683 | PR #1912
+_ci_ledger_upsert() {
+    local new tries n=1 rc
+    new="$(cat)"
+    tries="$(_ci_variable CI_RETRY_MAX_ATTEMPTS)" || return 3
+    while :; do
+        rc=0
+        printf '%s' "${new}" | _ci_ledger_upsert_once "$@" || rc=$?
+        [ "${rc}" -eq 2 ] || return "${rc}"
+        [ "${n}" -lt "${tries}" ] || return 2
+        n=$((n + 1))
+    done
+}
+
 # What: Upsert record lines from stdin in one CAS write.
 # Why: §26.1 one atomic ledger write per workflow.
 # From: Issue #1683
-_ci_ledger_upsert() {
+_ci_ledger_upsert_once() {
     local remote="$1" new blob rc=0 parent="" ids kept merged blobsha treesha commitsha raw ledger_ref file
     local refvar="${2:-CI_LEDGER_REF}" filevar="${3:-CI_LEDGER_FILE}" mode="${4:-}"
     ledger_ref="$(_ci_variable "${refvar}")" || return 3
@@ -4489,19 +4505,9 @@ ci_cmd_aggregate() {
         records="${records}${line}"$'\n'
     done
     [ -n "${records}" ] || { ci_log "[CI-ERROR-AGGREGATE-0003]" "reason=\"no result.json in dir\" dir=\"${dir}\""; return 2; }
-    local rc=0 remote tries n=1
+    local rc=0 remote
     remote="$(_ci_git_remote)" || return 2
-    tries="$(_ci_variable CI_RETRY_MAX_ATTEMPTS)" || return 2
-    # What: a lost CAS race re-reads the ledger, then writes
-    # Why: the other writer's records must be merged in
-    # From: Issue #1683 | PR #1912
-    while :; do
-        rc=0
-        printf '%s' "${records}" | _ci_ledger_upsert "${remote}" || rc=$?
-        [ "${rc}" -eq 2 ] || break
-        [ "${n}" -lt "${tries}" ] || break
-        n=$((n + 1))
-    done
+    printf '%s' "${records}" | _ci_ledger_upsert "${remote}" || rc=$?
     if [ "${rc}" -eq 0 ]; then
         printf 'aggregate records=%s\n' "$(_ci_count_lines "${records}")"
         return 0
