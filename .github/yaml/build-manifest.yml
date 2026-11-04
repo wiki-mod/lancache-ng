@@ -566,8 +566,8 @@ runtime:
     # Why: shell reads the path here; no literal copy.
     # From: Issue #1683 | PR #1912
     - UI_PAGE_DOMAINS=/domains
-    - UI_ROUTE_LAN_ADD=/domains/lan/add
-    - UI_ROUTE_STATIC_ADD=/dhcp/static/add
+    - UI_ROUTE_LAN_ADD=/domains/record-add
+    - UI_ROUTE_STATIC_ADD=/dhcp/static-add
     - UI_ROUTE_SECONDARY_REGISTER=/api/secondary/register
     # What: ui page refresh timings, in seconds.
     # Why: templates read the value; no literal in markup.
