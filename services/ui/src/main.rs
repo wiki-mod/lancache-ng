@@ -136,6 +136,13 @@ impl App {
             .map(|sp| (sp.key.clone(), String::new()))
             .collect();
         values.extend(s.texts().map(|(k, v)| (k.clone(), v)));
+        // What: compose-only address for the NTP hints.
+        // Why: IP_HTTP lives in env, not in the spec list.
+        // From: Issue #1683 | PR #1980
+        if let Ok(ip) = s.text("IP_HTTP") {
+            values.entry("IP_HTTP".into()).or_insert(ip);
+        }
+        values.entry("IP_HTTP".into()).or_default();
         let login = !s.text("UI_PASSWORD_HASH").unwrap_or_default().is_empty();
         let pages: BTreeMap<&str, &str> = PAGES.iter().copied().collect();
         let routes: BTreeMap<&str, &str> = ROUTES.iter().copied().collect();
