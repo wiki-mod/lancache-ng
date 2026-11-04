@@ -11528,6 +11528,7 @@ _ci_validate_https_mitm() {
     fi
     tmp="$(_ci_mktemp "${CI_TMPDIR}/ci-proxy-ca.XXXXXX")" || return 2
     if ! out="$(docker cp "${cid}:${ca}/${ca_file}" "${tmp}" 2>&1)"; then
+        out+=$'\n'"$(_ci_validate_service_evidence "${project}" "$(_ci_validation_service ui)")"
         ci_error "[CI-ERROR-VALIDATE-0024]" "reason=\"could not read proxy LAN CA for https-mitm check\"" "${out}"
         rm -f "${tmp}"
         return 2
@@ -11546,7 +11547,7 @@ _ci_validate_https_mitm() {
         issuer="${issuer#issuer=}"
     fi
     if [ -z "${ca_subj}" ] || [ -z "${issuer}" ]; then
-        ci_error "[CI-ERROR-VALIDATE-0025]" "domain=\"${domain}\" reason=\"no TLS issuer or CA subject for https-mitm check\"" "$(cat "${tls_err}")"
+        ci_error "[CI-ERROR-VALIDATE-0025]" "domain=\"${domain}\" reason=\"no TLS issuer or CA subject for https-mitm check\"" "$(cat "${tls_err}"; _ci_validate_service_evidence "${project}" "$(_ci_validation_service ui)")"
         rm -f "${tls_err}"
         return 1
     fi
