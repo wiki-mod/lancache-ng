@@ -1826,18 +1826,25 @@ async fn apply_all(app: &App, old: &Settings, new: &Settings) -> Result<Vec<Stri
     }
     let mut plan = apply::plan(&changes);
     let (grace, limit) = app.limits(new)?;
+    // What: mode off stops dhcp; a missing one is fine.
+    // Why: compose may not create it; others still apply.
+    // From: Issue #1683 | PR #1980
+    let dhcp = new.text("DHCP_SERVICE")?;
+    if new.text("DHCP_MODE")? == "off" && plan.remove(&dhcp).is_some() {
+        match container_of(app, new, &dhcp).await {
+            Ok(name) => {
+                let r = app
+                    .docker
+                    .act(&name, docker::Action::Stop, grace, limit)
+                    .await;
+                report.push(format!("{dhcp}: mode off, stop {r:?}"));
+            }
+            Err(e) => report.push(format!("{dhcp}: mode off, {e}")),
+        }
+    }
     let mut names = BTreeMap::new();
     for owner in plan.keys() {
         names.insert(owner.clone(), container_of(app, new, owner).await?);
-    }
-    let dhcp = new.text("DHCP_SERVICE")?;
-    if new.text("DHCP_MODE")? == "off" && plan.remove(&dhcp).is_some() {
-        let name = container_of(app, new, &dhcp).await?;
-        let r = app
-            .docker
-            .act(&name, docker::Action::Stop, grace, limit)
-            .await;
-        report.push(format!("{dhcp}: mode off, stop {r:?}"));
     }
     let lookup = |owner: &str| names.get(owner).cloned().unwrap_or_default();
     let hup = new.list("HUP_OWNERS");
