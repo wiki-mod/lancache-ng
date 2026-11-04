@@ -27,6 +27,9 @@ image_base:
     - sed
     - util-linux
     - zstd
+    - tzdata
+    - xz
+    - lsof
   smoke:
     - bash --version
     - curl --version
@@ -243,6 +246,8 @@ build_toolchain:
       - run-parts
       - rust
       - rust-clippy
+      - rust-src
+      - rustup
       - rustfmt
       - sccache
       - shellcheck
