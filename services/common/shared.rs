@@ -3043,7 +3043,18 @@ pub mod render {
         }
     }
 
-    fn dns_files(o: &mut Out, sec: &Secrets, names: &[String], serial: u32) {
+    // What: FNV-1a of a body as a non-zero zone serial.
+    // Why: same content, same serial, no rewrite.
+    // From: Issue #1683 | PR #1980
+    fn content_serial(body: &str) -> u32 {
+        let mut h: u32 = 0x811c_9dc5;
+        for b in body.bytes() {
+            h = (h ^ u32::from(b)).wrapping_mul(0x0100_0193);
+        }
+        h.max(1)
+    }
+
+    fn dns_files(o: &mut Out, sec: &Secrets, names: &[String]) {
         let s = o.s;
         o.add_file("services", "CHRONY_CONF_FILE", chrony::render(s));
         o.add_file("services", "SYSLOG_CONF_FILE", log::render(s));
@@ -3061,6 +3072,12 @@ pub mod render {
             let Ok(answer) = s.text(ip_key) else { continue };
             let rpz_key = which.key("RPZ_FILE");
             let lua_key = which.key("LUA_FILE");
+            // What: serial from the zone body itself.
+            // Why: a clock serial restarts dns on every save.
+            // From: Issue #1683 | PR #1980
+            let serial = recursor_conf::rpz(s, names, &answer, 0)
+                .map(|b| content_serial(&b))
+                .unwrap_or(1);
             o.add_file(
                 "dns",
                 &rpz_key,
@@ -3151,7 +3168,7 @@ pub mod render {
     // What: render all files; report every error.
     // Why: one call for the ui; nothing half written.
     // From: Issue #1683 | PR #1858
-    pub fn all(s: &Settings, sec: &Secrets, serial: u32) -> Result<Vec<File>, Vec<String>> {
+    pub fn all(s: &Settings, sec: &Secrets) -> Result<Vec<File>, Vec<String>> {
         let mut o = Out {
             s,
             files: Vec::new(),
@@ -3169,7 +3186,7 @@ pub mod render {
             .filter_map(crate::dns::cdn_entry)
             .map(|(n, _)| n)
             .collect();
-        dns_files(&mut o, sec, &names, serial);
+        dns_files(&mut o, sec, &names);
         dhcp_files(&mut o, sec);
         if let Err(e) = nginx_files(&mut o, &domains) {
             o.errs.push(e);
@@ -3184,7 +3201,7 @@ pub mod render {
     // What: only the dns files, for a secondary.
     // Why: a secondary runs only the dns container.
     // From: Issue #1683 | PR #1980
-    pub fn dns_only(s: &Settings, sec: &Secrets, serial: u32) -> Result<Vec<File>, Vec<String>> {
+    pub fn dns_only(s: &Settings, sec: &Secrets) -> Result<Vec<File>, Vec<String>> {
         let mut o = Out {
             s,
             files: Vec::new(),
@@ -3196,7 +3213,7 @@ pub mod render {
             .filter_map(crate::dns::cdn_entry)
             .map(|(n, _)| n)
             .collect();
-        dns_files(&mut o, sec, &names, serial);
+        dns_files(&mut o, sec, &names);
         o.files.retain(|f| f.owner == "dns");
         if o.errs.is_empty() {
             Ok(o.files)

@@ -1814,8 +1814,7 @@ fn write_files(s: &Settings, files: &[render::File]) -> Result<Vec<config::Chang
 // From: Issue #1683 | PR #1858
 async fn apply_all(app: &App, old: &Settings, new: &Settings) -> Result<Vec<String>, String> {
     let sec = secrets(new)?;
-    let serial = u32::try_from(clock::unix_secs() % u64::from(u32::MAX)).unwrap_or(1);
-    let files = render::all(new, &sec, serial).map_err(|e| e.join("; "))?;
+    let files = render::all(new, &sec).map_err(|e| e.join("; "))?;
     let mut changes = old.diff(new);
     changes.extend(write_files(new, &files)?);
     // What: PowerDNS steps report, not abort.
@@ -2290,8 +2289,7 @@ async fn command(s: &Settings, args: &[String]) -> Option<Result<(), String>> {
 // From: Issue #1683 | PR #1980
 fn render_dns(s: &Settings) -> Result<(), String> {
     let sec = secrets(s)?;
-    let serial = u32::try_from(clock::unix_secs() % u64::from(u32::MAX)).unwrap_or(1);
-    let files = render::dns_only(s, &sec, serial).map_err(|e| e.join("; "))?;
+    let files = render::dns_only(s, &sec).map_err(|e| e.join("; "))?;
     let changed = write_files(s, &files)?;
     println!(
         "{}",
