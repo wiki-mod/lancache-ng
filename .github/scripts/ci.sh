@@ -11478,7 +11478,8 @@ _ci_https_dispatch_violations() {
 # From: Issue #1683
 _ci_validate_proxy_stream_map() {
     local file port
-    file="$(_ci_proxy_constant NGINX_STREAM_TARGETS)" || return 2
+    file="$(_ci_runtime_default NGINX_STREAM_TARGETS_FILE)" || return 2
+    file="$(_ci_nginx_path "${file}")" || return 2
     port="$(_ci_runtime_default NGINX_ORIGIN_HTTPS_PORT)" || return 2
     _ci_validate_proxy_map "$1" "${file}" _ci_stream_map_violations "${port}" \
         "[CI-ERROR-VALIDATE-0022]" "no proxy container for stream-map check" \
@@ -11564,7 +11565,8 @@ _ci_validate_https_mitm() {
 # From: Issue #1683
 _ci_validate_https_dispatch_map() {
     local file relay
-    file="$(_ci_proxy_constant NGINX_HTTPS_DISPATCH)" || return 2
+    file="$(_ci_runtime_default NGINX_HTTPS_DISPATCH_FILE)" || return 2
+    file="$(_ci_nginx_path "${file}")" || return 2
     relay="$(_ci_runtime_default NGINX_PASSTHROUGH_RELAY_PORT)" || return 2
     _ci_validate_proxy_map "$1" "${file}" _ci_https_dispatch_violations "${relay}" \
         "[CI-ERROR-VALIDATE-0027]" "no proxy container for https-dispatch-map check" \
@@ -12995,17 +12997,24 @@ _ci_service_setup() {
 # Why: 64.4: a default rebuilds only images that read it.
 # From: Issue #1683 | PR #1912
 _ci_service_default_rows() {
-    local service="$1" rows type text="" paths p part field tracked memo out=""
+    local service="$1" want="${2:-defaults}" rows type text="" paths p part field tracked memo out=""
     local -a specs=() files=()
     # What: one call builds a service's rows once.
     # Why: A3: plan built them per platform, 2.1 s each.
     # From: Issue #1683 | PR #1858
-    memo="default-rows-${_CI_CALL_KEY}-${service}"
+    memo="${want}-rows-${_CI_CALL_KEY}-${service}"
     if out="$(_ci_job_memo_get "${memo}")"; then
         printf '%s\n' "${out}"
         return 0
     fi
-    rows="$(_ci_runtime_defaults)" || return 2
+    # What: defaults rows, or schema rows for want=schema.
+    # Why: keys without default still need a spec.
+    # From: Issue #1683 | PR #1980
+    if [ "${want}" = schema ]; then
+        rows="$(_ci_required_field runtime schema blocklist)" || return 2
+    else
+        rows="$(_ci_runtime_defaults)" || return 2
+    fi
     type="$(_ci_required_field "${service}" build_type)" || return 2
     if [ "${type}" = rust ]; then
         text="$(_ci_rust_content "${service}" "" text)" || return 2
@@ -13064,18 +13073,12 @@ _ci_service_defaults_arg() {
 }
 
 # What: the SOT schema rows of the keys one image reads.
-# Why: config.rs needs a spec for every baked default.
+# Why: config.rs needs a spec for every read key.
 # From: Issue #1683 | PR #1858
 _ci_service_schema_arg() {
-    local rows schema keys out="" row
-    rows="$(_ci_service_default_rows "$1")" || return 2
-    schema="$(_ci_required_field runtime schema blocklist)" || return 2
-    keys=" $(printf '%s\n' "${rows}" | cut -d= -f1 | tr '\n' ' ')"
-    while IFS= read -r row; do
-        [ -n "${row}" ] || continue
-        case "${keys}" in *" ${row%%=*} "*) out="${out:+${out}|}${row}" ;; esac
-    done <<< "${schema}"
-    printf '%s' "${out}"
+    local rows
+    rows="$(_ci_service_default_rows "$1" schema)" || return 2
+    printf '%s' "${rows//$'\n'/|}"
 }
 
 # What: KEY=value rows compose gives one service.
@@ -18547,7 +18550,7 @@ _ci_check_compose_config() {
 _ci_check_proxy_nginx_policy() {
     local repo_root="${1:-${CI_REPO_ROOT}}" f out line pp blocks=0 b h a d al r px hk hu hp="" hq pn lb fb hv sv sp bn
     local -a viol=() bnt
-    px="$(_ci_service_path proxy "" "${repo_root}")" || return 2
+    px="$(_ci_service_path ui nginx "${repo_root}")" || return 2
     px="${px%/}"
     # What: the health and status paths of the SOT.
     # Why: the templates name the keys; values must be sane.
@@ -18683,7 +18686,7 @@ _ci_check_proxy_cert_volume() {
     dir="$(_ci_nginx_subdir NGINX_SUBDIR_CERTS)" || return 2
     ca="$(_ci_nginx_subdir NGINX_SUBDIR_CA)" || return 2
     cache="$(_ci_runtime_default NGINX_CACHE_DIR)" || return 2
-    px="$(_ci_service_path proxy "" "${repo_root}")" || return 2
+    px="$(_ci_service_path ui nginx "${repo_root}")" || return 2
     _ci_file_match "[CI-ERROR-CHECK-0184]" "reason=\"proxy_cache_path not searched\"" "${px%/}/nginx.conf" '^[[:space:]]*proxy_cache_path[[:space:]]+\$\{NGINX_CACHE_DIR\}[[:space:]]*$' \
         || { [ "$?" -eq 1 ] || return 2; viol+=("${px#"${repo_root}/"}nginx.conf: proxy_cache_path is not the SOT key NGINX_CACHE_DIR"); }
     _ci_stack_compose_files files || return $?

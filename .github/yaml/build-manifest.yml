@@ -1407,8 +1407,8 @@ ci_check_inputs:
     - "deploy/**"
     - "@{ci_variables.CI_ARCH_DOC}"
     - "@{ci_variables.CI_INSTALLER}"
-  proxy-cert-volume: ["deploy/**", "@{services.proxy.context}/**"]
-  proxy-nginx-policy: ["@{services.proxy.context}/**"]
+  proxy-cert-volume: ["deploy/**", "@{services.ui.context}/nginx/**"]
+  proxy-nginx-policy: ["@{services.ui.context}/nginx/**"]
   setup-update-safety: ["@{ci_variables.CI_INSTALLER}"]
   shell-guards: ["@shell", "**/Dockerfile"]
   shellcheck: ["@shell"]
