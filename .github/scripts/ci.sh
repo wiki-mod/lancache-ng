@@ -55,6 +55,7 @@ CI_ARG_TOOLCHAIN_IMAGE=BUILD_TOOLS_IMAGE
 CI_ARG_CRATES=RUST_CRATES
 CI_ARG_TARGET=MUSL_TARGET
 CI_ARG_PROCESSES=LANCACHE_PROCESSES
+CI_ARG_PROCESS_PRE=LANCACHE_PROCESS_PRE
 CI_ARG_GID=LANCACHE_RUNTIME_GID
 CI_ARG_IMAGE_SETUP=IMAGE_SETUP
 CI_ARG_DEFAULTS=LANCACHE_RUNTIME_DEFAULTS
@@ -13044,7 +13045,7 @@ _ci_service_default_rows() {
             git -C "${CI_REPO_ROOT}" grep --cached -I -h -o -E '[A-Z][A-Z0-9_]*' -- "${files[@]}")" || return 2
         text+=$'\n'"${part}"
     fi
-    for field in processes setup default_args; do
+    for field in processes process_pre setup default_args; do
         part="$(_ci_target_list "${service}" "${field}")" || return 2
         text+=$'\n'"${part}"
     done
@@ -13156,6 +13157,11 @@ _ci_service_build_args() {
     # From: Issue #1683
     val="$(_ci_target_list "${service}" processes)" || return 2
     [ -z "${val}" ] || out="${out}${prefix}${CI_ARG_PROCESSES}=${val//$'\n'/ }"$'\n'
+    # What: SOT start_pre step per process, "|"-joined.
+    # Why: runtime seeds, e.g. the empty PowerDNS DB.
+    # From: Issue #1683 | PR #1980
+    val="$(_ci_target_list "${service}" process_pre)" || return 2
+    [ -z "${val}" ] || out="${out}${prefix}${CI_ARG_PROCESS_PRE}=${val//$'\n'/|}"$'\n'
     # What: the SOT runtime gid the images share.
     # Why: the Dockerfiles bake it; compose names none.
     # From: Issue #1683 | PR #1912

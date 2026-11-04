@@ -135,6 +135,11 @@ services:
       - pdns=/usr/sbin/pdns_server,--config-dir=@CONFIG_DIR@/dns,--guardian=no,--daemon=no
       - dns-http=/usr/sbin/pdns_recursor,--config-dir=@CONFIG_DIR@/dns,--config-name=http,--daemon=no
       - dns-https=/usr/sbin/pdns_recursor,--config-dir=@CONFIG_DIR@/dns,--config-name=https,--daemon=no
+    # What: start_pre step: seed a missing PowerDNS DB.
+    # Why: PDNS_DATA_DIR is a host dir; fresh = no DB.
+    # From: Issue #1683 | PR #1980
+    process_pre:
+      - 'pdns=[ -e @PDNS_DATABASE@ ] && return 0; sqlite3 @PDNS_DATABASE@ < @PDNS_SCHEMA_FILE@ && chown pdns:pdns @PDNS_DATABASE@ && return 0; rm -f @PDNS_DATABASE@; return 1'
     setup:
       - dir=@PDNS_CONF_DIR@/auth
       - dir=@PDNS_DATA_DIR@:pdns

@@ -55,11 +55,14 @@ ENV LANCACHE_RUNTIME_GID=${LANCACHE_RUNTIME_GID} \
 # Why: OpenRC restarts crashes; @KEY@ e.g. CONFIG_DIR.
 # From: Issue #1683 | PR #1980
 ARG LANCACHE_PROCESSES
+ARG LANCACHE_PROCESS_PRE
 RUN set -e; \
     sed -i 's/^#\?rc_sys=.*/rc_sys="docker"/' /etc/rc.conf; \
     sed -i 's/^#\?rc_env_allow=.*/rc_env_allow="*"/' /etc/rc.conf; \
     declare -A v; IFS='|' read -ra kv <<< "${LANCACHE_RUNTIME_DEFAULTS}"; \
     for p in "${kv[@]}"; do v["${p%%=*}"]="${p#*=}"; done; \
+    declare -A pre; IFS='|' read -ra kv <<< "${LANCACHE_PROCESS_PRE}"; \
+    for p in "${kv[@]}"; do pre["${p%%=*}"]="${p#*=}"; done; \
     for row in ${LANCACHE_PROCESSES}; do \
       level=default; \
       if [[ "${row%%=*}" == *:* ]]; then level="${row%%:*}"; row="${row#*:}"; fi; \
@@ -71,12 +74,20 @@ RUN set -e; \
         [[ -v "v[${k}]" ]] || { echo "unknown SOT key ${k}" >&2; exit 1; }; \
         cmd="${cmd//@${k}@/${v[${k}]}}"; \
       done; \
+      sp="${pre[${name}]:-}"; \
+      while [[ "${sp}" =~ @([A-Z0-9_]+)@ ]]; do \
+        k="${BASH_REMATCH[1]}"; \
+        [[ -v "v[${k}]" ]] || { echo "unknown SOT key ${k}" >&2; exit 1; }; \
+        sp="${sp//@${k}@/${v[${k}]}}"; \
+      done; \
       cmd="${cmd//,/ }"; args=""; \
       [[ "${cmd}" != *" "* ]] || args="${cmd#* }"; \
       printf '%s\n' '#!/sbin/openrc-run' 'supervisor=supervise-daemon' \
         "command=${cmd%% *}" "command_args=\"${args}\"" \
         'respawn_delay=2' 'output_log=/proc/1/fd/1' \
         'error_log=/proc/1/fd/2' > "/etc/init.d/${name}"; \
+      [ -z "${sp}" ] || printf 'start_pre() { %s; }\n' "${sp}" \
+        >> "/etc/init.d/${name}"; \
       chmod 0755 "/etc/init.d/${name}"; \
       rc-update add "${name}" "${level}"; \
     done
