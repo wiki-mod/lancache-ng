@@ -1842,10 +1842,19 @@ async fn apply_all(app: &App, old: &Settings, new: &Settings) -> Result<Vec<Stri
             Err(e) => report.push(format!("{dhcp}: mode off, {e}")),
         }
     }
+    // What: skip an owner that has no container yet.
+    // Why: at stack start it reads the new files anyway.
+    // From: Issue #1683 | PR #1980
     let mut names = BTreeMap::new();
     for owner in plan.keys() {
-        names.insert(owner.clone(), container_of(app, new, owner).await?);
+        match container_of(app, new, owner).await {
+            Ok(name) => {
+                names.insert(owner.clone(), name);
+            }
+            Err(e) => report.push(format!("{owner}: skipped, {e}")),
+        }
     }
+    plan.retain(|owner, _| names.contains_key(owner));
     let lookup = |owner: &str| names.get(owner).cloned().unwrap_or_default();
     let hup = new.list("HUP_OWNERS");
     let mut restarted = Vec::new();
@@ -1869,15 +1878,18 @@ async fn apply_all(app: &App, old: &Settings, new: &Settings) -> Result<Vec<Stri
         Ok(0) => {}
         Ok(n) => {
             report.push(format!("certs: {n} issued"));
-            let plan = apply::plan(&[config::Change {
+            let mut plan = apply::plan(&[config::Change {
                 key: "certs".into(),
                 owner: "proxy".into(),
                 effect: config::Effect::Reload,
             }]);
             let mut names = BTreeMap::new();
             for owner in plan.keys() {
-                names.insert(owner.clone(), container_of(app, new, owner).await?);
+                if let Ok(name) = container_of(app, new, owner).await {
+                    names.insert(owner.clone(), name);
+                }
             }
+            plan.retain(|owner, _| names.contains_key(owner));
             let lookup = |owner: &str| names.get(owner).cloned().unwrap_or_default();
             for (owner, result) in apply::run(&app.docker, &plan, &hup, &lookup, grace, limit).await
             {
