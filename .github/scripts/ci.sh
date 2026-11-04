@@ -12996,7 +12996,7 @@ _ci_service_setup() {
 # Why: 64.4: a default rebuilds only images that read it.
 # From: Issue #1683 | PR #1912
 _ci_service_default_rows() {
-    local service="$1" want="${2:-defaults}" rows type text="" paths p part field tracked memo out=""
+    local service="$1" want="${2:-defaults}" rows type text="" paths p part field tracked memo out="" d k
     local -a specs=() files=()
     # What: one call builds a service's rows once.
     # Why: A3: plan built them per platform, 2.1 s each.
@@ -13009,8 +13009,13 @@ _ci_service_default_rows() {
     # What: defaults rows, or schema rows for want=schema.
     # Why: keys without default still need a spec.
     # From: Issue #1683 | PR #1980
+    local -A has_default=()
     if [ "${want}" = schema ]; then
         rows="$(_ci_required_field runtime schema blocklist)" || return 2
+        d="$(_ci_runtime_defaults)" || return 2
+        while IFS= read -r k; do
+            [ -z "${k}" ] || has_default["${k%%=*}"]=1
+        done <<< "${d}"
     else
         rows="$(_ci_runtime_defaults)" || return 2
     fi
@@ -13055,7 +13060,15 @@ _ci_service_default_rows() {
     done <<< "${words}"
     while IFS= read -r row; do
         [ -n "${row}" ] || continue
-        [ -z "${used["${row%%=*}"]+x}" ] || out+="${row}"$'\n'
+        [ -n "${used["${row%%=*}"]+x}" ] || continue
+        # What: a schema row without default is optional.
+        # Why: compose or setup.sh sets it; load must not fail.
+        # From: Issue #1683 | PR #1980
+        if [ "${want}" = schema ] && [ -z "${has_default["${row%%=*}"]+x}" ]; then
+            k="${row#*=}"; k="${k%%;*}"
+            [[ "${k}" == *\? ]] || row="${row%%=*}=${k}?${row#*=${k}}"
+        fi
+        out+="${row}"$'\n'
     done <<< "${rows}"
     [ -n "${out}" ] || return 0
     _ci_job_memo_put "${memo}" "${out%$'\n'}" || return 2
