@@ -13066,7 +13066,7 @@ _ci_service_default_rows() {
         # From: Issue #1683 | PR #1980
         if [ "${want}" = schema ] && [ -z "${has_default["${row%%=*}"]+x}" ]; then
             k="${row#*=}"; k="${k%%;*}"
-            [[ "${k}" == *\? ]] || row="${row%%=*}=${k}?${row#*=${k}}"
+            [[ "${k}" == *\? ]] || row="${row%%=*}=${k}?${row#*="${k}"}"
         fi
         out+="${row}"$'\n'
     done <<< "${rows}"
