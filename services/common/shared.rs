@@ -3283,7 +3283,7 @@ pub mod render {
         let psl = nginx_conf::Psl::parse(&read(&tpl.join(s.text("NGINX_PSL_FILE")?))?);
         let hosts = nginx_conf::hosts(&crate::cdn::effective(s)?, &psl)?;
         let mut want = hosts.certs();
-        // What: default cert names the DNS name and IP_HTTPS.
+        // What: default cert: DNS name and IP_HTTPS.
         // Why: clients without SNI or by IP get this cert.
         // From: Issue #1683 | PR #1980
         let mut names = vec![s.text("DEFAULT_CERT_DNS")?];
