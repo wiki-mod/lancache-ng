@@ -28,7 +28,9 @@ image_base:
     - nano
     - ripgrep
     - sed
+    - tzdata
     - util-linux
+    - xz
     - zstd
   # What: smoke runs; a one-word run gets --version.
   # Why: ci.sh _ci_image_smoke adds it; one rule.
