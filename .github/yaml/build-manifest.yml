@@ -857,6 +857,10 @@ runtime:
     - PDNS_LISTEN=0.0.0.0
     - PDNS_PRIMARY_API_URL=http://@CONTAINER_NAME_DNS@:@PDNS_AUTH_API_PORT@/api/v1/servers/localhost
     - PDNS_SECONDARY_API_URL=
+    # What: SOA serial rule for API and DDNS writes.
+    # Why: a change raises the serial; NOTIFY follows.
+    # From: Issue #1683 | PR #1980
+    - PDNS_SOA_EDIT=INCREASE
     - PDNS_XFR_CYCLE=60
     - PROXY_ALLOWED_CLIENT_CIDRS=@PRIVATE_NETS@ fc00::/7
     - PROXY_LOG_PROGRAM=nginx
@@ -1090,6 +1094,8 @@ runtime:
     - PDNS_LISTEN=list;;;restart;dns
     - PDNS_PRIMARY_API_URL=text?;;;live;services
     - PDNS_SECONDARY_API_URL=text?;;;live;services
+    - PDNS_SOA_EDIT=text;;;live;ui
+    - PDNS_SOA_COLD_RETRY=uint;1;3600;live;ui
     - PDNS_XFR_CYCLE=uint;1;86400;reload;dns
     - PROXY_ALLOWED_CLIENT_CIDRS=list;;;reload;proxy
     - PROXY_HTTP_PORT=uint;1;65535;container;proxy

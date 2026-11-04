@@ -600,6 +600,21 @@ pub mod pdns {
                 .map(drop)
         }
 
+        // What: add a primary zone; SOA from default-soa.
+        // Why: API writes and DDNS need the zone to exist.
+        // From: Issue #1683 | PR #1980
+        pub async fn create_primary(&self, zone: &str, soa_edit: &str) -> Result<(), String> {
+            let body = json!({
+                "name": zone_id(zone),
+                "kind": "Master",
+                "nameservers": [],
+                "soa_edit_api": soa_edit,
+            });
+            self.call(Method::POST, "/zones", Some(body))
+                .await
+                .map(drop)
+        }
+
         // What: create or replace one TSIG key.
         // Why: rotation keeps the name; PUT needs a key.
         // From: Issue #1683 | PR #1858
@@ -1241,8 +1256,7 @@ pub mod cert {
         if !san.is_empty() {
             body.push_str(&format!("subjectAltName={}\n", san.join(",")));
         }
-        std::fs::write(&ext, body)
-        .map_err(|e| format!("{}: {e}", ext.display()))?;
+        std::fs::write(&ext, body).map_err(|e| format!("{}: {e}", ext.display()))?;
         let request = openssl(&[
             "req",
             "-new",

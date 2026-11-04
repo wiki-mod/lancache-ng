@@ -1821,13 +1821,8 @@ async fn apply_all(app: &App, old: &Settings, new: &Settings) -> Result<Vec<Stri
     // Why: pdns starts only after the restart below.
     // From: Issue #1683 | PR #1980
     let mut report = Vec::new();
-    if new.text("DNS_REPLICATION_ROLE")? == "secondary"
-        && let Err(e) = ensure_secondary_zones(new).await
-    {
-        report.push(format!("secondary zones: {e}"));
-    }
-    if let Err(e) = ensure_tsig(new).await {
-        report.push(format!("tsig: {e}"));
+    if let Err(e) = ensure_zones(new).await {
+        report.push(e);
     }
     // What: issue missing certs before the proxy wakes.
     // Why: a cert the map names must exist on disk.
@@ -1927,6 +1922,66 @@ async fn ensure_secondary_zones(s: &Settings) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+// What: create missing primary zones; set DDNS meta.
+// Why: 4220b1c3 dropped pdnsutil create-zone, no owner.
+// From: Issue #1683 | PR #1980
+async fn ensure_primary_zones(s: &Settings) -> Result<(), String> {
+    let api = pdns_api(s)?;
+    let have: Vec<String> = api.zones().await?.into_iter().map(|z| z.name).collect();
+    let edit = vec![s.text("PDNS_SOA_EDIT")?];
+    let signed = if s.flag("DDNS_ALLOW_UNSIGNED")? {
+        Vec::new()
+    } else {
+        vec![secrets(s)?.tsig_name]
+    };
+    for zone in lancache_ng::dns::managed_zones(s)? {
+        let id = lancache_ng::pdns::zone_id(&zone);
+        if !have.contains(&id) {
+            api.create_primary(&id, &edit[0]).await?;
+        }
+        api.set_metadata(&id, "SOA-EDIT-DNSUPDATE", &edit).await?;
+        api.set_metadata(&id, "NOTIFY-DNSUPDATE", &["1".to_string()])
+            .await?;
+        api.set_metadata(&id, "TSIG-ALLOW-DNSUPDATE", &signed)
+            .await?;
+    }
+    Ok(())
+}
+
+// What: zones, then TSIG; one report line on error.
+// Why: TSIG binds to the zones that exist.
+// From: Issue #1683 | PR #1980
+async fn ensure_zones(s: &Settings) -> Result<(), String> {
+    if s.text("DNS_REPLICATION_ROLE")? == "secondary" {
+        ensure_secondary_zones(s)
+            .await
+            .map_err(|e| format!("secondary zones: {e}"))?;
+    } else {
+        ensure_primary_zones(s)
+            .await
+            .map_err(|e| format!("primary zones: {e}"))?;
+    }
+    ensure_tsig(s).await.map_err(|e| format!("tsig: {e}"))
+}
+
+// What: retry zones and TSIG until pdns answers.
+// Why: at ui start the dns container may not run yet.
+// From: Issue #1683 | PR #1980
+async fn zones_at_start(app: Arc<App>) {
+    loop {
+        let s = app.settings();
+        let wait = s.uint("PDNS_SOA_COLD_RETRY").unwrap_or(1).max(1);
+        match ensure_zones(&s).await {
+            Ok(()) => {
+                eprintln!("ui: start: zones ready");
+                return;
+            }
+            Err(e) => eprintln!("ui: start: {e}"),
+        }
+        tokio::time::sleep(Duration::from_secs(wait)).await;
+    }
 }
 
 // What: path of the DDNS TSIG secret file.
@@ -2436,6 +2491,7 @@ async fn main() -> Result<(), String> {
     }
     tokio::spawn(sampler(app.clone()));
     tokio::spawn(flush_on_transfer(app.clone()));
+    tokio::spawn(zones_at_start(app.clone()));
     let listen = format!("{}:{}", s.text("UI_LISTEN")?, s.uint("UI_PORT")?);
     let sock = tokio::net::TcpListener::bind(&listen)
         .await
