@@ -1824,21 +1824,6 @@ async fn apply_all(app: &App, old: &Settings, new: &Settings) -> Result<Vec<Stri
     if let Err(e) = ensure_zones(new).await {
         report.push(e);
     }
-    // What: issue missing certs before the proxy wakes.
-    // Why: a cert the map names must exist on disk.
-    // From: Issue #1683 | PR #1980
-    match render::issue_certs(new) {
-        Ok(0) => {}
-        Ok(n) => {
-            report.push(format!("certs: {n} issued"));
-            changes.push(config::Change {
-                key: "certs".into(),
-                owner: "proxy".into(),
-                effect: config::Effect::Reload,
-            });
-        }
-        Err(e) => report.push(format!("certs: {e}")),
-    }
     let mut plan = apply::plan(&changes);
     let (grace, limit) = app.limits(new)?;
     let mut names = BTreeMap::new();
@@ -1858,6 +1843,34 @@ async fn apply_all(app: &App, old: &Settings, new: &Settings) -> Result<Vec<Stri
     let hup = new.list("HUP_OWNERS");
     for (owner, result) in apply::run(&app.docker, &plan, &hup, &lookup, grace, limit).await {
         report.push(format!("{owner}: {result:?}"));
+    }
+    // What: issue missing certs after the restarts.
+    // Why: many leaves take time; dns must not wait.
+    // From: Issue #1683 | PR #1980
+    let s = new.clone();
+    let issued = tokio::task::spawn_blocking(move || render::issue_certs(&s))
+        .await
+        .map_err(|e| e.to_string())?;
+    match issued {
+        Ok(0) => {}
+        Ok(n) => {
+            report.push(format!("certs: {n} issued"));
+            let plan = apply::plan(&[config::Change {
+                key: "certs".into(),
+                owner: "proxy".into(),
+                effect: config::Effect::Reload,
+            }]);
+            let mut names = BTreeMap::new();
+            for owner in plan.keys() {
+                names.insert(owner.clone(), container_of(app, new, owner).await?);
+            }
+            let lookup = |owner: &str| names.get(owner).cloned().unwrap_or_default();
+            for (owner, result) in apply::run(&app.docker, &plan, &hup, &lookup, grace, limit).await
+            {
+                report.push(format!("{owner}: {result:?}"));
+            }
+        }
+        Err(e) => report.push(format!("certs: {e}")),
     }
     Ok(report)
 }
