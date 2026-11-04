@@ -2080,7 +2080,7 @@ pub mod recursor_conf {
     }
 
     impl Which {
-        // What: SOT key RECURSOR_<MODE>_<name>, spelled out.
+        // What: SOT key RECURSOR_<MODE>_<name>, in full.
         // Why: ci.sh bakes only keys the source names.
         // From: Issue #1683 | PR #1980
         pub fn key(self, name: &str) -> String {

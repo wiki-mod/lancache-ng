@@ -133,7 +133,7 @@ impl App {
         let s = self.settings();
         let page = name.trim_end_matches(".html");
         // What: every spec key, unset ones as empty text.
-        // Why: templates read optional keys without a guard.
+        // Why: templates read optional keys unguarded.
         // From: Issue #1683 | PR #1980
         let mut values: BTreeMap<String, String> = s
             .specs()
