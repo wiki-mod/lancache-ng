@@ -1848,8 +1848,15 @@ async fn apply_all(app: &App, old: &Settings, new: &Settings) -> Result<Vec<Stri
     }
     let lookup = |owner: &str| names.get(owner).cloned().unwrap_or_default();
     let hup = new.list("HUP_OWNERS");
+    let mut restarted = Vec::new();
     for (owner, result) in apply::run(&app.docker, &plan, &hup, &lookup, grace, limit).await {
+        if matches!(result, apply::Outcome::Done(docker::Action::Restart)) {
+            restarted.push(lookup(&owner));
+        }
         report.push(format!("{owner}: {result:?}"));
+    }
+    for name in wait_healthy(app, new, &restarted, limit).await {
+        report.push(format!("{name}: not healthy in time"));
     }
     // What: issue missing certs after the restarts.
     // Why: many leaves take time; dns must not wait.
@@ -1880,6 +1887,34 @@ async fn apply_all(app: &App, old: &Settings, new: &Settings) -> Result<Vec<Stri
         Err(e) => report.push(format!("certs: {e}")),
     }
     Ok(report)
+}
+
+// What: wait until restarted containers are healthy.
+// Why: "done" must mean the service answers again.
+// From: Issue #1683 | PR #1980
+async fn wait_healthy(app: &App, s: &Settings, names: &[String], limit: Duration) -> Vec<String> {
+    let wait = Duration::from_secs(s.uint("APPLY_HEALTH_WAIT_SECONDS").unwrap_or(0));
+    let poll = Duration::from_secs(s.uint("APPLY_HEALTH_POLL_SECONDS").unwrap_or(1).max(1));
+    let end = std::time::Instant::now() + wait;
+    let mut late = Vec::new();
+    for name in names {
+        loop {
+            let state = app.docker.inspect(name, limit).await.ok();
+            let field = |p: &str| state.as_ref().and_then(|v| v.pointer(p)).cloned();
+            let running = field("/State/Running").and_then(|v| v.as_bool());
+            let health = field("/State/Health/Status");
+            let health = health.as_ref().and_then(Value::as_str);
+            if running == Some(true) && health.is_none_or(|h| h == "healthy") {
+                break;
+            }
+            if std::time::Instant::now() >= end {
+                late.push(name.clone());
+                break;
+            }
+            tokio::time::sleep(poll).await;
+        }
+    }
+    late
 }
 
 // What: start or stop a container for the user.
