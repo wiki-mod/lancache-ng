@@ -3073,7 +3073,7 @@ pub mod render {
             let rpz_key = which.key("RPZ_FILE");
             let lua_key = which.key("LUA_FILE");
             // What: serial from the zone body itself.
-            // Why: a clock serial restarts dns on every save.
+            // Why: a clock serial restarts dns each save.
             // From: Issue #1683 | PR #1980
             let serial = recursor_conf::rpz(s, names, &answer, 0)
                 .map(|b| content_serial(&b))

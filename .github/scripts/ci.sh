@@ -1388,8 +1388,7 @@ _ci_github_get() {
         return 0
     fi
     # What: rate limit: one more read with the job token.
-    # Why: hosted runners share IPs; 60 anonymous reads/h.
-    # Why: no log; callers read 2>&1 as the JSON body.
+    # Why: shared runner IPs; no log, callers read 2>&1.
     # From: Issue #1683 | PR #1858
     if [[ "${out}" != *"API rate limit exceeded"* ]] || [ -z "${tok}" ]; then
         printf '%s\n' "${out}"
