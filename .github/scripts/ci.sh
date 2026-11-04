@@ -2985,13 +2985,47 @@ _ci_listing_items() {
     fi
 }
 
-# What: generate the workspace lock, once per job.
-# Why: no third-party pin; cargo resolves the latest.
+# What: the workspace lock, once per job; $1 record
+# Why: §17: a refresh run resolves the latest; ids stay
 # From: Issue #1683 | PR #1858
 _ci_cargo_lock() {
-    local lock seen out
+    local write="${1:-}" lock seen out remote blob rc=0 k v val="" refresh=0
+    local run="${GITHUB_RUN_ID:-local}"
     lock="$(_ci_repo_path CI_CARGO_LOCK)" || return 2
     if seen="$(_ci_job_memo_get cargo-lock.done)" && [ "${seen}" = "${lock}" ] && [ -s "${lock}" ]; then
+        return 0
+    fi
+    _ci_refresh_event || refresh=$?
+    [ "${refresh}" -le 1 ] || return 2
+    remote="$(_ci_git_remote)" || return 2
+    blob="$(_ci_ledger_blob "${remote}" CI_REFRESH_REF CI_REFRESH_FILE)" || rc=$?
+    case "${rc}" in
+        0)
+            while IFS=$'\t' read -r k v; do
+                [ "${k}" != cargo-lock ] || val="${v}"
+            done <<< "${blob}"
+            ;;
+        1) ;;
+        *) return 2 ;;
+    esac
+    # What: reuse the record; a refresh run only its own
+    # Why: plan and builds of one run read one lock
+    # From: Issue #1683 | PR #1858
+    if [ -n "${val}" ] && { [ "${refresh}" -eq 1 ] || [ "${val%% *}" = "${run}" ]; }; then
+        if ! out="$(printf '%s' "${val#* }" | base64 -d 2>&1 > "${lock}")"; then
+            ci_error "[CI-ERROR-RESOLVE-0018]" "path=\"${lock}\" run=\"${val%% *}\" reason=\"recorded lock not decoded\"" "${out}"
+            return 2
+        fi
+        # What: a new workspace dependency still resolves
+        # Why: --workspace moves no locked crate version
+        # From: Issue #1683 | PR #1858
+        if ! out="$(cd "${CI_REPO_ROOT:-.}" && _ci_retry cargo cargo update --workspace 2>&1)"; then
+            ci_error "[CI-ERROR-RESOLVE-0020]" "path=\"${lock}\" reason=\"recorded lock not completed\"" "${out}"
+            return 2
+        fi
+        [ -z "${out}" ] || printf '%s\n' "${out}" >&2
+        ci_log "[CI-INFO-RESOLVE-0017]" "path=\"${lock}\" run=\"${val%% *}\" reason=\"lock of the last refresh run; reuse\""
+        _ci_job_memo_put cargo-lock.done "${lock}"
         return 0
     fi
     if ! out="$(cd "${CI_REPO_ROOT:-.}" && _ci_retry cargo cargo generate-lockfile)"; then
@@ -2999,6 +3033,15 @@ _ci_cargo_lock() {
         return 2
     fi
     [ -z "${out}" ] || printf '%s\n' "${out}" >&2
+    # What: a refresh run's id owner records its lock
+    # Why: §17: the refresh result is read, not redone
+    # From: Issue #1683 | PR #1858
+    if [ "${refresh}" -eq 0 ] && [ "${write}" = record ]; then
+        rc=0
+        val="$(_ci_capture 0 base64 -w0 "${lock}")" || return 2
+        printf 'cargo-lock\t%s %s\n' "${run}" "${val}" | _ci_ledger_upsert "${remote}" CI_REFRESH_REF CI_REFRESH_FILE replace || rc=$?
+        [ "${rc}" -eq 0 ] || ci_log "[CI-WARN-RESOLVE-0019]" "path=\"${lock}\" rc=${rc} reason=\"lock record not written (raw above); later runs resolve anew\""
+    fi
     _ci_job_memo_put cargo-lock.done "${lock}"
 }
 
@@ -3036,7 +3079,7 @@ _ci_rust_content() {
     # What: every ref reads this job's generated lock.
     # Why: a resolved input, like a base image digest.
     # From: Issue #1683 | PR #1858
-    _ci_cargo_lock || return 2
+    _ci_cargo_lock record || return 2
     lockf="$(_ci_repo_path CI_CARGO_LOCK)" || return 2
     pkgs="$(_ci_run "[CI-ERROR-IDENTITY-0011]" "path=\"${lock}\" reason=\"lock closure not read\"" awk -v roots="${crates}" "${_CI_AWK_LOCK_CLOSURE}" "${lockf}")" || return 2
     if [ "${mode}" != text ]; then
