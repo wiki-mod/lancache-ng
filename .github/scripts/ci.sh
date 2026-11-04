@@ -11408,7 +11408,11 @@ _ci_validate_dns() {
     for side in IP_HTTP IP_HTTPS; do
         port="$(_ci_validate_dns_port "${side}")" || return 2
         out="$(_ci_run -s "[CI-ERROR-VALIDATE-0117]" "domain=\"${domain}\" side=\"${side}\" reason=\"dig failed\"" \
-            _ci_validate_dig +short -p "${port}" "@${ip}" A "${domain}")" || return 2
+            _ci_validate_dig +short -p "${port}" "@${ip}" A "${domain}")" || {
+            _ci_validate_service_evidence "${project}" "${svc}" >&2
+            _ci_validate_service_evidence "${project}" "$(_ci_validation_service ui)" >&2
+            return 2
+        }
         out="$(_ci_capture 0 sort -u <<<"${out}")" || return 2
         if [ -z "${out}" ]; then
             ci_log "[CI-ERROR-VALIDATE-0011]" "domain=\"${domain}\" side=\"${side}\" reason=\"no DNS answer from a resolver side\""
