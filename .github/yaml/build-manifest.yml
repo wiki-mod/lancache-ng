@@ -876,7 +876,7 @@ runtime:
     - RECURSOR_HTTPS_CONF_FILE=@CONFIG_DIR@/dns/recursor-https.yml
     - RECURSOR_HTTPS_LUA_FILE=@CONFIG_DIR@/dns/https.lua
     - RECURSOR_HTTPS_RPZ_FILE=@CONFIG_DIR@/dns/https.rpz
-    # What: listen address, DNS port and API port per recursor.
+    # What: listen address, DNS and API port per recursor.
     # Why: compose maps IP_HTTP and IP_HTTPS to these ports.
     # From: Issue #1683 | PR #1980
     - RECURSOR_HTTP_LISTEN=0.0.0.0
