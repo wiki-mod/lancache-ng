@@ -584,8 +584,8 @@ runtime:
     # Why: the ui renders it; nginx must not exit early.
     # From: Issue #1683 | PR #1980
     - PROXY_CONFIG_WAIT_SECONDS=1
-    # What: dns start_pre poll gap until the ui config exists.
-    # Why: recursors read config once; no early default start.
+    # What: dns start_pre poll gap until config exists.
+    # Why: recursors read config once at start.
     # From: Issue #1683 | PR #1980
     - DNS_CONFIG_WAIT_SECONDS=1
     # What: samples the stats page charts keep per series.
