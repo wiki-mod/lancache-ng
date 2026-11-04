@@ -1389,12 +1389,12 @@ _ci_github_get() {
     fi
     # What: rate limit: one more read with the job token.
     # Why: hosted runners share IPs; 60 anonymous reads/h.
+    # Why: no log; callers read 2>&1 as the JSON body.
     # From: Issue #1683 | PR #1858
     if [[ "${out}" != *"API rate limit exceeded"* ]] || [ -z "${tok}" ]; then
         printf '%s\n' "${out}"
         return 1
     fi
-    ci_log "[CI-INFO-FETCH-0009]" "url=\"$1\" reason=\"anonymous rate limit; one read with the job token\""
     printf 'Authorization: Bearer %s\n' "${tok}" \
         | _ci_download_curl --fail-with-body -sSL -H 'Accept: application/vnd.github+json' -H @- "$1" 2>&1
 }
