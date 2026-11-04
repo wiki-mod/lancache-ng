@@ -1251,7 +1251,13 @@ pub mod cert {
     ) -> Result<(), String> {
         let csr = crt.with_extension("csr");
         let ext = crt.with_extension("ext");
-        let san: Vec<String> = sans.iter().map(|n| format!("DNS:{n}")).collect();
+        let san: Vec<String> = sans
+            .iter()
+            .map(|n| match n.parse::<std::net::IpAddr>() {
+                Ok(_) => format!("IP:{n}"),
+                Err(_) => format!("DNS:{n}"),
+            })
+            .collect();
         let mut body = String::from("extendedKeyUsage=serverAuth\n");
         if !san.is_empty() {
             body.push_str(&format!("subjectAltName={}\n", san.join(",")));
@@ -1300,7 +1306,29 @@ pub mod cert {
                 _ => {}
             }
         }
+        // What: a failed sign leaves no half key pair.
+        // Why: a lone key would stop the next attempt.
+        // From: Issue #1683 | PR #1980
+        if signed.is_err() {
+            for f in [key, crt] {
+                let _ = std::fs::remove_file(f);
+            }
+        }
         signed.map(drop)
+    }
+
+    // What: SHA-256 fingerprint line of a certificate.
+    // Why: a changed CA must drop its old leaves.
+    // From: Issue #1683 | PR #1980
+    pub fn fingerprint(crt: &Path) -> Result<String, String> {
+        openssl(&[
+            "x509",
+            "-noout",
+            "-fingerprint",
+            "-sha256",
+            "-in",
+            &arg(crt),
+        ])
     }
 
     // What: true if crt stays valid for within seconds.
@@ -3003,7 +3031,7 @@ pub mod render {
     use crate::config::Settings;
     use crate::recursor_conf::{self, Which};
     use crate::{chrony, dhcp, dnsmasq_conf, kea_conf, log, nginx_conf, pdns_conf};
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     // What: secrets the config files embed.
     // Why: the caller reads them from the store.
@@ -3177,6 +3205,44 @@ pub mod render {
         Ok(())
     }
 
+    // What: octal mode from a SOT key.
+    // Why: the SOT owns every file mode.
+    // From: Issue #1683 | PR #1980
+    fn mode_of(s: &Settings, key: &str) -> Result<u32, String> {
+        u32::from_str_radix(&s.text(key)?, 8).map_err(|e| format!("{key}: {e}"))
+    }
+
+    // What: set group and mode of one path.
+    // Why: nginx workers read keys by the shared gid.
+    // From: Issue #1683 | PR #1980
+    fn grant(p: &Path, gid: Option<u32>, mode: u32) -> Result<(), String> {
+        use std::os::unix::fs::PermissionsExt;
+        let err = |e: std::io::Error| format!("{}: {e}", p.display());
+        std::os::unix::fs::chown(p, None, gid).map_err(err)?;
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(mode)).map_err(err)
+    }
+
+    // What: drop every leaf when the CA changed.
+    // Why: leaves of an old CA fail on every client.
+    // From: Issue #1683 | PR #1980
+    fn drop_stale_leaves(ca_crt: &Path, dir: &Path, stamp: &Path) -> Result<(), String> {
+        let print = crate::cert::fingerprint(ca_crt)?;
+        if std::fs::read_to_string(stamp).ok().as_deref() == Some(print.as_str()) {
+            return Ok(());
+        }
+        let list = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        for entry in list {
+            let file = entry.map_err(|e| e.to_string())?.path();
+            if matches!(
+                file.extension().and_then(|x| x.to_str()),
+                Some("crt" | "key")
+            ) {
+                std::fs::remove_file(&file).map_err(|e| format!("{}: {e}", file.display()))?;
+            }
+        }
+        std::fs::write(stamp, print).map_err(|e| format!("{}: {e}", stamp.display()))
+    }
+
     // What: make the CA and every missing leaf cert.
     // Why: HTTPS mode needs one cert per map name.
     // From: Issue #1683 | PR #1980
@@ -3192,10 +3258,13 @@ pub mod render {
             ca.join(s.text("CA_CERT_FILE")?),
         );
         let serial = ca.join(s.text("CA_SERIAL_FILE")?);
+        let gid = s.text("LANCACHE_RUNTIME_GID")?;
+        let gid = Some(gid.parse::<u32>().map_err(|e| format!("gid {gid}: {e}"))?);
         for d in [&ca, &dir] {
             std::fs::create_dir_all(d).map_err(|e| format!("{}: {e}", d.display()))?;
         }
-        if !ca_crt.exists() {
+        grant(&dir, gid, mode_of(s, "CERT_DIR_MODE")?)?;
+        if !(ca_crt.exists() && ca_key.exists()) {
             crate::cert::make_ca(
                 &ca_key,
                 &ca_crt,
@@ -3203,30 +3272,46 @@ pub mod render {
                 s.uint("CA_DAYS")?,
                 &s.text("CA_KEY_TYPE")?,
             )?;
+            eprintln!(
+                "cert: ACTION REQUIRED: new CA {}; every HTTPS client must install it",
+                ca_crt.display()
+            );
         }
+        grant(&ca_key, None, mode_of(s, "CA_KEY_MODE")?)?;
+        drop_stale_leaves(&ca_crt, &dir, &dir.join(s.text("CA_STAMP_FILE")?))?;
         let tpl = PathBuf::from(s.text("NGINX_TEMPLATE_DIR")?);
         let psl = nginx_conf::Psl::parse(&read(&tpl.join(s.text("NGINX_PSL_FILE")?))?);
         let hosts = nginx_conf::hosts(&crate::cdn::effective(s)?, &psl)?;
         let mut want = hosts.certs();
-        want.push((s.text("NGINX_DEFAULT_CERT")?, Vec::new()));
+        // What: default cert names the DNS name and IP_HTTPS.
+        // Why: clients without SNI or by IP get this cert.
+        // From: Issue #1683 | PR #1980
+        let mut names = vec![s.text("DEFAULT_CERT_DNS")?];
+        names.extend(s.text("IP_HTTPS").ok());
+        want.push((s.text("NGINX_DEFAULT_CERT")?, names));
+        let (key_mode, crt_mode) = (mode_of(s, "CERT_KEY_MODE")?, mode_of(s, "CERT_FILE_MODE")?);
         let mut made = 0;
         for (name, sans) in want {
-            let crt = dir.join(format!("{name}.crt"));
-            if crt.exists() {
-                continue;
+            let (key, crt) = (
+                dir.join(format!("{name}.key")),
+                dir.join(format!("{name}.crt")),
+            );
+            if !(crt.exists() && key.exists()) {
+                crate::cert::make_leaf(
+                    &ca_key,
+                    &ca_crt,
+                    &serial,
+                    &key,
+                    &crt,
+                    &s.text("LEAF_SUBJECT")?,
+                    &sans,
+                    s.uint("LEAF_DAYS")?,
+                    &s.text("LEAF_KEY_TYPE")?,
+                )?;
+                made += 1;
             }
-            crate::cert::make_leaf(
-                &ca_key,
-                &ca_crt,
-                &serial,
-                &dir.join(format!("{name}.key")),
-                &crt,
-                &s.text("LEAF_SUBJECT")?,
-                &sans,
-                s.uint("LEAF_DAYS")?,
-                &s.text("LEAF_KEY_TYPE")?,
-            )?;
-            made += 1;
+            grant(&key, gid, key_mode)?;
+            grant(&crt, gid, crt_mode)?;
         }
         Ok(made)
     }

@@ -104,6 +104,8 @@ services:
     build_type: apk
     processes: [nginx]
     setup:
+      - group=@LOG_READER_GROUP@:@GID@
+      - member=nginx:@LOG_READER_GROUP@
       - dir=@NGINX_DIR@/@NGINX_SUBDIR_CA@
       - dir=@NGINX_DIR@/@NGINX_SUBDIR_CERTS@
       - dir=@NGINX_CACHE_DIR@
@@ -737,6 +739,14 @@ runtime:
     - LEAF_DAYS=3650
     - DEFAULT_CERT_NAME=default
     - DEFAULT_CERT_DNS=lancache-default
+    # What: cert file modes and the CA stamp file name.
+    # Why: nginx workers read keys by the shared gid.
+    # From: Issue #1683 | PR #1980
+    - CERT_DIR_MODE=2750
+    - CERT_KEY_MODE=0640
+    - CERT_FILE_MODE=0644
+    - CA_KEY_MODE=0600
+    - CA_STAMP_FILE=.ca-fingerprint
     - NGINX_CACHE_DIR=/var/cache/nginx/lancache
     - PROXY_HEALTH_PATH=/healthz
     - PROXY_HEALTH_URL=http://@LOOPBACK_BIND_IP@:@PROXY_HTTP_PORT@@PROXY_HEALTH_PATH@
@@ -1228,6 +1238,37 @@ runtime:
     - UI_SERVICE=text;;;live;ui
     - UI_FLUSH_CHECK_SECONDS=uint;1;3600;live;ui
     - DNS_SECONDARY_NAME_MAX=uint;1;63;live;ui
+    # What: keys the Rust code reads that had no row.
+    # Why: config.rs drops a default without a row.
+    # From: Issue #1683 | PR #1980
+    - CA_CERT_FILE=text;;;live;ui
+    - CA_DAYS=uint;1;36500;live;ui
+    - CA_KEY_FILE=text;;;live;ui
+    - CA_KEY_MODE=text;;;live;ui
+    - CA_KEY_TYPE=text;;;live;ui
+    - CA_SERIAL_FILE=text;;;live;ui
+    - CA_STAMP_FILE=text;;;live;ui
+    - CA_SUBJECT=text;;;live;ui
+    - CERT_DIR_MODE=text;;;live;ui
+    - CERT_FILE_MODE=text;;;live;ui
+    - CERT_KEY_MODE=text;;;live;ui
+    - DDNS_TSIG_ALGORITHM=text;;;live;ui
+    - DEFAULT_CERT_DNS=text;;;live;ui
+    - LEAF_DAYS=uint;1;36500;live;ui
+    - LEAF_KEY_TYPE=text;;;live;ui
+    - LEAF_SUBJECT=text;;;live;ui
+    - NGINX_HEALTHZ_BODY=text;;;reload;proxy
+    - NGINX_HEALTHZ_FILE=text;;;reload;proxy
+    - NGINX_HEALTH_HTTPS_PORT=uint;1;65535;reload;proxy
+    - NGINX_MITM_PORT=uint;1;65535;reload;proxy
+    - NGINX_ORIGIN_HTTPS_PORT=uint;1;65535;reload;proxy
+    - NGINX_PASSTHROUGH_PORT=uint;1;65535;container;proxy
+    - NGINX_SUBDIR_CA=text;;;container;proxy
+    - NGINX_SUBDIR_CERTS=text;;;container;proxy
+    - NGINX_UPSTREAM_CONNECT_TIMEOUT=uint;1;86400;reload;proxy
+    - NGINX_UPSTREAM_IDLE_TIMEOUT=uint;1;86400;reload;proxy
+    - PROXY_HTTPS_PORT=uint;1;65535;container;proxy
+    - PROXY_STATUS_URL=text;;;live;ui
   # What: defaults compose interpolates as SOT_<KEY>.
   # Why: setup.sh and ci.sh export them; no clash with .env.
   # From: Issue #1683 | PR #1912

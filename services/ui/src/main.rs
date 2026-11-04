@@ -15,7 +15,7 @@ use axum::routing::{get, post};
 use axum::{Extension, Router};
 use base64::Engine as _;
 use lancache_ng::config::{self, Settings, process_env};
-use lancache_ng::{access, apply, clock, docker, fs, http, human, render, secret};
+use lancache_ng::{access, apply, docker, fs, http, human, render, secret};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
