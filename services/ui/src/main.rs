@@ -734,7 +734,7 @@ async fn domains(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     ctx.insert("lan_zone", lan.trim_end_matches('.'));
     let (mut lan_rows, mut ptr) = (Vec::new(), Vec::new());
     match pdns_api(&s) {
-        // What: read PTR rows only when the LAN zone answers.
+        // What: PTR rows only when the LAN zone answers.
         // Why: an unreachable API would time out 20 times.
         // From: Issue #1683 | PR #1980
         Ok(api) => match api.rrsets(&lan).await {
