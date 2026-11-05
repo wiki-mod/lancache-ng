@@ -6416,7 +6416,14 @@ _ci_rust_build_cleanup() {
 # Why: exact label; "(Rust)" and rate rows never match.
 # From: Issue #1683 | PR #1912
 _ci_sccache_count() {
-    awk -v l="$1" 'index($0, l " ") == 1 { r = substr($0, length(l) + 1); gsub(/^ +| +$/, "", r); if (r ~ /^[0-9]+$/) print r }' <<< "$2"
+    local line r
+    while IFS= read -r line; do
+        [[ "${line}" == "$1 "* ]] || continue
+        r="${line#"$1"}"
+        r="${r#"${r%%[! ]*}"}"
+        r="${r%"${r##*[! ]}"}"
+        [[ ! "${r}" =~ ^[0-9]+$ ]] || printf '%s\n' "${r}"
+    done <<< "$2"
 }
 
 # What: log sccache use; check requests and cache errors.
