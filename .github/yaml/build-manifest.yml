@@ -952,6 +952,7 @@ runtime:
     - STATS_RRAS=AVERAGE:0.5:1:1440 AVERAGE:0.5:12:1680 AVERAGE:0.5:288:800 MAX:0.5:12:1680
     - STATS_SNMP_TARGET=udp:@CACHEHAMSTER_SERVICE@:161
     - STATS_STEP=60
+    - CACHE_USAGE_SCAN_SECONDS=300
     - STATS_WIDTH=720
     - STEAM_API_URL=https://api.steampowered.com
     - STEAM_BRANCH=public
@@ -1198,6 +1199,7 @@ runtime:
     - STATS_RRAS=list;;;live;ui
     - STATS_SNMP_TARGET=text;;;live;ui
     - STATS_STEP=uint;10;3600;live;ui
+    - CACHE_USAGE_SCAN_SECONDS=uint;30;86400;live;ui
     - STATS_WIDTH=text;;;live;ui
     - STEAM_API_URL=text;;;live;services
     - STEAM_BRANCH=text;;;live;services

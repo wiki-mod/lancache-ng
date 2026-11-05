@@ -20,6 +20,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tera::{Context, Tera};
@@ -102,6 +103,7 @@ struct App {
     tera: Tera,
     docker: docker::Api,
     session_key: [u8; 32],
+    cache_used: AtomicU64,
 }
 
 type Shared = State<Arc<App>>;
@@ -374,8 +376,8 @@ async fn dashboard(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page
     // Why: live test 05.11.: the bar showed disk use.
     // From: Issue #1683 | PR #1980
     let max = gib_bytes(&s.text("CACHE_MAX_GB")?)?;
-    if let Ok(sp) = fs::space(Path::new(&s.text("CACHE_DIR")?)) {
-        let used = sp.total.saturating_sub(sp.free);
+    let used = app.cache_used.load(Ordering::Relaxed);
+    if used != u64::MAX {
         let pct = (used.saturating_mul(100) / max.max(1)).min(100);
         ctx.insert("cache_used_human", &human::bytes(used));
         ctx.insert("cache_pct", &pct);
@@ -1695,6 +1697,52 @@ async fn sampler(app: Arc<App>) {
     }
 }
 
+// What: bytes the cache folder holds on disk.
+// Why: disk use counts other files on a shared disk.
+// From: Issue #1683 | PR #1980
+fn dir_bytes(root: &Path) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    let mut total = 0u64;
+    let mut todo = vec![root.to_path_buf()];
+    while let Some(dir) = todo.pop() {
+        let Ok(list) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in list.flatten() {
+            let Ok(meta) = entry.metadata() else {
+                continue;
+            };
+            if meta.is_dir() {
+                todo.push(entry.path());
+            } else {
+                total = total.saturating_add(meta.blocks().saturating_mul(512));
+            }
+        }
+    }
+    total
+}
+
+// What: count the cache folder now and then.
+// Why: a walk is slow; the dashboard reads the last sum.
+// From: Issue #1683 | PR #1980
+async fn cache_scanner(app: Arc<App>) {
+    loop {
+        let s = app.settings();
+        let (step, dir) = match (s.uint("CACHE_USAGE_SCAN_SECONDS"), s.text("CACHE_DIR")) {
+            (Ok(step), Ok(dir)) => (step, dir),
+            (Err(e), _) | (_, Err(e)) => {
+                eprintln!("ui: cache count stop: {e}");
+                return;
+            }
+        };
+        match tokio::task::spawn_blocking(move || dir_bytes(Path::new(&dir))).await {
+            Ok(bytes) => app.cache_used.store(bytes, Ordering::Relaxed),
+            Err(e) => eprintln!("ui: cache count: {e}"),
+        }
+        tokio::time::sleep(Duration::from_secs(step)).await;
+    }
+}
+
 // What: container name of a compose service.
 // Why: Docker calls need the real name.
 // From: Issue #1683 | PR #1858
@@ -2634,6 +2682,7 @@ async fn main() -> Result<(), String> {
         settings: RwLock::new(s.clone()),
         saved,
         session_key: secret::key_bytes(&key)?,
+        cache_used: AtomicU64::new(u64::MAX),
     });
     // What: render every config once at start.
     // Why: owners read the config volume; it starts empty.
@@ -2643,6 +2692,7 @@ async fn main() -> Result<(), String> {
         Err(e) => eprintln!("ui: start render: {e}"),
     }
     tokio::spawn(sampler(app.clone()));
+    tokio::spawn(cache_scanner(app.clone()));
     tokio::spawn(flush_on_transfer(app.clone()));
     tokio::spawn(zones_at_start(app.clone()));
     let listen = format!("{}:{}", s.text("UI_LISTEN")?, s.uint("UI_PORT")?);
