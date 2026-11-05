@@ -1386,6 +1386,40 @@ pub mod cert {
             .map(|s| s.success())
             .map_err(|e| format!("openssl: {e}"))
     }
+
+    // What: end of crt: ISO day and whole days left.
+    // Why: a warning names the day, not a second count.
+    // From: Issue #1683 | PR #1980
+    pub fn expiry(crt: &Path) -> Result<(String, i64), String> {
+        let a = arg(crt);
+        let out = openssl(&[
+            "x509", "-noout", "-enddate", "-dateopt", "iso_8601", "-in", &a,
+        ])?;
+        let day: String = out
+            .trim()
+            .trim_start_matches("notAfter=")
+            .chars()
+            .take(10)
+            .collect();
+        let n: Vec<i64> = day.split('-').filter_map(|p| p.parse().ok()).collect();
+        let [y, m, d] = n[..] else {
+            return Err(format!("openssl date: {day}"));
+        };
+        // What: days since 1970-01-01 (civil calendar).
+        // Why: no date crate; Hinnant's days_from_civil.
+        // From: Issue #1683 | PR #1980
+        let y = if m <= 2 { y - 1 } else { y };
+        let era = y.div_euclid(400);
+        let yoe = y - era * 400;
+        let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + d - 1;
+        let end = era * 146_097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719_468;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| e.to_string())?
+            .as_secs() as i64
+            / 86_400;
+        Ok((day, end - now))
+    }
 }
 
 // What: syslog-ng config: store per program, forward.

@@ -353,7 +353,10 @@ fn certs(s: &Settings, f: &mut Findings) -> Result<(), String> {
     for path in s.list("WATCHDOG_CERT_FILES") {
         match cert::valid_for(Path::new(&path), within) {
             Ok(true) => {}
-            Ok(false) => f.warn(&path, format!("expires within {within} s")),
+            Ok(false) => match cert::expiry(Path::new(&path)) {
+                Ok((day, n)) => f.warn(&path, format!("expires in {n} days ({day})")),
+                Err(e) => f.crit(&path, e),
+            },
             Err(e) => f.crit(&path, e),
         }
     }
