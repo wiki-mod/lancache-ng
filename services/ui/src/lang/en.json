@@ -203,6 +203,8 @@
   "linux_a_reply_means_the_time": "(Linux). A reply means the time server runs.",
   "listen_interface_optional": "Listen interface (optional)",
   "load_owned_games": "Load owned games",
+  "loading": "Loading …",
+  "loading_login_code": "Requesting the login code from Steam …",
   "log_out": "Log out",
   "logged_in": "Logged in.",
   "logged_in_as": "Logged in as",

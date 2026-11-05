@@ -203,6 +203,8 @@
   "linux_a_reply_means_the_time": "(Linux). Eine Antwort heißt: der Zeitserver läuft.",
   "listen_interface_optional": "Schnittstelle (optional)",
   "load_owned_games": "Eigene Spiele laden",
+  "loading": "Lädt …",
+  "loading_login_code": "Login-Code wird bei Steam angefordert …",
   "log_out": "Abmelden",
   "logged_in": "Angemeldet.",
   "logged_in_as": "Angemeldet als",

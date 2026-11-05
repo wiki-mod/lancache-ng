@@ -150,13 +150,21 @@
       if (v.state === 'done') { location.reload(); return; }
       if (v.state !== 'idle') { setTimeout(function () { api('login-poll').then(show).catch(fail); }, (v.interval || 5) * 1000); }
     };
-    const fail = function (e) { state.textContent = LC_T.login_failed; window.LancacheUi.fail(e); };
-    login.addEventListener('click', function () { api('login-begin').then(show).catch(fail); });
+    const fail = function (e) { login.disabled = false; state.textContent = LC_T.login_failed; window.LancacheUi.fail(e); };
+    login.addEventListener('click', function () {
+      login.disabled = true;
+      state.textContent = LC_T.loading_login_code;
+      api('login-begin').then(show).catch(fail);
+    });
   }
   const lib = document.getElementById('hamster-library');
   if (lib) {
     lib.addEventListener('click', function () {
+      lib.disabled = true;
+      lib.textContent = LC_T.loading;
+      const back = function () { lib.disabled = false; lib.textContent = LC_T.load_owned_games; };
       api('library').then(function (v) {
+        back();
         const t = document.getElementById('hamster-games');
         t.innerHTML = '<tr><th>App ID</th><th>Name</th></tr>';
         v.games.forEach(function (g) {
@@ -164,7 +172,7 @@
           row.insertCell().textContent = g.appid;
           row.insertCell().textContent = g.name;
         });
-      }).catch(window.LancacheUi.fail);
+      }).catch(function (e) { back(); window.LancacheUi.fail(e); });
     });
   }
 </script>
