@@ -840,6 +840,10 @@ runtime:
     - DNS_SECONDARIES=
     - DNS_SECONDARY_ZONES=
     - DNS_SERVE_RFC1918=1
+    # What: compose service name of the dns container.
+    # Why: names differ per compose project; services stay.
+    # From: Issue #1683 | PR #1980
+    - DNS_SERVICE=dns
     - DNS_SNAPSHOT_DIR=@UI_DATA_DIR@/dns-snapshots
     - DNS_SNAPSHOT_KEEP=20
     - DOCKER_ENDPOINT=unix://@DOCKER_SOCKET@
@@ -871,7 +875,7 @@ runtime:
     - PDNS_DEFAULT_SOA=ns1.@DHCP_DOMAIN@ hostmaster.@DHCP_DOMAIN@ 0 30 10 604800 300
     - PDNS_DNSUPDATE_FROM=@PRIVATE_NETS@
     - PDNS_LISTEN=0.0.0.0
-    - PDNS_PRIMARY_API_URL=http://@CONTAINER_NAME_DNS@:@PDNS_AUTH_API_PORT@/api/v1/servers/localhost
+    - PDNS_PRIMARY_API_URL=http://@DNS_SERVICE@:@PDNS_AUTH_API_PORT@/api/v1/servers/localhost
     - PDNS_SECONDARY_API_URL=
     # What: SOA serial rule for API and DDNS writes.
     # Why: a change raises the serial; NOTIFY follows.

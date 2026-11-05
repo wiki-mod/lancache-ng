@@ -47,6 +47,10 @@ x-environment:
     IP_HTTP: ${IP_HTTP:?IP_HTTP is required}
     IP_HTTPS: ${IP_HTTPS:?IP_HTTPS is required}
   services-ui: &env-services-ui
+    # What: compose project name for container lookups.
+    # Why: -p or .env may rename it; labels must match.
+    # From: Issue #1683 | PR #1980
+    COMPOSE_PROJECT: ${COMPOSE_PROJECT_NAME}
     NTP_ALLOWED_CLIENT_CIDRS: ${NTP_ALLOWED_CLIENT_CIDRS:-}
   proxy-ui: &env-proxy-ui
     HTTPS_ENABLED: ${HTTPS_ENABLED:-}
