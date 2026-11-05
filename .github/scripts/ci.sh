@@ -11734,8 +11734,12 @@ _ci_validate_proxy() {
 # Why: a root literal sends every subdomain to one origin
 # From: Issue #1297 | PR #1858
 _ci_stream_map_violations() {
-    local port="$1"
-    awk -v want="\$ssl_preread_server_name:${port};" '/^[[:space:]]*\*\./ && $2 != want { print }'
+    local port="$1" line second
+    while IFS= read -r line || [ -n "${line}" ]; do
+        [[ "${line}" =~ ^[[:space:]]*\*\. ]] || continue
+        read -r _ second _ <<< "${line}"
+        [ "${second}" = "\$ssl_preread_server_name:${port};" ] || printf '%s\n' "${line}"
+    done
 }
 
 # What: print depth>=2 dispatch entries off the relay port
