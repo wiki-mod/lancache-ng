@@ -443,6 +443,20 @@ _ci_nonblank_lines() {
     done <<< "$1"
 }
 
+# What: non-blank lines, each once, first one kept.
+# Why: one order-keeping dedup owner; no awk (Fund 136).
+# From: Issue #1683 | PR #1858
+_ci_unique_lines() {
+    local line
+    local -A seen=()
+    while IFS= read -r line; do
+        [[ "${line}" =~ [^[:space:]] ]] || continue
+        [ -z "${seen["k${line}"]+x}" ] || continue
+        seen["k${line}"]=1
+        printf '%s\n' "${line}"
+    done <<< "$1"
+}
+
 # What: field N (from 1) of one tab-separated line.
 # Why: no awk (Fund 136); keeps empty fields unlike read.
 # From: Issue #1683 | PR #1858
@@ -3112,7 +3126,7 @@ _ci_rust_content() {
 _ci_image_base_plus() {
     local field="$1" own="$2" base
     base="$(_ci_block_entry_list image_base "" "${field}")" || return 2
-    _ci_capture 0 awk "NF && !seen[\$0]++" <<< "${base}"$'\n'"${own}"
+    _ci_unique_lines "${base}"$'\n'"${own}"
 }
 
 # What: bootstrap, base, own and build-type apk lists.
@@ -9265,7 +9279,7 @@ _ci_promote_targets_for_ref() {
     if [ -n "${requested}" ] && [ "${requested}" != none ]; then
         items+=$'\n'"${requested}"
     fi
-    _ci_capture 0 awk "NF && !seen[\$0]++" <<< "${items}"
+    _ci_unique_lines "${items}"
 }
 
 # What: Resolve a git ref's current remote tip SHA.
