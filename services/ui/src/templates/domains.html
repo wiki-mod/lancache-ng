@@ -324,6 +324,22 @@
       </form>
     </section>
 
+    {# What: external DNS servers and domains (SOT keys)
+       Why: live 05.11.: it was settable only by setup.sh
+       From: Issue #1683 | PR #1980 #}
+    <section data-dns-panel="settings" class="hidden">
+      <div class="section-title">{{ t.upstream_dns }}</div>
+      <p class="section-sub">{{ t.upstream_dns_desc }}</p>
+      <form action="{{ routes.setup_save | safe }}" method="post">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="back" value="/domains">
+        <div class="field"><label for="up-servers">{{ t.upstream_servers }}</label><input id="up-servers" name="DNS_UPSTREAM_SERVERS" placeholder="192.168.1.23 192.168.1.22" value="{{ v.DNS_UPSTREAM_SERVERS }}"></div>
+        <div class="field"><label for="up-zones">{{ t.upstream_zones }}</label><input id="up-zones" name="DNS_UPSTREAM_ZONES" placeholder="firma.local" value="{{ v.DNS_UPSTREAM_ZONES }}"></div>
+        <div class="field"><label for="up-unsigned">{{ t.upstream_unsigned }}</label><input id="up-unsigned" name="DNS_UPSTREAM_UNSIGNED_ZONES" placeholder="firma.local" value="{{ v.DNS_UPSTREAM_UNSIGNED_ZONES }}"></div>
+        <button type="submit" class="btn">{{ t.save }}</button>
+      </form>
+    </section>
+
     {# What: toggle that allows DNS updates without TSIG.
        Why: TSIG is required by default; this relaxes it.
        From: Issue #815 #}
