@@ -48,7 +48,7 @@
         <td>{{ j.name }}</td>
         <td>{% if j.target.kind == "steam_app" %}{{ t.steam_app }} {{ j.target.value }}{% else %}{{ j.target.value | length }} {{ t.addresses }}{% endif %}</td>
         <td>{% if j.when.kind == "at" %}<span data-unix="{{ j.when.at }}"></span>{% elif j.when.kind == "later" %}{{ t.by_hand_press_start }}{% else %}{{ j.when.kind }}{% endif %}</td>
-        <td>{{ j.state.state }}{% if j.state.reason %}: {{ j.state.reason }}{% endif %}</td>
+        {% set sk = "hamster_st_" ~ j.state.state %}<td>{{ t[sk] }}{% if j.state.reason %}: {{ j.state.reason }}{% endif %}</td>
         <td>{{ j.done }} {{ t.of }} {{ j.total }} {{ t.done }} {{ j.failed }} {{ t.failed }} {{ j.bytes | filesizeformat }}</td>
         <td>
           {% for op in ["start", "cancel", "remove"] %}
@@ -60,6 +60,7 @@
           {% endfor %}
         </td>
       </tr>
+      {% if j.history | length > 0 %}<tr><td colspan="6"><details><summary>{{ t.history }} ({{ j.history | length }})</summary><ul class="section-sub">{% for e in j.history | reverse %}{% set ek = "hamster_st_" ~ e.state %}<li><span data-unix="{{ e.at }}"></span> {{ t[ek] }}{% if e.reason %}: {{ e.reason }}{% endif %}</li>{% endfor %}</ul></details></td></tr>{% endif %}
       {% endfor %}
     </table>
     {% else %}<p class="section-sub">{{ t.no_jobs_yet }}</p>{% endif %}

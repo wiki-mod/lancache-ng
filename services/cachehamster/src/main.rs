@@ -88,6 +88,36 @@ struct Job {
     done: u64,
     failed: u64,
     total: u64,
+    // What: every state change with its time.
+    // Why: shows what happened and if a rerun is due.
+    // From: Issue #871 | PR #1980
+    #[serde(default)]
+    history: Vec<Event>,
+}
+
+// What: one history line: unix time and the new state.
+// Why: the page lists them per job.
+// From: Issue #871 | PR #1980
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct Event {
+    at: u64,
+    #[serde(flatten)]
+    state: State,
+}
+
+impl Job {
+    // What: set the state; log it if it changed.
+    // Why: one place keeps state and history in step.
+    // From: Issue #871 | PR #1980
+    fn set(&mut self, state: State) {
+        if self.state != state || self.history.is_empty() {
+            self.history.push(Event {
+                at: clock::unix_secs(),
+                state: state.clone(),
+            });
+        }
+        self.state = state;
+    }
 }
 
 // What: an inbox entry written by a command.
@@ -575,19 +605,23 @@ fn apply_order(jobs: &mut Vec<Job>, order: Order) {
                 done: 0,
                 failed: 0,
                 total,
+                history: vec![Event {
+                    at: clock::unix_secs(),
+                    state: State::Waiting,
+                }],
             });
         }
         Order::Start { id } => {
             for j in jobs.iter_mut().filter(|j| j.id == id) {
                 j.when = When::Now;
                 if j.state != State::Running {
-                    j.state = State::Waiting;
+                    j.set(State::Waiting);
                 }
             }
         }
         Order::Cancel { id } => {
             for j in jobs.iter_mut().filter(|j| j.id == id) {
-                j.state = State::Cancelled;
+                j.set(State::Cancelled);
             }
         }
         Order::Remove { id } => jobs.retain(|j| j.id != id || j.state == State::Running),
@@ -1375,7 +1409,7 @@ impl Runner {
                     .await
                     .unwrap_or_else(|e| State::Failed(format!("task: {e}")));
                 if let Some(j) = list.iter_mut().find(|j| j.id == id) {
-                    j.state = state;
+                    j.set(state);
                 }
             }
         }
@@ -1383,13 +1417,15 @@ impl Runner {
         let logged_in = c.path(TOKEN_FILE).exists();
         for j in list.iter_mut().filter(|j| is_due(j, now)) {
             if matches!(j.target, Target::SteamApp(_)) && !logged_in {
-                j.state = State::Blocked("Steam login missing; scan the QR code first".into());
+                j.set(State::Blocked(
+                    "Steam login missing; scan the QR code first".into(),
+                ));
                 continue;
             }
             if self.running.len() >= self.queues {
                 break;
             }
-            j.state = State::Running;
+            j.set(State::Running);
             (j.done, j.failed, j.bytes) = (0, 0, 0);
             let (jobs, id, rate) = (Arc::clone(&self.jobs), j.id.clone(), Arc::clone(&self.rate));
             let task = match &j.target {
@@ -1436,7 +1472,7 @@ async fn daemon(c: Ctx) -> Result<(), String> {
     // What: a restart leaves no job in Running.
     // Why: the task that ran it is gone.
     for j in list.iter_mut().filter(|j| j.state == State::Running) {
-        j.state = State::Waiting;
+        j.set(State::Waiting);
     }
     let mut runner = Runner {
         client,
