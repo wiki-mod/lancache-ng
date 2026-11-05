@@ -1112,17 +1112,15 @@ async fn secondary_health(s: &Settings, address: &str) -> Value {
     }
 }
 
-// What: on a secondary, flush caches on change.
-// Why: after AXFR old answers must go at once.
-// From: Issue #1683 | PR #1858
+// What: flush recursor caches when a serial moves.
+// Why: UI, DDNS, AXFR and rollback all bump it.
+// From: Issue #1683 | PR #1980
 async fn flush_on_transfer(app: Arc<App>) {
     let mut seen: BTreeMap<String, u32> = BTreeMap::new();
     loop {
         let s = app.settings();
         let wait = s.uint("UI_FLUSH_CHECK_SECONDS").unwrap_or(1).max(1);
-        if s.text("DNS_REPLICATION_ROLE").as_deref() == Ok("secondary")
-            && let Err(e) = flush_round(&s, &mut seen).await
-        {
+        if let Err(e) = flush_round(&s, &mut seen).await {
             eprintln!("ui: cache flush: {e}");
         }
         tokio::time::sleep(Duration::from_secs(wait)).await;
@@ -1132,7 +1130,7 @@ async fn flush_on_transfer(app: Arc<App>) {
 // What: clears recursor cache for changed zones.
 // Why: recursors would serve old answers until TTL.
 async fn flush_round(s: &Settings, seen: &mut BTreeMap<String, u32>) -> Result<(), String> {
-    let key = secrets(s)?.pdns_api_key;
+    let key = secrets(s)?.recursor_api_key;
     let client = http::client(s)?;
     for zone in pdns_api(s)?.zones().await? {
         let before = seen.insert(zone.name.clone(), zone.serial);

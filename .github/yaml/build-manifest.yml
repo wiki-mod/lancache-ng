@@ -916,7 +916,7 @@ runtime:
     - RECURSOR_HTTPS_API_PORT=@PDNS_HTTPS_API_PORT@
     - SNMPD_CONF_FILE=@CONFIG_DIR@/services/snmpd.conf
     - SYSLOG_CONF_FILE=@CONFIG_DIR@/services/syslog-ng.conf
-    - RECURSOR_API_URLS=http://@LOOPBACK_BIND_IP@:@PDNS_HTTP_API_PORT@ http://@LOOPBACK_BIND_IP@:@PDNS_HTTPS_API_PORT@
+    - RECURSOR_API_URLS=http://@DNS_SERVICE@:@PDNS_HTTP_API_PORT@/api/v1/servers/localhost http://@DNS_SERVICE@:@PDNS_HTTPS_API_PORT@/api/v1/servers/localhost
     - REPO_URL=https://github.com/wiki-mod/lancache-ng
     - SECRETS_DIR=@LANCACHE_SHARED_SECRET_DIR@
     - SETUP_SCRIPT_URL=https://raw.githubusercontent.com/wiki-mod/lancache-ng/master/setup.sh
