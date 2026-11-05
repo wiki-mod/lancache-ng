@@ -938,7 +938,8 @@ fn owner_keep() -> fs::Owner {
 fn registration_token(s: &Settings) -> Result<String, String> {
     let dir = PathBuf::from(s.text("SECRETS_DIR")?);
     let name = "SECONDARY_REGISTRATION_TOKEN";
-    secret::resolve(None, &dir, name, owner_keep()).map_err(|e| e.to_string())
+    secret::resolve(process_env(name).as_deref(), &dir, name, owner_keep())
+        .map_err(|e| e.to_string())
 }
 
 // What: secondaries as (name, address).
