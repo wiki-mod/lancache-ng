@@ -3771,13 +3771,11 @@ pub mod kea {
             self.command("config-get", None).await
         }
 
-        // What: apply and save a new config.
-        // Why: config-set applies; config-write saves.
-        // From: Issue #1683 | PR #1858
+        // What: apply a new config to the running Kea.
+        // Why: dhcp mounts the file read-only; the ui saves.
+        // From: Issue #1683 | PR #1980
         pub async fn set_config(&self, config: Value) -> Result<(), String> {
-            self.command("config-set", Some(config)).await?;
-            self.command("config-write", Some(json!({}))).await?;
-            Ok(())
+            self.command("config-set", Some(config)).await.map(drop)
         }
 
         // What: all IPv4 leases.
