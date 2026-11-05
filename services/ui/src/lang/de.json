@@ -314,7 +314,7 @@
   "statistics": "Statistiken",
   "stats_container_source": "Container {x}. Werte von Docker und vom Dienst, alle {y} s.",
   "stats_machine": "Maschine",
-  "stats_machine_source": "Ganze Maschine (snmpd auf {x}), alle {y} s.",
+  "stats_machine_source": "Ganze Maschine, alle {y} s.",
   "status_answering_on": "Status: antwortet auf",
   "status_no_answer_from": "Status: keine Antwort von",
   "stay_protected_by_the_fixed_fields": "bleiben über die festen Felder oben geschützt.",

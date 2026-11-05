@@ -314,7 +314,7 @@
   "statistics": "Statistics",
   "stats_container_source": "Container {x}. Values from Docker and the service, every {y} s.",
   "stats_machine": "Machine",
-  "stats_machine_source": "Whole machine (snmpd on {x}), every {y} s.",
+  "stats_machine_source": "Whole machine, every {y} s.",
   "status_answering_on": "Status: answering on",
   "status_no_answer_from": "Status: no answer from",
   "stay_protected_by_the_fixed_fields": "stay protected by the fixed fields above.",

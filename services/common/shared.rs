@@ -1376,6 +1376,9 @@ pub mod cert {
     // Why: renew before expiry, not after.
     // From: Issue #1683 | PR #1858
     pub fn valid_for(crt: &Path, within: u64) -> Result<bool, String> {
+        if !crt.is_file() {
+            return Err("file missing".into());
+        }
         Command::new("openssl")
             .args(["x509", "-noout", "-checkend", &within.to_string(), "-in"])
             .arg(crt)

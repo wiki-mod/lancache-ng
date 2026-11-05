@@ -126,6 +126,10 @@ services:
       - &mount-secrets shared-secrets:${SOT_LANCACHE_SHARED_SECRET_DIR}
       - &mount-ui-data-ro ui-data:${SOT_UI_DATA_DIR}:ro
       - watchdog-status:${SOT_STATUS_DIR}
+      # What: stack CA, read only, for the expiry check.
+      # Why: WATCHDOG_CERT_FILES names it; it was missing.
+      # From: Issue #1683 | PR #1980
+      - ${CA_DIR:?CA_DIR is required}:${SOT_NGINX_DIR}/${SOT_NGINX_SUBDIR_CA}:ro
       - proxy-cache:${SOT_CACHE_DIR}
       - ${SYSLOG_NG_LOG_DIR:?SYSLOG_NG_LOG_DIR is required}:${SOT_SYSLOG_LOG_ROOT}
       - retention-state:${SOT_RETENTION_STATE_DIR}
