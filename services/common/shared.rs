@@ -2908,6 +2908,7 @@ pub mod nginx_conf {
         cidrs: Vec<String>,
         lo: String,
         refuse: String,
+        refuse_relay: String,
         origin: String,
         acl: String,
         timeouts: String,
@@ -2931,6 +2932,7 @@ pub mod nginx_conf {
             strict,
             cidrs: s.list("PROXY_ALLOWED_CLIENT_CIDRS"),
             refuse: at("NGINX_DISCARD_PORT")?,
+            refuse_relay: at("NGINX_REFUSE_RELAY_PORT")?,
             origin: format!(
                 "$ssl_preread_server_name:{}",
                 s.uint("NGINX_ORIGIN_HTTPS_PORT")?
@@ -2983,11 +2985,11 @@ pub mod nginx_conf {
         out.push_str("    proxy_pass $stream_backend;\n");
         out.push_str(&p.timeouts);
         out.push_str("}\n");
-        // What: the refuse target closes at once.
+        // What: the refuse target sends a TLS alert.
         // Why: live: a closed port logged [error].
         // From: Issue #1683 | PR #1980
         out.push_str(&format!(
-            "\nserver {{\n    listen {};\n    ssl_preread on;\n    return \"\";\n}}\n",
+            "\nserver {{\n    listen {} ssl;\n    ssl_reject_handshake on;\n}}\n",
             p.refuse
         ));
         out
@@ -3030,7 +3032,7 @@ pub mod nginx_conf {
 
     fn dispatch_file(p: &Plan, h: &Hosts) -> String {
         let mut out = format!("{HEAD}map $ssl_preread_server_name $https_dispatch_backend {{\n");
-        map_row(&mut out, "\"\"", &p.refuse);
+        map_row(&mut out, "\"\"", &p.refuse_relay);
         for r in &h.roots {
             map_row(&mut out, r, &p.mitm_relay);
             if !h.root_wild.contains(r) {
@@ -3047,7 +3049,11 @@ pub mod nginx_conf {
             map_row(&mut out, &ends_with_re(b, true), &p.mitm_relay);
             map_row(&mut out, &ends_with_re(b, false), &p.pass_relay);
         }
-        let fallback = if p.strict { &p.refuse } else { &p.pass_relay };
+        let fallback = if p.strict {
+            &p.refuse_relay
+        } else {
+            &p.pass_relay
+        };
         out.push_str(&format!("    default {fallback};\n}}\n\nserver {{\n"));
         out.push_str(&format!("    listen {0};\n    listen [::]:{0};\n", p.https));
         out.push_str(&format!("    include {};\n    ssl_preread on;\n", p.acl));
@@ -3062,6 +3068,13 @@ pub mod nginx_conf {
         out.push('\n');
         let to_origin = format!("    ssl_preread on;\n    proxy_pass {};\n", p.origin);
         out.push_str(&relay_server(p, &p.pass_relay, &to_origin));
+        // What: refuse target of the dispatch, with PROXY.
+        // Why: a TLS alert instead of a reset and [error].
+        // From: Issue #1683 | PR #1980
+        out.push_str(&format!(
+            "\nserver {{\n    listen {} ssl proxy_protocol;\n    ssl_reject_handshake on;\n}}\n",
+            p.refuse_relay
+        ));
         out
     }
 

@@ -813,6 +813,7 @@ runtime:
     - NGINX_HEALTHZ_BODY=ok
     - NGINX_PSL_FILE=public_suffix_list.dat
     - NGINX_DISCARD_PORT=9
+    - NGINX_REFUSE_RELAY_PORT=9447
     - NGINX_STREAM_TARGETS_FILE=stream.d/00-stream-targets.conf
     - NGINX_HTTPS_MAP_FILE=conf.d/00-https-map.conf
     - NGINX_HTTPS_DISPATCH_FILE=stream.d/01-https-dispatch.conf
@@ -1135,6 +1136,7 @@ runtime:
     - NGINX_HTTPS_LISTEN_FILE=text;;;reload;proxy
     - NGINX_PSL_FILE=text;;;reload;proxy
     - NGINX_DISCARD_PORT=uint;1;65535;reload;proxy
+    - NGINX_REFUSE_RELAY_PORT=uint;1;65535;reload;proxy
     - NGINX_STREAM_TARGETS_FILE=text;;;reload;proxy
     - NGINX_HTTPS_MAP_FILE=text;;;reload;proxy
     - NGINX_HTTPS_DISPATCH_FILE=text;;;reload;proxy
