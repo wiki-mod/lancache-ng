@@ -653,6 +653,11 @@ fn newest_lines(root: &Path, programs: &[String], max: usize, chunk: u64) -> Vec
     all.into_iter()
         .map(|(p, l)| {
             let (stamp, text) = l.split_once(' ').unwrap_or(("", l.as_str()));
+            // What: drop "host program: " before the message.
+            // Why: the page shows the program in its own column.
+            // From: Issue #1683 | PR #1980
+            let lead = format!(" {p}: ");
+            let text = text.split_once(lead.as_str()).map_or(text, |(_, m)| m);
             json!({"host": p, "timestamp": stamp, "message": text})
         })
         .collect()

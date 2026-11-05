@@ -990,7 +990,7 @@ runtime:
     - 'SYSLOG_LINE_TEMPLATE=${ISODATE} ${HOST} ${PROGRAM}: ${MSG}\n'
     - SYSLOG_MUTED=
     - SYSLOG_PRIMARY=
-    - SYSLOG_PROGRAMS=nginx pdns pdns_recursor kea-dhcp4 dnsmasq lancache-ui lancache-watchdog lancache-cachehamster chronyd snmpd
+    - SYSLOG_PROGRAMS=@CONTAINER_NAME_PROXY@ @CONTAINER_NAME_DNS@ @CONTAINER_NAME_DHCP@ @CONTAINER_NAME_UI@ @CONTAINER_NAME_SERVICES@
     - UI_CONTROLLABLE_SERVICES=proxy dns dhcp services
     - DHCP_MODES=off kea dnsmasq-proxy dnsmasq-relay
     - UI_LANG_DEFAULT=de
