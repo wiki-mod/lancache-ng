@@ -350,6 +350,10 @@ services:
       # Why: Fund 148: runtime files, no image rebuild.
       # From: Issue #1683 | PR #1858
       - ../../services/ui/src/templates:${SOT_TEMPLATE_DIR}:ro
+      # What: the host's network counters, read only.
+      # Why: Machine network without the dhcp container.
+      # From: Issue #1683 | PR #1980
+      - ${SOT_HOST_NET_DEV_SOURCE}:${SOT_HOST_NET_DEV_FILE}:ro
     # What: Admin UI on UI_BIND_IP, default IP_HTTP.
     # Why: UI_BIND_IP narrows the LAN exposure of the UI.
     # From: Issue #1683 | PR #1912

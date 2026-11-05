@@ -1741,7 +1741,7 @@ async fn stats(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     let mut tabs = vec![json!({
         "id": lancache_ng::rrd::MACHINE,
         "label": "Machine",
-        "source": format!("Whole box (all containers together). Load, memory, CPU, disk: snmpd on {snmp}. Network: host interfaces, read in the dhcp container (host network). The ui asks every {step} s."),
+        "source": format!("Whole box (all containers together). Load, memory, CPU, disk: snmpd on {snmp}. Network: host interfaces, the ui reads the host counters directly. The ui asks every {step} s."),
     })];
     for c in s.list("STATS_CONTAINERS") {
         tabs.push(json!({
@@ -1901,12 +1901,12 @@ async fn service_values(app: &App, s: &Settings, want: &[String]) -> BTreeMap<St
         }
     }
 
-    // What: host network bytes from /proc/net/dev.
-    // Why: dhcp runs in the host network; Docker has none.
+    // What: host network bytes from the host's net/dev.
+    // Why: live test 05.11.: via dhcp it was empty when off.
     // From: Issue #1683 | PR #1980
     if has("host")
-        && let Ok(svc) = s.text("DHCP_SERVICE")
-        && let Ok((0, text)) = exec_in(app, s, &svc, &["cat", "/proc/net/dev"]).await
+        && let Ok(file) = s.text("HOST_NET_DEV_FILE")
+        && let Ok(text) = std::fs::read_to_string(&file)
     {
         let skip = s.list("STATS_HOST_IF_SKIP");
         let (mut rx, mut tx) = (0u64, 0u64);
