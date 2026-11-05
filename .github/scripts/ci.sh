@@ -14130,6 +14130,15 @@ _ci_rh_reap_trivy() {
     return "${rc}"
 }
 
+# What: used KiB (field 3, row 2) of df -P output $1.
+# Why: one owner for both cleanup reads; no awk (Fund 136).
+# From: Issue #1683 | PR #1858
+_ci_df_used() {
+    local used
+    { read -r _; read -r _ _ used _; } <<< "$1"
+    printf '%s\n' "${used}"
+}
+
 # What: the cleanup run: reap, prune, measure before/after.
 # Why: AG-CI-016: measure, clean, re-measure, verify.
 # From: Issue #1255 | PR #1349
@@ -14147,7 +14156,7 @@ _ci_rh_cleanup_run() {
     printf '=== %s runner-host cleanup start ===\n--- disk usage before cleanup ---\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     before="$(_ci_capture 0 df -P "${disk}")" || return 2
     printf '%s\n' "${before}"
-    before="$(_ci_capture 0 awk "NR == 2 { print \$3 }" <<<"${before}")" || return 2
+    before="$(_ci_df_used "${before}")"
     _ci_rh_reap_containers build-tools image "${bt_match}" "${bt_hours}" || rc=2
     _ci_rh_reap_containers validation project "${prefix}" "${val_hours}" || rc=2
     _ci_rh_reap_networks "${prefix}" "$(( val_hours * 3600 ))" || rc=2
@@ -14162,7 +14171,7 @@ _ci_rh_cleanup_run() {
     _ci_rh_prune_volumes || rc=2
     after="$(_ci_capture 0 df -P "${disk}")" || return 2
     printf -- '--- disk usage after cleanup ---\n%s\n' "${after}"
-    after="$(_ci_capture 0 awk "NR == 2 { print \$3 }" <<<"${after}")" || return 2
+    after="$(_ci_df_used "${after}")"
     kb=$(( before - after ))
     printf 'reclaimed: %s KiB (%s MiB) on %s\n=== %s runner-host cleanup done rc=%s ===\n' "${kb}" "$(( kb / 1024 ))" "${disk}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${rc}"
     return "${rc}"
