@@ -17024,27 +17024,32 @@ _ci_check_stable_external_images() {
 # Why: one parser for PR-body sections (template, close).
 # From: Issue #1683 | PR #1858
 _ci_pr_section() {
-    local text="$1" heading="$2" out
+    local text="$1" h="## $2" line trim count=0 found=0 fence=0 body=""
+    local sec_fence_re='^ {0,3}(```|~~~)' sec_head_re=$'^#+([ \t]|$)'
     # What: a heading outside code fences ends the section.
     # Why: a fenced or a level-3 heading must not bleed.
     # From: Issue #1496 | PR #1858
-    if ! out="$(awk -v h="## ${heading}" '
-        { sub(/\r$/, "") }
-        /^(   |  | )?(```|~~~)/ { fence = !fence; if (found == 1) print; next }
-        !fence && match($0, /^#+([ \t]|$)/) && RLENGTH <= 7 {
-            line = $0; sub(/[ \t]+$/, "", line)
-            if (line == h) { count++; if (found == 0) { found = 1; next } }
-            if (found == 1) found = 2
-            next
-        }
-        found == 1 { print }
-        END { printf "%d\n", count }
-    ' <<< "${text}" 2>&1)"; then
-        ci_error "[CI-ERROR-CHECK-0143]" "heading=\"${heading}\" reason=\"PR body section parse failed\"" "${out}"
-        return 2
-    fi
-    printf '%s\n' "${out##*$'\n'}"
-    [ "${out}" = "${out##*$'\n'}" ] || printf '%s\n' "${out%$'\n'*}"
+    while IFS= read -r line; do
+        line="${line%$'\r'}"
+        if [[ "${line}" =~ ${sec_fence_re} ]]; then
+            fence=$((1 - fence))
+            if [ "${found}" -eq 1 ]; then body+="${line}"$'\n'; fi
+            continue
+        fi
+        if [ "${fence}" -eq 0 ] && [[ "${line}" =~ ${sec_head_re} ]] \
+            && [ "${#BASH_REMATCH[0]}" -le 7 ]; then
+            trim="${line}"
+            while [[ "${trim}" == *[$' \t'] ]]; do trim="${trim%?}"; done
+            if [ "${trim}" = "${h}" ]; then
+                count=$((count + 1))
+                if [ "${found}" -eq 0 ]; then found=1; continue; fi
+            fi
+            if [ "${found}" -eq 1 ]; then found=2; fi
+            continue
+        fi
+        if [ "${found}" -eq 1 ]; then body+="${line}"$'\n'; fi
+    done <<< "${text}"
+    printf '%d\n%s' "${count}" "${body}"
 }
 
 # What: Drop HTML comments from Markdown text.
