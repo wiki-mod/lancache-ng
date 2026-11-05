@@ -9650,6 +9650,7 @@ _ci_release_pr_batch() {
 # From: Issue #894 | PR #1858
 _ci_release_render() {
     local rows="$1" labels cat title skip other section pr num url text body
+    local line out buf seen
     labels="$(_ci_block_keys release_notes_categories)" || return 2
     _ci_block_entry_fields release_notes "" skip_label skip other_title other pr_section section || return 2
     if [ -z "${labels}" ] || [ -z "${other}" ] || [ -z "${section}" ]; then
@@ -9676,7 +9677,15 @@ _ci_release_render() {
         body="$(_ci_pr_section "${body}" "${section}")" || return 2
         if [ "${body}" = "${body%%$'\n'*}" ]; then body=""; else body="${body#*$'\n'}"; fi
         body="$(_ci_md_strip_comments "${body}")" || return 2
-        body="$(_ci_capture 0 awk "NF { seen = 1 } seen { buf = buf \$0 \"\\n\"; if (NF) { out = out buf; buf = \"\" } } END { printf \"%s\", out }" <<< "${body}")" || return 2
+        out="" buf="" seen=0
+        while IFS= read -r line; do
+            if [[ "${line}" == *[!$' \t']* ]]; then
+                seen=1 out+="${buf}${line}"$'\n' buf=""
+            elif [ "${seen}" -eq 1 ]; then
+                buf+="${line}"$'\n'
+            fi
+        done <<< "${body}"
+        body="${out%$'\n'}"
         [ -n "${group[${cat}]+x}" ] || order+=("${cat}")
         group["${cat}"]+="- #${num} ${title} (${url})"$'\n'
         [ -z "${body}" ] || group["${cat}"]+="  ${body//$'\n'/$'\n'  }"$'\n'
