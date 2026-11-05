@@ -2121,7 +2121,7 @@ async fn zones_at_start(app: Arc<App>) {
                 eprintln!("ui: start: zones ready");
                 return;
             }
-            Err(e) => eprintln!("ui: start: {e}"),
+            Err(e) => eprintln!("ui: start: zones wait for dns: {e}"),
         }
         tokio::time::sleep(Duration::from_secs(wait)).await;
     }
