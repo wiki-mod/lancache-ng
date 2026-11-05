@@ -12256,9 +12256,6 @@ _ci_validate_rm_run() {
         docker rm -f "$1"
 }
 
-# What: Kea rollback leg on its own run containers.
-# Why: dhcp is host-mode, so up never starts a Kea.
-# From: Issue #763 | PR #1858
 # What: Kea mode file and OpenRC state, for evidence.
 # Why: a silent mode-off start shows no service lines.
 # From: Issue #1683 | PR #1980
@@ -12270,6 +12267,9 @@ _ci_validate_kea_state() {
     docker exec "$1" rc-status -a 2>&1
 }
 
+# What: Kea rollback leg on its own run containers.
+# Why: dhcp is host-mode, so up never starts a Kea.
+# From: Issue #763 | PR #1858
 _ci_validate_kea_rollback() {
     local project="$1" net="$2" pin="$3" kname uname kip kport tail_lines rc=0 dsvc usvc
     dsvc="$(_ci_validation_service dhcp)" || return 2
