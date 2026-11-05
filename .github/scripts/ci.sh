@@ -2930,12 +2930,30 @@ _ci_norm_grammar() {
     fi
 }
 
-# What: the first <<word line $2 opens, into var $1.
+# What: the <<word at the start of $1 into hd_w, hd_t, hd_k.
+# Why: hd_t 1 for <<-, hd_k chars it takes; one word rule.
+# From: Issue #1683 | PR #1858
+_ci_heredoc_at() {
+    local ha_x ha_re
+    [ "${1:0:2}" = "<<" ] || return 1
+    [ "${1:0:3}" != "<<<" ] || return 1
+    printf -v ha_x %b "\\134\\134\\047\\042"
+    ha_re="^-?[[:space:]]*[${ha_x}]?[A-Za-z_][A-Za-z0-9_]*[${ha_x:2}]?"
+    [[ "${1:2}" =~ ${ha_re} ]] || return 1
+    hd_w="${BASH_REMATCH[0]}"
+    hd_k=$((2 + ${#hd_w}))
+    hd_t=0
+    [ "${hd_w:0:1}" != - ] || hd_t=1
+    hd_w="${hd_w#-}"
+    hd_w="${hd_w#"${hd_w%%[![:space:]]*}"}"
+    hd_w="${hd_w//[${ha_x}]/}"
+}
+
+# What: first <<word of line $2 into var $1; tab flag to $3.
 # Why: <<< and a word that is no name open no heredoc.
 # From: Issue #1683 | PR #1858
 _ci_heredoc_word() {
-    local hw_rest="$2" hw_pre hw_w
-    local hw_re="^-?[[:space:]]*[\\\\'\"]?[A-Za-z_][A-Za-z0-9_]*['\"]?"
+    local hw_rest="$2" hw_pre hd_w hd_t hd_k
     while [[ "${hw_rest}" == *"<<"* ]]; do
         hw_pre="${hw_rest%%<<*}"
         hw_rest="${hw_rest:${#hw_pre}}"
@@ -2943,12 +2961,11 @@ _ci_heredoc_word() {
             hw_rest="${hw_rest:3}"
             continue
         fi
-        if [[ "${hw_rest:2}" =~ ${hw_re} ]]; then
-            hw_w="${BASH_REMATCH[0]#-}"
-            hw_w="${hw_w#"${hw_w%%[![:space:]]*}"}"
-            hw_w="${hw_w//\\/}"
-            hw_w="${hw_w//\'/}"
-            printf -v "$1" '%s' "${hw_w//\"/}"
+        if _ci_heredoc_at "${hw_rest}"; then
+            printf -v "$1" '%s' "${hd_w}"
+            if [ -n "${3:-}" ]; then
+                printf -v "$3" '%s' "${hd_t}"
+            fi
             return 0
         fi
         hw_rest="${hw_rest:1}"
@@ -2956,8 +2973,8 @@ _ci_heredoc_word() {
     return 1
 }
 
-# What: awk hd_word/hd_scan: the word a << opens.
-# Why: _ci_heredoc_word rule, for the 2 awk readers left.
+# What: awk hd_word: chars of a <<word at s (0: none).
+# Why: _ci_heredoc_at rule, for the awk reader left.
 # From: Issue #1683 | PR #1858
 _CI_AWK_HEREDOC_WORD="$(cat <<'PROG'
     # What: chars of a <<word at s (0: none); sets hdw, hdt.
@@ -2970,128 +2987,248 @@ _CI_AWK_HEREDOC_WORD="$(cat <<'PROG'
         sub(/^-?[[:space:]]*/, "", w); gsub(/[\\\047"]/, "", w); hdw = w
         return 2 + RLENGTH
     }
-    # What: 1 if line l opens a heredoc; first word in hdw.
-    # Why: Dockerfile lines are read without quote state.
-    # From: Issue #1683 | PR #1858
-    function hd_scan(l,  i, n) {
-        n = length(l)
-        for (i = 1; i <= n; i++) {
-            if (substr(l, i, 3) == "<<<") { i += 2; continue }
-            if (hd_word(substr(l, i))) return 1
-        }
-        return 0
-    }
 PROG
 )"
 
-# What: awk v1 normalizer; b=1 reads one file per blob.
-# Why: A3: one awk for all blobs of a listing; one program.
+# What: lex shell line $1 into the nv_ state of _ci_norm_v1.
+# Why: quotes, $( ), ticks and << words cross the lines.
 # From: Issue #1683 | PR #1858
-_CI_AWK_NORM_V1="$(cat <<'PROG'
-        # What: batch: a new blob file; g from its name.
-        # Why: each blob starts with fresh lexer state.
-        # From: Issue #1683 | PR #1858
-        function start(f,  n, p) {
-            cur = f; n = split(f, p, "/"); g = p[n]; sub(/\..*/, "", g)
-            outf = f; sub(/\.in$/, ".out", outf)
-            q = ""; hd = ""; tab = 0; past = 0; subst = 0; ticks = 0; bad = 0
-            dead = 0; pend = 0; seen = 0; v = 0
-        }
-        # What: rc c ends one text; batch marks the blob.
-        # Why: one blob in doubt keeps raw, not the batch.
-        # From: Issue #1683 | PR #1858
-        function stop(c) { if (!b) exit c; if (!dead) v = c; dead = 1 }
-        # What: print a line; batch drops trailing blanks.
-        # Why: as $( ) strips them for one text (same id).
-        # From: Issue #1683 | PR #1858
-        function emit(s) {
-            if (!b) { print s; return }
-            if (s == "") { pend++; return }
-            for (; pend > 0; pend--) print "" > outf
-            print s > outf; seen = 1
-        }
-        # What: batch: verdict line "file TAB rc" per blob.
-        # Why: the caller hashes rc 0, keeps raw for rc 1.
-        # From: Issue #1683 | PR #1858
-        function finish() {
-            if (!dead && (q != "" || hd != "")) v = 1
-            if (!seen) print "" > outf
-            close(outf)
-            print cur "\t" v
-        }
-        function lex(l,   i, n, c, k) {
-            n = length(l)
-            for (i = 1; i <= n; i++) {
-                c = substr(l, i, 1)
-                if (q == "s") { if (c == "\047") q = ""; continue }
-                if (q != "" && c == "\\") { i++; continue }
-                if (q == "a") { if (c == "\047") q = ""; continue }
-                if (c == "`") { ticks++; if (q == "d") bad = 1 }
-                if (substr(l, i, 2) == "$(") { if (q == "d") { subst++; bad = 1 } i++; continue }
-                if (c == ")" && subst) subst--
-                if (q == "d") { if (c == "\"") q = ""; continue }
-                if (c == "\\") { i++; continue }
-                if (c == "\047") { q = (i > 1 && substr(l, i - 1, 1) == "$") ? "a" : "s"; continue }
-                if (c == "\"") { q = "d"; continue }
-                if (c == "#" && (i == 1 || substr(l, i - 1, 1) ~ /[[:space:];|&()]/)) return
-                if (substr(l, i, 3) == "<<<") { i += 2; continue }
-                if ((k = hd_word(substr(l, i)))) { hd = hdw; tab = hdt; i += k - 1 }
-            }
-        }
-        b && FNR == 1 { if (cur != "") finish(); start(FILENAME) }
-        dead { next }
-        { sub(/\r$/, "") }
-        hd != "" {
-            t = $0
-            if (tab) sub(/^\t+/, "", t)
-            emit($0)
-            if (t == hd) hd = ""
-            next
-        }
-        g == "dockerfile" {
-            k = $0
-            if (!past && sub(/^#[[:space:]]*/, "", k) && sub(/[[:space:]]*=.*/, "", k) \
-                && tolower(k) ~ /^(syntax|escape|check)$/) { emit($0); next }
-            past = 1
-            if ($0 ~ /^[[:space:]]*(#|$)/) next
-            if (hd_scan($0)) { hd = hdw; tab = hdt }
-            emit($0)
-            next
-        }
-        g == "shell" {
-            if (FNR == 1 && $0 ~ /^#!/) { emit($0); next }
-            if (q == "" && $0 ~ /^[[:space:]]*#[[:space:]]*shellcheck[[:space:]]/) { emit($0); next }
-            if (q == "" && $0 ~ /^[[:space:]]*(#|$)/) next
-            lex($0)
-            if (subst || ticks % 2 || (bad && q != "")) { stop(1); next }
-            subst = 0; ticks = 0; bad = 0
-            emit($0)
-            next
-        }
-        g == "toml" {
-            if ($0 ~ /"""|\047\047\047/) { stop(1); next }
-            if ($0 ~ /^[[:space:]]*(#|$)/) next
-            emit($0)
-            next
-        }
-        { stop(3); next }
-        END {
-            if (b) { if (cur != "") finish(); exit 0 }
-            if (q != "" || hd != "") exit 1
-        }
-PROG
-)"
+_ci_norm_lex() {
+    local l="$1" n="${#1}" i=0 c p hd_w hd_t hd_k
+    while [ "${i}" -lt "${n}" ]; do
+        # What: skip to a char that can change state.
+        # Why: a loop over every char is too slow.
+        p="${l:i}"
+        p="${p%%["${nv_set}"]*}"
+        i=$((i + ${#p}))
+        [ "${i}" -lt "${n}" ] || break
+        c="${l:i:1}"
+        if [ "${nv_q}" = s ]; then
+            [ "${c}" != "${nv_sq}" ] || nv_q=""
+            i=$((i + 1))
+            continue
+        fi
+        if [ -n "${nv_q}" ] && [ "${c}" = "${nv_bs}" ]; then
+            i=$((i + 2))
+            continue
+        fi
+        if [ "${nv_q}" = a ]; then
+            [ "${c}" != "${nv_sq}" ] || nv_q=""
+            i=$((i + 1))
+            continue
+        fi
+        if [ "${c}" = "${nv_bt}" ]; then
+            nv_ticks=$((nv_ticks + 1))
+            [ "${nv_q}" != d ] || nv_bad=1
+        fi
+        if [ "${l:i:2}" = "\$(" ]; then
+            if [ "${nv_q}" = d ]; then
+                nv_subst=$((nv_subst + 1))
+                nv_bad=1
+            fi
+            i=$((i + 2))
+            continue
+        fi
+        if [ "${c}" = ")" ] && [ "${nv_subst}" != 0 ]; then
+            nv_subst=$((nv_subst - 1))
+        fi
+        if [ "${nv_q}" = d ]; then
+            [ "${c}" != "${nv_dq}" ] || nv_q=""
+            i=$((i + 1))
+            continue
+        fi
+        if [ "${c}" = "${nv_bs}" ]; then
+            i=$((i + 2))
+            continue
+        fi
+        if [ "${c}" = "${nv_sq}" ]; then
+            nv_q=s
+            if [ "${i}" -gt 0 ] && [ "${l:i-1:1}" = "\$" ]; then
+                nv_q=a
+            fi
+            i=$((i + 1))
+            continue
+        fi
+        if [ "${c}" = "${nv_dq}" ]; then
+            nv_q=d
+            i=$((i + 1))
+            continue
+        fi
+        # What: # first or after blank or ;|&() ends it.
+        # Why: the rest of the line is a comment then.
+        if [ "${c}" = "#" ]; then
+            [ "${i}" -gt 0 ] || break
+            case "${l:i-1:1}" in
+                [[:space:]\;\|\&\(\)]) break ;;
+            esac
+        fi
+        if [ "${l:i:3}" = "<<<" ]; then
+            i=$((i + 3))
+            continue
+        fi
+        if [ "${l:i:2}" = "<<" ] && _ci_heredoc_at "${l:i}"; then
+            nv_hd="${hd_w}"
+            nv_tab="${hd_t}"
+            i=$((i + hd_k))
+            continue
+        fi
+        i=$((i + 1))
+    done
+}
+
+# What: rc 0 if line $1 is blank or a # comment line.
+# Why: the v1 form drops such lines (A12.5, Test B/C).
+# From: Issue #1683 | PR #1858
+_ci_norm_skip() {
+    local s="${1#"${1%%[![:space:]]*}"}"
+    [ -z "${s}" ] || [ "${s:0:1}" = "#" ]
+}
+
+# What: v1 form of lines nv_in by grammar $1 into nv_out.
+# Why: rc 1 keeps raw, rc 3 no grammar; nv_last cuts blanks.
+# From: Issue #1683 | PR #1858
+_ci_norm_v1() {
+    local l t k nv_rc=0 nv_fnr=0 nv_past=0 nv_q="" nv_hd="" nv_tab=0
+    local nv_subst=0 nv_ticks=0 nv_bad=0 nv_sq nv_dq nv_bs nv_bt nv_ht nv_cr
+    local nv_set
+    local nv_sc='^[[:space:]]*#[[:space:]]*shellcheck[[:space:]]'
+    printf -v nv_sq %b "\\047"
+    printf -v nv_dq %b "\\042"
+    printf -v nv_bs %b "\\134"
+    printf -v nv_bt %b "\\140"
+    printf -v nv_ht %b "\\011"
+    printf -v nv_cr %b "\\015"
+    nv_set="${nv_sq}${nv_bs}${nv_bt}${nv_dq}\$)#<"
+    nv_out=()
+    for l in "${nv_in[@]}"; do
+        nv_fnr=$((nv_fnr + 1))
+        l="${l%"${nv_cr}"}"
+        # What: heredoc lines stay up to the word.
+        # Why: <<- strips leading tabs before the end test.
+        if [ -n "${nv_hd}" ]; then
+            t="${l}"
+            [ "${nv_tab}" = 0 ] || t="${t#"${t%%[!"${nv_ht}"]*}"}"
+            nv_out+=("${l}")
+            [ "${t}" != "${nv_hd}" ] || nv_hd=""
+            continue
+        fi
+        case "$1" in
+            dockerfile)
+                # What: a parser directive first.
+                # Why: no comment; it changes the build.
+                if [ "${nv_past}" = 0 ] && [ "${l:0:1}" = "#" ] && [[ "${l}" == *=* ]]; then
+                    k="${l:1}"
+                    k="${k#"${k%%[![:space:]]*}"}"
+                    k="${k%%=*}"
+                    k="${k%"${k##*[![:space:]]}"}"
+                    case "${k,,}" in
+                        syntax | escape | check)
+                            nv_out+=("${l}")
+                            continue
+                            ;;
+                    esac
+                fi
+                nv_past=1
+                ! _ci_norm_skip "${l}" || continue
+                if ! _ci_heredoc_word nv_hd "${l}" nv_tab; then
+                    nv_hd=""
+                fi
+                nv_out+=("${l}")
+                ;;
+            shell)
+                if [ "${nv_fnr}" = 1 ] && [ "${l:0:2}" = "#!" ]; then
+                    nv_out+=("${l}")
+                    continue
+                fi
+                if [ -z "${nv_q}" ]; then
+                    if [[ "${l}" =~ ${nv_sc} ]]; then
+                        nv_out+=("${l}")
+                        continue
+                    fi
+                    ! _ci_norm_skip "${l}" || continue
+                fi
+                _ci_norm_lex "${l}"
+                # What: open $( ), odd ticks or nesting.
+                # Why: the lexer is not sure then: keep raw.
+                if [ "${nv_subst}" != 0 ] || [ "$((nv_ticks % 2))" = 1 ]; then
+                    nv_rc=1
+                    break
+                fi
+                if [ "${nv_bad}" = 1 ] && [ -n "${nv_q}" ]; then
+                    nv_rc=1
+                    break
+                fi
+                nv_subst=0
+                nv_ticks=0
+                nv_bad=0
+                nv_out+=("${l}")
+                ;;
+            toml)
+                if [[ "${l}" == *"${nv_dq}${nv_dq}${nv_dq}"* ]] || [[ "${l}" == *"${nv_sq}${nv_sq}${nv_sq}"* ]]; then
+                    nv_rc=1
+                    break
+                fi
+                ! _ci_norm_skip "${l}" || continue
+                nv_out+=("${l}")
+                ;;
+            *)
+                nv_rc=3
+                break
+                ;;
+        esac
+    done
+    if [ "${nv_rc}" = 0 ] && [ -n "${nv_q}${nv_hd}" ]; then
+        nv_rc=1
+    fi
+    nv_last="${#nv_out[@]}"
+    while [ "${nv_last}" -gt 0 ] && [ -z "${nv_out[nv_last - 1]}" ]; do
+        nv_last=$((nv_last - 1))
+    done
+    return "${nv_rc}"
+}
+
+# What: v1 form of blob files $@ to .out; "file TAB rc".
+# Why: A3: one pass for all blobs of a listing.
+# From: Issue #1683 | PR #1858
+_ci_norm_files() {
+    local f g nv_last nv_rc
+    local -a nv_in nv_out
+    for f in "$@"; do
+        mapfile -t nv_in < "${f}" || return 2
+        # What: a file with no line gets no verdict line.
+        # Why: the caller then fails on the blob (0027).
+        [ "${#nv_in[@]}" -gt 0 ] || continue
+        g="${f##*/}"
+        g="${g%%.*}"
+        nv_rc=0
+        _ci_norm_v1 "${g}" || nv_rc=$?
+        if [ "${nv_last}" -gt 0 ]; then
+            printf '%s\n' "${nv_out[@]:0:nv_last}" > "${f%.in}.out" || return 2
+        else
+            printf '\n' > "${f%.in}.out" || return 2
+        fi
+        printf '%s\t%s\n' "${f}" "${nv_rc}"
+    done
+}
 
 # What: v1 form of $2 in grammar $1; rc 1 = unsafe, use raw.
 # Why: string and heredoc lines stay; any doubt keeps raw.
 # From: Issue #1683 | PR #1858
 _ci_norm_content() {
-    local out rc=0
+    local out="" rc=0 nv_last nv_nl=$'\n'
+    local -a nv_in nv_out
     if [ "$1" = rust ]; then
         _ci_rust_norm "$2" keep
         return "$?"
     fi
-    out="$(awk -v g="$1" "${_CI_AWK_HEREDOC_WORD}${_CI_AWK_NORM_V1}" <<< "$2" 2>&1)" || rc=$?
+    mapfile -t nv_in <<< "$2"
+    _ci_norm_v1 "$1" || rc=$?
+    # What: no trailing blank lines, as $( ) gave before.
+    # Why: the same text keeps the same id.
+    if [ "${nv_last}" -gt 0 ]; then
+        printf -v out '%s\n' "${nv_out[@]:0:nv_last}"
+        out="${out%"${nv_nl}"}"
+    fi
     _ci_awk_verdict "[CI-ERROR-IDENTITY-0008]" "grammar=\"$1\" rc=${rc} reason=\"v1 normalizer failed\"" "${rc}" "${out}"
 }
 
@@ -3310,7 +3447,7 @@ _ci_content_id_prefill() {
         [ -n "${line}" ] || continue
         ins+=("${line}.in")
     done <<< "${blist}"
-    out="$(cd -- "${dir}" && _ci_capture 0 awk -v b=1 "${_CI_AWK_HEREDOC_WORD}${_CI_AWK_NORM_V1}" "${ins[@]}")" || return 2
+    out="$(cd -- "${dir}" && _ci_capture 0 _ci_norm_files "${ins[@]}")" || return 2
     while IFS=$'\t' read -r f v; do
         [ -n "${f}" ] || continue
         case "${v}" in
