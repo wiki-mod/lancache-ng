@@ -2308,146 +2308,384 @@ ci_cmd_plan_matrix() {
 # IDENTITY ENGINE
 # =========================================================
 
-# What: Rust item records (TSV); refs: code, {name} only.
+# What: identifiers of $2, first seen order, into var $1.
+# Why: refs and attach lists name each identifier once.
+# From: Issue #1683 | PR #1858
+_ci_rust_idents() {
+    local ri_s="${2//[^A-Za-z0-9_]/ }" ri_t ri_o=""
+    local -a ri_w
+    local -A ri_seen=()
+    read -r -a ri_w <<< "${ri_s}"
+    for ri_t in "${ri_w[@]}"; do
+        if [[ "${ri_t}" =~ ^[0-9]+ ]]; then
+            ri_t="${ri_t:${#BASH_REMATCH[0]}}"
+        fi
+        [ -n "${ri_t}" ] || continue
+        [ -z "${ri_seen["k${ri_t}"]-}" ] || continue
+        ri_seen["k${ri_t}"]=1
+        ri_o+="${ri_o:+ }${ri_t}"
+    done
+    printf -v "$1" '%s' "${ri_o}"
+}
+
+# What: {name} captures of string literal $2 into var $1.
+# Why: format strings name the items they use.
+# From: Issue #1683 | PR #1858
+_ci_rust_caps() {
+    local rc_s="${2//\{\{/}" rc_o=" " rc_m rc_re='\{([A-Za-z_][A-Za-z0-9_]*)'
+    while [[ "${rc_s}" =~ ${rc_re} ]]; do
+        rc_o+="${BASH_REMATCH[1]} "
+        rc_m="${BASH_REMATCH[0]}"
+        rc_s="${rc_s#*"${rc_m}"}"
+    done
+    printf -v "$1" '%s' "${rc_o}"
+}
+
+# What: rc 0 when item text $1 at depth 0 ends an item.
+# Why: const, static, let, type and use end at a semicolon.
+# From: Issue #1683 | PR #1858
+_ci_rust_top() {
+    local rt_s="$1" rt_o="" rt_m rt_pre rt_re='#!?\[[^]]*\]'
+    local rt_fn='(^| )fn( |$)' rt_kw='(^| )(const|static|let|type|use)( |$)'
+    # What: drop #[..] blocks, then cut at the first {.
+    # Why: attributes before the { are not the head.
+    while [[ "${rt_s}" =~ ${rt_re} ]]; do
+        rt_m="${BASH_REMATCH[0]}"
+        rt_pre="${rt_s%%"${rt_m}"*}"
+        rt_o+="${rt_pre}"
+        if [[ "${rt_pre}" == *"{"* ]]; then
+            rt_s=""
+            break
+        fi
+        rt_s="${rt_s#*"${rt_m}"}"
+    done
+    rt_o+="${rt_s}"
+    rt_o="${rt_o%%\{*}"
+    if [[ "${rt_o}" =~ ${rt_fn} ]] || [[ ! "${rt_o}" =~ ${rt_kw} ]]; then
+        return 0
+    fi
+    return 1
+}
+
+# What: item row of text $1, code $2, $3 both: test column.
+# Why: kind, name, attach, refs and text of one item.
+# From: Issue #1683 | PR #1858
+_ci_rust_row() {
+    local t="$1" h at="" tst="" s m head kind=header name="" attach=""
+    local refs rest ch d k bs re_nb='^[^][]*' re_pub='pub\([^)]*\)'
+    local re_mod='(^| )mod '
+    local re_mac='(^| )macro_rules! *[A-Za-z_][A-Za-z0-9_]*' re_impl='(^| )impl( |<|$)'
+    local re_fn='(^| )(fn|struct|enum|union|trait|type|mod|static|const) +(mut +)?[A-Za-z_][A-Za-z0-9_]*'
+    local -a w
+    printf -v bs %b "\\134"
+    t="${t#"${t%%[! ]*}"}"
+    t="${t%"${t##*[! ]}"}"
+    if [ -z "${t}" ]; then
+        return 0
+    fi
+    h="${t}"
+    # What: leading #[..] and #![..], brackets nested.
+    # Why: cfg(test) or #[test] there marks a test item.
+    while [[ "${h}" == "#["* ]] || [[ "${h}" == "#!["* ]]; do
+        rest="${h}"
+        d=0
+        k=0
+        while [[ "${rest}" =~ ${re_nb} ]]; do
+            k=$((k + ${#BASH_REMATCH[0]}))
+            rest="${rest:${#BASH_REMATCH[0]}}"
+            [ -n "${rest}" ] || break
+            ch="${rest:0:1}"
+            rest="${rest:1}"
+            k=$((k + 1))
+            if [ "${ch}" = "[" ]; then
+                d=$((d + 1))
+            else
+                d=$((d - 1))
+                [ "${d}" != 0 ] || break
+            fi
+        done
+        at+="${h:0:k}"
+        h="${rest#"${rest%%[! ]*}"}"
+    done
+    if [[ "${at}" == *"cfg(test)"* ]] || [[ "${at}" == *"#[test]"* ]]; then
+        tst=t
+    fi
+    # What: pub(..) is pub, the head ends at a brace,
+    # semicolon, equals sign or parenthesis.
+    # Why: one pass, as one gsub left to right.
+    s="${h}"
+    head=""
+    while [[ "${s}" =~ ${re_pub} ]]; do
+        m="${BASH_REMATCH[0]}"
+        head+="${s%%"${m}"*}pub"
+        s="${s#*"${m}"}"
+    done
+    head+="${s}"
+    head="${head%%[\{;=\(]*}"
+    if [[ "${head}" =~ ${re_mac} ]]; then
+        kind=item
+        name="${BASH_REMATCH[0]##*macro_rules!}"
+        name="${name#"${name%%[! ]*}"}"
+    elif [[ "${head}" =~ ${re_impl} ]]; then
+        kind=impl
+        if [[ "${head}" == *" impl"* ]]; then
+            s="${head##*" impl"}"
+        else
+            s="${head#impl}"
+        fi
+        _ci_rust_idents attach "${s}"
+    elif [[ "${head}" =~ ${re_fn} ]]; then
+        read -r -a w <<< "${BASH_REMATCH[0]}"
+        name="${w[${#w[@]} - 1]}"
+        kind=item
+        if [[ "${head}" =~ ${re_mod} ]] && [[ "${t}" == *";" ]]; then
+            kind=header
+        fi
+    fi
+    _ci_rust_idents refs "$2"
+    t="${t//"${bs}"/"${bs}${bs}"}"
+    t="${t//$'\n'/"${bs}n"}"
+    t="${t//$'\t'/"${bs}t"}"
+    if [ "$3" = both ]; then
+        t+=$'\t'"${tst}"
+    fi
+    printf '%s\t%s\t%s\t%s\t%s\n' "${kind}" "${name}" "${attach}" "${refs}" "${t}"
+}
+
+# What: Rust item rows (TSV) of text $1, refs: code, {name}.
 # Why: one Rust lexer for norm, build id and lib closure.
 # From: Issue #1683 | PR #1912
-_CI_AWK_RUST_ITEMS="$(cat <<'PROG'
-function flush(   h, kind, name, attach, t, refs, seen, w, n, i, a, tst) {
-    t = cur; r = code
-    sub(/^ +/, "", t); sub(/ +$/, "", t)
-    cur = ""; code = ""; hdr = ""; need_semi = 0
-    if (t == "") return
-    h = t
-    attrs = ""
-    while (h ~ /^#!?\[/) {
-        n = length(h); d = 0
-        for (i = 1; i <= n; i++) {
-            c = substr(h, i, 1)
-            if (c == "[") d++
-            else if (c == "]") { d--; if (d == 0) break }
-        }
-        attrs = attrs substr(h, 1, i)
-        h = substr(h, i + 1); sub(/^ +/, "", h)
-    }
-    tst = (attrs ~ /cfg\(test\)/ || attrs ~ /#\[test\]/)
-    head = h; gsub(/pub\([^)]*\)/, "pub", head)
-    sub(/[{;=(].*$/, "", head)
-    kind = "header"; name = ""; attach = ""
-    if (match(head, /(^| )macro_rules! *[A-Za-z_][A-Za-z0-9_]*/)) {
-        kind = "item"; name = substr(head, RSTART, RLENGTH); sub(/.*macro_rules! */, "", name)
-    } else if (head ~ /(^| )impl( |<|$)/) {
-        kind = "impl"
-        a = head; sub(/.*(^| )impl/, "", a)
-        attach = idents(a)
-    } else if (match(head, /(^| )(fn|struct|enum|union|trait|type|mod|static|const) +(mut +)?[A-Za-z_][A-Za-z0-9_]*/)) {
-        name = substr(head, RSTART, RLENGTH)
-        sub(/^ /, "", name); n = split(name, w, " "); name = w[n]
-        kind = (head ~ /(^| )mod / && t ~ /;$/) ? "header" : "item"
-    }
-    refs = idents(r)
-    gsub(/\\/, "\\\\", t); gsub(/\n/, "\\n", t); gsub(/\t/, "\\t", t)
-    # What: tests=both adds column 6: t on a test item.
-    # Why: A3: one parse serves the keep and drop views.
-    # From: Issue #1683 | PR #1858
-    if (tests == "both") t = t "\t" (tst ? "t" : "")
-    printf "%s\t%s\t%s\t%s\t%s\n", kind, name, attach, refs, t
+_ci_rust_lex() {
+    local LC_ALL=C
+    local rx_b rx_c rx_q rx_w rx_t rx_k=0 rx_n rx_p rx_len rx_j rx_h=0
+    local rx_st=code rx_dep=0 rx_pd=0 rx_bd=0 rx_end=""
+    local rx_cur="" rx_cl="" rx_code="" rx_lit=""
+    local rx_ws=$'^[ \t\r\n]+' rx_id='^[A-Za-z0-9_]+'
+    local rx_bs rx_dq rx_sq rx_sr rx_rr rx_br='^[^/*]+' rx_wsc=$' \t\r\n'
+    local -a rx_lines
+    printf -v rx_bs %b "\\134"
+    printf -v rx_dq %b "\\042"
+    printf -v rx_sq %b "\\047"
+    rx_sr="^[^${rx_dq}${rx_bs}]+"
+    rx_rr="^[^${rx_dq}]+"
+    mapfile -t rx_lines <<< "$1"
+    rx_n="${#rx_lines[@]}"
+    while [ "${rx_k}" -lt "${rx_n}" ]; do
+        rx_b="${rx_lines[rx_k]}"$'\n'
+        rx_k=$((rx_k + 1))
+        rx_p=0
+        rx_len="${#rx_b}"
+        while [ "${rx_p}" -lt "${rx_len}" ]; do
+            rx_c="${rx_b:rx_p:1}"
+            # What: in a comment, string or raw string.
+            # Why: a run of plain bytes moves in one step.
+            case "${rx_st}" in
+                block)
+                    rx_q="${rx_b:rx_p+1:1}"
+                    if [ "${rx_c}" = / ] && [ "${rx_q}" = "*" ]; then
+                        rx_bd=$((rx_bd + 1))
+                        rx_p=$((rx_p + 2))
+                    elif [ "${rx_c}" = "*" ] && [ "${rx_q}" = / ]; then
+                        rx_bd=$((rx_bd - 1))
+                        rx_p=$((rx_p + 2))
+                        if [ "${rx_bd}" = 0 ]; then
+                            rx_st=code
+                            rx_code+=" "
+                            if [ -n "${rx_cl}" ] && [ "${rx_cl}" != " " ]; then
+                                rx_cur+=" "
+                                rx_cl=" "
+                            fi
+                        fi
+                    elif [[ "${rx_b:rx_p}" =~ ${rx_br} ]]; then
+                        rx_p=$((rx_p + ${#BASH_REMATCH[0]}))
+                    else
+                        rx_p=$((rx_p + 1))
+                    fi
+                    continue
+                    ;;
+                str | raw)
+                    if [ "${rx_st}" = str ]; then
+                        rx_q="${rx_sr}"
+                    else
+                        rx_q="${rx_rr}"
+                    fi
+                    if [[ "${rx_b:rx_p}" =~ ${rx_q} ]]; then
+                        rx_w="${BASH_REMATCH[0]}"
+                        rx_cur+="${rx_w}"
+                        rx_lit+="${rx_w}"
+                        rx_cl="${rx_w: -1}"
+                        rx_p=$((rx_p + ${#rx_w}))
+                        continue
+                    fi
+                    rx_cur+="${rx_c}"
+                    rx_lit+="${rx_c}"
+                    rx_cl="${rx_c}"
+                    rx_p=$((rx_p + 1))
+                    if [ "${rx_st}" = str ] && [ "${rx_c}" = "${rx_bs}" ]; then
+                        rx_c="${rx_b:rx_p:1}"
+                        rx_cur+="${rx_c}"
+                        rx_lit+="${rx_c}"
+                        rx_cl="${rx_c}"
+                        rx_p=$((rx_p + 1))
+                        continue
+                    fi
+                    if [ "${rx_st}" = raw ]; then
+                        [ "${rx_b:rx_p:rx_h}" = "${rx_end}" ] || continue
+                        rx_cur+="${rx_end}"
+                        [ "${rx_h}" = 0 ] || rx_cl="#"
+                        rx_p=$((rx_p + rx_h))
+                    fi
+                    rx_st=code
+                    _ci_rust_caps rx_t "${rx_lit}"
+                    rx_code+="${rx_t}"
+                    continue
+                    ;;
+            esac
+            case "${rx_c}" in
+                /)
+                    rx_q="${rx_b:rx_p+1:1}"
+                    if [ "${rx_q}" = / ]; then
+                        # What: a line comment ends at LF.
+                        rx_w="${rx_b:rx_p+2}"
+                        rx_w="${rx_w%%$'\n'*}"
+                        rx_p=$((rx_p + 3 + ${#rx_w}))
+                        rx_code+=" "
+                        if [ -n "${rx_cl}" ] && [ "${rx_cl}" != " " ]; then
+                            rx_cur+=" "
+                            rx_cl=" "
+                        fi
+                        continue
+                    fi
+                    if [ "${rx_q}" = "*" ]; then
+                        rx_st=block
+                        rx_bd=1
+                        rx_p=$((rx_p + 2))
+                        continue
+                    fi
+                    ;;
+                r | b)
+                    # What: raw r, r# or br after non-words.
+                    # Why: ends at a quote and its # count.
+                    rx_q=" "
+                    [ "${rx_p}" = 0 ] || rx_q="${rx_b:rx_p-1:1}"
+                    if { [ "${rx_c}" = r ] || [ "${rx_b:rx_p+1:1}" = r ]; } &&
+                        [[ "${rx_q}" != [A-Za-z0-9_] ]]; then
+                        rx_j=$((rx_p + 1))
+                        [ "${rx_c}" = r ] || rx_j=$((rx_p + 2))
+                        rx_h=0
+                        while [ "${rx_b:rx_j:1}" = "#" ]; do
+                            rx_h=$((rx_h + 1))
+                            rx_j=$((rx_j + 1))
+                        done
+                        if [ "${rx_b:rx_j:1}" = "${rx_dq}" ]; then
+                            rx_end="${rx_b:rx_j-rx_h:rx_h}"
+                            rx_cur+="${rx_b:rx_p:rx_j-rx_p+1}"
+                            rx_cl="${rx_dq}"
+                            rx_p=$((rx_j + 1))
+                            rx_st=raw
+                            rx_lit=""
+                            continue
+                        fi
+                    fi
+                    ;;
+                [${rx_dq}])
+                    rx_cur+="${rx_dq}"
+                    rx_cl="${rx_dq}"
+                    rx_st=str
+                    rx_lit=""
+                    rx_p=$((rx_p + 1))
+                    continue
+                    ;;
+                [${rx_sq}])
+                    # What: quote, backslash: to a quote.
+                    # Why: a char is 3 bytes, or a lifetime.
+                    if [ "${rx_b:rx_p+1:1}" = "${rx_bs}" ]; then
+                        rx_w="${rx_b:rx_p+2}"
+                        while [[ "${rx_w}" != *"${rx_sq}"* ]] && [ "${rx_k}" -lt "${rx_n}" ]; do
+                            rx_b+="${rx_lines[rx_k]}"$'\n'
+                            rx_k=$((rx_k + 1))
+                            rx_w="${rx_b:rx_p+2}"
+                        done
+                        rx_len="${#rx_b}"
+                        rx_w="${rx_w%%"${rx_sq}"*}"
+                        rx_j=$((rx_p + 2 + ${#rx_w}))
+                        rx_w="${rx_b:rx_p:rx_j-rx_p+1}"
+                        rx_cur+="${rx_w}"
+                        rx_cl="${rx_w: -1}"
+                        rx_p=$((rx_j + 1))
+                        continue
+                    fi
+                    if [ $((rx_p + 2)) -ge "${rx_len}" ] && [ "${rx_k}" -lt "${rx_n}" ]; then
+                        rx_b+="${rx_lines[rx_k]}"$'\n'
+                        rx_k=$((rx_k + 1))
+                        rx_len="${#rx_b}"
+                    fi
+                    if [ "${rx_b:rx_p+2:1}" = "${rx_sq}" ]; then
+                        rx_cur+="${rx_b:rx_p:3}"
+                        rx_p=$((rx_p + 3))
+                    else
+                        rx_cur+="${rx_sq}"
+                        rx_p=$((rx_p + 1))
+                    fi
+                    rx_cl="${rx_sq}"
+                    continue
+                    ;;
+                [${rx_wsc}])
+                    if [[ "${rx_b:rx_p}" =~ ${rx_ws} ]]; then
+                        rx_p=$((rx_p + ${#BASH_REMATCH[0]}))
+                    fi
+                    rx_code+=" "
+                    if [ -n "${rx_cl}" ] && [ "${rx_cl}" != " " ]; then
+                        rx_cur+=" "
+                        rx_cl=" "
+                    fi
+                    continue
+                    ;;
+            esac
+            if [[ "${rx_c}" == [A-Za-z0-9_] ]] && [[ "${rx_b:rx_p}" =~ ${rx_id} ]]; then
+                rx_w="${BASH_REMATCH[0]}"
+                rx_cur+="${rx_w}"
+                rx_code+="${rx_w}"
+                rx_cl="${rx_w: -1}"
+                rx_p=$((rx_p + ${#rx_w}))
+                continue
+            fi
+            # What: other bytes, a semicolon at depth 0 or
+            # a closing brace ends an item.
+            rx_cur+="${rx_c}"
+            rx_code+="${rx_c}"
+            rx_cl="${rx_c}"
+            rx_p=$((rx_p + 1))
+            case "${rx_c}" in
+                \( | \[) rx_pd=$((rx_pd + 1)) ;;
+                \) | \]) rx_pd=$((rx_pd - 1)) ;;
+                \{) rx_dep=$((rx_dep + 1)) ;;
+                \})
+                    rx_dep=$((rx_dep - 1))
+                    [ "${rx_dep}" = 0 ] || continue
+                    _ci_rust_top "${rx_cur}" || continue
+                    _ci_rust_row "${rx_cur}" "${rx_code}" "$2" || return 2
+                    rx_cur=""
+                    rx_code=""
+                    rx_cl=""
+                    ;;
+                \;)
+                    [ "${rx_dep}" = 0 ] || continue
+                    [ "${rx_pd}" = 0 ] || continue
+                    _ci_rust_row "${rx_cur}" "${rx_code}" "$2" || return 2
+                    rx_cur=""
+                    rx_code=""
+                    rx_cl=""
+                    ;;
+            esac
+        done
+    done
+    # What: open string, comment or brace: no item.
+    if [ "${rx_st}" != code ] || [ "${rx_dep}" != 0 ]; then
+        return 1
+    fi
+    _ci_rust_row "${rx_cur}" "${rx_code}" "$2" || return 2
 }
-# What: identifiers of s, first seen order, by one split.
-# Why: match+substr copied the rest per word (1.2 s ui).
-# From: Issue #1683 | PR #1858
-function idents(s,   out, seen, tok, w, n, i) {
-    out = ""
-    n = split(s, w, /[^A-Za-z0-9_]+/)
-    for (i = 1; i <= n; i++) {
-        tok = w[i]; sub(/^[0-9]+/, "", tok)
-        if (tok == "") continue
-        if (!(tok in seen)) { seen[tok] = 1; out = out (out == "" ? "" : " ") tok }
-    }
-    return out
-}
-function emit(c) {
-    code = code " "
-    if (c == " ") { if (cur != "" && substr(cur, length(cur), 1) != " ") cur = cur " "; return }
-    cur = cur c
-}
-function captures(s,   out) {
-    out = " "; gsub(/\{\{/, "", s)
-    while (match(s, /\{[A-Za-z_][A-Za-z0-9_]*/)) {
-        out = out substr(s, RSTART + 1, RLENGTH - 1) " "
-        s = substr(s, RSTART + RLENGTH)
-    }
-    return out
-}
-# What: word, space, string runs and // comments in a step.
-# Why: one regex per run, not per byte (ui 187 -> 111 ms).
-# From: Issue #1683 | PR #1858
-{ src = src $0 "\n"; nl[NR] = length(src) }
-END {
-    n = length(src); st = "code"; depth = 0; cur = ""; bdepth = 0; ln = 1
-    for (i = 1; i <= n; i++) {
-        c = substr(src, i, 1)
-        if (st == "line") { if (c == "\n") { st = "code"; emit(" ") } continue }
-        if (st == "block") {
-            if (c == "/" && substr(src, i + 1, 1) == "*") { bdepth++; i++ }
-            else if (c == "*" && substr(src, i + 1, 1) == "/") { bdepth--; i++; if (bdepth == 0) { st = "code"; emit(" ") } }
-            continue
-        }
-        if (st == "str") {
-            j = match(substr(src, i, 256), /^[^"\\]+/) ? i + RLENGTH : i
-            if (j > i) { w = substr(src, i, j - i); cur = cur w; lit = lit w; i = j - 1; continue }
-            cur = cur c; lit = lit c
-            if (c == "\\") { i++; cur = cur substr(src, i, 1); lit = lit substr(src, i, 1); continue }
-            if (c == "\"") { st = "code"; code = code captures(lit) }
-            continue
-        }
-        if (st == "raw") {
-            j = match(substr(src, i, 256), /^[^"]+/) ? i + RLENGTH : i
-            if (j > i) { w = substr(src, i, j - i); cur = cur w; lit = lit w; i = j - 1; continue }
-            cur = cur c; lit = lit c
-            if (c == "\"" && substr(src, i + 1, hashes) == rawend) { cur = cur rawend; i += hashes; st = "code"; code = code captures(lit) }
-            continue
-        }
-        if (c == "/" && substr(src, i + 1, 1) == "/") { st = "line"; i++; while (nl[ln] <= i) ln++; i = nl[ln] - 1; continue }
-        if (c == "/" && substr(src, i + 1, 1) == "*") { st = "block"; bdepth = 1; i++; continue }
-        p = (i > 1) ? substr(src, i - 1, 1) : " "
-        if ((c == "r" || (c == "b" && substr(src, i + 1, 1) == "r")) && p !~ /[A-Za-z0-9_]/) {
-            j = i + (c == "b" ? 2 : 1); hashes = 0
-            while (substr(src, j, 1) == "#") { hashes++; j++ }
-            if (substr(src, j, 1) == "\"" && (hashes > 0 || c == "r" || c == "b")) {
-                rawend = ""; for (k = 0; k < hashes; k++) rawend = rawend "#"
-                cur = cur substr(src, i, j - i + 1); i = j; st = "raw"; lit = ""; continue
-            }
-        }
-        if (c == "\"") { cur = cur c; st = "str"; lit = ""; continue }
-        if (c == "\047") {
-            if (substr(src, i + 1, 1) == "\\") {
-                j = i + 2
-                while (j <= n && substr(src, j, 1) != "\047") j++
-                cur = cur substr(src, i, j - i + 1); i = j; continue
-            }
-            if (substr(src, i + 2, 1) == "\047") { cur = cur substr(src, i, 3); i += 2; continue }
-            cur = cur c; continue
-        }
-        if (c ~ /[ \t\r\n]/) { if (match(substr(src, i, 256), /^[ \t\r\n]+/)) i += RLENGTH - 1; emit(" "); continue }
-        if (c ~ /[A-Za-z0-9_]/) { match(substr(src, i, 256), /^[A-Za-z0-9_]+/); w = substr(src, i, RLENGTH); cur = cur w; code = code w; i += RLENGTH - 1; continue }
-        cur = cur c; code = code c
-        if (c == "(" || c == "[") pdepth++
-        else if (c == ")" || c == "]") pdepth--
-        if (c == "{") depth++
-        else if (c == "}") {
-            depth--
-            if (depth == 0) {
-                h0 = cur; gsub(/#!?\[[^]]*\]/, "", h0); sub(/[{].*$/, "", h0)
-                if (h0 ~ /(^| )fn( |$)/ || h0 !~ /(^| )(const|static|let|type|use)( |$)/) flush()
-            }
-        } else if (c == ";" && depth == 0 && pdepth == 0) flush()
-    }
-    if ((st != "code" && st != "line") || depth != 0) exit 1
-    flush()
-}
-PROG
-)"
-readonly _CI_AWK_RUST_ITEMS
 
 # What: library items reached from a service's refs.
 # Why: an unreached item cannot change its artifact (64.4).
@@ -2650,7 +2888,7 @@ _ci_awk_verdict() {
 # From: Issue #1683 | PR #1912
 _ci_rust_items() {
     local out rc=0
-    out="$(awk -v tests="$2" "${_CI_AWK_RUST_ITEMS}" <<< "$1" 2>&1)" || rc=$?
+    out="$(_ci_rust_lex "$1" "$2" 2>&1)" || rc=$?
     _ci_awk_verdict "[CI-ERROR-IDENTITY-0010]" "rc=${rc} reason=\"rust item reader failed\"" "${rc}" "${out}"
 }
 
@@ -3193,7 +3431,7 @@ ci_cmd_rust_memo() {
     local mode="${1:-}" dir sha tree key rc=0
     [ -n "$(_ci_env_required RUNNER_TEMP)" ] || return 2
     dir="$(_ci_rust_memo_dir)"
-    sha="$(_ci_sha256_hex <<< "${_CI_AWK_RUST_ITEMS}")" || return 2
+    sha="$(_ci_sha256_hex <<< "$(declare -f _ci_rust_idents _ci_rust_caps _ci_rust_top _ci_rust_row _ci_rust_lex)")" || return 2
     tree="$(_ci_capture 0 git -C "${CI_REPO_ROOT}" rev-parse 'HEAD^{tree}')" || return 2
     key="rust-items-${sha}-${tree}"
     case "${mode}" in
