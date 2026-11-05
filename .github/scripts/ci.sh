@@ -10645,12 +10645,13 @@ _ci_gc_ref_reap() {
     esac
 }
 
-# What: delete green refs of closed PRs, ended locks.
+# What: green refs of closed PRs, ended locks, dead marks.
 # Why: nothing else deletes them; dry-run only lists.
 # From: Issue #1683 | PR #1858
 ci_cmd_gc_refs() {
     local mode remote prefix repo refs sha ref n state holder rc keep=0 del=0 deleted=0
-    local build_lock promote_lock
+    local build_lock promote_lock kind marks svc plat dig out auth=""
+    local -A mark_subj=()
     _ci_gc_mode GC-0036 gc-refs "$@" || return 2
     mode="${REPLY}"
     remote="$(_ci_git_remote)" || return 2
@@ -10715,6 +10716,53 @@ ci_cmd_gc_refs() {
                     return 2
                     ;;
             esac
+        done <<< "${refs}"
+    done
+    # What: verified and scanned marks of a gone image.
+    # Why: gc frees the digest first; its mark is dead.
+    # From: Issue #1683 | PR #1858
+    for kind in CI_VERIFIED_REF CI_SCANNED_REF; do
+        prefix="$(_ci_variable "${kind}")" || return 2
+        refs="$(_ci_capture 0 git ls-remote --refs "${remote}" "${prefix}/*")" || return 2
+        [ -n "${refs}" ] || continue
+        marks="$(_ci_marks "${kind}")" || return 2
+        [ -n "${auth}" ] || { _ci_require_ghcr_auth || return 2; auth=1; }
+        mark_subj=()
+        while IFS=$'\t' read -r ref out; do
+            [ -z "${ref}" ] || mark_subj["${ref}"]="${out}"
+        done <<< "${marks#*$'\n'}"
+        while IFS=$'\t' read -r sha ref; do
+            [ -n "${ref}" ] || continue
+            svc="" plat="" dig=""
+            read -r _ svc plat dig _ <<< "${mark_subj["${ref}"]:-}"
+            if [ -z "${dig}" ]; then
+                ci_log "[CI-ERROR-GC-0046]" "ref=\"${ref}\" reason=\"mark has no subject; neither kept nor deleted\""
+                return 2
+            fi
+            state=gone
+            if [ "${ref}" != "${prefix}/${svc}-${plat//\//-}-${dig#sha256:}" ]; then
+                state=old_format
+            else
+                rc=0; out="$(_ci_registry_probe "$(_ci_image_ref "${svc}" "${dig}")")" || rc=$?
+                case "${rc}" in
+                    0) state=present ;;
+                    1) ;;
+                    *)
+                        ci_error "[CI-ERROR-GC-0047]" "ref=\"${ref}\" digest=\"${dig}\" reason=\"image state unknown; neither kept nor deleted\"" "${out}"
+                        return 2
+                        ;;
+                esac
+            fi
+            if [ "${state}" = present ]; then
+                keep=$((keep + 1))
+                printf 'gc-refs ref=%s state=present action=KEEP\n' "${ref}"
+                continue
+            fi
+            del=$((del + 1))
+            printf 'gc-refs ref=%s state=%s action=DELETE mode=%s\n' "${ref}" "${state}" "${mode}"
+            [ "${mode}" = apply ] || continue
+            _ci_gc_ref_reap "${remote}" "${ref}" "${sha}" || return 2
+            deleted=$((deleted + 1))
         done <<< "${refs}"
     done
     printf 'gc-refs result=classified keep=%s delete=%s deleted=%s mode=%s\n' "${keep}" "${del}" "${deleted}" "${mode}"
