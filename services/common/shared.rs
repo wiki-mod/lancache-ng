@@ -2586,7 +2586,7 @@ pub mod kea_conf {
             s.text("DHCP_RANGE_START")?,
             s.text("DHCP_RANGE_END")?
         );
-        // What: the last rendered LAN domain, from its suffix.
+        // What: the LAN domain of the last render.
         // Why: kept subnets follow a changed DHCP_DOMAIN.
         // From: Issue #1683 | PR #1980
         let before = existing
