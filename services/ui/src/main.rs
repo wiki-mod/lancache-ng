@@ -1775,7 +1775,7 @@ fn add_stats(out: &mut BTreeMap<String, String>, prefix: &str, rows: Vec<(String
 // From: Issue #1683 | PR #1980
 async fn service_values(app: &App, s: &Settings, want: &[String]) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
-    let has = |p: &str| want.iter().any(|w| w.starts_with(&format!("{p}:")));
+    let has = |p: &str| want.iter().any(|w| w.split(':').next() == Some(p));
     if has("nginx")
         && let Some(v) = fetch_proxy_live(s).await
     {
