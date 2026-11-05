@@ -10368,7 +10368,15 @@ _ci_gc_roots() {
     # Why: PRODUCED_UNVERIFIED is pending, not garbage.
     # From: Issue #1683
     if [ "${rc}" -eq 0 ]; then
-        pairs="$(_ci_capture 0 awk -F'\t' "NF>=5 && \$2!=\"\" && \$5!=\"\" {print \$2\"\t\"\$5}" <<< "${blob}")" || return 2
+        local f2 f5
+        while IFS= read -r line; do
+            f2="$(_ci_tab_field "${line}" 2)"
+            f5="$(_ci_tab_field "${line}" 5)"
+            if [ -n "${f2}" ] && [ -n "${f5}" ]; then
+                pairs="${pairs}${f2}"$'\t'"${f5}"$'\n'
+            fi
+        done <<< "${blob}"
+        pairs="${pairs%$'\n'}"
     fi
     local targets targets_rc=0 reltags
     targets="$(ci_build_targets)" || targets_rc=$?
