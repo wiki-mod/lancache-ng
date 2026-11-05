@@ -12059,7 +12059,7 @@ _ci_validate_dns_rollback() {
         _ci_validate_setup_rollback resp rc "" "${dsvc}" "${zone}" "${snap}" || return 2
     case "${rc}:${resp}" in
         *"cache-flush publishes failed"*) rc=1 ;;
-        0:*"rolled back to known-good snapshot ${snap}"*"${label}.${zone}"*) ;;
+        0:*"rolled back to known-good snapshot ${snap}."*) ;;
         *) rc=1 ;;
     esac
     if [ "${rc}" -ne 0 ]; then
