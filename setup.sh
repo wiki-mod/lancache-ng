@@ -3861,7 +3861,7 @@ lancache_channel_ref_pass() {
         ref="${registry}/${prefix}/${slug}:${pointer_channel}"
         if ! digest=$(docker buildx imagetools inspect "$ref" --format '{{.Manifest.Digest}}' 2>&1); then
             # What: a missing image is no network fault.
-            # Why: live: checkout + latest said "check network".
+            # Why: live: it blamed the network.
             # From: Issue #1683 | PR #1980
             [[ "$digest" != *"not found"* ]] \
                 || die "${ref} does not exist: channel '${pointer_channel}' has no '${slug}' image. This checkout may need another channel, e.g. LANCACHE_IMAGE_CHANNEL=${testing} ./setup.sh install."
