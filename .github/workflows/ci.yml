@@ -189,7 +189,7 @@ jobs:
   # Why: ci.sh owns identity, publish, readback lifecycle
   # From: Issue #1683 | PR #1858
   build:
-    name: build ${{ matrix.service }} ${{ matrix.arch }}
+    name: build
     needs: plan
     # What: only pairs that need a platform runner.
     # Why: §70 §71: a verified digest books no runner.
@@ -476,6 +476,7 @@ jobs:
     # From: Issue #1683 | PR #1858
     outputs:
       ran: ${{ steps.pick.outputs.checks == 'true' || steps.meta.outputs.meta == 'true' }}
+      tools: ${{ steps.resolve.outputs.image }}
     steps:
       - *bootstrap
       # What: the build-tools ref that plan also resolves.
@@ -518,6 +519,7 @@ jobs:
         if: ${{ !cancelled() }}
         env:
           CHANGED_FILES: ${{ steps.changed.outputs.file }}
+          CI_CHECKS_TOOLS_IMAGE: ${{ steps.resolve.outputs.image }}
         run: bash .github/scripts/ci.sh checks-plan
       - name: Run the file check set
         if: ${{ !cancelled() && steps.pick.outputs.checks == 'true' }}
@@ -616,7 +618,7 @@ jobs:
         env:
           PR_NUMBER: *pr_number
           PR_IS_FORK: *pr_is_fork
-          CI_PLAN_ANY_BUILD: ${{ needs.plan.outputs.any-build }}
           CI_CHECKS_RESULT: ${{ needs.checks.outputs.ran == 'true' && needs.checks.result || 'skipped' }}
+          CI_CHECKS_TOOLS_IMAGE: ${{ needs.checks.outputs.tools }}
           CI_RUN_IDENTITIES: *run_ids
         run: bash .github/scripts/ci.sh pr-green-mark

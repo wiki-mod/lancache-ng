@@ -31,7 +31,9 @@ image_base:
     - ripgrep
     - rrdtool
     - sed
+    - tzdata
     - util-linux
+    - xz
     - zstd
   # What: smoke runs; a one-word run gets --version.
   # Why: ci.sh _ci_image_smoke adds it; one rule.
@@ -279,6 +281,8 @@ build_toolchain:
       - run-parts
       - rust
       - rust-clippy
+      - rust-src
+      - rustup
       - rustfmt
       - sccache
       - shellcheck

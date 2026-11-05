@@ -448,6 +448,31 @@ _ci_nonblank_lines() {
     done <<< "$1"
 }
 
+# What: non-blank lines, each once, first one kept.
+# Why: one order-keeping dedup owner; no awk (Fund 136).
+# From: Issue #1683 | PR #1858
+_ci_unique_lines() {
+    local line
+    local -A seen=()
+    while IFS= read -r line; do
+        [[ "${line}" =~ [^[:space:]] ]] || continue
+        [ -z "${seen["k${line}"]+x}" ] || continue
+        seen["k${line}"]=1
+        printf '%s\n' "${line}"
+    done <<< "$1"
+}
+
+# What: first KEY=VALUE line of $2 whose key is $1.
+# Why: one key lookup owner; no awk (Fund 136).
+# From: Issue #1683 | PR #1858
+_ci_kv_line() {
+    local line
+    while IFS= read -r line; do
+        [[ "${line}" == *=* ]] || continue
+        [ "${line%%=*}" != "$1" ] || { printf '%s\n' "${line}"; return 0; }
+    done <<< "$2"
+}
+
 # What: field N (from 1) of one tab-separated line.
 # Why: no awk (Fund 136); keeps empty fields unlike read.
 # From: Issue #1683 | PR #1858
@@ -459,6 +484,17 @@ _ci_tab_field() {
         n=$((n - 1))
     done
     printf '%s' "${rest%%$'\t'*}"
+}
+
+# What: first line of $2 whose first tab field is $1.
+# Why: one keyed row owner; no awk (Fund 136).
+# From: Issue #1683 | PR #1858
+_ci_tab_row() {
+    local line
+    while IFS= read -r line; do
+        [ "${line%%$'\t'*}" != "$1" ] || { printf '%s\n' "${line}"; return 0; }
+    done <<< "$2"
+    return 1
 }
 
 # What: line 2 of the text; nothing when it has one line.
@@ -1395,6 +1431,10 @@ _ci_github_get() {
         printf '%s\n' "${out}"
         return 1
     fi
+    # What: the note goes to fd 3, the caller's job log.
+    # Why: _ci_retry keeps stderr in the body; jq broke.
+    # From: Issue #1683 | PR #1858
+    ci_log "[CI-INFO-FETCH-0009]" "url=\"$1\" reason=\"anonymous rate limit; one read with the job token\"" 2>&3
     printf 'Authorization: Bearer %s\n' "${tok}" \
         | _ci_download_curl --fail-with-body -sSL -H 'Accept: application/vnd.github+json' -H @- "$1" 2>&1
 }
@@ -1465,7 +1505,7 @@ _ci_tool_latest() {
     # From: Issue #1683 | PR #1858
     memo="latest-${repo//\//-}.json"
     if ! json="$(_ci_job_memo_get "${memo}")"; then
-        if ! json="$(_ci_retry github-read _ci_github_get "${api}/repos/${repo}/releases/latest")"; then
+        if ! json="$(_ci_retry github-read _ci_github_get "${api}/repos/${repo}/releases/latest" 3>&2)"; then
             ci_error "[CI-ERROR-FETCH-0006]" "repo=\"${repo}\" reason=\"latest release not read\"" "${json}"
             return 2
         fi
@@ -1551,6 +1591,26 @@ _ci_codeql_run() {
         return 2
     fi
     local -x CODEQL_JAVA_HOME="${raw%/bin/java}"
+    # What: the Rust extractor gets rustc's sysroot.
+    # Why: without rustup it found no std; macros failed.
+    # From: Issue #1683 | PR #1858
+    if [ "${lang}" = rust ]; then
+        local sysroot
+        if ! sysroot="$(rustc --print sysroot 2>&1)"; then
+            ci_error "[CI-ERROR-CODEQL-0024]" "language=rust reason=\"rustc --print sysroot failed\"" "${sysroot}"
+            return 2
+        fi
+        local src="${sysroot}/lib/rustlib/src/rust/library"
+        # What: an image without rust-src warns, then runs.
+        # Why: CodeQL uses the nightly build-tools image.
+        # From: Issue #1683 | PR #1858
+        if [ -d "${src}" ]; then
+            local -x CODEQL_EXTRACTOR_RUST_OPTION_SYSROOT="${sysroot}"
+            local -x CODEQL_EXTRACTOR_RUST_OPTION_SYSROOT_SRC="${src}"
+        else
+            ci_log "[CI-WARN-CODEQL-0025]" "language=rust dir=\"${src}\" reason=\"no std source; apk rust-src not in this build-tools image yet\""
+        fi
+    fi
     codeql="$(_ci_codeql_fetch "${work}")" || return 2
     cfg="$(ci_cmd_codeql_config)" || return 2
     if ! raw="$(printf '%s' "${cfg}" 2>&1 > "${work}/config.yml")"; then
@@ -1759,13 +1819,14 @@ _ci_green_ref() {
     printf '%s/pr-%s%s' "${prefix}" "${n}" "${kind:+-${kind}}"
 }
 
-# What: subject of a checks mark: tree and diff base.
-# Why: equal tree and base give equal check results.
+# What: checks mark subject: tree, diff base, tools.
+# Why: new check tools may find new issues in one tree.
 # From: Issue #1683 | PR #1858
 _ci_checks_note() {
-    local tree
+    local tree tools
     tree="$(_ci_capture 0 git -C "${CI_REPO_ROOT}" rev-parse 'HEAD^{tree}')" || return 2
-    printf 'checks-green %s %s' "${tree}" "${BASE_SHA:-}"
+    tools="$(_ci_build_tools_run_image CI_CHECKS_TOOLS_IMAGE)" || return 2
+    printf 'checks-green %s %s %s' "${tree}" "${BASE_SHA:-}" "${tools##*@}"
 }
 
 # What: rc 0 if a green run checked this PR tree.
@@ -2181,6 +2242,19 @@ ci_cmd_plan_matrix() {
     fi
     validate="${any}"
     [ "${promote}" = false ] || validate=true
+    # What: a stack compose or SOT change validates too.
+    # Why: both change how the containers start.
+    # From: Issue #1683 | PR #1858
+    local -a stack=()
+    if [ "${validate}" = false ] && [ "${reuse}" = false ] && [ -z "${CI_RELEASE_TAG:-}" ]; then
+        [ "${sot_changed}" = false ] || validate=true
+        _ci_stack_compose_files stack || return 2
+        for f in "${changed[@]}"; do
+            for t in "${stack[@]}"; do
+                [ "${f}" != "${t}" ] || validate=true
+            done
+        done
+    fi
     local work=false
     if [ "${validate}" = true ] || [ -n "${test_services# }" ] || [ "${rust_audit}" = true ]; then
         work=true
@@ -2626,6 +2700,19 @@ _ci_identity_git() {
     printf '%s' "${out}"
 }
 
+# What: path TAB word $1 (from 1) of "meta TAB path" rows.
+# Why: one reader for diff-tree, ls-files; no awk (136).
+# From: Issue #1683 | PR #1858
+_ci_listing_ids() {
+    local meta path
+    local -a w
+    while IFS=$'\t' read -r meta path; do
+        [ -n "${meta}${path}" ] || continue
+        read -r -a w <<< "${meta}"
+        printf '%s\t%s\n' "${path}" "${w[$1 - 1]:-}"
+    done <<< "$2"
+}
+
 # What: path TAB blob id of tracked files under a root.
 # Why: one listing for content ids and the Rust reader.
 # From: Issue #1683
@@ -2648,10 +2735,10 @@ _ci_tracked_listing() {
     if [ -n "${ref}" ]; then
         empty="$(cd -- "${CI_REPO_ROOT}" && _ci_empty_tree)" || return 2
         raw="$(_ci_identity_git "${root}" "${ref}" diff-tree -r --raw "${empty}" "${ref}" -- "${root}")" || return 2
-        listing="$(_ci_capture 0 awk -F'\t' "NF { split(\$1, a, \" \"); print \$2 \"\\t\" a[4] }" <<< "${raw}")" || return 2
+        listing="$(_ci_listing_ids 4 "${raw}")"
     else
         raw="$(_ci_identity_git "${root}" "" ls-files -s -- "${root}")" || return 2
-        listing="$(_ci_capture 0 awk -F'\t' "NF { split(\$1, a, \" \"); print \$2 \"\\t\" a[2] }" <<< "${raw}")" || return 2
+        listing="$(_ci_listing_ids 2 "${raw}")"
     fi
     listing="$(LC_ALL=C _ci_capture 0 sort <<< "${listing}")" || return 2
     [ -n "${listing}" ] || return 0
@@ -2956,13 +3043,39 @@ _ci_listing_items() {
     fi
 }
 
-# What: generate the workspace lock, once per job.
-# Why: no third-party pin; cargo resolves the latest.
+# What: the workspace lock, once per job; $1 record
+# Why: §17: a refresh run resolves the latest; ids stay
 # From: Issue #1683 | PR #1858
 _ci_cargo_lock() {
-    local lock seen out
+    local write="${1:-}" lock seen out remote rc=0 val="" refresh=0
+    local run="${GITHUB_RUN_ID:-local}"
     lock="$(_ci_repo_path CI_CARGO_LOCK)" || return 2
     if seen="$(_ci_job_memo_get cargo-lock.done)" && [ "${seen}" = "${lock}" ] && [ -s "${lock}" ]; then
+        return 0
+    fi
+    _ci_refresh_event || refresh=$?
+    [ "${refresh}" -le 1 ] || return 2
+    remote="$(_ci_git_remote)" || return 2
+    val="$(_ci_refresh_record cargo-lock)" || rc=$?
+    [ "${rc}" -le 1 ] || return 2
+    # What: reuse the record; a refresh run only its own
+    # Why: plan and builds of one run read one lock
+    # From: Issue #1683 | PR #1858
+    if [ -n "${val}" ] && { [ "${refresh}" -eq 1 ] || [ "${val%% *}" = "${run}" ]; }; then
+        if ! out="$(printf '%s' "${val#* }" | base64 -d 2>&1 > "${lock}")"; then
+            ci_error "[CI-ERROR-RESOLVE-0018]" "path=\"${lock}\" run=\"${val%% *}\" reason=\"recorded lock not decoded\"" "${out}"
+            return 2
+        fi
+        # What: a new workspace dependency still resolves
+        # Why: --workspace moves no locked crate version
+        # From: Issue #1683 | PR #1858
+        if ! out="$(cd "${CI_REPO_ROOT:-.}" && _ci_retry cargo cargo update --workspace 2>&1)"; then
+            ci_error "[CI-ERROR-RESOLVE-0020]" "path=\"${lock}\" reason=\"recorded lock not completed\"" "${out}"
+            return 2
+        fi
+        [ -z "${out}" ] || printf '%s\n' "${out}" >&2
+        ci_log "[CI-INFO-RESOLVE-0017]" "path=\"${lock}\" run=\"${val%% *}\" reason=\"lock of the last refresh run; reuse\""
+        _ci_job_memo_put cargo-lock.done "${lock}"
         return 0
     fi
     if ! out="$(cd "${CI_REPO_ROOT:-.}" && _ci_retry cargo cargo generate-lockfile)"; then
@@ -2970,6 +3083,15 @@ _ci_cargo_lock() {
         return 2
     fi
     [ -z "${out}" ] || printf '%s\n' "${out}" >&2
+    # What: a refresh run's id owner records its lock
+    # Why: §17: the refresh result is read, not redone
+    # From: Issue #1683 | PR #1858
+    if [ "${refresh}" -eq 0 ] && [ "${write}" = record ]; then
+        rc=0
+        val="$(_ci_capture 0 base64 -w0 "${lock}")" || return 2
+        printf 'cargo-lock\t%s %s\n' "${run}" "${val}" | _ci_ledger_upsert "${remote}" CI_REFRESH_REF CI_REFRESH_FILE replace || rc=$?
+        [ "${rc}" -eq 0 ] || ci_log "[CI-WARN-RESOLVE-0019]" "path=\"${lock}\" rc=${rc} reason=\"lock record not written (raw above); later runs resolve anew\""
+    fi
     _ci_job_memo_put cargo-lock.done "${lock}"
 }
 
@@ -3007,7 +3129,7 @@ _ci_rust_content() {
     # What: every ref reads this job's generated lock.
     # Why: a resolved input, like a base image digest.
     # From: Issue #1683 | PR #1858
-    _ci_cargo_lock || return 2
+    _ci_cargo_lock record || return 2
     lockf="$(_ci_repo_path CI_CARGO_LOCK)" || return 2
     pkgs="$(_ci_run "[CI-ERROR-IDENTITY-0011]" "path=\"${lock}\" reason=\"lock closure not read\"" awk -v roots="${crates}" "${_CI_AWK_LOCK_CLOSURE}" "${lockf}")" || return 2
     if [ "${mode}" != text ]; then
@@ -3047,7 +3169,7 @@ _ci_rust_content() {
 _ci_image_base_plus() {
     local field="$1" own="$2" base
     base="$(_ci_block_entry_list image_base "" "${field}")" || return 2
-    _ci_capture 0 awk "NF && !seen[\$0]++" <<< "${base}"$'\n'"${own}"
+    _ci_unique_lines "${base}"$'\n'"${own}"
 }
 
 # What: bootstrap, base, own and build-type apk lists.
@@ -3855,7 +3977,7 @@ _ci_git_as_bot() {
 _ci_cas_note_commit() {
     local tree
     tree="$(_ci_empty_tree)" || return 2
-    _ci_bot_commit "${tree}" "" "$1"
+    _ci_bot_commit "${tree}" "${2:-}" "$1"
 }
 
 # What: bot commit of a tree, optional parent, message.
@@ -4131,9 +4253,16 @@ _ci_mark_write() {
     _ci_mark_has "${ref}" "${want}" || rc=$?
     [ "${rc}" -ne 0 ] || return 0
     [ "${rc}" -eq 1 ] || return 2
-    sha="$(_ci_cas_note_commit "$3")" || return 2
     rc=0; cur="$(_ci_cas_ref_sha "${remote}" "${ref}")" || rc=$?
     [ "${rc}" -le 1 ] || return 2
+    # What: an old mark stays the parent of the new one.
+    # Why: the ref history shows which run checked what.
+    # From: Issue #1683 | PR #1858
+    if [ -n "${cur}" ]; then
+        _ci_retry git git fetch --no-tags --depth=1 "${remote}" "${ref}" >&2 || return 2
+        cur="$(_ci_capture 0 git rev-parse FETCH_HEAD)" || return 2
+    fi
+    sha="$(_ci_cas_note_commit "$3" "${cur}")" || return 2
     rc=0; raw="$(_ci_cas_push "${remote}" "${ref}" "${sha}" "${cur}")" || rc=$?
     [ "${rc}" -ne 0 ] || return 0
     # What: a lost push race with an equal mark is success.
@@ -4149,27 +4278,35 @@ _ci_mark_write() {
 # Why: a pushed image is not an accepted image (B20).
 # From: Issue #1683 | PR #1912
 _ci_verified_has() {
-    local ref marks
+    local ref
     ref="$(_ci_verified_ref "$1" "$2" "$3")" || return 2
-    marks="$(_ci_verified_marks)" || return 2
+    _ci_mark_listed CI_VERIFIED_REF "${ref}" "$(_ci_verified_note "$1" "$2" "$3")"
+}
+
+# What: rc 0 if mark ref $2 under SOT ref $1 holds $3.
+# Why: one reader of the bulk mark list for every kind.
+# From: Issue #1683 | PR #1858
+_ci_mark_listed() {
+    local marks
+    marks="$(_ci_marks "$1")" || return 2
     case $'\n'"${marks}"$'\n' in
-        *$'\n'"${ref}"$'\t'"$(_ci_verified_note "$1" "$2" "$3")"$'\n'*) return 0 ;;
+        *$'\n'"$2"$'\t'"$3"$'\n'*) return 0 ;;
     esac
     return 1
 }
 
-# What: all verified marks as ref, tab, subject; once.
-# Why: A3: plan fetched one mark per pair, 1.4 s each.
+# What: all marks under SOT ref $1: ref, tab, subject.
+# Why: A3: one fetch per kind, not one mark per pair.
 # From: Issue #1683 | PR #1858
-_ci_verified_marks() {
-    local memo="verified-marks-${_CI_CALL_KEY}" remote prefix dest out
+_ci_marks() {
+    local memo="marks-$1-${_CI_CALL_KEY}" remote prefix dest out
     if out="$(_ci_job_memo_get "${memo}")"; then
         printf '%s\n' "${out}"
         return 0
     fi
     remote="$(_ci_git_remote)" || return 2
-    prefix="$(_ci_variable CI_VERIFIED_REF)" || return 2
-    dest="refs/ci-memo/${_CI_CALL_KEY}"
+    prefix="$(_ci_variable "$1")" || return 2
+    dest="refs/ci-memo/${_CI_CALL_KEY}-$1"
     _ci_retry git git fetch --no-tags "${remote}" "+${prefix}/*:${dest}/*" >&2 || return 2
     out="$(_ci_capture 0 git for-each-ref --format='%(refname)%09%(contents:subject)' "${dest}/")" || return 2
     # What: the local copies go; the list keeps the marks.
@@ -4227,10 +4364,6 @@ ci_cmd_pr_green_mark() {
         printf 'pr-checks-mark=written ref=%s note=%s\n' "${ref}" "${note}"
     else
         printf 'pr-checks-mark=NOT-RUN reason="checks did not run green in this run" checks="%s"\n' "${CI_CHECKS_RESULT:-}"
-    fi
-    if [ "${CI_PLAN_ANY_BUILD:-}" != true ]; then
-        printf 'pr-green-mark=NOT-RUN reason="plan had no build or verify pair; nothing to carry over" any-build="%s"\n' "${CI_PLAN_ANY_BUILD:-}"
-        return 0
     fi
     _ci_require_ghcr_auth || return "$?"
     fp="$(_ci_pr_fingerprint)" || rc=$?
@@ -4324,19 +4457,34 @@ _ci_ledger_blob() {
 # Why: One reader; resolve/digest/index share it (§26).
 # From: Issue #1683
 _ci_ledger_read() {
-    local remote="$1" identity="$2" blob rc=0 out
+    local remote="$1" identity="$2" blob rc=0 row
     blob="$(_ci_ledger_blob "${remote}")" || rc=$?
     [ "${rc}" -eq 1 ] && return 1
     [ "${rc}" -eq 0 ] || return 2
-    out="$(awk -F'\t' -v id="${identity}" '$1==id {print $4"\t"$5; exit}' <<< "${blob}")"
-    [ -n "${out}" ] || return 1
-    printf '%s\n' "${out}"
+    row="$(_ci_tab_row "${identity}" "${blob}")" || return 1
+    printf '%s\t%s\n' "$(_ci_tab_field "${row}" 4)" "$(_ci_tab_field "${row}" 5)"
+}
+
+# What: a lost CAS race re-reads the ledger, then writes
+# Why: every writer merges the other writer's records
+# From: Issue #1683 | PR #1912
+_ci_ledger_upsert() {
+    local new tries n=1 rc
+    new="$(cat)"
+    tries="$(_ci_variable CI_RETRY_MAX_ATTEMPTS)" || return 3
+    while :; do
+        rc=0
+        printf '%s' "${new}" | _ci_ledger_upsert_once "$@" || rc=$?
+        [ "${rc}" -eq 2 ] || return "${rc}"
+        [ "${n}" -lt "${tries}" ] || return 2
+        n=$((n + 1))
+    done
 }
 
 # What: Upsert record lines from stdin in one CAS write.
 # Why: §26.1 one atomic ledger write per workflow.
 # From: Issue #1683
-_ci_ledger_upsert() {
+_ci_ledger_upsert_once() {
     local remote="$1" new blob rc=0 parent="" ids kept merged blobsha treesha commitsha raw ledger_ref file
     local refvar="${2:-CI_LEDGER_REF}" filevar="${3:-CI_LEDGER_FILE}" mode="${4:-}"
     ledger_ref="$(_ci_variable "${refvar}")" || return 3
@@ -4460,19 +4608,9 @@ ci_cmd_aggregate() {
         records="${records}${line}"$'\n'
     done
     [ -n "${records}" ] || { ci_log "[CI-ERROR-AGGREGATE-0003]" "reason=\"no result.json in dir\" dir=\"${dir}\""; return 2; }
-    local rc=0 remote tries n=1
+    local rc=0 remote
     remote="$(_ci_git_remote)" || return 2
-    tries="$(_ci_variable CI_RETRY_MAX_ATTEMPTS)" || return 2
-    # What: a lost CAS race re-reads the ledger, then writes
-    # Why: the other writer's records must be merged in
-    # From: Issue #1683 | PR #1912
-    while :; do
-        rc=0
-        printf '%s' "${records}" | _ci_ledger_upsert "${remote}" || rc=$?
-        [ "${rc}" -eq 2 ] || break
-        [ "${n}" -lt "${tries}" ] || break
-        n=$((n + 1))
-    done
+    printf '%s' "${records}" | _ci_ledger_upsert "${remote}" || rc=$?
     if [ "${rc}" -eq 0 ]; then
         printf 'aggregate records=%s\n' "$(_ci_count_lines "${records}")"
         return 0
@@ -5038,27 +5176,27 @@ _ci_status_apply() {
     sha="$(_ci_env_required GITHUB_SHA)" || return 2
     run_url="${srv}/${repo}/actions/runs/$(_ci_env_required GITHUB_RUN_ID)" || return 2
     ctx="repo=\"${repo}\" label=\"${label}\" outcome=${outcome}"
-    open="$(_ci_run "[CI-ERROR-STATUS-0003]" "${ctx} step=list" gh issue list --repo "${repo}" --label "${label}" --state open \
+    open="$(_ci_run "[CI-ERROR-STATUS-0003]" "${ctx} step=list" _ci_retry github-api gh issue list --repo "${repo}" --label "${label}" --state open \
         --json number --jq 'map(.number) | min // empty')" || return 2
     if [ "${outcome}" = success ]; then
         [ -n "${open}" ] || { printf 'status=noop label=%s\n' "${label}"; return 0; }
-        _ci_run "[CI-ERROR-STATUS-0004]" "${ctx} step=comment issue=${open}" gh issue comment "${open}" --repo "${repo}" \
+        _ci_run "[CI-ERROR-STATUS-0004]" "${ctx} step=comment issue=${open}" _ci_retry github-api gh issue comment "${open}" --repo "${repo}" \
             --body "Green again in ${run_url} at ${sha}. Closing; a new issue opens with this label if the case turns red." >&2 || return 2
-        _ci_run "[CI-ERROR-STATUS-0005]" "${ctx} step=close issue=${open}" gh issue close "${open}" --repo "${repo}" >&2 || return 2
+        _ci_run "[CI-ERROR-STATUS-0005]" "${ctx} step=close issue=${open}" _ci_retry github-api gh issue close "${open}" --repo "${repo}" >&2 || return 2
         printf 'status=closed label=%s issue=%s\n' "${label}" "${open}"
         return 0
     fi
     body="$(_ci_status_body "${scope}" "${run_url}" "${sha}" "${evidence}")" || return 2
     if [ -n "${open}" ]; then
-        _ci_run "[CI-ERROR-STATUS-0006]" "${ctx} step=comment issue=${open}" gh issue comment "${open}" --repo "${repo}" \
+        _ci_run "[CI-ERROR-STATUS-0006]" "${ctx} step=comment issue=${open}" _ci_retry github-api gh issue comment "${open}" --repo "${repo}" \
             --body "Still red.${body:+$'\n\n'}${body}" >&2 || return 2
         printf 'status=updated label=%s issue=%s\n' "${label}" "${open}"
         return 0
     fi
     color="$(_ci_variable CI_STATUS_LABEL_COLOR)" || return 2
-    _ci_run "[CI-ERROR-STATUS-0007]" "${ctx} step=label" gh label create "${label}" --repo "${repo}" --color "${color}" --force \
+    _ci_run "[CI-ERROR-STATUS-0007]" "${ctx} step=label" _ci_retry github-api gh label create "${label}" --repo "${repo}" --color "${color}" --force \
         --description "${scope:0:100}" >&2 || return 2
-    _ci_run "[CI-ERROR-STATUS-0008]" "${ctx} step=create" gh issue create --repo "${repo}" --label "${label}" \
+    _ci_run "[CI-ERROR-STATUS-0008]" "${ctx} step=create" _ci_retry github-api gh issue create --repo "${repo}" --label "${label}" \
         --title "[${label}] ${scope}" --body "${body}" >&2 || return 2
     printf 'status=opened label=%s\n' "${label}"
 }
@@ -6286,7 +6424,14 @@ _ci_rust_build_cleanup() {
 # Why: exact label; "(Rust)" and rate rows never match.
 # From: Issue #1683 | PR #1912
 _ci_sccache_count() {
-    awk -v l="$1" 'index($0, l " ") == 1 { r = substr($0, length(l) + 1); gsub(/^ +| +$/, "", r); if (r ~ /^[0-9]+$/) print r }' <<< "$2"
+    local line r
+    while IFS= read -r line; do
+        [[ "${line}" == "$1 "* ]] || continue
+        r="${line#"$1"}"
+        r="${r#"${r%%[! ]*}"}"
+        r="${r%"${r##*[! ]}"}"
+        [[ ! "${r}" =~ ^[0-9]+$ ]] || printf '%s\n' "${r}"
+    done <<< "$2"
 }
 
 # What: log sccache use; check requests and cache errors.
@@ -7295,16 +7440,16 @@ _ci_scan_identity() {
     printf '%s\n' "$1" "${bsum}" "${db}" "${sev}" "${scn}" "${isum}" | _ci_sha256_hex
 }
 
-# What: read (has) or write the clean-scan mark of a pair.
-# Why: one ref per pair; a lost mark only rescans.
+# What: read (has) or write the clean-scan mark of a digest.
+# Why: a pair-wide ref let another run evict the mark.
 # From: Issue #1683 | PR #1858
 _ci_scan_mark() {
     local prefix ref note
     prefix="$(_ci_variable CI_SCANNED_REF)" || return 2
-    ref="${prefix}/$1-${2//\//-}"
+    ref="${prefix}/$1-${2//\//-}-${3#sha256:}"
     note="scanned $1 $2 $3 $4"
     if [ "$5" = has ]; then
-        _ci_mark_has "${ref}" "${note}"
+        _ci_mark_listed CI_SCANNED_REF "${ref}" "${note}"
         return
     fi
     if [ "${PR_IS_FORK:-false}" = true ]; then
@@ -7412,19 +7557,10 @@ _ci_refresh_event() {
 # Why: §17: the last refresh run's result, never re-read.
 # From: Issue #1683 | PR #1858
 _ci_package_refresh_value() {
-    local key="$1@$2" remote blob rc=0 k v
-    remote="$(_ci_git_remote)" || return 2
-    blob="$(_ci_ledger_blob "${remote}" CI_REFRESH_REF CI_REFRESH_FILE)" || rc=$?
-    case "${rc}" in
-        0)
-            while IFS=$'\t' read -r k v; do
-                if [ "${k}" = "${key}" ]; then printf '%s\n' "${v}"; return 0; fi
-            done <<< "${blob}"
-            ;;
-        1) ;;
-        *) return 2 ;;
-    esac
-    printf 'none\n'
+    local rc=0
+    _ci_refresh_record "$1@$2" || rc=$?
+    [ "${rc}" -ne 1 ] || { printf 'none\n'; return 0; }
+    return "${rc}"
 }
 
 # What: record each pair whose accepted image is behind.
@@ -7513,11 +7649,66 @@ _ci_local_image_files() {
     return "${rc}"
 }
 
+# What: value of refresh record key $1; 1 if absent.
+# Why: one reader of the refresh records for every key.
+# From: Issue #1683 | PR #1858
+_ci_refresh_record() {
+    local remote blob rc=0 row
+    remote="$(_ci_git_remote)" || return 2
+    blob="$(_ci_ledger_blob "${remote}" CI_REFRESH_REF CI_REFRESH_FILE)" || rc=$?
+    [ "${rc}" -le 1 ] || return 2
+    [ "${rc}" -eq 0 ] || return 1
+    row="$(_ci_tab_row "$1" "${blob}")" || return 1
+    [[ "${row}" == *$'\t'* ]] || row=$'\t'
+    printf '%s\n' "${row#*$'\t'}"
+}
+
+# What: one sha256 per id input of a pair: name=sum.
+# Why: Fund 116: a refresh BUILD names the changed input.
+# From: Issue #1683 | PR #1858
+_ci_identity_parts() {
+    local service="$1" platform="$2" type inputs input part sum
+    type="$(_ci_required_field "${service}" build_type)" || return 2
+    part="$(_ci_identity_content "${service}")" || return 2
+    sum="$(printf '%s' "${part}" | _ci_sha256_hex)" || return 2
+    printf 'content=%s' "${sum}"
+    inputs="$(_ci_block_entry_list build_identity "${type}" inputs)" || return 2
+    for input in ${inputs}; do
+        part="$(_ci_identity_pins "${service}" "${type}" "${platform}" "${input}")" || return "$?"
+        sum="$(printf '%s' "${part}" | _ci_sha256_hex)" || return 2
+        printf ',%s=%s' "${input}" "${sum}"
+    done
+}
+
+# What: log id inputs changed since the last refresh run.
+# Why: Fund 116: a BUILD names its input; then record it.
+# From: Issue #1683 | PR #1858
+_ci_identity_changed() {
+    local service="$1" platform="$2" run="${GITHUB_RUN_ID:-local}" key now old="" rc=0 p diff=""
+    key="inputs@${service}@${platform}"
+    now="$(_ci_identity_parts "${service}" "${platform}")" || return 2
+    old="$(_ci_refresh_record "${key}")" || rc=$?
+    [ "${rc}" -le 1 ] || return 2
+    [ "${old%% *}" != "${run}" ] || return 0
+    if [ -z "${old}" ]; then
+        diff="unrecorded"
+    else
+        for p in ${now//,/ }; do
+            [[ ",${old#* }," == *",${p},"* ]] || diff+="${p%%=*},"
+        done
+        diff="${diff%,}"
+    fi
+    ci_log "[CI-INFO-IMPACT-0019]" "service=\"${service}\" platform=\"${platform}\" last_run=\"${old%% *}\" changed=\"${diff:-none}\""
+    rc=0
+    printf '%s\t%s %s\n' "${key}" "${run}" "${now}" | _ci_ledger_upsert "$(_ci_git_remote)" CI_REFRESH_REF CI_REFRESH_FILE replace || rc=$?
+    [ "${rc}" -eq 0 ] || ci_log "[CI-WARN-IMPACT-0020]" "key=\"${key}\" rc=${rc} reason=\"inputs not recorded (raw above); the next refresh names none\""
+}
+
 # What: "key<TAB>digest name=version ..." of a toolchain.
 # Why: memo, refresh record and id read one value (§17).
 # From: Issue #1683 | PR #1858
 _ci_toolchain_entry() {
-    local build_type="$1" platform="$2" roots tref key memo val="" remote blob rc=0 k v
+    local build_type="$1" platform="$2" roots tref key memo val="" remote rc=0
     roots="$(_ci_block_entry_list build_identity "${build_type}" toolchain_packages)" || return 2
     if [ -z "${roots}" ]; then
         ci_log "[CI-ERROR-IDENTITY-0019]" "build_type=\"${build_type}\" reason=\"no SOT toolchain_packages; FAIL CLOSED\""
@@ -7535,16 +7726,9 @@ _ci_toolchain_entry() {
     # Why: one record per platform; a new image replaces it.
     # From: Issue #1683 | PR #1858
     remote="$(_ci_git_remote)" || return 2
-    blob="$(_ci_ledger_blob "${remote}" CI_REFRESH_REF CI_REFRESH_FILE)" || rc=$?
-    case "${rc}" in
-        0)
-            while IFS=$'\t' read -r k v; do
-                [ "${k}" != "${key}" ] || [ "${v%% *}" != "${tref##*@}" ] || val="${v}"
-            done <<< "${blob}"
-            ;;
-        1) ;;
-        *) return 2 ;;
-    esac
+    val="$(_ci_refresh_record "${key}")" || rc=$?
+    [ "${rc}" -le 1 ] || return 2
+    [ "${val%% *}" = "${tref##*@}" ] || val=""
     if [ -z "${val}" ]; then
         val="$(_ci_with_workdir ci-toolchain _ci_toolchain_closure "${tref}" "${platform}" "${roots}")" || return 2
         val="${tref##*@} ${val//$'\n'/ }"
@@ -7672,6 +7856,7 @@ _ci_semantic_impact() {
         _ci_refresh_event || frc=$?
         case "${frc}" in
             0)
+                _ci_identity_changed "${service}" "${platform}" || return 2
                 ci_log "[CI-INFO-IMPACT-0016]" "service=\"${service}\" platform=\"${platform}\" event=\"${GITHUB_EVENT_NAME:-}\" reason=\"controlled refresh run; the missing artifact is the proof; BUILD\""
                 printf 'BUILD\n'
                 return 0
@@ -8415,12 +8600,17 @@ _ci_docker_assemble() {
 ci_cmd_assemble() {
     local service="${1:-}"
     [ -n "${service}" ] || { ci_log "[CI-ERROR-ASSEMBLE-0001]" "reason=\"service arg required\""; return 2; }
-    local inputs want count reused index
+    local inputs want count=0 reused index kv
     inputs="$(_ci_collect_accepted_digests "${service}")" || return "$?"
     want="$(_ci_normalize_platform_digests "${inputs}")" || return 2
     local -a input_list=()
     [ -z "${inputs}" ] || mapfile -t input_list <<< "${inputs}"
-    count="$(_ci_capture 0 awk '/=/ {n++} END {print n+0}' <<< "${inputs}")" || return 2
+    # What: count the platform=digest lines in bash.
+    # Why: Fund 136: no awk where bash does the job.
+    # From: Issue #1683 | PR #1858
+    for kv in "${input_list[@]}"; do
+        [[ "${kv}" != *=* ]] || count=$((count + 1))
+    done
     if ! reused="$(_ci_reconcile_index "${service}" "${want}")"; then
         return 2
     fi
@@ -8484,9 +8674,22 @@ _ci_channel_field() {
 # Why: shared by mutable, ref and release-tag lookups.
 # From: Issue #1683
 _ci_channels_where() {
-    local rows
+    local rows c v
     rows="$(_ci_channel_field "$1")" || return 2
-    _ci_capture 0 awk -v v="$2" "\$2 == v { print \$1 }" <<< "${rows}"
+    while read -r c v _; do
+        [ "${v}" != "$2" ] || printf '%s\n' "${c}"
+    done <<< "${rows}"
+}
+
+# What: field $1 of channel $2, one value per line.
+# Why: one reader for ref and source_ref; no awk (136).
+# From: Issue #1683 | PR #1858
+_ci_channel_value() {
+    local rows c v
+    rows="$(_ci_channel_field "$1")" || return 2
+    while read -r c v _; do
+        [ "${c}" != "$2" ] || printf '%s\n' "${v}"
+    done <<< "${rows}"
 }
 
 # What: Print the SOT's mutable release channels.
@@ -8500,10 +8703,9 @@ _ci_mutable_channels() {
 # Why: the release-tag channel's ref; SOT is the owner.
 # From: Issue #1683
 _ci_release_ref() {
-    local ch rows ref
+    local ch ref
     ch="$(_ci_channels_where release_tags true)" || return 2
-    rows="$(_ci_channel_field ref)" || return 2
-    ref="$(_ci_capture 0 awk -v c="${ch%%$'\n'*}" "\$1 == c { print \$2 }" <<< "${rows}")" || return 2
+    ref="$(_ci_channel_value ref "${ch%%$'\n'*}")" || return 2
     if [ -z "${ref}" ]; then
         ci_log "[CI-ERROR-RELEASE-0018]" "reason=\"SOT release.channels has no release_tags channel with a ref\""
         return 2
@@ -8515,13 +8717,12 @@ _ci_release_ref() {
 # Why: a schedule run starts on the default branch
 # From: Issue #1683 | PR #1858
 ci_cmd_channel_checkout() {
-    local channel="${1:-}" pin="${2:-}" rows ref remote want sha boot
+    local channel="${1:-}" pin="${2:-}" ref remote want sha boot
     if [ -z "${channel}" ]; then
         ci_log "[CI-ERROR-PROMOTE-0017]" "reason=\"channel arg required\""
         return 2
     fi
-    rows="$(_ci_channel_field source_ref)" || return 2
-    ref="$(_ci_capture 0 awk -v c="${channel}" "\$1 == c { print \$2 }" <<< "${rows}")" || return 2
+    ref="$(_ci_channel_value source_ref "${channel}")" || return 2
     if [ -z "${ref}" ]; then
         ci_log "[CI-ERROR-PROMOTE-0018]" "channel=\"${channel}\" reason=\"SOT release.channels has no source_ref for this channel\""
         return 2
@@ -8864,7 +9065,7 @@ _ci_promote_kept() {
     while IFS= read -r p; do
         [ -n "${p}" ] || continue
         if _ci_text_has "^${p}=" "${have}"; then continue; fi
-        line="$(_ci_capture 0 awk -F= -v p="${p}" "\$1 == p { print; exit }" <<< "${old}")" || return 2
+        line="$(_ci_kv_line "${p}" "${old}")"
         if [ -z "${line}" ]; then
             ci_log "[CI-WARN-PROMOTE-0033]" "service=\"${svc}\" channel=\"${channel}\" platform=\"${p}\" reason=\"candidate and channel both lack this platform\""
             continue
@@ -9130,7 +9331,7 @@ _ci_promote_targets_for_ref() {
     if [ -n "${requested}" ] && [ "${requested}" != none ]; then
         items+=$'\n'"${requested}"
     fi
-    _ci_capture 0 awk "NF && !seen[\$0]++" <<< "${items}"
+    _ci_unique_lines "${items}"
 }
 
 # What: Resolve a git ref's current remote tip SHA.
@@ -9414,12 +9615,14 @@ _ci_release_changes() {
     # What: "Merge pull request #N ..." and "... (#N)".
     # Why: GitHub's merge and squash default subjects.
     # From: Issue #894 | PR #1858
-    nums="$(_ci_capture 0 awk "$(cat <<'PROG'
-        match($0, /^Merge pull request #[0-9]+/) { print substr($0, 21, RLENGTH - 20); next }
-        match($0, /\(#[0-9]+\)$/) { print substr($0, RSTART + 2, RLENGTH - 3) }
-PROG
-    )" <<< "${subjects}")" || return 2
-    nums="$(_ci_capture 0 sort -un <<< "${nums}")" || return 2
+    local subj pr_merge_re='^Merge pull request #([0-9]+)' pr_squash_re='\(#([0-9]+)\)$'
+    nums=""
+    while IFS= read -r subj; do
+        if [[ "${subj}" =~ ${pr_merge_re} ]] || [[ "${subj}" =~ ${pr_squash_re} ]]; then
+            nums+="${BASH_REMATCH[1]}"$'\n'
+        fi
+    done <<< "${subjects}"
+    nums="$(_ci_capture 0 sort -un <<< "${nums%$'\n'}")" || return 2
     if [ -z "${nums}" ]; then
         printf '_No pull requests merged since %s._\n' "${prev}"
         return 0
@@ -9459,6 +9662,7 @@ _ci_release_pr_batch() {
 # From: Issue #894 | PR #1858
 _ci_release_render() {
     local rows="$1" labels cat title skip other section pr num url text body
+    local line out buf seen
     labels="$(_ci_block_keys release_notes_categories)" || return 2
     _ci_block_entry_fields release_notes "" skip_label skip other_title other pr_section section || return 2
     if [ -z "${labels}" ] || [ -z "${other}" ] || [ -z "${section}" ]; then
@@ -9485,7 +9689,15 @@ _ci_release_render() {
         body="$(_ci_pr_section "${body}" "${section}")" || return 2
         if [ "${body}" = "${body%%$'\n'*}" ]; then body=""; else body="${body#*$'\n'}"; fi
         body="$(_ci_md_strip_comments "${body}")" || return 2
-        body="$(_ci_capture 0 awk "NF { seen = 1 } seen { buf = buf \$0 \"\\n\"; if (NF) { out = out buf; buf = \"\" } } END { printf \"%s\", out }" <<< "${body}")" || return 2
+        out="" buf="" seen=0
+        while IFS= read -r line; do
+            if [[ "${line}" == *[!$' \t']* ]]; then
+                seen=1 out+="${buf}${line}"$'\n' buf=""
+            elif [ "${seen}" -eq 1 ]; then
+                buf+="${line}"$'\n'
+            fi
+        done <<< "${body}"
+        body="${out%$'\n'}"
         [ -n "${group[${cat}]+x}" ] || order+=("${cat}")
         group["${cat}"]+="- #${num} ${title} (${url})"$'\n'
         [ -z "${body}" ] || group["${cat}"]+="  ${body//$'\n'/$'\n'  }"$'\n'
@@ -9861,7 +10073,7 @@ _ci_release_sbom_get() {
 # Why: one owner removes the work dir, not this body.
 # From: Issue #1683 | PR #1858
 _ci_release_sbom_in() {
-    local service="$1" tag="$2" digest="$3" dir="$4" out prev rc=0
+    local service="$1" tag="$2" digest="$3" dir="$4" out prev named rc=0
     out="${dir}/${service}.cdx.json"
     # What: an attached SBOM for this digest is reused
     # Why: architecture §57: one SBOM per digest, no rescan
@@ -9874,7 +10086,9 @@ _ci_release_sbom_in() {
             ;;
         1) ;;
         3)
-            ci_error "[CI-ERROR-RELEASE-0046]" "service=\"${service}\" tag=\"${tag}\" digest=\"${digest}\" reason=\"attached SBOM is not bound to this digest\"" "digests the attached SBOM names: $(grep -o -E "${CI_DIGEST_RE}" "${out}" 2>&1 | LC_ALL=C sort -u | awk '{ printf "%s ", $0; n++ } END { if (!n) printf "none" }')"
+            named="$(grep -o -E "${CI_DIGEST_RE}" "${out}" 2>&1 | LC_ALL=C sort -u)" || rc=$?
+            if [ -n "${named}" ]; then named="${named//$'\n'/ } "; else named=none; fi
+            ci_error "[CI-ERROR-RELEASE-0046]" "service=\"${service}\" tag=\"${tag}\" digest=\"${digest}\" reason=\"attached SBOM is not bound to this digest\"" "digests the attached SBOM names: ${named}"
             return 2
             ;;
         *) return 2 ;;
@@ -10006,7 +10220,12 @@ _ci_last_release_tag() {
     # From: Issue #1683 | PR #1858
     below="${below%%-*}"
     tags="$(_ci_capture 0 sort -V -u <<< "${tags}"$'\n'"${below}")" || return 2
-    awk -v b="${below}" '$0 == b { exit } { last = $0 } END { if (last != "") print last }' <<<"${tags}"
+    local t last=""
+    while IFS= read -r t; do
+        [ "${t}" != "${below}" ] || break
+        last="${t}"
+    done <<< "${tags}"
+    [ -z "${last}" ] || printf '%s\n' "${last}"
 }
 
 # What: The next patch tag after a plain vX.Y.Z tag.
@@ -10051,7 +10270,7 @@ _ci_pat_git() {
 # Why: a GITHUB_TOKEN tag push starts no release run
 # From: Issue #1683 | PR #1858
 _ci_push_release_tag() {
-    local tag="$1" sha="$2" url raw got
+    local tag="$1" sha="$2" url raw got obj name peeled="" direct=""
     url="$(_ci_pat_url)" || return 2
     _ci_run "[CI-ERROR-RELEASE-0026]" "tag=\"${tag}\" sha=\"${sha}\" reason=\"annotated tag not created\"" \
         _ci_git_as_bot tag -a "${tag}" "${sha}" -m "Patch release ${tag}" || return 2
@@ -10061,7 +10280,11 @@ _ci_push_release_tag() {
     # Why: AG-WF-031: every GitHub write is read back
     # From: Issue #1683 | PR #1858
     raw="$(_ci_capture 0 _ci_pat_git ls-remote --tags "${url}" "refs/tags/${tag}" "refs/tags/${tag}^{}")" || return 2
-    got="$(_ci_capture 0 awk -v r="refs/tags/${tag}" "\$2 == r \"^{}\" { p = \$1 } \$2 == r { d = \$1 } END { print (p != \"\" ? p : d) }" <<< "${raw}")" || return 2
+    while read -r obj name _; do
+        [ "${name}" != "refs/tags/${tag}^{}" ] || peeled="${obj}"
+        [ "${name}" != "refs/tags/${tag}" ] || direct="${obj}"
+    done <<< "${raw}"
+    got="${peeled:-${direct}}"
     if [ "${got}" != "${sha}" ]; then
         ci_error "[CI-ERROR-RELEASE-0048]" "tag=\"${tag}\" sha=\"${sha}\" found=\"${got}\" reason=\"pushed tag not read back at the cut commit\"" "${raw}"
         return 2
@@ -10117,7 +10340,8 @@ _ci_deletion_policy() {
 # Why: lines are counted as they exist, 19.9 or 18.88.
 # From: Issue #1683 | PR #1858
 _ci_gc_release_tags() {
-    local n tags t line prev="" lines="" keep mig
+    local n tags t line prev="" keep mig s
+    local -a lines=()
     n="$(_ci_block_entry_field release retention keep_release_lines)" || return 2
     case "${n}" in
         ''|*[!0-9]*|0*)
@@ -10132,10 +10356,11 @@ _ci_gc_release_tags() {
     while IFS= read -r t; do
         [ -n "${t}" ] || continue
         line="${t%.*}"
-        [ "${line}" = "${prev}" ] || lines="${lines}${line}"$'\n'
+        [ -z "${line}" ] || [ "${line}" = "${prev}" ] || lines+=("${line}")
         prev="${line}"
     done <<<"${tags}"
-    keep="$(_ci_capture 0 awk -v n="${n}" "NF { l[++c] = \$0 } END { for (i = c - n + 1; i <= c; i++) if (i > 0) print l[i] }" <<<"${lines}")" || return 2
+    s=$(( ${#lines[@]} > n ? ${#lines[@]} - n : 0 ))
+    keep="$(printf '%s\n' "${lines[@]:s}")"
     while IFS= read -r t; do
         [ -n "${t}" ] || continue
         case $'\n'"${keep}"$'\n' in
@@ -10177,7 +10402,15 @@ _ci_gc_roots() {
     # Why: PRODUCED_UNVERIFIED is pending, not garbage.
     # From: Issue #1683
     if [ "${rc}" -eq 0 ]; then
-        pairs="$(_ci_capture 0 awk -F'\t' "NF>=5 && \$2!=\"\" && \$5!=\"\" {print \$2\"\t\"\$5}" <<< "${blob}")" || return 2
+        local f2 f5
+        while IFS= read -r line; do
+            f2="$(_ci_tab_field "${line}" 2)"
+            f5="$(_ci_tab_field "${line}" 5)"
+            if [ -n "${f2}" ] && [ -n "${f5}" ]; then
+                pairs="${pairs}${f2}"$'\t'"${f5}"$'\n'
+            fi
+        done <<< "${blob}"
+        pairs="${pairs%$'\n'}"
     fi
     local targets targets_rc=0 reltags
     targets="$(ci_build_targets)" || targets_rc=$?
@@ -10259,7 +10492,7 @@ _ci_gh_versions() {
 # Why: SOT-scoped candidates; org-wide would delete others.
 # From: Issue #1683
 _ci_gc_candidates() {
-    local prefix owner pkgbase svc vers grc found=0
+    local prefix owner pkgbase svc vers v grc found=0
     prefix="$(_ci_repo)" || { ci_log "[CI-ERROR-GC-0017]" "reason=\"GITHUB_REPOSITORY missing; no package namespace\""; return 2; }
     owner="${prefix%%/*}"
     pkgbase="${prefix#*/}"
@@ -10280,7 +10513,10 @@ _ci_gc_candidates() {
         # Why: Delete path is package-scoped, not id-only.
         # From: Issue #1683
         if [ -n "${vers}" ]; then
-            _ci_capture 0 awk -v s="${svc}" "NF{print \$0\"\t\"s}" <<< "${vers}" || return 2
+            while IFS= read -r v; do
+                [[ "${v}" == *[![:space:]]* ]] || continue
+                printf '%s\t%s\n' "${v}" "${svc}"
+            done <<< "${vers}"
         fi
     done <<<"${produced}"
     # What: No package found anywhere is a config error.
@@ -10561,12 +10797,13 @@ _ci_gc_ref_reap() {
     esac
 }
 
-# What: delete green refs of closed PRs, ended locks.
+# What: green refs of closed PRs, ended locks, dead marks.
 # Why: nothing else deletes them; dry-run only lists.
 # From: Issue #1683 | PR #1858
 ci_cmd_gc_refs() {
     local mode remote prefix repo refs sha ref n state holder rc keep=0 del=0 deleted=0
-    local build_lock promote_lock
+    local build_lock promote_lock kind marks svc plat dig out auth=""
+    local -A mark_subj=()
     _ci_gc_mode GC-0036 gc-refs "$@" || return 2
     mode="${REPLY}"
     remote="$(_ci_git_remote)" || return 2
@@ -10631,6 +10868,53 @@ ci_cmd_gc_refs() {
                     return 2
                     ;;
             esac
+        done <<< "${refs}"
+    done
+    # What: verified and scanned marks of a gone image.
+    # Why: gc frees the digest first; its mark is dead.
+    # From: Issue #1683 | PR #1858
+    for kind in CI_VERIFIED_REF CI_SCANNED_REF; do
+        prefix="$(_ci_variable "${kind}")" || return 2
+        refs="$(_ci_capture 0 git ls-remote --refs "${remote}" "${prefix}/*")" || return 2
+        [ -n "${refs}" ] || continue
+        marks="$(_ci_marks "${kind}")" || return 2
+        [ -n "${auth}" ] || { _ci_require_ghcr_auth || return 2; auth=1; }
+        mark_subj=()
+        while IFS=$'\t' read -r ref out; do
+            [ -z "${ref}" ] || mark_subj["${ref}"]="${out}"
+        done <<< "${marks#*$'\n'}"
+        while IFS=$'\t' read -r sha ref; do
+            [ -n "${ref}" ] || continue
+            svc="" plat="" dig=""
+            read -r _ svc plat dig _ <<< "${mark_subj["${ref}"]:-}"
+            if [ -z "${dig}" ]; then
+                ci_log "[CI-ERROR-GC-0046]" "ref=\"${ref}\" reason=\"mark has no subject; neither kept nor deleted\""
+                return 2
+            fi
+            state=gone
+            if [ "${ref}" != "${prefix}/${svc}-${plat//\//-}-${dig#sha256:}" ]; then
+                state=old_format
+            else
+                rc=0; out="$(_ci_registry_probe "$(_ci_image_ref "${svc}" "${dig}")")" || rc=$?
+                case "${rc}" in
+                    0) state=present ;;
+                    1) ;;
+                    *)
+                        ci_error "[CI-ERROR-GC-0047]" "ref=\"${ref}\" digest=\"${dig}\" reason=\"image state unknown; neither kept nor deleted\"" "${out}"
+                        return 2
+                        ;;
+                esac
+            fi
+            if [ "${state}" = present ]; then
+                keep=$((keep + 1))
+                printf 'gc-refs ref=%s state=present action=KEEP\n' "${ref}"
+                continue
+            fi
+            del=$((del + 1))
+            printf 'gc-refs ref=%s state=%s action=DELETE mode=%s\n' "${ref}" "${state}" "${mode}"
+            [ "${mode}" = apply ] || continue
+            _ci_gc_ref_reap "${remote}" "${ref}" "${sha}" || return 2
+            deleted=$((deleted + 1))
         done <<< "${refs}"
     done
     printf 'gc-refs result=classified keep=%s delete=%s deleted=%s mode=%s\n' "${keep}" "${del}" "${deleted}" "${mode}"
@@ -10725,7 +11009,8 @@ _ci_validate_pin_override() {
                 slug="${image##*/"${prefix}"/}"
                 slug="${slug%%:*}"
                 slug="${slug%%@*}"
-                digest="$(_ci_capture 0 awk -F= -v s="${slug}" "\$1==s{print \$2; exit}" <<< "${candidate}")" || return 2
+                digest="$(_ci_kv_line "${slug}" "${candidate}")"
+                digest="${digest#*=}"
                 if [ -z "${digest}" ]; then
                     ci_log "[CI-ERROR-VALIDATE-0007]" "service=\"${svc}\" slug=\"${slug}\" reason=\"first-party compose image without candidate digest; refusing mutable tag\""
                     return 2
@@ -11465,16 +11750,25 @@ _ci_validate_proxy() {
 # Why: a root literal sends every subdomain to one origin
 # From: Issue #1297 | PR #1858
 _ci_stream_map_violations() {
-    local port="$1"
-    awk -v want="\$ssl_preread_server_name:${port};" '/^[[:space:]]*\*\./ && $2 != want { print }'
+    local port="$1" line second
+    while IFS= read -r line || [ -n "${line}" ]; do
+        [[ "${line}" =~ ^[[:space:]]*\*\. ]] || continue
+        read -r _ second _ <<< "${line}"
+        [ "${second}" = "\$ssl_preread_server_name:${port};" ] || printf '%s\n' "${line}"
+    done
 }
 
 # What: print depth>=2 dispatch entries off the relay port
 # Why: deeper SNI has no wildcard cert; it must passthrough
 # From: Issue #1322 | PR #1858
 _ci_https_dispatch_violations() {
-    local port="$1"
-    awk -v want=":${port};" 'index($0, "~^.+\\.") > 0 && substr($NF, length($NF) - length(want) + 1) != want { print }'
+    local port="$1" line
+    local -a w
+    while IFS= read -r line || [ -n "${line}" ]; do
+        [[ "${line}" == *'~^.+\.'* ]] || continue
+        read -r -a w <<< "${line}"
+        [[ "${w[-1]}" == *":${port};" ]] || printf '%s\n' "${line}"
+    done
 }
 
 # What: prove proxy routes wildcards by SNI.
@@ -11766,7 +12060,8 @@ _ci_validate_ui_post() {
 _ci_validate_lan_zone() {
     local env zone
     env="$(_ci_validation_env)" || return 2
-    zone="$(_ci_capture 0 awk "index(\$0, \"DHCP_DOMAIN=\") == 1 { print substr(\$0, 13); exit }" <<< "${env}")" || return 2
+    zone="$(_ci_kv_line DHCP_DOMAIN "${env}")"
+    zone="${zone#*=}"
     if [ -z "${zone}" ]; then
         zone="$(_ci_runtime_default DHCP_DOMAIN)" || return 2
     fi
@@ -13385,14 +13680,15 @@ _ci_build_tools_resolve_image() {
     printf '%s\n' "${image}"
 }
 
-# What: the build-tools ref the platform job resolved.
-# Why: one resolver per run; ids and builds read it.
+# What: the build-tools ref a job resolved; $1 its var.
+# Why: one resolver per run; ids, builds, checks read it.
 # From: Issue #1683 | PR #1912
 _ci_build_tools_run_image() {
-    local ref="${CI_BUILD_TOOLS_IMAGE:-}" image
+    local var="${1:-CI_BUILD_TOOLS_IMAGE}" ref image
+    ref="${!var:-}"
     image="$(_ci_build_tools_image)" || return 2
     if [[ "${ref}" != "${image}@sha256:"* ]] || [[ ! "${ref##*@sha256:}" =~ ^[0-9a-f]{64}$ ]]; then
-        ci_log "[CI-ERROR-BUILDTOOLS-0026]" "got=\"${ref}\" want=\"${image}@sha256:<64 hex>\" reason=\"CI_BUILD_TOOLS_IMAGE unset or no digest ref; FAIL CLOSED\""
+        ci_log "[CI-ERROR-BUILDTOOLS-0026]" "var=${var} got=\"${ref}\" want=\"${image}@sha256:<64 hex>\" reason=\"build-tools ref unset or no digest ref; FAIL CLOSED\""
         return 2
     fi
     printf '%s\n' "${ref}"
@@ -13519,14 +13815,35 @@ _ci_version_inputs() {
 # Why: copies are synced on demand, idempotent, not by hand.
 # From: Issue #1683 | PR #1858
 _ci_version_release_sync() {
-    local lic ed cargo f tmp out wrote=0
+    local lic ed cargo f tmp out line key on=0 body="" wrote=0
     _ci_version_inputs lic ed cargo || return 2
     f="${cargo}"
     tmp="$(_ci_mktemp "${CI_TMPDIR}/ci-vsync.XXXXXX")" || return 2
-    out="$(awk -v l="${lic}" -v e="${ed}" '/^\[workspace\.package\]/ { on = 1; print; next } /^\[/ { on = 0 }
-        on && $1 == "license" { print "license = \"" l "\""; next }
-        on && $1 == "edition" { print "edition = \"" e "\""; next } { print }' "${f}" 2>&1 > "${tmp}")" \
-        || { ci_error "[CI-ERROR-VERSION-0026]" "path=\"${f}\" reason=\"derived copy not rendered\"" "${out}"; rm -f "${tmp}"; return 2; }
+    out="file not readable"
+    if [ -r "${f}" ]; then
+        while IFS= read -r line || [ -n "${line}" ]; do
+            if [[ "${line}" == "[workspace.package]"* ]]; then
+                on=1
+                body+="${line}"$'\n'
+                continue
+            fi
+            [[ "${line}" != "["* ]] || on=0
+            read -r key _ <<< "${line}"
+            if [ "${on}" -eq 1 ] && [ "${key}" = license ]; then
+                body+="license = \"${lic}\""$'\n'
+            elif [ "${on}" -eq 1 ] && [ "${key}" = edition ]; then
+                body+="edition = \"${ed}\""$'\n'
+            else
+                body+="${line}"$'\n'
+            fi
+        done < "${f}"
+        out="$(printf '%s' "${body}" 2>&1 > "${tmp}")" && out=written
+    fi
+    if [ "${out}" != written ]; then
+        ci_error "[CI-ERROR-VERSION-0026]" "path=\"${f}\" reason=\"derived copy not rendered\"" "${out}"
+        rm -f "${tmp}"
+        return 2
+    fi
     if ! out="$(_ci_copy_if_changed "${tmp}" "${f}")"; then
         ci_error "[CI-ERROR-VERSION-0027]" "path=\"${f}\" reason=\"derived copy not written\"" "${out}"
         rm -f "${tmp}"
@@ -13937,6 +14254,15 @@ _ci_rh_reap_trivy() {
     return "${rc}"
 }
 
+# What: used KiB (field 3, row 2) of df -P output $1.
+# Why: one owner for both cleanup reads; no awk (Fund 136).
+# From: Issue #1683 | PR #1858
+_ci_df_used() {
+    local used
+    { read -r _; read -r _ _ used _; } <<< "$1"
+    printf '%s\n' "${used}"
+}
+
 # What: the cleanup run: reap, prune, measure before/after.
 # Why: AG-CI-016: measure, clean, re-measure, verify.
 # From: Issue #1255 | PR #1349
@@ -13954,7 +14280,7 @@ _ci_rh_cleanup_run() {
     printf '=== %s runner-host cleanup start ===\n--- disk usage before cleanup ---\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     before="$(_ci_capture 0 df -P "${disk}")" || return 2
     printf '%s\n' "${before}"
-    before="$(_ci_capture 0 awk "NR == 2 { print \$3 }" <<<"${before}")" || return 2
+    before="$(_ci_df_used "${before}")"
     _ci_rh_reap_containers build-tools image "${bt_match}" "${bt_hours}" || rc=2
     _ci_rh_reap_containers validation project "${prefix}" "${val_hours}" || rc=2
     _ci_rh_reap_networks "${prefix}" "$(( val_hours * 3600 ))" || rc=2
@@ -13969,7 +14295,7 @@ _ci_rh_cleanup_run() {
     _ci_rh_prune_volumes || rc=2
     after="$(_ci_capture 0 df -P "${disk}")" || return 2
     printf -- '--- disk usage after cleanup ---\n%s\n' "${after}"
-    after="$(_ci_capture 0 awk "NR == 2 { print \$3 }" <<<"${after}")" || return 2
+    after="$(_ci_df_used "${after}")"
     kb=$(( before - after ))
     printf 'reclaimed: %s KiB (%s MiB) on %s\n=== %s runner-host cleanup done rc=%s ===\n' "${kb}" "$(( kb / 1024 ))" "${disk}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${rc}"
     return "${rc}"
@@ -14765,6 +15091,7 @@ _ci_rh_grep_or() {
 # From: Issue #1622 | PR #1624
 _ci_rh_purge_pve_check() {
     local keep pkgs pkg_raw sim families units fstab pdir procs crons d open hits rss dpkg_out unit_out
+    local kb name total=0
     _ci_rh_need_sudo || return 2
     pdir="$(_ci_rh_val pve_config_dir)" || return 2
     procs="$(_ci_rh_ere pve_process_families)" || return 2
@@ -14814,7 +15141,11 @@ _ci_rh_purge_pve_check() {
     done <<< "${crons}"
     printf '\n--- RSS of the PVE stack processes ---\n'
     rss="$(_ci_capture 0 ps -eo rss=,comm=)" || return 2
-    awk -v re="${procs}" 'tolower($2) ~ re { kb += $1 } END { printf "  %d MiB\n", kb / 1024 }' <<< "${rss}"
+    while read -r kb name _; do
+        [[ "${name,,}" =~ ${procs} ]] || continue
+        if [[ "${kb}" =~ ^[0-9]+$ ]]; then total=$((total + kb)); fi
+    done <<< "${rss}"
+    printf '  %d MiB\n' "$((total / 1024))"
     printf '\n--- Simulated purge (no kernel or firmware must appear) ---\n'
     sim="$(_ci_run -m 100 "[CI-ERROR-RUNNER-0054]" "reason=\"simulated purge failed\"" _ci_rh_root apt-get purge --simulate "${pkgs[@]}")" || return 2
     printf '%s\n' "${sim}"
@@ -14826,6 +15157,7 @@ _ci_rh_purge_pve_check() {
 # From: Issue #1622 | PR #1624
 _ci_rh_purge_pve() {
     local keep pkgs pkg_raw svcs svc_raw sim rem procs bad families proc_families override dpkg_out ps_out
+    local line pid rows=""
     _ci_rh_confirmed CONFIRM_PURGE_PVE || return 2
     keep="$(_ci_rh_pve_keep_ere)" || return 2
     families="$(_ci_rh_ere pve_package_families)" || return 2
@@ -14859,7 +15191,13 @@ _ci_rh_purge_pve() {
     rem="$(_ci_run -m 1 "[CI-ERROR-RUNNER-0114]" "reason=\"remaining packages not scanned\"" grep -iE "^ii.*(${families})" <<< "${dpkg_out}")" || return 2
     bad="$(_ci_run -m 1 "[CI-ERROR-RUNNER-0115]" "reason=\"boot packages not filtered\"" grep -viE "${keep}" <<< "${rem}")" || return 2
     procs="$(_ci_run -m 1 "[CI-ERROR-RUNNER-0116]" "reason=\"remaining processes not scanned\"" grep -E "${proc_families}" <<< "${ps_out}")" || return 2
-    procs="$(_ci_capture 0 awk -v self="$$" "\$1 != self && \$0 !~ /grep|awk/" <<< "${procs}")" || return 2
+    while IFS= read -r line; do
+        read -r pid _ <<< "${line}"
+        [ "${pid}" != "$$" ] || continue
+        [[ "${line}" != *grep* && "${line}" != *awk* ]] || continue
+        rows+="${line}"$'\n'
+    done <<< "${procs}"
+    procs="${rows%$'\n'}"
     printf -- '--- Verification ---\nRemaining packages (kernel/firmware only expected):\n%s\nRemaining processes (none expected):\n%s\n' "${rem:-  (none)}" "${procs:-  (none)}"
     if [ -n "${bad}" ] || [ -n "${procs}" ]; then
         ci_log "[CI-ERROR-RUNNER-0058]" "reason=\"purge-pve did not remove the whole stack\""
@@ -15439,7 +15777,7 @@ _ci_scan_files() {
     local -n _ci_scan_out="$1" _ci_scan_override="$2"
     shift 2
     local -a _ci_scan_in=()
-    local _ci_scan_p _ci_scan_gone=0 _ci_scan_raw
+    local _ci_scan_p _ci_scan_gone=0 _ci_scan_raw _ci_scan_gone_list=""
     # What: git ls-files only when needed; failure is fatal.
     # Why: an empty list would report every check as clean.
     # From: Issue #1683 | PR #1858
@@ -15476,10 +15814,15 @@ _ci_scan_files() {
             _ci_scan_out+=("${_ci_scan_p}")
         else
             _ci_scan_gone=$((_ci_scan_gone + 1))
+            _ci_scan_gone_list+="${_ci_scan_p}"$'\n'
         fi
     done
+    # What: name each skipped path, not only the count.
+    # Why: AG-INT-002: the log shows what was not checked.
+    # From: Issue #1683 | PR #1858
     if [ "${_ci_scan_gone}" -gt 0 ]; then
         ci_log "[CI-NOTICE-CHECK-0070]" "skipped=${_ci_scan_gone} reason=\"path not in the tree (deleted)\""
+        printf 'raw:\n%s' "${_ci_scan_gone_list}" >&2
     fi
 }
 
@@ -16743,53 +17086,58 @@ _ci_check_pinned_external_images() {
 # Why: one parser for PR-body sections (template, close).
 # From: Issue #1683 | PR #1858
 _ci_pr_section() {
-    local text="$1" heading="$2" out
+    local text="$1" h="## $2" line trim count=0 found=0 fence=0 body=""
+    local sec_fence_re='^ {0,3}(```|~~~)' sec_head_re=$'^#+([ \t]|$)'
     # What: a heading outside code fences ends the section.
     # Why: a fenced or a level-3 heading must not bleed.
     # From: Issue #1496 | PR #1858
-    if ! out="$(awk -v h="## ${heading}" '
-        { sub(/\r$/, "") }
-        /^(   |  | )?(```|~~~)/ { fence = !fence; if (found == 1) print; next }
-        !fence && match($0, /^#+([ \t]|$)/) && RLENGTH <= 7 {
-            line = $0; sub(/[ \t]+$/, "", line)
-            if (line == h) { count++; if (found == 0) { found = 1; next } }
-            if (found == 1) found = 2
-            next
-        }
-        found == 1 { print }
-        END { printf "%d\n", count }
-    ' <<< "${text}" 2>&1)"; then
-        ci_error "[CI-ERROR-CHECK-0143]" "heading=\"${heading}\" reason=\"PR body section parse failed\"" "${out}"
-        return 2
-    fi
-    printf '%s\n' "${out##*$'\n'}"
-    [ "${out}" = "${out##*$'\n'}" ] || printf '%s\n' "${out%$'\n'*}"
+    while IFS= read -r line; do
+        line="${line%$'\r'}"
+        if [[ "${line}" =~ ${sec_fence_re} ]]; then
+            fence=$((1 - fence))
+            if [ "${found}" -eq 1 ]; then body+="${line}"$'\n'; fi
+            continue
+        fi
+        if [ "${fence}" -eq 0 ] && [[ "${line}" =~ ${sec_head_re} ]] \
+            && [ "${#BASH_REMATCH[0]}" -le 7 ]; then
+            trim="${line}"
+            while [[ "${trim}" == *[$' \t'] ]]; do trim="${trim%?}"; done
+            if [ "${trim}" = "${h}" ]; then
+                count=$((count + 1))
+                if [ "${found}" -eq 0 ]; then found=1; continue; fi
+            fi
+            if [ "${found}" -eq 1 ]; then found=2; fi
+            continue
+        fi
+        if [ "${found}" -eq 1 ]; then body+="${line}"$'\n'; fi
+    done <<< "${text}"
+    printf '%d\n%s' "${count}" "${body}"
 }
 
 # What: Drop HTML comments from Markdown text.
 # Why: template hints are not content (template, notes).
 # From: Issue #1683 | PR #1858
 _ci_md_strip_comments() {
-    local out
-    if ! out="$(awk '
-        {
-            line = $0; keep = ""
-            while (1) {
-                if (incm) {
-                    p = index(line, "-->")
-                    if (!p) break
-                    line = substr(line, p + 3); incm = 0
-                }
-                p = index(line, "<!--")
-                if (!p) { keep = keep line; break }
-                keep = keep substr(line, 1, p - 1); line = substr(line, p + 4); incm = 1
-            }
-            print keep
-        }
-    ' <<< "$1" 2>&1)"; then
-        ci_error "[CI-ERROR-CHECK-0144]" "reason=\"HTML comment strip failed\"" "${out}"
-        return 2
-    fi
+    local line keep incm=0 out="" cmt_open='<!--' cmt_close='-->'
+    while IFS= read -r line; do
+        keep=""
+        while :; do
+            if [ "${incm}" -eq 1 ]; then
+                [[ "${line}" == *"${cmt_close}"* ]] || break
+                line="${line#*"${cmt_close}"}"
+                incm=0
+            fi
+            if [[ "${line}" != *"${cmt_open}"* ]]; then
+                keep+="${line}"
+                break
+            fi
+            keep+="${line%%"${cmt_open}"*}"
+            line="${line#*"${cmt_open}"}"
+            incm=1
+        done
+        out+="${keep}"$'\n'
+    done <<< "$1"
+    while [[ "${out}" == *$'\n' ]]; do out="${out%$'\n'}"; done
     printf '%s\n' "${out}"
 }
 
@@ -17020,40 +17368,46 @@ _ci_branch_long_lived() {
 # Why: ref grammar bounds a name; no substring false hit.
 # From: Issue #1683 | PR #1858
 _ci_unreferenced_names() {
-    local wanted="$1" file="$2" out
+    local wanted="$1" file="$2" out="" w lines line str rest pre s before after hit from
     # What: bound = start/end or a char no ref holds.
     # Why: git-check-ref-format; prose quotes also bound.
     # From: Issue #1683 | PR #1858
-    if ! out="$(awk -v names="${wanted}" -v q="'" '
-        function bound(c) { return c == "" || c == q || index(" \t\n~^:?*[]\\`\"(),<>;!", c) > 0 }
-        BEGIN { n = split(names, want, "\n") }
-        { text = text $0 "\n" }
-        END {
-            for (i = 1; i <= n; i++) {
-                w = want[i]; hit = 0; from = 1
-                if (w == "") continue
-                while (!hit && (p = index(substr(text, from), w)) > 0) {
-                    s = from + p - 1; e = s + length(w)
-                    a = substr(text, e, 1)
-                    if (a == "." || a == "/") a = substr(text, e + 1, 1)
-                    if (bound(s > 1 ? substr(text, s - 1, 1) : "") && bound(a)) hit = 1
-                    from = s + 1
-                }
-                if (!hit) print w
-            }
-        }
-    ' "${file}" 2>&1)"; then
-        ci_error "[CI-ERROR-CHECK-0140]" "file=\"${file}\" reason=\"reference match failed\"" "${out}"
-        return 2
-    fi
-    [ -z "${out}" ] || printf '%s\n' "${out}"
+    local ref_bound=$' \t\n~^:?*[]\\`"(),<>;!\''
+    while IFS= read -r w; do
+        [ -n "${w}" ] || continue
+        # What: only lines that hold the name are scanned.
+        # Why: a newline is a bound; grep keeps it fast.
+        # From: Issue #1683 | PR #1858
+        lines="$(_ci_capture 1 grep -aF -e "${w}" "${file}")" || return 2
+        hit=0
+        while [ "${hit}" -eq 0 ] && IFS= read -r line; do
+            str="${line}"$'\n'
+            from=0
+            while [ "${hit}" -eq 0 ]; do
+                rest="${str:from}"
+                [[ "${rest}" == *"${w}"* ]] || break
+                pre="${rest%%"${w}"*}"
+                s=$((from + ${#pre}))
+                before=$'\n'
+                [ "${s}" -eq 0 ] || before="${str:s-1:1}"
+                after="${str:s+${#w}:1}"
+                [[ "${after}" != [./] ]] || after="${str:s+${#w}+1:1}"
+                if [[ "${ref_bound}" == *"${before}"* && ( -z "${after}" || "${ref_bound}" == *"${after}"* ) ]]; then
+                    hit=1
+                fi
+                from=$((s + 1))
+            done
+        done <<< "${lines}"
+        [ "${hit}" -eq 1 ] || out+="${w}"$'\n'
+    done <<< "${wanted}"
+    [ -z "${out}" ] || printf '%s' "${out}"
 }
 
 # What: AG-GH-017 sweep: old work branch, no PR or issue.
 # Why: repo-wide by nature (docs §98); a finding is rc 1.
 # From: Issue #1683 | PR #1858
 _ci_check_orphaned_branches() {
-    local repo min_age now exact regexes raw src rows rc=0
+    local repo min_age now exact regexes raw src rows ref rc=0
     repo="$(_ci_repo)" || return 2
     if [ -z "${GH_TOKEN:-}" ]; then
         ci_log "[CI-ERROR-CHECK-0130]" "repo=\"${repo}\" reason=\"GH_TOKEN is required\""
@@ -17069,7 +17423,12 @@ _ci_check_orphaned_branches() {
     # From: Issue #1683 | PR #1858
     raw="$(_ci_channel_field ref)" || return 2
     src="$(_ci_channel_field source_ref)" || return 2
-    exact="$(_ci_capture 0 awk "\$2 ~ /^refs\\/heads\\// { sub(/^refs\\/heads\\//, \"\", \$2); print \$2 }" <<< "${raw}"$'\n'"${src}")" || return 2
+    exact=""
+    while read -r _ ref _; do
+        [[ "${ref}" == refs/heads/* ]] || continue
+        exact+="${ref#refs/heads/}"$'\n'
+    done <<< "${raw}"$'\n'"${src}"
+    exact="${exact%$'\n'}"
     raw="$(_ci_block_entry_list branch_policy "" long_lived)" || return 2
     exact+=$'\n'"${raw}"
     regexes="$(_ci_block_entry_list branch_policy "" long_lived_regex)" || return 2
@@ -19501,11 +19860,11 @@ _ci_check_shellcheck() {
     for f in "${files[@]}"; do
         sc_rc=0
         sc_one="$(shellcheck --norc "${f}" 2>&1)" || sc_rc=$?
-        # What: rc 1 = findings; any other rc = no result.
+        # What: rc 0 logs; 1 = findings; else no result.
         # Why: a killed run (137) must not read as findings.
         # From: Issue #1683 | PR #1858
         case "${sc_rc}" in
-            0) ;;
+            0) [ -z "${sc_one}" ] || printf 'raw: %s\n%s\n' "${f}" "${sc_one}" >&2 ;;
             1) sc_found=1; sc_out="${sc_out}${sc_one}"$'\n' ;;
             *)
                 sc_broken=1
@@ -19531,10 +19890,20 @@ _ci_check_actionlint() {
     wf="$(_ci_repo_path CI_WORKFLOW_DIR "${repo_root}")" || return 2
     _ci_workflow_files wfs "${wf}" || return 2
     out="$(actionlint "${wfs[@]}" 2>&1)" || rc=$?
-    if [ "${rc}" -ne 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0057]" "reason=\"actionlint found issues\"" "${out}"
-        return 1
-    fi
+    # What: rc 1 = findings; any other rc = no result.
+    # Why: a missing actionlint (127) is not a finding.
+    # From: Issue #1683 | PR #1858
+    case "${rc}" in
+        0) ;;
+        1)
+            ci_error "[CI-ERROR-CHECK-0057]" "reason=\"actionlint found issues\"" "${out}"
+            return 1
+            ;;
+        *)
+            ci_error "[CI-ERROR-CHECK-0209]" "rc=${rc} reason=\"actionlint did not complete\"" "${out}"
+            return 2
+            ;;
+    esac
     # What: actionlint output is shown on a pass too.
     # Why: AG-INT-002: raw evidence of a passed run too.
     # From: Issue #1683 | PR #1858
