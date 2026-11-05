@@ -10240,7 +10240,7 @@ _ci_pat_git() {
 # Why: a GITHUB_TOKEN tag push starts no release run
 # From: Issue #1683 | PR #1858
 _ci_push_release_tag() {
-    local tag="$1" sha="$2" url raw got
+    local tag="$1" sha="$2" url raw got obj name peeled="" direct=""
     url="$(_ci_pat_url)" || return 2
     _ci_run "[CI-ERROR-RELEASE-0026]" "tag=\"${tag}\" sha=\"${sha}\" reason=\"annotated tag not created\"" \
         _ci_git_as_bot tag -a "${tag}" "${sha}" -m "Patch release ${tag}" || return 2
@@ -10250,7 +10250,11 @@ _ci_push_release_tag() {
     # Why: AG-WF-031: every GitHub write is read back
     # From: Issue #1683 | PR #1858
     raw="$(_ci_capture 0 _ci_pat_git ls-remote --tags "${url}" "refs/tags/${tag}" "refs/tags/${tag}^{}")" || return 2
-    got="$(_ci_capture 0 awk -v r="refs/tags/${tag}" "\$2 == r \"^{}\" { p = \$1 } \$2 == r { d = \$1 } END { print (p != \"\" ? p : d) }" <<< "${raw}")" || return 2
+    while read -r obj name _; do
+        [ "${name}" != "refs/tags/${tag}^{}" ] || peeled="${obj}"
+        [ "${name}" != "refs/tags/${tag}" ] || direct="${obj}"
+    done <<< "${raw}"
+    got="${peeled:-${direct}}"
     if [ "${got}" != "${sha}" ]; then
         ci_error "[CI-ERROR-RELEASE-0048]" "tag=\"${tag}\" sha=\"${sha}\" found=\"${got}\" reason=\"pushed tag not read back at the cut commit\"" "${raw}"
         return 2
