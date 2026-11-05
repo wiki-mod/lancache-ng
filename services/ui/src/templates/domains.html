@@ -628,12 +628,12 @@
 
       if (response.ok) {
         const data = await response.json();
-        alert(`Token erfolgreich rotiert für ${name}`);
+        alert(LC_T.js_token_renewed_x.replace('{x}', name));
       } else {
-        alert(`Fehler beim Rotieren des Tokens: ${response.statusText}`);
+        alert(LC_T.js_token_renew_failed_x.replace('{x}', response.statusText));
       }
     } catch (error) {
-      alert(`Fehler: ${error.message}`);
+      alert(LC_T.js_error_x.replace('{x}', error.message));
     }
   }
 
@@ -653,13 +653,13 @@
       });
 
       if (response.ok) {
-        alert(`${name} erfolgreich entfernt.`);
+        alert(LC_T.js_removed_x.replace('{x}', name));
         location.reload();
       } else {
-        alert(`Fehler beim Entfernen: ${response.statusText}`);
+        alert(LC_T.js_remove_failed_x.replace('{x}', response.statusText));
       }
     } catch (error) {
-      alert(`Fehler: ${error.message}`);
+      alert(LC_T.js_error_x.replace('{x}', error.message));
     }
   }
 
@@ -689,7 +689,7 @@
   // Why: the DNS probe runs on the server, not in the page
   async function checkSecondaryHealth(name) {
     const span = document.getElementById('health-' + name);
-    if (span) { span.className = 'text-slate-400'; span.textContent = 'Prüfe…'; }
+    if (span) { span.className = 'text-slate-400'; span.textContent = LC_T.js_checking; }
     try {
       const response = await fetch('{{ routes.secondary_health | safe }}'.replace('{name}', name), {
         method: 'POST',
@@ -699,17 +699,17 @@
         renderHealth(span, await response.json());
       } else if (span) {
         span.className = 'text-red-400';
-        span.textContent = `Fehler (${response.status})`;
+        span.textContent = LC_T.js_error_x.replace('{x}', response.status);
       }
     } catch (error) {
-      if (span) { span.className = 'text-red-400'; span.textContent = `Fehler: ${error.message}`; }
+      if (span) { span.className = 'text-red-400'; span.textContent = LC_T.js_error_x.replace('{x}', error.message); }
     }
   }
 
   // What: prompt() for a new address, POST, then reload
   // Why: the server checks it; 400 means not a private IPv4
   async function editSecondaryAddress(name, current) {
-    const input = prompt(`Adresse (private IPv4) für ${name}:`, current || '');
+    const input = prompt(LC_T.js_address_for_x.replace('{x}', name), current || '');
     if (input === null) return;
     try {
       const response = await fetch('{{ routes.secondary_address | safe }}'.replace('{name}', name), {
@@ -722,10 +722,10 @@
       } else if (response.status === 400) {
         alert(LC_T.invalid_address_only_private_ipv4_addres);
       } else {
-        alert(`Fehler beim Speichern der Adresse: ${response.statusText}`);
+        alert(LC_T.js_address_save_failed_x.replace('{x}', response.statusText));
       }
     } catch (error) {
-      alert(`Fehler: ${error.message}`);
+      alert(LC_T.js_error_x.replace('{x}', error.message));
     }
   }
 
