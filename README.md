@@ -544,6 +544,8 @@ If the setup asks whether the Admin UI should be password protected, using a pas
 
 Do not expose the Admin UI to the internet.
 
+Settings changed in the Admin UI are saved in `lancache-ui-settings.env` in the UI data folder (`UI_SETTINGS_FILE` and `UI_DATA_DIR` in `.github/yaml/build-manifest.yml`). They win over the built-in defaults and survive an update. The nginx templates of the proxy are kept in `services/ui/nginx/` and are rendered into the proxy config folder (`NGINX_CONF_DIR`).
+
 ## HTTPS mode certificate
 
 HTTPS mode generates a local CA certificate.
