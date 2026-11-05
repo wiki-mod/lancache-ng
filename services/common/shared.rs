@@ -3772,7 +3772,7 @@ pub mod kea {
         }
 
         // What: apply a new config to the running Kea.
-        // Why: dhcp mounts the file read-only; the ui saves.
+        // Why: dhcp mounts it read-only; the ui saves.
         // From: Issue #1683 | PR #1980
         pub async fn set_config(&self, config: Value) -> Result<(), String> {
             self.command("config-set", Some(config)).await.map(drop)
