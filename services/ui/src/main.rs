@@ -2389,10 +2389,11 @@ async fn apply_all(app: &App, old: &Settings, new: &Settings) -> Result<Vec<Stri
     let mut plan = apply::plan(&changes);
     let (grace, limit) = app.limits(new)?;
     // What: mode off stops dhcp; a missing one is fine.
-    // Why: compose may not create it; others still apply.
+    // Why: live: compose up started it again at start.
     // From: Issue #1683 | PR #1980
     let dhcp = new.text("DHCP_SERVICE")?;
-    if new.text("DHCP_MODE")? == "off" && plan.remove(&dhcp).is_some() {
+    if new.text("DHCP_MODE")? == "off" {
+        plan.remove(&dhcp);
         match container_of(app, new, &dhcp).await {
             Ok(name) => {
                 let r = app
@@ -2420,7 +2421,32 @@ async fn apply_all(app: &App, old: &Settings, new: &Settings) -> Result<Vec<Stri
     let lookup = |owner: &str| names.get(owner).cloned().unwrap_or_default();
     let hup = new.list("HUP_OWNERS");
     let mut restarted = Vec::new();
-    for (owner, result) in apply::run(&app.docker, &plan, &hup, &lookup, grace, limit).await {
+    let mut results = apply::run(&app.docker, &plan, &hup, &lookup, grace, limit).await;
+    // What: one more try for owners that got a 409.
+    // Why: live: restart while compose recreated proxy.
+    // From: Issue #1683 | PR #1980
+    if results
+        .iter()
+        .any(|(_, r)| matches!(r, apply::Outcome::Failed(docker::Error::Status(409))))
+    {
+        tokio::time::sleep(limit).await;
+        let again: BTreeMap<_, _> = plan
+            .iter()
+            .filter(|(o, _)| {
+                results.iter().any(|(x, r)| {
+                    x == *o && matches!(r, apply::Outcome::Failed(docker::Error::Status(409)))
+                })
+            })
+            .map(|(o, e)| (o.clone(), *e))
+            .collect();
+        let retried = apply::run(&app.docker, &again, &hup, &lookup, grace, limit).await;
+        for (owner, r) in retried {
+            if let Some(slot) = results.iter_mut().find(|(x, _)| *x == owner) {
+                slot.1 = r;
+            }
+        }
+    }
+    for (owner, result) in results {
         if matches!(result, apply::Outcome::Done(docker::Action::Restart)) {
             restarted.push(lookup(&owner));
         }
