@@ -1042,6 +1042,28 @@ fn in_zone(name: &str, zone: &str) -> String {
     }
 }
 
+// What: content in the form PowerDNS stores.
+// Why: TXT needs quotes; target names end in a dot.
+// From: Issue #1683 | PR #1980
+fn canonical(kind: &str, c: &str) -> String {
+    let dot = |n: &str| {
+        if n.ends_with('.') {
+            n.to_string()
+        } else {
+            format!("{n}.")
+        }
+    };
+    match kind {
+        "TXT" if !c.starts_with('"') => format!("\"{}\"", c.replace('"', "\\\"")),
+        "CNAME" => dot(c),
+        "MX" | "SRV" => match c.rsplit_once(' ') {
+            Some((head, target)) => format!("{head} {}", dot(target)),
+            None => c.to_string(),
+        },
+        _ => c.to_string(),
+    }
+}
+
 // What: add or remove one LAN record set.
 // Why: PATCH sets or deletes; NOTIFY follows.
 // From: Issue #1683 | PR #1858
@@ -1064,7 +1086,7 @@ async fn record(
             .split(';')
             .map(str::trim)
             .filter(|c| !c.is_empty())
-            .map(String::from)
+            .map(|c| canonical(&kind, c))
             .collect();
         let max = s.uint("DNS_RECORD_TTL_MAX")?;
         ttl = get("ttl").parse::<u32>().unwrap_or(0);
