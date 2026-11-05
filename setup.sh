@@ -8994,6 +8994,7 @@ NTP_DATA_DIR=${NTP_DATA_DIR}
 KEA_CTRL_TOKEN=${KEA_CTRL_TOKEN?}
 DDNS_TSIG_KEY=${DDNS_TSIG_KEY?}
 PDNS_API_KEY=${PDNS_API_KEY?}
+SNMP_COMMUNITY=${SNMP_COMMUNITY?}
 
 # What: token for ./setup.sh secondary registration
 # Why: whoever knows it can register a secondary
