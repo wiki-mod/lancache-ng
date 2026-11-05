@@ -1830,9 +1830,13 @@ _ci_pr_fingerprint() {
 # Why: a new digest of any pair needs the full run.
 # From: Issue #1683 | PR #1858
 _ci_pr_fingerprint_pair() {
-    local id digest rc=0
+    local id tag digest rc=0
     id="$(_ci_identity_for "$1" "$2")" || return 2
-    digest="$(_ci_published_digest "$1" "$2" ok)" || rc=$?
+    tag="$(_ci_image_tag "$1" "$2" "${id}")" || return 2
+    # What: plan reads the probe it already made.
+    # Why: 12 pairs read again cost 5 s on a NOOP run.
+    # From: Issue #1683 | PR #1858
+    digest="$(_ci_registry_probe_kept "${tag}")" || rc=$?
     case "${rc}" in
         0) _ci_fp_rows+="pair $1 $2 ${id} ${digest}"$'\n' ;;
         1) _ci_fp_absent+="$1/$2 " ;;
@@ -2216,10 +2220,6 @@ ci_cmd_plan_matrix() {
         any_runner=true
         [ "${svc_type}" != rust ] || rust_audit=true
     done <<< "${pairs}"
-    # What: drop the kept probes once plan has used them.
-    # Why: §26: a later read in this call asks the registry.
-    # From: Issue #1683 | PR #1858
-    _CI_PROBE_KEPT=() _CI_PROBE_ERR=()
     ci_group "plan: release gate, promote, reuse"
     # What: a release builds nothing; the gate decides.
     # Why: §82: release.yml never builds; ci.yml builds it.
@@ -2268,6 +2268,10 @@ ci_cmd_plan_matrix() {
             *) return "${rc}" ;;
         esac
     fi
+    # What: drop the kept probes once the reuse check ran.
+    # Why: §26: a later read in this call asks the registry.
+    # From: Issue #1683 | PR #1858
+    _CI_PROBE_KEPT=() _CI_PROBE_ERR=()
     # What: promote a ref target not yet on the candidate
     # Why: §50 needs no build; §8: no retag when current
     # From: Issue #1683 | PR #1858
