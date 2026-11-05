@@ -12127,6 +12127,10 @@ _ci_validate_kea_snapshots() {
         ci_log "[CI-ERROR-CHECK-0197]" "key=\"KEA_CONFIG_SNAPSHOT_FILE\" value=\"${file}\" reason=\"SOT snapshot file name is no plain file name\""
         return 2
     fi
+    # What: no snapshot dir yet means no snapshots.
+    # Why: the ui makes it with its first Kea write.
+    # From: Issue #763 | PR #1980
+    [ -d "$1" ] || return 0
     found="$(_ci_capture 0 find "$1" -mindepth 2 -maxdepth 2 -name "${file}")" || return 2
     while IFS= read -r p; do
         id="${p%/"${file}"}"
