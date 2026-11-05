@@ -95,11 +95,6 @@ services:
     healthcheck:
       <<: *healthcheck-timing
       test: ["CMD", "lancache-watchdog", "healthcheck"]
-    # What: /run as tmpfs for OpenRC.
-    # Why: OpenRC mounts /run itself; Docker denies it.
-    # From: Issue #1683 | PR #1980
-    tmpfs:
-      - ${SOT_RUN_DIR}
     container_name: ${SOT_CONTAINER_NAME_SERVICES}
     image: ${LANCACHE_IMAGE_REF_SERVICES:?LANCACHE_IMAGE_REF_SERVICES is required}
     environment:
@@ -219,11 +214,6 @@ services:
     healthcheck:
       <<: *healthcheck-timing
       test: ["CMD-SHELL", "dig +time=2 +tries=1 -p ${SOT_DNS_PORT} @${SOT_LOOPBACK_BIND_IP} ${SOT_SETUP_DNS_PROBE_NAME} >/dev/null"]
-    # What: /run as tmpfs for OpenRC.
-    # Why: OpenRC mounts /run itself; Docker denies it.
-    # From: Issue #1683 | PR #1980
-    tmpfs:
-      - ${SOT_RUN_DIR}
     container_name: ${SOT_CONTAINER_NAME_DNS}
     image: ${LANCACHE_IMAGE_REF_DNS:?LANCACHE_IMAGE_REF_DNS is required}
     environment:
@@ -273,11 +263,6 @@ services:
     healthcheck:
       <<: *healthcheck-timing
       test: ["CMD-SHELL", "! rc-status --crashed | grep -q ."]
-    # What: /run as tmpfs for OpenRC.
-    # Why: OpenRC mounts /run itself; Docker denies it.
-    # From: Issue #1683 | PR #1980
-    tmpfs:
-      - ${SOT_RUN_DIR}
     container_name: ${SOT_CONTAINER_NAME_DHCP}
     image: ${LANCACHE_IMAGE_REF_DHCP:?LANCACHE_IMAGE_REF_DHCP is required}
     environment:
