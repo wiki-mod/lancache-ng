@@ -497,6 +497,21 @@ _ci_tab_row() {
     return 1
 }
 
+# What: $2 trimmed, each blank run one space, into var $1.
+# Why: one blank fold owner; no awk gsub (Fund 136).
+# From: Issue #1683 | PR #1858
+_ci_ws_fold() {
+    local ws_in="$2" ws_out="" ws_run
+    ws_in="${ws_in#"${ws_in%%[![:space:]]*}"}"
+    ws_in="${ws_in%"${ws_in##*[![:space:]]}"}"
+    while [[ "${ws_in}" =~ [[:space:]]+ ]]; do
+        ws_run="${BASH_REMATCH[0]}"
+        ws_out+="${ws_in%%"${ws_run}"*} "
+        ws_in="${ws_in#*"${ws_run}"}"
+    done
+    printf -v "$1" '%s' "${ws_out}${ws_in}"
+}
+
 # What: line 2 of the text; nothing when it has one line.
 # Why: one second-line owner; no external line cutter.
 # From: Issue #1683 | PR #1912
@@ -3345,26 +3360,59 @@ _ci_context_build_rows() {
 # Why: the identity and the Dockerfile check share it.
 # From: Issue #1683 | PR #1858
 _ci_dockerfile_copy_sources() {
-    local lines
+    local lines line rest cut_at x i out=""
+    local -a copy_args copy_words
+    local copy_re='^[[:space:]]*COPY[[:space:]]'
+    local lead_re='^[[:space:]]*[^[:space:]]+[[:space:]]+'
+    local flag_re='^--[^[:space:]]*[[:space:]]+'
+    local open_re='^\[[[:space:]]*"' close_re='"[[:space:]]*\][[:space:]]*$'
+    local sep_re='"[[:space:]]*,[[:space:]]*"'
     # What: logical lines come from the one line reader.
     # Why: escape=, joins and heredoc rules live there.
     # From: Issue #1683 | PR #1858
     lines="$(_ci_capture 0 _ci_dockerfile_logical_lines - <<< "$1")" || return 2
-    _ci_capture 0 awk "$(cat <<'PROG'
-        toupper($0) !~ /^[[:space:]]*COPY[[:space:]]/ || $0 ~ /--from=/ { next }
-        { rest = $0; sub(/^[[:space:]]*[^[:space:]]+[[:space:]]+/, "", rest)
-          while (rest ~ /^--[^[:space:]]*[[:space:]]+/) sub(/^--[^[:space:]]*[[:space:]]+/, "", rest)
-          k = 0
-          if (rest ~ /^\[/) {
-              sub(/^\[[[:space:]]*"/, "", rest); sub(/"[[:space:]]*\][[:space:]]*$/, "", rest)
-              k = split(rest, a, /"[[:space:]]*,[[:space:]]*"/)
-          } else {
-              nw = split(rest, w, /[[:space:]]+/)
-              for (i = 1; i <= nw; i++) if (w[i] != "" && w[i] !~ /^<</) a[++k] = w[i]
-          }
-          for (i = 1; i < k; i++) print a[i] }
-PROG
-        )" <<< "${lines}"
+    while IFS= read -r line; do
+        [[ "${line^^}" =~ ${copy_re} ]] || continue
+        [[ "${line}" != *--from=* ]] || continue
+        [[ "${line}" =~ ${lead_re} ]]
+        rest="${line:${#BASH_REMATCH[0]}}"
+        while [[ "${rest}" =~ ${flag_re} ]]; do
+            rest="${rest:${#BASH_REMATCH[0]}}"
+        done
+        copy_args=()
+        # What: JSON form splits at '", "'; else at blanks.
+        # Why: the last item is the target, not a source.
+        if [[ "${rest}" == '['* ]]; then
+            if [[ "${rest}" =~ ${open_re} ]]; then
+                rest="${rest:${#BASH_REMATCH[0]}}"
+            fi
+            if [[ "${rest}" =~ ${close_re} ]]; then
+                rest="${rest:0:${#rest}-${#BASH_REMATCH[0]}}"
+            fi
+            if [ -n "${rest}" ]; then
+                while [[ "${rest}" =~ ${sep_re} ]]; do
+                    cut_at="${rest%%"${BASH_REMATCH[0]}"*}"
+                    copy_args+=("${cut_at}")
+                    rest="${rest:${#cut_at}+${#BASH_REMATCH[0]}}"
+                done
+                copy_args+=("${rest}")
+            fi
+        else
+            IFS=$' \t\n\r\v\f' read -r -a copy_words <<< "${rest}"
+            for x in "${copy_words[@]}"; do
+                if [ -n "${x}" ] && [[ "${x}" != '<<'* ]]; then
+                    copy_args+=("${x}")
+                fi
+            done
+        fi
+        for ((i = 0; i + 1 < ${#copy_args[@]}; i++)); do
+            out+="${copy_args[i]}"$'\n'
+        done
+    done <<< "${lines}"
+    # What: no trailing empty lines, as from a capture.
+    # Why: an empty JSON item at the end is no source.
+    out="${out%"${out##*[!$'\n']}"}"
+    [ -z "${out}" ] || printf '%s\n' "${out}"
 }
 
 # What: context paths the Rust reader owns, space-framed.
@@ -7744,54 +7792,80 @@ _ci_toolchain_entry() {
     printf '%s\t%s\n' "${key}" "${val}"
 }
 
-# What: P: name and V: version of an apk db record.
-# Why: one reader; each program defines pv(name, version).
+# What: "V|D|p|R<TAB>package<TAB>value" rows of an apk db.
+# Why: the one P:/V: reader for the db and the index.
 # From: Issue #1683 | PR #1858
-_CI_AWK_APK_PV="$(cat <<'PROG'
-/^P:/ { p = substr($0, 3); next }
-/^V:/ { pv(p, substr($0, 3)); next }
-PROG
-)"
-readonly _CI_AWK_APK_PV
-
-# What: apk packages reached from roots in an installed db.
-# Why: a D: entry names a package, a p: provide or a file.
-# From: Issue #1683 | PR #1858
-_CI_AWK_APK_CLOSURE="${_CI_AWK_APK_PV}"$'\n'"$(cat <<'PROG'
-function pv(n, v) { pkg[n] = 1; ver[n] = v }
-function bare(t) { sub(/[<>=~].*$/, "", t); return t }
-/^D:/ { dep[p] = substr($0, 3); next }
-/^p:/ { k = split(substr($0, 3), a, " "); for (i = 1; i <= k; i++) own[bare(a[i])] = p; next }
-/^F:/ { dir = substr($0, 3); next }
-/^R:/ { own["/" dir "/" substr($0, 3)] = p; next }
-END {
-    qn = split(roots, q, " ")
-    for (h = 1; h <= qn; h++) {
-        t = q[h]
-        if (t in pkg) i = t
-        else if (t in own) i = own[t]
-        else { print "unresolved: " t; bad = 1; continue }
-        if (i in sel) continue
-        sel[i] = 1
-        k = split(dep[i], a, " ")
-        for (j = 1; j <= k; j++) if (a[j] !~ /^!/) q[++qn] = bare(a[j])
-    }
-    if (bad) exit 2
-    for (i in sel) print i "=" ver[i]
+_ci_apk_db_rows() {
+    local lines line p="" dir=""
+    # What: tag letters $2 (default all) pick the rows.
+    # Why: an APKINDEX has many lines; grep keeps it fast.
+    # From: Issue #1683 | PR #1858
+    lines="$(_ci_capture 1 grep -a -E "^[${2:-PVDpFR}]:" "$1")" || return 2
+    while IFS= read -r line; do
+        case "${line}" in
+            '') ;;
+            P:*) p="${line:2}" ;;
+            F:*) dir="${line:2}" ;;
+            R:*) printf 'R\t%s\t/%s/%s\n' "${p}" "${dir}" "${line:2}" ;;
+            *) printf '%s\t%s\t%s\n' "${line:0:1}" "${p}" "${line:2}" ;;
+        esac
+    done <<< "${lines}"
 }
-PROG
-)"
-readonly _CI_AWK_APK_CLOSURE
 
 # What: sorted name=version of roots $3 in image $1 ($2).
 # Why: the closure holds the libs and tools the roots run.
 # From: Issue #1683 | PR #1858
 _ci_toolchain_closure() {
-    local ref="$1" platform="$2" roots="$3" work="$4" out
+    local ref="$1" platform="$2" roots="$3" work="$4" rows tag name val t i x bad="" h=0 out=""
+    local -A ver=() dep=() own=() sel=()
+    local -a rq=() toks=()
     _ci_image_files "${ref}" "${platform}" "${work}" /lib/apk/db/installed || return 2
-    out="$(_ci_run "[CI-ERROR-IDENTITY-0020]" "image=\"${ref}\" platform=\"${platform}\" reason=\"toolchain package closure not read\"" \
-        awk -v roots="${roots//$'\n'/ }" "${_CI_AWK_APK_CLOSURE}" "${work}/installed")" || return 2
-    _ci_capture 0 env LC_ALL=C sort <<< "${out}"
+    rows="$(_ci_apk_db_rows "${work}/installed")" || return 2
+    # What: a dep is a package, a p: provide or a file.
+    # Why: a provide drops its version; a file is /dir/name.
+    # From: Issue #1683 | PR #1858
+    while IFS=$'\t' read -r tag name val; do
+        [ -n "${name}" ] || continue
+        case "${tag}" in
+            V) ver["${name}"]="${val}" ;;
+            D) dep["${name}"]="${val}" ;;
+            R) own["${val}"]="${name}" ;;
+            p)
+                read -ra toks <<< "${val}"
+                for x in "${toks[@]}"; do
+                    x="${x%%[<>=~]*}"
+                    [ -z "${x}" ] || own["${x}"]="${name}"
+                done
+                ;;
+        esac
+    done <<< "${rows}"
+    read -ra rq <<< "${roots//$'\n'/ }"
+    while [ "${h}" -lt "${#rq[@]}" ]; do
+        t="${rq[h]}"
+        h=$((h + 1))
+        if [ -n "${t}" ] && [ -n "${ver["${t}"]+x}" ]; then
+            i="${t}"
+        elif [ -n "${t}" ] && [ -n "${own["${t}"]+x}" ]; then
+            i="${own["${t}"]}"
+        else
+            bad+="unresolved: ${t}"$'\n'
+            continue
+        fi
+        [ -z "${sel["${i}"]+x}" ] || continue
+        sel["${i}"]=1
+        read -ra toks <<< "${dep["${i}"]-}"
+        for x in "${toks[@]}"; do
+            [[ "${x}" == '!'* ]] || rq+=("${x%%[<>=~]*}")
+        done
+    done
+    if [ -n "${bad}" ]; then
+        ci_error "[CI-ERROR-IDENTITY-0020]" "image=\"${ref}\" platform=\"${platform}\" reason=\"toolchain package closure not read\"" "${bad%$'\n'}"
+        return 2
+    fi
+    for i in "${!sel[@]}"; do
+        out+="${i}=${ver["${i}"]-}"$'\n'
+    done
+    _ci_capture 0 env LC_ALL=C sort <<< "${out%$'\n'}"
 }
 
 # What: installed apk packages the index has newer.
@@ -7820,20 +7894,20 @@ _ci_apk_outdated() {
 # Why: apk version -t owns the order; no own compare.
 # From: Issue #1683 | PR #1858
 _ci_apk_newer() {
-    local pairs name have cand order behind=""
-    # What: P: then V: per record, in both file formats.
-    # Why: the one P:/V: reader for the db and the index.
-    # From: Issue #1683 | PR #1858
-    pairs="$(_ci_capture 0 awk 'function pv(n, v) {
-        if (file == 1) have[n] = v
-        else if ((n in have) && v != have[n]) print n "\t" have[n] "\t" v }
-        FNR == 1 { file++ }
-        '"${_CI_AWK_APK_PV}" "$1" "$2")" || return 2
-    while IFS=$'\t' read -r name have cand; do
-        [ -n "${name}" ] || continue
-        order="$(_ci_capture 0 apk version -t "${have}" "${cand}")" || return 2
-        [ "${order}" != "<" ] || behind+="${name} ${have} ${cand}"$'\n'
-    done <<< "${pairs}"
+    local rows tag name val order behind=""
+    local -A have=()
+    rows="$(_ci_apk_db_rows "$1" PV)" || return 2
+    while IFS=$'\t' read -r tag name val; do
+        [ "${tag}" != V ] || [ -z "${name}" ] || have["${name}"]="${val}"
+    done <<< "${rows}"
+    rows="$(_ci_apk_db_rows "$2" PV)" || return 2
+    while IFS=$'\t' read -r tag name val; do
+        if [ "${tag}" != V ] || [ -z "${name}" ] || [ -z "${have["${name}"]+x}" ] || [ "${val}" = "${have["${name}"]}" ]; then
+            continue
+        fi
+        order="$(_ci_capture 0 apk version -t "${have["${name}"]}" "${val}")" || return 2
+        [ "${order}" != "<" ] || behind+="${name} ${have["${name}"]} ${val}"$'\n'
+    done <<< "${rows}"
     [ -z "${behind}" ] || _ci_capture 0 env LC_ALL=C sort -u <<< "${behind%$'\n'}"
 }
 
@@ -9730,6 +9804,7 @@ ci_cmd_release_notes() {
 # From: Issue #894 | PR #1858
 ci_cmd_release_changelog() {
     local tag="${1:-}" branch="${CI_DEFAULT_BRANCH:-}" changes file head out remote url sha tip
+    local day entry line new="" put=0
     [ -n "${tag}" ] || { ci_log "[CI-ERROR-RELEASE-0032]" "reason=\"tag arg required\""; return 2; }
     file="$(_ci_variable CI_CHANGELOG)" || return 2
     _ci_release_tag_final "${tag}" || {
@@ -9751,14 +9826,20 @@ ci_cmd_release_changelog() {
         printf 'release-changelog=exists tag=%s line=%s\n' "${tag}" "${out%%:*}"
         return 0
     fi
+    day="$(_ci_capture 0 date -u +%Y-%m-%d)" || return 2
+    entry="${head} - ${day}"$'\n\n'"${changes}"
     # What: new entry goes above the first "## [" release.
     # Why: the pending section stays on top.
     # From: Issue #894 | PR #1858
-    if ! out="$(CI_CHANGES="${changes}" awk -v h="${head} - $(date -u +%Y-%m-%d)" '
-        !done && /^## \[/ { print h "\n\n" ENVIRON["CI_CHANGES"] "\n"; done = 1 }
-        { print }
-        END { if (!done) print "\n" h "\n\n" ENVIRON["CI_CHANGES"] }
-    ' "${file}" 2>&1 > "${file}.new")" || ! out="$(mv "${file}.new" "${file}" 2>&1)"; then
+    while IFS= read -r line || [ -n "${line}" ]; do
+        if [ "${put}" -eq 0 ] && [[ "${line}" == "## ["* ]]; then
+            new+="${entry}"$'\n\n'
+            put=1
+        fi
+        new+="${line}"$'\n'
+    done < "${file}"
+    [ "${put}" -eq 1 ] || new+=$'\n'"${entry}"$'\n'
+    if ! out="$(printf '%s' "${new}" 2>&1 > "${file}.new")" || ! out="$(mv "${file}.new" "${file}" 2>&1)"; then
         ci_error "[CI-ERROR-RELEASE-0034]" "file=\"${file}\" reason=\"changelog not rewritten\"" "${out}"
         rm -f "${file}.new"
         return 2
@@ -15875,6 +15956,31 @@ _ci_shell_sources() {
     done
 }
 
+# What: RUN shell text of Dockerfile lines $1; SHELL -> set.
+# Why: exec-form RUN is JSON; SHELL with pipefail sets -o.
+# From: Issue #1683 | PR #1858
+_ci_dockerfile_run_shell() {
+    local rs_line rs_txt rs_out=""
+    local rs_re='^[[:space:]]*--[A-Za-z-]+(=[^[:space:]]*)?[[:space:]]+'
+    while IFS= read -r rs_line; do
+        rs_line="${rs_line#"${rs_line%%[![:space:]]*}"}"
+        rs_txt="${rs_line:0:6}"
+        if [ "${rs_txt^^}" = "SHELL " ] && [[ "${rs_line}" == *pipefail* ]]; then
+            rs_out+="set -o pipefail"$'\n'
+            continue
+        fi
+        rs_txt="${rs_line:0:4}"
+        [ "${rs_txt^^}" = "RUN " ] || continue
+        rs_line="${rs_line:4}"
+        while [[ "${rs_line}" =~ ${rs_re} ]]; do
+            rs_line="${rs_line:${#BASH_REMATCH[0]}}"
+        done
+        rs_line="${rs_line#"${rs_line%%[![:space:]]*}"}"
+        [ "${rs_line:0:1}" = "[" ] || rs_out+="${rs_line}"$'\n'
+    done <<< "$1"
+    printf '%s' "${rs_out}"
+}
+
 # What: shfmt's JSON syntax tree of one source into $2.
 # Why: shell checks read the parser's tree, not raw text.
 # From: Issue #1683 | PR #1858
@@ -15883,21 +15989,7 @@ _ci_shell_ast() {
     case "${f##*/}" in
         Dockerfile)
             src="$(_ci_run "[CI-ERROR-CHECK-0165]" "file=\"${f}\" reason=\"Dockerfile lines unreadable\"" _ci_dockerfile_logical_lines "${f}")" || return 2
-            # What: RUN shell text; SHELL pipefail -> set.
-            # Why: exec-form RUN is JSON; SHELL sets -o.
-            # From: Issue #1683 | PR #1858
-            src="$(_ci_run "[CI-ERROR-CHECK-0163]" "file=\"${f}\" reason=\"RUN shell not extracted\"" awk "$(cat <<'PROG'
-                { t = $0; sub(/^[[:space:]]+/, "", t) }
-                toupper(substr(t, 1, 6)) == "SHELL " && t ~ /pipefail/ { print "set -o pipefail"; next }
-                toupper(substr(t, 1, 4)) != "RUN " { next }
-                {
-                    t = substr(t, 5)
-                    while (match(t, /^[[:space:]]*--[A-Za-z-]+(=[^[:space:]]*)?[[:space:]]+/)) t = substr(t, RLENGTH + 1)
-                    sub(/^[[:space:]]+/, "", t)
-                    if (substr(t, 1, 1) != "[") print t
-                }
-PROG
-                )" <<< "${src}")" || return 2 ;;
+            src="$(_ci_run "[CI-ERROR-CHECK-0163]" "file=\"${f}\" reason=\"RUN shell not extracted\"" _ci_dockerfile_run_shell "${src}")" || return 2 ;;
         *)
             [[ "${f##*/}" != *.bats ]] || lang=bats
             src="$(_ci_run "[CI-ERROR-CHECK-0166]" "file=\"${f}\" reason=\"source unreadable\"" cat -- "${f}")" || return 2 ;;
@@ -16635,7 +16727,9 @@ _ci_check_language_policy() {
 _ci_check_mutable_refs() {
     local -a _ci_override=("$@") files=() yml=() dock=() viol=()
     _ci_scan_files files _ci_override '.github/workflows/*.yml' "${CI_DOCKERFILE_SPECS[@]}" || return 2
-    local path out row
+    local path out row mr_line mr_img mr_as mr_n
+    local mr_syntax_re='^#[[:space:]]*syntax[[:space:]]*='
+    local -A mr_seen=()
     for path in "${files[@]}"; do
         case "${path}" in
             *.yml|*.yaml) yml+=("${path}") ;;
@@ -16658,18 +16752,21 @@ _ci_check_mutable_refs() {
         # What: FROM is an ARG, a stage alias or scratch.
         # Why: base_images owns each image; no pin here.
         # From: Issue #1683 | PR #1858
-        out="$(_ci_capture 0 awk "$(cat <<'PROG'
-            FNR == 1 { delete alias }
-            tolower($0) ~ /^#[[:space:]]*syntax[[:space:]]*=/ { print FILENAME ":" FNR " syntax-image: " $0; next }
-            toupper($1) == "FROM" {
-                i = 2; while ($i ~ /^--/) i++
-                img = tolower($i)
-                if (img !~ /^\$\{/ && img != "scratch" && !(img in alias)) print FILENAME ":" FNR " FROM-literal: " $0
-                if (toupper($(i + 1)) == "AS") alias[tolower($(i + 2))] = 1
-            }
-PROG
-        )" "${dock[@]}")" || return 2
-        while IFS= read -r row; do [ -z "${row}" ] || viol+=("${row}"); done <<< "${out}"
+        for path in "${dock[@]}"; do
+            mr_n=0
+            mr_seen=()
+            while IFS= read -r mr_line || [ -n "${mr_line}" ]; do
+                mr_n=$((mr_n + 1))
+                if [[ "${mr_line,,}" =~ ${mr_syntax_re} ]]; then
+                    viol+=("${path}:${mr_n} syntax-image: ${mr_line}"); continue
+                fi
+                _ci_dockerfile_from_parts "${mr_line}" mr_img mr_as || continue
+                if [[ "${mr_img}" != \$\{* && "${mr_img}" != scratch && -z "${mr_seen["k${mr_img}"]+x}" ]]; then
+                    viol+=("${path}:${mr_n} FROM-literal: ${mr_line}")
+                fi
+                [ -z "${mr_as}" ] || mr_seen["${mr_as}"]=1
+            done < "${path}" || return 2
+        done
     fi
     if [ "${#viol[@]}" -gt 0 ]; then
         ci_error "[CI-ERROR-CHECK-0008]" "reason=\"image reference outside the SOT\"" "$(printf '%s\n' "${viol[@]}")"
@@ -16751,19 +16848,30 @@ _ci_check_shell_guards() {
 _ci_check_bats_and_chain() {
     local -a _ci_override=("$@") files=()
     _ci_scan_files files _ci_override '.github/scripts/*.bats' || return 2
-    local path out
+    local path out bc_raw bc_line bc_cont bc_start bc_n
+    local bc_open_re='^[[:space:]]*\[\[?[[:space:]]'
+    local bc_and_re='\]\]?[[:space:]]*&&[[:space:]]*\['
+    local bc_close_re='\]\]?[[:space:]]*$'
     local -a viol=()
     for path in "${files[@]}"; do
-        out="$(_ci_capture 0 awk "$(cat <<'PROG'
-            { line = (cont != "" ? cont " " : "") $0; cont = "" }
-            /\\$/ { cont = substr(line, 1, length(line) - 1); if (!start) start = NR; next }
-            line ~ /^[[:space:]]*\[\[?[[:space:]]/ && line ~ /\]\]?[[:space:]]*&&[[:space:]]*\[/ \
-                && line ~ /\]\]?[[:space:]]*$/ && line !~ /\|\|/ {
-                print (start ? start : NR) ": " line
-            }
-            { start = 0 }
-PROG
-        )" "${path}")" || return 2
+        out="" bc_cont="" bc_start=0 bc_n=0
+        # What: \ at line end joins the next line.
+        # Why: the finding names the first line of the join.
+        while IFS= read -r bc_raw || [ -n "${bc_raw}" ]; do
+            bc_n=$((bc_n + 1))
+            bc_line="${bc_cont:+${bc_cont} }${bc_raw}"
+            bc_cont=""
+            if [[ "${bc_raw}" == *\\ ]]; then
+                bc_cont="${bc_line%\\}"
+                [ "${bc_start}" -ne 0 ] || bc_start="${bc_n}"
+                continue
+            fi
+            if [[ "${bc_line}" =~ ${bc_open_re} && "${bc_line}" =~ ${bc_and_re} && "${bc_line}" =~ ${bc_close_re} && "${bc_line}" != *'||'* ]]; then
+                out+="$((bc_start ? bc_start : bc_n)): ${bc_line}"$'\n'
+            fi
+            bc_start=0
+        done < "${path}" || return 2
+        out="${out%$'\n'}"
         [ -z "${out}" ] || viol+=("${path}: ${out}")
     done
     if [ "${#viol[@]}" -gt 0 ]; then
@@ -17897,41 +18005,49 @@ _ci_issue_meta() {
 # Why: GitHub grammar: keyword[:] #N or owner/repo#N.
 # From: Issue #1683 | PR #1858
 _ci_closing_refs() {
-    local text="$1" out
-    # What: skip a match negated by not/never/cannot/n't.
-    # Why: negated prose must never close an issue.
-    # From: Issue #1496 | PR #1858
-    if ! out="$(awk -v q="'" '
-        function negated(w,  n, i, k, words, at) {
-            n = split("not never cannot n" q "t", words, " ")
-            for (k = 1; k <= n; k++) {
-                at = 0
-                while ((i = index(substr(w, at + 1), words[k])) > 0) {
-                    at += i
-                    if ((k == n || at == 1 || substr(w, at - 1, 1) !~ /[a-z0-9_]/) && \
-                        length(w) - (at + length(words[k]) - 1) <= 20 && \
-                        substr(w, at + length(words[k]), 1) !~ /[a-z0-9_]/) return 1
-                }
-            }
-            return 0
-        }
-        { t = t $0 "\n" }
-        END {
-            low = tolower(t); pos = 1
-            re = "(close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved):?[ \t\n]+([a-z0-9_.-]+/[a-z0-9_.-]+)?#[0-9]+"
-            while (match(substr(low, pos), re)) {
-                s = pos + RSTART - 1; m = substr(low, s, RLENGTH); pos = s + RLENGTH
-                if (s > 1 && substr(low, s - 1, 1) ~ /[a-z0-9_]/) continue
-                w = substr(low, 1, s - 1); sub(/^.*[.!?\n]/, "", w)
-                if (negated(w)) continue
-                sub(/^[a-z]+:?[ \t\n]+/, "", m); print m
-            }
-        }
-    ' <<< "${text}" 2>&1)"; then
-        ci_error "[CI-ERROR-LINK-0001]" "reason=\"closing keyword parse failed\"" "${out}"
-        return 2
-    fi
-    [ -z "${out}" ] || printf '%s\n' "${out}"
+    local text="$1" out="" rest back="" cut m pre w neg wrest at np negated
+    local close_re=$'(close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved):?[ \t\n]+([a-z0-9_.-]+/[a-z0-9_.-]+)?#[0-9]+'
+    local key_re=$'^[a-z]+:?[ \t\n]+'
+    local nt=$'n\'t'
+    local -a neg_words=(not never cannot "${nt}")
+    rest="${text,,}"$'\n'
+    while [[ "${rest}" =~ ${close_re} ]]; do
+        m="${BASH_REMATCH[0]}"
+        pre="${rest%%"${m}"*}"
+        rest="${rest:${#pre}+${#m}}"
+        # What: keep only the last 40 chars before a match.
+        # Why: a negation counts only 20 chars back.
+        # From: Issue #1683 | PR #1858
+        cut="${back}${pre}"
+        [ "${#cut}" -le 40 ] || cut="${cut: -40}"
+        back="${cut}${m}"
+        [ "${#back}" -le 40 ] || back="${back: -40}"
+        if [ -n "${cut}" ] && [[ "${cut: -1}" == [a-z0-9_] ]]; then
+            continue
+        fi
+        w="${cut##*[.!?$'\n']}"
+        # What: skip a match after not/never/cannot/n't.
+        # Why: negated prose must never close an issue.
+        # From: Issue #1496 | PR #1858
+        negated=0
+        for neg in "${neg_words[@]}"; do
+            at=0
+            while [ "${negated}" -eq 0 ] && [[ "${w:at}" == *"${neg}"* ]]; do
+                wrest="${w:at}"
+                wrest="${wrest%%"${neg}"*}"
+                np=$((at + ${#wrest}))
+                at=$((np + 1))
+                if [[ ( "${neg}" == "${nt}" || "${np}" -eq 0 || "${w:np-1:1}" != [a-z0-9_] ) &&
+                    $((${#w} - np - ${#neg})) -le 20 && "${w:np+${#neg}:1}" != [a-z0-9_] ]]; then
+                    negated=1
+                fi
+            done
+        done
+        [ "${negated}" -eq 0 ] || continue
+        [[ "${m}" =~ ${key_re} ]]
+        out+="${m:${#BASH_REMATCH[0]}}"$'\n'
+    done
+    [ -z "${out}" ] || printf '%s' "${out}"
 }
 
 # What: post an issue/PR comment; compare what GitHub stored
@@ -18921,7 +19037,11 @@ _ci_check_compose_config() {
 # From: Issue #1683 | PR #1858
 _ci_check_proxy_nginx_policy() {
     local repo_root="${1:-${CI_REPO_ROOT}}" f out line pp blocks=0 b h a d al r px hk hu hp="" hq pn lb fb hv sv sp bn
-    local -a viol=() bnt
+    local hz_raw hz_line hz_body hz_in hz_a hz_d hz_al hz_r
+    local la_raw la_line la_loc la_t la_in la_dep la_a la_d la_s la_m
+    local ih_raw ih_h
+    local -a viol=() bnt hz_fld=() la_fld=() ih_fld=() ih_seq=()
+    local -A ih_ign=() ih_hid=()
     px="$(_ci_service_path ui nginx "${repo_root}")" || return 2
     px="${px%/}"
     # What: the health and status paths of the SOT.
@@ -18964,18 +19084,32 @@ _ci_check_proxy_nginx_policy() {
     # Why: both servers include it; a copy is a 2nd owner.
     # From: Issue #1683 | PR #1858
     for f in "${px}"/conf.d/*.conf "${pp}"; do
-        out="$(_ci_capture 0 awk -v "P=${hp}" "$(cat <<'PROG'
-            $1 == "location" && $2 == "=" && $3 == P && $4 == "{" { inb = 1; n++; body = ""; a = 0; d = 0; al = 0; r = 0; next }
-            inb && /^[[:space:]]*\}/ {
-                printf "%s|%d|%d|%d|%d\n", body, a, d, al, r; inb = 0; next }
-            inb { line = $0; gsub(/^[[:space:]]+|[[:space:]]+$/, "", line); gsub(/[[:space:]]+/, " ", line)
-                body = body line ";"
-                if (line ~ /^allow /) { a++; if (d) d = -1 }
-                if (line == "deny all;") { if (d == 0) d = 1 }
-                if (line ~ /^alias /) al = 1
-                if (line ~ /^return /) r = 1 }
-PROG
-                )" "${f}")" || return 2
+        out="" hz_in=0
+        # What: per block "body|allows|deny|alias|return".
+        # Why: deny is 1 for deny all; with no allow after.
+        while IFS= read -r hz_raw || [ -n "${hz_raw}" ]; do
+            read -r -a hz_fld <<< "${hz_raw}"
+            if [ "${hz_fld[0]-}" = location ] && [ "${hz_fld[1]-}" = "=" ] && [ "${hz_fld[2]-}" = "${hp}" ] && [ "${hz_fld[3]-}" = "{" ]; then
+                hz_in=1 hz_body="" hz_a=0 hz_d=0 hz_al=0 hz_r=0
+                continue
+            fi
+            [ "${hz_in}" -eq 1 ] || continue
+            if [[ "${hz_raw}" =~ ^[[:space:]]*\} ]]; then
+                out+="${hz_body}|${hz_a}|${hz_d}|${hz_al}|${hz_r}"$'\n'
+                hz_in=0
+                continue
+            fi
+            _ci_ws_fold hz_line "${hz_raw}"
+            hz_body+="${hz_line};"
+            if [[ "${hz_line}" == "allow "* ]]; then
+                hz_a=$((hz_a + 1))
+                [ "${hz_d}" -eq 0 ] || hz_d=-1
+            fi
+            [ "${hz_line}" != "deny all;" ] || [ "${hz_d}" -ne 0 ] || hz_d=1
+            [[ "${hz_line}" != "alias "* ]] || hz_al=1
+            [[ "${hz_line}" != "return "* ]] || hz_r=1
+        done < "${f}" || return 2
+        out="${out%$'\n'}"
         fb=0
         while IFS='|' read -r b line; do
             [ -n "${b}" ] || continue
@@ -18993,18 +19127,42 @@ PROG
         # What: the allow lines of every location.
         # Why: a location with allow lines is an ACL.
         # From: Issue #1683 | PR #1912
-        out="$(_ci_capture 0 awk "$(cat <<'PROG'
-            $1 == "location" { loc = $0; sub(/^[[:space:]]+/, "", loc); sub(/[[:space:]]*\{[[:space:]]*$/, "", loc); gsub(/[[:space:]]+/, " ", loc)
-                inb = 1; depth = 0; a = 0; d = 0; s = 0 }
-            inb { line = $0; gsub(/^[[:space:]]+|[[:space:]]+$/, "", line); gsub(/[[:space:]]+/, " ", line)
-                if (line ~ /^allow /) { t = line; sub(/^allow /, "", t); sub(/;$/, "", t); print loc "|T|" t; a++; if (d) d = -1 }
-                if (line == "deny all;" && d == 0) d = 1
-                if (line == "stub_status;") s = 1
-                o = $0; c = $0
-                depth += gsub(/\{/, "", o) - gsub(/\}/, "", c)
-                if (depth <= 0) { if (a > 0 && d != 1) print loc "|D|"; if (s) print loc "|S|"; inb = 0 } }
-PROG
-            )" "${f}")" || return 2
+        out="" la_in=0
+        # What: rows "loc|T|target", "loc|D|" and "loc|S|".
+        # Why: each location line opens a new block.
+        while IFS= read -r la_raw || [ -n "${la_raw}" ]; do
+            read -r -a la_fld <<< "${la_raw}"
+            if [ "${la_fld[0]-}" = location ]; then
+                la_loc="${la_raw#"${la_raw%%[![:space:]]*}"}"
+                la_m=""
+                [[ ! "${la_loc}" =~ [[:space:]]*\{[[:space:]]*$ ]] || la_m="${BASH_REMATCH[0]}"
+                la_loc="${la_loc%"${la_m}"}"
+                la_m=""
+                [[ ! "${la_loc}" =~ [[:space:]]+$ ]] || la_m=" "
+                _ci_ws_fold la_loc "${la_loc}"
+                la_loc+="${la_m}"
+                la_in=1 la_dep=0 la_a=0 la_d=0 la_s=0
+            fi
+            [ "${la_in}" -eq 1 ] || continue
+            _ci_ws_fold la_line "${la_raw}"
+            if [[ "${la_line}" == "allow "* ]]; then
+                la_t="${la_line#allow }"
+                out+="${la_loc}|T|${la_t%;}"$'\n'
+                la_a=$((la_a + 1))
+                [ "${la_d}" -eq 0 ] || la_d=-1
+            fi
+            [ "${la_line}" != "deny all;" ] || [ "${la_d}" -ne 0 ] || la_d=1
+            [ "${la_line}" != "stub_status;" ] || la_s=1
+            la_m="${la_raw//\{/}"
+            la_dep=$((la_dep + ${#la_raw} - ${#la_m}))
+            la_m="${la_raw//\}/}"
+            la_dep=$((la_dep - ${#la_raw} + ${#la_m}))
+            [ "${la_dep}" -le 0 ] || continue
+            [ "${la_a}" -eq 0 ] || [ "${la_d}" -eq 1 ] || out+="${la_loc}|D|"$'\n'
+            [ "${la_s}" -eq 0 ] || out+="${la_loc}|S|"$'\n'
+            la_in=0
+        done < "${f}" || return 2
+        out="${out%$'\n'}"
         while IFS='|' read -r line b h; do
             [ -n "${line}" ] || continue
             if [ "${b}" = "T" ]; then
@@ -19018,19 +19176,30 @@ PROG
             fi
         done <<<"${out}"
     done
-    out="$(_ci_capture 0 awk "$(cat <<'PROG'
-        $1 == "proxy_ignore_headers" { for (i = 2; i <= NF; i++) { h = $i; sub(/;$/, "", h); ign[h] = 1 } }
-        $1 == "proxy_hide_header" { h = $2; sub(/;$/, "", h); hid[h] = 1 }
-        END {
-            split("Cache-Control Expires Vary Set-Cookie", req, " ")
-            for (i in req) if (!(req[i] in ign)) print "proxy_ignore_headers must include " req[i]
-            for (h in ign) if (!(h in hid)) print "ignored header " h " must also be hidden from clients"
-        }
-PROG
-        )" "${pp}")" || return 2
-    while IFS= read -r h; do
-        [ -z "${h}" ] || viol+=("${pp#"${repo_root}/"}: ${h}")
-    done <<<"${out}"
+    # What: ignored and hidden headers of proxy-params.conf.
+    # Why: keys get a k so an empty name is a key too.
+    # From: Issue #1683 | PR #1858
+    while IFS= read -r ih_raw || [ -n "${ih_raw}" ]; do
+        read -r -a ih_fld <<< "${ih_raw}"
+        if [ "${ih_fld[0]-}" = proxy_ignore_headers ]; then
+            for ih_h in "${ih_fld[@]:1}"; do
+                ih_h="k${ih_h%;}"
+                [ -n "${ih_ign[${ih_h}]-}" ] || ih_seq+=("${ih_h}")
+                ih_ign[${ih_h}]=1
+            done
+        elif [ "${ih_fld[0]-}" = proxy_hide_header ]; then
+            ih_h="${ih_fld[1]-}"
+            ih_hid[k${ih_h%;}]=1
+        fi
+    done < "${pp}" || return 2
+    for ih_h in Cache-Control Expires Vary Set-Cookie; do
+        [ -n "${ih_ign[k${ih_h}]-}" ] \
+            || viol+=("${pp#"${repo_root}/"}: proxy_ignore_headers must include ${ih_h}")
+    done
+    for ih_h in "${ih_seq[@]}"; do
+        [ -n "${ih_hid[${ih_h}]-}" ] \
+            || viol+=("${pp#"${repo_root}/"}: ignored header ${ih_h#k} must also be hidden from clients")
+    done
     # What: the https.conf template includes the listen file
     # Why: a literal listen would be a second port owner.
     # From: Issue #1683 | PR #1912
@@ -19363,24 +19532,35 @@ _ci_check_changelog_direct_edit() {
 # Why: the check finds missing, extra and double rows.
 # From: Issue #1683 | PR #1912
 _ci_logging_matrix_canonical() {
-    local doc="$1"
-    awk '
-        /\*\*Logging matrix\*\*/ { seen_marker = 1; next }
-        seen_marker && /^\|/ {
-            rows_seen = 1
-            if ($0 ~ /^\|[[:space:]]*Service[[:space:]]*\|/) next
-            if ($0 ~ /^\|[[:space:]]*-+[[:space:]]*\|/) next
-            line = $0
-            sub(/^\|[[:space:]]*/, "", line)
-            split(line, parts, "|")
-            name = parts[1]
-            sub(/[[:space:]]+$/, "", name)
-            if (match(name, /`[a-z0-9-]+`/)) name = substr(name, RSTART + 1, RLENGTH - 2)
-            print "row=" name
-            next
-        }
-        seen_marker && rows_seen && !/^\|/ { exit }
-    ' "${doc}"
+    local doc="$1" line name marked=0 in_table=0
+    local head_re='^\|[[:space:]]*Service[[:space:]]*\|'
+    local sep_re='^\|[[:space:]]*-+[[:space:]]*\|'
+    local lead_re='^\|[[:space:]]*' tick_re=$'`[a-z0-9-]+`'
+    # What: rows of the first table after the marker line.
+    # Why: the first non-table line after a row ends it.
+    while IFS= read -r line || [ -n "${line}" ]; do
+        if [[ "${line}" == *'**Logging matrix**'* ]]; then
+            marked=1
+            continue
+        fi
+        [ "${marked}" -eq 1 ] || continue
+        if [[ "${line}" != '|'* ]]; then
+            [ "${in_table}" -eq 0 ] || break
+            continue
+        fi
+        in_table=1
+        if [[ "${line}" =~ ${head_re} || "${line}" =~ ${sep_re} ]]; then
+            continue
+        fi
+        [[ "${line}" =~ ${lead_re} ]]
+        name="${line:${#BASH_REMATCH[0]}}"
+        name="${name%%|*}"
+        name="${name%"${name##*[![:space:]]}"}"
+        if [[ "${name}" =~ ${tick_re} ]]; then
+            name="${BASH_REMATCH[0]:1:${#BASH_REMATCH[0]}-2}"
+        fi
+        printf 'row=%s\n' "${name}"
+    done < "${doc}"
 }
 
 # What: Print one real Compose service name per line.
@@ -19621,8 +19801,9 @@ _ci_check_sot_identity_inputs() {
 # From: Issue #1683 | PR #1912
 _ci_check_dockerfiles() {
     local repo_root="${1:-${CI_REPO_ROOT:-.}}" targets t df rel type svars bvars allow raw tok missing bst bv
-    local hits spec p id c ctxs srcs src ok n=0 rc=0
-    local -a tl=() cl=() roots=() parts=() e_bt=() e_tune=() e_stage=() e_secret=() e_ctx=() e_src=()
+    local hits spec p id c ctxs srcs src ok n=0 rc=0 dline mnt_spec
+    local cargo_re=$'cargo[ \t]+install[ \t]+' cmd_end_re='^[^&|;]*'
+    local -a tl=() cl=() roots=() parts=() toks=() e_bt=() e_tune=() e_stage=() e_secret=() e_ctx=() e_src=()
     local -A kv=() is_pkg=()
     svars="$(_ci_block_entry_list stage_variables "" ci_sh)" || return 2
     [ -n "${svars}" ] || e_stage+=("SOT stage_variables.ci_sh lists no variable")
@@ -19651,11 +19832,15 @@ _ci_check_dockerfiles() {
         # What: each secret mount id is a central id.
         # Why: set-runtime writes only listed ids.
         # From: Issue #1683 | PR #1858
-        hits="$(_ci_capture 0 awk "$(cat <<'PROG'
-/^[[:space:]]*#/ { next }
-            { s = $0; while (match(s, /--mount=[^[:space:]]+/)) { print substr(s, RSTART, RLENGTH); s = substr(s, RSTART + RLENGTH) } }
-PROG
-            )" "${df}")" || return 2
+        hits=""
+        while IFS= read -r dline || [ -n "${dline}" ]; do
+            [[ ! "${dline}" =~ ^[[:space:]]*# ]] || continue
+            while [[ "${dline}" =~ --mount=[^[:space:]]+ ]]; do
+                mnt_spec="${BASH_REMATCH[0]}"
+                hits+="${mnt_spec}"$'\n'
+                dline="${dline#*"${mnt_spec}"}"
+            done
+        done < "${df}" || return 2
         while IFS= read -r spec; do
             [ -n "${spec}" ] || continue
             kv=()
@@ -19690,14 +19875,17 @@ PROG
         # What: cargo install tokens; rust: none at all.
         # Why: build-tools owns the toolchain (AG-REL-002).
         # From: Issue #1683 | PR #1912
-        raw="$(_ci_capture 0 awk "$(cat <<'PROG'
-            match($0, /cargo[ \t]+install[ \t]+/) {
-                r = substr($0, RSTART + RLENGTH); sub(/[&|;].*/, "", r)
-                k = split(r, a, /[ \t]+/)
-                for (i = 1; i <= k; i++) if (a[i] != "" && a[i] !~ /^-/) print a[i]
-            }
-PROG
-            )" "${df}")" || return 2
+        raw=""
+        while IFS= read -r dline || [ -n "${dline}" ]; do
+            [[ "${dline}" =~ ${cargo_re} ]] || continue
+            dline="${dline#*"${BASH_REMATCH[0]}"}"
+            [[ "${dline}" =~ ${cmd_end_re} ]]
+            IFS=$' \t' read -r -a toks <<< "${BASH_REMATCH[0]}"
+            for tok in "${toks[@]}"; do
+                [[ "${tok}" == -* ]] || raw+="${tok}"$'\n'
+            done
+        done < "${df}" || return 2
+        raw="${raw%$'\n'}"
         if [ "${type}" != rust ]; then
             while IFS= read -r tok; do
                 [ -z "${tok}" ] || [ -z "${is_pkg[${tok}]:-}" ] || e_src+=("${rel}: cargo install ${tok}; SOT ships it prebuilt in build-tools")
@@ -19748,20 +19936,53 @@ PROG
 # Why: ARG scope is per stage; else no value reaches it
 # From: Issue #1683 | PR #1858
 _ci_dockerfile_stage_missing_args() {
-    local df="$1" argnames="$2" runs="$3"
-    _ci_capture 0 awk -v need="${argnames//$'\n'/ }" -v runs="${runs}" "$(cat <<'PROG'
-        BEGIN { n = split(need, req, " "); st = 0; decl[0] = "|" }
-        /^[[:space:]]*#/ { next }
-        toupper($1) == "FROM" {
-            st++; i = 2; while ($i ~ /^--/) i++
-            b = tolower($i); decl[st] = (b in alias) ? decl[alias[b]] : "|"
-            if (toupper($(i + 1)) == "AS") alias[tolower($(i + 2))] = st
-            next
-        }
-        toupper($1) == "ARG" { for (i = 2; i <= NF; i++) { a = $i; sub(/=.*/, "", a); decl[st] = decl[st] a "|" }; next }
-        $0 ~ runs { for (j = 1; j <= n; j++) if (index(decl[st], "|" req[j] "|") == 0) print st " " req[j] }
-PROG
-    )" "${df}"
+    local df="$1" runs="$3" sm_line sm_word sm_base sm_as sm_st=0
+    local -a sm_need=() sm_fld=() sm_decl=("|")
+    local -A sm_stage=()
+    read -r -a sm_need <<< "${2//$'\n'/ }"
+    while IFS= read -r sm_line || [ -n "${sm_line}" ]; do
+        [[ ! "${sm_line}" =~ ^[[:space:]]*# ]] || continue
+        # What: a stage inherits the ARGs of its base.
+        # Why: FROM <alias> keeps the ARGs declared there.
+        if _ci_dockerfile_from_parts "${sm_line}" sm_base sm_as; then
+            sm_st=$((sm_st + 1))
+            sm_decl[sm_st]="|"
+            [ -z "${sm_stage["k${sm_base}"]+x}" ] || sm_decl[sm_st]="${sm_decl[${sm_stage["k${sm_base}"]}]}"
+            [ -z "${sm_as}" ] || sm_stage["${sm_as}"]="${sm_st}"
+            continue
+        fi
+        IFS=$' \t' read -r -a sm_fld <<< "${sm_line}"
+        sm_word="${sm_fld[0]-}"
+        if [ "${sm_word^^}" = ARG ]; then
+            for sm_word in "${sm_fld[@]:1}"; do sm_decl[sm_st]+="${sm_word%%=*}|"; done
+            continue
+        fi
+        [[ "${sm_line}" =~ ${runs} ]] || continue
+        for sm_word in "${sm_need[@]}"; do
+            [[ "${sm_decl[sm_st]}" == *"|${sm_word}|"* ]] || printf '%s %s\n' "${sm_st}" "${sm_word}"
+        done
+    done < "${df}" || return 2
+}
+
+# What: FROM line: base word and AS key ("k" + name), lower.
+# Why: stage and image checks read FROM the same way.
+# From: Issue #1683 | PR #1858
+_ci_dockerfile_from_parts() {
+    local -a from_fld=()
+    local from_i=1 from_kw
+    IFS=$' \t' read -r -a from_fld <<< "$1"
+    from_kw="${from_fld[0]-}"
+    [ "${from_kw^^}" = FROM ] || return 1
+    while [[ "${from_fld[from_i]-}" == --* ]]; do from_i=$((from_i + 1)); done
+    from_kw="${from_fld[from_i]-}"
+    printf -v "$2" '%s' "${from_kw,,}"
+    from_kw="${from_fld[from_i + 1]-}"
+    if [ "${from_kw^^}" = AS ]; then
+        from_kw="${from_fld[from_i + 2]-}"
+        printf -v "$3" 'k%s' "${from_kw,,}"
+    else
+        printf -v "$3" '%s' ""
+    fi
 }
 
 # What: no workspace Cargo.toml set [profile].
