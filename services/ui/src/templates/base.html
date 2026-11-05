@@ -217,6 +217,15 @@
   }
   .beam-station { display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--mist); white-space: nowrap; }
   .beam-station b { color: var(--foam); font-weight: 600; }
+  /* What: fold-out program menu of a container.
+     Why: keeps the bar to state and Start/Stop.
+     From: Issue #1683 | PR #1980 */
+  .beam-menu { position: relative; }
+  .beam-menu summary { list-style: none; cursor: pointer; padding: 0 0.4rem; }
+  .beam-menu summary::-webkit-details-marker { display: none; }
+  .beam-menu-list { position: fixed; z-index: 30; display: flex; flex-direction: column; gap: 6px; padding: 8px; border-radius: 8px; border: 1px solid var(--navy-600); background: var(--navy-900); box-shadow: 0 4px 14px rgba(0,0,0,0.35); }
+  .beam-menu-row { display: flex; align-items: center; gap: 6px; }
+  .beam-menu-row span { flex: 1; min-width: 9em; color: var(--foam); }
   .beam-light { display: inline-block; width: 7px; height: 7px; border-radius: 999px; background: var(--tide); box-shadow: 0 0 8px 1px #34d0a680; vertical-align: middle; }
   .beam-light.warn { background: var(--coral); box-shadow: 0 0 8px 1px #ff7a5c80; }
   .beam-light.off { background: var(--mist-dim); box-shadow: none; }
@@ -938,6 +947,7 @@
     // From: Issue #1437
     (function () {
       const container = document.getElementById('beambar-services');
+      let openMenu = '';
       // What: one beambar entry: dot, name, dock button
       // Why: built from DOM nodes, never from HTML strings
       // From: Issue #1683 | PR #1912
@@ -975,20 +985,53 @@
           });
           wrap.appendChild(button);
         }
-        DOCK_PROGRAMS.filter(function (p) { return p.split(':')[0] === svc.name; }).forEach(function (p) {
-          const program = p.split(':')[1];
-          [['reload', '↻'], ['restart', '⟳']].forEach(function (a) {
-            const b = document.createElement('button');
-            b.type = 'button';
-            b.className = 'theme-btn';
-            b.style.marginLeft = '0.25rem';
-            b.style.padding = '0 0.35rem';
-            b.title = program + ': ' + a[0];
-            b.textContent = a[1] + ' ' + program;
-            b.addEventListener('click', function () { programAction(svc.name, program, a[0], b); });
-            wrap.appendChild(b);
+        // What: programs sit in a fold-out menu.
+        // Why: DoMe 05.11.: 14 near-equal buttons in the bar.
+        // From: Issue #1683 | PR #1980
+        const progs = DOCK_PROGRAMS.filter(function (p) { return p.split(':')[0] === svc.name; });
+        if (progs.length) {
+          const menu = document.createElement('details');
+          menu.className = 'beam-menu';
+          menu.open = openMenu === svc.name;
+          menu.addEventListener('toggle', function () {
+            if (menu.open) { openMenu = svc.name; } else if (openMenu === svc.name) { openMenu = ''; }
           });
-        });
+          const sum = document.createElement('summary');
+          sum.className = 'theme-btn';
+          sum.textContent = 'Programme ▾';
+          menu.appendChild(sum);
+          const list = document.createElement('div');
+          list.className = 'beam-menu-list';
+          progs.forEach(function (p) {
+            const program = p.split(':')[1];
+            const row = document.createElement('div');
+            row.className = 'beam-menu-row';
+            const name = document.createElement('span');
+            name.textContent = program;
+            row.appendChild(name);
+            [['reload', 'Reload'], ['restart', 'Restart']].forEach(function (a) {
+              const b = document.createElement('button');
+              b.type = 'button';
+              b.className = 'theme-btn';
+              b.textContent = a[1];
+              b.addEventListener('click', function () { programAction(svc.name, program, a[0], b); });
+              row.appendChild(b);
+            });
+            list.appendChild(row);
+          });
+          menu.appendChild(list);
+          wrap.appendChild(menu);
+          // What: place the list under its button.
+          // Why: the bar hides overflow; fixed escapes it.
+          // From: Issue #1683 | PR #1980
+          const place = function () {
+            const r = sum.getBoundingClientRect();
+            list.style.top = (r.bottom + 6) + 'px';
+            list.style.left = Math.max(8, Math.min(r.left, window.innerWidth - list.offsetWidth - 8)) + 'px';
+          };
+          menu.addEventListener('toggle', function () { if (menu.open) { place(); } });
+          if (menu.open) { requestAnimationFrame(place); }
+        }
         return wrap;
       }
       // What: rebuilds the beambar from one status update
