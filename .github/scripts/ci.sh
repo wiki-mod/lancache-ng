@@ -2868,10 +2868,10 @@ _ci_lock_closure() {
     done
 }
 
-# What: awk verdict: rc 0 print, rc 1 raw, else coded stop.
+# What: reader verdict: rc 0 print, 1 raw, else coded stop.
 # Why: one owner for the reader and the normalizer verdict.
 # From: Issue #1683 | PR #1912
-_ci_awk_verdict() {
+_ci_reader_verdict() {
     local id="$1" ctx="$2" rc="$3" out="$4"
     case "${rc}" in
         0) printf '%s\n' "${out}" ;;
@@ -2889,7 +2889,7 @@ _ci_awk_verdict() {
 _ci_rust_items() {
     local out rc=0
     out="$(_ci_rust_lex "$1" "$2" 2>&1)" || rc=$?
-    _ci_awk_verdict "[CI-ERROR-IDENTITY-0010]" "rc=${rc} reason=\"rust item reader failed\"" "${rc}" "${out}"
+    _ci_reader_verdict "[CI-ERROR-IDENTITY-0010]" "rc=${rc} reason=\"rust item reader failed\"" "${rc}" "${out}"
 }
 
 # What: normalized Rust text: kind, name, text per item.
@@ -3229,7 +3229,7 @@ _ci_norm_content() {
         printf -v out '%s\n' "${nv_out[@]:0:nv_last}"
         out="${out%"${nv_nl}"}"
     fi
-    _ci_awk_verdict "[CI-ERROR-IDENTITY-0008]" "grammar=\"$1\" rc=${rc} reason=\"v1 normalizer failed\"" "${rc}" "${out}"
+    _ci_reader_verdict "[CI-ERROR-IDENTITY-0008]" "grammar=\"$1\" rc=${rc} reason=\"v1 normalizer failed\"" "${rc}" "${out}"
 }
 
 # What: one git call for the identity; stderr is an error.
