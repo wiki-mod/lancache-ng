@@ -827,6 +827,31 @@ pub mod dns {
 pub mod dhcp {
     use crate::config::Settings;
 
+    // What: DHCP_NTP_SERVERS as IPv4 text; names resolve.
+    // Why: option 42 holds IPs; dead names are skipped.
+    // From: Issue #1683 | PR #1980
+    pub fn ntp_addrs(s: &Settings) -> Result<Vec<String>, String> {
+        use std::net::ToSocketAddrs as _;
+        s.list("DHCP_NTP_SERVERS")
+            .iter()
+            .map(|host| {
+                if let Ok(ip) = host.parse::<std::net::Ipv4Addr>() {
+                    return Ok(ip.to_string());
+                }
+                (host.as_str(), 0)
+                    .to_socket_addrs()
+                    .map_err(|e| format!("DHCP_NTP_SERVERS: cannot resolve {host}: {e}"))?
+                    .find_map(|a| match a {
+                        std::net::SocketAddr::V4(v4) => Some(v4.ip().to_string()),
+                        std::net::SocketAddr::V6(_) => None,
+                    })
+                    .ok_or_else(|| format!("DHCP_NTP_SERVERS: {host} has no IPv4 address"))
+            })
+            .filter_map(|r: Result<String, String>| r.map_err(|e| eprintln!("{e}; skipped")).ok())
+            .map(Ok)
+            .collect()
+    }
+
     // What: the four DHCP modes of the SOT choice.
     // Why: exactly one program serves DHCP.
     // From: Issue #1683 | PR #1858
@@ -2365,7 +2390,7 @@ pub mod kea_conf {
         rows.push(json!({"name": "domain-name-servers", "data": dns}));
         rows.push(json!({"name": "domain-name", "data": domain}));
         rows.push(json!({"name": "domain-search", "data": domain}));
-        let ntp = s.list("DHCP_NTP_SERVERS");
+        let ntp = crate::dhcp::ntp_addrs(s)?;
         if !ntp.is_empty() {
             rows.push(json!({"name": "ntp-servers", "data": ntp.join(", ")}));
         }
@@ -2558,7 +2583,7 @@ pub mod dnsmasq_conf {
         c.add_if("dhcp-option-pxe=3,", &get("DHCP_PROXY_ROUTER"))?;
         c.add_if("dhcp-option-pxe=6,", &s.list("DHCP_DNS_SERVERS").join(","))?;
         c.add_if("dhcp-option-pxe=15,", &get("DHCP_PROXY_DOMAIN"))?;
-        c.add_if("dhcp-option-pxe=42,", &s.list("DHCP_NTP_SERVERS").join(","))?;
+        c.add_if("dhcp-option-pxe=42,", &crate::dhcp::ntp_addrs(s)?.join(","))?;
         let file = get("DHCP_PROXY_BOOT_FILENAME");
         if !file.is_empty() {
             let server = get("DHCP_PROXY_BOOT_SERVER");
