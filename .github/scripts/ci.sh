@@ -8633,9 +8633,22 @@ _ci_channel_field() {
 # Why: shared by mutable, ref and release-tag lookups.
 # From: Issue #1683
 _ci_channels_where() {
-    local rows
+    local rows c v
     rows="$(_ci_channel_field "$1")" || return 2
-    _ci_capture 0 awk -v v="$2" "\$2 == v { print \$1 }" <<< "${rows}"
+    while read -r c v _; do
+        [ "${v}" != "$2" ] || printf '%s\n' "${c}"
+    done <<< "${rows}"
+}
+
+# What: field $1 of channel $2, one value per line.
+# Why: one reader for ref and source_ref; no awk (136).
+# From: Issue #1683 | PR #1858
+_ci_channel_value() {
+    local rows c v
+    rows="$(_ci_channel_field "$1")" || return 2
+    while read -r c v _; do
+        [ "${c}" != "$2" ] || printf '%s\n' "${v}"
+    done <<< "${rows}"
 }
 
 # What: Print the SOT's mutable release channels.
@@ -8649,10 +8662,9 @@ _ci_mutable_channels() {
 # Why: the release-tag channel's ref; SOT is the owner.
 # From: Issue #1683
 _ci_release_ref() {
-    local ch rows ref
+    local ch ref
     ch="$(_ci_channels_where release_tags true)" || return 2
-    rows="$(_ci_channel_field ref)" || return 2
-    ref="$(_ci_capture 0 awk -v c="${ch%%$'\n'*}" "\$1 == c { print \$2 }" <<< "${rows}")" || return 2
+    ref="$(_ci_channel_value ref "${ch%%$'\n'*}")" || return 2
     if [ -z "${ref}" ]; then
         ci_log "[CI-ERROR-RELEASE-0018]" "reason=\"SOT release.channels has no release_tags channel with a ref\""
         return 2
@@ -8664,13 +8676,12 @@ _ci_release_ref() {
 # Why: a schedule run starts on the default branch
 # From: Issue #1683 | PR #1858
 ci_cmd_channel_checkout() {
-    local channel="${1:-}" pin="${2:-}" rows ref remote want sha boot
+    local channel="${1:-}" pin="${2:-}" ref remote want sha boot
     if [ -z "${channel}" ]; then
         ci_log "[CI-ERROR-PROMOTE-0017]" "reason=\"channel arg required\""
         return 2
     fi
-    rows="$(_ci_channel_field source_ref)" || return 2
-    ref="$(_ci_capture 0 awk -v c="${channel}" "\$1 == c { print \$2 }" <<< "${rows}")" || return 2
+    ref="$(_ci_channel_value source_ref "${channel}")" || return 2
     if [ -z "${ref}" ]; then
         ci_log "[CI-ERROR-PROMOTE-0018]" "channel=\"${channel}\" reason=\"SOT release.channels has no source_ref for this channel\""
         return 2
