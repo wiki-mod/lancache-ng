@@ -2558,8 +2558,34 @@ _ci_norm_grammar() {
     fi
 }
 
+# What: the first <<word line $2 opens, into var $1.
+# Why: <<< and a word that is no name open no heredoc.
+# From: Issue #1683 | PR #1858
+_ci_heredoc_word() {
+    local hw_rest="$2" hw_pre hw_w
+    local hw_re="^-?[[:space:]]*[\\\\'\"]?[A-Za-z_][A-Za-z0-9_]*['\"]?"
+    while [[ "${hw_rest}" == *"<<"* ]]; do
+        hw_pre="${hw_rest%%<<*}"
+        hw_rest="${hw_rest:${#hw_pre}}"
+        if [ "${hw_rest:0:3}" = "<<<" ]; then
+            hw_rest="${hw_rest:3}"
+            continue
+        fi
+        if [[ "${hw_rest:2}" =~ ${hw_re} ]]; then
+            hw_w="${BASH_REMATCH[0]#-}"
+            hw_w="${hw_w#"${hw_w%%[![:space:]]*}"}"
+            hw_w="${hw_w//\\/}"
+            hw_w="${hw_w//\'/}"
+            printf -v "$1" '%s' "${hw_w//\"/}"
+            return 0
+        fi
+        hw_rest="${hw_rest:1}"
+    done
+    return 1
+}
+
 # What: awk hd_word/hd_scan: the word a << opens.
-# Why: one delimiter rule for the three heredoc readers.
+# Why: _ci_heredoc_word rule, for the 2 awk readers left.
 # From: Issue #1683 | PR #1858
 _CI_AWK_HEREDOC_WORD="$(cat <<'PROG'
     # What: chars of a <<word at s (0: none); sets hdw, hdt.
@@ -18425,49 +18451,62 @@ _ci_check_proxy_cache_env_doc_drift() {
 # Why: AG-VAL-036: heredoc/escape= change what a line is.
 # From: Issue #1683 | PR #1858
 _ci_dockerfile_logical_lines() {
-    awk "${_CI_AWK_HEREDOC_WORD}"'
-        function emit_logical(    candidate, owner) {
-            print logical
-            candidate = logical
-            sub(/^[[:space:]]*/, "", candidate)
-            owner = candidate
-            sub(/[[:space:]].*$/, "", owner)
-            if ((tolower(owner) == "run" || tolower(owner) == "copy") && hd_scan(candidate)) heredoc = hdw
-            logical = ""
-        }
-        heredoc != "" {
-            candidate = $0
-            sub(/^[[:space:]]*/, "", candidate)
-            if (candidate == heredoc) heredoc = ""
-            next
-        }
-        {
-            physical = $0
-            candidate = physical
-            sub(/^[[:space:]]*/, "", candidate)
-            if (!content_seen && candidate ~ /^#[[:space:]]*escape[[:space:]]*=/) {
-                directive = candidate
-                sub(/^#[[:space:]]*escape[[:space:]]*=[[:space:]]*/, "", directive)
-                sub(/[[:space:]]*$/, "", directive)
-                if (directive == "`" || directive == "\\") escape = directive
-                print physical
-                next
-            }
-            if (logical == "" && candidate ~ /^#/) { logical = physical; emit_logical(); next }
-            if (candidate != "") content_seen = 1
-            if (escape == "") escape = "\\"
-            escaped = (escape == "\\" ? physical ~ /\\[[:space:]]*$/ : physical ~ /`[[:space:]]*$/)
-            if (escaped) {
-                if (escape == "\\") sub(/\\[[:space:]]*$/, "", physical)
-                else sub(/`[[:space:]]*$/, "", physical)
-                logical = logical physical " "
-                next
-            }
-            logical = logical physical
-            emit_logical()
-        }
-        END { if (logical != "") emit_logical() }
-    ' "$1"
+    local -a dl_in=()
+    local dl_phys dl_cand dl_logic="" dl_hd="" dl_esc="" dl_seen=0 dl_dir dl_re
+    if [ "$1" = - ]; then
+        mapfile -t dl_in
+    else
+        mapfile -t dl_in < "$1" || return 2
+    fi
+    for dl_phys in "${dl_in[@]}"; do
+        dl_cand="${dl_phys#"${dl_phys%%[![:space:]]*}"}"
+        # What: heredoc body lines drop up to the word.
+        # Why: a body line is data, never an instruction.
+        if [ -n "${dl_hd}" ]; then
+            [ "${dl_cand}" != "${dl_hd}" ] || dl_hd=""
+            continue
+        fi
+        if [ "${dl_seen}" -eq 0 ] && [[ "${dl_cand}" =~ ^#[[:space:]]*escape[[:space:]]*=[[:space:]]* ]]; then
+            dl_dir="${dl_cand:${#BASH_REMATCH[0]}}"
+            dl_dir="${dl_dir%"${dl_dir##*[![:space:]]}"}"
+            if [ "${dl_dir}" = '`' ] || [ "${dl_dir}" = "\\" ]; then
+                dl_esc="${dl_dir}"
+            fi
+            printf '%s\n' "${dl_phys}"
+            continue
+        fi
+        if [ -z "${dl_logic}" ] && [ "${dl_cand:0:1}" = "#" ]; then
+            dl_logic="${dl_phys}"
+            _ci_dockerfile_emit_logical
+            continue
+        fi
+        [ -z "${dl_cand}" ] || dl_seen=1
+        [ -n "${dl_esc}" ] || dl_esc="\\"
+        dl_re='`[[:space:]]*$'
+        [ "${dl_esc}" != "\\" ] || dl_re='\\[[:space:]]*$'
+        if [[ "${dl_phys}" =~ ${dl_re} ]]; then
+            dl_logic+="${dl_phys%"${BASH_REMATCH[0]}"} "
+            continue
+        fi
+        dl_logic+="${dl_phys}"
+        _ci_dockerfile_emit_logical
+    done
+    [ -z "${dl_logic}" ] || _ci_dockerfile_emit_logical
+}
+
+# What: print dl_logic; a RUN or COPY <<word sets dl_hd.
+# Why: works on the locals of _ci_dockerfile_logical_lines.
+# From: Issue #1683 | PR #1858
+_ci_dockerfile_emit_logical() {
+    local lg_c lg_o lg_w
+    printf '%s\n' "${dl_logic}"
+    lg_c="${dl_logic#"${dl_logic%%[![:space:]]*}"}"
+    lg_o="${lg_c%%[[:space:]]*}"
+    lg_o="${lg_o,,}"
+    if { [ "${lg_o}" = run ] || [ "${lg_o}" = copy ]; } && _ci_heredoc_word lg_w "${lg_c}"; then
+        dl_hd="${lg_w}"
+    fi
+    dl_logic=""
 }
 
 # What: Fail unless prod install paths stay prebuilt-only.
