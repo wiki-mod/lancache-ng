@@ -572,7 +572,45 @@ async fn save(
         .filter(|b| b.starts_with('/') && !b.starts_with("//"))
         .cloned()
         .unwrap_or_else(|| "/setup".into());
-    finish(commit(&app, form).await, &back)
+    let before = lancache_ng::dns::managed_zones(&app.settings()).unwrap_or_default();
+    let result = commit(&app, form).await;
+    if result.is_ok() {
+        drop_old_zones(&app.settings(), &before).await;
+    }
+    finish(result, &back)
+}
+
+// What: remove zones a new LAN domain left behind.
+// Why: live test 05.11.: home.lan stayed after going back.
+// From: Issue #1683 | PR #1980
+async fn drop_old_zones(s: &Settings, before: &[String]) {
+    let Ok(now) = lancache_ng::dns::managed_zones(s) else {
+        return;
+    };
+    if s.text("DNS_REPLICATION_ROLE").unwrap_or_default() == "secondary" {
+        return;
+    }
+    let Ok(api) = pdns_api(s) else { return };
+    for zone in before.iter().filter(|z| !now.contains(z)) {
+        // What: only zones without own records go.
+        // Why: a record the user added is never lost.
+        // From: Issue #1683 | PR #1980
+        let own = match api.rrsets(zone).await {
+            Ok(sets) => sets
+                .iter()
+                .any(|r| !matches!(r["type"].as_str(), Some("SOA" | "NS"))),
+            Err(_) => continue,
+        };
+        let done = if own {
+            Err("it still holds records".to_string())
+        } else {
+            api.delete_zone(zone).await
+        };
+        match done {
+            Ok(()) => eprintln!("ui: zone {zone} removed"),
+            Err(e) => eprintln!("ui: zone {zone} kept: {e}"),
+        }
+    }
 }
 
 // What: newest lines of all programs, merged.
@@ -2572,7 +2610,10 @@ fn cache_room(s: &Settings, form: &Fields) -> Result<(), Fail> {
     if new <= old {
         return Ok(());
     }
-    let dir = s.text("NGINX_CACHE_DIR")?;
+    // What: the cache volume as the ui mounts it.
+    // Why: live test 05.11.: NGINX_CACHE_DIR is proxy-only.
+    // From: Issue #1069 | PR #1980
+    let dir = s.text("CACHE_DIR")?;
     let sp = fs::space(Path::new(&dir)).map_err(|e| format!("{dir}: {e}"))?;
     let used = sp.total.saturating_sub(sp.free);
     let reachable = sp.free.saturating_add(used.min(old));

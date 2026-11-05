@@ -600,6 +600,14 @@ pub mod pdns {
                 .map(drop)
         }
 
+        // What: remove one zone.
+        // Why: a changed LAN domain leaves its old zones.
+        // From: Issue #1683 | PR #1980
+        pub async fn delete_zone(&self, zone: &str) -> Result<(), String> {
+            let path = format!("/zones/{}", zone_id(zone));
+            self.call(Method::DELETE, &path, None).await.map(drop)
+        }
+
         // What: add a primary zone; SOA from default-soa.
         // Why: API writes and DDNS need the zone to exist.
         // From: Issue #1683 | PR #1980
