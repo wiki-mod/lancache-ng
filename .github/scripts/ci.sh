@@ -11916,6 +11916,17 @@ _ci_validate_shared_secret() {
     _ci_capture 0 _ci_bounded_exec "${cid}" cat "${dir}/${name}"
 }
 
+# What: one env value of a container, empty if unset.
+# Why: compose env keys are not in the secrets volume.
+# From: Issue #1683 | PR #1980
+_ci_validate_container_env() {
+    local cid="$1" key="$2" envs line
+    envs="$(_ci_capture 0 docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "${cid}")" || return 2
+    while IFS= read -r line; do
+        [ "${line%%=*}" != "${key}" ] || { printf '%s\n' "${line#*=}"; return 0; }
+    done <<< "${envs}"
+}
+
 # What: the SOT runtime.defaults rows, @KEY@ resolved.
 # Why: ci.sh resolves them; setup.sh is the customer file.
 # From: Issue #1683 | PR #1912
@@ -12026,10 +12037,11 @@ _ci_validate_dns_rollback() {
         ci_log "[CI-ERROR-VALIDATE-0037]" "reason=\"no dns container/IP for rollback check\""
         return 2
     fi
-    # What: read PDNS_API_KEY from the shared-secrets mount.
-    # Why: watchdog resolves it at runtime, not env.
-    # From: Issue #858
-    key="$(_ci_validate_shared_secret "${project}" "${cid}" pdns-api-key)" || return 2
+    # What: PDNS_API_KEY from the dns env, else the file.
+    # Why: setup.sh sets it; the ui makes a file if unset.
+    # From: Issue #858 | PR #1980
+    key="$(_ci_validate_container_env "${cid}" PDNS_API_KEY)" || return 2
+    [ -n "${key}" ] || key="$(_ci_validate_shared_secret "${project}" "${cid}" pdns-api-key)" || return 2
     key="${key//$'\n'/}"
     if [ -z "${key}" ]; then
         ci_log "[CI-ERROR-VALIDATE-0038]" "reason=\"could not read PDNS_API_KEY from shared-secrets\""
