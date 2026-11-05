@@ -1775,13 +1775,14 @@ _ci_green_ref() {
     printf '%s/pr-%s%s' "${prefix}" "${n}" "${kind:+-${kind}}"
 }
 
-# What: subject of a checks mark: tree and diff base.
-# Why: equal tree and base give equal check results.
+# What: checks mark subject: tree, diff base, tools.
+# Why: new check tools may find new issues in one tree.
 # From: Issue #1683 | PR #1858
 _ci_checks_note() {
-    local tree
+    local tree tools
     tree="$(_ci_capture 0 git -C "${CI_REPO_ROOT}" rev-parse 'HEAD^{tree}')" || return 2
-    printf 'checks-green %s %s' "${tree}" "${BASE_SHA:-}"
+    tools="$(_ci_build_tools_run_image CI_CHECKS_TOOLS_IMAGE)" || return 2
+    printf 'checks-green %s %s %s' "${tree}" "${BASE_SHA:-}" "${tools##*@}"
 }
 
 # What: rc 0 if a green run checked this PR tree.
@@ -3919,7 +3920,7 @@ _ci_git_as_bot() {
 _ci_cas_note_commit() {
     local tree
     tree="$(_ci_empty_tree)" || return 2
-    _ci_bot_commit "${tree}" "" "$1"
+    _ci_bot_commit "${tree}" "${2:-}" "$1"
 }
 
 # What: bot commit of a tree, optional parent, message.
@@ -4195,9 +4196,16 @@ _ci_mark_write() {
     _ci_mark_has "${ref}" "${want}" || rc=$?
     [ "${rc}" -ne 0 ] || return 0
     [ "${rc}" -eq 1 ] || return 2
-    sha="$(_ci_cas_note_commit "$3")" || return 2
     rc=0; cur="$(_ci_cas_ref_sha "${remote}" "${ref}")" || rc=$?
     [ "${rc}" -le 1 ] || return 2
+    # What: an old mark stays the parent of the new one.
+    # Why: the ref history shows which run checked what.
+    # From: Issue #1683 | PR #1858
+    if [ -n "${cur}" ]; then
+        _ci_retry git git fetch --no-tags --depth=1 "${remote}" "${ref}" >&2 || return 2
+        cur="$(_ci_capture 0 git rev-parse FETCH_HEAD)" || return 2
+    fi
+    sha="$(_ci_cas_note_commit "$3" "${cur}")" || return 2
     rc=0; raw="$(_ci_cas_push "${remote}" "${ref}" "${sha}" "${cur}")" || rc=$?
     [ "${rc}" -ne 0 ] || return 0
     # What: a lost push race with an equal mark is success.
@@ -13530,14 +13538,15 @@ _ci_build_tools_resolve_image() {
     printf '%s\n' "${image}"
 }
 
-# What: the build-tools ref the platform job resolved.
-# Why: one resolver per run; ids and builds read it.
+# What: the build-tools ref a job resolved; $1 its var.
+# Why: one resolver per run; ids, builds, checks read it.
 # From: Issue #1683 | PR #1912
 _ci_build_tools_run_image() {
-    local ref="${CI_BUILD_TOOLS_IMAGE:-}" image
+    local var="${1:-CI_BUILD_TOOLS_IMAGE}" ref image
+    ref="${!var:-}"
     image="$(_ci_build_tools_image)" || return 2
     if [[ "${ref}" != "${image}@sha256:"* ]] || [[ ! "${ref##*@sha256:}" =~ ^[0-9a-f]{64}$ ]]; then
-        ci_log "[CI-ERROR-BUILDTOOLS-0026]" "got=\"${ref}\" want=\"${image}@sha256:<64 hex>\" reason=\"CI_BUILD_TOOLS_IMAGE unset or no digest ref; FAIL CLOSED\""
+        ci_log "[CI-ERROR-BUILDTOOLS-0026]" "var=${var} got=\"${ref}\" want=\"${image}@sha256:<64 hex>\" reason=\"build-tools ref unset or no digest ref; FAIL CLOSED\""
         return 2
     fi
     printf '%s\n' "${ref}"
