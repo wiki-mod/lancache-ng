@@ -4221,27 +4221,35 @@ _ci_mark_write() {
 # Why: a pushed image is not an accepted image (B20).
 # From: Issue #1683 | PR #1912
 _ci_verified_has() {
-    local ref marks
+    local ref
     ref="$(_ci_verified_ref "$1" "$2" "$3")" || return 2
-    marks="$(_ci_verified_marks)" || return 2
+    _ci_mark_listed CI_VERIFIED_REF "${ref}" "$(_ci_verified_note "$1" "$2" "$3")"
+}
+
+# What: rc 0 if mark ref $2 under SOT ref $1 holds $3.
+# Why: one reader of the bulk mark list for every kind.
+# From: Issue #1683 | PR #1858
+_ci_mark_listed() {
+    local marks
+    marks="$(_ci_marks "$1")" || return 2
     case $'\n'"${marks}"$'\n' in
-        *$'\n'"${ref}"$'\t'"$(_ci_verified_note "$1" "$2" "$3")"$'\n'*) return 0 ;;
+        *$'\n'"$2"$'\t'"$3"$'\n'*) return 0 ;;
     esac
     return 1
 }
 
-# What: all verified marks as ref, tab, subject; once.
-# Why: A3: plan fetched one mark per pair, 1.4 s each.
+# What: all marks under SOT ref $1: ref, tab, subject.
+# Why: A3: one fetch per kind, not one mark per pair.
 # From: Issue #1683 | PR #1858
-_ci_verified_marks() {
-    local memo="verified-marks-${_CI_CALL_KEY}" remote prefix dest out
+_ci_marks() {
+    local memo="marks-$1-${_CI_CALL_KEY}" remote prefix dest out
     if out="$(_ci_job_memo_get "${memo}")"; then
         printf '%s\n' "${out}"
         return 0
     fi
     remote="$(_ci_git_remote)" || return 2
-    prefix="$(_ci_variable CI_VERIFIED_REF)" || return 2
-    dest="refs/ci-memo/${_CI_CALL_KEY}"
+    prefix="$(_ci_variable "$1")" || return 2
+    dest="refs/ci-memo/${_CI_CALL_KEY}-$1"
     _ci_retry git git fetch --no-tags "${remote}" "+${prefix}/*:${dest}/*" >&2 || return 2
     out="$(_ci_capture 0 git for-each-ref --format='%(refname)%09%(contents:subject)' "${dest}/")" || return 2
     # What: the local copies go; the list keeps the marks.
@@ -7373,16 +7381,16 @@ _ci_scan_identity() {
     printf '%s\n' "$1" "${bsum}" "${db}" "${sev}" "${scn}" "${isum}" | _ci_sha256_hex
 }
 
-# What: read (has) or write the clean-scan mark of a pair.
-# Why: one ref per pair; a lost mark only rescans.
+# What: read (has) or write the clean-scan mark of a digest.
+# Why: a pair-wide ref let another run evict the mark.
 # From: Issue #1683 | PR #1858
 _ci_scan_mark() {
     local prefix ref note
     prefix="$(_ci_variable CI_SCANNED_REF)" || return 2
-    ref="${prefix}/$1-${2//\//-}"
+    ref="${prefix}/$1-${2//\//-}-${3#sha256:}"
     note="scanned $1 $2 $3 $4"
     if [ "$5" = has ]; then
-        _ci_mark_has "${ref}" "${note}"
+        _ci_mark_listed CI_SCANNED_REF "${ref}" "${note}"
         return
     fi
     if [ "${PR_IS_FORK:-false}" = true ]; then
