@@ -929,6 +929,7 @@ runtime:
     - REPO_URL=https://github.com/wiki-mod/lancache-ng
     - SECRETS_DIR=@LANCACHE_SHARED_SECRET_DIR@
     - SETUP_SCRIPT_URL=https://raw.githubusercontent.com/wiki-mod/lancache-ng/master/setup.sh
+    - SETUP_SCRIPT_URL_NIGHTLY=https://raw.githubusercontent.com/wiki-mod/lancache-ng/current_dev/setup.sh
     - SNMP_AGENTX=0
     - SNMP_AGENTX_SOCKET=/var/agentx/master
     - SNMP_ALLOW_FROM=default
@@ -1171,6 +1172,7 @@ runtime:
     - REPO_URL=text;;;live;ui
     - SECRETS_DIR=path;;;container;services
     - SETUP_SCRIPT_URL=text;;;live;ui
+    - SETUP_SCRIPT_URL_NIGHTLY=text;;;live;ui
     - SNMP_AGENTX=bool;;;restart;services
     - SNMP_AGENTX_SOCKET=path;;;restart;services
     - SNMP_ALLOW_FROM=text;;;restart;services

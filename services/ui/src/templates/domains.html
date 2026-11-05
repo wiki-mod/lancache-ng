@@ -467,12 +467,18 @@
           <label for="secondary-name">Name</label>
           <input type="text" id="secondary-name" maxlength="63" pattern="[A-Za-z0-9-]+" placeholder="garage" autocomplete="off">
         </div>
+        {% if primary_ip_https %}<div class="field" style="max-width:320px;">
+          <label for="secondary-https-ip">Second IP of the secondary for HTTPS DNS (optional)</label>
+          <input type="text" id="secondary-https-ip" maxlength="15" placeholder="192.168.1.103" autocomplete="off">
+        </div>{% endif %}
         <div class="copy-row" style="max-width:none; align-items:flex-start; font-size:12.5px;">
           <code id="install-cmd" style="white-space:pre-wrap; overflow-x:visible;">bash &lt;(curl -fsSL {{ setup_script_url }}) secondary \
   --primary {{ primary_url }} \
   --token {{ registration_token }} \
   --name <span id="secondary-name-out">NAME</span> \
-  --ip-http {{ primary_ip }}</code>
+  --ip-http {{ primary_ip }}{% if primary_ip_https %}<span id="secondary-https-out" hidden> \
+  --ip-https {{ primary_ip_https }} \
+  --listen-ip-https <span id="secondary-https-ip-out">IP</span></span>{% endif %}</code>
           <button type="button" onclick="copyText('install-cmd', this)">Copy</button>
         </div>
         <p class="field-hint">If port 53 on that box is already used by something else, pass a free address with <code>--listen-ip</code>; the installer shows the conflict instead of failing partway through.</p>
@@ -540,6 +546,17 @@
       if (name !== input.value) input.value = name;
       out.textContent = name || 'NAME';
     });
+    const ip = document.getElementById('secondary-https-ip');
+    const ipOut = document.getElementById('secondary-https-ip-out');
+    const extra = document.getElementById('secondary-https-out');
+    if (ip && ipOut && extra) {
+      ip.addEventListener('input', () => {
+        const v = ip.value.replace(/[^0-9.]/g, '');
+        if (v !== ip.value) ip.value = v;
+        ipOut.textContent = v || 'IP';
+        extra.hidden = !v;
+      });
+    }
   })();
 
   // What: confirm() with record name and type

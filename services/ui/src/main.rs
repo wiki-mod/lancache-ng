@@ -780,8 +780,23 @@ async fn domains(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
         .collect();
     ctx.insert("secondaries", &peers);
     ctx.insert("registration_token", &registration_token(&s)?);
-    ctx.insert("setup_script_url", &s.text("SETUP_SCRIPT_URL")?);
+    // What: setup.sh from the branch of this channel.
+    // Why: a nightly primary must not hand out master.
+    // From: Issue #1683 | PR #1980
+    let nightly = process_env("LANCACHE_IMAGE_CHANNEL").as_deref() == Some("nightly");
+    let url_key = if nightly {
+        "SETUP_SCRIPT_URL_NIGHTLY"
+    } else {
+        "SETUP_SCRIPT_URL"
+    };
+    ctx.insert("setup_script_url", &s.text(url_key)?);
     ctx.insert("primary_ip", &s.text("IP_HTTP")?);
+    // What: HTTPS proxy IP when it is a second LAN IP.
+    // Why: the copied command then sets the HTTPS DNS bind.
+    // From: Issue #1683 | PR #1980
+    let https = s.text("IP_HTTPS").unwrap_or_default();
+    let own = !https.is_empty() && https != s.text("IP_HTTP")? && !https.starts_with("127.");
+    ctx.insert("primary_ip_https", if own { https.as_str() } else { "" });
     ctx.insert("primary_url", &s.text("UI_PUBLIC_URL").unwrap_or_default());
     ctx.insert("lan_record_types", &s.list("DNS_LAN_RECORD_TYPES"));
     ctx.insert("record_ttl_default", &s.uint("DNS_RECORD_TTL")?);
