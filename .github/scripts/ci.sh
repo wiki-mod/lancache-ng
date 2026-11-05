@@ -10190,7 +10190,12 @@ _ci_last_release_tag() {
     # From: Issue #1683 | PR #1858
     below="${below%%-*}"
     tags="$(_ci_capture 0 sort -V -u <<< "${tags}"$'\n'"${below}")" || return 2
-    awk -v b="${below}" '$0 == b { exit } { last = $0 } END { if (last != "") print last }' <<<"${tags}"
+    local t last=""
+    while IFS= read -r t; do
+        [ "${t}" != "${below}" ] || break
+        last="${t}"
+    done <<< "${tags}"
+    [ -z "${last}" ] || printf '%s\n' "${last}"
 }
 
 # What: The next patch tag after a plain vX.Y.Z tag.
