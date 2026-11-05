@@ -19703,7 +19703,8 @@ _ci_check_sot_identity_inputs() {
 _ci_check_dockerfiles() {
     local repo_root="${1:-${CI_REPO_ROOT:-.}}" targets t df rel type svars bvars allow raw tok missing bst bv
     local hits spec p id c ctxs srcs src ok n=0 rc=0 dline mnt_spec
-    local -a tl=() cl=() roots=() parts=() e_bt=() e_tune=() e_stage=() e_secret=() e_ctx=() e_src=()
+    local cargo_re=$'cargo[ \t]+install[ \t]+' cmd_end_re='^[^&|;]*'
+    local -a tl=() cl=() roots=() parts=() toks=() e_bt=() e_tune=() e_stage=() e_secret=() e_ctx=() e_src=()
     local -A kv=() is_pkg=()
     svars="$(_ci_block_entry_list stage_variables "" ci_sh)" || return 2
     [ -n "${svars}" ] || e_stage+=("SOT stage_variables.ci_sh lists no variable")
@@ -19775,14 +19776,17 @@ _ci_check_dockerfiles() {
         # What: cargo install tokens; rust: none at all.
         # Why: build-tools owns the toolchain (AG-REL-002).
         # From: Issue #1683 | PR #1912
-        raw="$(_ci_capture 0 awk "$(cat <<'PROG'
-            match($0, /cargo[ \t]+install[ \t]+/) {
-                r = substr($0, RSTART + RLENGTH); sub(/[&|;].*/, "", r)
-                k = split(r, a, /[ \t]+/)
-                for (i = 1; i <= k; i++) if (a[i] != "" && a[i] !~ /^-/) print a[i]
-            }
-PROG
-            )" "${df}")" || return 2
+        raw=""
+        while IFS= read -r dline || [ -n "${dline}" ]; do
+            [[ "${dline}" =~ ${cargo_re} ]] || continue
+            dline="${dline#*"${BASH_REMATCH[0]}"}"
+            [[ "${dline}" =~ ${cmd_end_re} ]]
+            IFS=$' \t' read -r -a toks <<< "${BASH_REMATCH[0]}"
+            for tok in "${toks[@]}"; do
+                [[ "${tok}" == -* ]] || raw+="${tok}"$'\n'
+            done
+        done < "${df}" || return 2
+        raw="${raw%$'\n'}"
         if [ "${type}" != rust ]; then
             while IFS= read -r tok; do
                 [ -z "${tok}" ] || [ -z "${is_pkg[${tok}]:-}" ] || e_src+=("${rel}: cargo install ${tok}; SOT ships it prebuilt in build-tools")
