@@ -961,6 +961,7 @@ runtime:
     - STEAM_CLIENT_OS_TYPE=203
     - STEAM_CLIENT_PACKAGE_VERSION=1771
     - STEAM_DEVICE_NAME=LanCache-NG
+    - STEAM_AUTH_PLATFORM_TYPE=3
     - STEAM_HEARTBEAT_DEFAULT=30
     - STEAM_MANIFEST_API_VERSION=5
     - STEAM_OS=windows
@@ -1206,6 +1207,7 @@ runtime:
     - STEAM_CLIENT_OS_TYPE=uint;0;1000;live;services
     - STEAM_CLIENT_PACKAGE_VERSION=uint;0;100000;live;services
     - STEAM_DEVICE_NAME=text;;;live;services
+    - STEAM_AUTH_PLATFORM_TYPE=uint;0;10;live;services
     - STEAM_HEARTBEAT_DEFAULT=uint;1;600;live;services
     - STEAM_MANIFEST_API_VERSION=uint;1;100;live;services
     - STEAM_OS=choice;windows,macos,linux;;live;services

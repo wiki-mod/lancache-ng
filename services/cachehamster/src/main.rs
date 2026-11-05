@@ -329,11 +329,19 @@ fn qr_size(c: &Ctx) -> Result<u32, String> {
 // From: Issue #871 | PR #1858
 async fn login_begin(c: &Ctx, client: &reqwest::Client) -> Result<Value, String> {
     let device = c.s.text("STEAM_DEVICE_NAME")?;
+
+    // What: login as the mobile app platform.
+    // Why: only its tokens renew for Web API calls.
+    // From: Issue #871 | PR #1980
+    let platform = c.s.uint("STEAM_AUTH_PLATFORM_TYPE")?.to_string();
     let r = steam_post(
         client,
         c,
         "IAuthenticationService/BeginAuthSessionViaQR",
-        &[("device_friendly_name", &device)],
+        &[
+            ("device_friendly_name", &device),
+            ("platform_type", &platform),
+        ],
     )
     .await?;
     let pending = Pending {
@@ -411,7 +419,8 @@ async fn access_token(c: &Ctx, client: &reqwest::Client, s: &Session) -> Result<
         ],
     )
     .await?;
-    field(&r, "access_token").ok_or_else(|| "Steam returned no access token".into())
+    field(&r, "access_token")
+        .ok_or_else(|| "Steam returned no access token; log out and scan the code again".into())
 }
 
 // What: the owned games of the logged-in account.
