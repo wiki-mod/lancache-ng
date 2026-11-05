@@ -653,8 +653,8 @@ fn newest_lines(root: &Path, programs: &[String], max: usize, chunk: u64) -> Vec
     all.into_iter()
         .map(|(p, l)| {
             let (stamp, text) = l.split_once(' ').unwrap_or(("", l.as_str()));
-            // What: drop "host program: " before the message.
-            // Why: the page shows the program in its own column.
+            // What: drop "host program: " ahead.
+            // Why: the program has its own column.
             // From: Issue #1683 | PR #1980
             let lead = format!(" {p}: ");
             let text = text.split_once(lead.as_str()).map_or(text, |(_, m)| m);
@@ -951,7 +951,7 @@ async fn domains(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     let https = s.text("IP_HTTPS").unwrap_or_default();
     let own = !https.is_empty() && https != s.text("IP_HTTP")? && !https.starts_with("127.");
     // What: no HTTPS part while HTTPS is off.
-    // Why: DoMe 05.11.: the field woke HTTPS that was never on.
+    // Why: the field woke HTTPS that was off.
     // From: Issue #1683 | PR #1980
     let own = own && s.flag("HTTPS_ENABLED").unwrap_or(false);
     ctx.insert("primary_ip_https", if own { https.as_str() } else { "" });
