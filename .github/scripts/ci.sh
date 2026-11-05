@@ -7252,49 +7252,32 @@ IFS="$old_ifs"
 set +f
 PATH="$trimmed_path"; export PATH
 SH
+    # What: an aws-lc-sys generated include skips pump.
+    # Why: pump cannot ship headers built during the build.
+    # From: Issue #1683 | PR #1858
     cat <<'SH'
-normalize_argument() {
-  arg="$1"
-  case "$arg" in
-    -I*|-isystem*)
-      case "$arg" in
-        -I*) echo "${arg#-I}" ;;
-        -isystem*) echo "${arg#-isystem}" ;;
-      esac
-      return
-      ;;
-  esac
-  printf "%s\n" "$arg"
-}
-matches_aws_lc_generated_path() {
-  arg="$1"
-  case "$arg" in
-    *aws-lc-sys*|*aws_lc_sys*)
-      case "$arg" in
-        *generated*|*out*|*target*/*/build/*) return 0;;
-      esac
-      ;;
-  esac
-  return 1
-}
+hit=""
 for arg in "$@"; do
-  normalized_arg="$(normalize_argument "$arg")"
-  if matches_aws_lc_generated_path "$normalized_arg"; then
-    matched_arg="$normalized_arg"
-    break
-  fi
+  case "$arg" in
+    -I*) inc="${arg#-I}" ;;
+    -isystem*) inc="${arg#-isystem}" ;;
+    *) inc="$arg" ;;
+  esac
+  case "$inc" in
+    *aws-lc-sys*|*aws_lc_sys*) ;;
+    *) continue ;;
+  esac
+  case "$inc" in
+    *generated*|*out*|*target*/*/build/*) hit="$inc"; break ;;
+  esac
 done
-if [ -n "${matched_arg:-}" ]; then
-  echo "[CI-INFO-RUSTBUILD-0018] input=$matched_arg reason=\"generated header; distcc without pump\"" >&2
-  if [ -n "${DISTCC_HOSTS_NO_PUMP:-}" ]; then
-    env -u INCLUDE_SERVER_PORT -u INCLUDE_SERVER_PID DISTCC_HOSTS="$DISTCC_HOSTS_NO_PUMP" "$distcc_real" "$real_compiler" "$@"
-    exit $?
-  fi
+[ -n "$hit" ] || exec "$distcc_real" "$real_compiler" "$@"
+echo "[CI-INFO-RUSTBUILD-0018] input=$hit reason=\"generated header; distcc without pump\"" >&2
+if [ -z "${DISTCC_HOSTS_NO_PUMP:-}" ]; then
   echo "[CI-INFO-RUSTBUILD-0019] reason=\"no non-pump distcc host; local compiler\"" >&2
-  env -u DISTCC_HOSTS -u INCLUDE_SERVER_PORT -u INCLUDE_SERVER_PID -u DISTCC_FALLBACK "$local_compiler" "$@"
-  exit $?
+  exec env -u DISTCC_HOSTS -u INCLUDE_SERVER_PORT -u INCLUDE_SERVER_PID -u DISTCC_FALLBACK "$local_compiler" "$@"
 fi
-exec "$distcc_real" "$real_compiler" "$@"
+exec env -u INCLUDE_SERVER_PORT -u INCLUDE_SERVER_PID DISTCC_HOSTS="$DISTCC_HOSTS_NO_PUMP" "$distcc_real" "$real_compiler" "$@"
 SH
 }
 
