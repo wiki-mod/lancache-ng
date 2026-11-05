@@ -3988,7 +3988,7 @@ pub mod rrd {
             let (tab, name) = head
                 .split_once('.')
                 .ok_or_else(|| format!("stats row {row:?} needs tab.name"))?;
-            if !tabs.iter().any(|t| t == tab) {
+            if tab != MACHINE && !tabs.iter().any(|t| t == tab) {
                 return Err(format!(
                     "stats row {row:?}: tab {tab} not in STATS_CONTAINERS"
                 ));

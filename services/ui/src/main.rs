@@ -1811,6 +1811,33 @@ async fn service_values(app: &App, s: &Settings, want: &[String]) -> BTreeMap<St
         }
     }
 
+    // What: host network bytes from /proc/net/dev.
+    // Why: dhcp runs in the host network; Docker has none.
+    // From: Issue #1683 | PR #1980
+    if has("host")
+        && let Ok(svc) = s.text("DHCP_SERVICE")
+        && let Ok((0, text)) = exec_in(app, s, &svc, &["cat", "/proc/net/dev"]).await
+    {
+        let skip = s.list("STATS_HOST_IF_SKIP");
+        let (mut rx, mut tx) = (0u64, 0u64);
+        for line in text.lines() {
+            let Some((name, rest)) = line.split_once(':') else {
+                continue;
+            };
+            if skip.iter().any(|p| name.trim().starts_with(p.as_str())) {
+                continue;
+            }
+            let n: Vec<u64> = rest
+                .split_whitespace()
+                .filter_map(|w| w.parse().ok())
+                .collect();
+            rx = rx.saturating_add(n.first().copied().unwrap_or(0));
+            tx = tx.saturating_add(n.get(8).copied().unwrap_or(0));
+        }
+        out.insert("host:rx".into(), rx.to_string());
+        out.insert("host:tx".into(), tx.to_string());
+    }
+
     // What: chronyc -c tracking: CSV, field 5 = offset.
     // Why: stratum and offset show the time source.
     // From: Issue #1683 | PR #1980

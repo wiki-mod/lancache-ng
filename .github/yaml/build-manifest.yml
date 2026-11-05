@@ -956,10 +956,11 @@ runtime:
     - STATS_HEARTBEAT_STEPS=2
     - "STATS_FONTS=DEFAULT:11: TITLE:13: AXIS:10: LEGEND:11:"
     - STATS_HEIGHT=240
+    - STATS_HOST_IF_SKIP=lo veth docker br-
     - "STATS_LINE_COLOURS=#2f81f7 #3fb950 #d29922 #f85149"
     - STATS_RANGES=1h 1d 1w 1m 1y
     - STATS_RRAS=AVERAGE:0.5:1:1440 AVERAGE:0.5:12:1680 AVERAGE:0.5:288:800 MAX:0.5:12:1680
-    - STATS_SERVICE_GRAPHS=proxy.requests:per_s=nginx:requests=DERIVE proxy.connections:active=nginx:active=GAUGE+waiting=nginx:waiting=GAUGE @DNS_SERVICE@.queries:recursor=recursor:questions=DERIVE+upstream=recursor:all-outqueries=DERIVE+auth=auth:udp-queries=DERIVE @DNS_SERVICE@.cache:hits=recursor:cache-hits=DERIVE+misses=recursor:cache-misses=DERIVE @DHCP_SERVICE@.packets:received=kea:pkt4-received=DERIVE+acks=kea:pkt4-ack-sent=DERIVE+naks=kea:pkt4-nak-sent=DERIVE @CACHEHAMSTER_SERVICE@.time:offset_ms=chrony:offset=GAUGE=1000+stratum=chrony:stratum=GAUGE
+    - STATS_SERVICE_GRAPHS=machine.network:in=host:rx=DERIVE+out=host:tx=DERIVE proxy.requests:per_s=nginx:requests=DERIVE proxy.connections:active=nginx:active=GAUGE+waiting=nginx:waiting=GAUGE @DNS_SERVICE@.queries:recursor=recursor:questions=DERIVE+upstream=recursor:all-outqueries=DERIVE+auth=auth:udp-queries=DERIVE @DNS_SERVICE@.cache:hits=recursor:cache-hits=DERIVE+misses=recursor:cache-misses=DERIVE @DHCP_SERVICE@.packets:received=kea:pkt4-received=DERIVE+acks=kea:pkt4-ack-sent=DERIVE+naks=kea:pkt4-nak-sent=DERIVE @CACHEHAMSTER_SERVICE@.time:offset_ms=chrony:offset=GAUGE=1000+stratum=chrony:stratum=GAUGE
     - STATS_SNMP_TARGET=udp:@CACHEHAMSTER_SERVICE@:161
     - STATS_STEP=60
     - CACHE_USAGE_SCAN_SECONDS=300
@@ -1207,6 +1208,7 @@ runtime:
     - STATS_GRAPHS=list;;;live;ui
     - STATS_HEARTBEAT_STEPS=uint;1;100;live;ui
     - STATS_HEIGHT=text;;;live;ui
+    - STATS_HOST_IF_SKIP=list;;;live;ui
     - STATS_LINE_COLOURS=list;;;live;ui
     - STATS_RANGES=list;;;live;ui
     - STATS_RRAS=list;;;live;ui
