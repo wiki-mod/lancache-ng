@@ -591,8 +591,7 @@ fn take_inbox(c: &Ctx, jobs: &mut Vec<Job>, consume: bool) -> Result<(), String>
     names.sort();
     for path in names {
         match read_json::<Order>(&path) {
-            Ok(Some(order)) => apply_order(jobs, order),
-            Ok(None) => {}
+            Ok(order) => order.into_iter().for_each(|o| apply_order(jobs, o)),
             Err(e) => eprintln!("cachehamster: dropped bad order: {e}"),
         }
         if consume {
@@ -807,11 +806,20 @@ impl Kv {
     }
 }
 
+// What: one KeyValues token: a word or a brace.
+// Why: a brace is no word; no sentinel string needed.
+// From: Issue #871 | PR #1980
+enum Tok {
+    Word(String),
+    Open,
+    Close,
+}
+
 // What: parse quoted tokens and braces into a Kv tree.
 // Why: only the subset Steam sends; escapes are kept.
 // From: Issue #871 | PR #1858
 fn parse_kv(text: &str) -> Result<Kv, String> {
-    let mut tokens: Vec<Option<String>> = Vec::new();
+    let mut tokens: Vec<Tok> = Vec::new();
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
         match c {
@@ -824,29 +832,36 @@ fn parse_kv(text: &str) -> Result<Kv, String> {
                         _ => s.push(c),
                     }
                 }
-                tokens.push(Some(s));
+                tokens.push(Tok::Word(s));
             }
-            '{' => tokens.push(None),
-            '}' => tokens.push(Some("\u{0}}".into())),
+            '{' => tokens.push(Tok::Open),
+            '}' => tokens.push(Tok::Close),
             _ => {}
         }
     }
     let mut stack: Vec<(String, Kv)> = vec![(String::new(), Kv::default())];
     let mut key: Option<String> = None;
     for t in tokens {
-        match (t, key.take()) {
-            (None, Some(k)) => stack.push((k, Kv::default())),
-            (Some(close), None) if close == "\u{0}}" => {
+        match t {
+            Tok::Open => {
+                let k = key.take().ok_or("KeyValues: { without key")?;
+                stack.push((k, Kv::default()));
+            }
+            Tok::Close => {
+                if key.is_some() {
+                    return Err("KeyValues: key without value".into());
+                }
                 let (k, node) = stack.pop().ok_or("KeyValues: stray }")?;
                 let parent = stack.last_mut().ok_or("KeyValues: stray }")?;
                 parent.1.0.push((k, KvValue::Node(node)));
             }
-            (Some(v), Some(k)) => {
-                let top = stack.last_mut().ok_or("KeyValues: empty")?;
-                top.1.0.push((k, KvValue::Text(v)));
-            }
-            (Some(k), None) => key = Some(k),
-            (None, None) => return Err("KeyValues: { without key".into()),
+            Tok::Word(w) => match key.take() {
+                Some(k) => {
+                    let top = stack.last_mut().ok_or("KeyValues: empty")?;
+                    top.1.0.push((k, KvValue::Text(w)));
+                }
+                None => key = Some(w),
+            },
         }
     }
     let (_, root) = stack.pop().ok_or("KeyValues: empty")?;
@@ -1284,14 +1299,12 @@ async fn request_code(
             EMSG_SERVICE_RESPONSE,
         )
         .await?;
-    match pb_int(&f.header, 13) {
-        None | Some(ERESULT_OK) => {}
-        Some(r) => return Err(format!("depot {depot}: manifest code eresult {r}")),
+    if let Some(r) = pb_int(&f.header, 13).filter(|r| *r != ERESULT_OK) {
+        return Err(format!("depot {depot}: manifest code eresult {r}"));
     }
-    match pb_int(&pb_read(&f.body)?, 1) {
-        None | Some(0) => Err(format!("depot {depot}: no manifest code (not owned?)")),
-        Some(code) => Ok(code),
-    }
+    pb_int(&pb_read(&f.body)?, 1)
+        .filter(|code| *code != 0)
+        .ok_or_else(|| format!("depot {depot}: no manifest code (not owned?)"))
 }
 
 // What: chunk ids from a zipped binary manifest.
