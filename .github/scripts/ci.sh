@@ -2127,6 +2127,12 @@ ci_cmd_plan_matrix() {
             # Why: A3: its registry read held pass 1 5-7 s.
             # From: Issue #1683 | PR #1858
             _ci_base_image_prefetch _ci_alpine_build_arg "" || return 2
+            # What: SOT change: all pairs; ids at once.
+            # Why: Fund 114: id loop held NOOP plan 27 s.
+            # From: Issue #1683 | PR #1858
+            if [ "${sot_changed}" = true ]; then
+                _ci_identity_prefill "${targets}" || return "$?"
+            fi
         fi
         # What: tests and audit follow content, not paths.
         # Why: §29 §64: equal content, equal test identity.
@@ -4148,8 +4154,50 @@ _ci_plan_record() {
         1) ;;
         *) return 2 ;;
     esac
-    id="$(_ci_identity_compute "$1" "$2")" || return "$?"
+    # What: take the id the prefill of this call computed.
+    # Why: same compute, same inputs; a miss computes here.
+    # From: Issue #1683 | PR #1858
+    rc=0; id="$(_ci_job_memo_get "$(_ci_identity_prefill_key "$1" "$2")")" || rc=$?
+    if [ "${rc}" -ne 0 ] || [[ ! "${id}" =~ ^[0-9a-f]{64}$ ]]; then
+        id="$(_ci_identity_compute "$1" "$2")" || return "$?"
+    fi
     _ci_plan_ids+=" $1@$2=${id}"
+}
+
+# What: memo name of one pair's prefilled id.
+# Why: only this ci.sh call may read it.
+# From: Issue #1683 | PR #1858
+_ci_identity_prefill_key() {
+    printf 'idfill-%s-%s-%s' "${_CI_CALL_KEY}" "$1" "${2//\//-}"
+}
+
+# What: compute the ids of all pairs of list $1 at once.
+# Why: Fund 114: one pair after another took 27 s.
+# From: Issue #1683 | PR #1858
+_ci_identity_prefill() {
+    local s p plats key wrc id
+    local -a pids=() keys=()
+    [ -n "${RUNNER_TEMP:-}" ] || return 0
+    for s in $1; do
+        plats="$(_ci_platforms "${s}")" || return "$?"
+        while IFS= read -r p; do
+            [ -n "${p}" ] || continue
+            key="$(_ci_identity_prefill_key "${s}" "${p}")"
+            {
+                id="$(_ci_identity_compute "${s}" "${p}")" && _ci_job_memo_put "${key}" "${id}"
+            } 2> "${RUNNER_TEMP}/${key}.err" &
+            pids+=("$!")
+            keys+=("${key}")
+        done <<< "${plats}"
+    done
+    # What: a failed pair keeps no memo and no log here.
+    # Why: _ci_plan_record computes it again and logs why.
+    # From: Issue #1683 | PR #1858
+    for p in "${!pids[@]}"; do
+        wrc=0; wait "${pids[$p]}" || wrc=$?
+        [ "${wrc}" -eq 0 ] || continue
+        printf '%s\n' "$(<"${RUNNER_TEMP}/${keys[$p]}.err")" >&2
+    done
 }
 
 # What: write the run record to the log and step output.
