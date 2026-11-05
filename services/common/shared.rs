@@ -3971,6 +3971,30 @@ pub mod rrd {
     pub fn all(s: &Settings) -> Result<Vec<Graph>, String> {
         let mut out = graphs(s)?;
         out.extend(container_graphs(s)?);
+        out.extend(service_graphs(s)?);
+        Ok(out)
+    }
+
+    // What: program values, row tab.name:sources.
+    // Why: 01.11.: PowerDNS, nginx, Kea, chrony values.
+    // From: Issue #1683 | PR #1980
+    pub fn service_graphs(s: &Settings) -> Result<Vec<Graph>, String> {
+        let tabs = s.list("STATS_CONTAINERS");
+        let mut out = Vec::new();
+        for row in s.list("STATS_SERVICE_GRAPHS") {
+            let (head, rest) = row
+                .split_once(':')
+                .ok_or_else(|| format!("stats row {row:?} needs tab.name:sources"))?;
+            let (tab, name) = head
+                .split_once('.')
+                .ok_or_else(|| format!("stats row {row:?} needs tab.name"))?;
+            if !tabs.iter().any(|t| t == tab) {
+                return Err(format!(
+                    "stats row {row:?}: tab {tab} not in STATS_CONTAINERS"
+                ));
+            }
+            out.push(graph(&format!("{name}:{rest}"), tab)?);
+        }
         Ok(out)
     }
 
@@ -4048,7 +4072,11 @@ pub mod rrd {
             .arg("--step")
             .arg(step.to_string());
         for src in &g.sources {
-            cmd.arg(format!("DS:{}:{}:{beat}:0:U", src.ds, src.kind));
+            // What: a gauge may go below zero.
+            // Why: time offsets are negative half the time.
+            // From: Issue #1683 | PR #1980
+            let min = if src.kind == "GAUGE" { "U" } else { "0" };
+            cmd.arg(format!("DS:{}:{}:{beat}:{min}:U", src.ds, src.kind));
         }
         for rra in s.list("STATS_RRAS") {
             cmd.arg(format!("RRA:{rra}"));

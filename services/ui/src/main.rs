@@ -1657,7 +1657,7 @@ async fn stats(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
         tabs.push(json!({
             "id": c,
             "label": c,
-            "source": format!("Container {c} only. Docker stats of this container; the ui asks every {step} s."),
+            "source": format!("Container {c} only. CPU, memory, network and disk from Docker; program values (nginx, PowerDNS, Kea, chrony) from their own interfaces. The ui asks every {step} s."),
         }));
     }
     ctx.insert("tabs", &tabs);
@@ -1756,6 +1756,108 @@ async fn sample_containers(app: &App, s: &Settings) -> Vec<String> {
     errs
 }
 
+// What: numbers of a PowerDNS statistics list.
+// Why: values come as text; prefix names the server.
+// From: Issue #1683 | PR #1980
+fn add_stats(out: &mut BTreeMap<String, String>, prefix: &str, rows: Vec<(String, String)>) {
+    for (name, value) in rows {
+        let Ok(n) = value.parse::<u64>() else {
+            continue;
+        };
+        let key = format!("{prefix}:{name}");
+        let old = out.get(&key).and_then(|v| v.parse::<u64>().ok());
+        out.insert(key, old.unwrap_or(0).saturating_add(n).to_string());
+    }
+}
+
+// What: program values one sample round reads.
+// Why: a program that is off leaves its values unknown.
+// From: Issue #1683 | PR #1980
+async fn service_values(app: &App, s: &Settings, want: &[String]) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    let has = |p: &str| want.iter().any(|w| w.starts_with(&format!("{p}:")));
+    if has("nginx")
+        && let Some(v) = fetch_proxy_live(s).await
+    {
+        for k in ["active", "requests", "waiting"] {
+            out.insert(format!("nginx:{k}"), v[k].to_string());
+        }
+    }
+    if has("recursor")
+        && let (Ok(sec), Ok(client)) = (secrets(s), http::client(s))
+    {
+        for url in s.list("RECURSOR_API_URLS") {
+            let r = lancache_ng::pdns::Api::new(client.clone(), &url, &sec.recursor_api_key);
+            if let Ok(rows) = r.statistics().await {
+                add_stats(&mut out, "recursor", rows);
+            }
+        }
+    }
+    if has("auth")
+        && let Ok(api) = pdns_api(s)
+        && let Ok(rows) = api.statistics().await
+    {
+        add_stats(&mut out, "auth", rows);
+    }
+    if has("kea")
+        && let Ok(api) = kea_api(s)
+        && let Ok(all) = api.command("statistic-get-all", None).await
+        && let Some(map) = all.as_object()
+    {
+        for (k, v) in map {
+            if let Some(n) = v[0][0].as_f64() {
+                out.insert(format!("kea:{k}"), n.to_string());
+            }
+        }
+    }
+
+    // What: chronyc -c tracking: CSV, field 5 = offset.
+    // Why: stratum and offset show the time source.
+    // From: Issue #1683 | PR #1980
+    if has("chrony")
+        && let Ok(svc) = s.text("CACHEHAMSTER_SERVICE")
+        && let Ok((0, text)) = exec_in(app, s, &svc, &["chronyc", "-c", "tracking"]).await
+    {
+        let f: Vec<&str> = text.trim().split(',').collect();
+        if let (Some(st), Some(off)) = (f.get(2), f.get(4)) {
+            out.insert("chrony:stratum".into(), st.to_string());
+            out.insert("chrony:offset".into(), off.to_string());
+        }
+    }
+    out
+}
+
+// What: program values into RRD each step.
+// Why: DoMe 01.11.: PowerDNS, nginx, Kea, chrony.
+// From: Issue #1683 | PR #1980
+async fn sample_services(app: &App, s: &Settings) -> Vec<String> {
+    let all = match lancache_ng::rrd::service_graphs(s) {
+        Ok(v) => v,
+        Err(e) => return vec![e],
+    };
+    let want: Vec<String> = all
+        .iter()
+        .flat_map(|g| g.sources.iter().map(|x| x.oid.clone()))
+        .collect();
+    let vals = service_values(app, s, &want).await;
+    let mut errs = Vec::new();
+    for g in all {
+        let row: Vec<String> = g
+            .sources
+            .iter()
+            .map(|x| vals.get(&x.oid).cloned().unwrap_or_else(|| "U".into()))
+            .collect();
+        let s2 = s.clone();
+        let put = move || lancache_ng::rrd::store(&s2, &g, &row);
+        match tokio::task::spawn_blocking(put).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => errs.push(e),
+            Err(e) => errs.push(e.to_string()),
+        }
+    }
+    errs
+}
+
 // What: records stats every STATS_STEP seconds.
 // Why: the dashboard graphs need a time series.
 async fn sampler(app: Arc<App>) {
@@ -1775,6 +1877,9 @@ async fn sampler(app: Arc<App>) {
             Err(e) => eprintln!("ui: stats: {e}"),
         }
         for e in sample_containers(&app, &s).await {
+            eprintln!("ui: stats: {e}");
+        }
+        for e in sample_services(&app, &s).await {
             eprintln!("ui: stats: {e}");
         }
         tokio::time::sleep(Duration::from_secs(step)).await;
