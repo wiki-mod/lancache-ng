@@ -1336,8 +1336,8 @@ async fn secondary_health(s: &Settings, address: &str) -> Value {
             let state = lancache_ng::dns::sync_state(p, r);
             json!({"status": format!("{state:?}"), "serial": r})
         }
-        Ok((_, None)) => json!({"status": "missing", "detail": "zone not on secondary"}),
-        Ok((None, _)) => json!({"status": "error", "detail": "zone not on primary"}),
+        Ok((_, r)) if r.is_none() => json!({"status": "missing", "detail": "zone not on secondary"}),
+        Ok(_) => json!({"status": "error", "detail": "zone not on primary"}),
         Err(e) => json!({"status": "unreachable", "detail": e}),
     }
 }
