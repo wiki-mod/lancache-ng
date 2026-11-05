@@ -1772,7 +1772,7 @@ async fn stats(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
         Ok(list) => {
             let rows: Vec<Value> = list
                 .iter()
-                .map(|g| json!({"name": g.name, "title": g.title, "tab": g.tab}))
+                .map(|g| json!({"name": g.name, "title": graph_title(&g.title), "tab": g.tab}))
                 .collect();
             ctx.insert("graphs", &rows);
         }
@@ -1815,6 +1815,15 @@ struct GraphQuery {
     dark: u8,
 }
 
+// What: graph title in the page language.
+// Why: SOT names are English words; key graph_<name>.
+// From: Issue #1683 | PR #1980
+fn graph_title(title: &str) -> String {
+    let key = format!("graph_{}", title.replace(' ', "_"));
+    let text = tr(&key);
+    if text == key { title.to_string() } else { text }
+}
+
 // What: one graph as PNG.
 // Why: drawn on request; RRD files stay small.
 // From: Issue #1683 | PR #1858
@@ -1825,9 +1834,10 @@ async fn graph(
 ) -> Page {
     let s = app.settings();
     let all = lancache_ng::rrd::all(&s)?;
-    let Some(g) = all.into_iter().find(|g| g.name == name) else {
+    let Some(mut g) = all.into_iter().find(|g| g.name == name) else {
         return Err(Fail(StatusCode::NOT_FOUND, "no such graph".into()));
     };
+    g.title = graph_title(&g.title);
     let draw = move || lancache_ng::rrd::png(&s, &g, &q.range, q.dark == 1);
     let png = tokio::task::spawn_blocking(draw)
         .await

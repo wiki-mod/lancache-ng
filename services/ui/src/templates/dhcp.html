@@ -6,6 +6,7 @@
 {# Why: mode and Kea state are read on each request #}
 {# From: Issue #1683 | PR #1912 #}
 {% extends "base.html" %}
+{% block title %} – DHCP{% endblock %}
 
 {# What: NTP auto-assign hint under the subnet forms #}
 {# Why: one copy for the add form and every edit form #}
