@@ -2984,7 +2984,7 @@ pub mod nginx_conf {
         out.push_str(&p.timeouts);
         out.push_str("}\n");
         // What: the refuse target closes at once.
-        // Why: live: a closed port logged [error] each time.
+        // Why: live: a closed port logged [error].
         // From: Issue #1683 | PR #1980
         out.push_str(&format!(
             "\nserver {{\n    listen {};\n    return \"\";\n}}\n",
