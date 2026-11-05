@@ -166,11 +166,27 @@
       api('library').then(function (v) {
         back();
         const t = document.getElementById('hamster-games');
-        t.innerHTML = '<tr><th>App ID</th><th>Name</th></tr>';
+        t.innerHTML = '<tr><th>App ID</th><th>Name</th><th></th></tr>';
         v.games.forEach(function (g) {
           const row = t.insertRow();
           row.insertCell().textContent = g.appid;
           row.insertCell().textContent = g.name;
+          // What: one click adds a "now" job for this game.
+          // Why: DoMe 05.11.: load straight from the list.
+          // From: Issue #871 | PR #1980
+          const f = document.createElement('form');
+          f.method = 'post';
+          f.action = "{{ routes.hamster_add | safe }}";
+          [['csrf_token', CSRF_TOKEN], ['name', g.name], ['app', String(g.appid)], ['when', 'now'], ['urls', ''], ['at', '']].forEach(function (p) {
+            const i = document.createElement('input');
+            i.type = 'hidden'; i.name = p[0]; i.value = p[1];
+            f.appendChild(i);
+          });
+          const b = document.createElement('button');
+          b.type = 'submit'; b.className = 'btn'; b.textContent = LC_T.preload;
+          f.addEventListener('submit', function () { b.disabled = true; b.textContent = LC_T.loading; });
+          f.appendChild(b);
+          row.insertCell().appendChild(f);
         });
       }).catch(function (e) { back(); window.LancacheUi.fail(e); });
     });
