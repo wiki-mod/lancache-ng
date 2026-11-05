@@ -15029,6 +15029,7 @@ _ci_rh_grep_or() {
 # From: Issue #1622 | PR #1624
 _ci_rh_purge_pve_check() {
     local keep pkgs pkg_raw sim families units fstab pdir procs crons d open hits rss dpkg_out unit_out
+    local kb name total=0
     _ci_rh_need_sudo || return 2
     pdir="$(_ci_rh_val pve_config_dir)" || return 2
     procs="$(_ci_rh_ere pve_process_families)" || return 2
@@ -15078,7 +15079,11 @@ _ci_rh_purge_pve_check() {
     done <<< "${crons}"
     printf '\n--- RSS of the PVE stack processes ---\n'
     rss="$(_ci_capture 0 ps -eo rss=,comm=)" || return 2
-    awk -v re="${procs}" 'tolower($2) ~ re { kb += $1 } END { printf "  %d MiB\n", kb / 1024 }' <<< "${rss}"
+    while read -r kb name _; do
+        [[ "${name,,}" =~ ${procs} ]] || continue
+        if [[ "${kb}" =~ ^[0-9]+$ ]]; then total=$((total + kb)); fi
+    done <<< "${rss}"
+    printf '  %d MiB\n' "$((total / 1024))"
     printf '\n--- Simulated purge (no kernel or firmware must appear) ---\n'
     sim="$(_ci_run -m 100 "[CI-ERROR-RUNNER-0054]" "reason=\"simulated purge failed\"" _ci_rh_root apt-get purge --simulate "${pkgs[@]}")" || return 2
     printf '%s\n' "${sim}"
