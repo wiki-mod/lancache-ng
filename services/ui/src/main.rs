@@ -2020,6 +2020,23 @@ async fn apply_all(app: &App, old: &Settings, new: &Settings) -> Result<Vec<Stri
     for name in wait_healthy(app, new, &restarted, limit).await {
         report.push(format!("{name}: not healthy in time"));
     }
+
+    // What: after a dns restart wait for the pdns API.
+    // Why: live test: the page loaded before pdns ran.
+    // From: Issue #1683 | PR #1980
+    if names
+        .get(&new.text("DNS_SERVICE")?)
+        .is_some_and(|n| restarted.contains(n))
+    {
+        let until = std::time::Instant::now() + limit;
+        while let Err(e) = ensure_zones(new).await {
+            if std::time::Instant::now() >= until {
+                report.push(format!("dns api: {e}"));
+                break;
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    }
     // What: issue missing certs after the restarts.
     // Why: many leaves take time; dns must not wait.
     // From: Issue #1683 | PR #1980

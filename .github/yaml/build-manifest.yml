@@ -1046,6 +1046,7 @@ runtime:
     - DHCP_RANGE_START=text;;;reload;dhcp
     - DHCP_RELAY_LOCAL_ADDR=text?;;;reload;dhcp
     - DHCP_SERVICE=text;;;live;services
+    - DNS_SERVICE=text;;;live;ui
     - DHCP_SUBNET=text;;;reload;dhcp
     - DHCP_SUBNET_ID=uint;1;4294967294;reload;dhcp
     - DHCP_SUBNET_START=text?;;;reload;dhcp
