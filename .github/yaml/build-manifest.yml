@@ -860,7 +860,6 @@ runtime:
     - KEA_DDNS_PORT=53001
     - KEA_DHCP4_CONF_FILE=@CONFIG_DIR@/dhcp/kea-dhcp4.conf
     - KEA_DHCP4_SOCKET=/run/kea/kea4-ctrl-socket
-    - KEA_SNAPSHOT_DIR=@KEA_DATA_DIR@/snapshots
     - KEA_SNAPSHOT_KEEP=20
     - NGINX_CLIENT_ACL_FILE=@NGINX_CONF_DIR@/conf.d/client-acl.inc
     - NGINX_DEFAULT_CERT=default
@@ -1089,7 +1088,8 @@ runtime:
     - KEA_LOG_DEBUGLEVEL=uint;0;99;reload;dhcp
     - KEA_LOG_SEVERITY=choice;FATAL,ERROR,WARN,INFO,DEBUG;;reload;dhcp
     - KEA_NCR_MAX_QUEUE=uint;1;65535;reload;dhcp
-    - KEA_SNAPSHOT_DIR=path;;;live;ui
+    - KEA_CONFIG_SNAPSHOT_DIR=path;;;live;ui
+    - KEA_CONFIG_SNAPSHOT_FILE=text;;;live;ui
     - KEA_SNAPSHOT_KEEP=uint;1;1000;live;ui
     - LANCACHE_IMAGE_CHANNEL=choice;nightly,latest;;live;ui
     - LANCACHE_LOG_PORT=uint;1;65535;container;services

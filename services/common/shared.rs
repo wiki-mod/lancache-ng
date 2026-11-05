@@ -1573,13 +1573,14 @@ pub mod snapshot {
     use crate::fs::{self, Owner, Place};
     use std::path::PathBuf;
 
-    // What: snapshot dir, how many to keep, owner.
-    // Why: retention per store from the SOT.
-    // From: Issue #1683 | PR #1858
+    // What: snapshot dir, keep count, owner, file name.
+    // Why: file set: <dir>/<id>/<file>, as setup.sh reads.
+    // From: Issue #1683 | PR #1980
     pub struct Store {
         pub dir: PathBuf,
         pub keep: usize,
         pub owner: Owner,
+        pub file: Option<String>,
     }
 
     // What: an id is a non-empty digit string.
@@ -1590,19 +1591,27 @@ pub mod snapshot {
     }
 
     impl Store {
+        // What: the file that holds snapshot id.
+        // Why: flat file, or one dir per id with a name.
+        // From: Issue #1683 | PR #1980
+        pub fn path(&self, id: &str) -> PathBuf {
+            match &self.file {
+                Some(name) => self.dir.join(id).join(name),
+                None => self.dir.join(id),
+            }
+        }
+
         // What: save body under a new time id.
         // Why: exclusive create; then prune old ones.
         // From: Issue #1683 | PR #1858
         pub fn save(&self, body: &[u8]) -> Result<String, String> {
             let id = crate::clock::unix_nanos().to_string();
-            fs::write(
-                &self.dir.join(&id),
-                body,
-                0o600,
-                Place::Exclusive,
-                self.owner,
-            )
-            .map_err(|e| format!("snapshot {id}: {e}"))?;
+            if self.file.is_some() {
+                std::fs::create_dir_all(self.dir.join(&id))
+                    .map_err(|e| format!("snapshot {id}: {e}"))?;
+            }
+            fs::write(&self.path(&id), body, 0o600, Place::Exclusive, self.owner)
+                .map_err(|e| format!("snapshot {id}: {e}"))?;
             self.prune()?;
             Ok(id)
         }
@@ -1619,7 +1628,7 @@ pub mod snapshot {
             let mut ids: Vec<String> = entries
                 .filter_map(Result::ok)
                 .filter_map(|e| e.file_name().into_string().ok())
-                .filter(|n| is_id(n))
+                .filter(|n| is_id(n) && self.path(n).is_file())
                 .collect();
             ids.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| b.cmp(a)));
             Ok(ids)
@@ -1632,7 +1641,7 @@ pub mod snapshot {
             if !is_id(id) {
                 return Err(format!("bad snapshot id {id:?}"));
             }
-            std::fs::read(self.dir.join(id)).map_err(|e| format!("snapshot {id}: {e}"))
+            std::fs::read(self.path(id)).map_err(|e| format!("snapshot {id}: {e}"))
         }
 
         // What: drop all but the newest keep.
@@ -1641,7 +1650,11 @@ pub mod snapshot {
         fn prune(&self) -> Result<(), String> {
             for id in self.list()?.into_iter().skip(self.keep.max(1)) {
                 let path = self.dir.join(&id);
-                std::fs::remove_file(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+                let gone = match self.file {
+                    Some(_) => std::fs::remove_dir_all(&path),
+                    None => std::fs::remove_file(&path),
+                };
+                gone.map_err(|e| format!("{}: {e}", path.display()))?;
             }
             Ok(())
         }

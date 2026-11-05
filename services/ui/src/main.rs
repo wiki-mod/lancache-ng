@@ -639,7 +639,12 @@ fn zone_store(s: &Settings, zone: &str) -> Result<lancache_ng::snapshot::Store, 
         uid: None,
         gid: None,
     };
-    Ok(lancache_ng::snapshot::Store { dir, keep, owner })
+    Ok(lancache_ng::snapshot::Store {
+        dir,
+        keep,
+        owner,
+        file: None,
+    })
 }
 
 // What: keep the zone's records after a change.
@@ -674,7 +679,7 @@ fn snapshot_list(s: &Settings) -> Result<Vec<(String, Vec<Value>)>, String> {
         let store = zone_store(s, &zone)?;
         let mut rows = Vec::new();
         for id in store.list().unwrap_or_default() {
-            let created = created_unix(&store.dir.join(&id))?;
+            let created = created_unix(&store.path(&id))?;
             rows.push(json!({"id": id, "created_unix": created}));
         }
         out.push((zone, rows));
@@ -1228,12 +1233,13 @@ async fn kea_view(api: &lancache_ng::kea::Api) -> (Vec<Value>, Vec<Value>, Vec<V
 // Why: each subnet change can be undone.
 // From: Issue #1683 | PR #1858
 fn kea_store(s: &Settings) -> Result<lancache_ng::snapshot::Store, String> {
-    let dir = PathBuf::from(s.text("KEA_SNAPSHOT_DIR")?);
+    let dir = PathBuf::from(s.text("KEA_CONFIG_SNAPSHOT_DIR")?);
     let keep = usize::try_from(s.uint("KEA_SNAPSHOT_KEEP")?).map_err(|e| e.to_string())?;
     Ok(lancache_ng::snapshot::Store {
         dir,
         keep,
         owner: owner_keep(),
+        file: Some(s.text("KEA_CONFIG_SNAPSHOT_FILE")?),
     })
 }
 
@@ -1300,7 +1306,7 @@ async fn dhcp(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     let store = kea_store(&s)?;
     let mut snaps = Vec::new();
     for id in store.list().unwrap_or_default() {
-        let created = created_unix(&store.dir.join(&id))?;
+        let created = created_unix(&store.path(&id))?;
         snaps.push(json!({"id": id, "created_unix": created}));
     }
     ctx.insert("kea_snapshots", &snaps);
