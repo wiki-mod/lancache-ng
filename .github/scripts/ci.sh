@@ -2989,7 +2989,7 @@ _ci_listing_items() {
 # Why: §17: a refresh run resolves the latest; ids stay
 # From: Issue #1683 | PR #1858
 _ci_cargo_lock() {
-    local write="${1:-}" lock seen out remote blob rc=0 k v val="" refresh=0
+    local write="${1:-}" lock seen out remote rc=0 val="" refresh=0
     local run="${GITHUB_RUN_ID:-local}"
     lock="$(_ci_repo_path CI_CARGO_LOCK)" || return 2
     if seen="$(_ci_job_memo_get cargo-lock.done)" && [ "${seen}" = "${lock}" ] && [ -s "${lock}" ]; then
@@ -2998,16 +2998,8 @@ _ci_cargo_lock() {
     _ci_refresh_event || refresh=$?
     [ "${refresh}" -le 1 ] || return 2
     remote="$(_ci_git_remote)" || return 2
-    blob="$(_ci_ledger_blob "${remote}" CI_REFRESH_REF CI_REFRESH_FILE)" || rc=$?
-    case "${rc}" in
-        0)
-            while IFS=$'\t' read -r k v; do
-                [ "${k}" != cargo-lock ] || val="${v}"
-            done <<< "${blob}"
-            ;;
-        1) ;;
-        *) return 2 ;;
-    esac
+    val="$(_ci_refresh_record cargo-lock)" || rc=$?
+    [ "${rc}" -le 1 ] || return 2
     # What: reuse the record; a refresh run only its own
     # Why: plan and builds of one run read one lock
     # From: Issue #1683 | PR #1858
@@ -7599,11 +7591,67 @@ _ci_local_image_files() {
     return "${rc}"
 }
 
+# What: value of refresh record key $1; 1 if absent.
+# Why: one reader of the refresh records for every key.
+# From: Issue #1683 | PR #1858
+_ci_refresh_record() {
+    local remote blob rc=0 k v
+    remote="$(_ci_git_remote)" || return 2
+    blob="$(_ci_ledger_blob "${remote}" CI_REFRESH_REF CI_REFRESH_FILE)" || rc=$?
+    [ "${rc}" -le 1 ] || return 2
+    [ "${rc}" -eq 0 ] || return 1
+    while IFS=$'\t' read -r k v; do
+        [ "${k}" != "$1" ] || { printf '%s\n' "${v}"; return 0; }
+    done <<< "${blob}"
+    return 1
+}
+
+# What: one sha256 per id input of a pair: name=sum.
+# Why: Fund 116: a refresh BUILD names the changed input.
+# From: Issue #1683 | PR #1858
+_ci_identity_parts() {
+    local service="$1" platform="$2" type inputs input part sum
+    type="$(_ci_required_field "${service}" build_type)" || return 2
+    part="$(_ci_identity_content "${service}")" || return 2
+    sum="$(printf '%s' "${part}" | _ci_sha256_hex)" || return 2
+    printf 'content=%s' "${sum}"
+    inputs="$(_ci_block_entry_list build_identity "${type}" inputs)" || return 2
+    for input in ${inputs}; do
+        part="$(_ci_identity_pins "${service}" "${type}" "${platform}" "${input}")" || return "$?"
+        sum="$(printf '%s' "${part}" | _ci_sha256_hex)" || return 2
+        printf ',%s=%s' "${input}" "${sum}"
+    done
+}
+
+# What: log id inputs changed since the last refresh run.
+# Why: Fund 116: a BUILD names its input; then record it.
+# From: Issue #1683 | PR #1858
+_ci_identity_changed() {
+    local service="$1" platform="$2" run="${GITHUB_RUN_ID:-local}" key now old="" rc=0 p diff=""
+    key="inputs@${service}@${platform}"
+    now="$(_ci_identity_parts "${service}" "${platform}")" || return 2
+    old="$(_ci_refresh_record "${key}")" || rc=$?
+    [ "${rc}" -le 1 ] || return 2
+    [ "${old%% *}" != "${run}" ] || return 0
+    if [ -z "${old}" ]; then
+        diff="unrecorded"
+    else
+        for p in ${now//,/ }; do
+            [[ ",${old#* }," == *",${p},"* ]] || diff+="${p%%=*},"
+        done
+        diff="${diff%,}"
+    fi
+    ci_log "[CI-INFO-IMPACT-0019]" "service=\"${service}\" platform=\"${platform}\" last_run=\"${old%% *}\" changed=\"${diff:-none}\""
+    rc=0
+    printf '%s\t%s %s\n' "${key}" "${run}" "${now}" | _ci_ledger_upsert "$(_ci_git_remote)" CI_REFRESH_REF CI_REFRESH_FILE replace || rc=$?
+    [ "${rc}" -eq 0 ] || ci_log "[CI-WARN-IMPACT-0020]" "key=\"${key}\" rc=${rc} reason=\"inputs not recorded (raw above); the next refresh names none\""
+}
+
 # What: "key<TAB>digest name=version ..." of a toolchain.
 # Why: memo, refresh record and id read one value (§17).
 # From: Issue #1683 | PR #1858
 _ci_toolchain_entry() {
-    local build_type="$1" platform="$2" roots tref key memo val="" remote blob rc=0 k v
+    local build_type="$1" platform="$2" roots tref key memo val="" remote rc=0
     roots="$(_ci_block_entry_list build_identity "${build_type}" toolchain_packages)" || return 2
     if [ -z "${roots}" ]; then
         ci_log "[CI-ERROR-IDENTITY-0019]" "build_type=\"${build_type}\" reason=\"no SOT toolchain_packages; FAIL CLOSED\""
@@ -7621,16 +7669,9 @@ _ci_toolchain_entry() {
     # Why: one record per platform; a new image replaces it.
     # From: Issue #1683 | PR #1858
     remote="$(_ci_git_remote)" || return 2
-    blob="$(_ci_ledger_blob "${remote}" CI_REFRESH_REF CI_REFRESH_FILE)" || rc=$?
-    case "${rc}" in
-        0)
-            while IFS=$'\t' read -r k v; do
-                [ "${k}" != "${key}" ] || [ "${v%% *}" != "${tref##*@}" ] || val="${v}"
-            done <<< "${blob}"
-            ;;
-        1) ;;
-        *) return 2 ;;
-    esac
+    val="$(_ci_refresh_record "${key}")" || rc=$?
+    [ "${rc}" -le 1 ] || return 2
+    [ "${val%% *}" = "${tref##*@}" ] || val=""
     if [ -z "${val}" ]; then
         val="$(_ci_with_workdir ci-toolchain _ci_toolchain_closure "${tref}" "${platform}" "${roots}")" || return 2
         val="${tref##*@} ${val//$'\n'/ }"
@@ -7758,6 +7799,7 @@ _ci_semantic_impact() {
         _ci_refresh_event || frc=$?
         case "${frc}" in
             0)
+                _ci_identity_changed "${service}" "${platform}" || return 2
                 ci_log "[CI-INFO-IMPACT-0016]" "service=\"${service}\" platform=\"${platform}\" event=\"${GITHUB_EVENT_NAME:-}\" reason=\"controlled refresh run; the missing artifact is the proof; BUILD\""
                 printf 'BUILD\n'
                 return 0
