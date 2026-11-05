@@ -34,7 +34,8 @@
           <option value="later">Later (start by hand)</option>
           <option value="at">At a time</option>
         </select>
-        <input type="datetime-local" id="hamster-at"></div>
+        <input type="datetime-local" id="hamster-at">
+        <p class="section-sub" id="hamster-when-hint"></p></div>
       <button type="submit" class="btn">Add job</button>
     </form>
 
@@ -46,7 +47,7 @@
       <tr>
         <td>{{ j.name }}</td>
         <td>{% if j.target.kind == "steam_app" %}Steam app {{ j.target.value }}{% else %}{{ j.target.value | length }} addresses{% endif %}</td>
-        <td>{% if j.when.kind == "at" %}<span data-unix="{{ j.when.at }}"></span>{% else %}{{ j.when.kind }}{% endif %}</td>
+        <td>{% if j.when.kind == "at" %}<span data-unix="{{ j.when.at }}"></span>{% elif j.when.kind == "later" %}by hand: press Start{% else %}{{ j.when.kind }}{% endif %}</td>
         <td>{{ j.state.state }}{% if j.state.reason %}: {{ j.state.reason }}{% endif %}</td>
         <td>{{ j.done }} of {{ j.total }} done, {{ j.failed }} failed, {{ j.bytes | filesizeformat }}</td>
         <td>
@@ -112,7 +113,16 @@
   // From: Issue #1683 | PR #1980
   const atField = document.getElementById('hamster-at');
   const whenField = document.getElementById('hamster-when');
-  const showAt = function () { atField.hidden = whenField.value !== 'at'; };
+  const hint = document.getElementById('hamster-when-hint');
+  const hints = {
+    now: 'Starts right after Add job.',
+    later: 'Goes into the job list and waits; it starts when you press Start there.',
+    at: 'Starts by itself at the chosen time.'
+  };
+  const showAt = function () {
+    atField.hidden = whenField.value !== 'at';
+    hint.textContent = hints[whenField.value] || '';
+  };
   whenField.addEventListener('change', showAt);
   showAt();
   atField.addEventListener('click', function () {
