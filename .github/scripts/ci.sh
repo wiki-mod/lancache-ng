@@ -2681,6 +2681,19 @@ _ci_identity_git() {
     printf '%s' "${out}"
 }
 
+# What: path TAB word $1 (from 1) of "meta TAB path" rows.
+# Why: one reader for diff-tree, ls-files; no awk (136).
+# From: Issue #1683 | PR #1858
+_ci_listing_ids() {
+    local meta path
+    local -a w
+    while IFS=$'\t' read -r meta path; do
+        [ -n "${meta}${path}" ] || continue
+        read -r -a w <<< "${meta}"
+        printf '%s\t%s\n' "${path}" "${w[$1 - 1]:-}"
+    done <<< "$2"
+}
+
 # What: path TAB blob id of tracked files under a root.
 # Why: one listing for content ids and the Rust reader.
 # From: Issue #1683
@@ -2703,10 +2716,10 @@ _ci_tracked_listing() {
     if [ -n "${ref}" ]; then
         empty="$(cd -- "${CI_REPO_ROOT}" && _ci_empty_tree)" || return 2
         raw="$(_ci_identity_git "${root}" "${ref}" diff-tree -r --raw "${empty}" "${ref}" -- "${root}")" || return 2
-        listing="$(_ci_capture 0 awk -F'\t' "NF { split(\$1, a, \" \"); print \$2 \"\\t\" a[4] }" <<< "${raw}")" || return 2
+        listing="$(_ci_listing_ids 4 "${raw}")"
     else
         raw="$(_ci_identity_git "${root}" "" ls-files -s -- "${root}")" || return 2
-        listing="$(_ci_capture 0 awk -F'\t' "NF { split(\$1, a, \" \"); print \$2 \"\\t\" a[2] }" <<< "${raw}")" || return 2
+        listing="$(_ci_listing_ids 2 "${raw}")"
     fi
     listing="$(LC_ALL=C _ci_capture 0 sort <<< "${listing}")" || return 2
     [ -n "${listing}" ] || return 0
