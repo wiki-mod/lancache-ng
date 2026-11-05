@@ -1315,17 +1315,6 @@ async fn dhcp(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     app.page("dhcp.html", ctx, &csrf)
 }
 
-// What: save the live Kea config to its file.
-// Why: the next render and a restart keep it.
-// From: Issue #1683 | PR #1980
-fn kea_persist(s: &Settings, cfg: &Value) -> Result<(), String> {
-    let path = PathBuf::from(s.text("KEA_DHCP4_CONF_FILE")?);
-    let body = serde_json::to_vec_pretty(cfg).map_err(|e| e.to_string())?;
-    fs::write_if_changed(&path, &body, file_mode(s)?, owner_keep())
-        .map(drop)
-        .map_err(|e| format!("{}: {e}", path.display()))
-}
-
 // What: change Kea subnets with a closure.
 // Why: get, edit, set, write, snapshot; one path.
 // From: Issue #1683 | PR #1858
@@ -1345,7 +1334,6 @@ async fn kea_edit(
     edit(&mut subnets)?;
     cfg["Dhcp4"]["subnet4"] = Value::Array(subnets);
     api.set_config(cfg.clone()).await?;
-    kea_persist(s, &cfg)?;
     let store = kea_store(s)?;
     std::fs::create_dir_all(&store.dir).map_err(|e| format!("{}: {e}", store.dir.display()))?;
     store.save(&serde_json::to_vec(&cfg).map_err(|e| e.to_string())?)?;
@@ -1500,8 +1488,7 @@ async fn kea_action(
         "kea-rollback" => {
             let body = kea_store(s)?.read(&get("snapshot_id"))?;
             let cfg: Value = serde_json::from_slice(&body).map_err(|e| e.to_string())?;
-            kea_api(s)?.set_config(cfg.clone()).await?;
-            kea_persist(s, &cfg)
+            kea_api(s)?.set_config(cfg).await
         }
         _ => Err(format!("unknown DHCP action {op}")),
     }
