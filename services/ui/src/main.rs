@@ -1097,7 +1097,23 @@ async fn record(
     let api = pdns_api(s)?;
     api.set_rrset(&zone, &name, &kind, ttl, &contents).await?;
     snapshot(s, &api, &zone).await?;
-    flush_zone(s, &zone).await
+    flush_zone(s, &zone).await?;
+    // What: PTR for each A address when ticked.
+    // Why: DoMe 31.10.: PTR from the LAN entries.
+    // From: Issue #1683 | PR #1980
+    if add && kind == "A" && get("ptr") == "1" {
+        let host = vec![format!("{}.", name.trim_end_matches('.'))];
+        for ip in &contents {
+            let Ok(rev) = reverse_name(ip) else { continue };
+            let Some(rz) = reverse_zone(s, &rev) else {
+                continue;
+            };
+            api.set_rrset(&rz, &rev, "PTR", ttl, &host).await?;
+            snapshot(s, &api, &rz).await?;
+            flush_zone(s, &rz).await?;
+        }
+    }
+    Ok(())
 }
 
 // What: add or remove one PTR record.
@@ -2754,16 +2770,41 @@ async fn status(State(app): Shared) -> Response {
     let Some(list) = list else {
         return axum::Json(json!({"state": "unavailable"})).into_response();
     };
-    let rows: Vec<Value> = list
-        .iter()
-        .map(|c| {
-            let name = c["Labels"][docker::SERVICE_LABEL]
-                .as_str()
-                .unwrap_or_default();
-            json!({"name": name, "status": colour(c), "health": c["Status"],
-                   "stopped_by_user": stopped.iter().any(|x| x == name)})
-        })
-        .collect();
+    // What: the dhcp container while DHCP_MODE is off.
+    // Why: live test: bar offered Start for it.
+    // From: Issue #1683 | PR #1980
+    let off = match (s.text("DHCP_SERVICE"), s.text("DHCP_MODE")) {
+        (Ok(svc), Ok(mode)) if mode == "off" => svc,
+        _ => String::new(),
+    };
+    let limit = app.limits(&s).map(|(_, l)| l).ok();
+    let mut rows: Vec<Value> = Vec::new();
+    for c in &list {
+        let name = c["Labels"][docker::SERVICE_LABEL]
+            .as_str()
+            .unwrap_or_default();
+        let colour = colour(c);
+        // What: last health check output when not green.
+        // Why: live test: "3 failures" showed no reason.
+        // From: Issue #1683 | PR #1980
+        let mut reason = String::new();
+        if let (Some(l), "red" | "yellow", Some(id)) = (limit, colour, c["Id"].as_str())
+            && let Ok(v) = app.docker.inspect(id, l).await
+        {
+            reason = v["State"]["Health"]["Log"]
+                .as_array()
+                .and_then(|a| a.last())
+                .and_then(|e| e["Output"].as_str())
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+        }
+        rows.push(
+            json!({"name": name, "status": colour, "health": c["Status"],
+               "reason": reason, "mode_off": !off.is_empty() && name == off,
+               "stopped_by_user": stopped.iter().any(|x| x == name)}),
+        );
+    }
     axum::Json(json!({"state": "ok", "services": rows})).into_response()
 }
 

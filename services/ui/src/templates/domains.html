@@ -171,6 +171,12 @@
           <label for="lan-content">{{ t.content }}</label>
           <input type="text" id="lan-content" name="content" placeholder="192.168.1.50" required data-lan-record-content>
         </div>
+        {# What: also add the PTR for type A
+           Why: DoMe 31.10.: PTR from the LAN entries
+           From: Issue #1683 | PR #1980 #}
+        <label class="field" style="margin-bottom:0; flex-direction:row; gap:6px; align-items:center;" data-lan-ptr>
+          <input type="checkbox" name="ptr" value="1" checked> {{ t.lan_also_ptr }}
+        </label>
         <button type="submit" class="btn" style="margin-bottom:0;">{{ t.add_2 }}</button>
       </form>
 
@@ -598,6 +604,16 @@
     document.querySelector('[data-lan-record-content]').placeholder = lanExamples[type] || '';
   }
   document.querySelector('[data-lan-record-type]').addEventListener('change', lanExample);
+  // What: PTR box only for type A.
+  // Why: a PTR points to one IPv4 address.
+  // From: Issue #1683 | PR #1980
+  const lanPtr = () => {
+    const a = document.querySelector('[data-lan-record-type]').value === 'A';
+    document.querySelector('[data-lan-ptr]').style.display = a ? '' : 'none';
+    document.querySelector('[data-lan-ptr] input').disabled = !a;
+  };
+  document.querySelector('[data-lan-record-type]').addEventListener('change', lanPtr);
+  lanPtr();
   lanExample();
   document.querySelector('[data-lan-record-type]').addEventListener('change', validateLanTxtContent);
   document.querySelector('[data-lan-record-content]').addEventListener('input', validateLanTxtContent);

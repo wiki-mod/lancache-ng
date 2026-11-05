@@ -1003,8 +1003,34 @@
         // Why: the watchdog leaves user-stopped containers.
         // From: Issue #1683 | PR #1980
         state.textContent = svc.stopped_by_user ? LC_T.stopped_by_the_user : (word[svc.status] || svc.status || '');
+        // What: mode off wins over the colour word.
+        // Why: live test: Start offered with DHCP_MODE off.
+        // From: Issue #1683 | PR #1980
+        if (svc.mode_off) { state.textContent = LC_T.svc_mode_off; }
         wrap.appendChild(state);
-        if (DOCK_CONTROLLABLE_SERVICES.includes(svc.name)) {
+        // What: health check output as a fold-out.
+        // Why: live test: "3 failures" gave no reason.
+        // From: Issue #1683 | PR #1980
+        if (svc.reason) {
+          const why = document.createElement('details');
+          why.className = 'beam-menu';
+          const ws = document.createElement('summary');
+          ws.className = 'theme-btn';
+          ws.textContent = LC_T.svc_reason;
+          why.appendChild(ws);
+          const wt = document.createElement('div');
+          wt.className = 'beam-menu-list';
+          wt.style.whiteSpace = 'pre-wrap';
+          wt.textContent = svc.reason;
+          why.appendChild(wt);
+          why.addEventListener('toggle', function () {
+            const r = ws.getBoundingClientRect();
+            wt.style.top = (r.bottom + 6) + 'px';
+            wt.style.left = Math.max(8, Math.min(r.left, window.innerWidth - wt.offsetWidth - 8)) + 'px';
+          });
+          wrap.appendChild(why);
+        }
+        if (!svc.mode_off && DOCK_CONTROLLABLE_SERVICES.includes(svc.name)) {
           // What: Start for red or gray, otherwise Stopp
           // Why: a user stop always offers Start
           // From: Issue #1437 | PR #1980
