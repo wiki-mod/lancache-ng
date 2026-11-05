@@ -847,7 +847,10 @@ runtime:
     - DNS_SNAPSHOT_KEEP=20
     - DOCKER_ENDPOINT=unix://@DOCKER_SOCKET@
     - DOCKER_TIMEOUT=30
-    - KEA_CTRL_ADDRESS=@LOOPBACK_BIND_IP@
+    # What: Kea agent listens on all interfaces.
+    # Why: the ui reaches it from its own network.
+    # From: Issue #1683 | PR #1980
+    - KEA_CTRL_ADDRESS=@ANY_BIND_IP@
     - KEA_CTRL_URL=http://@DHCP_API_HOST@:@KEA_CTRL_PORT@/
     - KEA_DDNS_ADDRESS=@LOOPBACK_BIND_IP@
     - KEA_DDNS_PORT=53001
