@@ -3340,26 +3340,59 @@ _ci_context_build_rows() {
 # Why: the identity and the Dockerfile check share it.
 # From: Issue #1683 | PR #1858
 _ci_dockerfile_copy_sources() {
-    local lines
+    local lines line rest cut_at x i out=""
+    local -a copy_args copy_words
+    local copy_re='^[[:space:]]*COPY[[:space:]]'
+    local lead_re='^[[:space:]]*[^[:space:]]+[[:space:]]+'
+    local flag_re='^--[^[:space:]]*[[:space:]]+'
+    local open_re='^\[[[:space:]]*"' close_re='"[[:space:]]*\][[:space:]]*$'
+    local sep_re='"[[:space:]]*,[[:space:]]*"'
     # What: logical lines come from the one line reader.
     # Why: escape=, joins and heredoc rules live there.
     # From: Issue #1683 | PR #1858
     lines="$(_ci_capture 0 _ci_dockerfile_logical_lines - <<< "$1")" || return 2
-    _ci_capture 0 awk "$(cat <<'PROG'
-        toupper($0) !~ /^[[:space:]]*COPY[[:space:]]/ || $0 ~ /--from=/ { next }
-        { rest = $0; sub(/^[[:space:]]*[^[:space:]]+[[:space:]]+/, "", rest)
-          while (rest ~ /^--[^[:space:]]*[[:space:]]+/) sub(/^--[^[:space:]]*[[:space:]]+/, "", rest)
-          k = 0
-          if (rest ~ /^\[/) {
-              sub(/^\[[[:space:]]*"/, "", rest); sub(/"[[:space:]]*\][[:space:]]*$/, "", rest)
-              k = split(rest, a, /"[[:space:]]*,[[:space:]]*"/)
-          } else {
-              nw = split(rest, w, /[[:space:]]+/)
-              for (i = 1; i <= nw; i++) if (w[i] != "" && w[i] !~ /^<</) a[++k] = w[i]
-          }
-          for (i = 1; i < k; i++) print a[i] }
-PROG
-        )" <<< "${lines}"
+    while IFS= read -r line; do
+        [[ "${line^^}" =~ ${copy_re} ]] || continue
+        [[ "${line}" != *--from=* ]] || continue
+        [[ "${line}" =~ ${lead_re} ]]
+        rest="${line:${#BASH_REMATCH[0]}}"
+        while [[ "${rest}" =~ ${flag_re} ]]; do
+            rest="${rest:${#BASH_REMATCH[0]}}"
+        done
+        copy_args=()
+        # What: JSON form splits at '", "'; else at blanks.
+        # Why: the last item is the target, not a source.
+        if [[ "${rest}" == '['* ]]; then
+            if [[ "${rest}" =~ ${open_re} ]]; then
+                rest="${rest:${#BASH_REMATCH[0]}}"
+            fi
+            if [[ "${rest}" =~ ${close_re} ]]; then
+                rest="${rest:0:${#rest}-${#BASH_REMATCH[0]}}"
+            fi
+            if [ -n "${rest}" ]; then
+                while [[ "${rest}" =~ ${sep_re} ]]; do
+                    cut_at="${rest%%"${BASH_REMATCH[0]}"*}"
+                    copy_args+=("${cut_at}")
+                    rest="${rest:${#cut_at}+${#BASH_REMATCH[0]}}"
+                done
+                copy_args+=("${rest}")
+            fi
+        else
+            IFS=$' \t\n\r\v\f' read -r -a copy_words <<< "${rest}"
+            for x in "${copy_words[@]}"; do
+                if [ -n "${x}" ] && [[ "${x}" != '<<'* ]]; then
+                    copy_args+=("${x}")
+                fi
+            done
+        fi
+        for ((i = 0; i + 1 < ${#copy_args[@]}; i++)); do
+            out+="${copy_args[i]}"$'\n'
+        done
+    done <<< "${lines}"
+    # What: no trailing empty lines, as from a capture.
+    # Why: an empty JSON item at the end is no source.
+    out="${out%"${out##*[!$'\n']}"}"
+    [ -z "${out}" ] || printf '%s\n' "${out}"
 }
 
 # What: context paths the Rust reader owns, space-framed.
