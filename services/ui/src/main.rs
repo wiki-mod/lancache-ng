@@ -1651,7 +1651,7 @@ async fn stats(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     let mut tabs = vec![json!({
         "id": lancache_ng::rrd::MACHINE,
         "label": "Machine",
-        "source": format!("Whole box (all containers together). snmpd answers on {snmp}; the ui asks every {step} s."),
+        "source": format!("Whole box (all containers together). Load, memory, CPU, disk: snmpd on {snmp}. Network: host interfaces, read in the dhcp container (host network). The ui asks every {step} s."),
     })];
     for c in s.list("STATS_CONTAINERS") {
         tabs.push(json!({
