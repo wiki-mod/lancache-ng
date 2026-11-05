@@ -19837,20 +19837,53 @@ _ci_check_dockerfiles() {
 # Why: ARG scope is per stage; else no value reaches it
 # From: Issue #1683 | PR #1858
 _ci_dockerfile_stage_missing_args() {
-    local df="$1" argnames="$2" runs="$3"
-    _ci_capture 0 awk -v need="${argnames//$'\n'/ }" -v runs="${runs}" "$(cat <<'PROG'
-        BEGIN { n = split(need, req, " "); st = 0; decl[0] = "|" }
-        /^[[:space:]]*#/ { next }
-        toupper($1) == "FROM" {
-            st++; i = 2; while ($i ~ /^--/) i++
-            b = tolower($i); decl[st] = (b in alias) ? decl[alias[b]] : "|"
-            if (toupper($(i + 1)) == "AS") alias[tolower($(i + 2))] = st
-            next
-        }
-        toupper($1) == "ARG" { for (i = 2; i <= NF; i++) { a = $i; sub(/=.*/, "", a); decl[st] = decl[st] a "|" }; next }
-        $0 ~ runs { for (j = 1; j <= n; j++) if (index(decl[st], "|" req[j] "|") == 0) print st " " req[j] }
-PROG
-    )" "${df}"
+    local df="$1" runs="$3" sm_line sm_word sm_base sm_as sm_st=0
+    local -a sm_need=() sm_fld=() sm_decl=("|")
+    local -A sm_stage=()
+    read -r -a sm_need <<< "${2//$'\n'/ }"
+    while IFS= read -r sm_line || [ -n "${sm_line}" ]; do
+        [[ ! "${sm_line}" =~ ^[[:space:]]*# ]] || continue
+        # What: a stage inherits the ARGs of its base.
+        # Why: FROM <alias> keeps the ARGs declared there.
+        if _ci_dockerfile_from_parts "${sm_line}" sm_base sm_as; then
+            sm_st=$((sm_st + 1))
+            sm_decl[sm_st]="|"
+            [ -z "${sm_stage["k${sm_base}"]+x}" ] || sm_decl[sm_st]="${sm_decl[${sm_stage["k${sm_base}"]}]}"
+            [ -z "${sm_as}" ] || sm_stage["${sm_as}"]="${sm_st}"
+            continue
+        fi
+        IFS=$' \t' read -r -a sm_fld <<< "${sm_line}"
+        sm_word="${sm_fld[0]-}"
+        if [ "${sm_word^^}" = ARG ]; then
+            for sm_word in "${sm_fld[@]:1}"; do sm_decl[sm_st]+="${sm_word%%=*}|"; done
+            continue
+        fi
+        [[ "${sm_line}" =~ ${runs} ]] || continue
+        for sm_word in "${sm_need[@]}"; do
+            [[ "${sm_decl[sm_st]}" == *"|${sm_word}|"* ]] || printf '%s %s\n' "${sm_st}" "${sm_word}"
+        done
+    done < "${df}" || return 2
+}
+
+# What: FROM line: base word and AS key ("k" + name), lower.
+# Why: stage and image checks read FROM the same way.
+# From: Issue #1683 | PR #1858
+_ci_dockerfile_from_parts() {
+    local -a from_fld=()
+    local from_i=1 from_kw
+    IFS=$' \t' read -r -a from_fld <<< "$1"
+    from_kw="${from_fld[0]-}"
+    [ "${from_kw^^}" = FROM ] || return 1
+    while [[ "${from_fld[from_i]-}" == --* ]]; do from_i=$((from_i + 1)); done
+    from_kw="${from_fld[from_i]-}"
+    printf -v "$2" '%s' "${from_kw,,}"
+    from_kw="${from_fld[from_i + 1]-}"
+    if [ "${from_kw^^}" = AS ]; then
+        from_kw="${from_fld[from_i + 2]-}"
+        printf -v "$3" 'k%s' "${from_kw,,}"
+    else
+        printf -v "$3" '%s' ""
+    fi
 }
 
 # What: no workspace Cargo.toml set [profile].
