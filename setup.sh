@@ -9096,6 +9096,20 @@ fi
 # From: Issue #1683 | PR #1858
 print_step "Installing host services"
 
+# What: asks before taking units of another install
+# Why: live test 05.11.: units of an old path were replaced
+# From: Issue #1683 | PR #1980
+host_unit_dir=$(runtime_default_in "$(runtime_defaults_list)" SYSTEMD_UNIT_DIR) || exit $?
+host_unit_owner=""
+if [[ -f "$host_unit_dir/$STACK_UNIT" ]]; then
+    host_unit_owner=$(sed -n 's/^WorkingDirectory=//p' "$host_unit_dir/$STACK_UNIT")
+fi
+if [[ -n "$host_unit_owner" && "$host_unit_owner" != "$INSTALL_DIR" ]]; then
+    print_warn "Host services now run the install in $host_unit_owner."
+    confirm "Move them to $INSTALL_DIR? [y/N]" "N" \
+        || die "Stopped; host services stay with $host_unit_owner."
+fi
+
 HOST_SERVICES_AVAILABLE=0
 if write_lancache_host_services "$INSTALL_DIR"; then
     HOST_SERVICES_AVAILABLE=1
