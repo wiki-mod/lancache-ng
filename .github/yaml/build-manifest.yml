@@ -26,7 +26,10 @@ image_base:
     - jq
     - lsof
     - nano
+    - net-snmp
+    - net-snmp-tools
     - ripgrep
+    - rrdtool
     - sed
     - util-linux
     - zstd
@@ -44,6 +47,7 @@ image_base:
     - nano
     - rg
     - sed
+    - snmpd -v
     - zstd
 
 # What: The product services this repository builds.
@@ -137,12 +141,14 @@ services:
       - pdns=/usr/sbin/pdns_server,--config-dir=@CONFIG_DIR@/dns,--guardian=no,--daemon=no
       - dns-http=/usr/sbin/pdns_recursor,--config-dir=@CONFIG_DIR@/dns,--config-name=http,--daemon=no
       - dns-https=/usr/sbin/pdns_recursor,--config-dir=@CONFIG_DIR@/dns,--config-name=https,--daemon=no
+      - snmpd=/usr/sbin/snmpd,-f,-C,-c,@SNMPD_CONF_FILE@
     # What: start_pre: wait for the ui config; seed the DB.
     # Why: a fresh stack has no config and no PowerDNS DB.
     # From: Issue #1683 | PR #1980
     process_pre:
       - 'dns-http=until [ -s @RECURSOR_HTTP_CONF_FILE@ ]; do sleep @DNS_CONFIG_WAIT_SECONDS@; done'
       - 'dns-https=until [ -s @RECURSOR_HTTPS_CONF_FILE@ ]; do sleep @DNS_CONFIG_WAIT_SECONDS@; done'
+      - 'snmpd=until [ -s @SNMPD_CONF_FILE@ ]; do sleep @DNS_CONFIG_WAIT_SECONDS@; done'
       - 'pdns=until [ -s @PDNS_CONF_FILE@ ]; do sleep @DNS_CONFIG_WAIT_SECONDS@; done; [ -e @PDNS_DATABASE@ ] && return 0; sqlite3 @PDNS_DATABASE@ < @PDNS_SCHEMA_FILE@ && chown pdns:pdns @PDNS_DATABASE@ && return 0; rm -f @PDNS_DATABASE@; return 1'
     setup:
       - dir=@PDNS_CONF_DIR@/auth
@@ -987,7 +993,7 @@ runtime:
     - UI_PORT=@UI_LISTEN_PORT@
     - UI_PUBLIC_URL=
     - UI_RECENT_REQUESTS=50
-    - UI_SERVICES=dns:pdns dns:dns-http dns:dns-https services:syslog-ng services:chronyd services:snmpd services:lancache-cachehamster
+    - UI_SERVICES=dns:pdns dns:dns-http dns:dns-https dns:snmpd services:syslog-ng services:chronyd services:snmpd services:lancache-cachehamster
     - UI_STATUS_REFRESH=10
     - UI_USER=admin
     - UPSTREAM_DHCP_IP=
