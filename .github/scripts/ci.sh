@@ -4176,7 +4176,7 @@ _ci_identity_prefill_key() {
 # From: Issue #1683 | PR #1858
 _ci_identity_prefill() {
     local s p plats key wrc id
-    local -a pids=() keys=()
+    local -a pids=() keys=() rcs=()
     [ -n "${RUNNER_TEMP:-}" ] || return 0
     for s in $1; do
         plats="$(_ci_platforms "${s}")" || return "$?"
@@ -4188,13 +4188,21 @@ _ci_identity_prefill() {
             } 2> "${RUNNER_TEMP}/${key}.err" &
             pids+=("$!")
             keys+=("${key}")
+            # What: first pair runs alone, then the rest.
+            # Why: 12 fetches at once: lock retry 14 s.
+            # From: Issue #1683 | PR #1858
+            if [ "${#pids[@]}" -eq 1 ]; then
+                wrc=0; wait "${pids[0]}" || wrc=$?
+                rcs[0]="${wrc}"
+            fi
         done <<< "${plats}"
     done
     # What: a failed pair keeps no memo and no log here.
     # Why: _ci_plan_record computes it again and logs why.
     # From: Issue #1683 | PR #1858
     for p in "${!pids[@]}"; do
-        wrc=0; wait "${pids[$p]}" || wrc=$?
+        wrc="${rcs[$p]:-}"
+        [ -n "${wrc}" ] || { wrc=0; wait "${pids[$p]}" || wrc=$?; }
         [ "${wrc}" -eq 0 ] || continue
         printf '%s\n' "$(<"${RUNNER_TEMP}/${keys[$p]}.err")" >&2
     done
