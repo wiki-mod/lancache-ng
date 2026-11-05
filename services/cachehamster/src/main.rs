@@ -491,7 +491,7 @@ fn parse_add(args: &[String]) -> Result<Order, String> {
         ),
     };
     if matches!(&target, Target::Urls(u) if u.is_empty()) {
-        return Err("no URL given".into());
+        return Err("enter addresses or a Steam app ID".into());
     }
     Ok(Order::Add {
         name: name.clone(),
