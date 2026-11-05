@@ -16665,7 +16665,9 @@ _ci_check_language_policy() {
 _ci_check_mutable_refs() {
     local -a _ci_override=("$@") files=() yml=() dock=() viol=()
     _ci_scan_files files _ci_override '.github/workflows/*.yml' "${CI_DOCKERFILE_SPECS[@]}" || return 2
-    local path out row
+    local path out row mr_line mr_img mr_as mr_n
+    local mr_syntax_re='^#[[:space:]]*syntax[[:space:]]*='
+    local -A mr_seen=()
     for path in "${files[@]}"; do
         case "${path}" in
             *.yml|*.yaml) yml+=("${path}") ;;
@@ -16688,18 +16690,21 @@ _ci_check_mutable_refs() {
         # What: FROM is an ARG, a stage alias or scratch.
         # Why: base_images owns each image; no pin here.
         # From: Issue #1683 | PR #1858
-        out="$(_ci_capture 0 awk "$(cat <<'PROG'
-            FNR == 1 { delete alias }
-            tolower($0) ~ /^#[[:space:]]*syntax[[:space:]]*=/ { print FILENAME ":" FNR " syntax-image: " $0; next }
-            toupper($1) == "FROM" {
-                i = 2; while ($i ~ /^--/) i++
-                img = tolower($i)
-                if (img !~ /^\$\{/ && img != "scratch" && !(img in alias)) print FILENAME ":" FNR " FROM-literal: " $0
-                if (toupper($(i + 1)) == "AS") alias[tolower($(i + 2))] = 1
-            }
-PROG
-        )" "${dock[@]}")" || return 2
-        while IFS= read -r row; do [ -z "${row}" ] || viol+=("${row}"); done <<< "${out}"
+        for path in "${dock[@]}"; do
+            mr_n=0
+            mr_seen=()
+            while IFS= read -r mr_line || [ -n "${mr_line}" ]; do
+                mr_n=$((mr_n + 1))
+                if [[ "${mr_line,,}" =~ ${mr_syntax_re} ]]; then
+                    viol+=("${path}:${mr_n} syntax-image: ${mr_line}"); continue
+                fi
+                _ci_dockerfile_from_parts "${mr_line}" mr_img mr_as || continue
+                if [[ "${mr_img}" != \$\{* && "${mr_img}" != scratch && -z "${mr_seen["k${mr_img}"]+x}" ]]; then
+                    viol+=("${path}:${mr_n} FROM-literal: ${mr_line}")
+                fi
+                [ -z "${mr_as}" ] || mr_seen["${mr_as}"]=1
+            done < "${path}" || return 2
+        done
     fi
     if [ "${#viol[@]}" -gt 0 ]; then
         ci_error "[CI-ERROR-CHECK-0008]" "reason=\"image reference outside the SOT\"" "$(printf '%s\n' "${viol[@]}")"
