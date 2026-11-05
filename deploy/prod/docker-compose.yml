@@ -158,10 +158,10 @@ services:
   # Why: the passthrough port relays SNI; 443 intercepts.
   proxy:
     <<: [*service, *supervised]
-    # What: snmpd beside nginx; both wait for their config.
-    # Why: 01.11.: SNMP in every container; snmpd respawns.
+    # What: snmpd beside nginx; restart on end or new file.
+    # Why: a new community in snmpd.conf needs a restart.
     # From: Issue #1683 | PR #1980
-    entrypoint: ["bash", "-c", "(until [[ -f \"$$3\" ]]; do sleep \"$$2\"; done; while :; do snmpd -f -C -c \"$$3\"; sleep \"$$2\"; done) & until [[ -f \"$$1\" ]]; do sleep \"$$2\"; done; exec nginx -g \"daemon off;\" -c \"$$1\"", "nginx"]
+    entrypoint: ["bash", "-c", "(until [[ -f \"$$3\" ]]; do sleep \"$$2\"; done; while :; do m=$$(stat -c %y \"$$3\"); snmpd -f -C -c \"$$3\" & p=$$!; while kill -0 $$p 2>/dev/null && [[ $$(stat -c %y \"$$3\") == \"$$m\" ]]; do sleep \"$$2\"; done; kill $$p 2>/dev/null; wait $$p; sleep \"$$2\"; done) & until [[ -f \"$$1\" ]]; do sleep \"$$2\"; done; exec nginx -g \"daemon off;\" -c \"$$1\"", "nginx"]
     command: ["${SOT_NGINX_CONF_DIR}/nginx.conf", "${SOT_PROXY_CONFIG_WAIT_SECONDS}", "${SOT_SNMPD_CONF_FILE}"]
     # What: a real HTTP request to the health path.
     # Why: only an answering nginx counts as healthy.
@@ -299,10 +299,10 @@ services:
   # From: Issue #1683
   ui:
     <<: [*service, *supervised]
-    # What: snmpd beside the ui, restarted when it ends.
-    # Why: 01.11.: SNMP in every container.
+    # What: snmpd beside the ui; restart on end or new file.
+    # Why: the ui rewrites snmpd.conf after snmpd started.
     # From: Issue #1683 | PR #1980
-    entrypoint: ["bash", "-c", "(until [[ -f \"$$1\" ]]; do sleep \"$$2\"; done; while :; do snmpd -f -C -c \"$$1\"; sleep \"$$2\"; done) & exec lancache-ui", "ui"]
+    entrypoint: ["bash", "-c", "(until [[ -f \"$$1\" ]]; do sleep \"$$2\"; done; while :; do m=$$(stat -c %y \"$$1\"); snmpd -f -C -c \"$$1\" & p=$$!; while kill -0 $$p 2>/dev/null && [[ $$(stat -c %y \"$$1\") == \"$$m\" ]]; do sleep \"$$2\"; done; kill $$p 2>/dev/null; wait $$p; sleep \"$$2\"; done) & exec lancache-ui", "ui"]
     command: ["${SOT_SNMPD_CONF_FILE}", "${SOT_PROXY_CONFIG_WAIT_SECONDS}"]
     container_name: ${SOT_CONTAINER_NAME_UI}
     image: ${LANCACHE_IMAGE_REF_UI:?LANCACHE_IMAGE_REF_UI is required}
