@@ -17332,33 +17332,39 @@ _ci_branch_long_lived() {
 # Why: ref grammar bounds a name; no substring false hit.
 # From: Issue #1683 | PR #1858
 _ci_unreferenced_names() {
-    local wanted="$1" file="$2" out
+    local wanted="$1" file="$2" out="" w lines line str rest pre s before after hit from
     # What: bound = start/end or a char no ref holds.
     # Why: git-check-ref-format; prose quotes also bound.
     # From: Issue #1683 | PR #1858
-    if ! out="$(awk -v names="${wanted}" -v q="'" '
-        function bound(c) { return c == "" || c == q || index(" \t\n~^:?*[]\\`\"(),<>;!", c) > 0 }
-        BEGIN { n = split(names, want, "\n") }
-        { text = text $0 "\n" }
-        END {
-            for (i = 1; i <= n; i++) {
-                w = want[i]; hit = 0; from = 1
-                if (w == "") continue
-                while (!hit && (p = index(substr(text, from), w)) > 0) {
-                    s = from + p - 1; e = s + length(w)
-                    a = substr(text, e, 1)
-                    if (a == "." || a == "/") a = substr(text, e + 1, 1)
-                    if (bound(s > 1 ? substr(text, s - 1, 1) : "") && bound(a)) hit = 1
-                    from = s + 1
-                }
-                if (!hit) print w
-            }
-        }
-    ' "${file}" 2>&1)"; then
-        ci_error "[CI-ERROR-CHECK-0140]" "file=\"${file}\" reason=\"reference match failed\"" "${out}"
-        return 2
-    fi
-    [ -z "${out}" ] || printf '%s\n' "${out}"
+    local ref_bound=$' \t\n~^:?*[]\\`"(),<>;!\''
+    while IFS= read -r w; do
+        [ -n "${w}" ] || continue
+        # What: only lines that hold the name are scanned.
+        # Why: a newline is a bound; grep keeps it fast.
+        # From: Issue #1683 | PR #1858
+        lines="$(_ci_capture 1 grep -aF -e "${w}" "${file}")" || return 2
+        hit=0
+        while [ "${hit}" -eq 0 ] && IFS= read -r line; do
+            str="${line}"$'\n'
+            from=0
+            while [ "${hit}" -eq 0 ]; do
+                rest="${str:from}"
+                [[ "${rest}" == *"${w}"* ]] || break
+                pre="${rest%%"${w}"*}"
+                s=$((from + ${#pre}))
+                before=$'\n'
+                [ "${s}" -eq 0 ] || before="${str:s-1:1}"
+                after="${str:s+${#w}:1}"
+                [[ "${after}" != [./] ]] || after="${str:s+${#w}+1:1}"
+                if [[ "${ref_bound}" == *"${before}"* && ( -z "${after}" || "${ref_bound}" == *"${after}"* ) ]]; then
+                    hit=1
+                fi
+                from=$((s + 1))
+            done
+        done <<< "${lines}"
+        [ "${hit}" -eq 1 ] || out+="${w}"$'\n'
+    done <<< "${wanted}"
+    [ -z "${out}" ] || printf '%s' "${out}"
 }
 
 # What: AG-GH-017 sweep: old work branch, no PR or issue.
