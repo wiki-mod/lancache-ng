@@ -4308,10 +4308,6 @@ ci_cmd_pr_green_mark() {
     else
         printf 'pr-checks-mark=NOT-RUN reason="checks did not run green in this run" checks="%s"\n' "${CI_CHECKS_RESULT:-}"
     fi
-    if [ "${CI_PLAN_ANY_BUILD:-}" != true ]; then
-        printf 'pr-green-mark=NOT-RUN reason="plan had no build or verify pair; nothing to carry over" any-build="%s"\n' "${CI_PLAN_ANY_BUILD:-}"
-        return 0
-    fi
     _ci_require_ghcr_auth || return "$?"
     fp="$(_ci_pr_fingerprint)" || rc=$?
     if [ "${rc}" -eq 1 ]; then
