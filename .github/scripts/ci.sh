@@ -512,6 +512,19 @@ _ci_ws_fold() {
     printf -v "$1" '%s' "${ws_out}${ws_in}"
 }
 
+# What: $2 without its '...' pairs, left to right, into $1.
+# Why: one single-quote cut owner; no awk gsub (Fund 136).
+# From: Issue #1683 | PR #1858
+_ci_strip_squoted() {
+    local sq_in="$2" sq_out=""
+    while [[ "${sq_in}" == *"'"*"'"* ]]; do
+        sq_out+="${sq_in%%"'"*}"
+        sq_in="${sq_in#*"'"}"
+        sq_in="${sq_in#*"'"}"
+    done
+    printf -v "$1" '%s' "${sq_out}${sq_in}"
+}
+
 # What: line 2 of the text; nothing when it has one line.
 # Why: one second-line owner; no external line cutter.
 # From: Issue #1683 | PR #1912
@@ -2300,211 +2313,570 @@ ci_cmd_plan_matrix() {
 # IDENTITY ENGINE
 # =========================================================
 
-# What: Rust item records (TSV); refs: code, {name} only.
+# What: identifiers of $2, first seen order, into var $1.
+# Why: refs and attach lists name each identifier once.
+# From: Issue #1683 | PR #1858
+_ci_rust_idents() {
+    local ri_s="${2//[^A-Za-z0-9_]/ }" ri_t ri_o=""
+    local -a ri_w
+    local -A ri_seen=()
+    read -r -a ri_w <<< "${ri_s}"
+    for ri_t in "${ri_w[@]}"; do
+        if [[ "${ri_t}" =~ ^[0-9]+ ]]; then
+            ri_t="${ri_t:${#BASH_REMATCH[0]}}"
+        fi
+        [ -n "${ri_t}" ] || continue
+        [ -z "${ri_seen["k${ri_t}"]-}" ] || continue
+        ri_seen["k${ri_t}"]=1
+        ri_o+="${ri_o:+ }${ri_t}"
+    done
+    printf -v "$1" '%s' "${ri_o}"
+}
+
+# What: {name} captures of string literal $2 into var $1.
+# Why: format strings name the items they use.
+# From: Issue #1683 | PR #1858
+_ci_rust_caps() {
+    local rc_s="${2//\{\{/}" rc_o=" " rc_m rc_re='\{([A-Za-z_][A-Za-z0-9_]*)'
+    while [[ "${rc_s}" =~ ${rc_re} ]]; do
+        rc_o+="${BASH_REMATCH[1]} "
+        rc_m="${BASH_REMATCH[0]}"
+        rc_s="${rc_s#*"${rc_m}"}"
+    done
+    printf -v "$1" '%s' "${rc_o}"
+}
+
+# What: rc 0 when item text $1 at depth 0 ends an item.
+# Why: const, static, let, type and use end at a semicolon.
+# From: Issue #1683 | PR #1858
+_ci_rust_top() {
+    local rt_s="$1" rt_o="" rt_m rt_pre rt_re='#!?\[[^]]*\]'
+    local rt_fn='(^| )fn( |$)' rt_kw='(^| )(const|static|let|type|use)( |$)'
+    # What: drop #[..] blocks, then cut at the first {.
+    # Why: attributes before the { are not the head.
+    while [[ "${rt_s}" =~ ${rt_re} ]]; do
+        rt_m="${BASH_REMATCH[0]}"
+        rt_pre="${rt_s%%"${rt_m}"*}"
+        rt_o+="${rt_pre}"
+        if [[ "${rt_pre}" == *"{"* ]]; then
+            rt_s=""
+            break
+        fi
+        rt_s="${rt_s#*"${rt_m}"}"
+    done
+    rt_o+="${rt_s}"
+    rt_o="${rt_o%%\{*}"
+    if [[ "${rt_o}" =~ ${rt_fn} ]] || [[ ! "${rt_o}" =~ ${rt_kw} ]]; then
+        return 0
+    fi
+    return 1
+}
+
+# What: item row of text $1, code $2, $3 both: test column.
+# Why: kind, name, attach, refs and text of one item.
+# From: Issue #1683 | PR #1858
+_ci_rust_row() {
+    local t="$1" h at="" tst="" s m head kind=header name="" attach=""
+    local refs rest ch d k bs re_nb='^[^][]*' re_pub='pub\([^)]*\)'
+    local re_mod='(^| )mod '
+    local re_mac='(^| )macro_rules! *[A-Za-z_][A-Za-z0-9_]*' re_impl='(^| )impl( |<|$)'
+    local re_fn='(^| )(fn|struct|enum|union|trait|type|mod|static|const) +(mut +)?[A-Za-z_][A-Za-z0-9_]*'
+    local -a w
+    printf -v bs %b "\\134"
+    t="${t#"${t%%[! ]*}"}"
+    t="${t%"${t##*[! ]}"}"
+    if [ -z "${t}" ]; then
+        return 0
+    fi
+    h="${t}"
+    # What: leading #[..] and #![..], brackets nested.
+    # Why: cfg(test) or #[test] there marks a test item.
+    while [[ "${h}" == "#["* ]] || [[ "${h}" == "#!["* ]]; do
+        rest="${h}"
+        d=0
+        k=0
+        while [[ "${rest}" =~ ${re_nb} ]]; do
+            k=$((k + ${#BASH_REMATCH[0]}))
+            rest="${rest:${#BASH_REMATCH[0]}}"
+            [ -n "${rest}" ] || break
+            ch="${rest:0:1}"
+            rest="${rest:1}"
+            k=$((k + 1))
+            if [ "${ch}" = "[" ]; then
+                d=$((d + 1))
+            else
+                d=$((d - 1))
+                [ "${d}" != 0 ] || break
+            fi
+        done
+        at+="${h:0:k}"
+        h="${rest#"${rest%%[! ]*}"}"
+    done
+    if [[ "${at}" == *"cfg(test)"* ]] || [[ "${at}" == *"#[test]"* ]]; then
+        tst=t
+    fi
+    # What: pub(..) is pub, the head ends at a brace,
+    # semicolon, equals sign or parenthesis.
+    # Why: one pass, as one gsub left to right.
+    s="${h}"
+    head=""
+    while [[ "${s}" =~ ${re_pub} ]]; do
+        m="${BASH_REMATCH[0]}"
+        head+="${s%%"${m}"*}pub"
+        s="${s#*"${m}"}"
+    done
+    head+="${s}"
+    head="${head%%[\{;=\(]*}"
+    if [[ "${head}" =~ ${re_mac} ]]; then
+        kind=item
+        name="${BASH_REMATCH[0]##*macro_rules!}"
+        name="${name#"${name%%[! ]*}"}"
+    elif [[ "${head}" =~ ${re_impl} ]]; then
+        kind=impl
+        if [[ "${head}" == *" impl"* ]]; then
+            s="${head##*" impl"}"
+        else
+            s="${head#impl}"
+        fi
+        _ci_rust_idents attach "${s}"
+    elif [[ "${head}" =~ ${re_fn} ]]; then
+        read -r -a w <<< "${BASH_REMATCH[0]}"
+        name="${w[${#w[@]} - 1]}"
+        kind=item
+        if [[ "${head}" =~ ${re_mod} ]] && [[ "${t}" == *";" ]]; then
+            kind=header
+        fi
+    fi
+    _ci_rust_idents refs "$2"
+    t="${t//"${bs}"/"${bs}${bs}"}"
+    t="${t//$'\n'/"${bs}n"}"
+    t="${t//$'\t'/"${bs}t"}"
+    if [ "$3" = both ]; then
+        t+=$'\t'"${tst}"
+    fi
+    printf '%s\t%s\t%s\t%s\t%s\n' "${kind}" "${name}" "${attach}" "${refs}" "${t}"
+}
+
+# What: Rust item rows (TSV) of text $1, refs: code, {name}.
 # Why: one Rust lexer for norm, build id and lib closure.
 # From: Issue #1683 | PR #1912
-_CI_AWK_RUST_ITEMS="$(cat <<'PROG'
-function flush(   h, kind, name, attach, t, refs, seen, w, n, i, a, tst) {
-    t = cur; r = code
-    sub(/^ +/, "", t); sub(/ +$/, "", t)
-    cur = ""; code = ""; hdr = ""; need_semi = 0
-    if (t == "") return
-    h = t
-    attrs = ""
-    while (h ~ /^#!?\[/) {
-        n = length(h); d = 0
-        for (i = 1; i <= n; i++) {
-            c = substr(h, i, 1)
-            if (c == "[") d++
-            else if (c == "]") { d--; if (d == 0) break }
-        }
-        attrs = attrs substr(h, 1, i)
-        h = substr(h, i + 1); sub(/^ +/, "", h)
-    }
-    tst = (attrs ~ /cfg\(test\)/ || attrs ~ /#\[test\]/)
-    head = h; gsub(/pub\([^)]*\)/, "pub", head)
-    sub(/[{;=(].*$/, "", head)
-    kind = "header"; name = ""; attach = ""
-    if (match(head, /(^| )macro_rules! *[A-Za-z_][A-Za-z0-9_]*/)) {
-        kind = "item"; name = substr(head, RSTART, RLENGTH); sub(/.*macro_rules! */, "", name)
-    } else if (head ~ /(^| )impl( |<|$)/) {
-        kind = "impl"
-        a = head; sub(/.*(^| )impl/, "", a)
-        attach = idents(a)
-    } else if (match(head, /(^| )(fn|struct|enum|union|trait|type|mod|static|const) +(mut +)?[A-Za-z_][A-Za-z0-9_]*/)) {
-        name = substr(head, RSTART, RLENGTH)
-        sub(/^ /, "", name); n = split(name, w, " "); name = w[n]
-        kind = (head ~ /(^| )mod / && t ~ /;$/) ? "header" : "item"
-    }
-    refs = idents(r)
-    gsub(/\\/, "\\\\", t); gsub(/\n/, "\\n", t); gsub(/\t/, "\\t", t)
-    # What: tests=both adds column 6: t on a test item.
-    # Why: A3: one parse serves the keep and drop views.
-    # From: Issue #1683 | PR #1858
-    if (tests == "both") t = t "\t" (tst ? "t" : "")
-    printf "%s\t%s\t%s\t%s\t%s\n", kind, name, attach, refs, t
+_ci_rust_lex() {
+    local LC_ALL=C
+    local rx_b rx_c rx_q rx_w rx_t rx_k=0 rx_n rx_p rx_len rx_j rx_h=0
+    local rx_st=code rx_dep=0 rx_pd=0 rx_bd=0 rx_end=""
+    local rx_cur="" rx_cl="" rx_code="" rx_lit=""
+    local rx_ws=$'^[ \t\r\n]+' rx_id='^[A-Za-z0-9_]+'
+    local rx_bs rx_dq rx_sq rx_sr rx_rr rx_br='^[^/*]+' rx_wsc=$' \t\r\n'
+    local -a rx_lines
+    printf -v rx_bs %b "\\134"
+    printf -v rx_dq %b "\\042"
+    printf -v rx_sq %b "\\047"
+    rx_sr="^[^${rx_dq}${rx_bs}]+"
+    rx_rr="^[^${rx_dq}]+"
+    mapfile -t rx_lines <<< "$1"
+    rx_n="${#rx_lines[@]}"
+    while [ "${rx_k}" -lt "${rx_n}" ]; do
+        rx_b="${rx_lines[rx_k]}"$'\n'
+        rx_k=$((rx_k + 1))
+        rx_p=0
+        rx_len="${#rx_b}"
+        while [ "${rx_p}" -lt "${rx_len}" ]; do
+            rx_c="${rx_b:rx_p:1}"
+            # What: in a comment, string or raw string.
+            # Why: a run of plain bytes moves in one step.
+            case "${rx_st}" in
+                block)
+                    rx_q="${rx_b:rx_p+1:1}"
+                    if [ "${rx_c}" = / ] && [ "${rx_q}" = "*" ]; then
+                        rx_bd=$((rx_bd + 1))
+                        rx_p=$((rx_p + 2))
+                    elif [ "${rx_c}" = "*" ] && [ "${rx_q}" = / ]; then
+                        rx_bd=$((rx_bd - 1))
+                        rx_p=$((rx_p + 2))
+                        if [ "${rx_bd}" = 0 ]; then
+                            rx_st=code
+                            rx_code+=" "
+                            if [ -n "${rx_cl}" ] && [ "${rx_cl}" != " " ]; then
+                                rx_cur+=" "
+                                rx_cl=" "
+                            fi
+                        fi
+                    elif [[ "${rx_b:rx_p}" =~ ${rx_br} ]]; then
+                        rx_p=$((rx_p + ${#BASH_REMATCH[0]}))
+                    else
+                        rx_p=$((rx_p + 1))
+                    fi
+                    continue
+                    ;;
+                str | raw)
+                    if [ "${rx_st}" = str ]; then
+                        rx_q="${rx_sr}"
+                    else
+                        rx_q="${rx_rr}"
+                    fi
+                    if [[ "${rx_b:rx_p}" =~ ${rx_q} ]]; then
+                        rx_w="${BASH_REMATCH[0]}"
+                        rx_cur+="${rx_w}"
+                        rx_lit+="${rx_w}"
+                        rx_cl="${rx_w: -1}"
+                        rx_p=$((rx_p + ${#rx_w}))
+                        continue
+                    fi
+                    rx_cur+="${rx_c}"
+                    rx_lit+="${rx_c}"
+                    rx_cl="${rx_c}"
+                    rx_p=$((rx_p + 1))
+                    if [ "${rx_st}" = str ] && [ "${rx_c}" = "${rx_bs}" ]; then
+                        rx_c="${rx_b:rx_p:1}"
+                        rx_cur+="${rx_c}"
+                        rx_lit+="${rx_c}"
+                        rx_cl="${rx_c}"
+                        rx_p=$((rx_p + 1))
+                        continue
+                    fi
+                    if [ "${rx_st}" = raw ]; then
+                        [ "${rx_b:rx_p:rx_h}" = "${rx_end}" ] || continue
+                        rx_cur+="${rx_end}"
+                        [ "${rx_h}" = 0 ] || rx_cl="#"
+                        rx_p=$((rx_p + rx_h))
+                    fi
+                    rx_st=code
+                    _ci_rust_caps rx_t "${rx_lit}"
+                    rx_code+="${rx_t}"
+                    continue
+                    ;;
+            esac
+            case "${rx_c}" in
+                /)
+                    rx_q="${rx_b:rx_p+1:1}"
+                    if [ "${rx_q}" = / ]; then
+                        # What: a line comment ends at LF.
+                        rx_w="${rx_b:rx_p+2}"
+                        rx_w="${rx_w%%$'\n'*}"
+                        rx_p=$((rx_p + 3 + ${#rx_w}))
+                        rx_code+=" "
+                        if [ -n "${rx_cl}" ] && [ "${rx_cl}" != " " ]; then
+                            rx_cur+=" "
+                            rx_cl=" "
+                        fi
+                        continue
+                    fi
+                    if [ "${rx_q}" = "*" ]; then
+                        rx_st=block
+                        rx_bd=1
+                        rx_p=$((rx_p + 2))
+                        continue
+                    fi
+                    ;;
+                r | b)
+                    # What: raw r, r# or br after non-words.
+                    # Why: ends at a quote and its # count.
+                    rx_q=" "
+                    [ "${rx_p}" = 0 ] || rx_q="${rx_b:rx_p-1:1}"
+                    if { [ "${rx_c}" = r ] || [ "${rx_b:rx_p+1:1}" = r ]; } &&
+                        [[ "${rx_q}" != [A-Za-z0-9_] ]]; then
+                        rx_j=$((rx_p + 1))
+                        [ "${rx_c}" = r ] || rx_j=$((rx_p + 2))
+                        rx_h=0
+                        while [ "${rx_b:rx_j:1}" = "#" ]; do
+                            rx_h=$((rx_h + 1))
+                            rx_j=$((rx_j + 1))
+                        done
+                        if [ "${rx_b:rx_j:1}" = "${rx_dq}" ]; then
+                            rx_end="${rx_b:rx_j-rx_h:rx_h}"
+                            rx_cur+="${rx_b:rx_p:rx_j-rx_p+1}"
+                            rx_cl="${rx_dq}"
+                            rx_p=$((rx_j + 1))
+                            rx_st=raw
+                            rx_lit=""
+                            continue
+                        fi
+                    fi
+                    ;;
+                [${rx_dq}])
+                    rx_cur+="${rx_dq}"
+                    rx_cl="${rx_dq}"
+                    rx_st=str
+                    rx_lit=""
+                    rx_p=$((rx_p + 1))
+                    continue
+                    ;;
+                [${rx_sq}])
+                    # What: quote, backslash: to a quote.
+                    # Why: a char is 3 bytes, or a lifetime.
+                    if [ "${rx_b:rx_p+1:1}" = "${rx_bs}" ]; then
+                        rx_w="${rx_b:rx_p+2}"
+                        while [[ "${rx_w}" != *"${rx_sq}"* ]] && [ "${rx_k}" -lt "${rx_n}" ]; do
+                            rx_b+="${rx_lines[rx_k]}"$'\n'
+                            rx_k=$((rx_k + 1))
+                            rx_w="${rx_b:rx_p+2}"
+                        done
+                        rx_len="${#rx_b}"
+                        rx_w="${rx_w%%"${rx_sq}"*}"
+                        rx_j=$((rx_p + 2 + ${#rx_w}))
+                        rx_w="${rx_b:rx_p:rx_j-rx_p+1}"
+                        rx_cur+="${rx_w}"
+                        rx_cl="${rx_w: -1}"
+                        rx_p=$((rx_j + 1))
+                        continue
+                    fi
+                    if [ $((rx_p + 2)) -ge "${rx_len}" ] && [ "${rx_k}" -lt "${rx_n}" ]; then
+                        rx_b+="${rx_lines[rx_k]}"$'\n'
+                        rx_k=$((rx_k + 1))
+                        rx_len="${#rx_b}"
+                    fi
+                    if [ "${rx_b:rx_p+2:1}" = "${rx_sq}" ]; then
+                        rx_cur+="${rx_b:rx_p:3}"
+                        rx_p=$((rx_p + 3))
+                    else
+                        rx_cur+="${rx_sq}"
+                        rx_p=$((rx_p + 1))
+                    fi
+                    rx_cl="${rx_sq}"
+                    continue
+                    ;;
+                [${rx_wsc}])
+                    if [[ "${rx_b:rx_p}" =~ ${rx_ws} ]]; then
+                        rx_p=$((rx_p + ${#BASH_REMATCH[0]}))
+                    fi
+                    rx_code+=" "
+                    if [ -n "${rx_cl}" ] && [ "${rx_cl}" != " " ]; then
+                        rx_cur+=" "
+                        rx_cl=" "
+                    fi
+                    continue
+                    ;;
+            esac
+            if [[ "${rx_c}" == [A-Za-z0-9_] ]] && [[ "${rx_b:rx_p}" =~ ${rx_id} ]]; then
+                rx_w="${BASH_REMATCH[0]}"
+                rx_cur+="${rx_w}"
+                rx_code+="${rx_w}"
+                rx_cl="${rx_w: -1}"
+                rx_p=$((rx_p + ${#rx_w}))
+                continue
+            fi
+            # What: other bytes, a semicolon at depth 0 or
+            # a closing brace ends an item.
+            rx_cur+="${rx_c}"
+            rx_code+="${rx_c}"
+            rx_cl="${rx_c}"
+            rx_p=$((rx_p + 1))
+            case "${rx_c}" in
+                \( | \[) rx_pd=$((rx_pd + 1)) ;;
+                \) | \]) rx_pd=$((rx_pd - 1)) ;;
+                \{) rx_dep=$((rx_dep + 1)) ;;
+                \})
+                    rx_dep=$((rx_dep - 1))
+                    [ "${rx_dep}" = 0 ] || continue
+                    _ci_rust_top "${rx_cur}" || continue
+                    _ci_rust_row "${rx_cur}" "${rx_code}" "$2" || return 2
+                    rx_cur=""
+                    rx_code=""
+                    rx_cl=""
+                    ;;
+                \;)
+                    [ "${rx_dep}" = 0 ] || continue
+                    [ "${rx_pd}" = 0 ] || continue
+                    _ci_rust_row "${rx_cur}" "${rx_code}" "$2" || return 2
+                    rx_cur=""
+                    rx_code=""
+                    rx_cl=""
+                    ;;
+            esac
+        done
+    done
+    # What: open string, comment or brace: no item.
+    if [ "${rx_st}" != code ] || [ "${rx_dep}" != 0 ]; then
+        return 1
+    fi
+    _ci_rust_row "${rx_cur}" "${rx_code}" "$2" || return 2
 }
-# What: identifiers of s, first seen order, by one split.
-# Why: match+substr copied the rest per word (1.2 s ui).
-# From: Issue #1683 | PR #1858
-function idents(s,   out, seen, tok, w, n, i) {
-    out = ""
-    n = split(s, w, /[^A-Za-z0-9_]+/)
-    for (i = 1; i <= n; i++) {
-        tok = w[i]; sub(/^[0-9]+/, "", tok)
-        if (tok == "") continue
-        if (!(tok in seen)) { seen[tok] = 1; out = out (out == "" ? "" : " ") tok }
-    }
-    return out
-}
-function emit(c) {
-    code = code " "
-    if (c == " ") { if (cur != "" && substr(cur, length(cur), 1) != " ") cur = cur " "; return }
-    cur = cur c
-}
-function captures(s,   out) {
-    out = " "; gsub(/\{\{/, "", s)
-    while (match(s, /\{[A-Za-z_][A-Za-z0-9_]*/)) {
-        out = out substr(s, RSTART + 1, RLENGTH - 1) " "
-        s = substr(s, RSTART + RLENGTH)
-    }
-    return out
-}
-# What: word, space, string runs and // comments in a step.
-# Why: one regex per run, not per byte (ui 187 -> 111 ms).
-# From: Issue #1683 | PR #1858
-{ src = src $0 "\n"; nl[NR] = length(src) }
-END {
-    n = length(src); st = "code"; depth = 0; cur = ""; bdepth = 0; ln = 1
-    for (i = 1; i <= n; i++) {
-        c = substr(src, i, 1)
-        if (st == "line") { if (c == "\n") { st = "code"; emit(" ") } continue }
-        if (st == "block") {
-            if (c == "/" && substr(src, i + 1, 1) == "*") { bdepth++; i++ }
-            else if (c == "*" && substr(src, i + 1, 1) == "/") { bdepth--; i++; if (bdepth == 0) { st = "code"; emit(" ") } }
-            continue
-        }
-        if (st == "str") {
-            j = match(substr(src, i, 256), /^[^"\\]+/) ? i + RLENGTH : i
-            if (j > i) { w = substr(src, i, j - i); cur = cur w; lit = lit w; i = j - 1; continue }
-            cur = cur c; lit = lit c
-            if (c == "\\") { i++; cur = cur substr(src, i, 1); lit = lit substr(src, i, 1); continue }
-            if (c == "\"") { st = "code"; code = code captures(lit) }
-            continue
-        }
-        if (st == "raw") {
-            j = match(substr(src, i, 256), /^[^"]+/) ? i + RLENGTH : i
-            if (j > i) { w = substr(src, i, j - i); cur = cur w; lit = lit w; i = j - 1; continue }
-            cur = cur c; lit = lit c
-            if (c == "\"" && substr(src, i + 1, hashes) == rawend) { cur = cur rawend; i += hashes; st = "code"; code = code captures(lit) }
-            continue
-        }
-        if (c == "/" && substr(src, i + 1, 1) == "/") { st = "line"; i++; while (nl[ln] <= i) ln++; i = nl[ln] - 1; continue }
-        if (c == "/" && substr(src, i + 1, 1) == "*") { st = "block"; bdepth = 1; i++; continue }
-        p = (i > 1) ? substr(src, i - 1, 1) : " "
-        if ((c == "r" || (c == "b" && substr(src, i + 1, 1) == "r")) && p !~ /[A-Za-z0-9_]/) {
-            j = i + (c == "b" ? 2 : 1); hashes = 0
-            while (substr(src, j, 1) == "#") { hashes++; j++ }
-            if (substr(src, j, 1) == "\"" && (hashes > 0 || c == "r" || c == "b")) {
-                rawend = ""; for (k = 0; k < hashes; k++) rawend = rawend "#"
-                cur = cur substr(src, i, j - i + 1); i = j; st = "raw"; lit = ""; continue
-            }
-        }
-        if (c == "\"") { cur = cur c; st = "str"; lit = ""; continue }
-        if (c == "\047") {
-            if (substr(src, i + 1, 1) == "\\") {
-                j = i + 2
-                while (j <= n && substr(src, j, 1) != "\047") j++
-                cur = cur substr(src, i, j - i + 1); i = j; continue
-            }
-            if (substr(src, i + 2, 1) == "\047") { cur = cur substr(src, i, 3); i += 2; continue }
-            cur = cur c; continue
-        }
-        if (c ~ /[ \t\r\n]/) { if (match(substr(src, i, 256), /^[ \t\r\n]+/)) i += RLENGTH - 1; emit(" "); continue }
-        if (c ~ /[A-Za-z0-9_]/) { match(substr(src, i, 256), /^[A-Za-z0-9_]+/); w = substr(src, i, RLENGTH); cur = cur w; code = code w; i += RLENGTH - 1; continue }
-        cur = cur c; code = code c
-        if (c == "(" || c == "[") pdepth++
-        else if (c == ")" || c == "]") pdepth--
-        if (c == "{") depth++
-        else if (c == "}") {
-            depth--
-            if (depth == 0) {
-                h0 = cur; gsub(/#!?\[[^]]*\]/, "", h0); sub(/[{].*$/, "", h0)
-                if (h0 ~ /(^| )fn( |$)/ || h0 !~ /(^| )(const|static|let|type|use)( |$)/) flush()
-            }
-        } else if (c == ";" && depth == 0 && pdepth == 0) flush()
-    }
-    if ((st != "code" && st != "line") || depth != 0) exit 1
-    flush()
-}
-PROG
-)"
-readonly _CI_AWK_RUST_ITEMS
 
 # What: library items reached from a service's refs.
 # Why: an unreached item cannot change its artifact (64.4).
 # From: Issue #1683 | PR #1912
-_CI_AWK_RUST_CLOSURE="$(cat <<'PROG'
-BEGIN { FS = "\t" }
-{ kind[NR] = $1; name[NR] = $2; attach[NR] = $3; refs[NR] = $4; text[NR] = $5; if ($2 != "") defined[$2] = 1; n = NR }
-END {
-    m = split(roots, r, " "); for (i = 1; i <= m; i++) want[r[i]] = 1
-    changed = 1
-    while (changed) {
-        changed = 0
-        for (i = 1; i <= n; i++) {
-            if (sel[i]) continue
-            take = (kind[i] == "header") || (kind[i] == "item" && (name[i] in want))
-            if (kind[i] == "impl") {
-                m = split(attach[i], a, " ")
-                for (j = 1; j <= m; j++) if ((a[j] in defined) && (a[j] in want)) take = 1
-            }
-            if (!take) continue
-            sel[i] = 1; changed = 1
-            m = split(refs[i], a, " "); for (j = 1; j <= m; j++) want[a[j]] = 1
-        }
-    }
-    for (i = 1; i <= n; i++) if (sel[i]) printf "%s\t%s\t%s\n", kind[i], name[i], text[i]
+_ci_rust_closure() {
+    local rl_line rl_rest rl_k rl_x rl_i rl_take rl_n=0 rl_more=1
+    local -a rl_lines rl_f rl_kind=() rl_name=() rl_att=() rl_refs=()
+    local -a rl_text=() rl_sel=() rl_a
+    local -A rl_want=() rl_def=()
+    mapfile -t rl_lines || return 1
+    # What: 5 tab fields a row; empty ones stay, rest cut.
+    # Why: same fields as awk with FS = tab.
+    for rl_line in "${rl_lines[@]}"; do
+        rl_n=$((rl_n + 1))
+        rl_f=()
+        rl_rest="${rl_line}"
+        for ((rl_k = 0; rl_k < 5; rl_k++)); do
+            if [[ "${rl_rest}" != *$'\t'* ]]; then
+                rl_f[rl_k]="${rl_rest}"
+                break
+            fi
+            rl_f[rl_k]="${rl_rest%%$'\t'*}"
+            rl_rest="${rl_rest#*$'\t'}"
+        done
+        rl_kind[rl_n]="${rl_f[0]-}"
+        rl_name[rl_n]="${rl_f[1]-}"
+        rl_att[rl_n]="${rl_f[2]-}"
+        rl_refs[rl_n]="${rl_f[3]-}"
+        rl_text[rl_n]="${rl_f[4]-}"
+        [ -z "${rl_name[rl_n]}" ] || rl_def["k${rl_name[rl_n]}"]=1
+    done
+    read -r -a rl_a <<< "$1"
+    for rl_x in "${rl_a[@]}"; do
+        rl_want["k${rl_x}"]=1
+    done
+    # What: passes until no row joins; its refs get wanted.
+    # Why: headers, wanted items, impls of wanted types.
+    while [ "${rl_more}" = 1 ]; do
+        rl_more=0
+        for ((rl_i = 1; rl_i <= rl_n; rl_i++)); do
+            [ -z "${rl_sel[rl_i]-}" ] || continue
+            rl_take=0
+            case "${rl_kind[rl_i]}" in
+                header) rl_take=1 ;;
+                item) [ -z "${rl_want["k${rl_name[rl_i]}"]-}" ] || rl_take=1 ;;
+                impl)
+                    read -r -a rl_a <<< "${rl_att[rl_i]}"
+                    for rl_x in "${rl_a[@]}"; do
+                        if [ -n "${rl_def["k${rl_x}"]-}" ] &&
+                            [ -n "${rl_want["k${rl_x}"]-}" ]; then
+                            rl_take=1
+                        fi
+                    done
+                    ;;
+            esac
+            [ "${rl_take}" = 1 ] || continue
+            rl_sel[rl_i]=1
+            rl_more=1
+            read -r -a rl_a <<< "${rl_refs[rl_i]}"
+            for rl_x in "${rl_a[@]}"; do
+                rl_want["k${rl_x}"]=1
+            done
+        done
+    done
+    for ((rl_i = 1; rl_i <= rl_n; rl_i++)); do
+        [ -n "${rl_sel[rl_i]-}" ] || continue
+        printf '%s\t%s\t%s\n' "${rl_kind[rl_i]}" "${rl_name[rl_i]}" \
+            "${rl_text[rl_i]}"
+    done
 }
-PROG
-)"
-readonly _CI_AWK_RUST_CLOSURE
+
+# What: one Cargo.lock value without 'key = "' and '"'.
+# Why: one cut for name, version, source and checksum.
+# From: Issue #1683 | PR #1912
+_ci_lock_val() {
+    local lv_s="$2"
+    if [[ "${lv_s}" =~ ^[^=]*=\ *\" ]]; then
+        lv_s="${lv_s:${#BASH_REMATCH[0]}}"
+    fi
+    if [[ "${lv_s}" =~ \"\ *$ ]]; then
+        lv_s="${lv_s:0:${#lv_s}-${#BASH_REMATCH[0]}}"
+    fi
+    printf -v "$1" '%s' "${lv_s}"
+}
 
 # What: Cargo.lock packages reached from root crates.
 # Why: a lock entry outside the closure is not built.
 # From: Issue #1683 | PR #1912
-_CI_AWK_LOCK_CLOSURE="$(cat <<'PROG'
-function val(l) { sub(/^[^=]*= *"/, "", l); sub(/" *$/, "", l); return l }
-/^\[\[package\]\]/ { p++; indeps = 0; next }
-indeps { if ($0 ~ /^\]/) { indeps = 0; next } d = $0; gsub(/[ ",]/, "", d); sub(/\(.*$/, "", d); deps[p] = deps[p] " " d; next }
-/^name = / { nm[p] = val($0); next }
-/^version = / { vr[p] = val($0); next }
-/^source = / { sr[p] = val($0); next }
-/^checksum = / { ck[p] = val($0); next }
-/^dependencies = \[/ { indeps = 1; next }
-END {
-    for (i = 1; i <= p; i++) { byname[nm[i]] = byname[nm[i]] " " i; key[nm[i] vr[i]] = i }
-    m = split(roots, r, " ")
-    for (i = 1; i <= m; i++) { k = split(byname[r[i]], a, " "); for (j = 1; j <= k; j++) q[++qn] = a[j] }
-    for (h = 1; h <= qn; h++) {
-        i = q[h]; if (i in sel) continue; sel[i] = 1
-        k = split(deps[i], a, " ")
-        for (j = 1; j <= k; j++) {
-            d = a[j]
-            if (d in byname && split(byname[d], b, " ") == 1) { q[++qn] = b[1]; continue }
-            for (x = 1; x <= p; x++) if (nm[x] vr[x] == d || nm[x] == d) q[++qn] = x
-        }
-    }
-    for (i = 1; i <= p; i++) if (i in sel) printf "%s %s %s %s\n", nm[i], vr[i], sr[i], ck[i]
+_ci_lock_closure() {
+    local lk_line lk_d lk_e lk_i lk_j lk_k lk_h lk_p=0 lk_in=0
+    local lk_n=0 lk_m=0
+    local -a lk_lines lk_nm=() lk_vr=() lk_sr=() lk_ck=()
+    local -a lk_dl=() lk_ds=() lk_de=() lk_q=() lk_sel=() lk_a
+    local -A lk_by=() lk_b1=() lk_b2=() lk_c=()
+    mapfile -t lk_lines < "$2" || return 1
+    for lk_line in "${lk_lines[@]}"; do
+        if [[ "${lk_line}" == "[[package]]"* ]]; then
+            lk_p=$((lk_p + 1))
+            lk_in=0
+        elif [ "${lk_in}" = 1 ]; then
+            if [[ "${lk_line}" == "]"* ]]; then
+                lk_in=0
+                continue
+            fi
+            lk_d="${lk_line//[ \",]/}"
+            lk_d="${lk_d%%[(]*}"
+            # What: a package's deps sit in a row of lk_dl.
+            # Why: a tab splits a dep, as awk split did.
+            [ -n "${lk_ds[lk_p]-}" ] || lk_ds[lk_p]="${lk_m}"
+            if [[ "${lk_d}" == *$'\t'* ]]; then
+                read -r -a lk_a <<< "${lk_d}"
+                for lk_e in "${lk_a[@]}"; do
+                    lk_dl[lk_m]="${lk_e}"
+                    lk_m=$((lk_m + 1))
+                done
+            elif [ -n "${lk_d}" ]; then
+                lk_dl[lk_m]="${lk_d}"
+                lk_m=$((lk_m + 1))
+            fi
+            lk_de[lk_p]="${lk_m}"
+        elif [[ "${lk_line}" == "name = "* ]]; then
+            _ci_lock_val "lk_nm[${lk_p}]" "${lk_line}"
+        elif [[ "${lk_line}" == "version = "* ]]; then
+            _ci_lock_val "lk_vr[${lk_p}]" "${lk_line}"
+        elif [[ "${lk_line}" == "source = "* ]]; then
+            _ci_lock_val "lk_sr[${lk_p}]" "${lk_line}"
+        elif [[ "${lk_line}" == "checksum = "* ]]; then
+            _ci_lock_val "lk_ck[${lk_p}]" "${lk_line}"
+        elif [[ "${lk_line}" == "dependencies = ["* ]]; then
+            lk_in=1
+        fi
+    done
+    # What: by: name to numbers; b1/b2: one or more; c: a
+    # dep text to the numbers whose name+version or name it is.
+    # Why: a dep names one package or name+version of many.
+    for ((lk_i = 1; lk_i <= lk_p; lk_i++)); do
+        lk_k="k${lk_nm[lk_i]-}"
+        lk_by["${lk_k}"]+=" ${lk_i}"
+        if [ -n "${lk_b1["${lk_k}"]-}" ]; then
+            lk_b2["${lk_k}"]=1
+        else
+            lk_b1["${lk_k}"]="${lk_i}"
+        fi
+        lk_c["c${lk_nm[lk_i]-}${lk_vr[lk_i]-}"]+=" ${lk_i}"
+        if [ -n "${lk_vr[lk_i]-}" ]; then
+            lk_c["c${lk_nm[lk_i]-}"]+=" ${lk_i}"
+        fi
+    done
+    read -r -a lk_a <<< "$1"
+    for lk_d in "${lk_a[@]}"; do
+        read -r -a lk_a <<< "${lk_by["k${lk_d}"]-}"
+        for lk_e in "${lk_a[@]}"; do
+            lk_q[lk_n]="${lk_e}"
+            lk_n=$((lk_n + 1))
+        done
+    done
+    for ((lk_h = 0; lk_h < lk_n; lk_h++)); do
+        lk_i="${lk_q[lk_h]}"
+        [ -z "${lk_sel[lk_i]-}" ] || continue
+        lk_sel[lk_i]=1
+        for ((lk_j = ${lk_ds[lk_i]-0}; lk_j < ${lk_de[lk_i]-0}; lk_j++)); do
+            lk_k="${lk_dl[lk_j]}"
+            if [ -n "${lk_b1["k${lk_k}"]-}" ] &&
+                [ -z "${lk_b2["k${lk_k}"]-}" ]; then
+                lk_q[lk_n]="${lk_b1["k${lk_k}"]}"
+                lk_n=$((lk_n + 1))
+                continue
+            fi
+            read -r -a lk_a <<< "${lk_c["c${lk_k}"]-}"
+            for lk_e in "${lk_a[@]}"; do
+                lk_q[lk_n]="${lk_e}"
+                lk_n=$((lk_n + 1))
+            done
+        done
+    done
+    for ((lk_i = 1; lk_i <= lk_p; lk_i++)); do
+        [ -n "${lk_sel[lk_i]-}" ] || continue
+        printf '%s %s %s %s\n' "${lk_nm[lk_i]-}" "${lk_vr[lk_i]-}" \
+            "${lk_sr[lk_i]-}" "${lk_ck[lk_i]-}"
+    done
 }
-PROG
-)"
-readonly _CI_AWK_LOCK_CLOSURE
 
-# What: awk verdict: rc 0 print, rc 1 raw, else coded stop.
+# What: reader verdict: rc 0 print, 1 raw, else coded stop.
 # Why: one owner for the reader and the normalizer verdict.
 # From: Issue #1683 | PR #1912
-_ci_awk_verdict() {
+_ci_reader_verdict() {
     local id="$1" ctx="$2" rc="$3" out="$4"
     case "${rc}" in
         0) printf '%s\n' "${out}" ;;
@@ -2521,8 +2893,8 @@ _ci_awk_verdict() {
 # From: Issue #1683 | PR #1912
 _ci_rust_items() {
     local out rc=0
-    out="$(awk -v tests="$2" "${_CI_AWK_RUST_ITEMS}" <<< "$1" 2>&1)" || rc=$?
-    _ci_awk_verdict "[CI-ERROR-IDENTITY-0010]" "rc=${rc} reason=\"rust item reader failed\"" "${rc}" "${out}"
+    out="$(_ci_rust_lex "$1" "$2" 2>&1)" || rc=$?
+    _ci_reader_verdict "[CI-ERROR-IDENTITY-0010]" "rc=${rc} reason=\"rust item reader failed\"" "${rc}" "${out}"
 }
 
 # What: normalized Rust text: kind, name, text per item.
@@ -2563,8 +2935,51 @@ _ci_norm_grammar() {
     fi
 }
 
-# What: awk hd_word/hd_scan: the word a << opens.
-# Why: one delimiter rule for the three heredoc readers.
+# What: the <<word at the start of $1 into hd_w, hd_t, hd_k.
+# Why: hd_t 1 for <<-, hd_k chars it takes; one word rule.
+# From: Issue #1683 | PR #1858
+_ci_heredoc_at() {
+    local ha_x ha_re
+    [ "${1:0:2}" = "<<" ] || return 1
+    [ "${1:0:3}" != "<<<" ] || return 1
+    printf -v ha_x %b "\\134\\134\\047\\042"
+    ha_re="^-?[[:space:]]*[${ha_x}]?[A-Za-z_][A-Za-z0-9_]*[${ha_x:2}]?"
+    [[ "${1:2}" =~ ${ha_re} ]] || return 1
+    hd_w="${BASH_REMATCH[0]}"
+    hd_k=$((2 + ${#hd_w}))
+    hd_t=0
+    [ "${hd_w:0:1}" != - ] || hd_t=1
+    hd_w="${hd_w#-}"
+    hd_w="${hd_w#"${hd_w%%[![:space:]]*}"}"
+    hd_w="${hd_w//[${ha_x}]/}"
+}
+
+# What: first <<word of line $2 into var $1; tab flag to $3.
+# Why: <<< and a word that is no name open no heredoc.
+# From: Issue #1683 | PR #1858
+_ci_heredoc_word() {
+    local hw_rest="$2" hw_pre hd_w hd_t hd_k
+    while [[ "${hw_rest}" == *"<<"* ]]; do
+        hw_pre="${hw_rest%%<<*}"
+        hw_rest="${hw_rest:${#hw_pre}}"
+        if [ "${hw_rest:0:3}" = "<<<" ]; then
+            hw_rest="${hw_rest:3}"
+            continue
+        fi
+        if _ci_heredoc_at "${hw_rest}"; then
+            printf -v "$1" '%s' "${hd_w}"
+            if [ -n "${3:-}" ]; then
+                printf -v "$3" '%s' "${hd_t}"
+            fi
+            return 0
+        fi
+        hw_rest="${hw_rest:1}"
+    done
+    return 1
+}
+
+# What: awk hd_word: chars of a <<word at s (0: none).
+# Why: _ci_heredoc_at rule, for the awk reader left.
 # From: Issue #1683 | PR #1858
 _CI_AWK_HEREDOC_WORD="$(cat <<'PROG'
     # What: chars of a <<word at s (0: none); sets hdw, hdt.
@@ -2577,129 +2992,249 @@ _CI_AWK_HEREDOC_WORD="$(cat <<'PROG'
         sub(/^-?[[:space:]]*/, "", w); gsub(/[\\\047"]/, "", w); hdw = w
         return 2 + RLENGTH
     }
-    # What: 1 if line l opens a heredoc; first word in hdw.
-    # Why: Dockerfile lines are read without quote state.
-    # From: Issue #1683 | PR #1858
-    function hd_scan(l,  i, n) {
-        n = length(l)
-        for (i = 1; i <= n; i++) {
-            if (substr(l, i, 3) == "<<<") { i += 2; continue }
-            if (hd_word(substr(l, i))) return 1
-        }
-        return 0
-    }
 PROG
 )"
 
-# What: awk v1 normalizer; b=1 reads one file per blob.
-# Why: A3: one awk for all blobs of a listing; one program.
+# What: lex shell line $1 into the nv_ state of _ci_norm_v1.
+# Why: quotes, $( ), ticks and << words cross the lines.
 # From: Issue #1683 | PR #1858
-_CI_AWK_NORM_V1="$(cat <<'PROG'
-        # What: batch: a new blob file; g from its name.
-        # Why: each blob starts with fresh lexer state.
-        # From: Issue #1683 | PR #1858
-        function start(f,  n, p) {
-            cur = f; n = split(f, p, "/"); g = p[n]; sub(/\..*/, "", g)
-            outf = f; sub(/\.in$/, ".out", outf)
-            q = ""; hd = ""; tab = 0; past = 0; subst = 0; ticks = 0; bad = 0
-            dead = 0; pend = 0; seen = 0; v = 0
-        }
-        # What: rc c ends one text; batch marks the blob.
-        # Why: one blob in doubt keeps raw, not the batch.
-        # From: Issue #1683 | PR #1858
-        function stop(c) { if (!b) exit c; if (!dead) v = c; dead = 1 }
-        # What: print a line; batch drops trailing blanks.
-        # Why: as $( ) strips them for one text (same id).
-        # From: Issue #1683 | PR #1858
-        function emit(s) {
-            if (!b) { print s; return }
-            if (s == "") { pend++; return }
-            for (; pend > 0; pend--) print "" > outf
-            print s > outf; seen = 1
-        }
-        # What: batch: verdict line "file TAB rc" per blob.
-        # Why: the caller hashes rc 0, keeps raw for rc 1.
-        # From: Issue #1683 | PR #1858
-        function finish() {
-            if (!dead && (q != "" || hd != "")) v = 1
-            if (!seen) print "" > outf
-            close(outf)
-            print cur "\t" v
-        }
-        function lex(l,   i, n, c, k) {
-            n = length(l)
-            for (i = 1; i <= n; i++) {
-                c = substr(l, i, 1)
-                if (q == "s") { if (c == "\047") q = ""; continue }
-                if (q != "" && c == "\\") { i++; continue }
-                if (q == "a") { if (c == "\047") q = ""; continue }
-                if (c == "`") { ticks++; if (q == "d") bad = 1 }
-                if (substr(l, i, 2) == "$(") { if (q == "d") { subst++; bad = 1 } i++; continue }
-                if (c == ")" && subst) subst--
-                if (q == "d") { if (c == "\"") q = ""; continue }
-                if (c == "\\") { i++; continue }
-                if (c == "\047") { q = (i > 1 && substr(l, i - 1, 1) == "$") ? "a" : "s"; continue }
-                if (c == "\"") { q = "d"; continue }
-                if (c == "#" && (i == 1 || substr(l, i - 1, 1) ~ /[[:space:];|&()]/)) return
-                if (substr(l, i, 3) == "<<<") { i += 2; continue }
-                if ((k = hd_word(substr(l, i)))) { hd = hdw; tab = hdt; i += k - 1 }
-            }
-        }
-        b && FNR == 1 { if (cur != "") finish(); start(FILENAME) }
-        dead { next }
-        { sub(/\r$/, "") }
-        hd != "" {
-            t = $0
-            if (tab) sub(/^\t+/, "", t)
-            emit($0)
-            if (t == hd) hd = ""
-            next
-        }
-        g == "dockerfile" {
-            k = $0
-            if (!past && sub(/^#[[:space:]]*/, "", k) && sub(/[[:space:]]*=.*/, "", k) \
-                && tolower(k) ~ /^(syntax|escape|check)$/) { emit($0); next }
-            past = 1
-            if ($0 ~ /^[[:space:]]*(#|$)/) next
-            if (hd_scan($0)) { hd = hdw; tab = hdt }
-            emit($0)
-            next
-        }
-        g == "shell" {
-            if (FNR == 1 && $0 ~ /^#!/) { emit($0); next }
-            if (q == "" && $0 ~ /^[[:space:]]*#[[:space:]]*shellcheck[[:space:]]/) { emit($0); next }
-            if (q == "" && $0 ~ /^[[:space:]]*(#|$)/) next
-            lex($0)
-            if (subst || ticks % 2 || (bad && q != "")) { stop(1); next }
-            subst = 0; ticks = 0; bad = 0
-            emit($0)
-            next
-        }
-        g == "toml" {
-            if ($0 ~ /"""|\047\047\047/) { stop(1); next }
-            if ($0 ~ /^[[:space:]]*(#|$)/) next
-            emit($0)
-            next
-        }
-        { stop(3); next }
-        END {
-            if (b) { if (cur != "") finish(); exit 0 }
-            if (q != "" || hd != "") exit 1
-        }
-PROG
-)"
+_ci_norm_lex() {
+    local l="$1" n="${#1}" i=0 c p hd_w hd_t hd_k
+    while [ "${i}" -lt "${n}" ]; do
+        # What: skip to a char that can change state.
+        # Why: a loop over every char is too slow.
+        p="${l:i}"
+        p="${p%%["${nv_set}"]*}"
+        i=$((i + ${#p}))
+        [ "${i}" -lt "${n}" ] || break
+        c="${l:i:1}"
+        if [ "${nv_q}" = s ]; then
+            [ "${c}" != "${nv_sq}" ] || nv_q=""
+            i=$((i + 1))
+            continue
+        fi
+        if [ -n "${nv_q}" ] && [ "${c}" = "${nv_bs}" ]; then
+            i=$((i + 2))
+            continue
+        fi
+        if [ "${nv_q}" = a ]; then
+            [ "${c}" != "${nv_sq}" ] || nv_q=""
+            i=$((i + 1))
+            continue
+        fi
+        if [ "${c}" = "${nv_bt}" ]; then
+            nv_ticks=$((nv_ticks + 1))
+            [ "${nv_q}" != d ] || nv_bad=1
+        fi
+        if [ "${l:i:2}" = "\$(" ]; then
+            if [ "${nv_q}" = d ]; then
+                nv_subst=$((nv_subst + 1))
+                nv_bad=1
+            fi
+            i=$((i + 2))
+            continue
+        fi
+        if [ "${c}" = ")" ] && [ "${nv_subst}" != 0 ]; then
+            nv_subst=$((nv_subst - 1))
+        fi
+        if [ "${nv_q}" = d ]; then
+            [ "${c}" != "${nv_dq}" ] || nv_q=""
+            i=$((i + 1))
+            continue
+        fi
+        if [ "${c}" = "${nv_bs}" ]; then
+            i=$((i + 2))
+            continue
+        fi
+        if [ "${c}" = "${nv_sq}" ]; then
+            nv_q=s
+            if [ "${i}" -gt 0 ] && [ "${l:i-1:1}" = "\$" ]; then
+                nv_q=a
+            fi
+            i=$((i + 1))
+            continue
+        fi
+        if [ "${c}" = "${nv_dq}" ]; then
+            nv_q=d
+            i=$((i + 1))
+            continue
+        fi
+        # What: # first or after blank or ;|&() ends it.
+        # Why: the rest of the line is a comment then.
+        if [ "${c}" = "#" ]; then
+            [ "${i}" -gt 0 ] || break
+            case "${l:i-1:1}" in
+                [[:space:]\;\|\&\(\)]) break ;;
+            esac
+        fi
+        if [ "${l:i:3}" = "<<<" ]; then
+            i=$((i + 3))
+            continue
+        fi
+        if [ "${l:i:2}" = "<<" ] && _ci_heredoc_at "${l:i}"; then
+            nv_hd="${hd_w}"
+            nv_tab="${hd_t}"
+            i=$((i + hd_k))
+            continue
+        fi
+        i=$((i + 1))
+    done
+}
+
+# What: rc 0 if line $1 is blank or a # comment line.
+# Why: the v1 form drops such lines (A12.5, Test B/C).
+# From: Issue #1683 | PR #1858
+_ci_norm_skip() {
+    local s="${1#"${1%%[![:space:]]*}"}"
+    [ -z "${s}" ] || [ "${s:0:1}" = "#" ]
+}
+
+# What: v1 form of lines nv_in by grammar $1 into nv_out.
+# Why: rc 1 keeps raw, rc 3 no grammar; nv_last cuts blanks.
+# From: Issue #1683 | PR #1858
+_ci_norm_v1() {
+    local l t k nv_rc=0 nv_fnr=0 nv_past=0 nv_q="" nv_hd="" nv_tab=0
+    local nv_subst=0 nv_ticks=0 nv_bad=0 nv_sq nv_dq nv_bs nv_bt nv_ht nv_cr
+    local nv_set
+    local nv_sc='^[[:space:]]*#[[:space:]]*shellcheck[[:space:]]'
+    printf -v nv_sq %b "\\047"
+    printf -v nv_dq %b "\\042"
+    printf -v nv_bs %b "\\134"
+    printf -v nv_bt %b "\\140"
+    printf -v nv_ht %b "\\011"
+    printf -v nv_cr %b "\\015"
+    nv_set="${nv_sq}${nv_bs}${nv_bt}${nv_dq}\$)#<"
+    nv_out=()
+    for l in "${nv_in[@]}"; do
+        nv_fnr=$((nv_fnr + 1))
+        l="${l%"${nv_cr}"}"
+        # What: heredoc lines stay up to the word.
+        # Why: <<- strips leading tabs before the end test.
+        if [ -n "${nv_hd}" ]; then
+            t="${l}"
+            [ "${nv_tab}" = 0 ] || t="${t#"${t%%[!"${nv_ht}"]*}"}"
+            nv_out+=("${l}")
+            [ "${t}" != "${nv_hd}" ] || nv_hd=""
+            continue
+        fi
+        case "$1" in
+            dockerfile)
+                # What: a parser directive first.
+                # Why: no comment; it changes the build.
+                if [ "${nv_past}" = 0 ] && [ "${l:0:1}" = "#" ] && [[ "${l}" == *=* ]]; then
+                    k="${l:1}"
+                    k="${k#"${k%%[![:space:]]*}"}"
+                    k="${k%%=*}"
+                    k="${k%"${k##*[![:space:]]}"}"
+                    case "${k,,}" in
+                        syntax | escape | check)
+                            nv_out+=("${l}")
+                            continue
+                            ;;
+                    esac
+                fi
+                nv_past=1
+                ! _ci_norm_skip "${l}" || continue
+                if ! _ci_heredoc_word nv_hd "${l}" nv_tab; then
+                    nv_hd=""
+                fi
+                nv_out+=("${l}")
+                ;;
+            shell)
+                if [ "${nv_fnr}" = 1 ] && [ "${l:0:2}" = "#!" ]; then
+                    nv_out+=("${l}")
+                    continue
+                fi
+                if [ -z "${nv_q}" ]; then
+                    if [[ "${l}" =~ ${nv_sc} ]]; then
+                        nv_out+=("${l}")
+                        continue
+                    fi
+                    ! _ci_norm_skip "${l}" || continue
+                fi
+                _ci_norm_lex "${l}"
+                # What: open $( ), odd ticks or nesting.
+                # Why: the lexer is not sure then: keep raw.
+                if [ "${nv_subst}" != 0 ] || [ "$((nv_ticks % 2))" = 1 ]; then
+                    nv_rc=1
+                    break
+                fi
+                if [ "${nv_bad}" = 1 ] && [ -n "${nv_q}" ]; then
+                    nv_rc=1
+                    break
+                fi
+                nv_subst=0
+                nv_ticks=0
+                nv_bad=0
+                nv_out+=("${l}")
+                ;;
+            toml)
+                if [[ "${l}" == *"${nv_dq}${nv_dq}${nv_dq}"* ]] || [[ "${l}" == *"${nv_sq}${nv_sq}${nv_sq}"* ]]; then
+                    nv_rc=1
+                    break
+                fi
+                ! _ci_norm_skip "${l}" || continue
+                nv_out+=("${l}")
+                ;;
+            *)
+                nv_rc=3
+                break
+                ;;
+        esac
+    done
+    if [ "${nv_rc}" = 0 ] && [ -n "${nv_q}${nv_hd}" ]; then
+        nv_rc=1
+    fi
+    nv_last="${#nv_out[@]}"
+    while [ "${nv_last}" -gt 0 ] && [ -z "${nv_out[nv_last - 1]}" ]; do
+        nv_last=$((nv_last - 1))
+    done
+    return "${nv_rc}"
+}
+
+# What: v1 form of blob files $@ to .out; "file TAB rc".
+# Why: A3: one pass for all blobs of a listing.
+# From: Issue #1683 | PR #1858
+_ci_norm_files() {
+    local f g nv_last nv_rc
+    local -a nv_in nv_out
+    for f in "$@"; do
+        mapfile -t nv_in < "${f}" || return 2
+        # What: a file with no line gets no verdict line.
+        # Why: the caller then fails on the blob (0027).
+        [ "${#nv_in[@]}" -gt 0 ] || continue
+        g="${f##*/}"
+        g="${g%%.*}"
+        nv_rc=0
+        _ci_norm_v1 "${g}" || nv_rc=$?
+        if [ "${nv_last}" -gt 0 ]; then
+            printf '%s\n' "${nv_out[@]:0:nv_last}" > "${f%.in}.out" || return 2
+        else
+            printf '\n' > "${f%.in}.out" || return 2
+        fi
+        printf '%s\t%s\n' "${f}" "${nv_rc}"
+    done
+}
 
 # What: v1 form of $2 in grammar $1; rc 1 = unsafe, use raw.
 # Why: string and heredoc lines stay; any doubt keeps raw.
 # From: Issue #1683 | PR #1858
 _ci_norm_content() {
-    local out rc=0
+    local out="" rc=0 nv_last nv_nl=$'\n'
+    local -a nv_in nv_out
     if [ "$1" = rust ]; then
         _ci_rust_norm "$2" keep
         return "$?"
     fi
-    out="$(awk -v g="$1" "${_CI_AWK_HEREDOC_WORD}${_CI_AWK_NORM_V1}" <<< "$2" 2>&1)" || rc=$?
-    _ci_awk_verdict "[CI-ERROR-IDENTITY-0008]" "grammar=\"$1\" rc=${rc} reason=\"v1 normalizer failed\"" "${rc}" "${out}"
+    mapfile -t nv_in <<< "$2"
+    _ci_norm_v1 "$1" || rc=$?
+    # What: no trailing blank lines, as $( ) gave before.
+    # Why: the same text keeps the same id.
+    if [ "${nv_last}" -gt 0 ]; then
+        printf -v out '%s\n' "${nv_out[@]:0:nv_last}"
+        out="${out%"${nv_nl}"}"
+    fi
+    _ci_reader_verdict "[CI-ERROR-IDENTITY-0008]" "grammar=\"$1\" rc=${rc} reason=\"v1 normalizer failed\"" "${rc}" "${out}"
 }
 
 # What: one git call for the identity; stderr is an error.
@@ -2782,47 +3317,88 @@ _ci_content_id_key() {
     printf -v "$1" 'content-id-%s-%s-%s' "$2" "$3" "$4"
 }
 
-# What: awk: cut a cat-file --batch file into blob files.
+# What: cut batch file $3 into blob files in $1 by $2.
 # Why: one file per blob, as $( ) and <<< hand it on.
 # From: Issue #1683 | PR #1858
-_CI_AWK_BATCH_CUT="$(cat <<'PROG'
-    # What: write the blob without trailing blank lines.
-    # Why: $( ) strips trailing LF; <<< adds one LF.
-    # From: Issue #1683 | PR #1858
-    function done(  i, last) {
-        last = 0
-        for (i = 1; i <= m; i++) if (line[i] != "") last = i
-        for (i = 1; i <= last; i++) printf "%s\n", line[i] > f
-        if (!last) printf "\n" > f
-        close(f); state = 0; m = 0
-    }
-    NR == FNR { name[++n] = $0; next }
-    state == 0 {
-        if (++i > n) { bad = "extra blob"; exit }
-        o = name[i]; sub(/^[^.]*\./, "", o)
-        if ($0 !~ ("^" o " blob [0-9]+$")) { bad = "header " i; exit }
-        size = $3 + 0; got = 0; m = 0; f = dir "/" name[i] ".in"
-        state = size ? 1 : 2
-        next
-    }
-    state == 1 {
-        got += length($0) + 1
-        line[++m] = $0
-        if (got == size) state = 2
-        else if (got == size + 1) done()
-        else if (got > size + 1) { bad = "size " i; exit }
-        next
-    }
-    state == 2 { if ($0 != "") { bad = "end " i; exit } done(); next }
-    END {
-        if (bad == "" && (state != 0 || i != n)) bad = "short"
-        print (bad == "" ? "ok" : bad)
-    }
-PROG
-)"
+_ci_batch_cut() {
+    local bc_dir="$1" bc_l bc_o bc_bad="" bc_st=0 bc_i=0 bc_w
+    local bc_size=0 bc_got=0 bc_m=0 bc_last=0 bc_f=""
+    local -a bc_names bc_all bc_b
+    mapfile -t bc_names < "$2" || return 1
+    mapfile -t bc_all < "$3" || return 1
+    for bc_l in "${bc_all[@]}"; do
+        bc_w=0
+        case "${bc_st}" in
+            0)
+                # What: header: next oid and its size.
+                # Why: names file gives the blob order.
+                bc_i=$((bc_i + 1))
+                if [ "${bc_i}" -gt "${#bc_names[@]}" ]; then
+                    bc_bad="extra blob"
+                    break
+                fi
+                bc_o="${bc_names[bc_i - 1]#*.}"
+                if [[ "${bc_l}" != "${bc_o} blob "* ]] ||
+                    [[ ! "${bc_l#"${bc_o} blob "}" =~ ^[0-9]+$ ]]; then
+                    bc_bad="header ${bc_i}"
+                    break
+                fi
+                bc_size=$((10#${bc_l##* }))
+                bc_got=0
+                bc_f="${bc_dir}/${bc_names[bc_i - 1]}.in"
+                bc_st=2
+                if [ "${bc_size}" -gt 0 ]; then
+                    bc_st=1
+                fi
+                ;;
+            1)
+                # What: size bytes, then one LF; a blob
+                # without own last LF ends on that LF.
+                # Why: C locale: bytes, as in the header.
+                bc_got=$((bc_got + ${#bc_l} + 1))
+                bc_b[bc_m]="${bc_l}"
+                bc_m=$((bc_m + 1))
+                if [ -n "${bc_l}" ]; then
+                    bc_last="${bc_m}"
+                fi
+                if [ "${bc_got}" -eq "${bc_size}" ]; then
+                    bc_st=2
+                elif [ "${bc_got}" -eq $((bc_size + 1)) ]; then
+                    bc_w=1
+                elif [ "${bc_got}" -gt $((bc_size + 1)) ]; then
+                    bc_bad="size ${bc_i}"
+                    break
+                fi
+                ;;
+            2)
+                if [ -n "${bc_l}" ]; then
+                    bc_bad="end ${bc_i}"
+                    break
+                fi
+                bc_w=1
+                ;;
+        esac
+        [ "${bc_w}" = 1 ] || continue
+        # What: the blob without trailing blank lines.
+        # Why: $( ) strips trailing LF; <<< adds one LF.
+        if [ "${bc_last}" -gt 0 ]; then
+            printf '%s\n' "${bc_b[@]:0:bc_last}" > "${bc_f}" || return 1
+        else
+            printf '\n' > "${bc_f}" || return 1
+        fi
+        bc_st=0
+        bc_m=0
+        bc_last=0
+        bc_b=()
+    done
+    if [ -z "${bc_bad}" ] && { [ "${bc_st}" != 0 ] || [ "${bc_i}" != "${#bc_names[@]}" ]; }; then
+        bc_bad=short
+    fi
+    printf '%s\n' "${bc_bad:-ok}"
+}
 
 # What: content id memos of a listing's plain-grammar blobs.
-# Why: A3: one git read, one awk, one hash for all blobs.
+# Why: A3: one git read, one cut, one hash for all blobs.
 # From: Issue #1683 | PR #1858
 _ci_content_id_prefill() {
     local listing="$1" ref="$2" line path oid g key dir blist="" oids="" n=0 split
@@ -2860,10 +3436,10 @@ _ci_content_id_prefill() {
     # From: Issue #1683 | PR #1858
     _ci_run -o "${dir}/text" -s "[CI-ERROR-IDENTITY-0023]" "ref=\"${ref}\" reason=\"blob batch not read\"" \
         tr -d '\000' < "${dir}/batch" || return 2
-    # What: C locale: length() counts bytes, as git does.
+    # What: C locale: ${#} counts bytes, as git does.
     # Why: the cut follows the byte size in each header.
     # From: Issue #1683 | PR #1858
-    split="$(LC_ALL=C _ci_capture 0 awk -v dir="${dir}" "${_CI_AWK_BATCH_CUT}" "${dir}/names" "${dir}/text")" || return 2
+    split="$(LC_ALL=C _ci_capture 0 _ci_batch_cut "${dir}" "${dir}/names" "${dir}/text")" || return 2
     # What: a cut out of step leaves the rows to read alone.
     # Why: a dropped NUL shifts the byte count of its blob.
     # From: Issue #1683 | PR #1858
@@ -2876,7 +3452,7 @@ _ci_content_id_prefill() {
         [ -n "${line}" ] || continue
         ins+=("${line}.in")
     done <<< "${blist}"
-    out="$(cd -- "${dir}" && _ci_capture 0 awk -v b=1 "${_CI_AWK_HEREDOC_WORD}${_CI_AWK_NORM_V1}" "${ins[@]}")" || return 2
+    out="$(cd -- "${dir}" && _ci_capture 0 _ci_norm_files "${ins[@]}")" || return 2
     while IFS=$'\t' read -r f v; do
         [ -n "${f}" ] || continue
         case "${v}" in
@@ -2997,7 +3573,7 @@ ci_cmd_rust_memo() {
     local mode="${1:-}" dir sha tree key rc=0
     [ -n "$(_ci_env_required RUNNER_TEMP)" ] || return 2
     dir="$(_ci_rust_memo_dir)"
-    sha="$(_ci_sha256_hex <<< "${_CI_AWK_RUST_ITEMS}")" || return 2
+    sha="$(_ci_sha256_hex <<< "$(declare -f _ci_rust_idents _ci_rust_caps _ci_rust_top _ci_rust_row _ci_rust_lex)")" || return 2
     tree="$(_ci_capture 0 git -C "${CI_REPO_ROOT}" rev-parse 'HEAD^{tree}')" || return 2
     key="rust-items-${sha}-${tree}"
     case "${mode}" in
@@ -3146,7 +3722,7 @@ _ci_rust_content() {
     # From: Issue #1683 | PR #1858
     _ci_cargo_lock record || return 2
     lockf="$(_ci_repo_path CI_CARGO_LOCK)" || return 2
-    pkgs="$(_ci_run "[CI-ERROR-IDENTITY-0011]" "path=\"${lock}\" reason=\"lock closure not read\"" awk -v roots="${crates}" "${_CI_AWK_LOCK_CLOSURE}" "${lockf}")" || return 2
+    pkgs="$(_ci_run "[CI-ERROR-IDENTITY-0011]" "path=\"${lock}\" reason=\"lock closure not read\"" _ci_lock_closure "${crates}" "${lockf}")" || return 2
     if [ "${mode}" != text ]; then
         h="$(_ci_sha256_hex <<< "${pkgs}")" || return 2
         printf '%s\t%s\n' "${lock}" "${h}"
@@ -3168,7 +3744,7 @@ _ci_rust_content() {
             items="$(_ci_listing_items "${line}" "${ref}")" || return 2
             lib+="${items}"$'\n'
         done <<< "${listing}"
-        sel="$(_ci_run "[CI-ERROR-IDENTITY-0012]" "dir=\"${dir}\" reason=\"library closure not read\"" awk -v roots="${roots}" "${_CI_AWK_RUST_CLOSURE}" <<< "${lib}")" || return 2
+        sel="$(_ci_run "[CI-ERROR-IDENTITY-0012]" "dir=\"${dir}\" reason=\"library closure not read\"" _ci_rust_closure "${roots}" <<< "${lib}")" || return 2
         if [ "${mode}" = text ]; then
             printf '%s\n' "${sel}"
             continue
@@ -17014,37 +17590,61 @@ _ci_check_ci_bats() {
 _ci_check_exit_evidence() {
     local -a _ci_override=("$@") files=()
     _ci_scan_files files _ci_override '.github/scripts/ci.sh' || return 2
-    local path out
-    local -a viol=()
+    local path out xv_line xv_s xv_fn xv_nr xv_m xv_code xv_out
+    local -a viol=() xv_lines=() xv_re=()
+    local -A xv_site=()
+    # What: rules 0 1 3 4, 5 code, 6 fn head, 7 comment.
+    # Why: rule 2 (< <() is a plain glob, no regex needed.
+    xv_re[0]='(^|[^_a-z])mktemp([[:space:]]|$)'
+    xv_re[1]='for [A-Za-z_][A-Za-z0-9_]* in [^;]*\$\('
+    xv_re[3]='\[\[? +"\$\((_ci_block_entry_field|_ci_block_entry_list|_ci_block_keys|_ci_channel_field|ci_service_field|ci_services|ci_build_targets|ci_service_context_paths)[ )]'
+    xv_re[4]='^[[:space:]]*(local +)?[A-Za-z_][A-Za-z0-9_]*="\$\((git|docker|jq|curl|gh|awk|sed|tar|cat|date|base64|sha256sum|openssl|dig|find|ls|wc|tr|cut|sort) [^)]*\)" *\|\| *return'
+    xv_re[5]='\[CI-[A-Z]+-[A-Z0-9]+-[0-9][0-9][0-9][0-9]\]'
+    xv_re[6]='^[a-z_][a-z0-9_]*\(\) [({]'
+    xv_re[7]='^[[:space:]]*#'
     for path in "${files[@]}"; do
-        if ! out="$(awk '
-            function strip(s) { gsub(/\047[^\047]*\047/, "", s); return s }
-            /^[a-z_][a-z0-9_]*\(\) [({]/ { fn = $1; sub(/\(\).*/, "", fn) }
-            /^[[:space:]]*#/ { next }
-            {
-                s = strip($0)
-                if (fn != "_ci_mktemp" && s ~ /(^|[^_a-z])mktemp([[:space:]]|$)/)
-                    print FILENAME ":" NR ": raw-mktemp: " $0
-                if (s ~ /for [A-Za-z_][A-Za-z0-9_]* in [^;]*\$\(/)
-                    print FILENAME ":" NR ": for-in-substitution: " $0
-                if (s ~ /< <\(/)
-                    print FILENAME ":" NR ": process-substitution-loop: " $0
-                if (s ~ /\[\[? +"\$\((_ci_block_entry_field|_ci_block_entry_list|_ci_block_keys|_ci_channel_field|ci_service_field|ci_services|ci_build_targets|ci_service_context_paths)[ )]/)
-                    print FILENAME ":" NR ": reader-in-test: " $0
-                if (s ~ /^[[:space:]]*(local +)?[A-Za-z_][A-Za-z0-9_]*="\$\((git|docker|jq|curl|gh|awk|sed|tar|cat|date|base64|sha256sum|openssl|dig|find|ls|wc|tr|cut|sort) [^)]*\)" *\|\| *return/)
-                    print FILENAME ":" NR ": uncoded-external-return: " $0
-                line = $0
-                while (match(line, /\[CI-[A-Z]+-[A-Z0-9]+-[0-9][0-9][0-9][0-9]\]/)) {
-                    code = substr(line, RSTART, RLENGTH); sub(/^\[CI-[A-Z]+-/, "", code); sub(/\]$/, "", code)
-                    if (code in site) print FILENAME ":" NR ": duplicate-code " code " (first at line " site[code] "): " $0
-                    else site[code] = NR
-                    line = substr(line, RSTART + RLENGTH)
-                }
-            }' "${path}" 2>&1)"; then
+        # What: a subshell try keeps the raw open error.
+        # Why: AG-INT-002: a failed read keeps its raw.
+        if ! out="$(mapfile -t xv_lines < "${path}" 2>&1)"; then
             ci_error "[CI-ERROR-CHECK-0123]" "file=\"${path}\" reason=\"exit-evidence scan failed\"" "${out}"
             return 2
         fi
-        [ -z "${out}" ] || viol+=("${out}")
+        mapfile -t xv_lines < "${path}"
+        xv_fn="" xv_nr=0 xv_out=""
+        xv_site=()
+        for xv_line in "${xv_lines[@]}"; do
+            xv_nr=$((xv_nr + 1))
+            [[ ! "${xv_line}" =~ ${xv_re[6]} ]] || xv_fn="${xv_line%%"()"*}"
+            [[ ! "${xv_line}" =~ ${xv_re[7]} ]] || continue
+            # What: a glob runs before each regex.
+            # Why: same hits; 20k lines stay fast.
+            xv_s="${xv_line}"
+            [[ "${xv_s}" != *"'"* ]] || _ci_strip_squoted xv_s "${xv_line}"
+            if [[ "${xv_s}" == *mktemp* ]] && [ "${xv_fn}" != "_ci_mktemp" ] && [[ "${xv_s}" =~ ${xv_re[0]} ]]; then
+                xv_out+="${path}:${xv_nr}: raw-mktemp: ${xv_line}"$'\n'
+            fi
+            if [[ "${xv_s}" == *"for "*"\$("* ]] && [[ "${xv_s}" =~ ${xv_re[1]} ]]; then
+                xv_out+="${path}:${xv_nr}: for-in-substitution: ${xv_line}"$'\n'
+            fi
+            [[ "${xv_s}" != *"< <"\(* ]] || xv_out+="${path}:${xv_nr}: process-substitution-loop: ${xv_line}"$'\n'
+            if [[ "${xv_s}" == *"\"\$("* ]]; then
+                [[ ! "${xv_s}" =~ ${xv_re[3]} ]] || xv_out+="${path}:${xv_nr}: reader-in-test: ${xv_line}"$'\n'
+                [[ ! "${xv_s}" =~ ${xv_re[4]} ]] || xv_out+="${path}:${xv_nr}: uncoded-external-return: ${xv_line}"$'\n'
+            fi
+            xv_s="${xv_line}"
+            while [[ "${xv_s}" == *"[CI-"* ]] && [[ "${xv_s}" =~ ${xv_re[5]} ]]; do
+                xv_m="${BASH_REMATCH[0]}"
+                xv_code="${xv_m#\[CI-*-}"
+                xv_code="${xv_code%]}"
+                if [ -n "${xv_site[k${xv_code}]:-}" ]; then
+                    xv_out+="${path}:${xv_nr}: duplicate-code ${xv_code} (first at line ${xv_site[k${xv_code}]}): ${xv_line}"$'\n'
+                else
+                    xv_site[k${xv_code}]="${xv_nr}"
+                fi
+                xv_s="${xv_s#*"${xv_m}"}"
+            done
+        done
+        [ -z "${xv_out}" ] || viol+=("${xv_out%$'\n'}")
     done
     if [ "${#viol[@]}" -gt 0 ]; then
         ci_error "[CI-ERROR-CHECK-0124]" "files=${#files[@]} reason=\"exit path loses code, context or raw (AG-INT-002)\"" "$(printf '%s\n' "${viol[@]}")"
@@ -18461,49 +19061,62 @@ _ci_check_proxy_cache_env_doc_drift() {
 # Why: AG-VAL-036: heredoc/escape= change what a line is.
 # From: Issue #1683 | PR #1858
 _ci_dockerfile_logical_lines() {
-    awk "${_CI_AWK_HEREDOC_WORD}"'
-        function emit_logical(    candidate, owner) {
-            print logical
-            candidate = logical
-            sub(/^[[:space:]]*/, "", candidate)
-            owner = candidate
-            sub(/[[:space:]].*$/, "", owner)
-            if ((tolower(owner) == "run" || tolower(owner) == "copy") && hd_scan(candidate)) heredoc = hdw
-            logical = ""
-        }
-        heredoc != "" {
-            candidate = $0
-            sub(/^[[:space:]]*/, "", candidate)
-            if (candidate == heredoc) heredoc = ""
-            next
-        }
-        {
-            physical = $0
-            candidate = physical
-            sub(/^[[:space:]]*/, "", candidate)
-            if (!content_seen && candidate ~ /^#[[:space:]]*escape[[:space:]]*=/) {
-                directive = candidate
-                sub(/^#[[:space:]]*escape[[:space:]]*=[[:space:]]*/, "", directive)
-                sub(/[[:space:]]*$/, "", directive)
-                if (directive == "`" || directive == "\\") escape = directive
-                print physical
-                next
-            }
-            if (logical == "" && candidate ~ /^#/) { logical = physical; emit_logical(); next }
-            if (candidate != "") content_seen = 1
-            if (escape == "") escape = "\\"
-            escaped = (escape == "\\" ? physical ~ /\\[[:space:]]*$/ : physical ~ /`[[:space:]]*$/)
-            if (escaped) {
-                if (escape == "\\") sub(/\\[[:space:]]*$/, "", physical)
-                else sub(/`[[:space:]]*$/, "", physical)
-                logical = logical physical " "
-                next
-            }
-            logical = logical physical
-            emit_logical()
-        }
-        END { if (logical != "") emit_logical() }
-    ' "$1"
+    local -a dl_in=()
+    local dl_phys dl_cand dl_logic="" dl_hd="" dl_esc="" dl_seen=0 dl_dir dl_re
+    if [ "$1" = - ]; then
+        mapfile -t dl_in
+    else
+        mapfile -t dl_in < "$1" || return 2
+    fi
+    for dl_phys in "${dl_in[@]}"; do
+        dl_cand="${dl_phys#"${dl_phys%%[![:space:]]*}"}"
+        # What: heredoc body lines drop up to the word.
+        # Why: a body line is data, never an instruction.
+        if [ -n "${dl_hd}" ]; then
+            [ "${dl_cand}" != "${dl_hd}" ] || dl_hd=""
+            continue
+        fi
+        if [ "${dl_seen}" -eq 0 ] && [[ "${dl_cand}" =~ ^#[[:space:]]*escape[[:space:]]*=[[:space:]]* ]]; then
+            dl_dir="${dl_cand:${#BASH_REMATCH[0]}}"
+            dl_dir="${dl_dir%"${dl_dir##*[![:space:]]}"}"
+            if [ "${dl_dir}" = '`' ] || [ "${dl_dir}" = "\\" ]; then
+                dl_esc="${dl_dir}"
+            fi
+            printf '%s\n' "${dl_phys}"
+            continue
+        fi
+        if [ -z "${dl_logic}" ] && [ "${dl_cand:0:1}" = "#" ]; then
+            dl_logic="${dl_phys}"
+            _ci_dockerfile_emit_logical
+            continue
+        fi
+        [ -z "${dl_cand}" ] || dl_seen=1
+        [ -n "${dl_esc}" ] || dl_esc="\\"
+        dl_re='`[[:space:]]*$'
+        [ "${dl_esc}" != "\\" ] || dl_re='\\[[:space:]]*$'
+        if [[ "${dl_phys}" =~ ${dl_re} ]]; then
+            dl_logic+="${dl_phys%"${BASH_REMATCH[0]}"} "
+            continue
+        fi
+        dl_logic+="${dl_phys}"
+        _ci_dockerfile_emit_logical
+    done
+    [ -z "${dl_logic}" ] || _ci_dockerfile_emit_logical
+}
+
+# What: print dl_logic; a RUN or COPY <<word sets dl_hd.
+# Why: works on the locals of _ci_dockerfile_logical_lines.
+# From: Issue #1683 | PR #1858
+_ci_dockerfile_emit_logical() {
+    local lg_c lg_o lg_w
+    printf '%s\n' "${dl_logic}"
+    lg_c="${dl_logic#"${dl_logic%%[![:space:]]*}"}"
+    lg_o="${lg_c%%[[:space:]]*}"
+    lg_o="${lg_o,,}"
+    if { [ "${lg_o}" = run ] || [ "${lg_o}" = copy ]; } && _ci_heredoc_word lg_w "${lg_c}"; then
+        dl_hd="${lg_w}"
+    fi
+    dl_logic=""
 }
 
 # What: Fail unless prod install paths stay prebuilt-only.
@@ -19646,7 +20259,7 @@ _ci_workflow_scan_files() {
     _ci_workflow_files "$2" "${dir}"
 }
 
-# What: read awk rows: "$2 N" count, "flag ..." findings.
+# What: read scan rows: "$2 N" count, "flag ..." findings.
 # Why: both workflow scans parse the same row format.
 # From: Issue #1683 | PR #1912
 _ci_workflow_scan_report() {
@@ -19708,19 +20321,98 @@ _ci_check_workflow_ci_variables() {
     printf 'workflow-ci-variables=clean scanned=%s callers=%s\n' "${#files[@]}" "${callers}"
 }
 
+# What: judge job rows $4 of file $1: runner $2, minutes $3.
+# Why: one owner for the rules; prints flags and jobs N.
+# From: Issue #1683 | PR #1858
+_ci_job_rows() {
+    local -n _ci_jr_min="$3"
+    local line job uses nd ro to want k m q key nfile=0 njob=0 fb_re to_re key_re
+    local -a fl
+    printf -v q %b "\\047"
+    fb_re="${q}[^${q}]*${q}"
+    to_re='[|][|][[:space:]]*[0-9]+'
+    key_re="[[]${q}[^${q}]*${q}[]]"
+    while IFS= read -r line; do
+        [ -n "${line}" ] || continue
+        nfile=$((nfile + 1))
+        # What: split at tabs; empty fields stay.
+        # Why: no subshell per field; read joins empty ones.
+        fl=()
+        k="${line}"
+        while [[ "${k}" == *$'\t'* ]]; do
+            fl[${#fl[@]}]="${k%%$'\t'*}"
+            k="${k#*$'\t'}"
+        done
+        fl[${#fl[@]}]="${k}"
+        job="${fl[0]}"
+        uses="${fl[1]-}"
+        nd="${fl[2]-}"
+        ro="${fl[3]-}"
+        to="${fl[4]-}"
+        [ "${uses}" != true ] || continue
+        njob=$((njob + 1))
+        want=""
+        if [ -n "${job}" ]; then
+            want="${_ci_jr_min[${job}]-}"
+        fi
+        if [ -z "${to}" ]; then
+            printf 'flag %s: job %s: no timeout-minutes\n' "$1" "${job}"
+        elif [ -n "${want}" ] && _ci_job_lit "${to}" && [ "${to}" != "${want}" ]; then
+            printf 'flag %s: job %s: timeout-minutes %s differs from SOT ci_job_timeouts.%s %s\n' "$1" "${job}" "${to}" "${job}" "${want}"
+        elif [ -z "${want}" ] && ! _ci_job_lit "${to}"; then
+            printf 'flag %s: job %s: timeout-minutes reads job-settings, SOT ci_job_timeouts has no %s\n' "$1" "${job}" "${job}"
+        fi
+        if [ "${nd}" = true ]; then
+            if _ci_job_lit "${ro}"; then
+                printf 'flag %s: job %s: runs-on %s (a needs job reads job-settings)\n' "$1" "${job}" "${ro}"
+            fi
+        elif _ci_job_lit "${ro}" && [ "${ro}" != "$2" ]; then
+            printf 'flag %s: job %s: runs-on %s (SOT runner %s)\n' "$1" "${job}" "${ro}" "$2"
+        fi
+        k="${ro}"
+        while [[ "${k}" =~ ${fb_re} ]]; do
+            m="${BASH_REMATCH[0]}"
+            if [ "${m:1:${#m}-2}" != "$2" ]; then
+                printf 'flag %s: job %s: runs-on fallback %s (SOT runner %s)\n' "$1" "${job}" "${m}" "$2"
+            fi
+            k="${k#*"${m}"}"
+        done
+        if [[ "${to}" =~ ${to_re} ]]; then
+            printf 'flag %s: job %s: timeout fallback %s (a literal is a second owner)\n' "$1" "${job}" "${BASH_REMATCH[0]}"
+        fi
+        if [[ "${to}" =~ ${key_re} ]]; then
+            m="${BASH_REMATCH[0]}"
+            key="${m:2:${#m}-4}"
+            if [ "${key}" != "${job}" ]; then
+                printf 'flag %s: job %s: timeout-minutes reads key %s\n' "$1" "${job}" "${key}"
+            fi
+        fi
+    done <<< "$4"
+    if [ "${nfile}" = 0 ]; then
+        printf 'flag %s: jobs: block without a parsable job\n' "$1"
+    fi
+    printf 'jobs %s\n' "${njob}"
+}
+
+# What: rc 0 if $1 is a literal, not empty nor a ${{ }}.
+# Why: only a literal can differ from the SOT value.
+# From: Issue #1683 | PR #1858
+_ci_job_lit() {
+    [ -n "$1" ] && [[ "$1" != [$]"{{"* ]]
+}
+
 # What: SOT-owned jobs read job-settings, others a literal
 # Why: AG-CI-006/016: one owner; a literal must match it
 # From: Issue #1683 | PR #1858
 _ci_check_workflow_job_settings() {
-    local repo_root="${1:-${CI_REPO_ROOT:-.}}" out="" runner job tmap="" js_count=0 f rows verdict hasjobs line
+    local repo_root="${1:-${CI_REPO_ROOT:-.}}" out="" runner js_count=0 f rows verdict hasjobs line
     local -a viol=() files=() js_jobs=()
     local -A js_min=()
     _ci_workflow_scan_files "${repo_root}" files || return 2
     _ci_job_settings_read runner js_jobs js_min || return 2
-    for job in "${js_jobs[@]}"; do tmap+="${job}=${js_min[${job}]} "; done
     for f in "${files[@]}"; do
         # What: has the workflow a jobs: map; its job rows.
-        # Why: yq reads the YAML; awk only judges the rows.
+        # Why: yq reads the YAML; bash judges the rows.
         # From: Issue #1683 | PR #1858
         hasjobs="$(_ci_run "[CI-ERROR-CHECK-0204]" "file=\"${f}\" reason=\"workflow jobs block not read\"" \
             yq --yaml-fix-merge-anchor-to-spec=true -r '(.jobs | tag) == "!!map"' "${f}")" || return 2
@@ -19730,36 +20422,7 @@ _ci_check_workflow_job_settings() {
         fi
         rows="$(_ci_run "[CI-ERROR-CHECK-0205]" "file=\"${f}\" reason=\"workflow job rows not read\"" \
             yq --yaml-fix-merge-anchor-to-spec=true -r '.jobs | to_entries[] | [.key, (.value | has("uses")), (.value | has("needs")), ((.value["runs-on"] // "") | tostring), ((.value["timeout-minutes"] // "") | tostring)] | @tsv' "${f}")" || return 2
-        verdict="$(_ci_capture 0 awk -v f="${f}" -v runner="${runner}" -v tmap="${tmap}" -v q="'" "$(cat <<'PROG'
-            function lit(v) { return v != "" && v !~ /^\$\{\{/ }
-            function bad(m) { print "flag " f ": job " job ": " m }
-            function judge(  k, want) {
-                njob++
-                want = (job in T) ? T[job] : ""
-                if (to == "") bad("no timeout-minutes")
-                else if (want != "" && lit(to) && to != want) bad("timeout-minutes " to " differs from SOT ci_job_timeouts." job " " want)
-                else if (want == "" && !lit(to)) bad("timeout-minutes reads job-settings, SOT ci_job_timeouts has no " job)
-                if (nd) {
-                    if (lit(ro)) bad("runs-on " ro " (a needs job reads job-settings)")
-                } else if (lit(ro) && ro != runner) bad("runs-on " ro " (SOT runner " runner ")")
-                k = ro
-                while (match(k, q "[^" q "]*" q)) {
-                    if (substr(k, RSTART + 1, RLENGTH - 2) != runner) bad("runs-on fallback " substr(k, RSTART, RLENGTH) " (SOT runner " runner ")")
-                    k = substr(k, RSTART + RLENGTH)
-                }
-                if (match(to, /\|\|[[:space:]]*[0-9]+/)) bad("timeout fallback " substr(to, RSTART, RLENGTH) " (a literal is a second owner)")
-                if (match(to, "\\[" q "[^" q "]*" q "\\]")) {
-                    k = substr(to, RSTART + 2, RLENGTH - 4)
-                    if (k != job) bad("timeout-minutes reads key " k)
-                }
-            }
-            BEGIN { FS = "\t"; n = split(tmap, kv, " "); for (i = 1; i <= n; i++) { p = index(kv[i], "="); T[substr(kv[i], 1, p - 1)] = substr(kv[i], p + 1) } }
-            NF == 0 { next }
-            { nfile++; job = $1; nd = ($3 == "true"); ro = $4; to = $5 }
-            $2 != "true" { judge() }
-            END { if (!nfile) print "flag " f ": jobs: block without a parsable job"; print "jobs " njob + 0 }
-PROG
-            )" <<< "${rows}")" || return 2
+        verdict="$(_ci_job_rows "${f}" "${runner}" js_min "${rows}")" || return 2
         while IFS= read -r line; do
             case "${line}" in
                 "jobs "*) js_count=$(( js_count + ${line#jobs} )) ;;

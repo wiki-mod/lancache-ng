@@ -415,7 +415,7 @@ jobs:
   # Why: a lost image must fail here, not at a user's pull.
   # From: Issue #1683 | PR #1858
   channel-check:
-    name: channel-check ${{ matrix.channel }}
+    name: channel-check
     # What: after promote, so nightly is today's channel.
     # Why: a check-only dispatch has a skipped promote.
     # From: Issue #1683 | PR #1858
