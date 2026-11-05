@@ -2228,7 +2228,8 @@ pub mod recursor_conf {
             s.text("PDNS_AUTH_ADDRESS")?,
             s.uint("PDNS_AUTH_PORT")?
         );
-        let local: String = crate::dns::managed_zones(s)?
+        let zones = crate::dns::managed_zones(s)?;
+        let local: String = zones
             .iter()
             .map(|z| {
                 format!(
@@ -2236,6 +2237,13 @@ pub mod recursor_conf {
                     z.trim_end_matches('.')
                 )
             })
+            .collect();
+        // What: no DNSSEC check for the local zones.
+        // Why: they are unsigned; the root denies them.
+        // From: Issue #1683 | PR #1980
+        let nta: String = zones
+            .iter()
+            .map(|z| format!("    - name: \"{}\"\n", z.trim_end_matches('.')))
             .collect();
         let upstream = s.list("DNS_UPSTREAM_SERVERS");
         let recurse = if upstream.is_empty() {
@@ -2264,7 +2272,7 @@ pub mod recursor_conf {
             String::new()
         };
         let negttl = u("RECURSOR_MAX_NEGATIVE_TTL")?;
-        let mut y = String::new();
+        let mut y = format!("dnssec:\n  negative_trustanchors:\n{nta}");
         y += "incoming:\n  listen:\n";
         y += &yaml_list(&s.list(&which.key("LISTEN")), "    ")?;
         y += &format!("  port: {}\n  allow_from:\n", u(&which.key("PORT"))?);
