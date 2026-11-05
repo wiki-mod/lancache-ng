@@ -56,7 +56,7 @@
           <form action="/cachehamster/{{ op }}" method="post" style="display:inline">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <input type="hidden" name="id" value="{{ j.id }}">
-            <button type="submit" class="btn">{{ op | capitalize }}</button>
+            <button type="submit" class="btn">{{ t[op] }}</button>
           </form>
           {% endfor %}
         </td>
