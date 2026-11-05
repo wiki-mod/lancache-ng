@@ -630,7 +630,11 @@ fn apply_order(jobs: &mut Vec<Job>, order: Order) {
         Order::Start { id } => {
             for j in jobs.iter_mut().filter(|j| j.id == id) {
                 j.when = When::Now;
+                // What: a new run counts from zero.
+                // Why: else a rerun showed "2 of 1 done".
+                // From: Issue #871 | PR #1980
                 if j.state != State::Running {
+                    (j.done, j.failed, j.bytes) = (0, 0, 0);
                     j.set(State::Waiting);
                 }
             }
