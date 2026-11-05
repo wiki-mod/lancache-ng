@@ -54,7 +54,7 @@ x-environment:
     NTP_ALLOWED_CLIENT_CIDRS: ${NTP_ALLOWED_CLIENT_CIDRS:-}
   proxy-ui: &env-proxy-ui
     HTTPS_ENABLED: ${HTTPS_ENABLED:-}
-    CACHE_MAX_SIZE: ${CACHE_MAX_SIZE:-}
+    CACHE_MAX_GB: ${CACHE_MAX_GB:-}
   dns-dhcp: &env-dns-dhcp
     DDNS_TSIG_KEY: ${DDNS_TSIG_KEY}
   dns-dhcp-ui: &env-dns-dhcp-ui
@@ -301,7 +301,6 @@ services:
       <<: [*env-stack, *env-services-ui, *env-proxy-ui, *env-dns-dhcp-ui, *env-dns-ui, *env-dhcp-ui]
       # What: image identity, login and Kea values.
       # Why: only the Admin UI reads these keys.
-      CACHE_MAX_GB: ${CACHE_MAX_GB:-}
       # What: start values the UI shows from the install.
       # Why: else the UI shows the SOT default instead.
       # From: Issue #1683 | PR #1858

@@ -530,7 +530,7 @@ runtime:
     - NGINX_UPSTREAM_RESOLVER=8.8.8.8 8.8.4.4
     - PROXY_SECURITY_MODE=lazy
     - NTP_UPSTREAM_SERVERS=0.debian.pool.ntp.org 1.debian.pool.ntp.org 2.debian.pool.ntp.org 3.debian.pool.ntp.org time.cloudflare.com
-    - CACHE_MAX_SIZE=50g
+    - CACHE_MAX_GB=50
     - CACHE_MEM_MB=512
     - DHCP_SUBNET=10.0.0.0/24
     - DHCP_SUBNET_ID=1
@@ -1070,7 +1070,7 @@ runtime:
     - DOCKER_ENDPOINT=text;;;container;services
     - DOCKER_TIMEOUT=uint;1;600;live;services
     - HTTPS_ENABLED=bool;;;reload;proxy
-    - CACHE_MAX_SIZE=text;;;reload;proxy
+    - CACHE_MAX_GB=uint;1;1048576;reload;proxy
     - HTTP_CLIENT_TIMEOUT=uint;1;600;live;services
     - HTTP_POOL_IDLE_TIMEOUT=uint;1;3600;live;services
     - HTTP_TCP_KEEPALIVE=uint;1;3600;live;services
@@ -2416,7 +2416,7 @@ validation:
     - DNS_HTTPS_HOST_PORT=
     - ALLOW_INSECURE_UI=true
     - NGINX_UPSTREAM_RESOLVER
-    - CACHE_MAX_SIZE
+    - CACHE_MAX_GB
     - CACHE_MEM_MB
     - DHCP_SUBNET
     - LANCACHE_STATE_DIR

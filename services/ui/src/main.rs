@@ -370,11 +370,10 @@ async fn dashboard(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page
     ctx.insert("cache_pct", &0u64);
     ctx.insert("cache_used_human", &human::bytes(0));
 
-    // What: the set size in the same unit as "used".
-    // Why: live test 05.11.: GiB used beside "40g".
+    // What: bar against the set size, not the disk.
+    // Why: live test 05.11.: the bar showed disk use.
     // From: Issue #1683 | PR #1980
-    let max = nginx_bytes(&s.text("CACHE_MAX_SIZE")?)?;
-    ctx.insert("cache_max_human", &human::bytes(max));
+    let max = gib_bytes(&s.text("CACHE_MAX_GB")?)?;
     if let Ok(sp) = fs::space(Path::new(&s.text("CACHE_DIR")?)) {
         let used = sp.total.saturating_sub(sp.free);
         let pct = (used.saturating_mul(100) / max.max(1)).min(100);
@@ -2207,20 +2206,15 @@ fn secrets(s: &Settings) -> Result<render::Secrets, String> {
     })
 }
 
-// What: bytes of an nginx size like 50g.
-// Why: CACHE_MAX_SIZE uses nginx size units.
-// From: Issue #1069
-fn nginx_bytes(text: &str) -> Result<u64, String> {
-    let t = text.trim().to_ascii_lowercase();
-    let (num, shift) = match t.chars().last() {
-        Some('k') => (&t[..t.len() - 1], 10),
-        Some('m') => (&t[..t.len() - 1], 20),
-        Some('g') => (&t[..t.len() - 1], 30),
-        Some('t') => (&t[..t.len() - 1], 40),
-        _ => (t.as_str(), 0),
-    };
-    let n: u64 = num.parse().map_err(|_| format!("{text:?} is no size"))?;
-    n.checked_shl(shift)
+// What: bytes of a whole GiB number.
+// Why: DoMe 05.11.: cache sizes are whole GiB only.
+// From: Issue #1683 | PR #1980
+fn gib_bytes(text: &str) -> Result<u64, String> {
+    let n: u64 = text
+        .trim()
+        .parse()
+        .map_err(|_| format!("{text:?} is no whole GiB number"))?;
+    n.checked_shl(30)
         .ok_or_else(|| format!("{text:?} is too big"))
 }
 
@@ -2228,11 +2222,11 @@ fn nginx_bytes(text: &str) -> Result<u64, String> {
 // Why: growth must fit the free disk space.
 // From: Issue #1069
 fn cache_room(s: &Settings, form: &Fields) -> Result<(), Fail> {
-    let Some(wanted) = form.get("CACHE_MAX_SIZE") else {
+    let Some(wanted) = form.get("CACHE_MAX_GB") else {
         return Ok(());
     };
-    let new = nginx_bytes(wanted).map_err(bad_request)?;
-    let old = nginx_bytes(&s.text("CACHE_MAX_SIZE")?)?;
+    let new = gib_bytes(wanted).map_err(bad_request)?;
+    let old = gib_bytes(&s.text("CACHE_MAX_GB")?)?;
     if new <= old {
         return Ok(());
     }

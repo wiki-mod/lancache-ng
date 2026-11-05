@@ -349,8 +349,8 @@ primary). With real secondaries on a real stack:
   again after a restart. A stale or missing status file renders as stale or
   unavailable, never as the last known color.
 - **Cache resize**: submit a new size (`POST /cache/resize`) and wait for the
-  `lancache-converge.timer` run; `setup.sh converge-reconcile` writes `CACHE_MAX_SIZE`
-  and `CACHE_MAX_GB` into the runtime env and the proxy is recreated. Pass:
+  `lancache-converge.timer` run; `setup.sh converge-reconcile` writes `CACHE_MAX_GB`
+  into the runtime env and the proxy is recreated. Pass:
   `docker exec <proxy container> nginx -T` shows the new `max_size=` on
   `proxy_cache_path`; a `200`/`303` from the form is not the proof.
 - **Self-restart** (issue #1486): submit the restart form on `/setup`

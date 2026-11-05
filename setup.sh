@@ -4291,7 +4291,6 @@ migrate_env_for_update() (
     cache_max_size=$(get_env_var_nonempty CACHE_MAX_SIZE "$env_file") || exit $?
     cache_max_gb=$(get_env_var_nonempty CACHE_MAX_GB "$env_file") || exit $?
     if cache_gb=$(cache_size_gb_from_env "${cache_max_size:-$cache_max_gb}"); then
-        set_env_key_if_empty_or_missing CACHE_MAX_SIZE "${cache_gb}g" "$env_file"
         set_env_key_if_empty_or_missing CACHE_MAX_GB "$cache_gb" "$env_file"
     fi
     # What: a broken CACHE_MEM_MB is removed, not replaced
@@ -6657,7 +6656,7 @@ cmd_converge_reconcile() {
     # From: Issue #1683 | PR #1858
     reconcile_auto_update_timer_state "$env_file"
 
-    # What: UI cache size -> CACHE_MAX_SIZE and CACHE_MAX_GB
+    # What: UI cache size -> CACHE_MAX_GB
     # Why: nginx and the dashboard read one value pair
     # From: Issue #1069 | PR #1858
     ui_cache_max_gb=$(lancache_read_ui_settings_override "$install_dir" "$env_file" "CACHE_MAX_GB") \
@@ -6666,7 +6665,6 @@ cmd_converge_reconcile() {
         ui_cache_max_gb=$(( 10#$ui_cache_max_gb ))
         current_cache_max_gb=$(get_env_var CACHE_MAX_GB "$env_file") || exit $?
         if [[ "$ui_cache_max_gb" != "$current_cache_max_gb" ]]; then
-            set_env_key CACHE_MAX_SIZE "${ui_cache_max_gb}g" "$env_file"
             set_env_key CACHE_MAX_GB "$ui_cache_max_gb" "$env_file"
             print_ok "Cache size updated from Admin UI: ${current_cache_max_gb:-<unset>} GB -> ${ui_cache_max_gb} GB"
         fi
@@ -8526,8 +8524,8 @@ while true; do
     print_error "Please enter an absolute path (e.g. $LANCACHE_STATE_DIR/cache)."
 done
 
-default_cache_gb=$(cache_size_gb_from_env "$(prod_env_default CACHE_MAX_SIZE)") \
-    || die "The CACHE_MAX_SIZE default is not a GB size."
+default_cache_gb=$(cache_size_gb_from_env "$(prod_env_default CACHE_MAX_GB)") \
+    || die "The CACHE_MAX_GB default is not a GiB number."
 while true; do
     ask "Cache size in GiB" "$default_cache_gb"
     cache_gb="$REPLY"
@@ -8934,11 +8932,10 @@ LANCACHE_STATE_DIR=${LANCACHE_STATE_DIR}
 HTTPS_ENABLED=${HTTPS_ENABLED}
 
 CACHE_DIR=${CACHE_DIR}
-CACHE_MAX_SIZE=${cache_gb}g
 CACHE_MEM_MB=${CACHE_MEM_MB}
 
-# What: cache size in GB as a plain number
-# Why: the Admin UI draws its progress bar from it
+# What: cache size in GiB, a whole number
+# Why: nginx max_size and the Admin UI read it
 # From: Issue #1683 | PR #1858
 CACHE_MAX_GB=${cache_gb}
 
