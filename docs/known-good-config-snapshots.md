@@ -12,20 +12,19 @@ service, not the whole install.
 
 ## Contract
 
-1. **One store.** `SnapshotStore` in `services/common/shared.rs` owns the
+1. **One store.** `snapshot::Store` in `services/common/shared.rs` owns the
    format for every service:
-   - A snapshot is a directory named by a 20-digit id (nanoseconds since the
-     Unix epoch), so name order is time order. It holds one JSON payload file.
-   - `create` writes into a `.staging.<id>` directory and renames it; a crash
-     never leaves a half-written snapshot. `ids` lists only numeric directories
-     that hold the payload file.
+   - A snapshot id is a digit string (nanoseconds since the Unix epoch), so a
+     longer or larger id is newer. The snapshot is either one file named by
+     the id, or a directory named by the id that holds one named file
+     (`<dir>/<id>/<file>`, the layout `setup.sh` reads).
+   - `save` creates the file exclusively (it never overwrites) and then
+     prunes old snapshots. `list` returns only numeric ids whose file exists,
+     newest first.
    - `read` accepts only numeric ids; the id joins onto a path, so nothing
      else passes.
-   - `prune` keeps the newest `KEEP_KNOWN_GOOD_CONFIGS` snapshots and refuses
-     0, which would delete every snapshot.
-   - `adopt_legacy` converts snapshots in the old shell format (directory name
-     `YYYYmmddTHHMMSS.N`, one file per config) into the new format, so an
-     update keeps its rollback targets.
+   - Pruning keeps the newest `KEEP_KNOWN_GOOD_CONFIGS` snapshots and always
+     at least one, so there is always a rollback target.
 2. **Retention.** `KEEP_KNOWN_GOOD_CONFIGS` (SOT
    `.github/yaml/build-manifest.yml`, read by
    `config::keep_known_good`, at least 1) applies to every store.
