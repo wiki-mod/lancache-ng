@@ -19021,7 +19021,8 @@ PROG
 _ci_check_proxy_nginx_policy() {
     local repo_root="${1:-${CI_REPO_ROOT}}" f out line pp blocks=0 b h a d al r px hk hu hp="" hq pn lb fb hv sv sp bn
     local hz_raw hz_line hz_body hz_in hz_a hz_d hz_al hz_r
-    local -a viol=() bnt hz_fld=()
+    local la_raw la_line la_loc la_t la_in la_dep la_a la_d la_s la_m
+    local -a viol=() bnt hz_fld=() la_fld=()
     px="$(_ci_service_path proxy "" "${repo_root}")" || return 2
     px="${px%/}"
     # What: the health and status paths of the SOT.
@@ -19107,18 +19108,42 @@ _ci_check_proxy_nginx_policy() {
         # What: the allow lines of every location.
         # Why: a location with allow lines is an ACL.
         # From: Issue #1683 | PR #1912
-        out="$(_ci_capture 0 awk "$(cat <<'PROG'
-            $1 == "location" { loc = $0; sub(/^[[:space:]]+/, "", loc); sub(/[[:space:]]*\{[[:space:]]*$/, "", loc); gsub(/[[:space:]]+/, " ", loc)
-                inb = 1; depth = 0; a = 0; d = 0; s = 0 }
-            inb { line = $0; gsub(/^[[:space:]]+|[[:space:]]+$/, "", line); gsub(/[[:space:]]+/, " ", line)
-                if (line ~ /^allow /) { t = line; sub(/^allow /, "", t); sub(/;$/, "", t); print loc "|T|" t; a++; if (d) d = -1 }
-                if (line == "deny all;" && d == 0) d = 1
-                if (line == "stub_status;") s = 1
-                o = $0; c = $0
-                depth += gsub(/\{/, "", o) - gsub(/\}/, "", c)
-                if (depth <= 0) { if (a > 0 && d != 1) print loc "|D|"; if (s) print loc "|S|"; inb = 0 } }
-PROG
-            )" "${f}")" || return 2
+        out="" la_in=0
+        # What: rows "loc|T|target", "loc|D|" and "loc|S|".
+        # Why: each location line opens a new block.
+        while IFS= read -r la_raw || [ -n "${la_raw}" ]; do
+            read -r -a la_fld <<< "${la_raw}"
+            if [ "${la_fld[0]-}" = location ]; then
+                la_loc="${la_raw#"${la_raw%%[![:space:]]*}"}"
+                la_m=""
+                [[ ! "${la_loc}" =~ [[:space:]]*\{[[:space:]]*$ ]] || la_m="${BASH_REMATCH[0]}"
+                la_loc="${la_loc%"${la_m}"}"
+                la_m=""
+                [[ ! "${la_loc}" =~ [[:space:]]+$ ]] || la_m=" "
+                _ci_ws_fold la_loc "${la_loc}"
+                la_loc+="${la_m}"
+                la_in=1 la_dep=0 la_a=0 la_d=0 la_s=0
+            fi
+            [ "${la_in}" -eq 1 ] || continue
+            _ci_ws_fold la_line "${la_raw}"
+            if [[ "${la_line}" == "allow "* ]]; then
+                la_t="${la_line#allow }"
+                out+="${la_loc}|T|${la_t%;}"$'\n'
+                la_a=$((la_a + 1))
+                [ "${la_d}" -eq 0 ] || la_d=-1
+            fi
+            [ "${la_line}" != "deny all;" ] || [ "${la_d}" -ne 0 ] || la_d=1
+            [ "${la_line}" != "stub_status;" ] || la_s=1
+            la_m="${la_raw//\{/}"
+            la_dep=$((la_dep + ${#la_raw} - ${#la_m}))
+            la_m="${la_raw//\}/}"
+            la_dep=$((la_dep - ${#la_raw} + ${#la_m}))
+            [ "${la_dep}" -le 0 ] || continue
+            [ "${la_a}" -eq 0 ] || [ "${la_d}" -eq 1 ] || out+="${la_loc}|D|"$'\n'
+            [ "${la_s}" -eq 0 ] || out+="${la_loc}|S|"$'\n'
+            la_in=0
+        done < "${f}" || return 2
+        out="${out%$'\n'}"
         while IFS='|' read -r line b h; do
             [ -n "${line}" ] || continue
             if [ "${b}" = "T" ]; then
