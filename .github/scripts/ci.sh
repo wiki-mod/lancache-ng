@@ -15494,7 +15494,7 @@ _ci_scan_files() {
     local -n _ci_scan_out="$1" _ci_scan_override="$2"
     shift 2
     local -a _ci_scan_in=()
-    local _ci_scan_p _ci_scan_gone=0 _ci_scan_raw
+    local _ci_scan_p _ci_scan_gone=0 _ci_scan_raw _ci_scan_gone_list=""
     # What: git ls-files only when needed; failure is fatal.
     # Why: an empty list would report every check as clean.
     # From: Issue #1683 | PR #1858
@@ -15531,10 +15531,15 @@ _ci_scan_files() {
             _ci_scan_out+=("${_ci_scan_p}")
         else
             _ci_scan_gone=$((_ci_scan_gone + 1))
+            _ci_scan_gone_list+="${_ci_scan_p}"$'\n'
         fi
     done
+    # What: name each skipped path, not only the count.
+    # Why: AG-INT-002: the log shows what was not checked.
+    # From: Issue #1683 | PR #1858
     if [ "${_ci_scan_gone}" -gt 0 ]; then
         ci_log "[CI-NOTICE-CHECK-0070]" "skipped=${_ci_scan_gone} reason=\"path not in the tree (deleted)\""
+        printf 'raw:\n%s' "${_ci_scan_gone_list}" >&2
     fi
 }
 
@@ -19588,11 +19593,11 @@ _ci_check_shellcheck() {
     for f in "${files[@]}"; do
         sc_rc=0
         sc_one="$(shellcheck --norc "${f}" 2>&1)" || sc_rc=$?
-        # What: rc 1 = findings; any other rc = no result.
+        # What: rc 0 logs; 1 = findings; else no result.
         # Why: a killed run (137) must not read as findings.
         # From: Issue #1683 | PR #1858
         case "${sc_rc}" in
-            0) ;;
+            0) [ -z "${sc_one}" ] || printf 'raw: %s\n%s\n' "${f}" "${sc_one}" >&2 ;;
             1) sc_found=1; sc_out="${sc_out}${sc_one}"$'\n' ;;
             *)
                 sc_broken=1
