@@ -54,7 +54,11 @@
       <div data-cdn-panel="custom">
         <div class="hint">
           <span class="glyph">◈</span>
-          <div><b>Each entry matches exactly one thing, never a combination:</b> <code>steamcontent.com</code> matches only that exact domain. <code>.steamcontent.com</code> (leading dot) matches every subdomain, like <code>cdn.steamcontent.com</code>, but not the bare domain itself. <code>cdn.steamcontent.com</code> written out matches only that one exact subdomain, nothing beneath it. Add each form separately if you need more than one.</div>
+          <div><b>Each entry matches exactly one thing, never a combination:</b><br>
+            <code>steamcontent.com</code> matches only that exact domain.<br>
+            <code>.steamcontent.com</code> (leading dot) matches every subdomain, like <code>cdn.steamcontent.com</code>, but not the bare domain itself.<br>
+            <code>cdn.steamcontent.com</code> written out matches only that one exact subdomain, nothing beneath it.<br>
+            Add each form separately if you need more than one.</div>
         </div>
 
         <form action="{{ routes.dns_add | safe }}" method="post" class="field-row">
