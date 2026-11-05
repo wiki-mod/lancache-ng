@@ -710,7 +710,8 @@ async fn rollback(s: &Settings, zone: &str, id: &str) -> Result<(), String> {
     let rows: Vec<Value> = serde_json::from_slice(&body).map_err(|e| e.to_string())?;
     let api = pdns_api(s)?;
     api.restore(zone, &rows).await?;
-    snapshot(s, &api, zone).await
+    snapshot(s, &api, zone).await?;
+    flush_zone(s, zone).await
 }
 
 // What: PTR rows of all private reverse zones.
@@ -892,7 +893,8 @@ async fn record(
     }
     let api = pdns_api(s)?;
     api.set_rrset(&zone, &name, &kind, ttl, &contents).await?;
-    snapshot(s, &api, &zone).await
+    snapshot(s, &api, &zone).await?;
+    flush_zone(s, &zone).await
 }
 
 // What: add or remove one PTR record.
@@ -920,7 +922,8 @@ async fn ptr(s: &Settings, add: bool, get: &(dyn Fn(&str) -> String + Sync)) -> 
     }
     let api = pdns_api(s)?;
     api.set_rrset(&zone, &name, "PTR", ttl, &contents).await?;
-    snapshot(s, &api, &zone).await
+    snapshot(s, &api, &zone).await?;
+    flush_zone(s, &zone).await
 }
 
 // What: owner that leaves uid and gid unchanged.
@@ -1151,20 +1154,31 @@ async fn flush_on_transfer(app: Arc<App>) {
     }
 }
 
+// What: clears one zone in every recursor cache.
+// Why: an edit shows at once, not after the poll.
+// From: Issue #1683 | PR #1980
+async fn flush_zone(s: &Settings, zone: &str) -> Result<(), String> {
+    let key = secrets(s)?.recursor_api_key;
+    let client = http::client(s)?;
+    for url in s.list("RECURSOR_API_URLS") {
+        let r = lancache_ng::pdns::Api::new(client.clone(), &url, &key);
+        r.flush(zone, true).await?;
+    }
+    Ok(())
+}
+
 // What: clears recursor cache for changed zones.
 // Why: recursors would serve old answers until TTL.
 async fn flush_round(s: &Settings, seen: &mut BTreeMap<String, u32>) -> Result<(), String> {
-    let key = secrets(s)?.recursor_api_key;
-    let client = http::client(s)?;
     for zone in pdns_api(s)?.zones().await? {
-        let before = seen.insert(zone.name.clone(), zone.serial);
-        if before.is_none_or(|b| b == zone.serial) {
-            continue;
+        // What: note a serial only after its flush worked.
+        // Why: a flush during a dns restart must retry.
+        // From: Issue #1683 | PR #1980
+        let before = seen.get(&zone.name).copied();
+        if before.is_some_and(|b| b != zone.serial) {
+            flush_zone(s, &zone.name).await?;
         }
-        for url in s.list("RECURSOR_API_URLS") {
-            let r = lancache_ng::pdns::Api::new(client.clone(), &url, &key);
-            r.flush(&zone.name, true).await?;
-        }
+        seen.insert(zone.name.clone(), zone.serial);
     }
     Ok(())
 }

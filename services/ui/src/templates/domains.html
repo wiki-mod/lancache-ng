@@ -442,7 +442,7 @@
         <div class="snapshot-row">
           <div>
             <div>{{ secondary.name }}</div>
-            <div class="s-meta">{% if secondary.address %}{{ secondary.address }}{% else %}no address{% endif %} · registered <time data-epoch="{{ secondary.registered_at }}">{{ secondary.registered_at }}</time>{% if secondary.last_seen %} · last seen <time data-epoch="{{ secondary.last_seen }}">{{ secondary.last_seen }}</time>{% endif %}</div>
+            <div class="s-meta">{% if secondary.address %}{{ secondary.address }}{% else %}no address{% endif %}</div>
           </div>
           <div class="snapshot-actions">
             <span class="tag off" id="health-{{ secondary.name }}">–</span>
