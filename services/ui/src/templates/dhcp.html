@@ -25,7 +25,7 @@
 {# What: the nine fields of one Kea subnet #}
 {# Why: add and edit forms differ only in values and tone #}
 {# From: Issue #1683 | PR #1912 #}
-{% component subnet_fields(tone, ntp_auto, ntp_url, lease_time, subnet="", gateway="", dns_primary="", dns_secondary="", pool_start="", pool_end="", domain="", ntp_servers="") %}<div class="grid grid-cols-2 gap-3">
+{% component subnet_fields(t, tone, ntp_auto, ntp_url, lease_time, subnet="", gateway="", dns_primary="", dns_secondary="", pool_start="", pool_end="", domain="", ntp_servers="") %}<div class="grid grid-cols-2 gap-3">
             {{ <text_field label={t.subnet_cidr} name="subnet" tone={tone} value={subnet} placeholder="192.168.2.0/24" required={true}/> }}
             {{ <text_field label="Gateway" name="gateway" tone={tone} value={gateway} placeholder="192.168.2.1" required={true}/> }}
             {{ <text_field label={t.dns_server_1} name="dns_primary" tone={tone} value={dns_primary} placeholder="192.168.2.10" required={true}/> }}
@@ -298,7 +298,7 @@
       <h3 class="text-sm font-medium text-white mb-3">{{ t.new_subnet }}</h3>
       <form method="POST" action="{{ routes.subnet_add | safe }}" class="space-y-3">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        {{ <subnet_fields tone={raised_tone} ntp_auto={ntp_auto_dhcp_active} ntp_url={pages.setup} dns_primary={dhcp_dns_primary} dns_secondary={dhcp_dns_secondary} lease_time={default_lease_time} domain={dhcp_domain} ntp_servers={dhcp_ntp_servers}/> }}
+        {{ <subnet_fields t={t} tone={raised_tone} ntp_auto={ntp_auto_dhcp_active} ntp_url={pages.setup} dns_primary={dhcp_dns_primary} dns_secondary={dhcp_dns_secondary} lease_time={default_lease_time} domain={dhcp_domain} ntp_servers={dhcp_ntp_servers}/> }}
         <div class="flex gap-2">
           <button type="submit" class="btn btn-blue">
             {{ t.add_2 }}
@@ -343,7 +343,7 @@
         <form method="POST" action="{{ routes.subnet_update | safe }}" class="space-y-3">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <input type="hidden" name="id" value="{{ subnet.id }}">
-          {{ <subnet_fields tone="bg-slate-700 border-slate-600" ntp_auto={ntp_auto_dhcp_active} ntp_url={pages.setup} subnet={subnet.subnet} gateway={subnet.gateway} dns_primary={subnet.dns_primary} dns_secondary={subnet.dns_secondary} pool_start={subnet.pool_start} pool_end={subnet.pool_end} lease_time={subnet.lease_time} domain={subnet.domain} ntp_servers={subnet.ntp_servers}/> }}
+          {{ <subnet_fields t={t} tone="bg-slate-700 border-slate-600" ntp_auto={ntp_auto_dhcp_active} ntp_url={pages.setup} subnet={subnet.subnet} gateway={subnet.gateway} dns_primary={subnet.dns_primary} dns_secondary={subnet.dns_secondary} pool_start={subnet.pool_start} pool_end={subnet.pool_end} lease_time={subnet.lease_time} domain={subnet.domain} ntp_servers={subnet.ntp_servers}/> }}
           <div class="flex gap-2">
             <button type="submit" class="btn btn-blue">
               {{ t.save }}
@@ -621,6 +621,9 @@ function toggleEditSubnet(id) {
   el.classList.toggle('hidden');
 }
 
+</script>
+{% endif %}
+<script>
 // What: empties and hides one detail list of the DHCP check
 // Why: one owner for both lists; no stale field remains
 // From: Issue #1683 | PR #1912
@@ -682,6 +685,17 @@ async function checkDhcpConflict() {
   clientEl.textContent = (data.lease_ok ? LC_T.test_lease_received : LC_T.no_test_lease) + (data.lease_text || '');
 }
 
+// What: run the check when the Precheck tab opens.
+// Why: DoMe 05.11.: the card said checking, nothing ran.
+// From: Issue #1683 | PR #1980
+let checked = false;
+function checkOnce() {
+  if (checked) { return; }
+  checked = true;
+  checkDhcpConflict();
+}
+const preTab = document.querySelector('[data-dhcp-tab="precheck"]');
+if (preTab) { preTab.addEventListener('click', checkOnce); }
+if (first === 'precheck') { checkOnce(); }
 </script>
-{% endif %}
 {% endblock %}
