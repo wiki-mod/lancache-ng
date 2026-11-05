@@ -507,6 +507,19 @@ _ci_ws_fold() {
     printf -v "$1" '%s' "${ws_out}${ws_in}"
 }
 
+# What: $2 without its '...' pairs, left to right, into $1.
+# Why: one single-quote cut owner; no awk gsub (Fund 136).
+# From: Issue #1683 | PR #1858
+_ci_strip_squoted() {
+    local sq_in="$2" sq_out=""
+    while [[ "${sq_in}" == *"'"*"'"* ]]; do
+        sq_out+="${sq_in%%"'"*}"
+        sq_in="${sq_in#*"'"}"
+        sq_in="${sq_in#*"'"}"
+    done
+    printf -v "$1" '%s' "${sq_out}${sq_in}"
+}
+
 # What: line 2 of the text; nothing when it has one line.
 # Why: one second-line owner; no external line cutter.
 # From: Issue #1683 | PR #1912
@@ -17004,37 +17017,61 @@ _ci_check_ci_bats() {
 _ci_check_exit_evidence() {
     local -a _ci_override=("$@") files=()
     _ci_scan_files files _ci_override '.github/scripts/ci.sh' || return 2
-    local path out
-    local -a viol=()
+    local path out xv_line xv_s xv_fn xv_nr xv_m xv_code xv_out
+    local -a viol=() xv_lines=() xv_re=()
+    local -A xv_site=()
+    # What: rules 0 1 3 4, 5 code, 6 fn head, 7 comment.
+    # Why: rule 2 (< <() is a plain glob, no regex needed.
+    xv_re[0]='(^|[^_a-z])mktemp([[:space:]]|$)'
+    xv_re[1]='for [A-Za-z_][A-Za-z0-9_]* in [^;]*\$\('
+    xv_re[3]='\[\[? +"\$\((_ci_block_entry_field|_ci_block_entry_list|_ci_block_keys|_ci_channel_field|ci_service_field|ci_services|ci_build_targets|ci_service_context_paths)[ )]'
+    xv_re[4]='^[[:space:]]*(local +)?[A-Za-z_][A-Za-z0-9_]*="\$\((git|docker|jq|curl|gh|awk|sed|tar|cat|date|base64|sha256sum|openssl|dig|find|ls|wc|tr|cut|sort) [^)]*\)" *\|\| *return'
+    xv_re[5]='\[CI-[A-Z]+-[A-Z0-9]+-[0-9][0-9][0-9][0-9]\]'
+    xv_re[6]='^[a-z_][a-z0-9_]*\(\) [({]'
+    xv_re[7]='^[[:space:]]*#'
     for path in "${files[@]}"; do
-        if ! out="$(awk '
-            function strip(s) { gsub(/\047[^\047]*\047/, "", s); return s }
-            /^[a-z_][a-z0-9_]*\(\) [({]/ { fn = $1; sub(/\(\).*/, "", fn) }
-            /^[[:space:]]*#/ { next }
-            {
-                s = strip($0)
-                if (fn != "_ci_mktemp" && s ~ /(^|[^_a-z])mktemp([[:space:]]|$)/)
-                    print FILENAME ":" NR ": raw-mktemp: " $0
-                if (s ~ /for [A-Za-z_][A-Za-z0-9_]* in [^;]*\$\(/)
-                    print FILENAME ":" NR ": for-in-substitution: " $0
-                if (s ~ /< <\(/)
-                    print FILENAME ":" NR ": process-substitution-loop: " $0
-                if (s ~ /\[\[? +"\$\((_ci_block_entry_field|_ci_block_entry_list|_ci_block_keys|_ci_channel_field|ci_service_field|ci_services|ci_build_targets|ci_service_context_paths)[ )]/)
-                    print FILENAME ":" NR ": reader-in-test: " $0
-                if (s ~ /^[[:space:]]*(local +)?[A-Za-z_][A-Za-z0-9_]*="\$\((git|docker|jq|curl|gh|awk|sed|tar|cat|date|base64|sha256sum|openssl|dig|find|ls|wc|tr|cut|sort) [^)]*\)" *\|\| *return/)
-                    print FILENAME ":" NR ": uncoded-external-return: " $0
-                line = $0
-                while (match(line, /\[CI-[A-Z]+-[A-Z0-9]+-[0-9][0-9][0-9][0-9]\]/)) {
-                    code = substr(line, RSTART, RLENGTH); sub(/^\[CI-[A-Z]+-/, "", code); sub(/\]$/, "", code)
-                    if (code in site) print FILENAME ":" NR ": duplicate-code " code " (first at line " site[code] "): " $0
-                    else site[code] = NR
-                    line = substr(line, RSTART + RLENGTH)
-                }
-            }' "${path}" 2>&1)"; then
+        # What: a subshell try keeps the raw open error.
+        # Why: AG-INT-002: a failed read keeps its raw.
+        if ! out="$(mapfile -t xv_lines < "${path}" 2>&1)"; then
             ci_error "[CI-ERROR-CHECK-0123]" "file=\"${path}\" reason=\"exit-evidence scan failed\"" "${out}"
             return 2
         fi
-        [ -z "${out}" ] || viol+=("${out}")
+        mapfile -t xv_lines < "${path}"
+        xv_fn="" xv_nr=0 xv_out=""
+        xv_site=()
+        for xv_line in "${xv_lines[@]}"; do
+            xv_nr=$((xv_nr + 1))
+            [[ ! "${xv_line}" =~ ${xv_re[6]} ]] || xv_fn="${xv_line%%"()"*}"
+            [[ ! "${xv_line}" =~ ${xv_re[7]} ]] || continue
+            # What: a glob runs before each regex.
+            # Why: same hits; 20k lines stay fast.
+            xv_s="${xv_line}"
+            [[ "${xv_s}" != *"'"* ]] || _ci_strip_squoted xv_s "${xv_line}"
+            if [[ "${xv_s}" == *mktemp* ]] && [ "${xv_fn}" != "_ci_mktemp" ] && [[ "${xv_s}" =~ ${xv_re[0]} ]]; then
+                xv_out+="${path}:${xv_nr}: raw-mktemp: ${xv_line}"$'\n'
+            fi
+            if [[ "${xv_s}" == *"for "*"\$("* ]] && [[ "${xv_s}" =~ ${xv_re[1]} ]]; then
+                xv_out+="${path}:${xv_nr}: for-in-substitution: ${xv_line}"$'\n'
+            fi
+            [[ "${xv_s}" != *"< <"\(* ]] || xv_out+="${path}:${xv_nr}: process-substitution-loop: ${xv_line}"$'\n'
+            if [[ "${xv_s}" == *"\"\$("* ]]; then
+                [[ ! "${xv_s}" =~ ${xv_re[3]} ]] || xv_out+="${path}:${xv_nr}: reader-in-test: ${xv_line}"$'\n'
+                [[ ! "${xv_s}" =~ ${xv_re[4]} ]] || xv_out+="${path}:${xv_nr}: uncoded-external-return: ${xv_line}"$'\n'
+            fi
+            xv_s="${xv_line}"
+            while [[ "${xv_s}" == *"[CI-"* ]] && [[ "${xv_s}" =~ ${xv_re[5]} ]]; do
+                xv_m="${BASH_REMATCH[0]}"
+                xv_code="${xv_m#\[CI-*-}"
+                xv_code="${xv_code%]}"
+                if [ -n "${xv_site[k${xv_code}]:-}" ]; then
+                    xv_out+="${path}:${xv_nr}: duplicate-code ${xv_code} (first at line ${xv_site[k${xv_code}]}): ${xv_line}"$'\n'
+                else
+                    xv_site[k${xv_code}]="${xv_nr}"
+                fi
+                xv_s="${xv_s#*"${xv_m}"}"
+            done
+        done
+        [ -z "${xv_out}" ] || viol+=("${xv_out%$'\n'}")
     done
     if [ "${#viol[@]}" -gt 0 ]; then
         ci_error "[CI-ERROR-CHECK-0124]" "files=${#files[@]} reason=\"exit path loses code, context or raw (AG-INT-002)\"" "$(printf '%s\n' "${viol[@]}")"
