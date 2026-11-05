@@ -62,6 +62,12 @@ x-environment:
     DNS_LOCAL_REVERSE_ZONES: ${DNS_LOCAL_REVERSE_ZONES:-}
   dns-ui: &env-dns-ui
     PDNS_API_KEY: ${PDNS_API_KEY}
+    # What: optional upstream resolver; empty = SOT.
+    # Why: the ui renders recursor.yml from these.
+    # From: Issue #1918 | PR #1980
+    DNS_UPSTREAM_SERVERS: ${DNS_UPSTREAM_SERVERS:-}
+    DNS_UPSTREAM_ZONES: ${DNS_UPSTREAM_ZONES:-}
+    DNS_UPSTREAM_UNSIGNED_ZONES: ${DNS_UPSTREAM_UNSIGNED_ZONES:-}
   dhcp-ui: &env-dhcp-ui
     DHCP_MODE: ${DHCP_MODE:-}
     DHCP_NTP_SERVERS: ${DHCP_NTP_SERVERS:-}
@@ -210,12 +216,6 @@ services:
       <<: [*env-stack, *env-dns-dhcp, *env-dns-dhcp-ui, *env-dns-ui]
       LOG_QUERIES: ${LOG_QUERIES:-}
       ROOT_ZONE_MIRROR: ${ROOT_ZONE_MIRROR:-}
-      # What: optional upstream resolver; empty = SOT.
-      # Why: a router may know names LanCache does not.
-      # From: Issue #1918 | PR #1858
-      DNS_UPSTREAM_SERVERS: ${DNS_UPSTREAM_SERVERS:-}
-      DNS_UPSTREAM_ZONES: ${DNS_UPSTREAM_ZONES:-}
-      DNS_UPSTREAM_UNSIGNED_ZONES: ${DNS_UPSTREAM_UNSIGNED_ZONES:-}
     volumes:
       # What: rendered configs; the ui writes, owners read.
       # Why: one owner per file; programs read SOT paths.
@@ -299,8 +299,6 @@ services:
     image: ${LANCACHE_IMAGE_REF_UI:?LANCACHE_IMAGE_REF_UI is required}
     environment:
       <<: [*env-stack, *env-services-ui, *env-proxy-ui, *env-dns-dhcp-ui, *env-dns-ui, *env-dhcp-ui]
-      # What: image identity, login and Kea values.
-      # Why: only the Admin UI reads these keys.
       # What: start values the UI shows from the install.
       # Why: else the UI shows the SOT default instead.
       # From: Issue #1683 | PR #1858
