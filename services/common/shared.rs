@@ -2439,7 +2439,15 @@ pub mod recursor_conf {
         y += &format!("  port: {}\n  allow_from:\n", u(&which.key("API_PORT"))?);
         y += &yaml_list(&s.list("PDNS_API_ALLOW_FROM"), "    ")?;
         y += &format!("  api_key: \"{api_key}\"\n");
-        y += &format!("logging:\n  loglevel: {}\n{snmp}", u("RECURSOR_LOGLEVEL")?);
+        // What: query log raises the level and drops quiet.
+        // Why: DoMe 31.10.: see DNS queries live.
+        // From: Issue #1683 | PR #1980
+        let (level, quiet) = if s.flag("DNS_QUERY_LOG")? {
+            (u("RECURSOR_LOGLEVEL_QUERIES")?, "  quiet: false\n")
+        } else {
+            (u("RECURSOR_LOGLEVEL")?, "")
+        };
+        y += &format!("logging:\n  loglevel: {level}\n{quiet}{snmp}");
         Ok(y)
     }
 }

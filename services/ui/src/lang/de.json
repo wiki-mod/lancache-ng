@@ -90,6 +90,8 @@
   "dns_gateway_ntp_domain_options": "DNS-, Gateway-, NTP- und Domain-Optionen",
   "dns_server_1": "DNS-Server 1",
   "dns_server_2": "DNS-Server 2",
+  "dns_query_log": "DNS-Anfragen protokollieren",
+  "dns_query_log_desc": "Schreibt jede DNS-Anfrage ins Log des dns-Containers (Seite Logs). Erzeugt viele Zeilen, darum nur zur Fehlersuche einschalten.",
   "dns_updates_tsig": "DNS-Updates (TSIG)",
   "dnsmasq_proxy_mode_is_active_this": "Der dnsmasq-Proxymodus ist aktiv. Diese Seite zeigt die aktuellen Proxy-Werte und lässt sie als einfache Felder bearbeiten.",
   "dnsmasq_relay_mode_is_active_dnsmasq": "Der dnsmasq-Relaymodus ist aktiv. dnsmasq leitet jede DHCP-Anfrage an den vorgelagerten DHCP-Server weiter und gibt die Antwort zurück; Lease und alle Optionen gehören diesem Server.",

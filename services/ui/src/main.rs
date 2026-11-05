@@ -968,6 +968,7 @@ async fn domains(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     ctx.insert("record_ttl_default", &s.uint("DNS_RECORD_TTL")?);
     ctx.insert("ttl_max", &s.uint("DNS_RECORD_TTL_MAX")?);
     ctx.insert("aaaa_filter_enabled", &s.flag("DNS_FILTER_AAAA")?);
+    ctx.insert("query_log_enabled", &s.flag("DNS_QUERY_LOG")?);
     ctx.insert(
         "ddns_unsigned_updates_allowed",
         &s.flag("DDNS_ALLOW_UNSIGNED")?,
@@ -1021,6 +1022,7 @@ async fn dns_action(
             commit(&app, list_change(&s, "CDN_DISABLED_DOMAINS", &domain, !on)).await
         }
         "aaaa-filter" => commit(&app, single_field("DNS_FILTER_AAAA", on)).await,
+        "query-log" => commit(&app, single_field("DNS_QUERY_LOG", on)).await,
         "ddns-unsigned" => commit(&app, single_field("DDNS_ALLOW_UNSIGNED", on)).await,
         "record-add" | "record-remove" => record(&s, op == "record-add", &get).await,
         "ptr-add" | "ptr-remove" => ptr(&s, op == "ptr-add", &get).await,
@@ -3001,7 +3003,7 @@ const PAGES: [(&str, &str); 7] = [
     ("setup", "/setup"),
 ];
 
-const ROUTES: [(&str, &str); 45] = [
+const ROUTES: [(&str, &str); 46] = [
     ("hamster_add", "/cachehamster/add"),
     ("hamster_start", "/cachehamster/start"),
     ("hamster_cancel", "/cachehamster/cancel"),
@@ -3025,6 +3027,7 @@ const ROUTES: [(&str, &str); 45] = [
     ("ptr_add", "/domains/ptr-add"),
     ("ptr_remove", "/domains/ptr-remove"),
     ("aaaa_filter", "/domains/aaaa-filter"),
+    ("query_log", "/domains/query-log"),
     ("ddns_unsigned", "/domains/ddns-unsigned"),
     ("zone_rollback", "/domains/zone-rollback"),
     ("tsig_rotate", "/domains/tsig-rotate"),

@@ -648,6 +648,10 @@ runtime:
     # Why: private PTR answers are opt-in.
     # From: Issue #1918 | PR #1858
     - DNS_LOCAL_REVERSE_ZONES=1
+    # What: 1 = recursor logs every DNS query.
+    # Why: DoMe 31.10.: see DNS queries live.
+    # From: Issue #1683 | PR #1980
+    - DNS_QUERY_LOG=0
     # What: private reverse zones the stack serves.
     # Why: RFC 1918 and ULA ranges; no list in code.
     # From: Issue #1683 | PR #1858
@@ -1078,6 +1082,7 @@ runtime:
     - DNS_FILTER_AAAA=bool;;;reload;dns
     - DNS_LAN_RECORD_TYPES=list;;;live;ui
     - DNS_LOCAL_REVERSE_ZONES=bool;;;reload;dns
+    - DNS_QUERY_LOG=bool;;;reload;dns
     - DNS_PRIVATE_REVERSE_ZONES=list;;;reload;dns
     - DNS_QUERY_ALLOW_FROM=list;;;reload;dns
     - DNS_RECORD_TTL=uint;1;86400;live;ui

@@ -306,6 +306,22 @@
           </label>
         </div>
       </form>
+      {# What: switch for the DNS query log
+         Why: DoMe 31.10.: see DNS queries live
+         From: Issue #1683 | PR #1980 #}
+      <form action="{{ routes.query_log | safe }}" method="post">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <div class="toggle-row">
+          <div>
+            <div class="t-label">{{ t.dns_query_log }}</div>
+            <div class="t-desc">{{ t.dns_query_log_desc }}</div>
+          </div>
+          <label class="toggle">
+            <input type="checkbox" name="enabled" value="1" {% if query_log_enabled %}checked{% endif %} onchange="this.form.requestSubmit()">
+            <span class="track"></span><span class="knob"></span>
+          </label>
+        </div>
+      </form>
     </section>
 
     {# What: toggle that allows DNS updates without TSIG.

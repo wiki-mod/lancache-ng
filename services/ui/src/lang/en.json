@@ -90,6 +90,8 @@
   "dns_gateway_ntp_domain_options": "DNS, gateway, NTP, domain options",
   "dns_server_1": "DNS server 1",
   "dns_server_2": "DNS server 2",
+  "dns_query_log": "Log DNS queries",
+  "dns_query_log_desc": "Writes every DNS query to the log of the dns container (Logs page). Produces many lines, so turn it on only for troubleshooting.",
   "dns_updates_tsig": "DNS updates (TSIG)",
   "dnsmasq_proxy_mode_is_active_this": "dnsmasq proxy mode is active. This page shows the live proxy values and lets you edit them directly as simple fields.",
   "dnsmasq_relay_mode_is_active_dnsmasq": "dnsmasq relay mode is active. dnsmasq forwards every client's DHCP request to the upstream DHCP server and relays the reply back, so the upstream server owns the whole lease and all options.",
