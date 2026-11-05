@@ -2478,36 +2478,116 @@ PROG
 )"
 readonly _CI_AWK_RUST_CLOSURE
 
+# What: one Cargo.lock value without 'key = "' and '"'.
+# Why: one cut for name, version, source and checksum.
+# From: Issue #1683 | PR #1912
+_ci_lock_val() {
+    local lv_s="$2"
+    if [[ "${lv_s}" =~ ^[^=]*=\ *\" ]]; then
+        lv_s="${lv_s:${#BASH_REMATCH[0]}}"
+    fi
+    if [[ "${lv_s}" =~ \"\ *$ ]]; then
+        lv_s="${lv_s:0:${#lv_s}-${#BASH_REMATCH[0]}}"
+    fi
+    printf -v "$1" '%s' "${lv_s}"
+}
+
 # What: Cargo.lock packages reached from root crates.
 # Why: a lock entry outside the closure is not built.
 # From: Issue #1683 | PR #1912
-_CI_AWK_LOCK_CLOSURE="$(cat <<'PROG'
-function val(l) { sub(/^[^=]*= *"/, "", l); sub(/" *$/, "", l); return l }
-/^\[\[package\]\]/ { p++; indeps = 0; next }
-indeps { if ($0 ~ /^\]/) { indeps = 0; next } d = $0; gsub(/[ ",]/, "", d); sub(/\(.*$/, "", d); deps[p] = deps[p] " " d; next }
-/^name = / { nm[p] = val($0); next }
-/^version = / { vr[p] = val($0); next }
-/^source = / { sr[p] = val($0); next }
-/^checksum = / { ck[p] = val($0); next }
-/^dependencies = \[/ { indeps = 1; next }
-END {
-    for (i = 1; i <= p; i++) { byname[nm[i]] = byname[nm[i]] " " i; key[nm[i] vr[i]] = i }
-    m = split(roots, r, " ")
-    for (i = 1; i <= m; i++) { k = split(byname[r[i]], a, " "); for (j = 1; j <= k; j++) q[++qn] = a[j] }
-    for (h = 1; h <= qn; h++) {
-        i = q[h]; if (i in sel) continue; sel[i] = 1
-        k = split(deps[i], a, " ")
-        for (j = 1; j <= k; j++) {
-            d = a[j]
-            if (d in byname && split(byname[d], b, " ") == 1) { q[++qn] = b[1]; continue }
-            for (x = 1; x <= p; x++) if (nm[x] vr[x] == d || nm[x] == d) q[++qn] = x
-        }
-    }
-    for (i = 1; i <= p; i++) if (i in sel) printf "%s %s %s %s\n", nm[i], vr[i], sr[i], ck[i]
+_ci_lock_closure() {
+    local lk_line lk_d lk_e lk_i lk_j lk_k lk_h lk_p=0 lk_in=0
+    local lk_n=0 lk_m=0
+    local -a lk_lines lk_nm=() lk_vr=() lk_sr=() lk_ck=()
+    local -a lk_dl=() lk_ds=() lk_de=() lk_q=() lk_sel=() lk_a
+    local -A lk_by=() lk_b1=() lk_b2=() lk_c=()
+    mapfile -t lk_lines < "$2" || return 1
+    for lk_line in "${lk_lines[@]}"; do
+        if [[ "${lk_line}" == "[[package]]"* ]]; then
+            lk_p=$((lk_p + 1))
+            lk_in=0
+        elif [ "${lk_in}" = 1 ]; then
+            if [[ "${lk_line}" == "]"* ]]; then
+                lk_in=0
+                continue
+            fi
+            lk_d="${lk_line//[ \",]/}"
+            lk_d="${lk_d%%[(]*}"
+            # What: a package's deps sit in a row of lk_dl.
+            # Why: a tab splits a dep, as awk split did.
+            [ -n "${lk_ds[lk_p]-}" ] || lk_ds[lk_p]="${lk_m}"
+            if [[ "${lk_d}" == *$'\t'* ]]; then
+                read -r -a lk_a <<< "${lk_d}"
+                for lk_e in "${lk_a[@]}"; do
+                    lk_dl[lk_m]="${lk_e}"
+                    lk_m=$((lk_m + 1))
+                done
+            elif [ -n "${lk_d}" ]; then
+                lk_dl[lk_m]="${lk_d}"
+                lk_m=$((lk_m + 1))
+            fi
+            lk_de[lk_p]="${lk_m}"
+        elif [[ "${lk_line}" == "name = "* ]]; then
+            _ci_lock_val "lk_nm[${lk_p}]" "${lk_line}"
+        elif [[ "${lk_line}" == "version = "* ]]; then
+            _ci_lock_val "lk_vr[${lk_p}]" "${lk_line}"
+        elif [[ "${lk_line}" == "source = "* ]]; then
+            _ci_lock_val "lk_sr[${lk_p}]" "${lk_line}"
+        elif [[ "${lk_line}" == "checksum = "* ]]; then
+            _ci_lock_val "lk_ck[${lk_p}]" "${lk_line}"
+        elif [[ "${lk_line}" == "dependencies = ["* ]]; then
+            lk_in=1
+        fi
+    done
+    # What: by: name to numbers; b1/b2: one or more; c: a
+    # dep text to the numbers whose name+version or name it is.
+    # Why: a dep names one package or name+version of many.
+    for ((lk_i = 1; lk_i <= lk_p; lk_i++)); do
+        lk_k="k${lk_nm[lk_i]-}"
+        lk_by["${lk_k}"]+=" ${lk_i}"
+        if [ -n "${lk_b1["${lk_k}"]-}" ]; then
+            lk_b2["${lk_k}"]=1
+        else
+            lk_b1["${lk_k}"]="${lk_i}"
+        fi
+        lk_c["c${lk_nm[lk_i]-}${lk_vr[lk_i]-}"]+=" ${lk_i}"
+        if [ -n "${lk_vr[lk_i]-}" ]; then
+            lk_c["c${lk_nm[lk_i]-}"]+=" ${lk_i}"
+        fi
+    done
+    read -r -a lk_a <<< "$1"
+    for lk_d in "${lk_a[@]}"; do
+        read -r -a lk_a <<< "${lk_by["k${lk_d}"]-}"
+        for lk_e in "${lk_a[@]}"; do
+            lk_q[lk_n]="${lk_e}"
+            lk_n=$((lk_n + 1))
+        done
+    done
+    for ((lk_h = 0; lk_h < lk_n; lk_h++)); do
+        lk_i="${lk_q[lk_h]}"
+        [ -z "${lk_sel[lk_i]-}" ] || continue
+        lk_sel[lk_i]=1
+        for ((lk_j = ${lk_ds[lk_i]-0}; lk_j < ${lk_de[lk_i]-0}; lk_j++)); do
+            lk_k="${lk_dl[lk_j]}"
+            if [ -n "${lk_b1["k${lk_k}"]-}" ] &&
+                [ -z "${lk_b2["k${lk_k}"]-}" ]; then
+                lk_q[lk_n]="${lk_b1["k${lk_k}"]}"
+                lk_n=$((lk_n + 1))
+                continue
+            fi
+            read -r -a lk_a <<< "${lk_c["c${lk_k}"]-}"
+            for lk_e in "${lk_a[@]}"; do
+                lk_q[lk_n]="${lk_e}"
+                lk_n=$((lk_n + 1))
+            done
+        done
+    done
+    for ((lk_i = 1; lk_i <= lk_p; lk_i++)); do
+        [ -n "${lk_sel[lk_i]-}" ] || continue
+        printf '%s %s %s %s\n' "${lk_nm[lk_i]-}" "${lk_vr[lk_i]-}" \
+            "${lk_sr[lk_i]-}" "${lk_ck[lk_i]-}"
+    done
 }
-PROG
-)"
-readonly _CI_AWK_LOCK_CLOSURE
 
 # What: awk verdict: rc 0 print, rc 1 raw, else coded stop.
 # Why: one owner for the reader and the normalizer verdict.
@@ -3180,7 +3260,7 @@ _ci_rust_content() {
     # From: Issue #1683 | PR #1858
     _ci_cargo_lock record || return 2
     lockf="$(_ci_repo_path CI_CARGO_LOCK)" || return 2
-    pkgs="$(_ci_run "[CI-ERROR-IDENTITY-0011]" "path=\"${lock}\" reason=\"lock closure not read\"" awk -v roots="${crates}" "${_CI_AWK_LOCK_CLOSURE}" "${lockf}")" || return 2
+    pkgs="$(_ci_run "[CI-ERROR-IDENTITY-0011]" "path=\"${lock}\" reason=\"lock closure not read\"" _ci_lock_closure "${crates}" "${lockf}")" || return 2
     if [ "${mode}" != text ]; then
         h="$(_ci_sha256_hex <<< "${pkgs}")" || return 2
         printf '%s\t%s\n' "${lock}" "${h}"
