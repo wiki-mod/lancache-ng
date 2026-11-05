@@ -1376,9 +1376,7 @@ ensure_stack_requirements_installed() {
     # What: jq reads every JSON answer this script gets
     # Why: primary, Kea and DNS replies need a real parser
     # From: Issue #1683 | PR #1858
-    if ! command_available jq; then
-        install_required_command jq "jq is missing." jq
-    fi
+    install_missing_tools jq
 
     if ! command_available docker; then
         install_docker
