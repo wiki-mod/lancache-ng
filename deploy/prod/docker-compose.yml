@@ -128,6 +128,10 @@ services:
       # Why: no socket proxy; the supervisor drops the rest.
       # From: Issue #1683
       - ${SOT_DOCKER_SOCKET}:${SOT_DOCKER_SOCKET}
+      # What: host time zone, read only.
+      # Why: CACHEHAMSTER_WINDOW is local time, not UTC.
+      # From: Issue #871 | PR #1980
+      - ${SOT_LOCALTIME_FILE}:${SOT_LOCALTIME_FILE}:ro
       # What: mounts several services share, one text each.
       # Why: a changed path or mode has one line to change.
       # From: Issue #1683 | PR #1912
