@@ -1349,23 +1349,29 @@ async fn secondary_health(s: &Settings, address: &str) -> Value {
 // From: Issue #1683 | PR #1980
 async fn flush_on_transfer(app: Arc<App>) {
     let mut seen: BTreeMap<String, u32> = BTreeMap::new();
-    // What: log only when the flush state changes.
-    // Why: a dns restart fails a few rounds; one line.
+    // What: an error only after the grace time.
+    // Why: DoMe 05.11.: a planned dns restart logged one.
     // From: Issue #1683 | PR #1980
-    let mut failing = false;
+    let mut down: Option<std::time::Instant> = None;
+    let mut logged = false;
     loop {
         let s = app.settings();
         let wait = s.uint("UI_FLUSH_CHECK_SECONDS").unwrap_or(1).max(1);
+        let grace = s.uint("UI_FLUSH_GRACE_SECONDS").unwrap_or(0);
         match flush_round(&s, &mut seen).await {
-            Err(e) if !failing => {
-                eprintln!("ui: cache flush waits for dns: {e}");
-                failing = true;
+            Err(e) => {
+                let since = *down.get_or_insert_with(std::time::Instant::now);
+                if !logged && since.elapsed().as_secs() >= grace {
+                    eprintln!("ui: cache flush fails for {grace} s: {e}");
+                    logged = true;
+                }
             }
-            Ok(()) if failing => {
-                eprintln!("ui: cache flush works again");
-                failing = false;
+            Ok(()) => {
+                if logged {
+                    eprintln!("ui: cache flush works again");
+                }
+                (down, logged) = (None, false);
             }
-            _ => {}
         }
         tokio::time::sleep(Duration::from_secs(wait)).await;
     }

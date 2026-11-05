@@ -1029,6 +1029,7 @@ runtime:
     - APPLY_HEALTH_POLL_SECONDS=1
     - UI_SERVICE=ui
     - UI_FLUSH_CHECK_SECONDS=5
+    - UI_FLUSH_GRACE_SECONDS=60
     - DNS_SECONDARY_NAME_MAX=32
   # What: key=kind;min;max;effect;owner; ? = optional.
   # Why: config.rs checks every value against it.
@@ -1302,6 +1303,7 @@ runtime:
     - APPLY_HEALTH_POLL_SECONDS=uint;1;60;live;ui
     - UI_SERVICE=text;;;live;ui
     - UI_FLUSH_CHECK_SECONDS=uint;1;3600;live;ui
+    - UI_FLUSH_GRACE_SECONDS=uint;0;3600;live;ui
     - DNS_SECONDARY_NAME_MAX=uint;1;63;live;ui
     # What: keys the Rust code reads that had no row.
     # Why: config.rs drops a default without a row.
