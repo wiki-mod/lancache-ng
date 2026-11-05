@@ -1902,7 +1902,7 @@ async fn service_values(app: &App, s: &Settings, want: &[String]) -> BTreeMap<St
     }
 
     // What: host network bytes from the host's net/dev.
-    // Why: live test 05.11.: via dhcp it was empty when off.
+    // Why: live test 05.11.: empty via dhcp in mode off.
     // From: Issue #1683 | PR #1980
     if has("host")
         && let Ok(file) = s.text("HOST_NET_DEV_FILE")
