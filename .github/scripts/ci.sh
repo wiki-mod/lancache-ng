@@ -10061,7 +10061,7 @@ _ci_release_sbom_get() {
 # Why: one owner removes the work dir, not this body.
 # From: Issue #1683 | PR #1858
 _ci_release_sbom_in() {
-    local service="$1" tag="$2" digest="$3" dir="$4" out prev rc=0
+    local service="$1" tag="$2" digest="$3" dir="$4" out prev named rc=0
     out="${dir}/${service}.cdx.json"
     # What: an attached SBOM for this digest is reused
     # Why: architecture §57: one SBOM per digest, no rescan
@@ -10074,7 +10074,9 @@ _ci_release_sbom_in() {
             ;;
         1) ;;
         3)
-            ci_error "[CI-ERROR-RELEASE-0046]" "service=\"${service}\" tag=\"${tag}\" digest=\"${digest}\" reason=\"attached SBOM is not bound to this digest\"" "digests the attached SBOM names: $(grep -o -E "${CI_DIGEST_RE}" "${out}" 2>&1 | LC_ALL=C sort -u | awk '{ printf "%s ", $0; n++ } END { if (!n) printf "none" }')"
+            named="$(grep -o -E "${CI_DIGEST_RE}" "${out}" 2>&1 | LC_ALL=C sort -u)" || rc=$?
+            if [ -n "${named}" ]; then named="${named//$'\n'/ } "; else named=none; fi
+            ci_error "[CI-ERROR-RELEASE-0046]" "service=\"${service}\" tag=\"${tag}\" digest=\"${digest}\" reason=\"attached SBOM is not bound to this digest\"" "digests the attached SBOM names: ${named}"
             return 2
             ;;
         *) return 2 ;;
