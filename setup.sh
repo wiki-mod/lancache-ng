@@ -4,6 +4,14 @@
 # What: lifecycle CLI; subcommands dispatched at file end
 # Why: one customer file for install and every later change
 # From: Issue #1683 | PR #1858
+
+# What: stop under a non-bash shell with a clear hint
+# Why: sh or dash fails later with cryptic syntax errors
+# From: Issue #1683 | PR #1980
+if [ -z "${BASH_VERSION:-}" ]; then
+    echo "setup.sh needs bash: run it as ./setup.sh or bash setup.sh." >&2
+    exit 1
+fi
 set -euo pipefail
 export LANG=C LC_ALL=C
 
@@ -75,8 +83,8 @@ APK_GNU_PACKAGES=(coreutils grep tar iproute2)
 # Why: logs and pipes must not get escape codes
 # From: Issue #1683 | PR #1858
 if [[ -t 1 ]]; then
-    BOLD="\033[1m"; GREEN="\033[0;32m"; YELLOW="\033[0;33m"
-    RED="\033[0;31m"; CYAN="\033[0;36m"; RESET="\033[0m"
+    BOLD=$'\033[1m'; GREEN=$'\033[0;32m'; YELLOW=$'\033[0;33m'
+    RED=$'\033[0;31m'; CYAN=$'\033[0;36m'; RESET=$'\033[0m'
 else
     BOLD=""; GREEN=""; YELLOW=""; RED=""; CYAN=""; RESET=""
 fi
@@ -450,6 +458,10 @@ prompt_dns_upstream() {
         print_error "Invalid DNS server: $bad"
     done
     DNS_UPSTREAM_SERVERS=$(dns_upstream_join "${entries[@]}")
+    printf "  all: every name LanCache-NG does not answer itself goes to\n"
+    printf "  this server. domains: only the domains you list (for example\n"
+    printf "  fritz.box or firma.local) go there; LanCache-NG looks up all\n"
+    printf "  other names on the internet itself.\n"
     while true; do
         ask "Forward all names, or only some domains? [all/domains]" "$scope"
         [[ "${REPLY,,}" = "all" || "${REPLY,,}" = "domains" ]] && break
@@ -472,6 +484,8 @@ prompt_dns_upstream() {
     fi
     printf "  DNSSEC checks stay on. Private domains of your network have\n"
     printf "  no signature; name them here, or their lookups fail.\n"
+    printf "  Example: fritz.box lan.local. With none, such names stop\n"
+    printf "  resolving. Your own LAN zone (%s) always works.\n" "$lan"
     while true; do
         ask "Private domains without DNSSEC (space or comma, 'none')" "${unsigned:-none}"
         entries=()
@@ -6000,6 +6014,9 @@ install_repo_follow_channel() {
         branches=$(lancache_channel_branches) || exit $?
         if [[ -n "$branch" ]] && ! list_has_line "$branch" "$branches"; then
             print_warn "Checkout $SCRIPT_DIR is on $branch, no channel branch; installing from it."
+            printf "  Compose files and this setup.sh come from that branch.\n"
+            printf "  Updates will not move the checkout; switch it to master\n"
+            printf "  (latest) or current_dev (nightly) to follow a channel.\n"
             return 0
         fi
     fi
@@ -7847,7 +7864,16 @@ cmd_secondary() {
         esac
     done
 
-    die_if_any_empty "Required argument(s) missing" \
+    # What: ask for each missing value in a terminal
+    # Why: secondary without arguments guides like install
+    # From: Issue #1683 | PR #1980
+    if [[ -t 0 ]]; then
+        [[ -n "$primary" ]] || { ask "Primary Admin-UI URL (for example http://192.168.1.100:8080)" ""; primary="$REPLY"; }
+        [[ -n "$token" ]] || { ask "Registration token (Admin-UI: DNS, Secondary DNS)" ""; token="$REPLY"; }
+        [[ -n "$name" ]] || { ask "Name of this secondary (a-z, 0-9, -)" ""; name="$REPLY"; }
+        [[ -n "$ip_http" ]] || { ask "Primary proxy IP (IP_HTTP of the primary)" ""; ip_http="$REPLY"; }
+    fi
+    die_if_any_empty "Required argument(s) missing (see ./setup.sh secondary --help)" \
         "--primary=$primary" "--token=$token" "--name=$name" "--ip-http=$ip_http"
 
     for cmd in curl docker jq; do
@@ -8476,7 +8502,9 @@ INSTALL_DIR="${PROD_COMPOSE%/*}"
 ENV_LOCAL="$INSTALL_DIR/.env.local"
 STATE_ROOT_DEFAULT=$(production_state_root_default "$INSTALL_DIR") \
     || die "Cannot read the default state root from $INSTALL_DIR (exit $?)."
-ask "Data directory (cache, DNS, DHCP, NTP state)" "$STATE_ROOT_DEFAULT"
+printf "  LanCache-NG itself stays in %s.\n" "$INSTALL_DIR"
+printf "  Here you choose where its data goes: cache, DNS, DHCP, NTP.\n"
+ask "Data folder (not the install folder)" "$STATE_ROOT_DEFAULT"
 LANCACHE_STATE_DIR="$(realpath -m "$REPLY")"
 
 if [[ -f "$ENV_LOCAL" ]]; then
@@ -8510,8 +8538,11 @@ while true; do
 done
 
 default_cache_mem_mb=$(prod_env_default CACHE_MEM_MB) || exit $?
+printf "  RAM for the list of cached files (nginx keys_zone). It is no\n"
+printf "  file cache: 1 MB holds about 8000 entries. Linux keeps hot\n"
+printf "  files in free RAM by itself.\n"
 while true; do
-    ask "Cache RAM buffer in MB (keys_zone)" "$default_cache_mem_mb"
+    ask "RAM for the cache index in MB" "$default_cache_mem_mb"
     CACHE_MEM_MB="$REPLY"
     is_positive_integer "$CACHE_MEM_MB" && break
     print_error "Please enter a positive integer (e.g. 512)."
@@ -8786,6 +8817,10 @@ UI_AUTH_USER=""
 UI_AUTH_PASSWORD=""
 UI_AUTH_PASSWORD_HASH=""
 ALLOW_INSECURE_UI=""
+# What: ask again until protection or open access is chosen
+# Why: a "no" to both used to end the whole install
+# From: Issue #1683 | PR #1980
+while true; do
 if confirm "Protect Admin-UI with password? [Y/n]" "Y"; then
     ui_user_default=$(prod_env_default SETUP_UI_USER_DEFAULT) || exit $?
     ask "Username" "$ui_user_default"
@@ -8823,16 +8858,18 @@ if confirm "Protect Admin-UI with password? [Y/n]" "Y"; then
         print_warn "Note the password now; only its hash is stored in $ENV_LOCAL"
         printf "\n"
     fi
+    break
 else
     insecure_yn=$(yn_default ALLOW_INSECURE_UI) || exit $?
     if confirm "Allow Admin-UI without authentication? $(yn_hint "$insecure_yn")" "$insecure_yn"; then
         ALLOW_INSECURE_UI=true
         print_warn "No password protection — Admin-UI will be reachable on $IP_HTTP"
         print_warn "This is explicitly allowed by ALLOW_INSECURE_UI=true"
-    else
-        die "Admin-UI authentication is required. Re-run setup and enable password protection, or explicitly allow insecure access."
+        break
     fi
+    print_warn "The Admin-UI then needs a password; the question comes again."
 fi
+done
 
 # What: step 9: writes .env.local in one atomic step
 # Why: a half-written .env.local must never exist
@@ -9179,6 +9216,33 @@ else
 fi
 print_ok "Stack started"
 
+# What: wait until every container reports healthy
+# Why: "running" must not show while a service is broken
+# From: Issue #1683 | PR #1980
+print_step "Waiting for healthy containers"
+_UPDATE_STACK_DIR="$INSTALL_DIR"
+_UPDATE_ENV_FILE="$ENV_LOCAL"
+install_wait=$(prod_env_default SETUP_HEALTH_WAIT_SERVICES_SECONDS) || exit $?
+install_poll=$(prod_env_default SETUP_HEALTH_POLL_SECONDS) || exit $?
+mapfile -t install_services < <(stack_compose "$INSTALL_DIR" "$ENV_LOCAL" config --services)
+install_waited=0
+install_bad=("${install_services[@]}")
+while (( ${#install_bad[@]} > 0 && install_waited < install_wait )); do
+    sleep "$install_poll"
+    install_waited=$((install_waited + install_poll))
+    install_left=()
+    for svc in "${install_bad[@]}"; do
+        service_container_is_healthy "$svc" 2>/dev/null || install_left+=("$svc")
+    done
+    install_bad=("${install_left[@]}")
+done
+if (( ${#install_bad[@]} > 0 )); then
+    print_warn "Not healthy after ${install_wait} s: ${install_bad[*]}"
+    print_warn "See: $SCRIPT_DIR/setup.sh debug, or docker logs <container>"
+else
+    print_ok "All containers are healthy"
+fi
+
 # What: step 14: Admin UI URL from the ui port mapping
 # Why: compose owns IP and port; a print never aborts setup
 # From: Issue #1683 | PR #1858
@@ -9191,7 +9255,11 @@ if [[ "$ui_url_rc" -ne 0 || -z "$ui_url" ]]; then
 fi
 printf "\n"
 printf '%s%s══════════════════════════════════════════════════%s\n' "${BOLD}" "${GREEN}" "${RESET}"
-printf '%s%s  LanCache-NG is running!%s\n' "${BOLD}" "${GREEN}" "${RESET}"
+if (( ${#install_bad[@]} > 0 )); then
+    printf '%s%s  LanCache-NG started, but not all containers are healthy%s\n' "${BOLD}" "${YELLOW}" "${RESET}"
+else
+    printf '%s%s  LanCache-NG is running!%s\n' "${BOLD}" "${GREEN}" "${RESET}"
+fi
 printf '%s%s══════════════════════════════════════════════════%s\n' "${BOLD}" "${GREEN}" "${RESET}"
 printf "\n"
 if [[ -n "$UI_AUTH_USER" ]]; then
@@ -9216,4 +9284,10 @@ printf "\n"
 printf '  %sCommands:%s\n' "${BOLD}" "${RESET}"
 printf "    Status:  %s/setup.sh debug\n"  "$SCRIPT_DIR"
 printf "    Update:  %s/setup.sh update\n" "$SCRIPT_DIR"
+printf "\n"
+# What: show the token a secondary registers with
+# Why: it was only written to .env.local, never shown
+# From: Issue #1683 | PR #1980
+printf '  %sSecondary DNS token:%s %s\n' "${BOLD}" "${RESET}" "${SECONDARY_REGISTRATION_TOKEN:-}"
+printf "    Also in the Admin-UI: DNS, Secondary DNS.\n"
 printf "\n"

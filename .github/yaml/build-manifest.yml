@@ -632,7 +632,7 @@ runtime:
     # What: 1 = dns answers private PTR zones itself.
     # Why: private PTR answers are opt-in.
     # From: Issue #1918 | PR #1858
-    - DNS_LOCAL_REVERSE_ZONES=0
+    - DNS_LOCAL_REVERSE_ZONES=1
     # What: private reverse zones the stack serves.
     # Why: RFC 1918 and ULA ranges; no list in code.
     # From: Issue #1683 | PR #1858
@@ -708,7 +708,7 @@ runtime:
     # Why: steps a bad clock only at start.
     # From: Issue #1683 | PR #1858
     - NTP_MAKESTEP=1.0 3
-    - NTP_ENABLED=0
+    - NTP_ENABLED=1
     - AUTO_UPDATE_ENABLED=0
     - NTP_AUTO_DHCP=0
     - UI_SECURITY_HEADERS=true
