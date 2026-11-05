@@ -128,7 +128,7 @@
        From: Issue #1683 | PR #1980 #}
     <section data-dns-panel="lan" class="hidden" style="margin-bottom:22px;">
       <div class="section-title" style="margin-top:0;">{{ t.lan_domain }}</div>
-      <p class="section-sub">{{ t.every_local_name_ends_in_this }} <code>lan</code> {{ t.a_printer_is }} <code>printer.lan</code>{{ t.with }} <code>home.lan</code> {{ t.it_is }} <code>printer.home.lan</code>{{ t.dhcp_hands_it_to_the_clients }}</p>
+      <p class="section-sub">{{ t.every_local_name_ends_in_this }} <code>lancache-ng.lan</code> {{ t.a_printer_is }} <code>printer.lancache-ng.lan</code>{{ t.with }} <code>lan</code> {{ t.it_is }} <code>printer.lan</code>{{ t.dhcp_hands_it_to_the_clients }}</p>
       <form action="{{ routes.setup_save | safe }}" method="post" class="field-row">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <input type="hidden" name="back" value="/domains">

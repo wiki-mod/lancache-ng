@@ -8567,18 +8567,18 @@ else
 fi
 
 # What: step: the LAN domain of all local names
-# Why: DoMe 05.11.: own domain like home.lan, not only lan
+# Why: DoMe 05.11.: own domain; default lancache-ng.lan
 # From: Issue #1683 | PR #1980
 print_step "LAN domain"
-printf "  Every local name ends in this domain. With lan a printer is\n"
-printf "  printer.lan; with home.lan it is printer.home.lan.\n\n"
+printf "  Every local name ends in this domain. With lancache-ng.lan\n"
+printf "  a printer is printer.lancache-ng.lan; with lan printer.lan.\n\n"
 DHCP_DOMAIN=$(prod_env_default DHCP_DOMAIN) || exit $?
 while true; do
     ask "LAN domain" "$DHCP_DOMAIN"
     DHCP_DOMAIN="${REPLY,,}"
     DHCP_DOMAIN="${DHCP_DOMAIN%.}"
     [[ "$DHCP_DOMAIN" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$ ]] && break
-    print_error "Please enter a domain like lan or home.lan"
+    print_error "Please enter a domain like lancache-ng.lan or lan"
 done
 print_ok "LAN domain: $DHCP_DOMAIN"
 
