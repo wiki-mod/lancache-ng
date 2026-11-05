@@ -2729,7 +2729,7 @@ pub mod nginx_conf {
         Ok(h)
     }
 
-    // What: stable cert file name for one host.
+    // What: fixed cert file name for one host.
     // Why: file names never carry raw host text.
     // From: Issue #1683 | PR #1858
     fn cert_id(host: &str, kind: &str) -> String {
