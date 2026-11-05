@@ -7542,19 +7542,10 @@ _ci_refresh_event() {
 # Why: §17: the last refresh run's result, never re-read.
 # From: Issue #1683 | PR #1858
 _ci_package_refresh_value() {
-    local key="$1@$2" remote blob rc=0 k v
-    remote="$(_ci_git_remote)" || return 2
-    blob="$(_ci_ledger_blob "${remote}" CI_REFRESH_REF CI_REFRESH_FILE)" || rc=$?
-    case "${rc}" in
-        0)
-            while IFS=$'\t' read -r k v; do
-                if [ "${k}" = "${key}" ]; then printf '%s\n' "${v}"; return 0; fi
-            done <<< "${blob}"
-            ;;
-        1) ;;
-        *) return 2 ;;
-    esac
-    printf 'none\n'
+    local rc=0
+    _ci_refresh_record "$1@$2" || rc=$?
+    [ "${rc}" -ne 1 ] || { printf 'none\n'; return 0; }
+    return "${rc}"
 }
 
 # What: record each pair whose accepted image is behind.
@@ -7647,15 +7638,14 @@ _ci_local_image_files() {
 # Why: one reader of the refresh records for every key.
 # From: Issue #1683 | PR #1858
 _ci_refresh_record() {
-    local remote blob rc=0 k v
+    local remote blob rc=0 row
     remote="$(_ci_git_remote)" || return 2
     blob="$(_ci_ledger_blob "${remote}" CI_REFRESH_REF CI_REFRESH_FILE)" || rc=$?
     [ "${rc}" -le 1 ] || return 2
     [ "${rc}" -eq 0 ] || return 1
-    while IFS=$'\t' read -r k v; do
-        [ "${k}" != "$1" ] || { printf '%s\n' "${v}"; return 0; }
-    done <<< "${blob}"
-    return 1
+    row="$(_ci_tab_row "$1" "${blob}")" || return 1
+    [[ "${row}" == *$'\t'* ]] || row=$'\t'
+    printf '%s\n' "${row#*$'\t'}"
 }
 
 # What: one sha256 per id input of a pair: name=sum.
