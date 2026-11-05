@@ -1382,8 +1382,8 @@ pub mod cert {
         Command::new("openssl")
             .args(["x509", "-noout", "-checkend", &within.to_string(), "-in"])
             .arg(crt)
-            .status()
-            .map(|s| s.success())
+            .output()
+            .map(|o| o.status.success())
             .map_err(|e| format!("openssl: {e}"))
     }
 
