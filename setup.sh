@@ -1827,6 +1827,18 @@ migrate_proxy_security_mode_for_update() {
     fi
 }
 
+# What: old DHCP_MODE=disabled becomes off
+# Why: the ui accepts only the SOT words (live test)
+# From: Issue #1683 | PR #1980
+migrate_dhcp_mode_for_update() {
+    local env_file="$1" mode
+    mode=$(get_env_var DHCP_MODE "$env_file") || exit $?
+    if [[ "$mode" = "disabled" ]]; then
+        set_env_key DHCP_MODE off "$env_file"
+        print_ok "Migrated legacy DHCP_MODE=disabled to off"
+    fi
+}
+
 readonly LEGACY_STATE_ROOT="/srv/lancache"
 readonly -a LEGACY_STATE_CHILDREN=(cache pdns pdns-ssl pdns-filter-state kea nats nats-conf)
 
@@ -4302,6 +4314,7 @@ migrate_env_for_update() (
         print_warn "CACHE_MEM_MB '$cache_mem_mb' is no positive integer; removed, the build-manifest.yml default applies"
     fi
     migrate_proxy_security_mode_for_update "$env_file"
+    migrate_dhcp_mode_for_update "$env_file"
     # What: image keys were resolved at the top
     # Why: the platform check runs before migration writes
     # From: Issue #1683 | PR #1858
@@ -7011,6 +7024,14 @@ cmd_create_logs_for_issue() (
             || n="$(os_release_field ID) $(os_release_field VERSION_ID)"; n="${n# }"; n="${n% }"; printf '%s' "${n:-unknown}")"
         printf '\nDisk usage:\n'
         df -h 2>&1 || printf '(df failed, exit %s)\n' "$?"
+        # What: uptime, memory and processes of the host
+        # Why: audit A1-A8: load and RAM were missing
+        # From: Issue #1683 | PR #1980
+        printf '\nUptime: %s\n' "$(uptime 2>&1 || printf ' (exit %s)' "$?")"
+        printf '\nMemory:\n'
+        free -m 2>&1 || printf '(free failed, exit %s)\n' "$?"
+        printf '\nProcesses (by memory):\n'
+        ps aux --sort=-rss 2>&1 || printf '(ps failed, exit %s)\n' "$?"
     } | logbundle_redact_stream "$secrets_file" > "$dest/host-facts.txt"
 
     print_step "Container status and configuration"
@@ -7075,7 +7096,7 @@ LanCache-NG diagnostic bundle created at $stamp UTC
 Install directory: $install_dir
 
 Contents:
-  host-facts.txt              Docker/Compose versions, kernel, disk space
+  host-facts.txt              Docker/Compose versions, kernel, disk, uptime, memory, processes
   compose-ps.txt               docker compose ps
   compose-config.txt           docker compose config (resolved)
   logs/<service>.log           docker compose logs --tail=${log_lines} per service
