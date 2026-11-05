@@ -2535,6 +2535,28 @@ pub mod kea_conf {
                   "socket-name": s.text("KEA_DHCP4_SOCKET")?}))
     }
 
+    // What: domain-name and domain-search of kept subnets.
+    // Why: live 05.11.: subnets kept the old LAN domain.
+    // From: Issue #1683 | PR #1980
+    fn follow_domain(mut subnets: Value, before: Option<&str>, domain: &str) -> Value {
+        let Some(before) = before.filter(|b| *b != domain) else {
+            return subnets;
+        };
+        let opts = subnets.as_array_mut().into_iter().flatten();
+        let rows = opts
+            .filter_map(|sn| sn["option-data"].as_array_mut())
+            .flatten();
+        for row in rows {
+            let name = row["name"].as_str().unwrap_or_default();
+            let hit = matches!(name, "domain-name" | "domain-search")
+                && row["data"].as_str() == Some(before);
+            if hit {
+                row["data"] = Value::from(domain);
+            }
+        }
+        subnets
+    }
+
     fn option_rows(s: &Settings, domain: &str) -> Result<Vec<Value>, String> {
         let mut rows = Vec::new();
         rows.push(json!({"name": "routers", "data": s.text("DHCP_GATEWAY")?}));
@@ -2564,8 +2586,15 @@ pub mod kea_conf {
             s.text("DHCP_RANGE_START")?,
             s.text("DHCP_RANGE_END")?
         );
+        // What: the last rendered LAN domain, from its suffix.
+        // Why: kept subnets follow a changed DHCP_DOMAIN.
+        // From: Issue #1683 | PR #1980
+        let before = existing
+            .and_then(|e| e.pointer("/Dhcp4/ddns-qualifying-suffix"))
+            .and_then(Value::as_str)
+            .map(|d| d.trim_end_matches('.').to_string());
         let subnets = match existing.and_then(|e| e.pointer("/Dhcp4/subnet4")) {
-            Some(kept) => kept.clone(),
+            Some(kept) => follow_domain(kept.clone(), before.as_deref(), &domain),
             None => json!([{
                 "id": s.uint("DHCP_SUBNET_ID")?,
                 "subnet": s.text("DHCP_SUBNET")?,
