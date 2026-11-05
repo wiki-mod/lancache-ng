@@ -20255,7 +20255,7 @@ _ci_workflow_scan_files() {
     _ci_workflow_files "$2" "${dir}"
 }
 
-# What: read awk rows: "$2 N" count, "flag ..." findings.
+# What: read scan rows: "$2 N" count, "flag ..." findings.
 # Why: both workflow scans parse the same row format.
 # From: Issue #1683 | PR #1912
 _ci_workflow_scan_report() {
@@ -20317,19 +20317,98 @@ _ci_check_workflow_ci_variables() {
     printf 'workflow-ci-variables=clean scanned=%s callers=%s\n' "${#files[@]}" "${callers}"
 }
 
+# What: judge job rows $4 of file $1: runner $2, minutes $3.
+# Why: one owner for the rules; prints flags and jobs N.
+# From: Issue #1683 | PR #1858
+_ci_job_rows() {
+    local -n _ci_jr_min="$3"
+    local line job uses nd ro to want k m q key nfile=0 njob=0 fb_re to_re key_re
+    local -a fl
+    printf -v q %b "\\047"
+    fb_re="${q}[^${q}]*${q}"
+    to_re='[|][|][[:space:]]*[0-9]+'
+    key_re="[[]${q}[^${q}]*${q}[]]"
+    while IFS= read -r line; do
+        [ -n "${line}" ] || continue
+        nfile=$((nfile + 1))
+        # What: split at tabs; empty fields stay.
+        # Why: no subshell per field; read joins empty ones.
+        fl=()
+        k="${line}"
+        while [[ "${k}" == *$'\t'* ]]; do
+            fl[${#fl[@]}]="${k%%$'\t'*}"
+            k="${k#*$'\t'}"
+        done
+        fl[${#fl[@]}]="${k}"
+        job="${fl[0]}"
+        uses="${fl[1]-}"
+        nd="${fl[2]-}"
+        ro="${fl[3]-}"
+        to="${fl[4]-}"
+        [ "${uses}" != true ] || continue
+        njob=$((njob + 1))
+        want=""
+        if [ -n "${job}" ]; then
+            want="${_ci_jr_min[${job}]-}"
+        fi
+        if [ -z "${to}" ]; then
+            printf 'flag %s: job %s: no timeout-minutes\n' "$1" "${job}"
+        elif [ -n "${want}" ] && _ci_job_lit "${to}" && [ "${to}" != "${want}" ]; then
+            printf 'flag %s: job %s: timeout-minutes %s differs from SOT ci_job_timeouts.%s %s\n' "$1" "${job}" "${to}" "${job}" "${want}"
+        elif [ -z "${want}" ] && ! _ci_job_lit "${to}"; then
+            printf 'flag %s: job %s: timeout-minutes reads job-settings, SOT ci_job_timeouts has no %s\n' "$1" "${job}" "${job}"
+        fi
+        if [ "${nd}" = true ]; then
+            if _ci_job_lit "${ro}"; then
+                printf 'flag %s: job %s: runs-on %s (a needs job reads job-settings)\n' "$1" "${job}" "${ro}"
+            fi
+        elif _ci_job_lit "${ro}" && [ "${ro}" != "$2" ]; then
+            printf 'flag %s: job %s: runs-on %s (SOT runner %s)\n' "$1" "${job}" "${ro}" "$2"
+        fi
+        k="${ro}"
+        while [[ "${k}" =~ ${fb_re} ]]; do
+            m="${BASH_REMATCH[0]}"
+            if [ "${m:1:${#m}-2}" != "$2" ]; then
+                printf 'flag %s: job %s: runs-on fallback %s (SOT runner %s)\n' "$1" "${job}" "${m}" "$2"
+            fi
+            k="${k#*"${m}"}"
+        done
+        if [[ "${to}" =~ ${to_re} ]]; then
+            printf 'flag %s: job %s: timeout fallback %s (a literal is a second owner)\n' "$1" "${job}" "${BASH_REMATCH[0]}"
+        fi
+        if [[ "${to}" =~ ${key_re} ]]; then
+            m="${BASH_REMATCH[0]}"
+            key="${m:2:${#m}-4}"
+            if [ "${key}" != "${job}" ]; then
+                printf 'flag %s: job %s: timeout-minutes reads key %s\n' "$1" "${job}" "${key}"
+            fi
+        fi
+    done <<< "$4"
+    if [ "${nfile}" = 0 ]; then
+        printf 'flag %s: jobs: block without a parsable job\n' "$1"
+    fi
+    printf 'jobs %s\n' "${njob}"
+}
+
+# What: rc 0 if $1 is a literal, not empty nor a ${{ }}.
+# Why: only a literal can differ from the SOT value.
+# From: Issue #1683 | PR #1858
+_ci_job_lit() {
+    [ -n "$1" ] && [[ "$1" != [$]"{{"* ]]
+}
+
 # What: SOT-owned jobs read job-settings, others a literal
 # Why: AG-CI-006/016: one owner; a literal must match it
 # From: Issue #1683 | PR #1858
 _ci_check_workflow_job_settings() {
-    local repo_root="${1:-${CI_REPO_ROOT:-.}}" out="" runner job tmap="" js_count=0 f rows verdict hasjobs line
+    local repo_root="${1:-${CI_REPO_ROOT:-.}}" out="" runner js_count=0 f rows verdict hasjobs line
     local -a viol=() files=() js_jobs=()
     local -A js_min=()
     _ci_workflow_scan_files "${repo_root}" files || return 2
     _ci_job_settings_read runner js_jobs js_min || return 2
-    for job in "${js_jobs[@]}"; do tmap+="${job}=${js_min[${job}]} "; done
     for f in "${files[@]}"; do
         # What: has the workflow a jobs: map; its job rows.
-        # Why: yq reads the YAML; awk only judges the rows.
+        # Why: yq reads the YAML; bash judges the rows.
         # From: Issue #1683 | PR #1858
         hasjobs="$(_ci_run "[CI-ERROR-CHECK-0204]" "file=\"${f}\" reason=\"workflow jobs block not read\"" \
             yq --yaml-fix-merge-anchor-to-spec=true -r '(.jobs | tag) == "!!map"' "${f}")" || return 2
@@ -20339,36 +20418,7 @@ _ci_check_workflow_job_settings() {
         fi
         rows="$(_ci_run "[CI-ERROR-CHECK-0205]" "file=\"${f}\" reason=\"workflow job rows not read\"" \
             yq --yaml-fix-merge-anchor-to-spec=true -r '.jobs | to_entries[] | [.key, (.value | has("uses")), (.value | has("needs")), ((.value["runs-on"] // "") | tostring), ((.value["timeout-minutes"] // "") | tostring)] | @tsv' "${f}")" || return 2
-        verdict="$(_ci_capture 0 awk -v f="${f}" -v runner="${runner}" -v tmap="${tmap}" -v q="'" "$(cat <<'PROG'
-            function lit(v) { return v != "" && v !~ /^\$\{\{/ }
-            function bad(m) { print "flag " f ": job " job ": " m }
-            function judge(  k, want) {
-                njob++
-                want = (job in T) ? T[job] : ""
-                if (to == "") bad("no timeout-minutes")
-                else if (want != "" && lit(to) && to != want) bad("timeout-minutes " to " differs from SOT ci_job_timeouts." job " " want)
-                else if (want == "" && !lit(to)) bad("timeout-minutes reads job-settings, SOT ci_job_timeouts has no " job)
-                if (nd) {
-                    if (lit(ro)) bad("runs-on " ro " (a needs job reads job-settings)")
-                } else if (lit(ro) && ro != runner) bad("runs-on " ro " (SOT runner " runner ")")
-                k = ro
-                while (match(k, q "[^" q "]*" q)) {
-                    if (substr(k, RSTART + 1, RLENGTH - 2) != runner) bad("runs-on fallback " substr(k, RSTART, RLENGTH) " (SOT runner " runner ")")
-                    k = substr(k, RSTART + RLENGTH)
-                }
-                if (match(to, /\|\|[[:space:]]*[0-9]+/)) bad("timeout fallback " substr(to, RSTART, RLENGTH) " (a literal is a second owner)")
-                if (match(to, "\\[" q "[^" q "]*" q "\\]")) {
-                    k = substr(to, RSTART + 2, RLENGTH - 4)
-                    if (k != job) bad("timeout-minutes reads key " k)
-                }
-            }
-            BEGIN { FS = "\t"; n = split(tmap, kv, " "); for (i = 1; i <= n; i++) { p = index(kv[i], "="); T[substr(kv[i], 1, p - 1)] = substr(kv[i], p + 1) } }
-            NF == 0 { next }
-            { nfile++; job = $1; nd = ($3 == "true"); ro = $4; to = $5 }
-            $2 != "true" { judge() }
-            END { if (!nfile) print "flag " f ": jobs: block without a parsable job"; print "jobs " njob + 0 }
-PROG
-            )" <<< "${rows}")" || return 2
+        verdict="$(_ci_job_rows "${f}" "${runner}" js_min "${rows}")" || return 2
         while IFS= read -r line; do
             case "${line}" in
                 "jobs "*) js_count=$(( js_count + ${line#jobs} )) ;;
