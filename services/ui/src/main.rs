@@ -1801,10 +1801,15 @@ fn file_mode(s: &Settings) -> Result<u32, String> {
 // From: Issue #1683 | PR #1858
 fn write_files(s: &Settings, files: &[render::File]) -> Result<Vec<config::Change>, String> {
     let mode = file_mode(s)?;
+    let hup = s.list("HUP_OWNERS");
     let mut out = Vec::new();
     for f in files {
+        // What: a first write wakes only HUP owners.
+        // Why: a restart owner waits for it at start.
+        // From: Issue #1683 | PR #1980
+        let wake = f.path.exists() || hup.iter().any(|o| o == f.owner);
         let changed = fs::write_if_changed(&f.path, f.body.as_bytes(), mode, owner_keep());
-        if changed.map_err(|e| format!("{}: {e}", f.path.display()))? {
+        if changed.map_err(|e| format!("{}: {e}", f.path.display()))? && wake {
             out.push(config::Change {
                 key: f.path.display().to_string(),
                 owner: f.owner.to_string(),
