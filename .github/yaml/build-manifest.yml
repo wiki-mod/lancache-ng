@@ -836,7 +836,6 @@ runtime:
     - DHCP_SUBNET_START=
     - DNS_FILTER_AAAA=0
     - DNS_LAN_RECORD_TYPES=A AAAA CNAME MX TXT
-    - DNS_LAN_ZONE=@DHCP_DOMAIN@
     - DNS_RECORD_TTL=300
     - DNS_RECORD_TTL_MAX=86400
     - DNS_TXT_MAX_BYTES=255
@@ -1052,7 +1051,6 @@ runtime:
     - DHCP_SUBNET_START=text?;;;reload;dhcp
     - DNS_FILTER_AAAA=bool;;;reload;dns
     - DNS_LAN_RECORD_TYPES=list;;;live;ui
-    - DNS_LAN_ZONE=text;;;reload;dns
     - DNS_LOCAL_REVERSE_ZONES=bool;;;reload;dns
     - DNS_PRIVATE_REVERSE_ZONES=list;;;reload;dns
     - DNS_QUERY_ALLOW_FROM=list;;;reload;dns

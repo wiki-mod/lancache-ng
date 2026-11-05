@@ -106,7 +106,7 @@ that is in the store's list, reads it, and applies it through the same
 ## Zones, records, and TSIG/DDNS metadata
 
 The Admin UI (`services/ui/src/main.rs`) snapshots the record data of the
-zones `snapshot_zones` names: the lan zone (`DNS_LAN_ZONE`) and the private
+zones `snapshot_zones` names: the lan zone (`DHCP_DOMAIN`) and the private
 reverse zones. Other zones, such as the RPZ, are never snapshotted or rolled
 back. TSIG keys and zone metadata are not part of a snapshot.
 

@@ -777,7 +777,7 @@ pub mod dns {
     // Why: LAN, local.LAN and optional reverse zones.
     // From: Issue #1683 | PR #1858
     pub fn managed_zones(s: &Settings) -> Result<Vec<String>, String> {
-        let lan = canonical_zone(&s.text("DNS_LAN_ZONE")?);
+        let lan = canonical_zone(&s.text("DHCP_DOMAIN")?);
         let mut zones = vec![format!("local.{lan}"), lan];
         if s.flag("DNS_SERVE_RFC1918")? {
             zones.extend(private_reverse_zones(s));
@@ -2421,7 +2421,7 @@ pub mod kea_conf {
     }
 
     fn lan_domain(s: &Settings) -> Result<String, String> {
-        let zone = crate::dns::canonical_zone(&s.text("DNS_LAN_ZONE")?);
+        let zone = crate::dns::canonical_zone(&s.text("DHCP_DOMAIN")?);
         Ok(zone.trim_end_matches('.').to_string())
     }
 
@@ -2523,7 +2523,7 @@ pub mod kea_conf {
             "port": s.uint("PDNS_AUTH_PORT")?
         }]);
         let entry = |zone: &str| json!({"name": zone, "key-name": key, "dns-servers": target});
-        let lan = crate::dns::canonical_zone(&s.text("DNS_LAN_ZONE")?);
+        let lan = crate::dns::canonical_zone(&s.text("DHCP_DOMAIN")?);
         let reverse: Vec<Value> = crate::dns::private_reverse_zones(s)
             .iter()
             .map(|z| entry(z))

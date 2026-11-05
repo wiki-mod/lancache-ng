@@ -65,6 +65,7 @@
       </div>
       <p class="field-hint" style="margin-top:12px;">Total reflects the cache size configured for this LanCache-NG instance. Oldest, least-requested files are removed automatically; you don't need to clear this yourself.</p>
       <form method="post" action="{{ routes.setup_save | safe }}" style="margin-top:14px;">
+        <input type="hidden" name="back" value="/">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <div class="field-row">
           <div class="field">

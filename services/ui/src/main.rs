@@ -506,7 +506,21 @@ async fn save(
 ) -> Page {
     csrf.check(&form)?;
     cache_room(&app.settings(), &form)?;
-    finish(commit(&app, form).await, "/setup")
+    if let Some(d) = form.get("DHCP_DOMAIN")
+        && !lancache_ng::dns::is_dns_name(d, false, false)
+    {
+        return Err(bad_request(format!("{d:?} is no domain name")));
+    }
+
+    // What: back to the page that sent the form.
+    // Why: live test: dashboard forms ended on /setup.
+    // From: Issue #1683 | PR #1980
+    let back = form
+        .get("back")
+        .filter(|b| b.starts_with('/') && !b.starts_with("//"))
+        .cloned()
+        .unwrap_or_else(|| "/setup".into());
+    finish(commit(&app, form).await, &back)
 }
 
 // What: newest lines of all programs, merged.
@@ -625,7 +639,7 @@ fn reverse_zone(s: &Settings, name: &str) -> Option<String> {
 // What: LAN zone name in canonical form.
 // Why: PowerDNS compares names with trailing dot.
 fn lan_zone(s: &Settings) -> Result<String, String> {
-    Ok(lancache_ng::dns::canonical_zone(&s.text("DNS_LAN_ZONE")?))
+    Ok(lancache_ng::dns::canonical_zone(&s.text("DHCP_DOMAIN")?))
 }
 
 // What: zones that keep snapshots.

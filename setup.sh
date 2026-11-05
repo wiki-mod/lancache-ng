@@ -8566,11 +8566,27 @@ else
     print_warn "Scheduled automatic updates disabled — manual updates with: ./setup.sh update"
 fi
 
+# What: step: the LAN domain of all local names
+# Why: DoMe 05.11.: own domain like home.lan, not only lan
+# From: Issue #1683 | PR #1980
+print_step "LAN domain"
+printf "  Every local name ends in this domain. With lan a printer is\n"
+printf "  printer.lan; with home.lan it is printer.home.lan.\n\n"
+DHCP_DOMAIN=$(prod_env_default DHCP_DOMAIN) || exit $?
+while true; do
+    ask "LAN domain" "$DHCP_DOMAIN"
+    DHCP_DOMAIN="${REPLY,,}"
+    DHCP_DOMAIN="${DHCP_DOMAIN%.}"
+    [[ "$DHCP_DOMAIN" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$ ]] && break
+    print_error "Please enter a domain like lan or home.lan"
+done
+print_ok "LAN domain: $DHCP_DOMAIN"
+
 # What: optional external DNS server for unknown names
 # Why: a router may answer the names of LAN devices
 # From: Issue #1918 | PR #1858
 print_step "External DNS server (optional)"
-install_lan_zone=$(prod_env_default DHCP_DOMAIN) || exit $?
+install_lan_zone="$DHCP_DOMAIN"
 prompt_dns_upstream "" "" "" "${IP_HTTP},${IP_HTTPS}" "$install_lan_zone"
 if [[ -n "$DNS_UPSTREAM_SERVERS" ]]; then
     print_ok "External DNS: ${DNS_UPSTREAM_SERVERS}"
@@ -9009,6 +9025,11 @@ AUTO_UPDATE_ENABLED=${AUTO_UPDATE_ENABLED}
 DNS_UPSTREAM_SERVERS=${DNS_UPSTREAM_SERVERS}
 DNS_UPSTREAM_ZONES=${DNS_UPSTREAM_ZONES}
 DNS_UPSTREAM_UNSIGNED_ZONES=${DNS_UPSTREAM_UNSIGNED_ZONES}
+
+# What: LAN domain; printer.<domain> for local names
+# Why: the Admin UI DNS settings can change it later
+# From: Issue #1683 | PR #1980
+DHCP_DOMAIN=${DHCP_DOMAIN}
 
 # What: 1 = LanCache-NG answers private PTR lookups itself
 # Why: 0 sends them on like every other name; kea needs 1
