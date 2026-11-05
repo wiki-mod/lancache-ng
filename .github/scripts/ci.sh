@@ -2452,31 +2452,72 @@ readonly _CI_AWK_RUST_ITEMS
 # What: library items reached from a service's refs.
 # Why: an unreached item cannot change its artifact (64.4).
 # From: Issue #1683 | PR #1912
-_CI_AWK_RUST_CLOSURE="$(cat <<'PROG'
-BEGIN { FS = "\t" }
-{ kind[NR] = $1; name[NR] = $2; attach[NR] = $3; refs[NR] = $4; text[NR] = $5; if ($2 != "") defined[$2] = 1; n = NR }
-END {
-    m = split(roots, r, " "); for (i = 1; i <= m; i++) want[r[i]] = 1
-    changed = 1
-    while (changed) {
-        changed = 0
-        for (i = 1; i <= n; i++) {
-            if (sel[i]) continue
-            take = (kind[i] == "header") || (kind[i] == "item" && (name[i] in want))
-            if (kind[i] == "impl") {
-                m = split(attach[i], a, " ")
-                for (j = 1; j <= m; j++) if ((a[j] in defined) && (a[j] in want)) take = 1
-            }
-            if (!take) continue
-            sel[i] = 1; changed = 1
-            m = split(refs[i], a, " "); for (j = 1; j <= m; j++) want[a[j]] = 1
-        }
-    }
-    for (i = 1; i <= n; i++) if (sel[i]) printf "%s\t%s\t%s\n", kind[i], name[i], text[i]
+_ci_rust_closure() {
+    local rl_line rl_rest rl_k rl_x rl_i rl_take rl_n=0 rl_more=1
+    local -a rl_lines rl_f rl_kind=() rl_name=() rl_att=() rl_refs=()
+    local -a rl_text=() rl_sel=() rl_a
+    local -A rl_want=() rl_def=()
+    mapfile -t rl_lines || return 1
+    # What: 5 tab fields a row; empty ones stay, rest cut.
+    # Why: same fields as awk with FS = tab.
+    for rl_line in "${rl_lines[@]}"; do
+        rl_n=$((rl_n + 1))
+        rl_f=()
+        rl_rest="${rl_line}"
+        for ((rl_k = 0; rl_k < 5; rl_k++)); do
+            if [[ "${rl_rest}" != *$'\t'* ]]; then
+                rl_f[rl_k]="${rl_rest}"
+                break
+            fi
+            rl_f[rl_k]="${rl_rest%%$'\t'*}"
+            rl_rest="${rl_rest#*$'\t'}"
+        done
+        rl_kind[rl_n]="${rl_f[0]-}"
+        rl_name[rl_n]="${rl_f[1]-}"
+        rl_att[rl_n]="${rl_f[2]-}"
+        rl_refs[rl_n]="${rl_f[3]-}"
+        rl_text[rl_n]="${rl_f[4]-}"
+        [ -z "${rl_name[rl_n]}" ] || rl_def["k${rl_name[rl_n]}"]=1
+    done
+    read -r -a rl_a <<< "$1"
+    for rl_x in "${rl_a[@]}"; do
+        rl_want["k${rl_x}"]=1
+    done
+    # What: passes until no row joins; its refs get wanted.
+    # Why: headers, wanted items, impls of wanted types.
+    while [ "${rl_more}" = 1 ]; do
+        rl_more=0
+        for ((rl_i = 1; rl_i <= rl_n; rl_i++)); do
+            [ -z "${rl_sel[rl_i]-}" ] || continue
+            rl_take=0
+            case "${rl_kind[rl_i]}" in
+                header) rl_take=1 ;;
+                item) [ -z "${rl_want["k${rl_name[rl_i]}"]-}" ] || rl_take=1 ;;
+                impl)
+                    read -r -a rl_a <<< "${rl_att[rl_i]}"
+                    for rl_x in "${rl_a[@]}"; do
+                        if [ -n "${rl_def["k${rl_x}"]-}" ] &&
+                            [ -n "${rl_want["k${rl_x}"]-}" ]; then
+                            rl_take=1
+                        fi
+                    done
+                    ;;
+            esac
+            [ "${rl_take}" = 1 ] || continue
+            rl_sel[rl_i]=1
+            rl_more=1
+            read -r -a rl_a <<< "${rl_refs[rl_i]}"
+            for rl_x in "${rl_a[@]}"; do
+                rl_want["k${rl_x}"]=1
+            done
+        done
+    done
+    for ((rl_i = 1; rl_i <= rl_n; rl_i++)); do
+        [ -n "${rl_sel[rl_i]-}" ] || continue
+        printf '%s\t%s\t%s\n' "${rl_kind[rl_i]}" "${rl_name[rl_i]}" \
+            "${rl_text[rl_i]}"
+    done
 }
-PROG
-)"
-readonly _CI_AWK_RUST_CLOSURE
 
 # What: one Cargo.lock value without 'key = "' and '"'.
 # Why: one cut for name, version, source and checksum.
@@ -3282,7 +3323,7 @@ _ci_rust_content() {
             items="$(_ci_listing_items "${line}" "${ref}")" || return 2
             lib+="${items}"$'\n'
         done <<< "${listing}"
-        sel="$(_ci_run "[CI-ERROR-IDENTITY-0012]" "dir=\"${dir}\" reason=\"library closure not read\"" awk -v roots="${roots}" "${_CI_AWK_RUST_CLOSURE}" <<< "${lib}")" || return 2
+        sel="$(_ci_run "[CI-ERROR-IDENTITY-0012]" "dir=\"${dir}\" reason=\"library closure not read\"" _ci_rust_closure "${roots}" <<< "${lib}")" || return 2
         if [ "${mode}" = text ]; then
             printf '%s\n' "${sel}"
             continue
