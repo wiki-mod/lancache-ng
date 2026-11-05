@@ -1099,7 +1099,7 @@ runtime:
     - HTTP_CLIENT_TIMEOUT=uint;1;600;live;services
     - HTTP_POOL_IDLE_TIMEOUT=uint;1;3600;live;services
     - HTTP_TCP_KEEPALIVE=uint;1;3600;live;services
-    - IP_HTTP=text;;;recreate;proxy
+    - IP_HTTP=text;;;recreate;proxy services
     - KEA_CTRL_ADDRESS=text;;;reload;dhcp
     - KEA_CTRL_PORT=uint;1;65535;reload;dhcp
     - DHCP_API_HOST=text;;;container;ui

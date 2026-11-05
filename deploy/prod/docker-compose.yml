@@ -103,7 +103,10 @@ services:
     container_name: ${SOT_CONTAINER_NAME_SERVICES}
     image: ${LANCACHE_IMAGE_REF_SERVICES:?LANCACHE_IMAGE_REF_SERVICES is required}
     environment:
-      <<: *env-services-ui
+      # What: the stack values, IP_HTTP for the cachehamster.
+      # Why: without it the daemon failed at every start.
+      # From: Issue #871 | PR #1980
+      <<: [*env-stack, *env-services-ui]
       # What: operator values; the defaults are baked in.
       # Why: the SOT owns each default; no value copy here.
       # From: Issue #1683
