@@ -1064,6 +1064,8 @@ runtime:
     - DNS_SNAPSHOT_DIR=path;;;live;ui
     - DNS_SNAPSHOT_KEEP=uint;1;1000;live;ui
     - DNS_UPSTREAM_SERVERS=list?;;;reload;dns
+    - DNS_UPSTREAM_UNSIGNED_ZONES=list?;;;reload;dns
+    - DNS_UPSTREAM_ZONES=list?;;;reload;dns
     - DNS_XFR_PRIMARY=text?;;;reload;dns
     - DOCKER_ENDPOINT=text;;;container;services
     - DOCKER_TIMEOUT=uint;1;600;live;services

@@ -2248,7 +2248,35 @@ pub mod recursor_conf {
         for z in crate::dns::managed_zones(s)? {
             lua += &format!("addNTA(\"{}\")\n", z.trim_end_matches('.'));
         }
+
+        // What: no DNSSEC check for private domains.
+        // Why: router domains like fritz.box are unsigned.
+        // From: Issue #1683 | PR #1980
+        for z in upstream_zones(s, "DNS_UPSTREAM_UNSIGNED_ZONES")? {
+            if z != "." {
+                lua += &format!("addNTA(\"{z}\")\n");
+            }
+        }
         Ok(lua)
+    }
+
+    // What: domain list for upstream forwarding.
+    // Why: empty or "." means all names; bad chars stop.
+    // From: Issue #1683 | PR #1980
+    fn upstream_zones(s: &Settings, key: &str) -> Result<Vec<String>, String> {
+        let ok = |c: char| c.is_ascii_alphanumeric() || "-._".contains(c);
+        let mut out = Vec::new();
+        for raw in s.list(key) {
+            let z = raw.trim_end_matches('.').to_ascii_lowercase();
+            if !z.chars().all(ok) {
+                return Err(format!("{key}: bad domain {raw}"));
+            }
+            out.push(if z.is_empty() { ".".to_string() } else { z });
+        }
+        if out.is_empty() && key == "DNS_UPSTREAM_ZONES" {
+            out.push(".".to_string());
+        }
+        Ok(out)
     }
 
     // What: Lua hook: AAAA answers become empty.
@@ -2285,10 +2313,16 @@ pub mod recursor_conf {
             String::new()
         } else {
             let list: Vec<String> = upstream.iter().map(|u| format!("\"{u}\"")).collect();
-            format!(
-                "  forward_zones_recurse:\n    - zone: \".\"\n      forwarders: [{}]\n",
-                list.join(", ")
-            )
+            let fwd = list.join(", ");
+
+            // What: one forward entry per chosen domain.
+            // Why: "domains" mode forwards only those.
+            // From: Issue #1683 | PR #1980
+            let entries: String = upstream_zones(s, "DNS_UPSTREAM_ZONES")?
+                .iter()
+                .map(|z| format!("    - zone: \"{z}\"\n      forwarders: [{fwd}]\n"))
+                .collect();
+            format!("  forward_zones_recurse:\n{entries}")
         };
         let aaaa = if s.flag("DNS_FILTER_AAAA")? {
             format!(
