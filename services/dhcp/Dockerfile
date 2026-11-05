@@ -94,6 +94,7 @@ RUN set -e; \
     done; \
     printf '%s\n' '#!/bin/bash' \
       "rm -rf '${v[OPENRC_STATE_DIR]}'; rm -f '${v[KEA_SOCKET_DIR]}'/*.pid" \
+      "mkdir -p '${v[KEA_SOCKET_DIR]}'" \
       "mode=\"\$(cat '${f}' 2>/dev/null || true)\"" \
       "exec openrc-init \"\${mode:-${v[DHCP_MODE]}}\"" \
       > /usr/local/bin/lancache-init; \
