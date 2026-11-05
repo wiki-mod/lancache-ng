@@ -178,6 +178,17 @@ amupdatedl3.microsoft.com
 amupdatedl4.microsoft.com
 amupdatedl5.microsoft.com
 
+# ---- Xbox / Game Pass ----
+assets1.xboxlive.com
+assets2.xboxlive.com
+d1.xboxlive.com
+d2.xboxlive.com
+dlassets.xboxlive.com
+dlassets2.xboxlive.com
+xbox-mbr.xboxlive.com
+xvcf1.xboxlive.com
+xvcf2.xboxlive.com
+
 # ---- Ubuntu / Canonical ----
 archive.ubuntu.com
 security.ubuntu.com
