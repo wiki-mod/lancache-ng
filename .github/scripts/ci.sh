@@ -10306,7 +10306,8 @@ _ci_deletion_policy() {
 # Why: lines are counted as they exist, 19.9 or 18.88.
 # From: Issue #1683 | PR #1858
 _ci_gc_release_tags() {
-    local n tags t line prev="" lines="" keep mig
+    local n tags t line prev="" keep mig s
+    local -a lines=()
     n="$(_ci_block_entry_field release retention keep_release_lines)" || return 2
     case "${n}" in
         ''|*[!0-9]*|0*)
@@ -10321,10 +10322,11 @@ _ci_gc_release_tags() {
     while IFS= read -r t; do
         [ -n "${t}" ] || continue
         line="${t%.*}"
-        [ "${line}" = "${prev}" ] || lines="${lines}${line}"$'\n'
+        [ -z "${line}" ] || [ "${line}" = "${prev}" ] || lines+=("${line}")
         prev="${line}"
     done <<<"${tags}"
-    keep="$(_ci_capture 0 awk -v n="${n}" "NF { l[++c] = \$0 } END { for (i = c - n + 1; i <= c; i++) if (i > 0) print l[i] }" <<<"${lines}")" || return 2
+    s=$(( ${#lines[@]} > n ? ${#lines[@]} - n : 0 ))
+    keep="$(printf '%s\n' "${lines[@]:s}")"
     while IFS= read -r t; do
         [ -n "${t}" ] || continue
         case $'\n'"${keep}"$'\n' in
