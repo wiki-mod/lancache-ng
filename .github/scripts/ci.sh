@@ -1794,13 +1794,25 @@ _ci_docs_only() {
 # Why: one value names the checked tree and images.
 # From: Issue #1683 | PR #1858
 _ci_pr_fingerprint() {
-    local tree line named docs rc _ci_fp_rows="" _ci_fp_absent=""
+    local tree line named docs rc wf own="" p _ci_fp_rows="" _ci_fp_absent=""
     named="$(_ci_sot_named_paths)" || return 2
     docs="$(_ci_variable CI_DOCS_DIR)" || return 2
+    wf="$(_ci_variable CI_WORKFLOW_DIR)" || return 2
+    # What: only this run's own workflow file counts.
+    # Why: another workflow never drives build or validate.
+    # From: Issue #1683 | PR #1858
+    if [ -n "${GITHUB_WORKFLOW_REF:-}" ]; then
+        own="${GITHUB_WORKFLOW_REF%%@*}"
+        own="${own#*/*/}"
+    fi
     tree="$(_ci_capture 0 git -C "${CI_REPO_ROOT}" ls-tree -r HEAD)" || return 2
     while IFS= read -r line; do
         [ -n "${line}" ] || continue
-        rc=0; _ci_doc_path "${line#*$'\t'}" "${docs}" "${named}" || rc=$?
+        p="${line#*$'\t'}"
+        if [ -n "${own}" ] && [ "${p#"${wf}/"}" != "${p}" ] && [ "${p}" != "${own}" ]; then
+            continue
+        fi
+        rc=0; _ci_doc_path "${p}" "${docs}" "${named}" || rc=$?
         [ "${rc}" -eq 0 ] || _ci_fp_rows+="${line}"$'\n'
     done <<< "${tree}"
     _ci_for_all_pairs _ci_pr_fingerprint_pair || return "$?"
@@ -2233,8 +2245,22 @@ ci_cmd_plan_matrix() {
     # What: a PR run reuses its last green run.
     # Why: §2.1 §29 §30: equal tree and digests, no work.
     # From: Issue #1683 | PR #1858
-    local reuse=false
-    if [ "${any}" = true ] && [ -z "${ptargets}" ]; then
+    local reuse=false stack_touch="${sot_changed}"
+    local -a stack=()
+    _ci_stack_compose_files stack || return 2
+    for f in "${changed[@]}"; do
+        for t in "${stack[@]}"; do
+            [ "${f}" != "${t}" ] || stack_touch=true
+        done
+    done
+    # What: reuse also when only the stack would validate.
+    # Why: §2.1: an equal stack needs no second validate.
+    # From: Issue #1683 | PR #1858
+    if { [ "${any}" = true ] || [ "${stack_touch}" = true ]; } && [ -z "${ptargets}" ]; then
+        if [ "${authed}" = false ] && [ "${GITHUB_EVENT_NAME:-}" = pull_request ]; then
+            _ci_require_ghcr_auth || return "$?"
+            authed=true
+        fi
         rc=0; _ci_pr_green_reuse || rc=$?
         case "${rc}" in
             0) reuse=true any=false include='[]' any_runner=false runners='[]' test_services='' rust_audit=false ;;
@@ -2268,15 +2294,8 @@ ci_cmd_plan_matrix() {
     # What: a stack compose or SOT change validates too.
     # Why: both change how the containers start.
     # From: Issue #1683 | PR #1858
-    local -a stack=()
     if [ "${validate}" = false ] && [ "${reuse}" = false ] && [ -z "${CI_RELEASE_TAG:-}" ]; then
-        [ "${sot_changed}" = false ] || validate=true
-        _ci_stack_compose_files stack || return 2
-        for f in "${changed[@]}"; do
-            for t in "${stack[@]}"; do
-                [ "${f}" != "${t}" ] || validate=true
-            done
-        done
+        [ "${stack_touch}" = false ] || validate=true
     fi
     local work=false
     if [ "${validate}" = true ] || [ -n "${test_services# }" ] || [ "${rust_audit}" = true ]; then
