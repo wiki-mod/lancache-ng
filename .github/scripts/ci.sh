@@ -15095,6 +15095,7 @@ _ci_rh_purge_pve_check() {
 # From: Issue #1622 | PR #1624
 _ci_rh_purge_pve() {
     local keep pkgs pkg_raw svcs svc_raw sim rem procs bad families proc_families override dpkg_out ps_out
+    local line pid rows=""
     _ci_rh_confirmed CONFIRM_PURGE_PVE || return 2
     keep="$(_ci_rh_pve_keep_ere)" || return 2
     families="$(_ci_rh_ere pve_package_families)" || return 2
@@ -15128,7 +15129,13 @@ _ci_rh_purge_pve() {
     rem="$(_ci_run -m 1 "[CI-ERROR-RUNNER-0114]" "reason=\"remaining packages not scanned\"" grep -iE "^ii.*(${families})" <<< "${dpkg_out}")" || return 2
     bad="$(_ci_run -m 1 "[CI-ERROR-RUNNER-0115]" "reason=\"boot packages not filtered\"" grep -viE "${keep}" <<< "${rem}")" || return 2
     procs="$(_ci_run -m 1 "[CI-ERROR-RUNNER-0116]" "reason=\"remaining processes not scanned\"" grep -E "${proc_families}" <<< "${ps_out}")" || return 2
-    procs="$(_ci_capture 0 awk -v self="$$" "\$1 != self && \$0 !~ /grep|awk/" <<< "${procs}")" || return 2
+    while IFS= read -r line; do
+        read -r pid _ <<< "${line}"
+        [ "${pid}" != "$$" ] || continue
+        [[ "${line}" != *grep* && "${line}" != *awk* ]] || continue
+        rows+="${line}"$'\n'
+    done <<< "${procs}"
+    procs="${rows%$'\n'}"
     printf -- '--- Verification ---\nRemaining packages (kernel/firmware only expected):\n%s\nRemaining processes (none expected):\n%s\n' "${rem:-  (none)}" "${procs:-  (none)}"
     if [ -n "${bad}" ] || [ -n "${procs}" ]; then
         ci_log "[CI-ERROR-RUNNER-0058]" "reason=\"purge-pve did not remove the whole stack\""
