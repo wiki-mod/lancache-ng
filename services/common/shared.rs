@@ -4186,10 +4186,10 @@ pub mod rrd {
         // Why: DoMe 05.11.: sizes differed per tab.
         // From: Issue #1683 | PR #1980
         cmd.arg("--full-size-mode");
-        // What: plain numbers for scaled values.
-        // Why: DoMe 05.11.: "233.5m" was unreadable.
+        // What: plain numbers when each factor shrinks.
+        // Why: "233.5m" unreadable; kB x1024 keeps units.
         // From: Issue #1683 | PR #1980
-        let plain = g.sources.iter().all(|x| x.scale.is_some());
+        let plain = g.sources.iter().all(|x| x.scale.is_some_and(|k| k < 1.0));
         let unit = if plain { "" } else { "%s" };
         if plain {
             cmd.arg("--units-exponent").arg("0");

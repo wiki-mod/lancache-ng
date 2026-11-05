@@ -27,10 +27,10 @@
     <button type="button" class="subtab stats-tab" data-range="{{ r }}">{{ r }}</button>
     {% endfor %}
   </div>
-  <div class="grid-2" style="grid-template-columns:1fr;">
+  <div class="grid-2" style="grid-template-columns:repeat(auto-fill, minmax(min(100%, 560px), 1fr));">
     {% for g in graphs %}
     <div class="card stats-card" data-tab="{{ g.tab }}" style="min-width:0;" hidden>
-      <img class="stats-img" data-graph="{{ g.name }}" alt="{{ g.title }}" style="width:100%; height:auto; display:block;">
+      <img class="stats-img" data-graph="{{ g.name }}" alt="{{ g.title }}" style="max-width:100%; height:auto; display:block; margin:0 auto;">
     </div>
     {% endfor %}
   </div>
