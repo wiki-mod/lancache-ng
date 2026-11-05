@@ -2118,8 +2118,38 @@ async fn sampler(app: Arc<App>) {
         for e in sample_services(&app, &s).await {
             eprintln!("ui: stats: {e}");
         }
+        if let Err(e) = dhcp_stays_off(&app, &s).await {
+            eprintln!("ui: dhcp: {e}");
+        }
         tokio::time::sleep(Duration::from_secs(step)).await;
     }
+}
+
+// What: in mode off a running dhcp is stopped again.
+// Why: live 05.11.: compose up started it after the ui.
+// From: Issue #1683 | PR #1980
+async fn dhcp_stays_off(app: &App, s: &Settings) -> Result<(), String> {
+    if s.text("DHCP_MODE")? != "off" {
+        return Ok(());
+    }
+    let service = s.text("DHCP_SERVICE")?;
+    let (grace, limit) = app.limits(s)?;
+    let list = app.docker.project(&s.text("COMPOSE_PROJECT")?, limit).await;
+    let list = list.map_err(|e| e.to_string())?;
+    let running = list.iter().find(|c| {
+        c["Labels"][docker::SERVICE_LABEL].as_str() == Some(service.as_str())
+            && c["State"].as_str() == Some("running")
+    });
+    let Some(name) = running.and_then(|c| c["Names"][0].as_str()) else {
+        return Ok(());
+    };
+    let name = name.trim_start_matches('/');
+    let r = app
+        .docker
+        .act(name, docker::Action::Stop, grace, limit)
+        .await;
+    eprintln!("ui: dhcp: mode off, stop {name} {r:?}");
+    Ok(())
 }
 
 // What: bytes the cache folder holds on disk.
