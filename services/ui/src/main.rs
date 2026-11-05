@@ -2163,10 +2163,13 @@ async fn hamster(app: &App, args: &[&str]) -> Result<Value, String> {
         .unwrap_or_default();
     let v: Value = serde_json::from_str(line).map_err(|e| format!("cachehamster: {e}: {out}"))?;
     if let Some(e) = v.get("error").and_then(Value::as_str) {
-        return Err(e.to_string());
+        // What: the service text behind a translated lead.
+        // Why: Steam details stay as the service wrote.
+        // From: Issue #871 | PR #1980
+        return Err(format!("{} {e}", tr("hamster_says")));
     }
     if code != 0 {
-        return Err(format!("cachehamster exit {code}"));
+        return Err(tr("hamster_exit").replace("{x}", &code.to_string()));
     }
     Ok(v)
 }
@@ -2191,7 +2194,7 @@ fn job_time(when: &str, at: &str) -> Result<String, Fail> {
         "at" => at
             .parse::<u64>()
             .map(|t| format!("at:{t}"))
-            .map_err(|_| bad_request("time not understood")),
+            .map_err(|_| bad_request(tr("err_time"))),
         "later" => Ok("later".into()),
         _ => Ok("now".into()),
     }
@@ -2218,6 +2221,12 @@ async fn hamster_action(
         id => format!("app:{id}"),
     };
     let (name, id) = (get("name"), get("id"));
+    // What: a job needs addresses or an app ID.
+    // Why: the text in the page language.
+    // From: Issue #871 | PR #1980
+    if op == "add" && what.trim().is_empty() {
+        return Err(bad_request(tr("err_hamster_empty")));
+    }
     let args: Vec<&str> = match op.as_str() {
         "add" => vec!["add", &name, &when, &what],
         "start" | "cancel" | "remove" => vec![op.as_str(), &id],
