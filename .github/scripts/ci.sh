@@ -15920,6 +15920,31 @@ _ci_shell_sources() {
     done
 }
 
+# What: RUN shell text of Dockerfile lines $1; SHELL -> set.
+# Why: exec-form RUN is JSON; SHELL with pipefail sets -o.
+# From: Issue #1683 | PR #1858
+_ci_dockerfile_run_shell() {
+    local rs_line rs_txt rs_out=""
+    local rs_re='^[[:space:]]*--[A-Za-z-]+(=[^[:space:]]*)?[[:space:]]+'
+    while IFS= read -r rs_line; do
+        rs_line="${rs_line#"${rs_line%%[![:space:]]*}"}"
+        rs_txt="${rs_line:0:6}"
+        if [ "${rs_txt^^}" = "SHELL " ] && [[ "${rs_line}" == *pipefail* ]]; then
+            rs_out+="set -o pipefail"$'\n'
+            continue
+        fi
+        rs_txt="${rs_line:0:4}"
+        [ "${rs_txt^^}" = "RUN " ] || continue
+        rs_line="${rs_line:4}"
+        while [[ "${rs_line}" =~ ${rs_re} ]]; do
+            rs_line="${rs_line:${#BASH_REMATCH[0]}}"
+        done
+        rs_line="${rs_line#"${rs_line%%[![:space:]]*}"}"
+        [ "${rs_line:0:1}" = "[" ] || rs_out+="${rs_line}"$'\n'
+    done <<< "$1"
+    printf '%s' "${rs_out}"
+}
+
 # What: shfmt's JSON syntax tree of one source into $2.
 # Why: shell checks read the parser's tree, not raw text.
 # From: Issue #1683 | PR #1858
@@ -15928,21 +15953,7 @@ _ci_shell_ast() {
     case "${f##*/}" in
         Dockerfile)
             src="$(_ci_run "[CI-ERROR-CHECK-0165]" "file=\"${f}\" reason=\"Dockerfile lines unreadable\"" _ci_dockerfile_logical_lines "${f}")" || return 2
-            # What: RUN shell text; SHELL pipefail -> set.
-            # Why: exec-form RUN is JSON; SHELL sets -o.
-            # From: Issue #1683 | PR #1858
-            src="$(_ci_run "[CI-ERROR-CHECK-0163]" "file=\"${f}\" reason=\"RUN shell not extracted\"" awk "$(cat <<'PROG'
-                { t = $0; sub(/^[[:space:]]+/, "", t) }
-                toupper(substr(t, 1, 6)) == "SHELL " && t ~ /pipefail/ { print "set -o pipefail"; next }
-                toupper(substr(t, 1, 4)) != "RUN " { next }
-                {
-                    t = substr(t, 5)
-                    while (match(t, /^[[:space:]]*--[A-Za-z-]+(=[^[:space:]]*)?[[:space:]]+/)) t = substr(t, RLENGTH + 1)
-                    sub(/^[[:space:]]+/, "", t)
-                    if (substr(t, 1, 1) != "[") print t
-                }
-PROG
-                )" <<< "${src}")" || return 2 ;;
+            src="$(_ci_run "[CI-ERROR-CHECK-0163]" "file=\"${f}\" reason=\"RUN shell not extracted\"" _ci_dockerfile_run_shell "${src}")" || return 2 ;;
         *)
             [[ "${f##*/}" != *.bats ]] || lang=bats
             src="$(_ci_run "[CI-ERROR-CHECK-0166]" "file=\"${f}\" reason=\"source unreadable\"" cat -- "${f}")" || return 2 ;;
