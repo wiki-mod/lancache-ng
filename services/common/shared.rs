@@ -4145,6 +4145,18 @@ pub mod rrd {
         cmd.arg("--title").arg(&g.title);
         cmd.arg("--width").arg(s.text("STATS_WIDTH")?);
         cmd.arg("--height").arg(s.text("STATS_HEIGHT")?);
+        // What: width and height are the whole image.
+        // Why: DoMe 05.11.: sizes differed per tab.
+        // From: Issue #1683 | PR #1980
+        cmd.arg("--full-size-mode");
+        // What: plain numbers for scaled values.
+        // Why: DoMe 05.11.: "233.5m" was unreadable.
+        // From: Issue #1683 | PR #1980
+        let plain = g.sources.iter().all(|x| x.scale.is_some());
+        let unit = if plain { "" } else { "%s" };
+        if plain {
+            cmd.arg("--units-exponent").arg("0");
+        }
 
         // What: larger fonts for axis, title and legend.
         // Why: DoMe 05.11.: values needed a magnifier.
@@ -4179,9 +4191,9 @@ pub mod rrd {
             // What: now, average and max as text per line.
             // Why: exact values without reading the axis.
             // From: Issue #1683 | PR #1980
-            cmd.arg(format!("GPRINT:{}:LAST:now %8.1lf%s", src.ds));
-            cmd.arg(format!("GPRINT:{}:AVERAGE:avg %8.1lf%s", src.ds));
-            cmd.arg(format!("GPRINT:{}:MAX:max %8.1lf%s\\l", src.ds));
+            cmd.arg(format!("GPRINT:{}:LAST:now %8.2lf{unit}", src.ds));
+            cmd.arg(format!("GPRINT:{}:AVERAGE:avg %8.2lf{unit}", src.ds));
+            cmd.arg(format!("GPRINT:{}:MAX:max %8.2lf{unit}\\l", src.ds));
         }
         run(&mut cmd)
     }
