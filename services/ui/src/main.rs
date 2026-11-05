@@ -1144,11 +1144,23 @@ async fn secondary_health(s: &Settings, address: &str) -> Value {
 // From: Issue #1683 | PR #1980
 async fn flush_on_transfer(app: Arc<App>) {
     let mut seen: BTreeMap<String, u32> = BTreeMap::new();
+    // What: log only when the flush state changes.
+    // Why: a dns restart fails a few rounds; one line.
+    // From: Issue #1683 | PR #1980
+    let mut failing = false;
     loop {
         let s = app.settings();
         let wait = s.uint("UI_FLUSH_CHECK_SECONDS").unwrap_or(1).max(1);
-        if let Err(e) = flush_round(&s, &mut seen).await {
-            eprintln!("ui: cache flush: {e}");
+        match flush_round(&s, &mut seen).await {
+            Err(e) if !failing => {
+                eprintln!("ui: cache flush waits for dns: {e}");
+                failing = true;
+            }
+            Ok(()) if failing => {
+                eprintln!("ui: cache flush works again");
+                failing = false;
+            }
+            _ => {}
         }
         tokio::time::sleep(Duration::from_secs(wait)).await;
     }
