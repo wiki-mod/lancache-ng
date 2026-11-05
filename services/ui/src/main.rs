@@ -668,7 +668,19 @@ async fn logs(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     let chunk = s.uint("UI_LOG_TAIL_CHUNK")?;
     let programs = s.list("SYSLOG_PROGRAMS");
     let muted = s.list("SYSLOG_MUTED");
-    let names = programs.clone();
+    // What: every folder the store holds, plus the list.
+    // Why: DoMe 05.11.: page empty; the store names differ.
+    // From: Issue #1683 | PR #1980
+    let mut names = programs.clone();
+    if let Ok(dirs) = std::fs::read_dir(&root) {
+        for d in dirs.flatten().filter(|d| d.path().is_dir()) {
+            let n = d.file_name().to_string_lossy().into_owned();
+            if !names.contains(&n) {
+                names.push(n);
+            }
+        }
+    }
+    let hosts = names.clone();
     let lines = tokio::task::spawn_blocking(move || newest_lines(&root, &names, max, chunk))
         .await
         .map_err(|e| e.to_string())?;
@@ -678,7 +690,7 @@ async fn logs(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
         .collect();
     let mut ctx = Context::new();
     ctx.insert("syslog_logs", &lines);
-    ctx.insert("syslog_hosts", &programs);
+    ctx.insert("syslog_hosts", &hosts);
     ctx.insert("log_switches", &switches);
     ctx.insert("logs_max_entries", &max);
     app.page("logs.html", ctx, &csrf)
