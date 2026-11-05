@@ -3860,6 +3860,11 @@ lancache_channel_ref_pass() {
     while read -r var slug; do
         ref="${registry}/${prefix}/${slug}:${pointer_channel}"
         if ! digest=$(docker buildx imagetools inspect "$ref" --format '{{.Manifest.Digest}}' 2>&1); then
+            # What: a missing image is no network fault.
+            # Why: live: checkout + latest said "check network".
+            # From: Issue #1683 | PR #1980
+            [[ "$digest" != *"not found"* ]] \
+                || die "${ref} does not exist: channel '${pointer_channel}' has no '${slug}' image. This checkout may need another channel, e.g. LANCACHE_IMAGE_CHANNEL=${testing} ./setup.sh install."
             if [[ "$pointer_channel" = "$release" ]]; then
                 cat >&2 <<EOF
 
@@ -3883,6 +3888,12 @@ EOF
                 die "Cannot resolve the ${release} channel image ${ref} (${digest})."
             fi
             die "Failed to resolve ${ref} to a digest (${digest}). Check registry access or set LANCACHE_IMAGE_TAG to an immutable sha-* / vX.Y.Z tag."
+        fi
+        # What: the Digest: row when --format was ignored.
+        # Why: live: Debian buildx 0.13 prints the overview.
+        # From: Issue #1683 | PR #1980
+        if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ && "$digest" =~ (^|$'\n')Digest:[[:space:]]+(sha256:[0-9a-f]{64}) ]]; then
+            digest="${BASH_REMATCH[2]}"
         fi
         [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] \
             || die "${ref} returned an invalid digest: ${digest:-<empty>}."
