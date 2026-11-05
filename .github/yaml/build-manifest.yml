@@ -517,6 +517,11 @@ runtime:
     - SYSLOG_PRUNE_RETRY_COOLDOWN=3600
     - CACHEHAMSTER_CONCURRENCY=8
     - CACHEHAMSTER_THROUGHPUT_INTERVAL=10
+    # What: prefill limit in Mbit/s (0 = none), window.
+    # Why: DoMe 26.10. (Fund 92): bandwidth, from-until.
+    # From: Issue #871 | PR #1980
+    - CACHEHAMSTER_MAX_MBIT=0
+    - CACHEHAMSTER_WINDOW=00:00-24:00
     - DHCP_LEASE_TIME=86400
     - DHCP_LEASE_TIME_MIN=60
     - DHCP_LEASE_TIME_MAX=604800
@@ -1054,6 +1059,8 @@ runtime:
     - CACHEHAMSTER_QUEUES=uint;1;64;restart;services
     - CACHEHAMSTER_SERVICE=text;;;live;ui
     - CACHEHAMSTER_THROUGHPUT_INTERVAL=uint;1;3600;live;services
+    - CACHEHAMSTER_MAX_MBIT=uint;0;100000;restart;services
+    - CACHEHAMSTER_WINDOW=text;;;restart;services
     - CDN_CUSTOM_DOMAINS=list?;;;reload;dns
     - CDN_DEFAULT_DOMAINS_FILE=path;;;reload;dns
     - CDN_DISABLED_DOMAINS=list?;;;reload;dns

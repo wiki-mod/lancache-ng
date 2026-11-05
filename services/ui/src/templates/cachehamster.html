@@ -49,6 +49,8 @@
       <input type="hidden" name="back" value="/cachehamster">
       <div class="field"><label for="hamster-conns">{{ t.hamster_connections }}</label><input type="number" id="hamster-conns" name="CACHEHAMSTER_CONCURRENCY" min="1" max="1024" value="{{ v.CACHEHAMSTER_CONCURRENCY }}"></div>
       <div class="field"><label for="hamster-queues">{{ t.hamster_queues }}</label><input type="number" id="hamster-queues" name="CACHEHAMSTER_QUEUES" min="1" max="64" value="{{ v.CACHEHAMSTER_QUEUES }}"></div>
+      <div class="field"><label for="hamster-mbit">{{ t.hamster_max_mbit }}</label><input type="number" id="hamster-mbit" name="CACHEHAMSTER_MAX_MBIT" min="0" max="100000" value="{{ v.CACHEHAMSTER_MAX_MBIT }}"></div>
+      <div class="field"><label for="hamster-window">{{ t.hamster_window }}</label><input type="text" id="hamster-window" name="CACHEHAMSTER_WINDOW" pattern="[0-2][0-9]:[0-5][0-9]-[0-2][0-9]:[0-5][0-9]" placeholder="01:00-06:00" value="{{ v.CACHEHAMSTER_WINDOW }}"></div>
       <button type="submit" class="btn">{{ t.save }}</button>
     </form>
 

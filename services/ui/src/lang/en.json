@@ -154,6 +154,8 @@
   "hamster_queued": "accepted, taken over shortly",
   "hamster_connections": "Parallel downloads per job",
   "hamster_queues": "Jobs at the same time",
+  "hamster_max_mbit": "Bandwidth limit in Mbit/s (0 = none)",
+  "hamster_window": "Time window (local time; 00:00-24:00 = always)",
   "hamster_says": "Cachehamster reports:",
   "hamster_st_blocked": "blocked",
   "hamster_st_cancelled": "cancelled",

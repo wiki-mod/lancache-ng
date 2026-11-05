@@ -670,6 +670,67 @@ fn apply_order(jobs: &mut Vec<Job>, order: Order) {
     }
 }
 
+// What: the shared bandwidth limit of all jobs.
+// Why: DoMe 26.10. (Fund 92): limit the bandwidth.
+// From: Issue #871 | PR #1980
+static PACE: std::sync::OnceLock<Pace> = std::sync::OnceLock::new();
+
+struct Pace {
+    start: std::time::Instant,
+    total: AtomicU64,
+    bytes_per_sec: u64,
+}
+
+impl Pace {
+    // What: sleep until the average is under the limit.
+    // Why: data is dropped; only the fetch rate matters.
+    // From: Issue #871 | PR #1980
+    async fn wait(&self, got: u64) {
+        let total = self.total.fetch_add(got, Ordering::Relaxed) + got;
+        let due = Duration::from_secs_f64(total as f64 / self.bytes_per_sec as f64);
+        if let Some(rest) = due.checked_sub(self.start.elapsed()) {
+            tokio::time::sleep(rest).await;
+        }
+    }
+}
+
+// What: daily window HH:MM-HH:MM; may cross midnight.
+// Why: DoMe 26.10. (Fund 92): from when until when.
+// From: Issue #871 | PR #1980
+fn window(text: &str) -> Result<(u32, u32), String> {
+    let mins = |t: &str| -> Option<u32> {
+        let (h, m) = t.trim().split_once(':')?;
+        let (h, m): (u32, u32) = (h.parse().ok()?, m.parse().ok()?);
+        (h <= 24 && m < 60 && h * 60 + m <= 1440).then_some(h * 60 + m)
+    };
+    text.split_once('-')
+        .and_then(|(a, b)| Some((mins(a)?, mins(b)?)))
+        .ok_or_else(|| format!("CACHEHAMSTER_WINDOW={text}: use HH:MM-HH:MM"))
+}
+
+// What: is the local time inside the window.
+// Why: the container clock follows TZ; date reads it.
+// From: Issue #871 | PR #1980
+fn in_window((from, to): (u32, u32)) -> bool {
+    if to.abs_diff(from) == 1440 || from == to {
+        return true;
+    }
+    let now = std::process::Command::new("date")
+        .arg("+%H %M")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .and_then(|t| {
+            let (h, m) = t.trim().split_once(' ')?;
+            Some(h.parse::<u32>().ok()? * 60 + m.parse::<u32>().ok()?)
+        });
+    match now {
+        Some(n) if from < to => (from..to).contains(&n),
+        Some(n) => n >= from || n < to,
+        None => true,
+    }
+}
+
 // What: true when a waiting job may start now.
 // Why: later waits for Start; At waits for its time.
 // From: Issue #871 | PR #1858
@@ -736,6 +797,9 @@ async fn run_urls(
         };
         if !count(&jobs, &id, &rate, got).await {
             return State::Cancelled;
+        }
+        if let (Some(b), Some(p)) = (got, PACE.get()) {
+            p.wait(b).await;
         }
     }
     let list = jobs.lock().await;
@@ -1447,6 +1511,7 @@ struct Runner {
     jobs: Arc<Mutex<Vec<Job>>>,
     rate: Arc<AtomicU64>,
     running: BTreeMap<String, tokio::task::JoinHandle<State>>,
+    window: (u32, u32),
 }
 
 impl Runner {
@@ -1468,6 +1533,19 @@ impl Runner {
                     j.set(state);
                 }
             }
+        }
+        // What: outside the window jobs pause as waiting.
+        // Why: they start again when the window opens.
+        // From: Issue #871 | PR #1980
+        if !in_window(self.window) {
+            for (id, h) in std::mem::take(&mut self.running) {
+                h.abort();
+                if let Some(j) = list.iter_mut().find(|j| j.id == id) {
+                    j.set(State::Waiting);
+                }
+            }
+            let body = serde_json::to_vec_pretty(&*list).map_err(|e| e.to_string())?;
+            return c.save(JOBS_FILE, &body);
         }
         let now = clock::unix_secs();
         let logged_in = c.path(TOKEN_FILE).exists();
@@ -1524,6 +1602,15 @@ async fn daemon(c: Ctx) -> Result<(), String> {
         .pool_max_idle_per_host(connections)
         .build()
         .map_err(|e| format!("HTTP client: {e}"))?;
+    let mbit = c.s.uint("CACHEHAMSTER_MAX_MBIT")?;
+    if mbit > 0 {
+        let _ = PACE.set(Pace {
+            start: std::time::Instant::now(),
+            total: AtomicU64::new(0),
+            bytes_per_sec: mbit * 1_000_000 / 8,
+        });
+    }
+    let window = window(&c.s.text("CACHEHAMSTER_WINDOW")?)?;
     let mut list = read_json::<Vec<Job>>(&c.path(JOBS_FILE))?.unwrap_or_default();
     // What: a restart leaves no job in Running.
     // Why: the task that ran it is gone.
@@ -1538,6 +1625,7 @@ async fn daemon(c: Ctx) -> Result<(), String> {
         jobs: Arc::new(Mutex::new(list)),
         rate: Arc::new(AtomicU64::new(0)),
         running: BTreeMap::new(),
+        window,
     };
     let mut last = clock::unix_secs();
     loop {
