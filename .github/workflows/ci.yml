@@ -93,14 +93,9 @@ jobs:
       actions: read
       contents: write
       packages: write
-    # What: one mutable entry: the current_dev channel.
-    # Why: ci.sh needs a container before any steps run
+    # What: no job container; plan runs on the runner.
+    # Why: A3: it needs git, jq, yq only; init took 31 s.
     # From: Issue #1683 | PR #1858
-    container:
-      image: ghcr.io/${{ github.repository }}/build-tools:nightly
-      credentials: &ghcr_credentials
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
     env:
       PR_NUMBER: &pr_number ${{ github.event.pull_request.number }}
       PR_IS_FORK: &pr_is_fork ${{ github.event.pull_request.head.repo.fork }}
@@ -212,7 +207,9 @@ jobs:
     timeout-minutes: ${{ fromJSON(needs.plan.outputs.timeouts)['build'] }}
     container: &bt_platform
       image: ${{ needs.plan.outputs.image }}
-      credentials: *ghcr_credentials
+      credentials: &ghcr_credentials
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
       # What: the build-tools ref this job runs in.
       # Why: ids and Rust builds read the plan resolve.
       # From: Issue #1683 | PR #1912
@@ -543,9 +540,9 @@ jobs:
     # From: Issue #1683 | PR #1858
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    container:
-      image: ghcr.io/${{ github.repository }}/build-tools:nightly
-      credentials: *ghcr_credentials
+    # What: no job container; admin runs on the runner.
+    # Why: A3: it needs git, jq, yq, curl; init took 28 s.
+    # From: Issue #1683 | PR #1858
     permissions:
       contents: read
       packages: read
