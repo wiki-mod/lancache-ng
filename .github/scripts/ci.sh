@@ -11746,8 +11746,13 @@ _ci_stream_map_violations() {
 # Why: deeper SNI has no wildcard cert; it must passthrough
 # From: Issue #1322 | PR #1858
 _ci_https_dispatch_violations() {
-    local port="$1"
-    awk -v want=":${port};" 'index($0, "~^.+\\.") > 0 && substr($NF, length($NF) - length(want) + 1) != want { print }'
+    local port="$1" line
+    local -a w
+    while IFS= read -r line || [ -n "${line}" ]; do
+        [[ "${line}" == *'~^.+\.'* ]] || continue
+        read -r -a w <<< "${line}"
+        [[ "${w[-1]}" == *":${port};" ]] || printf '%s\n' "${line}"
+    done
 }
 
 # What: prove proxy routes wildcards by SNI.
