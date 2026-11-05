@@ -9,18 +9,18 @@
 {% block content %}
 <section>
   <div>
-    <p class="eyebrow">Overview → Statistiken</p>
-    <h1 class="page-title">Systemstatistiken</h1>
-    <p class="page-sub">Pick the machine or one container, then the time range.</p>
+    <p class="eyebrow">{{ t.overview_statistics }}</p>
+    <h1 class="page-title">{{ t.system_statistics }}</h1>
+    <p class="page-sub">{{ t.pick_the_machine_or_one_container }}</p>
   </div>
   {% if stats_error %}<div class="hint"><span class="glyph">!</span><div>{{ stats_error }}</div></div>{% endif %}
   <div class="subtabs">
-    {% for t in tabs %}
-    <button type="button" class="subtab stats-src" data-tab="{{ t.id }}">{{ t.label }}</button>
+    {% for tab in tabs %}
+    <button type="button" class="subtab stats-src" data-tab="{{ tab.id }}">{{ tab.label }}</button>
     {% endfor %}
   </div>
-  {% for t in tabs %}
-  <p class="section-sub stats-source" data-tab="{{ t.id }}" hidden>Source: {{ t.source }}</p>
+  {% for tab in tabs %}
+  <p class="section-sub stats-source" data-tab="{{ tab.id }}" hidden>{{ t.source }} {{ tab.source }}</p>
   {% endfor %}
   <div class="subtabs">
     {% for r in ranges %}

@@ -987,6 +987,7 @@ runtime:
     - SYSLOG_PROGRAMS=nginx pdns pdns_recursor kea-dhcp4 dnsmasq lancache-ui lancache-watchdog lancache-cachehamster chronyd snmpd
     - UI_CONTROLLABLE_SERVICES=proxy dns dhcp services
     - DHCP_MODES=off kea dnsmasq-proxy dnsmasq-relay
+    - UI_LANG_DEFAULT=de
     - UI_LISTEN=0.0.0.0
     - UI_LOG_LINES=500
     - UI_LOG_TAIL_CHUNK=65536
@@ -1245,6 +1246,7 @@ runtime:
     - SYSLOG_FWD_TRANSPORT=choice;udp,tcp;;restart;services
     - UI_CONTROLLABLE_SERVICES=list;;;live;ui
     - DHCP_MODES=list;;;live;ui
+    - UI_LANG_DEFAULT=text;;;live;ui
     - UI_LISTEN=text;;;restart;ui
     - UI_LOG_LINES=uint;10;100000;live;ui
     - UI_LOG_TAIL_CHUNK=uint;1024;10485760;live;ui
@@ -2298,6 +2300,7 @@ file_headers:
     - LICENSE
     - Cargo.lock
     - services/ui/src/static/admin.css
+    - "services/ui/src/lang/*.json"
     - services/ui/nginx/public_suffix_list.dat
 
 # What: CI variables each build type passes as build-args.

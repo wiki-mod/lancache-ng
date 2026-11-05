@@ -12,27 +12,31 @@
 {# What: Admin-UI restart form; confirm() before submit #}
 {# Why: UI exits, compose restarts it; top bar and setup #}
 {# From: Issue #1683 | PR #1912 #}
-{% component restart_ui_form(action, csrf_token, button_class, label, title=none) %}<form method="post" action="{{ action | safe }}"
-              onsubmit="return confirm('Admin-UI wirklich neu starten? Die Seite ist danach kurz nicht erreichbar.')">
+{% component restart_ui_form(action, csrf_token, button_class, label, t, title=none) %}<form method="post" action="{{ action | safe }}"
+              data-ask="{{ t.restart_ui_ask }}" onsubmit="return confirm(this.dataset.ask)">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <button type="submit" class="{{ button_class }}"{% if title is not none %} title="{{ title }}"{% endif %}>{{ label }}</button>
         </form>{% endcomponent restart_ui_form %}
 {# What: "Kopieren" button; copyText() copies target #}
 {# Why: one markup for setup and Secondary copy buttons #}
 {# From: Issue #1683 | PR #1912 #}
-{% component copy_button(target, extra_class="") %}<button type="button" onclick="copyText('{{ target }}', this)"
-                class="btn btn-sm btn-slate absolute top-2 right-2 {{ extra_class }}">Kopieren</button>{% endcomponent copy_button %}
+{% component copy_button(target, t, extra_class="") %}<button type="button" onclick="copyText('{{ target }}', this)"
+                class="btn btn-sm btn-slate absolute top-2 right-2 {{ extra_class }}">{{ t.copy }}</button>{% endcomponent copy_button %}
 {# What: on/off badge, "aktiv" or "inaktiv" #}
 {# Why: one markup for the DHCP-DDNS and NTP state #}
 {# From: Issue #1683 | PR #1912 #}
-{% component on_off_badge(on) %}<span class="{% if on %}badge-on{% else %}badge-off{% endif %}">{% if on %}aktiv{% else %}inaktiv{% endif %}</span>{% endcomponent on_off_badge %}
+{% component on_off_badge(on, t) %}<span class="{% if on %}badge-on{% else %}badge-off{% endif %}">{% if on %}{{ t.active }}{% else %}{{ t.inactive }}{% endif %}</span>{% endcomponent on_off_badge %}
 {# What: one sidebar link with dot, glyph and label #}
 {# Why: one markup and active rule for every menu entry #}
 {# From: Issue #1437 | PR #1858 #}
 {% component nav_link(href, label, active, glyph) %}<a href="{{ href | safe }}" class="nav-item {% if active %}active{% endif %}"><span class="nav-dot"></span><span class="nav-icon">{{ glyph }}</span> {{ label }}</a>{% endcomponent nav_link %}
 <!DOCTYPE html>
-<html lang="de">
+<html lang="{{ lang }}">
 <head>
+  {# What: texts of the chosen language for the scripts #}
+  {# Why: scripts show the same texts as the page #}
+  {# From: Issue #1683 | PR #1980 #}
+  <script>const LC_T = {{ t_json | safe }};</script>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>LanCache-NG Admin{% block title %}{% endblock %}</title>
@@ -762,26 +766,26 @@
       <img class="brand-mark" alt="LanCache-NG" src="{{ routes.logo_icon | safe }}?v={{ lancache_image_tag() }}">
     </div>
 
-    <div class="nav-group-label">📊 Overview</div>
+    <div class="nav-group-label">{{ t.overview_2 }}</div>
     {{ <nav_link href={pages.dashboard} label="Dashboard" active={active_page == "dashboard"} glyph="◧"/> }}
     {{ <nav_link href={pages.logs} label="Logs" active={active_page == "logs"} glyph="▤"/> }}
-    {{ <nav_link href={pages.stats} label="Statistics" active={active_page == "stats"} glyph="◔"/> }}
+    {{ <nav_link href={pages.stats} label={t.statistics} active={active_page == "stats"} glyph="◔"/> }}
 
-    <div class="nav-group-label">🎮 Gaming</div>
+    <div class="nav-group-label">{{ t.gaming }}</div>
     {{ <nav_link href={pages.cachehamster} label="Steam" active={active_page == "cachehamster"} glyph="⇓"/> }}
 
-    <div class="nav-group-label">⚙ Settings</div>
+    <div class="nav-group-label">{{ t.settings_2 }}</div>
     {{ <nav_link href={pages.domains} label="DNS" active={active_page == "domains"} glyph="⌘"/> }}
     {{ <nav_link href={pages.dhcp} label="DHCP" active={active_page == "dhcp"} glyph="⇄"/> }}
     <a href="{{ pages.logs | safe }}#syslog" class="nav-item"><span class="nav-dot"></span><span class="nav-icon">☍</span> Syslog</a>
-    {{ <nav_link href={pages.setup} label="General" active={active_page == "setup"} glyph="◐"/> }}
+    {{ <nav_link href={pages.setup} label={t.general} active={active_page == "setup"} glyph="◐"/> }}
 
     <div class="dock-footer">
       <span title="{{ lancache_image_registry() }}/{{ lancache_image_prefix() }}:{{ lancache_image_tag() }}">{{ lancache_image_tag() }} · {{ lancache_image_channel() }}</span><br>
       <!-- What: link to the project repository page
            Why: address only from the SOT, escaped by tera
            From: Issue #1683 | PR #1912 -->
-      <a href="{{ repo_url }}" target="_blank" rel="noopener noreferrer" style="color: inherit;">Projektseite</a>
+      <a href="{{ repo_url }}" target="_blank" rel="noopener noreferrer" style="color: inherit;">{{ t.project_page }}</a>
     </div>
   </nav>
 
@@ -791,12 +795,12 @@
          From: Issue #1437 -->
     <header class="beambar" id="beambar">
       <div class="beambar-services" id="beambar-services">
-        <span>Service health: laden…</span>
+        <span>{{ t.service_health_loading }}</span>
       </div>
       <div class="beambar-end">
-        <label class="lang-switch">🌐 <select id="lang-select" aria-label="Language"></select></label>
-        {{ <restart_ui_form action={routes.restart_ui} csrf_token={csrf_token} button_class="theme-btn" label="⟳ UI" title="Admin-UI neu starten"/> }}
-        <button type="button" class="theme-btn" id="theme-toggle" title="Toggle light/dark theme">◐</button>
+        <label class="lang-switch">🌐 <select id="lang-select" aria-label="{{ t.language }}">{% for l in langs %}<option value="{{ l[0] }}"{% if l[0] == lang %} selected{% endif %}>{{ l[1] }}</option>{% endfor %}</select></label>
+        {{ <restart_ui_form action={routes.restart_ui} csrf_token={csrf_token} button_class="theme-btn" label="⟳ UI" title={t.restart_the_admin_ui} t={t}/> }}
+        <button type="button" class="theme-btn" id="theme-toggle" title="{{ t.toggle_light_dark_theme }}">◐</button>
       </div>
     </header>
     <main class="content">
@@ -902,14 +906,14 @@
     // From: Issue #1068 | PR #1912
     function copyText(id, button) {
       const el = document.getElementById(id);
-      // What: shows "Kopiert!" briefly, then the old label
+      // What: shows the copied text, then the old label
       // Why: confirms the copy without a dialog
       // From: Issue #1683 | PR #1912
       function flash() {
-        button.textContent = 'Kopiert!';
+        button.textContent = LC_T.copied;
         button.classList.add('text-green-400');
         setTimeout(function () {
-          button.textContent = 'Kopieren';
+          button.textContent = LC_T.copy;
           button.classList.remove('text-green-400');
         }, 1500);
       }
@@ -998,7 +1002,7 @@
         // What: a user stop wins over the colour word.
         // Why: the watchdog leaves user-stopped containers.
         // From: Issue #1683 | PR #1980
-        state.textContent = svc.stopped_by_user ? 'vom Nutzer gestoppt' : (word[svc.status] || svc.status || '');
+        state.textContent = svc.stopped_by_user ? LC_T.stopped_by_the_user : (word[svc.status] || svc.status || '');
         wrap.appendChild(state);
         if (DOCK_CONTROLLABLE_SERVICES.includes(svc.name)) {
           // What: Start for red or gray, otherwise Stopp
@@ -1010,7 +1014,7 @@
           button.className = 'theme-btn';
           button.style.marginLeft = '0.35rem';
           button.style.padding = '0 0.4rem';
-          button.textContent = running ? 'Stopp' : 'Start';
+          button.textContent = running ? LC_T.stop : 'Start';
           button.addEventListener('click', function () {
             setDockServiceState(svc.name, running ? 'stopped' : 'running', button);
           });
@@ -1029,7 +1033,7 @@
           });
           const sum = document.createElement('summary');
           sum.className = 'theme-btn';
-          sum.textContent = 'Programme ▾';
+          sum.textContent = LC_T.programs;
           menu.appendChild(sum);
           const list = document.createElement('div');
           list.className = 'beam-menu-list';
@@ -1071,7 +1075,7 @@
       function render(data) {
         container.textContent = '';
         if (data.state === 'unavailable') {
-          container.textContent = 'Watchdog-Status nicht verfügbar';
+          container.textContent = LC_T.watchdog_status_not_available;
           return;
         }
         (data.services || []).forEach(function (svc) {
@@ -1079,7 +1083,7 @@
         });
         if (data.state === 'stale') {
           const staleNote = document.createElement('span');
-          staleNote.textContent = '(veraltet, ' + data.age_seconds + 's)';
+          staleNote.textContent = LC_T.stale + data.age_seconds + 's)';
           container.appendChild(staleNote);
         }
       }
@@ -1111,321 +1115,20 @@
     })();
   </script>
 
-  <!-- What: language switch: English and German pairs
-       Why: DoMe 05.11.: switching changed almost nothing
+  <!-- What: language choice: cookie, then reload
+       Why: the ui renders the page in that language
        From: Issue #1683 | PR #1980 -->
   <script>
     (function () {
-      const names = { en: 'English', de: 'Deutsch' };
-      const pairs = [
-        ['(Linux). A reply means the time server runs.', '(Linux). Eine Antwort heißt: der Zeitserver läuft.'],
-        ['(Windows) or', '(Windows) oder'],
-        ['(leading dot) matches every subdomain, like', '(Punkt vorne) passt auf jede Subdomain, etwa'],
-        ['(or a DHCP mode change) replaced again by the LAN address of LanCache-NG-NTP.', '(oder einem DHCP-Moduswechsel) wieder durch die LAN-Adresse von LanCache-NG-NTP ersetzt.'],
-        ['). Independent of the DHCP mode: running Kea DHCP does not mean DNS must be maintained too.', '). Unabhängig vom DHCP-Modus: Kea-DHCP zu betreiben heißt nicht automatisch, dass auch DNS gepflegt werden soll.'],
-        ['+ Add', '+ Hinzufügen'],
-        ['+ Add subnet', '+ Subnet hinzufügen'],
-        [', but not the bare domain itself.', ', aber nicht die Domain selbst.'],
-        [', which the upstream server uses to pick the pool) and the upstream server address.', ', an dem der Upstream-Server den Pool wählt) und die Adresse des Upstream-Servers.'],
-        ['. DHCP hands it to the clients.', '. DHCP gibt sie an die Clients weiter.'],
-        ['. Removing a secondary does this by itself.', '. Ein Secondary zu entfernen tut das von selbst.'],
-        ['192.168.1.10 or bootfile.efi', '192.168.1.10 oder bootfile.efi'],
-        ['; the installer shows the conflict instead of failing partway through.', '; das Installationsskript zeigt den Konflikt, statt mittendrin abzubrechen.'],
-        ['; with', '; mit'],
-        ['Cancel', 'Abbrechen'],
-        ['Disabled services write nothing to local storage; forwarding still gets everything.', 'Abgeschaltete Dienste schreiben nichts in den lokalen Speicher; die Weiterleitung bekommt weiter alles.'],
-        ['Expires', 'Ablauf'],
-        ['Add', 'Hinzufügen'],
-        ['Add Secondary', 'Secondary hinzufügen'],
-        ['Add a domain', 'Domain hinzufügen'],
-        ['Add domain', 'Domain hinzufügen'],
-        ['Add each form separately if you need more than one.', 'Jede Form einzeln hinzufügen, wenn du mehrere brauchst.'],
-        ['Add job', 'Job hinzufügen'],
-        ['Additional safe custom options (optional, PXE-scoped)', 'Zusätzliche sichere eigene Optionen (optional, nur PXE)'],
-        ['Addresses, one per line', 'Adressen, eine pro Zeile'],
-        ['Restart Admin UI', 'Admin-UI neu starten'],
-        ['Action', 'Aktion'],
-        ['Active DHCP leases', 'Aktive DHCP-Leases'],
-        ['Active DHCP mode', 'Aktiver DHCP-Modus'],
-        ['Current password', 'Aktuelles Passwort'],
-        ['All fields below are plain text (IPs, a filename, a domain name); no JSON, no client-class syntax, no advanced parser tricks', 'Alle Felder unten sind einfacher Text (IPs, ein Dateiname, ein Domainname); kein JSON, keine Client-Class-Syntax, keine Parser-Tricks'],
-        ['All services', 'Alle Dienste'],
-        ['All entries also go to these servers over TCP, buffered on disk. A secondary always also sends to its primary.', 'Alle Einträge gehen zusätzlich per TCP an diese Server, mit Puffer auf der Platte. Ein Secondary sendet immer auch an seinen Primary.'],
-        ['Allow unsigned updates', 'Unsignierte Updates erlauben'],
-        ['Appearance', 'Darstellung'],
-        ['At a time', 'Zu einer Uhrzeit'],
-        ['At least 12 characters. The browser asks for the password once more after saving.', 'Mindestens 12 Zeichen. Nach dem Speichern fragt der Browser das Passwort noch einmal ab.'],
-        ['At least one server. Names or IP addresses, separated by a space, comma or new line, for example', 'Mindestens ein Server. Namen oder IP-Adressen, getrennt durch Leerzeichen, Komma oder neue Zeile, zum Beispiel'],
-        ['Automatic updates', 'Automatische Updates'],
-        ['Edit', 'Bearbeiten'],
-        ['Affected reverse zones', 'Betroffene Reverse-Zonen'],
-        ['Cache HITs', 'Cache-Treffer'],
-        ['Cache hit rate', 'Cache-Trefferquote'],
-        ['Cache storage', 'Cache-Speicher'],
-        ['Cached Domains', 'Gecachte Domains'],
-        ['Caching mode', 'Cache-Modus'],
-        ['Capability', 'Fähigkeit'],
-        ['Change password', 'Passwort ändern'],
-        ['Changes here save immediately and stay on this page. No DNS restart is needed.', 'Änderungen hier werden sofort gespeichert und bleiben auf dieser Seite. Kein DNS-Neustart nötig.'],
-        ['Changes the language of this interface, including tooltips and error messages.', 'Ändert die Sprache dieser Oberfläche.'],
-        ['Check', 'Prüfen'],
-        ['Check for updates automatically', 'Automatisch nach Updates suchen'],
-        ['Compare DHCP-Server, DHCP-Proxy, and DHCP-Relay', 'DHCP-Server, DHCP-Proxy und DHCP-Relay im Vergleich'],
-        ['Connected secondaries', 'Verbundene Secondaries'],
-        ['Content', 'Inhalt'],
-        ['Copy', 'Kopieren'],
-        ['Custom domains', 'Eigene Domains'],
-        ['Custom records for names under your local domain, for anything auto-discovery doesn\'t already cover.', 'Eigene Einträge für Namen unter deiner lokalen Domain, für alles, was die automatische Erkennung nicht abdeckt.'],
-        ['DDNS updates', 'DDNS-Updates'],
-        ['Enable DDNS updates', 'DDNS-Updates aktivieren'],
-        ['DHCP Server Status', 'DHCP-Server-Status'],
-        ['DHCP and devices may change LAN names only with the TSIG key. Unsigned updates are a real security loss; turn them on only for a client that cannot sign.', 'DHCP und Geräte dürfen LAN-Namen nur mit dem TSIG-Schlüssel ändern. Unsignierte Updates sind ein echter Sicherheitsverlust; nur für einen Client einschalten, der nicht signieren kann.'],
-        ['DHCP management is disabled. The configuration area stays visible so the mode can be re-enabled later, but no active DHCP service is running.', 'DHCP-Verwaltung ist aus. Der Einstellungsbereich bleibt sichtbar, damit der Modus später wieder eingeschaltet werden kann; es läuft aber kein DHCP-Dienst.'],
-        ['DHCP client dry run is not running yet.', 'DHCP-Client-Dry-Run läuft noch nicht.'],
-        ['DHCP mode', 'DHCP-Modus'],
-        ['DHCP precheck', 'DHCP-Precheck'],
-        ['DHCP-Proxy is not the active mode. Choose it in the DHCP mode box above.', 'DHCP-Proxy ist nicht der aktive Modus. Wähle ihn oben im Kasten DHCP-Modus.'],
-        ['DHCP-Relay is not the active mode. Choose it in the DHCP mode box above.', 'DHCP-Relay ist nicht der aktive Modus. Wähle ihn oben im Kasten DHCP-Modus.'],
-        ['DHCP-Server is not the active mode. Choose it in the DHCP mode box above.', 'DHCP-Server ist nicht der aktive Modus. Wähle ihn oben im Kasten DHCP-Modus.'],
-        ['DNS, gateway, NTP, domain options', 'DNS-, Gateway-, NTP- und Domain-Optionen'],
-        ['Data served', 'Ausgelieferte Daten'],
-        ['Default CDN', 'Standard-CDN'],
-        ['The reservation uses simple fields; extra Kea JSON metadata is hidden in the UI on purpose.', 'Die Reservierung nutzt einfache Felder; zusätzliche Kea-JSON-Metadaten sind in der UI bewusst ausgeblendet.'],
-        ['Disconnect', 'Trennen'],
-        ['Each entry matches exactly one thing, never a combination:', 'Jeder Eintrag passt auf genau eine Sache, nie auf eine Kombination:'],
-        ['Edit address', 'Adresse bearbeiten'],
-        ['Enabled', 'Aktiviert'],
-        ['Remove', 'Entfernen'],
-        ['Check again', 'Erneut prüfen'],
-        ['Created', 'Erstellt'],
-        ['Every local name ends in this domain. With', 'Jeder lokale Name endet auf diese Domain. Mit'],
-        ['Fills the proxy cache ahead of time. Data streams through the proxy and is dropped in memory; nothing is installed or stored here.', 'Füllt den Proxy-Cache im Voraus. Die Daten laufen durch den Proxy und werden im Speicher verworfen; hier wird nichts installiert oder gespeichert.'],
-        ['Filter by text…', 'Nach Text filtern…'],
-        ['Follows your device\'s light/dark setting automatically.', 'Folgt automatisch der Hell/Dunkel-Einstellung deines Geräts.'],
-        ['Release', 'Freigeben'],
-        ['Gaming → Cachehamster', 'Gaming → Cachehamster'],
-        ['General', 'Allgemein'],
-        ['Hand this time server to DHCP clients', 'Diesen Zeitserver an DHCP-Clients geben'],
-        ['Note: entries made by the DHCP server are listed here with the manual ones. If you remove one, DHCP may create it again at the next lease.', 'Hinweis: Vom DHCP-Server angelegte Einträge stehen hier mit den manuellen zusammen. Entfernst du einen davon, kann DHCP ihn beim nächsten Lease wieder anlegen.'],
-        ['IP, e.g. 192.168.1.50', 'IP, z.B. 192.168.1.50'],
-        ['IP address', 'IP-Adresse'],
-        ['IPv4 only', 'Nur IPv4'],
-        ['If port 53 on that box is already used by something else, pass a free address with', 'Ist Port 53 auf diesem Rechner schon belegt, gib eine freie Adresse an mit'],
-        ['Issues IP addresses to devices', 'Vergibt IP-Adressen an Geräte'],
-        ['Kea mode is active. The configuration area below is visible and editable with direct fields for gateway, DNS, NTP, reservations, and subnet details.', 'Kea-Modus ist aktiv. Der Einstellungsbereich unten zeigt Felder für Gateway, DNS, NTP, Reservierungen und Subnetze.'],
-        ['No PTR records yet.', 'Keine PTR-Einträge vorhanden.'],
-        ['No reservations yet', 'Keine Reservierungen vorhanden'],
-        ['No subnets configured', 'Keine Subnetze konfiguriert'],
-        ['No zone snapshots available (PowerDNS not reachable right now, or no snapshot made yet).', 'Keine Zonen-Snapshots verfügbar (PowerDNS momentan nicht erreichbar, oder noch kein Snapshot erstellt).'],
-        ['No active leases', 'Keine aktiven Leases'],
-        ['No extra DHCP options configured for this subnet.', 'Keine zusätzlichen DHCP-Optionen für dieses Subnet konfiguriert.'],
-        ['Configuration snapshots', 'Konfigurations-Snapshots'],
-        ['Conflict probe is not running yet.', 'Konfliktprobe läuft noch nicht.'],
-        ['LAN domain', 'LAN-Domain'],
-        ['LAN zone records', 'Einträge der LAN-Zone'],
-        ['Language', 'Sprache'],
-        ['Later (start by hand)', 'Später (von Hand starten)'],
-        ['Lease time control', 'Lease-Dauer steuern'],
-        ['Library', 'Bibliothek'],
-        ['Load owned games', 'Eigene Spiele laden'],
-        ['Log out', 'Abmelden'],
-        ['Delete', 'Löschen'],
-        ['MAC address', 'MAC-Adresse'],
-        ['Managed subnet values: gateway, pool, DNS servers, NTP servers, lease time, and domain-related DHCP options', 'Verwaltete Subnetz-Werte: Gateway, Pool, DNS-Server, NTP-Server, Lease-Dauer und Domain-Optionen'],
-        ['Match system theme', 'System-Design übernehmen'],
-        ['Matches', 'Treffer'],
-        ['NTP page', 'NTP-Seite'],
-        ['After each DHCP change that was applied, the checked configuration is saved here as a snapshot. You can roll back to an earlier snapshot; the chosen configuration is checked again before it is applied.', 'Nach jeder erfolgreich übernommenen DHCP-Änderung wird die validierte Konfiguration hier als Snapshot gesichert. Bei Bedarf kann auf einen früheren Snapshot zurückgerollt werden; die ausgewählte Konfiguration wird vor der Übernahme erneut geprüft.'],
-        ['Name to identify the secondary, no spaces', 'Name des Secondary, ohne Leerzeichen'],
-        ['Needs at least one upstream server (field below).', 'Braucht mindestens einen Upstream-Server (Feld unten).'],
-        ['Needs the time server and the Kea DHCP server enabled.', 'Braucht den Zeitserver und den eingeschalteten Kea-DHCP-Server.'],
-        ['Network mode', 'Netzwerkmodus'],
-        ['New password', 'Neues Passwort'],
-        ['Repeat new password', 'Neues Passwort wiederholen'],
-        ['New subnet', 'Neues Subnet'],
-        ['New TSIG key', 'Neuer TSIG-Schlüssel'],
-        ['New cache size in GiB (whole number)', 'Neue Cache-Größe in GiB (ganze Zahl)'],
-        ['New job', 'Neuer Job'],
-        ['No LAN records yet.', 'Noch keine LAN-Einträge.'],
-        ['No TSIG key is set, so there is nothing to relax.', 'Kein TSIG-Schlüssel gesetzt, also gibt es nichts zu lockern.'],
-        ['No custom domains added yet.', 'Noch keine eigenen Domains.'],
-        ['No jobs yet.', 'Noch keine Jobs.'],
-        ['No log entries yet', 'Noch keine Log-Einträge'],
-        ['No requests logged yet.', 'Noch keine Anfragen protokolliert.'],
-        ['No secondaries registered yet.', 'Noch keine Secondaries registriert.'],
-        ['No snapshots for this zone yet', 'Noch keine Snapshots für diese Zone'],
-        ['No snapshots yet', 'Noch keine Snapshots vorhanden'],
-        ['Now', 'Jetzt'],
-        ['One command installs it, registers it with this primary, and starts it. Enter a name for that location (letters, digits, hyphens).', 'Ein Befehl installiert ihn, meldet ihn bei diesem Primary an und startet ihn. Gib einen Namen für den Standort ein (Buchstaben, Ziffern, Bindestriche).'],
-        ['Open connections', 'Offene Verbindungen'],
-        ['Add option', 'Option hinzufügen'],
-        ['Overview', 'Übersicht'],
-        ['Overview → Logs', 'Übersicht → Logs'],
-        ['Overview → Statistics', 'Übersicht → Statistiken'],
-        ['PXE / network-boot options', 'PXE- / Netzwerk-Boot-Optionen'],
-        ['Path', 'Pfad'],
-        ['Pick the machine or one container, then the time range.', 'Wähle die Maschine oder einen Container, dann den Zeitraum.'],
-        ['Primary DNS', 'Primärer DNS'],
-        ['Progress', 'Fortschritt'],
-        ['Project page', 'Projektseite'],
-        ['Logging per service', 'Protokollierung je Dienst'],
-        ['Save proxy values', 'Proxy-Werte speichern'],
-        ['Checking conflict probe and DHCP client dry run...', 'Prüfe Konfliktprobe und DHCP-Client-Dry-Run...'],
-        ['Recent requests', 'Letzte Anfragen'],
-        ['Save relay values', 'Relay-Werte speichern'],
-        ['Relays requests to a DHCP server on a different subnet or VLAN', 'Leitet Anfragen an einen DHCP-Server in einem anderen Subnetz oder VLAN weiter'],
-        ['Release channel', 'Release-Kanal'],
-        ['Renew key', 'Schlüssel erneuern'],
-        ['Resize cache', 'Cache-Größe ändern'],
-        ['Result', 'Ergebnis'],
-        ['Rotate token', 'Token erneuern'],
-        ['Run the time server', 'Zeitserver betreiben'],
-        ['Run this on the secondary box', 'Auf dem Secondary-Rechner ausführen'],
-        ['Save', 'Speichern'],
-        ['Scan the code with the Steam app on your phone and confirm. No password is typed here.', 'Scanne den Code mit der Steam-App auf dem Handy und bestätige. Hier wird kein Passwort eingegeben.'],
-        ['Search', 'Suchen'],
-        ['Second IP of the secondary for HTTPS DNS (optional)', 'Zweite IP des Secondary für HTTPS-DNS (optional)'],
-        ['Secondary DNS', 'Sekundärer DNS'],
-        ['Service', 'Dienst'],
-        ['Settings', 'Einstellungen'],
-        ['Settings → DHCP', 'Einstellungen → DHCP'],
-        ['Settings → DNS', 'Einstellungen → DNS'],
-        ['Settings → General', 'Einstellungen → Allgemein'],
-        ['Show login code', 'Anmeldecode zeigen'],
-        ['Sign-in', 'Anmeldung'],
-        ['Sign-in is turned off for this Admin UI.', 'Die Anmeldung ist für diese Admin-UI ausgeschaltet.'],
-        ['Size', 'Größe'],
-        ['State', 'Zustand'],
-        ['Static reservations (always the same address for one device)', 'Feste Reservierungen (immer dieselbe Adresse für ein Gerät)'],
-        ['Static reservations and live leases are available below', 'Feste Reservierungen und aktuelle Leases stehen unten'],
-        ['Static reservations', 'Statische Reservierungen'],
-        ['Subnets', 'Subnetze'],
-        ['Supplemental only', 'Nur ergänzend'],
-        ['System statistics', 'Systemstatistiken'],
-        ['TTL (sec.)', 'TTL (Sek.)'],
-        ['Test from a PC in the LAN:', 'Test von einem PC im LAN:'],
-        ['Then register each secondary again with', 'Danach jeden Secondary neu anmelden mit'],
-        ['These ship with LanCache-NG and cover common game/software CDNs out of the box. Turn one off if you don\'t want that CDN cached, without losing your place in the list.', 'Diese kommen mit LanCache-NG und decken übliche Spiele- und Software-CDNs ab. Schalte einen aus, wenn dieses CDN nicht gecacht werden soll; er bleibt in der Liste.'],
-        ['This Admin UI requires a username and password unless you\'ve explicitly turned that off for a trusted network.', 'Diese Admin-UI verlangt Benutzername und Passwort, außer du hast das für ein vertrauenswürdiges Netz ausdrücklich ausgeschaltet.'],
-        ['This tile reads the proxy\'s access lines from syslog-ng. The view of every container is on the Logs page.', 'Diese Kachel liest die Zugriffszeilen des Proxys aus syslog-ng. Die Sicht auf jeden Container steht auf der Seite Logs.'],
-        ['Time server (NTP)', 'Zeitserver (NTP)'],
-        ['Today', 'Heute'],
-        ['Toggle light/dark theme', 'Hell/Dunkel umschalten'],
-        ['Total reflects the cache size configured for this LanCache-NG instance. Oldest, least-requested files are removed automatically; you don\'t need to clear this yourself.', 'Gesamt ist die eingestellte Cache-Größe dieser LanCache-NG-Instanz. Alte, selten angefragte Dateien werden automatisch entfernt; du musst nichts selbst leeren.'],
-        ['Total requests', 'Anfragen gesamt'],
-        ['Turn this on if devices on your network don\'t use IPv6. Off by default.', 'Einschalten, wenn Geräte in deinem Netz kein IPv6 nutzen. Standard: aus.'],
-        ['Type', 'Typ'],
-        ['Upstream DHCP (info only):', 'Upstream-DHCP (nur Info):'],
-        ['Waiting clients', 'Wartende Clients'],
-        ['Forward to more syslog servers', 'Weiterleitung an weitere Syslog-Server'],
-        ['When on, Kea writes an A and a PTR record into the LAN DNS for every lease (Kea D2,', 'Wenn aktiviert, schreibt Kea für jede Lease automatisch einen A- und PTR-Eintrag ins LAN-DNS (Kea D2,'],
-        ['What', 'Was'],
-        ['What\'s moved through the cache, and what still needs your attention.', 'Was durch den Cache gelaufen ist und was noch deine Aufmerksamkeit braucht.'],
-        ['When', 'Wann'],
-        ['Which set of images this box installs updates from.', 'Aus welchem Image-Satz dieser Rechner Updates installiert.'],
-        ['Applied after saving and kept.', 'Wird nach dem Speichern übernommen und dauerhaft gespeichert.'],
-        ['Works alongside another DHCP server on the network', 'Arbeitet neben einem anderen DHCP-Server im Netz'],
-        ['Shows the device name for an IP address, for example in logs.', 'Zeigt zu einer IP-Adresse den Namen des Geräts an, zum Beispiel in Logs.'],
-        ['Targets (host:port, separated by spaces or lines)', 'Ziele (host:port, durch Leerzeichen oder Zeilen getrennt)'],
-        ['Zone snapshots & rollback', 'Zonen-Snapshots und Zurückrollen'],
-        ['Roll back', 'Zurückrollen'],
-        ['Extra DHCP options', 'Zusätzliche DHCP-Optionen'],
-        ['a printer is', 'ein Drucker ist'],
-        ['expired', 'abgelaufen'],
-        ['first download', 'erster Download'],
-        ['it is', 'ist er'],
-        ['latest is the tested release. Nightly is the experimental build from current_dev; it can be broken and is not for production.', 'latest ist das geprüfte Release. Nightly ist der Versuchsstand aus current_dev; er kann kaputt sein und ist nicht für den Betrieb.'],
-        ['matches only that exact domain.', 'passt nur auf genau diese Domain.'],
-        ['or Steam app ID', 'oder Steam-App-ID'],
-        ['pair per line, e.g.', 'Paar pro Zeile, z.B.'],
-        ['relaxed', 'gelockert'],
-        ['used', 'belegt'],
-        ['written out matches only that one exact subdomain, nothing beneath it.', 'ausgeschrieben passt nur auf genau diese Subdomain, nichts darunter.'],
-        ['— (comes from the remote server)', '— (kommt vom entfernten Server)'],
-        ['— (conflicts by design)', '— (schließt sich aus)'],
-        ['— (forwards to another server)', '— (leitet an anderen Server weiter)'],
-        ['— (issues no lease of its own)', '— (vergibt keine eigene Lease)'],
-        ['⚙ Settings', '⚙ Einstellungen'],
-        ['✓ (that\'s its whole purpose)', '✓ (genau dafür ist er da)'],
-        ['✓ for PXE/network-boot devices only', '✓ nur für PXE-/Netzwerk-Boot-Geräte'],
-        ['📊 Overview', '📊 Übersicht'],
-        ['Statistics', 'Statistiken'],
-        ['Starts right after Add job.', 'Startet direkt nach "Job hinzufügen".'],
-        ['Goes into the job list and waits; it starts when you press Start there.', 'Kommt in die Job-Liste und wartet; er startet, wenn du dort auf Start drückst.'],
-        ['Starts by itself at the chosen time.', 'Startet von selbst zur gewählten Zeit.'],
-        ['by hand: press Start', 'von Hand: Start drücken'],
-        ['Cancel job', 'Job abbrechen'],
-      ];
-      const read = function () {
-        const m = document.cookie.match(/(?:^|; )lc_lang=([a-z]{2,8})/);
-        return m && names[m[1]] ? m[1] : 'en';
-      };
-      const lang = read();
-      const map = new Map();
-      pairs.forEach(function (p) {
-        if (lang === 'de') { map.set(p[0], p[1]); } else { map.set(p[1], p[0]); }
-      });
-      const swap = function (text) {
-        const t = text.trim();
-        const out = map.get(t);
-        return out === undefined ? text : text.replace(t, out);
-      };
-      const attrs = ['placeholder', 'title', 'aria-label'];
-      const walk = function (root) {
-        const tw = document.createTreeWalker(root, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT);
-        let n = tw.currentNode;
-        while (n) {
-          if (n.nodeType === 3) {
-            const v = swap(n.nodeValue);
-            if (v !== n.nodeValue) { n.nodeValue = v; }
-          } else if (n.tagName !== 'SCRIPT' && n.tagName !== 'STYLE') {
-            attrs.forEach(function (a) {
-              if (n.hasAttribute && n.hasAttribute(a)) {
-                const v = swap(n.getAttribute(a));
-                if (v !== n.getAttribute(a)) { n.setAttribute(a, v); }
-              }
-            });
-          }
-          n = tw.nextNode();
-        }
-      };
-      walk(document.body);
-      new MutationObserver(function (list) {
-        list.forEach(function (m) {
-          m.addedNodes.forEach(function (x) { walk(x); });
-          if (m.type === 'characterData') {
-            const v = swap(m.target.nodeValue);
-            if (v !== m.target.nodeValue) { m.target.nodeValue = v; }
-          }
-        });
-      }).observe(document.body, { childList: true, subtree: true, characterData: true });
-      document.documentElement.lang = lang;
       const choose = function (code) {
         document.cookie = 'lc_lang=' + code + '; path=/; max-age=31536000; samesite=strict';
         location.reload();
       };
       const pick = document.getElementById('lang-select');
-      if (pick) {
-        Object.keys(names).forEach(function (code) {
-          const o = document.createElement('option');
-          o.value = code;
-          o.textContent = names[code];
-          o.selected = code === lang;
-          pick.appendChild(o);
-        });
-        pick.addEventListener('change', function () { choose(pick.value); });
-      }
-      const row = document.getElementById('lang-row');
-      if (row) {
-        Object.keys(names).forEach(function (code) {
-          const b = document.createElement('button');
-          b.type = 'button';
-          b.className = 'mode-btn' + (code === lang ? ' selected' : '');
-          b.textContent = names[code];
-          b.addEventListener('click', function () { choose(code); });
-          row.appendChild(b);
-        });
-      }
+      if (pick) { pick.addEventListener('change', function () { choose(pick.value); }); }
+      document.querySelectorAll('[data-lang]').forEach(function (b) {
+        b.addEventListener('click', function () { choose(b.dataset.lang); });
+      });
     })();
   </script>
 

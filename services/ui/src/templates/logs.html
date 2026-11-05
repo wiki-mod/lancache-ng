@@ -9,7 +9,7 @@
 
 {% block content %}
 <section>
-  <p class="eyebrow">Overview → Logs</p>
+  <p class="eyebrow">{{ t.overview_logs }}</p>
   <h1 class="page-title">Logs</h1>
 
   <!-- What: two tabs, Logs and Syslog
@@ -22,17 +22,17 @@
   <div data-logs-panel="logs">
   <div class="field-row" style="max-width:none; margin-bottom:18px;">
     <div class="field" style="margin-bottom:0; max-width:220px;">
-      <label for="log-service">Service</label>
+      <label for="log-service">{{ t.service }}</label>
       <select id="log-service" onchange="filterLogs()" style="width:100%; padding:9px 11px; border-radius:8px; border:1px solid var(--navy-600); background:var(--navy-900); color:var(--foam); font-size:13.5px;">
-        <option value="">All services</option>
+        <option value="">{{ t.all_services }}</option>
         {% for h in syslog_hosts %}
         <option value="{{ h }}">{{ h }}</option>
         {% endfor %}
       </select>
     </div>
     <div class="field" style="margin-bottom:0; flex:1;">
-      <label for="log-search">Search</label>
-      <input type="text" id="log-search" placeholder="Filter by text…" oninput="filterLogs()">
+      <label for="log-search">{{ t.search }}</label>
+      <input type="text" id="log-search" placeholder="{{ t.filter_by_text }}" oninput="filterLogs()">
     </div>
   </div>
 
@@ -48,12 +48,12 @@
         </div>
         {% endfor %}
         {% else %}
-        <div class="empty-state">No log entries yet</div>
+        <div class="empty-state">{{ t.no_log_entries_yet }}</div>
         {% endif %}
       </div>
     </div>
   </div>
-  <p class="field-hint" style="margin-top:8px;">Last {{ logs_max_entries }} entries from the central syslog store.</p>
+  <p class="field-hint" style="margin-top:8px;">{{ t.last }} {{ logs_max_entries }} {{ t.entries_from_the_central_syslog_store }}</p>
   </div>
 
   <div data-logs-panel="syslog">
@@ -62,19 +62,18 @@
   <form method="post" action="{{ routes.logs_save | safe }}" class="card" style="margin-bottom:16px;">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <div class="card-head">
-      <h3>Weiterleitung an weitere Syslog-Server</h3>
+      <h3>{{ t.forward_to_more_syslog_servers }}</h3>
     </div>
     <div class="card-body">
       <p class="section-sub">
-        Alle Einträge gehen zusätzlich per TCP an diese Server, mit Puffer auf der Platte.
-        Ein Secondary sendet immer auch an seinen Primary.
+        {{ t.all_entries_also_go_to_these }}
       </p>
       <div class="field" style="max-width:none;">
-        <label for="SYSLOG_FORWARD">Ziele (host:port, durch Leerzeichen oder Zeilen getrennt)</label>
+        <label for="SYSLOG_FORWARD">{{ t.targets_host_port_separated_by_spaces }}</label>
         <textarea id="SYSLOG_FORWARD" name="SYSLOG_FORWARD" rows="2" style="width:100%; padding:9px 11px; border-radius:8px; border:1px solid var(--navy-600); background:var(--navy-900); color:var(--foam); font-family:var(--font-mono); font-size:13px;">{{ v.SYSLOG_FORWARD }}</textarea>
       </div>
-      <div class="section-title">Protokollierung je Dienst</div>
-      <p class="section-sub">Abgeschaltete Dienste schreiben nichts in den lokalen Speicher; die Weiterleitung bekommt weiter alles.</p>
+      <div class="section-title">{{ t.logging_per_service }}</div>
+      <p class="section-sub">{{ t.disabled_services_write_nothing_to_local }}</p>
 
       {% for sw in log_switches %}
       <div class="toggle-row">
@@ -85,7 +84,7 @@
         </label>
       </div>
       {% endfor %}
-      <button type="submit" class="btn" style="margin-top:12px;">Speichern</button>
+      <button type="submit" class="btn" style="margin-top:12px;">{{ t.save }}</button>
     </div>
   </form>
 

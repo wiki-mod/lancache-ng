@@ -59,6 +59,31 @@ const ADMIN_CSS: &str = include_str!("static/admin.css");
 const FAVICON: &[u8] = include_bytes!("static/favicon.ico");
 const LOGO: &[u8] = include_bytes!("static/logo-icon.png");
 
+// What: one text file per language, built in.
+// Why: pages hold keys only; a language is a file.
+// From: Issue #1683 | PR #1980
+const LANGS: [(&str, &str); 2] = [
+    ("de", include_str!("lang/de.json")),
+    ("en", include_str!("lang/en.json")),
+];
+
+// What: cookie of the language the user picked.
+// Why: the selector sets it; the ui reads it.
+// From: Issue #1683 | PR #1980
+const LANG_COOKIE: &str = "lc_lang";
+
+// What: texts per language: code, key, text.
+// Why: page() picks one map per request.
+// From: Issue #1683 | PR #1980
+type Texts = BTreeMap<String, BTreeMap<String, String>>;
+
+tokio::task_local! {
+    // What: language of the request being served.
+    // Why: page() has no headers; the layer sets it.
+    // From: Issue #1683 | PR #1980
+    static LANG: String;
+}
+
 // What: session cookie name.
 // Why: the CSRF token is derived from it.
 // From: Issue #1683 | PR #1858
@@ -101,6 +126,7 @@ struct App {
     settings: RwLock<Settings>,
     saved: Option<PathBuf>,
     tera: Tera,
+    texts: Texts,
     docker: docker::Api,
     session_key: [u8; 32],
     cache_used: AtomicU64,
@@ -165,6 +191,24 @@ impl App {
         ctx.insert("programs", &s.list("UI_SERVICES"));
         ctx.insert("watchdog_refresh_seconds", &s.uint("UI_STATUS_REFRESH")?);
         ctx.insert("warnings", &s.warnings);
+        // What: texts of the request language.
+        // Why: templates hold keys; scripts get the same.
+        // From: Issue #1683 | PR #1980
+        let code = LANG
+            .try_with(Clone::clone)
+            .unwrap_or_else(|_| s.text("UI_LANG_DEFAULT").unwrap_or_default());
+        let empty = BTreeMap::new();
+        let t = self.texts.get(&code).unwrap_or(&empty);
+        let langs: Vec<(&str, &str)> = self
+            .texts
+            .iter()
+            .map(|(c, m)| (c.as_str(), m.get("lang_name").map_or(c.as_str(), |n| n)))
+            .collect();
+        let json = serde_json::to_string(t).map_err(|e| e.to_string())?;
+        ctx.insert("t", t);
+        ctx.insert("t_json", &json.replace("</", "<\\/"));
+        ctx.insert("lang", &code);
+        ctx.insert("langs", &langs);
         let html = self.tera.render(name, &ctx).map_err(|e| {
             eprintln!("ui: template {name}: {e:?}");
             format!("template {name} failed, see the log")
@@ -216,11 +260,19 @@ impl Csrf {
 // What: session id from the Cookie header.
 // Why: browsers may send several Cookie headers.
 fn session_cookie(headers: &HeaderMap) -> Option<String> {
+    cookie(headers, COOKIE)
+}
+
+// What: one cookie value by name.
+// Why: session and language cookie share the parse.
+// From: Issue #1683 | PR #1980
+fn cookie(headers: &HeaderMap, name: &str) -> Option<String> {
     for value in headers.get_all(header::COOKIE) {
         let Ok(text) = value.to_str() else { continue };
         for part in text.split(';') {
-            if let Some((COOKIE, v)) = part.trim().split_once('=') {
-                return Some(v.to_string());
+            match part.trim().split_once('=') {
+                Some((k, v)) if k == name => return Some(v.to_string()),
+                _ => {}
             }
         }
     }
@@ -2706,6 +2758,53 @@ fn templates() -> Result<Tera, String> {
     Ok(t)
 }
 
+// What: read the language files at start.
+// Why: a broken file or a missing key stops the start.
+// From: Issue #1683 | PR #1980
+fn texts() -> Result<Texts, String> {
+    let mut all = Texts::new();
+    for (code, body) in LANGS {
+        let map: BTreeMap<String, String> =
+            serde_json::from_str(body).map_err(|e| format!("lang {code}: {e}"))?;
+        all.insert(code.into(), map);
+    }
+    let keys: Vec<Vec<&String>> = all.values().map(|m| m.keys().collect()).collect();
+    if keys.windows(2).any(|w| w[0] != w[1]) {
+        return Err("lang: the files differ in their keys".into());
+    }
+    Ok(all)
+}
+
+// What: language of one request.
+// Why: cookie first, then the browser, then the SOT.
+// From: Issue #1683 | PR #1980
+fn pick_lang(app: &App, headers: &HeaderMap) -> String {
+    let known = |c: &str| app.texts.contains_key(c);
+    if let Some(c) = cookie(headers, LANG_COOKIE).filter(|c| known(c)) {
+        return c;
+    }
+    let accept = headers
+        .get(header::ACCEPT_LANGUAGE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    for part in accept.split(',') {
+        let c = part.split([';', '-']).next().unwrap_or_default();
+        let c = c.trim().to_ascii_lowercase();
+        if known(&c) {
+            return c;
+        }
+    }
+    app.settings().text("UI_LANG_DEFAULT").unwrap_or_default()
+}
+
+// What: run the request in its language.
+// Why: page() reads it; no handler passes it on.
+// From: Issue #1683 | PR #1980
+async fn lang(State(app): Shared, req: Request, next: Next) -> Response {
+    let code = pick_lang(&app, req.headers());
+    LANG.scope(code, next.run(req)).await
+}
+
 // What: menu pages and form paths.
 // Why: templates never spell a path.
 // From: Issue #1683 | PR #1858
@@ -2858,6 +2957,7 @@ fn router(app: Arc<App>) -> Router {
         )
         .merge(pages)
         .layer(axum::middleware::from_fn_with_state(app.clone(), secure))
+        .layer(axum::middleware::from_fn_with_state(app.clone(), lang))
         .with_state(app)
 }
 
@@ -2912,6 +3012,7 @@ async fn main() -> Result<(), String> {
     let app = Arc::new(App {
         docker: docker::Api::new(&s.text("DOCKER_ENDPOINT")?)?,
         tera: templates()?,
+        texts: texts()?,
         settings: RwLock::new(s.clone()),
         saved,
         session_key: secret::key_bytes(&key)?,
