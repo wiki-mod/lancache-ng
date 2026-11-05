@@ -11916,17 +11916,6 @@ _ci_validate_shared_secret() {
     _ci_capture 0 _ci_bounded_exec "${cid}" cat "${dir}/${name}"
 }
 
-# What: one env value of a container, empty if unset.
-# Why: compose env keys are not in the secrets volume.
-# From: Issue #1683 | PR #1980
-_ci_validate_container_env() {
-    local cid="$1" key="$2" envs line
-    envs="$(_ci_capture 0 docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "${cid}")" || return 2
-    while IFS= read -r line; do
-        [ "${line%%=*}" != "${key}" ] || { printf '%s\n' "${line#*=}"; return 0; }
-    done <<< "${envs}"
-}
-
 # What: the SOT runtime.defaults rows, @KEY@ resolved.
 # Why: ci.sh resolves them; setup.sh is the customer file.
 # From: Issue #1683 | PR #1912
@@ -11998,13 +11987,14 @@ _ci_fill() {
     REPLY="${out}${text}"
 }
 
-# What: http://<dns ip>:<port> of the rollback listener
-# Why: the port is the SOT runtime default, not a ui env
-# From: Issue #628 | PR #1858
-_ci_validate_rollback_base() {
-    local ip="$1" port
-    port="$(_ci_runtime_default DNS_ROLLBACK_PORT)" || return 2
-    printf 'http://%s:%s' "${ip}" "${port}"
+# What: zone snapshots as JSON, via the ui CLI.
+# Why: the ui owns them; setup.sh calls the same.
+# From: Issue #628 | PR #1980
+_ci_validate_zone_snapshots() {
+    local cid="$1" bin out
+    bin="$(_ci_required_field ui crates list)" || return 2
+    out="$(_ci_capture 0 _ci_bounded_exec "${cid}" "${bin%%$'\n'*}" zone-snapshots)" || return 2
+    printf '%s\n' "${out##*$'\n'}"
 }
 
 # What: writes a deploy/prod install's .env.local, mode 600.
@@ -12024,11 +12014,11 @@ _ci_validate_env_local() {
 }
 
 # What: DNS known-good snapshot/rollback round-trip.
-# Why: Real listener HTTP + PATCH + cache flush.
-# From: Issue #1683
+# Why: ui CLI snapshots + PATCH + cache flush.
+# From: Issue #1683 | PR #1980
 _ci_validate_dns_rollback() {
-    local project="$1" ip cid key jar csrf snap resp code rc=0 last
-    local zone label old new dns_wait ucid base lbase tries pause decoy dsvc usvc
+    local project="$1" ip cid jar csrf snap resp rc=0 last
+    local zone label old new dns_wait ucid base tries pause decoy dsvc usvc
     dsvc="$(_ci_validation_service dns)" || return 2
     usvc="$(_ci_validation_service ui)" || return 2
     ip="$(_ci_validate_container_ip "${project}" "${dsvc}")"
@@ -12037,37 +12027,7 @@ _ci_validate_dns_rollback() {
         ci_log "[CI-ERROR-VALIDATE-0037]" "reason=\"no dns container/IP for rollback check\""
         return 2
     fi
-    # What: PDNS_API_KEY from the dns env, else the file.
-    # Why: setup.sh sets it; the ui makes a file if unset.
-    # From: Issue #858 | PR #1980
-    key="$(_ci_validate_container_env "${cid}" PDNS_API_KEY)" || return 2
-    [ -n "${key}" ] || key="$(_ci_validate_shared_secret "${project}" "${cid}" pdns-api-key)" || return 2
-    key="${key//$'\n'/}"
-    if [ -z "${key}" ]; then
-        ci_log "[CI-ERROR-VALIDATE-0038]" "reason=\"could not read PDNS_API_KEY from shared-secrets\""
-        return 2
-    fi
     ucid="$(_ci_validate_cid "${project}" "${usvc}")" || return 2
-    lbase="$(_ci_validate_rollback_base "${ip}")" || return 2
-    # What: one try; dns healthy means the listener accepts.
-    # Why: the healthcheck connects to it; no poll.
-    # From: Issue #1683 | PR #1912
-    if ! last="$(_ci_curl_secret header "X-API-Key: ${key}" -fsS "${lbase}/snapshots" 2>&1)"; then
-        ci_error "[CI-ERROR-VALIDATE-0039]" "url=\"${lbase}\" reason=\"rollback listener did not accept\"" "${last}"
-        return 1
-    fi
-    resp="$(_ci_capture 0 _ci_validate_curl -sS -w '\n%{http_code}' "${lbase}/snapshots")" || return 2
-    code="${resp##*$'\n'}"
-    if [ "${code}" != "401" ]; then
-        ci_error "[CI-ERROR-VALIDATE-0040]" "code=\"${code}\" reason=\"/snapshots without X-API-Key not 401\"" "${resp}"
-        return 1
-    fi
-    resp="$(_ci_capture 0 _ci_curl_secret header "X-API-Key: ${key}x" -sS -w '\n%{http_code}' "${lbase}/snapshots")" || return 2
-    code="${resp##*$'\n'}"
-    if [ "${code}" != "401" ]; then
-        ci_error "[CI-ERROR-VALIDATE-0041]" "code=\"${code}\" reason=\"/snapshots with wrong X-API-Key not 401\"" "${resp}"
-        return 1
-    fi
     zone="$(_ci_validate_lan_zone)" || return 2
     label="$(_ci_variable CI_VALIDATE_PROBE_LABEL)" || return 2
     old="$(_ci_validate_probe_ip 2)" && new="$(_ci_validate_probe_ip 3)" || return 2
@@ -12079,7 +12039,7 @@ _ci_validate_dns_rollback() {
     # What: capture the zone's newest snapshot (pre-change).
     # Why: target this test rolls back to after 2nd write.
     # From: Issue #628
-    resp="$(_ci_capture 0 _ci_curl_secret header "X-API-Key: ${key}" -sS "${lbase}/snapshots")" || { rm -f "${jar}"; return 2; }
+    resp="$(_ci_validate_zone_snapshots "${ucid}")" || { rm -f "${jar}"; return 2; }
     snap="$(_ci_capture 0 jq -r --arg z "${zone}" ".zones[\$z][0].id // empty" <<<"${resp}")" || { rm -f "${jar}"; return 2; }
     if [ -z "${snap}" ]; then
         ci_log "[CI-ERROR-VALIDATE-0042]" "zone=\"${zone}\" reason=\"no known-good snapshot after first write\""
@@ -12089,7 +12049,7 @@ _ci_validate_dns_rollback() {
     _ci_validate_ui_add_record "${base}" "${jar}" "${csrf}" "${label}" "${new}" || { rm -f "${jar}"; return 1; }
     _ci_validate_dns_resolves "${project}" IP_HTTP "${label}.${zone}" "${new}" "${dns_wait}" || { rm -f "${jar}"; return 1; }
     rm -f "${jar}"
-    resp="$(_ci_capture 0 _ci_curl_secret header "X-API-Key: ${key}" -sS "${lbase}/snapshots")" || return 2
+    resp="$(_ci_validate_zone_snapshots "${ucid}")" || return 2
     last="$(_ci_capture 0 jq -r --arg z "${zone}" ".zones[\$z][0].id // empty" <<<"${resp}")" || return 2
     # What: setup.sh rollback, wrong host PDNS_API_KEY.
     # Why: the key must be resolved inside the container.
@@ -12112,7 +12072,7 @@ _ci_validate_dns_rollback() {
     _ci_validate_dns_resolves "${project}" IP_HTTP "${label}.${zone}" "${old}" "${dns_wait}" || return $?
     tries="$(_ci_variable CI_VALIDATE_SNAPSHOT_POLL_ATTEMPTS)" || return 2
     pause="$(_ci_variable CI_VALIDATE_POLL_PAUSE)" || return 2
-    if ! resp="$(_ci_validate_poll "${tries}" "${pause}" _ci_validate_new_snapshot "${lbase}" "${key}" "${last}" "${zone}")"; then
+    if ! resp="$(_ci_validate_poll "${tries}" "${pause}" _ci_validate_new_snapshot "${ucid}" "${last}" "${zone}")"; then
         ci_error "[CI-ERROR-VALIDATE-0087]" "previous=\"${last}\" zone=\"${zone}\" reason=\"no new snapshot after the rollback\"" "${resp}"
         return 1
     fi
@@ -12122,8 +12082,8 @@ _ci_validate_dns_rollback() {
 # Why: a restore must record the restored state too.
 # From: Issue #836
 _ci_validate_new_snapshot() {
-    _ci_curl_secret header "X-API-Key: $2" -fsS "$1/snapshots" \
-        | jq -e --arg p "$3" --arg z "$4" '(.zones[$z][0].id // "") as $i | $i != "" and $i != $p'
+    _ci_validate_zone_snapshots "$1" \
+        | jq -e --arg p "$2" --arg z "$3" '(.zones[$z][0].id // "") as $i | $i != "" and $i != $p'
 }
 
 # What: http-port or user of the Kea control agent
