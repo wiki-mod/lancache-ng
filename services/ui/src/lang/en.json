@@ -147,6 +147,7 @@
   "graph_queries": "DNS queries",
   "graph_requests": "requests",
   "graph_time": "time",
+  "hamster_daemon_down": "The cachehamster service is not running; jobs are not processed. See Logs, container services.",
   "hamster_exit": "Cachehamster ended with code {x}",
   "hamster_says": "Cachehamster reports:",
   "hamster_st_blocked": "blocked",

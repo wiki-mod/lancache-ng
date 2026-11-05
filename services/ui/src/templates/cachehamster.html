@@ -13,6 +13,7 @@
   <h1 class="page-title">Cachehamster</h1>
   <p class="page-sub">{{ t.fills_the_proxy_cache_ahead_of }}</p>
   {% if hamster_error %}<p class="status-line"><span class="beam-light off"></span>{{ t.cachehamster_not_reachable }} {{ hamster_error }}</p>{% endif %}
+  {% if hamster and not hamster.daemon_running %}<p class="status-line"><span class="beam-light off"></span>{{ t.hamster_daemon_down }}</p>{% endif %}
 
   <div class="subtabs">
     <div class="subtab active" data-ch-tab="jobs">Jobs</div>

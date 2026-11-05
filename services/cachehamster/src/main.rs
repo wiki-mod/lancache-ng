@@ -550,7 +550,17 @@ fn status(c: &Ctx) -> Result<Value, String> {
     // Why: a new job was missing until the next round.
     // From: Issue #871 | PR #1980
     take_inbox(c, &mut jobs, false)?;
+    // What: the daemon writes jobs.json every round.
+    // Why: a stale file means the daemon is down.
+    // From: Issue #871 | PR #1980
+    let tick = c.s.uint("CACHEHAMSTER_POLL_INTERVAL")?;
+    let alive = std::fs::metadata(c.path(JOBS_FILE))
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .is_some_and(|age| age.as_secs() <= tick * 3);
     Ok(json!({
+        "daemon_running": alive,
         "logged_in": session.is_some(),
         "account": session.map(|s| s.account),
         "login_pending": c.path(PENDING_FILE).exists(),
