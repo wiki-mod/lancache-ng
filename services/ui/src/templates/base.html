@@ -406,6 +406,12 @@
     white-space: normal; width: max-content; max-width: 260px; line-height: 1.5;
     box-shadow: 0 4px 14px rgba(0,0,0,0.35); z-index: 20;
   }
+  /* What: dark browser parts (calendar icon) in dark.
+     Why: DoMe 05.11.: the calendar icon was invisible.
+     From: Issue #1683 | PR #1980 */
+  html:not([data-theme="light"]) input,
+  html:not([data-theme="light"]) select,
+  html:not([data-theme="light"]) textarea { color-scheme: dark; }
   /* What: one look for every form field.
      Why: DoMe 05.11.: Cachehamster fields were white.
      From: Issue #1683 | PR #1980 */

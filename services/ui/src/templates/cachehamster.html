@@ -107,6 +107,17 @@
   document.querySelectorAll('[data-unix]').forEach(function (el) {
     el.textContent = new Date(Number(el.dataset.unix) * 1000).toLocaleString();
   });
+  // What: the time field opens its calendar on click.
+  // Why: DoMe 05.11.: a click on "tt" opened nothing.
+  // From: Issue #1683 | PR #1980
+  const atField = document.getElementById('hamster-at');
+  const whenField = document.getElementById('hamster-when');
+  const showAt = function () { atField.hidden = whenField.value !== 'at'; };
+  whenField.addEventListener('change', showAt);
+  showAt();
+  atField.addEventListener('click', function () {
+    try { atField.showPicker(); } catch (err) { reportError(err); }
+  });
   document.getElementById('hamster-add').addEventListener('submit', function () {
     const at = document.getElementById('hamster-at').value;
     document.getElementById('hamster-at-unix').value = at ? Math.floor(new Date(at).getTime() / 1000) : '';
