@@ -676,21 +676,25 @@ fn apply_order(jobs: &mut Vec<Job>, order: Order) {
 static PACE: std::sync::OnceLock<Pace> = std::sync::OnceLock::new();
 
 struct Pace {
-    start: std::time::Instant,
-    total: AtomicU64,
+    next: std::sync::Mutex<tokio::time::Instant>,
     bytes_per_sec: u64,
 }
 
 impl Pace {
-    // What: sleep until the average is under the limit.
-    // Why: data is dropped; only the fetch rate matters.
+    // What: each file books its time after the last one.
+    // Why: live 05.11.: idle time built credit, 47 Mbit/s.
     // From: Issue #871 | PR #1980
     async fn wait(&self, got: u64) {
-        let total = self.total.fetch_add(got, Ordering::Relaxed) + got;
-        let due = Duration::from_secs_f64(total as f64 / self.bytes_per_sec as f64);
-        if let Some(rest) = due.checked_sub(self.start.elapsed()) {
-            tokio::time::sleep(rest).await;
-        }
+        let cost = Duration::from_secs_f64(got as f64 / self.bytes_per_sec as f64);
+        let until = {
+            let mut next = self
+                .next
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *next = (*next).max(tokio::time::Instant::now()) + cost;
+            *next
+        };
+        tokio::time::sleep_until(until).await;
     }
 }
 
@@ -1605,8 +1609,7 @@ async fn daemon(c: Ctx) -> Result<(), String> {
     let mbit = c.s.uint("CACHEHAMSTER_MAX_MBIT")?;
     if mbit > 0 {
         let _ = PACE.set(Pace {
-            start: std::time::Instant::now(),
-            total: AtomicU64::new(0),
+            next: std::sync::Mutex::new(tokio::time::Instant::now()),
             bytes_per_sec: mbit * 1_000_000 / 8,
         });
     }
