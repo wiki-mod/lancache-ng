@@ -80,11 +80,11 @@ services:
       - syslog-ng=/usr/sbin/syslog-ng,-F,-f,@SYSLOG_CONF_FILE@
       - chronyd=/usr/sbin/chronyd,-d,-f,@CHRONY_CONF_FILE@
       - snmpd=/usr/sbin/snmpd,-f,-C,-c,@SNMPD_CONF_FILE@
-    # What: chronyd off by NTP_ENABLED; own its state dir.
-    # Why: live 05.11.: ran at 0; drift.tmp denied.
+    # What: NTP_ENABLED read from the ui file; 0 = idle.
+    # Why: live 05.11.: UI switch unread; ERROR line at 0.
     # From: Issue #1683 | PR #1980
     process_pre:
-      - 'chronyd=x="${NTP_ENABLED:-1}"; if [ "$x" = 0 -o "$x" = false ]; then ewarn "NTP_ENABLED=$x"; return 1; fi; chown chrony:chrony @NTP_STATE_DIR@'
+      - 'chronyd=x="${NTP_ENABLED:-1}"; f=@UI_SETTINGS_FILE@; v=""; if [ -r "$f" ]; then v="$(sed -n "s/^NTP_ENABLED=//p" "$f")"; fi; if [ -n "$v" ]; then x="${v##*[[:space:]]}"; fi; if [ "$x" = 0 -o "$x" = false ]; then einfo "NTP_ENABLED=$x: chronyd off"; command=/bin/sleep; command_args=2147483647; return 0; fi; chown chrony:chrony @NTP_STATE_DIR@'
     # What: accounts and dirs ci.sh image-setup creates.
     # Why: no RUN logic in the Dockerfile; @KEY@ = default.
     # From: Issue #1683 | PR #1912
