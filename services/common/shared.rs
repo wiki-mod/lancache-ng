@@ -1167,6 +1167,14 @@ pub mod docker {
             )
         }
 
+        // What: one stats sample of a container.
+        // Why: CPU, memory, network, disk per container.
+        // From: Issue #1683 | PR #1980
+        pub async fn stats(&self, name: &str, limit: Duration) -> Result<Value, Error> {
+            let path = format!("/containers/{name}/stats?stream=false&one-shot=true");
+            decode(&self.call(Method::GET, &path, None, limit).await?)
+        }
+
         // What: start, stop, restart or HUP a container.
         // Why: grace is the stop timeout in seconds.
         // From: Issue #1683 | PR #1858
@@ -3854,6 +3862,7 @@ pub mod rrd {
         pub ds: String,
         pub oid: String,
         pub kind: String,
+        pub scale: Option<f64>,
     }
 
     // What: one graph, stored in one RRD file.
@@ -3863,8 +3872,26 @@ pub mod rrd {
     pub struct Graph {
         pub name: String,
         pub title: String,
+        pub tab: String,
         pub sources: Vec<Source>,
     }
+
+    // What: tab of the SNMP graphs.
+    // Why: whole-box values, not one container.
+    // From: Issue #1683 | PR #1980
+    pub const MACHINE: &str = "machine";
+
+    // What: Docker stats fields a container graph reads.
+    // Why: names of the per-container values.
+    // From: Issue #1683 | PR #1980
+    pub const FIELDS: [&str; 6] = [
+        "cpu_ns",
+        "mem_bytes",
+        "net_rx",
+        "net_tx",
+        "blk_read",
+        "blk_write",
+    ];
 
     fn is_plain(word: &str) -> bool {
         !word.is_empty() && word.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
@@ -3872,27 +3899,41 @@ pub mod rrd {
 
     fn source(text: &str) -> Result<Source, String> {
         let parts: Vec<&str> = text.split('=').collect();
-        match parts[..] {
-            [ds, oid, kind] if is_plain(ds) && KINDS.contains(&kind) => Ok(Source {
-                ds: ds.into(),
-                oid: oid.into(),
-                kind: kind.into(),
-            }),
-            _ => Err(format!("source {text:?} needs ds=oid=GAUGE|COUNTER|DERIVE")),
+        let (ds, oid, kind, scale) = match parts[..] {
+            [ds, oid, kind] => (ds, oid, kind, None),
+            [ds, oid, kind, f] => (ds, oid, kind, f.parse::<f64>().ok()),
+            _ => ("", "", "", None),
+        };
+        let bad_scale = parts.len() == 4 && scale.is_none();
+        if !is_plain(ds) || !KINDS.contains(&kind) || bad_scale {
+            return Err(format!(
+                "source {text:?} needs ds=oid=GAUGE|COUNTER|DERIVE[=factor]"
+            ));
         }
+        Ok(Source {
+            ds: ds.into(),
+            oid: oid.into(),
+            kind: kind.into(),
+            scale,
+        })
     }
 
-    fn graph(row: &str) -> Result<Graph, String> {
+    fn graph(row: &str, tab: &str) -> Result<Graph, String> {
         let (name, list) = row
             .split_once(':')
-            .ok_or_else(|| format!("STATS_GRAPHS row {row:?} needs name:sources"))?;
-        if !is_plain(name) {
+            .ok_or_else(|| format!("stats row {row:?} needs name:sources"))?;
+        if !is_plain(name) || !is_plain(tab) {
             return Err(format!("graph name {name:?} is not plain"));
         }
         let sources = list.split('+').map(source).collect::<Result<Vec<_>, _>>()?;
+        let full = match tab {
+            MACHINE => name.to_string(),
+            _ => format!("{tab}_{name}"),
+        };
         Ok(Graph {
-            name: name.into(),
+            name: full,
             title: name.replace('_', " "),
+            tab: tab.into(),
             sources,
         })
     }
@@ -3901,7 +3942,71 @@ pub mod rrd {
     // Why: a bad row is an error, never skipped.
     // From: Issue #1683 | PR #1858
     pub fn graphs(s: &Settings) -> Result<Vec<Graph>, String> {
-        s.list("STATS_GRAPHS").iter().map(|r| graph(r)).collect()
+        s.list("STATS_GRAPHS")
+            .iter()
+            .map(|r| graph(r, MACHINE))
+            .collect()
+    }
+
+    // What: one graph set per container.
+    // Why: DoMe 05.11.: no choice of container.
+    // From: Issue #1683 | PR #1980
+    pub fn container_graphs(s: &Settings) -> Result<Vec<Graph>, String> {
+        let mut out = Vec::new();
+        for tab in s.list("STATS_CONTAINERS") {
+            for row in s.list("STATS_CONTAINER_GRAPHS") {
+                let g = graph(&row, &tab)?;
+                if let Some(x) = g.sources.iter().find(|x| !FIELDS.contains(&x.oid.as_str())) {
+                    return Err(format!("{}: unknown field {}", g.name, x.oid));
+                }
+                out.push(g);
+            }
+        }
+        Ok(out)
+    }
+
+    // What: machine and container graphs.
+    // Why: the page and the image route use both.
+    // From: Issue #1683 | PR #1980
+    pub fn all(s: &Settings) -> Result<Vec<Graph>, String> {
+        let mut out = graphs(s)?;
+        out.extend(container_graphs(s)?);
+        Ok(out)
+    }
+
+    // What: one value of a Docker stats answer.
+    // Why: sums all networks and block devices.
+    // From: Issue #1683 | PR #1980
+    pub fn docker_value(v: &serde_json::Value, field: &str) -> String {
+        let sum = |list: Vec<&serde_json::Value>, key: &str| -> Option<u64> {
+            list.iter().map(|x| x[key].as_u64()).sum()
+        };
+        let nets: Vec<&serde_json::Value> = match v["networks"].as_object() {
+            Some(m) => m.values().collect(),
+            None => Vec::new(),
+        };
+        let blk = |op: &str| -> Option<u64> {
+            let rows = v["blkio_stats"]["io_service_bytes_recursive"].as_array()?;
+            let hit = rows
+                .iter()
+                .filter(|r| r["op"].as_str().is_some_and(|o| o.eq_ignore_ascii_case(op)));
+            hit.map(|r| r["value"].as_u64()).sum()
+        };
+        let mem = || -> Option<u64> {
+            let used = v["memory_stats"]["usage"].as_u64()?;
+            let cache = v["memory_stats"]["stats"]["inactive_file"].as_u64();
+            Some(used.saturating_sub(cache.unwrap_or(0)))
+        };
+        let got = match field {
+            "cpu_ns" => v["cpu_stats"]["cpu_usage"]["total_usage"].as_u64(),
+            "mem_bytes" => mem(),
+            "net_rx" if !nets.is_empty() => sum(nets, "rx_bytes"),
+            "net_tx" if !nets.is_empty() => sum(nets, "tx_bytes"),
+            "blk_read" => blk("read"),
+            "blk_write" => blk("write"),
+            _ => None,
+        };
+        got.map_or_else(|| "U".into(), |n| n.to_string())
     }
 
     // What: RRD file of one graph.
@@ -3963,7 +4068,6 @@ pub mod rrd {
     // Why: snmpget -Oqv prints one value per line.
     // From: Issue #1683 | PR #1858
     pub fn sample(s: &Settings, g: &Graph) -> Result<(), String> {
-        ensure(s, g)?;
         let mut get = Command::new("snmpget");
         get.args(["-v2c", "-Oqv", "-c"]);
         get.arg(s.text("SNMP_COMMUNITY")?)
@@ -3971,6 +4075,14 @@ pub mod rrd {
         get.args(g.sources.iter().map(|x| &x.oid));
         let text = String::from_utf8_lossy(&run(&mut get)?).into_owned();
         let values: Vec<String> = text.lines().map(number_or_unknown).collect();
+        store(s, g, &values)
+    }
+
+    // What: write one sample row into the RRD.
+    // Why: SNMP and Docker stats share the files.
+    // From: Issue #1683 | PR #1980
+    pub fn store(s: &Settings, g: &Graph, values: &[String]) -> Result<(), String> {
+        ensure(s, g)?;
         if values.len() != g.sources.len() {
             let (got, want) = (values.len(), g.sources.len());
             return Err(format!("{}: {got} values for {want} sources", g.name));
@@ -4015,7 +4127,17 @@ pub mod rrd {
                 0 => String::new(),
                 n => colours[i % n].clone(),
             };
-            cmd.arg(format!("DEF:{0}={1}:{0}:AVERAGE", src.ds, path.display()));
+            cmd.arg(format!(
+                "DEF:{0}_raw={1}:{0}:AVERAGE",
+                src.ds,
+                path.display()
+            ));
+
+            // What: factor per source, e.g. ns to percent.
+            // Why: Docker counts CPU time in nanoseconds.
+            // From: Issue #1683 | PR #1980
+            let factor = src.scale.unwrap_or(1.0);
+            cmd.arg(format!("CDEF:{0}={0}_raw,{factor},*", src.ds));
             cmd.arg(format!("LINE2:{0}{colour}:{0:<8}", src.ds));
 
             // What: now, average and max as text per line.

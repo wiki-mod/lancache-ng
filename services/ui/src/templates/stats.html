@@ -1,9 +1,9 @@
 
 {# LanCache-NG (https://github.com/wiki-mod/lancache-ng) #}
 {# SPDX-License-Identifier: AGPL-3.0-or-later #}
-{# What: statistics: rrdtool graphs, one tab per range
-   Why: SNMP samples in RRD; replaces Netdata
-   From: Issue #1683 | PR #1858 #}
+{# What: statistics: one tab per source and range #}
+{# Why: box via SNMP, each container via Docker #}
+{# From: Issue #1683 | PR #1980 #}
 {% extends "base.html" %}
 {% block title %} – Statistiken{% endblock %}
 {% block content %}
@@ -11,9 +11,17 @@
   <div>
     <p class="eyebrow">Overview → Statistiken</p>
     <h1 class="page-title">Systemstatistiken</h1>
-    <p class="page-sub">Load, memory, CPU and disk reads/writes of this box, one value per minute.</p>
+    <p class="page-sub">Pick the machine or one container, then the time range.</p>
   </div>
   {% if stats_error %}<div class="hint"><span class="glyph">!</span><div>{{ stats_error }}</div></div>{% endif %}
+  <div class="subtabs">
+    {% for t in tabs %}
+    <button type="button" class="subtab stats-src" data-tab="{{ t.id }}">{{ t.label }}</button>
+    {% endfor %}
+  </div>
+  {% for t in tabs %}
+  <p class="section-sub stats-source" data-tab="{{ t.id }}" hidden>Source: {{ t.source }}</p>
+  {% endfor %}
   <div class="subtabs">
     {% for r in ranges %}
     <button type="button" class="subtab stats-tab" data-range="{{ r }}">{{ r }}</button>
@@ -21,7 +29,7 @@
   </div>
   <div class="grid-2" style="grid-template-columns:1fr;">
     {% for g in graphs %}
-    <div class="card" style="min-width:0;">
+    <div class="card stats-card" data-tab="{{ g.tab }}" style="min-width:0;" hidden>
       <h3>{{ g.title }}</h3>
       <img class="stats-img" data-graph="{{ g.name }}" alt="{{ g.title }}" style="width:100%; height:auto; display:block;">
     </div>
@@ -31,20 +39,36 @@
 {% endblock %}
 {% block scripts %}
 <script>
-// What: switch the range; reload all graph images
-// Why: dark theme gets the dark rrdtool colour set
-// From: Issue #1683 | PR #1858
+// What: pick source and range; load visible images.
+// Why: the choice survives a reload.
+// From: Issue #1683 | PR #1980
 (function () {
+  const srcs = document.querySelectorAll('.stats-src');
   const tabs = document.querySelectorAll('.stats-tab');
+  let src = srcs.length ? srcs[0].dataset.tab : '';
+  let range = tabs.length ? tabs[0].dataset.range : '';
+  try {
+    const a = sessionStorage.getItem('stats-src');
+    const b = sessionStorage.getItem('stats-range');
+    if (a && document.querySelector('.stats-src[data-tab="' + a + '"]')) { src = a; }
+    if (b && document.querySelector('.stats-tab[data-range="' + b + '"]')) { range = b; }
+  } catch (err) { reportError(err); }
   function dark() { return document.documentElement.getAttribute('data-theme') !== 'light'; }
-  function show(range) {
+  function show() {
+    srcs.forEach(function (t) { t.classList.toggle('active', t.dataset.tab === src); });
     tabs.forEach(function (t) { t.classList.toggle('active', t.dataset.range === range); });
-    document.querySelectorAll('.stats-img').forEach(function (img) {
+    document.querySelectorAll('.stats-source').forEach(function (p) { p.hidden = p.dataset.tab !== src; });
+    document.querySelectorAll('.stats-card').forEach(function (card) {
+      card.hidden = card.dataset.tab !== src;
+      if (card.hidden) { return; }
+      const img = card.querySelector('.stats-img');
       img.src = '/stats/graph/' + img.dataset.graph + '?range=' + encodeURIComponent(range) + '&dark=' + (dark() ? 1 : 0) + '&t=' + Date.now();
     });
+    try { sessionStorage.setItem('stats-src', src); sessionStorage.setItem('stats-range', range); } catch (err) { reportError(err); }
   }
-  tabs.forEach(function (t) { t.addEventListener('click', function () { show(t.dataset.range); }); });
-  if (tabs.length) { show(tabs[0].dataset.range); }
+  srcs.forEach(function (t) { t.addEventListener('click', function () { src = t.dataset.tab; show(); }); });
+  tabs.forEach(function (t) { t.addEventListener('click', function () { range = t.dataset.range; show(); }); });
+  show();
 })();
 </script>
 {% endblock %}

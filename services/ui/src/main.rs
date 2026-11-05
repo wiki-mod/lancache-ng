@@ -1632,16 +1632,35 @@ async fn dhcp_check(
 async fn stats(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     let s = app.settings();
     let mut ctx = Context::new();
-    match lancache_ng::rrd::graphs(&s) {
+    match lancache_ng::rrd::all(&s) {
         Ok(list) => {
             let rows: Vec<Value> = list
                 .iter()
-                .map(|g| json!({"name": g.name, "title": g.title}))
+                .map(|g| json!({"name": g.name, "title": g.title, "tab": g.tab}))
                 .collect();
             ctx.insert("graphs", &rows);
         }
         Err(e) => ctx.insert("stats_error", &e),
     }
+
+    // What: one tab per source, with its origin.
+    // Why: DoMe 05.11.: no guessing where values come from.
+    // From: Issue #1683 | PR #1980
+    let step = s.uint("STATS_STEP").unwrap_or_default();
+    let snmp = s.text("STATS_SNMP_TARGET").unwrap_or_default();
+    let mut tabs = vec![json!({
+        "id": lancache_ng::rrd::MACHINE,
+        "label": "Machine",
+        "source": format!("Whole box (all containers together). snmpd answers on {snmp}; the ui asks every {step} s."),
+    })];
+    for c in s.list("STATS_CONTAINERS") {
+        tabs.push(json!({
+            "id": c,
+            "label": c,
+            "source": format!("Container {c} only. Docker stats of this container; the ui asks every {step} s."),
+        }));
+    }
+    ctx.insert("tabs", &tabs);
     ctx.insert("ranges", &s.list("STATS_RANGES"));
     app.page("stats.html", ctx, &csrf)
 }
@@ -1665,7 +1684,7 @@ async fn graph(
     axum::extract::Query(q): axum::extract::Query<GraphQuery>,
 ) -> Page {
     let s = app.settings();
-    let all = lancache_ng::rrd::graphs(&s)?;
+    let all = lancache_ng::rrd::all(&s)?;
     let Some(g) = all.into_iter().find(|g| g.name == name) else {
         return Err(Fail(StatusCode::NOT_FOUND, "no such graph".into()));
     };
@@ -1690,6 +1709,53 @@ fn sample_all(s: &Settings) -> Vec<String> {
     }
 }
 
+// What: Docker stats of each container into RRD.
+// Why: values per container, not only the box.
+// From: Issue #1683 | PR #1980
+async fn sample_containers(app: &App, s: &Settings) -> Vec<String> {
+    let all = match lancache_ng::rrd::container_graphs(s) {
+        Ok(v) => v,
+        Err(e) => return vec![e],
+    };
+    let limit = match app.limits(s) {
+        Ok((_, l)) => l,
+        Err(e) => return vec![e],
+    };
+    let mut errs = Vec::new();
+    for tab in s.list("STATS_CONTAINERS") {
+        let got = match container_of(app, s, &tab).await {
+            Ok(name) => app
+                .docker
+                .stats(&name, limit)
+                .await
+                .map_err(|e| e.to_string()),
+            Err(e) => Err(e),
+        };
+        let v = match got {
+            Ok(v) => v,
+            Err(e) => {
+                errs.push(format!("{tab}: {e}"));
+                continue;
+            }
+        };
+        for g in all.iter().filter(|g| g.tab == tab) {
+            let vals: Vec<String> = g
+                .sources
+                .iter()
+                .map(|x| lancache_ng::rrd::docker_value(&v, &x.oid))
+                .collect();
+            let (s2, g2) = (s.clone(), g.clone());
+            let put = move || lancache_ng::rrd::store(&s2, &g2, &vals);
+            match tokio::task::spawn_blocking(put).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => errs.push(e),
+                Err(e) => errs.push(e.to_string()),
+            }
+        }
+    }
+    errs
+}
+
 // What: records stats every STATS_STEP seconds.
 // Why: the dashboard graphs need a time series.
 async fn sampler(app: Arc<App>) {
@@ -1702,10 +1768,14 @@ async fn sampler(app: Arc<App>) {
                 return;
             }
         };
-        let errs = tokio::task::spawn_blocking(move || sample_all(&s)).await;
+        let c = s.clone();
+        let errs = tokio::task::spawn_blocking(move || sample_all(&c)).await;
         match errs {
             Ok(list) => list.iter().for_each(|e| eprintln!("ui: stats: {e}")),
             Err(e) => eprintln!("ui: stats: {e}"),
+        }
+        for e in sample_containers(&app, &s).await {
+            eprintln!("ui: stats: {e}");
         }
         tokio::time::sleep(Duration::from_secs(step)).await;
     }

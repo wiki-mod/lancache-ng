@@ -942,6 +942,8 @@ runtime:
     - SNMP_LOGMATCH_INTERVAL=60
     - SNMP_TRAPS=0
     - SNMP_TRAP_SINK=
+    - STATS_CONTAINER_GRAPHS=cpu_percent:used=cpu_ns=DERIVE=0.0000001 memory:used=mem_bytes=GAUGE network:in=net_rx=COUNTER+out=net_tx=COUNTER disk_io:read=blk_read=COUNTER+write=blk_write=COUNTER
+    - STATS_CONTAINERS=proxy @DNS_SERVICE@ @DHCP_SERVICE@ @UI_SERVICE@ @CACHEHAMSTER_SERVICE@
     - STATS_DARK_COLOURS=BACK#0b1220 CANVAS#0b1220 FONT#e6edf3 AXIS#8b949e GRID#30363d MGRID#30363d
     - STATS_DIR=@UI_DATA_DIR@/stats
     - STATS_GRAPHS=load:l1=.1.3.6.1.4.1.2021.10.1.5.1=GAUGE+l5=.1.3.6.1.4.1.2021.10.1.5.2=GAUGE memory:avail=.1.3.6.1.4.1.2021.4.6.0=GAUGE+total=.1.3.6.1.4.1.2021.4.5.0=GAUGE cpu:user=.1.3.6.1.4.1.2021.11.50.0=COUNTER+system=.1.3.6.1.4.1.2021.11.52.0=COUNTER+iowait=.1.3.6.1.4.1.2021.11.54.0=COUNTER disk_io:read=.1.3.6.1.4.1.2021.11.58.0=COUNTER+write=.1.3.6.1.4.1.2021.11.57.0=COUNTER
@@ -1190,6 +1192,8 @@ runtime:
     - SNMP_LOGMATCH_INTERVAL=uint;1;3600;restart;services
     - SNMP_TRAPS=bool;;;restart;services
     - SNMP_TRAP_SINK=text?;;;restart;services
+    - STATS_CONTAINER_GRAPHS=list;;;live;ui
+    - STATS_CONTAINERS=list;;;live;ui
     - STATS_DARK_COLOURS=list;;;live;ui
     - STATS_DIR=path;;;live;ui
     - STATS_FONTS=list;;;live;ui
