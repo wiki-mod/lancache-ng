@@ -109,7 +109,7 @@ be switched per service in the ui; the ui re-renders the syslog-ng config.
 | `dhcp` | Docker `syslog` driver (`x-logging`) → syslog-ng in `services` | `LanCache-NG-dhcp/` |
 | `ui` | Docker `syslog` driver (`x-logging`) → syslog-ng in `services` | `LanCache-NG-ui/` |
 
-## Cache warming
+## Pre-caching
 
 `lancache-cachehamster` runs in `services`. It logs in to Steam by QR
 code, keeps a job queue (now, later, at a time) and downloads through the

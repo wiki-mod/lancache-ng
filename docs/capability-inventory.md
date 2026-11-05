@@ -581,7 +581,7 @@ The current scaffold does not yet provide:
 `CACHEHAMSTER_URLS` is currently a scaffold input for directly supplied URLs,
 not the final operator-facing prefill workflow.
 
-CacheHamster therefore must not be described as a shipped Cache Warmer yet.
+CacheHamster therefore must not be described as a shipped pre-caching feature yet.
 
 ## setup.sh
 

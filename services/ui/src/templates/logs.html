@@ -38,7 +38,7 @@
 
   <div class="card">
     <div class="card-body" style="padding:0;">
-      <div id="log-lines" style="font-family:var(--font-mono); font-size:12.5px; line-height:1.9; padding:14px 18px; max-height:420px; overflow-y:auto;">
+      <div id="log-lines" style="font-family:var(--font-mono); font-size:12.5px; line-height:1.9; padding:14px 18px; height:calc(100vh - 340px); min-height:420px; overflow-y:auto;">
         {% if syslog_logs %}
         {% for entry in syslog_logs %}
         <div class="log-line" data-service="{{ entry.host }}">
