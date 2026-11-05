@@ -397,11 +397,15 @@
     white-space: normal; width: max-content; max-width: 260px; line-height: 1.5;
     box-shadow: 0 4px 14px rgba(0,0,0,0.35); z-index: 20;
   }
-  .field input[type="text"], .field input[type="number"] {
+  /* What: one look for every form field.
+     Why: DoMe 05.11.: Cachehamster fields were white.
+     From: Issue #1683 | PR #1980 */
+  .field input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]),
+  .field textarea, .field select {
     width: 100%; padding: 9px 11px; border-radius: 8px; border: 1px solid var(--navy-600);
     background: var(--navy-900); color: var(--foam); font-size: 13.5px; font-family: var(--font-mono);
   }
-  .field input[type="text"]:focus, .field input[type="number"]:focus { outline: 2px solid var(--beam); outline-offset: 1px; border-color: var(--beam); }
+  .field input:focus, .field textarea:focus, .field select:focus { outline: 2px solid var(--beam); outline-offset: 1px; border-color: var(--beam); }
   .field input.invalid { border-color: var(--danger); }
   .field-error { display: none; color: var(--danger); font-size: 12.5px; margin-top: 6px; }
   .field-error.show { display: block; }
