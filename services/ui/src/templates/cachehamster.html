@@ -89,12 +89,21 @@
 {# From: Issue #871 | PR #1858 #}
 {% block scripts %}
 <script>
+  // What: the open tab survives a reload.
+  // Why: DoMe 05.11.: after the login it showed Jobs.
+  // From: Issue #871 | PR #1980
+  const pickTab = function (name) {
+    document.querySelectorAll('[data-ch-tab]').forEach(function (o) { o.classList.toggle('active', o.dataset.chTab === name); });
+    document.querySelectorAll('[data-ch-panel]').forEach(function (p) { p.classList.toggle('active', p.dataset.chPanel === name); });
+    try { sessionStorage.setItem('ch-tab', name); } catch (err) { reportError(err); }
+  };
   document.querySelectorAll('[data-ch-tab]').forEach(function (tab) {
-    tab.addEventListener('click', function () {
-      document.querySelectorAll('[data-ch-tab]').forEach(function (o) { o.classList.toggle('active', o === tab); });
-      document.querySelectorAll('[data-ch-panel]').forEach(function (p) { p.classList.toggle('active', p.dataset.chPanel === tab.dataset.chTab); });
-    });
+    tab.addEventListener('click', function () { pickTab(tab.dataset.chTab); });
   });
+  try {
+    const saved = sessionStorage.getItem('ch-tab');
+    if (saved && document.querySelector('[data-ch-tab="' + saved + '"]')) { pickTab(saved); }
+  } catch (err) { reportError(err); }
   document.querySelectorAll('[data-unix]').forEach(function (el) {
     el.textContent = new Date(Number(el.dataset.unix) * 1000).toLocaleString();
   });
@@ -118,7 +127,7 @@
       if (v.state === 'done') { location.reload(); return; }
       if (v.state !== 'idle') { setTimeout(function () { api('login-poll').then(show).catch(fail); }, (v.interval || 5) * 1000); }
     };
-    const fail = function (e) { state.textContent = 'Login failed: ' + e.message; };
+    const fail = function (e) { state.textContent = 'Login failed'; window.LancacheUi.fail(e); };
     login.addEventListener('click', function () { api('login-begin').then(show).catch(fail); });
   }
   const lib = document.getElementById('hamster-library');
@@ -132,7 +141,7 @@
           row.insertCell().textContent = g.appid;
           row.insertCell().textContent = g.name;
         });
-      }).catch(function (e) { lib.textContent = 'Failed: ' + e.message; });
+      }).catch(window.LancacheUi.fail);
     });
   }
 </script>

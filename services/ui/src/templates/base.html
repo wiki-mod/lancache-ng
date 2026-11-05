@@ -627,6 +627,26 @@
     // From: Issue #1683 | PR #1912
     window.LancacheUi = { ms: function (seconds) { return seconds * 1000; } };
 
+    // What: a visible error line at the page bottom.
+    // Why: live test: errors went only to the console.
+    // From: Issue #1683 | PR #1980
+    window.LancacheUi.fail = function (err) {
+      reportError(err);
+      let box = document.getElementById('ui-fail');
+      if (!box) {
+        box = document.createElement('div');
+        box.id = 'ui-fail';
+        box.setAttribute('role', 'alert');
+        box.style.cssText = 'position:fixed;left:16px;right:16px;bottom:16px;z-index:50;'
+          + 'padding:10px 14px;border-radius:8px;border:1px solid var(--danger);'
+          + 'background:var(--navy-900);color:var(--danger);font-size:13px;';
+        box.addEventListener('click', function () { box.hidden = true; });
+        document.body.appendChild(box);
+      }
+      box.textContent = 'Error: ' + (err && err.message ? err.message : err);
+      box.hidden = false;
+    };
+
     // What: set data-theme before the first paint
     // Why: stored choice, else OS setting; one CSS rule set
     // From: Issue #1437 | PR #1912
@@ -832,7 +852,7 @@
         // What: reports the error, re-enables button
         // Why: a network hiccup must not strand the button
         // From: Issue #1437
-        reportError(err);
+        window.LancacheUi.fail(err);
       }
       button.disabled = false;
     }
