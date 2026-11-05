@@ -1815,6 +1815,11 @@ _ci_pr_fingerprint() {
         rc=0; _ci_doc_path "${p}" "${docs}" "${named}" || rc=$?
         [ "${rc}" -eq 0 ] || _ci_fp_rows+="${line}"$'\n'
     done <<< "${tree}"
+    # What: probe all pair tags at once, then read each.
+    # Why: the green mark read 12 pairs in turn, 5 s.
+    # From: Issue #1683 | PR #1858
+    _ci_for_all_pairs _ci_pr_fingerprint_probe || return "$?"
+    _ci_registry_probe_collect
     _ci_for_all_pairs _ci_pr_fingerprint_pair || return "$?"
     # What: a pair without an image gives no value.
     # Why: only a published digest was checked (§2.3).
@@ -1824,6 +1829,16 @@ _ci_pr_fingerprint() {
         return 1
     fi
     printf '%s' "${_ci_fp_rows}" | _ci_sha256_hex
+}
+
+# What: start the probe of one pair's tag.
+# Why: a kept plan probe is not started again.
+# From: Issue #1683 | PR #1858
+_ci_pr_fingerprint_probe() {
+    local id tag
+    id="$(_ci_identity_for "$1" "$2")" || return 2
+    tag="$(_ci_image_tag "$1" "$2" "${id}")" || return 2
+    _ci_registry_probe_start_tag "${tag}"
 }
 
 # What: add "pair svc plat id digest" to the fingerprint.
@@ -7834,10 +7849,20 @@ declare -ga _CI_PROBE_PIDS=() _CI_PROBE_TAGS=()
 # Why: a probe waits ~1 s on the registry; 14 add up.
 # From: Issue #1683 | PR #1858
 _ci_registry_probe_start() {
-    local id tag file
+    local id tag
     [ -n "${RUNNER_TEMP:-}" ] || return 0
     id="$(_ci_identity_recorded "${_ci_plan_ids}" "$1" "$2")" || return 2
     tag="$(_ci_image_tag "$1" "$2" "${id}")" || return 2
+    _ci_registry_probe_start_tag "${tag}"
+}
+
+# What: start the background probe of tag $1 once.
+# Why: plan and the green mark share one probe store.
+# From: Issue #1683 | PR #1858
+_ci_registry_probe_start_tag() {
+    local tag="$1" file
+    [ -n "${RUNNER_TEMP:-}" ] || return 0
+    [ -z "${_CI_PROBE_KEPT[${tag}]+x}" ] || return 0
     file="${RUNNER_TEMP}/probe-${_CI_CALL_KEY}-${#_CI_PROBE_TAGS[@]}"
     {
         local prc=0 dig
