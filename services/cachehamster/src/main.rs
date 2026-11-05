@@ -493,6 +493,16 @@ fn parse_add(args: &[String]) -> Result<Order, String> {
     if matches!(&target, Target::Urls(u) if u.is_empty()) {
         return Err("enter addresses or a Steam app ID".into());
     }
+    // What: every address must be an http(s) URL.
+    // Why: a typo was queued and failed without a word.
+    // From: Issue #871 | PR #1980
+    if let Target::Urls(u) = &target
+        && let Some(bad) = u.iter().find(|u| {
+            reqwest::Url::parse(u).map_or(true, |p| !matches!(p.scheme(), "http" | "https"))
+        })
+    {
+        return Err(format!("not an http(s) address: {bad}"));
+    }
     Ok(Order::Add {
         name: name.clone(),
         target,
@@ -505,7 +515,11 @@ fn parse_add(args: &[String]) -> Result<Order, String> {
 // From: Issue #871 | PR #1858
 fn status(c: &Ctx) -> Result<Value, String> {
     let session = load_session(&c.dir)?;
-    let jobs = read_json::<Vec<Job>>(&c.path(JOBS_FILE))?.unwrap_or_default();
+    let mut jobs = read_json::<Vec<Job>>(&c.path(JOBS_FILE))?.unwrap_or_default();
+    // What: orders the daemon has not taken yet, shown too.
+    // Why: a new job was missing until the next round.
+    // From: Issue #871 | PR #1980
+    take_inbox(c, &mut jobs, false)?;
     Ok(json!({
         "logged_in": session.is_some(),
         "account": session.map(|s| s.account),
@@ -517,7 +531,7 @@ fn status(c: &Ctx) -> Result<Value, String> {
 // What: apply inbox orders to the job list.
 // Why: the daemon is the single writer of jobs.json.
 // From: Issue #871 | PR #1858
-fn take_inbox(c: &Ctx, jobs: &mut Vec<Job>) -> Result<(), String> {
+fn take_inbox(c: &Ctx, jobs: &mut Vec<Job>, consume: bool) -> Result<(), String> {
     let dir = c.path(INBOX_DIR);
     let mut names: Vec<PathBuf> = match std::fs::read_dir(&dir) {
         Ok(rd) => rd
@@ -534,7 +548,9 @@ fn take_inbox(c: &Ctx, jobs: &mut Vec<Job>) -> Result<(), String> {
             Ok(None) => {}
             Err(e) => eprintln!("cachehamster: dropped bad order: {e}"),
         }
-        remove(&path)?;
+        if consume {
+            remove(&path)?;
+        }
     }
     Ok(())
 }
@@ -1346,7 +1362,7 @@ struct Runner {
 impl Runner {
     async fn round(&mut self, c: &Ctx) -> Result<(), String> {
         let mut list = self.jobs.lock().await;
-        take_inbox(c, &mut list)?;
+        take_inbox(c, &mut list, true)?;
         let finished: Vec<String> = self
             .running
             .iter()
