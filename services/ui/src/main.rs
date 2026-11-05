@@ -553,8 +553,19 @@ async fn commit(app: &App, form: Fields) -> Result<(), String> {
     if updates.is_empty() {
         return Ok(());
     }
+    let before = std::fs::read(&path).ok();
     config::store(&path, &old, &updates)?;
     let new = Settings::load(&process_env, Some(&path))?;
+    // What: a value that cannot render is not kept.
+    // Why: live 05.11.: a looping upstream was saved.
+    // From: Issue #1683 | PR #1980
+    let check = secrets(&new).and_then(|sec| render::all(&new, &sec).map_err(|e| e.join("; ")));
+    if let Err(e) = check {
+        if let Some(b) = before {
+            std::fs::write(&path, b).map_err(|w| format!("{e}; old file not restored: {w}"))?;
+        }
+        return Err(e);
+    }
     for line in apply_all(app, &old, &new, true).await? {
         eprintln!("ui: apply: {line}");
     }

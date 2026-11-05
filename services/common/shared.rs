@@ -2329,7 +2329,51 @@ pub mod recursor_conf {
         if out.is_empty() && key == "DNS_UPSTREAM_ZONES" {
             out.push(".".to_string());
         }
+        // What: a local zone or its subzone never goes out.
+        // Why: live 05.11. (U1): home.lan gave NXDOMAIN.
+        // From: Issue #1683 | PR #1980
+        if key == "DNS_UPSTREAM_ZONES" {
+            for m in crate::dns::managed_zones(s)? {
+                let m = m.trim_end_matches('.').to_ascii_lowercase();
+                if let Some(z) = out
+                    .iter()
+                    .find(|z| **z == m || z.ends_with(&format!(".{m}")))
+                {
+                    return Err(format!(
+                        "{key}: {z} is the local zone {m}; it is answered here"
+                    ));
+                }
+            }
+        }
         Ok(out)
+    }
+
+    // What: upstream servers; our own address is refused.
+    // Why: live 05.11. (U4): own IP made a query loop.
+    // From: Issue #1683 | PR #1980
+    fn upstream_servers(s: &Settings) -> Result<Vec<String>, String> {
+        let own: Vec<String> = ["IP_HTTP", "IP_HTTPS"]
+            .iter()
+            .filter_map(|k| s.text(k).ok())
+            .filter(|v| !v.is_empty())
+            .collect();
+        let list = s.list("DNS_UPSTREAM_SERVERS");
+        for raw in &list {
+            let host = match raw.strip_prefix('[') {
+                Some(rest) => rest.split(']').next().unwrap_or(rest),
+                None if raw.matches(':').count() == 1 => raw.split(':').next().unwrap_or(raw),
+                None => raw.as_str(),
+            };
+            let ip: std::net::IpAddr = host
+                .parse()
+                .map_err(|_| format!("DNS_UPSTREAM_SERVERS: {raw} is no IP address"))?;
+            if ip.is_loopback() || ip.is_unspecified() || own.iter().any(|o| *o == host) {
+                return Err(format!(
+                    "DNS_UPSTREAM_SERVERS: {raw} is this LanCache-NG itself; that would loop"
+                ));
+            }
+        }
+        Ok(list)
     }
 
     // What: Lua hook: AAAA answers become empty.
@@ -2361,7 +2405,7 @@ pub mod recursor_conf {
                 )
             })
             .collect();
-        let upstream = s.list("DNS_UPSTREAM_SERVERS");
+        let upstream = upstream_servers(s)?;
         let recurse = if upstream.is_empty() {
             String::new()
         } else {
