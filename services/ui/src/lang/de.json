@@ -390,7 +390,7 @@
   "upstream_dns": "Externer DNS",
   "upstream_dns_desc": "Namen, die LanCache-NG nicht selbst beantwortet, gehen an diese DNS-Server. Leer: LanCache-NG fragt selbst im Internet nach. Mit Domains gehen nur diese Domains dorthin (z. B. die Domain deiner Firma oder deines Routers).",
   "upstream_servers": "DNS-Server (IP-Adressen, mit Leerzeichen getrennt)",
-  "upstream_unsigned": "Domains ohne DNSSEC (private Domains)",
+  "upstream_unsigned": "Domains ohne DNSSEC: interne Domains wie lan.local oder fritz.box auch hier eintragen, sonst melden prüfende Geräte einen Fehler",
   "upstream_zones": "Nur diese Domains (leer oder . = alle Namen)",
   "upstream_dhcp_server_documentation_only": "Vorgelagerter DHCP-Server (nur zur Dokumentation)",
   "used": "belegt",
