@@ -8545,12 +8545,17 @@ _ci_docker_assemble() {
 ci_cmd_assemble() {
     local service="${1:-}"
     [ -n "${service}" ] || { ci_log "[CI-ERROR-ASSEMBLE-0001]" "reason=\"service arg required\""; return 2; }
-    local inputs want count reused index
+    local inputs want count=0 reused index kv
     inputs="$(_ci_collect_accepted_digests "${service}")" || return "$?"
     want="$(_ci_normalize_platform_digests "${inputs}")" || return 2
     local -a input_list=()
     [ -z "${inputs}" ] || mapfile -t input_list <<< "${inputs}"
-    count="$(_ci_capture 0 awk '/=/ {n++} END {print n+0}' <<< "${inputs}")" || return 2
+    # What: count the platform=digest lines in bash.
+    # Why: Fund 136: no awk where bash does the job.
+    # From: Issue #1683 | PR #1858
+    for kv in "${input_list[@]}"; do
+        [[ "${kv}" != *=* ]] || count=$((count + 1))
+    done
     if ! reused="$(_ci_reconcile_index "${service}" "${want}")"; then
         return 2
     fi
