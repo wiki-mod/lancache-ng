@@ -17,6 +17,9 @@ license.workspace = true
 name = "lancache-ui"
 path = "src/main.rs"
 
+# What: crates the ui binary links.
+# Why: versions come from the workspace manifest.
+# From: Issue #1683 | PR #1858
 [dependencies]
 LanCache-NG = { path = "../common" }
 anyhow = { workspace = true }
