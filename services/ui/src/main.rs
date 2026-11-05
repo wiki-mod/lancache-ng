@@ -1153,13 +1153,15 @@ async fn flush_round(s: &Settings, seen: &mut BTreeMap<String, u32>) -> Result<(
 }
 
 // What: Kea control agent of this stack.
-// Why: subnets, reservations, leases live in Kea.
-// From: Issue #1683 | PR #1858
+// Why: host from env at run time; a run may move it.
+// From: Issue #1683 | PR #1980
 fn kea_api(s: &Settings) -> Result<lancache_ng::kea::Api, String> {
-    Ok(lancache_ng::kea::Api::new(
-        http::client(s)?,
-        &s.text("KEA_CTRL_URL")?,
-    ))
+    let url = format!(
+        "http://{}:{}/",
+        s.text("DHCP_API_HOST")?,
+        s.uint("KEA_CTRL_PORT")?
+    );
+    Ok(lancache_ng::kea::Api::new(http::client(s)?, &url))
 }
 
 // What: value of one Kea option in a subnet.

@@ -855,7 +855,6 @@ runtime:
     # Why: the ui reaches it from its own network.
     # From: Issue #1683 | PR #1980
     - KEA_CTRL_ADDRESS=@ANY_BIND_IP@
-    - KEA_CTRL_URL=http://@DHCP_API_HOST@:@KEA_CTRL_PORT@/
     - KEA_DDNS_ADDRESS=@LOOPBACK_BIND_IP@
     - KEA_DDNS_PORT=53001
     - KEA_DHCP4_CONF_FILE=@CONFIG_DIR@/dhcp/kea-dhcp4.conf
@@ -1075,7 +1074,7 @@ runtime:
     - IP_HTTP=text;;;recreate;proxy
     - KEA_CTRL_ADDRESS=text;;;reload;dhcp
     - KEA_CTRL_PORT=uint;1;65535;reload;dhcp
-    - KEA_CTRL_URL=text;;;live;ui
+    - DHCP_API_HOST=text;;;container;ui
     - KEA_DATA_DIR=path;;;container;dhcp
     - KEA_DDNS_ADDRESS=text;;;reload;dhcp
     - KEA_DDNS_GENERATED_PREFIX=text;;;reload;dhcp
