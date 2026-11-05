@@ -720,7 +720,7 @@ is_valid_cidr() {
 # From: Issue #1683 | PR #1858
 is_valid_dhcp_mode() {
     case "$1" in
-        disabled|kea|dnsmasq-proxy|dnsmasq-relay) return 0 ;;
+        off|kea|dnsmasq-proxy|dnsmasq-relay) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -4330,7 +4330,7 @@ migrate_env_for_update() (
         elif [[ ",$compose_profiles," = *,dhcp-kea,* || "$dhcp_enabled" = "1" ]]; then
             dhcp_mode="kea"
         else
-            dhcp_mode="disabled"
+            dhcp_mode="off"
         fi
     fi
 
@@ -8588,12 +8588,13 @@ print_step "DHCP mode"
 printf "  Kea (full mode): route and DNS options via Admin-UI\n"
 printf "  dnsmasq-proxy: experimental proxy-DHCP helper; it does not reliably replace DNS options from a normal router DHCP server\n"
 printf "  dnsmasq-relay: forward DHCP to an upstream server on another segment (relay only; injects nothing of its own)\n"
-printf "  disabled: keep router DHCP and do nothing in LanCache\n\n"
+printf "  off: keep router DHCP and do nothing in LanCache\n\n"
 
 default_dhcp_mode=$(prod_env_default DHCP_MODE) || exit $?
 while true; do
-    ask "DHCP mode (disabled, kea, dnsmasq-proxy, dnsmasq-relay)" "$default_dhcp_mode"
+    ask "DHCP mode (off, kea, dnsmasq-proxy, dnsmasq-relay)" "$default_dhcp_mode"
     DHCP_MODE="${REPLY,,}"
+    [[ "$DHCP_MODE" != "disabled" ]] || DHCP_MODE="off"
     if is_valid_dhcp_mode "$DHCP_MODE"; then
         break
     fi
@@ -8673,7 +8674,7 @@ elif [[ "$DHCP_MODE" = "dnsmasq-proxy" ]]; then
     print_warn "It does not reliably replace DNS options from a normal router DHCP server."
     print_warn "Use Kea mode if LanCache must control normal client DNS settings."
     confirm "Continue with experimental dnsmasq-proxy mode? [y/N]" "N" \
-        || die "Cancelled dnsmasq-proxy mode. Re-run setup and choose kea or disabled."
+        || die "Cancelled dnsmasq-proxy mode. Re-run setup and choose kea or off."
 
     ask "DHCP subnet start for dnsmasq-proxy" "${DHCP_SUBNET_DEFAULT%/*}"
     while true; do
