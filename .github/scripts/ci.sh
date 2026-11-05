@@ -17861,41 +17861,49 @@ _ci_issue_meta() {
 # Why: GitHub grammar: keyword[:] #N or owner/repo#N.
 # From: Issue #1683 | PR #1858
 _ci_closing_refs() {
-    local text="$1" out
-    # What: skip a match negated by not/never/cannot/n't.
-    # Why: negated prose must never close an issue.
-    # From: Issue #1496 | PR #1858
-    if ! out="$(awk -v q="'" '
-        function negated(w,  n, i, k, words, at) {
-            n = split("not never cannot n" q "t", words, " ")
-            for (k = 1; k <= n; k++) {
-                at = 0
-                while ((i = index(substr(w, at + 1), words[k])) > 0) {
-                    at += i
-                    if ((k == n || at == 1 || substr(w, at - 1, 1) !~ /[a-z0-9_]/) && \
-                        length(w) - (at + length(words[k]) - 1) <= 20 && \
-                        substr(w, at + length(words[k]), 1) !~ /[a-z0-9_]/) return 1
-                }
-            }
-            return 0
-        }
-        { t = t $0 "\n" }
-        END {
-            low = tolower(t); pos = 1
-            re = "(close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved):?[ \t\n]+([a-z0-9_.-]+/[a-z0-9_.-]+)?#[0-9]+"
-            while (match(substr(low, pos), re)) {
-                s = pos + RSTART - 1; m = substr(low, s, RLENGTH); pos = s + RLENGTH
-                if (s > 1 && substr(low, s - 1, 1) ~ /[a-z0-9_]/) continue
-                w = substr(low, 1, s - 1); sub(/^.*[.!?\n]/, "", w)
-                if (negated(w)) continue
-                sub(/^[a-z]+:?[ \t\n]+/, "", m); print m
-            }
-        }
-    ' <<< "${text}" 2>&1)"; then
-        ci_error "[CI-ERROR-LINK-0001]" "reason=\"closing keyword parse failed\"" "${out}"
-        return 2
-    fi
-    [ -z "${out}" ] || printf '%s\n' "${out}"
+    local text="$1" out="" rest back="" cut m pre w neg wrest at np negated
+    local close_re=$'(close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved):?[ \t\n]+([a-z0-9_.-]+/[a-z0-9_.-]+)?#[0-9]+'
+    local key_re=$'^[a-z]+:?[ \t\n]+'
+    local nt=$'n\'t'
+    local -a neg_words=(not never cannot "${nt}")
+    rest="${text,,}"$'\n'
+    while [[ "${rest}" =~ ${close_re} ]]; do
+        m="${BASH_REMATCH[0]}"
+        pre="${rest%%"${m}"*}"
+        rest="${rest:${#pre}+${#m}}"
+        # What: keep only the last 40 chars before a match.
+        # Why: a negation counts only 20 chars back.
+        # From: Issue #1683 | PR #1858
+        cut="${back}${pre}"
+        [ "${#cut}" -le 40 ] || cut="${cut: -40}"
+        back="${cut}${m}"
+        [ "${#back}" -le 40 ] || back="${back: -40}"
+        if [ -n "${cut}" ] && [[ "${cut: -1}" == [a-z0-9_] ]]; then
+            continue
+        fi
+        w="${cut##*[.!?$'\n']}"
+        # What: skip a match after not/never/cannot/n't.
+        # Why: negated prose must never close an issue.
+        # From: Issue #1496 | PR #1858
+        negated=0
+        for neg in "${neg_words[@]}"; do
+            at=0
+            while [ "${negated}" -eq 0 ] && [[ "${w:at}" == *"${neg}"* ]]; do
+                wrest="${w:at}"
+                wrest="${wrest%%"${neg}"*}"
+                np=$((at + ${#wrest}))
+                at=$((np + 1))
+                if [[ ( "${neg}" == "${nt}" || "${np}" -eq 0 || "${w:np-1:1}" != [a-z0-9_] ) &&
+                    $((${#w} - np - ${#neg})) -le 20 && "${w:np+${#neg}:1}" != [a-z0-9_] ]]; then
+                    negated=1
+                fi
+            done
+        done
+        [ "${negated}" -eq 0 ] || continue
+        [[ "${m}" =~ ${key_re} ]]
+        out+="${m:${#BASH_REMATCH[0]}}"$'\n'
+    done
+    [ -z "${out}" ] || printf '%s' "${out}"
 }
 
 # What: post an issue/PR comment; compare what GitHub stored
