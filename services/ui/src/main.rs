@@ -695,15 +695,17 @@ fn zone_snapshots_cli(s: &Settings) -> Result<(), String> {
 }
 
 // What: put one zone back to a snapshot.
-// Why: PATCH restores; PowerDNS sends NOTIFY.
-// From: Issue #1683 | PR #1858
+// Why: PATCH restores; a new snapshot records it.
+// From: Issue #1683 | PR #1980
 async fn rollback(s: &Settings, zone: &str, id: &str) -> Result<(), String> {
     if !snapshot_zones(s)?.iter().any(|z| z == zone) {
         return Err(format!("zone {zone} keeps no snapshots"));
     }
     let body = zone_store(s, zone)?.read(id)?;
     let rows: Vec<Value> = serde_json::from_slice(&body).map_err(|e| e.to_string())?;
-    pdns_api(s)?.restore(zone, &rows).await
+    let api = pdns_api(s)?;
+    api.restore(zone, &rows).await?;
+    snapshot(s, &api, zone).await
 }
 
 // What: PTR rows of all private reverse zones.
