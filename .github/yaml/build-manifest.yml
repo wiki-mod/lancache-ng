@@ -1047,11 +1047,11 @@ runtime:
   schema:
     - AUTO_UPDATE_ENABLED=bool;;;live;ui
     - NTP_AUTO_DHCP=bool;;;reload;dhcp
-    - CACHEHAMSTER_CONCURRENCY=uint;1;1024;live;services
+    - CACHEHAMSTER_CONCURRENCY=uint;1;1024;restart;services
     - CACHEHAMSTER_DATA_DIR=path;;;container;services
     - CACHEHAMSTER_POLL_INTERVAL=uint;1;3600;live;services
     - CACHEHAMSTER_PROGRAM=text;;;live;ui
-    - CACHEHAMSTER_QUEUES=uint;1;64;live;services
+    - CACHEHAMSTER_QUEUES=uint;1;64;restart;services
     - CACHEHAMSTER_SERVICE=text;;;live;ui
     - CACHEHAMSTER_THROUGHPUT_INTERVAL=uint;1;3600;live;services
     - CDN_CUSTOM_DOMAINS=list?;;;reload;dns

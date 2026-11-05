@@ -40,6 +40,18 @@
       <button type="submit" class="btn">{{ t.add_job }}</button>
     </form>
 
+    {# What: speed settings of the prefill; SOT keys. #}
+    {# Why: DoMe 26.10. (Fund 90): set them in the UI. #}
+    {# From: Issue #871 | PR #1980 #}
+    <div class="section-title">{{ t.settings }}</div>
+    <form action="{{ routes.setup_save | safe }}" method="post" class="form-row">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="back" value="/cachehamster">
+      <div class="field"><label for="hamster-conns">{{ t.hamster_connections }}</label><input type="number" id="hamster-conns" name="CACHEHAMSTER_CONCURRENCY" min="1" max="1024" value="{{ v.CACHEHAMSTER_CONCURRENCY }}"></div>
+      <div class="field"><label for="hamster-queues">{{ t.hamster_queues }}</label><input type="number" id="hamster-queues" name="CACHEHAMSTER_QUEUES" min="1" max="64" value="{{ v.CACHEHAMSTER_QUEUES }}"></div>
+      <button type="submit" class="btn">{{ t.save }}</button>
+    </form>
+
     <div class="section-title">Jobs</div>
     {% if hamster and hamster.jobs | length > 0 %}
     <table class="table">

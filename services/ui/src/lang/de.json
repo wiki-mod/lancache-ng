@@ -152,6 +152,8 @@
   "hamster_daemon_down": "Der Cachehamster-Dienst läuft nicht; Jobs werden nicht bearbeitet. Siehe Logs, Container services.",
   "hamster_exit": "Cachehamster endete mit Code {x}",
   "hamster_queued": "angenommen, wird gleich übernommen",
+  "hamster_connections": "Gleichzeitige Downloads je Job",
+  "hamster_queues": "Jobs gleichzeitig",
   "hamster_says": "Cachehamster meldet:",
   "hamster_st_blocked": "blockiert",
   "hamster_st_cancelled": "abgebrochen",
