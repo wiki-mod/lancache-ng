@@ -19702,7 +19702,7 @@ _ci_check_sot_identity_inputs() {
 # From: Issue #1683 | PR #1912
 _ci_check_dockerfiles() {
     local repo_root="${1:-${CI_REPO_ROOT:-.}}" targets t df rel type svars bvars allow raw tok missing bst bv
-    local hits spec p id c ctxs srcs src ok n=0 rc=0
+    local hits spec p id c ctxs srcs src ok n=0 rc=0 dline mnt_spec
     local -a tl=() cl=() roots=() parts=() e_bt=() e_tune=() e_stage=() e_secret=() e_ctx=() e_src=()
     local -A kv=() is_pkg=()
     svars="$(_ci_block_entry_list stage_variables "" ci_sh)" || return 2
@@ -19732,11 +19732,15 @@ _ci_check_dockerfiles() {
         # What: each secret mount id is a central id.
         # Why: set-runtime writes only listed ids.
         # From: Issue #1683 | PR #1858
-        hits="$(_ci_capture 0 awk "$(cat <<'PROG'
-/^[[:space:]]*#/ { next }
-            { s = $0; while (match(s, /--mount=[^[:space:]]+/)) { print substr(s, RSTART, RLENGTH); s = substr(s, RSTART + RLENGTH) } }
-PROG
-            )" "${df}")" || return 2
+        hits=""
+        while IFS= read -r dline || [ -n "${dline}" ]; do
+            [[ ! "${dline}" =~ ^[[:space:]]*# ]] || continue
+            while [[ "${dline}" =~ --mount=[^[:space:]]+ ]]; do
+                mnt_spec="${BASH_REMATCH[0]}"
+                hits+="${mnt_spec}"$'\n'
+                dline="${dline#*"${mnt_spec}"}"
+            done
+        done < "${df}" || return 2
         while IFS= read -r spec; do
             [ -n "${spec}" ] || continue
             kv=()
