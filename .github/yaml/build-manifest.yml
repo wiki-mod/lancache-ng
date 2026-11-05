@@ -644,6 +644,10 @@ runtime:
     - KEA_DATA_DIR=/var/lib/kea
     - KEA_LEASE_FILE=@KEA_DATA_DIR@/kea-leases4.csv
     - KEA_SOCKET_DIR=/run/kea
+    # What: mode of the Kea socket dir.
+    # Why: Kea refuses a dir looser than 750.
+    # From: Issue #1683 | PR #1980
+    - KEA_SOCKET_DIR_MODE=750
     - KEA4_SOCKET=@KEA_SOCKET_DIR@/kea4.sock
     - KEA_DDNS_SOCKET=@KEA_SOCKET_DIR@/kea-ddns.sock
     # What: TSIG key name and algorithm of DDNS and AXFR.

@@ -87,14 +87,14 @@ RUN set -e; \
 RUN set -e; \
     declare -A v; IFS='|' read -ra kv <<< "${LANCACHE_RUNTIME_DEFAULTS}"; \
     for p in "${kv[@]}"; do v["${p%%=*}"]="${p#*=}"; done; \
-    : "${v[OPENRC_STATE_DIR]:?}" "${v[KEA_SOCKET_DIR]:?}"; \
+    : "${v[OPENRC_STATE_DIR]:?}" "${v[KEA_SOCKET_DIR]:?}" "${v[KEA_SOCKET_DIR_MODE]:?}"; \
     f="${v[DHCP_MODE_FILE]}"; \
     while [[ "${f}" =~ @([A-Z0-9_]+)@ ]]; do \
       k="${BASH_REMATCH[1]}"; f="${f//@${k}@/${v[${k}]}}"; \
     done; \
     printf '%s\n' '#!/bin/bash' \
       "rm -rf '${v[OPENRC_STATE_DIR]}'; rm -f '${v[KEA_SOCKET_DIR]}'/*.pid" \
-      "mkdir -p '${v[KEA_SOCKET_DIR]}'" \
+      "mkdir -p '${v[KEA_SOCKET_DIR]}'; chmod '${v[KEA_SOCKET_DIR_MODE]}' '${v[KEA_SOCKET_DIR]}'" \
       "mode=\"\$(cat '${f}' 2>/dev/null || true)\"" \
       "exec openrc-init \"\${mode:-${v[DHCP_MODE]}}\"" \
       > /usr/local/bin/lancache-init; \
