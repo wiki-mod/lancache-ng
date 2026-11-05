@@ -7739,54 +7739,80 @@ _ci_toolchain_entry() {
     printf '%s\t%s\n' "${key}" "${val}"
 }
 
-# What: P: name and V: version of an apk db record.
-# Why: one reader; each program defines pv(name, version).
+# What: "V|D|p|R<TAB>package<TAB>value" rows of an apk db.
+# Why: the one P:/V: reader for the db and the index.
 # From: Issue #1683 | PR #1858
-_CI_AWK_APK_PV="$(cat <<'PROG'
-/^P:/ { p = substr($0, 3); next }
-/^V:/ { pv(p, substr($0, 3)); next }
-PROG
-)"
-readonly _CI_AWK_APK_PV
-
-# What: apk packages reached from roots in an installed db.
-# Why: a D: entry names a package, a p: provide or a file.
-# From: Issue #1683 | PR #1858
-_CI_AWK_APK_CLOSURE="${_CI_AWK_APK_PV}"$'\n'"$(cat <<'PROG'
-function pv(n, v) { pkg[n] = 1; ver[n] = v }
-function bare(t) { sub(/[<>=~].*$/, "", t); return t }
-/^D:/ { dep[p] = substr($0, 3); next }
-/^p:/ { k = split(substr($0, 3), a, " "); for (i = 1; i <= k; i++) own[bare(a[i])] = p; next }
-/^F:/ { dir = substr($0, 3); next }
-/^R:/ { own["/" dir "/" substr($0, 3)] = p; next }
-END {
-    qn = split(roots, q, " ")
-    for (h = 1; h <= qn; h++) {
-        t = q[h]
-        if (t in pkg) i = t
-        else if (t in own) i = own[t]
-        else { print "unresolved: " t; bad = 1; continue }
-        if (i in sel) continue
-        sel[i] = 1
-        k = split(dep[i], a, " ")
-        for (j = 1; j <= k; j++) if (a[j] !~ /^!/) q[++qn] = bare(a[j])
-    }
-    if (bad) exit 2
-    for (i in sel) print i "=" ver[i]
+_ci_apk_db_rows() {
+    local lines line p="" dir=""
+    # What: tag letters $2 (default all) pick the rows.
+    # Why: an APKINDEX has many lines; grep keeps it fast.
+    # From: Issue #1683 | PR #1858
+    lines="$(_ci_capture 1 grep -a -E "^[${2:-PVDpFR}]:" "$1")" || return 2
+    while IFS= read -r line; do
+        case "${line}" in
+            '') ;;
+            P:*) p="${line:2}" ;;
+            F:*) dir="${line:2}" ;;
+            R:*) printf 'R\t%s\t/%s/%s\n' "${p}" "${dir}" "${line:2}" ;;
+            *) printf '%s\t%s\t%s\n' "${line:0:1}" "${p}" "${line:2}" ;;
+        esac
+    done <<< "${lines}"
 }
-PROG
-)"
-readonly _CI_AWK_APK_CLOSURE
 
 # What: sorted name=version of roots $3 in image $1 ($2).
 # Why: the closure holds the libs and tools the roots run.
 # From: Issue #1683 | PR #1858
 _ci_toolchain_closure() {
-    local ref="$1" platform="$2" roots="$3" work="$4" out
+    local ref="$1" platform="$2" roots="$3" work="$4" rows tag name val t i x bad="" h=0 out=""
+    local -A ver=() dep=() own=() sel=()
+    local -a rq=() toks=()
     _ci_image_files "${ref}" "${platform}" "${work}" /lib/apk/db/installed || return 2
-    out="$(_ci_run "[CI-ERROR-IDENTITY-0020]" "image=\"${ref}\" platform=\"${platform}\" reason=\"toolchain package closure not read\"" \
-        awk -v roots="${roots//$'\n'/ }" "${_CI_AWK_APK_CLOSURE}" "${work}/installed")" || return 2
-    _ci_capture 0 env LC_ALL=C sort <<< "${out}"
+    rows="$(_ci_apk_db_rows "${work}/installed")" || return 2
+    # What: a dep is a package, a p: provide or a file.
+    # Why: a provide drops its version; a file is /dir/name.
+    # From: Issue #1683 | PR #1858
+    while IFS=$'\t' read -r tag name val; do
+        [ -n "${name}" ] || continue
+        case "${tag}" in
+            V) ver["${name}"]="${val}" ;;
+            D) dep["${name}"]="${val}" ;;
+            R) own["${val}"]="${name}" ;;
+            p)
+                read -ra toks <<< "${val}"
+                for x in "${toks[@]}"; do
+                    x="${x%%[<>=~]*}"
+                    [ -z "${x}" ] || own["${x}"]="${name}"
+                done
+                ;;
+        esac
+    done <<< "${rows}"
+    read -ra rq <<< "${roots//$'\n'/ }"
+    while [ "${h}" -lt "${#rq[@]}" ]; do
+        t="${rq[h]}"
+        h=$((h + 1))
+        if [ -n "${t}" ] && [ -n "${ver["${t}"]+x}" ]; then
+            i="${t}"
+        elif [ -n "${t}" ] && [ -n "${own["${t}"]+x}" ]; then
+            i="${own["${t}"]}"
+        else
+            bad+="unresolved: ${t}"$'\n'
+            continue
+        fi
+        [ -z "${sel["${i}"]+x}" ] || continue
+        sel["${i}"]=1
+        read -ra toks <<< "${dep["${i}"]-}"
+        for x in "${toks[@]}"; do
+            [[ "${x}" == '!'* ]] || rq+=("${x%%[<>=~]*}")
+        done
+    done
+    if [ -n "${bad}" ]; then
+        ci_error "[CI-ERROR-IDENTITY-0020]" "image=\"${ref}\" platform=\"${platform}\" reason=\"toolchain package closure not read\"" "${bad%$'\n'}"
+        return 2
+    fi
+    for i in "${!sel[@]}"; do
+        out+="${i}=${ver["${i}"]-}"$'\n'
+    done
+    _ci_capture 0 env LC_ALL=C sort <<< "${out%$'\n'}"
 }
 
 # What: installed apk packages the index has newer.
@@ -7815,20 +7841,20 @@ _ci_apk_outdated() {
 # Why: apk version -t owns the order; no own compare.
 # From: Issue #1683 | PR #1858
 _ci_apk_newer() {
-    local pairs name have cand order behind=""
-    # What: P: then V: per record, in both file formats.
-    # Why: the one P:/V: reader for the db and the index.
-    # From: Issue #1683 | PR #1858
-    pairs="$(_ci_capture 0 awk 'function pv(n, v) {
-        if (file == 1) have[n] = v
-        else if ((n in have) && v != have[n]) print n "\t" have[n] "\t" v }
-        FNR == 1 { file++ }
-        '"${_CI_AWK_APK_PV}" "$1" "$2")" || return 2
-    while IFS=$'\t' read -r name have cand; do
-        [ -n "${name}" ] || continue
-        order="$(_ci_capture 0 apk version -t "${have}" "${cand}")" || return 2
-        [ "${order}" != "<" ] || behind+="${name} ${have} ${cand}"$'\n'
-    done <<< "${pairs}"
+    local rows tag name val order behind=""
+    local -A have=()
+    rows="$(_ci_apk_db_rows "$1" PV)" || return 2
+    while IFS=$'\t' read -r tag name val; do
+        [ "${tag}" != V ] || [ -z "${name}" ] || have["${name}"]="${val}"
+    done <<< "${rows}"
+    rows="$(_ci_apk_db_rows "$2" PV)" || return 2
+    while IFS=$'\t' read -r tag name val; do
+        if [ "${tag}" != V ] || [ -z "${name}" ] || [ -z "${have["${name}"]+x}" ] || [ "${val}" = "${have["${name}"]}" ]; then
+            continue
+        fi
+        order="$(_ci_capture 0 apk version -t "${have["${name}"]}" "${val}")" || return 2
+        [ "${order}" != "<" ] || behind+="${name} ${have["${name}"]} ${val}"$'\n'
+    done <<< "${rows}"
     [ -z "${behind}" ] || _ci_capture 0 env LC_ALL=C sort -u <<< "${behind%$'\n'}"
 }
 
