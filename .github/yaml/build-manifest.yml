@@ -95,6 +95,10 @@ services:
       - syslog-ng
       - chrony-nts
       - net-snmp
+      # What: openssl for the watchdog certificate check.
+      # Why: live test 05.11.: log flood, openssl missing.
+      # From: Issue #1683 | PR #1980
+      - openssl
       - xz
       - tzdata
     # What: execute-smoke checks run post-build by ci.sh.
