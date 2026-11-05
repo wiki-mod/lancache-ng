@@ -972,7 +972,8 @@ fn is_ip(text: &str) -> bool {
 struct Register {
     token: String,
     name: String,
-    address: String,
+    #[serde(default)]
+    address: Option<String>,
 }
 
 // What: checks a secondary name: length, a-z0-9-.
@@ -1007,18 +1008,33 @@ fn peer_kit(s: &Settings) -> Result<Value, String> {
 // What: register a secondary (public route).
 // Why: token checked; reply has the whole kit.
 // From: Issue #1683 | PR #1858
-async fn register(State(app): Shared, axum::Json(r): axum::Json<Register>) -> Page {
+async fn register(
+    State(app): Shared,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    axum::Json(r): axum::Json<Register>,
+) -> Page {
     let s = app.settings();
     let token = registration_token(&s).map_err(|e| Fail(StatusCode::SERVICE_UNAVAILABLE, e))?;
     if !secret::equal(&r.token, &token) {
         return Err(Fail(StatusCode::UNAUTHORIZED, "wrong token".into()));
     }
-    if !valid_peer_name(&s, &r.name)? || !is_ip(&r.address) {
+    let mut list = secondaries(&s);
+    // What: sent address, else stored, else the peer IP.
+    // Why: re-registration keeps a manual override.
+    // From: Issue #1683 | PR #1858
+    let stored = list
+        .iter()
+        .find(|(n, _)| *n == r.name)
+        .map(|(_, a)| a.clone());
+    let address = r
+        .address
+        .or(stored)
+        .unwrap_or_else(|| peer.ip().to_string());
+    if !valid_peer_name(&s, &r.name)? || !is_ip(&address) {
         return Err(bad_request("name or address is not valid"));
     }
-    let mut list = secondaries(&s);
     list.retain(|(n, _)| *n != r.name);
-    list.push((r.name.clone(), r.address.clone()));
+    list.push((r.name.clone(), address));
     store_secondaries(&app, &list).await?;
     Ok(axum::Json(peer_kit(&app.settings())?).into_response())
 }
@@ -2581,7 +2597,10 @@ async fn main() -> Result<(), String> {
     let sock = tokio::net::TcpListener::bind(&listen)
         .await
         .map_err(|e| format!("{listen}: {e}"))?;
-    axum::serve(sock, router(app))
-        .await
-        .map_err(|e| e.to_string())
+    axum::serve(
+        sock,
+        router(app).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await
+    .map_err(|e| e.to_string())
 }
