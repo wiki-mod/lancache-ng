@@ -17051,26 +17051,26 @@ _ci_pr_section() {
 # Why: template hints are not content (template, notes).
 # From: Issue #1683 | PR #1858
 _ci_md_strip_comments() {
-    local out
-    if ! out="$(awk '
-        {
-            line = $0; keep = ""
-            while (1) {
-                if (incm) {
-                    p = index(line, "-->")
-                    if (!p) break
-                    line = substr(line, p + 3); incm = 0
-                }
-                p = index(line, "<!--")
-                if (!p) { keep = keep line; break }
-                keep = keep substr(line, 1, p - 1); line = substr(line, p + 4); incm = 1
-            }
-            print keep
-        }
-    ' <<< "$1" 2>&1)"; then
-        ci_error "[CI-ERROR-CHECK-0144]" "reason=\"HTML comment strip failed\"" "${out}"
-        return 2
-    fi
+    local line keep incm=0 out="" cmt_open='<!--' cmt_close='-->'
+    while IFS= read -r line; do
+        keep=""
+        while :; do
+            if [ "${incm}" -eq 1 ]; then
+                [[ "${line}" == *"${cmt_close}"* ]] || break
+                line="${line#*"${cmt_close}"}"
+                incm=0
+            fi
+            if [[ "${line}" != *"${cmt_open}"* ]]; then
+                keep+="${line}"
+                break
+            fi
+            keep+="${line%%"${cmt_open}"*}"
+            line="${line#*"${cmt_open}"}"
+            incm=1
+        done
+        out+="${keep}"$'\n'
+    done <<< "$1"
+    while [[ "${out}" == *$'\n' ]]; do out="${out%$'\n'}"; done
     printf '%s\n' "${out}"
 }
 
