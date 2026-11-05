@@ -104,6 +104,8 @@ ARG LANCACHE_PROCESSES
 RUN set -e; \
     sed -i 's/^#\?rc_sys=.*/rc_sys="docker"/' /etc/rc.conf; \
     sed -i 's/^#\?rc_env_allow=.*/rc_env_allow="*"/' /etc/rc.conf; \
+    sed -i 's/^#\?rc_controller_cgroups=.*/rc_controller_cgroups="NO"/' /etc/rc.conf; \
+    rm -f /etc/runlevels/sysinit/* /etc/runlevels/boot/*; \
     declare -A v; IFS='|' read -ra kv <<< "${LANCACHE_RUNTIME_DEFAULTS}"; \
     for p in "${kv[@]}"; do v["${p%%=*}"]="${p#*=}"; done; \
     for row in ${LANCACHE_PROCESSES}; do \
