@@ -665,7 +665,7 @@
         box.addEventListener('click', function () { box.hidden = true; });
         document.body.appendChild(box);
       }
-      box.textContent = 'Error: ' + (err && err.message ? err.message : err);
+      box.textContent = LC_T.error_prefix + (err && err.message ? err.message : err);
       box.hidden = false;
     };
 

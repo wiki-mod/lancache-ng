@@ -77,6 +77,32 @@ const LANG_COOKIE: &str = "lc_lang";
 // From: Issue #1683 | PR #1980
 type Texts = BTreeMap<String, BTreeMap<String, String>>;
 
+// What: the language files, read once at start.
+// Why: form errors outside page() need them too.
+// From: Issue #1683 | PR #1980
+static TEXTS: std::sync::OnceLock<Texts> = std::sync::OnceLock::new();
+
+// What: all languages; empty before the start read.
+// Why: one access path for page(), tr() and the layer.
+// From: Issue #1683 | PR #1980
+fn all_texts() -> &'static Texts {
+    static EMPTY: Texts = Texts::new();
+    TEXTS.get().unwrap_or(&EMPTY)
+}
+
+// What: one text in the request language.
+// Why: form errors speak the language of the page.
+// From: Issue #1683 | PR #1980
+fn tr(key: &str) -> String {
+    let code = LANG.try_with(Clone::clone).unwrap_or_default();
+    let all = all_texts();
+    all.get(&code)
+        .or_else(|| all.values().next())
+        .and_then(|m| m.get(key))
+        .cloned()
+        .unwrap_or_else(|| key.to_string())
+}
+
 tokio::task_local! {
     // What: language of the request being served.
     // Why: page() has no headers; the layer sets it.
@@ -126,7 +152,6 @@ struct App {
     settings: RwLock<Settings>,
     saved: Option<PathBuf>,
     tera: Tera,
-    texts: Texts,
     docker: docker::Api,
     session_key: [u8; 32],
     cache_used: AtomicU64,
@@ -198,9 +223,8 @@ impl App {
             .try_with(Clone::clone)
             .unwrap_or_else(|_| s.text("UI_LANG_DEFAULT").unwrap_or_default());
         let empty = BTreeMap::new();
-        let t = self.texts.get(&code).unwrap_or(&empty);
-        let langs: Vec<(&str, &str)> = self
-            .texts
+        let t = all_texts().get(&code).unwrap_or(&empty);
+        let langs: Vec<(&str, &str)> = all_texts()
             .iter()
             .map(|(c, m)| (c.as_str(), m.get("lang_name").map_or(c.as_str(), |n| n)))
             .collect();
@@ -475,19 +499,20 @@ async fn password(
     let get = |k: &str| form.get(k).cloned().unwrap_or_default();
     let (current, new) = (get("current_password"), get("new_password"));
     if new != get("confirm_password") {
-        return Err(bad_request("the two new passwords differ"));
+        return Err(bad_request(tr("err_passwords_differ")));
     }
     let s = app.settings();
     let min = s.uint("UI_PASSWORD_MIN_LENGTH")?;
     if (new.chars().count() as u64) < min {
-        return Err(bad_request(format!(
-            "the password needs at least {min} characters"
-        )));
+        return Err(bad_request(
+            tr("err_password_min").replace("{x}", &min.to_string()),
+        ));
     }
+    let wrong = tr("err_password_wrong");
     let old = s.text("UI_PASSWORD_HASH").unwrap_or_default();
     let hashed = tokio::task::spawn_blocking(move || {
         if !old.is_empty() && !verify(&old, &current) {
-            return Err("the current password is wrong".to_string());
+            return Err(wrong);
         }
         phc(&new)
     })
@@ -561,7 +586,7 @@ async fn save(
     if let Some(d) = form.get("DHCP_DOMAIN")
         && !lancache_ng::dns::is_dns_name(d, false, false)
     {
-        return Err(bad_request(format!("{d:?} is no domain name")));
+        return Err(bad_request(tr("err_no_domain").replace("{x}", d)));
     }
 
     // What: back to the page that sent the form.
@@ -1740,14 +1765,18 @@ async fn stats(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     let snmp = s.text("STATS_SNMP_TARGET").unwrap_or_default();
     let mut tabs = vec![json!({
         "id": lancache_ng::rrd::MACHINE,
-        "label": "Machine",
-        "source": format!("Whole box (all containers together). Load, memory, CPU, disk: snmpd on {snmp}. Network: host interfaces, the ui reads the host counters directly. The ui asks every {step} s."),
+        "label": tr("stats_machine"),
+        "source": tr("stats_machine_source")
+            .replace("{x}", &snmp)
+            .replace("{y}", &step.to_string()),
     })];
     for c in s.list("STATS_CONTAINERS") {
         tabs.push(json!({
             "id": c,
             "label": c,
-            "source": format!("Container {c} only. CPU, memory, network and disk from Docker; program values (nginx, PowerDNS, Kea, chrony) from their own interfaces. The ui asks every {step} s."),
+            "source": tr("stats_container_source")
+                .replace("{x}", &c)
+                .replace("{y}", &step.to_string()),
         }));
     }
     ctx.insert("tabs", &tabs);
@@ -2593,7 +2622,7 @@ fn gib_bytes(text: &str) -> Result<u64, String> {
     let n: u64 = text
         .trim()
         .parse()
-        .map_err(|_| format!("{text:?} is no whole GiB number"))?;
+        .map_err(|_| tr("err_no_gib").replace("{x}", text))?;
     n.checked_shl(30)
         .ok_or_else(|| format!("{text:?} is too big"))
 }
@@ -2619,9 +2648,11 @@ fn cache_room(s: &Settings, form: &Fields) -> Result<(), Fail> {
     let reachable = sp.free.saturating_add(used.min(old));
     if new > reachable {
         let room = human::bytes(reachable);
-        return Err(bad_request(format!(
-            "cache size {wanted} does not fit; at most {room}"
-        )));
+        return Err(bad_request(
+            tr("err_cache_fit")
+                .replace("{x}", wanted)
+                .replace("{y}", &room),
+        ));
     }
     Ok(())
 }
@@ -2820,7 +2851,7 @@ fn texts() -> Result<Texts, String> {
 // Why: cookie first, then the browser, then the SOT.
 // From: Issue #1683 | PR #1980
 fn pick_lang(app: &App, headers: &HeaderMap) -> String {
-    let known = |c: &str| app.texts.contains_key(c);
+    let known = |c: &str| all_texts().contains_key(c);
     if let Some(c) = cookie(headers, LANG_COOKIE).filter(|c| known(c)) {
         return c;
     }
@@ -3050,10 +3081,12 @@ async fn main() -> Result<(), String> {
     let dir = PathBuf::from(s.text("SECRETS_DIR")?);
     let key =
         secret::resolve(None, &dir, "UI_SESSION_KEY", owner_keep()).map_err(|e| e.to_string())?;
+    TEXTS
+        .set(texts()?)
+        .map_err(|_| "lang: files read twice".to_string())?;
     let app = Arc::new(App {
         docker: docker::Api::new(&s.text("DOCKER_ENDPOINT")?)?,
         tera: templates()?,
-        texts: texts()?,
         settings: RwLock::new(s.clone()),
         saved,
         session_key: secret::key_bytes(&key)?,
