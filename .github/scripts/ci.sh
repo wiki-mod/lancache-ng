@@ -16786,19 +16786,30 @@ _ci_check_shell_guards() {
 _ci_check_bats_and_chain() {
     local -a _ci_override=("$@") files=()
     _ci_scan_files files _ci_override '.github/scripts/*.bats' || return 2
-    local path out
+    local path out bc_raw bc_line bc_cont bc_start bc_n
+    local bc_open_re='^[[:space:]]*\[\[?[[:space:]]'
+    local bc_and_re='\]\]?[[:space:]]*&&[[:space:]]*\['
+    local bc_close_re='\]\]?[[:space:]]*$'
     local -a viol=()
     for path in "${files[@]}"; do
-        out="$(_ci_capture 0 awk "$(cat <<'PROG'
-            { line = (cont != "" ? cont " " : "") $0; cont = "" }
-            /\\$/ { cont = substr(line, 1, length(line) - 1); if (!start) start = NR; next }
-            line ~ /^[[:space:]]*\[\[?[[:space:]]/ && line ~ /\]\]?[[:space:]]*&&[[:space:]]*\[/ \
-                && line ~ /\]\]?[[:space:]]*$/ && line !~ /\|\|/ {
-                print (start ? start : NR) ": " line
-            }
-            { start = 0 }
-PROG
-        )" "${path}")" || return 2
+        out="" bc_cont="" bc_start=0 bc_n=0
+        # What: \ at line end joins the next line.
+        # Why: the finding names the first line of the join.
+        while IFS= read -r bc_raw || [ -n "${bc_raw}" ]; do
+            bc_n=$((bc_n + 1))
+            bc_line="${bc_cont:+${bc_cont} }${bc_raw}"
+            bc_cont=""
+            if [[ "${bc_raw}" == *\\ ]]; then
+                bc_cont="${bc_line%\\}"
+                [ "${bc_start}" -ne 0 ] || bc_start="${bc_n}"
+                continue
+            fi
+            if [[ "${bc_line}" =~ ${bc_open_re} && "${bc_line}" =~ ${bc_and_re} && "${bc_line}" =~ ${bc_close_re} && "${bc_line}" != *'||'* ]]; then
+                out+="$((bc_start ? bc_start : bc_n)): ${bc_line}"$'\n'
+            fi
+            bc_start=0
+        done < "${path}" || return 2
+        out="${out%$'\n'}"
         [ -z "${out}" ] || viol+=("${path}: ${out}")
     done
     if [ "${#viol[@]}" -gt 0 ]; then
