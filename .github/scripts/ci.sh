@@ -4171,11 +4171,29 @@ _ci_identity_prefill_key() {
     printf 'idfill-%s-%s-%s' "${_CI_CALL_KEY}" "$1" "${2//\//-}"
 }
 
+# What: one service's prefill: ids of platforms $2.
+# Why: then the test content, so plan reads only memos.
+# From: Issue #1683 | PR #1858
+_ci_identity_prefill_one() {
+    local s="$1" p id type
+    while IFS= read -r p; do
+        [ -n "${p}" ] || continue
+        id="$(_ci_identity_compute "${s}" "${p}")" || continue
+        _ci_job_memo_put "$(_ci_identity_prefill_key "${s}" "${p}")" "${id}" || continue
+    done <<< "$2"
+    # What: read the test content base and head here.
+    # Why: plan compared them per service in turn, 2 s each.
+    # From: Issue #1683 | PR #1858
+    type="$(_ci_required_field "${s}" build_type)" || return 0
+    [ "${type}" = rust ] || return 0
+    _ci_content_changed _ci_identity_content "${s}" || return 0
+}
+
 # What: compute the ids of all pairs of list $1 at once.
 # Why: Fund 114: one pair after another took 27 s.
 # From: Issue #1683 | PR #1858
 _ci_identity_prefill() {
-    local s p plats key wrc id
+    local s p plats key wrc
     local -a pids=() keys=() rcs=()
     [ -n "${RUNNER_TEMP:-}" ] || return 0
     for s in $1; do
@@ -4184,11 +4202,7 @@ _ci_identity_prefill() {
         # What: one job per service; its platforms in turn.
         # Why: the second platform reads the content memo.
         # From: Issue #1683 | PR #1858
-        while IFS= read -r p; do
-            [ -n "${p}" ] || continue
-            id="$(_ci_identity_compute "${s}" "${p}")" || continue
-            _ci_job_memo_put "$(_ci_identity_prefill_key "${s}" "${p}")" "${id}" || continue
-        done <<< "${plats}" 2> "${RUNNER_TEMP}/${key}.err" &
+        _ci_identity_prefill_one "${s}" "${plats}" 2> "${RUNNER_TEMP}/${key}.err" &
         pids+=("$!")
         keys+=("${key}")
         # What: first service runs alone, then the rest.
