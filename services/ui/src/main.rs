@@ -555,7 +555,7 @@ async fn commit(app: &App, form: Fields) -> Result<(), String> {
     }
     config::store(&path, &old, &updates)?;
     let new = Settings::load(&process_env, Some(&path))?;
-    for line in apply_all(app, &old, &new).await? {
+    for line in apply_all(app, &old, &new, true).await? {
         eprintln!("ui: apply: {line}");
     }
     match app.settings.write() {
@@ -2374,7 +2374,12 @@ fn write_files(s: &Settings, files: &[render::File]) -> Result<Vec<config::Chang
 // What: render, write and wake the owners.
 // Why: only owners with changes are touched.
 // From: Issue #1683 | PR #1858
-async fn apply_all(app: &App, old: &Settings, new: &Settings) -> Result<Vec<String>, String> {
+async fn apply_all(
+    app: &App,
+    old: &Settings,
+    new: &Settings,
+    zones: bool,
+) -> Result<Vec<String>, String> {
     let sec = secrets(new)?;
     let files = render::all(new, &sec).map_err(|e| e.join("; "))?;
     let mut changes = old.diff(new);
@@ -2383,7 +2388,10 @@ async fn apply_all(app: &App, old: &Settings, new: &Settings) -> Result<Vec<Stri
     // Why: pdns starts only after the restart below.
     // From: Issue #1683 | PR #1980
     let mut report = Vec::new();
-    if let Err(e) = ensure_zones(new).await {
+    // What: at start zones_at_start owns this step.
+    // Why: live: dns not up yet gave an error line.
+    // From: Issue #1683 | PR #1980
+    if zones && let Err(e) = ensure_zones(new).await {
         report.push(e);
     }
     let mut plan = apply::plan(&changes);
@@ -2642,15 +2650,23 @@ async fn ensure_zones(s: &Settings) -> Result<(), String> {
 // Why: at ui start the dns container may not run yet.
 // From: Issue #1683 | PR #1980
 async fn zones_at_start(app: Arc<App>) {
+    let began = std::time::Instant::now();
     loop {
         let s = app.settings();
         let wait = s.uint("PDNS_SOA_COLD_RETRY").unwrap_or(1).max(1);
+        let grace = s.uint("UI_FLUSH_GRACE_SECONDS").unwrap_or(0);
         match ensure_zones(&s).await {
             Ok(()) => {
                 eprintln!("ui: start: zones ready");
                 return;
             }
-            Err(e) => eprintln!("ui: start: zones wait for dns: {e}"),
+            // What: log only after the grace time.
+            // Why: live: dns starts with the ui.
+            // From: Issue #1683 | PR #1980
+            Err(e) if began.elapsed().as_secs() >= grace => {
+                eprintln!("ui: start: zones wait for dns {grace} s: {e}");
+            }
+            Err(_) => {}
         }
         tokio::time::sleep(Duration::from_secs(wait)).await;
     }
@@ -2706,7 +2722,7 @@ async fn rotate_tsig(app: &App) -> Result<(), String> {
     }
     secret::load_or_create(&file, new_tsig, owner_keep())
         .map_err(|e| format!("DDNS_TSIG_KEY: {e}"))?;
-    for line in apply_all(app, &s, &s).await? {
+    for line in apply_all(app, &s, &s, true).await? {
         eprintln!("ui: tsig rotate: {line}");
     }
     Ok(())
@@ -3235,7 +3251,7 @@ async fn main() -> Result<(), String> {
     // What: render every config once at start.
     // Why: owners read the config volume; it starts empty.
     // From: Issue #1683 | PR #1980
-    match apply_all(&app, &s, &s).await {
+    match apply_all(&app, &s, &s, false).await {
         Ok(lines) => lines.iter().for_each(|l| eprintln!("ui: start: {l}")),
         Err(e) => eprintln!("ui: start render: {e}"),
     }
