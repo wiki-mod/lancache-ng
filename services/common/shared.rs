@@ -3997,6 +3997,13 @@ pub mod rrd {
         cmd.arg("--title").arg(&g.title);
         cmd.arg("--width").arg(s.text("STATS_WIDTH")?);
         cmd.arg("--height").arg(s.text("STATS_HEIGHT")?);
+
+        // What: larger fonts for axis, title and legend.
+        // Why: DoMe 05.11.: values needed a magnifier.
+        // From: Issue #1683 | PR #1980
+        for f in s.list("STATS_FONTS") {
+            cmd.arg("--font").arg(f);
+        }
         if dark {
             for c in s.list("STATS_DARK_COLOURS") {
                 cmd.arg("--color").arg(c);
@@ -4009,7 +4016,14 @@ pub mod rrd {
                 n => colours[i % n].clone(),
             };
             cmd.arg(format!("DEF:{0}={1}:{0}:AVERAGE", src.ds, path.display()));
-            cmd.arg(format!("LINE2:{0}{colour}:{0}", src.ds));
+            cmd.arg(format!("LINE2:{0}{colour}:{0:<8}", src.ds));
+
+            // What: now, average and max as text per line.
+            // Why: exact values without reading the axis.
+            // From: Issue #1683 | PR #1980
+            cmd.arg(format!("GPRINT:{}:LAST:now %8.1lf%s", src.ds));
+            cmd.arg(format!("GPRINT:{}:AVERAGE:avg %8.1lf%s", src.ds));
+            cmd.arg(format!("GPRINT:{}:MAX:max %8.1lf%s\\l", src.ds));
         }
         run(&mut cmd)
     }

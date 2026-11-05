@@ -946,14 +946,15 @@ runtime:
     - STATS_DIR=@UI_DATA_DIR@/stats
     - STATS_GRAPHS=load:l1=.1.3.6.1.4.1.2021.10.1.5.1=GAUGE+l5=.1.3.6.1.4.1.2021.10.1.5.2=GAUGE memory:avail=.1.3.6.1.4.1.2021.4.6.0=GAUGE+total=.1.3.6.1.4.1.2021.4.5.0=GAUGE cpu:user=.1.3.6.1.4.1.2021.11.50.0=COUNTER+system=.1.3.6.1.4.1.2021.11.52.0=COUNTER+iowait=.1.3.6.1.4.1.2021.11.54.0=COUNTER disk_io:read=.1.3.6.1.4.1.2021.11.58.0=COUNTER+write=.1.3.6.1.4.1.2021.11.57.0=COUNTER
     - STATS_HEARTBEAT_STEPS=2
-    - STATS_HEIGHT=200
+    - STATS_FONTS=DEFAULT:11: TITLE:13: AXIS:10: LEGEND:11:
+    - STATS_HEIGHT=240
     - "STATS_LINE_COLOURS=#2f81f7 #3fb950 #d29922 #f85149"
     - STATS_RANGES=1h 1d 1w 1m 1y
     - STATS_RRAS=AVERAGE:0.5:1:1440 AVERAGE:0.5:12:1680 AVERAGE:0.5:288:800 MAX:0.5:12:1680
     - STATS_SNMP_TARGET=udp:@CACHEHAMSTER_SERVICE@:161
     - STATS_STEP=60
     - CACHE_USAGE_SCAN_SECONDS=300
-    - STATS_WIDTH=720
+    - STATS_WIDTH=1000
     - STEAM_API_URL=https://api.steampowered.com
     - STEAM_BRANCH=public
     - STEAM_CDN_HOST=lancache.steamcontent.com
@@ -1191,6 +1192,7 @@ runtime:
     - SNMP_TRAP_SINK=text?;;;restart;services
     - STATS_DARK_COLOURS=list;;;live;ui
     - STATS_DIR=path;;;live;ui
+    - STATS_FONTS=list;;;live;ui
     - STATS_GRAPHS=list;;;live;ui
     - STATS_HEARTBEAT_STEPS=uint;1;100;live;ui
     - STATS_HEIGHT=text;;;live;ui
