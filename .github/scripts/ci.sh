@@ -10450,7 +10450,7 @@ _ci_gh_versions() {
 # Why: SOT-scoped candidates; org-wide would delete others.
 # From: Issue #1683
 _ci_gc_candidates() {
-    local prefix owner pkgbase svc vers grc found=0
+    local prefix owner pkgbase svc vers v grc found=0
     prefix="$(_ci_repo)" || { ci_log "[CI-ERROR-GC-0017]" "reason=\"GITHUB_REPOSITORY missing; no package namespace\""; return 2; }
     owner="${prefix%%/*}"
     pkgbase="${prefix#*/}"
@@ -10471,7 +10471,10 @@ _ci_gc_candidates() {
         # Why: Delete path is package-scoped, not id-only.
         # From: Issue #1683
         if [ -n "${vers}" ]; then
-            _ci_capture 0 awk -v s="${svc}" "NF{print \$0\"\t\"s}" <<< "${vers}" || return 2
+            while IFS= read -r v; do
+                [[ "${v}" == *[![:space:]]* ]] || continue
+                printf '%s\t%s\n' "${v}" "${svc}"
+            done <<< "${vers}"
         fi
     done <<<"${produced}"
     # What: No package found anywhere is a config error.
