@@ -12177,7 +12177,7 @@ _ci_validate_kea_add() {
 # From: Issue #763 | PR #1858
 _ci_validate_kea_round_trip() {
     local project="$1" kip="$2" kport="$3" uname="$4" cfg token dir subnet resp sid ubase
-    local jar csrf base snap snap_b n_a n_b rc=0 kbase kuser label mac_a mac_b snapdir mount snaps
+    local jar csrf base snap snap_b n_a n_b rc=0 kbase kuser label mac_a mac_b snapdir mount snaps tries pause
     kbase="http://${kip}:${kport}"
     kuser="$(_ci_validate_kea_agent user)" || return 2
     label="$(_ci_variable CI_VALIDATE_PROBE_LABEL)" || return 2
@@ -12200,9 +12200,12 @@ PROG
     fi
     dir="${mount%%$'\t'*}"
     snaps="${dir}${mount#*$'\t'}"
-    # What: one config-get; healthy dhcp means it accepts.
-    # Why: the healthcheck connects to it; no poll.
-    # From: Issue #1683 | PR #1912
+    # What: wait until the agent answers config-get.
+    # Why: dhcp health checks no agent; the ui restarts it.
+    # From: Issue #1683 | PR #1980
+    tries="$(_ci_variable CI_VALIDATE_SNAPSHOT_POLL_ATTEMPTS)" || return 2
+    pause="$(_ci_variable CI_VALIDATE_POLL_PAUSE)" || return 2
+    _ci_validate_poll "${tries}" "${pause}" _ci_validate_kea_cmd "${kbase}" "${kuser}" "${token}" '{"command":"config-get","service":["dhcp4"]}' > /dev/null || true
     resp="$(_ci_capture 0 _ci_validate_kea_cmd "${kbase}" "${kuser}" "${token}" '{"command":"config-get","service":["dhcp4"]}')" || return 2
     _ci_kea_reply_check "[CI-ERROR-VALIDATE-0090]" "ip=\"${kip}\" reason=\"Kea control agent config-get did not return result 0\"" "${resp}" || return 1
     sid="$(_ci_capture 0 jq -r --arg s "${subnet}" ".[0].arguments.Dhcp4.subnet4[]? | select(.subnet == \$s) | .id" <<< "${resp}")" || return 2
