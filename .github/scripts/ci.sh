@@ -19022,7 +19022,9 @@ _ci_check_proxy_nginx_policy() {
     local repo_root="${1:-${CI_REPO_ROOT}}" f out line pp blocks=0 b h a d al r px hk hu hp="" hq pn lb fb hv sv sp bn
     local hz_raw hz_line hz_body hz_in hz_a hz_d hz_al hz_r
     local la_raw la_line la_loc la_t la_in la_dep la_a la_d la_s la_m
-    local -a viol=() bnt hz_fld=() la_fld=()
+    local ih_raw ih_h
+    local -a viol=() bnt hz_fld=() la_fld=() ih_fld=() ih_seq=()
+    local -A ih_ign=() ih_hid=()
     px="$(_ci_service_path proxy "" "${repo_root}")" || return 2
     px="${px%/}"
     # What: the health and status paths of the SOT.
@@ -19157,19 +19159,30 @@ _ci_check_proxy_nginx_policy() {
             fi
         done <<<"${out}"
     done
-    out="$(_ci_capture 0 awk "$(cat <<'PROG'
-        $1 == "proxy_ignore_headers" { for (i = 2; i <= NF; i++) { h = $i; sub(/;$/, "", h); ign[h] = 1 } }
-        $1 == "proxy_hide_header" { h = $2; sub(/;$/, "", h); hid[h] = 1 }
-        END {
-            split("Cache-Control Expires Vary Set-Cookie", req, " ")
-            for (i in req) if (!(req[i] in ign)) print "proxy_ignore_headers must include " req[i]
-            for (h in ign) if (!(h in hid)) print "ignored header " h " must also be hidden from clients"
-        }
-PROG
-        )" "${pp}")" || return 2
-    while IFS= read -r h; do
-        [ -z "${h}" ] || viol+=("${pp#"${repo_root}/"}: ${h}")
-    done <<<"${out}"
+    # What: ignored and hidden headers of proxy-params.conf.
+    # Why: keys get a k so an empty name is a key too.
+    # From: Issue #1683 | PR #1858
+    while IFS= read -r ih_raw || [ -n "${ih_raw}" ]; do
+        read -r -a ih_fld <<< "${ih_raw}"
+        if [ "${ih_fld[0]-}" = proxy_ignore_headers ]; then
+            for ih_h in "${ih_fld[@]:1}"; do
+                ih_h="k${ih_h%;}"
+                [ -n "${ih_ign[${ih_h}]-}" ] || ih_seq+=("${ih_h}")
+                ih_ign[${ih_h}]=1
+            done
+        elif [ "${ih_fld[0]-}" = proxy_hide_header ]; then
+            ih_h="${ih_fld[1]-}"
+            ih_hid[k${ih_h%;}]=1
+        fi
+    done < "${pp}" || return 2
+    for ih_h in Cache-Control Expires Vary Set-Cookie; do
+        [ -n "${ih_ign[k${ih_h}]-}" ] \
+            || viol+=("${pp#"${repo_root}/"}: proxy_ignore_headers must include ${ih_h}")
+    done
+    for ih_h in "${ih_seq[@]}"; do
+        [ -n "${ih_hid[${ih_h}]-}" ] \
+            || viol+=("${pp#"${repo_root}/"}: ignored header ${ih_h#k} must also be hidden from clients")
+    done
     # What: the https.conf template includes the listen file
     # Why: a literal listen would be a second port owner.
     # From: Issue #1683 | PR #1912
