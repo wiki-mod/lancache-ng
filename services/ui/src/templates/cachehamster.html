@@ -45,10 +45,10 @@
     <table class="table">
       <tr><th>Name</th><th>{{ t.what }}</th><th>{{ t.when }}</th><th>{{ t.state }}</th><th>{{ t.progress }}</th><th></th></tr>
       {% for j in hamster.jobs %}
-      <tr>
+      <tr{% if j.state.state == "running" or (j.state.state == "waiting" and j.when.kind == "now") %} data-busy="1"{% endif %}>
         <td>{{ j.name }}</td>
         <td>{% if j.target.kind == "steam_app" %}{{ t.steam_app }} {{ j.target.value }}{% else %}{{ j.target.value | length }} {{ t.addresses }}{% endif %}</td>
-        <td>{% if j.when.kind == "at" %}<span data-unix="{{ j.when.at }}"></span>{% elif j.when.kind == "later" %}{{ t.by_hand_press_start }}{% else %}{{ j.when.kind }}{% endif %}</td>
+        <td>{% if j.when.kind == "at" %}<span data-unix="{{ j.when.at }}"></span>{% elif j.when.kind == "later" %}{{ t.by_hand_press_start }}{% else %}{{ t.now }}{% endif %}</td>
         {% set sk = "hamster_st_" ~ j.state.state %}<td>{{ t[sk] }}{% if j.state.reason %}: {{ j.state.reason }}{% endif %}</td>
         <td>{{ j.done }} {{ t.of }} {{ j.total }} {{ t.done }} {{ j.failed }} {{ t.failed }} {{ j.bytes | filesizeformat }}</td>
         <td>
@@ -156,6 +156,20 @@
       state.textContent = LC_T.loading_login_code;
       api('login-begin').then(show).catch(fail);
     });
+  }
+  // What: reload while a job waits to start or runs.
+  // Why: DoMe 05.11.: "now" stayed on waiting on screen.
+  // From: Issue #871 | PR #1980
+  if (document.querySelector('tr[data-busy]')) {
+    setInterval(function () {
+      const typing = ['hamster-name', 'hamster-urls', 'hamster-app'].some(function (id) {
+        const el = document.getElementById(id);
+        return el && el.value !== '';
+      });
+      const jobs = document.querySelector('[data-ch-panel="jobs"]');
+      const shown = jobs && jobs.classList.contains('active');
+      if (shown && !typing && !document.querySelector('details[open]')) { location.reload(); }
+    }, 5000);
   }
   const lib = document.getElementById('hamster-library');
   if (lib) {

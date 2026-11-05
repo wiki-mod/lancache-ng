@@ -160,6 +160,11 @@ struct Session {
     account: String,
     steam_id: String,
     refresh_token: String,
+    // What: the access token of the QR poll, sealed too.
+    // Why: client tokens may not renew by Web API.
+    // From: Issue #871 | PR #1980
+    #[serde(default)]
+    access_token: String,
 }
 
 // What: paths and settings for one invocation.
@@ -325,6 +330,13 @@ fn field(v: &Value, key: &str) -> Option<String> {
 // Why: GetOwnedGames and token refresh need it.
 // From: Issue #871 | PR #1858
 fn steam_id_of(token: &str) -> Result<String, String> {
+    field(&jwt_claims(token)?, "sub").ok_or_else(|| "refresh token has no sub".into())
+}
+
+// What: the claims of a Steam JWT, unchecked.
+// Why: sub and exp are read; Steam checks the rest.
+// From: Issue #871 | PR #1980
+fn jwt_claims(token: &str) -> Result<Value, String> {
     let payload = token
         .split('.')
         .nth(1)
@@ -332,8 +344,7 @@ fn steam_id_of(token: &str) -> Result<String, String> {
     let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(payload.trim_end_matches('='))
         .map_err(|e| format!("refresh token payload: {e}"))?;
-    let claims: Value = serde_json::from_slice(&raw).map_err(|e| e.to_string())?;
-    field(&claims, "sub").ok_or_else(|| "refresh token has no sub".into())
+    serde_json::from_slice(&raw).map_err(|e| e.to_string())
 }
 
 // What: the QR code of a challenge URL as inline SVG.
@@ -360,8 +371,8 @@ fn qr_size(c: &Ctx) -> Result<u32, String> {
 async fn login_begin(c: &Ctx, client: &reqwest::Client) -> Result<Value, String> {
     let device = c.s.text("STEAM_DEVICE_NAME")?;
 
-    // What: login as the mobile app platform.
-    // Why: only its tokens renew for Web API calls.
+    // What: login as the Steam client platform (SOT).
+    // Why: live 05.11.: CM refused mobile tokens (5).
     // From: Issue #871 | PR #1980
     let platform = c.s.uint("STEAM_AUTH_PLATFORM_TYPE")?.to_string();
     let r = steam_post(
@@ -409,6 +420,7 @@ async fn login_poll(c: &Ctx, client: &reqwest::Client) -> Result<Value, String> 
             account: field(&r, "account_name").unwrap_or_default(),
             steam_id: steam_id_of(&token)?,
             refresh_token: token,
+            access_token: field(&r, "access_token").unwrap_or_default(),
         };
         store_session(c, &session)?;
         remove(&c.path(PENDING_FILE))?;
@@ -436,9 +448,19 @@ async fn login_poll(c: &Ctx, client: &reqwest::Client) -> Result<Value, String> 
 }
 
 // What: a short-lived access token from the session.
-// Why: Web API calls need it; it is never stored.
+// Why: Web API calls need it; a renewed one is not kept.
 // From: Issue #871 | PR #1858
 async fn access_token(c: &Ctx, client: &reqwest::Client, s: &Session) -> Result<String, String> {
+    // What: the sealed token while it lives a minute more.
+    // Why: CM login needs a client token; see login_begin.
+    // From: Issue #871 | PR #1980
+    let live = jwt_claims(&s.access_token)
+        .ok()
+        .and_then(|j| j.get("exp").and_then(Value::as_u64))
+        .is_some_and(|exp| exp > clock::unix_secs() + 60);
+    if live {
+        return Ok(s.access_token.clone());
+    }
     let r = steam_post(
         client,
         c,
