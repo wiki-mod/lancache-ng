@@ -19713,10 +19713,20 @@ _ci_check_actionlint() {
     wf="$(_ci_repo_path CI_WORKFLOW_DIR "${repo_root}")" || return 2
     _ci_workflow_files wfs "${wf}" || return 2
     out="$(actionlint "${wfs[@]}" 2>&1)" || rc=$?
-    if [ "${rc}" -ne 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0057]" "reason=\"actionlint found issues\"" "${out}"
-        return 1
-    fi
+    # What: rc 1 = findings; any other rc = no result.
+    # Why: a missing actionlint (127) is not a finding.
+    # From: Issue #1683 | PR #1858
+    case "${rc}" in
+        0) ;;
+        1)
+            ci_error "[CI-ERROR-CHECK-0057]" "reason=\"actionlint found issues\"" "${out}"
+            return 1
+            ;;
+        *)
+            ci_error "[CI-ERROR-CHECK-0209]" "rc=${rc} reason=\"actionlint did not complete\"" "${out}"
+            return 2
+            ;;
+    esac
     # What: actionlint output is shown on a pass too.
     # Why: AG-INT-002: raw evidence of a passed run too.
     # From: Issue #1683 | PR #1858
