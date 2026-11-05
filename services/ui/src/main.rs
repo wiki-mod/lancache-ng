@@ -803,7 +803,15 @@ async fn domains(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     let https = s.text("IP_HTTPS").unwrap_or_default();
     let own = !https.is_empty() && https != s.text("IP_HTTP")? && !https.starts_with("127.");
     ctx.insert("primary_ip_https", if own { https.as_str() } else { "" });
-    ctx.insert("primary_url", &s.text("UI_PUBLIC_URL").unwrap_or_default());
+
+    // What: UI address on the LAN when none is set.
+    // Why: live test: an empty --primary broke the command.
+    // From: Issue #1683 | PR #1980
+    let mut url = s.text("UI_PUBLIC_URL").unwrap_or_default();
+    if url.is_empty() {
+        url = format!("http://{}:{}", s.text("IP_HTTP")?, s.uint("UI_PORT")?);
+    }
+    ctx.insert("primary_url", &url);
     ctx.insert("lan_record_types", &s.list("DNS_LAN_RECORD_TYPES"));
     ctx.insert("record_ttl_default", &s.uint("DNS_RECORD_TTL")?);
     ctx.insert("ttl_max", &s.uint("DNS_RECORD_TTL_MAX")?);
@@ -1262,6 +1270,7 @@ fn subnet_row(sn: &Value) -> Value {
         "dns_primary": dns.first().cloned().unwrap_or_default(),
         "dns_secondary": dns.get(1).cloned().unwrap_or_default(),
         "ntp_servers": option_data(sn, "ntp-servers"),
+        "domain": option_data(sn, "domain-name"),
         "pool_start": start.trim(),
         "pool_end": end.trim(),
         "lease_time": sn["valid-lifetime"],
