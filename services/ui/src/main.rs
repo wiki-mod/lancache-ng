@@ -369,10 +369,17 @@ async fn dashboard(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page
     // From: Issue #1683 | PR #1980
     ctx.insert("cache_pct", &0u64);
     ctx.insert("cache_used_human", &human::bytes(0));
+
+    // What: the set size in the same unit as "used".
+    // Why: live test 05.11.: GiB used beside "40g".
+    // From: Issue #1683 | PR #1980
+    let max = nginx_bytes(&s.text("CACHE_MAX_SIZE")?)?;
+    ctx.insert("cache_max_human", &human::bytes(max));
     if let Ok(sp) = fs::space(Path::new(&s.text("CACHE_DIR")?)) {
         let used = sp.total.saturating_sub(sp.free);
+        let pct = (used.saturating_mul(100) / max.max(1)).min(100);
         ctx.insert("cache_used_human", &human::bytes(used));
-        ctx.insert("cache_pct", &(used.saturating_mul(100) / sp.total.max(1)));
+        ctx.insert("cache_pct", &pct);
     }
     app.page("dashboard.html", ctx, &csrf)
 }

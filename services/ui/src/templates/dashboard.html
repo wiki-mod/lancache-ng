@@ -61,14 +61,14 @@
       <div class="storage-bar"><div class="storage-fill" style="width:{{ cache_pct }}%;"></div></div>
       <div class="storage-meta">
         <span><b>{{ cache_used_human }}</b> used</span>
-        <span>{{ v.CACHE_MAX_SIZE }} configured</span>
+        <span>{{ cache_max_human }} configured ({{ v.CACHE_MAX_SIZE }})</span>
       </div>
       <p class="field-hint" style="margin-top:12px;">Total reflects the cache size configured for this LanCache-NG instance. Oldest, least-requested files are removed automatically; you don't need to clear this yourself.</p>
       <form method="post" action="{{ routes.setup_save | safe }}" style="margin-top:14px;">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <div class="field-row">
           <div class="field">
-            <label for="cache_gb">New cache size (nginx size, e.g. 40g)</label>
+            <label for="cache_gb">New cache size (g = GiB, e.g. 40g)</label>
             <input type="text" id="cache_gb" name="CACHE_MAX_SIZE" placeholder="{{ v.CACHE_MAX_SIZE }}">
           </div>
           <button type="submit" class="btn" style="margin-top:23px;">Resize cache</button>
