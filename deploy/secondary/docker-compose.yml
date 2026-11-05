@@ -10,6 +10,11 @@ services:
   # Why: zones come by NOTIFY and AXFR from the primary.
   # From: Issue #1683
   dns:
+    # What: /run as tmpfs for OpenRC.
+    # Why: OpenRC mounts /run itself; Docker denies it.
+    # From: Issue #1683 | PR #1980
+    tmpfs:
+      - ${SOT_RUN_DIR}
     container_name: ${SOT_CONTAINER_NAME_DNS}
     image: ${LANCACHE_IMAGE_REF_DNS:?LANCACHE_IMAGE_REF_DNS is required}
     environment: &dns-env
