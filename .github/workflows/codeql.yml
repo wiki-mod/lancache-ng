@@ -112,7 +112,7 @@ jobs:
   # Why: one CI image; the CodeQL bundle is a SOT pin
   # From: Issue #1683 | PR #1858
   analyze:
-    name: CodeQL ${{ matrix.language }}
+    name: CodeQL
     needs: impact
     if: ${{ fromJSON(needs.impact.outputs.matrix).include[0] != null }}
     # What: write only for the analyzed-content mark ref.
