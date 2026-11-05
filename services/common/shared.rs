@@ -2987,7 +2987,7 @@ pub mod nginx_conf {
         // Why: live: a closed port logged [error].
         // From: Issue #1683 | PR #1980
         out.push_str(&format!(
-            "\nserver {{\n    listen {};\n    return \"\";\n}}\n",
+            "\nserver {{\n    listen {};\n    ssl_preread on;\n    return \"\";\n}}\n",
             p.refuse
         ));
         out
