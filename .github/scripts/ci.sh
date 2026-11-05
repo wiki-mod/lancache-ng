@@ -13774,14 +13774,35 @@ _ci_version_inputs() {
 # Why: copies are synced on demand, idempotent, not by hand.
 # From: Issue #1683 | PR #1858
 _ci_version_release_sync() {
-    local lic ed cargo f tmp out wrote=0
+    local lic ed cargo f tmp out line key on=0 body="" wrote=0
     _ci_version_inputs lic ed cargo || return 2
     f="${cargo}"
     tmp="$(_ci_mktemp "${CI_TMPDIR}/ci-vsync.XXXXXX")" || return 2
-    out="$(awk -v l="${lic}" -v e="${ed}" '/^\[workspace\.package\]/ { on = 1; print; next } /^\[/ { on = 0 }
-        on && $1 == "license" { print "license = \"" l "\""; next }
-        on && $1 == "edition" { print "edition = \"" e "\""; next } { print }' "${f}" 2>&1 > "${tmp}")" \
-        || { ci_error "[CI-ERROR-VERSION-0026]" "path=\"${f}\" reason=\"derived copy not rendered\"" "${out}"; rm -f "${tmp}"; return 2; }
+    out="file not readable"
+    if [ -r "${f}" ]; then
+        while IFS= read -r line || [ -n "${line}" ]; do
+            if [[ "${line}" == "[workspace.package]"* ]]; then
+                on=1
+                body+="${line}"$'\n'
+                continue
+            fi
+            [[ "${line}" != "["* ]] || on=0
+            read -r key _ <<< "${line}"
+            if [ "${on}" -eq 1 ] && [ "${key}" = license ]; then
+                body+="license = \"${lic}\""$'\n'
+            elif [ "${on}" -eq 1 ] && [ "${key}" = edition ]; then
+                body+="edition = \"${ed}\""$'\n'
+            else
+                body+="${line}"$'\n'
+            fi
+        done < "${f}"
+        out="$(printf '%s' "${body}" 2>&1 > "${tmp}")" && out=written
+    fi
+    if [ "${out}" != written ]; then
+        ci_error "[CI-ERROR-VERSION-0026]" "path=\"${f}\" reason=\"derived copy not rendered\"" "${out}"
+        rm -f "${tmp}"
+        return 2
+    fi
     if ! out="$(_ci_copy_if_changed "${tmp}" "${f}")"; then
         ci_error "[CI-ERROR-VERSION-0027]" "path=\"${f}\" reason=\"derived copy not written\"" "${out}"
         rm -f "${tmp}"
