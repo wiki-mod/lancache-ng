@@ -492,6 +492,21 @@ _ci_tab_row() {
     return 1
 }
 
+# What: $2 trimmed, each blank run one space, into var $1.
+# Why: one blank fold owner; no awk gsub (Fund 136).
+# From: Issue #1683 | PR #1858
+_ci_ws_fold() {
+    local ws_in="$2" ws_out="" ws_run
+    ws_in="${ws_in#"${ws_in%%[![:space:]]*}"}"
+    ws_in="${ws_in%"${ws_in##*[![:space:]]}"}"
+    while [[ "${ws_in}" =~ [[:space:]]+ ]]; do
+        ws_run="${BASH_REMATCH[0]}"
+        ws_out+="${ws_in%%"${ws_run}"*} "
+        ws_in="${ws_in#*"${ws_run}"}"
+    done
+    printf -v "$1" '%s' "${ws_out}${ws_in}"
+}
+
 # What: line 2 of the text; nothing when it has one line.
 # Why: one second-line owner; no external line cutter.
 # From: Issue #1683 | PR #1912
@@ -19005,7 +19020,8 @@ PROG
 # From: Issue #1683 | PR #1858
 _ci_check_proxy_nginx_policy() {
     local repo_root="${1:-${CI_REPO_ROOT}}" f out line pp blocks=0 b h a d al r px hk hu hp="" hq pn lb fb hv sv sp bn
-    local -a viol=() bnt
+    local hz_raw hz_line hz_body hz_in hz_a hz_d hz_al hz_r
+    local -a viol=() bnt hz_fld=()
     px="$(_ci_service_path proxy "" "${repo_root}")" || return 2
     px="${px%/}"
     # What: the health and status paths of the SOT.
@@ -19048,18 +19064,32 @@ _ci_check_proxy_nginx_policy() {
     # Why: both servers include it; a copy is a 2nd owner.
     # From: Issue #1683 | PR #1858
     for f in "${px}"/conf.d/*.conf "${pp}"; do
-        out="$(_ci_capture 0 awk -v "P=${hp}" "$(cat <<'PROG'
-            $1 == "location" && $2 == "=" && $3 == P && $4 == "{" { inb = 1; n++; body = ""; a = 0; d = 0; al = 0; r = 0; next }
-            inb && /^[[:space:]]*\}/ {
-                printf "%s|%d|%d|%d|%d\n", body, a, d, al, r; inb = 0; next }
-            inb { line = $0; gsub(/^[[:space:]]+|[[:space:]]+$/, "", line); gsub(/[[:space:]]+/, " ", line)
-                body = body line ";"
-                if (line ~ /^allow /) { a++; if (d) d = -1 }
-                if (line == "deny all;") { if (d == 0) d = 1 }
-                if (line ~ /^alias /) al = 1
-                if (line ~ /^return /) r = 1 }
-PROG
-                )" "${f}")" || return 2
+        out="" hz_in=0
+        # What: per block "body|allows|deny|alias|return".
+        # Why: deny is 1 for deny all; with no allow after.
+        while IFS= read -r hz_raw || [ -n "${hz_raw}" ]; do
+            read -r -a hz_fld <<< "${hz_raw}"
+            if [ "${hz_fld[0]-}" = location ] && [ "${hz_fld[1]-}" = "=" ] && [ "${hz_fld[2]-}" = "${hp}" ] && [ "${hz_fld[3]-}" = "{" ]; then
+                hz_in=1 hz_body="" hz_a=0 hz_d=0 hz_al=0 hz_r=0
+                continue
+            fi
+            [ "${hz_in}" -eq 1 ] || continue
+            if [[ "${hz_raw}" =~ ^[[:space:]]*\} ]]; then
+                out+="${hz_body}|${hz_a}|${hz_d}|${hz_al}|${hz_r}"$'\n'
+                hz_in=0
+                continue
+            fi
+            _ci_ws_fold hz_line "${hz_raw}"
+            hz_body+="${hz_line};"
+            if [[ "${hz_line}" == "allow "* ]]; then
+                hz_a=$((hz_a + 1))
+                [ "${hz_d}" -eq 0 ] || hz_d=-1
+            fi
+            [ "${hz_line}" != "deny all;" ] || [ "${hz_d}" -ne 0 ] || hz_d=1
+            [[ "${hz_line}" != "alias "* ]] || hz_al=1
+            [[ "${hz_line}" != "return "* ]] || hz_r=1
+        done < "${f}" || return 2
+        out="${out%$'\n'}"
         fb=0
         while IFS='|' read -r b line; do
             [ -n "${b}" ] || continue
