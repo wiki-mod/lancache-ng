@@ -2203,9 +2203,14 @@ pub mod recursor_conf {
         {
             return Err("RPZ path or policy name is not plain".into());
         }
-        Ok(format!(
-            "rpzFile(\"{rpz_file}\", {{ policyName=\"{policy}\" }})\n"
-        ))
+        let mut lua = format!("rpzFile(\"{rpz_file}\", {{ policyName=\"{policy}\" }})\n");
+        // What: no DNSSEC check for the local zones.
+        // Why: they are unsigned; the root denies them.
+        // From: Issue #1683 | PR #1980
+        for z in crate::dns::managed_zones(s)? {
+            lua += &format!("addNTA(\"{}\")\n", z.trim_end_matches('.'));
+        }
+        Ok(lua)
     }
 
     // What: Lua hook: AAAA answers become empty.
@@ -2228,8 +2233,7 @@ pub mod recursor_conf {
             s.text("PDNS_AUTH_ADDRESS")?,
             s.uint("PDNS_AUTH_PORT")?
         );
-        let zones = crate::dns::managed_zones(s)?;
-        let local: String = zones
+        let local: String = crate::dns::managed_zones(s)?
             .iter()
             .map(|z| {
                 format!(
@@ -2237,13 +2241,6 @@ pub mod recursor_conf {
                     z.trim_end_matches('.')
                 )
             })
-            .collect();
-        // What: no DNSSEC check for the local zones.
-        // Why: they are unsigned; the root denies them.
-        // From: Issue #1683 | PR #1980
-        let nta: String = zones
-            .iter()
-            .map(|z| format!("    - name: \"{}\"\n", z.trim_end_matches('.')))
             .collect();
         let upstream = s.list("DNS_UPSTREAM_SERVERS");
         let recurse = if upstream.is_empty() {
@@ -2272,7 +2269,7 @@ pub mod recursor_conf {
             String::new()
         };
         let negttl = u("RECURSOR_MAX_NEGATIVE_TTL")?;
-        let mut y = format!("dnssec:\n  negative_trustanchors:\n{nta}");
+        let mut y = String::new();
         y += "incoming:\n  listen:\n";
         y += &yaml_list(&s.list(&which.key("LISTEN")), "    ")?;
         y += &format!("  port: {}\n  allow_from:\n", u(&which.key("PORT"))?);
