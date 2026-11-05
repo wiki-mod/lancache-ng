@@ -12259,6 +12259,17 @@ _ci_validate_rm_run() {
 # What: Kea rollback leg on its own run containers.
 # Why: dhcp is host-mode, so up never starts a Kea.
 # From: Issue #763 | PR #1858
+# What: Kea mode file and OpenRC state, for evidence.
+# Why: a silent mode-off start shows no service lines.
+# From: Issue #1683 | PR #1980
+_ci_validate_kea_state() {
+    local file
+    file="$(_ci_runtime_default DHCP_MODE_FILE)" || return 2
+    printf 'mode file %s:\n' "${file}"
+    docker exec "$1" cat "${file}" 2>&1
+    docker exec "$1" rc-status -a 2>&1
+}
+
 _ci_validate_kea_rollback() {
     local project="$1" net="$2" pin="$3" kname uname kip kport tail_lines rc=0 dsvc usvc
     dsvc="$(_ci_validation_service dhcp)" || return 2
@@ -12290,7 +12301,7 @@ _ci_validate_kea_rollback() {
         # From: Issue #1683 | PR #1912
         if [ "${rc}" -ne 0 ]; then
             ci_error "[CI-ERROR-VALIDATE-0126]" "ui=\"${uname}\" kea=\"${kname}\" rc=${rc} reason=\"Kea round trip failed; run logs in raw\"" \
-                "$(docker logs --tail "${tail_lines}" "${uname}" 2>&1; docker logs --tail "${tail_lines}" "${kname}" 2>&1)"
+                "$(docker logs --tail "${tail_lines}" "${uname}" 2>&1; docker logs --tail "${tail_lines}" "${kname}" 2>&1; _ci_validate_kea_state "${kname}")"
         fi
         _ci_validate_rm_run "${uname}" || { [ "${rc}" -ne 0 ] || rc=2; }
     else
