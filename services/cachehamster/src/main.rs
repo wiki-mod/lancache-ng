@@ -1614,6 +1614,16 @@ async fn daemon(c: Ctx) -> Result<(), String> {
         });
     }
     let window = window(&c.s.text("CACHEHAMSTER_WINDOW")?)?;
+    // What: the values this start runs with.
+    // Why: live 05.11. Fund 90: the value was not visible.
+    // From: Issue #871 | PR #1980
+    eprintln!(
+        "cachehamster: start: {queues} jobs, {connections} downloads each, {mbit} Mbit/s (0 = off), window {:02}:{:02}-{:02}:{:02}",
+        window.0 / 60,
+        window.0 % 60,
+        window.1 / 60,
+        window.1 % 60
+    );
     let mut list = read_json::<Vec<Job>>(&c.path(JOBS_FILE))?.unwrap_or_default();
     // What: a restart leaves no job in Running.
     // Why: the task that ran it is gone.
