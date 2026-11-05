@@ -9608,12 +9608,14 @@ _ci_release_changes() {
     # What: "Merge pull request #N ..." and "... (#N)".
     # Why: GitHub's merge and squash default subjects.
     # From: Issue #894 | PR #1858
-    nums="$(_ci_capture 0 awk "$(cat <<'PROG'
-        match($0, /^Merge pull request #[0-9]+/) { print substr($0, 21, RLENGTH - 20); next }
-        match($0, /\(#[0-9]+\)$/) { print substr($0, RSTART + 2, RLENGTH - 3) }
-PROG
-    )" <<< "${subjects}")" || return 2
-    nums="$(_ci_capture 0 sort -un <<< "${nums}")" || return 2
+    local subj pr_merge_re='^Merge pull request #([0-9]+)' pr_squash_re='\(#([0-9]+)\)$'
+    nums=""
+    while IFS= read -r subj; do
+        if [[ "${subj}" =~ ${pr_merge_re} ]] || [[ "${subj}" =~ ${pr_squash_re} ]]; then
+            nums+="${BASH_REMATCH[1]}"$'\n'
+        fi
+    done <<< "${subjects}"
+    nums="$(_ci_capture 0 sort -un <<< "${nums%$'\n'}")" || return 2
     if [ -z "${nums}" ]; then
         printf '_No pull requests merged since %s._\n' "${prev}"
         return 0
