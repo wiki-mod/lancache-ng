@@ -83,18 +83,20 @@ RUN set -e; \
       rc-update add "${name}" "${level}"; \
     done
 
-# What: start script: clean state, runlevel from mode.
-# Why: a restart keeps /run; stale state starts nothing.
+# What: start script: seed /run, runlevel from mode.
+# Why: /run is tmpfs; the image dirs must be put back.
 # From: Issue #1683 | PR #1980
 RUN set -e; \
     declare -A v; IFS='|' read -ra kv <<< "${LANCACHE_RUNTIME_DEFAULTS}"; \
     for p in "${kv[@]}"; do v["${p%%=*}"]="${p#*=}"; done; \
-    : "${v[OPENRC_STATE_DIR]:?}" "${v[KEA_SOCKET_DIR]:?}" "${v[KEA_SOCKET_DIR_MODE]:?}"; \
+    : "${v[OPENRC_STATE_DIR]:?}" "${v[KEA_SOCKET_DIR]:?}" "${v[KEA_SOCKET_DIR_MODE]:?}" "${v[RUN_DIR]:?}"; \
+    tar -C "${v[RUN_DIR]}" -cpf "${v[RUN_DIR]}.tar" .; \
     f="${v[DHCP_MODE_FILE]}"; \
     while [[ "${f}" =~ @([A-Z0-9_]+)@ ]]; do \
       k="${BASH_REMATCH[1]}"; f="${f//@${k}@/${v[${k}]}}"; \
     done; \
     printf '%s\n' '#!/bin/bash' \
+      "tar -C '${v[RUN_DIR]}' -xpf '${v[RUN_DIR]}.tar'" \
       "rm -rf '${v[OPENRC_STATE_DIR]}'; rm -f '${v[KEA_SOCKET_DIR]}'/*.pid" \
       "mkdir -p '${v[KEA_SOCKET_DIR]}'; chmod '${v[KEA_SOCKET_DIR_MODE]}' '${v[KEA_SOCKET_DIR]}'" \
       "mode=\"\$(cat '${f}' 2>/dev/null || true)\"" \

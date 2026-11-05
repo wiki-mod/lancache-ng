@@ -94,14 +94,16 @@ RUN set -e; \
       rc-update add "${name}" "${level}"; \
     done
 
-# What: start script: clean OpenRC state, then init.
-# Why: a restart keeps /run; stale state starts nothing.
+# What: start script: seed the tmpfs /run, then init.
+# Why: /run is tmpfs; the image dirs must be put back.
 # From: Issue #1683 | PR #1980
 RUN set -e; \
     declare -A v; IFS='|' read -ra kv <<< "${LANCACHE_RUNTIME_DEFAULTS}"; \
     for p in "${kv[@]}"; do v["${p%%=*}"]="${p#*=}"; done; \
-    : "${v[OPENRC_STATE_DIR]:?}"; \
+    : "${v[OPENRC_STATE_DIR]:?}" "${v[RUN_DIR]:?}"; \
+    tar -C "${v[RUN_DIR]}" -cpf "${v[RUN_DIR]}.tar" .; \
     printf '%s\n' '#!/bin/sh' \
+      "tar -C '${v[RUN_DIR]}' -xpf '${v[RUN_DIR]}.tar'" \
       "rm -rf '${v[OPENRC_STATE_DIR]}'" \
       'exec openrc-init "$@"' \
       > /usr/local/bin/lancache-init; \

@@ -129,7 +129,21 @@ RUN set -e; \
       rc-update add "${name}" "${level}"; \
     done
 
+# What: start script: seed the tmpfs /run, then init.
+# Why: /run is tmpfs; the image dirs must be put back.
+# From: Issue #1683 | PR #1980
+RUN set -e; \
+    declare -A v; IFS='|' read -ra kv <<< "${LANCACHE_RUNTIME_DEFAULTS}"; \
+    for p in "${kv[@]}"; do v["${p%%=*}"]="${p#*=}"; done; \
+    : "${v[RUN_DIR]:?}"; \
+    tar -C "${v[RUN_DIR]}" -cpf "${v[RUN_DIR]}.tar" .; \
+    printf '%s\n' '#!/bin/sh' \
+      "tar -C '${v[RUN_DIR]}' -xpf '${v[RUN_DIR]}.tar'" \
+      'exec openrc-init "$@"' \
+      > /usr/local/bin/lancache-init; \
+    chmod 0755 /usr/local/bin/lancache-init
+
 # What: OpenRC as PID 1; compose may name a runlevel.
 # Why: openrc-init reaps zombies and stops on SIGTERM.
 # From: Issue #1683 | PR #1980
-ENTRYPOINT ["openrc-init"]
+ENTRYPOINT ["/usr/local/bin/lancache-init"]
