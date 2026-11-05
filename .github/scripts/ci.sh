@@ -2937,47 +2937,88 @@ _ci_content_id_key() {
     printf -v "$1" 'content-id-%s-%s-%s' "$2" "$3" "$4"
 }
 
-# What: awk: cut a cat-file --batch file into blob files.
+# What: cut batch file $3 into blob files in $1 by $2.
 # Why: one file per blob, as $( ) and <<< hand it on.
 # From: Issue #1683 | PR #1858
-_CI_AWK_BATCH_CUT="$(cat <<'PROG'
-    # What: write the blob without trailing blank lines.
-    # Why: $( ) strips trailing LF; <<< adds one LF.
-    # From: Issue #1683 | PR #1858
-    function done(  i, last) {
-        last = 0
-        for (i = 1; i <= m; i++) if (line[i] != "") last = i
-        for (i = 1; i <= last; i++) printf "%s\n", line[i] > f
-        if (!last) printf "\n" > f
-        close(f); state = 0; m = 0
-    }
-    NR == FNR { name[++n] = $0; next }
-    state == 0 {
-        if (++i > n) { bad = "extra blob"; exit }
-        o = name[i]; sub(/^[^.]*\./, "", o)
-        if ($0 !~ ("^" o " blob [0-9]+$")) { bad = "header " i; exit }
-        size = $3 + 0; got = 0; m = 0; f = dir "/" name[i] ".in"
-        state = size ? 1 : 2
-        next
-    }
-    state == 1 {
-        got += length($0) + 1
-        line[++m] = $0
-        if (got == size) state = 2
-        else if (got == size + 1) done()
-        else if (got > size + 1) { bad = "size " i; exit }
-        next
-    }
-    state == 2 { if ($0 != "") { bad = "end " i; exit } done(); next }
-    END {
-        if (bad == "" && (state != 0 || i != n)) bad = "short"
-        print (bad == "" ? "ok" : bad)
-    }
-PROG
-)"
+_ci_batch_cut() {
+    local bc_dir="$1" bc_l bc_o bc_bad="" bc_st=0 bc_i=0 bc_w
+    local bc_size=0 bc_got=0 bc_m=0 bc_last=0 bc_f=""
+    local -a bc_names bc_all bc_b
+    mapfile -t bc_names < "$2" || return 1
+    mapfile -t bc_all < "$3" || return 1
+    for bc_l in "${bc_all[@]}"; do
+        bc_w=0
+        case "${bc_st}" in
+            0)
+                # What: header: next oid and its size.
+                # Why: names file gives the blob order.
+                bc_i=$((bc_i + 1))
+                if [ "${bc_i}" -gt "${#bc_names[@]}" ]; then
+                    bc_bad="extra blob"
+                    break
+                fi
+                bc_o="${bc_names[bc_i - 1]#*.}"
+                if [[ "${bc_l}" != "${bc_o} blob "* ]] ||
+                    [[ ! "${bc_l#"${bc_o} blob "}" =~ ^[0-9]+$ ]]; then
+                    bc_bad="header ${bc_i}"
+                    break
+                fi
+                bc_size=$((10#${bc_l##* }))
+                bc_got=0
+                bc_f="${bc_dir}/${bc_names[bc_i - 1]}.in"
+                bc_st=2
+                if [ "${bc_size}" -gt 0 ]; then
+                    bc_st=1
+                fi
+                ;;
+            1)
+                # What: size bytes, then one LF; a blob
+                # without own last LF ends on that LF.
+                # Why: C locale: bytes, as in the header.
+                bc_got=$((bc_got + ${#bc_l} + 1))
+                bc_b[bc_m]="${bc_l}"
+                bc_m=$((bc_m + 1))
+                if [ -n "${bc_l}" ]; then
+                    bc_last="${bc_m}"
+                fi
+                if [ "${bc_got}" -eq "${bc_size}" ]; then
+                    bc_st=2
+                elif [ "${bc_got}" -eq $((bc_size + 1)) ]; then
+                    bc_w=1
+                elif [ "${bc_got}" -gt $((bc_size + 1)) ]; then
+                    bc_bad="size ${bc_i}"
+                    break
+                fi
+                ;;
+            2)
+                if [ -n "${bc_l}" ]; then
+                    bc_bad="end ${bc_i}"
+                    break
+                fi
+                bc_w=1
+                ;;
+        esac
+        [ "${bc_w}" = 1 ] || continue
+        # What: the blob without trailing blank lines.
+        # Why: $( ) strips trailing LF; <<< adds one LF.
+        if [ "${bc_last}" -gt 0 ]; then
+            printf '%s\n' "${bc_b[@]:0:bc_last}" > "${bc_f}" || return 1
+        else
+            printf '\n' > "${bc_f}" || return 1
+        fi
+        bc_st=0
+        bc_m=0
+        bc_last=0
+        bc_b=()
+    done
+    if [ -z "${bc_bad}" ] && { [ "${bc_st}" != 0 ] || [ "${bc_i}" != "${#bc_names[@]}" ]; }; then
+        bc_bad=short
+    fi
+    printf '%s\n' "${bc_bad:-ok}"
+}
 
 # What: content id memos of a listing's plain-grammar blobs.
-# Why: A3: one git read, one awk, one hash for all blobs.
+# Why: A3: one git read, one cut, one hash for all blobs.
 # From: Issue #1683 | PR #1858
 _ci_content_id_prefill() {
     local listing="$1" ref="$2" line path oid g key dir blist="" oids="" n=0 split
@@ -3015,10 +3056,10 @@ _ci_content_id_prefill() {
     # From: Issue #1683 | PR #1858
     _ci_run -o "${dir}/text" -s "[CI-ERROR-IDENTITY-0023]" "ref=\"${ref}\" reason=\"blob batch not read\"" \
         tr -d '\000' < "${dir}/batch" || return 2
-    # What: C locale: length() counts bytes, as git does.
+    # What: C locale: ${#} counts bytes, as git does.
     # Why: the cut follows the byte size in each header.
     # From: Issue #1683 | PR #1858
-    split="$(LC_ALL=C _ci_capture 0 awk -v dir="${dir}" "${_CI_AWK_BATCH_CUT}" "${dir}/names" "${dir}/text")" || return 2
+    split="$(LC_ALL=C _ci_capture 0 _ci_batch_cut "${dir}" "${dir}/names" "${dir}/text")" || return 2
     # What: a cut out of step leaves the rows to read alone.
     # Why: a dropped NUL shifts the byte count of its blob.
     # From: Issue #1683 | PR #1858
