@@ -17334,7 +17334,7 @@ _ci_unreferenced_names() {
 # Why: repo-wide by nature (docs §98); a finding is rc 1.
 # From: Issue #1683 | PR #1858
 _ci_check_orphaned_branches() {
-    local repo min_age now exact regexes raw src rows rc=0
+    local repo min_age now exact regexes raw src rows ref rc=0
     repo="$(_ci_repo)" || return 2
     if [ -z "${GH_TOKEN:-}" ]; then
         ci_log "[CI-ERROR-CHECK-0130]" "repo=\"${repo}\" reason=\"GH_TOKEN is required\""
@@ -17350,7 +17350,12 @@ _ci_check_orphaned_branches() {
     # From: Issue #1683 | PR #1858
     raw="$(_ci_channel_field ref)" || return 2
     src="$(_ci_channel_field source_ref)" || return 2
-    exact="$(_ci_capture 0 awk "\$2 ~ /^refs\\/heads\\// { sub(/^refs\\/heads\\//, \"\", \$2); print \$2 }" <<< "${raw}"$'\n'"${src}")" || return 2
+    exact=""
+    while read -r _ ref _; do
+        [[ "${ref}" == refs/heads/* ]] || continue
+        exact+="${ref#refs/heads/}"$'\n'
+    done <<< "${raw}"$'\n'"${src}"
+    exact="${exact%$'\n'}"
     raw="$(_ci_block_entry_list branch_policy "" long_lived)" || return 2
     exact+=$'\n'"${raw}"
     regexes="$(_ci_block_entry_list branch_policy "" long_lived_regex)" || return 2
