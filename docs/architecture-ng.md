@@ -62,7 +62,10 @@ Healthchecks:
 
 ## Configuration flow
 
-1. The user saves a setting in the ui.
+1. The user saves a setting in the ui. The ui stores only the changed
+   keys in `UI_SETTINGS_FILE` (`lancache-ui-settings.env` in the `ui-data`
+   volume). Precedence per key: this file, then the container env, then the
+   SOT default in `build-manifest.yml`.
 2. The ui renders every config from the SOT and the saved settings
    (`render::all` in `shared.rs`) and writes changed files into the
    `lancache-config` volume under `CONFIG_DIR`.
@@ -72,8 +75,11 @@ Healthchecks:
    programs with the SOT config paths.
 
 The ui also renders once at start, because the volume starts empty.
-nginx templates come from `services/proxy` in the checkout (mounted into
+nginx templates come from `services/ui/nginx` in the checkout (mounted into
 the ui at `NGINX_TEMPLATE_DIR`); the rendered files go to `NGINX_CONF_DIR`.
+Exception: `kea-dhcp4.conf` lives in `KEA_DATA_DIR`, which dhcp mounts
+writable, because Kea `config-write` (ui edits, `setup.sh` rollback) saves it
+in place.
 
 ## Watchdog duties
 
