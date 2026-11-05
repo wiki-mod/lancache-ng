@@ -549,7 +549,14 @@ fn status(c: &Ctx) -> Result<Value, String> {
     // What: orders the daemon has not taken yet, shown too.
     // Why: a new job was missing until the next round.
     // From: Issue #871 | PR #1980
+    let known = jobs.len();
     take_inbox(c, &mut jobs, false)?;
+    // What: a queued order has no id yet.
+    // Why: its buttons would act on a random id.
+    // From: Issue #871 | PR #1980
+    for j in jobs.iter_mut().skip(known) {
+        j.id.clear();
+    }
     // What: the daemon writes jobs.json every round.
     // Why: a stale file means the daemon is down.
     // From: Issue #871 | PR #1980

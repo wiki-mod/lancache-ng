@@ -52,13 +52,13 @@
         {% set sk = "hamster_st_" ~ j.state.state %}<td>{{ t[sk] }}{% if j.state.reason %}: {{ j.state.reason }}{% endif %}</td>
         <td>{{ j.done }} {{ t.of }} {{ j.total }} {{ t.done }} {{ j.failed }} {{ t.failed }} {{ j.bytes | filesizeformat }}</td>
         <td>
-          {% for op in ["start", "cancel", "remove"] %}
+          {% if j.id %}{% for op in ["start", "cancel", "remove"] %}
           <form action="/cachehamster/{{ op }}" method="post" style="display:inline">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <input type="hidden" name="id" value="{{ j.id }}">
             <button type="submit" class="btn">{{ t[op] }}</button>
           </form>
-          {% endfor %}
+          {% endfor %}{% else %}{{ t.hamster_queued }}{% endif %}
         </td>
       </tr>
       {% if j.history | length > 0 %}<tr><td colspan="6"><details><summary>{{ t.history }} ({{ j.history | length }})</summary><ul class="section-sub">{% for e in j.history | reverse %}{% set ek = "hamster_st_" ~ e.state %}<li><span data-unix="{{ e.at }}"></span> {{ t[ek] }}{% if e.reason %}: {{ e.reason }}{% endif %}</li>{% endfor %}</ul></details></td></tr>{% endif %}
