@@ -481,6 +481,17 @@ _ci_tab_field() {
     printf '%s' "${rest%%$'\t'*}"
 }
 
+# What: first line of $2 whose first tab field is $1.
+# Why: one keyed row owner; no awk (Fund 136).
+# From: Issue #1683 | PR #1858
+_ci_tab_row() {
+    local line
+    while IFS= read -r line; do
+        [ "${line%%$'\t'*}" != "$1" ] || { printf '%s\n' "${line}"; return 0; }
+    done <<< "$2"
+    return 1
+}
+
 # What: line 2 of the text; nothing when it has one line.
 # Why: one second-line owner; no external line cutter.
 # From: Issue #1683 | PR #1912
@@ -4438,13 +4449,12 @@ _ci_ledger_blob() {
 # Why: One reader; resolve/digest/index share it (§26).
 # From: Issue #1683
 _ci_ledger_read() {
-    local remote="$1" identity="$2" blob rc=0 out
+    local remote="$1" identity="$2" blob rc=0 row
     blob="$(_ci_ledger_blob "${remote}")" || rc=$?
     [ "${rc}" -eq 1 ] && return 1
     [ "${rc}" -eq 0 ] || return 2
-    out="$(awk -F'\t' -v id="${identity}" '$1==id {print $4"\t"$5; exit}' <<< "${blob}")"
-    [ -n "${out}" ] || return 1
-    printf '%s\n' "${out}"
+    row="$(_ci_tab_row "${identity}" "${blob}")" || return 1
+    printf '%s\t%s\n' "$(_ci_tab_field "${row}" 4)" "$(_ci_tab_field "${row}" 5)"
 }
 
 # What: a lost CAS race re-reads the ledger, then writes
