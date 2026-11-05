@@ -933,6 +933,10 @@ async fn domains(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     // From: Issue #1683 | PR #1980
     let https = s.text("IP_HTTPS").unwrap_or_default();
     let own = !https.is_empty() && https != s.text("IP_HTTP")? && !https.starts_with("127.");
+    // What: no HTTPS part while HTTPS is off.
+    // Why: DoMe 05.11.: the field woke HTTPS that was never on.
+    // From: Issue #1683 | PR #1980
+    let own = own && s.flag("HTTPS_ENABLED").unwrap_or(false);
     ctx.insert("primary_ip_https", if own { https.as_str() } else { "" });
 
     // What: UI address on the LAN when none is set.

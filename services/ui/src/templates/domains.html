@@ -449,7 +449,8 @@
         {% if primary_ip_https %}<div class="field" style="max-width:320px;">
           <label for="secondary-https-ip">{{ t.second_ip_of_the_secondary_for }}</label>
           <input type="text" id="secondary-https-ip" maxlength="15" placeholder="192.168.1.103" autocomplete="off">
-        </div>{% endif %}
+          <p class="field-hint">{{ t.https_ip_hint }}</p>
+        </div>{% else %}<p class="field-hint">{{ t.https_off_hint }}</p>{% endif %}
         <div class="copy-row" style="max-width:none; align-items:flex-start; font-size:12.5px;">
           <code id="install-cmd" style="white-space:pre-wrap; overflow-x:visible;">bash &lt;(curl -fsSL {{ setup_script_url }}) secondary \
   --primary {{ primary_url }} \
@@ -532,8 +533,14 @@
       ip.addEventListener('input', () => {
         const v = ip.value.replace(/[^0-9.]/g, '');
         if (v !== ip.value) ip.value = v;
-        ipOut.textContent = v || 'IP';
-        extra.hidden = !v;
+        // What: the HTTPS lines only for a whole IPv4 address.
+        // Why: DoMe 05.11.: a single digit already added them.
+        // From: Issue #1683 | PR #1980
+        const parts = v.split('.');
+        const whole = parts.length === 4 && parts.every(function (p) { return p !== '' && Number(p) <= 255; });
+        ip.setCustomValidity(v && !whole ? LC_T.err_ipv4 : '');
+        ipOut.textContent = whole ? v : 'IP';
+        extra.hidden = !whole;
       });
     }
   })();
