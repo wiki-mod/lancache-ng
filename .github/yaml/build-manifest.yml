@@ -896,6 +896,10 @@ runtime:
     - UI_HSTS=max-age=31536000; includeSubDomains
     - UI_REFERRER_POLICY=no-referrer
     - DHCP_MODE_FILE=@CONFIG_DIR@/dhcp/mode
+    # What: OpenRC run state; dns and dhcp clear it.
+    # Why: /run outlives a restart without tmpfs.
+    # From: Issue #1683 | PR #1980
+    - OPENRC_STATE_DIR=/run/openrc
     - HUP_OWNERS=proxy ui
     - NGINX_CONF_DIR=@CONFIG_DIR@/proxy
     - DNSMASQ_CONF_FILE=@CONFIG_DIR@/dhcp/dnsmasq.conf

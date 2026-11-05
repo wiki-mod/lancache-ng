@@ -92,7 +92,20 @@ RUN set -e; \
       rc-update add "${name}" "${level}"; \
     done
 
+# What: start script: clean OpenRC state, then init.
+# Why: a restart keeps /run; stale state starts nothing.
+# From: Issue #1683 | PR #1980
+RUN set -e; \
+    declare -A v; IFS='|' read -ra kv <<< "${LANCACHE_RUNTIME_DEFAULTS}"; \
+    for p in "${kv[@]}"; do v["${p%%=*}"]="${p#*=}"; done; \
+    : "${v[OPENRC_STATE_DIR]:?}"; \
+    printf '%s\n' '#!/bin/sh' \
+      "rm -rf '${v[OPENRC_STATE_DIR]}'" \
+      'exec openrc-init "$@"' \
+      > /usr/local/bin/lancache-init; \
+    chmod 0755 /usr/local/bin/lancache-init
+
 # What: OpenRC as PID 1; compose may name a runlevel.
 # Why: openrc-init reaps zombies and stops on SIGTERM.
 # From: Issue #1683 | PR #1980
-ENTRYPOINT ["openrc-init"]
+ENTRYPOINT ["/usr/local/bin/lancache-init"]

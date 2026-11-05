@@ -81,17 +81,19 @@ RUN set -e; \
       rc-update add "${name}" "${level}"; \
     done
 
-# What: start script: runlevel from DHCP_MODE_FILE.
-# Why: the ui writes the mode; SOT DHCP_MODE if none.
+# What: start script: clean state, runlevel from mode.
+# Why: a restart keeps /run; stale state starts nothing.
 # From: Issue #1683 | PR #1980
 RUN set -e; \
     declare -A v; IFS='|' read -ra kv <<< "${LANCACHE_RUNTIME_DEFAULTS}"; \
     for p in "${kv[@]}"; do v["${p%%=*}"]="${p#*=}"; done; \
+    : "${v[OPENRC_STATE_DIR]:?}" "${v[KEA_SOCKET_DIR]:?}"; \
     f="${v[DHCP_MODE_FILE]}"; \
     while [[ "${f}" =~ @([A-Z0-9_]+)@ ]]; do \
       k="${BASH_REMATCH[1]}"; f="${f//@${k}@/${v[${k}]}}"; \
     done; \
     printf '%s\n' '#!/bin/bash' \
+      "rm -rf '${v[OPENRC_STATE_DIR]}'; rm -f '${v[KEA_SOCKET_DIR]}'/*.pid" \
       "mode=\"\$(cat '${f}' 2>/dev/null || true)\"" \
       "exec openrc-init \"\${mode:-${v[DHCP_MODE]}}\"" \
       > /usr/local/bin/lancache-init; \
