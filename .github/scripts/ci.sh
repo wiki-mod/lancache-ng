@@ -9749,6 +9749,7 @@ ci_cmd_release_notes() {
 # From: Issue #894 | PR #1858
 ci_cmd_release_changelog() {
     local tag="${1:-}" branch="${CI_DEFAULT_BRANCH:-}" changes file head out remote url sha tip
+    local day entry line new="" put=0
     [ -n "${tag}" ] || { ci_log "[CI-ERROR-RELEASE-0032]" "reason=\"tag arg required\""; return 2; }
     file="$(_ci_variable CI_CHANGELOG)" || return 2
     _ci_release_tag_final "${tag}" || {
@@ -9770,14 +9771,20 @@ ci_cmd_release_changelog() {
         printf 'release-changelog=exists tag=%s line=%s\n' "${tag}" "${out%%:*}"
         return 0
     fi
+    day="$(_ci_capture 0 date -u +%Y-%m-%d)" || return 2
+    entry="${head} - ${day}"$'\n\n'"${changes}"
     # What: new entry goes above the first "## [" release.
     # Why: the pending section stays on top.
     # From: Issue #894 | PR #1858
-    if ! out="$(CI_CHANGES="${changes}" awk -v h="${head} - $(date -u +%Y-%m-%d)" '
-        !done && /^## \[/ { print h "\n\n" ENVIRON["CI_CHANGES"] "\n"; done = 1 }
-        { print }
-        END { if (!done) print "\n" h "\n\n" ENVIRON["CI_CHANGES"] }
-    ' "${file}" 2>&1 > "${file}.new")" || ! out="$(mv "${file}.new" "${file}" 2>&1)"; then
+    while IFS= read -r line || [ -n "${line}" ]; do
+        if [ "${put}" -eq 0 ] && [[ "${line}" == "## ["* ]]; then
+            new+="${entry}"$'\n\n'
+            put=1
+        fi
+        new+="${line}"$'\n'
+    done < "${file}"
+    [ "${put}" -eq 1 ] || new+=$'\n'"${entry}"$'\n'
+    if ! out="$(printf '%s' "${new}" 2>&1 > "${file}.new")" || ! out="$(mv "${file}.new" "${file}" 2>&1)"; then
         ci_error "[CI-ERROR-RELEASE-0034]" "file=\"${file}\" reason=\"changelog not rewritten\"" "${out}"
         rm -f "${file}.new"
         return 2
