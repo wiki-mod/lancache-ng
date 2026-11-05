@@ -457,6 +457,17 @@ _ci_unique_lines() {
     done <<< "$1"
 }
 
+# What: first KEY=VALUE line of $2 whose key is $1.
+# Why: one key lookup owner; no awk (Fund 136).
+# From: Issue #1683 | PR #1858
+_ci_kv_line() {
+    local line
+    while IFS= read -r line; do
+        [[ "${line}" == *=* ]] || continue
+        [ "${line%%=*}" != "$1" ] || { printf '%s\n' "${line}"; return 0; }
+    done <<< "$2"
+}
+
 # What: field N (from 1) of one tab-separated line.
 # Why: no awk (Fund 136); keeps empty fields unlike read.
 # From: Issue #1683 | PR #1858
@@ -9024,7 +9035,7 @@ _ci_promote_kept() {
     while IFS= read -r p; do
         [ -n "${p}" ] || continue
         if _ci_text_has "^${p}=" "${have}"; then continue; fi
-        line="$(_ci_capture 0 awk -F= -v p="${p}" "\$1 == p { print; exit }" <<< "${old}")" || return 2
+        line="$(_ci_kv_line "${p}" "${old}")"
         if [ -z "${line}" ]; then
             ci_log "[CI-WARN-PROMOTE-0033]" "service=\"${svc}\" channel=\"${channel}\" platform=\"${p}\" reason=\"candidate and channel both lack this platform\""
             continue
@@ -10933,7 +10944,8 @@ _ci_validate_pin_override() {
                 slug="${image##*/"${prefix}"/}"
                 slug="${slug%%:*}"
                 slug="${slug%%@*}"
-                digest="$(_ci_capture 0 awk -F= -v s="${slug}" "\$1==s{print \$2; exit}" <<< "${candidate}")" || return 2
+                digest="$(_ci_kv_line "${slug}" "${candidate}")"
+                digest="${digest#*=}"
                 if [ -z "${digest}" ]; then
                     ci_log "[CI-ERROR-VALIDATE-0007]" "service=\"${svc}\" slug=\"${slug}\" reason=\"first-party compose image without candidate digest; refusing mutable tag\""
                     return 2
@@ -11967,7 +11979,8 @@ _ci_validate_ui_post() {
 _ci_validate_lan_zone() {
     local env zone
     env="$(_ci_validation_env)" || return 2
-    zone="$(_ci_capture 0 awk "index(\$0, \"DHCP_DOMAIN=\") == 1 { print substr(\$0, 13); exit }" <<< "${env}")" || return 2
+    zone="$(_ci_kv_line DHCP_DOMAIN "${env}")"
+    zone="${zone#*=}"
     if [ -z "${zone}" ]; then
         zone="$(_ci_runtime_default DHCP_DOMAIN)" || return 2
     fi
