@@ -1426,7 +1426,10 @@ _ci_github_get() {
         printf '%s\n' "${out}"
         return 1
     fi
-    ci_log "[CI-INFO-FETCH-0009]" "url=\"$1\" reason=\"anonymous rate limit; one read with the job token\""
+    # What: the note goes to fd 3, the caller's job log.
+    # Why: _ci_retry keeps stderr in the body; jq broke.
+    # From: Issue #1683 | PR #1858
+    ci_log "[CI-INFO-FETCH-0009]" "url=\"$1\" reason=\"anonymous rate limit; one read with the job token\"" 2>&3
     printf 'Authorization: Bearer %s\n' "${tok}" \
         | _ci_download_curl --fail-with-body -sSL -H 'Accept: application/vnd.github+json' -H @- "$1" 2>&1
 }
@@ -1497,7 +1500,7 @@ _ci_tool_latest() {
     # From: Issue #1683 | PR #1858
     memo="latest-${repo//\//-}.json"
     if ! json="$(_ci_job_memo_get "${memo}")"; then
-        if ! json="$(_ci_retry github-read _ci_github_get "${api}/repos/${repo}/releases/latest")"; then
+        if ! json="$(_ci_retry github-read _ci_github_get "${api}/repos/${repo}/releases/latest" 3>&2)"; then
             ci_error "[CI-ERROR-FETCH-0006]" "repo=\"${repo}\" reason=\"latest release not read\"" "${json}"
             return 2
         fi
