@@ -19400,24 +19400,35 @@ _ci_check_changelog_direct_edit() {
 # Why: the check finds missing, extra and double rows.
 # From: Issue #1683 | PR #1912
 _ci_logging_matrix_canonical() {
-    local doc="$1"
-    awk '
-        /\*\*Logging matrix\*\*/ { seen_marker = 1; next }
-        seen_marker && /^\|/ {
-            rows_seen = 1
-            if ($0 ~ /^\|[[:space:]]*Service[[:space:]]*\|/) next
-            if ($0 ~ /^\|[[:space:]]*-+[[:space:]]*\|/) next
-            line = $0
-            sub(/^\|[[:space:]]*/, "", line)
-            split(line, parts, "|")
-            name = parts[1]
-            sub(/[[:space:]]+$/, "", name)
-            if (match(name, /`[a-z0-9-]+`/)) name = substr(name, RSTART + 1, RLENGTH - 2)
-            print "row=" name
-            next
-        }
-        seen_marker && rows_seen && !/^\|/ { exit }
-    ' "${doc}"
+    local doc="$1" line name marked=0 in_table=0
+    local head_re='^\|[[:space:]]*Service[[:space:]]*\|'
+    local sep_re='^\|[[:space:]]*-+[[:space:]]*\|'
+    local lead_re='^\|[[:space:]]*' tick_re=$'`[a-z0-9-]+`'
+    # What: rows of the first table after the marker line.
+    # Why: the first non-table line after a row ends it.
+    while IFS= read -r line || [ -n "${line}" ]; do
+        if [[ "${line}" == *'**Logging matrix**'* ]]; then
+            marked=1
+            continue
+        fi
+        [ "${marked}" -eq 1 ] || continue
+        if [[ "${line}" != '|'* ]]; then
+            [ "${in_table}" -eq 0 ] || break
+            continue
+        fi
+        in_table=1
+        if [[ "${line}" =~ ${head_re} || "${line}" =~ ${sep_re} ]]; then
+            continue
+        fi
+        [[ "${line}" =~ ${lead_re} ]]
+        name="${line:${#BASH_REMATCH[0]}}"
+        name="${name%%|*}"
+        name="${name%"${name##*[![:space:]]}"}"
+        if [[ "${name}" =~ ${tick_re} ]]; then
+            name="${BASH_REMATCH[0]:1:${#BASH_REMATCH[0]}-2}"
+        fi
+        printf 'row=%s\n' "${name}"
+    done < "${doc}"
 }
 
 # What: Print one real Compose service name per line.
