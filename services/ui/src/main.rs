@@ -221,6 +221,7 @@ impl App {
         ctx.insert("repo_url", &s.text("REPO_URL")?);
         ctx.insert("desired_services", &s.list("UI_CONTROLLABLE_SERVICES"));
         ctx.insert("programs", &s.list("UI_SERVICES"));
+        ctx.insert("signal_programs", &s.list("UI_SIGNAL_PROGRAMS"));
         ctx.insert("watchdog_refresh_seconds", &s.uint("UI_STATUS_REFRESH")?);
         ctx.insert("warnings", &s.warnings);
         // What: texts of the request language.
@@ -2287,6 +2288,39 @@ async fn service_action(
         .contains(&format!("{container}:{program}"))
     {
         return Err(Fail(StatusCode::NOT_FOUND, "program not offered".into()));
+    }
+    // What: a signal program reloads itself.
+    // Why: proxy has no OpenRC; nginx runs as PID 1.
+    // From: Issue #1683
+    let id = format!("{container}:{program}");
+    if s.list("UI_SIGNAL_PROGRAMS").contains(&id) {
+        if action != "reload" {
+            return Err(bad_request("this program only reloads"));
+        }
+        let cmd = [program.as_str(), "-s", "reload"];
+        let (code, out) = exec_in(&app, &s, &container, &cmd)
+            .await
+            .map_err(|e| Fail(StatusCode::BAD_GATEWAY, e))?;
+        if code != 0 {
+            return Err(Fail(
+                StatusCode::BAD_GATEWAY,
+                format!("{program} exit {code}: {out}"),
+            ));
+        }
+        return Ok(StatusCode::NO_CONTENT.into_response());
+    }
+    // What: only a running program is touched.
+    // Why: a restart must not start kea in dnsmasq mode.
+    // From: Issue #1683
+    let status = ["rc-service", program.as_str(), "status"];
+    let (code, _) = exec_in(&app, &s, &container, &status)
+        .await
+        .map_err(|e| Fail(StatusCode::BAD_GATEWAY, e))?;
+    if code != 0 {
+        return Err(Fail(
+            StatusCode::CONFLICT,
+            "program is not running in this mode".into(),
+        ));
     }
     let cmd = ["rc-service", program.as_str(), action.as_str()];
     let (code, out) = exec_in(&app, &s, &container, &cmd)
