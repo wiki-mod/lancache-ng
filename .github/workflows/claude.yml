@@ -1,7 +1,9 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
+
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
-#
-#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# What: Runs Claude Code on @claude mentions in issues/PRs
+# Why: Reserved maintainer convenience, dormant until used
+# From: PR #1805
 name: Claude Code
 
 on:
@@ -13,6 +15,7 @@ on:
     types: [opened, assigned]
   pull_request_review:
     types: [submitted]
+  workflow_dispatch:
 
 jobs:
   claude:
@@ -21,17 +24,26 @@ jobs:
       (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
       (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude')) ||
       (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')))
+    # What: literal runner and timeout of a root job.
+    # Why: SOT ci_job_timeouts: pre-platform jobs keep these
+    # From: Issue #1683 | PR #1858
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 360
+    # What: read scopes; actions read gives Claude CI logs
+    # Why: the action swaps an OIDC token for its app token
+    # From: PR #1805
     permissions:
       contents: read
       pull-requests: read
       issues: read
       id-token: write
-      actions: read # Required for Claude to read CI results on PRs
+      actions: read
     steps:
+      # What: uses: refs name SOT github_actions entries.
+      # Why: GitHub reads uses: only; ci.sh checks vN.
+      # From: Issue #1683 | PR #1912
       - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@v7
         with:
           fetch-depth: 1
 
@@ -40,16 +52,5 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-
-          # This is an optional setting that allows Claude to read CI results on PRs
           additional_permissions: |
             actions: read
-
-          # Optional: Give a custom prompt to Claude. If this is not specified, Claude will perform the instructions specified in the comment that tagged it.
-          # prompt: 'Update the pull request description to include a summary of changes.'
-
-          # Optional: Add claude_args to customize behavior and configuration
-          # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
-          # or https://code.claude.com/docs/en/cli-reference for available options
-          # claude_args: '--allowed-tools Bash(gh pr *)'
-

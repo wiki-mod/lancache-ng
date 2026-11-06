@@ -1,8 +1,7 @@
+
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # Configuration for actionlint GitHub Actions linter
 self-hosted-runner:
   labels:
-    - lancache
     - lancache-heavy
-    - lancache-light
-    - codeql

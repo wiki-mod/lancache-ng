@@ -1,336 +1,149 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
+
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
-# CI workflow that runs CodeQL static analysis (GitHub Actions and Rust languages)
-# on pushes, pull requests, and a daily schedule, uploading SARIF results as security alerts.
-name: CodeQL
+# SPDX-License-Identifier: AGPL-3.0-or-later
 
+# What: CodeQL security analysis; scope owned by SOT
+# Why: own workflow (§73); ci.sh admits, YAML only calls.
+# From: Issue #1683
+name: CI 2.0 CodeQL
 on:
-  push:
-    # current_dev is the active development branch today (v0.2.0 is frozen);
-    # without it, CodeQL silently stopped scanning the branch real work
-    # actually lands on (#709).
-    branches: [master, current_dev, v0.2.0]
-    paths-ignore:
-      - "**/*.md"
   pull_request:
-    # current_dev is the active development branch today (v0.2.0 is frozen);
-    # without it, CodeQL silently stopped scanning the branch real work
-    # actually lands on (#709).
-    branches: [master, current_dev, v0.2.0]
-    paths-ignore:
-      - "**/*.md"
+  push:
+    branches: [current_dev, master]
   schedule:
-    - cron: "24 3 * * *"
+    - cron: "27 3 * * 1"
   workflow_dispatch:
-
 permissions:
   contents: read
-  security-events: write
-
-env:
-  # Host temp files go to disk: /tmp is a small tmpfs on some runners and
-  # trivy alone writes 5 to 8 GB of image export there (run 39765669925).
-  TMPDIR: /var/tmp
-  CARGO_BUILD_JOBS: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && vars.CARGO_BUILD_JOBS || '' }}
-
+concurrency:
+  group: ci-2.0-codeql-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 defaults:
   run:
     shell: bash
-
+# What: GHCR token for ci.sh; no login action.
+# Why: auth is ci.sh policy; the workflow only sets env.
+# From: Issue #1683
+env:
+  GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  # What: Diff refs for ci.sh steps, set once
+  # Why: Step without them has no base reference
+  # From: Issue #1683 | PR #1858
+  BASE_SHA: ${{ github.event.pull_request.base.sha }}
+  BEFORE_SHA: ${{ github.event.before }}
+  # What: LAN proxy CA secret; ci.sh uses it self-hosted.
+  # Why: a secret is masked; ci.sh reads it by name.
+  # From: Issue #1683 | PR #1858
+  PROJECT_SELFHOSTED_PROXY_CA: ${{ secrets.PROJECT_SELFHOSTED_PROXY_CA }}
+  # What: the repo variables ci.sh reads, one by name.
+  # Why: Fund 94: the all-vars json put LAN IPs in logs.
+  # From: Issue #1683 | PR #1858
+  CARGO_BUILD_JOBS: ${{ vars.CARGO_BUILD_JOBS }}
+  PROJECT_CARGO_LTO: ${{ vars.PROJECT_CARGO_LTO }}
+  PROJECT_CARGO_CODEGENUNIT: ${{ vars.PROJECT_CARGO_CODEGENUNIT }}
+  PROJECT_NIGHTLY_REF: ${{ vars.PROJECT_NIGHTLY_REF }}
+  PROJECT_SELFHOSTED_RUNNER_USAGE_CI: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI }}
+  SCCACHE_REDIS_MODE: ${{ vars.SCCACHE_REDIS_MODE }}
+  CI_RUST_VALIDATION: ${{ vars.CI_RUST_VALIDATION }}
+  PR_TITLE_LINT_MODE: ${{ vars.PR_TITLE_LINT_MODE }}
+  # What: LAN values only when self-hosted runners run.
+  # Why: a GitHub-hosted log must show no LAN address.
+  # From: Issue #1683 | PR #1858
+  PROJECT_SELFHOSTED_PROXY_HTTP: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && vars.PROJECT_SELFHOSTED_PROXY_HTTP || '' }}
+  PROJECT_SELFHOSTED_PROXY_HTTPS: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && vars.PROJECT_SELFHOSTED_PROXY_HTTPS || '' }}
+  PROJECT_SELFHOSTED_PROXY_EXCLUSION: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && vars.PROJECT_SELFHOSTED_PROXY_EXCLUSION || '' }}
+  SCCACHE_DIST_SCHEDULER_URL: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && vars.SCCACHE_DIST_SCHEDULER_URL || '' }}
+  DISTCC_POTENTIAL_HOSTS: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && vars.DISTCC_POTENTIAL_HOSTS || '' }}
 jobs:
-  detect-changes:
-    # Gates the memory-heavy "rust" matrix entry below on whether the diff
-    # actually touches the Rust build CodeQL analyzes, the same efficiency
-    # class of fix as #1253 (narrowing build-tools.yml's image-rebuild
-    # trigger): before this job existed, EVERY push/PR re-ran the full Rust
-    # CodeQL extraction+analysis on the unchanged services/dns/ui crates --
-    # e.g. a docs/CI-only PR like #1247 -- burning lancache-heavy runner time
-    # for zero new signal. The "actions" matrix entry (which scans the
-    # workflow files themselves) is untouched by this job and keeps running
-    # on every trigger; only "rust" is scoped.
-    #
-    # "Analyze (rust)"/"Analyze (actions)" are NOT in current_dev's required
-    # status checks (verified via `gh api repos/wiki-mod/lancache-ng/branches/
-    # current_dev/protection` on 2026-07-25: the required contexts list is
-    # shellcheck, validate-compose, CI scope policy, line endings, file
-    # purpose headers, PR template validation, PR tracking metadata
-    # (labels/milestone/project), coverage (Rust), validate full-setup image
-    # -- CodeQL is absent from that list), so skipping the rust matrix entry
-    # outright (rather than the self-skip-internally pattern a *required*
-    # check would need, per Rule-Ref: AG-CI-012's "paths-ignore permanently
-    # blocks a required check" trap) cannot strand a PR in a perpetually-pending state.
-    name: detect changed paths (CodeQL rust relevance)
-    if: github.event_name == 'pull_request' || github.event_name == 'push'
-    runs-on: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && fromJSON('["self-hosted", "linux", "lancache", "lancache-light"]') || 'ubuntu-latest' }}
-    # Real runs: a git diff plus one classify-image-impact.sh invocation,
-    # comparable to build-push.yml's own detect-changes job (6-17s there).
-    # Same generous 15-minute floor that job's comment explains.
+  # What: Emit CodeQL language matrix from ci.sh
+  # Why: Book runners only for real analysis (§70)
+  # From: Issue #1683
+  impact:
+    name: codeql-impact
+    # What: the one literal runner/timeout; emits the rest.
+    # Why: ci.sh can only pick a runner once one runs it.
+    # From: Issue #1683 | PR #1858
+    runs-on: ubuntu-latest
     timeout-minutes: 15
+    # What: Admission runs in build-tools nightly channel
+    # Why: Nothing runs on runner; ci.sh needs its tools
+    # From: Issue #1683 | PR #1858
+    container:
+      image: ghcr.io/${{ github.repository }}/build-tools:nightly
+      credentials: &ghcr_credentials
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     outputs:
-      rust_relevant: ${{ steps.filter.outputs.rust_relevant }}
+      matrix: ${{ steps.impact.outputs.codeql-matrix }}
+      codeql-runner: ${{ steps.impact.outputs.codeql-runner }}
+      codeql-release: ${{ steps.impact.outputs.codeql-release }}
+      image: ${{ steps.resolve.outputs.image }}
+      timeouts: ${{ steps.jobs.outputs.timeouts }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # What: shallow checkout of the event commit.
+      # Why: no inline script; this uses: is the one ref
+      # From: Issue #1683 | PR #1858
+      - &bootstrap
+        name: Check out the event commit
+        uses: actions/checkout@v7
         with:
-          fetch-depth: 0
-
-      - name: Determine whether this diff touches the Rust build CodeQL analyzes
-        id: filter
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+      - name: Collect changed files
+        id: changed
+        run: bash .github/scripts/ci.sh changed-files
+      - name: Admit CodeQL analysis
+        id: impact
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          BEFORE_SHA: ${{ github.event.before }}
-        run: |
-          set -euo pipefail
+          CHANGED_FILES: ${{ steps.changed.outputs.file }}
+          # What: job token for the CodeQL release read.
+          # Why: anonymous reads hit the 403 rate limit.
+          # From: Issue #1683 | PR #1858
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash .github/scripts/ci.sh codeql-impact >> "$GITHUB_OUTPUT"
+      - name: Resolve the build-tools image
+        id: resolve
+        run: bash .github/scripts/ci.sh build-tools resolve-image
+      - name: Resolve the job settings
+        id: jobs
+        run: bash .github/scripts/ci.sh job-settings
 
-          : "${GITHUB_SHA:?GitHub checkout SHA is required}"
-
-          # Same base/before resolution build-push.yml's detect-changes job
-          # uses (#536's merge-base fix so an unrelated already-merged base
-          # change isn't misattributed to this branch; #1095's push
-          # before-SHA fallback for an all-zeros/force-pushed/unreachable
-          # base) -- mirrored inline rather than imported, since GitHub
-          # Actions has no cross-workflow step/job reuse for plain
-          # (non-reusable) workflows.
-          changed_files="$(mktemp)"
-          force_all=false
-          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
-            : "${BASE_SHA:?pull request base SHA is required}"
-            merge_base="$(git merge-base "$BASE_SHA" "$GITHUB_SHA")"
-            git diff --name-only "$merge_base" "$GITHUB_SHA" > "$changed_files"
-          else
-            if [ -z "$BEFORE_SHA" ] \
-              || [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ] \
-              || ! git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
-              echo "::notice::No usable push diff base (before='${BEFORE_SHA:-<empty>}'); treating this push as rust-relevant."
-              force_all=true
-            else
-              git diff --name-only "$BEFORE_SHA" "$GITHUB_SHA" > "$changed_files"
-            fi
-          fi
-
-          # Reuse the same per-path rules build-push.yml's detect-changes job
-          # depends on, instead of re-deriving a second, potentially-drifting
-          # copy of "does this touch Rust?": dns_rust is scoped to
-          # services/dns/nats-subscriber/ (the only Rust crate under
-          # services/dns -- the rest of that directory is PowerDNS
-          # config/entrypoint/lua, not analyzed by the rust matrix entry at
-          # all); ui is services/ui/ (a Rust crate at its root); watchdog is
-          # services/watchdog/ (added 2026-08 alongside
-          # services/watchdog/Cargo.toml, #1355 -- also a whole-directory
-          # filter like ui, not split into a Rust-only sub-filter like dns,
-          # since the shell runtime and the Rust crate share one directory);
-          # The classifier's `workflow` class (build-push.yml, build-tools.yml,
-          # every .github/actions/*) is NOT used: none of build-push.yml or
-          # build-tools.yml reaches this analysis, so it ran the full Rust
-          # analysis for workflow-only PRs. The two composite actions this
-          # rust matrix entry does consume are matched by name below.
-          rust_via_shared_classifier=false
-          if [ "$force_all" = "true" ]; then
-            rust_via_shared_classifier=true
-          else
-            classifier_output="$(CHANGED_FILES="$changed_files" bash scripts/classify-image-impact.sh)"
-            if printf '%s\n' "$classifier_output" | grep -qE '^(dns_rust|ui|watchdog)=true$'; then
-              rust_via_shared_classifier=true
-            fi
-          fi
-
-          # Additive to the shared classifier: a change to this workflow file
-          # itself, its CodeQL config, or one of the two composite actions the
-          # rust matrix entry runs (configure-rust-sccache,
-          # cargo-with-sccache-fallback), since each can change how the rust
-          # matrix entry is built/analyzed even when no Rust source moved
-          # (e.g. a new crate added to the "Build ... Rust crate for CodeQL"
-          # steps, or a query-suite change in codeql-config.yml).
-          codeql_self=false
-          if [ "$force_all" = "true" ]; then
-            codeql_self=true
-          elif grep -qE '^\.github/(workflows/codeql\.yml|codeql/|actions/(configure-rust-sccache|cargo-with-sccache-fallback)/)' "$changed_files"; then
-            codeql_self=true
-          fi
-
-          rm -f "$changed_files"
-
-          if [ "$rust_via_shared_classifier" = "true" ] || [ "$codeql_self" = "true" ]; then
-            echo "rust_relevant=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "rust_relevant=false" >> "$GITHUB_OUTPUT"
-          fi
-
+  # What: Analyze each admitted language in build-tools
+  # Why: one CI image; the CodeQL bundle is a SOT pin
+  # From: Issue #1683 | PR #1858
   analyze:
-    name: Analyze (${{ matrix.language }})
-    # Run advanced CodeQL on repository-owned runners to avoid GitHub-hosted minutes.
-    # CodeQL can compile Rust and is memory-heavy enough to avoid the light runner tier.
-    # Repository default setup must be disabled in GitHub Security settings before SARIF upload.
-    runs-on: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && fromJSON('["self-hosted", "linux", "lancache", "codeql", "lancache-heavy"]') || 'ubuntu-latest' }}
-    timeout-minutes: 120
-    needs: detect-changes
-    # `always()` is required here: GitHub implicitly ANDs any custom job
-    # `if:` with `success()` of every `needs` job UNLESS the expression
-    # itself calls one of the status-check functions -- without it, a
-    # `skipped` detect-changes (schedule/workflow_dispatch, which its own
-    # `if:` above doesn't cover) would silently skip THIS job too, including
-    # the 'actions' matrix entry, which must run on every trigger regardless.
-    # Mirrors the identical `always() && (...)` shape build-push.yml's
-    # dns_test/ui_test jobs already use for the same reason.
-    #   - matrix.language == 'actions': always runs. This scans the workflow
-    #     files themselves and must not be skipped by Rust-path scoping.
-    #   - schedule/workflow_dispatch: detect-changes reports `skipped` here,
-    #     caught by the `result != 'success'` fail-safe, same as an
-    #     undeterminable push diff -- both the daily cron and a manual
-    #     dispatch run the full Rust analysis unconditionally.
-    #   - pull_request/push with a determinable diff: gated on
-    #     detect-changes' rust_relevant output.
-    # `always()` runs this job on every trigger (incl. schedule/dispatch, where
-    # detect-changes is skipped). The Rust-relevance gating below is applied at
-    # STEP level, NOT here: GitHub Actions does not expose the `matrix` context
-    # in a job-level `if:` (matrix only exists after expansion, in steps), so a
-    # job-level condition cannot tell the 'actions' matrix leg from 'rust'. The
-    # 'actions' leg therefore always runs its analysis; the 'rust' leg spins up
-    # but skips its (expensive) extraction steps unless Rust is actually
-    # relevant (see the shared `if:` on the Rust setup/build/init/analyze steps).
-    if: ${{ always() }}
+    name: CodeQL
+    needs: impact
+    if: ${{ fromJSON(needs.impact.outputs.matrix).include[0] != null }}
+    # What: write only for the analyzed-content mark ref.
+    # Why: §73: a later PR run with that content is NOOP.
+    # From: Issue #1683 | PR #1858
+    permissions:
+      contents: write
+      security-events: write
+    # What: always the GitHub-hosted runner from ci.sh.
+    # Why: CodeQL needs 4-8 GB RAM; the fleet has less.
+    # From: Issue #1683 | PR #1858
+    runs-on: ${{ needs.impact.outputs.codeql-runner }}
+    container:
+      image: ${{ needs.impact.outputs.image }}
+      credentials: *ghcr_credentials
+    timeout-minutes: ${{ fromJSON(needs.impact.outputs.timeouts)['analyze'] }}
+    # What: each admitted language runs to its end
+    # Why: one language failing must not cancel the rest
+    # From: Issue #1683 | PR #1858
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - language: actions
-            build-mode: none
-          # CodeQL Rust extraction can silently degrade while the job still reports success.
-          # Observed historical example (PR #357, run 28596839186): the Rust extractor reported
-          # "12 files extracted with errors" vs "2 without error" (partial `macro expansion failed`
-          # for ordinary macros like format!, vec!, json!, tracing::*, assert!) yet the job
-          # concluded `success`. This is a known upstream limitation of CodeQL's Rust extractor,
-          # not a defect in this repository, and it is not tunable here: Rust supports only
-          # `build-mode: none` (manual/autobuild modes do not exist for Rust). Tracked upstream in
-          # github/codeql #19966, #19982, #20643, #20659, and locally in issue #394.
-          #
-          # CodeQL's own authoritative quality gate is the `rust/diagnostic/database-quality`
-          # ("Low Rust analysis quality") diagnostic query. On the observed degraded run it did NOT
-          # fire (the extractor's macro-expansion errors are classified as normal), so CodeQL does
-          # not treat this state as low quality. The raw per-file counts are metric-query output
-          # printed only to the analysis log summary; they are not exposed as a supported,
-          # machine-readable workflow output (github/codeql-action #1742, open since 2023) and the
-          # database is cleaned after `analyze`. The "Report CodeQL Rust extraction-quality signal"
-          # step below therefore surfaces CodeQL's own determination and a standing caveat instead
-          # of a hand-rolled count threshold. A green CodeQL Rust job must NOT be read as full
-          # security-scan coverage of the Rust codebase.
-          - language: rust
-            build-mode: none
+      matrix: ${{ fromJSON(needs.impact.outputs.matrix) }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Isolate Rust toolchain paths
-        if: matrix.language == 'rust' && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.rust_relevant == 'true')
-        run: |
-          {
-            echo 'CARGO_HOME=${{ runner.temp }}/cargo-home/codeql-${{ matrix.language }}'
-            echo 'RUSTUP_HOME=${{ runner.temp }}/rustup-home/codeql-${{ matrix.language }}'
-          } >> "$GITHUB_ENV"
-
-      - name: Install Rust toolchain
-        if: matrix.language == 'rust' && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.rust_relevant == 'true')
-        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
-        with:
-          toolchain: stable
-      # Optional acceleration only: CodeQL must still run if Redis-backed sccache is unavailable.
-      - name: Configure Redis-backed sccache
-        if: >-
-          ${{
-            matrix.language == 'rust' &&
-            github.actor != 'dependabot[bot]' &&
-            (
-              github.event_name != 'pull_request' ||
-              github.event.pull_request.head.repo.full_name == github.repository
-            )
-          }}
-        uses: ./.github/actions/configure-rust-sccache
-        with:
-          mode: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && vars.SCCACHE_REDIS_MODE || 'off' }}
-          redis-url: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && secrets.SCCACHE_REDIS_URL || '' }}
-          key-prefix: lancache-codeql-${{ matrix.language }}
-          dist-scheduler-url: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && vars.SCCACHE_DIST_SCHEDULER_URL || '' }}
-          dist-auth-token: ${{ vars.PROJECT_SELFHOSTED_RUNNER_USAGE_CI == 'true' && secrets.SCCACHE_DIST_AUTH_TOKEN || '' }}
-      - name: Initialize CodeQL
-        # 'actions' always analyzes; 'rust' only when Rust is actually relevant
-        # (or on schedule/dispatch where detect-changes is skipped).
-        if: matrix.language != 'rust' || needs.detect-changes.result != 'success' || needs.detect-changes.outputs.rust_relevant == 'true'
-        uses: github/codeql-action/init@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
-        with:
-          languages: ${{ matrix.language }}
-          build-mode: ${{ matrix.build-mode }}
-          config-file: ./.github/codeql/codeql-config.yml
-
-      - name: Build DNS Rust crate for CodeQL
-        if: matrix.language == 'rust' && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.rust_relevant == 'true')
-        uses: ./.github/actions/cargo-with-sccache-fallback
-        with:
-          command: cargo build --manifest-path services/dns/nats-subscriber/Cargo.toml
-
-      - name: Build UI Rust crate for CodeQL
-        if: matrix.language == 'rust' && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.rust_relevant == 'true')
-        uses: ./.github/actions/cargo-with-sccache-fallback
-        with:
-          command: cargo build --manifest-path services/ui/Cargo.toml
-
-      - name: Build watchdog Rust crate for CodeQL
-        if: matrix.language == 'rust' && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.rust_relevant == 'true')
-        uses: ./.github/actions/cargo-with-sccache-fallback
-        with:
-          command: cargo build --manifest-path services/watchdog/Cargo.toml
-
-      - name: Perform CodeQL Analysis
-        # Same gate as Initialize CodeQL above: skip the 'rust' analysis when
-        # Rust is not relevant, so init and analyze stay paired.
-        if: matrix.language != 'rust' || needs.detect-changes.result != 'success' || needs.detect-changes.outputs.rust_relevant == 'true'
-        uses: github/codeql-action/analyze@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
-        with:
-          category: "/language:${{ matrix.language }}"
-          # Persist the interpreted SARIF locally so the extraction-quality step can read
-          # CodeQL's own diagnostic notifications. Results are still uploaded as usual.
-          output: ${{ runner.temp }}/codeql-sarif
-
-      # Make CodeQL's Rust extraction-quality determination visible on every run so a green
-      # CodeQL Rust job is not silently misread as full extraction coverage (issue #394).
-      # This keys on CodeQL's own `rust/diagnostic/database-quality` signal rather than a
-      # hand-rolled count threshold, so it never turns red on the known, upstream, permanent
-      # macro-expansion limitation. It is warn-only and can never fail the job or manufacture
-      # false confidence: it always prints the standing caveat, and warns (not fails) only when
-      # CodeQL itself flags low quality or when the signal cannot be read.
-      - name: Report CodeQL Rust extraction-quality signal
-        if: always() && matrix.language == 'rust'
+      - *bootstrap
+      - name: Analyze and upload
         env:
-          SARIF_DIR: ${{ runner.temp }}/codeql-sarif
-        run: |
-          set -uo pipefail
-          {
-            printf '%s\n' '### CodeQL Rust extraction-quality signal'
-            printf '\n'
-            printf '%s\n' 'A green CodeQL Rust job does NOT by itself confirm full extraction coverage.'
-            printf '%s\n' "CodeQL's Rust extractor (build-mode: none is the only supported Rust mode)"
-            printf '%s\n' 'reports partial "macro expansion failed" errors for ordinary macros as a known'
-            printf '%s\n' 'upstream limitation (github/codeql #19966, #19982, #20643, #20659; local #394).'
-            printf '\n'
-          } >> "$GITHUB_STEP_SUMMARY"
-
-          sarif_file="$(find "$SARIF_DIR" -maxdepth 1 -name '*.sarif' -print -quit 2>/dev/null || true)"
-          if [ -z "$sarif_file" ] || ! command -v jq >/dev/null 2>&1; then
-            echo "::warning::Could not read the CodeQL Rust extraction-quality signal (SARIF or jq unavailable). Do not treat a green CodeQL Rust job as full Rust security-scan coverage (issue #394)."
-            echo '- Extraction-quality signal unavailable this run (SARIF or jq missing).' >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-
-          # `rust/diagnostic/database-quality` ("Low Rust analysis quality") appears as a SARIF
-          # notification only when CodeQL itself judges extraction degraded beyond the tolerated
-          # macro-expansion errors. Count matches across both possible notification id fields.
-          quality_hits="$(jq '[.runs[]?.invocations[]?.toolExecutionNotifications[]?
-            | select((.descriptor.id? // .associatedRule.id? // "") == "rust/diagnostic/database-quality")]
-            | length' "$sarif_file" 2>/dev/null || echo 0)"
-          quality_hits="${quality_hits:-0}"
-
-          if [ "$quality_hits" -gt 0 ]; then
-            echo "::warning::CodeQL flagged Low Rust analysis quality (rust/diagnostic/database-quality). Rust extraction is degraded beyond the known macro-expansion limitation this run; investigate (issue #394)."
-            echo "- CodeQL flagged Low Rust analysis quality this run (${quality_hits} notification(s)). See issue #394." >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo '- CodeQL did not flag Low Rust analysis quality this run. That gate tolerates partial macro-expansion extraction, so it is not proof of full semantic coverage (issue #394).' >> "$GITHUB_STEP_SUMMARY"
-          fi
-          exit 0
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LANGUAGE: ${{ matrix.language }}
+          # What: release read once; fork flag.
+          # Why: one API read per run; a fork marks nothing.
+          # From: Issue #1683 | PR #1858
+          CODEQL_RELEASE: ${{ needs.impact.outputs.codeql-release }}
+          PR_IS_FORK: ${{ github.event.pull_request.head.repo.fork }}
+        run: bash .github/scripts/ci.sh codeql-analyze "${LANGUAGE}"
