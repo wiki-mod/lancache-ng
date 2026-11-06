@@ -295,7 +295,7 @@
   "remove": "Remove",
   "remove_option_q": "Remove DHCP option {x} from {y}?",
   "remove_x_q": "Remove {x}?",
-  "removing_a_secondary_does_this_by": ". Removing a secondary does this by itself.",
+  "removing_a_secondary_does_this_by": ". Removing a secondary also renews the key.",
   "renew_key": "Renew key",
   "repeat_new_password": "Repeat new password",
   "resize_cache": "Resize cache",
