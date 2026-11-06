@@ -184,6 +184,7 @@
     font-size: 12px;
     color: var(--mist-dim);
   }
+  .dock-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 10px; }
 
   /* What: main column holding beambar and content
      Why: min-width 0 lets tables shrink
@@ -545,21 +546,22 @@
     color: var(--foam); font-size: 12px; font-weight: 700; display: flex; align-items: center; justify-content: center;
   }
 
-  /* What: phone layout: menu rows on top, they wrap
-     Why: a scrolling strip hid items behind a light bar
+  /* What: phone layout: slim menu strip on top
+     Why: the full dock used a third of a phone screen
      From: Issue #1683 | PR #1858 */
   @media (max-width: 880px) {
     .shell { flex-direction: column; }
-    .dock { position: relative; z-index: 5; width: 100%; height: auto; flex-direction: row; flex-wrap: wrap; align-items: center; gap: 4px; padding: 6px 8px; border-right: none; border-bottom: 1px solid var(--navy-700); }
+    .dock { position: sticky; top: 0; z-index: 5; width: 100%; height: auto; flex-direction: row; align-items: center; gap: 4px; padding: 6px 8px; overflow-x: auto; border-right: none; border-bottom: 1px solid var(--navy-700); }
     .dock .brand { padding: 0 6px; margin: 0; border: none; flex: none; }
     .dock .brand-mark { width: 34px; height: 34px; object-fit: contain; }
-    .dock .nav-group-label, .dock .dock-footer, .dock .nav-dot { display: none; }
-    .dock .nav-item { flex: none; white-space: nowrap; padding: 7px 10px; margin: 0; }
+    .dock .nav-group-label, .dock .dock-info, .dock .dock-footer > a, .dock .dock-footer > br, .dock .nav-dot { display: none; }
+    .dock .dock-footer { margin: 0; padding: 0; border: none; flex: none; }
+    .dock .dock-tools { margin: 0; flex-wrap: nowrap; }
+    .dock .nav-item { flex: none; white-space: nowrap; padding: 9px 12px; margin: 0; }
     .beambar { padding: 8px 12px; }
     .content { padding: 18px 14px 48px; }
     .page-title { font-size: 28px; }
     .subtabs { gap: 16px; overflow-x: auto; white-space: nowrap; }
-    .subtabs { scrollbar-color: var(--navy-700) transparent; scrollbar-width: thin; }
     .stat-row, .grid-2, .dhcp-modes { grid-template-columns: 1fr; }
   }
 
@@ -655,7 +657,6 @@
   .beambar-dot.red { background: var(--coral); box-shadow: 0 0 8px 1px #ff7a5c80; }
   .beambar-dot.gray { background: var(--mist-dim); }
   .beambar-services { display: flex; flex-wrap: wrap; row-gap: 6px; align-items: center; gap: 18px; font-size: 12.5px; color: var(--mist); white-space: nowrap; }
-  .beambar-end { margin-left: auto; display: flex; align-items: center; gap: 8px; }
   .dock a.nav-item, .dock a.nav-item:hover { text-decoration: none; }
     /* What: status bar at the bottom for every action
        Why: DoMe 06.11.: buttons gave no sign of work
@@ -860,7 +861,18 @@
     {{ <nav_link href={pages.setup} label={t.general} active={active_page == "setup"} glyph="◐"/> }}
 
     <div class="dock-footer">
-      <span title="{{ lancache_image_registry() }}/{{ lancache_image_prefix() }}:{{ lancache_image_tag() }}">{{ lancache_image_tag() }} · {{ lancache_image_channel() }}</span><br>
+      <!-- What: language, UI restart, theme at the foot
+           Why: DoMe 06.11.: not in the top bar
+           From: Issue #1683 | PR #1985 -->
+      <div class="dock-tools">
+        <label class="lang-switch">🌐 <select id="lang-select" aria-label="{{ t.language }}">{% for l in langs %}<option value="{{ l[0] }}"{% if l[0] == lang %} selected{% endif %}>{{ l[1] }}</option>{% endfor %}</select></label>
+        {{ <restart_ui_form action={routes.restart_ui} csrf_token={csrf_token} button_class="theme-btn" label="⟳ UI" title={t.restart_the_admin_ui} t={t}/> }}
+        <button type="button" class="theme-btn" id="theme-toggle" title="{{ t.toggle_light_dark_theme }}">◐</button>
+      </div>
+      <!-- What: tag once when it is the channel name
+           Why: it showed "nightly - nightly" twice
+           From: Issue #1683 | PR #1985 -->
+      <span class="dock-info" title="{{ lancache_image_registry() }}/{{ lancache_image_prefix() }}:{{ lancache_image_tag() }}">{% if lancache_image_tag() == lancache_image_channel() %}{{ lancache_image_channel() }}{% else %}{{ lancache_image_tag() }} · {{ lancache_image_channel() }}{% endif %}</span><br>
       <!-- What: link to the project repository page
            Why: address only from the SOT, escaped by tera
            From: Issue #1683 | PR #1912 -->
@@ -869,17 +881,12 @@
   </nav>
 
   <div class="main">
-    <!-- What: health bar and theme toggle in the header
+    <!-- What: health bar in the header
          Why: base.html renders it on every page
          From: Issue #1437 -->
     <header class="beambar" id="beambar">
       <div class="beambar-services" id="beambar-services">
         <span>{{ t.service_health_loading }}</span>
-      </div>
-      <div class="beambar-end">
-        <label class="lang-switch">🌐 <select id="lang-select" aria-label="{{ t.language }}">{% for l in langs %}<option value="{{ l[0] }}"{% if l[0] == lang %} selected{% endif %}>{{ l[1] }}</option>{% endfor %}</select></label>
-        {{ <restart_ui_form action={routes.restart_ui} csrf_token={csrf_token} button_class="theme-btn" label="⟳ UI" title={t.restart_the_admin_ui} t={t}/> }}
-        <button type="button" class="theme-btn" id="theme-toggle" title="{{ t.toggle_light_dark_theme }}">◐</button>
       </div>
     </header>
     <main class="content">
