@@ -3752,7 +3752,14 @@ _ci_rust_content() {
         src="$(_ci_workspace_src_dir "${dir}" "${bin}")"
         listing="$(_ci_tracked_listing "${src}" "${ref}")" || return 2
         while IFS= read -r line; do
-            [[ "${line%%$'\t'*}" == *.rs ]] || continue
+            [ -n "${line}" ] || continue
+            if [[ "${line%%$'\t'*}" != *.rs ]]; then
+                # What: include_str files count in the id.
+                # Why: a template edit kept the old binary.
+                # From: Issue #1683
+                [ "${mode}" = text ] || _ci_content_id_row "${line}" "${ref}" "" || return 2
+                continue
+            fi
             items="$(_ci_listing_items "${line}" "${ref}")" || return 2
             refs="$(_ci_capture 0 cut -f4 <<< "${items}")" || return 2
             roots+=" ${refs//$'\n'/ }"
