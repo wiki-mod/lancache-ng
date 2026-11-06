@@ -226,6 +226,7 @@ impl App {
         ctx.insert("repo_url", &s.text("REPO_URL")?);
         ctx.insert("desired_services", &s.list("UI_CONTROLLABLE_SERVICES"));
         ctx.insert("programs", &s.list("UI_SERVICES"));
+        ctx.insert("ui_service", &s.text("UI_SERVICE").unwrap_or_default());
         ctx.insert("watchdog_refresh_seconds", &s.uint("UI_STATUS_REFRESH")?);
         ctx.insert("warnings", &s.warnings);
         // What: texts of the request language.

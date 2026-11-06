@@ -1150,7 +1150,7 @@ runtime:
     - UI_PORT=@UI_LISTEN_PORT@
     - UI_PUBLIC_URL=
     - UI_RECENT_REQUESTS=50
-    - UI_SERVICES=dns:pdns dns:dns-http dns:dns-https dns:snmpd services:syslog-ng services:chronyd services:snmpd services:lancache-cachehamster dhcp:kea-dhcp4 dhcp:kea-ctrl-agent dhcp:kea-dhcp-ddns dhcp:dnsmasq proxy:nginx
+    - UI_SERVICES=dns:pdns dns:dns-http dns:dns-https dns:snmpd services:syslog-ng services:chronyd services:snmpd services:lancache-cachehamster dhcp:kea-dhcp4 dhcp:kea-ctrl-agent dhcp:kea-dhcp-ddns dhcp:dnsmasq proxy:nginx proxy:snmpd ui:snmpd
     - UI_STATUS_REFRESH=10
     - UI_USER=admin
     - UPSTREAM_DHCP_IP=
