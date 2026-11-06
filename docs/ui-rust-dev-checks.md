@@ -21,7 +21,7 @@ Run from the repository root:
 
 ```bash
 docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work" -w /work "$BUILD_TOOLS_IMAGE" \
-  bash -c 'cargo fmt --check -p lancache-ui && cargo clippy --locked --all-targets -p lancache-ui -- -D warnings && cargo test --locked -p lancache-ui'
+  bash -c 'cargo fmt --check -p lancache-ui && cargo clippy --all-targets -p lancache-ui -- -D warnings && cargo test -p lancache-ui'
 ```
 
 These are the same commands `ci.sh test-stack` runs per crate in CI.

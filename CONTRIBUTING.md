@@ -368,7 +368,7 @@ the crate you changed; the crates are the members of the root `Cargo.toml`).
 ```bash
 BUILD_TOOLS_IMAGE="$(bash .github/scripts/ci.sh build-tools resolve-image)"
 docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work" -w /work "$BUILD_TOOLS_IMAGE" \
-  bash -c 'cargo fmt --check && cargo clippy --locked --all-targets -- -D warnings && cargo test --locked'
+  bash -c 'cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test'
 ```
 
 If you cannot run a relevant check locally (for example, if Docker is unavailable),
