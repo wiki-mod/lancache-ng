@@ -4,6 +4,14 @@
 # What: lifecycle CLI; subcommands dispatched at file end
 # Why: one customer file for install and every later change
 # From: Issue #1683 | PR #1858
+
+# What: stop under a non-bash shell with a clear hint
+# Why: sh or dash fails later with cryptic syntax errors
+# From: Issue #1683 | PR #1980
+if [ -z "${BASH_VERSION:-}" ]; then
+    echo "setup.sh needs bash: run it as ./setup.sh or bash setup.sh." >&2
+    exit 1
+fi
 set -euo pipefail
 export LANG=C LC_ALL=C
 
@@ -75,8 +83,8 @@ APK_GNU_PACKAGES=(coreutils grep tar iproute2)
 # Why: logs and pipes must not get escape codes
 # From: Issue #1683 | PR #1858
 if [[ -t 1 ]]; then
-    BOLD="\033[1m"; GREEN="\033[0;32m"; YELLOW="\033[0;33m"
-    RED="\033[0;31m"; CYAN="\033[0;36m"; RESET="\033[0m"
+    BOLD=$'\033[1m'; GREEN=$'\033[0;32m'; YELLOW=$'\033[0;33m'
+    RED=$'\033[0;31m'; CYAN=$'\033[0;36m'; RESET=$'\033[0m'
 else
     BOLD=""; GREEN=""; YELLOW=""; RED=""; CYAN=""; RESET=""
 fi
@@ -450,6 +458,10 @@ prompt_dns_upstream() {
         print_error "Invalid DNS server: $bad"
     done
     DNS_UPSTREAM_SERVERS=$(dns_upstream_join "${entries[@]}")
+    printf "  all: every name LanCache-NG does not answer itself goes to\n"
+    printf "  this server. domains: only the domains you list (for example\n"
+    printf "  fritz.box or firma.local) go there; LanCache-NG looks up all\n"
+    printf "  other names on the internet itself.\n"
     while true; do
         ask "Forward all names, or only some domains? [all/domains]" "$scope"
         [[ "${REPLY,,}" = "all" || "${REPLY,,}" = "domains" ]] && break
@@ -472,6 +484,8 @@ prompt_dns_upstream() {
     fi
     printf "  DNSSEC checks stay on. Private domains of your network have\n"
     printf "  no signature; name them here, or their lookups fail.\n"
+    printf "  Example: fritz.box lan.local. With none, such names stop\n"
+    printf "  resolving. Your own LAN zone (%s) always works.\n" "$lan"
     while true; do
         ask "Private domains without DNSSEC (space or comma, 'none')" "${unsigned:-none}"
         entries=()
@@ -706,7 +720,7 @@ is_valid_cidr() {
 # From: Issue #1683 | PR #1858
 is_valid_dhcp_mode() {
     case "$1" in
-        disabled|kea|dnsmasq-proxy|dnsmasq-relay) return 0 ;;
+        off|kea|dnsmasq-proxy|dnsmasq-relay) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -1362,9 +1376,7 @@ ensure_stack_requirements_installed() {
     # What: jq reads every JSON answer this script gets
     # Why: primary, Kea and DNS replies need a real parser
     # From: Issue #1683 | PR #1858
-    if ! command_available jq; then
-        install_required_command jq "jq is missing." jq
-    fi
+    install_missing_tools jq
 
     if ! command_available docker; then
         install_docker
@@ -1812,6 +1824,18 @@ migrate_proxy_security_mode_for_update() {
     if [[ "$proxy_security_mode" = "strict" && -z "$proxy_allowed_client_cidrs" ]]; then
         set_env_key PROXY_SECURITY_MODE "$default_mode" "$env_file"
         print_ok "Migrated legacy PROXY_SECURITY_MODE=strict without PROXY_ALLOWED_CLIENT_CIDRS to $default_mode"
+    fi
+}
+
+# What: old DHCP_MODE=disabled becomes off
+# Why: the ui accepts only the SOT words (live test)
+# From: Issue #1683 | PR #1980
+migrate_dhcp_mode_for_update() {
+    local env_file="$1" mode
+    mode=$(get_env_var DHCP_MODE "$env_file") || exit $?
+    if [[ "$mode" = "disabled" ]]; then
+        set_env_key DHCP_MODE off "$env_file"
+        print_ok "Migrated legacy DHCP_MODE=disabled to off"
     fi
 }
 
@@ -3836,6 +3860,11 @@ lancache_channel_ref_pass() {
     while read -r var slug; do
         ref="${registry}/${prefix}/${slug}:${pointer_channel}"
         if ! digest=$(docker buildx imagetools inspect "$ref" --format '{{.Manifest.Digest}}' 2>&1); then
+            # What: a missing image is no network fault.
+            # Why: live: it blamed the network.
+            # From: Issue #1683 | PR #1980
+            [[ "$digest" != *"not found"* ]] \
+                || die "${ref} does not exist: channel '${pointer_channel}' has no '${slug}' image. This checkout may need another channel, e.g. LANCACHE_IMAGE_CHANNEL=${testing} ./setup.sh install."
             if [[ "$pointer_channel" = "$release" ]]; then
                 cat >&2 <<EOF
 
@@ -3859,6 +3888,12 @@ EOF
                 die "Cannot resolve the ${release} channel image ${ref} (${digest})."
             fi
             die "Failed to resolve ${ref} to a digest (${digest}). Check registry access or set LANCACHE_IMAGE_TAG to an immutable sha-* / vX.Y.Z tag."
+        fi
+        # What: the Digest: row when --format was ignored.
+        # Why: live: Debian buildx 0.13 prints the overview.
+        # From: Issue #1683 | PR #1980
+        if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ && "$digest" =~ (^|$'\n')Digest:[[:space:]]+(sha256:[0-9a-f]{64}) ]]; then
+            digest="${BASH_REMATCH[2]}"
         fi
         [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] \
             || die "${ref} returned an invalid digest: ${digest:-<empty>}."
@@ -4125,11 +4160,16 @@ migrate_env_for_update() (
     append_env_migrated_assignment_if_missing IP_HTTPS IP_SSL "" "$env_file"
     remove_env_key IP_STANDARD "$env_file"
     remove_env_key IP_SSL "$env_file"
-    # What: drops the unused NATS DNS replica login.
-    # Why: no client uses it; it held DNS publish rights.
-    # From: Issue #1683 | PR #1912
-    remove_env_key NATS_DNS_REPLICA_USER "$env_file"
-    remove_env_key NATS_DNS_REPLICA_PASSWORD "$env_file"
+    # What: drops every NATS and Netdata key on update.
+    # Why: NATS and Netdata are gone from the stack.
+    # From: Issue #1683 | PR #1858
+    local retired
+    for retired in NATS_DNS_REPLICA_USER NATS_DNS_REPLICA_PASSWORD \
+        NATS_UI_PASSWORD NATS_DNS_WRITER_PASSWORD NATS_CALLOUT_PASSWORD \
+        NATS_SYS_PASSWORD NATS_BIND_IP NATS_ADVERTISE_URL NATS_DATA_DIR \
+        NATS_CONF_DIR NETDATA_ALARM_TOKEN CACHEHAMSTER_URLS; do
+        remove_env_key "$retired" "$env_file"
+    done
     require_env_value_for_update IP_HTTP "$env_file"
     # What: the second LAN IP must be set before any write
     # Why: prod always runs dns-https on it (AG-SETUP-001)
@@ -4274,7 +4314,6 @@ migrate_env_for_update() (
     cache_max_size=$(get_env_var_nonempty CACHE_MAX_SIZE "$env_file") || exit $?
     cache_max_gb=$(get_env_var_nonempty CACHE_MAX_GB "$env_file") || exit $?
     if cache_gb=$(cache_size_gb_from_env "${cache_max_size:-$cache_max_gb}"); then
-        set_env_key_if_empty_or_missing CACHE_MAX_SIZE "${cache_gb}g" "$env_file"
         set_env_key_if_empty_or_missing CACHE_MAX_GB "$cache_gb" "$env_file"
     fi
     # What: a broken CACHE_MEM_MB is removed, not replaced
@@ -4286,6 +4325,7 @@ migrate_env_for_update() (
         print_warn "CACHE_MEM_MB '$cache_mem_mb' is no positive integer; removed, the build-manifest.yml default applies"
     fi
     migrate_proxy_security_mode_for_update "$env_file"
+    migrate_dhcp_mode_for_update "$env_file"
     # What: image keys were resolved at the top
     # Why: the platform check runs before migration writes
     # From: Issue #1683 | PR #1858
@@ -4313,7 +4353,7 @@ migrate_env_for_update() (
         elif [[ ",$compose_profiles," = *,dhcp-kea,* || "$dhcp_enabled" = "1" ]]; then
             dhcp_mode="kea"
         else
-            dhcp_mode="disabled"
+            dhcp_mode="off"
         fi
     fi
 
@@ -5362,7 +5402,7 @@ Registers and starts a secondary DNS node on a remote host. The command
 creates a local compose directory, writes the secondary .env file, and starts
 the container after the primary server returns the required secrets.
 Use --rotate in an existing secondary directory to refresh credentials after
-the primary changes its NATS authentication model.
+the primary changes its TSIG key.
 
 Required arguments:
   --primary <url>    Primary LanCache UI/API URL, for example http://<primary-ip>:<ui-port>
@@ -5425,12 +5465,9 @@ Supported services:
                      (config-test -> config-set -> config-write), reading
                      snapshots from KEA_CONFIG_SNAPSHOT_DIR in the
                      KEA_DATA_DIR state dir.
-  dns, pdns          Rolls back a PowerDNS zone's record data via
-                     nats-subscriber's rollback listener (list snapshots ->
-                     diff -> PATCH -> check-zone -> flush -> re-publish),
-                     reached by execing curl inside the target container
-                     (its port is Compose-internal only, never published to
-                     the host). The dns container runs the one listener.
+  dns, pdns          Rolls back a PowerDNS zone via lancache-ui in the ui
+                     container (PowerDNS API restore; NOTIFY and AXFR
+                     reach the secondaries).
                      Unlike Kea, PowerDNS tracks snapshots per zone (lan.,
                      local.lan., and the private reverse zones), so a <zone>
                      argument is required -- omit it to list which zones
@@ -5998,6 +6035,9 @@ install_repo_follow_channel() {
         branches=$(lancache_channel_branches) || exit $?
         if [[ -n "$branch" ]] && ! list_has_line "$branch" "$branches"; then
             print_warn "Checkout $SCRIPT_DIR is on $branch, no channel branch; installing from it."
+            printf "  Compose files and this setup.sh come from that branch.\n"
+            printf "  Updates will not move the checkout; switch it to master\n"
+            printf "  (latest) or current_dev (nightly) to follow a channel.\n"
             return 0
         fi
     fi
@@ -6640,7 +6680,7 @@ cmd_converge_reconcile() {
     # From: Issue #1683 | PR #1858
     reconcile_auto_update_timer_state "$env_file"
 
-    # What: UI cache size -> CACHE_MAX_SIZE and CACHE_MAX_GB
+    # What: UI cache size -> CACHE_MAX_GB
     # Why: nginx and the dashboard read one value pair
     # From: Issue #1069 | PR #1858
     ui_cache_max_gb=$(lancache_read_ui_settings_override "$install_dir" "$env_file" "CACHE_MAX_GB") \
@@ -6649,7 +6689,6 @@ cmd_converge_reconcile() {
         ui_cache_max_gb=$(( 10#$ui_cache_max_gb ))
         current_cache_max_gb=$(get_env_var CACHE_MAX_GB "$env_file") || exit $?
         if [[ "$ui_cache_max_gb" != "$current_cache_max_gb" ]]; then
-            set_env_key CACHE_MAX_SIZE "${ui_cache_max_gb}g" "$env_file"
             set_env_key CACHE_MAX_GB "$ui_cache_max_gb" "$env_file"
             print_ok "Cache size updated from Admin UI: ${current_cache_max_gb:-<unset>} GB -> ${ui_cache_max_gb} GB"
         fi
@@ -6996,6 +7035,14 @@ cmd_create_logs_for_issue() (
             || n="$(os_release_field ID) $(os_release_field VERSION_ID)"; n="${n# }"; n="${n% }"; printf '%s' "${n:-unknown}")"
         printf '\nDisk usage:\n'
         df -h 2>&1 || printf '(df failed, exit %s)\n' "$?"
+        # What: uptime, memory and processes of the host
+        # Why: audit A1-A8: load and RAM were missing
+        # From: Issue #1683 | PR #1980
+        printf '\nUptime: %s\n' "$(uptime 2>&1 || printf ' (exit %s)' "$?")"
+        printf '\nMemory:\n'
+        free -m 2>&1 || printf '(free failed, exit %s)\n' "$?"
+        printf '\nProcesses (by memory):\n'
+        ps aux --sort=-rss 2>&1 || printf '(ps failed, exit %s)\n' "$?"
     } | logbundle_redact_stream "$secrets_file" > "$dest/host-facts.txt"
 
     print_step "Container status and configuration"
@@ -7060,7 +7107,7 @@ LanCache-NG diagnostic bundle created at $stamp UTC
 Install directory: $install_dir
 
 Contents:
-  host-facts.txt              Docker/Compose versions, kernel, disk space
+  host-facts.txt              Docker/Compose versions, kernel, disk, uptime, memory, processes
   compose-ps.txt               docker compose ps
   compose-config.txt           docker compose config (resolved)
   logs/<service>.log           docker compose logs --tail=${log_lines} per service
@@ -7391,68 +7438,13 @@ dns_zone_snapshot_entries() {
 # Why: the listener is not published to the host
 # From: Issue #1683 | PR #1858
 dns_rollback_exec() (
-    local install_dir="$1" env_file="$2" container="$3" method="$4" path="$5" body="${6:-}"
-    local project stdout_val rc=0 exec_err http_status response_body
-
+    local install_dir="$1" env_file="$2" project out rc=0
+    shift 2
     project=$(compose_project_name "$install_dir" "$env_file") \
         || die "Cannot determine the compose project of $install_dir (exit $?)."
-    err_file=$(mktemp) || die "Cannot create a temporary file for the exec errors (exit $?)."
-    # What: the subshell body's trap removes the error file
-    # Why: no exit path may leave the file behind
-    # From: Issue #1683 | PR #1858
-    trap 'rm -f -- "$err_file"' EXIT
-
-    local exec_script placeholder_fn
-    exec_script=$(cat <<'SCRIPT'
-            key="$PDNS_API_KEY"
-            ! secret_value_is_placeholder "$key" || key=""
-            secrets=$(lancache-watchdog get LANCACHE_SHARED_SECRET_DIR) || exit 7
-            if [ -z "$key" ] && [ -s "$secrets/pdns-api-key" ]; then
-                key=$(tr -d "\n" < "$secrets/pdns-api-key")
-            fi
-            if [ -z "$key" ]; then
-                echo "DNS_ROLLBACK_EXEC_NO_API_KEY"
-                exit 9
-            fi
-            port=$(lancache-watchdog get DNS_ROLLBACK_PORT) || exit 7
-            lo=$(lancache-watchdog get LOOPBACK_BIND_IP) || exit 7
-            m="$1"; p="$2"; b="$3"
-            if [ "$m" = "POST" ]; then
-                curl -sS -w "\n%{http_code}" -X POST \
-                    -H "X-API-Key: $key" -H "Content-Type: application/json" -d "$b" \
-                    "http://$lo:$port$p" || { echo "DNS_ROLLBACK_EXEC_CURL_FAILED"; exit 8; }
-            else
-                curl -sS -w "\n%{http_code}" \
-                    -H "X-API-Key: $key" "http://$lo:$port$p" || { echo "DNS_ROLLBACK_EXEC_CURL_FAILED"; exit 8; }
-            fi
-SCRIPT
-    ) || die "Cannot build the listener request script (exit $?)."
-    placeholder_fn=$(declare -f secret_value_is_placeholder) \
-        || die "Cannot read secret_value_is_placeholder (exit $?)."
-    exec_script="${placeholder_fn}"$'\n'"${exec_script}"
-    stdout_val=$(stack_compose "$install_dir" "$env_file" -p "$project" exec -T "$container" sh -c "$exec_script" sh "$method" "$path" "$body" 2>"$err_file") || rc=$?
-    exec_err=$(cat "$err_file") || die "Cannot read $err_file (exit $?)."
-
-    if [[ $rc -ne 0 ]]; then
-        case "$stdout_val" in
-            *DNS_ROLLBACK_EXEC_NO_API_KEY*)
-                die "PDNS_API_KEY could not be resolved inside the $container container (no usable value in its environment and nothing on the shared-secrets volume yet). Is the stack fully started?"
-                ;;
-            *DNS_ROLLBACK_EXEC_CURL_FAILED*)
-                die "Failed to reach the rollback listener inside $container (curl could not connect to its rollback port). Is nats-subscriber running there?"
-                ;;
-            *)
-                die "docker compose exec into $container failed (exit $rc): ${exec_err:-$stdout_val}"
-                ;;
-        esac
-    fi
-
-    split_http_response response_body http_status "$stdout_val" \
-        || die "Unexpected response from $container's rollback listener: $stdout_val"
-    if [[ ! "$http_status" =~ ^2 ]]; then
-        die "$container's rollback listener rejected the request with HTTP ${http_status}. Response: ${response_body}"
-    fi
-    printf '%s\n' "$response_body"
+    out=$(stack_compose "$install_dir" "$env_file" -p "$project" exec -T ui lancache-ui "$@" 2>&1) || rc=$?
+    [[ $rc -eq 0 ]] || die "lancache-ui $1 in the ui container failed (exit $rc): $out"
+    printf "%s\n" "$out" | tail -n 1
 )
 
 # What: rolls a DNS zone back to a chosen snapshot
@@ -7460,16 +7452,15 @@ SCRIPT
 # From: Issue #1683 | PR #1858
 reset_dns_to_last_known_good_config() {
     local container="$1" install_dir="$2" zone="$3" snapshot_id="$4" assume_yes="${5:-0}"
-    local env_file snapshots_body zone_canon rollback_body resp zone_list entry_list
+    local env_file snapshots_body zone_canon resp zone_list entry_list
     local -a zone_names=()
     local -a entries=()
     local idx n entry eid ecreated found zn
-    local applied zone_check_passed flush_ok republished changed_names flush_failed
 
     env_file=$(require_stack_env_file "$install_dir") || exit $?
     install_missing_tools jq
 
-    snapshots_body=$(dns_rollback_exec "$install_dir" "$env_file" "$container" GET /snapshots)
+    snapshots_body=$(dns_rollback_exec "$install_dir" "$env_file" zone-snapshots)
 
     if [[ -z "$zone" ]]; then
         zone_list=$(list_dns_zones_with_snapshots "$snapshots_body") \
@@ -7519,38 +7510,13 @@ reset_dns_to_last_known_good_config() {
 
     confirm_snapshot_rollback "$container's zone $zone_canon" "$snapshot_id" "$assume_yes"
 
-    # What: the request body is built by jq, not by printf
-    # Why: a quote in a user-given snapshot id breaks JSON
-    # From: Issue #1683 | PR #1858
-    rollback_body=$(jq -nc --arg zone "$zone_canon" --arg id "$snapshot_id" '{zone: $zone, snapshot_id: $id}') \
-        || die "Failed to build the rollback request (exit $?)."
-    print_step "Applying snapshot $snapshot_id for zone $zone_canon (rollback listener PATCH)"
-    resp=$(dns_rollback_exec "$install_dir" "$env_file" "$container" POST /rollback "$rollback_body")
-
-    applied=$(json_value .applied "$resp") || die "Unrecognized rollback response from $container: $resp"
-    zone_check_passed=$(json_value .zone_check_passed "$resp") || die "Unrecognized rollback response from $container: $resp"
-    flush_ok=$(json_value .flush_ok "$resp") || die "Unrecognized rollback response from $container: $resp"
-    republished=$(json_value .republished_to_nats "$resp") || die "Unrecognized rollback response from $container: $resp"
-    changed_names=$(json_value '.changed_names // [] | join(", ")' "$resp") \
-        || die "Unrecognized rollback response from $container: $resp"
-    flush_failed=$(json_value '.flush_failed_names // [] | join(", ")' "$resp") \
-        || die "Unrecognized rollback response from $container: $resp"
-
-    [[ "$applied" = "true" ]] \
-        || die "Rollback listener did not report applied=true: $resp"
+    print_step "Applying snapshot $snapshot_id for zone $zone_canon (PowerDNS API restore)"
+    resp=$(dns_rollback_exec "$install_dir" "$env_file" zone-rollback "$zone_canon" "$snapshot_id")
+    [[ -n "$(json_value .restored "$resp")" ]] \
+        || die "Unrecognized rollback answer: $resp"
 
     print_ok "Zone $zone_canon on $container rolled back to known-good snapshot $snapshot_id."
-    [[ -n "$changed_names" ]] && print_ok "Changed rrsets: ${changed_names}"
-    if [[ "$zone_check_passed" != "true" ]]; then
-        print_warn "Post-rollback pdnsutil check-zone reported a problem for $zone_canon -- the rollback was already applied and is NOT automatically reverted. Inspect the zone manually."
-    fi
-    if [[ "$flush_ok" != "true" ]]; then
-        print_warn "One or more recursor cache-flush publishes failed after rollback (${flush_failed:-see response}) -- affected clients may see stale answers until TTL expiry."
-    fi
-    if [[ "$zone_canon" = "lan." && "$republished" = "true" ]]; then
-        print_ok "Restored lan. records were re-published to NATS so secondary DNS nodes converge."
-    fi
-    print_ok "A fresh known-good snapshot of the restored state was recorded automatically (same as an Admin-UI-driven rollback)."
+    print_ok "PowerDNS sends NOTIFY; secondaries pull the zone by AXFR."
 }
 
 # What: writes the previous .env back and restarts the stack
@@ -7865,7 +7831,7 @@ die_if_any_empty() {
 cmd_secondary() {
     local primary="" token="" name="" ip_http="" listen_ip="" ip_https="" listen_ip_https="" rotate=0
     local out http_status response secondary_dir cmd ddns_tsig_key dns_xfr_primary tag_input
-    local nats_url nats_user nats_password consumer_name pdns_api_key
+    local pdns_api_key tsig_name syslog_primary
     local response_image_registry response_image_prefix response_image_channel response_image_tag
     local existing_env_file lancache_image_registry lancache_image_prefix lancache_image_channel lancache_image_tag
     local explicit_lancache_image_tag keep_known_good_configs
@@ -7926,7 +7892,16 @@ cmd_secondary() {
         esac
     done
 
-    die_if_any_empty "Required argument(s) missing" \
+    # What: ask for each missing value in a terminal
+    # Why: secondary without arguments guides like install
+    # From: Issue #1683 | PR #1980
+    if [[ -t 0 ]]; then
+        [[ -n "$primary" ]] || { ask "Primary Admin-UI URL (for example http://192.168.1.100:8080)" ""; primary="$REPLY"; }
+        [[ -n "$token" ]] || { ask "Registration token (Admin-UI: DNS, Secondary DNS)" ""; token="$REPLY"; }
+        [[ -n "$name" ]] || { ask "Name of this secondary (a-z, 0-9, -)" ""; name="$REPLY"; }
+        [[ -n "$ip_http" ]] || { ask "Primary proxy IP (IP_HTTP of the primary)" ""; ip_http="$REPLY"; }
+    fi
+    die_if_any_empty "Required argument(s) missing (see ./setup.sh secondary --help)" \
         "--primary=$primary" "--token=$token" "--name=$name" "--ip-http=$ip_http"
 
     for cmd in curl docker jq; do
@@ -8066,24 +8041,17 @@ cmd_secondary() {
     split_http_response response http_status "$out" \
         || die "Unrecognized response from primary server at ${primary}."
 
-    if [[ "$http_status" = "503" ]]; then
-        # What: 503 means primary lacks a reachable NATS URL
-        # Why: dns publishes NATS only with NATS_BIND_IP set
-        # From: Issue #1683 | PR #1858
-        die "Primary server at ${primary} is not configured to register remote secondaries (HTTP 503): it needs NATS_BIND_IP (or the more specific NATS_ADVERTISE_URL) set in its .env/.env.local to a NATS address this secondary can reach, AND its 'dns' service recreated -- e.g. docker compose up -d dns if the variable is in .env, or docker compose --env-file .env.local up -d dns if it is in .env.local (Compose does not auto-load .env.local) -- so NATS actually publishes that address; restarting only the ui container is not enough. See docs/architecture-ng.md's \"Remote secondary NATS access\" section."
-    elif [[ ! "$http_status" =~ ^2 ]]; then
+    if [[ ! "$http_status" =~ ^2 ]]; then
         die "Primary server rejected the registration request with HTTP ${http_status}. Verify the registration token, secondary name, and primary server logs."
     fi
     [[ -n "$response" ]] || die "Empty response from primary server after successful registration request"
 
     bad_response="Unrecognized response from primary server at ${primary}."
-    nats_url=$(json_value .nats_url "$response") || die "$bad_response"
-    nats_user=$(json_value .nats_user "$response") || die "$bad_response"
-    nats_password=$(json_value .nats_password "$response") || die "$bad_response"
-    consumer_name=$(json_value .consumer_name "$response") || die "$bad_response"
     pdns_api_key=$(json_value .pdns_api_key "$response") || die "$bad_response"
-    ddns_tsig_key=$(json_value .ddns_tsig_key "$response") || die "$bad_response"
-    dns_xfr_primary=$(json_value .dns_xfr_primary "$response") || die "$bad_response"
+    tsig_name=$(json_value .tsig_name "$response") || die "$bad_response"
+    ddns_tsig_key=$(json_value .tsig_secret "$response") || die "$bad_response"
+    dns_xfr_primary=$(json_value .primary "$response") || die "$bad_response"
+    syslog_primary=$(json_value .syslog_primary "$response") || die "$bad_response"
     response_image_registry=$(json_value .image_registry "$response") || die "$bad_response"
     response_image_prefix=$(json_value .image_prefix "$response") || die "$bad_response"
     response_image_channel=$(json_value .image_channel "$response") || die "$bad_response"
@@ -8096,9 +8064,9 @@ cmd_secondary() {
     validate_env_value DNS_LOCAL_REVERSE_ZONES "$local_reverse"
 
     die_if_any_empty "Invalid response from primary server; missing field(s)" \
-        "nats_url=$nats_url" "nats_user=$nats_user" "nats_password=$nats_password" \
-        "consumer_name=$consumer_name" "pdns_api_key=$pdns_api_key" \
-        "ddns_tsig_key=$ddns_tsig_key" "dns_xfr_primary=$dns_xfr_primary"
+        "pdns_api_key=$pdns_api_key" "tsig_name=$tsig_name" \
+        "ddns_tsig_key=$ddns_tsig_key" "dns_xfr_primary=$dns_xfr_primary" \
+        "syslog_primary=$syslog_primary"
 
     mkdir -p "$secondary_dir"
 
@@ -8234,10 +8202,8 @@ DNS_HTTPS_HOST_PORT=${dns_https_host_port}
 PDNS_API_KEY=${pdns_api_key}
 DDNS_TSIG_KEY=${ddns_tsig_key}
 DNS_XFR_PRIMARY=${dns_xfr_primary}
-NATS_URL=${nats_url}
-NATS_USER=${nats_user}
-NATS_PASSWORD=${nats_password}
-NATS_CONSUMER=${consumer_name}
+DDNS_TSIG_NAME=${tsig_name}
+SYSLOG_PRIMARY=${syslog_primary}
 KEEP_KNOWN_GOOD_CONFIGS=${keep_known_good_configs}
 DNS_LOCAL_REVERSE_ZONES=${local_reverse}
 ${upstream_rows}LANCACHE_IMAGE_REGISTRY=${lancache_image_registry}
@@ -8564,7 +8530,9 @@ INSTALL_DIR="${PROD_COMPOSE%/*}"
 ENV_LOCAL="$INSTALL_DIR/.env.local"
 STATE_ROOT_DEFAULT=$(production_state_root_default "$INSTALL_DIR") \
     || die "Cannot read the default state root from $INSTALL_DIR (exit $?)."
-ask "Data directory (cache, DNS, DHCP, NTP state)" "$STATE_ROOT_DEFAULT"
+printf "  LanCache-NG itself stays in %s.\n" "$INSTALL_DIR"
+printf "  Here you choose where its data goes: cache, DNS, DHCP, NTP.\n"
+ask "Data folder (not the install folder)" "$STATE_ROOT_DEFAULT"
 LANCACHE_STATE_DIR="$(realpath -m "$REPLY")"
 
 if [[ -f "$ENV_LOCAL" ]]; then
@@ -8588,8 +8556,8 @@ while true; do
     print_error "Please enter an absolute path (e.g. $LANCACHE_STATE_DIR/cache)."
 done
 
-default_cache_gb=$(cache_size_gb_from_env "$(prod_env_default CACHE_MAX_SIZE)") \
-    || die "The CACHE_MAX_SIZE default is not a GB size."
+default_cache_gb=$(cache_size_gb_from_env "$(prod_env_default CACHE_MAX_GB)") \
+    || die "The CACHE_MAX_GB default is not a GiB number."
 while true; do
     ask "Cache size in GiB" "$default_cache_gb"
     cache_gb="$REPLY"
@@ -8598,8 +8566,11 @@ while true; do
 done
 
 default_cache_mem_mb=$(prod_env_default CACHE_MEM_MB) || exit $?
+printf "  RAM for the list of cached files (nginx keys_zone). It is no\n"
+printf "  file cache: 1 MB holds about 8000 entries. Linux keeps hot\n"
+printf "  files in free RAM by itself.\n"
 while true; do
-    ask "Cache RAM buffer in MB (keys_zone)" "$default_cache_mem_mb"
+    ask "RAM for the cache index in MB" "$default_cache_mem_mb"
     CACHE_MEM_MB="$REPLY"
     is_positive_integer "$CACHE_MEM_MB" && break
     print_error "Please enter a positive integer (e.g. 512)."
@@ -8627,11 +8598,27 @@ else
     print_warn "Scheduled automatic updates disabled — manual updates with: ./setup.sh update"
 fi
 
+# What: step: the LAN domain of all local names
+# Why: DoMe 05.11.: own domain; default lancache-ng.lan
+# From: Issue #1683 | PR #1980
+print_step "LAN domain"
+printf "  Every local name ends in this domain. With lancache-ng.lan\n"
+printf "  a printer is printer.lancache-ng.lan; with lan printer.lan.\n\n"
+DHCP_DOMAIN=$(prod_env_default DHCP_DOMAIN) || exit $?
+while true; do
+    ask "LAN domain" "$DHCP_DOMAIN"
+    DHCP_DOMAIN="${REPLY,,}"
+    DHCP_DOMAIN="${DHCP_DOMAIN%.}"
+    [[ "$DHCP_DOMAIN" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$ ]] && break
+    print_error "Please enter a domain like lancache-ng.lan or lan"
+done
+print_ok "LAN domain: $DHCP_DOMAIN"
+
 # What: optional external DNS server for unknown names
 # Why: a router may answer the names of LAN devices
 # From: Issue #1918 | PR #1858
 print_step "External DNS server (optional)"
-install_lan_zone=$(prod_env_default DHCP_DOMAIN) || exit $?
+install_lan_zone="$DHCP_DOMAIN"
 prompt_dns_upstream "" "" "" "${IP_HTTP},${IP_HTTPS}" "$install_lan_zone"
 if [[ -n "$DNS_UPSTREAM_SERVERS" ]]; then
     print_ok "External DNS: ${DNS_UPSTREAM_SERVERS}"
@@ -8647,12 +8634,13 @@ print_step "DHCP mode"
 printf "  Kea (full mode): route and DNS options via Admin-UI\n"
 printf "  dnsmasq-proxy: experimental proxy-DHCP helper; it does not reliably replace DNS options from a normal router DHCP server\n"
 printf "  dnsmasq-relay: forward DHCP to an upstream server on another segment (relay only; injects nothing of its own)\n"
-printf "  disabled: keep router DHCP and do nothing in LanCache\n\n"
+printf "  off: keep router DHCP and do nothing in LanCache\n\n"
 
 default_dhcp_mode=$(prod_env_default DHCP_MODE) || exit $?
 while true; do
-    ask "DHCP mode (disabled, kea, dnsmasq-proxy, dnsmasq-relay)" "$default_dhcp_mode"
+    ask "DHCP mode (off, kea, dnsmasq-proxy, dnsmasq-relay)" "$default_dhcp_mode"
     DHCP_MODE="${REPLY,,}"
+    [[ "$DHCP_MODE" != "disabled" ]] || DHCP_MODE="off"
     if is_valid_dhcp_mode "$DHCP_MODE"; then
         break
     fi
@@ -8732,7 +8720,7 @@ elif [[ "$DHCP_MODE" = "dnsmasq-proxy" ]]; then
     print_warn "It does not reliably replace DNS options from a normal router DHCP server."
     print_warn "Use Kea mode if LanCache must control normal client DNS settings."
     confirm "Continue with experimental dnsmasq-proxy mode? [y/N]" "N" \
-        || die "Cancelled dnsmasq-proxy mode. Re-run setup and choose kea or disabled."
+        || die "Cancelled dnsmasq-proxy mode. Re-run setup and choose kea or off."
 
     ask "DHCP subnet start for dnsmasq-proxy" "${DHCP_SUBNET_DEFAULT%/*}"
     while true; do
@@ -8855,7 +8843,7 @@ NTP_ENABLED=$(yn_flag "$REPLY")
 ntp_subdir=$(prod_env_default STATE_SUBDIR_NTP) || exit $?
 NTP_DATA_DIR="$LANCACHE_STATE_DIR/$ntp_subdir"
 if [[ "$NTP_ENABLED" = "1" ]]; then
-    print_ok "LanCache-NG-NTP enabled — configure upstream servers and the DHCP auto-populate toggle from the Admin UI's NTP page"
+    print_ok "LanCache-NG-NTP enabled — configure upstream servers from the Admin UI setup page"
 else
     print_ok "LanCache-NG-NTP skipped — can be enabled later from the Admin UI"
 fi
@@ -8874,6 +8862,10 @@ UI_AUTH_USER=""
 UI_AUTH_PASSWORD=""
 UI_AUTH_PASSWORD_HASH=""
 ALLOW_INSECURE_UI=""
+# What: ask again until protection or open access is chosen
+# Why: a "no" to both used to end the whole install
+# From: Issue #1683 | PR #1980
+while true; do
 if confirm "Protect Admin-UI with password? [Y/n]" "Y"; then
     ui_user_default=$(prod_env_default SETUP_UI_USER_DEFAULT) || exit $?
     ask "Username" "$ui_user_default"
@@ -8911,16 +8903,18 @@ if confirm "Protect Admin-UI with password? [Y/n]" "Y"; then
         print_warn "Note the password now; only its hash is stored in $ENV_LOCAL"
         printf "\n"
     fi
+    break
 else
     insecure_yn=$(yn_default ALLOW_INSECURE_UI) || exit $?
     if confirm "Allow Admin-UI without authentication? $(yn_hint "$insecure_yn")" "$insecure_yn"; then
         ALLOW_INSECURE_UI=true
         print_warn "No password protection — Admin-UI will be reachable on $IP_HTTP"
         print_warn "This is explicitly allowed by ALLOW_INSECURE_UI=true"
-    else
-        die "Admin-UI authentication is required. Re-run setup and enable password protection, or explicitly allow insecure access."
+        break
     fi
+    print_warn "The Admin-UI then needs a password; the question comes again."
 fi
+done
 
 # What: step 9: writes .env.local in one atomic step
 # Why: a half-written .env.local must never exist
@@ -8986,11 +8980,10 @@ LANCACHE_STATE_DIR=${LANCACHE_STATE_DIR}
 HTTPS_ENABLED=${HTTPS_ENABLED}
 
 CACHE_DIR=${CACHE_DIR}
-CACHE_MAX_SIZE=${cache_gb}g
 CACHE_MEM_MB=${CACHE_MEM_MB}
 
-# What: cache size in GB as a plain number
-# Why: the Admin UI draws its progress bar from it
+# What: cache size in GiB, a whole number
+# Why: nginx max_size and the Admin UI read it
 # From: Issue #1683 | PR #1858
 CACHE_MAX_GB=${cache_gb}
 
@@ -9034,23 +9027,19 @@ DHCP_PROXY_PXE_BOOT_SERVER=${DHCP_PROXY_PXE_BOOT_SERVER}
 DHCP_PROXY_PXE_BOOT_FILENAME_BIOS=${DHCP_PROXY_PXE_BOOT_FILENAME_BIOS}
 DHCP_PROXY_PXE_BOOT_FILENAME_UEFI=${DHCP_PROXY_PXE_BOOT_FILENAME_UEFI}
 
-# What: start value; the Admin UI NTP page changes it later
+# What: start value; the Admin UI setup page changes it
 # Why: the watchdog runs chronyd in services only when 1
 # From: Issue #1683 | PR #1912
 NTP_ENABLED=${NTP_ENABLED}
 NTP_DATA_DIR=${NTP_DATA_DIR}
 
 # What: generated secrets; keep them unchanged
-# Why: DHCP, DNS, NATS and the Admin UI share these values
+# Why: DHCP, DNS and the Admin UI share these values
 # From: Issue #1683 | PR #1858
 KEA_CTRL_TOKEN=${KEA_CTRL_TOKEN?}
 DDNS_TSIG_KEY=${DDNS_TSIG_KEY?}
 PDNS_API_KEY=${PDNS_API_KEY?}
-NETDATA_ALARM_TOKEN=${NETDATA_ALARM_TOKEN}
-NATS_UI_PASSWORD=${NATS_UI_PASSWORD}
-NATS_DNS_WRITER_PASSWORD=${NATS_DNS_WRITER_PASSWORD}
-NATS_CALLOUT_PASSWORD=${NATS_CALLOUT_PASSWORD}
-NATS_SYS_PASSWORD=${NATS_SYS_PASSWORD}
+SNMP_COMMUNITY=${SNMP_COMMUNITY?}
 
 # What: token for ./setup.sh secondary registration
 # Why: whoever knows it can register a secondary
@@ -9068,6 +9057,11 @@ AUTO_UPDATE_ENABLED=${AUTO_UPDATE_ENABLED}
 DNS_UPSTREAM_SERVERS=${DNS_UPSTREAM_SERVERS}
 DNS_UPSTREAM_ZONES=${DNS_UPSTREAM_ZONES}
 DNS_UPSTREAM_UNSIGNED_ZONES=${DNS_UPSTREAM_UNSIGNED_ZONES}
+
+# What: LAN domain; printer.<domain> for local names
+# Why: the Admin UI DNS settings can change it later
+# From: Issue #1683 | PR #1980
+DHCP_DOMAIN=${DHCP_DOMAIN}
 
 # What: 1 = LanCache-NG answers private PTR lookups itself
 # Why: 0 sends them on like every other name; kea needs 1
@@ -9151,6 +9145,20 @@ fi
 # Why: units are enabled only after the first pull succeeds
 # From: Issue #1683 | PR #1858
 print_step "Installing host services"
+
+# What: asks before taking units of another install
+# Why: live test 05.11.: units of an old path were replaced
+# From: Issue #1683 | PR #1980
+host_unit_dir=$(runtime_default_in "$(runtime_defaults_list)" SYSTEMD_UNIT_DIR) || exit $?
+host_unit_owner=""
+if [[ -f "$host_unit_dir/$STACK_UNIT" ]]; then
+    host_unit_owner=$(sed -n 's/^WorkingDirectory=//p' "$host_unit_dir/$STACK_UNIT")
+fi
+if [[ -n "$host_unit_owner" && "$host_unit_owner" != "$INSTALL_DIR" ]]; then
+    print_warn "Host services now run the install in $host_unit_owner."
+    confirm "Move them to $INSTALL_DIR? [y/N]" "N" \
+        || die "Stopped; host services stay with $host_unit_owner."
+fi
 
 HOST_SERVICES_AVAILABLE=0
 if write_lancache_host_services "$INSTALL_DIR"; then
@@ -9272,6 +9280,33 @@ else
 fi
 print_ok "Stack started"
 
+# What: wait until every container reports healthy
+# Why: "running" must not show while a service is broken
+# From: Issue #1683 | PR #1980
+print_step "Waiting for healthy containers"
+_UPDATE_STACK_DIR="$INSTALL_DIR"
+_UPDATE_ENV_FILE="$ENV_LOCAL"
+install_wait=$(prod_env_default SETUP_HEALTH_WAIT_SERVICES_SECONDS) || exit $?
+install_poll=$(prod_env_default SETUP_HEALTH_POLL_SECONDS) || exit $?
+mapfile -t install_services < <(stack_compose "$INSTALL_DIR" "$ENV_LOCAL" config --services)
+install_waited=0
+install_bad=("${install_services[@]}")
+while (( ${#install_bad[@]} > 0 && install_waited < install_wait )); do
+    sleep "$install_poll"
+    install_waited=$((install_waited + install_poll))
+    install_left=()
+    for svc in "${install_bad[@]}"; do
+        service_container_is_healthy "$svc" 2>/dev/null || install_left+=("$svc")
+    done
+    install_bad=("${install_left[@]}")
+done
+if (( ${#install_bad[@]} > 0 )); then
+    print_warn "Not healthy after ${install_wait} s: ${install_bad[*]}"
+    print_warn "See: $SCRIPT_DIR/setup.sh debug, or docker logs <container>"
+else
+    print_ok "All containers are healthy"
+fi
+
 # What: step 14: Admin UI URL from the ui port mapping
 # Why: compose owns IP and port; a print never aborts setup
 # From: Issue #1683 | PR #1858
@@ -9284,7 +9319,11 @@ if [[ "$ui_url_rc" -ne 0 || -z "$ui_url" ]]; then
 fi
 printf "\n"
 printf '%s%s══════════════════════════════════════════════════%s\n' "${BOLD}" "${GREEN}" "${RESET}"
-printf '%s%s  LanCache-NG is running!%s\n' "${BOLD}" "${GREEN}" "${RESET}"
+if (( ${#install_bad[@]} > 0 )); then
+    printf '%s%s  LanCache-NG started, but not all containers are healthy%s\n' "${BOLD}" "${YELLOW}" "${RESET}"
+else
+    printf '%s%s  LanCache-NG is running!%s\n' "${BOLD}" "${GREEN}" "${RESET}"
+fi
 printf '%s%s══════════════════════════════════════════════════%s\n' "${BOLD}" "${GREEN}" "${RESET}"
 printf "\n"
 if [[ -n "$UI_AUTH_USER" ]]; then
@@ -9309,4 +9348,10 @@ printf "\n"
 printf '  %sCommands:%s\n' "${BOLD}" "${RESET}"
 printf "    Status:  %s/setup.sh debug\n"  "$SCRIPT_DIR"
 printf "    Update:  %s/setup.sh update\n" "$SCRIPT_DIR"
+printf "\n"
+# What: show the token a secondary registers with
+# Why: it was only written to .env.local, never shown
+# From: Issue #1683 | PR #1980
+printf '  %sSecondary DNS token:%s %s\n' "${BOLD}" "${RESET}" "${SECONDARY_REGISTRATION_TOKEN:-}"
+printf "    Also in the Admin-UI: DNS, Secondary DNS.\n"
 printf "\n"

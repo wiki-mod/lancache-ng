@@ -128,7 +128,7 @@ catch-all caused NOTAUTH rejections).
   AXFR/NOTIFY.
 - **#1083 — lease release DDNS cleanup.** Implemented as a best-effort
   cleanup: `release_lease` looks up the lease hostname before `lease4-del` and
-  publishes forward-A and reverse-PTR delete events. A NATS or lookup failure
+  publishes forward-A and reverse-PTR delete events. A PowerDNS API or lookup failure
   can still leave stale records, but that is now an explicit residual risk
   rather than the former no-cleanup behavior.
 
@@ -206,7 +206,7 @@ ordering.
 | PXE keys (`next-server`/`server-hostname`/`boot-file-name`) | Not built | Planned, #1085 |
 | Standard-options table with tooltips | Not built | Planned, v0.3.0; i18n decision in §6 |
 | Lease release | Admin UI, implemented | `services/ui/src/main.rs` `release_lease` |
-| Lease release → DDNS record cleanup | Implemented, best-effort on NATS/publish failures | #1083 |
+| Lease release → DDNS record cleanup | Implemented, best-effort on PowerDNS API failures | #1083 |
 | DHCP conflict pre-check ("DHCP-Precheck") | Admin UI, implemented | `services/ui/src/main.rs` `check_dhcp_conflict` |
 | Kea config snapshot rollback | Admin UI, implemented | `services/ui/src/main.rs` `rollback_kea_snapshot`, #614 |
 | "Enable DDNS Updates" toggle (independent of DHCP-Server) | Admin UI, implemented | #1076 |

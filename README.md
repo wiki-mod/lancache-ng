@@ -39,7 +39,7 @@ LanCache NG combines several services into one Docker based stack:
   - optional LanCache-NG-NTP server (chrony), disciplined against public NTP servers, serving LAN clients on UDP/123, with an opt-in DHCP auto-populate toggle
   - optional scheduled automatic updates (ordered, health-gated, Admin UI last)
   - optional watchdog and convergence checks
-  - optional secondary DNS nodes synced through NATS
+  - optional secondary DNS nodes synced by NOTIFY and AXFR
 
 The goal is simple:
 
@@ -85,7 +85,7 @@ It can:
 Default installation path:
 
 ```text
-/opt/lancache-ng            data (cache, DNS, DHCP, NATS, CA, ...)
+/opt/lancache-ng            data (cache, DNS, DHCP, CA, ...)
 /opt/lancache-ng/latest     code of the latest channel (master)
 /opt/lancache-ng/nightly    code of the nightly channel (current_dev)
 /opt/lancache-ng/current    link to the channel that runs
@@ -544,6 +544,8 @@ If the setup asks whether the Admin UI should be password protected, using a pas
 
 Do not expose the Admin UI to the internet.
 
+Settings changed in the Admin UI are saved in `lancache-ui-settings.env` in the UI data folder (`UI_SETTINGS_FILE` and `UI_DATA_DIR` in `.github/yaml/build-manifest.yml`). They win over the built-in defaults and survive an update. The nginx templates of the proxy are kept in `services/ui/nginx/` and are rendered into the proxy config folder (`NGINX_CONF_DIR`).
+
 ## HTTPS mode certificate
 
 HTTPS mode generates a local CA certificate.
@@ -641,17 +643,9 @@ This is useful if:
 - you want another host to answer DNS requests
 - you want DNS closer to some clients
 
-Secondary DNS nodes sync with the primary through NATS.
-
-**Prerequisite**: the primary must be configured with a NATS address a remote
-secondary can actually reach before you register one. By default NATS is not
-published on the host at all, so registration fails closed with HTTP 503
-until the primary has `NATS_BIND_IP` (a trusted LAN/VPN interface) or, for a
-non-default port/scheme/hostname, the more specific `NATS_ADVERTISE_URL`
-set in its `.env`/`.env.local`, and the `dns` service (it runs NATS)
-recreated so it actually publishes that address. See
-[docs/architecture-ng.md's "Remote secondary NATS access"](docs/architecture-ng.md#remote-secondary-nats-access)
-section for the full setup and the exact failure modes it fail-closes.
+Secondary DNS nodes pull the zones from the primary by AXFR. The primary
+sends NOTIFY on every change. A secondary sends its logs to the primary by
+syslog.
 
 Setup example:
 
@@ -671,9 +665,8 @@ second bind IP; both flags are required together.
 
 You can also view a ready command inside the Admin UI under the secondary DNS section.
 
-If a secondary was created before scoped NATS user/password credentials existed,
-rerun the same command with `--rotate` in that secondary's install directory.
-This rewrites the local secondary `.env` from the primary registration API
+To renew the secondary's keys, rerun the same command with `--rotate`
+in that secondary's install directory. This rewrites the local secondary `.env` from the primary registration API
 without changing the secondary name.
 
 After setup, point additional clients to the secondary DNS IP.
@@ -769,14 +762,10 @@ Manual production changes belong in `deploy/prod/.env.local`, which is ignored b
 `setup.sh update`, `setup.sh auto-update`, `setup.sh backup`, `setup.sh restore`,
 `setup.sh update-ip`, and `setup.sh create-logs-for-issue` when present.
 
-If you use NATS, secondary DNS or DHCP DDNS, set real secret values too:
+If you use secondary DNS or DHCP DDNS, set a real secret value too:
 
 ```env
 DDNS_TSIG_KEY=<generate-a-secret>
-NATS_UI_PASSWORD=<generate-a-secret>
-NATS_DNS_WRITER_PASSWORD=<generate-a-secret>
-NATS_CALLOUT_PASSWORD=<generate-a-secret>
-NATS_SYS_PASSWORD=<generate-a-secret>
 ```
 
 `SECONDARY_REGISTRATION_TOKEN` is different from the values above: on an
@@ -804,7 +793,7 @@ Secrets in `.env` follow a simple rule: they are generated once on first install
 
 Secret formats vary by key, not by naming suffix — despite the `*_KEY`/`*_PASSWORD` names, generation kind is assigned per key in `setup.sh`, and the two families are not generated the same way as each other:
 
-- 64 hex characters (`openssl rand -hex 32`): `KEA_CTRL_TOKEN`, `PDNS_API_KEY`, `NATS_UI_PASSWORD`, `NATS_DNS_WRITER_PASSWORD`, `NATS_CALLOUT_PASSWORD`, `NATS_SYS_PASSWORD`, `SECONDARY_REGISTRATION_TOKEN`
+- 64 hex characters (`openssl rand -hex 32`): `KEA_CTRL_TOKEN`, `PDNS_API_KEY`, `SECONDARY_REGISTRATION_TOKEN`
 - 44 base64 characters (`openssl rand -base64 32`): `DDNS_TSIG_KEY`
 - 20 alphanumeric characters: the Admin UI password. It is shown once; only its Argon2id hash is stored as `UI_AUTH_PASSWORD_HASH`.
   The Setup page of the Admin UI can change it (old password required, at least 12 characters). The new Argon2id hash is saved in `lancache-ui-password.hash` (mode 0600) next to the UI settings file and replaces the `.env` hash only while that `.env` hash is unchanged; to reset a lost password, set a new `UI_AUTH_PASSWORD_HASH` in `.env` or delete that file.
@@ -818,8 +807,6 @@ mkdir -p /opt/lancache-ng/cache
 mkdir -p /opt/lancache-ng/kea
 mkdir -p /opt/lancache-ng/pdns
 mkdir -p /opt/lancache-ng/pdns-filter-state
-mkdir -p /opt/lancache-ng/nats
-mkdir -p /opt/lancache-ng/nats-conf
 ```
 
 Start the stack:
@@ -905,9 +892,9 @@ Important paths:
 deploy/prod/             Production compose used by setup.sh
 deploy/secondary/        Secondary DNS compose file
 docs/                    Documentation
-services/watchdog/       services image: supervisor, syslog-ng, chrony, Netdata
+services/watchdog/       services image: watchdog, cachehamster, syslog-ng, chrony, snmpd
 services/proxy/          Unified proxy for HTTP mode and HTTPS mode
-services/dns/            DNS image: PowerDNS, NATS, nats-subscriber
+services/dns/            DNS image: PowerDNS auth and recursor
 services/dhcp/           DHCP image: Kea or dnsmasq proxy/relay
 services/ui/             Admin UI
 services/common/         Shared Rust crate

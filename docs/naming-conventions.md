@@ -1,10 +1,11 @@
 # Naming Conventions
 
-This document is the naming contract for every runtime object lancache-ng
-creates: the Compose project and service names, Docker container names,
+This document is the naming contract for all project-defined names and
+identifiers (see [AG-CODE-014]). Runtime objects are covered first: the Compose project and service names, Docker container names,
 Docker volumes, host bind-mount directories, GHCR image and package names,
 environment variables that refer to services or containers, and
-backup/restore paths. `ci.sh check naming-consistency` (part of `ci.sh check
+backup/restore paths. Code identifiers are covered in "Code Naming
+Conventions" below. `ci.sh check naming-consistency` (part of `ci.sh check
 all`, see "CI guard" below) checks the parts that a script can check; it
 does not replace reading this document.
 
@@ -79,16 +80,11 @@ Rule for new volumes: lowercase, hyphen-separated, named for what they hold
 (for example `proxy-cache`, `proxy-config-snapshots`, `watchdog-status`,
 `retention-state`, `ui-data`, `shared-secrets`).
 
-Documented exception: the three Netdata volumes `netdataconfig`,
-`netdatalib` and `netdatacache` have no hyphen. They are not renamed:
-Docker named volumes hold persisted state, and a rename means data loss or a
-migration step in `setup.sh`, which needs a decision of its own.
-
 ### Host bind-mount directories
 
 Rule: each host directory is set by one operator variable that
 `deploy/prod/docker-compose.yml` requires (`CACHE_DIR`, `CA_DIR`,
-`PDNS_DIR`, `PDNS_FILTER_STATE_DIR`, `NATS_DATA_DIR`, `NATS_CONF_DIR`,
+`PDNS_DIR`, `PDNS_FILTER_STATE_DIR`,
 `KEA_DATA_DIR`, `NTP_DATA_DIR`, `CACHEHAMSTER_DATA_DIR`,
 `SYSLOG_NG_LOG_DIR`). A new state directory gets its own variable of the
 same shape and a lowercase, hyphen-separated directory name. See
@@ -165,3 +161,90 @@ when:
 It does not (and cannot) verify the human-judgment parts of this document —
 whether a *new* category of name follows the rule is a code-review
 question, not a script's job.
+
+## Code Naming Conventions
+
+### Scope
+
+These conventions MUST apply to all first-party implementation code,
+including Rust, Shell, tests, internal APIs, public APIs, data structures,
+and generated interfaces. Language-specific native naming conventions MUST
+be respected.
+
+### External identifiers
+
+Identifiers mandated by an external format, protocol or program
+(for example Kea `option-data`, PowerDNS settings, nginx directives,
+Docker labels) keep their external spelling. They are not project-defined.
+The project-side name that wraps or refers to them MUST follow this
+document. This section records the binding external specifications
+referred to in [AG-CODE-014]. A more specific AG rule that
+requires a name takes precedence; it MUST be referenced here
+and MUST NOT become a second, separately maintained convention.
+
+### Case
+
+| Element | Convention | Example |
+| --- | --- | --- |
+| Functions, methods, variables, fields, modules, files | `snake_case` | `restart_container()` |
+| Structs, enums, enum variants, traits | `PascalCase` | `DnsServer` |
+| Constants, statics, environment variables | `SCREAMING_SNAKE_CASE` | `MAX_RETRIES` |
+| API paths | lowercase, consistent | `/api/v1/containers` |
+| JSON properties (own formats) | `snake_case` | `desired_state` |
+
+Acronyms follow Rust style: `DnsServer`, `HttpClient`, `SnmpAgent`.
+
+### Function verbs
+
+Each prefix has one binding meaning. The verbs are not interchangeable.
+
+| Prefix | Meaning | Example |
+| --- | --- | --- |
+| `read_` | read local data, no change | `read_config()` |
+| `fetch_` | get data from a remote service | `fetch_zone()` |
+| `load_` | load stored state or configuration | `load_snapshot()` |
+| `save_` | store state permanently | `save_config()` |
+| `parse_` | turn input into a structure | `parse_dns_record()` |
+| `validate_` | check data, never modify it | `validate_zone()` |
+| `render_` | build a representation from data | `render_nginx_config()` |
+| `create_` | create a new resource | `create_snapshot()` |
+| `ensure_` | make a state exist; idempotent | `ensure_directory()` |
+| `apply_` | actually apply a change | `apply_config()` |
+| `reconcile_` | align actual with desired state | `reconcile_process_state()` |
+| `reload_` | take config without full restart | `reload_nginx()` |
+| `restart_` | restart a resource | `restart_process()` |
+| `stop_` | stop a running process or service | `stop_container()` |
+| `delete_` | remove a resource permanently | `delete_snapshot()` |
+| `handle_` | handle an event or request | `handle_process_exit()` |
+| `is_` / `has_` / `can_` | boolean state, presence, permission | `is_healthy()` |
+
+Simple getters follow Rust style (`status()`, not `get_status()`).
+Conversions follow `as_`, `to_`, `into_`, `From` and `TryFrom`.
+
+### Naming rules
+
+1. Function names MUST describe observable purpose, behavior, and relevant side effects.
+2. Equivalent operations MUST use the same terminology across the repository.
+3. Naming MUST NOT introduce competing implementations, owners, or duplicate abstractions.
+4. Names MUST NOT conceal state changes, file writes, network calls, or process control.
+5. `validate_*` MUST NOT modify the validated resource.
+6. `reload_*` MUST NOT silently substitute a full restart unless documented.
+7. `ensure_*` MUST keep the intended state when repeated with unchanged inputs.
+8. Names MUST NOT use suffixes such as `_new`, `_v2`, `_old`, `_helper`, `_impl` or `_async` to tell implementations apart.
+9. Names MUST NOT repeat context already given by the owning module or type.
+10. Ambiguous names (`do_work()`, `run_task()`, `handle_data()`) MUST NOT be used without clear domain context; abbreviations only where locally unambiguous.
+11. Existing canonical names MUST be reused; a second name for an existing capability needs a documented semantic distinction.
+12. Public API operations, fields, and their Rust implementations MUST share one terminology.
+13. Code identifiers MUST be English, except identifiers mandated by external formats or protocols (for example Kea `option-data`).
+14. Naming MUST NOT override ownership, reuse, or consolidation under [AG-CODE-011] and [AG-CODE-013].
+15. Naming MUST NOT substitute for comments, test documentation, or verification under [AG-LAW-001].
+16. Correct names MUST NOT be changed for cosmetic reasons only.
+
+### Enforcement
+
+Mechanical violations are checked by language tooling (rustc lints,
+clippy) and the existing naming guard. Semantic violations are judged
+against actual behavior, side effects, ownership and API contracts.
+Passing a naming check does not establish overall compliance. A rename
+needs a concrete reason and MUST keep all callers, contracts,
+serialization formats and external integrations working.

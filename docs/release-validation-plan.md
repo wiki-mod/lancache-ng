@@ -115,7 +115,7 @@ and `cargo-audit`, so no build, validate or promote runs.
 |---|---|---|
 | DHCP — Kea | `ci.sh validate` Kea leg (`_ci_validate_kea_rollback`: two Admin UI reservations, `setup.sh` rollback to the first snapshot, live `config-get`); `check setup-kea-preflight` | the rollback leaves the second reservation in Kea's running config, or `setup.sh` stops calling the preflight |
 | DNS | `ci.sh validate` (`_ci_validate_dns`: a real `dig`, the http and https answers differ; `_ci_validate_dns_rollback`: snapshot and rollback round trip through the rollback listener) | no answer, identical answers in both modes, or a rollback that does not revert the record |
-| NATS | `ci.sh validate` (`_ci_validate_ui_nats_dns`: an Admin UI record resolves in both DNS modes through NATS and PowerDNS; `_ci_validate_secondary_identity`: two secondaries get distinct identities) | the record never resolves, or two secondaries share an identity |
+| Zone transfer | `ci.sh validate` (`_ci_validate_ui_dns`: an Admin UI record resolves in both DNS modes; `_ci_validate_secondary_identity`: register answer carries TSIG key and primary) | the record never resolves, or two secondaries share an identity |
 | Proxy cache | `ci.sh validate` (`_ci_validate_proxy`: a real MISS, then a HIT); `check proxy-cache-env-doc-drift`; `check proxy-cert-volume` | the second request is not a HIT, a documented `CACHE_*` default differs from the shipped one, or the cert dir is not a named volume |
 | Proxy routing and TLS | `ci.sh validate` (`_ci_validate_proxy_stream_map`: a wildcard SNI forwards to the requested name; `_ci_validate_https_mitm`: the https-mode certificate is issued by the LAN CA; `_ci_validate_https_dispatch_map`: a depth ≥ 2 SNI takes the passthrough relay); `check proxy-nginx-policy` | a probe differs, or `/healthz` serves through `return` instead of `alias` |
 | Stack bring-up | `ci.sh validate` waits for every service it starts: healthcheck services until healthy, the others until their state is stable, and ships state and logs of a failing service; `check compose-config` (every compose file renders in every profile); `check compose-healthchecks` | a service is unhealthy or restarting, a compose file does not render, or a service has no healthcheck |
@@ -324,23 +324,16 @@ checks below need a real LAN.
   mode 0700, so the UI cannot walk them; the size comes from the watchdog status
   (`disk.cache.used_bytes`). Fail: `0.0 GB` with a non-empty cache.
 
-### 5. NATS — secondary lifecycle
+### 5. Zone transfer — secondary lifecycle
 
-CI covers the Admin UI → NATS → `nats-subscriber` → PowerDNS write path
-(`_ci_validate_ui_nats_dns`) and distinct per-secondary identities
-(`_ci_validate_secondary_identity`). With real secondaries on a real stack:
+CI covers the Admin UI → PowerDNS API write path (`_ci_validate_ui_dns`) and
+the register answer (`_ci_validate_secondary_identity`: TSIG name, secret and
+primary). With real secondaries on a real stack:
 
-- **Isolation and rotation**: two secondaries hold distinct credentials; after a
-  rotation the old credential no longer authenticates; a removed secondary cannot
-  connect.
-- **Active disconnect**: a secondary connected at the moment of its removal or
-  rotation is disconnected within seconds. Proof: poll `nats-server`'s `connz` monitor
-  endpoint until the connection is gone; the HTTP 200 of the removal call is not the
-  proof. The connection of an unrelated secondary stays.
-- **xkey encryption**: a packet capture of the auth-callout exchange between
-  `nats-server` and the Admin UI shows the sealed-box `xkv1` marker and not the JWT's
-  literal base64 header marker. Negative control: with `xkey` removed the plaintext
-  marker appears.
+- **Transfer**: a secondary pulls the zone by TSIG-signed AXFR after NOTIFY;
+  an unsigned AXFR is refused.
+- **Removal**: a removed secondary no longer appears on the dashboard; the
+  others keep working.
 - **Record removal**: a record deleted through the Admin UI stops resolving in both
   DNS modes; on the AXFR secondary the authoritative zone converges first, then the
   recursor answer expires within its cached TTL.
@@ -356,8 +349,8 @@ CI covers the Admin UI → NATS → `nats-subscriber` → PowerDNS write path
   again after a restart. A stale or missing status file renders as stale or
   unavailable, never as the last known color.
 - **Cache resize**: submit a new size (`POST /cache/resize`) and wait for the
-  `lancache-converge.timer` run; `setup.sh converge-reconcile` writes `CACHE_MAX_SIZE`
-  and `CACHE_MAX_GB` into the runtime env and the proxy is recreated. Pass:
+  `lancache-converge.timer` run; `setup.sh converge-reconcile` writes `CACHE_MAX_GB`
+  into the runtime env and the proxy is recreated. Pass:
   `docker exec <proxy container> nginx -T` shows the new `max_size=` on
   `proxy_cache_path`; a `200`/`303` from the form is not the proof.
 - **Self-restart** (issue #1486): submit the restart form on `/setup`
@@ -439,7 +432,6 @@ triggered the removal/rotation/restart returned success.
 
 | What to check | How to check it for real | Pass/fail |
 |---|---|---|
-| A removed/rotated NATS secondary's live connection is actually gone, not just access-revoked | The `connz` polling of §5: after removal, poll `nats-server`'s `connz` monitor endpoint until the connection entry disappears — do not stop at the HTTP 200 from the removal API | Fail if the connection lingers in `connz` past a reasonable poll window |
 | Watchdog-restarted containers leave no orphaned process/connection from the pre-restart instance | After a watchdog-triggered restart (Part B §7), `docker exec <host or a diagnostic container> ss -tnp` (or `netstat -tnp` if `ss` is unavailable) targeting the restarted service's port, confirm no stale connection to the old container's now-dead PID remains | Fail if a stale ESTABLISHED/CLOSE-WAIT connection to the pre-restart process persists |
 | `docker compose down -v` genuinely removes every container and named volume for the stack | `docker ps -a --filter "label=com.docker.compose.project=lancache-ng"` and `docker volume ls --filter "label=com.docker.compose.project=lancache-ng"` immediately after teardown — both must return empty | Fail if any container or volume with that project label remains |
 | A resized/rotated proxy container (cache-resize, PR #1174) doesn't leave the old container running alongside the new one | `docker compose -f deploy/prod/docker-compose.yml ps -a proxy` immediately after a convergence-triggered recreate — exactly one container, with a `StartedAt` matching the recreate, not two | Fail if more than one `proxy` container exists, or the old one's `StartedAt` is unchanged (recreate didn't actually happen) |
@@ -515,8 +507,8 @@ a stated reason it has none (AG-VAL-029).
 | Kea starting next to another DHCP server on the LAN | `check setup-kea-preflight` |
 | DNS split routing lost (http and https answer alike) | `_ci_validate_dns` |
 | DNS rollback that does not revert, or does not snapshot the restored state | `_ci_validate_dns_rollback` |
-| Admin UI record not reaching PowerDNS in both modes | `_ci_validate_ui_nats_dns` |
-| Two secondaries sharing one NATS identity | `_ci_validate_secondary_identity` |
+| Admin UI record not reaching PowerDNS in both modes | `_ci_validate_ui_dns` |
+| Secondary register answer without TSIG key or primary | `_ci_validate_secondary_identity` |
 | Wildcard SNI forwarded to a fixed root (#1297) | `_ci_validate_proxy_stream_map` |
 | Depth ≥ 2 SNI intercepted instead of relayed (#1276/#1322) | `_ci_validate_https_dispatch_map` |
 | HTTPS mode not intercepting | `_ci_validate_https_mitm` |
@@ -543,7 +535,7 @@ recurrence:
 - **Kea config render or migration drift**: the Kea templates and their migration.
 - **dnsmasq directive or template-key drift**: the dnsmasq templates and the compose
   keys that feed them.
-- **Torn shared-config write**: the NATS shared-config writer.
+- **Torn shared-config write**: the shared-secrets writer.
 - **Stream-level client ACL missing on a listener**: the proxy stream map render.
 - **`.env` migration not idempotent, rotating a secret or duplicating a key**:
   `migrate_env_for_update` in `setup.sh`.
@@ -617,7 +609,6 @@ recurrence:
 - **Proxy `slice` with a cached 301/302**: no live harness.
 - **Upstream DNS not reaching the recursor, or a wrong value not falling back**
   (issue #1918): the watchdog's upstream render; §2 is live only.
-- **Netdata alarm to Admin UI notification**: not exercised end to end.
 - **Concurrent BuildKit builds on a shared self-hosted daemon**: no source-level
   serialization in `ci.sh` (AG-CI-017).
 - **`check actionlint`**: no per-command kill bound; the `lint` job timeout from the
@@ -642,7 +633,7 @@ live in Part B:
 - wire-level DHCP in all three modes, the lease effect of an Admin UI reservation and
   the dnsmasq sub-mode switch (§3);
 - the DNS half of the wildcard scope rule and the upstream DNS change (§2);
-- NATS rotation, active disconnect and xkey encryption (§5);
+- secondary zone transfer and removal (§5);
 - the watchdog card, cache resize, Admin UI self-restart and dock start/stop (§6);
 - watchdog hang detection and restart (§7);
 - central logging (§8);

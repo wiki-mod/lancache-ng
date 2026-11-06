@@ -23,13 +23,11 @@ is authoritative and this document should be corrected.
 | Component          | Primary purpose                                                   | Runtime                   | State                    |
 | ------------------ | ----------------------------------------------------------------- | ------------------------- | ------------------------ |
 | Proxy              | HTTP caching, (SNI passthrough, TLS interception - Optional)      | nginx                     | Production               |
-| DNS                | Cache DNS, authoritative LAN DNS, RPZ, replication                | PowerDNS, Rust subscriber | Production               |
+| DNS                | Cache DNS, authoritative LAN DNS, RPZ, replication                | PowerDNS                  | Production               |
 | DHCP               | Native DHCPv4 server and DDNS                                     | Kea                       | Optional production mode |
 | DHCP Proxy / Relay | ProxyDHCP, PXE and DHCP relay                                     | dnsmasq                   | Optional production mode |
-| NATS               | Internal event bus, authentication and remote-secondary messaging | NATS Server               | Production               |
 | Admin UI           | Web control plane and configuration management                    | Rust                      | Production               |
 | Watchdog           | Service health monitoring and recovery                            | Rust                      | Production               |
-| Netdata            | Runtime metrics and system observability                          | Netdata                   | Production               |
 | Central Logging    | Log collection, normalization and retention                       | syslog-ng                | Production               |
 | NTP                | LAN time service and optional host clock discipline               | chrony                    | Optional production mode |
 | CacheHamster       | Future Steam cache-prefill engine                                 | Rust                      | Scaffold only            |
@@ -62,7 +60,7 @@ The proxy provides:
 * Known-good configuration snapshots and rollback support.
 * Health endpoints consumed by Docker, the UI and watchdog.
 * Access restrictions for proxy clients and management endpoints.
-* Integration with central logging and Netdata.
+* Integration with central logging.
 * Admin UI visibility for cache status, requests and cache utilization.
 
 The current image uses Alpine and nginx.org's mainline nginx package. The
@@ -118,7 +116,6 @@ The service combines:
 
 * PowerDNS Recursor.
 * PowerDNS Authoritative Server.
-* A Rust NATS subscriber.
 * RPZ generation and processing.
 * LAN and reverse-zone management.
 * Native PowerDNS primary/secondary replication.
@@ -149,14 +146,10 @@ The implementation includes:
 * `dns` as the single writable primary.
 * Remote `dns` nodes as secondaries.
 * Kea DDNS writes directed to the primary.
-* Secondary-side NATS record writes disabled to maintain the single-writer
-  model.
+* Secondaries never write records; they only pull zones (single writer).
 * Replication information supplied to registered remote secondaries.
 * SOA-based refresh behavior so replication does not depend exclusively on a
   NOTIFY packet being delivered.
-
-NATS remains part of the DNS control plane, but it is no longer intended to
-create a second independent writer on a replicated PowerDNS secondary.
 
 ### Cache-domain routing
 
@@ -190,17 +183,9 @@ selected cache traffic should remain IPv4-only.
 
 This is separate from DHCP, which is currently an IPv4-only subsystem.
 
-### NATS subscriber
-
-The Rust subscriber handles control-plane DNS record events and other
-NATS-driven DNS integration.
-
-Record writes can be disabled for nodes that are native PowerDNS secondaries,
-preventing the same zone from having multiple independent writers.
-
 ### Runtime hardening status
 
-The DNS image uses Alpine and builds the Rust subscriber for musl.
+The DNS image uses Alpine with the Rust watchdog (musl) under OpenRC.
 
 The PowerDNS processes currently do not use a Dockerfile-level `USER`
 directive. Further non-root execution remains a hardening area because the DNS
@@ -357,65 +342,6 @@ Admin UI.
 Some advanced PXE-specific settings remain more naturally operator and setup
 configuration than full first-class UI controls.
 
-## NATS
-
-### Purpose
-
-nats-server inside the `dns` container is the internal messaging and
-authentication backbone used by multiple LanCache-NG components.
-
-It is not an operator-facing message broker for arbitrary application traffic.
-
-### Current uses
-
-NATS is used for:
-
-* DNS control-plane events.
-* Remote secondary communication.
-* Authentication callout.
-* Per-secondary credentials.
-* Secondary connection lifecycle.
-* Internal event publication.
-* Selected service coordination.
-
-### Authentication callout
-
-The Admin UI acts as the authentication decision point for remote secondary
-NATS identities.
-
-Each registered secondary receives its own NATS username and generated
-password.
-
-Only the password hash is persisted by the primary. The plaintext password is
-returned to the secondary during registration and is not stored for later
-display.
-
-Removing or rotating one secondary does not require replacing the credentials
-of every other secondary.
-
-The primary can actively disconnect a removed secondary so an already-open
-connection does not remain usable until its next natural reconnect.
-
-### Secondary bootstrap
-
-Secondary registration still begins with a primary-wide registration token.
-
-After successful registration the secondary receives its own runtime identity
-and the connection information required for NATS, DNS replication and image
-selection.
-
-The bootstrap token is therefore distinct from the per-secondary NATS
-credential.
-
-### Generated NATS configuration
-
-The supervisor renders the static NATS configuration from the internal roles
-in `services/common/config.rs`; the UI writes only the authentication-callout
-fragment.
-
-Normal secondary registration, rotation and removal no longer require
-regenerating the entire NATS configuration for each credential change.
-
 ## Admin UI
 
 ### Purpose
@@ -447,7 +373,7 @@ The UI provides:
 * Per-secondary credential rotation and revocation.
 * Secondary address management and probing.
 * Runtime log views.
-* Netdata-backed statistics.
+* Watchdog-collected statistics.
 * Setup and configuration visibility.
 * Update and image-channel information.
 * Controlled container lifecycle operations.
@@ -481,7 +407,6 @@ owns replicated authoritative state.
 For each secondary the UI tracks:
 
 * Name.
-* NATS identity.
 * Registration time.
 * Last-seen state where available.
 * Reachable private DNS address.
@@ -490,8 +415,6 @@ For each secondary the UI tracks:
 Registration responses include the information required by a secondary
 installation, including:
 
-* Reachable NATS endpoint.
-* Per-secondary NATS credential.
 * Proxy IP.
 * PowerDNS API key where required.
 * Shared DDNS and transfer TSIG key.
@@ -503,9 +426,9 @@ installation, including:
 The initial registration endpoint still authenticates using the shared
 secondary registration token.
 
-Per-secondary NATS credentials are unique, but the bootstrap authorization
-itself is not yet a one-time token bound to one pre-authorized secondary
-identity.
+Removing a secondary does not affect the others, but the bootstrap
+authorization itself is not yet a one-time token bound to one pre-authorized
+secondary identity.
 
 ## Watchdog
 
@@ -525,8 +448,8 @@ The watchdog:
 * Reports service state for UI consumption.
 * Distinguishes restart-managed services from alert-only services.
 * Covers the core proxy and DNS path.
-* Covers NATS and the Docker control dependency.
-* Includes UI and Netdata visibility.
+* Covers the Docker control dependency.
+* Includes UI visibility.
 * Includes profile-dependent DHCP, DHCP proxy and central logging visibility.
 
 ### Recovery behavior
@@ -545,29 +468,6 @@ Destructive retention and pruning work is separated from the Rust health loop.
 The retention path has its own narrowly-scoped runtime environment instead of
 giving the main watchdog broad file-system mutation access.
 
-## Netdata
-
-### Purpose
-
-Netdata inside the `services` container provides system and service metrics
-used by the Admin UI and for direct operational diagnostics.
-
-### Current capabilities
-
-The Netdata integration provides visibility into areas such as:
-
-* Container and host resource use.
-* Proxy traffic.
-* nginx request data.
-* Cache-related activity.
-* Service-level resource behavior.
-
-The nginx `web_log` collector consumes the normalized proxy log path produced
-by the central logging stack.
-
-Netdata access is isolated through dedicated stack networking rather than being
-treated as a general public API.
-
 ## Central Logging
 
 ### Purpose
@@ -584,7 +484,6 @@ The logging path provides:
 * Normalized log files.
 * Proxy request log processing.
 * Inputs used by the Admin UI log viewer.
-* Input for Netdata's nginx `web_log` collector.
 * Logging switches per service (proxy, dns, dhcp, ui) in the Admin UI.
 * Log retention (age and size budget).
 
@@ -682,7 +581,7 @@ The current scaffold does not yet provide:
 `CACHEHAMSTER_URLS` is currently a scaffold input for directly supplied URLs,
 not the final operator-facing prefill workflow.
 
-CacheHamster therefore must not be described as a shipped Cache Warmer yet.
+CacheHamster therefore must not be described as a shipped pre-caching feature yet.
 
 ## setup.sh
 
@@ -753,7 +652,7 @@ This includes runtime credentials, DNS replication information and release
 image coordinates.
 
 The secondary flow no longer assumes that a user manually understands and
-assembles the internal NATS and DNS configuration from scratch.
+assembles the internal DNS configuration from scratch.
 
 ## Cross-component data flows
 
@@ -803,7 +702,7 @@ Operator
 Secondary setup
   -> Primary Admin UI
   -> registration bootstrap
-  -> per-secondary NATS identity
+  -> TSIG key and primary address
   -> DNS replication parameters
   -> secondary deployment
 ```
@@ -814,7 +713,7 @@ Secondary setup
 Service logs
   -> Central logging
   -> normalized log data
-  -> Admin UI / Netdata
+  -> Admin UI
 
 Service health
   -> Docker health state
@@ -851,7 +750,7 @@ The following boundaries are intentional or currently unresolved:
    Further least-privilege work must preserve binding and PowerDNS behavior.
 
 4. Secondary bootstrap still uses a shared registration token even though
-   runtime NATS credentials are unique per secondary.
+   each secondary can be removed on its own.
 
 5. NTP installs an NTS-capable chrony build, but the current runtime
    configuration does not yet use NTS.

@@ -9,7 +9,7 @@
 
 {% block content %}
 <section>
-  <p class="eyebrow">Overview → Logs</p>
+  <p class="eyebrow">{{ t.overview_logs }}</p>
   <h1 class="page-title">Logs</h1>
 
   <!-- What: two tabs, Logs and Syslog
@@ -22,23 +22,23 @@
   <div data-logs-panel="logs">
   <div class="field-row" style="max-width:none; margin-bottom:18px;">
     <div class="field" style="margin-bottom:0; max-width:220px;">
-      <label for="log-service">Service</label>
+      <label for="log-service">{{ t.service }}</label>
       <select id="log-service" onchange="filterLogs()" style="width:100%; padding:9px 11px; border-radius:8px; border:1px solid var(--navy-600); background:var(--navy-900); color:var(--foam); font-size:13.5px;">
-        <option value="">All services</option>
+        <option value="">{{ t.all_services }}</option>
         {% for h in syslog_hosts %}
         <option value="{{ h }}">{{ h }}</option>
         {% endfor %}
       </select>
     </div>
     <div class="field" style="margin-bottom:0; flex:1;">
-      <label for="log-search">Search</label>
-      <input type="text" id="log-search" placeholder="Filter by text…" oninput="filterLogs()">
+      <label for="log-search">{{ t.search }}</label>
+      <input type="text" id="log-search" placeholder="{{ t.filter_by_text }}" oninput="filterLogs()">
     </div>
   </div>
 
   <div class="card">
     <div class="card-body" style="padding:0;">
-      <div id="log-lines" style="font-family:var(--font-mono); font-size:12.5px; line-height:1.9; padding:14px 18px; max-height:420px; overflow-y:auto;">
+      <div id="log-lines" style="font-family:var(--font-mono); font-size:12.5px; line-height:1.9; padding:14px 18px; height:calc(100vh - 340px); min-height:420px; overflow-y:auto;">
         {% if syslog_logs %}
         {% for entry in syslog_logs %}
         <div class="log-line" data-service="{{ entry.host }}">
@@ -48,77 +48,43 @@
         </div>
         {% endfor %}
         {% else %}
-        <div class="empty-state">No log entries yet</div>
+        <div class="empty-state">{{ t.no_log_entries_yet }}</div>
         {% endif %}
       </div>
     </div>
   </div>
-  <p class="field-hint" style="margin-top:8px;">Last {{ logs_max_entries }} entries from the central syslog store.</p>
+  <p class="field-hint" style="margin-top:8px;">{{ t.last }} {{ logs_max_entries }} {{ t.entries_from_the_central_syslog_store }}</p>
   </div>
 
   <div data-logs-panel="syslog">
-  {# What: forwarding card is off until syslog-ng applies it
-     Why: a setting without effect must not show
-     From: Issue #1683 | PR #1858 #}
-  {% if false %}
-  <!-- What: send the central log on to an external server
-       Why: the ui saves; the watchdog applies it -->
-  <form method="post" action="{{ routes.logs_forward | safe }}" class="card" style="margin-bottom:16px;">
-    {{ <csrf_field csrf_token={csrf_token}/> }}
+  <!-- What: extra syslog targets (host:port, TCP)
+       Why: a secondary forwards to its primary too -->
+  <form method="post" action="{{ routes.logs_save | safe }}" class="card" style="margin-bottom:16px;">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <div class="card-head">
-      <h3>Weiterleitung an einen externen Syslog-Server</h3>
+      <h3>{{ t.forward_to_more_syslog_servers }}</h3>
     </div>
     <div class="card-body">
       <p class="section-sub">
-        Alle Einträge des zentralen Syslogs werden zusätzlich an diesen Server gesendet.
-        Ohne Host ist die Weiterleitung aus.
+        {{ t.all_entries_also_go_to_these }}
       </p>
-      <div class="field-row" style="max-width:none;">
-        <div class="field" style="max-width:260px;">
-          <label for="forward_host">Host oder IP</label>
-          <input type="text" id="forward_host" name="forward_host" value="{{ forward_host }}" placeholder="z. B. 192.168.1.50">
-        </div>
-        <div class="field" style="max-width:120px;">
-          <label for="forward_port">Port</label>
-          <input type="number" id="forward_port" name="forward_port" value="{{ forward_port }}" min="1" max="65535">
-        </div>
-        <div class="field" style="max-width:120px;">
-          <label for="forward_proto">Protokoll</label>
-          <select id="forward_proto" name="forward_proto" style="width:100%; padding:9px 11px; border-radius:8px; border:1px solid var(--navy-600); background:var(--navy-900); color:var(--foam); font-size:13.5px;">
-            <option value="udp" {% if forward_proto == "udp" %}selected{% endif %}>udp</option>
-            <option value="tcp" {% if forward_proto == "tcp" %}selected{% endif %}>tcp</option>
-          </select>
-        </div>
+      <div class="field" style="max-width:none;">
+        <label for="SYSLOG_FORWARD">{{ t.targets_host_port_separated_by_spaces }}</label>
+        <textarea id="SYSLOG_FORWARD" name="SYSLOG_FORWARD" rows="2" style="width:100%; padding:9px 11px; border-radius:8px; border:1px solid var(--navy-600); background:var(--navy-900); color:var(--foam); font-family:var(--font-mono); font-size:13px;">{{ v.SYSLOG_FORWARD }}</textarea>
       </div>
-      <button type="submit" class="btn" style="margin-top:12px;">Speichern</button>
-    </div>
-  </form>
+      <div class="section-title">{{ t.logging_per_service }}</div>
+      <p class="section-sub">{{ t.disabled_services_write_nothing_to_local }}</p>
 
-  {% endif %}
-
-  <!-- What: per-service logging switches.
-       Why: the ui saves; the watchdog applies. -->
-  <form method="post" action="{{ routes.logs_settings | safe }}" class="card" style="margin-bottom:16px;">
-    {{ <csrf_field csrf_token={csrf_token}/> }}
-    <div class="card-head">
-      <h3>Protokollierung je Dienst</h3>
-    </div>
-    <div class="card-body">
-      <p class="section-sub">
-        Abgeschaltete Dienste schreiben nichts mehr in den zentralen Syslog. Der Watchdog
-        (Container „services“) protokolliert immer. Die Änderung gilt nach wenigen Sekunden.
-        Ohne Proxy-Protokoll zeigen Statistik und Dashboard keine neuen Zugriffe.
-      </p>
       {% for sw in log_switches %}
       <div class="toggle-row">
         <div class="t-label">{{ sw.program }}</div>
         <label class="toggle">
-          <input type="checkbox" name="{{ sw.key }}" value="1" {% if sw.on %}checked{% endif %}>
+          <input type="checkbox" name="on_{{ sw.program }}" value="true" {% if sw.on %}checked{% endif %}>
           <span class="track"></span><span class="knob"></span>
         </label>
       </div>
       {% endfor %}
-      <button type="submit" class="btn" style="margin-top:12px;">Speichern</button>
+      <button type="submit" class="btn" style="margin-top:12px;">{{ t.save }}</button>
     </div>
   </form>
 

@@ -12,27 +12,31 @@
 {# What: Admin-UI restart form; confirm() before submit #}
 {# Why: UI exits, compose restarts it; top bar and setup #}
 {# From: Issue #1683 | PR #1912 #}
-{% component restart_ui_form(action, csrf_token, button_class, label, title=none) %}<form method="post" action="{{ action | safe }}"
-              onsubmit="return confirm('Admin-UI wirklich neu starten? Die Seite ist danach kurz nicht erreichbar.')">
-          {{ <csrf_field csrf_token={csrf_token}/> }}
+{% component restart_ui_form(action, csrf_token, button_class, label, t, title=none) %}<form method="post" action="{{ action | safe }}"
+              data-ask="{{ t.restart_ui_ask }}" onsubmit="return confirm(this.dataset.ask)">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <button type="submit" class="{{ button_class }}"{% if title is not none %} title="{{ title }}"{% endif %}>{{ label }}</button>
         </form>{% endcomponent restart_ui_form %}
 {# What: "Kopieren" button; copyText() copies target #}
 {# Why: one markup for setup and Secondary copy buttons #}
 {# From: Issue #1683 | PR #1912 #}
-{% component copy_button(target, extra_class="") %}<button type="button" onclick="copyText('{{ target }}', this)"
-                class="btn btn-sm btn-slate absolute top-2 right-2 {{ extra_class }}">Kopieren</button>{% endcomponent copy_button %}
+{% component copy_button(target, t, extra_class="") %}<button type="button" onclick="copyText('{{ target }}', this)"
+                class="btn btn-sm btn-slate absolute top-2 right-2 {{ extra_class }}">{{ t.copy }}</button>{% endcomponent copy_button %}
 {# What: on/off badge, "aktiv" or "inaktiv" #}
 {# Why: one markup for the DHCP-DDNS and NTP state #}
 {# From: Issue #1683 | PR #1912 #}
-{% component on_off_badge(on) %}<span class="{% if on %}badge-on{% else %}badge-off{% endif %}">{% if on %}aktiv{% else %}inaktiv{% endif %}</span>{% endcomponent on_off_badge %}
+{% component on_off_badge(on, t) %}<span class="{% if on %}badge-on{% else %}badge-off{% endif %}">{% if on %}{{ t.active }}{% else %}{{ t.inactive }}{% endif %}</span>{% endcomponent on_off_badge %}
 {# What: one sidebar link with dot, glyph and label #}
 {# Why: one markup and active rule for every menu entry #}
 {# From: Issue #1437 | PR #1858 #}
 {% component nav_link(href, label, active, glyph) %}<a href="{{ href | safe }}" class="nav-item {% if active %}active{% endif %}"><span class="nav-dot"></span><span class="nav-icon">{{ glyph }}</span> {{ label }}</a>{% endcomponent nav_link %}
 <!DOCTYPE html>
-<html lang="de">
+<html lang="{{ lang }}">
 <head>
+  {# What: texts of the chosen language for the scripts #}
+  {# Why: scripts show the same texts as the page #}
+  {# From: Issue #1683 | PR #1980 #}
+  <script>const LC_T = {{ t_json | safe }};</script>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>LanCache-NG Admin{% block title %}{% endblock %}</title>
@@ -217,6 +221,15 @@
   }
   .beam-station { display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--mist); white-space: nowrap; }
   .beam-station b { color: var(--foam); font-weight: 600; }
+  /* What: fold-out program menu of a container.
+     Why: keeps the bar to state and Start/Stop.
+     From: Issue #1683 | PR #1980 */
+  .beam-menu { position: relative; }
+  .beam-menu summary { list-style: none; cursor: pointer; padding: 0 0.4rem; }
+  .beam-menu summary::-webkit-details-marker { display: none; }
+  .beam-menu-list { position: fixed; z-index: 30; display: flex; flex-direction: column; gap: 6px; padding: 8px; border-radius: 8px; border: 1px solid var(--navy-600); background: var(--navy-900); box-shadow: 0 4px 14px rgba(0,0,0,0.35); }
+  .beam-menu-row { display: flex; align-items: center; gap: 6px; }
+  .beam-menu-row span { flex: 1; min-width: 9em; color: var(--foam); }
   .beam-light { display: inline-block; width: 7px; height: 7px; border-radius: 999px; background: var(--tide); box-shadow: 0 0 8px 1px #34d0a680; vertical-align: middle; }
   .beam-light.warn { background: var(--coral); box-shadow: 0 0 8px 1px #ff7a5c80; }
   .beam-light.off { background: var(--mist-dim); box-shadow: none; }
@@ -397,11 +410,21 @@
     white-space: normal; width: max-content; max-width: 260px; line-height: 1.5;
     box-shadow: 0 4px 14px rgba(0,0,0,0.35); z-index: 20;
   }
-  .field input[type="text"], .field input[type="number"] {
+  /* What: dark browser parts (calendar icon) in dark.
+     Why: DoMe 05.11.: the calendar icon was invisible.
+     From: Issue #1683 | PR #1980 */
+  html:not([data-theme="light"]) input,
+  html:not([data-theme="light"]) select,
+  html:not([data-theme="light"]) textarea { color-scheme: dark; }
+  /* What: one look for every form field.
+     Why: DoMe 05.11.: Cachehamster fields were white.
+     From: Issue #1683 | PR #1980 */
+  .field input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]),
+  .field textarea, .field select {
     width: 100%; padding: 9px 11px; border-radius: 8px; border: 1px solid var(--navy-600);
     background: var(--navy-900); color: var(--foam); font-size: 13.5px; font-family: var(--font-mono);
   }
-  .field input[type="text"]:focus, .field input[type="number"]:focus { outline: 2px solid var(--beam); outline-offset: 1px; border-color: var(--beam); }
+  .field input:focus, .field textarea:focus, .field select:focus { outline: 2px solid var(--beam); outline-offset: 1px; border-color: var(--beam); }
   .field input.invalid { border-color: var(--danger); }
   .field-error { display: none; color: var(--danger); font-size: 12.5px; margin-top: 6px; }
   .field-error.show { display: block; }
@@ -563,8 +586,11 @@
   /* What: old button variants map to the mockup buttons
      Why: one button look; primary is .btn, quiet is ghost
      From: Issue #1437 | PR #1858 */
-  a.btn, button.btn { display: inline-block; text-decoration: none; }
-  .btn-sm { font-size: 12px; padding: 5px 10px; border-radius: 6px; }
+  a.btn, button.btn {
+    display: inline-flex; align-items: center; justify-content: center;
+    box-sizing: border-box; height: 38px; align-self: flex-end; text-decoration: none;
+  }
+  .btn-sm { font-size: 12px; padding: 0 10px; height: 28px; border-radius: 6px; }
   .btn-slate, .btn-ghost-red, .btn-ghost-amber {
     background: transparent; border: 1px solid var(--navy-600); color: var(--mist);
   }
@@ -622,6 +648,48 @@
     // Why: one conversion for every page script
     // From: Issue #1683 | PR #1912
     window.LancacheUi = { ms: function (seconds) { return seconds * 1000; } };
+
+    // What: a visible error line at the page bottom.
+    // Why: live test: errors went only to the console.
+    // From: Issue #1683 | PR #1980
+    window.LancacheUi.fail = function (err) {
+      reportError(err);
+      let box = document.getElementById('ui-fail');
+      if (!box) {
+        box = document.createElement('div');
+        box.id = 'ui-fail';
+        box.setAttribute('role', 'alert');
+        box.style.cssText = 'position:fixed;left:16px;right:16px;bottom:16px;z-index:50;'
+          + 'padding:10px 14px;border-radius:8px;border:1px solid var(--danger);'
+          + 'background:var(--navy-900);color:var(--danger);font-size:13px;';
+        box.addEventListener('click', function () { box.hidden = true; });
+        document.body.appendChild(box);
+      }
+      box.textContent = LC_T.error_prefix + (err && err.message ? err.message : err);
+      box.hidden = false;
+    };
+
+    // What: POST forms send in the background.
+    // Why: DoMe 05.11.: an error opened a bare text page.
+    // From: Issue #1683 | PR #1980
+    document.addEventListener('submit', function (e) {
+      const form = e.target;
+      if (e.defaultPrevented || (form.method || '').toLowerCase() !== 'post') { return; }
+      e.preventDefault();
+      const body = new URLSearchParams(new FormData(form, e.submitter));
+      fetch(form.action, { method: 'POST', body: body, credentials: 'same-origin' })
+        .then(function (r) {
+          if (r.ok && r.redirected) { location.assign(r.url); return null; }
+          return r.text().then(function (t) {
+            if (r.ok) { document.open(); document.write(t); document.close(); return; }
+            throw new Error((t || r.statusText).slice(0, 300));
+          });
+        })
+        .catch(function (err) {
+          if (err instanceof TypeError) { HTMLFormElement.prototype.submit.call(form); return; }
+          window.LancacheUi.fail(err);
+        });
+    });
 
     // What: set data-theme before the first paint
     // Why: stored choice, else OS setting; one CSS rule set
@@ -698,26 +766,26 @@
       <img class="brand-mark" alt="LanCache-NG" src="{{ routes.logo_icon | safe }}?v={{ lancache_image_tag() }}">
     </div>
 
-    <div class="nav-group-label">📊 Overview</div>
+    <div class="nav-group-label">{{ t.overview_2 }}</div>
     {{ <nav_link href={pages.dashboard} label="Dashboard" active={active_page == "dashboard"} glyph="◧"/> }}
     {{ <nav_link href={pages.logs} label="Logs" active={active_page == "logs"} glyph="▤"/> }}
-    {{ <nav_link href={pages.stats} label="Statistics" active={active_page == "stats"} glyph="◔"/> }}
+    {{ <nav_link href={pages.stats} label={t.statistics} active={active_page == "stats"} glyph="◔"/> }}
 
-    <div class="nav-group-label">🎮 Gaming</div>
+    <div class="nav-group-label">{{ t.gaming }}</div>
     {{ <nav_link href={pages.cachehamster} label="Steam" active={active_page == "cachehamster"} glyph="⇓"/> }}
 
-    <div class="nav-group-label">⚙ Settings</div>
+    <div class="nav-group-label">{{ t.settings_2 }}</div>
     {{ <nav_link href={pages.domains} label="DNS" active={active_page == "domains"} glyph="⌘"/> }}
     {{ <nav_link href={pages.dhcp} label="DHCP" active={active_page == "dhcp"} glyph="⇄"/> }}
     <a href="{{ pages.logs | safe }}#syslog" class="nav-item"><span class="nav-dot"></span><span class="nav-icon">☍</span> Syslog</a>
-    {{ <nav_link href={pages.setup} label="General" active={active_page == "setup"} glyph="◐"/> }}
+    {{ <nav_link href={pages.setup} label={t.general} active={active_page == "setup"} glyph="◐"/> }}
 
     <div class="dock-footer">
       <span title="{{ lancache_image_registry() }}/{{ lancache_image_prefix() }}:{{ lancache_image_tag() }}">{{ lancache_image_tag() }} · {{ lancache_image_channel() }}</span><br>
       <!-- What: link to the project repository page
            Why: address only from the SOT, escaped by tera
            From: Issue #1683 | PR #1912 -->
-      <a href="{{ repo_url }}" target="_blank" rel="noopener noreferrer" style="color: inherit;">Projektseite</a>
+      <a href="{{ repo_url }}" target="_blank" rel="noopener noreferrer" style="color: inherit;">{{ t.project_page }}</a>
     </div>
   </nav>
 
@@ -727,12 +795,12 @@
          From: Issue #1437 -->
     <header class="beambar" id="beambar">
       <div class="beambar-services" id="beambar-services">
-        <span>Service health: laden…</span>
+        <span>{{ t.service_health_loading }}</span>
       </div>
       <div class="beambar-end">
-        <label class="lang-switch">🌐 <select id="lang-select" aria-label="Language"></select></label>
-        {{ <restart_ui_form action={routes.restart_ui} csrf_token={csrf_token} button_class="theme-btn" label="⟳ UI" title="Admin-UI neu starten"/> }}
-        <button type="button" class="theme-btn" id="theme-toggle" title="Toggle light/dark theme">◐</button>
+        <label class="lang-switch">🌐 <select id="lang-select" aria-label="{{ t.language }}">{% for l in langs %}<option value="{{ l[0] }}"{% if l[0] == lang %} selected{% endif %}>{{ l[1] }}</option>{% endfor %}</select></label>
+        {{ <restart_ui_form action={routes.restart_ui} csrf_token={csrf_token} button_class="theme-btn" label="⟳ UI" title={t.restart_the_admin_ui} t={t}/> }}
+        <button type="button" class="theme-btn" id="theme-toggle" title="{{ t.toggle_light_dark_theme }}">◐</button>
       </div>
     </header>
     <main class="content">
@@ -828,7 +896,7 @@
         // What: reports the error, re-enables button
         // Why: a network hiccup must not strand the button
         // From: Issue #1437
-        reportError(err);
+        window.LancacheUi.fail(err);
       }
       button.disabled = false;
     }
@@ -838,14 +906,14 @@
     // From: Issue #1068 | PR #1912
     function copyText(id, button) {
       const el = document.getElementById(id);
-      // What: shows "Kopiert!" briefly, then the old label
+      // What: shows the copied text, then the old label
       // Why: confirms the copy without a dialog
       // From: Issue #1683 | PR #1912
       function flash() {
-        button.textContent = 'Kopiert!';
+        button.textContent = LC_T.copied;
         button.classList.add('text-green-400');
         setTimeout(function () {
-          button.textContent = 'Kopieren';
+          button.textContent = LC_T.copy;
           button.classList.remove('text-green-400');
         }, 1500);
       }
@@ -892,12 +960,29 @@
     // Why: DesiredState::SERVICES, matched to status.json
     // From: Issue #1683 | PR #1912
     const DOCK_CONTROLLABLE_SERVICES = [{% for name in desired_services %}'{{ name }}',{% endfor %}];
+    // What: programs per container (container:program)
+    // Why: reload/restart one program via OpenRC
+    // From: Issue #1683 | PR #1858
+    const DOCK_PROGRAMS = [{% for p in programs %}'{{ p }}',{% endfor %}];
+    async function programAction(container, program, action, button) {
+      button.disabled = true;
+      try {
+        const url = '{{ routes.service_action | safe }}'
+          .replace('{container}', container).replace('{program}', program).replace('{action}', action);
+        const response = await fetch(url, { method: 'POST', headers: { 'X-CSRF-Token': CSRF_TOKEN } });
+        if (!response.ok) { throw new Error(action + ' ' + program + ': HTTP ' + response.status); }
+      } catch (err) {
+        reportError(err);
+      }
+      button.disabled = false;
+    }
 
     // What: render beambar service entries via DOM nodes
     // Why: no HTML is built from server-supplied strings
     // From: Issue #1437
     (function () {
       const container = document.getElementById('beambar-services');
+      let openMenu = '';
       // What: one beambar entry: dot, name, dock button
       // Why: built from DOM nodes, never from HTML strings
       // From: Issue #1683 | PR #1912
@@ -912,25 +997,101 @@
         // What: bold status word after the service name
         // Why: the mockup shows name plus state
         // From: Issue #1683 | PR #1858
-        const word = { green: 'läuft', yellow: 'eingeschränkt', amber: 'eingeschränkt', red: 'gestört', gray: 'aus' };
+        const word = { green: LC_T.svc_st_green, yellow: LC_T.svc_st_yellow, amber: LC_T.svc_st_yellow, red: LC_T.svc_st_red, gray: LC_T.svc_st_gray };
         const state = document.createElement('b');
-        state.textContent = word[svc.status] || svc.status || '';
+        // What: a user stop wins over the colour word.
+        // Why: the watchdog leaves user-stopped containers.
+        // From: Issue #1683 | PR #1980
+        state.textContent = svc.stopped_by_user ? LC_T.stopped_by_the_user : (word[svc.status] || svc.status || '');
+        // What: mode off wins over the colour word.
+        // Why: live test: Start offered with DHCP_MODE off.
+        // From: Issue #1683 | PR #1980
+        if (svc.mode_off) { state.textContent = LC_T.svc_mode_off; }
         wrap.appendChild(state);
-        if (DOCK_CONTROLLABLE_SERVICES.includes(svc.name)) {
+        // What: health check output as a fold-out.
+        // Why: live test: "3 failures" gave no reason.
+        // From: Issue #1683 | PR #1980
+        if (svc.reason) {
+          const why = document.createElement('details');
+          why.className = 'beam-menu';
+          const ws = document.createElement('summary');
+          ws.className = 'theme-btn';
+          ws.textContent = LC_T.svc_reason;
+          why.appendChild(ws);
+          const wt = document.createElement('div');
+          wt.className = 'beam-menu-list';
+          wt.style.whiteSpace = 'pre-wrap';
+          wt.textContent = svc.reason;
+          why.appendChild(wt);
+          why.addEventListener('toggle', function () {
+            const r = ws.getBoundingClientRect();
+            wt.style.top = (r.bottom + 6) + 'px';
+            wt.style.left = Math.max(8, Math.min(r.left, window.innerWidth - wt.offsetWidth - 8)) + 'px';
+          });
+          wrap.appendChild(why);
+        }
+        if (!svc.mode_off && DOCK_CONTROLLABLE_SERVICES.includes(svc.name)) {
           // What: Start for red or gray, otherwise Stopp
-          // Why: status.json has no running/stopped field
-          // From: Issue #1437
-          const running = svc.status !== 'red' && svc.status !== 'gray';
+          // Why: a user stop always offers Start
+          // From: Issue #1437 | PR #1980
+          const running = !svc.stopped_by_user && svc.status !== 'red' && svc.status !== 'gray';
           const button = document.createElement('button');
           button.type = 'button';
           button.className = 'theme-btn';
           button.style.marginLeft = '0.35rem';
           button.style.padding = '0 0.4rem';
-          button.textContent = running ? 'Stopp' : 'Start';
+          button.textContent = running ? LC_T.stop : 'Start';
           button.addEventListener('click', function () {
             setDockServiceState(svc.name, running ? 'stopped' : 'running', button);
           });
           wrap.appendChild(button);
+        }
+        // What: programs sit in a fold-out menu.
+        // Why: DoMe 05.11.: 14 equal buttons in the bar.
+        // From: Issue #1683 | PR #1980
+        const progs = DOCK_PROGRAMS.filter(function (p) { return p.split(':')[0] === svc.name; });
+        if (progs.length) {
+          const menu = document.createElement('details');
+          menu.className = 'beam-menu';
+          menu.open = openMenu === svc.name;
+          menu.addEventListener('toggle', function () {
+            if (menu.open) { openMenu = svc.name; } else if (openMenu === svc.name) { openMenu = ''; }
+          });
+          const sum = document.createElement('summary');
+          sum.className = 'theme-btn';
+          sum.textContent = LC_T.programs;
+          menu.appendChild(sum);
+          const list = document.createElement('div');
+          list.className = 'beam-menu-list';
+          progs.forEach(function (p) {
+            const program = p.split(':')[1];
+            const row = document.createElement('div');
+            row.className = 'beam-menu-row';
+            const name = document.createElement('span');
+            name.textContent = program;
+            row.appendChild(name);
+            [['reload', 'Reload'], ['restart', 'Restart']].forEach(function (a) {
+              const b = document.createElement('button');
+              b.type = 'button';
+              b.className = 'theme-btn';
+              b.textContent = a[1];
+              b.addEventListener('click', function () { programAction(svc.name, program, a[0], b); });
+              row.appendChild(b);
+            });
+            list.appendChild(row);
+          });
+          menu.appendChild(list);
+          wrap.appendChild(menu);
+          // What: place the list under its button.
+          // Why: the bar hides overflow; fixed escapes it.
+          // From: Issue #1683 | PR #1980
+          const place = function () {
+            const r = sum.getBoundingClientRect();
+            list.style.top = (r.bottom + 6) + 'px';
+            list.style.left = Math.max(8, Math.min(r.left, window.innerWidth - list.offsetWidth - 8)) + 'px';
+          };
+          menu.addEventListener('toggle', function () { if (menu.open) { place(); } });
+          if (menu.open) { requestAnimationFrame(place); }
         }
         return wrap;
       }
@@ -940,7 +1101,7 @@
       function render(data) {
         container.textContent = '';
         if (data.state === 'unavailable') {
-          container.textContent = 'Watchdog-Status nicht verfügbar';
+          container.textContent = LC_T.watchdog_status_not_available;
           return;
         }
         (data.services || []).forEach(function (svc) {
@@ -948,7 +1109,7 @@
         });
         if (data.state === 'stale') {
           const staleNote = document.createElement('span');
-          staleNote.textContent = '(veraltet, ' + data.age_seconds + 's)';
+          staleNote.textContent = LC_T.stale + data.age_seconds + 's)';
           container.appendChild(staleNote);
         }
       }
@@ -980,208 +1141,20 @@
     })();
   </script>
 
-  <!-- What: language catalog, one block per language
-       Why: a new language is one more block, no other edit
-       From: Issue #1683 | PR #1858 -->
+  <!-- What: language choice: cookie, then reload
+       Why: the ui renders the page in that language
+       From: Issue #1683 | PR #1980 -->
   <script>
     (function () {
-      const base = 'en';
-      const catalog = {
-        de: { name: 'Deutsch', t: {
-          overview: '📊 Overview', stats: 'Statistiken',
-          settings: '⚙ Settings', setup: 'Einrichtung',
-          project: 'Projektseite', language: 'Sprache',
-          channel: 'Release-Kanal', auto: 'Automatische Updates',
-          auto_on: 'Automatische Updates aktiv',
-          auto_off: 'Automatische Updates deaktiviert',
-          password: 'Passwort ändern', save: 'Speichern',
-          cancel: 'Abbrechen', delete: 'Löschen',
-          add: 'Hinzufügen', loading: 'laden…',
-          time: 'Zeit', source: 'Quelle', message: 'Nachricht',
-          protocol: 'Protokoll', sys_stats: 'Systemstatistiken',
-          ram: 'RAM-Nutzung', net: 'Netzwerkdurchsatz',
-          disk_io: 'Festplatten-I/O',
-          log_per_service: 'Protokollierung je Dienst',
-          no_logs: 'Noch keine Log-Einträge',
-          host_or_ip: 'Host oder IP',
-          active_leases: 'Aktive DHCP-Leases',
-          active_mode: 'Aktiver DHCP-Modus',
-          dhcp_mode: 'DHCP-Modus',
-          dns_mgmt: 'DNS-Verwaltung',
-          lan_entries: 'LAN-Einträge',
-          mac: 'MAC-Adresse',
-          ip: 'IP-Adresse',
-          created: 'Erstellt',
-          enabled: 'Aktiviert',
-          disabled: 'Deaktiviert',
-          actions: 'Aktionen',
-          check: 'Prüfen',
-          snapshots: 'Konfigurations-Snapshots',
-          new_subnet: 'Neues Subnet',
-          no_secondaries: 'Keine Secondaries registriert.',
-          new_secondary: 'Neuen Secondary registrieren',
-          secondary_name: 'Name des Secondary',
-          no_leases: 'Keine aktiven Leases',
-          no_subnets: 'Keine Subnetze konfiguriert',
-          no_reservations: 'Keine Reservierungen vorhanden',
-          no_lan: 'Keine LAN-Einträge vorhanden.',
-          empty_list: 'Liste ist leer.',
-          dns_status: 'DNS-Status',
-          hit_rate: 'Cache-Trefferquote',
-          hits: 'Cache-Treffer',
-          data_served: 'Ausgelieferte Daten',
-          total_requests: 'Anfragen gesamt',
-          recent_requests: 'Letzte Anfragen',
-          today: 'Heute',
-          days: 'Tage',
-          files: 'Dateien',
-          library: 'Bibliothek',
-          cache_storage: 'Cache-Speicher',
-          caching_mode: 'Cache-Modus',
-          resize_cache: 'Cache vergrößern',
-          new_cache_size: 'Neue Cache-Größe (GB)',
-          netdata_alarms: 'Netdata-Alarme',
-          no_alarms: 'Noch keine Netdata-Alarme empfangen.',
-          no_requests: 'Noch keine Anfragen protokolliert.',
-          proxy_down: 'Proxy nicht erreichbar',
-          service_health: 'Dienst-Status',
-          current_password: 'Aktuelles Passwort',
-          new_password: 'Neues Passwort',
-          repeat_password: 'Neues Passwort wiederholen',
-          refresh: 'Aktualisieren',
-          recommended: 'Empfohlen',
-          restart_ui: 'Admin-UI neu starten',
-          current_state: 'Aktueller Stand:',
-          general: 'Allgemein',
-          sign_in: 'Anmeldung',
-          check_updates: 'Automatisch nach Updates suchen',
-          appearance: 'Darstellung',
-          match_system: 'System-Design übernehmen',
-          match_system_desc: 'Folgt automatisch der Hell/Dunkel-Einstellung deines Geräts.'
-        } },
-        en: { name: 'English', t: {
-          overview: '📊 Overview', stats: 'Statistics',
-          settings: '⚙ Settings', setup: 'Setup',
-          project: 'Project page', language: 'Language',
-          channel: 'Release channel', auto: 'Automatic updates',
-          auto_on: 'Automatic updates on',
-          auto_off: 'Automatic updates off',
-          password: 'Change password', save: 'Save',
-          cancel: 'Cancel', delete: 'Delete',
-          add: 'Add', loading: 'loading…',
-          time: 'Time', source: 'Source', message: 'Message',
-          protocol: 'Protocol', sys_stats: 'System statistics',
-          ram: 'RAM usage', net: 'Network throughput',
-          disk_io: 'Disk I/O',
-          log_per_service: 'Logging per service',
-          no_logs: 'No log entries yet',
-          host_or_ip: 'Host or IP',
-          active_leases: 'Active DHCP leases',
-          active_mode: 'Active DHCP mode',
-          dhcp_mode: 'DHCP mode',
-          dns_mgmt: 'DNS management',
-          lan_entries: 'LAN entries',
-          mac: 'MAC address',
-          ip: 'IP address',
-          created: 'Created',
-          enabled: 'Enabled',
-          disabled: 'Disabled',
-          actions: 'Actions',
-          check: 'Check',
-          snapshots: 'Configuration snapshots',
-          new_subnet: 'New subnet',
-          no_secondaries: 'No secondaries registered.',
-          new_secondary: 'Register new secondary',
-          secondary_name: 'Secondary name',
-          no_leases: 'No active leases',
-          no_subnets: 'No subnets configured',
-          no_reservations: 'No reservations',
-          no_lan: 'No LAN entries.',
-          empty_list: 'List is empty.',
-          dns_status: 'DNS status',
-          hit_rate: 'Cache hit rate',
-          hits: 'Cache HITs',
-          data_served: 'Data served',
-          total_requests: 'Total requests',
-          recent_requests: 'Recent requests',
-          today: 'Today',
-          days: 'Days',
-          files: 'Files',
-          library: 'Library',
-          cache_storage: 'Cache storage',
-          caching_mode: 'Caching mode',
-          resize_cache: 'Resize cache',
-          new_cache_size: 'New cache size (GB)',
-          netdata_alarms: 'Netdata alarms',
-          no_alarms: 'No Netdata alarms received yet.',
-          no_requests: 'No requests logged yet.',
-          proxy_down: 'Proxy unreachable',
-          service_health: 'Service health',
-          current_password: 'Current password',
-          new_password: 'New password',
-          repeat_password: 'Repeat new password',
-          refresh: 'Refresh',
-          recommended: 'Recommended',
-          restart_ui: 'Restart Admin UI',
-          current_state: 'Current state:',
-          general: 'General',
-          sign_in: 'Sign-in',
-          check_updates: 'Check for updates automatically',
-          appearance: 'Appearance',
-          match_system: 'Match system theme',
-          match_system_desc: 'Follows your device light/dark setting automatically.'
-        } }
+      const choose = function (code) {
+        document.cookie = 'lc_lang=' + code + '; path=/; max-age=31536000; samesite=strict';
+        location.reload();
       };
-      const read = function () {
-        const m = document.cookie.match(/(?:^|; )lc_lang=([a-z]{2,8})/);
-        return m && catalog[m[1]] ? m[1] : base;
-      };
-      const lang = read();
-      const keyOf = new Map();
-      Object.keys(catalog).forEach(function (code) {
-        Object.keys(catalog[code].t).forEach(function (key) {
-          keyOf.set(catalog[code].t[key], key);
-        });
-      });
-      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
-      let node;
-      while ((node = walker.nextNode())) {
-        const text = node.nodeValue.trim();
-        const key = keyOf.get(text);
-        const out = key ? catalog[lang].t[key] : undefined;
-        if (out !== undefined && out !== text) {
-          node.nodeValue = node.nodeValue.replace(text, out);
-        }
-      }
-      document.documentElement.lang = lang;
       const pick = document.getElementById('lang-select');
-      if (pick) {
-        Object.keys(catalog).forEach(function (code) {
-          const o = document.createElement('option');
-          o.value = code;
-          o.textContent = catalog[code].name;
-          o.selected = code === lang;
-          pick.appendChild(o);
-        });
-        pick.addEventListener('change', function () {
-          document.cookie = 'lc_lang=' + pick.value + '; path=/; max-age=31536000; samesite=strict';
-          location.reload();
-        });
-      }
-      const row = document.getElementById('lang-row');
-      if (row) {
-        Object.keys(catalog).forEach(function (code) {
-          const b = document.createElement('button');
-          b.type = 'button';
-          b.className = 'mode-btn' + (code === lang ? ' selected' : '');
-          b.textContent = catalog[code].name;
-          b.addEventListener('click', function () {
-            document.cookie = 'lc_lang=' + code + '; path=/; max-age=31536000; samesite=strict';
-            location.reload();
-          });
-          row.appendChild(b);
-        });
-      }
+      if (pick) { pick.addEventListener('change', function () { choose(pick.value); }); }
+      document.querySelectorAll('[data-lang]').forEach(function (b) {
+        b.addEventListener('click', function () { choose(b.dataset.lang); });
+      });
     })();
   </script>
 

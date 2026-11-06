@@ -2,68 +2,42 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-# What: the services image; one supervisor runs it all.
-# Why: the watchdog owns the services image.
-# From: Issue #1683
+# What: services image: watchdog, cachehamster, logs, NTP.
+# Why: OpenRC keeps each SOT process alive.
+# From: Issue #1683 | PR #1980
 
 # What: base image pin, supplied by ci.sh from the SOT.
-# Why: SOT base_images.alpine is the sole owner (AG-CI-006).
+# Why: SOT base_images.alpine is the sole owner.
 # From: Issue #1683
 ARG ALPINE_IMAGE
 
-# What: builder image, supplied by ci.sh from the SOT.
-# Why: no mutable default; CI resolves the immutable ref.
-# From: Issue #1683
+# What: build-tools image pin, supplied by ci.sh.
+# Why: one toolchain image builds every Rust crate.
+# From: Issue #1683 | PR #1980
 ARG BUILD_TOOLS_IMAGE
-# What: scratch only when ci.sh passed no image arg.
-# Why: no baked image; a missing arg fails the build.
-# From: Issue #1683 | PR #1858
-FROM ${BUILD_TOOLS_IMAGE:-scratch} AS services-builder
 
-# What: musl cross-target, supplied by ci.sh per platform.
-# Why: ci.sh owns arch mapping; no uname -m in the image.
-# From: Issue #1683
+# What: Rust build stage; ci.sh rust-build does the work.
+# Why: ci.sh owns caches, target and crate list.
+# From: Issue #1683 | PR #1980
+FROM ${BUILD_TOOLS_IMAGE:-scratch} AS builder
 ARG MUSL_TARGET
-# What: workspace crates, supplied by ci.sh from the SOT.
-# Why: the SOT owns the crates; rust-build receives them.
-# From: Issue #1683 | PR #1858
 ARG RUST_CRATES
-
-# What: cargo tuning args, consumed by ci.sh rust-build.
-# Why: PROJECT_CARGO_*/CARGO_BUILD_JOBS own these.
-# From: Issue #1683
 ARG CARGO_BUILD_JOBS=
 ARG PROJECT_CARGO_LTO=
 ARG PROJECT_CARGO_CODEGENUNIT=
-# What: redeclare BUILD_TOOLS_IMAGE for the RUN stage.
-# Why: ci.sh rust-build folds it into the ccache key.
-# From: Issue #1683
 ARG BUILD_TOOLS_IMAGE
-# What: compiler pairs and cache key prefix, from ci.sh.
-# Why: the builder has no SOT; rust-build reads the env.
-# From: Issue #1683 | PR #1912
 ARG CI_TOOLCHAIN_COMPILERS
 ARG CI_CACHE_PREFIX
-# What: cargo home, root of the cargo cache mounts.
-# Why: §39 registry and git caches; the SOT owns it.
-# From: Issue #1683 | PR #1912
 ARG CI_CARGO_HOME
-
-WORKDIR /build
-# What: mount point of the build context, from the SOT.
-# Why: rust-build reads the tree there; no COPY list.
-# From: Issue #1683 | PR #1858
 ARG CI_RUST_SOURCE_DIR
-# What: retry and download bounds, SOT stage_variables
-# Why: this stage has no SOT; ci.sh reads them from env
-# From: Issue #1683 | PR #1858
 ARG CI_RETRY_MAX_ATTEMPTS
 ARG CI_RETRY_BACKOFF_BASE_SECONDS
 ARG CI_DOWNLOAD_CONNECT_TIMEOUT
 ARG CI_DOWNLOAD_STALL_SECONDS
-# What: ci.sh owns the rust build accel policy (one owner).
-# Why: AG-CI-005/022/023; bind-mounted, never baked in.
-# From: Issue #1683
+WORKDIR /build
+# What: source tree bind, build secrets, cargo caches.
+# Why: rust-build reads the tree there; no COPY list.
+# From: Issue #1683 | PR #1980
 RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
     --mount=type=bind,target=${CI_RUST_SOURCE_DIR},rw \
     --mount=type=secret,id=sccache_redis_url \
@@ -77,68 +51,112 @@ RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
     --mount=type=cache,target=${CI_CARGO_HOME}/git,sharing=locked \
     bash /usr/local/bin/ci.sh rust-build services "${RUST_CRATES}"
 
-# What: scratch only when ci.sh passed no image arg.
-# Why: no baked image; a missing arg fails the build.
-# From: Issue #1683 | PR #1858
+# What: final image on the SOT Alpine pin.
+# Why: scratch only fails a build without the arg.
+# From: Issue #1683 | PR #1980
 FROM ${ALPINE_IMAGE:-scratch}
 
 # What: build identity keys the cache of later layers.
-# Why: a new package set must not reuse a stale apk layer.
-# From: Issue #1683 | PR #1858
+# Why: a new package set must not reuse a stale layer.
+# From: Issue #1683 | PR #1980
 ARG BUILD_IDENTITY
-# What: apk package list, supplied from the SOT.
-# Why: the SOT owns the list; this stage only consumes it.
-# From: Issue #1683
 ARG APK_PACKAGES
-# What: bootstrap apk list, supplied from the SOT.
-# Why: AG-REL-001 forbids ash; ci.sh apk-setup needs bash.
-# From: Issue #1683 | PR #1912
 ARG APK_BOOTSTRAP
+# What: bash first; every later RUN uses it.
+# Why: ci.sh is bash; ash is not allowed.
+# From: Issue #1683 | PR #1980
 RUN apk add --no-cache ${APK_BOOTSTRAP}
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
-# What: retry and download bounds, SOT stage_variables
-# Why: this stage has no SOT; ci.sh reads them from env
-# From: Issue #1683 | PR #1858
 ARG CI_RETRY_MAX_ATTEMPTS
 ARG CI_RETRY_BACKOFF_BASE_SECONDS
 ARG CI_DOWNLOAD_CONNECT_TIMEOUT
 ARG CI_DOWNLOAD_STALL_SECONDS
-# What: shared package setup via ci.sh.
-# Why: ci.sh owns repos, proxy CA, update+upgrade, add.
-# From: Issue #1683 | PR #1858
+# What: packages and accounts through ci.sh.
+# Why: ci.sh owns repos, proxy CA, users and dirs.
+# From: Issue #1683 | PR #1980
 RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
     --mount=type=secret,id=project_selfhosted_proxy_ca \
     bash /usr/local/bin/ci.sh apk-setup ${APK_PACKAGES}
-
-# What: accounts and dirs of this image, from the SOT.
-# Why: ci.sh creates them; the Dockerfile names none.
-# From: Issue #1683 | PR #1912
 ARG IMAGE_SETUP
 RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
     bash /usr/local/bin/ci.sh image-setup
 
-# What: the shared gid of the stack's secret files.
-# Why: ci.sh passes it from the SOT; compose names none.
-# From: Issue #1683 | PR #1912
+# What: shared gid, SOT defaults and SOT schema.
+# Why: the programs read them as env; compose names none.
+# From: Issue #1683 | PR #1980
 ARG LANCACHE_RUNTIME_GID
-ENV LANCACHE_RUNTIME_GID=${LANCACHE_RUNTIME_GID}
-
-# What: the SOT default values, one pipe-joined list.
-# Why: ci.sh passes the list; binaries read it as env.
-# From: Issue #1683 | PR #1912
 ARG LANCACHE_RUNTIME_DEFAULTS
-ENV LANCACHE_RUNTIME_DEFAULTS=${LANCACHE_RUNTIME_DEFAULTS}
+ARG LANCACHE_RUNTIME_SCHEMA
+ENV LANCACHE_RUNTIME_GID=${LANCACHE_RUNTIME_GID} \
+    LANCACHE_RUNTIME_DEFAULTS=${LANCACHE_RUNTIME_DEFAULTS} \
+    LANCACHE_RUNTIME_SCHEMA=${LANCACHE_RUNTIME_SCHEMA}
 
-COPY --from=services-builder /build/lancache-watchdog-out /usr/local/bin/lancache-watchdog
-COPY --from=services-builder /build/lancache-cachehamster-out /usr/local/bin/lancache-cachehamster
+# What: the two Rust programs of this image.
+# Why: built in the builder stage from this checkout.
+# From: Issue #1683 | PR #1980
+COPY --from=builder /build/lancache-watchdog-out /usr/local/bin/lancache-watchdog
+COPY --from=builder /build/lancache-cachehamster-out /usr/local/bin/lancache-cachehamster
 
-# What: processes the supervisor runs, from the SOT.
-# Why: ci.sh passes the list; the image holds no copy.
-# From: Issue #1683
+# What: one supervise-daemon script per SOT process.
+# Why: OpenRC restarts crashes; @KEY@ e.g. CONFIG_DIR.
+# From: Issue #1683 | PR #1980
 ARG LANCACHE_PROCESSES
-ENV LANCACHE_PROCESSES=${LANCACHE_PROCESSES}
+ARG LANCACHE_PROCESS_PRE
+RUN set -e; \
+    sed -i 's/^#\?rc_sys=.*/rc_sys="docker"/' /etc/rc.conf; \
+    sed -i 's/^#\?rc_env_allow=.*/rc_env_allow="*"/' /etc/rc.conf; \
+    sed -i 's/^#\?rc_controller_cgroups=.*/rc_controller_cgroups="NO"/' /etc/rc.conf; \
+    sed -i 's/^#\?rc_cgroup_mode=.*/rc_cgroup_mode="legacy"/' /etc/rc.conf; \
+    for f in /etc/init.d/*; do grep -qE '^[[:space:]]*need[^#]*[[:space:]]dev([[:space:]]|$)' "$f" && rm -f "$f" || true; done; \
+    rm -f /etc/runlevels/sysinit/* /etc/runlevels/boot/*; \
+    declare -A v; IFS='|' read -ra kv <<< "${LANCACHE_RUNTIME_DEFAULTS}"; \
+    for p in "${kv[@]}"; do v["${p%%=*}"]="${p#*=}"; done; \
+    declare -A pre; IFS='|' read -ra kv <<< "${LANCACHE_PROCESS_PRE}"; \
+    for p in "${kv[@]}"; do pre["${p%%=*}"]="${p#*=}"; done; \
+    for row in ${LANCACHE_PROCESSES}; do \
+      level=default; \
+      if [[ "${row%%=*}" == *:* ]]; then level="${row%%:*}"; row="${row#*:}"; fi; \
+      mkdir -p "/etc/runlevels/${level}"; \
+      [ -n "${row}" ] || continue; \
+      name="${row%%=*}"; cmd="${row#*=}"; \
+      while [[ "${cmd}" =~ @([A-Z0-9_]+)@ ]]; do \
+        k="${BASH_REMATCH[1]}"; \
+        [[ -v "v[${k}]" ]] || { echo "unknown SOT key ${k}" >&2; exit 1; }; \
+        cmd="${cmd//@${k}@/${v[${k}]}}"; \
+      done; \
+      sp="${pre[${name}]:-}"; \
+      while [[ "${sp}" =~ @([A-Z0-9_]+)@ ]]; do \
+        k="${BASH_REMATCH[1]}"; \
+        [[ -v "v[${k}]" ]] || { echo "unknown SOT key ${k}" >&2; exit 1; }; \
+        sp="${sp//@${k}@/${v[${k}]}}"; \
+      done; \
+      cmd="${cmd//,/ }"; args=""; \
+      [[ "${cmd}" != *" "* ]] || args="${cmd#* }"; \
+      printf '%s\n' '#!/sbin/openrc-run' 'supervisor=supervise-daemon' \
+        "command=${cmd%% *}" "command_args=\"${args}\"" \
+        'respawn_delay=2' 'output_log=/proc/1/fd/1' \
+        'error_log=/proc/1/fd/2' > "/etc/init.d/${name}"; \
+      [ -z "${sp}" ] || printf 'start_pre() { %s; }\n' "${sp}" \
+        >> "/etc/init.d/${name}"; \
+      chmod 0755 "/etc/init.d/${name}"; \
+      rc-update add "${name}" "${level}"; \
+    done
 
-# What: the supervisor binary; no argument means supervise.
-# Why: compose and setup.sh add healthcheck or probe.
-# From: Issue #1683 | PR #1912
-ENTRYPOINT ["/usr/local/bin/lancache-watchdog"]
+# What: start script: seed the tmpfs /run, then init.
+# Why: /run is tmpfs; the image dirs must be put back.
+# From: Issue #1683 | PR #1980
+RUN set -e; \
+    declare -A v; IFS='|' read -ra kv <<< "${LANCACHE_RUNTIME_DEFAULTS}"; \
+    for p in "${kv[@]}"; do v["${p%%=*}"]="${p#*=}"; done; \
+    : "${v[RUN_DIR]:?}"; \
+    tar -C "${v[RUN_DIR]}" -cpf "${v[RUN_DIR]}.tar" .; \
+    printf '%s\n' '#!/bin/sh' \
+      "tar -C '${v[RUN_DIR]}' -xpf '${v[RUN_DIR]}.tar'" \
+      'exec openrc-init "$@"' \
+      > /usr/local/bin/lancache-init; \
+    chmod 0755 /usr/local/bin/lancache-init
+
+# What: OpenRC as PID 1; compose may name a runlevel.
+# Why: openrc-init reaps zombies and stops on SIGTERM.
+# From: Issue #1683 | PR #1980
+ENTRYPOINT ["/usr/local/bin/lancache-init"]

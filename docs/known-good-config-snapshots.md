@@ -12,20 +12,19 @@ service, not the whole install.
 
 ## Contract
 
-1. **One store.** `SnapshotStore` in `services/common/shared.rs` owns the
+1. **One store.** `snapshot::Store` in `services/common/shared.rs` owns the
    format for every service:
-   - A snapshot is a directory named by a 20-digit id (nanoseconds since the
-     Unix epoch), so name order is time order. It holds one JSON payload file.
-   - `create` writes into a `.staging.<id>` directory and renames it; a crash
-     never leaves a half-written snapshot. `ids` lists only numeric directories
-     that hold the payload file.
+   - A snapshot id is a digit string (nanoseconds since the Unix epoch), so a
+     longer or larger id is newer. The snapshot is either one file named by
+     the id, or a directory named by the id that holds one named file
+     (`<dir>/<id>/<file>`, the layout `setup.sh` reads).
+   - `save` creates the file exclusively (it never overwrites) and then
+     prunes old snapshots. `list` returns only numeric ids whose file exists,
+     newest first.
    - `read` accepts only numeric ids; the id joins onto a path, so nothing
      else passes.
-   - `prune` keeps the newest `KEEP_KNOWN_GOOD_CONFIGS` snapshots and refuses
-     0, which would delete every snapshot.
-   - `adopt_legacy` converts snapshots in the old shell format (directory name
-     `YYYYmmddTHHMMSS.N`, one file per config) into the new format, so an
-     update keeps its rollback targets.
+   - Pruning keeps the newest `KEEP_KNOWN_GOOD_CONFIGS` snapshots and always
+     at least one, so there is always a rollback target.
 2. **Retention.** `KEEP_KNOWN_GOOD_CONFIGS` (SOT
    `.github/yaml/build-manifest.yml`, read by
    `config::keep_known_good`, at least 1) applies to every store.
@@ -38,7 +37,7 @@ service, not the whole install.
    | `dhcp` and `ui` | Kea | `KEA_CONFIG_SNAPSHOT_DIR`, `KEA_CONFIG_SNAPSHOT_FILE` | the `KEA_DATA_DIR` bind mount |
    | `dns` | pdns (authoritative) | `DNS_CONFIG_SNAPSHOT_DIR`/`auth`, `DNS_AUTH_CONFIG_SNAPSHOT_FILE` | `dns-config-snapshots` |
    | `dns` | dns-http, dns-https (recursors) | `DNS_CONFIG_SNAPSHOT_DIR`/`<recursor>`, `DNS_RECURSOR_CONFIG_SNAPSHOT_FILE` | `dns-config-snapshots` |
-   | `dns` | nats-subscriber (zone data) | `DNS_CONFIG_SNAPSHOT_DIR`/`zones`/`<zone>`, `DNS_ZONE_SNAPSHOT_FILE` | `dns-config-snapshots` |
+   | `ui` | Admin UI (zone data) | `DNS_SNAPSHOT_DIR`/`<zone>`, `DNS_SNAPSHOT_KEEP` | `dns-config-snapshots` |
 
    A secondary DNS node (`deploy/secondary/docker-compose.yml`) has its own
    `dns-config-snapshots` volume.
@@ -105,66 +104,32 @@ that is in the store's list, reads it, and applies it through the same
 
 ## Zones, records, and TSIG/DDNS metadata
 
-`nats-subscriber` (`services/dns/nats-subscriber/src/main.rs`) snapshots the
-record data of the zones `config::rollback_zones` names: the lan zone
-(`DHCP_DOMAIN`), its `local.` zone, the private IPv4 reverse zones and
-`c.f.ip6.arpa.`/`d.f.ip6.arpa.`. Other zones, such as the RPZ, are never
-snapshotted or rolled back. TSIG keys and zone metadata are not part of a
+The Admin UI (`services/ui/src/main.rs`) snapshots the record data of the
+zones `snapshot_zones` names: the lan zone (`DHCP_DOMAIN`) and the private
+reverse zones. Other zones, such as the RPZ, are never snapshotted or rolled
+back. TSIG keys and zone metadata are not part of a snapshot.
+
+**When a snapshot is taken.** `snapshot` runs after every record change the
+Admin UI makes. It stores the zone's rrsets as JSON below
+`DNS_SNAPSHOT_DIR`/`<zone>` and keeps the newest `DNS_SNAPSHOT_KEEP`
+entries. DDNS writes from Kea go straight to PowerDNS and do not create a
 snapshot.
 
-**When a snapshot is taken.** `snapshot_zone` runs after every record write
-that PowerDNS accepted and notified, and `snapshot_watcher` runs it for every
-managed zone every `DNS_SYNC_TICK` seconds on every node. The watcher also
-catches DDNS writes from Kea, which do not pass through NATS. SOA and NS
-rrsets are left out (`data_rrsets`). A snapshot is only written when the zone
-differs from the newest one (`matches_latest`, which compares sorted rrsets and
-sorted records), so periodic republishes do not push out real history. A
-failed export or write is logged as `FATAL` and never stops the record write
-that triggered it.
+**What a rollback does** (`rollback`, then `pdns::Api::restore`):
 
-**Rollback listener.** `serve_rollback` listens on `DNS_ROLLBACK_LISTEN_ADDR`
-(port `DNS_ROLLBACK_PORT`, SOT). It binds all addresses because the Admin UI
-runs in another container; the port is not published to the host. Every
-request needs the `X-API-Key` header equal to `PDNS_API_KEY` (constant-time
-compare) before the body is read.
+1. Refuses a zone outside `snapshot_zones` and an id that is not stored.
+2. Reads the current rrsets and sends one PATCH: `REPLACE` for every
+   snapshot rrset, `DELETE` for every current rrset the snapshot lacks.
+3. PowerDNS raises the serial and sends NOTIFY; the secondaries pull the
+   zone by AXFR. The watchdog on each secondary sees the new serial and
+   flushes its recursor cache.
 
-| Route | Answer |
+Two ways start a rollback:
+
+| Way | Command |
 |---|---|
-| `GET /snapshots` | `{"zones": {<zone>: [{"id", "created_unix"}, ...]}}`, newest first; a store that cannot be listed fails the request |
-| `POST /rollback` with `{"zone", "snapshot_id"}` | the result fields below |
-
-**What a rollback does** (`rollback`):
-
-1. Refuses a zone outside `rollback_zones` and an id that is not in the list.
-2. Takes the zone lock, reads the current rrsets and builds a PATCH with
-   `REPLACE` for every snapshot rrset that differs and `DELETE` for every
-   current rrset the snapshot lacks (`rollback_patch`).
-3. Sends the PATCH to PowerDNS. A refusal is logged as `REJECT` and returned.
-4. Runs `pdnsutil check-zone` within `PDNS_ZONE_CHECK_TIMEOUT`. A failure is
-   logged; the applied PATCH is not reverted.
-5. For the lan zone, republishes every changed rrset on `lancache.dns.record`
-   with a fresh id `rollback-<time>-<name>-<type>`, so secondaries converge
-   now and the duplicate window cannot drop it (`publish_patch`).
-6. Publishes one `lancache.dns.flush` per changed name, all at once, each
-   within `DNS_FLUSH_TIMEOUT`, so every recursor drops its cached answer.
-7. Saves the restored state as a new snapshot if it differs from the newest.
-
-The answer holds `applied`, `changed_names`, `zone_check_passed`,
-`republished_to_nats`, `flush_ok` and `flush_failed_names`. The Admin UI's
-domains page lists the snapshots per zone (`fetch_zone_groups`) and forwards a
-choice through `POST /domains/zones/rollback` (`rollback_zone_snapshot`); it
-logs an error when `flush_ok` or `zone_check_passed` is false.
-
-**NATS permission dependency (#906, #867).** The republish and the flush only
-work if the dns writer identity may publish `lancache.dns.record` and
-`lancache.dns.flush`. `config.rs` generates that allow-list
-(`writer_publish`, from `NATS_SUBJECT_RECORD` and `NATS_SUBJECT_FLUSH`). A
-missing permission shows as a missing JetStream ack: `republished_to_nats`
-false or names in `flush_failed_names`.
-
-**Replication limits.** Only the lan zone is replicated through NATS. The
-`local.` zone and the reverse zones exist only on the primary, so a rollback
-there changes only the primary.
+| Admin UI | domains page, `POST /domains/zone-rollback` |
+| Shell, when the UI pages fail | `setup.sh reset-to-last-known-good-config dns <install-dir> <zone> [snapshot-id]` runs `lancache-ui zone-snapshots` and `lancache-ui zone-rollback` in the ui container |
 
 A zone rollback is never automatic: an older zone can undo leases and host
 names created since, and no check can judge that.

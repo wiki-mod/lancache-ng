@@ -1,99 +1,223 @@
 
 {# LanCache-NG (https://github.com/wiki-mod/lancache-ng) #}
 {# SPDX-License-Identifier: AGPL-3.0-or-later #}
-{# What: CacheHamster page: prefill tabs, placeholders #}
-{# Why: mockup Gaming page; nothing here is built yet #}
-{# From: Issue #816 | PR #1858 #}
+{# What: cachehamster page: Steam login, jobs, library #}
+{# Why: prefill now, later or scheduled; UI only #}
+{# From: Issue #871 | PR #1858 #}
 {% extends "base.html" %}
-{% block title %} – Steam{% endblock %}
+{% block title %} – Cachehamster{% endblock %}
 
 {% block content %}
 <section>
-  <p class="eyebrow">Gaming → Steam</p>
-  <h1 class="page-title">Steam</h1>
-  <p class="page-sub">Proactive cache warming for game platforms such as Steam (prefill). It streams depot data through this box's own proxy and discards it locally; it never installs games here. Everything below is placeholder scaffolding, not a finished design.</p>
+  <p class="eyebrow">{{ t.gaming_cachehamster }}</p>
+  <h1 class="page-title">Cachehamster</h1>
+  <p class="page-sub">{{ t.fills_the_proxy_cache_ahead_of }}</p>
+  {% if hamster_error %}<p class="status-line"><span class="beam-light off"></span>{{ t.cachehamster_not_reachable }} {{ hamster_error }}</p>{% endif %}
+  {% if hamster and not hamster.daemon_running %}<p class="status-line"><span class="beam-light off"></span>{{ t.hamster_daemon_down }}</p>{% endif %}
 
   <div class="subtabs">
-    <div class="subtab active" data-ch-tab="overview">Overview</div>
-    <div class="subtab" data-ch-tab="library">Library</div>
-    <div class="subtab" data-ch-tab="schedule">Schedule</div>
-    <div class="subtab" data-ch-tab="credentials">Credentials</div>
-    <div class="subtab" data-ch-tab="settings">Settings</div>
+    <div class="subtab active" data-ch-tab="jobs">Jobs</div>
+    <div class="subtab" data-ch-tab="steam">Steam</div>
   </div>
 
-  <div class="subtab5-panel active" data-ch-panel="overview">
-    <div class="section-title" style="margin-top:0;">Warm addresses</div>
-    <p class="section-sub">One http:// address per line. The proxy downloads each one and keeps it in the cache; nothing is stored here.</p>
-    <form action="{{ routes.prefill | safe }}" method="post">
-      {{ <csrf_field csrf_token={csrf_token}/> }}
-      <div class="field">
-        <label for="prefill-urls">Addresses</label>
-        <textarea id="prefill-urls" name="urls" rows="5" placeholder="http://deb.debian.org/debian/pool/main/m/mesa/mesa_26.1.5.orig.tar.xz" required style="width:100%; padding:9px 11px; border-radius:8px; border:1px solid var(--navy-600); background:var(--navy-900); color:var(--foam); font-family:var(--font-mono); font-size:13px;"></textarea>
-      </div>
-      <button type="submit" class="btn" {% if prefill_running %}disabled{% endif %}>Warm cache</button>
+  <div class="subtab5-panel active" data-ch-panel="jobs">
+    <div class="section-title" style="margin-top:0;">{{ t.new_job }}</div>
+    <form action="{{ routes.hamster_add | safe }}" method="post" id="hamster-add">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="at" id="hamster-at-unix">
+      <div class="field"><label for="hamster-name">Name</label><input id="hamster-name" name="name" required></div>
+      <div class="field"><label for="hamster-urls">{{ t.addresses_one_per_line }}</label>
+        <textarea id="hamster-urls" name="urls" rows="4"></textarea></div>
+      <div class="field"><label for="hamster-app">{{ t.or_steam_app_id }}</label><input id="hamster-app" name="app" inputmode="numeric"></div>
+      <div class="field"><label for="hamster-when">{{ t.when }}</label>
+        <select id="hamster-when" name="when">
+          <option value="now">{{ t.now }}</option>
+          <option value="later">{{ t.later_start_by_hand }}</option>
+          <option value="at">{{ t.at_a_time }}</option>
+        </select>
+        <input type="datetime-local" id="hamster-at">
+        <p class="section-sub" id="hamster-when-hint"></p></div>
+      <button type="submit" class="btn">{{ t.add_job }}</button>
     </form>
-    {% if prefill_total > 0 %}
-    <p class="status-line" style="margin-top:14px;">
-      <span class="beam-light {% if prefill_running %}on{% else %}off{% endif %}"></span>
-      {% if prefill_running %}Running{% else %}Last run finished{% endif %}:
-      {{ prefill_done }} of {{ prefill_total }} done, {{ prefill_failed }} failed, {{ prefill_mb }} MB read.
-      {% if prefill_running %}<a href="" style="margin-left:8px;">Refresh</a>{% endif %}
-    </p>
+
+    {# What: speed settings of the prefill; SOT keys. #}
+    {# Why: DoMe 26.10. (Fund 90): set them in the UI. #}
+    {# From: Issue #871 | PR #1980 #}
+    <div class="section-title">{{ t.settings }}</div>
+    <form action="{{ routes.setup_save | safe }}" method="post" class="form-row">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="back" value="/cachehamster">
+      <div class="field"><label for="hamster-conns">{{ t.hamster_connections }}</label><input type="number" id="hamster-conns" name="CACHEHAMSTER_CONCURRENCY" min="1" max="1024" value="{{ v.CACHEHAMSTER_CONCURRENCY }}"></div>
+      <div class="field"><label for="hamster-queues">{{ t.hamster_queues }}</label><input type="number" id="hamster-queues" name="CACHEHAMSTER_QUEUES" min="1" max="64" value="{{ v.CACHEHAMSTER_QUEUES }}"></div>
+      <div class="field"><label for="hamster-mbit">{{ t.hamster_max_mbit }}</label><input type="number" id="hamster-mbit" name="CACHEHAMSTER_MAX_MBIT" min="0" max="100000" value="{{ v.CACHEHAMSTER_MAX_MBIT }}"></div>
+      <div class="field"><label for="hamster-window">{{ t.hamster_window }}</label><input type="text" id="hamster-window" name="CACHEHAMSTER_WINDOW" pattern="[0-2][0-9]:[0-5][0-9]-[0-2][0-9]:[0-5][0-9]" placeholder="01:00-06:00" value="{{ v.CACHEHAMSTER_WINDOW }}"></div>
+      <button type="submit" class="btn">{{ t.save }}</button>
+    </form>
+
+    <div class="section-title">Jobs</div>
+    {% if hamster and hamster.jobs | length > 0 %}
+    <table class="table">
+      <tr><th>Name</th><th>{{ t.what }}</th><th>{{ t.when }}</th><th>{{ t.state }}</th><th>{{ t.progress }}</th><th></th></tr>
+      {% for j in hamster.jobs %}
+      <tr{% if j.state.state == "running" or (j.state.state == "waiting" and j.when.kind == "now") %} data-busy="1"{% endif %}>
+        <td>{{ j.name }}</td>
+        <td>{% if j.target.kind == "steam_app" %}{{ t.steam_app }} {{ j.target.value }}{% else %}{{ j.target.value | length }} {{ t.addresses }}{% endif %}</td>
+        <td>{% if j.when.kind == "at" %}<span data-unix="{{ j.when.at }}"></span>{% elif j.when.kind == "later" %}{{ t.by_hand_press_start }}{% else %}{{ t.now }}{% endif %}</td>
+        {% set sk = "hamster_st_" ~ j.state.state %}<td>{{ t[sk] }}{% if j.state.reason %}: {{ j.state.reason }}{% endif %}</td>
+        <td>{{ j.done }} {{ t.of }} {{ j.total }} {{ t.done }} {{ j.failed }} {{ t.failed }} {{ j.bytes | filesizeformat }}</td>
+        <td>
+          {% if j.id %}{% for op in ["start", "cancel", "remove"] %}
+          <form action="/cachehamster/{{ op }}" method="post" style="display:inline">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <input type="hidden" name="id" value="{{ j.id }}">
+            <button type="submit" class="btn">{{ t[op] }}</button>
+          </form>
+          {% endfor %}{% else %}{{ t.hamster_queued }}{% endif %}
+        </td>
+      </tr>
+      {% if j.history | length > 0 %}<tr><td colspan="6"><details><summary>{{ t.history }} ({{ j.history | length }})</summary><ul class="section-sub">{% for e in j.history | reverse %}{% set ek = "hamster_st_" ~ e.state %}<li><span data-unix="{{ e.at }}"></span> {{ t[ek] }}{% if e.reason %}: {{ e.reason }}{% endif %}</li>{% endfor %}</ul></details></td></tr>{% endif %}
+      {% endfor %}
+    </table>
+    {% else %}<p class="section-sub">{{ t.no_jobs_yet }}</p>{% endif %}
+  </div>
+
+  <div class="subtab5-panel" data-ch-panel="steam">
+    {% if hamster and hamster.logged_in %}
+    <p class="status-line"><span class="beam-light on"></span>{{ t.logged_in_as }} {{ hamster.account }}{{ t.only_an_encrypted_session_token_is }}</p>
+    <form action="{{ routes.hamster_logout | safe }}" method="post">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit" class="btn">{{ t.log_out }}</button>
+    </form>
+    <div class="section-title">{{ t.library }}</div>
+    <button type="button" class="btn" id="hamster-library">{{ t.load_owned_games }}</button>
+    <table class="table" id="hamster-games"></table>
+    {% else %}
+    <p class="section-sub">{{ t.scan_the_code_with_the_steam }}</p>
+    <button type="button" class="btn" id="hamster-login">{{ t.show_login_code }}</button>
+    <div id="hamster-qr" style="margin-top:14px;"></div>
+    <p class="status-line" id="hamster-login-state"></p>
     {% endif %}
-    <div class="placeholder-panel">
-      <div class="ph-tag">Placeholder</div>
-      <div class="glyph">⇓</div>
-      <p>Status of prefill jobs (running/last completed, chunks streamed through the proxy). The real shape depends on what the eventual Rust implementation exposes. Not yet built.</p>
-    </div>
-  </div>
-  <div class="subtab5-panel" data-ch-panel="library">
-    <div class="placeholder-panel">
-      <div class="ph-tag">Placeholder</div>
-      <div class="glyph">⇓</div>
-      <p>Manage the configurable list of App IDs to prefill (the project plan). Whether this gets a name-search convenience (e.g. against the public Steam Web API) or stays a plain App-ID list is not yet decided.</p>
-    </div>
-  </div>
-  <div class="subtab5-panel" data-ch-panel="schedule">
-    <div class="placeholder-panel">
-      <div class="ph-tag">Placeholder</div>
-      <div class="glyph">⇓</div>
-      <p>When prefill jobs run (e.g. off-peak hours). Not yet designed.</p>
-    </div>
-  </div>
-  <div class="subtab5-panel" data-ch-panel="credentials">
-    <div class="placeholder-panel">
-      <div class="ph-tag">Placeholder</div>
-      <div class="glyph">⇓</div>
-      <p>The real open decision of this project: anonymous Steam login only covers free-to-play/tools titles, so prefilling an operator's actual library needs a real account + Steam Guard 2FA. Owner still needs to decide: dedicated/throwaway account vs. main account, and where those credentials live.</p>
-    </div>
-  </div>
-  <div class="subtab5-panel" data-ch-panel="settings">
-    <div class="placeholder-panel">
-      <div class="ph-tag">Placeholder</div>
-      <div class="glyph">⇓</div>
-      <p>No disk-space setting here by design: the non-negotiable requirement is that this never writes game content to local disk; it streams through the proxy and discards. Settings here would cover things like which App IDs are enabled and prefill cadence, not storage.</p>
-    </div>
   </div>
 </section>
 {% endblock %}
 
-{# What: tab script after base.html's script #}
-{# Why: tabs switch panels without a page reload #}
-{# From: Issue #816 | PR #1858 #}
+{# What: tabs, schedule time, QR login, library #}
+{# Why: login polls without a page reload #}
+{# From: Issue #871 | PR #1858 #}
 {% block scripts %}
 <script>
-  // What: shows the panel of the clicked tab, marks the tab
-  // Why: one data-ch-tab name maps to one data-ch-panel
-  // From: Issue #816 | PR #1858
+  // What: the open tab survives a reload.
+  // Why: DoMe 05.11.: after the login it showed Jobs.
+  // From: Issue #871 | PR #1980
+  const pickTab = function (name) {
+    document.querySelectorAll('[data-ch-tab]').forEach(function (o) { o.classList.toggle('active', o.dataset.chTab === name); });
+    document.querySelectorAll('[data-ch-panel]').forEach(function (p) { p.classList.toggle('active', p.dataset.chPanel === name); });
+    try { sessionStorage.setItem('ch-tab', name); } catch (err) { reportError(err); }
+  };
   document.querySelectorAll('[data-ch-tab]').forEach(function (tab) {
-    tab.addEventListener('click', function () {
-      document.querySelectorAll('[data-ch-tab]').forEach(function (other) {
-        other.classList.toggle('active', other === tab);
-      });
-      document.querySelectorAll('[data-ch-panel]').forEach(function (panel) {
-        panel.classList.toggle('active', panel.dataset.chPanel === tab.dataset.chTab);
-      });
-    });
+    tab.addEventListener('click', function () { pickTab(tab.dataset.chTab); });
   });
+  try {
+    const saved = sessionStorage.getItem('ch-tab');
+    if (saved && document.querySelector('[data-ch-tab="' + saved + '"]')) { pickTab(saved); }
+  } catch (err) { reportError(err); }
+  document.querySelectorAll('[data-unix]').forEach(function (el) {
+    el.textContent = new Date(Number(el.dataset.unix) * 1000).toLocaleString();
+  });
+  // What: the time field opens its calendar on click.
+  // Why: DoMe 05.11.: a click on "tt" opened nothing.
+  // From: Issue #1683 | PR #1980
+  const atField = document.getElementById('hamster-at');
+  const whenField = document.getElementById('hamster-when');
+  const hint = document.getElementById('hamster-when-hint');
+  const hints = {
+    now: LC_T.starts_right_after_add_job,
+    later: LC_T.goes_into_the_job_list_and,
+    at: LC_T.starts_by_itself_at_the_chosen
+  };
+  const showAt = function () {
+    atField.hidden = whenField.value !== 'at';
+    hint.textContent = hints[whenField.value] || '';
+  };
+  whenField.addEventListener('change', showAt);
+  showAt();
+  atField.addEventListener('click', function () {
+    try { atField.showPicker(); } catch (err) { reportError(err); }
+  });
+  document.getElementById('hamster-add').addEventListener('submit', function () {
+    const at = document.getElementById('hamster-at').value;
+    document.getElementById('hamster-at-unix').value = at ? Math.floor(new Date(at).getTime() / 1000) : '';
+  });
+  const api = function (op) {
+    return fetch("{{ routes.hamster_api | safe }}".replace('{op}', op), {
+      method: 'POST', headers: { 'X-CSRF-Token': CSRF_TOKEN }
+    }).then(function (r) { return r.ok ? r.json() : r.text().then(function (t) { throw new Error(t); }); });
+  };
+  const login = document.getElementById('hamster-login');
+  if (login) {
+    const state = document.getElementById('hamster-login-state');
+    const qr = document.getElementById('hamster-qr');
+    const show = function (v) {
+      if (v.svg) { qr.innerHTML = v.svg; }
+      const words = { waiting: LC_T.waiting_for_the_scan, scanned: LC_T.scanned_please_confirm_in_the_steam, done: LC_T.logged_in };
+      state.textContent = words[v.state] || v.state;
+      if (v.state === 'done') { location.reload(); return; }
+      if (v.state !== 'idle') { setTimeout(function () { api('login-poll').then(show).catch(fail); }, (v.interval || 5) * 1000); }
+    };
+    const fail = function (e) { login.disabled = false; state.textContent = LC_T.login_failed; window.LancacheUi.fail(e); };
+    login.addEventListener('click', function () {
+      login.disabled = true;
+      state.textContent = LC_T.loading_login_code;
+      api('login-begin').then(show).catch(fail);
+    });
+  }
+  // What: reload while a job waits to start or runs.
+  // Why: DoMe 05.11.: "now" stayed on waiting on screen.
+  // From: Issue #871 | PR #1980
+  if (document.querySelector('tr[data-busy]')) {
+    setInterval(function () {
+      const typing = ['hamster-name', 'hamster-urls', 'hamster-app'].some(function (id) {
+        const el = document.getElementById(id);
+        return el && el.value !== '';
+      });
+      const jobs = document.querySelector('[data-ch-panel="jobs"]');
+      const shown = jobs && jobs.classList.contains('active');
+      if (shown && !typing && !document.querySelector('details[open]')) { location.reload(); }
+    }, 5000);
+  }
+  const lib = document.getElementById('hamster-library');
+  if (lib) {
+    lib.addEventListener('click', function () {
+      lib.disabled = true;
+      lib.textContent = LC_T.loading;
+      const back = function () { lib.disabled = false; lib.textContent = LC_T.load_owned_games; };
+      api('library').then(function (v) {
+        back();
+        const t = document.getElementById('hamster-games');
+        t.innerHTML = '<tr><th>App ID</th><th>Name</th><th></th></tr>';
+        v.games.forEach(function (g) {
+          const row = t.insertRow();
+          row.insertCell().textContent = g.appid;
+          row.insertCell().textContent = g.name;
+          // What: one click adds a "now" job for this game.
+          // Why: DoMe 05.11.: load straight from the list.
+          // From: Issue #871 | PR #1980
+          const f = document.createElement('form');
+          f.method = 'post';
+          f.action = "{{ routes.hamster_add | safe }}";
+          [['csrf_token', CSRF_TOKEN], ['name', g.name], ['app', String(g.appid)], ['when', 'now'], ['urls', ''], ['at', '']].forEach(function (p) {
+            const i = document.createElement('input');
+            i.type = 'hidden'; i.name = p[0]; i.value = p[1];
+            f.appendChild(i);
+          });
+          const b = document.createElement('button');
+          b.type = 'submit'; b.className = 'btn'; b.textContent = LC_T.preload;
+          f.addEventListener('submit', function () { b.disabled = true; b.textContent = LC_T.loading; });
+          f.appendChild(b);
+          row.insertCell().appendChild(f);
+        });
+      }).catch(function (e) { back(); window.LancacheUi.fail(e); });
+    });
+  }
 </script>
 {% endblock %}

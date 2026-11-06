@@ -4,46 +4,47 @@
 {# What: setup page: proxy and client commands #}
 {# Why: commands embed the server's LAN addresses #}
 {% extends "base.html" %}
-{% block title %} – General{% endblock %}
+{% block title %} – {{ t.general }}{% endblock %}
 
 {% block content %}
 <div class="space-y-6">
 
   <div>
-    <p class="eyebrow">Settings → General</p>
-    <h1 class="page-title">General</h1>
+    <p class="eyebrow">{{ t.settings_general }}</p>
+    <h1 class="page-title">{{ t.general }}</h1>
   </div>
 
   <!-- What: General page, markup copied from the mockup
        Why: DoMe wants the artifact 1:1; values are bound
        From: Issue #819 | PR #1858 -->
   <div>
-    <form method="post" action="{{ routes.setup_update | safe }}">
-      {{ <csrf_field csrf_token={csrf_token}/> }}
-      <div class="section-title" style="margin-top:0;">Release channel</div>
-      <p class="section-sub">Which set of images this box installs updates from.</p>
+    <form method="post" action="{{ routes.setup_save | safe }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div class="section-title" style="margin-top:0;">{{ t.release_channel }}</div>
+      <p class="section-sub">{{ t.which_set_of_images_this_box }}</p>
       <div class="field-row" style="align-items:center;">
         <div class="mode-switchrow" style="max-width:320px;" id="channel-row">
           {% for ch in ["nightly", "latest"] %}
-          <label class="mode-btn {% if lancache_image_channel == ch %}selected{% endif %}" style="position:relative;">
-            <input type="radio" name="lancache_image_channel" value="{{ ch }}"
-                   {% if lancache_image_channel == ch %}checked{% endif %}
+          <label class="mode-btn {% if v.LANCACHE_IMAGE_CHANNEL == ch %}selected{% endif %}" style="position:relative;">
+            <input type="radio" name="LANCACHE_IMAGE_CHANNEL" value="{{ ch }}"
+                   {% if v.LANCACHE_IMAGE_CHANNEL == ch %}checked{% endif %}
                    style="position:absolute; opacity:0; pointer-events:none;">{{ ch }}
           </label>
           {% endfor %}
         </div>
       </div>
-      <p class="field-hint">latest is the tested release. Nightly is the experimental build from current_dev; it can be broken and is not for production.</p>
+      <p class="field-hint">{{ t.latest_is_the_tested_release_nightly }}</p>
 
-      <div class="section-title">Automatic updates</div>
+      <div class="section-title">{{ t.automatic_updates }}</div>
       <div class="toggle-row">
         <div>
-          <div class="t-label">Check for updates automatically</div>
-          <div class="t-desc">Applied within {{ converge_minutes }} minutes of saving.</div>
+          <div class="t-label">{{ t.check_for_updates_automatically }}</div>
+          <div class="t-desc">{{ t.checked }} {{ v.AUTO_UPDATE_TIMER_CALENDAR }}{{ t.spread_over }} {{ v.AUTO_UPDATE_TIMER_SPREAD }}.</div>
         </div>
         <label class="toggle">
-          <input type="checkbox" id="auto_update_enabled" name="auto_update_enabled" value="1"
-                 {% if auto_update_enabled %}checked{% endif %}>
+          <input type="hidden" name="AUTO_UPDATE_ENABLED" value="0">
+                 <input type="checkbox" id="auto_update_enabled" name="AUTO_UPDATE_ENABLED" value="1"
+                 {% if v.AUTO_UPDATE_ENABLED == "1" or v.AUTO_UPDATE_ENABLED == "true" %}checked{% endif %}>
           <span class="track"></span><span class="knob"></span>
         </label>
       </div>
@@ -51,48 +52,50 @@
       <!-- What: time server (NTP) controls on General
          Why: the NTP page is gone; settings need a home
          From: Issue #1683 | PR #1858 -->
-      <div class="section-title">Time server (NTP)</div>
-      <p class="section-sub">Serves the time to LAN clients on UDP {{ ntp_port }}.</p>
+      <div class="section-title">{{ t.time_server_ntp }}</div>
+      <p class="section-sub">{{ t.serves_the_time_to_lan_clients }} {{ v.NTP_PORT }}.</p>
       <div class="toggle-row">
         <div>
-          <div class="t-label">Run the time server</div>
-          <div class="t-desc">Needs at least one upstream server (field below).</div>
-          {% if ntp_enabled %}<div class="t-desc" style="margin-top:4px;">{% if ntp_answers %}Status: answering on {{ http_ip }}:{{ ntp_port }}.{% else %}Status: no answer from {{ http_ip }}:{{ ntp_port }} yet.{% endif %}</div>{% endif %}
+          <div class="t-label">{{ t.run_the_time_server }}</div>
+          <div class="t-desc">{{ t.needs_at_least_one_upstream_server }}</div>
+          {% if v.NTP_ENABLED == "true" %}<div class="t-desc" style="margin-top:4px;">{% if ntp_answers %}{{ t.status_answering_on }} {{ v.IP_HTTP }}:{{ v.NTP_PORT }}.{% else %}{{ t.status_no_answer_from }} {{ v.IP_HTTP }}:{{ v.NTP_PORT }} {{ t.yet }}{% endif %}</div>{% endif %}
         </div>
         <label class="toggle">
-          <input type="checkbox" id="ntp_enabled" name="ntp_enabled" value="1"
-                 {% if ntp_enabled %}checked{% endif %}>
+          <input type="hidden" name="NTP_ENABLED" value="false">
+                 <input type="checkbox" id="ntp_enabled" name="NTP_ENABLED" value="true"
+                 {% if v.NTP_ENABLED == "true" %}checked{% endif %}>
           <span class="track"></span><span class="knob"></span>
         </label>
       </div>
-      <p class="field-hint">Test from a PC in the LAN: <code>w32tm /stripchart /computer:{{ http_ip }} /samples:3 /dataonly</code> (Windows) or <code>ntpdate -q {{ http_ip }}</code> (Linux). A reply means the time server runs.</p>
+      <p class="field-hint">{{ t.test_from_a_pc_in_the }} <code>w32tm /stripchart /computer:{{ v.IP_HTTP }} /samples:3 /dataonly</code> {{ t.windows_or }} <code>ntpdate -q {{ v.IP_HTTP }}</code> {{ t.linux_a_reply_means_the_time }}</p>
       <div class="field-row">
-        <textarea name="ntp_upstream_servers" rows="2" style="width:100%; padding:9px 11px; border-radius:8px; border:1px solid var(--navy-600); background:var(--navy-900); color:var(--foam); font-family:var(--font-mono); font-size:13px;">{{ ntp_upstream_servers }}</textarea>
+        <textarea name="NTP_UPSTREAM_SERVERS" rows="2" style="width:100%; padding:9px 11px; border-radius:8px; border:1px solid var(--navy-600); background:var(--navy-900); color:var(--foam); font-family:var(--font-mono); font-size:13px;">{{ v.NTP_UPSTREAM_SERVERS }}</textarea>
       </div>
-      <p class="field-hint">At least one server. Names or IP addresses, separated by a space, comma or new line, for example <code>0.debian.pool.ntp.org time.cloudflare.com</code>.</p>
+      <p class="field-hint">{{ t.at_least_one_server_names_or }} <code>0.debian.pool.ntp.org time.cloudflare.com</code>.</p>
       <div class="toggle-row">
         <div>
-          <div class="t-label">Hand this time server to DHCP clients</div>
-          <div class="t-desc">Needs the time server and the Kea DHCP server enabled.</div>
+          <div class="t-label">{{ t.hand_this_time_server_to_dhcp }}</div>
+          <div class="t-desc">{{ t.needs_the_time_server_and_the }}</div>
         </div>
         <label class="toggle">
-          <input type="checkbox" id="ntp_auto_dhcp" name="ntp_auto_dhcp" value="1"
-                 {% if ntp_auto_dhcp %}checked{% endif %}>
+          <input type="hidden" name="NTP_AUTO_DHCP" value="false">
+                 <input type="checkbox" id="ntp_auto_dhcp" name="NTP_AUTO_DHCP" value="true"
+                 {% if v.NTP_AUTO_DHCP == "true" %}checked{% endif %}>
           <span class="track"></span><span class="knob"></span>
         </label>
       </div>
-      <button type="submit" class="btn" style="margin-top:14px; margin-bottom:6px;">Save</button>
+      <button type="submit" class="btn" style="margin-top:14px; margin-bottom:6px;">{{ t.save }}</button>
     </form>
 
-    <div class="section-title">Language</div>
-    <p class="section-sub">Changes the language of this interface, including tooltips and error messages.</p>
-    <div class="mode-switchrow" style="max-width:320px;" id="lang-row"></div>
+    <div class="section-title">{{ t.language }}</div>
+    <p class="section-sub">{{ t.changes_the_language_of_this_interface }}</p>
+    <div class="mode-switchrow" style="max-width:320px;" id="lang-row">{% for l in langs %}<button type="button" class="mode-btn{% if l[0] == lang %} selected{% endif %}" data-lang="{{ l[0] }}">{{ l[1] }}</button>{% endfor %}</div>
 
-    <div class="section-title">Appearance</div>
+    <div class="section-title">{{ t.appearance }}</div>
     <div class="toggle-row">
       <div>
-        <div class="t-label">Match system theme</div>
-        <div class="t-desc">Follows your device's light/dark setting automatically.</div>
+        <div class="t-label">{{ t.match_system_theme }}</div>
+        <div class="t-desc">{{ t.follows_your_device_s_light_dark }}</div>
       </div>
       <label class="toggle">
         <input type="checkbox" id="follow-system-theme">
@@ -100,35 +103,35 @@
       </label>
     </div>
 
-    <div class="section-title">Sign-in</div>
+    <div class="section-title">{{ t.sign_in }}</div>
     {% if login_enabled %}
-    <p class="section-sub">This Admin UI requires a username and password unless you've explicitly turned that off for a trusted network.</p>
-    <button type="button" class="btn ghost" id="password-open">Change password</button>
+    <p class="section-sub">{{ t.this_admin_ui_requires_a_username }}</p>
+    <button type="button" class="btn ghost" id="password-open">{{ t.change_password }}</button>
     <div id="password-card" class="card hidden" style="margin-top:14px; max-width:480px;">
-      <p class="section-sub">At least 12 characters. The browser asks for the password once more after saving.</p>
+      <p class="section-sub">{{ t.at_least_12_characters_the_browser }}</p>
       <form method="post" action="{{ routes.password | safe }}" autocomplete="off"
           style="display:grid; gap:12px; max-width:420px;">
-      {{ <csrf_field csrf_token={csrf_token}/> }}
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <div>
-        <label class="block text-xs text-slate-400 mb-1" for="current_password">Aktuelles Passwort</label>
+        <label class="block text-xs text-slate-400 mb-1" for="current_password">{{ t.current_password }}</label>
         <input type="password" id="current_password" name="current_password" required
                autocomplete="current-password" style="width:100%;">
       </div>
       <div>
-        <label class="block text-xs text-slate-400 mb-1" for="new_password">Neues Passwort</label>
+        <label class="block text-xs text-slate-400 mb-1" for="new_password">{{ t.new_password }}</label>
         <input type="password" id="new_password" name="new_password" required minlength="12"
                autocomplete="new-password" style="width:100%;">
       </div>
       <div>
-        <label class="block text-xs text-slate-400 mb-1" for="confirm_password">Neues Passwort wiederholen</label>
+        <label class="block text-xs text-slate-400 mb-1" for="confirm_password">{{ t.repeat_new_password }}</label>
         <input type="password" id="confirm_password" name="confirm_password" required minlength="12"
                autocomplete="new-password" style="width:100%;">
       </div>
-      <button type="submit" class="btn btn-blue">Passwort ändern</button>
+      <button type="submit" class="btn btn-blue">{{ t.change_password }}</button>
     </form>
     </div>
     {% else %}
-    <p class="section-sub">Sign-in is turned off for this Admin UI.</p>
+    <p class="section-sub">{{ t.sign_in_is_turned_off_for }}</p>
     {% endif %}
   </div>
 </div>

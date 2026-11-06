@@ -55,9 +55,14 @@ CI_ARG_TOOLCHAIN_IMAGE=BUILD_TOOLS_IMAGE
 CI_ARG_CRATES=RUST_CRATES
 CI_ARG_TARGET=MUSL_TARGET
 CI_ARG_PROCESSES=LANCACHE_PROCESSES
+CI_ARG_PROCESS_PRE=LANCACHE_PROCESS_PRE
 CI_ARG_GID=LANCACHE_RUNTIME_GID
 CI_ARG_IMAGE_SETUP=IMAGE_SETUP
 CI_ARG_DEFAULTS=LANCACHE_RUNTIME_DEFAULTS
+# What: build-arg and env name of the SOT settings schema.
+# Why: config.rs checks every value against it.
+# From: Issue #1683 | PR #1858
+CI_ARG_SCHEMA=LANCACHE_RUNTIME_SCHEMA
 
 # What: The ci.sh subcommand dispatch table.
 # Why: One table is membership, dispatch and error text.
@@ -92,7 +97,7 @@ declare -gA CI_CHECKS=(
     [stable-external-images]="repo _ci_check_stable_external_images" [compose-healthchecks]="repo _ci_check_compose_healthchecks"
     [proxy-cache-env-doc-drift]="repo _ci_check_proxy_cache_env_doc_drift" [prebuilt-prod]="repo _ci_check_prebuilt_prod"
     [prod-state-wiring]="repo _ci_check_prod_state_wiring" [compose-config]="repo _ci_check_compose_config"
-    [netdata-isolation]="repo _ci_check_netdata_isolation" [proxy-cert-volume]="repo _ci_check_proxy_cert_volume"
+    [proxy-cert-volume]="repo _ci_check_proxy_cert_volume"
     [proxy-nginx-policy]="repo _ci_check_proxy_nginx_policy"
     [setup-update-safety]="repo _ci_check_setup_update_safety" [image-channel-resolution]="repo _ci_check_image_channel_resolution"
     [vex-drift]="repo _ci_check_vex_drift" [logging-matrix]="repo _ci_check_logging_matrix"
@@ -1448,7 +1453,7 @@ _ci_github_get() {
         return 0
     fi
     # What: rate limit: one more read with the job token.
-    # Why: hosted runners share IPs; 60 anonymous reads/h.
+    # Why: shared runner IPs; no log, callers read 2>&1.
     # From: Issue #1683 | PR #1858
     if [[ "${out}" != *"API rate limit exceeded"* ]] || [ -z "${tok}" ]; then
         printf '%s\n' "${out}"
@@ -8912,7 +8917,7 @@ _ci_test_rust() {
     # What: workspace-root cargo on the service's crates.
     # Why: build context is no crate; AG-VAL-008 per crate.
     # From: Issue #1683 | PR #1858
-    local trc=0 c setup_rc=200 defaults rows kv
+    local trc=0 c setup_rc=200 defaults schema rows kv
     local -a picks=() crate_list=()
     [ -z "${ctx}" ] || mapfile -t crate_list <<< "${ctx}"
     for c in "${crate_list[@]}"; do picks+=(-p "${c}"); done
@@ -8921,6 +8926,7 @@ _ci_test_rust() {
     # Why: no test invents a value (AG-CODE-010).
     # From: Issue #1683 | PR #1858
     defaults="$(_ci_service_defaults_arg "${service}")" || return 2
+    schema="$(_ci_service_schema_arg "${service}")" || return 2
     rows="$(_ci_service_compose_env "${service}")" || return 2
     _ci_cargo_lock || return 2
     ( _ci_sccache_env "${service}" || exit "${setup_rc}"
@@ -8929,6 +8935,7 @@ _ci_test_rust() {
             [ -z "${kv}" ] || export "${kv?}"
         done <<< "${rows}"
         export "${CI_ARG_DEFAULTS}=${defaults}"
+        export "${CI_ARG_SCHEMA}=${schema}"
         cd "${CI_REPO_ROOT:-.}" \
             && cargo fmt --check "${picks[@]}" \
             && cargo clippy --all-targets "${picks[@]}" -- -D warnings \
@@ -12446,7 +12453,11 @@ _ci_validate_dns() {
     for side in IP_HTTP IP_HTTPS; do
         port="$(_ci_validate_dns_port "${side}")" || return 2
         out="$(_ci_run -s "[CI-ERROR-VALIDATE-0117]" "domain=\"${domain}\" side=\"${side}\" reason=\"dig failed\"" \
-            _ci_validate_dig +short -p "${port}" "@${ip}" A "${domain}")" || return 2
+            _ci_validate_dig +short -p "${port}" "@${ip}" A "${domain}")" || {
+            _ci_validate_service_evidence "${project}" "${svc}" >&2
+            _ci_validate_service_evidence "${project}" "$(_ci_validation_service ui)" >&2
+            return 2
+        }
         out="$(_ci_capture 0 sort -u <<<"${out}")" || return 2
         if [ -z "${out}" ]; then
             ci_log "[CI-ERROR-VALIDATE-0011]" "domain=\"${domain}\" side=\"${side}\" reason=\"no DNS answer from a resolver side\""
@@ -12525,7 +12536,8 @@ _ci_https_dispatch_violations() {
 # From: Issue #1683
 _ci_validate_proxy_stream_map() {
     local file port
-    file="$(_ci_proxy_constant NGINX_STREAM_TARGETS)" || return 2
+    file="$(_ci_runtime_default NGINX_STREAM_TARGETS_FILE)" || return 2
+    file="$(_ci_nginx_path "${file}")" || return 2
     port="$(_ci_runtime_default NGINX_ORIGIN_HTTPS_PORT)" || return 2
     _ci_validate_proxy_map "$1" "${file}" _ci_stream_map_violations "${port}" \
         "[CI-ERROR-VALIDATE-0022]" "no proxy container for stream-map check" \
@@ -12574,6 +12586,7 @@ _ci_validate_https_mitm() {
     fi
     tmp="$(_ci_mktemp "${CI_TMPDIR}/ci-proxy-ca.XXXXXX")" || return 2
     if ! out="$(docker cp "${cid}:${ca}/${ca_file}" "${tmp}" 2>&1)"; then
+        out+=$'\n'"$(_ci_validate_service_evidence "${project}" "$(_ci_validation_service ui)")"
         ci_error "[CI-ERROR-VALIDATE-0024]" "reason=\"could not read proxy LAN CA for https-mitm check\"" "${out}"
         rm -f "${tmp}"
         return 2
@@ -12592,7 +12605,7 @@ _ci_validate_https_mitm() {
         issuer="${issuer#issuer=}"
     fi
     if [ -z "${ca_subj}" ] || [ -z "${issuer}" ]; then
-        ci_error "[CI-ERROR-VALIDATE-0025]" "domain=\"${domain}\" reason=\"no TLS issuer or CA subject for https-mitm check\"" "$(cat "${tls_err}")"
+        ci_error "[CI-ERROR-VALIDATE-0025]" "domain=\"${domain}\" reason=\"no TLS issuer or CA subject for https-mitm check\"" "$(cat "${tls_err}"; _ci_validate_service_evidence "${project}" "$(_ci_validation_service ui)")"
         rm -f "${tls_err}"
         return 1
     fi
@@ -12611,7 +12624,8 @@ _ci_validate_https_mitm() {
 # From: Issue #1683
 _ci_validate_https_dispatch_map() {
     local file relay
-    file="$(_ci_proxy_constant NGINX_HTTPS_DISPATCH)" || return 2
+    file="$(_ci_runtime_default NGINX_HTTPS_DISPATCH_FILE)" || return 2
+    file="$(_ci_nginx_path "${file}")" || return 2
     relay="$(_ci_runtime_default NGINX_PASSTHROUGH_RELAY_PORT)" || return 2
     _ci_validate_proxy_map "$1" "${file}" _ci_https_dispatch_violations "${relay}" \
         "[CI-ERROR-VALIDATE-0027]" "no proxy container for https-dispatch-map check" \
@@ -12757,7 +12771,7 @@ _ci_validate_setup_rollback() {
 }
 
 # What: POST one LAN A record through the ui (303 on ok)
-# Why: drives the real UI->NATS->PowerDNS write path
+# Why: drives the real UI->PowerDNS API write path
 # From: Issue #1683 | PR #1858
 _ci_validate_ui_add_record() {
     local base="$1" jar="$2" csrf="$3" name="$4" content="$5" ttl route
@@ -12857,7 +12871,7 @@ _ci_validate_dig() {
 }
 
 # What: Poll one dns side until <fqdn> is <expected>.
-# Why: the NATS->PowerDNS write is async; prove it.
+# Why: AXFR to the second side is async; prove it.
 # From: Issue #1683 | PR #1912
 _ci_validate_dns_resolves() {
     local project="$1" side="$2" fqdn="$3" expected="$4" attempts="$5" ip port svc
@@ -12902,10 +12916,10 @@ _ci_validate_dns_match() {
     return 1
 }
 
-# What: UI->NATS->PowerDNS writes reach both dns sides.
-# Why: Real end-to-end NATS ingest, not a mock.
+# What: UI->PowerDNS writes reach both dns sides.
+# Why: real end-to-end write, not a mock.
 # From: Issue #1683 | PR #1912
-_ci_validate_ui_nats_dns() {
+_ci_validate_ui_dns() {
     local project="$1" jar csrf cid base zone label ip dns_wait side rc=0 svc
     svc="$(_ci_validation_service ui)" || return 2
     cid="$(_ci_validate_cid "${project}" "${svc}")" || return 2
@@ -13028,13 +13042,14 @@ _ci_fill() {
     REPLY="${out}${text}"
 }
 
-# What: http://<dns ip>:<port> of the rollback listener
-# Why: the port is the SOT runtime default, not a ui env
-# From: Issue #628 | PR #1858
-_ci_validate_rollback_base() {
-    local ip="$1" port
-    port="$(_ci_runtime_default DNS_ROLLBACK_PORT)" || return 2
-    printf 'http://%s:%s' "${ip}" "${port}"
+# What: zone snapshots as JSON, via the ui CLI.
+# Why: the ui owns them; setup.sh calls the same.
+# From: Issue #628 | PR #1980
+_ci_validate_zone_snapshots() {
+    local cid="$1" bin out
+    bin="$(_ci_required_field ui crates list)" || return 2
+    out="$(_ci_capture 0 _ci_bounded_exec "${cid}" "${bin%%$'\n'*}" zone-snapshots)" || return 2
+    printf '%s\n' "${out##*$'\n'}"
 }
 
 # What: writes a deploy/prod install's .env.local, mode 600.
@@ -13054,11 +13069,11 @@ _ci_validate_env_local() {
 }
 
 # What: DNS known-good snapshot/rollback round-trip.
-# Why: Real listener HTTP + PATCH + cache flush.
-# From: Issue #1683
+# Why: ui CLI snapshots + PATCH + cache flush.
+# From: Issue #1683 | PR #1980
 _ci_validate_dns_rollback() {
-    local project="$1" ip cid key jar csrf snap resp code rc=0 last
-    local zone label old new dns_wait ucid base lbase tries pause decoy dsvc usvc
+    local project="$1" ip cid jar csrf snap resp rc=0 last
+    local zone label old new dns_wait ucid base tries pause decoy dsvc usvc
     dsvc="$(_ci_validation_service dns)" || return 2
     usvc="$(_ci_validation_service ui)" || return 2
     ip="$(_ci_validate_container_ip "${project}" "${dsvc}")"
@@ -13067,36 +13082,7 @@ _ci_validate_dns_rollback() {
         ci_log "[CI-ERROR-VALIDATE-0037]" "reason=\"no dns container/IP for rollback check\""
         return 2
     fi
-    # What: read PDNS_API_KEY from the shared-secrets mount.
-    # Why: watchdog resolves it at runtime, not env.
-    # From: Issue #858
-    key="$(_ci_validate_shared_secret "${project}" "${cid}" pdns-api-key)" || return 2
-    key="${key//$'\n'/}"
-    if [ -z "${key}" ]; then
-        ci_log "[CI-ERROR-VALIDATE-0038]" "reason=\"could not read PDNS_API_KEY from shared-secrets\""
-        return 2
-    fi
     ucid="$(_ci_validate_cid "${project}" "${usvc}")" || return 2
-    lbase="$(_ci_validate_rollback_base "${ip}")" || return 2
-    # What: one try; dns healthy means the listener accepts.
-    # Why: the healthcheck connects to it; no poll.
-    # From: Issue #1683 | PR #1912
-    if ! last="$(_ci_curl_secret header "X-API-Key: ${key}" -fsS "${lbase}/snapshots" 2>&1)"; then
-        ci_error "[CI-ERROR-VALIDATE-0039]" "url=\"${lbase}\" reason=\"rollback listener did not accept\"" "${last}"
-        return 1
-    fi
-    resp="$(_ci_capture 0 _ci_validate_curl -sS -w '\n%{http_code}' "${lbase}/snapshots")" || return 2
-    code="${resp##*$'\n'}"
-    if [ "${code}" != "401" ]; then
-        ci_error "[CI-ERROR-VALIDATE-0040]" "code=\"${code}\" reason=\"/snapshots without X-API-Key not 401\"" "${resp}"
-        return 1
-    fi
-    resp="$(_ci_capture 0 _ci_curl_secret header "X-API-Key: ${key}x" -sS -w '\n%{http_code}' "${lbase}/snapshots")" || return 2
-    code="${resp##*$'\n'}"
-    if [ "${code}" != "401" ]; then
-        ci_error "[CI-ERROR-VALIDATE-0041]" "code=\"${code}\" reason=\"/snapshots with wrong X-API-Key not 401\"" "${resp}"
-        return 1
-    fi
     zone="$(_ci_validate_lan_zone)" || return 2
     label="$(_ci_variable CI_VALIDATE_PROBE_LABEL)" || return 2
     old="$(_ci_validate_probe_ip 2)" && new="$(_ci_validate_probe_ip 3)" || return 2
@@ -13108,7 +13094,7 @@ _ci_validate_dns_rollback() {
     # What: capture the zone's newest snapshot (pre-change).
     # Why: target this test rolls back to after 2nd write.
     # From: Issue #628
-    resp="$(_ci_capture 0 _ci_curl_secret header "X-API-Key: ${key}" -sS "${lbase}/snapshots")" || { rm -f "${jar}"; return 2; }
+    resp="$(_ci_validate_zone_snapshots "${ucid}")" || { rm -f "${jar}"; return 2; }
     snap="$(_ci_capture 0 jq -r --arg z "${zone}" ".zones[\$z][0].id // empty" <<<"${resp}")" || { rm -f "${jar}"; return 2; }
     if [ -z "${snap}" ]; then
         ci_log "[CI-ERROR-VALIDATE-0042]" "zone=\"${zone}\" reason=\"no known-good snapshot after first write\""
@@ -13118,7 +13104,7 @@ _ci_validate_dns_rollback() {
     _ci_validate_ui_add_record "${base}" "${jar}" "${csrf}" "${label}" "${new}" || { rm -f "${jar}"; return 1; }
     _ci_validate_dns_resolves "${project}" IP_HTTP "${label}.${zone}" "${new}" "${dns_wait}" || { rm -f "${jar}"; return 1; }
     rm -f "${jar}"
-    resp="$(_ci_capture 0 _ci_curl_secret header "X-API-Key: ${key}" -sS "${lbase}/snapshots")" || return 2
+    resp="$(_ci_validate_zone_snapshots "${ucid}")" || return 2
     last="$(_ci_capture 0 jq -r --arg z "${zone}" ".zones[\$z][0].id // empty" <<<"${resp}")" || return 2
     # What: setup.sh rollback, wrong host PDNS_API_KEY.
     # Why: the key must be resolved inside the container.
@@ -13128,7 +13114,7 @@ _ci_validate_dns_rollback() {
         _ci_validate_setup_rollback resp rc "" "${dsvc}" "${zone}" "${snap}" || return 2
     case "${rc}:${resp}" in
         *"cache-flush publishes failed"*) rc=1 ;;
-        0:*"rolled back to known-good snapshot ${snap}"*"${label}.${zone}"*) ;;
+        0:*"rolled back to known-good snapshot ${snap}."*) ;;
         *) rc=1 ;;
     esac
     if [ "${rc}" -ne 0 ]; then
@@ -13141,7 +13127,7 @@ _ci_validate_dns_rollback() {
     _ci_validate_dns_resolves "${project}" IP_HTTP "${label}.${zone}" "${old}" "${dns_wait}" || return $?
     tries="$(_ci_variable CI_VALIDATE_SNAPSHOT_POLL_ATTEMPTS)" || return 2
     pause="$(_ci_variable CI_VALIDATE_POLL_PAUSE)" || return 2
-    if ! resp="$(_ci_validate_poll "${tries}" "${pause}" _ci_validate_new_snapshot "${lbase}" "${key}" "${last}" "${zone}")"; then
+    if ! resp="$(_ci_validate_poll "${tries}" "${pause}" _ci_validate_new_snapshot "${ucid}" "${last}" "${zone}")"; then
         ci_error "[CI-ERROR-VALIDATE-0087]" "previous=\"${last}\" zone=\"${zone}\" reason=\"no new snapshot after the rollback\"" "${resp}"
         return 1
     fi
@@ -13151,8 +13137,8 @@ _ci_validate_dns_rollback() {
 # Why: a restore must record the restored state too.
 # From: Issue #836
 _ci_validate_new_snapshot() {
-    _ci_curl_secret header "X-API-Key: $2" -fsS "$1/snapshots" \
-        | jq -e --arg p "$3" --arg z "$4" '(.zones[$z][0].id // "") as $i | $i != "" and $i != $p'
+    _ci_validate_zone_snapshots "$1" \
+        | jq -e --arg p "$2" --arg z "$3" '(.zones[$z][0].id // "") as $i | $i != "" and $i != $p'
 }
 
 # What: http-port or user of the Kea control agent
@@ -13196,6 +13182,10 @@ _ci_validate_kea_snapshots() {
         ci_log "[CI-ERROR-CHECK-0197]" "key=\"KEA_CONFIG_SNAPSHOT_FILE\" value=\"${file}\" reason=\"SOT snapshot file name is no plain file name\""
         return 2
     fi
+    # What: no snapshot dir yet means no snapshots.
+    # Why: the ui makes it with its first Kea write.
+    # From: Issue #763 | PR #1980
+    [ -d "$1" ] || return 0
     found="$(_ci_capture 0 find "$1" -mindepth 2 -maxdepth 2 -name "${file}")" || return 2
     while IFS= read -r p; do
         id="${p%/"${file}"}"
@@ -13246,7 +13236,7 @@ _ci_validate_kea_add() {
 # From: Issue #763 | PR #1858
 _ci_validate_kea_round_trip() {
     local project="$1" kip="$2" kport="$3" uname="$4" cfg token dir subnet resp sid ubase
-    local jar csrf base snap snap_b n_a n_b rc=0 kbase kuser label mac_a mac_b snapdir mount snaps
+    local jar csrf base snap snap_b n_a n_b rc=0 kbase kuser label mac_a mac_b snapdir mount snaps tries pause
     kbase="http://${kip}:${kport}"
     kuser="$(_ci_validate_kea_agent user)" || return 2
     label="$(_ci_variable CI_VALIDATE_PROBE_LABEL)" || return 2
@@ -13269,9 +13259,12 @@ PROG
     fi
     dir="${mount%%$'\t'*}"
     snaps="${dir}${mount#*$'\t'}"
-    # What: one config-get; healthy dhcp means it accepts.
-    # Why: the healthcheck connects to it; no poll.
-    # From: Issue #1683 | PR #1912
+    # What: wait until the agent answers config-get.
+    # Why: dhcp health checks no agent; the ui restarts it.
+    # From: Issue #1683 | PR #1980
+    tries="$(_ci_variable CI_VALIDATE_SNAPSHOT_POLL_ATTEMPTS)" || return 2
+    pause="$(_ci_variable CI_VALIDATE_POLL_PAUSE)" || return 2
+    _ci_validate_poll "${tries}" "${pause}" _ci_validate_kea_cmd "${kbase}" "${kuser}" "${token}" '{"command":"config-get","service":["dhcp4"]}' > /dev/null || true
     resp="$(_ci_capture 0 _ci_validate_kea_cmd "${kbase}" "${kuser}" "${token}" '{"command":"config-get","service":["dhcp4"]}')" || return 2
     _ci_kea_reply_check "[CI-ERROR-VALIDATE-0090]" "ip=\"${kip}\" reason=\"Kea control agent config-get did not return result 0\"" "${resp}" || return 1
     sid="$(_ci_capture 0 jq -r --arg s "${subnet}" ".[0].arguments.Dhcp4.subnet4[]? | select(.subnet == \$s) | .id" <<< "${resp}")" || return 2
@@ -13322,6 +13315,17 @@ _ci_validate_rm_run() {
         docker rm -f "$1"
 }
 
+# What: Kea mode file and OpenRC state, for evidence.
+# Why: a silent mode-off start shows no service lines.
+# From: Issue #1683 | PR #1980
+_ci_validate_kea_state() {
+    local file
+    file="$(_ci_runtime_default DHCP_MODE_FILE)" || return 2
+    printf 'mode file %s:\n' "${file}"
+    docker exec "$1" cat "${file}" 2>&1
+    docker exec "$1" rc-status -a 2>&1
+}
+
 # What: Kea rollback leg on its own run containers.
 # Why: dhcp is host-mode, so up never starts a Kea.
 # From: Issue #763 | PR #1858
@@ -13356,7 +13360,7 @@ _ci_validate_kea_rollback() {
         # From: Issue #1683 | PR #1912
         if [ "${rc}" -ne 0 ]; then
             ci_error "[CI-ERROR-VALIDATE-0126]" "ui=\"${uname}\" kea=\"${kname}\" rc=${rc} reason=\"Kea round trip failed; run logs in raw\"" \
-                "$(docker logs --tail "${tail_lines}" "${uname}" 2>&1; docker logs --tail "${tail_lines}" "${kname}" 2>&1)"
+                "$(docker logs --tail "${tail_lines}" "${uname}" 2>&1; docker logs --tail "${tail_lines}" "${kname}" 2>&1; _ci_validate_kea_state "${kname}")"
         fi
         _ci_validate_rm_run "${uname}" || { [ "${rc}" -ne 0 ] || rc=2; }
     else
@@ -13400,8 +13404,8 @@ _ci_validate_ui_token_file() {
     _ci_runtime_default SECONDARY_REGISTRATION_TOKEN_FILE
 }
 
-# What: Prove each secondary gets unique identity.
-# Why: per-secondary NATS auth-callout, not shared token.
+# What: each secondary gets the transfer key.
+# Why: AXFR needs TSIG name, secret and primary.
 # From: Issue #1683
 _ci_validate_secondary_identity() {
     local project="$1" base cid token a b au bu ap bp trc=0 tf label svc
@@ -13437,16 +13441,12 @@ _ci_validate_secondary_identity() {
         ci_log "[CI-ERROR-VALIDATE-0047]" "reason=\"a secondary register did not return 200\""
         return 1
     fi
-    au="$(_ci_capture 0 jq -r '.nats_user // empty' <<< "${a}")" || return 1
-    bu="$(_ci_capture 0 jq -r '.nats_user // empty' <<< "${b}")" || return 1
-    ap="$(_ci_capture 0 jq -r '.nats_password // empty' <<< "${a}")" || return 1
-    bp="$(_ci_capture 0 jq -r '.nats_password // empty' <<< "${b}")" || return 1
+    au="$(_ci_capture 0 jq -r '.tsig_name // empty' <<< "${a}")" || return 1
+    bu="$(_ci_capture 0 jq -r '.tsig_name // empty' <<< "${b}")" || return 1
+    ap="$(_ci_capture 0 jq -r '.tsig_secret // empty' <<< "${a}")" || return 1
+    bp="$(_ci_capture 0 jq -r '.primary // empty' <<< "${b}")" || return 1
     if [ -z "${au}" ] || [ -z "${bu}" ] || [ -z "${ap}" ] || [ -z "${bp}" ]; then
-        ci_log "[CI-ERROR-VALIDATE-0048]" "reason=\"register response missing nats_user/nats_password\""
-        return 1
-    fi
-    if [ "${au}" = "${bu}" ] || [ "${ap}" = "${bp}" ]; then
-        ci_log "[CI-ERROR-VALIDATE-0049]" "reason=\"two secondaries got the same NATS identity (per-secondary identity lost)\""
+        ci_log "[CI-ERROR-VALIDATE-0048]" "reason=\"register response missing tsig_name/tsig_secret/primary\""
         return 1
     fi
 }
@@ -13461,14 +13461,14 @@ _ci_validate_probes() {
     # Why: a green log must show which probes ran (§79)
     # From: Issue #1683 | PR #1858
     for p in dns proxy proxy_stream_map https_mitm https_dispatch_map \
-        ui_nats_dns dns_rollback kea_rollback secondary_identity; do
+        ui_dns dns_rollback kea_rollback secondary_identity; do
         case "${p}" in
             dns) _ci_validate_dns "${project}" ;;
             proxy) _ci_validate_proxy "${project}" ;;
             proxy_stream_map) _ci_validate_proxy_stream_map "${project}" ;;
             https_mitm) _ci_validate_https_mitm "${project}" ;;
             https_dispatch_map) _ci_validate_https_dispatch_map "${project}" ;;
-            ui_nats_dns) _ci_validate_ui_nats_dns "${project}" ;;
+            ui_dns) _ci_validate_ui_dns "${project}" ;;
             dns_rollback) _ci_validate_dns_rollback "${project}" ;;
             kea_rollback) _ci_validate_kea_rollback "${project}" "${net}" "${pin}" ;;
             secondary_identity) _ci_validate_secondary_identity "${project}" ;;
@@ -14047,17 +14047,29 @@ _ci_service_setup() {
 # Why: 64.4: a default rebuilds only images that read it.
 # From: Issue #1683 | PR #1912
 _ci_service_default_rows() {
-    local service="$1" rows type text="" paths p part field tracked memo out=""
+    local service="$1" want="${2:-defaults}" rows type text="" paths p part field tracked memo out="" d k
     local -a specs=() files=()
     # What: one call builds a service's rows once.
     # Why: A3: plan built them per platform, 2.1 s each.
     # From: Issue #1683 | PR #1858
-    memo="default-rows-${_CI_CALL_KEY}-${service}"
+    memo="${want}-rows-${_CI_CALL_KEY}-${service}"
     if out="$(_ci_job_memo_get "${memo}")"; then
         printf '%s\n' "${out}"
         return 0
     fi
-    rows="$(_ci_runtime_defaults)" || return 2
+    # What: defaults rows, or schema rows for want=schema.
+    # Why: keys without default still need a spec.
+    # From: Issue #1683 | PR #1980
+    local -A has_default=()
+    if [ "${want}" = schema ]; then
+        rows="$(_ci_required_field runtime schema blocklist)" || return 2
+        d="$(_ci_runtime_defaults)" || return 2
+        while IFS= read -r k; do
+            [ -z "${k}" ] || has_default["${k%%=*}"]=1
+        done <<< "${d}"
+    else
+        rows="$(_ci_runtime_defaults)" || return 2
+    fi
     type="$(_ci_required_field "${service}" build_type)" || return 2
     if [ "${type}" = rust ]; then
         text="$(_ci_rust_content "${service}" "" text)" || return 2
@@ -14083,7 +14095,7 @@ _ci_service_default_rows() {
             git -C "${CI_REPO_ROOT}" grep --cached -I -h -o -E '[A-Z][A-Z0-9_]*' -- "${files[@]}")" || return 2
         text+=$'\n'"${part}"
     fi
-    for field in processes setup default_args; do
+    for field in processes process_pre setup default_args; do
         part="$(_ci_target_list "${service}" "${field}")" || return 2
         text+=$'\n'"${part}"
     done
@@ -14099,7 +14111,15 @@ _ci_service_default_rows() {
     done <<< "${words}"
     while IFS= read -r row; do
         [ -n "${row}" ] || continue
-        [ -z "${used["${row%%=*}"]+x}" ] || out+="${row}"$'\n'
+        [ -n "${used["${row%%=*}"]+x}" ] || continue
+        # What: a schema row without default is optional.
+        # Why: compose or setup.sh sets it; load holds.
+        # From: Issue #1683 | PR #1980
+        if [ "${want}" = schema ] && [ -z "${has_default["${row%%=*}"]+x}" ]; then
+            k="${row#*=}"; k="${k%%;*}"
+            [[ "${k}" == *\? ]] || row="${row%%=*}=${k}?${row#*="${k}"}"
+        fi
+        out+="${row}"$'\n'
     done <<< "${rows}"
     [ -n "${out}" ] || return 0
     _ci_job_memo_put "${memo}" "${out%$'\n'}" || return 2
@@ -14112,6 +14132,15 @@ _ci_service_default_rows() {
 _ci_service_defaults_arg() {
     local rows
     rows="$(_ci_service_default_rows "$1")" || return 2
+    printf '%s' "${rows//$'\n'/|}"
+}
+
+# What: the SOT schema rows of the keys one image reads.
+# Why: config.rs needs a spec for every read key.
+# From: Issue #1683 | PR #1858
+_ci_service_schema_arg() {
+    local rows
+    rows="$(_ci_service_default_rows "$1" schema)" || return 2
     printf '%s' "${rows//$'\n'/|}"
 }
 
@@ -14178,6 +14207,11 @@ _ci_service_build_args() {
     # From: Issue #1683
     val="$(_ci_target_list "${service}" processes)" || return 2
     [ -z "${val}" ] || out="${out}${prefix}${CI_ARG_PROCESSES}=${val//$'\n'/ }"$'\n'
+    # What: SOT start_pre step per process, "|"-joined.
+    # Why: runtime seeds, e.g. the empty PowerDNS DB.
+    # From: Issue #1683 | PR #1980
+    val="$(_ci_target_list "${service}" process_pre)" || return 2
+    [ -z "${val}" ] || out="${out}${prefix}${CI_ARG_PROCESS_PRE}=${val//$'\n'/|}"$'\n'
     # What: the SOT runtime gid the images share.
     # Why: the Dockerfiles bake it; compose names none.
     # From: Issue #1683 | PR #1912
@@ -14188,6 +14222,8 @@ _ci_service_build_args() {
     # From: Issue #1683 | PR #1912
     val="$(_ci_service_defaults_arg "${service}")" || return 2
     out="${out}${prefix}${CI_ARG_DEFAULTS}=${val}"$'\n'
+    val="$(_ci_service_schema_arg "${service}")" || return 2
+    out="${out}${prefix}${CI_ARG_SCHEMA}=${val}"$'\n'
     # What: SOT defaults this Dockerfile takes as args.
     # Why: the image builds with the value; it names none.
     # From: Issue #1683 | PR #1912
@@ -19712,36 +19748,6 @@ _ci_check_compose_config() {
     printf 'compose-config=clean checks=%s\n' "${count}"
 }
 
-# What: no service publishes the netdata API port.
-# Why: only stack peers may reach it; the ui proxies it.
-# From: Issue #1683 | PR #1858
-_ci_check_netdata_isolation() {
-    local repo_root="${1:-${CI_REPO_ROOT}}" dep cfg out line nd_url
-    local -a viol=()
-    dep="$(_ci_compose_path "${repo_root}")" || return 2
-    nd_url="$(_ci_runtime_default NETDATA_URL)" || return 2
-    cfg="$(_ci_compose_json "${dep}")" || return 2
-    dep="${dep#"${repo_root}/"}"
-    out="$(_ci_capture 0 jq -r --arg url "${nd_url}" "$(cat <<'PROG'
-        if ($url | test(":[0-9]+$") | not)
-            then "ui NETDATA_URL has no port (got: \($url))"
-          else ($url | sub(".*:"; "") | tonumber) as $port
-            | .services | to_entries[]
-            | select(any(.value.ports[]?; .target == $port))
-            | "\(.key) publishes the netdata port \($port)"
-          end
-PROG
-          )" <<<"${cfg}")" || return 2
-    while IFS= read -r line; do
-        [ -z "${line}" ] || viol+=("${dep}: ${line}")
-    done <<<"${out}"
-    if [ "${#viol[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0146]" "reason=\"netdata API is published\"" "$(printf '%s\n' "${viol[@]}")"
-        return 1
-    fi
-    printf 'netdata-isolation=clean\n'
-}
-
 # What: health ACL order and ignored-header hiding.
 # Why: a bare return skips the ACL; ignored headers leak.
 # From: Issue #1683 | PR #1858
@@ -19752,7 +19758,7 @@ _ci_check_proxy_nginx_policy() {
     local ih_raw ih_h
     local -a viol=() bnt hz_fld=() la_fld=() ih_fld=() ih_seq=()
     local -A ih_ign=() ih_hid=()
-    px="$(_ci_service_path proxy "" "${repo_root}")" || return 2
+    px="$(_ci_service_path ui nginx "${repo_root}")" || return 2
     px="${px%/}"
     # What: the health and status paths of the SOT.
     # Why: the templates name the keys; values must be sane.
@@ -19937,7 +19943,7 @@ _ci_check_proxy_cert_volume() {
     dir="$(_ci_nginx_subdir NGINX_SUBDIR_CERTS)" || return 2
     ca="$(_ci_nginx_subdir NGINX_SUBDIR_CA)" || return 2
     cache="$(_ci_runtime_default NGINX_CACHE_DIR)" || return 2
-    px="$(_ci_service_path proxy "" "${repo_root}")" || return 2
+    px="$(_ci_service_path ui nginx "${repo_root}")" || return 2
     _ci_file_match "[CI-ERROR-CHECK-0184]" "reason=\"proxy_cache_path not searched\"" "${px%/}/nginx.conf" '^[[:space:]]*proxy_cache_path[[:space:]]+\$\{NGINX_CACHE_DIR\}[[:space:]]*$' \
         || { [ "$?" -eq 1 ] || return 2; viol+=("${px#"${repo_root}/"}nginx.conf: proxy_cache_path is not the SOT key NGINX_CACHE_DIR"); }
     _ci_stack_compose_files files || return $?
@@ -20021,12 +20027,10 @@ _ci_check_image_channel_resolution() {
         viol+=("ui source missing: ${sec}")
     else
         for f in \
-            '    image_tag: String,' '    image_registry: String,' \
-            '    image_prefix: String,' '    image_channel: String,' \
-            'image_tag: state.config.lancache_image_tag.clone()' \
-            'image_registry: state.config.lancache_image_registry.clone()' \
-            'image_prefix: state.config.lancache_image_prefix.clone()' \
-            'image_channel: state.config.lancache_image_channel.clone()'; do
+            '"image_registry": process_env("LANCACHE_IMAGE_REGISTRY")' \
+            '"image_prefix": process_env("LANCACHE_IMAGE_PREFIX")' \
+            '"image_channel": process_env("LANCACHE_IMAGE_CHANNEL")' \
+            '"image_tag": process_env("LANCACHE_IMAGE_TAG")'; do
             _ci_file_match "[CI-ERROR-CHECK-0187]" "line=\"${f}\" reason=\"ui source not searched\"" "${sec}" "${f}" -F \
                 || { [ "$?" -eq 1 ] || return 2; viol+=("ui main.rs must expose/use ${f}"); }
         done

@@ -1,57 +1,73 @@
 
 {# LanCache-NG (https://github.com/wiki-mod/lancache-ng) #}
 {# SPDX-License-Identifier: AGPL-3.0-or-later #}
-{# What: system stats page: CPU, RAM, network, disk I/O
-   Why: Netdata draws its own charts; the ui proxies it
-   From: Issue #1683 | PR #1912 #}
+{# What: statistics: one tab per source and range #}
+{# Why: box via SNMP, each container via Docker #}
+{# From: Issue #1683 | PR #1980 #}
 {% extends "base.html" %}
-{% block title %} – Statistiken{% endblock %}
-
+{% block title %} – {{ t.statistics }}{% endblock %}
 {% block content %}
 <section>
-
   <div>
-    <p class="eyebrow">Overview → Statistiken</p>
-    <h1 class="page-title">Systemstatistiken</h1>
-    <p class="page-sub">Live-Daten via Netdata (automatisch aktualisiert)</p>
+    <p class="eyebrow">{{ t.overview_statistics }}</p>
+    <h1 class="page-title">{{ t.system_statistics }}</h1>
+    <p class="page-sub">{{ t.pick_the_machine_or_one_container }}</p>
   </div>
-
-  <!-- What: four Netdata charts in the card grid -->
-  <!-- Why: Netdata draws them; the page only names them -->
-  <!-- From: Issue #1683 | PR #1858 -->
-  <div class="grid-2" style="grid-template-columns:1fr 1fr;">
-
-    <div class="card">
-      <h3>CPU-Auslastung</h3>
-      <div data-netdata="system.cpu" data-chart-library="dygraph" data-width="100%" data-height="160px" data-after="-300"></div>
-    </div>
-
-    <div class="card">
-      <h3>RAM-Nutzung</h3>
-      <div data-netdata="system.ram" data-chart-library="dygraph" data-width="100%" data-height="160px" data-after="-300"></div>
-    </div>
-
-    <div class="card">
-      <h3>Netzwerkdurchsatz</h3>
-      <div data-netdata="system.net" data-chart-library="dygraph" data-width="100%" data-height="160px" data-after="-300"></div>
-    </div>
-
-    <div class="card">
-      <h3>Festplatten-I/O</h3>
-      <div data-netdata="system.io" data-chart-library="dygraph" data-width="100%" data-height="160px" data-after="-300"></div>
-    </div>
-
+  {% if stats_error %}<div class="hint"><span class="glyph">!</span><div>{{ stats_error }}</div></div>{% endif %}
+  <div class="subtabs">
+    {% for tab in tabs %}
+    <button type="button" class="subtab stats-src" data-tab="{{ tab.id }}">{{ tab.label }}</button>
+    {% endfor %}
   </div>
-
+  {% for tab in tabs %}
+  <p class="section-sub stats-source" data-tab="{{ tab.id }}" hidden>{{ t.source }} {{ tab.source }}</p>
+  {% endfor %}
+  <div class="subtabs">
+    {% for r in ranges %}
+    <button type="button" class="subtab stats-tab" data-range="{{ r }}">{{ r }}</button>
+    {% endfor %}
+  </div>
+  <div class="grid-2" style="grid-template-columns:repeat(auto-fill, minmax(min(100%, 560px), 1fr));">
+    {% for g in graphs %}
+    <div class="card stats-card" data-tab="{{ g.tab }}" style="min-width:0;" hidden>
+      <img class="stats-img" data-graph="{{ g.name }}" alt="{{ g.title }}" style="max-width:100%; height:auto; display:block; margin:0 auto;">
+    </div>
+    {% endfor %}
+  </div>
 </section>
 {% endblock %}
-
 {% block scripts %}
 <script>
-// What: netdata base URL for its chart script
-// Why: main.rs owns the route string; no own drawing code
-// From: Issue #1683 | PR #1858
-var netdataServer = '{{ routes.netdata | safe }}'.replace('/{*path}', '');
+// What: pick source and range; load visible images.
+// Why: the choice survives a reload.
+// From: Issue #1683 | PR #1980
+(function () {
+  const srcs = document.querySelectorAll('.stats-src');
+  const tabs = document.querySelectorAll('.stats-tab');
+  let src = srcs.length ? srcs[0].dataset.tab : '';
+  let range = tabs.length ? tabs[0].dataset.range : '';
+  try {
+    const a = sessionStorage.getItem('stats-src');
+    const b = sessionStorage.getItem('stats-range');
+    if (a && document.querySelector('.stats-src[data-tab="' + a + '"]')) { src = a; }
+    if (b && document.querySelector('.stats-tab[data-range="' + b + '"]')) { range = b; }
+  } catch (err) { reportError(err); }
+  function dark() { return document.documentElement.getAttribute('data-theme') !== 'light'; }
+  function show() {
+    srcs.forEach(function (t) { t.classList.toggle('active', t.dataset.tab === src); });
+    tabs.forEach(function (t) { t.classList.toggle('active', t.dataset.range === range); });
+    document.querySelectorAll('.stats-source').forEach(function (p) { p.hidden = p.dataset.tab !== src; });
+    document.querySelectorAll('.stats-card').forEach(function (card) {
+      card.hidden = card.dataset.tab !== src;
+      if (card.hidden) { return; }
+      const img = card.querySelector('.stats-img');
+      img.src = '/stats/graph/' + img.dataset.graph + '?range=' + encodeURIComponent(range) + '&dark=' + (dark() ? 1 : 0) + '&t=' + Date.now();
+    });
+    try { sessionStorage.setItem('stats-src', src); sessionStorage.setItem('stats-range', range); } catch (err) { reportError(err); }
+  }
+  srcs.forEach(function (t) { t.addEventListener('click', function () { src = t.dataset.tab; show(); }); });
+  tabs.forEach(function (t) { t.addEventListener('click', function () { range = t.dataset.range; show(); }); });
+  show();
+})();
 </script>
-<script src="{{ routes.netdata | safe | replace(from="{*path}", to="dashboard.js") }}"></script>
 {% endblock %}

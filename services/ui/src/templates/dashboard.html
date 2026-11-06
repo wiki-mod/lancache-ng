@@ -9,34 +9,44 @@
 
 {% block content %}
 <section>
-  <p class="eyebrow">Overview</p>
-  <h1 class="page-title">Today</h1>
-  <p class="page-sub">What's moved through the cache, and what still needs your attention.</p>
+  <p class="eyebrow">{{ t.overview }}</p>
+  <h1 class="page-title">{{ t.today }}</h1>
+  <p class="page-sub">{{ t.what_s_moved_through_the_cache }}</p>
 
   <!-- What: hit rate and totals from log_stats
        Why: parsed from log lines, not nginx status
        From: Issue #1683 | PR #1912 -->
   <div class="stat-row">
     <div class="stat-card accent">
-      <div class="stat-label">Data served</div>
-      <div class="stat-num">{{ log_stats.total_bytes_gb | round(precision=1) }}<span class="unit">GB</span></div>
+      <div class="stat-label">{{ t.data_served }}</div>
+      <div class="stat-num">{{ log_stats.total_bytes_human }}</div>
     </div>
     <div class="stat-card">
-      <div class="stat-label">Cache hit rate</div>
+      <div class="stat-label">{{ t.cache_hit_rate }}</div>
       <div class="stat-num">{{ log_stats.hit_pct | round(precision=1) }}<span class="unit">%</span></div>
     </div>
     <div class="stat-card">
-      <div class="stat-label">Total requests</div>
+      <div class="stat-label">{{ t.total_requests }}</div>
       <div class="stat-num">{{ log_stats.total_requests }}</div>
     </div>
     <div class="stat-card">
-      <div class="stat-label">Cache HITs</div>
+      <div class="stat-label">{{ t.cache_hits }}</div>
       <div class="stat-num">{{ log_stats.hits }}</div>
     </div>
     <div class="stat-card">
-      <div class="stat-label">Caching mode</div>
-      <div class="stat-num" style="font-size:20px;">{% if https_enabled %}HTTP + HTTPS{% else %}HTTP{% endif %}</div>
+      <div class="stat-label">{{ t.caching_mode }}</div>
+      <div class="stat-num" style="font-size:20px;">{% if v.HTTPS_ENABLED == "true" %}HTTP + HTTPS{% else %}HTTP{% endif %}</div>
     </div>
+  {% if proxy_live %}
+    <div class="stat-card">
+      <div class="stat-label">{{ t.open_connections }}</div>
+      <div class="stat-num">{{ proxy_live.active }}</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">{{ t.waiting_clients }}</div>
+      <div class="stat-num">{{ proxy_live.waiting }}</div>
+    </div>
+  {% endif %}
   </div>
 
   <!-- What: cache figures from one shared CACHE_DIR
@@ -44,36 +54,25 @@
        From: Issue #1683 | PR #1912 -->
   <div class="card" style="margin-bottom:16px;">
     <div class="card-head">
-      <h3>Cache storage</h3>
-      <span class="mono" style="font-size:12px;color:var(--mist-dim);">{{ cache_dir }}</span>
+      <h3>{{ t.cache_storage }}</h3>
+      <span class="mono" style="font-size:12px;color:var(--mist-dim);">{{ v.NGINX_CACHE_DIR }}</span>
     </div>
     <div class="card-body">
       <div class="storage-bar"><div class="storage-fill" style="width:{{ cache_pct }}%;"></div></div>
       <div class="storage-meta">
-        <span><b>{{ cache_used_gb }} GB</b> used</span>
-        <span>{{ cache_max_gb }} GB total</span>
+        <span><b>{{ cache_used_human }}</b> {{ t.used }}</span>
+        <span>{{ v.CACHE_MAX_GB }} {{ t.gib_configured }}</span>
       </div>
-      <p class="field-hint" style="margin-top:12px;">Total reflects the cache size configured for this LanCache-NG instance. Oldest, least-requested files are removed automatically; you don't need to clear this yourself.</p>
-
-      <!-- What: resize saves CACHE_MAX_GB, host applies it
-           Why: proxy container restarts; no live reload
-           From: Issue #1683 | PR #1912 -->
-      {% if cache_resize_pending %}
-      <div class="hint">
-        <span class="glyph">◌</span>
-        <div>Resize to <b>{{ effective_cache_max_gb }} GB</b> requested. This takes effect within the next
-        few minutes (the host convergence timer runs every {{ converge_minutes }} minutes) and briefly restarts the
-        proxy container.</div>
-      </div>
-      {% endif %}
-      <form method="post" action="{{ routes.cache_resize | safe }}" style="margin-top:14px;">
-        {{ <csrf_field csrf_token={csrf_token}/> }}
+      <p class="field-hint" style="margin-top:12px;">{{ t.total_reflects_the_cache_size_configured }}</p>
+      <form method="post" action="{{ routes.setup_save | safe }}" style="margin-top:14px;">
+        <input type="hidden" name="back" value="/">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <div class="field-row">
           <div class="field">
-            <label for="cache_gb">New cache size (GB)</label>
-            <input type="number" id="cache_gb" name="cache_gb" min="1" step="1" placeholder="{{ cache_max_gb }}">
+            <label for="cache_gb">{{ t.new_cache_size_in_gib_whole }}</label>
+            <input type="number" id="cache_gb" name="CACHE_MAX_GB" min="1" step="1" placeholder="{{ v.CACHE_MAX_GB }}">
           </div>
-          <button type="submit" class="btn" style="margin-top:23px;">Resize cache</button>
+          <button type="submit" class="btn" style="margin-top:23px;">{{ t.resize_cache }}</button>
         </div>
       </form>
     </div>
@@ -84,13 +83,13 @@
        From: Issue #1683 | PR #1912 -->
   <div class="card" style="margin-bottom:16px;">
     <div class="card-head">
-      <h3>Recent requests</h3>
-      <span class="pill on" title="This tile reads the proxy's access lines from syslog-ng. The view of every container is on the Logs page.">Live</span>
+      <h3>{{ t.recent_requests }}</h3>
+      <span class="pill on" title="{{ t.this_tile_reads_the_proxy_s }}">Live</span>
     </div>
     <div class="card-body" style="padding-top:6px;">
       {% if recent_logs %}
       <table>
-        <tr><th>Host</th><th>Path</th><th>Status</th><th>Size</th><th>Result</th></tr>
+        <tr><th>Host</th><th>{{ t.path }}</th><th>Status</th><th>{{ t.size }}</th><th>{{ t.result }}</th></tr>
         {% for entry in recent_logs %}
         <tr>
           <td class="mono">{{ entry.host }}</td>
@@ -98,9 +97,9 @@
           <td class="mono">{{ entry.status }}</td>
           <td class="mono">{{ entry.bytes_human }}</td>
           <td>
-            {% if entry.cache_status == "HIT" %}<span class="tag hit">cache hit</span>
-            {% elif entry.cache_status == "MISS" %}<span class="tag miss">first download</span>
-            {% elif entry.cache_status == "EXPIRED" %}<span class="tag off">expired</span>
+            {% if entry.cache_status == "HIT" %}<span class="tag hit">{{ t.cache_hit }}</span>
+            {% elif entry.cache_status == "MISS" %}<span class="tag miss">{{ t.first_download }}</span>
+            {% elif entry.cache_status == "EXPIRED" %}<span class="tag off">{{ t.expired }}</span>
             {% else %}<span class="tag off">{{ entry.cache_status }}</span>
             {% endif %}
           </td>
@@ -110,7 +109,7 @@
       {% else %}
       <div class="empty-state">
         <div class="glyph">◌</div>
-        <p>No requests logged yet.</p>
+        <p>{{ t.no_requests_logged_yet }}</p>
       </div>
       {% endif %}
     </div>

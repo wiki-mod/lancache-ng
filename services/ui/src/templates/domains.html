@@ -8,9 +8,9 @@
 {# What: TTL input of the LAN and PTR record forms #}
 {# Why: one copy of default, limits and help text #}
 {# From: Issue #1683 | PR #1912 #}
-{% component ttl_input(ttl_default, ttl_max) %}<label class="flex items-center gap-2 text-xs text-slate-400">TTL (Sek.) <input type="number" name="ttl" value="{{ ttl_default }}"
+{% component ttl_input(ttl_default, ttl_max, t) %}<label class="flex items-center gap-2 text-xs text-slate-400">{{ t.ttl_sec }} <input type="number" name="ttl" value="{{ ttl_default }}"
                  required min="1" max="{{ ttl_max }}"
-                 title="TTL must be between 1 and {{ ttl_max }} seconds (RFC 2181)."
+                 title="{{ t.ttl_range | replace(from="{x}", to=ttl_max ~ "") }}"
                  class="w-24 bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-green-500"></label>{% endcomponent ttl_input %}
 {% block title %} – DNS{% endblock %}
 
@@ -18,7 +18,7 @@
 <div class="space-y-6">
 
   <div>
-    <p class="eyebrow">Settings → DNS</p>
+    <p class="eyebrow">{{ t.settings_dns }}</p>
     <h1 class="page-title">DNS</h1>
   </div>
 
@@ -35,10 +35,10 @@
      Why: setActiveDnsTab maps a panel to its tab button
      From: Issue #1683 | PR #1858 #}
   <div class="subtabs">
-    <button type="button" data-dns-tab="cdn" class="subtab dns-tab-btn">Cached Domains</button>
-    <button type="button" data-dns-tab="primary" class="subtab dns-tab-btn">Primary DNS</button>
-    <button type="button" data-dns-tab="secondary" class="subtab dns-tab-btn">Secondary DNS</button>
-    <button type="button" data-dns-tab="settings" class="subtab dns-tab-btn">Settings</button>
+    <button type="button" data-dns-tab="cdn" class="subtab dns-tab-btn">{{ t.cached_domains }}</button>
+    <button type="button" data-dns-tab="primary" class="subtab dns-tab-btn">{{ t.primary_dns }}</button>
+    <button type="button" data-dns-tab="secondary" class="subtab dns-tab-btn">{{ t.secondary_dns }}</button>
+    <button type="button" data-dns-tab="settings" class="subtab dns-tab-btn">{{ t.settings }}</button>
   </div>
 
   <div class="space-y-6">
@@ -47,46 +47,50 @@
        From: Issue #1683 | PR #1976 #}
     <section data-dns-panel="cdn">
       <div class="subtabs" style="margin-bottom:22px;">
-        <button type="button" class="subtab cdn-sub-btn active" data-cdn-sub="custom">Custom domains</button>
-        <button type="button" class="subtab cdn-sub-btn" data-cdn-sub="default">Default CDN</button>
+        <button type="button" class="subtab cdn-sub-btn active" data-cdn-sub="custom">{{ t.custom_domains }}</button>
+        <button type="button" class="subtab cdn-sub-btn" data-cdn-sub="default">{{ t.default_cdn }}</button>
       </div>
 
       <div data-cdn-panel="custom">
         <div class="hint">
           <span class="glyph">◈</span>
-          <div><b>Each entry matches exactly one thing, never a combination:</b> <code>steamcontent.com</code> matches only that exact domain. <code>.steamcontent.com</code> (leading dot) matches every subdomain, like <code>cdn.steamcontent.com</code>, but not the bare domain itself. <code>cdn.steamcontent.com</code> written out matches only that one exact subdomain, nothing beneath it. Add each form separately if you need more than one.</div>
+          <div><b>{{ t.each_entry_matches_exactly_one_thing }}</b><br>
+            <code>steamcontent.com</code> {{ t.matches_only_that_exact_domain }}<br>
+            <code>.steamcontent.com</code> {{ t.leading_dot_matches_every_subdomain_like }} <code>cdn.steamcontent.com</code>{{ t.but_not_the_bare_domain_itself }}<br>
+            <code>cdn.steamcontent.com</code> {{ t.written_out_matches_only_that_one }}<br>
+            {{ t.add_each_form_separately_if_you }}</div>
         </div>
 
         <form action="{{ routes.dns_add | safe }}" method="post" class="field-row">
-          {{ <csrf_field csrf_token={csrf_token}/> }}
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <div class="field" style="margin-bottom:0;">
-            <label for="new-domain">Add a domain</label>
+            <label for="new-domain">{{ t.add_a_domain }}</label>
             <input type="text" id="new-domain" name="domain" placeholder="steamcontent.com" required>
           </div>
-          <button type="submit" class="btn" style="margin-top:22px;">Add domain</button>
+          <button type="submit" class="btn" style="margin-top:22px;">{{ t.add_domain }}</button>
         </form>
 
         <table style="margin-top:8px;">
-          <tr><th>Domain</th><th>Matches</th><th></th></tr>
+          <tr><th>Domain</th><th>{{ t.matches }}</th><th></th></tr>
           {% set_global custom_count = 0 %}
           {% for domain in dns_domains %}
           {% if not domain.is_default %}
           {% set_global custom_count = custom_count + 1 %}
           <tr>
             <td class="mono">{{ domain.display }}</td>
-            <td>{% if domain.display is starting_with(pat=".") %}All subdomains{% else %}Exact domain only{% endif %}</td>
+            <td>{% if domain.display is starting_with(pat=".") %}{{ t.all_subdomains }}{% else %}{{ t.exact_domain_only }}{% endif %}</td>
             <td>
               <form action="{{ routes.dns_remove | safe }}" method="post">
-                {{ <csrf_field csrf_token={csrf_token}/> }}
-                <input type="hidden" name="domain" value="{{ domain.raw }}">
-                <button type="submit" class="btn ghost" onclick="return confirm('Remove {{ domain.display }}?')">Remove</button>
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="domain" value="{{ domain.display }}">
+                <button type="submit" class="btn ghost" data-ask="{{ t.remove_x_q | replace(from="{x}", to=domain.display) }}" onclick="return confirm(this.dataset.ask)">{{ t.remove }}</button>
               </form>
             </td>
           </tr>
           {% endif %}
           {% endfor %}
           {% if custom_count == 0 %}
-          <tr class="empty-row"><td colspan="3" style="color:var(--mist); font-style:italic; text-align:center;">No custom domains added yet.</td></tr>
+          <tr class="empty-row"><td colspan="3" style="color:var(--mist); font-style:italic; text-align:center;">{{ t.no_custom_domains_added_yet }}</td></tr>
           {% endif %}
         </table>
       </div>
@@ -94,19 +98,19 @@
       <div data-cdn-panel="default" class="hidden">
         <div class="hint">
           <span class="glyph">◈</span>
-          <div>These ship with LanCache-NG and cover common game/software CDNs out of the box. Turn one off if you don't want that CDN cached, without losing your place in the list.</div>
+          <div>{{ t.these_ship_with_lancache_ng_and }}</div>
         </div>
         <table style="margin-top:8px;">
-          <tr><th>Domain</th><th>Matches</th><th>Enabled</th></tr>
+          <tr><th>Domain</th><th>{{ t.matches }}</th><th>{{ t.enabled }}</th></tr>
           {% for domain in dns_domains %}
           {% if domain.is_default %}
           <tr>
             <td class="mono">{{ domain.display }}</td>
-            <td>{% if domain.display is starting_with(pat=".") %}All subdomains{% else %}Exact domain only{% endif %}</td>
+            <td>{% if domain.display is starting_with(pat=".") %}{{ t.all_subdomains }}{% else %}{{ t.exact_domain_only }}{% endif %}</td>
             <td>
               {% if domain.is_valid %}
               <form action="{{ routes.dns_toggle | safe }}" method="post">
-                {{ <csrf_field csrf_token={csrf_token}/> }}
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                 <input type="hidden" name="domain" value="{{ domain.display }}">
                 <label class="toggle"><input type="checkbox" name="enabled" value="1" {% if domain.enabled %}checked{% endif %} onchange="this.form.requestSubmit()"><span class="track"></span><span class="knob"></span></label>
               </form>
@@ -119,42 +123,65 @@
       </div>
     </section>
 
+    {# What: the LAN domain all local names end in
+       Why: DoMe 05.11.: own domain, next to its records
+       From: Issue #1683 | PR #1980 #}
+    <section data-dns-panel="lan" class="hidden" style="margin-bottom:22px;">
+      <div class="section-title" style="margin-top:0;">{{ t.lan_domain }}</div>
+      <p class="section-sub">{{ t.every_local_name_ends_in_this }} <code>lancache-ng.lan</code> {{ t.a_printer_is }} <code>printer.lancache-ng.lan</code>{{ t.with }} <code>lan</code> {{ t.it_is }} <code>printer.lan</code>{{ t.dhcp_hands_it_to_the_clients }}</p>
+      <form action="{{ routes.setup_save | safe }}" method="post" class="field-row">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="back" value="/domains">
+        <div class="field" style="margin-bottom:0;">
+          <label for="lan-domain">Domain</label>
+          <input type="text" id="lan-domain" name="DHCP_DOMAIN" value="{{ lan_zone }}" pattern="[A-Za-z0-9.-]+" required>
+        </div>
+        <button type="submit" class="btn" style="margin-top:23px;">{{ t.save }}</button>
+      </form>
+    </section>
+
     {# What: LAN records in PowerDNS: add form and list
        Why: changes apply live, no container restart
        From: Issue #1683 | PR #1912 #}
     <section data-dns-panel="lan" class="hidden">
-      <div class="section-title" style="margin-top:0;">LAN zone records</div>
-      <p class="section-sub">Custom records for names under your local domain, for anything auto-discovery doesn't already cover.</p>
-      {# What: record name, type, content, TTL, Add
+      <div class="section-title" style="margin-top:0;">{{ t.lan_zone_records }}</div>
+      <p class="section-sub">{{ t.custom_records_for_names_under_your }}</p>
+      {# What: record name, type, TTL, content, Add
          Why: type and content not parsed together
          From: Issue #1683 | PR #1976 #}
       <form action="{{ routes.lan_add | safe }}" method="post" class="field-row" style="max-width:none; align-items:flex-end;" data-lan-record-form>
-        {{ <csrf_field csrf_token={csrf_token}/> }}
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <div class="field" style="margin-bottom:0; max-width:180px;">
           <label for="lan-name">Name</label>
           <input type="text" id="lan-name" name="name" placeholder="printer.{{ lan_zone }}" required>
         </div>
         <div class="field" style="margin-bottom:0; max-width:110px;">
-          <label for="lan-type">Type</label>
+          <label for="lan-type">{{ t.type }}</label>
           <select id="lan-type" name="record_type" required data-lan-record-type style="width:100%; padding:9px 11px; border-radius:8px; border:1px solid var(--navy-600); background:var(--navy-900); color:var(--foam); font-size:13.5px;">
             {% for record_type in lan_record_types %}
             <option value="{{ record_type }}">{{ record_type }}</option>
             {% endfor %}
           </select>
         </div>
-        <div class="field" style="margin-bottom:0; flex:1;">
-          <label for="lan-content">Content</label>
-          <input type="text" id="lan-content" name="content" placeholder="192.168.1.50" required data-lan-record-content>
-        </div>
         <div class="field" style="margin-bottom:0; max-width:90px;">
           <label for="lan-ttl">TTL</label>
           <input type="number" id="lan-ttl" name="ttl" value="{{ record_ttl_default }}" required min="1" max="{{ ttl_max }}">
         </div>
-        <button type="submit" class="btn" style="margin-bottom:0;">Add</button>
+        <div class="field" style="margin-bottom:0; flex:1;">
+          <label for="lan-content">{{ t.content }}</label>
+          <input type="text" id="lan-content" name="content" placeholder="192.168.1.50" required data-lan-record-content>
+        </div>
+        {# What: also add the PTR for type A
+           Why: DoMe 31.10.: PTR from the LAN entries
+           From: Issue #1683 | PR #1980 #}
+        <label class="field" style="margin-bottom:0; flex-direction:row; gap:6px; align-items:center;" data-lan-ptr>
+          <input type="checkbox" name="ptr" value="1" checked> {{ t.lan_also_ptr }}
+        </label>
+        <button type="submit" class="btn" style="margin-bottom:0;">{{ t.add_2 }}</button>
       </form>
 
       <table style="margin-top:4px;">
-        <tr><th>Name</th><th>Type</th><th>Content</th><th>TTL</th><th></th></tr>
+        <tr><th>Name</th><th>{{ t.type }}</th><th>TTL</th><th>{{ t.content }}</th><th></th></tr>
         {% set_global lan_shown = 0 %}
         {% for record in lan_records %}
         {% if record.type != "SOA" and record.type != "NS" %}
@@ -162,22 +189,22 @@
         <tr>
           <td class="mono">{{ record.name }}</td>
           <td><span class="tag off">{{ record.type }}</span></td>
-          <td class="mono">{% for content in record.records %}{{ content.content }}{% if not loop.last %}<br>{% endif %}{% endfor %}</td>
           <td class="mono">{{ record.ttl }}</td>
+          <td class="mono">{% for content in record.records %}{{ content.content }}{% if not loop.last %}<br>{% endif %}{% endfor %}</td>
           <td>
             <form action="{{ routes.lan_remove | safe }}" method="post">
-              {{ <csrf_field csrf_token={csrf_token}/> }}
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
               <input type="hidden" name="name" value="{{ record.name }}">
               <input type="hidden" name="record_type" value="{{ record.type }}">
               <input type="hidden" name="content" value="{% for c in record.records %}{{ c.content }}{% if not loop.last %};{% endif %}{% endfor %}">
-              <button type="submit" data-record-name="{{ record.name }}" data-record-type="{{ record.type }}" onclick="return confirmRemoveRecord(this)" style="background:none; border:0; cursor:pointer; color:var(--danger); font-size:12.5px;">Remove</button>
+              <button type="submit" data-record-name="{{ record.name }}" data-record-type="{{ record.type }}" onclick="return confirmRemoveRecord(this)" style="background:none; border:0; cursor:pointer; color:var(--danger); font-size:12.5px;">{{ t.remove }}</button>
             </form>
           </td>
         </tr>
         {% endif %}
         {% endfor %}
         {% if lan_shown == 0 %}
-        <tr class="empty-row"><td colspan="5" style="color:var(--mist); font-style:italic; text-align:center;">No LAN records yet.</td></tr>
+        <tr class="empty-row"><td colspan="5" style="color:var(--mist); font-style:italic; text-align:center;">{{ t.no_lan_records_yet }}</td></tr>
         {% endif %}
       </table>
     </section>
@@ -189,37 +216,37 @@
       <div>
         <h2 class="font-semibold text-slate-200">PTR / Reverse-DNS</h2>
         <p class="text-xs text-slate-500 mt-0.5">
-          Zeigt zu einer IP-Adresse den Namen des Geräts an, zum Beispiel in Logs.
+          {{ t.shows_the_device_name_for_an }}
         </p>
         {% if dhcp_mode == "kea" %}
         <p class="text-xs text-amber-300/90 mt-1 leading-relaxed">
-          Hinweis: Vom DHCP-Server angelegte Einträge stehen hier mit den manuellen zusammen. Entfernst du einen davon, kann DHCP ihn beim nächsten Lease wieder anlegen.
+          {{ t.note_entries_made_by_the_dhcp }}
         </p>
         {% endif %}
         <details class="text-xs text-slate-500 mt-1">
-          <summary class="cursor-pointer">Betroffene Reverse-Zonen</summary>
+          <summary class="cursor-pointer">{{ t.affected_reverse_zones }}</summary>
           <span class="font-mono">{{ reverse_zones | join(sep=", ") }}</span>
         </details>
       </div>
 
       <form action="{{ routes.ptr_add | safe }}" method="post" class="flex flex-col gap-3">
-        {{ <csrf_field csrf_token={csrf_token}/> }}
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         {# What: form takes IP and hostname; name is derived
            Why: the reverse record name comes from the IP
            From: Issue #1683 | PR #1912 #}
         <div class="flex gap-2">
-          <input type="text" name="ip" placeholder="IP, z.B. 192.168.1.50"
+          <input type="text" name="ip" placeholder="{{ t.ip_e_g_192_168_1 }}"
                  required
                  class="flex-1 bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-green-500">
-          <input type="text" name="hostname" placeholder="Hostname, z.B. printer.{{ lan_zone }}"
+          <input type="text" name="hostname" placeholder="{{ t.hostname_eg }} printer.{{ lan_zone }}"
                  required
                  class="flex-1 bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-green-500">
         </div>
         <div class="flex gap-2">
-          {{ <ttl_input ttl_default={record_ttl_default} ttl_max={ttl_max}/> }}
+          {{ <ttl_input ttl_default={record_ttl_default} ttl_max={ttl_max} t={t}/> }}
           <button type="submit"
                   class="btn btn-green">
-            Hinzufügen
+            {{ t.add_2 }}
           </button>
         </div>
       </form>
@@ -237,7 +264,7 @@
             <div class="text-xs text-slate-400 mt-0.5 font-mono">→ {{ ptr.hostname }}</div>
           </div>
           <form action="{{ routes.ptr_remove | safe }}" method="post" class="opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0 ml-2">
-            {{ <csrf_field csrf_token={csrf_token}/> }}
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             {# What: removal deletes the PTR rrset for IP
                Why: the PTR rrset is keyed by IP
                From: Issue #1683 | PR #1912 #}
@@ -247,31 +274,31 @@
                     data-ptr-host="{{ ptr.hostname }}"
                     onclick="return confirmRemovePtr(this)"
                     class="btn btn-sm btn-ghost-red">
-              Entfernen
+              {{ t.remove }}
             </button>
           </form>
         </div>
         {% endfor %}
         {% else %}
-        <p class="text-slate-500 text-sm px-3 py-2">Keine PTR-Einträge vorhanden.</p>
+        <p class="text-slate-500 text-sm px-3 py-2">{{ t.no_ptr_records_yet }}</p>
         {% endif %}
       </div>
 
-      <p class="text-xs text-slate-500">{% if ptr_records %}{{ ptr_records | length }} {% if ptr_records | length == 1 %}Eintrag{% else %}Einträge{% endif %}{% endif %}</p>
+      <p class="text-xs text-slate-500">{% if ptr_records %}{{ ptr_records | length }} {% if ptr_records | length == 1 %}{{ t.entry }}{% else %}{{ t.entries }}{% endif %}{% endif %}</p>
     </section>
 
     {# What: global IPv4-only switch (AAAA filter)
        Why: clients then use IPv4 and reach the cache
        From: Issue #1683 | PR #1912 #}
     <section data-dns-panel="settings" class="hidden">
-      <div class="section-title" style="margin-top:0;">Network mode</div>
-      <p class="section-sub">Changes here save immediately and stay on this page. No DNS restart is needed.</p>
+      <div class="section-title" style="margin-top:0;">{{ t.network_mode }}</div>
+      <p class="section-sub">{{ t.changes_here_save_immediately_and_stay }}</p>
       <form action="{{ routes.aaaa_filter | safe }}" method="post">
-        {{ <csrf_field csrf_token={csrf_token}/> }}
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <div class="toggle-row">
           <div>
-            <div class="t-label">IPv4 only</div>
-            <div class="t-desc">Turn this on if devices on your network don't use IPv6. Off by default.</div>
+            <div class="t-label">{{ t.ipv4_only }}</div>
+            <div class="t-desc">{{ t.turn_this_on_if_devices_on }}</div>
           </div>
           <label class="toggle">
             <input type="checkbox" name="enabled" value="1" {% if aaaa_filter_enabled %}checked{% endif %} onchange="this.form.requestSubmit()">
@@ -279,83 +306,86 @@
           </label>
         </div>
       </form>
+      {# What: switch for the DNS query log
+         Why: DoMe 31.10.: see DNS queries live
+         From: Issue #1683 | PR #1980 #}
+      <form action="{{ routes.query_log | safe }}" method="post">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <div class="toggle-row">
+          <div>
+            <div class="t-label">{{ t.dns_query_log }}</div>
+            <div class="t-desc">{{ t.dns_query_log_desc }}</div>
+          </div>
+          <label class="toggle">
+            <input type="checkbox" name="enabled" value="1" {% if query_log_enabled %}checked{% endif %} onchange="this.form.requestSubmit()">
+            <span class="track"></span><span class="knob"></span>
+          </label>
+        </div>
+      </form>
+    </section>
+
+    {# What: external DNS servers and domains (SOT keys)
+       Why: live 05.11.: it was settable only by setup.sh
+       From: Issue #1683 | PR #1980 #}
+    <section data-dns-panel="settings" class="hidden">
+      <div class="section-title">{{ t.upstream_dns }}</div>
+      <p class="section-sub">{{ t.upstream_dns_desc }}</p>
+      <form action="{{ routes.setup_save | safe }}" method="post">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="back" value="/domains">
+        <div class="field"><label for="up-servers">{{ t.upstream_servers }}</label><input id="up-servers" name="DNS_UPSTREAM_SERVERS" placeholder="192.168.1.23 192.168.1.22" value="{{ v.DNS_UPSTREAM_SERVERS }}"></div>
+        <div class="field"><label for="up-zones">{{ t.upstream_zones }}</label><input id="up-zones" name="DNS_UPSTREAM_ZONES" placeholder="firma.local" value="{{ v.DNS_UPSTREAM_ZONES }}"></div>
+        <div class="field"><label for="up-unsigned">{{ t.upstream_unsigned }}</label><input id="up-unsigned" name="DNS_UPSTREAM_UNSIGNED_ZONES" placeholder="firma.local" value="{{ v.DNS_UPSTREAM_UNSIGNED_ZONES }}"></div>
+        <button type="submit" class="btn">{{ t.save }}</button>
+      </form>
     </section>
 
     {# What: toggle that allows DNS updates without TSIG.
        Why: TSIG is required by default; this relaxes it.
        From: Issue #815 #}
-    <section data-dns-panel="settings" class="card flex flex-col gap-4 hidden">
-      <div>
-        <h2 class="font-semibold text-slate-200">DNS-Updates: TSIG-Pflicht lockern</h2>
-        <p class="text-xs text-slate-500 mt-0.5">
-          PowerDNS verlangt bereits heute standardmäßig eine gültige TSIG-Signatur für
-          DNS-Updates an die von diesem Projekt verwalteten Zonen (LAN/Reverse-Zonen), sobald
-          ein echter DDNS-Schlüssel konfiguriert ist -- das ist praktisch immer der Fall. Diese
-          Option schaltet diese Anforderung testweise gezielt <strong>ab</strong>: ist sie
-          aktiv, akzeptiert PowerDNS auch <strong>unsignierte</strong> DNS-Updates von
-          Hosts, die laut IP-Zulassungsliste grundsätzlich Updates senden dürfen.
-          <strong class="text-amber-400">Das ist eine echte Verringerung der Sicherheit, kein
-          rein kosmetischer Schalter</strong> -- nur aktivieren, wenn es einen konkreten Grund
-          dafür gibt (z. B. ein Update-Client, der keine TSIG-Signatur unterstützt).
-          <strong>Löst einen Neustart des dns-Containers aus</strong> (kein Live-Reload,
-          PowerDNS liest diese Einstellung nur beim Start).
-          <strong class="text-amber-400">Während dieses Neustarts beantworten beide DNS-Instanzen
-          kurzzeitig keine Anfragen</strong> -- für alle Geräte im LAN, nicht nur für DNS-Updates,
-          typischerweise wenige Sekunden pro Instanz. Nicht während laufender Downloads/Spiel-Updates
-          umschalten, wenn das vermeidbar ist.
-        </p>
-      </div>
-
+    <section data-dns-panel="settings" class="hidden">
+      <div class="section-title">{{ t.dns_updates_tsig }}</div>
+      <p class="section-sub">{{ t.dhcp_and_devices_may_change_lan }}</p>
       {% if not ddns_tsig_key_configured %}
-      <p class="text-xs text-amber-400">
-        Kein DDNS_TSIG_KEY konfiguriert -- es gibt aktuell keine aktive TSIG-Erzwingung, die
-        diese Option lockern könnte (wird automatisch relevant, sobald ein echter
-        TSIG-Schlüssel existiert, siehe docs/threat-model.md).
-      </p>
+      <p class="section-sub">{{ t.no_tsig_key_is_set_so }}</p>
       {% endif %}
-
-      <form action="{{ routes.ddns_unsigned | safe }}" method="post" class="flex items-center gap-4">
-        {{ <csrf_field csrf_token={csrf_token}/> }}
-        <div class="flex items-center gap-2">
-          <input type="checkbox" id="ddns-allow-unsigned-enabled" name="enabled" value="1"
-                 {% if ddns_unsigned_updates_allowed %}checked{% endif %}
-                 {% if not ddns_tsig_key_configured %}disabled{% endif %}
-                 class="w-5 h-5 rounded border-slate-600 bg-slate-700 text-blue-600 focus:ring-2 focus:ring-blue-500 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed">
-          <label for="ddns-allow-unsigned-enabled" class="text-sm text-slate-300 cursor-pointer">
-            Unsignierte DNS-Updates zulassen (TSIG-Pflicht lockern)
+      <form action="{{ routes.ddns_unsigned | safe }}" method="post">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <div class="toggle-row">
+          <div>
+            <div class="t-label">{{ t.allow_unsigned_updates }}</div>
+            <div class="t-desc">{{ t.restarts_dns_for_a_few_seconds }} {% if ddns_unsigned_updates_allowed %}<b>{{ t.relaxed }}</b>{% else %}{{ t.tsig_required_default }}{% endif %}.</div>
+          </div>
+          <label class="toggle">
+            <input type="checkbox" name="enabled" value="1" {% if ddns_unsigned_updates_allowed %}checked{% endif %} {% if not ddns_tsig_key_configured %}disabled{% endif %} onchange="this.form.requestSubmit()">
+            <span class="track"></span><span class="knob"></span>
           </label>
         </div>
-        <button type="submit"
-                {% if not ddns_tsig_key_configured %}disabled{% endif %}
-                class="btn btn-blue">
-          Speichern &amp; DNS neu starten
-        </button>
       </form>
-
-      <p class="text-xs text-slate-500">
-        {% if ddns_unsigned_updates_allowed %}
-        Status: <span class="text-amber-400 font-semibold">Gelockert -- unsignierte Updates werden akzeptiert</span>
-        {% else %}
-        Status: <span class="text-green-400">TSIG erforderlich (Standard, unverändert)</span>
-        {% endif %}
-      </p>
+      <form action="{{ routes.tsig_rotate | safe }}" method="post">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <div class="toggle-row">
+          <div>
+            <div class="t-label">{{ t.new_tsig_key }}</div>
+            <div class="t-desc">{{ t.then_register_each_secondary_again_with }} <code>./setup.sh secondary --rotate</code>{{ t.removing_a_secondary_does_this_by }}</div>
+          </div>
+          <button type="submit" class="btn">{{ t.renew_key }}</button>
+        </div>
+      </form>
     </section>
 
     {# What: zone snapshot table; rows come from main.rs
-       Why: snapshot storage lives in nats-subscriber
+       Why: the ui keeps snapshots in DNS_SNAPSHOT_DIR
        From: Issue #1683 | PR #1912 #}
     <section data-dns-panel="zones" class="card flex flex-col gap-4 hidden">
       <div class="flex items-center justify-between">
         <div>
-          <h2 class="font-semibold text-slate-200">Zone-Snapshots &amp; Rollback</h2>
+          <h2 class="font-semibold text-slate-200">{{ t.zone_snapshots_rollback }}</h2>
           <p class="text-xs text-slate-500 mt-0.5">
-            PowerDNS-Zonen (<span class="font-mono">{{ rollback_zones | join(sep=", ") }}</span>) werden nach jeder
-            Änderung automatisch gesichert. Ein Rollback ersetzt den aktuellen Stand
-            einer Zone durch einen früheren Snapshot -- danach seit dem Snapshot
-            hinzugekommene Records können verloren gehen.
+            {{ t.after_every_change_the_lan_zone }}{{ lan_zone }}{{ t.is_saved_a_rollback_puts_an }}
           </p>
         </div>
-        <span class="text-xs text-slate-400 flex-shrink-0">Aufbewahrung: {{ zone_snapshot_retention }}</span>
+        <span class="text-xs text-slate-400 flex-shrink-0">{{ t.kept }} {{ zone_snapshot_retention }}</span>
       </div>
 
       {% if zone_snapshot_groups %}
@@ -367,8 +397,8 @@
             <table class="w-full text-sm">
               <thead>
                 <tr>
-                  <th class="th">Erstellt</th>
-                  <th class="th">Aktion</th>
+                  <th class="th">{{ t.created }}</th>
+                  <th class="th">{{ t.action }}</th>
                 </tr>
               </thead>
               <tbody class="rows">
@@ -382,12 +412,12 @@
                        Why: no JS escaping needed
                        From: Issue #1683 | PR #1912 #}
                     <form method="POST" action="{{ routes.zone_rollback | safe }}" class="inline"
-                          onsubmit="return confirm('Zone {{ group.zone }} auf diesen Snapshot zurückrollen? Seit dem Snapshot hinzugekommene Records können dabei verloren gehen.')">
-                      {{ <csrf_field csrf_token={csrf_token}/> }}
+                          data-ask="{{ t.zone_rollback_q | replace(from="{x}", to=group.zone) }}" onsubmit="return confirm(this.dataset.ask)">
+                      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                       <input type="hidden" name="zone" value="{{ group.zone }}">
                       <input type="hidden" name="snapshot_id" value="{{ snapshot.id }}">
                       <button type="submit" class="btn btn-sm btn-warn">
-                        Zurückrollen
+                        {{ t.roll_back }}
                       </button>
                     </form>
                   </td>
@@ -395,7 +425,7 @@
                 {% endfor %}
                 {% if group.snapshots | length == 0 %}
                 <tr>
-                  <td colspan="2" class="py-3 text-slate-500 text-center">Noch keine Snapshots für diese Zone</td>
+                  <td colspan="2" class="py-3 text-slate-500 text-center">{{ t.no_snapshots_for_this_zone_yet }}</td>
                 </tr>
                 {% endif %}
               </tbody>
@@ -406,8 +436,7 @@
       </div>
       {% else %}
       <p class="text-slate-500 text-sm px-3 py-2">
-        Keine Zonen-Snapshots verfügbar (nats-subscriber momentan nicht erreichbar, oder
-        noch kein Snapshot erstellt).
+        {{ t.no_zone_snapshots_available_powerdns_not }}
       </p>
       {% endif %}
     </section>
@@ -417,53 +446,60 @@
        From: Issue #1683 | PR #1858 #}
     <section data-dns-panel="secondary">
       <div class="subtabs" style="margin-bottom:22px;">
-        <button type="button" class="subtab sec-sub-btn active" data-sec-sub="settings">Settings</button>
-        <button type="button" class="subtab sec-sub-btn" data-sec-sub="add">Add Secondary</button>
+        <button type="button" class="subtab sec-sub-btn active" data-sec-sub="settings">{{ t.settings }}</button>
+        <button type="button" class="subtab sec-sub-btn" data-sec-sub="add">{{ t.add_secondary }}</button>
       </div>
 
       {# What: registered secondaries with their actions #}
       {# Why: health, address, token and removal per row #}
       <div data-sec-panel="settings">
-        <div class="section-title" style="margin-top:0;">Connected secondaries</div>
+        <div class="section-title" style="margin-top:0;">{{ t.connected_secondaries }}</div>
         {% if secondaries %}
         {% for secondary in secondaries %}
         <div class="snapshot-row">
           <div>
             <div>{{ secondary.name }}</div>
-            <div class="s-meta">{% if secondary.address %}{{ secondary.address }}{% else %}no address{% endif %} · registered <time data-epoch="{{ secondary.registered_at }}">{{ secondary.registered_at }}</time>{% if secondary.last_seen %} · last seen <time data-epoch="{{ secondary.last_seen }}">{{ secondary.last_seen }}</time>{% endif %}</div>
+            <div class="s-meta">{% if secondary.address %}{{ secondary.address }}{% else %}{{ t.no_address }}{% endif %}</div>
           </div>
           <div class="snapshot-actions">
             <span class="tag off" id="health-{{ secondary.name }}">–</span>
-            <a href="#" onclick="checkSecondaryHealth('{{ secondary.name }}'); return false;">Check</a>
-            <a href="#" onclick="editSecondaryAddress('{{ secondary.name }}', '{{ secondary.address | default(value='') }}'); return false;">Edit address</a>
-            <a href="#" onclick="rotateToken('{{ secondary.name }}'); return false;" style="color:var(--mist);">Rotate token</a>
-            <a href="#" style="color:var(--danger);" onclick="removeSecondary('{{ secondary.name }}'); return false;">Disconnect</a>
+            <a href="#" onclick="checkSecondaryHealth('{{ secondary.name }}'); return false;">{{ t.check }}</a>
+            <a href="#" onclick="editSecondaryAddress('{{ secondary.name }}', '{{ secondary.address | default(value='') }}'); return false;">{{ t.edit_address }}</a>
+            <a href="#" onclick="rotateToken('{{ secondary.name }}'); return false;" style="color:var(--mist);">{{ t.rotate_token }}</a>
+            <a href="#" style="color:var(--danger);" onclick="removeSecondary('{{ secondary.name }}'); return false;">{{ t.disconnect }}</a>
           </div>
         </div>
         {% endfor %}
         {% else %}
-        <p class="section-sub">No secondaries registered yet.</p>
+        <p class="section-sub">{{ t.no_secondaries_registered_yet }}</p>
         {% endif %}
       </div>
 
       {# What: install command for a new secondary #}
       {# Why: main.rs renders the token and primary URL #}
       <div data-sec-panel="add" class="hidden">
-        <div class="section-title" style="margin-top:0;">Run this on the secondary box</div>
-        <p class="section-sub">One command installs it, registers it with this primary, and starts it. Enter a name for that location (letters, digits, hyphens).</p>
+        <div class="section-title" style="margin-top:0;">{{ t.run_this_on_the_secondary_box }}</div>
+        <p class="section-sub">{{ t.one_command_installs_it_registers_it }}</p>
         <div class="field" style="max-width:320px;">
           <label for="secondary-name">Name</label>
-          <input type="text" id="secondary-name" maxlength="63" pattern="[A-Za-z0-9-]+" placeholder="garage" autocomplete="off">
+          <input type="text" id="secondary-name" maxlength="63" pattern="[A-Za-z0-9-]+" placeholder="{{ t.name_to_identify_the_secondary_no }}" autocomplete="off">
         </div>
+        {% if primary_ip_https %}<div class="field" style="max-width:320px;">
+          <label for="secondary-https-ip">{{ t.second_ip_of_the_secondary_for }}</label>
+          <input type="text" id="secondary-https-ip" maxlength="15" placeholder="192.168.1.103" autocomplete="off">
+          <p class="field-hint">{{ t.https_ip_hint }}</p>
+        </div>{% else %}<p class="field-hint">{{ t.https_off_hint }}</p>{% endif %}
         <div class="copy-row" style="max-width:none; align-items:flex-start; font-size:12.5px;">
           <code id="install-cmd" style="white-space:pre-wrap; overflow-x:visible;">bash &lt;(curl -fsSL {{ setup_script_url }}) secondary \
   --primary {{ primary_url }} \
   --token {{ registration_token }} \
   --name <span id="secondary-name-out">NAME</span> \
-  --ip-http {{ primary_ip }}</code>
-          <button type="button" onclick="copyText('install-cmd', this)">Copy</button>
+  --ip-http {{ primary_ip }}{% if primary_ip_https %}<span id="secondary-https-out" hidden> \
+  --ip-https {{ primary_ip_https }} \
+  --listen-ip-https <span id="secondary-https-ip-out">IP</span></span>{% endif %}</code>
+          <button type="button" onclick="copyText('install-cmd', this)">{{ t.copy }}</button>
         </div>
-        <p class="field-hint">If port 53 on that box is already used by something else, pass a free address with <code>--listen-ip</code>; the installer shows the conflict instead of failing partway through.</p>
+        <p class="field-hint">{{ t.if_port_53_on_that_box }} <code>--listen-ip</code>{{ t.the_installer_shows_the_conflict_instead }}</p>
       </div>
     </section>
   </div>
@@ -528,20 +564,37 @@
       if (name !== input.value) input.value = name;
       out.textContent = name || 'NAME';
     });
+    const ip = document.getElementById('secondary-https-ip');
+    const ipOut = document.getElementById('secondary-https-ip-out');
+    const extra = document.getElementById('secondary-https-out');
+    if (ip && ipOut && extra) {
+      ip.addEventListener('input', () => {
+        const v = ip.value.replace(/[^0-9.]/g, '');
+        if (v !== ip.value) ip.value = v;
+        // What: HTTPS lines only for a whole IPv4.
+        // Why: one digit already added them.
+        // From: Issue #1683 | PR #1980
+        const parts = v.split('.');
+        const whole = parts.length === 4 && parts.every(function (p) { return p !== '' && Number(p) <= 255; });
+        ip.setCustomValidity(v && !whole ? LC_T.err_ipv4 : '');
+        ipOut.textContent = whole ? v : 'IP';
+        extra.hidden = !whole;
+      });
+    }
   })();
 
   // What: confirm() with record name and type
   // Why: values come from data-*, not inline JS strings
   // From: Issue #1683 | PR #1912
   function confirmRemoveRecord(btn) {
-    return confirm(btn.dataset.recordName + ' (' + btn.dataset.recordType + ') entfernen?');
+    return confirm(LC_T.remove_x_q.replace('{x}', btn.dataset.recordName + ' (' + btn.dataset.recordType + ')'));
   }
 
   // What: confirm() with PTR IP and hostname
   // Why: values come from data-*, not inline JS strings
   // From: Issue #1683 | PR #1912
   function confirmRemovePtr(btn) {
-    return confirm('PTR ' + btn.dataset.ptrIp + ' → ' + btn.dataset.ptrHost + ' entfernen?');
+    return confirm(LC_T.remove_x_q.replace('{x}', 'PTR ' + btn.dataset.ptrIp + ' → ' + btn.dataset.ptrHost));
   }
 
   // What: TXT length check in UTF-8 bytes
@@ -567,6 +620,33 @@
     button.addEventListener('click', () => setActiveDnsTab(button.dataset.dnsTab));
   });
 
+  // What: a content example that fits the chosen type.
+  // Why: each type has its own content format.
+  // From: Issue #1683 | PR #1980
+  const lanExamples = {
+    A: '192.168.1.50', AAAA: 'fd00::50', CNAME: 'nas.{{ lan_zone }}.',
+    MX: '10 mail.{{ lan_zone }}.', TXT: '"some text"',
+    SRV: '10 5 5060 sip.{{ lan_zone }}.', CAA: '0 issue "letsencrypt.org"',
+    HTTPS: '1 . alpn=h2', SVCB: '1 . alpn=h2',
+    NAPTR: '100 10 "U" "E2U+sip" "!^.*$!sip:info@{{ lan_zone }}!" .',
+    SSHFP: '4 2 123456789abcdef...', TLSA: '3 1 1 123456789abcdef...'
+  };
+  function lanExample() {
+    const type = document.querySelector('[data-lan-record-type]').value;
+    document.querySelector('[data-lan-record-content]').placeholder = lanExamples[type] || '';
+  }
+  document.querySelector('[data-lan-record-type]').addEventListener('change', lanExample);
+  // What: PTR box only for type A.
+  // Why: a PTR points to one IPv4 address.
+  // From: Issue #1683 | PR #1980
+  const lanPtr = () => {
+    const a = document.querySelector('[data-lan-record-type]').value === 'A';
+    document.querySelector('[data-lan-ptr]').style.display = a ? '' : 'none';
+    document.querySelector('[data-lan-ptr] input').disabled = !a;
+  };
+  document.querySelector('[data-lan-record-type]').addEventListener('change', lanPtr);
+  lanPtr();
+  lanExample();
   document.querySelector('[data-lan-record-type]').addEventListener('change', validateLanTxtContent);
   document.querySelector('[data-lan-record-content]').addEventListener('input', validateLanTxtContent);
   document.querySelector('[data-lan-record-form]').addEventListener('submit', validateLanTxtContent);
@@ -596,38 +676,38 @@
 
       if (response.ok) {
         const data = await response.json();
-        alert(`Token erfolgreich rotiert für ${name}`);
+        alert(LC_T.js_token_renewed_x.replace('{x}', name));
       } else {
-        alert(`Fehler beim Rotieren des Tokens: ${response.statusText}`);
+        alert(LC_T.js_token_renew_failed_x.replace('{x}', response.statusText));
       }
     } catch (error) {
-      alert(`Fehler: ${error.message}`);
+      alert(LC_T.js_error_x.replace('{x}', error.message));
     }
   }
 
   // What: DELETE of one secondary after confirm()
   // Why: removal cannot be undone; the page then reloads
   async function removeSecondary(name) {
-    if (!confirm(`${name} wirklich entfernen?`)) {
+    if (!confirm(LC_T.remove_x_q.replace('{x}', name))) {
       return;
     }
 
     try {
       const response = await fetch('{{ routes.secondary | safe }}'.replace('{name}', name), {
-        method: 'DELETE',
+        method: 'POST',
         headers: {
           'X-CSRF-Token': CSRF_TOKEN
         }
       });
 
       if (response.ok) {
-        alert(`${name} erfolgreich entfernt.`);
+        alert(LC_T.js_removed_x.replace('{x}', name));
         location.reload();
       } else {
-        alert(`Fehler beim Entfernen: ${response.statusText}`);
+        alert(LC_T.js_remove_failed_x.replace('{x}', response.statusText));
       }
     } catch (error) {
-      alert(`Fehler: ${error.message}`);
+      alert(LC_T.js_error_x.replace('{x}', error.message));
     }
   }
 
@@ -635,19 +715,19 @@
   // Why: renderHealth() shows one label per probe result
   // From: Issue #1084
   const HEALTH_LABELS = {
-    ok: ['OK (autoritativ)', 'text-green-400'],
-    not_authoritative: ['Nicht autoritativ', 'text-amber-400'],
-    no_zone: ['Zone fehlt (REFUSED)', 'text-red-400'],
-    broken: ['Fehler (SERVFAIL)', 'text-red-400'],
-    unreachable: ['Nicht erreichbar', 'text-red-400'],
-    no_address: ['Keine Adresse', 'text-slate-500'],
-    error: ['Unerwartete Antwort', 'text-amber-400'],
+    ok: [LC_T.ok_authoritative, 'text-green-400'],
+    not_authoritative: [LC_T.not_authoritative, 'text-amber-400'],
+    no_zone: [LC_T.zone_missing_refused, 'text-red-400'],
+    broken: [LC_T.error_servfail, 'text-red-400'],
+    unreachable: [LC_T.not_reachable, 'text-red-400'],
+    no_address: [LC_T.no_address_2, 'text-slate-500'],
+    error: [LC_T.unexpected_answer, 'text-amber-400'],
   };
 
   // What: writes label, serial and detail of one probe
   // Why: one renderer for the click and the page-load run
   function renderHealth(span, data) {
-    const [label, cls] = HEALTH_LABELS[data.status] || ['Unbekannt', 'text-slate-500'];
+    const [label, cls] = HEALTH_LABELS[data.status] || [LC_T.unknown, 'text-slate-500'];
     span.className = cls;
     span.textContent = data.serial != null ? `${label} · Serial ${data.serial}` : label;
     if (data.detail) span.title = data.detail;
@@ -657,7 +737,7 @@
   // Why: the DNS probe runs on the server, not in the page
   async function checkSecondaryHealth(name) {
     const span = document.getElementById('health-' + name);
-    if (span) { span.className = 'text-slate-400'; span.textContent = 'Prüfe…'; }
+    if (span) { span.className = 'text-slate-400'; span.textContent = LC_T.js_checking; }
     try {
       const response = await fetch('{{ routes.secondary_health | safe }}'.replace('{name}', name), {
         method: 'POST',
@@ -667,17 +747,17 @@
         renderHealth(span, await response.json());
       } else if (span) {
         span.className = 'text-red-400';
-        span.textContent = `Fehler (${response.status})`;
+        span.textContent = LC_T.js_error_x.replace('{x}', response.status);
       }
     } catch (error) {
-      if (span) { span.className = 'text-red-400'; span.textContent = `Fehler: ${error.message}`; }
+      if (span) { span.className = 'text-red-400'; span.textContent = LC_T.js_error_x.replace('{x}', error.message); }
     }
   }
 
   // What: prompt() for a new address, POST, then reload
   // Why: the server checks it; 400 means not a private IPv4
   async function editSecondaryAddress(name, current) {
-    const input = prompt(`Adresse (private IPv4) für ${name}:`, current || '');
+    const input = prompt(LC_T.js_address_for_x.replace('{x}', name), current || '');
     if (input === null) return;
     try {
       const response = await fetch('{{ routes.secondary_address | safe }}'.replace('{name}', name), {
@@ -688,12 +768,12 @@
       if (response.ok) {
         location.reload();
       } else if (response.status === 400) {
-        alert('Ungültige Adresse: nur private IPv4-Adressen (10.x, 172.16–31.x, 192.168.x) sind erlaubt.');
+        alert(LC_T.invalid_address_only_private_ipv4_addres);
       } else {
-        alert(`Fehler beim Speichern der Adresse: ${response.statusText}`);
+        alert(LC_T.js_address_save_failed_x.replace('{x}', response.statusText));
       }
     } catch (error) {
-      alert(`Fehler: ${error.message}`);
+      alert(LC_T.js_error_x.replace('{x}', error.message));
     }
   }
 
