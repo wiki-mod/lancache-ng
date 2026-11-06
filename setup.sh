@@ -8395,12 +8395,16 @@ if [[ -n "${LANCACHE_IMAGE_CHANNEL:-}" ]]; then
         LANCACHE_IMAGE_CHANNEL="$current_channel"
     fi
     print_ok "Using the channel already set via LANCACHE_IMAGE_CHANNEL=${LANCACHE_IMAGE_CHANNEL}."
-    # What: a preset non-default channel still warns
-    # Why: nightly warns on every install (29.10.)
+    # What: a preset channel takes the prompt's nightly path
+    # Why: same warning and second yes as the prompt
     # From: Issue #1683
     if [[ "$LANCACHE_IMAGE_CHANNEL" != "$(lancache_sot_value install_channel release)" ]] \
-        && list_has_line "$LANCACHE_IMAGE_CHANNEL" "$(lancache_selectable_channels)"; then
+        && list_has_line "$LANCACHE_IMAGE_CHANNEL" "$(lancache_selectable_channels)" \
+        && [[ -z "${LANCACHE_CHANNEL_CONFIRMED:-}" ]]; then
         print_warn "The $LANCACHE_IMAGE_CHANNEL channel is experimental: untested daily builds that may break the stack; not for production use."
+        confirm "Install from $LANCACHE_IMAGE_CHANNEL anyway? [y/N]" "N" \
+            || die "Install cancelled; nothing was changed."
+        export LANCACHE_CHANNEL_CONFIRMED=1
     fi
 else
     selectable=$(lancache_selectable_channels) || exit $?
@@ -8431,6 +8435,7 @@ else
             if [[ "$LANCACHE_IMAGE_CHANNEL" != "$install_channel" ]]; then
                 print_warn "The $LANCACHE_IMAGE_CHANNEL channel is experimental: untested daily builds that may break the stack; not for production use."
                 confirm "Install from $LANCACHE_IMAGE_CHANNEL anyway? [y/N]" "N" || continue
+                export LANCACHE_CHANNEL_CONFIRMED=1
             fi
             print_ok "Using the $LANCACHE_IMAGE_CHANNEL channel."
             break
