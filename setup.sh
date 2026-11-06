@@ -364,7 +364,10 @@ dns_upstream_zone_problem() {
     for item in "${forwarded_zones[@]}"; do
         [[ "$zone" = "$item" || "$zone" == *".$item" ]] && inside=1
     done
-    if ! is_valid_dhcp_proxy_domain "$zone"; then
+    # What: "_" counts as a letter in zone names
+    # Why: live 06.11.: _msdcs.home.lan was refused
+    # From: Issue #1918
+    if ! is_valid_dhcp_proxy_domain "${zone//_/a}"; then
         printf "'%s' is no valid domain name\n" "$raw"
     elif [[ "$zone" = "$lan" || "$zone" == *".$lan" ]]; then
         printf "'%s' is answered by LanCache-NG itself\n" "$raw"
@@ -7727,7 +7730,7 @@ cmd_configure_upstream_dns() {
 
     print_step "Reading current configuration"
 
-    local env_file ip_http ip_https lan services apply_rc=0
+    local env_file ip_http ip_https lan ui_lan services apply_rc=0
     local old_servers old_zones old_unsigned old_reverse dhcp_mode
     local -a all_services
     env_file=$(runtime_env_file_for_install_dir "$install_dir")
@@ -7740,6 +7743,11 @@ cmd_configure_upstream_dns() {
     ip_http=$(get_env_var IP_HTTP "$env_file") || exit $?
     ip_https=$(get_env_var IP_HTTPS "$env_file") || exit $?
     lan=$(env_or_sot_default DHCP_DOMAIN "$env_file") || exit $?
+    # What: the LAN domain saved in the UI wins
+    # Why: live 06.11.: home.lan from the UI was not seen
+    # From: Issue #1918
+    ui_lan=$(lancache_read_ui_settings_override "$install_dir" "$env_file" DHCP_DOMAIN) || exit $?
+    [[ -z "$ui_lan" ]] || lan="$ui_lan"
 
     printf '\n  %sCurrent configuration:%s\n' "${BOLD}" "${RESET}"
     printf "    DNS servers:        %s\n" "${old_servers:-none (LanCache-NG resolves names itself)}"
