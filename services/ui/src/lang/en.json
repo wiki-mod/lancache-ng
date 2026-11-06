@@ -435,7 +435,8 @@
   "err_no_container": "No container for {service}.",
   "err_action_restart_reload": "Action must be restart or reload.",
   "err_program_not_offered": "This program is not offered.",
-  "err_program_reload_only": "This program can only reload.",
   "err_program_not_running": "The program is not running in this mode.",
-  "err_state_running_stopped": "State must be running or stopped."
+  "err_state_running_stopped": "State must be running or stopped.",
+  "prog_reload": "Reload",
+  "prog_restart": "Restart"
 }

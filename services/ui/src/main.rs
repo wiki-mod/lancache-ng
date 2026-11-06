@@ -221,7 +221,6 @@ impl App {
         ctx.insert("repo_url", &s.text("REPO_URL")?);
         ctx.insert("desired_services", &s.list("UI_CONTROLLABLE_SERVICES"));
         ctx.insert("programs", &s.list("UI_SERVICES"));
-        ctx.insert("signal_programs", &s.list("UI_SIGNAL_PROGRAMS"));
         ctx.insert("watchdog_refresh_seconds", &s.uint("UI_STATUS_REFRESH")?);
         ctx.insert("warnings", &s.warnings);
         // What: texts of the request language.
@@ -2289,26 +2288,6 @@ async fn service_action(
     {
         return Err(Fail(StatusCode::NOT_FOUND, tr("err_program_not_offered")));
     }
-    // What: a signal program reloads by container HUP.
-    // Why: "nginx -s reload" read the image default conf.
-    // From: Issue #1683
-    let id = format!("{container}:{program}");
-    if s.list("UI_SIGNAL_PROGRAMS").contains(&id) {
-        if action != "reload" {
-            return Err(bad_request(tr("err_program_reload_only")));
-        }
-        let name = container_of(&app, &s, &container)
-            .await
-            .map_err(|e| Fail(StatusCode::BAD_GATEWAY, e))?;
-        let (grace, limit) = app
-            .limits(&s)
-            .map_err(|e| Fail(StatusCode::BAD_GATEWAY, e))?;
-        app.docker
-            .act(&name, docker::Action::Reload, grace, limit)
-            .await
-            .map_err(|e| Fail(StatusCode::BAD_GATEWAY, e.to_string()))?;
-        return Ok(StatusCode::NO_CONTENT.into_response());
-    }
     // What: only a running program is touched.
     // Why: a restart must not start kea in dnsmasq mode.
     // From: Issue #1683
@@ -2495,11 +2474,35 @@ async fn apply_all(
     let sec = secrets(new)?;
     let files = render::all(new, &sec).map_err(|e| e.join("; "))?;
     let mut changes = old.diff(new);
-    changes.extend(write_files(new, &files)?);
+    let written = write_files(new, &files)?;
+    let snmpd_conf = new.text("SNMPD_CONF_FILE")?;
+    let snmpd_new = written.iter().any(|c| c.key == snmpd_conf);
+    changes.extend(written);
     // What: PowerDNS steps report, not abort.
     // Why: pdns starts only after the restart below.
     // From: Issue #1683 | PR #1980
     let mut report = Vec::new();
+    // What: a new snmpd.conf reloads every snmpd.
+    // Why: dns, proxy and ui run snmpd on the same file.
+    // From: Issue #1683
+    if snmpd_new {
+        let (_, limit) = app.limits(new)?;
+        let ex = new.list("SNMPD_RELOAD_EXEC");
+        let owners: std::collections::BTreeSet<&str> = ex
+            .iter()
+            .filter_map(|e| e.split_once(':'))
+            .map(|p| p.0)
+            .collect();
+        for owner in owners {
+            match container_of(app, new, owner).await {
+                Ok(name) => {
+                    let r = apply::reload_exec(&app.docker, &name, &ex, owner, limit).await;
+                    report.push(format!("{owner} snmpd: {r:?}"));
+                }
+                Err(e) => report.push(format!("{owner} snmpd: skipped, {e}")),
+            }
+        }
+    }
     // What: at start zones_at_start owns this step.
     // Why: live: dns not up yet gave an error line.
     // From: Issue #1683 | PR #1980
@@ -2539,10 +2542,9 @@ async fn apply_all(
     }
     plan.retain(|owner, _| names.contains_key(owner));
     let lookup = |owner: &str| names.get(owner).cloned().unwrap_or_default();
-    let hup = new.list("HUP_OWNERS");
     let rx = new.list("RELOAD_EXEC");
     let mut restarted = Vec::new();
-    let mut results = apply::run(&app.docker, &plan, &hup, &rx, &lookup, grace, limit).await;
+    let mut results = apply::run(&app.docker, &plan, &rx, &lookup, grace, limit).await;
     // What: one more try for owners that got a 409.
     // Why: live: restart while compose recreated proxy.
     // From: Issue #1683 | PR #1980
@@ -2560,7 +2562,7 @@ async fn apply_all(
             })
             .map(|(o, e)| (o.clone(), *e))
             .collect();
-        let retried = apply::run(&app.docker, &again, &hup, &rx, &lookup, grace, limit).await;
+        let retried = apply::run(&app.docker, &again, &rx, &lookup, grace, limit).await;
         for (owner, r) in retried {
             if let Some(slot) = results.iter_mut().find(|(x, _)| *x == owner) {
                 slot.1 = r;
@@ -2617,8 +2619,7 @@ async fn apply_all(
             }
             plan.retain(|owner, _| names.contains_key(owner));
             let lookup = |owner: &str| names.get(owner).cloned().unwrap_or_default();
-            for (owner, result) in
-                apply::run(&app.docker, &plan, &hup, &rx, &lookup, grace, limit).await
+            for (owner, result) in apply::run(&app.docker, &plan, &rx, &lookup, grace, limit).await
             {
                 report.push(format!("{owner}: {result:?}"));
             }

@@ -7135,11 +7135,17 @@ ci_cmd_openrc_setup() {
         _ci_fill "${row#*=}" "${rows}" || return 2
         cmd="${REPLY//,/ }"; args=""
         [[ "${cmd}" != *" "* ]] || args="${cmd#* }"
+        # What: reload sends HUP to the supervised program.
+        # Why: openrc-init drops a container HUP.
+        # From: Issue #1683
         printf '%s\n' '#!/sbin/openrc-run' "supervisor=${oset[OPENRC_SUPERVISOR]}" \
             "command=${cmd%% *}" "command_args=\"${args}\"" \
             "respawn_delay=${oset[OPENRC_RESPAWN_DELAY]}" \
             "output_log=${oset[OPENRC_OUTPUT_LOG]}" \
-            "error_log=${oset[OPENRC_ERROR_LOG]}" > "${idir}/${name}"
+            "error_log=${oset[OPENRC_ERROR_LOG]}" \
+            'extra_started_commands="reload"' \
+            "reload() { supervise-daemon \"\${RC_SVCNAME}\" --signal HUP; }" \
+            > "${idir}/${name}"
         if [ -n "${oset_pre[${name}]:-}" ]; then
             _ci_fill "${oset_pre[${name}]}" "${rows}" || return 2
             printf 'start_pre() { %s; }\n' "${REPLY}" >> "${idir}/${name}"

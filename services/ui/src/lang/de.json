@@ -435,7 +435,8 @@
   "err_no_container": "Kein Container für {service}.",
   "err_action_restart_reload": "Erlaubt sind nur Neustart oder Neu laden.",
   "err_program_not_offered": "Dieses Programm wird hier nicht angeboten.",
-  "err_program_reload_only": "Dieses Programm kann nur neu geladen werden.",
   "err_program_not_running": "Das Programm läuft in diesem Modus nicht.",
-  "err_state_running_stopped": "Der Zustand muss laufend oder gestoppt sein."
+  "err_state_running_stopped": "Der Zustand muss laufend oder gestoppt sein.",
+  "prog_reload": "Neu laden",
+  "prog_restart": "Neu starten"
 }

@@ -3253,7 +3253,7 @@ pub mod apply {
     // What: run every reload command; stop at the first.
     // Why: a failed reload is shown, never hidden.
     // From: Issue #1683
-    async fn reload_exec(
+    pub async fn reload_exec(
         api: &Api,
         name: &str,
         exec: &[String],
@@ -3273,14 +3273,12 @@ pub mod apply {
         Outcome::Done(Action::Reload)
     }
 
-    // What: carry out the plan: HUP, exec or restart.
-    // Why: openrc-init drops HUP; only hup owners get it.
+    // What: carry out the plan: exec or restart.
+    // Why: openrc-init drops HUP; reload runs commands.
     // From: Issue #1683 | PR #1980
-    #[allow(clippy::too_many_arguments)]
     pub async fn run(
         api: &Api,
         plan: &BTreeMap<String, Effect>,
-        hup: &[String],
         exec: &[String],
         container_of: &(dyn Fn(&str) -> String + Sync),
         grace: u32,
@@ -3297,7 +3295,7 @@ pub mod apply {
                 Some(Action::Reload) if exec_cmds(exec, owner).next().is_some() => {
                     reload_exec(api, &container_of(owner), exec, owner, limit).await
                 }
-                Some(Action::Reload) if !hup.contains(owner) => {
+                Some(Action::Reload) => {
                     let a = Action::Restart;
                     match api.act(&container_of(owner), a, grace, limit).await {
                         Ok(()) => Outcome::Done(a),
