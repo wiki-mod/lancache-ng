@@ -6396,7 +6396,12 @@ ci_cmd_build_tools_run() {
     # What: job values by name; docker reads each value.
     # Why: no value lands in argv or in a file.
     # From: Issue #1683 | PR #1984
-    for name in "${!GITHUB_@}" "${!RUNNER_@}" "${!ACTIONS_@}" "${!CI_@}" "${!SCCACHE_@}" "${!GH_TOKEN@}"; do
+    # What: also every top-level workflow env name.
+    # Why: arm64 ship lacked GHCR_TOKEN (run 42296020223).
+    # From: Issue #1683 | PR #1984
+    for name in "${!GITHUB_@}" "${!RUNNER_@}" "${!ACTIONS_@}" "${!CI_@}" "${!SCCACHE_@}" "${!GH_TOKEN@}" \
+        "${!GHCR_@}" "${!DOCKERHUB_@}" "${!PROJECT_@}" "${!PR_TITLE_@}" "${!DISTCC_@}" \
+        "${!BASE_SHA@}" "${!BEFORE_SHA@}" "${!CARGO_BUILD_JOBS@}"; do
         case "${name}" in
             CI_BUILD_TOOLS_NATIVE) ;;
             *) envs+=(-e "${name}") ;;
