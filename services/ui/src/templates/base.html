@@ -195,13 +195,19 @@
      From: Issue #1437 | PR #1858 */
   .beambar {
     position: relative;
-    height: 46px;
+    /* What: the bar wraps instead of clipping
+       Why: DoMe 06.11.: narrow window hid the menus
+       From: Issue #1683 */
+    min-height: 46px;
+    flex-wrap: wrap;
+    row-gap: 6px;
+    padding-block: 6px;
     flex: none;
     background: var(--navy-900);
     border-bottom: 1px solid var(--navy-700);
     display: flex;
     align-items: center;
-    padding: 0 22px;
+    padding-inline: 22px;
     gap: 18px;
     overflow: hidden;
   }
@@ -546,7 +552,7 @@
     .dock .brand-mark { width: 34px; height: 34px; object-fit: contain; }
     .dock .nav-group-label, .dock .dock-footer, .dock .nav-dot { display: none; }
     .dock .nav-item { flex: none; white-space: nowrap; padding: 9px 12px; margin: 0; }
-    .beambar { overflow-x: auto; padding: 8px 12px; }
+    .beambar { padding: 8px 12px; }
     .content { padding: 18px 14px 48px; }
     .page-title { font-size: 28px; }
     .subtabs { gap: 16px; overflow-x: auto; white-space: nowrap; }
@@ -644,7 +650,7 @@
   .beambar-dot.amber, .beambar-dot.yellow { background: var(--beam); box-shadow: 0 0 8px 1px #f7b95580; }
   .beambar-dot.red { background: var(--coral); box-shadow: 0 0 8px 1px #ff7a5c80; }
   .beambar-dot.gray { background: var(--mist-dim); }
-  .beambar-services { display: flex; align-items: center; gap: 18px; font-size: 12.5px; color: var(--mist); white-space: nowrap; }
+  .beambar-services { display: flex; flex-wrap: wrap; row-gap: 6px; align-items: center; gap: 18px; font-size: 12.5px; color: var(--mist); white-space: nowrap; }
   .beambar-end { margin-left: auto; display: flex; align-items: center; gap: 8px; }
   .dock a.nav-item, .dock a.nav-item:hover { text-decoration: none; }
   </style>
@@ -969,6 +975,10 @@
     // Why: reload/restart one program via OpenRC
     // From: Issue #1683 | PR #1858
     const DOCK_PROGRAMS = [{% for p in programs %}'{{ p }}',{% endfor %}];
+    // What: signal programs only reload.
+    // Why: nginx in proxy has no restart via OpenRC.
+    // From: Issue #1683
+    const DOCK_SIGNAL = [{% for p in signal_programs %}'{{ p }}',{% endfor %}];
     async function programAction(container, program, action, button) {
       button.disabled = true;
       try {
@@ -1056,7 +1066,7 @@
         // Why: DoMe 05.11.: 14 equal buttons in the bar.
         // From: Issue #1683 | PR #1980
         const progs = DOCK_PROGRAMS.filter(function (p) { return p.split(':')[0] === svc.name; });
-        if (progs.length) {
+        if (progs.length && !svc.mode_off) {
           const menu = document.createElement('details');
           menu.className = 'beam-menu beam-name';
           menu.open = openMenu === svc.name;
@@ -1078,7 +1088,8 @@
             const name = document.createElement('span');
             name.textContent = program;
             row.appendChild(name);
-            [['reload', 'Reload'], ['restart', 'Restart']].forEach(function (a) {
+            const acts = DOCK_SIGNAL.includes(p) ? [['reload', 'Reload']] : [['reload', 'Reload'], ['restart', 'Restart']];
+            acts.forEach(function (a) {
               const b = document.createElement('button');
               b.type = 'button';
               b.className = 'theme-btn';
