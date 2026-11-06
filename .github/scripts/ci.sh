@@ -6393,11 +6393,8 @@ ci_cmd_build_tools_run() {
         ci_log "[CI-ERROR-BUILDTOOLS-0028]" "got=\"${min}\" reason=\"CI_BUILD_TOOLS_RUN_MINUTES must be positive whole minutes\""
         return 2
     fi
-    # What: job values by name; docker reads each value.
-    # Why: no value lands in argv or in a file.
-    # From: Issue #1683 | PR #1984
-    # What: also every top-level workflow env name.
-    # Why: arm64 ship lacked GHCR_TOKEN (run 42296020223).
+    # What: job and workflow env values, passed by name.
+    # Why: no value in argv or file; arm64 needs GHCR_TOKEN
     # From: Issue #1683 | PR #1984
     for name in "${!GITHUB_@}" "${!RUNNER_@}" "${!ACTIONS_@}" "${!CI_@}" "${!SCCACHE_@}" "${!GH_TOKEN@}" \
         "${!GHCR_@}" "${!DOCKERHUB_@}" "${!PROJECT_@}" "${!PR_TITLE_@}" "${!DISTCC_@}" \
