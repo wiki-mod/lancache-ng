@@ -256,7 +256,7 @@ _ci_debug_init() {
     case "${v}" in
         true)
             _CI_DEBUG_MODE=true
-            # What: GitHub masks each set LAN value in the log.
+            # What: GitHub masks each set LAN value.
             # Why: a public log must show no LAN address.
             # From: Issue #1683 | PR #1984
             [ -f "${CI_MANIFEST}" ] || return 0
