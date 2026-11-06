@@ -1,0 +1,135 @@
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+#
+# Daily check that a public channel (default `latest`) is still installable,
+# the way an operator sees it: on a GitHub-hosted runner, without the
+# project's own runners or LAN cache (maintainer decision 2026-10-23: v0.3.0
+# and `latest` had answered while every per-platform image behind them
+# returned 404, and nobody noticed until an install failed).
+#
+# Flow: scripts/check-latest-channel.sh checks that every first-party image
+# in release/stack-images.yml resolves on the channel with its declared
+# platforms (scripts/require-image-platforms.sh, the same guard promote and
+# release use) and that the full-setup stack starts from it and reports
+# healthy. A green first attempt ends silently. On a failed first attempt the
+# channel's branch is rebuilt once through build-push.yml (master republishes
+# `latest`, current_dev with channel=nightly republishes `nightly`) and the
+# check runs again. Either way a failed first attempt opens an issue: a
+# rebuild that fixes the symptom leaves the cause in place, so a later
+# success must not hide the first failure (AG-INT-002). Immutable vX.Y.Z tags
+# are never rebuilt here.
+
+name: Latest Channel Health
+
+on:
+  schedule:
+    # 05:00 UTC, after build-push.yml's own 01:00 UTC master run.
+    - cron: "0 5 * * *"
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: Channel to check. latest is rebuilt from master, nightly from current_dev.
+        type: choice
+        options: [latest, nightly]
+        default: latest
+
+permissions:
+  contents: read
+  packages: read
+  actions: write
+  issues: write
+
+concurrency:
+  group: latest-health
+  cancel-in-progress: false
+
+env:
+  # The schedule has no inputs, so a scheduled run checks latest.
+  CHANNEL: ${{ inputs.channel || 'latest' }}
+
+jobs:
+  latest-health:
+    name: ${{ inputs.channel || 'latest' }} channel install check
+    runs-on: ubuntu-latest
+    # Two checks plus one full rebuild (build-push.yml takes about an hour on
+    # the self-hosted pool) must fit; bounds a hung wait (AG-CI-016).
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: master
+
+      - name: First check of the channel
+        id: first
+        run: |
+          set -uo pipefail
+          bash scripts/check-latest-channel.sh "$CHANNEL" > first.log 2>&1
+          rc=$?
+          cat first.log
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+
+      - name: Rebuild the channel's branch once
+        id: rebuild
+        if: steps.first.outputs.rc != '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          # nightly uses the same dispatch as nightly-refresh.yml; latest moves from master's own run.
+          if [ "$CHANNEL" = nightly ]; then
+            branch=current_dev
+            gh workflow run build-push.yml --repo "${{ github.repository }}" --ref current_dev -f channel=nightly
+          else
+            branch=master
+            gh workflow run build-push.yml --repo "${{ github.repository }}" --ref master
+          fi
+          run_id=""
+          for _ in $(seq 1 30); do
+            run_id="$(gh run list --repo "${{ github.repository }}" --workflow build-push.yml --branch "$branch" \
+              --event workflow_dispatch --created ">=$started" --limit 1 --json databaseId --jq '.[0].databaseId // ""')"
+            [ -n "$run_id" ] && break
+            sleep 10
+          done
+          [ -n "$run_id" ] || { echo "::error::dispatched build-push.yml run on $branch did not appear"; exit 1; }
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+          gh run watch "$run_id" --repo "${{ github.repository }}" --interval 60 --exit-status
+
+      - name: Second check of the channel
+        id: second
+        if: steps.first.outputs.rc != '0' && !cancelled()
+        run: |
+          set -uo pipefail
+          bash scripts/check-latest-channel.sh "$CHANNEL" > second.log 2>&1
+          rc=$?
+          cat second.log
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+
+      - name: Open an issue
+        if: steps.first.outputs.rc != '0' && !cancelled()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REBUILD: ${{ steps.rebuild.outcome }}
+          REBUILD_RUN: ${{ steps.rebuild.outputs.run_id }}
+          SECOND_RC: ${{ steps.second.outputs.rc }}
+        run: |
+          set -euo pipefail
+          if [ "$REBUILD" = success ] && [ "$SECOND_RC" = 0 ]; then
+            title="$CHANNEL was broken and a rebuild repaired it ($(date -u +%F))"
+          else
+            title="$CHANNEL is broken and a rebuild did not repair it ($(date -u +%F))"
+          fi
+          {
+            printf 'Run: %s/%s/actions/runs/%s\n\n' "$GITHUB_SERVER_URL" "${{ github.repository }}" "$GITHUB_RUN_ID"
+            printf 'Rebuild: %s, run %s. Second check rc: %s\n\n' "$REBUILD" "${REBUILD_RUN:-none}" "${SECOND_RC:-not run}"
+            printf 'First check (last 60 lines):\n```\n'; tail -n 60 first.log; printf '```\n'
+            if [ -f second.log ]; then printf '\nSecond check (last 60 lines):\n```\n'; tail -n 60 second.log; printf '```\n'; fi
+          } > issue.md
+          gh issue create --repo "${{ github.repository }}" --label bug --title "$title" --body-file issue.md
+
+      - name: Fail when the channel is still broken
+        if: steps.first.outputs.rc != '0' && !cancelled()
+        env:
+          SECOND_RC: ${{ steps.second.outputs.rc }}
+        run: |
+          set -euo pipefail
+          [ "${SECOND_RC:-1}" = 0 ] || { echo "::error::$CHANNEL is still not installable after one rebuild"; exit 1; }
