@@ -977,12 +977,13 @@ async fn domains(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     // Why: a nightly primary must not hand out master.
     // From: Issue #1683 | PR #1980
     let nightly = process_env("LANCACHE_IMAGE_CHANNEL").as_deref() == Some("nightly");
-    let url_key = if nightly {
-        "SETUP_SCRIPT_URL_NIGHTLY"
+    let (url_key, ref_key) = if nightly {
+        ("SETUP_SCRIPT_URL_NIGHTLY", "SETUP_GIT_REF_NIGHTLY")
     } else {
-        "SETUP_SCRIPT_URL"
+        ("SETUP_SCRIPT_URL", "SETUP_GIT_REF")
     };
     ctx.insert("setup_script_url", &s.text(url_key)?);
+    ctx.insert("setup_git_ref", &s.text(ref_key)?);
     ctx.insert("primary_ip", &s.text("IP_HTTP")?);
     // What: HTTPS proxy IP when it is a second LAN IP.
     // Why: the copied command then sets the HTTPS DNS bind.

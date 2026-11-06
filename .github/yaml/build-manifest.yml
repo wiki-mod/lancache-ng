@@ -1081,8 +1081,13 @@ runtime:
     - RECURSOR_API_URLS=http://@DNS_SERVICE@:@PDNS_HTTP_API_PORT@/api/v1/servers/localhost http://@DNS_SERVICE@:@PDNS_HTTPS_API_PORT@/api/v1/servers/localhost
     - REPO_URL=https://github.com/wiki-mod/lancache-ng
     - SECRETS_DIR=@LANCACHE_SHARED_SECRET_DIR@
-    - SETUP_SCRIPT_URL=https://raw.githubusercontent.com/wiki-mod/lancache-ng/master/setup.sh
-    - SETUP_SCRIPT_URL_NIGHTLY=https://raw.githubusercontent.com/wiki-mod/lancache-ng/current_dev/setup.sh
+    # What: git ref per channel for the secondary setup.sh.
+    # Why: script and SOT must come from the same ref.
+    # From: Issue #1683 | PR #1985
+    - SETUP_GIT_REF=master
+    - SETUP_GIT_REF_NIGHTLY=current_dev
+    - SETUP_SCRIPT_URL=@RAW_CONTENT_URL@/wiki-mod/lancache-ng/@SETUP_GIT_REF@/setup.sh
+    - SETUP_SCRIPT_URL_NIGHTLY=@RAW_CONTENT_URL@/wiki-mod/lancache-ng/@SETUP_GIT_REF_NIGHTLY@/setup.sh
     - SNMP_AGENTX=0
     - SNMP_AGENTX_SOCKET=/var/agentx/master
     - SNMP_ALLOW_FROM=default
@@ -1345,6 +1350,8 @@ runtime:
     - SECRETS_DIR=path;;;container;services
     - SETUP_SCRIPT_URL=text;;;live;ui
     - SETUP_SCRIPT_URL_NIGHTLY=text;;;live;ui
+    - SETUP_GIT_REF=text;;;live;ui
+    - SETUP_GIT_REF_NIGHTLY=text;;;live;ui
     - SNMP_AGENTX=bool;;;restart;services
     - SNMP_AGENTX_SOCKET=path;;;restart;services
     - SNMP_ALLOW_FROM=text;;;restart;services
