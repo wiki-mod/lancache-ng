@@ -7084,19 +7084,19 @@ ci_cmd_openrc_setup() {
     local rows="${LANCACHE_RUNTIME_DEFAULTS:-}" row k f out n
     local level name cmd args idir rdir
     local -a kv=()
-    local -A v=() pre=()
+    local -A orc=() orc_pre=()
     rows="${rows//|/$'\n'}"
     for k in OPENRC_RC_CONF OPENRC_RC_SETTINGS OPENRC_INIT_DIR OPENRC_RUNLEVEL_DIR \
         OPENRC_DROP_RUNLEVELS OPENRC_DEFAULT_RUNLEVEL OPENRC_SUPERVISOR \
         OPENRC_RESPAWN_DELAY OPENRC_OUTPUT_LOG OPENRC_ERROR_LOG; do
         _ci_fill "@${k}@" "${rows}" || return 2
-        v["${k}"]="${REPLY}"
+        orc["${k}"]="${REPLY}"
     done
-    idir="${v[OPENRC_INIT_DIR]}"; rdir="${v[OPENRC_RUNLEVEL_DIR]}"
-    read -ra kv <<< "${v[OPENRC_RC_SETTINGS]}"
+    idir="${orc[OPENRC_INIT_DIR]}"; rdir="${orc[OPENRC_RUNLEVEL_DIR]}"
+    read -ra kv <<< "${orc[OPENRC_RC_SETTINGS]}"
     for k in "${kv[@]}"; do
         n="${k%%=*}"
-        if ! out="$(sed -i "s|^#\?${n}=.*|${n}=\"${k#*=}\"|" "${v[OPENRC_RC_CONF]}" 2>&1)"; then
+        if ! out="$(sed -i "s|^#\?${n}=.*|${n}=\"${k#*=}\"|" "${orc[OPENRC_RC_CONF]}" 2>&1)"; then
             ci_error "[CI-ERROR-OPENRC-0001]" "setting=\"${k}\" reason=\"rc.conf not set\"" "${out}"
             return 2
         fi
@@ -7109,13 +7109,13 @@ ci_cmd_openrc_setup() {
             rm -f "${f}"
         fi
     done
-    for k in ${v[OPENRC_DROP_RUNLEVELS]}; do rm -f "${rdir:?}/${k}"/*; done
+    for k in ${orc[OPENRC_DROP_RUNLEVELS]}; do rm -f "${rdir:?}/${k}"/*; done
     while IFS= read -r row; do
         [[ "${row}" == *=* ]] || continue
-        pre["${row%%=*}"]="${row#*=}"
+        orc_pre["${row%%=*}"]="${row#*=}"
     done <<< "${LANCACHE_PROCESS_PRE//|/$'\n'}"
     for row in ${LANCACHE_PROCESSES:-}; do
-        level="${v[OPENRC_DEFAULT_RUNLEVEL]}"
+        level="${orc[OPENRC_DEFAULT_RUNLEVEL]}"
         if [[ "${row%%=*}" == *:* ]]; then level="${row%%:*}"; row="${row#*:}"; fi
         mkdir -p "${rdir}/${level}"
         [ -n "${row}" ] || continue
@@ -7123,13 +7123,13 @@ ci_cmd_openrc_setup() {
         _ci_fill "${row#*=}" "${rows}" || return 2
         cmd="${REPLY//,/ }"; args=""
         [[ "${cmd}" != *" "* ]] || args="${cmd#* }"
-        printf '%s\n' '#!/sbin/openrc-run' "supervisor=${v[OPENRC_SUPERVISOR]}" \
+        printf '%s\n' '#!/sbin/openrc-run' "supervisor=${orc[OPENRC_SUPERVISOR]}" \
             "command=${cmd%% *}" "command_args=\"${args}\"" \
-            "respawn_delay=${v[OPENRC_RESPAWN_DELAY]}" \
-            "output_log=${v[OPENRC_OUTPUT_LOG]}" \
-            "error_log=${v[OPENRC_ERROR_LOG]}" > "${idir}/${name}"
-        if [ -n "${pre[${name}]:-}" ]; then
-            _ci_fill "${pre[${name}]}" "${rows}" || return 2
+            "respawn_delay=${orc[OPENRC_RESPAWN_DELAY]}" \
+            "output_log=${orc[OPENRC_OUTPUT_LOG]}" \
+            "error_log=${orc[OPENRC_ERROR_LOG]}" > "${idir}/${name}"
+        if [ -n "${orc_pre[${name}]:-}" ]; then
+            _ci_fill "${orc_pre[${name}]}" "${rows}" || return 2
             printf 'start_pre() { %s; }\n' "${REPLY}" >> "${idir}/${name}"
         fi
         chmod 0755 "${idir}/${name}"
