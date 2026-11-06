@@ -2836,6 +2836,115 @@ deploy_prod_repo_input_paths() {
     true
 }
 
+# What: true if a file holds every SOT PSL marker.
+# Why: an error page or a cut download must never land.
+# From: Issue #1683 | PR #1984
+psl_file_is_valid() {
+    local file="$1" markers marker
+    local -a list=()
+    [[ -s "$file" ]] || return 1
+    markers=$(prod_env_default NGINX_PSL_MARKERS) || exit $?
+    IFS=, read -ra list <<< "$markers"
+    for marker in "${list[@]}"; do
+        grep -qF -- "$marker" "$file" || return 1
+    done
+}
+
+# What: the PSL backup dir and its backups, newest first.
+# Why: backup and restore read one list.
+# From: Issue #1683 | PR #1984
+psl_backup_dir() {
+    local sub
+    sub=$(prod_env_default NGINX_PSL_BACKUP_SUBDIR) || exit $?
+    printf '%s/%s\n' "$BACKUP_ROOT" "$sub"
+}
+psl_backup_list() {
+    local dir="$1" f
+    for f in "$dir"/*.gz; do
+        if [[ -f "$f" ]]; then
+            ls -1t -- "$dir"/*.gz
+        fi
+        break
+    done
+}
+
+# What: gzip copy of a PSL, named by its sha256; keep N.
+# Why: DoMe: the old list stays, compressed, at most 3.
+# From: Issue #1683 | PR #1984
+psl_backup() {
+    local file="$1" name dir keep sum gz n=0 f
+    name=$(prod_env_default NGINX_PSL_FILE) || exit $?
+    keep=$(prod_env_default NGINX_PSL_BACKUP_KEEP) || exit $?
+    dir=$(psl_backup_dir) || exit $?
+    mkdir -p "$dir" || die "Failed to create the PSL backup dir $dir (exit $?)."
+    sum=$(sha256sum "$file") || die "Failed to hash $file (exit $?)."
+    gz="$dir/${name%.*}-${sum%% *}.${name##*.}.gz"
+    if [[ ! -s "$gz" ]]; then
+        gzip -c "$file" > "$gz.tmp" && mv -f "$gz.tmp" "$gz" \
+            || die "Failed to back up $file to $gz (exit $?)."
+    fi
+    touch "$gz" || die "Failed to mark $gz as newest backup (exit $?)."
+    while IFS= read -r f; do
+        n=$((n + 1))
+        [[ "$n" -le "$keep" ]] || rm -f -- "$f" || die "Failed to remove the old PSL backup $f (exit $?)."
+    done < <(psl_backup_list "$dir")
+    print_ok "Old Public Suffix List backed up to $gz"
+}
+
+# What: put the newest valid PSL backup in place.
+# Why: no list at all would stop the stack from starting.
+# From: Issue #1683 | PR #1984
+psl_restore_backup() {
+    local dest="$1" tmp="$2" dir f
+    dir=$(psl_backup_dir) || exit $?
+    while IFS= read -r f; do
+        gzip -dc "$f" > "$tmp" && psl_file_is_valid "$tmp" || continue
+        mv -f "$tmp" "$dest" || die "Failed to restore $f to $dest (exit $?)."
+        print_warn "Public Suffix List restored from backup $f"
+        return 0
+    done < <(psl_backup_list "$dir")
+    return 1
+}
+
+# What: load the PSL into the checkout; old list stays.
+# Why: idempotent; a broken download never reaches the stack.
+# From: Issue #1683 | PR #1984
+ensure_public_suffix_list() {
+    local repo_root="$1" name url rel dir dest tmp
+    name=$(prod_env_default NGINX_PSL_FILE) || exit $?
+    url=$(prod_env_default NGINX_PSL_URL) || exit $?
+    rel=$(prod_env_default NGINX_PSL_REPO_DIR) || exit $?
+    dir="$repo_root/$rel"
+    dest="$dir/$name"
+    print_step "Loading the Public Suffix List"
+    install_curl
+    tmp=$(mktemp "$dir/.$name.tmp.XXXXXX") || die "Failed to create a temporary file in $dir (exit $?)."
+    if curl -fsSL --retry 3 -o "$tmp" "$url" && psl_file_is_valid "$tmp"; then
+        if [[ -f "$dest" ]] && cmp -s "$tmp" "$dest"; then
+            rm -f -- "$tmp"
+            print_ok "Public Suffix List is current"
+            return 0
+        fi
+        if psl_file_is_valid "$dest"; then
+            psl_backup "$dest"
+        fi
+        chmod 0644 "$tmp" && mv -f "$tmp" "$dest" || die "Failed to put the Public Suffix List in $dest (exit $?)."
+        print_ok "Public Suffix List updated from $url"
+        return 0
+    fi
+    if psl_file_is_valid "$dest"; then
+        rm -f -- "$tmp"
+        print_warn "No valid Public Suffix List from $url; the current list stays."
+        return 0
+    fi
+    if psl_restore_backup "$dest" "$tmp"; then
+        chmod 0644 "$dest" || die "Failed to set the mode of $dest (exit $?)."
+        return 0
+    fi
+    rm -f -- "$tmp"
+    die "No valid Public Suffix List: the download from $url failed and no backup exists. Check network access and run setup.sh again."
+}
+
 
 # What: stores the Argon2id hash of an Admin UI password
 # Why: only the hash is kept; a hash cannot be read back
@@ -6314,6 +6423,9 @@ perform_stack_update_flow() {
         _UPDATE_ROLLBACK_DIR="$install_dir"
         trap rollback_update_after_env_failure EXIT
     fi
+    if is_deploy_prod_install_dir "$install_dir"; then
+        ensure_public_suffix_list "$(deploy_prod_repo_root "$install_dir")"
+    fi
     migrate_env_for_update "$install_dir"
     validate_compose_config "$install_dir"
     trap resume_lancache_convergence_after_failed_update EXIT
@@ -9248,6 +9360,9 @@ ask "Start now? [Y/n]" "Y"
 # What: step 13: pulls images before enabling any unit
 # Why: failed first installs stay reversible
 # From: Issue #1683 | PR #1858
+if is_deploy_prod_install_dir "$INSTALL_DIR"; then
+    ensure_public_suffix_list "$(deploy_prod_repo_root "$INSTALL_DIR")"
+fi
 print_step "Pulling images"
 cd "$INSTALL_DIR"
 stack_compose "$INSTALL_DIR" "$ENV_LOCAL" pull \

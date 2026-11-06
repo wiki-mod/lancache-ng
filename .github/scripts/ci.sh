@@ -3705,7 +3705,7 @@ ci_cmd_psl() {
     # Why: CI rule: every cache version is a sha256.
     # From: Issue #1683 | PR #1984
     ver="$(_ci_sha256_hex <<< "${url}")" || return 2
-    dest="$(_ci_repo_path CI_PSL_DIR)" || return 2
+    dest="${CI_REPO_ROOT:-.}/$(_ci_runtime_default NGINX_PSL_REPO_DIR)" || return 2
     dir="${RUNNER_TEMP}/psl"
     _ci_run "[CI-ERROR-CACHE-0032]" "dir=\"${dir}\" reason=\"PSL dir not made\"" mkdir -p "${dir}" || return 2
     case "${mode}" in

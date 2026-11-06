@@ -827,6 +827,13 @@ runtime:
     - NGINX_HEALTHZ_BODY=ok
     - NGINX_PSL_FILE=public_suffix_list.dat
     - NGINX_PSL_URL=https://publicsuffix.org/list/public_suffix_list.dat
+    # What: PSL place in the checkout, checks, backups.
+    # Why: setup.sh loads it; a broken list never lands.
+    # From: Issue #1683 | PR #1984
+    - NGINX_PSL_REPO_DIR=services/ui/nginx
+    - NGINX_PSL_MARKERS===BEGIN ICANN DOMAINS===,===END ICANN DOMAINS===,===BEGIN PRIVATE DOMAINS===,===END PRIVATE DOMAINS===
+    - NGINX_PSL_BACKUP_SUBDIR=psl
+    - NGINX_PSL_BACKUP_KEEP=3
     - NGINX_DISCARD_PORT=9
     - NGINX_REFUSE_RELAY_PORT=9447
     - NGINX_STREAM_TARGETS_FILE=stream.d/00-stream-targets.conf
@@ -2072,10 +2079,6 @@ ci_variables:
   # Why: DoMe: raw output of every command must show.
   # From: Issue #1683 | PR #1984
   PROJECT_DEBUG_MODE: "true"
-  # What: checkout dir compose mounts as nginx templates.
-  # Why: CI puts the fetched PSL there for the ui mount.
-  # From: Issue #1683 | PR #1984
-  CI_PSL_DIR: services/ui/nginx
 
 # What: runner host values: paths, ages, units, packages.
 # Why: AG-CI-016: ci.sh runner-host reads them; no copy.

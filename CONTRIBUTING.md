@@ -296,12 +296,10 @@ dependencies, across every ecosystem this repository uses.
   silently drifting.
 - **Obtaining dependencies at build time**: Rust dependencies are
   fetched by Cargo from crates.io during the Docker build stage; no
-  vendored/copied third-party Rust source is committed. The one
-  documented exception is `services/proxy/public_suffix_list.dat` (the
-  vendored Mozilla Public Suffix List)
-  which carries its own upstream header — see `AGENTS.md`'s
-  **AG-HDR-004** for why these are excluded from the project's own file
-  header requirement.
+  vendored/copied third-party Rust source is committed. The Mozilla
+  Public Suffix List is not committed either: `setup.sh` loads it from
+  `NGINX_PSL_URL` when it runs and keeps the old list when a download
+  is broken; CI loads it into the Actions cache each night.
 
 ## Local checks
 
