@@ -948,13 +948,17 @@ async fn domains(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     // What: setup.sh from the branch of this channel.
     // Why: a nightly primary must not hand out master.
     // From: Issue #1683 | PR #1980
-    let nightly = process_env("LANCACHE_IMAGE_CHANNEL").as_deref() == Some("nightly");
-    let url_key = if nightly {
+    let channel = process_env("LANCACHE_IMAGE_CHANNEL").unwrap_or_default();
+    let url_key = if channel == "nightly" {
         "SETUP_SCRIPT_URL_NIGHTLY"
     } else {
         "SETUP_SCRIPT_URL"
     };
     ctx.insert("setup_script_url", &s.text(url_key)?);
+    // What: the copied command names this channel.
+    // Why: setup.sh then reads files from its ref.
+    // From: Issue #1683 | PR #1984
+    ctx.insert("setup_channel", &channel);
     ctx.insert("primary_ip", &s.text("IP_HTTP")?);
     // What: HTTPS proxy IP when it is a second LAN IP.
     // Why: the copied command then sets the HTTPS DNS bind.

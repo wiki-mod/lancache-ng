@@ -7926,6 +7926,22 @@ lancache_repo_file_text() {
     curl -fsSL "$raw" || die "Failed to download ${path} from $raw (exit $?)."
 }
 
+# What: no checkout: files from LANCACHE_IMAGE_CHANNEL's ref
+# Why: AG-REL-009; curl|bash read HEAD (master) for nightly
+# From: Issue #1683 | PR #1984
+secondary_pin_channel_ref() {
+    local channel="${LANCACHE_IMAGE_CHANNEL:-}" ref
+    if [[ -n "${LANCACHE_SETUP_GIT_REF:-}" || -z "$channel" || -f "$SCRIPT_DIR/$LANCACHE_SOT" ]]; then
+        return 0
+    fi
+    validate_lancache_image_channel "$channel"
+    ref=$(lancache_channel_code_ref "$channel" "${LANCACHE_IMAGE_TAG:-}") || exit $?
+    [[ -n "$ref" ]] || die "LANCACHE_IMAGE_CHANNEL=${channel} needs LANCACHE_IMAGE_TAG (vX.Y.Z or sha-<commit>)."
+    LANCACHE_SETUP_GIT_REF="$ref"
+    LANCACHE_SOT_TEXT=$(lancache_repo_file_text "$LANCACHE_SOT") || exit $?
+    print_ok "Repository files from ${ref} (channel ${channel})"
+}
+
 # What: dies naming each NAME=VALUE pair with empty value
 # Why: arguments and response fields share the check
 # From: Issue #1683 | PR #1858
@@ -8055,6 +8071,7 @@ cmd_secondary() {
         print_ok "Secondary https DNS bind IP: ${listen_ip_https}"
     fi
     assert_prebuilt_image_platform_supported
+    secondary_pin_channel_ref
     # What: the compose file is fetched before registration
     # Why: a fetch failure must not follow a registration
     # From: Issue #1683 | PR #1858

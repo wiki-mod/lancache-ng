@@ -490,7 +490,7 @@
           <p class="field-hint">{{ t.https_ip_hint }}</p>
         </div>{% else %}<p class="field-hint">{{ t.https_off_hint }}</p>{% endif %}
         <div class="copy-row" style="max-width:none; align-items:flex-start; font-size:12.5px;">
-          <code id="install-cmd" style="white-space:pre-wrap; overflow-x:visible;">bash &lt;(curl -fsSL {{ setup_script_url }}) secondary \
+          <code id="install-cmd" style="white-space:pre-wrap; overflow-x:visible;">{% if setup_channel %}LANCACHE_IMAGE_CHANNEL={{ setup_channel }} {% endif %}bash &lt;(curl -fsSL {{ setup_script_url }}) secondary \
   --primary {{ primary_url }} \
   --token {{ registration_token }} \
   --name <span id="secondary-name-out">NAME</span> \
