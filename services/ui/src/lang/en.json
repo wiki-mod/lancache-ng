@@ -356,7 +356,7 @@
   "subnet_start": "Subnet start:",
   "subnets": "Subnets",
   "supplemental_only": "Supplemental only",
-  "svc_mode_off": "off (DHCP mode off)",
+  "svc_mode_off": "not enabled",
   "svc_container": "Container",
   "svc_reason": "Reason",
   "svc_st_gray": "off",
