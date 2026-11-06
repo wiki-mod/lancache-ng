@@ -67,7 +67,9 @@
           <span class="track"></span><span class="knob"></span>
         </label>
       </div>
-      <p class="field-hint">{{ t.test_from_a_pc_in_the }} <code>w32tm /stripchart /computer:{{ v.IP_HTTP }} /samples:3 /dataonly</code> {{ t.windows_or }} <code>ntpdate -q {{ v.IP_HTTP }}</code> {{ t.linux_a_reply_means_the_time }}</p>
+      <p class="field-hint">{{ t.test_from_a_pc_in_the }} {{ t.ntp_test_reply }}</p>
+      <div class="copy-row cmd-row"><span class="cmd-os">Windows</span><code id="ntp-test-win">w32tm /stripchart /computer:{{ v.IP_HTTP }} /samples:3 /dataonly</code><button type="button" onclick="copyText('ntp-test-win', this)">{{ t.copy }}</button></div>
+      <div class="copy-row cmd-row"><span class="cmd-os">Linux</span><code id="ntp-test-linux">ntpdate -q {{ v.IP_HTTP }}</code><button type="button" onclick="copyText('ntp-test-linux', this)">{{ t.copy }}</button></div>
       <div class="field-row">
         <textarea name="NTP_UPSTREAM_SERVERS" rows="2" style="width:100%; padding:9px 11px; border-radius:8px; border:1px solid var(--navy-600); background:var(--navy-900); color:var(--foam); font-family:var(--font-mono); font-size:13px;">{{ v.NTP_UPSTREAM_SERVERS }}</textarea>
       </div>

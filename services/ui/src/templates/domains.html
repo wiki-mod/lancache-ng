@@ -367,7 +367,9 @@
         <div class="toggle-row">
           <div>
             <div class="t-label">{{ t.new_tsig_key }}</div>
-            <div class="t-desc">{{ t.then_register_each_secondary_again_with }} <code>./setup.sh secondary --rotate</code>{{ t.removing_a_secondary_does_this_by }}</div>
+            <div class="t-desc">{{ t.then_register_each_secondary_again_with }}</div>
+            <div class="copy-row cmd-row"><code id="tsig-rotate-cmd">./setup.sh secondary --rotate</code><button type="button" onclick="copyText('tsig-rotate-cmd', this)">{{ t.copy }}</button></div>
+            <div class="t-desc">{{ t.removing_a_secondary_does_this_by }}</div>
           </div>
           <button type="submit" class="btn">{{ t.renew_key }}</button>
         </div>
