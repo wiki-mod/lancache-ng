@@ -5261,10 +5261,12 @@ print_command_help() {
     case "$command" in
         install)
             cat <<EOF
-Usage: ./setup.sh install
+Usage: ./setup.sh install [<channel>]
 
-Runs the guided LanCache-NG installer. setup.sh does nothing without a
-command, so the curl | bash one-liner passes it: ... | sudo bash -s -- install
+Runs the guided LanCache-NG installer. The optional channel word
+(one of: $(lancache_release_rows channel | paste -sd" ")) skips the channel prompt.
+setup.sh does nothing without a command, so the curl | bash one-liner
+passes it: ... | sudo bash -s -- install [<channel>]
 
 When no local repo is found (the standalone curl | bash path), this command
 self-clones to ${DEFAULT_INSTALL_DIR} from the remote's default branch by
@@ -8259,7 +8261,16 @@ if [[ "${2:-}" = "--help" || "${2:-}" = "help" ]] \
     print_command_help "$setup_command" && exit 0
 fi
 case "$setup_command" in
-    install) ;;
+    install)
+        # What: "install <channel>" picks the channel
+        # Why: one-liner needs no env var or prompt
+        # From: Issue #1683
+        if [[ -n "${2:-}" ]]; then
+            list_has_line "$2" "$(lancache_release_rows channel)" \
+                || die "Unknown channel '$2'; use one of: $(lancache_release_rows channel | paste -sd" ")."
+            export LANCACHE_IMAGE_CHANNEL="$2"
+        fi
+        ;;
     list-prompts)
         # What: list-prompts records, then falls through
         # Why: the walk uses the real wizard branch logic
