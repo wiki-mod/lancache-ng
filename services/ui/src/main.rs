@@ -203,7 +203,7 @@ impl App {
         }
         let login = !s.text("UI_PASSWORD_HASH").unwrap_or_default().is_empty();
         // What: page and route paths by short name.
-        // Why: templates name the SOT key without its prefix.
+        // Why: templates name the SOT key without prefix.
         // From: Issue #1683
         let paths = |prefix: &str| -> BTreeMap<String, String> {
             s.texts()

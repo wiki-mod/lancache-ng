@@ -586,8 +586,8 @@ runtime:
     # Why: an alarm burst must not grow the file unbounded.
     # From: Issue #1683 | PR #1858
     - UI_ALARMS_MAX=50
-    # What: every ui page and route path; the ui serves them.
-    # Why: one owner for ui, setup.sh and ci.sh (AG-CODE-011).
+    # What: every ui page and route path the ui serves.
+    # Why: one owner for ui, setup.sh, ci.sh (AG-CODE-011)
     # From: Issue #1683
     - UI_PAGE_DASHBOARD=/
     - UI_PAGE_LOGS=/logs
