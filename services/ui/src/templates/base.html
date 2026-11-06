@@ -545,20 +545,21 @@
     color: var(--foam); font-size: 12px; font-weight: 700; display: flex; align-items: center; justify-content: center;
   }
 
-  /* What: phone layout: slim menu strip on top
-     Why: the full dock used a third of a phone screen
+  /* What: phone layout: menu rows on top, they wrap
+     Why: a scrolling strip hid items behind a light bar
      From: Issue #1683 | PR #1858 */
   @media (max-width: 880px) {
     .shell { flex-direction: column; }
-    .dock { position: sticky; top: 0; z-index: 5; width: 100%; height: auto; flex-direction: row; align-items: center; gap: 4px; padding: 6px 8px; overflow-x: auto; border-right: none; border-bottom: 1px solid var(--navy-700); }
+    .dock { position: relative; z-index: 5; width: 100%; height: auto; flex-direction: row; flex-wrap: wrap; align-items: center; gap: 4px; padding: 6px 8px; border-right: none; border-bottom: 1px solid var(--navy-700); }
     .dock .brand { padding: 0 6px; margin: 0; border: none; flex: none; }
     .dock .brand-mark { width: 34px; height: 34px; object-fit: contain; }
     .dock .nav-group-label, .dock .dock-footer, .dock .nav-dot { display: none; }
-    .dock .nav-item { flex: none; white-space: nowrap; padding: 9px 12px; margin: 0; }
+    .dock .nav-item { flex: none; white-space: nowrap; padding: 7px 10px; margin: 0; }
     .beambar { padding: 8px 12px; }
     .content { padding: 18px 14px 48px; }
     .page-title { font-size: 28px; }
     .subtabs { gap: 16px; overflow-x: auto; white-space: nowrap; }
+    .subtabs { scrollbar-color: var(--navy-700) transparent; scrollbar-width: thin; }
     .stat-row, .grid-2, .dhcp-modes { grid-template-columns: 1fr; }
   }
 
