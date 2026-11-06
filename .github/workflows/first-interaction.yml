@@ -25,7 +25,7 @@ defaults:
     shell: bash
 env:
   # What: the repo variables ci.sh reads, one by name.
-  # Why: Fund 94: the all-vars json put LAN IPs in logs.
+  # Why: a vars json would show LAN IPs in logs.
   # From: Issue #1683 | PR #1858
   CARGO_BUILD_JOBS: ${{ vars.CARGO_BUILD_JOBS }}
   PROJECT_CARGO_LTO: ${{ vars.PROJECT_CARGO_LTO }}

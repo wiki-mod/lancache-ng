@@ -248,7 +248,7 @@ services:
       - &mount-pdns-filter ${PDNS_FILTER_STATE_DIR:?PDNS_FILTER_STATE_DIR is required}:${SOT_DNS_STATE_DIR}
       - dns-config-snapshots:${SOT_DNS_SNAPSHOT_MOUNT}
       # What: the recursor Lua script from the checkout.
-      # Why: Fund 148: a runtime file, no image rebuild.
+      # Why: a runtime file; no image rebuild.
       # From: Issue #1683 | PR #1858
       - ../../services/dns/filter-aaaa.lua:${SOT_PDNS_LUA_DNS_SCRIPT}:ro
     # What: dns-http on IP_HTTP, dns-https on IP_HTTPS.
@@ -373,7 +373,7 @@ services:
       - ${SYSLOG_NG_LOG_DIR:?SYSLOG_NG_LOG_DIR is required}:${SOT_SYSLOG_LOG_ROOT}:ro
       - watchdog-status:${SOT_STATUS_DIR}:ro
       # What: the Tera templates from the checkout.
-      # Why: Fund 148: runtime files, no image rebuild.
+      # Why: runtime files; no image rebuild.
       # From: Issue #1683 | PR #1858
       - ../../services/ui/src/templates:${SOT_TEMPLATE_DIR}:ro
       # What: the host's network counters, read only.

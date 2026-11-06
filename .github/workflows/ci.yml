@@ -56,7 +56,7 @@ env:
   # From: Issue #1683 | PR #1858
   PROJECT_SELFHOSTED_PROXY_CA: ${{ secrets.PROJECT_SELFHOSTED_PROXY_CA }}
   # What: the repo variables ci.sh reads, one by name.
-  # Why: Fund 94: the all-vars json put LAN IPs in logs.
+  # Why: a vars json would show LAN IPs in logs.
   # From: Issue #1683 | PR #1858
   CARGO_BUILD_JOBS: ${{ vars.CARGO_BUILD_JOBS }}
   PROJECT_CARGO_LTO: ${{ vars.PROJECT_CARGO_LTO }}
@@ -216,7 +216,7 @@ jobs:
       env:
         CI_BUILD_TOOLS_IMAGE: ${{ needs.plan.outputs.image }}
         # What: the tool releases the plan job read.
-        # Why: no later job reads the API again (Fund 146).
+        # Why: no later job reads the API again.
         # From: Issue #1683 | PR #1858
         CI_TOOL_RELEASES: ${{ needs.plan.outputs.releases }}
     # What: cache secrets the build's set-runtime needs.
@@ -483,7 +483,7 @@ jobs:
         id: resolve
         run: bash .github/scripts/ci.sh build-tools resolve-image
       # What: decide the PR text check; unchanged is NOOP.
-      # Why: Fund 94: PR text only in the step reading it.
+      # Why: PR text only in the step reading it.
       # From: Issue #1683 | PR #1858
       - name: Decide the PR text check
         id: meta

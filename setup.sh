@@ -8599,7 +8599,7 @@ else
 fi
 
 # What: step: the LAN domain of all local names
-# Why: DoMe 05.11.: own domain; default lancache-ng.lan
+# Why: own step; default lancache-ng.lan
 # From: Issue #1683 | PR #1980
 print_step "LAN domain"
 printf "  Every local name ends in this domain. With lancache-ng.lan\n"

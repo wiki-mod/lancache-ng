@@ -125,13 +125,13 @@ ci_log() {
 }
 
 # What: name and start of the open log group.
-# Why: A7: each part of a step shows its own time.
+# Why: each part of a step shows its own time.
 # From: Issue #1683 | PR #1858
 _CI_GROUP_NAME=""
 _CI_GROUP_T0=0
 
 # What: open a named log group; closes the open one.
-# Why: Fund 82: a long step shows its parts by name.
+# Why: a long step shows its parts by name.
 # From: Issue #1683 | PR #1858
 ci_group() {
     ci_group_end
@@ -141,7 +141,7 @@ ci_group() {
 }
 
 # What: close the open log group; log its time.
-# Why: no fold stays open; A7: one owner of part time.
+# Why: no fold stays open; one owner of part time.
 # From: Issue #1683 | PR #1858
 ci_group_end() {
     printf '::endgroup::\n' >&2
@@ -227,7 +227,7 @@ _ci_run() {
 }
 
 # What: log every command: function, name, rc, time.
-# Why: A7, AG-INT-002: no command runs unseen, no filter.
+# Why: AG-INT-002: no command runs unseen, no filter.
 # From: Issue #1683 | PR #1858
 _ci_cmd_time() {
     local ms fn="" sub="" a
@@ -261,7 +261,7 @@ _ci_cmd_time_init() {
 }
 
 # What: run program $1 and log its time line.
-# Why: A7: a direct call shows rc and time too.
+# Why: a direct call shows rc and time too.
 # From: Issue #1683 | PR #1858
 _ci_timed() {
     local t0 rc=0
@@ -439,7 +439,7 @@ _ci_count_lines() {
 }
 
 # What: the lines that hold a non-space character.
-# Why: one blank-line owner; no awk (AG-REL-001, Fund 136).
+# Why: one blank-line owner; bash only (AG-REL-001).
 # From: Issue #1683 | PR #1858
 _ci_nonblank_lines() {
     local line
@@ -449,7 +449,7 @@ _ci_nonblank_lines() {
 }
 
 # What: non-blank lines, each once, first one kept.
-# Why: one order-keeping dedup owner; no awk (Fund 136).
+# Why: one order-keeping dedup owner; bash only.
 # From: Issue #1683 | PR #1858
 _ci_unique_lines() {
     local line
@@ -463,7 +463,7 @@ _ci_unique_lines() {
 }
 
 # What: first KEY=VALUE line of $2 whose key is $1.
-# Why: one key lookup owner; no awk (Fund 136).
+# Why: one key lookup owner; bash only.
 # From: Issue #1683 | PR #1858
 _ci_kv_line() {
     local line
@@ -474,7 +474,7 @@ _ci_kv_line() {
 }
 
 # What: field N (from 1) of one tab-separated line.
-# Why: no awk (Fund 136); keeps empty fields unlike read.
+# Why: bash only; keeps empty fields unlike read.
 # From: Issue #1683 | PR #1858
 _ci_tab_field() {
     local rest="$1" n="$2"
@@ -487,7 +487,7 @@ _ci_tab_field() {
 }
 
 # What: first line of $2 whose first tab field is $1.
-# Why: one keyed row owner; no awk (Fund 136).
+# Why: one keyed row owner; bash only.
 # From: Issue #1683 | PR #1858
 _ci_tab_row() {
     local line
@@ -498,7 +498,7 @@ _ci_tab_row() {
 }
 
 # What: $2 trimmed, each blank run one space, into var $1.
-# Why: one blank fold owner; no awk gsub (Fund 136).
+# Why: one blank fold owner; bash only.
 # From: Issue #1683 | PR #1858
 _ci_ws_fold() {
     local ws_in="$2" ws_out="" ws_run
@@ -513,7 +513,7 @@ _ci_ws_fold() {
 }
 
 # What: $2 without its '...' pairs, left to right, into $1.
-# Why: one single-quote cut owner; no awk gsub (Fund 136).
+# Why: one single-quote cut owner; bash only.
 # From: Issue #1683 | PR #1858
 _ci_strip_squoted() {
     local sq_in="$2" sq_out=""
@@ -620,7 +620,7 @@ _ci_git_trust_init() {
 _ci_proxy_init() {
     local http="" https="" exclusion=""
     # What: read the proxy values on self-hosted only.
-    # Why: Fund 94: the workflow sets them self-hosted only.
+    # Why: the workflow sets them on self-hosted only.
     # From: Issue #1683 | PR #1912
     if _ci_runner_self_hosted; then
         http="$(_ci_variable_env PROJECT_SELFHOSTED_PROXY_HTTP)" || return 2
@@ -1561,7 +1561,7 @@ _ci_tool_latest() {
 }
 
 # What: every SOT external release, read once, as JSON.
-# Why: later jobs take it as CI_TOOL_RELEASES (Fund 146).
+# Why: later jobs take it as CI_TOOL_RELEASES.
 # From: Issue #1683 | PR #1858
 ci_cmd_tool_releases() {
     local keys key line json='{}'
@@ -2148,7 +2148,7 @@ ci_cmd_plan_matrix() {
             # From: Issue #1683 | PR #1858
             _ci_base_image_prefetch _ci_alpine_build_arg "" || return 2
             # What: SOT change: all pairs; ids at once.
-            # Why: Fund 114: id loop held NOOP plan 27 s.
+            # Why: one batch call, not one per pair.
             # From: Issue #1683 | PR #1858
             if [ "${sot_changed}" = true ]; then
                 _ci_identity_prefill "${targets}" || return "$?"
@@ -3910,7 +3910,7 @@ _ci_target_plain_paths() {
 _ci_identity_content() {
     local service="$1" ref="${2:-}" mode="${3-build}" paths p part buf="" type ctx memo
     # What: one call reads a target's content once per ref.
-    # Why: plan read it per platform, 2-3 s each (Fund 94).
+    # Why: platforms share one read per ref.
     # From: Issue #1683 | PR #1858
     memo="content-${_CI_CALL_KEY}-${service}-${ref:-tree}-${mode:-none}"
     if buf="$(_ci_job_memo_get "${memo//\//-}")"; then
@@ -4210,7 +4210,7 @@ _ci_identity_prefill_one() {
 }
 
 # What: compute the ids of all pairs of list $1 at once.
-# Why: Fund 114: one pair after another took 27 s.
+# Why: one batch call, not one per pair.
 # From: Issue #1683 | PR #1858
 _ci_identity_prefill() {
     local s p plats key wrc
@@ -5151,7 +5151,7 @@ _ci_ledger_blob() {
     file="$(_ci_variable "${3:-CI_LEDGER_FILE}")" || return 2
     local sha memo blob state
     # What: this call asks the remote for a ref state once.
-    # Why: plan asked 24 times, 0.5-0.8 s each (Fund 94).
+    # Why: callers in one run reuse the answer.
     # From: Issue #1683 | PR #1858
     state="state-${_CI_CALL_KEY}-${ledger_ref//\//-}"
     if [ "${4:-}" = fetch ] || ! sha="$(_ci_job_memo_get "${state}")"; then
@@ -5407,7 +5407,7 @@ ci_cmd_aggregate_stack() {
     _ci_require_ghcr_auth || return "$?"
     dir="$(_ci_mktemp -d "${CI_TMPDIR}/ci-results.XXXXXX")" || return 2
     # What: accept each built, verified pair; no scan wait.
-    # Why: DoMe 30.10.: the nightly run scans once a day.
+    # Why: the nightly run scans once a day.
     # From: Issue #1683 | PR #1858
     ci_group "aggregate: accept built and verified pairs"
     while read -r svc plat; do
@@ -5589,7 +5589,7 @@ _ci_diff_history() {
     [ "${#deep[@]}" -gt 0 ] || [ "${#need[@]}" -gt 0 ] || return 0
     remote="$(_ci_git_remote)" || return 2
     # What: commits and trees only; blobs load on demand.
-    # Why: whole history with blobs cost 33 s (Fund 114).
+    # Why: blobs load only when a check needs them.
     # From: Issue #1683 | PR #1858
     (cd -- "${CI_REPO_ROOT}" && _ci_retry git-fetch git fetch --no-tags --filter=blob:none "${deep[@]}" "${remote}" "${head}" "${need[@]}") >&2 || return 2
     [ -z "${memo}" ] || _ci_job_memo_put "${memo}" "${head}"
@@ -5824,7 +5824,7 @@ ci_cmd_assemble_stack() {
         return 2
     fi
     # What: assembles each service in its own log group
-    # Why: one blocks no other; A7: parts show by name
+    # Why: one blocks no other; parts show by name
     # From: Issue #1683 | PR #1912
     for svc in ${svcs}; do
         ci_group "assemble: ${svc}"
@@ -5852,7 +5852,7 @@ _ci_for_test_services() {
         return 2
     fi
     # What: one timed log group per tested service.
-    # Why: A7 (Fund 82a): the step shows its parts by name.
+    # Why: the step log shows its parts by name.
     # From: Issue #1683 | PR #1858
     for svc in ${list}; do
         ci_group "test: ${svc}"
@@ -7682,7 +7682,7 @@ ci_cmd_rust_build() {
     local cargo_jobs
     cargo_jobs="$(_ci_rb_cargo_jobs)" || return 2
     # What: build in the mounted tree; target in WORKDIR.
-    # Why: Fund 147: no COPY; output outside the mount.
+    # Why: no COPY; output stays outside the mount.
     # From: Issue #1683 | PR #1858
     src="$(_ci_variable CI_RUST_SOURCE_DIR)" || return 2
     if ! cd "${src}"; then
@@ -8391,7 +8391,7 @@ _ci_refresh_record() {
 }
 
 # What: one sha256 per id input of a pair: name=sum.
-# Why: Fund 116: a refresh BUILD names the changed input.
+# Why: a refresh BUILD names the changed input.
 # From: Issue #1683 | PR #1858
 _ci_identity_parts() {
     local service="$1" platform="$2" type inputs input part sum
@@ -8408,7 +8408,7 @@ _ci_identity_parts() {
 }
 
 # What: log id inputs changed since the last refresh run.
-# Why: Fund 116: a BUILD names its input; then record it.
+# Why: a BUILD names its changed input, then saves it.
 # From: Issue #1683 | PR #1858
 _ci_identity_changed() {
     local service="$1" platform="$2" run="${GITHUB_RUN_ID:-local}" key now old="" rc=0 p diff=""
@@ -8770,7 +8770,7 @@ ci_cmd_ship() {
         return 2
     fi
     # What: each ship part in its own timed log group.
-    # Why: A7 (Fund 82a): the step shows its parts by name.
+    # Why: the step log shows its parts by name.
     # From: Issue #1683 | PR #1858
     ci_group "ship: take build lock"
     _ci_build_lock_take "${service}" "${platform}" || return "$?"
@@ -9359,7 +9359,7 @@ ci_cmd_assemble() {
     local -a input_list=()
     [ -z "${inputs}" ] || mapfile -t input_list <<< "${inputs}"
     # What: count the platform=digest lines in bash.
-    # Why: Fund 136: no awk where bash does the job.
+    # Why: bash does this; no awk.
     # From: Issue #1683 | PR #1858
     for kv in "${input_list[@]}"; do
         [[ "${kv}" != *=* ]] || count=$((count + 1))
@@ -10103,7 +10103,7 @@ _ci_ref_tip() {
 ci_cmd_promote_ref() {
     local ref tip targets t head
     # What: each promote part in its own timed log group.
-    # Why: A7 (Fund 82a): the step shows its parts by name.
+    # Why: the step log shows its parts by name.
     # From: Issue #1683 | PR #1858
     ci_group "promote: targets and gates"
     ref="$(_ci_promote_ref)" || return 2
@@ -13485,7 +13485,7 @@ _ci_validate_stack() {
     local candidate="$1" reservation subnet holder project rc=0 up_out
     local net_ovr pin_ovr shared compose_copy state
     # What: each validate part in its own timed log group.
-    # Why: A7 (Fund 82a): the step shows its parts by name.
+    # Why: the step log shows its parts by name.
     # From: Issue #1683 | PR #1858
     ci_group "validate: reserve a subnet"
     reservation="$(_ci_validate_reserve)" || rc=$?
@@ -13686,7 +13686,7 @@ _ci_variable() {
 }
 
 # What: a repo variable from env; empty when unset.
-# Why: Fund 94: workflows pass each var by name (SOT).
+# Why: workflows pass each var by name (SOT).
 # From: Issue #1683 | PR #1912
 _ci_variable_env() {
     local _ci_ve_name="$1"
@@ -13892,7 +13892,7 @@ _ci_set_runtime() {
         [ "${mode}" = off ] || sccache_enabled=1
     fi
     # What: dist scheduler and distcc hosts from env.
-    # Why: Fund 94: the workflow sets them self-hosted only.
+    # Why: the workflow sets them on self-hosted only.
     # From: Issue #1683 | PR #1858
     local sched="" hosts="" vrc=0
     # What: dist farm is read on self-hosted runners only.
@@ -15015,7 +15015,7 @@ _ci_rh_reap_trivy() {
 }
 
 # What: used KiB (field 3, row 2) of df -P output $1.
-# Why: one owner for both cleanup reads; no awk (Fund 136).
+# Why: one owner for both cleanup reads; bash only.
 # From: Issue #1683 | PR #1858
 _ci_df_used() {
     local used
@@ -16489,7 +16489,7 @@ ci_main() {
     # From: Issue #1683 | PR #1912
     case "${command}" in have-command) "${fn}" "$@"; return "$?" ;; esac
     # What: every command logs its time from here on.
-    # Why: A7 and AG-INT-002 for every subcommand.
+    # Why: AG-INT-002 for every subcommand.
     # From: Issue #1683 | PR #1858
     _ci_cmd_time_init
     _ci_tmp_init || return "$?"
@@ -20954,7 +20954,7 @@ ci_cmd_check_all() {
     mapfile -t names <<< "${raw}"
     [ "${#changed[@]}" -eq 0 ] || diff_seen="${#changed[@]} changed paths"
     # What: the paths the diff checks see, once, folded.
-    # Why: Fund 94: "files=34" alone names no file.
+    # Why: a bare file count names no file.
     # From: Issue #1683 | PR #1858
     ci_group "check all: ${diff_seen}"
     [ "${#changed[@]}" -eq 0 ] || printf '%s\n' "${changed[@]}" >&2
@@ -20999,7 +20999,7 @@ ci_cmd_check_all() {
             plan) why="plan: no changed path is an input of this check (§98)" ;;
             diff | repo)
                 # What: its log as one block, in name order.
-                # Why: Fund 94: each check shown apart.
+                # Why: each check log shown apart.
                 # From: Issue #1683 | PR #1858
                 [ ! -s "${dir}/${sub}.log" ] || printf '%s\n' "$(<"${dir}/${sub}.log")" >&2
                 if [ -s "${dir}/${sub}.rc" ]; then

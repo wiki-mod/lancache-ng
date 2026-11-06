@@ -47,7 +47,7 @@ env:
   # From: Issue #1683 | PR #1858
   PROJECT_SELFHOSTED_PROXY_CA: ${{ secrets.PROJECT_SELFHOSTED_PROXY_CA }}
   # What: the repo variables ci.sh reads, one by name.
-  # Why: Fund 94: the all-vars json put LAN IPs in logs.
+  # Why: a vars json would show LAN IPs in logs.
   # From: Issue #1683 | PR #1858
   CARGO_BUILD_JOBS: ${{ vars.CARGO_BUILD_JOBS }}
   PROJECT_CARGO_LTO: ${{ vars.PROJECT_CARGO_LTO }}
@@ -482,7 +482,7 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       # What: the tool releases the platform job read.
-      # Why: no later job reads the API again (Fund 146).
+      # Why: no later job reads the API again.
       # From: Issue #1683 | PR #1858
       CI_TOOL_RELEASES: ${{ needs.platform.outputs.releases }}
     outputs:
