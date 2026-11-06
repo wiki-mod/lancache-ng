@@ -77,7 +77,7 @@ declare -A CI_DISPATCH=(
     [validate]=ci_cmd_validate [result-gate]=ci_cmd_result_gate [promote]=ci_cmd_promote [promote-ref]=ci_cmd_promote_ref [channel-checkout]=ci_cmd_channel_checkout [channel-matrix]=ci_cmd_channel_matrix [channel-check]=ci_cmd_channel_check [channel-report]=ci_cmd_channel_report [release-validation]=_ci_release_validation_valid [release-ref]=_ci_release_ref
     [release-publish]=ci_cmd_release_publish [release-images]=ci_cmd_release_images [release-sbom-stack]=ci_cmd_release_sbom_stack [release-vex]=ci_cmd_release_vex [cut-release-tag]=ci_cmd_cut_release_tag [release-notes]=ci_cmd_release_notes [release-changelog]=ci_cmd_release_changelog [release-variable]=ci_cmd_release_variable
     [gc]=ci_cmd_gc [gc-refs]=ci_cmd_gc_refs [check]=ci_cmd_check [close-linked-issues]=ci_cmd_close_linked_issues [pr-labels]=ci_cmd_pr_labels [pr-milestone]=ci_cmd_pr_milestone [board-add]=ci_cmd_board_add
-    [welcome]=ci_cmd_welcome [version]=ci_cmd_version [docker-daemon-config]=ci_cmd_docker_daemon_config [runner-host]=ci_cmd_runner_host
+    [version]=ci_cmd_version [docker-daemon-config]=ci_cmd_docker_daemon_config [runner-host]=ci_cmd_runner_host
     [have-command]=ci_cmd_have_command [pr-green-mark]=ci_cmd_pr_green_mark [pr-meta]=ci_cmd_pr_meta
 )
 
@@ -18802,61 +18802,6 @@ _ci_issue_comment() {
         ci_error "${id}" "repo=\"${repo}\" number=${n} reason=\"stored comment differs from the sent text\"" "${out}"
         return 2
     fi
-}
-
-# What: welcome an author's first issue or first PR
-# Why: first contact gets the SOT rules text; bots skip
-# From: Issue #1683 | PR #1858
-ci_cmd_welcome() {
-    local event repo row kind n sender stype oldest raw file err
-    event="$(_ci_env_required GITHUB_EVENT_PATH)" || return 2
-    repo="$(_ci_env_required GITHUB_REPOSITORY)" || return 2
-    row="$(_ci_capture 0 jq -r '[(if .pull_request then "pr" elif .issue then "issue" else "none" end),
-        ((.pull_request.number // .issue.number // "") | tostring), (.sender.login // ""), (.sender.type // "")] | @tsv' "${event}")" || return 2
-    IFS=$'\t' read -r kind n sender stype <<< "${row}"
-    if [ "${kind}" = none ]; then
-        printf 'welcome=skip reason="not an issue or pull request event"\n'
-        return 0
-    fi
-    if [ -z "${sender}" ]; then
-        ci_error "[CI-ERROR-WELCOME-0001]" "kind=${kind} number=${n} reason=\"payload has no sender login\"" "${row}"
-        return 2
-    fi
-    if [ "${stype}" = Bot ]; then
-        printf 'welcome=skip kind=%s number=%s reason="bot author"\n' "${kind}" "${n}"
-        return 0
-    fi
-    # What: login and number must match GitHub's grammar.
-    # Why: both go into a search query and an API path.
-    # From: Issue #1683 | PR #1858
-    if [[ ! "${sender}" =~ ^[A-Za-z0-9](-?[A-Za-z0-9])*$ ]] || [[ ! "${n}" =~ ^[1-9][0-9]*$ ]]; then
-        ci_error "[CI-ERROR-WELCOME-0002]" "kind=${kind} reason=\"sender or number outside the GitHub grammar\"" "${row}"
-        return 2
-    fi
-    oldest="$(_ci_retry github-api gh api -X GET --jq '.items[0].number // empty' search/issues \
-        -f q="repo:${repo} author:${sender} is:${kind}" -f sort=created -f order=asc -f per_page=1)" || return 2
-    if [ -n "${oldest}" ] && [[ ! "${oldest}" =~ ^[0-9]+$ ]]; then
-        ci_error "[CI-ERROR-WELCOME-0003]" "kind=${kind} number=${n} reason=\"search gave no issue number\"" "${oldest}"
-        return 2
-    fi
-    if [ -n "${oldest}" ] && [ "${oldest}" -lt "${n}" ]; then
-        printf 'welcome=skip kind=%s number=%s reason="author has an older %s (#%s)"\n' "${kind}" "${n}" "${kind}" "${oldest}"
-        return 0
-    fi
-    raw="$(_ci_block_entry_list pr_policy "" "welcome_${kind}")" || return 2
-    if [ -z "${raw}" ]; then
-        ci_log "[CI-ERROR-WELCOME-0004]" "kind=${kind} reason=\"no SOT pr_policy.welcome_${kind} text\""
-        return 2
-    fi
-    file="$(_ci_mktemp "${CI_TMPDIR}/ci-welcome.XXXXXX")" || return 2
-    if ! err="$(printf '%s\n' "${raw}" 2>&1 > "${file}")"; then
-        ci_error "[CI-ERROR-WELCOME-0005]" "file=\"${file}\" reason=\"comment text not written\"" "${err}"
-        rm -f "${file}"
-        return 2
-    fi
-    _ci_issue_comment "[CI-ERROR-WELCOME-0006]" "${repo}" "${n}" "${file}" || { rm -f "${file}"; return 2; }
-    rm -f "${file}"
-    printf 'welcome=posted kind=%s number=%s\n' "${kind}" "${n}"
 }
 
 # What: Close issues a merged PR lists under Linked Issues.

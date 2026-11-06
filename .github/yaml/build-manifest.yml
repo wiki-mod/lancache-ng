@@ -2394,33 +2394,6 @@ pr_policy:
   # From: Issue #1683 | PR #1858
   check_exempt_authors:
     - dependabot[bot]
-  # What: welcome text for a first issue, one line per item
-  # Why: ci.sh welcome posts it; the text is data, not code
-  # From: Issue #1683 | PR #1858
-  welcome_issue:
-    - Thanks for opening your first issue in lancache-ng.
-    - ""
-    - "Please make sure the issue includes:"
-    - "- expected behavior"
-    - "- actual behavior"
-    - "- logs or reproduction steps"
-    - "- relevant configuration without secrets"
-    - ""
-    - Do not post private keys, tokens, passwords, personal data, or private infrastructure details.
-    - Security-sensitive reports should use the project's private security reporting channel.
-  # What: welcome text for a first PR, one line per item
-  # Why: same path as welcome_issue; data, not code
-  # From: Issue #1683 | PR #1858
-  welcome_pr:
-    - Thanks for opening your first pull request in lancache-ng.
-    - ""
-    - "Please make sure the pull request:"
-    - "- links the related issue"
-    - "- explains the user-visible behavior change"
-    - "- lists the validation that was run"
-    - "- does not include private keys, tokens, passwords, personal data, or private infrastructure details"
-    - ""
-    - Security-sensitive reports should use the project's private security reporting channel.
 
 # What: Orphan-branch sweep inputs (AG-GH-017).
 # Why: age gate and long-lived refs are data, not code.
