@@ -653,6 +653,20 @@
   .beambar-services { display: flex; flex-wrap: wrap; row-gap: 6px; align-items: center; gap: 18px; font-size: 12.5px; color: var(--mist); white-space: nowrap; }
   .beambar-end { margin-left: auto; display: flex; align-items: center; gap: 8px; }
   .dock a.nav-item, .dock a.nav-item:hover { text-decoration: none; }
+    /* What: status bar at the bottom for every action
+       Why: DoMe 06.11.: buttons gave no sign of work
+       From: Issue #1683 */
+    #ui-busy { position: fixed; left: 0; right: 0; bottom: 0; z-index: 49;
+      padding: 6px 16px 8px; background: var(--navy-900); color: var(--mist);
+      border-top: 1px solid var(--color-border); font-size: 13px; }
+    #ui-busy[data-state="done"] { color: var(--foam); }
+    #ui-busy[data-state="failed"] { color: var(--danger); }
+    #ui-busy .ui-busy-track { position: absolute; left: 0; right: 0; top: 0;
+      height: 2px; overflow: hidden; }
+    #ui-busy[data-state="busy"] .ui-busy-track::after { content: ""; position: absolute;
+      top: 0; bottom: 0; width: 30%; background: var(--beam);
+      animation: ui-busy-run 1.2s linear infinite; }
+    @keyframes ui-busy-run { from { left: -30%; } to { left: 100%; } }
   </style>
   <script>
     // What: SOT seconds as the milliseconds JS timers take
@@ -679,6 +693,56 @@
       box.textContent = LC_T.error_prefix + (err && err.message ? err.message : err);
       box.hidden = false;
     };
+
+    // What: a bar at the bottom for every action.
+    // Why: DoMe 06.11.: buttons gave no sign of work.
+    // From: Issue #1683
+    (function () {
+      const bar = document.createElement('div');
+      bar.id = 'ui-busy';
+      bar.setAttribute('role', 'status');
+      bar.hidden = true;
+      const text = document.createElement('span');
+      const track = document.createElement('div');
+      track.className = 'ui-busy-track';
+      bar.append(track, text);
+      let open = 0;
+      let t0 = 0;
+      let hide = 0;
+      let tick = 0;
+      const show = function (msg, state) {
+        clearTimeout(hide);
+        clearInterval(tick);
+        text.textContent = msg;
+        bar.dataset.state = state;
+        bar.hidden = false;
+        if (state === 'busy') {
+          tick = setInterval(function () {
+            text.textContent = msg + ' ' + Math.round((Date.now() - t0) / 1000) + ' s';
+          }, 1000);
+        } else {
+          hide = setTimeout(function () { bar.hidden = true; }, state === 'done' ? 3000 : 10000);
+        }
+      };
+      const end = function (ok) {
+        open -= 1;
+        if (open > 0) { return; }
+        const s = ((Date.now() - t0) / 1000).toFixed(1) + ' s';
+        show((ok ? LC_T.busy_done : LC_T.busy_failed) + ' (' + s + ')', ok ? 'done' : 'failed');
+      };
+      const orig = window.fetch.bind(window);
+      window.fetch = function (input, init) {
+        const method = ((init && init.method) || 'GET').toUpperCase();
+        if (method === 'GET' || method === 'HEAD') { return orig(input, init); }
+        if (open === 0) { t0 = Date.now(); }
+        open += 1;
+        show(LC_T.busy_running, 'busy');
+        return orig(input, init).then(function (r) { end(r.ok); return r; },
+          function (err) { end(false); throw err; });
+      };
+      const mount = function () { document.body.appendChild(bar); };
+      if (document.body) { mount(); } else { document.addEventListener('DOMContentLoaded', mount); }
+    })();
 
     // What: POST forms send in the background.
     // Why: DoMe 05.11.: an error opened a bare text page.
