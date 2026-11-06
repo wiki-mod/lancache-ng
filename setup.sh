@@ -9101,8 +9101,8 @@ CACHE_MEM_MB=${CACHE_MEM_MB}
 # From: Issue #1683 | PR #1858
 CACHE_MAX_GB=${cache_gb}
 
-# What: image source; the channel resolves to a sha-* tag
-# Why: setup.sh pulls only immutable tags
+# What: image source; a channel pins each image digest
+# Why: pulls go by digest or by an immutable tag
 # From: Issue #1683 | PR #1858
 LANCACHE_IMAGE_REGISTRY=${LANCACHE_IMAGE_REGISTRY}
 LANCACHE_IMAGE_PREFIX=${LANCACHE_IMAGE_PREFIX}
