@@ -7089,17 +7089,17 @@ ci_cmd_openrc_setup() {
     local rows="${LANCACHE_RUNTIME_DEFAULTS:-}" row k f out n
     local level name cmd args idir rdir pl
     local -a kv=()
-    local -A orc=() orc_pre=()
+    local -A oset=() oset_pre=()
     rows="${rows//|/$'\n'}"
     for k in ${CI_OPENRC_KEYS}; do
         _ci_fill "@${k}@" "${rows}" || return 2
-        orc["${k}"]="${REPLY}"
+        oset["${k}"]="${REPLY}"
     done
-    idir="${orc[OPENRC_INIT_DIR]}"; rdir="${orc[OPENRC_RUNLEVEL_DIR]}"
-    read -ra kv <<< "${orc[OPENRC_RC_SETTINGS]}"
+    idir="${oset[OPENRC_INIT_DIR]}"; rdir="${oset[OPENRC_RUNLEVEL_DIR]}"
+    read -ra kv <<< "${oset[OPENRC_RC_SETTINGS]}"
     for k in "${kv[@]}"; do
         n="${k%%=*}"
-        if ! out="$(sed -i "s|^#\?${n}=.*|${n}=\"${k#*=}\"|" "${orc[OPENRC_RC_CONF]}" 2>&1)"; then
+        if ! out="$(sed -i "s|^#\?${n}=.*|${n}=\"${k#*=}\"|" "${oset[OPENRC_RC_CONF]}" 2>&1)"; then
             ci_error "[CI-ERROR-OPENRC-0001]" "setting=\"${k}\" reason=\"rc.conf not set\"" "${out}"
             return 2
         fi
@@ -7112,14 +7112,14 @@ ci_cmd_openrc_setup() {
             rm -f "${f}"
         fi
     done
-    for k in ${orc[OPENRC_DROP_RUNLEVELS]}; do rm -f "${rdir:?}/${k}"/*; done
+    for k in ${oset[OPENRC_DROP_RUNLEVELS]}; do rm -f "${rdir:?}/${k}"/*; done
     pl="${LANCACHE_PROCESS_PRE:-}"
     while IFS= read -r row; do
         [[ "${row}" == *=* ]] || continue
-        orc_pre["${row%%=*}"]="${row#*=}"
+        oset_pre["${row%%=*}"]="${row#*=}"
     done <<< "${pl//|/$'\n'}"
     for row in ${LANCACHE_PROCESSES:-}; do
-        level="${orc[OPENRC_DEFAULT_RUNLEVEL]}"
+        level="${oset[OPENRC_DEFAULT_RUNLEVEL]}"
         if [[ "${row%%=*}" == *:* ]]; then level="${row%%:*}"; row="${row#*:}"; fi
         mkdir -p "${rdir}/${level}"
         [ -n "${row}" ] || continue
@@ -7127,13 +7127,13 @@ ci_cmd_openrc_setup() {
         _ci_fill "${row#*=}" "${rows}" || return 2
         cmd="${REPLY//,/ }"; args=""
         [[ "${cmd}" != *" "* ]] || args="${cmd#* }"
-        printf '%s\n' '#!/sbin/openrc-run' "supervisor=${orc[OPENRC_SUPERVISOR]}" \
+        printf '%s\n' '#!/sbin/openrc-run' "supervisor=${oset[OPENRC_SUPERVISOR]}" \
             "command=${cmd%% *}" "command_args=\"${args}\"" \
-            "respawn_delay=${orc[OPENRC_RESPAWN_DELAY]}" \
-            "output_log=${orc[OPENRC_OUTPUT_LOG]}" \
-            "error_log=${orc[OPENRC_ERROR_LOG]}" > "${idir}/${name}"
-        if [ -n "${orc_pre[${name}]:-}" ]; then
-            _ci_fill "${orc_pre[${name}]}" "${rows}" || return 2
+            "respawn_delay=${oset[OPENRC_RESPAWN_DELAY]}" \
+            "output_log=${oset[OPENRC_OUTPUT_LOG]}" \
+            "error_log=${oset[OPENRC_ERROR_LOG]}" > "${idir}/${name}"
+        if [ -n "${oset_pre[${name}]:-}" ]; then
+            _ci_fill "${oset_pre[${name}]}" "${rows}" || return 2
             printf 'start_pre() { %s; }\n' "${REPLY}" >> "${idir}/${name}"
         fi
         chmod 0755 "${idir}/${name}"
@@ -14162,8 +14162,8 @@ _ci_service_default_rows() {
         part="$(_ci_run -m 1 "[CI-ERROR-BUILDARGS-0022]" "service=\"${service}\" reason=\"tracked files not read\"" \
             git -C "${CI_REPO_ROOT}" grep --cached -I -h -o -E '[A-Z][A-Z0-9_]*' -- "${files[@]}")" || return 2
         text+=$'\n'"${part}"
-        # What: an image running openrc-setup reads its keys.
-        # Why: the Dockerfile names the command, not the keys.
+        # What: openrc-setup images read its keys.
+        # Why: the Dockerfile names only the command.
         # From: Issue #1683
         if git -C "${CI_REPO_ROOT}" grep --cached -q -F openrc-setup -- "${files[@]}"; then
             text+=$'\n'"${CI_OPENRC_KEYS}"
