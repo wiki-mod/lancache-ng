@@ -2880,8 +2880,8 @@ psl_backup() {
     sum=$(sha256sum "$file") || die "Failed to hash $file (exit $?)."
     gz="$dir/${name%.*}-${sum%% *}.${name##*.}.gz"
     if [[ ! -s "$gz" ]]; then
-        gzip -c "$file" > "$gz.tmp" && mv -f "$gz.tmp" "$gz" \
-            || die "Failed to back up $file to $gz (exit $?)."
+        gzip -c "$file" > "$gz.tmp" || die "Failed to compress $file (exit $?)."
+        mv -f "$gz.tmp" "$gz" || die "Failed to back up $file to $gz (exit $?)."
     fi
     touch "$gz" || die "Failed to mark $gz as newest backup (exit $?)."
     while IFS= read -r f; do
@@ -2898,7 +2898,8 @@ psl_restore_backup() {
     local dest="$1" tmp="$2" dir f
     dir=$(psl_backup_dir) || exit $?
     while IFS= read -r f; do
-        gzip -dc "$f" > "$tmp" && psl_file_is_valid "$tmp" || continue
+        gzip -dc "$f" > "$tmp" || continue
+        psl_file_is_valid "$tmp" || continue
         mv -f "$tmp" "$dest" || die "Failed to restore $f to $dest (exit $?)."
         print_warn "Public Suffix List restored from backup $f"
         return 0
@@ -2907,7 +2908,7 @@ psl_restore_backup() {
 }
 
 # What: load the PSL into the checkout; old list stays.
-# Why: idempotent; a broken download never reaches the stack.
+# Why: idempotent; a broken download never lands.
 # From: Issue #1683 | PR #1984
 ensure_public_suffix_list() {
     local repo_root="$1" name url rel dir dest tmp
@@ -2928,7 +2929,8 @@ ensure_public_suffix_list() {
         if psl_file_is_valid "$dest"; then
             psl_backup "$dest"
         fi
-        chmod 0644 "$tmp" && mv -f "$tmp" "$dest" || die "Failed to put the Public Suffix List in $dest (exit $?)."
+        chmod 0644 "$tmp" || die "Failed to set the mode of $tmp (exit $?)."
+        mv -f "$tmp" "$dest" || die "Failed to put the Public Suffix List in $dest (exit $?)."
         print_ok "Public Suffix List updated from $url"
         return 0
     fi
