@@ -5849,11 +5849,12 @@ ci_cmd_pr_labels() {
     printf 'pr-labels=added labels=%s\n' "${labels//$'\n'/,}"
 }
 
-# What: set the SOT milestone on a PR that has none.
+# What: set a milestone on a PR that has none.
 # Why: AG-GH-008 wants it at open; a set one stays.
 # From: Issue #1683 | PR #1984
 ci_cmd_pr_milestone() {
-    local repo number out cur got
+    local repo number out cur got body refs ref from
+    local -a issues=()
     if _ci_skip_outside_pr pr-milestone; then
         return 0
     fi
@@ -5874,6 +5875,25 @@ ci_cmd_pr_milestone() {
         printf 'pr-milestone=kept milestone=%s\n' "${cur}"
         return 0
     fi
+    # What: one closed issue gives its own milestone.
+    # Why: AG-GH-008: mirror it; Refs #N never counts.
+    # From: Issue #1683 | PR #1984
+    body="$(_ci_capture 0 jq -r '.body // ""' <<< "${out}")" || return 2
+    refs="$(_ci_linked_refs "${body}")" || return 2
+    if [ "${refs}" = "${refs%%$'\n'*}" ]; then refs=""; else refs="${refs#*$'\n'}"; fi
+    while IFS= read -r ref; do
+        [ -n "${ref}" ] || continue
+        if [ "${ref%#*}" = "" ] || [ "${ref%#*}" = "${repo,,}" ]; then
+            issues+=("${ref##*#}")
+        fi
+    done <<< "${refs}"
+    from=sot
+    if [ "${#issues[@]}" -eq 1 ]; then
+        out="$(_ci_run "[CI-ERROR-PRMILESTONE-0005]" "issue=\"${issues[0]}\" reason=\"closed issue not read\"" \
+            gh api "repos/${repo}/issues/${issues[0]}")" || return 2
+        cur="$(_ci_capture 0 jq -r 'select(.pull_request == null) | .milestone.number // empty' <<< "${out}")" || return 2
+        [ -z "${cur}" ] || { number="${cur}"; from="issue-${issues[0]}"; }
+    fi
     out="$(_ci_run "[CI-ERROR-PRMILESTONE-0003]" "pr=\"${PR_NUMBER}\" milestone=\"${number}\" reason=\"milestone not set\"" \
         gh api -X PATCH "repos/${repo}/issues/${PR_NUMBER}" -F milestone="${number}")" || return 2
     # What: the set milestone is in the PATCH answer.
@@ -5884,7 +5904,7 @@ ci_cmd_pr_milestone() {
         ci_error "[CI-ERROR-PRMILESTONE-0004]" "pr=\"${PR_NUMBER}\" want=\"${number}\" got=\"${got}\" reason=\"milestone not on the PR after the write\"" "${out}"
         return 2
     fi
-    printf 'pr-milestone=set milestone=%s\n' "${number}"
+    printf 'pr-milestone=set milestone=%s from=%s\n' "${number}" "${from}"
 }
 
 # What: put the new PR or issue on the SOT project board.
@@ -19002,6 +19022,21 @@ _ci_issue_comment() {
     fi
 }
 
+# What: count of Linked Issues sections, then its refs.
+# Why: one reader for closing and for the PR milestone.
+# From: Issue #1683 | PR #1984
+_ci_linked_refs() {
+    local heading section count refs
+    heading="$(_ci_block_entry_field pr_policy "" linked_section)" || return 2
+    section="$(_ci_pr_section "$1" "${heading}")" || return 2
+    count="${section%%$'\n'*}"
+    printf '%s\n' "${count}"
+    [ "${count}" -eq 1 ] || return 0
+    if [ "${section}" = "${count}" ]; then section=""; else section="${section#*$'\n'}"; fi
+    refs="$(_ci_closing_refs "${section}")" || return 2
+    [ -z "${refs}" ] || _ci_capture 0 sort -u <<< "${refs}"
+}
+
 # What: Close issues a merged PR lists under Linked Issues.
 # Why: GitHub auto-closes only on default-branch merges.
 # From: Issue #1137 | PR #1858
@@ -19062,9 +19097,8 @@ ci_cmd_close_linked_issues() {
     url="$(_ci_capture 0 jq -r '.[0].url' <<< "${rows}")" || return 2
     merge="$(_ci_capture 0 jq -r '.[0].mergeCommit.oid // ""' <<< "${rows}")" || return 2
     heading="$(_ci_block_entry_field pr_policy "" linked_section)" || return 2
-    section="$(_ci_pr_section "${body}" "${heading}")" || return 2
+    section="$(_ci_linked_refs "${body}")" || return 2
     count="${section%%$'\n'*}"
-    if [ "${section}" = "${count}" ]; then section=""; else section="${section#*$'\n'}"; fi
     if [ "${count}" -eq 0 ]; then
         printf 'close-linked-issues=clean pr=%s reason="no %s section"\n' "${pr}" "${heading}"
         return 0
@@ -19073,8 +19107,7 @@ ci_cmd_close_linked_issues() {
         ci_log "[CI-ERROR-LINK-0007]" "pr=${pr} count=${count} reason=\"${heading} heading is ambiguous; nothing closed\""
         return 1
     fi
-    refs="$(_ci_closing_refs "${section}")" || return 2
-    refs="$(_ci_capture 0 sort -u <<< "${refs}")" || return 2
+    if [ "${section}" = "${count}" ]; then refs=""; else refs="${section#*$'\n'}"; fi
     local ref n meta comment out closed=0 skipped=0 mode="done"
     local -a failed=()
     while IFS= read -r ref; do

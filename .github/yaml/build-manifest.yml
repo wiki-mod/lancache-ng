@@ -2388,11 +2388,11 @@ pr_policy:
   # From: Issue #1683 | PR #1858
   title_scopes_extra: [setup, ci, governance, docs, scripts, tests]
   project_number: 6
-  # What: milestone ci.sh sets on a PR that has none.
+  # What: PR milestone unless one closed issue has one.
   # Why: AG-GH-008 wants a milestone when the PR opens.
   # From: Issue #1683 | PR #1984
   milestone_number: 11
-  # What: PR-template heading close-linked-issues reads.
+  # What: PR-template heading of the closing refs.
   # Why: the template heading is a contract, not a literal.
   # From: Issue #1683 | PR #1858
   linked_section: Linked Issues
