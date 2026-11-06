@@ -8608,10 +8608,10 @@ _ci_apk_outdated() {
 }
 
 # What: "name installed newer" for each package behind.
-# Why: apk version -t owns the order; no own compare.
+# Why: the mirror index lists only the newest version.
 # From: Issue #1683 | PR #1858
 _ci_apk_newer() {
-    local rows tag name val order behind=""
+    local rows tag name val behind=""
     local -A have=()
     rows="$(_ci_apk_db_rows "$1" PV)" || return 2
     while IFS=$'\t' read -r tag name val; do
@@ -8622,8 +8622,7 @@ _ci_apk_newer() {
         if [ "${tag}" != V ] || [ -z "${name}" ] || [ -z "${have["${name}"]+x}" ] || [ "${val}" = "${have["${name}"]}" ]; then
             continue
         fi
-        order="$(_ci_capture 0 apk version -t "${have["${name}"]}" "${val}")" || return 2
-        [ "${order}" != "<" ] || behind+="${name} ${have["${name}"]} ${val}"$'\n'
+        behind+="${name} ${have["${name}"]} ${val}"$'\n'
     done <<< "${rows}"
     [ -z "${behind}" ] || _ci_capture 0 env LC_ALL=C sort -u <<< "${behind%$'\n'}"
 }
