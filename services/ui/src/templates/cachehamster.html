@@ -59,7 +59,7 @@
     {% if hamster and hamster.jobs | length > 0 %}
     <table class="table">
       <tr><th>Name</th><th>{{ t.what }}</th><th>{{ t.when }}</th><th>{{ t.state }}</th><th>{{ t.progress }}</th><th></th></tr>
-      {% for j in hamster.jobs %}
+      {% for j in hamster.jobs | reverse %}
       <tr{% if j.state.state == "running" or (j.state.state == "waiting" and j.when.kind == "now") %} data-busy="1"{% endif %}>
         <td>{{ j.name }}</td>
         <td>{% if j.target.kind == "steam_app" %}{{ t.steam_app }} {{ j.target.value }}{% else %}{{ j.target.value | length }} {{ t.addresses }}{% endif %}</td>
