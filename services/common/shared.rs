@@ -2372,7 +2372,7 @@ pub mod recursor_conf {
         let mut out = Vec::new();
         for raw in s.list(key) {
             let z = raw.trim_end_matches('.').to_ascii_lowercase();
-            // What: each label 1-63 chars, no "-" at an edge.
+            // What: label 1-63 chars, no "-" at an edge.
             // Why: PC test 06.11.: a..b and -bad- passed.
             // From: Issue #1918
             let label = |l: &str| {
