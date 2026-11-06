@@ -3702,7 +3702,7 @@ ci_cmd_psl() {
     name="$(_ci_runtime_default NGINX_PSL_FILE)" || return 2
     url="$(_ci_runtime_default NGINX_PSL_URL)" || return 2
     # What: cache version is the sha256 of the source URL.
-    # Why: the service rejected "psl"; others pass 64 hex.
+    # Why: CI rule: every cache version is a sha256.
     # From: Issue #1683 | PR #1984
     ver="$(_ci_sha256_hex <<< "${url}")" || return 2
     dest="$(_ci_repo_path CI_PSL_DIR)" || return 2
