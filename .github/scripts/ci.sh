@@ -64,6 +64,11 @@ CI_ARG_DEFAULTS=LANCACHE_RUNTIME_DEFAULTS
 # From: Issue #1683 | PR #1858
 CI_ARG_SCHEMA=LANCACHE_RUNTIME_SCHEMA
 
+# What: SOT keys ci.sh openrc-setup reads in an image.
+# Why: the Dockerfile only names the command, not keys.
+# From: Issue #1683
+CI_OPENRC_KEYS="OPENRC_RC_CONF OPENRC_RC_SETTINGS OPENRC_INIT_DIR OPENRC_RUNLEVEL_DIR OPENRC_DROP_RUNLEVELS OPENRC_DEFAULT_RUNLEVEL OPENRC_SUPERVISOR OPENRC_RESPAWN_DELAY OPENRC_OUTPUT_LOG OPENRC_ERROR_LOG"
+
 # What: The ci.sh subcommand dispatch table.
 # Why: One table is membership, dispatch and error text.
 # From: Issue #1683
@@ -7086,9 +7091,7 @@ ci_cmd_openrc_setup() {
     local -a kv=()
     local -A orc=() orc_pre=()
     rows="${rows//|/$'\n'}"
-    for k in OPENRC_RC_CONF OPENRC_RC_SETTINGS OPENRC_INIT_DIR OPENRC_RUNLEVEL_DIR \
-        OPENRC_DROP_RUNLEVELS OPENRC_DEFAULT_RUNLEVEL OPENRC_SUPERVISOR \
-        OPENRC_RESPAWN_DELAY OPENRC_OUTPUT_LOG OPENRC_ERROR_LOG; do
+    for k in ${CI_OPENRC_KEYS}; do
         _ci_fill "@${k}@" "${rows}" || return 2
         orc["${k}"]="${REPLY}"
     done
@@ -14158,6 +14161,12 @@ _ci_service_default_rows() {
         part="$(_ci_run -m 1 "[CI-ERROR-BUILDARGS-0022]" "service=\"${service}\" reason=\"tracked files not read\"" \
             git -C "${CI_REPO_ROOT}" grep --cached -I -h -o -E '[A-Z][A-Z0-9_]*' -- "${files[@]}")" || return 2
         text+=$'\n'"${part}"
+        # What: an image running openrc-setup reads its keys.
+        # Why: the Dockerfile names the command, not the keys.
+        # From: Issue #1683
+        if git -C "${CI_REPO_ROOT}" grep --cached -q -F openrc-setup -- "${files[@]}"; then
+            text+=$'\n'"${CI_OPENRC_KEYS}"
+        fi
     fi
     for field in processes process_pre setup default_args; do
         part="$(_ci_target_list "${service}" "${field}")" || return 2
