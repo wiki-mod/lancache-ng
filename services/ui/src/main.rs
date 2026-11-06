@@ -2290,8 +2290,7 @@ async fn service_action(
         return Err(Fail(StatusCode::NOT_FOUND, "program not offered".into()));
     }
     // What: a signal program reloads by container HUP.
-    // Why: live 06.11.: "nginx -s reload" read the image
-    // default nginx.conf, not the one nginx started with.
+    // Why: "nginx -s reload" read the image default conf.
     // From: Issue #1683
     let id = format!("{container}:{program}");
     if s.list("UI_SIGNAL_PROGRAMS").contains(&id) {
