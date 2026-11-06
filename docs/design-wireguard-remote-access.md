@@ -36,7 +36,7 @@ container with a config-driven peer set, not three different builds:
 ### Mode 1 — Road-warrior, standalone (no rendezvous VM)
 
 **This must remain fully first-class, not implicitly superseded by mode
-2/3.** An operator whose home connection has a fixed/DDNS-reachable
+2/3.** An operator whose home connection has a stable/DDNS-reachable
 address and can port-forward WireGuard's UDP port needs to be able to run
 exactly this, with nothing else. The lancache-ng WireGuard container
 listens on a UDP port, road-warrior clients hold peer configs pointing at
@@ -53,7 +53,7 @@ project's scope to provide**, the project only needs to support
 *connecting out to* one. The lancache-ng WireGuard container **initiates
 and maintains an outbound tunnel to that VM** (WireGuard peers are
 symmetric at the protocol level, but only the home side needs to be the
-one dialing out, since it's the side without a fixed address or open
+one dialing out, since it's the side without a stable address or open
 inbound port).
 
 **"Rendezvous VM" in this issue's own framing is specifically a WireGuard
@@ -64,7 +64,7 @@ tunnel back to the home LAN" — it holds:
    lancache-ng WireGuard container).
 2. **N peers**: individual road-warrior client configs.
 
-A remote client (road-warrior) then dials the *rendezvous VM's* fixed,
+A remote client (road-warrior) then dials the *rendezvous VM's* stable,
 memorable address — never the home network's own (changing) address at
 all — and the VM routes that client's traffic through the already-live
 site-to-site tunnel into the home LAN. One fixed endpoint serves both
@@ -73,7 +73,7 @@ default," and this design treats it as the primary mode 2/3 topology
 rather than a stretch case bolted on afterward.
 
 ```
- [road-warrior client] --WG--> [rendezvous VM, fixed IP]
+ [road-warrior client] --WG--> [rendezvous VM, stable IP]
                                    |  (WG hub: site-to-site peer +
                                    |   N road-warrior peer configs)
                                    +--WG (outbound from home)--> [lancache-ng WG container] --> home LAN
@@ -272,7 +272,7 @@ route:
 - **Rendezvous VM compromise blast radius**: since the VM in modes 2/3 sits
   between the internet and the home LAN, a compromised VM could relay
   traffic into the LAN. This is inherent to the rendezvous-hub topology the
-  issue asks for (there's no way to get a fixed front door for a
+  issue asks for (there's no way to get a stable front door for a
   CGNAT'd home network without *some* internet-facing relay), but it
   should be called out explicitly in operator-facing docs as the real
   tradeoff of choosing mode 2/3 over mode 1, not left implicit.

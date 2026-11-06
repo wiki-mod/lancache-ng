@@ -94,7 +94,7 @@ declare -gA CI_CHECKS=(
     [governance-guards]="diff _ci_check_governance_guards" [changelog-direct-edit]="diff _ci_check_changelog_direct_edit"
     [action-node-versions]="repo _ci_check_action_node_versions" [action-majors]="job _ci_check_action_majors"
     [naming-consistency]="repo _ci_check_naming_consistency" [workflow-line-limit]="repo _ci_check_workflow_line_limit"
-    [pinned-external-images]="repo _ci_check_pinned_external_images" [compose-healthchecks]="repo _ci_check_compose_healthchecks"
+    [stable-external-images]="repo _ci_check_stable_external_images" [compose-healthchecks]="repo _ci_check_compose_healthchecks"
     [proxy-cache-env-doc-drift]="repo _ci_check_proxy_cache_env_doc_drift" [prebuilt-prod]="repo _ci_check_prebuilt_prod"
     [prod-state-wiring]="repo _ci_check_prod_state_wiring" [compose-config]="repo _ci_check_compose_config"
     [proxy-cert-volume]="repo _ci_check_proxy_cert_volume"
@@ -115,7 +115,7 @@ declare -gA CI_CHECKS=(
 # LOGGING
 # =========================================================
 
-# What: Emit one structured log line with a fixed id.
+# What: Emit one structured log line with a stable id.
 # Why: Ids must be unique and greppable (Contract 52).
 # From: Issue #1683
 ci_log() {
@@ -10228,7 +10228,7 @@ _ci_release_tag_kind() {
 }
 
 # What: rc 0 plain vX.Y.Z, 1 other tag, 2 SOT error.
-# Why: an SOT error must never read as "no final tag".
+# Why: an SOT error must never read as "not stable".
 # From: Issue #1683 | PR #1858
 _ci_release_tag_final() {
     local kind rc=0
@@ -10375,7 +10375,7 @@ ci_cmd_release_notes() {
     _ci_release_changes "${tag}"
 }
 
-# What: Add a release tag's change list to CHANGELOG.md.
+# What: Add a stable tag's change list to CHANGELOG.md.
 # Why: release writes CHANGELOG; no PR edits it by hand.
 # From: Issue #894 | PR #1858
 ci_cmd_release_changelog() {
@@ -10385,7 +10385,7 @@ ci_cmd_release_changelog() {
     file="$(_ci_variable CI_CHANGELOG)" || return 2
     _ci_release_tag_final "${tag}" || {
         [ "$?" -eq 1 ] || return 2
-        printf 'release-changelog=skip tag=%s reason="not a vX.Y.Z release tag"\n' "${tag}"
+        printf 'release-changelog=skip tag=%s reason="not a stable vX.Y.Z tag"\n' "${tag}"
         return 0
     }
     head="## [${tag#"${tag%%[0-9]*}"}]"
@@ -10449,7 +10449,7 @@ _ci_release_variable_get() {
     printf '%s\n' "${out}"
 }
 
-# What: set PROJECT_RELEASE_VERSION to a release tag.
+# What: set PROJECT_RELEASE_VERSION to a stable tag.
 # Why: AG-SEC-004: the version is a repo variable.
 # From: Issue #1683 | PR #1858
 ci_cmd_release_variable() {
@@ -10457,7 +10457,7 @@ ci_cmd_release_variable() {
     [ -n "${tag}" ] || { ci_log "[CI-ERROR-RELEASE-0059]" "reason=\"tag arg required\""; return 2; }
     _ci_release_tag_final "${tag}" || {
         [ "$?" -eq 1 ] || return 2
-        printf 'release-variable=skip tag=%s reason="not a vX.Y.Z release tag"\n' "${tag}"
+        printf 'release-variable=skip tag=%s reason="not a stable vX.Y.Z tag"\n' "${tag}"
         return 0
     }
     repo="$(_ci_env_required GITHUB_REPOSITORY)" || return 2
@@ -17735,7 +17735,7 @@ _ci_compose_dir_files() {
 # What: an external deploy image must be a SOT base image.
 # Why: one owner per external image; no copy elsewhere.
 # From: Issue #1683
-_ci_check_pinned_external_images() {
+_ci_check_stable_external_images() {
     local -a dirs=("$@")
     local d img k allowed=" " dep
     if [ "${#dirs[@]}" -eq 0 ]; then
@@ -17787,7 +17787,7 @@ _ci_check_pinned_external_images() {
         ci_error "[CI-ERROR-CHECK-0014]" "reason=\"external image not in SOT\"" "$(printf '%s\n' "${viol[@]}")"
         return 1
     fi
-    printf 'pinned-external-images=clean\n'
+    printf 'stable-external-images=clean\n'
 }
 
 # What: Print the heading count, then the section lines.

@@ -299,7 +299,7 @@ per-image table (role, policy) and provenance/SBOM expectations -- this
 section states the policy only, not the current image list.
 
 Every external image must be pinned by digest in the SOT `base_images`;
-`ci.sh check all` runs the `pinned-external-images` check on every CI run
+`ci.sh check all` runs the `stable-external-images` check on every CI run
 except issue events.
 
 ## Rollback
@@ -365,7 +365,7 @@ events. The run fails
 closed when:
 
 - a compose image is neither a first-party `LANCACHE_*` image nor a digest
-  pin from the SOT `base_images` (`pinned-external-images`);
+  pin from the SOT `base_images` (`stable-external-images`);
 - a changed file uses a mutable image reference (`mutable-refs`);
 - channel or tag resolution does not come from one config across
   `setup.sh`, the UI and compose (`image-channel-resolution`);

@@ -43,7 +43,7 @@ Two `uses: docker://` steps in `.github/workflows/ci.yml` and
 `.github/workflows/nightly.yml` must name the `base_images.alpine` value
 literally, because a workflow `uses:` cannot read the SOT. `ci.sh check all`
 fails any `docker://` step that is not a SOT `base_images` pin, and the
-`pinned-external-images` check fails any compose image outside the
+`stable-external-images` check fails any compose image outside the
 `LANCACHE_*` first-party refs that is not digest-pinned or not a SOT
 `base_images` pin (`CI-ERROR-CHECK-0014`).
 
@@ -181,11 +181,11 @@ This complements the Vulnerability Management Policy documentation in
 ## Retention
 
 Do not delete digests that are referenced by a supported release, rollback
-procedure, or published deployment document. Keep at least the current
-release and two previous release digests for first-party images and any
+procedure, or published deployment document. Keep at least the current stable
+release and two previous stable release digests for first-party images and any
 mirrored external image they depend on.
 
 A floating external reference cannot reach a channel: `ci.sh check all` runs
-the `pinned-external-images` check on every CI run, and promotion runs only
+the `stable-external-images` check on every CI run, and promotion runs only
 after a green run. Pin by digest in the SOT `base_images`, mirror, or remove
 the external helper from the deployment profile.

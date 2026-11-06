@@ -61,7 +61,7 @@ the code being built.
 
 ## Docker storage
 
-Docker builds are faster when the host uses a native and reliable storage driver.
+Docker builds are faster when the host uses a native and stable storage driver.
 
 Check the current driver:
 
@@ -263,7 +263,7 @@ If builds are slow:
 
 - check whether Docker uses `overlay2`
 - check whether base images are being pulled repeatedly
-- check whether BuildKit cache paths stay the same for the job
+- check whether BuildKit cache paths are stable for the job
 - check CPU, memory and disk I/O during the build
 - check whether Rust dependencies are recompiling from scratch every time
 

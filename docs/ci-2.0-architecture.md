@@ -586,7 +586,7 @@ atomic promote nightly
 ### 54.2 Unchanged nightly
 If `current_dev desired stack == current nightly accepted stack`, then: `NO BUILD`, `NO RETAG`. Depending on security policy, a separate security revalidation run may still be necessary — that is not a build.
 ## 55. master
-Semantics: `master` = the current release state. Not `master = nightly`. Not `master = current_dev`.
+Semantics: `master` = the current stable release state. Not `master = nightly`. Not `master = current_dev`.
 ## 56. Release
 Release follows `BUILD ONCE`, `PROMOTE MANY`. If the desired release candidate is already exactly ACCEPTED: `Release -> 0 builds`.
 ### 56.1 Release flow

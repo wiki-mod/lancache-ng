@@ -128,7 +128,7 @@ Updating it is automatic and requires no manual collection step (#894):
    since the previous `vX.Y.Z` tag, as `#NUMBER TITLE (URL)` followed by that
    PR's own `## Changelog` section, grouped by label (grouping, fallback group
    and skip label live in `.github/yaml/build-manifest.yml`, `release_notes`).
-2. For a `vX.Y.Z` release tag, `ci.sh release-changelog` then adds the same
+2. For a stable `vX.Y.Z` tag, `ci.sh release-changelog` then adds the same
    list to `CHANGELOG.md` as `## [X.Y.Z] - <date>` and commits it to the
    default branch.
 
@@ -216,7 +216,7 @@ images.
   `GITHUB_ACTOR` and `GHCR_TOKEN` for GHCR read access), so `cargo`/`rustc`
   never need to be installed on the host.
   If you do want a local Rust toolchain for editor tooling (rust-analyzer,
-  etc.), any recent Rust release matching the edition declared in
+  etc.), any recent stable toolchain matching the edition declared in
   the workspace `Cargo.toml` works; see `AGENTS.md`'s "Build-tools
   container verification" section for why the build-tools container, not
   your host toolchain, is still the only path CI/PR verification counts.
@@ -345,7 +345,7 @@ For image inventory, release, or package-channel changes, run inside the build-t
 ```bash
 BUILD_TOOLS_IMAGE="$(bash .github/scripts/ci.sh build-tools resolve-image)"
 docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work:ro" -w /work "$BUILD_TOOLS_IMAGE" \
-  bash -c 'set -e; for c in pinned-external-images image-channel-resolution prebuilt-prod; do bash .github/scripts/ci.sh check "$c"; done'
+  bash -c 'set -e; for c in stable-external-images image-channel-resolution prebuilt-prod; do bash .github/scripts/ci.sh check "$c"; done'
 ```
 
 For workflow changes, run inside the build-tools container:

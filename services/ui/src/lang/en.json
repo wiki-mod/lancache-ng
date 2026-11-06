@@ -325,7 +325,7 @@
   "settings_general": "Settings → General",
   "show_login_code": "Show login code",
   "shows_the_device_name_for_an": "Shows the device name for an IP address, for example in logs.",
-  "shows_what_the_admin_ui_offers": "Shows what the Admin UI offers for each mode. DHCP-Server and DHCP-Proxy exclude each other on the same interface. DHCP-Relay exists but is greyed out -- not ready for production yet.",
+  "shows_what_the_admin_ui_offers": "Shows what the Admin UI offers for each mode. DHCP-Server and DHCP-Proxy exclude each other on the same interface. DHCP-Relay exists but is greyed out -- not stable or ready for production yet.",
   "sign_in": "Sign-in",
   "sign_in_is_turned_off_for": "Sign-in is turned off for this Admin UI.",
   "size": "Size",
