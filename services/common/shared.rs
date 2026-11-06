@@ -1208,6 +1208,57 @@ pub mod docker {
                 r => r.map(drop),
             }
         }
+
+        // What: run a one-shot container to its end.
+        // Why: the DHCP probe needs the host network.
+        // From: Issue #1683 | PR #1985
+        pub async fn run_once(
+            &self,
+            spec: Value,
+            limit: Duration,
+            wait: Duration,
+        ) -> Result<(i64, String), Error> {
+            let made = self
+                .call(Method::POST, "/containers/create", Some(spec), limit)
+                .await?;
+            let id = decode(&made)?["Id"]
+                .as_str()
+                .ok_or_else(|| Error::Decode("create without Id".into()))?
+                .to_string();
+            let run = async {
+                let start = format!("/containers/{id}/start");
+                self.call(Method::POST, &start, None, limit).await?;
+                let path = format!("/containers/{id}/wait");
+                let done = decode(&self.call(Method::POST, &path, None, wait).await?)?;
+                let path = format!("/containers/{id}/logs?stdout=1");
+                let raw = self.call(Method::GET, &path, None, limit).await?;
+                let code = done["StatusCode"].as_i64().unwrap_or(-1);
+                Ok((code, stdout_of(&raw)))
+            }
+            .await;
+            let gone = format!("/containers/{id}?force=1");
+            if let Err(e) = self.call(Method::DELETE, &gone, None, limit).await {
+                eprintln!("docker: remove {id}: {e}");
+            }
+            run
+        }
+    }
+
+    // What: stdout frames of a log stream.
+    // Why: without a TTY Docker adds 8-byte headers.
+    // From: Issue #1683 | PR #1985
+    fn stdout_of(raw: &[u8]) -> String {
+        let mut out = Vec::new();
+        let mut rest = raw;
+        while let [kind, _, _, _, a, b, c, d, tail @ ..] = rest {
+            let size = u32::from_be_bytes([*a, *b, *c, *d]) as usize;
+            let (frame, next) = tail.split_at(size.min(tail.len()));
+            if *kind == 1 {
+                out.extend_from_slice(frame);
+            }
+            rest = next;
+        }
+        String::from_utf8_lossy(&out).trim().to_string()
     }
 }
 

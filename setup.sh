@@ -787,7 +787,7 @@ confirm() {
 # Why: stops or warns before a second DHCP server exists
 # From: Issue #1683 | PR #1858
 run_kea_dhcp_activation_preflight() {
-    local env_file="$1" output status server_identifier=""
+    local env_file="$1" output="" count="" error="" image env_rows server_identifier=""
 
     if [[ "$DHCP_MODE" != "kea" ]]; then
         print_skip "DHCP activation preflight: DHCP_MODE is '$DHCP_MODE', not kea"
@@ -795,14 +795,22 @@ run_kea_dhcp_activation_preflight() {
     fi
 
     print_step "DHCP activation preflight"
-    printf "  Probe-only check: the dhcp image runs its DHCP probe and exits without starting Kea.\n"
+    printf "  Probe-only check: the ui image runs one DHCP probe on the host network and exits.\n"
 
-    # What: one supervisor probe run in the dhcp image
-    # Why: the same probe as the Admin UI; no extra package
-    # From: Issue #1683 | PR #1912
-    if ! output=$(sot_compose "$env_file" -f "$PROD_COMPOSE" run --rm --no-deps dhcp \
-        probe) || ! status=$(json_value .status "$output") || [[ "$status" = unavailable || -z "$status" ]]; then
-        print_warn "DHCP discovery preflight could not be executed inside the dhcp image."
+    # What: the ui image and env from the compose config
+    # Why: the same probe and values as the Admin UI
+    # From: Issue #1683 | PR #1985
+    image=$(compose_config_value "$INSTALL_DIR" "$env_file" .services.ui.image)
+    env_rows=$(compose_config_value "$INSTALL_DIR" "$env_file" \
+        '.services.ui.environment | to_entries | map("\(.key)=\(.value // "")") | join("\n")')
+
+    # What: one probe run with the host network
+    # Why: a bridge network never carries LAN broadcasts
+    # From: Issue #1683 | PR #1985
+    if ! output=$(docker run --rm --network host --env-file <(printf '%s\n' "$env_rows") \
+        "$image" dhcp-probe) || ! count=$(json_value '.servers | length' "$output") \
+        || ! error=$(json_value .error "$output") || [[ -n "$error" ]]; then
+        print_warn "DHCP discovery preflight did not complete: ${error:-no probe answer}"
         print_warn "Kea activation will require an explicit confirmation because the safety check did not complete."
         confirm "Continue with Kea activation anyway? [y/N]" "N" \
             || die "Cancelled DHCP activation."
@@ -812,8 +820,8 @@ run_kea_dhcp_activation_preflight() {
     # What: the server address of the first DHCP offer
     # Why: names the existing server in the warning
     # From: Issue #1683 | PR #1912
-    if [[ "$status" = conflict_found ]]; then
-        server_identifier=$(json_value .conflict.output "$output") || die "Cannot read the probe answer (exit $?)."
+    if [[ "$count" != 0 ]]; then
+        server_identifier=$(json_value '.servers[0].server' "$output") || die "Cannot read the probe answer (exit $?)."
         print_warn "An existing DHCP server answered before Kea activation: ${server_identifier:-unknown}"
         print_warn "Kea would become a second active DHCP server if you continue."
         confirm "Continue with Kea activation anyway? [y/N]" "N" \

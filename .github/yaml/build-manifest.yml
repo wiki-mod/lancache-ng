@@ -521,12 +521,9 @@ runtime:
     - SUPERVISE_BACKOFF_RESET=60
     - SUPERVISE_STOP_GRACE=8
     - SUPERVISE_STATUS_MAX_AGE=30
-    - DHCP_PROBE_WINDOW=5
-    - DHCP_PROBE_REQUEST_TIMEOUT=3
-    - DHCP_PROBE_RETRANSMITS=3
-    # What: ui wait for one DHCP probe answer, seconds.
-    # Why: probe = DHCP_PROBE_WINDOW plus request wait.
-    # From: Issue #1683 | PR #1912
+    # What: ui wait for the one-shot DHCP probe, seconds.
+    # Why: covers DHCP_PROBE_WINDOW_MS plus the lease wait.
+    # From: Issue #1683 | PR #1985
     - DHCP_PROBE_WAIT_TIMEOUT=30
     - PDNS_SOA_COLD_RETRY=5
     - DNS_CONFIRM_PAUSE_MS=100
@@ -612,8 +609,6 @@ runtime:
     - UI_DATA_DIR=/data
     - DESIRED_STATE_FILE=@UI_DATA_DIR@/desired-state.json
     - UI_SETTINGS_FILE=@UI_DATA_DIR@/lancache-ui-settings.env
-    - DHCP_PROBE_REQUEST_FILE=@UI_DATA_DIR@/dhcp-probe-request
-    - DHCP_PROBE_RESULT_FILE=@KEA_DATA_DIR@/dhcp-probe-result.json
     - UI_SESSION_SECRET_FILE=@UI_DATA_DIR@/lancache-ui-session.secret
     - SECONDARY_REGISTRATION_TOKEN_FILE=@UI_DATA_DIR@/lancache-secondary-registration.token
     - UI_DATABASE_FILE=@UI_DATA_DIR@/lancache-ui.db

@@ -30,6 +30,11 @@ use tera::{Context, Tera};
 // From: Issue #1683 | PR #1858
 const SETTINGS_FILE_ENV: &str = "LANCACHE_SETTINGS_FILE";
 
+// What: CLI word of the one-shot DHCP probe.
+// Why: the ui and setup.sh start the same command.
+// From: Issue #1683 | PR #1985
+const DHCP_PROBE_CMD: &str = "dhcp-probe";
+
 // What: page keys read from env, not from specs.
 // Why: compose sets them; no schema row exists.
 // From: Issue #1683 | PR #1980
@@ -1848,10 +1853,24 @@ async fn dhcp_check(
 ) -> Page {
     csrf.check_header(&headers)?;
     let s = app.settings();
-    let probe = move || lancache_ng::dhcp_probe::run(&s);
-    let report = tokio::task::spawn_blocking(probe)
-        .await
-        .map_err(|e| e.to_string())?;
+    let (_, limit) = app.limits(&s)?;
+    let wait = Duration::from_secs(s.uint("DHCP_PROBE_WAIT_TIMEOUT")?);
+    let me = container_of(&app, &s, &s.text("UI_SERVICE")?).await?;
+    let bad = |e: docker::Error| Fail(StatusCode::BAD_GATEWAY, e.to_string());
+    let own = app.docker.inspect(&me, limit).await.map_err(bad)?;
+    // What: the same image, env and volumes as the ui.
+    // Why: a bridge never carries LAN broadcasts.
+    // From: Issue #1683 | PR #1985
+    let spec = json!({
+        "Image": own["Config"]["Image"],
+        "Env": own["Config"]["Env"],
+        "Entrypoint": own["Config"]["Entrypoint"],
+        "Cmd": [DHCP_PROBE_CMD],
+        "HostConfig": {"NetworkMode": "host", "VolumesFrom": [me]},
+    });
+    let (code, out) = app.docker.run_once(spec, limit, wait).await.map_err(bad)?;
+    let report: Value = serde_json::from_str(&out)
+        .map_err(|e| Fail(StatusCode::BAD_GATEWAY, format!("probe exit {code}: {e}")))?;
     Ok(axum::Json(report).into_response())
 }
 
@@ -3213,8 +3232,21 @@ async fn command(s: &Settings, args: &[String]) -> Option<Result<(), String>> {
         }),
         Some("healthcheck") => Some(healthcheck(s).await),
         Some("render-dns") => Some(render_dns(s)),
+        Some(DHCP_PROBE_CMD) => Some(dhcp_probe_cli(s)),
         _ => None,
     }
+}
+
+// What: one DHCP probe; the report as JSON.
+// Why: runs on the host network, apart from the ui.
+// From: Issue #1683 | PR #1985
+fn dhcp_probe_cli(s: &Settings) -> Result<(), String> {
+    let report = lancache_ng::dhcp_probe::run(s);
+    println!(
+        "{}",
+        serde_json::to_string(&report).map_err(|e| e.to_string())?
+    );
+    Ok(())
 }
 
 // What: write the dns configs once, then exit.
