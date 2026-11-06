@@ -826,6 +826,7 @@ runtime:
     - NGINX_HEALTHZ_FILE=lancache-healthz-body.txt
     - NGINX_HEALTHZ_BODY=ok
     - NGINX_PSL_FILE=public_suffix_list.dat
+    - NGINX_PSL_URL=https://publicsuffix.org/list/public_suffix_list.dat
     - NGINX_DISCARD_PORT=9
     - NGINX_REFUSE_RELAY_PORT=9447
     - NGINX_STREAM_TARGETS_FILE=stream.d/00-stream-targets.conf
@@ -2071,6 +2072,10 @@ ci_variables:
   # Why: DoMe: raw output of every command must show.
   # From: Issue #1683 | PR #1984
   PROJECT_DEBUG_MODE: "true"
+  # What: checkout dir compose mounts as nginx templates.
+  # Why: CI puts the fetched PSL there for the ui mount.
+  # From: Issue #1683 | PR #1984
+  CI_PSL_DIR: services/ui/nginx
 
 # What: runner host values: paths, ages, units, packages.
 # Why: AG-CI-016: ci.sh runner-host reads them; no copy.

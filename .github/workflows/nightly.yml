@@ -238,13 +238,15 @@ jobs:
       # What: export args for the GHA cache runtime step.
       # Why: ci.sh owns the kill timeout and the var list.
       # From: Issue #1683 | PR #1912
-      - name: Prepare the GHA cache runtime export
+      - &gha_args
+        name: Prepare the GHA cache runtime export
         id: gha-runtime
         run: bash .github/scripts/ci.sh gha-runtime-args
       # What: hand the GHA cache runtime to later steps.
       # Why: only action steps get ACTIONS_RUNTIME_TOKEN.
       # From: Issue #1683 | PR #1912
-      - name: Export the GHA cache runtime
+      - &gha_export
+        name: Export the GHA cache runtime
         uses: docker://mirror.gcr.io/library/alpine:latest
         with:
           entrypoint: timeout
@@ -354,6 +356,13 @@ jobs:
     steps:
       - *bootstrap
       - *channel_pin
+      - *gha_args
+      - *gha_export
+      # What: load the PSL, store it in the Actions cache.
+      # Why: jobs and PR runs read it there.
+      # From: Issue #1683 | PR #1984
+      - name: Refresh the Public Suffix List
+        run: bash .github/scripts/ci.sh psl refresh
       - name: Validate the accepted stack candidate
         id: validate
         env:
