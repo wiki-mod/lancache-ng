@@ -2289,24 +2289,25 @@ async fn service_action(
     {
         return Err(Fail(StatusCode::NOT_FOUND, "program not offered".into()));
     }
-    // What: a signal program reloads itself.
-    // Why: proxy has no OpenRC; nginx runs as PID 1.
+    // What: a signal program reloads by container HUP.
+    // Why: live 06.11.: "nginx -s reload" read the image
+    // default nginx.conf, not the one nginx started with.
     // From: Issue #1683
     let id = format!("{container}:{program}");
     if s.list("UI_SIGNAL_PROGRAMS").contains(&id) {
         if action != "reload" {
             return Err(bad_request("this program only reloads"));
         }
-        let cmd = [program.as_str(), "-s", "reload"];
-        let (code, out) = exec_in(&app, &s, &container, &cmd)
+        let name = container_of(&app, &s, &container)
             .await
             .map_err(|e| Fail(StatusCode::BAD_GATEWAY, e))?;
-        if code != 0 {
-            return Err(Fail(
-                StatusCode::BAD_GATEWAY,
-                format!("{program} exit {code}: {out}"),
-            ));
-        }
+        let (grace, limit) = app
+            .limits(&s)
+            .map_err(|e| Fail(StatusCode::BAD_GATEWAY, e))?;
+        app.docker
+            .act(&name, docker::Action::Reload, grace, limit)
+            .await
+            .map_err(|e| Fail(StatusCode::BAD_GATEWAY, e.to_string()))?;
         return Ok(StatusCode::NO_CONTENT.into_response());
     }
     // What: only a running program is touched.
