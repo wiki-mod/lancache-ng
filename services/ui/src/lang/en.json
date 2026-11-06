@@ -275,7 +275,6 @@
   "pick_the_machine_or_one_container": "Pick the machine or one container, then the time range.",
   "preload": "Preload",
   "primary_dns": "Primary DNS",
-  "programs": "Programs ▾",
   "progress": "Progress",
   "project_page": "Project page",
   "proxy_dhcp_pxe_helper_only_the": "Proxy-DHCP / PXE helper only -- the upstream/router DHCP server keeps issuing every ordinary client's lease and options",

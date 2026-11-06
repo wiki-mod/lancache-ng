@@ -275,7 +275,6 @@
   "pick_the_machine_or_one_container": "Wähle die Maschine oder einen Container, dann den Zeitraum.",
   "preload": "Vorladen",
   "primary_dns": "Primärer DNS",
-  "programs": "Programme ▾",
   "progress": "Fortschritt",
   "project_page": "Projektseite",
   "proxy_dhcp_pxe_helper_only_the": "Nur Proxy-DHCP / PXE-Helfer -- der vorgelagerte DHCP-Server (Router) vergibt weiter Leases und Optionen für alle normalen Geräte",

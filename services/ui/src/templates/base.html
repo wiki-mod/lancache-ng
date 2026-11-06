@@ -227,6 +227,11 @@
   .beam-menu { position: relative; }
   .beam-menu summary { list-style: none; cursor: pointer; padding: 0 0.4rem; }
   .beam-menu summary::-webkit-details-marker { display: none; }
+  /* What: container name as the programs button
+     Why: DoMe 06.11.: no extra "Programme" button
+     From: Issue #1683 */
+  .beam-name { display: inline-block; }
+  .beam-name > summary { display: inline; padding: 0; }
   .beam-menu-list { position: fixed; z-index: 30; display: flex; flex-direction: column; gap: 6px; padding: 8px; border-radius: 8px; border: 1px solid var(--navy-600); background: var(--navy-900); box-shadow: 0 4px 14px rgba(0,0,0,0.35); }
   .beam-menu-row { display: flex; align-items: center; gap: 6px; }
   .beam-menu-row span { flex: 1; min-width: 9em; color: var(--foam); }
@@ -993,7 +998,8 @@
         const dot = document.createElement('span');
         window.LancacheWatchdog.paintDot(dot, svc.status);
         wrap.appendChild(dot);
-        wrap.appendChild(document.createTextNode(svc.name + ' '));
+        const nameNode = document.createTextNode(svc.name + ' ');
+        wrap.appendChild(nameNode);
         // What: bold status word after the service name
         // Why: the mockup shows name plus state
         // From: Issue #1683 | PR #1858
@@ -1052,14 +1058,16 @@
         const progs = DOCK_PROGRAMS.filter(function (p) { return p.split(':')[0] === svc.name; });
         if (progs.length) {
           const menu = document.createElement('details');
-          menu.className = 'beam-menu';
+          menu.className = 'beam-menu beam-name';
           menu.open = openMenu === svc.name;
           menu.addEventListener('toggle', function () {
             if (menu.open) { openMenu = svc.name; } else if (openMenu === svc.name) { openMenu = ''; }
           });
+          // What: the container name opens its programs.
+          // Why: DoMe 06.11.: no extra "Programme" button.
+          // From: Issue #1683
           const sum = document.createElement('summary');
-          sum.className = 'theme-btn';
-          sum.textContent = LC_T.programs;
+          sum.textContent = svc.name + ' \u25BE ';
           menu.appendChild(sum);
           const list = document.createElement('div');
           list.className = 'beam-menu-list';
@@ -1081,7 +1089,7 @@
             list.appendChild(row);
           });
           menu.appendChild(list);
-          wrap.appendChild(menu);
+          wrap.replaceChild(menu, nameNode);
           // What: place the list under its button.
           // Why: the bar hides overflow; fixed escapes it.
           // From: Issue #1683 | PR #1980
