@@ -1046,26 +1046,29 @@
           });
           wrap.appendChild(why);
         }
+        let button = null;
         if (!svc.mode_off && DOCK_CONTROLLABLE_SERVICES.includes(svc.name)) {
           // What: Start for red or gray, otherwise Stopp
           // Why: a user stop always offers Start
           // From: Issue #1437 | PR #1980
           const running = !svc.stopped_by_user && svc.status !== 'red' && svc.status !== 'gray';
-          const button = document.createElement('button');
+          button = document.createElement('button');
           button.type = 'button';
           button.className = 'theme-btn';
-          button.style.marginLeft = '0.35rem';
-          button.style.padding = '0 0.4rem';
           button.textContent = running ? LC_T.stop : 'Start';
           button.addEventListener('click', function () {
             setDockServiceState(svc.name, running ? 'stopped' : 'running', button);
           });
-          wrap.appendChild(button);
         }
         // What: programs sit in a fold-out menu.
         // Why: DoMe 05.11.: 14 equal buttons in the bar.
         // From: Issue #1683 | PR #1980
         const progs = DOCK_PROGRAMS.filter(function (p) { return p.split(':')[0] === svc.name; });
+        if (button && !(progs.length && !svc.mode_off)) {
+          button.style.marginLeft = '0.35rem';
+          button.style.padding = '0 0.4rem';
+          wrap.appendChild(button);
+        }
         if (progs.length && !svc.mode_off) {
           const menu = document.createElement('details');
           menu.className = 'beam-menu beam-name';
@@ -1081,6 +1084,18 @@
           menu.appendChild(sum);
           const list = document.createElement('div');
           list.className = 'beam-menu-list';
+          // What: container Start/Stop is the first menu row.
+          // Why: DoMe 06.11.: no Stop button beside the menu.
+          // From: Issue #1683
+          if (button) {
+            const row = document.createElement('div');
+            row.className = 'beam-menu-row';
+            const name = document.createElement('span');
+            name.textContent = LC_T.svc_container;
+            row.appendChild(name);
+            row.appendChild(button);
+            list.appendChild(row);
+          }
           progs.forEach(function (p) {
             const program = p.split(':')[1];
             const row = document.createElement('div');

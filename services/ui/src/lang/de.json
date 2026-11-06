@@ -355,6 +355,7 @@
   "subnets": "Subnetze",
   "supplemental_only": "Nur ergänzend",
   "svc_mode_off": "aus (DHCP-Modus aus)",
+  "svc_container": "Container",
   "svc_reason": "Grund",
   "svc_st_gray": "aus",
   "svc_st_green": "läuft",
