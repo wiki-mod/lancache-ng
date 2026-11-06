@@ -3240,13 +3240,13 @@ pub mod apply {
         }
     }
 
-    // What: an owner's reload commands, "owner:cmd,arg".
+    // What: an owner's reload commands, "owner:cmd+arg".
     // Why: RELOAD_EXEC in the SOT; no list in code.
     // From: Issue #1683
     fn exec_cmds<'a>(exec: &'a [String], owner: &'a str) -> impl Iterator<Item = Vec<&'a str>> {
         exec.iter().filter_map(move |e| {
             let (o, cmd) = e.split_once(':')?;
-            (o == owner).then(|| cmd.split(',').collect())
+            (o == owner).then(|| cmd.split('+').collect())
         })
     }
 
