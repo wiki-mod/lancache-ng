@@ -607,6 +607,20 @@ async fn save(
     {
         return Err(bad_request(tr("err_no_domain").replace("{x}", d)));
     }
+    // What: each upstream entry is checked before save.
+    // Why: live 06.11.: "[fd00::1" was saved unchecked.
+    // From: Issue #1683
+    if let Some(v) = form.get("DNS_UPSTREAM_SERVERS") {
+        let s = app.settings();
+        let own: Vec<String> = ["IP_HTTP", "IP_HTTPS"]
+            .iter()
+            .filter_map(|k| s.text(k).ok())
+            .filter(|ip| !ip.is_empty())
+            .collect();
+        for raw in config::list_items(v) {
+            lancache_ng::recursor_conf::upstream_entry(raw, &own).map_err(bad_request)?;
+        }
+    }
 
     // What: back to the page that sent the form.
     // Why: live test: dashboard forms ended on /setup.

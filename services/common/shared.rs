@@ -2359,21 +2359,40 @@ pub mod recursor_conf {
             .collect();
         let list = s.list("DNS_UPSTREAM_SERVERS");
         for raw in &list {
-            let host = match raw.strip_prefix('[') {
-                Some(rest) => rest.split(']').next().unwrap_or(rest),
-                None if raw.matches(':').count() == 1 => raw.split(':').next().unwrap_or(raw),
-                None => raw.as_str(),
-            };
-            let ip: std::net::IpAddr = host
-                .parse()
-                .map_err(|_| format!("DNS_UPSTREAM_SERVERS: {raw} is no IP address"))?;
-            if ip.is_loopback() || ip.is_unspecified() || own.iter().any(|o| *o == host) {
-                return Err(format!(
-                    "DNS_UPSTREAM_SERVERS: {raw} is this LanCache-NG itself; that would loop"
-                ));
-            }
+            upstream_entry(raw, &own)?;
         }
         Ok(list)
+    }
+
+    // What: one upstream: IP, [IPv6]:port or IPv4:port.
+    // Why: live 06.11.: "[fd00::1" was saved unchecked.
+    // From: Issue #1683
+    pub fn upstream_entry(raw: &str, own: &[String]) -> Result<(), String> {
+        let bad = || format!("DNS_UPSTREAM_SERVERS: {raw} is no IP address");
+        let (host, port) = match raw.strip_prefix('[') {
+            Some(rest) => {
+                let (h, tail) = rest.split_once(']').ok_or_else(bad)?;
+                match tail {
+                    "" => (h, None),
+                    t => (h, Some(t.strip_prefix(':').ok_or_else(bad)?)),
+                }
+            }
+            None if raw.matches(':').count() == 1 => raw
+                .split_once(':')
+                .map(|(h, p)| (h, Some(p)))
+                .ok_or_else(bad)?,
+            None => (raw, None),
+        };
+        if let Some(p) = port {
+            p.parse::<u16>().ok().filter(|n| *n > 0).ok_or_else(bad)?;
+        }
+        let ip: std::net::IpAddr = host.parse().map_err(|_| bad())?;
+        if ip.is_loopback() || ip.is_unspecified() || own.iter().any(|o| *o == host) {
+            return Err(format!(
+                "DNS_UPSTREAM_SERVERS: {raw} is this LanCache-NG itself; that would loop"
+            ));
+        }
+        Ok(())
     }
 
     // What: Lua hook: AAAA answers become empty.
