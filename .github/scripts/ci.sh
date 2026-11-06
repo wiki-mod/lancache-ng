@@ -69,7 +69,7 @@ CI_ARG_SCHEMA=LANCACHE_RUNTIME_SCHEMA
 # From: Issue #1683
 declare -A CI_DISPATCH=(
     [plan]=ci_cmd_plan [plan-matrix]=ci_cmd_plan_matrix [impact]=ci_cmd_impact [codeql-impact]=ci_cmd_codeql_impact [codeql-analyze]=ci_cmd_codeql_analyze [identity]=ci_cmd_identity
-    [resolve]=ci_cmd_resolve [build]=ci_cmd_build [rust-build]=ci_cmd_rust_build [apk-setup]=ci_cmd_apk_setup [image-setup]=ci_cmd_image_setup
+    [resolve]=ci_cmd_resolve [build]=ci_cmd_build [rust-build]=ci_cmd_rust_build [apk-setup]=ci_cmd_apk_setup [image-setup]=ci_cmd_image_setup [openrc-setup]=ci_cmd_openrc_setup
     [build-tools]=ci_cmd_build_tools [job-settings]=ci_cmd_job_settings [tool-releases]=ci_cmd_tool_releases [publish]=ci_cmd_publish [verify]=ci_cmd_verify [ship]=ci_cmd_ship [ship-release]=ci_cmd_ship_release [gha-runtime-args]=ci_cmd_gha_runtime_args
     [test]=ci_cmd_test [scan-channel]=ci_cmd_scan_channel [assemble]=ci_cmd_assemble
     [aggregate-stack]=ci_cmd_aggregate_stack [scan-stack]=ci_cmd_scan_stack [changed-files]=ci_cmd_changed_files [checks-plan]=ci_cmd_checks_plan [rust-memo]=ci_cmd_rust_memo
@@ -7075,6 +7075,70 @@ ci_cmd_image_setup() {
         fi
     done
     printf 'image-setup=ok steps=%s\n' "$(wc -w <<< "${IMAGE_SETUP:-}")"
+}
+
+# What: OpenRC services from LANCACHE_PROCESSES.
+# Why: dns, dhcp, services had one copied RUN block each.
+# From: Issue #1683
+ci_cmd_openrc_setup() {
+    local rows="${LANCACHE_RUNTIME_DEFAULTS:-}" row k f out n
+    local level name cmd args idir rdir
+    local -a kv=()
+    local -A v=() pre=()
+    rows="${rows//|/$'\n'}"
+    for k in OPENRC_RC_CONF OPENRC_RC_SETTINGS OPENRC_INIT_DIR OPENRC_RUNLEVEL_DIR \
+        OPENRC_DROP_RUNLEVELS OPENRC_DEFAULT_RUNLEVEL OPENRC_SUPERVISOR \
+        OPENRC_RESPAWN_DELAY OPENRC_OUTPUT_LOG OPENRC_ERROR_LOG; do
+        _ci_fill "@${k}@" "${rows}" || return 2
+        v["${k}"]="${REPLY}"
+    done
+    idir="${v[OPENRC_INIT_DIR]}"; rdir="${v[OPENRC_RUNLEVEL_DIR]}"
+    read -ra kv <<< "${v[OPENRC_RC_SETTINGS]}"
+    for k in "${kv[@]}"; do
+        n="${k%%=*}"
+        if ! out="$(sed -i "s|^#\?${n}=.*|${n}=\"${k#*=}\"|" "${v[OPENRC_RC_CONF]}" 2>&1)"; then
+            ci_error "[CI-ERROR-OPENRC-0001]" "setting=\"${k}\" reason=\"rc.conf not set\"" "${out}"
+            return 2
+        fi
+    done
+    # What: init scripts that need /dev are dropped.
+    # Why: a container has no dev service to wait for.
+    # From: Issue #1683 | PR #1980
+    for f in "${idir}"/*; do
+        if grep -qE '^[[:space:]]*need[^#]*[[:space:]]dev([[:space:]]|$)' "${f}"; then
+            rm -f "${f}"
+        fi
+    done
+    for k in ${v[OPENRC_DROP_RUNLEVELS]}; do rm -f "${rdir:?}/${k}"/*; done
+    while IFS= read -r row; do
+        [[ "${row}" == *=* ]] || continue
+        pre["${row%%=*}"]="${row#*=}"
+    done <<< "${LANCACHE_PROCESS_PRE//|/$'\n'}"
+    for row in ${LANCACHE_PROCESSES:-}; do
+        level="${v[OPENRC_DEFAULT_RUNLEVEL]}"
+        if [[ "${row%%=*}" == *:* ]]; then level="${row%%:*}"; row="${row#*:}"; fi
+        mkdir -p "${rdir}/${level}"
+        [ -n "${row}" ] || continue
+        name="${row%%=*}"
+        _ci_fill "${row#*=}" "${rows}" || return 2
+        cmd="${REPLY//,/ }"; args=""
+        [[ "${cmd}" != *" "* ]] || args="${cmd#* }"
+        printf '%s\n' '#!/sbin/openrc-run' "supervisor=${v[OPENRC_SUPERVISOR]}" \
+            "command=${cmd%% *}" "command_args=\"${args}\"" \
+            "respawn_delay=${v[OPENRC_RESPAWN_DELAY]}" \
+            "output_log=${v[OPENRC_OUTPUT_LOG]}" \
+            "error_log=${v[OPENRC_ERROR_LOG]}" > "${idir}/${name}"
+        if [ -n "${pre[${name}]:-}" ]; then
+            _ci_fill "${pre[${name}]}" "${rows}" || return 2
+            printf 'start_pre() { %s; }\n' "${REPLY}" >> "${idir}/${name}"
+        fi
+        chmod 0755 "${idir}/${name}"
+        if ! out="$(rc-update add "${name}" "${level}" 2>&1)"; then
+            ci_error "[CI-ERROR-OPENRC-0002]" "process=\"${name}\" level=\"${level}\" reason=\"rc-update failed\"" "${out}"
+            return 2
+        fi
+    done
+    printf 'openrc-setup=ok processes=%s\n' "$(wc -w <<< "${LANCACHE_PROCESSES:-}")"
 }
 
 # What: one apk step, output shown, coded error with raw.
@@ -16498,7 +16562,7 @@ ci_main() {
     # What: skip manifest for build-only commands
     # Why: bind-mounted stage has no SOT present
     # From: Issue #1683
-    case "${command}" in check|rust-build|apk-setup|image-setup) ;; *) ci_require_manifest || return "$?" ;; esac
+    case "${command}" in check|rust-build|apk-setup|image-setup|openrc-setup) ;; *) ci_require_manifest || return "$?" ;; esac
     # What: index a present SOT once for this command.
     # Why: readers then look fields up instead of rereading.
     # From: Issue #1683 | PR #1858

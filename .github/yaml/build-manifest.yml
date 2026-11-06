@@ -996,6 +996,19 @@ runtime:
     # From: Issue #1683 | PR #1980
     - RUN_DIR=/run
     - OPENRC_STATE_DIR=/run/openrc
+    # What: OpenRC setup ci.sh openrc-setup writes.
+    # Why: dns, dhcp, services read one list.
+    # From: Issue #1683
+    - OPENRC_RC_CONF=/etc/rc.conf
+    - OPENRC_RC_SETTINGS=rc_sys=docker rc_env_allow=* rc_controller_cgroups=NO rc_cgroup_mode=legacy
+    - OPENRC_INIT_DIR=/etc/init.d
+    - OPENRC_RUNLEVEL_DIR=/etc/runlevels
+    - OPENRC_DROP_RUNLEVELS=sysinit boot
+    - OPENRC_DEFAULT_RUNLEVEL=default
+    - OPENRC_SUPERVISOR=supervise-daemon
+    - OPENRC_RESPAWN_DELAY=2
+    - OPENRC_OUTPUT_LOG=/proc/1/fd/1
+    - OPENRC_ERROR_LOG=/proc/1/fd/2
     - HUP_OWNERS=proxy ui
     - NGINX_CONF_DIR=@CONFIG_DIR@/proxy
     - DNSMASQ_CONF_FILE=@CONFIG_DIR@/dhcp/dnsmasq.conf
