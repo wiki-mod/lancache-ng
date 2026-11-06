@@ -2409,7 +2409,7 @@ pub mod recursor_conf {
     // Why: live 05.11. (U4): own IP made a query loop.
     // From: Issue #1683 | PR #1980
     fn upstream_servers(s: &Settings) -> Result<Vec<String>, String> {
-        let own: Vec<String> = ["IP_HTTP", "IP_HTTPS"]
+        let own: Vec<String> = ["IP_HTTP", "IP_HTTPS", "LISTEN_IP", "LISTEN_IP_HTTPS"]
             .iter()
             .filter_map(|k| s.text(k).ok())
             .filter(|v| !v.is_empty())
