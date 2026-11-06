@@ -3346,8 +3346,8 @@ pub mod apply {
                 Some(Action::Reload) if exec_cmds(exec, owner).next().is_some() => {
                     let name = container_of(owner);
                     match reload_exec(api, &name, exec, owner, limit).await {
-                        // What: a failed reload restarts the owner.
-                        // Why: 249: nginx ran with an old conf.
+                        // What: failed reload: restart.
+                        // Why: 249 ran an old nginx.conf.
                         // From: Issue #1683 | PR #1985
                         Outcome::Failed(e) => {
                             eprintln!("apply: {owner}: reload failed ({e}); restart");
