@@ -2543,8 +2543,9 @@ async fn apply_all(
     plan.retain(|owner, _| names.contains_key(owner));
     let lookup = |owner: &str| names.get(owner).cloned().unwrap_or_default();
     let hup = new.list("HUP_OWNERS");
+    let rx = new.list("RELOAD_EXEC");
     let mut restarted = Vec::new();
-    let mut results = apply::run(&app.docker, &plan, &hup, &lookup, grace, limit).await;
+    let mut results = apply::run(&app.docker, &plan, &hup, &rx, &lookup, grace, limit).await;
     // What: one more try for owners that got a 409.
     // Why: live: restart while compose recreated proxy.
     // From: Issue #1683 | PR #1980
@@ -2562,7 +2563,7 @@ async fn apply_all(
             })
             .map(|(o, e)| (o.clone(), *e))
             .collect();
-        let retried = apply::run(&app.docker, &again, &hup, &lookup, grace, limit).await;
+        let retried = apply::run(&app.docker, &again, &hup, &rx, &lookup, grace, limit).await;
         for (owner, r) in retried {
             if let Some(slot) = results.iter_mut().find(|(x, _)| *x == owner) {
                 slot.1 = r;
@@ -2619,7 +2620,8 @@ async fn apply_all(
             }
             plan.retain(|owner, _| names.contains_key(owner));
             let lookup = |owner: &str| names.get(owner).cloned().unwrap_or_default();
-            for (owner, result) in apply::run(&app.docker, &plan, &hup, &lookup, grace, limit).await
+            for (owner, result) in
+                apply::run(&app.docker, &plan, &hup, &rx, &lookup, grace, limit).await
             {
                 report.push(format!("{owner}: {result:?}"));
             }

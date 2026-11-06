@@ -1023,6 +1023,10 @@ runtime:
     - OPENRC_ERROR_LOG=/proc/1/fd/2
     - LANCACHE_INIT_FILE=/usr/local/bin/lancache-init
     - HUP_OWNERS=proxy ui
+    # What: reload commands per owner without HUP.
+    # Why: DoMe 06.11.: a dns toggle restarted dns.
+    # From: Issue #1683
+    - RELOAD_EXEC=dns:rec_control,--socket-dir=@RECURSOR_RUN_DIR@,--config-name=http,reload-lua-config dns:rec_control,--socket-dir=@RECURSOR_RUN_DIR@,--config-name=http,reload-acls dns:rec_control,--socket-dir=@RECURSOR_RUN_DIR@,--config-name=http,reload-zones dns:rec_control,--socket-dir=@RECURSOR_RUN_DIR@,--config-name=http,reload-lua-script dns:rec_control,--socket-dir=@RECURSOR_RUN_DIR@,--config-name=http,wipe-cache,.$ dns:rec_control,--socket-dir=@RECURSOR_RUN_DIR@,--config-name=https,reload-lua-config dns:rec_control,--socket-dir=@RECURSOR_RUN_DIR@,--config-name=https,reload-acls dns:rec_control,--socket-dir=@RECURSOR_RUN_DIR@,--config-name=https,reload-zones dns:rec_control,--socket-dir=@RECURSOR_RUN_DIR@,--config-name=https,reload-lua-script dns:rec_control,--socket-dir=@RECURSOR_RUN_DIR@,--config-name=https,wipe-cache,.$
     - NGINX_CONF_DIR=@CONFIG_DIR@/proxy
     - DNSMASQ_CONF_FILE=@CONFIG_DIR@/dhcp/dnsmasq.conf
     - KEA_CTRL_CONF_FILE=@CONFIG_DIR@/dhcp/kea-ctrl-agent.conf
@@ -1159,8 +1163,8 @@ runtime:
     - CDN_DEFAULT_DOMAINS_FILE=path;;;reload;dns
     - CDN_DISABLED_DOMAINS=list?;;;reload;dns
     - COMPOSE_PROJECT=text;;;live;ui
-    - DDNS_ALLOW_UNSIGNED=bool;;;reload;dns
-    - DDNS_TSIG_NAME=text;;;reload;dns
+    - DDNS_ALLOW_UNSIGNED=bool;;;restart;dns
+    - DDNS_TSIG_NAME=text;;;restart;dns
     - DHCP_CUSTOM_OPTIONS=text?;;;reload;dhcp
     - DHCP_DDNS=bool;;;reload;dhcp
     - DHCP_DNS_SERVERS=list?;;;reload;dhcp
@@ -1189,22 +1193,22 @@ runtime:
     - DNS_FILTER_AAAA=bool;;;reload;dns
     - DNS_LAN_RECORD_TYPES=list;;;live;ui
     - DNS_LOCAL_REVERSE_ZONES=bool;;;reload;dns
-    - DNS_QUERY_LOG=bool;;;reload;dns
+    - DNS_QUERY_LOG=bool;;;restart;dns
     - DNS_PRIVATE_REVERSE_ZONES=list;;;reload;dns
     - DNS_QUERY_ALLOW_FROM=list;;;reload;dns
     - DNS_RECORD_TTL=uint;1;86400;live;ui
     - DNS_RECORD_TTL_MAX=uint;1;604800;live;ui
     - DNS_TXT_MAX_BYTES=uint;1;255;live;ui
     - DNS_REPLICATION_ROLE=choice;primary,secondary;;recreate;dns
-    - DNS_SECONDARIES=list?;;;reload;dns
-    - DNS_SECONDARY_ZONES=list?;;;reload;dns
-    - DNS_SERVE_RFC1918=bool;;;reload;dns
+    - DNS_SECONDARIES=list?;;;restart;dns
+    - DNS_SECONDARY_ZONES=list?;;;restart;dns
+    - DNS_SERVE_RFC1918=bool;;;restart;dns
     - DNS_SNAPSHOT_DIR=path;;;live;ui
     - DNS_SNAPSHOT_KEEP=uint;1;1000;live;ui
     - DNS_UPSTREAM_SERVERS=list?;;;reload;dns
     - DNS_UPSTREAM_UNSIGNED_ZONES=list?;;;reload;dns
     - DNS_UPSTREAM_ZONES=list?;;;reload;dns
-    - DNS_XFR_PRIMARY=text?;;;reload;dns
+    - DNS_XFR_PRIMARY=text?;;;restart;dns
     - DOCKER_ENDPOINT=text;;;container;services
     - DOCKER_TIMEOUT=uint;1;600;live;services
     - HTTPS_ENABLED=bool;;;reload;proxy
@@ -1256,29 +1260,29 @@ runtime:
     - NTP_PORT=uint;1;65535;container;services
     - NTP_PROBE_WAIT_MS=uint;100;60000;live;ui
     - NTP_UPSTREAM_SERVERS=list;;;restart;services
-    - PDNS_API_ALLOW_FROM=list;;;reload;dns
+    - PDNS_API_ALLOW_FROM=list;;;restart;dns
     - PDNS_API_KEY=secret?;;;restart;dns
     - PDNS_API_LISTEN=text;;;restart;dns
     - PDNS_AUTH_ADDRESS=text;;;restart;dns
     - PDNS_AUTH_API_PORT=uint;1;65535;restart;dns
-    - PDNS_AUTH_LOGLEVEL=uint;0;9;reload;dns
+    - PDNS_AUTH_LOGLEVEL=uint;0;9;restart;dns
     - PDNS_AUTH_PORT=uint;1;65535;container;dns
-    - PDNS_AXFR_FROM=list?;;;reload;dns
+    - PDNS_AXFR_FROM=list?;;;restart;dns
     - PDNS_DATABASE=path;;;restart;dns
     - PDNS_LAUNCH=text;;;restart;dns
-    - PDNS_DEFAULT_SOA=text;;;reload;dns
-    - PDNS_DNSUPDATE_FROM=list?;;;reload;dns
+    - PDNS_DEFAULT_SOA=text;;;restart;dns
+    - PDNS_DNSUPDATE_FROM=list?;;;restart;dns
     - PDNS_LISTEN=list;;;restart;dns
     - PDNS_PRIMARY_API_URL=text?;;;live;services
     - PDNS_SECONDARY_API_URL=text?;;;live;services
     - PDNS_SOA_EDIT=text;;;live;ui
     - PDNS_SOA_COLD_RETRY=uint;1;3600;live;ui
-    - PDNS_XFR_CYCLE=uint;1;86400;reload;dns
+    - PDNS_XFR_CYCLE=uint;1;86400;restart;dns
     - PROXY_ALLOWED_CLIENT_CIDRS=list;;;reload;proxy
     - PROXY_HTTP_PORT=uint;1;65535;container;proxy
     - PROXY_LOG_PROGRAM=text;;;live;ui
     - PROXY_SECURITY_MODE=choice;lazy,strict;;reload;proxy
-    - RECURSOR_AAAA_LUA_FILE=path;;;reload;dns
+    - RECURSOR_AAAA_LUA_FILE=path;;;restart;dns
     - RECURSOR_RUN_DIR=path;;;restart;dns
     - CHRONY_CONF_FILE=path;;;container;services
     - CONFIG_DIR=path;;;container;ui
@@ -1289,6 +1293,7 @@ runtime:
     - UI_REFERRER_POLICY=text;;;live;ui
     - DHCP_MODE_FILE=path;;;container;dhcp
     - HUP_OWNERS=list;;;live;ui
+    - RELOAD_EXEC=list;;;live;ui
     - NGINX_CONF_DIR=path;;;container;proxy
     - DNSMASQ_CONF_FILE=path;;;container;dhcp
     - KEA_CTRL_CONF_FILE=path;;;container;dhcp

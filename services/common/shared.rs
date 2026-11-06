@@ -3240,13 +3240,48 @@ pub mod apply {
         }
     }
 
-    // What: carry out the plan: HUP or restart.
+    // What: an owner's reload commands, "owner:cmd,arg".
+    // Why: RELOAD_EXEC in the SOT; no list in code.
+    // From: Issue #1683
+    fn exec_cmds<'a>(exec: &'a [String], owner: &'a str) -> impl Iterator<Item = Vec<&'a str>> {
+        exec.iter().filter_map(move |e| {
+            let (o, cmd) = e.split_once(':')?;
+            (o == owner).then(|| cmd.split(',').collect())
+        })
+    }
+
+    // What: run every reload command; stop at the first.
+    // Why: a failed reload is shown, never hidden.
+    // From: Issue #1683
+    async fn reload_exec(
+        api: &Api,
+        name: &str,
+        exec: &[String],
+        owner: &str,
+        limit: Duration,
+    ) -> Outcome {
+        for cmd in exec_cmds(exec, owner) {
+            match api.exec(name, &cmd, limit).await {
+                Ok((0, _)) => {}
+                Ok((code, out)) => {
+                    let text = format!("{} exit {code}: {}", cmd.join(" "), out.trim());
+                    return Outcome::Failed(Error::Transport(text));
+                }
+                Err(e) => return Outcome::Failed(e),
+            }
+        }
+        Outcome::Done(Action::Reload)
+    }
+
+    // What: carry out the plan: HUP, exec or restart.
     // Why: openrc-init drops HUP; only hup owners get it.
     // From: Issue #1683 | PR #1980
+    #[allow(clippy::too_many_arguments)]
     pub async fn run(
         api: &Api,
         plan: &BTreeMap<String, Effect>,
         hup: &[String],
+        exec: &[String],
         container_of: &(dyn Fn(&str) -> String + Sync),
         grace: u32,
         limit: Duration,
@@ -3256,6 +3291,12 @@ pub mod apply {
             let outcome = match action_of(effect) {
                 None if effect == Effect::Recreate => Outcome::NeedsRecreate,
                 None => Outcome::Live,
+                // What: owner reload commands via exec.
+                // Why: DoMe 06.11.: a toggle restarted dns.
+                // From: Issue #1683
+                Some(Action::Reload) if exec_cmds(exec, owner).next().is_some() => {
+                    reload_exec(api, &container_of(owner), exec, owner, limit).await
+                }
                 Some(Action::Reload) if !hup.contains(owner) => {
                     let a = Action::Restart;
                     match api.act(&container_of(owner), a, grace, limit).await {
