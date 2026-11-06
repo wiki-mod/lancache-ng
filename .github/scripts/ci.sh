@@ -70,7 +70,7 @@ CI_ARG_SCHEMA=LANCACHE_RUNTIME_SCHEMA
 declare -A CI_DISPATCH=(
     [plan]=ci_cmd_plan [plan-matrix]=ci_cmd_plan_matrix [impact]=ci_cmd_impact [codeql-impact]=ci_cmd_codeql_impact [codeql-analyze]=ci_cmd_codeql_analyze [identity]=ci_cmd_identity
     [resolve]=ci_cmd_resolve [build]=ci_cmd_build [rust-build]=ci_cmd_rust_build [apk-setup]=ci_cmd_apk_setup [image-setup]=ci_cmd_image_setup
-    [build-tools]=ci_cmd_build_tools [job-settings]=ci_cmd_job_settings [tool-releases]=ci_cmd_tool_releases [publish]=ci_cmd_publish [verify]=ci_cmd_verify [ship]=ci_cmd_ship [ship-release]=ci_cmd_ship_release [gha-runtime-args]=ci_cmd_gha_runtime_args
+    [build-tools]=ci_cmd_build_tools [job-settings]=ci_cmd_job_settings [tool-releases]=ci_cmd_tool_releases [publish]=ci_cmd_publish [verify]=ci_cmd_verify [ship]=ci_cmd_ship [ship-release]=ci_cmd_ship_release [build-tools-run]=ci_cmd_build_tools_run
     [test]=ci_cmd_test [scan-channel]=ci_cmd_scan_channel [assemble]=ci_cmd_assemble
     [aggregate-stack]=ci_cmd_aggregate_stack [scan-stack]=ci_cmd_scan_stack [changed-files]=ci_cmd_changed_files [checks-plan]=ci_cmd_checks_plan [rust-memo]=ci_cmd_rust_memo [psl]=ci_cmd_psl
     [assemble-stack]=ci_cmd_assemble_stack [test-stack]=ci_cmd_test_stack [nightly-report]=ci_cmd_nightly_report
@@ -2144,7 +2144,7 @@ ci_cmd_plan_matrix() {
     _ci_docs_only "${changed[@]}" || drc=$?
     case "${drc}" in 0) docs_only=true ;; 1) ;; *) return 2 ;; esac
     local service platform include='[]' any=false resolved paction pident pimpact runner authed=false test_services=''
-    local runners='[]' any_runner=false pdig vrc pairs=""
+    local runners='[]' any_runner=false pdig vrc pairs="" native
     local _ci_plan_ids=""
     local sot_changed=false f path_cand rc plats unknown=""
     # What: SOT change makes every target id candidate.
@@ -2295,7 +2295,8 @@ ci_cmd_plan_matrix() {
             ci_log "[CI-INFO-PLAN-0015]" "service=\"${service}\" platform=\"${platform}\" digest=\"${pdig}\" action=no-runner reason=\"digest already verified; scan and accept only\""
             continue
         fi
-        runners="$(_ci_matrix_append "${runners}" service="${service}" arch="${platform##*/}" runner="${runner}" platform="${platform}")" || return 2
+        native="$(_ci_platform_field "${platform}" native "[CI-ERROR-PLAN-0025]" "service=\"${service}\" reason=\"no native flag for platform\"")" || return 2
+        runners="$(_ci_matrix_append "${runners}" service="${service}" arch="${platform##*/}" runner="${runner}" platform="${platform}" native="${native}")" || return 2
         any_runner=true
         [ "${svc_type}" != rust ] || rust_audit=true
     done <<< "${pairs}"
@@ -6332,21 +6333,46 @@ _ci_sccache_env() {
     unset SCCACHE_SERVER_UDS
 }
 
-# What: args of the docker:// GHA runtime export step.
-# Why: run steps never get the cache token; kill-bounded.
-# From: Issue #1683 | PR #1858
-ci_cmd_gha_runtime_args() {
-    local t args
-    t="$(_ci_variable CI_GHA_RUNTIME_EXPORT_TIMEOUT)" || return 2
-    case "${t}" in
-        ''|*[!0-9]*)
-            ci_log "[CI-ERROR-CACHE-0009]" "value=\"${t}\" reason=\"CI_GHA_RUNTIME_EXPORT_TIMEOUT must be whole seconds\""
-            return 2
-            ;;
-    esac
-    args="-s KILL ${t} /bin/sh -c \"env | grep -E '^ACTIONS_(RESULTS_URL|RUNTIME_TOKEN)=' >> \$GITHUB_ENV\""
-    _ci_step_output "[CI-ERROR-CACHE-0010]" args "${args}" || return 2
-    printf '%s\n' "${args}"
+# What: run a ci.sh command; native: in build-tools.
+# Why: a native job starts its build-tools image once.
+# From: Issue #1683 | PR #1984
+ci_cmd_build_tools_run() {
+    local ref="${CI_BUILD_TOOLS_IMAGE:-}" min="${CI_BUILD_TOOLS_RUN_MINUTES:-}" name
+    local -a envs=()
+    if [ "${CI_BUILD_TOOLS_NATIVE:-}" != true ]; then
+        ci_main "$@"
+        return
+    fi
+    if [[ ! "${ref}" =~ @sha256:[0-9a-f]{64}$ ]]; then
+        ci_log "[CI-ERROR-BUILDTOOLS-0027]" "got=\"${ref}\" reason=\"CI_BUILD_TOOLS_IMAGE is no digest ref; FAIL CLOSED\""
+        return 2
+    fi
+    if [[ ! "${min}" =~ ^[1-9][0-9]*$ ]]; then
+        ci_log "[CI-ERROR-BUILDTOOLS-0028]" "got=\"${min}\" reason=\"CI_BUILD_TOOLS_RUN_MINUTES must be positive whole minutes\""
+        return 2
+    fi
+    # What: job values by name; docker reads each value.
+    # Why: no value lands in argv or in a file.
+    # From: Issue #1683 | PR #1984
+    for name in $(compgen -e); do
+        case "${name}" in
+            CI_BUILD_TOOLS_NATIVE) ;;
+            GITHUB_* | RUNNER_* | ACTIONS_* | CI_* | SCCACHE_* | GH_TOKEN) envs+=(-e "${name}") ;;
+        esac
+    done
+    # What: registry login with the job token for the pull.
+    # Why: a native job has no container credentials.
+    # From: Issue #1683 | PR #1984
+    if ! printf '%s' "${CI_GIT_TOKEN:-}" | docker login "${ref%%/*}" -u "${GITHUB_ACTOR:-}" --password-stdin; then
+        ci_log "[CI-ERROR-BUILDTOOLS-0030]" "registry=\"${ref%%/*}\" reason=\"registry login for the build-tools pull failed\""
+        return 2
+    fi
+    ci_log "[CI-INFO-BUILDTOOLS-0029]" "image=\"${ref}\" command=\"$*\" kill_after_s=$((min * 60))"
+    docker run --rm --network host \
+        -v /var/run/docker.sock:/var/run/docker.sock \
+        -v "${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}" -v "${RUNNER_TEMP}:${RUNNER_TEMP}" \
+        -w "${GITHUB_WORKSPACE}" "${envs[@]}" "${ref}" \
+        timeout -s KILL "$((min * 60))" bash .github/scripts/ci.sh "$@"
 }
 
 # What: kill timeout (s) of a docker run/exec CI command.
@@ -16693,10 +16719,10 @@ ci_main() {
         ci_log "[CI-ERROR-CORE-0002]" "command=\"${command}\" reason=\"unknown subcommand\" known=\"${!CI_DISPATCH[*]}\""
         return 2
     fi
-    # What: run the lookup before temp, proxy, manifest.
-    # Why: a git hook has no manifest, temp root or network.
+    # What: run these before temp, proxy, manifest.
+    # Why: a git hook or a native host has no manifest.
     # From: Issue #1683 | PR #1912
-    case "${command}" in have-command) "${fn}" "$@"; return "$?" ;; esac
+    case "${command}" in have-command | build-tools-run) "${fn}" "$@"; return "$?" ;; esac
     # What: every command logs its time from here on.
     # Why: AG-INT-002 for every subcommand.
     # From: Issue #1683 | PR #1858

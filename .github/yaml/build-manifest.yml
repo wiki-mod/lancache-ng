@@ -409,6 +409,8 @@ github_actions:
     uses: anthropics/claude-code-action
   docker-login:
     uses: docker/login-action
+  github-script:
+    uses: actions/github-script
 
 # What: the runtime group id the containers share.
 # Why: ci.sh bakes it into each image; one owner.
@@ -1471,11 +1473,16 @@ platform_arch:
   # From: Issue #1683 | PR #1912
   amd64:
     apk: x86_64
+    # What: true = host job, build-tools by docker run.
+    # Why: JS actions run in Alpine on x64 only.
+    # From: Issue #1683 | PR #1984
+    native: false
     runner: ubuntu-latest
     runner_self_hosted: lancache-heavy
     rust_target: x86_64-alpine-linux-musl
   arm64:
     apk: aarch64
+    native: true
     runner: ubuntu-24.04-arm
     runner_self_hosted: ubuntu-24.04-arm
     rust_target: aarch64-alpine-linux-musl
@@ -1876,10 +1883,6 @@ ci_variables:
   # Why: distcc, ccache and smoke read one compiler list.
   # From: Issue #1683 | PR #1858
   CI_TOOLCHAIN_COMPILERS: CC=cc GCC=gcc CXX=c++ GXX=g++
-  # What: kill timeout (s) of the GHA runtime export step.
-  # Why: AG-CI-016: every container command is bounded.
-  # From: Issue #1683 | PR #1858
-  CI_GHA_RUNTIME_EXPORT_TIMEOUT: 30
   # What: kill timeout (s) of a docker run/exec CI command.
   # Why: AG-CI-016 needs an unignorable kill timeout.
   # From: Issue #1683 | PR #1858
