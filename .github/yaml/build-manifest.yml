@@ -153,6 +153,11 @@ services:
       - dns-http=/usr/sbin/pdns_recursor,--config-dir=@CONFIG_DIR@/dns,--config-name=http,--daemon=no
       - dns-https=/usr/sbin/pdns_recursor,--config-dir=@CONFIG_DIR@/dns,--config-name=https,--daemon=no
       - snmpd=/usr/sbin/snmpd,-f,-C,-c,@SNMPD_CONF_FILE@
+    # What: start script lines before openrc-init.
+    # Why: stale OpenRC state blocks the services.
+    # From: Issue #1683 | PR #1980
+    init_pre:
+      - "rm -rf '@OPENRC_STATE_DIR@'"
     # What: start_pre: wait for the ui config; seed the DB.
     # Why: a fresh stack has no config and no PowerDNS DB.
     # From: Issue #1683 | PR #1980
@@ -190,6 +195,13 @@ services:
       - kea:kea-dhcp-ddns=/usr/sbin/kea-dhcp-ddns,-c,@KEA_DDNS_CONF_FILE@
       - dnsmasq-proxy:dnsmasq=/usr/sbin/dnsmasq,-k,-C,@DNSMASQ_CONF_FILE@
       - dnsmasq-relay:dnsmasq=/usr/sbin/dnsmasq,-k,-C,@DNSMASQ_CONF_FILE@
+    # What: start script lines before openrc-init.
+    # Why: /run is tmpfs; stale state and pids go.
+    # From: Issue #1683 | PR #1980
+    init_pre:
+      - "rm -rf '@OPENRC_STATE_DIR@'; rm -f '@KEA_SOCKET_DIR@'/*.pid"
+      - "mkdir -p '@KEA_SOCKET_DIR@'; chmod @KEA_SOCKET_DIR_MODE@ '@KEA_SOCKET_DIR@'"
+      - 'm="$(cat ''@DHCP_MODE_FILE@'' 2>/dev/null)"; set -- "${m:-@DHCP_MODE@}"'
     final_base: alpine
     packages:
       - openrc
@@ -1009,6 +1021,7 @@ runtime:
     - OPENRC_RESPAWN_DELAY=2
     - OPENRC_OUTPUT_LOG=/proc/1/fd/1
     - OPENRC_ERROR_LOG=/proc/1/fd/2
+    - LANCACHE_INIT_FILE=/usr/local/bin/lancache-init
     - HUP_OWNERS=proxy ui
     - NGINX_CONF_DIR=@CONFIG_DIR@/proxy
     - DNSMASQ_CONF_FILE=@CONFIG_DIR@/dhcp/dnsmasq.conf

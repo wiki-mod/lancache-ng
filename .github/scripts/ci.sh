@@ -56,6 +56,7 @@ CI_ARG_CRATES=RUST_CRATES
 CI_ARG_TARGET=MUSL_TARGET
 CI_ARG_PROCESSES=LANCACHE_PROCESSES
 CI_ARG_PROCESS_PRE=LANCACHE_PROCESS_PRE
+CI_ARG_INIT_PRE=LANCACHE_INIT_PRE
 CI_ARG_GID=LANCACHE_RUNTIME_GID
 CI_ARG_IMAGE_SETUP=IMAGE_SETUP
 CI_ARG_DEFAULTS=LANCACHE_RUNTIME_DEFAULTS
@@ -67,7 +68,7 @@ CI_ARG_SCHEMA=LANCACHE_RUNTIME_SCHEMA
 # What: SOT keys ci.sh openrc-setup reads in an image.
 # Why: the Dockerfile only names the command, not keys.
 # From: Issue #1683
-CI_OPENRC_KEYS="OPENRC_RC_CONF OPENRC_RC_SETTINGS OPENRC_INIT_DIR OPENRC_RUNLEVEL_DIR OPENRC_DROP_RUNLEVELS OPENRC_DEFAULT_RUNLEVEL OPENRC_SUPERVISOR OPENRC_RESPAWN_DELAY OPENRC_OUTPUT_LOG OPENRC_ERROR_LOG"
+CI_OPENRC_KEYS="OPENRC_RC_CONF OPENRC_RC_SETTINGS OPENRC_INIT_DIR OPENRC_RUNLEVEL_DIR OPENRC_DROP_RUNLEVELS OPENRC_DEFAULT_RUNLEVEL OPENRC_SUPERVISOR OPENRC_RESPAWN_DELAY OPENRC_OUTPUT_LOG OPENRC_ERROR_LOG RUN_DIR LANCACHE_INIT_FILE"
 
 # What: The ci.sh subcommand dispatch table.
 # Why: One table is membership, dispatch and error text.
@@ -7142,6 +7143,23 @@ ci_cmd_openrc_setup() {
             return 2
         fi
     done
+    # What: start script: seed the tmpfs /run, then init.
+    # Why: /run is tmpfs; the image dirs must be put back.
+    # From: Issue #1683 | PR #1980
+    local rd="${oset[RUN_DIR]}" init="${oset[LANCACHE_INIT_FILE]}" il
+    if ! out="$(tar -C "${rd}" -cpf "${rd}.tar" . 2>&1)"; then
+        ci_error "[CI-ERROR-OPENRC-0003]" "dir=\"${rd}\" reason=\"run dir not packed\"" "${out}"
+        return 2
+    fi
+    il="${LANCACHE_INIT_PRE:-}"
+    printf '%s\n' '#!/bin/sh' "tar -C '${rd}' -xpf '${rd}.tar'" > "${init}"
+    while IFS= read -r row; do
+        [ -n "${row}" ] || continue
+        _ci_fill "${row}" "${rows}" || return 2
+        printf '%s\n' "${REPLY}" >> "${init}"
+    done <<< "${il//|/$'\n'}"
+    printf '%s\n' 'exec openrc-init "$@"' >> "${init}"
+    chmod 0755 "${init}"
     printf 'openrc-setup=ok processes=%s\n' "$(wc -w <<< "${LANCACHE_PROCESSES:-}")"
 }
 
@@ -14169,7 +14187,7 @@ _ci_service_default_rows() {
             text+=$'\n'"${CI_OPENRC_KEYS}"
         fi
     fi
-    for field in processes process_pre setup default_args; do
+    for field in processes process_pre init_pre setup default_args; do
         part="$(_ci_target_list "${service}" "${field}")" || return 2
         text+=$'\n'"${part}"
     done
@@ -14286,6 +14304,11 @@ _ci_service_build_args() {
     # From: Issue #1683 | PR #1980
     val="$(_ci_target_list "${service}" process_pre)" || return 2
     [ -z "${val}" ] || out="${out}${prefix}${CI_ARG_PROCESS_PRE}=${val//$'\n'/|}"$'\n'
+    # What: SOT start script lines, "|"-joined.
+    # Why: openrc-setup writes them before openrc-init.
+    # From: Issue #1683
+    val="$(_ci_target_list "${service}" init_pre)" || return 2
+    [ -z "${val}" ] || out="${out}${prefix}${CI_ARG_INIT_PRE}=${val//$'\n'/|}"$'\n'
     # What: the SOT runtime gid the images share.
     # Why: the Dockerfiles bake it; compose names none.
     # From: Issue #1683 | PR #1912
