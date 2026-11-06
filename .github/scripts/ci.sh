@@ -7087,7 +7087,7 @@ ci_cmd_image_setup() {
 # From: Issue #1683
 ci_cmd_openrc_setup() {
     local rows="${LANCACHE_RUNTIME_DEFAULTS:-}" row k f out n
-    local level name cmd args idir rdir
+    local level name cmd args idir rdir pl
     local -a kv=()
     local -A orc=() orc_pre=()
     rows="${rows//|/$'\n'}"
@@ -7113,10 +7113,11 @@ ci_cmd_openrc_setup() {
         fi
     done
     for k in ${orc[OPENRC_DROP_RUNLEVELS]}; do rm -f "${rdir:?}/${k}"/*; done
+    pl="${LANCACHE_PROCESS_PRE:-}"
     while IFS= read -r row; do
         [[ "${row}" == *=* ]] || continue
         orc_pre["${row%%=*}"]="${row#*=}"
-    done <<< "${LANCACHE_PROCESS_PRE//|/$'\n'}"
+    done <<< "${pl//|/$'\n'}"
     for row in ${LANCACHE_PROCESSES:-}; do
         level="${orc[OPENRC_DEFAULT_RUNLEVEL]}"
         if [[ "${row%%=*}" == *:* ]]; then level="${row%%:*}"; row="${row#*:}"; fi
