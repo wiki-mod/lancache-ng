@@ -10369,7 +10369,7 @@ _ci_release_tag_kind() {
 }
 
 # What: rc 0 plain vX.Y.Z, 1 other tag, 2 SOT error.
-# Why: an SOT error must never read as "not stable".
+# Why: an SOT error must never read as "not a release".
 # From: Issue #1683 | PR #1858
 _ci_release_tag_final() {
     local kind rc=0
@@ -10516,7 +10516,7 @@ ci_cmd_release_notes() {
     _ci_release_changes "${tag}"
 }
 
-# What: Add a stable tag's change list to CHANGELOG.md.
+# What: Add a release tag's change list to CHANGELOG.md.
 # Why: release writes CHANGELOG; no PR edits it by hand.
 # From: Issue #894 | PR #1858
 ci_cmd_release_changelog() {
@@ -10526,7 +10526,7 @@ ci_cmd_release_changelog() {
     file="$(_ci_variable CI_CHANGELOG)" || return 2
     _ci_release_tag_final "${tag}" || {
         [ "$?" -eq 1 ] || return 2
-        printf 'release-changelog=skip tag=%s reason="not a stable vX.Y.Z tag"\n' "${tag}"
+        printf 'release-changelog=skip tag=%s reason="not a vX.Y.Z release tag"\n' "${tag}"
         return 0
     }
     head="## [${tag#"${tag%%[0-9]*}"}]"
@@ -10590,7 +10590,7 @@ _ci_release_variable_get() {
     printf '%s\n' "${out}"
 }
 
-# What: set PROJECT_RELEASE_VERSION to a stable tag.
+# What: set PROJECT_RELEASE_VERSION to a release tag.
 # Why: AG-SEC-004: the version is a repo variable.
 # From: Issue #1683 | PR #1858
 ci_cmd_release_variable() {
@@ -10598,7 +10598,7 @@ ci_cmd_release_variable() {
     [ -n "${tag}" ] || { ci_log "[CI-ERROR-RELEASE-0059]" "reason=\"tag arg required\""; return 2; }
     _ci_release_tag_final "${tag}" || {
         [ "$?" -eq 1 ] || return 2
-        printf 'release-variable=skip tag=%s reason="not a stable vX.Y.Z tag"\n' "${tag}"
+        printf 'release-variable=skip tag=%s reason="not a vX.Y.Z release tag"\n' "${tag}"
         return 0
     }
     repo="$(_ci_env_required GITHUB_REPOSITORY)" || return 2
