@@ -5808,11 +5808,32 @@ _ci_pr_labels_for() {
     fi
 }
 
-# What: add the path labels to the current pull request.
+# What: the one same-repo issue PR $2 closes, as JSON.
+# Why: AG-GH-008 mirrors only it; none or many: empty.
+# From: Issue #1683 | PR #1984
+_ci_pr_closed_issue() {
+    local repo="$1" body refs ref out
+    local -a issues=()
+    body="$(_ci_capture 0 jq -r '.body // ""' <<< "$2")" || return 2
+    refs="$(_ci_linked_refs "${body}")" || return 2
+    if [ "${refs}" = "${refs%%$'\n'*}" ]; then refs=""; else refs="${refs#*$'\n'}"; fi
+    while IFS= read -r ref; do
+        [ -n "${ref}" ] || continue
+        if [ "${ref%#*}" = "" ] || [ "${ref%#*}" = "${repo,,}" ]; then
+            issues+=("${ref##*#}")
+        fi
+    done <<< "${refs}"
+    [ "${#issues[@]}" -eq 1 ] || return 0
+    out="$(_ci_run "[CI-ERROR-PRMETA-0001]" "issue=\"${issues[0]}\" reason=\"closed issue not read\"" \
+        gh api "repos/${repo}/issues/${issues[0]}")" || return 2
+    _ci_capture 0 jq -c 'select(.pull_request == null)' <<< "${out}"
+}
+
+# What: add path labels and the closed issue's labels.
 # Why: AG-GH-008 labels; SOT owns the path->label rules.
 # From: Issue #1683 | PR #1858
 ci_cmd_pr_labels() {
-    local labels l repo out stored
+    local labels l repo out stored issue
     local -a files=() args=() missing=()
     if _ci_skip_outside_pr pr-labels; then
         return 0
@@ -5827,12 +5848,23 @@ ci_cmd_pr_labels() {
     fi
     _ci_collect_changed files || return 2
     labels="$(_ci_pr_labels_for "${files[@]}")" || return 2
+    repo="$(_ci_repo)" || return 2
+    # What: the one closed issue adds its own labels.
+    # Why: AG-GH-008: mirror them; Refs #N never counts.
+    # From: Issue #1683 | PR #1984
+    out="$(_ci_run "[CI-ERROR-PRLABELS-0004]" "pr=\"${PR_NUMBER:-}\" reason=\"PR not read\"" \
+        gh api "repos/${repo}/issues/${PR_NUMBER:-}")" || return 2
+    issue="$(_ci_pr_closed_issue "${repo}" "${out}")" || return 2
+    if [ -n "${issue}" ]; then
+        issue="$(_ci_capture 0 jq -r '.labels[].name' <<< "${issue}")" || return 2
+        labels="$(_ci_capture 0 env LC_ALL=C sort -u <<< "${labels:+${labels}$'\n'}${issue}")" || return 2
+        labels="${labels#$'\n'}"
+    fi
     if [ -z "${labels}" ]; then
         printf 'pr-labels=none changed=%s\n' "${#files[@]}"
         return 0
     fi
     while IFS= read -r l; do args+=(-f "labels[]=${l}"); done <<< "${labels}"
-    repo="$(_ci_repo)" || return 2
     out="$(_ci_run "[CI-ERROR-PRLABELS-0002]" "pr=\"${PR_NUMBER:-}\" labels=\"${labels//$'\n'/ }\" reason=\"labels not added\"" \
         gh api -X POST "repos/${repo}/issues/${PR_NUMBER:-}/labels" "${args[@]}")" || return 2
     # What: each added label is in the label list returned
@@ -5853,8 +5885,7 @@ ci_cmd_pr_labels() {
 # Why: AG-GH-008 wants it at open; a set one stays.
 # From: Issue #1683 | PR #1984
 ci_cmd_pr_milestone() {
-    local repo number out cur got body refs ref from
-    local -a issues=()
+    local repo number out cur got issue from
     if _ci_skip_outside_pr pr-milestone; then
         return 0
     fi
@@ -5878,21 +5909,12 @@ ci_cmd_pr_milestone() {
     # What: one closed issue gives its own milestone.
     # Why: AG-GH-008: mirror it; Refs #N never counts.
     # From: Issue #1683 | PR #1984
-    body="$(_ci_capture 0 jq -r '.body // ""' <<< "${out}")" || return 2
-    refs="$(_ci_linked_refs "${body}")" || return 2
-    if [ "${refs}" = "${refs%%$'\n'*}" ]; then refs=""; else refs="${refs#*$'\n'}"; fi
-    while IFS= read -r ref; do
-        [ -n "${ref}" ] || continue
-        if [ "${ref%#*}" = "" ] || [ "${ref%#*}" = "${repo,,}" ]; then
-            issues+=("${ref##*#}")
-        fi
-    done <<< "${refs}"
     from=sot
-    if [ "${#issues[@]}" -eq 1 ]; then
-        out="$(_ci_run "[CI-ERROR-PRMILESTONE-0005]" "issue=\"${issues[0]}\" reason=\"closed issue not read\"" \
-            gh api "repos/${repo}/issues/${issues[0]}")" || return 2
-        cur="$(_ci_capture 0 jq -r 'select(.pull_request == null) | .milestone.number // empty' <<< "${out}")" || return 2
-        [ -z "${cur}" ] || { number="${cur}"; from="issue-${issues[0]}"; }
+    out="$(_ci_pr_closed_issue "${repo}" "${out}")" || return 2
+    if [ -n "${out}" ]; then
+        cur="$(_ci_capture 0 jq -r '.milestone.number // empty' <<< "${out}")" || return 2
+        issue="$(_ci_capture 0 jq -r '.number' <<< "${out}")" || return 2
+        [ -z "${cur}" ] || { number="${cur}"; from="issue-${issue}"; }
     fi
     out="$(_ci_run "[CI-ERROR-PRMILESTONE-0003]" "pr=\"${PR_NUMBER}\" milestone=\"${number}\" reason=\"milestone not set\"" \
         gh api -X PATCH "repos/${repo}/issues/${PR_NUMBER}" -F milestone="${number}")" || return 2
