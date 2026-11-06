@@ -566,6 +566,14 @@ jobs:
           CHANGED_FILES: ${{ steps.changed.outputs.file }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bash .github/scripts/ci.sh pr-labels
+      # What: set the SOT milestone when the PR has none.
+      # Why: PAT event reruns checks, which then see it.
+      # From: Issue #1683 | PR #1984
+      - name: Set the PR milestone
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.PROJECT_AUTOMATION_PAT }}
+        run: bash .github/scripts/ci.sh pr-milestone
       # What: add a new issue or PR to the board (step PAT).
       # Why: GITHUB_TOKEN cannot write org Projects v2.
       # From: Issue #1683 | PR #1858

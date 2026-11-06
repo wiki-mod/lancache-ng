@@ -76,7 +76,7 @@ declare -A CI_DISPATCH=(
     [assemble-stack]=ci_cmd_assemble_stack [test-stack]=ci_cmd_test_stack [nightly-report]=ci_cmd_nightly_report
     [validate]=ci_cmd_validate [result-gate]=ci_cmd_result_gate [promote]=ci_cmd_promote [promote-ref]=ci_cmd_promote_ref [channel-checkout]=ci_cmd_channel_checkout [channel-matrix]=ci_cmd_channel_matrix [channel-check]=ci_cmd_channel_check [channel-report]=ci_cmd_channel_report [release-validation]=_ci_release_validation_valid [release-ref]=_ci_release_ref
     [release-publish]=ci_cmd_release_publish [release-images]=ci_cmd_release_images [release-sbom-stack]=ci_cmd_release_sbom_stack [release-vex]=ci_cmd_release_vex [cut-release-tag]=ci_cmd_cut_release_tag [release-notes]=ci_cmd_release_notes [release-changelog]=ci_cmd_release_changelog [release-variable]=ci_cmd_release_variable
-    [gc]=ci_cmd_gc [gc-refs]=ci_cmd_gc_refs [check]=ci_cmd_check [close-linked-issues]=ci_cmd_close_linked_issues [pr-labels]=ci_cmd_pr_labels [board-add]=ci_cmd_board_add
+    [gc]=ci_cmd_gc [gc-refs]=ci_cmd_gc_refs [check]=ci_cmd_check [close-linked-issues]=ci_cmd_close_linked_issues [pr-labels]=ci_cmd_pr_labels [pr-milestone]=ci_cmd_pr_milestone [board-add]=ci_cmd_board_add
     [welcome]=ci_cmd_welcome [version]=ci_cmd_version [docker-daemon-config]=ci_cmd_docker_daemon_config [runner-host]=ci_cmd_runner_host
     [have-command]=ci_cmd_have_command [pr-green-mark]=ci_cmd_pr_green_mark [pr-meta]=ci_cmd_pr_meta
 )
@@ -5746,6 +5746,44 @@ ci_cmd_pr_labels() {
         return 2
     fi
     printf 'pr-labels=added labels=%s\n' "${labels//$'\n'/,}"
+}
+
+# What: set the SOT milestone on a PR that has none.
+# Why: AG-GH-008 wants it at open; a set one stays.
+# From: Issue #1683 | PR #1984
+ci_cmd_pr_milestone() {
+    local repo number out cur got
+    if _ci_skip_outside_pr pr-milestone; then
+        return 0
+    fi
+    if [ "${PR_IS_FORK:-false}" = true ] || [ -z "${GH_TOKEN:-}" ]; then
+        printf 'pr-milestone=NOT-RUN reason="no project token (fork or unset); set by hand (AG-GH-008)"\n'
+        return 0
+    fi
+    number="$(_ci_block_entry_field pr_policy "" milestone_number)" || return 2
+    if ! [[ "${number}" =~ ^[0-9]+$ ]]; then
+        ci_log "[CI-ERROR-PRMILESTONE-0001]" "got=\"${number}\" reason=\"no numeric SOT pr_policy.milestone_number\""
+        return 2
+    fi
+    repo="$(_ci_repo)" || return 2
+    out="$(_ci_run "[CI-ERROR-PRMILESTONE-0002]" "pr=\"${PR_NUMBER:-}\" reason=\"PR milestone not read\"" \
+        gh api "repos/${repo}/issues/${PR_NUMBER:-}")" || return 2
+    cur="$(_ci_capture 0 jq -r '.milestone.number // empty' <<< "${out}")" || return 2
+    if [ -n "${cur}" ]; then
+        printf 'pr-milestone=kept milestone=%s\n' "${cur}"
+        return 0
+    fi
+    out="$(_ci_run "[CI-ERROR-PRMILESTONE-0003]" "pr=\"${PR_NUMBER}\" milestone=\"${number}\" reason=\"milestone not set\"" \
+        gh api -X PATCH "repos/${repo}/issues/${PR_NUMBER}" -F milestone="${number}")" || return 2
+    # What: the set milestone is in the PATCH answer.
+    # Why: AG-WF-031: every GitHub write is read back
+    # From: Issue #1683 | PR #1984
+    got="$(_ci_capture 0 jq -r '.milestone.number // empty' <<< "${out}")" || return 2
+    if [ "${got}" != "${number}" ]; then
+        ci_error "[CI-ERROR-PRMILESTONE-0004]" "pr=\"${PR_NUMBER}\" want=\"${number}\" got=\"${got}\" reason=\"milestone not on the PR after the write\"" "${out}"
+        return 2
+    fi
+    printf 'pr-milestone=set milestone=%s\n' "${number}"
 }
 
 # What: put the new PR or issue on the SOT project board.
