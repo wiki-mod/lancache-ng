@@ -243,7 +243,7 @@ impl App {
         ctx.insert("langs", &langs);
         let html = self.tera.render(name, &ctx).map_err(|e| {
             eprintln!("ui: template {name}: {e:?}");
-            format!("template {name} failed, see the log")
+            tr("err_template").replace("{name}", name)
         })?;
         Ok(Html(html).into_response())
     }
@@ -273,7 +273,7 @@ impl Csrf {
     fn check(&self, form: &Fields) -> Result<(), Fail> {
         match form.get(CSRF_FIELD) {
             Some(t) if self.matches(t) => Ok(()),
-            _ => Err(Fail(StatusCode::FORBIDDEN, "CSRF token mismatch".into())),
+            _ => Err(Fail(StatusCode::FORBIDDEN, tr("err_csrf"))),
         }
     }
 
@@ -284,7 +284,7 @@ impl Csrf {
         let given = headers.get("x-csrf-token").and_then(|v| v.to_str().ok());
         match given {
             Some(t) if self.matches(t) => Ok(()),
-            _ => Err(Fail(StatusCode::FORBIDDEN, "CSRF token mismatch".into())),
+            _ => Err(Fail(StatusCode::FORBIDDEN, tr("err_csrf"))),
         }
     }
 }
@@ -661,7 +661,7 @@ async fn drop_old_zones(s: &Settings, before: &[String]) {
             Err(_) => continue,
         };
         let done = if own {
-            Err("it still holds records".to_string())
+            Err(tr("err_zone_has_records"))
         } else {
             api.delete_zone(zone).await
         };
@@ -893,7 +893,7 @@ fn zone_snapshots_cli(s: &Settings) -> Result<(), String> {
 // From: Issue #1683 | PR #1980
 async fn rollback(s: &Settings, zone: &str, id: &str) -> Result<(), String> {
     if !snapshot_zones(s)?.iter().any(|z| z == zone) {
-        return Err(format!("zone {zone} keeps no snapshots"));
+        return Err(tr("err_zone_no_snapshots").replace("{zone}", zone));
     }
     let body = zone_store(s, zone)?.read(id)?;
     let rows: Vec<Value> = serde_json::from_slice(&body).map_err(|e| e.to_string())?;
@@ -1067,7 +1067,7 @@ async fn dns_action(
         "UI_ROUTE_PTR_ADD" | "UI_ROUTE_PTR_REMOVE" => ptr(&s, op == "UI_ROUTE_PTR_ADD", &get).await,
         "UI_ROUTE_ZONE_ROLLBACK" => rollback(&s, &get("zone"), &get("snapshot_id")).await,
         "UI_ROUTE_TSIG_ROTATE" => rotate_tsig(&app).await,
-        _ => Err(format!("unknown DNS action {op}")),
+        _ => Err(tr("err_unknown_dns_action").replace("{op}", op)),
     };
     finish(result, &s.text("UI_PAGE_DOMAINS")?)
 }
@@ -1116,7 +1116,7 @@ async fn record(
     let zone = lan_zone(s)?;
     let kind = get("record_type");
     if !s.list("DNS_LAN_RECORD_TYPES").contains(&kind) {
-        return Err(format!("record type {kind} is not allowed"));
+        return Err(tr("err_record_type").replace("{kind}", &kind));
     }
     let name = in_zone(&get("name"), &zone);
     let mut contents = Vec::new();
@@ -1132,7 +1132,7 @@ async fn record(
         let max = s.uint("DNS_RECORD_TTL_MAX")?;
         ttl = get("ttl").parse::<u32>().unwrap_or(0);
         if ttl == 0 || u64::from(ttl) > max {
-            return Err(format!("TTL must be 1 to {max}"));
+            return Err(tr("err_ttl_range").replace("{max}", &max.to_string()));
         }
     }
     let api = pdns_api(s)?;
@@ -1695,7 +1695,7 @@ fn subnet_from(get: &(dyn Fn(&str) -> String + Sync), id: u64, old: Option<&Valu
 // Why: edits target a subnet by id, not position.
 fn subnet_mut(list: &mut [Value], id: u64) -> Result<&mut Value, String> {
     let found = list.iter_mut().find(|x| x["id"].as_u64() == Some(id));
-    found.ok_or_else(|| format!("no subnet {id}"))
+    found.ok_or_else(|| tr("err_no_subnet").replace("{id}", &id.to_string()))
 }
 
 // What: SOT keys of the proxy and relay forms.
@@ -1807,7 +1807,7 @@ async fn kea_action(
             let cfg: Value = serde_json::from_slice(&body).map_err(|e| e.to_string())?;
             kea_api(s)?.set_config(cfg).await
         }
-        _ => Err(format!("unknown DHCP action {op}")),
+        _ => Err(tr("err_unknown_dhcp_action").replace("{op}", op)),
     }
 }
 
@@ -1929,7 +1929,7 @@ async fn graph(
     let s = app.settings();
     let all = lancache_ng::rrd::all(&s)?;
     let Some(mut g) = all.into_iter().find(|g| g.name == name) else {
-        return Err(Fail(StatusCode::NOT_FOUND, "no such graph".into()));
+        return Err(Fail(StatusCode::NOT_FOUND, tr("err_no_graph")));
     };
     g.title = graph_title(&g.title);
     let draw = move || lancache_ng::rrd::png(&s, &g, &q.range, q.dark == 1);
@@ -2245,7 +2245,7 @@ async fn container_of(app: &App, s: &Settings, service: &str) -> Result<String, 
         .find(|c| c["Labels"][docker::SERVICE_LABEL].as_str() == Some(service));
     let name = hit.and_then(|c| c["Names"][0].as_str());
     name.map(|n| n.trim_start_matches('/').to_string())
-        .ok_or_else(|| format!("no container for {service}"))
+        .ok_or_else(|| tr("err_no_container").replace("{service}", service))
 }
 
 // What: run a command in a service container.
@@ -2280,14 +2280,14 @@ async fn service_action(
 ) -> Page {
     csrf.check_header(&headers)?;
     if action != "restart" && action != "reload" {
-        return Err(bad_request("action must be restart or reload"));
+        return Err(bad_request(tr("err_action_restart_reload")));
     }
     let s = app.settings();
     if !s
         .list("UI_SERVICES")
         .contains(&format!("{container}:{program}"))
     {
-        return Err(Fail(StatusCode::NOT_FOUND, "program not offered".into()));
+        return Err(Fail(StatusCode::NOT_FOUND, tr("err_program_not_offered")));
     }
     // What: a signal program reloads by container HUP.
     // Why: "nginx -s reload" read the image default conf.
@@ -2295,7 +2295,7 @@ async fn service_action(
     let id = format!("{container}:{program}");
     if s.list("UI_SIGNAL_PROGRAMS").contains(&id) {
         if action != "reload" {
-            return Err(bad_request("this program only reloads"));
+            return Err(bad_request(tr("err_program_reload_only")));
         }
         let name = container_of(&app, &s, &container)
             .await
@@ -2317,10 +2317,7 @@ async fn service_action(
         .await
         .map_err(|e| Fail(StatusCode::BAD_GATEWAY, e))?;
     if code != 0 {
-        return Err(Fail(
-            StatusCode::CONFLICT,
-            "program is not running in this mode".into(),
-        ));
+        return Err(Fail(StatusCode::CONFLICT, tr("err_program_not_running")));
     }
     let cmd = ["rc-service", program.as_str(), action.as_str()];
     let (code, out) = exec_in(&app, &s, &container, &cmd)
@@ -2991,7 +2988,7 @@ async fn container_state(
     let run = match want.state.as_str() {
         "running" => true,
         "stopped" => false,
-        _ => return Err(bad_request("state must be running or stopped")),
+        _ => return Err(bad_request(tr("err_state_running_stopped"))),
     };
     set_wanted(&app, &service, run)
         .await
