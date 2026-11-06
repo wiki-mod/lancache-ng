@@ -3344,7 +3344,21 @@ pub mod apply {
                 // Why: DoMe 06.11.: a toggle restarted dns.
                 // From: Issue #1683
                 Some(Action::Reload) if exec_cmds(exec, owner).next().is_some() => {
-                    reload_exec(api, &container_of(owner), exec, owner, limit).await
+                    let name = container_of(owner);
+                    match reload_exec(api, &name, exec, owner, limit).await {
+                        // What: a failed reload restarts the owner.
+                        // Why: 249: nginx ran with an old conf.
+                        // From: Issue #1683 | PR #1985
+                        Outcome::Failed(e) => {
+                            eprintln!("apply: {owner}: reload failed ({e}); restart");
+                            let a = Action::Restart;
+                            match api.act(&name, a, grace, limit).await {
+                                Ok(()) => Outcome::Done(a),
+                                Err(e) => Outcome::Failed(e),
+                            }
+                        }
+                        done => done,
+                    }
                 }
                 Some(Action::Reload) => {
                     let a = Action::Restart;
