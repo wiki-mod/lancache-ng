@@ -2067,6 +2067,10 @@ ci_variables:
   # Why: AG-GH-018: the mode is a value, default warn.
   # From: Issue #1683 | PR #1858
   PR_TITLE_LINT_MODE: warn
+  # What: debug mode (true|false): log all raw output.
+  # Why: DoMe: raw output of every command must show.
+  # From: Issue #1683 | PR #1984
+  PROJECT_DEBUG_MODE: "true"
 
 # What: runner host values: paths, ages, units, packages.
 # Why: AG-CI-016: ci.sh runner-host reads them; no copy.
@@ -2355,7 +2359,7 @@ repo_variables:
   # Why: GitHub-hosted runners have no LAN route.
   # From: Issue #1683 | PR #1858
   switch: PROJECT_SELFHOSTED_RUNNER_USAGE_CI
-  plain: [CARGO_BUILD_JOBS, PROJECT_CARGO_LTO, PROJECT_CARGO_CODEGENUNIT, PROJECT_NIGHTLY_REF, PROJECT_SELFHOSTED_RUNNER_USAGE_CI, SCCACHE_REDIS_MODE, CI_RUST_VALIDATION, PR_TITLE_LINT_MODE]
+  plain: [CARGO_BUILD_JOBS, PROJECT_CARGO_LTO, PROJECT_CARGO_CODEGENUNIT, PROJECT_NIGHTLY_REF, PROJECT_SELFHOSTED_RUNNER_USAGE_CI, SCCACHE_REDIS_MODE, CI_RUST_VALIDATION, PR_TITLE_LINT_MODE, PROJECT_DEBUG_MODE]
   # What: values with LAN addresses; set only self-hosted.
   # Why: a GitHub-hosted log must show no LAN address.
   # From: Issue #1683 | PR #1858

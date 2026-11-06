@@ -51,6 +51,7 @@ env:
   SCCACHE_REDIS_MODE: ${{ vars.SCCACHE_REDIS_MODE }}
   CI_RUST_VALIDATION: ${{ vars.CI_RUST_VALIDATION }}
   PR_TITLE_LINT_MODE: ${{ vars.PR_TITLE_LINT_MODE }}
+  PROJECT_DEBUG_MODE: ${{ vars.PROJECT_DEBUG_MODE }}
   # What: LAN values only when self-hosted runners run.
   # Why: a GitHub-hosted log must show no LAN address.
   # From: Issue #1683 | PR #1858

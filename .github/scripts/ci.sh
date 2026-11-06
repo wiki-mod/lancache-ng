@@ -180,7 +180,7 @@ _ci_git_run() {
 # Why: one owner for coded command errors and their raw.
 # From: Issue #1683 | PR #1858
 _ci_run() {
-    local okmax=0 strict="" ofile="" id ctx err out="" rc=0 t0
+    local okmax=0 strict="" ofile="" secret="" id ctx err out="" rc=0 t0 l
     # What: -m N: rc to N ok; -s: stderr fails; -o F: to F
     # Why: grep rc 1 is a miss; big trees skip bash strings
     # From: Issue #1683 | PR #1858
@@ -189,6 +189,7 @@ _ci_run() {
             -m) okmax="$2"; shift 2 ;;
             -s) strict=1; shift ;;
             -o) ofile="$2"; shift 2 ;;
+            -k) secret=1; shift ;;
             *) break ;;
         esac
     done
@@ -216,6 +217,14 @@ _ci_run() {
         out="$("$@" 2>"${err}")" || rc=$?
     fi
     _ci_timed_here "$1" || _ci_cmd_time "${t0}" "${rc}" "$@"
+    # What: -k: GitHub masks each stdout line before logs.
+    # Why: a per-run secret must not show in a public log.
+    # From: Issue #1683 | PR #1984
+    if [ -n "${secret}" ] && [ -n "${out}" ]; then
+        while IFS= read -r l; do
+            [ -z "${l}" ] || printf '::add-mask::%s\n' "${l}" >&"${_CI_CMD_FD:-2}"
+        done <<< "${out}"
+    fi
     if [ "${rc}" -gt "${okmax}" ] || { [ -n "${strict}" ] && [ -s "${err}" ]; }; then
         ci_error "${id}" "${ctx} cmd=\"$1\" rc=${rc}" "$(cat "${err}"; [ -z "${out}" ] || printf 'stdout:\n%s\n' "${out}")"
         [ -n "${RUNNER_TEMP:-}" ] || rm -f "${err}"
@@ -223,7 +232,51 @@ _ci_run() {
     fi
     [ ! -s "${err}" ] || cat "${err}" >&2
     [ -n "${RUNNER_TEMP:-}" ] || rm -f "${err}"
+    # What: debug mode also logs the raw stdout.
+    # Why: every raw output must be visible in the log.
+    # From: Issue #1683 | PR #1984
+    if [ "${_CI_DEBUG_MODE:-}" = true ] && [ -n "${out}" ]; then
+        ci_log "[CI-INFO-CORE-0161]" "cmd=\"$1\" stdout:" 2>&"${_CI_CMD_FD:-2}"
+        printf '%s\n' "${out}" >&"${_CI_CMD_FD:-2}"
+    fi
     [ -z "${out}" ] || printf '%s\n' "${out}"
+}
+
+# What: set the debug mode once per command run.
+# Why: SOT default true; the repo variable may change it.
+# From: Issue #1683 | PR #1984
+_CI_DEBUG_MODE=""
+_ci_debug_init() {
+    local v=""
+    if [ -f "${CI_MANIFEST}" ]; then
+        v="$(_ci_variable PROJECT_DEBUG_MODE)" || return 2
+    else
+        _ci_variable_env PROJECT_DEBUG_MODE v
+    fi
+    case "${v}" in
+        true)
+            _CI_DEBUG_MODE=true
+            # What: GitHub masks each set LAN value in the log.
+            # Why: a public log must show no LAN address.
+            # From: Issue #1683 | PR #1984
+            [ -f "${CI_MANIFEST}" ] || return 0
+            local lan n val
+            lan="$(_ci_required_field repo_variables self_hosted blocklist)" || return 2
+            for n in ${lan}; do
+                _ci_variable_env "${n}" val
+                [ -z "${val}" ] || printf '::add-mask::%s\n' "${val}" >&"${_CI_CMD_FD:-2}"
+            done
+            ;;
+        false) _CI_DEBUG_MODE=false ;;
+        '')
+            _CI_DEBUG_MODE=true
+            ci_log "[CI-INFO-CORE-0162]" "reason=\"no SOT and no PROJECT_DEBUG_MODE; debug on\""
+            ;;
+        *)
+            ci_log "[CI-ERROR-CORE-0163]" "got=\"${v}\" reason=\"PROJECT_DEBUG_MODE must be true or false\""
+            return 2
+            ;;
+    esac
 }
 
 # What: log every command: function, name, rc, time.
@@ -13301,7 +13354,12 @@ PROG
     # From: Issue #1683 | PR #1980
     tries="$(_ci_variable CI_VALIDATE_SNAPSHOT_POLL_ATTEMPTS)" || return 2
     pause="$(_ci_variable CI_VALIDATE_POLL_PAUSE)" || return 2
-    _ci_validate_poll "${tries}" "${pause}" _ci_validate_kea_cmd "${kbase}" "${kuser}" "${token}" '{"command":"config-get","service":["dhcp4"]}' > /dev/null || true
+    # What: the wait shows its raw output and its rc.
+    # Why: nothing is hidden; the next call decides.
+    # From: Issue #1683 | PR #1984
+    local prc=0
+    _ci_validate_poll "${tries}" "${pause}" _ci_validate_kea_cmd "${kbase}" "${kuser}" "${token}" '{"command":"config-get","service":["dhcp4"]}' >&2 || prc=$?
+    [ "${prc}" -eq 0 ] || ci_log "[CI-INFO-VALIDATE-0144]" "rc=${prc} reason=\"Kea agent wait ended without answer; the next call decides\""
     resp="$(_ci_capture 0 _ci_validate_kea_cmd "${kbase}" "${kuser}" "${token}" '{"command":"config-get","service":["dhcp4"]}')" || return 2
     _ci_kea_reply_check "[CI-ERROR-VALIDATE-0090]" "ip=\"${kip}\" reason=\"Kea control agent config-get did not return result 0\"" "${resp}" || return 1
     sid="$(_ci_capture 0 jq -r --arg s "${subnet}" ".[0].arguments.Dhcp4.subnet4[]? | select(.subnet == \$s) | .id" <<< "${resp}")" || return 2
@@ -16540,6 +16598,7 @@ ci_main() {
     # Why: readers then look fields up instead of rereading.
     # From: Issue #1683 | PR #1858
     [ ! -f "${CI_MANIFEST}" ] || _ci_sot_load || return 2
+    _ci_debug_init || return 2
     "${fn}" "$@"
 }
 
@@ -19450,7 +19509,7 @@ _ci_validation_env() {
             return 2
         fi
         read -ra cmd <<< "${row}"
-        v="$(_ci_run "[CI-ERROR-VALIDATE-0141]" "key=${k} reason=\"secret not generated\"" "${cmd[@]}")" || return 2
+        v="$(_ci_run -k "[CI-ERROR-VALIDATE-0141]" "key=${k} reason=\"secret not generated\"" "${cmd[@]}")" || return 2
         v="${v//$'\n'/}"
         if [ -z "${v}" ]; then
             ci_log "[CI-ERROR-VALIDATE-0142]" "key=\"${k}\" kind=\"${kind}\" reason=\"generator wrote nothing\""
