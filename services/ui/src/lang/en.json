@@ -68,6 +68,7 @@
   "custom_domains": "Custom domains",
   "custom_records_for_names_under_your": "Custom records for names under your local domain, for anything auto-discovery doesn't already cover.",
   "data_served": "Data served",
+  "date_and_time": "Date and time",
   "ddns_updates": "DDNS updates",
   "default_cdn": "Default CDN",
   "delete": "Delete",

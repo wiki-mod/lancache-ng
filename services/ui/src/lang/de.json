@@ -68,6 +68,7 @@
   "custom_domains": "Eigene Domains",
   "custom_records_for_names_under_your": "Eigene Einträge für Namen unter deiner lokalen Domain, für alles, was die automatische Erkennung nicht abdeckt.",
   "data_served": "Ausgelieferte Daten",
+  "date_and_time": "Datum und Uhrzeit",
   "ddns_updates": "DDNS-Updates",
   "default_cdn": "Standard-CDN",
   "delete": "Löschen",

@@ -17,6 +17,7 @@
 
   <div class="subtabs">
     <div class="subtab active" data-ch-tab="jobs">Jobs</div>
+    <div class="subtab" data-ch-tab="history">{{ t.history }}</div>
     <div class="subtab" data-ch-tab="steam">Steam</div>
   </div>
 
@@ -75,10 +76,21 @@
           {% endfor %}{% else %}{{ t.hamster_queued }}{% endif %}
         </td>
       </tr>
-      {% if j.history | length > 0 %}<tr><td colspan="6"><details><summary>{{ t.history }} ({{ j.history | length }})</summary><ul class="section-sub">{% for e in j.history | reverse %}{% set ek = "hamster_st_" ~ e.state %}<li><span data-unix="{{ e.at }}"></span> {{ t[ek] }}{% if e.reason %}: {{ e.reason }}{% endif %}</li>{% endfor %}</ul></details></td></tr>{% endif %}
       {% endfor %}
     </table>
     {% else %}<p class="section-sub">{{ t.no_jobs_yet }}</p>{% endif %}
+  </div>
+
+  {# What: history of all jobs, newest first. #}
+  {# Why: DoMe 06.11.: own tab, with date and time. #}
+  {# From: Issue #871 | PR #1985 #}
+  <div class="subtab5-panel" data-ch-panel="history">
+    <table class="table" id="hamster-history">
+      <tr><th>{{ t.date_and_time }}</th><th>Name</th><th>{{ t.state }}</th></tr>
+      {% if hamster %}{% for j in hamster.jobs %}{% for e in j.history %}{% set ek = "hamster_st_" ~ e.state %}
+      <tr data-at="{{ e.at }}"><td><span data-unix="{{ e.at }}"></span></td><td>{{ j.name }}</td><td>{{ t[ek] }}{% if e.reason %}: {{ e.reason }}{% endif %}</td></tr>
+      {% endfor %}{% endfor %}{% endif %}
+    </table>
   </div>
 
   <div class="subtab5-panel" data-ch-panel="steam">
@@ -122,8 +134,14 @@
     if (saved && document.querySelector('[data-ch-tab="' + saved + '"]')) { pickTab(saved); }
   } catch (err) { reportError(err); }
   document.querySelectorAll('[data-unix]').forEach(function (el) {
-    el.textContent = new Date(Number(el.dataset.unix) * 1000).toLocaleString();
+    el.textContent = new Date(Number(el.dataset.unix) * 1000).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'medium' });
   });
+  const hist = document.getElementById('hamster-history');
+  if (hist) {
+    Array.from(hist.querySelectorAll('tr[data-at]'))
+      .sort(function (a, b) { return Number(b.dataset.at) - Number(a.dataset.at); })
+      .forEach(function (r) { r.parentNode.appendChild(r); });
+  }
   // What: the time field opens its calendar on click.
   // Why: DoMe 05.11.: a click on "tt" opened nothing.
   // From: Issue #1683 | PR #1980
@@ -212,7 +230,13 @@
           });
           const b = document.createElement('button');
           b.type = 'submit'; b.className = 'btn'; b.textContent = LC_T.preload;
-          f.addEventListener('submit', function () { b.disabled = true; b.textContent = LC_T.loading; });
+          f.addEventListener('submit', function (ev) {
+            ev.preventDefault();
+            b.disabled = true; b.textContent = LC_T.loading;
+            fetch(f.action, { method: 'POST', body: new URLSearchParams(new FormData(f)) })
+              .then(function (r) { if (!r.ok) { throw new Error(r.statusText); } b.textContent = LC_T.hamster_queued; })
+              .catch(function (e) { b.disabled = false; b.textContent = LC_T.preload; window.LancacheUi.fail(e); });
+          });
           f.appendChild(b);
           row.insertCell().appendChild(f);
         });
