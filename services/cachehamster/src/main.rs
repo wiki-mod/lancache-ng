@@ -1245,7 +1245,13 @@ impl Cm {
                 .map(u32::from_le_bytes)
                 .ok_or_else(|| "CM frame too short".to_string())
         };
-        let emsg = word(raw, 0)? & !PROTO_MASK;
+        let raw_emsg = word(raw, 0)?;
+        // What: skip frames without the protobuf flag.
+        // Why: live 06.11.: such a frame broke a job.
+        if raw_emsg & PROTO_MASK == 0 {
+            return Ok(());
+        }
+        let emsg = raw_emsg & !PROTO_MASK;
         let hlen = usize::try_from(word(raw, 4)?).map_err(|e| e.to_string())?;
         let header = pb_read(raw.get(8..8 + hlen).ok_or("CM header cut")?)?;
         let body = raw.get(8 + hlen..).ok_or("CM body cut")?.to_vec();
