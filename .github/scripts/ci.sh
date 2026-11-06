@@ -3697,16 +3697,20 @@ ci_cmd_rust_memo() {
 # Why: nightly loads it into the cache; jobs read it there.
 # From: Issue #1683 | PR #1984
 ci_cmd_psl() {
-    local mode="${1:-}" name url dest dir sum rc=0
+    local mode="${1:-}" name url dest dir sum ver rc=0
     [ -n "$(_ci_env_required RUNNER_TEMP)" ] || return 2
     name="$(_ci_runtime_default NGINX_PSL_FILE)" || return 2
     url="$(_ci_runtime_default NGINX_PSL_URL)" || return 2
+    # What: cache version is the sha256 of the source URL.
+    # Why: the service rejected "psl"; others pass 64 hex.
+    # From: Issue #1683 | PR #1984
+    ver="$(_ci_sha256_hex <<< "${url}")" || return 2
     dest="$(_ci_repo_path CI_PSL_DIR)" || return 2
     dir="${RUNNER_TEMP}/psl"
     _ci_run "[CI-ERROR-CACHE-0032]" "dir=\"${dir}\" reason=\"PSL dir not made\"" mkdir -p "${dir}" || return 2
     case "${mode}" in
         restore)
-            _ci_gha_cache_get psl-latest psl- psl "${dir}" || rc=$?
+            _ci_gha_cache_get psl-latest psl- "${ver}" "${dir}" || rc=$?
             case "${rc}" in
                 0) ci_log "[CI-INFO-CACHE-0033]" "file=\"${name}\" reason=\"PSL restored from the nightly cache\"" ;;
                 # What: a miss loads from the source.
@@ -3722,7 +3726,7 @@ ci_cmd_psl() {
         refresh)
             _ci_retry download _ci_http_download "${url}" "${dir}/${name}" >&2 || return 2
             sum="$(_ci_sha256_hex < "${dir}/${name}")" || return 2
-            _ci_gha_cache_put "psl-${sum}" psl "${dir}" || return 2
+            _ci_gha_cache_put "psl-${sum}" "${ver}" "${dir}" || return 2
             ;;
         *)
             ci_log "[CI-ERROR-CACHE-0035]" "got=\"${mode}\" reason=\"psl needs restore or refresh\""
