@@ -34,16 +34,16 @@ the top is a signal that its threats need re-checking.
 | Component | Primary source of truth | Last verified | Threats |
 |---|---|---|---|
 | DNS spoofing (PowerDNS RPZ) | `services/watchdog/src/main.rs` (`pdns_auth`, `rpz_zone`), `services/dns/cdn-domains.txt` | v0.2.0 | T1, T4, T11 |
-| TLS interception + local CA | `services/watchdog/src/main.rs` (`nginx`), `services/proxy/conf.d/https.conf` | v0.2.0 | T7, T8, T10 |
-| Proxy request policy (client CIDR + host allowlists) | `services/watchdog/src/main.rs` (`nginx`), `services/proxy/conf.d/http.conf` | v0.2.0 | T2, T9 |
+| TLS interception + local CA | `services/watchdog/src/main.rs` (`nginx`), `services/ui/nginx/conf.d/https.conf` | v0.2.0 | T7, T8, T10 |
+| Proxy request policy (client CIDR + host allowlists) | `services/watchdog/src/main.rs` (`nginx`), `services/ui/nginx/conf.d/http.conf` | v0.2.0 | T2, T9 |
 | Admin UI authentication | `services/ui/src/main.rs` | v0.2.0 | T3 |
 | Docker access (socket in the `services` container, watchdog client) | `deploy/prod/docker-compose.yml`, `services/common/shared.rs` (`DockerApi`) | `current_dev` (Issue #1683) | T6 |
 | DHCP — Kea mode | `services/watchdog/src/main.rs` (`kea_dhcp4`, `kea_ctrl_fence`, `kea_dhcp_ddns`), `docs/dhcp-modes.md` | v0.2.0 | T12 |
 | DHCP — dnsmasq-proxy and dnsmasq-relay modes | `services/watchdog/src/main.rs` (`dnsmasq_conf`), `docs/dhcp-modes.md` | v0.2.0 | T12, T13 |
-| NATS event bus + role-scoped credentials | `deploy/prod/docker-compose.yml` (`dns`), `services/common/config.rs` (NATS server config), `services/dns/nats-subscriber/` | v0.2.0 | T5 |
-| Secondary-node registration / remote NATS | `deploy/prod/docker-compose.yml` (`NATS_BIND_IP`), `deploy/secondary/docker-compose.yml`, `services/ui/src/main.rs` | v0.2.0 | T5, T14 |
+| Zone transfer to secondaries (TSIG, NOTIFY, AXFR) | `services/watchdog/src/main.rs` (`pdns_auth`) | v0.2.0 | T5 |
+| Secondary-node registration | `deploy/secondary/docker-compose.yml`, `services/ui/src/main.rs` | v0.2.0 | T5, T14 |
 | Console exclusion-by-omission | `services/dns/cdn-domains.txt`, `docs/install-ca-cert.md` | v0.2.0 | T4, T10 |
-| Zone/record known-good snapshot + rollback listener | `services/dns/nats-subscriber/src/main.rs`, `docs/known-good-config-snapshots.md` | v0.3.0 | T4 |
+| Zone/record known-good snapshot + rollback listener | `services/ui/src/main.rs` (`zone-rollback`), `docs/known-good-config-snapshots.md` | v0.3.0 | T4 |
 
 ---
 
@@ -57,7 +57,7 @@ the top is a signal that its threats need re-checking.
    certificates every client trusts. Its compromise is the highest-impact event
    in the whole system.
 4. **Control-plane integrity** — the Admin UI, PowerDNS API, Kea Control Agent
-   API, NATS event bus, and the Docker control path. Anyone who can drive these
+   API, and the Docker control path. Anyone who can drive these
    can redirect traffic, poison the cache, or (via Docker) take the host.
 5. **Deployment confidentiality** — the appliance must not be reachable from
    untrusted networks.
@@ -88,7 +88,7 @@ protects *from the operator*. It is called out again in "Out of scope".
 │  │     HTTPS-mode MITM cache, HTTP-       - PowerDNS HTTP API        │ │
 │  │     mode SNI passthrough              - Kea Control Agent API     │ │
 │  │   - DNS (PowerDNS auth + recursor)      (port 8000, host-net)     │ │
-│  │   - DHCP (Kea) OR dnsmasq-proxy       - NATS event bus (4222)     │ │
+│  │   - DHCP (Kea) OR dnsmasq-proxy       - PowerDNS API (internal)    │ │
 │  │                                       - watchdog in `services`    │ │
 │  │  Local CA key (HTTPS mode) lives on     (Docker socket mount) ────┼─┼─► Docker
 │  │  host: <CA_DIR>/ca.key                                           │ │   daemon
@@ -118,7 +118,7 @@ per-component sources in the inventory table (**corrected 2026-08-05, issue
 #1391 doc-sweep audit**: this used to cite `CLAUDE.md`, which no longer carries
 architecture content as of 2026-07-31 — that content moved into `AGENTS.md`).
 
-- **DNS spoofing** — PowerDNS (authoritative + recursor + a NATS subscriber) in
+- **DNS spoofing** — PowerDNS (authoritative + recursor) in
   one container. Before PowerDNS starts, the supervisor (`rpz_zone` in
   `services/watchdog/src/main.rs`) builds an **RPZ zone**
   from `cdn-domains.txt`, pointing each listed CDN hostname (and its wildcards)
@@ -152,8 +152,8 @@ architecture content as of 2026-07-31 — that content moved into `AGENTS.md`).
 - **DHCP** — optional, mutually-exclusive modes (`disabled` / `kea` /
   `dnsmasq-proxy` / `dnsmasq-relay`) in the one `dhcp` container, so clients
   receive the appliance's DNS automatically.
-- **NATS event bus** — carries DNS record changes from the Admin UI to the
-  PowerDNS node(s), including optional remote **secondary** DNS nodes.
+- **Zone transfer** — PowerDNS NOTIFY + TSIG-signed AXFR carries DNS record
+  changes to optional remote **secondary** DNS nodes.
 
 ---
 
@@ -171,11 +171,11 @@ injects malicious content that the proxy caches and serves to every client.
 **Likelihood**: Low · **Impact**: High
 
 **Mitigations**:
-- The proxy fetches origins over TLS with `proxy_ssl_verify on` and the container's system CA
+- The proxy fetches HTTPS-mode origins over TLS with `proxy_ssl_verify on` and the container's system CA
   bundle (`proxy_ssl_trusted_certificate`, `/etc/ssl/certs/ca-certificates.crt` on
   this service's current Alpine base, issue #815 -- the same path the prior
   Debian base also used); see also T8.
-- Upstream resolution uses `NGINX_UPSTREAM_RESOLVER` (default `8.8.8.8 8.8.4.4 [2001:4860:4860::8888] [2001:4860:4860::8844]`),
+- Upstream resolution uses `NGINX_UPSTREAM_RESOLVER` (default `8.8.8.8 8.8.4.4`, IPv4 only),
   never the LAN spoof DNS — the supervisor's nginx render (`nginx` in
   `services/watchdog/src/main.rs`) refuses to start nginx if the resolver names a
   LanCache IP, preventing a resolve-to-self loop.
@@ -241,35 +241,19 @@ untrusted network · **Impact**: High
   **refuses to start** unless the operator has *explicitly* set
   `ALLOW_INSECURE_UI=true`. A partial config (only one of the two) is a hard
   startup error. There is no silent unauthenticated default.
+- A password changed on the Setup page needs the old password, at least 12
+  characters, and is stored only as an Argon2id hash in a 0600 file next to
+  the settings file. A new `UI_AUTH_PASSWORD_HASH` in `.env` wins over that
+  file, so the reset path stays with the host operator.
 - A valid session cookie never substitutes for required Basic auth on protected
   routes (regression-tested).
 - Startup also fails closed if `SECONDARY_REGISTRATION_TOKEN` is empty (an empty
   token would authenticate any secondary; see T14).
-- `POST /api/netdata-alarms` (issue #849 observability.md finding #3's
-  alarm-forwarding webhook, `services/ui/src/main.rs`) sits
-  outside the Basic Auth gate for the same reason `/api/secondary/register`
-  does (it is a machine-to-machine call with no browser session to attach
-  CSRF/cookie state to), but is not unauthenticated: it requires a matching
-  `X-Netdata-Alarm-Token` header, checked in constant time, and an
-  empty/unconfigured token on the Admin UI side rejects every request
-  rather than accepting them. This is a genuinely new write-capable network
-  endpoint on the Admin UI, not merely a restatement of an existing one —
-  worth naming explicitly because bug hunt finding #20 already established
-  that Netdata's own REST API has no authentication of its own. Netdata runs
-  inside the `services` container on the stack's default network, so every
-  container on that network could inject fabricated alarms into the Admin UI
-  dashboard without this token check.
 
 **Residual risk**: Low, and entirely operator-controlled: it exists only if the
 operator sets `ALLOW_INSECURE_UI=true` *and* exposes the UI beyond the trusted
 LAN. `deploy/prod` binds the UI to `UI_BIND_IP`, which defaults to
-`IP_HTTP`; `UI_BIND_IP=127.0.0.1` restricts it further. Separately, `POST
-/api/netdata-alarms`'s token check is scoped to *this* endpoint only — it does
-not change finding #20's underlying fact that Netdata's own API (port 19999,
-not published on the host, reachable from containers on the stack's default
-network and from the `dhcp` container, which runs with `network_mode: host`
-and shares the host's routing to that network) has no authentication of its
-own.
+`IP_HTTP`; `UI_BIND_IP=127.0.0.1` restricts it further.
 
 ---
 
@@ -286,21 +270,13 @@ appliance spoofs.
   mode — see T12).
 - The spoof set is an explicit allowlist (`cdn-domains.txt`); domains are
   validated before being written into the RPZ zone. DNS record changes flow only
-  over the authenticated NATS event bus and the PowerDNS API (see T5), not from
-  arbitrary clients.
-- **Zone/record rollback listener (issue #628, added since v0.2.0)**:
-  `services/dns/nats-subscriber/src/main.rs` exposes a local HTTP
-  API (`DNS_ROLLBACK_LISTEN_ADDR`, port `DNS_ROLLBACK_PORT` in `runtime.defaults`, 8083) the Admin UI calls to
-  list known-good zone/record snapshots and trigger an operator-selected
-  rollback — another path, besides NATS and the PowerDNS API, that can mutate
-  live DNS record data. It is not published to the host/LAN (`deploy/*/
-  docker-compose.yml` lists no `ports:` entry for it — reachable only from
-  other containers on the same Compose network, same treatment as PowerDNS's
-  own API ports), and every request still requires
-  `X-API-Key: <PDNS_API_KEY>` regardless of network placement, matching the
-  same handshake-secret convention as the PowerDNS API itself (see above) —
-  network placement is defense-in-depth here, not the trust boundary. Rollback
-  is always operator-selected, never automatic on startup.
+  through the authenticated PowerDNS API and TSIG-signed zone transfers (see
+  T5), not from arbitrary clients.
+- **Zone/record rollback (issue #628)**: known-good snapshots are listed and
+  restored by `lancache-ui zone-snapshots` / `zone-rollback` inside the `ui`
+  container (`services/ui/src/main.rs`). There is no network listener for it;
+  the restore uses the PowerDNS API with `X-API-Key`. Rollback is always
+  operator-selected, never automatic on startup.
 - The PowerDNS API key is a shared handshake secret bootstrapped safely (issue
   #858): the supervisor in `dns` (`pdns_api_key` and `stack_secret` in
   `services/watchdog/src/main.rs`, `resolve_shared_secret` in
@@ -317,134 +293,32 @@ responsibility. A bypass costs caching, not integrity.
 
 ---
 
-### T5: NATS event bus abuse
+### T5: DNS zone-transfer abuse (primary → secondary)
 
-**Threat**: An untrusted party connects to NATS (4222) and publishes forged DNS
-record changes, or subscribes to read cache/DNS metadata.
+**Threat**: An untrusted party pulls zone data from the primary (AXFR), or
+pushes forged NOTIFY/updates to make a secondary load wrong DNS data.
 
-**Likelihood**: High *if the port is exposed*; otherwise Low · **Impact**: High
-(forged DNS records reprogram what the appliance spoofs)
+**Likelihood**: Low · **Impact**: Medium (DNS state disclosure; wrong records
+on a secondary until the next good transfer)
 
-**Mitigations** (verified in `deploy/prod/docker-compose.yml`):
-- nats-server runs inside the `dns` container. Its client port is published
-  only on the host's loopback address by default; setting `NATS_BIND_IP`
-  publishes it on that interface instead (`deploy/prod/docker-compose.yml`,
-  `dns` service). The HTTP monitor endpoint (`http_port`, rendered by
-  `services/common/config.rs`) is not published on the host. It carries no
-  credentials of its own (nats-server's monitor has no built-in auth), so any
-  container on the same Docker network can read `/varz`/`/healthz` without a
-  NATS role credential. The endpoint exposes read-only server metadata such as
-  version and connection counts, not the DNS-record data path.
-- Access is **credentialled and role-scoped**, not a single shared account.
-  Four static identities exist with least-privilege permissions:
-  - **UI writer** — may only `publish` `lancache.dns.record` / `lancache.dns.flush`.
-  - **DNS writer** (the one `dns` container) — publish DNS records and
-    `lancache.dns.flush` (the post-rollback recursor cache-flush signal),
-    and the specific JetStream stream/consumer subjects it needs;
-    subscribe to `lancache.dns.>`. Two of these grants are deliberate
-    widenings beyond the original least-privilege scope: `publish` on
-    `lancache.dns.record` (issue #906), so `main.rs`'s `publish_patch` can
-    republish restored `lan.` records, and `publish` on
-    `$JS.API.STREAM.CREATE.LANCACHE_DNS`, so its own `nats-subscriber` can
-    create the `LANCACHE_DNS` stream on a cold start. **Accepted
-    tradeoff**: a compromised dns NATS credential can forge or replicate
-    `lan.` DNS record changes, not merely trigger a cache-flush signal, and
-    can administratively create the shared `LANCACHE_DNS` stream. This was a
-    conscious maintainer decision (widen the permission) over making the
-    rollback listener fail closed when it lacks the permission. The earlier
-    separate replica identity is gone: one `dns` container needs one
-    identity.
-  - **Auth-callout responder** (the Admin UI itself) — no subject permissions
-    of its own; only recognized by name so its own connection to answer
-    `$SYS.REQ.USER.AUTH` doesn't recursively trigger the callout it exists to
-    answer.
-  The four role **usernames** are still required at compose-interpolation time
-  (`:?` guards). The four role **passwords** are no longer a hard compose
-  requirement (issue #858): an empty/placeholder `NATS_*_PASSWORD` now
-  self-heals through the shared-secrets volume the same way `PDNS_API_KEY`/
-  `KEA_CTRL_TOKEN`/`DDNS_TSIG_KEY` do, instead of failing at `docker compose up`.
-  The bus still never comes up unauthenticated: the supervisor in `dns` and
-  the `lancache-ui` binary's own root start all resolve the exact same
-  generated value, or exit if the shared-secrets volume is unwritable, before
-  the affected process starts.
-- **Registered secondaries no longer share a credential (issue #583).** Each
-  gets its own unique NATS username/password at registration time, issued via
-  NATS's auth-callout mechanism (see `services/ui/src/main.rs`):
-  the Admin UI signs a per-connection JWT after checking the presented
-  credential's hash against that one secondary's row in its `secondaries`
-  table, live, on every single connection attempt. Removing a secondary
-  (`DELETE /api/secondary/{name}`) or rotating its credential
-  (`POST /api/secondary/{name}/rotate-token`) takes effect on that
-  secondary's very next reconnect, with zero effect on any other secondary —
-  there is no shared token whose compromise or rotation affects the whole
-  fleet, and no static config file to rewrite per secondary.
-- **Active connection termination (issue #681), closing #621/#583's own
-  documented gap.** The DB-level revocation above only ever took effect on a
-  secondary's *next reconnect* — a secondary already holding its streaming
-  NATS connection open at the moment it was removed/rotated kept using its
-  already-issued user JWT (90-day TTL, `USER_JWT_TTL_SECS` in
-  `services/ui/src/main.rs`) until it happened to reconnect on its own. Both
-  `remove_secondary` and `rotate_token` (`services/ui/src/main.rs`) now additionally force-disconnect that secondary's current
-  live connection immediately after committing the DB write, via
-  `services/ui/src/main.rs` (NATS's `$SYS.REQ.SERVER.*` system-services
-  API: `CONNZ` to find the connection, `KICK` to disconnect it). This is
-  best-effort, fire-and-forget, and additive — a NATS outage or a slow kick
-  never blocks or fails the Admin UI's HTTP response, and the DB-level
-  revocation above (which nothing here weakens or replaces) is still what
-  actually prevents the *next* reconnect from succeeding, kick or no kick.
-- **New static role, new secret class: `NATS_SYS_USER`/`NATS_SYS_PASSWORD`
-  (issue #681).** The sole member of a newly introduced NATS `SYS` account
-  (the `accounts {}` block of the nats-server config that
-  `services/common/config.rs` renders, the first `accounts {}`
-  this project has ever needed — every other role, including every
-  callout-authenticated secondary, still lives in the implicit default
-  account `$G`, unaffected). Holding this credential grants read access to
-  every live NATS connection's metadata network-wide (`CONNZ`: IP, username,
-  subscriptions) and the ability to forcibly disconnect any of them (`KICK`)
-  — treat it as at least as sensitive as the other static NATS role
-  passwords, not as a narrower "just a kick switch" credential. It carries no
-  application subject permissions of its own (no `lancache.dns.*`/JetStream
-  access), so a compromise of this one credential alone cannot forge or read
-  DNS records — only enumerate/disconnect connections.
-- Remote/secondary access is opt-in only by setting `NATS_BIND_IP` to a
-  trusted LAN/VPN interface, and must be firewalled to that scope.
-- **Issue #866/#881**: registration (`POST /api/secondary/register`) hands a
-  new secondary the address it will actually dial, computed by
-  `Config::advertised_nats_url()`. By default that is derived from the same
-  `NATS_BIND_IP` trusted-interface binding above, but an operator can instead
-  set the explicit `NATS_ADVERTISE_URL` override to advertise a different
-  hostname, reverse proxy, or non-default port/scheme reachable over that
-  same trusted network. The security boundary is therefore whatever address
-  is actually advertised, not literally `NATS_BIND_IP` itself — firewalling
-  must cover the real reachability path `NATS_ADVERTISE_URL` names (e.g. a
-  proxy's own listener), not just the primary's raw bind interface, when that
-  override is used. `advertised_nats_url()` fails closed to `None` (HTTP 503)
-  for a wildcard (`0.0.0.0`/`::`, bracketed or not), loopback
-  (`127.0.0.1`/`::1`), or hostname `NATS_BIND_IP` with no explicit
-  `NATS_ADVERTISE_URL` set, since none of those are addresses a genuinely
-  remote secondary could dial — see `services/ui/src/main.rs`'s
-  `advertised_nats_url()` and its unit tests for the exact rejected cases.
+**Mitigations**:
+- Secondaries replicate with native PowerDNS NOTIFY + AXFR. Every transfer is
+  signed with the TSIG key (`DDNS_TSIG_NAME`/`DDNS_TSIG_KEY`), bound per zone
+  (`TSIG-ALLOW-AXFR` / `AXFR-MASTER-TSIG`); `allow-axfr-ips` holds only the
+  optional `PDNS_AXFR_FROM` hosts, so a secondary without the key gets nothing.
+- The TSIG key reaches a secondary only through the authenticated
+  registration answer (`/api/secondary/register`, see T14).
+- Record changes are written only by the Admin UI through the PowerDNS API
+  (`X-API-Key`); secondaries never publish records.
+- SOA serials are monotonic (RFC 1982); the dashboard shows a lagging
+  secondary (lost NOTIFY or broken AXFR).
 
-**Residual risk**: Medium — correct firewalling of the optional secondary
-binding (and, when `NATS_ADVERTISE_URL` is used, of whatever address it
-actually names) is the operator's responsibility, and the role split limits
-but does not eliminate what a compromised *writer* credential could do (forge DNS records).
-A compromised *secondary* credential is scoped to exactly that one secondary's
-consume-only JetStream permissions (same scope the old shared reader role
-had) and can be individually revoked without touching any other secondary.
-Issue #681's active-disconnect kick narrows, but does not eliminate, the old
-"up to 90 days on an already-open connection" exposure window: it is
-best-effort (a NATS outage at the exact moment of removal/rotation means the
-kick itself cannot run, though the DB-level revocation above still blocks the
-next reconnect regardless), and a secondary that never reconnects and is
-never actively kicked in time keeps whatever access its still-open connection
-already had until the kick eventually lands or the connection drops on its
-own. A compromise of the new `NATS_SYS_USER`/`PASSWORD` credential itself
-adds a distinct, narrower risk: network-wide read access to live-connection
-metadata and the ability to disconnect any connection (including
-non-secondary static roles), but no ability to forge or read DNS records.
+**Residual risk**: Low — bounded by keeping the TSIG secret and the
+registration token secret. Rotating the TSIG key requires re-registering
+every secondary.
 
 ---
+
 
 ### T6: Docker control-path abuse (host takeover)
 
@@ -463,7 +337,7 @@ sensitive) · **Impact**: Critical (full host compromise)
   socket proxy.** Its watchdog process is the only Docker API client in the
   code (`DockerApi`: container list of the compose project, inspect, and
   restart of a failing container). The mount is visible to every process in that container
-  (watchdog, syslog-ng, chronyd, netdata, retention), and the socket itself
+  (watchdog, syslog-ng, chronyd, retention), and the socket itself
   grants the full Docker API, so a compromise of the `services` container is a
   host compromise. The container drops all capabilities except the list in
   `deploy/prod/docker-compose.yml`.
@@ -508,7 +382,7 @@ the cache.
 **Likelihood**: Low · **Impact**: High
 
 **Mitigations**:
-- `proxy_ssl_verify on` with the container's system CA bundle for all origin connections.
+- `proxy_ssl_verify on` with the container's system CA bundle for every HTTPS origin connection; HTTP clients fetch over HTTP.
 - Origin names resolve via real upstream DNS, never the spoof DNS (see T1).
 
 **Residual risk**: Medium — verification reduces MITM risk but cannot stop a real
@@ -536,27 +410,11 @@ or saturating the proxy.
   watchdog-computed cache-disk yellow/red color is rendered live on the
   Admin UI dashboard's "Service health" card (`services/ui/src/main.rs`),
   closing the visibility gap #849 observability finding #3 identified.
-  Netdata's own health.d alarms (disk usage, CPU, memory, and every other
-  stock alarm template it ships) are now also forwarded: the `custom_sender()`
-  that the supervisor writes into Netdata's config (`netdata` in
-  `services/watchdog/src/main.rs`) POSTs
-  each alarm event to the Admin UI's `POST /api/netdata-alarms`
-  (`services/ui/src/main.rs`), gated by its own shared
-  `NETDATA_ALARM_TOKEN` (issue #858 shared-secret pattern), and the
-  dashboard's "Netdata alarms" card renders the recent history
-  (`services/ui/src/main.rs`). This closes the remainder of #849
-  finding #3: an operator no longer needs direct `docker exec`/Netdata-API
-  access to learn that a health.d alarm fired. Netdata's own full metrics
-  dashboard (port 19999) is still never published to the host — this
-  integration forwards alarm *events*, not the underlying metrics browsing
-  UI, so an operator investigating the cause of a forwarded alarm in detail
-  still needs direct access to that port.
+  Further alarms (CPU, memory) are shown on the dashboard from the watchdog's
+  own checks; there is no separate metrics service.
 
 **Residual risk**: Medium — there is no per-client request rate limiting by
-default; the operator must configure limits. Netdata's alarm events now
-reach the dashboard, but its full metrics UI (port 19999) remains
-unpublished, so deep investigation of a forwarded alarm still requires
-direct Netdata access.
+default; the operator must configure limits.
 
 ---
 
@@ -714,27 +572,23 @@ incorrectly.
 ### T14: Rogue secondary DNS node registration
 
 **Threat**: An attacker registers a forged "secondary" DNS node to receive DNS
-updates or join the NATS mesh.
+updates or obtain the TSIG key.
 
 **Likelihood**: Low · **Impact**: Medium (information disclosure of DNS state; a
-foothold in the sync mesh)
+copy of all zones)
 
 **Mitigations**:
 - `SECONDARY_REGISTRATION_TOKEN` is **fail-closed**: the Admin UI refuses to start
   if it is empty (an empty token would match any registration attempt).
-- Since issue #583, each secondary receives its own individually-revocable
-  NATS credential at registration time (T5) instead of a role shared across
-  every registered secondary, and reaches NATS only over whatever address the
-  primary advertises during registration — by default the operator's trusted
-  LAN/VPN interface (`NATS_BIND_IP`), or an explicit, separately-firewalled
-  `NATS_ADVERTISE_URL` when one is configured (see T5).
-- A forged registration only grants the consume-only DNS-sync permission
-  scope (T5); it cannot publish DNS records, and can be revoked on its own
-  (`DELETE /api/secondary/{name}`) without affecting any legitimately
-  registered secondary.
+- A registered secondary receives the TSIG key and the primary address; it
+  then pulls zones by signed AXFR only (T5). It cannot publish DNS records.
+- A secondary can be removed (`DELETE /api/secondary/{name}`) without
+  affecting the others; removal renews the TSIG key at once, so the
+  removed node can no longer transfer zones. The DNS page can renew it
+  any time ("TSIG-Schlüssel erneuern").
 
-**Residual risk**: Low–Medium — bounded by keeping the token secret and the NATS
-secondary interface off untrusted networks.
+**Residual risk**: Low–Medium — bounded by keeping the registration token and
+the TSIG key secret.
 
 ---
 
@@ -744,7 +598,7 @@ The following are **not** addressed by lancache-ng:
 
 1. **Internet-facing deployment.** The appliance is not hardened for WAN
    exposure. External DDoS, zero-days, and APTs are out of scope. Exposing any
-   control-plane port (UI, NATS, Kea API, PowerDNS API) to an untrusted network
+   control-plane port (UI, Kea API, PowerDNS API) to an untrusted network
    breaks the core assumption.
 2. **Inter-client isolation / multi-tenancy.** Any LAN client can receive any
    cached content. There is no per-user separation.
@@ -769,7 +623,7 @@ The following are **not** addressed by lancache-ng:
   segments.
 - Admin UI authenticated (`UI_AUTH_USER`/`UI_AUTH_PASSWORD_HASH` set — the default
   posture) or bound to `127.0.0.1`.
-- NATS unpublished (default) or its optional secondary binding firewalled.
+- Zone transfers to secondaries only TSIG-signed (default).
 - Kea Control Agent reachable only on Docker-internal ranges (default).
 - Scheduled automatic updates left disabled (default) unless wanted -- and
   even when enabled, it runs on the host, not as a container with expanded
@@ -779,11 +633,11 @@ The following are **not** addressed by lancache-ng:
 - Many untrusted or guest devices on the same flat LAN.
 - Proxy left in `lazy` mode with no `PROXY_ALLOWED_CLIENT_CIDRS`.
 - No cache-size monitoring or request limits.
-- Optional NATS secondary binding reachable by some untrusted segment.
+- PowerDNS zone transfers (AXFR) reachable by some untrusted segment.
 
 ### High risk (breaks the core assumption — avoid)
 - Admin UI exposed beyond the LAN, **especially** with `ALLOW_INSECURE_UI=true`.
-- NATS 4222, Kea API 8000, or the PowerDNS API reachable from untrusted networks.
+- Kea API 8000, or the PowerDNS API reachable from untrusted networks.
 - Direct Docker socket exposed to untrusted containers/networks.
 - No firewall between the appliance and an untrusted uplink.
 
@@ -801,13 +655,13 @@ tagging each release, then update the top marker and the
    2026-07-31) and diff the sources listed in the inventory table:
    - `services/watchdog/src/main.rs` (every config render: `pdns_auth`,
      `rpz_zone`, `nginx`, `kea_dhcp4`, `kea_ctrl_fence`, `kea_dhcp_ddns`,
-     `dnsmasq_conf`, `netdata`), `services/dns/cdn-domains.txt`,
-     `services/proxy/conf.d/*.conf`
+     `dnsmasq_conf`), `services/dns/cdn-domains.txt`,
+     `services/ui/nginx/conf.d/*.conf`
    - `services/ui/src/main.rs`
      (`preflight`, `ALLOW_INSECURE_UI`, startup guards)
    - `docs/dhcp-modes.md`
-   - `services/dns/nats-subscriber/`, the NATS server config in
-     `services/common/config.rs`, and the `dns` service's NATS port
+   - the PowerDNS zone-transfer settings (TSIG, NOTIFY, AXFR) rendered by
+     `pdns_auth` in `services/watchdog/src/main.rs`
    - `deploy/prod/docker-compose.yml`
      — especially every service that mounts the Docker socket (SOT
      `DOCKER_SOCKET`) and every caller of `DockerApi`.
@@ -832,10 +686,10 @@ tagging each release, then update the top marker and the
 ## Security roadmap (non-binding)
 
 1. Per-client request rate limiting / flood protection in the proxy.
-2. Stronger, rotate-able NATS auth beyond the shared-credential model.
+2. Rotate-able TSIG keys for secondaries without re-registration.
 3. Audit logging of Admin UI and control-plane operations.
 4. Optional content-signature verification for cached objects.
-5. Security-event metrics/alerts via the existing Netdata integration.
+5. Security-event alerts on the Admin UI dashboard (watchdog data).
 
 ---
 
@@ -844,7 +698,7 @@ tagging each release, then update the top marker and the
 lancache-ng is designed for **trusted, isolated LAN environments only**. It
 deliberately trades some guarantees (it MITMs client HTTPS in HTTPS mode; it trusts
 every LAN device) for caching performance, while keeping the *control plane*
-fail-closed: the Admin UI, NATS credentials, the PowerDNS API key, the Kea Control Agent,
+fail-closed: the Admin UI, the PowerDNS API key, the Kea Control Agent,
 DDNS updates, and secondary registration all refuse to start in an
 insecure/unauthenticated state unless the operator explicitly opts out. The Admin UI
 has no Docker access; only the `services` container mounts the Docker socket,

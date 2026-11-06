@@ -8,93 +8,129 @@
 {% block title %} – Logs{% endblock %}
 
 {% block content %}
-<div class="max-w-7xl mx-auto space-y-4">
+<section>
+  <p class="eyebrow">{{ t.overview_logs }}</p>
+  <h1 class="page-title">Logs</h1>
 
-  <div class="flex items-center justify-between">
-    <div>
-      <h1 class="text-xl font-bold text-white">Syslog</h1>
-      <p class="text-sm text-slate-400 mt-1">
-        Letzte {{ logs_max_entries }} Einträge aus dem zentralen Syslog-Speicher
-      </p>
-    </div>
-    <!-- What: reloads the page for new log lines
-         Why: the table below is rendered server-side -->
-    <button onclick="location.reload()"
-            class="text-sm text-slate-400 hover:text-white border border-slate-600 hover:border-slate-400 px-3 py-1.5 rounded-lg transition-colors">
-      Aktualisieren
-    </button>
+  <!-- What: two tabs, Logs and Syslog
+       Why: the Syslog tab holds the log settings -->
+  <div class="subtabs">
+    <button type="button" data-logs-tab="logs" class="subtab logs-tab-btn">Logs</button>
+    <button type="button" data-logs-tab="syslog" class="subtab logs-tab-btn">Syslog</button>
   </div>
 
-  <!-- What: host filter reloads the page with ?host=
-       Why: parse_syslog_tail reads that host only -->
-  <div class="flex gap-3 flex-wrap">
-    <select id="syslog-host-filter"
-            onchange="location.href = this.value ? ('{{ pages.logs | safe }}?host=' + encodeURIComponent(this.value)) : '{{ pages.logs | safe }}'"
-            class="bg-slate-800 border border-slate-600 rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:ring-1 focus:ring-blue-500">
-      <option value="" {% if not selected_host %}selected{% endif %}>Alle Hosts</option>
-      {% for h in syslog_hosts %}
-      <option value="{{ h }}" {% if selected_host and h == selected_host %}selected{% endif %}>{{ h }}</option>
-      {% endfor %}
-    </select>
+  <div data-logs-panel="logs">
+  <div class="field-row" style="max-width:none; margin-bottom:18px;">
+    <div class="field" style="margin-bottom:0; max-width:220px;">
+      <label for="log-service">{{ t.service }}</label>
+      <select id="log-service" onchange="filterLogs()" style="width:100%; padding:9px 11px; border-radius:8px; border:1px solid var(--navy-600); background:var(--navy-900); color:var(--foam); font-size:13.5px;">
+        <option value="">{{ t.all_services }}</option>
+        {% for h in syslog_hosts %}
+        <option value="{{ h }}">{{ h }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="field" style="margin-bottom:0; flex:1;">
+      <label for="log-search">{{ t.search }}</label>
+      <input type="text" id="log-search" placeholder="{{ t.filter_by_text }}" oninput="filterLogs()">
+    </div>
   </div>
 
-  <!-- What: per-service logging switches.
-       Why: the ui saves; the watchdog applies. -->
-  <form method="post" action="{{ routes.logs_settings | safe }}" class="card space-y-3">
-    {{ <csrf_field csrf_token={csrf_token}/> }}
-    <div>
-      <h2 class="font-semibold text-slate-200">Protokollierung je Dienst</h2>
-      <p class="text-xs text-slate-400 mt-1">
-        Abgeschaltete Dienste schreiben nichts mehr in den zentralen Syslog. Der Watchdog
-        (Container „services“) protokolliert immer. Die Änderung gilt nach wenigen Sekunden.
-        Ohne Proxy-Protokoll zeigen Statistik und Dashboard keine neuen Zugriffe.
-      </p>
+  <div class="card">
+    <div class="card-body" style="padding:0;">
+      <div id="log-lines" style="font-family:var(--font-mono); font-size:12.5px; line-height:1.9; padding:14px 18px; height:calc(100vh - 340px); min-height:420px; overflow-y:auto;">
+        {% if syslog_logs %}
+        {% for entry in syslog_logs %}
+        <div class="log-line" data-service="{{ entry.host }}">
+          <span class="mono" style="color:var(--mist-dim);"><time data-iso="{{ entry.timestamp }}">{{ entry.timestamp }}</time></span>
+          <span class="tag off" style="margin:0 8px;">{{ entry.host }}</span>
+          {{ entry.message }}
+        </div>
+        {% endfor %}
+        {% else %}
+        <div class="empty-state">{{ t.no_log_entries_yet }}</div>
+        {% endif %}
+      </div>
     </div>
-    <div class="flex flex-wrap gap-x-6 gap-y-2">
+  </div>
+  <p class="field-hint" style="margin-top:8px;">{{ t.last }} {{ logs_max_entries }} {{ t.entries_from_the_central_syslog_store }}</p>
+  </div>
+
+  <div data-logs-panel="syslog">
+  <!-- What: extra syslog targets (host:port, TCP)
+       Why: a secondary forwards to its primary too -->
+  <form method="post" action="{{ routes.logs_save | safe }}" class="card" style="margin-bottom:16px;">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div class="card-head">
+      <h3>{{ t.forward_to_more_syslog_servers }}</h3>
+    </div>
+    <div class="card-body">
+      <p class="section-sub">
+        {{ t.all_entries_also_go_to_these }}
+      </p>
+      <div class="field" style="max-width:none;">
+        <label for="SYSLOG_FORWARD">{{ t.targets_host_port_separated_by_spaces }}</label>
+        <textarea id="SYSLOG_FORWARD" name="SYSLOG_FORWARD" rows="2" style="width:100%; padding:9px 11px; border-radius:8px; border:1px solid var(--navy-600); background:var(--navy-900); color:var(--foam); font-family:var(--font-mono); font-size:13px;">{{ v.SYSLOG_FORWARD }}</textarea>
+      </div>
+      <div class="section-title">{{ t.logging_per_service }}</div>
+      <p class="section-sub">{{ t.disabled_services_write_nothing_to_local }}</p>
+
       {% for sw in log_switches %}
-      <label class="flex items-center gap-2 text-sm text-slate-300">
-        <input type="checkbox" name="{{ sw.key }}" value="1" {% if sw.on %}checked{% endif %}
-               class="rounded border-slate-600 bg-slate-700 text-blue-500 focus:ring-blue-500">
-        {{ sw.program }}
-      </label>
+      <div class="toggle-row">
+        <div class="t-label">{{ sw.program }}</div>
+        <label class="toggle">
+          <input type="checkbox" name="on_{{ sw.program }}" value="true" {% if sw.on %}checked{% endif %}>
+          <span class="track"></span><span class="knob"></span>
+        </label>
+      </div>
       {% endfor %}
+      <button type="submit" class="btn" style="margin-top:12px;">{{ t.save }}</button>
     </div>
-    <button type="submit"
-            class="btn btn-blue">
-      Speichern
-    </button>
   </form>
 
-  <!-- What: syslog lines of the selected host or all hosts
-       Why: rendered server-side; reload shows new lines -->
-  <div class="card p-0 overflow-hidden">
-    <div class="overflow-x-auto">
-      <table class="w-full text-xs" id="syslog-table">
-        <thead>
-          <tr>
-            <th class="th px-4 w-48">Zeit</th>
-            <th class="th px-4 w-40">Host</th>
-            <th class="th px-4 w-32">Programm</th>
-            <th class="th px-4">Nachricht</th>
-          </tr>
-        </thead>
-        <tbody class="rows">
-          {% if syslog_logs %}
-          {% for entry in syslog_logs %}
-          <tr>
-            <td class="px-4 py-2 text-slate-500 font-mono">{{ entry.timestamp }}</td>
-            <td class="px-4 py-2 text-blue-400 font-mono">{{ entry.host }}</td>
-            <td class="px-4 py-2 text-slate-300 font-mono">{{ entry.program }}</td>
-            <td class="px-4 py-2 text-slate-300 font-mono">{{ entry.message }}</td>
-          </tr>
-          {% endfor %}
-          {% else %}
-          <tr><td colspan="4" class="px-4 py-8 text-center text-slate-500">Noch keine Log-Einträge</td></tr>
-          {% endif %}
-        </tbody>
-      </table>
-    </div>
   </div>
+</section>
+{% endblock %}
 
-</div>
+{% block scripts %}
+<script>
+  // What: hides log lines not matching service or text
+  // Why: the mockup filters the list in the browser
+  // From: Issue #1683 | PR #1976
+  function filterLogs() {
+    const svc = document.getElementById('log-service').value;
+    const q = document.getElementById('log-search').value.toLowerCase();
+    document.querySelectorAll('#log-lines .log-line').forEach((l) => {
+      const ok = (!svc || l.dataset.service === svc) && (!q || l.textContent.toLowerCase().includes(q));
+      l.style.display = ok ? '' : 'none';
+    });
+  }
+
+  // What: shows each log time in the browser's local time
+  // Why: the server sends UTC; operators read local time
+  // From: Issue #1683 | PR #1858
+  document.querySelectorAll('time[data-iso]').forEach((el) => {
+    const d = new Date(el.dataset.iso);
+    if (!isNaN(d)) el.textContent = d.toLocaleString('de-DE');
+  });
+
+  // What: shows one tab panel, keeps it in the URL hash
+  // Why: a form post returns to the Syslog tab
+  // From: Issue #1683 | PR #1858
+  function setLogsTab(name) {
+    document.querySelectorAll('[data-logs-panel]').forEach((panel) => {
+      panel.classList.toggle('hidden', panel.dataset.logsPanel !== name);
+    });
+    document.querySelectorAll('.logs-tab-btn').forEach((button) => {
+      button.classList.toggle('active', button.dataset.logsTab === name);
+    });
+  }
+  document.querySelectorAll('.logs-tab-btn').forEach((button) => {
+    button.addEventListener('click', () => {
+      history.replaceState(null, '', button.dataset.logsTab === 'syslog' ? '#syslog' : location.pathname + location.search);
+      setLogsTab(button.dataset.logsTab);
+    });
+  });
+  setLogsTab(location.hash === '#syslog' ? 'syslog' : 'logs');
+</script>
 {% endblock %}

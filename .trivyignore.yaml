@@ -4,9 +4,3 @@
 #
 # What: Trivy ignore list; statements use What/Why/From.
 # Why: Omitted status = tracked risk; no expiry field used.
-#vulnerabilities:
-#  - id: CVE-2026-92392
-#    statement: >-
-#      What: curl 8.22.0 HTTP/2 use-after-free, Alpine images
-#      Why: no fixed v3.24 pkg; drop once it ships 8.23.0
-#      From: Issue #1931 | PR #1933

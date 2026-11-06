@@ -15,13 +15,13 @@ The LAN cache binds to one or two IP addresses on your server. You may need to c
 If you installed using the setup script, use this to reconfigure the IP addresses:
 
 ```bash
-sudo /opt/lancache-ng/setup.sh update-ip
+sudo /opt/lancache-ng/current/setup.sh update-ip
 ```
 
 Or equivalently:
 
 ```bash
-sudo /opt/lancache-ng/setup.sh --reconfigure
+sudo /opt/lancache-ng/current/setup.sh --reconfigure
 ```
 
 The setup script will ask you for the new IP(s), update all necessary config files automatically, restart the services, and verify the change worked.

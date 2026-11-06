@@ -72,12 +72,8 @@
      AG-WF-027) and where it's tracked going forward (a specific issue/comment, or explicitly "not yet
      tracked, needs a home"). A silent omission here is worse than an honestly-listed unfixed problem:
      this section exists specifically to stop a found-but-unfixed issue from quietly disappearing once
-     this comment scrolls out of view -- the exact failure mode this template's own drafting surfaced
-     (2026-08-13: several real findings from earlier in the same session -- undisabled reboot cron
-     entries on two runner hosts, an unimplemented runner-host script consolidation, this very rule not
-     yet landed in AGENTS.md -- had accumulated with no single place listing them until asked for
-     directly). If genuinely nothing was found, state that explicitly rather than leaving the section
-     empty. -->
+     this comment scrolls out of view. If genuinely nothing was found, state that explicitly rather
+     than leaving the section empty. -->
 - <bug/problem> -- not fixed because <reason> -- tracked at <issue/comment link, or "not yet tracked">
 
 

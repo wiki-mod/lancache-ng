@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
 # What: manifest of the cachehamster prefill daemon.
-# Why: single binary crate; src/main.rs is the only source.
+# Why: one binary: daemon plus UI commands.
 # From: Issue #871 | PR #1858
 [package]
 name = "lancache-cachehamster"
@@ -11,7 +11,7 @@ edition.workspace = true
 license.workspace = true
 
 # What: explicit bin target, same as cargo's default
-# Why: manifest-only build stages stub declared targets
+# Why: ci.sh tells a bin crate from a library by it
 # From: Issue #1683 | PR #1905
 [[bin]]
 name = "lancache-cachehamster"
@@ -20,16 +20,25 @@ path = "src/main.rs"
 [dependencies]
 LanCache-NG = { path = "../common" }
 tokio = { workspace = true }
-# What: reqwest with the stream feature on rustls.
-# Why: bytes_stream needs it; no openssl-sys (AG-REL-003).
-# From: Issue #871
-reqwest = { workspace = true, features = ["stream"] }
+reqwest = { workspace = true }
 futures-util = { workspace = true }
-argon2 = { workspace = true }
-chacha20poly1305 = { workspace = true }
-rand = { workspace = true }
-anyhow = { workspace = true }
-tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
+base64 = { workspace = true }
+# What: QR code renderer to SVG.
+# Why: Steam QR login; the UI embeds the SVG.
+# From: Issue #871 | PR #1858
+qrcode = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+hex = { workspace = true }
+# What: websocket to the Steam CM (rustls, no openssl).
+# Why: PICS and manifest codes exist only on the CM.
+# From: Issue #871 | PR #1858
+tokio-tungstenite = { workspace = true }
+# What: gzip of bundled CM messages (Multi).
+# Why: the CM packs many answers into one frame.
+# From: Issue #871 | PR #1858
+flate2 = { workspace = true }
+# What: unzip Steam depot manifests.
+# Why: the CDN sends each manifest as a zip file.
+# From: Issue #871 | PR #1858
+zip = { workspace = true }

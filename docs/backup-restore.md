@@ -19,14 +19,16 @@ available for manual recovery.
 The setup script includes three backup-related flows:
 
 ```bash
-sudo /opt/lancache-ng/setup.sh update [install-dir]
-sudo /opt/lancache-ng/setup.sh backup [--config|--full] [install-dir] [--dest /backup/path]
-sudo /opt/lancache-ng/setup.sh restore <backup.tar.gz> [install-dir]
+sudo /opt/lancache-ng/current/setup.sh update [install-dir]
+sudo /opt/lancache-ng/current/setup.sh backup [--config|--full] [install-dir] [--dest /backup/path]
+sudo /opt/lancache-ng/current/setup.sh restore <backup.tar.gz> [install-dir]
 ```
 
 Archives go to `/var/backups/lancache-ng` unless `--dest` is given. Set `LANCACHE_BACKUP_ROOT` to move that default for every command, including the automatic pre-update backup that `update` and `auto-update` roll back from.
 
-`update` also updates the repository checkout itself when it sits on its default branch with no local changes: it takes the pre-update backup first, pulls, and continues with the pulled `setup.sh`. A failed update returns the checkout to its previous revision along with the restored configuration. A checkout on a tag, commit or other branch, or with local changes, is left where it is and the update says so.
+`update` also updates the repository checkout itself when it sits on its channel's branch with no changed tracked files (untracked state such as `ca/` does not count): it takes the pre-update backup first, pulls, and continues with the pulled `setup.sh`. A failed update returns the checkout to its previous revision along with the restored configuration. A checkout on another branch, or with changed tracked files, is left where it is and the update says so.
+
+The code of each channel has its own directory below the state root: `/opt/lancache-ng/latest` (from `master`) and `/opt/lancache-ng/nightly` (from `current_dev`); `/opt/lancache-ng/current` points to the one in use. When the channel changes, `update` moves the stack to the other directory and copies `deploy/prod/.env.local` and a compose override along. A failed move points `current` back, restores the pre-update backup and removes the copied files from the new directory. An old checkout cloned straight into `/opt/lancache-ng` moves the same way; after a successful move only its unchanged tracked files are removed, its data stays. If such a checkout still runs an older `setup.sh`, run `git -C /opt/lancache-ng pull` once before `setup.sh update`.
 
 The script verifies that required archive tools are present before running backup or restore. If `tar` or `rsync` is missing on an `apt-get` based system, the script installs the missing tool before it touches backup data. `restore` additionally requires `openssl`, since converging a legacy or incomplete `.env` (see "Restore also re-converges `.env`" below) can generate missing service secrets, which shells out to `openssl rand`.
 
@@ -47,13 +49,12 @@ Use this when moving to new hardware or when losing cached objects would be expe
 The automated manifest includes these paths when they exist:
 
 - install configuration: the active runtime env file (`.env` or `deploy/prod/.env.local`), `docker-compose.yml`; manual `deploy/prod` backups also include the repository-root runtime inputs `deploy/prod/docker-compose.yml` reaches via `../../` and that exist in the checkout (today `services/dns/cdn-domains.txt`), because production compose mounts those tracked files outside `deploy/prod/`
-- Docker named volumes discovered from the compose project, including stopped containers so PowerDNS and NATS volumes are included; the cache volume (`<project>_proxy-cache`) is skipped in `--config` mode and only archived in `--full` mode, matching the cache-directory scope described above, since Docker reports that volume's mount type as "volume" even though it is bind-backed under the hood
+- Docker named volumes discovered from the compose project, including stopped containers so PowerDNS volumes are included; the cache volume (`<project>_proxy-cache`) is skipped in `--config` mode and only archived in `--full` mode, matching the cache-directory scope described above, since Docker reports that volume's mount type as "volume" even though it is bind-backed under the hood
 - an `image-revisions.txt` file with the image revisions present before an update pulls new tags
 - PowerDNS state from Docker named volumes, the production state root `LANCACHE_STATE_DIR`, optional `PDNS_DIR` and `PDNS_FILTER_STATE_DIR`, and the legacy PowerDNS and filter-state directories below `/srv/lancache` when present
 - Kea data from the production state root `LANCACHE_STATE_DIR`, optional `KEA_DATA_DIR`, and legacy `/srv/lancache/kea` when present
 - the HTTPS CA (`ca.crt`, `ca.key`) from the production state root `LANCACHE_STATE_DIR` or optional `CA_DIR`; an update moves a CA from the old repository-root `certs/` there
 - chrony and CacheHamster data from the production state root `LANCACHE_STATE_DIR`, optional `NTP_DATA_DIR`, `CACHEHAMSTER_DATA_DIR`, and legacy `/srv/lancache/ntp`, `/srv/lancache/cachehamster` when present
-- NATS state and generated config from Docker named volumes, the production state root `LANCACHE_STATE_DIR`, optional `NATS_DATA_DIR`, `NATS_CONF_DIR`, and legacy `/srv/lancache/nats`, `/srv/lancache/nats-conf` when present
 - in `--full` mode only, the cache directory from `CACHE_DIR` (or the production state root `LANCACHE_STATE_DIR`), plus the legacy split cache directories of old installs and `/srv/lancache/cache` when present
 
 Central logging's own log path (`SYSLOG_NG_LOG_DIR`, or the production state root `LANCACHE_STATE_DIR/syslog-ng`; syslog-ng always runs inside the `services` container) is **not** part of the automated backup manifest yet. Like cache content, it is rotated/compressed application output rather than configuration or operational state, so losing it does not affect the running stack. Back it up manually if you need log retention across a host migration.
@@ -71,17 +72,16 @@ The backup command stops the compose stack before copying mutable databases and 
 2. Restore the selected backup:
 
    ```bash
-   sudo /opt/lancache-ng/setup.sh restore /var/backups/lancache-ng/lancache-ng-config-YYYYMMDDTHHMMSSZ.tar.gz /opt/lancache-ng
+   sudo /opt/lancache-ng/current/setup.sh restore /var/backups/lancache-ng/lancache-ng-config-YYYYMMDDTHHMMSSZ.tar.gz /opt/lancache-ng
    ```
 
 3. Check the stack:
 
    ```bash
-   cd /opt/lancache-ng
-   sudo docker compose ps
+   sudo /opt/lancache-ng/current/setup.sh compose /opt/lancache-ng ps
    ```
 
-If a scheduled automatic update caused the failure, disable it first (set `AUTO_UPDATE_ENABLED=0` in `.env`, or answer "N" if re-running `setup.sh install`'s interactive prompt) before starting again, so the same update is not retried immediately -- the orchestrator's own health gate and automatic rollback should already have restored a known-good state, but this avoids the timer immediately re-triggering another attempt while you investigate. If the failure was caused by a bad first-party image, `restore`'s `.env` convergence step (see "Restore also re-converges `.env`" below) already keeps the backup's own `LANCACHE_IMAGE_TAG` instead of re-resolving it, so restoring the automatic pre-update backup restarts the stack on the previous known-good tag automatically. To roll back to a *different* revision than the one in that backup, inspect `image-revisions.txt` inside the restored archive and set `LANCACHE_IMAGE_TAG` in `.env` to the desired `sha-*`, release candidate, or stable release tag, then run `setup.sh update [install-dir]` to apply it.
+If a scheduled automatic update caused the failure, disable it first (set `AUTO_UPDATE_ENABLED=0` in `.env`, or answer "N" if re-running `setup.sh install`'s interactive prompt) before starting again, so the same update is not retried immediately -- the orchestrator's own health gate and automatic rollback should already have restored a known-good state, but this avoids the timer immediately re-triggering another attempt while you investigate. If the failure was caused by a bad first-party image, `restore`'s `.env` convergence step (see "Restore also re-converges `.env`" below) already keeps the backup's own `LANCACHE_IMAGE_TAG` instead of re-resolving it, so restoring the automatic pre-update backup restarts the stack on the previous known-good tag automatically. To roll back to a *different* revision than the one in that backup, inspect `image-revisions.txt` inside the restored archive and set `LANCACHE_IMAGE_TAG` in `.env` to the desired `sha-*`, release candidate, or `vX.Y.Z` release tag, then run `setup.sh update [install-dir]` to apply it.
 
 ## Restore also re-converges `.env`
 
@@ -156,7 +156,7 @@ Test restores periodically on a spare host or VM:
 
 ## Secret and CA handling
 
-Backups contain secrets such as `.env`, `DDNS_TSIG_KEY`, `PDNS_API_KEY`, `NATS_UI_PASSWORD`, `NATS_DNS_WRITER_PASSWORD`, `NATS_CALLOUT_PASSWORD`, `NATS_SYS_PASSWORD` (the NATS system-account credential used only to look up and force-disconnect a removed/rotated secondary's live connection, issue #681 -- treat it as at least as sensitive as the other NATS static-role passwords, since it grants read access to every live connection's metadata network-wide via NATS's `$SYS.REQ.SERVER.*` API, not just the ability to disconnect one), the auth-callout issuer NKey seed file (`NATS_ISSUER_SEED_PATH`, default `/data/lancache-nats-issuer.seed` inside the Admin UI's data volume), `SECONDARY_REGISTRATION_TOKEN`, optional Admin UI credentials, and possibly `ca.key`. Store backups off-host and encrypt them when they leave the server. Losing the issuer seed is self-healing, not a durability risk: the Admin UI generates a fresh one on next start and rewrites `nats.conf`'s `auth_callout.issuer` to match before accepting any connections, so already-registered secondaries keep working unchanged (their credential is verified against the `secondaries` table, not tied to any particular issuer key).
+Backups contain secrets such as `.env`, `DDNS_TSIG_KEY`, `PDNS_API_KEY`, `SECONDARY_REGISTRATION_TOKEN`, the cachehamster session key and sealed Steam session token (`CACHEHAMSTER_DATA_DIR`), optional Admin UI credentials, and possibly `ca.key`. Store backups off-host and encrypt them when they leave the server.
 
 Treat `ca.key` in the CA state directory as highly sensitive. Anyone with that private key can issue certificates trusted by HTTPS-mode clients. Distribute `ca.crt` to clients, but never distribute `ca.key`. If the CA key is exposed, generate a new CA, remove the old CA from clients, install the new `ca.crt`, and restart the proxy stack.
 
@@ -164,4 +164,4 @@ Treat `ca.key` in the CA state directory as highly sensitive. Anyone with that p
 
 The current implementation uses timestamped tar archives because they are predictable, easy to inspect, and do not require a long-running backup service. Future PRs could add an optional text-file history layer similar to `etckeeper` for `.env`, compose files, and generated service config, but that should stay separate from cache backups so repository history never grows with cache payloads or secrets accidentally committed to a remote.
 
-Since this document was written, a small piece of that idea landed for individual services: see [known-good-config-snapshots.md](known-good-config-snapshots.md) for the per-service known-good configuration snapshot mechanism: the supervisor checks nginx, dnsmasq, Kea DHCP and PowerDNS's `pdns.conf`/`recursor.conf` at each start and falls back to the newest snapshot that passes; the Admin UI also saves a Kea snapshot after each config write and offers a Kea rollback. It is deliberately separate from this backup/restore contract — it is not a replacement, does not cover the whole install, and its snapshot volumes are not part of the automated backup manifest above. PowerDNS's zone/record database (`pdns.sqlite3`) *is* included in the automated backup above (it lives under the PowerDNS state paths listed in "What the automated backup includes"). The snapshot mechanism never copies that SQLite file; per-zone record snapshots and their rollback are taken through the PowerDNS API by the `nats-subscriber`, see known-good-config-snapshots.md's "Zones, records, and TSIG/DDNS metadata" section.
+Since this document was written, a small piece of that idea landed for individual services: see [known-good-config-snapshots.md](known-good-config-snapshots.md) for the per-service known-good configuration snapshot mechanism: the supervisor checks nginx, dnsmasq, Kea DHCP and PowerDNS's `pdns.conf`/`recursor.conf` at each start and falls back to the newest snapshot that passes; the Admin UI also saves a Kea snapshot after each config write and offers a Kea rollback. It is deliberately separate from this backup/restore contract — it is not a replacement, does not cover the whole install, and its snapshot volumes are not part of the automated backup manifest above. PowerDNS's zone/record database (`pdns.sqlite3`) *is* included in the automated backup above (it lives under the PowerDNS state paths listed in "What the automated backup includes"). The snapshot mechanism never copies that SQLite file; per-zone record snapshots and their rollback are taken through the PowerDNS API by the Admin UI, see known-good-config-snapshots.md's "Zones, records, and TSIG/DDNS metadata" section.

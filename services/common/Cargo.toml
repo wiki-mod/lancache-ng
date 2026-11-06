@@ -18,13 +18,24 @@ name = "lancache_ng"
 path = "shared.rs"
 
 [dependencies]
-anyhow = { workspace = true }
 hex = { workspace = true }
+# What: ChaCha20-Poly1305 for sealed login tokens.
+# Why: one cipher owner; cachehamster used it already.
+# From: Issue #1683 | PR #1858
+chacha20poly1305 = { workspace = true }
+# What: DHCPv4 codec for the shared precheck.
+# Why: the probe moved from the watchdog to shared.
+# From: Issue #1683 | PR #1858
+dhcproto = { workspace = true }
 rand = { workspace = true }
 # What: reqwest client of the Docker API (rustls).
 # Why: AG-REL-003 forbids openssl-sys.
 # From: Issue #1683 | PR #1858
-reqwest = { workspace = true }
+reqwest = { workspace = true, features = ["stream"] }
+# What: StreamExt for the shared body drain.
+# Why: ui prefill and cachehamster drain one way.
+# From: Issue #816 | PR #1976
+futures-util = { workspace = true }
 # What: statvfs and SIGTERM for df and terminate.
 # Why: std has neither; rustix is the safe wrapper.
 # From: Issue #1683 | PR #1912

@@ -140,7 +140,7 @@ This section documents intentional security design decisions and known tradeoffs
 
 ### 6. Upstream TLS Verification in nginx
 
-**Design**: nginx proxies cached HTTP and HTTPS-mode requests to the real CDN over HTTPS and validates the upstream certificate chain (`proxy_ssl_verify on`).
+**Design**: nginx fetches the real CDN with the scheme the client used: HTTP requests over HTTP, HTTPS-mode requests over HTTPS with the upstream certificate chain validated (`proxy_ssl_verify on`).
 
 **Reason**: The proxy resolves upstream CDN hostnames with public DNS resolvers configured in nginx, not the local DNS-spoofing recursor, so certificate verification can validate the real origin.
 

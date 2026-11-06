@@ -11,34 +11,22 @@ edition.workspace = true
 license.workspace = true
 
 # What: explicit bin target, same as cargo's default
-# Why: manifest-only build stages stub declared targets
+# Why: ci.sh tells a bin crate from a library by it
 # From: Issue #1683 | PR #1905
 [[bin]]
 name = "lancache-ui"
 path = "src/main.rs"
 
+# What: crates the ui binary links.
+# Why: versions come from the workspace manifest.
+# From: Issue #1683 | PR #1858
 [dependencies]
 LanCache-NG = { path = "../common" }
-anyhow = { workspace = true }
 argon2 = { workspace = true }
-async-nats = { workspace = true }
 axum = { workspace = true, features = ["form"] }
 base64 = { workspace = true }
-data-encoding = { workspace = true }
-form_urlencoded = { workspace = true }
-futures-util = { workspace = true }
-hex = { workspace = true }
-liblzma = { workspace = true }
-nkeys = { workspace = true }
-rand = { workspace = true }
-regex = { workspace = true }
-reqwest = { workspace = true, features = ["stream"] }
-rusqlite = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 tera = { workspace = true }
-time = { workspace = true, features = ["macros", "parsing"] }
 tokio = { workspace = true }
-tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
