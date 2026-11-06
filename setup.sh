@@ -8395,6 +8395,13 @@ if [[ -n "${LANCACHE_IMAGE_CHANNEL:-}" ]]; then
         LANCACHE_IMAGE_CHANNEL="$current_channel"
     fi
     print_ok "Using the channel already set via LANCACHE_IMAGE_CHANNEL=${LANCACHE_IMAGE_CHANNEL}."
+    # What: a preset non-default channel still warns
+    # Why: nightly warns on every install (29.10.)
+    # From: Issue #1683
+    if [[ "$LANCACHE_IMAGE_CHANNEL" != "$(lancache_sot_value install_channel release)" ]] \
+        && list_has_line "$LANCACHE_IMAGE_CHANNEL" "$(lancache_selectable_channels)"; then
+        print_warn "The $LANCACHE_IMAGE_CHANNEL channel is experimental: untested daily builds that may break the stack; not for production use."
+    fi
 else
     selectable=$(lancache_selectable_channels) || exit $?
     retired=$(lancache_release_rows retired) || exit $?
