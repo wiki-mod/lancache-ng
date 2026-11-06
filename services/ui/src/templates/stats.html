@@ -61,7 +61,7 @@
       card.hidden = card.dataset.tab !== src;
       if (card.hidden) { return; }
       const img = card.querySelector('.stats-img');
-      img.src = '/stats/graph/' + img.dataset.graph + '?range=' + encodeURIComponent(range) + '&dark=' + (dark() ? 1 : 0) + '&t=' + Date.now();
+      img.src = '{{ routes.stats_graph | safe }}'.replace('{name}', img.dataset.graph) + '?range=' + encodeURIComponent(range) + '&dark=' + (dark() ? 1 : 0) + '&t=' + Date.now();
     });
     try { sessionStorage.setItem('stats-src', src); sessionStorage.setItem('stats-range', range); } catch (err) { reportError(err); }
   }

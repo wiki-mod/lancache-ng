@@ -586,13 +586,65 @@ runtime:
     # Why: an alarm burst must not grow the file unbounded.
     # From: Issue #1683 | PR #1858
     - UI_ALARMS_MAX=50
-    # What: URL paths of ui routes setup.sh and ci.sh call.
-    # Why: shell reads the path here; no literal copy.
-    # From: Issue #1683 | PR #1912
+    # What: every ui page and route path; the ui serves them.
+    # Why: one owner for ui, setup.sh and ci.sh (AG-CODE-011).
+    # From: Issue #1683
+    - UI_PAGE_DASHBOARD=/
+    - UI_PAGE_LOGS=/logs
+    - UI_PAGE_STATS=/stats
+    - UI_PAGE_CACHEHAMSTER=/cachehamster
     - UI_PAGE_DOMAINS=/domains
+    - UI_PAGE_DHCP=/dhcp
+    - UI_PAGE_SETUP=/setup
+    - UI_ROUTE_HAMSTER_ADD=/cachehamster/add
+    - UI_ROUTE_HAMSTER_START=/cachehamster/start
+    - UI_ROUTE_HAMSTER_CANCEL=/cachehamster/cancel
+    - UI_ROUTE_HAMSTER_REMOVE=/cachehamster/remove
+    - UI_ROUTE_HAMSTER_LOGOUT=/cachehamster/logout
+    - UI_ROUTE_HAMSTER_API=/api/cachehamster/{op}
+    - UI_ROUTE_ADMIN_CSS=/static/admin.css
+    - UI_ROUTE_FAVICON=/favicon.ico
+    - UI_ROUTE_LOGO_ICON=/static/logo-icon.png
+    - UI_ROUTE_WATCHDOG_STATUS=/api/status
+    - UI_ROUTE_DESIRED_STATE=/api/container/{service}
+    - UI_ROUTE_RESTART_UI=/api/restart-ui
+    - UI_ROUTE_SETUP_SAVE=/setup/save
+    - UI_ROUTE_PASSWORD=/setup/password
+    - UI_ROUTE_LOGS_SAVE=/logs/save
+    - UI_ROUTE_DNS_ADD=/domains/domain-add
+    - UI_ROUTE_DNS_REMOVE=/domains/domain-remove
+    - UI_ROUTE_DNS_TOGGLE=/domains/domain-toggle
     - UI_ROUTE_LAN_ADD=/domains/record-add
+    - UI_ROUTE_LAN_REMOVE=/domains/record-remove
+    - UI_ROUTE_PTR_ADD=/domains/ptr-add
+    - UI_ROUTE_PTR_REMOVE=/domains/ptr-remove
+    - UI_ROUTE_AAAA_FILTER=/domains/aaaa-filter
+    - UI_ROUTE_QUERY_LOG=/domains/query-log
+    - UI_ROUTE_DDNS_UNSIGNED=/domains/ddns-unsigned
+    - UI_ROUTE_ZONE_ROLLBACK=/domains/zone-rollback
+    - UI_ROUTE_TSIG_ROTATE=/domains/tsig-rotate
+    - UI_ROUTE_SECONDARY=/api/secondary/{name}/remove
+    - UI_ROUTE_SECONDARY_ROTATE=/api/secondary/{name}/rotate
+    - UI_ROUTE_SECONDARY_HEALTH=/api/secondary/{name}/health
+    - UI_ROUTE_SECONDARY_ADDRESS=/api/secondary/{name}/address
+    - UI_ROUTE_DHCP_MODE=/dhcp/mode
+    - UI_ROUTE_DHCP_DDNS=/dhcp/ddns
+    - UI_ROUTE_DHCP_PROXY=/dhcp/proxy
+    - UI_ROUTE_DHCP_RELAY=/dhcp/relay
+    - UI_ROUTE_SUBNET_ADD=/dhcp/subnet-add
+    - UI_ROUTE_SUBNET_UPDATE=/dhcp/subnet-update
+    - UI_ROUTE_SUBNET_REMOVE=/dhcp/subnet-remove
+    - UI_ROUTE_SUBNET_OPTION_ADD=/dhcp/option-add
+    - UI_ROUTE_SUBNET_OPTION_REMOVE=/dhcp/option-remove
     - UI_ROUTE_STATIC_ADD=/dhcp/static-add
+    - UI_ROUTE_STATIC_REMOVE=/dhcp/static-remove
+    - UI_ROUTE_LEASE_RELEASE=/dhcp/lease-release
+    - UI_ROUTE_KEA_ROLLBACK=/dhcp/kea-rollback
+    - UI_ROUTE_DHCP_CHECK=/dhcp/check
+    - UI_ROUTE_SERVICE_ACTION=/api/service/{container}/{program}/{action}
+    - UI_ROUTE_STATS_GRAPH=/stats/graph/{name}
     - UI_ROUTE_SECONDARY_REGISTER=/api/secondary/register
+    - UI_ROUTE_HEALTH=@PROXY_HEALTH_PATH@
     # What: ui page refresh timings, in seconds.
     # Why: templates read the value; no literal in markup.
     # From: Issue #1683 | PR #1912

@@ -131,7 +131,7 @@
       <p class="section-sub">{{ t.every_local_name_ends_in_this }} <code>lancache-ng.lan</code> {{ t.a_printer_is }} <code>printer.lancache-ng.lan</code>{{ t.with }} <code>lan</code> {{ t.it_is }} <code>printer.lan</code>{{ t.dhcp_hands_it_to_the_clients }}</p>
       <form action="{{ routes.setup_save | safe }}" method="post" class="field-row">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <input type="hidden" name="back" value="/domains">
+        <input type="hidden" name="back" value="{{ pages.domains }}">
         <div class="field" style="margin-bottom:0;">
           <label for="lan-domain">Domain</label>
           <input type="text" id="lan-domain" name="DHCP_DOMAIN" value="{{ lan_zone }}" pattern="[A-Za-z0-9.-]+" required>
@@ -332,7 +332,7 @@
       <p class="section-sub">{{ t.upstream_dns_desc }}</p>
       <form action="{{ routes.setup_save | safe }}" method="post">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <input type="hidden" name="back" value="/domains">
+        <input type="hidden" name="back" value="{{ pages.domains }}">
         <div class="field"><label for="up-servers">{{ t.upstream_servers }}</label><input id="up-servers" name="DNS_UPSTREAM_SERVERS" placeholder="192.168.1.23 192.168.1.22" value="{{ v.DNS_UPSTREAM_SERVERS }}"></div>
         <div class="field"><label for="up-zones">{{ t.upstream_zones }}</label><input id="up-zones" name="DNS_UPSTREAM_ZONES" placeholder="firma.local" value="{{ v.DNS_UPSTREAM_ZONES }}"></div>
         <div class="field"><label for="up-unsigned">{{ t.upstream_unsigned }}</label><input id="up-unsigned" name="DNS_UPSTREAM_UNSIGNED_ZONES" placeholder="firma.local" value="{{ v.DNS_UPSTREAM_UNSIGNED_ZONES }}"></div>
