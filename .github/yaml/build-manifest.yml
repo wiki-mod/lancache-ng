@@ -805,6 +805,10 @@ runtime:
     - NGINX_UPSTREAM_IDLE_TIMEOUT=3600
     - NGINX_CACHE_LOCK_TIMEOUT=2h
     - NGINX_SSL_VERIFY_DEPTH=2
+    # What: CA bundle nginx trusts for origin https.
+    # Why: one owner for the path; Alpine default.
+    # From: Issue #1683 | PR #1980
+    - NGINX_SSL_TRUSTED_CA=/etc/ssl/certs/ca-certificates.crt
     - NGINX_SSL_PROTOCOLS=TLSv1.2 TLSv1.3
     - NGINX_SSL_CIPHERS=HIGH:!aNULL:!MD5
     - NGINX_SSL_SESSION_CACHE=shared:SSL:10m
