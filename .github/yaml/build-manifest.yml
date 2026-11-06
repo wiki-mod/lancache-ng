@@ -820,6 +820,10 @@ runtime:
     - PDNS_LUA_DNS_SCRIPT=@PDNS_CONF_DIR@/filter-aaaa.lua
     - PDNS_SCHEMA_FILE=/usr/share/doc/pdns/schema.sqlite3.sql
     - NGINX_DIR=/etc/nginx
+    # What: NGINX_DIR parts the proxy image links
+    # Why: one nginx.conf; no package file stays
+    # From: Issue #1683
+    - NGINX_LINK_PARTS=nginx.conf conf.d stream.d proxy-params.conf
     - NGINX_SUBDIR_CA=ssl/ca
     - NGINX_SUBDIR_CERTS=ssl/certs
     - CA_CERT_FILE=ca.crt
@@ -1209,6 +1213,7 @@ runtime:
     - NGINX_CLIENT_ACL_FILE=path;;;reload;proxy
     - NGINX_DEFAULT_CERT=text;;;reload;proxy
     - NGINX_DIR=path;;;container;proxy
+    - NGINX_LINK_PARTS=list;;;container;proxy
     - NGINX_HTTPS_LISTEN_FILE=text;;;reload;proxy
     - NGINX_PSL_FILE=text;;;reload;proxy
     - NGINX_DISCARD_PORT=uint;1;65535;reload;proxy
