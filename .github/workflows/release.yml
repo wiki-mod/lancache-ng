@@ -147,6 +147,11 @@ jobs:
       credentials: *ghcr_credentials
       volumes:
         - ${{ needs.resolve-build-tools.outputs.validate-dir }}:${{ needs.resolve-build-tools.outputs.validate-dir }}
+      # What: the build-tools ref this job runs in.
+      # Why: the state-root clear runs in it, no alpine.
+      # From: Issue #1683 | PR #1984
+      env:
+        CI_BUILD_TOOLS_IMAGE: ${{ needs.resolve-build-tools.outputs.image }}
     permissions: *release_read
     outputs:
       stack: ${{ steps.validate.outputs.stack }}

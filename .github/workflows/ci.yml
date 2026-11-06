@@ -228,14 +228,12 @@ jobs:
       SCCACHE_DIST_AUTH_TOKEN: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
     steps:
       - *bootstrap
-      # What: arm64 checkout by git in a container step.
-      # Why: no actions/checkout; push auth is CI_GIT_TOKEN.
-      # From: Issue #1683 | PR #1858
+      # What: arm64 checkout by git of the build-tools job.
+      # Why: no foreign container; one container per job.
+      # From: Issue #1683 | PR #1984
       - name: Check out the event commit on arm64
         if: runner.arch == 'ARM64'
-        uses: docker://mirror.gcr.io/alpine/git:latest
-        with:
-          args: -c safe.directory=/github/workspace clone --depth 1 --revision=${{ github.sha }} ${{ github.server_url }}/${{ github.repository }} /github/workspace
+        run: git -c safe.directory="${GITHUB_WORKSPACE}" clone --depth 1 --revision="${GITHUB_SHA}" "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" "${GITHUB_WORKSPACE}"
       - *gha_args
       - *gha_export
       # What: build, then publish and verify result
@@ -383,6 +381,11 @@ jobs:
       credentials: *ghcr_credentials
       volumes:
         - ${{ needs.plan.outputs.validate-dir }}:${{ needs.plan.outputs.validate-dir }}
+      # What: the build-tools ref this job runs in.
+      # Why: the state-root clear runs in it, no alpine.
+      # From: Issue #1683 | PR #1984
+      env:
+        CI_BUILD_TOOLS_IMAGE: ${{ needs.plan.outputs.image }}
     permissions:
       contents: read
       packages: read

@@ -12459,11 +12459,12 @@ _ci_validate_teardown() {
         }
     done
     if [ -n "${LANCACHE_STATE_DIR:-}" ] && [ -d "${LANCACHE_STATE_DIR}" ]; then
-        # What: clear root-owned state via a container.
-        # Why: services write as root; runner user cannot.
-        # From: Issue #1683
+        # What: clear root-owned state via build-tools.
+        # Why: services write as root; no foreign container.
+        # From: Issue #1683 | PR #1984
         local base
-        if ! base="$(_ci_base_image alpine "[CI-ERROR-VALIDATE-0102]" "key=\"base_images.alpine\" reason=\"no alpine base to clear the state root\"")"; then
+        if ! base="$(_ci_build_tools_run_image)"; then
+            ci_log "[CI-ERROR-VALIDATE-0102]" "reason=\"no build-tools ref to clear the state root\""
             rc=2
         elif ! out="$(_ci_bounded_run "${LANCACHE_STATE_DIR}:/s" "${base}" \
                 find /s -mindepth 1 -delete 2>&1 && rmdir "${LANCACHE_STATE_DIR}" 2>&1)"; then

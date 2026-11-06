@@ -226,14 +226,14 @@ jobs:
       SCCACHE_DIST_AUTH_TOKEN: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
     steps:
       - *bootstrap
-      # What: arm64 checkout of the nightly branch by git.
-      # Why: no actions/checkout; push auth is CI_GIT_TOKEN.
-      # From: Issue #1683 | PR #1858
+      # What: arm64 checkout by git of the build-tools job.
+      # Why: no foreign container; one container per job.
+      # From: Issue #1683 | PR #1984
       - name: Check out the nightly branch on arm64
         if: runner.arch == 'ARM64'
-        uses: docker://mirror.gcr.io/alpine/git:latest
-        with:
-          args: -c safe.directory=/github/workspace clone --depth 1 --branch=${{ vars.PROJECT_NIGHTLY_REF }} ${{ github.server_url }}/${{ github.repository }} /github/workspace
+        env:
+          NIGHTLY_REF: ${{ vars.PROJECT_NIGHTLY_REF }}
+        run: git -c safe.directory="${GITHUB_WORKSPACE}" clone --depth 1 --branch="${NIGHTLY_REF}" "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" "${GITHUB_WORKSPACE}"
       - *channel_pin
       # What: export args for the GHA cache runtime step.
       # Why: ci.sh owns the kill timeout and the var list.
@@ -351,6 +351,11 @@ jobs:
       credentials: *ghcr_credentials
       volumes:
         - ${{ needs.platform.outputs.validate-dir }}:${{ needs.platform.outputs.validate-dir }}
+      # What: the build-tools ref this job runs in.
+      # Why: the state-root clear runs in it, no alpine.
+      # From: Issue #1683 | PR #1984
+      env:
+        CI_BUILD_TOOLS_IMAGE: ${{ needs.platform.outputs.image }}
     outputs:
       stack: ${{ steps.validate.outputs.stack }}
     steps:
@@ -442,6 +447,11 @@ jobs:
       credentials: *ghcr_credentials
       volumes:
         - ${{ needs.platform.outputs.validate-dir }}:${{ needs.platform.outputs.validate-dir }}
+      # What: the build-tools ref this job runs in.
+      # Why: the state-root clear runs in it, no alpine.
+      # From: Issue #1683 | PR #1984
+      env:
+        CI_BUILD_TOOLS_IMAGE: ${{ needs.platform.outputs.image }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
