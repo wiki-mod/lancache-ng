@@ -1653,8 +1653,8 @@ async fn daemon(c: Ctx) -> Result<(), String> {
                 runner.running.len(),
                 bytes * 8 / (now - last).max(1) / 1_000_000,
             );
-            // What: log while jobs run or the state changed.
-            // Why: an idle "0 jobs" line every 10 s is spam.
+            // What: log while jobs run or on a change.
+            // Why: an idle 0-jobs line is log spam.
             // From: Issue #871 | PR #1984
             if state.0 > 0 || state != shown {
                 eprintln!("cachehamster: {} jobs running, {} Mbit/s", state.0, state.1);
