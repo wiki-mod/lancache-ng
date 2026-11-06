@@ -100,7 +100,7 @@ jobs:
       # From: Issue #1683 | PR #1984
       - &bootstrap
         name: Check out the nightly branch
-        uses: actions/checkout@v7
+        uses: &checkout actions/checkout@v7
         with:
           ref: ${{ vars.PROJECT_NIGHTLY_REF }}
           fetch-depth: 1
@@ -226,7 +226,7 @@ jobs:
       # Why: one tree per run, also on a native host.
       # From: Issue #1683 | PR #1984
       - name: Check out the resolved nightly commit
-        uses: actions/checkout@v7
+        uses: *checkout
         with:
           ref: ${{ needs.platform.outputs.commit }}
           fetch-depth: 1

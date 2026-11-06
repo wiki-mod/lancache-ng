@@ -6354,10 +6354,10 @@ ci_cmd_build_tools_run() {
     # What: job values by name; docker reads each value.
     # Why: no value lands in argv or in a file.
     # From: Issue #1683 | PR #1984
-    for name in $(compgen -e); do
+    for name in "${!GITHUB_@}" "${!RUNNER_@}" "${!ACTIONS_@}" "${!CI_@}" "${!SCCACHE_@}" "${!GH_TOKEN@}"; do
         case "${name}" in
             CI_BUILD_TOOLS_NATIVE) ;;
-            GITHUB_* | RUNNER_* | ACTIONS_* | CI_* | SCCACHE_* | GH_TOKEN) envs+=(-e "${name}") ;;
+            *) envs+=(-e "${name}") ;;
         esac
     done
     # What: registry login with the job token for the pull.
