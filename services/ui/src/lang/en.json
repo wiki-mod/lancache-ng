@@ -43,7 +43,7 @@
   "cancel": "Cancel",
   "capability": "Capability",
   "change_password": "Change password",
-  "changes_here_save_immediately_and_stay": "Changes here save immediately and stay on this page. No DNS restart is needed.",
+  "changes_here_save_immediately_and_stay": "Changes here save immediately and stay on this page. IPv4 only needs no restart. Logging DNS queries restarts the dns container, because PowerDNS reads the log level only at start.",
   "changes_the_language_of_this_interface": "Changes the language of this interface, including tooltips and error messages.",
   "check": "Check",
   "check_again": "Check again",

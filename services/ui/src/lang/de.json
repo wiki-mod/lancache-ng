@@ -43,7 +43,7 @@
   "cancel": "Abbrechen",
   "capability": "Fähigkeit",
   "change_password": "Passwort ändern",
-  "changes_here_save_immediately_and_stay": "Änderungen hier werden sofort gespeichert und bleiben auf dieser Seite. Kein DNS-Neustart nötig.",
+  "changes_here_save_immediately_and_stay": "Änderungen hier werden sofort gespeichert und bleiben auf dieser Seite. IPv4 only braucht keinen Neustart. DNS-Abfragen protokollieren startet den Container dns neu, weil PowerDNS die Log-Stufe nur beim Start liest.",
   "changes_the_language_of_this_interface": "Ändert die Sprache dieser Oberfläche.",
   "check": "Prüfen",
   "check_again": "Erneut prüfen",
