@@ -8,7 +8,7 @@
 {% block title %} – {{ t.statistics }}{% endblock %}
 {% block content %}
 <style>
-  .stats-grid { grid-template-columns: repeat(2, minmax(0, 360px)); }
+  .stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   @media (max-width: 720px) { .stats-grid { grid-template-columns: 1fr; } }
 </style>
 <section>
@@ -34,7 +34,7 @@
   <div class="grid-2 stats-grid">
     {% for g in graphs %}
     <div class="card stats-card" data-tab="{{ g.tab }}" style="min-width:0; padding:8px;" hidden>
-      <img class="stats-img" data-graph="{{ g.name }}" alt="{{ g.title }}" style="max-width:100%; height:auto; display:block; margin:0 auto;">
+      <img class="stats-img" data-graph="{{ g.name }}" alt="{{ g.title }}" style="width:100%; height:auto; display:block;">
     </div>
     {% endfor %}
   </div>
