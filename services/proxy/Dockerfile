@@ -57,7 +57,7 @@ ENV LANCACHE_RUNTIME_GID=${LANCACHE_RUNTIME_GID} \
     LANCACHE_RUNTIME_SCHEMA=${LANCACHE_RUNTIME_SCHEMA}
 
 # What: NGINX_DIR parts point into NGINX_CONF_DIR.
-# Why: the ui renders them into the CONFIG_DIR volume.
+# Why: ui renders them; plain nginx -t sees the live file
 # From: Issue #1683 | PR #1980
 RUN set -e; \
     declare -A v; IFS='|' read -ra kv <<< "${LANCACHE_RUNTIME_DEFAULTS}"; \
@@ -67,7 +67,7 @@ RUN set -e; \
         k="${BASH_REMATCH[1]}"; t="${t//@${k}@/${v[${k}]}}"; \
       done; printf '%s' "${t}"; }; \
     src="$(x "${v[NGINX_DIR]}")"; dst="$(x "${v[NGINX_CONF_DIR]}")"; \
-    for part in conf.d stream.d proxy-params.conf; do \
+    for part in nginx.conf conf.d stream.d proxy-params.conf; do \
       rm -rf "${src:?}/${part}"; ln -s "${dst}/${part}" "${src}/${part}"; \
     done
 
