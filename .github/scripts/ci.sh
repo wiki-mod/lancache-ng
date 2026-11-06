@@ -9349,7 +9349,7 @@ _ci_normalize_platform_digests() {
 # From: Issue #1683 | PR #1858
 _ci_index_lookup() {
     local service="$1" want="$2"
-    local name head kv rev revs tag idx grc plats have found=""
+    local name head kv rev revs tag idx grc plats have dig found=""
     name="$(_ci_image_ref "${service}")" || return 2
     head="$(_ci_head_commit)" || return 2
     revs="${head}"
@@ -9376,6 +9376,16 @@ _ci_index_lookup() {
         # From: Issue #1683 | PR #1858
         [ "${rev}" != "${head}" ] || found="${idx} ${plats% }"
     done <<< "${revs}"
+    # What: a digest-only index of the same content.
+    # Why: §96: a rebuild at one commit gets no tag.
+    # From: Issue #1683 | PR #1984
+    dig="$(_ci_index_digest "${service}" "${want}")" || return 2
+    grc=0; idx="$(_ci_registry_probe "${name}@${dig}")" || grc=$?
+    if [ "${grc}" -eq 0 ]; then
+        printf '%s %s\n' "${idx}" "${want% }"
+        return 0
+    fi
+    [ "${grc}" -eq 1 ] || return "${grc}"
     [ -n "${found}" ] || return 1
     printf '%s\n' "${found}"
 }
@@ -9391,6 +9401,42 @@ _ci_index_children() {
         return 2
     fi
     [ -z "${plats}" ] || printf '%s\n' "${plats}"
+}
+
+# What: name@digest sources of a platform=digest list.
+# Why: one source order keeps the index digest stable.
+# From: Issue #1683 | PR #1984
+_ci_index_sources() {
+    local name="$1" kv
+    local -a list
+    read -ra list <<< "$2"
+    for kv in "${list[@]}"; do
+        printf '%s@%s\n' "${name}" "${kv#*=}"
+    done
+}
+
+# What: sha256 digest an index of these sources gets.
+# Why: §96: a rebuild is found by digest, not by tag.
+# From: Issue #1683 | PR #1984
+_ci_index_digest() {
+    local service="$1" want="$2" name s out hex
+    name="$(_ci_image_ref "${service}")" || return 2
+    s="$(_ci_index_sources "${name}" "${want}")" || return 2
+    local -a srcs
+    mapfile -t srcs <<< "${s}"
+    if ! out="$(_ci_retry registry-read docker buildx imagetools create --dry-run --tag "${name}" "${srcs[@]}")"; then
+        ci_error "[CI-ERROR-ASSEMBLE-0019]" "service=\"${service}\" reason=\"index digest not computable; UNKNOWN\"" "${out}"
+        return 2
+    fi
+    # What: the dry-run text must be the index JSON alone.
+    # Why: a warning line in it would change the digest.
+    # From: Issue #1683 | PR #1984
+    if ! hex="$(_ci_capture 0 jq -e '.manifests | length > 0' <<< "${out}")"; then
+        ci_error "[CI-ERROR-ASSEMBLE-0020]" "service=\"${service}\" reason=\"dry-run gave no index JSON; UNKNOWN\"" "${out}"
+        return 2
+    fi
+    hex="$(printf '%s' "${out}" | _ci_sha256_hex)" || return 2
+    printf 'sha256:%s\n' "${hex}"
 }
 
 # What: Collect a target's accepted per-platform digests.
@@ -9430,7 +9476,7 @@ _ci_collect_accepted_digests() {
     fi
 }
 
-# What: Reuse an identical index or reject a divergent one.
+# What: Reuse an identical index; rc 3 for a divergent one.
 # Why: Idempotent retry; never overwrite an index.
 # From: Issue #1683
 _ci_reconcile_index() {
@@ -9463,25 +9509,40 @@ _ci_reconcile_index() {
         ci_log "[CI-INFO-ASSEMBLE-0015]" "service=\"${service}\" existing=\"${ex_digest}\" reason=\"index lacks a platform accepted now; completing it\""
         return 0
     fi
-    ci_error "[CI-ERROR-ASSEMBLE-0004]" "service=\"${service}\" reason=\"existing index has different platform digests; refusing to overwrite\" existing=\"${ex_digest}\"" "existing: ${existing#* }"
-    return 2
+    # What: rc 3: other digests at this commit, by digest.
+    # Why: §96; setup.sh pins sha-<commit> as immutable.
+    # From: Issue #1683 | PR #1984
+    ci_log "[CI-INFO-ASSEMBLE-0017]" "service=\"${service}\" existing=\"${ex_digest}\" reason=\"rebuild at this commit; the commit tag stays, the new index is stored by digest\""
+    return 3
 }
 
 # What: Merge accepted per-platform digests into an index.
 # Why: Default assemble backend; shares the index writer.
 # From: Issue #1683
 _ci_docker_assemble() {
-    local service="$1"; shift
-    local name sha target kv
+    local service="$1" mode="$2" want="$3"
+    local name sha target s dig="" got
     name="$(_ci_image_ref "${service}")" || return 2
-    sha="$(_ci_head_commit)" || return 2
-    target="${name}:sha-${sha}"
-    local -a srcs=()
-    for kv; do
-        srcs+=("${name}@${kv#*=}")
-    done
+    if [ "${mode}" = digest ]; then
+        dig="$(_ci_index_digest "${service}" "${want}")" || return 2
+        target="${name}@${dig}"
+    else
+        sha="$(_ci_head_commit)" || return 2
+        target="${name}:sha-${sha}"
+    fi
+    s="$(_ci_index_sources "${name}" "${want}")" || return 2
+    local -a srcs
+    mapfile -t srcs <<< "${s}"
     _ci_imagetools_create "${target}" "${srcs[@]}" >&2 || return "$?"
-    _ci_registry_digest "${target}"
+    got="$(_ci_registry_digest "${target}")" || return 2
+    # What: a digest push must read back as that digest.
+    # Why: VERIFY EXACT DIGEST (§90); no mismatch accepted.
+    # From: Issue #1683 | PR #1984
+    if [ -n "${dig}" ] && [ "${got}" != "${dig}" ]; then
+        ci_error "[CI-ERROR-ASSEMBLE-0018]" "service=\"${service}\" want=\"${dig}\" got=\"${got}\" reason=\"index readback differs from its digest\"" "target: ${target}"
+        return 2
+    fi
+    printf '%s\n' "${got}"
 }
 
 # What: Assemble accepted per-platform digests.
@@ -9501,16 +9562,20 @@ ci_cmd_assemble() {
     for kv in "${input_list[@]}"; do
         [[ "${kv}" != *=* ]] || count=$((count + 1))
     done
-    if ! reused="$(_ci_reconcile_index "${service}" "${want}")"; then
-        return 2
-    fi
+    local rrc=0 mode=tag
+    reused="$(_ci_reconcile_index "${service}" "${want}")" || rrc=$?
+    case "${rrc}" in
+        0) ;;
+        3) mode=digest ;;
+        *) return 2 ;;
+    esac
     if [ -n "${reused}" ]; then
         printf 'service=%s result=reuse-index assembled=%s platforms=%s\n' "${service}" "${reused}" "${count}"
         _ci_assemble_report "${service}" "${inputs}"
         return "$?"
     fi
     _ci_require_ghcr_auth || return "$?"
-    if ! index="$(_ci_docker_assemble "${service}" "${input_list[@]}")"; then
+    if ! index="$(_ci_docker_assemble "${service}" "${mode}" "${want}")"; then
         ci_log "[CI-ERROR-ASSEMBLE-0005]" "service=\"${service}\" inputs=\"${inputs}\" reason=\"assemble backend failed (raw above)\""
         return 2
     fi
@@ -9787,10 +9852,11 @@ _ci_stack_candidate_rows() {
 # Why: one owner for stack and toolchain candidate intake.
 # From: Issue #1683 | PR #1858
 _ci_candidate_index() {
-    local service="$1" inputs want idx
+    local service="$1" inputs want idx rc=0
     inputs="$(_ci_collect_accepted_digests "${service}")" || return "$?"
     want="$(_ci_normalize_platform_digests "${inputs}")" || return 2
-    idx="$(_ci_reconcile_index "${service}" "${want}")" || return "$?"
+    idx="$(_ci_reconcile_index "${service}" "${want}")" || rc=$?
+    [ "${rc}" -eq 0 ] || [ "${rc}" -eq 3 ] || return "${rc}"
     if [ -z "${idx}" ]; then
         ci_error "[CI-ERROR-CANDIDATE-0001]" "service=\"${service}\" reason=\"platforms accepted but no assembled multi-arch index; not candidate-ready\"" "accepted=${inputs}"
         return 2
