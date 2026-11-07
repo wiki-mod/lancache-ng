@@ -6018,15 +6018,36 @@ ci_cmd_board_add() {
     printf 'board-add=added project=%s %s=%s\n' "${number}" "${kind}" "${item}"
 }
 
-# What: assemble product services from build matrix.
-# Why: one matrix walk; iteration in ci.sh (AG-CODE-011).
+# What: services of a build matrix, one per line.
+# Why: passed and planned matrix share one reader.
+# From: Issue #1683
+_ci_matrix_services() {
+    local out
+    [ -n "$1" ] || return 0
+    if ! out="$(jq -r '[.include[].service] | unique | .[]' <<< "$1" 2>&1)"; then
+        ci_error "[CI-ERROR-ASSEMBLE-0011]" "reason=\"build matrix unreadable; no service assembled\"" "${out}"$'\n'"matrix: $1"
+        return 2
+    fi
+    [ -z "${out}" ] || printf '%s\n' "${out}"
+}
+
+# What: assemble passed and unchanged product services.
+# Why: AG-REL-009: a push tags sha-<commit> per service.
 # From: Issue #1683
 ci_cmd_assemble_stack() {
-    local matrix="${CI_BUILD_MATRIX:-}" svc svcs rc=0 arc failed=""
-    [ -n "${matrix}" ] || { ci_log "[CI-ERROR-ASSEMBLE-0006]" "reason=\"CI_BUILD_MATRIX required\""; return 2; }
-    if ! svcs="$(jq -r '[.include[].service] | unique | .[]' <<< "${matrix}" 2>&1)"; then
-        ci_error "[CI-ERROR-ASSEMBLE-0011]" "reason=\"CI_BUILD_MATRIX unreadable; no service assembled\"" "${svcs}"$'\n'"matrix: ${matrix}"
-        return 2
+    local matrix="${CI_BUILD_MATRIX:-}" svc svcs planned all rc=0 arc failed=""
+    [ -n "${matrix}" ] || [ -n "${CI_PLAN_MATRIX+x}" ] || { ci_log "[CI-ERROR-ASSEMBLE-0006]" "reason=\"CI_BUILD_MATRIX or CI_PLAN_MATRIX required\""; return 2; }
+    svcs="$(_ci_matrix_services "${matrix}")" || return 2
+    # What: a service the plan did not build is unchanged.
+    # Why: its accepted digests get this commit's tag too.
+    # From: Issue #1683
+    if [ -n "${CI_PLAN_MATRIX+x}" ]; then
+        planned="$(_ci_matrix_services "${CI_PLAN_MATRIX}")" || return 2
+        all="$(ci_services)" || return 2
+        while IFS= read -r svc; do
+            [ -n "${svc}" ] || continue
+            _ci_list_has "${svc}" "${planned}" || svcs+=$'\n'"${svc}"
+        done <<< "${all}"
     fi
     # What: assembles each service in its own log group
     # Why: one blocks no other; parts show by name
@@ -9765,6 +9786,20 @@ ci_cmd_assemble() {
         3) mode=digest ;;
         *) return 2 ;;
     esac
+    # What: a reused index still needs this commit's tag.
+    # Why: AG-REL-009; setup.sh pins sha-<commit> per image.
+    # From: Issue #1683
+    if [ -n "${reused}" ] && [ "${mode}" = tag ]; then
+        local name head seen prc=0
+        name="$(_ci_image_ref "${service}")" || return 2
+        head="$(_ci_head_commit)" || return 2
+        seen="$(_ci_registry_probe "${name}:sha-${head}")" || prc=$?
+        case "${prc}" in
+            0) reused="${seen}" ;;
+            1) reused="" ;;
+            *) return 2 ;;
+        esac
+    fi
     if [ -n "${reused}" ]; then
         printf 'service=%s result=reuse-index assembled=%s platforms=%s\n' "${service}" "${reused}" "${count}"
         _ci_assemble_report "${service}" "${inputs}"

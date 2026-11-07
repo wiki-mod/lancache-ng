@@ -183,6 +183,11 @@ image digests: a changed service uses the digest built for its new identity, an
 unchanged service reuses the digest accepted for that identity. Nothing is
 retagged or pulled from a mutable channel to complete the stack.
 
+On every push, `ci.sh assemble-stack` assembles the built services and every
+service the plan did not build. An unchanged service gets the index of its
+accepted digests under the new `sha-<full-sha>` tag; nothing is rebuilt. So a
+`sha-<full-sha>` pin finds all five images (AG-REL-009).
+
 ### 4.2 `nightly`
 
 - `nightly.yml` runs on schedule (`23 3 * * *`, UTC) and on

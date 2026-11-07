@@ -335,9 +335,11 @@ jobs:
   assemble:
     name: assemble
     needs: [plan, aggregate]
+    # What: every push, also one that built nothing.
+    # Why: AG-REL-009: sha-<commit> for every service.
+    # From: Issue #1683
     if: >-
-      !cancelled() && needs.aggregate.outputs.passed != '' &&
-      needs.plan.outputs.any-build == 'true' && github.event_name != 'pull_request'
+      !cancelled() && github.event_name != 'pull_request'
     runs-on: ${{ needs.plan.outputs.runner }}
     timeout-minutes: ${{ fromJSON(needs.plan.outputs.timeouts)['assemble'] }}
     container: *bt_platform
@@ -355,6 +357,7 @@ jobs:
       - name: Assemble multi-arch indexes
         env:
           CI_BUILD_MATRIX: ${{ needs.aggregate.outputs.passed }}
+          CI_PLAN_MATRIX: ${{ needs.plan.outputs.matrix }}
           CI_RUN_IDENTITIES: *run_ids
         run: bash .github/scripts/ci.sh assemble-stack
 
