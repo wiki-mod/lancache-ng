@@ -93,6 +93,11 @@ struct Job {
     // From: Issue #871 | PR #1980
     #[serde(default)]
     history: Vec<Event>,
+    // What: bytes to fetch, from the depot manifests.
+    // Why: DoMe 07.11.: show the preload size up front.
+    // From: Issue #871 | PR #1985
+    #[serde(default)]
+    size: u64,
 }
 
 // What: one history line: unix time and the new state.
@@ -643,6 +648,7 @@ fn apply_order(jobs: &mut Vec<Job>, order: Order) {
                 done: 0,
                 failed: 0,
                 total,
+                size: 0,
                 history: vec![Event {
                     at: clock::unix_secs(),
                     state: State::Waiting,
@@ -1432,7 +1438,7 @@ async fn request_code(
 // What: chunk ids from a zipped binary manifest.
 // Why: chunk SHA-1 names the CDN URL; data stays unread.
 // From: Issue #871 | PR #1858
-fn chunks_of(zipped: &[u8]) -> Result<Vec<String>, String> {
+fn chunks_of(zipped: &[u8]) -> Result<Vec<(String, u64)>, String> {
     use std::io::Read as _;
     const PAYLOAD_MAGIC: u32 = 0x71F6_17D0;
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(zipped))
@@ -1456,20 +1462,24 @@ fn chunks_of(zipped: &[u8]) -> Result<Vec<String>, String> {
     let mut ids = Vec::new();
     for mapping in pb_all(&payload, 1) {
         for chunk in pb_all(&pb_read(mapping)?, 6) {
-            if let Some(sha) = pb_all(&pb_read(chunk)?, 1).next() {
-                ids.push(hex::encode(sha));
+            let c = pb_read(chunk)?;
+            if let Some(sha) = pb_all(&c, 1).next() {
+                // What: compressed size, else the plain size.
+                // Why: the CDN sends chunks compressed.
+                let n = pb_int(&c, 5).or_else(|| pb_int(&c, 4)).unwrap_or(0);
+                ids.push((hex::encode(sha), n));
             }
         }
     }
     ids.sort();
-    ids.dedup();
+    ids.dedup_by(|a, b| a.0 == b.0);
     Ok(ids)
 }
 
 // What: every chunk URL of an app's depots.
 // Why: the URL job warms them through the proxy.
 // From: Issue #871 | PR #1858
-async fn app_urls(cfg: &SteamCfg, app: u32) -> Result<Vec<String>, String> {
+async fn app_urls(cfg: &SteamCfg, app: u32) -> Result<(Vec<String>, u64), String> {
     let client = cfg.client()?;
     let web = reqwest::Client::new();
     let mut cm = Cm::login(cfg, &web).await?;
@@ -1496,7 +1506,7 @@ async fn app_urls(cfg: &SteamCfg, app: u32) -> Result<Vec<String>, String> {
             list.push((from, depot, gid));
         }
     }
-    let mut urls = Vec::new();
+    let (mut urls, mut size) = (Vec::new(), 0);
     for (owner, depot, gid) in list {
         let code = match request_code(&mut cm, owner, depot, gid, &cfg.branch).await {
             Ok(c) => c,
@@ -1519,14 +1529,15 @@ async fn app_urls(cfg: &SteamCfg, app: u32) -> Result<Vec<String>, String> {
             continue;
         }
         let body = resp.bytes().await.map_err(|e| format!("{url}: {e}"))?;
-        for sha in chunks_of(&body)? {
+        for (sha, n) in chunks_of(&body)? {
             urls.push(format!("http://{}/depot/{depot}/chunk/{sha}", cfg.cdn_host));
+            size += n;
         }
     }
     if urls.is_empty() {
         return Err(format!("app {app}: no depot of this account and OS"));
     }
-    Ok(urls)
+    Ok((urls, size))
 }
 
 // What: run a Steam app job: resolve, then warm.
@@ -1540,12 +1551,13 @@ async fn run_app(
     id: String,
     rate: Arc<AtomicU64>,
 ) -> State {
-    let urls = match app_urls(&cfg, app).await {
+    let (urls, size) = match app_urls(&cfg, app).await {
         Ok(u) => u,
         Err(e) => return State::Failed(e),
     };
     if let Some(j) = jobs.lock().await.iter_mut().find(|j| j.id == id) {
         j.total = urls.len() as u64;
+        j.size = size;
     }
     let client = match cfg.client() {
         Ok(c) => c,

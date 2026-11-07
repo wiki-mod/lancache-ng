@@ -30,6 +30,10 @@
     {% for r in ranges %}
     <button type="button" class="subtab stats-tab" data-range="{{ r }}">{{ r }}</button>
     {% endfor %}
+    {# What: reload the graphs every recording step. #}
+    {# Why: DoMe 07.11.: values change every minute. #}
+    {# From: Issue #1683 | PR #1985 #}
+    <button type="button" class="subtab" id="stats-auto" data-step="{{ stats_step }}" aria-pressed="false">⟳ {{ t.auto_reload }}</button>
   </div>
   <div class="grid-2 stats-grid">
     {% for g in graphs %}
@@ -72,6 +76,18 @@
   srcs.forEach(function (t) { t.addEventListener('click', function () { src = t.dataset.tab; show(); }); });
   tabs.forEach(function (t) { t.addEventListener('click', function () { range = t.dataset.range; show(); }); });
   show();
+  const auto = document.getElementById('stats-auto');
+  let timer = null;
+  function setAuto(on) {
+    auto.classList.toggle('active', on);
+    auto.setAttribute('aria-pressed', on ? 'true' : 'false');
+    if (timer) { clearInterval(timer); timer = null; }
+    const step = Number(auto.dataset.step);
+    if (on && step > 0) { timer = setInterval(show, step * 1000); }
+    try { sessionStorage.setItem('stats-auto', on ? '1' : ''); } catch (err) { reportError(err); }
+  }
+  auto.addEventListener('click', function () { setAuto(!timer); });
+  try { if (sessionStorage.getItem('stats-auto')) { setAuto(true); } } catch (err) { reportError(err); }
 })();
 </script>
 {% endblock %}

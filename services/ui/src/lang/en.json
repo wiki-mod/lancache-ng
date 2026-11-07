@@ -30,6 +30,7 @@
   "at_a_time": "At a time",
   "at_least_12_characters_the_browser": "At least 12 characters. The browser asks for the password once more after saving.",
   "at_least_one_server_names_or": "At least one server. Names or IP addresses, separated by a space, comma or new line, for example",
+  "auto_reload": "Auto-reload",
   "automatic_updates": "Automatic updates",
   "but_not_the_bare_domain_itself": ", but not the bare domain itself.",
   "by_hand_press_start": "by hand: press Start",

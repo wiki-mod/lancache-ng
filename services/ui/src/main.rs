@@ -1897,6 +1897,7 @@ async fn stats(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     // Why: DoMe 05.11.: no guessing where values come from.
     // From: Issue #1683 | PR #1980
     let step = s.uint("STATS_STEP").unwrap_or_default();
+    ctx.insert("stats_step", &step);
     let snmp = s.text("STATS_SNMP_TARGET").unwrap_or_default();
     let mut tabs = vec![json!({
         "id": lancache_ng::rrd::MACHINE,
