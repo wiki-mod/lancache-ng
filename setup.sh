@@ -6014,8 +6014,8 @@ rollback_stack_update() {
             set_env_key LANCACHE_IMAGE_CHANNEL "$old_channel" "$install_dir/${_UPDATE_ENV_FILE##*/}"
             print_warn "LANCACHE_IMAGE_CHANNEL is $old_channel again; set it anew and run update to retry the switch"
         fi
-        # What: the old stack must be healthy before "restored"
-        # Why: success was shown while every container exited
+        # What: old stack must be healthy before success
+        # Why: success was shown with all containers exited
         # From: Issue #1683 | PR #1991
         local wait services
         local -a restored_services
