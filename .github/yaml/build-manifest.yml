@@ -2070,6 +2070,10 @@ ci_variables:
   # Why: §73: analyzed content is NOOP on a later PR run.
   # From: Issue #1683 | PR #1858
   CI_CODEQL_REF: refs/ci/codeql
+  # What: page size of GitHub REST and GraphQL lists.
+  # Why: AG-CI-006; 100 is the API maximum; no cut list.
+  # From: Issue #1683 | PR #1984
+  CI_GH_PAGE_SIZE: 100
   # What: PR title lint mode (warn|block).
   # Why: AG-GH-018: the mode is a value, default warn.
   # From: Issue #1683 | PR #1858

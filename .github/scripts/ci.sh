@@ -10653,9 +10653,10 @@ _ci_release_changes() {
         printf '_No pull requests merged since %s._\n' "${prev}"
         return 0
     fi
-    local n q="" count=0 rows="" part
+    local n q="" count=0 rows="" part gh_page
+    gh_page="$(_ci_variable CI_GH_PAGE_SIZE)" || return 2
     while IFS= read -r n; do
-        q+=" p${n}: issueOrPullRequest(number: ${n}) { __typename ... on PullRequest { number title url body labels(first: 20) { nodes { name } } } }"
+        q+=" p${n}: issueOrPullRequest(number: ${n}) { __typename ... on PullRequest { number title url body labels(first: ${gh_page}) { nodes { name } } } }"
         count=$((count + 1))
         if [ "${count}" -eq 50 ]; then
             part="$(_ci_release_pr_batch "${repo}" "${q}")" || return 2
@@ -11508,11 +11509,12 @@ _ci_gc_roots() {
 # Why: One discriminating GHCR reader; 404 is not transient.
 # From: Issue #1683
 _ci_gh_versions() {
-    local owner="$1" pkg="$2" out rc=0
+    local owner="$1" pkg="$2" out rc=0 gh_page
+    gh_page="$(_ci_variable CI_GH_PAGE_SIZE)" || return 2
     # What: retry transient GH-API reads; 404 permanent.
     # Why: op=github-api treats 404 as permanent failure.
     # From: Issue #1683
-    out="$(_ci_retry github-api gh api --paginate "/orgs/${owner}/packages/container/${pkg}/versions?per_page=100" --jq '.[] | [.name, .id, .created_at, ((.metadata.container.tags // []) | join(","))] | @tsv')" || rc=$?
+    out="$(_ci_retry github-api gh api --paginate "/orgs/${owner}/packages/container/${pkg}/versions?per_page=${gh_page}" --jq '.[] | [.name, .id, .created_at, ((.metadata.container.tags // []) | join(","))] | @tsv')" || rc=$?
     if [ "${rc}" -ne 0 ]; then
         _ci_text_has -i 'HTTP 404|Not Found' "${out}" && return 1
         ci_error "[CI-ERROR-GC-0018]" "owner=\"${owner}\" pkg=\"${pkg}\" reason=\"GHCR version listing failed\"" "${out}"
@@ -18411,9 +18413,10 @@ _ci_check_pr_tracking_metadata() {
         # What: board lookup: gh api graphql via _ci_retry.
         # Why: a set token that fails must fail (AG-GH-008).
         # From: Issue #1683 | PR #1858
-        local response rc=0 project_item_count
+        local response rc=0 project_item_count gh_page
+        gh_page="$(_ci_variable CI_GH_PAGE_SIZE)" || return 2
         response="$(_ci_retry github-api gh api graphql -f owner="${project_owner}" \
-            -f repo="${repo#*/}" -F pr="${pr_number}" -f query="query(\$owner: String!, \$pr: Int!, \$repo: String!) { repository(owner: \$owner, name: \$repo) { pullRequest(number: \$pr) { projectItems(first: 10) { nodes { project { number } } } } } }")" || rc=$?
+            -f repo="${repo#*/}" -F pr="${pr_number}" -f query="query(\$owner: String!, \$pr: Int!, \$repo: String!) { repository(owner: \$owner, name: \$repo) { pullRequest(number: \$pr) { projectItems(first: ${gh_page}) { nodes { project { number } } } } } }")" || rc=$?
         if [ "${rc}" -ne 0 ]; then
             errs+=("Project-board lookup failed: ${response##*$'\n'}")
         elif ! project_item_count="$(jq -er --argjson pn "${project_number}" \
@@ -18523,8 +18526,10 @@ _ci_check_orphaned_branches() {
     # What: one paged query: tip date and PR count per ref.
     # Why: GraphQL budget, not REST; PRs in any state count.
     # From: Issue #1683 | PR #1858
+    local gh_page
+    gh_page="$(_ci_variable CI_GH_PAGE_SIZE)" || return 2
     raw="$(_ci_retry github-api gh api graphql --paginate -f owner="${repo%%/*}" -f name="${repo#*/}" \
-        -f query="query(\$owner: String!, \$name: String!, \$endCursor: String) { repository(owner: \$owner, name: \$name) { refs(refPrefix: \"refs/heads/\", first: 100, after: \$endCursor) { nodes { name target { ... on Commit { committedDate author { name } } } associatedPullRequests { totalCount } } pageInfo { hasNextPage endCursor } } } }")" || rc=$?
+        -f query="query(\$owner: String!, \$name: String!, \$endCursor: String) { repository(owner: \$owner, name: \$name) { refs(refPrefix: \"refs/heads/\", first: ${gh_page}, after: \$endCursor) { nodes { name target { ... on Commit { committedDate author { name } } } associatedPullRequests { totalCount } } pageInfo { hasNextPage endCursor } } } }")" || rc=$?
     if [ "${rc}" -ne 0 ]; then
         ci_log "[CI-ERROR-CHECK-0133]" "repo=\"${repo}\" rc=${rc} reason=\"branch listing failed (raw above)\""
         return 2
@@ -18563,7 +18568,7 @@ _ci_check_orphaned_branches() {
     local corpus out="" more="" n
     corpus="$(_ci_mktemp "${CI_TMPDIR}/ci-orphan-corpus.XXXXXX")" || return 2
     raw="$(_ci_retry github-api gh api graphql --paginate -f owner="${repo%%/*}" -f name="${repo#*/}" \
-        -f query="query(\$owner: String!, \$name: String!, \$endCursor: String) { repository(owner: \$owner, name: \$name) { issues(first: 100, after: \$endCursor) { nodes { number body comments(first: 100) { nodes { body } pageInfo { hasNextPage } } } pageInfo { hasNextPage endCursor } } } }")" || rc=$?
+        -f query="query(\$owner: String!, \$name: String!, \$endCursor: String) { repository(owner: \$owner, name: \$name) { issues(first: ${gh_page}, after: \$endCursor) { nodes { number body comments(first: ${gh_page}) { nodes { body } pageInfo { hasNextPage } } } pageInfo { hasNextPage endCursor } } } }")" || rc=$?
     if [ "${rc}" -ne 0 ]; then
         ci_log "[CI-ERROR-CHECK-0136]" "repo=\"${repo}\" rc=${rc} reason=\"issue listing failed (raw above)\""
         rm -f "${corpus}"
@@ -18581,7 +18586,7 @@ _ci_check_orphaned_branches() {
     while IFS= read -r n; do
         [ -n "${n}" ] || continue
         raw="$(_ci_retry github-api gh api graphql --paginate -f owner="${repo%%/*}" -f name="${repo#*/}" -F number="${n}" \
-            -f query="query(\$owner: String!, \$name: String!, \$number: Int!, \$endCursor: String) { repository(owner: \$owner, name: \$name) { issue(number: \$number) { comments(first: 100, after: \$endCursor) { nodes { body } pageInfo { hasNextPage endCursor } } } } }")" || rc=$?
+            -f query="query(\$owner: String!, \$name: String!, \$number: Int!, \$endCursor: String) { repository(owner: \$owner, name: \$name) { issue(number: \$number) { comments(first: ${gh_page}, after: \$endCursor) { nodes { body } pageInfo { hasNextPage endCursor } } } } }")" || rc=$?
         if [ "${rc}" -ne 0 ]; then
             ci_log "[CI-ERROR-CHECK-0138]" "repo=\"${repo}\" issue=${n} rc=${rc} reason=\"issue comment listing failed (raw above)\""
             rm -f "${corpus}"
@@ -19094,8 +19099,10 @@ ci_cmd_close_linked_issues() {
             printf 'close-linked-issues=skip reason="GitHub closes on the default branch" branch="%s"\n' "${branch}"
             return 0
         fi
+        local gh_page
+        gh_page="$(_ci_variable CI_GH_PAGE_SIZE)" || return 2
         raw="$(_ci_retry github-api gh api graphql -f owner="${repo%%/*}" -f name="${repo#*/}" -f oid="${GITHUB_SHA}" \
-            -f query="query(\$owner: String!, \$name: String!, \$oid: GitObjectID!) { repository(owner: \$owner, name: \$name) { object(oid: \$oid) { ... on Commit { associatedPullRequests(first: 10) { nodes { ${fields} } } } } } }")" || return 2
+            -f query="query(\$owner: String!, \$name: String!, \$oid: GitObjectID!) { repository(owner: \$owner, name: \$name) { object(oid: \$oid) { ... on Commit { associatedPullRequests(first: ${gh_page}) { nodes { ${fields} } } } } } }")" || return 2
         rows="$(jq -c --arg b "${branch}" --arg s "${GITHUB_SHA}" '[.data.repository.object.associatedPullRequests.nodes[] | select(.merged and .baseRefName == $b and .mergeCommit.oid == $s)]' <<< "${raw}" 2>&1)" || {
             ci_error "[CI-ERROR-LINK-0014]" "sha=\"${GITHUB_SHA}\" reason=\"PR lookup unparseable\"" "${rows}"; return 2; }
     fi
