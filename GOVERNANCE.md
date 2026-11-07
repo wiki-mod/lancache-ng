@@ -1,90 +1,60 @@
 # Governance
 
-This document describes how lancache-ng makes decisions today: who decides
-what, how proposals move from an idea to merged code, and what happens if
-the current maintainer becomes unavailable. It exists to satisfy the OpenSSF
-Best Practices Badge's Silver-tier `governance` and `roles_responsibilities`
-criteria (project #13763, tracked in issue #1130) with a real, accurate
-description rather than a template that doesn't match how this project
-actually runs.
+Reviewed against `current_dev` at `5f32f9f106949681f8887a8c2e48a467bf7c6dac`.
 
-## Decision-making model
+## Contents
 
-lancache-ng currently has **one human maintainer** ([@djdomi](https://github.com/djdomi))
-and no formal steering committee, working group, or voting process. This is
-a deliberate reflection of the project's actual current size and contributor
-base, not an aspiration to grow a committee before there is a community that
-needs one.
+1. [Decision authority](#1-decision-authority)
+2. [Path of a change](#2-path-of-a-change)
+3. [Roles](#3-roles)
+4. [Continuity](#4-continuity)
+5. [Howto audit this file](#howto-audit-this-file)
 
-- **Final decision-making authority** on architecture, security posture,
-  release timing, dependency and tooling choices, and repository settings
-  rests with the maintainer. See `MAINTAINERS.md` for the authoritative,
-  API-verified list of who currently holds this role and what repository
-  access it comes with.
-- **Proposals and discussion happen in the open**, via GitHub issues and pull
-  request review, per `CONTRIBUTING.md`. Anyone can open an issue or a pull
-  request; the maintainer reviews and merges.
-- **AI coding agents** (Claude, Codex, and similar tools) are used to help
-  implement changes under the maintainer's direction. An agent's commits and
-  pull requests carry no independent decision-making authority — they remain
-  subject to the same review as any other contribution before merging, and
-  the repository's own agent governance (`AGENTS.md`, `.github/AGENTS.md`,
-  `CLAUDE.md`) instructs those agents to make ordinary technical decisions
-  independently but to escalate anything with real operational impact
-  (hardware, cost, network topology, or an irreversible/high-risk change)
-  back to the maintainer rather than deciding it unilaterally.
+## 1. Decision authority
 
-## How a change actually gets decided
+| Item | State | Evidence |
+| --- | --- | --- |
+| Maintainers | One, [@djdomi](https://github.com/djdomi) | `MAINTAINERS.md` |
+| Committees, voting | None | `MAINTAINERS.md` lists no further role |
+| Authority | Architecture, security posture, release approval, dependency and tooling choices, repository settings | Maintainer |
+| Rulebook for agents and workflows | `AGENTS.md` (`AG-LAW-001`), with `.github/AGENTS.md` and `CLAUDE.md` | Repository root and `.github/` |
 
-1. **Small, well-scoped fixes** can go straight to a pull request; the PR
-   itself carries the rationale (see `CONTRIBUTING.md`'s "Before you start").
-2. **Larger or ambiguous changes** — new features, behavior changes,
-   anything touching security posture or release process — start as a
-   GitHub issue so the proposal and its discussion are traceable before code
-   exists. `docs/` design documents (for example
-   `docs/design-plannings/design-wireguard-remote-access.md`) are used for
-   changes that need more written rationale than an issue body comfortably
-   holds.
-3. **The maintainer reviews and merges** every pull request; nothing lands
-   on `current_dev` or `master` without that review, and `master` additionally
-   requires a pull request by branch protection (see `AGENTS.md`'s
-   `AG-WF-004`/`AG-WF-014`).
-4. **Governance and rule changes themselves** (this file, `AGENTS.md`,
-   `CLAUDE.md`, `CODE_OF_CONDUCT.md`, `MAINTAINERS.md`) require the
-   maintainer's explicit review before being changed — `AGENTS.md`'s
-   `AG-WF-016` specifically forbids silently narrowing or rewriting existing
-   governance content without that sign-off.
+## 2. Path of a change
 
-## Key roles and responsibilities
+| Step | Rule or location |
+| --- | --- |
+| Discussion | GitHub issues and pull requests (`CONTRIBUTING.md`) |
+| Design text for larger work | `docs/design-plannings/`, `docs/design-steam-prefill.md` |
+| Integration into `master` | By pull request (`AG-WF-004`) |
+| Merge, close, delete | Maintainer authorization (`AG-WF-005`) |
+| Change of `AGENTS.md` content | `AG-WF-016` |
 
-| Role | Who | Responsibilities |
-|---|---|---|
-| Maintainer / owner | [@djdomi](https://github.com/djdomi) | Final say on architecture, security posture, and release approval; reviews and merges every pull request; triages issues; manages repository settings, secrets, and security advisories. See `MAINTAINERS.md` for the full, API-verified detail. |
-| Contributors | Anyone opening an issue or pull request | Propose changes via issues/PRs following `CONTRIBUTING.md`; do not receive write access, admin rights, or secrets as part of a merged contribution. |
-| AI coding agents | Claude, Codex, and similar tools, directed by the maintainer | Implement changes under the governance rules in `AGENTS.md`/`.github/AGENTS.md`/`CLAUDE.md`; make independent technical decisions where the correct answer is determinable from code/docs, escalate the rest. |
+Protection of the default branch `master`:
 
-## Continuity if the maintainer is unavailable
+| Mechanism | State | Evidence |
+| --- | --- | --- |
+| Ruleset `require pull request before merging` | Active, target `~DEFAULT_BRANCH`, no bypass actors, required approvals 0, review thread resolution required | `gh api repos/wiki-mod/lancache-ng/rulesets/19675909` |
+| Branch protection of `master` | Required status checks; no required pull request reviews | `gh api repos/wiki-mod/lancache-ng/branches/master/protection` |
+| Branch protection of `current_dev` | Required status check `result` | `gh api repos/wiki-mod/lancache-ng/branches/current_dev/protection` |
 
-This project does not yet have a second person with repository write access
-(see `MAINTAINERS.md`'s single-row maintainer table) — the Best Practices
-Badge's Silver-tier `bus_factor` criterion is tracked as a known, currently
-unmet gap in issue #1130 for exactly this reason, and closing it is the
-maintainer's decision to make (naming a second trusted maintainer is a real
-operational/trust decision, not something an agent can decide on the
-maintainer's behalf). Until that happens, continuity relies on:
+## 3. Roles
 
-- The repository being public on GitHub (any interested party can fork it if
-  the project is ever abandoned; the AGPL-3.0-or-later license explicitly
-  preserves that right — see `LICENSE`).
-- All project knowledge — architecture, security posture, release process,
-  and historical rationale — being kept in version-controlled, in-repository
-  documentation (`AGENTS.md`, `CLAUDE.md`, `docs/`) rather than only in the
-  maintainer's head or in chat history, per `AGENTS.md`'s "Documentation
-  Drift Is A Defect" and `AG-WF-026` consolidation rules.
+| Role | Holder | Permission |
+| --- | --- | --- |
+| Maintainer | [@djdomi](https://github.com/djdomi) | `admin`; code owner of all files (`.github/CODEOWNERS`) |
+| Contributor | Anyone opening an issue or pull request | None granted by contributing |
+| AI coding agent | Tools directed by the maintainer | None; bound by `AGENTS.md` |
 
-## Changing this document
+## 4. Continuity
 
-Governance changes are themselves a governance decision: open an issue
-describing the proposed change before editing this file or `MAINTAINERS.md`,
-the same way `MAINTAINERS.md`'s own "Changes to this list" section already
-requires for maintainer-list changes.
+| Item | State | Evidence |
+| --- | --- | --- |
+| Persons with write access besides the maintainer | None | `MAINTAINERS.md` |
+| Fork right | AGPL-3.0-or-later, public repository | `LICENSE` |
+| Project knowledge | In the repository: `AGENTS.md`, `docs/` | `AG-WF-026`, `AG-DOC-001` |
+
+Naming a second maintainer is a maintainer decision (`AG-GH-018`).
+
+## Howto audit this file
+
+The audit procedure of this file is `docs/policy/howto-audit-documentation.md`.

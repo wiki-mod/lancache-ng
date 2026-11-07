@@ -1,41 +1,38 @@
 # Maintainers
 
-This file documents who has access to sensitive project resources and what
-their role and responsibilities are, per the OSPS Baseline governance
-controls (see `docs/` for the project's other governance documentation).
-It is kept up to date whenever repository access or roles change.
+Reviewed against `current_dev` at `5f32f9f106949681f8887a8c2e48a467bf7c6dac`.
 
-See `GOVERNANCE.md` for the project's decision-making model and continuity
-plan (the "how" this list's roles fit into), and `ROADMAP.md` for what the
-project intends to do next.
+## Contents
 
-## Current maintainers
+1. [Maintainers](#1-maintainers)
+2. [Contributors and AI coding agents](#2-contributors-and-ai-coding-agents)
+3. [Changes to this file](#3-changes-to-this-file)
+4. [Howto audit this file](#howto-audit-this-file)
 
-| GitHub handle | Role | Responsibilities | Access to sensitive resources |
-|---|---|---|---|
-| [@djdomi](https://github.com/djdomi) | Sole maintainer / owner | Final decision-making on architecture, security posture, release approval, and dependency/tooling choices; reviews and merges all pull requests; triages issues; manages GitHub repository settings | Repository `admin` role (branch protection, security settings, secrets, webhooks); write access to `master`/`current_dev` and all branches; publish rights to the project's GHCR image registry via repository Actions secrets; manages private security advisories and vulnerability disclosure via GitHub Security Advisories |
+## 1. Maintainers
 
-This list is derived from the repository's actual collaborator permissions
-(`GET /repos/wiki-mod/lancache-ng/collaborators`), not from an assumed org
-chart, and must be re-verified against that API whenever this file is
-updated.
+| GitHub handle | Role | Repository permission |
+| --- | --- | --- |
+| [@djdomi](https://github.com/djdomi) | Owner and sole maintainer | `admin` |
 
-## How contributors relate to this list
+| Item | State | Evidence |
+| --- | --- | --- |
+| Collaborators with access | One | `gh api repos/wiki-mod/lancache-ng/collaborators` returns `djdomi` with `admin` |
+| Code owner of all files | `@djdomi` | `.github/CODEOWNERS` |
+| Repository secrets | `CLAUDE_CODE_OAUTH_TOKEN`, `DOCKERHUB_TOKEN`, `DOCKERHUB_USERNAME`, `GHCR_PACKAGE_DELETE_PAT`, `PROJECT_AUTOMATION_PAT`, `SCCACHE_DIST_AUTH_TOKEN`, `SCCACHE_REDIS_URL` | `gh api repos/wiki-mod/lancache-ng/actions/secrets` |
+| GHCR login in CI | Workflow token `secrets.GITHUB_TOKEN` | `.github/workflows/ci.yml` (`GHCR_TOKEN`) |
+| Security reports | GitHub private security advisories | `SECURITY.md` |
 
-lancache-ng accepts external contributions (see `CONTRIBUTING.md`), but
-contributors do not receive write access to the repository as part of
-having a pull request merged. Write access, admin rights, and secrets are
-granted only to the maintainer(s) listed above. AI coding agents (Claude,
-Codex, and similar tools) are sometimes used to help implement changes in
-this repository, under the direction and review of the maintainer listed
-above — an agent's commits and pull requests are not an independent grant
-of access and remain subject to the same maintainer review before merge.
+## 2. Contributors and AI coding agents
 
-## Changes to this list
+- Contributors work through issues and pull requests (`CONTRIBUTING.md`).
+- A merged pull request grants no repository permission.
+- AI coding agents act under the rules of `AGENTS.md` (`AG-WF-004`, `AG-WF-005`). Their commits and pull requests grant no repository permission.
 
-Adding or removing a maintainer, or changing what sensitive resources they
-can access, is a repository governance decision. Open an issue describing
-the proposed change before editing this file, so the change itself is
-traceable the same way any other governance change is (see `AGENTS.md`'s
-"Documentation Drift Is A Defect" section for why stale governance
-documentation is treated as a defect, not a stylistic gap).
+## 3. Changes to this file
+
+A change of the maintainer list or of repository permissions is changed in this file in the same pull request (`AG-DOC-001`). The collaborator list is read again with the command in section 1 at each audit.
+
+## Howto audit this file
+
+The audit procedure of this file is `docs/policy/howto-audit-documentation.md`.
