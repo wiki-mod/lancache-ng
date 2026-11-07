@@ -3749,6 +3749,11 @@ pub mod render {
         if let Err(e) = nginx_files(&mut o, &domains) {
             o.errs.push(e);
         }
+        // What: each error once, even if two files hit it.
+        // Why: DoMe 07.11.: no double texts.
+        // From: Issue #1683 | PR #1991
+        let mut seen = std::collections::HashSet::new();
+        o.errs.retain(|e| seen.insert(e.clone()));
         if o.errs.is_empty() {
             Ok(o.files)
         } else {
@@ -3773,6 +3778,11 @@ pub mod render {
             .collect();
         dns_files(&mut o, sec, &names);
         o.files.retain(|f| f.owner == "dns");
+        // What: each error once, even if two files hit it.
+        // Why: DoMe 07.11.: no double texts.
+        // From: Issue #1683 | PR #1991
+        let mut seen = std::collections::HashSet::new();
+        o.errs.retain(|e| seen.insert(e.clone()));
         if o.errs.is_empty() {
             Ok(o.files)
         } else {
