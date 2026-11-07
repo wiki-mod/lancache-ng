@@ -671,8 +671,8 @@ and reads its Docker health each round (`CHECK_INTERVAL`).
   (`CHECK_INTERVAL` times `RESTART_AFTER`).
 - Hang check: run `docker top <container> -o pid`, then `kill -STOP` every
   listed PID from outside the container (root or `sudo`).
-  `docker kill --signal=STOP` signals only PID 1 (`init: true` makes that
-  `tini`) and the programs keep serving. `docker pause` marks the container
+  `docker kill --signal=STOP` signals only PID 1 and the programs keep
+  serving. `docker pause` marks the container
   unhealthy without running a probe (`FailingStreak` stays 0) and proves no hang
   detection. Pass: a real `FailingStreak` increase from failed probes (not
   only a `Status` flip) and a restart (new `StartedAt`).
@@ -948,3 +948,7 @@ ticked.
 | `bats .github/scripts/ci.bats` in the `build-tools` image | the regression suite (four tests) |
 | `gh attestation verify "oci://<digest>" --owner wiki-mod` | provenance of one image digest |
 | Admin UI DHCP page (`POST /dhcp/check`) | the DHCP conflict and client probe |
+
+## Howto audit this file
+
+The audit procedure of this file is `docs/policy/howto-audit-documentation.md`.

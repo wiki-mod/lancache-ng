@@ -308,3 +308,7 @@ This issue is for design/research first, not implementation. No container,
 no `setup.sh` changes, and no compose wiring exist yet as a result of this
 document — it exists to give the maintainer a concrete plan and a
 named set of decisions to make before any of that code is written.
+
+## Howto audit this file
+
+The audit procedure of this file is `docs/policy/howto-audit-documentation.md`.

@@ -33,9 +33,8 @@ Valid for `current_dev` at `e223782d`. Section 9 lists what is not verified.
 | `docs/naming-conventions.md` | Naming contract (AG-CODE-014) |
 | `docs/combined-release-and-checklist.md` | Release channels, external images, provenance, release validation and checklist |
 | `docs/ci-2.0-architecture.md` | CI 2.0 architecture |
-| `docs/policy/` | Policies (`ci-image-pinning-policy.md`) |
+| `docs/policy/` | Policies (`ci-image-pinning-policy.md`, `howto-audit-documentation.md`) |
 | `docs/design-plannings/` | Design plans (`design-wireguard-remote-access.md`) |
-| `docs/design-steam-prefill.md` | Steam prefill design |
 | `docs/validation-state.json` | Validation record (AG-REL-011) |
 | `AGENTS.md`, `SECURITY.md`, `CONTRIBUTING.md`, `GOVERNANCE.md` | Governance, security policy, contribution rules |
 
@@ -278,14 +277,15 @@ router as the DHCP server; only one DHCP server may be active on a LAN.
   control agent.
 
 **Activation preflight.** Before the stack starts, `setup.sh`
-(`run_kea_dhcp_activation_preflight`) runs one DHCP probe in the `dhcp` image
-(`docker compose run --rm --no-deps dhcp probe`). It does not start Kea.
+(`run_kea_dhcp_activation_preflight`) runs one DHCP probe from the `ui` image on
+the host network (`docker run --rm --network host ... <ui image> dhcp-probe`).
+It does not start Kea.
 
 | Probe result | `setup.sh` |
 | --- | --- |
-| no other DHCP server answers | continues; Kea starts |
-| another server answers (`conflict_found`) | prints the responding server and requires an explicit `y` or `yes`; no cancels the activation |
-| the probe could not run, or reports `unavailable` | requires the same explicit confirmation (fails closed) |
+| no other DHCP server answers (`servers` is empty) | continues; Kea starts |
+| another server answers | prints the first responding server and asks `Continue with Kea activation anyway? [y/N]` (default No); No cancels the activation |
+| the probe did not complete (no answer or `error` set) | prints a warning and asks the same question (fails closed) |
 
 The probe sends a broadcast DISCOVER and a client dry-run (REQUEST for the
 first offer, then RELEASE). It does not validate Kea's own configuration and
@@ -651,8 +651,11 @@ The `proxy` service publishes its ports on Docker's default bridge network
 
 ### 8.1 Docker `userland-proxy`
 
-With `userland-proxy: true` (Docker's default) published ports go through
-`docker-proxy`. Unverified: `docker-proxy` may
+The SOT sets `docker_userland_proxy: false`. `setup.sh install` and `setup.sh
+update` apply it to `docker_daemon_json` (`ensure_docker_userland_proxy`) after
+a confirmation and restart Docker once; without a terminal they leave Docker
+unchanged. With `userland-proxy: true` (Docker's default) published ports go
+through `docker-proxy`. Unverified: `docker-proxy` may
 present the container with a rewritten source address, which would turn the
 source-address allowlist `PROXY_ALLOWED_CLIENT_CIDRS` into an all-or-nothing
 filter instead of a per-client filter. The test below decides it.
@@ -665,7 +668,7 @@ Docker daemon restart that stops every running container.
 curl -s http://<lancache-host>/some/cached/path -o /dev/null
 tail -5 "${SYSLOG_NG_LOG_DIR}/LanCache-NG-proxy/$(date +%Y%m%d).log"
 
-# apply: add "userland-proxy": false to /etc/docker/daemon.json, then
+# apply: set "userland-proxy" in /etc/docker/daemon.json (setup.sh does this), then
 sudo systemctl restart docker
 docker compose -f deploy/prod/docker-compose.yml up -d
 
@@ -791,3 +794,7 @@ Not verified against the code or a running stack:
 - the `setup.sh` prompts of the Kea preflight and the log wording of the `dhcp`
   container;
 - the behavior of the tuning commands in section 8 on a given host and NIC.
+
+## Howto audit this file
+
+The audit procedure of this file is `docs/policy/howto-audit-documentation.md`.

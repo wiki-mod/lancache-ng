@@ -731,7 +731,7 @@ LANCACHE_IMAGE_TAG=sha-<resolved-by-setup>
 - `lazy` is the default and keeps the traditional LanCache-style behavior: if a client reaches the cache, nginx proxies the requested host upstream. This is the deliberate cache-first choice so new CDN hostnames keep working out of the box.
 - `strict` NOT RECOMMENDED! Only proxies hosts whose root domain is derived from `services/dns/cdn-domains.txt`; unknown hosts receive `403 Forbidden`. This reduces accidental or abusive proxying, but it can AND will break downloads until the missing CDN hostname is added to `cdn-domains.txt` — there is no separate file to maintain, but you still need to add every CDN hostname you want to cache by hand.
 
-`PROXY_ALLOWED_CLIENT_CIDRS` can optionally restrict who may use the proxy, for example `192.168.1.0/24 172.16.0.0/12`. Leave it empty to allow any client that can reach the bound LAN/Docker ports; `setup.sh` writes the empty value by default for the normal LAN-only deployment model where firewalling and Docker port bindings already define the boundary.
+`PROXY_ALLOWED_CLIENT_CIDRS` restricts who may use the proxy, for example `192.168.1.0/24 172.16.0.0/12`. An empty value keeps the default from `runtime.defaults` in `.github/yaml/build-manifest.yml` (the private networks and `fc00::/7`); it does not open the proxy to every client (`Settings::load` in `services/common/config.rs` treats an empty file or environment value as unset). Firewalling and Docker port bindings still define the outer boundary for the normal LAN-only deployment model.
 
 The Admin UI keeps snapshots of the Kea DHCP configuration (`KEA_SNAPSHOT_KEEP`, default `20`) and of the lan and private reverse zone records (`DNS_SNAPSHOT_KEEP`, default `20`) for operator-selected rollback; see [docs/README.md](docs/README.md#6-known-good-snapshots-and-rollback). `setup.sh` also writes `KEEP_KNOWN_GOOD_CONFIGS` (default `3`) to the runtime env, but no service reads it.
 
@@ -795,7 +795,7 @@ Secret formats vary by key, not by naming suffix — despite the `*_KEY`/`*_PASS
 - 64 hex characters (`openssl rand -hex 32`): `KEA_CTRL_TOKEN`, `PDNS_API_KEY`, `SECONDARY_REGISTRATION_TOKEN`
 - 44 base64 characters (`openssl rand -base64 32`): `DDNS_TSIG_KEY`
 - 20 alphanumeric characters: the Admin UI password. It is shown once; only its Argon2id hash is stored as `UI_AUTH_PASSWORD_HASH`.
-  The Setup page of the Admin UI can change it (old password required, at least 12 characters). The new Argon2id hash is saved in `lancache-ui-password.hash` (mode 0600) next to the UI settings file and replaces the `.env` hash only while that `.env` hash is unchanged; to reset a lost password, set a new `UI_AUTH_PASSWORD_HASH` in `.env` or delete that file.
+  The Setup page of the Admin UI can change it (old password required, at least 12 characters). The new Argon2id hash is saved as `UI_PASSWORD_HASH` in the UI settings file (`lancache-ui-settings.env` in the `ui-data` volume), which takes precedence over the `.env` value; to reset a lost password, run `sudo ./setup.sh reset-sign-in`, which turns the sign-in off until a new password is set on the Setup page.
 
 Store your actual secret values securely if you need to rotate them manually. The setup script will not regenerate them unless you explicitly delete or clear the `.env` entry.
 
