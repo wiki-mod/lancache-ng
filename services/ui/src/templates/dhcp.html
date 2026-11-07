@@ -564,12 +564,28 @@
   // Why: DHCP off must not open on an inactive tab.
   // From: Issue #1683 | PR #1976
   const MODE_TAB = { kea: 'server', 'dnsmasq-proxy': 'proxy', 'dnsmasq-relay': 'relay' };
-  let first = MODE_TAB['{{ dhcp_mode }}'] || 'precheck';
+  // What: only the tab of the mode picked above shows.
+  // Why: DoMe 07.11.: pick shows it; save activates it.
+  // From: Issue #1683 | PR #1991
+  function showModeTab(mode) {
+    const keep = MODE_TAB[mode];
+    Object.values(MODE_TAB).forEach((tab) => {
+      const b = document.querySelector('[data-dhcp-tab="' + tab + '"]');
+      if (b) b.hidden = tab !== keep;
+    });
+    return keep || 'precheck';
+  }
+  let first = showModeTab('{{ dhcp_mode }}');
   try {
     const saved = sessionStorage.getItem('dhcpTab');
-    if (saved && document.querySelector('[data-dhcp-tab="' + saved + '"]')) first = saved;
+    const b = saved && document.querySelector('[data-dhcp-tab="' + saved + '"]');
+    if (b && !b.hidden) first = saved;
   } catch (e) { /* blocked */ }
   setDhcpTab(first);
+  const modeSelect = document.querySelector('select[name="dhcp_mode"]');
+  if (modeSelect) {
+    modeSelect.addEventListener('change', () => setDhcpTab(showModeTab(modeSelect.value)));
+  }
 </script>
 <script>
   // What: folds the mode comparison open and shut
