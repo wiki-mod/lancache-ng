@@ -3414,6 +3414,13 @@ async fn main() -> Result<(), String> {
     if let Some(done) = command(&s, &args).await {
         return done;
     }
+    // What: no login and no opt-out stops the ui.
+    // Why: AG-SEC-001: fail closed unless opted out.
+    // From: Issue #1683 | PR #1985
+    let hash = s.text("UI_PASSWORD_HASH").unwrap_or_default();
+    if hash.is_empty() && !s.flag("ALLOW_INSECURE_UI").unwrap_or(false) {
+        return Err("Admin-UI authentication is required".into());
+    }
     let dir = PathBuf::from(s.text("SECRETS_DIR")?);
     let key =
         secret::resolve(None, &dir, "UI_SESSION_KEY", owner_keep()).map_err(|e| e.to_string())?;
