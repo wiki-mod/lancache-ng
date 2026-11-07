@@ -558,13 +558,23 @@ host_ipv4_addresses() {
     ' <<< "$addrs"
 }
 
-# What: host addresses without loopback and Docker 172.x
-# Why: only these can serve DNS to LAN clients
-# From: Issue #1683 | PR #1858
+# What: host IPv4 rows minus SOT-skipped interfaces
+# Why: LANs may use 172.x; skip by device, not address
+# From: Issue #1683 | PR #1984
 host_lan_addresses() {
-    local addrs
+    local addrs skip line dev prefix
+    local -a prefixes
     addrs=$(host_ipv4_addresses) || return $?
-    awk '$1 !~ /^127\./ && $1 !~ /^172\./' <<< "$addrs"
+    skip=$(prod_env_default STATS_HOST_IF_SKIP) || exit $?
+    read -ra prefixes <<< "$skip"
+    while read -r line; do
+        [[ -n "$line" ]] || continue
+        dev=${line##* }
+        for prefix in "${prefixes[@]}"; do
+            [[ "$dev" == "$prefix"* ]] && continue 2
+        done
+        printf '%s\n' "$line"
+    done <<< "$addrs"
 }
 
 # What: reports a failed host_lan_addresses call, exit as $1
