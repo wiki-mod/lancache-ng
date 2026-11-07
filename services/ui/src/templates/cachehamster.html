@@ -284,6 +284,10 @@
   function showGames(games) {
         const t = document.getElementById('hamster-games');
         if (!t) { return; }
+        // What: games sorted by name, A to Z.
+        // Why: DoMe 07.11.: the list came in app id order.
+        // From: Issue #871 | PR #1991
+        games = games.slice().sort(function (a, b) { return String(a.name).localeCompare(String(b.name)); });
         t.innerHTML = '<tr><th>App ID</th><th>Name</th><th>' + LC_T.in_cache + '</th><th></th></tr>';
         games.forEach(function (g) {
           const row = t.insertRow();
