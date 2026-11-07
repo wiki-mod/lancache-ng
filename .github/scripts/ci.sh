@@ -12492,12 +12492,9 @@ _ci_validate_teardown() {
     # Why: the label sweep frees the slot without the file.
     # From: Issue #1683 | PR #1858
     if compose="$(_ci_compose_file)"; then
-        out="$(docker compose -p "${project}" \
-            -f "${compose}" \
-            down -v --remove-orphans 2>&1)" || {
-            ci_error "[CI-ERROR-VALIDATE-0058]" "project=\"${project}\" reason=\"compose down failed\"" "${out}"
-            rc=2
-        }
+        _ci_run "[CI-ERROR-VALIDATE-0058]" "project=\"${project}\" reason=\"compose down failed\"" \
+            docker compose -p "${project}" -f "${compose}" \
+            down -v --remove-orphans >&2 || rc=2
     else
         rc=2
     fi
@@ -12506,12 +12503,10 @@ _ci_validate_teardown() {
     # From: Issue #1683
     local -a found=()
     for kind in container volume network; do
-        if [ "${kind}" = container ]; then
-            ids="$(docker container ls -aq --filter "${label}" 2>&1)"
-        else
-            ids="$(docker "${kind}" ls -q --filter "${label}" 2>&1)"
-        fi || {
-            ci_error "[CI-ERROR-VALIDATE-0059]" "kind=\"${kind}\" reason=\"cannot list leftovers\"" "${ids}"
+        local -a all=()
+        [ "${kind}" != container ] || all=(-a)
+        ids="$(_ci_run "[CI-ERROR-VALIDATE-0059]" "kind=\"${kind}\" reason=\"cannot list leftovers\"" \
+            docker "${kind}" ls "${all[@]}" -q --filter "${label}")" || {
             rc=2
             continue
         }
@@ -12523,10 +12518,8 @@ _ci_validate_teardown() {
             done
             continue
         fi
-        out="$(docker "${kind}" rm -f "${found[@]}" 2>&1)" || {
-            ci_error "[CI-ERROR-VALIDATE-0060]" "kind=\"${kind}\" reason=\"leftover removal failed\"" "${out}"
-            rc=2
-        }
+        _ci_run "[CI-ERROR-VALIDATE-0060]" "kind=\"${kind}\" reason=\"leftover removal failed\"" \
+            docker "${kind}" rm -f "${found[@]}" >&2 || rc=2
     done
     if [ -n "${LANCACHE_STATE_DIR:-}" ] && [ -d "${LANCACHE_STATE_DIR}" ]; then
         # What: clear root-owned state via build-tools.
