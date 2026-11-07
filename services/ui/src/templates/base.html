@@ -259,8 +259,9 @@
   .lang-switch select { background: transparent; border: 0; color: inherit; font: inherit; cursor: pointer; }
   .lang-switch select option { background: var(--navy-850); color: var(--foam); }
   .theme-btn {
-    border: 1px solid var(--navy-600); border-radius: 999px;
-    padding: 5px 10px; cursor: pointer; background: var(--navy-850); color: var(--mist); font-size: 13px;
+    border: 1px solid var(--navy-600); border-radius: 6px; height: 28px; box-sizing: border-box;
+    padding: 0 10px; cursor: pointer; background: transparent; color: var(--mist);
+    font-size: 12px; font-weight: 600;
   }
   .theme-btn:hover { color: var(--foam); }
 
@@ -316,10 +317,16 @@
      Why: building blocks of dashboard and settings
      From: Issue #1437 | PR #1858 */
   .mode-switchrow { display: flex; gap: 8px; }
+  /* What: choice buttons share the size of .btn
+     Why: DoMe 07.11.: one button type on every page
+     From: Issue #1683 | PR #1991 */
   .mode-btn {
-    flex: 1; text-align: center; padding: 8px 10px; border-radius: 8px; font-size: 12.5px;
+    flex: 1; display: inline-flex; align-items: center; justify-content: center;
+    box-sizing: border-box; height: 38px; padding: 0 16px; border-radius: 8px;
+    font-size: 13.5px; font-weight: 600;
     border: 1px solid var(--navy-600); color: var(--mist); cursor: pointer; background: transparent;
   }
+  .mode-btn:hover { color: var(--foam); border-color: var(--mist-dim); }
   .mode-btn.selected { border-color: var(--beam); color: var(--foam); background: #f7b95514; }
 
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
@@ -450,6 +457,8 @@
     background: var(--beam); color: #241705; white-space: nowrap;
   }
   .btn.ghost { background: transparent; border: 1px solid var(--navy-600); color: var(--mist); }
+  .btn.ghost:hover { color: var(--foam); border-color: var(--mist-dim); }
+  summary:focus:not(:focus-visible) { outline: none; }
   .btn:focus-visible { outline: 2px solid var(--beam); outline-offset: 2px; }
 
   .toggle-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 9px 0; border-top: 1px solid var(--navy-700); }
