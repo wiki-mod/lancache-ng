@@ -4613,6 +4613,18 @@ pub mod tidy {
             if f.mtime >= today || f.path.extension().is_some_and(|e| e == "xz") {
                 continue;
             }
+            // What: late lines join the existing .xz file.
+            // Why: live 07.11.: "File exists" every round.
+            // From: Issue #1683 | PR #1985
+            let mut packed = f.path.clone().into_os_string();
+            packed.push(".xz");
+            let packed = std::path::PathBuf::from(packed);
+            if packed.exists() {
+                if let Err(e) = append_xz(&f.path, &packed, preset) {
+                    errs.push(e);
+                }
+                continue;
+            }
             let run = Command::new("xz")
                 .arg(format!("-{preset}"))
                 .arg("--")
@@ -4625,6 +4637,28 @@ pub mod tidy {
             }
         }
         errs
+    }
+
+    // What: xz one file as a second stream onto .xz.
+    // Why: xz reads joined streams as one file.
+    // From: Issue #1683 | PR #1985
+    fn append_xz(src: &Path, packed: &Path, preset: u64) -> Result<(), String> {
+        let out = std::fs::OpenOptions::new()
+            .append(true)
+            .open(packed)
+            .map_err(|e| format!("{}: {e}", packed.display()))?;
+        let o = Command::new("xz")
+            .arg(format!("-{preset}"))
+            .arg("-c")
+            .arg("--")
+            .arg(src)
+            .stdout(out)
+            .output()
+            .map_err(|e| format!("xz: {e}"))?;
+        if !o.status.success() {
+            return Err(String::from_utf8_lossy(&o.stderr).trim().to_string());
+        }
+        std::fs::remove_file(src).map_err(|e| format!("{}: {e}", src.display()))
     }
 
     // What: is a daily job due by its stamp.
