@@ -277,7 +277,7 @@
   "progress": "Progress",
   "project_page": "LanCache-NG Project Page",
   "proxy_dhcp_pxe_helper_only_the": "Your router keeps handing out the addresses. This mode only adds boot data for devices that start over the network (PXE).",
-  "proxy_subnet_start": "Proxy network (empty = DHCP server subnet)",
+  "proxy_subnet_start": "Proxy network (empty = network of LanCache-NG)",
   "pxe_boot_filename_optional": "PXE boot filename (optional)",
   "pxe_boot_server_address_optional": "PXE boot server (optional, empty = LanCache-NG)",
   "pxe_network_boot_options": "PXE / network-boot options",
@@ -325,7 +325,7 @@
   "settings_general": "Settings → General",
   "show_login_code": "Show login code",
   "shows_the_device_name_for_an": "Shows the device name for an IP address, for example in logs.",
-  "shows_what_the_admin_ui_offers": "Shows what the Admin UI offers for each mode. DHCP-Server and DHCP-Proxy exclude each other on the same interface. DHCP-Relay exists but is greyed out -- not stable or ready for production yet.",
+  "shows_what_the_admin_ui_offers": "Shows what each mode can do. Only one mode is active at a time.",
   "sign_in": "Sign-in",
   "sign_in_is_turned_off_for": "Sign-in is turned off for this Admin UI.",
   "size": "Size",
@@ -429,5 +429,6 @@
   "err_program_not_running": "The program is not running in this mode.",
   "err_state_running_stopped": "State must be running or stopped.",
   "prog_reload": "Reload",
-  "prog_restart": "Restart"
+  "prog_restart": "Restart",
+  "err_relay_needs_upstream": "DHCP-Relay needs the real DHCP server. Enter it below on the DHCP-Relay tab, save, then activate the mode."
 }

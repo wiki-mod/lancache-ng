@@ -1852,6 +1852,13 @@ async fn dhcp_action(
             .unwrap_or_default()
     };
     let on = matches!(get("enabled").as_str(), "1" | "true");
+    // What: relay without the real server: plain hint.
+    // Why: DoMe 07.11.: a newbie got a bare key name.
+    // From: Issue #1683 | PR #1991
+    let relay = op == "UI_ROUTE_DHCP_MODE" && get("dhcp_mode") == "dnsmasq-relay";
+    if relay && s.text("UPSTREAM_DHCP_IP").unwrap_or_default().is_empty() {
+        return Err(bad_request(tr("err_relay_needs_upstream")));
+    }
     let result = match op {
         "UI_ROUTE_DHCP_MODE" => commit(&app, single_field("DHCP_MODE", get("dhcp_mode"))).await,
         "UI_ROUTE_DHCP_DDNS" => commit(&app, single_field("DHCP_DDNS", on)).await,
