@@ -1208,6 +1208,57 @@ pub mod docker {
                 r => r.map(drop),
             }
         }
+
+        // What: run a one-shot container to its end.
+        // Why: the DHCP probe needs the host network.
+        // From: Issue #1683 | PR #1985
+        pub async fn run_once(
+            &self,
+            spec: Value,
+            limit: Duration,
+            wait: Duration,
+        ) -> Result<(i64, String), Error> {
+            let made = self
+                .call(Method::POST, "/containers/create", Some(spec), limit)
+                .await?;
+            let id = decode(&made)?["Id"]
+                .as_str()
+                .ok_or_else(|| Error::Decode("create without Id".into()))?
+                .to_string();
+            let run = async {
+                let start = format!("/containers/{id}/start");
+                self.call(Method::POST, &start, None, limit).await?;
+                let path = format!("/containers/{id}/wait");
+                let done = decode(&self.call(Method::POST, &path, None, wait).await?)?;
+                let path = format!("/containers/{id}/logs?stdout=1");
+                let raw = self.call(Method::GET, &path, None, limit).await?;
+                let code = done["StatusCode"].as_i64().unwrap_or(-1);
+                Ok((code, stdout_of(&raw)))
+            }
+            .await;
+            let gone = format!("/containers/{id}?force=1");
+            if let Err(e) = self.call(Method::DELETE, &gone, None, limit).await {
+                eprintln!("docker: remove {id}: {e}");
+            }
+            run
+        }
+    }
+
+    // What: stdout frames of a log stream.
+    // Why: without a TTY Docker adds 8-byte headers.
+    // From: Issue #1683 | PR #1985
+    fn stdout_of(raw: &[u8]) -> String {
+        let mut out = Vec::new();
+        let mut rest = raw;
+        while let [kind, _, _, _, a, b, c, d, tail @ ..] = rest {
+            let size = u32::from_be_bytes([*a, *b, *c, *d]) as usize;
+            let (frame, next) = tail.split_at(size.min(tail.len()));
+            if *kind == 1 {
+                out.extend_from_slice(frame);
+            }
+            rest = next;
+        }
+        String::from_utf8_lossy(&out).trim().to_string()
     }
 }
 
@@ -2321,7 +2372,13 @@ pub mod recursor_conf {
         let mut out = Vec::new();
         for raw in s.list(key) {
             let z = raw.trim_end_matches('.').to_ascii_lowercase();
-            if !z.chars().all(ok) {
+            // What: label 1-63 chars, no "-" at an edge.
+            // Why: PC test 06.11.: a..b and -bad- passed.
+            // From: Issue #1918
+            let label = |l: &str| {
+                !l.is_empty() && l.len() <= 63 && !l.starts_with('-') && !l.ends_with('-')
+            };
+            if !z.chars().all(ok) || (!z.is_empty() && !z.split('.').all(label)) {
                 return Err(format!("{key}: bad domain {raw}"));
             }
             out.push(if z.is_empty() { ".".to_string() } else { z });
@@ -2352,28 +2409,54 @@ pub mod recursor_conf {
     // Why: live 05.11. (U4): own IP made a query loop.
     // From: Issue #1683 | PR #1980
     fn upstream_servers(s: &Settings) -> Result<Vec<String>, String> {
-        let own: Vec<String> = ["IP_HTTP", "IP_HTTPS"]
+        let own = own_ips(s);
+        let list = s.list("DNS_UPSTREAM_SERVERS");
+        for raw in &list {
+            upstream_entry("DNS_UPSTREAM_SERVERS", raw, &own)?;
+        }
+        Ok(list)
+    }
+
+    // What: the addresses this LanCache-NG answers on.
+    // Why: one list for every upstream loop check.
+    // From: Issue #1683 | PR #1985
+    pub fn own_ips(s: &Settings) -> Vec<String> {
+        ["IP_HTTP", "IP_HTTPS", "LISTEN_IP", "LISTEN_IP_HTTPS"]
             .iter()
             .filter_map(|k| s.text(k).ok())
             .filter(|v| !v.is_empty())
-            .collect();
-        let list = s.list("DNS_UPSTREAM_SERVERS");
-        for raw in &list {
-            let host = match raw.strip_prefix('[') {
-                Some(rest) => rest.split(']').next().unwrap_or(rest),
-                None if raw.matches(':').count() == 1 => raw.split(':').next().unwrap_or(raw),
-                None => raw.as_str(),
-            };
-            let ip: std::net::IpAddr = host
-                .parse()
-                .map_err(|_| format!("DNS_UPSTREAM_SERVERS: {raw} is no IP address"))?;
-            if ip.is_loopback() || ip.is_unspecified() || own.iter().any(|o| *o == host) {
-                return Err(format!(
-                    "DNS_UPSTREAM_SERVERS: {raw} is this LanCache-NG itself; that would loop"
-                ));
+            .collect()
+    }
+
+    // What: one upstream: IP, [IPv6]:port or IPv4:port.
+    // Why: live 06.11.: "[fd00::1" was saved unchecked.
+    // From: Issue #1683
+    pub fn upstream_entry(key: &str, raw: &str, own: &[String]) -> Result<(), String> {
+        let bad = || format!("{key}: {raw} is no IP address");
+        let (host, port) = match raw.strip_prefix('[') {
+            Some(rest) => {
+                let (h, tail) = rest.split_once(']').ok_or_else(bad)?;
+                match tail {
+                    "" => (h, None),
+                    t => (h, Some(t.strip_prefix(':').ok_or_else(bad)?)),
+                }
             }
+            None if raw.matches(':').count() == 1 => raw
+                .split_once(':')
+                .map(|(h, p)| (h, Some(p)))
+                .ok_or_else(bad)?,
+            None => (raw, None),
+        };
+        if let Some(p) = port {
+            p.parse::<u16>().ok().filter(|n| *n > 0).ok_or_else(bad)?;
         }
-        Ok(list)
+        let ip: std::net::IpAddr = host.parse().map_err(|_| bad())?;
+        if ip.is_loopback() || ip.is_unspecified() || own.iter().any(|o| *o == host) {
+            return Err(format!(
+                "{key}: {raw} is this LanCache-NG itself; that would loop"
+            ));
+        }
+        Ok(())
     }
 
     // What: Lua hook: AAAA answers become empty.
@@ -2636,13 +2719,18 @@ pub mod kea_conf {
         }}))
     }
 
-    // What: kea-ctrl-agent.conf.
-    // Why: the ui reads leases over its REST port.
-    // From: Issue #1683 | PR #1858
-    pub fn ctrl_agent(s: &Settings) -> Result<Value, String> {
+    // What: kea-ctrl-agent.conf with a basic-auth login.
+    // Why: threat model G2: the port was open to the LAN.
+    // From: Issue #1683 | PR #1985
+    pub fn ctrl_agent(s: &Settings, token: &str) -> Result<Value, String> {
         Ok(json!({"Control-agent": {
             "http-host": s.text("KEA_CTRL_ADDRESS")?,
             "http-port": s.uint("KEA_CTRL_PORT")?,
+            "authentication": {
+                "type": "basic",
+                "realm": "lancache",
+                "clients": [{"user": s.text("KEA_CTRL_USER")?, "password": token}]
+            },
             "control-sockets": {"dhcp4": socket(s)?},
             "loggers": log_rows(s, &["kea-ctrl-agent"])?
         }}))
@@ -3221,13 +3309,46 @@ pub mod apply {
         }
     }
 
-    // What: carry out the plan: HUP or restart.
-    // Why: openrc-init drops HUP; only hup owners get it.
+    // What: an owner's reload commands, "owner:cmd+arg".
+    // Why: RELOAD_EXEC in the SOT; no list in code.
+    // From: Issue #1683
+    fn exec_cmds<'a>(exec: &'a [String], owner: &'a str) -> impl Iterator<Item = Vec<&'a str>> {
+        exec.iter().filter_map(move |e| {
+            let (o, cmd) = e.split_once(':')?;
+            (o == owner).then(|| cmd.split('+').collect())
+        })
+    }
+
+    // What: run every reload command; stop at the first.
+    // Why: a failed reload is shown, never hidden.
+    // From: Issue #1683
+    pub async fn reload_exec(
+        api: &Api,
+        name: &str,
+        exec: &[String],
+        owner: &str,
+        limit: Duration,
+    ) -> Outcome {
+        for cmd in exec_cmds(exec, owner) {
+            match api.exec(name, &cmd, limit).await {
+                Ok((0, _)) => {}
+                Ok((code, out)) => {
+                    let text = format!("{} exit {code}: {}", cmd.join(" "), out.trim());
+                    return Outcome::Failed(Error::Transport(text));
+                }
+                Err(e) => return Outcome::Failed(e),
+            }
+        }
+        Outcome::Done(Action::Reload)
+    }
+
+    // What: carry out the plan: exec or restart.
+    // Why: openrc-init drops HUP; reload runs commands.
     // From: Issue #1683 | PR #1980
     pub async fn run(
         api: &Api,
         plan: &BTreeMap<String, Effect>,
-        hup: &[String],
+        exec: &[String],
         container_of: &(dyn Fn(&str) -> String + Sync),
         grace: u32,
         limit: Duration,
@@ -3237,7 +3358,27 @@ pub mod apply {
             let outcome = match action_of(effect) {
                 None if effect == Effect::Recreate => Outcome::NeedsRecreate,
                 None => Outcome::Live,
-                Some(Action::Reload) if !hup.contains(owner) => {
+                // What: owner reload commands via exec.
+                // Why: DoMe 06.11.: a toggle restarted dns.
+                // From: Issue #1683
+                Some(Action::Reload) if exec_cmds(exec, owner).next().is_some() => {
+                    let name = container_of(owner);
+                    match reload_exec(api, &name, exec, owner, limit).await {
+                        // What: failed reload: restart.
+                        // Why: 249 ran an old nginx.conf.
+                        // From: Issue #1683 | PR #1985
+                        Outcome::Failed(e) => {
+                            eprintln!("apply: {owner}: reload failed ({e}); restart");
+                            let a = Action::Restart;
+                            match api.act(&name, a, grace, limit).await {
+                                Ok(()) => Outcome::Done(a),
+                                Err(e) => Outcome::Failed(e),
+                            }
+                        }
+                        done => done,
+                    }
+                }
+                Some(Action::Reload) => {
                     let a = Action::Restart;
                     match api.act(&container_of(owner), a, grace, limit).await {
                         Ok(()) => Outcome::Done(a),
@@ -3272,6 +3413,7 @@ pub mod render {
         pub recursor_api_key: String,
         pub tsig_name: String,
         pub tsig_secret: String,
+        pub kea_ctrl_token: String,
     }
 
     // What: one file and its owning container.
@@ -3387,7 +3529,11 @@ pub mod render {
                     "KEA_DHCP4_CONF_FILE",
                     kea_conf::dhcp4(s, kept.as_ref()),
                 );
-                o.put_json("dhcp", "KEA_CTRL_CONF_FILE", kea_conf::ctrl_agent(s));
+                o.put_json(
+                    "dhcp",
+                    "KEA_CTRL_CONF_FILE",
+                    kea_conf::ctrl_agent(s, &sec.kea_ctrl_token),
+                );
                 let ddns = kea_conf::ddns(s, &sec.tsig_name, &sec.tsig_secret);
                 o.put_json("dhcp", "KEA_DDNS_CONF_FILE", ddns);
             }
@@ -3404,6 +3550,13 @@ pub mod render {
         let s = o.s;
         let src = PathBuf::from(s.text("NGINX_TEMPLATE_DIR")?);
         let dst = PathBuf::from(s.text("NGINX_CONF_DIR")?);
+        // What: nginx resolvers must not be this host.
+        // Why: threat model G3: own DNS sends CDNs here.
+        // From: Issue #1683 | PR #1985
+        let own = crate::recursor_conf::own_ips(s);
+        for raw in s.list("NGINX_UPSTREAM_RESOLVER") {
+            crate::recursor_conf::upstream_entry("NGINX_UPSTREAM_RESOLVER", &raw, &own)?;
+        }
         let psl = nginx_conf::Psl::parse(&read(&src.join(s.text("NGINX_PSL_FILE")?))?);
         let hosts = nginx_conf::hosts(domains, &psl)?;
         let https = s.flag("HTTPS_ENABLED")?;
@@ -3911,16 +4064,20 @@ pub mod kea {
     pub struct Api {
         client: reqwest::Client,
         url: String,
+        user: String,
+        token: String,
     }
 
     impl Api {
-        // What: client for one agent URL.
-        // Why: the caller owns the shared client.
-        // From: Issue #1683 | PR #1858
-        pub fn new(client: reqwest::Client, url: &str) -> Self {
+        // What: client for one agent URL and its login.
+        // Why: the agent asks for basic auth (G2).
+        // From: Issue #1683 | PR #1985
+        pub fn new(client: reqwest::Client, url: &str, user: &str, token: &str) -> Self {
             Api {
                 client,
                 url: url.into(),
+                user: user.into(),
+                token: token.into(),
             }
         }
 
@@ -3936,6 +4093,7 @@ pub mod kea {
             let reply = self
                 .client
                 .post(&self.url)
+                .basic_auth(&self.user, Some(&self.token))
                 .json(&body)
                 .send()
                 .await
@@ -4484,6 +4642,18 @@ pub mod tidy {
             if f.mtime >= today || f.path.extension().is_some_and(|e| e == "xz") {
                 continue;
             }
+            // What: late lines join the existing .xz file.
+            // Why: live 07.11.: "File exists" every round.
+            // From: Issue #1683 | PR #1985
+            let mut packed = f.path.clone().into_os_string();
+            packed.push(".xz");
+            let packed = std::path::PathBuf::from(packed);
+            if packed.exists() {
+                if let Err(e) = append_xz(&f.path, &packed, preset) {
+                    errs.push(e);
+                }
+                continue;
+            }
             let run = Command::new("xz")
                 .arg(format!("-{preset}"))
                 .arg("--")
@@ -4496,6 +4666,28 @@ pub mod tidy {
             }
         }
         errs
+    }
+
+    // What: xz one file as a second stream onto .xz.
+    // Why: xz reads joined streams as one file.
+    // From: Issue #1683 | PR #1985
+    fn append_xz(src: &Path, packed: &Path, preset: u64) -> Result<(), String> {
+        let out = std::fs::OpenOptions::new()
+            .append(true)
+            .open(packed)
+            .map_err(|e| format!("{}: {e}", packed.display()))?;
+        let o = Command::new("xz")
+            .arg(format!("-{preset}"))
+            .arg("-c")
+            .arg("--")
+            .arg(src)
+            .stdout(out)
+            .output()
+            .map_err(|e| format!("xz: {e}"))?;
+        if !o.status.success() {
+            return Err(String::from_utf8_lossy(&o.stderr).trim().to_string());
+        }
+        std::fs::remove_file(src).map_err(|e| format!("{}: {e}", src.display()))
     }
 
     // What: is a daily job due by its stamp.

@@ -364,7 +364,10 @@ dns_upstream_zone_problem() {
     for item in "${forwarded_zones[@]}"; do
         [[ "$zone" = "$item" || "$zone" == *".$item" ]] && inside=1
     done
-    if ! is_valid_dhcp_proxy_domain "$zone"; then
+    # What: "_" counts as a letter in zone names
+    # Why: live 06.11.: _msdcs.home.lan was refused
+    # From: Issue #1918
+    if ! is_valid_dhcp_proxy_domain "${zone//_/a}"; then
         printf "'%s' is no valid domain name\n" "$raw"
     elif [[ "$zone" = "$lan" || "$zone" == *".$lan" ]]; then
         printf "'%s' is answered by LanCache-NG itself\n" "$raw"
@@ -784,7 +787,7 @@ confirm() {
 # Why: stops or warns before a second DHCP server exists
 # From: Issue #1683 | PR #1858
 run_kea_dhcp_activation_preflight() {
-    local env_file="$1" output status server_identifier=""
+    local env_file="$1" output="" count="" error="" image env_rows server_identifier=""
 
     if [[ "$DHCP_MODE" != "kea" ]]; then
         print_skip "DHCP activation preflight: DHCP_MODE is '$DHCP_MODE', not kea"
@@ -792,14 +795,22 @@ run_kea_dhcp_activation_preflight() {
     fi
 
     print_step "DHCP activation preflight"
-    printf "  Probe-only check: the dhcp image runs its DHCP probe and exits without starting Kea.\n"
+    printf "  Probe-only check: the ui image runs one DHCP probe on the host network and exits.\n"
 
-    # What: one supervisor probe run in the dhcp image
-    # Why: the same probe as the Admin UI; no extra package
-    # From: Issue #1683 | PR #1912
-    if ! output=$(sot_compose "$env_file" -f "$PROD_COMPOSE" run --rm --no-deps dhcp \
-        probe) || ! status=$(json_value .status "$output") || [[ "$status" = unavailable || -z "$status" ]]; then
-        print_warn "DHCP discovery preflight could not be executed inside the dhcp image."
+    # What: the ui image and env from the compose config
+    # Why: the same probe and values as the Admin UI
+    # From: Issue #1683 | PR #1985
+    image=$(compose_config_value "$INSTALL_DIR" "$env_file" .services.ui.image)
+    env_rows=$(compose_config_value "$INSTALL_DIR" "$env_file" \
+        '.services.ui.environment | to_entries | map("\(.key)=\(.value // "")") | join("\n")')
+
+    # What: one probe run with the host network
+    # Why: a bridge network never carries LAN broadcasts
+    # From: Issue #1683 | PR #1985
+    if ! output=$(docker run --rm --network host --env-file <(printf '%s\n' "$env_rows") \
+        "$image" dhcp-probe) || ! count=$(json_value '.servers | length' "$output") \
+        || ! error=$(json_value .error "$output") || [[ -n "$error" ]]; then
+        print_warn "DHCP discovery preflight did not complete: ${error:-no probe answer}"
         print_warn "Kea activation will require an explicit confirmation because the safety check did not complete."
         confirm "Continue with Kea activation anyway? [y/N]" "N" \
             || die "Cancelled DHCP activation."
@@ -809,8 +820,8 @@ run_kea_dhcp_activation_preflight() {
     # What: the server address of the first DHCP offer
     # Why: names the existing server in the warning
     # From: Issue #1683 | PR #1912
-    if [[ "$status" = conflict_found ]]; then
-        server_identifier=$(json_value .conflict.output "$output") || die "Cannot read the probe answer (exit $?)."
+    if [[ "$count" != 0 ]]; then
+        server_identifier=$(json_value '.servers[0].server' "$output") || die "Cannot read the probe answer (exit $?)."
         print_warn "An existing DHCP server answered before Kea activation: ${server_identifier:-unknown}"
         print_warn "Kea would become a second active DHCP server if you continue."
         confirm "Continue with Kea activation anyway? [y/N]" "N" \
@@ -1340,6 +1351,50 @@ install_docker() {
     esac
 }
 
+# What: Docker's userland-proxy set as the SOT says
+# Why: DoMe 07.11.: docker-proxy copied hairpin traffic
+# From: Issue #1683 | PR #1985
+ensure_docker_userland_proxy() {
+    local file want current tmp
+    file=$(lancache_sot_value docker_daemon_json runtime) || exit $?
+    want=$(lancache_sot_value docker_userland_proxy runtime) || exit $?
+    current="unset"
+    if [[ -f "$file" ]]; then
+        current=$(jq -r 'if has("userland-proxy") then ."userland-proxy" | tostring else "unset" end' "$file") \
+            || die "Cannot read $file as JSON (exit $?); Docker was not changed."
+    fi
+    [[ "$current" == "$want" ]] && return 0
+    print_step "Docker userland-proxy: ${current} -> ${want}"
+    printf "  Docker restarts once; every container on this host restarts with it.\n"
+    # What: no terminal leaves Docker as it is
+    # Why: an unattended update must not stop on a question
+    # From: Issue #1683 | PR #1985
+    if ! { : < /dev/tty; } 2>/dev/null; then
+        print_warn "No terminal: Docker unchanged. Run setup.sh update in a shell to apply it."
+        return 0
+    fi
+    confirm "Change it and restart Docker now? [Y/n]" "Y" || {
+        print_warn "Skipped; Docker unchanged."
+        return 0
+    }
+    mkdir -p -- "${file%/*}" || die "Cannot create ${file%/*} (exit $?)."
+    tmp=$(mktemp "${file}.XXXXXX") || die "mktemp next to $file failed (exit $?)."
+    if [[ -f "$file" ]]; then
+        cp -p -- "$file" "${file}.bak" || die "Cannot back up $file (exit $?)."
+        jq --argjson v "$want" '."userland-proxy" = $v' "$file" > "$tmp" \
+            || { rm -f -- "$tmp"; die "Cannot update $file (exit $?); Docker was not changed."; }
+    else
+        jq -n --argjson v "$want" '{"userland-proxy": $v}' > "$tmp" \
+            || { rm -f -- "$tmp"; die "Cannot write $file (exit $?)."; }
+    fi
+    chmod 0644 -- "$tmp" || die "Cannot chmod $tmp (exit $?)."
+    mv -f -- "$tmp" "$file" || die "Cannot replace $file (exit $?)."
+    host_unit_action "$DOCKER_UNIT" restart
+    docker info >/dev/null 2>&1 \
+        || die "Docker does not answer after the restart; the old file is ${file}.bak."
+    print_ok "Docker userland-proxy is ${want}"
+}
+
 # What: installs curl, Docker, Docker Compose v2 plugin
 # Why: secondary needs the same set as primary
 # From: Issue #1683 | PR #1858
@@ -1398,6 +1453,7 @@ ensure_stack_requirements_installed() {
 
     out=$(docker compose version 2>&1) \
         || die "Docker Compose plugin still missing after installing Docker requirements (exit $?): $out"
+    ensure_docker_userland_proxy
 }
 
 # What: installs curl, jq, Docker, Compose; prints next step
@@ -3346,7 +3402,7 @@ host_unit_action() {
             name=$(openrc_service_for_unit "$unit")
             [[ -n "$name" ]] || die "No OpenRC service stands for $unit."
             case "$action" in
-                start|stop) out=$(timeout "$limit" rc-service "$name" "$action" 2>&1) || rc=$? ;;
+                start|stop|restart) out=$(timeout "$limit" rc-service "$name" "$action" 2>&1) || rc=$? ;;
                 enable) out=$(rc-update add "$name" default 2>&1) || rc=$? ;;
                 disable) out=$(rc-update del "$name" default 2>&1) || rc=$? ;;
                 *) die "Unknown service action: $action" ;;
@@ -5240,6 +5296,10 @@ Commands:
                        config when the Admin UI itself is unreachable.
                        Supported: kea, dns/pdns (dns/pdns also takes a <zone>
                        argument -- run with --help for the full shape).
+  reset-sign-in [install-dir] [--yes]
+                       Turn the Admin UI sign-in off after a lockout (asks
+                       first); then set a new user name and password in
+                       the UI.
   help, --help         Show this compact command list.
 
 Compatibility aliases:
@@ -5261,10 +5321,12 @@ print_command_help() {
     case "$command" in
         install)
             cat <<EOF
-Usage: ./setup.sh install
+Usage: ./setup.sh install [<channel>]
 
-Runs the guided LanCache-NG installer. setup.sh does nothing without a
-command, so the curl | bash one-liner passes it: ... | sudo bash -s -- install
+Runs the guided LanCache-NG installer. The optional channel word
+(one of: $(lancache_release_rows channel | paste -sd" ")) skips the channel prompt.
+setup.sh does nothing without a command, so the curl | bash one-liner
+passes it: ... | sudo bash -s -- install [<channel>]
 
 When no local repo is found (the standalone curl | bash path), this command
 self-clones to ${DEFAULT_INSTALL_DIR} from the remote's default branch by
@@ -5341,6 +5403,17 @@ moved to a new image set since the last update -- an unchanged channel is a
 silent no-op, not a full pull-and-restart. When it does act, it runs the
 exact same ordered, health-gated update as ./setup.sh update. If
 [install-dir] is omitted, ${DEFAULT_INSTALL_DIR} is used.
+EOF
+            ;;
+        reset-sign-in)
+            cat <<EOF
+Usage: sudo ./setup.sh reset-sign-in [install-dir] [--yes]
+
+Turns the Admin UI sign-in off when you are locked out. It asks first; only
+"y" (or --yes) changes anything. It removes the saved password hash and
+restarts the ui container. Afterwards open the Admin UI and
+set a new user name and password under General, Sign-in. If [install-dir] is
+omitted, ${DEFAULT_INSTALL_DIR} is used.
 EOF
             ;;
         update-ip)
@@ -6263,6 +6336,7 @@ perform_stack_update_flow() {
     # Why: the functional health gate must not silently skip
     # From: Issue #1683 | PR #1858
     install_missing_tools curl dig jq
+    ensure_docker_userland_proxy
     cd "$install_dir"
     _UPDATE_ENV_FILE=$(runtime_env_file_for_install_dir "$install_dir")
     _UPDATE_STACK_DIR="$install_dir"
@@ -7537,6 +7611,39 @@ restore_update_ip_env() {
     print_warn "The previous IPs are active again"
 }
 
+# What: turns the Admin UI sign-in off after a lockout
+# Why: DoMe 07.11.: a locked-out user needs a way back
+# From: Issue #1683 | PR #1985
+cmd_reset_sign_in() {
+    ensure_default_install_dir
+    local install_dir="$DEFAULT_INSTALL_DIR" assume_yes=0 env_file project out rc=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --yes|-y) assume_yes=1 ;;
+            *) install_dir="$1" ;;
+        esac
+        shift
+    done
+    install_dir=$(resolve_stack_dir "$(realpath -m "$install_dir")") || exit $?
+    [[ "$(id -u)" = "0" ]] \
+        || die "This script must be run as root (sudo ./setup.sh reset-sign-in [install-dir])."
+    # What: nothing changes without an explicit yes
+    # Why: DoMe 07.11.: a curious run must not lock out
+    # From: Issue #1683 | PR #1985
+    if [[ "$assume_yes" != "1" ]]; then
+        print_warn "This removes the Admin UI password. Until you set a new one, anyone in the LAN can open the Admin UI."
+        confirm "Turn the Admin UI sign-in off now? [y/N]" "N" || die "Cancelled; nothing was changed."
+    fi
+    env_file=$(require_stack_env_file "$install_dir") || exit $?
+    project=$(compose_project_name "$install_dir" "$env_file") \
+        || die "Cannot determine the compose project of $install_dir (exit $?)."
+    out=$(stack_compose "$install_dir" "$env_file" -p "$project" exec -T ui lancache-ui reset-sign-in 2>&1) || rc=$?
+    [[ $rc -eq 0 ]] || die "lancache-ui reset-sign-in in the ui container failed (exit $rc): $out"
+    stack_compose "$install_dir" "$env_file" -p "$project" restart ui >/dev/null \
+        || die "The ui container did not restart (exit $?); sign-in turns off on its next start."
+    print_ok "Admin UI sign-in is off. Set a new user name and password under General, Sign-in."
+}
+
 # What: reconfigures IPs of an existing install
 # Why: uses the install's directory, not the repo
 # From: Issue #1683 | PR #1858
@@ -7725,7 +7832,7 @@ cmd_configure_upstream_dns() {
 
     print_step "Reading current configuration"
 
-    local env_file ip_http ip_https lan services apply_rc=0
+    local env_file ip_http ip_https lan ui_lan services apply_rc=0
     local old_servers old_zones old_unsigned old_reverse dhcp_mode
     local -a all_services
     env_file=$(runtime_env_file_for_install_dir "$install_dir")
@@ -7738,6 +7845,11 @@ cmd_configure_upstream_dns() {
     ip_http=$(get_env_var IP_HTTP "$env_file") || exit $?
     ip_https=$(get_env_var IP_HTTPS "$env_file") || exit $?
     lan=$(env_or_sot_default DHCP_DOMAIN "$env_file") || exit $?
+    # What: the LAN domain saved in the UI wins
+    # Why: live 06.11.: home.lan from the UI was not seen
+    # From: Issue #1918
+    ui_lan=$(lancache_read_ui_settings_override "$install_dir" "$env_file" DHCP_DOMAIN) || exit $?
+    [[ -z "$ui_lan" ]] || lan="$ui_lan"
 
     printf '\n  %sCurrent configuration:%s\n' "${BOLD}" "${RESET}"
     printf "    DNS servers:        %s\n" "${old_servers:-none (LanCache-NG resolves names itself)}"
@@ -8259,7 +8371,16 @@ if [[ "${2:-}" = "--help" || "${2:-}" = "help" ]] \
     print_command_help "$setup_command" && exit 0
 fi
 case "$setup_command" in
-    install) ;;
+    install)
+        # What: "install <channel>" picks the channel
+        # Why: one-liner needs no env var or prompt
+        # From: Issue #1683
+        if [[ -n "${2:-}" ]]; then
+            list_has_line "$2" "$(lancache_release_rows channel)" \
+                || die "Unknown channel '$2'; use one of: $(lancache_release_rows channel | paste -sd" ")."
+            export LANCACHE_IMAGE_CHANNEL="$2"
+        fi
+        ;;
     list-prompts)
         # What: list-prompts records, then falls through
         # Why: the walk uses the real wizard branch logic
@@ -8313,6 +8434,8 @@ case "$setup_command" in
         cmd_configure_upstream_dns "${2:-$DEFAULT_INSTALL_DIR}"; exit 0 ;;
     reset-to-last-known-good-config)
         shift; cmd_reset_to_last_known_good_config "$@"; exit 0 ;;
+    reset-sign-in)
+        shift; cmd_reset_sign_in "$@"; exit 0 ;;
     help|--help|-h) print_usage; exit 0 ;;
     *)           die "Unknown command: $1. Run './setup.sh --help' for available commands." ;;
 esac
@@ -8384,6 +8507,17 @@ if [[ -n "${LANCACHE_IMAGE_CHANNEL:-}" ]]; then
         LANCACHE_IMAGE_CHANNEL="$current_channel"
     fi
     print_ok "Using the channel already set via LANCACHE_IMAGE_CHANNEL=${LANCACHE_IMAGE_CHANNEL}."
+    # What: a preset channel takes the prompt's nightly path
+    # Why: same warning and second yes as the prompt
+    # From: Issue #1683
+    if [[ "$LANCACHE_IMAGE_CHANNEL" != "$(lancache_sot_value install_channel release)" ]] \
+        && list_has_line "$LANCACHE_IMAGE_CHANNEL" "$(lancache_selectable_channels)" \
+        && [[ -z "${LANCACHE_CHANNEL_CONFIRMED:-}" ]]; then
+        print_warn "The $LANCACHE_IMAGE_CHANNEL channel is experimental: untested daily builds that may break the stack; not for production use."
+        confirm "Install from $LANCACHE_IMAGE_CHANNEL anyway? [y/N]" "N" \
+            || die "Install cancelled; nothing was changed."
+        export LANCACHE_CHANNEL_CONFIRMED=1
+    fi
 else
     selectable=$(lancache_selectable_channels) || exit $?
     retired=$(lancache_release_rows retired) || exit $?
@@ -8413,6 +8547,7 @@ else
             if [[ "$LANCACHE_IMAGE_CHANNEL" != "$install_channel" ]]; then
                 print_warn "The $LANCACHE_IMAGE_CHANNEL channel is experimental: untested daily builds that may break the stack; not for production use."
                 confirm "Install from $LANCACHE_IMAGE_CHANNEL anyway? [y/N]" "N" || continue
+                export LANCACHE_CHANNEL_CONFIRMED=1
             fi
             print_ok "Using the $LANCACHE_IMAGE_CHANNEL channel."
             break
@@ -8866,7 +9001,7 @@ ALLOW_INSECURE_UI=""
 # Why: a "no" to both used to end the whole install
 # From: Issue #1683 | PR #1980
 while true; do
-if confirm "Protect Admin-UI with password? [Y/n]" "Y"; then
+if confirm "Protect Admin-UI with password? [y/N]" "N"; then
     ui_user_default=$(prod_env_default SETUP_UI_USER_DEFAULT) || exit $?
     ask "Username" "$ui_user_default"
     UI_AUTH_USER="$REPLY"

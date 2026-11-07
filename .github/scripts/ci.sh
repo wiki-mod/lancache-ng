@@ -56,6 +56,7 @@ CI_ARG_CRATES=RUST_CRATES
 CI_ARG_TARGET=MUSL_TARGET
 CI_ARG_PROCESSES=LANCACHE_PROCESSES
 CI_ARG_PROCESS_PRE=LANCACHE_PROCESS_PRE
+CI_ARG_INIT_PRE=LANCACHE_INIT_PRE
 CI_ARG_GID=LANCACHE_RUNTIME_GID
 CI_ARG_IMAGE_SETUP=IMAGE_SETUP
 CI_ARG_DEFAULTS=LANCACHE_RUNTIME_DEFAULTS
@@ -64,12 +65,17 @@ CI_ARG_DEFAULTS=LANCACHE_RUNTIME_DEFAULTS
 # From: Issue #1683 | PR #1858
 CI_ARG_SCHEMA=LANCACHE_RUNTIME_SCHEMA
 
+# What: SOT keys ci.sh openrc-setup reads in an image.
+# Why: the Dockerfile only names the command, not keys.
+# From: Issue #1683
+CI_OPENRC_KEYS="OPENRC_RC_CONF OPENRC_RC_SETTINGS OPENRC_INIT_DIR OPENRC_RUNLEVEL_DIR OPENRC_DROP_RUNLEVELS OPENRC_DEFAULT_RUNLEVEL OPENRC_SUPERVISOR OPENRC_RESPAWN_DELAY OPENRC_OUTPUT_LOG OPENRC_ERROR_LOG RUN_DIR LANCACHE_INIT_FILE"
+
 # What: The ci.sh subcommand dispatch table.
 # Why: One table is membership, dispatch and error text.
 # From: Issue #1683
 declare -A CI_DISPATCH=(
     [plan]=ci_cmd_plan [plan-matrix]=ci_cmd_plan_matrix [impact]=ci_cmd_impact [codeql-impact]=ci_cmd_codeql_impact [codeql-analyze]=ci_cmd_codeql_analyze [identity]=ci_cmd_identity
-    [resolve]=ci_cmd_resolve [build]=ci_cmd_build [rust-build]=ci_cmd_rust_build [apk-setup]=ci_cmd_apk_setup [image-setup]=ci_cmd_image_setup
+    [resolve]=ci_cmd_resolve [build]=ci_cmd_build [rust-build]=ci_cmd_rust_build [apk-setup]=ci_cmd_apk_setup [image-setup]=ci_cmd_image_setup [openrc-setup]=ci_cmd_openrc_setup
     [build-tools]=ci_cmd_build_tools [job-settings]=ci_cmd_job_settings [tool-releases]=ci_cmd_tool_releases [publish]=ci_cmd_publish [verify]=ci_cmd_verify [ship]=ci_cmd_ship [ship-release]=ci_cmd_ship_release [gha-runtime-args]=ci_cmd_gha_runtime_args
     [test]=ci_cmd_test [scan-channel]=ci_cmd_scan_channel [assemble]=ci_cmd_assemble
     [aggregate-stack]=ci_cmd_aggregate_stack [scan-stack]=ci_cmd_scan_stack [changed-files]=ci_cmd_changed_files [checks-plan]=ci_cmd_checks_plan [rust-memo]=ci_cmd_rust_memo
@@ -3746,7 +3752,14 @@ _ci_rust_content() {
         src="$(_ci_workspace_src_dir "${dir}" "${bin}")"
         listing="$(_ci_tracked_listing "${src}" "${ref}")" || return 2
         while IFS= read -r line; do
-            [[ "${line%%$'\t'*}" == *.rs ]] || continue
+            [ -n "${line}" ] || continue
+            if [[ "${line%%$'\t'*}" != *.rs ]]; then
+                # What: include_str files count in the id.
+                # Why: a template edit kept the old binary.
+                # From: Issue #1683
+                [ "${mode}" = text ] || _ci_content_id_row "${line}" "${ref}" "" || return 2
+                continue
+            fi
             items="$(_ci_listing_items "${line}" "${ref}")" || return 2
             refs="$(_ci_capture 0 cut -f4 <<< "${items}")" || return 2
             roots+=" ${refs//$'\n'/ }"
@@ -7075,6 +7088,92 @@ ci_cmd_image_setup() {
         fi
     done
     printf 'image-setup=ok steps=%s\n' "$(wc -w <<< "${IMAGE_SETUP:-}")"
+}
+
+# What: OpenRC services from LANCACHE_PROCESSES.
+# Why: dns, dhcp, services had one copied RUN block each.
+# From: Issue #1683
+ci_cmd_openrc_setup() {
+    local rows="${LANCACHE_RUNTIME_DEFAULTS:-}" row k f out n
+    local level name cmd args idir rdir pl
+    local -a kv=()
+    local -A oset=() oset_pre=()
+    rows="${rows//|/$'\n'}"
+    for k in ${CI_OPENRC_KEYS}; do
+        _ci_fill "@${k}@" "${rows}" || return 2
+        oset["${k}"]="${REPLY}"
+    done
+    idir="${oset[OPENRC_INIT_DIR]}"; rdir="${oset[OPENRC_RUNLEVEL_DIR]}"
+    read -ra kv <<< "${oset[OPENRC_RC_SETTINGS]}"
+    for k in "${kv[@]}"; do
+        n="${k%%=*}"
+        if ! out="$(sed -i "s|^#\?${n}=.*|${n}=\"${k#*=}\"|" "${oset[OPENRC_RC_CONF]}" 2>&1)"; then
+            ci_error "[CI-ERROR-OPENRC-0001]" "setting=\"${k}\" reason=\"rc.conf not set\"" "${out}"
+            return 2
+        fi
+    done
+    # What: init scripts that need /dev are dropped.
+    # Why: a container has no dev service to wait for.
+    # From: Issue #1683 | PR #1980
+    for f in "${idir}"/*; do
+        if grep -qE '^[[:space:]]*need[^#]*[[:space:]]dev([[:space:]]|$)' "${f}"; then
+            rm -f "${f}"
+        fi
+    done
+    for k in ${oset[OPENRC_DROP_RUNLEVELS]}; do rm -f "${rdir:?}/${k}"/*; done
+    pl="${LANCACHE_PROCESS_PRE:-}"
+    while IFS= read -r row; do
+        [[ "${row}" == *=* ]] || continue
+        oset_pre["${row%%=*}"]="${row#*=}"
+    done <<< "${pl//|/$'\n'}"
+    for row in ${LANCACHE_PROCESSES:-}; do
+        level="${oset[OPENRC_DEFAULT_RUNLEVEL]}"
+        if [[ "${row%%=*}" == *:* ]]; then level="${row%%:*}"; row="${row#*:}"; fi
+        mkdir -p "${rdir}/${level}"
+        [ -n "${row}" ] || continue
+        name="${row%%=*}"
+        _ci_fill "${row#*=}" "${rows}" || return 2
+        cmd="${REPLY//,/ }"; args=""
+        [[ "${cmd}" != *" "* ]] || args="${cmd#* }"
+        # What: reload sends HUP to the supervised program.
+        # Why: openrc-init drops a container HUP.
+        # From: Issue #1683
+        printf '%s\n' '#!/sbin/openrc-run' "supervisor=${oset[OPENRC_SUPERVISOR]}" \
+            "command=${cmd%% *}" "command_args=\"${args}\"" \
+            "respawn_delay=${oset[OPENRC_RESPAWN_DELAY]}" \
+            "output_log=${oset[OPENRC_OUTPUT_LOG]}" \
+            "error_log=${oset[OPENRC_ERROR_LOG]}" \
+            'extra_started_commands="reload"' \
+            "reload() { supervise-daemon \"\${RC_SVCNAME}\" --signal HUP; }" \
+            > "${idir}/${name}"
+        if [ -n "${oset_pre[${name}]:-}" ]; then
+            _ci_fill "${oset_pre[${name}]}" "${rows}" || return 2
+            printf 'start_pre() { %s; }\n' "${REPLY}" >> "${idir}/${name}"
+        fi
+        chmod 0755 "${idir}/${name}"
+        if ! out="$(rc-update add "${name}" "${level}" 2>&1)"; then
+            ci_error "[CI-ERROR-OPENRC-0002]" "process=\"${name}\" level=\"${level}\" reason=\"rc-update failed\"" "${out}"
+            return 2
+        fi
+    done
+    # What: start script: seed the tmpfs /run, then init.
+    # Why: /run is tmpfs; the image dirs must be put back.
+    # From: Issue #1683 | PR #1980
+    local rd="${oset[RUN_DIR]}" init="${oset[LANCACHE_INIT_FILE]}" il
+    if ! out="$(tar -C "${rd}" -cpf "${rd}.tar" . 2>&1)"; then
+        ci_error "[CI-ERROR-OPENRC-0003]" "dir=\"${rd}\" reason=\"run dir not packed\"" "${out}"
+        return 2
+    fi
+    il="${LANCACHE_INIT_PRE:-}"
+    printf '%s\n' '#!/bin/sh' "tar -C '${rd}' -xpf '${rd}.tar'" > "${init}"
+    while IFS= read -r row; do
+        [ -n "${row}" ] || continue
+        _ci_fill "${row}" "${rows}" || return 2
+        printf '%s\n' "${REPLY}" >> "${init}"
+    done <<< "${il//|/$'\n'}"
+    printf '%s\n' 'exec openrc-init "$@"' >> "${init}"
+    chmod 0755 "${init}"
+    printf 'openrc-setup=ok processes=%s\n' "$(wc -w <<< "${LANCACHE_PROCESSES:-}")"
 }
 
 # What: one apk step, output shown, coded error with raw.
@@ -14094,8 +14193,14 @@ _ci_service_default_rows() {
         part="$(_ci_run -m 1 "[CI-ERROR-BUILDARGS-0022]" "service=\"${service}\" reason=\"tracked files not read\"" \
             git -C "${CI_REPO_ROOT}" grep --cached -I -h -o -E '[A-Z][A-Z0-9_]*' -- "${files[@]}")" || return 2
         text+=$'\n'"${part}"
+        # What: openrc-setup images read its keys.
+        # Why: the Dockerfile names only the command.
+        # From: Issue #1683
+        if git -C "${CI_REPO_ROOT}" grep --cached -q -F openrc-setup -- "${files[@]}"; then
+            text+=$'\n'"${CI_OPENRC_KEYS}"
+        fi
     fi
-    for field in processes process_pre setup default_args; do
+    for field in processes process_pre init_pre setup default_args; do
         part="$(_ci_target_list "${service}" "${field}")" || return 2
         text+=$'\n'"${part}"
     done
@@ -14212,6 +14317,11 @@ _ci_service_build_args() {
     # From: Issue #1683 | PR #1980
     val="$(_ci_target_list "${service}" process_pre)" || return 2
     [ -z "${val}" ] || out="${out}${prefix}${CI_ARG_PROCESS_PRE}=${val//$'\n'/|}"$'\n'
+    # What: SOT start script lines, "|"-joined.
+    # Why: openrc-setup writes them before openrc-init.
+    # From: Issue #1683
+    val="$(_ci_target_list "${service}" init_pre)" || return 2
+    [ -z "${val}" ] || out="${out}${prefix}${CI_ARG_INIT_PRE}=${val//$'\n'/|}"$'\n'
     # What: the SOT runtime gid the images share.
     # Why: the Dockerfiles bake it; compose names none.
     # From: Issue #1683 | PR #1912
@@ -16498,7 +16608,7 @@ ci_main() {
     # What: skip manifest for build-only commands
     # Why: bind-mounted stage has no SOT present
     # From: Issue #1683
-    case "${command}" in check|rust-build|apk-setup|image-setup) ;; *) ci_require_manifest || return "$?" ;; esac
+    case "${command}" in check|rust-build|apk-setup|image-setup|openrc-setup) ;; *) ci_require_manifest || return "$?" ;; esac
     # What: index a present SOT once for this command.
     # Why: readers then look fields up instead of rereading.
     # From: Issue #1683 | PR #1858

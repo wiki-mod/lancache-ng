@@ -246,12 +246,12 @@ and names the exclusion (`CI-INFO-VALIDATE-0055`); for its Kea checks it runs `d
 alone inside the per-run /27 with the host networking reset (Part A). The wire-level
 checks below need a real LAN.
 
-- **Probe**: the Admin UI DHCP page posts to `/api/dhcp/check`; the ui writes a
-  request id to `DHCP_PROBE_REQUEST_FILE`, the `dhcp-probe` program in the `dhcp`
-  container runs one DISCOVER and a REQUEST for the first offer and writes its answer
-  to `DHCP_PROBE_RESULT_FILE`. The page shows `conflict` (other DHCP servers that
-  offered) and `client` (whether the exchange completed); no answer within the ui's
-  wait time shows as `unavailable`.
+- **Probe**: the Admin UI DHCP page posts to `/api/dhcp/check`; the ui starts a
+  one-shot container of its own image on the host network (`lancache-ui dhcp-probe`),
+  which runs one DISCOVER and a REQUEST for the first offer and prints its report.
+  `setup.sh` runs the same command before Kea activation. The page lists every
+  server that offered and whether the lease exchange completed; a probe that does
+  not finish within `DHCP_PROBE_WAIT_TIMEOUT` shows as an error.
 - **Kea**: a real LAN client completes DISCOVER, OFFER, REQUEST, ACK; the address lies
   in the configured pool and the client receives the configured DNS and NTP options
   (AG-OP-014). A static reservation added through the Admin UI applies to the next

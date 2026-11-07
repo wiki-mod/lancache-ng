@@ -55,56 +55,9 @@ ENV LANCACHE_RUNTIME_GID=${LANCACHE_RUNTIME_GID} \
 # Why: OpenRC restarts crashes; @KEY@ e.g. CONFIG_DIR.
 # From: Issue #1683 | PR #1980
 ARG LANCACHE_PROCESSES
-RUN set -e; \
-    sed -i 's/^#\?rc_sys=.*/rc_sys="docker"/' /etc/rc.conf; \
-    sed -i 's/^#\?rc_env_allow=.*/rc_env_allow="*"/' /etc/rc.conf; \
-    sed -i 's/^#\?rc_controller_cgroups=.*/rc_controller_cgroups="NO"/' /etc/rc.conf; \
-    sed -i 's/^#\?rc_cgroup_mode=.*/rc_cgroup_mode="legacy"/' /etc/rc.conf; \
-    for f in /etc/init.d/*; do grep -qE '^[[:space:]]*need[^#]*[[:space:]]dev([[:space:]]|$)' "$f" && rm -f "$f" || true; done; \
-    rm -f /etc/runlevels/sysinit/* /etc/runlevels/boot/*; \
-    declare -A v; IFS='|' read -ra kv <<< "${LANCACHE_RUNTIME_DEFAULTS}"; \
-    for p in "${kv[@]}"; do v["${p%%=*}"]="${p#*=}"; done; \
-    for row in ${LANCACHE_PROCESSES}; do \
-      level=default; \
-      if [[ "${row%%=*}" == *:* ]]; then level="${row%%:*}"; row="${row#*:}"; fi; \
-      mkdir -p "/etc/runlevels/${level}"; \
-      [ -n "${row}" ] || continue; \
-      name="${row%%=*}"; cmd="${row#*=}"; \
-      while [[ "${cmd}" =~ @([A-Z0-9_]+)@ ]]; do \
-        k="${BASH_REMATCH[1]}"; \
-        [[ -v "v[${k}]" ]] || { echo "unknown SOT key ${k}" >&2; exit 1; }; \
-        cmd="${cmd//@${k}@/${v[${k}]}}"; \
-      done; \
-      cmd="${cmd//,/ }"; args=""; \
-      [[ "${cmd}" != *" "* ]] || args="${cmd#* }"; \
-      printf '%s\n' '#!/sbin/openrc-run' 'supervisor=supervise-daemon' \
-        "command=${cmd%% *}" "command_args=\"${args}\"" \
-        'respawn_delay=2' 'output_log=/proc/1/fd/1' \
-        'error_log=/proc/1/fd/2' > "/etc/init.d/${name}"; \
-      chmod 0755 "/etc/init.d/${name}"; \
-      rc-update add "${name}" "${level}"; \
-    done
-
-# What: start script: seed /run, runlevel from mode.
-# Why: /run is tmpfs; the image dirs must be put back.
-# From: Issue #1683 | PR #1980
-RUN set -e; \
-    declare -A v; IFS='|' read -ra kv <<< "${LANCACHE_RUNTIME_DEFAULTS}"; \
-    for p in "${kv[@]}"; do v["${p%%=*}"]="${p#*=}"; done; \
-    : "${v[OPENRC_STATE_DIR]:?}" "${v[KEA_SOCKET_DIR]:?}" "${v[KEA_SOCKET_DIR_MODE]:?}" "${v[RUN_DIR]:?}"; \
-    tar -C "${v[RUN_DIR]}" -cpf "${v[RUN_DIR]}.tar" .; \
-    f="${v[DHCP_MODE_FILE]}"; \
-    while [[ "${f}" =~ @([A-Z0-9_]+)@ ]]; do \
-      k="${BASH_REMATCH[1]}"; f="${f//@${k}@/${v[${k}]}}"; \
-    done; \
-    printf '%s\n' '#!/bin/bash' \
-      "tar -C '${v[RUN_DIR]}' -xpf '${v[RUN_DIR]}.tar'" \
-      "rm -rf '${v[OPENRC_STATE_DIR]}'; rm -f '${v[KEA_SOCKET_DIR]}'/*.pid" \
-      "mkdir -p '${v[KEA_SOCKET_DIR]}'; chmod '${v[KEA_SOCKET_DIR_MODE]}' '${v[KEA_SOCKET_DIR]}'" \
-      "mode=\"\$(cat '${f}' 2>/dev/null || true)\"" \
-      "exec openrc-init \"\${mode:-${v[DHCP_MODE]}}\"" \
-      > /usr/local/bin/lancache-init; \
-    chmod 0755 /usr/local/bin/lancache-init
+ARG LANCACHE_INIT_PRE
+RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
+    bash /usr/local/bin/ci.sh openrc-setup
 
 # What: the start script runs openrc-init as PID 1.
 # Why: exec keeps zombie reaping and SIGTERM stop.

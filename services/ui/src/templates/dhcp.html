@@ -34,9 +34,9 @@
             {{ <text_field label={t.ip_pool_start} name="pool_start" tone={tone} value={pool_start} placeholder="192.168.2.100" required={true}/> }}
             {{ <text_field label={t.ip_pool_end} name="pool_end" tone={tone} value={pool_end} placeholder="192.168.2.200" required={true}/> }}
             {{ <text_field label={t.lease_time_s} name="lease_time" tone={tone} value={lease_time ~ ""}/> }}
-            {{ <text_field label="Domain" name="domain" tone={tone} value={domain}/> }}
+            {{ <text_field label={t.dhcp_domain_label} name="domain" tone={tone} value={domain}/> }}
             <div class="col-span-2">
-              {{ <text_field label={t.ntp_server} name="ntp_servers" tone={tone} value={ntp_servers} placeholder="192.0.2.123, 192.0.2.124" hint="Kommagetrennte IPv4-Liste, z. B. <code>192.0.2.123, 192.0.2.124</code>. Leerlassen, wenn du keinen NTP-Wert verteilen willst."/> }}
+              {{ <text_field label={t.ntp_server} name="ntp_servers" tone={tone} value={ntp_servers} placeholder="192.0.2.123, 192.0.2.124" hint={t.hint_ntp_list}/> }}
               {% if ntp_auto %}
               {{ <ntp_auto_hint ntp_url={ntp_url} t={t}/> }}
               {% endif %}
@@ -158,15 +158,15 @@
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <div class="grid gap-3 md:grid-cols-2">
             {{ <text_field label={t.proxy_subnet_start} name="dhcp_subnet_start" value={dhcp_proxy_subnet_start} placeholder="10.0.0.0" required={true}/> }}
-            {{ <text_field label={t.upstream_dhcp_server_documentation_only} name="upstream_dhcp_ip" value={dhcp_upstream_dhcp_ip} placeholder="10.0.0.1" required={true} hint="ProxyDHCP mode never needs to contact this server to work; recorded so you and the DHCP conflict check agree on which server owns real leases."/> }}
+            {{ <text_field label={t.upstream_dhcp_server_documentation_only} name="upstream_dhcp_ip" value={dhcp_upstream_dhcp_ip} placeholder="10.0.0.1" required={true} hint={t.hint_proxy_upstream}/> }}
             {{ <text_field label={t.dns_server_1} name="dhcp_dns_primary" value={dhcp_dns_primary} placeholder="10.0.0.10" required={true}/> }}
             {{ <text_field label={t.dns_server_2} name="dhcp_dns_secondary" value={dhcp_dns_secondary} placeholder="10.0.0.11"/> }}
-            {{ <text_field label={t.listen_interface_optional} name="dhcp_proxy_interface" value={dhcp_proxy_interface} placeholder="eth0" hint="Bind dnsmasq to one host interface instead of all of them. Leave empty on a single-NIC host."/> }}
+            {{ <text_field label={t.listen_interface_optional} name="dhcp_proxy_interface" value={dhcp_proxy_interface} placeholder="eth0" hint={t.hint_proxy_interface}/> }}
             {{ <text_field label={t.router_gateway_option_optional_pxe_scope} name="dhcp_proxy_router" value={dhcp_proxy_router} placeholder="10.0.0.1"/> }}
-            {{ <text_field label={t.ntp_servers_optional_pxe_scoped} name="dhcp_ntp_servers" value={dhcp_ntp_servers} placeholder="10.0.0.20, 10.0.0.21" hint="Comma-separated IPv4 list."/> }}
+            {{ <text_field label={t.ntp_servers_optional_pxe_scoped} name="dhcp_ntp_servers" value={dhcp_ntp_servers} placeholder="10.0.0.20, 10.0.0.21" hint={t.hint_ipv4_list}/> }}
             {{ <text_field label={t.domain_option_optional_pxe_scoped} name="dhcp_proxy_domain" value={dhcp_proxy_domain} placeholder={dhcp_domain}/> }}
             {{ <text_field label={t.pxe_boot_filename_optional} name="dhcp_proxy_boot_filename" value={dhcp_proxy_boot_filename} placeholder="pxelinux.0"/> }}
-            {{ <text_field label={t.pxe_boot_server_address_optional} name="dhcp_proxy_boot_server" value={dhcp_proxy_boot_server} placeholder="10.0.0.5" hint="Requires a boot filename above; defaults to this host's own address if left empty while a filename is set."/> }}
+            {{ <text_field label={t.pxe_boot_server_address_optional} name="dhcp_proxy_boot_server" value={dhcp_proxy_boot_server} placeholder="10.0.0.5" hint={t.hint_boot_server}/> }}
             <div class="col-span-2">
               <label class="block text-xs text-slate-400 mb-1">{{ t.additional_safe_custom_options_optional }}</label>
               <textarea name="dhcp_proxy_custom_options" rows="3" placeholder="60:PXEClient&#10;93:0"
@@ -199,8 +199,8 @@
         <form method="post" action="{{ routes.dhcp_relay | safe }}" class="space-y-3 rounded border border-sky-500/30 bg-slate-900/50 p-4">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <div class="grid gap-3 md:grid-cols-2">
-            {{ <text_field label={t.relay_local_address_this_relay_s} name="dhcp_relay_local_addr" value={dhcp_relay_local_addr} placeholder="192.168.1.2" required={true} hint="The IP dnsmasq listens on for client DHCP broadcasts; forwarded as <code>giaddr</code> so the upstream server selects the right pool."/> }}
-            {{ <text_field label={t.upstream_dhcp_server} name="upstream_dhcp_ip" value={dhcp_upstream_dhcp_ip} placeholder="10.0.0.1" required={true} hint="The real DHCP server every relayed request is forwarded to."/> }}
+            {{ <text_field label={t.relay_local_address_this_relay_s} name="dhcp_relay_local_addr" value={dhcp_relay_local_addr} placeholder="192.168.1.2" required={true} hint={t.hint_relay_local}/> }}
+            {{ <text_field label={t.upstream_dhcp_server} name="upstream_dhcp_ip" value={dhcp_upstream_dhcp_ip} placeholder="10.0.0.1" required={true} hint={t.hint_relay_upstream}/> }}
           </div>
           <button type="submit"
                   class="btn btn-sky">

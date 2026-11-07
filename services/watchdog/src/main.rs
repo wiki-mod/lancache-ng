@@ -345,6 +345,34 @@ fn disks(s: &Settings, f: &mut Findings) -> Result<(), String> {
     Ok(())
 }
 
+// What: host conntrack use against its maximum.
+// Why: DoMe 07.11.: a full table drops new connections.
+// From: Issue #1683 | PR #1985
+fn conntrack(s: &Settings, f: &mut Findings) -> Result<(), String> {
+    let path = Path::new(&s.text("HOST_NET_STAT_DIR")?).join("nf_conntrack");
+    let Ok(stat) = std::fs::read_to_string(&path) else {
+        return Ok(());
+    };
+    let used = stat
+        .lines()
+        .nth(1)
+        .and_then(|l| l.split_whitespace().next())
+        .and_then(|h| u64::from_str_radix(h, 16).ok())
+        .ok_or_else(|| format!("{}: no entries column", path.display()))?;
+    let max_file = s.text("CONNTRACK_MAX_FILE")?;
+    let max: u64 = std::fs::read_to_string(&max_file)
+        .map_err(|e| format!("{max_file}: {e}"))?
+        .trim()
+        .parse()
+        .map_err(|e| format!("{max_file}: {e}"))?;
+    let pct = used.saturating_mul(100) / max.max(1);
+    let warn = s.uint("WATCHDOG_CONNTRACK_WARN_PCT")?;
+    if pct >= warn {
+        f.warn("conntrack", format!("{pct}% used ({used} of {max})"));
+    }
+    Ok(())
+}
+
 // What: expiry of each watched certificate.
 // Why: warn before clients reject proxy or ui.
 // From: Issue #1683 | PR #1858
@@ -403,9 +431,10 @@ async fn round(s: &Settings, m: &mut Memory) -> Findings {
     if let Err(e) = containers(s, &mut f, m).await {
         f.crit("docker", e);
     }
-    let steps: [(&str, Result<(), String>); 6] = [
+    let steps: [(&str, Result<(), String>); 7] = [
         ("cache", cache_light(s, &mut f)),
         ("disks", disks(s, &mut f)),
+        ("conntrack", conntrack(s, &mut f)),
         ("certs", certs(s, &mut f)),
         ("cache purge", purge_cache(s, &mut f, now)),
         ("log prune", prune_logs(s, &mut f, now)),
