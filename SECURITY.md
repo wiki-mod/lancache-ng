@@ -216,9 +216,9 @@ Static Application Security Testing (SAST) remediation policy.
   `.github/workflows/nightly.yml` runs it once a day against new advisory
   data. In `ci.yml` it feeds the `result` job, the always-present aggregate
   check meant for branch protection. **`current_dev`, where pull requests
-  actually land, is protected** (checked 2026-11-07 with
+  actually land, is protected** (as read with
   `gh api repos/wiki-mod/lancache-ng/branches/current_dev/protection` and
-  `gh api repos/wiki-mod/lancache-ng/rulesets`): `result` is a required status
+  `gh api repos/wiki-mod/lancache-ng/rulesets` on 2026-11-07): `result` is a required status
   check, enforced for non-administrators (`enforce_admins` is false), and an
   active ruleset requires a pull request before merging. A failing
   `cargo-audit` result therefore fails `result` and blocks a `current_dev`
@@ -244,8 +244,8 @@ Static Application Security Testing (SAST) remediation policy.
   are visible as GitHub code scanning alerts. Before a CodeQL finding
   actually blocks a merge, the CodeQL analysis result has to be fed into the
   `result` gate (or an equivalent required check) the way `cargo-audit` is;
-  this was tracked as a Level 3 follow-up in issue #1130 and was not
-  re-checked in the 2026-11-07 review. Until then, enforcement of this
+  this is tracked as a Level 3 follow-up in issue #1130 and its current
+  state is not verified here. Until then, enforcement of this
   threshold relies on manual review of the repository's Security tab before
   each release.
 

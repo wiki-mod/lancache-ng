@@ -6,13 +6,12 @@ It replaces the former component-specific files under
 `docs/capability-inventory/SoT-*.md`.
 
 The inventory describes the capabilities that exist in the `current_dev`
-implementation at the commits named above; the parts that follow PR #1985 are
-marked and MUST NOT be merged before it. It is a function-level companion to
+implementation at the commits named above. It is a function-level companion to
 `docs/architecture-ng.md`, not a replacement for the higher-level architecture
 documentation. LanCache-NG runs as exactly five containers (`services`,
 `proxy`, `dns`, `dhcp`, `ui`); the programs of each container are listed in
-`docs/architecture-ng.md`. Security findings that this review made are tracked
-in `docs/threat-model.md` ("Gaps found by the 2026-11-07 review") and are only referenced here.
+`docs/architecture-ng.md`. Security-relevant limits of the code are listed in
+`docs/threat-model.md` ("Security-relevant limits of the current code") and are only referenced here.
 
 Historical audit notes, already-resolved findings, temporary investigation
 state, and old implementation snapshots are intentionally not retained here.
@@ -250,8 +249,8 @@ The Admin UI uses the Control Agent for live configuration operations such as:
 * `lease4-get-all`
 * `lease4-del`
 
-The Control Agent is meant as an internal management interface. In the code of
-PR #1985 its configuration has a basic `authentication` block (user
+The Control Agent is meant as an internal management interface. Its
+configuration has a basic `authentication` block (user
 `KEA_CTRL_USER`, password `KEA_CTRL_TOKEN`) and the UI client sends the
 credentials; see gap G2 in `docs/threat-model.md`. It is bound to
 `KEA_CTRL_ADDRESS` (SOT default `0.0.0.0`) on the host network and no firewall
@@ -276,8 +275,7 @@ Admin UI rollback flow and operator recovery tooling.
 
 ### DHCP probe
 
-The old external `dhclient` and `nmap` based probe has been replaced by native
-Rust DHCP probing.
+The DHCP probe is native Rust (`dhcp_probe` in `services/common/shared.rs`).
 
 The probe can test for responding DHCP servers and exercise the real DHCP
 client path without configuring the host interface with the obtained lease.
@@ -548,8 +546,8 @@ runs in the `services` container (`daemon` mode, started by OpenRC) and the
 Admin UI has a CacheHamster page. The UI runs the daemon's commands in the
 `services` container through the Docker API (`hamster`, `exec_in`).
 
-This review read the code; it did not run a prefill. No test exists for it on
-`current_dev`, so end-to-end prefill behavior is not verified here.
+No test covers it on `current_dev`; prefill behavior is described from the code,
+not from a run.
 
 ### Design
 
@@ -613,8 +611,9 @@ The script handles:
 
 The current repository uses the production (`deploy/prod`) and secondary
 (`deploy/secondary`) deployment layouts. The former `deploy/dev` and
-`deploy/full-setup` layouts are gone; development no longer depends on
-maintaining a second parallel copy of the complete runtime stack.
+`deploy/full-setup` layouts do not exist; development uses the production
+layout and does not maintain a second parallel copy of the complete runtime
+stack (`AG-KD-008`).
 
 ### Idempotence and convergence
 
@@ -643,9 +642,6 @@ needed to construct its local deployment.
 
 This includes runtime credentials, DNS replication information and release
 image coordinates.
-
-The secondary flow no longer assumes that a user manually understands and
-assembles the internal DNS configuration from scratch.
 
 ## Cross-component data flows
 
@@ -728,8 +724,7 @@ CacheHamster receives and discards the response body.
 ```
 
 The Steam content-resolution portion of this flow exists in the code
-(`app_info`, `request_code`, `chunks_of`, `app_urls`); it was not run in the
-2026-11-07 review.
+(`app_info`, `request_code`, `chunks_of`, `app_urls`); no test covers it.
 
 ## Capability boundaries
 

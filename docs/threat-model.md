@@ -6,8 +6,6 @@
 > **Latest release tag at review time: `v0.3.2`. It is not contained in
 > `current_dev`; this document describes the five-container architecture of
 > `current_dev` (see `docs/architecture-ng.md`), not the v0.3.2 images.**
-> **T3, T12 and the gap table describe the code of #1985, which is not in
-> `current_dev` yet. This document MUST NOT be merged before #1985.**
 >
 > This document must be re-audited for every release. It describes the security
 > posture of a *specific* architecture, and that architecture changes between
@@ -29,21 +27,18 @@ framed against that assumption.
 
 ---
 
-## Gaps found by the 2026-11-07 review and their state
+## Security-relevant limits of the current code
 
-The review found three places where the code on `current_dev` (`3005b2b4`)
-appeared not to do what this document used to state, or what `AGENTS.md`
-requires. The identifiers G1 to G3 stay because code comments refer to them.
-All states below are **statically indicated**: the cited code was read, callers,
-defaults and alternate paths were searched, and no stack was started that
-exercises the Admin UI login, the Kea Control Agent or the nginx resolver check.
-By `AG-INT-001` they are not confirmed behavior.
+The statements in this document come from reading the code, its callers,
+defaults and alternate paths; no running stack exercised the Admin UI login,
+the Kea Control Agent or the nginx resolver check (`AG-INT-001`). The
+identifiers G1 to G3 are stable references used by code comments.
 
-| ID | Finding on `current_dev` `3005b2b4` | State in #1985 (`9a4b4be4`) | Threat |
+| ID | Topic | State in the code (#1985 `9a4b4be4`) | Threat |
 |---|---|---|---|
-| G1 | The compose file delivered `UI_AUTH_USER` and `UI_AUTH_PASSWORD_HASH`, but the UI read `UI_USER` and `UI_PASSWORD_HASH`, so a password set by `setup.sh` never reached the UI. | The compose file now passes them as `UI_USER` and `UI_PASSWORD_HASH` (`deploy/prod/docker-compose.yml`). An unauthenticated Admin UI is an explicit choice made in the setup flow with a default of open (`ALLOW_INSECURE_UI=true` in the SOT runtime defaults): `setup.sh` asks "Protect Admin-UI with password? [y/N]" (default No) and, on No, "Allow Admin-UI without authentication?" (default from the SOT value `ALLOW_INSECURE_UI=true`); answering No to both repeats the question. An update appends `ALLOW_INSECURE_UI=true` to an install that has no login, so the open state is an explicit entry in `.env`; `AG-SEC-001` allows this as an explicit operator choice, including trusted LAN deployments. Still true: the `ui` process does not read `ALLOW_INSECURE_UI`, and `login_ok` accepts every request when the hash is empty, so the refusal that `AG-SEC-001` describes for "neither credentials nor `ALLOW_INSECURE_UI=true`" exists only in the setup flow. | T3 |
-| G2 | The Kea Control Agent was bound to `0.0.0.0` on the host network with no `authentication` block, and the UI client sent no credentials. | `kea_conf::ctrl_agent` writes a basic `authentication` block (user `KEA_CTRL_USER`, password the `KEA_CTRL_TOKEN`) and `kea::Api` sends them. Still true: the bind address is `KEA_CTRL_ADDRESS=@ANY_BIND_IP@` (`0.0.0.0`) on the host network, and `KEA_CTRL_ALLOW_FROM` and `KEA_CTRL_CHAIN` exist only in the SOT; no code applies a firewall fence. | T12 |
-| G3 | `AG-OP-002` requires real upstream resolvers for nginx. `NGINX_UPSTREAM_RESOLVER` was rendered without a check that it is not a LanCache address. | `render::nginx_files` and the UI save path check every entry with `recursor_conf::upstream_entry` (numeric address only; loopback, unspecified and this host's own addresses are refused as "would loop"). | T1 |
+| G1 | Admin UI login | The compose file passes `UI_AUTH_USER` and `UI_AUTH_PASSWORD_HASH` to the UI as `UI_USER` and `UI_PASSWORD_HASH` (`deploy/prod/docker-compose.yml`). An unauthenticated Admin UI is an explicit choice made in the setup flow with a default of open (`ALLOW_INSECURE_UI=true` in the SOT runtime defaults): `setup.sh` asks "Protect Admin-UI with password? [y/N]" (default No) and, on No, "Allow Admin-UI without authentication?" (default from the SOT value); answering No to both repeats the question. An update appends `ALLOW_INSECURE_UI=true` to an install that has no login, so the open state is an explicit entry in `.env`. `AG-SEC-001` allows this as an explicit operator choice, including trusted LAN deployments. The `ui` process does not read `ALLOW_INSECURE_UI`, and `login_ok` accepts every request when the hash is empty, so the refusal that `AG-SEC-001` describes for "neither credentials nor `ALLOW_INSECURE_UI=true`" exists only in the setup flow. | T3 |
+| G2 | Kea Control Agent | `kea_conf::ctrl_agent` writes a basic `authentication` block (user `KEA_CTRL_USER`, password `KEA_CTRL_TOKEN`) and `kea::Api` sends them. The bind address is `KEA_CTRL_ADDRESS=@ANY_BIND_IP@` (`0.0.0.0`) on the host network. `KEA_CTRL_ALLOW_FROM` and `KEA_CTRL_CHAIN` exist only in the SOT; no code applies a firewall fence. | T12 |
+| G3 | nginx upstream resolver | `AG-OP-002` requires real upstream resolvers for nginx. `render::nginx_files` and the UI save path check every `NGINX_UPSTREAM_RESOLVER` entry with `recursor_conf::upstream_entry` (numeric address only; loopback, unspecified and this host's own addresses are refused as "would loop"). | T1 |
 
 ---
 
@@ -397,8 +392,7 @@ sensitive) · **Impact**: Critical (full host compromise)
   compromise of either container is a host compromise.
 - Reaching the `ui` through the network therefore reaches Docker; this makes
   the Admin UI authentication (T3) part of this threat; with the unauthenticated
-  default, reaching the UI is enough. The earlier
-  statement that the Admin UI has no Docker access is no longer true.
+  default, reaching the UI is enough.
 - **Scheduled automatic updates do not add a socket-access surface.** They run
   on the host as a `systemd` timer or, on Alpine hosts without systemd, an
   OpenRC loop service invoking `setup.sh` (`AUTO_UPDATE_ENABLED=0` by default).
@@ -706,10 +700,10 @@ tagging each release, then update the top marker and the
    them.
 4. **Re-verify the two things most prone to silent drift:** which containers
    still have direct Docker socket access (T6), and whether Admin UI auth is
-   still fail-closed by default (T3, `AG-SEC-001`). These have gone stale before.
+   still fail-closed by default (T3, `AG-SEC-001`).
 5. **Reconcile internal consistency** — the Conclusion and the risk tiers must
-   not contradict the individual threats, and every gap in "Gaps found by the 2026-11-07 review" must
-   either still be open in the code or be removed.
+   not contradict the individual threats, and every entry in "Security-relevant limits of the current code"
+   must match the code.
 6. **Update** the inventory "Last verified" cells, the top marker, and the
    review date.
 
@@ -734,12 +728,12 @@ every LAN device) for caching performance. The design goal is a fail-closed
 DDNS updates, and secondary registration should refuse to start or answer in an
 insecure/unauthenticated state unless the operator explicitly opts out.
 
-At the 2026-11-07 review the code read shows that goal met for the PowerDNS
+In the current code that goal is met for the PowerDNS
 API key, DDNS updates (TSIG), secondary registration and the Kea Control Agent
 login. The Admin UI is unauthenticated by an explicit setup choice whose default is open, which `AG-SEC-001`
 allows for trusted LAN deployments; the `ui` process itself does not refuse to
-start without a password, that choice lives in the setup flow (see "Gaps found
-by the 2026-11-07 review"). Both the `ui` and `services` containers mount the Docker
+start without a password, that choice lives in the setup flow (see "Security-relevant
+limits of the current code"). Both the `ui` and `services` containers mount the Docker
 socket read-write (T6), so the Admin UI is the most sensitive network-facing
 component. Scheduled automatic updates run on the host via `systemd` or an
 OpenRC service, not as a container, so they add no socket-access surface.
