@@ -211,7 +211,7 @@ dl.fedoraproject.org
 mirrors.fedoraproject.org
 
 # ---- Alpine Linux ----
-# What: Alpine package CDN; only plain http is cached.
+# What: Alpine package CDN; https needs HTTPS mode.
 # Why: DoMe asked for Alpine in the default list.
 # From: Issue #1683 | PR #1985
 dl-cdn.alpinelinux.org
