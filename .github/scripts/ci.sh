@@ -76,7 +76,7 @@ CI_OPENRC_KEYS="OPENRC_RC_CONF OPENRC_RC_SETTINGS OPENRC_INIT_DIR OPENRC_RUNLEVE
 declare -A CI_DISPATCH=(
     [plan]=ci_cmd_plan [plan-matrix]=ci_cmd_plan_matrix [impact]=ci_cmd_impact [codeql-impact]=ci_cmd_codeql_impact [codeql-analyze]=ci_cmd_codeql_analyze [identity]=ci_cmd_identity
     [resolve]=ci_cmd_resolve [build]=ci_cmd_build [rust-build]=ci_cmd_rust_build [apk-setup]=ci_cmd_apk_setup [image-setup]=ci_cmd_image_setup [openrc-setup]=ci_cmd_openrc_setup
-    [build-tools]=ci_cmd_build_tools [job-settings]=ci_cmd_job_settings [tool-releases]=ci_cmd_tool_releases [publish]=ci_cmd_publish [verify]=ci_cmd_verify [ship]=ci_cmd_ship [ship-release]=ci_cmd_ship_release [build-tools-run]=ci_cmd_build_tools_run
+    [build-tools]=ci_cmd_build_tools [job-settings]=ci_cmd_job_settings [tool-releases]=ci_cmd_tool_releases [publish]=ci_cmd_publish [verify]=ci_cmd_verify [ship]=ci_cmd_ship [ship-release]=ci_cmd_ship_release [build-tools-run]=ci_cmd_build_tools_run [gha-runtime-args]=ci_cmd_gha_runtime_args
     [test]=ci_cmd_test [scan-channel]=ci_cmd_scan_channel [assemble]=ci_cmd_assemble
     [aggregate-stack]=ci_cmd_aggregate_stack [scan-stack]=ci_cmd_scan_stack [changed-files]=ci_cmd_changed_files [checks-plan]=ci_cmd_checks_plan [rust-memo]=ci_cmd_rust_memo [psl]=ci_cmd_psl
     [assemble-stack]=ci_cmd_assemble_stack [test-stack]=ci_cmd_test_stack [nightly-report]=ci_cmd_nightly_report
@@ -6437,6 +6437,23 @@ ci_cmd_build_tools_run() {
         -v "${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}" -v "${RUNNER_TEMP}:${RUNNER_TEMP}" \
         -w "${GITHUB_WORKSPACE}" "${envs[@]}" "${ref}" \
         timeout -s KILL "$((min * 60))" bash .github/scripts/ci.sh "$@"
+}
+
+# What: args of the docker:// GHA runtime export step.
+# Why: run steps never get the cache token; kill-bounded.
+# From: Issue #1683 | PR #1858
+ci_cmd_gha_runtime_args() {
+    local t args
+    t="$(_ci_variable CI_GHA_RUNTIME_EXPORT_TIMEOUT)" || return 2
+    case "${t}" in
+        ''|*[!0-9]*)
+            ci_log "[CI-ERROR-CACHE-0009]" "value=\"${t}\" reason=\"CI_GHA_RUNTIME_EXPORT_TIMEOUT must be whole seconds\""
+            return 2
+            ;;
+    esac
+    args="-s KILL ${t} /bin/sh -c \"env | grep -E '^ACTIONS_(RESULTS_URL|RUNTIME_TOKEN)=' >> \$GITHUB_ENV\""
+    _ci_step_output "[CI-ERROR-CACHE-0010]" args "${args}" || return 2
+    printf '%s\n' "${args}"
 }
 
 # What: kill timeout (s) of a docker run/exec CI command.
