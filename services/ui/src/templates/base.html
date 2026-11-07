@@ -176,7 +176,18 @@
     font-size: 12px;
     color: var(--mist-dim);
   }
-  .dock-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 10px; }
+  .dock-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 12px; }
+  /* What: tidy foot: language pill, channel badge, link
+     Why: DoMe 07.11.: make the menu foot look nicer
+     From: Issue #1683 | PR #1985 */
+  .dock-tools .lang-switch { flex: 1 1 auto; justify-content: space-between; }
+  .dock-meta { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
+  .dock-info {
+    padding: 2px 10px; border-radius: 999px; border: 1px solid var(--navy-600);
+    background: var(--navy-850); color: var(--mist); font-size: 11.5px; letter-spacing: 0.02em;
+  }
+  .dock-link { color: var(--mist); text-decoration: none; }
+  .dock-link:hover { color: var(--foam); text-decoration: underline; }
 
   /* What: main column holding beambar and content
      Why: min-width 0 lets tables shrink
@@ -546,7 +557,7 @@
     .dock { position: sticky; top: 0; z-index: 5; width: 100%; height: auto; flex-direction: row; align-items: center; gap: 4px; padding: 6px 8px; overflow-x: auto; border-right: none; border-bottom: 1px solid var(--navy-700); }
     .dock .brand { padding: 0 6px; margin: 0; border: none; flex: none; }
     .dock .brand-mark { width: 34px; height: 34px; object-fit: contain; }
-    .dock .nav-group-label, .dock .dock-info, .dock .dock-footer > a, .dock .dock-footer > br, .dock .nav-dot { display: none; }
+    .dock .nav-group-label, .dock .dock-meta, .dock .nav-dot { display: none; }
     .dock .dock-footer { margin: 0; padding: 0; border: none; flex: none; }
     .dock .dock-tools { margin: 0; flex-wrap: nowrap; }
     .dock .nav-item { flex: none; white-space: nowrap; padding: 9px 12px; margin: 0; }
@@ -863,11 +874,13 @@
       <!-- What: tag once when it is the channel name
            Why: it showed "nightly - nightly" twice
            From: Issue #1683 | PR #1985 -->
-      <span class="dock-info" title="{{ lancache_image_registry() }}/{{ lancache_image_prefix() }}:{{ lancache_image_tag() }}">{% if lancache_image_tag() == lancache_image_channel() %}{{ lancache_image_channel() }}{% else %}{{ lancache_image_tag() }} · {{ lancache_image_channel() }}{% endif %}</span><br>
+      <div class="dock-meta">
+      <span class="dock-info" title="{{ lancache_image_registry() }}/{{ lancache_image_prefix() }}:{{ lancache_image_tag() }}">{% if lancache_image_tag() == lancache_image_channel() %}{{ lancache_image_channel() }}{% else %}{{ lancache_image_tag() }} · {{ lancache_image_channel() }}{% endif %}</span>
       <!-- What: link to the project repository page
            Why: address only from the SOT, escaped by tera
            From: Issue #1683 | PR #1912 -->
-      <a href="{{ repo_url }}" target="_blank" rel="noopener noreferrer" style="color: inherit;">{{ t.project_page }}</a>
+      <a class="dock-link" href="{{ repo_url }}" target="_blank" rel="noopener noreferrer">{{ t.project_page }} ↗</a>
+      </div>
     </div>
   </nav>
 

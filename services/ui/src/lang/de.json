@@ -280,7 +280,7 @@
   "preload": "Vorladen",
   "primary_dns": "Primärer DNS",
   "progress": "Fortschritt",
-  "project_page": "Projektseite",
+  "project_page": "LanCache-NG Projektseite",
   "proxy_dhcp_pxe_helper_only_the": "Nur Proxy-DHCP / PXE-Helfer -- der vorgelagerte DHCP-Server (Router) vergibt weiter Leases und Optionen für alle normalen Geräte",
   "proxy_subnet_start": "Proxy-Subnetz-Anfang",
   "pxe_boot_filename_optional": "PXE-Bootdatei (optional)",
