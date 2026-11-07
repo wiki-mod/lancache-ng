@@ -124,6 +124,7 @@ RUN set -euo pipefail; \
       clang \
       cmake \
       curl \
+      default-jre-headless \
       docker-cli \
       docker-compose \
       expect \
@@ -552,6 +553,7 @@ RUN set -euo pipefail; \
     command -v pump >/dev/null; \
     command -v lsof >/dev/null; \
     command -v nano >/dev/null; \
+    java -version; \
     bats --version; \
     shellspec --version; \
     shellcheck --version; \
