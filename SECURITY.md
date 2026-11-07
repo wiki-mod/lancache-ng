@@ -238,7 +238,8 @@ Static Application Security Testing (SAST) remediation policy.
   `.github/workflows/ci.yml` does not contain a CodeQL job, and the branch
   protection of `current_dev` requires only the check `result`. A CodeQL alert
   therefore does not block a merge. Before a release, the Security tab of the
-  repository is reviewed manually.
+  repository is reviewed manually. It is planned that an issue is opened
+  automatically for a CodeQL alert and closed when the alert is fixed.
 
 ## Deployment Scope
 
