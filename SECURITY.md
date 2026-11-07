@@ -44,9 +44,7 @@ for the full channel/tagging model).
 
 ## Reporting a Vulnerability
 
-This is the project's documented process for responding to vulnerability
-reports, satisfying the OpenSSF Best Practices Badge's Silver-tier
-`vulnerability_response_process` criterion (project #13763, issue #1130):
+This is the process for responding to vulnerability reports:
 
 1. **Contact**: Send a detailed report to the security contact above, or use GitHub's private advisory feature.
 2. **Information to include**:
@@ -227,28 +225,20 @@ Static Application Security Testing (SAST) remediation policy.
 
 ### SAST (static analysis) findings
 
-- **Tooling**: GitHub CodeQL (`.github/workflows/codeql.yml`) analyzes the
-  `actions` (GitHub Actions workflow) and `rust` (both first-party crates)
-  languages on every pull request, push, and a daily schedule, uploading
-  results as GitHub code scanning alerts.
-- **Threshold**: any CodeQL alert on human-authored code (not the documented
-  macro-expansion extraction-warning carve-out in issue #394) at Error or
-  Warning severity must be triaged and either fixed or explicitly dismissed
-  with a documented reason before the affected code ships in a stable
-  release, matching this project's existing warnings-as-errors posture for
-  every other static check (`cargo clippy`, `shellcheck`, `actionlint`; see
-  `CONTRIBUTING.md`'s "Warning-as-errors policy").
-- **Enforcement status**: CodeQL already runs on every `current_dev` pull
-  request and push (`.github/workflows/codeql.yml`'s `branches:` list
-  explicitly includes `current_dev`, added by issue #709 specifically so
-  CodeQL keeps scanning the branch real work actually lands on), and results
-  are visible as GitHub code scanning alerts. Before a CodeQL finding
-  actually blocks a merge, the CodeQL analysis result has to be fed into the
-  `result` gate (or an equivalent required check) the way `cargo-audit` is;
-  this is tracked as a Level 3 follow-up in issue #1130 and its current
-  state is not verified here. Until then, enforcement of this
-  threshold relies on manual review of the repository's Security tab before
-  each release.
+- **Tooling**: GitHub CodeQL (`.github/workflows/codeql.yml`, workflow
+  `CI 2.0 CodeQL`) runs on every pull request, on pushes to `current_dev` and
+  `master`, and weekly (Monday 03:27 UTC). It analyzes the languages in
+  `codeql_languages` of `.github/yaml/build-manifest.yml`: `actions` (the
+  workflow directory) and `rust` (the `@rust_workspace` member directories).
+  Results are uploaded as GitHub code scanning alerts.
+- **Threshold**: any CodeQL alert on human-authored code at Error or Warning
+  severity must be triaged and either fixed or dismissed with a documented
+  reason before the affected code ships in a stable release.
+- **Enforcement status**: the `needs` list of the `result` job in
+  `.github/workflows/ci.yml` does not contain a CodeQL job, and the branch
+  protection of `current_dev` requires only the check `result`. A CodeQL alert
+  therefore does not block a merge. Before a release, the Security tab of the
+  repository is reviewed manually.
 
 ## Deployment Scope
 
