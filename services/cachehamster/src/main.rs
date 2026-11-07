@@ -962,31 +962,45 @@ fn parse_kv(text: &str) -> Result<Kv, String> {
     Ok(root)
 }
 
-// What: depot id and public manifest id per depot.
+// What: public manifest id of one depot node.
 // Why: only depots for STEAM_OS (or any OS) are warmed.
 // From: Issue #871 | PR #1858
-fn depots_of(app: &Kv, cfg: &SteamCfg) -> Vec<(u32, u64)> {
-    let Some(depots) = app.node("appinfo").unwrap_or(app).node("depots") else {
-        return Vec::new();
+fn depot_gid(d: &Kv, cfg: &SteamCfg) -> Option<u64> {
+    let os_ok = d
+        .node("config")
+        .and_then(|c| c.text("oslist"))
+        .is_none_or(|l| l.is_empty() || l.split(',').any(|o| o == cfg.os));
+    let gid = match d.node("manifests")?.get(&cfg.branch)? {
+        KvValue::Text(t) => t.parse().ok()?,
+        KvValue::Node(n) => n.text("gid")?.parse().ok()?,
     };
-    depots
-        .0
-        .iter()
-        .filter_map(|(id, v)| {
-            let KvValue::Node(d) = v else { return None };
-            let id: u32 = id.parse().ok()?;
-            let os_ok = d
-                .node("config")
-                .and_then(|c| c.text("oslist"))
-                .is_none_or(|l| l.is_empty() || l.split(',').any(|o| o == cfg.os));
-            let m = d.node("manifests")?;
-            let gid = match m.get(&cfg.branch)? {
-                KvValue::Text(t) => t.parse().ok()?,
-                KvValue::Node(n) => n.text("gid")?.parse().ok()?,
-            };
-            os_ok.then_some((id, gid))
-        })
-        .collect()
+    os_ok.then_some(gid)
+}
+
+// What: own depots (id, gid), borrowed (app, id).
+// Why: clippy type_complexity; one name for both.
+// From: Issue #871 | PR #1985
+type Depots = (Vec<(u32, u64)>, Vec<(u32, u32)>);
+
+// What: split the depots of one app.
+// Why: DoMe 07.11.: TFC 59 MB; HL base was skipped.
+// From: Issue #871 | PR #1985
+fn depots_of(app: &Kv, cfg: &SteamCfg) -> Depots {
+    let (mut own, mut borrowed) = (Vec::new(), Vec::new());
+    let Some(depots) = app.node("appinfo").unwrap_or(app).node("depots") else {
+        return (own, borrowed);
+    };
+    for (id, v) in &depots.0 {
+        let (KvValue::Node(d), Ok(id)) = (v, id.parse::<u32>()) else {
+            continue;
+        };
+        if let Some(gid) = depot_gid(d, cfg) {
+            own.push((id, gid));
+        } else if let Some(from) = d.text("depotfromapp").and_then(|t| t.parse().ok()) {
+            borrowed.push((from, id));
+        }
+    }
+    (own, borrowed)
 }
 
 // What: a decoded protobuf field value.
@@ -1452,9 +1466,31 @@ async fn app_urls(cfg: &SteamCfg, app: u32) -> Result<Vec<String>, String> {
     let web = reqwest::Client::new();
     let mut cm = Cm::login(cfg, &web).await?;
     let info = app_info(&mut cm, app).await?;
+    let (own, borrowed) = depots_of(&info, cfg);
+    let mut list: Vec<(u32, u32, u64)> = own.into_iter().map(|(d, g)| (app, d, g)).collect();
+    // What: a borrowed depot takes its owner app gid.
+    // Why: GoldSrc mods share the Half-Life base depots.
+    // From: Issue #871 | PR #1985
+    for (from, depot) in borrowed {
+        let owner = match app_info(&mut cm, from).await {
+            Ok(i) => i,
+            Err(e) => {
+                eprintln!("cachehamster: app {app}: depot {depot} via app {from}: {e}");
+                continue;
+            }
+        };
+        if let Some(gid) = depots_of(&owner, cfg)
+            .0
+            .into_iter()
+            .find(|(d, _)| *d == depot)
+            .map(|(_, g)| g)
+        {
+            list.push((from, depot, gid));
+        }
+    }
     let mut urls = Vec::new();
-    for (depot, gid) in depots_of(&info, cfg) {
-        let code = match request_code(&mut cm, app, depot, gid, &cfg.branch).await {
+    for (owner, depot, gid) in list {
+        let code = match request_code(&mut cm, owner, depot, gid, &cfg.branch).await {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("cachehamster: app {app}: {e}");
