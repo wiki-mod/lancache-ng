@@ -19461,7 +19461,7 @@ PROG
     done
 
     if [ "${#viol[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0096]" "reason=\"naming-consistency drift (docs/naming-conventions.md)\"" "$(printf '%s\n' "${viol[@]}")"
+        ci_error "[CI-ERROR-CHECK-0096]" "reason=\"naming-consistency drift (docs/policy/naming-conventions-policy.md)\"" "$(printf '%s\n' "${viol[@]}")"
         return 1
     fi
     printf 'naming-consistency=clean\n'

@@ -30,10 +30,10 @@ Valid for `current_dev` at `e223782d`. Section 9 lists what is not verified.
 | `docs/architecture-ng.md` | Service architecture |
 | `docs/threat-model.md` | Threat model |
 | `docs/capability-inventory.md` | Capability inventory |
-| `docs/naming-conventions.md` | Naming contract (AG-CODE-014) |
+| `docs/policy/naming-conventions-policy.md` | Naming contract (AG-CODE-014) |
 | `docs/combined-release-and-checklist.md` | Release channels, external images, provenance, release validation and checklist |
 | `docs/ci-2.0-architecture.md` | CI 2.0 architecture |
-| `docs/policy/` | Policies (`ci-image-pinning-policy.md`, `howto-audit-documentation.md`) |
+| `docs/policy/` | Policies (`ci-image-pinning-policy.md`, `howto-audit-documentation.md`, `naming-conventions-policy.md`) |
 | `docs/design-plannings/` | Design plans (`design-wireguard-remote-access.md`) |
 | `docs/validation-state.json` | Validation record (AG-REL-011) |
 | `AGENTS.md`, `SECURITY.md`, `CONTRIBUTING.md`, `GOVERNANCE.md` | Governance, security policy, contribution rules |
