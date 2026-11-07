@@ -2712,13 +2712,18 @@ pub mod kea_conf {
         }}))
     }
 
-    // What: kea-ctrl-agent.conf.
-    // Why: the ui reads leases over its REST port.
-    // From: Issue #1683 | PR #1858
-    pub fn ctrl_agent(s: &Settings) -> Result<Value, String> {
+    // What: kea-ctrl-agent.conf with a basic-auth login.
+    // Why: threat model G2: the port was open to the LAN.
+    // From: Issue #1683 | PR #1985
+    pub fn ctrl_agent(s: &Settings, token: &str) -> Result<Value, String> {
         Ok(json!({"Control-agent": {
             "http-host": s.text("KEA_CTRL_ADDRESS")?,
             "http-port": s.uint("KEA_CTRL_PORT")?,
+            "authentication": {
+                "type": "basic",
+                "realm": "lancache",
+                "clients": [{"user": s.text("KEA_CTRL_USER")?, "password": token}]
+            },
             "control-sockets": {"dhcp4": socket(s)?},
             "loggers": log_rows(s, &["kea-ctrl-agent"])?
         }}))
@@ -3401,6 +3406,7 @@ pub mod render {
         pub recursor_api_key: String,
         pub tsig_name: String,
         pub tsig_secret: String,
+        pub kea_ctrl_token: String,
     }
 
     // What: one file and its owning container.
@@ -3516,7 +3522,11 @@ pub mod render {
                     "KEA_DHCP4_CONF_FILE",
                     kea_conf::dhcp4(s, kept.as_ref()),
                 );
-                o.put_json("dhcp", "KEA_CTRL_CONF_FILE", kea_conf::ctrl_agent(s));
+                o.put_json(
+                    "dhcp",
+                    "KEA_CTRL_CONF_FILE",
+                    kea_conf::ctrl_agent(s, &sec.kea_ctrl_token),
+                );
                 let ddns = kea_conf::ddns(s, &sec.tsig_name, &sec.tsig_secret);
                 o.put_json("dhcp", "KEA_DDNS_CONF_FILE", ddns);
             }
@@ -4040,16 +4050,20 @@ pub mod kea {
     pub struct Api {
         client: reqwest::Client,
         url: String,
+        user: String,
+        token: String,
     }
 
     impl Api {
-        // What: client for one agent URL.
-        // Why: the caller owns the shared client.
-        // From: Issue #1683 | PR #1858
-        pub fn new(client: reqwest::Client, url: &str) -> Self {
+        // What: client for one agent URL and its login.
+        // Why: the agent asks for basic auth (G2).
+        // From: Issue #1683 | PR #1985
+        pub fn new(client: reqwest::Client, url: &str, user: &str, token: &str) -> Self {
             Api {
                 client,
                 url: url.into(),
+                user: user.into(),
+                token: token.into(),
             }
         }
 
@@ -4065,6 +4079,7 @@ pub mod kea {
             let reply = self
                 .client
                 .post(&self.url)
+                .basic_auth(&self.user, Some(&self.token))
                 .json(&body)
                 .send()
                 .await

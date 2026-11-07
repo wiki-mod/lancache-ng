@@ -1482,7 +1482,7 @@ async fn flush_round(s: &Settings, seen: &mut BTreeMap<String, u32>) -> Result<(
 }
 
 // What: Kea control agent of this stack.
-// Why: host from env at run time; a run may move it.
+// Why: host from env; basic auth with the stack token.
 // From: Issue #1683 | PR #1980
 fn kea_api(s: &Settings) -> Result<lancache_ng::kea::Api, String> {
     let url = format!(
@@ -1490,7 +1490,13 @@ fn kea_api(s: &Settings) -> Result<lancache_ng::kea::Api, String> {
         s.text("DHCP_API_HOST")?,
         s.uint("KEA_CTRL_PORT")?
     );
-    Ok(lancache_ng::kea::Api::new(http::client(s)?, &url))
+    let token = secrets(s)?.kea_ctrl_token;
+    Ok(lancache_ng::kea::Api::new(
+        http::client(s)?,
+        &url,
+        &s.text("KEA_CTRL_USER")?,
+        &token,
+    ))
 }
 
 // What: value of one Kea option in a subnet.
@@ -2886,6 +2892,7 @@ fn secrets(s: &Settings) -> Result<render::Secrets, String> {
         recursor_api_key: get("RECURSOR_API_KEY")?,
         tsig_name: s.text("DDNS_TSIG_NAME")?,
         tsig_secret: tsig_secret(s)?,
+        kea_ctrl_token: get("KEA_CTRL_TOKEN")?,
     })
 }
 
