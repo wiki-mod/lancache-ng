@@ -912,6 +912,10 @@ runtime:
     - NGINX_SSL_CIPHERS=HIGH:!aNULL:!MD5
     - NGINX_SSL_SESSION_CACHE=shared:SSL:10m
     - NGINX_SSL_SESSION_TIMEOUT=1d
+    # What: OpenSSL Options for the MITM server; -KTLS off.
+    # Why: DoMe 07.11.: kTLS cut nginx CPU 73 % in a test.
+    # From: Issue #1683 | PR #1985
+    - NGINX_SSL_CONF_OPTIONS=KTLS
     - NGINX_MAX_TEMP_FILE_SIZE=51200m
     - NGINX_TEMP_FILE_WRITE_SIZE=8m
     - NGINX_WORKER_RLIMIT_NOFILE=65535
