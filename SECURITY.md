@@ -13,31 +13,28 @@ Do **not** open a public GitHub issue for security vulnerabilities. Private disc
 | Version | Status | Support Until |
 |---------|--------|----------------|
 | 0.3.x (pre-1.0) | Current | Ongoing |
-| Pre 0.3.x | EOL | Ended |
+| 0.2.x | Supported (previous line) | Until the next minor line is published |
+| 0.1.x and older | EOL | Ended |
+
+Support covers the current minor line and the minor line before it. An
+installation on an older line has no support and has to be updated first.
 
 lancache-ng has not reached a `1.0.0` release yet (see `docs/combined-release-and-checklist.md`
 for the full channel/tagging model); the current stable release line is `v0.3.x`.
-We aim to provide security updates for the current stable release. Older
-releases are not actively maintained.
 
-### Scope and duration of support (per release)
+### Scope and duration of support (per minor line)
 
-- **What is supported**: only the most recently published stable `vX.Y.Z`
-  release tag (the one `latest` currently points at) receives bug fixes and
-  security updates. Every `vX.Y.Z` release is a full stack release (see
-  `docs/combined-release-and-checklist.md`, section "Release model") -- support is per stack release,
-  not per individual service image.
+- **What is supported**: the current minor line and the minor line before it.
+  Every `vX.Y.Z` release is a full stack release (see
+  `docs/combined-release-and-checklist.md`, section "Release model"); support
+  is per stack release line, not per individual service image.
 - **What kind of support**: security fixes and correctness bug fixes, applied
-  by publishing a new stable release. There is no separate long-term-support
-  (LTS) branch and no backported point releases for a release once a newer
-  stable release has superseded it.
-- **Duration**: a stable release stops receiving security updates the moment
-  the next stable `vX.Y.Z` release is published -- there is no fixed
-  post-supersession grace window today. Operators should update to the current
-  stable release (or an audited `edge`/release-candidate build) promptly after
-  a new stable release ships, especially when the release notes mention a
-  security fix. This reflects this project's actual current maintenance
-  capacity (a single primary maintainer); it may be revisited if that changes.
+  by publishing a new stable release of a supported line.
+- **Duration**: a minor line is supported until the next minor line after the
+  current one is published, and is EOL from then on. With 0.3.x current, 0.2.x
+  is supported until 0.4.x is published.
+- **Updating**: an installation on an unsupported line is updated to a
+  supported line to receive support.
 - **Pre-1.0 caveat**: as a pre-1.0 project, breaking changes and security-
   relevant behavior changes can still land between minor versions; the
   `CHANGELOG.md` and each release's notes call these out explicitly.
