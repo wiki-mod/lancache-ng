@@ -110,6 +110,15 @@
       </label>
     </div>
 
+    {# What: empties the whole cache on a 2nd click #}
+    {# Why: DoMe 07.11.: in settings, not the overview #}
+    {# From: Issue #871 | PR #1991 #}
+    <div class="section-title">{{ t.cache_wipe_title }}</div>
+    <p class="section-sub">{{ t.cache_wipe_hint }}</p>
+    <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+      <button type="button" class="btn btn-danger" data-cache-wipe="{{ routes.hamster_api | replace(from="{op}", to="wipe") | safe }}" data-csrf="{{ csrf_token }}">{{ t.cache_wipe }}</button>
+      <span class="field-hint" data-cache-wipe-state style="margin:0;"></span>
+    </div>
     <div class="section-title">{{ t.sign_in }}</div>
     {# What: set a password here to turn sign-in on. #}
     {# Why: DoMe 07.11.: off was not changeable here. #}

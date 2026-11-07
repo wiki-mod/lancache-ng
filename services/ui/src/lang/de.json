@@ -440,5 +440,7 @@
   "cache_freed": "{x} freigegeben",
   "cache_wipe": "Ganzen Cache leeren",
   "cache_wipe_sure": "Wirklich alles löschen?",
+  "cache_wipe_title": "Cache leeren",
+  "cache_wipe_hint": "Löscht alle zwischengespeicherten Dateien aller Dienste. Sie werden beim nächsten Download neu geholt.",
   "games_search": "Name, App-ID oder Regex"
 }

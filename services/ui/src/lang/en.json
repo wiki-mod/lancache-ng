@@ -440,5 +440,7 @@
   "cache_freed": "{x} freed",
   "cache_wipe": "Empty whole cache",
   "cache_wipe_sure": "Really delete everything?",
+  "cache_wipe_title": "Empty the cache",
+  "cache_wipe_hint": "Deletes every cached file of all services. They are fetched again on the next download.",
   "games_search": "Name, app ID or regex"
 }

@@ -1240,6 +1240,22 @@
         }
         return wrap;
       }
+      // What: wipe buttons empty the whole cache.
+      // Why: DoMe 07.11.: second click confirms the wipe.
+      // From: Issue #871 | PR #1991
+      document.querySelectorAll('[data-cache-wipe]').forEach(function (b) {
+        const st = b.parentNode.querySelector('[data-cache-wipe-state]');
+        const gib = function (n) { return (n / 1073741824).toFixed(1) + ' GiB'; };
+        b.addEventListener('click', function () {
+          if (!b.dataset.sure) { b.dataset.sure = '1'; b.textContent = LC_T.cache_wipe_sure; return; }
+          b.disabled = true; b.textContent = LC_T.loading;
+          fetch(b.dataset.cacheWipe, { method: 'POST', headers: { 'X-CSRF-Token': b.dataset.csrf } })
+            .then(function (r) { return r.ok ? r.json() : r.text().then(function (t) { throw new Error(t); }); })
+            .then(function (v) { st.textContent = LC_T.cache_freed.replace('{x}', gib(v.freed)); })
+            .catch(function (e) { window.LancacheUi.fail(e); })
+            .finally(function () { b.disabled = false; delete b.dataset.sure; b.textContent = LC_T.cache_wipe; });
+        });
+      });
       // What: click outside or Escape closes service menus.
       // Why: DoMe 07.11.: at most one menu, easy to close.
       // From: Issue #1683 | PR #1991
