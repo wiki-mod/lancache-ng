@@ -49,6 +49,10 @@ x-environment:
   proxy-ui: &env-proxy-ui
     HTTPS_ENABLED: ${HTTPS_ENABLED:-}
     CACHE_MAX_GB: ${CACHE_MAX_GB:-}
+    # What: nginx resolver; the ui renders nginx.conf
+    # Why: a .env value never reached the renderer
+    # From: Issue #1683 | PR #1985
+    NGINX_UPSTREAM_RESOLVER: ${NGINX_UPSTREAM_RESOLVER:-}
   dns-dhcp: &env-dns-dhcp
     DDNS_TSIG_KEY: ${DDNS_TSIG_KEY}
   dns-dhcp-ui: &env-dns-dhcp-ui
@@ -187,7 +191,6 @@ services:
       # Why: .env is the one owner of operator values.
       # From: Issue #1683
       CACHE_MEM_MB: ${CACHE_MEM_MB:-}
-      NGINX_UPSTREAM_RESOLVER: ${NGINX_UPSTREAM_RESOLVER:-}
       PROXY_SECURITY_MODE: ${PROXY_SECURITY_MODE:-}
       PROXY_ALLOWED_CLIENT_CIDRS: ${PROXY_ALLOWED_CLIENT_CIDRS:-}
       CACHE_SLICE_SIZE: ${CACHE_SLICE_SIZE:-}
