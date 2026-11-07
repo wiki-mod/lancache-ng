@@ -1358,7 +1358,7 @@ ensure_docker_userland_proxy() {
     local file want current tmp
     file=$(lancache_sot_value docker_daemon_json runtime) || exit $?
     want=$(lancache_sot_value docker_userland_proxy runtime) || exit $?
-    current=unset
+    current="unset"
     if [[ -f "$file" ]]; then
         current=$(jq -r 'if has("userland-proxy") then ."userland-proxy" | tostring else "unset" end' "$file") \
             || die "Cannot read $file as JSON (exit $?); Docker was not changed."
@@ -1387,7 +1387,8 @@ ensure_docker_userland_proxy() {
         jq -n --argjson v "$want" '{"userland-proxy": $v}' > "$tmp" \
             || { rm -f -- "$tmp"; die "Cannot write $file (exit $?)."; }
     fi
-    chmod 0644 -- "$tmp" && mv -f -- "$tmp" "$file" || die "Cannot replace $file (exit $?)."
+    chmod 0644 -- "$tmp" || die "Cannot chmod $tmp (exit $?)."
+    mv -f -- "$tmp" "$file" || die "Cannot replace $file (exit $?)."
     host_unit_action "$DOCKER_UNIT" restart
     docker info >/dev/null 2>&1 \
         || die "Docker does not answer after the restart; the old file is ${file}.bak."
