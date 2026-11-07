@@ -871,7 +871,7 @@ impl SteamCfg {
     // Why: the proxy caches by Host; DNS is not needed.
     fn client(&self) -> Result<reqwest::Client, String> {
         // What: the proxy container on the Docker network.
-        // Why: DoMe 07.11.: IP_HTTP cost docker-proxy 17 % CPU.
+        // Why: DoMe 07.11.: docker-proxy cost 17 % CPU.
         // From: Issue #871 | PR #1985
         use std::net::ToSocketAddrs;
         let proxy = self
