@@ -320,7 +320,11 @@
         // Why: DoMe 07.11.: the list came in app id order.
         // From: Issue #871 | PR #1991
         games = games.slice().sort(function (a, b) { return String(a.name).localeCompare(String(b.name)); });
-        t.innerHTML = '<tr><th>App ID</th><th>Name</th><th>' + LC_T.in_cache + '</th><th></th></tr>';
+        // What: fixed column widths in the library.
+        // Why: DoMe 07.11.: Check made the row jump.
+        // From: Issue #871 | PR #1991
+        t.style.tableLayout = 'fixed';
+        t.innerHTML = '<tr><th style="width:7em">App ID</th><th>Name</th><th style="width:17em">' + LC_T.in_cache + '</th><th style="width:11em"></th></tr>';
         games.forEach(function (g) {
           const row = t.insertRow();
           row.insertCell().textContent = g.appid;
