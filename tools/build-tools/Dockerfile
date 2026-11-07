@@ -199,6 +199,18 @@ RUN set -euo pipefail; \
     install -m 0755 "$actionlint_tmp/actionlint" /usr/local/bin/actionlint; \
     actionlint --version
 
+# What: Go yq (mikefarah) from the upstream release, newest.
+# Why: CI 2.0 reads the SOT with it; Debian's yq is a jq wrapper.
+# From: Issue #1683
+RUN set -euo pipefail; \
+    case "$(dpkg --print-architecture)" in \
+      amd64|arm64) yq_arch="$(dpkg --print-architecture)" ;; \
+      *) echo "Unsupported architecture for yq: $(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL "https://github.com/mikefarah/yq/releases/latest/download/yq_linux_${yq_arch}" -o /usr/local/bin/yq; \
+    chmod 0755 /usr/local/bin/yq; \
+    yq --version
+
 RUN set -euo pipefail; \
     shellspec_tmp="$(mktemp -d)"; \
     trap 'rm -rf "$shellspec_tmp"' EXIT; \
@@ -521,6 +533,7 @@ RUN set -euo pipefail; \
     cargo audit --version; \
     cargo tarpaulin --version; \
     actionlint --version; \
+    yq --version; \
     bats --version; \
     shellspec --version; \
     shellcheck --version; \
