@@ -126,6 +126,10 @@ services:
       # Why: CACHEHAMSTER_WINDOW is local time, not UTC.
       # From: Issue #871 | PR #1980
       - ${SOT_LOCALTIME_FILE}:${SOT_LOCALTIME_FILE}:ro
+      # What: host netfilter counters, read only.
+      # Why: the watchdog warns before conntrack fills up.
+      # From: Issue #1683 | PR #1985
+      - ${SOT_HOST_NET_STAT_SOURCE}:${SOT_HOST_NET_STAT_DIR}:ro
       # What: mounts several services share, one text each.
       # Why: a changed path or mode has one line to change.
       # From: Issue #1683 | PR #1912
