@@ -88,7 +88,7 @@ Rule: each host directory is set by one operator variable that
 `KEA_DATA_DIR`, `NTP_DATA_DIR`, `CACHEHAMSTER_DATA_DIR`,
 `SYSLOG_NG_LOG_DIR`). A new state directory gets its own variable of the
 same shape and a lowercase, hyphen-separated directory name. See
-`docs/backup-restore.md` and `docs/how-to-change-ip.md` for the
+`docs/README.md` for the
 `LANCACHE_STATE_DIR` contract; this document does not repeat it.
 
 ### GHCR image/package names
@@ -129,7 +129,7 @@ SOT `CONTAINER_NAME_*` keys are the one place a container name is written.
 ### Backup/restore paths that depend on these names
 
 Rule: `setup.sh`'s `compose_volume_names()`, `backup_compose_volumes()` and
-`restore_compose_volumes()` (see `docs/backup-restore.md`) discover Docker
+`restore_compose_volumes()` (see `docs/README.md`) discover Docker
 volumes by inspecting the running containers, so a new volume that follows
 the rule above is included without a `setup.sh` change. Repo files that a
 Compose service mounts through `../../` are found the same way:
@@ -145,7 +145,7 @@ the Compose files and keeps the ones that exist in the checkout (today
 | Compose service names | `deploy/prod/docker-compose.yml` and `deploy/secondary/docker-compose.yml` service keys | the `status.json` keys the watchdog writes |
 | Container names | `.github/yaml/build-manifest.yml` (`CONTAINER_NAME_PREFIX`, `CONTAINER_NAME_*`) | `container_name:` of both Compose files, `LOG_SWITCHES` in `services/common/config.rs` |
 | Docker volumes | `deploy/prod/docker-compose.yml` top-level `volumes:` block | the service `volumes:` lists in the same file |
-| Host bind-mount directories | the required variables of `deploy/prod/docker-compose.yml` | `docs/backup-restore.md`, `docs/how-to-change-ip.md`, `setup.sh` |
+| Host bind-mount directories | the required variables of `deploy/prod/docker-compose.yml` | `docs/README.md`, `setup.sh` |
 | GHCR image/package names | `.github/yaml/build-manifest.yml` (`services:`) | `docs/combined-release-and-checklist.md`, the `image:` lines of `deploy/prod` and `deploy/secondary` |
 
 ## CI guard

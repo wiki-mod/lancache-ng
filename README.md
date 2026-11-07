@@ -342,7 +342,7 @@ check with:
 sudo /opt/lancache-ng/current/setup.sh auto-update
 ```
 
-**Update validation:** The update command validates your configuration during the process. If required config values are missing or invalid, the update will abort immediately rather than continuing with a partial or degraded configuration. If this happens, check that your `.env` and `config/*/` files exist and contain all required keys. See `docs/backup-restore.md` for rollback options.
+**Update validation:** The update command validates your configuration during the process. If required config values are missing or invalid, the update will abort immediately rather than continuing with a partial or degraded configuration. If this happens, check that your `.env` and `config/*/` files exist and contain all required keys. See `docs/README.md` (section 7) for rollback options.
 
 Create a manual backup with:
 
@@ -357,7 +357,7 @@ Use `--config` for small update rollback backups. Use `--full` only when you als
 sudo /opt/lancache-ng/current/setup.sh restore /var/backups/lancache-ng/lancache-ng-config-YYYYMMDDTHHMMSSZ.tar.gz /opt/lancache-ng
 ```
 
-See `docs/backup-restore.md` for backup scope, restore testing, secret handling, CA lifecycle notes, and rollback details.
+See `docs/README.md` (section 7) for backup scope, restore testing, secret handling, CA lifecycle notes, and rollback details.
 
 ## Image Versioning and Release Channels
 
@@ -438,7 +438,7 @@ compressed, timestamped archive and prints its path:
   TSIG keys, passwords, tokens) redacted
 - host facts (Docker/Compose versions, kernel, disk space)
 - known-good-snapshot directory listings (file names only, no content) --
-  see `docs/known-good-config-snapshots.md`
+  see `docs/README.md` (section 6)
 
 Review the archive yourself before attaching it to an issue -- this command
 never uploads or attaches anything automatically.
@@ -477,7 +477,7 @@ clients. `setup.sh` lets you pick one of four DHCP modes (stored as
   lease management in the Admin UI. Use this only when you are ready to make
   LanCache NG the network's DHCP server — configure and confirm Kea is running
   here first, then disable your router's built-in DHCP server, not the other
-  way around (see [docs/dhcp-modes.md](docs/dhcp-modes.md) for why the order
+  way around (see [docs/README.md](docs/README.md#5-dhcp-modes) for why the order
   matters).
 - `dnsmasq-proxy` — LanCache NG runs dnsmasq in proxy-DHCP mode next to an
   existing DHCP server for networks where the router or ISP gateway keeps DHCP
@@ -500,7 +500,7 @@ Important: do not run two normal DHCP servers in the same network unless you
 planned it carefully. If your router already provides DHCP, either keep using
 the router (and set DNS another way) or switch DHCP fully to LanCache NG.
 
-See [docs/dhcp-modes.md](docs/dhcp-modes.md) for when to use each mode, what is
+See [docs/README.md](docs/README.md#5-dhcp-modes) for when to use each mode, what is
 not available in `dnsmasq-proxy` mode, how to set the upstream DHCP IP, and how
 to verify clients actually receive the LanCache NG DNS servers.
 
@@ -561,8 +561,7 @@ Follow the per-platform steps (Windows, Linux, macOS, Firefox, Steam Deck,
 consoles) and keep the CA backed up:
 
 ```text
-docs/install-ca-cert.md
-docs/backup-restore.md
+docs/README.md   (section 4: CA certificate, section 7: backup and restore)
 ```
 
 ### Firefox note
@@ -734,7 +733,7 @@ LANCACHE_IMAGE_TAG=sha-<resolved-by-setup>
 
 `PROXY_ALLOWED_CLIENT_CIDRS` can optionally restrict who may use the proxy, for example `192.168.1.0/24 172.16.0.0/12`. Leave it empty to allow any client that can reach the bound LAN/Docker ports; `setup.sh` writes the empty value by default for the normal LAN-only deployment model where firewalling and Docker port bindings already define the boundary.
 
-`KEEP_KNOWN_GOOD_CONFIGS` (default `3`) controls how many validated nginx/dnsmasq/PowerDNS configurations are kept for automatic rollback if a newly generated config fails validation at container startup. It also controls how many known-good Kea DHCP config snapshots the Admin UI keeps for operator-selected rollback (see the DHCP settings page). See [docs/known-good-config-snapshots.md](docs/known-good-config-snapshots.md).
+The Admin UI keeps snapshots of the Kea DHCP configuration (`KEA_SNAPSHOT_KEEP`, default `20`) and of the lan and private reverse zone records (`DNS_SNAPSHOT_KEEP`, default `20`) for operator-selected rollback; see [docs/README.md](docs/README.md#6-known-good-snapshots-and-rollback). `setup.sh` also writes `KEEP_KNOWN_GOOD_CONFIGS` (default `3`) to the runtime env, but no service reads it.
 
 `LANCACHE_IMAGE_CHANNEL` controls the mutable stack channel. `latest` (from
 `master`) is the install default (SOT `release.install_channel`); an older

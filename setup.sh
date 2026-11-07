@@ -5453,7 +5453,7 @@ Usage: ./setup.sh reset-to-last-known-good-config <service> [install-dir] [snaps
 
 CLI fallback for when the Admin UI itself is unreachable but a service's own
 control surface still is. Automates the exact by-hand recovery
-sequence docs/known-good-config-snapshots.md's "Manual recovery" section
+sequence docs/README.md section 6.4
 documents: list this install's known-good config snapshots for <service> and
 apply one -- the given [snapshot-id], or the newest after an explicit
 confirmation if omitted -- via that service's own real validate/apply/persist
@@ -8244,7 +8244,7 @@ if [[ -z "${1:-}" ]]; then
     exit 0
 fi
 # What: maps old command spellings to their names
-# Why: docs/how-to-change-ip.md still uses --reconfigure
+# Why: docs/README.md still names --reconfigure
 # From: Issue #1683 | PR #1912
 setup_command="$1"
 case "$setup_command" in
@@ -8741,7 +8741,7 @@ elif [[ "$DHCP_MODE" = "dnsmasq-proxy" ]]; then
     # From: Issue #450
     boot_filename_error="Invalid boot filename (no whitespace, commas, or other .env-unsafe characters like \$, \`, \", ', \\, #)"
     print_warn "Optional: additional dnsmasq relay/proxy options (router, NTP, domain, PXE/TFTP boot, listen interface, custom options)."
-    print_warn "These are delivered only to PXE/network-boot-aware clients via the supplemental ProxyDHCP exchange, never to ordinary DHCP clients -- see docs/dhcp-modes.md."
+    print_warn "These are delivered only to PXE/network-boot-aware clients via the supplemental ProxyDHCP exchange, never to ordinary DHCP clients -- see docs/README.md."
     if confirm "Configure additional dnsmasq relay/proxy options now? [y/N]" "N"; then
         ask_checked DHCP_PROXY_INTERFACE "Listen interface (blank = listen on all interfaces)" "$DHCP_PROXY_INTERFACE" is_valid_dhcp_proxy_interface "Invalid interface name" 1
 
@@ -8781,7 +8781,7 @@ elif [[ "$DHCP_MODE" = "dnsmasq-proxy" ]]; then
     # What: PXE boot-pointer is its own opt-in gate
     # Why: without pxe-service dnsmasq never replies
     # From: Issue #1683 | PR #1858
-    print_warn "Optional: PXE boot-pointer support. This makes dnsmasq start REPLYING to every PXE-tagged client on this segment, pointing them at an EXISTING external PXE/TFTP boot server -- lancache-ng does not host boot files itself. See docs/dhcp-modes.md."
+    print_warn "Optional: PXE boot-pointer support. This makes dnsmasq start REPLYING to every PXE-tagged client on this segment, pointing them at an EXISTING external PXE/TFTP boot server -- lancache-ng does not host boot files itself. See docs/README.md."
     if confirm "Configure PXE boot-pointer support now? [y/N]" "N"; then
         ask_checked DHCP_PROXY_PXE_BOOT_SERVER "External PXE/TFTP boot server address (blank = skip PXE boot-pointer support)" "$DHCP_PROXY_PXE_BOOT_SERVER" is_valid_ipv4 "Invalid IPv4 address" 1
 
@@ -9005,7 +9005,7 @@ DHCP_SUBNET_START=${DHCP_SUBNET_START}
 DHCP_DNS_PRIMARY=${DHCP_DNS_PRIMARY}
 DHCP_DNS_SECONDARY=${DHCP_DNS_SECONDARY}
 UPSTREAM_DHCP_IP=${UPSTREAM_DHCP_IP}
-# What: relay local address (giaddr); see docs/dhcp-modes.md
+# What: relay local address (giaddr); see docs/README.md
 # Why: only DHCP_MODE=dnsmasq-relay uses it
 # From: Issue #1683 | PR #1858
 DHCP_RELAY_LOCAL_ADDR=${DHCP_RELAY_LOCAL_ADDR}

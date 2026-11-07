@@ -38,12 +38,12 @@ the top is a signal that its threats need re-checking.
 | Proxy request policy (client CIDR + host allowlists) | `services/watchdog/src/main.rs` (`nginx`), `services/ui/nginx/conf.d/http.conf` | v0.2.0 | T2, T9 |
 | Admin UI authentication | `services/ui/src/main.rs` | v0.2.0 | T3 |
 | Docker access (socket in the `services` container, watchdog client) | `deploy/prod/docker-compose.yml`, `services/common/shared.rs` (`DockerApi`) | `current_dev` (Issue #1683) | T6 |
-| DHCP — Kea mode | `services/watchdog/src/main.rs` (`kea_dhcp4`, `kea_ctrl_fence`, `kea_dhcp_ddns`), `docs/dhcp-modes.md` | v0.2.0 | T12 |
-| DHCP — dnsmasq-proxy and dnsmasq-relay modes | `services/watchdog/src/main.rs` (`dnsmasq_conf`), `docs/dhcp-modes.md` | v0.2.0 | T12, T13 |
+| DHCP — Kea mode | `services/watchdog/src/main.rs` (`kea_dhcp4`, `kea_ctrl_fence`, `kea_dhcp_ddns`), `docs/README.md` | v0.2.0 | T12 |
+| DHCP — dnsmasq-proxy and dnsmasq-relay modes | `services/watchdog/src/main.rs` (`dnsmasq_conf`), `docs/README.md` | v0.2.0 | T12, T13 |
 | Zone transfer to secondaries (TSIG, NOTIFY, AXFR) | `services/watchdog/src/main.rs` (`pdns_auth`) | v0.2.0 | T5 |
 | Secondary-node registration | `deploy/secondary/docker-compose.yml`, `services/ui/src/main.rs` | v0.2.0 | T5, T14 |
-| Console exclusion-by-omission | `services/dns/cdn-domains.txt`, `docs/install-ca-cert.md` | v0.2.0 | T4, T10 |
-| Zone/record known-good snapshot + rollback listener | `services/ui/src/main.rs` (`zone-rollback`), `docs/known-good-config-snapshots.md` | v0.3.0 | T4 |
+| Console exclusion-by-omission | `services/dns/cdn-domains.txt`, `docs/README.md` | v0.2.0 | T4, T10 |
+| Zone/record known-good snapshot + rollback listener | `services/ui/src/main.rs` (`zone-rollback`), `docs/README.md` | v0.3.0 | T4 |
 
 ---
 
@@ -425,12 +425,12 @@ default; the operator must configure limits.
 **Likelihood**: High (user error) · **Impact**: Low (fails safe, no compromise)
 
 **Mitigations**:
-- Clear per-OS install docs (`docs/install-ca-cert.md`) and, in future, an
+- Clear per-OS install docs (`docs/README.md`) and, in future, an
   easier distribution path (see that doc's distribution section).
 - HTTP mode is the CA-free alternative.
 - Devices that *cannot* install a CA (consoles) are intentionally excluded from
   the spoof list, so they never hit this failure — see T4 and the console note in
-  `docs/install-ca-cert.md`.
+  `docs/README.md`.
 
 **Residual risk**: Low — intended, safe-failing behaviour.
 
@@ -465,7 +465,7 @@ unaffected, only HTTP gets cached).
   from `cdn-domains.txt`, with an in-file explanation. Consoles keep using the
   appliance as an ordinary, unrestricted DNS resolver; their CDN names resolve to
   the real internet and work normally (no caching benefit, no breakage).
-- `docs/install-ca-cert.md` (named in the in-file explanation) lists the
+- `docs/README.md` (named in the in-file explanation) lists the
   hosts to *opt in* to Xbox-PC (Game Pass) or Nintendo caching only on a LAN
   known to have no such consoles.
 
@@ -526,7 +526,7 @@ proxy-DHCP DNS options are not reliably honoured by ordinary clients.
 
 **Mitigations** (verified in `services/watchdog/src/main.rs` (`dnsmasq_conf`,
 `dnsmasq`), `services/ui/src/main.rs` (`update_dhcp_proxy`) and
-`docs/dhcp-modes.md`):
+`docs/README.md`):
 - Fail-closed configuration: the Admin UI refuses to save without a valid
   `DHCP_SUBNET_START` and `UPSTREAM_DHCP_IP`; a render without a usable subnet
   fails `dnsmasq --test`, and dnsmasq then runs from the newest known-good
@@ -535,7 +535,7 @@ proxy-DHCP DNS options are not reliably honoured by ordinary clients.
   router DHCP cannot be disabled; the Admin UI's DHCP check probes for competing
   servers and DNS-option override.
 - Issue #450 added an optional-option surface (router/NTP/domain/PXE-boot/
-  custom options via `dhcp-option-pxe`), documented in `docs/dhcp-modes.md`
+  custom options via `dhcp-option-pxe`), documented in `docs/README.md`
   as carrying the exact same limitation as the pre-existing DNS option: all
   of it rides the supplemental ProxyDHCP/PXE exchange, never the ordinary
   client's real lease. A value holding a line break is skipped with a warning
@@ -551,8 +551,8 @@ proxy-DHCP DNS options are not reliably honoured by ordinary clients.
   before #705. So the "appliance answers the proxy-DHCP portion" premise
   above only holds once an operator explicitly opts in by setting
   `DHCP_PROXY_PXE_BOOT_SERVER` plus at least one
-  `DHCP_PROXY_PXE_BOOT_FILENAME_*` variable (see `docs/dhcp-modes.md`'s
-  "PXE boot-pointer" section). By default (the pre-#705 state, and every
+  `DHCP_PROXY_PXE_BOOT_FILENAME_*` variable (see `docs/README.md`,
+  section 5.3). By default (the pre-#705 state, and every
   install that never sets those variables), `dnsmasq-proxy` mode renders no
   `pxe-service` directive, never replies to a DHCPDISCOVER at all, and this
   threat does not apply. Once the operator opts in, the mitigations above
@@ -660,7 +660,7 @@ tagging each release, then update the top marker and the
      `services/ui/nginx/conf.d/*.conf`
    - `services/ui/src/main.rs`
      (`preflight`, `ALLOW_INSECURE_UI`, startup guards)
-   - `docs/dhcp-modes.md`
+   - `docs/README.md`
    - the PowerDNS zone-transfer settings (TSIG, NOTIFY, AXFR) rendered by
      `pdns_auth` in `services/watchdog/src/main.rs`
    - `deploy/prod/docker-compose.yml`

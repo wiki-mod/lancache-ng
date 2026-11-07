@@ -515,8 +515,8 @@ itself. `ping`, `ss` or an open port alone never prove DNS or proxy health
    Docker required). Without a detected LAN address the server-IP prompt has no
    default, so the answers file names it; `list-prompts` fails instead of
    looping when a prompt rejects its answer.
-3. Feed that sequence through `expect` to run `bash setup.sh` (`install` is the
-   default action). A real install needs root. Set
+3. Feed that sequence through `expect` to run `bash setup.sh install`; without a
+   command `setup.sh` only prints its usage. A real install needs root. Set
    `LANCACHE_IMAGE_CHANNEL` and `LANCACHE_IMAGE_TAG` only as a per-command
    environment prefix on this one invocation, never exported process-wide.
 4. Expect `Stack started`; `Failed to pull required container images` is the
