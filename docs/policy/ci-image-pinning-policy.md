@@ -81,3 +81,7 @@ nothing. The repository keeps no package version list. The planner run record
 unchanged identity reuses the accepted digest. Such a run has no base commit to
 compare against, so the resolver alone decides: a pair with no accepted
 artifact for its current identity is built, and a pair that has one is reused.
+
+## Howto audit this file
+
+The audit procedure of this file is `docs/policy/howto-audit-documentation.md`.

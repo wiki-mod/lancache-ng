@@ -308,3 +308,7 @@ that path is explicitly a streamed drain to a sink, never a file write. The
 Steam-protocol crates are scoped to control-plane/manifest metadata only
 (small JSON/binary structures, not depot content), so even their own
 internal behavior never touches the multi-GB depot payloads.
+
+## Howto audit this file
+
+The audit procedure of this file is `docs/policy/howto-audit-documentation.md`.

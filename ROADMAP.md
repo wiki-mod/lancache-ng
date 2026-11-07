@@ -1,112 +1,58 @@
 # Roadmap
 
-This document describes what lancache-ng intends to do, and deliberately does
-not intend to do, looking roughly a year out. It exists to satisfy the OpenSSF
-Best Practices Badge's Silver-tier `documentation_roadmap` criterion (project
-#13763, tracked in issue #1130) with a real, currently-accurate picture rather
-than a static aspirational list.
+This document states what lancache-ng intends to do and does not intend to do
+in the next twelve months (OpenSSF Best Practices criterion
+`documentation_roadmap`). The live record is the set of GitHub milestones,
+issues and pull requests; each item below names its tracking item.
 
-The authoritative, live version of this roadmap is always the project's
-GitHub Milestones and the **LanCache-NG Roadmap** project board/milestone —
-this file is a periodically-refreshed summary of that real state, not a
-replacement for it. If this file and the GitHub milestones disagree, GitHub
-is correct (see `AGENTS.md`'s documentation-drift precedence rules) and this
-file should be updated to match.
+## Contents
 
-## Where the project is today
+1. [Product line](#1-product-line)
+2. [Intended work](#2-intended-work)
+3. [Not intended or not scheduled](#3-not-intended-or-not-scheduled)
+4. [Howto audit this file](#howto-audit-this-file)
 
-- Current stable line: pre-1.0 `v0.x` (see `docs/combined-release-and-checklist.md` for
-  the channel/tagging model). The project is pre-1.0 deliberately — breaking
-  changes still bump the minor version, not a major version, until a
-  maintainer-decided production-readiness milestone (issue #819).
-- Active development branch: `current_dev` (see `docs/combined-release-and-checklist.md`
-  and issues #825/#1141 for the branch/channel model). `master` only receives
-  occasional stable-release promotions.
-- `v0.3.0` retired the old parallel `deploy/dev/` environment (#766) in favor
-  of a single `deploy/prod/` profile used for both developing and deploying,
-  distinguished only by which git ref is checked out.
+## 1. Product line
 
-## What the project intends to do (next ~12 months)
+| Item | State |
+| --- | --- |
+| Version | Pre-1.0; support window in `SECURITY.md` |
+| Stable channel | `latest`, built from `master` |
+| Pre-stable channel | `nightly`, built from `current_dev` |
+| Development branch | `current_dev` |
+| Deployment profile | One profile, `deploy/prod/` (`AG-KD-008`) |
 
-Grouped by the GitHub Milestone that actually tracks each item (see the
-linked issue numbers for full detail — this file summarizes, it does not
-duplicate, their acceptance criteria):
+Channel semantics are in `docs/combined-release-and-checklist.md`.
 
-### LanCache-NG Roadmap milestone
+## 2. Intended work
 
-- **Security posture / OpenSSF Best Practices Badge** (#1130): keep closing
-  real, verified gaps toward the Silver and Gold tiers of the legacy Best
-  Practices Badge and toward OSPS Baseline Level 3, rather than only
-  improving the reported percentage.
-- **Admin UI completeness** (#1078): finish wiring Admin UI capabilities that
-  `docs/architecture-ng.md` already documents but the UI doesn't yet expose
-  (per `AGENTS.md`'s "Feature Completeness" section — a backend capability
-  without UI exposure is treated as delivery debt, not as done).
-- **DNS resilience** (#1164): native PowerDNS AXFR/NOTIFY primary/secondary
-  replication for `dns`, superseding the earlier #770
-  design.
-- **DHCP consolidation** (#840): umbrella for scattered Kea/dnsmasq-proxy
-  feature and bug work; includes replacing the EOL `dhclient` + `nmap`
-  DHCP-probe tooling with a native Rust implementation (#1288).
-- **Watchdog coverage** (#842, #1170): the watchdog currently only monitors
-  `proxy`/`dns` despite its name implying stack-wide
-  coverage; also adding self-healing for a hung `docker-socket-proxy`.
-- **Release automation** (#819, #850): move the fully-manual `vX.Y.Z` semver
-  bump decision toward automation, once the tag/PR-title mechanics it depends
-  on (see `AGENTS.md`'s `AG-GH-018` caveat on `release-please` readiness) are
-  in place.
-- **Field-testing follow-through** (#1068): work through the setup/docs gaps
-  and Admin UI/DHCP/DNS UX issues found during hands-on `v0.2.0` field
-  testing; roughly half of that audit's findings remain open.
-- **Base image evaluation** (#815, #1287): evaluate migrating DNS/DHCP and
-  proxy/ntp/watchdog/ui services to Alpine base images for fresher packages.
-- **Undocumented-vs-real-capability audits** (#843, #871): reconcile
-  documentation that describes capabilities against what actually exists in
-  the codebase today — e.g. CacheHamster (Cache-Prefill), whose mechanism is
-  now decided (stream-and-discard prefill, not steamcmd, per #871) and built
-  as the `lancache-cachehamster` crate of the services image (no supervised
-  program, started by hand), but whose Steam control-plane/depot integration
-  is not yet built.
-- **CI/tooling health**: several open `ci`/`tooling`-labeled issues (e.g.
-  #1014 consolidating workflow files, #1065's runner-pool saturation,
-  #1253/#1290 narrowing build-tools rebuild triggers) reduce CI cost and
-  fragility without changing product behavior.
+| Topic | Tracking | Milestone |
+| --- | --- | --- |
+| CI rewrite and its follow-up work | [#1683](https://github.com/wiki-mod/lancache-ng/issues/1683) | none |
+| CI infrastructure rework (rebuild, scan, promote, workflow consolidation) | [#1095](https://github.com/wiki-mod/lancache-ng/issues/1095) | Tooling & Checks |
+| Check that the `latest` channel can be pulled by tag and started (daily) | [#1986](https://github.com/wiki-mod/lancache-ng/issues/1986) | none |
+| CacheHamster: stream-and-discard Steam prefill | [#871](https://github.com/wiki-mod/lancache-ng/issues/871) | LanCache-NG Roadmap |
+| Admin UI: unified visual redesign | [#1437](https://github.com/wiki-mod/lancache-ng/issues/1437) | In the Future |
 
-### v0.3.0 milestone (in-flight release line)
+Design documents for planned work: `docs/design-steam-prefill.md`.
 
-Nineteen open issues track the remaining work for the current `v0.3.0` line,
-spanning setup-flow refactors (#1263), CI trigger-coverage gaps (#1245,
-#1176), and the items above that are also tagged for this specific release.
-See the milestone itself for the current exact set, since it changes as
-issues close.
+## 3. Not intended or not scheduled
 
-## What the project deliberately does not intend to do (or has deferred)
+| Topic | State | Reference |
+| --- | --- | --- |
+| IPv6 listener of the PowerDNS recursor | Deferred, low priority | [#851](https://github.com/wiki-mod/lancache-ng/issues/851) |
+| A second deployment profile besides `deploy/prod/` | Not intended | `AG-KD-008` |
+| Promotion to `1.0.0` | Maintainer decision | `AG-GH-018` |
+| WireGuard remote LAN access | Design proposal only, not approved, not scheduled | `docs/design-plannings/design-wireguard-remote-access.md` |
 
-- **IPv6 for the PowerDNS Recursor** (#851): deliberately deferred as low
-  priority; full dual-stack support already exists elsewhere in the stack
-  (see `AGENTS.md`'s `## CDN Domains, First-time Setup, IPv6` section — **corrected
-  2026-08-05, issue #1391 doc-sweep audit**: this used to point at `CLAUDE.md`'s IPv6
-  notes, which moved into `AGENTS.md` on 2026-07-31 per `CLAUDE.md`'s own current
-  text), but the recursor's own IPv6 listener is not currently planned work.
-- **A parallel `deploy/dev/` environment**: deliberately retired (#766, v0.3.0)
-  and not coming back — see `AGENTS.md`'s `AG-KD-008` (**corrected 2026-08-05, issue
-  #1391 doc-sweep audit**: this used to point at `CLAUDE.md`'s "No Separate Dev
-  Environment" section, which also moved into `AGENTS.md` on 2026-07-31) for why an
-  earlier version of this project's own tooling mistakenly grew one and why that was
-  undone.
-- **A major-version (`1.0.0`) bump**: `AGENTS.md`'s `AG-GH-018` is explicit
-  that this stays a deliberate, manual maintainer decision, never an
-  automatic side effect of any automation this roadmap's release-automation
-  item might add.
-- **Mandatory two-person code review** and other Gold-tier Best Practices
-  Badge process controls that would change how contributions are reviewed:
-  these are real maintainer decisions with ongoing process cost, tracked as
-  open questions in issue #1130 rather than committed roadmap items.
+## Howto audit this file
 
-## Keeping this current
+The audit procedure of this file is `docs/policy/howto-audit-documentation.md`.
 
-Whoever last works through the `LanCache-NG Roadmap` milestone in a given
-quarter should re-check this file against the real milestone/issue state and
-correct drift, the same way `docs/threat-model.md` is re-audited per release
-(see that document's own "How to re-audit this document" section for the
-pattern this follows).
+### Special deviation
+
+| Field | Content |
+| --- | --- |
+| Step | 3 to 6 |
+| Reason | The file states plans, not code facts; its evidence is the state of the tracking items |
+| Replacement | Every item in sections 2 and 3 has an open tracking issue, a design document or a rule identifier that exists. `gh issue view <number>` and `gh pr view <number>` give the state. An item whose tracking issue is closed is removed from section 2 or moved to section 3 with its reference. An open issue that states intended work and has no row in section 2 is added. |
