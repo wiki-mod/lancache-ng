@@ -431,5 +431,11 @@
   "err_state_running_stopped": "Der Zustand muss laufend oder gestoppt sein.",
   "prog_reload": "Neu laden",
   "prog_restart": "Neu starten",
-  "err_relay_needs_upstream": "DHCP-Relay braucht den echten DHCP-Server. Trage ihn unten im Reiter DHCP-Relay ein, speichere und aktiviere den Modus dann."
+  "err_relay_needs_upstream": "DHCP-Relay braucht den echten DHCP-Server. Trage ihn unten im Reiter DHCP-Relay ein, speichere und aktiviere den Modus dann.",
+  "in_cache": "Im Cache",
+  "cache_check": "Prüfen",
+  "cache_none": "nicht im Cache",
+  "cache_evict": "Aus dem Cache entfernen",
+  "cache_evict_sure": "Wirklich entfernen?",
+  "cache_freed": "{x} freigegeben"
 }

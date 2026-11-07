@@ -2479,11 +2479,17 @@ async fn hamster_api(
         "login-cancel",
         "library",
         "status",
+        "cached",
     ];
-    if !allowed.contains(&op.as_str()) {
-        return Err(Fail(StatusCode::NOT_FOUND, "no such call".into()));
-    }
-    let v = hamster(&app, &[op.as_str()])
+    // What: lookup-ID and evict-ID carry one app id.
+    // Why: the library row checks or frees one game.
+    // From: Issue #871 | PR #1991
+    let args: Vec<&str> = match op.split_once('-') {
+        Some((cmd @ ("lookup" | "evict"), id)) if id.parse::<u32>().is_ok() => vec![cmd, id],
+        _ if allowed.contains(&op.as_str()) => vec![op.as_str()],
+        _ => return Err(Fail(StatusCode::NOT_FOUND, "no such call".into())),
+    };
+    let v = hamster(&app, &args)
         .await
         .map_err(|e| Fail(StatusCode::BAD_GATEWAY, e))?;
     Ok(axum::Json(v).into_response())

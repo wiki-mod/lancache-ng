@@ -431,5 +431,11 @@
   "err_state_running_stopped": "State must be running or stopped.",
   "prog_reload": "Reload",
   "prog_restart": "Restart",
-  "err_relay_needs_upstream": "DHCP-Relay needs the real DHCP server. Enter it below on the DHCP-Relay tab, save, then activate the mode."
+  "err_relay_needs_upstream": "DHCP-Relay needs the real DHCP server. Enter it below on the DHCP-Relay tab, save, then activate the mode.",
+  "in_cache": "In cache",
+  "cache_check": "Check",
+  "cache_none": "not in cache",
+  "cache_evict": "Remove from cache",
+  "cache_evict_sure": "Really remove?",
+  "cache_freed": "{x} freed"
 }

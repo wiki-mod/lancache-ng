@@ -234,17 +234,62 @@
       }).catch(function (e) { back(); window.LancacheUi.fail(e); });
     });
   }
+  // What: cache use and evict per library game.
+  // Why: DoMe 07.11.: empty one game, not everything.
+  // From: Issue #871 | PR #1991
+  const size = function (n) {
+    return n >= 1073741824 ? (n / 1073741824).toFixed(1) + ' GiB' : Math.round(n / 1048576) + ' MiB';
+  };
+  const button = function (label) {
+    const b = document.createElement('button');
+    b.type = 'button'; b.className = 'btn'; b.textContent = label;
+    b.style.whiteSpace = 'nowrap';
+    return b;
+  };
+  function showCache(cell, id, bytes) {
+    cell.textContent = '';
+    if (!bytes) { cell.textContent = LC_T.cache_none; return; }
+    cell.appendChild(document.createTextNode(size(bytes) + ' '));
+    const b = button(LC_T.cache_evict);
+    b.addEventListener('click', function () {
+      if (!b.dataset.sure) { b.dataset.sure = '1'; b.textContent = LC_T.cache_evict_sure; return; }
+      b.disabled = true; b.textContent = LC_T.loading;
+      api('evict-' + id).then(function (v) {
+        cell.textContent = LC_T.cache_freed.replace('{x}', size(v.freed));
+      }).catch(function (e) { b.disabled = false; delete b.dataset.sure; b.textContent = LC_T.cache_evict; window.LancacheUi.fail(e); });
+    });
+    cell.appendChild(b);
+  }
+  function cacheCell(cell, id) {
+    cell.dataset.cacheApp = String(id);
+    const b = button(LC_T.cache_check);
+    b.addEventListener('click', function () {
+      b.disabled = true; b.textContent = LC_T.loading;
+      api('lookup-' + id).then(function (v) { showCache(cell, id, v.bytes); })
+        .catch(function (e) { b.disabled = false; b.textContent = LC_T.cache_check; window.LancacheUi.fail(e); });
+    });
+    cell.appendChild(b);
+  }
+  function fillCache() {
+    api('cached').then(function (v) {
+      Object.keys(v.apps || {}).forEach(function (id) {
+        const cell = document.querySelector('[data-cache-app="' + id + '"]');
+        if (cell) { showCache(cell, id, v.apps[id]); }
+      });
+    }).catch(function (e) { window.LancacheUi.fail(e); });
+  }
   // What: the owned games survive a reload.
   // Why: DoMe 07.11.: Ctrl+F5 emptied the list.
   // From: Issue #871 | PR #1985
   function showGames(games) {
         const t = document.getElementById('hamster-games');
         if (!t) { return; }
-        t.innerHTML = '<tr><th>App ID</th><th>Name</th><th></th></tr>';
+        t.innerHTML = '<tr><th>App ID</th><th>Name</th><th>' + LC_T.in_cache + '</th><th></th></tr>';
         games.forEach(function (g) {
           const row = t.insertRow();
           row.insertCell().textContent = g.appid;
           row.insertCell().textContent = g.name;
+          cacheCell(row.insertCell(), g.appid);
           // What: one click adds a "now" job for this game.
           // Why: DoMe 05.11.: load straight from the list.
           // From: Issue #871 | PR #1980
@@ -272,6 +317,7 @@
           f.appendChild(b);
           row.insertCell().appendChild(f);
         });
+        fillCache();
   }
   try {
     const kept = sessionStorage.getItem('ch-games');
