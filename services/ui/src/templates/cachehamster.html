@@ -142,8 +142,14 @@
     const saved = sessionStorage.getItem('ch-tab');
     if (saved && document.querySelector('[data-ch-tab="' + saved + '"]')) { pickTab(saved); }
   } catch (err) { reportError(err); }
+  // What: date on the first line, time on the second.
+  // Why: DoMe 07.11.: one line made the column wide.
+  // From: Issue #871 | PR #1985
   document.querySelectorAll('[data-unix]').forEach(function (el) {
-    el.textContent = new Date(Number(el.dataset.unix) * 1000).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'medium' });
+    const d = new Date(Number(el.dataset.unix) * 1000);
+    el.textContent = d.toLocaleDateString(undefined, { dateStyle: 'medium' });
+    el.appendChild(document.createElement('br'));
+    el.appendChild(document.createTextNode(d.toLocaleTimeString(undefined, { timeStyle: 'medium' })));
   });
   // What: the time field opens its calendar on click.
   // Why: DoMe 05.11.: a click on "tt" opened nothing.
