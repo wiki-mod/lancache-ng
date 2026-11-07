@@ -81,8 +81,8 @@
       {# What: empties the whole cache on a 2nd click #}
       {# Why: DoMe 07.11.: full wipe on the overview #}
       {# From: Issue #871 | PR #1991 #}
-      <div style="margin-top:12px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
-        <button type="button" id="cache-wipe" class="btn btn-sm btn-ghost-red">{{ t.cache_wipe }}</button>
+      <div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--navy-600);display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+        <button type="button" id="cache-wipe" class="btn btn-danger">{{ t.cache_wipe }}</button>
         <span id="cache-wipe-state" class="field-hint" style="margin:0;"></span>
       </div>
       <script>
