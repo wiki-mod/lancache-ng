@@ -140,7 +140,7 @@
       {# Why: options reach only PXE clients in this mode #}
       {# From: Issue #1683 | PR #1912 #}
       <div class="text-sm text-amber-300 space-y-2">
-        {% if dhcp_is_dnsmasq and not dhcp_is_relay %}<p>{{ t.dnsmasq_proxy_mode_is_active_this }}</p>{% else %}<p class="font-semibold">{{ t.dhcp_proxy_is_not_the_active }}</p>{% endif %}
+        {% if dhcp_is_dnsmasq and not dhcp_is_relay %}<p>{{ t.dnsmasq_proxy_mode_is_active_this }}</p>{% else %}<p class="text-lg font-bold text-orange-400">{{ t.dhcp_proxy_is_not_the_active }}</p>{% endif %}
         <p class="text-amber-200">{{ t.proxy_dhcp_pxe_helper_only_the }}</p>
         <form method="post" action="{{ routes.dhcp_proxy | safe }}" class="space-y-3 rounded border border-amber-500/30 bg-slate-900/50 p-4">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -174,7 +174,7 @@
       {# Why: client broadcasts cannot reach upstream #}
       {# From: Issue #844 #}
       <div class="text-sm text-sky-300 space-y-2">
-        {% if dhcp_is_relay %}<p>{{ t.dnsmasq_relay_mode_is_active_dnsmasq }}</p>{% else %}<p class="font-semibold">{{ t.dhcp_relay_is_not_the_active }}</p>{% endif %}
+        {% if dhcp_is_relay %}<p>{{ t.dnsmasq_relay_mode_is_active_dnsmasq }}</p>{% else %}<p class="text-lg font-bold text-orange-400">{{ t.dhcp_relay_is_not_the_active }}</p>{% endif %}
         <p class="text-sky-200">{{ t.unlike_proxydhcp_mode_this_is_a }}</p>
         <form method="post" action="{{ routes.dhcp_relay | safe }}" class="space-y-3 rounded border border-sky-500/30 bg-slate-900/50 p-4">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -537,7 +537,7 @@
   </div>
 
     {% else %}
-    <p class="section-sub">{{ t.dhcp_server_is_not_the_active }}</p>
+    <p class="text-lg font-bold text-orange-400">{{ t.dhcp_server_is_not_the_active }}</p>
     {% endif %}
   </div>
 </div>
