@@ -50,7 +50,11 @@
     {% endif %}
     {% if hamster and hamster.jobs | length > 0 %}
     <div style="overflow-x:auto;">
-    <table class="table">
+    {# What: fixed column widths for the job table #}
+    {# Why: DoMe 07.11.: rows shifted with the progress text #}
+    {# From: Issue #871 | PR #1985 #}
+    <table class="table" style="table-layout:fixed; min-width:980px;">
+      <colgroup><col style="width:110px"><col><col style="width:120px"><col style="width:90px"><col style="width:150px"><col style="width:250px"><col style="width:220px"></colgroup>
       <tr><th>{{ t.date_and_time }}</th><th>Name</th><th>{{ t.what }}</th><th>{{ t.when }}</th><th>{{ t.state }}</th><th>{{ t.progress }}</th><th></th></tr>
       {% for j in hamster.jobs | reverse %}{% if panel == "history" or loop.index <= 3 %}
       <tr{% if j.state.state == "running" or (j.state.state == "waiting" and j.when.kind == "now") %} data-busy="1"{% endif %}>
