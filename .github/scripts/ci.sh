@@ -76,14 +76,14 @@ CI_OPENRC_KEYS="OPENRC_RC_CONF OPENRC_RC_SETTINGS OPENRC_INIT_DIR OPENRC_RUNLEVE
 declare -A CI_DISPATCH=(
     [plan]=ci_cmd_plan [plan-matrix]=ci_cmd_plan_matrix [impact]=ci_cmd_impact [codeql-impact]=ci_cmd_codeql_impact [codeql-analyze]=ci_cmd_codeql_analyze [identity]=ci_cmd_identity
     [resolve]=ci_cmd_resolve [build]=ci_cmd_build [rust-build]=ci_cmd_rust_build [apk-setup]=ci_cmd_apk_setup [image-setup]=ci_cmd_image_setup [openrc-setup]=ci_cmd_openrc_setup
-    [build-tools]=ci_cmd_build_tools [job-settings]=ci_cmd_job_settings [tool-releases]=ci_cmd_tool_releases [publish]=ci_cmd_publish [verify]=ci_cmd_verify [ship]=ci_cmd_ship [ship-release]=ci_cmd_ship_release [gha-runtime-args]=ci_cmd_gha_runtime_args
+    [build-tools]=ci_cmd_build_tools [job-settings]=ci_cmd_job_settings [tool-releases]=ci_cmd_tool_releases [publish]=ci_cmd_publish [verify]=ci_cmd_verify [ship]=ci_cmd_ship [ship-release]=ci_cmd_ship_release [build-tools-run]=ci_cmd_build_tools_run
     [test]=ci_cmd_test [scan-channel]=ci_cmd_scan_channel [assemble]=ci_cmd_assemble
-    [aggregate-stack]=ci_cmd_aggregate_stack [scan-stack]=ci_cmd_scan_stack [changed-files]=ci_cmd_changed_files [checks-plan]=ci_cmd_checks_plan [rust-memo]=ci_cmd_rust_memo
+    [aggregate-stack]=ci_cmd_aggregate_stack [scan-stack]=ci_cmd_scan_stack [changed-files]=ci_cmd_changed_files [checks-plan]=ci_cmd_checks_plan [rust-memo]=ci_cmd_rust_memo [psl]=ci_cmd_psl
     [assemble-stack]=ci_cmd_assemble_stack [test-stack]=ci_cmd_test_stack [nightly-report]=ci_cmd_nightly_report
     [validate]=ci_cmd_validate [result-gate]=ci_cmd_result_gate [promote]=ci_cmd_promote [promote-ref]=ci_cmd_promote_ref [channel-checkout]=ci_cmd_channel_checkout [channel-matrix]=ci_cmd_channel_matrix [channel-check]=ci_cmd_channel_check [channel-report]=ci_cmd_channel_report [release-validation]=_ci_release_validation_valid [release-ref]=_ci_release_ref
     [release-publish]=ci_cmd_release_publish [release-images]=ci_cmd_release_images [release-sbom-stack]=ci_cmd_release_sbom_stack [release-vex]=ci_cmd_release_vex [cut-release-tag]=ci_cmd_cut_release_tag [release-notes]=ci_cmd_release_notes [release-changelog]=ci_cmd_release_changelog [release-variable]=ci_cmd_release_variable
-    [gc]=ci_cmd_gc [gc-refs]=ci_cmd_gc_refs [check]=ci_cmd_check [close-linked-issues]=ci_cmd_close_linked_issues [pr-labels]=ci_cmd_pr_labels [board-add]=ci_cmd_board_add
-    [welcome]=ci_cmd_welcome [version]=ci_cmd_version [docker-daemon-config]=ci_cmd_docker_daemon_config [runner-host]=ci_cmd_runner_host
+    [gc]=ci_cmd_gc [gc-refs]=ci_cmd_gc_refs [check]=ci_cmd_check [close-linked-issues]=ci_cmd_close_linked_issues [pr-labels]=ci_cmd_pr_labels [pr-milestone]=ci_cmd_pr_milestone [board-add]=ci_cmd_board_add
+    [version]=ci_cmd_version [docker-daemon-config]=ci_cmd_docker_daemon_config [runner-host]=ci_cmd_runner_host
     [have-command]=ci_cmd_have_command [pr-green-mark]=ci_cmd_pr_green_mark [pr-meta]=ci_cmd_pr_meta
 )
 
@@ -131,13 +131,13 @@ ci_log() {
 }
 
 # What: name and start of the open log group.
-# Why: A7: each part of a step shows its own time.
+# Why: each part of a step shows its own time.
 # From: Issue #1683 | PR #1858
 _CI_GROUP_NAME=""
 _CI_GROUP_T0=0
 
 # What: open a named log group; closes the open one.
-# Why: Fund 82: a long step shows its parts by name.
+# Why: a long step shows its parts by name.
 # From: Issue #1683 | PR #1858
 ci_group() {
     ci_group_end
@@ -147,7 +147,7 @@ ci_group() {
 }
 
 # What: close the open log group; log its time.
-# Why: no fold stays open; A7: one owner of part time.
+# Why: no fold stays open; one owner of part time.
 # From: Issue #1683 | PR #1858
 ci_group_end() {
     printf '::endgroup::\n' >&2
@@ -186,7 +186,7 @@ _ci_git_run() {
 # Why: one owner for coded command errors and their raw.
 # From: Issue #1683 | PR #1858
 _ci_run() {
-    local okmax=0 strict="" ofile="" id ctx err out="" rc=0 t0
+    local okmax=0 strict="" ofile="" secret="" id ctx err out="" rc=0 t0 l
     # What: -m N: rc to N ok; -s: stderr fails; -o F: to F
     # Why: grep rc 1 is a miss; big trees skip bash strings
     # From: Issue #1683 | PR #1858
@@ -195,6 +195,7 @@ _ci_run() {
             -m) okmax="$2"; shift 2 ;;
             -s) strict=1; shift ;;
             -o) ofile="$2"; shift 2 ;;
+            -k) secret=1; shift ;;
             *) break ;;
         esac
     done
@@ -222,6 +223,14 @@ _ci_run() {
         out="$("$@" 2>"${err}")" || rc=$?
     fi
     _ci_timed_here "$1" || _ci_cmd_time "${t0}" "${rc}" "$@"
+    # What: -k: GitHub masks each stdout line before logs.
+    # Why: a per-run secret must not show in a public log.
+    # From: Issue #1683 | PR #1984
+    if [ -n "${secret}" ] && [ -n "${out}" ]; then
+        while IFS= read -r l; do
+            [ -z "${l}" ] || printf '::add-mask::%s\n' "${l}" >&"${_CI_CMD_FD:-2}"
+        done <<< "${out}"
+    fi
     if [ "${rc}" -gt "${okmax}" ] || { [ -n "${strict}" ] && [ -s "${err}" ]; }; then
         ci_error "${id}" "${ctx} cmd=\"$1\" rc=${rc}" "$(cat "${err}"; [ -z "${out}" ] || printf 'stdout:\n%s\n' "${out}")"
         [ -n "${RUNNER_TEMP:-}" ] || rm -f "${err}"
@@ -229,11 +238,55 @@ _ci_run() {
     fi
     [ ! -s "${err}" ] || cat "${err}" >&2
     [ -n "${RUNNER_TEMP:-}" ] || rm -f "${err}"
+    # What: debug mode also logs the raw stdout.
+    # Why: every raw output must be visible in the log.
+    # From: Issue #1683 | PR #1984
+    if [ "${_CI_DEBUG_MODE:-}" = true ] && [ -n "${out}" ]; then
+        ci_log "[CI-INFO-CORE-0161]" "cmd=\"$1\" stdout:" 2>&"${_CI_CMD_FD:-2}"
+        printf '%s\n' "${out}" >&"${_CI_CMD_FD:-2}"
+    fi
     [ -z "${out}" ] || printf '%s\n' "${out}"
 }
 
+# What: set the debug mode once per command run.
+# Why: SOT default true; the repo variable may change it.
+# From: Issue #1683 | PR #1984
+_CI_DEBUG_MODE=""
+_ci_debug_init() {
+    local v=""
+    if [ -f "${CI_MANIFEST}" ]; then
+        v="$(_ci_variable PROJECT_DEBUG_MODE)" || return 2
+    else
+        _ci_variable_env PROJECT_DEBUG_MODE v
+    fi
+    case "${v}" in
+        true)
+            _CI_DEBUG_MODE=true
+            # What: GitHub masks each set LAN value.
+            # Why: a public log must show no LAN address.
+            # From: Issue #1683 | PR #1984
+            [ -f "${CI_MANIFEST}" ] || return 0
+            local lan n val
+            lan="$(_ci_required_field repo_variables self_hosted blocklist)" || return 2
+            for n in ${lan}; do
+                _ci_variable_env "${n}" val
+                [ -z "${val}" ] || printf '::add-mask::%s\n' "${val}" >&"${_CI_CMD_FD:-2}"
+            done
+            ;;
+        false) _CI_DEBUG_MODE=false ;;
+        '')
+            _CI_DEBUG_MODE=true
+            ci_log "[CI-INFO-CORE-0162]" "reason=\"no SOT and no PROJECT_DEBUG_MODE; debug on\""
+            ;;
+        *)
+            ci_log "[CI-ERROR-CORE-0163]" "got=\"${v}\" reason=\"PROJECT_DEBUG_MODE must be true or false\""
+            return 2
+            ;;
+    esac
+}
+
 # What: log every command: function, name, rc, time.
-# Why: A7, AG-INT-002: no command runs unseen, no filter.
+# Why: AG-INT-002: no command runs unseen, no filter.
 # From: Issue #1683 | PR #1858
 _ci_cmd_time() {
     local ms fn="" sub="" a
@@ -267,7 +320,7 @@ _ci_cmd_time_init() {
 }
 
 # What: run program $1 and log its time line.
-# Why: A7: a direct call shows rc and time too.
+# Why: a direct call shows rc and time too.
 # From: Issue #1683 | PR #1858
 _ci_timed() {
     local t0 rc=0
@@ -445,7 +498,7 @@ _ci_count_lines() {
 }
 
 # What: the lines that hold a non-space character.
-# Why: one blank-line owner; no awk (AG-REL-001, Fund 136).
+# Why: one blank-line owner; bash only (AG-REL-001).
 # From: Issue #1683 | PR #1858
 _ci_nonblank_lines() {
     local line
@@ -455,7 +508,7 @@ _ci_nonblank_lines() {
 }
 
 # What: non-blank lines, each once, first one kept.
-# Why: one order-keeping dedup owner; no awk (Fund 136).
+# Why: one order-keeping dedup owner; bash only.
 # From: Issue #1683 | PR #1858
 _ci_unique_lines() {
     local line
@@ -469,7 +522,7 @@ _ci_unique_lines() {
 }
 
 # What: first KEY=VALUE line of $2 whose key is $1.
-# Why: one key lookup owner; no awk (Fund 136).
+# Why: one key lookup owner; bash only.
 # From: Issue #1683 | PR #1858
 _ci_kv_line() {
     local line
@@ -480,7 +533,7 @@ _ci_kv_line() {
 }
 
 # What: field N (from 1) of one tab-separated line.
-# Why: no awk (Fund 136); keeps empty fields unlike read.
+# Why: bash only; keeps empty fields unlike read.
 # From: Issue #1683 | PR #1858
 _ci_tab_field() {
     local rest="$1" n="$2"
@@ -493,7 +546,7 @@ _ci_tab_field() {
 }
 
 # What: first line of $2 whose first tab field is $1.
-# Why: one keyed row owner; no awk (Fund 136).
+# Why: one keyed row owner; bash only.
 # From: Issue #1683 | PR #1858
 _ci_tab_row() {
     local line
@@ -504,7 +557,7 @@ _ci_tab_row() {
 }
 
 # What: $2 trimmed, each blank run one space, into var $1.
-# Why: one blank fold owner; no awk gsub (Fund 136).
+# Why: one blank fold owner; bash only.
 # From: Issue #1683 | PR #1858
 _ci_ws_fold() {
     local ws_in="$2" ws_out="" ws_run
@@ -519,7 +572,7 @@ _ci_ws_fold() {
 }
 
 # What: $2 without its '...' pairs, left to right, into $1.
-# Why: one single-quote cut owner; no awk gsub (Fund 136).
+# Why: one single-quote cut owner; bash only.
 # From: Issue #1683 | PR #1858
 _ci_strip_squoted() {
     local sq_in="$2" sq_out=""
@@ -626,7 +679,7 @@ _ci_git_trust_init() {
 _ci_proxy_init() {
     local http="" https="" exclusion=""
     # What: read the proxy values on self-hosted only.
-    # Why: Fund 94: the workflow sets them self-hosted only.
+    # Why: the workflow sets them on self-hosted only.
     # From: Issue #1683 | PR #1912
     if _ci_runner_self_hosted; then
         http="$(_ci_variable_env PROJECT_SELFHOSTED_PROXY_HTTP)" || return 2
@@ -1567,7 +1620,7 @@ _ci_tool_latest() {
 }
 
 # What: every SOT external release, read once, as JSON.
-# Why: later jobs take it as CI_TOOL_RELEASES (Fund 146).
+# Why: later jobs take it as CI_TOOL_RELEASES.
 # From: Issue #1683 | PR #1858
 ci_cmd_tool_releases() {
     local keys key line json='{}'
@@ -1806,6 +1859,13 @@ _ci_docs_only() {
 # From: Issue #1683 | PR #1858
 _ci_pr_fingerprint() {
     local tree line named docs rc wf own="" p _ci_fp_rows="" _ci_fp_absent=""
+    # What: an empty run record gives no value.
+    # Why: a docs-only plan fixes no pair id; no mark.
+    # From: Issue #1683 | PR #1984
+    if [ -n "${CI_RUN_IDENTITIES+x}" ] && [ -z "${CI_RUN_IDENTITIES// /}" ]; then
+        ci_log "[CI-INFO-PLAN-0026]" "reason=\"run record holds no pair id; no fingerprint\""
+        return 1
+    fi
     named="$(_ci_sot_named_paths)" || return 2
     docs="$(_ci_variable CI_DOCS_DIR)" || return 2
     wf="$(_ci_variable CI_WORKFLOW_DIR)" || return 2
@@ -2097,7 +2157,7 @@ ci_cmd_plan_matrix() {
     _ci_docs_only "${changed[@]}" || drc=$?
     case "${drc}" in 0) docs_only=true ;; 1) ;; *) return 2 ;; esac
     local service platform include='[]' any=false resolved paction pident pimpact runner authed=false test_services=''
-    local runners='[]' any_runner=false pdig vrc pairs=""
+    local runners='[]' any_runner=false pdig vrc pairs="" native
     local _ci_plan_ids=""
     local sot_changed=false f path_cand rc plats unknown=""
     # What: SOT change makes every target id candidate.
@@ -2154,7 +2214,7 @@ ci_cmd_plan_matrix() {
             # From: Issue #1683 | PR #1858
             _ci_base_image_prefetch _ci_alpine_build_arg "" || return 2
             # What: SOT change: all pairs; ids at once.
-            # Why: Fund 114: id loop held NOOP plan 27 s.
+            # Why: one batch call, not one per pair.
             # From: Issue #1683 | PR #1858
             if [ "${sot_changed}" = true ]; then
                 _ci_identity_prefill "${targets}" || return "$?"
@@ -2248,7 +2308,8 @@ ci_cmd_plan_matrix() {
             ci_log "[CI-INFO-PLAN-0015]" "service=\"${service}\" platform=\"${platform}\" digest=\"${pdig}\" action=no-runner reason=\"digest already verified; scan and accept only\""
             continue
         fi
-        runners="$(_ci_matrix_append "${runners}" service="${service}" arch="${platform##*/}" runner="${runner}" platform="${platform}")" || return 2
+        native="$(_ci_platform_field "${platform}" native "[CI-ERROR-PLAN-0025]" "service=\"${service}\" reason=\"no native flag for platform\"")" || return 2
+        runners="$(_ci_matrix_append "${runners}" service="${service}" arch="${platform##*/}" runner="${runner}" platform="${platform}" native="${native}")" || return 2
         any_runner=true
         [ "${svc_type}" != rust ] || rust_audit=true
     done <<< "${pairs}"
@@ -3646,6 +3707,53 @@ ci_cmd_rust_memo() {
     esac
 }
 
+# What: put the PSL in place; $1 restore or refresh.
+# Why: nightly loads it into the cache; jobs read it there.
+# From: Issue #1683 | PR #1984
+ci_cmd_psl() {
+    local mode="${1:-}" name url dest dir sum ver rc=0
+    [ -n "$(_ci_env_required RUNNER_TEMP)" ] || return 2
+    name="$(_ci_runtime_default NGINX_PSL_FILE)" || return 2
+    url="$(_ci_runtime_default NGINX_PSL_URL)" || return 2
+    # What: cache version is the sha256 of the source URL.
+    # Why: CI rule: every cache version is a sha256.
+    # From: Issue #1683 | PR #1984
+    ver="$(_ci_sha256_hex <<< "${url}")" || return 2
+    dest="${CI_REPO_ROOT:-.}/$(_ci_runtime_default NGINX_PSL_REPO_DIR)" || return 2
+    dir="${RUNNER_TEMP}/psl"
+    _ci_run "[CI-ERROR-CACHE-0032]" "dir=\"${dir}\" reason=\"PSL dir not made\"" mkdir -p "${dir}" || return 2
+    case "${mode}" in
+        restore)
+            _ci_gha_cache_get psl-latest psl- "${ver}" "${dir}" || rc=$?
+            case "${rc}" in
+                0) ci_log "[CI-INFO-CACHE-0033]" "file=\"${name}\" reason=\"PSL restored from the nightly cache\"" ;;
+                # What: a miss loads from the source.
+                # Why: no entry before the first nightly.
+                # From: Issue #1683 | PR #1984
+                1)
+                    ci_log "[CI-WARN-CACHE-0034]" "url=\"${url}\" reason=\"no PSL cached; loaded from source\""
+                    _ci_retry download _ci_http_download "${url}" "${dir}/${name}" >&2 || return 2
+                    ;;
+                *) return 2 ;;
+            esac
+            ;;
+        refresh)
+            _ci_retry download _ci_http_download "${url}" "${dir}/${name}" >&2 || return 2
+            sum="$(_ci_sha256_hex < "${dir}/${name}")" || return 2
+            _ci_gha_cache_put "psl-${sum}" "${ver}" "${dir}" || return 2
+            ;;
+        *)
+            ci_log "[CI-ERROR-CACHE-0035]" "got=\"${mode}\" reason=\"psl needs restore or refresh\""
+            return 2
+            ;;
+    esac
+    if [ ! -s "${dir}/${name}" ]; then
+        ci_log "[CI-ERROR-CACHE-0036]" "file=\"${dir}/${name}\" reason=\"PSL missing or empty\""
+        return 2
+    fi
+    _ci_run "[CI-ERROR-CACHE-0037]" "dir=\"${dest}\" reason=\"PSL not put in place\"" cp -f -- "${dir}/${name}" "${dest}/${name}"
+}
+
 # What: Rust items of a listing row's blob; $3 keep|drop.
 # Why: A3: plan read each library per service and ref.
 # From: Issue #1683 | PR #1858
@@ -3697,7 +3805,7 @@ _ci_cargo_lock() {
     _ci_refresh_event || refresh=$?
     [ "${refresh}" -le 1 ] || return 2
     remote="$(_ci_git_remote)" || return 2
-    val="$(_ci_refresh_record cargo-lock)" || rc=$?
+    val="$(_ci_refresh_record cargo-lock accepted)" || rc=$?
     [ "${rc}" -le 1 ] || return 2
     # What: reuse the record; a refresh run only its own
     # Why: plan and builds of one run read one lock
@@ -3923,7 +4031,7 @@ _ci_target_plain_paths() {
 _ci_identity_content() {
     local service="$1" ref="${2:-}" mode="${3-build}" paths p part buf="" type ctx memo
     # What: one call reads a target's content once per ref.
-    # Why: plan read it per platform, 2-3 s each (Fund 94).
+    # Why: platforms share one read per ref.
     # From: Issue #1683 | PR #1858
     memo="content-${_CI_CALL_KEY}-${service}-${ref:-tree}-${mode:-none}"
     if buf="$(_ci_job_memo_get "${memo//\//-}")"; then
@@ -4223,7 +4331,7 @@ _ci_identity_prefill_one() {
 }
 
 # What: compute the ids of all pairs of list $1 at once.
-# Why: Fund 114: one pair after another took 27 s.
+# Why: one batch call, not one per pair.
 # From: Issue #1683 | PR #1858
 _ci_identity_prefill() {
     local s p plats key wrc
@@ -5164,7 +5272,7 @@ _ci_ledger_blob() {
     file="$(_ci_variable "${3:-CI_LEDGER_FILE}")" || return 2
     local sha memo blob state
     # What: this call asks the remote for a ref state once.
-    # Why: plan asked 24 times, 0.5-0.8 s each (Fund 94).
+    # Why: callers in one run reuse the answer.
     # From: Issue #1683 | PR #1858
     state="state-${_CI_CALL_KEY}-${ledger_ref//\//-}"
     if [ "${4:-}" = fetch ] || ! sha="$(_ci_job_memo_get "${state}")"; then
@@ -5420,7 +5528,7 @@ ci_cmd_aggregate_stack() {
     _ci_require_ghcr_auth || return "$?"
     dir="$(_ci_mktemp -d "${CI_TMPDIR}/ci-results.XXXXXX")" || return 2
     # What: accept each built, verified pair; no scan wait.
-    # Why: DoMe 30.10.: the nightly run scans once a day.
+    # Why: the nightly run scans once a day.
     # From: Issue #1683 | PR #1858
     ci_group "aggregate: accept built and verified pairs"
     while read -r svc plat; do
@@ -5602,7 +5710,7 @@ _ci_diff_history() {
     [ "${#deep[@]}" -gt 0 ] || [ "${#need[@]}" -gt 0 ] || return 0
     remote="$(_ci_git_remote)" || return 2
     # What: commits and trees only; blobs load on demand.
-    # Why: whole history with blobs cost 33 s (Fund 114).
+    # Why: blobs load only when a check needs them.
     # From: Issue #1683 | PR #1858
     (cd -- "${CI_REPO_ROOT}" && _ci_retry git-fetch git fetch --no-tags --filter=blob:none "${deep[@]}" "${remote}" "${head}" "${need[@]}") >&2 || return 2
     [ -z "${memo}" ] || _ci_job_memo_put "${memo}" "${head}"
@@ -5720,11 +5828,32 @@ _ci_pr_labels_for() {
     fi
 }
 
-# What: add the path labels to the current pull request.
+# What: the one same-repo issue PR $2 closes, as JSON.
+# Why: AG-GH-008 mirrors only it; none or many: empty.
+# From: Issue #1683 | PR #1984
+_ci_pr_closed_issue() {
+    local repo="$1" body refs ref out
+    local -a issues=()
+    body="$(_ci_capture 0 jq -r '.body // ""' <<< "$2")" || return 2
+    refs="$(_ci_linked_refs "${body}")" || return 2
+    if [ "${refs}" = "${refs%%$'\n'*}" ]; then refs=""; else refs="${refs#*$'\n'}"; fi
+    while IFS= read -r ref; do
+        [ -n "${ref}" ] || continue
+        if [ "${ref%#*}" = "" ] || [ "${ref%#*}" = "${repo,,}" ]; then
+            issues+=("${ref##*#}")
+        fi
+    done <<< "${refs}"
+    [ "${#issues[@]}" -eq 1 ] || return 0
+    out="$(_ci_run "[CI-ERROR-PRMETA-0001]" "issue=\"${issues[0]}\" reason=\"closed issue not read\"" \
+        gh api "repos/${repo}/issues/${issues[0]}")" || return 2
+    _ci_capture 0 jq -c 'select(.pull_request == null)' <<< "${out}"
+}
+
+# What: add path labels and the closed issue's labels.
 # Why: AG-GH-008 labels; SOT owns the path->label rules.
 # From: Issue #1683 | PR #1858
 ci_cmd_pr_labels() {
-    local labels l repo out stored
+    local labels l repo out stored issue
     local -a files=() args=() missing=()
     if _ci_skip_outside_pr pr-labels; then
         return 0
@@ -5739,12 +5868,23 @@ ci_cmd_pr_labels() {
     fi
     _ci_collect_changed files || return 2
     labels="$(_ci_pr_labels_for "${files[@]}")" || return 2
+    repo="$(_ci_repo)" || return 2
+    # What: the one closed issue adds its own labels.
+    # Why: AG-GH-008: mirror them; Refs #N never counts.
+    # From: Issue #1683 | PR #1984
+    out="$(_ci_run "[CI-ERROR-PRLABELS-0004]" "pr=\"${PR_NUMBER:-}\" reason=\"PR not read\"" \
+        gh api "repos/${repo}/issues/${PR_NUMBER:-}")" || return 2
+    issue="$(_ci_pr_closed_issue "${repo}" "${out}")" || return 2
+    if [ -n "${issue}" ]; then
+        issue="$(_ci_capture 0 jq -r '.labels[].name' <<< "${issue}")" || return 2
+        labels="$(_ci_capture 0 env LC_ALL=C sort -u <<< "${labels:+${labels}$'\n'}${issue}")" || return 2
+        labels="${labels#$'\n'}"
+    fi
     if [ -z "${labels}" ]; then
         printf 'pr-labels=none changed=%s\n' "${#files[@]}"
         return 0
     fi
     while IFS= read -r l; do args+=(-f "labels[]=${l}"); done <<< "${labels}"
-    repo="$(_ci_repo)" || return 2
     out="$(_ci_run "[CI-ERROR-PRLABELS-0002]" "pr=\"${PR_NUMBER:-}\" labels=\"${labels//$'\n'/ }\" reason=\"labels not added\"" \
         gh api -X POST "repos/${repo}/issues/${PR_NUMBER:-}/labels" "${args[@]}")" || return 2
     # What: each added label is in the label list returned
@@ -5759,6 +5899,54 @@ ci_cmd_pr_labels() {
         return 2
     fi
     printf 'pr-labels=added labels=%s\n' "${labels//$'\n'/,}"
+}
+
+# What: set a milestone on a PR that has none.
+# Why: AG-GH-008 wants it at open; a set one stays.
+# From: Issue #1683 | PR #1984
+ci_cmd_pr_milestone() {
+    local repo number out cur got issue from
+    if _ci_skip_outside_pr pr-milestone; then
+        return 0
+    fi
+    if [ "${PR_IS_FORK:-false}" = true ] || [ -z "${GH_TOKEN:-}" ]; then
+        printf 'pr-milestone=NOT-RUN reason="no project token (fork or unset); set by hand (AG-GH-008)"\n'
+        return 0
+    fi
+    number="$(_ci_block_entry_field pr_policy "" milestone_number)" || return 2
+    if ! [[ "${number}" =~ ^[0-9]+$ ]]; then
+        ci_log "[CI-ERROR-PRMILESTONE-0001]" "got=\"${number}\" reason=\"no numeric SOT pr_policy.milestone_number\""
+        return 2
+    fi
+    repo="$(_ci_repo)" || return 2
+    out="$(_ci_run "[CI-ERROR-PRMILESTONE-0002]" "pr=\"${PR_NUMBER:-}\" reason=\"PR milestone not read\"" \
+        gh api "repos/${repo}/issues/${PR_NUMBER:-}")" || return 2
+    cur="$(_ci_capture 0 jq -r '.milestone.number // empty' <<< "${out}")" || return 2
+    if [ -n "${cur}" ]; then
+        printf 'pr-milestone=kept milestone=%s\n' "${cur}"
+        return 0
+    fi
+    # What: one closed issue gives its own milestone.
+    # Why: AG-GH-008: mirror it; Refs #N never counts.
+    # From: Issue #1683 | PR #1984
+    from=sot
+    out="$(_ci_pr_closed_issue "${repo}" "${out}")" || return 2
+    if [ -n "${out}" ]; then
+        cur="$(_ci_capture 0 jq -r '.milestone.number // empty' <<< "${out}")" || return 2
+        issue="$(_ci_capture 0 jq -r '.number' <<< "${out}")" || return 2
+        [ -z "${cur}" ] || { number="${cur}"; from="issue-${issue}"; }
+    fi
+    out="$(_ci_run "[CI-ERROR-PRMILESTONE-0003]" "pr=\"${PR_NUMBER}\" milestone=\"${number}\" reason=\"milestone not set\"" \
+        gh api -X PATCH "repos/${repo}/issues/${PR_NUMBER}" -F milestone="${number}")" || return 2
+    # What: the set milestone is in the PATCH answer.
+    # Why: AG-WF-031: every GitHub write is read back
+    # From: Issue #1683 | PR #1984
+    got="$(_ci_capture 0 jq -r '.milestone.number // empty' <<< "${out}")" || return 2
+    if [ "${got}" != "${number}" ]; then
+        ci_error "[CI-ERROR-PRMILESTONE-0004]" "pr=\"${PR_NUMBER}\" want=\"${number}\" got=\"${got}\" reason=\"milestone not on the PR after the write\"" "${out}"
+        return 2
+    fi
+    printf 'pr-milestone=set milestone=%s from=%s\n' "${number}" "${from}"
 }
 
 # What: put the new PR or issue on the SOT project board.
@@ -5837,7 +6025,7 @@ ci_cmd_assemble_stack() {
         return 2
     fi
     # What: assembles each service in its own log group
-    # Why: one blocks no other; A7: parts show by name
+    # Why: one blocks no other; parts show by name
     # From: Issue #1683 | PR #1912
     for svc in ${svcs}; do
         ci_group "assemble: ${svc}"
@@ -5865,7 +6053,7 @@ _ci_for_test_services() {
         return 2
     fi
     # What: one timed log group per tested service.
-    # Why: A7 (Fund 82a): the step shows its parts by name.
+    # Why: the step log shows its parts by name.
     # From: Issue #1683 | PR #1858
     for svc in ${list}; do
         ci_group "test: ${svc}"
@@ -6207,21 +6395,48 @@ _ci_sccache_env() {
     unset SCCACHE_SERVER_UDS
 }
 
-# What: args of the docker:// GHA runtime export step.
-# Why: run steps never get the cache token; kill-bounded.
-# From: Issue #1683 | PR #1858
-ci_cmd_gha_runtime_args() {
-    local t args
-    t="$(_ci_variable CI_GHA_RUNTIME_EXPORT_TIMEOUT)" || return 2
-    case "${t}" in
-        ''|*[!0-9]*)
-            ci_log "[CI-ERROR-CACHE-0009]" "value=\"${t}\" reason=\"CI_GHA_RUNTIME_EXPORT_TIMEOUT must be whole seconds\""
-            return 2
-            ;;
-    esac
-    args="-s KILL ${t} /bin/sh -c \"env | grep -E '^ACTIONS_(RESULTS_URL|RUNTIME_TOKEN)=' >> \$GITHUB_ENV\""
-    _ci_step_output "[CI-ERROR-CACHE-0010]" args "${args}" || return 2
-    printf '%s\n' "${args}"
+# What: run a ci.sh command; native: in build-tools.
+# Why: a native job starts its build-tools image once.
+# From: Issue #1683 | PR #1984
+ci_cmd_build_tools_run() {
+    local ref="${CI_BUILD_TOOLS_IMAGE:-}" min="${CI_BUILD_TOOLS_RUN_MINUTES:-}" name
+    local -a envs=()
+    if [ "${CI_BUILD_TOOLS_NATIVE:-}" != true ]; then
+        ci_main "$@"
+        return
+    fi
+    if [[ ! "${ref}" =~ @sha256:[0-9a-f]{64}$ ]]; then
+        ci_log "[CI-ERROR-BUILDTOOLS-0027]" "got=\"${ref}\" reason=\"CI_BUILD_TOOLS_IMAGE is no digest ref; FAIL CLOSED\""
+        return 2
+    fi
+    if [[ ! "${min}" =~ ^[1-9][0-9]*$ ]]; then
+        ci_log "[CI-ERROR-BUILDTOOLS-0028]" "got=\"${min}\" reason=\"CI_BUILD_TOOLS_RUN_MINUTES must be positive whole minutes\""
+        return 2
+    fi
+    # What: job and workflow env values, passed by name.
+    # Why: no value in argv or file; arm64 needs GHCR_TOKEN
+    # From: Issue #1683 | PR #1984
+    for name in "${!GITHUB_@}" "${!RUNNER_@}" "${!ACTIONS_@}" "${!CI_@}" "${!SCCACHE_@}" "${!GH_TOKEN@}" \
+        "${!GHCR_@}" "${!DOCKERHUB_@}" "${!PROJECT_@}" "${!PR_TITLE_@}" "${!DISTCC_@}" \
+        "${!BASE_SHA@}" "${!BEFORE_SHA@}" "${!CARGO_BUILD_JOBS@}"; do
+        case "${name}" in
+            CI_BUILD_TOOLS_NATIVE) ;;
+            *) envs+=(-e "${name}") ;;
+        esac
+    done
+    # What: registry login with the job token for the pull.
+    # Why: a native job has no container credentials.
+    # From: Issue #1683 | PR #1984
+    if ! printf '%s' "${CI_GIT_TOKEN:-}" | docker login "${ref%%/*}" -u "${GITHUB_ACTOR:-}" --password-stdin; then
+        ci_log "[CI-ERROR-BUILDTOOLS-0030]" "registry=\"${ref%%/*}\" reason=\"registry login for the build-tools pull failed\""
+        return 2
+    fi
+    ci_log "[CI-INFO-BUILDTOOLS-0029]" "image=\"${ref}\" command=\"$*\" kill_after_s=$((min * 60))"
+    docker run --rm --network host \
+        -v /var/run/docker.sock:/var/run/docker.sock \
+        -v "${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}" -v "${RUNNER_TEMP}:${RUNNER_TEMP}" \
+        -w "${GITHUB_WORKSPACE}" "${envs[@]}" "${ref}" \
+        timeout -s KILL "$((min * 60))" bash .github/scripts/ci.sh "$@"
 }
 
 # What: kill timeout (s) of a docker run/exec CI command.
@@ -7781,7 +7996,7 @@ ci_cmd_rust_build() {
     local cargo_jobs
     cargo_jobs="$(_ci_rb_cargo_jobs)" || return 2
     # What: build in the mounted tree; target in WORKDIR.
-    # Why: Fund 147: no COPY; output outside the mount.
+    # Why: no COPY; output stays outside the mount.
     # From: Issue #1683 | PR #1858
     src="$(_ci_variable CI_RUST_SOURCE_DIR)" || return 2
     if ! cd "${src}"; then
@@ -8384,7 +8599,7 @@ _ci_refresh_event() {
 # From: Issue #1683 | PR #1858
 _ci_package_refresh_value() {
     local rc=0
-    _ci_refresh_record "$1@$2" || rc=$?
+    _ci_refresh_record "$1@$2" accepted || rc=$?
     [ "${rc}" -ne 1 ] || { printf 'none\n'; return 0; }
     return "${rc}"
 }
@@ -8479,9 +8694,25 @@ _ci_local_image_files() {
 # Why: one reader of the refresh records for every key.
 # From: Issue #1683 | PR #1858
 _ci_refresh_record() {
-    local remote blob rc=0 row
+    local remote blob rc=0 row ref=CI_REFRESH_REF
     remote="$(_ci_git_remote)" || return 2
-    blob="$(_ci_ledger_blob "${remote}" CI_REFRESH_REF CI_REFRESH_FILE)" || rc=$?
+    # What: $2 accepted: other runs read the promoted state.
+    # Why: a failed refresh run moved every PR run's id.
+    # From: Issue #1683 | PR #1984
+    if [ "${2:-}" = accepted ]; then
+        _ci_refresh_event || rc=$?
+        [ "${rc}" -le 1 ] || return 2
+        [ "${rc}" -eq 0 ] || ref=CI_REFRESH_ACCEPTED_REF
+        rc=0
+    fi
+    blob="$(_ci_ledger_blob "${remote}" "${ref}" CI_REFRESH_FILE)" || rc=$?
+    # What: no promoted state yet: refresh records count.
+    # Why: the first promotion writes it; ids stay valid.
+    # From: Issue #1683 | PR #1984
+    if [ "${rc}" -eq 1 ] && [ "${ref}" != CI_REFRESH_REF ]; then
+        rc=0
+        blob="$(_ci_ledger_blob "${remote}" CI_REFRESH_REF CI_REFRESH_FILE)" || rc=$?
+    fi
     [ "${rc}" -le 1 ] || return 2
     [ "${rc}" -eq 0 ] || return 1
     row="$(_ci_tab_row "$1" "${blob}")" || return 1
@@ -8490,7 +8721,7 @@ _ci_refresh_record() {
 }
 
 # What: one sha256 per id input of a pair: name=sum.
-# Why: Fund 116: a refresh BUILD names the changed input.
+# Why: a refresh BUILD names the changed input.
 # From: Issue #1683 | PR #1858
 _ci_identity_parts() {
     local service="$1" platform="$2" type inputs input part sum
@@ -8507,7 +8738,7 @@ _ci_identity_parts() {
 }
 
 # What: log id inputs changed since the last refresh run.
-# Why: Fund 116: a BUILD names its input; then record it.
+# Why: a BUILD names its changed input, then saves it.
 # From: Issue #1683 | PR #1858
 _ci_identity_changed() {
     local service="$1" platform="$2" run="${GITHUB_RUN_ID:-local}" key now old="" rc=0 p diff=""
@@ -8669,10 +8900,10 @@ _ci_apk_outdated() {
 }
 
 # What: "name installed newer" for each package behind.
-# Why: apk version -t owns the order; no own compare.
+# Why: the mirror index lists only the newest version.
 # From: Issue #1683 | PR #1858
 _ci_apk_newer() {
-    local rows tag name val order behind=""
+    local rows tag name val behind=""
     local -A have=()
     rows="$(_ci_apk_db_rows "$1" PV)" || return 2
     while IFS=$'\t' read -r tag name val; do
@@ -8683,8 +8914,7 @@ _ci_apk_newer() {
         if [ "${tag}" != V ] || [ -z "${name}" ] || [ -z "${have["${name}"]+x}" ] || [ "${val}" = "${have["${name}"]}" ]; then
             continue
         fi
-        order="$(_ci_capture 0 apk version -t "${have["${name}"]}" "${val}")" || return 2
-        [ "${order}" != "<" ] || behind+="${name} ${have["${name}"]} ${val}"$'\n'
+        behind+="${name} ${have["${name}"]} ${val}"$'\n'
     done <<< "${rows}"
     [ -z "${behind}" ] || _ci_capture 0 env LC_ALL=C sort -u <<< "${behind%$'\n'}"
 }
@@ -8869,7 +9099,7 @@ ci_cmd_ship() {
         return 2
     fi
     # What: each ship part in its own timed log group.
-    # Why: A7 (Fund 82a): the step shows its parts by name.
+    # Why: the step log shows its parts by name.
     # From: Issue #1683 | PR #1858
     ci_group "ship: take build lock"
     _ci_build_lock_take "${service}" "${platform}" || return "$?"
@@ -9311,7 +9541,7 @@ _ci_normalize_platform_digests() {
 # From: Issue #1683 | PR #1858
 _ci_index_lookup() {
     local service="$1" want="$2"
-    local name head kv rev revs tag idx grc plats have found=""
+    local name head kv rev revs tag idx grc plats have dig found=""
     name="$(_ci_image_ref "${service}")" || return 2
     head="$(_ci_head_commit)" || return 2
     revs="${head}"
@@ -9338,6 +9568,16 @@ _ci_index_lookup() {
         # From: Issue #1683 | PR #1858
         [ "${rev}" != "${head}" ] || found="${idx} ${plats% }"
     done <<< "${revs}"
+    # What: a digest-only index of the same content.
+    # Why: §96: a rebuild at one commit gets no tag.
+    # From: Issue #1683 | PR #1984
+    dig="$(_ci_index_digest "${service}" "${want}")" || return 2
+    grc=0; idx="$(_ci_registry_probe "${name}@${dig}")" || grc=$?
+    if [ "${grc}" -eq 0 ]; then
+        printf '%s %s\n' "${idx}" "${want% }"
+        return 0
+    fi
+    [ "${grc}" -eq 1 ] || return "${grc}"
     [ -n "${found}" ] || return 1
     printf '%s\n' "${found}"
 }
@@ -9353,6 +9593,42 @@ _ci_index_children() {
         return 2
     fi
     [ -z "${plats}" ] || printf '%s\n' "${plats}"
+}
+
+# What: name@digest sources of a platform=digest list.
+# Why: one source order keeps the index digest stable.
+# From: Issue #1683 | PR #1984
+_ci_index_sources() {
+    local name="$1" kv
+    local -a list
+    read -ra list <<< "$2"
+    for kv in "${list[@]}"; do
+        printf '%s@%s\n' "${name}" "${kv#*=}"
+    done
+}
+
+# What: sha256 digest an index of these sources gets.
+# Why: §96: a rebuild is found by digest, not by tag.
+# From: Issue #1683 | PR #1984
+_ci_index_digest() {
+    local service="$1" want="$2" name s out hex
+    name="$(_ci_image_ref "${service}")" || return 2
+    s="$(_ci_index_sources "${name}" "${want}")" || return 2
+    local -a srcs
+    mapfile -t srcs <<< "${s}"
+    if ! out="$(_ci_retry registry-read docker buildx imagetools create --dry-run --tag "${name}" "${srcs[@]}")"; then
+        ci_error "[CI-ERROR-ASSEMBLE-0019]" "service=\"${service}\" reason=\"index digest not computable; UNKNOWN\"" "${out}"
+        return 2
+    fi
+    # What: the dry-run text must be the index JSON alone.
+    # Why: a warning line in it would change the digest.
+    # From: Issue #1683 | PR #1984
+    if ! hex="$(_ci_capture 0 jq -e '.manifests | length > 0' <<< "${out}")"; then
+        ci_error "[CI-ERROR-ASSEMBLE-0020]" "service=\"${service}\" reason=\"dry-run gave no index JSON; UNKNOWN\"" "${out}"
+        return 2
+    fi
+    hex="$(printf '%s' "${out}" | _ci_sha256_hex)" || return 2
+    printf 'sha256:%s\n' "${hex}"
 }
 
 # What: Collect a target's accepted per-platform digests.
@@ -9392,7 +9668,7 @@ _ci_collect_accepted_digests() {
     fi
 }
 
-# What: Reuse an identical index or reject a divergent one.
+# What: Reuse an identical index; rc 3 for a divergent one.
 # Why: Idempotent retry; never overwrite an index.
 # From: Issue #1683
 _ci_reconcile_index() {
@@ -9425,25 +9701,40 @@ _ci_reconcile_index() {
         ci_log "[CI-INFO-ASSEMBLE-0015]" "service=\"${service}\" existing=\"${ex_digest}\" reason=\"index lacks a platform accepted now; completing it\""
         return 0
     fi
-    ci_error "[CI-ERROR-ASSEMBLE-0004]" "service=\"${service}\" reason=\"existing index has different platform digests; refusing to overwrite\" existing=\"${ex_digest}\"" "existing: ${existing#* }"
-    return 2
+    # What: rc 3: other digests at this commit, by digest.
+    # Why: §96; setup.sh pins sha-<commit> as immutable.
+    # From: Issue #1683 | PR #1984
+    ci_log "[CI-INFO-ASSEMBLE-0017]" "service=\"${service}\" existing=\"${ex_digest}\" reason=\"rebuild at this commit; the commit tag stays, the new index is stored by digest\""
+    return 3
 }
 
 # What: Merge accepted per-platform digests into an index.
 # Why: Default assemble backend; shares the index writer.
 # From: Issue #1683
 _ci_docker_assemble() {
-    local service="$1"; shift
-    local name sha target kv
+    local service="$1" mode="$2" want="$3"
+    local name sha target s dig="" got
     name="$(_ci_image_ref "${service}")" || return 2
-    sha="$(_ci_head_commit)" || return 2
-    target="${name}:sha-${sha}"
-    local -a srcs=()
-    for kv; do
-        srcs+=("${name}@${kv#*=}")
-    done
+    if [ "${mode}" = digest ]; then
+        dig="$(_ci_index_digest "${service}" "${want}")" || return 2
+        target="${name}@${dig}"
+    else
+        sha="$(_ci_head_commit)" || return 2
+        target="${name}:sha-${sha}"
+    fi
+    s="$(_ci_index_sources "${name}" "${want}")" || return 2
+    local -a srcs
+    mapfile -t srcs <<< "${s}"
     _ci_imagetools_create "${target}" "${srcs[@]}" >&2 || return "$?"
-    _ci_registry_digest "${target}"
+    got="$(_ci_registry_digest "${target}")" || return 2
+    # What: a digest push must read back as that digest.
+    # Why: VERIFY EXACT DIGEST (§90); no mismatch accepted.
+    # From: Issue #1683 | PR #1984
+    if [ -n "${dig}" ] && [ "${got}" != "${dig}" ]; then
+        ci_error "[CI-ERROR-ASSEMBLE-0018]" "service=\"${service}\" want=\"${dig}\" got=\"${got}\" reason=\"index readback differs from its digest\"" "target: ${target}"
+        return 2
+    fi
+    printf '%s\n' "${got}"
 }
 
 # What: Assemble accepted per-platform digests.
@@ -9458,21 +9749,25 @@ ci_cmd_assemble() {
     local -a input_list=()
     [ -z "${inputs}" ] || mapfile -t input_list <<< "${inputs}"
     # What: count the platform=digest lines in bash.
-    # Why: Fund 136: no awk where bash does the job.
+    # Why: bash does this; no awk.
     # From: Issue #1683 | PR #1858
     for kv in "${input_list[@]}"; do
         [[ "${kv}" != *=* ]] || count=$((count + 1))
     done
-    if ! reused="$(_ci_reconcile_index "${service}" "${want}")"; then
-        return 2
-    fi
+    local rrc=0 mode=tag
+    reused="$(_ci_reconcile_index "${service}" "${want}")" || rrc=$?
+    case "${rrc}" in
+        0) ;;
+        3) mode=digest ;;
+        *) return 2 ;;
+    esac
     if [ -n "${reused}" ]; then
         printf 'service=%s result=reuse-index assembled=%s platforms=%s\n' "${service}" "${reused}" "${count}"
         _ci_assemble_report "${service}" "${inputs}"
         return "$?"
     fi
     _ci_require_ghcr_auth || return "$?"
-    if ! index="$(_ci_docker_assemble "${service}" "${input_list[@]}")"; then
+    if ! index="$(_ci_docker_assemble "${service}" "${mode}" "${want}")"; then
         ci_log "[CI-ERROR-ASSEMBLE-0005]" "service=\"${service}\" inputs=\"${inputs}\" reason=\"assemble backend failed (raw above)\""
         return 2
     fi
@@ -9749,10 +10044,11 @@ _ci_stack_candidate_rows() {
 # Why: one owner for stack and toolchain candidate intake.
 # From: Issue #1683 | PR #1858
 _ci_candidate_index() {
-    local service="$1" inputs want idx
+    local service="$1" inputs want idx rc=0
     inputs="$(_ci_collect_accepted_digests "${service}")" || return "$?"
     want="$(_ci_normalize_platform_digests "${inputs}")" || return 2
-    idx="$(_ci_reconcile_index "${service}" "${want}")" || return "$?"
+    idx="$(_ci_reconcile_index "${service}" "${want}")" || rc=$?
+    [ "${rc}" -eq 0 ] || [ "${rc}" -eq 3 ] || return "${rc}"
     if [ -z "${idx}" ]; then
         ci_error "[CI-ERROR-CANDIDATE-0001]" "service=\"${service}\" reason=\"platforms accepted but no assembled multi-arch index; not candidate-ready\"" "accepted=${inputs}"
         return 2
@@ -10104,6 +10400,35 @@ _ci_promote_all_current() {
     done <<< "${cand}"
 }
 
+# What: a promoted refresh run makes its records count.
+# Why: PR runs read records of a validated stack only.
+# From: Issue #1683 | PR #1984
+_ci_refresh_accept() {
+    local remote ref acc sha cur="" raw rc=0
+    _ci_refresh_event || rc=$?
+    [ "${rc}" -le 1 ] || return 2
+    [ "${rc}" -eq 0 ] || return 0
+    remote="$(_ci_git_remote)" || return 2
+    ref="$(_ci_variable CI_REFRESH_REF)" || return 2
+    acc="$(_ci_variable CI_REFRESH_ACCEPTED_REF)" || return 2
+    rc=0; sha="$(_ci_cas_ref_sha "${remote}" "${ref}")" || rc=$?
+    [ "${rc}" -ne 1 ] || return 0
+    [ "${rc}" -eq 0 ] || return 2
+    rc=0; cur="$(_ci_cas_ref_sha "${remote}" "${acc}")" || rc=$?
+    [ "${rc}" -le 1 ] || return 2
+    [ "${cur}" != "${sha}" ] || return 0
+    # What: the push needs the commit object locally.
+    # Why: git push sends objects; a bare sha has none.
+    # From: Issue #1683 | PR #1984
+    _ci_git_run fetch "${remote}" "${ref}" >&2 || return 2
+    rc=0; raw="$(_ci_cas_push "${remote}" "${acc}" "${sha}" "${cur}")" || rc=$?
+    if [ "${rc}" -ne 0 ]; then
+        ci_error "[CI-ERROR-REFRESH-0007]" "ref=\"${acc}\" sha=\"${sha}\" rc=${rc} reason=\"refresh records not accepted; PR runs keep the old ids\"" "${raw}"
+        return 2
+    fi
+    ci_log "[CI-INFO-REFRESH-0006]" "ref=\"${acc}\" sha=\"${sha}\" reason=\"refresh records of a promoted stack now count\""
+}
+
 # What: Atomically move a channel to an accepted stack.
 # Why: Stack-atomic; moves refs only, never builds.
 # From: Issue #1683
@@ -10131,7 +10456,8 @@ ci_cmd_promote() {
     _ci_promote_all_current "${channel}" "${cand}" || arc=$?
     if [ "${arc}" -eq 0 ]; then
         printf 'channel=%s result=already-promoted services=%s\n' "${channel}" "$(_ci_count_lines "${cand}")"
-        return 0
+        _ci_refresh_accept
+        return
     fi
     [ "${arc}" -eq 1 ] || return "${arc}"
     if ! _ci_promote_lock "${channel}"; then
@@ -10149,6 +10475,7 @@ ci_cmd_promote() {
     }
     [ "${rc}" -eq 0 ] || return "${rc}"
     printf 'channel=%s result=promoted services=%s\n' "${channel}" "$(_ci_count_lines "${cand}")"
+    _ci_refresh_accept
 }
 
 # What: the ref promotion reads: release tag, else event.
@@ -10202,7 +10529,7 @@ _ci_ref_tip() {
 ci_cmd_promote_ref() {
     local ref tip targets t head
     # What: each promote part in its own timed log group.
-    # Why: A7 (Fund 82a): the step shows its parts by name.
+    # Why: the step log shows its parts by name.
     # From: Issue #1683 | PR #1858
     ci_group "promote: targets and gates"
     ref="$(_ci_promote_ref)" || return 2
@@ -10430,7 +10757,7 @@ _ci_release_tag_kind() {
 }
 
 # What: rc 0 plain vX.Y.Z, 1 other tag, 2 SOT error.
-# Why: an SOT error must never read as "not stable".
+# Why: an SOT error must never read as "not a release".
 # From: Issue #1683 | PR #1858
 _ci_release_tag_final() {
     local kind rc=0
@@ -10479,9 +10806,10 @@ _ci_release_changes() {
         printf '_No pull requests merged since %s._\n' "${prev}"
         return 0
     fi
-    local n q="" count=0 rows="" part
+    local n q="" count=0 rows="" part gh_page
+    gh_page="$(_ci_variable CI_GH_PAGE_SIZE)" || return 2
     while IFS= read -r n; do
-        q+=" p${n}: issueOrPullRequest(number: ${n}) { __typename ... on PullRequest { number title url body labels(first: 20) { nodes { name } } } }"
+        q+=" p${n}: issueOrPullRequest(number: ${n}) { __typename ... on PullRequest { number title url body labels(first: ${gh_page}) { nodes { name } } } }"
         count=$((count + 1))
         if [ "${count}" -eq 50 ]; then
             part="$(_ci_release_pr_batch "${repo}" "${q}")" || return 2
@@ -10577,7 +10905,7 @@ ci_cmd_release_notes() {
     _ci_release_changes "${tag}"
 }
 
-# What: Add a stable tag's change list to CHANGELOG.md.
+# What: Add a release tag's change list to CHANGELOG.md.
 # Why: release writes CHANGELOG; no PR edits it by hand.
 # From: Issue #894 | PR #1858
 ci_cmd_release_changelog() {
@@ -10587,7 +10915,7 @@ ci_cmd_release_changelog() {
     file="$(_ci_variable CI_CHANGELOG)" || return 2
     _ci_release_tag_final "${tag}" || {
         [ "$?" -eq 1 ] || return 2
-        printf 'release-changelog=skip tag=%s reason="not a stable vX.Y.Z tag"\n' "${tag}"
+        printf 'release-changelog=skip tag=%s reason="not a vX.Y.Z release tag"\n' "${tag}"
         return 0
     }
     head="## [${tag#"${tag%%[0-9]*}"}]"
@@ -10651,7 +10979,7 @@ _ci_release_variable_get() {
     printf '%s\n' "${out}"
 }
 
-# What: set PROJECT_RELEASE_VERSION to a stable tag.
+# What: set PROJECT_RELEASE_VERSION to a release tag.
 # Why: AG-SEC-004: the version is a repo variable.
 # From: Issue #1683 | PR #1858
 ci_cmd_release_variable() {
@@ -10659,7 +10987,7 @@ ci_cmd_release_variable() {
     [ -n "${tag}" ] || { ci_log "[CI-ERROR-RELEASE-0059]" "reason=\"tag arg required\""; return 2; }
     _ci_release_tag_final "${tag}" || {
         [ "$?" -eq 1 ] || return 2
-        printf 'release-variable=skip tag=%s reason="not a stable vX.Y.Z tag"\n' "${tag}"
+        printf 'release-variable=skip tag=%s reason="not a vX.Y.Z release tag"\n' "${tag}"
         return 0
     }
     repo="$(_ci_env_required GITHUB_REPOSITORY)" || return 2
@@ -11334,11 +11662,12 @@ _ci_gc_roots() {
 # Why: One discriminating GHCR reader; 404 is not transient.
 # From: Issue #1683
 _ci_gh_versions() {
-    local owner="$1" pkg="$2" out rc=0
+    local owner="$1" pkg="$2" out rc=0 gh_page
+    gh_page="$(_ci_variable CI_GH_PAGE_SIZE)" || return 2
     # What: retry transient GH-API reads; 404 permanent.
     # Why: op=github-api treats 404 as permanent failure.
     # From: Issue #1683
-    out="$(_ci_retry github-api gh api --paginate "/orgs/${owner}/packages/container/${pkg}/versions?per_page=100" --jq '.[] | [.name, .id, .created_at, ((.metadata.container.tags // []) | join(","))] | @tsv')" || rc=$?
+    out="$(_ci_retry github-api gh api --paginate "/orgs/${owner}/packages/container/${pkg}/versions?per_page=${gh_page}" --jq '.[] | [.name, .id, .created_at, ((.metadata.container.tags // []) | join(","))] | @tsv')" || rc=$?
     if [ "${rc}" -ne 0 ]; then
         _ci_text_has -i 'HTTP 404|Not Found' "${out}" && return 1
         ci_error "[CI-ERROR-GC-0018]" "owner=\"${owner}\" pkg=\"${pkg}\" reason=\"GHCR version listing failed\"" "${out}"
@@ -12318,12 +12647,9 @@ _ci_validate_teardown() {
     # Why: the label sweep frees the slot without the file.
     # From: Issue #1683 | PR #1858
     if compose="$(_ci_compose_file)"; then
-        out="$(docker compose -p "${project}" \
-            -f "${compose}" \
-            down -v --remove-orphans 2>&1)" || {
-            ci_error "[CI-ERROR-VALIDATE-0058]" "project=\"${project}\" reason=\"compose down failed\"" "${out}"
-            rc=2
-        }
+        _ci_run "[CI-ERROR-VALIDATE-0058]" "project=\"${project}\" reason=\"compose down failed\"" \
+            docker compose -p "${project}" -f "${compose}" \
+            down -v --remove-orphans >&2 || rc=2
     else
         rc=2
     fi
@@ -12332,12 +12658,10 @@ _ci_validate_teardown() {
     # From: Issue #1683
     local -a found=()
     for kind in container volume network; do
-        if [ "${kind}" = container ]; then
-            ids="$(docker container ls -aq --filter "${label}" 2>&1)"
-        else
-            ids="$(docker "${kind}" ls -q --filter "${label}" 2>&1)"
-        fi || {
-            ci_error "[CI-ERROR-VALIDATE-0059]" "kind=\"${kind}\" reason=\"cannot list leftovers\"" "${ids}"
+        local -a all=()
+        [ "${kind}" != container ] || all=(-a)
+        ids="$(_ci_run "[CI-ERROR-VALIDATE-0059]" "kind=\"${kind}\" reason=\"cannot list leftovers\"" \
+            docker "${kind}" ls "${all[@]}" -q --filter "${label}")" || {
             rc=2
             continue
         }
@@ -12349,17 +12673,16 @@ _ci_validate_teardown() {
             done
             continue
         fi
-        out="$(docker "${kind}" rm -f "${found[@]}" 2>&1)" || {
-            ci_error "[CI-ERROR-VALIDATE-0060]" "kind=\"${kind}\" reason=\"leftover removal failed\"" "${out}"
-            rc=2
-        }
+        _ci_run "[CI-ERROR-VALIDATE-0060]" "kind=\"${kind}\" reason=\"leftover removal failed\"" \
+            docker "${kind}" rm -f "${found[@]}" >&2 || rc=2
     done
     if [ -n "${LANCACHE_STATE_DIR:-}" ] && [ -d "${LANCACHE_STATE_DIR}" ]; then
-        # What: clear root-owned state via a container.
-        # Why: services write as root; runner user cannot.
-        # From: Issue #1683
+        # What: clear root-owned state via build-tools.
+        # Why: services write as root; no foreign container.
+        # From: Issue #1683 | PR #1984
         local base
-        if ! base="$(_ci_base_image alpine "[CI-ERROR-VALIDATE-0102]" "key=\"base_images.alpine\" reason=\"no alpine base to clear the state root\"")"; then
+        if ! base="$(_ci_build_tools_run_image)"; then
+            ci_log "[CI-ERROR-VALIDATE-0102]" "reason=\"no build-tools ref to clear the state root\""
             rc=2
         elif ! out="$(_ci_bounded_run "${LANCACHE_STATE_DIR}:/s" "${base}" \
                 find /s -mindepth 1 -delete 2>&1 && rmdir "${LANCACHE_STATE_DIR}" 2>&1)"; then
@@ -13363,7 +13686,12 @@ PROG
     # From: Issue #1683 | PR #1980
     tries="$(_ci_variable CI_VALIDATE_SNAPSHOT_POLL_ATTEMPTS)" || return 2
     pause="$(_ci_variable CI_VALIDATE_POLL_PAUSE)" || return 2
-    _ci_validate_poll "${tries}" "${pause}" _ci_validate_kea_cmd "${kbase}" "${kuser}" "${token}" '{"command":"config-get","service":["dhcp4"]}' > /dev/null || true
+    # What: the wait shows its raw output and its rc.
+    # Why: nothing is hidden; the next call decides.
+    # From: Issue #1683 | PR #1984
+    local prc=0
+    _ci_validate_poll "${tries}" "${pause}" _ci_validate_kea_cmd "${kbase}" "${kuser}" "${token}" '{"command":"config-get","service":["dhcp4"]}' >&2 || prc=$?
+    [ "${prc}" -eq 0 ] || ci_log "[CI-INFO-VALIDATE-0144]" "rc=${prc} reason=\"Kea agent wait ended without answer; the next call decides\""
     resp="$(_ci_capture 0 _ci_validate_kea_cmd "${kbase}" "${kuser}" "${token}" '{"command":"config-get","service":["dhcp4"]}')" || return 2
     _ci_kea_reply_check "[CI-ERROR-VALIDATE-0090]" "ip=\"${kip}\" reason=\"Kea control agent config-get did not return result 0\"" "${resp}" || return 1
     sid="$(_ci_capture 0 jq -r --arg s "${subnet}" ".[0].arguments.Dhcp4.subnet4[]? | select(.subnet == \$s) | .id" <<< "${resp}")" || return 2
@@ -13584,7 +13912,7 @@ _ci_validate_stack() {
     local candidate="$1" reservation subnet holder project rc=0 up_out
     local net_ovr pin_ovr shared compose_copy state
     # What: each validate part in its own timed log group.
-    # Why: A7 (Fund 82a): the step shows its parts by name.
+    # Why: the step log shows its parts by name.
     # From: Issue #1683 | PR #1858
     ci_group "validate: reserve a subnet"
     reservation="$(_ci_validate_reserve)" || rc=$?
@@ -13785,7 +14113,7 @@ _ci_variable() {
 }
 
 # What: a repo variable from env; empty when unset.
-# Why: Fund 94: workflows pass each var by name (SOT).
+# Why: workflows pass each var by name (SOT).
 # From: Issue #1683 | PR #1912
 _ci_variable_env() {
     local _ci_ve_name="$1"
@@ -13991,7 +14319,7 @@ _ci_set_runtime() {
         [ "${mode}" = off ] || sccache_enabled=1
     fi
     # What: dist scheduler and distcc hosts from env.
-    # Why: Fund 94: the workflow sets them self-hosted only.
+    # Why: the workflow sets them on self-hosted only.
     # From: Issue #1683 | PR #1858
     local sched="" hosts="" vrc=0
     # What: dist farm is read on self-hosted runners only.
@@ -15125,7 +15453,7 @@ _ci_rh_reap_trivy() {
 }
 
 # What: used KiB (field 3, row 2) of df -P output $1.
-# Why: one owner for both cleanup reads; no awk (Fund 136).
+# Why: one owner for both cleanup reads; bash only.
 # From: Issue #1683 | PR #1858
 _ci_df_used() {
     local used
@@ -16594,12 +16922,12 @@ ci_main() {
         ci_log "[CI-ERROR-CORE-0002]" "command=\"${command}\" reason=\"unknown subcommand\" known=\"${!CI_DISPATCH[*]}\""
         return 2
     fi
-    # What: run the lookup before temp, proxy, manifest.
-    # Why: a git hook has no manifest, temp root or network.
+    # What: run these before temp, proxy, manifest.
+    # Why: a git hook or a native host has no manifest.
     # From: Issue #1683 | PR #1912
-    case "${command}" in have-command) "${fn}" "$@"; return "$?" ;; esac
+    case "${command}" in have-command | build-tools-run) "${fn}" "$@"; return "$?" ;; esac
     # What: every command logs its time from here on.
-    # Why: A7 and AG-INT-002 for every subcommand.
+    # Why: AG-INT-002 for every subcommand.
     # From: Issue #1683 | PR #1858
     _ci_cmd_time_init
     _ci_tmp_init || return "$?"
@@ -16613,6 +16941,7 @@ ci_main() {
     # Why: readers then look fields up instead of rereading.
     # From: Issue #1683 | PR #1858
     [ ! -f "${CI_MANIFEST}" ] || _ci_sot_load || return 2
+    _ci_debug_init || return 2
     "${fn}" "$@"
 }
 
@@ -18248,9 +18577,10 @@ _ci_check_pr_tracking_metadata() {
         # What: board lookup: gh api graphql via _ci_retry.
         # Why: a set token that fails must fail (AG-GH-008).
         # From: Issue #1683 | PR #1858
-        local response rc=0 project_item_count
+        local response rc=0 project_item_count gh_page
+        gh_page="$(_ci_variable CI_GH_PAGE_SIZE)" || return 2
         response="$(_ci_retry github-api gh api graphql -f owner="${project_owner}" \
-            -f repo="${repo#*/}" -F pr="${pr_number}" -f query="query(\$owner: String!, \$pr: Int!, \$repo: String!) { repository(owner: \$owner, name: \$repo) { pullRequest(number: \$pr) { projectItems(first: 10) { nodes { project { number } } } } } }")" || rc=$?
+            -f repo="${repo#*/}" -F pr="${pr_number}" -f query="query(\$owner: String!, \$pr: Int!, \$repo: String!) { repository(owner: \$owner, name: \$repo) { pullRequest(number: \$pr) { projectItems(first: ${gh_page}) { nodes { project { number } } } } } }")" || rc=$?
         if [ "${rc}" -ne 0 ]; then
             errs+=("Project-board lookup failed: ${response##*$'\n'}")
         elif ! project_item_count="$(jq -er --argjson pn "${project_number}" \
@@ -18360,8 +18690,10 @@ _ci_check_orphaned_branches() {
     # What: one paged query: tip date and PR count per ref.
     # Why: GraphQL budget, not REST; PRs in any state count.
     # From: Issue #1683 | PR #1858
+    local gh_page
+    gh_page="$(_ci_variable CI_GH_PAGE_SIZE)" || return 2
     raw="$(_ci_retry github-api gh api graphql --paginate -f owner="${repo%%/*}" -f name="${repo#*/}" \
-        -f query="query(\$owner: String!, \$name: String!, \$endCursor: String) { repository(owner: \$owner, name: \$name) { refs(refPrefix: \"refs/heads/\", first: 100, after: \$endCursor) { nodes { name target { ... on Commit { committedDate author { name } } } associatedPullRequests { totalCount } } pageInfo { hasNextPage endCursor } } } }")" || rc=$?
+        -f query="query(\$owner: String!, \$name: String!, \$endCursor: String) { repository(owner: \$owner, name: \$name) { refs(refPrefix: \"refs/heads/\", first: ${gh_page}, after: \$endCursor) { nodes { name target { ... on Commit { committedDate author { name } } } associatedPullRequests { totalCount } } pageInfo { hasNextPage endCursor } } } }")" || rc=$?
     if [ "${rc}" -ne 0 ]; then
         ci_log "[CI-ERROR-CHECK-0133]" "repo=\"${repo}\" rc=${rc} reason=\"branch listing failed (raw above)\""
         return 2
@@ -18400,7 +18732,7 @@ _ci_check_orphaned_branches() {
     local corpus out="" more="" n
     corpus="$(_ci_mktemp "${CI_TMPDIR}/ci-orphan-corpus.XXXXXX")" || return 2
     raw="$(_ci_retry github-api gh api graphql --paginate -f owner="${repo%%/*}" -f name="${repo#*/}" \
-        -f query="query(\$owner: String!, \$name: String!, \$endCursor: String) { repository(owner: \$owner, name: \$name) { issues(first: 100, after: \$endCursor) { nodes { number body comments(first: 100) { nodes { body } pageInfo { hasNextPage } } } pageInfo { hasNextPage endCursor } } } }")" || rc=$?
+        -f query="query(\$owner: String!, \$name: String!, \$endCursor: String) { repository(owner: \$owner, name: \$name) { issues(first: ${gh_page}, after: \$endCursor) { nodes { number body comments(first: ${gh_page}) { nodes { body } pageInfo { hasNextPage } } } pageInfo { hasNextPage endCursor } } } }")" || rc=$?
     if [ "${rc}" -ne 0 ]; then
         ci_log "[CI-ERROR-CHECK-0136]" "repo=\"${repo}\" rc=${rc} reason=\"issue listing failed (raw above)\""
         rm -f "${corpus}"
@@ -18418,7 +18750,7 @@ _ci_check_orphaned_branches() {
     while IFS= read -r n; do
         [ -n "${n}" ] || continue
         raw="$(_ci_retry github-api gh api graphql --paginate -f owner="${repo%%/*}" -f name="${repo#*/}" -F number="${n}" \
-            -f query="query(\$owner: String!, \$name: String!, \$number: Int!, \$endCursor: String) { repository(owner: \$owner, name: \$name) { issue(number: \$number) { comments(first: 100, after: \$endCursor) { nodes { body } pageInfo { hasNextPage endCursor } } } } }")" || rc=$?
+            -f query="query(\$owner: String!, \$name: String!, \$number: Int!, \$endCursor: String) { repository(owner: \$owner, name: \$name) { issue(number: \$number) { comments(first: ${gh_page}, after: \$endCursor) { nodes { body } pageInfo { hasNextPage endCursor } } } } }")" || rc=$?
         if [ "${rc}" -ne 0 ]; then
             ci_log "[CI-ERROR-CHECK-0138]" "repo=\"${repo}\" issue=${n} rc=${rc} reason=\"issue comment listing failed (raw above)\""
             rm -f "${corpus}"
@@ -18876,59 +19208,19 @@ _ci_issue_comment() {
     fi
 }
 
-# What: welcome an author's first issue or first PR
-# Why: first contact gets the SOT rules text; bots skip
-# From: Issue #1683 | PR #1858
-ci_cmd_welcome() {
-    local event repo row kind n sender stype oldest raw file err
-    event="$(_ci_env_required GITHUB_EVENT_PATH)" || return 2
-    repo="$(_ci_env_required GITHUB_REPOSITORY)" || return 2
-    row="$(_ci_capture 0 jq -r '[(if .pull_request then "pr" elif .issue then "issue" else "none" end),
-        ((.pull_request.number // .issue.number // "") | tostring), (.sender.login // ""), (.sender.type // "")] | @tsv' "${event}")" || return 2
-    IFS=$'\t' read -r kind n sender stype <<< "${row}"
-    if [ "${kind}" = none ]; then
-        printf 'welcome=skip reason="not an issue or pull request event"\n'
-        return 0
-    fi
-    if [ -z "${sender}" ]; then
-        ci_error "[CI-ERROR-WELCOME-0001]" "kind=${kind} number=${n} reason=\"payload has no sender login\"" "${row}"
-        return 2
-    fi
-    if [ "${stype}" = Bot ]; then
-        printf 'welcome=skip kind=%s number=%s reason="bot author"\n' "${kind}" "${n}"
-        return 0
-    fi
-    # What: login and number must match GitHub's grammar.
-    # Why: both go into a search query and an API path.
-    # From: Issue #1683 | PR #1858
-    if [[ ! "${sender}" =~ ^[A-Za-z0-9](-?[A-Za-z0-9])*$ ]] || [[ ! "${n}" =~ ^[1-9][0-9]*$ ]]; then
-        ci_error "[CI-ERROR-WELCOME-0002]" "kind=${kind} reason=\"sender or number outside the GitHub grammar\"" "${row}"
-        return 2
-    fi
-    oldest="$(_ci_retry github-api gh api -X GET --jq '.items[0].number // empty' search/issues \
-        -f q="repo:${repo} author:${sender} is:${kind}" -f sort=created -f order=asc -f per_page=1)" || return 2
-    if [ -n "${oldest}" ] && [[ ! "${oldest}" =~ ^[0-9]+$ ]]; then
-        ci_error "[CI-ERROR-WELCOME-0003]" "kind=${kind} number=${n} reason=\"search gave no issue number\"" "${oldest}"
-        return 2
-    fi
-    if [ -n "${oldest}" ] && [ "${oldest}" -lt "${n}" ]; then
-        printf 'welcome=skip kind=%s number=%s reason="author has an older %s (#%s)"\n' "${kind}" "${n}" "${kind}" "${oldest}"
-        return 0
-    fi
-    raw="$(_ci_block_entry_list pr_policy "" "welcome_${kind}")" || return 2
-    if [ -z "${raw}" ]; then
-        ci_log "[CI-ERROR-WELCOME-0004]" "kind=${kind} reason=\"no SOT pr_policy.welcome_${kind} text\""
-        return 2
-    fi
-    file="$(_ci_mktemp "${CI_TMPDIR}/ci-welcome.XXXXXX")" || return 2
-    if ! err="$(printf '%s\n' "${raw}" 2>&1 > "${file}")"; then
-        ci_error "[CI-ERROR-WELCOME-0005]" "file=\"${file}\" reason=\"comment text not written\"" "${err}"
-        rm -f "${file}"
-        return 2
-    fi
-    _ci_issue_comment "[CI-ERROR-WELCOME-0006]" "${repo}" "${n}" "${file}" || { rm -f "${file}"; return 2; }
-    rm -f "${file}"
-    printf 'welcome=posted kind=%s number=%s\n' "${kind}" "${n}"
+# What: count of Linked Issues sections, then its refs.
+# Why: one reader for closing and for the PR milestone.
+# From: Issue #1683 | PR #1984
+_ci_linked_refs() {
+    local heading section count refs
+    heading="$(_ci_block_entry_field pr_policy "" linked_section)" || return 2
+    section="$(_ci_pr_section "$1" "${heading}")" || return 2
+    count="${section%%$'\n'*}"
+    printf '%s\n' "${count}"
+    [ "${count}" -eq 1 ] || return 0
+    if [ "${section}" = "${count}" ]; then section=""; else section="${section#*$'\n'}"; fi
+    refs="$(_ci_closing_refs "${section}")" || return 2
+    [ -z "${refs}" ] || _ci_capture 0 sort -u <<< "${refs}"
 }
 
 # What: Close issues a merged PR lists under Linked Issues.
@@ -18971,8 +19263,10 @@ ci_cmd_close_linked_issues() {
             printf 'close-linked-issues=skip reason="GitHub closes on the default branch" branch="%s"\n' "${branch}"
             return 0
         fi
+        local gh_page
+        gh_page="$(_ci_variable CI_GH_PAGE_SIZE)" || return 2
         raw="$(_ci_retry github-api gh api graphql -f owner="${repo%%/*}" -f name="${repo#*/}" -f oid="${GITHUB_SHA}" \
-            -f query="query(\$owner: String!, \$name: String!, \$oid: GitObjectID!) { repository(owner: \$owner, name: \$name) { object(oid: \$oid) { ... on Commit { associatedPullRequests(first: 10) { nodes { ${fields} } } } } } }")" || return 2
+            -f query="query(\$owner: String!, \$name: String!, \$oid: GitObjectID!) { repository(owner: \$owner, name: \$name) { object(oid: \$oid) { ... on Commit { associatedPullRequests(first: ${gh_page}) { nodes { ${fields} } } } } } }")" || return 2
         rows="$(jq -c --arg b "${branch}" --arg s "${GITHUB_SHA}" '[.data.repository.object.associatedPullRequests.nodes[] | select(.merged and .baseRefName == $b and .mergeCommit.oid == $s)]' <<< "${raw}" 2>&1)" || {
             ci_error "[CI-ERROR-LINK-0014]" "sha=\"${GITHUB_SHA}\" reason=\"PR lookup unparseable\"" "${rows}"; return 2; }
     fi
@@ -18991,9 +19285,8 @@ ci_cmd_close_linked_issues() {
     url="$(_ci_capture 0 jq -r '.[0].url' <<< "${rows}")" || return 2
     merge="$(_ci_capture 0 jq -r '.[0].mergeCommit.oid // ""' <<< "${rows}")" || return 2
     heading="$(_ci_block_entry_field pr_policy "" linked_section)" || return 2
-    section="$(_ci_pr_section "${body}" "${heading}")" || return 2
+    section="$(_ci_linked_refs "${body}")" || return 2
     count="${section%%$'\n'*}"
-    if [ "${section}" = "${count}" ]; then section=""; else section="${section#*$'\n'}"; fi
     if [ "${count}" -eq 0 ]; then
         printf 'close-linked-issues=clean pr=%s reason="no %s section"\n' "${pr}" "${heading}"
         return 0
@@ -19002,8 +19295,7 @@ ci_cmd_close_linked_issues() {
         ci_log "[CI-ERROR-LINK-0007]" "pr=${pr} count=${count} reason=\"${heading} heading is ambiguous; nothing closed\""
         return 1
     fi
-    refs="$(_ci_closing_refs "${section}")" || return 2
-    refs="$(_ci_capture 0 sort -u <<< "${refs}")" || return 2
+    if [ "${section}" = "${count}" ]; then refs=""; else refs="${section#*$'\n'}"; fi
     local ref n meta comment out closed=0 skipped=0 mode="done"
     local -a failed=()
     while IFS= read -r ref; do
@@ -19578,7 +19870,7 @@ _ci_validation_env() {
             return 2
         fi
         read -ra cmd <<< "${row}"
-        v="$(_ci_run "[CI-ERROR-VALIDATE-0141]" "key=${k} reason=\"secret not generated\"" "${cmd[@]}")" || return 2
+        v="$(_ci_run -k "[CI-ERROR-VALIDATE-0141]" "key=${k} reason=\"secret not generated\"" "${cmd[@]}")" || return 2
         v="${v//$'\n'/}"
         if [ -z "${v}" ]; then
             ci_log "[CI-ERROR-VALIDATE-0142]" "key=\"${k}\" kind=\"${kind}\" reason=\"generator wrote nothing\""
@@ -21064,7 +21356,7 @@ ci_cmd_check_all() {
     mapfile -t names <<< "${raw}"
     [ "${#changed[@]}" -eq 0 ] || diff_seen="${#changed[@]} changed paths"
     # What: the paths the diff checks see, once, folded.
-    # Why: Fund 94: "files=34" alone names no file.
+    # Why: a bare file count names no file.
     # From: Issue #1683 | PR #1858
     ci_group "check all: ${diff_seen}"
     [ "${#changed[@]}" -eq 0 ] || printf '%s\n' "${changed[@]}" >&2
@@ -21109,7 +21401,7 @@ ci_cmd_check_all() {
             plan) why="plan: no changed path is an input of this check (§98)" ;;
             diff | repo)
                 # What: its log as one block, in name order.
-                # Why: Fund 94: each check shown apart.
+                # Why: each check log shown apart.
                 # From: Issue #1683 | PR #1858
                 [ ! -s "${dir}/${sub}.log" ] || printf '%s\n' "$(<"${dir}/${sub}.log")" >&2
                 if [ -s "${dir}/${sub}.rc" ]; then

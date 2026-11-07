@@ -426,13 +426,13 @@
     box-shadow: 0 4px 14px rgba(0,0,0,0.35); z-index: 20;
   }
   /* What: dark browser parts (calendar icon) in dark.
-     Why: DoMe 05.11.: the calendar icon was invisible.
+     Why: the calendar icon stays visible in dark.
      From: Issue #1683 | PR #1980 */
   html:not([data-theme="light"]) input,
   html:not([data-theme="light"]) select,
   html:not([data-theme="light"]) textarea { color-scheme: dark; }
   /* What: one look for every form field.
-     Why: DoMe 05.11.: Cachehamster fields were white.
+     Why: every field has the same colours.
      From: Issue #1683 | PR #1980 */
   .field input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]),
   .field textarea, .field select {
@@ -757,7 +757,7 @@
     })();
 
     // What: POST forms send in the background.
-    // Why: DoMe 05.11.: an error opened a bare text page.
+    // Why: an error stays in the page, no bare page.
     // From: Issue #1683 | PR #1980
     document.addEventListener('submit', function (e) {
       const form = e.target;
@@ -1157,7 +1157,7 @@
           });
         }
         // What: programs sit in a fold-out menu.
-        // Why: DoMe 05.11.: 14 equal buttons in the bar.
+        // Why: the bar stays short with many programs.
         // From: Issue #1683 | PR #1980
         const progs = DOCK_PROGRAMS.filter(function (p) { return p.split(':')[0] === svc.name; });
         if (button && !(progs.length && !svc.mode_off)) {

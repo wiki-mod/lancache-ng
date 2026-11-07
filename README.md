@@ -714,12 +714,12 @@ CACHE_MAX_GB=50
 # latest is the channel from master, promoted after the full release
 # validation gate. nightly (formerly called edge) is experimental, may break
 # the stack and is not for production.
-# setup.sh resolves mutable channels to an immutable sha-* image tag before pull.
+# setup.sh resolves a mutable channel to one sha256 digest per image before pull.
 # Do not change LANCACHE_IMAGE_TAG by hand unless LANCACHE_IMAGE_CHANNEL=pinned.
 LANCACHE_IMAGE_REGISTRY=ghcr.io
 LANCACHE_IMAGE_PREFIX=wiki-mod/lancache-ng
 LANCACHE_IMAGE_CHANNEL=latest
-LANCACHE_IMAGE_TAG=sha-<resolved-by-setup>
+LANCACHE_IMAGE_TAG=<set-by-setup>
 ```
 
 `NGINX_UPSTREAM_RESOLVER` is what nginx uses to resolve the *real* CDN hostnames it proxies to. Its default lives in `runtime.defaults` of `.github/yaml/build-manifest.yml`; put your own value in `deploy/prod/.env.local` (an empty value keeps the default), which `deploy/prod/docker-compose.yml` passes to the `proxy` service, then recreate that container from the repository root (`sudo ./setup.sh compose deploy/prod up -d proxy`). The default — `8.8.8.8 8.8.4.4` (Google Public DNS, IPv4 only; an IPv6 entry you add must be bracketed, as nginx's `resolver` directive requires) — is a convenience default, not a requirement. Set it to whatever real upstream DNS servers you prefer: your ISP's resolvers, a corporate DNS server, 1.1.1.1, or anything else. The actual requirement is that the chosen resolver returns the CDN's *real* origin address for these hostnames — not merely that its own server IP differs from the LanCache DNS/proxy IP. Setup rejects the obvious case (setting this directly to `IP_HTTP`/`IP_HTTPS`) automatically, but it cannot detect an indirect loop: for example, a split-DNS or conditional-forwarding resolver that itself forwards the CDN's zone back to the LanCache DNS server would still hand nginx the LanCache proxy IP, at which point nginx loops even though the configured resolver's own IP isn't the cache's. If you use split-DNS or conditional forwarding upstream of this resolver, make sure CDN zones aren't among the forwarded ones.

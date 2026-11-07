@@ -134,7 +134,6 @@ SOT `base_images` block:
 | --- | --- |
 | `base_images.alpine` | Base of the first-party images and of `build-tools`; `setup.sh` helper image |
 | `base_images.buildkit` | BuildKit daemon of the image builds |
-| `base_images.git` | Git image of the arm64 checkout step |
 | `base_images.trivy` | Trivy image; `ci.sh` copies the binary out |
 
 - nginx, PowerDNS, syslog-ng, chrony, Kea and dnsmasq are apk packages inside
@@ -142,9 +141,10 @@ SOT `base_images` block:
 - A compose image outside the `${LANCACHE_*}` first-party references has to
   equal a SOT `base_images` value. `ci.sh check stable-external-images`
   reports every other value with `CI-ERROR-CHECK-0014`.
-- A workflow `uses: docker://` step cannot read the SOT, so it names the
-  `base_images` value literally. `ci.sh check all` fails a `docker://` step
-  that is not a SOT `base_images` value.
+- No workflow step runs in a foreign container. A job runs in its own
+  `build-tools` image, or, on a native host, through exactly one `docker run`
+  of that image (`ci.sh build-tools-run`). `ci.sh check all` fails a
+  `docker://` step that is not a SOT `base_images` value.
 - GitHub Actions are named in the SOT `github_actions` block and are used with
   their major tag `vN` (AG-CI-001). The tag lives in `uses:`.
 - Mutable external tags are not authoritative release records. A mirrored or

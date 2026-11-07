@@ -11,7 +11,7 @@ Valid for `current_dev` at `e223782d`.
 | Reference | Form | Owner |
 | --- | --- | --- |
 | GitHub Actions | the major tag `vN` in `uses:`; never a commit SHA, never a branch (AG-CI-001) | SOT `github_actions` names the allowed actions; the workflow `uses:` line carries the tag, which Dependabot moves |
-| `docker://` workflow steps | the literal SOT `base_images` value, because a workflow `uses:` cannot read the SOT | SOT `base_images` |
+| Workflow steps | no `docker://` step; a job runs in its `build-tools` image, or on a native host through `ci.sh build-tools-run` | `ci.sh` |
 | Base images of first-party Dockerfiles | build argument without a default | SOT `base_images`, supplied by `ci.sh` |
 | `build-tools` image | the image `ci.sh build-tools resolve-image` selects | `ci.sh` and the SOT |
 | Third-party tool downloads | latest release, resolved by `ci.sh` | SOT `external_versions` (`codeql`, `runner`) |
@@ -26,7 +26,7 @@ Valid for `current_dev` at `e223782d`.
   tag. `ci.sh` passes `ALPINE_IMAGE` from `base_images.alpine` and fails closed
   when the entry is missing.
 - **Base image values**: the SOT `base_images` entries (`alpine`, `buildkit`,
-  `git`, `trivy`) are `mirror.gcr.io/...` references with the tag `latest`.
+  `trivy`) are `mirror.gcr.io/...` references with the tag `latest`.
   They are not pinned to a digest. Docker Hub images are pulled through
   `mirror.gcr.io`; Dockerfiles carry no second fallback `FROM` path.
 - **External images in compose files**: an image outside the `${LANCACHE_*}`
@@ -42,9 +42,8 @@ design. `docs/combined-release-and-checklist.md` owns their semantics.
 
 ## Changing a reference
 
-- An image: change its SOT `base_images` entry and, for a `docker://` step, the
-  literal value in the workflow. `ci.sh check all` fails a `docker://` step that
-  is not a SOT `base_images` value.
+- An image: change its SOT `base_images` entry. `ci.sh check all` fails a
+  `docker://` step that is not a SOT `base_images` value.
 - An action: change the tag in its `uses:` line; the action has to be listed in
   SOT `github_actions`.
 - A tool download: the SOT `external_versions` entry names repository and asset;

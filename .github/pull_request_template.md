@@ -63,5 +63,5 @@ updates. Do NOT edit CHANGELOG.md in this PR: every simultaneously-open PR editi
 "### Fixed"-style heading guarantees a merge conflict with every other one. CHANGELOG.md is
 written automatically at release time: `ci.sh release-publish` puts this section, under the
 PR's title and grouped by its labels, into the GitHub Release notes, and `ci.sh
-release-changelog` adds them to CHANGELOG.md for a stable tag (see CONTRIBUTING.md's
+release-changelog` adds them to CHANGELOG.md for a vX.Y.Z release tag (see CONTRIBUTING.md's
 "Releasing Changes to CHANGELOG.md"). Write this section for release readers. -->

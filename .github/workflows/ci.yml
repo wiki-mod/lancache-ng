@@ -56,7 +56,7 @@ env:
   # From: Issue #1683 | PR #1858
   PROJECT_SELFHOSTED_PROXY_CA: ${{ secrets.PROJECT_SELFHOSTED_PROXY_CA }}
   # What: the repo variables ci.sh reads, one by name.
-  # Why: Fund 94: the all-vars json put LAN IPs in logs.
+  # Why: a vars json would show LAN IPs in logs.
   # From: Issue #1683 | PR #1858
   CARGO_BUILD_JOBS: ${{ vars.CARGO_BUILD_JOBS }}
   PROJECT_CARGO_LTO: ${{ vars.PROJECT_CARGO_LTO }}
@@ -66,6 +66,7 @@ env:
   SCCACHE_REDIS_MODE: ${{ vars.SCCACHE_REDIS_MODE }}
   CI_RUST_VALIDATION: ${{ vars.CI_RUST_VALIDATION }}
   PR_TITLE_LINT_MODE: ${{ vars.PR_TITLE_LINT_MODE }}
+  PROJECT_DEBUG_MODE: ${{ vars.PROJECT_DEBUG_MODE }}
   # What: LAN values only when self-hosted runners run.
   # Why: a GitHub-hosted log must show no LAN address.
   # From: Issue #1683 | PR #1858
@@ -118,12 +119,11 @@ jobs:
       identities: ${{ steps.plan.outputs.identities }}
       reuse: ${{ steps.plan.outputs.reuse }}
     steps:
-      # What: shallow x64 checkout of the event commit.
-      # Why: GitHub runs JS actions in Alpine on x64 only.
-      # From: Issue #1683 | PR #1858
+      # What: shallow checkout of the event commit.
+      # Why: x64 in Alpine or native host; both run JS.
+      # From: Issue #1683 | PR #1984
       - &bootstrap
         name: Check out the event commit
-        if: runner.arch != 'ARM64'
         uses: actions/checkout@v7
         with:
           ref: ${{ github.sha }}
@@ -140,22 +140,15 @@ jobs:
       - name: Collect changed files
         id: changed
         run: bash .github/scripts/ci.sh changed-files
-      # What: export args for the GHA cache runtime step.
-      # Why: ci.sh owns the kill timeout and the var list.
-      # From: Issue #1683 | PR #1858
-      - &gha_args
-        name: Prepare the GHA cache runtime export
-        id: gha-runtime
-        run: bash .github/scripts/ci.sh gha-runtime-args
       # What: hand the GHA cache runtime to later steps.
-      # Why: only action steps get ACTIONS_RUNTIME_TOKEN
-      # From: Issue #1683 | PR #1858
+      # Why: only action steps get ACTIONS_RUNTIME_TOKEN.
+      # From: Issue #1683 | PR #1984
       - &gha_export
         name: Export the GHA cache runtime
-        uses: docker://mirror.gcr.io/library/alpine:latest
+        uses: actions/github-script@v9
         with:
-          entrypoint: timeout
-          args: ${{ steps.gha-runtime.outputs.args }}
+          script: |
+            for (const k of ['ACTIONS_RESULTS_URL', 'ACTIONS_RUNTIME_TOKEN']) core.exportVariable(k, process.env[k] ?? '');
       # What: Rust item rows of earlier runs, saved anew.
       # Why: §26: hosted jobs keep no disk; rows cost 17 s.
       # From: Issue #1683 | PR #1858
@@ -205,20 +198,14 @@ jobs:
       contents: write
       packages: write
     timeout-minutes: ${{ fromJSON(needs.plan.outputs.timeouts)['build'] }}
-    container: &bt_platform
-      image: ${{ needs.plan.outputs.image }}
+    # What: x64 in build-tools; a native job on the host.
+    # Why: arm64 Alpine runs no JS action; the host does.
+    # From: Issue #1683 | PR #1984
+    container:
+      image: ${{ matrix.native != 'true' && needs.plan.outputs.image || '' }}
       credentials: &ghcr_credentials
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-      # What: the build-tools ref this job runs in.
-      # Why: ids and Rust builds read the plan resolve.
-      # From: Issue #1683 | PR #1912
-      env:
-        CI_BUILD_TOOLS_IMAGE: ${{ needs.plan.outputs.image }}
-        # What: the tool releases the plan job read.
-        # Why: no later job reads the API again (Fund 146).
-        # From: Issue #1683 | PR #1858
-        CI_TOOL_RELEASES: ${{ needs.plan.outputs.releases }}
     # What: cache secrets the build's set-runtime needs.
     # Why: secrets reach ci.sh only by name, masked.
     # From: Issue #1683 | PR #1858
@@ -227,15 +214,6 @@ jobs:
       SCCACHE_DIST_AUTH_TOKEN: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
     steps:
       - *bootstrap
-      # What: arm64 checkout by git in a container step.
-      # Why: no actions/checkout; push auth is CI_GIT_TOKEN.
-      # From: Issue #1683 | PR #1858
-      - name: Check out the event commit on arm64
-        if: runner.arch == 'ARM64'
-        uses: docker://mirror.gcr.io/alpine/git:latest
-        with:
-          args: -c safe.directory=/github/workspace clone --depth 1 --revision=${{ github.sha }} ${{ github.server_url }}/${{ github.repository }} /github/workspace
-      - *gha_args
       - *gha_export
       # What: build, then publish and verify result
       # Why: publish != build; readback verifies digest
@@ -256,7 +234,14 @@ jobs:
           # Why: the arm64 checkout leaves no git auth.
           # From: Issue #1683 | PR #1858
           CI_GIT_TOKEN: &git_token ${{ secrets.GITHUB_TOKEN }}
-        run: bash .github/scripts/ci.sh ship "${SERVICE}" "${PLATFORM}"
+          # What: build-tools ref, releases, mode, kill.
+          # Why: a native job hands them to one docker run.
+          # From: Issue #1683 | PR #1984
+          CI_BUILD_TOOLS_IMAGE: &bt_ref ${{ needs.plan.outputs.image }}
+          CI_TOOL_RELEASES: &tool_releases ${{ needs.plan.outputs.releases }}
+          CI_BUILD_TOOLS_NATIVE: &bt_native ${{ matrix.native }}
+          CI_BUILD_TOOLS_RUN_MINUTES: &bt_minutes ${{ fromJSON(needs.plan.outputs.timeouts)['build'] }}
+        run: bash .github/scripts/ci.sh build-tools-run ship "${SERVICE}" "${PLATFORM}"
       # What: frees this run's build lock after a cancel.
       # Why: a cancel stops the step; no signal reaches bash
       # From: Issue #1683 | PR #1912
@@ -267,7 +252,11 @@ jobs:
           PLATFORM: ${{ matrix.platform }}
           CI_RUN_IDENTITIES: *run_ids
           CI_GIT_TOKEN: *git_token
-        run: bash .github/scripts/ci.sh ship-release "${SERVICE}" "${PLATFORM}"
+          CI_BUILD_TOOLS_IMAGE: *bt_ref
+          CI_TOOL_RELEASES: *tool_releases
+          CI_BUILD_TOOLS_NATIVE: *bt_native
+          CI_BUILD_TOOLS_RUN_MINUTES: *bt_minutes
+        run: bash .github/scripts/ci.sh build-tools-run ship-release "${SERVICE}" "${PLATFORM}"
 
   # What: audit the generated lock of rust candidates
   # Why: latest crates each run; nightly sees new advisories
@@ -278,7 +267,18 @@ jobs:
     if: needs.plan.outputs.rust-audit == 'true'
     runs-on: ${{ needs.plan.outputs.runner }}
     timeout-minutes: ${{ fromJSON(needs.plan.outputs.timeouts)['cargo-audit'] }}
-    container: *bt_platform
+    container: &bt_platform
+      image: ${{ needs.plan.outputs.image }}
+      credentials: *ghcr_credentials
+      # What: the build-tools ref this job runs in.
+      # Why: ids and Rust builds read the plan resolve.
+      # From: Issue #1683 | PR #1912
+      env:
+        CI_BUILD_TOOLS_IMAGE: ${{ needs.plan.outputs.image }}
+        # What: the tool releases the plan job read.
+        # Why: no later job reads the API again.
+        # From: Issue #1683 | PR #1858
+        CI_TOOL_RELEASES: ${{ needs.plan.outputs.releases }}
     steps:
       - *bootstrap
       - name: Audit rust dependencies
@@ -297,7 +297,6 @@ jobs:
     env: *cache_secrets
     steps:
       - *bootstrap
-      - *gha_args
       - *gha_export
       - name: Test the changed rust services
         env:
@@ -382,6 +381,11 @@ jobs:
       credentials: *ghcr_credentials
       volumes:
         - ${{ needs.plan.outputs.validate-dir }}:${{ needs.plan.outputs.validate-dir }}
+      # What: the build-tools ref this job runs in.
+      # Why: the state-root clear runs in it, no alpine.
+      # From: Issue #1683 | PR #1984
+      env:
+        CI_BUILD_TOOLS_IMAGE: ${{ needs.plan.outputs.image }}
     permissions:
       contents: read
       packages: read
@@ -389,6 +393,12 @@ jobs:
       stack: ${{ steps.validate.outputs.stack }}
     steps:
       - *bootstrap
+      - *gha_export
+      # What: the PSL from the nightly cache.
+      # Why: the ui reads it from the checkout mount.
+      # From: Issue #1683 | PR #1984
+      - name: Restore the Public Suffix List
+        run: bash .github/scripts/ci.sh psl restore
       - name: Validate the accepted stack candidate
         id: validate
         env:
@@ -483,7 +493,7 @@ jobs:
         id: resolve
         run: bash .github/scripts/ci.sh build-tools resolve-image
       # What: decide the PR text check; unchanged is NOOP.
-      # Why: Fund 94: PR text only in the step reading it.
+      # Why: PR text only in the step reading it.
       # From: Issue #1683 | PR #1858
       - name: Decide the PR text check
         id: meta
@@ -566,6 +576,14 @@ jobs:
           CHANGED_FILES: ${{ steps.changed.outputs.file }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bash .github/scripts/ci.sh pr-labels
+      # What: set a milestone when the PR has none.
+      # Why: PAT event reruns checks, which then see it.
+      # From: Issue #1683 | PR #1984
+      - name: Set the PR milestone
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.PROJECT_AUTOMATION_PAT }}
+        run: bash .github/scripts/ci.sh pr-milestone
       # What: add a new issue or PR to the board (step PAT).
       # Why: GITHUB_TOKEN cannot write org Projects v2.
       # From: Issue #1683 | PR #1858
