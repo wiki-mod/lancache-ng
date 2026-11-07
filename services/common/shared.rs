@@ -2829,6 +2829,23 @@ pub mod dnsmasq_conf {
         Ok(())
     }
 
+    // What: proxy range; empty start uses DHCP_SUBNET.
+    // Why: DoMe 07.11.: mode switch failed on empty start.
+    // From: Issue #1683 | PR #1985
+    fn proxy_range(s: &Settings) -> Result<String, String> {
+        let start = s.text("DHCP_SUBNET_START").unwrap_or_default();
+        if !start.is_empty() {
+            return Ok(format!("{start},proxy"));
+        }
+        let net = s.text("DHCP_SUBNET")?;
+        let bad = || format!("DHCP_SUBNET: {net} is no IPv4 net");
+        let (addr, len) = net.split_once('/').ok_or_else(bad)?;
+        let ip: std::net::Ipv4Addr = addr.parse().map_err(|_| bad())?;
+        let len: u32 = len.parse().ok().filter(|n| *n <= 32).ok_or_else(bad)?;
+        let mask = u32::MAX.checked_shl(32 - len).unwrap_or(0);
+        Ok(format!("{ip},proxy,{}", std::net::Ipv4Addr::from(mask)))
+    }
+
     // What: render dnsmasq.conf for one mode.
     // Why: Off and Kea start no dnsmasq at all.
     // From: Issue #1683 | PR #1858
@@ -2844,10 +2861,7 @@ pub mod dnsmasq_conf {
             return Err(format!("no dnsmasq in DHCP mode {mode:?}"));
         }
         let get = |k: &str| s.text(k).unwrap_or_default();
-        c.add(&format!(
-            "dhcp-range={},proxy",
-            s.text("DHCP_SUBNET_START")?
-        ))?;
+        c.add(&format!("dhcp-range={}", proxy_range(s)?))?;
         c.add_if("interface=", &get("DHCP_PROXY_INTERFACE"))?;
         c.add_if("dhcp-option-pxe=3,", &get("DHCP_PROXY_ROUTER"))?;
         c.add_if("dhcp-option-pxe=6,", &s.list("DHCP_DNS_SERVERS").join(","))?;

@@ -107,8 +107,11 @@
           {# What: one option per DhcpMode::ALL name
              Why: offers what update_dhcp_mode accepts
              From: Issue #1683 | PR #1912 #}
+          {# What: shown names are roles, not product names
+             Why: DoMe 07.11.: Server, Proxy, Relay only
+             From: Issue #1683 | PR #1985 #}
           {% for mode in dhcp_modes %}
-          <option value="{{ mode }}" {% if dhcp_mode == mode %}selected{% endif %}>{{ mode }}</option>
+          <option value="{{ mode }}" {% if dhcp_mode == mode %}selected{% endif %}>{% if mode == "kea" %}DHCP-Server{% elif mode == "dnsmasq-proxy" %}DHCP-Proxy{% elif mode == "dnsmasq-relay" %}DHCP-Relay{% else %}{{ t.svc_st_gray }}{% endif %}</option>
           {% endfor %}
         </select>
       </div>
