@@ -104,12 +104,9 @@
         <label class="block text-xs text-slate-400 mb-1">{{ t.active_dhcp_mode }}</label>
         <select name="dhcp_mode"
                 class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-blue-500">
-          {# What: one option per DhcpMode::ALL name
-             Why: offers what update_dhcp_mode accepts
-             From: Issue #1683 | PR #1912 #}
-          {# What: shown names are roles, not product names
+          {# What: DhcpMode::ALL names, shown as roles
              Why: DoMe 07.11.: Server, Proxy, Relay only
-             From: Issue #1683 | PR #1985 #}
+             From: Issue #1683 | PR #1912 #1985 #}
           {% for mode in dhcp_modes %}
           <option value="{{ mode }}" {% if dhcp_mode == mode %}selected{% endif %}>{% if mode == "kea" %}DHCP-Server{% elif mode == "dnsmasq-proxy" %}DHCP-Proxy{% elif mode == "dnsmasq-relay" %}DHCP-Relay{% else %}{{ t.svc_st_gray }}{% endif %}</option>
           {% endfor %}

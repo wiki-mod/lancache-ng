@@ -211,37 +211,22 @@ dl.fedoraproject.org
 mirrors.fedoraproject.org
 
 # ---- Alpine Linux ----
-# What: Alpine package CDN; https needs HTTPS mode.
-# Why: DoMe asked for Alpine in the default list.
-# From: Issue #1683 | PR #1985
 dl-cdn.alpinelinux.org
 dl.alpinelinux.org
 
 # ---- Proxmox ----
-# What: Proxmox no-subscription repo and ISO downloads.
-# Why: DoMe asked for Proxmox in the default list.
-# From: Issue #1683 | PR #1985
 download.proxmox.com
 
 # ---- Kali Linux ----
-# What: Kali redirector and its CDN host.
-# Why: DoMe asked for Kali in the default list.
-# From: Issue #1683 | PR #1985
 http.kali.org
 kali.download
 
 # ---- Raspberry Pi OS ----
-# What: Raspberry Pi OS package and image hosts.
-# Why: DoMe asked for Raspberry Pi in the default list.
-# From: Issue #1683 | PR #1985
 archive.raspberrypi.com
 archive.raspberrypi.org
 downloads.raspberrypi.com
 
 # ---- CentOS Stream ----
-# What: CentOS Stream package mirror.
-# Why: DoMe asked for CentOS Stream in the default list.
-# From: Issue #1683 | PR #1985
 mirror.stream.centos.org
 
 # ---- Rocky Linux ----

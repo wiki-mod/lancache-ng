@@ -2852,8 +2852,8 @@ pub mod dnsmasq_conf {
     pub fn render(s: &Settings, mode: Mode) -> Result<String, String> {
         let mut c = base(s)?;
         if mode == Mode::DnsmasqRelay {
-            // What: empty relay address uses this host's IP.
-            // Why: DoMe 07.11.: every mode switch in one click.
+            // What: empty relay address = this host IP.
+            // Why: DoMe 07.11.: one-click mode switch.
             // From: Issue #1683 | PR #1985
             let local = Some(s.text("DHCP_RELAY_LOCAL_ADDR").unwrap_or_default())
                 .filter(|v| !v.is_empty())
