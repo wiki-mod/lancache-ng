@@ -1351,6 +1351,49 @@ install_docker() {
     esac
 }
 
+# What: Docker's userland-proxy set as the SOT says
+# Why: DoMe 07.11.: docker-proxy copied hairpin traffic
+# From: Issue #1683 | PR #1985
+ensure_docker_userland_proxy() {
+    local file want current tmp
+    file=$(lancache_sot_value docker_daemon_json runtime) || exit $?
+    want=$(lancache_sot_value docker_userland_proxy runtime) || exit $?
+    current=unset
+    if [[ -f "$file" ]]; then
+        current=$(jq -r 'if has("userland-proxy") then ."userland-proxy" | tostring else "unset" end' "$file") \
+            || die "Cannot read $file as JSON (exit $?); Docker was not changed."
+    fi
+    [[ "$current" == "$want" ]] && return 0
+    print_step "Docker userland-proxy: ${current} -> ${want}"
+    printf "  Docker restarts once; every container on this host restarts with it.\n"
+    # What: no terminal leaves Docker as it is
+    # Why: an unattended update must not stop on a question
+    # From: Issue #1683 | PR #1985
+    if ! { : < /dev/tty; } 2>/dev/null; then
+        print_warn "No terminal: Docker unchanged. Run setup.sh update in a shell to apply it."
+        return 0
+    fi
+    confirm "Change it and restart Docker now? [Y/n]" "Y" || {
+        print_warn "Skipped; Docker unchanged."
+        return 0
+    }
+    mkdir -p -- "${file%/*}" || die "Cannot create ${file%/*} (exit $?)."
+    tmp=$(mktemp "${file}.XXXXXX") || die "mktemp next to $file failed (exit $?)."
+    if [[ -f "$file" ]]; then
+        cp -p -- "$file" "${file}.bak" || die "Cannot back up $file (exit $?)."
+        jq --argjson v "$want" '."userland-proxy" = $v' "$file" > "$tmp" \
+            || { rm -f -- "$tmp"; die "Cannot update $file (exit $?); Docker was not changed."; }
+    else
+        jq -n --argjson v "$want" '{"userland-proxy": $v}' > "$tmp" \
+            || { rm -f -- "$tmp"; die "Cannot write $file (exit $?)."; }
+    fi
+    chmod 0644 -- "$tmp" && mv -f -- "$tmp" "$file" || die "Cannot replace $file (exit $?)."
+    host_unit_action "$DOCKER_UNIT" restart
+    docker info >/dev/null 2>&1 \
+        || die "Docker does not answer after the restart; the old file is ${file}.bak."
+    print_ok "Docker userland-proxy is ${want}"
+}
+
 # What: installs curl, Docker, Docker Compose v2 plugin
 # Why: secondary needs the same set as primary
 # From: Issue #1683 | PR #1858
@@ -1409,6 +1452,7 @@ ensure_stack_requirements_installed() {
 
     out=$(docker compose version 2>&1) \
         || die "Docker Compose plugin still missing after installing Docker requirements (exit $?): $out"
+    ensure_docker_userland_proxy
 }
 
 # What: installs curl, jq, Docker, Compose; prints next step
@@ -3357,7 +3401,7 @@ host_unit_action() {
             name=$(openrc_service_for_unit "$unit")
             [[ -n "$name" ]] || die "No OpenRC service stands for $unit."
             case "$action" in
-                start|stop) out=$(timeout "$limit" rc-service "$name" "$action" 2>&1) || rc=$? ;;
+                start|stop|restart) out=$(timeout "$limit" rc-service "$name" "$action" 2>&1) || rc=$? ;;
                 enable) out=$(rc-update add "$name" default 2>&1) || rc=$? ;;
                 disable) out=$(rc-update del "$name" default 2>&1) || rc=$? ;;
                 *) die "Unknown service action: $action" ;;
@@ -6291,6 +6335,7 @@ perform_stack_update_flow() {
     # Why: the functional health gate must not silently skip
     # From: Issue #1683 | PR #1858
     install_missing_tools curl dig jq
+    ensure_docker_userland_proxy
     cd "$install_dir"
     _UPDATE_ENV_FILE=$(runtime_env_file_for_install_dir "$install_dir")
     _UPDATE_STACK_DIR="$install_dir"

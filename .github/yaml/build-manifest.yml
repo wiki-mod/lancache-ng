@@ -466,6 +466,11 @@ runtime:
   # Why: setup.sh starts the stack from this one file.
   # From: Issue #1683 | PR #1858
   compose_file: deploy/prod/docker-compose.yml
+  # What: Docker daemon file and its userland-proxy value.
+  # Why: DoMe 07.11.: hairpin traffic ran via docker-proxy.
+  # From: Issue #1683 | PR #1985
+  docker_daemon_json: /etc/docker/daemon.json
+  docker_userland_proxy: false
   # What: KEY=value defaults; @KEY@ names another entry.
   # Why: images bake them; no .env template holds any.
   # From: Issue #1683 | PR #1912
