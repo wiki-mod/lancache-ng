@@ -1,4 +1,4 @@
-# LanCache-NG Capability Inventory (reviewed 2026-11-07 against `current_dev` `3005b2b4`)
+# LanCache-NG Capability Inventory (reviewed 2026-11-07 against `current_dev` `3005b2b4` and the code of PR #1985 `9a4b4be4`)
 
 This document is the consolidated capability inventory for LanCache-NG.
 
@@ -6,12 +6,13 @@ It replaces the former component-specific files under
 `docs/capability-inventory/SoT-*.md`.
 
 The inventory describes the capabilities that exist in the `current_dev`
-implementation at the commit named above. It is a function-level companion to
+implementation at the commits named above; the parts that follow PR #1985 are
+marked and MUST NOT be merged before it. It is a function-level companion to
 `docs/architecture-ng.md`, not a replacement for the higher-level architecture
 documentation. LanCache-NG runs as exactly five containers (`services`,
 `proxy`, `dns`, `dhcp`, `ui`); the programs of each container are listed in
 `docs/architecture-ng.md`. Security findings that this review made are tracked
-in `docs/threat-model.md` ("Gaps statically indicated") and are only referenced here.
+in `docs/threat-model.md` ("Gaps found by the 2026-11-07 review") and are only referenced here.
 
 Historical audit notes, already-resolved findings, temporary investigation
 state, and old implementation snapshots are intentionally not retained here.
@@ -249,10 +250,12 @@ The Admin UI uses the Control Agent for live configuration operations such as:
 * `lease4-get-all`
 * `lease4-del`
 
-The Control Agent is meant as an internal management interface. In the current
-code it is bound to `KEA_CTRL_ADDRESS` (SOT default `0.0.0.0`) on the host
-network, its configuration has no `authentication` block, and the UI client
-sends no credentials; see gap G2 in `docs/threat-model.md`.
+The Control Agent is meant as an internal management interface. In the code of
+PR #1985 its configuration has a basic `authentication` block (user
+`KEA_CTRL_USER`, password `KEA_CTRL_TOKEN`) and the UI client sends the
+credentials; see gap G2 in `docs/threat-model.md`. It is bound to
+`KEA_CTRL_ADDRESS` (SOT default `0.0.0.0`) on the host network and no firewall
+fence is applied.
 
 ### DDNS
 
@@ -361,7 +364,7 @@ stack.
 
 The UI provides:
 
-* Authentication (HTTP Basic with an Argon2id hash; a missing fail-closed start check is statically indicated, see gap G1 in `docs/threat-model.md`).
+* Authentication (HTTP Basic with an Argon2id hash when a password is set; unauthenticated is the explicit default, see gap G1 in `docs/threat-model.md`).
 * CSRF protection.
 * Dashboard and service state.
 * Proxy status and cache visibility.
@@ -753,9 +756,10 @@ The following boundaries are intentional or currently unresolved:
 7. CacheHamster is implemented in code and wired into the `services` container, but
    it has no test on `current_dev`; treat prefill as unverified until it has been run.
 
-8. Admin UI login enforcement and Kea Control Agent protection appear not to
-   be fail-closed in the current code (statically indicated, not reproduced);
-   see gaps G1 and G2 in `docs/threat-model.md`.
+8. The Admin UI is unauthenticated by explicit default (`ALLOW_INSECURE_UI=true`,
+   `setup.sh` asks for a password with the default No), and the Kea Control
+   Agent is open to the LAN behind a basic-auth login; see gaps G1 and G2 in
+   `docs/threat-model.md`.
 
 ## Validation coverage
 

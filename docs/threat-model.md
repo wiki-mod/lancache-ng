@@ -1,10 +1,13 @@
 # lancache-ng Threat Model
 
-> **Last reviewed against: `current_dev` at `3005b2b4`**
+> **Last reviewed against: `current_dev` at `3005b2b4` and the code of pull
+> request #1985 at `9a4b4be4`**
 > **Last review date: 2026-11-07**
 > **Latest release tag at review time: `v0.3.2`. It is not contained in
 > `current_dev`; this document describes the five-container architecture of
 > `current_dev` (see `docs/architecture-ng.md`), not the v0.3.2 images.**
+> **T3, T12 and the gap table describe the code of #1985, which is not in
+> `current_dev` yet. This document MUST NOT be merged before #1985.**
 >
 > This document must be re-audited for every release. It describes the security
 > posture of a *specific* architecture, and that architecture changes between
@@ -26,21 +29,21 @@ framed against that assumption.
 
 ---
 
-## Gaps statically indicated by the 2026-11-07 review
+## Gaps found by the 2026-11-07 review and their state
 
-These are places where the code on `current_dev` appears not to do what this
-document used to state, or what `AGENTS.md` requires. Each one is **statically
-indicated** (the cited code was read, callers, defaults and alternate paths
-were searched, no stack was started); by `AG-INT-001` none is a confirmed
-defect until it is reproduced. They are listed here and not described as
-mitigations. Fixing them is a code change that needs a maintainer decision
-(`AG-WF-027`), not a documentation change.
+The review found three places where the code on `current_dev` (`3005b2b4`)
+appeared not to do what this document used to state, or what `AGENTS.md`
+requires. The identifiers G1 to G3 stay because code comments refer to them.
+All states below are **statically indicated**: the cited code was read, callers,
+defaults and alternate paths were searched, and no stack was started that
+exercises the Admin UI login, the Kea Control Agent or the nginx resolver check.
+By `AG-INT-001` they are not confirmed behavior.
 
-| ID | Gap | Evidence (`current_dev` `3005b2b4`) | Threat |
+| ID | Finding on `current_dev` `3005b2b4` | State in #1985 (`9a4b4be4`) | Threat |
 |---|---|---|---|
-| G1 | The Admin UI appears not to be fail-closed. `setup.sh` and the compose file deliver `UI_AUTH_USER` and `UI_AUTH_PASSWORD_HASH`, but the UI reads `UI_USER` and `UI_PASSWORD_HASH`. With no hash `login_ok` accepts every request and no start check refuses. `AG-SEC-001` requires fail-closed. | `deploy/prod/docker-compose.yml` lines 343-344 and `setup.sh` (`set_env_key UI_AUTH_PASSWORD_HASH`); `services/ui/src/main.rs` `login_ok` (returns `true` for an empty hash) and `s.text("UI_PASSWORD_HASH")`; no Rust code reads `ALLOW_INSECURE_UI`; the message `Admin-UI authentication is required` exists only in docs | T3 |
-| G2 | The Kea Control Agent appears to be reachable on all host interfaces (`dhcp` runs with `network_mode: host`, bind address `0.0.0.0`) and its config has no `authentication` block; the UI client sends no credentials. No code applying the iptables fence of the old document was found: `KEA_CTRL_ALLOW_FROM` and `KEA_CTRL_CHAIN` appear only in the SOT. | `.github/yaml/build-manifest.yml` (`KEA_CTRL_ADDRESS=@ANY_BIND_IP@`, `ANY_BIND_IP=0.0.0.0`); `services/common/shared.rs` `kea_conf::ctrl_agent`, `kea::Api`; no `iptables` call in `services/` or `setup.sh` | T12 |
-| G3 | `AG-OP-002` requires nginx to resolve upstream names with real resolvers, never with the local PowerDNS recursor, because project DNS can route proxied CDN hosts back to the proxy. `NGINX_UPSTREAM_RESOLVER` is rendered without a check that it is not a LanCache address; only `DNS_UPSTREAM_SERVERS` has such a guard. | `services/ui/nginx/nginx.conf` (`resolver ${NGINX_UPSTREAM_RESOLVER}`), `services/common/shared.rs` `recursor_conf::yaml` (the only "would loop" guard) | T1 |
+| G1 | The compose file delivered `UI_AUTH_USER` and `UI_AUTH_PASSWORD_HASH`, but the UI read `UI_USER` and `UI_PASSWORD_HASH`, so a password set by `setup.sh` never reached the UI. | The compose file now passes them as `UI_USER` and `UI_PASSWORD_HASH` (`deploy/prod/docker-compose.yml`). An unauthenticated Admin UI is the explicit default: `ALLOW_INSECURE_UI=true` in the SOT, and `setup.sh` asks "Protect Admin-UI with password? [y/N]" with the default No; `AG-SEC-001` allows this as an explicit operator choice, including trusted LAN deployments. Still true: the `ui` process does not read `ALLOW_INSECURE_UI`, and `login_ok` accepts every request when the hash is empty, so the refusal that `AG-SEC-001` describes for "neither credentials nor `ALLOW_INSECURE_UI=true`" exists only in the setup flow. | T3 |
+| G2 | The Kea Control Agent was bound to `0.0.0.0` on the host network with no `authentication` block, and the UI client sent no credentials. | `kea_conf::ctrl_agent` writes a basic `authentication` block (user `KEA_CTRL_USER`, password the `KEA_CTRL_TOKEN`) and `kea::Api` sends them. Still true: the bind address is `KEA_CTRL_ADDRESS=@ANY_BIND_IP@` (`0.0.0.0`) on the host network, and `KEA_CTRL_ALLOW_FROM` and `KEA_CTRL_CHAIN` exist only in the SOT; no code applies a firewall fence. | T12 |
+| G3 | `AG-OP-002` requires real upstream resolvers for nginx. `NGINX_UPSTREAM_RESOLVER` was rendered without a check that it is not a LanCache address. | `render::nginx_files` and the UI save path check every entry with `recursor_conf::upstream_entry` (numeric address only; loopback, unspecified and this host's own addresses are refused as "would loop"). | T1 |
 
 ---
 
@@ -57,9 +60,9 @@ the top is a signal that its threats need re-checking.
 | DNS spoofing (PowerDNS RPZ) | `services/common/shared.rs` (`recursor_conf::rpz`, `recursor_conf::yaml`, `pdns_conf::auth`), `services/dns/cdn-domains.txt` | `current_dev` `3005b2b4` | T1, T4, T11 |
 | TLS interception + local CA | `services/common/shared.rs` (`cert::make_ca`, `cert::make_leaf`, `render::issue_certs`, `nginx_conf`), `services/ui/nginx/conf.d/https.conf` | `current_dev` `3005b2b4` | T7, T8, T10 |
 | Proxy request policy (client CIDR + host allowlists) | `services/common/shared.rs` (`nginx_conf`), `services/ui/nginx/proxy-params.conf`, `services/ui/nginx/conf.d/*.conf` | `current_dev` `3005b2b4` | T2, T9 |
-| Admin UI authentication | `services/ui/src/main.rs` (`login_ok`, `auth`, `Csrf`), `deploy/prod/docker-compose.yml`, `setup.sh` | `current_dev` `3005b2b4` (gap G1) | T3 |
+| Admin UI authentication | `services/ui/src/main.rs` (`login_ok`, `auth`, `Csrf`), `deploy/prod/docker-compose.yml`, `setup.sh` | #1985 `9a4b4be4` | T3 |
 | Docker access (socket in `services` and `ui`) | `deploy/prod/docker-compose.yml`, `services/common/shared.rs` (`docker::Api`) | `current_dev` `3005b2b4` | T6 |
-| DHCP: Kea mode | `services/common/shared.rs` (`kea_conf`, `kea::Api`), `deploy/prod/docker-compose.yml` (`dhcp`), `docs/dhcp-modes.md` | `current_dev` `3005b2b4` (gap G2) | T12 |
+| DHCP: Kea mode | `services/common/shared.rs` (`kea_conf`, `kea::Api`), `deploy/prod/docker-compose.yml` (`dhcp`), `docs/dhcp-modes.md` | #1985 `9a4b4be4` | T12 |
 | DHCP: dnsmasq-proxy and dnsmasq-relay modes | `services/common/shared.rs` (`dnsmasq_conf`), `docs/dhcp-modes.md` | `current_dev` `3005b2b4` | T12, T13 |
 | Zone transfer to secondaries (TSIG, NOTIFY, AXFR) | `services/common/shared.rs` (`pdns_conf::auth`), `services/ui/src/main.rs` (`rotate_tsig`, `TSIG-ALLOW-AXFR`, `AXFR-MASTER-TSIG`) | `current_dev` `3005b2b4` | T5 |
 | Secondary-node registration | `services/ui/src/main.rs` (`register`, `registration_token`, `secondary_action`), `deploy/secondary/docker-compose.yml` | `current_dev` `3005b2b4` | T5, T14 |
@@ -207,10 +210,11 @@ injects malicious content that the proxy caches and serves to every client.
   /etc/ssl/certs/ca-certificates.crt`, `services/ui/nginx/proxy-params.conf`);
   see also T8.
 - Upstream resolution uses `NGINX_UPSTREAM_RESOLVER` (default `8.8.8.8 8.8.4.4`,
-  `ipv6=off`, `services/ui/nginx/nginx.conf`), not the LAN spoof DNS. There is
-  **no check** that the configured resolver is not a LanCache address (gap G3);
-  an operator who sets it to the appliance's own DNS creates a resolve-to-self
-  loop.
+  `ipv6=off`, `services/ui/nginx/nginx.conf`), not the LAN spoof DNS
+  (`AG-OP-002`). The render and the UI save path refuse an entry that is not a
+  numeric address or that is loopback, unspecified or one of this host's own
+  addresses (`recursor_conf::upstream_entry`, gap G3), so the resolver cannot
+  point back at the appliance by that route.
 - Cache key is `$host$uri$slice_range` (never `$request_uri`, `AG-OP-001`), so
   query-string signatures do not create separate cache objects and a
   per-request signature cannot be used to smuggle a distinct poisoned object
@@ -272,24 +276,24 @@ control of the UI is full control of the host.
 **Likelihood**: Low on a firewalled LAN; High if the UI port is exposed to an
 untrusted network · **Impact**: Critical
 
-**Required design** (`AG-SEC-001`): the `ui` service MUST fail closed and MAY
-restart-loop when neither `UI_AUTH_USER` and `UI_AUTH_PASSWORD` nor
-`ALLOW_INSECURE_UI=true` is configured; a restarting UI logging `Admin-UI
-authentication is required` is expected security behavior; and
-`ALLOW_INSECURE_UI=true` remains a valid explicit operator choice for an
-intentionally unauthenticated UI, including trusted LAN deployments. (The setup
-flow generates `UI_AUTH_PASSWORD` and delivers only its Argon2id hash as
-`UI_AUTH_PASSWORD_HASH`.)
+**Rule** (`AG-SEC-001`): the `ui` service MUST fail closed and MAY restart-loop
+when neither `UI_AUTH_USER` and `UI_AUTH_PASSWORD` nor `ALLOW_INSECURE_UI=true`
+is configured; a restarting UI logging `Admin-UI authentication is required` is
+expected security behavior; and `ALLOW_INSECURE_UI=true` remains a valid
+explicit operator choice for an intentionally unauthenticated UI, including
+trusted LAN deployments. The setup flow generates `UI_AUTH_PASSWORD` and
+delivers only its Argon2id hash.
 
-**State in the code** (`services/ui/src/main.rs`, `current_dev` `3005b2b4`):
-- **The required fail-closed behaviour is statically indicated as not implemented (gap G1).**
-  `login_ok` accepts every request when `UI_PASSWORD_HASH` is empty, no start
-  check refuses an empty hash, and no Rust code reads `ALLOW_INSECURE_UI`.
-  `setup.sh` and the compose file deliver the credentials as `UI_AUTH_USER` /
-  `UI_AUTH_PASSWORD_HASH`, which no code in the repository reads. Until this is
-  reproduced or refuted on a running stack, do not rely on the Admin UI login.
-- When a hash is set, HTTP Basic credentials are checked with Argon2id and a
-  constant-time user compare (`secret::equal`).
+**State in the code** (`services/ui/src/main.rs`, code of #1985 `9a4b4be4`):
+- **Password set:** the compose file passes `UI_AUTH_USER` and
+  `UI_AUTH_PASSWORD_HASH` to the UI as `UI_USER` and `UI_PASSWORD_HASH`
+  (gap G1). `login_ok` then requires HTTP Basic credentials, checked with
+  Argon2id and a constant-time user compare (`secret::equal`).
+- **No password:** `login_ok` accepts every request when `UI_PASSWORD_HASH` is
+  empty. Unauthenticated access is the explicit default: `ALLOW_INSECURE_UI=true`
+  in the SOT, and `setup.sh` asks "Protect Admin-UI with password? [y/N]" with
+  the default No. The `ui` process does not read `ALLOW_INSECURE_UI` and does
+  not refuse to start; the choice is made in the setup flow.
 - Every state-changing request needs a CSRF token bound to the session
   (`Csrf::check`, `Csrf::check_header`); the session cookie is `HttpOnly` and
   `SameSite=Strict`.
@@ -298,11 +302,11 @@ flow generates `UI_AUTH_PASSWORD` and delivers only its Argon2id hash as
   Argon2id hash is stored, in the UI settings file in the `ui-data` volume.
 - The registration route for secondaries has its own token (T14).
 
-**Residual risk**: High if G1 holds: the UI would be unauthenticated by default
-on whatever address `UI_BIND_IP` selects (`IP_HTTP` by default,
-`deploy/prod/docker-compose.yml`). If G1 is refuted or fixed it drops to Low and
-entirely operator-controlled: it exists only if the operator sets `ALLOW_INSECURE_UI=true`
-*and* exposes the UI beyond the trusted LAN. `UI_BIND_IP=127.0.0.1` restricts it
+**Residual risk**: Depends on the operator's explicit choice. With a password
+set it is Low. With the default (no password) anyone who can reach the address
+`UI_BIND_IP` selects (`IP_HTTP` by default, `deploy/prod/docker-compose.yml`)
+controls the stack and, through the Docker socket, the host: acceptable only on
+a trusted LAN, as `AG-SEC-001` states. `UI_BIND_IP=127.0.0.1` restricts it
 further.
 
 ---
@@ -388,7 +392,8 @@ sensitive) · **Impact**: Critical (full host compromise)
   container. The mounted socket itself grants the full Docker API, so a
   compromise of either container is a host compromise.
 - Reaching the `ui` through the network therefore reaches Docker; this makes
-  the Admin UI authentication (T3, gap G1) part of this threat. The earlier
+  the Admin UI authentication (T3) part of this threat; with the unauthenticated
+  default, reaching the UI is enough. The earlier
   statement that the Admin UI has no Docker access is no longer true.
 - **Scheduled automatic updates do not add a socket-access surface.** They run
   on the host as a `systemd` timer or, on Alpine hosts without systemd, an
@@ -396,8 +401,8 @@ sensitive) · **Impact**: Critical (full host compromise)
   No container is granted expanded Docker or filesystem access to perform them.
 
 **Residual risk**: High — both the UI (network-facing) and `services` hold a
-read-write socket mount; the risk is concentrated in the Admin UI, whose
-authentication has gap G1.
+read-write socket mount; the risk is concentrated in the Admin UI, which is
+unauthenticated unless the operator sets a password (T3).
 
 ---
 
@@ -528,25 +533,26 @@ networking publishes that API on every host interface unless something fences it
 **Likelihood**: Medium (only when Kea mode is enabled) · **Impact**: High
 (reprogramming DHCP-issued DNS redirects the whole LAN)
 
-**State in the code** (`services/common/shared.rs`, `current_dev` `3005b2b4`):
-- **The Control Agent is bound to `KEA_CTRL_ADDRESS`, whose SOT default is
-  `0.0.0.0`, with no `authentication` block (`kea_conf::ctrl_agent`), and the
-  UI's client (`kea::Api`) sends no credentials (gap G2).** `KEA_CTRL_TOKEN`
-  is delivered to the containers but nothing in the Kea configuration checks it.
-- **No code applying the iptables fence of the old design was found.**
+**State in the code** (`services/common/shared.rs`, code of #1985 `9a4b4be4`):
+- **Authentication:** `kea_conf::ctrl_agent` writes a basic `authentication`
+  block (user `KEA_CTRL_USER`, password `KEA_CTRL_TOKEN`) and the UI's client
+  (`kea::Api`) sends them with `basic_auth` (gap G2). `KEA_CTRL_TOKEN` is a
+  generated shared secret (`managed_secrets` in the SOT).
+- **Reachability:** the Control Agent is bound to `KEA_CTRL_ADDRESS`, whose SOT
+  default is `0.0.0.0`, on the host network. **No firewall fence exists:**
   `KEA_CTRL_ALLOW_FROM` and `KEA_CTRL_CHAIN` appear only in the SOT, and no code
-  in `services/` or `setup.sh` calls `iptables`. Do not rely on host networking
-  being fenced.
+  in `services/` or `setup.sh` calls `iptables`. The port is open to the LAN and
+  protected only by the basic-auth login.
 - `kea_conf::ddns` signs the Kea→PowerDNS dynamic updates with TSIG
   (`DDNS_TSIG_KEY`, algorithm `DDNS_TSIG_ALGORITHM`); the key is a shared secret
   resolved by `secret::resolve` like the PowerDNS API key (T4): an empty or
   template-like value is replaced by a generated one, so DDNS is
   TSIG-authenticated end to end by default.
 
-**Residual risk**: High if G2 holds: any host on any network segment that can
-reach port 8000 of the appliance while Kea mode is on could drive the DHCP
-configuration. Medium if a fence or authentication exists, and always dependent
-on the operator running Kea only where it is the sole DHCP server on the LAN.
+**Residual risk**: Medium — a LAN host that knows the token can drive the DHCP
+configuration; without it the login is refused. Basic authentication over plain
+HTTP exposes the token to anyone who can sniff the segment. Always dependent on
+the operator running Kea only where it is the sole DHCP server on the LAN.
 
 ---
 
@@ -605,7 +611,7 @@ copy of all zones)
   calls `rotate_tsig` at once, so the removed node's key stops working.
 
 **Residual risk**: Low–Medium — bounded by keeping the registration token and
-the TSIG key secret, and by the Admin UI authentication (T3, gap G1) for the
+the TSIG key secret, and by the Admin UI authentication (T3, unauthenticated by default) for the
 remove and rotate actions. The bootstrap authorization is one shared token, not
 a one-time token bound to one secondary.
 
@@ -640,11 +646,11 @@ The following are **not** addressed by lancache-ng:
 ### Low risk
 - Private, firewalled LAN; control-plane ports unreachable from untrusted
   segments.
-- Admin UI authenticated, or bound to `127.0.0.1`. While gap G1 is not refuted
-  the operator has to verify the authentication; do not assume it.
+- Admin UI with a password set, bound to `127.0.0.1`, or consciously left
+  unauthenticated on a trusted LAN (`AG-SEC-001`).
 - Zone transfers to secondaries only TSIG-signed (default).
-- Kea mode off, or Kea Control Agent port 8000 blocked by the host firewall
-  (gap G2: the appliance does not fence it).
+- Kea mode off, or Kea Control Agent port 8000 reachable only from trusted
+  hosts (the appliance does not fence it; the basic-auth login protects it).
 - Scheduled automatic updates left disabled (default) unless wanted — and even
   when enabled, they run on the host, not as a container with expanded socket
   access.
@@ -657,8 +663,8 @@ The following are **not** addressed by lancache-ng:
 - PowerDNS zone transfers (AXFR) reachable by some untrusted segment.
 
 ### High risk (breaks the core assumption — avoid)
-- Admin UI exposed beyond the LAN, **especially** with `ALLOW_INSECURE_UI=true`
-  or while gap G1 is not refuted.
+- Admin UI exposed beyond the LAN, **especially** without a password
+  (`ALLOW_INSECURE_UI=true`).
 - Kea API 8000, or the PowerDNS API reachable from untrusted networks.
 - Direct Docker socket exposed to untrusted containers/networks.
 - No firewall between the appliance and an untrusted uplink.
@@ -698,7 +704,7 @@ tagging each release, then update the top marker and the
    still have direct Docker socket access (T6), and whether Admin UI auth is
    still fail-closed by default (T3, `AG-SEC-001`). These have gone stale before.
 5. **Reconcile internal consistency** — the Conclusion and the risk tiers must
-   not contradict the individual threats, and every gap in "Gaps statically indicated" must
+   not contradict the individual threats, and every gap in "Gaps found by the 2026-11-07 review" must
    either still be open in the code or be removed.
 6. **Update** the inventory "Last verified" cells, the top marker, and the
    review date.
@@ -725,9 +731,11 @@ DDNS updates, and secondary registration should refuse to start or answer in an
 insecure/unauthenticated state unless the operator explicitly opts out.
 
 At the 2026-11-07 review the code read shows that goal met for the PowerDNS
-API key, DDNS updates (TSIG) and secondary registration, and **statically
-indicates it is not met for the Admin UI login (G1) and the Kea Control Agent
-(G2)**; see "Gaps statically indicated by the 2026-11-07 review". Both the `ui` and `services` containers mount the Docker
+API key, DDNS updates (TSIG), secondary registration and the Kea Control Agent
+login. The Admin UI is unauthenticated by explicit default, which `AG-SEC-001`
+allows for trusted LAN deployments; the `ui` process itself does not refuse to
+start without a password, that choice lives in the setup flow (see "Gaps found
+by the 2026-11-07 review"). Both the `ui` and `services` containers mount the Docker
 socket read-write (T6), so the Admin UI is the most sensitive network-facing
 component. Scheduled automatic updates run on the host via `systemd` or an
 OpenRC service, not as a container, so they add no socket-access surface.
@@ -735,15 +743,15 @@ OpenRC service, not as a container, so they add no socket-access surface.
 The operator remains responsible for:
 1. Deploying on a trusted, firewalled LAN and keeping control-plane ports off
    untrusted segments.
-2. Verifying that the Admin UI login is enforced. `ALLOW_INSECURE_UI=true` is a
-   valid explicit choice for an intentionally unauthenticated UI on a trusted
-   LAN (`AG-SEC-001`), but not on anything reachable from an untrusted network.
+2. Setting an Admin UI password unless the UI is intentionally unauthenticated.
+   `ALLOW_INSECURE_UI=true` is a valid explicit choice on a trusted LAN
+   (`AG-SEC-001`), but not on anything reachable from an untrusted network.
 3. Narrowing `PROXY_ALLOWED_CLIENT_CIDRS` when the LAN is not fully trusted;
    `strict` proxy mode is an opt-in that accepts a maintained allowlist
    (`AG-OP-003`).
 4. Protecting the local CA private key (`<CA_DIR>/ca.key`) in HTTPS mode.
-5. Blocking Kea Control Agent port 8000 at the host firewall while Kea mode is
-   on, unless G2 is refuted or fixed.
+5. Restricting Kea Control Agent port 8000 at the host firewall while Kea mode
+   is on; the appliance does not fence it.
 6. Monitoring disk and activity, and keeping images updated.
 
 For security concerns, use the project's private security reporting channel
