@@ -19333,7 +19333,7 @@ _ci_dockerfile_emit_logical() {
 }
 
 # What: Fail unless prod install paths stay prebuilt-only.
-# Why: docs/release-versioning: prod runs prebuilt images.
+# Why: release doc: prod runs prebuilt images.
 # From: Issue #1683 | PR #1858
 _ci_check_prebuilt_prod() {
     local repo_root="${1:-${CI_REPO_ROOT}}" dep

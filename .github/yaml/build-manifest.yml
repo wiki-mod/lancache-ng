@@ -1901,11 +1901,11 @@ release:
       # From: Issue #1683 | PR #1858
       former_names: [stable]
   # What: the install mode that pins one fixed tag.
-  # Why: release-versioning: pinned stays a channel value.
+  # Why: release doc: pinned stays a channel value.
   # From: Issue #1683 | PR #1858
   pinned_channel: pinned
   # What: refused channel names and why they went.
-  # Why: release-versioning: a clear error, no fallback.
+  # Why: release doc: a clear error, no fallback.
   # From: Issue #1683 | PR #1858
   retired_channels:
     edge: "renamed to nightly in v0.3.0"
@@ -2075,7 +2075,7 @@ ci_variables:
   CI_CHANGELOG: CHANGELOG.md
   CI_README: README.md
   CI_ARCH_DOC: docs/architecture-ng.md
-  CI_BACKUP_RESTORE_DOC: docs/backup-restore.md
+  CI_BACKUP_RESTORE_DOC: docs/README.md
   CI_DOCS_DIR: docs
   # What: attempts and backoff base of the retry owner.
   # Why: AG-CI-006: a retry/timeout value has one owner.

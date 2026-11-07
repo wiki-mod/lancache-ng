@@ -41,9 +41,10 @@ needs one.
 2. **Larger or ambiguous changes** — new features, behavior changes,
    anything touching security posture or release process — start as a
    GitHub issue so the proposal and its discussion are traceable before code
-   exists. `docs/` design documents (e.g. `docs/design-wireguard-remote-access.md`)
-   are used for changes that need more written rationale than an issue body
-   comfortably holds.
+   exists. `docs/` design documents (for example
+   `docs/design-plannings/design-wireguard-remote-access.md`) are used for
+   changes that need more written rationale than an issue body comfortably
+   holds.
 3. **The maintainer reviews and merges** every pull request; nothing lands
    on `current_dev` or `master` without that review, and `master` additionally
    requires a pull request by branch protection (see `AGENTS.md`'s

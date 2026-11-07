@@ -302,7 +302,7 @@ drivers.amd.com
 pat.downloads.amd.com
 
 # What: no console CDN hosts; consoles cannot use our CA.
-# Why: docs/install-ca-cert.md lists hosts to add by hand.
+# Why: docs/README.md lists hosts to add by hand.
 # From: Issue #1683 | PR #1912
 
 # ==== lancache-ng: entries added via the Admin UI are appended below this exact line ====
