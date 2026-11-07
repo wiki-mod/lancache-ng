@@ -277,5 +277,15 @@
     const kept = sessionStorage.getItem('ch-games');
     if (kept) { showGames(JSON.parse(kept)); }
   } catch (err) { reportError(err); }
+  // What: the Library tab loads the games when empty.
+  // Why: DoMe 07.11.: no extra click after opening.
+  // From: Issue #871 | PR #1985
+  const libTab = document.querySelector('[data-ch-tab="library"]');
+  const autoLoad = function () {
+    const t = document.getElementById('hamster-games');
+    if (lib && t && t.rows.length === 0 && !lib.disabled) { lib.click(); }
+  };
+  if (libTab) { libTab.addEventListener('click', autoLoad); }
+  if (libTab && libTab.classList.contains('active')) { autoLoad(); }
 </script>
 {% endblock %}
