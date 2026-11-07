@@ -582,6 +582,10 @@ async fn commit(app: &App, form: Fields) -> Result<(), String> {
     // From: Issue #1683 | PR #1980
     let check = secrets(&new).and_then(|sec| render::all(&new, &sec).map_err(|e| e.join("; ")));
     if let Err(e) = check {
+        // What: a refused save is logged, not only shown.
+        // Why: DoMe 07.11.: an error left no trace in logs.
+        // From: Issue #1683 | PR #1991
+        eprintln!("ui: save refused: {e}");
         if let Some(b) = before {
             std::fs::write(&path, b).map_err(|w| format!("{e}; old file not restored: {w}"))?;
         }
