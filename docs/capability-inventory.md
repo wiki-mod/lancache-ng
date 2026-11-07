@@ -361,7 +361,7 @@ stack.
 
 The UI provides:
 
-* Authentication (HTTP Basic with an Argon2id hash; the fail-closed start check is missing, see gap G1 in `docs/threat-model.md`).
+* Authentication (HTTP Basic with an Argon2id hash; a missing fail-closed start check is statically indicated, see gap G1 in `docs/threat-model.md`).
 * CSRF protection.
 * Dashboard and service state.
 * Proxy status and cache visibility.
@@ -753,9 +753,9 @@ The following boundaries are intentional or currently unresolved:
 7. CacheHamster is implemented in code and wired into the `services` container, but
    it has no test on `current_dev`; treat prefill as unverified until it has been run.
 
-8. Admin UI login enforcement and Kea Control Agent protection are not
-   fail-closed in the current code; see gaps G1 and G2 in
-   `docs/threat-model.md`.
+8. Admin UI login enforcement and Kea Control Agent protection appear not to
+   be fail-closed in the current code (statically indicated, not reproduced);
+   see gaps G1 and G2 in `docs/threat-model.md`.
 
 ## Validation coverage
 

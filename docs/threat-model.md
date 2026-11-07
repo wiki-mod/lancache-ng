@@ -38,8 +38,8 @@ mitigations. Fixing them is a code change that needs a maintainer decision
 
 | ID | Gap | Evidence (`current_dev` `3005b2b4`) | Threat |
 |---|---|---|---|
-| G1 | The Admin UI is not fail-closed. `setup.sh` and the compose file deliver `UI_AUTH_USER` and `UI_AUTH_PASSWORD_HASH`, but the UI reads `UI_USER` and `UI_PASSWORD_HASH`. With no hash the UI accepts every request and does not refuse to start. `AG-SEC-001` requires fail-closed. | `deploy/prod/docker-compose.yml` lines 343-344 and `setup.sh` (`set_env_key UI_AUTH_PASSWORD_HASH`); `services/ui/src/main.rs` `login_ok` (returns `true` for an empty hash) and `s.text("UI_PASSWORD_HASH")`; no Rust code reads `ALLOW_INSECURE_UI`; the message `Admin-UI authentication is required` exists only in docs | T3 |
-| G2 | The Kea Control Agent is reachable on all host interfaces (`dhcp` runs with `network_mode: host`) and its config has no `authentication` block; the UI client sends no credentials. The iptables fence of the old document no longer exists: `KEA_CTRL_ALLOW_FROM` and `KEA_CTRL_CHAIN` appear only in the SOT. | `.github/yaml/build-manifest.yml` (`KEA_CTRL_ADDRESS=@ANY_BIND_IP@`, `ANY_BIND_IP=0.0.0.0`); `services/common/shared.rs` `kea_conf::ctrl_agent`, `kea::Api`; no `iptables` call in `services/` or `setup.sh` | T12 |
+| G1 | The Admin UI appears not to be fail-closed. `setup.sh` and the compose file deliver `UI_AUTH_USER` and `UI_AUTH_PASSWORD_HASH`, but the UI reads `UI_USER` and `UI_PASSWORD_HASH`. With no hash `login_ok` accepts every request and no start check refuses. `AG-SEC-001` requires fail-closed. | `deploy/prod/docker-compose.yml` lines 343-344 and `setup.sh` (`set_env_key UI_AUTH_PASSWORD_HASH`); `services/ui/src/main.rs` `login_ok` (returns `true` for an empty hash) and `s.text("UI_PASSWORD_HASH")`; no Rust code reads `ALLOW_INSECURE_UI`; the message `Admin-UI authentication is required` exists only in docs | T3 |
+| G2 | The Kea Control Agent appears to be reachable on all host interfaces (`dhcp` runs with `network_mode: host`, bind address `0.0.0.0`) and its config has no `authentication` block; the UI client sends no credentials. No code applying the iptables fence of the old document was found: `KEA_CTRL_ALLOW_FROM` and `KEA_CTRL_CHAIN` appear only in the SOT. | `.github/yaml/build-manifest.yml` (`KEA_CTRL_ADDRESS=@ANY_BIND_IP@`, `ANY_BIND_IP=0.0.0.0`); `services/common/shared.rs` `kea_conf::ctrl_agent`, `kea::Api`; no `iptables` call in `services/` or `setup.sh` | T12 |
 | G3 | `AG-OP-002` requires nginx to resolve upstream names with real resolvers, never with the local PowerDNS recursor, because project DNS can route proxied CDN hosts back to the proxy. `NGINX_UPSTREAM_RESOLVER` is rendered without a check that it is not a LanCache address; only `DNS_UPSTREAM_SERVERS` has such a guard. | `services/ui/nginx/nginx.conf` (`resolver ${NGINX_UPSTREAM_RESOLVER}`), `services/common/shared.rs` `recursor_conf::yaml` (the only "would loop" guard) | T1 |
 
 ---
@@ -286,8 +286,8 @@ flow generates `UI_AUTH_PASSWORD` and delivers only its Argon2id hash as
   `login_ok` accepts every request when `UI_PASSWORD_HASH` is empty, no start
   check refuses an empty hash, and no Rust code reads `ALLOW_INSECURE_UI`.
   `setup.sh` and the compose file deliver the credentials as `UI_AUTH_USER` /
-  `UI_AUTH_PASSWORD_HASH`, which the UI does not read. Until this is fixed, do
-  not rely on the Admin UI login.
+  `UI_AUTH_PASSWORD_HASH`, which no code in the repository reads. Until this is
+  reproduced or refuted on a running stack, do not rely on the Admin UI login.
 - When a hash is set, HTTP Basic credentials are checked with Argon2id and a
   constant-time user compare (`secret::equal`).
 - Every state-changing request needs a CSRF token bound to the session
@@ -298,10 +298,10 @@ flow generates `UI_AUTH_PASSWORD` and delivers only its Argon2id hash as
   Argon2id hash is stored, in the UI settings file in the `ui-data` volume.
 - The registration route for secondaries has its own token (T14).
 
-**Residual risk**: High while G1 is open: the UI is unauthenticated by default
+**Residual risk**: High if G1 holds: the UI would be unauthenticated by default
 on whatever address `UI_BIND_IP` selects (`IP_HTTP` by default,
-`deploy/prod/docker-compose.yml`). With G1 fixed it drops to Low and entirely
-operator-controlled: it exists only if the operator sets `ALLOW_INSECURE_UI=true`
+`deploy/prod/docker-compose.yml`). If G1 is refuted or fixed it drops to Low and
+entirely operator-controlled: it exists only if the operator sets `ALLOW_INSECURE_UI=true`
 *and* exposes the UI beyond the trusted LAN. `UI_BIND_IP=127.0.0.1` restricts it
 further.
 
@@ -533,20 +533,20 @@ networking publishes that API on every host interface unless something fences it
   `0.0.0.0`, with no `authentication` block (`kea_conf::ctrl_agent`), and the
   UI's client (`kea::Api`) sends no credentials (gap G2).** `KEA_CTRL_TOKEN`
   is delivered to the containers but nothing in the Kea configuration checks it.
-- **The iptables fence of the old design is gone.** `KEA_CTRL_ALLOW_FROM` and
-  `KEA_CTRL_CHAIN` exist only in the SOT; no code applies firewall rules. Do not
-  rely on host networking being fenced.
+- **No code applying the iptables fence of the old design was found.**
+  `KEA_CTRL_ALLOW_FROM` and `KEA_CTRL_CHAIN` appear only in the SOT, and no code
+  in `services/` or `setup.sh` calls `iptables`. Do not rely on host networking
+  being fenced.
 - `kea_conf::ddns` signs the Kea→PowerDNS dynamic updates with TSIG
   (`DDNS_TSIG_KEY`, algorithm `DDNS_TSIG_ALGORITHM`); the key is a shared secret
   resolved by `secret::resolve` like the PowerDNS API key (T4): an empty or
   template-like value is replaced by a generated one, so DDNS is
   TSIG-authenticated end to end by default.
 
-**Residual risk**: High while G2 is open: any host on any network segment that
-can reach port 8000 of the appliance while Kea mode is on can drive the DHCP
-configuration. Medium after a fence or authentication exists, and always
-dependent on the operator running Kea only where it is the sole DHCP server on
-the LAN.
+**Residual risk**: High if G2 holds: any host on any network segment that can
+reach port 8000 of the appliance while Kea mode is on could drive the DHCP
+configuration. Medium if a fence or authentication exists, and always dependent
+on the operator running Kea only where it is the sole DHCP server on the LAN.
 
 ---
 
@@ -640,8 +640,8 @@ The following are **not** addressed by lancache-ng:
 ### Low risk
 - Private, firewalled LAN; control-plane ports unreachable from untrusted
   segments.
-- Admin UI authenticated, or bound to `127.0.0.1`. With gap G1 open the
-  authentication has to be verified by the operator; do not assume it.
+- Admin UI authenticated, or bound to `127.0.0.1`. While gap G1 is not refuted
+  the operator has to verify the authentication; do not assume it.
 - Zone transfers to secondaries only TSIG-signed (default).
 - Kea mode off, or Kea Control Agent port 8000 blocked by the host firewall
   (gap G2: the appliance does not fence it).
@@ -658,7 +658,7 @@ The following are **not** addressed by lancache-ng:
 
 ### High risk (breaks the core assumption — avoid)
 - Admin UI exposed beyond the LAN, **especially** with `ALLOW_INSECURE_UI=true`
-  or while gap G1 is open.
+  or while gap G1 is not refuted.
 - Kea API 8000, or the PowerDNS API reachable from untrusted networks.
 - Direct Docker socket exposed to untrusted containers/networks.
 - No firewall between the appliance and an untrusted uplink.
@@ -743,7 +743,7 @@ The operator remains responsible for:
    (`AG-OP-003`).
 4. Protecting the local CA private key (`<CA_DIR>/ca.key`) in HTTPS mode.
 5. Blocking Kea Control Agent port 8000 at the host firewall while Kea mode is
-   on, until G2 is closed.
+   on, unless G2 is refuted or fixed.
 6. Monitoring disk and activity, and keeping images updated.
 
 For security concerns, use the project's private security reporting channel
