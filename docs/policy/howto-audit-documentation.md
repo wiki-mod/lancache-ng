@@ -1,8 +1,8 @@
 # How to Audit Documentation
 
-This policy defines how every document under `docs/` is audited against the
-code and against `AGENTS.md`. It applies to each file that carries the section
-"Howto audit this file".
+This policy defines how every document under `docs/` and the file `ROADMAP.md`
+are audited against the code, the tracking items and `AGENTS.md`. It applies
+to each file that carries the section "Howto audit this file".
 
 ## Contents
 
@@ -22,7 +22,7 @@ code and against `AGENTS.md`. It applies to each file that carries the section
 
 | Item | Value |
 | --- | --- |
-| Audited | Every `docs/**/*.md` file |
+| Audited | Every `docs/**/*.md` file and `ROADMAP.md` |
 | Reference | The code and configuration of the audited commit |
 | Result | Each statement is supported by evidence or removed |
 
@@ -133,7 +133,7 @@ applied.
 
 ## 9. Section in each document
 
-Every `docs/**/*.md` file ends with this section:
+Every `docs/**/*.md` file and `ROADMAP.md` end with this section:
 
 ```text
 ## Howto audit this file
