@@ -13,7 +13,7 @@ Do **not** open a public GitHub issue for security vulnerabilities. Private disc
 | Version | Status | Support Until |
 |---------|--------|----------------|
 | 0.3.x (pre-1.0) | Current | Ongoing |
-| 0.2.x | Supported (previous line) | Until the next minor line is published |
+| 0.2.x | Supported (previous line) | Until the next minor line is released |
 | 0.1.x and older | EOL | Ended |
 
 Support covers the current minor line and the minor line before it. An
@@ -24,10 +24,10 @@ How the table is read:
 | Position | Meaning | Support |
 |----------|---------|---------|
 | Current line | The newest minor line | Yes |
-| One line back (-1) | The minor line before the current one | Yes, until the next minor line is published |
+| One line back (-1) | The minor line before the current one | Yes, until the next minor line is released |
 | Two lines back (-2) and older | Every earlier minor line | No (EOL) |
 
-Example: 0.3.x is current and 0.2.x is one line back. When 0.4.x is published,
+Example: 0.3.x is current and 0.2.x is one line back. When 0.4.x is released,
 0.4.x is current, 0.3.x is one line back and 0.2.x is EOL. An operator who
 wants support keeps the installation on the current line or the one before it.
 
@@ -43,8 +43,8 @@ for the full channel/tagging model); the current stable release line is `v0.3.x`
 - **What kind of support**: security fixes and correctness bug fixes, applied
   by publishing a new stable release of a supported line.
 - **Duration**: a minor line is supported until the next minor line after the
-  current one is published, and is EOL from then on. With 0.3.x current, 0.2.x
-  is supported until 0.4.x is published.
+  current one is released, and is EOL from then on. With 0.3.x current, 0.2.x
+  is supported until 0.4.x is released.
 - **Updating**: an installation on an unsupported line is updated to a
   supported line to receive support.
 - **Pre-1.0 caveat**: as a pre-1.0 project, breaking changes and security-
