@@ -6,14 +6,6 @@
 > **Latest release tag at review time: `v0.3.2`. It is not contained in
 > `current_dev`; this document describes the five-container architecture of
 > `current_dev` (see `docs/architecture-ng.md`), not the v0.3.2 images.**
->
-> This document must be re-audited for every release. It describes the security
-> posture of a *specific* architecture, and that architecture changes between
-> versions. Wording alone going stale (e.g. a service renamed, a mitigation
-> narrowed) silently turns this file into misinformation, which is worse than
-> having no threat model. Before tagging a release, work through
-> [How to re-audit this document](#how-to-re-audit-this-document-per-release) and
-> bump the marker above.
 
 This document outlines the security threats that lancache-ng is designed to
 protect against, the mitigations that actually exist in the current codebase,
@@ -44,11 +36,7 @@ identifiers G1 to G3 are stable references used by code comments.
 
 ## Component currency inventory
 
-A reviewer can use this table to see, at a glance, which parts of the system
-this document was last checked against. When a component's implementation
-changes, update its row (and the threats that reference it) and set "Last
-verified" to the release or commit that was read. A row that lags the marker at
-the top is a signal that its threats need re-checking.
+The table names the source of each component and the commit it was read against.
 
 | Component | Primary source of truth | Last verified | Threats |
 |---|---|---|---|
@@ -446,8 +434,8 @@ or saturating the proxy.
 **Likelihood**: Medium · **Impact**: Medium (degradation / eviction)
 
 **Mitigations**:
-- Configurable cache size limits; `proxy_cache_use_stale` keeps serving under
-  pressure.
+- `proxy_cache_path` limits the cache with `CACHE_MAX_GB`, `CACHE_MIN_FREE` and
+  `CACHE_INACTIVE`; `proxy_cache_use_stale` keeps serving under pressure.
 - `PROXY_ALLOWED_CLIENT_CIDRS` (default: private networks and `fc00::/7`)
   restricts which clients may drive the proxy over HTTP/HTTPS, and is also
   enforced by the stream-level listeners through generated `allow` / `deny all`
@@ -455,69 +443,52 @@ or saturating the proxy.
   TCP level before it can reach any relay or backend (see T2).
 - Disk-usage warnings/alarms: the watchdog checks the free space of the cache
   (`DISK_WARN_PCT`, `DISK_ALARM_PCT`) each round and writes the alarm file the
-  Admin UI dashboard shows. Further alarms (CPU, memory) come from the same
-  checks and from SNMP; there is no separate metrics service.
+  Admin UI dashboard shows; `/stats` draws SNMP and Docker figures.
 
-**Residual risk**: Medium — there is no per-client request rate limiting by
-default; the operator must configure limits.
+**Residual risk**: Medium — the nginx templates contain no `limit_req` or
+`limit_conn`, so no per-client request rate limit exists.
 
 ---
 
-### T10: Client connects to HTTPS mode without the CA (expected failure)
+### T10: Client uses HTTPS mode without the CA
 
-**Threat**: A client uses HTTPS mode without installing the CA and downloads fail.
+**Threat**: A client uses the HTTPS-mode DNS address without the local CA
+installed and its downloads fail.
 
 **Likelihood**: High (user error) · **Impact**: Low (fails safe, no compromise)
 
 **Mitigations**:
-- Clear per-OS install docs (`docs/README.md`, section 4) and, in future, an
-  easier distribution path (see that doc's distribution section).
-- HTTP mode is the CA-free alternative.
-- Devices that *cannot* install a CA (consoles) are intentionally excluded from
-  the spoof list, so they never hit this failure — see T4 and the console note in
-  `docs/README.md`, section 4.2.
+- Per-platform install steps and the distribution of `ca.crt` to clients are in
+  `docs/README.md`, sections 4.1 and 4.3.
+- HTTP mode needs no CA: the proxy forwards HTTPS by SNI passthrough.
+- Consoles must not use the HTTPS-mode DNS address (`docs/README.md`,
+  section 4.2).
 
-**Residual risk**: Low — intended, safe-failing behaviour.
+**Residual risk**: Low — the failure is the intended safe behavior.
 
 ---
 
-### T11: Console breakage from over-broad DNS spoofing
+### T11: Console breakage from DNS spoofing in HTTPS mode
 
-**Threat**: This threat is specific to **https-mode DNS** (the mode that performs
-TLS interception). If console CDN domains were added to the spoof list *and* the
-console were pointed at https-mode DNS, the console (which cannot trust the local
-CA) would fail the TLS handshake to the proxy — and because the appliance's DNS
-would keep returning the proxy IP on every retry, the console could not fall back
-to the real CDN. The failure is immediate and obvious (the console cannot reach
-that CDN at all), not a silent degradation.
+**Threat**: A console cannot install the local CA. If its CDN hosts are on the
+spoof list and it uses the HTTPS-mode DNS address, it receives the proxy
+certificate, rejects it and cannot fall back to the real CDN, because the
+appliance keeps answering with the proxy address.
 
-Pointed at **http-mode DNS** instead, the same spoofed domain is harmless for
-HTTPS: the unified `services/proxy`'s `ssl_preread`-based SNI passthrough
-(`stream{}` block, `:8443` — `services/proxy-standard` was retired and merged
-into this single service in the v0.2.0 refactor) forwards the TLS connection
-to the real CDN blind, with no interception and no CA
-involved, so the console's handshake succeeds normally. Only HTTP traffic for
-that domain would be cached — the default, low-impact behavior this appliance is
-built around, with no other restriction on the console.
-
-**Likelihood**: Low (requires the operator to add console domains) · **Impact**:
-Medium on https-mode DNS (console downloads for that CDN break, though the cause is
-immediately obvious); negligible on http-mode DNS (HTTPS passes through
-unaffected, only HTTP gets cached).
+**Likelihood**: Low · **Impact**: Medium (downloads from that CDN fail on the
+console)
 
 **Mitigations**:
-- Console CDN domains (Xbox/PlayStation/Nintendo) are **deliberately omitted**
-  from `cdn-domains.txt`, with an in-file explanation. Consoles keep using the
-  appliance as an ordinary, unrestricted DNS resolver; their CDN names resolve to
-  the real internet and work normally (no caching benefit, no breakage).
-- `docs/README.md`, section 4.2 (named in the in-file explanation) lists the
-  hosts to *opt in* to Xbox-PC (Game Pass) or Nintendo caching only on a LAN
-  known to have no such consoles.
+- `services/dns/cdn-domains.txt` lists no PlayStation or Nintendo CDN hosts; a
+  host that is not on the list resolves to the real CDN (`docs/README.md`,
+  section 4.2).
+- The list contains nine Xbox and Game Pass hosts (`docs/README.md`,
+  section 4.2).
+- On the HTTP-mode DNS address the proxy forwards HTTPS by SNI passthrough, so
+  no local certificate is involved.
 
-**Residual risk**: Low — safe by default; only an explicit operator opt-in, and
-even then only https-mode DNS carries real breakage risk. Opting into Xbox-PC
-(Game Pass) caching on a LAN that still has consoles present re-introduces
-the risk for that specific CDN.
+**Residual risk**: Low — it needs a console on the HTTPS-mode DNS address and a
+spoofed host of that console's CDN.
 
 ---
 
@@ -669,88 +640,19 @@ The following are **not** addressed by lancache-ng:
 
 ---
 
-## How to re-audit this document (per release)
+## Operator responsibilities
 
-This is the repeatable process the currency markers depend on. Run it before
-tagging each release, then update the top marker and the
-[component currency inventory](#component-currency-inventory).
-
-1. **Diff the architecture since the last reviewed release.** Read
-   `docs/architecture-ng.md` and diff the sources listed in the inventory table:
-   - `services/common/shared.rs`: every config render (`recursor_conf`,
-     `pdns_conf`, `nginx_conf`, `kea_conf`, `dnsmasq_conf`), `cert`, `secret`,
-     `docker`, `render` and `apply`
-   - `services/ui/src/main.rs` (`login_ok`, `auth`, `Csrf`, `register`,
-     `secondary_action`, `rollback`, startup guards) and `services/watchdog/src/main.rs`
-   - `services/dns/cdn-domains.txt`, `services/ui/nginx/**`
-   - `docs/README.md` (section 5, DHCP modes)
-   - `deploy/prod/docker-compose.yml`: every service that mounts the Docker
-     socket (SOT `DOCKER_SOCKET`; today `services` **and** `ui`) and every
-     caller of `docker::Api`
-   - the security-relevant defaults in `.github/yaml/build-manifest.yml`
-     (`PROXY_ALLOWED_CLIENT_CIDRS`, `PROXY_SECURITY_MODE`, `KEA_CTRL_*`,
-     `CA_*`, `UI_PASSWORD_MIN_LENGTH`, `AUTO_UPDATE_*`).
-2. **For each component, confirm the mitigations still match the code** —
-   fail-closed guards, allowlists, firewall rules, credential roles. Search for
-   every function, variable and route name this document cites; a name with no
-   hit is a stale claim. If a mitigation was narrowed, broadened, renamed, or
-   removed, rewrite the affected threat. Do **not** only reword.
-3. **Check for new components/ports** not yet in this document (a new service, a
-   new exposed port, a new external image with socket access) and add threats for
-   them.
-4. **Re-verify the two things most prone to silent drift:** which containers
-   still have direct Docker socket access (T6), and whether Admin UI auth is
-   still fail-closed by default (T3, `AG-SEC-001`).
-5. **Reconcile internal consistency** — the Conclusion and the risk tiers must
-   not contradict the individual threats, and every entry in "Security-relevant limits of the current code"
-   must match the code.
-6. **Update** the inventory "Last verified" cells, the top marker, and the
-   review date.
-
----
-
-## Security roadmap (non-binding)
-
-1. Per-client request rate limiting / flood protection in the proxy.
-2. Rotate-able TSIG keys for secondaries without re-registration.
-3. Audit logging of Admin UI and control-plane operations.
-4. Optional content-signature verification for cached objects.
-5. Security-event alerts on the Admin UI dashboard (watchdog data).
-
----
-
-## Conclusion
-
-lancache-ng is designed for **trusted, isolated LAN environments only**. It
-deliberately trades some guarantees (it MITMs client HTTPS in HTTPS mode; it trusts
-every LAN device) for caching performance. The design goal is a fail-closed
-*control plane*: the Admin UI, the PowerDNS API key, the Kea Control Agent,
-DDNS updates, and secondary registration should refuse to start or answer in an
-insecure/unauthenticated state unless the operator explicitly opts out.
-
-In the current code that goal is met for the PowerDNS
-API key, DDNS updates (TSIG), secondary registration and the Kea Control Agent
-login. The Admin UI is unauthenticated by an explicit setup choice whose default is open, which `AG-SEC-001`
-allows for trusted LAN deployments; the `ui` process itself does not refuse to
-start without a password, that choice lives in the setup flow (see "Security-relevant
-limits of the current code"). Both the `ui` and `services` containers mount the Docker
-socket read-write (T6), so the Admin UI is the most sensitive network-facing
-component. Scheduled automatic updates run on the host via `systemd` or an
-OpenRC service, not as a container, so they add no socket-access surface.
-
-The operator remains responsible for:
-1. Deploying on a trusted, firewalled LAN and keeping control-plane ports off
+1. Deploy on a trusted, firewalled LAN and keep control-plane ports off
    untrusted segments.
-2. Setting an Admin UI password unless the UI is intentionally unauthenticated.
+2. Set an Admin UI password unless the UI is intentionally unauthenticated.
    `ALLOW_INSECURE_UI=true` is a valid explicit choice on a trusted LAN
    (`AG-SEC-001`), but not on anything reachable from an untrusted network.
-3. Narrowing `PROXY_ALLOWED_CLIENT_CIDRS` when the LAN is not fully trusted;
+3. Narrow `PROXY_ALLOWED_CLIENT_CIDRS` when the LAN is not fully trusted;
    `strict` proxy mode is an opt-in that accepts a maintained allowlist
    (`AG-OP-003`).
-4. Protecting the local CA private key (`<CA_DIR>/ca.key`) in HTTPS mode.
-5. Restricting Kea Control Agent port 8000 at the host firewall while Kea mode
-   is on; the appliance does not fence it.
-6. Monitoring disk and activity, and keeping images updated.
+4. Protect the local CA private key (`<CA_DIR>/ca.key`) in HTTPS mode.
+5. Restrict Kea Control Agent port 8000 at the host firewall while Kea mode is
+   on; the appliance does not fence it.
+6. Monitor disk and activity, and keep images updated.
 
-For security concerns, use the project's private security reporting channel
-(`SECURITY.md`).
+Security concerns are reported through the private channel in `SECURITY.md`.
