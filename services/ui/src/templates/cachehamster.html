@@ -61,11 +61,15 @@
         {% set sk = "hamster_st_" ~ j.state.state %}<td>{{ t[sk] }}{% if j.state.reason %}: {{ j.state.reason }}{% endif %}</td>
         <td>{{ j.done }} {{ t.of }} {{ j.total }} {{ t.done }} {{ j.failed }} {{ t.failed }} {{ j.bytes | filesizeformat }}{% if j.size %} {{ t.of }} {{ j.size | filesizeformat }}{% endif %}</td>
         <td>
-          {% if j.id %}<div style="display:flex; flex-wrap:wrap; gap:6px; justify-content:flex-end;">{% for op in ["start", "cancel", "remove"] %}
+          {# What: only the buttons this state can use #}
+          {# Why: DoMe 07.11.: three big buttons wrapped #}
+          {# From: Issue #871 | PR #1985 #}
+          {% set st = j.state.state %}{% if st == "running" %}{% set ops = ["cancel"] %}{% elif st == "waiting" %}{% set ops = ["start", "cancel", "remove"] %}{% else %}{% set ops = ["start", "remove"] %}{% endif %}
+          {% if j.id %}<div style="display:flex; gap:6px; justify-content:flex-end; white-space:nowrap;">{% for op in ops %}
           {% set rk = "hamster_" ~ op %}<form action="{{ routes[rk] | safe }}" method="post">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <input type="hidden" name="id" value="{{ j.id }}">
-            <button type="submit" class="btn">{{ t[op] }}</button>
+            <button type="submit" class="btn btn-sm{% if op == "cancel" %} btn-ghost-amber{% elif op == "remove" %} btn-ghost-red{% endif %}">{{ t[op] }}</button>
           </form>
           {% endfor %}</div>{% else %}{{ t.hamster_queued }}{% endif %}
         </td>
