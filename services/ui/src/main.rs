@@ -2480,6 +2480,7 @@ async fn hamster_api(
         "library",
         "status",
         "cached",
+        "wipe",
     ];
     // What: lookup-ID and evict-ID carry one app id.
     // Why: the library row checks or frees one game.

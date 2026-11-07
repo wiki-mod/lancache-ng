@@ -438,5 +438,7 @@
   "cache_evict": "Aus dem Cache entfernen",
   "cache_evict_sure": "Wirklich entfernen?",
   "cache_freed": "{x} freigegeben",
+  "cache_wipe": "Ganzen Cache leeren",
+  "cache_wipe_sure": "Wirklich alles löschen?",
   "games_search": "Name, App-ID oder Regex"
 }

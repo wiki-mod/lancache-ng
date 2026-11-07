@@ -78,6 +78,30 @@
           <button type="submit" class="btn" style="margin-top:23px;">{{ t.resize_cache }}</button>
         </div>
       </form>
+      {# What: empties the whole cache on a 2nd click #}
+      {# Why: DoMe 07.11.: full wipe on the overview #}
+      {# From: Issue #871 | PR #1991 #}
+      <div style="margin-top:12px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+        <button type="button" id="cache-wipe" class="btn btn-sm btn-ghost-red">{{ t.cache_wipe }}</button>
+        <span id="cache-wipe-state" class="field-hint" style="margin:0;"></span>
+      </div>
+      <script>
+      (function () {
+        const b = document.getElementById('cache-wipe');
+        const st = document.getElementById('cache-wipe-state');
+        const gib = function (n) { return (n / 1073741824).toFixed(1) + ' GiB'; };
+        b.addEventListener('click', function () {
+          if (!b.dataset.sure) { b.dataset.sure = '1'; b.textContent = LC_T.cache_wipe_sure; return; }
+          b.disabled = true; b.textContent = LC_T.loading;
+          fetch("{{ routes.hamster_api | safe }}".replace('{op}', 'wipe'), {
+            method: 'POST', headers: { 'X-CSRF-Token': '{{ csrf_token }}' }
+          }).then(function (r) { return r.ok ? r.json() : r.text().then(function (t) { throw new Error(t); }); })
+            .then(function (v) { st.textContent = LC_T.cache_freed.replace('{x}', gib(v.freed)); b.textContent = LC_T.cache_wipe; })
+            .catch(function (e) { window.LancacheUi.fail(e); b.textContent = LC_T.cache_wipe; })
+            .finally(function () { b.disabled = false; delete b.dataset.sure; });
+        });
+      })();
+      </script>
     </div>
   </div>
 

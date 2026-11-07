@@ -1699,6 +1699,35 @@ fn cached(c: &Ctx) -> Result<Value, String> {
     Ok(json!({"apps": apps}))
 }
 
+// What: delete every file in the cache, keep folders.
+// Why: DoMe 07.11.: one button empties the whole cache.
+// From: Issue #871 | PR #1991
+fn wipe_dir(dir: &Path, freed: &mut (u64, u64)) -> Result<(), String> {
+    let rd = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    for e in rd {
+        let e = e.map_err(|e| e.to_string())?;
+        let ty = e.file_type().map_err(|e| e.to_string())?;
+        if ty.is_dir() {
+            wipe_dir(&e.path(), freed)?;
+        } else if ty.is_file() {
+            let len = e.metadata().map(|m| m.len()).unwrap_or(0);
+            remove(&e.path())?;
+            freed.0 += len;
+            freed.1 += 1;
+        }
+    }
+    Ok(())
+}
+
+// What: empty the whole cache of every service.
+// Why: DoMe 07.11.: full wipe next to per-game evict.
+// From: Issue #871 | PR #1991
+fn wipe(c: &Ctx) -> Result<Value, String> {
+    let mut freed = (0, 0);
+    wipe_dir(&PathBuf::from(c.s.text("CACHE_DIR")?), &mut freed)?;
+    Ok(json!({"freed": freed.0, "files": freed.1}))
+}
+
 // What: depots of one app from PICS, then saved.
 // Why: games never preloaded have no saved depots.
 // From: Issue #871 | PR #1991
@@ -1929,6 +1958,7 @@ async fn command(c: Ctx, args: &[String]) -> Result<Value, String> {
         Some("logout") => remove(&c.path(TOKEN_FILE)).map(|()| json!({"logged_in": false})),
         Some("library") => library(&c, &client).await,
         Some("cached") => cached(&c),
+        Some("wipe") => wipe(&c),
         Some("lookup") => app_cache(&c, &args[1..], false).await,
         Some("evict") => app_cache(&c, &args[1..], true).await,
         Some("add") => submit(&c, &parse_add(&args[1..])?),
