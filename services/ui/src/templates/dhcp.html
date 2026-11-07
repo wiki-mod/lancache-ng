@@ -231,7 +231,7 @@
         </ul>
       </div>
     {% endif %}
-    {% if dhcp_has_kea %}
+    {% if not dhcp_has_kea %}<p class="text-lg font-bold text-orange-400">{{ t.dhcp_server_is_not_the_active }}</p>{% endif %}
   {# What: toggles Kea dhcp-ddns.enable-updates live #}
   {# Why: DNS writes are a separate decision from DHCP #}
   {# From: Issue #1076 #}
@@ -536,9 +536,6 @@
     </div>
   </div>
 
-    {% else %}
-    <p class="text-lg font-bold text-orange-400">{{ t.dhcp_server_is_not_the_active }}</p>
-    {% endif %}
   </div>
 </div>
 {% endblock %}
@@ -598,7 +595,6 @@
     document.getElementById('compare-caret').textContent = open ? '▾' : '▸';
   });
 </script>
-{% if dhcp_has_kea %}
 <script>
 // What: shows or hides the new-subnet form
 // Why: the form stays hidden until the button is pressed
@@ -617,7 +613,6 @@ function toggleEditSubnet(id) {
 }
 
 </script>
-{% endif %}
 <script>
 // What: empties and hides one detail list of the DHCP check
 // Why: one owner for both lists; no stale field remains
