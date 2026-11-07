@@ -5251,6 +5251,9 @@ Commands:
                        config when the Admin UI itself is unreachable.
                        Supported: kea, dns/pdns (dns/pdns also takes a <zone>
                        argument -- run with --help for the full shape).
+  reset-sign-in [install-dir]
+                       Turn the Admin UI sign-in off after a lockout; set a
+                       new user name and password in the UI afterwards.
   help, --help         Show this compact command list.
 
 Compatibility aliases:
@@ -5354,6 +5357,16 @@ moved to a new image set since the last update -- an unchanged channel is a
 silent no-op, not a full pull-and-restart. When it does act, it runs the
 exact same ordered, health-gated update as ./setup.sh update. If
 [install-dir] is omitted, ${DEFAULT_INSTALL_DIR} is used.
+EOF
+            ;;
+        reset-sign-in)
+            cat <<EOF
+Usage: sudo ./setup.sh reset-sign-in [install-dir]
+
+Turns the Admin UI sign-in off when you are locked out. It removes the saved
+password hash and restarts the ui container. Afterwards open the Admin UI and
+set a new user name and password under General, Sign-in. If [install-dir] is
+omitted, ${DEFAULT_INSTALL_DIR} is used.
 EOF
             ;;
         update-ip)
@@ -7553,6 +7566,25 @@ restore_update_ip_env() {
 # What: reconfigures IPs of an existing install
 # Why: uses the install's directory, not the repo
 # From: Issue #1683 | PR #1858
+# What: turns the Admin UI sign-in off after a lockout
+# Why: DoMe 07.11.: a locked-out user needs a way back
+# From: Issue #1683 | PR #1985
+cmd_reset_sign_in() {
+    ensure_default_install_dir
+    local install_dir="${1:-$DEFAULT_INSTALL_DIR}" env_file project out rc=0
+    install_dir=$(resolve_stack_dir "$(realpath -m "$install_dir")") || exit $?
+    [[ "$(id -u)" = "0" ]] \
+        || die "This script must be run as root (sudo ./setup.sh reset-sign-in [install-dir])."
+    env_file=$(require_stack_env_file "$install_dir") || exit $?
+    project=$(compose_project_name "$install_dir" "$env_file") \
+        || die "Cannot determine the compose project of $install_dir (exit $?)."
+    out=$(stack_compose "$install_dir" "$env_file" -p "$project" exec -T ui lancache-ui reset-sign-in 2>&1) || rc=$?
+    [[ $rc -eq 0 ]] || die "lancache-ui reset-sign-in in the ui container failed (exit $rc): $out"
+    stack_compose "$install_dir" "$env_file" -p "$project" restart ui >/dev/null \
+        || die "The ui container did not restart (exit $?); sign-in turns off on its next start."
+    print_ok "Admin UI sign-in is off. Set a new user name and password under General, Sign-in."
+}
+
 cmd_update_ip() {
     ensure_default_install_dir
     local install_dir="${1:-$DEFAULT_INSTALL_DIR}"
@@ -8340,6 +8372,8 @@ case "$setup_command" in
         cmd_configure_upstream_dns "${2:-$DEFAULT_INSTALL_DIR}"; exit 0 ;;
     reset-to-last-known-good-config)
         shift; cmd_reset_to_last_known_good_config "$@"; exit 0 ;;
+    reset-sign-in)
+        cmd_reset_sign_in "${2:-$DEFAULT_INSTALL_DIR}"; exit 0 ;;
     help|--help|-h) print_usage; exit 0 ;;
     *)           die "Unknown command: $1. Run './setup.sh --help' for available commands." ;;
 esac

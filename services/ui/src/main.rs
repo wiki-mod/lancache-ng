@@ -3243,8 +3243,25 @@ async fn command(s: &Settings, args: &[String]) -> Option<Result<(), String>> {
         Some("healthcheck") => Some(healthcheck(s).await),
         Some("render-dns") => Some(render_dns(s)),
         Some(DHCP_PROBE_CMD) => Some(dhcp_probe_cli(s)),
+        Some("reset-sign-in") => Some(reset_sign_in()),
         _ => None,
     }
+}
+
+// What: drop the saved password hash; sign-in is off.
+// Why: DoMe 07.11.: a locked-out user needs a way back.
+// From: Issue #1683 | PR #1985
+fn reset_sign_in() -> Result<(), String> {
+    let path = process_env(SETTINGS_FILE_ENV).ok_or("no settings file set")?;
+    let old = std::fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))?;
+    let kept: String = old
+        .lines()
+        .filter(|l| !l.starts_with("UI_PASSWORD_HASH="))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    std::fs::write(&path, kept).map_err(|e| format!("{path}: {e}"))?;
+    println!("{}", json!({"sign_in": "off"}));
+    Ok(())
 }
 
 // What: one DHCP probe; the report as JSON.
