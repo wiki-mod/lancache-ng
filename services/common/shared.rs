@@ -2409,23 +2409,30 @@ pub mod recursor_conf {
     // Why: live 05.11. (U4): own IP made a query loop.
     // From: Issue #1683 | PR #1980
     fn upstream_servers(s: &Settings) -> Result<Vec<String>, String> {
-        let own: Vec<String> = ["IP_HTTP", "IP_HTTPS", "LISTEN_IP", "LISTEN_IP_HTTPS"]
+        let own = own_ips(s);
+        let list = s.list("DNS_UPSTREAM_SERVERS");
+        for raw in &list {
+            upstream_entry("DNS_UPSTREAM_SERVERS", raw, &own)?;
+        }
+        Ok(list)
+    }
+
+    // What: the addresses this LanCache-NG answers on.
+    // Why: one list for every upstream loop check.
+    // From: Issue #1683 | PR #1985
+    pub fn own_ips(s: &Settings) -> Vec<String> {
+        ["IP_HTTP", "IP_HTTPS", "LISTEN_IP", "LISTEN_IP_HTTPS"]
             .iter()
             .filter_map(|k| s.text(k).ok())
             .filter(|v| !v.is_empty())
-            .collect();
-        let list = s.list("DNS_UPSTREAM_SERVERS");
-        for raw in &list {
-            upstream_entry(raw, &own)?;
-        }
-        Ok(list)
+            .collect()
     }
 
     // What: one upstream: IP, [IPv6]:port or IPv4:port.
     // Why: live 06.11.: "[fd00::1" was saved unchecked.
     // From: Issue #1683
-    pub fn upstream_entry(raw: &str, own: &[String]) -> Result<(), String> {
-        let bad = || format!("DNS_UPSTREAM_SERVERS: {raw} is no IP address");
+    pub fn upstream_entry(key: &str, raw: &str, own: &[String]) -> Result<(), String> {
+        let bad = || format!("{key}: {raw} is no IP address");
         let (host, port) = match raw.strip_prefix('[') {
             Some(rest) => {
                 let (h, tail) = rest.split_once(']').ok_or_else(bad)?;
@@ -2446,7 +2453,7 @@ pub mod recursor_conf {
         let ip: std::net::IpAddr = host.parse().map_err(|_| bad())?;
         if ip.is_loopback() || ip.is_unspecified() || own.iter().any(|o| *o == host) {
             return Err(format!(
-                "DNS_UPSTREAM_SERVERS: {raw} is this LanCache-NG itself; that would loop"
+                "{key}: {raw} is this LanCache-NG itself; that would loop"
             ));
         }
         Ok(())
@@ -3543,6 +3550,13 @@ pub mod render {
         let s = o.s;
         let src = PathBuf::from(s.text("NGINX_TEMPLATE_DIR")?);
         let dst = PathBuf::from(s.text("NGINX_CONF_DIR")?);
+        // What: nginx resolvers must not be this host.
+        // Why: threat model G3: own DNS sends CDNs here.
+        // From: Issue #1683 | PR #1985
+        let own = crate::recursor_conf::own_ips(s);
+        for raw in s.list("NGINX_UPSTREAM_RESOLVER") {
+            crate::recursor_conf::upstream_entry("NGINX_UPSTREAM_RESOLVER", &raw, &own)?;
+        }
         let psl = nginx_conf::Psl::parse(&read(&src.join(s.text("NGINX_PSL_FILE")?))?);
         let hosts = nginx_conf::hosts(domains, &psl)?;
         let https = s.flag("HTTPS_ENABLED")?;

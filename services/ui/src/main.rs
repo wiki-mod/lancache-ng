@@ -621,17 +621,17 @@ async fn save(
         return Err(bad_request(tr("err_no_domain").replace("{x}", d)));
     }
     // What: each upstream entry is checked before save.
-    // Why: live 06.11.: "[fd00::1" was saved unchecked.
-    // From: Issue #1683
-    if let Some(v) = form.get("DNS_UPSTREAM_SERVERS") {
-        let s = app.settings();
-        let own: Vec<String> = ["IP_HTTP", "IP_HTTPS"]
-            .iter()
-            .filter_map(|k| s.text(k).ok())
-            .filter(|ip| !ip.is_empty())
-            .collect();
-        for raw in config::list_items(v) {
-            lancache_ng::recursor_conf::upstream_entry(raw, &own).map_err(bad_request)?;
+    // Why: live 06.11. + threat model G3: no self loop.
+    // From: Issue #1683 | PR #1985
+    let own = lancache_ng::recursor_conf::own_ips(&app.settings());
+    for key in ["DNS_UPSTREAM_SERVERS", "NGINX_UPSTREAM_RESOLVER"] {
+        for raw in form
+            .get(key)
+            .map(|v| config::list_items(v))
+            .into_iter()
+            .flatten()
+        {
+            lancache_ng::recursor_conf::upstream_entry(key, raw, &own).map_err(bad_request)?;
         }
     }
 
