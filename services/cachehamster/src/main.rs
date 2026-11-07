@@ -1214,7 +1214,13 @@ impl Cm {
             queue: Default::default(),
             limit: cfg.limit,
         };
-        let ip = PbOut::default().fixed32(1, 0);
+        // What: a login id of its own per CM connection.
+        // Why: two jobs logged each other off (eresult 34).
+        // From: Issue #871 | PR #1985
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.subsec_nanos());
+        let ip = PbOut::default().fixed32(1, nanos | 1);
         let logon = PbOut::default()
             .int(1, cfg.logon[0])
             .int(5, cfg.logon[1])
