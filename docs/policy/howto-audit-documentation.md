@@ -28,21 +28,23 @@ code and against `AGENTS.md`. It applies to each file that carries the section
 
 ## 2. Binding rules
 
-`AGENTS.md` is one rulebook (`AG-LAW-001`). An audit passes only when every
-applicable rule passes; passing one rule does not establish compliance.
+`AGENTS.md` is one rulebook (`AG-LAW-001`). Every applicable rule applies to
+the audited change at the same time.
 
-| Rule | Requirement for an audit |
+A rule is read in its complete text (`AG-WF-035`, `AG-WF-044`). This policy
+names rules by identifier only and does not restate their content. A partial
+quotation or a paraphrase of a rule does not replace reading it.
+
+| Topic of the audit | Rules to read in full |
 | --- | --- |
-| `AG-LAW-001` | All applicable rules apply to the audited change as a whole |
-| `AG-INT-001` | A factual claim needs evidence obtained in the audit; claim scope does not exceed evidence scope |
-| `AG-INT-002` | Results represent observed reality; adverse evidence is not hidden |
-| `AG-DOC-001` | Relevant documentation matches the implementation; stale documentation blocks completion |
-| `AG-DOC-002` | Verified code behavior is ground truth; a document that contradicts it is stale |
-| `AG-DOC-008` to `AG-DOC-010` | A source conflict is not resolved silently; it is corrected or escalated |
-| `AG-GH-001` | GitHub-visible content, including documentation, is English |
-| `AG-CODE-011` | Reasoning, search before, search after and one canonical owner are recorded per change |
-| `AG-VAL-016` | Verification runs in the matching `build-tools` environment |
-| `AG-WF-026` | Substantive knowledge is persisted in a durable record |
+| Rulebook as a whole | `AG-LAW-001` to `AG-LAW-004` |
+| Evidence and results | `AG-INT-001`, `AG-INT-002` |
+| Documentation and precedence | `AG-DOC-001` to `AG-DOC-011` |
+| Language of GitHub-visible content | `AG-GH-001` |
+| Change evidence and ownership | `AG-CODE-011`, `AG-CODE-013` |
+| Verification environment | `AG-VAL-016` |
+| Durable record | `AG-WF-026` |
+| Reading and acceptance | `AG-WF-035`, `AG-WF-044` |
 
 ## 3. Preconditions
 
@@ -97,8 +99,8 @@ met.
 | Hypothesis | Inference from static evidence | "It appears" or "if" |
 | Unknown | No evidence | Not stated |
 
-Reading code does not prove runtime behavior. A runtime statement needs an
-observed result; without it the document states the static fact only.
+Each statement of the audited document has exactly one class. The class
+decides the wording (`AG-INT-001`, read in full).
 
 ## 7. Form of a document
 
@@ -116,13 +118,17 @@ Word search for step 8: `earlier`, `previously`, `no longer`, `used to`,
 
 ## 8. Conflicts
 
-| Conflict | Resolution |
+A conflict between sources is handled under the rules below, read in full. The
+audit record names the conflicting sources, the verified behavior and the rule
+applied.
+
+| Conflict | Rules |
 | --- | --- |
-| Document against verified code | The code governs (`AG-DOC-002`); the document is corrected |
-| Document against `SECURITY.md` | `SECURITY.md` takes precedence for security behavior (`AG-DOC-005`) unless verified code contradicts it |
-| Two documents | The one that governs its scope (`AG-DOC-006`) prevails; the other is corrected |
-| Code against a rule of `AGENTS.md` | The finding is reported to the maintainer (`AG-DOC-009`); the document names the code behavior and the rule |
-| Unresolvable | Escalation with sources and verified behavior (`AG-DOC-009`) |
+| Document against code | `AG-DOC-002`, `AG-DOC-010` |
+| Document against `SECURITY.md` | `AG-DOC-002`, `AG-DOC-005` |
+| Two documents | `AG-DOC-004` to `AG-DOC-007` |
+| Code against a rule of `AGENTS.md` | `AG-DOC-008`, `AG-DOC-009` |
+| Not resolvable from the sources | `AG-DOC-009` |
 
 ## 9. Section in each document
 

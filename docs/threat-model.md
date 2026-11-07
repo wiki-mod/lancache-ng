@@ -28,9 +28,9 @@ identifiers G1 to G3 are stable references used by code comments.
 
 | ID | Topic | State in the code (#1985 `9a4b4be4`) | Threat |
 |---|---|---|---|
-| G1 | Admin UI login | The compose file passes `UI_AUTH_USER` and `UI_AUTH_PASSWORD_HASH` to the UI as `UI_USER` and `UI_PASSWORD_HASH` (`deploy/prod/docker-compose.yml`). An unauthenticated Admin UI is an explicit choice made in the setup flow with a default of open (`ALLOW_INSECURE_UI=true` in the SOT runtime defaults): `setup.sh` asks "Protect Admin-UI with password? [y/N]" (default No) and, on No, "Allow Admin-UI without authentication?" (default from the SOT value); answering No to both repeats the question. An update appends `ALLOW_INSECURE_UI=true` to an install that has no login, so the open state is an explicit entry in `.env`. `AG-SEC-001` allows this as an explicit operator choice, including trusted LAN deployments. The `ui` process does not read `ALLOW_INSECURE_UI`, and `login_ok` accepts every request when the hash is empty, so the refusal that `AG-SEC-001` describes for "neither credentials nor `ALLOW_INSECURE_UI=true`" exists only in the setup flow. | T3 |
+| G1 | Admin UI login | The compose file passes `UI_AUTH_USER` and `UI_AUTH_PASSWORD_HASH` to the UI as `UI_USER` and `UI_PASSWORD_HASH` (`deploy/prod/docker-compose.yml`). An unauthenticated Admin UI is an explicit choice made in the setup flow with a default of open (`ALLOW_INSECURE_UI=true` in the SOT runtime defaults): `setup.sh` asks "Protect Admin-UI with password? [y/N]" (default No) and, on No, "Allow Admin-UI without authentication?" (default from the SOT value); answering No to both repeats the question. An update appends `ALLOW_INSECURE_UI=true` to an install that has no login, so the open state is an explicit entry in `.env`. `AG-SEC-001` governs this case. The `ui` process does not read `ALLOW_INSECURE_UI`, and `login_ok` accepts every request when the hash is empty, so the start behavior that `AG-SEC-001` governs exists only in the setup flow. | | T3 |
 | G2 | Kea Control Agent | `kea_conf::ctrl_agent` writes a basic `authentication` block (user `KEA_CTRL_USER`, password `KEA_CTRL_TOKEN`) and `kea::Api` sends them. The bind address is `KEA_CTRL_ADDRESS=@ANY_BIND_IP@` (`0.0.0.0`) on the host network. `KEA_CTRL_ALLOW_FROM` and `KEA_CTRL_CHAIN` exist only in the SOT; no code applies a firewall fence. | T12 |
-| G3 | nginx upstream resolver | `AG-OP-002` requires real upstream resolvers for nginx. `render::nginx_files` and the UI save path check every `NGINX_UPSTREAM_RESOLVER` entry with `recursor_conf::upstream_entry` (numeric address only; loopback, unspecified and this host's own addresses are refused as "would loop"). | T1 |
+| G3 | nginx upstream resolver | `AG-OP-002` governs the nginx upstream resolver. `render::nginx_files` and the UI save path check every `NGINX_UPSTREAM_RESOLVER` entry with `recursor_conf::upstream_entry` (numeric address only; loopback, unspecified and this host's own addresses are refused as "would loop"). | T1 |
 
 ---
 
@@ -198,7 +198,7 @@ injects malicious content that the proxy caches and serves to every client.
   numeric address or that is loopback, unspecified or one of this host's own
   addresses (`recursor_conf::upstream_entry`, gap G3), so the resolver cannot
   point back at the appliance by that route.
-- Cache key is `$host$uri$slice_range` (never `$request_uri`, `AG-OP-001`), so
+- Cache key is `$host$uri$slice_range` (`AG-OP-001` governs the key), so
   query-string signatures do not create separate cache objects and a
   per-request signature cannot be used to smuggle a distinct poisoned object
   under a shared key without also passing origin validation.
@@ -218,20 +218,15 @@ proxy into caching attacker-controlled content under a legitimate key.
 **Mitigations**:
 - Cache key includes the `Host` header (`$host$uri$slice_range`); responses are
   only cached after the origin fetch succeeds over verified TLS.
-- The proxy mode is a deliberate design choice (`AG-OP-003`): **lazy is the
-  mandated default** (cache-first: nginx takes the upstream destination from the
-  client `Host` or `$ssl_server_name`, `AG-KD-004`, so any host a client reaches
-  the cache for is proxied and new CDN hostnames work out of the box); **strict requires an
-  explicit operator opt-in** from an operator who accepts its tighter allowlist
-  and its maintenance burden. Strict limits proxied hosts to those derived from
-  `cdn-domains.txt` (deny-by-default `$cdn_host_allowed` map, rooted via the
-  vendored Public Suffix List; see `Psl` and `nginx_conf::hosts` in
-  `services/common/shared.rs`) and answers others with HTTP 403 in the
-  `http{}`/`https{}` `location /` blocks; the stream-level SNI listeners
-  enforce the same domain list differently — an unlisted SNI is routed to a
-  closed backend, not a 403. It breaks downloads until a missing CDN hostname is
-  added to `cdn-domains.txt` (`README.md`, `PROXY_SECURITY_MODE`), so it is a
-  trade-off, not a fix.
+- `PROXY_SECURITY_MODE` is `lazy` by default (SOT) and `strict` when the operator
+  selects it; `AG-OP-003` governs both modes. In `lazy` mode nginx takes the
+  upstream destination from the client `Host` or `$ssl_server_name`
+  (`AG-KD-004`) and `$cdn_host_allowed` defaults to allow. In `strict` mode it
+  defaults to deny and allows the hosts derived from `cdn-domains.txt` (rooted
+  via the vendored Public Suffix List; see `Psl` and `nginx_conf::hosts` in
+  `services/common/shared.rs`); other hosts get HTTP 403 in the `http{}` and
+  `https{}` `location /` blocks, and the stream-level SNI listeners route an
+  unlisted SNI to a closed backend.
 - `PROXY_ALLOWED_CLIENT_CIDRS` restricts which client networks the proxy will
   answer at all. Its default is the private networks and `fc00::/7`
   (`.github/yaml/build-manifest.yml`). For HTTP/HTTPS traffic
@@ -242,10 +237,8 @@ proxy into caching attacker-controlled content under a legitimate key.
 
 **Residual risk**: Medium — poisoning needs a device that is allowed to reach the
 cache; the client list (`PROXY_ALLOWED_CLIENT_CIDRS`) is the control that
-limits that set. The default `lazy` mode is the intended cache-first behavior
-(`AG-OP-003`), not a defect; an operator with untrusted devices on the LAN
-narrows the client list first and chooses `strict` only if the allowlist
-maintenance is acceptable. Ultimately bounded by the trusted-LAN assumption.
+limits that set. `AG-OP-003` governs the `lazy` and `strict` modes. Ultimately
+bounded by the trusted-LAN assumption.
 
 ---
 
@@ -259,13 +252,9 @@ control of the UI is full control of the host.
 **Likelihood**: Low on a firewalled LAN; High if the UI port is exposed to an
 untrusted network · **Impact**: Critical
 
-**Rule** (`AG-SEC-001`): the `ui` service MUST fail closed and MAY restart-loop
-when neither `UI_AUTH_USER` and `UI_AUTH_PASSWORD` nor `ALLOW_INSECURE_UI=true`
-is configured; a restarting UI logging `Admin-UI authentication is required` is
-expected security behavior; and `ALLOW_INSECURE_UI=true` remains a valid
-explicit operator choice for an intentionally unauthenticated UI, including
-trusted LAN deployments. The setup flow generates `UI_AUTH_PASSWORD` and
-delivers only its Argon2id hash.
+**Rule**: `AG-SEC-001` governs the start behavior of the `ui` service and the
+unauthenticated case. The setup flow generates `UI_AUTH_PASSWORD` and delivers
+only its Argon2id hash.
 
 **State in the code** (`services/ui/src/main.rs`, code of #1985 `9a4b4be4`):
 - **Password set:** the compose file passes `UI_AUTH_USER` and
@@ -293,7 +282,7 @@ delivers only its Argon2id hash.
 set it is Low. With the default (no password) anyone who can reach the address
 `UI_BIND_IP` selects (`IP_HTTP` by default, `deploy/prod/docker-compose.yml`)
 controls the stack and, through the Docker socket, the host: acceptable only on
-a trusted LAN, as `AG-SEC-001` states. `UI_BIND_IP=127.0.0.1` restricts it
+a trusted LAN. `UI_BIND_IP=127.0.0.1` restricts it
 further.
 
 ---
@@ -616,7 +605,7 @@ The following are **not** addressed by lancache-ng:
 - Private, firewalled LAN; control-plane ports unreachable from untrusted
   segments.
 - Admin UI with a password set, bound to `127.0.0.1`, or consciously left
-  unauthenticated on a trusted LAN (`AG-SEC-001`).
+  unauthenticated on a trusted LAN.
 - Zone transfers to secondaries only TSIG-signed (default).
 - Kea mode off, or Kea Control Agent port 8000 reachable only from trusted
   hosts (the appliance does not fence it; the basic-auth login protects it).
@@ -645,11 +634,10 @@ The following are **not** addressed by lancache-ng:
 1. Deploy on a trusted, firewalled LAN and keep control-plane ports off
    untrusted segments.
 2. Set an Admin UI password unless the UI is intentionally unauthenticated.
-   `ALLOW_INSECURE_UI=true` is a valid explicit choice on a trusted LAN
-   (`AG-SEC-001`), but not on anything reachable from an untrusted network.
+   `ALLOW_INSECURE_UI=true` (`AG-SEC-001`) is not for anything reachable from an
+   untrusted network.
 3. Narrow `PROXY_ALLOWED_CLIENT_CIDRS` when the LAN is not fully trusted;
-   `strict` proxy mode is an opt-in that accepts a maintained allowlist
-   (`AG-OP-003`).
+   `strict` proxy mode is an opt-in (`AG-OP-003`).
 4. Protect the local CA private key (`<CA_DIR>/ca.key`) in HTTPS mode.
 5. Restrict Kea Control Agent port 8000 at the host firewall while Kea mode is
    on; the appliance does not fence it.
