@@ -1030,7 +1030,10 @@ runtime:
     - PDNS_SOA_EDIT=INCREASE
     - PDNS_XFR_CYCLE=60
     - PROXY_ALLOWED_CLIENT_CIDRS=@PRIVATE_NETS@ fc00::/7
-    - PROXY_LOG_PROGRAM=nginx
+    # What: syslog folder holding proxy access lines.
+    # Why: syslog-ng files them under the container.
+    # From: Issue #1683 | PR #1985
+    - PROXY_LOG_PROGRAM=@CONTAINER_NAME_PROXY@
     - RECURSOR_AAAA_LUA_FILE=@CONFIG_DIR@/dns/filter-aaaa.lua
     - RECURSOR_RUN_DIR=/var/run/pdns-recursor
     - CHRONY_CONF_FILE=@CONFIG_DIR@/services/chrony.conf
