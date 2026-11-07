@@ -200,7 +200,7 @@ RUN set -euo pipefail; \
     actionlint --version
 
 # What: Go yq (mikefarah) from the upstream release, newest.
-# Why: CI 2.0 reads the SOT with it; Debian's yq is a jq wrapper.
+# Why: ci.sh reads the SOT with Go yq; apt yq differs.
 # From: Issue #1683
 RUN set -euo pipefail; \
     case "$(dpkg --print-architecture)" in \
