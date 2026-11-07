@@ -5,9 +5,9 @@ server IP address, installing the CA certificate on clients, choosing a DHCP
 mode, rolling back known-good configurations, backing up and restoring, and
 tuning the host network.
 
-Statements were checked against the repository on `current_dev`
-(`e223782d`). Section 9 lists what could not be checked without a running
-stack.
+Names, paths, keys, routes, commands and render behavior were checked against
+the repository on `current_dev` (`e223782d`). Section 9 lists what was carried
+over without a code check and what needs a running stack.
 
 ## Contents
 
@@ -654,10 +654,10 @@ The `proxy` service publishes its ports on Docker's default bridge network
 ### 8.1 Docker `userland-proxy`
 
 With `userland-proxy: true` (Docker's default) published ports go through
-`docker-proxy`, which can present the container with a rewritten source
-address. That would turn the source-address allowlist
-`PROXY_ALLOWED_CLIENT_CIDRS` into an all-or-nothing filter instead of a
-per-client filter.
+`docker-proxy`. A hypothesis, not verified here, is that `docker-proxy` can
+present the container with a rewritten source address, which would turn the
+source-address allowlist `PROXY_ALLOWED_CLIENT_CIDRS` into an all-or-nothing
+filter instead of a per-client filter. The test below decides it.
 
 Test on a deployment host, not on a busy shared runner: the change needs a
 Docker daemon restart that stops every running container.
@@ -789,6 +789,15 @@ restore flags and paths, the DHCP mode set and default (SOT `DHCP_MODES`,
 routes named above, the snapshot store and its users, the SOT retention values,
 `services/dns/cdn-domains.txt`, `deploy/prod/docker-compose.yml` publishing, and
 the files named in section 8.
+
+Carried over from the former documents without a code check in this pass:
+
+- the backup manifest paths of section 7.3 (`/srv/lancache/*`, the legacy
+  directories) and the restore guard conditions of section 7.4;
+- the channel directory move of `update` (section 7.1) beyond the `current`
+  link handling;
+- the tuning options of section 8 (kTLS preconditions, RPS, RFS, GRO), which are
+  host and kernel facts.
 
 Not checkable without a running stack or a real LAN:
 

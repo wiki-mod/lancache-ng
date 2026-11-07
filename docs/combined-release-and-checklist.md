@@ -5,9 +5,10 @@ release-channel contract, the handling of external images, the provenance
 evidence of a release, and the validation hurdles a release candidate has to
 pass before it is released.
 
-Statements below were checked against the repository on `current_dev`
-(`e223782d`). Where a statement could not be checked without a live stack,
-section 11 names it.
+Names, paths, keys, routes, commands, workflow triggers, jobs and SOT values
+were checked against the repository on `current_dev` (`e223782d`). Behavior
+statements carried over from the former documents without a code check, and
+procedures that need a live stack, are listed in section 11.4.
 
 ## Contents
 
@@ -864,6 +865,22 @@ procedures that still need a live run against current code:
 - the dashboard cache-size source and the `FailingStreak` hang check
   (10.4, 10.7).
 
+Carried over from the former documents without a code check in this pass:
+
+- the rollback of already moved channel tags and the double digest read of
+  `setup.sh` (sections 4.1 and 5);
+- that a release re-run never replaces an attached asset, and that the SBOM is
+  generated in Trivy CycloneDX mode (section 6);
+- the `sha256-<subject>` referrer rule, the delete re-classification and the
+  `release.retention` behavior beyond the values named (section 7);
+- the proxy behavior statements of section 10.4 (blind passthrough in HTTP
+  mode, shared cache key `$host$uri`, the four hurdles);
+- the `setup.sh update` flow descriptions of sections 10.11 and 10.12;
+- the pass criteria of sections 10.5, 10.8 and 10.9.
+
+The checklist in section 12 is assembled from sections 4 to 10; it adds no
+requirement that those sections do not state.
+
 ---
 
 ## 12. Release checklist
@@ -916,19 +933,8 @@ ticked.
   image) and `vex.openvex.json`.
 - [ ] `gh attestation verify "oci://<digest>" --owner wiki-mod` succeeds for
   every first-party image digest of the release.
-- [ ] `latest` points at the released stack and `nightly` at the accepted
-  `current_dev` stack; both resolve through `ci.sh channel-check`.
-- [ ] A fresh `setup.sh install` from the release archive pulls the matching
-  tag and starts.
-
-### 12.4 After the release
-
-- [ ] The `channel-check-latest` and `channel-check-nightly` issues are closed
-  or explained.
-- [ ] `ci.sh gc` (dry run) shows no KEEP/DELETE verdict that contradicts the
-  protected roots of section 7.1.
-- [ ] The rollback anchor (`sha-<full-sha>` and `vX.Y.Z` of the previous
-  release) is still present.
+- [ ] The `channel-check` job of `nightly.yml` passed for `latest` and
+  `nightly` (section 9.1).
 
 ---
 
