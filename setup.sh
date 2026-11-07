@@ -3882,7 +3882,7 @@ To proceed, choose one of these options:
      LANCACHE_IMAGE_CHANNEL=${testing} ./setup.sh install
 
 For details on release channels and their stability, see:
-  docs/release-versioning.md
+  docs/combined-release-and-checklist.md
 
 EOF
                 die "Cannot resolve the ${release} channel image ${ref} (${digest})."
@@ -5312,7 +5312,7 @@ the order prompts are expected to be asked. A blank line (or running out of
 lines) falls back to that prompt's own default, the same as an operator
 pressing Enter. Omitting the file entirely walks the all-defaults path.
 
-Intended consumer: docs/release-validation-plan.md reads the real prompt
+Intended consumer: docs/combined-release-and-checklist.md reads the real prompt
 sequence from this output instead of hand-encoding it, so a new prompt
 cannot silently drift out of sync with the validated install.
 EOF
@@ -8418,7 +8418,7 @@ else
             break
         fi
         # What: a retired name shows why it went
-        # Why: release-versioning asks for a clear answer
+        # Why: the release doc asks for a clear answer
         # From: Issue #1683 | PR #1858
         reason=$(awk -v c="${REPLY,,}" '$1 == c { sub(/^[^ ]+ /, ""); print; exit }' <<< "$retired")
         if [[ -n "$reason" ]]; then

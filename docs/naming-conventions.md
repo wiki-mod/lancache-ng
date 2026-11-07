@@ -98,7 +98,7 @@ where `<service>` is the same lowercase-hyphenated name as the Compose
 service and its key in the `services:` block of
 `.github/yaml/build-manifest.yml` (plus `build-tools`). This is already
 fully governed by `.github/yaml/build-manifest.yml` (the machine-readable
-inventory) and `docs/release-versioning.md` — this document does not duplicate that
+inventory) and `docs/combined-release-and-checklist.md` — this document does not duplicate that
 contract, it only asserts that the image name always matches the service
 name it packages. `LANCACHE_IMAGE_REGISTRY`, `LANCACHE_IMAGE_PREFIX`,
 `LANCACHE_IMAGE_TAG`, and `LANCACHE_IMAGE_CHANNEL` are the fixed
@@ -108,7 +108,7 @@ reference; do not introduce a second set of image-location variables.
 ### GHCR image tags
 
 Rule: the prefix `sha-` names a commit and nothing else. A per-commit tag is
-`sha-<full 40-hex commit SHA>` (AG-REL-015, `docs/release-versioning.md`).
+`sha-<full 40-hex commit SHA>` (AG-REL-015, `docs/combined-release-and-checklist.md`).
 A tag that names a build identity (the 64-hex hash of a service's build
 inputs, `docs/ci-2.0-architecture.md`) is
 `<release.tag_identity_prefix><build identity>-<arch>`, with the prefix
@@ -146,7 +146,7 @@ the Compose files and keeps the ones that exist in the checkout (today
 | Container names | `.github/yaml/build-manifest.yml` (`CONTAINER_NAME_PREFIX`, `CONTAINER_NAME_*`) | `container_name:` of both Compose files, `LOG_SWITCHES` in `services/common/config.rs` |
 | Docker volumes | `deploy/prod/docker-compose.yml` top-level `volumes:` block | the service `volumes:` lists in the same file |
 | Host bind-mount directories | the required variables of `deploy/prod/docker-compose.yml` | `docs/backup-restore.md`, `docs/how-to-change-ip.md`, `setup.sh` |
-| GHCR image/package names | `.github/yaml/build-manifest.yml` (`services:`) | `docs/release-versioning.md`, the `image:` lines of `deploy/prod` and `deploy/secondary` |
+| GHCR image/package names | `.github/yaml/build-manifest.yml` (`services:`) | `docs/combined-release-and-checklist.md`, the `image:` lines of `deploy/prod` and `deploy/secondary` |
 
 ## CI guard
 

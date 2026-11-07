@@ -48,8 +48,8 @@ infrastructure layer.
 ## Exception: the project's own channels
 
 The channels in SOT `release.channels` (`nightly`, `latest`) are mutable by
-design and exempt from the pinning rule; `docs/release-versioning.md` owns their
-semantics. Release-capable paths do not depend on a mutable `build-tools`
+design and exempt from the pinning rule; `docs/combined-release-and-checklist.md`
+owns their semantics. Release-capable paths do not depend on a mutable `build-tools`
 channel tag (CONTRIBUTING.md).
 
 ## Computing a pin

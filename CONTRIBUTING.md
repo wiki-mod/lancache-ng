@@ -394,7 +394,7 @@ Setup and update changes must preserve these rules:
 
 ## Release and package changes
 
-Release and package changes must follow `docs/release-versioning.md` and the
+Release and package changes must follow `docs/combined-release-and-checklist.md` and the
 SOT `.github/yaml/build-manifest.yml` (services, `build_toolchain`,
 `base_images`, `release`).
 
@@ -404,8 +404,8 @@ Required rules:
 - `latest` is the channel from `master`; release tags `vX.Y.Z` move it
 - `nightly` is the experimental channel from `current_dev`, moved once a
   day and on demand by `.github/workflows/nightly.yml` after validation, never
-  rebuilt there (formerly `edge`; see `docs/release-versioning.md`, the
-  authoritative source for this channel's semantics, for the full history)
+  rebuilt there (see `docs/combined-release-and-checklist.md`, the
+  authoritative source for the channel semantics)
 - release candidates use `vX.Y.Z-rc.N` and must be GitHub prereleases
 - releases use `vX.Y.Z` and may move `latest`
 - every job after the first runs in the build-tools image the first job

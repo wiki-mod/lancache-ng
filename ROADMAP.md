@@ -15,11 +15,11 @@ file should be updated to match.
 
 ## Where the project is today
 
-- Current stable line: pre-1.0 `v0.x` (see `docs/release-versioning.md` for
+- Current stable line: pre-1.0 `v0.x` (see `docs/combined-release-and-checklist.md` for
   the channel/tagging model). The project is pre-1.0 deliberately — breaking
   changes still bump the minor version, not a major version, until a
   maintainer-decided production-readiness milestone (issue #819).
-- Active development branch: `current_dev` (see `docs/release-versioning.md`
+- Active development branch: `current_dev` (see `docs/combined-release-and-checklist.md`
   and issues #825/#1141 for the branch/channel model). `master` only receives
   occasional stable-release promotions.
 - `v0.3.0` retired the old parallel `deploy/dev/` environment (#766) in favor

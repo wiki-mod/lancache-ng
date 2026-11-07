@@ -745,7 +745,7 @@ production, and `setup.sh` warns on install and on every update with it.
 `setup.sh` resolves a mutable channel by reading every first-party image's
 channel digest twice while no promotion runs, and writes each image as
 `LANCACHE_IMAGE_REF_<NAME>=<image>@<digest>`, which Docker Compose pulls
-(see [docs/release-versioning.md](docs/release-versioning.md)). If you install from a tagged release archive or a
+(see [docs/combined-release-and-checklist.md](docs/combined-release-and-checklist.md)). If you install from a tagged release archive or a
 checked-out `vX.Y.Z` / `vX.Y.Z-rc.N` tag, set `LANCACHE_IMAGE_CHANNEL=pinned`
 and `LANCACHE_IMAGE_TAG` to that same release tag so the running containers
 match the source tree.
@@ -756,7 +756,7 @@ local compiler caches or remote compiler services.
 
 Current prebuilt first-party images are published for both `linux/amd64` and `linux/arm64`, built natively on GitHub-hosted arm64 runners rather than emulated -- see `docs/self-hosted-actions-runner.md`.
 
-Release channels and package rules are documented in `docs/release-versioning.md`. External image handling is documented in `docs/release-external-images.md`.
+Release channels, package rules and external image handling are documented in `docs/combined-release-and-checklist.md`.
 
 Manual production changes belong in `deploy/prod/.env.local`, which is ignored by git and preferred by
 `setup.sh update`, `setup.sh auto-update`, `setup.sh backup`, `setup.sh restore`,

@@ -365,5 +365,5 @@ interface:
 No automated check renders or exercises the two dnsmasq modes, a real Kea
 lease with its options, a reservation's effect on a real lease, or a DDNS
 update from a lease. The former simulation scripts and their workflow jobs are
-not in the tree. These behaviors are checked live on a real LAN, see §3 of
-[docs/release-validation-plan.md](release-validation-plan.md).
+not in the tree. These behaviors are checked live on a real LAN, see section 10.3 of
+[docs/combined-release-and-checklist.md](combined-release-and-checklist.md).

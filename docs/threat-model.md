@@ -611,8 +611,9 @@ The following are **not** addressed by lancache-ng:
 5. **Hardware / side-channel attacks** (Spectre, Meltdown, etc.).
 6. **Physical access** to the appliance host.
 7. **Supply-chain attacks** on base images or dependencies (mitigated only by
-   digest-pinning external images per `docs/release-versioning.md` and upstream
-   practices, not by this appliance).
+   the SOT-owned external image list per
+   `docs/combined-release-and-checklist.md` and upstream practices, not by this
+   appliance).
 
 ---
 
