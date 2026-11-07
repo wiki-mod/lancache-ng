@@ -480,7 +480,11 @@
     border-radius: 8px; padding: 10px 12px; font-family: var(--font-mono); font-size: 13px; max-width: 480px;
   }
   .copy-row code { flex: 1; overflow-x: auto; white-space: nowrap; }
-  .copy-row.cmd-row { margin: 6px 0; }
+  /* What: command boxes span the full width
+     Why: DoMe 07.11.: short boxes with a scrollbar
+     From: Issue #1683 | PR #1985 */
+  .copy-row.cmd-row { margin: 6px 0; max-width: none; }
+  .copy-row.cmd-row code { white-space: pre-wrap; overflow-wrap: anywhere; }
   .cmd-os { flex: none; color: var(--mist); font-size: 12px; }
   .t-desc code, .field-hint code, .section-sub code { white-space: nowrap; }
   .copy-row button {
