@@ -34,7 +34,7 @@ is authoritative and this document should be corrected.
 | Central Logging    | Log collection, normalization and retention                       | syslog-ng (`services`)            | Production               |
 | NTP                | LAN time service and optional host clock discipline               | chrony (`services`)              | Optional production mode |
 | SNMP statistics    | Host and container figures for the Admin UI graphs                | snmpd (`services`, `dns`)         | Production               |
-| CacheHamster       | Steam cache-prefill engine                                        | Rust (`services`)                 | In code and wired; see section |
+| CacheHamster       | Steam cache-prefill engine                                        | Rust (`services`)                 | Production, under development |
 | setup.sh           | Installation and lifecycle orchestration                          | Bash (host)                       | Production               |
 
 ## Proxy
@@ -541,9 +541,12 @@ Disabling NTP does not disable proxying, DNS or the Admin UI.
 
 ### Status
 
-`services/cachehamster` is the Steam pre-cache daemon. `lancache-cachehamster`
-runs in the `services` container (`daemon` mode, started by OpenRC) and the
-Admin UI has a CacheHamster page. The UI runs the daemon's commands in the
+`services/cachehamster` is the Steam pre-cache daemon. It is in production use
+and under development. `lancache-cachehamster` runs in the `services`
+container (`daemon` mode, started by OpenRC: row `lancache-cachehamster` of the
+`services` `processes` list in `.github/yaml/build-manifest.yml`, described in
+`docs/architecture-ng.md`, section "Pre-caching") and the Admin UI has a
+CacheHamster page. The UI runs the daemon's commands in the
 `services` container through the Docker API (`hamster`, `exec_in`).
 
 No test covers it on `current_dev`; prefill behavior is described from the code,
@@ -748,8 +751,8 @@ The following boundaries are intentional or currently unresolved:
 6. Some advanced PXE-specific configuration is not exposed with the same UI
    depth as the normal DHCP mode and Kea configuration.
 
-7. CacheHamster is implemented in code and wired into the `services` container, but
-   it has no test on `current_dev`; treat prefill as unverified until it has been run.
+7. CacheHamster is in production use and under development. It has no test on
+   `current_dev`; its behavior is described from the code.
 
 8. The Admin UI is unauthenticated by an explicit choice with a default of open
    (`ALLOW_INSECURE_UI=true`; `setup.sh` asks for a password, then asks whether
