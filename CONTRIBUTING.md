@@ -286,7 +286,7 @@ dependencies, across every ecosystem this repository uses.
 - **GitHub Actions** (`.github/workflows/*.yml`): pinned to full commit
   SHAs with a version comment (never floating tags like `@v4`), per this
   file's "Quality and release process expectations" section above.
-- **Docker base images**: pinned per `docs/ci-image-pinning-policy.md`,
+- **Docker base images**: pinned per `docs/policy/ci-image-pinning-policy.md`,
   which documents which images are pinned by digest vs. version tag and
   why, split between runtime base images and build-time builder images.
 - **Automated update tracking**: `.github/dependabot.yml` runs weekly
