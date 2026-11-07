@@ -14,7 +14,7 @@ Do **not** open a public GitHub issue for security vulnerabilities. Private disc
 |---------|--------|----------------|
 | 0.x (pre-1.0) | Current | Ongoing |
 
-lancache-ng has not reached a `1.0.0` release yet (see `docs/release-versioning.md`
+lancache-ng has not reached a `1.0.0` release yet (see `docs/combined-release-and-checklist.md`
 for the full channel/tagging model); the current stable release line is `v0.x`.
 We aim to provide security updates for the current stable release. Older
 releases are not actively maintained.
@@ -24,7 +24,7 @@ releases are not actively maintained.
 - **What is supported**: only the most recently published stable `vX.Y.Z`
   release tag (the one `latest` currently points at) receives bug fixes and
   security updates. Every `vX.Y.Z` release is a full stack release (see
-  `docs/release-versioning.md`'s "Core Rule") -- support is per stack release,
+  `docs/combined-release-and-checklist.md`, section "Release model") -- support is per stack release,
   not per individual service image.
 - **What kind of support**: security fixes and correctness bug fixes, applied
   by publishing a new stable release. There is no separate long-term-support

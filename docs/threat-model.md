@@ -57,12 +57,12 @@ the top is a signal that its threats need re-checking.
 | Proxy request policy (client CIDR + host allowlists) | `services/common/shared.rs` (`nginx_conf`), `services/ui/nginx/proxy-params.conf`, `services/ui/nginx/conf.d/*.conf` | `current_dev` `3005b2b4` | T2, T9 |
 | Admin UI authentication | `services/ui/src/main.rs` (`login_ok`, `auth`, `Csrf`), `deploy/prod/docker-compose.yml`, `setup.sh` | #1985 `9a4b4be4` | T3 |
 | Docker access (socket in `services` and `ui`) | `deploy/prod/docker-compose.yml`, `services/common/shared.rs` (`docker::Api`) | `current_dev` `3005b2b4` | T6 |
-| DHCP: Kea mode | `services/common/shared.rs` (`kea_conf`, `kea::Api`), `deploy/prod/docker-compose.yml` (`dhcp`), `docs/dhcp-modes.md` | #1985 `9a4b4be4` | T12 |
-| DHCP: dnsmasq-proxy and dnsmasq-relay modes | `services/common/shared.rs` (`dnsmasq_conf`), `docs/dhcp-modes.md` | `current_dev` `3005b2b4` | T12, T13 |
+| DHCP: Kea mode | `services/common/shared.rs` (`kea_conf`, `kea::Api`), `deploy/prod/docker-compose.yml` (`dhcp`), `docs/README.md` (section 5) | #1985 `9a4b4be4` | T12 |
+| DHCP: dnsmasq-proxy and dnsmasq-relay modes | `services/common/shared.rs` (`dnsmasq_conf`), `docs/README.md` (section 5) | `current_dev` `3005b2b4` | T12, T13 |
 | Zone transfer to secondaries (TSIG, NOTIFY, AXFR) | `services/common/shared.rs` (`pdns_conf::auth`), `services/ui/src/main.rs` (`rotate_tsig`, `TSIG-ALLOW-AXFR`, `AXFR-MASTER-TSIG`) | `current_dev` `3005b2b4` | T5 |
 | Secondary-node registration | `services/ui/src/main.rs` (`register`, `registration_token`, `secondary_action`), `deploy/secondary/docker-compose.yml` | `current_dev` `3005b2b4` | T5, T14 |
-| Console exclusion-by-omission | `services/dns/cdn-domains.txt`, `docs/install-ca-cert.md` | `current_dev` `3005b2b4` | T4, T10 |
-| Zone/record known-good snapshot + rollback | `services/ui/src/main.rs` (`rollback`, `zone_snapshots_cli`, route `/domains/zone-rollback`), `docs/known-good-config-snapshots.md` | `current_dev` `3005b2b4` | T4 |
+| Console exclusion-by-omission | `services/dns/cdn-domains.txt`, `docs/README.md` (section 4) | `current_dev` `3005b2b4` | T4, T10 |
+| Zone/record known-good snapshot + rollback | `services/ui/src/main.rs` (`rollback`, `zone_snapshots_cli`, route `/domains/zone-rollback`), `docs/README.md` (section 6) | `current_dev` `3005b2b4` | T4 |
 
 ---
 
@@ -470,12 +470,12 @@ default; the operator must configure limits.
 **Likelihood**: High (user error) · **Impact**: Low (fails safe, no compromise)
 
 **Mitigations**:
-- Clear per-OS install docs (`docs/install-ca-cert.md`) and, in future, an
+- Clear per-OS install docs (`docs/README.md`, section 4) and, in future, an
   easier distribution path (see that doc's distribution section).
 - HTTP mode is the CA-free alternative.
 - Devices that *cannot* install a CA (consoles) are intentionally excluded from
   the spoof list, so they never hit this failure — see T4 and the console note in
-  `docs/install-ca-cert.md`.
+  `docs/README.md`, section 4.2.
 
 **Residual risk**: Low — intended, safe-failing behaviour.
 
@@ -510,7 +510,7 @@ unaffected, only HTTP gets cached).
   from `cdn-domains.txt`, with an in-file explanation. Consoles keep using the
   appliance as an ordinary, unrestricted DNS resolver; their CDN names resolve to
   the real internet and work normally (no caching benefit, no breakage).
-- `docs/install-ca-cert.md` (named in the in-file explanation) lists the
+- `docs/README.md`, section 4.2 (named in the in-file explanation) lists the
   hosts to *opt in* to Xbox-PC (Game Pass) or Nintendo caching only on a LAN
   known to have no such consoles.
 
@@ -563,7 +563,7 @@ proxy-DHCP DNS options are not reliably honoured by ordinary clients.
 **Likelihood**: Medium · **Impact**: Low–Medium (cache bypass, not compromise)
 
 **Mitigations** (verified in `services/common/shared.rs` `dnsmasq_conf` and
-`docs/dhcp-modes.md`):
+`docs/README.md`, section 5):
 - A render with a bad value fails instead of producing a config
   (`dnsmasq_conf::render` returns an error; `render::all` returns the errors
   instead of files).
@@ -571,13 +571,13 @@ proxy-DHCP DNS options are not reliably honoured by ordinary clients.
   router DHCP cannot be disabled; the Admin UI's DHCP check probes for competing
   servers and DNS-option override (`dhcp_probe`).
 - The optional-option surface (router/NTP/domain/PXE-boot/custom options via
-  `dhcp-option-pxe`) is documented in `docs/dhcp-modes.md` as carrying the same
+  `dhcp-option-pxe`) is documented in `docs/README.md`, section 5, as carrying the same
   limitation as the DNS option: all of it rides the supplemental ProxyDHCP/PXE
   exchange, never the ordinary client's real lease.
 - dnsmasq's ProxyDHCP mode does not reply to *any* DHCPDISCOVER unless at least
   one `pxe-service` directive is present. `dnsmasq_conf::pxe` renders those
   only when the operator sets `DHCP_PROXY_PXE_BOOT_SERVER` plus a boot filename
-  (see `docs/dhcp-modes.md`, "PXE boot-pointer"). By default `dnsmasq-proxy`
+  (see `docs/README.md`, section 5.3). By default `dnsmasq-proxy`
   mode never replies to a DHCPDISCOVER and this threat does not apply.
 
 **Residual risk**: Medium once the PXE boot-pointer opt-in is configured — by
@@ -635,7 +635,7 @@ The following are **not** addressed by lancache-ng:
 6. **Physical access** to the appliance host.
 7. **Supply-chain attacks** on base images or dependencies (not addressed by
    this appliance; the project only resolves its own images by channel digest,
-   see `docs/release-versioning.md`).
+   see `docs/combined-release-and-checklist.md`).
 
 ---
 
@@ -683,7 +683,7 @@ tagging each release, then update the top marker and the
    - `services/ui/src/main.rs` (`login_ok`, `auth`, `Csrf`, `register`,
      `secondary_action`, `rollback`, startup guards) and `services/watchdog/src/main.rs`
    - `services/dns/cdn-domains.txt`, `services/ui/nginx/**`
-   - `docs/dhcp-modes.md`
+   - `docs/README.md` (section 5, DHCP modes)
    - `deploy/prod/docker-compose.yml`: every service that mounts the Docker
      socket (SOT `DOCKER_SOCKET`; today `services` **and** `ui`) and every
      caller of `docker::Api`
