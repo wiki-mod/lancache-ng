@@ -472,6 +472,12 @@ async fn dashboard(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page
         ctx.insert("cache_used_human", &human::bytes(used));
         ctx.insert("cache_pct", &pct);
     }
+    // What: the form label names the largest size.
+    // Why: DoMe 07.11.: free space was not visible.
+    // From: Issue #1069 | PR #1991
+    if let Ok(room) = cache_reachable(&s, max) {
+        ctx.insert("cache_max_gib", &(room >> 30).to_string());
+    }
     app.page("dashboard.html", ctx, &csrf)
 }
 
@@ -2920,6 +2926,19 @@ fn gib_bytes(text: &str) -> Result<u64, String> {
         .ok_or_else(|| format!("{text:?} is too big"))
 }
 
+// What: largest cache size the disk allows, in bytes.
+// Why: the form shows it; the save check enforces it.
+// From: Issue #1069 | PR #1991
+fn cache_reachable(s: &Settings, old: u64) -> Result<u64, String> {
+    // What: the cache volume as the ui mounts it.
+    // Why: live test 05.11.: NGINX_CACHE_DIR is proxy-only.
+    // From: Issue #1069 | PR #1980
+    let dir = s.text("CACHE_DIR")?;
+    let sp = fs::space(Path::new(&dir)).map_err(|e| format!("{dir}: {e}"))?;
+    let used = sp.total.saturating_sub(sp.free);
+    Ok(sp.free.saturating_add(used.min(old)))
+}
+
 // What: refuse a bigger cache without room.
 // Why: growth must fit the free disk space.
 // From: Issue #1069
@@ -2932,13 +2951,7 @@ fn cache_room(s: &Settings, form: &Fields) -> Result<(), Fail> {
     if new <= old {
         return Ok(());
     }
-    // What: the cache volume as the ui mounts it.
-    // Why: live test 05.11.: NGINX_CACHE_DIR is proxy-only.
-    // From: Issue #1069 | PR #1980
-    let dir = s.text("CACHE_DIR")?;
-    let sp = fs::space(Path::new(&dir)).map_err(|e| format!("{dir}: {e}"))?;
-    let used = sp.total.saturating_sub(sp.free);
-    let reachable = sp.free.saturating_add(used.min(old));
+    let reachable = cache_reachable(s, old)?;
     if new > reachable {
         let room = human::bytes(reachable);
         return Err(bad_request(

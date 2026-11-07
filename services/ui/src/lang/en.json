@@ -227,6 +227,7 @@
   "needs_the_time_server_and_the": "Needs the time server and the DHCP-Server mode.",
   "network_mode": "Network mode",
   "new_cache_size_in_gib_whole": "New cache size in GiB (whole number)",
+  "cache_max_suffix": "Max size: {x} GiB",
   "new_job": "New job",
   "new_password": "New password",
   "new_subnet": "New subnet",
