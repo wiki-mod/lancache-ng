@@ -178,7 +178,7 @@ exempt.
 
 Because of this limitation, **a green CodeQL Rust job must not be read as full security-scan coverage of the Rust codebase.** A concrete historical example (PR #357, Actions run 28596839186) shows the Rust extractor reporting 12 files "extracted with errors" against 2 "without error" while the job still concluded `success`. That state is expected: CodeQL's own authoritative quality gate — the `rust/diagnostic/database-quality` ("Low Rust analysis quality") diagnostic query — did not fire on that run, so CodeQL classifies partial macro-expansion extraction as normal, not degraded. The raw per-file counts are metric-query output printed only to the analysis log summary; they are not exposed as a supported, machine-readable workflow output (github/codeql-action #1742, open since 2023), and the database is cleaned after `analyze`. This is why `.github/workflows/codeql.yml` reports CodeQL's own `database-quality` determination and a standing caveat in the job summary rather than enforcing a hand-rolled count threshold (which would be permanently red on an upstream limitation that is not tunable here — Rust supports only `build-mode: none`). The Rust checks independent of CodeQL extraction quality are `cargo fmt --check`, `cargo clippy -- -D warnings` and `cargo test` in the `ci.yml` job `test` (`ci.sh test-stack`), which runs only when Rust validation is enabled (AG-VAL-008).
 
-- Keep workflow action references pinned to full commit SHAs with a version comment; floating tags such as `@v4` are forbidden in project PRs, because Dependabot and similar tooling report them as a security finding.
+- Reference workflow actions by their major tag `vN` (AG-CI-001); commit SHAs and branches are forbidden in project PRs. The SOT `github_actions` block lists the allowed actions and `ci.sh check action-node-versions` enforces the reference shape.
 - Keep workflow changes reviewable:
   - document changed checks,
   - explain any intentional risk,
@@ -283,12 +283,12 @@ dependencies, across every ecosystem this repository uses.
   `bash .github/scripts/ci.sh check cargo-audit` flags known-vulnerable
   versions of already-added dependencies: in the `ci.yml` `cargo-audit`
   job when the lockfile changes, and daily in `nightly.yml`.
-- **GitHub Actions** (`.github/workflows/*.yml`): pinned to full commit
-  SHAs with a version comment (never floating tags like `@v4`), per this
-  file's "Quality and release process expectations" section above.
-- **Docker base images**: pinned per `docs/policy/ci-image-pinning-policy.md`,
-  which documents which images are pinned by digest vs. version tag and
-  why, split between runtime base images and build-time builder images.
+- **GitHub Actions** (`.github/workflows/*.yml`): referenced by their major
+  tag `vN`, never by a commit SHA or a branch (AG-CI-001); the SOT
+  `github_actions` block lists the allowed actions.
+- **Docker base images**: owned by the SOT `base_images` block and supplied to
+  the Dockerfiles as build arguments, per
+  `docs/policy/ci-image-pinning-policy.md`.
 - **Automated update tracking**: `.github/dependabot.yml` runs weekly
   update checks for every ecosystem above (GitHub Actions, Cargo,
   Docker base images), across both `master` and the active long-lived
