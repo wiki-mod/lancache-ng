@@ -18,8 +18,11 @@
   <div class="subtabs">
     <div class="subtab active" data-ch-tab="jobs">Jobs</div>
     <div class="subtab" data-ch-tab="history">{{ t.history }}</div>
+    {# What: Library only when logged in; Settings last. #}
+    {# Why: DoMe 07.11.: own tab; QR login in Settings. #}
+    {# From: Issue #871 | PR #1985 #}
+    {% if hamster and hamster.logged_in %}<div class="subtab" data-ch-tab="library">{{ t.library }}</div>{% endif %}
     <div class="subtab" data-ch-tab="settings">{{ t.settings }}</div>
-    <div class="subtab" data-ch-tab="steam">{{ t.qr_login }}</div>
   </div>
 
   {# What: Jobs = new job plus the last 3; History = all. #}
@@ -85,7 +88,7 @@
   </div>
   {% endfor %}
 
-  {# What: speed settings of the prefill; SOT keys. #}
+  {# What: prefill speed (SOT keys) and the Steam login. #}
   {# Why: DoMe 07.11.: own tab, not under Jobs. #}
   {# From: Issue #871 | PR #1985 #}
   <div class="subtab5-panel" data-ch-panel="settings">
@@ -98,18 +101,13 @@
       <div class="field"><label for="hamster-window">{{ t.hamster_window }}</label><input type="text" id="hamster-window" name="CACHEHAMSTER_WINDOW" pattern="[0-2][0-9]:[0-5][0-9]-[0-2][0-9]:[0-5][0-9]" placeholder="01:00-06:00" value="{{ v.CACHEHAMSTER_WINDOW }}"></div>
       <button type="submit" class="btn">{{ t.save }}</button>
     </form>
-  </div>
-
-  <div class="subtab5-panel" data-ch-panel="steam">
+    <div class="section-title">{{ t.qr_login }}</div>
     {% if hamster and hamster.logged_in %}
     <p class="status-line"><span class="beam-light on"></span>{{ t.logged_in_as }} {{ hamster.account }}{{ t.only_an_encrypted_session_token_is }}</p>
     <form action="{{ routes.hamster_logout | safe }}" method="post">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <button type="submit" class="btn">{{ t.log_out }}</button>
     </form>
-    <div class="section-title">{{ t.library }}</div>
-    <button type="button" class="btn" id="hamster-library">{{ t.load_owned_games }}</button>
-    <table class="table" id="hamster-games"></table>
     {% else %}
     <p class="section-sub">{{ t.scan_the_code_with_the_steam }}</p>
     <button type="button" class="btn" id="hamster-login">{{ t.show_login_code }}</button>
@@ -117,6 +115,13 @@
     <p class="status-line" id="hamster-login-state"></p>
     {% endif %}
   </div>
+
+  {% if hamster and hamster.logged_in %}
+  <div class="subtab5-panel" data-ch-panel="library">
+    <button type="button" class="btn" id="hamster-library">{{ t.load_owned_games }}</button>
+    <table class="table" id="hamster-games"></table>
+  </div>
+  {% endif %}
 </section>
 {% endblock %}
 
@@ -139,7 +144,7 @@
       // What: after a preload, Jobs and History reload.
       // Why: DoMe 07.11.: the new job never showed up.
       // From: Issue #871 | PR #1985
-      if (window.hamsterAdded && tab.dataset.chTab !== 'steam') { location.reload(); }
+      if (window.hamsterAdded && (tab.dataset.chTab === 'jobs' || tab.dataset.chTab === 'history')) { location.reload(); }
     });
   });
   try {
