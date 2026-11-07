@@ -2939,7 +2939,7 @@ fn cache_reachable(s: &Settings, old: u64, cached: u64) -> Result<u64, String> {
     // From: Issue #1069 | PR #1980
     let dir = s.text("CACHE_DIR")?;
     let sp = fs::space(Path::new(&dir)).map_err(|e| format!("{dir}: {e}"))?;
-    // What: measured cache bytes; disk use only as fallback.
+    // What: measured cache bytes; disk use as fallback.
     // Why: 249 showed 60 GiB; the disk holds OS files too.
     // From: Issue #1069 | PR #1991
     let used = sp.total.saturating_sub(sp.free);
