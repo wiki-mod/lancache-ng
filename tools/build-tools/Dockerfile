@@ -120,6 +120,7 @@ RUN set -euo pipefail; \
       bc \
       build-essential \
       ca-certificates \
+      ccache \
       clang \
       cmake \
       curl \
@@ -127,13 +128,18 @@ RUN set -euo pipefail; \
       docker-compose \
       expect \
       git \
+      gh \
       jq \
       libssl-dev \
       lld \
+      lsof \
       make \
+      nano \
       parallel \
       pkg-config \
+      ripgrep \
       shellcheck \
+      shfmt \
       xz-utils; \
     rm -rf /var/lib/apt/lists/*
 
@@ -210,6 +216,11 @@ RUN set -euo pipefail; \
     curl -fsSL "https://github.com/mikefarah/yq/releases/latest/download/yq_linux_${yq_arch}" -o /usr/local/bin/yq; \
     chmod 0755 /usr/local/bin/yq; \
     yq --version
+
+# What: ci.sh calls pump; Debian ships it as distcc-pump.
+# Why: one command name for both build-tools images.
+# From: Issue #1683
+RUN ln -s /usr/bin/distcc-pump /usr/local/bin/pump
 
 RUN set -euo pipefail; \
     shellspec_tmp="$(mktemp -d)"; \
@@ -534,6 +545,13 @@ RUN set -euo pipefail; \
     cargo tarpaulin --version; \
     actionlint --version; \
     yq --version; \
+    gh --version; \
+    ccache --version; \
+    shfmt --version; \
+    rg --version; \
+    command -v pump >/dev/null; \
+    command -v lsof >/dev/null; \
+    command -v nano >/dev/null; \
     bats --version; \
     shellspec --version; \
     shellcheck --version; \
