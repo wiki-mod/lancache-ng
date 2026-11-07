@@ -41,7 +41,7 @@ By `AG-INT-001` they are not confirmed behavior.
 
 | ID | Finding on `current_dev` `3005b2b4` | State in #1985 (`9a4b4be4`) | Threat |
 |---|---|---|---|
-| G1 | The compose file delivered `UI_AUTH_USER` and `UI_AUTH_PASSWORD_HASH`, but the UI read `UI_USER` and `UI_PASSWORD_HASH`, so a password set by `setup.sh` never reached the UI. | The compose file now passes them as `UI_USER` and `UI_PASSWORD_HASH` (`deploy/prod/docker-compose.yml`). An unauthenticated Admin UI is the explicit default: `ALLOW_INSECURE_UI=true` in the SOT, and `setup.sh` asks "Protect Admin-UI with password? [y/N]" with the default No; `AG-SEC-001` allows this as an explicit operator choice, including trusted LAN deployments. Still true: the `ui` process does not read `ALLOW_INSECURE_UI`, and `login_ok` accepts every request when the hash is empty, so the refusal that `AG-SEC-001` describes for "neither credentials nor `ALLOW_INSECURE_UI=true`" exists only in the setup flow. | T3 |
+| G1 | The compose file delivered `UI_AUTH_USER` and `UI_AUTH_PASSWORD_HASH`, but the UI read `UI_USER` and `UI_PASSWORD_HASH`, so a password set by `setup.sh` never reached the UI. | The compose file now passes them as `UI_USER` and `UI_PASSWORD_HASH` (`deploy/prod/docker-compose.yml`). An unauthenticated Admin UI is an explicit choice made in the setup flow with a default of open (`ALLOW_INSECURE_UI=true` in the SOT runtime defaults): `setup.sh` asks "Protect Admin-UI with password? [y/N]" (default No) and, on No, "Allow Admin-UI without authentication?" (default from the SOT value `ALLOW_INSECURE_UI=true`); answering No to both repeats the question. An update appends `ALLOW_INSECURE_UI=true` to an install that has no login, so the open state is an explicit entry in `.env`; `AG-SEC-001` allows this as an explicit operator choice, including trusted LAN deployments. Still true: the `ui` process does not read `ALLOW_INSECURE_UI`, and `login_ok` accepts every request when the hash is empty, so the refusal that `AG-SEC-001` describes for "neither credentials nor `ALLOW_INSECURE_UI=true`" exists only in the setup flow. | T3 |
 | G2 | The Kea Control Agent was bound to `0.0.0.0` on the host network with no `authentication` block, and the UI client sent no credentials. | `kea_conf::ctrl_agent` writes a basic `authentication` block (user `KEA_CTRL_USER`, password the `KEA_CTRL_TOKEN`) and `kea::Api` sends them. Still true: the bind address is `KEA_CTRL_ADDRESS=@ANY_BIND_IP@` (`0.0.0.0`) on the host network, and `KEA_CTRL_ALLOW_FROM` and `KEA_CTRL_CHAIN` exist only in the SOT; no code applies a firewall fence. | T12 |
 | G3 | `AG-OP-002` requires real upstream resolvers for nginx. `NGINX_UPSTREAM_RESOLVER` was rendered without a check that it is not a LanCache address. | `render::nginx_files` and the UI save path check every entry with `recursor_conf::upstream_entry` (numeric address only; loopback, unspecified and this host's own addresses are refused as "would loop"). | T1 |
 
@@ -290,10 +290,14 @@ delivers only its Argon2id hash.
   (gap G1). `login_ok` then requires HTTP Basic credentials, checked with
   Argon2id and a constant-time user compare (`secret::equal`).
 - **No password:** `login_ok` accepts every request when `UI_PASSWORD_HASH` is
-  empty. Unauthenticated access is the explicit default: `ALLOW_INSECURE_UI=true`
-  in the SOT, and `setup.sh` asks "Protect Admin-UI with password? [y/N]" with
-  the default No. The `ui` process does not read `ALLOW_INSECURE_UI` and does
-  not refuse to start; the choice is made in the setup flow.
+  empty. Unauthenticated access is an explicit choice with a default of open
+  (`ALLOW_INSECURE_UI=true` in the SOT runtime defaults): `setup.sh` asks
+  "Protect Admin-UI with password? [y/N]" (default No) and, on No, "Allow
+  Admin-UI without authentication?" (default from the SOT value); answering No
+  to both repeats the question. An update appends `ALLOW_INSECURE_UI=true` to an
+  install that has no login. The `ui` process itself does not read
+  `ALLOW_INSECURE_UI` (searched in `services/`) and does not refuse to start;
+  the choice is made in the setup flow.
 - Every state-changing request needs a CSRF token bound to the session
   (`Csrf::check`, `Csrf::check_header`); the session cookie is `HttpOnly` and
   `SameSite=Strict`.
@@ -732,7 +736,7 @@ insecure/unauthenticated state unless the operator explicitly opts out.
 
 At the 2026-11-07 review the code read shows that goal met for the PowerDNS
 API key, DDNS updates (TSIG), secondary registration and the Kea Control Agent
-login. The Admin UI is unauthenticated by explicit default, which `AG-SEC-001`
+login. The Admin UI is unauthenticated by an explicit setup choice whose default is open, which `AG-SEC-001`
 allows for trusted LAN deployments; the `ui` process itself does not refuse to
 start without a password, that choice lives in the setup flow (see "Gaps found
 by the 2026-11-07 review"). Both the `ui` and `services` containers mount the Docker

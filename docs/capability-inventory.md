@@ -364,7 +364,7 @@ stack.
 
 The UI provides:
 
-* Authentication (HTTP Basic with an Argon2id hash when a password is set; unauthenticated is the explicit default, see gap G1 in `docs/threat-model.md`).
+* Authentication (HTTP Basic with an Argon2id hash when a password is set; unauthenticated is an explicit setup choice, see gap G1 in `docs/threat-model.md`).
 * CSRF protection.
 * Dashboard and service state.
 * Proxy status and cache visibility.
@@ -756,8 +756,9 @@ The following boundaries are intentional or currently unresolved:
 7. CacheHamster is implemented in code and wired into the `services` container, but
    it has no test on `current_dev`; treat prefill as unverified until it has been run.
 
-8. The Admin UI is unauthenticated by explicit default (`ALLOW_INSECURE_UI=true`,
-   `setup.sh` asks for a password with the default No), and the Kea Control
+8. The Admin UI is unauthenticated by an explicit choice with a default of open
+   (`ALLOW_INSECURE_UI=true`; `setup.sh` asks for a password, then asks whether
+   to allow it without authentication), and the Kea Control
    Agent is open to the LAN behind a basic-auth login; see gaps G1 and G2 in
    `docs/threat-model.md`.
 
