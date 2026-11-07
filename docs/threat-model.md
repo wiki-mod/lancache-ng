@@ -656,3 +656,15 @@ The following are **not** addressed by lancache-ng:
 6. Monitor disk and activity, and keep images updated.
 
 Security concerns are reported through the private channel in `SECURITY.md`.
+
+## Howto audit this file
+
+The audit procedure of this file is `docs/policy/howto-audit-documentation.md`.
+
+### Special deviation
+
+| Field | Content |
+| --- | --- |
+| Step | 4 and 5 |
+| Reason | The likelihood, impact and residual-risk ratings are assessments, not code facts |
+| Replacement | The audit checks that each rating does not contradict the mitigations and gaps listed in the same threat; it does not verify the rating against code |

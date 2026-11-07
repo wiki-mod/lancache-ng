@@ -791,3 +791,7 @@ Not verified against the code or a running stack:
 - the `setup.sh` prompts of the Kea preflight and the log wording of the `dhcp`
   container;
 - the behavior of the tuning commands in section 8 on a given host and NIC.
+
+## Howto audit this file
+
+The audit procedure of this file is `docs/policy/howto-audit-documentation.md`.

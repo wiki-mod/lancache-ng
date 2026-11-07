@@ -948,3 +948,7 @@ ticked.
 | `bats .github/scripts/ci.bats` in the `build-tools` image | the regression suite (four tests) |
 | `gh attestation verify "oci://<digest>" --owner wiki-mod` | provenance of one image digest |
 | Admin UI DHCP page (`POST /dhcp/check`) | the DHCP conflict and client probe |
+
+## Howto audit this file
+
+The audit procedure of this file is `docs/policy/howto-audit-documentation.md`.

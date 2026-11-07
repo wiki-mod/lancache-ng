@@ -248,3 +248,7 @@ against actual behavior, side effects, ownership and API contracts.
 Passing a naming check does not establish overall compliance. A rename
 needs a concrete reason and MUST keep all callers, contracts,
 serialization formats and external integrations working.
+
+## Howto audit this file
+
+The audit procedure of this file is `docs/policy/howto-audit-documentation.md`.

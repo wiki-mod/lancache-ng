@@ -114,3 +114,7 @@ be switched per service in the ui; the ui re-renders the syslog-ng config.
 `lancache-cachehamster` runs in `services`. It logs in to Steam by QR
 code, keeps a job queue (now, later, at a time) and downloads through the
 proxy so the cache fills. The ui starts jobs through it.
+
+## Howto audit this file
+
+The audit procedure of this file is `docs/policy/howto-audit-documentation.md`.

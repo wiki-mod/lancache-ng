@@ -237,3 +237,7 @@ Commands of the dispatcher: `install`, `install-requirements-primary`,
 - `.github/scripts/ci.bats` holds 4 tests.
 - The repository has no `tests/` directory and no Rust test function under
   `services/`.
+
+## Howto audit this file
+
+The audit procedure of this file is `docs/policy/howto-audit-documentation.md`.
