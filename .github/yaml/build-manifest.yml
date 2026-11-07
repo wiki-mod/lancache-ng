@@ -2017,6 +2017,10 @@ ci_variables:
   # From: Issue #1683 | PR #1858
   CI_REFRESH_REF: refs/ci/refresh/packages
   CI_REFRESH_FILE: records
+  # What: the refresh records of the last promoted stack.
+  # Why: a failed refresh run must not move PR run ids.
+  # From: Issue #1683 | PR #1984
+  CI_REFRESH_ACCEPTED_REF: refs/ci/refresh/accepted
   # What: layer cache tag stem; ci.sh appends -<arch>.
   # Why: §35: one registry cache per service and arch.
   # From: Issue #1683 | PR #1912

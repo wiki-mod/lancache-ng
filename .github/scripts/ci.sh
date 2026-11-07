@@ -3799,7 +3799,7 @@ _ci_cargo_lock() {
     _ci_refresh_event || refresh=$?
     [ "${refresh}" -le 1 ] || return 2
     remote="$(_ci_git_remote)" || return 2
-    val="$(_ci_refresh_record cargo-lock)" || rc=$?
+    val="$(_ci_refresh_record cargo-lock accepted)" || rc=$?
     [ "${rc}" -le 1 ] || return 2
     # What: reuse the record; a refresh run only its own
     # Why: plan and builds of one run read one lock
@@ -8500,7 +8500,7 @@ _ci_refresh_event() {
 # From: Issue #1683 | PR #1858
 _ci_package_refresh_value() {
     local rc=0
-    _ci_refresh_record "$1@$2" || rc=$?
+    _ci_refresh_record "$1@$2" accepted || rc=$?
     [ "${rc}" -ne 1 ] || { printf 'none\n'; return 0; }
     return "${rc}"
 }
@@ -8595,9 +8595,25 @@ _ci_local_image_files() {
 # Why: one reader of the refresh records for every key.
 # From: Issue #1683 | PR #1858
 _ci_refresh_record() {
-    local remote blob rc=0 row
+    local remote blob rc=0 row ref=CI_REFRESH_REF
     remote="$(_ci_git_remote)" || return 2
-    blob="$(_ci_ledger_blob "${remote}" CI_REFRESH_REF CI_REFRESH_FILE)" || rc=$?
+    # What: $2 accepted: other runs read the promoted state.
+    # Why: a failed refresh run moved every PR run's id.
+    # From: Issue #1683 | PR #1984
+    if [ "${2:-}" = accepted ]; then
+        _ci_refresh_event || rc=$?
+        [ "${rc}" -le 1 ] || return 2
+        [ "${rc}" -eq 0 ] || ref=CI_REFRESH_ACCEPTED_REF
+        rc=0
+    fi
+    blob="$(_ci_ledger_blob "${remote}" "${ref}" CI_REFRESH_FILE)" || rc=$?
+    # What: no promoted state yet: refresh records count.
+    # Why: the first promotion writes it; ids stay valid.
+    # From: Issue #1683 | PR #1984
+    if [ "${rc}" -eq 1 ] && [ "${ref}" != CI_REFRESH_REF ]; then
+        rc=0
+        blob="$(_ci_ledger_blob "${remote}" CI_REFRESH_REF CI_REFRESH_FILE)" || rc=$?
+    fi
     [ "${rc}" -le 1 ] || return 2
     [ "${rc}" -eq 0 ] || return 1
     row="$(_ci_tab_row "$1" "${blob}")" || return 1
@@ -10285,6 +10301,35 @@ _ci_promote_all_current() {
     done <<< "${cand}"
 }
 
+# What: a promoted refresh run makes its records count.
+# Why: PR runs read records of a validated stack only.
+# From: Issue #1683 | PR #1984
+_ci_refresh_accept() {
+    local remote ref acc sha cur="" raw rc=0
+    _ci_refresh_event || rc=$?
+    [ "${rc}" -le 1 ] || return 2
+    [ "${rc}" -eq 0 ] || return 0
+    remote="$(_ci_git_remote)" || return 2
+    ref="$(_ci_variable CI_REFRESH_REF)" || return 2
+    acc="$(_ci_variable CI_REFRESH_ACCEPTED_REF)" || return 2
+    rc=0; sha="$(_ci_cas_ref_sha "${remote}" "${ref}")" || rc=$?
+    [ "${rc}" -ne 1 ] || return 0
+    [ "${rc}" -eq 0 ] || return 2
+    rc=0; cur="$(_ci_cas_ref_sha "${remote}" "${acc}")" || rc=$?
+    [ "${rc}" -le 1 ] || return 2
+    [ "${cur}" != "${sha}" ] || return 0
+    # What: the push needs the commit object locally.
+    # Why: git push sends objects; a bare sha has none.
+    # From: Issue #1683 | PR #1984
+    _ci_git_run fetch "${remote}" "${ref}" >&2 || return 2
+    rc=0; raw="$(_ci_cas_push "${remote}" "${acc}" "${sha}" "${cur}")" || rc=$?
+    if [ "${rc}" -ne 0 ]; then
+        ci_error "[CI-ERROR-REFRESH-0007]" "ref=\"${acc}\" sha=\"${sha}\" rc=${rc} reason=\"refresh records not accepted; PR runs keep the old ids\"" "${raw}"
+        return 2
+    fi
+    ci_log "[CI-INFO-REFRESH-0006]" "ref=\"${acc}\" sha=\"${sha}\" reason=\"refresh records of a promoted stack now count\""
+}
+
 # What: Atomically move a channel to an accepted stack.
 # Why: Stack-atomic; moves refs only, never builds.
 # From: Issue #1683
@@ -10312,7 +10357,8 @@ ci_cmd_promote() {
     _ci_promote_all_current "${channel}" "${cand}" || arc=$?
     if [ "${arc}" -eq 0 ]; then
         printf 'channel=%s result=already-promoted services=%s\n' "${channel}" "$(_ci_count_lines "${cand}")"
-        return 0
+        _ci_refresh_accept
+        return
     fi
     [ "${arc}" -eq 1 ] || return "${arc}"
     if ! _ci_promote_lock "${channel}"; then
@@ -10330,6 +10376,7 @@ ci_cmd_promote() {
     }
     [ "${rc}" -eq 0 ] || return "${rc}"
     printf 'channel=%s result=promoted services=%s\n' "${channel}" "$(_ci_count_lines "${cand}")"
+    _ci_refresh_accept
 }
 
 # What: the ref promotion reads: release tag, else event.
