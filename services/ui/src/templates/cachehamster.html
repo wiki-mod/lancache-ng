@@ -18,10 +18,16 @@
   <div class="subtabs">
     <div class="subtab active" data-ch-tab="jobs">Jobs</div>
     <div class="subtab" data-ch-tab="history">{{ t.history }}</div>
-    <div class="subtab" data-ch-tab="steam">Steam</div>
+    <div class="subtab" data-ch-tab="settings">{{ t.settings }}</div>
+    <div class="subtab" data-ch-tab="steam">{{ t.qr_login }}</div>
   </div>
 
-  <div class="subtab5-panel active" data-ch-panel="jobs">
+  {# What: Jobs = new job plus the last 3; History = all. #}
+  {# Why: DoMe 07.11.: no duplicate, less space. #}
+  {# From: Issue #871 | PR #1985 #}
+  {% for panel in ["jobs", "history"] %}
+  <div class="subtab5-panel{% if panel == "jobs" %} active{% endif %}" data-ch-panel="{{ panel }}">
+    {% if panel == "jobs" %}
     <div class="section-title" style="margin-top:0;">{{ t.new_job }}</div>
     <form action="{{ routes.hamster_add | safe }}" method="post" id="hamster-add">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -40,11 +46,41 @@
         <p class="section-sub" id="hamster-when-hint"></p></div>
       <button type="submit" class="btn">{{ t.add_job }}</button>
     </form>
+    <div class="section-title">{{ t.last_3_jobs }}</div>
+    {% endif %}
+    {% if hamster and hamster.jobs | length > 0 %}
+    <div style="overflow-x:auto;">
+    <table class="table">
+      <tr><th>{{ t.date_and_time }}</th><th>Name</th><th>{{ t.what }}</th><th>{{ t.when }}</th><th>{{ t.state }}</th><th>{{ t.progress }}</th><th></th></tr>
+      {% for j in hamster.jobs | reverse %}{% if panel == "history" or loop.index <= 3 %}
+      <tr{% if j.state.state == "running" or (j.state.state == "waiting" and j.when.kind == "now") %} data-busy="1"{% endif %}>
+        <td style="white-space:nowrap;">{% if j.history | length > 0 %}{% set last = j.history | last %}<span data-unix="{{ last.at }}"></span>{% endif %}</td>
+        <td>{{ j.name }}</td>
+        <td>{% if j.target.kind == "steam_app" %}{{ t.steam_app }} {{ j.target.value }}{% else %}{{ j.target.value | length }} {{ t.addresses }}{% endif %}</td>
+        <td>{% if j.when.kind == "at" %}<span data-unix="{{ j.when.at }}"></span>{% elif j.when.kind == "later" %}{{ t.by_hand_press_start }}{% else %}{{ t.now }}{% endif %}</td>
+        {% set sk = "hamster_st_" ~ j.state.state %}<td>{{ t[sk] }}{% if j.state.reason %}: {{ j.state.reason }}{% endif %}</td>
+        <td>{{ j.done }} {{ t.of }} {{ j.total }} {{ t.done }} {{ j.failed }} {{ t.failed }} {{ j.bytes | filesizeformat }}</td>
+        <td>
+          {% if j.id %}<div style="display:flex; flex-wrap:wrap; gap:6px; justify-content:flex-end;">{% for op in ["start", "cancel", "remove"] %}
+          {% set rk = "hamster_" ~ op %}<form action="{{ routes[rk] | safe }}" method="post">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <input type="hidden" name="id" value="{{ j.id }}">
+            <button type="submit" class="btn">{{ t[op] }}</button>
+          </form>
+          {% endfor %}</div>{% else %}{{ t.hamster_queued }}{% endif %}
+        </td>
+      </tr>
+      {% endif %}{% endfor %}
+    </table>
+    </div>
+    {% else %}<p class="section-sub">{{ t.no_jobs_yet }}</p>{% endif %}
+  </div>
+  {% endfor %}
 
-    {# What: speed settings of the prefill; SOT keys. #}
-    {# Why: DoMe 26.10. (Fund 90): set them in the UI. #}
-    {# From: Issue #871 | PR #1980 #}
-    <div class="section-title">{{ t.settings }}</div>
+  {# What: speed settings of the prefill; SOT keys. #}
+  {# Why: DoMe 07.11.: own tab, not under Jobs. #}
+  {# From: Issue #871 | PR #1985 #}
+  <div class="subtab5-panel" data-ch-panel="settings">
     <form action="{{ routes.setup_save | safe }}" method="post" class="form-row">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <input type="hidden" name="back" value="{{ pages.cachehamster }}">
@@ -54,43 +90,6 @@
       <div class="field"><label for="hamster-window">{{ t.hamster_window }}</label><input type="text" id="hamster-window" name="CACHEHAMSTER_WINDOW" pattern="[0-2][0-9]:[0-5][0-9]-[0-2][0-9]:[0-5][0-9]" placeholder="01:00-06:00" value="{{ v.CACHEHAMSTER_WINDOW }}"></div>
       <button type="submit" class="btn">{{ t.save }}</button>
     </form>
-
-    <div class="section-title">Jobs</div>
-    {% if hamster and hamster.jobs | length > 0 %}
-    <table class="table">
-      <tr><th>Name</th><th>{{ t.what }}</th><th>{{ t.when }}</th><th>{{ t.state }}</th><th>{{ t.progress }}</th><th></th></tr>
-      {% for j in hamster.jobs | reverse %}
-      <tr{% if j.state.state == "running" or (j.state.state == "waiting" and j.when.kind == "now") %} data-busy="1"{% endif %}>
-        <td>{{ j.name }}</td>
-        <td>{% if j.target.kind == "steam_app" %}{{ t.steam_app }} {{ j.target.value }}{% else %}{{ j.target.value | length }} {{ t.addresses }}{% endif %}</td>
-        <td>{% if j.when.kind == "at" %}<span data-unix="{{ j.when.at }}"></span>{% elif j.when.kind == "later" %}{{ t.by_hand_press_start }}{% else %}{{ t.now }}{% endif %}</td>
-        {% set sk = "hamster_st_" ~ j.state.state %}<td>{{ t[sk] }}{% if j.state.reason %}: {{ j.state.reason }}{% endif %}</td>
-        <td>{{ j.done }} {{ t.of }} {{ j.total }} {{ t.done }} {{ j.failed }} {{ t.failed }} {{ j.bytes | filesizeformat }}</td>
-        <td>
-          {% if j.id %}{% for op in ["start", "cancel", "remove"] %}
-          {% set rk = "hamster_" ~ op %}<form action="{{ routes[rk] | safe }}" method="post" style="display:inline">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <input type="hidden" name="id" value="{{ j.id }}">
-            <button type="submit" class="btn">{{ t[op] }}</button>
-          </form>
-          {% endfor %}{% else %}{{ t.hamster_queued }}{% endif %}
-        </td>
-      </tr>
-      {% endfor %}
-    </table>
-    {% else %}<p class="section-sub">{{ t.no_jobs_yet }}</p>{% endif %}
-  </div>
-
-  {# What: history of all jobs, newest first. #}
-  {# Why: DoMe 06.11.: own tab, with date and time. #}
-  {# From: Issue #871 | PR #1985 #}
-  <div class="subtab5-panel" data-ch-panel="history">
-    <table class="table" id="hamster-history">
-      <tr><th>{{ t.date_and_time }}</th><th>Name</th><th>{{ t.state }}</th></tr>
-      {% if hamster %}{% for j in hamster.jobs %}{% for e in j.history %}{% set ek = "hamster_st_" ~ e.state %}
-      <tr data-at="{{ e.at }}"><td><span data-unix="{{ e.at }}"></span></td><td>{{ j.name }}</td><td>{{ t[ek] }}{% if e.reason %}: {{ e.reason }}{% endif %}</td></tr>
-      {% endfor %}{% endfor %}{% endif %}
-    </table>
   </div>
 
   <div class="subtab5-panel" data-ch-panel="steam">
@@ -127,7 +126,13 @@
     try { sessionStorage.setItem('ch-tab', name); } catch (err) { reportError(err); }
   };
   document.querySelectorAll('[data-ch-tab]').forEach(function (tab) {
-    tab.addEventListener('click', function () { pickTab(tab.dataset.chTab); });
+    tab.addEventListener('click', function () {
+      pickTab(tab.dataset.chTab);
+      // What: after a preload, Jobs and History reload.
+      // Why: DoMe 07.11.: the new job never showed up.
+      // From: Issue #871 | PR #1985
+      if (window.hamsterAdded && tab.dataset.chTab !== 'steam') { location.reload(); }
+    });
   });
   try {
     const saved = sessionStorage.getItem('ch-tab');
@@ -136,12 +141,6 @@
   document.querySelectorAll('[data-unix]').forEach(function (el) {
     el.textContent = new Date(Number(el.dataset.unix) * 1000).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'medium' });
   });
-  const hist = document.getElementById('hamster-history');
-  if (hist) {
-    Array.from(hist.querySelectorAll('tr[data-at]'))
-      .sort(function (a, b) { return Number(b.dataset.at) - Number(a.dataset.at); })
-      .forEach(function (r) { r.parentNode.appendChild(r); });
-  }
   // What: the time field opens its calendar on click.
   // Why: DoMe 05.11.: a click on "tt" opened nothing.
   // From: Issue #1683 | PR #1980
@@ -234,7 +233,7 @@
             ev.preventDefault();
             b.disabled = true; b.textContent = LC_T.loading;
             fetch(f.action, { method: 'POST', body: new URLSearchParams(new FormData(f)) })
-              .then(function (r) { if (!r.ok) { throw new Error(r.statusText); } b.textContent = LC_T.hamster_queued; })
+              .then(function (r) { if (!r.ok) { throw new Error(r.statusText); } b.textContent = LC_T.hamster_queued; window.hamsterAdded = true; })
               .catch(function (e) { b.disabled = false; b.textContent = LC_T.preload; window.LancacheUi.fail(e); });
           });
           f.appendChild(b);
