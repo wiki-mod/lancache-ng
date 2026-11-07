@@ -65,7 +65,7 @@
         <td>{{ j.name }}</td>
         <td style="white-space:nowrap;">{% if j.target.kind == "steam_app" %}{{ t.steam_app }} {{ j.target.value }}{% else %}{{ j.target.value | length }} {{ t.addresses }}{% endif %}</td>
         <td>{% if j.when.kind == "at" %}<span data-unix="{{ j.when.at }}"></span>{% elif j.when.kind == "later" %}{{ t.by_hand_press_start }}{% else %}{{ t.now }}{% endif %}</td>
-        {% set sk = "hamster_st_" ~ j.state.state %}<td>{{ t[sk] }}{% if j.state.reason %}<br><span style="font-size:12px; color:var(--mist);">{{ j.state.reason }}</span>{% endif %}</td>
+        {% set sk = "hamster_st_" ~ j.state.state %}<td>{{ t[sk] }}{% if j.state.reason %}<br><span style="font-size:12px; color:var(--mist);">{{ j.state.reason }}</span>{% endif %}{% if j.skipped %}<br><span style="font-size:12px; color:var(--mist);" title="{{ j.skipped | join(sep="; ") }}">{{ t.hamster_skipped }}: {{ j.skipped | length }}</span>{% endif %}</td>
         <td style="font-variant-numeric:tabular-nums;">{{ j.done }} {{ t.of }} {{ j.total }} {{ t.done }} {{ j.failed }} {{ t.failed }} {{ j.bytes | filesizeformat }}{% if j.size %} {{ t.of }} {{ j.size | filesizeformat }}{% endif %}</td>
         <td>
           {# What: only the buttons this state can use #}

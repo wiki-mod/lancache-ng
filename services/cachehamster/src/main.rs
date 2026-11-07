@@ -98,6 +98,11 @@ struct Job {
     // From: Issue #871 | PR #1985
     #[serde(default)]
     size: u64,
+    // What: depots Steam refused, with the reason.
+    // Why: DoMe 07.11.: Portal depot 401 left out unseen.
+    // From: Issue #871 | PR #1985
+    #[serde(default)]
+    skipped: Vec<String>,
 }
 
 // What: one history line: unix time and the new state.
@@ -649,6 +654,7 @@ fn apply_order(jobs: &mut Vec<Job>, order: Order) {
                 failed: 0,
                 total,
                 size: 0,
+                skipped: Vec::new(),
                 history: vec![Event {
                     at: clock::unix_secs(),
                     state: State::Waiting,
@@ -1501,7 +1507,7 @@ fn chunks_of(zipped: &[u8]) -> Result<Vec<(String, u64)>, String> {
 // What: every chunk URL of an app's depots.
 // Why: the URL job warms them through the proxy.
 // From: Issue #871 | PR #1858
-async fn app_urls(cfg: &SteamCfg, app: u32) -> Result<(Vec<String>, u64), String> {
+async fn app_urls(cfg: &SteamCfg, app: u32) -> Result<(Vec<String>, u64, Vec<String>), String> {
     let client = cfg.client()?;
     let web = reqwest::Client::new();
     let mut cm = Cm::login(cfg, &web).await?;
@@ -1528,12 +1534,13 @@ async fn app_urls(cfg: &SteamCfg, app: u32) -> Result<(Vec<String>, u64), String
             list.push((from, depot, gid));
         }
     }
-    let (mut urls, mut size) = (Vec::new(), 0);
+    let (mut urls, mut size, mut skipped) = (Vec::new(), 0, Vec::new());
     for (owner, depot, gid) in list {
         let code = match request_code(&mut cm, owner, depot, gid, &cfg.branch).await {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("cachehamster: app {app}: {e}");
+                skipped.push(e);
                 continue;
             }
         };
@@ -1548,6 +1555,7 @@ async fn app_urls(cfg: &SteamCfg, app: u32) -> Result<(Vec<String>, u64), String
             .map_err(|e| format!("{url}: {}", http::error_chain(&e)))?;
         if !resp.status().is_success() {
             eprintln!("cachehamster: {url}: HTTP {}", resp.status());
+            skipped.push(format!("depot {depot}: HTTP {}", resp.status()));
             continue;
         }
         let body = resp.bytes().await.map_err(|e| format!("{url}: {e}"))?;
@@ -1559,7 +1567,7 @@ async fn app_urls(cfg: &SteamCfg, app: u32) -> Result<(Vec<String>, u64), String
     if urls.is_empty() {
         return Err(format!("app {app}: no depot of this account and OS"));
     }
-    Ok((urls, size))
+    Ok((urls, size, skipped))
 }
 
 // What: run a Steam app job: resolve, then warm.
@@ -1573,13 +1581,14 @@ async fn run_app(
     id: String,
     rate: Arc<AtomicU64>,
 ) -> State {
-    let (urls, size) = match app_urls(&cfg, app).await {
+    let (urls, size, skipped) = match app_urls(&cfg, app).await {
         Ok(u) => u,
         Err(e) => return State::Failed(e),
     };
     if let Some(j) = jobs.lock().await.iter_mut().find(|j| j.id == id) {
         j.total = urls.len() as u64;
         j.size = size;
+        j.skipped = skipped;
     }
     let client = match cfg.client() {
         Ok(c) => c,
