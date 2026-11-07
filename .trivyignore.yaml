@@ -822,3 +822,23 @@ vulnerabilities:
       network input as a server. The exception ends when a buildx release
       with the fixed module exists and the pin in
       tools/build-tools/Dockerfile is moved to it.
+
+  - id: CVE-2026-78661
+    paths:
+      - usr/local/lib/docker/cli-plugins/docker-buildx
+    statement: >-
+      golang.org/x/net v0.59.0 (fixed in 0.62.0). Not exploitable in this
+      artifact (vulnerable code not present). CVE-2026-78661 is a denial of
+      service via crafted HTML input in the package golang.org/x/net/html.
+      Verified on 2026-11-07 against the official docker buildx v0.38.2
+      linux-amd64 release binary (newest release, sha256
+      7992ec09413b80ff57ba4e081f56fc833d7bac1d5e71143c6c809e7e6065f6d6):
+      the function names compiled into it name only these x/net packages:
+      dns/dnsmessage, http/httpguts, http/httpproxy, http2, http2/hpack,
+      idna, internal/httpcommon, internal/httpsfv, internal/socks,
+      internal/timeseries, proxy, trace and websocket. The string
+      "x/net/html" does not occur in the binary at all, so the scanner
+      matches the module version, not reachable code. Re-review when a
+      buildx release ships golang.org/x/net 0.62.0 or later; then drop
+      this entry.
+    status: not_affected
