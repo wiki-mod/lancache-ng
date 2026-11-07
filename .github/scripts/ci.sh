@@ -1853,6 +1853,13 @@ _ci_docs_only() {
 # From: Issue #1683 | PR #1858
 _ci_pr_fingerprint() {
     local tree line named docs rc wf own="" p _ci_fp_rows="" _ci_fp_absent=""
+    # What: an empty run record gives no value.
+    # Why: a docs-only plan fixes no pair id; no mark.
+    # From: Issue #1683 | PR #1984
+    if [ -n "${CI_RUN_IDENTITIES+x}" ] && [ -z "${CI_RUN_IDENTITIES// /}" ]; then
+        ci_log "[CI-INFO-PLAN-0026]" "reason=\"run record holds no pair id; no fingerprint\""
+        return 1
+    fi
     named="$(_ci_sot_named_paths)" || return 2
     docs="$(_ci_variable CI_DOCS_DIR)" || return 2
     wf="$(_ci_variable CI_WORKFLOW_DIR)" || return 2
