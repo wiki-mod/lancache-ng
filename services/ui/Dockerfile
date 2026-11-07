@@ -101,4 +101,17 @@ COPY --from=builder /build/lancache-ui-out /usr/local/bin/lancache-ui
 # From: Issue #1683 | PR #1980
 ARG UI_LISTEN_PORT
 EXPOSE ${UI_LISTEN_PORT}
-ENTRYPOINT ["lancache-ui"]
+
+# What: one supervise-daemon script per SOT process.
+# Why: OpenRC restarts crashes; @KEY@ e.g. CONFIG_DIR.
+# From: Issue #1683
+ARG LANCACHE_PROCESSES
+ARG LANCACHE_PROCESS_PRE
+ARG LANCACHE_INIT_PRE
+RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
+    bash /usr/local/bin/ci.sh openrc-setup
+
+# What: OpenRC as PID 1.
+# Why: openrc-init reaps zombies and stops on SIGTERM.
+# From: Issue #1683
+ENTRYPOINT ["/usr/local/bin/lancache-init"]

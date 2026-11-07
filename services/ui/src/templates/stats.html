@@ -7,6 +7,10 @@
 {% extends "base.html" %}
 {% block title %} – {{ t.statistics }}{% endblock %}
 {% block content %}
+<style>
+  .stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  @media (max-width: 720px) { .stats-grid { grid-template-columns: 1fr; } }
+</style>
 <section>
   <div>
     <p class="eyebrow">{{ t.overview_statistics }}</p>
@@ -26,11 +30,15 @@
     {% for r in ranges %}
     <button type="button" class="subtab stats-tab" data-range="{{ r }}">{{ r }}</button>
     {% endfor %}
+    {# What: reload the graphs every recording step. #}
+    {# Why: DoMe 07.11.: values change every minute. #}
+    {# From: Issue #1683 | PR #1985 #}
+    <button type="button" class="subtab" id="stats-auto" data-step="{{ stats_step }}" aria-pressed="false">⟳ {{ t.auto_reload }}</button>
   </div>
-  <div class="grid-2" style="grid-template-columns:repeat(auto-fill, minmax(min(100%, 560px), 1fr));">
+  <div class="grid-2 stats-grid">
     {% for g in graphs %}
-    <div class="card stats-card" data-tab="{{ g.tab }}" style="min-width:0;" hidden>
-      <img class="stats-img" data-graph="{{ g.name }}" alt="{{ g.title }}" style="max-width:100%; height:auto; display:block; margin:0 auto;">
+    <div class="card stats-card" data-tab="{{ g.tab }}" style="min-width:0; padding:8px;" hidden>
+      <img class="stats-img" data-graph="{{ g.name }}" alt="{{ g.title }}" style="width:100%; height:auto; display:block;">
     </div>
     {% endfor %}
   </div>
@@ -61,13 +69,25 @@
       card.hidden = card.dataset.tab !== src;
       if (card.hidden) { return; }
       const img = card.querySelector('.stats-img');
-      img.src = '/stats/graph/' + img.dataset.graph + '?range=' + encodeURIComponent(range) + '&dark=' + (dark() ? 1 : 0) + '&t=' + Date.now();
+      img.src = '{{ routes.stats_graph | safe }}'.replace('{name}', img.dataset.graph) + '?range=' + encodeURIComponent(range) + '&dark=' + (dark() ? 1 : 0) + '&t=' + Date.now();
     });
     try { sessionStorage.setItem('stats-src', src); sessionStorage.setItem('stats-range', range); } catch (err) { reportError(err); }
   }
   srcs.forEach(function (t) { t.addEventListener('click', function () { src = t.dataset.tab; show(); }); });
   tabs.forEach(function (t) { t.addEventListener('click', function () { range = t.dataset.range; show(); }); });
   show();
+  const auto = document.getElementById('stats-auto');
+  let timer = null;
+  function setAuto(on) {
+    auto.classList.toggle('active', on);
+    auto.setAttribute('aria-pressed', on ? 'true' : 'false');
+    if (timer) { clearInterval(timer); timer = null; }
+    const step = Number(auto.dataset.step);
+    if (on && step > 0) { timer = setInterval(show, step * 1000); }
+    try { sessionStorage.setItem('stats-auto', on ? '1' : ''); } catch (err) { reportError(err); }
+  }
+  auto.addEventListener('click', function () { setAuto(!timer); });
+  try { if (sessionStorage.getItem('stats-auto')) { setAuto(true); } } catch (err) { reportError(err); }
 })();
 </script>
 {% endblock %}

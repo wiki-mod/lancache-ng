@@ -93,6 +93,16 @@ struct Job {
     // From: Issue #871 | PR #1980
     #[serde(default)]
     history: Vec<Event>,
+    // What: bytes to fetch, from the depot manifests.
+    // Why: DoMe 07.11.: show the preload size up front.
+    // From: Issue #871 | PR #1985
+    #[serde(default)]
+    size: u64,
+    // What: depots Steam refused, with the reason.
+    // Why: DoMe 07.11.: Portal depot 401 left out unseen.
+    // From: Issue #871 | PR #1985
+    #[serde(default)]
+    skipped: Vec<String>,
 }
 
 // What: one history line: unix time and the new state.
@@ -372,7 +382,7 @@ async fn login_begin(c: &Ctx, client: &reqwest::Client) -> Result<Value, String>
     let device = c.s.text("STEAM_DEVICE_NAME")?;
 
     // What: login as the Steam client platform (SOT).
-    // Why: the Steam CM refuses mobile tokens.
+    // Why: live 05.11.: CM refused mobile tokens (5).
     // From: Issue #871 | PR #1980
     let platform = c.s.uint("STEAM_AUTH_PLATFORM_TYPE")?.to_string();
     let r = steam_post(
@@ -643,6 +653,8 @@ fn apply_order(jobs: &mut Vec<Job>, order: Order) {
                 done: 0,
                 failed: 0,
                 total,
+                size: 0,
+                skipped: Vec::new(),
                 history: vec![Event {
                     at: clock::unix_secs(),
                     state: State::Waiting,
@@ -671,7 +683,7 @@ fn apply_order(jobs: &mut Vec<Job>, order: Order) {
 }
 
 // What: the shared bandwidth limit of all jobs.
-// Why: all jobs share one uplink limit.
+// Why: DoMe 26.10. (Fund 92): limit the bandwidth.
 // From: Issue #871 | PR #1980
 static PACE: std::sync::OnceLock<Pace> = std::sync::OnceLock::new();
 
@@ -682,7 +694,7 @@ struct Pace {
 
 impl Pace {
     // What: each file books its time after the last one.
-    // Why: idle time builds no burst credit.
+    // Why: live 05.11.: idle time built credit, 47 Mbit/s.
     // From: Issue #871 | PR #1980
     async fn wait(&self, got: u64) {
         let cost = Duration::from_secs_f64(got as f64 / self.bytes_per_sec as f64);
@@ -699,7 +711,7 @@ impl Pace {
 }
 
 // What: daily window HH:MM-HH:MM; may cross midnight.
-// Why: prefill runs only in the set hours.
+// Why: DoMe 26.10. (Fund 92): from when until when.
 // From: Issue #871 | PR #1980
 fn window(text: &str) -> Result<(u32, u32), String> {
     let mins = |t: &str| -> Option<u32> {
@@ -828,6 +840,7 @@ struct SteamCfg {
     logon: [u64; 4],
     cdn_host: String,
     proxy: std::net::SocketAddr,
+    proxy_name: String,
     branch: String,
     os: String,
 }
@@ -850,6 +863,11 @@ impl SteamCfg {
             ],
             cdn_host: c.s.text("STEAM_CDN_HOST")?,
             proxy: addr.parse().map_err(|e| format!("{addr}: {e}"))?,
+            proxy_name: format!(
+                "{}:{}",
+                c.s.text("CONTAINER_NAME_PROXY")?,
+                c.s.uint("PROXY_HTTP_PORT")?
+            ),
             branch: c.s.text("STEAM_BRANCH")?,
             os: c.s.text("STEAM_OS")?,
         })
@@ -858,8 +876,18 @@ impl SteamCfg {
     // What: a client that sends the CDN host to the proxy.
     // Why: the proxy caches by Host; DNS is not needed.
     fn client(&self) -> Result<reqwest::Client, String> {
+        // What: the proxy container on the Docker network.
+        // Why: DoMe 07.11.: docker-proxy cost 17 % CPU.
+        // From: Issue #871 | PR #1985
+        use std::net::ToSocketAddrs;
+        let proxy = self
+            .proxy_name
+            .to_socket_addrs()
+            .ok()
+            .and_then(|mut a| a.next())
+            .unwrap_or(self.proxy);
         reqwest::Client::builder()
-            .resolve(&self.cdn_host, self.proxy)
+            .resolve(&self.cdn_host, proxy)
             .build()
             .map_err(|e| format!("CDN client: {e}"))
     }
@@ -962,31 +990,45 @@ fn parse_kv(text: &str) -> Result<Kv, String> {
     Ok(root)
 }
 
-// What: depot id and public manifest id per depot.
+// What: public manifest id of one depot node.
 // Why: only depots for STEAM_OS (or any OS) are warmed.
 // From: Issue #871 | PR #1858
-fn depots_of(app: &Kv, cfg: &SteamCfg) -> Vec<(u32, u64)> {
-    let Some(depots) = app.node("appinfo").unwrap_or(app).node("depots") else {
-        return Vec::new();
+fn depot_gid(d: &Kv, cfg: &SteamCfg) -> Option<u64> {
+    let os_ok = d
+        .node("config")
+        .and_then(|c| c.text("oslist"))
+        .is_none_or(|l| l.is_empty() || l.split(',').any(|o| o == cfg.os));
+    let gid = match d.node("manifests")?.get(&cfg.branch)? {
+        KvValue::Text(t) => t.parse().ok()?,
+        KvValue::Node(n) => n.text("gid")?.parse().ok()?,
     };
-    depots
-        .0
-        .iter()
-        .filter_map(|(id, v)| {
-            let KvValue::Node(d) = v else { return None };
-            let id: u32 = id.parse().ok()?;
-            let os_ok = d
-                .node("config")
-                .and_then(|c| c.text("oslist"))
-                .is_none_or(|l| l.is_empty() || l.split(',').any(|o| o == cfg.os));
-            let m = d.node("manifests")?;
-            let gid = match m.get(&cfg.branch)? {
-                KvValue::Text(t) => t.parse().ok()?,
-                KvValue::Node(n) => n.text("gid")?.parse().ok()?,
-            };
-            os_ok.then_some((id, gid))
-        })
-        .collect()
+    os_ok.then_some(gid)
+}
+
+// What: own depots (id, gid), borrowed (app, id).
+// Why: clippy type_complexity; one name for both.
+// From: Issue #871 | PR #1985
+type Depots = (Vec<(u32, u64)>, Vec<(u32, u32)>);
+
+// What: split the depots of one app.
+// Why: DoMe 07.11.: TFC 59 MB; HL base was skipped.
+// From: Issue #871 | PR #1985
+fn depots_of(app: &Kv, cfg: &SteamCfg) -> Depots {
+    let (mut own, mut borrowed) = (Vec::new(), Vec::new());
+    let Some(depots) = app.node("appinfo").unwrap_or(app).node("depots") else {
+        return (own, borrowed);
+    };
+    for (id, v) in &depots.0 {
+        let (KvValue::Node(d), Ok(id)) = (v, id.parse::<u32>()) else {
+            continue;
+        };
+        if let Some(gid) = depot_gid(d, cfg) {
+            own.push((id, gid));
+        } else if let Some(from) = d.text("depotfromapp").and_then(|t| t.parse().ok()) {
+            borrowed.push((from, id));
+        }
+    }
+    (own, borrowed)
 }
 
 // What: a decoded protobuf field value.
@@ -1105,6 +1147,7 @@ const EMSG_SERVICE_RESPONSE: u32 = 147;
 const EMSG_SERVICE_CALL: u32 = 151;
 const EMSG_HEARTBEAT: u32 = 703;
 const EMSG_LOGON_RESPONSE: u32 = 751;
+const EMSG_LOGGED_OFF: u32 = 757;
 const EMSG_LOGON: u32 = 5514;
 const EMSG_PICS_INFO_REQUEST: u32 = 8903;
 const EMSG_PICS_INFO_RESPONSE: u32 = 8904;
@@ -1130,7 +1173,7 @@ struct Frame {
 }
 
 // What: our own CM session over a websocket.
-// Why: no third-party Steam library.
+// Why: DoMe 18:18: no third-party Steam library.
 // From: Issue #871 | PR #1858
 struct Cm {
     ws: Ws,
@@ -1177,7 +1220,13 @@ impl Cm {
             queue: Default::default(),
             limit: cfg.limit,
         };
-        let ip = PbOut::default().fixed32(1, 0);
+        // What: a login id of its own per CM connection.
+        // Why: two jobs logged each other off (eresult 34).
+        // From: Issue #871 | PR #1985
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.subsec_nanos());
+        let ip = PbOut::default().fixed32(1, nanos | 1);
         let logon = PbOut::default()
             .int(1, cfg.logon[0])
             .int(5, cfg.logon[1])
@@ -1245,7 +1294,13 @@ impl Cm {
                 .map(u32::from_le_bytes)
                 .ok_or_else(|| "CM frame too short".to_string())
         };
-        let emsg = word(raw, 0)? & !PROTO_MASK;
+        let raw_emsg = word(raw, 0)?;
+        // What: skip frames without the protobuf flag.
+        // Why: live 06.11.: such a frame broke a job.
+        if raw_emsg & PROTO_MASK == 0 {
+            return Ok(());
+        }
+        let emsg = raw_emsg & !PROTO_MASK;
         let hlen = usize::try_from(word(raw, 4)?).map_err(|e| e.to_string())?;
         let header = pb_read(raw.get(8..8 + hlen).ok_or("CM header cut")?)?;
         let body = raw.get(8 + hlen..).ok_or("CM body cut")?.to_vec();
@@ -1289,6 +1344,13 @@ impl Cm {
         loop {
             if let Some(pos) = self.queue.iter().position(&want) {
                 return self.queue.remove(pos).ok_or_else(|| "CM queue".to_string());
+            }
+            // What: name why Steam ended the session.
+            // Why: DoMe 07.11.: only "CM closed" was shown.
+            // From: Issue #871 | PR #1985
+            if let Some(off) = self.queue.iter().find(|f| f.emsg == EMSG_LOGGED_OFF) {
+                let r = pb_read(&off.body).ok().and_then(|b| pb_int(&b, 1));
+                return Err(format!("Steam logged the session off, eresult {r:?}"));
             }
             self.queue.clear();
             self.beat().await?;
@@ -1404,7 +1466,7 @@ async fn request_code(
 // What: chunk ids from a zipped binary manifest.
 // Why: chunk SHA-1 names the CDN URL; data stays unread.
 // From: Issue #871 | PR #1858
-fn chunks_of(zipped: &[u8]) -> Result<Vec<String>, String> {
+fn chunks_of(zipped: &[u8]) -> Result<Vec<(String, u64)>, String> {
     use std::io::Read as _;
     const PAYLOAD_MAGIC: u32 = 0x71F6_17D0;
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(zipped))
@@ -1428,30 +1490,57 @@ fn chunks_of(zipped: &[u8]) -> Result<Vec<String>, String> {
     let mut ids = Vec::new();
     for mapping in pb_all(&payload, 1) {
         for chunk in pb_all(&pb_read(mapping)?, 6) {
-            if let Some(sha) = pb_all(&pb_read(chunk)?, 1).next() {
-                ids.push(hex::encode(sha));
+            let c = pb_read(chunk)?;
+            if let Some(sha) = pb_all(&c, 1).next() {
+                // What: packed size, else the plain size.
+                // Why: the CDN sends chunks compressed.
+                let n = pb_int(&c, 5).or_else(|| pb_int(&c, 4)).unwrap_or(0);
+                ids.push((hex::encode(sha), n));
             }
         }
     }
     ids.sort();
-    ids.dedup();
+    ids.dedup_by(|a, b| a.0 == b.0);
     Ok(ids)
 }
 
 // What: every chunk URL of an app's depots.
 // Why: the URL job warms them through the proxy.
 // From: Issue #871 | PR #1858
-async fn app_urls(cfg: &SteamCfg, app: u32) -> Result<Vec<String>, String> {
+async fn app_urls(cfg: &SteamCfg, app: u32) -> Result<(Vec<String>, u64, Vec<String>), String> {
     let client = cfg.client()?;
     let web = reqwest::Client::new();
     let mut cm = Cm::login(cfg, &web).await?;
     let info = app_info(&mut cm, app).await?;
-    let mut urls = Vec::new();
-    for (depot, gid) in depots_of(&info, cfg) {
-        let code = match request_code(&mut cm, app, depot, gid, &cfg.branch).await {
+    let (own, borrowed) = depots_of(&info, cfg);
+    let mut list: Vec<(u32, u32, u64)> = own.into_iter().map(|(d, g)| (app, d, g)).collect();
+    // What: a borrowed depot takes its owner app gid.
+    // Why: GoldSrc mods share the Half-Life base depots.
+    // From: Issue #871 | PR #1985
+    for (from, depot) in borrowed {
+        let owner = match app_info(&mut cm, from).await {
+            Ok(i) => i,
+            Err(e) => {
+                eprintln!("cachehamster: app {app}: depot {depot} via app {from}: {e}");
+                continue;
+            }
+        };
+        if let Some(gid) = depots_of(&owner, cfg)
+            .0
+            .into_iter()
+            .find(|(d, _)| *d == depot)
+            .map(|(_, g)| g)
+        {
+            list.push((from, depot, gid));
+        }
+    }
+    let (mut urls, mut size, mut skipped) = (Vec::new(), 0, Vec::new());
+    for (owner, depot, gid) in list {
+        let code = match request_code(&mut cm, owner, depot, gid, &cfg.branch).await {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("cachehamster: app {app}: {e}");
+                skipped.push(e);
                 continue;
             }
         };
@@ -1466,17 +1555,19 @@ async fn app_urls(cfg: &SteamCfg, app: u32) -> Result<Vec<String>, String> {
             .map_err(|e| format!("{url}: {}", http::error_chain(&e)))?;
         if !resp.status().is_success() {
             eprintln!("cachehamster: {url}: HTTP {}", resp.status());
+            skipped.push(format!("depot {depot}: HTTP {}", resp.status()));
             continue;
         }
         let body = resp.bytes().await.map_err(|e| format!("{url}: {e}"))?;
-        for sha in chunks_of(&body)? {
+        for (sha, n) in chunks_of(&body)? {
             urls.push(format!("http://{}/depot/{depot}/chunk/{sha}", cfg.cdn_host));
+            size += n;
         }
     }
     if urls.is_empty() {
         return Err(format!("app {app}: no depot of this account and OS"));
     }
-    Ok(urls)
+    Ok((urls, size, skipped))
 }
 
 // What: run a Steam app job: resolve, then warm.
@@ -1490,12 +1581,14 @@ async fn run_app(
     id: String,
     rate: Arc<AtomicU64>,
 ) -> State {
-    let urls = match app_urls(&cfg, app).await {
+    let (urls, size, skipped) = match app_urls(&cfg, app).await {
         Ok(u) => u,
         Err(e) => return State::Failed(e),
     };
     if let Some(j) = jobs.lock().await.iter_mut().find(|j| j.id == id) {
         j.total = urls.len() as u64;
+        j.size = size;
+        j.skipped = skipped;
     }
     let client = match cfg.client() {
         Ok(c) => c,
@@ -1615,7 +1708,7 @@ async fn daemon(c: Ctx) -> Result<(), String> {
     }
     let window = window(&c.s.text("CACHEHAMSTER_WINDOW")?)?;
     // What: the values this start runs with.
-    // Why: the log shows the limits in effect.
+    // Why: live 05.11. Fund 90: the value was not visible.
     // From: Issue #871 | PR #1980
     eprintln!(
         "cachehamster: start: {queues} jobs, {connections} downloads each, {mbit} Mbit/s (0 = off), window {:02}:{:02}-{:02}:{:02}",
@@ -1653,8 +1746,8 @@ async fn daemon(c: Ctx) -> Result<(), String> {
                 runner.running.len(),
                 bytes * 8 / (now - last).max(1) / 1_000_000,
             );
-            // What: log while jobs run or on a change.
-            // Why: an idle 0-jobs line is log spam.
+            // What: log while jobs run or state changed.
+            // Why: idle "0 jobs" line every 10 s is spam.
             // From: Issue #871 | PR #1984
             if state.0 > 0 || state != shown {
                 eprintln!("cachehamster: {} jobs running, {} Mbit/s", state.0, state.1);

@@ -30,12 +30,6 @@ x-service: &service
   restart: always
   logging: *logging
 
-# What: tini for proxy and ui; neither is an init.
-# Why: OpenRC images bring openrc-init as PID 1.
-# From: Issue #1683 | PR #1858
-x-supervised: &supervised
-  init: true
-
 # What: operator values; one map per set of consumers.
 # Why: a key two services read has one line to change.
 # From: Issue #1683 | PR #1912
@@ -55,6 +49,10 @@ x-environment:
   proxy-ui: &env-proxy-ui
     HTTPS_ENABLED: ${HTTPS_ENABLED:-}
     CACHE_MAX_GB: ${CACHE_MAX_GB:-}
+    # What: nginx resolver; the ui renders nginx.conf
+    # Why: a .env value never reached the renderer
+    # From: Issue #1683 | PR #1985
+    NGINX_UPSTREAM_RESOLVER: ${NGINX_UPSTREAM_RESOLVER:-}
   dns-dhcp: &env-dns-dhcp
     DDNS_TSIG_KEY: ${DDNS_TSIG_KEY}
   dns-dhcp-ui: &env-dns-dhcp-ui
@@ -132,6 +130,10 @@ services:
       # Why: CACHEHAMSTER_WINDOW is local time, not UTC.
       # From: Issue #871 | PR #1980
       - ${SOT_LOCALTIME_FILE}:${SOT_LOCALTIME_FILE}:ro
+      # What: host netfilter counters, read only.
+      # Why: the watchdog warns before conntrack fills up.
+      # From: Issue #1683 | PR #1985
+      - ${SOT_HOST_NET_STAT_SOURCE}:${SOT_HOST_NET_STAT_DIR}:ro
       # What: mounts several services share, one text each.
       # Why: a changed path or mode has one line to change.
       # From: Issue #1683 | PR #1912
@@ -169,12 +171,12 @@ services:
   # What: nginx cache; the http and https side in one.
   # Why: the passthrough port relays SNI; 443 intercepts.
   proxy:
-    <<: [*service, *supervised]
-    # What: snmpd beside nginx; restart on end or new file.
-    # Why: a new community in snmpd.conf needs a restart.
-    # From: Issue #1683 | PR #1980
-    entrypoint: ["bash", "-c", "(until [[ -f \"$$3\" ]]; do sleep \"$$2\"; done; while :; do m=$$(stat -c %y \"$$3\"); snmpd -f -C -c \"$$3\" & p=$$!; while kill -0 $$p 2>/dev/null && [[ $$(stat -c %y \"$$3\") == \"$$m\" ]]; do sleep \"$$2\"; done; kill $$p 2>/dev/null; wait $$p; sleep \"$$2\"; done) & until [[ -f \"$$1\" ]]; do sleep \"$$2\"; done; exec nginx -g \"daemon off;\" -c \"$$1\"", "nginx"]
-    command: ["${SOT_NGINX_CONF_DIR}/nginx.conf", "${SOT_PROXY_CONFIG_WAIT_SECONDS}", "${SOT_SNMPD_CONF_FILE}"]
+    <<: *service
+    # What: /run as tmpfs for OpenRC.
+    # Why: OpenRC mounts /run itself; Docker denies it.
+    # From: Issue #1683
+    tmpfs:
+      - ${SOT_RUN_DIR}
     # What: a real HTTP request to the health path.
     # Why: only an answering nginx counts as healthy.
     # From: Issue #1683 | PR #1858
@@ -189,7 +191,6 @@ services:
       # Why: .env is the one owner of operator values.
       # From: Issue #1683
       CACHE_MEM_MB: ${CACHE_MEM_MB:-}
-      NGINX_UPSTREAM_RESOLVER: ${NGINX_UPSTREAM_RESOLVER:-}
       PROXY_SECURITY_MODE: ${PROXY_SECURITY_MODE:-}
       PROXY_ALLOWED_CLIENT_CIDRS: ${PROXY_ALLOWED_CLIENT_CIDRS:-}
       CACHE_SLICE_SIZE: ${CACHE_SLICE_SIZE:-}
@@ -320,12 +321,12 @@ services:
   # Why: the watchdog is the one control owner.
   # From: Issue #1683
   ui:
-    <<: [*service, *supervised]
-    # What: snmpd beside the ui; restart on end or new file.
-    # Why: the ui rewrites snmpd.conf after snmpd started.
-    # From: Issue #1683 | PR #1980
-    entrypoint: ["bash", "-c", "(until [[ -f \"$$1\" ]]; do sleep \"$$2\"; done; while :; do m=$$(stat -c %y \"$$1\"); snmpd -f -C -c \"$$1\" & p=$$!; while kill -0 $$p 2>/dev/null && [[ $$(stat -c %y \"$$1\") == \"$$m\" ]]; do sleep \"$$2\"; done; kill $$p 2>/dev/null; wait $$p; sleep \"$$2\"; done) & exec lancache-ui", "ui"]
-    command: ["${SOT_SNMPD_CONF_FILE}", "${SOT_PROXY_CONFIG_WAIT_SECONDS}"]
+    <<: *service
+    # What: /run as tmpfs for OpenRC.
+    # Why: OpenRC mounts /run itself; Docker denies it.
+    # From: Issue #1683
+    tmpfs:
+      - ${SOT_RUN_DIR}
     container_name: ${SOT_CONTAINER_NAME_UI}
     image: ${LANCACHE_IMAGE_REF_UI:?LANCACHE_IMAGE_REF_UI is required}
     environment:
@@ -340,11 +341,14 @@ services:
       LANCACHE_IMAGE_PREFIX: ${LANCACHE_IMAGE_PREFIX:?LANCACHE_IMAGE_PREFIX is required}
       LANCACHE_IMAGE_CHANNEL: ${LANCACHE_IMAGE_CHANNEL:-}
       LANCACHE_IMAGE_TAG: ${LANCACHE_IMAGE_TAG:?LANCACHE_IMAGE_TAG is required}
-      UI_AUTH_USER: ${UI_AUTH_USER:-}
-      UI_AUTH_PASSWORD_HASH: ${UI_AUTH_PASSWORD_HASH:-}
+      # What: setup.sh login under the ui key names
+      # Why: G1: the setup.sh password never applied
+      # From: Issue #1683 | PR #1985
+      UI_USER: ${UI_AUTH_USER:-}
+      UI_PASSWORD_HASH: ${UI_AUTH_PASSWORD_HASH:-}
       ALLOW_INSECURE_UI: ${ALLOW_INSECURE_UI:-}
       UI_SESSION_TTL_SECONDS: ${UI_SESSION_TTL_SECONDS:-}
-      DHCP_API_TOKEN: ${KEA_CTRL_TOKEN}
+      KEA_CTRL_TOKEN: ${KEA_CTRL_TOKEN}
       SECONDARY_REGISTRATION_TOKEN: ${SECONDARY_REGISTRATION_TOKEN}
     volumes:
       # What: rendered configs; the ui writes, owners read.
@@ -390,7 +394,7 @@ services:
     # From: Issue #1683 | PR #1912
     extra_hosts:
       - "${SOT_DHCP_API_HOST}:host-gateway"
-    # What: the UI probes itself; no supervisor runs here.
+    # What: the UI probes itself; no watchdog runs here.
     # Why: the UI image has no lancache-watchdog binary.
     healthcheck:
       <<: *healthcheck-timing

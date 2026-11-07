@@ -9,10 +9,10 @@ Dockerfiles and compose files name keys, never values.
 | Container | Programs | Started by |
 | --- | --- | --- |
 | `services` | lancache-watchdog, lancache-cachehamster, syslog-ng, chronyd, snmpd | OpenRC |
-| `proxy` | nginx | nginx is the main process (tini as PID 1) |
-| `dns` | PowerDNS auth, recursor `dns-http`, recursor `dns-https` | OpenRC |
+| `proxy` | nginx, snmpd | OpenRC |
+| `dns` | PowerDNS auth, recursor `dns-http`, recursor `dns-https`, snmpd | OpenRC |
 | `dhcp` | Kea (dhcp4, ctrl-agent, ddns) or dnsmasq | OpenRC, runlevel = `DHCP_MODE` |
-| `ui` | lancache-ui | lancache-ui is the main process |
+| `ui` | lancache-ui, snmpd | OpenRC |
 
 The program list of each image is the SOT field `processes`. Each row is
 `[runlevel:]name=command,arg,...`. The Dockerfile turns every row into an
@@ -88,6 +88,7 @@ Each round (`CHECK_INTERVAL`) the watchdog:
 - reads the health of every container and restarts sick ones (see above);
 - checks free disk space of the cache (`DISK_WARN_PCT`, `DISK_ALARM_PCT`);
 - checks certificate expiry;
+- warns when host conntrack use reaches `WATCHDOG_CONNTRACK_WARN_PCT`;
 - once a day purges old cache files, prunes and packs logs (xz);
 - checks that syslog-ng still writes;
 - writes `WATCHDOG_ALARM_FILE` for the ui dashboard.
@@ -114,3 +115,7 @@ be switched per service in the ui; the ui re-renders the syslog-ng config.
 `lancache-cachehamster` runs in `services`. It logs in to Steam by QR
 code, keeps a job queue (now, later, at a time) and downloads through the
 proxy so the cache fills. The ui starts jobs through it.
+
+## Howto audit this file
+
+The audit procedure of this file is `docs/policy/howto-audit-documentation.md`.

@@ -30,6 +30,11 @@ use tera::{Context, Tera};
 // From: Issue #1683 | PR #1858
 const SETTINGS_FILE_ENV: &str = "LANCACHE_SETTINGS_FILE";
 
+// What: CLI word of the one-shot DHCP probe.
+// Why: the ui and setup.sh start the same command.
+// From: Issue #1683 | PR #1985
+const DHCP_PROBE_CMD: &str = "dhcp-probe";
+
 // What: page keys read from env, not from specs.
 // Why: compose sets them; no schema row exists.
 // From: Issue #1683 | PR #1980
@@ -202,8 +207,15 @@ impl App {
             values.entry(key.into()).or_insert(val);
         }
         let login = !s.text("UI_PASSWORD_HASH").unwrap_or_default().is_empty();
-        let pages: BTreeMap<&str, &str> = PAGES.iter().copied().collect();
-        let routes: BTreeMap<&str, &str> = ROUTES.iter().copied().collect();
+        // What: page and route paths by short name.
+        // Why: templates name the SOT key without prefix.
+        // From: Issue #1683
+        let paths = |prefix: &str| -> BTreeMap<String, String> {
+            s.texts()
+                .filter_map(|(k, v)| k.strip_prefix(prefix).map(|n| (n.to_ascii_lowercase(), v)))
+                .collect()
+        };
+        let (pages, routes) = (paths("UI_PAGE_"), paths("UI_ROUTE_"));
         ctx.insert(CSRF_FIELD, &csrf.0);
         ctx.insert("page", page);
         ctx.insert("active_page", page);
@@ -214,6 +226,7 @@ impl App {
         ctx.insert("repo_url", &s.text("REPO_URL")?);
         ctx.insert("desired_services", &s.list("UI_CONTROLLABLE_SERVICES"));
         ctx.insert("programs", &s.list("UI_SERVICES"));
+        ctx.insert("ui_service", &s.text("UI_SERVICE").unwrap_or_default());
         ctx.insert("watchdog_refresh_seconds", &s.uint("UI_STATUS_REFRESH")?);
         ctx.insert("warnings", &s.warnings);
         // What: texts of the request language.
@@ -235,7 +248,7 @@ impl App {
         ctx.insert("langs", &langs);
         let html = self.tera.render(name, &ctx).map_err(|e| {
             eprintln!("ui: template {name}: {e:?}");
-            format!("template {name} failed, see the log")
+            tr("err_template").replace("{name}", name)
         })?;
         Ok(Html(html).into_response())
     }
@@ -265,7 +278,7 @@ impl Csrf {
     fn check(&self, form: &Fields) -> Result<(), Fail> {
         match form.get(CSRF_FIELD) {
             Some(t) if self.matches(t) => Ok(()),
-            _ => Err(Fail(StatusCode::FORBIDDEN, "CSRF token mismatch".into())),
+            _ => Err(Fail(StatusCode::FORBIDDEN, tr("err_csrf"))),
         }
     }
 
@@ -276,7 +289,7 @@ impl Csrf {
         let given = headers.get("x-csrf-token").and_then(|v| v.to_str().ok());
         match given {
             Some(t) if self.matches(t) => Ok(()),
-            _ => Err(Fail(StatusCode::FORBIDDEN, "CSRF token mismatch".into())),
+            _ => Err(Fail(StatusCode::FORBIDDEN, tr("err_csrf"))),
         }
     }
 }
@@ -519,8 +532,16 @@ async fn password(
     .await
     .map_err(|e| e.to_string())?
     .map_err(bad_request)?;
-    let change = Fields::from([("UI_PASSWORD_HASH".to_string(), hashed)]);
-    finish(commit(&app, change).await, "/setup")
+    let mut change = Fields::from([("UI_PASSWORD_HASH".to_string(), hashed)]);
+    // What: the user name is set in the same form.
+    // Why: DoMe 07.11.: any name, not only the default.
+    // From: Issue #1683 | PR #1985
+    let user = get("user").trim().to_string();
+    if !user.is_empty() {
+        change.insert("UI_USER".to_string(), user);
+    }
+    let back = app.settings().text("UI_PAGE_SETUP")?;
+    finish(commit(&app, change).await, &back)
 }
 
 // What: keep only real changes of known keys.
@@ -557,7 +578,7 @@ async fn commit(app: &App, form: Fields) -> Result<(), String> {
     config::store(&path, &old, &updates)?;
     let new = Settings::load(&process_env, Some(&path))?;
     // What: a value that cannot render is not kept.
-    // Why: a looping upstream must not be saved.
+    // Why: live 05.11.: a looping upstream was saved.
     // From: Issue #1683 | PR #1980
     let check = secrets(&new).and_then(|sec| render::all(&new, &sec).map_err(|e| e.join("; ")));
     if let Err(e) = check {
@@ -599,6 +620,20 @@ async fn save(
     {
         return Err(bad_request(tr("err_no_domain").replace("{x}", d)));
     }
+    // What: each upstream entry is checked before save.
+    // Why: live 06.11. + threat model G3: no self loop.
+    // From: Issue #1683 | PR #1985
+    let own = lancache_ng::recursor_conf::own_ips(&app.settings());
+    for key in ["DNS_UPSTREAM_SERVERS", "NGINX_UPSTREAM_RESOLVER"] {
+        for raw in form
+            .get(key)
+            .map(|v| config::list_items(v))
+            .into_iter()
+            .flatten()
+        {
+            lancache_ng::recursor_conf::upstream_entry(key, raw, &own).map_err(bad_request)?;
+        }
+    }
 
     // What: back to the page that sent the form.
     // Why: live test: dashboard forms ended on /setup.
@@ -607,7 +642,7 @@ async fn save(
         .get("back")
         .filter(|b| b.starts_with('/') && !b.starts_with("//"))
         .cloned()
-        .unwrap_or_else(|| "/setup".into());
+        .map_or_else(|| app.settings().text("UI_PAGE_SETUP"), Ok)?;
     let before = lancache_ng::dns::managed_zones(&app.settings()).unwrap_or_default();
     let result = commit(&app, form).await;
     if result.is_ok() {
@@ -638,7 +673,7 @@ async fn drop_old_zones(s: &Settings, before: &[String]) {
             Err(_) => continue,
         };
         let done = if own {
-            Err("it still holds records".to_string())
+            Err(tr("err_zone_has_records"))
         } else {
             api.delete_zone(zone).await
         };
@@ -685,7 +720,7 @@ async fn logs(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     let programs = s.list("SYSLOG_PROGRAMS");
     let muted = s.list("SYSLOG_MUTED");
     // What: every folder the store holds, plus the list.
-    // Why: the store folder names differ from the list.
+    // Why: DoMe 05.11.: page empty; the store names differ.
     // From: Issue #1683 | PR #1980
     let mut names = programs.clone();
     if let Ok(dirs) = std::fs::read_dir(&root) {
@@ -733,7 +768,8 @@ async fn logs_save(
     let mut change = Fields::new();
     change.insert("SYSLOG_MUTED".into(), muted.join(" "));
     change.insert("SYSLOG_FORWARD".into(), targets.join(" "));
-    finish(commit(&app, change).await, "/logs#syslog")
+    let back = format!("{}#syslog", app.settings().text("UI_PAGE_LOGS")?);
+    finish(commit(&app, change).await, &back)
 }
 
 // What: PowerDNS API of this node.
@@ -869,7 +905,7 @@ fn zone_snapshots_cli(s: &Settings) -> Result<(), String> {
 // From: Issue #1683 | PR #1980
 async fn rollback(s: &Settings, zone: &str, id: &str) -> Result<(), String> {
     if !snapshot_zones(s)?.iter().any(|z| z == zone) {
-        return Err(format!("zone {zone} keeps no snapshots"));
+        return Err(tr("err_zone_no_snapshots").replace("{zone}", zone));
     }
     let body = zone_store(s, zone)?.read(id)?;
     let rows: Vec<Value> = serde_json::from_slice(&body).map_err(|e| e.to_string())?;
@@ -948,17 +984,14 @@ async fn domains(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     // What: setup.sh from the branch of this channel.
     // Why: a nightly primary must not hand out master.
     // From: Issue #1683 | PR #1980
-    let channel = process_env("LANCACHE_IMAGE_CHANNEL").unwrap_or_default();
-    let url_key = if channel == "nightly" {
-        "SETUP_SCRIPT_URL_NIGHTLY"
+    let nightly = process_env("LANCACHE_IMAGE_CHANNEL").as_deref() == Some("nightly");
+    let (url_key, ref_key) = if nightly {
+        ("SETUP_SCRIPT_URL_NIGHTLY", "SETUP_GIT_REF_NIGHTLY")
     } else {
-        "SETUP_SCRIPT_URL"
+        ("SETUP_SCRIPT_URL", "SETUP_GIT_REF")
     };
     ctx.insert("setup_script_url", &s.text(url_key)?);
-    // What: the copied command names this channel.
-    // Why: setup.sh then reads files from its ref.
-    // From: Issue #1683 | PR #1984
-    ctx.insert("setup_channel", &channel);
+    ctx.insert("setup_git_ref", &s.text(ref_key)?);
     ctx.insert("primary_ip", &s.text("IP_HTTP")?);
     // What: HTTPS proxy IP when it is a second LAN IP.
     // Why: the copied command then sets the HTTPS DNS bind.
@@ -1007,13 +1040,13 @@ fn single_field(key: &str, value: impl ToString) -> Fields {
     Fields::from([(key.to_string(), value.to_string())])
 }
 
-// What: one DNS page form, chosen by op.
-// Why: all DNS forms post to /domains/{op}.
-// From: Issue #1683 | PR #1858
+// What: one DNS page form, chosen by its SOT key.
+// Why: all DNS forms share one handler.
+// From: Issue #1683
 async fn dns_action(
     State(app): Shared,
     Extension(csrf): Extension<Csrf>,
-    axum::extract::Path(op): axum::extract::Path<String>,
+    Extension(Op(op)): Extension<Op>,
     Form(form): Form<Fields>,
 ) -> Page {
     csrf.check(&form)?;
@@ -1025,27 +1058,31 @@ async fn dns_action(
     };
     let on = matches!(get("enabled").as_str(), "1" | "true");
     let domain = get("domain").to_ascii_lowercase();
-    let result = match op.as_str() {
-        "domain-add" if lancache_ng::dns::cdn_entry(&domain).is_none() => {
+    let result = match op {
+        "UI_ROUTE_DNS_ADD" if lancache_ng::dns::cdn_entry(&domain).is_none() => {
             Err(format!("{domain:?} is no valid domain entry"))
         }
-        "domain-add" => commit(&app, list_change(&s, "CDN_CUSTOM_DOMAINS", &domain, true)).await,
-        "domain-remove" => {
+        "UI_ROUTE_DNS_ADD" => {
+            commit(&app, list_change(&s, "CDN_CUSTOM_DOMAINS", &domain, true)).await
+        }
+        "UI_ROUTE_DNS_REMOVE" => {
             commit(&app, list_change(&s, "CDN_CUSTOM_DOMAINS", &domain, false)).await
         }
-        "domain-toggle" => {
+        "UI_ROUTE_DNS_TOGGLE" => {
             commit(&app, list_change(&s, "CDN_DISABLED_DOMAINS", &domain, !on)).await
         }
-        "aaaa-filter" => commit(&app, single_field("DNS_FILTER_AAAA", on)).await,
-        "query-log" => commit(&app, single_field("DNS_QUERY_LOG", on)).await,
-        "ddns-unsigned" => commit(&app, single_field("DDNS_ALLOW_UNSIGNED", on)).await,
-        "record-add" | "record-remove" => record(&s, op == "record-add", &get).await,
-        "ptr-add" | "ptr-remove" => ptr(&s, op == "ptr-add", &get).await,
-        "zone-rollback" => rollback(&s, &get("zone"), &get("snapshot_id")).await,
-        "tsig-rotate" => rotate_tsig(&app).await,
-        _ => Err(format!("unknown DNS action {op}")),
+        "UI_ROUTE_AAAA_FILTER" => commit(&app, single_field("DNS_FILTER_AAAA", on)).await,
+        "UI_ROUTE_QUERY_LOG" => commit(&app, single_field("DNS_QUERY_LOG", on)).await,
+        "UI_ROUTE_DDNS_UNSIGNED" => commit(&app, single_field("DDNS_ALLOW_UNSIGNED", on)).await,
+        "UI_ROUTE_LAN_ADD" | "UI_ROUTE_LAN_REMOVE" => {
+            record(&s, op == "UI_ROUTE_LAN_ADD", &get).await
+        }
+        "UI_ROUTE_PTR_ADD" | "UI_ROUTE_PTR_REMOVE" => ptr(&s, op == "UI_ROUTE_PTR_ADD", &get).await,
+        "UI_ROUTE_ZONE_ROLLBACK" => rollback(&s, &get("zone"), &get("snapshot_id")).await,
+        "UI_ROUTE_TSIG_ROTATE" => rotate_tsig(&app).await,
+        _ => Err(tr("err_unknown_dns_action").replace("{op}", op)),
     };
-    finish(result, "/domains")
+    finish(result, &s.text("UI_PAGE_DOMAINS")?)
 }
 
 // What: full name inside the LAN zone.
@@ -1092,7 +1129,7 @@ async fn record(
     let zone = lan_zone(s)?;
     let kind = get("record_type");
     if !s.list("DNS_LAN_RECORD_TYPES").contains(&kind) {
-        return Err(format!("record type {kind} is not allowed"));
+        return Err(tr("err_record_type").replace("{kind}", &kind));
     }
     let name = in_zone(&get("name"), &zone);
     let mut contents = Vec::new();
@@ -1108,7 +1145,7 @@ async fn record(
         let max = s.uint("DNS_RECORD_TTL_MAX")?;
         ttl = get("ttl").parse::<u32>().unwrap_or(0);
         if ttl == 0 || u64::from(ttl) > max {
-            return Err(format!("TTL must be 1 to {max}"));
+            return Err(tr("err_ttl_range").replace("{max}", &max.to_string()));
         }
     }
     let api = pdns_api(s)?;
@@ -1116,7 +1153,7 @@ async fn record(
     snapshot(s, &api, &zone).await?;
     flush_zone(s, &zone).await?;
     // What: PTR for each A address when ticked.
-    // Why: LAN A records get their PTR in one step.
+    // Why: DoMe 31.10.: PTR from the LAN entries.
     // From: Issue #1683 | PR #1980
     if add && kind == "A" && get("ptr") == "1" {
         let host = vec![format!("{}.", name.trim_end_matches('.'))];
@@ -1308,7 +1345,8 @@ fn renew_token(s: &Settings) -> Result<String, String> {
 async fn secondary_action(
     State(app): Shared,
     Extension(csrf): Extension<Csrf>,
-    axum::extract::Path((name, op)): axum::extract::Path<(String, String)>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+    Extension(Op(op)): Extension<Op>,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Page {
@@ -1318,15 +1356,17 @@ async fn secondary_action(
     let Some(at) = list.iter().position(|(n, _)| *n == name) else {
         return Err(Fail(StatusCode::NOT_FOUND, "no such secondary".into()));
     };
-    match op.as_str() {
-        "remove" => {
+    match op {
+        "UI_ROUTE_SECONDARY" => {
             list.remove(at);
             store_secondaries(&app, &list).await?;
             rotate_tsig(&app).await?;
-            Ok(Redirect::to("/domains").into_response())
+            Ok(Redirect::to(&s.text("UI_PAGE_DOMAINS")?).into_response())
         }
-        "rotate" => Ok(axum::Json(json!({"token": renew_token(&s)?})).into_response()),
-        "address" => {
+        "UI_ROUTE_SECONDARY_ROTATE" => {
+            Ok(axum::Json(json!({"token": renew_token(&s)?})).into_response())
+        }
+        "UI_ROUTE_SECONDARY_ADDRESS" => {
             let a: Address = serde_json::from_slice(&body)
                 .map_err(|_| bad_request("body must be {\"address\": ...}"))?;
             if !is_ip(&a.address) {
@@ -1336,7 +1376,9 @@ async fn secondary_action(
             store_secondaries(&app, &list).await.map_err(bad_request)?;
             Ok(StatusCode::NO_CONTENT.into_response())
         }
-        "health" => Ok(axum::Json(secondary_health(&s, &list[at].1).await).into_response()),
+        "UI_ROUTE_SECONDARY_HEALTH" => {
+            Ok(axum::Json(secondary_health(&s, &list[at].1).await).into_response())
+        }
         _ => Err(Fail(StatusCode::NOT_FOUND, "unknown action".into())),
     }
 }
@@ -1383,7 +1425,7 @@ async fn secondary_health(s: &Settings, address: &str) -> Value {
 async fn flush_on_transfer(app: Arc<App>) {
     let mut seen: BTreeMap<String, u32> = BTreeMap::new();
     // What: an error only after the grace time.
-    // Why: a planned dns restart logs no error.
+    // Why: DoMe 05.11.: a planned dns restart logged one.
     // From: Issue #1683 | PR #1980
     let mut down: Option<std::time::Instant> = None;
     let mut logged = false;
@@ -1440,7 +1482,7 @@ async fn flush_round(s: &Settings, seen: &mut BTreeMap<String, u32>) -> Result<(
 }
 
 // What: Kea control agent of this stack.
-// Why: host from env at run time; a run may move it.
+// Why: host from env; basic auth with the stack token.
 // From: Issue #1683 | PR #1980
 fn kea_api(s: &Settings) -> Result<lancache_ng::kea::Api, String> {
     let url = format!(
@@ -1448,7 +1490,13 @@ fn kea_api(s: &Settings) -> Result<lancache_ng::kea::Api, String> {
         s.text("DHCP_API_HOST")?,
         s.uint("KEA_CTRL_PORT")?
     );
-    Ok(lancache_ng::kea::Api::new(http::client(s)?, &url))
+    let token = secrets(s)?.kea_ctrl_token;
+    Ok(lancache_ng::kea::Api::new(
+        http::client(s)?,
+        &url,
+        &s.text("KEA_CTRL_USER")?,
+        &token,
+    ))
 }
 
 // What: value of one Kea option in a subnet.
@@ -1666,7 +1714,7 @@ fn subnet_from(get: &(dyn Fn(&str) -> String + Sync), id: u64, old: Option<&Valu
 // Why: edits target a subnet by id, not position.
 fn subnet_mut(list: &mut [Value], id: u64) -> Result<&mut Value, String> {
     let found = list.iter_mut().find(|x| x["id"].as_u64() == Some(id));
-    found.ok_or_else(|| format!("no subnet {id}"))
+    found.ok_or_else(|| tr("err_no_subnet").replace("{id}", &id.to_string()))
 }
 
 // What: SOT keys of the proxy and relay forms.
@@ -1713,7 +1761,7 @@ async fn kea_action(
             .map_err(|_| format!("{k} must be a number"))
     };
     match op {
-        "subnet-add" => {
+        "UI_ROUTE_SUBNET_ADD" => {
             kea_edit(s, |l| {
                 let next = l.iter().filter_map(|x| x["id"].as_u64()).max().unwrap_or(0) + 1;
                 l.push(subnet_from(get, next, None));
@@ -1721,7 +1769,7 @@ async fn kea_action(
             })
             .await
         }
-        "subnet-update" => {
+        "UI_ROUTE_SUBNET_UPDATE" => {
             let id = num("id")?;
             kea_edit(s, |l| {
                 let sn = subnet_mut(l, id)?;
@@ -1730,7 +1778,7 @@ async fn kea_action(
             })
             .await
         }
-        "subnet-remove" => {
+        "UI_ROUTE_SUBNET_REMOVE" => {
             let id = num("id")?;
             kea_edit(s, |l| {
                 l.retain(|x| x["id"].as_u64() != Some(id));
@@ -1738,7 +1786,7 @@ async fn kea_action(
             })
             .await
         }
-        "option-add" | "option-remove" => {
+        "UI_ROUTE_SUBNET_OPTION_ADD" | "UI_ROUTE_SUBNET_OPTION_REMOVE" => {
             let (id, code) = (
                 num("subnet_id")?,
                 lancache_ng::dhcp::option_code(&get("code"))?,
@@ -1749,7 +1797,7 @@ async fn kea_action(
                 let mut opts = sn["option-data"].as_array().cloned().unwrap_or_default();
                 let same = |o: &Value| o["code"].as_u64() == Some(u64::from(code));
                 opts.retain(|o| !same(o) || o.get("name").is_some());
-                if op == "option-add" {
+                if op == "UI_ROUTE_SUBNET_OPTION_ADD" {
                     opts.push(json!({"code": code, "data": data}));
                 }
                 sn["option-data"] = opts.into();
@@ -1757,14 +1805,14 @@ async fn kea_action(
             })
             .await
         }
-        "static-add" | "static-remove" => {
+        "UI_ROUTE_STATIC_ADD" | "UI_ROUTE_STATIC_REMOVE" => {
             let id = num("subnet_id")?;
             let (mac, ip, host) = (get("mac"), get("ip"), get("hostname"));
             kea_edit(s, |l| {
                 let sn = subnet_mut(l, id)?;
                 let mut hosts = sn["reservations"].as_array().cloned().unwrap_or_default();
                 hosts.retain(|r| r["hw-address"].as_str() != Some(mac.as_str()));
-                if op == "static-add" {
+                if op == "UI_ROUTE_STATIC_ADD" {
                     hosts.push(json!({"hw-address": mac, "ip-address": ip, "hostname": host}));
                 }
                 sn["reservations"] = hosts.into();
@@ -1772,13 +1820,13 @@ async fn kea_action(
             })
             .await
         }
-        "lease-release" => kea_api(s)?.release(&get("ip")).await,
-        "kea-rollback" => {
+        "UI_ROUTE_LEASE_RELEASE" => kea_api(s)?.release(&get("ip")).await,
+        "UI_ROUTE_KEA_ROLLBACK" => {
             let body = kea_store(s)?.read(&get("snapshot_id"))?;
             let cfg: Value = serde_json::from_slice(&body).map_err(|e| e.to_string())?;
             kea_api(s)?.set_config(cfg).await
         }
-        _ => Err(format!("unknown DHCP action {op}")),
+        _ => Err(tr("err_unknown_dhcp_action").replace("{op}", op)),
     }
 }
 
@@ -1788,7 +1836,7 @@ async fn kea_action(
 async fn dhcp_action(
     State(app): Shared,
     Extension(csrf): Extension<Csrf>,
-    axum::extract::Path(op): axum::extract::Path<String>,
+    Extension(Op(op)): Extension<Op>,
     Form(form): Form<Fields>,
 ) -> Page {
     csrf.check(&form)?;
@@ -1799,13 +1847,15 @@ async fn dhcp_action(
             .unwrap_or_default()
     };
     let on = matches!(get("enabled").as_str(), "1" | "true");
-    let result = match op.as_str() {
-        "mode" => commit(&app, single_field("DHCP_MODE", get("dhcp_mode"))).await,
-        "ddns" => commit(&app, single_field("DHCP_DDNS", on)).await,
-        "proxy" | "relay" => commit(&app, dnsmasq_fields(&form, op == "proxy")).await,
-        _ => kea_action(&s, &op, &get).await,
+    let result = match op {
+        "UI_ROUTE_DHCP_MODE" => commit(&app, single_field("DHCP_MODE", get("dhcp_mode"))).await,
+        "UI_ROUTE_DHCP_DDNS" => commit(&app, single_field("DHCP_DDNS", on)).await,
+        "UI_ROUTE_DHCP_PROXY" | "UI_ROUTE_DHCP_RELAY" => {
+            commit(&app, dnsmasq_fields(&form, op == "UI_ROUTE_DHCP_PROXY")).await
+        }
+        _ => kea_action(&s, op, &get).await,
     };
-    finish(result, "/dhcp")
+    finish(result, &s.text("UI_PAGE_DHCP")?)
 }
 
 // What: DHCP precheck on demand.
@@ -1818,10 +1868,24 @@ async fn dhcp_check(
 ) -> Page {
     csrf.check_header(&headers)?;
     let s = app.settings();
-    let probe = move || lancache_ng::dhcp_probe::run(&s);
-    let report = tokio::task::spawn_blocking(probe)
-        .await
-        .map_err(|e| e.to_string())?;
+    let (_, limit) = app.limits(&s)?;
+    let wait = Duration::from_secs(s.uint("DHCP_PROBE_WAIT_TIMEOUT")?);
+    let me = container_of(&app, &s, &s.text("UI_SERVICE")?).await?;
+    let bad = |e: docker::Error| Fail(StatusCode::BAD_GATEWAY, e.to_string());
+    let own = app.docker.inspect(&me, limit).await.map_err(bad)?;
+    // What: the same image, env and volumes as the ui.
+    // Why: a bridge never carries LAN broadcasts.
+    // From: Issue #1683 | PR #1985
+    let spec = json!({
+        "Image": own["Config"]["Image"],
+        "Env": own["Config"]["Env"],
+        "Entrypoint": own["Config"]["Entrypoint"],
+        "Cmd": [DHCP_PROBE_CMD],
+        "HostConfig": {"NetworkMode": "host", "VolumesFrom": [me]},
+    });
+    let (code, out) = app.docker.run_once(spec, limit, wait).await.map_err(bad)?;
+    let report: Value = serde_json::from_str(&out)
+        .map_err(|e| Fail(StatusCode::BAD_GATEWAY, format!("probe exit {code}: {e}")))?;
     Ok(axum::Json(report).into_response())
 }
 
@@ -1843,9 +1907,10 @@ async fn stats(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     }
 
     // What: one tab per source, with its origin.
-    // Why: each value names where it comes from.
+    // Why: DoMe 05.11.: no guessing where values come from.
     // From: Issue #1683 | PR #1980
     let step = s.uint("STATS_STEP").unwrap_or_default();
+    ctx.insert("stats_step", &step);
     let snmp = s.text("STATS_SNMP_TARGET").unwrap_or_default();
     let mut tabs = vec![json!({
         "id": lancache_ng::rrd::MACHINE,
@@ -1898,7 +1963,7 @@ async fn graph(
     let s = app.settings();
     let all = lancache_ng::rrd::all(&s)?;
     let Some(mut g) = all.into_iter().find(|g| g.name == name) else {
-        return Err(Fail(StatusCode::NOT_FOUND, "no such graph".into()));
+        return Err(Fail(StatusCode::NOT_FOUND, tr("err_no_graph")));
     };
     g.title = graph_title(&g.title);
     let draw = move || lancache_ng::rrd::png(&s, &g, &q.range, q.dark == 1);
@@ -2068,7 +2133,7 @@ async fn service_values(app: &App, s: &Settings, want: &[String]) -> BTreeMap<St
 }
 
 // What: program values into RRD each step.
-// Why: PowerDNS, nginx, Kea and chrony values.
+// Why: DoMe 01.11.: PowerDNS, nginx, Kea, chrony.
 // From: Issue #1683 | PR #1980
 async fn sample_services(app: &App, s: &Settings) -> Vec<String> {
     let all = match lancache_ng::rrd::service_graphs(s) {
@@ -2130,7 +2195,7 @@ async fn sampler(app: Arc<App>) {
 }
 
 // What: in mode off a running dhcp is stopped again.
-// Why: compose up can start dhcp after the ui.
+// Why: live 05.11.: compose up started it after the ui.
 // From: Issue #1683 | PR #1980
 async fn dhcp_stays_off(app: &App, s: &Settings) -> Result<(), String> {
     if s.text("DHCP_MODE")? != "off" {
@@ -2214,7 +2279,7 @@ async fn container_of(app: &App, s: &Settings, service: &str) -> Result<String, 
         .find(|c| c["Labels"][docker::SERVICE_LABEL].as_str() == Some(service));
     let name = hit.and_then(|c| c["Names"][0].as_str());
     name.map(|n| n.trim_start_matches('/').to_string())
-        .ok_or_else(|| format!("no container for {service}"))
+        .ok_or_else(|| tr("err_no_container").replace("{service}", service))
 }
 
 // What: run a command in a service container.
@@ -2249,14 +2314,24 @@ async fn service_action(
 ) -> Page {
     csrf.check_header(&headers)?;
     if action != "restart" && action != "reload" {
-        return Err(bad_request("action must be restart or reload"));
+        return Err(bad_request(tr("err_action_restart_reload")));
     }
     let s = app.settings();
     if !s
         .list("UI_SERVICES")
         .contains(&format!("{container}:{program}"))
     {
-        return Err(Fail(StatusCode::NOT_FOUND, "program not offered".into()));
+        return Err(Fail(StatusCode::NOT_FOUND, tr("err_program_not_offered")));
+    }
+    // What: only a running program is touched.
+    // Why: a restart must not start kea in dnsmasq mode.
+    // From: Issue #1683
+    let status = ["rc-service", program.as_str(), "status"];
+    let (code, _) = exec_in(&app, &s, &container, &status)
+        .await
+        .map_err(|e| Fail(StatusCode::BAD_GATEWAY, e))?;
+    if code != 0 {
+        return Err(Fail(StatusCode::CONFLICT, tr("err_program_not_running")));
     }
     let cmd = ["rc-service", program.as_str(), action.as_str()];
     let (code, out) = exec_in(&app, &s, &container, &cmd)
@@ -2330,7 +2405,7 @@ fn job_time(when: &str, at: &str) -> Result<String, Fail> {
 async fn hamster_action(
     State(app): Shared,
     Extension(csrf): Extension<Csrf>,
-    axum::extract::Path(op): axum::extract::Path<String>,
+    Extension(Op(op)): Extension<Op>,
     Form(form): Form<Fields>,
 ) -> Page {
     csrf.check(&form)?;
@@ -2348,16 +2423,22 @@ async fn hamster_action(
     // What: a job needs addresses or an app ID.
     // Why: the text in the page language.
     // From: Issue #871 | PR #1980
-    if op == "add" && what.trim().is_empty() {
+    if op == "UI_ROUTE_HAMSTER_ADD" && what.trim().is_empty() {
         return Err(bad_request(tr("err_hamster_empty")));
     }
-    let args: Vec<&str> = match op.as_str() {
-        "add" => vec!["add", &name, &when, &what],
-        "start" | "cancel" | "remove" => vec![op.as_str(), &id],
-        "logout" => vec!["logout"],
+    // What: the cachehamster command of each action.
+    // Why: the daemon protocol names commands, not paths.
+    // From: Issue #871
+    let args: Vec<&str> = match op {
+        "UI_ROUTE_HAMSTER_ADD" => vec!["add", &name, &when, &what],
+        "UI_ROUTE_HAMSTER_START" => vec!["start", &id],
+        "UI_ROUTE_HAMSTER_CANCEL" => vec!["cancel", &id],
+        "UI_ROUTE_HAMSTER_REMOVE" => vec!["remove", &id],
+        "UI_ROUTE_HAMSTER_LOGOUT" => vec!["logout"],
         _ => return Err(Fail(StatusCode::NOT_FOUND, "no such action".into())),
     };
-    finish(hamster(&app, &args).await.map(drop), "/cachehamster")
+    let back = app.settings().text("UI_PAGE_CACHEHAMSTER")?;
+    finish(hamster(&app, &args).await.map(drop), &back)
 }
 
 // What: JSON calls: QR login and library.
@@ -2428,11 +2509,35 @@ async fn apply_all(
     let sec = secrets(new)?;
     let files = render::all(new, &sec).map_err(|e| e.join("; "))?;
     let mut changes = old.diff(new);
-    changes.extend(write_files(new, &files)?);
+    let written = write_files(new, &files)?;
+    let snmpd_conf = new.text("SNMPD_CONF_FILE")?;
+    let snmpd_new = written.iter().any(|c| c.key == snmpd_conf);
+    changes.extend(written);
     // What: PowerDNS steps report, not abort.
     // Why: pdns starts only after the restart below.
     // From: Issue #1683 | PR #1980
     let mut report = Vec::new();
+    // What: a new snmpd.conf reloads every snmpd.
+    // Why: dns, proxy and ui run snmpd on the same file.
+    // From: Issue #1683
+    if snmpd_new {
+        let (_, limit) = app.limits(new)?;
+        let ex = new.list("SNMPD_RELOAD_EXEC");
+        let owners: std::collections::BTreeSet<&str> = ex
+            .iter()
+            .filter_map(|e| e.split_once(':'))
+            .map(|p| p.0)
+            .collect();
+        for owner in owners {
+            match container_of(app, new, owner).await {
+                Ok(name) => {
+                    let r = apply::reload_exec(&app.docker, &name, &ex, owner, limit).await;
+                    report.push(format!("{owner} snmpd: {r:?}"));
+                }
+                Err(e) => report.push(format!("{owner} snmpd: skipped, {e}")),
+            }
+        }
+    }
     // What: at start zones_at_start owns this step.
     // Why: live: dns not up yet gave an error line.
     // From: Issue #1683 | PR #1980
@@ -2472,9 +2577,9 @@ async fn apply_all(
     }
     plan.retain(|owner, _| names.contains_key(owner));
     let lookup = |owner: &str| names.get(owner).cloned().unwrap_or_default();
-    let hup = new.list("HUP_OWNERS");
+    let rx = new.list("RELOAD_EXEC");
     let mut restarted = Vec::new();
-    let mut results = apply::run(&app.docker, &plan, &hup, &lookup, grace, limit).await;
+    let mut results = apply::run(&app.docker, &plan, &rx, &lookup, grace, limit).await;
     // What: one more try for owners that got a 409.
     // Why: live: restart while compose recreated proxy.
     // From: Issue #1683 | PR #1980
@@ -2492,7 +2597,7 @@ async fn apply_all(
             })
             .map(|(o, e)| (o.clone(), *e))
             .collect();
-        let retried = apply::run(&app.docker, &again, &hup, &lookup, grace, limit).await;
+        let retried = apply::run(&app.docker, &again, &rx, &lookup, grace, limit).await;
         for (owner, r) in retried {
             if let Some(slot) = results.iter_mut().find(|(x, _)| *x == owner) {
                 slot.1 = r;
@@ -2549,7 +2654,7 @@ async fn apply_all(
             }
             plan.retain(|owner, _| names.contains_key(owner));
             let lookup = |owner: &str| names.get(owner).cloned().unwrap_or_default();
-            for (owner, result) in apply::run(&app.docker, &plan, &hup, &lookup, grace, limit).await
+            for (owner, result) in apply::run(&app.docker, &plan, &rx, &lookup, grace, limit).await
             {
                 report.push(format!("{owner}: {result:?}"));
             }
@@ -2787,11 +2892,12 @@ fn secrets(s: &Settings) -> Result<render::Secrets, String> {
         recursor_api_key: get("RECURSOR_API_KEY")?,
         tsig_name: s.text("DDNS_TSIG_NAME")?,
         tsig_secret: tsig_secret(s)?,
+        kea_ctrl_token: get("KEA_CTRL_TOKEN")?,
     })
 }
 
 // What: bytes of a whole GiB number.
-// Why: cache sizes are whole GiB only.
+// Why: DoMe 05.11.: cache sizes are whole GiB only.
 // From: Issue #1683 | PR #1980
 fn gib_bytes(text: &str) -> Result<u64, String> {
     let n: u64 = text
@@ -2919,7 +3025,7 @@ async fn container_state(
     let run = match want.state.as_str() {
         "running" => true,
         "stopped" => false,
-        _ => return Err(bad_request("state must be running or stopped")),
+        _ => return Err(bad_request(tr("err_state_running_stopped"))),
     };
     set_wanted(&app, &service, run)
         .await
@@ -3077,70 +3183,57 @@ async fn lang(State(app): Shared, req: Request, next: Next) -> Response {
     LANG.scope(code, next.run(req)).await
 }
 
-// What: menu pages and form paths.
-// Why: templates never spell a path.
-// From: Issue #1683 | PR #1858
-const PAGES: [(&str, &str); 7] = [
-    ("dashboard", "/"),
-    ("logs", "/logs"),
-    ("stats", "/stats"),
-    ("cachehamster", "/cachehamster"),
-    ("domains", "/domains"),
-    ("dhcp", "/dhcp"),
-    ("setup", "/setup"),
+// What: SOT keys of the actions each handler serves.
+// Why: the handler matches the key; the SOT owns the path.
+// From: Issue #1683
+const DNS_OPS: [&str; 12] = [
+    "UI_ROUTE_DNS_ADD",
+    "UI_ROUTE_DNS_REMOVE",
+    "UI_ROUTE_DNS_TOGGLE",
+    "UI_ROUTE_AAAA_FILTER",
+    "UI_ROUTE_QUERY_LOG",
+    "UI_ROUTE_DDNS_UNSIGNED",
+    "UI_ROUTE_LAN_ADD",
+    "UI_ROUTE_LAN_REMOVE",
+    "UI_ROUTE_PTR_ADD",
+    "UI_ROUTE_PTR_REMOVE",
+    "UI_ROUTE_ZONE_ROLLBACK",
+    "UI_ROUTE_TSIG_ROTATE",
+];
+const DHCP_OPS: [&str; 13] = [
+    "UI_ROUTE_DHCP_MODE",
+    "UI_ROUTE_DHCP_DDNS",
+    "UI_ROUTE_DHCP_PROXY",
+    "UI_ROUTE_DHCP_RELAY",
+    "UI_ROUTE_SUBNET_ADD",
+    "UI_ROUTE_SUBNET_UPDATE",
+    "UI_ROUTE_SUBNET_REMOVE",
+    "UI_ROUTE_SUBNET_OPTION_ADD",
+    "UI_ROUTE_SUBNET_OPTION_REMOVE",
+    "UI_ROUTE_STATIC_ADD",
+    "UI_ROUTE_STATIC_REMOVE",
+    "UI_ROUTE_LEASE_RELEASE",
+    "UI_ROUTE_KEA_ROLLBACK",
+];
+const HAMSTER_OPS: [&str; 5] = [
+    "UI_ROUTE_HAMSTER_ADD",
+    "UI_ROUTE_HAMSTER_START",
+    "UI_ROUTE_HAMSTER_CANCEL",
+    "UI_ROUTE_HAMSTER_REMOVE",
+    "UI_ROUTE_HAMSTER_LOGOUT",
+];
+const SECONDARY_OPS: [&str; 4] = [
+    "UI_ROUTE_SECONDARY",
+    "UI_ROUTE_SECONDARY_ROTATE",
+    "UI_ROUTE_SECONDARY_HEALTH",
+    "UI_ROUTE_SECONDARY_ADDRESS",
 ];
 
-const ROUTES: [(&str, &str); 46] = [
-    ("hamster_add", "/cachehamster/add"),
-    ("hamster_start", "/cachehamster/start"),
-    ("hamster_cancel", "/cachehamster/cancel"),
-    ("hamster_remove", "/cachehamster/remove"),
-    ("hamster_logout", "/cachehamster/logout"),
-    ("hamster_api", "/api/cachehamster/{op}"),
-    ("admin_css", "/static/admin.css"),
-    ("favicon", "/favicon.ico"),
-    ("logo_icon", "/static/logo-icon.png"),
-    ("watchdog_status", "/api/status"),
-    ("desired_state", "/api/container/{service}"),
-    ("restart_ui", "/api/restart-ui"),
-    ("setup_save", "/setup/save"),
-    ("password", "/setup/password"),
-    ("logs_save", "/logs/save"),
-    ("dns_add", "/domains/domain-add"),
-    ("dns_remove", "/domains/domain-remove"),
-    ("dns_toggle", "/domains/domain-toggle"),
-    ("lan_add", "/domains/record-add"),
-    ("lan_remove", "/domains/record-remove"),
-    ("ptr_add", "/domains/ptr-add"),
-    ("ptr_remove", "/domains/ptr-remove"),
-    ("aaaa_filter", "/domains/aaaa-filter"),
-    ("query_log", "/domains/query-log"),
-    ("ddns_unsigned", "/domains/ddns-unsigned"),
-    ("zone_rollback", "/domains/zone-rollback"),
-    ("tsig_rotate", "/domains/tsig-rotate"),
-    ("secondary", "/api/secondary/{name}/remove"),
-    ("secondary_rotate", "/api/secondary/{name}/rotate"),
-    ("secondary_health", "/api/secondary/{name}/health"),
-    ("secondary_address", "/api/secondary/{name}/address"),
-    ("dhcp_mode", "/dhcp/mode"),
-    ("dhcp_ddns", "/dhcp/ddns"),
-    ("dhcp_proxy", "/dhcp/proxy"),
-    ("dhcp_relay", "/dhcp/relay"),
-    ("subnet_add", "/dhcp/subnet-add"),
-    ("subnet_update", "/dhcp/subnet-update"),
-    ("subnet_remove", "/dhcp/subnet-remove"),
-    ("subnet_option_add", "/dhcp/option-add"),
-    ("subnet_option_remove", "/dhcp/option-remove"),
-    ("static_add", "/dhcp/static-add"),
-    ("static_remove", "/dhcp/static-remove"),
-    ("lease_release", "/dhcp/lease-release"),
-    ("kea_rollback", "/dhcp/kea-rollback"),
-    ("dhcp_check", "/dhcp/check"),
-    (
-        "service_action",
-        "/api/service/{container}/{program}/{action}",
-    ),
-];
+// What: SOT key of the action a route serves.
+// Why: one handler serves several SOT paths.
+// From: Issue #1683
+#[derive(Clone, Copy)]
+struct Op(&'static str);
 
 // What: command line uses besides the server.
 // Why: setup.sh and the healthcheck need them.
@@ -3156,8 +3249,38 @@ async fn command(s: &Settings, args: &[String]) -> Option<Result<(), String>> {
         }),
         Some("healthcheck") => Some(healthcheck(s).await),
         Some("render-dns") => Some(render_dns(s)),
+        Some(DHCP_PROBE_CMD) => Some(dhcp_probe_cli(s)),
+        Some("reset-sign-in") => Some(reset_sign_in()),
         _ => None,
     }
+}
+
+// What: drop the saved password hash; sign-in is off.
+// Why: DoMe 07.11.: a locked-out user needs a way back.
+// From: Issue #1683 | PR #1985
+fn reset_sign_in() -> Result<(), String> {
+    let path = process_env(SETTINGS_FILE_ENV).ok_or("no settings file set")?;
+    let old = std::fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))?;
+    let kept: String = old
+        .lines()
+        .filter(|l| !l.starts_with("UI_PASSWORD_HASH="))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    std::fs::write(&path, kept).map_err(|e| format!("{path}: {e}"))?;
+    println!("{}", json!({"sign_in": "off"}));
+    Ok(())
+}
+
+// What: one DHCP probe; the report as JSON.
+// Why: runs on the host network, apart from the ui.
+// From: Issue #1683 | PR #1985
+fn dhcp_probe_cli(s: &Settings) -> Result<(), String> {
+    let report = lancache_ng::dhcp_probe::run(s);
+    println!(
+        "{}",
+        serde_json::to_string(&report).map_err(|e| e.to_string())?
+    );
+    Ok(())
 }
 
 // What: write the dns configs once, then exit.
@@ -3176,62 +3299,74 @@ fn render_dns(s: &Settings) -> Result<(), String> {
 
 async fn healthcheck(s: &Settings) -> Result<(), String> {
     let url = format!(
-        "http://{}:{}/healthz",
+        "http://{}:{}{}",
         s.text("LOOPBACK_BIND_IP")?,
-        s.uint("UI_PORT")?
+        s.uint("UI_PORT")?,
+        s.text("UI_ROUTE_HEALTH")?
     );
     let limit = Duration::from_secs(s.uint("HTTP_CLIENT_TIMEOUT")?);
     http::probe(&url, None, limit).await
 }
 
 // What: all ui routes plus auth and headers.
-// Why: one place lists every page and action.
-fn router(app: Arc<App>) -> Router {
-    let pages = Router::new()
-        .route("/", get(dashboard))
-        .route("/setup", get(setup))
-        .route("/setup/save", post(save))
-        .route("/setup/password", post(password))
-        .route("/logs", get(logs))
-        .route("/logs/save", post(logs_save))
-        .route("/cachehamster", get(cachehamster))
-        .route("/cachehamster/{op}", post(hamster_action))
-        .route("/api/cachehamster/{op}", post(hamster_api))
-        .route("/domains", get(domains))
-        .route("/domains/{op}", post(dns_action))
-        .route("/dhcp", get(dhcp))
-        .route("/dhcp/check", post(dhcp_check))
-        .route("/dhcp/{op}", post(dhcp_action))
-        .route("/stats", get(stats))
-        .route("/stats/graph/{name}", get(graph))
-        .route("/api/secondary/{name}/{op}", post(secondary_action))
-        .route("/api/status", get(status))
-        .route("/api/container/{service}", post(container_state))
-        .route("/api/restart-ui", post(restart_ui))
+// Why: paths come from the SOT; one place maps them.
+// From: Issue #1683
+fn router(app: Arc<App>) -> Result<Router, String> {
+    let s = app.settings();
+    let p = |key: &str| s.text(key);
+    let mut pages = Router::new()
+        .route(&p("UI_PAGE_DASHBOARD")?, get(dashboard))
+        .route(&p("UI_PAGE_SETUP")?, get(setup))
+        .route(&p("UI_ROUTE_SETUP_SAVE")?, post(save))
+        .route(&p("UI_ROUTE_PASSWORD")?, post(password))
+        .route(&p("UI_PAGE_LOGS")?, get(logs))
+        .route(&p("UI_ROUTE_LOGS_SAVE")?, post(logs_save))
+        .route(&p("UI_PAGE_CACHEHAMSTER")?, get(cachehamster))
+        .route(&p("UI_ROUTE_HAMSTER_API")?, post(hamster_api))
+        .route(&p("UI_PAGE_DOMAINS")?, get(domains))
+        .route(&p("UI_PAGE_DHCP")?, get(dhcp))
+        .route(&p("UI_ROUTE_DHCP_CHECK")?, post(dhcp_check))
+        .route(&p("UI_PAGE_STATS")?, get(stats))
+        .route(&p("UI_ROUTE_STATS_GRAPH")?, get(graph))
+        .route(&p("UI_ROUTE_WATCHDOG_STATUS")?, get(status))
+        .route(&p("UI_ROUTE_DESIRED_STATE")?, post(container_state))
+        .route(&p("UI_ROUTE_RESTART_UI")?, post(restart_ui))
+        .route(&p("UI_ROUTE_SERVICE_ACTION")?, post(service_action));
+    // What: one route per action, tagged with its SOT key.
+    // Why: handlers match the key, never a path text.
+    // From: Issue #1683
+    for key in DNS_OPS {
+        pages = pages.route(&p(key)?, post(dns_action).layer(Extension(Op(key))));
+    }
+    for key in DHCP_OPS {
+        pages = pages.route(&p(key)?, post(dhcp_action).layer(Extension(Op(key))));
+    }
+    for key in HAMSTER_OPS {
+        pages = pages.route(&p(key)?, post(hamster_action).layer(Extension(Op(key))));
+    }
+    for key in SECONDARY_OPS {
+        pages = pages.route(&p(key)?, post(secondary_action).layer(Extension(Op(key))));
+    }
+    let pages = pages.layer(axum::middleware::from_fn_with_state(app.clone(), auth));
+    Ok(Router::new()
+        .route(&p("UI_ROUTE_HEALTH")?, get(health))
+        .route(&p("UI_ROUTE_SECONDARY_REGISTER")?, post(register))
         .route(
-            "/api/service/{container}/{program}/{action}",
-            post(service_action),
-        )
-        .layer(axum::middleware::from_fn_with_state(app.clone(), auth));
-    Router::new()
-        .route("/healthz", get(health))
-        .route("/api/secondary/register", post(register))
-        .route(
-            "/static/admin.css",
+            &p("UI_ROUTE_ADMIN_CSS")?,
             get(|| async { asset("text/css", ADMIN_CSS.as_bytes()) }),
         )
         .route(
-            "/favicon.ico",
+            &p("UI_ROUTE_FAVICON")?,
             get(|| async { asset("image/x-icon", FAVICON) }),
         )
         .route(
-            "/static/logo-icon.png",
+            &p("UI_ROUTE_LOGO_ICON")?,
             get(|| async { asset("image/png", LOGO) }),
         )
         .merge(pages)
         .layer(axum::middleware::from_fn_with_state(app.clone(), secure))
         .layer(axum::middleware::from_fn_with_state(app.clone(), lang))
-        .with_state(app)
+        .with_state(app))
 }
 
 // What: security headers on every answer, from SOT.
@@ -3279,6 +3414,13 @@ async fn main() -> Result<(), String> {
     if let Some(done) = command(&s, &args).await {
         return done;
     }
+    // What: no login and no opt-out stops the ui.
+    // Why: AG-SEC-001: fail closed unless opted out.
+    // From: Issue #1683 | PR #1985
+    let hash = s.text("UI_PASSWORD_HASH").unwrap_or_default();
+    if hash.is_empty() && !s.flag("ALLOW_INSECURE_UI").unwrap_or(false) {
+        return Err("Admin-UI authentication is required".into());
+    }
     let dir = PathBuf::from(s.text("SECRETS_DIR")?);
     let key =
         secret::resolve(None, &dir, "UI_SESSION_KEY", owner_keep()).map_err(|e| e.to_string())?;
@@ -3310,7 +3452,7 @@ async fn main() -> Result<(), String> {
         .map_err(|e| format!("{listen}: {e}"))?;
     axum::serve(
         sock,
-        router(app).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        router(app)?.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
     .await
     .map_err(|e| e.to_string())

@@ -56,60 +56,9 @@ ENV LANCACHE_RUNTIME_GID=${LANCACHE_RUNTIME_GID} \
 # From: Issue #1683 | PR #1980
 ARG LANCACHE_PROCESSES
 ARG LANCACHE_PROCESS_PRE
-RUN set -e; \
-    sed -i 's/^#\?rc_sys=.*/rc_sys="docker"/' /etc/rc.conf; \
-    sed -i 's/^#\?rc_env_allow=.*/rc_env_allow="*"/' /etc/rc.conf; \
-    sed -i 's/^#\?rc_controller_cgroups=.*/rc_controller_cgroups="NO"/' /etc/rc.conf; \
-    sed -i 's/^#\?rc_cgroup_mode=.*/rc_cgroup_mode="legacy"/' /etc/rc.conf; \
-    for f in /etc/init.d/*; do grep -qE '^[[:space:]]*need[^#]*[[:space:]]dev([[:space:]]|$)' "$f" && rm -f "$f" || true; done; \
-    rm -f /etc/runlevels/sysinit/* /etc/runlevels/boot/*; \
-    declare -A v; IFS='|' read -ra kv <<< "${LANCACHE_RUNTIME_DEFAULTS}"; \
-    for p in "${kv[@]}"; do v["${p%%=*}"]="${p#*=}"; done; \
-    declare -A pre; IFS='|' read -ra kv <<< "${LANCACHE_PROCESS_PRE}"; \
-    for p in "${kv[@]}"; do pre["${p%%=*}"]="${p#*=}"; done; \
-    for row in ${LANCACHE_PROCESSES}; do \
-      level=default; \
-      if [[ "${row%%=*}" == *:* ]]; then level="${row%%:*}"; row="${row#*:}"; fi; \
-      mkdir -p "/etc/runlevels/${level}"; \
-      [ -n "${row}" ] || continue; \
-      name="${row%%=*}"; cmd="${row#*=}"; \
-      while [[ "${cmd}" =~ @([A-Z0-9_]+)@ ]]; do \
-        k="${BASH_REMATCH[1]}"; \
-        [[ -v "v[${k}]" ]] || { echo "unknown SOT key ${k}" >&2; exit 1; }; \
-        cmd="${cmd//@${k}@/${v[${k}]}}"; \
-      done; \
-      sp="${pre[${name}]:-}"; \
-      while [[ "${sp}" =~ @([A-Z0-9_]+)@ ]]; do \
-        k="${BASH_REMATCH[1]}"; \
-        [[ -v "v[${k}]" ]] || { echo "unknown SOT key ${k}" >&2; exit 1; }; \
-        sp="${sp//@${k}@/${v[${k}]}}"; \
-      done; \
-      cmd="${cmd//,/ }"; args=""; \
-      [[ "${cmd}" != *" "* ]] || args="${cmd#* }"; \
-      printf '%s\n' '#!/sbin/openrc-run' 'supervisor=supervise-daemon' \
-        "command=${cmd%% *}" "command_args=\"${args}\"" \
-        'respawn_delay=2' 'output_log=/proc/1/fd/1' \
-        'error_log=/proc/1/fd/2' > "/etc/init.d/${name}"; \
-      [ -z "${sp}" ] || printf 'start_pre() { %s; }\n' "${sp}" \
-        >> "/etc/init.d/${name}"; \
-      chmod 0755 "/etc/init.d/${name}"; \
-      rc-update add "${name}" "${level}"; \
-    done
-
-# What: start script: seed the tmpfs /run, then init.
-# Why: /run is tmpfs; the image dirs must be put back.
-# From: Issue #1683 | PR #1980
-RUN set -e; \
-    declare -A v; IFS='|' read -ra kv <<< "${LANCACHE_RUNTIME_DEFAULTS}"; \
-    for p in "${kv[@]}"; do v["${p%%=*}"]="${p#*=}"; done; \
-    : "${v[OPENRC_STATE_DIR]:?}" "${v[RUN_DIR]:?}"; \
-    tar -C "${v[RUN_DIR]}" -cpf "${v[RUN_DIR]}.tar" .; \
-    printf '%s\n' '#!/bin/sh' \
-      "tar -C '${v[RUN_DIR]}' -xpf '${v[RUN_DIR]}.tar'" \
-      "rm -rf '${v[OPENRC_STATE_DIR]}'" \
-      'exec openrc-init "$@"' \
-      > /usr/local/bin/lancache-init; \
-    chmod 0755 /usr/local/bin/lancache-init
+ARG LANCACHE_INIT_PRE
+RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
+    bash /usr/local/bin/ci.sh openrc-setup
 
 # What: OpenRC as PID 1; compose may name a runlevel.
 # Why: openrc-init reaps zombies and stops on SIGTERM.

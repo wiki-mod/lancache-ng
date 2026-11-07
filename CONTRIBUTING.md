@@ -178,7 +178,7 @@ exempt.
 
 Because of this limitation, **a green CodeQL Rust job must not be read as full security-scan coverage of the Rust codebase.** A concrete historical example (PR #357, Actions run 28596839186) shows the Rust extractor reporting 12 files "extracted with errors" against 2 "without error" while the job still concluded `success`. That state is expected: CodeQL's own authoritative quality gate — the `rust/diagnostic/database-quality` ("Low Rust analysis quality") diagnostic query — did not fire on that run, so CodeQL classifies partial macro-expansion extraction as normal, not degraded. The raw per-file counts are metric-query output printed only to the analysis log summary; they are not exposed as a supported, machine-readable workflow output (github/codeql-action #1742, open since 2023), and the database is cleaned after `analyze`. This is why `.github/workflows/codeql.yml` reports CodeQL's own `database-quality` determination and a standing caveat in the job summary rather than enforcing a hand-rolled count threshold (which would be permanently red on an upstream limitation that is not tunable here — Rust supports only `build-mode: none`). The Rust checks independent of CodeQL extraction quality are `cargo fmt --check`, `cargo clippy -- -D warnings` and `cargo test` in the `ci.yml` job `test` (`ci.sh test-stack`), which runs only when Rust validation is enabled (AG-VAL-008).
 
-- Reference workflow actions by their major tag (`@vN`), never by a commit SHA; each action has its SOT `github_actions` entry, and `ci.sh check action-node-versions` enforces both.
+- Reference workflow actions by their major tag `vN` (AG-CI-001); commit SHAs and branches are forbidden in project PRs. The SOT `github_actions` block lists the allowed actions and `ci.sh check action-node-versions` enforces the reference shape.
 - Keep workflow changes reviewable:
   - document changed checks,
   - explain any intentional risk,
@@ -283,12 +283,12 @@ dependencies, across every ecosystem this repository uses.
   `bash .github/scripts/ci.sh check cargo-audit` flags known-vulnerable
   versions of already-added dependencies: in the `ci.yml` `cargo-audit`
   job when the lockfile changes, and daily in `nightly.yml`.
-- **GitHub Actions** (`.github/workflows/*.yml`): a major tag `@vN`, no
-  SHA pin, per this file's "Quality and release process expectations"
-  section above.
-- **Docker base images**: pinned per `docs/ci-image-pinning-policy.md`,
-  which documents which images are pinned by digest vs. version tag and
-  why, split between runtime base images and build-time builder images.
+- **GitHub Actions** (`.github/workflows/*.yml`): referenced by their major
+  tag `vN`, never by a commit SHA or a branch (AG-CI-001); the SOT
+  `github_actions` block lists the allowed actions.
+- **Docker base images**: owned by the SOT `base_images` block and supplied to
+  the Dockerfiles as build arguments, per
+  `docs/policy/ci-image-pinning-policy.md`.
 - **Automated update tracking**: `.github/dependabot.yml` runs weekly
   update checks for every ecosystem above (GitHub Actions, Cargo,
   Docker base images), across both `master` and the active long-lived
@@ -296,10 +296,12 @@ dependencies, across every ecosystem this repository uses.
   silently drifting.
 - **Obtaining dependencies at build time**: Rust dependencies are
   fetched by Cargo from crates.io during the Docker build stage; no
-  vendored/copied third-party Rust source is committed. The Mozilla
-  Public Suffix List is not committed either: `setup.sh` loads it from
-  `NGINX_PSL_URL` when it runs and keeps the old list when a download
-  is broken; CI loads it into the Actions cache each night.
+  vendored/copied third-party Rust source is committed. The one
+  documented exception is `services/proxy/public_suffix_list.dat` (the
+  vendored Mozilla Public Suffix List)
+  which carries its own upstream header — see `AGENTS.md`'s
+  **AG-HDR-004** for why these are excluded from the project's own file
+  header requirement.
 
 ## Local checks
 
@@ -392,7 +394,7 @@ Setup and update changes must preserve these rules:
 
 ## Release and package changes
 
-Release and package changes must follow `docs/release-versioning.md` and the
+Release and package changes must follow `docs/combined-release-and-checklist.md` and the
 SOT `.github/yaml/build-manifest.yml` (services, `build_toolchain`,
 `base_images`, `release`).
 
@@ -402,8 +404,8 @@ Required rules:
 - `latest` is the channel from `master`; release tags `vX.Y.Z` move it
 - `nightly` is the experimental channel from `current_dev`, moved once a
   day and on demand by `.github/workflows/nightly.yml` after validation, never
-  rebuilt there (formerly `edge`; see `docs/release-versioning.md`, the
-  authoritative source for this channel's semantics, for the full history)
+  rebuilt there (see `docs/combined-release-and-checklist.md`, the
+  authoritative source for the channel semantics)
 - release candidates use `vX.Y.Z-rc.N` and must be GitHub prereleases
 - releases use `vX.Y.Z` and may move `latest`
 - every job after the first runs in the build-tools image the first job

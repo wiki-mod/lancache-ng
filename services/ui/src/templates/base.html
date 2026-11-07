@@ -9,14 +9,6 @@
 {# Why: one markup; main.rs CSRF_FORM_FIELD reads it #}
 {# From: Issue #1683 | PR #1912 #}
 {% component csrf_field(csrf_token) %}<input type="hidden" name="csrf_token" value="{{ csrf_token }}">{% endcomponent csrf_field %}
-{# What: Admin-UI restart form; confirm() before submit #}
-{# Why: UI exits, compose restarts it; top bar and setup #}
-{# From: Issue #1683 | PR #1912 #}
-{% component restart_ui_form(action, csrf_token, button_class, label, t, title=none) %}<form method="post" action="{{ action | safe }}"
-              data-ask="{{ t.restart_ui_ask }}" onsubmit="return confirm(this.dataset.ask)">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <button type="submit" class="{{ button_class }}"{% if title is not none %} title="{{ title }}"{% endif %}>{{ label }}</button>
-        </form>{% endcomponent restart_ui_form %}
 {# What: "Kopieren" button; copyText() copies target #}
 {# Why: one markup for setup and Secondary copy buttons #}
 {# From: Issue #1683 | PR #1912 #}
@@ -184,6 +176,18 @@
     font-size: 12px;
     color: var(--mist-dim);
   }
+  .dock-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 12px; }
+  /* What: tidy foot: language pill, channel badge, link
+     Why: DoMe 07.11.: make the menu foot look nicer
+     From: Issue #1683 | PR #1985 */
+  .dock-tools .lang-switch { flex: 1 1 auto; justify-content: space-between; }
+  .dock-meta { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
+  .dock-info {
+    padding: 2px 10px; border-radius: 999px; border: 1px solid var(--navy-600);
+    background: var(--navy-850); color: var(--mist); font-size: 11.5px; letter-spacing: 0.02em;
+  }
+  .dock-link { color: var(--mist); text-decoration: none; }
+  .dock-link:hover { color: var(--foam); text-decoration: underline; }
 
   /* What: main column holding beambar and content
      Why: min-width 0 lets tables shrink
@@ -195,13 +199,19 @@
      From: Issue #1437 | PR #1858 */
   .beambar {
     position: relative;
-    height: 46px;
+    /* What: the bar wraps instead of clipping
+       Why: DoMe 06.11.: narrow window hid the menus
+       From: Issue #1683 */
+    min-height: 46px;
+    flex-wrap: wrap;
+    row-gap: 6px;
+    padding-block: 6px;
     flex: none;
     background: var(--navy-900);
     border-bottom: 1px solid var(--navy-700);
     display: flex;
     align-items: center;
-    padding: 0 22px;
+    padding-inline: 22px;
     gap: 18px;
     overflow: hidden;
   }
@@ -227,6 +237,11 @@
   .beam-menu { position: relative; }
   .beam-menu summary { list-style: none; cursor: pointer; padding: 0 0.4rem; }
   .beam-menu summary::-webkit-details-marker { display: none; }
+  /* What: container name as the programs button
+     Why: DoMe 06.11.: no extra "Programme" button
+     From: Issue #1683 */
+  .beam-name { display: inline-block; }
+  .beam-name > summary { display: inline; padding: 0; }
   .beam-menu-list { position: fixed; z-index: 30; display: flex; flex-direction: column; gap: 6px; padding: 8px; border-radius: 8px; border: 1px solid var(--navy-600); background: var(--navy-900); box-shadow: 0 4px 14px rgba(0,0,0,0.35); }
   .beam-menu-row { display: flex; align-items: center; gap: 6px; }
   .beam-menu-row span { flex: 1; min-width: 9em; color: var(--foam); }
@@ -465,6 +480,13 @@
     border-radius: 8px; padding: 10px 12px; font-family: var(--font-mono); font-size: 13px; max-width: 480px;
   }
   .copy-row code { flex: 1; overflow-x: auto; white-space: nowrap; }
+  /* What: command boxes span the full width
+     Why: DoMe 07.11.: short boxes with a scrollbar
+     From: Issue #1683 | PR #1985 */
+  .copy-row.cmd-row { margin: 6px 0; max-width: none; }
+  .copy-row.cmd-row code { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .cmd-os { flex: none; color: var(--mist); font-size: 12px; }
+  .t-desc code, .field-hint code, .section-sub code { white-space: nowrap; }
   .copy-row button {
     flex: none; background: var(--navy-800); border: 1px solid var(--navy-600); color: var(--mist);
     border-radius: 6px; padding: 5px 10px; font-size: 12px; cursor: pointer;
@@ -539,9 +561,11 @@
     .dock { position: sticky; top: 0; z-index: 5; width: 100%; height: auto; flex-direction: row; align-items: center; gap: 4px; padding: 6px 8px; overflow-x: auto; border-right: none; border-bottom: 1px solid var(--navy-700); }
     .dock .brand { padding: 0 6px; margin: 0; border: none; flex: none; }
     .dock .brand-mark { width: 34px; height: 34px; object-fit: contain; }
-    .dock .nav-group-label, .dock .dock-footer, .dock .nav-dot { display: none; }
+    .dock .nav-group-label, .dock .dock-meta, .dock .nav-dot { display: none; }
+    .dock .dock-footer { margin: 0; padding: 0; border: none; flex: none; }
+    .dock .dock-tools { margin: 0; flex-wrap: nowrap; }
     .dock .nav-item { flex: none; white-space: nowrap; padding: 9px 12px; margin: 0; }
-    .beambar { overflow-x: auto; padding: 8px 12px; }
+    .beambar { padding: 8px 12px; }
     .content { padding: 18px 14px 48px; }
     .page-title { font-size: 28px; }
     .subtabs { gap: 16px; overflow-x: auto; white-space: nowrap; }
@@ -639,9 +663,22 @@
   .beambar-dot.amber, .beambar-dot.yellow { background: var(--beam); box-shadow: 0 0 8px 1px #f7b95580; }
   .beambar-dot.red { background: var(--coral); box-shadow: 0 0 8px 1px #ff7a5c80; }
   .beambar-dot.gray { background: var(--mist-dim); }
-  .beambar-services { display: flex; align-items: center; gap: 18px; font-size: 12.5px; color: var(--mist); white-space: nowrap; }
-  .beambar-end { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+  .beambar-services { display: flex; flex-wrap: wrap; row-gap: 6px; align-items: center; gap: 18px; font-size: 12.5px; color: var(--mist); white-space: nowrap; }
   .dock a.nav-item, .dock a.nav-item:hover { text-decoration: none; }
+    /* What: status bar at the bottom for every action
+       Why: DoMe 06.11.: buttons gave no sign of work
+       From: Issue #1683 */
+    #ui-busy { position: fixed; left: 0; right: 0; bottom: 0; z-index: 49;
+      padding: 6px 16px 8px; background: var(--navy-900); color: var(--mist);
+      border-top: 1px solid var(--color-border); font-size: 13px; }
+    #ui-busy[data-state="done"] { color: var(--foam); }
+    #ui-busy[data-state="failed"] { color: var(--danger); }
+    #ui-busy .ui-busy-track { position: absolute; left: 0; right: 0; top: 0;
+      height: 2px; overflow: hidden; }
+    #ui-busy[data-state="busy"] .ui-busy-track::after { content: ""; position: absolute;
+      top: 0; bottom: 0; width: 30%; background: var(--beam);
+      animation: ui-busy-run 1.2s linear infinite; }
+    @keyframes ui-busy-run { from { left: -30%; } to { left: 100%; } }
   </style>
   <script>
     // What: SOT seconds as the milliseconds JS timers take
@@ -668,6 +705,56 @@
       box.textContent = LC_T.error_prefix + (err && err.message ? err.message : err);
       box.hidden = false;
     };
+
+    // What: a bar at the bottom for every action.
+    // Why: DoMe 06.11.: buttons gave no sign of work.
+    // From: Issue #1683
+    (function () {
+      const bar = document.createElement('div');
+      bar.id = 'ui-busy';
+      bar.setAttribute('role', 'status');
+      bar.hidden = true;
+      const text = document.createElement('span');
+      const track = document.createElement('div');
+      track.className = 'ui-busy-track';
+      bar.append(track, text);
+      let open = 0;
+      let t0 = 0;
+      let hide = 0;
+      let tick = 0;
+      const show = function (msg, state) {
+        clearTimeout(hide);
+        clearInterval(tick);
+        text.textContent = msg;
+        bar.dataset.state = state;
+        bar.hidden = false;
+        if (state === 'busy') {
+          tick = setInterval(function () {
+            text.textContent = msg + ' ' + Math.round((Date.now() - t0) / 1000) + ' s';
+          }, 1000);
+        } else {
+          hide = setTimeout(function () { bar.hidden = true; }, state === 'done' ? 3000 : 10000);
+        }
+      };
+      const end = function (ok) {
+        open -= 1;
+        if (open > 0) { return; }
+        const s = ((Date.now() - t0) / 1000).toFixed(1) + ' s';
+        show((ok ? LC_T.busy_done : LC_T.busy_failed) + ' (' + s + ')', ok ? 'done' : 'failed');
+      };
+      const orig = window.fetch.bind(window);
+      window.fetch = function (input, init) {
+        const method = ((init && init.method) || 'GET').toUpperCase();
+        if (method === 'GET' || method === 'HEAD') { return orig(input, init); }
+        if (open === 0) { t0 = Date.now(); }
+        open += 1;
+        show(LC_T.busy_running, 'busy');
+        return orig(input, init).then(function (r) { end(r.ok); return r; },
+          function (err) { end(false); throw err; });
+      };
+      const mount = function () { document.body.appendChild(bar); };
+      if (document.body) { mount(); } else { document.addEventListener('DOMContentLoaded', mount); }
+    })();
 
     // What: POST forms send in the background.
     // Why: an error stays in the page, no bare page.
@@ -781,26 +868,33 @@
     {{ <nav_link href={pages.setup} label={t.general} active={active_page == "setup"} glyph="◐"/> }}
 
     <div class="dock-footer">
-      <span title="{{ lancache_image_registry() }}/{{ lancache_image_prefix() }}:{{ lancache_image_tag() }}">{{ lancache_image_tag() }} · {{ lancache_image_channel() }}</span><br>
+      <!-- What: language, UI restart, theme at the foot
+           Why: DoMe 06.11.: not in the top bar
+           From: Issue #1683 | PR #1985 -->
+      <div class="dock-tools">
+        <label class="lang-switch">🌐 <select id="lang-select" aria-label="{{ t.language }}">{% for l in langs %}<option value="{{ l[0] }}"{% if l[0] == lang %} selected{% endif %}>{{ l[1] }}</option>{% endfor %}</select></label>
+        <button type="button" class="theme-btn" id="theme-toggle" title="{{ t.toggle_light_dark_theme }}">◐</button>
+      </div>
+      <!-- What: tag once when it is the channel name
+           Why: it showed "nightly - nightly" twice
+           From: Issue #1683 | PR #1985 -->
+      <div class="dock-meta">
+      <span class="dock-info" title="{{ lancache_image_registry() }}/{{ lancache_image_prefix() }}:{{ lancache_image_tag() }}">{% if lancache_image_tag() == lancache_image_channel() %}{{ lancache_image_channel() }}{% else %}{{ lancache_image_tag() }} · {{ lancache_image_channel() }}{% endif %}</span>
       <!-- What: link to the project repository page
            Why: address only from the SOT, escaped by tera
            From: Issue #1683 | PR #1912 -->
-      <a href="{{ repo_url }}" target="_blank" rel="noopener noreferrer" style="color: inherit;">{{ t.project_page }}</a>
+      <a class="dock-link" href="{{ repo_url }}" target="_blank" rel="noopener noreferrer">{{ t.project_page }} ↗</a>
+      </div>
     </div>
   </nav>
 
   <div class="main">
-    <!-- What: health bar and theme toggle in the header
+    <!-- What: health bar in the header
          Why: base.html renders it on every page
          From: Issue #1437 -->
     <header class="beambar" id="beambar">
       <div class="beambar-services" id="beambar-services">
         <span>{{ t.service_health_loading }}</span>
-      </div>
-      <div class="beambar-end">
-        <label class="lang-switch">🌐 <select id="lang-select" aria-label="{{ t.language }}">{% for l in langs %}<option value="{{ l[0] }}"{% if l[0] == lang %} selected{% endif %}>{{ l[1] }}</option>{% endfor %}</select></label>
-        {{ <restart_ui_form action={routes.restart_ui} csrf_token={csrf_token} button_class="theme-btn" label="⟳ UI" title={t.restart_the_admin_ui} t={t}/> }}
-        <button type="button" class="theme-btn" id="theme-toggle" title="{{ t.toggle_light_dark_theme }}">◐</button>
       </div>
     </header>
     <main class="content">
@@ -964,6 +1058,10 @@
     // Why: reload/restart one program via OpenRC
     // From: Issue #1683 | PR #1858
     const DOCK_PROGRAMS = [{% for p in programs %}'{{ p }}',{% endfor %}];
+    // What: the ui container: restart only, no stop.
+    // Why: DoMe 06.11.: restart in its menu like proxy.
+    // From: Issue #1683 | PR #1985
+    const UI_SERVICE_NAME = '{{ ui_service }}';
     async function programAction(container, program, action, button) {
       button.disabled = true;
       try {
@@ -993,7 +1091,8 @@
         const dot = document.createElement('span');
         window.LancacheWatchdog.paintDot(dot, svc.status);
         wrap.appendChild(dot);
-        wrap.appendChild(document.createTextNode(svc.name + ' '));
+        const nameNode = document.createTextNode(svc.name + ' ');
+        wrap.appendChild(nameNode);
         // What: bold status word after the service name
         // Why: the mockup shows name plus state
         // From: Issue #1683 | PR #1858
@@ -1030,39 +1129,69 @@
           });
           wrap.appendChild(why);
         }
+        let button = null;
         if (!svc.mode_off && DOCK_CONTROLLABLE_SERVICES.includes(svc.name)) {
           // What: Start for red or gray, otherwise Stopp
           // Why: a user stop always offers Start
           // From: Issue #1437 | PR #1980
           const running = !svc.stopped_by_user && svc.status !== 'red' && svc.status !== 'gray';
-          const button = document.createElement('button');
+          button = document.createElement('button');
           button.type = 'button';
           button.className = 'theme-btn';
-          button.style.marginLeft = '0.35rem';
-          button.style.padding = '0 0.4rem';
           button.textContent = running ? LC_T.stop : 'Start';
           button.addEventListener('click', function () {
             setDockServiceState(svc.name, running ? 'stopped' : 'running', button);
           });
-          wrap.appendChild(button);
+        }
+        if (svc.name === UI_SERVICE_NAME) {
+          button = document.createElement('button');
+          button.type = 'button';
+          button.className = 'theme-btn';
+          button.textContent = LC_T.prog_restart;
+          button.addEventListener('click', function () {
+            if (!confirm(LC_T.restart_ui_ask)) { return; }
+            button.disabled = true;
+            const body = new URLSearchParams({ csrf_token: CSRF_TOKEN });
+            fetch('{{ routes.restart_ui | safe }}', { method: 'POST', body: body })
+              .finally(function () { setTimeout(function () { location.reload(); }, 5000); });
+          });
         }
         // What: programs sit in a fold-out menu.
         // Why: the bar stays short with many programs.
         // From: Issue #1683 | PR #1980
         const progs = DOCK_PROGRAMS.filter(function (p) { return p.split(':')[0] === svc.name; });
-        if (progs.length) {
+        if (button && !(progs.length && !svc.mode_off)) {
+          button.style.marginLeft = '0.35rem';
+          button.style.padding = '0 0.4rem';
+          wrap.appendChild(button);
+        }
+        if (progs.length && !svc.mode_off) {
           const menu = document.createElement('details');
-          menu.className = 'beam-menu';
+          menu.className = 'beam-menu beam-name';
           menu.open = openMenu === svc.name;
           menu.addEventListener('toggle', function () {
             if (menu.open) { openMenu = svc.name; } else if (openMenu === svc.name) { openMenu = ''; }
           });
+          // What: the container name opens its programs.
+          // Why: DoMe 06.11.: no extra "Programme" button.
+          // From: Issue #1683
           const sum = document.createElement('summary');
-          sum.className = 'theme-btn';
-          sum.textContent = LC_T.programs;
+          sum.textContent = svc.name + ' \u25BE ';
           menu.appendChild(sum);
           const list = document.createElement('div');
           list.className = 'beam-menu-list';
+          // What: container Start/Stop is menu row one.
+          // Why: DoMe 06.11.: no Stop beside the menu.
+          // From: Issue #1683
+          if (button) {
+            const row = document.createElement('div');
+            row.className = 'beam-menu-row';
+            const name = document.createElement('span');
+            name.textContent = LC_T.svc_container;
+            row.appendChild(name);
+            row.appendChild(button);
+            list.appendChild(row);
+          }
           progs.forEach(function (p) {
             const program = p.split(':')[1];
             const row = document.createElement('div');
@@ -1070,7 +1199,8 @@
             const name = document.createElement('span');
             name.textContent = program;
             row.appendChild(name);
-            [['reload', 'Reload'], ['restart', 'Restart']].forEach(function (a) {
+            const acts = [['reload', LC_T.prog_reload], ['restart', LC_T.prog_restart]];
+            acts.forEach(function (a) {
               const b = document.createElement('button');
               b.type = 'button';
               b.className = 'theme-btn';
@@ -1081,7 +1211,7 @@
             list.appendChild(row);
           });
           menu.appendChild(list);
-          wrap.appendChild(menu);
+          wrap.replaceChild(menu, nameNode);
           // What: place the list under its button.
           // Why: the bar hides overflow; fixed escapes it.
           // From: Issue #1683 | PR #1980

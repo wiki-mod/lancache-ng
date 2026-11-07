@@ -88,7 +88,7 @@ Rule: each host directory is set by one operator variable that
 `KEA_DATA_DIR`, `NTP_DATA_DIR`, `CACHEHAMSTER_DATA_DIR`,
 `SYSLOG_NG_LOG_DIR`). A new state directory gets its own variable of the
 same shape and a lowercase, hyphen-separated directory name. See
-`docs/backup-restore.md` and `docs/how-to-change-ip.md` for the
+`docs/README.md` for the
 `LANCACHE_STATE_DIR` contract; this document does not repeat it.
 
 ### GHCR image/package names
@@ -98,7 +98,7 @@ where `<service>` is the same lowercase-hyphenated name as the Compose
 service and its key in the `services:` block of
 `.github/yaml/build-manifest.yml` (plus `build-tools`). This is already
 fully governed by `.github/yaml/build-manifest.yml` (the machine-readable
-inventory) and `docs/release-versioning.md` — this document does not duplicate that
+inventory) and `docs/combined-release-and-checklist.md` — this document does not duplicate that
 contract, it only asserts that the image name always matches the service
 name it packages. `LANCACHE_IMAGE_REGISTRY`, `LANCACHE_IMAGE_PREFIX`,
 `LANCACHE_IMAGE_TAG`, and `LANCACHE_IMAGE_CHANNEL` are the fixed
@@ -108,7 +108,7 @@ reference; do not introduce a second set of image-location variables.
 ### GHCR image tags
 
 Rule: the prefix `sha-` names a commit and nothing else. A per-commit tag is
-`sha-<full 40-hex commit SHA>` (AG-REL-015, `docs/release-versioning.md`).
+`sha-<full 40-hex commit SHA>` (AG-REL-015, `docs/combined-release-and-checklist.md`).
 A tag that names a build identity (the 64-hex hash of a service's build
 inputs, `docs/ci-2.0-architecture.md`) is
 `<release.tag_identity_prefix><build identity>-<arch>`, with the prefix
@@ -120,16 +120,16 @@ check or retention rank can mistake it for a commit.
 ### Environment variables that refer to services or containers
 
 Rule: no operator environment variable names a service or a container. The
-ui has no Docker access: it writes settings, marker and request files, and
-the supervisor in the owning container restarts its own program when a
-watched file changes. Only the watchdog in `services` talks to Docker, and
-it finds the stack by its compose project label, not by a name list. The
+ui and the watchdog in `services` talk to Docker: the ui renders the
+configs and wakes the owner containers, the watchdog checks health and
+restarts containers. Both find the stack by its compose project label, not
+by a name list. The
 SOT `CONTAINER_NAME_*` keys are the one place a container name is written.
 
 ### Backup/restore paths that depend on these names
 
 Rule: `setup.sh`'s `compose_volume_names()`, `backup_compose_volumes()` and
-`restore_compose_volumes()` (see `docs/backup-restore.md`) discover Docker
+`restore_compose_volumes()` (see `docs/README.md`) discover Docker
 volumes by inspecting the running containers, so a new volume that follows
 the rule above is included without a `setup.sh` change. Repo files that a
 Compose service mounts through `../../` are found the same way:
@@ -145,8 +145,8 @@ the Compose files and keeps the ones that exist in the checkout (today
 | Compose service names | `deploy/prod/docker-compose.yml` and `deploy/secondary/docker-compose.yml` service keys | the `status.json` keys the watchdog writes |
 | Container names | `.github/yaml/build-manifest.yml` (`CONTAINER_NAME_PREFIX`, `CONTAINER_NAME_*`) | `container_name:` of both Compose files, `LOG_SWITCHES` in `services/common/config.rs` |
 | Docker volumes | `deploy/prod/docker-compose.yml` top-level `volumes:` block | the service `volumes:` lists in the same file |
-| Host bind-mount directories | the required variables of `deploy/prod/docker-compose.yml` | `docs/backup-restore.md`, `docs/how-to-change-ip.md`, `setup.sh` |
-| GHCR image/package names | `.github/yaml/build-manifest.yml` (`services:`) | `docs/release-versioning.md`, the `image:` lines of `deploy/prod` and `deploy/secondary` |
+| Host bind-mount directories | the required variables of `deploy/prod/docker-compose.yml` | `docs/README.md`, `setup.sh` |
+| GHCR image/package names | `.github/yaml/build-manifest.yml` (`services:`) | `docs/combined-release-and-checklist.md`, the `image:` lines of `deploy/prod` and `deploy/secondary` |
 
 ## CI guard
 
@@ -248,3 +248,7 @@ against actual behavior, side effects, ownership and API contracts.
 Passing a naming check does not establish overall compliance. A rename
 needs a concrete reason and MUST keep all callers, contracts,
 serialization formats and external integrations working.
+
+## Howto audit this file
+
+The audit procedure of this file is `docs/policy/howto-audit-documentation.md`.

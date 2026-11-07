@@ -210,6 +210,25 @@ ftp.debian.org
 dl.fedoraproject.org
 mirrors.fedoraproject.org
 
+# ---- Alpine Linux ----
+dl-cdn.alpinelinux.org
+dl.alpinelinux.org
+
+# ---- Proxmox ----
+download.proxmox.com
+
+# ---- Kali Linux ----
+http.kali.org
+kali.download
+
+# ---- Raspberry Pi OS ----
+archive.raspberrypi.com
+archive.raspberrypi.org
+downloads.raspberrypi.com
+
+# ---- CentOS Stream ----
+mirror.stream.centos.org
+
 # ---- Rocky Linux ----
 dl.rockylinux.org
 download.rockylinux.org
@@ -268,7 +287,7 @@ drivers.amd.com
 pat.downloads.amd.com
 
 # What: no console CDN hosts; consoles cannot use our CA.
-# Why: docs/install-ca-cert.md lists hosts to add by hand.
+# Why: docs/README.md lists hosts to add by hand.
 # From: Issue #1683 | PR #1912
 
 # ==== lancache-ng: entries added via the Admin UI are appended below this exact line ====
