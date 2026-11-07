@@ -14,12 +14,6 @@ FROM rust:latest
 
 LABEL org.opencontainers.image.description="Prebuilt lancache-ng CI and developer validation toolchain image."
 
-ARG ACTIONLINT_VERSION=1.7.12
-ARG ACTIONLINT_SHA256_AMD64=8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
-ARG ACTIONLINT_SHA256_ARM64=325e971b6ba9bfa504672e29be93c24981eeb1c07576d730e9f7c8805afff0c6
-ARG DOCKER_BUILDX_VERSION=0.38.1
-ARG DOCKER_BUILDX_SHA256_AMD64=e25d5cd675092bb5d1d03632fdc46cdf3fede7b514dc5f023a105e00d3ce5ad4
-ARG DOCKER_BUILDX_SHA256_ARM64=3b83b3731916ba433feccaaa689fe5bcdc81c641d92c8e6c2ea865dfa141c97a
 ARG SCCACHE_VERSION=0.18.0
 ARG CARGO_AUDIT_VERSION=0.22.2
 ARG CARGO_AUDIT_SHA256_AMD64=ab28a1bdb54db4d5d8ad5981cf1f959410370b3d28250dbd35f6a44248620e39
@@ -31,8 +25,6 @@ ARG CARGO_TARPAULIN_VERSION=0.37.5
 ARG CARGO_TARPAULIN_SHA256_AMD64=affb00dc5e82582fb8124efb39233ee8318980c3136b27931684d2804d9e3a54
 ARG CARGO_TARPAULIN_SHA256_ARM64=dcbdecd73903ac9071d61d2003ff0c82568edb676cff5a557b8be26d78ae896b
 ARG DISTCC_PUMP_PACKAGE_VERSION=3.4+really3.4-12
-ARG SHELLSPEC_VERSION=0.28.1
-ARG SHELLSPEC_SHA256=350d3de04ba61505c54eda31a3c2ee912700f1758b1a80a284bc08fd8b6c5992
 ARG DEBIAN_FRONTEND=noninteractive
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
@@ -191,17 +183,20 @@ RUN set -euo pipefail; \
     ln -sf /usr/local/cargo/bin/cargo-audit /usr/local/bin/cargo-audit; \
     ln -sf /usr/local/cargo/bin/cargo-tarpaulin /usr/local/bin/cargo-tarpaulin
 
+# What: actionlint from the upstream release, newest.
+# Why: no third-party version pin.
+# From: Issue #1683
 RUN set -euo pipefail; \
     case "$(dpkg --print-architecture)" in \
-      amd64) actionlint_sha256="${ACTIONLINT_SHA256_AMD64}"; actionlint_arch="amd64" ;; \
-      arm64) actionlint_sha256="${ACTIONLINT_SHA256_ARM64}"; actionlint_arch="arm64" ;; \
+      amd64|arm64) actionlint_arch="$(dpkg --print-architecture)" ;; \
       *) echo "Unsupported architecture for actionlint: $(dpkg --print-architecture)" >&2; exit 1 ;; \
     esac; \
+    actionlint_tag="$(curl -fsSIL -o /dev/null -w '%{url_effective}' https://github.com/rhysd/actionlint/releases/latest)"; \
+    actionlint_tag="${actionlint_tag##*/}"; \
     actionlint_tmp="$(mktemp -d)"; \
     trap 'rm -rf "$actionlint_tmp"' EXIT; \
-    curl -fsSL "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_${actionlint_arch}.tar.gz" \
+    curl -fsSL "https://github.com/rhysd/actionlint/releases/download/${actionlint_tag}/actionlint_${actionlint_tag#v}_linux_${actionlint_arch}.tar.gz" \
       -o "$actionlint_tmp/actionlint.tar.gz"; \
-    printf '%s  %s\n' "$actionlint_sha256" "$actionlint_tmp/actionlint.tar.gz" | sha256sum -c -; \
     tar -xzf "$actionlint_tmp/actionlint.tar.gz" -C "$actionlint_tmp" actionlint; \
     install -m 0755 "$actionlint_tmp/actionlint" /usr/local/bin/actionlint; \
     actionlint --version
@@ -223,12 +218,16 @@ RUN set -euo pipefail; \
 # From: Issue #1683
 RUN ln -s /usr/bin/distcc-pump /usr/local/bin/pump
 
+# What: shellspec from the upstream release, newest.
+# Why: no third-party version pin.
+# From: Issue #1683
 RUN set -euo pipefail; \
+    shellspec_tag="$(curl -fsSIL -o /dev/null -w '%{url_effective}' https://github.com/shellspec/shellspec/releases/latest)"; \
+    shellspec_tag="${shellspec_tag##*/}"; \
     shellspec_tmp="$(mktemp -d)"; \
     trap 'rm -rf "$shellspec_tmp"' EXIT; \
-    curl -fsSL "https://github.com/shellspec/shellspec/releases/download/${SHELLSPEC_VERSION}/shellspec-dist.tar.gz" \
+    curl -fsSL "https://github.com/shellspec/shellspec/releases/download/${shellspec_tag}/shellspec-dist.tar.gz" \
       -o "$shellspec_tmp/shellspec-dist.tar.gz"; \
-    printf '%s  %s\n' "${SHELLSPEC_SHA256}" "$shellspec_tmp/shellspec-dist.tar.gz" | sha256sum -c -; \
     tar -xzf "$shellspec_tmp/shellspec-dist.tar.gz" -C /opt; \
     ln -sf /opt/shellspec/shellspec /usr/local/bin/shellspec; \
     shellspec --version
@@ -242,17 +241,15 @@ RUN set -euo pipefail; \
 # the packaged one in /usr/libexec/docker/cli-plugins.
 RUN set -euo pipefail; \
     case "$(dpkg --print-architecture)" in \
-      amd64) buildx_sha256="${DOCKER_BUILDX_SHA256_AMD64}"; buildx_arch="amd64" ;; \
-      arm64) buildx_sha256="${DOCKER_BUILDX_SHA256_ARM64}"; buildx_arch="arm64" ;; \
+      amd64|arm64) buildx_arch="$(dpkg --print-architecture)" ;; \
       *) echo "Unsupported architecture for docker buildx: $(dpkg --print-architecture)" >&2; exit 1 ;; \
     esac; \
+    buildx_tag="$(curl -fsSIL -o /dev/null -w '%{url_effective}' https://github.com/docker/buildx/releases/latest)"; \
+    buildx_tag="${buildx_tag##*/}"; \
     install -d /usr/local/lib/docker/cli-plugins; \
-    buildx_tmp="$(mktemp -d)"; \
-    trap 'rm -rf "$buildx_tmp"' EXIT; \
-    curl -fsSL "https://github.com/docker/buildx/releases/download/v${DOCKER_BUILDX_VERSION}/buildx-v${DOCKER_BUILDX_VERSION}.linux-${buildx_arch}" \
-      -o "$buildx_tmp/docker-buildx"; \
-    printf '%s  %s\n' "$buildx_sha256" "$buildx_tmp/docker-buildx" | sha256sum -c -; \
-    install -m 0755 "$buildx_tmp/docker-buildx" /usr/local/lib/docker/cli-plugins/docker-buildx
+    curl -fsSL "https://github.com/docker/buildx/releases/download/${buildx_tag}/buildx-${buildx_tag}.linux-${buildx_arch}" \
+      -o /usr/local/lib/docker/cli-plugins/docker-buildx; \
+    chmod 0755 /usr/local/lib/docker/cli-plugins/docker-buildx
 RUN docker --version; \
     docker compose version; \
     docker buildx version
