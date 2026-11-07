@@ -40,37 +40,38 @@ const DHCP_PROBE_CMD: &str = "dhcp-probe";
 // From: Issue #1683 | PR #1980
 const ENV_ONLY_KEYS: [&str; 2] = ["IP_HTTP", "LANCACHE_IMAGE_CHANNEL"];
 
-// What: page templates built into the binary.
-// Why: nothing to mount or lose; one image.
-// From: Issue #1683 | PR #1858
-const TEMPLATES: [(&str, &str); 8] = [
-    ("base.html", include_str!("templates/base.html")),
-    ("dashboard.html", include_str!("templates/dashboard.html")),
-    ("setup.html", include_str!("templates/setup.html")),
-    ("dhcp.html", include_str!("templates/dhcp.html")),
-    ("domains.html", include_str!("templates/domains.html")),
-    ("stats.html", include_str!("templates/stats.html")),
-    ("logs.html", include_str!("templates/logs.html")),
-    (
-        "cachehamster.html",
-        include_str!("templates/cachehamster.html"),
-    ),
-];
+// What: read the files of one mounted folder.
+// Why: DoMe 07.11.: page edits need no image build.
+// From: Issue #1683 | PR #1991
+fn folder(dir: &str, ext: &str) -> Result<Vec<(String, String)>, String> {
+    let err = |e: std::io::Error| format!("{dir}: {e}");
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(dir).map_err(err)? {
+        let path = entry.map_err(err)?.path();
+        if path.extension().and_then(|e| e.to_str()) != Some(ext) {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let body = std::fs::read_to_string(&path).map_err(err)?;
+        out.push((name.to_string(), body));
+    }
+    if out.is_empty() {
+        return Err(format!("{dir}: no .{ext} files"));
+    }
+    out.sort();
+    Ok(out)
+}
 
-// What: static files built into the binary.
-// Why: fixed content types; no runtime reads.
-// From: Issue #1683 | PR #1858
-const ADMIN_CSS: &str = include_str!("static/admin.css");
-const FAVICON: &[u8] = include_bytes!("static/favicon.ico");
-const LOGO: &[u8] = include_bytes!("static/logo-icon.png");
-
-// What: one text file per language, built in.
-// Why: pages hold keys only; a language is a file.
-// From: Issue #1683 | PR #1980
-const LANGS: [(&str, &str); 2] = [
-    ("de", include_str!("lang/de.json")),
-    ("en", include_str!("lang/en.json")),
-];
+// What: one static file of the mounted folder.
+// Why: css and icons change without an image build.
+// From: Issue #1683 | PR #1991
+fn static_file(dir: &str, name: &str) -> Result<&'static [u8], String> {
+    let path = std::path::Path::new(dir).join(name);
+    let body = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(Box::leak(body.into_boxed_slice()))
+}
 
 // What: cookie of the language the user picked.
 // Why: the selector sets it; the ui reads it.
@@ -3119,10 +3120,10 @@ fn register_image_functions(t: &mut Tera) {
     }
 }
 
-// What: compile all templates at start.
+// What: compile the mounted templates at start.
 // Why: a broken template stops the start.
-// From: Issue #1683 | PR #1858
-fn templates() -> Result<Tera, String> {
+// From: Issue #1683 | PR #1991
+fn templates(dir: &str) -> Result<Tera, String> {
     let mut t = Tera::default();
     t.autoescape_on(vec!["html"]);
     register_image_functions(&mut t);
@@ -3133,8 +3134,8 @@ fn templates() -> Result<Tera, String> {
         "filesizeformat",
         |v: u64, _: tera::Kwargs, _: &tera::State| human::bytes(v),
     );
-    for (name, body) in TEMPLATES {
-        t.add_raw_template(name, body)
+    for (name, body) in folder(dir, "html")? {
+        t.add_raw_template(&name, &body)
             .map_err(|e| format!("template {name}: {e}"))?;
     }
     Ok(t)
@@ -3143,12 +3144,13 @@ fn templates() -> Result<Tera, String> {
 // What: read the language files at start.
 // Why: a broken file or a missing key stops the start.
 // From: Issue #1683 | PR #1980
-fn texts() -> Result<Texts, String> {
+fn texts(dir: &str) -> Result<Texts, String> {
     let mut all = Texts::new();
-    for (code, body) in LANGS {
+    for (name, body) in folder(dir, "json")? {
+        let code = name.trim_end_matches(".json").to_string();
         let map: BTreeMap<String, String> =
-            serde_json::from_str(body).map_err(|e| format!("lang {code}: {e}"))?;
-        all.insert(code.into(), map);
+            serde_json::from_str(&body).map_err(|e| format!("lang {code}: {e}"))?;
+        all.insert(code, map);
     }
     let keys: Vec<Vec<&String>> = all.values().map(|m| m.keys().collect()).collect();
     if keys.windows(2).any(|w| w[0] != w[1]) {
@@ -3318,6 +3320,10 @@ async fn healthcheck(s: &Settings) -> Result<(), String> {
 fn router(app: Arc<App>) -> Result<Router, String> {
     let s = app.settings();
     let p = |key: &str| s.text(key);
+    let dir = s.text("STATIC_DIR")?;
+    let css = static_file(&dir, "admin.css")?;
+    let icon = static_file(&dir, "favicon.ico")?;
+    let logo = static_file(&dir, "logo-icon.png")?;
     let mut pages = Router::new()
         .route(&p("UI_PAGE_DASHBOARD")?, get(dashboard))
         .route(&p("UI_PAGE_SETUP")?, get(setup))
@@ -3357,15 +3363,15 @@ fn router(app: Arc<App>) -> Result<Router, String> {
         .route(&p("UI_ROUTE_SECONDARY_REGISTER")?, post(register))
         .route(
             &p("UI_ROUTE_ADMIN_CSS")?,
-            get(|| async { asset("text/css", ADMIN_CSS.as_bytes()) }),
+            get(move || async move { asset("text/css", css) }),
         )
         .route(
             &p("UI_ROUTE_FAVICON")?,
-            get(|| async { asset("image/x-icon", FAVICON) }),
+            get(move || async move { asset("image/x-icon", icon) }),
         )
         .route(
             &p("UI_ROUTE_LOGO_ICON")?,
-            get(|| async { asset("image/png", LOGO) }),
+            get(move || async move { asset("image/png", logo) }),
         )
         .merge(pages)
         .layer(axum::middleware::from_fn_with_state(app.clone(), secure))
@@ -3429,11 +3435,11 @@ async fn main() -> Result<(), String> {
     let key =
         secret::resolve(None, &dir, "UI_SESSION_KEY", owner_keep()).map_err(|e| e.to_string())?;
     TEXTS
-        .set(texts()?)
+        .set(texts(&s.text("LANG_DIR")?)?)
         .map_err(|_| "lang: files read twice".to_string())?;
     let app = Arc::new(App {
         docker: docker::Api::new(&s.text("DOCKER_ENDPOINT")?)?,
-        tera: templates()?,
+        tera: templates(&s.text("TEMPLATE_DIR")?)?,
         settings: RwLock::new(s.clone()),
         saved,
         session_key: secret::key_bytes(&key)?,
