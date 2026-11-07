@@ -1,37 +1,41 @@
-# LanCache-NG Capability Inventory (stated 16.09.2026, WIP)
+# LanCache-NG Capability Inventory (reviewed 2026-11-07 against `current_dev` `3005b2b4`)
 
 This document is the consolidated capability inventory for LanCache-NG.
 
 It replaces the former component-specific files under
 `docs/capability-inventory/SoT-*.md`.
 
-The inventory describes the capabilities that exist in the current
-`current_dev` implementation after the v0.3.0 development cycle. It is a
-function-level companion to `docs/architecture-ng.md`, not a replacement for
-the higher-level architecture documentation.
+The inventory describes the capabilities that exist in the `current_dev`
+implementation at the commit named above. It is a function-level companion to
+`docs/architecture-ng.md`, not a replacement for the higher-level architecture
+documentation. LanCache-NG runs as exactly five containers (`services`,
+`proxy`, `dns`, `dhcp`, `ui`); the programs of each container are listed in
+`docs/architecture-ng.md`. Security findings that this review made are tracked
+in `docs/threat-model.md` ("Open gaps") and are only referenced here.
 
 Historical audit notes, already-resolved findings, temporary investigation
-state, and old v0.2.0 implementation snapshots are intentionally not retained
-here. Git history and the corresponding issues and pull requests remain the
-source for that historical context.
+state, and old implementation snapshots are intentionally not retained here.
+Git history and the corresponding issues and pull requests remain the source
+for that historical context.
 
 If this document conflicts with the current implementation, the implementation
 is authoritative and this document should be corrected.
 
 ## Component overview
 
-| Component          | Primary purpose                                                   | Runtime                   | State                    |
-| ------------------ | ----------------------------------------------------------------- | ------------------------- | ------------------------ |
-| Proxy              | HTTP caching, (SNI passthrough, TLS interception - Optional)      | nginx                     | Production               |
-| DNS                | Cache DNS, authoritative LAN DNS, RPZ, replication                | PowerDNS                  | Production               |
-| DHCP               | Native DHCPv4 server and DDNS                                     | Kea                       | Optional production mode |
-| DHCP Proxy / Relay | ProxyDHCP, PXE and DHCP relay                                     | dnsmasq                   | Optional production mode |
-| Admin UI           | Web control plane and configuration management                    | Rust                      | Production               |
-| Watchdog           | Service health monitoring and recovery                            | Rust                      | Production               |
-| Central Logging    | Log collection, normalization and retention                       | syslog-ng                | Production               |
-| NTP                | LAN time service and optional host clock discipline               | chrony                    | Optional production mode |
-| CacheHamster       | Future Steam cache-prefill engine                                 | Rust                      | Scaffold only            |
-| setup.sh           | Installation and lifecycle orchestration                          | Bash                      | Production               |
+| Component          | Primary purpose                                                   | Runtime (container)               | State                    |
+| ------------------ | ----------------------------------------------------------------- | --------------------------------- | ------------------------ |
+| Proxy              | HTTP caching, (SNI passthrough, TLS interception - Optional)      | nginx (`proxy`)                   | Production               |
+| DNS                | Cache DNS, authoritative LAN DNS, RPZ, replication                | PowerDNS (`dns`)                  | Production               |
+| DHCP               | Native DHCPv4 server and DDNS                                     | Kea (`dhcp`)                      | Optional production mode |
+| DHCP Proxy / Relay | ProxyDHCP, PXE and DHCP relay                                     | dnsmasq (`dhcp`)                  | Optional production mode |
+| Admin UI           | Web control plane, config rendering and configuration management  | Rust (`ui`)                       | Production               |
+| Watchdog           | Container health, restarts, disk and certificate checks, cleanup  | Rust (`services`)                 | Production               |
+| Central Logging    | Log collection, normalization and retention                       | syslog-ng (`services`)            | Production               |
+| NTP                | LAN time service and optional host clock discipline               | chrony (`services`)              | Optional production mode |
+| SNMP statistics    | Host and container figures for the Admin UI graphs                | snmpd (`services`, `dns`)         | Production               |
+| CacheHamster       | Steam cache-prefill engine                                        | Rust (`services`)                 | In code and wired; see section |
+| setup.sh           | Installation and lifecycle orchestration                          | Bash (host)                       | Production               |
 
 ## Proxy
 
@@ -56,8 +60,7 @@ The proxy provides:
 * Cache hit and miss logging.
 * Cache storage on a persistent volume.
 * Persistent CA and generated certificate storage.
-* Config validation before nginx starts.
-* Known-good configuration snapshots and rollback support.
+* nginx configuration rendered from templates; a bad value stops the render with an error (`nginx_conf::template`).
 * Health endpoints consumed by Docker, the UI and watchdog.
 * Access restrictions for proxy clients and management endpoints.
 * Integration with central logging.
@@ -185,7 +188,9 @@ This is separate from DHCP, which is currently an IPv4-only subsystem.
 
 ### Runtime hardening status
 
-The DNS image uses Alpine with the Rust watchdog (musl) under OpenRC.
+The DNS image uses Alpine. OpenRC starts `pdns`, the two recursors (`dns-http`,
+`dns-https`) and `snmpd`; the program list is the SOT field `processes`. The
+`dns` container does not run the watchdog.
 
 The PowerDNS processes currently do not use a Dockerfile-level `USER`
 directive. Further non-root execution remains a hardening area because the DNS
@@ -208,8 +213,8 @@ The service runs:
 * Kea Control Agent.
 * Kea DHCP-DDNS.
 
-The supervisor binary (`services/watchdog`) owns configuration rendering,
-migrations, secret handling and process supervision.
+OpenRC in the `dhcp` container starts the programs of the selected mode.
+The `ui` renders their configuration (`kea_conf` in `services/common/shared.rs`) and writes it to the `lancache-config` volume.
 
 ### Admin UI capabilities
 
@@ -230,25 +235,24 @@ The Admin UI provides management for:
 * Configuration snapshots.
 * Snapshot rollback.
 
-Kea configuration modifications follow a validate, apply and persist flow.
+Kea configuration changes are applied with `config-set` and persisted with `config-write` (`kea::Api::set_config`).
 
-A failed persistent write does not simply leave the in-memory service state as
-the accepted configuration. The modification layer contains rollback and
-ambiguous-failure handling.
+A known-good snapshot of the Kea configuration can be restored from the Admin UI (`kea-rollback`).
 
 ### Kea Control Agent
 
 The Admin UI uses the Control Agent for live configuration operations such as:
 
 * `config-get`
-* `config-test`
 * `config-set`
 * `config-write`
 * `lease4-get-all`
 * `lease4-del`
 
-The Control Agent is an internal management interface and is not intended as a
-general LAN-facing API.
+The Control Agent is meant as an internal management interface. In the current
+code it is bound to `KEA_CTRL_ADDRESS` (SOT default `0.0.0.0`) on the host
+network, its configuration has no `authentication` block, and the UI client
+sends no credentials; see gap G2 in `docs/threat-model.md`.
 
 ### DDNS
 
@@ -319,20 +323,21 @@ of acting as the lease-owning DHCP server itself.
 
 ### Configuration safety
 
-The service validates generated dnsmasq configuration before accepting it.
-
-It also supports known-good configuration snapshots and rollback.
+A value that cannot be rendered stops the render with an error
+(`dnsmasq_conf::render`); it is not written to the config volume.
 
 Configuration values passed from the Admin UI are parsed as data rather than
 executed as shell input.
 
+The snapshot store (`snapshot::Store`) is used for DNS zones and for Kea
+(`zone_store`, `kea_store`); no dnsmasq snapshot is kept.
+
 ### Test coverage
 
-The project includes function-level coverage for configuration generation and
-real packet-oriented PXE simulations.
-
-A dedicated UEFI-only packet-level scenario remains less thoroughly exercised
-than the normal combined BIOS and UEFI path.
+`current_dev` holds no PXE or packet-level tests: there is no `tests/`
+directory and no Rust test function under `services/`. The PXE and ProxyDHCP
+behavior described here is verified by reading `dnsmasq_conf::pxe` and
+`dnsmasq_conf::render`, not by a simulation.
 
 ### UI scope
 
@@ -356,7 +361,7 @@ stack.
 
 The UI provides:
 
-* Authentication.
+* Authentication (HTTP Basic with an Argon2id hash; the fail-closed start check is missing, see gap G1 in `docs/threat-model.md`).
 * CSRF protection.
 * Dashboard and service state.
 * Proxy status and cache visibility.
@@ -380,16 +385,22 @@ The UI provides:
 
 ### Container control
 
-The UI does not receive unrestricted Docker socket access.
-
-Runtime operations are routed through the project's narrowed Docker socket
-proxy and are limited to the operations that the UI actually needs.
+The Admin UI mounts the Docker socket read-write; there is no socket proxy
+(`deploy/prod/docker-compose.yml`). Through `docker::Api` it lists the compose
+project, reads container state and stats, starts, stops, restarts or reloads
+(HUP) containers and runs commands in them (for example the CacheHamster
+commands). The `services` container mounts the socket too, for the watchdog.
+The security consequences are described in `docs/threat-model.md` (T6).
 
 ### Configuration ownership
 
-The UI writes persistent operator settings into its data volume and coordinates
-service-specific configuration changes through the corresponding service APIs
-or controlled restart/reload paths.
+The Admin UI saves only the changed settings in its data volume
+(`UI_SETTINGS_FILE`); precedence per key is that file, then the container
+environment, then the SOT default. It renders every config from the SOT and the
+saved settings (`render::all`), writes the changed files into the
+`lancache-config` volume and wakes only the owner containers with the strongest
+action they need (reload or restart, `apply::plan`). The owner containers mount
+that volume read-only.
 
 Configuration that can be safely applied live is not treated the same as
 configuration that requires a container lifecycle operation.
@@ -415,11 +426,12 @@ For each secondary the UI tracks:
 Registration responses include the information required by a secondary
 installation, including:
 
-* Proxy IP.
-* PowerDNS API key where required.
-* Shared DDNS and transfer TSIG key.
-* DNS transfer primary.
-* Image registry and image-channel information.
+* Primary address and the list of replicated zones.
+* PowerDNS API key.
+* TSIG key name and secret for transfers and DDNS.
+* Syslog target on the primary.
+* The local reverse-zone setting.
+* Image registry, prefix, channel and tag.
 
 ### Remaining registration limitation
 
@@ -461,20 +473,20 @@ The watchdog keeps service observation separate from the decision to perform a
 restart. This allows infrastructure that should only be surfaced to the
 operator to remain alert-only.
 
-### Retention separation
+### Cleanup
 
-Destructive retention and pruning work is separated from the Rust health loop.
-
-The retention path has its own narrowly-scoped runtime environment instead of
-giving the main watchdog broad file-system mutation access.
+Once a day the watchdog purges old cache files (`purge_cache`) and prunes and
+packs logs (`prune_logs`). There is no separate retention process: the
+`services` container runs the watchdog, CacheHamster, syslog-ng, chronyd and
+snmpd.
 
 ## Central Logging
 
 ### Purpose
 
 syslog-ng inside the `services` container provides centralized collection of
-logs from LanCache-NG services. The watchdog renders its configuration and
-supervises it.
+logs from LanCache-NG services. The Admin UI renders its configuration (`log::render`) and
+OpenRC supervises it.
 
 ### Current capabilities
 
@@ -484,7 +496,7 @@ The logging path provides:
 * Normalized log files.
 * Proxy request log processing.
 * Inputs used by the Admin UI log viewer.
-* Logging switches per service (proxy, dns, dhcp, ui) in the Admin UI.
+* Logging switches per service in the Admin UI.
 * Log retention (age and size budget).
 
 Service logs remain useful through their normal container output as well. The
@@ -518,9 +530,6 @@ changes the host clock rather than an isolated container-local clock.
 The deployment uses explicit capabilities for this instead of assuming the
 container can modify system time by default.
 
-chronyd drops privileges to its packaged service user after the privileged
-startup operations are complete.
-
 ### Operational scope
 
 NTP is optional and independent of the caching data path.
@@ -531,16 +540,17 @@ Disabling NTP does not disable proxying, DNS or the Admin UI.
 
 ### Status
 
-`services/cachehamster` exists in `current_dev`, but it is not yet a finished
-or deployed product capability.
+`services/cachehamster` is the Steam pre-cache daemon. `lancache-cachehamster`
+runs in the `services` container (`daemon` mode, started by OpenRC) and the
+Admin UI has a CacheHamster page. The UI runs the daemon's commands in the
+`services` container through the Docker API (`hamster`, `exec_in`).
 
-It should be treated as a scaffold.
+This review read the code; it did not run a prefill. No test exists for it on
+`current_dev`, so end-to-end prefill behavior is not verified here.
 
-### Intended purpose
+### Design
 
-CacheHamster is the planned active prefill engine.
-
-Its intended design is stream-and-discard:
+CacheHamster is stream-and-discard:
 
 1. Resolve game or depot content.
 2. Fetch that content through the LanCache-NG cache path.
@@ -551,37 +561,20 @@ Its intended design is stream-and-discard:
 The prefill service itself must not create a second persistent copy of the
 downloaded game data.
 
-### Implemented scaffold capabilities
+### Implemented capabilities (in code)
 
-The current Rust scaffold already provides:
-
-* Streaming URL fetches.
-* Bounded concurrent fetches.
-* Byte counting.
-* Periodic throughput logging.
-* Stream-and-discard handling.
-* Optional in-memory-only Steam credential use.
-* Optional encrypted credential persistence.
-* Placeholder-secret rejection.
-* A dedicated container image.
-
-### Not yet implemented
-
-The current scaffold does not yet provide:
-
-* Steam login flow.
-* Steam app-ID resolution.
-* Depot discovery.
-* Depot manifest parsing.
-* Real Steam CDN chunk resolution.
-* Compose deployment wiring.
-* Admin UI controls.
-* End-to-end game prefill verification.
-
-`CACHEHAMSTER_URLS` is currently a scaffold input for directly supplied URLs,
-not the final operator-facing prefill workflow.
-
-CacheHamster therefore must not be described as a shipped pre-caching feature yet.
+* Steam login by QR code (`login_begin`, `login_poll`) with the session stored
+  sealed on disk (`secret::seal`).
+* Library listing of the logged-in account (`library`).
+* App and depot resolution through the Steam connection manager (`app_info`,
+  `depots_of`), manifest request codes (`request_code`) and chunk lists from the
+  zipped binary manifest (`chunks_of`, `app_urls`).
+* A job queue with orders now, later or at a time, a time window and pacing
+  (`When`, `Job`, `window`, `Pace`).
+* Streaming URL fetches with byte counting and a throughput rate that discard
+  the payload (`run_urls`, `count`).
+* Direct URL jobs.
+* A JSON command interface (`status`, orders) used by the Admin UI.
 
 ## setup.sh
 
@@ -596,32 +589,29 @@ persistent LanCache-NG installation.
 
 The script handles:
 
-* Host requirement checks.
-* Installation prerequisites.
+* Host requirement checks (`install-requirements-primary`,
+  `install-requirements-secondary`).
 * Initial installation.
 * Runtime configuration generation.
-* Deployment profile selection.
 * Image-channel and image-tag resolution.
-* Updates.
+* Updates and scheduled updates (`update`, `auto-update`, host units for
+  `systemd` or OpenRC).
+* IP changes (`update-ip`).
 * Configuration migration.
-* Backup.
-* Restore.
-* Secondary installation.
-* Primary and secondary requirements.
+* Backup and restore.
+* Secondary installation (`secondary`).
+* Upstream DNS configuration (`configure-upstream-dns`).
 * DHCP mode configuration.
-* Runtime convergence.
-* Recovery operations.
-* Known-good configuration rollback helpers.
-* Full-setup and validation-oriented deployment paths.
+* Runtime convergence (`converge`).
+* Recovery operations, including `reset-to-last-known-good-config`.
+* Log bundles for issue reports (`create-logs-for-issue`).
 
 ### Deployment layouts
 
-The current repository uses the production, full-setup and secondary
-deployment layouts where appropriate.
-
-The former permanent `deploy/dev` environment has been retired. Development no
-longer depends on maintaining a second parallel copy of the complete runtime
-stack.
+The current repository uses the production (`deploy/prod`) and secondary
+(`deploy/secondary`) deployment layouts. The former `deploy/dev` and
+`deploy/full-setup` layouts are gone; development no longer depends on
+maintaining a second parallel copy of the complete runtime stack.
 
 ### Idempotence and convergence
 
@@ -758,37 +748,31 @@ The following boundaries are intentional or currently unresolved:
 6. Some advanced PXE-specific configuration is not exposed with the same UI
    depth as the normal DHCP mode and Kea configuration.
 
-7. CacheHamster is a development scaffold and has no production deployment or
-   Admin UI integration yet.
+7. CacheHamster is implemented in code and wired into the `services` container, but
+   it has no test on `current_dev`; treat prefill as unverified until it has been run.
+
+8. Admin UI login enforcement and Kea Control Agent protection are not
+   fail-closed in the current code; see gaps G1 and G2 in
+   `docs/threat-model.md`.
 
 ## Validation coverage
 
-LanCache-NG uses multiple validation layers because configuration generation
-alone is not sufficient evidence that a network service works.
+On `current_dev` validation is done by `.github/scripts/ci.sh`; there is no
+`tests/` directory and no Rust test function under `services/`.
 
-Representative validation includes:
-
-* Rust unit and integration tests.
-* Compose configuration validation.
-* Real nginx configuration validation.
-* Real HTTP cache simulations.
-* TLS-interception simulations.
-* DHCP DORA tests.
-* Native DHCP probing.
-* PXE packet simulations.
-* Kea Control Agent mutation tests.
-* DNS and DDNS tests.
-* PowerDNS replication configuration tests.
-* Setup CLI simulations.
-* Backup and restore tests.
-* Known-good snapshot rollback tests.
-* Watchdog health and recovery tests.
-* Logging and observability checks.
+* `ci.sh check all` runs 42 named checks, among them `line-endings`,
+  `comments`, `governance-guards`, `compose-config`, `compose-healthchecks`,
+  `proxy-nginx-policy`, `prod-state-wiring`, `setup-update-safety`,
+  `logging-matrix`, `vex-drift`, `cargo-audit`, `shellcheck` and `actionlint`.
+* `.github/scripts/ci.bats` holds 4 tests.
+* `ci.sh validate` validates the assembled stack.
 
 A capability should not be considered fully validated merely because its
 configuration renders successfully. Where behavior depends on real network
 traffic, service interaction or persistence, validation should exercise that
-behavior directly.
+behavior directly. Capabilities in this document that no check covers (for
+example DHCP, PXE, replication and CacheHamster) are described from the code,
+not from a test result.
 
 ## Maintenance model
 
