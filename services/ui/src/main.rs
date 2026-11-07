@@ -2493,6 +2493,16 @@ async fn hamster_api(
     let v = hamster(&app, &args)
         .await
         .map_err(|e| Fail(StatusCode::BAD_GATEWAY, e))?;
+    // What: freed bytes leave the shown sum at once.
+    // Why: DoMe 07.11.: used kept 10.8 GiB after a wipe.
+    // From: Issue #871 | PR #1991
+    if let Some(freed) = v.get("freed").and_then(Value::as_u64) {
+        let _ = app
+            .cache_used
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                (n != u64::MAX).then(|| n.saturating_sub(freed))
+            });
+    }
     Ok(axum::Json(v).into_response())
 }
 
