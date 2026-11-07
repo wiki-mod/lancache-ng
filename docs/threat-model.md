@@ -1,7 +1,6 @@
 # lancache-ng Threat Model
 
-> **Last reviewed against: `current_dev` at `5f32f9f106949681f8887a8c2e48a467bf7c6dac`
-> and the code of pull request #1985 at `9a4b4be4f74ab930ac53ca6aed33307714f5122c`**
+> **Last reviewed against: `current_dev` at `ef21ed38524fcf6cd6b43e8d800d19c047fe46a9`**
 > **Last review date: 2026-11-07**
 > **Latest release tag at review time: `v0.3.2`. It is not contained in
 > `current_dev`; this document describes the five-container architecture of
@@ -19,16 +18,16 @@ framed against that assumption.
 
 ---
 
-## Security-relevant limits of the current code
+## Security-relevant state of the current code
 
 The statements in this document come from reading the code, its callers,
 defaults and alternate paths; no running stack exercised the Admin UI login,
 the Kea Control Agent or the nginx resolver check (`AG-INT-001`). The
 identifiers G1 to G3 are stable references used by code comments.
 
-| ID | Topic | State in the code (code of #1985) | Threat |
+| ID | Topic | State in the code | Threat |
 |---|---|---|---|
-| G1 | Admin UI login | The compose file passes `UI_AUTH_USER` and `UI_AUTH_PASSWORD_HASH` to the UI as `UI_USER` and `UI_PASSWORD_HASH` (`deploy/prod/docker-compose.yml`). An unauthenticated Admin UI is an explicit choice made in the setup flow with a default of open (`ALLOW_INSECURE_UI=true` in the SOT runtime defaults): `setup.sh` asks "Protect Admin-UI with password? [y/N]" (default No) and, on No, "Allow Admin-UI without authentication?" (default from the SOT value); answering No to both repeats the question. An update appends `ALLOW_INSECURE_UI=true` to an install that has no login, so the open state is an explicit entry in `.env`. `AG-SEC-001` governs this case. The `ui` process does not read `ALLOW_INSECURE_UI`, and `login_ok` accepts every request when the hash is empty, so the start behavior that `AG-SEC-001` governs exists only in the setup flow. | | T3 |
+| G1 | Admin UI login | The compose file passes `UI_AUTH_USER` and `UI_AUTH_PASSWORD_HASH` to the UI as `UI_USER` and `UI_PASSWORD_HASH` (`deploy/prod/docker-compose.yml`). `main` in `services/ui/src/main.rs` stops the `ui` process with "Admin-UI authentication is required" when `UI_PASSWORD_HASH` is empty and `ALLOW_INSECURE_UI` is not true. The SOT runtime default is `ALLOW_INSECURE_UI=true`. `setup.sh` asks "Protect Admin-UI with password? [y/N]" (default No) and, on No, "Allow Admin-UI without authentication?" (default from the SOT value); answering No to both repeats the question. An update appends `ALLOW_INSECURE_UI=true` to an install that has no login, so the open state is an explicit entry in `.env`. `AG-SEC-001` governs this case. `setup.sh reset-sign-in` removes the saved password hash after a lockout. | T3 |
 | G2 | Kea Control Agent | `kea_conf::ctrl_agent` writes a basic `authentication` block (user `KEA_CTRL_USER`, password `KEA_CTRL_TOKEN`) and `kea::Api` sends them. The bind address is `KEA_CTRL_ADDRESS=@ANY_BIND_IP@` (`0.0.0.0`) on the host network. `KEA_CTRL_ALLOW_FROM` and `KEA_CTRL_CHAIN` exist only in the SOT; no code applies a firewall fence. | T12 |
 | G3 | nginx upstream resolver | `AG-OP-002` governs the nginx upstream resolver. `render::nginx_files` and the UI save path check every `NGINX_UPSTREAM_RESOLVER` entry with `recursor_conf::upstream_entry` (numeric address only; loopback, unspecified and this host's own addresses are refused as "would loop"). | T1 |
 
@@ -190,13 +189,14 @@ injects malicious content that the proxy caches and serves to every client.
 **Mitigations**:
 - The proxy fetches HTTPS origins over TLS with `proxy_ssl_verify on` and the
   container's system CA bundle (`proxy_ssl_trusted_certificate
-  /etc/ssl/certs/ca-certificates.crt`, `services/ui/nginx/proxy-params.conf`);
+  ${NGINX_SSL_TRUSTED_CA}`, SOT value `/etc/ssl/certs/ca-certificates.crt`,
+  `services/ui/nginx/proxy-params.conf`);
   see also T8.
 - Upstream resolution uses `NGINX_UPSTREAM_RESOLVER` (default `8.8.8.8 8.8.4.4`,
   `ipv6=off`, `services/ui/nginx/nginx.conf`), not the LAN spoof DNS
   (`AG-OP-002`). The render and the UI save path refuse an entry that is not a
   numeric address or that is loopback, unspecified or one of this host's own
-  addresses (`recursor_conf::upstream_entry`, gap G3), so the resolver cannot
+  addresses (`recursor_conf::upstream_entry`, G3), so the resolver cannot
   point back at the appliance by that route.
 - Cache key is `$host$uri$slice_range` (`AG-OP-001` governs the key), so
   query-string signatures do not create separate cache objects and a
@@ -256,20 +256,20 @@ untrusted network · **Impact**: Critical
 unauthenticated case. The setup flow generates `UI_AUTH_PASSWORD` and delivers
 only its Argon2id hash.
 
-**State in the code** (`services/ui/src/main.rs`, code of #1985):
+**State in the code** (`services/ui/src/main.rs`):
 - **Password set:** the compose file passes `UI_AUTH_USER` and
   `UI_AUTH_PASSWORD_HASH` to the UI as `UI_USER` and `UI_PASSWORD_HASH`
-  (gap G1). `login_ok` then requires HTTP Basic credentials, checked with
+  (G1). `login_ok` then requires HTTP Basic credentials, checked with
   Argon2id and a constant-time user compare (`secret::equal`).
-- **No password:** `login_ok` accepts every request when `UI_PASSWORD_HASH` is
-  empty. Unauthenticated access is an explicit choice with a default of open
-  (`ALLOW_INSECURE_UI=true` in the SOT runtime defaults): `setup.sh` asks
-  "Protect Admin-UI with password? [y/N]" (default No) and, on No, "Allow
-  Admin-UI without authentication?" (default from the SOT value); answering No
-  to both repeats the question. An update appends `ALLOW_INSECURE_UI=true` to an
-  install that has no login. The `ui` process itself does not read
-  `ALLOW_INSECURE_UI` (searched in `services/`) and does not refuse to start;
-  the choice is made in the setup flow.
+- **No password:** `main` stops the `ui` process when `UI_PASSWORD_HASH` is
+  empty and `ALLOW_INSECURE_UI` is not true. With `ALLOW_INSECURE_UI=true`,
+  `login_ok` accepts every request. Unauthenticated access is an explicit choice
+  with a default of open (`ALLOW_INSECURE_UI=true` in the SOT runtime defaults):
+  `setup.sh` asks "Protect Admin-UI with password? [y/N]" (default No) and, on
+  No, "Allow Admin-UI without authentication?" (default from the SOT value);
+  answering No to both repeats the question. An update appends
+  `ALLOW_INSECURE_UI=true` to an install that has no login.
+  `setup.sh reset-sign-in` removes the saved hash after a lockout.
 - Every state-changing request needs a CSRF token bound to the session
   (`Csrf::check`, `Csrf::check_header`); the session cookie is `HttpOnly` and
   `SameSite=Strict`.
@@ -359,7 +359,7 @@ sensitive) · **Impact**: Critical (full host compromise)
 **Actual exposure** (verified in `deploy/prod/docker-compose.yml` and
 `services/common/shared.rs`):
 - **Two containers mount the Docker socket read-write, with no socket proxy:
-  `services` (compose line 130) and `ui` (compose line 361).** The `ui`
+  `services` and `ui` (`${SOT_DOCKER_SOCKET}` in `deploy/prod/docker-compose.yml`).** The `ui`
   mounts it "for apply and the overview": it wakes owner containers after it
   writes configs and reads container state. The watchdog in `services` reads
   container health and restarts sick containers.
@@ -491,10 +491,10 @@ networking publishes that API on every host interface unless something fences it
 **Likelihood**: Medium (only when Kea mode is enabled) · **Impact**: High
 (reprogramming DHCP-issued DNS redirects the whole LAN)
 
-**State in the code** (`services/common/shared.rs`, code of #1985):
+**State in the code** (`services/common/shared.rs`):
 - **Authentication:** `kea_conf::ctrl_agent` writes a basic `authentication`
   block (user `KEA_CTRL_USER`, password `KEA_CTRL_TOKEN`) and the UI's client
-  (`kea::Api`) sends them with `basic_auth` (gap G2). `KEA_CTRL_TOKEN` is a
+  (`kea::Api`) sends them with `basic_auth` (G2). `KEA_CTRL_TOKEN` is a
   generated shared secret (`managed_secrets` in the SOT).
 - **Reachability:** the Control Agent is bound to `KEA_CTRL_ADDRESS`, whose SOT
   default is `0.0.0.0`, on the host network. **No firewall fence exists:**

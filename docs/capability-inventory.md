@@ -1,6 +1,6 @@
 # LanCache-NG Capability Inventory
 
-Reviewed against `current_dev` at `5f32f9f106949681f8887a8c2e48a467bf7c6dac`.
+Reviewed against `current_dev` at `ef21ed38524fcf6cd6b43e8d800d19c047fe46a9`.
 
 This document lists what LanCache-NG can do. Every capability names the code
 that provides it (file, function, SOT key or route). The statements come from
@@ -131,6 +131,9 @@ Provided by `dhcp`, `kea_conf`, `kea`, `dhcp_probe` and `dnsmasq_conf` in
 
 - **ProxyDHCP and relay.** `dnsmasq_conf::render` renders `dnsmasq.conf` for
   `dnsmasq-proxy` and `dnsmasq-relay` (routes `/dhcp/proxy`, `/dhcp/relay`).
+  An empty `DHCP_SUBNET_START` makes the proxy range follow `DHCP_SUBNET`
+  (`proxy_range`); an empty `DHCP_RELAY_LOCAL_ADDR` makes the relay use this
+  host's first non-loopback address (`recursor_conf::own_ips`).
 - **Options.** Router (3), DNS (6), domain (15), NTP (42) and custom options
   are sent as `dhcp-option-pxe`.
 - **PXE.** `dnsmasq_conf::pxe` renders `pxe-service` and `dhcp-boot` for BIOS
@@ -142,15 +145,22 @@ Provided by `dhcp`, `kea_conf`, `kea`, `dhcp_probe` and `dnsmasq_conf` in
 Provided by `services/ui/src/main.rs` and `services/ui/src/templates/`.
 
 - **Pages.** `/` dashboard, `/setup`, `/logs`, `/stats`, `/domains`, `/dhcp`,
-  `/cachehamster`; texts in German and English (`services/ui/src/lang/`).
+  `/cachehamster`; texts in German and English (`services/ui/src/lang/`). Every
+  page and route path is a SOT key (`UI_PAGE_*`, `UI_ROUTE_*`); `router` reads
+  them.
 - **Settings.** `/setup/save` stores changed keys in `UI_SETTINGS_FILE`;
   precedence per key is that file, the container environment, the SOT default
   (`config::Settings::load`).
 - **Config rendering.** `render::all` renders every config from the SOT and the
   settings into the `lancache-config` volume; `apply::plan` and `apply::run` reload
-  (HUP) or restart only the owners with changes, through `docker::Api`.
+  or restart only the owners with changes, through `docker::Api`. A reload runs
+  the commands of `RELOAD_EXEC` in the owner container (`reload_exec`); an owner
+  without a command, or a failed reload, is restarted.
 - **Container actions.** `/api/container/{service}` sets a desired state,
-  `/api/restart-ui` restarts the UI; `docker::Api` also reads container state
+  `/api/restart-ui` restarts the UI,
+  `/api/service/{container}/{program}/{action}` (`service_action`) restarts or
+  reloads one program through `rc-service` in its container; only programs
+  listed in `UI_SERVICES` and only a running program; `docker::Api` also reads container state
   and statistics.
 - **Access control.** HTTP Basic with an Argon2id hash when `UI_PASSWORD_HASH`
   is set (`login_ok`), CSRF tokens bound to the session (`Csrf`), password
@@ -162,8 +172,10 @@ Provided by `services/ui/src/main.rs` and `services/ui/src/templates/`.
   `access::stats` shows proxy requests, hits and bytes.
 - **Logs.** `/logs` shows the stored logs and `/logs/save` switches logging per
   service.
-- **CLI.** `lancache-ui healthcheck`, `render-dns`, `zone-snapshots` and
-  `zone-rollback`.
+- **CLI.** `lancache-ui healthcheck`, `render-dns`, `zone-snapshots`,
+  `zone-rollback`, `dhcp-probe` (one DHCP probe as JSON, run on the host
+  network) and `reset-sign-in` (removes `UI_PASSWORD_HASH` from the settings
+  file).
 
 ## Watchdog
 
@@ -180,6 +192,9 @@ file the Admin UI reads (`publish`, `WATCHDOG_ALARM_FILE`):
   log pruning and log packing.
 - `log_writing`: checks that syslog-ng still writes.
 - `dns_sync`: compares primary and secondary zone serials.
+- `conntrack`: host conntrack entries against `CONNTRACK_MAX_FILE`; warns at
+  `WATCHDOG_CONNTRACK_WARN_PCT` percent. It reads `nf_conntrack` under
+  `HOST_NET_STAT_DIR` and does nothing when that file is absent.
 
 ## Services container programs
 
@@ -206,23 +221,35 @@ JSON commands that the Admin UI executes in that container (`hamster`).
   `jobs.json`.
 - **Resolution.** `app_info` and `depots_of` resolve depots through the Steam
   connection manager, `request_code` and `chunks_of` read the manifest, and
-  `app_urls` builds the chunk URLs.
-- **Prefill.** `run_urls` fetches the URLs through the proxy, counts the bytes
-  and discards the payload.
+  `app_urls` builds the chunk URLs and the total size. A depot whose request
+  code or manifest Steam refuses is skipped and recorded in the job (`skipped`);
+  the Admin UI shows the count (`hamster_skipped`).
+- **Prefill.** `run_urls` fetches the URLs from the proxy, counts the bytes and
+  discards the payload. It reaches the proxy by the container name
+  `CONTAINER_NAME_PROXY` on `PROXY_HTTP_PORT` and falls back to the configured
+  proxy address.
 
 ## setup.sh
 
 Commands of the dispatcher: `install`, `install-requirements-primary`,
 `install-requirements-secondary`, `update`, `auto-update`, `update-ip`,
 `configure-upstream-dns`, `create-logs-for-issue`, `secondary`, `backup`,
-`restore`, `reset-to-last-known-good-config`, `converge` and `compose`.
+`restore`, `reset-to-last-known-good-config` and `reset-sign-in`. Internal
+commands, not in the usage text: `compose`, `converge-reconcile` and
+`openrc-loop`.
 
 - `install` runs the wizard and writes the environment file for `deploy/prod`;
   `secondary` takes the registration token of a primary (`--token`), builds the
   registration request and reads `deploy/secondary/docker-compose.yml`.
 - `update` and `auto-update` resolve the image channel and tag and pin each
   image to its channel digest (`docs/combined-release-and-checklist.md`);
-  `auto-update` and `converge` run from host units for `systemd` or OpenRC.
+  `auto-update` and `converge-reconcile` run from host units for `systemd` or OpenRC.
+- `install` and `update` call `ensure_docker_userland_proxy`: it sets
+  `userland-proxy` in `docker_daemon_json` to `docker_userland_proxy` (SOT) and
+  restarts Docker once after a confirmation; without a terminal it leaves Docker
+  unchanged.
+- `reset-sign-in` asks first (`--yes` skips the question), runs
+  `lancache-ui reset-sign-in` in the `ui` container and restarts it.
 - `backup` and `restore` cover the persistent state; `reset-to-last-known-good-config`
   restores the Kea snapshot.
 

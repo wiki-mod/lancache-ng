@@ -1,6 +1,6 @@
 # Governance
 
-Reviewed against `current_dev` at `5f32f9f106949681f8887a8c2e48a467bf7c6dac`.
+Reviewed against `current_dev` at `ef21ed38524fcf6cd6b43e8d800d19c047fe46a9`.
 
 ## Contents
 
@@ -24,7 +24,7 @@ Reviewed against `current_dev` at `5f32f9f106949681f8887a8c2e48a467bf7c6dac`.
 | Step | Rule or location |
 | --- | --- |
 | Discussion | GitHub issues and pull requests (`CONTRIBUTING.md`) |
-| Design text for larger work | `docs/design-plannings/`, `docs/design-steam-prefill.md` |
+| Design text for larger work | `docs/design-plannings/` |
 | Integration into `master` | By pull request (`AG-WF-004`) |
 | Merge, close, delete | Maintainer authorization (`AG-WF-005`) |
 | Change of `AGENTS.md` content | `AG-WF-016` |

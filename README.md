@@ -795,7 +795,7 @@ Secret formats vary by key, not by naming suffix — despite the `*_KEY`/`*_PASS
 - 64 hex characters (`openssl rand -hex 32`): `KEA_CTRL_TOKEN`, `PDNS_API_KEY`, `SECONDARY_REGISTRATION_TOKEN`
 - 44 base64 characters (`openssl rand -base64 32`): `DDNS_TSIG_KEY`
 - 20 alphanumeric characters: the Admin UI password. It is shown once; only its Argon2id hash is stored as `UI_AUTH_PASSWORD_HASH`.
-  The Setup page of the Admin UI can change it (old password required, at least 12 characters). The new Argon2id hash is saved in `lancache-ui-password.hash` (mode 0600) next to the UI settings file and replaces the `.env` hash only while that `.env` hash is unchanged; to reset a lost password, set a new `UI_AUTH_PASSWORD_HASH` in `.env` or delete that file.
+  The Setup page of the Admin UI can change it (old password required, at least 12 characters). The new Argon2id hash is saved as `UI_PASSWORD_HASH` in the UI settings file (`lancache-ui-settings.env` in the `ui-data` volume), which takes precedence over the `.env` value; to reset a lost password, run `sudo ./setup.sh reset-sign-in`, which turns the sign-in off until a new password is set on the Setup page.
 
 Store your actual secret values securely if you need to rotate them manually. The setup script will not regenerate them unless you explicitly delete or clear the `.env` entry.
 

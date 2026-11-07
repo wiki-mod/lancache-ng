@@ -120,10 +120,10 @@ check or retention rank can mistake it for a commit.
 ### Environment variables that refer to services or containers
 
 Rule: no operator environment variable names a service or a container. The
-ui has no Docker access: it writes settings, marker and request files, and
-the supervisor in the owning container restarts its own program when a
-watched file changes. Only the watchdog in `services` talks to Docker, and
-it finds the stack by its compose project label, not by a name list. The
+ui and the watchdog in `services` talk to Docker: the ui renders the
+configs and wakes the owner containers, the watchdog checks health and
+restarts containers. Both find the stack by its compose project label, not
+by a name list. The
 SOT `CONTAINER_NAME_*` keys are the one place a container name is written.
 
 ### Backup/restore paths that depend on these names

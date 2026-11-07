@@ -115,9 +115,9 @@ This section documents intentional security design decisions and known tradeoffs
 
 ### 4. Admin UI Authentication Must Be Explicit
 
-**Design**: The setup flow now requires either UI credentials or an explicit `ALLOW_INSECURE_UI=true` opt-in before the Admin UI can start without authentication.
+**Design**: The `ui` process stops at start when no password hash is set and `ALLOW_INSECURE_UI` is not true (`AG-SEC-001`).
 
-**Status**: Unauthenticated access is an explicit choice with a default of open (`ALLOW_INSECURE_UI=true`): `setup.sh` asks "Protect Admin-UI with password? [y/N]" (default No) and, on No, "Allow Admin-UI without authentication?"; answering No to both repeats the question. With a password set the Admin UI requires HTTP Basic credentials. The choice is made in the setup flow; the `ui` process itself does not read `ALLOW_INSECURE_UI` (see `docs/threat-model.md`, T3).
+**Status**: Unauthenticated access is an explicit choice with a default of open (`ALLOW_INSECURE_UI=true`): `setup.sh` asks "Protect Admin-UI with password? [y/N]" (default No) and, on No, "Allow Admin-UI without authentication?"; answering No to both repeats the question. With a password set the Admin UI requires HTTP Basic credentials. `setup.sh reset-sign-in` turns the sign-in off after a lockout (see `docs/threat-model.md`, T3).
 
 **Required before production**:
 - Configure authentication for the Admin UI

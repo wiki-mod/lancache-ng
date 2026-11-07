@@ -31,16 +31,13 @@ Channel semantics are in `docs/combined-release-and-checklist.md`.
 | CI rewrite and its follow-up work | [#1683](https://github.com/wiki-mod/lancache-ng/issues/1683) | none |
 | CI infrastructure rework (rebuild, scan, promote, workflow consolidation) | [#1095](https://github.com/wiki-mod/lancache-ng/issues/1095) | Tooling & Checks |
 | Check that the `latest` channel can be pulled by tag and started (daily) | [#1986](https://github.com/wiki-mod/lancache-ng/issues/1986) | none |
-| CacheHamster: stream-and-discard Steam prefill | [#871](https://github.com/wiki-mod/lancache-ng/issues/871) | LanCache-NG Roadmap |
-| Admin UI: unified visual redesign | [#1437](https://github.com/wiki-mod/lancache-ng/issues/1437) | In the Future |
-
-Design documents for planned work: `docs/design-steam-prefill.md`.
+| Admin UI: unified visual redesign | [#1437](https://github.com/wiki-mod/lancache-ng/issues/1437) | In the Future® |
 
 ## 3. Not intended or not scheduled
 
 | Topic | State | Reference |
 | --- | --- | --- |
-| IPv6 listener of the PowerDNS recursor | Deferred, low priority | [#851](https://github.com/wiki-mod/lancache-ng/issues/851) |
+| IPv6 listener of the PowerDNS recursor | Closed as not planned | [#851](https://github.com/wiki-mod/lancache-ng/issues/851) |
 | A second deployment profile besides `deploy/prod/` | Not intended | `AG-KD-008` |
 | Promotion to `1.0.0` | Maintainer decision | `AG-GH-018` |
 | WireGuard remote LAN access | Design proposal only, not approved, not scheduled | `docs/design-plannings/design-wireguard-remote-access.md` |
