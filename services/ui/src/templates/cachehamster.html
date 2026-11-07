@@ -99,8 +99,26 @@
       <div class="field"><label for="hamster-queues">{{ t.hamster_queues }}</label><input type="number" id="hamster-queues" name="CACHEHAMSTER_QUEUES" min="1" max="64" value="{{ v.CACHEHAMSTER_QUEUES }}"></div>
       <div class="field"><label for="hamster-mbit">{{ t.hamster_max_mbit }}</label><input type="number" id="hamster-mbit" name="CACHEHAMSTER_MAX_MBIT" min="0" max="100000" value="{{ v.CACHEHAMSTER_MAX_MBIT }}"></div>
       <div class="field"><label for="hamster-window">{{ t.hamster_window }}</label><input type="text" id="hamster-window" name="CACHEHAMSTER_WINDOW" pattern="[0-2][0-9]:[0-5][0-9]-[0-2][0-9]:[0-5][0-9]" placeholder="01:00-06:00" value="{{ v.CACHEHAMSTER_WINDOW }}"></div>
-      <button type="submit" class="btn">{{ t.save }}</button>
+      {# What: Save first, red Log out right beside it. #}
+      {# Why: DoMe 07.11.: one row, log out in red. #}
+      {# From: Issue #871 | PR #1991 #}
+      <div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;">
+        <button type="submit" class="btn">{{ t.save }}</button>
+        {% if hamster and hamster.logged_in %}<button type="submit" form="hamster-logout" class="btn btn-danger">{{ t.log_out }}</button>{% endif %}
+      </div>
     </form>
+    <div class="section-title">{{ t.qr_login }}</div>
+    {% if hamster and hamster.logged_in %}
+    <p class="status-line"><span class="beam-light on"></span>{{ t.logged_in_as }} {{ hamster.account }}{{ t.only_an_encrypted_session_token_is }}</p>
+    <form id="hamster-logout" action="{{ routes.hamster_logout | safe }}" method="post">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    </form>
+    {% else %}
+    <p class="section-sub">{{ t.scan_the_code_with_the_steam }}</p>
+    <button type="button" class="btn" id="hamster-login">{{ t.show_login_code }}</button>
+    <div id="hamster-qr" style="margin-top:14px;"></div>
+    <p class="status-line" id="hamster-login-state"></p>
+    {% endif %}
     {# What: empties the whole cache on a 2nd click #}
     {# Why: DoMe 07.11.: in settings, not the overview #}
     {# From: Issue #871 | PR #1991 #}
@@ -110,19 +128,6 @@
       <button type="button" class="btn btn-danger" data-cache-wipe="{{ routes.hamster_api | replace(from="{op}", to="wipe") | safe }}" data-csrf="{{ csrf_token }}">{{ t.cache_wipe }}</button>
       <span class="field-hint" data-cache-wipe-state style="margin:0;"></span>
     </div>
-    <div class="section-title">{{ t.qr_login }}</div>
-    {% if hamster and hamster.logged_in %}
-    <p class="status-line"><span class="beam-light on"></span>{{ t.logged_in_as }} {{ hamster.account }}{{ t.only_an_encrypted_session_token_is }}</p>
-    <form action="{{ routes.hamster_logout | safe }}" method="post">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <button type="submit" class="btn">{{ t.log_out }}</button>
-    </form>
-    {% else %}
-    <p class="section-sub">{{ t.scan_the_code_with_the_steam }}</p>
-    <button type="button" class="btn" id="hamster-login">{{ t.show_login_code }}</button>
-    <div id="hamster-qr" style="margin-top:14px;"></div>
-    <p class="status-line" id="hamster-login-state"></p>
-    {% endif %}
   </div>
 
   {% if hamster and hamster.logged_in %}
