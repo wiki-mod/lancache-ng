@@ -239,6 +239,10 @@
           });
           const b = document.createElement('button');
           b.type = 'submit'; b.className = 'btn'; b.textContent = LC_T.preload;
+          // What: one width for every button label.
+          // Why: DoMe 07.11.: the list shifted on click.
+          // From: Issue #871 | PR #1985
+          b.style.minWidth = '12em'; b.style.whiteSpace = 'nowrap';
           f.addEventListener('submit', function (ev) {
             ev.preventDefault();
             b.disabled = true; b.textContent = LC_T.loading;
