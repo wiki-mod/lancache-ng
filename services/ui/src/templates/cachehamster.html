@@ -118,7 +118,7 @@
 
   {% if hamster and hamster.logged_in %}
   <div class="subtab5-panel" data-ch-panel="library">
-    <button type="button" class="btn" id="hamster-library">{{ t.load_owned_games }}</button>
+    <div style="margin-bottom:12px;"><button type="button" class="btn" id="hamster-library">{{ t.load_owned_games }}</button></div>
     <table class="table" id="hamster-games"></table>
   </div>
   {% endif %}
@@ -240,9 +240,9 @@
   const size = function (n) {
     return n >= 1073741824 ? (n / 1073741824).toFixed(1) + ' GiB' : Math.round(n / 1048576) + ' MiB';
   };
-  const button = function (label) {
+  const button = function (label, look) {
     const b = document.createElement('button');
-    b.type = 'button'; b.className = 'btn'; b.textContent = label;
+    b.type = 'button'; b.className = 'btn btn-sm ' + look; b.textContent = label;
     b.style.whiteSpace = 'nowrap';
     return b;
   };
@@ -250,7 +250,7 @@
     cell.textContent = '';
     if (!bytes) { cell.textContent = LC_T.cache_none; return; }
     cell.appendChild(document.createTextNode(size(bytes) + ' '));
-    const b = button(LC_T.cache_evict);
+    const b = button(LC_T.cache_evict, 'btn-ghost-red');
     b.addEventListener('click', function () {
       if (!b.dataset.sure) { b.dataset.sure = '1'; b.textContent = LC_T.cache_evict_sure; return; }
       b.disabled = true; b.textContent = LC_T.loading;
@@ -262,7 +262,7 @@
   }
   function cacheCell(cell, id) {
     cell.dataset.cacheApp = String(id);
-    const b = button(LC_T.cache_check);
+    const b = button(LC_T.cache_check, 'btn-slate');
     b.addEventListener('click', function () {
       b.disabled = true; b.textContent = LC_T.loading;
       api('lookup-' + id).then(function (v) { showCache(cell, id, v.bytes); })
@@ -302,11 +302,11 @@
             f.appendChild(i);
           });
           const b = document.createElement('button');
-          b.type = 'submit'; b.className = 'btn'; b.textContent = LC_T.preload;
+          b.type = 'submit'; b.className = 'btn btn-sm'; b.textContent = LC_T.preload;
           // What: one width for every button label.
           // Why: DoMe 07.11.: the list shifted on click.
           // From: Issue #871 | PR #1985
-          b.style.minWidth = '12em'; b.style.whiteSpace = 'nowrap';
+          b.style.minWidth = '9em'; b.style.whiteSpace = 'nowrap';
           f.addEventListener('submit', function (ev) {
             ev.preventDefault();
             b.disabled = true; b.textContent = LC_T.loading;
