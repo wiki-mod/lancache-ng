@@ -4565,8 +4565,6 @@ migrate_env_for_update() (
                 || die "DHCP_MODE=dnsmasq-proxy has invalid DHCP_DNS_PRIMARY in $env_file. Set a valid IPv4 address or leave it empty (the services then use IP_HTTP)."
             [[ -z "$dhcp_dns_secondary" ]] || is_valid_ipv4 "$dhcp_dns_secondary" \
                 || die "DHCP_MODE=dnsmasq-proxy has invalid DHCP_DNS_SECONDARY in $env_file. Set a valid IPv4 address or leave it empty (the services then use IP_HTTPS)."
-            is_valid_ipv4 "$upstream_dhcp_ip" \
-                || die "DHCP_MODE=dnsmasq-proxy requires the real router DHCP IP in UPSTREAM_DHCP_IP in $env_file. Set it, then rerun setup.sh update."
             # What: optional fields are checked when set
             # Why: empty means the option is not used
             # From: Issue #1683 | PR #1858
@@ -6015,6 +6013,21 @@ rollback_stack_update() {
             local old_channel="${LANCACHE_UPDATE_SWITCHED_FROM##*/}"
             set_env_key LANCACHE_IMAGE_CHANNEL "$old_channel" "$install_dir/${_UPDATE_ENV_FILE##*/}"
             print_warn "LANCACHE_IMAGE_CHANNEL is $old_channel again; set it anew and run update to retry the switch"
+        fi
+        # What: old stack must be healthy before success
+        # Why: success was shown with all containers exited
+        # From: Issue #1683 | PR #1991
+        local wait services
+        local -a restored_services
+        _UPDATE_STACK_DIR="$install_dir"
+        _UPDATE_ENV_FILE=$(runtime_env_file_for_install_dir "$install_dir")
+        wait=$(prod_env_default SETUP_HEALTH_WAIT_SERVICES_SECONDS) || exit $?
+        services=$(stack_compose "$install_dir" "$_UPDATE_ENV_FILE" config --services) \
+            || { print_error "Cannot list the services of $install_dir (exit $?). Manual recovery required."; return 1; }
+        mapfile -t restored_services <<< "$services"
+        if ! wait_for_stack_health "$wait" "${restored_services[@]}"; then
+            print_error "Rollback restored the files, but the stack is not healthy. Manual recovery required: $SCRIPT_DIR/setup.sh compose $install_dir up -d"
+            return 1
         fi
         print_ok "Rollback completed; stack restored to its pre-update state."
         return 0
@@ -9009,8 +9022,6 @@ elif [[ "$DHCP_MODE" = "dnsmasq-proxy" ]]; then
     ask_checked DHCP_DNS_PRIMARY "Primary DNS option for proxy-DHCP/PXE clients (blank = HTTP IP)" "$DHCP_DNS_PRIMARY" is_valid_ipv4 "Invalid IPv4 address" 1
 
     ask_checked DHCP_DNS_SECONDARY "Secondary DNS option for proxy-DHCP/PXE clients (blank = HTTPS IP)" "$DHCP_DNS_SECONDARY" is_valid_ipv4 "Invalid IPv4 address" 1
-
-    ask_checked UPSTREAM_DHCP_IP "Upstream DHCP server IP" "$DHCP_GATEWAY" is_valid_ipv4 "Invalid IPv4 address"
 
     # What: optional relay/proxy options; all skippable
     # Why: a plain Enter still gives a working proxy

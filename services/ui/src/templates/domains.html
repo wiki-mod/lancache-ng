@@ -489,7 +489,6 @@
         {% if primary_ip_https %}<div class="field" style="max-width:320px;">
           <label for="secondary-https-ip">{{ t.second_ip_of_the_secondary_for }}</label>
           <input type="text" id="secondary-https-ip" maxlength="15" placeholder="192.168.1.103" autocomplete="off">
-          <p class="field-hint">{{ t.https_ip_hint }}</p>
         </div>{% else %}<p class="field-hint">{{ t.https_off_hint }}</p>{% endif %}
         <div class="copy-row" style="max-width:none; align-items:flex-start; font-size:12.5px;">
           <code id="install-cmd" style="white-space:pre-wrap; overflow-x:visible;">LANCACHE_SETUP_GIT_REF={{ setup_git_ref }} bash &lt;(curl -fsSL {{ setup_script_url }}) secondary \

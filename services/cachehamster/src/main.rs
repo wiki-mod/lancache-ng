@@ -33,6 +33,7 @@ const TOKEN_FILE: &str = "session.sealed";
 const PENDING_FILE: &str = "login.pending";
 const JOBS_FILE: &str = "jobs.json";
 const INBOX_DIR: &str = "inbox";
+const DEPOTS_DIR: &str = "depots";
 
 // What: file mode of every file written here.
 // Why: the session token and jobs are owner-only.
@@ -1512,6 +1513,12 @@ async fn app_urls(cfg: &SteamCfg, app: u32) -> Result<(Vec<String>, u64, Vec<Str
     let web = reqwest::Client::new();
     let mut cm = Cm::login(cfg, &web).await?;
     let info = app_info(&mut cm, app).await?;
+    // What: keep the depots for the library cache view.
+    // Why: a preloaded game shows its size at once.
+    // From: Issue #871 | PR #1991
+    if let Err(e) = save_depots(&cfg.dir, app, &depot_ids(&info)) {
+        eprintln!("cachehamster: app {app}: {e}");
+    }
     let (own, borrowed) = depots_of(&info, cfg);
     let mut list: Vec<(u32, u32, u64)> = own.into_iter().map(|(d, g)| (app, d, g)).collect();
     // What: a borrowed depot takes its owner app gid.
@@ -1568,6 +1575,185 @@ async fn app_urls(cfg: &SteamCfg, app: u32) -> Result<(Vec<String>, u64, Vec<Str
         return Err(format!("app {app}: no depot of this account and OS"));
     }
     Ok((urls, size, skipped))
+}
+
+// What: depot ids an app owns, any OS, no borrowed.
+// Why: evict must not drop the shared base of mods.
+// From: Issue #871 | PR #1991
+fn depot_ids(app: &Kv) -> Vec<u32> {
+    let Some(depots) = app.node("appinfo").unwrap_or(app).node("depots") else {
+        return Vec::new();
+    };
+    depots
+        .0
+        .iter()
+        .filter_map(|(id, v)| match v {
+            KvValue::Node(d) if d.text("depotfromapp").is_none() => id.parse().ok(),
+            _ => None,
+        })
+        .collect()
+}
+
+// What: remember the depots of an app.
+// Why: the library shows cache use without a login.
+// From: Issue #871 | PR #1991
+fn save_depots(dir: &Path, app: u32, ids: &[u32]) -> Result<(), String> {
+    let body = serde_json::to_vec(ids).map_err(|e| e.to_string())?;
+    let path = dir.join(DEPOTS_DIR).join(format!("{app}.json"));
+    write(&path, &body, MODE, Place::Replace, Owner::default())
+        .map_err(|e| format!("{}: {e}", path.display()))
+}
+
+// What: every saved app and its depots.
+// Why: one map for the whole library list.
+// From: Issue #871 | PR #1991
+fn known_depots(dir: &Path) -> Result<BTreeMap<u32, Vec<u32>>, String> {
+    let dir = dir.join(DEPOTS_DIR);
+    let rd = match std::fs::read_dir(&dir) {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+        Err(e) => return Err(format!("{}: {e}", dir.display())),
+    };
+    let mut out = BTreeMap::new();
+    for e in rd {
+        let path = e.map_err(|e| e.to_string())?.path();
+        let Some(app) = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .and_then(|s| s.parse().ok())
+        else {
+            continue;
+        };
+        if let Some(ids) = read_json::<Vec<u32>>(&path)? {
+            out.insert(app, ids);
+        }
+    }
+    Ok(out)
+}
+
+// What: the Steam depot named in a cache file KEY.
+// Why: nginx writes the cache key into each file head.
+// From: Issue #871 | PR #1991
+fn key_depot(path: &Path) -> Option<u32> {
+    use std::io::Read as _;
+    let mut head = vec![0; 4096];
+    let n = std::fs::File::open(path).ok()?.read(&mut head).ok()?;
+    let head = &head[..n];
+    let at = head.windows(6).position(|w| w == b"\nKEY: ")? + 6;
+    let end = head[at..].iter().position(|b| *b == b'\n')? + at;
+    let key = std::str::from_utf8(&head[at..end]).ok()?;
+    let rest = key.split_once("/depot/")?.1;
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    digits.parse().ok()
+}
+
+// What: walk the cache; sum or delete per depot.
+// Why: free one game without a full wipe.
+// From: Issue #871 | PR #1991
+fn walk_cache(
+    dir: &Path,
+    drop: &dyn Fn(u32) -> bool,
+    sizes: &mut BTreeMap<u32, u64>,
+    freed: &mut (u64, u64),
+) -> Result<(), String> {
+    let rd = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    for e in rd {
+        let e = e.map_err(|e| e.to_string())?;
+        let ty = e.file_type().map_err(|e| e.to_string())?;
+        if ty.is_dir() {
+            walk_cache(&e.path(), drop, sizes, freed)?;
+            continue;
+        }
+        if !ty.is_file() {
+            continue;
+        }
+        let Some(depot) = key_depot(&e.path()) else {
+            continue;
+        };
+        let len = e.metadata().map(|m| m.len()).unwrap_or(0);
+        if drop(depot) {
+            remove(&e.path())?;
+            freed.0 += len;
+            freed.1 += 1;
+        } else {
+            *sizes.entry(depot).or_default() += len;
+        }
+    }
+    Ok(())
+}
+
+// What: cache bytes of every known app.
+// Why: the library shows "in cache: x GiB" per game.
+// From: Issue #871 | PR #1991
+fn cached(c: &Ctx) -> Result<Value, String> {
+    let mut sizes = BTreeMap::new();
+    let dir = PathBuf::from(c.s.text("CACHE_DIR")?);
+    walk_cache(&dir, &|_| false, &mut sizes, &mut (0, 0))?;
+    let apps: BTreeMap<String, u64> = known_depots(&c.dir)?
+        .into_iter()
+        .map(|(app, ids)| {
+            let n = ids.iter().filter_map(|d| sizes.get(d)).sum();
+            (app.to_string(), n)
+        })
+        .collect();
+    Ok(json!({"apps": apps}))
+}
+
+// What: delete every file in the cache, keep folders.
+// Why: DoMe 07.11.: one button empties the whole cache.
+// From: Issue #871 | PR #1991
+fn wipe_dir(dir: &Path, freed: &mut (u64, u64)) -> Result<(), String> {
+    let rd = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    for e in rd {
+        let e = e.map_err(|e| e.to_string())?;
+        let ty = e.file_type().map_err(|e| e.to_string())?;
+        if ty.is_dir() {
+            wipe_dir(&e.path(), freed)?;
+        } else if ty.is_file() {
+            let len = e.metadata().map(|m| m.len()).unwrap_or(0);
+            remove(&e.path())?;
+            freed.0 += len;
+            freed.1 += 1;
+        }
+    }
+    Ok(())
+}
+
+// What: empty the whole cache of every service.
+// Why: DoMe 07.11.: full wipe next to per-game evict.
+// From: Issue #871 | PR #1991
+fn wipe(c: &Ctx) -> Result<Value, String> {
+    let mut freed = (0, 0);
+    wipe_dir(&PathBuf::from(c.s.text("CACHE_DIR")?), &mut freed)?;
+    Ok(json!({"freed": freed.0, "files": freed.1}))
+}
+
+// What: depots of one app from PICS, then saved.
+// Why: games never preloaded have no saved depots.
+// From: Issue #871 | PR #1991
+async fn lookup(c: &Ctx, app: u32) -> Result<Vec<u32>, String> {
+    let cfg = SteamCfg::load(c)?;
+    let mut cm = Cm::login(&cfg, &reqwest::Client::new()).await?;
+    let ids = depot_ids(&app_info(&mut cm, app).await?);
+    save_depots(&c.dir, app, &ids)?;
+    Ok(ids)
+}
+
+// What: check or evict one app in the cache.
+// Why: DoMe 07.11.: empty one game, not everything.
+// From: Issue #871 | PR #1991
+async fn app_cache(c: &Ctx, args: &[String], evict: bool) -> Result<Value, String> {
+    let app: u32 = args
+        .first()
+        .and_then(|a| a.parse().ok())
+        .ok_or("app id must be a number")?;
+    let ids = lookup(c, app).await?;
+    let (mut sizes, mut freed) = (BTreeMap::new(), (0, 0));
+    let dir = PathBuf::from(c.s.text("CACHE_DIR")?);
+    let hit = |d: u32| evict && ids.contains(&d);
+    walk_cache(&dir, &hit, &mut sizes, &mut freed)?;
+    let bytes: u64 = ids.iter().filter_map(|d| sizes.get(d)).sum();
+    Ok(json!({"app": app, "bytes": bytes, "freed": freed.0, "files": freed.1}))
 }
 
 // What: run a Steam app job: resolve, then warm.
@@ -1771,6 +1957,10 @@ async fn command(c: Ctx, args: &[String]) -> Result<Value, String> {
         Some("login-cancel") => remove(&c.path(PENDING_FILE)).map(|()| json!({"state": "idle"})),
         Some("logout") => remove(&c.path(TOKEN_FILE)).map(|()| json!({"logged_in": false})),
         Some("library") => library(&c, &client).await,
+        Some("cached") => cached(&c),
+        Some("wipe") => wipe(&c),
+        Some("lookup") => app_cache(&c, &args[1..], false).await,
+        Some("evict") => app_cache(&c, &args[1..], true).await,
         Some("add") => submit(&c, &parse_add(&args[1..])?),
         Some(op @ ("start" | "cancel" | "remove")) => {
             let id = args.get(1).ok_or("job id missing")?.clone();
@@ -1783,7 +1973,7 @@ async fn command(c: Ctx, args: &[String]) -> Result<Value, String> {
         }
         _ => Err(
             "commands: daemon status login-begin login-poll login-cancel \
-                  logout library add start cancel remove"
+                  logout library cached lookup evict add start cancel remove"
                 .into(),
         ),
     }

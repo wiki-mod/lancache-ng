@@ -70,7 +70,10 @@
         <div class="field-row">
           <div class="field">
             <label for="cache_gb">{{ t.new_cache_size_in_gib_whole }}</label>
-            <input type="number" id="cache_gb" name="CACHE_MAX_GB" min="1" step="1" placeholder="{{ v.CACHE_MAX_GB }}">
+            <div style="position:relative;">
+            <input type="number" id="cache_gb" name="CACHE_MAX_GB" min="1" {% if cache_max_gib %}max="{{ cache_max_gib }}" {% endif %}step="1" placeholder="{{ v.CACHE_MAX_GB }}" style="padding-right:11em;">
+              {% if cache_max_gib %}<span class="field-hint" style="position:absolute;right:12px;top:50%;transform:translateY(-50%);margin:0;pointer-events:none;">{{ t.cache_max_suffix | replace(from="{x}", to=cache_max_gib) }}</span>{% endif %}
+            </div>
           </div>
           <button type="submit" class="btn" style="margin-top:23px;">{{ t.resize_cache }}</button>
         </div>
