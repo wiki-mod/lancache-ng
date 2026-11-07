@@ -19,6 +19,18 @@ Do **not** open a public GitHub issue for security vulnerabilities. Private disc
 Support covers the current minor line and the minor line before it. An
 installation on an older line has no support and has to be updated first.
 
+How the table is read:
+
+| Position | Meaning | Support |
+|----------|---------|---------|
+| Current line | The newest minor line | Yes |
+| One line back (-1) | The minor line before the current one | Yes, until the next minor line is published |
+| Two lines back (-2) and older | Every earlier minor line | No (EOL) |
+
+Example: 0.3.x is current and 0.2.x is one line back. When 0.4.x is published,
+0.4.x is current, 0.3.x is one line back and 0.2.x is EOL. An operator who
+wants support keeps the installation on the current line or the one before it.
+
 lancache-ng has not reached a `1.0.0` release yet (see `docs/combined-release-and-checklist.md`
 for the full channel/tagging model); the current stable release line is `v0.3.x`.
 
