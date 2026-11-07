@@ -532,7 +532,14 @@ async fn password(
     .await
     .map_err(|e| e.to_string())?
     .map_err(bad_request)?;
-    let change = Fields::from([("UI_PASSWORD_HASH".to_string(), hashed)]);
+    let mut change = Fields::from([("UI_PASSWORD_HASH".to_string(), hashed)]);
+    // What: the user name is set in the same form.
+    // Why: DoMe 07.11.: any name, not only the default.
+    // From: Issue #1683 | PR #1985
+    let user = get("user").trim().to_string();
+    if !user.is_empty() {
+        change.insert("UI_USER".to_string(), user);
+    }
     let back = app.settings().text("UI_PAGE_SETUP")?;
     finish(commit(&app, change).await, &back)
 }
