@@ -5,9 +5,7 @@ server IP address, installing the CA certificate on clients, choosing a DHCP
 mode, rolling back known-good configurations, backing up and restoring, and
 tuning the host network.
 
-Names, paths, keys, routes, commands and render behavior were checked against
-the repository on `current_dev` (`e223782d`). Section 9 lists what was carried
-over without a code check and what needs a running stack.
+Valid for `current_dev` at `e223782d`. Section 9 lists what is not verified.
 
 ## Contents
 
@@ -19,7 +17,7 @@ over without a code check and what needs a running stack.
 6. [Known-good snapshots and rollback](#6-known-good-snapshots-and-rollback)
 7. [Backup, restore and rollback](#7-backup-restore-and-rollback)
 8. [OS and kernel network tuning](#8-os-and-kernel-network-tuning)
-9. [Verification status](#9-verification-status)
+9. [Open verification](#9-open-verification)
 
 ---
 
@@ -654,7 +652,7 @@ The `proxy` service publishes its ports on Docker's default bridge network
 ### 8.1 Docker `userland-proxy`
 
 With `userland-proxy: true` (Docker's default) published ports go through
-`docker-proxy`. A hypothesis, not verified here, is that `docker-proxy` can
+`docker-proxy`. Unverified: `docker-proxy` may
 present the container with a rewritten source address, which would turn the
 source-address allowlist `PROXY_ALLOWED_CLIENT_CIDRS` into an all-or-nothing
 filter instead of a per-client filter. The test below decides it.
@@ -779,29 +777,17 @@ one.
 
 ---
 
-## 9. Verification status
+## 9. Open verification
 
-Checked against the repository: the `setup.sh` commands and help texts
-(`update-ip`, `--reconfigure`, `backup`, `restore`, `compose`,
-`reset-to-last-known-good-config`, `configure-upstream-dns`), the backup and
-restore flags and paths, the DHCP mode set and default (SOT `DHCP_MODES`,
-`DHCP_MODE`), the `dnsmasq_conf` render, the custom-option rules, the Admin UI
-routes named above, the snapshot store and its users, the SOT retention values,
-`services/dns/cdn-domains.txt`, `deploy/prod/docker-compose.yml` publishing, and
-the files named in section 8.
-
-Carried over from the former documents without a code check in this pass:
+Not verified against the code or a running stack:
 
 - the backup manifest paths of section 7.3 (`/srv/lancache/*`, the legacy
   directories) and the restore guard conditions of section 7.4;
 - the channel directory move of `update` (section 7.1) beyond the `current`
   link handling;
 - the tuning options of section 8 (kTLS preconditions, RPS, RFS, GRO), which are
-  host and kernel facts.
-
-Not checkable without a running stack or a real LAN:
-
+  host and kernel facts;
 - the Admin UI's field validation messages for the dnsmasq modes;
-- the exact `setup.sh` prompts of the Kea preflight and the log wording of the
-  `dhcp` container;
+- the `setup.sh` prompts of the Kea preflight and the log wording of the `dhcp`
+  container;
 - the behavior of the tuning commands in section 8 on a given host and NIC.

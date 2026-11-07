@@ -4,8 +4,7 @@ This policy states where every image and GitHub Action reference of CI and
 release is owned, what form it takes, and how CI checks it. It keeps no copy of
 the referenced values; each value has one owner (AG-CI-006).
 
-Names, paths, SOT keys, rules and checks below were checked against the
-repository on `current_dev` (`e223782d`).
+Valid for `current_dev` at `e223782d`.
 
 ## Rules and owners
 

@@ -5,10 +5,8 @@ release-channel contract, the handling of external images, the provenance
 evidence of a release, and the validation hurdles a release candidate has to
 pass before it is released.
 
-Names, paths, keys, routes, commands, workflow triggers, jobs and SOT values
-were checked against the repository on `current_dev` (`e223782d`). Behavior
-statements carried over from the former documents without a code check, and
-procedures that need a live stack, are listed in section 11.4.
+Valid for `current_dev` at `e223782d`. Section 11.4 lists what is not
+verified.
 
 ## Contents
 
@@ -861,43 +859,27 @@ Covered only by Part B (section 10):
 - `setup.sh install` and `setup.sh update` on a running stack (10.1, 10.11,
   10.12).
 
-### 11.4 Verification status of this document
+### 11.4 Open verification
 
-Checked against the repository: workflow names, triggers, schedules and jobs;
-the `ci.sh` command and guard names and error codes named above; the SOT keys
-(`services`, `build_toolchain`, `base_images`, `github_actions`,
-`build_matrix`, `ci_result_gate`, `release.*`); `deploy/prod/docker-compose.yml`
-publishing and logging; the Admin UI routes (`/dhcp/check`, `/dhcp/mode`,
-`/dhcp/kea-rollback`, `/api/status`, `/api/container/{service}`,
-`/api/restart-ui`); the watchdog restart logic; the `setup.sh` function names.
+Not verified against the code or a live stack:
 
-Not checkable without a live stack, and therefore carried as scenario
-procedures that still need a live run against current code:
-
-- the exact log wording and status files of the supervisor-based scenarios
-  (the dnsmasq sub-mode switch, the NTP upstream change, the container
-  start/stop effect on the supervised programs) in sections 10.3, 10.6 and
-  10.10;
+- the exact log wording and status files of the supervisor-based scenarios (the
+  dnsmasq sub-mode switch, the NTP upstream change, the container start and stop
+  effect on the supervised programs) in sections 10.3, 10.6 and 10.10;
 - the upstream DNS rejection log lines and the rendered recursor configuration
   in section 10.2;
-- the dashboard cache-size source and the `FailingStreak` hang check
-  (10.4, 10.7).
-
-Carried over from the former documents without a code check in this pass:
-
+- the dashboard cache-size source and the `FailingStreak` hang check (10.4,
+  10.7);
 - the rollback of already moved channel tags and the double digest read of
   `setup.sh` (sections 4.1 and 5);
 - that a release re-run never replaces an attached asset, and that the SBOM is
   generated in Trivy CycloneDX mode (section 6);
 - the `sha256-<subject>` referrer rule, the delete re-classification and the
   `release.retention` behavior beyond the values named (section 7);
-- the proxy behavior statements of section 10.4 (blind passthrough in HTTP
-  mode, shared cache key `$host$uri`, the four hurdles);
-- the `setup.sh update` flow descriptions of sections 10.11 and 10.12;
+- the proxy behavior of section 10.4 (blind passthrough in HTTP mode, shared
+  cache key `$host$uri`, the four hurdles);
+- the `setup.sh update` flow of sections 10.11 and 10.12;
 - the pass criteria of sections 10.5, 10.8 and 10.9.
-
-The checklist in section 12 is assembled from sections 4 to 10; it adds no
-requirement that those sections do not state.
 
 ---
 
