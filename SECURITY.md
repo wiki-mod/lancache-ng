@@ -12,10 +12,11 @@ Do **not** open a public GitHub issue for security vulnerabilities. Private disc
 
 | Version | Status | Support Until |
 |---------|--------|----------------|
-| 0.x (pre-1.0) | Current | Ongoing |
+| 0.3.x (pre-1.0) | Current | Ongoing |
+| Pre 0.3.x | EOL | Ended |
 
 lancache-ng has not reached a `1.0.0` release yet (see `docs/combined-release-and-checklist.md`
-for the full channel/tagging model); the current stable release line is `v0.x`.
+for the full channel/tagging model); the current stable release line is `v0.3.x`.
 We aim to provide security updates for the current stable release. Older
 releases are not actively maintained.
 
