@@ -10,16 +10,9 @@ Do **not** open a public GitHub issue for security vulnerabilities. Private disc
 
 ## Supported Versions
 
-| Version | Status | Support Until |
-|---------|--------|----------------|
-| 0.3.x (pre-1.0) | Current | Ongoing |
-| 0.2.x | Supported (previous line) | Until the next minor line is released |
-| 0.1.x and older | EOL | Ended |
-
 Support covers the current minor line and the minor line before it. An
-installation on an older line has no support and has to be updated first.
-
-How the table is read:
+installation on an older line has no support and has to be updated first. The
+current line is the one the `latest` channel serves (`docs/combined-release-and-checklist.md`).
 
 | Position | Meaning | Support |
 |----------|---------|---------|
@@ -27,12 +20,11 @@ How the table is read:
 | One line back (-1) | The minor line before the current one | Yes, until the next minor line is released |
 | Two lines back (-2) and older | Every earlier minor line | No (EOL) |
 
-Example: 0.3.x is current and 0.2.x is one line back. When 0.4.x is released,
-0.4.x is current, 0.3.x is one line back and 0.2.x is EOL. An operator who
-wants support keeps the installation on the current line or the one before it.
+Example: with line N current, line N-1 is supported and line N-2 is EOL. When
+line N+1 is released, N+1 is current, N is one line back and N-1 is EOL.
 
 lancache-ng has not reached a `1.0.0` release yet (see `docs/combined-release-and-checklist.md`
-for the full channel/tagging model); the current stable release line is `v0.3.x`.
+for the full channel/tagging model).
 
 ### Scope and duration of support (per minor line)
 
@@ -43,8 +35,7 @@ for the full channel/tagging model); the current stable release line is `v0.3.x`
 - **What kind of support**: security fixes and correctness bug fixes, applied
   by publishing a new stable release of a supported line.
 - **Duration**: a minor line is supported until the next minor line after the
-  current one is released, and is EOL from then on. With 0.3.x current, 0.2.x
-  is supported until 0.4.x is released.
+  current one is released, and is EOL from then on.
 - **Updating**: an installation on an unsupported line is updated to a
   supported line to receive support.
 - **Pre-1.0 caveat**: as a pre-1.0 project, breaking changes and security-
