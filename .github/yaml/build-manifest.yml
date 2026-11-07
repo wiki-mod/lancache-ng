@@ -608,7 +608,10 @@ runtime:
     - DHCP_RANGE_END=10.0.0.254
     - DHCP_GATEWAY=10.0.0.1
     - DHCP_NTP_SERVERS=debian.pool.ntp.org,time.nist.gov
-    - ALLOW_INSECURE_UI=false
+    # What: the Admin UI is open until a login is set
+    # Why: DoMe 07.11.: "lazy ist default"
+    # From: Issue #1683 | PR #1985
+    - ALLOW_INSECURE_UI=true
     - SUPERVISE_RUN_DIR=/run/lancache
     - LANCACHE_SHARED_SECRET_DIR=/var/lib/lancache-secrets
     - UI_DATA_DIR=/data

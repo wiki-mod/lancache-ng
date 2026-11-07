@@ -9001,7 +9001,7 @@ ALLOW_INSECURE_UI=""
 # Why: a "no" to both used to end the whole install
 # From: Issue #1683 | PR #1980
 while true; do
-if confirm "Protect Admin-UI with password? [Y/n]" "Y"; then
+if confirm "Protect Admin-UI with password? [y/N]" "N"; then
     ui_user_default=$(prod_env_default SETUP_UI_USER_DEFAULT) || exit $?
     ask "Username" "$ui_user_default"
     UI_AUTH_USER="$REPLY"

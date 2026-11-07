@@ -338,8 +338,11 @@ services:
       LANCACHE_IMAGE_PREFIX: ${LANCACHE_IMAGE_PREFIX:?LANCACHE_IMAGE_PREFIX is required}
       LANCACHE_IMAGE_CHANNEL: ${LANCACHE_IMAGE_CHANNEL:-}
       LANCACHE_IMAGE_TAG: ${LANCACHE_IMAGE_TAG:?LANCACHE_IMAGE_TAG is required}
-      UI_AUTH_USER: ${UI_AUTH_USER:-}
-      UI_AUTH_PASSWORD_HASH: ${UI_AUTH_PASSWORD_HASH:-}
+      # What: setup.sh login under the ui key names
+      # Why: G1: the setup.sh password never applied
+      # From: Issue #1683 | PR #1985
+      UI_USER: ${UI_AUTH_USER:-}
+      UI_PASSWORD_HASH: ${UI_AUTH_PASSWORD_HASH:-}
       ALLOW_INSECURE_UI: ${ALLOW_INSECURE_UI:-}
       UI_SESSION_TTL_SECONDS: ${UI_SESSION_TTL_SECONDS:-}
       DHCP_API_TOKEN: ${KEA_CTRL_TOKEN}
