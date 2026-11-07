@@ -17,10 +17,20 @@
 
   <div class="subtabs">
     <div class="subtab active" data-ch-tab="jobs">Jobs</div>
-    <div class="subtab" data-ch-tab="steam">Steam</div>
+    <div class="subtab" data-ch-tab="history">{{ t.history }}</div>
+    {# What: Library only when logged in; Settings last. #}
+    {# Why: DoMe 07.11.: own tab; QR login in Settings. #}
+    {# From: Issue #871 | PR #1985 #}
+    {% if hamster and hamster.logged_in %}<div class="subtab" data-ch-tab="library">{{ t.library }}</div>{% endif %}
+    <div class="subtab" data-ch-tab="settings">{{ t.settings }}</div>
   </div>
 
-  <div class="subtab5-panel active" data-ch-panel="jobs">
+  {# What: Jobs = new job plus the last 3; History = all. #}
+  {# Why: DoMe 07.11.: no duplicate, less space. #}
+  {# From: Issue #871 | PR #1985 #}
+  {% for panel in ["jobs", "history"] %}
+  <div class="subtab5-panel{% if panel == "jobs" %} active{% endif %}" data-ch-panel="{{ panel }}">
+    {% if panel == "jobs" %}
     <div class="section-title" style="margin-top:0;">{{ t.new_job }}</div>
     <form action="{{ routes.hamster_add | safe }}" method="post" id="hamster-add">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -39,58 +49,65 @@
         <p class="section-sub" id="hamster-when-hint"></p></div>
       <button type="submit" class="btn">{{ t.add_job }}</button>
     </form>
+    <div class="section-title">{{ t.last_3_jobs }}</div>
+    {% endif %}
+    {% if hamster and hamster.jobs | length > 0 %}
+    <div style="overflow-x:auto;">
+    {# What: fixed column widths for the job table #}
+    {# Why: DoMe 07.11.: rows shifted with the progress #}
+    {# From: Issue #871 | PR #1985 #}
+    <table class="table" style="table-layout:fixed; min-width:980px;">
+      <colgroup><col style="width:110px"><col><col style="width:120px"><col style="width:90px"><col style="width:150px"><col style="width:250px"><col style="width:220px"></colgroup>
+      <tr><th>{{ t.date_and_time }}</th><th>Name</th><th>{{ t.what }}</th><th>{{ t.when }}</th><th>{{ t.state }}</th><th>{{ t.progress }}</th><th></th></tr>
+      {% for j in hamster.jobs | reverse %}{% if panel == "history" or loop.index <= 3 %}
+      <tr{% if j.state.state == "running" or (j.state.state == "waiting" and j.when.kind == "now") %} data-busy="1"{% endif %}>
+        <td style="white-space:nowrap;">{% if j.history | length > 0 %}{% set ev = j.history | first %}<span data-unix="{{ ev.at }}"></span>{% endif %}</td>
+        <td>{{ j.name }}</td>
+        <td style="white-space:nowrap;">{% if j.target.kind == "steam_app" %}{{ t.steam_app }} {{ j.target.value }}{% else %}{{ j.target.value | length }} {{ t.addresses }}{% endif %}</td>
+        <td>{% if j.when.kind == "at" %}<span data-unix="{{ j.when.at }}"></span>{% elif j.when.kind == "later" %}{{ t.by_hand_press_start }}{% else %}{{ t.now }}{% endif %}</td>
+        {% set sk = "hamster_st_" ~ j.state.state %}<td>{{ t[sk] }}{% if j.state.reason %}<br><span style="font-size:12px; color:var(--mist);">{{ j.state.reason }}</span>{% endif %}{% if j.skipped %}<br><span style="font-size:12px; color:var(--mist);" title="{{ j.skipped | join(sep="; ") }}">{{ t.hamster_skipped }}: {{ j.skipped | length }}</span>{% endif %}</td>
+        <td style="font-variant-numeric:tabular-nums;">{{ j.done }} {{ t.of }} {{ j.total }} {{ t.done }} {{ j.failed }} {{ t.failed }} {{ j.bytes | filesizeformat }}{% if j.size %} {{ t.of }} {{ j.size | filesizeformat }}{% endif %}</td>
+        <td>
+          {# What: only the buttons this state can use #}
+          {# Why: DoMe 07.11.: three big buttons wrapped #}
+          {# From: Issue #871 | PR #1985 #}
+          {% set st = j.state.state %}{% if st == "running" %}{% set ops = ["cancel"] %}{% elif st == "waiting" %}{% set ops = ["start", "cancel", "remove"] %}{% else %}{% set ops = ["start", "remove"] %}{% endif %}
+          {% if j.id %}<div style="display:flex; gap:6px; justify-content:flex-end; white-space:nowrap;">{% for op in ops %}
+          {% set rk = "hamster_" ~ op %}<form action="{{ routes[rk] | safe }}" method="post">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <input type="hidden" name="id" value="{{ j.id }}">
+            <button type="submit" class="btn btn-sm{% if op == "cancel" %} btn-ghost-amber{% elif op == "remove" %} btn-ghost-red{% endif %}">{{ t[op] }}</button>
+          </form>
+          {% endfor %}</div>{% else %}{{ t.hamster_queued }}{% endif %}
+        </td>
+      </tr>
+      {% endif %}{% endfor %}
+    </table>
+    </div>
+    {% else %}<p class="section-sub">{{ t.no_jobs_yet }}</p>{% endif %}
+  </div>
+  {% endfor %}
 
-    {# What: speed settings of the prefill; SOT keys. #}
-    {# Why: DoMe 26.10. (Fund 90): set them in the UI. #}
-    {# From: Issue #871 | PR #1980 #}
-    <div class="section-title">{{ t.settings }}</div>
+  {# What: prefill speed (SOT keys) and the Steam login. #}
+  {# Why: DoMe 07.11.: own tab, not under Jobs. #}
+  {# From: Issue #871 | PR #1985 #}
+  <div class="subtab5-panel" data-ch-panel="settings">
     <form action="{{ routes.setup_save | safe }}" method="post" class="form-row">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <input type="hidden" name="back" value="/cachehamster">
+      <input type="hidden" name="back" value="{{ pages.cachehamster }}">
       <div class="field"><label for="hamster-conns">{{ t.hamster_connections }}</label><input type="number" id="hamster-conns" name="CACHEHAMSTER_CONCURRENCY" min="1" max="1024" value="{{ v.CACHEHAMSTER_CONCURRENCY }}"></div>
       <div class="field"><label for="hamster-queues">{{ t.hamster_queues }}</label><input type="number" id="hamster-queues" name="CACHEHAMSTER_QUEUES" min="1" max="64" value="{{ v.CACHEHAMSTER_QUEUES }}"></div>
       <div class="field"><label for="hamster-mbit">{{ t.hamster_max_mbit }}</label><input type="number" id="hamster-mbit" name="CACHEHAMSTER_MAX_MBIT" min="0" max="100000" value="{{ v.CACHEHAMSTER_MAX_MBIT }}"></div>
       <div class="field"><label for="hamster-window">{{ t.hamster_window }}</label><input type="text" id="hamster-window" name="CACHEHAMSTER_WINDOW" pattern="[0-2][0-9]:[0-5][0-9]-[0-2][0-9]:[0-5][0-9]" placeholder="01:00-06:00" value="{{ v.CACHEHAMSTER_WINDOW }}"></div>
       <button type="submit" class="btn">{{ t.save }}</button>
     </form>
-
-    <div class="section-title">Jobs</div>
-    {% if hamster and hamster.jobs | length > 0 %}
-    <table class="table">
-      <tr><th>Name</th><th>{{ t.what }}</th><th>{{ t.when }}</th><th>{{ t.state }}</th><th>{{ t.progress }}</th><th></th></tr>
-      {% for j in hamster.jobs %}
-      <tr{% if j.state.state == "running" or (j.state.state == "waiting" and j.when.kind == "now") %} data-busy="1"{% endif %}>
-        <td>{{ j.name }}</td>
-        <td>{% if j.target.kind == "steam_app" %}{{ t.steam_app }} {{ j.target.value }}{% else %}{{ j.target.value | length }} {{ t.addresses }}{% endif %}</td>
-        <td>{% if j.when.kind == "at" %}<span data-unix="{{ j.when.at }}"></span>{% elif j.when.kind == "later" %}{{ t.by_hand_press_start }}{% else %}{{ t.now }}{% endif %}</td>
-        {% set sk = "hamster_st_" ~ j.state.state %}<td>{{ t[sk] }}{% if j.state.reason %}: {{ j.state.reason }}{% endif %}</td>
-        <td>{{ j.done }} {{ t.of }} {{ j.total }} {{ t.done }} {{ j.failed }} {{ t.failed }} {{ j.bytes | filesizeformat }}</td>
-        <td>
-          {% if j.id %}{% for op in ["start", "cancel", "remove"] %}
-          <form action="/cachehamster/{{ op }}" method="post" style="display:inline">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <input type="hidden" name="id" value="{{ j.id }}">
-            <button type="submit" class="btn">{{ t[op] }}</button>
-          </form>
-          {% endfor %}{% else %}{{ t.hamster_queued }}{% endif %}
-        </td>
-      </tr>
-      {% if j.history | length > 0 %}<tr><td colspan="6"><details><summary>{{ t.history }} ({{ j.history | length }})</summary><ul class="section-sub">{% for e in j.history | reverse %}{% set ek = "hamster_st_" ~ e.state %}<li><span data-unix="{{ e.at }}"></span> {{ t[ek] }}{% if e.reason %}: {{ e.reason }}{% endif %}</li>{% endfor %}</ul></details></td></tr>{% endif %}
-      {% endfor %}
-    </table>
-    {% else %}<p class="section-sub">{{ t.no_jobs_yet }}</p>{% endif %}
-  </div>
-
-  <div class="subtab5-panel" data-ch-panel="steam">
+    <div class="section-title">{{ t.qr_login }}</div>
     {% if hamster and hamster.logged_in %}
     <p class="status-line"><span class="beam-light on"></span>{{ t.logged_in_as }} {{ hamster.account }}{{ t.only_an_encrypted_session_token_is }}</p>
     <form action="{{ routes.hamster_logout | safe }}" method="post">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <button type="submit" class="btn">{{ t.log_out }}</button>
     </form>
-    <div class="section-title">{{ t.library }}</div>
-    <button type="button" class="btn" id="hamster-library">{{ t.load_owned_games }}</button>
-    <table class="table" id="hamster-games"></table>
     {% else %}
     <p class="section-sub">{{ t.scan_the_code_with_the_steam }}</p>
     <button type="button" class="btn" id="hamster-login">{{ t.show_login_code }}</button>
@@ -98,6 +115,13 @@
     <p class="status-line" id="hamster-login-state"></p>
     {% endif %}
   </div>
+
+  {% if hamster and hamster.logged_in %}
+  <div class="subtab5-panel" data-ch-panel="library">
+    <button type="button" class="btn" id="hamster-library">{{ t.load_owned_games }}</button>
+    <table class="table" id="hamster-games"></table>
+  </div>
+  {% endif %}
 </section>
 {% endblock %}
 
@@ -115,14 +139,26 @@
     try { sessionStorage.setItem('ch-tab', name); } catch (err) { reportError(err); }
   };
   document.querySelectorAll('[data-ch-tab]').forEach(function (tab) {
-    tab.addEventListener('click', function () { pickTab(tab.dataset.chTab); });
+    tab.addEventListener('click', function () {
+      pickTab(tab.dataset.chTab);
+      // What: after a preload, Jobs and History reload.
+      // Why: DoMe 07.11.: the new job never showed up.
+      // From: Issue #871 | PR #1985
+      if (window.hamsterAdded && (tab.dataset.chTab === 'jobs' || tab.dataset.chTab === 'history')) { location.reload(); }
+    });
   });
   try {
     const saved = sessionStorage.getItem('ch-tab');
     if (saved && document.querySelector('[data-ch-tab="' + saved + '"]')) { pickTab(saved); }
   } catch (err) { reportError(err); }
+  // What: date on the first line, time on the second.
+  // Why: DoMe 07.11.: one line made the column wide.
+  // From: Issue #871 | PR #1985
   document.querySelectorAll('[data-unix]').forEach(function (el) {
-    el.textContent = new Date(Number(el.dataset.unix) * 1000).toLocaleString();
+    const d = new Date(Number(el.dataset.unix) * 1000);
+    el.textContent = d.toLocaleDateString(undefined, { dateStyle: 'medium' });
+    el.appendChild(document.createElement('br'));
+    el.appendChild(document.createTextNode(d.toLocaleTimeString(undefined, { timeStyle: 'medium' })));
   });
   // What: the time field opens its calendar on click.
   // Why: DoMe 05.11.: a click on "tt" opened nothing.
@@ -193,9 +229,19 @@
       const back = function () { lib.disabled = false; lib.textContent = LC_T.load_owned_games; };
       api('library').then(function (v) {
         back();
+        try { sessionStorage.setItem('ch-games', JSON.stringify(v.games)); } catch (err) { reportError(err); }
+        showGames(v.games);
+      }).catch(function (e) { back(); window.LancacheUi.fail(e); });
+    });
+  }
+  // What: the owned games survive a reload.
+  // Why: DoMe 07.11.: Ctrl+F5 emptied the list.
+  // From: Issue #871 | PR #1985
+  function showGames(games) {
         const t = document.getElementById('hamster-games');
+        if (!t) { return; }
         t.innerHTML = '<tr><th>App ID</th><th>Name</th><th></th></tr>';
-        v.games.forEach(function (g) {
+        games.forEach(function (g) {
           const row = t.insertRow();
           row.insertCell().textContent = g.appid;
           row.insertCell().textContent = g.name;
@@ -212,12 +258,34 @@
           });
           const b = document.createElement('button');
           b.type = 'submit'; b.className = 'btn'; b.textContent = LC_T.preload;
-          f.addEventListener('submit', function () { b.disabled = true; b.textContent = LC_T.loading; });
+          // What: one width for every button label.
+          // Why: DoMe 07.11.: the list shifted on click.
+          // From: Issue #871 | PR #1985
+          b.style.minWidth = '12em'; b.style.whiteSpace = 'nowrap';
+          f.addEventListener('submit', function (ev) {
+            ev.preventDefault();
+            b.disabled = true; b.textContent = LC_T.loading;
+            fetch(f.action, { method: 'POST', body: new URLSearchParams(new FormData(f)) })
+              .then(function (r) { if (!r.ok) { throw new Error(r.statusText); } b.textContent = LC_T.hamster_queued; window.hamsterAdded = true; })
+              .catch(function (e) { b.disabled = false; b.textContent = LC_T.preload; window.LancacheUi.fail(e); });
+          });
           f.appendChild(b);
           row.insertCell().appendChild(f);
         });
-      }).catch(function (e) { back(); window.LancacheUi.fail(e); });
-    });
   }
+  try {
+    const kept = sessionStorage.getItem('ch-games');
+    if (kept) { showGames(JSON.parse(kept)); }
+  } catch (err) { reportError(err); }
+  // What: the Library tab loads the games when empty.
+  // Why: DoMe 07.11.: no extra click after opening.
+  // From: Issue #871 | PR #1985
+  const libTab = document.querySelector('[data-ch-tab="library"]');
+  const autoLoad = function () {
+    const t = document.getElementById('hamster-games');
+    if (lib && t && t.rows.length === 0 && !lib.disabled) { lib.click(); }
+  };
+  if (libTab) { libTab.addEventListener('click', autoLoad); }
+  if (libTab && libTab.classList.contains('active')) { autoLoad(); }
 </script>
 {% endblock %}

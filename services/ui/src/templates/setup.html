@@ -67,9 +67,9 @@
           <span class="track"></span><span class="knob"></span>
         </label>
       </div>
-      <p class="field-hint">{{ t.test_from_a_pc_in_the }} <code>w32tm /stripchart /computer:{{ v.IP_HTTP }} /samples:3 /dataonly</code> {{ t.windows_or }} <code>ntpdate -q {{ v.IP_HTTP }}</code> {{ t.linux_a_reply_means_the_time }}</p>
+      <label class="t-label" for="ntp_upstream" style="display:block; margin-top:12px;">{{ t.upstream_time_servers }}</label>
       <div class="field-row">
-        <textarea name="NTP_UPSTREAM_SERVERS" rows="2" style="width:100%; padding:9px 11px; border-radius:8px; border:1px solid var(--navy-600); background:var(--navy-900); color:var(--foam); font-family:var(--font-mono); font-size:13px;">{{ v.NTP_UPSTREAM_SERVERS }}</textarea>
+        <textarea id="ntp_upstream" name="NTP_UPSTREAM_SERVERS" rows="2" style="width:100%; padding:9px 11px; border-radius:8px; border:1px solid var(--navy-600); background:var(--navy-900); color:var(--foam); font-family:var(--font-mono); font-size:13px;">{{ v.NTP_UPSTREAM_SERVERS }}</textarea>
       </div>
       <p class="field-hint">{{ t.at_least_one_server_names_or }} <code>0.debian.pool.ntp.org time.cloudflare.com</code>.</p>
       <div class="toggle-row">
@@ -84,6 +84,15 @@
           <span class="track"></span><span class="knob"></span>
         </label>
       </div>
+      {# What: test commands folded under the NTP block. #}
+      {# Why: DoMe 07.11.: they sat amid the settings. #}
+      {# From: Issue #1683 | PR #1985 #}
+      <details style="margin-top:12px;">
+        <summary class="field-hint" style="cursor:pointer;">{{ t.test_from_a_pc_in_the }}</summary>
+        <p class="field-hint">{{ t.ntp_test_reply }}</p>
+        <div class="copy-row cmd-row"><span class="cmd-os">Windows</span><code id="ntp-test-win">w32tm /stripchart /computer:{{ v.IP_HTTP }} /samples:3 /dataonly</code><button type="button" onclick="copyText('ntp-test-win', this)">{{ t.copy }}</button></div>
+        <div class="copy-row cmd-row"><span class="cmd-os">Linux</span><code id="ntp-test-linux">ntpdate -q {{ v.IP_HTTP }}</code><button type="button" onclick="copyText('ntp-test-linux', this)">{{ t.copy }}</button></div>
+      </details>
       <button type="submit" class="btn" style="margin-top:14px; margin-bottom:6px;">{{ t.save }}</button>
     </form>
 
@@ -104,19 +113,30 @@
     </div>
 
     <div class="section-title">{{ t.sign_in }}</div>
+    {# What: set a password here to turn sign-in on. #}
+    {# Why: DoMe 07.11.: off was not changeable here. #}
+    {# From: Issue #1683 | PR #1985 #}
     {% if login_enabled %}
     <p class="section-sub">{{ t.this_admin_ui_requires_a_username }}</p>
-    <button type="button" class="btn ghost" id="password-open">{{ t.change_password }}</button>
+    {% else %}
+    <p class="section-sub">{{ t.sign_in_is_turned_off_for }} {{ t.set_a_password_to_turn_on }}</p>
+    {% endif %}
+    <button type="button" class="btn ghost" id="password-open">{% if login_enabled %}{{ t.change_password }}{% else %}{{ t.turn_on_sign_in }}{% endif %}</button>
     <div id="password-card" class="card hidden" style="margin-top:14px; max-width:480px;">
       <p class="section-sub">{{ t.at_least_12_characters_the_browser }}</p>
       <form method="post" action="{{ routes.password | safe }}" autocomplete="off"
           style="display:grid; gap:12px; max-width:420px;">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <div>
+        <label class="block text-xs text-slate-400 mb-1" for="ui_user">{{ t.user_name }}</label>
+        <input type="text" id="ui_user" name="user" required value="{{ v.UI_USER }}"
+               autocomplete="username" style="width:100%;">
+      </div>
+      {% if login_enabled %}<div>
         <label class="block text-xs text-slate-400 mb-1" for="current_password">{{ t.current_password }}</label>
         <input type="password" id="current_password" name="current_password" required
                autocomplete="current-password" style="width:100%;">
-      </div>
+      </div>{% endif %}
       <div>
         <label class="block text-xs text-slate-400 mb-1" for="new_password">{{ t.new_password }}</label>
         <input type="password" id="new_password" name="new_password" required minlength="12"
@@ -127,12 +147,9 @@
         <input type="password" id="confirm_password" name="confirm_password" required minlength="12"
                autocomplete="new-password" style="width:100%;">
       </div>
-      <button type="submit" class="btn btn-blue">{{ t.change_password }}</button>
+      <button type="submit" class="btn btn-blue">{% if login_enabled %}{{ t.change_password }}{% else %}{{ t.turn_on_sign_in }}{% endif %}</button>
     </form>
     </div>
-    {% else %}
-    <p class="section-sub">{{ t.sign_in_is_turned_off_for }}</p>
-    {% endif %}
   </div>
 </div>
 {% endblock %}

@@ -210,6 +210,25 @@ ftp.debian.org
 dl.fedoraproject.org
 mirrors.fedoraproject.org
 
+# ---- Alpine Linux ----
+dl-cdn.alpinelinux.org
+dl.alpinelinux.org
+
+# ---- Proxmox ----
+download.proxmox.com
+
+# ---- Kali Linux ----
+http.kali.org
+kali.download
+
+# ---- Raspberry Pi OS ----
+archive.raspberrypi.com
+archive.raspberrypi.org
+downloads.raspberrypi.com
+
+# ---- CentOS Stream ----
+mirror.stream.centos.org
+
 # ---- Rocky Linux ----
 dl.rockylinux.org
 download.rockylinux.org
