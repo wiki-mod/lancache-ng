@@ -475,7 +475,7 @@ async fn dashboard(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page
     // What: the form label names the largest size.
     // Why: DoMe 07.11.: free space was not visible.
     // From: Issue #1069 | PR #1991
-    if let Ok(room) = cache_reachable(&s, max) {
+    if let Ok(room) = cache_reachable(&s, max, used) {
         ctx.insert("cache_max_gib", &(room >> 30).to_string());
     }
     app.page("dashboard.html", ctx, &csrf)
@@ -625,7 +625,11 @@ async fn save(
     Form(form): Form<Fields>,
 ) -> Page {
     csrf.check(&form)?;
-    cache_room(&app.settings(), &form)?;
+    cache_room(
+        &app.settings(),
+        &form,
+        app.cache_used.load(Ordering::Relaxed),
+    )?;
     if let Some(d) = form.get("DHCP_DOMAIN")
         && !lancache_ng::dns::is_dns_name(d, false, false)
     {
@@ -2929,20 +2933,28 @@ fn gib_bytes(text: &str) -> Result<u64, String> {
 // What: largest cache size the disk allows, in bytes.
 // Why: the form shows it; the save check enforces it.
 // From: Issue #1069 | PR #1991
-fn cache_reachable(s: &Settings, old: u64) -> Result<u64, String> {
+fn cache_reachable(s: &Settings, old: u64, cached: u64) -> Result<u64, String> {
     // What: the cache volume as the ui mounts it.
     // Why: live test 05.11.: NGINX_CACHE_DIR is proxy-only.
     // From: Issue #1069 | PR #1980
     let dir = s.text("CACHE_DIR")?;
     let sp = fs::space(Path::new(&dir)).map_err(|e| format!("{dir}: {e}"))?;
+    // What: measured cache bytes; disk use only as fallback.
+    // Why: 249 showed 60 GiB; the disk holds OS files too.
+    // From: Issue #1069 | PR #1991
     let used = sp.total.saturating_sub(sp.free);
-    Ok(sp.free.saturating_add(used.min(old)))
+    let held = if cached == u64::MAX {
+        used.min(old)
+    } else {
+        cached
+    };
+    Ok(sp.free.saturating_add(held))
 }
 
 // What: refuse a bigger cache without room.
 // Why: growth must fit the free disk space.
 // From: Issue #1069
-fn cache_room(s: &Settings, form: &Fields) -> Result<(), Fail> {
+fn cache_room(s: &Settings, form: &Fields, cached: u64) -> Result<(), Fail> {
     let Some(wanted) = form.get("CACHE_MAX_GB") else {
         return Ok(());
     };
@@ -2951,7 +2963,7 @@ fn cache_room(s: &Settings, form: &Fields) -> Result<(), Fail> {
     if new <= old {
         return Ok(());
     }
-    let reachable = cache_reachable(s, old)?;
+    let reachable = cache_reachable(s, old, cached)?;
     if new > reachable {
         let room = human::bytes(reachable);
         return Err(bad_request(
