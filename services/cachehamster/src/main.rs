@@ -1464,7 +1464,7 @@ fn chunks_of(zipped: &[u8]) -> Result<Vec<(String, u64)>, String> {
         for chunk in pb_all(&pb_read(mapping)?, 6) {
             let c = pb_read(chunk)?;
             if let Some(sha) = pb_all(&c, 1).next() {
-                // What: compressed size, else the plain size.
+                // What: packed size, else the plain size.
                 // Why: the CDN sends chunks compressed.
                 let n = pb_int(&c, 5).or_else(|| pb_int(&c, 4)).unwrap_or(0);
                 ids.push((hex::encode(sha), n));
