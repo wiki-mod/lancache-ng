@@ -54,7 +54,7 @@
       <tr><th>{{ t.date_and_time }}</th><th>Name</th><th>{{ t.what }}</th><th>{{ t.when }}</th><th>{{ t.state }}</th><th>{{ t.progress }}</th><th></th></tr>
       {% for j in hamster.jobs | reverse %}{% if panel == "history" or loop.index <= 3 %}
       <tr{% if j.state.state == "running" or (j.state.state == "waiting" and j.when.kind == "now") %} data-busy="1"{% endif %}>
-        <td style="white-space:nowrap;">{% if j.history | length > 0 %}{% set last = j.history | last %}<span data-unix="{{ last.at }}"></span>{% endif %}</td>
+        <td style="white-space:nowrap;">{% if j.history | length > 0 %}{% set ev = j.history | last %}<span data-unix="{{ ev.at }}"></span>{% endif %}</td>
         <td>{{ j.name }}</td>
         <td>{% if j.target.kind == "steam_app" %}{{ t.steam_app }} {{ j.target.value }}{% else %}{{ j.target.value | length }} {{ t.addresses }}{% endif %}</td>
         <td>{% if j.when.kind == "at" %}<span data-unix="{{ j.when.at }}"></span>{% elif j.when.kind == "later" %}{{ t.by_hand_press_start }}{% else %}{{ t.now }}{% endif %}</td>
