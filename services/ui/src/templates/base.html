@@ -864,7 +864,7 @@
     <div class="nav-group-label">{{ t.settings_2 }}</div>
     {{ <nav_link href={pages.domains} label="DNS" active={active_page == "domains"} glyph="⌘"/> }}
     {{ <nav_link href={pages.dhcp} label="DHCP" active={active_page == "dhcp"} glyph="⇄"/> }}
-    <a href="{{ pages.logs | safe }}#syslog" class="nav-item"><span class="nav-dot"></span><span class="nav-icon">☍</span> Syslog</a>
+    <a href="{{ pages.logs | safe }}" class="nav-item"><span class="nav-dot"></span><span class="nav-icon">☍</span> Syslog</a>
     {{ <nav_link href={pages.setup} label={t.general} active={active_page == "setup"} glyph="◐"/> }}
 
     <div class="dock-footer">
@@ -1169,7 +1169,13 @@
           const menu = document.createElement('details');
           menu.className = 'beam-menu beam-name';
           menu.open = openMenu === svc.name;
+          // What: opening one service menu closes the others.
+          // Why: DoMe 07.11.: menus must not overlap.
+          // From: Issue #1683 | PR #1991
           menu.addEventListener('toggle', function () {
+            if (menu.open) {
+              document.querySelectorAll('details.beam-menu[open]').forEach(function (m) { if (m !== menu) { m.open = false; } });
+            }
             if (menu.open) { openMenu = svc.name; } else if (openMenu === svc.name) { openMenu = ''; }
           });
           // What: the container name opens its programs.
@@ -1225,6 +1231,14 @@
         }
         return wrap;
       }
+      // What: click outside or Escape closes service menus.
+      // Why: DoMe 07.11.: at most one menu, easy to close.
+      // From: Issue #1683 | PR #1991
+      const closeMenus = function (keep) {
+        document.querySelectorAll('details.beam-menu[open]').forEach(function (m) { if (m !== keep) { m.open = false; } });
+      };
+      document.addEventListener('click', function (e) { closeMenus(e.target.closest('details.beam-menu')); });
+      document.addEventListener('keydown', function (e) { if (e.key === 'Escape') { closeMenus(null); } });
       // What: rebuilds the beambar from one status update
       // Why: unavailable and stale states own their text
       // From: Issue #1683 | PR #1912
