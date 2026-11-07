@@ -3724,7 +3724,14 @@ ci_cmd_psl() {
     _ci_run "[CI-ERROR-CACHE-0032]" "dir=\"${dir}\" reason=\"PSL dir not made\"" mkdir -p "${dir}" || return 2
     case "${mode}" in
         restore)
-            _ci_gha_cache_get psl-latest psl- "${ver}" "${dir}" || rc=$?
+            # What: no cache runtime in the job is a miss.
+            # Why: master nightly validate lacks the export.
+            # From: Issue #1683 | PR #1984
+            if [ -z "${ACTIONS_RESULTS_URL:-}" ] || [ -z "${ACTIONS_RUNTIME_TOKEN:-}" ]; then
+                rc=1
+            else
+                _ci_gha_cache_get psl-latest psl- "${ver}" "${dir}" || rc=$?
+            fi
             case "${rc}" in
                 0) ci_log "[CI-INFO-CACHE-0033]" "file=\"${name}\" reason=\"PSL restored from the nightly cache\"" ;;
                 # What: a miss loads from the source.
@@ -14012,6 +14019,12 @@ ci_cmd_validate() {
     local cand shared
     ci_group "validate: host tools and stack candidate"
     _ci_validate_host_tools || return 2
+    # What: the PSL is loaded here when a job left it out.
+    # Why: dns and proxy need it (run 42415183542).
+    # From: Issue #1683 | PR #1984
+    if [ ! -s "${CI_REPO_ROOT:-.}/$(_ci_runtime_default NGINX_PSL_REPO_DIR)/$(_ci_runtime_default NGINX_PSL_FILE)" ]; then
+        ci_cmd_psl restore || return 2
+    fi
     shared="$(_ci_validate_shared_dir)" || return 2
     printf 'validate shared_dir=%s\n' "${shared}"
     if ! cand="$(_ci_stack_candidate)"; then
