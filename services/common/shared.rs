@@ -2852,8 +2852,20 @@ pub mod dnsmasq_conf {
     pub fn render(s: &Settings, mode: Mode) -> Result<String, String> {
         let mut c = base(s)?;
         if mode == Mode::DnsmasqRelay {
-            let local = s.text("DHCP_RELAY_LOCAL_ADDR")?;
-            let upstream = s.text("UPSTREAM_DHCP_IP")?;
+            // What: empty relay address uses this host's IP.
+            // Why: DoMe 07.11.: every mode switch in one click.
+            // From: Issue #1683 | PR #1985
+            let local = Some(s.text("DHCP_RELAY_LOCAL_ADDR").unwrap_or_default())
+                .filter(|v| !v.is_empty())
+                .or_else(|| {
+                    crate::recursor_conf::own_ips(s)
+                        .into_iter()
+                        .find(|ip| !ip.starts_with("127."))
+                })
+                .ok_or("DHCP-Relay: DHCP_RELAY_LOCAL_ADDR is not set")?;
+            let upstream = s.text("UPSTREAM_DHCP_IP").map_err(|_| {
+                "DHCP-Relay needs the real DHCP server: UPSTREAM_DHCP_IP".to_string()
+            })?;
             c.add(&format!("dhcp-relay={local},{upstream}"))?;
             return Ok(c.0);
         }
