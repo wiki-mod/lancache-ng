@@ -1119,6 +1119,7 @@ const EMSG_SERVICE_RESPONSE: u32 = 147;
 const EMSG_SERVICE_CALL: u32 = 151;
 const EMSG_HEARTBEAT: u32 = 703;
 const EMSG_LOGON_RESPONSE: u32 = 751;
+const EMSG_LOGGED_OFF: u32 = 757;
 const EMSG_LOGON: u32 = 5514;
 const EMSG_PICS_INFO_REQUEST: u32 = 8903;
 const EMSG_PICS_INFO_RESPONSE: u32 = 8904;
@@ -1309,6 +1310,13 @@ impl Cm {
         loop {
             if let Some(pos) = self.queue.iter().position(&want) {
                 return self.queue.remove(pos).ok_or_else(|| "CM queue".to_string());
+            }
+            // What: name why Steam ended the session.
+            // Why: DoMe 07.11.: only "CM closed" was shown.
+            // From: Issue #871 | PR #1985
+            if let Some(off) = self.queue.iter().find(|f| f.emsg == EMSG_LOGGED_OFF) {
+                let r = pb_read(&off.body).ok().and_then(|b| pb_int(&b, 1));
+                return Err(format!("Steam logged the session off, eresult {r:?}"));
             }
             self.queue.clear();
             self.beat().await?;

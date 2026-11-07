@@ -210,9 +210,19 @@
       const back = function () { lib.disabled = false; lib.textContent = LC_T.load_owned_games; };
       api('library').then(function (v) {
         back();
+        try { sessionStorage.setItem('ch-games', JSON.stringify(v.games)); } catch (err) { reportError(err); }
+        showGames(v.games);
+      }).catch(function (e) { back(); window.LancacheUi.fail(e); });
+    });
+  }
+  // What: the owned games survive a reload.
+  // Why: DoMe 07.11.: Ctrl+F5 emptied the list.
+  // From: Issue #871 | PR #1985
+  function showGames(games) {
         const t = document.getElementById('hamster-games');
+        if (!t) { return; }
         t.innerHTML = '<tr><th>App ID</th><th>Name</th><th></th></tr>';
-        v.games.forEach(function (g) {
+        games.forEach(function (g) {
           const row = t.insertRow();
           row.insertCell().textContent = g.appid;
           row.insertCell().textContent = g.name;
@@ -239,8 +249,10 @@
           f.appendChild(b);
           row.insertCell().appendChild(f);
         });
-      }).catch(function (e) { back(); window.LancacheUi.fail(e); });
-    });
   }
+  try {
+    const kept = sessionStorage.getItem('ch-games');
+    if (kept) { showGames(JSON.parse(kept)); }
+  } catch (err) { reportError(err); }
 </script>
 {% endblock %}
