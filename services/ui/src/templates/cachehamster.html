@@ -118,7 +118,13 @@
 
   {% if hamster and hamster.logged_in %}
   <div class="subtab5-panel" data-ch-panel="library">
-    <div style="margin-bottom:12px;"><button type="button" class="btn" id="hamster-library">{{ t.load_owned_games }}</button></div>
+    <div class="field-row" style="max-width:none; margin-bottom:18px; align-items:flex-end;">
+      <div class="field" style="margin-bottom:0; flex:0 0 auto;"><button type="button" class="btn" id="hamster-library">{{ t.load_owned_games }}</button></div>
+      <div class="field" style="margin-bottom:0; flex:1;">
+        <label for="hamster-find">{{ t.search }}</label>
+        <input type="text" id="hamster-find" placeholder="{{ t.games_search }}">
+      </div>
+    </div>
     <table class="table" id="hamster-games"></table>
   </div>
   {% endif %}
@@ -234,6 +240,23 @@
       }).catch(function (e) { back(); window.LancacheUi.fail(e); });
     });
   }
+  // What: filter the games by name or app id.
+  // Why: DoMe 07.11.: a regex search was missing.
+  // From: Issue #871 | PR #1991
+  const find = document.getElementById('hamster-find');
+  function findGames() {
+    const t = document.getElementById('hamster-games');
+    if (!find || !t) { return; }
+    const q = find.value.trim();
+    let re = null;
+    try { re = new RegExp(q, 'i'); } catch (err) { re = null; }
+    find.style.borderColor = re ? '' : 'var(--danger, #e5484d)';
+    Array.prototype.slice.call(t.rows, 1).forEach(function (row) {
+      const text = row.cells[0].textContent + ' ' + row.cells[1].textContent;
+      row.hidden = q !== '' && !(re ? re.test(text) : text.toLowerCase().includes(q.toLowerCase()));
+    });
+  }
+  if (find) { find.addEventListener('input', findGames); }
   // What: cache use and evict per library game.
   // Why: DoMe 07.11.: empty one game, not everything.
   // From: Issue #871 | PR #1991
@@ -322,6 +345,7 @@
           row.insertCell().appendChild(f);
         });
         fillCache();
+        findGames();
   }
   try {
     const kept = sessionStorage.getItem('ch-games');

@@ -437,5 +437,6 @@
   "cache_none": "not in cache",
   "cache_evict": "Remove from cache",
   "cache_evict_sure": "Really remove?",
-  "cache_freed": "{x} freed"
+  "cache_freed": "{x} freed",
+  "games_search": "Name, app ID or regex"
 }
