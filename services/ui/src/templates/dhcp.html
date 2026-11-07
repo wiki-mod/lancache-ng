@@ -149,7 +149,6 @@
         </ul>
         <div class="grid gap-2 md:grid-cols-2 rounded border border-amber-500/30 bg-slate-900/50 p-3 text-xs">
           <div><span class="text-slate-400">{{ t.subnet_start }}</span> <span class="text-white">{{ dhcp_proxy_subnet_start }}</span></div>
-          <div><span class="text-slate-400">{{ t.upstream_dhcp_info_only }}</span> <span class="text-white">{{ dhcp_upstream_dhcp_ip }}</span></div>
           <div><span class="text-slate-400">DNS 1:</span> <span class="text-white">{{ dhcp_dns_primary }}</span></div>
           <div><span class="text-slate-400">DNS 2:</span> <span class="text-white">{{ dhcp_dns_secondary }}</span></div>
         </div>
@@ -157,7 +156,6 @@
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <div class="grid gap-3 md:grid-cols-2">
             {{ <text_field label={t.proxy_subnet_start} name="dhcp_subnet_start" value={dhcp_proxy_subnet_start} placeholder="10.0.0.0" required={true}/> }}
-            {{ <text_field label={t.upstream_dhcp_server_documentation_only} name="upstream_dhcp_ip" value={dhcp_upstream_dhcp_ip} placeholder="10.0.0.1" required={true} hint={t.hint_proxy_upstream}/> }}
             {{ <text_field label={t.dns_server_1} name="dhcp_dns_primary" value={dhcp_dns_primary} placeholder="10.0.0.10" required={true}/> }}
             {{ <text_field label={t.dns_server_2} name="dhcp_dns_secondary" value={dhcp_dns_secondary} placeholder="10.0.0.11"/> }}
             {{ <text_field label={t.listen_interface_optional} name="dhcp_proxy_interface" value={dhcp_proxy_interface} placeholder="eth0" hint={t.hint_proxy_interface}/> }}
