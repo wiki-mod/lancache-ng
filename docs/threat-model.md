@@ -26,20 +26,21 @@ framed against that assumption.
 
 ---
 
-## Open gaps found by the 2026-11-07 review
+## Gaps statically indicated by the 2026-11-07 review
 
-These are places where the code on `current_dev` does not do what this
-document used to state, or what `AGENTS.md` / `SECURITY.md` require. Each one
-was verified by reading the cited code; none was verified by running a stack.
-They are listed here and not described as mitigations. Fixing them is a code
-change, not a documentation change.
+These are places where the code on `current_dev` appears not to do what this
+document used to state, or what `AGENTS.md` requires. Each one is **statically
+indicated** (the cited code was read, callers, defaults and alternate paths
+were searched, no stack was started); by `AG-INT-001` none is a confirmed
+defect until it is reproduced. They are listed here and not described as
+mitigations. Fixing them is a code change that needs a maintainer decision
+(`AG-WF-027`), not a documentation change.
 
 | ID | Gap | Evidence (`current_dev` `3005b2b4`) | Threat |
 |---|---|---|---|
 | G1 | The Admin UI is not fail-closed. `setup.sh` and the compose file deliver `UI_AUTH_USER` and `UI_AUTH_PASSWORD_HASH`, but the UI reads `UI_USER` and `UI_PASSWORD_HASH`. With no hash the UI accepts every request and does not refuse to start. `AG-SEC-001` requires fail-closed. | `deploy/prod/docker-compose.yml` lines 343-344 and `setup.sh` (`set_env_key UI_AUTH_PASSWORD_HASH`); `services/ui/src/main.rs` `login_ok` (returns `true` for an empty hash) and `s.text("UI_PASSWORD_HASH")`; no Rust code reads `ALLOW_INSECURE_UI`; the message `Admin-UI authentication is required` exists only in docs | T3 |
 | G2 | The Kea Control Agent is reachable on all host interfaces (`dhcp` runs with `network_mode: host`) and its config has no `authentication` block; the UI client sends no credentials. The iptables fence of the old document no longer exists: `KEA_CTRL_ALLOW_FROM` and `KEA_CTRL_CHAIN` appear only in the SOT. | `.github/yaml/build-manifest.yml` (`KEA_CTRL_ADDRESS=@ANY_BIND_IP@`, `ANY_BIND_IP=0.0.0.0`); `services/common/shared.rs` `kea_conf::ctrl_agent`, `kea::Api`; no `iptables` call in `services/` or `setup.sh` | T12 |
 | G3 | `AG-OP-002` requires nginx to resolve upstream names with real resolvers, never with the local PowerDNS recursor, because project DNS can route proxied CDN hosts back to the proxy. `NGINX_UPSTREAM_RESOLVER` is rendered without a check that it is not a LanCache address; only `DNS_UPSTREAM_SERVERS` has such a guard. | `services/ui/nginx/nginx.conf` (`resolver ${NGINX_UPSTREAM_RESOLVER}`), `services/common/shared.rs` `recursor_conf::yaml` (the only "would loop" guard) | T1 |
-| G4 | `SECURITY.md` says only the `services` container mounts the Docker socket. The compose file also mounts it into `ui`. | `SECURITY.md` line 107; `deploy/prod/docker-compose.yml` lines 130 and 361 | T6 |
 
 ---
 
@@ -271,12 +272,17 @@ control of the UI is full control of the host.
 **Likelihood**: Low on a firewalled LAN; High if the UI port is exposed to an
 untrusted network · **Impact**: Critical
 
-**Required design** (`AG-SEC-001`): the `ui` fails closed and may restart-loop
-when neither `UI_AUTH_USER` with its password hash nor `ALLOW_INSECURE_UI=true`
-is configured.
+**Required design** (`AG-SEC-001`): the `ui` service MUST fail closed and MAY
+restart-loop when neither `UI_AUTH_USER` and `UI_AUTH_PASSWORD` nor
+`ALLOW_INSECURE_UI=true` is configured; a restarting UI logging `Admin-UI
+authentication is required` is expected security behavior; and
+`ALLOW_INSECURE_UI=true` remains a valid explicit operator choice for an
+intentionally unauthenticated UI, including trusted LAN deployments. (The setup
+flow generates `UI_AUTH_PASSWORD` and delivers only its Argon2id hash as
+`UI_AUTH_PASSWORD_HASH`.)
 
 **State in the code** (`services/ui/src/main.rs`, `current_dev` `3005b2b4`):
-- **The required fail-closed behaviour is not implemented (gap G1).**
+- **The required fail-closed behaviour is statically indicated as not implemented (gap G1).**
   `login_ok` accepts every request when `UI_PASSWORD_HASH` is empty, no start
   check refuses an empty hash, and no Rust code reads `ALLOW_INSECURE_UI`.
   `setup.sh` and the compose file deliver the credentials as `UI_AUTH_USER` /
@@ -391,8 +397,7 @@ sensitive) · **Impact**: Critical (full host compromise)
 
 **Residual risk**: High — both the UI (network-facing) and `services` hold a
 read-write socket mount; the risk is concentrated in the Admin UI, whose
-authentication has gap G1. `SECURITY.md` still says only `services` mounts the
-socket (gap G4).
+authentication has gap G1.
 
 ---
 
@@ -693,7 +698,7 @@ tagging each release, then update the top marker and the
    still have direct Docker socket access (T6), and whether Admin UI auth is
    still fail-closed by default (T3, `AG-SEC-001`). These have gone stale before.
 5. **Reconcile internal consistency** — the Conclusion and the risk tiers must
-   not contradict the individual threats, and every gap in "Open gaps" must
+   not contradict the individual threats, and every gap in "Gaps statically indicated" must
    either still be open in the code or be removed.
 6. **Update** the inventory "Last verified" cells, the top marker, and the
    review date.
@@ -719,10 +724,10 @@ every LAN device) for caching performance. The design goal is a fail-closed
 DDNS updates, and secondary registration should refuse to start or answer in an
 insecure/unauthenticated state unless the operator explicitly opts out.
 
-At the 2026-11-07 review that goal is met for the PowerDNS API key, DDNS
-updates (TSIG) and secondary registration, and **not met for the Admin UI
-login (G1) and the Kea Control Agent (G2)**; see "Open gaps found by the
-2026-11-07 review". Both the `ui` and `services` containers mount the Docker
+At the 2026-11-07 review the code read shows that goal met for the PowerDNS
+API key, DDNS updates (TSIG) and secondary registration, and **statically
+indicates it is not met for the Admin UI login (G1) and the Kea Control Agent
+(G2)**; see "Gaps statically indicated by the 2026-11-07 review". Both the `ui` and `services` containers mount the Docker
 socket read-write (T6), so the Admin UI is the most sensitive network-facing
 component. Scheduled automatic updates run on the host via `systemd` or an
 OpenRC service, not as a container, so they add no socket-access surface.

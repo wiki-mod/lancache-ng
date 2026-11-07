@@ -102,15 +102,15 @@ This section documents intentional security design decisions and known tradeoffs
 
 **What is not spoofed**: Web browsers, corporate networks, banking, or other general-purpose traffic.
 
-### 3. Docker Socket Mount in the services Container
+### 3. Docker Socket Mount in the services and ui Containers
 
-**Design**: The `services` container mounts the Docker daemon socket (SOT `DOCKER_SOCKET`, read-write, no socket proxy) for its watchdog process, the only Docker API client (`DockerApi` in `services/common/shared.rs`); it lists the stack's containers, inspects them and restarts a failing one. The Admin UI container has no socket; it writes the desired state (`DESIRED_STATE_FILE`) that the supervisor inside the supervised containers reads to run or stop its own processes, with no Docker call.
+**Design**: Two containers mount the Docker daemon socket (SOT `DOCKER_SOCKET`, read-write, no socket proxy): `services` for its watchdog, which lists the stack's containers, inspects them and restarts a failing one, and `ui`, which wakes owner containers after it writes configs, reads container state and statistics, and runs commands in containers (`docker` module in `services/common/shared.rs`, `deploy/prod/docker-compose.yml`).
 
-**Known Risk**: The Docker socket is a privileged interface — any process with access can run arbitrary containers with full host privileges. The mount is visible to the whole `services` container (watchdog, syslog-ng, chronyd, netdata, retention), so a compromise of that container is a host compromise.
+**Known Risk**: The Docker socket is a privileged interface — any process with access can run arbitrary containers with full host privileges. A compromise of the `services` container or of the `ui` container is a host compromise. The Admin UI is network-facing, so its authentication is part of this risk.
 
 **Mitigation**:
 - The `services` container drops all capabilities except the list in `deploy/prod/docker-compose.yml`
-- The Admin UI cannot reach Docker; enable its authentication before production deployment
+- Enable the Admin UI authentication before production deployment (see section 4)
 - Configure Docker rootless mode on the host if available
 - Restrict network access to the Admin UI and the `services` ports (do not expose them to untrusted networks)
 
@@ -118,7 +118,7 @@ This section documents intentional security design decisions and known tradeoffs
 
 **Design**: The setup flow now requires either UI credentials or an explicit `ALLOW_INSECURE_UI=true` opt-in before the Admin UI can start without authentication.
 
-**Status**: Unauthenticated access is still possible, but only after an explicit operator decision.
+**Status**: Unauthenticated access is still possible, but only after an explicit operator decision. The check lives in the setup flow; the `ui` process itself is not shown to refuse an empty password hash, see `docs/threat-model.md` gap G1 (statically indicated, not reproduced).
 
 **Required before production**:
 - Configure authentication for the Admin UI
@@ -126,19 +126,7 @@ This section documents intentional security design decisions and known tradeoffs
 - Restrict Admin UI access to trusted network segments
 - Do not expose the Admin UI directly to the internet
 
-### 5. NATS Event Bus (Port 4222) Exposed
-
-**Design**: NATS broker is used for inter-service communication and is exposed on port 4222.
-
-**Risk**: If exposed to the internet, untrusted clients could publish or subscribe to internal events.
-
-**Mitigation**:
-- NATS should only be accessible from within the LAN (not internet-facing)
-- Configure firewall rules to restrict port 4222 to LAN traffic only
-- Enable NATS authentication (username/password or client certificates) in production
-- Use network policies (e.g., `UFW`, `iptables`) to limit access
-
-### 6. Upstream TLS Verification in nginx
+### 5. Upstream TLS Verification in nginx
 
 **Design**: nginx fetches the real CDN with the scheme the client used: HTTP requests over HTTP, HTTPS-mode requests over HTTPS with the upstream certificate chain validated (`proxy_ssl_verify on`).
 
@@ -170,8 +158,8 @@ different handling:
 
 **Runtime/deployment secrets** (generated for and used by a running
 lancache-ng install -- the local CA key, `PDNS_API_KEY`, `KEA_CTRL_TOKEN`,
-`DDNS_TSIG_KEY`, the four NATS role passwords, `UI_AUTH_PASSWORD`,
-`SECONDARY_REGISTRATION_TOKEN`, and per-secondary NATS credentials):
+`DDNS_TSIG_KEY`, `SNMP_COMMUNITY`, `UI_AUTH_PASSWORD` and
+`SECONDARY_REGISTRATION_TOKEN`):
 - **Storing**: written to the operator's own `.env` file (gitignored) or, for
   values shared across containers, a shared-secrets Docker volume (see
   `docs/threat-model.md` T4/T5/T12 for the exact mechanism per secret).
@@ -186,8 +174,9 @@ lancache-ng install -- the local CA key, `PDNS_API_KEY`, `KEA_CTRL_TOKEN`,
   existing non-placeholder operator-supplied value is always preserved
   (`AGENTS.md` `AG-OP-006`/`AG-OP-009`). `setup.sh update`/`setup.sh
   auto-update` never rotates an already-set secret.
-- **Rotating**: the Admin UI exposes explicit rotation for
-  per-secondary NATS credentials (`POST /api/secondary/{name}/rotate-token`);
+- **Rotating**: the Admin UI exposes explicit rotation for the secondary
+  registration token (`/api/secondary/{name}/rotate`) and renews the TSIG key
+  when a secondary is removed (`/api/secondary/{name}/remove`);
   other runtime secrets are rotated by an operator manually setting a new
   value and running `setup.sh update` (which does not overwrite an existing
   non-placeholder value, so the operator must intentionally replace it).
@@ -227,15 +216,13 @@ Static Application Security Testing (SAST) remediation policy.
   `.github/workflows/nightly.yml` runs it once a day against new advisory
   data. In `ci.yml` it feeds the `result` job, the always-present aggregate
   check meant for branch protection. **`current_dev`, where pull requests
-  actually land, had no branch protection rule** when last checked (via
-  `gh api repos/wiki-mod/lancache-ng/branches/current_dev/protection`, which
-  returned 404 "Branch not protected"). In that state a failing
-  `cargo-audit` result is clearly visible as a red check on a `current_dev`
-  PR, but nothing in GitHub's own repository configuration stops that PR
-  from being merged anyway. Closing this gap requires enabling branch
-  protection on `current_dev` with `result` as a required status check -- a
-  repository-settings change for the maintainer to make, tracked as a Level 3
-  follow-up in issue #1130.
+  actually land, is protected** (checked 2026-11-07 with
+  `gh api repos/wiki-mod/lancache-ng/branches/current_dev/protection` and
+  `gh api repos/wiki-mod/lancache-ng/rulesets`): `result` is a required status
+  check, enforced for non-administrators (`enforce_admins` is false), and an
+  active ruleset requires a pull request before merging. A failing
+  `cargo-audit` result therefore fails `result` and blocks a `current_dev`
+  pull request for non-administrators.
 
 ### SAST (static analysis) findings
 
@@ -254,15 +241,13 @@ Static Application Security Testing (SAST) remediation policy.
   request and push (`.github/workflows/codeql.yml`'s `branches:` list
   explicitly includes `current_dev`, added by issue #709 specifically so
   CodeQL keeps scanning the branch real work actually lands on), and results
-  are visible as GitHub code scanning alerts. Two things still need to happen
-  before a CodeQL finding actually blocks a merge, both tracked as Level 3
-  follow-ups in issue #1130: (1) the CodeQL analysis result is not yet fed
-  into the `result` gate (or an equivalent check) the way
-  `cargo-audit` is, and (2) as described just above, `current_dev` has no
-  branch protection at all today, so even a check that is technically
-  required would not yet be enforced there. Until both land, enforcement of
-  this threshold relies on manual review of the repository's Security tab
-  before each release.
+  are visible as GitHub code scanning alerts. Before a CodeQL finding
+  actually blocks a merge, the CodeQL analysis result has to be fed into the
+  `result` gate (or an equivalent required check) the way `cargo-audit` is;
+  this was tracked as a Level 3 follow-up in issue #1130 and was not
+  re-checked in the 2026-11-07 review. Until then, enforcement of this
+  threshold relies on manual review of the repository's Security tab before
+  each release.
 
 ## Deployment Scope
 
@@ -279,9 +264,8 @@ Static Application Security Testing (SAST) remediation policy.
 1. **Network Isolation**: Run on a trusted, isolated LAN; do not expose to the internet without additional security.
 2. **Access Control**: Restrict Admin UI access to authorized users and network segments.
 3. **Firewall Rules**: Use network policies to limit service access (DNS, cache, Admin UI) to trusted IPs.
-4. **NATS Authentication**: Enable authentication in production deployments.
-5. **Logging and Monitoring**: Regularly review logs for suspicious activity.
-6. **Regular Updates**: Keep the software and dependencies up to date.
+4. **Logging and Monitoring**: Regularly review logs for suspicious activity.
+5. **Regular Updates**: Keep the software and dependencies up to date.
 
 ## Responsible Disclosure
 

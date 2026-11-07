@@ -11,7 +11,7 @@ implementation at the commit named above. It is a function-level companion to
 documentation. LanCache-NG runs as exactly five containers (`services`,
 `proxy`, `dns`, `dhcp`, `ui`); the programs of each container are listed in
 `docs/architecture-ng.md`. Security findings that this review made are tracked
-in `docs/threat-model.md` ("Open gaps") and are only referenced here.
+in `docs/threat-model.md` ("Gaps statically indicated") and are only referenced here.
 
 Historical audit notes, already-resolved findings, temporary investigation
 state, and old implementation snapshots are intentionally not retained here.
@@ -711,7 +711,7 @@ Service health
   -> status and controlled recovery
 ```
 
-### Future prefill
+### Prefill
 
 ```text
 Operator
@@ -724,7 +724,9 @@ Operator
 CacheHamster receives and discards the response body.
 ```
 
-The Steam content-resolution portion of this flow is not implemented yet.
+The Steam content-resolution portion of this flow exists in the code
+(`app_info`, `request_code`, `chunks_of`, `app_urls`); it was not run in the
+2026-11-07 review.
 
 ## Capability boundaries
 
