@@ -124,7 +124,7 @@
     </section>
 
     {# What: the LAN domain all local names end in
-       Why: DoMe 05.11.: own domain, next to its records
+       Why: own section next to the LAN records
        From: Issue #1683 | PR #1980 #}
     <section data-dns-panel="lan" class="hidden" style="margin-bottom:22px;">
       <div class="section-title" style="margin-top:0;">{{ t.lan_domain }}</div>
@@ -172,7 +172,7 @@
           <input type="text" id="lan-content" name="content" placeholder="192.168.1.50" required data-lan-record-content>
         </div>
         {# What: also add the PTR for type A
-           Why: DoMe 31.10.: PTR from the LAN entries
+           Why: one step adds A and its PTR
            From: Issue #1683 | PR #1980 #}
         <label class="field" style="margin-bottom:0; flex-direction:row; gap:6px; align-items:center;" data-lan-ptr>
           <input type="checkbox" name="ptr" value="1" checked> {{ t.lan_also_ptr }}
@@ -307,7 +307,7 @@
         </div>
       </form>
       {# What: switch for the DNS query log
-         Why: DoMe 31.10.: see DNS queries live
+         Why: the admin follows DNS queries in the log
          From: Issue #1683 | PR #1980 #}
       <form action="{{ routes.query_log | safe }}" method="post">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -325,7 +325,7 @@
     </section>
 
     {# What: external DNS servers and domains (SOT keys)
-       Why: live 05.11.: it was settable only by setup.sh
+       Why: the UI sets them, not only setup.sh
        From: Issue #1683 | PR #1980 #}
     <section data-dns-panel="settings" class="hidden">
       <div class="section-title">{{ t.upstream_dns }}</div>
@@ -490,7 +490,7 @@
           <p class="field-hint">{{ t.https_ip_hint }}</p>
         </div>{% else %}<p class="field-hint">{{ t.https_off_hint }}</p>{% endif %}
         <div class="copy-row" style="max-width:none; align-items:flex-start; font-size:12.5px;">
-          <code id="install-cmd" style="white-space:pre-wrap; overflow-x:visible;">bash &lt;(curl -fsSL {{ setup_script_url }}) secondary \
+          <code id="install-cmd" style="white-space:pre-wrap; overflow-x:visible;">{% if setup_channel %}LANCACHE_IMAGE_CHANNEL={{ setup_channel }} {% endif %}bash &lt;(curl -fsSL {{ setup_script_url }}) secondary \
   --primary {{ primary_url }} \
   --token {{ registration_token }} \
   --name <span id="secondary-name-out">NAME</span> \

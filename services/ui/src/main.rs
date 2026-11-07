@@ -557,7 +557,7 @@ async fn commit(app: &App, form: Fields) -> Result<(), String> {
     config::store(&path, &old, &updates)?;
     let new = Settings::load(&process_env, Some(&path))?;
     // What: a value that cannot render is not kept.
-    // Why: live 05.11.: a looping upstream was saved.
+    // Why: a looping upstream must not be saved.
     // From: Issue #1683 | PR #1980
     let check = secrets(&new).and_then(|sec| render::all(&new, &sec).map_err(|e| e.join("; ")));
     if let Err(e) = check {
@@ -685,7 +685,7 @@ async fn logs(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     let programs = s.list("SYSLOG_PROGRAMS");
     let muted = s.list("SYSLOG_MUTED");
     // What: every folder the store holds, plus the list.
-    // Why: DoMe 05.11.: page empty; the store names differ.
+    // Why: the store folder names differ from the list.
     // From: Issue #1683 | PR #1980
     let mut names = programs.clone();
     if let Ok(dirs) = std::fs::read_dir(&root) {
@@ -948,13 +948,17 @@ async fn domains(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     // What: setup.sh from the branch of this channel.
     // Why: a nightly primary must not hand out master.
     // From: Issue #1683 | PR #1980
-    let nightly = process_env("LANCACHE_IMAGE_CHANNEL").as_deref() == Some("nightly");
-    let url_key = if nightly {
+    let channel = process_env("LANCACHE_IMAGE_CHANNEL").unwrap_or_default();
+    let url_key = if channel == "nightly" {
         "SETUP_SCRIPT_URL_NIGHTLY"
     } else {
         "SETUP_SCRIPT_URL"
     };
     ctx.insert("setup_script_url", &s.text(url_key)?);
+    // What: the copied command names this channel.
+    // Why: setup.sh then reads files from its ref.
+    // From: Issue #1683 | PR #1984
+    ctx.insert("setup_channel", &channel);
     ctx.insert("primary_ip", &s.text("IP_HTTP")?);
     // What: HTTPS proxy IP when it is a second LAN IP.
     // Why: the copied command then sets the HTTPS DNS bind.
@@ -1112,7 +1116,7 @@ async fn record(
     snapshot(s, &api, &zone).await?;
     flush_zone(s, &zone).await?;
     // What: PTR for each A address when ticked.
-    // Why: DoMe 31.10.: PTR from the LAN entries.
+    // Why: LAN A records get their PTR in one step.
     // From: Issue #1683 | PR #1980
     if add && kind == "A" && get("ptr") == "1" {
         let host = vec![format!("{}.", name.trim_end_matches('.'))];
@@ -1379,7 +1383,7 @@ async fn secondary_health(s: &Settings, address: &str) -> Value {
 async fn flush_on_transfer(app: Arc<App>) {
     let mut seen: BTreeMap<String, u32> = BTreeMap::new();
     // What: an error only after the grace time.
-    // Why: DoMe 05.11.: a planned dns restart logged one.
+    // Why: a planned dns restart logs no error.
     // From: Issue #1683 | PR #1980
     let mut down: Option<std::time::Instant> = None;
     let mut logged = false;
@@ -1839,7 +1843,7 @@ async fn stats(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     }
 
     // What: one tab per source, with its origin.
-    // Why: DoMe 05.11.: no guessing where values come from.
+    // Why: each value names where it comes from.
     // From: Issue #1683 | PR #1980
     let step = s.uint("STATS_STEP").unwrap_or_default();
     let snmp = s.text("STATS_SNMP_TARGET").unwrap_or_default();
@@ -2064,7 +2068,7 @@ async fn service_values(app: &App, s: &Settings, want: &[String]) -> BTreeMap<St
 }
 
 // What: program values into RRD each step.
-// Why: DoMe 01.11.: PowerDNS, nginx, Kea, chrony.
+// Why: PowerDNS, nginx, Kea and chrony values.
 // From: Issue #1683 | PR #1980
 async fn sample_services(app: &App, s: &Settings) -> Vec<String> {
     let all = match lancache_ng::rrd::service_graphs(s) {
@@ -2126,7 +2130,7 @@ async fn sampler(app: Arc<App>) {
 }
 
 // What: in mode off a running dhcp is stopped again.
-// Why: live 05.11.: compose up started it after the ui.
+// Why: compose up can start dhcp after the ui.
 // From: Issue #1683 | PR #1980
 async fn dhcp_stays_off(app: &App, s: &Settings) -> Result<(), String> {
     if s.text("DHCP_MODE")? != "off" {
@@ -2787,7 +2791,7 @@ fn secrets(s: &Settings) -> Result<render::Secrets, String> {
 }
 
 // What: bytes of a whole GiB number.
-// Why: DoMe 05.11.: cache sizes are whole GiB only.
+// Why: cache sizes are whole GiB only.
 // From: Issue #1683 | PR #1980
 fn gib_bytes(text: &str) -> Result<u64, String> {
     let n: u64 = text

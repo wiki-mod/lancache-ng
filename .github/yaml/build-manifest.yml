@@ -81,7 +81,7 @@ services:
       - chronyd=/usr/sbin/chronyd,-d,-f,@CHRONY_CONF_FILE@
       - snmpd=/usr/sbin/snmpd,-f,-C,-c,@SNMPD_CONF_FILE@
     # What: NTP_ENABLED read from the ui file; 0 = idle.
-    # Why: live 05.11.: UI switch unread; ERROR line at 0.
+    # Why: chronyd idles at 0 and logs no ERROR line.
     # From: Issue #1683 | PR #1980
     process_pre:
       - 'chronyd=x="${NTP_ENABLED:-1}"; f=@UI_SETTINGS_FILE@; v=""; if [ -r "$f" ]; then v="$(sed -n "s/^NTP_ENABLED=//p" "$f")"; fi; if [ -n "$v" ]; then x="${v##*[[:space:]]}"; fi; if [ "$x" = 0 -o "$x" = false ]; then einfo "NTP_ENABLED=$x: chronyd off"; command=/bin/sleep; command_args=2147483647; return 0; fi; chown chrony:chrony @NTP_STATE_DIR@'
@@ -392,10 +392,6 @@ base_images:
   # Why: §35 cache export needs a docker-container builder.
   # From: Issue #1683 | PR #1912
   buildkit: "mirror.gcr.io/moby/buildkit:latest"
-  # What: git image of the arm64 checkout step.
-  # Why: actions/checkout needs x64 node in Alpine.
-  # From: Issue #1683 | PR #1858
-  git: "mirror.gcr.io/alpine/git:latest"
   # What: official Trivy image; ci.sh copies trivy out.
   # Why: AG-VAL-017 external; no GitHub API read limit.
   # From: Issue #1683 | PR #1858
@@ -413,6 +409,8 @@ github_actions:
     uses: anthropics/claude-code-action
   docker-login:
     uses: docker/login-action
+  github-script:
+    uses: actions/github-script
 
 # What: the runtime group id the containers share.
 # Why: ci.sh bakes it into each image; one owner.
@@ -518,7 +516,7 @@ runtime:
     - CACHEHAMSTER_CONCURRENCY=8
     - CACHEHAMSTER_THROUGHPUT_INTERVAL=10
     # What: prefill limit in Mbit/s (0 = none), window.
-    # Why: DoMe 26.10. (Fund 92): bandwidth, from-until.
+    # Why: the admin sets prefill bandwidth and hours.
     # From: Issue #871 | PR #1980
     - CACHEHAMSTER_MAX_MBIT=0
     - CACHEHAMSTER_WINDOW=00:00-24:00
@@ -644,7 +642,7 @@ runtime:
     - SETUP_HEALTH_BASELINE_INTERVAL_SECONDS=2
     - SETUP_DNS_PROBE_NAME=content1.steampowered.com
     # What: repo files a secondary keeps in its compose dir.
-    # Why: Fund 148: its compose mounts them from its dir.
+    # Why: its compose mounts them from its dir.
     # From: Issue #1683 | PR #1858
     - SETUP_SECONDARY_REPO_FILES=services/dns/cdn-domains.txt services/dns/filter-aaaa.lua
     # What: host service paths for systemd and OpenRC.
@@ -659,7 +657,7 @@ runtime:
     # From: Issue #1918 | PR #1858
     - DNS_LOCAL_REVERSE_ZONES=1
     # What: 1 = recursor logs every DNS query.
-    # Why: DoMe 31.10.: see DNS queries live.
+    # Why: the admin can follow DNS queries in the log.
     # From: Issue #1683 | PR #1980
     - DNS_QUERY_LOG=0
     # What: private reverse zones the stack serves.
@@ -826,6 +824,14 @@ runtime:
     - NGINX_HEALTHZ_FILE=lancache-healthz-body.txt
     - NGINX_HEALTHZ_BODY=ok
     - NGINX_PSL_FILE=public_suffix_list.dat
+    - NGINX_PSL_URL=https://publicsuffix.org/list/public_suffix_list.dat
+    # What: PSL place in the checkout, checks, backups.
+    # Why: setup.sh loads it; a broken list never lands.
+    # From: Issue #1683 | PR #1984
+    - NGINX_PSL_REPO_DIR=services/ui/nginx
+    - NGINX_PSL_MARKERS===BEGIN ICANN DOMAINS===,===END ICANN DOMAINS===,===BEGIN PRIVATE DOMAINS===,===END PRIVATE DOMAINS===
+    - NGINX_PSL_BACKUP_SUBDIR=psl
+    - NGINX_PSL_BACKUP_KEEP=3
     - NGINX_DISCARD_PORT=9
     - NGINX_REFUSE_RELAY_PORT=9447
     - NGINX_STREAM_TARGETS_FILE=stream.d/00-stream-targets.conf
@@ -1467,11 +1473,16 @@ platform_arch:
   # From: Issue #1683 | PR #1912
   amd64:
     apk: x86_64
+    # What: true = host job, build-tools by docker run.
+    # Why: JS actions run in Alpine on x64 only.
+    # From: Issue #1683 | PR #1984
+    native: false
     runner: ubuntu-latest
     runner_self_hosted: lancache-heavy
     rust_target: x86_64-alpine-linux-musl
   arm64:
     apk: aarch64
+    native: true
     runner: ubuntu-24.04-arm
     runner_self_hosted: ubuntu-24.04-arm
     rust_target: aarch64-alpine-linux-musl
@@ -1861,7 +1872,7 @@ ci_variables:
   # From: Issue #1683 | PR #1912
   CI_CARGO_HOME: /root/.cargo
   # What: mount point of the build context in rust-build.
-  # Why: Fund 147: the tree is mounted, not copied.
+  # Why: the tree is mounted, not copied.
   # From: Issue #1683 | PR #1858
   CI_RUST_SOURCE_DIR: /src
   # What: sccache dist toolchain cache size in bytes.
@@ -1872,10 +1883,6 @@ ci_variables:
   # Why: distcc, ccache and smoke read one compiler list.
   # From: Issue #1683 | PR #1858
   CI_TOOLCHAIN_COMPILERS: CC=cc GCC=gcc CXX=c++ GXX=g++
-  # What: kill timeout (s) of the GHA runtime export step.
-  # Why: AG-CI-016: every container command is bounded.
-  # From: Issue #1683 | PR #1858
-  CI_GHA_RUNTIME_EXPORT_TIMEOUT: 30
   # What: kill timeout (s) of a docker run/exec CI command.
   # Why: AG-CI-016 needs an unignorable kill timeout.
   # From: Issue #1683 | PR #1858
@@ -2063,10 +2070,18 @@ ci_variables:
   # Why: §73: analyzed content is NOOP on a later PR run.
   # From: Issue #1683 | PR #1858
   CI_CODEQL_REF: refs/ci/codeql
+  # What: page size of GitHub REST and GraphQL lists.
+  # Why: AG-CI-006; 100 is the API maximum; no cut list.
+  # From: Issue #1683 | PR #1984
+  CI_GH_PAGE_SIZE: 100
   # What: PR title lint mode (warn|block).
   # Why: AG-GH-018: the mode is a value, default warn.
   # From: Issue #1683 | PR #1858
   PR_TITLE_LINT_MODE: warn
+  # What: debug mode (true|false): log all raw output.
+  # Why: DoMe: raw output of every command must show.
+  # From: Issue #1683 | PR #1984
+  PROJECT_DEBUG_MODE: "true"
 
 # What: runner host values: paths, ages, units, packages.
 # Why: AG-CI-016: ci.sh runner-host reads them; no copy.
@@ -2348,14 +2363,14 @@ build_variables:
   rust: [CARGO_BUILD_JOBS, PROJECT_CARGO_LTO, PROJECT_CARGO_CODEGENUNIT, CI_TOOLCHAIN_COMPILERS, CI_CACHE_PREFIX, CI_CARGO_HOME, CI_RUST_SOURCE_DIR]
 
 # What: repo variables each ci.sh workflow passes by name.
-# Why: Fund 94: toJSON(vars) put LAN IPs in public logs.
+# Why: toJSON(vars) would show LAN IPs in public logs.
 # From: Issue #1683 | PR #1858
 repo_variables:
   # What: the switch that gates the self_hosted values.
   # Why: GitHub-hosted runners have no LAN route.
   # From: Issue #1683 | PR #1858
   switch: PROJECT_SELFHOSTED_RUNNER_USAGE_CI
-  plain: [CARGO_BUILD_JOBS, PROJECT_CARGO_LTO, PROJECT_CARGO_CODEGENUNIT, PROJECT_NIGHTLY_REF, PROJECT_SELFHOSTED_RUNNER_USAGE_CI, SCCACHE_REDIS_MODE, CI_RUST_VALIDATION, PR_TITLE_LINT_MODE]
+  plain: [CARGO_BUILD_JOBS, PROJECT_CARGO_LTO, PROJECT_CARGO_CODEGENUNIT, PROJECT_NIGHTLY_REF, PROJECT_SELFHOSTED_RUNNER_USAGE_CI, SCCACHE_REDIS_MODE, CI_RUST_VALIDATION, PR_TITLE_LINT_MODE, PROJECT_DEBUG_MODE]
   # What: values with LAN addresses; set only self-hosted.
   # Why: a GitHub-hosted log must show no LAN address.
   # From: Issue #1683 | PR #1858
@@ -2377,7 +2392,11 @@ pr_policy:
   # From: Issue #1683 | PR #1858
   title_scopes_extra: [setup, ci, governance, docs, scripts, tests]
   project_number: 6
-  # What: PR-template heading close-linked-issues reads.
+  # What: PR milestone unless one closed issue has one.
+  # Why: AG-GH-008 wants a milestone when the PR opens.
+  # From: Issue #1683 | PR #1984
+  milestone_number: 11
+  # What: PR-template heading of the closing refs.
   # Why: the template heading is a contract, not a literal.
   # From: Issue #1683 | PR #1858
   linked_section: Linked Issues
@@ -2390,33 +2409,6 @@ pr_policy:
   # From: Issue #1683 | PR #1858
   check_exempt_authors:
     - dependabot[bot]
-  # What: welcome text for a first issue, one line per item
-  # Why: ci.sh welcome posts it; the text is data, not code
-  # From: Issue #1683 | PR #1858
-  welcome_issue:
-    - Thanks for opening your first issue in lancache-ng.
-    - ""
-    - "Please make sure the issue includes:"
-    - "- expected behavior"
-    - "- actual behavior"
-    - "- logs or reproduction steps"
-    - "- relevant configuration without secrets"
-    - ""
-    - Do not post private keys, tokens, passwords, personal data, or private infrastructure details.
-    - Security-sensitive reports should use the project's private security reporting channel.
-  # What: welcome text for a first PR, one line per item
-  # Why: same path as welcome_issue; data, not code
-  # From: Issue #1683 | PR #1858
-  welcome_pr:
-    - Thanks for opening your first pull request in lancache-ng.
-    - ""
-    - "Please make sure the pull request:"
-    - "- links the related issue"
-    - "- explains the user-visible behavior change"
-    - "- lists the validation that was run"
-    - "- does not include private keys, tokens, passwords, personal data, or private infrastructure details"
-    - ""
-    - Security-sensitive reports should use the project's private security reporting channel.
 
 # What: Orphan-branch sweep inputs (AG-GH-017).
 # Why: age gate and long-lived refs are data, not code.

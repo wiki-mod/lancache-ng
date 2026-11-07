@@ -39,10 +39,11 @@ nginx, PowerDNS, syslog-ng, chrony, Kea and dnsmasq are apk
 packages inside the first-party images (nginx from the nginx.org Alpine
 repository), not separate external images; the per-image SBOM lists them.
 
-Two `uses: docker://` steps in `.github/workflows/ci.yml` and
-`.github/workflows/nightly.yml` must name the `base_images.alpine` value
-literally, because a workflow `uses:` cannot read the SOT. `ci.sh check all`
-fails any `docker://` step that is not a SOT `base_images` pin, and the
+No workflow step runs in a foreign container. A job runs in its own
+build-tools image, or, where `platform_arch.<arch>.native` is true, on the
+host with exactly one `docker run` of that image (`ci.sh build-tools-run`).
+`ci.sh check all` fails any `docker://` step that is not a SOT `base_images`
+pin, and the
 `stable-external-images` check fails any compose image outside the
 `LANCACHE_*` first-party refs that is not digest-pinned or not a SOT
 `base_images` pin (`CI-ERROR-CHECK-0014`).

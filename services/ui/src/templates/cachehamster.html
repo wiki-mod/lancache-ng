@@ -41,7 +41,7 @@
     </form>
 
     {# What: speed settings of the prefill; SOT keys. #}
-    {# Why: DoMe 26.10. (Fund 90): set them in the UI. #}
+    {# Why: the admin sets them in the UI. #}
     {# From: Issue #871 | PR #1980 #}
     <div class="section-title">{{ t.settings }}</div>
     <form action="{{ routes.setup_save | safe }}" method="post" class="form-row">
@@ -107,7 +107,7 @@
 {% block scripts %}
 <script>
   // What: the open tab survives a reload.
-  // Why: DoMe 05.11.: after the login it showed Jobs.
+  // Why: a reload keeps the tab, also after login.
   // From: Issue #871 | PR #1980
   const pickTab = function (name) {
     document.querySelectorAll('[data-ch-tab]').forEach(function (o) { o.classList.toggle('active', o.dataset.chTab === name); });
@@ -125,7 +125,7 @@
     el.textContent = new Date(Number(el.dataset.unix) * 1000).toLocaleString();
   });
   // What: the time field opens its calendar on click.
-  // Why: DoMe 05.11.: a click on "tt" opened nothing.
+  // Why: a click on the field opens the calendar.
   // From: Issue #1683 | PR #1980
   const atField = document.getElementById('hamster-at');
   const whenField = document.getElementById('hamster-when');
@@ -172,7 +172,7 @@
     });
   }
   // What: reload while a job waits to start or runs.
-  // Why: DoMe 05.11.: "now" stayed on waiting on screen.
+  // Why: the status of a waiting job stays current.
   // From: Issue #871 | PR #1980
   if (document.querySelector('tr[data-busy]')) {
     setInterval(function () {
@@ -200,7 +200,7 @@
           row.insertCell().textContent = g.appid;
           row.insertCell().textContent = g.name;
           // What: one click adds a "now" job for this game.
-          // Why: DoMe 05.11.: load straight from the list.
+          // Why: a game loads straight from the list.
           // From: Issue #871 | PR #1980
           const f = document.createElement('form');
           f.method = 'post';

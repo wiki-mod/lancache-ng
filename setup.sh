@@ -558,13 +558,23 @@ host_ipv4_addresses() {
     ' <<< "$addrs"
 }
 
-# What: host addresses without loopback and Docker 172.x
-# Why: only these can serve DNS to LAN clients
-# From: Issue #1683 | PR #1858
+# What: host IPv4 rows minus SOT-skipped interfaces
+# Why: LANs may use 172.x; skip by device, not address
+# From: Issue #1683 | PR #1984
 host_lan_addresses() {
-    local addrs
+    local addrs skip line dev prefix
+    local -a prefixes
     addrs=$(host_ipv4_addresses) || return $?
-    awk '$1 !~ /^127\./ && $1 !~ /^172\./' <<< "$addrs"
+    skip=$(prod_env_default STATS_HOST_IF_SKIP) || exit $?
+    read -ra prefixes <<< "$skip"
+    while read -r line; do
+        [[ -n "$line" ]] || continue
+        dev=${line##* }
+        for prefix in "${prefixes[@]}"; do
+            [[ "$dev" == "$prefix"* ]] && continue 2
+        done
+        printf '%s\n' "$line"
+    done <<< "$addrs"
 }
 
 # What: reports a failed host_lan_addresses call, exit as $1
@@ -2834,6 +2844,117 @@ deploy_prod_repo_input_paths() {
         [[ -n "$rel" && -e "$repo_root/${rel#../../}" ]] && printf '%s\n' "$repo_root/${rel#../../}"
     done <<< "$rels"
     true
+}
+
+# What: true if a file holds every SOT PSL marker.
+# Why: an error page or a cut download must never land.
+# From: Issue #1683 | PR #1984
+psl_file_is_valid() {
+    local file="$1" markers marker
+    local -a list=()
+    [[ -s "$file" ]] || return 1
+    markers=$(prod_env_default NGINX_PSL_MARKERS) || exit $?
+    IFS=, read -ra list <<< "$markers"
+    for marker in "${list[@]}"; do
+        grep -qF -- "$marker" "$file" || return 1
+    done
+}
+
+# What: the PSL backup dir and its backups, newest first.
+# Why: backup and restore read one list.
+# From: Issue #1683 | PR #1984
+psl_backup_dir() {
+    local sub
+    sub=$(prod_env_default NGINX_PSL_BACKUP_SUBDIR) || exit $?
+    printf '%s/%s\n' "$BACKUP_ROOT" "$sub"
+}
+psl_backup_list() {
+    local dir="$1" f
+    for f in "$dir"/*.gz; do
+        if [[ -f "$f" ]]; then
+            ls -1t -- "$dir"/*.gz
+        fi
+        break
+    done
+}
+
+# What: gzip copy of a PSL, named by its sha256; keep N.
+# Why: DoMe: the old list stays, compressed, at most 3.
+# From: Issue #1683 | PR #1984
+psl_backup() {
+    local file="$1" name dir keep sum gz n=0 f
+    name=$(prod_env_default NGINX_PSL_FILE) || exit $?
+    keep=$(prod_env_default NGINX_PSL_BACKUP_KEEP) || exit $?
+    dir=$(psl_backup_dir) || exit $?
+    mkdir -p "$dir" || die "Failed to create the PSL backup dir $dir (exit $?)."
+    sum=$(sha256sum "$file") || die "Failed to hash $file (exit $?)."
+    gz="$dir/${name%.*}-${sum%% *}.${name##*.}.gz"
+    if [[ ! -s "$gz" ]]; then
+        gzip -c "$file" > "$gz.tmp" || die "Failed to compress $file (exit $?)."
+        mv -f "$gz.tmp" "$gz" || die "Failed to back up $file to $gz (exit $?)."
+    fi
+    touch "$gz" || die "Failed to mark $gz as newest backup (exit $?)."
+    while IFS= read -r f; do
+        n=$((n + 1))
+        [[ "$n" -le "$keep" ]] || rm -f -- "$f" || die "Failed to remove the old PSL backup $f (exit $?)."
+    done < <(psl_backup_list "$dir")
+    print_ok "Old Public Suffix List backed up to $gz"
+}
+
+# What: put the newest valid PSL backup in place.
+# Why: no list at all would stop the stack from starting.
+# From: Issue #1683 | PR #1984
+psl_restore_backup() {
+    local dest="$1" tmp="$2" dir f
+    dir=$(psl_backup_dir) || exit $?
+    while IFS= read -r f; do
+        gzip -dc "$f" > "$tmp" || continue
+        psl_file_is_valid "$tmp" || continue
+        mv -f "$tmp" "$dest" || die "Failed to restore $f to $dest (exit $?)."
+        print_warn "Public Suffix List restored from backup $f"
+        return 0
+    done < <(psl_backup_list "$dir")
+    return 1
+}
+
+# What: load the PSL into the checkout; old list stays.
+# Why: idempotent; a broken download never lands.
+# From: Issue #1683 | PR #1984
+ensure_public_suffix_list() {
+    local repo_root="$1" name url rel dir dest tmp
+    name=$(prod_env_default NGINX_PSL_FILE) || exit $?
+    url=$(prod_env_default NGINX_PSL_URL) || exit $?
+    rel=$(prod_env_default NGINX_PSL_REPO_DIR) || exit $?
+    dir="$repo_root/$rel"
+    dest="$dir/$name"
+    print_step "Loading the Public Suffix List"
+    install_curl
+    tmp=$(mktemp "$dir/.$name.tmp.XXXXXX") || die "Failed to create a temporary file in $dir (exit $?)."
+    if curl -fsSL --retry 3 -o "$tmp" "$url" && psl_file_is_valid "$tmp"; then
+        if [[ -f "$dest" ]] && cmp -s "$tmp" "$dest"; then
+            rm -f -- "$tmp"
+            print_ok "Public Suffix List is current"
+            return 0
+        fi
+        if psl_file_is_valid "$dest"; then
+            psl_backup "$dest"
+        fi
+        chmod 0644 "$tmp" || die "Failed to set the mode of $tmp (exit $?)."
+        mv -f "$tmp" "$dest" || die "Failed to put the Public Suffix List in $dest (exit $?)."
+        print_ok "Public Suffix List updated from $url"
+        return 0
+    fi
+    if psl_file_is_valid "$dest"; then
+        rm -f -- "$tmp"
+        print_warn "No valid Public Suffix List from $url; the current list stays."
+        return 0
+    fi
+    if psl_restore_backup "$dest" "$tmp"; then
+        chmod 0644 "$dest" || die "Failed to set the mode of $dest (exit $?)."
+        return 0
+    fi
+    rm -f -- "$tmp"
+    die "No valid Public Suffix List: the download from $url failed and no backup exists. Check network access and run setup.sh again."
 }
 
 
@@ -6314,6 +6435,9 @@ perform_stack_update_flow() {
         _UPDATE_ROLLBACK_DIR="$install_dir"
         trap rollback_update_after_env_failure EXIT
     fi
+    if is_deploy_prod_install_dir "$install_dir"; then
+        ensure_public_suffix_list "$(deploy_prod_repo_root "$install_dir")"
+    fi
     migrate_env_for_update "$install_dir"
     validate_compose_config "$install_dir"
     trap resume_lancache_convergence_after_failed_update EXIT
@@ -7812,6 +7936,22 @@ lancache_repo_file_text() {
     curl -fsSL "$raw" || die "Failed to download ${path} from $raw (exit $?)."
 }
 
+# What: no checkout: files from LANCACHE_IMAGE_CHANNEL's ref
+# Why: AG-REL-009; curl|bash read HEAD (master) for nightly
+# From: Issue #1683 | PR #1984
+secondary_pin_channel_ref() {
+    local channel="${LANCACHE_IMAGE_CHANNEL:-}" ref
+    if [[ -n "${LANCACHE_SETUP_GIT_REF:-}" || -z "$channel" || -f "$SCRIPT_DIR/$LANCACHE_SOT" ]]; then
+        return 0
+    fi
+    validate_lancache_image_channel "$channel"
+    ref=$(lancache_channel_code_ref "$channel" "${LANCACHE_IMAGE_TAG:-}") || exit $?
+    [[ -n "$ref" ]] || die "LANCACHE_IMAGE_CHANNEL=${channel} needs LANCACHE_IMAGE_TAG (vX.Y.Z or sha-<commit>)."
+    LANCACHE_SETUP_GIT_REF="$ref"
+    LANCACHE_SOT_TEXT=$(lancache_repo_file_text "$LANCACHE_SOT") || exit $?
+    print_ok "Repository files from ${ref} (channel ${channel})"
+}
+
 # What: dies naming each NAME=VALUE pair with empty value
 # Why: arguments and response fields share the check
 # From: Issue #1683 | PR #1858
@@ -7941,6 +8081,7 @@ cmd_secondary() {
         print_ok "Secondary https DNS bind IP: ${listen_ip_https}"
     fi
     assert_prebuilt_image_platform_supported
+    secondary_pin_channel_ref
     # What: the compose file is fetched before registration
     # Why: a fetch failure must not follow a registration
     # From: Issue #1683 | PR #1858
@@ -8599,7 +8740,7 @@ else
 fi
 
 # What: step: the LAN domain of all local names
-# Why: DoMe 05.11.: own domain; default lancache-ng.lan
+# Why: own step; default lancache-ng.lan
 # From: Issue #1683 | PR #1980
 print_step "LAN domain"
 printf "  Every local name ends in this domain. With lancache-ng.lan\n"
@@ -8987,8 +9128,8 @@ CACHE_MEM_MB=${CACHE_MEM_MB}
 # From: Issue #1683 | PR #1858
 CACHE_MAX_GB=${cache_gb}
 
-# What: image source; the channel resolves to a sha-* tag
-# Why: setup.sh pulls only immutable tags
+# What: image source; a channel pins each image digest
+# Why: pulls go by digest or by an immutable tag
 # From: Issue #1683 | PR #1858
 LANCACHE_IMAGE_REGISTRY=${LANCACHE_IMAGE_REGISTRY}
 LANCACHE_IMAGE_PREFIX=${LANCACHE_IMAGE_PREFIX}
@@ -9248,6 +9389,9 @@ ask "Start now? [Y/n]" "Y"
 # What: step 13: pulls images before enabling any unit
 # Why: failed first installs stay reversible
 # From: Issue #1683 | PR #1858
+if is_deploy_prod_install_dir "$INSTALL_DIR"; then
+    ensure_public_suffix_list "$(deploy_prod_repo_root "$INSTALL_DIR")"
+fi
 print_step "Pulling images"
 cd "$INSTALL_DIR"
 stack_compose "$INSTALL_DIR" "$ENV_LOCAL" pull \

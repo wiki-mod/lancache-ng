@@ -48,3 +48,9 @@ Thumbs.db
 # Why: no third-party pin; cargo resolves the latest.
 # From: Issue #1683 | PR #1858
 /Cargo.lock
+
+# What: the PSL setup.sh and CI load from its source.
+# Why: a foreign file; it is never committed.
+# From: Issue #1683 | PR #1984
+/services/ui/nginx/public_suffix_list.dat
+/services/ui/nginx/.public_suffix_list.dat.tmp.*

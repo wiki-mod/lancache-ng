@@ -1,8 +1,8 @@
 # CI Image Pinning Policy
 
-This policy covers immutable references for CI- and release-sensitive images and
-GitHub Actions: why they are pinned, where each pin is owned, the documented
-exception, how to compute a pin, and how CI checks it. It keeps no copy of the
+This policy covers immutable references for CI- and release-sensitive images,
+and why GitHub Actions carry no pin: why images are pinned, where each pin is
+owned, the documented exception, how to compute a pin, and how CI checks it. It keeps no copy of the
 pinned values; each value has one owner (AG-CI-006).
 
 Source: issue #489 (pin CI/runtime images by immutable SHA; a short policy doc
@@ -21,11 +21,12 @@ defaults, decided as AGENTS.md AG-CI-008).
 
 ## Rules and owners
 
-- **GitHub Actions** (AGENTS.md AG-CI-001, CONTRIBUTING.md): every `uses:` pins
-  the full 40-character commit SHA with a version comment
-  (`uses: owner/action@<sha> # vX.Y.Z`). The workflows under
-  `.github/workflows/` are the inventory. A `docker://` step is accepted only
-  when its image equals a SOT `base_images` pin.
+- **GitHub Actions**: no SHA pin. Every external `uses:` names a major tag
+  (`uses: owner/action@vN`), so the action moves forward with its upstream;
+  the SOT `github_actions` block owns each action, and the tag stays literal
+  because GitHub reads `uses:` only. `ci.sh check action-node-versions`
+  enforces the major tag, the SOT entry and no unused entry. No workflow step
+  runs in a `docker://` image.
 - **Base images** (AG-CI-008): every first-party Dockerfile declares its image
   build arguments without a default (`ARG ALPINE_IMAGE`, and
   `ARG BUILD_TOOLS_IMAGE` in the Rust builder stages) and uses
@@ -65,14 +66,10 @@ crane digest docker.io/library/alpine:3.24
 `docker pull` followed by `docker inspect --format '{{index .RepoDigests 0}}'`
 prints the same index digest as part of the repository digest.
 
-GitHub Action:
+GitHub Action: no pin to compute. A new major version changes the `vN` in
+the `uses:` lines of that action.
 
-```bash
-git ls-remote https://github.com/owner/action.git refs/tags/v1.2.3
-# <sha>  refs/tags/v1.2.3   ->   uses: owner/action@<sha> # v1.2.3
-```
-
-To change a pin, change its SOT entry (or the `uses:` line for an action). The
+To change a pin, change its SOT entry. The
 build identity of every consumer changes with a base pin; see the last section.
 
 ## Checks
@@ -82,7 +79,7 @@ inside the `build-tools` container (AG-VAL-016):
 
 ```bash
 bash .github/scripts/ci.sh check mutable-refs            # tags, branches, short SHAs, unpinned images
-bash .github/scripts/ci.sh check action-node-versions    # pinned actions: runtime and reference shape
+bash .github/scripts/ci.sh check action-node-versions    # actions: runtime, vN tag, SOT entry
 bash .github/scripts/ci.sh check stable-external-images  # digest-less external images
 bash .github/scripts/ci.sh check version-drift           # external_versions consumers
 ```

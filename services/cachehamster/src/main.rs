@@ -372,7 +372,7 @@ async fn login_begin(c: &Ctx, client: &reqwest::Client) -> Result<Value, String>
     let device = c.s.text("STEAM_DEVICE_NAME")?;
 
     // What: login as the Steam client platform (SOT).
-    // Why: live 05.11.: CM refused mobile tokens (5).
+    // Why: the Steam CM refuses mobile tokens.
     // From: Issue #871 | PR #1980
     let platform = c.s.uint("STEAM_AUTH_PLATFORM_TYPE")?.to_string();
     let r = steam_post(
@@ -671,7 +671,7 @@ fn apply_order(jobs: &mut Vec<Job>, order: Order) {
 }
 
 // What: the shared bandwidth limit of all jobs.
-// Why: DoMe 26.10. (Fund 92): limit the bandwidth.
+// Why: all jobs share one uplink limit.
 // From: Issue #871 | PR #1980
 static PACE: std::sync::OnceLock<Pace> = std::sync::OnceLock::new();
 
@@ -682,7 +682,7 @@ struct Pace {
 
 impl Pace {
     // What: each file books its time after the last one.
-    // Why: live 05.11.: idle time built credit, 47 Mbit/s.
+    // Why: idle time builds no burst credit.
     // From: Issue #871 | PR #1980
     async fn wait(&self, got: u64) {
         let cost = Duration::from_secs_f64(got as f64 / self.bytes_per_sec as f64);
@@ -699,7 +699,7 @@ impl Pace {
 }
 
 // What: daily window HH:MM-HH:MM; may cross midnight.
-// Why: DoMe 26.10. (Fund 92): from when until when.
+// Why: prefill runs only in the set hours.
 // From: Issue #871 | PR #1980
 fn window(text: &str) -> Result<(u32, u32), String> {
     let mins = |t: &str| -> Option<u32> {
@@ -1130,7 +1130,7 @@ struct Frame {
 }
 
 // What: our own CM session over a websocket.
-// Why: DoMe 18:18: no third-party Steam library.
+// Why: no third-party Steam library.
 // From: Issue #871 | PR #1858
 struct Cm {
     ws: Ws,
@@ -1615,7 +1615,7 @@ async fn daemon(c: Ctx) -> Result<(), String> {
     }
     let window = window(&c.s.text("CACHEHAMSTER_WINDOW")?)?;
     // What: the values this start runs with.
-    // Why: live 05.11. Fund 90: the value was not visible.
+    // Why: the log shows the limits in effect.
     // From: Issue #871 | PR #1980
     eprintln!(
         "cachehamster: start: {queues} jobs, {connections} downloads each, {mbit} Mbit/s (0 = off), window {:02}:{:02}-{:02}:{:02}",
@@ -1641,6 +1641,7 @@ async fn daemon(c: Ctx) -> Result<(), String> {
         window,
     };
     let mut last = clock::unix_secs();
+    let mut shown = (0usize, 0u64);
     loop {
         if let Err(e) = runner.round(&c).await {
             eprintln!("cachehamster: round failed: {e}");
@@ -1648,11 +1649,17 @@ async fn daemon(c: Ctx) -> Result<(), String> {
         let now = clock::unix_secs();
         if now >= last + report {
             let bytes = runner.rate.swap(0, Ordering::Relaxed);
-            eprintln!(
-                "cachehamster: {} jobs running, {} Mbit/s",
+            let state = (
                 runner.running.len(),
-                bytes * 8 / (now - last).max(1) / 1_000_000
+                bytes * 8 / (now - last).max(1) / 1_000_000,
             );
+            // What: log while jobs run or on a change.
+            // Why: an idle 0-jobs line is log spam.
+            // From: Issue #871 | PR #1984
+            if state.0 > 0 || state != shown {
+                eprintln!("cachehamster: {} jobs running, {} Mbit/s", state.0, state.1);
+                shown = state;
+            }
             last = now;
         }
         tokio::time::sleep(tick).await;

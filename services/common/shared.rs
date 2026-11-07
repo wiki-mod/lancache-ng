@@ -2330,7 +2330,7 @@ pub mod recursor_conf {
             out.push(".".to_string());
         }
         // What: a local zone or its subzone never goes out.
-        // Why: live 05.11. (U1): home.lan gave NXDOMAIN.
+        // Why: local names sent out return NXDOMAIN.
         // From: Issue #1683 | PR #1980
         if key == "DNS_UPSTREAM_ZONES" {
             for m in crate::dns::managed_zones(s)? {
@@ -2349,7 +2349,7 @@ pub mod recursor_conf {
     }
 
     // What: upstream servers; our own address is refused.
-    // Why: live 05.11. (U4): own IP made a query loop.
+    // Why: our own address as upstream loops queries.
     // From: Issue #1683 | PR #1980
     fn upstream_servers(s: &Settings) -> Result<Vec<String>, String> {
         let own: Vec<String> = ["IP_HTTP", "IP_HTTPS"]
@@ -2484,7 +2484,7 @@ pub mod recursor_conf {
         y += &yaml_list(&s.list("PDNS_API_ALLOW_FROM"), "    ")?;
         y += &format!("  api_key: \"{api_key}\"\n");
         // What: query log raises the level and drops quiet.
-        // Why: DoMe 31.10.: see DNS queries live.
+        // Why: the admin follows DNS queries in the log.
         // From: Issue #1683 | PR #1980
         let (level, quiet) = if s.flag("DNS_QUERY_LOG")? {
             (u("RECURSOR_LOGLEVEL_QUERIES")?, "  quiet: false\n")
@@ -2536,7 +2536,7 @@ pub mod kea_conf {
     }
 
     // What: domain-name and domain-search of kept subnets.
-    // Why: live 05.11.: subnets kept the old LAN domain.
+    // Why: kept subnets follow a changed LAN domain.
     // From: Issue #1683 | PR #1980
     fn follow_domain(mut subnets: Value, before: Option<&str>, domain: &str) -> Value {
         let Some(before) = before.filter(|b| *b != domain) else {
@@ -4095,7 +4095,7 @@ pub mod rrd {
     }
 
     // What: one graph set per container.
-    // Why: DoMe 05.11.: no choice of container.
+    // Why: each container gets its own graphs.
     // From: Issue #1683 | PR #1980
     pub fn container_graphs(s: &Settings) -> Result<Vec<Graph>, String> {
         let mut out = Vec::new();
@@ -4284,7 +4284,7 @@ pub mod rrd {
         cmd.arg("--width").arg(s.text("STATS_WIDTH")?);
         cmd.arg("--height").arg(s.text("STATS_HEIGHT")?);
         // What: width and height are the whole image.
-        // Why: DoMe 05.11.: sizes differed per tab.
+        // Why: every tab draws the same image size.
         // From: Issue #1683 | PR #1980
         cmd.arg("--full-size-mode");
         // What: plain numbers when each factor shrinks.
@@ -4297,7 +4297,7 @@ pub mod rrd {
         }
 
         // What: larger fonts for axis, title and legend.
-        // Why: DoMe 05.11.: values needed a magnifier.
+        // Why: values stay readable without zoom.
         // From: Issue #1683 | PR #1980
         for f in s.list("STATS_FONTS") {
             cmd.arg("--font").arg(f);
