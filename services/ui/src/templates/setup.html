@@ -57,7 +57,6 @@
       <div class="toggle-row">
         <div>
           <div class="t-label">{{ t.run_the_time_server }}</div>
-          <div class="t-desc">{{ t.needs_at_least_one_upstream_server }}</div>
           {% if v.NTP_ENABLED == "true" %}<div class="t-desc" style="margin-top:4px;">{% if ntp_answers %}{{ t.status_answering_on }} {{ v.IP_HTTP }}:{{ v.NTP_PORT }}.{% else %}{{ t.status_no_answer_from }} {{ v.IP_HTTP }}:{{ v.NTP_PORT }} {{ t.yet }}{% endif %}</div>{% endif %}
         </div>
         <label class="toggle">
@@ -69,9 +68,8 @@
       </div>
       <label class="t-label" for="ntp_upstream" style="display:block; margin-top:12px;">{{ t.upstream_time_servers }}</label>
       <div class="field-row">
-        <textarea id="ntp_upstream" name="NTP_UPSTREAM_SERVERS" rows="2" style="width:100%; padding:9px 11px; border-radius:8px; border:1px solid var(--navy-600); background:var(--navy-900); color:var(--foam); font-family:var(--font-mono); font-size:13px;">{{ v.NTP_UPSTREAM_SERVERS }}</textarea>
+        <textarea id="ntp_upstream" name="NTP_UPSTREAM_SERVERS" rows="2" placeholder="0.debian.pool.ntp.org time.cloudflare.com" style="width:100%; padding:9px 11px; border-radius:8px; border:1px solid var(--navy-600); background:var(--navy-900); color:var(--foam); font-family:var(--font-mono); font-size:13px;">{{ v.NTP_UPSTREAM_SERVERS }}</textarea>
       </div>
-      <p class="field-hint">{{ t.at_least_one_server_names_or }} <code>0.debian.pool.ntp.org time.cloudflare.com</code>.</p>
       <div class="toggle-row">
         <div>
           <div class="t-label">{{ t.hand_this_time_server_to_dhcp }}</div>
