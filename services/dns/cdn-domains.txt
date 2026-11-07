@@ -215,6 +215,7 @@ mirrors.fedoraproject.org
 # Why: DoMe asked for Alpine in the default list.
 # From: Issue #1683 | PR #1985
 dl-cdn.alpinelinux.org
+dl.alpinelinux.org
 
 # ---- Proxmox ----
 # What: Proxmox no-subscription repo and ISO downloads.
