@@ -10,12 +10,13 @@ code and against `AGENTS.md`. It applies to each file that carries the section
 2. [Binding rules](#2-binding-rules)
 3. [Preconditions](#3-preconditions)
 4. [Procedure](#4-procedure)
-5. [Evidence classes](#5-evidence-classes)
-6. [Form of a document](#6-form-of-a-document)
-7. [Conflicts](#7-conflicts)
-8. [Section in each document](#8-section-in-each-document)
-9. [Special deviations](#9-special-deviations)
-10. [Audit record](#10-audit-record)
+5. [Gates](#5-gates)
+6. [Evidence classes](#6-evidence-classes)
+7. [Form of a document](#7-form-of-a-document)
+8. [Conflicts](#8-conflicts)
+9. [Section in each document](#9-section-in-each-document)
+10. [Special deviations](#10-special-deviations)
+11. [Audit record](#11-audit-record)
 
 ## 1. Scope
 
@@ -61,15 +62,33 @@ applicable rule passes; passing one rule does not establish compliance.
 | 5 | Prove every negative statement with a documented search pattern and its scope | Pattern and result |
 | 6 | Read each value in `.github/yaml/build-manifest.yml`: key, default, owner | SOT key |
 | 7 | Search all documents for the same names and keys | List of hits |
-| 8 | Check the form (section 6) | Word search |
+| 8 | Check the form (section 7) | Word search |
 | 9 | Run the checks below in the `build-tools` container | Exit status per check |
-| 10 | Record the audit (section 10) | Commit message |
+| 10 | Record the audit (section 11) | Commit message |
 
 Checks of step 9 (`bash .github/scripts/ci.sh check <name>`):
 `line-endings`, `language-policy`, `governance-guards`, `naming-consistency`,
 `proxy-cache-env-doc-drift`, `exit-evidence`; and `git diff --check`.
 
-## 5. Evidence classes
+## 5. Gates
+
+An audit passes only when every gate is met. A gate without evidence is not
+met.
+
+| Gate | Criterion | Evidence | Step |
+| --- | --- | --- | --- |
+| G1 | `AGENTS.md` and every rule cited by the document are read in full | Statement in the audit record | 3 |
+| G2 | The audited commit and dependent pull requests are recorded | Marker in the document | 1 |
+| G3 | Every backticked identifier and path exists | Search result with zero misses | 3 |
+| G4 | Every behavior statement is backed by read code | File and function | 4 |
+| G5 | Every negative statement has a search pattern and scope | Pattern and result | 5 |
+| G6 | Every value or default is read from its SOT key | Key and owner | 6 |
+| G7 | No other document contradicts the statement | Search result across `docs/` | 7 |
+| G8 | The form word search has no history or narrative hit | Search result | 8 |
+| G9 | Every listed check has exit status 0 | Exit status per check | 9 |
+| G10 | The audit record is complete | Commit message | 10 |
+
+## 6. Evidence classes
 
 | Class | Basis | Allowed wording |
 | --- | --- | --- |
@@ -81,7 +100,7 @@ Checks of step 9 (`bash .github/scripts/ci.sh check <name>`):
 Reading code does not prove runtime behavior. A runtime statement needs an
 observed result; without it the document states the static fact only.
 
-## 6. Form of a document
+## 7. Form of a document
 
 - It states the current state, in the present tense.
 - It contains no history, narrative, storytelling, rationale of how a
@@ -95,7 +114,7 @@ observed result; without it the document states the static fact only.
 Word search for step 8: `earlier`, `previously`, `no longer`, `used to`,
 `has been`, `was`, `were`, `now`, `legacy`, `old`.
 
-## 7. Conflicts
+## 8. Conflicts
 
 | Conflict | Resolution |
 | --- | --- |
@@ -105,7 +124,7 @@ Word search for step 8: `earlier`, `previously`, `no longer`, `used to`,
 | Code against a rule of `AGENTS.md` | The finding is reported to the maintainer (`AG-DOC-009`); the document names the code behavior and the rule |
 | Unresolvable | Escalation with sources and verified behavior (`AG-DOC-009`) |
 
-## 8. Section in each document
+## 9. Section in each document
 
 Every `docs/**/*.md` file ends with this section:
 
@@ -115,7 +134,7 @@ Every `docs/**/*.md` file ends with this section:
 The audit procedure of this file is `docs/policy/howto-audit-documentation.md`.
 ```
 
-## 9. Special deviations
+## 10. Special deviations
 
 The procedure is general. A file that needs a step to differ gets its own
 subsection at the end of "Howto audit this file", headed "Special deviation",
@@ -129,7 +148,7 @@ that states:
 
 A file without such a subsection follows the procedure unchanged.
 
-## 10. Audit record
+## 11. Audit record
 
 The commit that changes the document records:
 
