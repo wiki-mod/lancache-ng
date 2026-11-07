@@ -128,20 +128,19 @@
      Why: the mockup groups DHCP by mode
      From: Issue #1683 | PR #1976 #}
   <div class="subtabs">
-    {% if dhcp_has_kea %}<button type="button" data-dhcp-tab="server" class="subtab dhcp-tab-btn">DHCP-Server</button>{% endif %}
-    {% if dhcp_is_dnsmasq and not dhcp_is_relay %}<button type="button" data-dhcp-tab="proxy" class="subtab dhcp-tab-btn">DHCP-Proxy</button>{% endif %}
-    {% if dhcp_is_relay %}<button type="button" data-dhcp-tab="relay" class="subtab dhcp-tab-btn">DHCP-Relay</button>{% endif %}
+    <button type="button" data-dhcp-tab="server" class="subtab dhcp-tab-btn">DHCP-Server</button>
+    <button type="button" data-dhcp-tab="proxy" class="subtab dhcp-tab-btn">DHCP-Proxy</button>
+    <button type="button" data-dhcp-tab="relay" class="subtab dhcp-tab-btn">DHCP-Relay</button>
     <button type="button" data-dhcp-tab="precheck" class="subtab dhcp-tab-btn">{{ t.dhcp_precheck }}</button>
   </div>
 
 
   <div data-dhcp-panel="proxy" class="hidden">
-    {% if dhcp_is_dnsmasq and not dhcp_is_relay %}
       {# What: ProxyDHCP values and their edit form #}
       {# Why: options reach only PXE clients in this mode #}
       {# From: Issue #1683 | PR #1912 #}
       <div class="text-sm text-amber-300 space-y-2">
-        <p>{{ t.dnsmasq_proxy_mode_is_active_this }}</p>
+        {% if dhcp_is_dnsmasq and not dhcp_is_relay %}<p>{{ t.dnsmasq_proxy_mode_is_active_this }}</p>{% else %}<p class="font-semibold">{{ t.dhcp_proxy_is_not_the_active }}</p>{% endif %}
         <ul class="list-disc pl-5 space-y-1 text-amber-200">
           <li>{{ t.proxy_dhcp_pxe_helper_only_the }}</li>
           <li>{{ t.every_option_below_router_ntp_domain }}</li>
@@ -179,18 +178,14 @@
             {{ t.save_proxy_values }}
           </button>
         </form>
-    {% else %}
-    <p class="section-sub">{{ t.dhcp_proxy_is_not_the_active }}</p>
-    {% endif %}
   </div>
 
   <div data-dhcp-panel="relay" class="hidden">
-    {% if dhcp_is_relay %}
       {# What: real DHCP relay to the upstream server #}
       {# Why: client broadcasts cannot reach upstream #}
       {# From: Issue #844 #}
       <div class="text-sm text-sky-300 space-y-2">
-        <p>{{ t.dnsmasq_relay_mode_is_active_dnsmasq }}</p>
+        {% if dhcp_is_relay %}<p>{{ t.dnsmasq_relay_mode_is_active_dnsmasq }}</p>{% else %}<p class="font-semibold">{{ t.dhcp_relay_is_not_the_active }}</p>{% endif %}
         <ul class="list-disc pl-5 space-y-1 text-sky-200">
           <li>{{ t.unlike_proxydhcp_mode_this_is_a }}</li>
           <li>{{ t.only_two_values_are_needed_this }} <code>giaddr</code>{{ t.which_the_upstream_server_uses_to }}</li>
@@ -207,9 +202,6 @@
             {{ t.save_relay_values }}
           </button>
         </form>
-    {% else %}
-    <p class="section-sub">{{ t.dhcp_relay_is_not_the_active }}</p>
-    {% endif %}
   </div>
 
   <div data-dhcp-panel="precheck" class="hidden">

@@ -1620,7 +1620,7 @@ async fn dhcp(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
         let name = format!("dhcp_proxy_{}", k.to_ascii_lowercase());
         ctx.insert(name, &opt(&format!("DHCP_PROXY_{k}")));
     }
-    ctx.insert("dhcp_upstream_dhcp_ip", &opt("DHCP_UPSTREAM_DHCP_IP"));
+    ctx.insert("dhcp_upstream_dhcp_ip", &opt("UPSTREAM_DHCP_IP"));
     ctx.insert("kea_snapshot_retention", &opt("KEA_SNAPSHOT_KEEP"));
     ctx.insert(
         "ntp_auto_dhcp_active",
