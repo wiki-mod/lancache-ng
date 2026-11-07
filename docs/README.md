@@ -35,7 +35,6 @@ Valid for `current_dev` at `e223782d`. Section 9 lists what is not verified.
 | `docs/ci-2.0-architecture.md` | CI 2.0 architecture |
 | `docs/policy/` | Policies (`ci-image-pinning-policy.md`, `howto-audit-documentation.md`, `naming-conventions-policy.md`) |
 | `docs/design-plannings/` | Design plans (`capability-inventory.md`, `design-wireguard-remote-access.md`) |
-| `docs/validation-state.json` | Validation record (AG-REL-011) |
 | `AGENTS.md`, `SECURITY.md`, `CONTRIBUTING.md`, `GOVERNANCE.md` | Governance, security policy, contribution rules |
 
 ---

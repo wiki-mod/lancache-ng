@@ -33,7 +33,6 @@ verified.
 | Gates, error codes, promotion, tagging, garbage collection | `.github/scripts/ci.sh` (workflows only call it) |
 | Workflows | `ci.yml`, `nightly.yml`, `release.yml`, `gc.yml`, `codeql.yml` |
 | Install and update behavior | `setup.sh` |
-| Validation record | `docs/validation-state.json` |
 | Binding rules | `AGENTS.md` (`AG-REL-*`, `AG-VAL-*`, `AG-CI-*`) |
 
 This document names SOT keys and does not copy their values, except where a
@@ -178,8 +177,6 @@ Order of a release:
 
 If one required image is missing, the channel is not promoted. `promote-ref`
 promotes every target the current ref maps to and refuses a moved branch tip.
-For a `refs/tags/*` ref it first runs the release-validation gate
-(section 8.2) and refuses with `CI-ERROR-RELEASE-0001` when it is not fresh.
 
 `ci.sh validate` assembles the stack candidate of a pull request from exact
 image digests: a changed service uses the digest built for its new identity, an
@@ -238,15 +235,13 @@ required. Minor and major bumps are never automated (AG-REL-013).
 
 ### 4.5 Hard sequence for a promotion to `master` (AG-REL-013)
 
-1. Enumerate the unique `master` commits since the previous promotion and
-   classify each as already present, superseded or genuinely missing.
-2. Port required `master`-only content to the source branch first; never patch
-   it directly onto `master`.
-3. The promotion pull request needs fresh green CI.
-4. Apply AG-REL-011: an invalidated validation record needs fresh Part B
-   validation (section 8).
-5. The promotion merge needs its explicit maintainer authorization.
-6. Release-tag creation is a separate post-merge action with its own
+1. `master` is stale; the promotion replaces it with the state of
+   `current_dev`. Nothing is backported or ported from `master` to
+   `current_dev`.
+2. The promotion pull request needs fresh green CI, including `validate`
+   (AG-REL-011, section 8).
+3. The promotion merge needs its explicit maintainer authorization.
+4. Release-tag creation is a separate post-merge action with its own
    authorization.
 
 ---
@@ -405,55 +400,11 @@ Rules that refer to this document: AG-VAL-027 (a runtime service is part of
 the running-stack validation), AG-VAL-029 (a confirmed bug, CI failure or
 infrastructure incident gets a durable regression check or a stated reason in
 section 11), AG-VAL-033 (a runtime behavior change updates its scenario) and
-AG-REL-011 (release readiness against `docs/validation-state.json`).
+AG-REL-011 (release readiness never rests on a stale or invalidated record).
 
-### 8.1 Validation state record
-
-`docs/validation-state.json` is the validation record. Its path and the
-governance paths come from the SOT `release` block (`validation_state`,
-`governance_paths`). It holds records only:
-
-- `last_stack_validation` and `last_ci_validation`: `commit`, `date`,
-  `validator`, `scope`, `summary`, `evidence_ref` of the last completed run per
-  layer;
-- `subsystem_validation.<build target>`: `commit`, `date`, `validator`,
-  `evidence_ref` per SOT build target.
-
-A missing record or a `null` commit means never validated. The scope of a
-record comes from the SOT: for a build target its `context` plus the Rust
-workspace paths that `ci.sh` derives from `Cargo.toml` (`_ci_target_paths`);
-for a layer the `pr_labels` path class named by
-`release.validation_layers`.
-
-A record is stale when:
-
-- content under its scope or a governance path changed since its commit;
-- its commit is not an ancestor of the commit under test;
-- its key names no SOT target or layer.
-
-A scope path that matches no tracked file stops the gate with
-`CI-ERROR-RELEASE-0051`.
-
-A record changes only as the result of a completed run with attached evidence
-(command output, a CI run URL or a GitHub comment quoting it), and only for the
-layer and the `subsystem_validation` entries the run exercised. The two layers
-are tracked independently; a readiness claim needs both current for the same
-commit.
-
-### 8.2 Release-validation gate (AG-REL-011)
-
-```bash
-git fetch origin --tags
-git checkout <commit under test>
-bash .github/scripts/ci.sh release-validation
-```
-
-The gate checks every record against the checked-out commit. A stale record
-ends the run with `CI-ERROR-RELEASE-0017` (exit 1) and its reason in the raw
-output. Otherwise the gate prints `release-validation=fresh target=<commit>`.
-The staleness rules are owned by `ci.sh` (`_ci_release_validation_valid`,
-`_ci_release_record_stale`). `promote-ref` runs the same gate before a `v*` tag
-moves a release channel.
+Release readiness rests on the CI run of the exact commit: `result-gate`
+passed and the `validate` job started the stack and passed its probes. There is
+no hand-written validation record; a run on another commit does not count.
 
 ---
 
@@ -501,7 +452,7 @@ moves a release channel.
 | Stack bring-up | `ci.sh validate` waits for every service it starts and ships state and logs of a failing one; `check compose-config`; `check compose-healthchecks` | a service is unhealthy or restarting, a compose file does not render, or a service has no healthcheck |
 | `setup.sh` | `check setup-update-safety`, `check prod-state-wiring`, `check prebuilt-prod`, `check image-channel-resolution` | a guard reports a finding |
 | Images and supply chain | `scan-stack` scans the published digest; `check vex-drift`; `check mutable-refs`; `check stable-external-images`; `check cargo-audit` | `.trivyignore.yaml` does not yield a complete OpenVEX document, a reference is mutable, or a dependency is vulnerable or yanked |
-| Channels and release | `promote-ref` supersede check and the AG-REL-011 gate | a moved branch tip is promoted, or a stale record releases |
+| Channels and release | `promote-ref` supersede check | a moved branch tip is promoted |
 | Rust services | `test-stack` runs `cargo fmt --check`, `cargo clippy -- -D warnings` and `cargo test` per crate only when enabled; off by default (AG-VAL-008); `cargo check` is a manual developer step | a Rust check fails when enabled |
 | Repository guards | `ci.sh check all` (guards of the diff, repo and, with `PR_NUMBER` set, pull request scope) | a guard reports a finding |
 
@@ -890,21 +841,17 @@ ticked.
 
 ### 12.1 Before the release
 
-- [ ] The release candidate commit is the tip of the release source branch and
-  `docs/validation-state.json` records both layers for that commit
-  (`bash .github/scripts/ci.sh release-validation` prints
-  `release-validation=fresh target=<commit>`).
+- [ ] The release candidate commit is the tip of the release source branch.
 - [ ] CI is green on the commit: `result-gate` passed, `ci.sh check all` has no
   finding, `validate` passed, `scan` reports no unreported finding.
 - [ ] Every image of the package set exists for the commit as
   `sha-<full-sha>`, for every platform of `build_matrix.platforms`.
-- [ ] Section 4.5 is followed: unique `master` commits classified, required
-  content ported to the source branch, promotion pull request has fresh green
-  CI, the maintainer authorization is recorded.
+- [ ] Section 4.5 is followed: nothing ported from `master`, promotion pull
+  request has fresh green CI, the maintainer authorization is recorded.
 - [ ] The documentation matches the resulting behavior (AG-DOC-001), including
   this document and `AGENTS.md` references to it.
 
-### 12.2 Part B pass (when AG-REL-011 requires fresh validation)
+### 12.2 Part B pass (live stack on a real LAN)
 
 - [ ] 10.1 Bring-up: `Stack started`, five healthy containers.
 - [ ] 10.2 DNS in both modes, wildcard scope, upstream DNS cases.
@@ -921,14 +868,12 @@ ticked.
 - [ ] 10.10 NTP clock discipline.
 - [ ] 10.11 and 10.12 `setup.sh update` and the update health gate, including
   the negative control.
-- [ ] The two layer records in `docs/validation-state.json` are updated with the
-  evidence of the run (section 8.1).
 
 ### 12.3 Release
 
 - [ ] The release tag matches `vX.Y.Z` or `vX.Y.Z-rc.N`; a release candidate
   creates a prerelease and does not move `latest`.
-- [ ] `promote-ref` passed the release-validation gate and moved the channels.
+- [ ] `promote-ref` moved the channels.
 - [ ] The GitHub release exists with the SBOM assets (`<service>.cdx.json` per
   image) and `vex.openvex.json`.
 - [ ] `gh attestation verify "oci://<digest>" --owner wiki-mod` succeeds for
@@ -943,7 +888,6 @@ ticked.
 | Command | Proves |
 | --- | --- |
 | `bash .github/scripts/ci.sh validate` | the running-stack validation for the accepted stack candidate, inside the `build-tools` container (AG-VAL-016) |
-| `bash .github/scripts/ci.sh release-validation` | the AG-REL-011 gate over `docs/validation-state.json` for the checked-out commit |
 | `bash .github/scripts/ci.sh check all`, `check <name>` | the guards of the diff, repository and (with `PR_NUMBER`) pull request scope, or one named guard |
 | `bats .github/scripts/ci.bats` in the `build-tools` image | the regression suite (four tests) |
 | `gh attestation verify "oci://<digest>" --owner wiki-mod` | provenance of one image digest |

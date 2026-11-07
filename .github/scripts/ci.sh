@@ -80,7 +80,7 @@ declare -A CI_DISPATCH=(
     [test]=ci_cmd_test [scan-channel]=ci_cmd_scan_channel [assemble]=ci_cmd_assemble
     [aggregate-stack]=ci_cmd_aggregate_stack [scan-stack]=ci_cmd_scan_stack [changed-files]=ci_cmd_changed_files [checks-plan]=ci_cmd_checks_plan [rust-memo]=ci_cmd_rust_memo [psl]=ci_cmd_psl
     [assemble-stack]=ci_cmd_assemble_stack [test-stack]=ci_cmd_test_stack [nightly-report]=ci_cmd_nightly_report
-    [validate]=ci_cmd_validate [result-gate]=ci_cmd_result_gate [promote]=ci_cmd_promote [promote-ref]=ci_cmd_promote_ref [channel-checkout]=ci_cmd_channel_checkout [channel-matrix]=ci_cmd_channel_matrix [channel-check]=ci_cmd_channel_check [channel-report]=ci_cmd_channel_report [release-validation]=_ci_release_validation_valid [release-ref]=_ci_release_ref
+    [validate]=ci_cmd_validate [result-gate]=ci_cmd_result_gate [promote]=ci_cmd_promote [promote-ref]=ci_cmd_promote_ref [channel-checkout]=ci_cmd_channel_checkout [channel-matrix]=ci_cmd_channel_matrix [channel-check]=ci_cmd_channel_check [channel-report]=ci_cmd_channel_report [release-ref]=_ci_release_ref
     [release-publish]=ci_cmd_release_publish [release-images]=ci_cmd_release_images [release-sbom-stack]=ci_cmd_release_sbom_stack [release-vex]=ci_cmd_release_vex [cut-release-tag]=ci_cmd_cut_release_tag [release-notes]=ci_cmd_release_notes [release-changelog]=ci_cmd_release_changelog [release-variable]=ci_cmd_release_variable
     [gc]=ci_cmd_gc [gc-refs]=ci_cmd_gc_refs [check]=ci_cmd_check [close-linked-issues]=ci_cmd_close_linked_issues [pr-labels]=ci_cmd_pr_labels [pr-milestone]=ci_cmd_pr_milestone [board-add]=ci_cmd_board_add
     [version]=ci_cmd_version [docker-daemon-config]=ci_cmd_docker_daemon_config [runner-host]=ci_cmd_runner_host
@@ -1819,9 +1819,6 @@ _ci_sot_named_paths() {
         v="$(_ci_variable "${n}")" || return 2
         printf '%s\n' "${v}"
     done <<< "${names}"
-    v="$(_ci_block_entry_field release "" validation_state)" || return 2
-    printf '%s\n' "${v}"
-    _ci_block_entry_list release "" governance_paths || return 2
 }
 
 # What: path $1: rc 0 doc, 1 no doc, 3 SOT-named doc.
@@ -10545,13 +10542,6 @@ ci_cmd_promote_ref() {
         printf 'promote=noop reason=no-targets ref=%s\n' "${ref}"
         return 0
     fi
-    # What: a release tag passes the AG-REL-011 gate first
-    # Why: AG-REL-013: no release move on stale validation
-    # From: Issue #1683 | PR #1858
-    if [[ "${ref}" == refs/tags/* ]] && ! _ci_release_validation_valid; then
-        ci_log "[CI-ERROR-RELEASE-0001]" "ref=\"${ref}\" reason=\"candidate validation not valid or unverified; not releasing\""
-        return 2
-    fi
     # What: moved branch tip means newer run supersedes.
     # Why: determinism (§4); never promote stale blind.
     # From: Issue #1683 | PR #1858
@@ -10577,158 +10567,6 @@ ci_cmd_promote_ref() {
 # =========================================================
 # NIGHTLY / RELEASE
 # =========================================================
-
-# What: Print why one validation record is stale, if it is.
-# Why: AG-REL-011 triggers are checked directly, per record.
-# From: Issue #1683
-_ci_release_record_stale() {
-    local name="$1" commit="$2" target="$3" rc=0 p
-    local -a gov=() paths=()
-    read -ra paths <<< "$4"
-    read -ra gov <<< "$5"
-    if [ -z "${commit}" ] || [ "${commit}" = null ]; then
-        printf '%s: never validated\n' "${name}"; return 0
-    fi
-    local anc_err
-    anc_err="$(git -C "${CI_REPO_ROOT}" merge-base --is-ancestor "${commit}" "${target}" 2>&1)" || rc=$?
-    case "${rc}" in
-        0) ;;
-        1) printf '%s: %s is not an ancestor of %s\n' "${name}" "${commit}" "${target}"; return 0 ;;
-        *)
-            ci_error "[CI-ERROR-RELEASE-0019]" "commit=\"${commit}\" target=\"${target}\" reason=\"ancestry check failed\"" "${anc_err}"
-            return 2
-            ;;
-    esac
-    for p in "${gov[@]}"; do
-        rc=0; _ci_content_changed _ci_tracked_content_ids "${p}" "${commit}" "${target}" || rc=$?
-        case "${rc}" in
-            0) printf '%s: governance %s changed since %s\n' "${name}" "${p}" "${commit}"; return 0 ;;
-            1) ;;
-            *) return 2 ;;
-        esac
-    done
-    for p in "${paths[@]}"; do
-        rc=0; _ci_content_changed _ci_tracked_content_ids "${p}" "${commit}" "${target}" || rc=$?
-        case "${rc}" in
-            0) printf '%s: %s changed since %s\n' "${name}" "${p}" "${commit}"; return 0 ;;
-            1) ;;
-            *) return 2 ;;
-        esac
-    done
-}
-
-# What: the scope paths of one validation record
-# Why: a layer owns a pr_labels class, a target its paths
-# From: Issue #1683 | PR #1858
-_ci_release_scope() {
-    local kind="$1" name="$2" class lock paths p
-    if [ "${kind}" = target ]; then
-        # What: drop the generated lock from a target scope
-        # Why: CI_CARGO_LOCK is untracked; no git history
-        # From: Issue #1683 | PR #1858
-        lock="$(_ci_variable CI_CARGO_LOCK)" || return 2
-        paths="$(_ci_target_paths "${name}")" || return 2
-        while IFS= read -r p; do
-            if [ -n "${p}" ] && [ "${p}" != "${lock}" ]; then
-                printf '%s\n' "${p}"
-            fi
-        done <<< "${paths}"
-        return 0
-    fi
-    class="$(_ci_block_entry_field release validation_layers "${name}")" || return 2
-    if [ -z "${class}" ]; then
-        ci_log "[CI-ERROR-RELEASE-0049]" "layer=\"${name}\" reason=\"SOT release.validation_layers names no pr_labels class\""
-        return 2
-    fi
-    _ci_block_entry_list pr_labels "" "${class}"
-}
-
-# What: scope paths that match no tracked file
-# Why: a gone path would read as unchanged forever
-# From: Issue #1683 | PR #1858
-_ci_release_dead_paths() {
-    local p hit
-    while IFS= read -r p; do
-        [ -n "${p}" ] || continue
-        hit="$(_ci_capture 0 git -C "${CI_REPO_ROOT}" ls-files -- "${p}")" || return 2
-        [ -n "${hit}" ] || printf '%s\n' "${p}"
-    done <<< "$1"
-}
-
-# What: AG-REL-011 verdict over the SOT validation record.
-# Why: a stale or invalidated record must never ship.
-# From: Issue #1683 | PR #1858
-_ci_release_validation_valid() {
-    local rel gov state target stale="" out dead="" rows layers targets name commit scope kind
-    local -A rec=()
-    rel="$(_ci_block_entry_field release "" validation_state)" || return 2
-    gov="$(_ci_block_entry_list release "" governance_paths)" || return 2
-    target="$(_ci_head_commit)" || return 2
-    state="${CI_REPO_ROOT}/${rel}"
-    if [ -z "${rel}" ] || [ -z "${gov}" ] || ! jq -e '(.subsystem_validation // false) != false' "${state}" >&2; then
-        ci_log "[CI-ERROR-RELEASE-0014]" "state=\"${state}\" reason=\"no readable SOT validation record\""
-        return 2
-    fi
-    # What: load the full history before any record check
-    # Why: a depth-1 checkout lacks every record commit
-    # From: Issue #1683 | PR #1858
-    _ci_diff_history || return 2
-    layers="$(_ci_block_keys release/validation_layers all)" || return 2
-    if [ -z "${layers}" ]; then
-        ci_log "[CI-ERROR-RELEASE-0052]" "reason=\"SOT release.validation_layers lists no layer\""
-        return 2
-    fi
-    targets="$(ci_build_targets)" || return 2
-    if ! rows="$(jq -r '(.subsystem_validation | to_entries[] | ["target", .key, (.value.commit // "null")]),
-        (to_entries[] | select(.key | test("^last_.+_validation$"))
-            | ["layer", (.key | sub("^last_"; "") | sub("_validation$"; "")), (.value.commit // "null")])
-        | @tsv' "${state}" 2>&1)"; then
-        ci_error "[CI-ERROR-RELEASE-0023]" "state=\"${state}\" reason=\"validation records unreadable\"" "${rows}"
-        return 2
-    fi
-    while IFS=$'\t' read -r kind name commit; do
-        [ -n "${kind}" ] && rec["${kind}/${name}"]="${commit}"
-    done <<< "${rows}"
-    # What: a record whose key the SOT no longer knows
-    # Why: a removed target or layer must not stay silent
-    # From: Issue #1683 | PR #1858
-    for name in "${!rec[@]}"; do
-        kind="${name%%/*}"
-        local known="${layers}"
-        [ "${kind}" = layer ] || known="${targets}"
-        [[ $'\n'"${known}"$'\n' == *$'\n'"${name#*/}"$'\n'* ]] && continue
-        stale+="${name#*/}: no SOT ${kind} of that name"$'\n'
-    done
-    out="$(_ci_release_dead_paths "${gov}")" || return 2
-    dead+="${out:+${out}$'\n'}"
-    gov="${gov//$'\n'/ }"
-    for kind in layer target; do
-        local names="${layers}"
-        [ "${kind}" = layer ] || names="${targets}"
-        while IFS= read -r name; do
-            [ -n "${name}" ] || continue
-            scope="$(_ci_release_scope "${kind}" "${name}")" || return 2
-            if [ -z "${scope}" ]; then
-                ci_log "[CI-ERROR-RELEASE-0050]" "${kind}=\"${name}\" reason=\"empty validation scope\""
-                return 2
-            fi
-            out="$(_ci_release_dead_paths "${scope}")" || return 2
-            dead+="${out:+${out}$'\n'}"
-            out="$(_ci_release_record_stale "${name}" "${rec["${kind}/${name}"]:-null}" "${target}" "${scope//$'\n'/ }" "${gov}")" || return 2
-            stale+="${out:+${out}$'\n'}"
-        done <<< "${names}"
-    done
-    if [ -n "${dead}" ]; then
-        ci_error "[CI-ERROR-RELEASE-0051]" "target=\"${target}\" reason=\"validation scope path matches no tracked file\"" "${dead}"
-        return 2
-    fi
-    if [ -n "${stale}" ]; then
-        ci_error "[CI-ERROR-RELEASE-0017]" "reason=\"validation record stale (AG-REL-011)\"" "${stale}"
-        return 1
-    fi
-    printf 'release-validation=fresh target=%s\n' "${target}"
-}
-
 
 # What: Map a release tag to its prerelease flag.
 # Why: -rc.N ships as prerelease; vX.Y.Z is final.
@@ -17212,13 +17050,12 @@ _ci_check_line_endings() {
 # Why: _ci_glob_ere owns glob syntax; a read error fails.
 # From: Issue #1683 | PR #1912
 _ci_prose_exempt_load() {
-    local list state g
+    local list g
     list="$(_ci_block_entry_list file_headers "" exempt)" || return 2
-    state="$(_ci_block_entry_field release "" validation_state)" || return 2
     _CI_PROSE_EXEMPT=()
     while IFS= read -r g; do
         [ -z "${g}" ] || _CI_PROSE_EXEMPT+=("$(_ci_glob_ere "**/${g}")")
-    done <<<"${list}"$'\n'"${state}"
+    done <<<"${list}"
 }
 
 # What: true for a path a SOT exemption glob matches.
