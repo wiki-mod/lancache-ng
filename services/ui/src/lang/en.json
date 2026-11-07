@@ -81,7 +81,7 @@
   "dhcp_proxy_is_not_the_active": "DHCP-Proxy is not active. You can save the values here already; they apply once you activate the mode above.",
   "dhcp_relay_is_not_the_active": "DHCP-Relay is not active. You can save the values here already; they apply once you activate the mode above.",
   "dhcp_rollback_q": "Roll back to this snapshot? The current DHCP configuration will be replaced.",
-  "dhcp_server_is_not_the_active": "DHCP-Server is not active. You can save the values here already; they apply once you activate the mode above.",
+  "dhcp_server_is_not_the_active": "DHCP-Server is not active. Subnets, reservations and leases can be edited here once you activate the mode above.",
   "dhcp_server_status": "DHCP Server Status",
   "dhcp_servers_answer": " DHCP servers answer.",
   "disabled": "Disabled",

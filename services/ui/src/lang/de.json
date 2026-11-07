@@ -81,7 +81,7 @@
   "dhcp_proxy_is_not_the_active": "DHCP-Proxy ist nicht aktiv. Du kannst die Werte hier schon speichern; sie gelten erst, wenn du den Modus oben aktivierst.",
   "dhcp_relay_is_not_the_active": "DHCP-Relay ist nicht aktiv. Du kannst die Werte hier schon speichern; sie gelten erst, wenn du den Modus oben aktivierst.",
   "dhcp_rollback_q": "Auf diesen Snapshot zurückrollen? Die aktuelle DHCP-Konfiguration wird ersetzt.",
-  "dhcp_server_is_not_the_active": "DHCP-Server ist nicht aktiv. Du kannst die Werte hier schon speichern; sie gelten erst, wenn du den Modus oben aktivierst.",
+  "dhcp_server_is_not_the_active": "DHCP-Server ist nicht aktiv. Netze, Reservierungen und Leases bearbeitest du hier, sobald du den Modus oben aktivierst.",
   "dhcp_server_status": "DHCP-Server-Status",
   "dhcp_servers_answer": " DHCP-Server antworten.",
   "disabled": "Deaktiviert",
