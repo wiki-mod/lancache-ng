@@ -56,8 +56,8 @@ ENV LANCACHE_RUNTIME_GID=${LANCACHE_RUNTIME_GID} \
     LANCACHE_RUNTIME_DEFAULTS=${LANCACHE_RUNTIME_DEFAULTS} \
     LANCACHE_RUNTIME_SCHEMA=${LANCACHE_RUNTIME_SCHEMA}
 
-# What: NGINX_DIR parts point into NGINX_CONF_DIR.
-# Why: the ui renders them into the CONFIG_DIR volume.
+# What: NGINX_LINK_PARTS point into NGINX_CONF_DIR.
+# Why: ui renders them; plain nginx -t sees the live file
 # From: Issue #1683 | PR #1980
 RUN set -e; \
     declare -A v; IFS='|' read -ra kv <<< "${LANCACHE_RUNTIME_DEFAULTS}"; \
@@ -67,11 +67,20 @@ RUN set -e; \
         k="${BASH_REMATCH[1]}"; t="${t//@${k}@/${v[${k}]}}"; \
       done; printf '%s' "${t}"; }; \
     src="$(x "${v[NGINX_DIR]}")"; dst="$(x "${v[NGINX_CONF_DIR]}")"; \
-    for part in conf.d stream.d proxy-params.conf; do \
+    for part in ${v[NGINX_LINK_PARTS]}; do \
       rm -rf "${src:?}/${part}"; ln -s "${dst}/${part}" "${src}/${part}"; \
     done
 
-# What: nginx in the foreground as the main program.
-# Why: a crash ends the container; Docker restarts it.
-# From: Issue #1683 | PR #1980
-ENTRYPOINT ["nginx", "-g", "daemon off;"]
+# What: one supervise-daemon script per SOT process.
+# Why: OpenRC restarts crashes; @KEY@ e.g. CONFIG_DIR.
+# From: Issue #1683
+ARG LANCACHE_PROCESSES
+ARG LANCACHE_PROCESS_PRE
+ARG LANCACHE_INIT_PRE
+RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
+    bash /usr/local/bin/ci.sh openrc-setup
+
+# What: OpenRC as PID 1.
+# Why: openrc-init reaps zombies and stops on SIGTERM.
+# From: Issue #1683
+ENTRYPOINT ["/usr/local/bin/lancache-init"]
