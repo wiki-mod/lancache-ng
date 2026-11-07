@@ -5251,9 +5251,10 @@ Commands:
                        config when the Admin UI itself is unreachable.
                        Supported: kea, dns/pdns (dns/pdns also takes a <zone>
                        argument -- run with --help for the full shape).
-  reset-sign-in [install-dir]
-                       Turn the Admin UI sign-in off after a lockout; set a
-                       new user name and password in the UI afterwards.
+  reset-sign-in [install-dir] [--yes]
+                       Turn the Admin UI sign-in off after a lockout (asks
+                       first); then set a new user name and password in
+                       the UI.
   help, --help         Show this compact command list.
 
 Compatibility aliases:
@@ -5361,10 +5362,11 @@ EOF
             ;;
         reset-sign-in)
             cat <<EOF
-Usage: sudo ./setup.sh reset-sign-in [install-dir]
+Usage: sudo ./setup.sh reset-sign-in [install-dir] [--yes]
 
-Turns the Admin UI sign-in off when you are locked out. It removes the saved
-password hash and restarts the ui container. Afterwards open the Admin UI and
+Turns the Admin UI sign-in off when you are locked out. It asks first; only
+"y" (or --yes) changes anything. It removes the saved password hash and
+restarts the ui container. Afterwards open the Admin UI and
 set a new user name and password under General, Sign-in. If [install-dir] is
 omitted, ${DEFAULT_INSTALL_DIR} is used.
 EOF
@@ -7563,18 +7565,29 @@ restore_update_ip_env() {
     print_warn "The previous IPs are active again"
 }
 
-# What: reconfigures IPs of an existing install
-# Why: uses the install's directory, not the repo
-# From: Issue #1683 | PR #1858
 # What: turns the Admin UI sign-in off after a lockout
 # Why: DoMe 07.11.: a locked-out user needs a way back
 # From: Issue #1683 | PR #1985
 cmd_reset_sign_in() {
     ensure_default_install_dir
-    local install_dir="${1:-$DEFAULT_INSTALL_DIR}" env_file project out rc=0
+    local install_dir="$DEFAULT_INSTALL_DIR" assume_yes=0 env_file project out rc=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --yes|-y) assume_yes=1 ;;
+            *) install_dir="$1" ;;
+        esac
+        shift
+    done
     install_dir=$(resolve_stack_dir "$(realpath -m "$install_dir")") || exit $?
     [[ "$(id -u)" = "0" ]] \
         || die "This script must be run as root (sudo ./setup.sh reset-sign-in [install-dir])."
+    # What: nothing changes without an explicit yes
+    # Why: DoMe 07.11.: a curious run must not lock out
+    # From: Issue #1683 | PR #1985
+    if [[ "$assume_yes" != "1" ]]; then
+        print_warn "This removes the Admin UI password. Until you set a new one, anyone in the LAN can open the Admin UI."
+        confirm "Turn the Admin UI sign-in off now? [y/N]" "N" || die "Cancelled; nothing was changed."
+    fi
     env_file=$(require_stack_env_file "$install_dir") || exit $?
     project=$(compose_project_name "$install_dir" "$env_file") \
         || die "Cannot determine the compose project of $install_dir (exit $?)."
@@ -7585,6 +7598,9 @@ cmd_reset_sign_in() {
     print_ok "Admin UI sign-in is off. Set a new user name and password under General, Sign-in."
 }
 
+# What: reconfigures IPs of an existing install
+# Why: uses the install's directory, not the repo
+# From: Issue #1683 | PR #1858
 cmd_update_ip() {
     ensure_default_install_dir
     local install_dir="${1:-$DEFAULT_INSTALL_DIR}"
@@ -8373,7 +8389,7 @@ case "$setup_command" in
     reset-to-last-known-good-config)
         shift; cmd_reset_to_last_known_good_config "$@"; exit 0 ;;
     reset-sign-in)
-        cmd_reset_sign_in "${2:-$DEFAULT_INSTALL_DIR}"; exit 0 ;;
+        shift; cmd_reset_sign_in "$@"; exit 0 ;;
     help|--help|-h) print_usage; exit 0 ;;
     *)           die "Unknown command: $1. Run './setup.sh --help' for available commands." ;;
 esac
