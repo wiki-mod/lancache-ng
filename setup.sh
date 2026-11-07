@@ -6014,6 +6014,21 @@ rollback_stack_update() {
             set_env_key LANCACHE_IMAGE_CHANNEL "$old_channel" "$install_dir/${_UPDATE_ENV_FILE##*/}"
             print_warn "LANCACHE_IMAGE_CHANNEL is $old_channel again; set it anew and run update to retry the switch"
         fi
+        # What: the old stack must be healthy before "restored"
+        # Why: success was shown while every container exited
+        # From: Issue #1683 | PR #1991
+        local wait services
+        local -a restored_services
+        _UPDATE_STACK_DIR="$install_dir"
+        _UPDATE_ENV_FILE=$(runtime_env_file_for_install_dir "$install_dir")
+        wait=$(prod_env_default SETUP_HEALTH_WAIT_SERVICES_SECONDS) || exit $?
+        services=$(stack_compose "$install_dir" "$_UPDATE_ENV_FILE" config --services) \
+            || { print_error "Cannot list the services of $install_dir (exit $?). Manual recovery required."; return 1; }
+        mapfile -t restored_services <<< "$services"
+        if ! wait_for_stack_health "$wait" "${restored_services[@]}"; then
+            print_error "Rollback restored the files, but the stack is not healthy. Manual recovery required: $SCRIPT_DIR/setup.sh compose $install_dir up -d"
+            return 1
+        fi
         print_ok "Rollback completed; stack restored to its pre-update state."
         return 0
     fi
