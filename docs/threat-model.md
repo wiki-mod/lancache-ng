@@ -38,7 +38,7 @@ change, not a documentation change.
 |---|---|---|---|
 | G1 | The Admin UI is not fail-closed. `setup.sh` and the compose file deliver `UI_AUTH_USER` and `UI_AUTH_PASSWORD_HASH`, but the UI reads `UI_USER` and `UI_PASSWORD_HASH`. With no hash the UI accepts every request and does not refuse to start. `AG-SEC-001` requires fail-closed. | `deploy/prod/docker-compose.yml` lines 343-344 and `setup.sh` (`set_env_key UI_AUTH_PASSWORD_HASH`); `services/ui/src/main.rs` `login_ok` (returns `true` for an empty hash) and `s.text("UI_PASSWORD_HASH")`; no Rust code reads `ALLOW_INSECURE_UI`; the message `Admin-UI authentication is required` exists only in docs | T3 |
 | G2 | The Kea Control Agent is reachable on all host interfaces (`dhcp` runs with `network_mode: host`) and its config has no `authentication` block; the UI client sends no credentials. The iptables fence of the old document no longer exists: `KEA_CTRL_ALLOW_FROM` and `KEA_CTRL_CHAIN` appear only in the SOT. | `.github/yaml/build-manifest.yml` (`KEA_CTRL_ADDRESS=@ANY_BIND_IP@`, `ANY_BIND_IP=0.0.0.0`); `services/common/shared.rs` `kea_conf::ctrl_agent`, `kea::Api`; no `iptables` call in `services/` or `setup.sh` | T12 |
-| G3 | `NGINX_UPSTREAM_RESOLVER` is rendered without a check that it is not a LanCache address. Only `DNS_UPSTREAM_SERVERS` has such a guard. | `services/ui/nginx/nginx.conf` (`resolver ${NGINX_UPSTREAM_RESOLVER}`), `services/common/shared.rs` `recursor_conf::yaml` (the only "would loop" guard) | T1 |
+| G3 | `AG-OP-002` requires nginx to resolve upstream names with real resolvers, never with the local PowerDNS recursor, because project DNS can route proxied CDN hosts back to the proxy. `NGINX_UPSTREAM_RESOLVER` is rendered without a check that it is not a LanCache address; only `DNS_UPSTREAM_SERVERS` has such a guard. | `services/ui/nginx/nginx.conf` (`resolver ${NGINX_UPSTREAM_RESOLVER}`), `services/common/shared.rs` `recursor_conf::yaml` (the only "would loop" guard) | T1 |
 | G4 | `SECURITY.md` says only the `services` container mounts the Docker socket. The compose file also mounts it into `ui`. | `SECURITY.md` line 107; `deploy/prod/docker-compose.yml` lines 130 and 361 | T6 |
 
 ---
@@ -164,8 +164,8 @@ sources in the inventory table.
   `CA_KEY_TYPE=rsa:4096`, `CA_DAYS=3650`, key file mode `0600`) in the CA state
   directory (`CA_DIR`). `ca.key` is the crown jewel and stays outside the
   checkout; `ca.crt` is a public certificate distributed to clients.
-- **Proxy request policy** — `PROXY_SECURITY_MODE` (`lazy` default / `strict`)
-  controls whether only listed CDN hosts may be proxied; `PROXY_ALLOWED_CLIENT_CIDRS`
+- **Proxy request policy** — `PROXY_SECURITY_MODE` (`lazy` default, `strict`
+  opt-in, `AG-OP-003`) controls whether only listed CDN hosts may be proxied; `PROXY_ALLOWED_CLIENT_CIDRS`
   restricts which client source networks the proxy answers at all (default: the
   private networks and `fc00::/7`). For HTTP/HTTPS traffic this is an
   `http{}`/`https{}` control (returns 403 otherwise, `proxy-params.conf`). The
@@ -210,7 +210,8 @@ injects malicious content that the proxy caches and serves to every client.
   **no check** that the configured resolver is not a LanCache address (gap G3);
   an operator who sets it to the appliance's own DNS creates a resolve-to-self
   loop.
-- Cache key is `$host$uri$slice_range` (query-string signatures stripped), so a
+- Cache key is `$host$uri$slice_range` (never `$request_uri`, `AG-OP-001`), so
+  query-string signatures do not create separate cache objects and a
   per-request signature cannot be used to smuggle a distinct poisoned object
   under a shared key without also passing origin validation.
 
@@ -229,14 +230,20 @@ proxy into caching attacker-controlled content under a legitimate key.
 **Mitigations**:
 - Cache key includes the `Host` header (`$host$uri$slice_range`); responses are
   only cached after the origin fetch succeeds over verified TLS.
-- `PROXY_SECURITY_MODE=strict` limits proxied hosts to those derived from
+- The proxy mode is a deliberate design choice (`AG-OP-003`): **lazy is the
+  mandated default** (cache-first: nginx takes the upstream destination from the
+  client `Host` or `$ssl_server_name`, `AG-KD-004`, so any host a client reaches
+  the cache for is proxied and new CDN hostnames work out of the box); **strict requires an
+  explicit operator opt-in** from an operator who accepts its tighter allowlist
+  and its maintenance burden. Strict limits proxied hosts to those derived from
   `cdn-domains.txt` (deny-by-default `$cdn_host_allowed` map, rooted via the
   vendored Public Suffix List; see `Psl` and `nginx_conf::hosts` in
-  `services/common/shared.rs`), removing the "proxy anything" behaviour of the
-  default `lazy` mode. This enforcement applies to the `http{}`/`https{}`
-  `location /` blocks (HTTP 403 response); the stream-level SNI listeners
+  `services/common/shared.rs`) and answers others with HTTP 403 in the
+  `http{}`/`https{}` `location /` blocks; the stream-level SNI listeners
   enforce the same domain list differently — an unlisted SNI is routed to a
-  closed backend, not a 403.
+  closed backend, not a 403. It breaks downloads until a missing CDN hostname is
+  added to `cdn-domains.txt` (`README.md`, `PROXY_SECURITY_MODE`), so it is a
+  trade-off, not a fix.
 - `PROXY_ALLOWED_CLIENT_CIDRS` restricts which client networks the proxy will
   answer at all. Its default is the private networks and `fc00::/7`
   (`.github/yaml/build-manifest.yml`). For HTTP/HTTPS traffic
@@ -245,10 +252,12 @@ proxy into caching attacker-controlled content under a legitimate key.
   `deny all` directives (`nginx_conf`), a TCP-level accept/reject ahead of
   `ssl_preread`, so a denied connection is refused before any TLS handshake.
 
-**Residual risk**: Medium — `lazy` mode (the default) will proxy any requested
-host; strict mode is opt-in, and the default client list admits every private
-network the appliance can be reached from. Ultimately bounded by the
-trusted-LAN assumption.
+**Residual risk**: Medium — poisoning needs a device that is allowed to reach the
+cache; the client list (`PROXY_ALLOWED_CLIENT_CIDRS`) is the control that
+limits that set. The default `lazy` mode is the intended cache-first behavior
+(`AG-OP-003`), not a defect; an operator with untrusted devices on the LAN
+narrows the client list first and chooses `strict` only if the allowlist
+maintenance is acceptable. Ultimately bounded by the trusted-LAN assumption.
 
 ---
 
@@ -637,7 +646,8 @@ The following are **not** addressed by lancache-ng:
 
 ### Medium risk
 - Many untrusted or guest devices on the same flat LAN.
-- Proxy left in `lazy` mode with the default client list (private networks).
+- A client list wider than the devices that should use the cache (the default
+  is the private networks and `fc00::/7`).
 - No cache-size monitoring or request limits.
 - PowerDNS zone transfers (AXFR) reachable by some untrusted segment.
 
@@ -720,10 +730,12 @@ OpenRC service, not as a container, so they add no socket-access surface.
 The operator remains responsible for:
 1. Deploying on a trusted, firewalled LAN and keeping control-plane ports off
    untrusted segments.
-2. Verifying that the Admin UI login is enforced, and never setting
-   `ALLOW_INSECURE_UI=true` on anything reachable.
-3. Choosing `strict` proxy mode and client CIDR limits when the LAN is not fully
-   trusted.
+2. Verifying that the Admin UI login is enforced. `ALLOW_INSECURE_UI=true` is a
+   valid explicit choice for an intentionally unauthenticated UI on a trusted
+   LAN (`AG-SEC-001`), but not on anything reachable from an untrusted network.
+3. Narrowing `PROXY_ALLOWED_CLIENT_CIDRS` when the LAN is not fully trusted;
+   `strict` proxy mode is an opt-in that accepts a maintained allowlist
+   (`AG-OP-003`).
 4. Protecting the local CA private key (`<CA_DIR>/ca.key`) in HTTPS mode.
 5. Blocking Kea Control Agent port 8000 at the host firewall while Kea mode is
    on, until G2 is closed.
