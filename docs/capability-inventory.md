@@ -1,6 +1,6 @@
 # LanCache-NG Capability Inventory
 
-Reviewed against `current_dev` `5f32f9f1`.
+Reviewed against `current_dev` at `5f32f9f106949681f8887a8c2e48a467bf7c6dac`.
 
 This document lists what LanCache-NG can do. Every capability names the code
 that provides it (file, function, SOT key or route). The statements come from

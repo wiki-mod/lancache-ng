@@ -48,8 +48,9 @@ quotation or a paraphrase of a rule does not replace reading it.
 
 ## 3. Preconditions
 
-- `AGENTS.md` is read in full, not in excerpts.
-- The audit target is one commit; its short hash is recorded.
+- `AGENTS.md` is read in full, not in excerpts (`AG-WF-035`, `AG-WF-044`).
+- The audit target is one commit; its full HEAD hash (40 hexadecimal digits) is
+  recorded.
 - The checkout is a worktree of the audit task; the base is fetched.
 - Every rule cited by the document is read in its complete text.
 
@@ -57,7 +58,7 @@ quotation or a paraphrase of a rule does not replace reading it.
 
 | Step | Action | Evidence |
 | --- | --- | --- |
-| 1 | Record the audited commit and any dependent pull request | Marker in the document |
+| 1 | Record the full HEAD hash of the audited commit and of each dependent pull request | Marker in the document |
 | 2 | List every statement about code, configuration, behavior, command, path, key, route, port or default | Statement list |
 | 3 | Search every backticked identifier with `git grep`; test every path with `test -e` | A name without a hit is stale |
 | 4 | Read the owning code of each behavior statement: function, callers, defaults, alternate paths | File and function |
@@ -80,7 +81,7 @@ met.
 | Gate | Criterion | Evidence | Step |
 | --- | --- | --- | --- |
 | G1 | `AGENTS.md` and every rule cited by the document are read in full | Statement in the audit record | 3 |
-| G2 | The audited commit and dependent pull requests are recorded | Marker in the document | 1 |
+| G2 | The full HEAD hash of the audited commit and of each dependent pull request is recorded | Marker in the document | 1 |
 | G3 | Every backticked identifier and path exists | Search result with zero misses | 3 |
 | G4 | Every behavior statement is backed by read code | File and function | 4 |
 | G5 | Every negative statement has a search pattern and scope | Pattern and result | 5 |
@@ -160,7 +161,7 @@ The commit that changes the document records:
 
 | Field | Content |
 | --- | --- |
-| Audited commit | Short hash in the document marker |
+| Audited commit | Full HEAD hash in the document marker |
 | Search before and after | Files referenced by `SEARCH-BEFORE` and `SEARCH-AFTER` |
 | Checks | The file referenced by `CHECKS`, with exit status per check |
 | Confirmation | The sentence required by `AG-CODE-011` |

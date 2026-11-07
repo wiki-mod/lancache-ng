@@ -1,7 +1,7 @@
 # lancache-ng Threat Model
 
-> **Last reviewed against: `current_dev` at `3005b2b4` and the code of pull
-> request #1985 at `9a4b4be4`**
+> **Last reviewed against: `current_dev` at `5f32f9f106949681f8887a8c2e48a467bf7c6dac`
+> and the code of pull request #1985 at `9a4b4be4f74ab930ac53ca6aed33307714f5122c`**
 > **Last review date: 2026-11-07**
 > **Latest release tag at review time: `v0.3.2`. It is not contained in
 > `current_dev`; this document describes the five-container architecture of
@@ -26,7 +26,7 @@ defaults and alternate paths; no running stack exercised the Admin UI login,
 the Kea Control Agent or the nginx resolver check (`AG-INT-001`). The
 identifiers G1 to G3 are stable references used by code comments.
 
-| ID | Topic | State in the code (#1985 `9a4b4be4`) | Threat |
+| ID | Topic | State in the code (code of #1985) | Threat |
 |---|---|---|---|
 | G1 | Admin UI login | The compose file passes `UI_AUTH_USER` and `UI_AUTH_PASSWORD_HASH` to the UI as `UI_USER` and `UI_PASSWORD_HASH` (`deploy/prod/docker-compose.yml`). An unauthenticated Admin UI is an explicit choice made in the setup flow with a default of open (`ALLOW_INSECURE_UI=true` in the SOT runtime defaults): `setup.sh` asks "Protect Admin-UI with password? [y/N]" (default No) and, on No, "Allow Admin-UI without authentication?" (default from the SOT value); answering No to both repeats the question. An update appends `ALLOW_INSECURE_UI=true` to an install that has no login, so the open state is an explicit entry in `.env`. `AG-SEC-001` governs this case. The `ui` process does not read `ALLOW_INSECURE_UI`, and `login_ok` accepts every request when the hash is empty, so the start behavior that `AG-SEC-001` governs exists only in the setup flow. | | T3 |
 | G2 | Kea Control Agent | `kea_conf::ctrl_agent` writes a basic `authentication` block (user `KEA_CTRL_USER`, password `KEA_CTRL_TOKEN`) and `kea::Api` sends them. The bind address is `KEA_CTRL_ADDRESS=@ANY_BIND_IP@` (`0.0.0.0`) on the host network. `KEA_CTRL_ALLOW_FROM` and `KEA_CTRL_CHAIN` exist only in the SOT; no code applies a firewall fence. | T12 |
@@ -36,21 +36,21 @@ identifiers G1 to G3 are stable references used by code comments.
 
 ## Component currency inventory
 
-The table names the source of each component and the commit it was read against.
+The table names the source of each component.
 
-| Component | Primary source of truth | Last verified | Threats |
-|---|---|---|---|
-| DNS spoofing (PowerDNS RPZ) | `services/common/shared.rs` (`recursor_conf::rpz`, `recursor_conf::yaml`, `pdns_conf::auth`), `services/dns/cdn-domains.txt` | `current_dev` `3005b2b4` | T1, T4, T11 |
-| TLS interception + local CA | `services/common/shared.rs` (`cert::make_ca`, `cert::make_leaf`, `render::issue_certs`, `nginx_conf`), `services/ui/nginx/conf.d/https.conf` | `current_dev` `3005b2b4` | T7, T8, T10 |
-| Proxy request policy (client CIDR + host allowlists) | `services/common/shared.rs` (`nginx_conf`), `services/ui/nginx/proxy-params.conf`, `services/ui/nginx/conf.d/*.conf` | `current_dev` `3005b2b4` | T2, T9 |
-| Admin UI authentication | `services/ui/src/main.rs` (`login_ok`, `auth`, `Csrf`), `deploy/prod/docker-compose.yml`, `setup.sh` | #1985 `9a4b4be4` | T3 |
-| Docker access (socket in `services` and `ui`) | `deploy/prod/docker-compose.yml`, `services/common/shared.rs` (`docker::Api`) | `current_dev` `3005b2b4` | T6 |
-| DHCP: Kea mode | `services/common/shared.rs` (`kea_conf`, `kea::Api`), `deploy/prod/docker-compose.yml` (`dhcp`), `docs/README.md` (section 5) | #1985 `9a4b4be4` | T12 |
-| DHCP: dnsmasq-proxy and dnsmasq-relay modes | `services/common/shared.rs` (`dnsmasq_conf`), `docs/README.md` (section 5) | `current_dev` `3005b2b4` | T12, T13 |
-| Zone transfer to secondaries (TSIG, NOTIFY, AXFR) | `services/common/shared.rs` (`pdns_conf::auth`), `services/ui/src/main.rs` (`rotate_tsig`, `TSIG-ALLOW-AXFR`, `AXFR-MASTER-TSIG`) | `current_dev` `3005b2b4` | T5 |
-| Secondary-node registration | `services/ui/src/main.rs` (`register`, `registration_token`, `secondary_action`), `deploy/secondary/docker-compose.yml` | `current_dev` `3005b2b4` | T5, T14 |
-| Console exclusion-by-omission | `services/dns/cdn-domains.txt`, `docs/README.md` (section 4) | `current_dev` `3005b2b4` | T4, T10 |
-| Zone/record known-good snapshot + rollback | `services/ui/src/main.rs` (`rollback`, `zone_snapshots_cli`, route `/domains/zone-rollback`), `docs/README.md` (section 6) | `current_dev` `3005b2b4` | T4 |
+| Component | Primary source of truth | Threats |
+|---|---|---|
+| DNS spoofing (PowerDNS RPZ) | `services/common/shared.rs` (`recursor_conf::rpz`, `recursor_conf::yaml`, `pdns_conf::auth`), `services/dns/cdn-domains.txt` | T1, T4, T11 |
+| TLS interception + local CA | `services/common/shared.rs` (`cert::make_ca`, `cert::make_leaf`, `render::issue_certs`, `nginx_conf`), `services/ui/nginx/conf.d/https.conf` | T7, T8, T10 |
+| Proxy request policy (client CIDR + host allowlists) | `services/common/shared.rs` (`nginx_conf`), `services/ui/nginx/proxy-params.conf`, `services/ui/nginx/conf.d/*.conf` | T2, T9 |
+| Admin UI authentication | `services/ui/src/main.rs` (`login_ok`, `auth`, `Csrf`), `deploy/prod/docker-compose.yml`, `setup.sh` | T3 |
+| Docker access (socket in `services` and `ui`) | `deploy/prod/docker-compose.yml`, `services/common/shared.rs` (`docker::Api`) | T6 |
+| DHCP: Kea mode | `services/common/shared.rs` (`kea_conf`, `kea::Api`), `deploy/prod/docker-compose.yml` (`dhcp`), `docs/README.md` (section 5) | T12 |
+| DHCP: dnsmasq-proxy and dnsmasq-relay modes | `services/common/shared.rs` (`dnsmasq_conf`), `docs/README.md` (section 5) | T12, T13 |
+| Zone transfer to secondaries (TSIG, NOTIFY, AXFR) | `services/common/shared.rs` (`pdns_conf::auth`), `services/ui/src/main.rs` (`rotate_tsig`, `TSIG-ALLOW-AXFR`, `AXFR-MASTER-TSIG`) | T5 |
+| Secondary-node registration | `services/ui/src/main.rs` (`register`, `registration_token`, `secondary_action`), `deploy/secondary/docker-compose.yml` | T5, T14 |
+| Console exclusion-by-omission | `services/dns/cdn-domains.txt`, `docs/README.md` (section 4) | T4, T10 |
+| Zone/record known-good snapshot + rollback | `services/ui/src/main.rs` (`rollback`, `zone_snapshots_cli`, route `/domains/zone-rollback`), `docs/README.md` (section 6) | T4 |
 
 ---
 
@@ -256,7 +256,7 @@ untrusted network · **Impact**: Critical
 unauthenticated case. The setup flow generates `UI_AUTH_PASSWORD` and delivers
 only its Argon2id hash.
 
-**State in the code** (`services/ui/src/main.rs`, code of #1985 `9a4b4be4`):
+**State in the code** (`services/ui/src/main.rs`, code of #1985):
 - **Password set:** the compose file passes `UI_AUTH_USER` and
   `UI_AUTH_PASSWORD_HASH` to the UI as `UI_USER` and `UI_PASSWORD_HASH`
   (gap G1). `login_ok` then requires HTTP Basic credentials, checked with
@@ -491,7 +491,7 @@ networking publishes that API on every host interface unless something fences it
 **Likelihood**: Medium (only when Kea mode is enabled) · **Impact**: High
 (reprogramming DHCP-issued DNS redirects the whole LAN)
 
-**State in the code** (`services/common/shared.rs`, code of #1985 `9a4b4be4`):
+**State in the code** (`services/common/shared.rs`, code of #1985):
 - **Authentication:** `kea_conf::ctrl_agent` writes a basic `authentication`
   block (user `KEA_CTRL_USER`, password `KEA_CTRL_TOKEN`) and the UI's client
   (`kea::Api`) sends them with `basic_auth` (gap G2). `KEA_CTRL_TOKEN` is a
