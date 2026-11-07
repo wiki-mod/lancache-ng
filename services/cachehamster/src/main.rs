@@ -834,6 +834,7 @@ struct SteamCfg {
     logon: [u64; 4],
     cdn_host: String,
     proxy: std::net::SocketAddr,
+    proxy_name: String,
     branch: String,
     os: String,
 }
@@ -856,6 +857,11 @@ impl SteamCfg {
             ],
             cdn_host: c.s.text("STEAM_CDN_HOST")?,
             proxy: addr.parse().map_err(|e| format!("{addr}: {e}"))?,
+            proxy_name: format!(
+                "{}:{}",
+                c.s.text("CONTAINER_NAME_PROXY")?,
+                c.s.uint("PROXY_HTTP_PORT")?
+            ),
             branch: c.s.text("STEAM_BRANCH")?,
             os: c.s.text("STEAM_OS")?,
         })
@@ -864,8 +870,18 @@ impl SteamCfg {
     // What: a client that sends the CDN host to the proxy.
     // Why: the proxy caches by Host; DNS is not needed.
     fn client(&self) -> Result<reqwest::Client, String> {
+        // What: the proxy container on the Docker network.
+        // Why: DoMe 07.11.: IP_HTTP cost docker-proxy 17 % CPU.
+        // From: Issue #871 | PR #1985
+        use std::net::ToSocketAddrs;
+        let proxy = self
+            .proxy_name
+            .to_socket_addrs()
+            .ok()
+            .and_then(|mut a| a.next())
+            .unwrap_or(self.proxy);
         reqwest::Client::builder()
-            .resolve(&self.cdn_host, self.proxy)
+            .resolve(&self.cdn_host, proxy)
             .build()
             .map_err(|e| format!("CDN client: {e}"))
     }
