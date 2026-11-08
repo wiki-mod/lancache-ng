@@ -354,7 +354,7 @@ sudo /opt/lancache-ng/current/setup.sh backup --full
 Use `--config` for small update rollback backups. Use `--full` only when you also need cache objects, because full backups can be very large. Restore a backup with:
 
 ```bash
-sudo /opt/lancache-ng/current/setup.sh restore /var/backups/lancache-ng/lancache-ng-config-YYYYMMDDTHHMMSSZ.tar.gz /opt/lancache-ng
+sudo /opt/lancache-ng/current/setup.sh restore /var/backups/lancache-ng/lancache-ng-config-YYYYMMDDTHHMMSSZ.tar.zst /opt/lancache-ng
 ```
 
 See `docs/README.md` (section 7) for backup scope, restore testing, secret handling, CA lifecycle notes, and rollback details.

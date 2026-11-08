@@ -484,7 +484,7 @@ after configuration changes and before enabling scheduled automatic updates.
 ```bash
 sudo /opt/lancache-ng/current/setup.sh update [install-dir]
 sudo /opt/lancache-ng/current/setup.sh backup [--config|--full] [install-dir] [--dest /backup/path]
-sudo /opt/lancache-ng/current/setup.sh restore <backup.tar.gz> [install-dir]
+sudo /opt/lancache-ng/current/setup.sh restore <backup archive> [install-dir]
 ```
 
 - Archives go to `/var/backups/lancache-ng` unless `--dest` is given. Set
@@ -590,13 +590,13 @@ Further behavior:
 1. Find the automatic pre-update backup:
 
    ```bash
-   sudo find /var/backups/lancache-ng -maxdepth 1 -name 'lancache-ng-config-*.tar.gz' -print
+   sudo find /var/backups/lancache-ng -maxdepth 1 -name 'lancache-ng-config-*.tar.*' -print
    ```
 
 2. Restore it:
 
    ```bash
-   sudo /opt/lancache-ng/current/setup.sh restore /var/backups/lancache-ng/lancache-ng-config-YYYYMMDDTHHMMSSZ.tar.gz /opt/lancache-ng
+   sudo /opt/lancache-ng/current/setup.sh restore /var/backups/lancache-ng/lancache-ng-config-YYYYMMDDTHHMMSSZ.tar.zst /opt/lancache-ng
    ```
 
 3. Check the stack:

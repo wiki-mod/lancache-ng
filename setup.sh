@@ -5104,7 +5104,11 @@ cmd_backup() (
     backup_paused_convergence=0
     stamp=$(date -u +%Y%m%dT%H%M%SZ)
     dest="$backup_root/$stamp"
-    archive="$backup_root/lancache-ng-${mode}-${stamp}.tar.gz"
+    # What: backup packs with the best present compressor
+    # Why: zstd -T0 uses all cores; gzip used only one
+    # From: Issue #1683
+    archive_ext=$(logbundle_select_compressor)
+    archive="$backup_root/lancache-ng-${mode}-${stamp}.tar.${archive_ext}"
     mkdir -p "$backup_root" || die "Failed to create $backup_root (exit $?)."
     old_umask=$(umask)
     umask 077
@@ -5179,7 +5183,7 @@ EOF
     # What: archive is written as .partial, then renamed
     # Why: rollback takes the newest complete archive
     # From: Issue #1683 | PR #1858
-    write_compressed_tar gz "$archive.partial" "$backup_root" "$stamp" \
+    write_compressed_tar "$archive_ext" "$archive.partial" "$backup_root" "$stamp" \
         || die "Failed to write $archive (exit $?)."
     chmod 600 "$archive.partial" || die "Failed to restrict $archive.partial (exit $?)."
     mv "$archive.partial" "$archive" || die "Failed to finish $archive (exit $?)."
@@ -5210,7 +5214,7 @@ cmd_restore() (
     ensure_default_install_dir
     install_dir="${2:-$DEFAULT_INSTALL_DIR}"
     install_dir=$(resolve_stack_dir "$(realpath -m "$install_dir")") || exit $?
-    [[ -n "$archive" ]] || die "Usage: $0 restore <backup.tar.gz> [install-dir]"
+    [[ -n "$archive" ]] || die "Usage: $0 restore <backup archive (.tar.zst, .tar.bz2 or .tar.gz)> [install-dir]"
     [[ -f "$archive" ]] || die "Backup archive not found: $archive"
     # What: requires openssl for the convergence step
     # Why: fails before restore mutations on minimal hosts
@@ -5241,7 +5245,7 @@ cmd_restore() (
         return "$status"
     }
     trap restore_cleanup EXIT
-    tar -C "$tmp" -xzf "$archive" || die "Failed to unpack $archive (exit $?)."
+    tar -C "$tmp" -xf "$archive" || die "Failed to unpack $archive (exit $?)."
     # What: find stops at the first rootfs match via -quit
     # Why: avoids SIGPIPE from an early pipe close
     # From: Issue #1377
@@ -5605,7 +5609,7 @@ EOF
             ;;
         restore)
             cat <<EOF
-Usage: ./setup.sh restore <backup.tar.gz> [install-dir]
+Usage: ./setup.sh restore <backup archive (.tar.zst, .tar.bz2 or .tar.gz)> [install-dir]
 
 Restores a setup-script backup. Files from the archived install directory are
 remapped to [install-dir] when it differs from the original path. After
@@ -5940,7 +5944,7 @@ rollback_stack_update() {
     local latest_backup="" backups sorted_backups
 
     if [[ -d "$backup_root" ]]; then
-        if ! backups=$(find "$backup_root" -maxdepth 1 -name 'lancache-ng-config-*.tar.gz' -print); then
+        if ! backups=$(find "$backup_root" -maxdepth 1 -name 'lancache-ng-config-*.tar.*' ! -name '*.partial' -print); then
             print_error "Failed to list the backups under $backup_root; cannot roll back automatically. Manual recovery required."
             return 1
         fi
