@@ -406,11 +406,6 @@ jobs:
     steps:
       - *bootstrap
       - *gha_export
-      # What: the PSL from the nightly cache.
-      # Why: the ui reads it from the checkout mount.
-      # From: Issue #1683 | PR #1984
-      - name: Restore the Public Suffix List
-        run: bash .github/scripts/ci.sh update-psl restore
       - name: Validate the accepted stack candidate
         id: validate
         env:
