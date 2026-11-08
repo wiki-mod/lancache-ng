@@ -8552,6 +8552,17 @@ cmd_secondary() {
         done
     fi
 
+    # What: own snmp community; kept on --rotate
+    # Why: live 229: render-dns died without it
+    # From: Issue #1683
+    local snmp_community=""
+    if [[ -n "$existing_env_file" ]] \
+        && env_key_has_usable_secret SNMP_COMMUNITY "$existing_env_file"; then
+        snmp_community=$(get_env_var SNMP_COMMUNITY "$existing_env_file") || exit $?
+    else
+        snmp_community=$(generate_managed_secret SNMP_COMMUNITY stack) || exit $?
+    fi
+
     write_file_atomically "${secondary_dir}/docker-compose.yml" <<< "$secondary_compose" \
         || die "Failed to write ${secondary_dir}/docker-compose.yml (exit $?)."
     for repo_i in "${!repo_files[@]}"; do
@@ -8578,6 +8589,7 @@ IP_HTTPS=${ip_https}
 LISTEN_IP_HTTPS=${listen_ip_https}
 DNS_HTTPS_HOST_PORT=${dns_https_host_port}
 PDNS_API_KEY=${pdns_api_key}
+SNMP_COMMUNITY=${snmp_community}
 DDNS_TSIG_KEY=${ddns_tsig_key}
 DNS_XFR_PRIMARY=${dns_xfr_primary}
 DDNS_TSIG_NAME=${tsig_name}

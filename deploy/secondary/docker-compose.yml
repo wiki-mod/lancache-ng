@@ -21,6 +21,10 @@ services:
       - IP_HTTP=${IP_HTTP:?IP_HTTP is required}
       - IP_HTTPS=${IP_HTTPS:-}
       - PDNS_API_KEY=${PDNS_API_KEY}
+      # What: own snmp community from setup.sh
+      # Why: render-dns writes snmpd.conf with it
+      # From: Issue #1683
+      - SNMP_COMMUNITY=${SNMP_COMMUNITY:?SNMP_COMMUNITY is required}
       # What: the primary's TSIG key; no generated fallback.
       # Why: a generated key fails AXFR from the primary
       # From: Issue #1683 | PR #1858
