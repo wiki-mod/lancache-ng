@@ -7978,23 +7978,50 @@ restore_dns_upstream() {
 # Why: the watchdog starts without upstream on a bad value
 # From: Issue #1918 | PR #1858
 dns_upstream_is_live() {
-    local install_dir="$1" env_file="$2" servers="$3" run_dir cid rc=0
-    run_dir=$(prod_env_default SUPERVISE_RUN_DIR) || exit $?
+    local install_dir="$1" env_file="$2" servers="$3" cid rc conf
+    local wait poll waited=0 key server ok
+    local -a confs=() wanted=()
+    # What: the recursor files the ui renders, not /run.
+    # Why: live 249: grep of /run found none; a reject.
+    # From: Issue #1918
+    for key in RECURSOR_HTTP_CONF_FILE RECURSOR_HTTPS_CONF_FILE; do
+        conf=$(prod_env_default "$key") || exit $?
+        confs+=("$conf")
+    done
+    wait=$(prod_env_default SETUP_HEALTH_WAIT_SERVICES_SECONDS) || exit $?
+    poll=$(prod_env_default SETUP_HEALTH_POLL_SECONDS) || exit $?
+    read -r -a wanted <<< "${servers//,/ }"
     cid=$(stack_compose "$install_dir" "$env_file" ps -q dns) \
         || die "Failed to look up the dns container of $install_dir (exit $?)."
     if [[ -z "$cid" ]]; then
         print_error "No dns container is running in $install_dir."
         return 1
     fi
-    docker exec "$cid" grep -r -q -e 'forward_zones_recurse:' "$run_dir" || rc=$?
-    case "$rc" in
-        0) [[ -n "$servers" ]] ;;
-        1) [[ -z "$servers" ]] ;;
-        *)
-            print_error "Cannot read the recursor config in the dns container (exit $rc)."
+    # What: poll; the ui renders the files after its start.
+    # Why: the ui starts last in the ordered update.
+    # From: Issue #1918
+    while true; do
+        ok=1
+        for conf in "${confs[@]}"; do
+            rc=0
+            docker exec "$cid" grep -q -e 'forward_zones_recurse:' "$conf" || rc=$?
+            case "$rc" in
+                0) (( ${#wanted[@]} > 0 )) || ok=0 ;;
+                1) (( ${#wanted[@]} == 0 )) || ok=0 ;;
+                *) ok=0 ;;
+            esac
+            for server in "${wanted[@]}"; do
+                docker exec "$cid" grep -q -F -e "\"${server}\"" "$conf" || ok=0
+            done
+        done
+        (( ok == 1 )) && return 0
+        if (( waited >= wait )); then
+            print_error "The recursor config in the dns container does not match the setting after ${wait}s (last read exit ${rc})."
             return 1
-            ;;
-    esac
+        fi
+        sleep "$poll"
+        waited=$((waited + poll))
+    done
 }
 
 # What: shows and changes the upstream DNS of an install
