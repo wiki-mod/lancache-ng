@@ -138,7 +138,7 @@ SOT `base_images` block:
 - nginx, PowerDNS, syslog-ng, chrony, Kea and dnsmasq are apk packages inside
   the first-party images, not external images. The per-image SBOM lists them.
 - A compose image outside the `${LANCACHE_*}` first-party references has to
-  equal a SOT `base_images` value. `ci.sh check stable-external-images`
+  equal a SOT `base_images` value. `ci.sh check sot-external-images`
   reports every other value with `CI-ERROR-CHECK-0014`.
 - No workflow step runs in a foreign container. A job runs in its own
   `build-tools` image, or, on a native host, through exactly one `docker run`
@@ -456,7 +456,7 @@ no hand-written validation record; a run on another commit does not count.
 | Proxy routing and TLS | `ci.sh validate` (`_ci_validate_proxy_stream_map`: a wildcard SNI forwards to the requested name; `_ci_validate_https_mitm`: the HTTPS-mode certificate is issued by the LAN CA; `_ci_validate_https_dispatch_map`: a depth >= 2 SNI takes the passthrough relay); `check proxy-nginx-policy` | a probe differs, or `/healthz` serves through `return` instead of `alias` |
 | Stack bring-up | `ci.sh validate` waits for every service it starts and ships state and logs of a failing one; `check compose-config`; `check compose-healthchecks` | a service is unhealthy or restarting, a compose file does not render, or a service has no healthcheck |
 | `setup.sh` | `check setup-update-safety`, `check prod-state-wiring`, `check prebuilt-prod`, `check image-channel-resolution` | a guard reports a finding |
-| Images and supply chain | `scan-stack` scans the published digest; `check vex-drift`; `check mutable-refs`; `check stable-external-images`; `check cargo-audit` | `.trivyignore.yaml` does not yield a complete OpenVEX document, a reference is mutable, or a dependency is vulnerable or yanked |
+| Images and supply chain | `scan-stack` scans the published digest; `check vex-drift`; `check mutable-refs`; `check sot-external-images`; `check cargo-audit` | `.trivyignore.yaml` does not yield a complete OpenVEX document, a reference is mutable, or a dependency is vulnerable or yanked |
 | Channels and release | `promote-ref` supersede check | a moved branch tip is promoted |
 | Rust services | `test-stack` runs `cargo fmt --check`, `cargo clippy -- -D warnings` and `cargo test` per crate only when enabled; off by default (AG-VAL-008); `cargo check` is a manual developer step | a Rust check fails when enabled |
 | Repository guards | `ci.sh check all` (guards of the diff, repo and, with `PR_NUMBER` set, pull request scope) | a guard reports a finding |

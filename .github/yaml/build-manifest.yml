@@ -1721,7 +1721,7 @@ ci_check_inputs:
   shell-guards: ["@shell", "**/Dockerfile"]
   shellcheck: ["@shell"]
   sot-identity-inputs: []
-  stable-external-images: ["deploy/**"]
+  sot-external-images: ["deploy/**"]
   version-drift: ["**/Cargo.toml"]
   vex-drift: ["@{ci_variables.CI_TRIVY_IGNORE}"]
   workflow-ci-variables: ["@{ci_variables.CI_WORKFLOW_DIR}/**"]

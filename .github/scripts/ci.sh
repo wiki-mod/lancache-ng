@@ -100,7 +100,7 @@ declare -gA CI_CHECKS=(
     [governance-guards]="diff _ci_check_governance_guards" [changelog-direct-edit]="diff _ci_check_changelog_direct_edit"
     [action-node-versions]="repo _ci_check_action_node_versions" [action-majors]="job _ci_check_action_majors"
     [naming-consistency]="repo _ci_check_naming_consistency" [workflow-line-limit]="repo _ci_check_workflow_line_limit"
-    [stable-external-images]="repo _ci_check_stable_external_images" [compose-healthchecks]="repo _ci_check_compose_healthchecks"
+    [sot-external-images]="repo _ci_check_sot_external_images" [compose-healthchecks]="repo _ci_check_compose_healthchecks"
     [proxy-cache-env-doc-drift]="repo _ci_check_proxy_cache_env_doc_drift" [prebuilt-prod]="repo _ci_check_prebuilt_prod"
     [prod-state-wiring]="repo _ci_check_prod_state_wiring" [compose-config]="repo _ci_check_compose_config"
     [proxy-cert-volume]="repo _ci_check_proxy_cert_volume"
@@ -18162,7 +18162,7 @@ _ci_compose_dir_files() {
 # What: an external deploy image must be a SOT base image.
 # Why: one owner per external image; no copy elsewhere.
 # From: Issue #1683
-_ci_check_stable_external_images() {
+_ci_check_sot_external_images() {
     local -a dirs=("$@")
     local d img k allowed=" " dep
     if [ "${#dirs[@]}" -eq 0 ]; then
@@ -18214,7 +18214,7 @@ _ci_check_stable_external_images() {
         ci_error "[CI-ERROR-CHECK-0014]" "reason=\"external image not in SOT\"" "$(printf '%s\n' "${viol[@]}")"
         return 1
     fi
-    printf 'stable-external-images=clean\n'
+    printf 'sot-external-images=clean\n'
 }
 
 # What: Print the heading count, then the section lines.

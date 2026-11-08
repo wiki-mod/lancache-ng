@@ -343,7 +343,7 @@ For image inventory, release, or package-channel changes, run inside the build-t
 ```bash
 BUILD_TOOLS_IMAGE="$(bash .github/scripts/ci.sh build-tools resolve-image)"
 docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work:ro" -w /work "$BUILD_TOOLS_IMAGE" \
-  bash -c 'set -e; for c in stable-external-images image-channel-resolution prebuilt-prod; do bash .github/scripts/ci.sh check "$c"; done'
+  bash -c 'set -e; for c in sot-external-images image-channel-resolution prebuilt-prod; do bash .github/scripts/ci.sh check "$c"; done'
 ```
 
 For workflow changes, run inside the build-tools container:
