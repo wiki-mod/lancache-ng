@@ -14090,7 +14090,7 @@ _ci_validate_run() {
     local cand="$1" rc=0
     # What: the PSL is loaded here when a job left it out.
     # Why: validate and channel-check start the stack here.
-    # From: Issue #1683 | PR #1984 | run 42483102657
+    # From: Issue #1683 | PR #2001
     if [ ! -s "${CI_REPO_ROOT:-.}/$(_ci_runtime_default NGINX_PSL_REPO_DIR)/$(_ci_runtime_default NGINX_PSL_FILE)" ]; then
         ci_cmd_update_psl restore || return 2
     fi
