@@ -2546,7 +2546,10 @@ migrate_quickstart_install() (
     _UPDATE_ENV_FILE="$env_local" _UPDATE_STACK_DIR="$stack_dir"
     validate_compose_config "$stack_dir"
     local apply_rc=0
-    apply_stack_update_ordered "$stack_dir" rollback_quickstart_migration "$old_dir" "$record" "$stack_dir" "$env_local" || apply_rc=$?
+    # What: the migrated stack starts like a fresh install
+    # Why: its config volume is empty until the ui renders
+    # From: Issue #1683 | PR #1858
+    STACK_FIRST_PROD_START=1 apply_stack_update_ordered "$stack_dir" rollback_quickstart_migration "$old_dir" "$record" "$stack_dir" "$env_local" || apply_rc=$?
     if [[ "$apply_rc" -eq 2 ]]; then
         trap - EXIT
         UPDATE_CONVERGENCE_COMPLETED=1
@@ -6034,6 +6037,20 @@ apply_stack_update_ordered() {
     (( ${#non_ui_services[@]} > 0 )) \
         || die "No non-UI services found in this compose configuration; refusing to apply an update that cannot guarantee UI-last ordering."
 
+    # What: a first prod start runs all services at once
+    # Why: dns and proxy wait for configs the ui renders
+    # From: Issue #1683 | PR #1858
+    if [[ "${STACK_FIRST_PROD_START:-0}" = 1 ]]; then
+        if stack_update_step "Starting the whole stack (first start)" "Failed to start the stack." \
+                stack_compose "$install_dir" "$_UPDATE_ENV_FILE" up -d --remove-orphans \
+            && stack_update_step "Verifying the whole stack is healthy" "The stack did not become healthy in time." \
+                wait_for_stack_health "$(( wait_services + wait_ui ))" "${all_services[@]}"; then
+            print_ok "Whole stack verified healthy"
+            return 0
+        fi
+        "${rollback[@]}" || return 2
+        return 1
+    fi
     # What: baseline is captured earlier by the caller
     # Why: earlier steps may already change containers
     # From: Issue #1683 | PR #1858
