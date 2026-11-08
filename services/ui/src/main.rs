@@ -2680,6 +2680,24 @@ async fn apply_all(
             Err(e) => report.push(format!("{dhcp}: mode off, {e}")),
         }
     }
+    // What: proxy and relay share one dnsmasq daemon.
+    // Why: release 10.3: the container keeps running.
+    // From: Issue #1683
+    let (was, now) = (old.text("DHCP_MODE")?, new.text("DHCP_MODE")?);
+    if was.starts_with("dnsmasq-") && now.starts_with("dnsmasq-") && plan.contains_key(&dhcp) {
+        let ex = new.list("DNSMASQ_RESTART_EXEC");
+        match container_of(app, new, &dhcp).await {
+            Ok(name) if !ex.is_empty() => {
+                let r = apply::reload_exec(&app.docker, &name, &ex, &dhcp, limit).await;
+                if !matches!(r, apply::Outcome::Failed(_)) {
+                    plan.remove(&dhcp);
+                }
+                report.push(format!("{dhcp} dnsmasq: {r:?}"));
+            }
+            Ok(_) => {}
+            Err(e) => report.push(format!("{dhcp} dnsmasq: skipped, {e}")),
+        }
+    }
     // What: skip an owner that has no container yet.
     // Why: at stack start it reads the new files anyway.
     // From: Issue #1683 | PR #1980
