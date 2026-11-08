@@ -2647,7 +2647,7 @@ validation:
   # Why: operator keys are :?-required; one owner.
   # From: Issue #1683 | PR #1858
   compose_validation_env:
-    - DNS_XFR_PRIMARY=@{validation.peer_ip}:@PDNS_AUTH_PORT@
+    - DNS_XFR_PRIMARY=@{validation.peer_ip}
     - IP_HTTPS=127.0.0.2
     - IP_HTTP=@LOOPBACK_BIND_IP@
     - LISTEN_IP=127.0.0.3

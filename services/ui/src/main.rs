@@ -2857,10 +2857,16 @@ async fn ensure_tsig(s: &Settings) -> Result<(), String> {
 async fn ensure_secondary_zones(s: &Settings) -> Result<(), String> {
     let api = pdns_api(s)?;
     let have: Vec<String> = api.zones().await?.into_iter().map(|z| z.name).collect();
-    let masters = vec![s.text("DNS_XFR_PRIMARY")?];
+    // What: the primary pdns port, not its recursor.
+    // Why: live 229: port 53 refused every SOA check.
+    // From: Issue #1683
+    let port = s.uint("PDNS_AUTH_PORT")?;
+    let masters = vec![format!("{}:{port}", s.text("DNS_XFR_PRIMARY")?)];
     for zone in s.list("DNS_SECONDARY_ZONES") {
         let id = lancache_ng::pdns::zone_id(&zone);
-        if !have.contains(&id) {
+        if have.contains(&id) {
+            api.set_masters(&id, &masters).await?;
+        } else {
             api.create_secondary(&id, &masters).await?;
         }
     }

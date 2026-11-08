@@ -682,6 +682,15 @@ pub mod pdns {
             self.call(Method::PUT, &path, Some(body)).await.map(drop)
         }
 
+        // What: primary address of one secondary zone.
+        // Why: a rerun fixes the masters of old zones.
+        // From: Issue #1683
+        pub async fn set_masters(&self, zone: &str, masters: &[String]) -> Result<(), String> {
+            let path = format!("/zones/{}", zone_id(zone));
+            let body = json!({"masters": masters});
+            self.call(Method::PUT, &path, Some(body)).await.map(drop)
+        }
+
         // What: TSIG key a secondary uses for AXFR.
         // Why: the API refuses meta AXFR-MASTER-TSIG.
         // From: Issue #1683
@@ -2258,7 +2267,15 @@ pub mod pdns_conf {
             (
                 "also-notify",
                 if primary {
-                    secondary_ips(s).join(",")
+                    // What: NOTIFY to secondary pdns.
+                    // Why: port 53 there is the recursor.
+                    // From: Issue #1683
+                    let port = s.uint("PDNS_AUTH_PORT")?;
+                    let to: Vec<String> = secondary_ips(s)
+                        .iter()
+                        .map(|ip| format!("{ip}:{port}"))
+                        .collect();
+                    to.join(",")
                 } else {
                     String::new()
                 },

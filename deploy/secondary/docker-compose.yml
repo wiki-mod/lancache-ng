@@ -75,6 +75,11 @@ services:
       - "${LISTEN_IP:?LISTEN_IP is required}:${SOT_DNS_PORT}:${SOT_DNS_PORT}/tcp"
       - "${LISTEN_IP_HTTPS:?LISTEN_IP_HTTPS is required}:${DNS_HTTPS_HOST_PORT}:${SOT_DNS_HTTPS_PORT}/udp"
       - "${LISTEN_IP_HTTPS:?LISTEN_IP_HTTPS is required}:${DNS_HTTPS_HOST_PORT}:${SOT_DNS_HTTPS_PORT}/tcp"
+      # What: pdns port for NOTIFY and SOA checks.
+      # Why: the primary reaches the secondary pdns.
+      # From: Issue #1683
+      - "${LISTEN_IP:?LISTEN_IP is required}:${SOT_PDNS_AUTH_PORT}:${SOT_PDNS_AUTH_PORT}/udp"
+      - "${LISTEN_IP:?LISTEN_IP is required}:${SOT_PDNS_AUTH_PORT}:${SOT_PDNS_AUTH_PORT}/tcp"
     # What: a real DNS query; any reply counts.
     # Why: a dead upstream must not restart the dns.
     # From: Issue #1683 | PR #1980
