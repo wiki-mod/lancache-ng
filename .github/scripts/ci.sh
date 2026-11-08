@@ -2343,7 +2343,10 @@ ci_cmd_plan_matrix() {
     # What: the run record covers every target pair.
     # Why: promote check, validate, promote read all pairs.
     # From: Issue #1683 | PR #1912
-    if [ "${any}" = true ] || [ -n "${ptargets}" ]; then
+    # What: a push records all pairs for assemble too.
+    # Why: assemble tags every service on every push.
+    # From: Issue #1683
+    if [ "${any}" = true ] || [ -n "${ptargets}" ] || [ "${GITHUB_EVENT_NAME:-}" != pull_request ]; then
         _ci_for_all_pairs _ci_plan_record || return "$?"
     fi
     # What: a PR run reuses its last green run.
