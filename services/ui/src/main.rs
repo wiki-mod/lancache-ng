@@ -3117,7 +3117,15 @@ async fn status(State(app): Shared) -> Response {
         let name = c["Labels"][docker::SERVICE_LABEL]
             .as_str()
             .unwrap_or_default();
-        let colour = colour(c);
+        let by_user = stopped.iter().any(|x| x == name);
+        let mode_off = !off.is_empty() && name == off;
+        // What: a stop nobody asked for is red, not gray.
+        // Why: release 10.6: the entry must turn unhealthy.
+        // From: Issue #1683
+        let colour = match colour(c) {
+            "gray" if !by_user && !mode_off => "red",
+            other => other,
+        };
         // What: last health check output when not green.
         // Why: live test: "3 failures" showed no reason.
         // From: Issue #1683 | PR #1980
@@ -3135,8 +3143,8 @@ async fn status(State(app): Shared) -> Response {
         }
         rows.push(
             json!({"name": name, "status": colour, "health": c["Status"],
-               "reason": reason, "mode_off": !off.is_empty() && name == off,
-               "stopped_by_user": stopped.iter().any(|x| x == name)}),
+               "reason": reason, "mode_off": mode_off,
+               "stopped_by_user": by_user}),
         );
     }
     axum::Json(json!({"state": "ok", "services": rows})).into_response()
