@@ -212,7 +212,7 @@ mirrors.fedoraproject.org
 
 # ---- Alpine Linux ----
 dl-cdn.alpinelinux.org
-dl.alpinelinux.org
+!dl.alpinelinux.org
 
 # ---- Proxmox ----
 download.proxmox.com
