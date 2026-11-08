@@ -2839,13 +2839,14 @@ async fn ensure_tsig(s: &Settings) -> Result<(), String> {
     let algorithm = s.text("DDNS_TSIG_ALGORITHM")?;
     api.set_tsigkey(&sec.tsig_name, &algorithm, &sec.tsig_secret)
         .await?;
-    let kind = match s.text("DNS_REPLICATION_ROLE")?.as_str() {
-        "secondary" => "AXFR-MASTER-TSIG",
-        _ => "TSIG-ALLOW-AXFR",
-    };
+    let secondary = s.text("DNS_REPLICATION_ROLE")? == "secondary";
     let key = vec![sec.tsig_name];
     for z in api.zones().await? {
-        api.set_metadata(&z.name, kind, &key).await?;
+        if secondary {
+            api.set_secondary_tsig(&z.name, &key[0]).await?;
+        } else {
+            api.set_metadata(&z.name, "TSIG-ALLOW-AXFR", &key).await?;
+        }
     }
     Ok(())
 }

@@ -682,6 +682,15 @@ pub mod pdns {
             self.call(Method::PUT, &path, Some(body)).await.map(drop)
         }
 
+        // What: TSIG key a secondary uses for AXFR.
+        // Why: the API refuses meta AXFR-MASTER-TSIG.
+        // From: Issue #1683
+        pub async fn set_secondary_tsig(&self, zone: &str, key: &str) -> Result<(), String> {
+            let path = format!("/zones/{}", zone_id(zone));
+            let body = json!({"slave_tsig_key_ids": [zone_id(key)]});
+            self.call(Method::PUT, &path, Some(body)).await.map(drop)
+        }
+
         // What: all zones with serial and checks.
         // Why: sync state compares primary and secondary.
         // From: Issue #1683 | PR #1858
