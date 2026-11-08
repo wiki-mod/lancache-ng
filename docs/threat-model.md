@@ -46,7 +46,7 @@ The table names the source of each component.
 | Docker access (socket in `services` and `ui`) | `deploy/prod/docker-compose.yml`, `services/common/shared.rs` (`docker::Api`) | T6 |
 | DHCP: Kea mode | `services/common/shared.rs` (`kea_conf`, `kea::Api`), `deploy/prod/docker-compose.yml` (`dhcp`), `docs/README.md` (section 5) | T12 |
 | DHCP: dnsmasq-proxy and dnsmasq-relay modes | `services/common/shared.rs` (`dnsmasq_conf`), `docs/README.md` (section 5) | T12, T13 |
-| Zone transfer to secondaries (TSIG, NOTIFY, AXFR) | `services/common/shared.rs` (`pdns_conf::auth`), `services/ui/src/main.rs` (`rotate_tsig`, `TSIG-ALLOW-AXFR`, `AXFR-MASTER-TSIG`) | T5 |
+| Zone transfer to secondaries (TSIG, NOTIFY, AXFR) | `services/common/shared.rs` (`pdns_conf::auth`), `services/ui/src/main.rs` (`rotate_tsig`, `ensure_tsig`: `TSIG-ALLOW-AXFR`, `slave_tsig_key_ids`) | T5 |
 | Secondary-node registration | `services/ui/src/main.rs` (`register`, `registration_token`, `secondary_action`), `deploy/secondary/docker-compose.yml` | T5, T14 |
 | Console exclusion-by-omission | `services/dns/cdn-domains.txt`, `docs/README.md` (section 4) | T4, T10 |
 | Zone/record known-good snapshot + rollback | `services/ui/src/main.rs` (`rollback`, `zone_snapshots_cli`, route `/domains/zone-rollback`), `docs/README.md` (section 6) | T4 |
@@ -332,8 +332,10 @@ on a secondary until the next good transfer)
 - Secondaries replicate with native PowerDNS NOTIFY + AXFR. `pdns_conf::auth`
   allows AXFR by TSIG, not by IP list; `allow-axfr-ips` holds only the optional
   `PDNS_AXFR_FROM` hosts (empty by default). The UI sets the per-zone TSIG
-  metadata (`TSIG-ALLOW-AXFR` on the primary, `AXFR-MASTER-TSIG` on a
-  secondary), so a secondary without the key gets nothing.
+  metadata (`TSIG-ALLOW-AXFR` on the primary; on a secondary
+  `AXFR-MASTER-TSIG`, written through the zone field
+  `slave_tsig_key_ids`, as the API refuses that kind), so a secondary
+  without the key gets nothing.
 - The TSIG key reaches a secondary only through the token-checked registration
   answer (`register`, see T14).
 - Record changes are written only by the Admin UI through the PowerDNS API

@@ -274,6 +274,8 @@ router as the DHCP server; only one DHCP server may be active on a LAN.
 - Kea hands out address, gateway and the LanCache NG DNS servers. The Admin UI
   edits subnets, options, static reservations and leases through the Kea
   control agent.
+- Kea listens only on the network card set in `DHCP_PROXY_INTERFACE`
+  (one or more names). The Admin UI mode form refuses `kea` without it.
 
 **Activation preflight.** Before the stack starts, `setup.sh`
 (`run_kea_dhcp_activation_preflight`) runs one DHCP probe from the `ui` image on
