@@ -1897,7 +1897,7 @@ _ci_pr_fingerprint() {
     # Why: only a published digest was checked (§2.3).
     # From: Issue #1683 | PR #1858
     if [ -n "${_ci_fp_absent}" ]; then
-        ci_log "[CI-INFO-PLAN-0011]" "absent=\"${_ci_fp_absent% }\" reason=\"pair has no image; no fingerprint\""
+        ci_log "[CI-INFO-PLAN-0011]" "absent=\"${_ci_fp_absent% }\" reason=\"pair has no image or no id; no fingerprint\""
         return 1
     fi
     printf '%s' "${_ci_fp_rows}" | _ci_sha256_hex
@@ -1907,8 +1907,10 @@ _ci_pr_fingerprint() {
 # Why: a kept plan probe is not started again.
 # From: Issue #1683 | PR #1858
 _ci_pr_fingerprint_probe() {
-    local id tag
-    id="$(_ci_identity_for "$1" "$2")" || return 2
+    local id tag rc=0
+    id="$(_ci_identity_for "$1" "$2" absent-ok)" || rc=$?
+    [ "${rc}" -ne 1 ] || return 0
+    [ "${rc}" -eq 0 ] || return 2
     tag="$(_ci_image_tag "$1" "$2" "${id}")" || return 2
     _ci_registry_probe_start_tag "${tag}"
 }
@@ -1918,7 +1920,15 @@ _ci_pr_fingerprint_probe() {
 # From: Issue #1683 | PR #1858
 _ci_pr_fingerprint_pair() {
     local id tag digest rc=0
-    id="$(_ci_identity_for "$1" "$2")" || return 2
+    # What: a pair the plan skipped has no id; no value.
+    # Why: only a recorded id names a checked image.
+    # From: Issue #1683 | PR #1858
+    id="$(_ci_identity_for "$1" "$2" absent-ok)" || rc=$?
+    if [ "${rc}" -eq 1 ]; then
+        _ci_fp_absent+="$1/$2 "
+        return 0
+    fi
+    [ "${rc}" -eq 0 ] || return 2
     tag="$(_ci_image_tag "$1" "$2" "${id}")" || return 2
     # What: plan reads the probe it already made.
     # Why: 12 pairs read again cost 5 s on a NOOP run.
@@ -4220,7 +4230,7 @@ _ci_identity_recorded() {
 # Why: no consumer can mint a second id in one run (§17).
 # From: Issue #1683 | PR #1912
 _ci_identity_for() {
-    local service="$1" platform="$2" rec rc=0
+    local service="$1" platform="$2" absent_ok="${3:-}" rec rc=0
     if [ -n "${CI_RUN_IDENTITIES+x}" ]; then
         rec="${CI_RUN_IDENTITIES}"
     elif [ -n "${_ci_plan_ids+x}" ]; then
@@ -4232,7 +4242,11 @@ _ci_identity_for() {
     _ci_identity_recorded "${rec}" "${service}" "${platform}" || rc=$?
     case "${rc}" in
         0) return 0 ;;
+        # What: absent-ok gives rc 1 for a skipped pair.
+        # Why: a plan that skips a service records no id.
+        # From: Issue #1683 | PR #1858
         1)
+            [ "${absent_ok}" != absent-ok ] || return 1
             ci_log "[CI-ERROR-IDENTITY-0015]" "service=\"${service}\" platform=\"${platform}\" reason=\"pair not in the run record; FAIL CLOSED\""
             return 2
             ;;
