@@ -2347,6 +2347,13 @@ ci_cmd_plan_matrix() {
     # Why: assemble tags every service on every push.
     # From: Issue #1683
     if [ "${any}" = true ] || [ -n "${ptargets}" ] || [ "${GITHUB_EVENT_NAME:-}" != pull_request ]; then
+        # What: auth before the ids of unchanged services.
+        # Why: base digests: anonymous reads are rate-limited.
+        # From: Issue #1683
+        if [ "${authed}" = false ]; then
+            _ci_require_ghcr_auth || return "$?"
+            authed=true
+        fi
         _ci_for_all_pairs _ci_plan_record || return "$?"
     fi
     # What: a PR run reuses its last green run.
