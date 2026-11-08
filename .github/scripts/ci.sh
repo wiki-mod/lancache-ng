@@ -11778,7 +11778,7 @@ _ci_gc_reachable() {
     fi
     for subj in "${probes[@]}"; do
         root_hit="$(_ci_capture 1 grep -xF -- "${subj}" "${CI_GC_ROOTS_FILE}")" || return 2
-        [ -z "${root_hit}" ] || { printf '%s\n' "${_CI_GC_REFERENCED}"; return 0; }
+        [ -z "${root_hit}" ] || { printf '%s root\n' "${_CI_GC_REFERENCED}"; return 0; }
     done
     # What: Fail closed unless grace is a positive integer.
     # Why: Empty grace makes floor=now and deletes all.
@@ -11807,7 +11807,7 @@ _ci_gc_reachable() {
     esac
     now="$(date +%s)"
     floor=$(( now - window * 60 ))
-    [ "${created_epoch}" -ge "${floor}" ] && { printf '%s\n' "${_CI_GC_REFERENCED}"; return 0; }
+    [ "${created_epoch}" -ge "${floor}" ] && { printf '%s grace\n' "${_CI_GC_REFERENCED}"; return 0; }
     printf '%s\n' "${_CI_GC_UNREACHABLE}"
 }
 
@@ -11820,8 +11820,12 @@ _ci_gc_classify() {
         ci_log "[CI-ERROR-GC-0004]" "candidate=\"${candidate}\" reason=\"reachability probe failed\""
         return 2
     fi
+    # What: KEEP carries its cause: root or grace.
+    # Why: DoMe 08.11.: a KEEP line must say why.
+    # From: Issue #1683 | PR #1858
     case "${verdict}" in
-        "${_CI_GC_REFERENCED}") printf 'KEEP\n' ;;
+        "${_CI_GC_REFERENCED} root") printf 'KEEP referenced by a protected root\n' ;;
+        "${_CI_GC_REFERENCED} grace") printf 'KEEP younger than unaggregated_grace_minutes\n' ;;
         "${_CI_GC_UNREACHABLE}") printf 'DELETE\n' ;;
         *)
             ci_log "[CI-ERROR-GC-0005]" "candidate=\"${candidate}\" verdict=\"${verdict}\" reason=\"unknown reachability; fix probe, never delete or keep\""
@@ -11924,7 +11928,7 @@ _ci_gc_run() {
             printf 'gc candidate=%s action=DELETE mode=%s\n' "${line}" "${mode}"
         else
             keep=$((keep + 1))
-            printf 'gc candidate=%s action=KEEP\n' "${line}"
+            printf 'gc candidate=%s action=KEEP reason="%s"\n' "${line}" "${action#KEEP }"
         fi
     done <<< "${cands}"
     if [ "${mode}" = "apply" ] && [ -n "${to_delete}" ]; then
@@ -12045,7 +12049,7 @@ ci_cmd_gc_refs() {
         case "${state}" in
             open)
                 keep=$((keep + 1))
-                printf 'gc-refs ref=%s pr=%s state=open action=KEEP\n' "${ref}" "${n}"
+                printf 'gc-refs ref=%s pr=%s state=open action=KEEP reason="PR still open"\n' "${ref}" "${n}"
                 ;;
             closed)
                 del=$((del + 1))
@@ -12075,7 +12079,7 @@ ci_cmd_gc_refs() {
             # From: Issue #1683
             if [[ "${holder}" == *" mixed" ]]; then
                 keep=$((keep + 1))
-                printf 'gc-refs ref=%s holder="%s" state=mixed action=KEEP\n' "${ref}" "${holder}"
+                printf 'gc-refs ref=%s holder="%s" state=mixed action=KEEP reason="mixed promote lock waits for a rerun"\n' "${ref}" "${holder}"
                 continue
             fi
             rc=0; _ci_lock_holder_ended "${holder}" || rc=$?
@@ -12089,7 +12093,7 @@ ci_cmd_gc_refs() {
                     ;;
                 1)
                     keep=$((keep + 1))
-                    printf 'gc-refs ref=%s holder="%s" state=running action=KEEP\n' "${ref}" "${holder}"
+                    printf 'gc-refs ref=%s holder="%s" state=running action=KEEP reason="lock holder run still running"\n' "${ref}" "${holder}"
                     ;;
                 *)
                     ci_log "[CI-ERROR-GC-0044]" "ref=\"${ref}\" holder=\"${holder}\" reason=\"holder run state unknown; neither kept nor deleted\""
@@ -12135,7 +12139,7 @@ ci_cmd_gc_refs() {
             fi
             if [ "${state}" = present ]; then
                 keep=$((keep + 1))
-                printf 'gc-refs ref=%s state=present action=KEEP\n' "${ref}"
+                printf 'gc-refs ref=%s state=present action=KEEP reason="image digest still in the registry"\n' "${ref}"
                 continue
             fi
             del=$((del + 1))
