@@ -186,7 +186,7 @@ _ci_git_run() {
 # Why: one owner for coded command errors and their raw.
 # From: Issue #1683 | PR #1858
 _ci_run() {
-    local okmax=0 strict="" ofile="" secret="" id ctx err out="" rc=0 t0 l
+    local okmax=0 strict="" ofile="" secret="" quiet="" id ctx err out="" rc=0 t0 l
     # What: -m N: rc to N ok; -s: stderr fails; -o F: to F
     # Why: grep rc 1 is a miss; big trees skip bash strings
     # From: Issue #1683 | PR #1858
@@ -195,7 +195,11 @@ _ci_run() {
             -m) okmax="$2"; shift 2 ;;
             -s) strict=1; shift ;;
             -o) ofile="$2"; shift 2 ;;
-            -k) secret=1; shift ;;
+            -k) secret=1 quiet=1; shift ;;
+            # What: -q: stdout holds secrets; never logged.
+            # Why: the register reply carries the TSIG key.
+            # From: Issue #1683 | PR #1858
+            -q) quiet=1; shift ;;
             *) break ;;
         esac
     done
@@ -232,7 +236,7 @@ _ci_run() {
         done <<< "${out}"
     fi
     if [ "${rc}" -gt "${okmax}" ] || { [ -n "${strict}" ] && [ -s "${err}" ]; }; then
-        ci_error "${id}" "${ctx} cmd=\"$1\" rc=${rc}" "$(cat "${err}"; [ -z "${out}" ] || printf 'stdout:\n%s\n' "${out}")"
+        ci_error "${id}" "${ctx} cmd=\"$1\" rc=${rc}" "$(cat "${err}"; [ -z "${out}" ] || [ -n "${quiet}" ] || printf 'stdout:\n%s\n' "${out}")"
         [ -n "${RUNNER_TEMP:-}" ] || rm -f "${err}"
         return 2
     fi
@@ -241,7 +245,7 @@ _ci_run() {
     # What: debug mode also logs the raw stdout.
     # Why: every raw output must be visible in the log.
     # From: Issue #1683 | PR #1984
-    if [ "${_CI_DEBUG_MODE:-}" = true ] && [ -n "${out}" ]; then
+    if [ "${_CI_DEBUG_MODE:-}" = true ] && [ -n "${out}" ] && [ -z "${quiet}" ]; then
         ci_log "[CI-INFO-CORE-0161]" "cmd=\"$1\" stdout:" 2>&"${_CI_CMD_FD:-2}"
         printf '%s\n' "${out}" >&"${_CI_CMD_FD:-2}"
     fi
@@ -13840,7 +13844,7 @@ _ci_register_secondary() {
     # Why: a quote breaks pasted JSON; argv shows secrets.
     # From: Issue #1683 | PR #1858
     body="$(CI_REGISTER_TOKEN="${token}" _ci_capture 0 jq -cn --arg name "${name}" "{token: env.CI_REGISTER_TOKEN, name: \$name}")" || return 2
-    out="$(_ci_capture 0 _ci_curl_secret data "${body}" \
+    out="$(_ci_run -q -s "[CI-ERROR-CORE-0106]" "reason=\"command failed or wrote stderr\"" _ci_curl_secret data "${body}" \
         -sS -w '\n%{http_code}' -H 'Content-Type: application/json' \
         "${url}")" || {
         ci_log "[CI-ERROR-VALIDATE-0083]" "url=\"${url}\" name=\"${name}\" reason=\"secondary register request failed (raw above)\""
@@ -13900,7 +13904,7 @@ _ci_validate_secondary_identity() {
     fi
     au="$(_ci_capture 0 jq -r '.tsig_name // empty' <<< "${a}")" || return 1
     bu="$(_ci_capture 0 jq -r '.tsig_name // empty' <<< "${b}")" || return 1
-    ap="$(_ci_capture 0 jq -r '.tsig_secret // empty' <<< "${a}")" || return 1
+    ap="$(_ci_run -q -s "[CI-ERROR-CORE-0106]" "reason=\"command failed or wrote stderr\"" jq -r '.tsig_secret // empty' <<< "${a}")" || return 1
     bp="$(_ci_capture 0 jq -r '.primary // empty' <<< "${b}")" || return 1
     if [ -z "${au}" ] || [ -z "${bu}" ] || [ -z "${ap}" ] || [ -z "${bp}" ]; then
         ci_log "[CI-ERROR-VALIDATE-0048]" "reason=\"register response missing tsig_name/tsig_secret/primary\""
