@@ -13916,13 +13916,17 @@ _ci_validate_secondary_identity() {
 # Why: probes target the stack; a host proxy must not.
 # From: Issue #1683 | PR #1858
 _ci_validate_probes() {
-    local project="$1" net="$2" pin="$3" rc=0 p
+    local project="$1" net="$2" pin="$3" rc=0 p t0
     local -x NO_PROXY='*' no_proxy='*'
     # What: one log line per passed probe, in probe order
     # Why: a green log must show which probes ran (§79)
     # From: Issue #1683 | PR #1858
     for p in dns proxy proxy_stream_map https_mitm https_dispatch_map \
         ui_dns dns_rollback kea_rollback secondary_identity; do
+        # What: each pass line carries the probe's time.
+        # Why: DoMe 08.11.: which probe makes validate slow.
+        # From: Issue #1683 | PR #1858
+        t0="${EPOCHREALTIME/./}"
         case "${p}" in
             dns) _ci_validate_dns "${project}" ;;
             proxy) _ci_validate_proxy "${project}" ;;
@@ -13935,7 +13939,7 @@ _ci_validate_probes() {
             secondary_identity) _ci_validate_secondary_identity "${project}" ;;
         esac || rc=$?
         [ "${rc}" -eq 0 ] || return "${rc}"
-        ci_log "[CI-INFO-VALIDATE-0143]" "probe=\"${p}\" result=pass"
+        ci_log "[CI-INFO-VALIDATE-0143]" "probe=\"${p}\" result=pass ms=$(((${EPOCHREALTIME/./} - t0) / 1000))"
     done
 }
 
