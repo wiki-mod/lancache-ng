@@ -6588,14 +6588,15 @@ perform_stack_update_flow() {
     fi
 
     migrate_legacy_ca "$install_dir/../../certs" "$_UPDATE_ENV_FILE" 1
-    # What: a finished move from the old root cleans it up
-    # Why: units then start the code behind the current link
-    # From: Issue #1683 | PR #1858
-    if [[ -n "${LANCACHE_UPDATE_SWITCHED_FROM:-}" ]] && is_channel_root_dir "$LANCACHE_UPDATE_SWITCHED_FROM"; then
-        migrate_legacy_ca "$LANCACHE_UPDATE_SWITCHED_FROM/certs" "$_UPDATE_ENV_FILE" 1
+    # What: the root keeps no code once a channel dir runs
+    # Why: switch and quickstart migration both leave it
+    # From: Issue #1683 | PR #2002
+    ensure_default_install_dir
+    if [[ -e "$DEFAULT_INSTALL_DIR/.git" && "$(realpath -m "$install_dir")" != "$(realpath -m "$DEFAULT_INSTALL_DIR/deploy/prod")" ]]; then
+        migrate_legacy_ca "$DEFAULT_INSTALL_DIR/certs" "$_UPDATE_ENV_FILE" 1
         write_lancache_host_services "$(channel_active_link)/deploy/prod" \
             || print_warn "Neither systemd nor OpenRC found — host services were not written"
-        remove_root_checkout "$LANCACHE_UPDATE_SWITCHED_FROM"
+        remove_root_checkout "$DEFAULT_INSTALL_DIR"
     fi
     trap - EXIT
     resume_lancache_convergence_after_update
