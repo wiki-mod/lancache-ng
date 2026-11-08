@@ -2340,12 +2340,9 @@ ci_cmd_plan_matrix() {
     case "${rc}" in 0) ;; 1) rust_validation=false ;; *) return 2 ;; esac
     local promote=false validate ptargets t cand
     ptargets="$(_ci_promote_targets_for_ref)" || return 2
-    # What: the run record covers every target pair.
-    # Why: promote check, validate, promote read all pairs.
+    # What: the run record covers every pair, on a push too.
+    # Why: assemble, validate and promote read all pairs.
     # From: Issue #1683 | PR #1912
-    # What: a push records all pairs for assemble too.
-    # Why: assemble tags every service on every push.
-    # From: Issue #1683
     if [ "${any}" = true ] || [ -n "${ptargets}" ] || [ "${GITHUB_EVENT_NAME:-}" != pull_request ]; then
         # What: auth before the ids of unchanged services.
         # Why: base digests: anonymous reads are rate-limited.
