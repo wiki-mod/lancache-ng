@@ -20,7 +20,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tera::{Context, Tera};
@@ -160,6 +160,10 @@ struct App {
     docker: docker::Api,
     session_key: [u8; 32],
     cache_used: AtomicU64,
+    // What: true once every config was rendered.
+    // Why: dns and proxy wait for these files.
+    // From: Issue #1683 | PR #1858
+    rendered: AtomicBool,
 }
 
 type Shared = State<Arc<App>>;
@@ -2510,6 +2514,7 @@ async fn apply_all(
     let files = render::all(new, &sec).map_err(|e| e.join("; "))?;
     let mut changes = old.diff(new);
     let written = write_files(new, &files)?;
+    app.rendered.store(true, Ordering::Relaxed);
     let snmpd_conf = new.text("SNMPD_CONF_FILE")?;
     let snmpd_new = written.iter().any(|c| c.key == snmpd_conf);
     changes.extend(written);
@@ -3052,11 +3057,15 @@ async fn restart_ui(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
-// What: liveness answer for the healthcheck.
-// Why: no login; says only that the ui answers.
+// What: unhealthy until the configs are rendered.
+// Why: a failed start render hid behind a healthy ui.
 // From: Issue #1683 | PR #1858
-async fn health() -> &'static str {
-    "ok"
+async fn health(State(app): Shared) -> Response {
+    if app.rendered.load(Ordering::Relaxed) {
+        "ok".into_response()
+    } else {
+        (StatusCode::SERVICE_UNAVAILABLE, "configs not rendered").into_response()
+    }
 }
 
 fn asset(kind: &'static str, body: &'static [u8]) -> Response {
@@ -3434,6 +3443,7 @@ async fn main() -> Result<(), String> {
         saved,
         session_key: secret::key_bytes(&key)?,
         cache_used: AtomicU64::new(u64::MAX),
+        rendered: AtomicBool::new(false),
     });
     // What: render every config once at start.
     // Why: owners read the config volume; it starts empty.
