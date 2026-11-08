@@ -1515,17 +1515,17 @@ _ci_github_get() {
         printf '%s\n' "${out}"
         return 0
     fi
-    # What: rate limit: one more read with the job token.
-    # Why: shared runner IPs; no log, callers read 2>&1.
-    # From: Issue #1683 | PR #1858
-    if [[ "${out}" != *"API rate limit exceeded"* ]] || [ -z "${tok}" ]; then
+    # What: failed anonymous read: one more with the token.
+    # Why: rate limits and 504s hit anonymous reads only.
+    # From: Issue #1683 | PR #1997
+    if [ -z "${tok}" ]; then
         printf '%s\n' "${out}"
         return 1
     fi
     # What: the note goes to fd 3, the caller's job log.
     # Why: _ci_retry keeps stderr in the body; jq broke.
     # From: Issue #1683 | PR #1858
-    ci_log "[CI-INFO-FETCH-0009]" "url=\"$1\" reason=\"anonymous rate limit; one read with the job token\"" 2>&3
+    ci_log "[CI-INFO-FETCH-0009]" "url=\"$1\" reason=\"anonymous read failed; one read with the job token\"" 2>&3
     printf 'Authorization: Bearer %s\n' "${tok}" \
         | _ci_download_curl --fail-with-body -sSL -H 'Accept: application/vnd.github+json' -H @- "$1" 2>&1
 }
