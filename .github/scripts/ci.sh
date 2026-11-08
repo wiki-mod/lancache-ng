@@ -2345,7 +2345,7 @@ ci_cmd_plan_matrix() {
     # From: Issue #1683 | PR #1912
     if [ "${any}" = true ] || [ -n "${ptargets}" ] || [ "${GITHUB_EVENT_NAME:-}" != pull_request ]; then
         # What: auth before the ids of unchanged services.
-        # Why: base digests: anonymous reads are rate-limited.
+        # Why: anonymous base digest reads are rate-limited.
         # From: Issue #1683
         if [ "${authed}" = false ]; then
             _ci_require_ghcr_auth || return "$?"
