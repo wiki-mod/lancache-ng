@@ -2444,8 +2444,6 @@ migrate_quickstart_install() (
         || die "Cannot list the services of $old_dir (exit $?); nothing was changed."
     mapfile -t service_list <<< "$services"
     capture_stack_health_baseline "${service_list[@]}"
-    ( cmd_backup --config "$old_dir" ) \
-        || die "Pre-migration backup of $old_dir failed; nothing was changed."
     project=$(compose_project_name "$old_dir" "$old_env") \
         || die "Cannot resolve the compose project of $old_dir (exit $?); nothing was changed."
     # What: a retry without live copies starts afresh
@@ -2528,6 +2526,11 @@ migrate_quickstart_install() (
         missing+=" $volume"
     done <<< "$old_volumes"
     [[ -z "$missing" ]] || die "Quickstart volume(s)${missing} have no home in $PROD_COMPOSE; the quickstart stack was not touched."
+    # What: backup only after every pre-stop check passed
+    # Why: a bad setting must stop before the stack stops
+    # From: Issue #1683
+    ( cmd_backup --config "$old_dir" ) \
+        || die "Pre-migration backup of $old_dir failed; the quickstart stack was not touched."
     stack_compose "$old_dir" "$old_env" stop \
         || die "Failed to stop the quickstart stack in $old_dir (exit $?); the quickstart stack was not touched."
     copies=$(quickstart_volume_dirs "$env_local") \
