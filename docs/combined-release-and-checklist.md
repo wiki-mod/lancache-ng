@@ -410,8 +410,10 @@ that fails (AG-INT-002).
 
 Rules that refer to this document: AG-VAL-027 (a runtime service is part of
 the running-stack validation), AG-VAL-029 (a confirmed bug, CI failure or
-infrastructure incident gets a durable regression check or a stated reason in
-section 11), AG-VAL-033 (a runtime behavior change updates its scenario) and
+infrastructure incident gets its root cause fixed; existing coverage is reused,
+a new check needs a shown gap and its authorization, and a class without
+practical automation is listed in section 11 with reason and manual
+validation), AG-VAL-033 (a runtime behavior change updates its scenario) and
 AG-REL-011 (release readiness never rests on a stale or invalidated record).
 
 Release readiness rests on the CI run of the exact commit: `result-gate`
