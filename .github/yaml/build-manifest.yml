@@ -2236,6 +2236,14 @@ ci_variables:
   # Why: DoMe: raw output of every command must show.
   # From: Issue #1683 | PR #1984
   PROJECT_DEBUG_MODE: "true"
+  # What: seconds gc waits between two deletes.
+  # Why: DoMe: empty repo variable means 2 seconds.
+  # From: Issue #1683 | PR #1858
+  PROJECT_GC_DELETE_PAUSE_SECONDS: 2
+  # What: minutes gc may delete before it ends green.
+  # Why: the gc job timeout keeps time for the checks.
+  # From: Issue #1683 | PR #1858
+  CI_GC_DELETE_MINUTES: 40
 
 # What: runner host values: paths, ages, units, packages.
 # Why: AG-CI-016: ci.sh runner-host reads them; no copy.
@@ -2524,7 +2532,7 @@ repo_variables:
   # Why: GitHub-hosted runners have no LAN route.
   # From: Issue #1683 | PR #1858
   switch: PROJECT_SELFHOSTED_RUNNER_USAGE_CI
-  plain: [CARGO_BUILD_JOBS, PROJECT_CARGO_LTO, PROJECT_CARGO_CODEGENUNIT, PROJECT_NIGHTLY_REF, PROJECT_SELFHOSTED_RUNNER_USAGE_CI, SCCACHE_REDIS_MODE, CI_RUST_VALIDATION, PR_TITLE_LINT_MODE, PROJECT_DEBUG_MODE]
+  plain: [CARGO_BUILD_JOBS, PROJECT_CARGO_LTO, PROJECT_CARGO_CODEGENUNIT, PROJECT_NIGHTLY_REF, PROJECT_SELFHOSTED_RUNNER_USAGE_CI, SCCACHE_REDIS_MODE, CI_RUST_VALIDATION, PR_TITLE_LINT_MODE, PROJECT_DEBUG_MODE, PROJECT_GC_DELETE_PAUSE_SECONDS]
   # What: values with LAN addresses; set only self-hosted.
   # Why: a GitHub-hosted log must show no LAN address.
   # From: Issue #1683 | PR #1858

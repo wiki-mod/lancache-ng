@@ -11678,17 +11678,35 @@ _ci_gc_delete() {
         esac
         return 2
     fi
-    # What: deleted = 404 or a set deleted_at on read back.
-    # Why: AG-WF-031; GitHub keeps soft-deleted versions.
+    # What: _ci_gc_run checks once per package after this.
+    # Why: a read back per delete used up the rate limit.
     # From: Issue #1683 | PR #1858
-    rc=0; out="$(_ci_retry github-read gh api --jq '.deleted_at // ""' "${path}")" || rc=$?
-    if [ "${rc}" -eq 1 ] || { [ "${rc}" -eq 0 ] && [ -n "${out}" ]; }; then return 0; fi
-    if [ "${rc}" -eq 0 ]; then
-        ci_error "[CI-ERROR-GC-0032]" "candidate=\"${candidate}\" reason=\"version still active after the delete\"" "${out}"
-    else
-        ci_error "[CI-ERROR-GC-0033]" "candidate=\"${candidate}\" reason=\"delete not confirmed; read back failed\"" "${out}"
+    return 0
+}
+
+# What: deleted ids ($2) are gone from the active list.
+# Why: AG-WF-031; one listing per package, not per id.
+# From: Issue #1683 | PR #1858
+_ci_gc_check_gone() {
+    local svc="$1" ids="$2" prefix vers v id rc=0
+    local -A active=()
+    prefix="$(_ci_repo)" || return 2
+    vers="$(_ci_gh_versions "${prefix%%/*}" "${prefix#*/}%2F${svc}")" || rc=$?
+    [ "${rc}" -eq 1 ] && return 0
+    if [ "${rc}" -ne 0 ]; then
+        ci_log "[CI-ERROR-GC-0033]" "service=\"${svc}\" reason=\"delete not confirmed; listing failed (raw above)\""
+        return 2
     fi
-    return 2
+    while IFS=$'\t' read -r _ v _; do
+        [ -n "${v}" ] && active["${v}"]=1
+    done <<< "${vers}"
+    while IFS= read -r id; do
+        [ -n "${id}" ] || continue
+        [ -z "${active[${id}]:-}" ] && continue
+        ci_log "[CI-ERROR-GC-0032]" "service=\"${svc}\" id=\"${id}\" reason=\"version still active after the delete\""
+        rc=2
+    done <<< "${ids}"
+    return "${rc}"
 }
 
 # What: the two words a reachability probe may answer.
@@ -11839,8 +11857,9 @@ ci_cmd_gc() {
 # Why: Wrapper owns the roots file; this owns the policy.
 # From: Issue #1683
 _ci_gc_run() {
-    local mode="$1" cands line action policy rc
+    local mode="$1" cands line action policy rc pause mins stop_s svc limited=0
     local del=0 keep=0 deleted=0 to_delete=""
+    local -A gone=()
     if ! cands="$(_ci_gc_candidates)"; then
         ci_log "[CI-ERROR-GC-0031]" "mode=${mode} source=\"_ci_gc_candidates\" reason=\"candidate list not derivable (raw above); no gc\""
         return 2
@@ -11876,8 +11895,31 @@ _ci_gc_run() {
         fi
     done <<< "${cands}"
     if [ "${mode}" = "apply" ] && [ -n "${to_delete}" ]; then
+        # What: pause seconds, delete minutes: SOT or var.
+        # Why: an empty repo variable means the SOT value.
+        # From: Issue #1683 | PR #1858
+        pause="$(_ci_variable PROJECT_GC_DELETE_PAUSE_SECONDS)" || return 2
+        mins="$(_ci_variable CI_GC_DELETE_MINUTES)" || return 2
+        case "${pause}" in
+            ''|*[!0-9]*)
+                ci_log "[CI-ERROR-GC-0049]" "value=\"${pause}\" reason=\"PROJECT_GC_DELETE_PAUSE_SECONDS not whole seconds\""
+                return 2 ;;
+        esac
+        case "${mins}" in
+            ''|*[!0-9]*|0)
+                ci_log "[CI-ERROR-GC-0050]" "value=\"${mins}\" reason=\"CI_GC_DELETE_MINUTES not a positive integer\""
+                return 2 ;;
+        esac
+        stop_s=$(( SECONDS + mins * 60 ))
         while IFS= read -r line; do
             [ -n "${line}" ] || continue
+            # What: delete time used up ends the run green.
+            # Why: the job timeout leaves time for checks.
+            # From: Issue #1683 | PR #1858
+            if [ "${SECONDS}" -ge "${stop_s}" ]; then
+                ci_log "[CI-INFO-GC-0051]" "deleted=${deleted} left=$((del - deleted)) reason=\"delete time used up; the next gc run goes on\""
+                break
+            fi
             # What: Re-check reachability before delete.
             # Why: Re-check closes a TOCTOU delete gap.
             # From: Issue #1683
@@ -11886,12 +11928,17 @@ _ci_gc_run() {
                 ci_log "[CI-INFO-GC-0011]" "candidate=\"${line}\" reason=\"referenced at delete time; skipped\""
                 continue
             fi
+            # What: a pause before each delete, not the 1st.
+            # Why: DoMe: stay far below the hour API limit.
+            # From: Issue #1683 | PR #1858
+            [ "${deleted}" -eq 0 ] || sleep "${pause}"
             rc=0; _ci_gc_delete "${line}" || rc=$?
             # What: a used-up rate limit ends the run green.
             # Why: a 60 min job is under a rate window.
             # From: Issue #1683
             if [ "${rc}" -eq 3 ]; then
                 ci_log "[CI-INFO-GC-0048]" "deleted=${deleted} left=$((del - deleted)) reason=\"API rate limit used up; the next gc run goes on\""
+                limited=1
                 break
             fi
             if [ "${rc}" -ne 0 ]; then
@@ -11899,7 +11946,19 @@ _ci_gc_run() {
                 return 2
             fi
             deleted=$((deleted + 1))
+            svc="$(_ci_tab_field "${line}" 5)" || return 2
+            gone["${svc}"]+="$(_ci_tab_field "${line}" 2)"$'\n' || return 2
         done <<< "${to_delete}"
+        # What: no API calls left: the next listing checks.
+        # Why: a still active version is listed again then.
+        # From: Issue #1683 | PR #1858
+        if [ "${limited}" -eq 1 ]; then
+            ci_log "[CI-INFO-GC-0052]" "unchecked=${deleted} reason=\"rate limit; the next gc listing shows any version still active\""
+        else
+            for svc in "${!gone[@]}"; do
+                _ci_gc_check_gone "${svc}" "${gone[${svc}]}" || return 2
+            done
+        fi
     fi
     printf 'gc result=classified keep=%s delete=%s deleted=%s mode=%s\n' "${keep}" "${del}" "${deleted}" "${mode}"
     return 0
