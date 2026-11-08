@@ -12681,9 +12681,21 @@ _ci_validate_teardown() {
     # Why: the label sweep frees the slot without the file.
     # From: Issue #1683 | PR #1858
     if compose="$(_ci_compose_file)"; then
+        local since ev line
+        since="${EPOCHREALTIME}"
         _ci_run "[CI-ERROR-VALIDATE-0058]" "project=\"${project}\" reason=\"compose down failed\"" \
             docker compose -p "${project}" -f "${compose}" \
             down -v --remove-orphans >&2 || rc=2
+        # What: log each container's stop signal and exit.
+        # Why: DoMe 08.11.: which container makes down slow.
+        # From: Issue #1683 | PR #1858
+        ev="$(_ci_run "[CI-ERROR-VALIDATE-0145]" "project=\"${project}\" reason=\"cannot read stop events\"" \
+            docker events --since "${since}" --until "${EPOCHREALTIME}" \
+            --filter "${label}" --filter type=container --filter event=kill --filter event=die \
+            --format '{{.Time}} {{.Action}} {{index .Actor.Attributes "name"}} signal={{index .Actor.Attributes "signal"}} exit={{index .Actor.Attributes "exitCode"}}')" || rc=2
+        while IFS= read -r line; do
+            [ -z "${line}" ] || ci_log "[CI-INFO-VALIDATE-0146]" "${line}"
+        done <<< "${ev}"
     else
         rc=2
     fi
