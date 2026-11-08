@@ -18737,7 +18737,7 @@ _ci_unreferenced_names() {
 }
 
 # What: AG-GH-017 sweep: old work branch, no PR or issue.
-# Why: repo-wide by nature (docs §98); a finding is rc 1.
+# Why: repo-wide by nature (docs §98); a finding warns.
 # From: Issue #1683 | PR #1858
 _ci_check_orphaned_branches() {
     local repo min_age now exact regexes raw src rows ref rc=0
@@ -18855,8 +18855,14 @@ _ci_check_orphaned_branches() {
     while IFS= read -r branch; do
         found+=("branch=\"${branch}\" last_commit=${when[${branch}]} author=\"${who[${branch}]}\"")
     done <<< "${out}"
-    ci_error "[CI-ERROR-CHECK-0139]" "orphaned=${#found[@]} scanned=${scanned} checked=${old} reason=\"AG-GH-017: no PR and no issue reference\"" "$(printf '%s\n' "${found[@]}")"
-    return 1
+    # What: a finding is a warning; the job stays green.
+    # Why: DoMe 08.11.: report old branches, never fail.
+    # From: Issue #1683 | PR #1858
+    ci_error "[CI-WARN-CHECK-0210]" "orphaned=${#found[@]} scanned=${scanned} checked=${old} reason=\"AG-GH-017: no PR and no issue reference\"" "$(printf '%s\n' "${found[@]}")"
+    for branch in "${found[@]}"; do
+        printf '::warning title=AG-GH-017 no PR or issue::%s\n' "${branch}" >&2
+    done
+    return 0
 }
 
 # What: print top-level runs.using from an action manifest.
