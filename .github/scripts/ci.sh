@@ -6719,7 +6719,7 @@ _ci_job_settings_read() {
 # Why: AG-CI-002/006/016: one owner, no YAML copies.
 # From: Issue #1683 | PR #1858
 ci_cmd_job_settings() {
-    local runner json job vdir
+    local runner json job vdir groups probes
     local -a js_jobs=() js_pairs=()
     local -A js_min=()
     _ci_job_settings_read runner js_jobs js_min || return 2
@@ -6732,7 +6732,13 @@ ci_cmd_job_settings() {
     # From: Issue #1683 | PR #1912
     vdir="$(_ci_variable CI_VALIDATE_SHARED_DIR)" || return 2
     _ci_step_output "[CI-ERROR-JOBS-0007]" validate-dir "${vdir}" || return 2
-    printf 'runner=%s\ntimeouts=%s\nvalidate-dir=%s\n' "${runner}" "${json}" "${vdir}"
+    # What: the SOT probe groups as a JSON list.
+    # Why: one validate matrix job per group, all at once.
+    # From: Issue #1683 | PR #1858
+    groups="$(_ci_variable CI_VALIDATE_PROBE_GROUPS)" || return 2
+    probes="$(_ci_capture 0 jq -cn --arg g "${groups}" "\$g | split(\";\") | map(gsub(\"^ +| +\$\"; \"\")) | map(select(length > 0))")" || return 2
+    _ci_step_output "[CI-ERROR-JOBS-0009]" validate-probes "${probes}" || return 2
+    printf 'runner=%s\ntimeouts=%s\nvalidate-dir=%s\nvalidate-probes=%s\n' "${runner}" "${json}" "${vdir}" "${probes}"
 }
 
 # What: Lowercased owner/repo for GHCR image refs.
@@ -13928,13 +13934,25 @@ _ci_validate_secondary_identity() {
 # Why: probes target the stack; a host proxy must not.
 # From: Issue #1683 | PR #1858
 _ci_validate_probes() {
-    local project="$1" net="$2" pin="$3" rc=0 p t0
+    local project="$1" net="$2" pin="$3" rc=0 p t0 list
+    local -a probes=()
     local -x NO_PROXY='*' no_proxy='*'
+    # What: this matrix job's probes, else every SOT group.
+    # Why: groups run as parallel jobs; local runs do all.
+    # From: Issue #1683 | PR #1858
+    list="${CI_VALIDATE_PROBES:-}"
+    if [ -z "${list}" ]; then
+        list="$(_ci_variable CI_VALIDATE_PROBE_GROUPS)" || return 2
+    fi
+    read -r -a probes <<< "${list//;/ }"
+    if [ "${#probes[@]}" -eq 0 ]; then
+        ci_log "[CI-ERROR-VALIDATE-0149]" "reason=\"no validate probe to run\""
+        return 2
+    fi
     # What: one log line per passed probe, in probe order
     # Why: a green log must show which probes ran (§79)
     # From: Issue #1683 | PR #1858
-    for p in dns proxy proxy_stream_map https_mitm https_dispatch_map \
-        ui_dns dns_rollback kea_rollback secondary_identity; do
+    for p in "${probes[@]}"; do
         # What: each pass line carries the probe's time.
         # Why: DoMe 08.11.: which probe makes validate slow.
         # From: Issue #1683 | PR #1858
@@ -13949,6 +13967,10 @@ _ci_validate_probes() {
             dns_rollback) _ci_validate_dns_rollback "${project}" ;;
             kea_rollback) _ci_validate_kea_rollback "${project}" "${net}" "${pin}" ;;
             secondary_identity) _ci_validate_secondary_identity "${project}" ;;
+            *)
+                ci_log "[CI-ERROR-VALIDATE-0150]" "probe=\"${p}\" reason=\"unknown validate probe\""
+                rc=2
+                ;;
         esac || rc=$?
         [ "${rc}" -eq 0 ] || return "${rc}"
         ci_log "[CI-INFO-VALIDATE-0143]" "probe=\"${p}\" result=pass ms=$(((${EPOCHREALTIME/./} - t0) / 1000))"

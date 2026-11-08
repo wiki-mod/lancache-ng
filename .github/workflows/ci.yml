@@ -106,6 +106,7 @@ jobs:
       runner: ${{ steps.jobs.outputs.runner }}
       timeouts: ${{ steps.jobs.outputs.timeouts }}
       validate-dir: ${{ steps.jobs.outputs.validate-dir }}
+      validate-probes: ${{ steps.jobs.outputs.validate-probes }}
       releases: ${{ steps.releases.outputs.releases }}
       any-build: ${{ steps.plan.outputs.any-build }}
       promote: ${{ steps.plan.outputs.promote }}
@@ -380,6 +381,13 @@ jobs:
     # From: Issue #1683 | PR #1912
     runs-on: ${{ needs.plan.outputs.runner }}
     timeout-minutes: ${{ fromJSON(needs.plan.outputs.timeouts)['validate'] }}
+    # What: one job per SOT probe group, all at once.
+    # Why: DoMe 08.11.: serial probes made validate slow.
+    # From: Issue #1683 | PR #1858
+    strategy:
+      fail-fast: false
+      matrix:
+        probes: ${{ fromJSON(needs.plan.outputs.validate-probes) }}
     container:
       image: ${{ needs.plan.outputs.image }}
       credentials: *ghcr_credentials
@@ -407,6 +415,7 @@ jobs:
         id: validate
         env:
           CI_RUN_IDENTITIES: *run_ids
+          CI_VALIDATE_PROBES: ${{ matrix.probes }}
         run: bash .github/scripts/ci.sh validate
 
   # What: promote channels the ref maps to

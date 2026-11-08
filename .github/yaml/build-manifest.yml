@@ -2126,6 +2126,10 @@ ci_variables:
   # Why: same path both sides; the daemon binds host paths
   # From: Issue #1683 | PR #1912
   CI_VALIDATE_SHARED_DIR: /var/tmp/ci-validate
+  # What: validate probe groups, ; apart; one job each.
+  # Why: groups run at once; probes in a group in order.
+  # From: Issue #1683 | PR #1858
+  CI_VALIDATE_PROBE_GROUPS: dns proxy proxy_stream_map https_mitm https_dispatch_map ui_dns dns_rollback;kea_rollback;secondary_identity
   # What: DNS probe label, TEST-NET net, TTL, waits, polls
   # Why: AG-CI-006: probe values and waits have one owner.
   # From: Issue #1683 | PR #1858
