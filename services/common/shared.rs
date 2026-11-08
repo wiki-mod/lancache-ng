@@ -1020,6 +1020,11 @@ pub mod docker {
     // From: Issue #1683 | PR #1858
     pub const SERVICE_LABEL: &str = "com.docker.compose.service";
 
+    // What: compose label of a "compose run" container.
+    // Why: fixed by Docker Compose; "True" on run only.
+    // From: Issue #1683
+    pub const ONEOFF_LABEL: &str = "com.docker.compose.oneoff";
+
     // What: URL host used over the unix socket.
     // Why: HTTP needs a host; the socket ignores it.
     // From: Issue #1683 | PR #1858
