@@ -298,7 +298,7 @@ dependencies, across every ecosystem this repository uses.
   fetched by Cargo from crates.io during the Docker build stage; no
   vendored/copied third-party Rust source is committed. The Mozilla
   Public Suffix List is not committed either: `setup.sh` loads it at
-  install and update time, and `ci.sh psl` loads it in CI, into
+  install and update time, and `ci.sh update-psl` loads it in CI, into
   `services/ui/nginx/public_suffix_list.dat` (ignored by git).
 
 ## Local checks
