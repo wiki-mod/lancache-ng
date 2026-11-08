@@ -196,7 +196,7 @@ async fn containers(s: &Settings, f: &mut Findings, m: &mut Memory) -> Result<()
         let health = Health::from_inspect(&inspect);
         let (word, colour) = health.word_and_colour();
         let by_user = stopped.iter().any(|x| x == service);
-        let wanted = !by_user && !(dhcp_off && service == dhcp_service);
+        let wanted = !(by_user || dhcp_off && service == dhcp_service);
         f.containers.push(serde_json::json!({
             "service": service, "name": name, "health": word,
             "colour": colour, "stopped_by_user": by_user,
