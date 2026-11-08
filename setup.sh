@@ -2516,7 +2516,7 @@ migrate_quickstart_install() (
         [[ -n "$volume" ]] || continue
         list_has_line "$volume" "$prod_volumes" && continue
         awk -v v="$volume" '$1 == v { f = 1 } END { exit !f }' <<< "$rows" && continue
-        # What: SOT-listed log volumes stay, untouched
+        # What: SOT-listed v0.3 volumes stay, untouched
         # Why: nothing is deleted; the operator decides
         # From: Issue #1683 | PR #1858
         if list_has_line "$volume" "$kept_list"; then
