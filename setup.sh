@@ -5900,11 +5900,21 @@ capture_stack_health_baseline() {
 wait_for_stack_health() {
     local timeout_seconds="$1"
     shift
-    local -a services=("$@")
+    local -a services=()
     local interval_seconds elapsed=0 svc all_healthy baseline
+    local dhcp_svc dhcp_mode
     local -a regressed_services pre_existing_unhealthy_services
 
     interval_seconds=$(prod_env_default SETUP_HEALTH_POLL_SECONDS) || exit $?
+    # What: no wait for dhcp while DHCP_MODE is off
+    # Why: the ui stops dhcp on purpose in mode off
+    # From: Issue #1683 | PR #2001
+    dhcp_svc=$(prod_env_default DHCP_SERVICE) || exit $?
+    dhcp_mode=$(env_or_sot_default DHCP_MODE "$_UPDATE_ENV_FILE") || exit $?
+    for svc in "$@"; do
+        [[ "$dhcp_mode" = "off" && "$svc" = "$dhcp_svc" ]] && continue
+        services+=("$svc")
+    done
 
     while (( elapsed < timeout_seconds )); do
         all_healthy=1
