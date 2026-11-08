@@ -27,16 +27,16 @@
 {# Why: add and edit forms differ only in values and tone #}
 {# From: Issue #1683 | PR #1912 #}
 {% component subnet_fields(t, tone, ntp_auto, ntp_url, lease_time, subnet="", gateway="", dns_primary="", dns_secondary="", pool_start="", pool_end="", domain="", ntp_servers="") %}<div class="grid grid-cols-2 gap-3">
-            {{ <text_field label={t.subnet_cidr} name="subnet" tone={tone} value={subnet} placeholder="192.168.2.0/24" required={true}/> }}
-            {{ <text_field label="Gateway" name="gateway" tone={tone} value={gateway} placeholder="192.168.2.1" required={true}/> }}
-            {{ <text_field label={t.dns_server_1} name="dns_primary" tone={tone} value={dns_primary} placeholder="192.168.2.10" required={true}/> }}
-            {{ <text_field label={t.dns_server_2} name="dns_secondary" tone={tone} value={dns_secondary} placeholder="192.168.2.11"/> }}
-            {{ <text_field label={t.ip_pool_start} name="pool_start" tone={tone} value={pool_start} placeholder="192.168.2.100" required={true}/> }}
-            {{ <text_field label={t.ip_pool_end} name="pool_end" tone={tone} value={pool_end} placeholder="192.168.2.200" required={true}/> }}
+            {{ <text_field label={t.subnet_cidr} name="subnet" tone={tone} value={subnet} placeholder="192.168.1.0/24" required={true}/> }}
+            {{ <text_field label="Gateway" name="gateway" tone={tone} value={gateway} placeholder="192.168.1.1" required={true}/> }}
+            {{ <text_field label={t.dns_server_1} name="dns_primary" tone={tone} value={dns_primary} placeholder="192.168.1.10" required={true}/> }}
+            {{ <text_field label={t.dns_server_2} name="dns_secondary" tone={tone} value={dns_secondary} placeholder="192.168.1.11"/> }}
+            {{ <text_field label={t.ip_pool_start} name="pool_start" tone={tone} value={pool_start} placeholder="192.168.1.100" required={true}/> }}
+            {{ <text_field label={t.ip_pool_end} name="pool_end" tone={tone} value={pool_end} placeholder="192.168.1.200" required={true}/> }}
             {{ <text_field label={t.lease_time_s} name="lease_time" tone={tone} value={lease_time ~ ""}/> }}
             {{ <text_field label={t.dhcp_domain_label} name="domain" tone={tone} value={domain}/> }}
             <div class="col-span-2">
-              {{ <text_field label={t.ntp_server} name="ntp_servers" tone={tone} value={ntp_servers} placeholder="192.0.2.123, 192.0.2.124" hint={t.hint_ntp_list}/> }}
+              {{ <text_field label={t.ntp_server} name="ntp_servers" tone={tone} value={ntp_servers} placeholder="192.0.2.123, 192.0.2.124"/> }}
               {% if ntp_auto %}
               {{ <ntp_auto_hint ntp_url={ntp_url} t={t}/> }}
               {% endif %}
@@ -128,45 +128,32 @@
      Why: the mockup groups DHCP by mode
      From: Issue #1683 | PR #1976 #}
   <div class="subtabs">
-    {% if dhcp_has_kea %}<button type="button" data-dhcp-tab="server" class="subtab dhcp-tab-btn">DHCP-Server</button>{% endif %}
-    {% if dhcp_is_dnsmasq and not dhcp_is_relay %}<button type="button" data-dhcp-tab="proxy" class="subtab dhcp-tab-btn">DHCP-Proxy</button>{% endif %}
-    {% if dhcp_is_relay %}<button type="button" data-dhcp-tab="relay" class="subtab dhcp-tab-btn">DHCP-Relay</button>{% endif %}
+    <button type="button" data-dhcp-tab="server" class="subtab dhcp-tab-btn">DHCP-Server</button>
+    <button type="button" data-dhcp-tab="proxy" class="subtab dhcp-tab-btn">DHCP-Proxy</button>
+    <button type="button" data-dhcp-tab="relay" class="subtab dhcp-tab-btn">DHCP-Relay</button>
     <button type="button" data-dhcp-tab="precheck" class="subtab dhcp-tab-btn">{{ t.dhcp_precheck }}</button>
   </div>
 
 
   <div data-dhcp-panel="proxy" class="hidden">
-    {% if dhcp_is_dnsmasq and not dhcp_is_relay %}
       {# What: ProxyDHCP values and their edit form #}
       {# Why: options reach only PXE clients in this mode #}
       {# From: Issue #1683 | PR #1912 #}
       <div class="text-sm text-amber-300 space-y-2">
-        <p>{{ t.dnsmasq_proxy_mode_is_active_this }}</p>
-        <ul class="list-disc pl-5 space-y-1 text-amber-200">
-          <li>{{ t.proxy_dhcp_pxe_helper_only_the }}</li>
-          <li>{{ t.every_option_below_router_ntp_domain }}</li>
-          <li>{{ t.no_lease_time_field_dnsmasq_never }}</li>
-          <li>{{ t.all_fields_below_are_plain_text }}</li>
-        </ul>
-        <div class="grid gap-2 md:grid-cols-2 rounded border border-amber-500/30 bg-slate-900/50 p-3 text-xs">
-          <div><span class="text-slate-400">{{ t.subnet_start }}</span> <span class="text-white">{{ dhcp_proxy_subnet_start }}</span></div>
-          <div><span class="text-slate-400">{{ t.upstream_dhcp_info_only }}</span> <span class="text-white">{{ dhcp_upstream_dhcp_ip }}</span></div>
-          <div><span class="text-slate-400">DNS 1:</span> <span class="text-white">{{ dhcp_dns_primary }}</span></div>
-          <div><span class="text-slate-400">DNS 2:</span> <span class="text-white">{{ dhcp_dns_secondary }}</span></div>
-        </div>
+        {% if dhcp_is_dnsmasq and not dhcp_is_relay %}<p>{{ t.dnsmasq_proxy_mode_is_active_this }}</p>{% else %}<p class="text-lg font-bold text-orange-400">{{ t.dhcp_proxy_is_not_the_active }}</p>{% endif %}
+        <p class="text-amber-200">{{ t.proxy_dhcp_pxe_helper_only_the }}</p>
         <form method="post" action="{{ routes.dhcp_proxy | safe }}" class="space-y-3 rounded border border-amber-500/30 bg-slate-900/50 p-4">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <div class="grid gap-3 md:grid-cols-2">
-            {{ <text_field label={t.proxy_subnet_start} name="dhcp_subnet_start" value={dhcp_proxy_subnet_start} placeholder="10.0.0.0" required={true}/> }}
-            {{ <text_field label={t.upstream_dhcp_server_documentation_only} name="upstream_dhcp_ip" value={dhcp_upstream_dhcp_ip} placeholder="10.0.0.1" required={true} hint={t.hint_proxy_upstream}/> }}
-            {{ <text_field label={t.dns_server_1} name="dhcp_dns_primary" value={dhcp_dns_primary} placeholder="10.0.0.10" required={true}/> }}
-            {{ <text_field label={t.dns_server_2} name="dhcp_dns_secondary" value={dhcp_dns_secondary} placeholder="10.0.0.11"/> }}
-            {{ <text_field label={t.listen_interface_optional} name="dhcp_proxy_interface" value={dhcp_proxy_interface} placeholder="eth0" hint={t.hint_proxy_interface}/> }}
-            {{ <text_field label={t.router_gateway_option_optional_pxe_scope} name="dhcp_proxy_router" value={dhcp_proxy_router} placeholder="10.0.0.1"/> }}
-            {{ <text_field label={t.ntp_servers_optional_pxe_scoped} name="dhcp_ntp_servers" value={dhcp_ntp_servers} placeholder="10.0.0.20, 10.0.0.21" hint={t.hint_ipv4_list}/> }}
+            {{ <text_field label={t.proxy_subnet_start} name="dhcp_subnet_start" value={dhcp_proxy_subnet_start} placeholder="192.168.1.0"/> }}
+            {{ <text_field label={t.dns_server_1} name="dhcp_dns_primary" value={dhcp_dns_primary} placeholder="192.168.1.10"/> }}
+            {{ <text_field label={t.dns_server_2} name="dhcp_dns_secondary" value={dhcp_dns_secondary} placeholder="192.168.1.11"/> }}
+            {{ <text_field label={t.listen_interface_optional} name="dhcp_proxy_interface" value={dhcp_proxy_interface} placeholder="eth0"/> }}
+            {{ <text_field label={t.router_gateway_option_optional_pxe_scope} name="dhcp_proxy_router" value={dhcp_proxy_router} placeholder="192.168.1.1"/> }}
+            {{ <text_field label={t.ntp_servers_optional_pxe_scoped} name="dhcp_ntp_servers" value={dhcp_ntp_servers} placeholder="192.168.1.20, 192.168.1.21"/> }}
             {{ <text_field label={t.domain_option_optional_pxe_scoped} name="dhcp_proxy_domain" value={dhcp_proxy_domain} placeholder={dhcp_domain}/> }}
             {{ <text_field label={t.pxe_boot_filename_optional} name="dhcp_proxy_boot_filename" value={dhcp_proxy_boot_filename} placeholder="pxelinux.0"/> }}
-            {{ <text_field label={t.pxe_boot_server_address_optional} name="dhcp_proxy_boot_server" value={dhcp_proxy_boot_server} placeholder="10.0.0.5" hint={t.hint_boot_server}/> }}
+            {{ <text_field label={t.pxe_boot_server_address_optional} name="dhcp_proxy_boot_server" value={dhcp_proxy_boot_server} placeholder="192.168.1.5"/> }}
             <div class="col-span-2">
               <label class="block text-xs text-slate-400 mb-1">{{ t.additional_safe_custom_options_optional }}</label>
               <textarea name="dhcp_proxy_custom_options" rows="3" placeholder="60:PXEClient&#10;93:0"
@@ -179,37 +166,28 @@
             {{ t.save_proxy_values }}
           </button>
         </form>
-    {% else %}
-    <p class="section-sub">{{ t.dhcp_proxy_is_not_the_active }}</p>
-    {% endif %}
+      </div>
   </div>
 
   <div data-dhcp-panel="relay" class="hidden">
-    {% if dhcp_is_relay %}
       {# What: real DHCP relay to the upstream server #}
       {# Why: client broadcasts cannot reach upstream #}
       {# From: Issue #844 #}
       <div class="text-sm text-sky-300 space-y-2">
-        <p>{{ t.dnsmasq_relay_mode_is_active_dnsmasq }}</p>
-        <ul class="list-disc pl-5 space-y-1 text-sky-200">
-          <li>{{ t.unlike_proxydhcp_mode_this_is_a }}</li>
-          <li>{{ t.only_two_values_are_needed_this }} <code>giaddr</code>{{ t.which_the_upstream_server_uses_to }}</li>
-          <li>{{ t.no_subnet_dns_pxe_fields_here }}</li>
-        </ul>
+        {% if dhcp_is_relay %}<p>{{ t.dnsmasq_relay_mode_is_active_dnsmasq }}</p>{% else %}<p class="text-lg font-bold text-orange-400">{{ t.dhcp_relay_is_not_the_active }}</p>{% endif %}
+        <p class="text-sky-200">{{ t.unlike_proxydhcp_mode_this_is_a }}</p>
         <form method="post" action="{{ routes.dhcp_relay | safe }}" class="space-y-3 rounded border border-sky-500/30 bg-slate-900/50 p-4">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <div class="grid gap-3 md:grid-cols-2">
-            {{ <text_field label={t.relay_local_address_this_relay_s} name="dhcp_relay_local_addr" value={dhcp_relay_local_addr} placeholder="192.168.1.2" required={true} hint={t.hint_relay_local}/> }}
-            {{ <text_field label={t.upstream_dhcp_server} name="upstream_dhcp_ip" value={dhcp_upstream_dhcp_ip} placeholder="10.0.0.1" required={true} hint={t.hint_relay_upstream}/> }}
+            {{ <text_field label={t.relay_local_address_this_relay_s} name="dhcp_relay_local_addr" value={dhcp_relay_local_addr} placeholder="192.168.1.2"/> }}
+            {{ <text_field label={t.upstream_dhcp_server} name="upstream_dhcp_ip" value={dhcp_upstream_dhcp_ip} placeholder="192.168.1.1" required={true}/> }}
           </div>
           <button type="submit"
                   class="btn btn-sky">
             {{ t.save_relay_values }}
           </button>
         </form>
-    {% else %}
-    <p class="section-sub">{{ t.dhcp_relay_is_not_the_active }}</p>
-    {% endif %}
+      </div>
   </div>
 
   <div data-dhcp-panel="precheck" class="hidden">
@@ -253,7 +231,7 @@
         </ul>
       </div>
     {% endif %}
-    {% if dhcp_has_kea %}
+    {% if not dhcp_has_kea %}<p class="text-lg font-bold text-orange-400">{{ t.dhcp_server_is_not_the_active }}</p>{% endif %}
   {# What: toggles Kea dhcp-ddns.enable-updates live #}
   {# Why: DNS writes are a separate decision from DHCP #}
   {# From: Issue #1076 #}
@@ -427,7 +405,7 @@
           </select>
         </div>
         {{ <text_field label={t.mac_address} name="mac" tone={raised_tone} placeholder="AA:BB:CC:DD:EE:FF" required={true}/> }}
-        {{ <text_field label={t.ip_address} name="ip" tone={raised_tone} placeholder="10.0.0.50" required={true}/> }}
+        {{ <text_field label={t.ip_address} name="ip" tone={raised_tone} placeholder="192.168.1.50" required={true}/> }}
         {{ <text_field label="Hostname" name="hostname" tone={raised_tone} placeholder="mydevice"/> }}
       </div>
       <p class="text-xs text-slate-500">{{ t.the_reservation_uses_simple_fields_extra }}</p>
@@ -558,9 +536,6 @@
     </div>
   </div>
 
-    {% else %}
-    <p class="section-sub">{{ t.dhcp_server_is_not_the_active }}</p>
-    {% endif %}
   </div>
 </div>
 {% endblock %}
@@ -586,12 +561,28 @@
   // Why: DHCP off must not open on an inactive tab.
   // From: Issue #1683 | PR #1976
   const MODE_TAB = { kea: 'server', 'dnsmasq-proxy': 'proxy', 'dnsmasq-relay': 'relay' };
-  let first = MODE_TAB['{{ dhcp_mode }}'] || 'precheck';
+  // What: only the tab of the mode picked above shows.
+  // Why: DoMe 07.11.: pick shows it; save activates it.
+  // From: Issue #1683 | PR #1991
+  function showModeTab(mode) {
+    const keep = MODE_TAB[mode];
+    Object.values(MODE_TAB).forEach((tab) => {
+      const b = document.querySelector('[data-dhcp-tab="' + tab + '"]');
+      if (b) b.hidden = tab !== keep;
+    });
+    return keep || 'precheck';
+  }
+  let first = showModeTab('{{ dhcp_mode }}');
   try {
     const saved = sessionStorage.getItem('dhcpTab');
-    if (saved && document.querySelector('[data-dhcp-tab="' + saved + '"]')) first = saved;
+    const b = saved && document.querySelector('[data-dhcp-tab="' + saved + '"]');
+    if (b && !b.hidden) first = saved;
   } catch (e) { /* blocked */ }
   setDhcpTab(first);
+  const modeSelect = document.querySelector('select[name="dhcp_mode"]');
+  if (modeSelect) {
+    modeSelect.addEventListener('change', () => setDhcpTab(showModeTab(modeSelect.value)));
+  }
 </script>
 <script>
   // What: folds the mode comparison open and shut
@@ -604,7 +595,6 @@
     document.getElementById('compare-caret').textContent = open ? '▾' : '▸';
   });
 </script>
-{% if dhcp_has_kea %}
 <script>
 // What: shows or hides the new-subnet form
 // Why: the form stays hidden until the button is pressed
@@ -623,7 +613,6 @@ function toggleEditSubnet(id) {
 }
 
 </script>
-{% endif %}
 <script>
 // What: empties and hides one detail list of the DHCP check
 // Why: one owner for both lists; no stale field remains

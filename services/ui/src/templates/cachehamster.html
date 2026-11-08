@@ -99,14 +99,19 @@
       <div class="field"><label for="hamster-queues">{{ t.hamster_queues }}</label><input type="number" id="hamster-queues" name="CACHEHAMSTER_QUEUES" min="1" max="64" value="{{ v.CACHEHAMSTER_QUEUES }}"></div>
       <div class="field"><label for="hamster-mbit">{{ t.hamster_max_mbit }}</label><input type="number" id="hamster-mbit" name="CACHEHAMSTER_MAX_MBIT" min="0" max="100000" value="{{ v.CACHEHAMSTER_MAX_MBIT }}"></div>
       <div class="field"><label for="hamster-window">{{ t.hamster_window }}</label><input type="text" id="hamster-window" name="CACHEHAMSTER_WINDOW" pattern="[0-2][0-9]:[0-5][0-9]-[0-2][0-9]:[0-5][0-9]" placeholder="01:00-06:00" value="{{ v.CACHEHAMSTER_WINDOW }}"></div>
-      <button type="submit" class="btn">{{ t.save }}</button>
+      {# What: Save first, red Log out right beside it. #}
+      {# Why: DoMe 07.11.: one row, log out in red. #}
+      {# From: Issue #871 | PR #1991 #}
+      <div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;">
+        <button type="submit" class="btn">{{ t.save }}</button>
+        {% if hamster and hamster.logged_in %}<button type="submit" form="hamster-logout" class="btn btn-danger">{{ t.log_out }}</button>{% endif %}
+      </div>
     </form>
     <div class="section-title">{{ t.qr_login }}</div>
     {% if hamster and hamster.logged_in %}
     <p class="status-line"><span class="beam-light on"></span>{{ t.logged_in_as }} {{ hamster.account }}{{ t.only_an_encrypted_session_token_is }}</p>
-    <form action="{{ routes.hamster_logout | safe }}" method="post">
+    <form id="hamster-logout" action="{{ routes.hamster_logout | safe }}" method="post">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <button type="submit" class="btn">{{ t.log_out }}</button>
     </form>
     {% else %}
     <p class="section-sub">{{ t.scan_the_code_with_the_steam }}</p>
@@ -114,11 +119,26 @@
     <div id="hamster-qr" style="margin-top:14px;"></div>
     <p class="status-line" id="hamster-login-state"></p>
     {% endif %}
+    {# What: empties the whole cache on a 2nd click #}
+    {# Why: DoMe 07.11.: in settings, not the overview #}
+    {# From: Issue #871 | PR #1991 #}
+    <div class="section-title">{{ t.cache_wipe_title }}</div>
+    <p class="section-sub">{{ t.cache_wipe_hint }}</p>
+    <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+      <button type="button" class="btn btn-danger" data-cache-wipe="{{ routes.hamster_api | replace(from="{op}", to="wipe") | safe }}" data-csrf="{{ csrf_token }}">{{ t.cache_wipe }}</button>
+      <span class="field-hint" data-cache-wipe-state style="margin:0;"></span>
+    </div>
   </div>
 
   {% if hamster and hamster.logged_in %}
   <div class="subtab5-panel" data-ch-panel="library">
-    <button type="button" class="btn" id="hamster-library">{{ t.load_owned_games }}</button>
+    <div class="field-row" style="max-width:none; margin-bottom:18px; align-items:flex-end;">
+      <div class="field" style="margin-bottom:0; flex:0 0 auto;"><button type="button" class="btn" id="hamster-library">{{ t.load_owned_games }}</button></div>
+      <div class="field" style="margin-bottom:0; flex:1;">
+        <label for="hamster-find">{{ t.search }}</label>
+        <input type="text" id="hamster-find" placeholder="{{ t.games_search }}">
+      </div>
+    </div>
     <table class="table" id="hamster-games"></table>
   </div>
   {% endif %}
@@ -234,17 +254,87 @@
       }).catch(function (e) { back(); window.LancacheUi.fail(e); });
     });
   }
+  // What: filter the games by name or app id.
+  // Why: DoMe 07.11.: a regex search was missing.
+  // From: Issue #871 | PR #1991
+  const find = document.getElementById('hamster-find');
+  function findGames() {
+    const t = document.getElementById('hamster-games');
+    if (!find || !t) { return; }
+    const q = find.value.trim();
+    let re = null;
+    try { re = new RegExp(q, 'i'); } catch (err) { re = null; }
+    find.style.borderColor = re ? '' : 'var(--danger, #e5484d)';
+    Array.prototype.slice.call(t.rows, 1).forEach(function (row) {
+      const text = row.cells[0].textContent + ' ' + row.cells[1].textContent;
+      row.hidden = q !== '' && !(re ? re.test(text) : text.toLowerCase().includes(q.toLowerCase()));
+    });
+  }
+  if (find) { find.addEventListener('input', findGames); }
+  // What: cache use and evict per library game.
+  // Why: DoMe 07.11.: empty one game, not everything.
+  // From: Issue #871 | PR #1991
+  const size = function (n) {
+    return n >= 1073741824 ? (n / 1073741824).toFixed(1) + ' GiB' : Math.round(n / 1048576) + ' MiB';
+  };
+  const button = function (label, look) {
+    const b = document.createElement('button');
+    b.type = 'button'; b.className = 'btn btn-sm ' + look; b.textContent = label;
+    b.style.whiteSpace = 'nowrap';
+    return b;
+  };
+  function showCache(cell, id, bytes) {
+    cell.textContent = '';
+    if (!bytes) { cell.textContent = LC_T.cache_none; return; }
+    cell.appendChild(document.createTextNode(size(bytes) + ' '));
+    const b = button(LC_T.cache_evict, 'btn-ghost-red');
+    b.addEventListener('click', function () {
+      if (!b.dataset.sure) { b.dataset.sure = '1'; b.textContent = LC_T.cache_evict_sure; return; }
+      b.disabled = true; b.textContent = LC_T.loading;
+      api('evict-' + id).then(function (v) {
+        cell.textContent = LC_T.cache_freed.replace('{x}', size(v.freed));
+      }).catch(function (e) { b.disabled = false; delete b.dataset.sure; b.textContent = LC_T.cache_evict; window.LancacheUi.fail(e); });
+    });
+    cell.appendChild(b);
+  }
+  function cacheCell(cell, id) {
+    cell.dataset.cacheApp = String(id);
+    const b = button(LC_T.cache_check, 'btn-slate');
+    b.addEventListener('click', function () {
+      b.disabled = true; b.textContent = LC_T.loading;
+      api('lookup-' + id).then(function (v) { showCache(cell, id, v.bytes); })
+        .catch(function (e) { b.disabled = false; b.textContent = LC_T.cache_check; window.LancacheUi.fail(e); });
+    });
+    cell.appendChild(b);
+  }
+  function fillCache() {
+    api('cached').then(function (v) {
+      Object.keys(v.apps || {}).forEach(function (id) {
+        const cell = document.querySelector('[data-cache-app="' + id + '"]');
+        if (cell) { showCache(cell, id, v.apps[id]); }
+      });
+    }).catch(function (e) { window.LancacheUi.fail(e); });
+  }
   // What: the owned games survive a reload.
   // Why: DoMe 07.11.: Ctrl+F5 emptied the list.
   // From: Issue #871 | PR #1985
   function showGames(games) {
         const t = document.getElementById('hamster-games');
         if (!t) { return; }
-        t.innerHTML = '<tr><th>App ID</th><th>Name</th><th></th></tr>';
+        // What: games sorted by name, A to Z.
+        // Why: DoMe 07.11.: the list came in app id order.
+        // From: Issue #871 | PR #1991
+        games = games.slice().sort(function (a, b) { return String(a.name).localeCompare(String(b.name)); });
+        // What: fixed column widths in the library.
+        // Why: DoMe 07.11.: Check made the row jump.
+        // From: Issue #871 | PR #1991
+        t.style.tableLayout = 'fixed';
+        t.innerHTML = '<tr><th style="width:7em">App ID</th><th>Name</th><th style="width:17em">' + LC_T.in_cache + '</th><th style="width:11em"></th></tr>';
         games.forEach(function (g) {
           const row = t.insertRow();
           row.insertCell().textContent = g.appid;
           row.insertCell().textContent = g.name;
+          cacheCell(row.insertCell(), g.appid);
           // What: one click adds a "now" job for this game.
           // Why: DoMe 05.11.: load straight from the list.
           // From: Issue #871 | PR #1980
@@ -257,11 +347,11 @@
             f.appendChild(i);
           });
           const b = document.createElement('button');
-          b.type = 'submit'; b.className = 'btn'; b.textContent = LC_T.preload;
+          b.type = 'submit'; b.className = 'btn btn-sm'; b.textContent = LC_T.preload;
           // What: one width for every button label.
           // Why: DoMe 07.11.: the list shifted on click.
           // From: Issue #871 | PR #1985
-          b.style.minWidth = '12em'; b.style.whiteSpace = 'nowrap';
+          b.style.minWidth = '9em'; b.style.whiteSpace = 'nowrap';
           f.addEventListener('submit', function (ev) {
             ev.preventDefault();
             b.disabled = true; b.textContent = LC_T.loading;
@@ -272,6 +362,8 @@
           f.appendChild(b);
           row.insertCell().appendChild(f);
         });
+        fillCache();
+        findGames();
   }
   try {
     const kept = sessionStorage.getItem('ch-games');
