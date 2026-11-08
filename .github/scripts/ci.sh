@@ -13887,7 +13887,7 @@ _ci_validate_ui_token_file() {
 # Why: AXFR needs TSIG name, secret and primary.
 # From: Issue #1683
 _ci_validate_secondary_identity() {
-    local project="$1" base cid token a b au bu ap bp trc=0 tf label svc
+    local project="$1" base cid token a au ap bp trc=0 tf label svc
     label="$(_ci_variable CI_VALIDATE_PROBE_LABEL)" || return 2
     svc="$(_ci_validation_service ui)" || return 2
     cid="$(_ci_validate_cid "${project}" "${svc}")" || return 2
@@ -13915,16 +13915,17 @@ _ci_validate_secondary_identity() {
         ci_log "[CI-ERROR-VALIDATE-0046]" "reason=\"could not read SECONDARY_REGISTRATION_TOKEN from ui\""
         return 2
     fi
-    if ! a="$(_ci_register_secondary "${base}" "${token}" "${label}-1")" \
-        || ! b="$(_ci_register_secondary "${base}" "${token}" "${label}-2")"; then
+    # What: one register; its reply carries all three keys.
+    # Why: a 2nd register checked nothing new; 16.6 s each.
+    # From: Issue #1683 | PR #1858
+    if ! a="$(_ci_register_secondary "${base}" "${token}" "${label}-1")"; then
         ci_log "[CI-ERROR-VALIDATE-0047]" "reason=\"a secondary register did not return 200\""
         return 1
     fi
     au="$(_ci_capture 0 jq -r '.tsig_name // empty' <<< "${a}")" || return 1
-    bu="$(_ci_capture 0 jq -r '.tsig_name // empty' <<< "${b}")" || return 1
     ap="$(_ci_run -q -s "[CI-ERROR-VALIDATE-0148]" "reason=\"tsig_secret read failed or wrote stderr\"" jq -r '.tsig_secret // empty' <<< "${a}")" || return 1
-    bp="$(_ci_capture 0 jq -r '.primary // empty' <<< "${b}")" || return 1
-    if [ -z "${au}" ] || [ -z "${bu}" ] || [ -z "${ap}" ] || [ -z "${bp}" ]; then
+    bp="$(_ci_capture 0 jq -r '.primary // empty' <<< "${a}")" || return 1
+    if [ -z "${au}" ] || [ -z "${ap}" ] || [ -z "${bp}" ]; then
         ci_log "[CI-ERROR-VALIDATE-0048]" "reason=\"register response missing tsig_name/tsig_secret/primary\""
         return 1
     fi
