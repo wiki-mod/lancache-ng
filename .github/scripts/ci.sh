@@ -2396,7 +2396,11 @@ ci_cmd_plan_matrix() {
         work=true
     fi
     ci_group_end
-    {
+    # What: the plan outputs to the log too, as written.
+    # Why: test-services showed nowhere in the run log.
+    # From: Issue #1683 | PR #1858
+    local plan_out
+    plan_out="$(
         printf 'work=%s\n' "${work}"
         printf 'any-build=%s\n' "${any}"
         printf 'promote=%s\n' "${promote}"
@@ -2409,7 +2413,9 @@ ci_cmd_plan_matrix() {
         printf 'rust-audit=%s\n' "${rust_audit}"
         printf 'docs-only=%s\n' "${docs_only}"
         printf 'reuse=%s\n' "${reuse}"
-    } >> "${out}"
+    )" || return 2
+    printf '%s\n' "${plan_out}" >> "${out}"
+    printf '%s\n' "${plan_out}" >&2
     _ci_record_emit || return 2
     if [ -n "${unknown}" ]; then
         ci_error "[CI-ERROR-PLAN-0008]" "reason=\"UNKNOWN pairs: no build, escalate (2.3)\"" "${unknown}"
