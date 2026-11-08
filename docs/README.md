@@ -318,7 +318,7 @@ Settings of the `dnsmasq-proxy` render (`dnsmasq_conf`,
 | --- | --- | --- |
 | `DHCP_SUBNET_START` | `dhcp-range=<value>,proxy` | required; the network base address of the served LAN |
 | `UPSTREAM_DHCP_IP` | nothing | the proxy render uses no line from it |
-| `DHCP_DNS_SERVERS` | `dhcp-option-pxe=6,<list>` | the Admin UI form joins primary and secondary DNS into this list |
+| `DHCP_DNS_SERVERS` | `dhcp-option-pxe=6,<list>` | the Admin UI form joins primary and secondary DNS into this list; empty uses `DHCP_DNS_PRIMARY` and `DHCP_DNS_SECONDARY` from `setup.sh`, then `IP_HTTP` (Kea too) |
 | `DHCP_PROXY_INTERFACE` | `interface=<value>` | optional |
 | `DHCP_PROXY_ROUTER` | `dhcp-option-pxe=3,<value>` | optional |
 | `DHCP_PROXY_DOMAIN` | `dhcp-option-pxe=15,<value>` | optional |

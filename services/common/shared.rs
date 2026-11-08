@@ -866,6 +866,23 @@ pub mod dns {
 pub mod dhcp {
     use crate::config::Settings;
 
+    // What: DNS servers handed to DHCP clients.
+    // Why: setup.sh: empty means the stack, IP_HTTP.
+    // From: Issue #1683
+    pub fn dns_addrs(s: &Settings) -> Vec<String> {
+        let mut dns = s.list("DHCP_DNS_SERVERS");
+        if dns.is_empty() {
+            dns = ["DHCP_DNS_PRIMARY", "DHCP_DNS_SECONDARY"]
+                .iter()
+                .filter_map(|k| s.text(k).ok())
+                .collect();
+        }
+        if dns.is_empty() {
+            dns.extend(s.text("IP_HTTP").ok());
+        }
+        dns
+    }
+
     // What: DHCP_NTP_SERVERS as IPv4 text; names resolve.
     // Why: option 42 holds IPs; dead names are skipped.
     // From: Issue #1683 | PR #1980
@@ -2687,7 +2704,7 @@ pub mod kea_conf {
     fn option_rows(s: &Settings, domain: &str) -> Result<Vec<Value>, String> {
         let mut rows = Vec::new();
         rows.push(json!({"name": "routers", "data": s.text("DHCP_GATEWAY")?}));
-        let dns = s.list("DHCP_DNS_SERVERS").join(", ");
+        let dns = crate::dhcp::dns_addrs(s).join(", ");
         rows.push(json!({"name": "domain-name-servers", "data": dns}));
         rows.push(json!({"name": "domain-name", "data": domain}));
         rows.push(json!({"name": "domain-search", "data": domain}));
@@ -2937,7 +2954,7 @@ pub mod dnsmasq_conf {
         c.add(&format!("dhcp-range={}", proxy_range(s)?))?;
         c.add_if("interface=", &s.list("DHCP_PROXY_INTERFACE").join(","))?;
         c.add_if("dhcp-option-pxe=3,", &get("DHCP_PROXY_ROUTER"))?;
-        c.add_if("dhcp-option-pxe=6,", &s.list("DHCP_DNS_SERVERS").join(","))?;
+        c.add_if("dhcp-option-pxe=6,", &crate::dhcp::dns_addrs(s).join(","))?;
         c.add_if("dhcp-option-pxe=15,", &get("DHCP_PROXY_DOMAIN"))?;
         c.add_if("dhcp-option-pxe=42,", &crate::dhcp::ntp_addrs(s)?.join(","))?;
         let file = get("DHCP_PROXY_BOOT_FILENAME");
