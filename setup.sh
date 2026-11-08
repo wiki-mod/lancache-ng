@@ -8501,16 +8501,26 @@ cmd_secondary() {
     # What: the secondary pins dns to a digest or the tag
     # Why: the secondary compose has no image default
     # From: Issue #1683 | PR #1858
-    local secondary_refs="" secondary_dns_ref=""
+    local secondary_refs="" secondary_dns_ref="" secondary_ui_ref="" pin_key pin
     if [[ -n "$lancache_image_tag" ]]; then
         secondary_refs=$(LANCACHE_IMAGE_REGISTRY="$lancache_image_registry" \
             LANCACHE_IMAGE_PREFIX="$lancache_image_prefix" \
             lancache_image_refs_for_tag "" "$lancache_image_tag") \
-            || die "Cannot pin the dns image of ${lancache_image_tag} for the secondary (exit $?)."
-        secondary_dns_ref=$(awk -F= '$1 == "LANCACHE_IMAGE_REF_DNS" { print substr($0, length($1) + 2) }' <<< "$secondary_refs") \
-            || die "Failed to read LANCACHE_IMAGE_REF_DNS from the image pins (exit $?)."
-        [[ -n "$secondary_dns_ref" ]] \
-            || die "${lancache_image_tag} resolved no LANCACHE_IMAGE_REF_DNS pin for the secondary."
+            || die "Cannot pin the images of ${lancache_image_tag} for the secondary (exit $?)."
+        # What: dns and the ui image; render uses the ui
+        # Why: live 229: compose stopped without REF_UI
+        # From: Issue #1683
+        for pin_key in LANCACHE_IMAGE_REF_DNS LANCACHE_IMAGE_REF_UI; do
+            pin=$(awk -F= -v k="$pin_key" '$1 == k { print substr($0, length($1) + 2) }' <<< "$secondary_refs") \
+                || die "Failed to read ${pin_key} from the image pins (exit $?)."
+            [[ -n "$pin" ]] \
+                || die "${lancache_image_tag} resolved no ${pin_key} pin for the secondary."
+            if [[ "$pin_key" = LANCACHE_IMAGE_REF_DNS ]]; then
+                secondary_dns_ref="$pin"
+            else
+                secondary_ui_ref="$pin"
+            fi
+        done
     fi
 
     # What: verifies tag platform before secondary writes
@@ -8579,6 +8589,7 @@ LANCACHE_IMAGE_PREFIX=${lancache_image_prefix}
 LANCACHE_IMAGE_CHANNEL=${lancache_image_channel}
 LANCACHE_IMAGE_TAG=${lancache_image_tag}
 LANCACHE_IMAGE_REF_DNS=${secondary_dns_ref}
+LANCACHE_IMAGE_REF_UI=${secondary_ui_ref}
 EOF
 
     print_step "Starting secondary DNS container"
