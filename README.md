@@ -56,7 +56,7 @@ Run this on a Linux machine inside your network:
 curl -fsSL https://raw.githubusercontent.com/wiki-mod/lancache-ng/master/setup.sh | sudo bash
 ```
 
-The setup script guides you through the installation. If required tools are missing, it asks before installing packages, installs missing requirements such as Docker, curl and git through the host package manager, and prints the package names to install manually if you abort.
+The setup script guides you through the installation. If required tools are missing, it installs them, such as Docker, curl and git, through the host package manager (apt, dnf, yum, pacman or apk) without a question and prints one "Installing requirements" line with the package names.
 It is a pull-only installer: it resolves and pulls prebuilt first-party images,
 so Redis-backed sccache, distcc and other build accelerators do not affect
 normal setup or update paths.
@@ -264,7 +264,7 @@ Recommended installation:
 curl -fsSL https://raw.githubusercontent.com/wiki-mod/lancache-ng/master/setup.sh | sudo bash
 ```
 
-During setup you will be asked for the important values. If required tools are missing, setup asks before installing packages and prints the package names to install manually if you abort.
+During setup you will be asked for the important values. If required tools are missing, setup installs them without a question and prints one "Installing requirements" line with the package names.
 
 Example values:
 

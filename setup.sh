@@ -870,20 +870,24 @@ apt_install() {
     apt-get install -y --no-install-recommends "$@"
 }
 
+# What: one info line before a package install
+# Why: requirements install without a question (DoMe)
+# From: Issue #1683
+announce_install() {
+    local reason="$1"
+    shift
+    print_step "Installing requirements: $reason ($*)"
+}
+
 # What: installs packages via apt, dnf, yum, pacman or apk
-# Why: host changes need confirmation; unknown PM fails
+# Why: one install path for every manager; unknown fails
 # From: Issue #1683 | PR #1858
 install_packages() {
     local reason="$1" manager
     shift
     local packages=("$@")
 
-    print_warn "$reason"
-    printf "  Required packages: %s\n" "${packages[*]}"
-    if ! confirm "Install these packages now? [y/N]" "N"; then
-        die "Aborted. Please install these packages manually, then rerun setup.sh: ${packages[*]}"
-    fi
-
+    announce_install "$reason" "${packages[@]}"
     manager=$(host_package_manager)
     case "$manager" in
         apt-get) apt-get update -y && apt_install "${packages[@]}" ;;
@@ -907,8 +911,8 @@ apk_install() {
     return 1
 }
 
-# What: package installs ask first; unknown managers fail
-# Why: setup.sh mutates the host, so it must not guess
+# What: installs a command's packages, then checks it
+# Why: a package that lacks the command must fail loudly
 # From: Issue #1683 | PR #1858
 install_required_command() {
     local command_name="$1" reason="$2"
@@ -1275,23 +1279,8 @@ install_docker_rpm() {
     verify_docker_installation
 }
 
-# What: rpm install dialog; aborts without a yes
-# Why: engine and Compose-only installs share one dialog
-# From: Issue #1683 | PR #1858
-confirm_docker_rpm_packages() {
-    local warn="$1" question="$2" product="$3"
-    shift 3
-
-    print_warn "$warn"
-    printf "  Required packages: %s\n" "$*"
-    printf "  Docker's RPM repository will be configured before installation.\n"
-    if ! confirm "$question" "N"; then
-        die "Aborted. Please install $product from Docker's RPM repository manually, then rerun setup.sh: $*"
-    fi
-}
-
 # What: installs only the Compose v2 plugin
-# Why: each manager asks for confirmation before changes
+# Why: each manager has its own Compose package
 # From: Issue #1683 | PR #1858
 install_docker_compose() {
     local manager
@@ -1299,16 +1288,11 @@ install_docker_compose() {
     manager=$(host_package_manager)
     case "$manager" in
         apt-get)
-            print_warn "Docker Compose plugin missing."
-            printf "  Required package: an available Compose v2 package (%s, %s, or %s)\n" "${APT_COMPOSE_PACKAGES[@]}"
-            if ! confirm "Install this package now? [y/N]" "N"; then
-                die "Aborted. Please install a Docker Compose v2 package manually, then rerun setup.sh."
-            fi
+            announce_install "Docker Compose plugin missing" "one of ${APT_COMPOSE_PACKAGES[*]}"
             install_docker_compose_apt || die "Failed to install Docker Compose."
             ;;
         dnf|yum)
-            confirm_docker_rpm_packages "Docker Compose plugin missing." "Install this package now? [y/N]" \
-                "Docker Compose" "$DOCKER_COMPOSE_PLUGIN"
+            announce_install "Docker Compose plugin missing, from Docker's RPM repository" "$DOCKER_COMPOSE_PLUGIN"
             install_docker_rpm "$manager" "$DOCKER_COMPOSE_PLUGIN" || die "Failed to install Docker Compose."
             ;;
         pacman)
@@ -1326,7 +1310,7 @@ install_docker_compose() {
 }
 
 # What: installs Docker engine and Compose v2 per manager
-# Why: each manager has its own confirmation and package set
+# Why: each manager has its own package set
 # From: Issue #1683 | PR #1858
 install_docker() {
     local manager
@@ -1334,17 +1318,11 @@ install_docker() {
     manager=$(host_package_manager)
     case "$manager" in
         apt-get)
-            print_warn "Docker is missing."
-            printf "  Required packages: %s, an available Compose v2 package (%s, %s, or %s), and Buildx (%s or %s) when this apt index has one\n" \
-                "$APT_DOCKER_ENGINE" "${APT_COMPOSE_PACKAGES[@]}" "${APT_BUILDX_PACKAGES[@]}"
-            if ! confirm "Install these packages now? [y/N]" "N"; then
-                die "Aborted. Please install Docker and a Docker Compose v2 package manually, then rerun setup.sh."
-            fi
+            announce_install "Docker is missing" "$APT_DOCKER_ENGINE, one of ${APT_COMPOSE_PACKAGES[*]}, Buildx when the index has one"
             install_docker_apt || die "Failed to install Docker."
             ;;
         dnf|yum)
-            confirm_docker_rpm_packages "Docker is missing." "Install these packages now? [y/N]" \
-                "Docker" "${DOCKER_RPM_PACKAGES[@]}"
+            announce_install "Docker is missing, from Docker's RPM repository" "${DOCKER_RPM_PACKAGES[*]}"
             install_docker_rpm "$manager" || die "Failed to install Docker."
             ;;
         pacman)
@@ -4683,16 +4661,19 @@ migrate_env_for_update() (
     adopt_moved_config_prod_keys "$install_dir" "$env_file" drop
 )
 
-# What: maps a tool to its apt or apk package name
-# Why: dig ships in bind9-dnsutils, dnsutils or bind-tools
+# What: maps a tool to its package for the host manager
+# Why: dig and ss ship in differently named packages
 # From: Issue #1683 | PR #1858
 package_name_for_tool() {
     local manager
     manager=$(host_package_manager)
     case "$manager:$1" in
         apk:dig) printf 'bind-tools\n' ;;
-        apk:ss|apk:ip) printf 'iproute2\n' ;;
-        *:dig)
+        dnf:dig|yum:dig) printf 'bind-utils\n' ;;
+        pacman:dig) printf 'bind\n' ;;
+        dnf:ss|dnf:ip|yum:ss|yum:ip) printf 'iproute\n' ;;
+        *:ss|*:ip) printf 'iproute2\n' ;;
+        apt-get:dig)
             if apt_package_available bind9-dnsutils; then
                 printf '%s\n' bind9-dnsutils
             else
@@ -4710,27 +4691,17 @@ package_name_for_tool() {
 # From: Issue #1683 | PR #1858
 install_missing_tools() {
     local -a missing=() packages=() tools=("$@")
-    local tool package manager
+    local tool package
     for tool in "${tools[@]}"; do
         command_available "$tool" || missing+=("$tool")
     done
     (( ${#missing[@]} == 0 )) && return 0
-    print_warn "Missing required tool(s): ${missing[*]} — installing now..."
-    manager=$(host_package_manager)
-    case "$manager" in
-        apt-get|apk) ;;
-        *) die "Cannot install missing tools automatically; install: ${missing[*]}" ;;
-    esac
     for tool in "${missing[@]}"; do
         package=$(package_name_for_tool "$tool") || die "Cannot resolve the package of $tool (exit $?)."
         packages+=("$package")
     done
-    if [[ "$manager" = apk ]]; then
-        apk_install "${packages[@]}" || die "Failed to install required tool(s): ${missing[*]}"
-    else
-        apt-get update -y || die "apt-get update failed (exit $?); nothing was installed."
-        apt_install "${packages[@]}" || die "Failed to install required tool(s): ${missing[*]}"
-    fi
+    install_packages "missing tool(s) ${missing[*]}" "${packages[@]}" \
+        || die "Failed to install required tool(s): ${missing[*]}"
     for tool in "${missing[@]}"; do
         command_available "$tool" \
             || die "$tool is still missing after installing package(s): ${packages[*]}"
