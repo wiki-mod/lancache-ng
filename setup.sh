@@ -917,6 +917,10 @@ apk_install() {
 install_required_command() {
     local command_name="$1" reason="$2"
     shift 2
+    # What: a present command installs nothing
+    # Why: live 249: "curl is missing" with curl installed
+    # From: Issue #1683 | PR #1858
+    command_available "$command_name" && return 0
 
     install_packages "$reason" "$@" \
         || die "Failed to install required package(s): $*"
