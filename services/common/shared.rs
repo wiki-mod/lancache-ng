@@ -355,6 +355,28 @@ pub mod secret {
             .decrypt(&nonce.into(), body)
             .map_err(|_| "sealed data is damaged or the key is wrong".to_string())
     }
+
+    // What: 32 key bytes from a salt and machine features.
+    // Why: the key needs the data dir and this machine.
+    // From: Issue #871
+    pub fn bind_key(salt: &[u8; 32], parts: &[(String, Vec<u8>)]) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(b"lancache-ng bind v1\0");
+        h.update(salt);
+        // What: each part with its length in front.
+        // Why: "ab"+"c" must differ from "a"+"bc".
+        // From: Issue #871
+        for (name, value) in parts {
+            for chunk in [name.as_bytes(), value.as_slice()] {
+                h.update((chunk.len() as u64).to_be_bytes());
+                h.update(chunk);
+            }
+        }
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&h.finalize());
+        key
+    }
 }
 
 // What: HTTP client, probe and drain.

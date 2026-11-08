@@ -3124,6 +3124,16 @@ sot_compose_env() {
         value=$(runtime_default_in "$list" "$key") || exit $?
         printf 'SOT_%s=%s\n' "$key" "$value"
     done
+    # What: the first host machine-id file that exists.
+    # Why: a missing bind source would become a directory.
+    # From: Issue #871
+    value=$(runtime_default_in "$list" HOST_MACHINE_ID_SOURCES) || exit $?
+    read -ra words <<< "$value"
+    for dir in "${words[@]}" ""; do
+        [[ -z "$dir" || -f "$dir" || -c "$dir" ]] && break
+    done
+    [[ -n "$dir" ]] || die "No file of the SOT HOST_MACHINE_ID_SOURCES exists: $value."
+    printf 'SOT_HOST_MACHINE_ID_SOURCE=%s\n' "$dir"
     keys=$(prod_state_keys) || exit $?
     read -ra words <<< "${keys//$'\n'/ }"
     for key in "${words[@]}"; do
