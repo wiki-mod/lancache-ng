@@ -7961,14 +7961,19 @@ cmd_update_ip() {
 # Why: a setting that fails a check must not stay active
 # From: Issue #1918 | PR #1858
 restore_dns_upstream() {
-    local install_dir="$1" env_file="$2" rc=0
+    local install_dir="$1" env_file="$2" rc=0 dns_svc ui_svc
+    dns_svc=$(prod_env_default DNS_SERVICE) || exit $?
+    ui_svc=$(prod_env_default UI_SERVICE) || exit $?
     set_env_key DNS_UPSTREAM_SERVERS "$3" "$env_file"
     set_env_key DNS_UPSTREAM_ZONES "$4" "$env_file"
     set_env_key DNS_UPSTREAM_UNSIGNED_ZONES "$5" "$env_file"
     set_env_key DNS_LOCAL_REVERSE_ZONES "$6" "$env_file"
-    stack_compose "$install_dir" "$env_file" up -d dns || rc=$?
+    # What: the ui too; it renders the recursor files.
+    # Why: live 249: dns alone kept the new forwarders.
+    # From: Issue #1918
+    stack_compose "$install_dir" "$env_file" up -d "$dns_svc" "$ui_svc" || rc=$?
     if [[ "$rc" -ne 0 ]]; then
-        print_error "Failed to restart dns with the previous external DNS setting (exit $rc)."
+        print_error "Failed to restart dns and ui with the previous external DNS setting (exit $rc)."
         return 1
     fi
     print_warn "The previous external DNS setting is active again"
