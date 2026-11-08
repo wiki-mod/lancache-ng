@@ -870,20 +870,24 @@ apt_install() {
     apt-get install -y --no-install-recommends "$@"
 }
 
+# What: one info line before a package install
+# Why: requirements install without a question (DoMe)
+# From: Issue #1683
+announce_install() {
+    local reason="$1"
+    shift
+    print_step "Installing requirements: $reason ($*)"
+}
+
 # What: installs packages via apt, dnf, yum, pacman or apk
-# Why: host changes need confirmation; unknown PM fails
+# Why: one install path for every manager; unknown fails
 # From: Issue #1683 | PR #1858
 install_packages() {
     local reason="$1" manager
     shift
     local packages=("$@")
 
-    print_warn "$reason"
-    printf "  Required packages: %s\n" "${packages[*]}"
-    if ! confirm "Install these packages now? [y/N]" "N"; then
-        die "Aborted. Please install these packages manually, then rerun setup.sh: ${packages[*]}"
-    fi
-
+    announce_install "$reason" "${packages[@]}"
     manager=$(host_package_manager)
     case "$manager" in
         apt-get) apt-get update -y && apt_install "${packages[@]}" ;;
@@ -907,12 +911,16 @@ apk_install() {
     return 1
 }
 
-# What: package installs ask first; unknown managers fail
-# Why: setup.sh mutates the host, so it must not guess
+# What: installs a command's packages, then checks it
+# Why: a package that lacks the command must fail loudly
 # From: Issue #1683 | PR #1858
 install_required_command() {
     local command_name="$1" reason="$2"
     shift 2
+    # What: a present command installs nothing
+    # Why: live 249: "curl is missing" with curl installed
+    # From: Issue #1683 | PR #1858
+    command_available "$command_name" && return 0
 
     install_packages "$reason" "$@" \
         || die "Failed to install required package(s): $*"
@@ -1275,23 +1283,8 @@ install_docker_rpm() {
     verify_docker_installation
 }
 
-# What: rpm install dialog; aborts without a yes
-# Why: engine and Compose-only installs share one dialog
-# From: Issue #1683 | PR #1858
-confirm_docker_rpm_packages() {
-    local warn="$1" question="$2" product="$3"
-    shift 3
-
-    print_warn "$warn"
-    printf "  Required packages: %s\n" "$*"
-    printf "  Docker's RPM repository will be configured before installation.\n"
-    if ! confirm "$question" "N"; then
-        die "Aborted. Please install $product from Docker's RPM repository manually, then rerun setup.sh: $*"
-    fi
-}
-
 # What: installs only the Compose v2 plugin
-# Why: each manager asks for confirmation before changes
+# Why: each manager has its own Compose package
 # From: Issue #1683 | PR #1858
 install_docker_compose() {
     local manager
@@ -1299,16 +1292,11 @@ install_docker_compose() {
     manager=$(host_package_manager)
     case "$manager" in
         apt-get)
-            print_warn "Docker Compose plugin missing."
-            printf "  Required package: an available Compose v2 package (%s, %s, or %s)\n" "${APT_COMPOSE_PACKAGES[@]}"
-            if ! confirm "Install this package now? [y/N]" "N"; then
-                die "Aborted. Please install a Docker Compose v2 package manually, then rerun setup.sh."
-            fi
+            announce_install "Docker Compose plugin missing" "one of ${APT_COMPOSE_PACKAGES[*]}"
             install_docker_compose_apt || die "Failed to install Docker Compose."
             ;;
         dnf|yum)
-            confirm_docker_rpm_packages "Docker Compose plugin missing." "Install this package now? [y/N]" \
-                "Docker Compose" "$DOCKER_COMPOSE_PLUGIN"
+            announce_install "Docker Compose plugin missing, from Docker's RPM repository" "$DOCKER_COMPOSE_PLUGIN"
             install_docker_rpm "$manager" "$DOCKER_COMPOSE_PLUGIN" || die "Failed to install Docker Compose."
             ;;
         pacman)
@@ -1326,7 +1314,7 @@ install_docker_compose() {
 }
 
 # What: installs Docker engine and Compose v2 per manager
-# Why: each manager has its own confirmation and package set
+# Why: each manager has its own package set
 # From: Issue #1683 | PR #1858
 install_docker() {
     local manager
@@ -1334,17 +1322,11 @@ install_docker() {
     manager=$(host_package_manager)
     case "$manager" in
         apt-get)
-            print_warn "Docker is missing."
-            printf "  Required packages: %s, an available Compose v2 package (%s, %s, or %s), and Buildx (%s or %s) when this apt index has one\n" \
-                "$APT_DOCKER_ENGINE" "${APT_COMPOSE_PACKAGES[@]}" "${APT_BUILDX_PACKAGES[@]}"
-            if ! confirm "Install these packages now? [y/N]" "N"; then
-                die "Aborted. Please install Docker and a Docker Compose v2 package manually, then rerun setup.sh."
-            fi
+            announce_install "Docker is missing" "$APT_DOCKER_ENGINE, one of ${APT_COMPOSE_PACKAGES[*]}, Buildx when the index has one"
             install_docker_apt || die "Failed to install Docker."
             ;;
         dnf|yum)
-            confirm_docker_rpm_packages "Docker is missing." "Install these packages now? [y/N]" \
-                "Docker" "${DOCKER_RPM_PACKAGES[@]}"
+            announce_install "Docker is missing, from Docker's RPM repository" "${DOCKER_RPM_PACKAGES[*]}"
             install_docker_rpm "$manager" || die "Failed to install Docker."
             ;;
         pacman)
@@ -2466,8 +2448,6 @@ migrate_quickstart_install() (
         || die "Cannot list the services of $old_dir (exit $?); nothing was changed."
     mapfile -t service_list <<< "$services"
     capture_stack_health_baseline "${service_list[@]}"
-    ( cmd_backup --config "$old_dir" ) \
-        || die "Pre-migration backup of $old_dir failed; nothing was changed."
     project=$(compose_project_name "$old_dir" "$old_env") \
         || die "Cannot resolve the compose project of $old_dir (exit $?); nothing was changed."
     # What: a retry without live copies starts afresh
@@ -2540,7 +2520,7 @@ migrate_quickstart_install() (
         [[ -n "$volume" ]] || continue
         list_has_line "$volume" "$prod_volumes" && continue
         awk -v v="$volume" '$1 == v { f = 1 } END { exit !f }' <<< "$rows" && continue
-        # What: SOT-listed log volumes stay, untouched
+        # What: SOT-listed v0.3 volumes stay, untouched
         # Why: nothing is deleted; the operator decides
         # From: Issue #1683 | PR #1858
         if list_has_line "$volume" "$kept_list"; then
@@ -2550,6 +2530,15 @@ migrate_quickstart_install() (
         missing+=" $volume"
     done <<< "$old_volumes"
     [[ -z "$missing" ]] || die "Quickstart volume(s)${missing} have no home in $PROD_COMPOSE; the quickstart stack was not touched."
+    # What: the PSL lands before the old stack stops
+    # Why: the ui renders nginx only with it; dns/proxy wait
+    # From: Issue #1683 | PR #1858
+    ensure_public_suffix_list "$(deploy_prod_repo_root "$stack_dir")"
+    # What: backup only after every pre-stop check passed
+    # Why: a bad setting must stop before the stack stops
+    # From: Issue #1683
+    ( cmd_backup --config "$old_dir" ) \
+        || die "Pre-migration backup of $old_dir failed; the quickstart stack was not touched."
     stack_compose "$old_dir" "$old_env" stop \
         || die "Failed to stop the quickstart stack in $old_dir (exit $?); the quickstart stack was not touched."
     copies=$(quickstart_volume_dirs "$env_local") \
@@ -2565,7 +2554,10 @@ migrate_quickstart_install() (
     _UPDATE_ENV_FILE="$env_local" _UPDATE_STACK_DIR="$stack_dir"
     validate_compose_config "$stack_dir"
     local apply_rc=0
-    apply_stack_update_ordered "$stack_dir" rollback_quickstart_migration "$old_dir" "$record" "$stack_dir" "$env_local" || apply_rc=$?
+    # What: the migrated stack starts like a fresh install
+    # Why: its config volume is empty until the ui renders
+    # From: Issue #1683 | PR #1858
+    STACK_FIRST_PROD_START=1 apply_stack_update_ordered "$stack_dir" rollback_quickstart_migration "$old_dir" "$record" "$stack_dir" "$env_local" || apply_rc=$?
     if [[ "$apply_rc" -eq 2 ]]; then
         trap - EXIT
         UPDATE_CONVERGENCE_COMPLETED=1
@@ -3132,6 +3124,16 @@ sot_compose_env() {
         value=$(runtime_default_in "$list" "$key") || exit $?
         printf 'SOT_%s=%s\n' "$key" "$value"
     done
+    # What: the first host machine-id file that exists.
+    # Why: a missing bind source would become a directory.
+    # From: Issue #871
+    value=$(runtime_default_in "$list" HOST_MACHINE_ID_SOURCES) || exit $?
+    read -ra words <<< "$value"
+    for dir in "${words[@]}" ""; do
+        [[ -z "$dir" || -f "$dir" || -c "$dir" ]] && break
+    done
+    [[ -n "$dir" ]] || die "No file of the SOT HOST_MACHINE_ID_SOURCES exists: $value."
+    printf 'SOT_HOST_MACHINE_ID_SOURCE=%s\n' "$dir"
     keys=$(prod_state_keys) || exit $?
     read -ra words <<< "${keys//$'\n'/ }"
     for key in "${words[@]}"; do
@@ -4365,6 +4367,14 @@ migrate_env_for_update() (
     validate_lancache_image_prefix "$lancache_image_prefix"
     lancache_image_channel=$(resolve_lancache_image_channel "$env_file") || exit $?
     existing_image_tag=$(get_env_var LANCACHE_IMAGE_TAG "$env_file") || exit $?
+    # What: a short v0.3 sha- pin leaves .env, not the run
+    # Why: AG-REL-015 needs 40 hex; the channel picks images
+    # From: Issue #1683
+    if [[ "$existing_image_tag" == sha-* ]] && ! is_commit_image_tag "$existing_image_tag"; then
+        remove_env_key LANCACHE_IMAGE_TAG "$env_file"
+        print_warn "Dropped the short image pin LANCACHE_IMAGE_TAG=$existing_image_tag; the channel picks the images."
+        existing_image_tag=""
+    fi
     local lancache_image_refs="" keep_image_refs=0 archived_refs
     archived_refs=$(awk '/^LANCACHE_IMAGE_REF_[A-Z_]+=/' "$env_file") \
         || die "Failed to read the image pins from $env_file (exit $?)."
@@ -4681,16 +4691,19 @@ migrate_env_for_update() (
     adopt_moved_config_prod_keys "$install_dir" "$env_file" drop
 )
 
-# What: maps a tool to its apt or apk package name
-# Why: dig ships in bind9-dnsutils, dnsutils or bind-tools
+# What: maps a tool to its package for the host manager
+# Why: dig and ss ship in differently named packages
 # From: Issue #1683 | PR #1858
 package_name_for_tool() {
     local manager
     manager=$(host_package_manager)
     case "$manager:$1" in
         apk:dig) printf 'bind-tools\n' ;;
-        apk:ss|apk:ip) printf 'iproute2\n' ;;
-        *:dig)
+        dnf:dig|yum:dig) printf 'bind-utils\n' ;;
+        pacman:dig) printf 'bind\n' ;;
+        dnf:ss|dnf:ip|yum:ss|yum:ip) printf 'iproute\n' ;;
+        *:ss|*:ip) printf 'iproute2\n' ;;
+        apt-get:dig)
             if apt_package_available bind9-dnsutils; then
                 printf '%s\n' bind9-dnsutils
             else
@@ -4708,27 +4721,17 @@ package_name_for_tool() {
 # From: Issue #1683 | PR #1858
 install_missing_tools() {
     local -a missing=() packages=() tools=("$@")
-    local tool package manager
+    local tool package
     for tool in "${tools[@]}"; do
         command_available "$tool" || missing+=("$tool")
     done
     (( ${#missing[@]} == 0 )) && return 0
-    print_warn "Missing required tool(s): ${missing[*]} — installing now..."
-    manager=$(host_package_manager)
-    case "$manager" in
-        apt-get|apk) ;;
-        *) die "Cannot install missing tools automatically; install: ${missing[*]}" ;;
-    esac
     for tool in "${missing[@]}"; do
         package=$(package_name_for_tool "$tool") || die "Cannot resolve the package of $tool (exit $?)."
         packages+=("$package")
     done
-    if [[ "$manager" = apk ]]; then
-        apk_install "${packages[@]}" || die "Failed to install required tool(s): ${missing[*]}"
-    else
-        apt-get update -y || die "apt-get update failed (exit $?); nothing was installed."
-        apt_install "${packages[@]}" || die "Failed to install required tool(s): ${missing[*]}"
-    fi
+    install_packages "missing tool(s) ${missing[*]}" "${packages[@]}" \
+        || die "Failed to install required tool(s): ${missing[*]}"
     for tool in "${missing[@]}"; do
         command_available "$tool" \
             || die "$tool is still missing after installing package(s): ${packages[*]}"
@@ -5120,7 +5123,11 @@ cmd_backup() (
     backup_paused_convergence=0
     stamp=$(date -u +%Y%m%dT%H%M%SZ)
     dest="$backup_root/$stamp"
-    archive="$backup_root/lancache-ng-${mode}-${stamp}.tar.gz"
+    # What: backup packs with the best present compressor
+    # Why: zstd -T0 uses all cores; gzip used only one
+    # From: Issue #1683
+    archive_ext=$(logbundle_select_compressor)
+    archive="$backup_root/lancache-ng-${mode}-${stamp}.tar.${archive_ext}"
     mkdir -p "$backup_root" || die "Failed to create $backup_root (exit $?)."
     old_umask=$(umask)
     umask 077
@@ -5195,7 +5202,7 @@ EOF
     # What: archive is written as .partial, then renamed
     # Why: rollback takes the newest complete archive
     # From: Issue #1683 | PR #1858
-    write_compressed_tar gz "$archive.partial" "$backup_root" "$stamp" \
+    write_compressed_tar "$archive_ext" "$archive.partial" "$backup_root" "$stamp" \
         || die "Failed to write $archive (exit $?)."
     chmod 600 "$archive.partial" || die "Failed to restrict $archive.partial (exit $?)."
     mv "$archive.partial" "$archive" || die "Failed to finish $archive (exit $?)."
@@ -5226,7 +5233,7 @@ cmd_restore() (
     ensure_default_install_dir
     install_dir="${2:-$DEFAULT_INSTALL_DIR}"
     install_dir=$(resolve_stack_dir "$(realpath -m "$install_dir")") || exit $?
-    [[ -n "$archive" ]] || die "Usage: $0 restore <backup.tar.gz> [install-dir]"
+    [[ -n "$archive" ]] || die "Usage: $0 restore <backup archive (.tar.zst, .tar.bz2 or .tar.gz)> [install-dir]"
     [[ -f "$archive" ]] || die "Backup archive not found: $archive"
     # What: requires openssl for the convergence step
     # Why: fails before restore mutations on minimal hosts
@@ -5257,7 +5264,7 @@ cmd_restore() (
         return "$status"
     }
     trap restore_cleanup EXIT
-    tar -C "$tmp" -xzf "$archive" || die "Failed to unpack $archive (exit $?)."
+    tar -C "$tmp" -xf "$archive" || die "Failed to unpack $archive (exit $?)."
     # What: find stops at the first rootfs match via -quit
     # Why: avoids SIGPIPE from an early pipe close
     # From: Issue #1377
@@ -5621,7 +5628,7 @@ EOF
             ;;
         restore)
             cat <<EOF
-Usage: ./setup.sh restore <backup.tar.gz> [install-dir]
+Usage: ./setup.sh restore <backup archive (.tar.zst, .tar.bz2 or .tar.gz)> [install-dir]
 
 Restores a setup-script backup. Files from the archived install directory are
 remapped to [install-dir] when it differs from the original path. After
@@ -5956,7 +5963,7 @@ rollback_stack_update() {
     local latest_backup="" backups sorted_backups
 
     if [[ -d "$backup_root" ]]; then
-        if ! backups=$(find "$backup_root" -maxdepth 1 -name 'lancache-ng-config-*.tar.gz' -print); then
+        if ! backups=$(find "$backup_root" -maxdepth 1 -name 'lancache-ng-config-*.tar.*' ! -name '*.partial' -print); then
             print_error "Failed to list the backups under $backup_root; cannot roll back automatically. Manual recovery required."
             return 1
         fi
@@ -6061,6 +6068,20 @@ apply_stack_update_ordered() {
     (( ${#non_ui_services[@]} > 0 )) \
         || die "No non-UI services found in this compose configuration; refusing to apply an update that cannot guarantee UI-last ordering."
 
+    # What: a first prod start runs all services at once
+    # Why: dns and proxy wait for configs the ui renders
+    # From: Issue #1683 | PR #1858
+    if [[ "${STACK_FIRST_PROD_START:-0}" = 1 ]]; then
+        if stack_update_step "Starting the whole stack (first start)" "Failed to start the stack." \
+                stack_compose "$install_dir" "$_UPDATE_ENV_FILE" up -d --remove-orphans \
+            && stack_update_step "Verifying the whole stack is healthy" "The stack did not become healthy in time." \
+                wait_for_stack_health "$(( wait_services + wait_ui ))" "${all_services[@]}"; then
+            print_ok "Whole stack verified healthy"
+            return 0
+        fi
+        "${rollback[@]}" || return 2
+        return 1
+    fi
     # What: baseline is captured earlier by the caller
     # Why: earlier steps may already change containers
     # From: Issue #1683 | PR #1858
@@ -6579,6 +6600,23 @@ cmd_update() {
     ensure_default_install_dir
     local install_dir="${1:-$DEFAULT_INSTALL_DIR}"
     install_dir=$(resolve_stack_dir "$(realpath -m "$install_dir")") || exit $?
+    # What: a lone setup.sh first fetches its channel code
+    # Why: without it a v0.3 quickstart is not migrated
+    # From: Issue #1683
+    if [[ ! -f "$PROD_COMPOSE" ]]; then
+        local env_file channel tag
+        env_file=$(runtime_env_file_for_install_dir "$install_dir")
+        [[ -f "$env_file" ]] || die_no_stack_found "$install_dir"
+        channel=$(resolve_lancache_image_channel "$env_file") || exit $?
+        tag="${LANCACHE_IMAGE_TAG:-}"
+        [[ -n "$tag" ]] || tag=$(get_env_var LANCACHE_IMAGE_TAG "$env_file") || exit $?
+        if is_commit_image_tag "$tag" || is_release_tag "$tag"; then
+            export LANCACHE_IMAGE_TAG="$tag"
+        fi
+        command_available git || install_git
+        install_repo_follow_channel "$channel" update "$install_dir"
+        die "setup.sh did not continue from the code of channel $channel; the stack in $install_dir was not changed."
+    fi
     perform_stack_update_flow "$install_dir"
 }
 

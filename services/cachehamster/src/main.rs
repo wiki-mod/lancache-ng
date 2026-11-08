@@ -30,6 +30,7 @@ const SETTINGS_FILE_ENV: &str = "LANCACHE_SETTINGS_FILE";
 // From: Issue #871 | PR #1858
 const KEY_FILE: &str = "session.key";
 const TOKEN_FILE: &str = "session.sealed";
+const BIND_FILE: &str = "session.bind";
 const PENDING_FILE: &str = "login.pending";
 const JOBS_FILE: &str = "jobs.json";
 const INBOX_DIR: &str = "inbox";
@@ -185,6 +186,7 @@ struct Ctx {
     s: Settings,
     dir: PathBuf,
     api: String,
+    bind: Vec<String>,
 }
 
 impl Ctx {
@@ -193,7 +195,8 @@ impl Ctx {
         let s = Settings::load(&process_env, saved.as_deref())?;
         let dir = PathBuf::from(s.text("CACHEHAMSTER_DATA_DIR")?);
         let api = s.text("STEAM_API_URL")?.trim_end_matches('/').to_string();
-        Ok(Self { s, dir, api })
+        let bind = s.list("CACHEHAMSTER_BIND_FILES");
+        Ok(Self { s, dir, api, bind })
     }
 
     fn path(&self, name: &str) -> PathBuf {
@@ -249,16 +252,64 @@ fn session_key(dir: &Path) -> Result<[u8; 32], String> {
     secret::key_bytes(&hex)
 }
 
+// What: one machine feature, trimmed; None if unusable.
+// Why: DoMe 08.11.: use what is there, skip the rest.
+// From: Issue #871
+fn feature(path: &str) -> Option<Vec<u8>> {
+    let raw = std::fs::read(path).ok()?;
+    let text = String::from_utf8_lossy(&raw).trim().to_string();
+    (!text.is_empty()).then(|| text.into_bytes())
+}
+
+// What: seal key from session.key plus machine features.
+// Why: a copied data dir must not open the login.
+// From: Issue #871
+fn bound_key(dir: &Path, bind: &[String], fresh: bool) -> Result<[u8; 32], String> {
+    let salt = session_key(dir)?;
+    let path = dir.join(BIND_FILE);
+    // What: a QR login freezes the features found now.
+    // Why: a feature seen later must not change the key.
+    // From: Issue #871
+    let names: Vec<String> = if fresh {
+        let names: Vec<String> = bind
+            .iter()
+            .filter(|p| feature(p).is_some())
+            .cloned()
+            .collect();
+        let body = serde_json::to_vec(&names).map_err(|e| e.to_string())?;
+        write(&path, &body, MODE, Place::Replace, Owner::default())
+            .map_err(|e| format!("{BIND_FILE}: {e}"))?;
+        names
+    } else {
+        // What: no bind file means a login from before.
+        // Why: only a new QR login may freeze the features.
+        // From: Issue #871
+        read_json(&path)?.ok_or("Steam login predates the machine binding; log in again by QR")?
+    };
+    let mut parts = Vec::with_capacity(names.len());
+    for name in names {
+        let value = feature(&name)
+            .ok_or_else(|| format!("machine feature {name} changed; log in again by QR"))?;
+        parts.push((name, value));
+    }
+    Ok(secret::bind_key(&salt, &parts))
+}
+
 // What: the stored session, opened in memory only.
 // Why: the plaintext token never touches the disk.
 // From: Issue #871 | PR #1858
-fn load_session(dir: &Path) -> Result<Option<Session>, String> {
+fn load_session(dir: &Path, bind: &[String]) -> Result<Option<Session>, String> {
     let sealed = match std::fs::read(dir.join(TOKEN_FILE)) {
         Ok(raw) => raw,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(format!("{TOKEN_FILE}: {e}")),
     };
-    let plain = secret::open(&session_key(dir)?, &sealed)?;
+    // What: an old or moved login opens no more.
+    // Why: the operator must know to scan the QR again.
+    // From: Issue #871
+    let plain = secret::open(&bound_key(dir, bind, false)?, &sealed).map_err(|_| {
+        "Steam login belongs to other machine features; log in again by QR".to_string()
+    })?;
     serde_json::from_slice(&plain)
         .map(Some)
         .map_err(|e| format!("{TOKEN_FILE}: {e}"))
@@ -269,7 +320,10 @@ fn load_session(dir: &Path) -> Result<Option<Session>, String> {
 // From: Issue #871 | PR #1858
 fn store_session(c: &Ctx, session: &Session) -> Result<(), String> {
     let plain = serde_json::to_vec(session).map_err(|e| e.to_string())?;
-    c.save(TOKEN_FILE, &secret::seal(&session_key(&c.dir)?, &plain)?)
+    c.save(
+        TOKEN_FILE,
+        &secret::seal(&bound_key(&c.dir, &c.bind, true)?, &plain)?,
+    )
 }
 
 // What: POST a form to a Steam Web API method.
@@ -490,7 +544,7 @@ async fn access_token(c: &Ctx, client: &reqwest::Client, s: &Session) -> Result<
 // Why: the library tab picks apps from this list.
 // From: Issue #871 | PR #1858
 async fn library(c: &Ctx, client: &reqwest::Client) -> Result<Value, String> {
-    let s = load_session(&c.dir)?.ok_or("not logged in")?;
+    let s = load_session(&c.dir, &c.bind)?.ok_or("not logged in")?;
     let token = access_token(c, client, &s).await?;
     let r = steam_get(
         client,
@@ -577,7 +631,13 @@ fn parse_add(args: &[String]) -> Result<Order, String> {
 // Why: one JSON answer per page refresh.
 // From: Issue #871 | PR #1858
 fn status(c: &Ctx) -> Result<Value, String> {
-    let session = load_session(&c.dir)?;
+    // What: an unusable login shows as logged out.
+    // Why: the page then offers the QR login again.
+    // From: Issue #871
+    let (session, login_error) = match load_session(&c.dir, &c.bind) {
+        Ok(s) => (s, None),
+        Err(e) => (None, Some(e)),
+    };
     let mut jobs = read_json::<Vec<Job>>(&c.path(JOBS_FILE))?.unwrap_or_default();
     // What: orders the daemon has not taken yet, shown too.
     // Why: a new job was missing until the next round.
@@ -602,6 +662,7 @@ fn status(c: &Ctx) -> Result<Value, String> {
     Ok(json!({
         "daemon_running": alive,
         "logged_in": session.is_some(),
+        "login_error": login_error,
         "account": session.map(|s| s.account),
         "login_pending": c.path(PENDING_FILE).exists(),
         "jobs": jobs,
@@ -832,6 +893,7 @@ async fn run_urls(
 #[derive(Clone)]
 struct SteamCfg {
     dir: PathBuf,
+    bind: Vec<String>,
     api: String,
     limit: Duration,
     manifest_api: u64,
@@ -851,6 +913,7 @@ impl SteamCfg {
         let addr = format!("{}:{}", c.s.text("IP_HTTP")?, c.s.uint("PROXY_HTTP_PORT")?);
         Ok(Self {
             dir: c.dir.clone(),
+            bind: c.bind.clone(),
             api: c.api.clone(),
             limit: Duration::from_secs(c.s.uint("HTTP_CLIENT_TIMEOUT")?),
             heartbeat: Duration::from_secs(c.s.uint("STEAM_HEARTBEAT_DEFAULT")?),
@@ -1191,7 +1254,7 @@ impl Cm {
     // What: log in with the sealed QR session token.
     // Why: Steam takes the refresh token as access_token.
     async fn login(cfg: &SteamCfg, client: &reqwest::Client) -> Result<Self, String> {
-        let s = load_session(&cfg.dir)?.ok_or("Steam login missing")?;
+        let s = load_session(&cfg.dir, &cfg.bind)?.ok_or("Steam login missing")?;
         let steam_id: u64 = steam_id_of(&s.refresh_token)?
             .parse()
             .map_err(|e| format!("steam id: {e}"))?;

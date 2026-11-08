@@ -78,9 +78,9 @@ declare -A CI_DISPATCH=(
     [resolve]=ci_cmd_resolve [build]=ci_cmd_build [rust-build]=ci_cmd_rust_build [apk-setup]=ci_cmd_apk_setup [image-setup]=ci_cmd_image_setup [openrc-setup]=ci_cmd_openrc_setup
     [build-tools]=ci_cmd_build_tools [job-settings]=ci_cmd_job_settings [tool-releases]=ci_cmd_tool_releases [publish]=ci_cmd_publish [verify]=ci_cmd_verify [ship]=ci_cmd_ship [ship-release]=ci_cmd_ship_release [build-tools-run]=ci_cmd_build_tools_run [gha-runtime-args]=ci_cmd_gha_runtime_args
     [test]=ci_cmd_test [scan-channel]=ci_cmd_scan_channel [assemble]=ci_cmd_assemble
-    [aggregate-stack]=ci_cmd_aggregate_stack [scan-stack]=ci_cmd_scan_stack [changed-files]=ci_cmd_changed_files [checks-plan]=ci_cmd_checks_plan [rust-memo]=ci_cmd_rust_memo [psl]=ci_cmd_psl
+    [aggregate-stack]=ci_cmd_aggregate_stack [scan-stack]=ci_cmd_scan_stack [changed-files]=ci_cmd_changed_files [checks-plan]=ci_cmd_checks_plan [rust-memo]=ci_cmd_rust_memo [update-psl]=ci_cmd_update_psl
     [assemble-stack]=ci_cmd_assemble_stack [test-stack]=ci_cmd_test_stack [nightly-report]=ci_cmd_nightly_report
-    [validate]=ci_cmd_validate [result-gate]=ci_cmd_result_gate [promote]=ci_cmd_promote [promote-ref]=ci_cmd_promote_ref [channel-checkout]=ci_cmd_channel_checkout [channel-matrix]=ci_cmd_channel_matrix [channel-check]=ci_cmd_channel_check [channel-report]=ci_cmd_channel_report [release-validation]=_ci_release_validation_valid [release-ref]=_ci_release_ref
+    [validate]=ci_cmd_validate [result-gate]=ci_cmd_result_gate [promote]=ci_cmd_promote [promote-ref]=ci_cmd_promote_ref [channel-checkout]=ci_cmd_channel_checkout [channel-matrix]=ci_cmd_channel_matrix [channel-check]=ci_cmd_channel_check [channel-report]=ci_cmd_channel_report [release-ref]=_ci_release_ref
     [release-publish]=ci_cmd_release_publish [release-images]=ci_cmd_release_images [release-sbom-stack]=ci_cmd_release_sbom_stack [release-vex]=ci_cmd_release_vex [cut-release-tag]=ci_cmd_cut_release_tag [release-notes]=ci_cmd_release_notes [release-changelog]=ci_cmd_release_changelog [release-variable]=ci_cmd_release_variable
     [gc]=ci_cmd_gc [gc-refs]=ci_cmd_gc_refs [check]=ci_cmd_check [close-linked-issues]=ci_cmd_close_linked_issues [pr-labels]=ci_cmd_pr_labels [pr-milestone]=ci_cmd_pr_milestone [board-add]=ci_cmd_board_add
     [version]=ci_cmd_version [docker-daemon-config]=ci_cmd_docker_daemon_config [runner-host]=ci_cmd_runner_host
@@ -100,7 +100,7 @@ declare -gA CI_CHECKS=(
     [governance-guards]="diff _ci_check_governance_guards" [changelog-direct-edit]="diff _ci_check_changelog_direct_edit"
     [action-node-versions]="repo _ci_check_action_node_versions" [action-majors]="job _ci_check_action_majors"
     [naming-consistency]="repo _ci_check_naming_consistency" [workflow-line-limit]="repo _ci_check_workflow_line_limit"
-    [stable-external-images]="repo _ci_check_stable_external_images" [compose-healthchecks]="repo _ci_check_compose_healthchecks"
+    [sot-external-images]="repo _ci_check_sot_external_images" [compose-healthchecks]="repo _ci_check_compose_healthchecks"
     [proxy-cache-env-doc-drift]="repo _ci_check_proxy_cache_env_doc_drift" [prebuilt-prod]="repo _ci_check_prebuilt_prod"
     [prod-state-wiring]="repo _ci_check_prod_state_wiring" [compose-config]="repo _ci_check_compose_config"
     [proxy-cert-volume]="repo _ci_check_proxy_cert_volume"
@@ -186,7 +186,7 @@ _ci_git_run() {
 # Why: one owner for coded command errors and their raw.
 # From: Issue #1683 | PR #1858
 _ci_run() {
-    local okmax=0 strict="" ofile="" secret="" id ctx err out="" rc=0 t0 l
+    local okmax=0 strict="" ofile="" secret="" quiet="" id ctx err out="" rc=0 t0 l
     # What: -m N: rc to N ok; -s: stderr fails; -o F: to F
     # Why: grep rc 1 is a miss; big trees skip bash strings
     # From: Issue #1683 | PR #1858
@@ -195,7 +195,11 @@ _ci_run() {
             -m) okmax="$2"; shift 2 ;;
             -s) strict=1; shift ;;
             -o) ofile="$2"; shift 2 ;;
-            -k) secret=1; shift ;;
+            -k) secret=1 quiet=1; shift ;;
+            # What: -q: stdout holds secrets; never logged.
+            # Why: the register reply carries the TSIG key.
+            # From: Issue #1683 | PR #1858
+            -q) quiet=1; shift ;;
             *) break ;;
         esac
     done
@@ -232,7 +236,7 @@ _ci_run() {
         done <<< "${out}"
     fi
     if [ "${rc}" -gt "${okmax}" ] || { [ -n "${strict}" ] && [ -s "${err}" ]; }; then
-        ci_error "${id}" "${ctx} cmd=\"$1\" rc=${rc}" "$(cat "${err}"; [ -z "${out}" ] || printf 'stdout:\n%s\n' "${out}")"
+        ci_error "${id}" "${ctx} cmd=\"$1\" rc=${rc}" "$(cat "${err}"; [ -z "${out}" ] || [ -n "${quiet}" ] || printf 'stdout:\n%s\n' "${out}")"
         [ -n "${RUNNER_TEMP:-}" ] || rm -f "${err}"
         return 2
     fi
@@ -241,7 +245,7 @@ _ci_run() {
     # What: debug mode also logs the raw stdout.
     # Why: every raw output must be visible in the log.
     # From: Issue #1683 | PR #1984
-    if [ "${_CI_DEBUG_MODE:-}" = true ] && [ -n "${out}" ]; then
+    if [ "${_CI_DEBUG_MODE:-}" = true ] && [ -n "${out}" ] && [ -z "${quiet}" ]; then
         ci_log "[CI-INFO-CORE-0161]" "cmd=\"$1\" stdout:" 2>&"${_CI_CMD_FD:-2}"
         printf '%s\n' "${out}" >&"${_CI_CMD_FD:-2}"
     fi
@@ -1511,17 +1515,17 @@ _ci_github_get() {
         printf '%s\n' "${out}"
         return 0
     fi
-    # What: rate limit: one more read with the job token.
-    # Why: shared runner IPs; no log, callers read 2>&1.
-    # From: Issue #1683 | PR #1858
-    if [[ "${out}" != *"API rate limit exceeded"* ]] || [ -z "${tok}" ]; then
+    # What: failed anonymous read: one more with the token.
+    # Why: rate limits and 504s hit anonymous reads only.
+    # From: Issue #1683 | PR #1997
+    if [ -z "${tok}" ]; then
         printf '%s\n' "${out}"
         return 1
     fi
     # What: the note goes to fd 3, the caller's job log.
     # Why: _ci_retry keeps stderr in the body; jq broke.
     # From: Issue #1683 | PR #1858
-    ci_log "[CI-INFO-FETCH-0009]" "url=\"$1\" reason=\"anonymous rate limit; one read with the job token\"" 2>&3
+    ci_log "[CI-INFO-FETCH-0009]" "url=\"$1\" reason=\"anonymous read failed; one read with the job token\"" 2>&3
     printf 'Authorization: Bearer %s\n' "${tok}" \
         | _ci_download_curl --fail-with-body -sSL -H 'Accept: application/vnd.github+json' -H @- "$1" 2>&1
 }
@@ -1819,9 +1823,6 @@ _ci_sot_named_paths() {
         v="$(_ci_variable "${n}")" || return 2
         printf '%s\n' "${v}"
     done <<< "${names}"
-    v="$(_ci_block_entry_field release "" validation_state)" || return 2
-    printf '%s\n' "${v}"
-    _ci_block_entry_list release "" governance_paths || return 2
 }
 
 # What: path $1: rc 0 doc, 1 no doc, 3 SOT-named doc.
@@ -1896,7 +1897,7 @@ _ci_pr_fingerprint() {
     # Why: only a published digest was checked (§2.3).
     # From: Issue #1683 | PR #1858
     if [ -n "${_ci_fp_absent}" ]; then
-        ci_log "[CI-INFO-PLAN-0011]" "absent=\"${_ci_fp_absent% }\" reason=\"pair has no image; no fingerprint\""
+        ci_log "[CI-INFO-PLAN-0011]" "absent=\"${_ci_fp_absent% }\" reason=\"pair has no image or no id; no fingerprint\""
         return 1
     fi
     printf '%s' "${_ci_fp_rows}" | _ci_sha256_hex
@@ -1906,8 +1907,10 @@ _ci_pr_fingerprint() {
 # Why: a kept plan probe is not started again.
 # From: Issue #1683 | PR #1858
 _ci_pr_fingerprint_probe() {
-    local id tag
-    id="$(_ci_identity_for "$1" "$2")" || return 2
+    local id tag rc=0
+    id="$(_ci_identity_for "$1" "$2" absent-ok)" || rc=$?
+    [ "${rc}" -ne 1 ] || return 0
+    [ "${rc}" -eq 0 ] || return 2
     tag="$(_ci_image_tag "$1" "$2" "${id}")" || return 2
     _ci_registry_probe_start_tag "${tag}"
 }
@@ -1917,7 +1920,15 @@ _ci_pr_fingerprint_probe() {
 # From: Issue #1683 | PR #1858
 _ci_pr_fingerprint_pair() {
     local id tag digest rc=0
-    id="$(_ci_identity_for "$1" "$2")" || return 2
+    # What: a pair the plan skipped has no id; no value.
+    # Why: only a recorded id names a checked image.
+    # From: Issue #1683 | PR #1858
+    id="$(_ci_identity_for "$1" "$2" absent-ok)" || rc=$?
+    if [ "${rc}" -eq 1 ]; then
+        _ci_fp_absent+="$1/$2 "
+        return 0
+    fi
+    [ "${rc}" -eq 0 ] || return 2
     tag="$(_ci_image_tag "$1" "$2" "${id}")" || return 2
     # What: plan reads the probe it already made.
     # Why: 12 pairs read again cost 5 s on a NOOP run.
@@ -2399,7 +2410,11 @@ ci_cmd_plan_matrix() {
         work=true
     fi
     ci_group_end
-    {
+    # What: the plan outputs to the log too, as written.
+    # Why: test-services showed nowhere in the run log.
+    # From: Issue #1683 | PR #1858
+    local plan_out
+    plan_out="$(
         printf 'work=%s\n' "${work}"
         printf 'any-build=%s\n' "${any}"
         printf 'promote=%s\n' "${promote}"
@@ -2412,7 +2427,9 @@ ci_cmd_plan_matrix() {
         printf 'rust-audit=%s\n' "${rust_audit}"
         printf 'docs-only=%s\n' "${docs_only}"
         printf 'reuse=%s\n' "${reuse}"
-    } >> "${out}"
+    )" || return 2
+    printf '%s\n' "${plan_out}" >> "${out}"
+    printf '%s\n' "${plan_out}" >&2
     _ci_record_emit || return 2
     if [ -n "${unknown}" ]; then
         ci_error "[CI-ERROR-PLAN-0008]" "reason=\"UNKNOWN pairs: no build, escalate (2.3)\"" "${unknown}"
@@ -3710,7 +3727,7 @@ ci_cmd_rust_memo() {
 # What: put the PSL in place; $1 restore or refresh.
 # Why: nightly loads it into the cache; jobs read it there.
 # From: Issue #1683 | PR #1984
-ci_cmd_psl() {
+ci_cmd_update_psl() {
     local mode="${1:-}" name url dest dir sum ver rc=0
     [ -n "$(_ci_env_required RUNNER_TEMP)" ] || return 2
     name="$(_ci_runtime_default NGINX_PSL_FILE)" || return 2
@@ -3724,7 +3741,14 @@ ci_cmd_psl() {
     _ci_run "[CI-ERROR-CACHE-0032]" "dir=\"${dir}\" reason=\"PSL dir not made\"" mkdir -p "${dir}" || return 2
     case "${mode}" in
         restore)
-            _ci_gha_cache_get psl-latest psl- "${ver}" "${dir}" || rc=$?
+            # What: no cache runtime in the job is a miss.
+            # Why: master nightly validate lacks the export.
+            # From: Issue #1683 | PR #1984
+            if [ -z "${ACTIONS_RESULTS_URL:-}" ] || [ -z "${ACTIONS_RUNTIME_TOKEN:-}" ]; then
+                rc=1
+            else
+                _ci_gha_cache_get psl-latest psl- "${ver}" "${dir}" || rc=$?
+            fi
             case "${rc}" in
                 0) ci_log "[CI-INFO-CACHE-0033]" "file=\"${name}\" reason=\"PSL restored from the nightly cache\"" ;;
                 # What: a miss loads from the source.
@@ -4206,7 +4230,7 @@ _ci_identity_recorded() {
 # Why: no consumer can mint a second id in one run (§17).
 # From: Issue #1683 | PR #1912
 _ci_identity_for() {
-    local service="$1" platform="$2" rec rc=0
+    local service="$1" platform="$2" absent_ok="${3:-}" rec rc=0
     if [ -n "${CI_RUN_IDENTITIES+x}" ]; then
         rec="${CI_RUN_IDENTITIES}"
     elif [ -n "${_ci_plan_ids+x}" ]; then
@@ -4218,7 +4242,11 @@ _ci_identity_for() {
     _ci_identity_recorded "${rec}" "${service}" "${platform}" || rc=$?
     case "${rc}" in
         0) return 0 ;;
+        # What: absent-ok gives rc 1 for a skipped pair.
+        # Why: a plan that skips a service records no id.
+        # From: Issue #1683 | PR #1858
         1)
+            [ "${absent_ok}" != absent-ok ] || return 1
             ci_log "[CI-ERROR-IDENTITY-0015]" "service=\"${service}\" platform=\"${platform}\" reason=\"pair not in the run record; FAIL CLOSED\""
             return 2
             ;;
@@ -6014,15 +6042,36 @@ ci_cmd_board_add() {
     printf 'board-add=added project=%s %s=%s\n' "${number}" "${kind}" "${item}"
 }
 
-# What: assemble product services from build matrix.
-# Why: one matrix walk; iteration in ci.sh (AG-CODE-011).
+# What: services of a build matrix, one per line.
+# Why: passed and planned matrix share one reader.
+# From: Issue #1683
+_ci_matrix_services() {
+    local out
+    [ -n "$1" ] || return 0
+    if ! out="$(jq -r '[.include[].service] | unique | .[]' <<< "$1" 2>&1)"; then
+        ci_error "[CI-ERROR-ASSEMBLE-0011]" "reason=\"build matrix unreadable; no service assembled\"" "${out}"$'\n'"matrix: $1"
+        return 2
+    fi
+    [ -z "${out}" ] || printf '%s\n' "${out}"
+}
+
+# What: assemble passed and unchanged product services.
+# Why: AG-REL-009: a push tags sha-<commit> per service.
 # From: Issue #1683
 ci_cmd_assemble_stack() {
-    local matrix="${CI_BUILD_MATRIX:-}" svc svcs rc=0 arc failed=""
-    [ -n "${matrix}" ] || { ci_log "[CI-ERROR-ASSEMBLE-0006]" "reason=\"CI_BUILD_MATRIX required\""; return 2; }
-    if ! svcs="$(jq -r '[.include[].service] | unique | .[]' <<< "${matrix}" 2>&1)"; then
-        ci_error "[CI-ERROR-ASSEMBLE-0011]" "reason=\"CI_BUILD_MATRIX unreadable; no service assembled\"" "${svcs}"$'\n'"matrix: ${matrix}"
-        return 2
+    local matrix="${CI_BUILD_MATRIX:-}" svc svcs planned all rc=0 arc failed=""
+    [ -n "${matrix}" ] || [ -n "${CI_PLAN_MATRIX+x}" ] || { ci_log "[CI-ERROR-ASSEMBLE-0006]" "reason=\"CI_BUILD_MATRIX or CI_PLAN_MATRIX required\""; return 2; }
+    svcs="$(_ci_matrix_services "${matrix}")" || return 2
+    # What: a service the plan did not build is unchanged.
+    # Why: its accepted digests get this commit's tag too.
+    # From: Issue #1683
+    if [ -n "${CI_PLAN_MATRIX+x}" ]; then
+        planned="$(_ci_matrix_services "${CI_PLAN_MATRIX}")" || return 2
+        all="$(ci_services)" || return 2
+        while IFS= read -r svc; do
+            [ -n "${svc}" ] || continue
+            _ci_list_has "${svc}" "${planned}" || svcs+=$'\n'"${svc}"
+        done <<< "${all}"
     fi
     # What: assembles each service in its own log group
     # Why: one blocks no other; parts show by name
@@ -6684,7 +6733,7 @@ _ci_job_settings_read() {
 # Why: AG-CI-002/006/016: one owner, no YAML copies.
 # From: Issue #1683 | PR #1858
 ci_cmd_job_settings() {
-    local runner json job vdir
+    local runner json job vdir groups probes
     local -a js_jobs=() js_pairs=()
     local -A js_min=()
     _ci_job_settings_read runner js_jobs js_min || return 2
@@ -6697,7 +6746,13 @@ ci_cmd_job_settings() {
     # From: Issue #1683 | PR #1912
     vdir="$(_ci_variable CI_VALIDATE_SHARED_DIR)" || return 2
     _ci_step_output "[CI-ERROR-JOBS-0007]" validate-dir "${vdir}" || return 2
-    printf 'runner=%s\ntimeouts=%s\nvalidate-dir=%s\n' "${runner}" "${json}" "${vdir}"
+    # What: the SOT probe groups as a JSON list.
+    # Why: one validate matrix job per group, all at once.
+    # From: Issue #1683 | PR #1858
+    groups="$(_ci_variable CI_VALIDATE_PROBE_GROUPS)" || return 2
+    probes="$(_ci_capture 0 jq -cn --arg g "${groups}" "\$g | split(\";\") | map(gsub(\"^ +| +\$\"; \"\")) | map(select(length > 0))")" || return 2
+    _ci_step_output "[CI-ERROR-JOBS-0009]" validate-probes "${probes}" || return 2
+    printf 'runner=%s\ntimeouts=%s\nvalidate-dir=%s\nvalidate-probes=%s\n' "${runner}" "${json}" "${vdir}" "${probes}"
 }
 
 # What: Lowercased owner/repo for GHCR image refs.
@@ -9778,6 +9833,20 @@ ci_cmd_assemble() {
         3) mode=digest ;;
         *) return 2 ;;
     esac
+    # What: a reused index still needs this commit's tag.
+    # Why: AG-REL-009; setup.sh pins sha-<commit> per image.
+    # From: Issue #1683
+    if [ -n "${reused}" ] && [ "${mode}" = tag ]; then
+        local name head seen prc=0
+        name="$(_ci_image_ref "${service}")" || return 2
+        head="$(_ci_head_commit)" || return 2
+        seen="$(_ci_registry_probe "${name}:sha-${head}")" || prc=$?
+        case "${prc}" in
+            0) reused="${seen}" ;;
+            1) reused="" ;;
+            *) return 2 ;;
+        esac
+    fi
     if [ -n "${reused}" ]; then
         printf 'service=%s result=reuse-index assembled=%s platforms=%s\n' "${service}" "${reused}" "${count}"
         _ci_assemble_report "${service}" "${inputs}"
@@ -10329,19 +10398,19 @@ _ci_promote_move_all() {
         [ -n "${svc}" ] || continue
         if ! _ci_promote_move "${svc}" "${channel}" "${digest}" "${kept}"; then
             ci_log "[CI-ERROR-PROMOTE-0007]" "service=\"${svc}\" channel=\"${channel}\" reason=\"channel ref move failed\""
-            _ci_promote_rollback "${channel}" "${moved}"
+            _ci_promote_rollback "${channel}" "${moved}" || return 4
             return 2
         fi
         moved="${moved}${svc}=${prev}"$'\n'
         if ! seen="$(_ci_channel_readback "${svc}" "${channel}")"; then
             ci_log "[CI-ERROR-PROMOTE-0008]" "service=\"${svc}\" channel=\"${channel}\" reason=\"readback failed; blocking\""
-            _ci_promote_rollback "${channel}" "${moved}"
+            _ci_promote_rollback "${channel}" "${moved}" || return 4
             return 2
         fi
         mrc=0; _ci_channel_matches "${svc}" "${channel}" "${digest}" "${kept}" || mrc=$?
         if [ "${mrc}" -ne 0 ]; then
             ci_error "[CI-ERROR-PROMOTE-0009]" "service=\"${svc}\" channel=\"${channel}\" rc=${mrc} reason=\"readback MISMATCH; rolling the moved services back\" expected=\"${digest} ${kept}\"" "readback=${seen}"
-            _ci_promote_rollback "${channel}" "${moved}"
+            _ci_promote_rollback "${channel}" "${moved}" || return 4
             return 2
         fi
     done <<< "${plan}"
@@ -10364,22 +10433,57 @@ _ci_promote_locked() {
     _ci_promote_move_all "${channel}" "${cand}"
 }
 
-# What: Put moved services back on their earlier digests.
+# What: Put moved services back; rc 1 = channel mixed.
 # Why: a failed move must not leave a mixed channel (§50)
 # From: Issue #1683 | PR #1912
 _ci_promote_rollback() {
-    local channel="$1" moved="$2" line svc prev
+    local channel="$1" moved="$2" line svc prev rc=0
     while IFS= read -r line; do
         [ -n "${line}" ] || continue
         svc="${line%%=*}"; prev="${line#*=}"
         if [ -z "${prev}" ]; then
             ci_log "[CI-ERROR-PROMOTE-0022]" "service=\"${svc}\" channel=\"${channel}\" reason=\"channel had no image before; ref stays, channel incomplete until a promote rerun\""
+            rc=1
             continue
         fi
         if ! _ci_promote_move "${svc}" "${channel}" "${prev}"; then
             ci_log "[CI-ERROR-PROMOTE-0023]" "service=\"${svc}\" channel=\"${channel}\" earlier=\"${prev}\" reason=\"rollback move failed; channel is mixed until a promote rerun\""
+            rc=1
         fi
     done <<< "${moved}"
+    return "${rc}"
+}
+
+# What: mark our promote lock mixed and keep it held.
+# Why: setup.sh waits; gc-refs keeps a mixed lock.
+# From: Issue #1683
+_ci_promote_lock_mark_mixed() {
+    local remote ref note head sha raw rc=0
+    remote="$(_ci_git_remote)" || return 2
+    ref="$(_ci_promote_lock_ref "$1")" || return 2
+    note="$(_ci_lock_note promote "$1")"
+    head="$(_ci_ref_head "${remote}" "${ref}" 1)" || return 2
+    [ "${head#*$'\t'}" = "${note}" ] || return 2
+    sha="$(_ci_cas_note_commit "${note} mixed")" || return 2
+    raw="$(_ci_cas_push "${remote}" "${ref}" "${sha}" "${head%%$'\t'*}")" || rc=$?
+    [ "${rc}" -ne 0 ] || return 0
+    _ci_cas_push_failed mark "${ref}" "${rc}" "${raw}"
+    return 2
+}
+
+# What: free a mixed lock once the channel is complete.
+# Why: an already-promoted rerun ends the install wait.
+# From: Issue #1683
+_ci_promote_clear_mixed() {
+    local remote ref head rc=0
+    remote="$(_ci_git_remote)" || return 2
+    ref="$(_ci_promote_lock_ref "$1")" || return 2
+    head="$(_ci_ref_head "${remote}" "${ref}" 1)" || rc=$?
+    [ "${rc}" -ne 1 ] || return 0
+    [ "${rc}" -eq 0 ] || return 2
+    [[ "${head#*$'\t'}" == *" mixed" ]] || return 0
+    _ci_promote_lock "$1" || return 2
+    _ci_promote_unlock "$1"
 }
 
 # What: True if the candidate holds every product service.
@@ -10472,6 +10576,10 @@ ci_cmd_promote() {
     _ci_require_ghcr_auth || return "$?"
     _ci_promote_all_current "${channel}" "${cand}" || arc=$?
     if [ "${arc}" -eq 0 ]; then
+        if ! _ci_promote_clear_mixed "${channel}"; then
+            ci_log "[CI-ERROR-PROMOTE-0045]" "channel=\"${channel}\" reason=\"mixed lock of a complete channel not freed\""
+            return 2
+        fi
         printf 'channel=%s result=already-promoted services=%s\n' "${channel}" "$(_ci_count_lines "${cand}")"
         _ci_refresh_accept
         return
@@ -10486,6 +10594,15 @@ ci_cmd_promote() {
     # From: Issue #1683 | PR #1858
     local rc
     if _ci_promote_locked "${channel}" "${cand}"; then rc=0; else rc=$?; fi
+    # What: rc 4 = channel mixed; keep the lock, marked.
+    # Why: no install from a mixed channel until a rerun.
+    # From: Issue #1683
+    if [ "${rc}" -eq 4 ]; then
+        _ci_promote_lock_mark_mixed "${channel}" \
+            || ci_log "[CI-ERROR-PROMOTE-0044]" "channel=\"${channel}\" reason=\"mixed mark failed; lock kept unmarked, gc-refs may free it\""
+        ci_log "[CI-ERROR-PROMOTE-0043]" "channel=\"${channel}\" reason=\"channel mixed; lock kept so installs wait until a promote rerun\""
+        return 2
+    fi
     _ci_promote_unlock "${channel}" || {
         ci_error "[CI-ERROR-PROMOTE-0011]" "channel=\"${channel}\" reason=\"lock release failed\"" "${channel}"
         [ "${rc}" -ne 0 ] || rc=2
@@ -10555,13 +10672,6 @@ ci_cmd_promote_ref() {
         printf 'promote=noop reason=no-targets ref=%s\n' "${ref}"
         return 0
     fi
-    # What: a release tag passes the AG-REL-011 gate first
-    # Why: AG-REL-013: no release move on stale validation
-    # From: Issue #1683 | PR #1858
-    if [[ "${ref}" == refs/tags/* ]] && ! _ci_release_validation_valid; then
-        ci_log "[CI-ERROR-RELEASE-0001]" "ref=\"${ref}\" reason=\"candidate validation not valid or unverified; not releasing\""
-        return 2
-    fi
     # What: moved branch tip means newer run supersedes.
     # Why: determinism (§4); never promote stale blind.
     # From: Issue #1683 | PR #1858
@@ -10587,158 +10697,6 @@ ci_cmd_promote_ref() {
 # =========================================================
 # NIGHTLY / RELEASE
 # =========================================================
-
-# What: Print why one validation record is stale, if it is.
-# Why: AG-REL-011 triggers are checked directly, per record.
-# From: Issue #1683
-_ci_release_record_stale() {
-    local name="$1" commit="$2" target="$3" rc=0 p
-    local -a gov=() paths=()
-    read -ra paths <<< "$4"
-    read -ra gov <<< "$5"
-    if [ -z "${commit}" ] || [ "${commit}" = null ]; then
-        printf '%s: never validated\n' "${name}"; return 0
-    fi
-    local anc_err
-    anc_err="$(git -C "${CI_REPO_ROOT}" merge-base --is-ancestor "${commit}" "${target}" 2>&1)" || rc=$?
-    case "${rc}" in
-        0) ;;
-        1) printf '%s: %s is not an ancestor of %s\n' "${name}" "${commit}" "${target}"; return 0 ;;
-        *)
-            ci_error "[CI-ERROR-RELEASE-0019]" "commit=\"${commit}\" target=\"${target}\" reason=\"ancestry check failed\"" "${anc_err}"
-            return 2
-            ;;
-    esac
-    for p in "${gov[@]}"; do
-        rc=0; _ci_content_changed _ci_tracked_content_ids "${p}" "${commit}" "${target}" || rc=$?
-        case "${rc}" in
-            0) printf '%s: governance %s changed since %s\n' "${name}" "${p}" "${commit}"; return 0 ;;
-            1) ;;
-            *) return 2 ;;
-        esac
-    done
-    for p in "${paths[@]}"; do
-        rc=0; _ci_content_changed _ci_tracked_content_ids "${p}" "${commit}" "${target}" || rc=$?
-        case "${rc}" in
-            0) printf '%s: %s changed since %s\n' "${name}" "${p}" "${commit}"; return 0 ;;
-            1) ;;
-            *) return 2 ;;
-        esac
-    done
-}
-
-# What: the scope paths of one validation record
-# Why: a layer owns a pr_labels class, a target its paths
-# From: Issue #1683 | PR #1858
-_ci_release_scope() {
-    local kind="$1" name="$2" class lock paths p
-    if [ "${kind}" = target ]; then
-        # What: drop the generated lock from a target scope
-        # Why: CI_CARGO_LOCK is untracked; no git history
-        # From: Issue #1683 | PR #1858
-        lock="$(_ci_variable CI_CARGO_LOCK)" || return 2
-        paths="$(_ci_target_paths "${name}")" || return 2
-        while IFS= read -r p; do
-            if [ -n "${p}" ] && [ "${p}" != "${lock}" ]; then
-                printf '%s\n' "${p}"
-            fi
-        done <<< "${paths}"
-        return 0
-    fi
-    class="$(_ci_block_entry_field release validation_layers "${name}")" || return 2
-    if [ -z "${class}" ]; then
-        ci_log "[CI-ERROR-RELEASE-0049]" "layer=\"${name}\" reason=\"SOT release.validation_layers names no pr_labels class\""
-        return 2
-    fi
-    _ci_block_entry_list pr_labels "" "${class}"
-}
-
-# What: scope paths that match no tracked file
-# Why: a gone path would read as unchanged forever
-# From: Issue #1683 | PR #1858
-_ci_release_dead_paths() {
-    local p hit
-    while IFS= read -r p; do
-        [ -n "${p}" ] || continue
-        hit="$(_ci_capture 0 git -C "${CI_REPO_ROOT}" ls-files -- "${p}")" || return 2
-        [ -n "${hit}" ] || printf '%s\n' "${p}"
-    done <<< "$1"
-}
-
-# What: AG-REL-011 verdict over the SOT validation record.
-# Why: a stale or invalidated record must never ship.
-# From: Issue #1683 | PR #1858
-_ci_release_validation_valid() {
-    local rel gov state target stale="" out dead="" rows layers targets name commit scope kind
-    local -A rec=()
-    rel="$(_ci_block_entry_field release "" validation_state)" || return 2
-    gov="$(_ci_block_entry_list release "" governance_paths)" || return 2
-    target="$(_ci_head_commit)" || return 2
-    state="${CI_REPO_ROOT}/${rel}"
-    if [ -z "${rel}" ] || [ -z "${gov}" ] || ! jq -e '(.subsystem_validation // false) != false' "${state}" >&2; then
-        ci_log "[CI-ERROR-RELEASE-0014]" "state=\"${state}\" reason=\"no readable SOT validation record\""
-        return 2
-    fi
-    # What: load the full history before any record check
-    # Why: a depth-1 checkout lacks every record commit
-    # From: Issue #1683 | PR #1858
-    _ci_diff_history || return 2
-    layers="$(_ci_block_keys release/validation_layers all)" || return 2
-    if [ -z "${layers}" ]; then
-        ci_log "[CI-ERROR-RELEASE-0052]" "reason=\"SOT release.validation_layers lists no layer\""
-        return 2
-    fi
-    targets="$(ci_build_targets)" || return 2
-    if ! rows="$(jq -r '(.subsystem_validation | to_entries[] | ["target", .key, (.value.commit // "null")]),
-        (to_entries[] | select(.key | test("^last_.+_validation$"))
-            | ["layer", (.key | sub("^last_"; "") | sub("_validation$"; "")), (.value.commit // "null")])
-        | @tsv' "${state}" 2>&1)"; then
-        ci_error "[CI-ERROR-RELEASE-0023]" "state=\"${state}\" reason=\"validation records unreadable\"" "${rows}"
-        return 2
-    fi
-    while IFS=$'\t' read -r kind name commit; do
-        [ -n "${kind}" ] && rec["${kind}/${name}"]="${commit}"
-    done <<< "${rows}"
-    # What: a record whose key the SOT no longer knows
-    # Why: a removed target or layer must not stay silent
-    # From: Issue #1683 | PR #1858
-    for name in "${!rec[@]}"; do
-        kind="${name%%/*}"
-        local known="${layers}"
-        [ "${kind}" = layer ] || known="${targets}"
-        [[ $'\n'"${known}"$'\n' == *$'\n'"${name#*/}"$'\n'* ]] && continue
-        stale+="${name#*/}: no SOT ${kind} of that name"$'\n'
-    done
-    out="$(_ci_release_dead_paths "${gov}")" || return 2
-    dead+="${out:+${out}$'\n'}"
-    gov="${gov//$'\n'/ }"
-    for kind in layer target; do
-        local names="${layers}"
-        [ "${kind}" = layer ] || names="${targets}"
-        while IFS= read -r name; do
-            [ -n "${name}" ] || continue
-            scope="$(_ci_release_scope "${kind}" "${name}")" || return 2
-            if [ -z "${scope}" ]; then
-                ci_log "[CI-ERROR-RELEASE-0050]" "${kind}=\"${name}\" reason=\"empty validation scope\""
-                return 2
-            fi
-            out="$(_ci_release_dead_paths "${scope}")" || return 2
-            dead+="${out:+${out}$'\n'}"
-            out="$(_ci_release_record_stale "${name}" "${rec["${kind}/${name}"]:-null}" "${target}" "${scope//$'\n'/ }" "${gov}")" || return 2
-            stale+="${out:+${out}$'\n'}"
-        done <<< "${names}"
-    done
-    if [ -n "${dead}" ]; then
-        ci_error "[CI-ERROR-RELEASE-0051]" "target=\"${target}\" reason=\"validation scope path matches no tracked file\"" "${dead}"
-        return 2
-    fi
-    if [ -n "${stale}" ]; then
-        ci_error "[CI-ERROR-RELEASE-0017]" "reason=\"validation record stale (AG-REL-011)\"" "${stale}"
-        return 1
-    fi
-    printf 'release-validation=fresh target=%s\n' "${target}"
-}
-
 
 # What: Map a release tag to its prerelease flag.
 # Why: -rc.N ships as prerelease; vX.Y.Z is final.
@@ -11760,20 +11718,42 @@ _ci_gc_delete() {
             *"http 404"*)
                 ci_log "[CI-INFO-GC-0034]" "candidate=\"${candidate}\" reason=\"version already gone; goal reached\""
                 return 0 ;;
+            # What: rc 3 = API rate limit used up.
+            # Why: the caller ends; the next run goes on.
+            # From: Issue #1683
+            *"api rate limit exceeded"*) return 3 ;;
         esac
         return 2
     fi
-    # What: deleted = 404 or a set deleted_at on read back.
-    # Why: AG-WF-031; GitHub keeps soft-deleted versions.
+    # What: _ci_gc_run checks once per package after this.
+    # Why: a read back per delete used up the rate limit.
     # From: Issue #1683 | PR #1858
-    rc=0; out="$(_ci_retry github-read gh api --jq '.deleted_at // ""' "${path}")" || rc=$?
-    if [ "${rc}" -eq 1 ] || { [ "${rc}" -eq 0 ] && [ -n "${out}" ]; }; then return 0; fi
-    if [ "${rc}" -eq 0 ]; then
-        ci_error "[CI-ERROR-GC-0032]" "candidate=\"${candidate}\" reason=\"version still active after the delete\"" "${out}"
-    else
-        ci_error "[CI-ERROR-GC-0033]" "candidate=\"${candidate}\" reason=\"delete not confirmed; read back failed\"" "${out}"
+    return 0
+}
+
+# What: deleted ids ($2) are gone from the active list.
+# Why: AG-WF-031; one listing per package, not per id.
+# From: Issue #1683 | PR #1858
+_ci_gc_check_gone() {
+    local svc="$1" ids="$2" prefix vers v id rc=0
+    local -A active=()
+    prefix="$(_ci_repo)" || return 2
+    vers="$(_ci_gh_versions "${prefix%%/*}" "${prefix#*/}%2F${svc}")" || rc=$?
+    [ "${rc}" -eq 1 ] && return 0
+    if [ "${rc}" -ne 0 ]; then
+        ci_log "[CI-ERROR-GC-0033]" "service=\"${svc}\" reason=\"delete not confirmed; listing failed (raw above)\""
+        return 2
     fi
-    return 2
+    while IFS=$'\t' read -r _ v _; do
+        [ -n "${v}" ] && active["${v}"]=1
+    done <<< "${vers}"
+    while IFS= read -r id; do
+        [ -n "${id}" ] || continue
+        [ -z "${active[${id}]:-}" ] && continue
+        ci_log "[CI-ERROR-GC-0032]" "service=\"${svc}\" id=\"${id}\" reason=\"version still active after the delete\""
+        rc=2
+    done <<< "${ids}"
+    return "${rc}"
 }
 
 # What: the two words a reachability probe may answer.
@@ -11812,7 +11792,7 @@ _ci_gc_reachable() {
     fi
     for subj in "${probes[@]}"; do
         root_hit="$(_ci_capture 1 grep -xF -- "${subj}" "${CI_GC_ROOTS_FILE}")" || return 2
-        [ -z "${root_hit}" ] || { printf '%s\n' "${_CI_GC_REFERENCED}"; return 0; }
+        [ -z "${root_hit}" ] || { printf '%s root\n' "${_CI_GC_REFERENCED}"; return 0; }
     done
     # What: Fail closed unless grace is a positive integer.
     # Why: Empty grace makes floor=now and deletes all.
@@ -11841,7 +11821,7 @@ _ci_gc_reachable() {
     esac
     now="$(date +%s)"
     floor=$(( now - window * 60 ))
-    [ "${created_epoch}" -ge "${floor}" ] && { printf '%s\n' "${_CI_GC_REFERENCED}"; return 0; }
+    [ "${created_epoch}" -ge "${floor}" ] && { printf '%s grace\n' "${_CI_GC_REFERENCED}"; return 0; }
     printf '%s\n' "${_CI_GC_UNREACHABLE}"
 }
 
@@ -11854,8 +11834,12 @@ _ci_gc_classify() {
         ci_log "[CI-ERROR-GC-0004]" "candidate=\"${candidate}\" reason=\"reachability probe failed\""
         return 2
     fi
+    # What: KEEP carries its cause: root or grace.
+    # Why: DoMe 08.11.: a KEEP line must say why.
+    # From: Issue #1683 | PR #1858
     case "${verdict}" in
-        "${_CI_GC_REFERENCED}") printf 'KEEP\n' ;;
+        "${_CI_GC_REFERENCED} root") printf 'KEEP referenced by a protected root\n' ;;
+        "${_CI_GC_REFERENCED} grace") printf 'KEEP younger than unaggregated_grace_minutes\n' ;;
         "${_CI_GC_UNREACHABLE}") printf 'DELETE\n' ;;
         *)
             ci_log "[CI-ERROR-GC-0005]" "candidate=\"${candidate}\" verdict=\"${verdict}\" reason=\"unknown reachability; fix probe, never delete or keep\""
@@ -11924,8 +11908,9 @@ ci_cmd_gc() {
 # Why: Wrapper owns the roots file; this owns the policy.
 # From: Issue #1683
 _ci_gc_run() {
-    local mode="$1" cands line action policy
+    local mode="$1" cands line action policy rc pause mins stop_s svc limited=0
     local del=0 keep=0 deleted=0 to_delete=""
+    local -A gone=()
     if ! cands="$(_ci_gc_candidates)"; then
         ci_log "[CI-ERROR-GC-0031]" "mode=${mode} source=\"_ci_gc_candidates\" reason=\"candidate list not derivable (raw above); no gc\""
         return 2
@@ -11957,12 +11942,35 @@ _ci_gc_run() {
             printf 'gc candidate=%s action=DELETE mode=%s\n' "${line}" "${mode}"
         else
             keep=$((keep + 1))
-            printf 'gc candidate=%s action=KEEP\n' "${line}"
+            printf 'gc candidate=%s action=KEEP reason="%s"\n' "${line}" "${action#KEEP }"
         fi
     done <<< "${cands}"
     if [ "${mode}" = "apply" ] && [ -n "${to_delete}" ]; then
+        # What: pause seconds, delete minutes: SOT or var.
+        # Why: an empty repo variable means the SOT value.
+        # From: Issue #1683 | PR #1858
+        pause="$(_ci_variable PROJECT_GC_DELETE_PAUSE_SECONDS)" || return 2
+        mins="$(_ci_variable CI_GC_DELETE_MINUTES)" || return 2
+        case "${pause}" in
+            ''|*[!0-9]*)
+                ci_log "[CI-ERROR-GC-0049]" "value=\"${pause}\" reason=\"PROJECT_GC_DELETE_PAUSE_SECONDS not whole seconds\""
+                return 2 ;;
+        esac
+        case "${mins}" in
+            ''|*[!0-9]*|0)
+                ci_log "[CI-ERROR-GC-0050]" "value=\"${mins}\" reason=\"CI_GC_DELETE_MINUTES not a positive integer\""
+                return 2 ;;
+        esac
+        stop_s=$(( SECONDS + mins * 60 ))
         while IFS= read -r line; do
             [ -n "${line}" ] || continue
+            # What: delete time used up ends the run green.
+            # Why: the job timeout leaves time for checks.
+            # From: Issue #1683 | PR #1858
+            if [ "${SECONDS}" -ge "${stop_s}" ]; then
+                ci_log "[CI-INFO-GC-0051]" "deleted=${deleted} left=$((del - deleted)) reason=\"delete time used up; the next gc run goes on\""
+                break
+            fi
             # What: Re-check reachability before delete.
             # Why: Re-check closes a TOCTOU delete gap.
             # From: Issue #1683
@@ -11971,12 +11979,37 @@ _ci_gc_run() {
                 ci_log "[CI-INFO-GC-0011]" "candidate=\"${line}\" reason=\"referenced at delete time; skipped\""
                 continue
             fi
-            if ! _ci_gc_delete "${line}"; then
+            # What: a pause before each delete, not the 1st.
+            # Why: DoMe: stay far below the hour API limit.
+            # From: Issue #1683 | PR #1858
+            [ "${deleted}" -eq 0 ] || sleep "${pause}"
+            rc=0; _ci_gc_delete "${line}" || rc=$?
+            # What: a used-up rate limit ends the run green.
+            # Why: a 60 min job is under a rate window.
+            # From: Issue #1683
+            if [ "${rc}" -eq 3 ]; then
+                ci_log "[CI-INFO-GC-0048]" "deleted=${deleted} left=$((del - deleted)) reason=\"API rate limit used up; the next gc run goes on\""
+                limited=1
+                break
+            fi
+            if [ "${rc}" -ne 0 ]; then
                 ci_log "[CI-ERROR-GC-0009]" "candidate=\"${line}\" reason=\"delete backend failed\""
                 return 2
             fi
             deleted=$((deleted + 1))
+            svc="$(_ci_tab_field "${line}" 5)" || return 2
+            gone["${svc}"]+="$(_ci_tab_field "${line}" 2)"$'\n' || return 2
         done <<< "${to_delete}"
+        # What: no API calls left: the next listing checks.
+        # Why: a still active version is listed again then.
+        # From: Issue #1683 | PR #1858
+        if [ "${limited}" -eq 1 ]; then
+            ci_log "[CI-INFO-GC-0052]" "unchecked=${deleted} reason=\"rate limit; the next gc listing shows any version still active\""
+        else
+            for svc in "${!gone[@]}"; do
+                _ci_gc_check_gone "${svc}" "${gone[${svc}]}" || return 2
+            done
+        fi
     fi
     printf 'gc result=classified keep=%s delete=%s deleted=%s mode=%s\n' "${keep}" "${del}" "${deleted}" "${mode}"
     return 0
@@ -12030,7 +12063,7 @@ ci_cmd_gc_refs() {
         case "${state}" in
             open)
                 keep=$((keep + 1))
-                printf 'gc-refs ref=%s pr=%s state=open action=KEEP\n' "${ref}" "${n}"
+                printf 'gc-refs ref=%s pr=%s state=open action=KEEP reason="PR still open"\n' "${ref}" "${n}"
                 ;;
             closed)
                 del=$((del + 1))
@@ -12055,6 +12088,14 @@ ci_cmd_gc_refs() {
         while IFS=$'\t' read -r sha ref; do
             [ -n "${ref}" ] || continue
             holder="$(_ci_ref_subject "${remote}" "${ref}" 1)" || return 2
+            # What: a mixed promote lock stays to a rerun.
+            # Why: setup.sh never installs a mixed channel.
+            # From: Issue #1683
+            if [[ "${holder}" == *" mixed" ]]; then
+                keep=$((keep + 1))
+                printf 'gc-refs ref=%s holder="%s" state=mixed action=KEEP reason="mixed promote lock waits for a rerun"\n' "${ref}" "${holder}"
+                continue
+            fi
             rc=0; _ci_lock_holder_ended "${holder}" || rc=$?
             case "${rc}" in
                 0)
@@ -12066,7 +12107,7 @@ ci_cmd_gc_refs() {
                     ;;
                 1)
                     keep=$((keep + 1))
-                    printf 'gc-refs ref=%s holder="%s" state=running action=KEEP\n' "${ref}" "${holder}"
+                    printf 'gc-refs ref=%s holder="%s" state=running action=KEEP reason="lock holder run still running"\n' "${ref}" "${holder}"
                     ;;
                 *)
                     ci_log "[CI-ERROR-GC-0044]" "ref=\"${ref}\" holder=\"${holder}\" reason=\"holder run state unknown; neither kept nor deleted\""
@@ -12112,7 +12153,7 @@ ci_cmd_gc_refs() {
             fi
             if [ "${state}" = present ]; then
                 keep=$((keep + 1))
-                printf 'gc-refs ref=%s state=present action=KEEP\n' "${ref}"
+                printf 'gc-refs ref=%s state=present action=KEEP reason="image digest still in the registry"\n' "${ref}"
                 continue
             fi
             del=$((del + 1))
@@ -12664,9 +12705,21 @@ _ci_validate_teardown() {
     # Why: the label sweep frees the slot without the file.
     # From: Issue #1683 | PR #1858
     if compose="$(_ci_compose_file)"; then
+        local since ev line
+        since="${EPOCHREALTIME}"
         _ci_run "[CI-ERROR-VALIDATE-0058]" "project=\"${project}\" reason=\"compose down failed\"" \
             docker compose -p "${project}" -f "${compose}" \
             down -v --remove-orphans >&2 || rc=2
+        # What: log each container's stop signal and exit.
+        # Why: DoMe 08.11.: which container makes down slow.
+        # From: Issue #1683 | PR #1858
+        ev="$(_ci_run "[CI-ERROR-VALIDATE-0145]" "project=\"${project}\" reason=\"cannot read stop events\"" \
+            docker events --since "${since}" --until "${EPOCHREALTIME}" \
+            --filter "${label}" --filter type=container --filter event=kill --filter event=die \
+            --format '{{.Time}} {{.Action}} {{index .Actor.Attributes "name"}} signal={{index .Actor.Attributes "signal"}} exit={{index .Actor.Attributes "exitCode"}}')" || rc=2
+        while IFS= read -r line; do
+            [ -z "${line}" ] || ci_log "[CI-INFO-VALIDATE-0146]" "${line}"
+        done <<< "${ev}"
     else
         rc=2
     fi
@@ -13827,7 +13880,7 @@ _ci_register_secondary() {
     # Why: a quote breaks pasted JSON; argv shows secrets.
     # From: Issue #1683 | PR #1858
     body="$(CI_REGISTER_TOKEN="${token}" _ci_capture 0 jq -cn --arg name "${name}" "{token: env.CI_REGISTER_TOKEN, name: \$name}")" || return 2
-    out="$(_ci_capture 0 _ci_curl_secret data "${body}" \
+    out="$(_ci_run -q -s "[CI-ERROR-VALIDATE-0147]" "reason=\"secondary register call failed or wrote stderr\"" _ci_curl_secret data "${body}" \
         -sS -w '\n%{http_code}' -H 'Content-Type: application/json' \
         "${url}")" || {
         ci_log "[CI-ERROR-VALIDATE-0083]" "url=\"${url}\" name=\"${name}\" reason=\"secondary register request failed (raw above)\""
@@ -13852,7 +13905,7 @@ _ci_validate_ui_token_file() {
 # Why: AXFR needs TSIG name, secret and primary.
 # From: Issue #1683
 _ci_validate_secondary_identity() {
-    local project="$1" base cid token a b au bu ap bp trc=0 tf label svc
+    local project="$1" base cid token a au ap bp trc=0 tf label svc
     label="$(_ci_variable CI_VALIDATE_PROBE_LABEL)" || return 2
     svc="$(_ci_validation_service ui)" || return 2
     cid="$(_ci_validate_cid "${project}" "${svc}")" || return 2
@@ -13880,16 +13933,17 @@ _ci_validate_secondary_identity() {
         ci_log "[CI-ERROR-VALIDATE-0046]" "reason=\"could not read SECONDARY_REGISTRATION_TOKEN from ui\""
         return 2
     fi
-    if ! a="$(_ci_register_secondary "${base}" "${token}" "${label}-1")" \
-        || ! b="$(_ci_register_secondary "${base}" "${token}" "${label}-2")"; then
+    # What: one register; its reply carries all three keys.
+    # Why: a 2nd register checked nothing new; 16.6 s each.
+    # From: Issue #1683 | PR #1858
+    if ! a="$(_ci_register_secondary "${base}" "${token}" "${label}-1")"; then
         ci_log "[CI-ERROR-VALIDATE-0047]" "reason=\"a secondary register did not return 200\""
         return 1
     fi
     au="$(_ci_capture 0 jq -r '.tsig_name // empty' <<< "${a}")" || return 1
-    bu="$(_ci_capture 0 jq -r '.tsig_name // empty' <<< "${b}")" || return 1
-    ap="$(_ci_capture 0 jq -r '.tsig_secret // empty' <<< "${a}")" || return 1
-    bp="$(_ci_capture 0 jq -r '.primary // empty' <<< "${b}")" || return 1
-    if [ -z "${au}" ] || [ -z "${bu}" ] || [ -z "${ap}" ] || [ -z "${bp}" ]; then
+    ap="$(_ci_run -q -s "[CI-ERROR-VALIDATE-0148]" "reason=\"tsig_secret read failed or wrote stderr\"" jq -r '.tsig_secret // empty' <<< "${a}")" || return 1
+    bp="$(_ci_capture 0 jq -r '.primary // empty' <<< "${a}")" || return 1
+    if [ -z "${au}" ] || [ -z "${ap}" ] || [ -z "${bp}" ]; then
         ci_log "[CI-ERROR-VALIDATE-0048]" "reason=\"register response missing tsig_name/tsig_secret/primary\""
         return 1
     fi
@@ -13899,13 +13953,29 @@ _ci_validate_secondary_identity() {
 # Why: probes target the stack; a host proxy must not.
 # From: Issue #1683 | PR #1858
 _ci_validate_probes() {
-    local project="$1" net="$2" pin="$3" rc=0 p
+    local project="$1" net="$2" pin="$3" rc=0 p t0 list
+    local -a probes=()
     local -x NO_PROXY='*' no_proxy='*'
+    # What: this matrix job's probes, else every SOT group.
+    # Why: groups run as parallel jobs; local runs do all.
+    # From: Issue #1683 | PR #1858
+    list="${CI_VALIDATE_PROBES:-}"
+    if [ -z "${list}" ]; then
+        list="$(_ci_variable CI_VALIDATE_PROBE_GROUPS)" || return 2
+    fi
+    read -r -a probes <<< "${list//;/ }"
+    if [ "${#probes[@]}" -eq 0 ]; then
+        ci_log "[CI-ERROR-VALIDATE-0149]" "reason=\"no validate probe to run\""
+        return 2
+    fi
     # What: one log line per passed probe, in probe order
     # Why: a green log must show which probes ran (§79)
     # From: Issue #1683 | PR #1858
-    for p in dns proxy proxy_stream_map https_mitm https_dispatch_map \
-        ui_dns dns_rollback kea_rollback secondary_identity; do
+    for p in "${probes[@]}"; do
+        # What: each pass line carries the probe's time.
+        # Why: DoMe 08.11.: which probe makes validate slow.
+        # From: Issue #1683 | PR #1858
+        t0="${EPOCHREALTIME/./}"
         case "${p}" in
             dns) _ci_validate_dns "${project}" ;;
             proxy) _ci_validate_proxy "${project}" ;;
@@ -13916,9 +13986,13 @@ _ci_validate_probes() {
             dns_rollback) _ci_validate_dns_rollback "${project}" ;;
             kea_rollback) _ci_validate_kea_rollback "${project}" "${net}" "${pin}" ;;
             secondary_identity) _ci_validate_secondary_identity "${project}" ;;
+            *)
+                ci_log "[CI-ERROR-VALIDATE-0150]" "probe=\"${p}\" reason=\"unknown validate probe\""
+                rc=2
+                ;;
         esac || rc=$?
         [ "${rc}" -eq 0 ] || return "${rc}"
-        ci_log "[CI-INFO-VALIDATE-0143]" "probe=\"${p}\" result=pass"
+        ci_log "[CI-INFO-VALIDATE-0143]" "probe=\"${p}\" result=pass ms=$(((${EPOCHREALTIME/./} - t0) / 1000))"
     done
 }
 
@@ -14029,6 +14103,12 @@ ci_cmd_validate() {
     local cand shared
     ci_group "validate: host tools and stack candidate"
     _ci_validate_host_tools || return 2
+    # What: the PSL is loaded here when a job left it out.
+    # Why: dns and proxy need it (run 42415183542).
+    # From: Issue #1683 | PR #1984
+    if [ ! -s "${CI_REPO_ROOT:-.}/$(_ci_runtime_default NGINX_PSL_REPO_DIR)/$(_ci_runtime_default NGINX_PSL_FILE)" ]; then
+        ci_cmd_update_psl restore || return 2
+    fi
     shared="$(_ci_validate_shared_dir)" || return 2
     printf 'validate shared_dir=%s\n' "${shared}"
     if ! cand="$(_ci_stack_candidate)"; then
@@ -17216,13 +17296,12 @@ _ci_check_line_endings() {
 # Why: _ci_glob_ere owns glob syntax; a read error fails.
 # From: Issue #1683 | PR #1912
 _ci_prose_exempt_load() {
-    local list state g
+    local list g
     list="$(_ci_block_entry_list file_headers "" exempt)" || return 2
-    state="$(_ci_block_entry_field release "" validation_state)" || return 2
     _CI_PROSE_EXEMPT=()
     while IFS= read -r g; do
         [ -z "${g}" ] || _CI_PROSE_EXEMPT+=("$(_ci_glob_ere "**/${g}")")
-    done <<<"${list}"$'\n'"${state}"
+    done <<<"${list}"
 }
 
 # What: true for a path a SOT exemption glob matches.
@@ -18294,7 +18373,7 @@ _ci_compose_dir_files() {
 # What: an external deploy image must be a SOT base image.
 # Why: one owner per external image; no copy elsewhere.
 # From: Issue #1683
-_ci_check_stable_external_images() {
+_ci_check_sot_external_images() {
     local -a dirs=("$@")
     local d img k allowed=" " dep
     if [ "${#dirs[@]}" -eq 0 ]; then
@@ -18346,7 +18425,7 @@ _ci_check_stable_external_images() {
         ci_error "[CI-ERROR-CHECK-0014]" "reason=\"external image not in SOT\"" "$(printf '%s\n' "${viol[@]}")"
         return 1
     fi
-    printf 'stable-external-images=clean\n'
+    printf 'sot-external-images=clean\n'
 }
 
 # What: Print the heading count, then the section lines.
@@ -18672,7 +18751,7 @@ _ci_unreferenced_names() {
 }
 
 # What: AG-GH-017 sweep: old work branch, no PR or issue.
-# Why: repo-wide by nature (docs §98); a finding is rc 1.
+# Why: repo-wide by nature (docs §98); a finding warns.
 # From: Issue #1683 | PR #1858
 _ci_check_orphaned_branches() {
     local repo min_age now exact regexes raw src rows ref rc=0
@@ -18790,8 +18869,14 @@ _ci_check_orphaned_branches() {
     while IFS= read -r branch; do
         found+=("branch=\"${branch}\" last_commit=${when[${branch}]} author=\"${who[${branch}]}\"")
     done <<< "${out}"
-    ci_error "[CI-ERROR-CHECK-0139]" "orphaned=${#found[@]} scanned=${scanned} checked=${old} reason=\"AG-GH-017: no PR and no issue reference\"" "$(printf '%s\n' "${found[@]}")"
-    return 1
+    # What: a finding is a warning; the job stays green.
+    # Why: DoMe 08.11.: report old branches, never fail.
+    # From: Issue #1683 | PR #1858
+    ci_error "[CI-WARN-CHECK-0210]" "orphaned=${#found[@]} scanned=${scanned} checked=${old} reason=\"AG-GH-017: no PR and no issue reference\"" "$(printf '%s\n' "${found[@]}")"
+    for branch in "${found[@]}"; do
+        printf '::warning title=AG-GH-017 no PR or issue::%s\n' "${branch}" >&2
+    done
+    return 0
 }
 
 # What: print top-level runs.using from an action manifest.
@@ -19465,7 +19550,7 @@ PROG
     done
 
     if [ "${#viol[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0096]" "reason=\"naming-consistency drift (docs/naming-conventions.md)\"" "$(printf '%s\n' "${viol[@]}")"
+        ci_error "[CI-ERROR-CHECK-0096]" "reason=\"naming-consistency drift (docs/policy/naming-conventions-policy.md)\"" "$(printf '%s\n' "${viol[@]}")"
         return 1
     fi
     printf 'naming-consistency=clean\n'

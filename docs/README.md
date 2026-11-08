@@ -29,13 +29,12 @@ Valid for `current_dev` at `e223782d`. Section 9 lists what is not verified.
 | `docs/README.md` | This operator guide |
 | `docs/architecture-ng.md` | Service architecture |
 | `docs/threat-model.md` | Threat model |
-| `docs/capability-inventory.md` | Capability inventory |
-| `docs/naming-conventions.md` | Naming contract (AG-CODE-014) |
+| `docs/design-plannings/capability-inventory.md` | Capability inventory |
+| `docs/policy/naming-conventions-policy.md` | Naming contract (AG-CODE-014) |
 | `docs/combined-release-and-checklist.md` | Release channels, external images, provenance, release validation and checklist |
 | `docs/ci-2.0-architecture.md` | CI 2.0 architecture |
-| `docs/policy/` | Policies (`ci-image-pinning-policy.md`, `howto-audit-documentation.md`) |
-| `docs/design-plannings/` | Design plans (`design-wireguard-remote-access.md`) |
-| `docs/validation-state.json` | Validation record (AG-REL-011) |
+| `docs/policy/` | Policies (`ci-image-pinning-policy.md`, `howto-audit-documentation.md`, `naming-conventions-policy.md`) |
+| `docs/design-plannings/` | Design plans (`capability-inventory.md`, `design-wireguard-remote-access.md`) |
 | `AGENTS.md`, `SECURITY.md`, `CONTRIBUTING.md`, `GOVERNANCE.md` | Governance, security policy, contribution rules |
 
 ---
@@ -485,7 +484,7 @@ after configuration changes and before enabling scheduled automatic updates.
 ```bash
 sudo /opt/lancache-ng/current/setup.sh update [install-dir]
 sudo /opt/lancache-ng/current/setup.sh backup [--config|--full] [install-dir] [--dest /backup/path]
-sudo /opt/lancache-ng/current/setup.sh restore <backup.tar.gz> [install-dir]
+sudo /opt/lancache-ng/current/setup.sh restore <backup archive> [install-dir]
 ```
 
 - Archives go to `/var/backups/lancache-ng` unless `--dest` is given. Set
@@ -591,13 +590,13 @@ Further behavior:
 1. Find the automatic pre-update backup:
 
    ```bash
-   sudo find /var/backups/lancache-ng -maxdepth 1 -name 'lancache-ng-config-*.tar.gz' -print
+   sudo find /var/backups/lancache-ng -maxdepth 1 -name 'lancache-ng-config-*.tar.*' -print
    ```
 
 2. Restore it:
 
    ```bash
-   sudo /opt/lancache-ng/current/setup.sh restore /var/backups/lancache-ng/lancache-ng-config-YYYYMMDDTHHMMSSZ.tar.gz /opt/lancache-ng
+   sudo /opt/lancache-ng/current/setup.sh restore /var/backups/lancache-ng/lancache-ng-config-YYYYMMDDTHHMMSSZ.tar.zst /opt/lancache-ng
    ```
 
 3. Check the stack:

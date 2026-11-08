@@ -296,12 +296,10 @@ dependencies, across every ecosystem this repository uses.
   silently drifting.
 - **Obtaining dependencies at build time**: Rust dependencies are
   fetched by Cargo from crates.io during the Docker build stage; no
-  vendored/copied third-party Rust source is committed. The one
-  documented exception is `services/proxy/public_suffix_list.dat` (the
-  vendored Mozilla Public Suffix List)
-  which carries its own upstream header — see `AGENTS.md`'s
-  **AG-HDR-004** for why these are excluded from the project's own file
-  header requirement.
+  vendored/copied third-party Rust source is committed. The Mozilla
+  Public Suffix List is not committed either: `setup.sh` loads it at
+  install and update time, and `ci.sh update-psl` loads it in CI, into
+  `services/ui/nginx/public_suffix_list.dat` (ignored by git).
 
 ## Local checks
 
@@ -345,7 +343,7 @@ For image inventory, release, or package-channel changes, run inside the build-t
 ```bash
 BUILD_TOOLS_IMAGE="$(bash .github/scripts/ci.sh build-tools resolve-image)"
 docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work:ro" -w /work "$BUILD_TOOLS_IMAGE" \
-  bash -c 'set -e; for c in stable-external-images image-channel-resolution prebuilt-prod; do bash .github/scripts/ci.sh check "$c"; done'
+  bash -c 'set -e; for c in sot-external-images image-channel-resolution prebuilt-prod; do bash .github/scripts/ci.sh check "$c"; done'
 ```
 
 For workflow changes, run inside the build-tools container:

@@ -57,7 +57,7 @@ inside the `build-tools` container (AG-VAL-016):
 ```bash
 bash .github/scripts/ci.sh check mutable-refs            # image references the SOT does not own
 bash .github/scripts/ci.sh check action-node-versions    # action references and Node runtime
-bash .github/scripts/ci.sh check stable-external-images  # compose images against SOT base_images
+bash .github/scripts/ci.sh check sot-external-images  # compose images against SOT base_images
 bash .github/scripts/ci.sh check version-drift           # external_versions consumers
 ```
 

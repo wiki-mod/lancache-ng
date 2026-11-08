@@ -134,6 +134,10 @@ services:
       # Why: the watchdog warns before conntrack fills up.
       # From: Issue #1683 | PR #1985
       - ${SOT_HOST_NET_STAT_SOURCE}:${SOT_HOST_NET_STAT_DIR}:ro
+      # What: host machine-id, read only.
+      # Why: the cachehamster binds the Steam login to it.
+      # From: Issue #871
+      - ${SOT_HOST_MACHINE_ID_SOURCE}:${SOT_HOST_MACHINE_ID_FILE}:ro
       # What: mounts several services share, one text each.
       # Why: a changed path or mode has one line to change.
       # From: Issue #1683 | PR #1912
