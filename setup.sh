@@ -2526,6 +2526,10 @@ migrate_quickstart_install() (
         missing+=" $volume"
     done <<< "$old_volumes"
     [[ -z "$missing" ]] || die "Quickstart volume(s)${missing} have no home in $PROD_COMPOSE; the quickstart stack was not touched."
+    # What: the PSL lands before the old stack stops
+    # Why: the ui renders nginx only with it; dns/proxy wait
+    # From: Issue #1683 | PR #1858
+    ensure_public_suffix_list "$(deploy_prod_repo_root "$stack_dir")"
     # What: backup only after every pre-stop check passed
     # Why: a bad setting must stop before the stack stops
     # From: Issue #1683
