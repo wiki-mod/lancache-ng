@@ -6635,11 +6635,32 @@ cmd_update() {
 # Why: units and operators start the stack exactly as setup
 # From: Issue #1683 | PR #1858
 cmd_compose() {
-    local install_dir
+    local install_dir env_file arg dhcp_svc dhcp_mode services svc
+    local -a args=() picked=()
     [[ $# -ge 1 ]] || die "Usage: setup.sh compose <install-dir> <compose args>"
     install_dir=$(resolve_stack_dir_checked "$1") || exit $?
     shift
-    stack_compose "$install_dir" "$(runtime_env_file_for_install_dir "$install_dir")" "$@"
+    env_file=$(runtime_env_file_for_install_dir "$install_dir")
+    args=("$@")
+    # What: a bare "up" skips dhcp while DHCP_MODE is off
+    # Why: live 249: converge started dhcp every 5 min
+    # From: Issue #1683
+    if [[ "${1:-}" = "up" ]]; then
+        for arg in "${@:2}"; do
+            [[ "$arg" = -* ]] || { stack_compose "$install_dir" "$env_file" "$@"; return; }
+        done
+        dhcp_mode=$(env_or_sot_default DHCP_MODE "$env_file") || exit $?
+        if [[ "$dhcp_mode" = "off" ]]; then
+            dhcp_svc=$(prod_env_default DHCP_SERVICE) || exit $?
+            services=$(stack_compose "$install_dir" "$env_file" config --services) \
+                || die "Cannot list the services of $install_dir (exit $?)."
+            while IFS= read -r svc; do
+                [[ -z "$svc" || "$svc" = "$dhcp_svc" ]] || picked+=("$svc")
+            done <<< "$services"
+            args+=("${picked[@]}")
+        fi
+    fi
+    stack_compose "$install_dir" "$env_file" "${args[@]}"
 }
 
 # What: seconds of a systemd span like 90s, 5min or 1h
