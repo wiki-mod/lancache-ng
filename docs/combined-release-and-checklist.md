@@ -166,6 +166,12 @@ works like this:
 3. It moves every image's channel tag.
 4. It moves already moved tags back to their earlier digest when a later move
    fails.
+5. When that move back fails, or a moved service had no earlier digest, the
+   channel stays mixed. Then the run keeps the promote lock and marks its note
+   `mixed` (`CI-ERROR-PROMOTE-0043`). `setup.sh` waits while the lock exists,
+   `gc-refs` keeps a mixed lock, and the next promote run takes it over and
+   moves the whole stack again. A run that finds the channel already complete
+   frees a mixed lock.
 
 Order of a release:
 

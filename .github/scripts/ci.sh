@@ -10351,19 +10351,19 @@ _ci_promote_move_all() {
         [ -n "${svc}" ] || continue
         if ! _ci_promote_move "${svc}" "${channel}" "${digest}" "${kept}"; then
             ci_log "[CI-ERROR-PROMOTE-0007]" "service=\"${svc}\" channel=\"${channel}\" reason=\"channel ref move failed\""
-            _ci_promote_rollback "${channel}" "${moved}"
+            _ci_promote_rollback "${channel}" "${moved}" || return 4
             return 2
         fi
         moved="${moved}${svc}=${prev}"$'\n'
         if ! seen="$(_ci_channel_readback "${svc}" "${channel}")"; then
             ci_log "[CI-ERROR-PROMOTE-0008]" "service=\"${svc}\" channel=\"${channel}\" reason=\"readback failed; blocking\""
-            _ci_promote_rollback "${channel}" "${moved}"
+            _ci_promote_rollback "${channel}" "${moved}" || return 4
             return 2
         fi
         mrc=0; _ci_channel_matches "${svc}" "${channel}" "${digest}" "${kept}" || mrc=$?
         if [ "${mrc}" -ne 0 ]; then
             ci_error "[CI-ERROR-PROMOTE-0009]" "service=\"${svc}\" channel=\"${channel}\" rc=${mrc} reason=\"readback MISMATCH; rolling the moved services back\" expected=\"${digest} ${kept}\"" "readback=${seen}"
-            _ci_promote_rollback "${channel}" "${moved}"
+            _ci_promote_rollback "${channel}" "${moved}" || return 4
             return 2
         fi
     done <<< "${plan}"
@@ -10386,22 +10386,57 @@ _ci_promote_locked() {
     _ci_promote_move_all "${channel}" "${cand}"
 }
 
-# What: Put moved services back on their earlier digests.
+# What: Put moved services back; rc 1 = channel mixed.
 # Why: a failed move must not leave a mixed channel (§50)
 # From: Issue #1683 | PR #1912
 _ci_promote_rollback() {
-    local channel="$1" moved="$2" line svc prev
+    local channel="$1" moved="$2" line svc prev rc=0
     while IFS= read -r line; do
         [ -n "${line}" ] || continue
         svc="${line%%=*}"; prev="${line#*=}"
         if [ -z "${prev}" ]; then
             ci_log "[CI-ERROR-PROMOTE-0022]" "service=\"${svc}\" channel=\"${channel}\" reason=\"channel had no image before; ref stays, channel incomplete until a promote rerun\""
+            rc=1
             continue
         fi
         if ! _ci_promote_move "${svc}" "${channel}" "${prev}"; then
             ci_log "[CI-ERROR-PROMOTE-0023]" "service=\"${svc}\" channel=\"${channel}\" earlier=\"${prev}\" reason=\"rollback move failed; channel is mixed until a promote rerun\""
+            rc=1
         fi
     done <<< "${moved}"
+    return "${rc}"
+}
+
+# What: mark our promote lock mixed and keep it held.
+# Why: setup.sh waits; gc-refs keeps a mixed lock.
+# From: Issue #1683
+_ci_promote_lock_mark_mixed() {
+    local remote ref note head sha raw rc=0
+    remote="$(_ci_git_remote)" || return 2
+    ref="$(_ci_promote_lock_ref "$1")" || return 2
+    note="$(_ci_lock_note promote "$1")"
+    head="$(_ci_ref_head "${remote}" "${ref}" 1)" || return 2
+    [ "${head#*$'\t'}" = "${note}" ] || return 2
+    sha="$(_ci_cas_note_commit "${note} mixed")" || return 2
+    raw="$(_ci_cas_push "${remote}" "${ref}" "${sha}" "${head%%$'\t'*}")" || rc=$?
+    [ "${rc}" -ne 0 ] || return 0
+    _ci_cas_push_failed mark "${ref}" "${rc}" "${raw}"
+    return 2
+}
+
+# What: free a mixed lock once the channel is complete.
+# Why: an already-promoted rerun ends the install wait.
+# From: Issue #1683
+_ci_promote_clear_mixed() {
+    local remote ref head rc=0
+    remote="$(_ci_git_remote)" || return 2
+    ref="$(_ci_promote_lock_ref "$1")" || return 2
+    head="$(_ci_ref_head "${remote}" "${ref}" 1)" || rc=$?
+    [ "${rc}" -ne 1 ] || return 0
+    [ "${rc}" -eq 0 ] || return 2
+    [[ "${head#*$'\t'}" == *" mixed" ]] || return 0
+    _ci_promote_lock "$1" || return 2
+    _ci_promote_unlock "$1"
 }
 
 # What: True if the candidate holds every product service.
@@ -10494,6 +10529,10 @@ ci_cmd_promote() {
     _ci_require_ghcr_auth || return "$?"
     _ci_promote_all_current "${channel}" "${cand}" || arc=$?
     if [ "${arc}" -eq 0 ]; then
+        if ! _ci_promote_clear_mixed "${channel}"; then
+            ci_log "[CI-ERROR-PROMOTE-0045]" "channel=\"${channel}\" reason=\"mixed lock of a complete channel not freed\""
+            return 2
+        fi
         printf 'channel=%s result=already-promoted services=%s\n' "${channel}" "$(_ci_count_lines "${cand}")"
         _ci_refresh_accept
         return
@@ -10508,6 +10547,15 @@ ci_cmd_promote() {
     # From: Issue #1683 | PR #1858
     local rc
     if _ci_promote_locked "${channel}" "${cand}"; then rc=0; else rc=$?; fi
+    # What: rc 4 = channel mixed; keep the lock, marked.
+    # Why: no install from a mixed channel until a rerun.
+    # From: Issue #1683
+    if [ "${rc}" -eq 4 ]; then
+        _ci_promote_lock_mark_mixed "${channel}" \
+            || ci_log "[CI-ERROR-PROMOTE-0044]" "channel=\"${channel}\" reason=\"mixed mark failed; lock kept unmarked, gc-refs may free it\""
+        ci_log "[CI-ERROR-PROMOTE-0043]" "channel=\"${channel}\" reason=\"channel mixed; lock kept so installs wait until a promote rerun\""
+        return 2
+    fi
     _ci_promote_unlock "${channel}" || {
         ci_error "[CI-ERROR-PROMOTE-0011]" "channel=\"${channel}\" reason=\"lock release failed\"" "${channel}"
         [ "${rc}" -ne 0 ] || rc=2
@@ -11918,6 +11966,14 @@ ci_cmd_gc_refs() {
         while IFS=$'\t' read -r sha ref; do
             [ -n "${ref}" ] || continue
             holder="$(_ci_ref_subject "${remote}" "${ref}" 1)" || return 2
+            # What: a mixed promote lock stays to a rerun.
+            # Why: setup.sh never installs a mixed channel.
+            # From: Issue #1683
+            if [[ "${holder}" == *" mixed" ]]; then
+                keep=$((keep + 1))
+                printf 'gc-refs ref=%s holder="%s" state=mixed action=KEEP\n' "${ref}" "${holder}"
+                continue
+            fi
             rc=0; _ci_lock_holder_ended "${holder}" || rc=$?
             case "${rc}" in
                 0)
