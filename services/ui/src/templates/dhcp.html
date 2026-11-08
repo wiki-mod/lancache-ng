@@ -112,6 +112,12 @@
           {% endfor %}
         </select>
       </div>
+      {# What: one network card for every DHCP mode
+         Why: live 229: without one Kea answered nobody
+         From: Issue #1683 #}
+      <div style="min-width:220px; max-width:320px; flex:1 1 220px;">
+        {{ <text_field label={t.dhcp_interface} name="dhcp_proxy_interface" value={dhcp_proxy_interface} placeholder="eth0"/> }}
+      </div>
       <button type="submit"
               class="btn btn-blue" style="width:auto;">
         {{ t.save }}
@@ -148,7 +154,6 @@
             {{ <text_field label={t.proxy_subnet_start} name="dhcp_subnet_start" value={dhcp_proxy_subnet_start} placeholder="192.168.1.0"/> }}
             {{ <text_field label={t.dns_server_1} name="dhcp_dns_primary" value={dhcp_dns_primary} placeholder="192.168.1.10"/> }}
             {{ <text_field label={t.dns_server_2} name="dhcp_dns_secondary" value={dhcp_dns_secondary} placeholder="192.168.1.11"/> }}
-            {{ <text_field label={t.listen_interface_optional} name="dhcp_proxy_interface" value={dhcp_proxy_interface} placeholder="eth0"/> }}
             {{ <text_field label={t.router_gateway_option_optional_pxe_scope} name="dhcp_proxy_router" value={dhcp_proxy_router} placeholder="192.168.1.1"/> }}
             {{ <text_field label={t.ntp_servers_optional_pxe_scoped} name="dhcp_ntp_servers" value={dhcp_ntp_servers} placeholder="192.168.1.20, 192.168.1.21"/> }}
             {{ <text_field label={t.domain_option_optional_pxe_scoped} name="dhcp_proxy_domain" value={dhcp_proxy_domain} placeholder={dhcp_domain}/> }}

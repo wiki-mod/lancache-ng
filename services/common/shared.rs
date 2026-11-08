@@ -2693,9 +2693,9 @@ pub mod kea_conf {
         Ok(rows)
     }
 
-    // What: kea-dhcp4.conf.
-    // Why: subnets edited in the ui survive a render.
-    // From: Issue #1683 | PR #1858
+    // What: kea-dhcp4.conf; main subnet from settings.
+    // Why: DoMe 08.11.: settings are the only source.
+    // From: Issue #1683
     pub fn dhcp4(s: &Settings, existing: Option<&Value>) -> Result<Value, String> {
         let domain = lan_domain(s)?;
         let (valid, max) = crate::dhcp::lease_limits(s, s.uint("DHCP_LEASE_TIME")?)?;
@@ -2711,21 +2711,41 @@ pub mod kea_conf {
             .and_then(|e| e.pointer("/Dhcp4/ddns-qualifying-suffix"))
             .and_then(Value::as_str)
             .map(|d| d.trim_end_matches('.').to_string());
-        let subnets = match existing.and_then(|e| e.pointer("/Dhcp4/subnet4")) {
-            Some(kept) => follow_domain(kept.clone(), before.as_deref(), &domain),
-            None => json!([{
-                "id": s.uint("DHCP_SUBNET_ID")?,
-                "subnet": s.text("DHCP_SUBNET")?,
-                "pools": [{"pool": pool}],
-                "option-data": option_rows(s, &domain)?,
-                "valid-lifetime": valid,
-                "max-valid-lifetime": max
-            }]),
-        };
+        let id = s.uint("DHCP_SUBNET_ID")?;
+        let kept = existing
+            .and_then(|e| e.pointer("/Dhcp4/subnet4"))
+            .cloned()
+            .unwrap_or_else(|| json!([]));
+        let kept = follow_domain(kept, before.as_deref(), &domain);
+        let old = kept.as_array().into_iter().flatten();
+        let old_main = old.clone().find(|x| x["id"].as_u64() == Some(id));
+        let mut main = json!({
+            "id": id,
+            "subnet": s.text("DHCP_SUBNET")?,
+            "pools": [{"pool": pool}],
+            "option-data": option_rows(s, &domain)?,
+            "valid-lifetime": valid,
+            "max-valid-lifetime": max
+        });
+        // What: hosts and code options of the old main.
+        // Why: they come from the ui, not from settings.
+        // From: Issue #1683
+        if let Some(o) = old_main {
+            if let Some(hosts) = o.get("reservations") {
+                main["reservations"] = hosts.clone();
+            }
+            let coded = o["option-data"].as_array().into_iter().flatten();
+            let coded: Vec<Value> = coded.filter(|r| r.get("name").is_none()).cloned().collect();
+            if let Some(rows) = main["option-data"].as_array_mut() {
+                rows.extend(coded);
+            }
+        }
+        let mut subnets = vec![main];
+        subnets.extend(old.filter(|x| x["id"].as_u64() != Some(id)).cloned());
         let updates = s.flag("DHCP_DDNS")?;
         Ok(json!({"Dhcp4": {
             "interfaces-config": {
-                "interfaces": s.list("DHCP_INTERFACES"),
+                "interfaces": s.list("DHCP_PROXY_INTERFACE"),
                 "re-detect": false
             },
             "lease-database": {

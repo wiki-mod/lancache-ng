@@ -1670,6 +1670,46 @@ async fn dhcp(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     app.page("dhcp.html", ctx, &csrf)
 }
 
+// What: the main subnet form also saves settings.
+// Why: DoMe 08.11.: settings are the only source.
+// From: Issue #1683
+async fn main_subnet(
+    app: &App,
+    s: &Settings,
+    op: &str,
+    get: &(dyn Fn(&str) -> String + Sync),
+) -> Result<(), String> {
+    let main = s.uint("DHCP_SUBNET_ID")?.to_string();
+    let hit = get("id") == main;
+    if hit && op == "UI_ROUTE_SUBNET_REMOVE" {
+        return Err(tr("err_main_subnet_remove"));
+    }
+    kea_action(s, op, get).await?;
+    if !(hit && op == "UI_ROUTE_SUBNET_UPDATE") {
+        return Ok(());
+    }
+    let dns: Vec<String> = [get("dns_primary"), get("dns_secondary")]
+        .into_iter()
+        .filter(|d| !d.is_empty())
+        .collect();
+    let mut f = Fields::new();
+    for (key, field) in [
+        ("DHCP_SUBNET", "subnet"),
+        ("DHCP_RANGE_START", "pool_start"),
+        ("DHCP_RANGE_END", "pool_end"),
+        ("DHCP_GATEWAY", "gateway"),
+        ("DHCP_DOMAIN", "domain"),
+        ("DHCP_NTP_SERVERS", "ntp_servers"),
+    ] {
+        f.insert(key.into(), get(field));
+    }
+    if !get("lease_time").is_empty() {
+        f.insert("DHCP_LEASE_TIME".into(), get("lease_time"));
+    }
+    f.insert("DHCP_DNS_SERVERS".into(), dns.join(" "));
+    commit(app, f).await
+}
+
 // What: change Kea subnets with a closure.
 // Why: get, edit, set, write, snapshot; one path.
 // From: Issue #1683 | PR #1858
@@ -1873,13 +1913,24 @@ async fn dhcp_action(
     if relay && s.text("UPSTREAM_DHCP_IP").unwrap_or_default().is_empty() {
         return Err(bad_request(tr("err_relay_needs_upstream")));
     }
+    // What: the Kea server needs a network card.
+    // Why: live 229: no card, Kea answered nobody.
+    // From: Issue #1683
+    let cards = get("dhcp_proxy_interface");
+    if op == "UI_ROUTE_DHCP_MODE" && get("dhcp_mode") == "kea" && cards.is_empty() {
+        return Err(bad_request(tr("err_kea_needs_interface")));
+    }
     let result = match op {
-        "UI_ROUTE_DHCP_MODE" => commit(&app, single_field("DHCP_MODE", get("dhcp_mode"))).await,
+        "UI_ROUTE_DHCP_MODE" => {
+            let mut f = single_field("DHCP_MODE", get("dhcp_mode"));
+            f.insert("DHCP_PROXY_INTERFACE".into(), cards);
+            commit(&app, f).await
+        }
         "UI_ROUTE_DHCP_DDNS" => commit(&app, single_field("DHCP_DDNS", on)).await,
         "UI_ROUTE_DHCP_PROXY" | "UI_ROUTE_DHCP_RELAY" => {
             commit(&app, dnsmasq_fields(&form, op == "UI_ROUTE_DHCP_PROXY")).await
         }
-        _ => kea_action(&s, op, &get).await,
+        _ => main_subnet(&app, &s, op, &get).await,
     };
     finish(result, &s.text("UI_PAGE_DHCP")?)
 }

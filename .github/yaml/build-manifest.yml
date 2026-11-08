@@ -976,7 +976,6 @@ runtime:
     - DHCP_CUSTOM_OPTIONS=
     - DHCP_DDNS=0
     - DHCP_DNS_SERVERS=
-    - DHCP_INTERFACES=
     - DHCP_LOG_PACKETS=0
     - DHCP_OPTION_DATA_MAX=255
     - DHCP_PROBE_ACK_WAIT_MS=2000
@@ -1238,7 +1237,6 @@ runtime:
     - DHCP_DNS_SERVERS=list?;;;reload;dhcp
     - DHCP_DOMAIN=text;;;reload;dhcp
     - DHCP_GATEWAY=text;;;reload;dhcp
-    - DHCP_INTERFACES=list?;;;reload;dhcp
     - DHCP_LEASE_TIME=uint~;60;604800;reload;dhcp
     - DHCP_LEASE_TIME_MAX=uint;60;31536000;reload;dhcp
     - DHCP_LEASE_TIME_MIN=uint;1;604800;reload;dhcp
