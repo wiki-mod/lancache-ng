@@ -11671,6 +11671,10 @@ _ci_gc_delete() {
             *"http 404"*)
                 ci_log "[CI-INFO-GC-0034]" "candidate=\"${candidate}\" reason=\"version already gone; goal reached\""
                 return 0 ;;
+            # What: rc 3 = API rate limit used up.
+            # Why: the caller ends; the next run goes on.
+            # From: Issue #1683
+            *"api rate limit exceeded"*) return 3 ;;
         esac
         return 2
     fi
@@ -11835,7 +11839,7 @@ ci_cmd_gc() {
 # Why: Wrapper owns the roots file; this owns the policy.
 # From: Issue #1683
 _ci_gc_run() {
-    local mode="$1" cands line action policy
+    local mode="$1" cands line action policy rc
     local del=0 keep=0 deleted=0 to_delete=""
     if ! cands="$(_ci_gc_candidates)"; then
         ci_log "[CI-ERROR-GC-0031]" "mode=${mode} source=\"_ci_gc_candidates\" reason=\"candidate list not derivable (raw above); no gc\""
@@ -11882,7 +11886,15 @@ _ci_gc_run() {
                 ci_log "[CI-INFO-GC-0011]" "candidate=\"${line}\" reason=\"referenced at delete time; skipped\""
                 continue
             fi
-            if ! _ci_gc_delete "${line}"; then
+            rc=0; _ci_gc_delete "${line}" || rc=$?
+            # What: a used-up rate limit ends the run green.
+            # Why: a 60 min job is under a rate window.
+            # From: Issue #1683
+            if [ "${rc}" -eq 3 ]; then
+                ci_log "[CI-INFO-GC-0048]" "deleted=${deleted} left=$((del - deleted)) reason=\"API rate limit used up; the next gc run goes on\""
+                break
+            fi
+            if [ "${rc}" -ne 0 ]; then
                 ci_log "[CI-ERROR-GC-0009]" "candidate=\"${line}\" reason=\"delete backend failed\""
                 return 2
             fi
