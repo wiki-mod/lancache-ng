@@ -4343,6 +4343,14 @@ migrate_env_for_update() (
     validate_lancache_image_prefix "$lancache_image_prefix"
     lancache_image_channel=$(resolve_lancache_image_channel "$env_file") || exit $?
     existing_image_tag=$(get_env_var LANCACHE_IMAGE_TAG "$env_file") || exit $?
+    # What: a short v0.3 sha- pin leaves .env, not the run
+    # Why: AG-REL-015 needs 40 hex; the channel picks images
+    # From: Issue #1683
+    if [[ "$existing_image_tag" == sha-* ]] && ! is_commit_image_tag "$existing_image_tag"; then
+        remove_env_key LANCACHE_IMAGE_TAG "$env_file"
+        print_warn "Dropped the short image pin LANCACHE_IMAGE_TAG=$existing_image_tag; the channel picks the images."
+        existing_image_tag=""
+    fi
     local lancache_image_refs="" keep_image_refs=0 archived_refs
     archived_refs=$(awk '/^LANCACHE_IMAGE_REF_[A-Z_]+=/' "$env_file") \
         || die "Failed to read the image pins from $env_file (exit $?)."
@@ -6547,7 +6555,9 @@ cmd_update() {
         channel=$(resolve_lancache_image_channel "$env_file") || exit $?
         tag="${LANCACHE_IMAGE_TAG:-}"
         [[ -n "$tag" ]] || tag=$(get_env_var LANCACHE_IMAGE_TAG "$env_file") || exit $?
-        [[ -z "$tag" ]] || export LANCACHE_IMAGE_TAG="$tag"
+        if is_commit_image_tag "$tag" || is_release_tag "$tag"; then
+            export LANCACHE_IMAGE_TAG="$tag"
+        fi
         command_available git || install_git
         install_repo_follow_channel "$channel" update "$install_dir"
         die "setup.sh did not continue from the code of channel $channel; the stack in $install_dir was not changed."
