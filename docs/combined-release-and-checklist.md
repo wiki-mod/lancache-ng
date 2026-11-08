@@ -93,8 +93,8 @@ first-party image, moved together by one promotion.
 - `master` is always stale. `current_dev` runs ahead; `master` catches up
   through a release, never the other way round.
 - A change made on `master` is history only. It never flows back into
-  `current_dev`; required `master`-only content is ported to `current_dev`
-  before a promotion (section 4.5, AG-REL-013).
+  `current_dev`: nothing is backported or ported from `master` to
+  `current_dev`, and doing so breaks AG-REL-013 (section 4.5).
 - At a release, `master` is overwritten with the released state of
   `current_dev`. The state that applied at the time of the release is
   preserved in an immutable `release/*` ref (write-protected when created,
@@ -248,9 +248,10 @@ required. Minor and major bumps are never automated (AG-REL-013).
 
 1. `master` is stale; the promotion replaces it with the state of
    `current_dev`. Nothing is backported or ported from `master` to
-   `current_dev`.
+   `current_dev`; a backport or port is a rule violation.
 2. The promotion pull request needs fresh green CI, including `validate`
-   (AG-REL-011, section 8).
+   (AG-REL-011, section 8). Its invalidation triggers are checked directly;
+   an invalidated state needs a fresh validation run first.
 3. The promotion merge needs its explicit maintainer authorization.
 4. Release-tag creation is a separate post-merge action with its own
    authorization.
@@ -857,8 +858,9 @@ ticked.
   finding, `validate` passed, `scan` reports no unreported finding.
 - [ ] Every image of the package set exists for the commit as
   `sha-<full-sha>`, for every platform of `build_matrix.platforms`.
-- [ ] Section 4.5 is followed: nothing ported from `master`, promotion pull
-  request has fresh green CI, the maintainer authorization is recorded.
+- [ ] Section 4.5 is followed: nothing backported or ported from `master`,
+  promotion pull request has fresh green CI, the maintainer authorization of
+  the promotion merge is recorded.
 - [ ] The documentation matches the resulting behavior (AG-DOC-001), including
   this document and `AGENTS.md` references to it.
 
@@ -882,6 +884,8 @@ ticked.
 
 ### 12.3 Release
 
+- [ ] The release tag is created after the promotion merge, with its own
+  maintainer authorization (AG-REL-013).
 - [ ] The release tag matches `vX.Y.Z` or `vX.Y.Z-rc.N`; a release candidate
   creates a prerelease and does not move `latest`.
 - [ ] `promote-ref` moved the channels.
