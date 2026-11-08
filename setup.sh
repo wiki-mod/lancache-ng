@@ -455,7 +455,7 @@ prompt_dns_upstream() {
         done
         if [[ -z "$bad" ]]; then
             dns_upstream_answers "${entries[@]}" && break
-            confirm "A server did not answer. Save anyway? [y/N]" "N" && break
+            confirm "A server did not answer. Try it anyway (rolled back if still dead)? [y/N]" "N" && break
             continue
         fi
         print_error "Invalid DNS server: $bad"
@@ -8073,7 +8073,7 @@ cmd_configure_upstream_dns() {
 
     local env_file ip_http ip_https lan ui_lan services apply_rc=0
     local old_servers old_zones old_unsigned old_reverse dhcp_mode
-    local -a all_services
+    local -a all_services new_entries
     env_file=$(runtime_env_file_for_install_dir "$install_dir")
     [[ -f "$env_file" ]] || die "Configuration not found: $env_file"
     old_servers=$(get_env_var DNS_UPSTREAM_SERVERS "$env_file") || exit $?
@@ -8145,6 +8145,15 @@ cmd_configure_upstream_dns() {
         restore_dns_upstream "$install_dir" "$env_file" "$old_servers" "$old_zones" "$old_unsigned" "$old_reverse" \
             || die "The dns container rejected the new setting, and restoring the previous one failed. Check: $SCRIPT_DIR/setup.sh compose $install_dir logs dns"
         die "The dns container rejected the new setting (see: $SCRIPT_DIR/setup.sh compose $install_dir logs dns); the previous setting is active again."
+    fi
+    # What: the new servers must answer after the apply.
+    # Why: a dead resolver must not stay active.
+    # From: Issue #1683
+    read -r -a new_entries <<< "${DNS_UPSTREAM_SERVERS//,/ }"
+    if (( ${#new_entries[@]} > 0 )) && ! dns_upstream_answers "${new_entries[@]}"; then
+        restore_dns_upstream "$install_dir" "$env_file" "$old_servers" "$old_zones" "$old_unsigned" "$old_reverse" \
+            || die "A new external DNS server does not answer, and restoring the previous setting failed. Check: $SCRIPT_DIR/setup.sh compose $install_dir logs dns"
+        die "A new external DNS server does not answer; the previous setting is active again."
     fi
     print_ok "External DNS setting applied and active in the dns container"
 }
