@@ -2232,7 +2232,7 @@ async fn dhcp_stays_off(app: &App, s: &Settings) -> Result<(), String> {
     let list = app.docker.project(&s.text("COMPOSE_PROJECT")?, limit).await;
     let list = list.map_err(|e| e.to_string())?;
     // What: only the stack dhcp, not a "compose run" one.
-    // Why: CI kea_rollback runs its own Kea; it was stopped.
+    // Why: CI kea_rollback runs own Kea; it was stopped.
     // From: Issue #1683
     let running = list.iter().find(|c| {
         c["Labels"][docker::SERVICE_LABEL].as_str() == Some(service.as_str())
