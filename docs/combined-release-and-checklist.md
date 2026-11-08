@@ -690,7 +690,9 @@ and the service is not stopped by the user; `NTP_UPSTREAM_SERVERS` and
 
 ### 10.11 `setup.sh update`
 
-`setup.sh update` (`cmd_update`, `perform_stack_update_flow`) captures a health
+A `setup.sh` without its channel code next to it (fetched alone) first clones
+that channel and continues with the channel's `setup.sh`, so a v0.3 quickstart
+install is migrated. `setup.sh update` (`cmd_update`, `perform_stack_update_flow`) captures a health
 baseline, takes a config backup, pulls the checkout and continues on the pulled
 `setup.sh` (`update_repo_and_resume`), migrates `.env`
 (`migrate_env_for_update`), pulls the images and applies the update service by

@@ -6537,6 +6537,21 @@ cmd_update() {
     ensure_default_install_dir
     local install_dir="${1:-$DEFAULT_INSTALL_DIR}"
     install_dir=$(resolve_stack_dir "$(realpath -m "$install_dir")") || exit $?
+    # What: a lone setup.sh first fetches its channel code
+    # Why: without it a v0.3 quickstart is not migrated
+    # From: Issue #1683
+    if [[ ! -f "$PROD_COMPOSE" ]]; then
+        local env_file channel tag
+        env_file=$(runtime_env_file_for_install_dir "$install_dir")
+        [[ -f "$env_file" ]] || die_no_stack_found "$install_dir"
+        channel=$(resolve_lancache_image_channel "$env_file") || exit $?
+        tag="${LANCACHE_IMAGE_TAG:-}"
+        [[ -n "$tag" ]] || tag=$(get_env_var LANCACHE_IMAGE_TAG "$env_file") || exit $?
+        [[ -z "$tag" ]] || export LANCACHE_IMAGE_TAG="$tag"
+        command_available git || install_git
+        install_repo_follow_channel "$channel" update "$install_dir"
+        die "setup.sh did not continue from the code of channel $channel; the stack in $install_dir was not changed."
+    fi
     perform_stack_update_flow "$install_dir"
 }
 
