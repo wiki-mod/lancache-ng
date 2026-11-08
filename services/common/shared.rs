@@ -2829,21 +2829,18 @@ pub mod dnsmasq_conf {
         Ok(())
     }
 
-    // What: proxy range; empty start uses DHCP_SUBNET.
-    // Why: DoMe 07.11.: mode switch failed on empty start.
-    // From: Issue #1683 | PR #1985
+    // What: proxy range; empty start = own LAN IP.
+    // Why: 10.0.0.0 default missed the real LAN.
+    // From: Issue #1683 | PR #1991
     fn proxy_range(s: &Settings) -> Result<String, String> {
         let start = s.text("DHCP_SUBNET_START").unwrap_or_default();
         if !start.is_empty() {
             return Ok(format!("{start},proxy"));
         }
-        let net = s.text("DHCP_SUBNET")?;
-        let bad = || format!("DHCP_SUBNET: {net} is no IPv4 net");
-        let (addr, len) = net.split_once('/').ok_or_else(bad)?;
-        let ip: std::net::Ipv4Addr = addr.parse().map_err(|_| bad())?;
-        let len: u32 = len.parse().ok().filter(|n| *n <= 32).ok_or_else(bad)?;
-        let mask = u32::MAX.checked_shl(32 - len).unwrap_or(0);
-        Ok(format!("{ip},proxy,{}", std::net::Ipv4Addr::from(mask)))
+        // What: dnsmasq takes the mask from the NIC.
+        // Why: the dhcp container runs on the host net.
+        // From: Issue #1683 | PR #1991
+        Ok(format!("{},proxy", s.text("IP_HTTP")?))
     }
 
     // What: render dnsmasq.conf for one mode.
@@ -3752,6 +3749,11 @@ pub mod render {
         if let Err(e) = nginx_files(&mut o, &domains) {
             o.errs.push(e);
         }
+        // What: each error once, even if two files hit it.
+        // Why: DoMe 07.11.: no double texts.
+        // From: Issue #1683 | PR #1991
+        let mut seen = std::collections::HashSet::new();
+        o.errs.retain(|e| seen.insert(e.clone()));
         if o.errs.is_empty() {
             Ok(o.files)
         } else {
@@ -3776,6 +3778,11 @@ pub mod render {
             .collect();
         dns_files(&mut o, sec, &names);
         o.files.retain(|f| f.owner == "dns");
+        // What: each error once, even if two files hit it.
+        // Why: DoMe 07.11.: no double texts.
+        // From: Issue #1683 | PR #1991
+        let mut seen = std::collections::HashSet::new();
+        o.errs.retain(|e| seen.insert(e.clone()));
         if o.errs.is_empty() {
             Ok(o.files)
         } else {

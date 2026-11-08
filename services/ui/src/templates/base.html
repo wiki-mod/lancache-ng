@@ -259,8 +259,9 @@
   .lang-switch select { background: transparent; border: 0; color: inherit; font: inherit; cursor: pointer; }
   .lang-switch select option { background: var(--navy-850); color: var(--foam); }
   .theme-btn {
-    border: 1px solid var(--navy-600); border-radius: 999px;
-    padding: 5px 10px; cursor: pointer; background: var(--navy-850); color: var(--mist); font-size: 13px;
+    border: 1px solid var(--navy-600); border-radius: 6px; height: 28px; box-sizing: border-box;
+    padding: 0 10px; cursor: pointer; background: transparent; color: var(--mist);
+    font-size: 12px; font-weight: 600;
   }
   .theme-btn:hover { color: var(--foam); }
 
@@ -316,10 +317,16 @@
      Why: building blocks of dashboard and settings
      From: Issue #1437 | PR #1858 */
   .mode-switchrow { display: flex; gap: 8px; }
+  /* What: choice buttons share the size of .btn
+     Why: DoMe 07.11.: one button type on every page
+     From: Issue #1683 | PR #1991 */
   .mode-btn {
-    flex: 1; text-align: center; padding: 8px 10px; border-radius: 8px; font-size: 12.5px;
+    flex: 1; display: inline-flex; align-items: center; justify-content: center;
+    box-sizing: border-box; height: 38px; padding: 0 16px; border-radius: 8px;
+    font-size: 13.5px; font-weight: 600;
     border: 1px solid var(--navy-600); color: var(--mist); cursor: pointer; background: transparent;
   }
+  .mode-btn:hover { color: var(--foam); border-color: var(--mist-dim); }
   .mode-btn.selected { border-color: var(--beam); color: var(--foam); background: #f7b95514; }
 
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
@@ -450,6 +457,8 @@
     background: var(--beam); color: #241705; white-space: nowrap;
   }
   .btn.ghost { background: transparent; border: 1px solid var(--navy-600); color: var(--mist); }
+  .btn.ghost:hover { color: var(--foam); border-color: var(--mist-dim); }
+  summary:focus:not(:focus-visible) { outline: none; }
   .btn:focus-visible { outline: 2px solid var(--beam); outline-offset: 2px; }
 
   .toggle-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 9px 0; border-top: 1px solid var(--navy-700); }
@@ -553,18 +562,18 @@
     color: var(--foam); font-size: 12px; font-weight: 700; display: flex; align-items: center; justify-content: center;
   }
 
-  /* What: phone layout: slim menu strip on top
-     Why: the full dock used a third of a phone screen
-     From: Issue #1683 | PR #1858 */
+  /* What: phone layout: menu rows on top, they wrap
+     Why: a scroll strip cut items off (DoMe 06.11.)
+     From: Issue #1683 | PR #1991 */
   @media (max-width: 880px) {
     .shell { flex-direction: column; }
-    .dock { position: sticky; top: 0; z-index: 5; width: 100%; height: auto; flex-direction: row; align-items: center; gap: 4px; padding: 6px 8px; overflow-x: auto; border-right: none; border-bottom: 1px solid var(--navy-700); }
+    .dock { position: relative; z-index: 5; width: 100%; height: auto; flex-direction: row; flex-wrap: wrap; align-items: center; gap: 4px; padding: 6px 8px; border-right: none; border-bottom: 1px solid var(--navy-700); }
     .dock .brand { padding: 0 6px; margin: 0; border: none; flex: none; }
     .dock .brand-mark { width: 34px; height: 34px; object-fit: contain; }
     .dock .nav-group-label, .dock .dock-meta, .dock .nav-dot { display: none; }
     .dock .dock-footer { margin: 0; padding: 0; border: none; flex: none; }
-    .dock .dock-tools { margin: 0; flex-wrap: nowrap; }
-    .dock .nav-item { flex: none; white-space: nowrap; padding: 9px 12px; margin: 0; }
+    .dock .dock-tools { margin: 0; flex-wrap: wrap; }
+    .dock .nav-item { flex: none; white-space: nowrap; padding: 7px 10px; margin: 0; }
     .beambar { padding: 8px 12px; }
     .content { padding: 18px 14px 48px; }
     .page-title { font-size: 28px; }
@@ -864,7 +873,7 @@
     <div class="nav-group-label">{{ t.settings_2 }}</div>
     {{ <nav_link href={pages.domains} label="DNS" active={active_page == "domains"} glyph="⌘"/> }}
     {{ <nav_link href={pages.dhcp} label="DHCP" active={active_page == "dhcp"} glyph="⇄"/> }}
-    <a href="{{ pages.logs | safe }}#syslog" class="nav-item"><span class="nav-dot"></span><span class="nav-icon">☍</span> Syslog</a>
+    <a href="{{ pages.logs | safe }}" class="nav-item"><span class="nav-dot"></span><span class="nav-icon">☍</span> Syslog</a>
     {{ <nav_link href={pages.setup} label={t.general} active={active_page == "setup"} glyph="◐"/> }}
 
     <div class="dock-footer">
@@ -1169,7 +1178,13 @@
           const menu = document.createElement('details');
           menu.className = 'beam-menu beam-name';
           menu.open = openMenu === svc.name;
+          // What: opening a menu closes the others.
+          // Why: DoMe 07.11.: menus must not overlap.
+          // From: Issue #1683 | PR #1991
           menu.addEventListener('toggle', function () {
+            if (menu.open) {
+              document.querySelectorAll('details.beam-menu[open]').forEach(function (m) { if (m !== menu) { m.open = false; } });
+            }
             if (menu.open) { openMenu = svc.name; } else if (openMenu === svc.name) { openMenu = ''; }
           });
           // What: the container name opens its programs.
@@ -1225,6 +1240,30 @@
         }
         return wrap;
       }
+      // What: wipe buttons empty the whole cache.
+      // Why: DoMe 07.11.: second click confirms the wipe.
+      // From: Issue #871 | PR #1991
+      document.querySelectorAll('[data-cache-wipe]').forEach(function (b) {
+        const st = b.parentNode.querySelector('[data-cache-wipe-state]');
+        const gib = function (n) { return (n / 1073741824).toFixed(1) + ' GiB'; };
+        b.addEventListener('click', function () {
+          if (!b.dataset.sure) { b.dataset.sure = '1'; b.textContent = LC_T.cache_wipe_sure; return; }
+          b.disabled = true; b.textContent = LC_T.loading;
+          fetch(b.dataset.cacheWipe, { method: 'POST', headers: { 'X-CSRF-Token': b.dataset.csrf } })
+            .then(function (r) { return r.ok ? r.json() : r.text().then(function (t) { throw new Error(t); }); })
+            .then(function (v) { st.textContent = LC_T.cache_freed.replace('{x}', gib(v.freed)); })
+            .catch(function (e) { window.LancacheUi.fail(e); })
+            .finally(function () { b.disabled = false; delete b.dataset.sure; b.textContent = LC_T.cache_wipe; });
+        });
+      });
+      // What: click outside or Escape closes service menus.
+      // Why: DoMe 07.11.: at most one menu, easy to close.
+      // From: Issue #1683 | PR #1991
+      const closeMenus = function (keep) {
+        document.querySelectorAll('details.beam-menu[open]').forEach(function (m) { if (m !== keep) { m.open = false; } });
+      };
+      document.addEventListener('click', function (e) { closeMenus(e.target.closest('details.beam-menu')); });
+      document.addEventListener('keydown', function (e) { if (e.key === 'Escape') { closeMenus(null); } });
       // What: rebuilds the beambar from one status update
       // Why: unavailable and stale states own their text
       // From: Issue #1683 | PR #1912
