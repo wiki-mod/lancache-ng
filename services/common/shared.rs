@@ -2333,7 +2333,7 @@ pub mod recursor_conf {
     // From: Issue #1683 | PR #1858
     pub fn rpz(
         s: &Settings,
-        domains: &[String],
+        domains: &[(String, bool)],
         answer: &str,
         serial: u32,
     ) -> Result<String, String> {
@@ -2351,12 +2351,20 @@ pub mod recursor_conf {
             s.uint("RPZ_SOA_EXPIRE")?,
             s.uint("RPZ_SOA_MINIMUM")?,
         );
-        for d in domains {
+        // What: ".name" = subdomains, "name" = itself.
+        // Why: live 249: the apex of .steamcontent.com hit.
+        // From: Issue #1072
+        for (d, subtree) in domains {
             let d = d.trim_end_matches('.');
             if !crate::dns::is_dns_name(d, false, true) {
                 return Err(format!("cache domain {d:?} is no DNS name"));
             }
-            out += &format!("{d} {kind} {answer}\n*.{d} {kind} {answer}\n");
+            let owner = if *subtree {
+                format!("*.{d}")
+            } else {
+                d.to_string()
+            };
+            out += &format!("{owner} {kind} {answer}\n");
         }
         Ok(out)
     }
@@ -3517,7 +3525,7 @@ pub mod render {
         h.max(1)
     }
 
-    fn dns_files(o: &mut Out, sec: &Secrets, names: &[String]) {
+    fn dns_files(o: &mut Out, sec: &Secrets, names: &[(String, bool)]) {
         let s = o.s;
         o.add_file("services", "CHRONY_CONF_FILE", chrony::render(s));
         o.add_file("services", "SYSLOG_CONF_FILE", log::render(s));
@@ -3766,11 +3774,8 @@ pub mod render {
                 String::new()
             }
         };
-        let names: Vec<String> = domains
-            .lines()
-            .filter_map(crate::dns::cdn_entry)
-            .map(|(n, _)| n)
-            .collect();
+        let names: Vec<(String, bool)> =
+            domains.lines().filter_map(crate::dns::cdn_entry).collect();
         dns_files(&mut o, sec, &names);
         dhcp_files(&mut o, sec);
         if let Err(e) = nginx_files(&mut o, &domains) {
@@ -3798,11 +3803,8 @@ pub mod render {
             errs: Vec::new(),
         };
         let domains = crate::cdn::effective(s).map_err(|e| vec![e])?;
-        let names: Vec<String> = domains
-            .lines()
-            .filter_map(crate::dns::cdn_entry)
-            .map(|(n, _)| n)
-            .collect();
+        let names: Vec<(String, bool)> =
+            domains.lines().filter_map(crate::dns::cdn_entry).collect();
         dns_files(&mut o, sec, &names);
         o.files.retain(|f| f.owner == "dns");
         // What: each error once, even if two files hit it.
