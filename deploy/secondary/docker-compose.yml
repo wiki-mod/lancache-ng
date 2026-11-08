@@ -31,6 +31,11 @@ services:
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY:?DDNS_TSIG_KEY is required}
       - DNS_REPLICATION_ROLE=${SOT_DNS_REPLICATION_ROLE_SECONDARY}
       - DNS_XFR_PRIMARY=${DNS_XFR_PRIMARY:?DNS_XFR_PRIMARY is required}
+      # What: zones to pull and the TSIG key name.
+      # Why: the zones step creates them on this node.
+      # From: Issue #1683
+      - DNS_SECONDARY_ZONES=${DNS_SECONDARY_ZONES:?DNS_SECONDARY_ZONES is required}
+      - DDNS_TSIG_NAME=${DDNS_TSIG_NAME:?DDNS_TSIG_NAME is required}
       # What: a replica keeps its secrets in its own volume.
       # Why: no shared-secrets volume, no ui; runs as root.
       # From: Issue #1683 | PR #1912
@@ -106,6 +111,25 @@ services:
     # What: no probe; the run ends after one write.
     # Why: dns waits for its exit code instead.
     # From: Issue #1683 | PR #1980
+    healthcheck:
+      disable: true
+    logging:
+      driver: local
+
+  # What: one-shot ui run: secondary zones and TSIG.
+  # Why: live 229: no zone existed, so no AXFR ran.
+  # From: Issue #1683
+  zones:
+    image: ${LANCACHE_IMAGE_REF_UI:?LANCACHE_IMAGE_REF_UI is required}
+    command: ["secondary-zones"]
+    environment: *dns-env
+    # What: retry until the pdns API answers.
+    # Why: pdns starts after this run may begin.
+    # From: Issue #1683
+    restart: on-failure
+    depends_on:
+      dns:
+        condition: service_started
     healthcheck:
       disable: true
     logging:

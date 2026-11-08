@@ -8417,6 +8417,12 @@ cmd_secondary() {
     bad_response="Unrecognized response from primary server at ${primary}."
     pdns_api_key=$(json_value .pdns_api_key "$response") || die "$bad_response"
     tsig_name=$(json_value .tsig_name "$response") || die "$bad_response"
+    # What: zones the secondary pulls from the primary
+    # Why: live 229: no zone existed, so no AXFR ran
+    # From: Issue #1683
+    local secondary_zones
+    secondary_zones=$(json_value '.zones | join(" ")' "$response") || die "$bad_response"
+    validate_env_value DNS_SECONDARY_ZONES "$secondary_zones"
     ddns_tsig_key=$(json_value .tsig_secret "$response") || die "$bad_response"
     dns_xfr_primary=$(json_value .primary "$response") || die "$bad_response"
     syslog_primary=$(json_value .syslog_primary "$response") || die "$bad_response"
@@ -8433,6 +8439,7 @@ cmd_secondary() {
 
     die_if_any_empty "Invalid response from primary server; missing field(s)" \
         "pdns_api_key=$pdns_api_key" "tsig_name=$tsig_name" \
+        "secondary_zones=$secondary_zones" \
         "ddns_tsig_key=$ddns_tsig_key" "dns_xfr_primary=$dns_xfr_primary" \
         "syslog_primary=$syslog_primary"
 
@@ -8593,6 +8600,7 @@ SNMP_COMMUNITY=${snmp_community}
 DDNS_TSIG_KEY=${ddns_tsig_key}
 DNS_XFR_PRIMARY=${dns_xfr_primary}
 DDNS_TSIG_NAME=${tsig_name}
+DNS_SECONDARY_ZONES=${secondary_zones}
 SYSLOG_PRIMARY=${syslog_primary}
 KEEP_KNOWN_GOOD_CONFIGS=${keep_known_good_configs}
 DNS_LOCAL_REVERSE_ZONES=${local_reverse}

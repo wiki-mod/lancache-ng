@@ -1288,7 +1288,10 @@ fn peer_kit(s: &Settings) -> Result<Value, String> {
     let primary = s.text("IP_HTTP")?;
     Ok(json!({
         "primary": primary,
-        "zones": snapshot_zones(s)?,
+        // What: the zones the primary serves.
+        // Why: the secondary pulls each one by AXFR.
+        // From: Issue #1683
+        "zones": lancache_ng::dns::managed_zones(s)?,
         "pdns_api_key": sec.pdns_api_key,
         "tsig_name": sec.tsig_name,
         "tsig_secret": sec.tsig_secret,
@@ -3378,6 +3381,10 @@ async fn command(s: &Settings, args: &[String]) -> Option<Result<(), String>> {
         }),
         Some("healthcheck") => Some(healthcheck(s).await),
         Some("render-dns") => Some(render_dns(s)),
+        // What: secondary zones and TSIG via the pdns API.
+        // Why: a secondary has no ui server to do it.
+        // From: Issue #1683
+        Some("secondary-zones") => Some(ensure_zones(s).await),
         Some(DHCP_PROBE_CMD) => Some(dhcp_probe_cli(s)),
         Some("reset-sign-in") => Some(reset_sign_in()),
         _ => None,

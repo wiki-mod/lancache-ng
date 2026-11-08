@@ -178,7 +178,10 @@ services:
     # From: Issue #1683 | PR #1980
     process_pre:
       - 'dns-http=until [ -s @RECURSOR_HTTP_CONF_FILE@ ]; do sleep @DNS_CONFIG_WAIT_SECONDS@; done'
-      - 'dns-https=until [ -s @RECURSOR_HTTPS_CONF_FILE@ ]; do sleep @DNS_CONFIG_WAIT_SECONDS@; done'
+      # What: no IP_HTTPS: dns-https idles, no wait loop.
+      # Why: live 229: the wait blocked pdns forever.
+      # From: Issue #1683
+      - 'dns-https=if [ -z "${IP_HTTPS:-}" ]; then einfo "IP_HTTPS empty: dns-https off"; command=/bin/sleep; command_args=2147483647; return 0; fi; until [ -s @RECURSOR_HTTPS_CONF_FILE@ ]; do sleep @DNS_CONFIG_WAIT_SECONDS@; done'
       - 'snmpd=until [ -s @SNMPD_CONF_FILE@ ]; do sleep @DNS_CONFIG_WAIT_SECONDS@; done'
       - 'pdns=until [ -s @PDNS_CONF_FILE@ ]; do sleep @DNS_CONFIG_WAIT_SECONDS@; done; [ -e @PDNS_DATABASE@ ] && return 0; sqlite3 @PDNS_DATABASE@ < @PDNS_SCHEMA_FILE@ && chown pdns:pdns @PDNS_DATABASE@ && return 0; rm -f @PDNS_DATABASE@; return 1'
     setup:
@@ -2654,6 +2657,8 @@ validation:
     - CACHE_MEM_MB
     - DHCP_SUBNET
     - LANCACHE_STATE_DIR
+    - DDNS_TSIG_NAME
+    - DNS_SECONDARY_ZONES=@DHCP_DOMAIN@
   # What: required keys setup.sh repairs
   # Why: empty required key breaks the stack
   # From: Issue #1683 | PR #1858
