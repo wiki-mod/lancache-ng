@@ -13856,7 +13856,7 @@ _ci_register_secondary() {
     # Why: a quote breaks pasted JSON; argv shows secrets.
     # From: Issue #1683 | PR #1858
     body="$(CI_REGISTER_TOKEN="${token}" _ci_capture 0 jq -cn --arg name "${name}" "{token: env.CI_REGISTER_TOKEN, name: \$name}")" || return 2
-    out="$(_ci_run -q -s "[CI-ERROR-CORE-0106]" "reason=\"command failed or wrote stderr\"" _ci_curl_secret data "${body}" \
+    out="$(_ci_run -q -s "[CI-ERROR-VALIDATE-0147]" "reason=\"secondary register call failed or wrote stderr\"" _ci_curl_secret data "${body}" \
         -sS -w '\n%{http_code}' -H 'Content-Type: application/json' \
         "${url}")" || {
         ci_log "[CI-ERROR-VALIDATE-0083]" "url=\"${url}\" name=\"${name}\" reason=\"secondary register request failed (raw above)\""
@@ -13916,7 +13916,7 @@ _ci_validate_secondary_identity() {
     fi
     au="$(_ci_capture 0 jq -r '.tsig_name // empty' <<< "${a}")" || return 1
     bu="$(_ci_capture 0 jq -r '.tsig_name // empty' <<< "${b}")" || return 1
-    ap="$(_ci_run -q -s "[CI-ERROR-CORE-0106]" "reason=\"command failed or wrote stderr\"" jq -r '.tsig_secret // empty' <<< "${a}")" || return 1
+    ap="$(_ci_run -q -s "[CI-ERROR-VALIDATE-0148]" "reason=\"tsig_secret read failed or wrote stderr\"" jq -r '.tsig_secret // empty' <<< "${a}")" || return 1
     bp="$(_ci_capture 0 jq -r '.primary // empty' <<< "${b}")" || return 1
     if [ -z "${au}" ] || [ -z "${bu}" ] || [ -z "${ap}" ] || [ -z "${bp}" ]; then
         ci_log "[CI-ERROR-VALIDATE-0048]" "reason=\"register response missing tsig_name/tsig_secret/primary\""
