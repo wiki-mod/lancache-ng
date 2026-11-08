@@ -1945,7 +1945,17 @@ async fn stats(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
             .replace("{x}", &snmp)
             .replace("{y}", &step.to_string()),
     })];
+    // What: no dhcp tab while DHCP_MODE is off.
+    // Why: live 249: the tab showed a stopped dhcp.
+    // From: Issue #1683
+    let off = match (s.text("DHCP_SERVICE"), s.text("DHCP_MODE")) {
+        (Ok(svc), Ok(mode)) if mode == "off" => svc,
+        _ => String::new(),
+    };
     for c in s.list("STATS_CONTAINERS") {
+        if c == off {
+            continue;
+        }
         tabs.push(json!({
             "id": c,
             "label": c,
