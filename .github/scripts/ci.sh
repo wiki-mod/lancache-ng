@@ -14088,6 +14088,12 @@ _ci_validate_stack() {
 # From: Issue #1683 | PR #1858
 _ci_validate_run() {
     local cand="$1" rc=0
+    # What: the PSL is loaded here when a job left it out.
+    # Why: validate and channel-check start the stack here.
+    # From: Issue #1683 | PR #1984 | run 42483102657
+    if [ ! -s "${CI_REPO_ROOT:-.}/$(_ci_runtime_default NGINX_PSL_REPO_DIR)/$(_ci_runtime_default NGINX_PSL_FILE)" ]; then
+        ci_cmd_update_psl restore || return 2
+    fi
     _ci_validate_stack "${cand}" || rc=$?
     if [ "${rc}" -ne 0 ]; then
         ci_log "[CI-ERROR-VALIDATE-0004]" "reason=\"stack validation failed\""
@@ -14103,12 +14109,6 @@ ci_cmd_validate() {
     local cand shared
     ci_group "validate: host tools and stack candidate"
     _ci_validate_host_tools || return 2
-    # What: the PSL is loaded here when a job left it out.
-    # Why: dns and proxy need it (run 42415183542).
-    # From: Issue #1683 | PR #1984
-    if [ ! -s "${CI_REPO_ROOT:-.}/$(_ci_runtime_default NGINX_PSL_REPO_DIR)/$(_ci_runtime_default NGINX_PSL_FILE)" ]; then
-        ci_cmd_update_psl restore || return 2
-    fi
     shared="$(_ci_validate_shared_dir)" || return 2
     printf 'validate shared_dir=%s\n' "${shared}"
     if ! cand="$(_ci_stack_candidate)"; then
