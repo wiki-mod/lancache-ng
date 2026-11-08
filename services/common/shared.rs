@@ -2926,7 +2926,7 @@ pub mod dnsmasq_conf {
         }
         let get = |k: &str| s.text(k).unwrap_or_default();
         c.add(&format!("dhcp-range={}", proxy_range(s)?))?;
-        c.add_if("interface=", &get("DHCP_PROXY_INTERFACE"))?;
+        c.add_if("interface=", &s.list("DHCP_PROXY_INTERFACE").join(","))?;
         c.add_if("dhcp-option-pxe=3,", &get("DHCP_PROXY_ROUTER"))?;
         c.add_if("dhcp-option-pxe=6,", &s.list("DHCP_DNS_SERVERS").join(","))?;
         c.add_if("dhcp-option-pxe=15,", &get("DHCP_PROXY_DOMAIN"))?;

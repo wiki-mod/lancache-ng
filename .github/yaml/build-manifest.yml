@@ -984,6 +984,7 @@ runtime:
     - DHCP_PROBE_ACK_WAIT_MS=2000
     - DHCP_PROBE_SENDS=3
     - DHCP_PROBE_WINDOW_MS=5000
+    - DHCP_PROXY_INTERFACE=
     - DHCP_RELAY_LOCAL_ADDR=
     - DHCP_SERVICE=dhcp
     - DHCP_SUBNET_START=
@@ -1251,6 +1252,7 @@ runtime:
     - DHCP_PROBE_ACK_WAIT_MS=uint;100;60000;live;ui
     - DHCP_PROBE_SENDS=uint;1;10;live;ui
     - DHCP_PROBE_WINDOW_MS=uint;100;60000;live;ui
+    - DHCP_PROXY_INTERFACE=list?;;;reload;dhcp
     - DHCP_RANGE_END=text;;;reload;dhcp
     - DHCP_RANGE_START=text;;;reload;dhcp
     - DHCP_RELAY_LOCAL_ADDR=text?;;;reload;dhcp
