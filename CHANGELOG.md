@@ -1356,6 +1356,48 @@ is real, live, running code, not just work sitting in source control.
   against this file's long-form, prose-heavy entry style, so a small custom
   script was written instead.
 
+## [0.4.0] - 2026-11-09
+
+## Changes
+
+- #1979 | fix(ui): follow-up to the admin UI mockup (NTP block, recent requests, shared drain)
+
+## 🚀 Added
+
+- #2004 | Promotion 0.3.4 to 0.4.0
+- #2008 | feat(release): release-drafter layout and one-click publish in CI 2.0
+
+## 📚 Documentation
+
+- #2004 | Promotion 0.3.4 to 0.4.0
+- #2008 | feat(release): release-drafter layout and one-click publish in CI 2.0
+- #2007 | docs(release): drop the /logs notice and the 11.2 narrative
+- #2006 | fix(ci): promotion PR toolchain and changelog label rule
+- #1997 | ci(1683): CI 2.0 rewrite, continuation after #1984
+- #1984 | CI 2.0 rewrite (continues #1858)
+- #1988 | docs: re-audit the threat model and the capability inventory against current\_dev
+- #1985 | fix(ui): SOT paths, programs menu, install channel, upstream checks
+- #1989 | docs(docs): merge release and operator documents
+- #1983 | Sync to current\_dev: CI 2.0 (#1858) and rewrite (#1980)
+- #1976 | feat(ui): take over the admin UI mockup design
+
+## 🧰 Chore / CI
+
+- #2004 | Promotion 0.3.4 to 0.4.0
+- #2008 | feat(release): release-drafter layout and one-click publish in CI 2.0
+- #2006 | fix(ci): promotion PR toolchain and changelog label rule
+- #2002 | fix: six release-check findings for 0.4.x
+- #2001 | fix(ci): channel-check loads the Public Suffix List too
+- #1997 | ci(1683): CI 2.0 rewrite, continuation after #1984
+- #1991 | fix(ui): DHCP modes, one text per field, cache size, per-game evict and full wipe
+- #1995 | fix(ci): restore gha-runtime-args for the master workflows
+- #1984 | CI 2.0 rewrite (continues #1858)
+- #1985 | fix(ui): SOT paths, programs menu, install channel, upstream checks
+- #1989 | docs(docs): merge release and operator documents
+- #1983 | Sync to current\_dev: CI 2.0 (#1858) and rewrite (#1980)
+- #1981 | build-tools: add apk rust-src and rustup
+- #1976 | feat(ui): take over the admin UI mockup design
+
 ## [0.1.0] - 2026-07-06
 
 ### Added
