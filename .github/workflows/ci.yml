@@ -19,7 +19,16 @@ on:
   # From: Issue #1683 | PR #1858
   issues:
     types: [opened]
+  # What: a dispatch may name ci.bats tests to enable.
+  # Why: every ci.bats test is off unless enabled.
+  # From: Issue #1683
   workflow_dispatch:
+    inputs:
+      bats_enable:
+        description: ci.bats switches, e.g. enable-all or enable-proxy_nginx_policy enable-proxy_cert_volume
+        type: string
+        required: false
+        default: ''
 # What: actions read: lock waits ask if a holder run ended.
 # Why: a lock frees when its run ends, not after an age.
 # From: Issue #1683 | PR #1912
@@ -489,6 +498,29 @@ jobs:
           GH_TOKEN: ${{ secrets.RELEASE_DRAFTER_PAT }}
         run: bash .github/scripts/ci.sh release-draft
 
+  # What: run ci.bats with the tests a dispatch enables.
+  # Why: only a dispatch with bats_enable runs them.
+  # From: Issue #1683
+  ci-bats:
+    name: ci-bats
+    if: github.event_name == 'workflow_dispatch' && inputs.bats_enable != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    container:
+      image: ghcr.io/${{ github.repository }}/build-tools:nightly
+      credentials: *ghcr_credentials
+    permissions:
+      contents: read
+      packages: read
+    env:
+      CI_BATS_ENABLE: ${{ inputs.bats_enable }}
+    steps:
+      - *bootstrap
+      - name: Run ci.bats with the enabled tests
+        run: |
+          read -r -a enable <<< "${CI_BATS_ENABLE}"
+          bash .github/scripts/ci.sh check ci-bats "${enable[@]}"
+
   # What: checks beside plan; each runs only with a reason.
   # Why: §2.1 §98: a green tree or PR text is NOOP; -75 s.
   # From: Issue #1683 | PR #1858
@@ -541,6 +573,14 @@ jobs:
           PR_LABELS_JSON: ${{ toJSON(github.event.pull_request.labels.*.name) }}
           PR_MILESTONE_TITLE: ${{ github.event.pull_request.milestone.title }}
         run: bash .github/scripts/ci.sh pr-meta plan
+      # What: board-add right before the metadata check.
+      # Why: pr-admin runs in parallel; the check reads it.
+      # From: Issue #1683
+      - name: Add the PR to the project board
+        if: steps.meta.outputs.meta == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.PROJECT_AUTOMATION_PAT }}
+        run: bash .github/scripts/ci.sh board-add
       # What: PR title, template, labels and milestone.
       # Why: this PR text is not yet checked green.
       # From: Issue #1683 | PR #1858
@@ -579,10 +619,10 @@ jobs:
   # From: Issue #1683 | PR #1858
   pr-admin:
     name: pr-admin
-    if: >-
-      github.event_name == 'issues' ||
-      (github.event_name == 'pull_request' &&
-      contains(fromJSON('["opened","reopened","synchronize"]'), github.event.action))
+    # What: any issue or PR event runs it; idempotent.
+    # Why: a cancelled opened run still gets its board.
+    # From: Issue #1683
+    if: github.event_name == 'issues' || github.event_name == 'pull_request'
     # What: own literal runner/timeout; it needs no plan.
     # Why: it runs beside plan, never after it.
     # From: Issue #1683 | PR #1858
