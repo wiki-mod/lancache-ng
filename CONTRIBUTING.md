@@ -121,22 +121,30 @@ not by appending new comments each time something is fixed or added.
 lancache-ng maintains a `CHANGELOG.md` file at the repository root, following
 the [Keep a Changelog](https://keepachangelog.com/) format.
 
-Updating it is automatic and requires no manual collection step (#894):
+Updating it is automatic and requires no manual collection step:
 
-1. A `vX.Y.Z` or `vX.Y.Z-rc.N` tag runs `.github/workflows/release.yml`.
-   `ci.sh release-publish` writes the GitHub Release notes: every PR merged
-   since the previous `vX.Y.Z` tag, as `#NUMBER TITLE (URL)` followed by that
-   PR's own `## Changelog` section, grouped by label (grouping, fallback group
-   and skip label live in `.github/yaml/build-manifest.yml`, `release_notes`).
-2. For a stable `vX.Y.Z` tag, `ci.sh release-changelog` then adds the same
-   list to `CHANGELOG.md` as `## [X.Y.Z] - <date>` and commits it to the
-   default branch.
+1. Every push to `master` runs `ci.sh release-draft` (`ci.yml`, job
+   `release-draft`). It keeps one draft GitHub Release in the release-drafter
+   layout: `## Changes`, PRs without a matching label first, then one
+   `## <icon> <title>` group per label group, each PR as `- #NUMBER | TITLE`,
+   merged since the last published release. The draft is named after the
+   proposed version: `minor` when a PR carries `enhancement`, otherwise
+   `patch`. Groups, icons, labels and bumps live in
+   `.github/yaml/build-manifest.yml` (`release_notes`,
+   `release_notes_categories`).
+2. The maintainer edits the draft if needed and publishes it. Publishing
+   creates the tag, which runs `.github/workflows/release.yml`;
+   `ci.sh release-publish` keeps the published text and attaches the assets.
+3. For a stable `vX.Y.Z` tag, `ci.sh release-changelog` then adds the
+   published release text to `CHANGELOG.md` as `## [X.Y.Z] - <date>` and
+   commits it to the default branch.
 
 Applying the `skip-changelog` label to a PR excludes it from the release
 notes (e.g. a pure internal refactor with no user-visible effect).
 
-`ci.sh release-notes <tag>` prints the same list without publishing anything
--- useful for reconstructing history or checking notes before a release.
+`ci.sh release-notes [<ref or tag> [<base tag>]]` prints the notes without
+publishing anything -- useful for reconstructing history or checking notes
+before a release.
 
 Maintainers reviewing release PRs should verify that `CHANGELOG.md` accurately
 reflects user-visible behavior changes across all merged work for that release.
