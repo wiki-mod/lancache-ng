@@ -10935,14 +10935,21 @@ ci_cmd_release_notes() {
     printf '%s' "${body%.}"
 }
 
-# What: create or update the one draft release on master.
+# What: create or update the one draft from a draft ref.
 # Why: the maintainer publishes the draft; CI never does.
 # From: Issue #1683 | PR #2004
 ci_cmd_release_draft() {
-    local ref repo base payload inc name rows id file out got want mode=created
-    ref="$(_ci_release_ref)" || return 2
-    if [ "${GITHUB_REF:-}" != "${ref}" ]; then
-        printf 'release-draft=skip ref=%s reason="not the release ref %s"\n' "${GITHUB_REF:-}" "${ref}"
+    local ref="${GITHUB_REF:-}" refs r draft_hit=0 repo base payload inc name rows id file out got want mode=created
+    refs="$(_ci_block_entry_list release_notes "" draft_refs)" || return 2
+    if [ -z "${refs}" ]; then
+        ci_log "[CI-ERROR-RELEASE-0080]" "reason=\"SOT release_notes draft_refs missing\""
+        return 2
+    fi
+    while IFS= read -r r; do
+        [ "${r}" != "${ref}" ] || draft_hit=1
+    done <<< "${refs}"
+    if [ "${draft_hit}" -eq 0 ]; then
+        printf 'release-draft=skip ref=%s reason="not a SOT draft ref"\n' "${ref}"
         return 0
     fi
     repo="$(_ci_repo)" || return 2
