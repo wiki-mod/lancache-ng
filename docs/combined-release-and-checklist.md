@@ -33,7 +33,7 @@ verified.
 | Gates, error codes, promotion, tagging, garbage collection | `.github/scripts/ci.sh` (workflows only call it) |
 | Workflows | `ci.yml`, `nightly.yml`, `release.yml`, `gc.yml`, `codeql.yml` |
 | Install and update behavior | `setup.sh` |
-| Binding rules | `AGENTS.md` (`AG-REL-*`, `AG-VAL-*`, `AG-CI-*`) |
+| Binding rules | `AGENTS.md` (`AG-LAW-001`) |
 
 This document names SOT keys and does not copy their values, except where a
 value is part of the operator contract.
