@@ -1691,6 +1691,7 @@ ci_job_timeouts:
   orphaned-branches: 15
   plan: 30
   promote: 30
+  promote-build-tools: 15
   publish-draft: 15
   release: 30
   release-draft: 15
