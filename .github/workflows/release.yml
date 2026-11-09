@@ -9,15 +9,15 @@ name: CI 2.0 Release
 on:
   push:
     tags: ['v*']
-  # What: publish a tag, or cut the next patch tag.
+  # What: publish a tag, cut a patch tag, publish draft.
   # Why: AG-REL-013: a tag cut is its own dispatch.
-  # From: Issue #1683 | PR #1858
+  # From: Issue #1683 | PR #2004
   workflow_dispatch:
     inputs:
       action:
-        description: publish a release tag, or cut the next patch tag from the previous release
+        description: publish a release tag, cut the next patch tag, or publish the draft release
         type: choice
-        options: [publish, cut-patch]
+        options: [publish, cut-patch, publish-draft]
         default: publish
       tag:
         description: Release tag to (re)publish (vX.Y.Z or vX.Y.Z-rc.N); empty for cut-patch.
@@ -35,7 +35,7 @@ defaults:
 # From: Issue #1683 | PR #1858
 env:
   GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-  CI_RELEASE_TAG: ${{ inputs.action != 'cut-patch' && (github.event.inputs.tag || github.ref_name) || '' }}
+  CI_RELEASE_TAG: ${{ inputs.action != 'cut-patch' && inputs.action != 'publish-draft' && (github.event.inputs.tag || github.ref_name) || '' }}
   # What: LAN proxy CA secret; ci.sh uses it self-hosted.
   # Why: a secret is masked; ci.sh reads it by name.
   # From: Issue #1683 | PR #1858
@@ -108,7 +108,7 @@ jobs:
   plan:
     name: plan
     needs: resolve-build-tools
-    if: inputs.action != 'cut-patch'
+    if: inputs.action != 'cut-patch' && inputs.action != 'publish-draft'
     runs-on: ${{ needs.resolve-build-tools.outputs.runner }}
     timeout-minutes: ${{ fromJSON(needs.resolve-build-tools.outputs.timeouts)['plan'] }}
     container: &bt_container
@@ -195,7 +195,7 @@ jobs:
   release:
     name: release
     needs: [resolve-build-tools, plan, promote]
-    if: inputs.action != 'cut-patch'
+    if: inputs.action != 'cut-patch' && inputs.action != 'publish-draft'
     runs-on: ${{ needs.resolve-build-tools.outputs.runner }}
     timeout-minutes: ${{ fromJSON(needs.resolve-build-tools.outputs.timeouts)['release'] }}
     container: *bt_container
@@ -326,3 +326,23 @@ jobs:
         env:
           PROJECT_AUTOMATION_PAT: ${{ secrets.PROJECT_AUTOMATION_PAT }}
         run: bash .github/scripts/ci.sh cut-release-tag
+
+  # What: publish the draft release on an explicit dispatch.
+  # Why: the PAT tag creation then starts the tag publish.
+  # From: Issue #1683 | PR #2004
+  publish-draft:
+    name: publish-draft
+    needs: resolve-build-tools
+    if: inputs.action == 'publish-draft'
+    runs-on: ${{ needs.resolve-build-tools.outputs.runner }}
+    timeout-minutes: ${{ fromJSON(needs.resolve-build-tools.outputs.timeouts)['publish-draft'] }}
+    container: *bt_container
+    steps:
+      - *bootstrap
+      # What: the PAT reaches the publish step only
+      # Why: least privilege; the checkout needs no PAT
+      # From: Issue #1683 | PR #2004
+      - name: Refresh and publish the draft release
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_DRAFTER_PAT }}
+        run: bash .github/scripts/ci.sh release-draft publish
