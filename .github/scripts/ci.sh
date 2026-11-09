@@ -5974,21 +5974,6 @@ ci_cmd_board_add() {
         printf 'board-add=NOT-RUN reason="not a pull request or issue"\n'
         return 0
     fi
-    # What: a PR goes on the board when opened or reopened.
-    # Why: a later PR event would only repeat the same add.
-    # From: Issue #1683 | PR #1858
-    if [ "${kind}" = pull ]; then
-        local event action
-        event="$(_ci_env_required GITHUB_EVENT_PATH)" || return 2
-        action="$(_ci_capture 0 jq -r '.action // empty' "${event}")" || return 2
-        case "${action}" in
-            opened | reopened) ;;
-            *)
-                printf 'board-add=NOT-RUN action="%s" reason="the PR was added when opened"\n' "${action}"
-                return 0
-                ;;
-        esac
-    fi
     if [ "${PR_IS_FORK:-false}" = true ] || [ -z "${GH_TOKEN:-}" ]; then
         printf 'board-add=NOT-RUN reason="no project token (fork or unset); add by hand (AG-GH-008)"\n'
         return 0
@@ -11067,11 +11052,11 @@ ci_cmd_release_changelog() {
     fi
     day="$(_ci_capture 0 date -u +%Y-%m-%d)" || return 2
     entry="${head} - ${day}"$'\n\n'"${changes}"
-    # What: new entry goes above the first "## [" release.
-    # Why: the pending section stays on top.
-    # From: Issue #894 | PR #1858
+    # What: new entry goes right below the file header.
+    # Why: versions run newest first; no section above it.
+    # From: Issue #1683
     while IFS= read -r line || [ -n "${line}" ]; do
-        if [ "${put}" -eq 0 ] && [[ "${line}" == "## ["* ]]; then
+        if [ "${put}" -eq 0 ] && [[ "${line}" == "## "* ]]; then
             new+="${entry}"$'\n\n'
             put=1
         fi
