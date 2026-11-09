@@ -182,9 +182,10 @@ functions for `services/ui`/`services/dns/nats-subscriber`, a test in
 documented on the PR (issue #1683 comment 6145242213), or a live probe in
 `ci.sh validate` for full-stack behavior) that exercises the new or changed
 behavior. Every `ci.bats` test starts with
-`if [ "${<name>_is_enabled:-false}" != "true" ]; then skip ...; fi` and is off
-by default; `ci.sh check ci-bats enable-all` or `enable-<name>`, or a `ci.yml`
-dispatch with `bats_enable`, turns it on. A pull request that changes behavior with no
+`if [ "${<name>_is_enabled:-false}" != "true" ]; then skip ...; fi`; the
+default `false` keeps it off, the default `true` runs it in every `ci-bats`
+check. `ci.sh check ci-bats enable-all` or `enable-<name>`, or a `ci.yml`
+dispatch with `bats_enable`, turns an off test on. A pull request that changes behavior with no
 corresponding test change should explain why in the PR body (for example,
 "covered by existing test X" or "no automated coverage is practical for this
 because Y" -- see `docs/threat-model.md`'s own precedent of naming untestable
