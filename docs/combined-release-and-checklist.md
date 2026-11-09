@@ -211,7 +211,7 @@ accepted digests under the new `sha-<full-sha>` tag; nothing is rebuilt. So a
 | --- | --- |
 | `resolve-build-tools`, `plan`, `validate` | image resolution, plan, stack validation |
 | `promote` | `promote-ref` |
-| `release` | `release-changelog`, `release-images`, `release-publish`, `release-variable`, `release-vex` |
+| `release` | `release-changelog`, `release-images`, `release-publish`, `release-variable`, `release-vex`, `release-branch` |
 | `release-provenance` | one `actions/attest` per image digest named by `release-images` |
 | `release-sbom` | `release-sbom-stack` |
 | `cut-release-tag` | `cut-release-tag` (dispatch only) |
@@ -240,6 +240,10 @@ accepted digests under the new `sha-<full-sha>` tag; nothing is rebuilt. So a
 - `release-changelog` writes the published release text of a stable tag to
   `CHANGELOG.md`.
 - `release-variable` sets `PROJECT_RELEASE_VERSION` to a stable tag.
+- `release-branch` creates `release/vX.Y.Z` on the tag commit of a stable
+  tag (SOT `release.release_branch_prefix`). An existing branch on the same
+  commit is accepted; on another commit the step fails
+  (`CI-ERROR-RELEASE-0087`, AG-REL-014).
 
 ### 4.4 Patch tags
 

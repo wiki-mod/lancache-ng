@@ -1937,6 +1937,10 @@ release:
   # Why: setup.sh waits while promote moves channel tags.
   # From: Issue #1683 | PR #1858
   promote_lock_ref: refs/ci/promote-lock
+  # What: prefix of the branch a stable release keeps.
+  # Why: release doc 2.3; AG-REL-014 protects release/*.
+  # From: Issue #1683
+  release_branch_prefix: release/
   # What: setup.sh lock checks and seconds between them.
   # Why: an install must not mix tags of a running promote.
   # From: Issue #1683 | PR #1858

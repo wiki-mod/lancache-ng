@@ -81,7 +81,7 @@ declare -A CI_DISPATCH=(
     [aggregate-stack]=ci_cmd_aggregate_stack [scan-stack]=ci_cmd_scan_stack [changed-files]=ci_cmd_changed_files [checks-plan]=ci_cmd_checks_plan [rust-memo]=ci_cmd_rust_memo [update-psl]=ci_cmd_update_psl
     [assemble-stack]=ci_cmd_assemble_stack [test-stack]=ci_cmd_test_stack [nightly-report]=ci_cmd_nightly_report
     [validate]=ci_cmd_validate [result-gate]=ci_cmd_result_gate [promote]=ci_cmd_promote [promote-ref]=ci_cmd_promote_ref [channel-checkout]=ci_cmd_channel_checkout [channel-matrix]=ci_cmd_channel_matrix [channel-check]=ci_cmd_channel_check [channel-report]=ci_cmd_channel_report [release-ref]=_ci_release_ref
-    [release-publish]=ci_cmd_release_publish [release-images]=ci_cmd_release_images [release-sbom-stack]=ci_cmd_release_sbom_stack [release-vex]=ci_cmd_release_vex [cut-release-tag]=ci_cmd_cut_release_tag [release-notes]=ci_cmd_release_notes [release-draft]=ci_cmd_release_draft [release-changelog]=ci_cmd_release_changelog [release-variable]=ci_cmd_release_variable
+    [release-publish]=ci_cmd_release_publish [release-images]=ci_cmd_release_images [release-sbom-stack]=ci_cmd_release_sbom_stack [release-vex]=ci_cmd_release_vex [cut-release-tag]=ci_cmd_cut_release_tag [release-notes]=ci_cmd_release_notes [release-draft]=ci_cmd_release_draft [release-changelog]=ci_cmd_release_changelog [release-variable]=ci_cmd_release_variable [release-branch]=ci_cmd_release_branch
     [gc]=ci_cmd_gc [gc-refs]=ci_cmd_gc_refs [check]=ci_cmd_check [close-linked-issues]=ci_cmd_close_linked_issues [pr-labels]=ci_cmd_pr_labels [pr-milestone]=ci_cmd_pr_milestone [board-add]=ci_cmd_board_add
     [version]=ci_cmd_version [docker-daemon-config]=ci_cmd_docker_daemon_config [runner-host]=ci_cmd_runner_host
     [have-command]=ci_cmd_have_command [pr-green-mark]=ci_cmd_pr_green_mark [pr-meta]=ci_cmd_pr_meta
@@ -11095,6 +11095,51 @@ _ci_release_variable_get() {
         return 2
     fi
     printf '%s\n' "${out}"
+}
+
+# What: keep a stable release as release/<tag> branch.
+# Why: release doc 2.3; AG-REL-014: the ref is immutable.
+# From: Issue #1683
+ci_cmd_release_branch() {
+    local tag="${1:-}" prefix ref sha tip url remote
+    [ -n "${tag}" ] || { ci_log "[CI-ERROR-RELEASE-0085]" "reason=\"tag arg required\""; return 2; }
+    _ci_release_tag_final "${tag}" || {
+        [ "$?" -eq 1 ] || return 2
+        printf 'release-branch=skip tag=%s reason="not a vX.Y.Z release tag"\n' "${tag}"
+        return 0
+    }
+    _ci_block_entry_field release "" release_branch_prefix prefix || return 2
+    if [ -z "${prefix}" ]; then
+        ci_log "[CI-ERROR-RELEASE-0086]" "reason=\"no SOT release.release_branch_prefix\""
+        return 2
+    fi
+    ref="refs/heads/${prefix}${tag}"
+    remote="$(_ci_git_remote)" || return 2
+    _ci_retry git-fetch git fetch --no-tags "${remote}" "+refs/tags/${tag}:refs/tags/${tag}" >&2 || return 2
+    sha="$(_ci_capture 0 git rev-parse "refs/tags/${tag}^{commit}")" || return 2
+    tip="$(_ci_ref_tip "${ref}")" || return 2
+    # What: an existing branch may sit on the tag commit.
+    # Why: AG-REL-014: a release ref never moves.
+    # From: Issue #1683
+    if [ -n "${tip}" ]; then
+        if [ "${tip}" = "${sha}" ]; then
+            printf 'release-branch=exists ref=%s sha=%s\n' "${ref}" "${sha}"
+            return 0
+        fi
+        ci_log "[CI-ERROR-RELEASE-0087]" "ref=\"${ref}\" tip=\"${tip}\" tag_commit=\"${sha}\" reason=\"release branch points elsewhere; it is immutable (AG-REL-014)\""
+        return 2
+    fi
+    url="$(_ci_pat_url)" || return 2
+    _ci_retry git-push _ci_pat_git push "${url}" "${sha}:${ref}" >&2 || return 2
+    # What: the new branch must read back on the tag commit.
+    # Why: AG-WF-031: every GitHub write is read back
+    # From: Issue #1683
+    tip="$(_ci_ref_tip "${ref}")" || return 2
+    if [ "${tip}" != "${sha}" ]; then
+        ci_log "[CI-ERROR-RELEASE-0088]" "ref=\"${ref}\" sha=\"${sha}\" found=\"${tip}\" reason=\"release branch not read back\""
+        return 2
+    fi
+    printf 'release-branch=created ref=%s sha=%s\n' "${ref}" "${sha}"
 }
 
 # What: set PROJECT_RELEASE_VERSION to a release tag.
