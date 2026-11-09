@@ -542,6 +542,10 @@ jobs:
           CHANGED_FILES: ${{ steps.changed.outputs.file }}
           CI_CHECKS_SELECTED: ${{ steps.pick.outputs.check-list }}
           CI_BUILD_TOOLS_IMAGE: ${{ steps.resolve.outputs.image }}
+          # What: PR labels for the changelog label rule.
+          # Why: changelog-direct-edit reads PR_LABELS_JSON.
+          # From: Issue #1683
+          PR_LABELS_JSON: ${{ toJSON(github.event.pull_request.labels.*.name) }}
         run: bash .github/scripts/ci.sh check all
 
   # What: labels and board; GitHub admin, no CI path.
