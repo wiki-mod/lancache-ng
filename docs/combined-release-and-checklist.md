@@ -923,7 +923,7 @@ ticked.
 | --- | --- |
 | `bash .github/scripts/ci.sh validate` | the running-stack validation for the accepted stack candidate, inside the `build-tools` container (AG-VAL-016) |
 | `bash .github/scripts/ci.sh check all`, `check <name>` | the guards of the diff, repository and (with `PR_NUMBER`) pull request scope, or one named guard |
-| `bats .github/scripts/ci.bats` in the `build-tools` image | the regression suite (four tests) |
+| `bats .github/scripts/ci.bats` in the `build-tools` image | the regression suite |
 | `gh attestation verify "oci://<digest>" --owner wiki-mod` | provenance of one image digest |
 | Admin UI DHCP page (`POST /dhcp/check`) | the DHCP conflict and client probe |
 
