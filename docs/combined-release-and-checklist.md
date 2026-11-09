@@ -87,7 +87,7 @@ first-party image, moved together by one promotion.
 | `current_dev` | `nightly` | A normal push publishes the per-commit `sha-<full-sha>` tags only. `nightly` moves through `nightly.yml` (section 4.2). |
 | archived `vX.Y.Z` branches | none | Frozen; they publish no live channel. |
 
-**Direction of flow (maintainer decision, 07.11.2026 11:19 CET).**
+**Direction of flow.**
 `current_dev` always wins over `master`:
 
 - `master` is always stale. `current_dev` runs ahead; `master` catches up
@@ -99,11 +99,6 @@ first-party image, moved together by one promotion.
   `current_dev`. The state that applied at the time of the release is
   preserved in an immutable `release/*` ref (write-protected when created,
   AG-REL-014).
-
-A search of `ci.sh` and the workflows on `current_dev` (`e223782d`) finds no
-step that overwrites `master` or creates a `release/*` ref: `release.yml`
-publishes tags, and the archived `vX.Y.Z` branches are the existing frozen
-refs.
 
 `schedule:` triggers run only from the workflow file on the default branch
 (AG-CI-018). `nightly.yml` therefore refreshes `nightly` on schedule only from
@@ -655,7 +650,7 @@ and reads its Docker health each round (`CHECK_INTERVAL`).
   `1`) on the Admin UI `/logs` page. Switch one service off: only its directory
   stops growing; the others and `LanCache-NG-services/` keep growing.
 - With the proxy switch off the proxy access log gets no new lines, and the
-  Admin UI statistics show no new traffic; the `/logs` page says so.
+  Admin UI statistics show no new traffic.
 - Silent log loss: when logs arrive but no file is written, the watchdog
   reports a finding (`log_writing`). Live check: make the log root unwritable
   for syslog-ng and confirm the finding. `setup.sh` pre-creates and chowns the
@@ -752,11 +747,6 @@ before (or has no baseline) and is unhealthy now.
 | Two jobs of one run computing two identities for one target and platform | `_ci_identity_compute` runs only in a planner scope and fails closed beside a given `CI_RUN_IDENTITIES`; every other reader goes through `_ci_identity_for` |
 
 ### 11.2 No durable check
-
-`.github/scripts/ci.bats` currently holds four tests (`base: uptime`,
-`base: ps auxwww`, `base: df -h`, `base: free -m`); a new test needs a
-maintainer ACK (AG-CODE-010). The classes below have no regression check; the
-named function or job is the fix, not a check that detects a recurrence.
 
 - Kea config render or migration drift; dnsmasq directive or template-key
   drift; a torn shared-config write; a missing stream-level client ACL on a
@@ -928,7 +918,7 @@ ticked.
 | --- | --- |
 | `bash .github/scripts/ci.sh validate` | the running-stack validation for the accepted stack candidate, inside the `build-tools` container (AG-VAL-016) |
 | `bash .github/scripts/ci.sh check all`, `check <name>` | the guards of the diff, repository and (with `PR_NUMBER`) pull request scope, or one named guard |
-| `bats .github/scripts/ci.bats` in the `build-tools` image | the regression suite (four tests) |
+| `bats .github/scripts/ci.bats` in the `build-tools` image | the regression suite |
 | `gh attestation verify "oci://<digest>" --owner wiki-mod` | provenance of one image digest |
 | Admin UI DHCP page (`POST /dhcp/check`) | the DHCP conflict and client probe |
 
