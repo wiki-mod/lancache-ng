@@ -245,6 +245,13 @@ jobs:
         env:
           PROJECT_AUTOMATION_PAT: ${{ secrets.PROJECT_AUTOMATION_PAT }}
         run: bash .github/scripts/ci.sh release-variable "${CI_RELEASE_TAG}"
+      # What: keep the release as release/<tag> branch.
+      # Why: AG-REL-014; the PAT reaches this step only.
+      # From: Issue #1683
+      - name: Create the release branch
+        env:
+          PROJECT_AUTOMATION_PAT: ${{ secrets.PROJECT_AUTOMATION_PAT }}
+        run: bash .github/scripts/ci.sh release-branch "${CI_RELEASE_TAG}"
 
   # What: attest the provenance of each released digest.
   # Why: §59: provenance names the exact digest, no tag.
