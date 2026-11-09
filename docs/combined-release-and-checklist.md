@@ -215,6 +215,7 @@ accepted digests under the new `sha-<full-sha>` tag; nothing is rebuilt. So a
 | `release-provenance` | one `actions/attest` per image digest named by `release-images` |
 | `release-sbom` | `release-sbom-stack` |
 | `cut-release-tag` | `cut-release-tag` (dispatch only) |
+| `publish-draft` | `release-draft publish` (dispatch only) |
 
 - Every push to a SOT `release_notes.draft_refs` ref (`current_dev`,
   `master`) runs the `ci.yml` job `release-draft` (`ci.sh release-draft`).
@@ -226,8 +227,12 @@ accepted digests under the new `sha-<full-sha>` tag; nothing is rebuilt. So a
   `- #NUMBER | TITLE`, merged since the last published release. The draft
   name and tag are the proposed version: `minor` when a PR carries a group
   with `increment: minor`, otherwise `patch`.
-- The maintainer publishes the draft. Publishing creates the tag and starts
-  `release.yml`.
+- The maintainer publishes the draft: in the GitHub release view, or with a
+  `release.yml` dispatch on `master` with `action: publish-draft`. The
+  dispatch refreshes the draft, publishes it with `RELEASE_DRAFTER_PAT` and
+  opens a discussion in the SOT `release_notes.discussion_category`; on any
+  other ref it fails (`CI-ERROR-RELEASE-0081`). Publishing creates the tag
+  and starts `release.yml`.
 - `release-publish` keeps a published release as it is and checks its
   prerelease state (AG-REL-014: CI never edits a published release). For a
   tag without a release it creates one with notes in the same layout.
@@ -439,7 +444,7 @@ no hand-written validation record; a run on another commit does not count.
 | --- | --- | --- |
 | `ci.yml` | `plan`, `build`, `cargo-audit`, `test`, `aggregate`, `assemble`, `validate`, `promote`, `close-linked-issues`, `release-draft`, `checks`, `pr-admin`, `result` | pull request, push to `current_dev` and `master`, new issue, dispatch |
 | `nightly.yml` | `platform`, `plan`, `build`, `aggregate`, `assemble`, `validate`, `cargo-audit`, `nightly`, `channel-check`, `scan`, `report` | schedule, dispatch |
-| `release.yml` | `resolve-build-tools`, `plan`, `validate`, `promote`, `release`, `release-provenance`, `release-sbom`, `cut-release-tag` | `v*` tag, dispatch |
+| `release.yml` | `resolve-build-tools`, `plan`, `validate`, `promote`, `release`, `release-provenance`, `release-sbom`, `cut-release-tag`, `publish-draft` | `v*` tag, dispatch |
 | `gc.yml` | `platform`, `gc`, `orphaned-branches` | schedule, dispatch |
 | `codeql.yml` | `impact`, `analyze` | pull request, push, schedule, dispatch |
 
