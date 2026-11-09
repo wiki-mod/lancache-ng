@@ -10423,12 +10423,17 @@ _ci_promote_move_all() {
     done <<< "${plan}"
 }
 
-# What: re-read the stack under the lock, then move it.
+# What: re-read the candidate under the lock, then move.
 # Why: a stack accepted meanwhile was never validated.
 # From: Issue #1683 | PR #1858
 _ci_promote_locked() {
     local channel="$1" cand="$2" now
-    if ! now="$(_ci_stack_candidate --with-toolchain)"; then
+    local -a reader=(_ci_stack_candidate --with-toolchain)
+    # What: $3.. name another candidate reader.
+    # Why: build-tools promote re-reads its own candidate.
+    # From: Issue #1683 | PR #2004
+    [ "$#" -lt 3 ] || reader=("${@:3}")
+    if ! now="$("${reader[@]}")"; then
         ci_log "[CI-ERROR-PROMOTE-0041]" "channel=\"${channel}\" reason=\"stack unreadable under the lock; blocking\""
         return 2
     fi
@@ -10581,6 +10586,15 @@ ci_cmd_promote() {
         return 2
     fi
     _ci_require_ghcr_auth || return "$?"
+    _ci_promote_apply "${channel}" "${cand}"
+}
+
+# What: move channel $1 to candidate $2 under the lock.
+# Why: stack and build-tools promote share one mover.
+# From: Issue #1683 | PR #2004
+_ci_promote_apply() {
+    local channel="$1" cand="$2" arc=0
+    shift 2
     _ci_promote_all_current "${channel}" "${cand}" || arc=$?
     if [ "${arc}" -eq 0 ]; then
         if ! _ci_promote_clear_mixed "${channel}"; then
@@ -10600,7 +10614,7 @@ ci_cmd_promote() {
     # Why: a failed move must never leak the promotion lock.
     # From: Issue #1683 | PR #1858
     local rc
-    if _ci_promote_locked "${channel}" "${cand}"; then rc=0; else rc=$?; fi
+    if _ci_promote_locked "${channel}" "${cand}" "$@"; then rc=0; else rc=$?; fi
     # What: rc 4 = channel mixed; keep the lock, marked.
     # Why: no install from a mixed channel until a rerun.
     # From: Issue #1683
@@ -15080,7 +15094,7 @@ _ci_matrix_doc() {
 # Why: jobs pin toolchain by digest; no cascade.
 # From: Issue #1683
 _ci_build_tools_resolve_image() {
-    local ref channel image digest
+    local ref channel image digest rc
     # What: checkout ref, else PR head, else event ref.
     # Why: nightly runs current_dev; a PR head was accepted.
     # From: Issue #1683 | PR #1858
@@ -15108,9 +15122,78 @@ _ci_build_tools_resolve_image() {
         ci_log "[CI-ERROR-BUILDTOOLS-0018]" "channel=\"${channel}\" reason=\"no published build-tools digest; FAIL CLOSED\""
         return 2
     fi
+    # What: the channel image must be ledger-ACCEPTED.
+    # Why: §26: the ledger records accepted digests.
+    # From: Issue #1683 | PR #2004
+    rc=0; _ci_build_tools_accepted "${image}@${digest}" "${image##*/}" || rc=$?
+    if [ "${rc}" -ne 0 ]; then
+        [ "${rc}" -eq 1 ] || return 2
+        ci_log "[CI-ERROR-BUILDTOOLS-0031]" "channel=\"${channel}\" digest=\"${digest}\" reason=\"channel image is no ledger-ACCEPTED build-tools; promote one (release.yml action promote-build-tools on the release ref); FAIL CLOSED\""
+        return 2
+    fi
     image="${image}@${digest}"
     _ci_step_output "[CI-ERROR-BUILDTOOLS-0023]" image "${image}" || return 2
     printf '%s\n' "${image}"
+}
+
+# What: 0 if each child of index $1 is ACCEPTED as $2.
+# Why: rc 1 not accepted, 2 unknown; one ledger read.
+# From: Issue #1683 | PR #2004
+_ci_build_tools_accepted() {
+    local ref="$1" target="$2" kids blob kv remote id svc plat st dig hit rc=0
+    kids="$(_ci_index_children "${ref}")" || return 2
+    [ -n "${kids}" ] || return 1
+    remote="$(_ci_git_remote)" || return 2
+    blob="$(_ci_ledger_blob "${remote}")" || rc=$?
+    [ "${rc}" -ne 1 ] || return 1
+    [ "${rc}" -eq 0 ] || return 2
+    while IFS= read -r kv; do
+        [ -n "${kv}" ] || continue
+        hit=0
+        while IFS=$'\t' read -r id svc plat st dig _; do
+            [ -n "${id}" ] || continue
+            if [ "${svc}" = "${target}" ] && [ "${plat}" = "${kv%%=*}" ] && [ "${st}" = ACCEPTED ] && [ "${dig}" = "${kv#*=}" ]; then
+                hit=1
+                break
+            fi
+        done <<< "${blob}"
+        [ "${hit}" -eq 1 ] || return 1
+    done <<< "${kids}"
+}
+
+# What: move the release channel to this tree's build-tools.
+# Why: plan needs an ACCEPTED build-tools on the channel.
+# From: Issue #1683 | PR #2004
+_ci_build_tools_promote() {
+    local ref="${GITHUB_REF:-}" rel channel tool plats p cand _ci_plan_ids=""
+    rel="$(_ci_release_ref)" || return 2
+    if [ "${ref}" != "${rel}" ]; then
+        ci_log "[CI-ERROR-BUILDTOOLS-0032]" "ref=\"${ref}\" release_ref=\"${rel}\" reason=\"build-tools promote runs on the release ref only\""
+        return 2
+    fi
+    channel="$(_ci_channels_where ref "${ref}")" || return 2
+    channel="${channel%%$'\n'*}"
+    if [ -z "${channel}" ]; then
+        ci_log "[CI-ERROR-BUILDTOOLS-0033]" "ref=\"${ref}\" reason=\"SOT release.channels maps no channel to the release ref\""
+        return 2
+    fi
+    tool="$(_ci_build_tools_image)" || return 2
+    tool="${tool##*/}"
+    # What: this call is the planner scope of the ids.
+    # Why: the candidate reads ids from the run record.
+    # From: Issue #1683 | PR #2004
+    plats="$(_ci_platforms "${tool}")" || return "$?"
+    while IFS= read -r p; do
+        [ -n "${p}" ] || continue
+        _ci_plan_record "${tool}" "${p}" || return "$?"
+    done <<< "${plats}"
+    cand="$(_ci_toolchain_candidate)" || return "$?"
+    if [ -z "${cand}" ]; then
+        ci_log "[CI-ERROR-BUILDTOOLS-0034]" "channel=\"${channel}\" reason=\"no ledger-ACCEPTED build-tools for this tree; a ci.yml run must build it first\""
+        return 2
+    fi
+    _ci_require_ghcr_auth || return "$?"
+    _ci_promote_apply "${channel}" "${cand}" _ci_toolchain_candidate
 }
 
 # What: the build-tools ref a job resolved; $1 its var.
@@ -15138,6 +15221,7 @@ ci_cmd_build_tools() {
         signature) _ci_build_tools_signature ;;
         image) _ci_build_tools_image ;;
         resolve-image) _ci_build_tools_resolve_image "${1:-}" ;;
+        promote) _ci_build_tools_promote ;;
         *)
             ci_log "[CI-ERROR-BUILDTOOLS-0003]" "sub=\"${sub}\" reason=\"unknown build-tools subcommand\""
             return 2
