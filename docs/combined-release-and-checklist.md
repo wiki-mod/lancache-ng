@@ -753,11 +753,6 @@ before (or has no baseline) and is unhealthy now.
 
 ### 11.2 No durable check
 
-`.github/scripts/ci.bats` currently holds four tests (`base: uptime`,
-`base: ps auxwww`, `base: df -h`, `base: free -m`); a new test needs a
-maintainer ACK (AG-CODE-010). The classes below have no regression check; the
-named function or job is the fix, not a check that detects a recurrence.
-
 - Kea config render or migration drift; dnsmasq directive or template-key
   drift; a torn shared-config write; a missing stream-level client ACL on a
   listener.
