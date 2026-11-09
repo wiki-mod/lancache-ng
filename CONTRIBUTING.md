@@ -134,7 +134,10 @@ Updating it is automatic and requires no manual collection step:
    `patch`. Groups, icons, labels and bumps live in
    `.github/yaml/build-manifest.yml` (`release_notes`,
    `release_notes_categories`).
-2. The maintainer edits the draft if needed and publishes it. Publishing
+2. The maintainer edits the draft if needed and publishes it: either in the
+   GitHub release view, or with a `release.yml` dispatch on `master` with
+   `action: publish-draft`, which refreshes the draft and publishes it with a
+   discussion in the SOT `release_notes.discussion_category`. Publishing
    creates the tag, which runs `.github/workflows/release.yml`;
    `ci.sh release-publish` keeps the published text and attaches the assets.
 3. For a stable `vX.Y.Z` tag, `ci.sh release-changelog` then adds the
