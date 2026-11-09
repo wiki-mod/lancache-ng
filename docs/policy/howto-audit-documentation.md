@@ -70,8 +70,9 @@ quotation or a paraphrase of a rule does not replace reading it.
 | 10 | Record the audit (section 11) | Commit message |
 
 Checks of step 9 (`bash .github/scripts/ci.sh check <name>`):
-`line-endings`, `language-policy`, `governance-guards`, `naming-consistency`,
-`proxy-cache-env-doc-drift`, `exit-evidence`; and `git diff --check`.
+`line-endings`, `language-policy`, `governance-guards`, `exit-evidence`;
+`ci.sh check ci-bats enable-naming_consistency enable-proxy_cache_env_doc_drift`;
+and `git diff --check`.
 
 ## 5. Gates
 

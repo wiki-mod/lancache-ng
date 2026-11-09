@@ -255,13 +255,12 @@ commands, not in the usage text: `compose`, `converge-reconcile` and
 
 ## Validation
 
-- `.github/scripts/ci.sh check all` runs 42 named checks (for example
-  `line-endings`, `comments`, `governance-guards`, `compose-config`,
-  `compose-healthchecks`, `proxy-nginx-policy`, `prod-state-wiring`,
-  `setup-update-safety`, `logging-matrix`, `vex-drift`, `cargo-audit`,
+- `.github/scripts/ci.sh check all` runs the named checks (for example
+  `line-endings`, `comments`, `governance-guards`, `cargo-audit`,
   `shellcheck`, `actionlint`).
 - `ci.sh validate` validates the accepted stack candidate end to end.
-- `.github/scripts/ci.bats` holds 4 tests.
+- `.github/scripts/ci.bats` holds the tests; each starts with its
+  `<name>_is_enabled` switch (`ci.sh check ci-bats enable-<name>`).
 - The repository has no `tests/` directory and no Rust test function under
   `services/`.
 

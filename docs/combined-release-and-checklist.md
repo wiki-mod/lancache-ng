@@ -133,8 +133,8 @@ SOT `base_images` block:
 - nginx, PowerDNS, syslog-ng, chrony, Kea and dnsmasq are apk packages inside
   the first-party images, not external images. The per-image SBOM lists them.
 - A compose image outside the `${LANCACHE_*}` first-party references has to
-  equal a SOT `base_images` value. `ci.sh check sot-external-images`
-  reports every other value with `CI-ERROR-CHECK-0014`.
+  equal a SOT `base_images` value. The `ci.bats` test `sot_external_images`
+  (off by default) reports every other value with `CI-ERROR-CHECK-0014`.
 - No workflow step runs in a foreign container. A job runs in its own
   `build-tools` image, or, on a native host, through exactly one `docker run`
   of that image (`ci.sh build-tools-run`). `ci.sh check all` fails a
@@ -358,8 +358,8 @@ with string values and `paths` as a list of strings. Any other key, status or
 shape fails closed (`CI-ERROR-RELEASE-0035`).
 
 `vex.openvex.json` is not committed. It is derived entirely from
-`.trivyignore.yaml` and generated at release time. `ci.sh check vex-drift` runs
-the generator on the checked-out file and requires one statement per entry.
+`.trivyignore.yaml` and generated at release time. The `ci.bats` test
+`vex_drift` (off by default) runs the generator on the checked-out file and requires one statement per entry.
 
 ---
 
@@ -474,10 +474,10 @@ no hand-written validation record; a run on another commit does not count.
 | Subsystem | Gate | Fails when |
 | --- | --- | --- |
 | DNS | `ci.sh validate` (`_ci_validate_dns`: a real `dig`, the HTTP and HTTPS answers differ) | no answer, or identical answers in both modes |
-| Proxy cache | `ci.sh validate` (`_ci_validate_proxy`: a real MISS, then a HIT); `check proxy-cache-env-doc-drift` | the second request is not a HIT, a documented `CACHE_*` default differs from the shipped one |
-| Stack bring-up | `ci.sh validate` waits for every service it starts and ships state and logs of a failing one; `check compose-config`; `check compose-healthchecks` | a service is unhealthy or restarting, a compose file does not render, or a service has no healthcheck |
-| `setup.sh` | `check setup-update-safety`, `check prod-state-wiring`, `check prebuilt-prod`, `check image-channel-resolution` | a guard reports a finding |
-| Images and supply chain | `scan-stack` scans the published digest; `check vex-drift`; `check mutable-refs`; `check sot-external-images`; `check cargo-audit` | `.trivyignore.yaml` does not yield a complete OpenVEX document, a reference is mutable, or a dependency is vulnerable or yanked |
+| Proxy cache | `ci.sh validate` (`_ci_validate_proxy`: a real MISS, then a HIT) | the second request is not a HIT |
+| Stack bring-up | `ci.sh validate` waits for every service it starts and ships state and logs of a failing one; `ci.bats` tests `compose_config` and `compose_healthchecks` | a service is unhealthy or restarting, a compose file does not render, or a service has no healthcheck |
+| `setup.sh` | `ci.bats` tests `prebuilt_prod` and `image_channel_resolution` | a test reports a finding |
+| Images and supply chain | `scan-stack` scans the published digest; `check mutable-refs`; `check cargo-audit` | a reference is mutable, or a dependency is vulnerable or yanked |
 | Channels and release | `promote-ref` supersede check | a moved branch tip is promoted |
 | Rust services | `test-stack` runs `cargo fmt --check`, `cargo clippy -- -D warnings` and `cargo test` per crate only when enabled; off by default (AG-VAL-008); `cargo check` is a manual developer step | a Rust check fails when enabled |
 | Repository guards | `ci.sh check all` (guards of the diff, repo and, with `PR_NUMBER` set, pull request scope) | a guard reports a finding |
@@ -744,10 +744,8 @@ before (or has no baseline) and is unhealthy now.
 | Failure class | Durable check |
 | --- | --- |
 | DNS split routing lost (HTTP and HTTPS answer alike) | `_ci_validate_dns` |
-| Documented `CACHE_*` default drifting from the shipped one | `check proxy-cache-env-doc-drift` |
 | Cache not serving a HIT | `_ci_validate_proxy` |
 | A service crash-looping after `docker compose up` exits 0 | the health and stability wait of `ci.sh validate` for every service it starts |
-| A `.trivyignore.yaml` entry not yielding a complete OpenVEX statement | `check vex-drift` |
 | Live pipe into an early-exit consumer under `pipefail` (exit 141); `$?` read from an `if` | `check shell-guards` |
 | Review chronology, stale line references, or a comment, heredoc or YAML text block breaking the What/Why/From contract | `check comments` |
 | A bats `[ ] && [ ]` check that cannot fail | `check bats-and-chain` |
@@ -759,7 +757,10 @@ before (or has no baseline) and is unhealthy now.
 
 - `ci.bats` tests that are off by default (`<name>_is_enabled=false`; run
   with `ci.sh check ci-bats enable-all` or `enable-<name>`):
-  `proxy_nginx_policy`, `proxy_cert_volume`, and against a running stack
+  `proxy_nginx_policy`, `proxy_cert_volume`, `dockerfiles`, `logging_matrix`,
+  `prod_state_wiring`, `sot_external_images`, `setup_update_safety`,
+  `cargo_profile_tuning`, `vex_drift`, `proxy_cache_env_doc_drift`,
+  `naming_consistency`, `version_drift`, and against a running stack
   `proxy_stream_map`, `https_mitm`, `https_dispatch_map`, `ui_dns`,
   `dns_rollback`, `kea_rollback`, `secondary_identity`.
 - Kea config render or migration drift; dnsmasq directive or template-key
