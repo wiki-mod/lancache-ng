@@ -254,7 +254,7 @@ jobs:
     needs: [resolve-build-tools, release]
     runs-on: ${{ needs.resolve-build-tools.outputs.runner }}
     timeout-minutes: ${{ fromJSON(needs.resolve-build-tools.outputs.timeouts)['release-provenance'] }}
-    # What: the attestation needs OIDC and packages.
+    # What: OIDC, packages, attestations, storage record.
     # Why: least privilege; only this job gets them.
     # From: Issue #1683 | PR #1912
     permissions:
@@ -262,6 +262,7 @@ jobs:
       packages: write
       id-token: write
       attestations: write
+      artifact-metadata: write
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.release.outputs.images) }}

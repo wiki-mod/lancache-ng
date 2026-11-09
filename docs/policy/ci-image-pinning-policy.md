@@ -57,8 +57,7 @@ inside the `build-tools` container (AG-VAL-016):
 ```bash
 bash .github/scripts/ci.sh check mutable-refs            # image references the SOT does not own
 bash .github/scripts/ci.sh check action-node-versions    # action references and Node runtime
-bash .github/scripts/ci.sh check sot-external-images  # compose images against SOT base_images
-bash .github/scripts/ci.sh check version-drift           # external_versions consumers
+bash .github/scripts/ci.sh check ci-bats enable-sot_external_images enable-version_drift  # compose images against SOT base_images; external_versions consumers
 ```
 
 ## Drift and the build identity
