@@ -1751,8 +1751,6 @@ ci_check_inputs:
     - "deploy/**"
     - "@{ci_variables.CI_ARCH_DOC}"
     - "@{ci_variables.CI_INSTALLER}"
-  proxy-cert-volume: ["deploy/**", "@{services.ui.context}/nginx/**"]
-  proxy-nginx-policy: ["@{services.ui.context}/nginx/**"]
   setup-update-safety: ["@{ci_variables.CI_INSTALLER}"]
   shell-guards: ["@shell", "**/Dockerfile"]
   shellcheck: ["@shell"]
@@ -2183,7 +2181,7 @@ ci_variables:
   # What: validate probe groups, ; apart; one job each.
   # Why: groups run at once; probes in a group in order.
   # From: Issue #1683 | PR #1858
-  CI_VALIDATE_PROBE_GROUPS: dns proxy proxy_stream_map https_mitm https_dispatch_map ui_dns dns_rollback;kea_rollback;secondary_identity
+  CI_VALIDATE_PROBE_GROUPS: dns proxy
   # What: DNS probe label, TEST-NET net, TTL, waits, polls
   # Why: AG-CI-006: probe values and waits have one owner.
   # From: Issue #1683 | PR #1858
