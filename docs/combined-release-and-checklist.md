@@ -655,7 +655,7 @@ and reads its Docker health each round (`CHECK_INTERVAL`).
   `1`) on the Admin UI `/logs` page. Switch one service off: only its directory
   stops growing; the others and `LanCache-NG-services/` keep growing.
 - With the proxy switch off the proxy access log gets no new lines, and the
-  Admin UI statistics show no new traffic; the `/logs` page says so.
+  Admin UI statistics show no new traffic.
 - Silent log loss: when logs arrive but no file is written, the watchdog
   reports a finding (`log_writing`). Live check: make the log root unwritable
   for syslog-ng and confirm the finding. `setup.sh` pre-creates and chowns the
