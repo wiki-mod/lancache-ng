@@ -216,8 +216,10 @@ accepted digests under the new `sha-<full-sha>` tag; nothing is rebuilt. So a
 | `release-sbom` | `release-sbom-stack` |
 | `cut-release-tag` | `cut-release-tag` (dispatch only) |
 
-- Every push to the release ref runs the `ci.yml` job `release-draft`
-  (`ci.sh release-draft`). It keeps one draft GitHub release in the
+- Every push to a SOT `release_notes.draft_refs` ref (`current_dev`,
+  `master`) runs the `ci.yml` job `release-draft` (`ci.sh release-draft`).
+  The last push wins and sets the draft's target branch. It keeps one draft
+  GitHub release in the
   release-drafter layout from the SOT `release_notes` and
   `release_notes_categories`: `## Changes`, PRs without a group label, then
   one `## <icon> <title>` group per label group, each PR as
