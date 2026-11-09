@@ -5722,18 +5722,18 @@ _ci_trivyignore_stale() {
     _ci_status_issue_kind trivy-ignore-stale "${outcome}" "${stale:+path=${ignore} stale=${stale# }}"
 }
 
-# What: load the history a diff needs, plus refs named
+# What: load the history a diff needs, once per job.
 # Why: workflows check out one commit; ci.sh owns the diff.
 # From: Issue #1683 | PR #1858
 _ci_diff_history() {
-    local shallow have="" remote head memo="" seen
-    local -a deep=() need=("$@")
+    local shallow have="" remote head memo seen
+    local -a deep=() need=()
     head="$(_ci_head_commit)" || return 2
-    # What: a call without refs loads history once per job.
+    # What: the history loads once per job and commit.
     # Why: A3: plan fetched HEAD again after changed-files.
     # From: Issue #1683 | PR #1858
-    [ "$#" -gt 0 ] || memo="diff-history-${head}"
-    if [ -n "${memo}" ] && seen="$(_ci_job_memo_get "${memo}")" && [ "${seen}" = "${head}" ]; then
+    memo="diff-history-${head}"
+    if seen="$(_ci_job_memo_get "${memo}")" && [ "${seen}" = "${head}" ]; then
         return 0
     fi
     shallow="$(cd -- "${CI_REPO_ROOT}" && _ci_capture 0 git rev-parse --is-shallow-repository)" || return 2
@@ -5748,7 +5748,7 @@ _ci_diff_history() {
     # Why: blobs load only when a check needs them.
     # From: Issue #1683 | PR #1858
     (cd -- "${CI_REPO_ROOT}" && _ci_retry git-fetch git fetch --no-tags --filter=blob:none "${deep[@]}" "${remote}" "${head}" "${need[@]}") >&2 || return 2
-    [ -z "${memo}" ] || _ci_job_memo_put "${memo}" "${head}"
+    _ci_job_memo_put "${memo}" "${head}"
 }
 
 # What: This run's base and head diff refs, or empty.
@@ -10827,7 +10827,8 @@ _ci_release_categories() {
     keys="$(_ci_block_keys release_notes_categories)" || return 2
     while IFS= read -r key; do
         [ -n "${key}" ] || continue
-        _ci_block_entry_fields release_notes_categories "${key}" title title labels labels increment inc || return 2
+        _ci_block_entry_fields release_notes_categories "${key}" title title increment inc || return 2
+        labels="$(_ci_block_entry_list release_notes_categories "${key}" labels)" || return 2
         if [ -z "${title}" ] || [ -z "${labels}" ] || [ -z "${inc}" ]; then
             ci_log "[CI-ERROR-RELEASE-0030]" "category=\"${key}\" reason=\"SOT release_notes_categories entry needs title, labels and increment\""
             return 2
