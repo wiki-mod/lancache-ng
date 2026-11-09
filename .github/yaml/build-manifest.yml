@@ -1691,7 +1691,9 @@ ci_job_timeouts:
   orphaned-branches: 15
   plan: 30
   promote: 30
+  publish-draft: 15
   release: 30
+  release-draft: 15
   release-provenance: 30
   release-sbom: 60
   scan: 60
@@ -1986,34 +1988,60 @@ pr_labels:
   github_actions: ["@{ci_variables.CI_WORKFLOW_DIR}/**"]
   documentation: ["docs/**", "**/*.md"]
 
-# What: Release notes: PR section, skip label, fallback.
-# Why: one owner for release-publish and CHANGELOG.md.
-# From: Issue #894 | PR #1858
+# What: release notes in the release-drafter v7 layout.
+# Why: the maintainer keeps the known draft and its format.
+# From: Issue #1683 | PR #2004
 release_notes:
-  pr_section: Changelog
+  header: "## Changes"
+  category_template: "## $TITLE"
+  change_template: "- #$NUMBER | $TITLE"
+  title_escapes: '\<*_&'
+  no_changes: "* No changes"
+  name_template: "v$RESOLVED_VERSION"
   skip_label: skip-changelog
-  other_title: Other
+  fallback_increment: patch
+  # What: PRs read per commit; recent merged PRs rechecked.
+  # Why: release-drafter limits 5 and 5; same PR set.
+  # From: Issue #1683 | PR #2004
+  pull_request_limit: 5
+  recent_merged_lookback: 5
+  # What: pushes to these refs refresh the one draft.
+  # Why: release-drafter ran on both; last push wins.
+  # From: Issue #1683 | PR #2004
+  draft_refs: [refs/heads/current_dev, refs/heads/master]
+  # What: discussion category a published release opens.
+  # Why: maintainer: every release gets its discussion.
+  # From: Issue #1683 | PR #2004
+  discussion_category: Announcements
   # What: PR label that marks a deliberate CHANGELOG.md edit
   # Why: the release flow owns the file; a label opts in
   # From: Issue #1683 | PR #1858
   changelog_edit_label: release
 
-# What: Release-notes groups: PR label -> heading.
-# Why: grouping is data; the first matching label wins.
-# From: Issue #894 | PR #1858
+# What: notes groups in order: icon title, labels, bump.
+# Why: a PR shows in every group whose label it carries.
+# From: Issue #1683 | PR #2004
 release_notes_categories:
-  bug:
-    title: Fixed
-  enhancement:
-    title: Added
+  fixed:
+    title: "🐛 Fixed"
+    labels: [bug]
+    increment: patch
+  added:
+    title: "🚀 Added"
+    labels: [enhancement]
+    increment: minor
   documentation:
-    title: Documentation
+    title: "📚 Documentation"
+    labels: [documentation]
+    increment: patch
   dependencies:
-    title: Dependencies
+    title: "🔧 Dependencies"
+    labels: [dependencies]
+    increment: patch
   chore:
-    title: Chore / CI
-  ci:
-    title: Chore / CI
+    title: "🧰 Chore / CI"
+    labels: [chore, ci]
+    increment: patch
 
 # What: CI runtime variables with their fallback defaults.
 # Why: No hardcode, like CARGO_BUILD_JOBS (AG-CI-006).
