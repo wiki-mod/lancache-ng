@@ -215,6 +215,7 @@ accepted digests under the new `sha-<full-sha>` tag; nothing is rebuilt. So a
 | `release-provenance` | one `actions/attest` per image digest named by `release-images` |
 | `release-sbom` | `release-sbom-stack` |
 | `cut-release-tag` | `cut-release-tag` (dispatch only) |
+| `promote-build-tools` | `build-tools promote` (dispatch only) |
 | `publish-draft` | `release-draft publish` (dispatch only) |
 
 - Every push to a SOT `release_notes.draft_refs` ref (`current_dev`,
@@ -444,7 +445,7 @@ no hand-written validation record; a run on another commit does not count.
 | --- | --- | --- |
 | `ci.yml` | `plan`, `build`, `cargo-audit`, `test`, `aggregate`, `assemble`, `validate`, `promote`, `close-linked-issues`, `release-draft`, `checks`, `pr-admin`, `result` | pull request, push to `current_dev` and `master`, new issue, dispatch |
 | `nightly.yml` | `platform`, `plan`, `build`, `aggregate`, `assemble`, `validate`, `cargo-audit`, `nightly`, `channel-check`, `scan`, `report` | schedule, dispatch |
-| `release.yml` | `resolve-build-tools`, `plan`, `validate`, `promote`, `release`, `release-provenance`, `release-sbom`, `cut-release-tag`, `publish-draft` | `v*` tag, dispatch |
+| `release.yml` | `resolve-build-tools`, `plan`, `validate`, `promote`, `release`, `release-provenance`, `release-sbom`, `cut-release-tag`, `publish-draft`, `promote-build-tools` | `v*` tag, dispatch |
 | `gc.yml` | `platform`, `gc`, `orphaned-branches` | schedule, dispatch |
 | `codeql.yml` | `impact`, `analyze` | pull request, push, schedule, dispatch |
 

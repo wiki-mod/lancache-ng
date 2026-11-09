@@ -324,7 +324,7 @@ Treat host-local tools (`cargo`, `rustc`, `rustfmt`, `clippy`, `shellcheck`, `ac
 
 To run checks with the build-tools container:
 
-1. Resolve the published build-tools image to its digest: `bash .github/scripts/ci.sh build-tools resolve-image` (needs `GITHUB_ACTOR` and `GHCR_TOKEN`; it reads the channel of the branch in `GITHUB_BASE_REF` or `GITHUB_REF_NAME`, else the SOT `release.default_channel`).
+1. Resolve the published build-tools image to its digest: `bash .github/scripts/ci.sh build-tools resolve-image` (needs `GITHUB_ACTOR` and `GHCR_TOKEN`; it reads the channel of the branch in `GITHUB_BASE_REF` or `GITHUB_REF_NAME`, else the SOT `release.default_channel`, and accepts the channel image only when every platform image is `ACCEPTED` for `build-tools` in the acceptance ledger; otherwise it fails with `CI-ERROR-BUILDTOOLS-0031`).
 2. Run checks inside the container with the standard pattern:
 
 ```bash
@@ -423,6 +423,9 @@ Required rules:
   resolved to a digest (`ci.sh build-tools resolve-image`); only that first job
   and the jobs that must run when it failed name the mutable
   `build-tools:nightly` channel
+- a `release.yml` dispatch on `master` with `action: promote-build-tools`
+  moves the release channel (`build-tools:latest`) to the ledger-`ACCEPTED`
+  build-tools image of the dispatched tree; it never builds
 - every first-party compose image is one `LANCACHE_IMAGE_REF_<NAME>` value,
   which `setup.sh` writes as `<image>@<digest>`
 - package, workflow, release-note, and setup changes must pass

@@ -1691,6 +1691,7 @@ ci_job_timeouts:
   orphaned-branches: 15
   plan: 30
   promote: 30
+  promote-build-tools: 15
   publish-draft: 15
   release: 30
   release-draft: 15
@@ -2615,7 +2616,7 @@ pr_policy:
   # Why: cross-cutting areas own no image of their own.
   # From: Issue #1683 | PR #1858
   title_scopes_extra: [setup, ci, governance, docs, scripts, tests]
-  project_number: 6
+  project_number: 7
   # What: PR milestone unless one closed issue has one.
   # Why: AG-GH-008 wants a milestone when the PR opens.
   # From: Issue #1683 | PR #1984
