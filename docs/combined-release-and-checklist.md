@@ -848,9 +848,10 @@ Not verified against the code or a live stack:
 - the `setup.sh update` flow of sections 10.11 and 10.12;
 - the pass criteria of sections 10.5, 10.8 and 10.9.
 
-### 11.5 Failure classes from Part B
+### 11.5 Failure classes from the release run
 
-Part B scenario is the recurrence check. One row per failure class.
+The scenario (Part B or 12.1) is the recurrence check. One row per
+failure class.
 
 | Failure class | Scenario | Fix |
 | --- | --- | --- |
@@ -864,6 +865,8 @@ Part B scenario is the recurrence check. One row per failure class.
 | `log_writing` counter without `dst.file` rows is always 0 | 10.8 | `49f15bd7` |
 | `DHCP_PROXY_PXE_*` missing in the ui environment: no PXE offer | 10.3 | `3a6be729` |
 | dnsmasq sub-mode switch restarts the dhcp container | 10.3 | `4aafe168` |
+| file check set without PR labels: changelog rule always fails | 12.1 | `cc5748c8` |
+| PR into master reads build-tools `latest`: plan fails | 12.1 | `da958b3d` |
 
 ---
 
