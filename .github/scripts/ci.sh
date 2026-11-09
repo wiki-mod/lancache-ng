@@ -14953,7 +14953,10 @@ _ci_build_tools_resolve_image() {
     # What: a channel-checkout ref wins over the event ref.
     # Why: nightly starts on master but runs current_dev.
     # From: Issue #1683 | PR #1858
-    ref="${CI_SOURCE_REF:-${GITHUB_BASE_REF:-${GITHUB_REF_NAME:-}}}"
+    # What: a PR reads the toolchain of its head branch.
+    # Why: the head content was accepted with that image.
+    # From: Issue #1683
+    ref="${CI_SOURCE_REF:-${GITHUB_HEAD_REF:-${GITHUB_REF_NAME:-}}}"
     # What: a release tag run reads the release branch.
     # Why: its ids must match the run that accepted them.
     # From: Issue #1683 | PR #1858
