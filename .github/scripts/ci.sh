@@ -11053,6 +11053,10 @@ ci_cmd_release_changelog() {
     [ "${rc}" -eq 0 ] || return 2
     if [ "${changes}" = "${changes%%$'\n'*}" ]; then changes=""; else changes="${changes#*$'\n'}"; fi
     changes="${changes//$'\r'/}"
+    # What: release body headings move one level down.
+    # Why: they belong under the "## [X.Y.Z]" entry.
+    # From: Issue #1683
+    changes="$(_ci_capture 0 sed -E 's/^(#+) /#\1 /' <<< "${changes}")" || return 2
     remote="$(_ci_git_remote)" || return 2
     _ci_retry git-fetch git fetch --no-tags "${remote}" "+refs/heads/${branch}:refs/remotes/${remote}/${branch}" >&2 || return 2
     _ci_git_run checkout -B ci-release-changelog "${remote}/${branch}" >&2 || return 2
