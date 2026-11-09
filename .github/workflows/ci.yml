@@ -464,7 +464,7 @@ jobs:
         run: bash .github/scripts/ci.sh close-linked-issues
 
   # What: keep the one draft release on the release ref.
-  # Why: the maintainer publishes it; release-drafter layout.
+  # Why: maintainer publishes it; release-drafter layout.
   # From: Issue #1683 | PR #2004
   release-draft:
     name: release-draft
