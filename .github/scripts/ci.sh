@@ -99,17 +99,10 @@ declare -gA CI_CHECKS=(
     [ci-bats]="diff _ci_check_ci_bats"
     [governance-guards]="diff _ci_check_governance_guards" [changelog-direct-edit]="diff _ci_check_changelog_direct_edit"
     [action-node-versions]="repo _ci_check_action_node_versions" [action-majors]="job _ci_check_action_majors"
-    [naming-consistency]="repo _ci_check_naming_consistency" [workflow-line-limit]="repo _ci_check_workflow_line_limit"
-    [sot-external-images]="repo _ci_check_sot_external_images" [compose-healthchecks]="repo _ci_check_compose_healthchecks"
-    [proxy-cache-env-doc-drift]="repo _ci_check_proxy_cache_env_doc_drift" [prebuilt-prod]="repo _ci_check_prebuilt_prod"
-    [prod-state-wiring]="repo _ci_check_prod_state_wiring" [compose-config]="repo _ci_check_compose_config"
-    [setup-update-safety]="repo _ci_check_setup_update_safety" [image-channel-resolution]="repo _ci_check_image_channel_resolution"
-    [vex-drift]="repo _ci_check_vex_drift" [logging-matrix]="repo _ci_check_logging_matrix"
-    [dockerfiles]="repo _ci_check_dockerfiles"
+    [workflow-line-limit]="repo _ci_check_workflow_line_limit"
     [sot-identity-inputs]="repo _ci_check_sot_identity_inputs" [workflow-ci-variables]="repo _ci_check_workflow_ci_variables"
-    [workflow-job-settings]="repo _ci_check_workflow_job_settings" [cargo-profile-tuning]="repo _ci_check_cargo_profile_tuning"
+    [workflow-job-settings]="repo _ci_check_workflow_job_settings"
     [codeql-coverage]="repo _ci_check_codeql_coverage"
-    [version-drift]="repo _ci_version_release"
     [pr-title]="job _ci_check_pr_title" [pr-template]="job _ci_check_pr_template" [pr-tracking-metadata]="job _ci_check_pr_tracking_metadata"
     [cargo-audit]="job _ci_check_cargo_audit" [shellcheck]="diff _ci_check_shellcheck"
     [actionlint]="repo _ci_check_actionlint" [orphaned-branches]="job _ci_check_orphaned_branches"
@@ -14493,13 +14486,6 @@ _ci_release_value() {
     printf '%s\n' "${want}"
 }
 
-# What: one string key of a [workspace.package] table.
-# Why: verify reads version and license the same way.
-# From: Issue #1683 | PR #1858
-_ci_cargo_ws_value() {
-    _ci_capture 0 env K="$2" yq -p toml -oy '.workspace.package[strenv(K)]' "$1"
-}
-
 # What: set 3 vars: license, edition, toml.
 # Why: sync and verify read the same SOT values once.
 # From: Issue #1683 | PR #1912
@@ -14551,58 +14537,6 @@ _ci_version_release_sync() {
     [ "${out}" = unchanged ] || wrote=1
     rm -f "${tmp}"
     printf 'sync=cargo-workspace changed=%s\n' "${wrote}"
-}
-
-# What: Cargo has no version; license, edition from SOT.
-# Why: AG-SEC-004: PROJECT_RELEASE_VERSION owns it.
-# From: Issue #1683 | PR #1858
-_ci_version_release() {
-    local lic ed got cargo members m mf k rc=0
-    _ci_version_inputs lic ed cargo || return 2
-    got="$(_ci_cargo_ws_value "${cargo}" version)" || return 2
-    if [ "${got}" != null ]; then
-        ci_log "[CI-ERROR-VERSION-0021]" "path=\"${cargo}\" got=\"${got}\" reason=\"workspace.package.version must be absent; the repo variable PROJECT_RELEASE_VERSION owns it\""
-        rc=1
-    fi
-    got="$(_ci_cargo_ws_value "${cargo}" license)" || return 2
-    if [ "${got}" != "${lic}" ]; then
-        ci_log "[CI-ERROR-VERSION-0028]" "path=\"${cargo}\" got=\"${got}\" want=\"${lic}\" reason=\"workspace.package.license is not SOT release.license\""
-        rc=1
-    fi
-    got="$(_ci_cargo_ws_value "${cargo}" edition)" || return 2
-    if [ "${got}" != "${ed}" ]; then
-        ci_log "[CI-ERROR-VERSION-0031]" "path=\"${cargo}\" got=\"${got}\" want=\"${ed}\" reason=\"workspace.package.edition is not SOT release.rust_edition\""
-        rc=1
-    fi
-    members="$(_ci_cargo_members "${cargo}")" || return 2
-    while IFS= read -r m; do
-        [ -n "${m}" ] || continue
-        mf="$(_ci_repo_path CI_CARGO_MANIFEST "${CI_REPO_ROOT:-.}/${m}")" || return 2
-        local vrc=0
-        _ci_file_match "[CI-ERROR-VERSION-0033]" "member=\"${m}\" key=\"version\"" "${mf}" "^version([.]workspace)? *=" || vrc=$?
-        case "${vrc}" in
-            0)
-                ci_log "[CI-ERROR-VERSION-0032]" "member=\"${m}\" key=\"version\" reason=\"member sets a version; PROJECT_RELEASE_VERSION owns it\""
-                rc=1
-                ;;
-            1) ;;
-            *) return 2 ;;
-        esac
-        for k in edition license; do
-            local mrc=0
-            _ci_file_match "[CI-ERROR-VERSION-0029]" "member=\"${m}\" key=\"${k}\"" "${mf}" "^${k}\.workspace *= *true$" || mrc=$?
-            case "${mrc}" in
-                0) ;;
-                1)
-                    ci_log "[CI-ERROR-VERSION-0022]" "member=\"${m}\" key=\"${k}\" reason=\"member owns its ${k}; use ${k}.workspace = true\""
-                    rc=1
-                    ;;
-                *) return 2 ;;
-            esac
-        done
-    done <<< "${members}"
-    [ "${rc}" -eq 0 ] && printf 'cargo-workspace=clean version=absent\n'
-    return "${rc}"
 }
 
 # What: version sync writes the SOT version into copies.
@@ -17605,8 +17539,9 @@ _ci_check_ci_bats() {
     # What: enable-all or enable-<name> turns tests on.
     # Why: a test runs only with <name>_is_enabled=true.
     # From: Issue #1683
-    names="$(_ci_capture 1 grep -o -E '[a-z0-9_]+_is_enabled:-false' "${suite}")" || return 2
+    names="$(_ci_capture 1 grep -o -E '[a-z0-9_]+_is_enabled:-(false|true)' "${suite}")" || return 2
     names="${names//_is_enabled:-false/}"
+    names="${names//_is_enabled:-true/}"
     for a in "$@"; do
         case "${a}" in
             enable-all)
@@ -17625,10 +17560,10 @@ _ci_check_ci_bats() {
             *) files+=("${a}") ;;
         esac
     done
-    # What: a set repo, stack project and overrides pass on.
-    # Why: enabled tests render Compose and probe the stack.
+    # What: set repo, server URL and stack values pass on.
+    # Why: tests render Compose, write VEX, probe the stack.
     # From: Issue #1683
-    for n in GITHUB_REPOSITORY CI_VALIDATE_PROJECT CI_VALIDATE_NET_OVERRIDE CI_VALIDATE_PIN_OVERRIDE; do
+    for n in GITHUB_REPOSITORY GITHUB_SERVER_URL CI_VALIDATE_PROJECT CI_VALIDATE_NET_OVERRIDE CI_VALIDATE_PIN_OVERRIDE; do
         [ -z "${!n:-}" ] || enable+=("${n}=${!n}")
     done
     set -- "${files[@]}"
@@ -17794,73 +17729,6 @@ _ci_check_pr_title() {
     fi
     ci_error "[CI-ERROR-CHECK-0087]" "reason=\"PR title convention\"" "$(printf '%s\n' "${errs[@]}")"
     return 1
-}
-
-# What: the compose files of a dir, one per line, sorted.
-# Why: one finder for the checks that read compose with yq.
-# From: Issue #1683 | PR #1858
-_ci_compose_dir_files() {
-    local out
-    out="$(_ci_capture 0 find "$1" -type f \( -name '*.yml' -o -name '*.yaml' \))" || return 2
-    [ -z "${out}" ] || _ci_capture 0 sort <<< "${out}"
-}
-
-# What: an external deploy image must be a SOT base image.
-# Why: one owner per external image; no copy elsewhere.
-# From: Issue #1683
-_ci_check_sot_external_images() {
-    local -a dirs=("$@")
-    local d img k allowed=" " dep
-    if [ "${#dirs[@]}" -eq 0 ]; then
-        dep="$(_ci_compose_path)" || return 2
-        dirs=("${dep%/*}")
-    fi
-    local -a viol=()
-    # What: the exact SOT base image values.
-    # Why: compose must match them; other values are drift.
-    # From: Issue #1683 | PR #1858
-    local keys val
-    keys="$(_ci_block_keys base_images all)" || return 2
-    for k in ${keys}; do
-        val="$(_ci_block_entry_field base_images "" "${k}")" || return 2
-        allowed+="${val} "
-    done
-    for d in "${dirs[@]}"; do
-        if [ ! -d "${d}" ]; then
-            viol+=("${d}: compose dir missing")
-            continue
-        fi
-        local files f produced
-        files="$(_ci_compose_dir_files "${d}")" || return 2
-        if [ -z "${files}" ]; then
-            viol+=("${d}: compose dir holds no compose file")
-            continue
-        fi
-        while IFS= read -r f; do
-            # What: the image: of every service, read by yq.
-            # Why: yq owns YAML quoting and comments.
-            # From: Issue #1683 | PR #1858
-            produced="$(_ci_run "[CI-ERROR-CHECK-0200]" "file=\"${f}\" reason=\"compose images not read\"" \
-                yq --yaml-fix-merge-anchor-to-spec=true -r '.services[]?.image | select(tag == "!!str")' "${f}")" || return 2
-            while IFS= read -r img; do
-                # What: only ${LANCACHE_*} own images skip.
-                # Why: any literal host (ghcr too) is SOT.
-                # From: Issue #1683 | PR #1858
-                case "${img}" in
-                    *"\${LANCACHE"*|'') continue ;;
-                esac
-                case "${allowed}" in
-                    *" ${img} "*) ;;
-                    *) viol+=("${f}: external image is not a SOT base image: ${img}") ;;
-                esac
-            done <<<"${produced}"
-        done <<<"${files}"
-    done
-    if [ "${#viol[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0014]" "reason=\"external image not in SOT\"" "$(printf '%s\n' "${viol[@]}")"
-        return 1
-    fi
-    printf 'sot-external-images=clean\n'
 }
 
 # What: Print the heading count, then the section lines.
@@ -18939,166 +18807,6 @@ _ci_check_governance_guards() {
     printf 'governance-guards=clean\n'
 }
 
-# What: add each text line to array $1 as "<$2>: <line>".
-# Why: checks list findings per file the same way.
-# From: Issue #1683 | PR #1912
-_ci_viol_lines() {
-    local -n _vl_viol="$1"
-    local _vl_line
-    while IFS= read -r _vl_line; do
-        [ -z "${_vl_line}" ] || _vl_viol+=("$2: ${_vl_line}")
-    done <<< "$3"
-}
-
-# What: container names share one prefix + service name.
-# Why: operators find a container by its service name.
-# From: Issue #1683 | PR #1858
-_ci_check_naming_consistency() {
-    local root="${1:-${CI_REPO_ROOT}}" dep
-    dep="$(_ci_compose_path "${root}")" || return 2
-    local -a compose_files=("${dep}")
-    local -a viol=()
-    local cf cfg line
-
-    for cf in "${compose_files[@]}"; do
-        if [ ! -f "${cf}" ]; then
-            viol+=("${cf}: compose file missing")
-            continue
-        fi
-        cfg="$(_ci_compose_json "${cf}")" || return 2
-        # What: prefix is the project name in any case.
-        # Why: compose name: owns the name; one spelling.
-        # From: Issue #1683 | PR #1912
-        line="$(_ci_capture 0 jq -r "$(cat <<'PROG'
-.name as $p
-            | [.services | to_entries[] | {s: .key, c: (.value.container_name // "")}] as $all
-            | ($all | map(select(.c == "")) | map("service \(.s) has no container_name")[]),
-              ($all | map(select(.c != "" and (.s as $s | .c | endswith("-" + $s) | not)))
-                | map("container_name \(.c) does not end in -\(.s)")[]),
-              ($all | map(select(.c != "") | .c[0:(.c | length) - (.s | length) - 1]) | unique
-                | (select(length > 1) | "container prefixes differ: \(join(", "))"),
-                  (.[] | select(ascii_downcase != ($p | ascii_downcase))
-                    | "container prefix \(.) is not the project name \($p)"))
-PROG
-                    )" <<<"${cfg}")" || return 2
-        _ci_viol_lines viol "${cf}" "${line}"
-    done
-
-    if [ "${#viol[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0096]" "reason=\"naming-consistency drift (docs/policy/naming-conventions-policy.md)\"" "$(printf '%s\n' "${viol[@]}")"
-        return 1
-    fi
-    printf 'naming-consistency=clean\n'
-}
-
-# What: fail on compose service with no healthcheck.
-# Why: every service needs a real healthcheck.
-# From: Issue #1683 | PR #1858
-_ci_check_compose_healthchecks() {
-    local -a files=("$@")
-    if [ "${#files[@]}" -eq 0 ]; then
-        local f dep top
-        dep="$(_ci_compose_path)" || return 2
-        top="${dep%/*}"; top="${top%/*}"
-        for f in "${top}"/*/"${dep##*/}"; do
-            [ -f "${f}" ] && files+=("${f}")
-        done
-    fi
-    if [ "${#files[@]}" -eq 0 ]; then
-        ci_log "[CI-ERROR-CHECK-0020]" "reason=\"no stack compose files found\""
-        return 2
-    fi
-    # What: exemptions are per service, never per file path.
-    # Why: the SOT owns the list; a path key duplicated it.
-    # From: Issue #1683 | PR #1858
-    local -A excluded=()
-    local file svc hc checked=0 ex raw
-    raw="$(_ci_block_entry_list validation "" healthcheck_exempt)" || return 2
-    while IFS= read -r ex; do
-        [ -n "${ex}" ] && excluded["${ex}"]=1
-    done <<< "${raw}"
-    local -a viol=()
-    for file in "${files[@]}"; do
-        if [ ! -f "${file}" ]; then
-            viol+=("${file}: compose file missing")
-            continue
-        fi
-        # What: judge the rendered compose, not its text.
-        # Why: anchors and merge keys give healthchecks too.
-        # From: Issue #1683 | PR #1912
-        local cfg produced
-        cfg="$(_ci_compose_json "${file}")" || return 2
-        produced="$(_ci_capture 0 jq -r '.services | to_entries[]
-            | "\(.key)\t\(if .value.healthcheck then 1 else 0 end)"' <<<"${cfg}")" || return 2
-        while IFS=$'\t' read -r svc hc; do
-            [ -n "${svc}" ] || continue
-            checked=$((checked + 1))
-            [ "${hc}" = "1" ] && continue
-            [ -n "${excluded[${svc}]:-}" ] && continue
-            viol+=("${file}: service '${svc}' has no healthcheck:")
-        done <<<"${produced}"
-    done
-    if [ "${checked}" -eq 0 ]; then
-        ci_log "[CI-ERROR-CHECK-0097]" "reason=\"no services found across deploy compose files\""
-        return 2
-    fi
-    if [ "${#viol[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0021]" "reason=\"service missing a healthcheck\"" "$(printf '%s\n' "${viol[@]}")"
-        return 1
-    fi
-    printf 'compose-healthchecks=clean checked=%s\n' "${checked}"
-}
-
-# What: Fail if a proxy CACHE_* default drifts from its doc.
-# Why: a hand-copied doc default silently goes stale.
-# From: Issue #1683 | PR #1858
-_ci_check_proxy_cache_env_doc_drift() {
-    local defaults="${1:-}"
-    local arch_doc="${2:-}"
-    if [ -z "${arch_doc}" ]; then arch_doc="$(_ci_repo_path CI_ARCH_DOC)" || return 2; fi
-    if [ ! -f "${arch_doc}" ]; then
-        ci_log "[CI-ERROR-CHECK-0098]" "path=\"${arch_doc}\" reason=\"architecture doc not found\""
-        return 2
-    fi
-    local key value doc_row documented scanned=0 checked=0 rc
-    local -a viol=()
-    local produced produced_rc=0
-    if [ -n "${defaults}" ]; then
-        if [ ! -f "${defaults}" ]; then
-            ci_log "[CI-ERROR-CHECK-0022]" "path=\"${defaults}\" reason=\"defaults file not found\""
-            return 2
-        fi
-        produced="$(grep -E '^CACHE_[A-Z_]+=' "${defaults}")" || produced_rc=$?
-        _ci_producer_ok "${produced_rc}" 1 || return 2
-    else
-        # What: values compose gives proxy, SOT fixture env
-        # Why: an empty one falls back to runtime.defaults
-        # From: Issue #1683 | PR #1912
-        produced="$(_ci_service_compose_env proxy)" || return 2
-    fi
-    while IFS='=' read -r key value; do
-        [[ "${key}" =~ ^CACHE_[A-Z_]+$ ]] || continue
-        scanned=$((scanned + 1))
-        doc_row="$(_ci_capture 1 grep -E "^\| \`${key}\` \|" "${arch_doc}")" || return 2
-        [ -n "${doc_row}" ] || continue
-        checked=$((checked + 1))
-        if [ -z "${value}" ] && [ -z "${defaults}" ]; then value="$(_ci_runtime_default "${key}")" || return 2; fi
-        documented="$(_ci_capture 0 sed -E "s/^\| \`[A-Z_]+\` \| \`([^\`]*)\` \|.*/\1/" <<<"${doc_row}")" || return 2
-        if [ "${documented}" != "${value}" ]; then
-            viol+=("${key}: default=${value} vs doc=${documented}")
-        fi
-    done <<<"${produced}"
-    if [ "${scanned}" -eq 0 ]; then
-        ci_log "[CI-ERROR-CHECK-0152]" "defaults=\"${defaults:-deploy compose}\" reason=\"no CACHE_* default found for proxy; vacuous scan\""
-        return 2
-    fi
-    if [ "${#viol[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0023]" "reason=\"proxy CACHE_* default/doc drift\"" "$(printf '%s\n' "${viol[@]}")"
-        return 1
-    fi
-    printf 'proxy-cache-env-doc-drift=clean scanned=%s checked=%s\n' "${scanned}" "${checked}"
-}
-
 # What: Print Dockerfile logical lines (joined).
 # Why: AG-VAL-036: heredoc/escape= change what a line is.
 # From: Issue #1683 | PR #1858
@@ -19159,103 +18867,6 @@ _ci_dockerfile_emit_logical() {
         dl_hd="${lg_w}"
     fi
     dl_logic=""
-}
-
-# What: Fail unless prod install paths stay prebuilt-only.
-# Why: release doc: prod runs prebuilt images.
-# From: Issue #1683 | PR #1858
-_ci_check_prebuilt_prod() {
-    local repo_root="${1:-${CI_REPO_ROOT}}" dep
-    local -a viol=()
-    dep="$(_ci_compose_path "${repo_root}")" || return 2
-    dep="${dep%/*}"
-    local hit="" files f one
-    files="$(_ci_compose_dir_files "${dep}")" || return 2
-    if [ -z "${files}" ]; then
-        viol+=("${dep}: compose dir holds no compose file")
-    fi
-    while IFS= read -r f; do
-        [ -n "${f}" ] || continue
-        # What: services with a build: key, read by yq.
-        # Why: yq owns YAML; grep read text inside strings.
-        # From: Issue #1683 | PR #1858
-        one="$(_ci_run "[CI-ERROR-CHECK-0202]" "file=\"${f}\" reason=\"compose build: not read\"" \
-            yq --yaml-fix-merge-anchor-to-spec=true -r '(.services // {}) | to_entries[] | select((.value | tag) == "!!map" and (.value | has("build"))) | .key + " (build: at line " + (.value.build | line | tostring) + ")"' "${f}")" || return 2
-        if [ -n "${one}" ]; then hit+="${f}: ${one}"$'\n'; fi
-    done <<<"${files}"
-    hit="${hit%$'\n'}"
-    if [ -n "${hit}" ]; then
-        viol+=("a stack compose declares build:; prod must run prebuilt images only" "${hit}")
-    fi
-    local hit su readme
-    su="$(_ci_installer "${repo_root}")" || return 2
-    readme="$(_ci_repo_path CI_README "${repo_root}")" || return 2
-    hit="$(_ci_capture 1 grep -RIn -- '--build' "${readme}" "${dep}" "${su}")" || return 2
-    if [ -n "${hit}" ]; then
-        viol+=("a user-facing install path instructs --build; prod must run from prebuilt images, not a local build" "${hit}")
-    fi
-    if [ "${#viol[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0042]" "reason=\"production install path is not prebuilt-only\"" "$(printf '%s\n' "${viol[@]}")"
-        return 1
-    fi
-    printf 'prebuilt-prod=clean\n'
-}
-
-# What: Check prod state derives from LANCACHE_STATE_DIR.
-# Why: AG-SETUP-001: LANCACHE_STATE_DIR is state root.
-# From: Issue #1683 | PR #1858
-_ci_check_prod_state_wiring() {
-    local repo_root="${1:-${CI_REPO_ROOT}}" dep compose
-    compose="$(_ci_compose_path "${repo_root}")" || return 2
-    dep="${compose#"${repo_root}/"}"
-    local doc doc_rel
-    doc_rel="$(_ci_variable CI_BACKUP_RESTORE_DOC)" || return 2
-    doc="${repo_root}/${doc_rel}"
-    local -a viol=()
-    local key f keys
-    for f in "${compose}" "${doc}"; do
-        [ -f "${f}" ] || { ci_log "[CI-ERROR-CHECK-0043]" "path=\"${f}\" reason=\"required prod-state-wiring input missing\""; return 2; }
-    done
-    keys="$(_ci_state_keys)" || return 2
-    if [ -z "${keys}" ]; then
-        ci_log "[CI-ERROR-CHECK-0174]" "reason=\"SOT runtime.state_dir_keys names no state key\""
-        return 2
-    fi
-    # What: a key counts only as a whole word, not a prefix.
-    # Why: PDNS_DIR_OLD must not satisfy PDNS_DIR.
-    # From: Issue #1683 | PR #1912
-    while IFS= read -r key; do
-        _ci_file_match "[CI-ERROR-CHECK-0181]" "key=\"${key}\" reason=\"doc not searched\"" "${doc}" "${key}" -Fw \
-            || { [ "$?" -eq 1 ] || return 2; viol+=("${doc_rel} does not mention ${key}"); }
-    done <<<"${keys}"
-    # What: compose mounts exactly the SOT state_dir_keys.
-    # Why: the SOT list owns the keys; compose only mounts.
-    # From: Issue #1683 | PR #1912
-    local mounted="" want row key off=""
-    row="$(_ci_run "[CI-ERROR-CHECK-0192]" "file=\"${compose}\" reason=\"state mounts not read\"" \
-        yq --yaml-fix-merge-anchor-to-spec=true -r '(.services[].volumes[]?, .volumes[]?.driver_opts.device?) | select(tag == "!!str") | select(test("^\$\{[A-Z0-9_]+:[?-]"))' "${compose}")" || return 2
-    # What: ":?" after the key is a mount, ":-" a default.
-    # Why: a mount default in compose is a second owner.
-    # From: Issue #1683 | PR #1912
-    while IFS= read -r want; do
-        [ -n "${want}" ] || continue
-        key="${want#\$\{}"
-        key="${key%%:*}"
-        case "${want:$(( ${#key} + 2 )):2}" in
-            ':?') mounted+="${key}"$'\n' ;;
-            *) off+=$'\n'"${want}" ;;
-        esac
-    done <<< "${row}"
-    mounted="$(_ci_capture 0 sort -u <<< "${mounted%$'\n'}")" || return 2
-    want="$(_ci_capture 0 sort -u <<< "${keys}")" || return 2
-    [ "${mounted}" = "${want}" ] \
-        || viol+=("${dep} state mounts differ from SOT runtime.state_dir_keys: compose=[${mounted//$'\n'/ }] sot=[${want//$'\n'/ }]")
-    [ -z "${off}" ] || viol+=("${dep} has a mount default in compose:${off}")
-    if [ "${#viol[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0100]" "reason=\"prod state wiring differs from the SOT or undocumented\"" "$(printf '%s\n' "${viol[@]}")"
-        return 1
-    fi
-    printf 'prod-state-wiring=clean\n'
 }
 
 # What: Fail unless every SOT host tool is present.
@@ -19567,26 +19178,6 @@ _ci_compose_run() {
     )
 }
 
-# What: True if compose file/profile warning-free.
-# Why: docker compose warnings hide real drift; fail closed.
-# From: Issue #1683 | PR #1858
-_ci_compose_config_ok() {
-    local file="$1" profile="${2:-}" env_file="${3:-}" out
-    local -a args=(-f "${file}")
-    if [ -n "${profile}" ]; then
-        args+=(--profile "${profile}")
-    fi
-    if ! out="$(_ci_compose_run "${env_file}" "${args[@]}" config --quiet 2>&1)"; then
-        printf '%s\n' "${out}"
-        return 1
-    fi
-    if _ci_text_has -i '(^|[[:space:]])(warn|warning|level=warning)' "${out}"; then
-        printf 'warnings treated as errors:\n%s\n' "${out}"
-        return 1
-    fi
-    return 0
-}
-
 # What: stdout of one compose query; stderr output fails.
 # Why: a warning is an error (AG-VAL-001); raw is kept.
 # From: Issue #1683 | PR #1858
@@ -19601,15 +19192,6 @@ _ci_compose_query() {
 # From: Issue #1683 | PR #1858
 _ci_compose_profiles() {
     _ci_compose_query "$1" "${2:-}" config --profiles
-}
-
-# What: a compose file as JSON, all profiles, opt env file
-# Why: a profiled service is checked like any other.
-# From: Issue #1683 | PR #1858
-_ci_compose_json() {
-    local -a pf=()
-    _ci_compose_profile_flags "$1" pf || return 2
-    _ci_compose_query "$1" "${2:-}" "${pf[@]}" config --no-env-resolution --format json
 }
 
 # What: copy a rendered file over its target on a change
@@ -19646,163 +19228,6 @@ _ci_stack_compose_files() {
     # From: Issue #1683 | PR #1912
     read -ra _ci_scf_out <<< "${_ci_scf_targets}"
     _ci_scf_out=("${_ci_scf_dep}" "${_ci_scf_out[@]}")
-}
-
-# What: every stack compose renders clean in every profile.
-# Why: profiles come from the file; none is skipped.
-# From: Issue #1683 | PR #1858
-_ci_check_compose_config() {
-    local repo_root="${1:-${CI_REPO_ROOT}}"
-    local -a viol=() profiles=() files=()
-    local rel cf raw p label render msg count=0
-    _ci_stack_compose_files files || return $?
-    for rel in "${files[@]}"; do
-        cf="${repo_root}/${rel}"
-        label="${rel}"
-        if [ ! -f "${cf}" ]; then
-            viol+=("${label}: compose target missing")
-            continue
-        fi
-        if ! raw="$(_ci_compose_profiles "${cf}" "" 2>&1)"; then
-            viol+=("${label}: profiles unreadable"$'\n'"${raw}")
-            continue
-        fi
-        profiles=("")
-        [ -z "${raw}" ] || mapfile -t -O 1 profiles <<< "${raw}"
-        for p in "${profiles[@]}"; do
-            count=$((count + 1))
-            render="${label}"
-            if [ -n "${p}" ]; then
-                render="${label}:${p}"
-            fi
-            if ! msg="$(_ci_compose_config_ok "${cf}" "${p}" "")"; then
-                viol+=("${render}: config invalid" "${msg}")
-            fi
-        done
-    done
-    if [ "${#viol[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0101]" "reason=\"compose config invalid\"" "$(printf '%s\n' "${viol[@]}")"
-        return 1
-    fi
-    printf 'compose-config=clean checks=%s\n' "${count}"
-}
-
-# What: the bootstrap repo address equals the SOT value.
-# Why: setup.sh runs before the clone; the one text check.
-# From: Issue #1683 | PR #1858
-_ci_check_setup_update_safety() {
-    local repo_root="${1:-${CI_REPO_ROOT}}" su
-    local -a viol=()
-    su="$(_ci_installer "${repo_root}")" || return 2
-    local repo_url
-    repo_url="$(_ci_runtime_default LANCACHE_REPO_URL)" || return 2
-    _ci_file_match "[CI-ERROR-CHECK-0193]" "reason=\"repo address not searched\"" "${su}" "LANCACHE_REPO_URL=\"${repo_url}\"" -Fx \
-        || { [ "$?" -eq 1 ] || return 2; viol+=("setup.sh LANCACHE_REPO_URL differs from SOT runtime.defaults LANCACHE_REPO_URL (${repo_url})"); }
-    if [ "${#viol[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0103]" "reason=\"setup.sh update safety or bootstrap contract violated\"" "$(printf '%s\n' "${viol[@]}")"
-        return 1
-    fi
-    printf 'setup-update-safety=clean\n'
-}
-
-# What: compose JSON on the fixture env, own IMAGE vars
-# Why: only then do the images show which var they take
-# From: Issue #1683 | PR #1912
-_ci_compose_image_render() {
-    local file="$1" out="$2" env body line kept=""
-    shift 2
-    env="$(_ci_mktemp "${CI_TMPDIR}/ci-image-env.XXXXXX")" || return 2
-    body="$(_ci_validation_env)" || { rm -f "${env}"; return 2; }
-    while IFS= read -r line; do
-        case "${line}" in LANCACHE_IMAGE_*) ;; *) kept+="${line}"$'\n' ;; esac
-    done <<< "${body}"
-    body="${kept%$'\n'}"
-    if ! printf '%s\n' "${body}" "$@" > "${env}"; then
-        ci_log "[CI-ERROR-CHECK-0172]" "file=\"${env}\" reason=\"render env file not writable\""
-        rm -f "${env}"
-        return 2
-    fi
-    if ! _ci_compose_json "${file}" "${env}" > "${out}"; then
-        rm -f "${env}"
-        return 2
-    fi
-    rm -f "${env}"
-}
-
-# What: Fail unless channel/tag resolves from config.
-# Why: one resolution across setup.sh/UI/compose.
-# From: Issue #1683
-_ci_check_image_channel_resolution() {
-    local repo_root="${1:-${CI_REPO_ROOT}}"
-    local sec prod dep
-    sec="$(_ci_service_path ui src/main.rs "${repo_root}")" || return 2
-    prod="$(_ci_compose_path "${repo_root}")" || return 2
-    dep="${prod#"${repo_root}/"}"
-    local -a viol=()
-    local f
-    if [ ! -f "${sec}" ]; then
-        viol+=("ui source missing: ${sec}")
-    else
-        for f in \
-            '"image_registry": process_env("LANCACHE_IMAGE_REGISTRY")' \
-            '"image_prefix": process_env("LANCACHE_IMAGE_PREFIX")' \
-            '"image_channel": process_env("LANCACHE_IMAGE_CHANNEL")' \
-            '"image_tag": process_env("LANCACHE_IMAGE_TAG")'; do
-            _ci_file_match "[CI-ERROR-CHECK-0187]" "line=\"${f}\" reason=\"ui source not searched\"" "${sec}" "${f}" -F \
-                || { [ "$?" -eq 1 ] || return 2; viol+=("ui main.rs must expose/use ${f}"); }
-        done
-    fi
-    if [ ! -f "${prod}" ]; then
-        viol+=("prod compose missing: ${prod}")
-    else
-        # What: each compose image has one ref var
-        # Why: AG-CI-006: the SOT owns the image coordinates
-        # From: Issue #1683 | PR #1912
-        local tdir rep line sreg spre stag schan prog svc names refs hits
-        hits="$(_ci_run -m 1 "[CI-ERROR-CHECK-0178]" "file=\"${prod}\" reason=\"image defaults not scanned\"" grep -nE 'LANCACHE_IMAGE_(REF_[A-Z_]+|REGISTRY|PREFIX|TAG):-[^}]' "${prod}")" || return 2
-        while IFS= read -r line; do
-            [ -z "${line}" ] || viol+=("compose gives an image coordinate a default: ${line}")
-        done <<< "${hits}"
-        names="$(ci_services)" || return 2
-        sreg="r${SRANDOM}.test" spre="p${SRANDOM}/q${SRANDOM}" stag="t${SRANDOM}" schan="c${SRANDOM}"
-        refs=()
-        while IFS= read -r svc; do
-            [ -z "${svc}" ] || refs+=("LANCACHE_IMAGE_REF_${svc^^}=${sreg}/${spre}/${svc}:${stag}")
-        done <<< "${names}"
-        prog="$(cat <<'PROG'
-($s[0].services) as $S | ($sreg + "/" + $spre + "/") as $sp
-            | [$names | split("\n")[] | select(. != "")] as $N
-            | [$S | to_entries[] | select((.value.environment // {}) | type == "object" and has("LANCACHE_IMAGE_REGISTRY"))] as $ev
-            | (if ($ev | length) == 0 then "no compose service receives LANCACHE_IMAGE_REGISTRY" else empty end),
-              ($N[] | . as $k | ($S[$k].image // "") as $im
-                | if $im == ($sp + $k + ":" + $stag) then empty
-                  else "service \($k): image \($im) does not take LANCACHE_IMAGE_REF_\($k | ascii_upcase)" end),
-              ($ev[] | .key as $k | $S[$k].environment as $se
-                | (["LANCACHE_IMAGE_REGISTRY", $sreg], ["LANCACHE_IMAGE_PREFIX", $spre],
-                   ["LANCACHE_IMAGE_CHANNEL", $schan], ["LANCACHE_IMAGE_TAG", $stag]) as [$n, $sv]
-                | if ($se[$n] // null) == $sv then empty else "service \($k): \($n) is \($se[$n] // "unset") for env file value \($sv)" end)
-PROG
-                )"
-        tdir="$(_ci_mktemp -d "${CI_TMPDIR}/ci-chanres.XXXXXX")" || return 2
-        if ! _ci_compose_image_render "${prod}" "${tdir}/s.json" "LANCACHE_IMAGE_REGISTRY=${sreg}" \
-                "LANCACHE_IMAGE_PREFIX=${spre}" "LANCACHE_IMAGE_TAG=${stag}" "LANCACHE_IMAGE_CHANNEL=${schan}" "${refs[@]}"; then
-            rm -rf "${tdir}"
-            return 2
-        fi
-        rep="$(_ci_run "[CI-ERROR-CHECK-0171]" "file=\"${dep}\" reason=\"image coordinate comparison failed\"" \
-            jq -rn --slurpfile s "${tdir}/s.json" --arg names "${names}" \
-            --arg sreg "${sreg}" --arg spre "${spre}" --arg stag "${stag}" --arg schan "${schan}" \
-            "${prog}")" || { rm -rf "${tdir}"; return 2; }
-        rm -rf "${tdir}"
-        while IFS= read -r line; do
-            [ -z "${line}" ] || viol+=("${line}")
-        done <<< "${rep}"
-    fi
-    if [ "${#viol[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0105]" "reason=\"image channel/tag resolution contract violated\"" "$(printf '%s\n' "${viol[@]}")"
-        return 1
-    fi
-    printf 'image-channel-resolution=clean\n'
 }
 
 # What: Emit the OpenVEX document for a trivyignore file.
@@ -19901,29 +19326,6 @@ _ci_trivyignore_ids() {
     done <<< "${fields}"
 }
 
-# What: Fail unless the trivyignore yields full OpenVEX.
-# Why: a broken entry must fail here, not at release time.
-# From: Issue #1683 | PR #1858
-_ci_check_vex_drift() {
-    local repo_root="${1:-${CI_REPO_ROOT}}"
-    local trivyignore
-    trivyignore="$(_ci_repo_path CI_TRIVY_IGNORE "${repo_root}")" || return 2
-    local out ids entry_count statement_count
-    [ -f "${trivyignore}" ] || { ci_error "[CI-ERROR-CHECK-0050]" "path=\"${trivyignore}\" reason=\".trivyignore.yaml not found\"" "${trivyignore}"; return 2; }
-    if ! out="$(_ci_generate_vex "${trivyignore}")"; then
-        ci_log "[CI-ERROR-CHECK-0107]" "path=\"${trivyignore}\" reason=\"OpenVEX generation failed (raw above)\""
-        return 1
-    fi
-    ids="$(_ci_trivyignore_ids "${trivyignore}")" || return 2
-    entry_count="$(_ci_count_lines "${ids}")"
-    statement_count="$(_ci_capture 0 jq '.statements | length' <<< "${out}")" || return 2
-    if [ "${statement_count}" != "${entry_count}" ]; then
-        ci_log "[CI-ERROR-CHECK-0109]" "entries=${entry_count} statements=${statement_count} reason=\"trivyignore entries and VEX statements differ\""
-        return 1
-    fi
-    printf 'vex-drift=clean statements=%s\n' "${statement_count}"
-}
-
 # What: Fail on editing CHANGELOG.md without the label.
 # Why: AG-VAL-001: a warning is no success; conflict risk.
 # From: Issue #893 | PR #1858
@@ -19961,51 +19363,6 @@ _ci_check_changelog_direct_edit() {
     printf 'changelog-direct-edit=labelled\n'
 }
 
-# What: print each logging-matrix row's service, dupes kept.
-# Why: the check finds missing, extra and double rows.
-# From: Issue #1683 | PR #1912
-_ci_logging_matrix_canonical() {
-    local doc="$1" line name marked=0 in_table=0
-    local head_re='^\|[[:space:]]*Service[[:space:]]*\|'
-    local sep_re='^\|[[:space:]]*-+[[:space:]]*\|'
-    local lead_re='^\|[[:space:]]*' tick_re=$'`[a-z0-9-]+`'
-    # What: rows of the first table after the marker line.
-    # Why: the first non-table line after a row ends it.
-    while IFS= read -r line || [ -n "${line}" ]; do
-        if [[ "${line}" == *'**Logging matrix**'* ]]; then
-            marked=1
-            continue
-        fi
-        [ "${marked}" -eq 1 ] || continue
-        if [[ "${line}" != '|'* ]]; then
-            [ "${in_table}" -eq 0 ] || break
-            continue
-        fi
-        in_table=1
-        if [[ "${line}" =~ ${head_re} || "${line}" =~ ${sep_re} ]]; then
-            continue
-        fi
-        [[ "${line}" =~ ${lead_re} ]]
-        name="${line:${#BASH_REMATCH[0]}}"
-        name="${name%%|*}"
-        name="${name%"${name##*[![:space:]]}"}"
-        if [[ "${name}" =~ ${tick_re} ]]; then
-            name="${BASH_REMATCH[0]:1:${#BASH_REMATCH[0]}-2}"
-        fi
-        printf 'row=%s\n' "${name}"
-    done < "${doc}"
-}
-
-# What: Print one real Compose service name per line.
-# Why: a profiled service needs `config --profiles` first.
-# From: Issue #1683 | PR #1858
-_ci_compose_service_names() {
-    local file="$1"
-    local -a profile_flags=()
-    _ci_compose_profile_flags "${file}" profile_flags || return 2
-    _ci_compose_query "${file}" "" "${profile_flags[@]}" config --services
-}
-
 # What: out[]: --profile pairs for every compose profile.
 # Why: one owner; a profiled service must not be skipped.
 # From: Issue #1683 | PR #1912
@@ -20018,56 +19375,6 @@ _ci_compose_profile_flags() {
         [ -n "${_ci_pf_p}" ] && _ci_pf_out+=(--profile "${_ci_pf_p}")
     done <<< "${_ci_pf_all}"
     return 0
-}
-
-# What: each Compose service has exactly one matrix row.
-# Why: a new, renamed or doubled service must not hide.
-# From: Issue #1683 | PR #1912
-_ci_check_logging_matrix() {
-    local repo_root="${1:-${CI_REPO_ROOT}}" doc rows cf raw_services n
-    local -a canonical=() services=() viol=()
-    local -A in_doc=() in_compose=()
-    doc="$(_ci_repo_path CI_ARCH_DOC "${repo_root}")" || return 2
-    if [ ! -f "${doc}" ]; then
-        ci_log "[CI-ERROR-CHECK-0035]" "path=\"${doc}\" reason=\"architecture doc not found\""
-        return 2
-    fi
-    rows="$(_ci_logging_matrix_canonical "${doc}")" || {
-        ci_log "[CI-ERROR-CHECK-0120]" "path=\"${doc}\" reason=\"logging matrix not readable (raw above)\""; return 2; }
-    if [ -z "${rows}" ]; then
-        ci_log "[CI-ERROR-CHECK-0036]" "path=\"${doc}\" reason=\"no logging-matrix rows parsed\""
-        return 2
-    fi
-    mapfile -t canonical <<< "${rows}"
-    # What: drops the row= prefix of each parsed name.
-    # Why: $(...) would eat a last row with an empty name.
-    # From: Issue #1683 | PR #1912
-    canonical=("${canonical[@]#row=}")
-    # What: only the primary stack compose is matched.
-    # Why: the secondary dns logs locally (driver: local).
-    # From: Issue #1683 | PR #1912
-    cf="$(_ci_compose_path "${repo_root}")" || return 2
-    raw_services="$(_ci_compose_service_names "${cf}")" || {
-        ci_log "[CI-ERROR-CHECK-0034]" "path=\"${cf}\" reason=\"compose service lookup failed (raw above)\""; return 2; }
-    mapfile -t services <<< "${raw_services}"
-    for n in "${canonical[@]}"; do
-        [ -n "${n}" ] || { viol+=("${doc}: a row has no service name"); continue; }
-        [ -z "${in_doc[${n}]:-}" ] || viol+=("${doc}: row '${n}' appears more than once")
-        in_doc[${n}]=1
-    done
-    for n in "${services[@]}"; do
-        [ -n "${n}" ] || continue
-        in_compose[${n}]=1
-        [ -n "${in_doc[${n}]:-}" ] || viol+=("${cf}: service '${n}' has no logging-matrix row")
-    done
-    for n in "${canonical[@]}"; do
-        [ -z "${n}" ] || [ -n "${in_compose[${n}]:-}" ] || viol+=("${doc}: row '${n}' is not a real Compose service")
-    done
-    if [ "${#viol[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0038]" "reason=\"logging-matrix drift\"" "$(printf '%s\n' "${viol[@]}")"
-        return 1
-    fi
-    printf 'logging-matrix=clean rows=%s services=%s\n' "${#canonical[@]}" "${#in_compose[@]}"
 }
 
 # What: fill array $2 with the workflow files under root $1.
@@ -20279,174 +19586,6 @@ _ci_check_sot_identity_inputs() {
     printf 'sot-identity-inputs=clean types=%s\n' "${n}"
 }
 
-# What: every build target's Dockerfile, one pass each.
-# Why: one owner for the rules a Dockerfile must meet.
-# From: Issue #1683 | PR #1912
-_ci_check_dockerfiles() {
-    local repo_root="${1:-${CI_REPO_ROOT:-.}}" targets t df rel type svars bvars allow raw tok missing bst bv
-    local hits spec p id c ctxs srcs src ok n=0 rc=0 dline mnt_spec
-    local cargo_re=$'cargo[ \t]+install[ \t]+' cmd_end_re='^[^&|;]*'
-    local -a tl=() cl=() roots=() parts=() toks=() e_bt=() e_tune=() e_stage=() e_secret=() e_ctx=() e_src=()
-    local -A kv=() is_pkg=()
-    svars="$(_ci_block_entry_list stage_variables "" ci_sh)" || return 2
-    [ -n "${svars}" ] || e_stage+=("SOT stage_variables.ci_sh lists no variable")
-    bvars="$(_ci_block_entry_list build_variables "" rust)" || return 2
-    allow="$(_ci_runtime_secret_ids)" || return 2
-    raw="$(_ci_build_tools_packages)" || return 2
-    while IFS= read -r tok; do [ -z "${tok}" ] || is_pkg["${tok}"]=1; done <<< "${raw}"
-    targets="$(ci_build_targets)" || return 2
-    [ -z "${targets}" ] || mapfile -t tl <<< "${targets}"
-    for t in "${tl[@]}"; do
-        df="$(_ci_service_path "${t}" Dockerfile "${repo_root}")" || return 2
-        rel="${df#"${repo_root}/"}"
-        if [ ! -f "${df}" ]; then
-            e_secret+=("${t}: no Dockerfile at ${rel}"); continue
-        fi
-        n=$(( n + 1 ))
-        type="$(_ci_required_field "${t}" build_type)" || return 2
-        # What: ci.sh stages declare each SOT stage var.
-        # Why: ARG scope is per stage; else no value.
-        # From: Issue #1683 | PR #1858
-        missing="$(_ci_dockerfile_stage_missing_args "${df}" "${svars}" 'ci[.]sh (apk-setup|rust-build)')" || return 2
-        missing="$(_ci_capture 0 sort -u <<< "${missing}")" || return 2
-        while read -r bst bv; do
-            [ -z "${bv}" ] || e_stage+=("${t}: Dockerfile stage ${bst} runs ci.sh without ARG ${bv} (SOT stage_variables.ci_sh)")
-        done <<< "${missing}"
-        # What: each secret mount id is a central id.
-        # Why: set-runtime writes only listed ids.
-        # From: Issue #1683 | PR #1858
-        hits=""
-        while IFS= read -r dline || [ -n "${dline}" ]; do
-            [[ ! "${dline}" =~ ^[[:space:]]*# ]] || continue
-            while [[ "${dline}" =~ --mount=[^[:space:]]+ ]]; do
-                mnt_spec="${BASH_REMATCH[0]}"
-                hits+="${mnt_spec}"$'\n'
-                dline="${dline#*"${mnt_spec}"}"
-            done
-        done < "${df}" || return 2
-        while IFS= read -r spec; do
-            [ -n "${spec}" ] || continue
-            kv=()
-            IFS=',' read -r -a parts <<< "${spec#--mount=}"
-            for p in "${parts[@]}"; do kv["${p%%=*}"]="${p#*=}"; done
-            [ "${kv[type]:-bind}" = secret ] || continue
-            id="${kv[id]:-${kv[target]:-${kv[dst]:-${kv[destination]:-}}}}"
-            [ -n "${kv[id]:-}" ] || id="${id##*/}"
-            if [ -z "${id}" ]; then
-                e_secret+=("${t}: ${rel}: '${spec}' has no id or target"); continue
-            fi
-            _ci_list_has "${id}" "${allow}" || e_secret+=("${t}: ${rel}: mount id '${id}' is not in the central list")
-        done <<< "${hits}"
-        # What: COPY sources: the context or an edge.
-        # Why: else the image identity goes stale.
-        # From: Issue #1683 | PR #1912
-        c="$(_ci_required_field "${t}" context)" || return 2
-        roots=("${c}")
-        ctxs="$(ci_service_context_paths "${t}" "${repo_root}")" || return 2
-        cl=()
-        [ -z "${ctxs}" ] || mapfile -t cl <<< "${ctxs}"
-        roots+=("${cl[@]}")
-        srcs="$(_ci_dockerfile_copy_sources "$(< "${df}")")" || return 2
-        while IFS= read -r src; do
-            [ -n "${src}" ] || continue
-            ok=""
-            for p in "${roots[@]}"; do
-                case "${src%/}" in "${p}" | "${p}"/*) ok=1; break ;; esac
-            done
-            [ -n "${ok}" ] || e_ctx+=("${t}: ${rel} copies ${src}, outside its context and SOT edges")
-        done <<< "${srcs}"
-        # What: cargo install tokens; rust: none at all.
-        # Why: build-tools owns the toolchain (AG-REL-002).
-        # From: Issue #1683 | PR #1912
-        raw=""
-        while IFS= read -r dline || [ -n "${dline}" ]; do
-            [[ "${dline}" =~ ${cargo_re} ]] || continue
-            dline="${dline#*"${BASH_REMATCH[0]}"}"
-            [[ "${dline}" =~ ${cmd_end_re} ]]
-            IFS=$' \t' read -r -a toks <<< "${BASH_REMATCH[0]}"
-            for tok in "${toks[@]}"; do
-                [[ "${tok}" == -* ]] || raw+="${tok}"$'\n'
-            done
-        done < "${df}" || return 2
-        raw="${raw%$'\n'}"
-        if [ "${type}" != rust ]; then
-            while IFS= read -r tok; do
-                [ -z "${tok}" ] || [ -z "${is_pkg[${tok}]:-}" ] || e_src+=("${rel}: cargo install ${tok}; SOT ships it prebuilt in build-tools")
-            done <<< "${raw}"
-            continue
-        fi
-        [ -z "${raw}" ] || e_bt+=("${t}: Dockerfile compiles a tool with cargo install; consume the build-tools image")
-        # What: rust stages: build vars, build-tools image.
-        # Why: one toolchain owner (AG-CI-008).
-        # From: Issue #1683
-        _ci_file_match "[CI-ERROR-CHECK-0188]" "target=\"${t}\" reason=\"toolchain ARG not searched\"" "${df}" "ARG ${CI_ARG_TOOLCHAIN_IMAGE}" -F \
-            || { [ "$?" -eq 1 ] || return 2; e_bt+=("${t}: Dockerfile must declare ARG ${CI_ARG_TOOLCHAIN_IMAGE}"); }
-        missing="$(_ci_dockerfile_stage_missing_args "${df}" "${bvars}" 'ci[.]sh rust-build')" || return 2
-        missing="$(_ci_capture 0 sort -u <<< "${missing}")" || return 2
-        while read -r bst bv; do
-            [ -z "${bv}" ] || e_bt+=("${t}: Dockerfile stage ${bst} runs ci.sh rust-build without ARG ${bv} (SOT build_variables.rust)")
-        done <<< "${missing}"
-        _ci_file_match "[CI-ERROR-CHECK-0189]" "target=\"${t}\" reason=\"FROM line not searched\"" "${df}" "^FROM \\$\\{${CI_ARG_TOOLCHAIN_IMAGE}(:-scratch)?\\}([[:space:]]|$)" \
-            || { [ "$?" -eq 1 ] || return 2; e_bt+=("${t}: Dockerfile must build FROM \${${CI_ARG_TOOLCHAIN_IMAGE}}"); }
-        # What: forbid a mutable default on the ARG.
-        # Why: ci.sh supplies the immutable ref (AG-CI-008).
-        # From: Issue #1683
-        if _ci_file_match "[CI-ERROR-CHECK-0190]" "target=\"${t}\" reason=\"ARG default not searched\"" "${df}" "^ARG ${CI_ARG_TOOLCHAIN_IMAGE}="; then
-            e_bt+=("${t}: ARG ${CI_ARG_TOOLCHAIN_IMAGE} must carry no default; ci.sh supplies it")
-        elif [ "$?" -ne 1 ]; then
-            return 2
-        fi
-        # What: reject Cargo tuning hardcode; empty ARG ok.
-        # Why: jobs/lto/codegen from CI vars (AG-CI-006).
-        # From: Issue #1683
-        if _ci_file_match "[CI-ERROR-CHECK-0191]" "target=\"${t}\" reason=\"Cargo tuning not searched\"" "${df}" '^[[:space:]]*(ARG[[:space:]]+SCCACHE_DIST_SCHEDULER_URL|ENV[[:space:]]+CARGO_BUILD_JOBS=|ARG[[:space:]]+PROJECT_CARGO_LTO=.+|ARG[[:space:]]+PROJECT_CARGO_CODEGENUNIT=.+|ENV[[:space:]]+PROJECT_CARGO_LTO=|ENV[[:space:]]+PROJECT_CARGO_CODEGENUNIT=)'; then
-            e_tune+=("${t}: Dockerfile hardcodes a Cargo tuning value; source jobs/lto/codegen from CI vars")
-        elif [ "$?" -ne 1 ]; then
-            return 2
-        fi
-    done
-    [ "${#e_stage[@]}" -eq 0 ] || { ci_error "[CI-ERROR-CHECK-0169]" "targets=${n} reason=\"a ci.sh build stage lacks an SOT stage variable ARG\"" "$(printf '%s\n' "${e_stage[@]}")"; rc=1; }
-    [ "${#e_secret[@]}" -eq 0 ] || { ci_error "[CI-ERROR-CHECK-0156]" "targets=${n} reason=\"Dockerfile missing or mount id not central\"" "$(printf '%s\n' "${e_secret[@]}")"; rc=1; }
-    [ "${#e_ctx[@]}" -eq 0 ] || { ci_error "[CI-ERROR-CHECK-0175]" "targets=${n} reason=\"a COPY source is outside the context paths\"" "$(printf '%s\n' "${e_ctx[@]}")"; rc=1; }
-    [ "${#e_src[@]}" -eq 0 ] || { ci_error "[CI-ERROR-CHECK-0061]" "targets=${n} reason=\"Dockerfile source-compiles a prebuilt SOT tool; consume the build-tools image\"" "$(printf '%s\n' "${e_src[@]}")"; rc=1; }
-    [ "${#e_bt[@]}" -eq 0 ] || { ci_error "[CI-ERROR-CHECK-0058]" "targets=${n} reason=\"rust Dockerfile does not consume the build-tools image (AG-CI-008/AG-REL-002)\"" "$(printf '%s\n' "${e_bt[@]}")"; rc=1; }
-    [ "${#e_tune[@]}" -eq 0 ] || { ci_error "[CI-ERROR-CHECK-0060]" "targets=${n} reason=\"rust Dockerfile hardcodes a Cargo tuning value (AG-CI-006)\"" "$(printf '%s\n' "${e_tune[@]}")"; rc=1; }
-    [ "${rc}" -ne 0 ] || printf 'dockerfiles=clean targets=%s\n' "${n}"
-    return "${rc}"
-}
-
-# What: "stage name" per stage that runs <ere> sans ARG
-# Why: ARG scope is per stage; else no value reaches it
-# From: Issue #1683 | PR #1858
-_ci_dockerfile_stage_missing_args() {
-    local df="$1" runs="$3" sm_line sm_word sm_base sm_as sm_st=0
-    local -a sm_need=() sm_fld=() sm_decl=("|")
-    local -A sm_stage=()
-    read -r -a sm_need <<< "${2//$'\n'/ }"
-    while IFS= read -r sm_line || [ -n "${sm_line}" ]; do
-        [[ ! "${sm_line}" =~ ^[[:space:]]*# ]] || continue
-        # What: a stage inherits the ARGs of its base.
-        # Why: FROM <alias> keeps the ARGs declared there.
-        if _ci_dockerfile_from_parts "${sm_line}" sm_base sm_as; then
-            sm_st=$((sm_st + 1))
-            sm_decl[sm_st]="|"
-            [ -z "${sm_stage["k${sm_base}"]+x}" ] || sm_decl[sm_st]="${sm_decl[${sm_stage["k${sm_base}"]}]}"
-            [ -z "${sm_as}" ] || sm_stage["${sm_as}"]="${sm_st}"
-            continue
-        fi
-        IFS=$' \t' read -r -a sm_fld <<< "${sm_line}"
-        sm_word="${sm_fld[0]-}"
-        if [ "${sm_word^^}" = ARG ]; then
-            for sm_word in "${sm_fld[@]:1}"; do sm_decl[sm_st]+="${sm_word%%=*}|"; done
-            continue
-        fi
-        [[ "${sm_line}" =~ ${runs} ]] || continue
-        for sm_word in "${sm_need[@]}"; do
-            [[ "${sm_decl[sm_st]}" == *"|${sm_word}|"* ]] || printf '%s %s\n' "${sm_st}" "${sm_word}"
-        done
-    done < "${df}" || return 2
-}
-
 # What: FROM line: base word and AS key ("k" + name), lower.
 # Why: stage and image checks read FROM the same way.
 # From: Issue #1683 | PR #1858
@@ -20466,29 +19605,6 @@ _ci_dockerfile_from_parts() {
     else
         printf -v "$3" '%s' ""
     fi
-}
-
-# What: no workspace Cargo.toml set [profile].
-# Why: sourced from CARGO env vars (AG-CI-006).
-# From: Issue #1683
-_ci_check_cargo_profile_tuning() {
-    local repo_root="${1:-${CI_REPO_ROOT:-.}}" f line tomls
-    local -a viol=()
-    tomls="$(_ci_ls_files cargo-profile-tuning "${repo_root}" '*Cargo.toml')" || return 2
-    while IFS= read -r f; do
-        [ -n "${f}" ] || continue
-        local produced produced_rc=0
-        produced="$(grep -nE '^[[:space:]]*(lto|codegen-units)[[:space:]]*=' "${repo_root}/${f}")" || produced_rc=$?
-        _ci_producer_ok "${produced_rc}" 1 || return 2
-        while IFS= read -r line; do
-            [ -n "${line}" ] && viol+=("${f}:${line}")
-        done <<<"${produced}"
-    done <<< "${tomls}"
-    if [ "${#viol[@]}" -gt 0 ]; then
-        ci_error "[CI-ERROR-CHECK-0059]" "reason=\"Cargo.toml hardcodes [profile] lto/codegen-units; source them from CARGO_PROFILE_RELEASE env (AG-CI-006)\"" "$(printf '%s\n' "${viol[@]}")"
-        return 1
-    fi
-    printf 'cargo-profile-tuning=clean\n'
 }
 
 # What: every tracked language file is in its CodeQL scope.
