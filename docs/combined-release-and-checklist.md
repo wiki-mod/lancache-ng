@@ -87,7 +87,7 @@ first-party image, moved together by one promotion.
 | `current_dev` | `nightly` | A normal push publishes the per-commit `sha-<full-sha>` tags only. `nightly` moves through `nightly.yml` (section 4.2). |
 | archived `vX.Y.Z` branches | none | Frozen; they publish no live channel. |
 
-**Direction of flow (maintainer decision, 07.11.2026 11:19 CET).**
+**Direction of flow.**
 `current_dev` always wins over `master`:
 
 - `master` is always stale. `current_dev` runs ahead; `master` catches up
@@ -99,11 +99,6 @@ first-party image, moved together by one promotion.
   `current_dev`. The state that applied at the time of the release is
   preserved in an immutable `release/*` ref (write-protected when created,
   AG-REL-014).
-
-A search of `ci.sh` and the workflows on `current_dev` (`e223782d`) finds no
-step that overwrites `master` or creates a `release/*` ref: `release.yml`
-publishes tags, and the archived `vX.Y.Z` branches are the existing frozen
-refs.
 
 `schedule:` triggers run only from the workflow file on the default branch
 (AG-CI-018). `nightly.yml` therefore refreshes `nightly` on schedule only from
