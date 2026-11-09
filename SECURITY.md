@@ -10,42 +10,41 @@ Do **not** open a public GitHub issue for security vulnerabilities. Private disc
 
 ## Supported Versions
 
-| Version | Status | Support Until |
-|---------|--------|----------------|
-| 0.x (pre-1.0) | Current | Ongoing |
+Support covers the current minor line and the minor line before it. An
+installation on an older line has no support and has to be updated first. The
+current line is the one the `latest` channel serves (`docs/combined-release-and-checklist.md`).
 
-lancache-ng has not reached a `1.0.0` release yet (see `docs/release-versioning.md`
-for the full channel/tagging model); the current stable release line is `v0.x`.
-We aim to provide security updates for the current stable release. Older
-releases are not actively maintained.
+| Position | Meaning | Support |
+|----------|---------|---------|
+| Current line | The newest minor line | Yes |
+| One line back (-1) | The minor line before the current one | Yes, until the next minor line is released |
+| Two lines back (-2) and older | Every earlier minor line | No (EOL) |
 
-### Scope and duration of support (per release)
+Example: with line N current, line N-1 is supported and line N-2 is EOL. When
+line N+1 is released, N+1 is current, N is one line back and N-1 is EOL.
 
-- **What is supported**: only the most recently published stable `vX.Y.Z`
-  release tag (the one `latest` currently points at) receives bug fixes and
-  security updates. Every `vX.Y.Z` release is a full stack release (see
-  `docs/release-versioning.md`'s "Core Rule") -- support is per stack release,
-  not per individual service image.
+lancache-ng has not reached a `1.0.0` release yet (see `docs/combined-release-and-checklist.md`
+for the full channel/tagging model).
+
+### Scope and duration of support (per minor line)
+
+- **What is supported**: the current minor line and the minor line before it.
+  Every `vX.Y.Z` release is a full stack release (see
+  `docs/combined-release-and-checklist.md`, section "Release model"); support
+  is per stack release line, not per individual service image.
 - **What kind of support**: security fixes and correctness bug fixes, applied
-  by publishing a new stable release. There is no separate long-term-support
-  (LTS) branch and no backported point releases for a release once a newer
-  stable release has superseded it.
-- **Duration**: a stable release stops receiving security updates the moment
-  the next stable `vX.Y.Z` release is published -- there is no fixed
-  post-supersession grace window today. Operators should update to the current
-  stable release (or an audited `edge`/release-candidate build) promptly after
-  a new stable release ships, especially when the release notes mention a
-  security fix. This reflects this project's actual current maintenance
-  capacity (a single primary maintainer); it may be revisited if that changes.
+  by publishing a new stable release of a supported line.
+- **Duration**: a minor line is supported until the next minor line after the
+  current one is released, and is EOL from then on.
+- **Updating**: an installation on an unsupported line is updated to a
+  supported line to receive support.
 - **Pre-1.0 caveat**: as a pre-1.0 project, breaking changes and security-
   relevant behavior changes can still land between minor versions; the
   `CHANGELOG.md` and each release's notes call these out explicitly.
 
 ## Reporting a Vulnerability
 
-This is the project's documented process for responding to vulnerability
-reports, satisfying the OpenSSF Best Practices Badge's Silver-tier
-`vulnerability_response_process` criterion (project #13763, issue #1130):
+This is the process for responding to vulnerability reports:
 
 1. **Contact**: Send a detailed report to the security contact above, or use GitHub's private advisory feature.
 2. **Information to include**:
@@ -83,8 +82,8 @@ This section documents intentional security design decisions and known tradeoffs
 - Document the CA installation process for clients
 
 **When to use**: 
-- SSL mode (`192.168.1.11` DNS) is designed for maximum caching benefit
-- Clients that cannot or will not trust the CA can use standard mode instead
+- HTTPS mode (`192.168.1.11` DNS) is designed for maximum caching benefit
+- Clients that cannot or will not trust the CA can use HTTP mode instead
 
 ### 2. DNS Spoofing of CDN Domains
 
@@ -96,31 +95,29 @@ This section documents intentional security design decisions and known tradeoffs
 - Only known CDN domains are spoofed; see `services/dns/cdn-domains.txt`
 - Gaming consoles (PS5, Xbox) are explicitly excluded to prevent breakage
 - The spoofing scope is limited to a curated list; arbitrary domains are not affected
-- Clients can opt out by using standard mode (passthrough HTTPS) or external DNS
+- Clients can opt out by using HTTP mode (passthrough HTTPS) or external DNS
 
 **What is spoofed**: Game CDNs (Steam, Epic, Blizzard, etc.) and software distributors.
 
 **What is not spoofed**: Web browsers, corporate networks, banking, or other general-purpose traffic.
 
-**Optional upstream resolver**: If an operator sets `DNS_UPSTREAM_SERVERS`, the recursors forward the configured zones (default every name) to those resolvers instead of resolving them from the root servers. DNSSEC validation stays on for forwarded names; only the zones the operator lists in `DNS_UPSTREAM_UNSIGNED_ZONES` (private zones without signatures) are exempt, and the configured resolver is trusted for them. The settings are operator-only and empty by default; `setup.sh` and the DNS container reject loopback addresses, LanCache addresses and malformed entries; the container then starts without an upstream and logs an error.
+### 3. Docker Socket Mount in the services and ui Containers
 
-### 3. Docker Socket Mount in UI Container
+**Design**: Two containers mount the Docker daemon socket (SOT `DOCKER_SOCKET`, read-write, no socket proxy): `services` for its watchdog, which lists the stack's containers, inspects them and restarts a failing one, and `ui`, which wakes owner containers after it writes configs, reads container state and statistics, and runs commands in containers (`docker` module in `services/common/shared.rs`, `deploy/prod/docker-compose.yml`).
 
-**Design**: The Admin UI container mounts the Docker daemon socket (`/var/run/docker.sock`) to allow container management.
-
-**Known Risk**: The Docker socket is a privileged interface — any process with access can run arbitrary containers with full host privileges.
+**Known Risk**: The Docker socket is a privileged interface — any process with access can run arbitrary containers with full host privileges. A compromise of the `services` container or of the `ui` container is a host compromise. The Admin UI is network-facing, so its authentication is part of this risk.
 
 **Mitigation**:
-- Enable authentication for the Admin UI before production deployment
+- The `services` container drops all capabilities except the list in `deploy/prod/docker-compose.yml`
+- Enable the Admin UI authentication before production deployment (see section 4)
 - Configure Docker rootless mode on the host if available
-- Restrict network access to the Admin UI (do not expose to untrusted networks)
-- Use network policies or firewall rules to limit Admin UI access to trusted IPs
+- Restrict network access to the Admin UI and the `services` ports (do not expose them to untrusted networks)
 
 ### 4. Admin UI Authentication Must Be Explicit
 
-**Design**: The setup flow now requires either UI credentials or an explicit `ALLOW_INSECURE_UI=true` opt-in before the Admin UI can start without authentication.
+**Design**: The `ui` process stops at start when no password hash is set and `ALLOW_INSECURE_UI` is not true (`AG-SEC-001`).
 
-**Status**: Unauthenticated access is still possible, but only after an explicit operator decision.
+**Status**: Unauthenticated access is an explicit choice with a default of open (`ALLOW_INSECURE_UI=true`): `setup.sh` asks "Protect Admin-UI with password? [y/N]" (default No) and, on No, "Allow Admin-UI without authentication?"; answering No to both repeats the question. With a password set the Admin UI requires HTTP Basic credentials. `setup.sh reset-sign-in` turns the sign-in off after a lockout (see `docs/threat-model.md`, T3).
 
 **Required before production**:
 - Configure authentication for the Admin UI
@@ -128,21 +125,9 @@ This section documents intentional security design decisions and known tradeoffs
 - Restrict Admin UI access to trusted network segments
 - Do not expose the Admin UI directly to the internet
 
-### 5. NATS Event Bus (Port 4222) Exposed
+### 5. Upstream TLS Verification in nginx
 
-**Design**: NATS broker is used for inter-service communication and is exposed on port 4222.
-
-**Risk**: If exposed to the internet, untrusted clients could publish or subscribe to internal events.
-
-**Mitigation**:
-- NATS should only be accessible from within the LAN (not internet-facing)
-- Configure firewall rules to restrict port 4222 to LAN traffic only
-- Enable NATS authentication (username/password or client certificates) in production
-- Use network policies (e.g., `UFW`, `iptables`) to limit access
-
-### 6. Upstream TLS Verification in nginx
-
-**Design**: nginx proxies cached HTTP and SSL-mode requests to the real CDN over HTTPS and validates the upstream certificate chain (`proxy_ssl_verify on`).
+**Design**: nginx fetches the real CDN with the scheme the client used: HTTP requests over HTTP, HTTPS-mode requests over HTTPS with the upstream certificate chain validated (`proxy_ssl_verify on`).
 
 **Reason**: The proxy resolves upstream CDN hostnames with public DNS resolvers configured in nginx, not the local DNS-spoofing recursor, so certificate verification can validate the real origin.
 
@@ -172,13 +157,13 @@ different handling:
 
 **Runtime/deployment secrets** (generated for and used by a running
 lancache-ng install -- the local CA key, `PDNS_API_KEY`, `KEA_CTRL_TOKEN`,
-`DDNS_TSIG_KEY`, the four NATS role passwords, `UI_AUTH_PASSWORD`,
-`SECONDARY_REGISTRATION_TOKEN`, and per-secondary NATS credentials):
+`DDNS_TSIG_KEY`, `SNMP_COMMUNITY`, `UI_AUTH_PASSWORD` and
+`SECONDARY_REGISTRATION_TOKEN`):
 - **Storing**: written to the operator's own `.env` file (gitignored) or, for
   values shared across containers, a shared-secrets Docker volume (see
   `docs/threat-model.md` T4/T5/T12 for the exact mechanism per secret).
-  `ca.key` lives under `<install>/certs/` and is gitignored (`AGENTS.md`
-  `AG-KD-002`).
+  `ca.key` lives in the CA state directory (`CA_DIR`), outside the
+  checkout (`AGENTS.md` `AG-KD-002`).
 - **Accessing**: each service's entrypoint resolves only the specific
   secret(s) it needs from `.env`/the shared-secrets volume at startup; no
   service is handed a shared "all secrets" credential set.
@@ -188,8 +173,9 @@ lancache-ng install -- the local CA key, `PDNS_API_KEY`, `KEA_CTRL_TOKEN`,
   existing non-placeholder operator-supplied value is always preserved
   (`AGENTS.md` `AG-OP-006`/`AG-OP-009`). `setup.sh update`/`setup.sh
   auto-update` never rotates an already-set secret.
-- **Rotating**: the Admin UI exposes explicit rotation for
-  per-secondary NATS credentials (`POST /api/secondary/{name}/rotate-token`);
+- **Rotating**: the Admin UI exposes explicit rotation for the secondary
+  registration token (`/api/secondary/{name}/rotate`) and renews the TSIG key
+  when a secondary is removed (`/api/secondary/{name}/remove`);
   other runtime secrets are rotated by an operator manually setting a new
   value and running `setup.sh update` (which does not overwrite an existing
   non-placeholder value, so the operator must intentionally replace it).
@@ -205,65 +191,55 @@ Static Application Security Testing (SAST) remediation policy.
 
 ### SCA (dependency vulnerability) findings
 
-- **Tooling**: `cargo audit` runs against both first-party Rust crates
-  (`services/ui`, `services/dns/nats-subscriber`) on every pull request and
-  push, using `cargo audit --deny warnings` -- this denies on **any** reported
+- **Tooling**: `bash .github/scripts/ci.sh check cargo-audit` runs
+  `cargo audit --deny warnings` against the workspace lockfile
+  (`CI_CARGO_LOCK`): in `ci.yml` when the plan sees that lockfile change, and
+  daily in `nightly.yml` -- this denies on **any** reported
   advisory, not only Critical/High severity. Container base images and their
   OS packages are scanned with Trivy at image-build time.
 - **Threshold**: zero-tolerance by default. Any `cargo audit` finding, or any
   Trivy-reported vulnerability not already listed in `.trivyignore.yaml`, is
   treated as a blocking failure. A finding may only be accepted (not fixed) by
-  adding a justified entry to `.trivyignore.yaml` that states when the
-  exception ends (a fixed version becoming available) and carries no
-  deadline date -- there is no equivalent suppression file for `cargo audit`
+  adding a justified entry to `.trivyignore.yaml`; Trivy accepts the entry
+  without an exception expiry date, so the entry remains an explicit,
+  documented disposition rather than an untracked suppression -- there is no
+  equivalent suppression file for `cargo audit`
   findings today, so a Rust dependency advisory must be fixed (upgrade,
   patch, or replace the dependency) rather than suppressed.
 - **License findings**: dependency license compliance is not currently
   automated by a dedicated SCA license-scanning tool (e.g. `cargo-deny`'s
   license checks). This is a known gap; license review today is manual.
-- **Enforcement status**: the `cargo-audit (dns/nats-subscriber)` and
-  `cargo-audit (ui)` jobs run on every pull request and push to `current_dev`
-  (the active development branch, per issue #825's branch-model decision) and
-  feed into the `CI scope policy` job in `.github/workflows/build-push.yml`.
-  `CI scope policy` **is** a required branch-protection status check on
-  `master` -- but `master` receives only occasional stable-release promotions,
-  not day-to-day merges. **`current_dev`, where pull requests actually land,
-  currently has no branch protection rule at all** (confirmed via
-  `gh api repos/wiki-mod/lancache-ng/branches/current_dev/protection`, which
-  returns 404 "Branch not protected"). In practice this means a failing
-  `cargo-audit` result is clearly visible as a red check on a `current_dev`
-  PR, but nothing in GitHub's own repository configuration currently stops
-  that PR from being merged anyway. Closing this gap requires enabling branch
-  protection on `current_dev` with `CI scope policy` (or an equivalent
-  aggregate check) as a required status check -- a repository-settings change
-  for the maintainer to make, tracked as a Level 3 follow-up in issue #1130.
+- **Enforcement status**: the `cargo-audit` job of `.github/workflows/ci.yml`
+  runs `ci.sh check cargo-audit` when a change touches the workspace lockfile
+  (SOT `CI_CARGO_LOCK`), and the `cargo-audit` job of
+  `.github/workflows/nightly.yml` runs it once a day against new advisory
+  data. In `ci.yml` it feeds the `result` job, the always-present aggregate
+  check meant for branch protection. **`current_dev`, where pull requests
+  actually land, is protected** (as read with
+  `gh api repos/wiki-mod/lancache-ng/branches/current_dev/protection` and
+  `gh api repos/wiki-mod/lancache-ng/rulesets` on 2026-11-07): `result` is a required status
+  check, enforced for non-administrators (`enforce_admins` is false), and an
+  active ruleset requires a pull request before merging. A failing
+  `cargo-audit` result therefore fails `result` and blocks a `current_dev`
+  pull request for non-administrators.
 
 ### SAST (static analysis) findings
 
-- **Tooling**: GitHub CodeQL (`.github/workflows/codeql.yml`) analyzes the
-  `actions` (GitHub Actions workflow) and `rust` (both first-party crates)
-  languages on every pull request, push, and a daily schedule, uploading
-  results as GitHub code scanning alerts.
-- **Threshold**: any CodeQL alert on human-authored code (not the documented
-  macro-expansion extraction-warning carve-out in issue #394) at Error or
-  Warning severity must be triaged and either fixed or explicitly dismissed
-  with a documented reason before the affected code ships in a stable
-  release, matching this project's existing warnings-as-errors posture for
-  every other static check (`cargo clippy`, `shellcheck`, `actionlint`; see
-  `CONTRIBUTING.md`'s "Warning-as-errors policy").
-- **Enforcement status**: CodeQL already runs on every `current_dev` pull
-  request and push (`.github/workflows/codeql.yml`'s `branches:` list
-  explicitly includes `current_dev`, added by issue #709 specifically so
-  CodeQL keeps scanning the branch real work actually lands on), and results
-  are visible as GitHub code scanning alerts. Two things still need to happen
-  before a CodeQL finding actually blocks a merge, both tracked as Level 3
-  follow-ups in issue #1130: (1) the CodeQL analysis result is not yet fed
-  into the `CI scope policy` gate (or an equivalent check) the way
-  `cargo-audit` is, and (2) as described just above, `current_dev` has no
-  branch protection at all today, so even a check that is technically
-  required would not yet be enforced there. Until both land, enforcement of
-  this threshold relies on manual review of the repository's Security tab
-  before each release.
+- **Tooling**: GitHub CodeQL (`.github/workflows/codeql.yml`, workflow
+  `CI 2.0 CodeQL`) runs on every pull request, on pushes to `current_dev` and
+  `master`, and weekly (Monday 03:27 UTC). It analyzes the languages in
+  `codeql_languages` of `.github/yaml/build-manifest.yml`: `actions` (the
+  workflow directory) and `rust` (the `@rust_workspace` member directories).
+  Results are uploaded as GitHub code scanning alerts.
+- **Threshold**: any CodeQL alert on human-authored code at Error or Warning
+  severity must be triaged and either fixed or dismissed with a documented
+  reason before the affected code ships in a stable release.
+- **Enforcement status**: the `needs` list of the `result` job in
+  `.github/workflows/ci.yml` does not contain a CodeQL job, and the branch
+  protection of `current_dev` requires only the check `result`. A CodeQL alert
+  therefore does not block a merge. Before a release, the Security tab of the
+  repository is reviewed manually. It is planned that an issue is opened
+  automatically for a CodeQL alert and closed when the alert is fixed.
 
 ## Deployment Scope
 
@@ -280,9 +256,8 @@ Static Application Security Testing (SAST) remediation policy.
 1. **Network Isolation**: Run on a trusted, isolated LAN; do not expose to the internet without additional security.
 2. **Access Control**: Restrict Admin UI access to authorized users and network segments.
 3. **Firewall Rules**: Use network policies to limit service access (DNS, cache, Admin UI) to trusted IPs.
-4. **NATS Authentication**: Enable authentication in production deployments.
-5. **Logging and Monitoring**: Regularly review logs for suspicious activity.
-6. **Regular Updates**: Keep the software and dependencies up to date.
+4. **Logging and Monitoring**: Regularly review logs for suspicious activity.
+5. **Regular Updates**: Keep the software and dependencies up to date.
 
 ## Responsible Disclosure
 

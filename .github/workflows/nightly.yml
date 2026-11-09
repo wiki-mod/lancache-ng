@@ -47,7 +47,7 @@ env:
   # From: Issue #1683 | PR #1858
   PROJECT_SELFHOSTED_PROXY_CA: ${{ secrets.PROJECT_SELFHOSTED_PROXY_CA }}
   # What: the repo variables ci.sh reads, one by name.
-  # Why: Fund 94: the all-vars json put LAN IPs in logs.
+  # Why: a vars json would show LAN IPs in logs.
   # From: Issue #1683 | PR #1858
   CARGO_BUILD_JOBS: ${{ vars.CARGO_BUILD_JOBS }}
   PROJECT_CARGO_LTO: ${{ vars.PROJECT_CARGO_LTO }}
@@ -57,6 +57,8 @@ env:
   SCCACHE_REDIS_MODE: ${{ vars.SCCACHE_REDIS_MODE }}
   CI_RUST_VALIDATION: ${{ vars.CI_RUST_VALIDATION }}
   PR_TITLE_LINT_MODE: ${{ vars.PR_TITLE_LINT_MODE }}
+  PROJECT_DEBUG_MODE: ${{ vars.PROJECT_DEBUG_MODE }}
+  PROJECT_GC_DELETE_PAUSE_SECONDS: ${{ vars.PROJECT_GC_DELETE_PAUSE_SECONDS }}
   # What: LAN values only when self-hosted runners run.
   # Why: a GitHub-hosted log must show no LAN address.
   # From: Issue #1683 | PR #1858
@@ -94,13 +96,12 @@ jobs:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      # What: shallow x64 checkout of the nightly branch.
+      # What: shallow checkout of the nightly branch.
       # Why: schedule starts on master; master has no ci.sh.
-      # From: Issue #1683 | PR #1858
+      # From: Issue #1683 | PR #1984
       - &bootstrap
         name: Check out the nightly branch
-        if: runner.arch != 'ARM64'
-        uses: actions/checkout@v7
+        uses: &checkout actions/checkout@v7
         with:
           ref: ${{ vars.PROJECT_NIGHTLY_REF }}
           fetch-depth: 1
@@ -209,14 +210,12 @@ jobs:
       matrix: ${{ fromJSON(needs.plan.outputs.runners) }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: ${{ fromJSON(needs.platform.outputs.timeouts)['build'] }}
+    # What: x64 in build-tools; a native job on the host.
+    # Why: arm64 Alpine runs no JS action; the host does.
+    # From: Issue #1683 | PR #1984
     container:
-      image: ${{ needs.platform.outputs.image }}
+      image: ${{ matrix.native != 'true' && needs.platform.outputs.image || '' }}
       credentials: *ghcr_credentials
-      # What: the build-tools ref this job runs in.
-      # Why: ids and Rust builds read the platform resolve.
-      # From: Issue #1683 | PR #1912
-      env:
-        CI_BUILD_TOOLS_IMAGE: ${{ needs.platform.outputs.image }}
     # What: cache secrets the build's set-runtime needs.
     # Why: secrets reach ci.sh only by name, masked.
     # From: Issue #1683 | PR #1912
@@ -224,30 +223,23 @@ jobs:
       SCCACHE_REDIS_URL: ${{ secrets.SCCACHE_REDIS_URL }}
       SCCACHE_DIST_AUTH_TOKEN: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
     steps:
-      - *bootstrap
-      # What: arm64 checkout of the nightly branch by git.
-      # Why: no actions/checkout; push auth is CI_GIT_TOKEN.
-      # From: Issue #1683 | PR #1858
-      - name: Check out the nightly branch on arm64
-        if: runner.arch == 'ARM64'
-        uses: docker://mirror.gcr.io/alpine/git:latest
+      # What: shallow checkout of the resolved commit.
+      # Why: one tree per run, also on a native host.
+      # From: Issue #1683 | PR #1984
+      - name: Check out the resolved nightly commit
+        uses: *checkout
         with:
-          args: -c safe.directory=/github/workspace clone --depth 1 --branch=${{ vars.PROJECT_NIGHTLY_REF }} ${{ github.server_url }}/${{ github.repository }} /github/workspace
-      - *channel_pin
-      # What: export args for the GHA cache runtime step.
-      # Why: ci.sh owns the kill timeout and the var list.
-      # From: Issue #1683 | PR #1912
-      - name: Prepare the GHA cache runtime export
-        id: gha-runtime
-        run: bash .github/scripts/ci.sh gha-runtime-args
+          ref: ${{ needs.platform.outputs.commit }}
+          fetch-depth: 1
       # What: hand the GHA cache runtime to later steps.
       # Why: only action steps get ACTIONS_RUNTIME_TOKEN.
-      # From: Issue #1683 | PR #1912
-      - name: Export the GHA cache runtime
-        uses: docker://mirror.gcr.io/library/alpine:latest
+      # From: Issue #1683 | PR #1984
+      - &gha_export
+        name: Export the GHA cache runtime
+        uses: actions/github-script@v9
         with:
-          entrypoint: timeout
-          args: ${{ steps.gha-runtime.outputs.args }}
+          script: |
+            for (const k of ['ACTIONS_RESULTS_URL', 'ACTIONS_RUNTIME_TOKEN']) core.exportVariable(k, process.env[k] ?? '');
       # What: build, then publish and verify the result.
       # Why: publish is not build; readback proves it.
       # From: Issue #1683 | PR #1912
@@ -264,7 +256,13 @@ jobs:
           # Why: the arm64 checkout leaves no git auth.
           # From: Issue #1683 | PR #1858
           CI_GIT_TOKEN: &git_token ${{ secrets.GITHUB_TOKEN }}
-        run: bash .github/scripts/ci.sh ship "${SERVICE}" "${PLATFORM}"
+          # What: build-tools ref, mode, kill minutes.
+          # Why: a native job hands them to one docker run.
+          # From: Issue #1683 | PR #1984
+          CI_BUILD_TOOLS_IMAGE: &bt_ref ${{ needs.platform.outputs.image }}
+          CI_BUILD_TOOLS_NATIVE: &bt_native ${{ matrix.native }}
+          CI_BUILD_TOOLS_RUN_MINUTES: &bt_minutes ${{ fromJSON(needs.platform.outputs.timeouts)['build'] }}
+        run: bash .github/scripts/ci.sh build-tools-run ship "${SERVICE}" "${PLATFORM}"
       # What: frees this run's build lock after a cancel.
       # Why: a cancel stops the step; bash gets no signal.
       # From: Issue #1683 | PR #1912
@@ -275,7 +273,10 @@ jobs:
           PLATFORM: ${{ matrix.platform }}
           CI_RUN_IDENTITIES: *run_ids
           CI_GIT_TOKEN: *git_token
-        run: bash .github/scripts/ci.sh ship-release "${SERVICE}" "${PLATFORM}"
+          CI_BUILD_TOOLS_IMAGE: *bt_ref
+          CI_BUILD_TOOLS_NATIVE: *bt_native
+          CI_BUILD_TOOLS_RUN_MINUTES: *bt_minutes
+        run: bash .github/scripts/ci.sh build-tools-run ship-release "${SERVICE}" "${PLATFORM}"
 
   # What: aggregate this run's acceptance into the ledger.
   # Why: one aggregator, one CAS commit, after the scan.
@@ -348,11 +349,22 @@ jobs:
       credentials: *ghcr_credentials
       volumes:
         - ${{ needs.platform.outputs.validate-dir }}:${{ needs.platform.outputs.validate-dir }}
+      # What: the build-tools ref this job runs in.
+      # Why: the state-root clear runs in it, no alpine.
+      # From: Issue #1683 | PR #1984
+      env:
+        CI_BUILD_TOOLS_IMAGE: ${{ needs.platform.outputs.image }}
     outputs:
       stack: ${{ steps.validate.outputs.stack }}
     steps:
       - *bootstrap
       - *channel_pin
+      - *gha_export
+      # What: load the PSL, store it in the Actions cache.
+      # Why: jobs and PR runs read it there.
+      # From: Issue #1683 | PR #1984
+      - name: Refresh the Public Suffix List
+        run: bash .github/scripts/ci.sh update-psl refresh
       - name: Validate the accepted stack candidate
         id: validate
         env:
@@ -432,6 +444,11 @@ jobs:
       credentials: *ghcr_credentials
       volumes:
         - ${{ needs.platform.outputs.validate-dir }}:${{ needs.platform.outputs.validate-dir }}
+      # What: the build-tools ref this job runs in.
+      # Why: the state-root clear runs in it, no alpine.
+      # From: Issue #1683 | PR #1984
+      env:
+        CI_BUILD_TOOLS_IMAGE: ${{ needs.platform.outputs.image }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
@@ -482,7 +499,7 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       # What: the tool releases the platform job read.
-      # Why: no later job reads the API again (Fund 146).
+      # Why: no later job reads the API again.
       # From: Issue #1683 | PR #1858
       CI_TOOL_RELEASES: ${{ needs.platform.outputs.releases }}
     outputs:

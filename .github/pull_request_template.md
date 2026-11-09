@@ -61,7 +61,8 @@ validation performed, and any explicit follow-up issue. Keep this section update
 PR evolves -- edit this body directly rather than adding new comments for progress/changelog
 updates. Do NOT edit CHANGELOG.md in this PR: every simultaneously-open PR editing the same
 "### Fixed"-style heading guarantees a merge conflict with every other one. CHANGELOG.md is
-written automatically at release time: `ci.sh release-publish` puts this section, under the
-PR's title and grouped by its labels, into the GitHub Release notes, and `ci.sh
-release-changelog` adds them to CHANGELOG.md for a stable tag (see CONTRIBUTING.md's
-"Releasing Changes to CHANGELOG.md"). Write this section for release readers. -->
+written automatically at release time: `ci.sh release-draft` lists this PR's title, grouped
+by its labels, in the draft GitHub Release; the maintainer publishes the draft, and `ci.sh
+release-changelog` adds the published notes to CHANGELOG.md for a vX.Y.Z release tag (see
+CONTRIBUTING.md's "Releasing Changes to CHANGELOG.md"). Write this section for release
+readers. -->

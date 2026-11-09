@@ -1,252 +1,66 @@
+
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
-# DNS service: PowerDNS (recursor + authoritative), nats-subscriber binary, Lua RPZ scripts.
+# SPDX-License-Identifier: AGPL-3.0-or-later
 
-# Intentional ARG default (overridable at build time via --build-arg).
-# Actual digest pinning for release builds is tracked in issue #508.
-ARG BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools:latest
-FROM ${BUILD_TOOLS_IMAGE} AS subscriber-builder
+# What: dns image: PowerDNS auth and two recursors.
+# Why: OpenRC keeps each SOT process alive.
+# From: Issue #1683 | PR #1980
 
-# The shared build-tools image already carries the Rust toolchain, sccache,
-# distcc, distcc-pump, and the supporting Debian packages. Keep this stage
-# lean and fail closed if the contract is not met.
-RUN set -eu; \
-    for tool in cargo rustc rustup rustfmt clippy-driver sccache distcc distcc-pump python3 pkg-config; do \
-      command -v "$tool" >/dev/null; \
-    done; \
-    distcc_bin="$(command -v distcc)"; \
-    mkdir -p /usr/local/lib/distcc; \
-    for wrapper in cc gcc c++ g++; do ln -sf "$distcc_bin" "/usr/local/lib/distcc/$wrapper"; done; \
-    printf '%s\n' \
-      '#!/bin/sh' \
-      'case "${1:-}" in' \
-      '  distcc|*/distcc) exec "$@" ;;' \
-      '  *) exec /usr/local/bin/sccache "$@" ;;' \
-      'esac' \
-      > /usr/local/bin/lancache-rustc-wrapper; \
-    chmod +x /usr/local/bin/lancache-rustc-wrapper
+# What: base image pin, supplied by ci.sh from the SOT.
+# Why: SOT base_images.alpine is the sole owner.
+# From: Issue #1683
+ARG ALPINE_IMAGE
 
-ARG CARGO_BUILD_JOBS=
+# What: final image on the SOT Alpine pin.
+# Why: scratch only fails a build without the arg.
+# From: Issue #1683 | PR #1980
+FROM ${ALPINE_IMAGE:-scratch}
 
-WORKDIR /build
-COPY nats-subscriber/ .
-# The shell functions defined inside this RUN (in call order):
-#   configure_sccache      - opt-in cache wrapper, only if a sccache secret was mounted.
-#   configure_distcc       - opt-in distributed compile, only if a distcc hosts secret was
-#                            mounted; probes the pump daemon with a trivial compile first.
-#   disable_distcc         - rollback path used by configure_distcc/run_cargo_build on failure;
-#                            shuts down distcc-pump and restores the pre-distcc PATH/env.
-#   resolve_distcc_wrapper_dir - locates the cc/gcc/c++/g++ -> distcc wrapper symlinks.
-#   resolve_cargo_jobs     - CARGO_BUILD_JOBS if set, else nproc-2 floored at 4.
-#   run_cargo_build        - builds with distcc if enabled, retrying once locally on failure.
-# NOTE: comments cannot be embedded inside this block itself. Docker's line-continuation
-# strips the backslash-newline entirely (no newline is inserted), so a "#" comment ending
-# in "\" would swallow every following continuation line as commented-out text instead of
-# executable shell, silently dropping the rest of the build. Verified empirically.
-RUN --mount=type=secret,id=sccache_redis_url \
-    --mount=type=secret,id=sccache_dist_config \
-    --mount=type=secret,id=distcc_potential_hosts \
-    set -eu; \
-    distcc_enabled=0; \
-    original_path="$PATH"; \
-    configure_sccache() { \
-      if [ -s /run/secrets/sccache_redis_url ] || [ -s /run/secrets/sccache_dist_config ]; then \
-        unset CARGO_MAKEFLAGS MAKEFLAGS; \
-        export RUSTC_WRAPPER=/usr/local/bin/lancache-rustc-wrapper SCCACHE_REDIS_KEY_PREFIX=lancache-dns; \
-        if [ -s /run/secrets/sccache_redis_url ]; then \
-        SCCACHE_REDIS="$(cat /run/secrets/sccache_redis_url)"; export SCCACHE_REDIS; \
-        fi; \
-        if [ -s /run/secrets/sccache_dist_config ]; then \
-          export SCCACHE_CONF=/run/secrets/sccache_dist_config; \
-          sccache --dist-status; \
-        fi; \
-      fi; \
-    }; \
-    disable_distcc() { \
-      if [ "${distcc_enabled:-0}" = "1" ]; then distcc-pump --shutdown >/dev/null 2>&1 || true; fi; \
-      distcc_enabled=0; \
-      trap - EXIT; \
-      unset DISTCC_POTENTIAL_HOSTS DISTCC_HOSTS DISTCC_FALLBACK CC GCC CXX GXX INCLUDE_SERVER_PORT INCLUDE_SERVER_PID; \
-      PATH="$original_path"; \
-      export PATH; \
-    }; \
-    resolve_distcc_wrapper_dir() { \
-      for candidate in /usr/local/lib/distcc /usr/lib/distcc; do \
-        if [ -x "$candidate/cc" ] && [ -x "$candidate/gcc" ] && [ -x "$candidate/c++" ] && [ -x "$candidate/g++" ]; then \
-          printf '%s\n' "$candidate"; \
-          return 0; \
-        fi; \
-      done; \
-      echo "distcc wrapper directory not found" >&2; \
-      exit 1; \
-    }; \
-    configure_distcc() { \
-      if [ -s /run/secrets/distcc_potential_hosts ]; then \
-        distcc_probe_dir="$(mktemp -d)"; \
-        DISTCC_POTENTIAL_HOSTS="$(cat /run/secrets/distcc_potential_hosts)"; export DISTCC_POTENTIAL_HOSTS; \
-        echo "[INFO] trying distcc path." >&2; \
-        distcc_wrapper_dir="$(resolve_distcc_wrapper_dir)"; \
-        export PATH="$distcc_wrapper_dir:$PATH" CC=cc GCC=gcc CXX=c++ GXX=g++ DISTCC_FALLBACK=0; \
-        if ! distcc_pump_env="$(distcc-pump --startup 2>"$distcc_probe_dir/distcc-pump.log")"; then \
-          disable_distcc; \
-          rm -rf "$distcc_probe_dir"; \
-          echo "[INFO] distcc pump unavailable; continuing with normal local C compiler." >&2; \
-          return 0; \
-        fi; \
-        eval "$distcc_pump_env"; \
-        PATH="$distcc_wrapper_dir:$PATH"; \
-        export PATH; \
-        export CC=cc GCC=gcc CXX=c++ GXX=g++; \
-        distcc_enabled=1; \
-        trap 'distcc-pump --shutdown' EXIT; \
-        printf '%s\n' 'int main(void) { return 0; }' > "$distcc_probe_dir/distcc-probe.c"; \
-        if ! cc -c "$distcc_probe_dir/distcc-probe.c" -o "$distcc_probe_dir/distcc-probe.o" >"$distcc_probe_dir/distcc-probe.log" 2>&1; then \
-          disable_distcc; \
-          rm -rf "$distcc_probe_dir"; \
-          echo "[INFO] distcc probe unavailable; continuing with normal local C compiler." >&2; \
-          return 0; \
-        fi; \
-        rm -rf "$distcc_probe_dir"; \
-      fi; \
-    }; \
-    resolve_cargo_jobs() { \
-      jobs="${CARGO_BUILD_JOBS:-}"; \
-      if [ -z "$jobs" ]; then \
-        cores="$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN || echo 2)"; \
-        jobs=$((cores - 2)); \
-        if [ "$jobs" -lt 4 ]; then jobs=4; fi; \
-      fi; \
-      case "$jobs" in ''|*[!0-9]*) echo "CARGO_BUILD_JOBS must be a positive integer" >&2; exit 1;; esac; \
-      if [ "$jobs" -le 0 ]; then echo "CARGO_BUILD_JOBS must be greater than zero" >&2; exit 1; fi; \
-      printf '%s\n' "$jobs"; \
-    }; \
-    run_cargo_build() { \
-      cargo_log="$(mktemp)"; \
-      cargo_status_file="$(mktemp)"; \
-      { set +e; cargo build -j "$cargo_jobs" --release 2>&1; echo "$?" >"$cargo_status_file"; set -e; } | tee "$cargo_log"; \
-      cargo_status="$(cat "$cargo_status_file")"; \
-      rm -f "$cargo_status_file"; \
-      if [ "$cargo_status" = "0" ]; then rm -f "$cargo_log"; return 0; fi; \
-      if [ "${distcc_enabled:-0}" = "1" ]; then \
-        disable_distcc; \
-        unset RUSTC_WRAPPER SCCACHE_REDIS SCCACHE_CONF SCCACHE_REDIS_KEY_PREFIX; \
-        echo "[INFO] distcc build path unavailable; retrying with normal local C compiler." >&2; \
-        if cargo build -j "$cargo_jobs" --release; then \
-          echo "[INFO] normal local C compiler fallback completed." >&2; \
-          rm -f "$cargo_log"; \
-          return 0; \
-        fi; \
-        rm -f "$cargo_log"; \
-        return 1; \
-      fi; \
-      if grep -Eqi 'sccache: error|Fixed token mismatch|Timed out waiting for server startup|SCCACHE_' "$cargo_log"; then \
-        unset RUSTC_WRAPPER SCCACHE_REDIS SCCACHE_CONF SCCACHE_REDIS_KEY_PREFIX; \
-        echo "[INFO] sccache build path unavailable; retrying with sccache disabled." >&2; \
-        rm -f "$cargo_log"; \
-        if cargo build -j "$cargo_jobs" --release; then \
-          echo "[INFO] sccache-disabled fallback completed." >&2; \
-          return 0; \
-        fi; \
-        return 1; \
-      fi; \
-      echo "[ERROR] cargo build failed for reasons unrelated to sccache or distcc; not retrying." >&2; \
-      rm -f "$cargo_log"; \
-      return "$cargo_status"; \
-    }; \
-    configure_sccache; \
-    configure_distcc; \
-    cargo_jobs="$(resolve_cargo_jobs)"; \
-    run_cargo_build
+# What: build identity keys the cache of later layers.
+# Why: a new package set must not reuse a stale layer.
+# From: Issue #1683 | PR #1980
+ARG BUILD_IDENTITY
+ARG APK_PACKAGES
+ARG APK_BOOTSTRAP
+# What: bash first; every later RUN uses it.
+# Why: ci.sh is bash; ash is not allowed.
+# From: Issue #1683 | PR #1980
+RUN apk add --no-cache ${APK_BOOTSTRAP}
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+ARG CI_RETRY_MAX_ATTEMPTS
+ARG CI_RETRY_BACKOFF_BASE_SECONDS
+ARG CI_DOWNLOAD_CONNECT_TIMEOUT
+ARG CI_DOWNLOAD_STALL_SECONDS
+# What: packages and accounts through ci.sh.
+# Why: ci.sh owns repos, proxy CA, users and dirs.
+# From: Issue #1683 | PR #1980
+RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
+    --mount=type=secret,id=project_selfhosted_proxy_ca \
+    bash /usr/local/bin/ci.sh apk-setup ${APK_PACKAGES}
+ARG IMAGE_SETUP
+RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
+    bash /usr/local/bin/ci.sh image-setup
 
-FROM mirror.gcr.io/library/debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2
+# What: shared gid, SOT defaults and SOT schema.
+# Why: the programs read them as env; compose names none.
+# From: Issue #1683 | PR #1980
+ARG LANCACHE_RUNTIME_GID
+ARG LANCACHE_RUNTIME_DEFAULTS
+ARG LANCACHE_RUNTIME_SCHEMA
+ENV LANCACHE_RUNTIME_GID=${LANCACHE_RUNTIME_GID} \
+    LANCACHE_RUNTIME_DEFAULTS=${LANCACHE_RUNTIME_DEFAULTS} \
+    LANCACHE_RUNTIME_SCHEMA=${LANCACHE_RUNTIME_SCHEMA}
 
-LABEL org.opencontainers.image.description="PowerDNS recursor, authoritative DNS, and NATS subscriber service for lancache-ng cache routing."
+# What: one supervise-daemon script per SOT process.
+# Why: OpenRC restarts crashes; @KEY@ e.g. CONFIG_DIR.
+# From: Issue #1683 | PR #1980
+ARG LANCACHE_PROCESSES
+ARG LANCACHE_PROCESS_PRE
+ARG LANCACHE_INIT_PRE
+RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
+    bash /usr/local/bin/ci.sh openrc-setup
 
-# trixie-backports is the standard package source for this image (maintainer
-# decision, 2026-07-30, mirrored from services/proxy/Dockerfile) -- not scoped
-# to any single package: `Package: *` at Pin-Priority 500 (tied with the
-# regular trixie archive) applies project-wide to every Debian-based image, so
-# ordinary version-comparison rules pick whichever archive has the newer
-# version for ANY package this stage installs. `apt-get dist-upgrade` then
-# `apt-get full-upgrade` are both run deliberately (a maintainer decision to
-# keep both explicit, even though modern apt treats `full-upgrade` as the same
-# operation `dist-upgrade` performs) so any package backports has already
-# patched gets picked up on every rebuild, not only whatever prompted the
-# original policy decision.
-#
-# The pin selector below MUST use `a=stable-backports`, not `a=trixie-backports`:
-# APT's `a=`/release-Archive selector matches the Release file's `Suite:`
-# field, and trixie-backports' own Release file declares
-# `Suite: stable-backports` / `Codename: trixie-backports` -- the two are not
-# interchangeable. Using `a=trixie-backports` silently never matches anything
-# (apt-cache policy still shows backports at its Debian-default priority 100),
-# so every "backports-sourced" package would silently stay on the plain-trixie
-# version despite the pin file being present -- this was caught for real on
-# services/proxy/Dockerfile by building the image and checking the installed
-# package version rather than trusting the Dockerfile comment; see that file's
-# own history for the incident.
-#
-# Debian package triggers try to start services during image builds; the entrypoint starts PDNS instead.
-# The stub is restored to the real invoke-rc.d (not just left in place) once this
-# layer's installs finish, via a trap so it runs even if apt-get itself fails --
-# so a future RUN layer, or anything inspecting this image, still finds the real
-# invoke-rc.d rather than a permanent no-op stub that outlives the one install it
-# was needed for.
-RUN set -eu; \
-    export DEBIAN_FRONTEND=noninteractive; \
-    cleanup_invoke_rc_d() { \
-        rm -f /usr/sbin/invoke-rc.d; \
-        if [ -x /usr/sbin/invoke-rc.d.real ]; then mv /usr/sbin/invoke-rc.d.real /usr/sbin/invoke-rc.d; fi; \
-    }; \
-    trap cleanup_invoke_rc_d EXIT; \
-    if [ -x /usr/sbin/invoke-rc.d ]; then mv /usr/sbin/invoke-rc.d /usr/sbin/invoke-rc.d.real; fi; \
-    printf '%s\n' '#!/bin/sh' 'exit 0' > /usr/sbin/invoke-rc.d; \
-    chmod +x /usr/sbin/invoke-rc.d; \
-    echo "deb http://deb.debian.org/debian trixie-backports main" > /etc/apt/sources.list.d/backports.list; \
-    printf 'Package: *\nPin: release a=stable-backports\nPin-Priority: 500\n' > /etc/apt/preferences.d/backports; \
-    apt-get update && apt-get dist-upgrade -y && apt-get full-upgrade -y && apt-get install -y --no-install-recommends \
-    pdns-recursor \
-    pdns-server \
-    pdns-backend-sqlite3 \
-    dnsutils \
-    sqlite3 \
-    gettext-base \
-    iproute2 \
-    locales \
-    nano \
-    lsof \
-    ripgrep \
-    curl \
-    && echo "en_US.UTF-8 UTF-8" >> /etc/locale.gen \
-    && locale-gen \
-    && rm -rf /var/lib/apt/lists/*
-
-ENV LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
-# nano/lsof/ripgrep: in-container troubleshooting tools -- see
-# services/proxy/Dockerfile's identical comment for the full rationale.
-# curl: unlike Kea's Control Agent (reachable from the host directly via
-# network_mode: host), nats-subscriber's zone-rollback listener (port 8083,
-# see rollback_listener.rs) is only `expose`d to the Compose network, never
-# published to the host -- so `setup.sh reset-to-last-known-good-config
-# dns`/`pdns` reaches it via `docker compose exec` into THIS container
-# rather than calling it directly from the host. dhcp/proxy/ui/watchdog
-# already carry curl for comparable internal/operational HTTP calls; this
-# is the same justification, not a new pattern.
-ENV EDITOR=nano
-ENV VISUAL=$EDITOR
-
-RUN mkdir -p /etc/pdns/auth /var/lib/powerdns /var/run/pdns \
-    && chown -R pdns:pdns /var/lib/powerdns /var/run/pdns
-
-COPY --from=subscriber-builder /build/target/release/nats-subscriber /usr/local/bin/nats-subscriber
-
-COPY recursor.conf.template /etc/pdns/recursor.conf.template
-COPY pdns.conf.template /etc/pdns/auth/pdns.conf.template
-COPY recursor.lua /etc/pdns/recursor.lua
-COPY filter-aaaa.lua /etc/pdns/filter-aaaa.lua
-COPY cdn-domains.txt /etc/pdns/cdn-domains.txt
-COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
-
-EXPOSE 53/udp 53/tcp 8081 8082 8083
-
-ENTRYPOINT ["/entrypoint.sh"]
+# What: OpenRC as PID 1; compose may name a runlevel.
+# Why: openrc-init reaps zombies and stops on SIGTERM.
+# From: Issue #1683 | PR #1980
+ENTRYPOINT ["/usr/local/bin/lancache-init"]

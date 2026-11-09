@@ -1,326 +1,301 @@
-{# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 
-   DHCP management page: server status and conflict detection. #}
+{# LanCache-NG (https://github.com/wiki-mod/lancache-ng) #}
+{# SPDX-License-Identifier: AGPL-3.0-or-later #}
+
+{# What: DHCP page: mode, conflict check, subnets, leases #}
+{# Why: mode and Kea state are read on each request #}
+{# From: Issue #1683 | PR #1912 #}
 {% extends "base.html" %}
+{% block title %} – DHCP{% endblock %}
+
+{# What: NTP auto-assign hint under the subnet forms #}
+{# Why: one copy for the add form and every edit form #}
+{# From: Issue #1683 | PR #1912 #}
+{% component ntp_auto_hint(ntp_url, t) %}<p class="text-xs text-amber-300 mt-1">{{ t.lancache_ng_ntp_s_fill_in }} <a href="{{ ntp_url | safe }}" class="underline">{{ t.ntp_page }}</a> {{ t.or_a_dhcp_mode_change_replaced }}</p>{% endcomponent ntp_auto_hint %}
+
+{# What: one labelled input with optional hint #}
+{# Why: one frame for all forms; tone sets bg and border #}
+{# From: Issue #1683 | PR #1912 #}
+{% component text_field(label, name, tone="bg-slate-800 border-slate-600", value="", placeholder="", required=false, hint=none, type="text", min=none, max=none) %}<div>
+              <label class="block text-xs text-slate-400 mb-1">{{ label }}</label>
+              <input type="{{ type }}" name="{{ name }}" value="{{ value }}"{% if placeholder %} placeholder="{{ placeholder }}"{% endif %}{% if min is not none %} min="{{ min }}"{% endif %}{% if max is not none %} max="{{ max }}"{% endif %}{% if required %} required{% endif %}
+                class="w-full px-3 py-2 border rounded text-white text-sm {{ tone }}">
+              {% if hint is not none %}<p class="text-xs text-slate-500 mt-1">{{ hint | safe }}</p>{% endif %}
+            </div>{% endcomponent text_field %}
+
+{# What: the nine fields of one Kea subnet #}
+{# Why: add and edit forms differ only in values and tone #}
+{# From: Issue #1683 | PR #1912 #}
+{% component subnet_fields(t, tone, ntp_auto, ntp_url, lease_time, subnet="", gateway="", dns_primary="", dns_secondary="", pool_start="", pool_end="", domain="", ntp_servers="") %}<div class="grid grid-cols-2 gap-3">
+            {{ <text_field label={t.subnet_cidr} name="subnet" tone={tone} value={subnet} placeholder="192.168.1.0/24" required={true}/> }}
+            {{ <text_field label="Gateway" name="gateway" tone={tone} value={gateway} placeholder="192.168.1.1" required={true}/> }}
+            {{ <text_field label={t.dns_server_1} name="dns_primary" tone={tone} value={dns_primary} placeholder="192.168.1.10" required={true}/> }}
+            {{ <text_field label={t.dns_server_2} name="dns_secondary" tone={tone} value={dns_secondary} placeholder="192.168.1.11"/> }}
+            {{ <text_field label={t.ip_pool_start} name="pool_start" tone={tone} value={pool_start} placeholder="192.168.1.100" required={true}/> }}
+            {{ <text_field label={t.ip_pool_end} name="pool_end" tone={tone} value={pool_end} placeholder="192.168.1.200" required={true}/> }}
+            {{ <text_field label={t.lease_time_s} name="lease_time" tone={tone} value={lease_time ~ ""}/> }}
+            {{ <text_field label={t.dhcp_domain_label} name="domain" tone={tone} value={domain}/> }}
+            <div class="col-span-2">
+              {{ <text_field label={t.ntp_server} name="ntp_servers" tone={tone} value={ntp_servers} placeholder="192.0.2.123, 192.0.2.124"/> }}
+              {% if ntp_auto %}
+              {{ <ntp_auto_hint ntp_url={ntp_url} t={t}/> }}
+              {% endif %}
+            </div>
+          </div>{% endcomponent subnet_fields %}
 
 {% block content %}
-<div class="max-w-5xl mx-auto space-y-6">
+{# What: field tone of the forms on a bg-slate-700 panel #}
+{# Why: add-subnet and reservation forms share one tone #}
+{# From: Issue #1683 | PR #1912 #}
+{% set raised_tone = "bg-slate-600 border-slate-500" %}
+<div class="space-y-6">
 
   <div>
-    <h1 class="text-xl font-bold text-white">DHCP-Verwaltung</h1>
-    <p class="text-sm text-slate-400 mt-1">
-      DHCP-Modus, Kea-Subnetze, Reservierungen und Leases werden hier gemeinsam verwaltet.
-    </p>
+    <p class="eyebrow">{{ t.settings_dhcp }}</p>
+    <h1 class="page-title">DHCP</h1>
   </div>
 
-  <div class="flex items-center gap-2 border-b border-slate-700">
-    <a href="/dhcp"
-       class="px-4 py-2 text-sm font-medium border-b-2 {% if active_page == "dhcp" %}border-blue-500 text-blue-300{% else %}border-transparent text-slate-400 hover:text-slate-200{% endif %}">
-      DHCP
-    </a>
-    <a href="/secondaries"
-       class="px-4 py-2 text-sm font-medium border-b-2 {% if active_page == "secondaries" %}border-blue-500 text-blue-300{% else %}border-transparent text-slate-400 hover:text-slate-200{% endif %}">
-      Secondary
-    </a>
+  {# What: capability table of the three DHCP modes
+     Why: copied from the mockup; folds away
+     From: Issue #1683 | PR #1976 #}
+  <div class="compare-toggle" id="compare-toggle">
+    <span id="compare-caret">▸</span> {{ t.compare_dhcp_server_dhcp_proxy_and }}
+  </div>
+  <div class="card compare-card" id="compare-card" style="display:none;">
+    <div class="card-body" style="padding:0;">
+      <table class="compare-table">
+        <tr>
+          <th>{{ t.capability }}</th>
+          <th>DHCP-Server</th>
+          <th>DHCP-Proxy</th>
+          <th>DHCP-Relay</th>
+        </tr>
+        <tr><td>{{ t.issues_ip_addresses_to_devices }}</td><td class="yes">✓</td><td class="no">{{ t.supplemental_only }}</td><td class="no">{{ t.forwards_to_another_server }}</td></tr>
+        <tr><td>{{ t.static_reservations_always_the_same_addr }}</td><td class="yes">✓</td><td class="no">—</td><td class="no">—</td></tr>
+        <tr><td>{{ t.lease_time_control }}</td><td class="yes">✓</td><td class="no">{{ t.issues_no_lease_of_its_own }}</td><td class="no">{{ t.issues_no_lease_of_its_own }}</td></tr>
+        <tr><td>{{ t.dns_gateway_ntp_domain_options }}</td><td class="yes">✓</td><td class="partial">{{ t.for_pxe_network_boot_devices_only }}</td><td class="no">{{ t.comes_from_the_remote_server }}</td></tr>
+        <tr><td>{{ t.pxe_network_boot_options }}</td><td class="yes">✓</td><td class="yes">✓</td><td class="no">—</td></tr>
+        <tr><td>{{ t.works_alongside_another_dhcp_server_on }}</td><td class="no">{{ t.conflicts_by_design }}</td><td class="yes">✓</td><td class="yes">{{ t.that_s_its_whole_purpose }}</td></tr>
+        <tr><td>{{ t.relays_requests_to_a_dhcp_server }}</td><td class="no">—</td><td class="no">—</td><td class="yes">✓</td></tr>
+      </table>
+      <div class="compare-footnote">{{ t.shows_what_the_admin_ui_offers }}</div>
+    </div>
   </div>
 
+  {# What: mode choice sits above the mode tabs
+     Why: only one DHCP mode can be active at a time
+     From: Issue #1683 | PR #1858 #}
+  <div>
+  {# What: DHCP mode select, form of the active mode #}
+  {# Why: proxy and relay values exist only in their mode #}
+  {# From: Issue #1683 | PR #1912 #}
   <div class="card space-y-4">
     <div class="flex flex-wrap items-center justify-between gap-3">
       <div>
-        <h2 class="font-semibold text-slate-200">DHCP mode</h2>
-        <p class="text-xs text-slate-500 mt-0.5">Der Modus wird live aus der UI-Konfiguration gelesen und persistent in `/data` gespeichert.</p>
+        <div class="section-title" style="margin-top:0;">{{ t.dhcp_mode }}</div>
+        <p class="text-xs text-slate-500 mt-0.5">{{ t.applied_after_saving_and_kept }}</p>
       </div>
-      <span class="text-xs px-2 py-1 rounded bg-slate-700 text-slate-200">{{ dhcp_mode }}</span>
+      <span class="beambar-dot" data-dot-status="{% if dhcp_mode == "off" %}gray{% else %}green{% endif %}"></span>
     </div>
 
-    <form method="post" action="/dhcp/mode" class="grid gap-3 md:grid-cols-2 items-end">
+    <form method="post" action="{{ routes.dhcp_mode | safe }}" class="flex flex-wrap items-end gap-3">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <div>
-        <label class="block text-xs text-slate-400 mb-1">Aktiver DHCP-Modus</label>
+      <div style="min-width:220px; max-width:320px; flex:1 1 220px;">
+        <label class="block text-xs text-slate-400 mb-1">{{ t.active_dhcp_mode }}</label>
         <select name="dhcp_mode"
                 class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-blue-500">
-          <option value="disabled" {% if dhcp_mode == "disabled" %}selected{% endif %}>disabled</option>
-          <option value="kea" {% if dhcp_mode == "kea" %}selected{% endif %}>kea</option>
-          <option value="dnsmasq-proxy" {% if dhcp_mode == "dnsmasq-proxy" %}selected{% endif %}>dnsmasq-proxy</option>
-          <option value="dnsmasq-relay" {% if dhcp_mode == "dnsmasq-relay" %}selected{% endif %}>dnsmasq-relay</option>
+          {# What: DhcpMode::ALL names, shown as roles
+             Why: DoMe 07.11.: Server, Proxy, Relay only
+             From: Issue #1683 | PR #1985 #}
+          {% for mode in dhcp_modes %}
+          <option value="{{ mode }}" {% if dhcp_mode == mode %}selected{% endif %}>{% if mode == "kea" %}DHCP-Server{% elif mode == "dnsmasq-proxy" %}DHCP-Proxy{% elif mode == "dnsmasq-relay" %}DHCP-Relay{% else %}{{ t.svc_st_gray }}{% endif %}</option>
+          {% endfor %}
         </select>
       </div>
+      {# What: one network card for every DHCP mode
+         Why: live 229: without one Kea answered nobody
+         From: Issue #1683 #}
+      <div style="min-width:220px; max-width:320px; flex:1 1 220px;">
+        {{ <text_field label={t.dhcp_interface} name="dhcp_proxy_interface" value={dhcp_proxy_interface} placeholder="eth0"/> }}
+      </div>
       <button type="submit"
-              class="bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors">
-        Speichern
+              class="btn btn-blue" style="width:auto;">
+        {{ t.save }}
       </button>
     </form>
 
-    {% if dhcp_mode == "dnsmasq-proxy" %}
-      <div class="text-sm text-amber-300 space-y-2">
-        <p>dnsmasq proxy mode is active. This page shows the live proxy values and lets you edit them directly as simple fields.</p>
-        <ul class="list-disc pl-5 space-y-1 text-amber-200">
-          <li>Proxy-DHCP / PXE helper only -- the upstream/router DHCP server keeps issuing every ordinary client's lease and options</li>
-          <li>Every option below (router, NTP, domain, PXE/TFTP boot info, custom options) is delivered only through the supplemental ProxyDHCP/PXE exchange, to PXE/network-boot-aware clients. Ordinary clients never see them; their DNS, gateway, NTP, and domain settings come entirely from the upstream server.</li>
-          <li>No lease-time field: dnsmasq never issues a lease of its own in this mode, so a lease-time value would have no effect. Use Kea mode if you need LanCache NG to control lease time.</li>
-          <li>All fields below are plain text (IPs, a filename, a domain name); no JSON, no client-class syntax, no advanced parser tricks</li>
-        </ul>
-        <div class="grid gap-2 md:grid-cols-2 rounded border border-amber-500/30 bg-slate-900/50 p-3 text-xs">
-          <div><span class="text-slate-400">Subnet start:</span> <span class="text-white">{{ dhcp_proxy_subnet_start }}</span></div>
-          <div><span class="text-slate-400">Upstream DHCP (info only):</span> <span class="text-white">{{ dhcp_upstream_dhcp_ip }}</span></div>
-          <div><span class="text-slate-400">DNS 1:</span> <span class="text-white">{{ dhcp_dns_primary }}</span></div>
-          <div><span class="text-slate-400">DNS 2:</span> <span class="text-white">{{ dhcp_dns_secondary }}</span></div>
-        </div>
-        <form method="post" action="/dhcp/proxy" class="space-y-3 rounded border border-amber-500/30 bg-slate-900/50 p-4">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <div class="grid gap-3 md:grid-cols-2">
-            <div>
-              <label class="block text-xs text-slate-400 mb-1">Proxy subnet start</label>
-              <input type="text" name="dhcp_subnet_start" value="{{ dhcp_proxy_subnet_start }}" placeholder="10.0.0.0" required
-                class="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded text-white text-sm">
-            </div>
-            <div>
-              <label class="block text-xs text-slate-400 mb-1">Upstream DHCP server (documentation only)</label>
-              <input type="text" name="upstream_dhcp_ip" value="{{ dhcp_upstream_dhcp_ip }}" placeholder="10.0.0.1" required
-                class="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded text-white text-sm">
-              <p class="text-xs text-slate-500 mt-1">ProxyDHCP mode never needs to contact this server to work; recorded so you and the DHCP conflict check agree on which server owns real leases.</p>
-            </div>
-            <div>
-              <label class="block text-xs text-slate-400 mb-1">DNS-Server 1</label>
-              <input type="text" name="dhcp_dns_primary" value="{{ dhcp_dns_primary }}" placeholder="10.0.0.10" required
-                class="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded text-white text-sm">
-            </div>
-            <div>
-              <label class="block text-xs text-slate-400 mb-1">DNS-Server 2</label>
-              <input type="text" name="dhcp_dns_secondary" value="{{ dhcp_dns_secondary }}" placeholder="10.0.0.11"
-                class="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded text-white text-sm">
-            </div>
-            <div>
-              <label class="block text-xs text-slate-400 mb-1">Listen interface (optional)</label>
-              <input type="text" name="dhcp_proxy_interface" value="{{ dhcp_proxy_interface }}" placeholder="eth0"
-                class="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded text-white text-sm">
-              <p class="text-xs text-slate-500 mt-1">Bind dnsmasq to one host interface instead of all of them. Leave empty on a single-NIC host.</p>
-            </div>
-            <div>
-              <label class="block text-xs text-slate-400 mb-1">Router/gateway option (optional, PXE-scoped)</label>
-              <input type="text" name="dhcp_proxy_router" value="{{ dhcp_proxy_router }}" placeholder="10.0.0.1"
-                class="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded text-white text-sm">
-            </div>
-            <div>
-              <label class="block text-xs text-slate-400 mb-1">NTP servers (optional, PXE-scoped)</label>
-              <input type="text" name="dhcp_ntp_servers" value="{{ dhcp_ntp_servers }}" placeholder="10.0.0.20, 10.0.0.21"
-                class="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded text-white text-sm">
-              <p class="text-xs text-slate-500 mt-1">Comma-separated IPv4 list.</p>
-            </div>
-            <div>
-              <label class="block text-xs text-slate-400 mb-1">Domain option (optional, PXE-scoped)</label>
-              <input type="text" name="dhcp_proxy_domain" value="{{ dhcp_proxy_domain }}" placeholder="lan.local"
-                class="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded text-white text-sm">
-            </div>
-            <div>
-              <label class="block text-xs text-slate-400 mb-1">PXE boot filename (optional)</label>
-              <input type="text" name="dhcp_proxy_boot_filename" value="{{ dhcp_proxy_boot_filename }}" placeholder="pxelinux.0"
-                class="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded text-white text-sm">
-            </div>
-            <div>
-              <label class="block text-xs text-slate-400 mb-1">PXE boot server address (optional)</label>
-              <input type="text" name="dhcp_proxy_boot_server" value="{{ dhcp_proxy_boot_server }}" placeholder="10.0.0.5"
-                class="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded text-white text-sm">
-              <p class="text-xs text-slate-500 mt-1">Requires a boot filename above; defaults to this host's own address if left empty while a filename is set.</p>
-            </div>
-            <div class="col-span-2">
-              <label class="block text-xs text-slate-400 mb-1">Additional safe custom options (optional, PXE-scoped)</label>
-              <textarea name="dhcp_proxy_custom_options" rows="3" placeholder="60:PXEClient&#10;93:0"
-                class="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded text-white text-sm font-mono">{{ dhcp_proxy_custom_options_form }}</textarea>
-              <p class="text-xs text-slate-500 mt-1">One <code>CODE:VALUE</code> pair per line, e.g. <code>60:PXEClient</code>. Codes already used by the dedicated fields above (3, 6, 15, 42) are rejected here to avoid two conflicting ways to set the same option.</p>
-            </div>
-          </div>
-          <button type="submit"
-                  class="bg-amber-600 hover:bg-amber-500 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors">
-            Proxy-Werte speichern
-          </button>
-        </form>
-      </div>
-    {% elif dhcp_mode == "dnsmasq-relay" %}
-      {# Issue #844: real DHCP-relay mode -- distinct from ProxyDHCP above. #}
-      <div class="text-sm text-sky-300 space-y-2">
-        <p>dnsmasq relay mode is active. dnsmasq forwards every client's DHCP request to the upstream DHCP server and relays the reply back, so the upstream server owns the whole lease and all options.</p>
-        <ul class="list-disc pl-5 space-y-1 text-sky-200">
-          <li>Unlike ProxyDHCP mode, this is a real relay: it is useful when clients and the upstream DHCP server are on different network segments and the client broadcasts cannot reach the server directly.</li>
-          <li>Only two values are needed: this relay's own address on the client-facing network (stamped into the relayed request's <code>giaddr</code>, which the upstream server uses to pick the pool) and the upstream server address.</li>
-          <li>No subnet/DNS/PXE fields here -- a relay injects nothing of its own. Use ProxyDHCP mode for PXE option injection, or Kea mode to own leases here.</li>
-        </ul>
-        <form method="post" action="/dhcp/relay" class="space-y-3 rounded border border-sky-500/30 bg-slate-900/50 p-4">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <div class="grid gap-3 md:grid-cols-2">
-            <div>
-              <label class="block text-xs text-slate-400 mb-1">Relay local address (this relay's client-facing IP)</label>
-              <input type="text" name="dhcp_relay_local_addr" value="{{ dhcp_relay_local_addr }}" placeholder="192.168.1.2" required
-                class="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded text-white text-sm">
-              <p class="text-xs text-slate-500 mt-1">The IP dnsmasq listens on for client DHCP broadcasts; forwarded as <code>giaddr</code> so the upstream server selects the right pool.</p>
-            </div>
-            <div>
-              <label class="block text-xs text-slate-400 mb-1">Upstream DHCP server</label>
-              <input type="text" name="upstream_dhcp_ip" value="{{ dhcp_upstream_dhcp_ip }}" placeholder="10.0.0.1" required
-                class="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded text-white text-sm">
-              <p class="text-xs text-slate-500 mt-1">The real DHCP server every relayed request is forwarded to.</p>
-            </div>
-          </div>
-          <button type="submit"
-                  class="bg-sky-600 hover:bg-sky-500 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors">
-            Relay-Werte speichern
-          </button>
-        </form>
-      </div>
-    {% elif dhcp_mode == "kea" %}
-      <div class="text-sm text-green-400 space-y-2">
-        <p>Kea mode is active. The configuration area below is visible and editable with direct fields for gateway, DNS, NTP, reservations, and subnet details.</p>
-        <ul class="list-disc pl-5 space-y-1 text-green-300">
-          <li>Managed subnet values: gateway, pool, DNS servers, NTP servers, lease time, and domain-related DHCP options</li>
-          <li>Current Kea subnet editor preserves unmanaged <code>option-data</code> entries on save, but exposes only simple fields here</li>
-          <li>Static reservations and live leases are available below</li>
-        </ul>
-      </div>
-    {% else %}
-      <p class="text-sm text-slate-400">DHCP management is disabled. The configuration area stays visible so the mode can be re-enabled later, but no active DHCP service is running.</p>
+    {% if not dhcp_is_dnsmasq and not dhcp_is_relay and not dhcp_has_kea %}
+      <p class="text-sm text-slate-400">{{ t.dhcp_management_is_disabled_the_configur }}</p>
     {% endif %}
   </div>
+  </div>
 
-  {% if dhcp_has_kea %}
-  <!-- DHCP Conflict Check -->
+  {# What: five tabs; each shows one panel
+     Why: the mockup groups DHCP by mode
+     From: Issue #1683 | PR #1976 #}
+  <div class="subtabs">
+    <button type="button" data-dhcp-tab="server" class="subtab dhcp-tab-btn">DHCP-Server</button>
+    <button type="button" data-dhcp-tab="proxy" class="subtab dhcp-tab-btn">DHCP-Proxy</button>
+    <button type="button" data-dhcp-tab="relay" class="subtab dhcp-tab-btn">DHCP-Relay</button>
+    <button type="button" data-dhcp-tab="precheck" class="subtab dhcp-tab-btn">{{ t.dhcp_precheck }}</button>
+  </div>
+
+
+  <div data-dhcp-panel="proxy" class="hidden">
+      {# What: ProxyDHCP values and their edit form #}
+      {# Why: options reach only PXE clients in this mode #}
+      {# From: Issue #1683 | PR #1912 #}
+      <div class="text-sm text-amber-300 space-y-2">
+        {% if dhcp_is_dnsmasq and not dhcp_is_relay %}<p>{{ t.dnsmasq_proxy_mode_is_active_this }}</p>{% else %}<p class="text-lg font-bold text-orange-400">{{ t.dhcp_proxy_is_not_the_active }}</p>{% endif %}
+        <p class="text-amber-200">{{ t.proxy_dhcp_pxe_helper_only_the }}</p>
+        <form method="post" action="{{ routes.dhcp_proxy | safe }}" class="space-y-3 rounded border border-amber-500/30 bg-slate-900/50 p-4">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <div class="grid gap-3 md:grid-cols-2">
+            {{ <text_field label={t.proxy_subnet_start} name="dhcp_subnet_start" value={dhcp_proxy_subnet_start} placeholder="192.168.1.0"/> }}
+            {{ <text_field label={t.dns_server_1} name="dhcp_dns_primary" value={dhcp_dns_primary} placeholder="192.168.1.10"/> }}
+            {{ <text_field label={t.dns_server_2} name="dhcp_dns_secondary" value={dhcp_dns_secondary} placeholder="192.168.1.11"/> }}
+            {{ <text_field label={t.router_gateway_option_optional_pxe_scope} name="dhcp_proxy_router" value={dhcp_proxy_router} placeholder="192.168.1.1"/> }}
+            {{ <text_field label={t.ntp_servers_optional_pxe_scoped} name="dhcp_ntp_servers" value={dhcp_ntp_servers} placeholder="192.168.1.20, 192.168.1.21"/> }}
+            {{ <text_field label={t.domain_option_optional_pxe_scoped} name="dhcp_proxy_domain" value={dhcp_proxy_domain} placeholder={dhcp_domain}/> }}
+            {{ <text_field label={t.pxe_boot_filename_optional} name="dhcp_proxy_boot_filename" value={dhcp_proxy_boot_filename} placeholder="pxelinux.0"/> }}
+            {{ <text_field label={t.pxe_boot_server_address_optional} name="dhcp_proxy_boot_server" value={dhcp_proxy_boot_server} placeholder="192.168.1.5"/> }}
+            <div class="col-span-2">
+              <label class="block text-xs text-slate-400 mb-1">{{ t.additional_safe_custom_options_optional }}</label>
+              <textarea name="dhcp_proxy_custom_options" rows="3" placeholder="60:PXEClient&#10;93:0"
+                class="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded text-white text-sm font-mono">{{ dhcp_proxy_custom_options_form }}</textarea>
+              <p class="text-xs text-slate-500 mt-1">{{ t.one }} <code>CODE:VALUE</code> {{ t.pair_per_line_e_g }} <code>60:PXEClient</code>{{ t.codes_already_used_by_the_dedicated }}{{ dnsmasq_managed_codes | join(sep=", ") }}{{ t.are_rejected_here_to_avoid_two }}</p>
+            </div>
+          </div>
+          <button type="submit"
+                  class="btn btn-amber">
+            {{ t.save_proxy_values }}
+          </button>
+        </form>
+      </div>
+  </div>
+
+  <div data-dhcp-panel="relay" class="hidden">
+      {# What: real DHCP relay to the upstream server #}
+      {# Why: client broadcasts cannot reach upstream #}
+      {# From: Issue #844 #}
+      <div class="text-sm text-sky-300 space-y-2">
+        {% if dhcp_is_relay %}<p>{{ t.dnsmasq_relay_mode_is_active_dnsmasq }}</p>{% else %}<p class="text-lg font-bold text-orange-400">{{ t.dhcp_relay_is_not_the_active }}</p>{% endif %}
+        <p class="text-sky-200">{{ t.unlike_proxydhcp_mode_this_is_a }}</p>
+        <form method="post" action="{{ routes.dhcp_relay | safe }}" class="space-y-3 rounded border border-sky-500/30 bg-slate-900/50 p-4">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <div class="grid gap-3 md:grid-cols-2">
+            {{ <text_field label={t.relay_local_address_this_relay_s} name="dhcp_relay_local_addr" value={dhcp_relay_local_addr} placeholder="192.168.1.2"/> }}
+            {{ <text_field label={t.upstream_dhcp_server} name="upstream_dhcp_ip" value={dhcp_upstream_dhcp_ip} placeholder="192.168.1.1" required={true}/> }}
+          </div>
+          <button type="submit"
+                  class="btn btn-sky">
+            {{ t.save_relay_values }}
+          </button>
+        </form>
+      </div>
+  </div>
+
+  <div data-dhcp-panel="precheck" class="hidden">
+  <!-- What: status card for the DHCP conflict probe -->
+  <!-- Why: element ids are read by checkDhcpConflict() -->
+  <!-- From: Issue #1683 | PR #1912 -->
   <div id="dhcp-check" class="bg-slate-800 border border-slate-700 rounded-lg p-4">
     <div class="flex items-center justify-between">
       <div>
-        <h3 class="text-sm font-medium text-white mb-1">DHCP Server Status</h3>
-        <p id="check-status" class="text-sm text-slate-400">Prüfe Konfliktprobe und DHCP-Client-Dry-Run...</p>
-        <p id="check-conflict-status" class="text-sm text-slate-400 mt-1">Konfliktprobe läuft noch nicht.</p>
-        {# Lists the extra nmap broadcast-dhcp-discover fields (Router, DNS, lease time, ...) for a
-           found conflicting server, alongside the address already shown above in check-conflict-status.
-           Hidden by default/on every re-check; only populated+shown by checkDhcpConflict() itself when
-           data.conflict.status === 'found' and details are present, see script below. #}
+        <h3 class="text-sm font-medium text-white mb-1">{{ t.dhcp_server_status }}</h3>
+        <p id="check-status" class="text-sm text-slate-400">{{ t.checking_conflict_probe_and_dhcp_client }}</p>
+        <p id="check-conflict-status" class="text-sm text-slate-400 mt-1">{{ t.conflict_probe_is_not_running_yet }}</p>
+        {# What: extra fields of the found DHCP server #}
+        {# Why: address above; hidden without details #}
+        {# From: Issue #1683 | PR #1912 #}
         <ul id="check-conflict-details" class="text-xs text-slate-400 mt-1 ml-4 list-disc hidden"></ul>
-        <p id="check-client-status" class="text-sm text-slate-400 mt-1">DHCP-Client-Dry-Run läuft noch nicht.</p>
-        {# Lists the lease fields (assigned IP, router, DNS, lease time, ...) dhclient actually
-           negotiated on a SUCCESSFUL dry-run, alongside the summary already shown above in
-           check-client-status -- same rendering pattern as check-conflict-details above, just for
-           the "it worked, here's what we got" case instead of "a rogue server answered". Hidden by
-           default/on every re-check; only populated+shown by checkDhcpConflict() itself when
-           data.client.status === 'passed' and details are present, see script below. #}
+        <p id="check-client-status" class="text-sm text-slate-400 mt-1">{{ t.dhcp_client_dry_run_is_not }}</p>
+        {# What: lease fields of a passed client dry-run #}
+        {# Why: summary above; hidden without details #}
+        {# From: Issue #1683 | PR #1912 #}
         <ul id="check-client-details" class="text-xs text-slate-400 mt-1 ml-4 list-disc hidden"></ul>
       </div>
-      <button onclick="checkDhcpConflict()" class="px-3 py-1 text-sm bg-slate-700 hover:bg-slate-600 text-white rounded">
-        Erneut prüfen
+      <button onclick="checkDhcpConflict()" class="btn btn-slate">
+        {{ t.check_again }}
       </button>
     </div>
   </div>
+  </div>
 
-  {# DDNS-Updates (issue #1076): eigener Schalter, unabhängig vom DHCP-Modus.
-     Steuert Keas dhcp-ddns.enable-updates live über die Kea-Control-API. #}
+  <div data-dhcp-panel="server" class="hidden">
+    {% if dhcp_has_kea and not dhcp_is_dnsmasq and not dhcp_is_relay %}
+      {# What: Kea mode summary of the managed values #}
+      {# Why: lists what the subnet editor below manages #}
+      {# From: Issue #1683 | PR #1912 #}
+      <div class="text-sm text-green-400 space-y-2">
+        <p>{{ t.kea_mode_is_active_the_configuration }}</p>
+        <ul class="list-disc pl-5 space-y-1 text-green-300">
+          <li>{{ t.managed_subnet_values_gateway_pool_dns }}</li>
+          <li>{{ t.current_kea_subnet_editor_preserves_unma }} <code>option-data</code> {{ t.entries_on_save_but_exposes_only }}</li>
+          <li>{{ t.static_reservations_and_live_leases_are }}</li>
+        </ul>
+      </div>
+    {% endif %}
+    {% if not dhcp_has_kea %}<p class="text-lg font-bold text-orange-400">{{ t.dhcp_server_is_not_the_active }}</p>{% endif %}
+  {# What: toggles Kea dhcp-ddns.enable-updates live #}
+  {# Why: DNS writes are a separate decision from DHCP #}
+  {# From: Issue #1076 #}
   <div class="bg-slate-800 border border-slate-700 rounded-lg p-4">
     <div class="flex items-center justify-between gap-4">
       <div>
-        <h3 class="text-sm font-medium text-white mb-1">DDNS-Updates</h3>
+        <h3 class="text-sm font-medium text-white mb-1">{{ t.ddns_updates }}</h3>
         <p class="text-xs text-slate-500">
-          Wenn aktiviert, schreibt Kea für jede Lease automatisch einen A- und PTR-Eintrag ins LAN-DNS
-          (Kea D2, <code>dhcp-ddns.enable-updates</code>). Unabhängig vom DHCP-Modus: Kea-DHCP zu betreiben
-          heißt nicht automatisch, dass auch DNS gepflegt werden soll.
+          {{ t.when_on_kea_writes_an_a }} <code>dhcp-ddns.enable-updates</code>{{ t.independent_of_the_dhcp_mode_running }}
         </p>
       </div>
-      <span class="text-xs px-2 py-1 rounded {% if dhcp_ddns_enabled %}bg-green-900 text-green-200{% else %}bg-slate-700 text-slate-200{% endif %}">
-        {% if dhcp_ddns_enabled %}aktiv{% else %}inaktiv{% endif %}
-      </span>
+      {{ <on_off_badge on={dhcp_ddns_enabled} t={t}/> }}
     </div>
-    <form method="POST" action="/dhcp/ddns" class="mt-3 grid gap-3 md:grid-cols-[1fr_auto] items-end">
+    <form method="POST" action="{{ routes.dhcp_ddns | safe }}" class="mt-3 grid gap-3 md:grid-cols-[1fr_auto] items-end">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <div>
-        <label class="block text-xs text-slate-400 mb-1">DDNS-Updates aktivieren</label>
+        <label class="block text-xs text-slate-400 mb-1">{{ t.enable_ddns_updates }}</label>
         <select name="enabled"
                 class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-blue-500">
-          <option value="true" {% if dhcp_ddns_enabled %}selected{% endif %}>aktiviert</option>
-          <option value="false" {% if not dhcp_ddns_enabled %}selected{% endif %}>deaktiviert</option>
+          <option value="true" {% if dhcp_ddns_enabled %}selected{% endif %}>{{ t.enabled }}</option>
+          <option value="false" {% if not dhcp_ddns_enabled %}selected{% endif %}>{{ t.disabled }}</option>
         </select>
       </div>
       <button type="submit"
-              class="bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors">
-        Speichern
+              class="btn btn-blue">
+        {{ t.save }}
       </button>
     </form>
   </div>
 
-  <!-- Subnetze -->
+  {# What: Kea subnet list with add, edit, remove forms #}
+  {# Why: add form stays hidden until toggleAddSubnet() #}
+  {# From: Issue #1683 | PR #1912 #}
   <div class="bg-slate-800 border border-slate-700 rounded-lg p-6">
     <div class="flex items-center justify-between mb-4">
-      <h2 class="text-lg font-semibold text-white">Subnetze</h2>
-      <button onclick="toggleAddSubnet()" class="px-3 py-1 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded">
-        + Subnet hinzufügen
+      <h2 class="text-lg font-semibold text-white">{{ t.subnets }}</h2>
+      <button onclick="toggleAddSubnet()" class="btn btn-blue">
+        {{ t.add_subnet }}
       </button>
     </div>
 
-    <!-- Add Subnet Form (hidden by default) -->
     <div id="add-subnet-form" class="hidden mb-6 p-4 bg-slate-700 rounded border border-slate-600">
-      <h3 class="text-sm font-medium text-white mb-3">Neues Subnet</h3>
-      <form method="POST" action="/dhcp/subnet/add" class="space-y-3">
+      <h3 class="text-sm font-medium text-white mb-3">{{ t.new_subnet }}</h3>
+      <form method="POST" action="{{ routes.subnet_add | safe }}" class="space-y-3">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <div class="grid grid-cols-2 gap-3">
-          <div>
-            <label class="block text-xs text-slate-400 mb-1">Subnet (CIDR)</label>
-            <input type="text" name="subnet" placeholder="192.168.2.0/24" required
-              class="w-full px-3 py-2 bg-slate-600 border border-slate-500 rounded text-white text-sm">
-          </div>
-          <div>
-            <label class="block text-xs text-slate-400 mb-1">Gateway</label>
-            <input type="text" name="gateway" placeholder="192.168.2.1" required
-              class="w-full px-3 py-2 bg-slate-600 border border-slate-500 rounded text-white text-sm">
-          </div>
-          <div>
-            <label class="block text-xs text-slate-400 mb-1">DNS-Server 1</label>
-            <input type="text" name="dns_primary" value="{{ dhcp_dns_primary }}" placeholder="192.168.2.10" required
-              class="w-full px-3 py-2 bg-slate-600 border border-slate-500 rounded text-white text-sm">
-          </div>
-          <div>
-            <label class="block text-xs text-slate-400 mb-1">DNS-Server 2</label>
-            <input type="text" name="dns_secondary" value="{{ dhcp_dns_secondary }}" placeholder="192.168.2.11"
-              class="w-full px-3 py-2 bg-slate-600 border border-slate-500 rounded text-white text-sm">
-          </div>
-          <div>
-            <label class="block text-xs text-slate-400 mb-1">IP-Pool Start</label>
-            <input type="text" name="pool_start" placeholder="192.168.2.100" required
-              class="w-full px-3 py-2 bg-slate-600 border border-slate-500 rounded text-white text-sm">
-          </div>
-          <div>
-            <label class="block text-xs text-slate-400 mb-1">IP-Pool Ende</label>
-            <input type="text" name="pool_end" placeholder="192.168.2.200" required
-              class="w-full px-3 py-2 bg-slate-600 border border-slate-500 rounded text-white text-sm">
-          </div>
-          <div>
-            <label class="block text-xs text-slate-400 mb-1">Lease-Zeit (s)</label>
-            <input type="text" name="lease_time" value="86400"
-              class="w-full px-3 py-2 bg-slate-600 border border-slate-500 rounded text-white text-sm">
-          </div>
-          <div>
-            <label class="block text-xs text-slate-400 mb-1">Domain</label>
-            <input type="text" name="domain" value="lan"
-              class="w-full px-3 py-2 bg-slate-600 border border-slate-500 rounded text-white text-sm">
-          </div>
-          <div class="col-span-2">
-            <label class="block text-xs text-slate-400 mb-1">NTP-Server</label>
-            <input type="text" name="ntp_servers" value="{{ dhcp_ntp_servers }}" placeholder="192.0.2.123, 192.0.2.124"
-              class="w-full px-3 py-2 bg-slate-600 border border-slate-500 rounded text-white text-sm">
-            <p class="text-xs text-slate-500 mt-1">Kommagetrennte IPv4-Liste. Leerlassen, wenn du keinen NTP-Wert verteilen willst.</p>
-            {% if ntp_auto_dhcp_active %}
-            <p class="text-xs text-amber-300 mt-1">LanCache-NG-NTP's "Als DHCP-NTP-Server automatisch eintragen" ist aktiv -- ein hier gesetzter Wert wird bei der nächsten Speicherung auf der <a href="/ntp" class="underline">NTP-Seite</a> (oder einem DHCP-Moduswechsel) wieder durch die LAN-Adresse von LanCache-NG-NTP ersetzt.</p>
-            {% endif %}
-          </div>
-        </div>
+        {{ <subnet_fields t={t} tone={raised_tone} ntp_auto={ntp_auto_dhcp_active} ntp_url={pages.setup} dns_primary={dhcp_dns_primary} dns_secondary={dhcp_dns_secondary} lease_time={default_lease_time} domain={dhcp_domain} ntp_servers={dhcp_ntp_servers}/> }}
         <div class="flex gap-2">
-          <button type="submit" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded text-sm font-medium">
-            Hinzufügen
+          <button type="submit" class="btn btn-blue">
+            {{ t.add_2 }}
           </button>
-          <button type="button" onclick="toggleAddSubnet()" class="px-4 py-2 bg-slate-600 hover:bg-slate-500 text-white rounded text-sm">
-            Abbrechen
+          <button type="button" onclick="toggleAddSubnet()" class="btn btn-slate">
+            {{ t.cancel }}
           </button>
         </div>
       </form>
     </div>
 
-    <!-- Subnet List -->
     {% if subnets | length == 0 %}
-    <p class="text-slate-500 text-sm py-4 text-center">Keine Subnetze konfiguriert</p>
+    <p class="text-slate-500 text-sm py-4 text-center">{{ t.no_subnets_configured }}</p>
     {% endif %}
 
     {% for subnet in subnets %}
@@ -334,92 +309,44 @@
           {% endif %}
         </div>
         <div class="flex gap-2">
-          <button onclick="toggleEditSubnet({{ subnet.id }})" class="text-xs px-2 py-1 bg-slate-600 hover:bg-slate-500 text-white rounded">
-            Bearbeiten
+          <button onclick="toggleEditSubnet({{ subnet.id }})" class="btn btn-sm btn-slate">
+            {{ t.edit }}
           </button>
-          <form method="POST" action="/dhcp/subnet/remove" class="inline"
-            onsubmit="return confirm('Subnet {{ subnet.subnet }} löschen?')">
+          <form method="POST" action="{{ routes.subnet_remove | safe }}" class="inline"
+            data-ask="{{ t.delete_subnet_q | replace(from="{x}", to=subnet.subnet) }}" onsubmit="return confirm(this.dataset.ask)">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <input type="hidden" name="id" value="{{ subnet.id }}">
-            <button type="submit" class="text-xs px-2 py-1 bg-red-900 hover:bg-red-800 text-red-200 rounded">
-              Löschen
+            <button type="submit" class="btn btn-sm btn-danger">
+              {{ t.delete }}
             </button>
           </form>
         </div>
       </div>
 
-      <!-- Edit Subnet Form (hidden by default) -->
       <div id="edit-subnet-{{ subnet.id }}" class="hidden p-4 bg-slate-750 border-t border-slate-600">
-        <form method="POST" action="/dhcp/subnet/update" class="space-y-3">
+        <form method="POST" action="{{ routes.subnet_update | safe }}" class="space-y-3">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <input type="hidden" name="id" value="{{ subnet.id }}">
-          <div class="grid grid-cols-2 gap-3">
-            <div>
-              <label class="block text-xs text-slate-400 mb-1">Subnet (CIDR)</label>
-              <input type="text" name="subnet" value="{{ subnet.subnet }}" required
-                class="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white text-sm">
-            </div>
-            <div>
-              <label class="block text-xs text-slate-400 mb-1">Gateway</label>
-              <input type="text" name="gateway" value="{{ subnet.gateway }}" required
-                class="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white text-sm">
-            </div>
-            <div>
-              <label class="block text-xs text-slate-400 mb-1">DNS-Server 1</label>
-              <input type="text" name="dns_primary" value="{{ subnet.dns_primary }}" required
-                class="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white text-sm">
-            </div>
-            <div>
-              <label class="block text-xs text-slate-400 mb-1">DNS-Server 2</label>
-              <input type="text" name="dns_secondary" value="{{ subnet.dns_secondary }}"
-                class="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white text-sm">
-            </div>
-            <div>
-              <label class="block text-xs text-slate-400 mb-1">Pool Start</label>
-              <input type="text" name="pool_start" value="{{ subnet.pool_start }}" required
-                class="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white text-sm">
-            </div>
-            <div>
-              <label class="block text-xs text-slate-400 mb-1">Pool Ende</label>
-              <input type="text" name="pool_end" value="{{ subnet.pool_end }}" required
-                class="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white text-sm">
-            </div>
-            <div>
-              <label class="block text-xs text-slate-400 mb-1">Lease-Zeit (s)</label>
-              <input type="text" name="lease_time" value="{{ subnet.lease_time }}"
-                class="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white text-sm">
-            </div>
-            <div>
-              <label class="block text-xs text-slate-400 mb-1">Domain</label>
-              <input type="text" name="domain" value="{{ subnet.domain }}"
-                class="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white text-sm">
-            </div>
-            <div class="col-span-2">
-              <label class="block text-xs text-slate-400 mb-1">NTP-Server</label>
-              <input type="text" name="ntp_servers" value="{{ subnet.ntp_servers }}"
-                class="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded text-white text-sm">
-              <p class="text-xs text-slate-500 mt-1">Kommagetrennte IPv4-Adressen, z. B. <code>192.0.2.123, 192.0.2.124</code></p>
-              {% if ntp_auto_dhcp_active %}
-              <p class="text-xs text-amber-300 mt-1">LanCache-NG-NTP's "Als DHCP-NTP-Server automatisch eintragen" ist aktiv -- ein hier gesetzter Wert wird bei der nächsten Speicherung auf der <a href="/ntp" class="underline">NTP-Seite</a> (oder einem DHCP-Moduswechsel) wieder durch die LAN-Adresse von LanCache-NG-NTP ersetzt.</p>
-              {% endif %}
-            </div>
-          </div>
+          {{ <subnet_fields t={t} tone="bg-slate-700 border-slate-600" ntp_auto={ntp_auto_dhcp_active} ntp_url={pages.setup} subnet={subnet.subnet} gateway={subnet.gateway} dns_primary={subnet.dns_primary} dns_secondary={subnet.dns_secondary} pool_start={subnet.pool_start} pool_end={subnet.pool_end} lease_time={subnet.lease_time} domain={subnet.domain} ntp_servers={subnet.ntp_servers}/> }}
           <div class="flex gap-2">
-            <button type="submit" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded text-sm font-medium">
-              Speichern
+            <button type="submit" class="btn btn-blue">
+              {{ t.save }}
             </button>
-            <button type="button" onclick="toggleEditSubnet({{ subnet.id }})" class="px-4 py-2 bg-slate-600 hover:bg-slate-500 text-white rounded text-sm">
-              Abbrechen
+            <button type="button" onclick="toggleEditSubnet({{ subnet.id }})" class="btn btn-slate">
+              {{ t.cancel }}
             </button>
           </div>
         </form>
       </div>
 
+      {# What: free DHCPv4 code/value options per subnet #}
+      {# Why: fixed fields own router, DNS, domain, NTP #}
+      {# From: Issue #1683 | PR #1912 #}
       <div class="p-4 bg-slate-900/40 border-t border-slate-700 space-y-3">
         <div>
-          <h3 class="text-sm font-medium text-slate-200">Zusätzliche DHCP-Optionen</h3>
+          <h3 class="text-sm font-medium text-slate-200">{{ t.extra_dhcp_options }}</h3>
           <p class="text-xs text-slate-500 mt-1">
-            Freie Kea-Optionen werden als einfache DHCPv4-Code/Wert-Paare verwaltet. Router, DNS, Domain, Domain-Search und NTP bleiben über die festen Felder oben geschützt.
+            {{ t.free_kea_options_are_kept_as }} {{ kea_managed_codes | join(sep=", ") }} {{ t.stay_protected_by_the_fixed_fields }}
           </p>
         </div>
 
@@ -433,38 +360,30 @@
               <span class="text-slate-500 mx-2">→</span>
               <span class="text-slate-200">{{ option.data }}</span>
             </div>
-            <form method="POST" action="/dhcp/subnet/option/remove" class="inline"
-              onsubmit="return confirm('DHCP-Option {{ option.code }} aus {{ subnet.subnet }} entfernen?')">
+            <form method="POST" action="{{ routes.subnet_option_remove | safe }}" class="inline"
+              data-ask="{{ t.remove_option_q | replace(from="{x}", to=option.code ~ "") | replace(from="{y}", to=subnet.subnet) }}" onsubmit="return confirm(this.dataset.ask)">
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
               <input type="hidden" name="subnet_id" value="{{ subnet.id }}">
               <input type="hidden" name="code" value="{{ option.code }}">
               <input type="hidden" name="data" value="{{ option.data }}">
-              <button type="submit" class="text-xs px-2 py-1 bg-red-900 hover:bg-red-800 text-red-200 rounded">
-                Entfernen
+              <button type="submit" class="btn btn-sm btn-danger">
+                {{ t.remove }}
               </button>
             </form>
           </div>
           {% endfor %}
         </div>
         {% else %}
-        <p class="text-xs text-slate-500">Keine zusätzlichen DHCP-Optionen für dieses Subnet konfiguriert.</p>
+        <p class="text-xs text-slate-500">{{ t.no_extra_dhcp_options_configured_for }}</p>
         {% endif %}
 
-        <form method="POST" action="/dhcp/subnet/option/add" class="grid gap-3 md:grid-cols-[120px_1fr_auto] items-end">
+        <form method="POST" action="{{ routes.subnet_option_add | safe }}" class="grid gap-3 md:grid-cols-[120px_1fr_auto] items-end">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <input type="hidden" name="subnet_id" value="{{ subnet.id }}">
-          <div>
-            <label class="block text-xs text-slate-400 mb-1">Options-Code</label>
-            <input type="number" name="code" min="1" max="254" placeholder="66" required
-              class="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded text-white text-sm">
-          </div>
-          <div>
-            <label class="block text-xs text-slate-400 mb-1">Wert</label>
-            <input type="text" name="data" placeholder="192.168.1.10 oder bootfile.efi" required
-              class="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded text-white text-sm">
-          </div>
-          <button type="submit" class="px-4 py-2 bg-slate-600 hover:bg-slate-500 text-white rounded text-sm font-medium">
-            Option hinzufügen
+          {{ <text_field label={t.option_code} name="code" type="number" min={option_code_min} max={option_code_max} placeholder="66" required={true}/> }}
+          {{ <text_field label={t.value} name="data" placeholder={t.n_192_168_1_10_or_bootfile} required={true}/> }}
+          <button type="submit" class="btn btn-slate">
+            {{ t.add_option }}
           </button>
         </form>
       </div>
@@ -472,41 +391,31 @@
     {% endfor %}
   </div>
 
-  <!-- Statische Reservierungen -->
+  {# What: static reservations: add form and list #}
+  {# Why: the add form needs a subnet; hidden without one #}
+  {# From: Issue #1683 | PR #1912 #}
   <div class="bg-slate-800 border border-slate-700 rounded-lg p-6">
-    <h2 class="text-lg font-semibold text-white mb-4">Statische Reservierungen</h2>
+    <h2 class="text-lg font-semibold text-white mb-4">{{ t.static_reservations }}</h2>
 
     {% if subnets | length > 0 %}
-    <form method="POST" action="/dhcp/static/add" class="mb-6 space-y-3 p-4 bg-slate-700 rounded">
+    <form method="POST" action="{{ routes.static_add | safe }}" class="mb-6 space-y-3 p-4 bg-slate-700 rounded">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <div class="grid grid-cols-4 gap-3">
         <div>
-          <label class="block text-xs text-slate-400 mb-1">Subnet</label>
-          <select name="subnet_id" class="w-full px-3 py-2 bg-slate-600 border border-slate-500 rounded text-white text-sm" required>
+          <label class="block text-xs text-slate-400 mb-1">{{ t.subnet }}</label>
+          <select name="subnet_id" class="w-full px-3 py-2 border rounded text-white text-sm {{ raised_tone }}" required>
             {% for subnet in subnets %}
             <option value="{{ subnet.id }}">{{ subnet.subnet }}</option>
             {% endfor %}
           </select>
         </div>
-        <div>
-          <label class="block text-xs text-slate-400 mb-1">MAC-Adresse</label>
-          <input type="text" name="mac" placeholder="AA:BB:CC:DD:EE:FF"
-            class="w-full px-3 py-2 bg-slate-600 border border-slate-500 rounded text-white text-sm" required>
-        </div>
-        <div>
-          <label class="block text-xs text-slate-400 mb-1">IP-Adresse</label>
-          <input type="text" name="ip" placeholder="10.0.0.50"
-            class="w-full px-3 py-2 bg-slate-600 border border-slate-500 rounded text-white text-sm" required>
-        </div>
-        <div>
-          <label class="block text-xs text-slate-400 mb-1">Hostname</label>
-          <input type="text" name="hostname" placeholder="mydevice"
-            class="w-full px-3 py-2 bg-slate-600 border border-slate-500 rounded text-white text-sm">
-        </div>
+        {{ <text_field label={t.mac_address} name="mac" tone={raised_tone} placeholder="AA:BB:CC:DD:EE:FF" required={true}/> }}
+        {{ <text_field label={t.ip_address} name="ip" tone={raised_tone} placeholder="192.168.1.50" required={true}/> }}
+        {{ <text_field label="Hostname" name="hostname" tone={raised_tone} placeholder="mydevice"/> }}
       </div>
-      <p class="text-xs text-slate-500">Die Reservierung nutzt einfache Felder; zusätzliche Kea-JSON-Metadaten sind in der UI bewusst ausgeblendet.</p>
-      <button type="submit" class="w-full px-3 py-2 bg-slate-600 hover:bg-slate-500 text-white rounded text-sm font-medium">
-        + Hinzufügen
+      <p class="text-xs text-slate-500">{{ t.the_reservation_uses_simple_fields_extra }}</p>
+      <button type="submit" class="btn btn-slate w-full">
+        {{ t.add }}
       </button>
     </form>
     {% endif %}
@@ -517,57 +426,59 @@
         <div class="text-sm">
           <div class="text-white font-medium">{{ res.hostname }}</div>
           <div class="text-slate-400">{{ res.mac }} → {{ res.ip }}
-            <span class="text-slate-500 text-xs ml-1">(Subnet {{ res.subnet_id }})</span>
+            <span class="text-slate-500 text-xs ml-1">{{ t.subnet_2 }} {{ res.subnet_id }})</span>
           </div>
         </div>
-        <form method="POST" action="/dhcp/static/remove" class="inline">
+        <form method="POST" action="{{ routes.static_remove | safe }}" class="inline">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <input type="hidden" name="subnet_id" value="{{ res.subnet_id }}">
           <input type="hidden" name="mac" value="{{ res.mac }}">
-          <button type="submit" class="text-xs px-2 py-1 bg-red-900 hover:bg-red-800 text-red-200 rounded">
-            Entfernen
+          <button type="submit" class="btn btn-sm btn-danger">
+            {{ t.remove }}
           </button>
         </form>
       </div>
       {% endfor %}
       {% if reservations | length == 0 %}
-      <p class="text-slate-500 text-sm py-4 text-center">Keine Reservierungen vorhanden</p>
+      <p class="text-slate-500 text-sm py-4 text-center">{{ t.no_reservations_yet }}</p>
       {% endif %}
     </div>
   </div>
 
-  <!-- Aktive Leases -->
+  {# What: active Kea leases with a release form each #}
+  {# Why: expiry is epoch; base.html formats [data-epoch] #}
+  {# From: Issue #1683 | PR #1912 #}
   <div class="bg-slate-800 border border-slate-700 rounded-lg p-6">
-    <h2 class="text-lg font-semibold text-white mb-4">Aktive DHCP-Leases</h2>
+    <h2 class="text-lg font-semibold text-white mb-4">{{ t.active_dhcp_leases }}</h2>
     <div class="overflow-x-auto">
       <table class="w-full text-sm">
-        <thead class="border-b border-slate-700">
+        <thead>
           <tr>
-            <th class="text-left py-2 text-slate-300">IP-Adresse</th>
-            <th class="text-left py-2 text-slate-300">MAC-Adresse</th>
-            <th class="text-left py-2 text-slate-300">Hostname</th>
-            <th class="text-left py-2 text-slate-300">Subnet</th>
-            <th class="text-left py-2 text-slate-300">Ablauf</th>
-            <th class="text-left py-2 text-slate-300">Aktion</th>
+            <th class="th">{{ t.ip_address }}</th>
+            <th class="th">{{ t.mac_address }}</th>
+            <th class="th">Hostname</th>
+            <th class="th">{{ t.subnet }}</th>
+            <th class="th">{{ t.expires }}</th>
+            <th class="th">{{ t.action }}</th>
           </tr>
         </thead>
-        <tbody>
+        <tbody class="rows">
           {% for lease in leases %}
-          <tr class="border-b border-slate-700 hover:bg-slate-700">
+          <tr>
             <td class="py-2 text-white">{{ lease.ip }}</td>
             <td class="py-2 text-slate-300">{{ lease.mac }}</td>
             <td class="py-2 text-slate-300">{{ lease.hostname }}</td>
             <td class="py-2 text-slate-400">{{ lease.subnet_id }}</td>
             <td class="py-2 text-slate-400">
-              <span class="dhcp-expiry" data-epoch="{{ lease.expires }}">{{ lease.expires }}</span>
+              <span data-epoch="{{ lease.expires }}">{{ lease.expires }}</span>
             </td>
             <td class="py-2">
-              <form method="POST" action="/dhcp/lease/release" class="inline"
-                onsubmit="return confirm('Lease {{ lease.ip }} freigeben?')">
+              <form method="POST" action="{{ routes.lease_release | safe }}" class="inline"
+                data-ask="{{ t.release_lease_q | replace(from="{x}", to=lease.ip) }}" onsubmit="return confirm(this.dataset.ask)">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                 <input type="hidden" name="ip" value="{{ lease.ip }}">
-                <button type="submit" class="text-xs px-2 py-1 bg-amber-900 hover:bg-amber-800 text-amber-100 rounded">
-                  Freigeben
+                <button type="submit" class="btn btn-sm btn-warn">
+                  {{ t.release }}
                 </button>
               </form>
             </td>
@@ -575,7 +486,7 @@
           {% endfor %}
           {% if leases | length == 0 %}
           <tr>
-            <td colspan="6" class="py-4 text-slate-500 text-center">Keine aktiven Leases</td>
+            <td colspan="6" class="py-4 text-slate-500 text-center">{{ t.no_active_leases }}</td>
           </tr>
           {% endif %}
         </tbody>
@@ -583,38 +494,38 @@
     </div>
   </div>
 
-  <!-- Konfigurations-Snapshots (#614) -->
+  <!-- What: lists Kea config snapshots with rollback -->
+  <!-- Why: Kea rolls back only on operator selection -->
+  <!-- From: Issue #614 -->
   <div class="bg-slate-800 border border-slate-700 rounded-lg p-6">
     <div class="flex items-center justify-between mb-4">
-      <h2 class="text-lg font-semibold text-white">Konfigurations-Snapshots</h2>
-      <span class="text-xs text-slate-400">Aufbewahrung: {{ kea_snapshot_retention }}</span>
+      <h2 class="text-lg font-semibold text-white">{{ t.configuration_snapshots }}</h2>
+      <span class="text-xs text-slate-400">{{ t.kept }} {{ kea_snapshot_retention }}</span>
     </div>
     <p class="text-sm text-slate-400 mb-4">
-      Nach jeder erfolgreich übernommenen DHCP-Änderung wird die validierte Konfiguration
-      hier als Snapshot gesichert. Bei Bedarf kann auf einen früheren Snapshot zurückgerollt
-      werden; die ausgewählte Konfiguration wird vor der Übernahme erneut geprüft.
+      {{ t.after_each_dhcp_change_that_was }}
     </p>
     <div class="overflow-x-auto">
       <table class="w-full text-sm">
-        <thead class="border-b border-slate-700">
+        <thead>
           <tr>
-            <th class="text-left py-2 text-slate-300">Erstellt</th>
-            <th class="text-left py-2 text-slate-300">Aktion</th>
+            <th class="th">{{ t.created }}</th>
+            <th class="th">{{ t.action }}</th>
           </tr>
         </thead>
-        <tbody>
+        <tbody class="rows">
           {% for snapshot in kea_snapshots %}
-          <tr class="border-b border-slate-700 hover:bg-slate-700">
+          <tr>
             <td class="py-2 text-white">
-              <span class="dhcp-expiry" data-epoch="{{ snapshot.created_unix }}">{{ snapshot.created_unix }}</span>
+              <span data-epoch="{{ snapshot.created_unix }}">{{ snapshot.created_unix }}</span>
             </td>
             <td class="py-2">
-              <form method="POST" action="/dhcp/snapshot/rollback" class="inline"
-                onsubmit="return confirm('Auf diesen Snapshot zurückrollen? Die aktuelle DHCP-Konfiguration wird ersetzt.')">
+              <form method="POST" action="{{ routes.kea_rollback | safe }}" class="inline"
+                data-ask="{{ t.dhcp_rollback_q }}" onsubmit="return confirm(this.dataset.ask)">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                 <input type="hidden" name="snapshot_id" value="{{ snapshot.id }}">
-                <button type="submit" class="text-xs px-2 py-1 bg-amber-900 hover:bg-amber-800 text-amber-100 rounded">
-                  Zurückrollen
+                <button type="submit" class="btn btn-sm btn-warn">
+                  {{ t.roll_back }}
                 </button>
               </form>
             </td>
@@ -622,7 +533,7 @@
           {% endfor %}
           {% if kea_snapshots | length == 0 %}
           <tr>
-            <td colspan="2" class="py-4 text-slate-500 text-center">Noch keine Snapshots vorhanden</td>
+            <td colspan="2" class="py-4 text-slate-500 text-center">{{ t.no_snapshots_yet }}</td>
           </tr>
           {% endif %}
         </tbody>
@@ -630,135 +541,156 @@
     </div>
   </div>
 
-  {% endif %}
+  </div>
 </div>
+{% endblock %}
 
-{% if dhcp_has_kea %}
+{% block scripts %}
 <script>
+  // What: shows one DHCP panel and marks its tab
+  // Why: tabs switch client-side; no reload per tab
+  // From: Issue #1683 | PR #1976
+  function setDhcpTab(name) {
+    document.querySelectorAll('[data-dhcp-panel]').forEach((p) => {
+      p.classList.toggle('hidden', p.dataset.dhcpPanel !== name);
+    });
+    document.querySelectorAll('.dhcp-tab-btn').forEach((b) => {
+      b.classList.toggle('active', b.dataset.dhcpTab === name);
+    });
+    try { sessionStorage.setItem('dhcpTab', name); } catch (e) { /* blocked */ }
+  }
+  document.querySelectorAll('.dhcp-tab-btn').forEach((b) => {
+    b.addEventListener('click', () => setDhcpTab(b.dataset.dhcpTab));
+  });
+  // What: start tab is the active mode, else Precheck.
+  // Why: DHCP off must not open on an inactive tab.
+  // From: Issue #1683 | PR #1976
+  const MODE_TAB = { kea: 'server', 'dnsmasq-proxy': 'proxy', 'dnsmasq-relay': 'relay' };
+  // What: only the tab of the mode picked above shows.
+  // Why: DoMe 07.11.: pick shows it; save activates it.
+  // From: Issue #1683 | PR #1991
+  function showModeTab(mode) {
+    const keep = MODE_TAB[mode];
+    Object.values(MODE_TAB).forEach((tab) => {
+      const b = document.querySelector('[data-dhcp-tab="' + tab + '"]');
+      if (b) b.hidden = tab !== keep;
+    });
+    return keep || 'precheck';
+  }
+  let first = showModeTab('{{ dhcp_mode }}');
+  try {
+    const saved = sessionStorage.getItem('dhcpTab');
+    const b = saved && document.querySelector('[data-dhcp-tab="' + saved + '"]');
+    if (b && !b.hidden) first = saved;
+  } catch (e) { /* blocked */ }
+  setDhcpTab(first);
+  const modeSelect = document.querySelector('select[name="dhcp_mode"]');
+  if (modeSelect) {
+    modeSelect.addEventListener('change', () => setDhcpTab(showModeTab(modeSelect.value)));
+  }
+</script>
+<script>
+  // What: folds the mode comparison open and shut
+  // Why: the mockup keeps it closed until asked for
+  // From: Issue #1683 | PR #1976
+  document.getElementById('compare-toggle').addEventListener('click', () => {
+    const card = document.getElementById('compare-card');
+    const open = card.style.display === 'none';
+    card.style.display = open ? '' : 'none';
+    document.getElementById('compare-caret').textContent = open ? '▾' : '▸';
+  });
+</script>
+<script>
+// What: shows or hides the new-subnet form
+// Why: the form stays hidden until the button is pressed
+// From: Issue #1683 | PR #1912
 function toggleAddSubnet() {
   const el = document.getElementById('add-subnet-form');
   el.classList.toggle('hidden');
 }
 
+// What: shows or hides the edit form of subnet id
+// Why: each subnet row has its own hidden edit form
+// From: Issue #1683 | PR #1912
 function toggleEditSubnet(id) {
   const el = document.getElementById('edit-subnet-' + id);
   el.classList.toggle('hidden');
 }
 
+</script>
+<script>
+// What: empties and hides one detail list of the DHCP check
+// Why: one owner for both lists; no stale field remains
+// From: Issue #1683 | PR #1912
+function clearDetails(listEl) {
+  listEl.replaceChildren();
+  listEl.classList.add('hidden');
+}
+
+// What: one <li> per item via textContent, never innerHTML
+// Why: values are untrusted input from a DHCP server
+// From: Issue #1683 | PR #1912
+function showDetails(listEl, details) {
+  for (const item of details) {
+    const li = document.createElement('li');
+    li.textContent = `${item.label}: ${item.value}`;
+    listEl.appendChild(li);
+  }
+  if (details.length > 0) {
+    listEl.classList.remove('hidden');
+  }
+}
+
+// What: show the precheck report from /dhcp/check
+// Why: servers found and the test lease, one answer
+// From: Issue #1683 | PR #1858
 async function checkDhcpConflict() {
   const statusEl = document.getElementById('check-status');
   const conflictEl = document.getElementById('check-conflict-status');
   const conflictDetailsEl = document.getElementById('check-conflict-details');
   const clientEl = document.getElementById('check-client-status');
   const clientDetailsEl = document.getElementById('check-client-details');
-  statusEl.textContent = 'Prüfe...';
-  conflictEl.textContent = 'Konfliktprobe läuft...';
-  // Reset both details lists on every run (button re-click or the
-  // DOMContentLoaded auto-run further down), not just when a conflict is
-  // found / a dry-run succeeds below -- otherwise a later re-check with a
-  // different outcome would still show a stale previous run's fields.
-  conflictDetailsEl.replaceChildren();
-  conflictDetailsEl.classList.add('hidden');
-  clientDetailsEl.replaceChildren();
-  clientDetailsEl.classList.add('hidden');
-  clientEl.textContent = 'DHCP-Client-Dry-Run läuft...';
+  statusEl.textContent = LC_T.check_running;
+  conflictEl.textContent = '';
+  clientEl.textContent = '';
+  conflictDetailsEl.textContent = '';
+  clientDetailsEl.textContent = '';
+  let data;
   try {
-    // POST with an explicit CSRF header, not a plain GET: this endpoint has
-    // a real side effect (starts/stops the DHCP conflict-probe container on
-    // the server), and this app's CSRF protection only covers mutating
-    // methods -- see check_dhcp_conflict's own comment in dhcp.rs.
-    const res = await fetch('/api/dhcp/check', {
+    const res = await fetch('{{ routes.dhcp_check | safe }}', {
       method: 'POST',
-      headers: {
-        'X-CSRF-Token': '{{ csrf_token }}'
-      }
+      headers: { 'X-CSRF-Token': CSRF_TOKEN },
     });
-    const data = await res.json();
-    if (data.status === 'verified') {
-      statusEl.className = 'text-sm text-green-400';
-      statusEl.textContent = '✓ Konfliktprobe und DHCP-Client-Dry-Run erfolgreich';
-    } else if (data.status === 'conflict_found') {
-      statusEl.className = 'text-sm text-yellow-400';
-      statusEl.textContent = '⚠ Fremder DHCP-Server gefunden';
-    } else if (data.status === 'client_failed') {
-      statusEl.className = 'text-sm text-amber-400';
-      statusEl.textContent = '⚠ DHCP-Client-Dry-Run fehlgeschlagen';
-    } else {
-      statusEl.className = 'text-sm text-amber-400';
-      const reason = data.conflict?.reason ?? data.client?.reason ?? 'unbekannt';
-      statusEl.textContent = `DHCP-Prüfung nicht verfügbar: ${reason}`;
-    }
-    if (data.conflict?.status === 'found') {
-      conflictEl.className = 'text-sm text-yellow-400';
-      conflictEl.textContent = `Konfliktprobe: fremder DHCP-Server gefunden (${data.conflict.output ?? 'ohne Detail'})`;
-      // Label/value pairs come straight from the rogue DHCP server's
-      // own DHCPOFFER response (untrusted network input relayed via the
-      // probe container), so each row is built with textContent, never
-      // innerHTML -- a malicious value must never be interpreted as markup.
-      const details = data.conflict.details ?? [];
-      for (const item of details) {
-        const li = document.createElement('li');
-        li.textContent = `${item.label}: ${item.value}`;
-        conflictDetailsEl.appendChild(li);
-      }
-      if (details.length > 0) {
-        conflictDetailsEl.classList.remove('hidden');
-      }
-    } else if (data.conflict?.status === 'not_found') {
-      conflictEl.className = 'text-sm text-green-400';
-      conflictEl.textContent = 'Konfliktprobe: kein fremder DHCP-Server im gescannten Segment gefunden';
-    } else {
-      conflictEl.className = 'text-sm text-amber-400';
-      conflictEl.textContent = `Konfliktprobe: nicht verfügbar (${data.conflict?.reason ?? 'unbekannt'})`;
-    }
-    if (data.client?.status === 'passed') {
-      clientEl.className = 'text-sm text-green-400';
-      clientEl.textContent = `DHCP-Client-Dry-Run: erfolgreich (${data.client.output ?? 'ohne Detail'})`;
-      // Label/value pairs come from dhclient's own negotiated lease (a real
-      // response from whichever DHCP server answered -- our own or, if this
-      // dry-run happened to reach a foreign one, that server's), so each row
-      // is built with textContent, never innerHTML, same as the conflict
-      // details above.
-      const clientDetails = data.client.details ?? [];
-      for (const item of clientDetails) {
-        const li = document.createElement('li');
-        li.textContent = `${item.label}: ${item.value}`;
-        clientDetailsEl.appendChild(li);
-      }
-      if (clientDetails.length > 0) {
-        clientDetailsEl.classList.remove('hidden');
-      }
-    } else if (data.client?.status === 'failed') {
-      clientEl.className = 'text-sm text-amber-400';
-      clientEl.textContent = `DHCP-Client-Dry-Run: fehlgeschlagen (${data.client.output ?? 'ohne Detail'})`;
-    } else {
-      clientEl.className = 'text-sm text-amber-400';
-      clientEl.textContent = `DHCP-Client-Dry-Run: nicht verfügbar (${data.client?.reason ?? 'unbekannt'})`;
-    }
-  } catch (e) {
-    statusEl.textContent = 'Fehler beim Prüfen: ' + e.message;
+    if (!res.ok) { throw new Error('HTTP ' + res.status); }
+    data = await res.json();
+  } catch (err) {
+    statusEl.textContent = LC_T.check_failed + err.message;
+    return;
   }
+  if (data.error) {
+    statusEl.textContent = LC_T.check_failed + data.error;
+    return;
+  }
+  const servers = data.servers || [];
+  statusEl.textContent = servers.length + LC_T.dhcp_servers_answer;
+  servers.forEach(function (s) {
+    conflictEl.textContent += LC_T.server_offers.replace('{s}', s.server || '?').replace('{a}', s.address || '?');
+    showDetails(conflictDetailsEl, s.details || []);
+  });
+  clientEl.textContent = (data.lease_ok ? LC_T.test_lease_received : LC_T.no_test_lease) + (data.lease_text || '');
 }
 
-function formatDhcpExpiries() {
-  const formatter = new Intl.DateTimeFormat('de-DE', {
-    dateStyle: 'medium',
-    timeStyle: 'medium',
-  });
-
-  document.querySelectorAll('.dhcp-expiry').forEach((el) => {
-    const epoch = Number(el.dataset.epoch);
-    if (!Number.isFinite(epoch) || epoch <= 0) {
-      return;
-    }
-
-    el.textContent = formatter.format(new Date(epoch * 1000));
-    el.title = `Unix: ${el.dataset.epoch}`;
-  });
+// What: run the check when the Precheck tab opens.
+// Why: the Precheck tab runs its check at once.
+// From: Issue #1683 | PR #1980
+let checked = false;
+function checkOnce() {
+  if (checked) { return; }
+  checked = true;
+  checkDhcpConflict();
 }
-
-document.addEventListener('DOMContentLoaded', checkDhcpConflict);
-document.addEventListener('DOMContentLoaded', formatDhcpExpiries);
+const preTab = document.querySelector('[data-dhcp-tab="precheck"]');
+if (preTab) { preTab.addEventListener('click', checkOnce); }
+if (first === 'precheck') { checkOnce(); }
 </script>
-{% endif %}
 {% endblock %}

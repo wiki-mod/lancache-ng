@@ -9,15 +9,15 @@ name: CI 2.0 Release
 on:
   push:
     tags: ['v*']
-  # What: publish a tag, or cut the next patch tag.
+  # What: publish a tag, cut a patch tag, publish draft.
   # Why: AG-REL-013: a tag cut is its own dispatch.
-  # From: Issue #1683 | PR #1858
+  # From: Issue #1683 | PR #2004
   workflow_dispatch:
     inputs:
       action:
-        description: publish a release tag, or cut the next patch tag from the previous release
+        description: publish a release tag, cut the next patch tag, or publish the draft release
         type: choice
-        options: [publish, cut-patch]
+        options: [publish, cut-patch, publish-draft]
         default: publish
       tag:
         description: Release tag to (re)publish (vX.Y.Z or vX.Y.Z-rc.N); empty for cut-patch.
@@ -35,13 +35,13 @@ defaults:
 # From: Issue #1683 | PR #1858
 env:
   GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-  CI_RELEASE_TAG: ${{ inputs.action != 'cut-patch' && (github.event.inputs.tag || github.ref_name) || '' }}
+  CI_RELEASE_TAG: ${{ inputs.action != 'cut-patch' && inputs.action != 'publish-draft' && (github.event.inputs.tag || github.ref_name) || '' }}
   # What: LAN proxy CA secret; ci.sh uses it self-hosted.
   # Why: a secret is masked; ci.sh reads it by name.
   # From: Issue #1683 | PR #1858
   PROJECT_SELFHOSTED_PROXY_CA: ${{ secrets.PROJECT_SELFHOSTED_PROXY_CA }}
   # What: the repo variables ci.sh reads, one by name.
-  # Why: Fund 94: the all-vars json put LAN IPs in logs.
+  # Why: a vars json would show LAN IPs in logs.
   # From: Issue #1683 | PR #1858
   CARGO_BUILD_JOBS: ${{ vars.CARGO_BUILD_JOBS }}
   PROJECT_CARGO_LTO: ${{ vars.PROJECT_CARGO_LTO }}
@@ -51,6 +51,8 @@ env:
   SCCACHE_REDIS_MODE: ${{ vars.SCCACHE_REDIS_MODE }}
   CI_RUST_VALIDATION: ${{ vars.CI_RUST_VALIDATION }}
   PR_TITLE_LINT_MODE: ${{ vars.PR_TITLE_LINT_MODE }}
+  PROJECT_DEBUG_MODE: ${{ vars.PROJECT_DEBUG_MODE }}
+  PROJECT_GC_DELETE_PAUSE_SECONDS: ${{ vars.PROJECT_GC_DELETE_PAUSE_SECONDS }}
   # What: LAN values only when self-hosted runners run.
   # Why: a GitHub-hosted log must show no LAN address.
   # From: Issue #1683 | PR #1858
@@ -106,7 +108,7 @@ jobs:
   plan:
     name: plan
     needs: resolve-build-tools
-    if: inputs.action != 'cut-patch'
+    if: inputs.action != 'cut-patch' && inputs.action != 'publish-draft'
     runs-on: ${{ needs.resolve-build-tools.outputs.runner }}
     timeout-minutes: ${{ fromJSON(needs.resolve-build-tools.outputs.timeouts)['plan'] }}
     container: &bt_container
@@ -146,6 +148,11 @@ jobs:
       credentials: *ghcr_credentials
       volumes:
         - ${{ needs.resolve-build-tools.outputs.validate-dir }}:${{ needs.resolve-build-tools.outputs.validate-dir }}
+      # What: the build-tools ref this job runs in.
+      # Why: the state-root clear runs in it, no alpine.
+      # From: Issue #1683 | PR #1984
+      env:
+        CI_BUILD_TOOLS_IMAGE: ${{ needs.resolve-build-tools.outputs.image }}
     permissions: *release_read
     outputs:
       stack: ${{ steps.validate.outputs.stack }}
@@ -188,7 +195,7 @@ jobs:
   release:
     name: release
     needs: [resolve-build-tools, plan, promote]
-    if: inputs.action != 'cut-patch'
+    if: inputs.action != 'cut-patch' && inputs.action != 'publish-draft'
     runs-on: ${{ needs.resolve-build-tools.outputs.runner }}
     timeout-minutes: ${{ fromJSON(needs.resolve-build-tools.outputs.timeouts)['release'] }}
     container: *bt_container
@@ -227,7 +234,7 @@ jobs:
         env:
           PROJECT_AUTOMATION_PAT: ${{ secrets.PROJECT_AUTOMATION_PAT }}
         run: bash .github/scripts/ci.sh release-changelog "${CI_RELEASE_TAG}"
-      # What: PROJECT_RELEASE_VERSION from the stable tag
+      # What: PROJECT_RELEASE_VERSION from the release tag
       # Why: GITHUB_TOKEN cannot write repo variables
       # From: Issue #1683 | PR #1858
       - name: Set the release version variable
@@ -319,3 +326,23 @@ jobs:
         env:
           PROJECT_AUTOMATION_PAT: ${{ secrets.PROJECT_AUTOMATION_PAT }}
         run: bash .github/scripts/ci.sh cut-release-tag
+
+  # What: publish the draft release on an explicit dispatch.
+  # Why: the PAT tag creation then starts the tag publish.
+  # From: Issue #1683 | PR #2004
+  publish-draft:
+    name: publish-draft
+    needs: resolve-build-tools
+    if: inputs.action == 'publish-draft'
+    runs-on: ${{ needs.resolve-build-tools.outputs.runner }}
+    timeout-minutes: ${{ fromJSON(needs.resolve-build-tools.outputs.timeouts)['publish-draft'] }}
+    container: *bt_container
+    steps:
+      - *bootstrap
+      # What: the PAT reaches the publish step only
+      # Why: least privilege; the checkout needs no PAT
+      # From: Issue #1683 | PR #2004
+      - name: Refresh and publish the draft release
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_DRAFTER_PAT }}
+        run: bash .github/scripts/ci.sh release-draft publish
