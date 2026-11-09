@@ -1358,16 +1358,16 @@ is real, live, running code, not just work sitting in source control.
 
 ## [0.4.0] - 2026-11-09
 
-## Changes
+### Changes
 
 - #1979 | fix(ui): follow-up to the admin UI mockup (NTP block, recent requests, shared drain)
 
-## 🚀 Added
+### 🚀 Added
 
 - #2004 | Promotion 0.3.4 to 0.4.0
 - #2008 | feat(release): release-drafter layout and one-click publish in CI 2.0
 
-## 📚 Documentation
+### 📚 Documentation
 
 - #2004 | Promotion 0.3.4 to 0.4.0
 - #2008 | feat(release): release-drafter layout and one-click publish in CI 2.0
@@ -1381,7 +1381,7 @@ is real, live, running code, not just work sitting in source control.
 - #1983 | Sync to current\_dev: CI 2.0 (#1858) and rewrite (#1980)
 - #1976 | feat(ui): take over the admin UI mockup design
 
-## 🧰 Chore / CI
+### 🧰 Chore / CI
 
 - #2004 | Promotion 0.3.4 to 0.4.0
 - #2008 | feat(release): release-drafter layout and one-click publish in CI 2.0
