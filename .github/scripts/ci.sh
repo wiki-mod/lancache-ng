@@ -10935,11 +10935,28 @@ ci_cmd_release_notes() {
     printf '%s' "${body%.}"
 }
 
-# What: create or update the one draft from a draft ref.
-# Why: the maintainer publishes the draft; CI never does.
+# What: create or update the one draft; publish publishes.
+# Why: release-drafter layout; publish only by dispatch.
 # From: Issue #1683 | PR #2004
 ci_cmd_release_draft() {
-    local ref="${GITHUB_REF:-}" refs r draft_hit=0 repo base payload inc name rows id file out got want mode=created
+    local act="${1:-}" ref="${GITHUB_REF:-}" refs r draft_hit=0 repo base payload inc name rows id file out got want mode=created
+    case "${act}" in
+        "") ;;
+        publish)
+            # What: publish runs on the release ref only.
+            # Why: AG-REL-009: releases come from master.
+            # From: Issue #1683 | PR #2004
+            r="$(_ci_release_ref)" || return 2
+            if [ "${ref}" != "${r}" ]; then
+                ci_log "[CI-ERROR-RELEASE-0081]" "ref=\"${ref}\" release_ref=\"${r}\" reason=\"publish runs on the release ref only\""
+                return 2
+            fi
+            ;;
+        *)
+            ci_log "[CI-ERROR-RELEASE-0082]" "arg=\"${act}\" reason=\"release-draft takes no arg or publish\""
+            return 2
+            ;;
+    esac
     refs="$(_ci_block_entry_list release_notes "" draft_refs)" || return 2
     if [ -z "${refs}" ]; then
         ci_log "[CI-ERROR-RELEASE-0080]" "reason=\"SOT release_notes draft_refs missing\""
@@ -10990,6 +11007,33 @@ ci_cmd_release_draft() {
         return 2
     fi
     printf 'release-draft=%s tag=%s id=%s base=%s\n' "${mode}" "${name}" "${out}" "${base}"
+    [ "${act}" = publish ] || return 0
+    _ci_release_draft_publish "${repo}" "${out}" "${name}"
+}
+
+# What: publish draft $2 as tag $3 with its discussion.
+# Why: the PAT tag creation starts the release.yml run.
+# From: Issue #1683 | PR #2004
+_ci_release_draft_publish() {
+    local repo="$1" id="$2" tag="$3" category got t d u
+    _ci_block_entry_field release_notes "" discussion_category category || return 2
+    if [ -z "${category}" ]; then
+        ci_log "[CI-ERROR-RELEASE-0083]" "reason=\"SOT release_notes discussion_category missing\""
+        return 2
+    fi
+    _ci_retry github-api gh api -X PATCH "repos/${repo}/releases/${id}" -F draft=false \
+        -f make_latest=true -f discussion_category_name="${category}" --jq '.id' > /dev/null || return 2
+    # What: read the published release back.
+    # Why: AG-WF-031: every GitHub write is read back
+    # From: Issue #1683 | PR #2004
+    got="$(_ci_retry github-read gh api "repos/${repo}/releases/${id}" \
+        --jq '"\(.tag_name)\t\(.draft)\t\(.discussion_url // "")"')" || return 2
+    IFS=$'\t' read -r t d u <<< "${got}"
+    if [ "${t}" != "${tag}" ] || [ "${d}" != false ] || [ -z "${u}" ]; then
+        ci_log "[CI-ERROR-RELEASE-0084]" "id=\"${id}\" tag=\"${tag}\" found=\"${got}\" reason=\"release not read back as published with discussion\""
+        return 2
+    fi
+    printf 'release-draft=published tag=%s id=%s discussion=%s\n' "${tag}" "${id}" "${u}"
 }
 
 # What: add the published release notes to CHANGELOG.md.
