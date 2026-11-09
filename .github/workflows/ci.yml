@@ -463,6 +463,27 @@ jobs:
       - name: Close the issues the merged PR links
         run: bash .github/scripts/ci.sh close-linked-issues
 
+  # What: keep the one draft release on the release ref.
+  # Why: the maintainer publishes it; release-drafter layout.
+  # From: Issue #1683 | PR #2004
+  release-draft:
+    name: release-draft
+    needs: plan
+    if: ${{ !cancelled() && needs.plan.result == 'success' && github.event_name == 'push' }}
+    runs-on: ${{ needs.plan.outputs.runner }}
+    timeout-minutes: ${{ fromJSON(needs.plan.outputs.timeouts)['release-draft'] }}
+    container: *bt_platform
+    permissions:
+      contents: write
+      packages: read
+      pull-requests: read
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - *bootstrap
+      - name: Create or update the draft release
+        run: bash .github/scripts/ci.sh release-draft
+
   # What: checks beside plan; each runs only with a reason.
   # Why: §2.1 §98: a green tree or PR text is NOOP; -75 s.
   # From: Issue #1683 | PR #1858
