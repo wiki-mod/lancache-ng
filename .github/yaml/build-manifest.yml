@@ -1691,6 +1691,7 @@ ci_job_timeouts:
   orphaned-branches: 15
   plan: 30
   promote: 30
+  publish-draft: 15
   release: 30
   release-draft: 15
   release-provenance: 30
@@ -2008,6 +2009,10 @@ release_notes:
   # Why: release-drafter ran on both; last push wins.
   # From: Issue #1683 | PR #2004
   draft_refs: [refs/heads/current_dev, refs/heads/master]
+  # What: discussion category a published release opens.
+  # Why: maintainer: every release gets its discussion.
+  # From: Issue #1683 | PR #2004
+  discussion_category: Announcements
   # What: PR label that marks a deliberate CHANGELOG.md edit
   # Why: the release flow owns the file; a label opts in
   # From: Issue #1683 | PR #1858
