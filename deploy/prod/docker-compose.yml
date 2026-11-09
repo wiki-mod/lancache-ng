@@ -80,6 +80,12 @@ x-environment:
     DHCP_PROXY_BOOT_FILENAME: ${DHCP_PROXY_BOOT_FILENAME:-}
     DHCP_PROXY_BOOT_SERVER: ${DHCP_PROXY_BOOT_SERVER:-}
     DHCP_PROXY_CUSTOM_OPTIONS: ${DHCP_PROXY_CUSTOM_OPTIONS:-}
+    # What: PXE values for the dnsmasq.conf render.
+    # Why: the ui renders it; live 229: no pxe-service.
+    # From: Issue #1683
+    DHCP_PROXY_PXE_BOOT_SERVER: ${DHCP_PROXY_PXE_BOOT_SERVER:-}
+    DHCP_PROXY_PXE_BOOT_FILENAME_BIOS: ${DHCP_PROXY_PXE_BOOT_FILENAME_BIOS:-}
+    DHCP_PROXY_PXE_BOOT_FILENAME_UEFI: ${DHCP_PROXY_PXE_BOOT_FILENAME_UEFI:-}
 
 services:
   # What: watchdog, cachehamster, syslog-ng, chronyd, snmpd.
@@ -294,7 +300,7 @@ services:
     image: ${LANCACHE_IMAGE_REF_DHCP:?LANCACHE_IMAGE_REF_DHCP is required}
     environment:
       <<: [*env-stack, *env-dns-dhcp, *env-dns-dhcp-ui, *env-dhcp-ui]
-      # What: Kea token, DDNS switch, pool and PXE values.
+      # What: Kea token, DDNS switch and pool values.
       # Why: only the DHCP daemons read these keys.
       KEA_CTRL_TOKEN: ${KEA_CTRL_TOKEN}
       DHCP_DDNS_ENABLED: ${DHCP_DDNS_ENABLED:-}
@@ -302,9 +308,6 @@ services:
       DHCP_RANGE_START: ${DHCP_RANGE_START:-}
       DHCP_RANGE_END: ${DHCP_RANGE_END:-}
       DHCP_GATEWAY: ${DHCP_GATEWAY:-}
-      DHCP_PROXY_PXE_BOOT_SERVER: ${DHCP_PROXY_PXE_BOOT_SERVER:-}
-      DHCP_PROXY_PXE_BOOT_FILENAME_BIOS: ${DHCP_PROXY_PXE_BOOT_FILENAME_BIOS:-}
-      DHCP_PROXY_PXE_BOOT_FILENAME_UEFI: ${DHCP_PROXY_PXE_BOOT_FILENAME_UEFI:-}
     volumes:
       # What: rendered configs; the ui writes, owners read.
       # Why: one owner per file; programs read SOT paths.

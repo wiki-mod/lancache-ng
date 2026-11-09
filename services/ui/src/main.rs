@@ -2622,19 +2622,24 @@ async fn apply_all(
     let mut changes = old.diff(new);
     let written = write_files(new, &files)?;
     app.rendered.store(true, Ordering::Relaxed);
-    let snmpd_conf = new.text("SNMPD_CONF_FILE")?;
-    let snmpd_new = written.iter().any(|c| c.key == snmpd_conf);
-    changes.extend(written);
+    changes.extend(written.iter().cloned());
     // What: PowerDNS steps report, not abort.
     // Why: pdns starts only after the restart below.
     // From: Issue #1683 | PR #1980
     let mut report = Vec::new();
-    // What: a new snmpd.conf reloads every snmpd.
-    // Why: dns, proxy and ui run snmpd on the same file.
+    // What: a new file runs the commands of its daemon.
+    // Why: snmpd and pdns read their file only at start.
     // From: Issue #1683
-    if snmpd_new {
-        let (_, limit) = app.limits(new)?;
-        let ex = new.list("SNMPD_RELOAD_EXEC");
+    let (_, limit) = app.limits(new)?;
+    for (file, exec, tag) in [
+        ("SNMPD_CONF_FILE", "SNMPD_RELOAD_EXEC", "snmpd"),
+        ("PDNS_CONF_FILE", "PDNS_RESTART_EXEC", "pdns"),
+    ] {
+        let path = new.text(file)?;
+        if !written.iter().any(|c| c.key == path) {
+            continue;
+        }
+        let ex = new.list(exec);
         let owners: std::collections::BTreeSet<&str> = ex
             .iter()
             .filter_map(|e| e.split_once(':'))
@@ -2644,9 +2649,9 @@ async fn apply_all(
             match container_of(app, new, owner).await {
                 Ok(name) => {
                     let r = apply::reload_exec(&app.docker, &name, &ex, owner, limit).await;
-                    report.push(format!("{owner} snmpd: {r:?}"));
+                    report.push(format!("{owner} {tag}: {r:?}"));
                 }
-                Err(e) => report.push(format!("{owner} snmpd: skipped, {e}")),
+                Err(e) => report.push(format!("{owner} {tag}: skipped, {e}")),
             }
         }
     }
@@ -2673,6 +2678,24 @@ async fn apply_all(
                 report.push(format!("{dhcp}: mode off, stop {r:?}"));
             }
             Err(e) => report.push(format!("{dhcp}: mode off, {e}")),
+        }
+    }
+    // What: proxy and relay share one dnsmasq daemon.
+    // Why: release 10.3: the container keeps running.
+    // From: Issue #1683
+    let (was, now) = (old.text("DHCP_MODE")?, new.text("DHCP_MODE")?);
+    if was.starts_with("dnsmasq-") && now.starts_with("dnsmasq-") && plan.contains_key(&dhcp) {
+        let ex = new.list("DNSMASQ_RESTART_EXEC");
+        match container_of(app, new, &dhcp).await {
+            Ok(name) if !ex.is_empty() => {
+                let r = apply::reload_exec(&app.docker, &name, &ex, &dhcp, limit).await;
+                if !matches!(r, apply::Outcome::Failed(_)) {
+                    plan.remove(&dhcp);
+                }
+                report.push(format!("{dhcp} dnsmasq: {r:?}"));
+            }
+            Ok(_) => {}
+            Err(e) => report.push(format!("{dhcp} dnsmasq: skipped, {e}")),
         }
     }
     // What: skip an owner that has no container yet.
@@ -3112,7 +3135,15 @@ async fn status(State(app): Shared) -> Response {
         let name = c["Labels"][docker::SERVICE_LABEL]
             .as_str()
             .unwrap_or_default();
-        let colour = colour(c);
+        let by_user = stopped.iter().any(|x| x == name);
+        let mode_off = !off.is_empty() && name == off;
+        // What: a stop nobody asked for is red, not gray.
+        // Why: release 10.6: the entry must turn unhealthy.
+        // From: Issue #1683
+        let colour = match colour(c) {
+            "gray" if !by_user && !mode_off => "red",
+            other => other,
+        };
         // What: last health check output when not green.
         // Why: live test: "3 failures" showed no reason.
         // From: Issue #1683 | PR #1980
@@ -3130,8 +3161,8 @@ async fn status(State(app): Shared) -> Response {
         }
         rows.push(
             json!({"name": name, "status": colour, "health": c["Status"],
-               "reason": reason, "mode_off": !off.is_empty() && name == off,
-               "stopped_by_user": stopped.iter().any(|x| x == name)}),
+               "reason": reason, "mode_off": mode_off,
+               "stopped_by_user": by_user}),
         );
     }
     axum::Json(json!({"state": "ok", "services": rows})).into_response()

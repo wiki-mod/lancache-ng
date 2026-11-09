@@ -1081,6 +1081,14 @@ runtime:
     # Why: one file, several snmpd; HUP rereads it.
     # From: Issue #1683
     - SNMPD_RELOAD_EXEC=dns:rc-service+snmpd+reload proxy:rc-service+snmpd+reload ui:rc-service+snmpd+reload
+    # What: pdns restart on a new pdns.conf.
+    # Why: pdns reads its config only at start.
+    # From: Issue #1683
+    - PDNS_RESTART_EXEC=dns:rc-service+pdns+restart
+    # What: dnsmasq restart on a proxy/relay switch.
+    # Why: both sub-modes run the same dnsmasq daemon.
+    # From: Issue #1683
+    - DNSMASQ_RESTART_EXEC=dhcp:rc-service+dnsmasq+restart
     - NGINX_CONF_DIR=@CONFIG_DIR@/proxy
     - DNSMASQ_CONF_FILE=@CONFIG_DIR@/dhcp/dnsmasq.conf
     - KEA_CTRL_CONF_FILE=@CONFIG_DIR@/dhcp/kea-ctrl-agent.conf
@@ -1365,6 +1373,8 @@ runtime:
     - DHCP_MODE_FILE=path;;;container;dhcp
     - RELOAD_EXEC=list;;;live;ui
     - SNMPD_RELOAD_EXEC=list;;;live;ui
+    - PDNS_RESTART_EXEC=list;;;live;ui
+    - DNSMASQ_RESTART_EXEC=list;;;live;ui
     - NGINX_CONF_DIR=path;;;container;proxy
     - DNSMASQ_CONF_FILE=path;;;container;dhcp
     - KEA_CTRL_CONF_FILE=path;;;container;dhcp

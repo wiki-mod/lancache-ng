@@ -4844,16 +4844,24 @@ pub mod tidy {
     }
 
     // What: processed count of syslog-ng file outputs.
-    // Why: syslog-ng-ctl stats lists dst.file rows.
+    // Why: syslog-ng-ctl stats lists the store rows.
     // From: Issue #1683 | PR #1858
     pub fn syslog_processed() -> Result<u64, String> {
         let out = Command::new("syslog-ng-ctl").arg("stats").output();
         let out = out.map_err(|e| format!("syslog-ng-ctl: {e}"))?;
         let text = String::from_utf8_lossy(&out.stdout);
         let mut total = 0;
-        for row in text.lines().filter(|l| l.starts_with("dst.file;")) {
+        for row in text.lines() {
             let cols: Vec<&str> = row.split(';').collect();
-            if cols.get(4) == Some(&"processed") {
+            // What: old dst.file rows or the d_store row.
+            // Why: live: syslog-ng 4 shows only d_store.
+            // From: Issue #1683
+            let store = match cols.first() {
+                Some(&"dst.file") => true,
+                Some(&"destination") => cols.get(1) == Some(&super::log::STORE),
+                _ => false,
+            };
+            if store && cols.get(4) == Some(&"processed") {
                 total += cols.get(5).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
             }
         }
