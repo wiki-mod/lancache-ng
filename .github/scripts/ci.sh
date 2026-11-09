@@ -10874,7 +10874,7 @@ _ci_release_payload() {
         | (if $total == 0 then $none
             else ((if ($other | length) > 0 then [($other | map(line) | join("\n")), "\n\n"] else [] end)
                 + [range(0; $groups | length) as $i | $groups[$i] | select(.prs | length > 0)
-                    | ($cat_tpl | tpl({TITLE: .title})) as $t
+                    | .title as $ct | ($cat_tpl | tpl({TITLE: $ct})) as $t
                     | (if $t != "" then [$t, "\n\n"] else [] end)
                         + [.prs | map(line) | join("\n")]
                         + (if $i + 1 != ($groups | length) then ["\n\n"] else [] end)]
