@@ -81,7 +81,7 @@ declare -A CI_DISPATCH=(
     [aggregate-stack]=ci_cmd_aggregate_stack [scan-stack]=ci_cmd_scan_stack [changed-files]=ci_cmd_changed_files [checks-plan]=ci_cmd_checks_plan [rust-memo]=ci_cmd_rust_memo [update-psl]=ci_cmd_update_psl
     [assemble-stack]=ci_cmd_assemble_stack [test-stack]=ci_cmd_test_stack [nightly-report]=ci_cmd_nightly_report
     [validate]=ci_cmd_validate [result-gate]=ci_cmd_result_gate [promote]=ci_cmd_promote [promote-ref]=ci_cmd_promote_ref [channel-checkout]=ci_cmd_channel_checkout [channel-matrix]=ci_cmd_channel_matrix [channel-check]=ci_cmd_channel_check [channel-report]=ci_cmd_channel_report [release-ref]=_ci_release_ref
-    [release-publish]=ci_cmd_release_publish [release-images]=ci_cmd_release_images [release-sbom-stack]=ci_cmd_release_sbom_stack [release-vex]=ci_cmd_release_vex [cut-release-tag]=ci_cmd_cut_release_tag [release-notes]=ci_cmd_release_notes [release-changelog]=ci_cmd_release_changelog [release-variable]=ci_cmd_release_variable
+    [release-publish]=ci_cmd_release_publish [release-images]=ci_cmd_release_images [release-sbom-stack]=ci_cmd_release_sbom_stack [release-vex]=ci_cmd_release_vex [cut-release-tag]=ci_cmd_cut_release_tag [release-notes]=ci_cmd_release_notes [release-draft]=ci_cmd_release_draft [release-changelog]=ci_cmd_release_changelog [release-variable]=ci_cmd_release_variable
     [gc]=ci_cmd_gc [gc-refs]=ci_cmd_gc_refs [check]=ci_cmd_check [close-linked-issues]=ci_cmd_close_linked_issues [pr-labels]=ci_cmd_pr_labels [pr-milestone]=ci_cmd_pr_milestone [board-add]=ci_cmd_board_add
     [version]=ci_cmd_version [docker-daemon-config]=ci_cmd_docker_daemon_config [runner-host]=ci_cmd_runner_host
     [have-command]=ci_cmd_have_command [pr-green-mark]=ci_cmd_pr_green_mark [pr-meta]=ci_cmd_pr_meta
@@ -5722,18 +5722,18 @@ _ci_trivyignore_stale() {
     _ci_status_issue_kind trivy-ignore-stale "${outcome}" "${stale:+path=${ignore} stale=${stale# }}"
 }
 
-# What: load the history a diff needs, plus refs named
+# What: load the history a diff needs, once per job.
 # Why: workflows check out one commit; ci.sh owns the diff.
 # From: Issue #1683 | PR #1858
 _ci_diff_history() {
-    local shallow have="" remote head memo="" seen
-    local -a deep=() need=("$@")
+    local shallow have="" remote head memo seen
+    local -a deep=() need=()
     head="$(_ci_head_commit)" || return 2
-    # What: a call without refs loads history once per job.
+    # What: the history loads once per job and commit.
     # Why: A3: plan fetched HEAD again after changed-files.
     # From: Issue #1683 | PR #1858
-    [ "$#" -gt 0 ] || memo="diff-history-${head}"
-    if [ -n "${memo}" ] && seen="$(_ci_job_memo_get "${memo}")" && [ "${seen}" = "${head}" ]; then
+    memo="diff-history-${head}"
+    if seen="$(_ci_job_memo_get "${memo}")" && [ "${seen}" = "${head}" ]; then
         return 0
     fi
     shallow="$(cd -- "${CI_REPO_ROOT}" && _ci_capture 0 git rev-parse --is-shallow-repository)" || return 2
@@ -5748,7 +5748,7 @@ _ci_diff_history() {
     # Why: blobs load only when a check needs them.
     # From: Issue #1683 | PR #1858
     (cd -- "${CI_REPO_ROOT}" && _ci_retry git-fetch git fetch --no-tags --filter=blob:none "${deep[@]}" "${remote}" "${head}" "${need[@]}") >&2 || return 2
-    [ -z "${memo}" ] || _ci_job_memo_put "${memo}" "${head}"
+    _ci_job_memo_put "${memo}" "${head}"
 }
 
 # What: This run's base and head diff refs, or empty.
@@ -10748,151 +10748,300 @@ _ci_release_tag_final() {
     [ "${kind}" = false ]
 }
 
-# What: Print the release-notes start or end marker.
-# Why: one marker owner for writer and replacer; no name.
-# From: Issue #1683
-_ci_release_marker() {
-    local repo
+# What: every release as one JSON line, in API order.
+# Why: drafts and the notes base come from releases.
+# From: Issue #1683 | PR #2004
+_ci_release_list() {
+    local repo gh_page
     repo="$(_ci_repo)" || return 2
-    printf '<!-- %s-image-tags:%s -->\n' "${repo##*/}" "$1"
-}
-
-# What: Markdown of the PRs merged since the last release.
-# Why: notes come from PR sections, no manual step.
-# From: Issue #894 | PR #1858
-_ci_release_changes() {
-    local tag="$1" prev repo subjects nums
-    repo="$(_ci_repo)" || return 2
-    prev="$(_ci_last_release_tag "${tag}")" || return 2
-    if [ -z "${prev}" ]; then
-        printf '_No earlier vX.Y.Z release: no change list for %s._\n' "${tag}"
-        return 0
-    fi
-    # What: fetch both tags with full history for the range.
-    # Why: CI checkouts are depth 1; log needs both ends.
-    # From: Issue #894 | PR #1858
-    _ci_diff_history "+refs/tags/${prev}:refs/tags/${prev}" "+refs/tags/${tag}:refs/tags/${tag}" || return 2
-    subjects="$(_ci_capture 0 git -C "${CI_REPO_ROOT}" log --format=%s "${prev}..${tag}")" || return 2
-    # What: "Merge pull request #N ..." and "... (#N)".
-    # Why: GitHub's merge and squash default subjects.
-    # From: Issue #894 | PR #1858
-    local subj pr_merge_re='^Merge pull request #([0-9]+)' pr_squash_re='\(#([0-9]+)\)$'
-    nums=""
-    while IFS= read -r subj; do
-        if [[ "${subj}" =~ ${pr_merge_re} ]] || [[ "${subj}" =~ ${pr_squash_re} ]]; then
-            nums+="${BASH_REMATCH[1]}"$'\n'
-        fi
-    done <<< "${subjects}"
-    nums="$(_ci_capture 0 sort -un <<< "${nums%$'\n'}")" || return 2
-    if [ -z "${nums}" ]; then
-        printf '_No pull requests merged since %s._\n' "${prev}"
-        return 0
-    fi
-    local n q="" count=0 rows="" part gh_page
     gh_page="$(_ci_variable CI_GH_PAGE_SIZE)" || return 2
-    while IFS= read -r n; do
-        q+=" p${n}: issueOrPullRequest(number: ${n}) { __typename ... on PullRequest { number title url body labels(first: ${gh_page}) { nodes { name } } } }"
-        count=$((count + 1))
-        if [ "${count}" -eq 50 ]; then
-            part="$(_ci_release_pr_batch "${repo}" "${q}")" || return 2
-            rows+="${part}"$'\n'; q=""; count=0
-        fi
-    done <<< "${nums}"
-    if [ -n "${q}" ]; then
-        part="$(_ci_release_pr_batch "${repo}" "${q}")" || return 2
-        rows+="${part}"$'\n'
-    fi
-    _ci_release_render "${rows}"
+    _ci_retry github-api gh api --paginate "repos/${repo}/releases?per_page=${gh_page}" \
+        --jq '.[] | {id, tag_name, name, draft, prerelease} | @json'
 }
 
-# What: Run one aliased PR query; print one JSON per PR.
-# Why: 50 PRs per GraphQL call; issues are dropped here.
-# From: Issue #894 | PR #1858
-_ci_release_pr_batch() {
-    local repo="$1" q="$2" raw out
-    raw="$(_ci_retry github-api gh api graphql -f owner="${repo%%/*}" -f name="${repo#*/}" \
-        -f query="query(\$owner: String!, \$name: String!) { repository(owner: \$owner, name: \$name) {${q} } }")" || return 2
-    if ! out="$(jq -c '.data.repository[] | select(. != null and .__typename == "PullRequest")' <<< "${raw}" 2>&1)"; then
-        ci_error "[CI-ERROR-RELEASE-0029]" "reason=\"PR batch unparseable\"" "${out}"
+# What: tag of the highest published non-pre release.
+# Why: release-drafter's base: last stable, semver order.
+# From: Issue #1683 | PR #2004
+_ci_release_last_published() {
+    local rows tags
+    rows="$(_ci_release_list)" || return 2
+    tags="$(_ci_capture 0 jq -r 'select(.draft == false and .prerelease == false) | .tag_name' <<< "${rows}")" || return 2
+    [ -n "${tags}" ] || return 0
+    tags="$(_ci_capture 0 sort -V <<< "${tags}")" || return 2
+    printf '%s\n' "${tags##*$'\n'}"
+}
+
+# What: merged PRs of the commits base..head, JSON lines.
+# Why: release-drafter's PR set: compare, then PR links.
+# From: Issue #1683 | PR #2004
+_ci_release_pulls() {
+    local base="$1" head="$2" repo limit look gh_page fields raw recent=null out
+    repo="$(_ci_repo)" || return 2
+    _ci_block_entry_fields release_notes "" pull_request_limit limit recent_merged_lookback look || return 2
+    if [ -z "${limit}" ] || [ -z "${look}" ]; then
+        ci_log "[CI-ERROR-RELEASE-0069]" "reason=\"SOT release_notes pull_request_limit or recent_merged_lookback missing\""
+        return 2
+    fi
+    gh_page="$(_ci_variable CI_GH_PAGE_SIZE)" || return 2
+    fields="number title mergedAt merged baseRepository { nameWithOwner } labels(first: ${gh_page}) { nodes { name } }"
+    raw="$(_ci_retry github-api gh api graphql --paginate -f owner="${repo%%/*}" -f name="${repo#*/}" \
+        -f base="refs/tags/${base}" -f head="${head}" \
+        -f query="query(\$owner: String!, \$name: String!, \$base: String!, \$head: String!, \$endCursor: String) { repository(owner: \$owner, name: \$name) { ref(qualifiedName: \$base) { compare(headRef: \$head) { commits(first: ${gh_page}, after: \$endCursor) { nodes { oid associatedPullRequests(first: ${limit}) { nodes { ${fields} } } } pageInfo { hasNextPage endCursor } } } } } }")" || return 2
+    if ! out="$(jq -e -s 'length > 0 and all(.[]; .data.repository.ref.compare != null)' <<< "${raw}" 2>&1)"; then
+        ci_error "[CI-ERROR-RELEASE-0070]" "base=\"${base}\" head=\"${head}\" reason=\"commit comparison not readable\"" "${out}"$'\n'"${raw}"
+        return 2
+    fi
+    # What: a branch head also reads its newest merged PRs.
+    # Why: GitHub links a fresh merge to its PR with a lag.
+    # From: Issue #1683 | PR #2004
+    if [[ "${head}" == refs/heads/* ]]; then
+        recent="$(_ci_retry github-api gh api graphql -f owner="${repo%%/*}" -f name="${repo#*/}" \
+            -f branch="${head#refs/heads/}" \
+            -f query="query(\$owner: String!, \$name: String!, \$branch: String) { repository(owner: \$owner, name: \$name) { pullRequests(states: [MERGED], baseRefName: \$branch, orderBy: { field: UPDATED_AT, direction: DESC }, first: ${look}) { nodes { ${fields} mergeCommit { oid } } } } }")" || return 2
+    fi
+    if ! out="$(jq -c -n --arg repo "${repo}" --argjson recent "${recent}" '
+        [inputs | .data.repository.ref.compare.commits.nodes[]] as $commits
+        | ($commits | map(.oid)) as $oids
+        | ([$commits[] | .associatedPullRequests.nodes[] | select(. != null)]
+            | reduce .[] as $p ({k: {}, o: []};
+                ($p.baseRepository.nameWithOwner + "#" + ($p.number | tostring)) as $id
+                | if .k[$id] then . else .k[$id] = true | .o += [$p] end)) as $found
+        | ($recent // {} | .data.repository.pullRequests.nodes // []
+            | map(select(. != null and .mergeCommit.oid != null)
+                | select(.mergeCommit.oid as $m | any($oids[]; . == $m))
+                | select(($found.k[.baseRepository.nameWithOwner + "#" + (.number | tostring)] // false) | not))) as $late
+        | ($found.o + $late)[]
+        | select((.baseRepository.nameWithOwner | ascii_downcase) == $repo and .merged == true)
+        | {number, title, mergedAt, labels: [.labels.nodes[].name]}' <<< "${raw}" 2>&1)"; then
+        ci_error "[CI-ERROR-RELEASE-0071]" "base=\"${base}\" head=\"${head}\" reason=\"pull request list not parsed\"" "${out}"
         return 2
     fi
     [ -z "${out}" ] || printf '%s\n' "${out}"
 }
 
-# What: Group PR JSON lines by SOT label into Markdown.
-# Why: SOT order decides the group; skip label drops a PR.
-# From: Issue #894 | PR #1858
-_ci_release_render() {
-    local rows="$1" labels cat title skip other section pr num url text body
-    local line out buf seen
-    labels="$(_ci_block_keys release_notes_categories)" || return 2
-    _ci_block_entry_fields release_notes "" skip_label skip other_title other pr_section section || return 2
-    if [ -z "${labels}" ] || [ -z "${other}" ] || [ -z "${section}" ]; then
-        ci_log "[CI-ERROR-RELEASE-0030]" "reason=\"SOT release_notes or release_notes_categories incomplete\""
+# What: SOT notes groups as one JSON array, in order.
+# Why: the renderer and the version bump read one list.
+# From: Issue #1683 | PR #2004
+_ci_release_categories() {
+    local keys key title labels inc out="[]"
+    keys="$(_ci_block_keys release_notes_categories)" || return 2
+    while IFS= read -r key; do
+        [ -n "${key}" ] || continue
+        _ci_block_entry_fields release_notes_categories "${key}" title title increment inc || return 2
+        labels="$(_ci_block_entry_list release_notes_categories "${key}" labels)" || return 2
+        if [ -z "${title}" ] || [ -z "${labels}" ] || [ -z "${inc}" ]; then
+            ci_log "[CI-ERROR-RELEASE-0030]" "category=\"${key}\" reason=\"SOT release_notes_categories entry needs title, labels and increment\""
+            return 2
+        fi
+        out="$(_ci_capture 0 jq -c --arg t "${title}" --arg l "${labels}" --arg i "${inc}" \
+            ". + [{title: \$t, labels: (\$l | split(\"\\n\") | map(select(. != \"\"))), increment: \$i}]" <<< "${out}")" || return 2
+    done <<< "${keys}"
+    printf '%s\n' "${out}"
+}
+
+# What: notes body and version bump for base..head as JSON.
+# Why: release-drafter v7 layout, one renderer for all uses.
+# From: Issue #1683 | PR #2004
+_ci_release_payload() {
+    local base="$1" head="$2" pulls cats header cat_tpl line_tpl esc none skip fallback out
+    _ci_block_entry_fields release_notes "" header header category_template cat_tpl change_template line_tpl \
+        title_escapes esc no_changes none skip_label skip fallback_increment fallback || return 2
+    if [ -z "${header}" ] || [ -z "${cat_tpl}" ] || [ -z "${line_tpl}" ] || [ -z "${none}" ] || [ -z "${fallback}" ]; then
+        ci_log "[CI-ERROR-RELEASE-0072]" "reason=\"SOT release_notes needs header, category_template, change_template, no_changes and fallback_increment\""
         return 2
     fi
-    local -a order=()
-    local -A group=()
-    while IFS= read -r pr; do
-        [ -n "${pr}" ] || continue
-        num="$(_ci_capture 0 jq -r '.number' <<< "${pr}")" || return 2
-        title="$(_ci_capture 0 jq -r '.title' <<< "${pr}")" || return 2
-        url="$(_ci_capture 0 jq -r '.url' <<< "${pr}")" || return 2
-        text="$(_ci_capture 0 jq -r '[.labels.nodes[].name] | join("\n")' <<< "${pr}")" || return 2
-        [ -z "${skip}" ] || ! _ci_list_has "${skip}" "${text}" || continue
-        cat="${other}"
-        while IFS= read -r body; do
-            if _ci_list_has "${body}" "${text}"; then
-                cat="$(_ci_block_entry_field release_notes_categories "${body}" title)" || return 2
-                break
+    cats="$(_ci_release_categories)" || return 2
+    pulls="$(_ci_release_pulls "${base}" "${head}")" || return 2
+    if ! out="$(jq -c -s --argjson cats "${cats}" --arg header "${header}" --arg cat_tpl "${cat_tpl}" \
+        --arg line_tpl "${line_tpl}" --arg esc "${esc}" --arg none "${none}" --arg skip "${skip}" \
+        --arg fallback "${fallback}" '
+        def tpl($vals): gsub("\\$(?<k>[A-Z_]+)"; .k as $k | if $vals | has($k) then $vals[$k] else "$" + $k end);
+        def esc_title:
+            if $esc == "" then .
+            else ($esc | split("") | map(if . == "\\" or . == "]" or . == "[" or . == "^" or . == "-" then "\\" + . else . end) | join("")) as $cls
+                | gsub("(?<m>[" + $cls + "]|`.*?`)";
+                    if (.m | length) > 1 then .m elif .m == "@" or .m == "#" then .m + "<!---->" else "\\" + .m end)
+            end;
+        def line: . as $p | $line_tpl | tpl({NUMBER: ($p.number | tostring), TITLE: ($p.title | esc_title)});
+        def has_any($want): any(.labels[]; . as $l | any($want[]; . == $l));
+        def prio: {patch: 1, minor: 2, major: 3}[.] // 0;
+        [.[] | select(($skip != "" and any(.labels[]; . == $skip)) | not)]
+        | to_entries | sort_by([.value.mergedAt, -.key]) | reverse | map(.value)
+        | . as $prs
+        | [$cats[] | .labels as $w | {title, increment, prs: [$prs[] | select(has_any($w))]}] as $groups
+        | [$prs[] | select(has_any([$cats[].labels[]]) | not)] as $other
+        | (($other | length) + ([$groups[].prs | length] | add // 0)) as $total
+        | (if $total == 0 then $none
+            else ((if ($other | length) > 0 then [($other | map(line) | join("\n")), "\n\n"] else [] end)
+                + [range(0; $groups | length) as $i | $groups[$i] | select(.prs | length > 0)
+                    | .title as $ct | ($cat_tpl | tpl({TITLE: $ct})) as $t
+                    | (if $t != "" then [$t, "\n\n"] else [] end)
+                        + [.prs | map(line) | join("\n")]
+                        + (if $i + 1 != ($groups | length) then ["\n\n"] else [] end)]
+                | flatten | join("") | sub("\\A\\s+"; "") | sub("\\s+\\z"; ""))
+            end) as $changes
+        | ([$groups[] | select(.prs | length > 0) | .increment | prio] + [$fallback | prio] | max) as $p
+        | {body: ($header + "\n\n" + $changes + "\n"), increment: ({"1": "patch", "2": "minor", "3": "major"}[$p | tostring])}
+        ' <<< "${pulls}" 2>&1)"; then
+        ci_error "[CI-ERROR-RELEASE-0073]" "base=\"${base}\" head=\"${head}\" reason=\"release notes not rendered\"" "${out}"
+        return 2
+    fi
+    printf '%s\n' "${out}"
+}
+
+# What: next version name from the base tag and the bump.
+# Why: release-drafter's v$RESOLVED_VERSION on base+bump.
+# From: Issue #1683 | PR #2004
+_ci_release_next_name() {
+    local base="$1" inc="$2" tpl ver x y z
+    _ci_block_entry_field release_notes "" name_template tpl || return 2
+    ver="${base#"${base%%[0-9]*}"}"
+    if [[ ! "${ver}" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+) ]]; then
+        ci_log "[CI-ERROR-RELEASE-0074]" "base=\"${base}\" reason=\"base tag holds no X.Y.Z version\""
+        return 2
+    fi
+    x="${BASH_REMATCH[1]}" y="${BASH_REMATCH[2]}" z="${BASH_REMATCH[3]}"
+    case "${inc}" in
+        major) x=$((x + 1)) y=0 z=0 ;;
+        minor) y=$((y + 1)) z=0 ;;
+        patch) z=$((z + 1)) ;;
+        *) ci_log "[CI-ERROR-RELEASE-0075]" "increment=\"${inc}\" reason=\"bump must be major, minor or patch\""; return 2 ;;
+    esac
+    printf '%s\n' "${tpl//\$RESOLVED_VERSION/${x}.${y}.${z}}"
+}
+
+# What: print the notes body for head and base; no write.
+# Why: preview and replay use the draft's own renderer.
+# From: Issue #1683 | PR #2004
+ci_cmd_release_notes() {
+    local head="${1:-}" base="${2:-}" payload body
+    if [ -z "${head}" ]; then
+        head="$(_ci_release_ref)" || return 2
+    elif [[ "${head}" != refs/* ]]; then
+        head="refs/tags/${head}"
+    fi
+    if [ -z "${base}" ]; then
+        base="$(_ci_release_last_published)" || return 2
+    fi
+    if [ -z "${base}" ]; then
+        ci_log "[CI-ERROR-RELEASE-0031]" "head=\"${head}\" reason=\"no published release as base\""
+        return 2
+    fi
+    payload="$(_ci_release_payload "${base}" "${head}")" || return 2
+    # What: a dot after the body survives $(...) trimming.
+    # Why: the body ends in a newline that must be printed.
+    # From: Issue #1683 | PR #2004
+    body="$(_ci_capture 0 jq -j '.body + "."' <<< "${payload}")" || return 2
+    printf '%s' "${body%.}"
+}
+
+# What: create or update the one draft; publish publishes.
+# Why: release-drafter layout; publish only by dispatch.
+# From: Issue #1683 | PR #2004
+ci_cmd_release_draft() {
+    local act="${1:-}" ref="${GITHUB_REF:-}" refs r draft_hit=0 repo base payload inc name rows id file out got want mode=created
+    case "${act}" in
+        "") ;;
+        publish)
+            # What: publish runs on the release ref only.
+            # Why: AG-REL-009: releases come from master.
+            # From: Issue #1683 | PR #2004
+            r="$(_ci_release_ref)" || return 2
+            if [ "${ref}" != "${r}" ]; then
+                ci_log "[CI-ERROR-RELEASE-0081]" "ref=\"${ref}\" release_ref=\"${r}\" reason=\"publish runs on the release ref only\""
+                return 2
             fi
-        done <<< "${labels}"
-        body="$(_ci_capture 0 jq -r '.body // ""' <<< "${pr}")" || return 2
-        body="$(_ci_pr_section "${body}" "${section}")" || return 2
-        if [ "${body}" = "${body%%$'\n'*}" ]; then body=""; else body="${body#*$'\n'}"; fi
-        body="$(_ci_md_strip_comments "${body}")" || return 2
-        out="" buf="" seen=0
-        while IFS= read -r line; do
-            if [[ "${line}" == *[!$' \t']* ]]; then
-                seen=1 out+="${buf}${line}"$'\n' buf=""
-            elif [ "${seen}" -eq 1 ]; then
-                buf+="${line}"$'\n'
-            fi
-        done <<< "${body}"
-        body="${out%$'\n'}"
-        [ -n "${group[${cat}]+x}" ] || order+=("${cat}")
-        group["${cat}"]+="- #${num} ${title} (${url})"$'\n'
-        [ -z "${body}" ] || group["${cat}"]+="  ${body//$'\n'/$'\n'  }"$'\n'
-    done <<< "${rows}"
-    if [ "${#order[@]}" -eq 0 ]; then
-        printf '_No pull requests with release notes._\n'
+            ;;
+        *)
+            ci_log "[CI-ERROR-RELEASE-0082]" "arg=\"${act}\" reason=\"release-draft takes no arg or publish\""
+            return 2
+            ;;
+    esac
+    refs="$(_ci_block_entry_list release_notes "" draft_refs)" || return 2
+    if [ -z "${refs}" ]; then
+        ci_log "[CI-ERROR-RELEASE-0080]" "reason=\"SOT release_notes draft_refs missing\""
+        return 2
+    fi
+    while IFS= read -r r; do
+        [ "${r}" != "${ref}" ] || draft_hit=1
+    done <<< "${refs}"
+    if [ "${draft_hit}" -eq 0 ]; then
+        printf 'release-draft=skip ref=%s reason="not a SOT draft ref"\n' "${ref}"
         return 0
     fi
-    local done_titles=$'\n' t
-    while IFS= read -r body; do
-        t="$(_ci_block_entry_field release_notes_categories "${body}" title)" || return 2
-        [[ "${done_titles}" != *$'\n'"${t}"$'\n'* ]] || continue
-        done_titles+="${t}"$'\n'
-        [ -z "${group[${t}]+x}" ] || printf '### %s\n\n%s\n' "${t}" "${group[${t}]}"
-    done <<< "${labels}"
-    [ -z "${group[${other}]+x}" ] || printf '### %s\n\n%s\n' "${other}" "${group[${other}]}"
+    repo="$(_ci_repo)" || return 2
+    base="$(_ci_release_last_published)" || return 2
+    if [ -z "${base}" ]; then
+        ci_log "[CI-ERROR-RELEASE-0076]" "reason=\"no published release as base for the draft\""
+        return 2
+    fi
+    payload="$(_ci_release_payload "${base}" "${ref}")" || return 2
+    inc="$(_ci_capture 0 jq -r '.increment' <<< "${payload}")" || return 2
+    name="$(_ci_release_next_name "${base}" "${inc}")" || return 2
+    rows="$(_ci_release_list)" || return 2
+    id="$(_ci_capture 0 jq -r 'select(.draft == true and .prerelease == false) | .id' <<< "${rows}")" || return 2
+    id="${id%%$'\n'*}"
+    file="$(_ci_mktemp "${CI_TMPDIR}/ci-release-draft.XXXXXX")" || return 2
+    if ! out="$(jq --arg tag "${name}" --arg target "${ref#refs/heads/}" \
+        '{tag_name: $tag, name: $tag, body: .body, target_commitish: $target, draft: true, prerelease: false, make_latest: "true"}' \
+        <<< "${payload}" 2>&1 > "${file}")"; then
+        ci_error "[CI-ERROR-RELEASE-0077]" "file=\"${file}\" reason=\"draft payload not written\"" "${out}"
+        rm -f "${file}"
+        return 2
+    fi
+    if [ -n "${id}" ]; then
+        mode=updated
+        out="$(_ci_retry github-api gh api -X PATCH "repos/${repo}/releases/${id}" --input "${file}" --jq '.id')" || { rm -f "${file}"; return 2; }
+    else
+        out="$(_ci_retry github-api gh api -X POST "repos/${repo}/releases" --input "${file}" --jq '.id')" || { rm -f "${file}"; return 2; }
+    fi
+    want="$(_ci_capture 0 jq -S -c '{tag_name, name, body, draft}' "${file}")" || { rm -f "${file}"; return 2; }
+    rm -f "${file}"
+    # What: read the draft back before it counts.
+    # Why: AG-WF-031: every GitHub write is read back
+    # From: Issue #1683 | PR #2004
+    got="$(_ci_retry github-read gh api "repos/${repo}/releases/${out}" --jq '{tag_name, name, body, draft} | @json')" || return 2
+    got="$(_ci_capture 0 jq -S -c '.' <<< "${got}")" || return 2
+    if [ "${got}" != "${want}" ]; then
+        ci_error "[CI-ERROR-RELEASE-0078]" "id=\"${out}\" reason=\"draft release not read back equal\"" "expected:"$'\n'"${want}"$'\n'"found:"$'\n'"${got}"
+        return 2
+    fi
+    printf 'release-draft=%s tag=%s id=%s base=%s\n' "${mode}" "${name}" "${out}" "${base}"
+    [ "${act}" = publish ] || return 0
+    _ci_release_draft_publish "${repo}" "${out}" "${name}"
 }
 
-# What: Print the release notes change list for a tag.
-# Why: maintainer fallback; same generator as the release.
-# From: Issue #894 | PR #1858
-ci_cmd_release_notes() {
-    local tag="${1:-}"
-    [ -n "${tag}" ] || { ci_log "[CI-ERROR-RELEASE-0031]" "reason=\"tag arg required\""; return 2; }
-    _ci_release_changes "${tag}"
+# What: publish draft $2 as tag $3 with its discussion.
+# Why: the PAT tag creation starts the release.yml run.
+# From: Issue #1683 | PR #2004
+_ci_release_draft_publish() {
+    local repo="$1" id="$2" tag="$3" category got t d u
+    _ci_block_entry_field release_notes "" discussion_category category || return 2
+    if [ -z "${category}" ]; then
+        ci_log "[CI-ERROR-RELEASE-0083]" "reason=\"SOT release_notes discussion_category missing\""
+        return 2
+    fi
+    _ci_retry github-api gh api -X PATCH "repos/${repo}/releases/${id}" -F draft=false \
+        -f make_latest=true -f discussion_category_name="${category}" --jq '.id' > /dev/null || return 2
+    # What: read the published release back.
+    # Why: AG-WF-031: every GitHub write is read back
+    # From: Issue #1683 | PR #2004
+    got="$(_ci_retry github-read gh api "repos/${repo}/releases/${id}" \
+        --jq '"\(.tag_name)\t\(.draft)\t\(.discussion_url // "")"')" || return 2
+    IFS=$'\t' read -r t d u <<< "${got}"
+    if [ "${t}" != "${tag}" ] || [ "${d}" != false ] || [ -z "${u}" ]; then
+        ci_log "[CI-ERROR-RELEASE-0084]" "id=\"${id}\" tag=\"${tag}\" found=\"${got}\" reason=\"release not read back as published with discussion\""
+        return 2
+    fi
+    printf 'release-draft=published tag=%s id=%s discussion=%s\n' "${tag}" "${id}" "${u}"
 }
 
-# What: Add a release tag's change list to CHANGELOG.md.
+# What: add the published release notes to CHANGELOG.md.
 # Why: release writes CHANGELOG; no PR edits it by hand.
-# From: Issue #894 | PR #1858
+# From: Issue #1683 | PR #2004
 ci_cmd_release_changelog() {
     local tag="${1:-}" branch="${CI_DEFAULT_BRANCH:-}" changes file head out remote url sha tip
-    local day entry line new="" put=0
+    local day entry line new="" put=0 repo rc=0
     [ -n "${tag}" ] || { ci_log "[CI-ERROR-RELEASE-0032]" "reason=\"tag arg required\""; return 2; }
     file="$(_ci_variable CI_CHANGELOG)" || return 2
     _ci_release_tag_final "${tag}" || {
@@ -10905,7 +11054,15 @@ ci_cmd_release_changelog() {
         ci_log "[CI-ERROR-RELEASE-0033]" "reason=\"CI_DEFAULT_BRANCH is required\""
         return 2
     fi
-    changes="$(_ci_release_changes "${tag}")" || return 2
+    repo="$(_ci_env_required GITHUB_REPOSITORY)" || return 2
+    changes="$(_ci_release_state "${repo}" "${tag}")" || rc=$?
+    if [ "${rc}" -eq 1 ]; then
+        ci_log "[CI-ERROR-RELEASE-0079]" "tag=\"${tag}\" reason=\"no published release for the tag; nothing to copy\""
+        return 2
+    fi
+    [ "${rc}" -eq 0 ] || return 2
+    if [ "${changes}" = "${changes%%$'\n'*}" ]; then changes=""; else changes="${changes#*$'\n'}"; fi
+    changes="${changes//$'\r'/}"
     remote="$(_ci_git_remote)" || return 2
     _ci_retry git-fetch git fetch --no-tags "${remote}" "+refs/heads/${branch}:refs/remotes/${remote}/${branch}" >&2 || return 2
     _ci_git_run checkout -B ci-release-changelog "${remote}/${branch}" >&2 || return 2
@@ -11084,34 +11241,6 @@ _ci_release_digest() {
     printf '%s\n' "${dig}"
 }
 
-# What: Render the marker-delimited image provenance block.
-# Why: Records every shipped digest; SOT list, no hardcode.
-# From: Issue #1683
-_ci_release_notes_block() {
-    local tag="$1" base target dig head
-    base="$(_ci_image_ref)" || return 2
-    head="$(_ci_head_commit)" || return 2
-    _ci_release_marker start || return 2
-    printf '## Changes\n\n'
-    _ci_release_changes "${tag}" || return 2
-    printf '\n## Images\n\n'
-    printf 'Images published for %s (commit %s):\n\n' "${tag}" "${head}"
-    local targets
-    local -a target_list=()
-    targets="$(ci_build_targets)" || return 2
-    [ -z "${targets}" ] || mapfile -t target_list <<< "${targets}"
-    for target in "${target_list[@]}"; do
-        dig="$(_ci_release_digest "${base}/${target}")" || return "$?"
-        printf -- '- %s:%s -> %s\n' "${base}/${target}" "${tag}" "${dig}"
-    done
-    printf '\nProvenance attestations and CycloneDX SBOMs attach per image.\n'
-    local ignore vex
-    ignore="$(_ci_variable CI_TRIVY_IGNORE)" || return 2
-    vex="$(_ci_variable CI_RELEASE_VEX_ASSET)" || return 2
-    printf 'OpenVEX from %s attaches as %s.\n' "${ignore}" "${vex}"
-    _ci_release_marker end || return 2
-}
-
 # What: fetch one release asset: 0 got, 1 absent, 2 unknown
 # Why: a repeat reuses or compares, it never re-uploads
 # From: Issue #1683 | PR #1858
@@ -11161,24 +11290,32 @@ _ci_release_state() {
     _ci_capture 0 jq -r '(.isPrerelease | tostring), (.body // "")' <<< "${out}"
 }
 
-# What: create a GitHub release once; a repeat only compares
+# What: accept a published release; create one if absent.
 # Why: AG-REL-014: CI never edits a published release
-# From: Issue #1683 | PR #1858
+# From: Issue #1683 | PR #2004
 ci_cmd_release_publish() {
     local tag="${1:-}"
     [ -n "${tag}" ] || { ci_log "[CI-ERROR-RELEASE-0003]" "reason=\"tag arg required\""; return 2; }
-    local repo sha pre want state found body_file err mode=unchanged rc=0
+    local repo sha pre base payload state body_file err mode=accepted rc=0
     local -a create=()
     repo="$(_ci_env_required GITHUB_REPOSITORY)" || return 2
     sha="$(_ci_head_commit)" || return 2
     pre="$(_ci_release_prerelease "${tag}")" || return "$?"
-    want="$(_ci_release_notes_block "${tag}")" || return "$?"
     state="$(_ci_release_state "${repo}" "${tag}")" || rc=$?
     [ "${rc}" -le 1 ] || return 2
+    # What: no release yet: render the notes like the draft.
+    # Why: a tag cut without a published draft needs notes.
+    # From: Issue #1683 | PR #2004
     if [ "${rc}" -eq 1 ]; then
         mode=published
+        base="$(_ci_release_last_published)" || return 2
+        if [ -z "${base}" ]; then
+            ci_log "[CI-ERROR-RELEASE-0038]" "tag=\"${tag}\" reason=\"no published release as notes base\""
+            return 2
+        fi
+        payload="$(_ci_release_payload "${base}" "refs/tags/${tag}")" || return 2
         body_file="$(_ci_mktemp "${CI_TMPDIR}/ci-release-notes.XXXXXX")" || return 2
-        if ! err="$(printf '%s\n' "${want}" 2>&1 > "${body_file}")"; then
+        if ! err="$(jq -j '.body' <<< "${payload}" 2>&1 > "${body_file}")"; then
             ci_error "[CI-ERROR-RELEASE-0036]" "tag=\"${tag}\" file=\"${body_file}\" reason=\"notes file not written\"" "${err}"
             rm -f "${body_file}"
             return 2
@@ -11199,14 +11336,8 @@ ci_cmd_release_publish() {
             return 2
         fi
     fi
-    found="${state#*$'\n'}"
-    [ "${found}" != "${state}" ] || found=""
     if [ "${state%%$'\n'*}" != "${pre}" ]; then
         ci_log "[CI-ERROR-RELEASE-0005]" "tag=\"${tag}\" mode=${mode} reason=\"release prerelease state != tag policy\" expected=\"${pre}\" found=\"${state%%$'\n'*}\""
-        return 2
-    fi
-    if [ "${found//$'\r'/}" != "${want//$'\r'/}" ]; then
-        ci_error "[CI-ERROR-RELEASE-0038]" "tag=\"${tag}\" mode=${mode} reason=\"release notes differ from the expected state; CI never edits a release\"" "expected:"$'\n'"${want}"$'\n'"found:"$'\n'"${found}"
         return 2
     fi
     printf 'release=%s tag=%s prerelease=%s\n' "${mode}" "${tag}" "${pre}"
