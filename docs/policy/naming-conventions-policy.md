@@ -5,8 +5,9 @@ identifiers (see [AG-CODE-014]). Runtime objects are covered first: the Compose 
 Docker volumes, host bind-mount directories, GHCR image and package names,
 environment variables that refer to services or containers, and
 backup/restore paths. Code identifiers are covered in "Code Naming
-Conventions" below. `ci.sh check naming-consistency` (part of `ci.sh check
-all`, see "CI guard" below) checks the parts that a script can check; it
+Conventions" below. The `ci.bats` test `naming_consistency` (off by default;
+`ci.sh check ci-bats enable-naming_consistency`, see "CI guard" below)
+checks the parts that a script can check; it
 does not replace reading this document.
 
 If you add a new service, volume or environment variable, follow the rule
@@ -150,8 +151,8 @@ the Compose files and keeps the ones that exist in the checkout (today
 
 ## CI guard
 
-`ci.sh check naming-consistency` (`_ci_check_naming_consistency` in
-`.github/scripts/ci.sh`) renders `deploy/prod/docker-compose.yml` and fails
+The `ci.bats` test `naming_consistency` (`_ci_check_naming_consistency` in
+`.github/scripts/ci.bats`) renders `deploy/prod/docker-compose.yml` and fails
 when:
 - a service has no `container_name:`;
 - a `container_name:` does not end in `-<service>`;

@@ -100,7 +100,7 @@ Every container logs through Docker's `syslog` driver to syslog-ng in
 `SYSLOG_NG_LOG_DIR/<program>/`. The ui reads them read-only. Logging can
 be switched per service in the ui; the ui re-renders the syslog-ng config.
 
-**Logging matrix** (one row per Compose service in `deploy/prod/docker-compose.yml`; `ci.sh check logging-matrix` enforces it):
+**Logging matrix** (one row per Compose service in `deploy/prod/docker-compose.yml`; the `ci.bats` test `logging_matrix` checks it, off by default):
 
 | Service | Logging path | Store directory under `SYSLOG_NG_LOG_DIR` |
 | --- | --- | --- |
