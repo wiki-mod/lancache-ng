@@ -9,15 +9,15 @@ name: CI 2.0 Release
 on:
   push:
     tags: ['v*']
-  # What: publish a tag, cut a patch tag, publish draft.
+  # What: publish, cut-patch, publish-draft, build-tools.
   # Why: AG-REL-013: a tag cut is its own dispatch.
   # From: Issue #1683 | PR #2004
   workflow_dispatch:
     inputs:
       action:
-        description: publish a release tag, cut the next patch tag, or publish the draft release
+        description: publish a release tag, cut the next patch tag, publish the draft release, or promote the accepted build-tools image
         type: choice
-        options: [publish, cut-patch, publish-draft]
+        options: [publish, cut-patch, publish-draft, promote-build-tools]
         default: publish
       tag:
         description: Release tag to (re)publish (vX.Y.Z or vX.Y.Z-rc.N); empty for cut-patch.
@@ -35,7 +35,7 @@ defaults:
 # From: Issue #1683 | PR #1858
 env:
   GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-  CI_RELEASE_TAG: ${{ inputs.action != 'cut-patch' && inputs.action != 'publish-draft' && (github.event.inputs.tag || github.ref_name) || '' }}
+  CI_RELEASE_TAG: ${{ !contains(fromJSON('["cut-patch","publish-draft","promote-build-tools"]'), inputs.action) && (github.event.inputs.tag || github.ref_name) || '' }}
   # What: LAN proxy CA secret; ci.sh uses it self-hosted.
   # Why: a secret is masked; ci.sh reads it by name.
   # From: Issue #1683 | PR #1858
@@ -95,8 +95,12 @@ jobs:
         with:
           ref: ${{ github.event.inputs.tag || github.sha }}
           fetch-depth: 1
+      # What: promote-build-tools skips the image resolve.
+      # Why: the resolver refuses a non-ACCEPTED image.
+      # From: Issue #1683 | PR #2004
       - name: Resolve the build-tools image
         id: resolve
+        if: inputs.action != 'promote-build-tools'
         run: bash .github/scripts/ci.sh build-tools resolve-image
       - name: Resolve the job settings
         id: jobs
@@ -108,7 +112,7 @@ jobs:
   plan:
     name: plan
     needs: resolve-build-tools
-    if: inputs.action != 'cut-patch' && inputs.action != 'publish-draft'
+    if: ${{ !contains(fromJSON('["cut-patch","publish-draft","promote-build-tools"]'), inputs.action) }}
     runs-on: ${{ needs.resolve-build-tools.outputs.runner }}
     timeout-minutes: ${{ fromJSON(needs.resolve-build-tools.outputs.timeouts)['plan'] }}
     container: &bt_container
@@ -195,7 +199,7 @@ jobs:
   release:
     name: release
     needs: [resolve-build-tools, plan, promote]
-    if: inputs.action != 'cut-patch' && inputs.action != 'publish-draft'
+    if: ${{ !contains(fromJSON('["cut-patch","publish-draft","promote-build-tools"]'), inputs.action) }}
     runs-on: ${{ needs.resolve-build-tools.outputs.runner }}
     timeout-minutes: ${{ fromJSON(needs.resolve-build-tools.outputs.timeouts)['release'] }}
     container: *bt_container
@@ -346,3 +350,32 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.RELEASE_DRAFTER_PAT }}
         run: bash .github/scripts/ci.sh release-draft publish
+
+  # What: promote this tree's accepted build-tools image.
+  # Why: plan needs an ACCEPTED build-tools on the channel.
+  # From: Issue #1683 | PR #2004
+  promote-build-tools:
+    name: promote-build-tools
+    needs: resolve-build-tools
+    if: inputs.action == 'promote-build-tools'
+    runs-on: ${{ needs.resolve-build-tools.outputs.runner }}
+    timeout-minutes: ${{ fromJSON(needs.resolve-build-tools.outputs.timeouts)['promote-build-tools'] }}
+    # What: the job runs in the build-tools:nightly image.
+    # Why: the release channel image may be non-ACCEPTED.
+    # From: Issue #1683 | PR #2004
+    container:
+      image: ghcr.io/${{ github.repository }}/build-tools:nightly
+      credentials: *ghcr_credentials
+    # What: actions read: lock waits ask if a holder ended.
+    # Why: the lock is a git ref; channels are packages.
+    # From: Issue #1683 | PR #2004
+    permissions:
+      actions: read
+      contents: write
+      packages: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - *bootstrap
+      - name: Promote the accepted build-tools image
+        run: bash .github/scripts/ci.sh build-tools promote
