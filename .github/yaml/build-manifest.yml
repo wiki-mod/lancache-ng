@@ -1999,7 +1999,7 @@ release_notes:
   name_template: "v$RESOLVED_VERSION"
   skip_label: skip-changelog
   fallback_increment: patch
-  # What: associated PRs read per commit; recent PRs rechecked.
+  # What: PRs read per commit; recent merged PRs rechecked.
   # Why: release-drafter limits 5 and 5; same PR set.
   # From: Issue #1683 | PR #2004
   pull_request_limit: 5
