@@ -372,22 +372,71 @@ jobs:
           CI_RUN_IDENTITIES: *run_ids
         run: bash .github/scripts/ci.sh assemble-stack
 
+  # What: validate full stack; a red build stops a PR only.
+  # Why: a push validates what assemble accepted.
+  # From: Issue #1683 | PR #1858
+  validate:
+    name: validate
+    needs: [plan, build, aggregate, assemble]
+    if: >-
+      !cancelled() && needs.plan.outputs.validate == 'true' &&
+      (needs.plan.outputs.any-build == 'false' ||
+      (github.event_name == 'pull_request' &&
+      (needs.build.result == 'success' ||
+      needs.build.result == 'skipped')) ||
+      (needs.aggregate.result == 'success' && needs.assemble.result == 'success'))
+    # What: build-tools container, one shared host dir.
+    # Why: AG-VAL-016; same path both sides for binds.
+    # From: Issue #1683 | PR #1912
+    runs-on: ${{ needs.plan.outputs.runner }}
+    timeout-minutes: ${{ fromJSON(needs.plan.outputs.timeouts)['validate'] }}
+    # What: one job per SOT probe group, all at once.
+    # Why: DoMe 08.11.: serial probes made validate slow.
+    # From: Issue #1683 | PR #1858
+    strategy:
+      fail-fast: false
+      matrix:
+        probes: ${{ fromJSON(needs.plan.outputs.validate-probes) }}
+    container:
+      image: ${{ needs.plan.outputs.image }}
+      credentials: *ghcr_credentials
+      volumes:
+        - ${{ needs.plan.outputs.validate-dir }}:${{ needs.plan.outputs.validate-dir }}
+      # What: the build-tools ref this job runs in.
+      # Why: the state-root clear runs in it, no alpine.
+      # From: Issue #1683 | PR #1984
+      env:
+        CI_BUILD_TOOLS_IMAGE: ${{ needs.plan.outputs.image }}
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      stack: ${{ steps.validate.outputs.stack }}
+    steps:
+      - *bootstrap
+      - *gha_export
+      - name: Validate the accepted stack candidate
+        id: validate
+        env:
+          CI_RUN_IDENTITIES: *run_ids
+          CI_VALIDATE_PROBES: ${{ matrix.probes }}
+        run: bash .github/scripts/ci.sh validate
+
   # What: promote channels the ref maps to
   # Why: ref-driven promote owner; moves refs only
   # From: Issue #1683
   promote:
     name: promote
-    needs: [plan, aggregate, assemble]
+    needs: [plan, validate]
     if: >-
-      !cancelled() && needs.plan.outputs.promote == 'true' &&
-      github.event_name == 'push' &&
-      (needs.plan.outputs.any-build == 'false' ||
-      (needs.aggregate.result == 'success' && needs.assemble.result == 'success'))
+      !cancelled() && needs.validate.result == 'success' &&
+      needs.plan.outputs.promote == 'true' && github.event_name == 'push'
     runs-on: ${{ needs.plan.outputs.runner }}
     timeout-minutes: ${{ fromJSON(needs.plan.outputs.timeouts)['promote'] }}
     container: *bt_platform
     permissions: *ship_write
     env:
+      CI_STACK_VALIDATED: ${{ needs.validate.outputs.stack }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       CI_RUN_IDENTITIES: *run_ids
     steps:
@@ -619,7 +668,7 @@ jobs:
   # From: Issue #1683
   result:
     name: result
-    needs: [plan, build, test, cargo-audit, aggregate, assemble, promote, checks, close-linked-issues]
+    needs: [plan, build, test, cargo-audit, aggregate, assemble, validate, promote, checks, close-linked-issues]
     if: always() && github.event_name != 'issues'
     # What: plan's runner or the bootstrap pair.
     # Why: the required check must run when plan failed.
