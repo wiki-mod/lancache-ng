@@ -10791,7 +10791,7 @@ _ci_release_pulls() {
         ci_error "[CI-ERROR-RELEASE-0070]" "base=\"${base}\" head=\"${head}\" reason=\"commit comparison not readable\"" "${out}"$'\n'"${raw}"
         return 2
     fi
-    # What: a branch head also asks for its newest merged PRs.
+    # What: a branch head also reads its newest merged PRs.
     # Why: GitHub links a fresh merge to its PR with a lag.
     # From: Issue #1683 | PR #2004
     if [[ "${head}" == refs/heads/* ]]; then
@@ -10834,7 +10834,7 @@ _ci_release_categories() {
             return 2
         fi
         out="$(_ci_capture 0 jq -c --arg t "${title}" --arg l "${labels}" --arg i "${inc}" \
-            '. + [{title: $t, labels: ($l | split("\n") | map(select(. != ""))), increment: $i}]' <<< "${out}")" || return 2
+            ". + [{title: \$t, labels: (\$l | split(\"\\n\") | map(select(. != \"\"))), increment: \$i}]" <<< "${out}")" || return 2
     done <<< "${keys}"
     printf '%s\n' "${out}"
 }
