@@ -11052,11 +11052,11 @@ ci_cmd_release_changelog() {
     fi
     day="$(_ci_capture 0 date -u +%Y-%m-%d)" || return 2
     entry="${head} - ${day}"$'\n\n'"${changes}"
-    # What: new entry goes above the first "## [" release.
-    # Why: the pending section stays on top.
-    # From: Issue #894 | PR #1858
+    # What: new entry goes right below the file header.
+    # Why: versions run newest first; no section above it.
+    # From: Issue #1683
     while IFS= read -r line || [ -n "${line}" ]; do
-        if [ "${put}" -eq 0 ] && [[ "${line}" == "## ["* ]]; then
+        if [ "${put}" -eq 0 ] && [[ "${line}" == "## "* ]]; then
             new+="${entry}"$'\n\n'
             put=1
         fi
