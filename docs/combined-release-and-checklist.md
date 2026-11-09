@@ -848,23 +848,22 @@ Not verified against the code or a live stack:
 - the `setup.sh update` flow of sections 10.11 and 10.12;
 - the pass criteria of sections 10.5, 10.8 and 10.9.
 
-### 11.5 Defects found by Part B
+### 11.5 Failure classes from Part B
 
-Each row is a defect a Part B scenario found. The scenario stays the check
-for a recurrence; a new row is added for each new defect.
+Part B scenario is the recurrence check. One row per failure class.
 
-| Defect | Found by | Fix |
+| Failure class | Scenario | Fix |
 | --- | --- | --- |
-| `DHCP_PROXY_INTERFACE` had no schema row; Kea opened no socket and the ui refused Kea mode | 10.3 Kea lease | `dd8aa722` |
-| a secondary set `AXFR-MASTER-TSIG` by API metadata; PowerDNS refuses it, no transfer | 10.5 transfer | `9365bd5f` |
-| empty `DHCP_DNS_SERVERS` sent an empty DNS option; clients got no DNS | 10.3 Kea DNS option | `df805036` |
-| secondary asked the primary on port 53 and did not publish the pdns port | 10.5 transfer | `14948d8d` |
-| a new `pdns.conf` (also-notify with port) took effect only after a pdns restart | 10.5 NOTIFY | `edfdef9f` |
-| `configure-upstream-dns` kept a server that does not answer | 10.2 dead resolver | `805fb763` |
-| a container stopped without a user wish showed gray, not red | 10.6 health card | `27dbfaec` |
-| `log_writing` counted only `dst.file` rows; syslog-ng 4 has none, so it never fired | 10.8 silent log loss | `49f15bd7` |
-| `DHCP_PROXY_PXE_*` did not reach the ui that renders `dnsmasq.conf`; no PXE offer | 10.3 ProxyDHCP | `3a6be729` |
-| a proxy/relay switch restarted the dhcp container | 10.3 sub-mode switch | `4aafe168` |
+| `DHCP_PROXY_INTERFACE` without schema row: Kea opens no socket | 10.3 | `dd8aa722` |
+| secondary TSIG set as API metadata: PowerDNS refuses, no transfer | 10.5 | `9365bd5f` |
+| empty `DHCP_DNS_SERVERS`: empty DNS option to clients | 10.3 | `df805036` |
+| zone transfer and NOTIFY on port 53 instead of the pdns port | 10.5 | `14948d8d` |
+| new `pdns.conf` without pdns restart | 10.5 | `edfdef9f` |
+| unanswering upstream DNS server stays active | 10.2 | `805fb763` |
+| unrequested container stop shown gray, not red | 10.6 | `27dbfaec` |
+| `log_writing` counter without `dst.file` rows is always 0 | 10.8 | `49f15bd7` |
+| `DHCP_PROXY_PXE_*` missing in the ui environment: no PXE offer | 10.3 | `3a6be729` |
+| dnsmasq sub-mode switch restarts the dhcp container | 10.3 | `4aafe168` |
 
 ---
 
