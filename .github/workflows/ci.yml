@@ -573,6 +573,14 @@ jobs:
           PR_LABELS_JSON: ${{ toJSON(github.event.pull_request.labels.*.name) }}
           PR_MILESTONE_TITLE: ${{ github.event.pull_request.milestone.title }}
         run: bash .github/scripts/ci.sh pr-meta plan
+      # What: board-add right before the metadata check.
+      # Why: pr-admin runs in parallel; the check reads it.
+      # From: Issue #1683
+      - name: Add the PR to the project board
+        if: steps.meta.outputs.meta == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.PROJECT_AUTOMATION_PAT }}
+        run: bash .github/scripts/ci.sh board-add
       # What: PR title, template, labels and milestone.
       # Why: this PR text is not yet checked green.
       # From: Issue #1683 | PR #1858
@@ -611,10 +619,10 @@ jobs:
   # From: Issue #1683 | PR #1858
   pr-admin:
     name: pr-admin
-    if: >-
-      github.event_name == 'issues' ||
-      (github.event_name == 'pull_request' &&
-      contains(fromJSON('["opened","reopened","synchronize"]'), github.event.action))
+    # What: any issue or PR event runs it; idempotent.
+    # Why: a cancelled opened run still gets its board.
+    # From: Issue #1683
+    if: github.event_name == 'issues' || github.event_name == 'pull_request'
     # What: own literal runner/timeout; it needs no plan.
     # Why: it runs beside plan, never after it.
     # From: Issue #1683 | PR #1858
