@@ -2004,6 +2004,10 @@ release_notes:
   # From: Issue #1683 | PR #2004
   pull_request_limit: 5
   recent_merged_lookback: 5
+  # What: pushes to these refs refresh the one draft.
+  # Why: release-drafter ran on both; last push wins.
+  # From: Issue #1683 | PR #2004
+  draft_refs: [refs/heads/current_dev, refs/heads/master]
   # What: PR label that marks a deliberate CHANGELOG.md edit
   # Why: the release flow owns the file; a label opts in
   # From: Issue #1683 | PR #1858
