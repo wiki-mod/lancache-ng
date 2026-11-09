@@ -1,0 +1,44 @@
+
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+# What: manifest of the cachehamster prefill daemon.
+# Why: one binary: daemon plus UI commands.
+# From: Issue #871 | PR #1858
+[package]
+name = "lancache-cachehamster"
+edition.workspace = true
+license.workspace = true
+
+# What: explicit bin target, same as cargo's default
+# Why: ci.sh tells a bin crate from a library by it
+# From: Issue #1683 | PR #1905
+[[bin]]
+name = "lancache-cachehamster"
+path = "src/main.rs"
+
+[dependencies]
+LanCache-NG = { path = "../common" }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+futures-util = { workspace = true }
+base64 = { workspace = true }
+# What: QR code renderer to SVG.
+# Why: Steam QR login; the UI embeds the SVG.
+# From: Issue #871 | PR #1858
+qrcode = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+hex = { workspace = true }
+# What: websocket to the Steam CM (rustls, no openssl).
+# Why: PICS and manifest codes exist only on the CM.
+# From: Issue #871 | PR #1858
+tokio-tungstenite = { workspace = true }
+# What: gzip of bundled CM messages (Multi).
+# Why: the CM packs many answers into one frame.
+# From: Issue #871 | PR #1858
+flate2 = { workspace = true }
+# What: unzip Steam depot manifests.
+# Why: the CDN sends each manifest as a zip file.
+# From: Issue #871 | PR #1858
+zip = { workspace = true }

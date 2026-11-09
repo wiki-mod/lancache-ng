@@ -1,353 +1,536 @@
-//! SPDX-License-Identifier: AGPL-3.0-or-later
-//! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 //!
-//! Binary entry point for the Rust rewrite of watchdog.sh's health-check/
-//! restart loop. See `lib.rs`'s module doc comment for the current scope
-//! (health checks + restart + status.json + the docker-socket-proxy alert
-//! probe; NOT yet the three filesystem-retention passes) and why
-//! `services/watchdog/Dockerfile`'s `ENTRYPOINT` still points at the bash
-//! script rather than this binary.
+//! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+//! SPDX-License-Identifier: AGPL-3.0-or-later
 
-use std::collections::HashMap;
-use std::path::PathBuf;
+// What: watchdog: decides when to check and tidy.
+// Why: the how lives in shared.rs; no config here.
+// From: Issue #1683 | PR #1858
+
+use lancache_ng::config::{Settings, process_env};
+use lancache_ng::{cert, clock, dns, docker, fs, http, pdns, tidy};
+use serde::Serialize;
+use serde_json::Value;
+use std::collections::{BTreeMap, VecDeque};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use lancache_watchdog::config::{self, ContainerNames, MonitoredService};
-use lancache_watchdog::docker_client::DockerProxyClient;
-use lancache_watchdog::health::{Action, AlertAction, AlertCounter, FailureCounter, HealthReading};
-use lancache_watchdog::status::{self, DiskInfo, ServiceHealth, WatchdogStatus};
+// What: env name of the saved settings file.
+// Why: needed before any setting can be read.
+// From: Issue #1683 | PR #1858
+const SETTINGS_FILE_ENV: &str = "LANCACHE_SETTINGS_FILE";
 
-// Matches watchdog.sh's log()/log_err(): "[watchdog] HH:MM:SS msg". Kept as
-// this exact shape (rather than switching to a structured `tracing`
-// format) so operators grepping existing `docker logs lancache-watchdog`
-// output/dashboards built around this line shape see no discontinuity the
-// day this binary eventually replaces the bash entrypoint.
-fn timestamp_hms() -> String {
-    const FORMAT: &[time::format_description::FormatItem] =
-        time::macros::format_description!("[hour]:[minute]:[second]");
-    time::OffsetDateTime::now_utc()
-        .format(FORMAT)
-        .expect("fixed UTC format description must always succeed")
+// What: weight of one finding.
+// Why: the ui sorts and colours by it.
+// From: Issue #1683 | PR #1858
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+enum Level {
+    Warn,
+    Crit,
 }
 
-fn log(msg: &str) {
-    println!("[watchdog] {} {msg}", timestamp_hms());
+// What: one finding.
+// Why: same row in the alarm file and the log.
+// From: Issue #1683 | PR #1858
+#[derive(Debug, Serialize)]
+struct Alarm {
+    level: Level,
+    source: String,
+    text: String,
 }
 
-fn log_err(msg: &str) {
-    eprintln!("[watchdog] {} {msg}", timestamp_hms());
+// What: findings and facts of one round.
+// Why: a check adds rows and never stops others.
+// From: Issue #1683 | PR #1858
+#[derive(Default)]
+struct Findings {
+    alarms: Vec<Alarm>,
+    containers: Vec<Value>,
+    cache: Value,
 }
 
-// Startup env parsing, mirrored from watchdog.sh's top-of-file section.
-// Kept in main.rs (not lib.rs) because it reads real process environment
-// variables -- everything it calls into (config::*) is itself pure and
-// unit-tested independently.
-struct Settings {
-    docker_proxy_url: String,
-    check_interval: Duration,
-    restart_after: u32,
-    // `None` means "no timeout", matching curl's own `--max-time 0`
-    // semantics for CURL_MAX_TIME/CURL_MAX_TIME_RESTART -- see
-    // config::parse_curl_timeout's doc comment. Never represented as
-    // `Duration::ZERO`: docker_client's bounded()/apply_timeout() treat
-    // that as "essentially instant", the opposite of "unbounded".
-    curl_max_time: Option<Duration>,
-    curl_max_time_restart: Option<Duration>,
-    disk_warn_pct: u32,
-    disk_alarm_pct: u32,
-    status_file: PathBuf,
-    cache_dir: PathBuf,
-    container_names: ContainerNames,
-}
-
-fn load_settings() -> Settings {
-    // Filters an explicitly-empty env value (e.g. `DOCKER_PROXY_URL=` set
-    // but blank) down to `None` here, at the single point every setting in
-    // this function reads from -- see config::non_empty's own doc comment
-    // for why bash's `${VAR:-default}` treats empty and unset identically.
-    // This also makes the equivalent filtering inside config::resolve_bool/
-    // parse_u64_with_default/resolve_container_names redundant for THESE
-    // call sites specifically, which is fine: those functions still need
-    // their own guard so they stay correct for any other caller, not just
-    // this one.
-    let env = |name: &str| {
-        let value = std::env::var(name).ok();
-        config::non_empty(value.as_deref()).map(str::to_string)
-    };
-
-    let docker_proxy_url =
-        env("DOCKER_PROXY_URL").unwrap_or_else(|| "http://docker-socket-proxy:2375".to_string());
-
-    let (check_interval, warnings) = config::parse_check_interval(env("CHECK_INTERVAL").as_deref());
-    for w in warnings {
-        log(&w);
-    }
-
-    let (restart_after, warnings) = config::parse_restart_after(env("RESTART_AFTER").as_deref());
-    for w in warnings {
-        log(&w);
-    }
-
-    let (curl_max_time, warnings) =
-        config::parse_curl_timeout(env("CURL_MAX_TIME").as_deref(), "CURL_MAX_TIME", 5);
-    for w in warnings {
-        log(&w);
-    }
-    let (curl_max_time_restart, warnings) = config::parse_curl_timeout(
-        env("CURL_MAX_TIME_RESTART").as_deref(),
-        "CURL_MAX_TIME_RESTART",
-        30,
-    );
-    for w in warnings {
-        log(&w);
-    }
-
-    let (disk_warn_pct, warnings) =
-        config::parse_u32_with_default(env("DISK_WARN_PCT").as_deref(), "DISK_WARN_PCT", 85);
-    for w in warnings {
-        log(&w);
-    }
-    let (disk_alarm_pct, warnings) =
-        config::parse_u32_with_default(env("DISK_ALARM_PCT").as_deref(), "DISK_ALARM_PCT", 95);
-    for w in warnings {
-        log(&w);
-    }
-
-    // SSL_ENABLED defaults truthy, matching watchdog.sh's `is_truthy
-    // "${SSL_ENABLED:-1}"`.
-    let ssl_enabled = config::resolve_bool(env("SSL_ENABLED").as_deref(), true);
-
-    let container_names = match config::resolve_container_names(
-        env("CONTAINER_PROXY").as_deref(),
-        env("CONTAINER_DNS_STANDARD").as_deref(),
-        env("CONTAINER_DNS_SSL").as_deref(),
-        env("CONTAINER_NATS").as_deref(),
-        ssl_enabled,
-    ) {
-        Ok(names) => names,
-        Err(msg) => {
-            log_err(&msg);
-            std::process::exit(1);
-        }
-    };
-
-    let status_file = env("STATUS_FILE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/var/run/watchdog/status.json"));
-
-    // Mirrors watchdog.sh's resolve_cache_dir(): CACHE_DIR wins outright,
-    // but an older installation may still only have the pre-CACHE_DIR
-    // split CACHE_DIR_STANDARD/CACHE_DIR_SSL pair set -- reading only
-    // CACHE_DIR here would silently fall back to the default and report
-    // disk usage for the wrong filesystem on such an install. Conflicting
-    // legacy values with no CACHE_DIR to arbitrate is fatal, matching the
-    // bash's own exit 1, via the same log_err-then-exit(1) pattern
-    // resolve_container_names's fail-closed mismatch uses above.
-    let cache_dir = match config::resolve_cache_dir(
-        env("CACHE_DIR").as_deref(),
-        env("CACHE_DIR_STANDARD").as_deref(),
-        env("CACHE_DIR_SSL").as_deref(),
-    ) {
-        Ok(dir) => PathBuf::from(dir),
-        Err(msg) => {
-            log_err(&msg);
-            std::process::exit(1);
-        }
-    };
-
-    Settings {
-        docker_proxy_url,
-        check_interval,
-        restart_after,
-        curl_max_time,
-        curl_max_time_restart,
-        disk_warn_pct,
-        disk_alarm_pct,
-        status_file,
-        cache_dir,
-        container_names,
-    }
-}
-
-#[tokio::main]
-async fn main() {
-    let settings = load_settings();
-    let client = DockerProxyClient::new(settings.docker_proxy_url.clone())
-        .expect("building the reqwest client must not fail (no invalid static config)");
-
-    // The data-driven service table the maintainer's own rewrite brief
-    // asked for, replacing watchdog.sh's four individually-named
-    // C_PROXY/C_DNS_STD/C_DNS_SSL/C_NATS variables. Built fresh from
-    // ContainerNames rather than stored on Settings: this is the shape the
-    // main loop iterates, while ContainerNames is the validated
-    // env-resolution result the rest of the program (status.json's
-    // dns-ssl-key omission) also needs directly.
-    let mut monitored: Vec<MonitoredService> = vec![
-        MonitoredService {
-            container_name: settings.container_names.proxy.clone(),
-            restart_after: settings.restart_after,
-            grace_period: None,
-        },
-        MonitoredService {
-            container_name: settings.container_names.dns_standard.clone(),
-            restart_after: settings.restart_after,
-            grace_period: None,
-        },
-    ];
-    if let Some(dns_ssl) = &settings.container_names.dns_ssl {
-        monitored.push(MonitoredService {
-            container_name: dns_ssl.clone(),
-            restart_after: settings.restart_after,
-            grace_period: None,
+impl Findings {
+    fn add(&mut self, level: Level, source: &str, text: impl Into<String>) {
+        let (source, text) = (source.to_string(), text.into());
+        self.alarms.push(Alarm {
+            level,
+            source,
+            text,
         });
     }
-    monitored.push(MonitoredService {
-        container_name: settings.container_names.nats.clone(),
-        restart_after: settings.restart_after,
-        grace_period: None,
-    });
+    fn warn(&mut self, source: &str, text: impl Into<String>) {
+        self.add(Level::Warn, source, text);
+    }
+    fn crit(&mut self, source: &str, text: impl Into<String>) {
+        self.add(Level::Crit, source, text);
+    }
+}
 
-    let mut failure_counters: HashMap<String, FailureCounter> = monitored
-        .iter()
-        .map(|s| (s.container_name.clone(), FailureCounter::default()))
-        .collect();
-    let mut docker_proxy_alert_counter = AlertCounter::default();
+// What: body of the alarm file.
+// Why: the ui shows it; the stamp proves life.
+// From: Issue #1683 | PR #1858
+#[derive(Serialize)]
+struct Report<'a> {
+    written: u64,
+    alarms: &'a [Alarm],
+    containers: &'a [Value],
+    cache: &'a Value,
+}
 
-    log(&format!(
-        "Watchdog started. Monitoring: {} (SSL_ENABLED={}); alert-only probe: {}",
-        monitored
-            .iter()
-            .map(|s| s.container_name.as_str())
-            .collect::<Vec<_>>()
-            .join(" "),
-        if settings.container_names.dns_ssl.is_some() {
-            1
-        } else {
-            0
-        },
-        settings.container_names.docker_socket_proxy,
-    ));
-    log(&format!(
-        "Cache directory: {}",
-        settings.cache_dir.display()
-    ));
-    log(&format!(
-        "Interval: {}s | Restart after: {} | Disk warn: {}% alarm: {}%",
-        settings.check_interval.as_secs(),
-        settings.restart_after,
-        settings.disk_warn_pct,
-        settings.disk_alarm_pct,
-    ));
+// What: Docker health of one container.
+// Why: degraded and starting are not failures.
+// From: Issue #1683 | PR #1858
+#[derive(Debug, PartialEq)]
+enum Health {
+    Healthy,
+    Degraded,
+    Starting,
+    Unhealthy,
+    Stopped(String),
+    Unknown(String),
+}
 
-    loop {
-        let mut services_status: HashMap<String, ServiceHealth> = HashMap::new();
+impl Health {
+    // What: read docker inspect State.
+    // Why: newest check output DEGRADED: refines ok.
+    // From: Issue #1296
+    fn from_inspect(inspect: &Value) -> Self {
+        let state = inspect.pointer("/State/Status").and_then(Value::as_str);
+        if state != Some("running") {
+            return Health::Stopped(state.unwrap_or("unknown").into());
+        }
+        let status = inspect
+            .pointer("/State/Health/Status")
+            .and_then(Value::as_str);
+        let last = inspect
+            .pointer("/State/Health/Log")
+            .and_then(Value::as_array)
+            .and_then(|log| log.last())
+            .and_then(|e| e["Output"].as_str())
+            .unwrap_or_default();
+        let degraded = last.lines().any(|l| l.starts_with("DEGRADED: "));
+        match status.unwrap_or("none") {
+            "healthy" if degraded => Health::Degraded,
+            "healthy" | "none" => Health::Healthy,
+            "starting" => Health::Starting,
+            "unhealthy" => Health::Unhealthy,
+            other => Health::Unknown(other.into()),
+        }
+    }
 
-        for service in &monitored {
-            let reading = client
-                .get_health(&service.container_name, settings.curl_max_time)
-                .await;
-            let counter = failure_counters
-                .get_mut(&service.container_name)
-                .expect("every monitored service has a counter");
-            let name = &service.container_name;
+    fn word_and_colour(&self) -> (String, &'static str) {
+        match self {
+            Health::Healthy => ("healthy".into(), "green"),
+            Health::Degraded => ("degraded".into(), "amber"),
+            Health::Starting => ("starting".into(), "yellow"),
+            Health::Unhealthy => ("unhealthy".into(), "red"),
+            Health::Stopped(s) => (s.clone(), "red"),
+            Health::Unknown(s) => (s.clone(), "yellow"),
+        }
+    }
 
-            match counter.record(&reading, service.restart_after) {
-                Action::None => {}
-                Action::Unhealthy { count, threshold } => {
-                    log(&format!("UNHEALTHY {name} ({count}/{threshold})"));
-                }
-                Action::Restart { threshold } => {
-                    log(&format!("UNHEALTHY {name} ({threshold}/{threshold})"));
-                    log(&format!("RESTARTING {name}"));
-                    if !client.restart(name, settings.curl_max_time_restart).await {
-                        log(&format!("WARNING: restart call failed for {name}"));
-                    }
-                }
-                Action::Recovered => {
-                    log(&format!("RECOVERED {name}"));
+    fn failing(&self) -> bool {
+        matches!(self, Health::Unhealthy | Health::Stopped(_))
+    }
+}
+
+// What: failure streaks and restart times.
+// Why: restart after RESTART_AFTER misses, capped.
+// From: Issue #1683 | PR #1858
+#[derive(Default)]
+struct Memory {
+    streak: BTreeMap<String, u64>,
+    restarts: BTreeMap<String, VecDeque<u64>>,
+    log_counter: Option<(u64, u64)>,
+}
+
+impl Memory {
+    // What: may this container restart now.
+    // Why: at most LIMIT restarts per WINDOW.
+    // From: Issue #1683 | PR #1858
+    fn restart_allowed(&mut self, s: &Settings, name: &str) -> Result<bool, String> {
+        let max = s.uint("WATCHDOG_RESTART_LIMIT")?;
+        let window = s.uint("WATCHDOG_RESTART_WINDOW")?;
+        let now = clock::unix_secs();
+        let times = self.restarts.entry(name.to_string()).or_default();
+        times.retain(|t| now.saturating_sub(*t) <= window);
+        if times.len() as u64 >= max {
+            return Ok(false);
+        }
+        times.push_back(now);
+        Ok(true)
+    }
+}
+
+// What: settings from env and the saved file.
+// Why: ui changes reach the watchdog via the file.
+fn load() -> Result<Settings, String> {
+    let saved = process_env(SETTINGS_FILE_ENV).map(PathBuf::from);
+    Settings::load(&process_env, saved.as_deref())
+}
+
+// What: check every container; heal on a streak.
+// Why: one miss is noise; RESTART_AFTER is a fault.
+// From: Issue #1683 | PR #1858
+async fn containers(s: &Settings, f: &mut Findings, m: &mut Memory) -> Result<(), String> {
+    let api = docker::Api::new(&s.text("DOCKER_ENDPOINT")?)?;
+    let limit = Duration::from_secs(s.uint("DOCKER_TIMEOUT")?);
+    let grace = u32::try_from(s.uint("WATCHDOG_STOP_GRACE")?).map_err(|e| e.to_string())?;
+    let after = s.uint("RESTART_AFTER")?;
+    let project = s.text("COMPOSE_PROJECT")?;
+    let stopped = s.list("SERVICES_STOPPED");
+    let dhcp_off = s.text("DHCP_MODE")? == "off";
+    let dhcp_service = s.text("DHCP_SERVICE")?;
+    for row in api
+        .project(&project, limit)
+        .await
+        .map_err(|e| e.to_string())?
+    {
+        let Some(service) = row["Labels"][docker::SERVICE_LABEL].as_str() else {
+            continue;
+        };
+        let name = row["Names"][0]
+            .as_str()
+            .unwrap_or(service)
+            .trim_start_matches('/');
+        let inspect = api.inspect(name, limit).await.map_err(|e| e.to_string())?;
+        let health = Health::from_inspect(&inspect);
+        let (word, colour) = health.word_and_colour();
+        let by_user = stopped.iter().any(|x| x == service);
+        let wanted = !(by_user || dhcp_off && service == dhcp_service);
+        f.containers.push(serde_json::json!({
+            "service": service, "name": name, "health": word,
+            "colour": colour, "stopped_by_user": by_user,
+        }));
+        if health == Health::Degraded {
+            f.warn(service, "running with reduced function");
+        }
+        if !wanted || !health.failing() {
+            m.streak.remove(name);
+            continue;
+        }
+        let count = m.streak.entry(name.to_string()).or_default();
+        *count += 1;
+        if *count < after {
+            f.warn(service, format!("{word}, check {count} of {after}"));
+            continue;
+        }
+        *count = 0;
+        if !m.restart_allowed(s, name)? {
+            f.crit(service, format!("{word}; restart limit reached"));
+            continue;
+        }
+        match api.act(name, docker::Action::Restart, grace, limit).await {
+            Ok(()) => f.warn(service, format!("{word}; restarted")),
+            Err(e) => f.crit(service, format!("{word}; restart failed: {e}")),
+        }
+    }
+    Ok(())
+}
+
+// What: daily: drop cache files past their days.
+// Why: CACHE_VALID_DAYS keeps the disk usable.
+// From: Issue #1683 | PR #1858
+fn purge_cache(s: &Settings, f: &mut Findings, now: u64) -> Result<(), String> {
+    let stamp = PathBuf::from(s.text("PURGE_STAMP")?);
+    if !tidy::is_due(&stamp, now) {
+        return Ok(());
+    }
+    let dir = tidy::inside(&s.text("CACHE_DIR")?, &s.text("CACHE_DIR_ALLOWED_PREFIX")?)?;
+    let (gone, errs) = tidy::drop_older(&dir, s.uint("CACHE_VALID_DAYS")?, now);
+    eprintln!("watchdog: cache purge removed {gone} files");
+    for e in errs {
+        f.warn("cache purge", e);
+    }
+    tidy::save_stamp(&stamp, now)
+}
+
+// What: log root, only inside the allowed prefix.
+// Why: cleanup must never delete outside the logs.
+fn log_root(s: &Settings) -> Result<PathBuf, String> {
+    tidy::inside(
+        &s.text("SYSLOG_LOG_ROOT")?,
+        &s.text("SYSLOG_LOG_ROOT_ALLOWED_PREFIX")?,
+    )
+}
+
+// What: daily: log age limit, then size budget.
+// Why: over budget retries after the cooldown.
+// From: Issue #1683 | PR #1858
+fn prune_logs(s: &Settings, f: &mut Findings, now: u64) -> Result<(), String> {
+    let stamp = PathBuf::from(s.text("SYSLOG_PRUNE_STAMP")?);
+    if !tidy::is_due(&stamp, now) {
+        return Ok(());
+    }
+    let root = log_root(s)?;
+    let budget = s.uint("SYSLOG_MAX_GB")?.saturating_mul(1 << 30);
+    let (_, mut errs) = tidy::drop_older(&root, s.uint("SYSLOG_RETENTION_DAYS")?, now);
+    let (size, more) = tidy::fit_budget(&root, budget, now);
+    errs.extend(more);
+    for e in errs {
+        f.warn("log prune", e);
+    }
+    if size <= budget {
+        return tidy::save_stamp(&stamp, now);
+    }
+    f.warn("logs", format!("log size {size} bytes is over the budget"));
+    let wait = s.uint("SYSLOG_PRUNE_RETRY_COOLDOWN")?;
+    tidy::save_stamp(&stamp, (now + wait).saturating_sub(tidy::DAY))
+}
+
+// What: pack closed log files with xz.
+// Why: saves log disk; open files stay plain.
+// From: Issue #1683 | PR #1858
+fn pack_logs(s: &Settings, f: &mut Findings, now: u64) -> Result<(), String> {
+    for e in tidy::pack_closed(&log_root(s)?, s.uint("SYSLOG_XZ_PRESET")?, now) {
+        f.warn("log pack", e);
+    }
+    Ok(())
+}
+
+// What: logs arrive but nothing is written.
+// Why: a full or read-only log disk hides itself.
+// From: Issue #1683 | PR #1858
+fn log_writing(s: &Settings, f: &mut Findings, m: &mut Memory) -> Result<(), String> {
+    let newest = tidy::newest(Path::new(&s.text("SYSLOG_LOG_ROOT")?));
+    let count = tidy::syslog_processed()?;
+    if let Some((was_count, was_newest)) = m.log_counter
+        && count > was_count
+        && newest == was_newest
+    {
+        f.crit("logs", "messages arrive but no log file is written");
+    }
+    m.log_counter = Some((count, newest));
+    Ok(())
+}
+
+// What: cache disk use as a traffic light.
+// Why: the ui shows green, yellow or red.
+// From: Issue #1683 | PR #1858
+fn cache_light(s: &Settings, f: &mut Findings) -> Result<(), String> {
+    let dir = s.text("CACHE_DIR")?;
+    let sp = fs::space(Path::new(&dir)).map_err(|e| format!("{dir}: {e}"))?;
+    let used = sp.total.saturating_sub(sp.free);
+    let pct = used.saturating_mul(100) / sp.total.max(1);
+    let (warn, alarm) = (s.uint("DISK_WARN_PCT")?, s.uint("DISK_ALARM_PCT")?);
+    let colour = if pct >= alarm {
+        f.crit(&dir, format!("cache disk {pct}% full"));
+        "red"
+    } else if pct >= warn {
+        f.warn(&dir, format!("cache disk {pct}% full"));
+        "yellow"
+    } else {
+        "green"
+    };
+    f.cache = serde_json::json!({"pct": pct, "used_bytes": used, "status": colour});
+    Ok(())
+}
+
+// What: free space of each other watched path.
+// Why: a full log disk stops the logs.
+// From: Issue #1683 | PR #1858
+fn disks(s: &Settings, f: &mut Findings) -> Result<(), String> {
+    let min = s.uint("WATCHDOG_DISK_MIN_FREE_PERCENT")?;
+    for path in s.list("WATCHDOG_DISK_PATHS") {
+        match fs::space(Path::new(&path)) {
+            Err(e) => f.crit(&path, e.to_string()),
+            Ok(sp) if sp.total == 0 => f.warn(&path, "reports size 0"),
+            Ok(sp) => {
+                let free = sp.free.saturating_mul(100) / sp.total;
+                if free < min {
+                    f.crit(&path, format!("{free}% free, minimum {min}%"));
                 }
             }
+        }
+    }
+    Ok(())
+}
 
-            services_status.insert(
-                name.clone(),
-                ServiceHealth::from_reading(&reading, counter.0),
+// What: host conntrack use against its maximum.
+// Why: DoMe 07.11.: a full table drops new connections.
+// From: Issue #1683 | PR #1985
+fn conntrack(s: &Settings, f: &mut Findings) -> Result<(), String> {
+    let path = Path::new(&s.text("HOST_NET_STAT_DIR")?).join("nf_conntrack");
+    let Ok(stat) = std::fs::read_to_string(&path) else {
+        return Ok(());
+    };
+    let used = stat
+        .lines()
+        .nth(1)
+        .and_then(|l| l.split_whitespace().next())
+        .and_then(|h| u64::from_str_radix(h, 16).ok())
+        .ok_or_else(|| format!("{}: no entries column", path.display()))?;
+    let max_file = s.text("CONNTRACK_MAX_FILE")?;
+    let max: u64 = std::fs::read_to_string(&max_file)
+        .map_err(|e| format!("{max_file}: {e}"))?
+        .trim()
+        .parse()
+        .map_err(|e| format!("{max_file}: {e}"))?;
+    let pct = used.saturating_mul(100) / max.max(1);
+    let warn = s.uint("WATCHDOG_CONNTRACK_WARN_PCT")?;
+    if pct >= warn {
+        f.warn("conntrack", format!("{pct}% used ({used} of {max})"));
+    }
+    Ok(())
+}
+
+// What: expiry of each watched certificate.
+// Why: warn before clients reject proxy or ui.
+// From: Issue #1683 | PR #1858
+fn certs(s: &Settings, f: &mut Findings) -> Result<(), String> {
+    let within = s.uint("WATCHDOG_CERT_WARN_SECS")?;
+    for path in s.list("WATCHDOG_CERT_FILES") {
+        match cert::valid_for(Path::new(&path), within) {
+            Ok(true) => {}
+            Ok(false) => match cert::expiry(Path::new(&path)) {
+                Ok((day, n)) => f.warn(&path, format!("expires in {n} days ({day})")),
+                Err(e) => f.crit(&path, e),
+            },
+            Err(e) => f.crit(&path, e),
+        }
+    }
+    Ok(())
+}
+
+// What: zone serials, primary against secondary.
+// Why: shows a lost NOTIFY or a broken AXFR.
+// From: Issue #1683 | PR #1858
+async fn dns_sync(s: &Settings, f: &mut Findings) -> Result<(), String> {
+    let far = s.text("PDNS_SECONDARY_API_URL").unwrap_or_default();
+    if far.is_empty() {
+        return Ok(());
+    }
+    let key = s.text("PDNS_API_KEY")?;
+    let client = http::client(s)?;
+    let near = pdns::Api::new(client.clone(), &s.text("PDNS_PRIMARY_API_URL")?, &key);
+    let far = pdns::Api::new(client, &far, &key);
+    let ours = near.zones().await.map_err(|e| format!("primary: {e}"))?;
+    let theirs = far.zones().await.map_err(|e| format!("secondary: {e}"))?;
+    let seen: BTreeMap<&str, u32> = theirs.iter().map(|z| (z.name.as_str(), z.serial)).collect();
+    for z in &ours {
+        let Some(&other) = seen.get(z.name.as_str()) else {
+            f.crit(&z.name, "zone missing on secondary");
+            continue;
+        };
+        let state = dns::sync_state(z.serial, other);
+        if state != dns::Sync::InSync {
+            f.warn(
+                &z.name,
+                format!("{state:?}: primary {} secondary {other}", z.serial),
             );
         }
+    }
+    Ok(())
+}
 
-        // Alert-only docker-socket-proxy probe: deliberately never
-        // restarted -- see docker_client::ping's and health::AlertCounter's
-        // own doc comments for why.
-        let reachable = client.ping(settings.curl_max_time).await;
-        let docker_proxy_name = settings.container_names.docker_socket_proxy;
-        match docker_proxy_alert_counter.record(reachable) {
-            AlertAction::None => {}
-            AlertAction::Recovered => log(&format!("RECOVERED {docker_proxy_name}")),
-            AlertAction::Unreachable { count } => log(&format!(
-                "UNHEALTHY {docker_proxy_name} ({count} consecutive failures) -- alert only, watchdog cannot restart its own Docker API channel (see issue #1170)"
-            )),
+// What: run every duty of one round.
+// Why: a broken duty is itself an alarm.
+// From: Issue #1683 | PR #1858
+async fn round(s: &Settings, m: &mut Memory) -> Findings {
+    let mut f = Findings::default();
+    let now = clock::unix_secs();
+    if let Err(e) = containers(s, &mut f, m).await {
+        f.crit("docker", e);
+    }
+    let steps: [(&str, Result<(), String>); 7] = [
+        ("cache", cache_light(s, &mut f)),
+        ("disks", disks(s, &mut f)),
+        ("conntrack", conntrack(s, &mut f)),
+        ("certs", certs(s, &mut f)),
+        ("cache purge", purge_cache(s, &mut f, now)),
+        ("log prune", prune_logs(s, &mut f, now)),
+        ("log pack", pack_logs(s, &mut f, now)),
+    ];
+    for (name, result) in steps {
+        if let Err(e) = result {
+            f.crit(name, e);
         }
-        // watchdog.sh's probe_docker_socket_proxy() stores the literal
-        // string "healthy"/"unhealthy" into H_DOCKER_PROXY (never
-        // "unreachable" -- that string is reserved for get_health()'s
-        // per-container Docker-API failures). Using HealthReading::Unhealthy
-        // here (not ::Unreachable) matches that exactly: health_color()
-        // renders it red, the correct alarm-level color for "the management
-        // plane's own Docker API gateway is down," not the yellow
-        // indeterminate-warning color ::Unreachable maps to. This is purely
-        // a status.json/dashboard representation choice -- it does not run
-        // through FailureCounter/restart logic at all, so it carries none of
-        // ::Unhealthy's restart-triggering meaning for the four monitored
-        // containers above; only AlertCounter (which never restarts
-        // anything) drives this probe's actual behavior.
-        let docker_proxy_reading = if reachable {
-            HealthReading::Healthy
-        } else {
-            HealthReading::Unhealthy
-        };
-        services_status.insert(
-            docker_proxy_name.to_string(),
-            ServiceHealth::from_reading(&docker_proxy_reading, docker_proxy_alert_counter.0),
-        );
+    }
+    if let Err(e) = log_writing(s, &mut f, m) {
+        f.crit("logs", e);
+    }
+    if let Err(e) = dns_sync(s, &mut f).await {
+        f.crit("dns", e);
+    }
+    f.alarms
+        .sort_by(|a, b| b.level.cmp(&a.level).then_with(|| a.source.cmp(&b.source)));
+    f
+}
 
-        let disk_cache = status::disk_info(
-            &settings.cache_dir,
-            settings.disk_warn_pct,
-            settings.disk_alarm_pct,
-        );
-        let watchdog_status = WatchdogStatus {
-            updated: status::format_updated_timestamp(time::OffsetDateTime::now_utc()),
-            services: services_status,
-            disk: DiskInfo { cache: disk_cache },
-        };
-        // A failed status write is treated as fatal, matching the bash
-        // implementation's behavior under `set -e`: a failing `mkdir`/
-        // tmp-file write/`mv` there exits the whole script. That distinction
-        // matters operationally, not just for parity's own sake -- the
-        // Compose `watchdog` service (deploy/*/docker-compose.yml) sets
-        // `restart: always`, so an exited process actually gets the
-        // orchestrator to restart it. `healthcheck.sh`'s own mtime-freshness
-        // check (see this loop's own comment further below) would correctly
-        // start reporting the container `unhealthy` once status.json goes
-        // stale even without this exit -- but `restart: always` alone only
-        // restarts a container whose process actually exits, not one that is
-        // merely reported unhealthy while still running; without this exit,
-        // the process would keep running, correctly flagged unhealthy, with
-        // no automatic recovery path unless something else (external to this
-        // Compose file) acts on that health status.
-        if let Err(e) = status::write_status(&settings.status_file, &watchdog_status) {
-            log_err(&format!(
-                "ERROR: failed to write {}: {e}",
-                settings.status_file.display()
-            ));
+// What: write the alarm file for the ui.
+// Why: whole-file replace; no half reads.
+// From: Issue #1683 | PR #1858
+fn publish(s: &Settings, f: &Findings) -> Result<(), String> {
+    let path = PathBuf::from(s.text("WATCHDOG_ALARM_FILE")?);
+    let mode = u32::from_str_radix(&s.text("WATCHDOG_ALARM_FILE_MODE")?, 8)
+        .map_err(|e| format!("WATCHDOG_ALARM_FILE_MODE: {e}"))?;
+    let report = Report {
+        written: clock::unix_secs(),
+        alarms: &f.alarms,
+        containers: &f.containers,
+        cache: &f.cache,
+    };
+    let body = serde_json::to_vec_pretty(&report).map_err(|e| e.to_string())?;
+    let owner = fs::Owner {
+        uid: None,
+        gid: None,
+    };
+    fs::write(&path, &body, mode, fs::Place::Replace, owner)
+        .map_err(|e| format!("{}: {e}", path.display()))
+}
+
+// What: healthcheck mode for the container probe.
+// Why: fresh alarm file means the watch loop runs.
+// From: Issue #1683 | PR #1980
+fn healthcheck() -> Result<(), String> {
+    let s = load()?;
+    let limit = s.uint("CHECK_INTERVAL")? * s.uint("RESTART_AFTER")?.max(1);
+    let path = PathBuf::from(s.text("WATCHDOG_ALARM_FILE")?);
+    let raw = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let v: serde_json::Value = serde_json::from_slice(&raw).map_err(|e| e.to_string())?;
+    let written = v["written"].as_u64().ok_or("written missing")?;
+    let age = clock::unix_secs().saturating_sub(written);
+    if age > limit {
+        return Err(format!("alarm file {age}s old, limit {limit}s"));
+    }
+    Ok(())
+}
+
+// What: healthcheck command, else the check loop.
+// Why: settings are reread; a bad round never exits.
+// From: Issue #1683 | PR #1858
+#[tokio::main]
+async fn main() -> Result<(), String> {
+    if std::env::args().nth(1).as_deref() == Some("healthcheck") {
+        if let Err(e) = healthcheck() {
+            eprintln!("watchdog healthcheck: {e}");
             std::process::exit(1);
         }
-
-        // maybe_purge()/maybe_prune_syslog()/maybe_rotate_fluent_bit_selflog()
-        // are intentionally never called here: those filesystem-retention
-        // passes run as their own dedicated `retention` Compose service (see
-        // lib.rs's module doc comment) -- not a scope question still open
-        // for this daemon to eventually absorb.
-
-        tokio::time::sleep(settings.check_interval).await;
+        return Ok(());
+    }
+    use tokio::signal::unix::{SignalKind, signal};
+    let mut settings = load()?;
+    let mut pause = Duration::from_secs(settings.uint("CHECK_INTERVAL")?);
+    let mut term = signal(SignalKind::terminate()).map_err(|e| e.to_string())?;
+    let mut memory = Memory::default();
+    loop {
+        match load() {
+            Ok(s) => settings = s,
+            Err(e) => eprintln!("watchdog: settings kept: {e}"),
+        }
+        match settings.uint("CHECK_INTERVAL") {
+            Ok(v) => pause = Duration::from_secs(v),
+            Err(e) => eprintln!("watchdog: interval kept: {e}"),
+        }
+        let found = round(&settings, &mut memory).await;
+        for a in &found.alarms {
+            eprintln!("watchdog: {:?} {}: {}", a.level, a.source, a.text);
+        }
+        if let Err(e) = publish(&settings, &found) {
+            eprintln!("watchdog: alarm file: {e}");
+        }
+        tokio::select! {
+            () = tokio::time::sleep(pause) => {}
+            _ = term.recv() => return Ok(()),
+        }
     }
 }

@@ -1,587 +1,117 @@
+
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
-#
-# Multi-stage build for the Admin UI service. The builder stage compiles the
-# Rust binary against the shared build-tools image, opportunistically
-# accelerating the build with sccache and/or distcc when the corresponding
-# BuildKit secrets are present (falling back to a plain local build
-# otherwise). The runtime stage is a minimal Debian image that only carries
-# the compiled binary, its Tera templates, and the entrypoint script.
+# SPDX-License-Identifier: AGPL-3.0-or-later
 
-# Intentional ARG default (overridable at build time via --build-arg).
-# Actual digest pinning for release builds is tracked in issue #508.
-ARG BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools:latest
-FROM ${BUILD_TOOLS_IMAGE} AS builder
+# What: ui image: the admin web interface.
+# Why: one program; it is the main process.
+# From: Issue #1683 | PR #1980
 
-# The shared build-tools image already carries the Rust toolchain, sccache,
-# distcc, distcc-pump, and the supporting Debian packages. Keep this stage
-# lean and fail closed if the contract is not met.
-#
-# Everything below builds a custom distcc wrapper. It exists because
-# distcc-pump preprocesses every `#include` locally before sending the job to
-# a remote host, and the `aws-lc-sys` crate (a transitive TLS dependency)
-# writes generated C headers into its own Cargo build/target directory at
-# build time. distcc-pump's header discovery cannot see files that don't
-# exist until the build is already underway, so pump-mode compilation of
-# those specific translation units fails. The wrapper below detects an
-# aws-lc-sys generated-header include path in the compiler arguments and, for
-# just that case, routes the job to a non-pump distcc host (or the local
-# compiler if none is configured) instead of letting it go through pump mode
-# and fail.
-RUN set -eu; \
-    for tool in cargo rustc rustup rustfmt clippy-driver sccache distcc distcc-pump python3 pkg-config; do \
-      command -v "$tool" >/dev/null; \
-    done; \
-    distcc_bin="$(command -v distcc)"; \
-    distcc_real_bin="/usr/local/bin/distcc-real"; \
-    cp "$distcc_bin" "$distcc_real_bin"; \
-    printf '%s\n' \
-      '#!/bin/sh' \
-      'set -eu' \
-      'distcc_real="/usr/local/bin/distcc-real"' \
-      'compiler_name="$(basename "$0")"' \
-      'case "$compiler_name" in cc|gcc|c++|g++) real_compiler="$compiler_name" ;; *) real_compiler="cc" ;; esac' \
-      'case "$real_compiler" in cc|gcc|c++|g++) local_compiler="/usr/bin/$real_compiler" ;; *) local_compiler="/usr/bin/cc" ;; esac' \
-      'normalize_argument() {' \
-      '  arg="$1"' \
-      '  case "$arg" in' \
-      '    -I*|-isystem*)' \
-      '      case "$arg" in' \
-      '        -I*) echo "${arg#-I}" ;;' \
-      '        -isystem*) echo "${arg#-isystem}" ;;' \
-      '      esac' \
-      '      return' \
-      '      ;;' \
-      '  esac' \
-      '  printf "%s\n" "$arg"' \
-      '}' \
-      'matches_aws_lc_generated_path() {' \
-      '  arg="$1"' \
-      '  case "$arg" in' \
-      '    *aws-lc-sys*|*aws_lc_sys*)' \
-      '      case "$arg" in' \
-      '        *generated*|*out*|*target*/*/build/*) return 0;;' \
-      '      esac' \
-      '      ;;' \
-      '  esac' \
-      '  return 1' \
-      '}' \
-      'for arg in "$@"; do' \
-      '  normalized_arg="$(normalize_argument "$arg")"' \
-      '  if matches_aws_lc_generated_path "$normalized_arg"; then' \
-      '    matched_arg="$normalized_arg"' \
-      '    break' \
-      '  fi' \
-      'done' \
-      'if [ -n "${matched_arg:-}" ]; then' \
-      '  echo "[INFO] bypassing distcc-pump for generated-header input: $matched_arg" >&2' \
-      '  if [ -n "${DISTCC_HOSTS_NO_PUMP:-}" ]; then' \
-      '    env -u INCLUDE_SERVER_PORT -u INCLUDE_SERVER_PID DISTCC_HOSTS="$DISTCC_HOSTS_NO_PUMP" "$distcc_real" "$real_compiler" "$@"' \
-      '    exit $?' \
-      '  fi' \
-      '  echo "[INFO] no non-pump hosts configured; compiling through local compiler path." >&2' \
-      '  env -u DISTCC_HOSTS -u INCLUDE_SERVER_PORT -u INCLUDE_SERVER_PID -u DISTCC_FALLBACK "$local_compiler" "$@"' \
-      '  exit $?' \
-      'fi' \
-      'exec "$distcc_real" "$real_compiler" "$@"' \
-      > /usr/local/bin/lancache-distcc-wrapper; \
-    chmod +x /usr/local/bin/lancache-distcc-wrapper; \
-    mkdir -p /usr/local/lib/distcc; \
-    for wrapper in cc gcc c++ g++; do ln -sf /usr/local/bin/lancache-distcc-wrapper "/usr/local/lib/distcc/$wrapper"; done; \
-    ln -sf /usr/local/bin/lancache-distcc-wrapper "$distcc_bin"; \
-    printf '%s\n' \
-      '#!/bin/sh' \
-      'case "${1:-}" in' \
-      '  distcc|*/distcc) exec "$@" ;;' \
-      '  *) exec /usr/local/bin/sccache "$@" ;;' \
-      'esac' \
-      > /usr/local/bin/lancache-rustc-wrapper; \
-    chmod +x /usr/local/bin/lancache-rustc-wrapper
+# What: base image pin, supplied by ci.sh from the SOT.
+# Why: SOT base_images.alpine is the sole owner.
+# From: Issue #1683
+ARG ALPINE_IMAGE
 
+# What: build-tools image pin, supplied by ci.sh.
+# Why: one toolchain image builds every Rust crate.
+# From: Issue #1683 | PR #1980
+ARG BUILD_TOOLS_IMAGE
+
+# What: Rust build stage; ci.sh rust-build does the work.
+# Why: ci.sh owns caches, target and crate list.
+# From: Issue #1683 | PR #1980
+FROM ${BUILD_TOOLS_IMAGE:-scratch} AS builder
+ARG MUSL_TARGET
+ARG RUST_CRATES
 ARG CARGO_BUILD_JOBS=
-
+ARG PROJECT_CARGO_LTO=
+ARG PROJECT_CARGO_CODEGENUNIT=
+ARG BUILD_TOOLS_IMAGE
+ARG CI_TOOLCHAIN_COMPILERS
+ARG CI_CACHE_PREFIX
+ARG CI_CARGO_HOME
+ARG CI_RUST_SOURCE_DIR
+ARG CI_RETRY_MAX_ATTEMPTS
+ARG CI_RETRY_BACKOFF_BASE_SECONDS
+ARG CI_DOWNLOAD_CONNECT_TIMEOUT
+ARG CI_DOWNLOAD_STALL_SECONDS
 WORKDIR /build
-COPY Cargo.toml ./
-# Pre-cache dependencies. Acceleration is opt-in through BuildKit secrets.
-# The shell functions defined inside this RUN (in call order):
-#   configure_sccache      - opt-in cache wrapper, only if a sccache secret was mounted.
-#   configure_distcc       - opt-in distributed compile, only if a distcc hosts secret was
-#                            mounted; probes the pump daemon with a trivial compile first.
-#   lancache-distcc-wrapper (installed earlier in this stage) - distcc-pump preprocesses
-#     #includes locally before dispatching, but aws-lc-sys (a transitive TLS dependency)
-#     writes generated C headers into its own build directory during the build, so pump
-#     can't see them yet. The wrapper detects those translation units and falls back to
-#     non-pump distcc / the local compiler for just those compiles.
-#   disable_distcc         - rollback path used by configure_distcc/run_cargo_build on failure;
-#                            shuts down distcc-pump and restores the pre-distcc PATH/env.
-#   resolve_distcc_wrapper_dir - locates the cc/gcc/c++/g++ -> distcc wrapper symlinks.
-#   resolve_cargo_jobs     - CARGO_BUILD_JOBS if set, else nproc-2 floored at 4.
-#   run_cargo_build        - builds with distcc if enabled, retrying once locally on failure.
-# NOTE: comments cannot be embedded inside this block itself. Docker's line-continuation
-# strips the backslash-newline entirely (no newline is inserted), so a "#" comment ending
-# in "\" would swallow every following continuation line as commented-out text instead of
-# executable shell, silently dropping the rest of the build. Verified empirically.
-RUN --mount=type=secret,id=sccache_redis_url \
+# What: source tree bind, build secrets, cargo caches.
+# Why: rust-build reads the tree there; no COPY list.
+# From: Issue #1683 | PR #1980
+RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
+    --mount=type=bind,target=${CI_RUST_SOURCE_DIR},rw \
+    --mount=type=secret,id=sccache_redis_url \
+    --mount=type=secret,id=sccache_policy \
+    --mount=type=secret,id=sccache_gha \
     --mount=type=secret,id=sccache_dist_config \
     --mount=type=secret,id=distcc_potential_hosts \
-    set -eu; \
-    distcc_enabled=0; \
-    original_path="$PATH"; \
-    configure_sccache() { \
-      if [ -s /run/secrets/sccache_redis_url ] || [ -s /run/secrets/sccache_dist_config ]; then \
-        unset CARGO_MAKEFLAGS MAKEFLAGS; \
-        export RUSTC_WRAPPER=/usr/local/bin/lancache-rustc-wrapper SCCACHE_REDIS_KEY_PREFIX=lancache-ui; \
-        if [ -s /run/secrets/sccache_redis_url ]; then \
-          SCCACHE_REDIS="$(cat /run/secrets/sccache_redis_url)"; export SCCACHE_REDIS; \
-        fi; \
-        if [ -s /run/secrets/sccache_dist_config ]; then \
-          export SCCACHE_CONF=/run/secrets/sccache_dist_config; \
-          sccache --dist-status; \
-        fi; \
-      fi; \
-    }; \
-    disable_distcc() { \
-      distcc_enabled=0; \
-      trap - EXIT; \
-      unset DISTCC_POTENTIAL_HOSTS DISTCC_HOSTS DISTCC_HOSTS_NO_PUMP DISTCC_FALLBACK CC GCC CXX GXX INCLUDE_SERVER_PORT INCLUDE_SERVER_PID; \
-      PATH="$original_path"; \
-      export PATH; \
-    }; \
-    resolve_distcc_wrapper_dir() { \
-      for candidate in /usr/local/lib/distcc /usr/lib/distcc; do \
-        if [ -x "$candidate/cc" ] && [ -x "$candidate/gcc" ] && [ -x "$candidate/c++" ] && [ -x "$candidate/g++" ]; then \
-          printf '%s\n' "$candidate"; \
-          return 0; \
-        fi; \
-      done; \
-      echo "distcc wrapper directory not found" >&2; \
-      exit 1; \
-    }; \
-    configure_distcc() { \
-      if [ -s /run/secrets/distcc_potential_hosts ]; then \
-        distcc_probe_dir="$(mktemp -d)"; \
-        DISTCC_POTENTIAL_HOSTS="$(cat /run/secrets/distcc_potential_hosts)"; export DISTCC_POTENTIAL_HOSTS; \
-        distcc_hosts=""; \
-        distcc_hosts_with_pump=""; \
-        distcc_hosts_without_pump=""; \
-        for distcc_host_spec in $DISTCC_POTENTIAL_HOSTS; do \
-          distcc_host_base="${distcc_host_spec%%,*}"; \
-          if [ -n "$distcc_host_base" ]; then \
-            distcc_hosts="${distcc_hosts:+$distcc_hosts }$distcc_host_base"; \
-          fi; \
-          case "$distcc_host_spec" in \
-            *,cpp*) distcc_hosts_with_pump="${distcc_hosts_with_pump:+$distcc_hosts_with_pump }$distcc_host_base" ;; \
-            *) distcc_hosts_without_pump="${distcc_hosts_without_pump:+$distcc_hosts_without_pump }$distcc_host_spec" ;; \
-          esac; \
-        done; \
-        if [ -z "$distcc_hosts" ]; then \
-          rm -rf "$distcc_probe_dir"; \
-          echo "DISTCC_POTENTIAL_HOSTS does not contain usable distcc hosts" >&2; \
-          exit 1; \
-        fi; \
-        distcc_pump_hosts="${distcc_hosts_with_pump:-}"; \
-        distcc_hosts_without_pump="${distcc_hosts_without_pump:-$distcc_hosts}"; \
-        echo "[INFO] trying distcc path." >&2; \
-        distcc_wrapper_dir="$(resolve_distcc_wrapper_dir)"; \
-        export DISTCC_HOSTS_NO_PUMP="$distcc_hosts_without_pump"; \
-        export PATH="$distcc_wrapper_dir:$PATH" CC=cc GCC=gcc CXX=c++ GXX=g++ DISTCC_FALLBACK=0; \
-        distcc_enabled=1; \
-        if [ -n "$distcc_pump_hosts" ]; then \
-          export DISTCC_POTENTIAL_HOSTS="$distcc_pump_hosts"; \
-          unset DISTCC_HOSTS; \
-          if ! distcc_pump_env="$(distcc-pump --startup 2>"$distcc_probe_dir/distcc-pump.log")"; then \
-            disable_distcc; \
-            rm -rf "$distcc_probe_dir"; \
-            echo "[INFO] distcc pump unavailable; continuing with normal local C compiler." >&2; \
-            return 0; \
-          fi; \
-          eval "$distcc_pump_env"; \
-          distcc_pump_real_hosts=""; \
-          for distcc_host_token in ${DISTCC_HOSTS:-}; do case "$distcc_host_token" in --*) ;; *) distcc_pump_real_hosts=1 ;; esac; done; \
-          if [ -z "$distcc_pump_real_hosts" ]; then unset DISTCC_HOSTS; fi; \
-          PATH="$distcc_wrapper_dir:$PATH"; \
-          export PATH DISTCC_HOSTS_NO_PUMP CC=cc GCC=gcc CXX=c++ GXX=g++; \
-          trap 'distcc-pump --shutdown' EXIT; \
-        else \
-          export DISTCC_HOSTS="$distcc_hosts"; \
-        fi; \
-        printf '%s\n' 'int main(void) { return 0; }' > "$distcc_probe_dir/distcc-probe.c"; \
-        if ! cc -c "$distcc_probe_dir/distcc-probe.c" -o "$distcc_probe_dir/distcc-probe.o" >"$distcc_probe_dir/distcc-probe.log" 2>&1; then \
-          disable_distcc; \
-          rm -rf "$distcc_probe_dir"; \
-          echo "[INFO] distcc probe unavailable; continuing with normal local C compiler." >&2; \
-          return 0; \
-        fi; \
-        rm -rf "$distcc_probe_dir"; \
-      fi; \
-    }; \
-    resolve_cargo_jobs() { \
-      jobs="${CARGO_BUILD_JOBS:-}"; \
-      if [ -z "$jobs" ]; then \
-        cores="$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN || echo 2)"; \
-        jobs=$((cores - 2)); \
-        if [ "$jobs" -lt 4 ]; then jobs=4; fi; \
-      fi; \
-      case "$jobs" in ''|*[!0-9]*) echo "CARGO_BUILD_JOBS must be a positive integer" >&2; exit 1;; esac; \
-      if [ "$jobs" -le 0 ]; then echo "CARGO_BUILD_JOBS must be greater than zero" >&2; exit 1; fi; \
-      printf '%s\n' "$jobs"; \
-    }; \
-    run_cargo_build() { \
-      cargo_log="$(mktemp)"; \
-      cargo_status_file="$(mktemp)"; \
-      { set +e; cargo build -j "$cargo_jobs" --release 2>&1; echo "$?" >"$cargo_status_file"; set -e; } | tee "$cargo_log"; \
-      cargo_status="$(cat "$cargo_status_file")"; \
-      rm -f "$cargo_status_file"; \
-      if [ "$cargo_status" = "0" ]; then rm -f "$cargo_log"; return 0; fi; \
-      if [ "${distcc_enabled:-0}" = "1" ]; then \
-        # The `{ set +e; ...; echo "$?" >file; set -e; } | tee log` shape
-        # above (not `set -o pipefail`, which dash under `sh -c` doesn't
-        # support) is how the real cargo build exit code survives being
-        # piped through `tee`: `$?` right after a piped command would
-        # otherwise reflect `tee`'s own exit status, not cargo's.
-        # Two independent failure paths are handled here: if distcc is
-        # enabled, ANY build failure is assumed distcc-related and retried
-        # with distcc disabled first (below). If distcc isn't enabled (or
-        # its retry also failed), the log is grep'd for sccache-specific
-        # error signatures before giving up, since a build can fail purely
-        # because the remote sccache server was unreachable/misbehaving
-        # while the local compiler would have worked fine.
-        disable_distcc; \
-        unset RUSTC_WRAPPER SCCACHE_REDIS SCCACHE_CONF SCCACHE_REDIS_KEY_PREFIX; \
-        echo "[INFO] distcc build path unavailable; retrying with normal local C compiler." >&2; \
-        if cargo build -j "$cargo_jobs" --release; then \
-          echo "[INFO] normal local C compiler fallback completed." >&2; \
-          rm -f "$cargo_log"; \
-          return 0; \
-        fi; \
-        rm -f "$cargo_log"; \
-        return 1; \
-      fi; \
-      if grep -Eqi 'sccache: error|Fixed token mismatch|Timed out waiting for server startup|SCCACHE_' "$cargo_log"; then \
-        unset RUSTC_WRAPPER SCCACHE_REDIS SCCACHE_CONF SCCACHE_REDIS_KEY_PREFIX; \
-        echo "[INFO] sccache build path unavailable; retrying with sccache disabled." >&2; \
-        rm -f "$cargo_log"; \
-        if cargo build -j "$cargo_jobs" --release; then \
-          echo "[INFO] sccache-disabled fallback completed." >&2; \
-          return 0; \
-        fi; \
-        return 1; \
-      fi; \
-      echo "[ERROR] cargo build failed for reasons unrelated to sccache or distcc; not retrying." >&2; \
-      rm -f "$cargo_log"; \
-      return "$cargo_status"; \
-    }; \
-    configure_sccache; \
-    configure_distcc; \
-    cargo_jobs="$(resolve_cargo_jobs)"; \
-    mkdir -p src && echo 'fn main() {}' > src/main.rs && echo '' > src/lib.rs \
-    && run_cargo_build \
-    && rm -rf src
+    --mount=type=secret,id=ccache_redis_url \
+    --mount=type=secret,id=project_selfhosted_proxy_ca \
+    --mount=type=cache,target=${CI_CARGO_HOME}/registry,sharing=locked \
+    --mount=type=cache,target=${CI_CARGO_HOME}/git,sharing=locked \
+    bash /usr/local/bin/ci.sh rust-build ui "${RUST_CRATES}"
 
-# This first build only had a throwaway `fn main() {}`/empty `lib.rs`, so it
-# compiled every dependency crate (and a stub `liblancache_ui.rlib`) but
-# nothing real from `src/`. Because only Cargo.toml was COPYed
-# before that RUN, Docker's layer cache can reuse the compiled dependency
-# artifacts here even when application source changes on every commit — only
-# this second, real build (after copying the actual `src/`) reruns when the
-# app code changes. The sccache/distcc setup, wrapper checks, and fallback
-# logic in the RUN block below are otherwise identical to the one above for
-# the same acceleration to apply to both builds.
-COPY src ./src
-# Same helper functions as the pre-cache RUN above (configure_sccache, configure_distcc,
-# disable_distcc, resolve_distcc_wrapper_dir, resolve_cargo_jobs, run_cargo_build), this
-# time building the real sources instead of the throwaway `fn main() {}` stub.
-#
-# `cargo clean -p lancache-ui --release` (issue: `lancache_ui::kea_response_parse`/
-# `lancache_ui::netdata_url` unresolved-import failures on every build): COPY
-# preserves each file's original mtime from the build context (the runner's
-# git checkout), not "now". Those checkout mtimes are consistently OLDER than
-# the `liblancache_ui.rlib` the pre-cache RUN above just compiled from the
-# throwaway empty `lib.rs` a few Dockerfile instructions ago -- confirmed by
-# directly comparing `stat` timestamps inside the builder stage: every real
-# `src/*.rs` file (including `lib.rs`, `kea_response_parse.rs`, `netdata_url.rs`)
-# was ~4-5 minutes older than that cached rlib. Cargo's unit-freshness check
-# for the `[lib]` target is mtime-based: source mtime <= cached-artifact mtime
-# reads as "unchanged", so cargo reused the stale, empty-stub rlib instead of
-# recompiling `src/lib.rs`. Two prior fix attempts relied on bumping mtimes
-# instead of removing the stale artifact outright: `touch src/main.rs` alone
-# (forces a `[[bin]]` rebuild, but the bin then links against the still-stale
-# lib rlib -- exactly the `E0432` failure this fixes), and
-# `find src -type f -exec touch {} +` (works, but relies on Cargo's mtime
-# comparison remaining the deciding factor, which is an implementation detail
-# rather than a documented contract). `cargo clean -p lancache-ui --release`
-# instead removes this package's own previously-built lib/bin artifacts
-# unconditionally -- Cargo then has no stale rlib to fall back to regardless
-# of mtimes, so it must recompile `lib.rs` and its modules for real. `-p` scopes
-# the clean to this package only, leaving every dependency's cached rlib in
-# `target/release/deps/` untouched, so the pre-cache stage's whole point
-# (skip recompiling third-party crates) is preserved.
-RUN --mount=type=secret,id=sccache_redis_url \
-    --mount=type=secret,id=sccache_dist_config \
-    --mount=type=secret,id=distcc_potential_hosts \
-    set -eu; \
-    distcc_enabled=0; \
-    original_path="$PATH"; \
-    configure_sccache() { \
-      if [ -s /run/secrets/sccache_redis_url ] || [ -s /run/secrets/sccache_dist_config ]; then \
-        unset CARGO_MAKEFLAGS MAKEFLAGS; \
-        export RUSTC_WRAPPER=/usr/local/bin/lancache-rustc-wrapper SCCACHE_REDIS_KEY_PREFIX=lancache-ui; \
-        if [ -s /run/secrets/sccache_redis_url ]; then \
-          SCCACHE_REDIS="$(cat /run/secrets/sccache_redis_url)"; export SCCACHE_REDIS; \
-        fi; \
-        if [ -s /run/secrets/sccache_dist_config ]; then \
-          export SCCACHE_CONF=/run/secrets/sccache_dist_config; \
-          sccache --dist-status; \
-        fi; \
-      fi; \
-    }; \
-    disable_distcc() { \
-      distcc_enabled=0; \
-      trap - EXIT; \
-      unset DISTCC_POTENTIAL_HOSTS DISTCC_HOSTS DISTCC_HOSTS_NO_PUMP DISTCC_FALLBACK CC GCC CXX GXX INCLUDE_SERVER_PORT INCLUDE_SERVER_PID; \
-      PATH="$original_path"; \
-      export PATH; \
-    }; \
-    resolve_distcc_wrapper_dir() { \
-      for candidate in /usr/local/lib/distcc /usr/lib/distcc; do \
-        if [ -x "$candidate/cc" ] && [ -x "$candidate/gcc" ] && [ -x "$candidate/c++" ] && [ -x "$candidate/g++" ]; then \
-          printf '%s\n' "$candidate"; \
-          return 0; \
-        fi; \
-      done; \
-      echo "distcc wrapper directory not found" >&2; \
-      exit 1; \
-    }; \
-    configure_distcc() { \
-      if [ -s /run/secrets/distcc_potential_hosts ]; then \
-        distcc_probe_dir="$(mktemp -d)"; \
-        DISTCC_POTENTIAL_HOSTS="$(cat /run/secrets/distcc_potential_hosts)"; export DISTCC_POTENTIAL_HOSTS; \
-        distcc_hosts=""; \
-        distcc_hosts_with_pump=""; \
-        distcc_hosts_without_pump=""; \
-        for distcc_host_spec in $DISTCC_POTENTIAL_HOSTS; do \
-          distcc_host_base="${distcc_host_spec%%,*}"; \
-          if [ -n "$distcc_host_base" ]; then \
-            distcc_hosts="${distcc_hosts:+$distcc_hosts }$distcc_host_base"; \
-          fi; \
-          case "$distcc_host_spec" in \
-            *,cpp*) distcc_hosts_with_pump="${distcc_hosts_with_pump:+$distcc_hosts_with_pump }$distcc_host_base" ;; \
-            *) distcc_hosts_without_pump="${distcc_hosts_without_pump:+$distcc_hosts_without_pump }$distcc_host_spec" ;; \
-          esac; \
-        done; \
-        if [ -z "$distcc_hosts" ]; then \
-          rm -rf "$distcc_probe_dir"; \
-          echo "DISTCC_POTENTIAL_HOSTS does not contain usable distcc hosts" >&2; \
-          exit 1; \
-        fi; \
-        distcc_pump_hosts="${distcc_hosts_with_pump:-}"; \
-        distcc_hosts_without_pump="${distcc_hosts_without_pump:-$distcc_hosts}"; \
-        echo "[INFO] trying distcc path." >&2; \
-        distcc_wrapper_dir="$(resolve_distcc_wrapper_dir)"; \
-        export DISTCC_HOSTS_NO_PUMP="$distcc_hosts_without_pump"; \
-        export PATH="$distcc_wrapper_dir:$PATH" CC=cc GCC=gcc CXX=c++ GXX=g++ DISTCC_FALLBACK=0; \
-        distcc_enabled=1; \
-        if [ -n "$distcc_pump_hosts" ]; then \
-          export DISTCC_POTENTIAL_HOSTS="$distcc_pump_hosts"; \
-          unset DISTCC_HOSTS; \
-          if ! distcc_pump_env="$(distcc-pump --startup 2>"$distcc_probe_dir/distcc-pump.log")"; then \
-            disable_distcc; \
-            rm -rf "$distcc_probe_dir"; \
-            echo "[INFO] distcc pump unavailable; continuing with normal local C compiler." >&2; \
-            return 0; \
-          fi; \
-          eval "$distcc_pump_env"; \
-          distcc_pump_real_hosts=""; \
-          for distcc_host_token in ${DISTCC_HOSTS:-}; do case "$distcc_host_token" in --*) ;; *) distcc_pump_real_hosts=1 ;; esac; done; \
-          if [ -z "$distcc_pump_real_hosts" ]; then unset DISTCC_HOSTS; fi; \
-          PATH="$distcc_wrapper_dir:$PATH"; \
-          export PATH DISTCC_HOSTS_NO_PUMP CC=cc GCC=gcc CXX=c++ GXX=g++; \
-          trap 'distcc-pump --shutdown' EXIT; \
-        else \
-          export DISTCC_HOSTS="$distcc_hosts"; \
-        fi; \
-        printf '%s\n' 'int main(void) { return 0; }' > "$distcc_probe_dir/distcc-probe.c"; \
-        if ! cc -c "$distcc_probe_dir/distcc-probe.c" -o "$distcc_probe_dir/distcc-probe.o" >"$distcc_probe_dir/distcc-probe.log" 2>&1; then \
-          disable_distcc; \
-          rm -rf "$distcc_probe_dir"; \
-          echo "[INFO] distcc probe unavailable; continuing with normal local C compiler." >&2; \
-          return 0; \
-        fi; \
-        rm -rf "$distcc_probe_dir"; \
-      fi; \
-    }; \
-    resolve_cargo_jobs() { \
-      jobs="${CARGO_BUILD_JOBS:-}"; \
-      if [ -z "$jobs" ]; then \
-        cores="$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN || echo 2)"; \
-        jobs=$((cores - 2)); \
-        if [ "$jobs" -lt 4 ]; then jobs=4; fi; \
-      fi; \
-      case "$jobs" in ''|*[!0-9]*) echo "CARGO_BUILD_JOBS must be a positive integer" >&2; exit 1;; esac; \
-      if [ "$jobs" -le 0 ]; then echo "CARGO_BUILD_JOBS must be greater than zero" >&2; exit 1; fi; \
-      printf '%s\n' "$jobs"; \
-    }; \
-    run_cargo_build() { \
-      cargo_log="$(mktemp)"; \
-      cargo_status_file="$(mktemp)"; \
-      { set +e; cargo build -j "$cargo_jobs" --release 2>&1; echo "$?" >"$cargo_status_file"; set -e; } | tee "$cargo_log"; \
-      cargo_status="$(cat "$cargo_status_file")"; \
-      rm -f "$cargo_status_file"; \
-      if [ "$cargo_status" = "0" ]; then rm -f "$cargo_log"; return 0; fi; \
-      if [ "${distcc_enabled:-0}" = "1" ]; then \
-        # The `{ set +e; ...; echo "$?" >file; set -e; } | tee log` shape
-        # above (not `set -o pipefail`, which dash under `sh -c` doesn't
-        # support) is how the real cargo build exit code survives being
-        # piped through `tee`: `$?` right after a piped command would
-        # otherwise reflect `tee`'s own exit status, not cargo's.
-        # Two independent failure paths are handled here: if distcc is
-        # enabled, ANY build failure is assumed distcc-related and retried
-        # with distcc disabled first (below). If distcc isn't enabled (or
-        # its retry also failed), the log is grep'd for sccache-specific
-        # error signatures before giving up, since a build can fail purely
-        # because the remote sccache server was unreachable/misbehaving
-        # while the local compiler would have worked fine.
-        disable_distcc; \
-        unset RUSTC_WRAPPER SCCACHE_REDIS SCCACHE_CONF SCCACHE_REDIS_KEY_PREFIX; \
-        echo "[INFO] distcc build path unavailable; retrying with normal local C compiler." >&2; \
-        if cargo build -j "$cargo_jobs" --release; then \
-          echo "[INFO] normal local C compiler fallback completed." >&2; \
-          rm -f "$cargo_log"; \
-          return 0; \
-        fi; \
-        rm -f "$cargo_log"; \
-        return 1; \
-      fi; \
-      if grep -Eqi 'sccache: error|Fixed token mismatch|Timed out waiting for server startup|SCCACHE_' "$cargo_log"; then \
-        unset RUSTC_WRAPPER SCCACHE_REDIS SCCACHE_CONF SCCACHE_REDIS_KEY_PREFIX; \
-        echo "[INFO] sccache build path unavailable; retrying with sccache disabled." >&2; \
-        rm -f "$cargo_log"; \
-        if cargo build -j "$cargo_jobs" --release; then \
-          echo "[INFO] sccache-disabled fallback completed." >&2; \
-          return 0; \
-        fi; \
-        return 1; \
-      fi; \
-      echo "[ERROR] cargo build failed for reasons unrelated to sccache or distcc; not retrying." >&2; \
-      rm -f "$cargo_log"; \
-      return "$cargo_status"; \
-    }; \
-    configure_sccache; \
-    configure_distcc; \
-    cargo_jobs="$(resolve_cargo_jobs)"; \
-    cargo clean -p lancache-ui --release \
-    && run_cargo_build
+# What: final image on the SOT Alpine pin.
+# Why: scratch only fails a build without the arg.
+# From: Issue #1683 | PR #1980
+FROM ${ALPINE_IMAGE:-scratch}
 
-# ── Runtime image ──────────────────────────────────────────────────────────────
-FROM mirror.gcr.io/library/debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2
+# What: build identity keys the cache of later layers.
+# Why: a new package set must not reuse a stale layer.
+# From: Issue #1683 | PR #1980
+ARG BUILD_IDENTITY
+ARG APK_PACKAGES
+ARG APK_BOOTSTRAP
+# What: bash first; every later RUN uses it.
+# Why: ci.sh is bash; ash is not allowed.
+# From: Issue #1683 | PR #1980
+RUN apk add --no-cache ${APK_BOOTSTRAP}
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+ARG CI_RETRY_MAX_ATTEMPTS
+ARG CI_RETRY_BACKOFF_BASE_SECONDS
+ARG CI_DOWNLOAD_CONNECT_TIMEOUT
+ARG CI_DOWNLOAD_STALL_SECONDS
+# What: packages and accounts through ci.sh.
+# Why: ci.sh owns repos, proxy CA, users and dirs.
+# From: Issue #1683 | PR #1980
+RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
+    --mount=type=secret,id=project_selfhosted_proxy_ca \
+    bash /usr/local/bin/ci.sh apk-setup ${APK_PACKAGES}
+ARG IMAGE_SETUP
+RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
+    bash /usr/local/bin/ci.sh image-setup
 
-LABEL org.opencontainers.image.description="lancache-ng Admin UI and control-plane service for cache, DNS, DHCP, and secondary management."
+# What: shared gid, SOT defaults and SOT schema.
+# Why: the programs read them as env; compose names none.
+# From: Issue #1683 | PR #1980
+ARG LANCACHE_RUNTIME_GID
+ARG LANCACHE_RUNTIME_DEFAULTS
+ARG LANCACHE_RUNTIME_SCHEMA
+ENV LANCACHE_RUNTIME_GID=${LANCACHE_RUNTIME_GID} \
+    LANCACHE_RUNTIME_DEFAULTS=${LANCACHE_RUNTIME_DEFAULTS} \
+    LANCACHE_RUNTIME_SCHEMA=${LANCACHE_RUNTIME_SCHEMA}
 
-# trixie-backports is the standard package source for this image (maintainer
-# decision, 2026-07-30) -- not scoped to any specific package: `Package: *` at
-# Pin-Priority 500 (tied with the regular trixie archive) applies project-wide
-# to every Debian-based image, so ordinary version-comparison rules pick
-# whichever archive has the newer version for ANY package installed below.
-# `apt-get dist-upgrade` then `apt-get full-upgrade` are both run deliberately
-# (a maintainer decision to keep both explicit, even though modern apt treats
-# `full-upgrade` as the same operation `dist-upgrade` performs) so any package
-# backports has already patched gets picked up on every rebuild.
-#
-# The pin selector below MUST use `a=stable-backports`, not `a=trixie-backports`:
-# APT's `a=`/release-Archive selector matches the Release file's `Suite:`
-# field, and trixie-backports' own Release file declares `Suite: stable-backports`
-# / `Codename: trixie-backports` -- the two are not interchangeable. See
-# services/proxy/Dockerfile's identical pin comment for the incident that
-# established this (a first version used `a=trixie-backports` and silently
-# never matched anything).
-#
-# This final stage's own base image (`debian:trixie-slim`) resolves to the
-# exact same digest as services/proxy/Dockerfile's `debian:13-slim` (both
-# aliases of the same underlying image). Issue #1304's own acceptance
-# criteria explicitly call out confirming services/ui's curl sourcing
-# (affected or not) before assuming the proxy's finding generalizes here --
-# CONFIRMED (2026-07-30) via a real, controlled before/after Trivy scan
-# (`--severity HIGH,CRITICAL --scanners vuln`) of this exact image built on
-# both plain trixie and trixie-backports: 37 HIGH/CRITICAL findings on
-# both, byte-for-byte identical CVE ID sets. curl
-# specifically carries the same unfixed 7 HIGH CVE IDs either way
-# (CVE-2026-12064, -8286, -8927, -8932, -9079, -9080, -9545 -- `libcurl4t64`
-# moved 8.14.1-2+deb13u4 -> 8.21.0-2~bpo13+1 at the time of that scan;
-# every other installed package here had no newer backports version, so
-# stayed on plain trixie). Do not re-assert either way without re-running
-# that scan, since curl's CVE set is a moving target (see issue #1304 for
-# the full history and the proxy image's matching result).
-RUN set -eu; \
-    export DEBIAN_FRONTEND=noninteractive; \
-    echo "deb http://deb.debian.org/debian trixie-backports main" > /etc/apt/sources.list.d/backports.list \
-    && printf 'Package: *\nPin: release a=stable-backports\nPin-Priority: 500\n' > /etc/apt/preferences.d/backports \
-    && apt-get update \
-    && apt-get dist-upgrade -y \
-    && apt-get full-upgrade -y \
-    && apt-get install -y --no-install-recommends \
-    ca-certificates \
-    coreutils \
-    curl \
-    locales \
-    util-linux \
-    nano \
-    lsof \
-    ripgrep \
-    && echo "en_US.UTF-8 UTF-8" >> /etc/locale.gen \
-    && locale-gen \
-    && rm -rf /var/lib/apt/lists/*
+# What: the ui program from the builder stage.
+# Why: built from this checkout; no other binary here.
+# From: Issue #1683 | PR #1980
+COPY --from=builder /build/lancache-ui-out /usr/local/bin/lancache-ui
 
-ENV LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
-# nano/lsof/ripgrep: in-container troubleshooting tools -- see
-# services/proxy/Dockerfile's identical comment for the full rationale.
-ENV EDITOR=nano
-ENV VISUAL=$EDITOR
+# What: the SOT ui port, documented for Docker.
+# Why: compose maps it; the value comes from ci.sh.
+# From: Issue #1683 | PR #1980
+ARG UI_LISTEN_PORT
+EXPOSE ${UI_LISTEN_PORT}
 
-COPY --from=builder /build/target/release/lancache-ui /usr/local/bin/lancache-ui
-COPY src/templates /templates
-COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-# The former dhcp-probe.sh (nmap + isc-dhcp-client) is retired by issue
-# #1288 -- the dhcp-probe container now runs this same lancache-ui binary
-# with `--dhcp-probe` (see deploy/*/docker-compose.yml's dhcp-probe
-# service `entrypoint:`), so no separate script needs to be copied in.
+# What: one supervise-daemon script per SOT process.
+# Why: OpenRC restarts crashes; @KEY@ e.g. CONFIG_DIR.
+# From: Issue #1683
+ARG LANCACHE_PROCESSES
+ARG LANCACHE_PROCESS_PRE
+ARG LANCACHE_INIT_PRE
+RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
+    bash /usr/local/bin/ci.sh openrc-setup
 
-# `--groups adm`: the UI process drops privileges to this unprivileged user
-# (see docker-entrypoint.sh's `setpriv --reuid=lancache ... --init-groups`),
-# but the dashboard/log-viewer must still READ the proxy's nginx access log,
-# mounted read-only at /var/log/nginx (proxy-logs volume). nginx writes that
-# log as mode 0640 owned by its own runtime user and group `adm` -- the Debian
-# convention for granting log-read access. Without adm membership, uid 10001 is
-# neither the owner nor in the file's group, so every File::open on the log
-# fails with EACCES. That error is swallowed (parse_log_tail returns an empty
-# Vec, get_log_stats skips the unreadable file), so the Admin UI silently shows
-# an empty log viewer, 0% cache-hit-ratio, and empty "Recent requests" even
-# though caching is demonstrably working at the nginx level (issue #1068 item 6).
-# `--init-groups` in the entrypoint is what carries this supplementary group
-# through the privilege drop; a bare `setpriv --regid` alone would not.
-RUN groupadd --system --gid 10001 lancache \
-    && useradd --uid 10001 --gid lancache --groups adm --home-dir /nonexistent --shell /usr/sbin/nologin lancache \
-    && mkdir -p /data /etc/nats \
-    && chown -R lancache:lancache /data /etc/nats \
-    && chmod +x /usr/local/bin/docker-entrypoint.sh
-
-
-EXPOSE 8080
-
-# Runtime defaults mirror the compose files: one shared cache path is mounted
-# read-only for dashboard reporting, while writes remain owned by proxy/watchdog.
-ENV TEMPLATE_DIR=/templates \
-    CDN_DOMAINS_FILE=/data/cdn-domains.txt \
-    STANDARD_LOG=/var/log/nginx/access.log \
-    SSL_LOG=/var/log/nginx/access.log \
-    CACHE_DIR=/var/cache/proxy \
-    PROXY_SERVICE=proxy \
-    SSL_ENABLED=1 \
-    PROXY_STANDARD_URL=http://proxy \
-    PROXY_SSL_URL=http://proxy \
-    NETDATA_URL=http://netdata:19999 \
-    DNS_STANDARD_SERVICE=dns-standard \
-    DNS_SSL_SERVICE=dns-ssl \
-    PROXY_SSL_SERVICE=proxy \
-    CACHE_MAX_GB=50
-
-ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
-CMD ["lancache-ui"]
+# What: OpenRC as PID 1.
+# Why: openrc-init reaps zombies and stops on SIGTERM.
+# From: Issue #1683
+ENTRYPOINT ["/usr/local/bin/lancache-init"]

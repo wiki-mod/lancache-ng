@@ -1,0 +1,46 @@
+
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+# What: shared crate; sources shared.rs and config.rs.
+# Why: one owner for behavior several services share.
+# From: Issue #1683 | PR #1858
+[package]
+name = "LanCache-NG"
+edition.workspace = true
+license.workspace = true
+
+# What: crate root is shared.rs, which declares config.
+# Why: the decision allows exactly these two shared sources.
+# From: Issue #1683 | PR #1858
+[lib]
+name = "lancache_ng"
+path = "shared.rs"
+
+[dependencies]
+hex = { workspace = true }
+# What: ChaCha20-Poly1305 for sealed login tokens.
+# Why: one cipher owner; cachehamster used it already.
+# From: Issue #1683 | PR #1858
+chacha20poly1305 = { workspace = true }
+# What: DHCPv4 codec for the shared precheck.
+# Why: the probe moved from the watchdog to shared.
+# From: Issue #1683 | PR #1858
+dhcproto = { workspace = true }
+rand = { workspace = true }
+# What: reqwest client of the Docker API (rustls).
+# Why: AG-REL-003 forbids openssl-sys.
+# From: Issue #1683 | PR #1858
+reqwest = { workspace = true, features = ["stream"] }
+# What: StreamExt for the shared body drain.
+# Why: ui prefill and cachehamster drain one way.
+# From: Issue #816 | PR #1976
+futures-util = { workspace = true }
+# What: statvfs and SIGTERM for df and terminate.
+# Why: std has neither; rustix is the safe wrapper.
+# From: Issue #1683 | PR #1912
+rustix = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+subtle = { workspace = true }

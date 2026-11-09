@@ -1,137 +1,1331 @@
-{# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 
-   Root Tera layout every other template under this directory extends. Defines
-   the sidebar navigation (Dashboard/DHCP/NTP/DNS/Secondary/Statistiken/Logs/
-   Einrichtung, active-page highlighting via the `active_page` context var),
-   runtime image metadata from Tera globals, links the compiled Tailwind output
-   (/static/admin.css), and declares the `title`, `content`, and `scripts`
-   blocks that child templates override. #}
+{# LanCache-NG (https://github.com/wiki-mod/lancache-ng) #}
+{# SPDX-License-Identifier: AGPL-3.0-or-later #}
+{# What: root layout: dock nav, beambar, admin.css #}
+{# Why: child templates extend it and override the blocks #}
+{# From: Issue #1683 | PR #1912 #}
+
+{# What: hidden csrf_token field of every POST form #}
+{# Why: one markup; main.rs CSRF_FORM_FIELD reads it #}
+{# From: Issue #1683 | PR #1912 #}
+{% component csrf_field(csrf_token) %}<input type="hidden" name="csrf_token" value="{{ csrf_token }}">{% endcomponent csrf_field %}
+{# What: "Kopieren" button; copyText() copies target #}
+{# Why: one markup for setup and Secondary copy buttons #}
+{# From: Issue #1683 | PR #1912 #}
+{% component copy_button(target, t, extra_class="") %}<button type="button" onclick="copyText('{{ target }}', this)"
+                class="btn btn-sm btn-slate absolute top-2 right-2 {{ extra_class }}">{{ t.copy }}</button>{% endcomponent copy_button %}
+{# What: on/off badge, "aktiv" or "inaktiv" #}
+{# Why: one markup for the DHCP-DDNS and NTP state #}
+{# From: Issue #1683 | PR #1912 #}
+{% component on_off_badge(on, t) %}<span class="{% if on %}badge-on{% else %}badge-off{% endif %}">{% if on %}{{ t.active }}{% else %}{{ t.inactive }}{% endif %}</span>{% endcomponent on_off_badge %}
+{# What: one sidebar link with dot, glyph and label #}
+{# Why: one markup and active rule for every menu entry #}
+{# From: Issue #1437 | PR #1858 #}
+{% component nav_link(href, label, active, glyph) %}<a href="{{ href | safe }}" class="nav-item {% if active %}active{% endif %}"><span class="nav-dot"></span><span class="nav-icon">{{ glyph }}</span> {{ label }}</a>{% endcomponent nav_link %}
 <!DOCTYPE html>
-<html lang="de" class="h-full">
+<html lang="{{ lang }}">
 <head>
+  {# What: texts of the chosen language for the scripts #}
+  {# Why: scripts show the same texts as the page #}
+  {# From: Issue #1683 | PR #1980 #}
+  <script>const LC_T = {{ t_json | safe }};</script>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>LanCache-NG Admin{% block title %}{% endblock %}</title>
-  <link rel="icon" type="image/x-icon" href="/favicon.ico">
-  <link rel="stylesheet" href="/static/admin.css">
+  <link rel="icon" type="image/x-icon" href="{{ routes.favicon | safe }}">
+  <link rel="stylesheet" href="{{ routes.admin_css | safe }}">
   <style>
-    body { font-family: ui-sans-serif, system-ui, sans-serif; }
-    .nav-link {
-      display: flex; align-items: center; gap: 0.625rem;
-      padding: 0.5rem 0.75rem; border-radius: 0.5rem;
-      font-size: 0.875rem; color: #94a3b8;
-      transition: background-color 0.15s, color 0.15s;
-      text-decoration: none;
-    }
-    .nav-link:hover { background: #334155; color: white; }
-    .nav-link.active { background: rgba(37,99,235,0.2); color: #60a5fa; font-weight: 500; }
-    .card { background: #1e293b; border-radius: 0.75rem; border: 1px solid #334155; padding: 1.25rem; }
-    .badge-hit     { background: rgba(16,185,129,0.2); color: #34d399; }
-    .badge-miss    { background: rgba(249,115,22,0.2); color: #fb923c; }
-    .badge-expired { background: rgba(234,179,8,0.2);  color: #facc15; }
-    .badge-other   { background: rgba(100,116,139,0.2); color: #94a3b8; }
-    .badge-hit, .badge-miss, .badge-expired, .badge-other {
-      font-size: 0.7rem; font-weight: 700; padding: 0.15rem 0.45rem;
-      border-radius: 0.25rem; display: inline-block; line-height: 1.4;
-    }
-    ::-webkit-scrollbar { width: 6px; height: 6px; }
-    ::-webkit-scrollbar-track { background: #1e293b; }
-    ::-webkit-scrollbar-thumb { background: #475569; border-radius: 3px; }
-  </style>
-</head>
-<body class="h-full bg-slate-900 text-slate-100 flex">
+  /* What: CSS tokens, dark values on :root
+     Why: Mockup palette; data-theme light overrides below
+     From: Issue #1437 | PR #1858 */
+  :root {
+    --navy-950: #0a1220;
+    --navy-900: #101c30;
+    --navy-850: #13213a;
+    --navy-800: #17253d;
+    --navy-700: #22314f;
+    --navy-600: #34456a;
+    --beam: #f7b955;
+    --beam-dim: #f7b95533;
+    --coral: #ff7a5c;
+    --foam: #eef4fb;
+    --mist: #92a2ba;
+    --mist-dim: #5f7089;
+    --tide: #34d0a6;
+    --danger: #ef5a5a;
+    --font-display: Georgia, "Iowan Old Style", "Palatino Linotype", ui-serif, serif;
+    --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    --font-mono: ui-monospace, "SFMono-Regular", "IBM Plex Mono", Consolas, monospace;
+  }
 
-  <!-- Sidebar -->
-  <aside class="w-52 shrink-0 bg-slate-800 border-r border-slate-700 flex flex-col">
-    <div class="px-4 py-5 border-b border-slate-700">
-      <div class="flex items-center gap-2">
-        <img src="/static/logo-icon.png" alt="LanCache-NG Logo" class="w-8 h-8 rounded-full">
-        <div>
-          <p class="font-bold text-white leading-none">LanCache-NG</p>
-          <p class="text-xs text-slate-400 mt-0.5">Admin Interface</p>
-        </div>
+  /* What: light values of the same tokens
+     Why: head script sets data-theme before paint
+     From: Issue #1437 | PR #1858 */
+  :root[data-theme="light"] {
+    --navy-950: #eef2f8;
+    --navy-900: #ffffff;
+    --navy-850: #ffffff;
+    --navy-800: #ffffff;
+    --navy-700: #d7e0ee;
+    --navy-600: #b9c6dc;
+    --foam: #16233a;
+    --mist: #51617c;
+    --mist-dim: #64748f;
+    --beam: #a8670d;
+    --tide: #0a8f6e;
+  }
+
+  /* What: page reset and base text
+     Why: one font, background and colour for all pages
+     From: Issue #1437 | PR #1858 */
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; min-height: 100%;
+    background: var(--navy-950);
+    color: var(--foam);
+    font-family: var(--font-ui);
+    -webkit-font-smoothing: antialiased;
+  }
+  body { font-size: 14px; line-height: normal; }
+  body { overflow-x: hidden; }
+
+  a { color: inherit; }
+  button { font-family: inherit; }
+
+  /* What: faint logo behind the page
+     Why: fixed to the page centre, no pointer events
+     From: Issue #1437 | PR #1858 */
+  .watermark {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: min(55%, 640px);
+    height: auto;
+    aspect-ratio: 353 / 360;
+    object-fit: contain;
+    opacity: 0.05;
+    pointer-events: none;
+    z-index: 0;
+  }
+  :root[data-theme="light"] .watermark { opacity: 0.06; }
+
+  /* What: app shell: dock plus main column
+     Why: flex row; stacks below 880px
+     From: Issue #1437 | PR #1858 */
+  .shell { position: relative; z-index: 1; display: flex; min-height: 100vh; }
+
+  /* What: sidebar with logo and menu groups
+     Why: same menu on every page
+     From: Issue #1437 | PR #1858 */
+  .dock {
+    width: 232px;
+    flex: 0 0 auto;
+    background: var(--navy-900);
+    border-right: 1px solid var(--navy-700);
+    display: flex;
+    flex-direction: column;
+    padding: 20px 14px;
+    gap: 4px;
+  }
+  .brand {
+    display: flex;
+    justify-content: center;
+    padding: 4px 8px 18px;
+    margin-bottom: 8px;
+    border-bottom: 1px solid var(--navy-700);
+  }
+  .brand-mark {
+    width: 100%; max-width: 176px; height: auto; flex: none;
+    object-fit: contain;
+  }
+
+  .nav-group-label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--mist-dim);
+    padding: 16px 10px 6px;
+  }
+  .nav-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 9px 10px;
+    border-radius: 8px;
+    font-size: 14px;
+    color: var(--mist);
+    cursor: pointer;
+    border: 1px solid transparent;
+    transition: background 0.12s ease, color 0.12s ease;
+  }
+  .nav-item:hover { background: var(--navy-800); color: var(--foam); }
+  .nav-item.active {
+    background: var(--navy-800);
+    color: var(--foam);
+    border-color: var(--navy-600);
+  }
+  .nav-item.active .nav-dot { background: var(--tide); box-shadow: 0 0 0 3px #34d0a626; }
+  .nav-dot { display: inline-block; width: 6px; height: 6px; border-radius: 999px; background: var(--mist-dim); flex: none; }
+  .nav-icon { display: inline-block; width: 16px; text-align: center; flex: none; opacity: 0.9; }
+
+  .dock-footer {
+    margin-top: auto;
+    padding-top: 14px;
+    border-top: 1px solid var(--navy-700);
+    font-size: 12px;
+    color: var(--mist-dim);
+  }
+  .dock-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 12px; }
+  /* What: tidy foot: language pill, channel badge, link
+     Why: DoMe 07.11.: make the menu foot look nicer
+     From: Issue #1683 | PR #1985 */
+  .dock-tools .lang-switch { flex: 1 1 auto; justify-content: space-between; }
+  .dock-meta { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
+  .dock-info {
+    padding: 2px 10px; border-radius: 999px; border: 1px solid var(--navy-600);
+    background: var(--navy-850); color: var(--mist); font-size: 11.5px; letter-spacing: 0.02em;
+  }
+  .dock-link { color: var(--mist); text-decoration: none; }
+  .dock-link:hover { color: var(--foam); text-decoration: underline; }
+
+  /* What: main column holding beambar and content
+     Why: min-width 0 lets tables shrink
+     From: Issue #1437 | PR #1858 */
+  .main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; }
+
+  /* What: top status bar with sweeping beam
+     Why: signature element of the mockup
+     From: Issue #1437 | PR #1858 */
+  .beambar {
+    position: relative;
+    /* What: the bar wraps instead of clipping
+       Why: DoMe 06.11.: narrow window hid the menus
+       From: Issue #1683 */
+    min-height: 46px;
+    flex-wrap: wrap;
+    row-gap: 6px;
+    padding-block: 6px;
+    flex: none;
+    background: var(--navy-900);
+    border-bottom: 1px solid var(--navy-700);
+    display: flex;
+    align-items: center;
+    padding-inline: 22px;
+    gap: 18px;
+    overflow: hidden;
+  }
+  .beambar::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(100deg, transparent 0%, var(--beam-dim) 45%, transparent 60%);
+    background-size: 220% 100%;
+    animation: sweep 6s linear infinite;
+    pointer-events: none;
+  }
+  @media (prefers-reduced-motion: reduce) { .beambar::before { animation: none; } }
+  @keyframes sweep {
+    0% { background-position: 140% 0; }
+    100% { background-position: -60% 0; }
+  }
+  .beam-station { display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--mist); white-space: nowrap; }
+  .beam-station b { color: var(--foam); font-weight: 600; }
+  /* What: fold-out program menu of a container.
+     Why: keeps the bar to state and Start/Stop.
+     From: Issue #1683 | PR #1980 */
+  .beam-menu { position: relative; }
+  .beam-menu summary { list-style: none; cursor: pointer; padding: 0 0.4rem; }
+  .beam-menu summary::-webkit-details-marker { display: none; }
+  /* What: container name as the programs button
+     Why: DoMe 06.11.: no extra "Programme" button
+     From: Issue #1683 */
+  .beam-name { display: inline-block; }
+  .beam-name > summary { display: inline; padding: 0; }
+  .beam-menu-list { position: fixed; z-index: 30; display: flex; flex-direction: column; gap: 6px; padding: 8px; border-radius: 8px; border: 1px solid var(--navy-600); background: var(--navy-900); box-shadow: 0 4px 14px rgba(0,0,0,0.35); }
+  .beam-menu-row { display: flex; align-items: center; gap: 6px; }
+  .beam-menu-row span { flex: 1; min-width: 9em; color: var(--foam); }
+  .beam-light { display: inline-block; width: 7px; height: 7px; border-radius: 999px; background: var(--tide); box-shadow: 0 0 8px 1px #34d0a680; vertical-align: middle; }
+  .beam-light.warn { background: var(--coral); box-shadow: 0 0 8px 1px #ff7a5c80; }
+  .beam-light.off { background: var(--mist-dim); box-shadow: none; }
+  .beam-spacer { flex: 1; }
+  .lang-switch {
+    display: flex; align-items: center; gap: 6px;
+    font-size: 12.5px; color: var(--mist);
+    border: 1px solid var(--navy-600); border-radius: 999px;
+    padding: 5px 12px; cursor: pointer; background: var(--navy-850);
+  }
+  .lang-switch:hover { color: var(--foam); border-color: var(--mist-dim); }
+  .lang-switch select { background: transparent; border: 0; color: inherit; font: inherit; cursor: pointer; }
+  .lang-switch select option { background: var(--navy-850); color: var(--foam); }
+  .theme-btn {
+    border: 1px solid var(--navy-600); border-radius: 6px; height: 28px; box-sizing: border-box;
+    padding: 0 10px; cursor: pointer; background: transparent; color: var(--mist);
+    font-size: 12px; font-weight: 600;
+  }
+  .theme-btn:hover { color: var(--foam); }
+
+  /* What: page content box and entry animation
+     Why: max width keeps lines readable
+     From: Issue #1437 | PR #1858 */
+  .content { position: relative; flex: 1 1 auto; padding: 30px 34px 60px; max-width: 1180px; }
+  .view { display: none; }
+  .view.active { display: block; animation: rise 0.28s ease both; }
+  @keyframes rise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+
+  /* What: page heading, eyebrow and subtitle
+     Why: display font only on the page title
+     From: Issue #1437 | PR #1858 */
+  .eyebrow { font-size: 12px; letter-spacing: 0.09em; text-transform: uppercase; color: var(--mist-dim); margin: 0 0 6px; }
+  h1.page-title {
+    font-family: var(--font-display);
+    font-weight: 600;
+    font-size: 30px;
+    margin: 0 0 8px;
+    letter-spacing: 0.01em;
+    text-wrap: balance;
+  }
+  .page-sub { color: var(--mist); font-size: 14.5px; max-width: 62ch; line-height: 1.5; margin: 0 0 28px; }
+
+  /* What: stat cards, cards, pills, tables, tags
+     Why: building blocks shared by all pages
+     From: Issue #1437 | PR #1858 */
+  .stat-row { display: grid; grid-template-columns: repeat(5, 1fr); gap: 14px; margin-bottom: 22px; }
+  .stat-card {
+    background: var(--navy-850); border: 1px solid var(--navy-700); border-radius: 12px;
+    padding: 16px 18px;
+  }
+  .stat-num { font-family: var(--font-display); font-size: 27px; font-weight: 600; line-height: 1; font-variant-numeric: tabular-nums; margin-top: 6px; }
+  .stat-num .unit { font-size: 14px; color: var(--mist); font-family: var(--font-ui); margin-left: 4px; font-weight: 400; }
+  .stat-label { font-size: 12.5px; color: var(--mist); text-transform: uppercase; letter-spacing: 0.04em; }
+  .stat-card.accent .stat-num { color: var(--tide); }
+
+  /* What: .hidden hides an element until a script shows it.
+     Why: stats and dhcp toggle it; no utility CSS here. */
+  .hidden { display: none !important; }
+
+  .grid-2 { display: grid; grid-template-columns: 1.1fr 1.5fr; gap: 16px; align-items: start; }
+  .card { background: var(--navy-850); border: 1px solid var(--navy-700); border-radius: 12px; overflow: hidden; }
+  .card-head { padding: 15px 18px; border-bottom: 1px solid var(--navy-700); display: flex; align-items: center; justify-content: space-between; }
+  .card-head h3 { margin: 0; font-size: 14.5px; font-weight: 600; text-wrap: balance; }
+  .card-body { padding: 14px; }
+  .pill { font-size: 11px; padding: 3px 9px; border-radius: 999px; font-weight: 600; letter-spacing: 0.02em; }
+  .pill.on { background: #34d0a61f; color: var(--tide); }
+  .pill.off { background: #92a2ba1f; color: var(--mist); }
+
+  /* What: mode buttons, storage bar, log lines
+     Why: building blocks of dashboard and settings
+     From: Issue #1437 | PR #1858 */
+  .mode-switchrow { display: flex; gap: 8px; }
+  /* What: choice buttons share the size of .btn
+     Why: DoMe 07.11.: one button type on every page
+     From: Issue #1683 | PR #1991 */
+  .mode-btn {
+    flex: 1; display: inline-flex; align-items: center; justify-content: center;
+    box-sizing: border-box; height: 38px; padding: 0 16px; border-radius: 8px;
+    font-size: 13.5px; font-weight: 600;
+    border: 1px solid var(--navy-600); color: var(--mist); cursor: pointer; background: transparent;
+  }
+  .mode-btn:hover { color: var(--foam); border-color: var(--mist-dim); }
+  .mode-btn.selected { border-color: var(--beam); color: var(--foam); background: #f7b95514; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; font-weight: 600; color: var(--mist-dim); font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.05em; padding: 0 6px 10px; }
+  td { padding: 9px 6px; border-top: 1px solid var(--navy-700); vertical-align: middle; }
+  td.mono, .mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+  .tag { font-size: 11px; padding: 2px 7px; border-radius: 5px; font-weight: 600; }
+  .tag.hit { background: #34d0a61f; color: var(--tide); }
+  .tag.miss { background: #92a2ba1f; color: var(--mist); }
+  .tag.off { background: var(--navy-700); color: var(--mist-dim); }
+
+  .storage-bar { height: 10px; border-radius: 999px; background: var(--navy-700); overflow: hidden; }
+  .storage-fill { height: 100%; border-radius: 999px; background: linear-gradient(90deg, var(--beam), var(--coral)); }
+  .storage-meta { display: flex; justify-content: space-between; font-size: 12.5px; color: var(--mist); margin-top: 8px; }
+  .storage-meta b { color: var(--foam); font-family: var(--font-display); font-size: 15px; }
+  .log-line { padding: 3px 0; border-bottom: 1px solid var(--navy-700); }
+  .log-line:last-child { border-bottom: none; }
+
+  /* What: empty state and hint box
+     Why: explains a blank area instead of hiding it
+     From: Issue #1437 | PR #1858 */
+  .empty-state {
+    text-align: center; padding: 34px 20px 30px; color: var(--mist);
+  }
+  .empty-state .glyph { font-size: 26px; margin-bottom: 10px; opacity: 0.7; }
+  .empty-state p { margin: 0 auto 14px; max-width: 34ch; font-size: 13.5px; line-height: 1.5; }
+  .empty-state button {
+    background: var(--beam); color: #241705; border: none; border-radius: 8px;
+    padding: 8px 16px; font-size: 13px; font-weight: 600; cursor: pointer;
+  }
+
+  .hint {
+    display: flex; gap: 10px; align-items: flex-start;
+    background: #f7b9550f; border: 1px solid #f7b95533; border-radius: 10px;
+    padding: 12px 14px; font-size: 13px; color: var(--mist); line-height: 1.55;
+    margin-bottom: 16px;
+  }
+  .hint .glyph { flex: none; color: var(--beam); }
+  .hint b { color: var(--foam); }
+  .hint > div { max-width: 62ch; }
+
+  /* What: DHCP mode cards, errors, compare table
+     Why: building blocks of the DHCP page
+     From: Issue #1437 | PR #1858 */
+  .dhcp-modes { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 22px; }
+  .status-line { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--mist); margin-bottom: 14px; }
+  .errbox {
+    background: #ef5a5a14; border: 1px solid #ef5a5a44; border-radius: 10px; padding: 14px 16px; margin-top: 14px;
+    font-size: 13px; color: var(--foam); line-height: 1.55; max-width: 62ch;
+  }
+  .errbox .errtitle { display: flex; align-items: center; gap: 8px; font-weight: 600; color: var(--danger); margin-bottom: 6px; }
+  .errbox a.retry { color: var(--beam); font-weight: 600; text-decoration: none; }
+  .errbox a.retry:hover { text-decoration: underline; }
+
+  .advanced-toggle {
+    font-size: 12px; color: var(--mist-dim); cursor: pointer; display: inline-flex; align-items: center; gap: 5px; margin-top: 8px;
+  }
+  .advanced-toggle:hover { color: var(--mist); }
+
+  .compare-toggle {
+    font-size: 13px; font-weight: 600; color: var(--mist); cursor: pointer;
+    display: inline-flex; align-items: center; gap: 6px; margin-bottom: 16px;
+  }
+  .compare-toggle:hover { color: var(--foam); }
+  .compare-card { margin-bottom: 22px; }
+  .compare-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .compare-table th {
+    text-align: left; font-weight: 600; color: var(--mist-dim); font-size: 11.5px;
+    text-transform: uppercase; letter-spacing: 0.05em; padding: 12px 16px 10px;
+    border-bottom: 1px solid var(--navy-700);
+  }
+  .compare-table th:not(:first-child), .compare-table td:not(:first-child) { text-align: center; width: 30%; }
+  .compare-table td { padding: 11px 16px; border-top: 1px solid var(--navy-700); color: var(--mist); }
+  .compare-table td:first-child { color: var(--foam); }
+  .compare-table td.yes { color: var(--tide); font-weight: 600; }
+  .compare-table td.no { color: var(--mist-dim); font-size: 12.5px; }
+  .compare-table td.partial { color: var(--beam); font-size: 12.5px; }
+  .compare-footnote {
+    font-size: 12px; color: var(--mist-dim); padding: 12px 16px; border-top: 1px solid var(--navy-700);
+  }
+
+  .footnote { color: var(--mist-dim); font-size: 12px; margin-top: 40px; line-height: 1.6; border-top: 1px solid var(--navy-700); padding-top: 16px; }
+
+  /* What: form fields, buttons, toggles, toast, copy row
+     Why: one markup for every settings form
+     From: Issue #1437 | PR #1858 */
+  .field { margin-bottom: 12px; max-width: 480px; }
+  .field label { display: block; font-size: 13px; font-weight: 600; margin-bottom: 5px; }
+  .field .field-hint { font-size: 12px; color: var(--mist); margin-top: 5px; line-height: 1.5; max-width: 62ch; }
+
+  .info-tip {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 15px; height: 15px; border-radius: 50%; background: var(--navy-700);
+    color: var(--mist); font-size: 10.5px; font-weight: 700; cursor: help;
+    margin-left: 5px; vertical-align: middle; position: relative;
+  }
+  .info-tip:hover, .info-tip:focus { background: var(--navy-600); color: var(--foam); outline: none; }
+  .info-tip:hover::after, .info-tip:focus::after {
+    content: attr(data-tip);
+    position: absolute; bottom: 130%; left: 0; transform: none;
+    background: var(--navy-900); color: var(--foam); border: 1px solid var(--navy-600);
+    padding: 7px 10px; border-radius: 6px; font-size: 12px; font-weight: 400;
+    white-space: normal; width: max-content; max-width: 260px; line-height: 1.5;
+    box-shadow: 0 4px 14px rgba(0,0,0,0.35); z-index: 20;
+  }
+  /* What: dark browser parts (calendar icon) in dark.
+     Why: the calendar icon stays visible in dark.
+     From: Issue #1683 | PR #1980 */
+  html:not([data-theme="light"]) input,
+  html:not([data-theme="light"]) select,
+  html:not([data-theme="light"]) textarea { color-scheme: dark; }
+  /* What: one look for every form field.
+     Why: every field has the same colours.
+     From: Issue #1683 | PR #1980 */
+  .field input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]),
+  .field textarea, .field select {
+    width: 100%; padding: 9px 11px; border-radius: 8px; border: 1px solid var(--navy-600);
+    background: var(--navy-900); color: var(--foam); font-size: 13.5px; font-family: var(--font-mono);
+  }
+  .field input:focus, .field textarea:focus, .field select:focus { outline: 2px solid var(--beam); outline-offset: 1px; border-color: var(--beam); }
+  .field input.invalid { border-color: var(--danger); }
+  .field-error { display: none; color: var(--danger); font-size: 12.5px; margin-top: 6px; }
+  .field-error.show { display: block; }
+  .field-row { display: flex; gap: 10px; align-items: flex-start; max-width: 480px; }
+  .field-row .field { flex: 1; }
+  .btn {
+    padding: 9px 16px; border-radius: 8px; font-size: 13.5px; font-weight: 600; cursor: pointer; border: none;
+    background: var(--beam); color: #241705; white-space: nowrap;
+  }
+  .btn.ghost { background: transparent; border: 1px solid var(--navy-600); color: var(--mist); }
+  .btn.ghost:hover { color: var(--foam); border-color: var(--mist-dim); }
+  summary:focus:not(:focus-visible) { outline: none; }
+  .btn:focus-visible { outline: 2px solid var(--beam); outline-offset: 2px; }
+
+  .toggle-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 9px 0; border-top: 1px solid var(--navy-700); }
+  .toggle-row:first-child { border-top: none; }
+  .toggle-row .t-label { font-size: 13.5px; font-weight: 600; }
+  .toggle-row .t-desc { font-size: 12.5px; color: var(--mist); margin-top: 3px; max-width: 62ch; }
+  .toggle { display: inline-block; position: relative; width: 40px; height: 23px; flex: none; vertical-align: middle; cursor: pointer; }
+  .toggle input { position: absolute; opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; }
+  .toggle .track {
+    position: absolute; inset: 0; background: var(--navy-600); border-radius: 999px; transition: background 0.15s ease;
+  }
+  .toggle .knob {
+    position: absolute; top: 2.5px; left: 2.5px; width: 18px; height: 18px; border-radius: 999px;
+    background: var(--foam); transition: transform 0.15s ease;
+  }
+  .toggle input:checked ~ .track { background: var(--tide); }
+  .toggle input:checked ~ .knob { transform: translateX(17px); }
+  .toggle input:focus-visible ~ .track { outline: 2px solid var(--beam); outline-offset: 2px; }
+
+  .toast {
+    display: none; align-items: center; gap: 8px; font-size: 12.5px; color: var(--tide);
+    background: #34d0a614; border: 1px solid #34d0a63d; border-radius: 8px; padding: 7px 12px; margin-top: 10px;
+  }
+  .toast.show { display: inline-flex; }
+
+  .copy-row {
+    display: flex; align-items: center; gap: 10px; background: var(--navy-900); border: 1px solid var(--navy-700);
+    border-radius: 8px; padding: 10px 12px; font-family: var(--font-mono); font-size: 13px; max-width: 480px;
+  }
+  .copy-row code { flex: 1; overflow-x: auto; white-space: nowrap; }
+  /* What: command boxes span the full width
+     Why: DoMe 07.11.: short boxes with a scrollbar
+     From: Issue #1683 | PR #1985 */
+  .copy-row.cmd-row { margin: 6px 0; max-width: none; }
+  .copy-row.cmd-row code { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .cmd-os { flex: none; color: var(--mist); font-size: 12px; }
+  .t-desc code, .field-hint code, .section-sub code { white-space: nowrap; }
+  .copy-row button {
+    flex: none; background: var(--navy-800); border: 1px solid var(--navy-600); color: var(--mist);
+    border-radius: 6px; padding: 5px 10px; font-size: 12px; cursor: pointer;
+  }
+  .copy-row button:hover { color: var(--foam); }
+  .copy-row button.copied { color: var(--tide); border-color: #34d0a655; }
+
+  /* What: snapshot rows, subtabs and tab panels
+     Why: building blocks of backup and DNS pages
+     From: Issue #1437 | PR #1858 */
+  .snapshot-row {
+    display: flex; align-items: center; justify-content: space-between; padding: 11px 0; border-top: 1px solid var(--navy-700); font-size: 13px;
+  }
+  .snapshot-row:first-of-type { border-top: none; }
+  .snapshot-row .s-meta { color: var(--mist); font-size: 12px; margin-top: 2px; }
+  .snapshot-actions { display: flex; gap: 14px; font-size: 12.5px; }
+  .snapshot-actions a { color: var(--beam); text-decoration: none; }
+  .snapshot-actions a:hover { text-decoration: underline; }
+
+  .subtabs { display: flex; gap: 22px; border-bottom: 1px solid var(--navy-700); margin-bottom: 26px; }
+  .subtab {
+    padding: 0 0 10px; font-size: 13.5px; font-weight: 600; color: var(--mist); cursor: pointer;
+    border-bottom: 2px solid transparent; margin-bottom: -1px;
+  }
+  .subtab:hover { color: var(--foam); }
+  .subtab.active { color: var(--foam); border-bottom-color: var(--beam); }
+  .subtab-panel { display: none; }
+  .subtab-panel.active { display: block; }
+  .subtab2-panel { display: none; }
+  .subtab2-panel.active { display: block; }
+  .subtab3-panel { display: none; }
+  .subtab3-panel.active { display: block; }
+  .subtab4-panel { display: none; }
+  .subtab4-panel.active { display: block; }
+  .subtab5-panel { display: none; }
+  .subtab5-panel.active { display: block; }
+
+  /* What: placeholder panel for unbuilt tabs
+     Why: marks Steam tabs as not yet real
+     From: Issue #1437 | PR #1858 */
+  .placeholder-panel {
+    text-align: center; padding: 46px 20px 42px; color: var(--mist);
+    border: 1px dashed var(--navy-600); border-radius: 12px;
+  }
+  .placeholder-panel .glyph { font-size: 22px; margin-bottom: 10px; opacity: 0.6; }
+  .placeholder-panel p { margin: 0 auto; max-width: 40ch; font-size: 13px; line-height: 1.55; }
+  .placeholder-panel .ph-tag {
+    display: inline-block; margin-bottom: 10px; font-size: 11px; font-weight: 700;
+    letter-spacing: 0.05em; text-transform: uppercase; color: var(--mist-dim);
+    background: var(--navy-800); border-radius: 999px; padding: 3px 10px;
+  }
+
+  /* What: section title and setup steps
+     Why: building blocks of settings pages
+     From: Issue #1437 | PR #1858 */
+  .section-title { font-size: 15px; font-weight: 600; margin: 20px 0 4px; }
+  .section-title:first-of-type { margin-top: 0; }
+  .section-sub { font-size: 13px; color: var(--mist); margin: 0 0 10px; max-width: 62ch; line-height: 1.5; }
+
+  .setup-steps { display: flex; flex-direction: column; gap: 18px; max-width: 480px; }
+  .setup-step { display: flex; gap: 14px; }
+  .setup-step-num {
+    flex: none; width: 22px; height: 22px; border-radius: 999px; background: var(--navy-700);
+    color: var(--foam); font-size: 12px; font-weight: 700; display: flex; align-items: center; justify-content: center;
+  }
+
+  /* What: phone layout: menu rows on top, they wrap
+     Why: a scroll strip cut items off (DoMe 06.11.)
+     From: Issue #1683 | PR #1991 */
+  @media (max-width: 880px) {
+    .shell { flex-direction: column; }
+    .dock { position: relative; z-index: 5; width: 100%; height: auto; flex-direction: row; flex-wrap: wrap; align-items: center; gap: 4px; padding: 6px 8px; border-right: none; border-bottom: 1px solid var(--navy-700); }
+    .dock .brand { padding: 0 6px; margin: 0; border: none; flex: none; }
+    .dock .brand-mark { width: 34px; height: 34px; object-fit: contain; }
+    .dock .nav-group-label, .dock .dock-meta, .dock .nav-dot { display: none; }
+    .dock .dock-footer { margin: 0; padding: 0; border: none; flex: none; }
+    .dock .dock-tools { margin: 0; flex-wrap: wrap; }
+    .dock .nav-item { flex: none; white-space: nowrap; padding: 7px 10px; margin: 0; }
+    .beambar { padding: 8px 12px; }
+    .content { padding: 18px 14px 48px; }
+    .page-title { font-size: 28px; }
+    .subtabs { gap: 16px; overflow-x: auto; white-space: nowrap; }
+    .stat-row, .grid-2, .dhcp-modes { grid-template-columns: 1fr; }
+  }
+
+  /* What: old --color-* tokens point at the mockup tokens
+     Why: page templates still read them in inline styles
+     From: Issue #1437 | PR #1858 */
+  :root {
+    --color-bg: var(--navy-950);
+    --color-surface: var(--navy-900);
+    --color-surface-raised: var(--navy-800);
+    --color-border: var(--navy-700);
+    --color-text: var(--foam);
+    --color-text-muted: var(--mist);
+    --color-accent-gold: var(--beam);
+    --color-accent-gold-soft: var(--beam-dim);
+    --color-accent-coral: var(--coral);
+    --color-accent-coral-soft: #ff7a5c29;
+  }
+
+  /* What: slate utility classes use the mockup tokens
+     Why: admin.css colours are fixed; pages not yet moved
+     From: Issue #1437 | PR #1858 */
+  :root .text-white, :root .text-slate-100, :root .text-slate-200,
+  :root .text-slate-300, :root .hover\:text-white:hover,
+  :root .hover\:text-slate-300:hover { color: var(--foam); }
+  :root .text-slate-400, :root .text-slate-500 { color: var(--mist); }
+  :root .bg-slate-900, :root .bg-slate-950 { background-color: var(--navy-950); }
+  :root .bg-slate-800, :root .bg-slate-750 { background-color: var(--navy-850); }
+  :root .bg-slate-700, :root .bg-slate-600,
+  :root .hover\:bg-slate-600:hover { background-color: var(--navy-800); }
+  :root .border-slate-400, :root .border-slate-500, :root .border-slate-600,
+  :root .border-slate-700, :root .hover\:border-slate-400:hover { border-color: var(--navy-700); }
+
+  /* What: card without card-body keeps its own padding
+     Why: pages not yet on card-head/card-body need spacing
+     From: Issue #1437 | PR #1858 */
+  .card:not(:has(> .card-body)) { padding: 18px; }
+
+  /* What: old button variants map to the mockup buttons
+     Why: one button look; primary is .btn, quiet is ghost
+     From: Issue #1437 | PR #1858 */
+  a.btn, button.btn {
+    display: inline-flex; align-items: center; justify-content: center;
+    box-sizing: border-box; height: 38px; align-self: flex-end; text-decoration: none;
+  }
+  .btn-sm { font-size: 12px; padding: 0 10px; height: 28px; border-radius: 6px; }
+  .btn-slate, .btn-ghost-red, .btn-ghost-amber {
+    background: transparent; border: 1px solid var(--navy-600); color: var(--mist);
+  }
+  .btn-slate:hover { color: var(--foam); border-color: var(--mist-dim); }
+  .btn-danger, .btn-ghost-red {
+    background: #ef5a5a14; border: 1px solid #ef5a5a44; color: var(--danger);
+  }
+  .btn-warn, .btn-ghost-amber {
+    background: #f7b9550f; border: 1px solid #f7b95533; color: var(--beam);
+  }
+  .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  /* What: old badges use the mockup tag and pill colours
+     Why: one status colour set across all pages
+     From: Issue #1437 | PR #1858 */
+  .badge-hit, .badge-miss, .badge-expired, .badge-other, .badge-on, .badge-off {
+    font-size: 11px; padding: 2px 7px; border-radius: 5px; font-weight: 600; display: inline-block;
+  }
+  .badge-hit, .badge-on { background: #34d0a61f; color: var(--tide); }
+  .badge-miss { background: #ff7a5c29; color: var(--coral); }
+  .badge-expired { background: #f7b9551f; color: var(--beam); }
+  .badge-other, .badge-off { background: #92a2ba1f; color: var(--mist); }
+
+  /* What: old tab, table head and row use mockup tones
+     Why: pages not yet on subtabs and table still use them
+     From: Issue #1437 | PR #1858 */
+  .tab { padding: 0 0 10px; font-size: 13.5px; font-weight: 600; color: var(--mist); text-decoration: none; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+  .tab:hover { color: var(--foam); }
+  .tab.active { color: var(--foam); border-bottom-color: var(--beam); }
+  .th { text-align: left; font-weight: 600; color: var(--mist-dim); font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.05em; padding: 0 6px 10px; }
+  .rows > tr + tr { border-top: 1px solid var(--navy-700); }
+  .list-row { display: flex; align-items: center; justify-content: space-between; padding: 8px 10px; border-radius: 8px; }
+  .list-row:hover { background-color: var(--navy-800); }
+
+  /* What: tab links and buttons look like mockup subtabs
+     Why: section tabs are links, DNS tabs are buttons
+     From: Issue #1437 | PR #1858 */
+  a.subtab { text-decoration: none; }
+  button.subtab { background: transparent; border: 0; border-bottom: 2px solid transparent; font: inherit; font-size: 13.5px; font-weight: 600; cursor: pointer; }
+
+  /* What: watchdog dots in the mockup beam-light look
+     Why: JS paints one class per status on every page
+     From: Issue #1437 | PR #1858 */
+  .beambar-dot { display: inline-block; width: 7px; height: 7px; border-radius: 999px; vertical-align: middle; margin-right: 7px; }
+  .beambar-dot.green { background: var(--tide); box-shadow: 0 0 8px 1px #34d0a680; }
+  .beambar-dot.amber, .beambar-dot.yellow { background: var(--beam); box-shadow: 0 0 8px 1px #f7b95580; }
+  .beambar-dot.red { background: var(--coral); box-shadow: 0 0 8px 1px #ff7a5c80; }
+  .beambar-dot.gray { background: var(--mist-dim); }
+  .beambar-services { display: flex; flex-wrap: wrap; row-gap: 6px; align-items: center; gap: 18px; font-size: 12.5px; color: var(--mist); white-space: nowrap; }
+  .dock a.nav-item, .dock a.nav-item:hover { text-decoration: none; }
+    /* What: status bar at the bottom for every action
+       Why: DoMe 06.11.: buttons gave no sign of work
+       From: Issue #1683 */
+    #ui-busy { position: fixed; left: 0; right: 0; bottom: 0; z-index: 49;
+      padding: 6px 16px 8px; background: var(--navy-900); color: var(--mist);
+      border-top: 1px solid var(--color-border); font-size: 13px; }
+    #ui-busy[data-state="done"] { color: var(--foam); }
+    #ui-busy[data-state="failed"] { color: var(--danger); }
+    #ui-busy .ui-busy-track { position: absolute; left: 0; right: 0; top: 0;
+      height: 2px; overflow: hidden; }
+    #ui-busy[data-state="busy"] .ui-busy-track::after { content: ""; position: absolute;
+      top: 0; bottom: 0; width: 30%; background: var(--beam);
+      animation: ui-busy-run 1.2s linear infinite; }
+    @keyframes ui-busy-run { from { left: -30%; } to { left: 100%; } }
+  </style>
+  <script>
+    // What: SOT seconds as the milliseconds JS timers take
+    // Why: one conversion for every page script
+    // From: Issue #1683 | PR #1912
+    window.LancacheUi = { ms: function (seconds) { return seconds * 1000; } };
+
+    // What: a visible error line at the page bottom.
+    // Why: live test: errors went only to the console.
+    // From: Issue #1683 | PR #1980
+    window.LancacheUi.fail = function (err) {
+      reportError(err);
+      let box = document.getElementById('ui-fail');
+      if (!box) {
+        box = document.createElement('div');
+        box.id = 'ui-fail';
+        box.setAttribute('role', 'alert');
+        box.style.cssText = 'position:fixed;left:16px;right:16px;bottom:16px;z-index:50;'
+          + 'padding:10px 14px;border-radius:8px;border:1px solid var(--danger);'
+          + 'background:var(--navy-900);color:var(--danger);font-size:13px;';
+        box.addEventListener('click', function () { box.hidden = true; });
+        document.body.appendChild(box);
+      }
+      box.textContent = LC_T.error_prefix + (err && err.message ? err.message : err);
+      box.hidden = false;
+    };
+
+    // What: a bar at the bottom for every action.
+    // Why: DoMe 06.11.: buttons gave no sign of work.
+    // From: Issue #1683
+    (function () {
+      const bar = document.createElement('div');
+      bar.id = 'ui-busy';
+      bar.setAttribute('role', 'status');
+      bar.hidden = true;
+      const text = document.createElement('span');
+      const track = document.createElement('div');
+      track.className = 'ui-busy-track';
+      bar.append(track, text);
+      let open = 0;
+      let t0 = 0;
+      let hide = 0;
+      let tick = 0;
+      const show = function (msg, state) {
+        clearTimeout(hide);
+        clearInterval(tick);
+        text.textContent = msg;
+        bar.dataset.state = state;
+        bar.hidden = false;
+        if (state === 'busy') {
+          tick = setInterval(function () {
+            text.textContent = msg + ' ' + Math.round((Date.now() - t0) / 1000) + ' s';
+          }, 1000);
+        } else {
+          hide = setTimeout(function () { bar.hidden = true; }, state === 'done' ? 3000 : 10000);
+        }
+      };
+      const end = function (ok) {
+        open -= 1;
+        if (open > 0) { return; }
+        const s = ((Date.now() - t0) / 1000).toFixed(1) + ' s';
+        show((ok ? LC_T.busy_done : LC_T.busy_failed) + ' (' + s + ')', ok ? 'done' : 'failed');
+      };
+      const orig = window.fetch.bind(window);
+      window.fetch = function (input, init) {
+        const method = ((init && init.method) || 'GET').toUpperCase();
+        if (method === 'GET' || method === 'HEAD') { return orig(input, init); }
+        if (open === 0) { t0 = Date.now(); }
+        open += 1;
+        show(LC_T.busy_running, 'busy');
+        return orig(input, init).then(function (r) { end(r.ok); return r; },
+          function (err) { end(false); throw err; });
+      };
+      const mount = function () { document.body.appendChild(bar); };
+      if (document.body) { mount(); } else { document.addEventListener('DOMContentLoaded', mount); }
+    })();
+
+    // What: POST forms send in the background.
+    // Why: an error stays in the page, no bare page.
+    // From: Issue #1683 | PR #1980
+    document.addEventListener('submit', function (e) {
+      const form = e.target;
+      if (e.defaultPrevented || (form.method || '').toLowerCase() !== 'post') { return; }
+      e.preventDefault();
+      const body = new URLSearchParams(new FormData(form, e.submitter));
+      fetch(form.action, { method: 'POST', body: body, credentials: 'same-origin' })
+        .then(function (r) {
+          if (r.ok && r.redirected) { location.assign(r.url); return null; }
+          return r.text().then(function (t) {
+            if (r.ok) { document.open(); document.write(t); document.close(); return; }
+            throw new Error((t || r.statusText).slice(0, 300));
+          });
+        })
+        .catch(function (err) {
+          if (err instanceof TypeError) { HTMLFormElement.prototype.submit.call(form); return; }
+          window.LancacheUi.fail(err);
+        });
+    });
+
+    // What: set data-theme before the first paint
+    // Why: stored choice, else OS setting; one CSS rule set
+    // From: Issue #1437 | PR #1912
+    (function () {
+      const STORAGE_KEY = 'lancache-ui-theme';
+      const root = document.documentElement;
+      const osLight = window.matchMedia('(prefers-color-scheme: light)');
+      let stored = null;
+      try {
+        stored = localStorage.getItem(STORAGE_KEY);
+      } catch (err) {
+        // What: report read error, keep the OS theme
+        // Why: private browsing may block localStorage
+        // From: Issue #1437
+        reportError(err);
+      }
+      // What: stored theme if valid, else the OS setting
+      // Why: one rule for page load and both change events
+      // From: Issue #1437 | PR #1912
+      function apply() {
+        const own = stored === 'light' || stored === 'dark';
+        root.setAttribute('data-theme', own ? stored : (osLight.matches ? 'light' : 'dark'));
+      }
+      apply();
+      osLight.addEventListener('change', apply);
+      // What: Setup page switch: follow the OS theme or not
+      // Why: the mockup has a Match system theme toggle
+      // From: Issue #1683 | PR #1858
+      window.LancacheUi.followSystem = function (on) {
+        stored = on ? null : root.getAttribute('data-theme');
+        apply();
+        try {
+          if (on) {
+            localStorage.removeItem(STORAGE_KEY);
+          } else {
+            localStorage.setItem(STORAGE_KEY, stored);
+          }
+        } catch (err) {
+          reportError(err);
+        }
+      };
+      window.LancacheUi.followsSystem = function () {
+        return !(stored === 'light' || stored === 'dark');
+      };
+      document.addEventListener('DOMContentLoaded', function () {
+        document.getElementById('theme-toggle').addEventListener('click', function () {
+          stored = root.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+          apply();
+          try {
+            localStorage.setItem(STORAGE_KEY, stored);
+          } catch (err) {
+            // What: report write error; theme still set
+            // Why: the choice only fails to persist
+            // From: Issue #1437
+            reportError(err);
+          }
+        });
+      });
+    })();
+  </script>
+</head>
+<body>
+  <!-- What: faint logo behind the page content
+       Why: mockup watermark; same image as the sidebar logo
+       From: Issue #1437 | PR #1858 -->
+  <img class="watermark" alt="" src="{{ routes.logo_icon | safe }}">
+  <div class="shell">
+  <!-- What: sidebar with logo, menu groups and image info
+       Why: one layout, same navigation on every page
+       From: Issue #1437 | PR #1858 -->
+  <nav class="dock">
+    <div class="brand">
+      <img class="brand-mark" alt="LanCache-NG" src="{{ routes.logo_icon | safe }}?v={{ lancache_image_tag() }}">
+    </div>
+
+    <div class="nav-group-label">{{ t.overview_2 }}</div>
+    {{ <nav_link href={pages.dashboard} label="Dashboard" active={active_page == "dashboard"} glyph="◧"/> }}
+    {{ <nav_link href={pages.logs} label="Logs" active={active_page == "logs"} glyph="▤"/> }}
+    {{ <nav_link href={pages.stats} label={t.statistics} active={active_page == "stats"} glyph="◔"/> }}
+
+    <div class="nav-group-label">{{ t.gaming }}</div>
+    {{ <nav_link href={pages.cachehamster} label="Steam" active={active_page == "cachehamster"} glyph="⇓"/> }}
+
+    <div class="nav-group-label">{{ t.settings_2 }}</div>
+    {{ <nav_link href={pages.domains} label="DNS" active={active_page == "domains"} glyph="⌘"/> }}
+    {{ <nav_link href={pages.dhcp} label="DHCP" active={active_page == "dhcp"} glyph="⇄"/> }}
+    <a href="{{ pages.logs | safe }}" class="nav-item"><span class="nav-dot"></span><span class="nav-icon">☍</span> Syslog</a>
+    {{ <nav_link href={pages.setup} label={t.general} active={active_page == "setup"} glyph="◐"/> }}
+
+    <div class="dock-footer">
+      <!-- What: language, UI restart, theme at the foot
+           Why: DoMe 06.11.: not in the top bar
+           From: Issue #1683 | PR #1985 -->
+      <div class="dock-tools">
+        <label class="lang-switch">🌐 <select id="lang-select" aria-label="{{ t.language }}">{% for l in langs %}<option value="{{ l[0] }}"{% if l[0] == lang %} selected{% endif %}>{{ l[1] }}</option>{% endfor %}</select></label>
+        <button type="button" class="theme-btn" id="theme-toggle" title="{{ t.toggle_light_dark_theme }}">◐</button>
+      </div>
+      <!-- What: tag once when it is the channel name
+           Why: it showed "nightly - nightly" twice
+           From: Issue #1683 | PR #1985 -->
+      <div class="dock-meta">
+      <span class="dock-info" title="{{ lancache_image_registry() }}/{{ lancache_image_prefix() }}:{{ lancache_image_tag() }}">{% if lancache_image_tag() == lancache_image_channel() %}{{ lancache_image_channel() }}{% else %}{{ lancache_image_tag() }} · {{ lancache_image_channel() }}{% endif %}</span>
+      <!-- What: link to the project repository page
+           Why: address only from the SOT, escaped by tera
+           From: Issue #1683 | PR #1912 -->
+      <a class="dock-link" href="{{ repo_url }}" target="_blank" rel="noopener noreferrer">{{ t.project_page }} ↗</a>
       </div>
     </div>
+  </nav>
 
-    <nav class="flex-1 p-3 space-y-0.5">
-      <a href="/" class="nav-link {% if active_page == "dashboard" %}active{% endif %}">
-        <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-            d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"/>
-        </svg>
-        Dashboard
-      </a>
-      <a href="/dhcp" class="nav-link {% if active_page == "dhcp" %}active{% endif %}">
-        <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-            d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/>
-        </svg>
-        DHCP
-      </a>
-      <a href="/ntp" class="nav-link {% if active_page == "ntp" %}active{% endif %}">
-        <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-            d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
-        </svg>
-        NTP
-      </a>
-      <a href="/domains" class="nav-link {% if active_page == "domains" %}active{% endif %}">
-        <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-            d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9"/>
-        </svg>
-        DNS
-      </a>
-      <a href="/secondaries" class="nav-link {% if active_page == "secondaries" %}active{% endif %}">
-        <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-            d="M9 12l2 2 4-4m7.538-4.854a.75.75 0 00-1.054-1.054l-5.5 5.5a1 1 0 01-1.414 0l-2.5-2.5a.75.75 0 00-1.06 1.061l2.5 2.5a1 1 0 001.414 0l5.5-5.5zm0 7a.75.75 0 00-1.054-1.054l-5.5 5.5a1 1 0 01-1.414 0l-2.5-2.5a.75.75 0 10-1.06 1.061l2.5 2.5a1 1 0 001.414 0l5.5-5.5z"/>
-        </svg>
-        Secondary
-      </a>
-      <a href="/stats" class="nav-link {% if active_page == "stats" %}active{% endif %}">
-        <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-            d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/>
-        </svg>
-        Statistiken
-      </a>
-      <a href="/logs" class="nav-link {% if active_page == "logs" %}active{% endif %}">
-        <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-            d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
-        </svg>
-        Logs
-      </a>
-      <a href="/setup" class="nav-link {% if active_page == "setup" %}active{% endif %}">
-        <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-            d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/>
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
-        </svg>
-        Einrichtung
-      </a>
-    </nav>
-
-    <div class="p-4 border-t border-slate-700">
-      <p class="text-[0.65rem] uppercase tracking-wide text-slate-500">Runtime Image</p>
-      <p class="mt-1 text-xs font-semibold text-slate-300 truncate"
-         title="{{ lancache_image_registry() }}/{{ lancache_image_prefix() }}:{{ lancache_image_tag() }}">
-        {{ lancache_image_tag() }}
-      </p>
-      <p class="mt-0.5 text-[0.7rem] text-slate-500">
-        Channel: {{ lancache_image_channel() }}
-      </p>
-      <p class="mt-3 text-xs text-slate-500">Netdata läuft intern<br>und speist die Graphen.</p>
-    </div>
-  </aside>
-
-  <!-- Main -->
-  <div class="flex-1 flex flex-col overflow-hidden">
-    <main class="flex-1 overflow-y-auto p-6">
+  <div class="main">
+    <!-- What: health bar in the header
+         Why: base.html renders it on every page
+         From: Issue #1437 -->
+    <header class="beambar" id="beambar">
+      <div class="beambar-services" id="beambar-services">
+        <span>{{ t.service_health_loading }}</span>
+      </div>
+    </header>
+    <main class="content">
       {% block content %}{% endblock %}
     </main>
   </div>
+  </div>
+
+  <script>
+    // What: CSRF token for the fetch()-based POSTs below
+    // Why: sent as X-CSRF-Token header, not a form field
+    // From: Issue #1437
+    const CSRF_TOKEN = "{{ csrf_token }}";
+
+    // What: shared watchdog poll for beambar + dashboard
+    // Why: one fetch/interval, not one per template
+    // From: Issue #1437
+    window.LancacheWatchdog = (function () {
+      const DOT_COLOR_CLASSES = ['green', 'amber', 'yellow', 'red', 'gray'];
+      // What: the status as dot class; unknown becomes gray
+      // Why: a server value never adds an unknown class
+      // From: Issue #1683 | PR #1912
+      function colorClass(status) {
+        return DOT_COLOR_CLASSES.includes(status) ? status : 'gray';
+      }
+      // What: sets a dot's .beambar-dot colour for a status
+      // Why: one status-to-colour owner for all dots
+      // From: Issue #1683 | PR #1912
+      function paintDot(dot, status) {
+        dot.classList.remove(...DOT_COLOR_CLASSES);
+        dot.classList.add('beambar-dot', colorClass(status));
+      }
+      // What: paints server-rendered [data-dot-status]
+      // Why: setup and dashboard dots get the same colours
+      // From: Issue #1683 | PR #1912
+      document.querySelectorAll('[data-dot-status]').forEach(function (dot) {
+        paintDot(dot, dot.dataset.dotStatus);
+      });
+      // What: registers a renderer for each status update
+      // Why: beambar and dashboard share one poll
+      // From: Issue #1683 | PR #1912
+      const listeners = [];
+      function onUpdate(fn) {
+        listeners.push(fn);
+      }
+      // What: fetches the status and hands it to listeners
+      // Why: one fetch feeds every renderer on the page
+      // From: Issue #1683 | PR #1912
+      async function refresh() {
+        let data;
+        try {
+          const response = await fetch('{{ routes.watchdog_status | safe }}');
+          // What: throws on a non-2xx status response
+          // Why: the catch below reports it as fetch error
+          // From: Issue #1683 | PR #1912
+          if (!response.ok) {
+            throw new Error('watchdog status: HTTP ' + response.status);
+          }
+          data = await response.json();
+        } catch (err) {
+          // What: report it, keep last render, retry
+          // Why: network hiccup or the UI itself restarting
+          // From: Issue #1437
+          reportError(err);
+          return;
+        }
+        listeners.forEach(function (fn) {
+          fn(data);
+        });
+      }
+      return { colorClass: colorClass, paintDot: paintDot, onUpdate: onUpdate, refresh: refresh };
+    })();
+
+    // What: POSTs desired state; the watchdog applies it
+    // Why: shared by all dock start/stop buttons
+    // From: Issue #1437
+    async function setDockServiceState(service, state, button) {
+      button.disabled = true;
+      try {
+        const response = await fetch('{{ routes.desired_state | safe }}'.replace('{service}', service), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF_TOKEN },
+          body: JSON.stringify({ state: state }),
+        });
+        // What: throws on a non-2xx desired-state response
+        // Why: the catch below reports it as fetch error
+        // From: Issue #1683 | PR #1912
+        if (!response.ok) {
+          throw new Error('desired state: HTTP ' + response.status);
+        }
+        window.LancacheWatchdog.refresh();
+      } catch (err) {
+        // What: reports the error, re-enables button
+        // Why: a network hiccup must not strand the button
+        // From: Issue #1437
+        window.LancacheUi.fail(err);
+      }
+      button.disabled = false;
+    }
+
+    // What: copies an element's text to the clipboard
+    // Why: no clipboard API on HTTP; use execCommand
+    // From: Issue #1068 | PR #1912
+    function copyText(id, button) {
+      const el = document.getElementById(id);
+      // What: shows the copied text, then the old label
+      // Why: confirms the copy without a dialog
+      // From: Issue #1683 | PR #1912
+      function flash() {
+        button.textContent = LC_T.copied;
+        button.classList.add('text-green-400');
+        setTimeout(function () {
+          button.textContent = LC_T.copy;
+          button.classList.remove('text-green-400');
+        }, 1500);
+      }
+      // What: selects element text, copies by execCommand
+      // Why: fallback when the Clipboard API is missing
+      // From: Issue #1683 | PR #1912
+      function selectAndCopy() {
+        const range = document.createRange();
+        range.selectNodeContents(el);
+        const sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+        // What: on failure report it, keep selection
+        // Why: the operator can still copy it with Ctrl+C
+        // From: Issue #1683 | PR #1912
+        let ok;
+        try {
+          ok = document.execCommand('copy');
+        } catch (err) {
+          reportError(err);
+          return;
+        }
+        if (!ok) {
+          reportError(new Error('copy: execCommand failed'));
+          return;
+        }
+        sel.removeAllRanges();
+        flash();
+      }
+      // What: Clipboard API if secure context, else select
+      // Why: browsers offer navigator.clipboard only there
+      // From: Issue #1683 | PR #1912
+      if (navigator.clipboard && window.isSecureContext) {
+        navigator.clipboard.writeText(el.innerText).then(flash, function (err) {
+          reportError(err);
+          selectAndCopy();
+        });
+      } else {
+        selectAndCopy();
+      }
+    }
+
+    // What: names that get a dock start/stop button
+    // Why: DesiredState::SERVICES, matched to status.json
+    // From: Issue #1683 | PR #1912
+    const DOCK_CONTROLLABLE_SERVICES = [{% for name in desired_services %}'{{ name }}',{% endfor %}];
+    // What: programs per container (container:program)
+    // Why: reload/restart one program via OpenRC
+    // From: Issue #1683 | PR #1858
+    const DOCK_PROGRAMS = [{% for p in programs %}'{{ p }}',{% endfor %}];
+    // What: the ui container: restart only, no stop.
+    // Why: DoMe 06.11.: restart in its menu like proxy.
+    // From: Issue #1683 | PR #1985
+    const UI_SERVICE_NAME = '{{ ui_service }}';
+    async function programAction(container, program, action, button) {
+      button.disabled = true;
+      try {
+        const url = '{{ routes.service_action | safe }}'
+          .replace('{container}', container).replace('{program}', program).replace('{action}', action);
+        const response = await fetch(url, { method: 'POST', headers: { 'X-CSRF-Token': CSRF_TOKEN } });
+        if (!response.ok) { throw new Error(action + ' ' + program + ': HTTP ' + response.status); }
+      } catch (err) {
+        reportError(err);
+      }
+      button.disabled = false;
+    }
+
+    // What: render beambar service entries via DOM nodes
+    // Why: no HTML is built from server-supplied strings
+    // From: Issue #1437
+    (function () {
+      const container = document.getElementById('beambar-services');
+      let openMenu = '';
+      // What: one beambar entry: dot, name, dock button
+      // Why: built from DOM nodes, never from HTML strings
+      // From: Issue #1683 | PR #1912
+      function serviceEntry(svc) {
+        const wrap = document.createElement('span');
+        wrap.className = 'beam-station';
+        wrap.title = svc.health || '';
+        const dot = document.createElement('span');
+        window.LancacheWatchdog.paintDot(dot, svc.status);
+        wrap.appendChild(dot);
+        const nameNode = document.createTextNode(svc.name + ' ');
+        wrap.appendChild(nameNode);
+        // What: bold status word after the service name
+        // Why: the mockup shows name plus state
+        // From: Issue #1683 | PR #1858
+        const word = { green: LC_T.svc_st_green, yellow: LC_T.svc_st_yellow, amber: LC_T.svc_st_yellow, red: LC_T.svc_st_red, gray: LC_T.svc_st_gray };
+        const state = document.createElement('b');
+        // What: a user stop wins over the colour word.
+        // Why: the watchdog leaves user-stopped containers.
+        // From: Issue #1683 | PR #1980
+        state.textContent = svc.stopped_by_user ? LC_T.stopped_by_the_user : (word[svc.status] || svc.status || '');
+        // What: mode off wins over the colour word.
+        // Why: live test: Start offered with DHCP_MODE off.
+        // From: Issue #1683 | PR #1980
+        if (svc.mode_off) { state.textContent = LC_T.svc_mode_off; }
+        wrap.appendChild(state);
+        // What: health check output as a fold-out.
+        // Why: live test: "3 failures" gave no reason.
+        // From: Issue #1683 | PR #1980
+        if (svc.reason) {
+          const why = document.createElement('details');
+          why.className = 'beam-menu';
+          const ws = document.createElement('summary');
+          ws.className = 'theme-btn';
+          ws.textContent = LC_T.svc_reason;
+          why.appendChild(ws);
+          const wt = document.createElement('div');
+          wt.className = 'beam-menu-list';
+          wt.style.whiteSpace = 'pre-wrap';
+          wt.textContent = svc.reason;
+          why.appendChild(wt);
+          why.addEventListener('toggle', function () {
+            const r = ws.getBoundingClientRect();
+            wt.style.top = (r.bottom + 6) + 'px';
+            wt.style.left = Math.max(8, Math.min(r.left, window.innerWidth - wt.offsetWidth - 8)) + 'px';
+          });
+          wrap.appendChild(why);
+        }
+        let button = null;
+        if (!svc.mode_off && DOCK_CONTROLLABLE_SERVICES.includes(svc.name)) {
+          // What: Start for red or gray, otherwise Stopp
+          // Why: a user stop always offers Start
+          // From: Issue #1437 | PR #1980
+          const running = !svc.stopped_by_user && svc.status !== 'red' && svc.status !== 'gray';
+          button = document.createElement('button');
+          button.type = 'button';
+          button.className = 'theme-btn';
+          button.textContent = running ? LC_T.stop : 'Start';
+          button.addEventListener('click', function () {
+            setDockServiceState(svc.name, running ? 'stopped' : 'running', button);
+          });
+        }
+        if (svc.name === UI_SERVICE_NAME) {
+          button = document.createElement('button');
+          button.type = 'button';
+          button.className = 'theme-btn';
+          button.textContent = LC_T.prog_restart;
+          button.addEventListener('click', function () {
+            if (!confirm(LC_T.restart_ui_ask)) { return; }
+            button.disabled = true;
+            const body = new URLSearchParams({ csrf_token: CSRF_TOKEN });
+            fetch('{{ routes.restart_ui | safe }}', { method: 'POST', body: body })
+              .finally(function () { setTimeout(function () { location.reload(); }, 5000); });
+          });
+        }
+        // What: programs sit in a fold-out menu.
+        // Why: the bar stays short with many programs.
+        // From: Issue #1683 | PR #1980
+        const progs = DOCK_PROGRAMS.filter(function (p) { return p.split(':')[0] === svc.name; });
+        if (button && !(progs.length && !svc.mode_off)) {
+          button.style.marginLeft = '0.35rem';
+          button.style.padding = '0 0.4rem';
+          wrap.appendChild(button);
+        }
+        if (progs.length && !svc.mode_off) {
+          const menu = document.createElement('details');
+          menu.className = 'beam-menu beam-name';
+          menu.open = openMenu === svc.name;
+          // What: opening a menu closes the others.
+          // Why: DoMe 07.11.: menus must not overlap.
+          // From: Issue #1683 | PR #1991
+          menu.addEventListener('toggle', function () {
+            if (menu.open) {
+              document.querySelectorAll('details.beam-menu[open]').forEach(function (m) { if (m !== menu) { m.open = false; } });
+            }
+            if (menu.open) { openMenu = svc.name; } else if (openMenu === svc.name) { openMenu = ''; }
+          });
+          // What: the container name opens its programs.
+          // Why: DoMe 06.11.: no extra "Programme" button.
+          // From: Issue #1683
+          const sum = document.createElement('summary');
+          sum.textContent = svc.name + ' \u25BE ';
+          menu.appendChild(sum);
+          const list = document.createElement('div');
+          list.className = 'beam-menu-list';
+          // What: container Start/Stop is menu row one.
+          // Why: DoMe 06.11.: no Stop beside the menu.
+          // From: Issue #1683
+          if (button) {
+            const row = document.createElement('div');
+            row.className = 'beam-menu-row';
+            const name = document.createElement('span');
+            name.textContent = LC_T.svc_container;
+            row.appendChild(name);
+            row.appendChild(button);
+            list.appendChild(row);
+          }
+          progs.forEach(function (p) {
+            const program = p.split(':')[1];
+            const row = document.createElement('div');
+            row.className = 'beam-menu-row';
+            const name = document.createElement('span');
+            name.textContent = program;
+            row.appendChild(name);
+            const acts = [['reload', LC_T.prog_reload], ['restart', LC_T.prog_restart]];
+            acts.forEach(function (a) {
+              const b = document.createElement('button');
+              b.type = 'button';
+              b.className = 'theme-btn';
+              b.textContent = a[1];
+              b.addEventListener('click', function () { programAction(svc.name, program, a[0], b); });
+              row.appendChild(b);
+            });
+            list.appendChild(row);
+          });
+          menu.appendChild(list);
+          wrap.replaceChild(menu, nameNode);
+          // What: place the list under its button.
+          // Why: the bar hides overflow; fixed escapes it.
+          // From: Issue #1683 | PR #1980
+          const place = function () {
+            const r = sum.getBoundingClientRect();
+            list.style.top = (r.bottom + 6) + 'px';
+            list.style.left = Math.max(8, Math.min(r.left, window.innerWidth - list.offsetWidth - 8)) + 'px';
+          };
+          menu.addEventListener('toggle', function () { if (menu.open) { place(); } });
+          if (menu.open) { requestAnimationFrame(place); }
+        }
+        return wrap;
+      }
+      // What: wipe buttons empty the whole cache.
+      // Why: DoMe 07.11.: second click confirms the wipe.
+      // From: Issue #871 | PR #1991
+      document.querySelectorAll('[data-cache-wipe]').forEach(function (b) {
+        const st = b.parentNode.querySelector('[data-cache-wipe-state]');
+        const gib = function (n) { return (n / 1073741824).toFixed(1) + ' GiB'; };
+        b.addEventListener('click', function () {
+          if (!b.dataset.sure) { b.dataset.sure = '1'; b.textContent = LC_T.cache_wipe_sure; return; }
+          b.disabled = true; b.textContent = LC_T.loading;
+          fetch(b.dataset.cacheWipe, { method: 'POST', headers: { 'X-CSRF-Token': b.dataset.csrf } })
+            .then(function (r) { return r.ok ? r.json() : r.text().then(function (t) { throw new Error(t); }); })
+            .then(function (v) { st.textContent = LC_T.cache_freed.replace('{x}', gib(v.freed)); })
+            .catch(function (e) { window.LancacheUi.fail(e); })
+            .finally(function () { b.disabled = false; delete b.dataset.sure; b.textContent = LC_T.cache_wipe; });
+        });
+      });
+      // What: click outside or Escape closes service menus.
+      // Why: DoMe 07.11.: at most one menu, easy to close.
+      // From: Issue #1683 | PR #1991
+      const closeMenus = function (keep) {
+        document.querySelectorAll('details.beam-menu[open]').forEach(function (m) { if (m !== keep) { m.open = false; } });
+      };
+      document.addEventListener('click', function (e) { closeMenus(e.target.closest('details.beam-menu')); });
+      document.addEventListener('keydown', function (e) { if (e.key === 'Escape') { closeMenus(null); } });
+      // What: rebuilds the beambar from one status update
+      // Why: unavailable and stale states own their text
+      // From: Issue #1683 | PR #1912
+      function render(data) {
+        container.textContent = '';
+        if (data.state === 'unavailable') {
+          container.textContent = LC_T.watchdog_status_not_available;
+          return;
+        }
+        (data.services || []).forEach(function (svc) {
+          container.appendChild(serviceEntry(svc));
+        });
+        if (data.state === 'stale') {
+          const staleNote = document.createElement('span');
+          staleNote.textContent = LC_T.stale + data.age_seconds + 's)';
+          container.appendChild(staleNote);
+        }
+      }
+      window.LancacheWatchdog.onUpdate(render);
+    })();
+
+    // What: loads watchdog status now and per SOT interval
+    // Why: beambar and dashboard dots read the same data
+    // From: Issue #1683 | PR #1912
+    window.LancacheWatchdog.refresh();
+    setInterval(window.LancacheWatchdog.refresh, window.LancacheUi.ms({{ watchdog_refresh_seconds }}));
+
+    // What: each [data-epoch] value as de-DE date and time
+    // Why: one owner for every page; 0 or junk stays raw
+    // From: Issue #1683 | PR #1912
+    (function () {
+      const formatter = new Intl.DateTimeFormat('de-DE', {
+        dateStyle: 'medium',
+        timeStyle: 'medium',
+      });
+      document.querySelectorAll('[data-epoch]').forEach(function (el) {
+        const epoch = Number(el.dataset.epoch);
+        if (!Number.isFinite(epoch) || epoch <= 0) {
+          return;
+        }
+        el.textContent = formatter.format(new Date(window.LancacheUi.ms(epoch)));
+        el.title = 'Unix: ' + el.dataset.epoch;
+      });
+    })();
+  </script>
+
+  <!-- What: language choice: cookie, then reload
+       Why: the ui renders the page in that language
+       From: Issue #1683 | PR #1980 -->
+  <script>
+    (function () {
+      const choose = function (code) {
+        document.cookie = 'lc_lang=' + code + '; path=/; max-age=31536000; samesite=strict';
+        location.reload();
+      };
+      const pick = document.getElementById('lang-select');
+      if (pick) { pick.addEventListener('change', function () { choose(pick.value); }); }
+      document.querySelectorAll('[data-lang]').forEach(function (b) {
+        b.addEventListener('click', function () { choose(b.dataset.lang); });
+      });
+    })();
+  </script>
 
   {% block scripts %}{% endblock %}
 </body>

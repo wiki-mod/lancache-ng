@@ -1,5 +1,14 @@
 # Code of Conduct
 
+## Contents
+
+1. [Our standard](#our-standard)
+2. [Scope](#scope)
+3. [Reporting](#reporting)
+4. [Enforcement](#enforcement)
+5. [Project-specific safety note](#project-specific-safety-note)
+6. [Howto audit this file](#howto-audit-this-file)
+
 ## Our standard
 
 The lancache-ng project should be a practical and respectful place to improve
@@ -33,8 +42,9 @@ It also applies when someone represents the project in public spaces.
 
 ## Reporting
 
-If you see or experience unacceptable behavior, report it to the project
-maintainers.
+If you see or experience unacceptable behavior, report it to the maintainer
+listed in `MAINTAINERS.md`. The repository defines no dedicated conduct
+address; the maintainer is reachable through the GitHub profile in that file.
 
 When reporting, include the relevant links, screenshots or context if you can
 do so safely. Do not publish private information in a public issue.
@@ -59,3 +69,15 @@ lancache-ng is used on real networks. Do not pressure contributors or operators
 to publish private IP layouts, credentials, certificates, logs with secrets or
 other sensitive local configuration. When sensitive information is needed for
 debugging, prefer redacted examples or a private security report.
+
+## Howto audit this file
+
+The audit procedure of this file is `docs/policy/howto-audit-documentation.md`.
+
+### Special deviation
+
+| Field | Content |
+| --- | --- |
+| Step | 3 to 6 |
+| Reason | The file states conduct rules, not code facts |
+| Replacement | The reporting contact equals the maintainer in `MAINTAINERS.md`; every referenced file exists |
