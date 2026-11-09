@@ -1714,50 +1714,31 @@ ci_check_inputs:
   action-node-versions: ["@{ci_variables.CI_WORKFLOW_DIR}/**"]
   actionlint: ["@{ci_variables.CI_WORKFLOW_DIR}/**"]
   bats-and-chain: [".github/scripts/*.bats"]
-  cargo-profile-tuning: ["**/Cargo.toml"]
   changelog-direct-edit: ["@{ci_variables.CI_CHANGELOG}"]
-  ci-bats: [".github/scripts/*.bats"]
+  ci-bats:
+    - ".github/scripts/*.bats"
+    - "deploy/**"
+    - "@{ci_variables.CI_README}"
+    - "@{ci_variables.CI_INSTALLER}"
+    - "@{services.ui.context}/src/main.rs"
   codeql-coverage: ["**/*.rs", "**/Cargo.toml"]
   comments: ["**"]
-  compose-config: ["deploy/**"]
-  compose-healthchecks: ["deploy/**"]
   deny-short-sha:
     - "@shell"
     - "**/Dockerfile"
     - "@{ci_variables.CI_WORKFLOW_DIR}/*.yml"
     - "**/*.rs"
-  dockerfiles: ["**/Dockerfile"]
   executable-bits: []
   exit-evidence: []
   governance-guards: ["**"]
-  image-channel-resolution:
-    - "deploy/**"
-    - "@{services.ui.context}/src/main.rs"
   language-policy: ["**"]
   line-endings: ["**"]
-  logging-matrix: ["deploy/**", "@{ci_variables.CI_ARCH_DOC}"]
   mutable-refs:
     - "@{ci_variables.CI_WORKFLOW_DIR}/*.yml"
     - "**/Dockerfile"
-  naming-consistency: ["deploy/**"]
-  prebuilt-prod:
-    - "deploy/**"
-    - "@{ci_variables.CI_README}"
-    - "@{ci_variables.CI_INSTALLER}"
-  prod-state-wiring:
-    - "deploy/**"
-    - "@{ci_variables.CI_BACKUP_RESTORE_DOC}"
-  proxy-cache-env-doc-drift:
-    - "deploy/**"
-    - "@{ci_variables.CI_ARCH_DOC}"
-    - "@{ci_variables.CI_INSTALLER}"
-  setup-update-safety: ["@{ci_variables.CI_INSTALLER}"]
   shell-guards: ["@shell", "**/Dockerfile"]
   shellcheck: ["@shell"]
   sot-identity-inputs: []
-  sot-external-images: ["deploy/**"]
-  version-drift: ["**/Cargo.toml"]
-  vex-drift: ["@{ci_variables.CI_TRIVY_IGNORE}"]
   workflow-ci-variables: ["@{ci_variables.CI_WORKFLOW_DIR}/**"]
   workflow-job-settings: ["@{ci_variables.CI_WORKFLOW_DIR}/**"]
   workflow-line-limit: ["@{ci_variables.CI_WORKFLOW_DIR}/**"]
