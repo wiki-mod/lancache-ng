@@ -123,8 +123,10 @@ the [Keep a Changelog](https://keepachangelog.com/) format.
 
 Updating it is automatic and requires no manual collection step:
 
-1. Every push to `master` runs `ci.sh release-draft` (`ci.yml`, job
-   `release-draft`). It keeps one draft GitHub Release in the release-drafter
+1. Every push to `current_dev` or `master` runs `ci.sh release-draft`
+   (`ci.yml`, job `release-draft`; SOT `release_notes.draft_refs`). The last
+   push wins and sets the draft's target branch. It keeps one draft GitHub
+   Release in the release-drafter
    layout: `## Changes`, PRs without a matching label first, then one
    `## <icon> <title>` group per label group, each PR as `- #NUMBER | TITLE`,
    merged since the last published release. The draft is named after the
