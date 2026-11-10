@@ -708,21 +708,23 @@ secondary_suggest_alternate_listen_ip() {
     return 1
 }
 
-# What: port-53 holders shown; prompt for alternate IP
-# Why: fails closed without a terminal, no endless loop
+# What: port 53 on the IP in variable $1; else ask again
+# Why: a nameref: in $(...) the prompt lost its terminal
 # From: Issue #1683 | PR #1858
 secondary_choose_listen_ip() {
-    local listen_ip="$1" conflicts suggestion dns_port
+    local -n _bind_ref="$1"
+    local keep="${2:-}" conflicts suggestion dns_port
 
     dns_port=$(prod_env_default DNS_PORT) || exit $?
     while true; do
-        conflicts="$(secondary_listen_ip_conflicts "$listen_ip")" || exit $?
-        if [[ -z "$conflicts" ]]; then
-            printf '%s\n' "$listen_ip"
-            return 0
-        fi
+        # What: --rotate keeps its own bind IP unchecked
+        # Why: the running secondary holds that port itself
+        # From: Issue #1683
+        [[ -n "$keep" && "$_bind_ref" = "$keep" ]] && return 0
+        conflicts="$(secondary_listen_ip_conflicts "$_bind_ref")" || exit $?
+        [[ -z "$conflicts" ]] && return 0
 
-        print_warn "Port ${dns_port} is already in use for bind IP ${listen_ip}."
+        print_warn "Port ${dns_port} is already in use for bind IP ${_bind_ref}."
         {
             printf '%s\n' "$conflicts" | sed 's/^/    /'
             # What: port-53 holder details, raw output
@@ -740,9 +742,9 @@ secondary_choose_listen_ip() {
             return 1
         fi
 
-        suggestion=$(secondary_suggest_alternate_listen_ip "$listen_ip") \
+        suggestion=$(secondary_suggest_alternate_listen_ip "$_bind_ref") \
             || (( $? == 1 )) || exit 2
-        ask_checked listen_ip "Use another Secondary bind IP" "${suggestion:-$listen_ip}" is_valid_ipv4 "Invalid IPv4 address"
+        ask_checked "$1" "Use another Secondary bind IP" "${suggestion:-$_bind_ref}" is_valid_ipv4 "Invalid IPv4 address"
     done
 }
 
@@ -8442,7 +8444,15 @@ cmd_secondary() {
             || die "Could not auto-detect a secondary bind IP. Re-run with --listen-ip <ip>."
     fi
     dns_port=$(prod_env_default DNS_PORT) || exit $?
-    listen_ip=$(secondary_choose_listen_ip "$listen_ip") \
+    # What: --rotate keeps its stored bind IPs unchecked
+    # Why: its own running container holds them
+    # From: Issue #1683
+    local keep_listen="" keep_listen_https=""
+    if [[ "$rotate" -eq 1 ]]; then
+        keep_listen="$stored_listen"
+        keep_listen_https="$stored_listen_https"
+    fi
+    secondary_choose_listen_ip listen_ip "$keep_listen" \
         || die "No usable secondary bind IP on port ${dns_port} (exit $?; see above). Re-run with --listen-ip <ip> after freeing the port."
     print_ok "Secondary DNS bind IP: ${listen_ip}"
     if [[ -n "$ip_https" || -n "$listen_ip_https" ]]; then
@@ -8452,7 +8462,7 @@ cmd_secondary() {
             || die "--ip-https must be a valid IPv4 address"
         is_valid_ipv4 "$listen_ip_https" \
             || die "--listen-ip-https must be a valid IPv4 address"
-        listen_ip_https=$(secondary_choose_listen_ip "$listen_ip_https") \
+        secondary_choose_listen_ip listen_ip_https "$keep_listen_https" \
             || die "No usable secondary https bind IP on port ${dns_port} (exit $?; see above). Re-run with --listen-ip-https <ip> after freeing the port."
         [[ "$listen_ip_https" != "$listen_ip" ]] \
             || die "the https bind IP must differ from the http bind IP ${listen_ip}"
@@ -8472,7 +8482,7 @@ cmd_secondary() {
             ask_checked listen_ip_https "Second DNS IP of this secondary (HTTPS clients)" "$https_listen_default" is_valid_ipv4 "Invalid IPv4 address"
             [[ "$listen_ip_https" != "$listen_ip" ]] \
                 || die "the https bind IP must differ from the http bind IP ${listen_ip}"
-            listen_ip_https=$(secondary_choose_listen_ip "$listen_ip_https") \
+            secondary_choose_listen_ip listen_ip_https "$keep_listen_https" \
                 || die "No usable secondary https bind IP on port ${dns_port} (exit $?; see above). Re-run with --listen-ip-https <ip> after freeing the port."
             print_ok "Secondary https DNS bind IP: ${listen_ip_https}"
         fi
