@@ -657,24 +657,24 @@ bash <(curl -fsSL https://raw.githubusercontent.com/wiki-mod/lancache-ng/master/
 ```
 
 The registration token is generated during primary setup and stored in `.env`.
-`--ip-http` (the cache IP: the primary's proxy IP the secondary hands out for
-download names) is optional: the wizard asks it after registration with the
-primary's answer as default; without a terminal that answer is used. Without
-arguments, `setup.sh secondary` asks each value in the terminal and checks it
-at once. A bind IP that is not yet on the host is
-offered for `ip addr add`, as on the primary (not persistent).
 
-Run it as root. Like the primary install, it first installs missing
-requirements (curl, jq, Docker, Docker Compose v2; the same set as the primary).
-Before the first question, the wizard checks the secondary name and
-whether this host already runs a lancache dns container. A secondary needs its
-own host: if the primary (or another secondary) runs here, setup stops before
-it changes anything.
+Run it as root. The order is: check, ask, then act.
 
-Optional https side: when the primary runs https, the wizard asks whether this
-secondary runs the https DNS too. As arguments: `--ip-https <primary https proxy ip>
---listen-ip-https <second bind ip>`; both flags are required together. The
-secondary's one dns container then also answers on the second bind IP.
+1. Check: install missing requirements (curl, jq, Docker, Docker Compose v2;
+   the same set as the primary), check the name, and check whether this host
+   already runs a lancache dns container. A secondary needs its own host: if
+   the primary (or another secondary) runs here, setup stops before it changes
+   anything.
+2. Ask: name, primary URL, token, the DNS IP of this secondary, and whether it
+   answers HTTPS clients too (then a second DNS IP). Each answer is checked at
+   once.
+3. Act: add a missing bind IP (`ip addr add`, default yes, not persistent),
+   register at the primary, write the files and start the container.
+
+The cache IP (`IP_HTTP`) and the HTTPS proxy IP come from the primary; they are
+not asked. `--ip-http` overrides the cache IP. As arguments, the https side is
+`--ip-https <primary https proxy ip> --listen-ip-https <second bind ip>`; both
+flags are required together.
 
 You can also view a ready command inside the Admin UI under the secondary DNS section.
 
