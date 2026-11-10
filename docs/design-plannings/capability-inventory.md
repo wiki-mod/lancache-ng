@@ -231,8 +231,9 @@ JSON commands that the Admin UI executes in that container (`hamster`).
 
 ## setup.sh
 
-Commands of the dispatcher: `install`, `install-requirements-primary`,
-`install-requirements-secondary`, `update`, `auto-update`, `update-ip`,
+Commands of the dispatcher: `install`, `install-requirements` (aliases
+`install-requirements-primary`, `install-requirements-secondary`; `install`
+and `secondary` run it on their own), `update`, `auto-update`, `update-ip`,
 `configure-upstream-dns`, `create-logs-for-issue`, `secondary`, `backup`,
 `restore`, `reset-to-last-known-good-config` and `reset-sign-in`. Internal
 commands, not in the usage text: `compose`, `converge-reconcile` and
