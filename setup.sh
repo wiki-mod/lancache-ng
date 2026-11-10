@@ -8305,7 +8305,7 @@ cmd_secondary() {
     local explicit_lancache_image_tag keep_known_good_configs
     local preflight_dir preflight_env_file preflight_registry preflight_prefix preflight_channel preflight_env_tag
     local preflight_tag preflight_verified_registry="" preflight_verified_prefix="" preflight_verified_tag=""
-    local secondary_env_file compose_out bad_response secondary_compose
+    local secondary_env_file bad_response secondary_compose
     local channel_words pinned release dns_port
 
     while [[ $# -gt 0 ]]; do
@@ -8360,16 +8360,12 @@ cmd_secondary() {
         esac
     done
 
-    # What: tools first, as the primary checks prerequisites
-    # Why: check, then ask, then act; no answer is wasted
+    # What: requirements installed first, as on the primary
+    # Why: a missing tool stopped the wizard; same set as primary
     # From: Issue #1683
-    for cmd in curl docker jq; do
-        command_available "$cmd" \
-            || die "$cmd is not installed or is not in PATH; run: sudo $0 install-requirements-secondary"
-    done
-
-    compose_out=$(docker compose version 2>&1) \
-        || die "'docker compose' is not available; install Docker Compose v2 before continuing (exit $?): $compose_out"
+    [[ "$(id -u)" = "0" ]] \
+        || die "This script must be run as root (sudo ./setup.sh secondary)."
+    ensure_stack_requirements_installed
 
     # What: the name first; inside a secondary it is the dir
     # Why: the name selects the stored .env of --rotate
