@@ -1436,7 +1436,7 @@ ensure_docker_userland_proxy() {
 ensure_stack_requirements_installed() {
     local info out
     [[ "$(id -u)" = "0" ]] \
-        || die "This command must be run as root (sudo ./setup.sh install-requirements-primary or install-requirements-secondary)."
+        || die "This command must be run as root (sudo ./setup.sh install-requirements)."
     # What: refuses an unsupported arch before any install
     # Why: no host change on a host the stack cannot run on
     # From: Issue #1683 | PR #1858
@@ -1492,15 +1492,11 @@ ensure_stack_requirements_installed() {
 }
 
 # What: installs curl, jq, Docker, Compose; prints next step
-# Why: a host gets its requirements before any install
-# From: Issue #1068
-cmd_install_requirements_primary() {
+# Why: one set for both; old names stay as aliases
+# From: Issue #1068 | Issue #1683
+cmd_install_requirements() {
     ensure_stack_requirements_installed
-    print_ok "Primary node requirements installed (curl, jq, Docker, Docker Compose v2). Run ./setup.sh install next."
-}
-cmd_install_requirements_secondary() {
-    ensure_stack_requirements_installed
-    print_ok "Secondary node requirements installed (curl, jq, Docker, Docker Compose v2). Next: ./setup.sh secondary --help shows the registration command."
+    print_ok "Requirements installed (curl, jq, Docker, Docker Compose v2). Next: ./setup.sh install (primary) or ./setup.sh secondary."
 }
 
 # What: strips quotes and unquoted inline comments
@@ -5437,13 +5433,12 @@ Commands:
   install              Run the guided first-time setup. Without a command,
                        setup.sh only prints this help; curl | bash passes
                        the command as: bash -s -- install
-  install-requirements-primary
-                       Install only the Docker prerequisites (curl, Docker
-                       engine, Docker Compose v2) for a primary node, without
-                       running the rest of the interactive installer.
-  install-requirements-secondary
-                       Install only the Docker prerequisites for a secondary
-                       DNS node, without running ./setup.sh secondary.
+  install-requirements
+                       Install only the prerequisites (curl, jq, Docker
+                       engine, Docker Compose v2), the same for primary and
+                       secondary. install and secondary run it on their own.
+                       Aliases: install-requirements-primary,
+                       install-requirements-secondary.
   list-prompts [answers-file]
                        Introspection mode: reports the exact ordered prompt
                        sequence the install wizard would ask for a given set
@@ -5509,27 +5504,17 @@ for validating a pre-release branch the same documented one-liner way that
 LANCACHE_IMAGE_CHANNEL already selects a specific image channel.
 EOF
             ;;
-        install-requirements-primary)
+        install-requirements|install-requirements-primary|install-requirements-secondary)
             cat <<EOF
-Usage: ./setup.sh install-requirements-primary
+Usage: ./setup.sh install-requirements
 
-Installs only the Docker prerequisites (curl, Docker engine, a running Docker
-daemon, and the Docker Compose v2 plugin) for a primary node, then stops --
-does not run the rest of the interactive installer. Useful for provisioning a
-host's requirements ahead of time, or standalone, separately from the guided
-setup. Must be run as root. Follow with ./setup.sh install.
-EOF
-            ;;
-        install-requirements-secondary)
-            cat <<EOF
-Usage: ./setup.sh install-requirements-secondary
+Installs only the prerequisites (curl, jq, Docker engine, a running Docker
+daemon, and the Docker Compose v2 plugin), then stops. Primary and secondary
+need the same set. ./setup.sh install and ./setup.sh secondary run this step
+on their own, so it is only needed to prepare a host ahead of time.
+Must be run as root.
 
-Installs only the Docker prerequisites (curl, Docker engine, a running Docker
-daemon, and the Docker Compose v2 plugin) for a secondary DNS node, then
-stops. ./setup.sh secondary itself only checks for these tools and fails with
-"docker is not installed" if they are missing -- this command lets an
-operator install exactly what a secondary needs, standalone, before running
-./setup.sh secondary. Must be run as root.
+Aliases: install-requirements-primary, install-requirements-secondary.
 EOF
             ;;
         list-prompts)
@@ -8906,10 +8891,8 @@ case "$setup_command" in
             WIZARD_INTROSPECT_ANSWERS_FD=9
         fi
         ;;
-    install-requirements-primary)
-        cmd_install_requirements_primary; exit 0 ;;
-    install-requirements-secondary)
-        cmd_install_requirements_secondary; exit 0 ;;
+    install-requirements|install-requirements-primary|install-requirements-secondary)
+        cmd_install_requirements; exit 0 ;;
     update)
         cmd_update "${2:-$DEFAULT_INSTALL_DIR}"; exit 0 ;;
     auto-update)
