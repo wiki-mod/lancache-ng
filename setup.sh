@@ -8377,7 +8377,7 @@ cmd_secondary() {
     # From: Issue #1683 | PR #1980
     if [[ "$tty" = 1 ]]; then
         local listen_default="$stored_listen"
-        [[ -n "$primary_arg" ]] || ask_checked primary "Primary Admin-UI URL (for example http://192.168.1.100:8080)" "$stored_primary" is_http_url "Not an http(s) URL"
+        [[ -n "$primary_arg" ]] || ask_checked primary "Primary Admin-UI URL (http://<primary-ip>:<ui-port>)" "$stored_primary" is_http_url "Not an http(s) URL"
         [[ -n "$token" ]] || ask_checked token "Registration token (Admin-UI: DNS, Secondary DNS)" "" is_nonempty_value "The token is required"
         if [[ -z "$listen_ip" ]]; then
             if [[ -z "$listen_default" ]]; then
@@ -8404,7 +8404,7 @@ cmd_secondary() {
     is_secondary_name "$name" \
         || die "--name must contain only alphanumeric characters and dashes"
     is_http_url "$primary" \
-        || die "--primary must be an http(s) URL, for example http://192.168.1.100:8080"
+        || die "--primary must be an http(s) URL: http://<primary-ip>:<ui-port>"
     # What: --ip-http is optional; asked after registration
     # Why: the primary's answer is then the default
     # From: Issue #1683
