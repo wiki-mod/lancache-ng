@@ -6298,12 +6298,12 @@ set_active_channel_dir() {
     ln -sfn "${dir##*/}" "$link" || die "Failed to point $link at $dir (exit $?)."
 }
 
-# What: install runs from the chosen channel's dir
-# Why: compose files and images from one ref at once
+# What: clones or syncs the channel's code; sets current
+# Why: install and secondary share one checkout step
 # From: Issue #1683 | PR #1858
-install_repo_follow_channel() {
-    local channel="$1" target dir link branch branches old="" new exec_rc
-    shift
+channel_code_checkout() {
+    local channel="$1" target dir branch branches
+    CHANNEL_CODE_DIR="" CHANNEL_CODE_OLD="" CHANNEL_CODE_IN_PLACE=0
     # What: a named non-channel branch installs in place
     # Why: the operator chose that revision (AG-OP-009)
     # From: Issue #1683 | PR #1858
@@ -6315,15 +6315,15 @@ install_repo_follow_channel() {
             printf "  Compose files and this setup.sh come from that branch.\n"
             printf "  Updates will not move the checkout; switch it to master\n"
             printf "  (latest) or current_dev (nightly) to follow a channel.\n"
+            CHANNEL_CODE_DIR="$SCRIPT_DIR" CHANNEL_CODE_IN_PLACE=1
             return 0
         fi
     fi
     dir=$(channel_code_dir "$channel") || exit $?
-    link=$(channel_active_link) || exit $?
     target="${LANCACHE_SETUP_GIT_REF:-}"
     [[ -n "$target" ]] || target=$(lancache_channel_code_ref "$channel" "${LANCACHE_IMAGE_TAG:-}") || exit $?
     [[ -n "$target" ]] || die "Channel $channel needs LANCACHE_IMAGE_TAG to name its code."
-    [[ ! -e "$dir/.git" ]] || old=$(git -C "$dir" rev-parse HEAD) || die "Failed to read HEAD of $dir (exit $?)."
+    [[ ! -e "$dir/.git" ]] || CHANNEL_CODE_OLD=$(git -C "$dir" rev-parse HEAD) || die "Failed to read HEAD of $dir (exit $?)."
     print_step "Code of channel $channel in $dir ($target)"
     if [[ -n "${LANCACHE_SETUP_GIT_REF:-}" && -e "$dir/.git" ]]; then
         sync_repo_to_ref "$dir" "$target"
@@ -6334,6 +6334,19 @@ install_repo_follow_channel() {
         ensure_channel_checkout "$dir" "$target"
     fi
     set_active_channel_dir "$dir"
+    CHANNEL_CODE_DIR="$dir"
+}
+
+# What: install runs from the chosen channel's dir
+# Why: compose files and images from one ref at once
+# From: Issue #1683 | PR #1858
+install_repo_follow_channel() {
+    local channel="$1" dir link old new exec_rc
+    shift
+    channel_code_checkout "$channel"
+    [[ "$CHANNEL_CODE_IN_PLACE" = 0 ]] || return 0
+    dir="$CHANNEL_CODE_DIR" old="$CHANNEL_CODE_OLD"
+    link=$(channel_active_link) || exit $?
     new=$(git -C "$dir" rev-parse HEAD) || die "Failed to read HEAD of $dir (exit $?)."
     # What: running from current at its HEAD goes on here
     # Why: units then name current, the link, not a dir
@@ -8211,22 +8224,6 @@ lancache_repo_file_text() {
     curl -fsSL "$raw" || die "Failed to download ${path} from $raw (exit $?)."
 }
 
-# What: no checkout: files from LANCACHE_IMAGE_CHANNEL's ref
-# Why: AG-REL-009; curl|bash read HEAD (master) for nightly
-# From: Issue #1683 | PR #1984
-secondary_pin_channel_ref() {
-    local channel="${LANCACHE_IMAGE_CHANNEL:-}" ref
-    if [[ -n "${LANCACHE_SETUP_GIT_REF:-}" || -z "$channel" || -f "$SCRIPT_DIR/$LANCACHE_SOT" ]]; then
-        return 0
-    fi
-    validate_lancache_image_channel "$channel"
-    ref=$(lancache_channel_code_ref "$channel" "${LANCACHE_IMAGE_TAG:-}") || exit $?
-    [[ -n "$ref" ]] || die "LANCACHE_IMAGE_CHANNEL=${channel} needs LANCACHE_IMAGE_TAG (vX.Y.Z or sha-<commit>)."
-    LANCACHE_SETUP_GIT_REF="$ref"
-    LANCACHE_SOT_TEXT=$(lancache_repo_file_text "$LANCACHE_SOT") || exit $?
-    print_ok "Repository files from ${ref} (channel ${channel})"
-}
-
 # What: dies naming each NAME=VALUE pair with empty value
 # Why: arguments and response fields share the check
 # From: Issue #1683 | PR #1858
@@ -8357,7 +8354,7 @@ cmd_secondary() {
     # What: the name first; inside a secondary it is the dir
     # Why: the name selects the stored .env of --rotate
     # From: Issue #1683
-    local tty=0 stored_env="" stored_listen="" stored_listen_https="" loopback
+    local tty=0 stored_env="" stored_listen="" stored_listen_https="" stored_ip_https="" stored_channel="" loopback
     local primary_arg="$primary" stored_primary=""
     [[ -t 0 ]] && tty=1
     if [[ "$tty" = 1 && -z "$name" ]]; then
@@ -8387,6 +8384,10 @@ cmd_secondary() {
         fi
     fi
     assert_secondary_container_free "$secondary_dir"
+    # What: git for the channel clone, as on the primary
+    # Why: the secondary runs from its channel's checkout
+    # From: Issue #1683
+    command_available git || install_git
     # What: an existing secondary's .env answers the wizard
     # Why: --rotate asks again only for the token
     # From: Issue #1683
@@ -8402,9 +8403,22 @@ cmd_secondary() {
             || die "Cannot read LISTEN_IP from $stored_env (exit $?)."
         stored_listen_https=$(get_env_var LISTEN_IP_HTTPS "$stored_env") \
             || die "Cannot read LISTEN_IP_HTTPS from $stored_env (exit $?)."
+        stored_ip_https=$(get_env_var IP_HTTPS "$stored_env") \
+            || die "Cannot read IP_HTTPS from $stored_env (exit $?)."
+        stored_channel=$(get_env_var LANCACHE_IMAGE_CHANNEL "$stored_env") \
+            || die "Cannot read LANCACHE_IMAGE_CHANNEL from $stored_env (exit $?)."
         loopback=$(prod_env_default LOOPBACK_BIND_IP) || exit $?
         [[ "$stored_listen_https" != "$loopback" ]] || stored_listen_https=""
     fi
+    # What: the release channel and the other channel
+    # Why: the channel question is yes/no on the release one
+    # From: Issue #1683
+    local release_channel other_channel channel_list
+    release_channel=$(lancache_release_rows release) || exit $?
+    channel_list=$(lancache_release_rows channel) || exit $?
+    other_channel=$(awk -v r="$release_channel" '$0 != r { print; exit }' <<< "$channel_list") \
+        || die "Failed to read the channels of the SOT (exit $?)."
+    [[ -n "$other_channel" ]] || die "The SOT names no channel besides ${release_channel}."
     # What: ask each missing value; check it at once
     # Why: an empty or bad answer is asked again, not later
     # From: Issue #1683 | PR #1980
@@ -8412,6 +8426,18 @@ cmd_secondary() {
         local listen_default="$stored_listen"
         [[ -n "$primary_arg" ]] || ask_checked primary "Primary Admin-UI URL (http://<primary-ip>:<ui-port>)" "$stored_primary" is_http_url "Not an http(s) URL"
         [[ -n "$token" ]] || ask_checked token "Registration token (Admin-UI: DNS, Secondary DNS)" "" is_nonempty_value "The token is required"
+        # What: the primary's channel as a yes/no question
+        # Why: the secondary clones and runs that channel
+        # From: Issue #1683
+        if [[ -z "${LANCACHE_IMAGE_CHANNEL:-}" ]]; then
+            local channel_yn="Y"
+            [[ -z "$stored_channel" || "$stored_channel" = "$release_channel" ]] || channel_yn="N"
+            if confirm "Runs the primary on the ${release_channel} channel? $(yn_hint "$channel_yn")" "$channel_yn"; then
+                LANCACHE_IMAGE_CHANNEL="$release_channel"
+            else
+                LANCACHE_IMAGE_CHANNEL="$other_channel"
+            fi
+        fi
         if [[ -z "$listen_ip" ]]; then
             if [[ -z "$listen_default" ]]; then
                 listen_default=$(detect_lan_ip) \
@@ -8423,6 +8449,11 @@ cmd_secondary() {
     elif [[ -z "$primary" ]]; then
         primary="$stored_primary"
     fi
+    # What: no terminal: env, stored, else release channel
+    # Why: the clone needs one channel before any change
+    # From: Issue #1683
+    [[ -n "${LANCACHE_IMAGE_CHANNEL:-}" ]] || LANCACHE_IMAGE_CHANNEL="${stored_channel:-$release_channel}"
+    validate_lancache_image_channel "$LANCACHE_IMAGE_CHANNEL"
     die_if_any_empty "Required argument(s) missing (see ./setup.sh secondary --help)" \
         "--primary=$primary" "--token=$token"
 
@@ -8471,11 +8502,11 @@ cmd_secondary() {
         # What: https asked with the other questions
         # Why: no change before all answers are known
         # From: Issue #1683
-        local https_default="N" https_listen_default
-        [[ -z "$stored_listen_https" ]] || https_default="Y"
-        printf '\n  %sHTTPS mode%s: if the primary runs HTTPS mode, this secondary can\n' "${BOLD}" "${RESET}"
-        printf '  answer HTTPS clients on a second DNS IP.\n\n'
-        if confirm "Answer HTTPS clients on this secondary too? [y/n]" "$https_default"; then
+        local https_default="Y" https_listen_default
+        [[ -z "$stored_env" || -n "$stored_listen_https" ]] || https_default="N"
+        if confirm "Has the primary HTTPS enabled? $(yn_hint "$https_default")" "$https_default" \
+            && confirm "Enable HTTPS secondary support? $(yn_hint "$https_default")" "$https_default"; then
+            ask_checked ip_https "HTTPS IP of the primary" "$stored_ip_https" is_valid_ipv4 "Invalid IPv4 address"
             https_listen_default="${stored_listen_https:-${listen_ip%.*}.$((10#${listen_ip##*.} + 1))}"
             printf '\n  %sSecond DNS IP of this secondary%s: HTTPS clients enter it as their DNS server;\n' "${BOLD}" "${RESET}"
             printf '  it must differ from %s.\n\n' "$listen_ip"
@@ -8487,10 +8518,27 @@ cmd_secondary() {
             print_ok "Secondary https DNS bind IP: ${listen_ip_https}"
         fi
     fi
+    # What: missing bind IPs are added after all answers
+    # Why: no change before all answers; asks as the primary
+    # From: Issue #1683
+    local host_ref=""
+    if [[ "$tty" = 1 ]]; then
+        host_ref=$(detect_lan_ip) || print_warn "No LAN IP detected (exit $?); cannot offer to add a bind IP."
+        if [[ -n "$host_ref" ]]; then
+            ensure_host_ipv4 "$listen_ip" "$host_ref"
+            [[ -z "$listen_ip_https" ]] || ensure_host_ipv4 "$listen_ip_https" "$host_ref"
+        fi
+    fi
+    # What: the channel's code is cloned, as on the primary
+    # Why: compose, SOT and the promote lock from one checkout
+    # From: Issue #1683
+    channel_code_checkout "$LANCACHE_IMAGE_CHANNEL"
+    SCRIPT_DIR="$CHANNEL_CODE_DIR"
+    LANCACHE_SOT_TEXT=$(lancache_repo_file_text "$LANCACHE_SOT") || exit $?
+    PROD_COMPOSE="$SCRIPT_DIR/$(lancache_sot_value compose_file runtime)" || exit $?
     assert_prebuilt_image_platform_supported
-    secondary_pin_channel_ref
-    # What: the compose file is fetched before registration
-    # Why: a fetch failure must not follow a registration
+    # What: the compose file is read before registration
+    # Why: a read failure must not follow a registration
     # From: Issue #1683 | PR #1858
     secondary_compose=$(lancache_repo_file_text deploy/secondary/docker-compose.yml) || exit $?
     # What: the runtime files of the same ref as the compose
@@ -8547,18 +8595,6 @@ cmd_secondary() {
                     preflight_verified_tag="$preflight_tag"
                 fi
             fi
-        fi
-    fi
-
-    # What: missing bind IPs are added after all answers
-    # Why: no change before all answers; asks as the primary
-    # From: Issue #1683
-    local host_ref=""
-    if [[ "$tty" = 1 ]]; then
-        host_ref=$(detect_lan_ip) || print_warn "No LAN IP detected (exit $?); cannot offer to add a bind IP."
-        if [[ -n "$host_ref" ]]; then
-            ensure_host_ipv4 "$listen_ip" "$host_ref"
-            [[ -z "$listen_ip_https" ]] || ensure_host_ipv4 "$listen_ip_https" "$host_ref"
         fi
     fi
 
@@ -8632,16 +8668,6 @@ cmd_secondary() {
         fi
     else
         print_warn "Cannot list this host's IPv4 addresses (exit $?)."
-    fi
-    # What: the https proxy IP comes from the primary
-    # Why: the user only answers yes/no and the second IP
-    # From: Issue #1683
-    if [[ -n "$listen_ip_https" && -z "$ip_https" ]]; then
-        ip_https=$(json_value '.primary_https' "$response") || die "$bad_response"
-        if [[ -z "$ip_https" ]]; then
-            print_warn "The primary runs no HTTPS mode; this secondary answers HTTP clients only."
-            listen_ip_https=""
-        fi
     fi
     validate_env_value PRIMARY_URL "$primary"
 
