@@ -2919,7 +2919,56 @@ async fn ensure_primary_zones(s: &Settings) -> Result<(), String> {
         api.set_metadata(&id, "TSIG-ALLOW-DNSUPDATE", &signed)
             .await?;
     }
+    ensure_soa_nameserver(s, &api).await
+}
+
+// What: NS and A record for the SOA's nameserver.
+// Why: the SOA named ns1, but no record held that name.
+// From: Issue #1683
+async fn ensure_soa_nameserver(s: &Settings, api: &lancache_ng::pdns::Api) -> Result<(), String> {
+    let soa = s.text("PDNS_DEFAULT_SOA")?;
+    let mname = lancache_ng::dns::canonical_zone(soa.split_whitespace().next().unwrap_or_default());
+    let lan = lancache_ng::dns::canonical_zone(&s.text("DHCP_DOMAIN")?);
+    let ttl = u32::try_from(s.uint("DNS_RECORD_TTL")?).map_err(|e| e.to_string())?;
+    for zone in lancache_ng::dns::managed_zones(s)? {
+        ensure_rrset(api, &zone, &zone, "NS", ttl, std::slice::from_ref(&mname)).await?;
+    }
+    // What: the A record only when ns1 is in the LAN zone.
+    // Why: a foreign name has no home in a managed zone.
+    // From: Issue #1683
+    if mname.ends_with(&format!(".{lan}")) {
+        ensure_rrset(api, &lan, &mname, "A", ttl, &[s.text("IP_HTTP")?]).await?;
+    }
     Ok(())
+}
+
+// What: writes one rrset only when it differs.
+// Why: an equal PATCH would still raise the serial.
+// From: Issue #1683
+async fn ensure_rrset(
+    api: &lancache_ng::pdns::Api,
+    zone: &str,
+    name: &str,
+    kind: &str,
+    ttl: u32,
+    want: &[String],
+) -> Result<(), String> {
+    let id = lancache_ng::pdns::zone_id(name);
+    let same = api.rrsets(zone).await?.iter().any(|r| {
+        let have: Vec<&str> = r["records"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|c| c["content"].as_str()).collect())
+            .unwrap_or_default();
+        r["name"] == id.as_str()
+            && r["type"] == kind
+            && r["ttl"] == ttl
+            && have.len() == want.len()
+            && want.iter().all(|w| have.contains(&w.as_str()))
+    });
+    if same {
+        return Ok(());
+    }
+    api.set_rrset(zone, name, kind, ttl, want).await
 }
 
 // What: zones, then TSIG; one report line on error.
