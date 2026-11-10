@@ -8384,7 +8384,8 @@ cmd_secondary() {
                 listen_default=$(detect_lan_ip) \
                     || print_warn "No LAN IP detected (exit $?); enter the DNS IP of this secondary."
             fi
-            ask_checked listen_ip "DNS IP of this secondary (clients use it as DNS server)" "$listen_default" is_valid_ipv4 "Invalid IPv4 address"
+            printf '\n  %sDNS IP of this secondary%s: clients enter it as their DNS server.\n\n' "${BOLD}" "${RESET}"
+            ask_checked listen_ip "DNS IP of this secondary" "$listen_default" is_valid_ipv4 "Invalid IPv4 address"
         fi
     elif [[ -z "$primary" ]]; then
         primary="$stored_primary"
@@ -8404,20 +8405,13 @@ cmd_secondary() {
         || die "--name must contain only alphanumeric characters and dashes"
     is_http_url "$primary" \
         || die "--primary must be an http(s) URL, for example http://192.168.1.100:8080"
-    # What: --ip-http is optional; the primary sends its IP
-    # Why: live pve04: the secondary's own IP was typed here
+    # What: --ip-http is optional; asked after registration
+    # Why: the primary's answer is then the default
     # From: Issue #1683
     local host_addrs=""
     if [[ -n "$ip_http" ]]; then
         is_valid_ipv4 "$ip_http" \
             || die "--ip-http must be a valid IPv4 address"
-        if host_addrs=$(host_ipv4_addresses); then
-            if awk -v ip="$ip_http" '$1 == ip { found = 1 } END { exit !found }' <<< "$host_addrs"; then
-                print_warn "--ip-http ${ip_http} is an address of this host; it must be the primary's proxy IP."
-            fi
-        else
-            print_warn "Cannot list this host's IPv4 addresses (exit $?)."
-        fi
     fi
     if [[ -n "$listen_ip" ]]; then
         is_valid_ipv4 "$listen_ip" \
@@ -8591,12 +8585,24 @@ cmd_secondary() {
         "ddns_tsig_key=$ddns_tsig_key" "dns_xfr_primary=$dns_xfr_primary" \
         "syslog_primary=$syslog_primary"
 
-    # What: IP_HTTP defaults to the primary's own answer
-    # Why: the primary knows its proxy IP; no typing slip
+    # What: the cache IP, asked with the primary's answer
+    # Why: live pve04: the secondary's own IP was typed here
     # From: Issue #1683
+    if [[ -z "$ip_http" && "$tty" = 1 ]]; then
+        printf '\n  %sCache IP%s: this secondary answers game download names with it.\n' "${BOLD}" "${RESET}"
+        printf '  It is the proxy IP of the primary, not an IP of this host.\n\n'
+        ask_checked ip_http "Cache IP (proxy IP of the primary)" "$dns_xfr_primary" is_valid_ipv4 "Invalid IPv4 address"
+    fi
     [[ -n "$ip_http" ]] || ip_http="$dns_xfr_primary"
     is_valid_ipv4 "$ip_http" \
         || die "The primary sent no valid proxy IP (${ip_http}); pass --ip-http <ip>."
+    if host_addrs=$(host_ipv4_addresses); then
+        if awk -v ip="$ip_http" '$1 == ip { found = 1 } END { exit !found }' <<< "$host_addrs"; then
+            print_warn "Cache IP ${ip_http} is an address of this host; it must be the proxy IP of the primary."
+        fi
+    else
+        print_warn "Cannot list this host's IPv4 addresses (exit $?)."
+    fi
     # What: https DNS asked when the primary runs https
     # Why: https stays optional, as on the primary.
     # From: Issue #1683
@@ -8607,16 +8613,27 @@ cmd_secondary() {
         local https_default="N" https_ask=1 https_listen_default
         if [[ "$has_primary_https" = true && -z "$primary_https" ]]; then
             https_ask=0
-            print_ok "The primary runs no https proxy; this secondary runs no https DNS."
+            print_ok "The primary runs no HTTPS mode; this secondary answers HTTP clients only."
         elif [[ -n "$primary_https" || -n "$stored_listen_https" ]]; then
             https_default="Y"
         fi
-        if [[ "$https_ask" = 1 ]] && confirm "Run the https DNS on this secondary too? [y/n]" "$https_default"; then
+        if [[ "$https_ask" = 1 ]]; then
+            printf '\n  %sHTTPS mode%s: the primary also caches HTTPS downloads' "${BOLD}" "${RESET}"
+            if [[ -n "$primary_https" ]]; then
+                printf ' (proxy IP %s).\n' "$primary_https"
+            else
+                printf ', if it runs HTTPS mode.\n'
+            fi
+            printf '  This secondary can answer HTTPS clients on a second DNS IP.\n\n'
+        fi
+        if [[ "$https_ask" = 1 ]] && confirm "Answer HTTPS clients on this secondary too? [y/n]" "$https_default"; then
             ip_https="$primary_https"
             [[ -n "$ip_https" ]] \
-                || ask_checked ip_https "Primary https proxy IP (IP_HTTPS of the primary)" "$stored_ip_https" is_valid_ipv4 "Invalid IPv4 address"
+                || ask_checked ip_https "HTTPS proxy IP of the primary (IP_HTTPS)" "$stored_ip_https" is_valid_ipv4 "Invalid IPv4 address"
             https_listen_default="${stored_listen_https:-${listen_ip%.*}.$((10#${listen_ip##*.} + 1))}"
-            ask_checked listen_ip_https "https DNS IP of this secondary" "$https_listen_default" is_valid_ipv4 "Invalid IPv4 address"
+            printf '\n  %sSecond DNS IP of this secondary%s: HTTPS clients enter it as their DNS server;\n' "${BOLD}" "${RESET}"
+            printf '  it must differ from %s.\n\n' "$listen_ip"
+            ask_checked listen_ip_https "Second DNS IP of this secondary (HTTPS clients)" "$https_listen_default" is_valid_ipv4 "Invalid IPv4 address"
             [[ "$listen_ip_https" != "$listen_ip" ]] \
                 || die "the https bind IP must differ from the http bind IP ${listen_ip}"
             listen_ip_https=$(secondary_choose_listen_ip "$listen_ip_https") \
