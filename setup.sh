@@ -587,6 +587,49 @@ print_host_addresses_failed() {
     print_error "Failed to list the IPv4 addresses of this host (exit $1)."
 }
 
+# What: offer ip addr add for an IP missing on this host
+# Why: one owner for the primary and the secondary binds
+# From: Issue #1683
+ensure_host_ipv4() {
+    local ip="$1" ref="$2" assigned=0 link="" addrs prefix dev
+    # What: $1 goes on the device and prefix of $2
+    # Why: same link and subnet; no guessed device or mask
+    # From: Issue #1683 | PR #1858
+    if addrs=$(host_ipv4_addresses); then
+        awk -v ip="$ip" '$1 == ip { found = 1 } END { exit !found }' <<< "$addrs" \
+            && assigned=1
+        link=$(awk -v ip="$ref" '$1 == ip { print $2, $3; exit }' <<< "$addrs")
+    else
+        print_warn "Cannot list this host's IPv4 addresses (exit $?)."
+    fi
+    if [[ "$assigned" = 1 ]]; then
+        print_ok "$ip already assigned"
+        return 0
+    fi
+    print_warn "$ip not yet assigned to an interface"
+    if [[ -n "$link" ]]; then
+        read -r prefix dev <<< "$link"
+        if confirm "Add now? (ip addr add $ip/$prefix dev $dev) [y/N]" "N"; then
+            if [[ "$WIZARD_INTROSPECT_MODE" = "1" ]]; then
+                # What: introspection skips ip addr add
+                # Why: list-prompts only walks the prompts
+                # From: Issue #1176
+                print_ok "$ip would be added (skipped: introspection mode)"
+            elif ip addr add "$ip/$prefix" dev "$dev"; then
+                print_ok "$ip added (not persistent)"
+            else
+                print_warn "Adding failed (exit $?) — please add manually"
+            fi
+        fi
+    else
+        print_warn "Add $ip to the interface that carries $ref."
+    fi
+    printf "\n"
+    print_warn "For persistent configuration after reboot:"
+    printf "    netplan:    sudo nano /etc/netplan/01-netcfg.yaml\n"
+    printf "    interfaces: sudo nano /etc/network/interfaces\n"
+}
+
 # What: internet-route source IP, else the first LAN IP
 # Why: the route source is right on multi-homed hosts
 # From: Issue #1683 | PR #1858
@@ -3965,8 +4008,12 @@ lancache_channel_code_ref() {
 # Why: the prod compose names the ref; the slug is its name
 # From: Issue #1683 | PR #1858
 lancache_image_ref_vars() {
-    local vars
-    vars=$(sed -nE 's/^ *image: \$\{(LANCACHE_IMAGE_REF_([A-Z_]+)):\?.*$/\1 \2/p' "$PROD_COMPOSE" \
+    local vars text
+    # What: the compose text from the checkout or the ref
+    # Why: a curl|bash secondary has no $PROD_COMPOSE file
+    # From: Issue #1683
+    text=$(lancache_repo_file_text "${PROD_COMPOSE#"$SCRIPT_DIR"/}") || exit $?
+    vars=$(sed -nE 's/^ *image: \$\{(LANCACHE_IMAGE_REF_([A-Z_]+)):\?.*$/\1 \2/p' <<< "$text" \
         | awk '{ print $1, tolower($2) }' | sort -u) \
         || die "Failed to read the first-party image refs from $PROD_COMPOSE."
     [[ -n "$vars" ]] || die "$PROD_COMPOSE declares no LANCACHE_IMAGE_REF_* image; cannot pin a channel."
@@ -5595,21 +5642,26 @@ EOF
             ;;
         secondary)
             cat <<EOF
-Usage: ./setup.sh secondary --primary <url> --token <token> --name <name> --ip-http <ip> [--listen-ip <ip>] [--ip-https <ip> --listen-ip-https <ip>] [--rotate]
+Usage: ./setup.sh secondary --primary <url> --token <token> --name <name> [--ip-http <ip>] [--listen-ip <ip>] [--ip-https <ip> --listen-ip-https <ip>] [--rotate]
 
 Registers and starts a secondary DNS node on a remote host. The command
 creates a local compose directory, writes the secondary .env file, and starts
 the container after the primary server returns the required secrets.
 Use --rotate in an existing secondary directory to refresh credentials after
 the primary changes its TSIG key.
+In a terminal, missing values are asked one by one and checked at once;
+--rotate offers the values stored in the secondary's .env, only the token is
+asked again. When the primary runs https, the wizard asks whether this
+secondary runs the https DNS too. A bind IP that is not yet on this host is
+offered for "ip addr add", as on the primary.
 
 Required arguments:
   --primary <url>    Primary LanCache UI/API URL, for example http://<primary-ip>:<ui-port>
   --token <token>    Secondary registration token from the primary server
   --name <name>      Secondary node name, using letters, numbers, and dashes only
-  --ip-http <ip>     Primary proxy IP address clients should use for cached traffic
 
 Optional arguments:
+  --ip-http <ip>     Primary proxy IP for cached traffic (default: the IP the primary sends at registration)
   --listen-ip <ip>   Bind IP for the secondary DNS container (default: detected host LAN IP)
   --ip-https <ip>    Primary https proxy IP; adds a second DNS bind (needs --listen-ip-https)
   --listen-ip-https <ip>  Second bind IP for the https DNS (needs --ip-https; differs from --listen-ip)
@@ -8201,6 +8253,27 @@ die_if_any_empty() {
     [[ ${#missing[@]} -eq 0 ]] || die "${message}: ${missing[*]}"
 }
 
+# What: 0 for an http or https URL without spaces
+# Why: the secondary wizard checks the primary URL at once
+# From: Issue #1683
+is_http_url() {
+    [[ "$1" =~ ^https?://[^[:space:]]+$ ]]
+}
+
+# What: 0 for a non-empty answer
+# Why: the secondary wizard asks again on an empty token
+# From: Issue #1683
+is_nonempty_value() {
+    [[ -n "$1" ]]
+}
+
+# What: 0 for a secondary name of letters, digits, dashes
+# Why: the name is a DNS label and the directory name
+# From: Issue #1683
+is_secondary_name() {
+    [[ "$1" =~ ^[a-zA-Z0-9-]+$ ]]
+}
+
 # What: secondary setup consumes primary credentials
 # Why: it must not modify the primary host
 # From: Issue #1683 | PR #1858
@@ -8268,17 +8341,56 @@ cmd_secondary() {
         esac
     done
 
-    # What: ask for each missing value in a terminal
-    # Why: secondary without arguments guides like install
+    # What: the name first; inside a secondary it is the dir
+    # Why: the name selects the stored .env of --rotate
+    # From: Issue #1683
+    local tty=0 stored_env="" stored_listen="" stored_ip_https="" stored_listen_https="" loopback
+    local primary_arg="$primary" stored_primary=""
+    [[ -t 0 ]] && tty=1
+    if [[ "$tty" = 1 && -z "$name" ]]; then
+        local name_default=""
+        [[ "$rotate" -eq 1 && -f .env && -f docker-compose.yml ]] && name_default=$(basename "$PWD")
+        ask_checked name "Name of this secondary (a-z, 0-9, -)" "$name_default" is_secondary_name "Only letters, digits and dashes"
+    fi
+    # What: an existing secondary's .env answers the wizard
+    # Why: --rotate asks again only for the token
+    # From: Issue #1683
+    if [[ -n "$name" && "$(basename "$PWD")" = "$name" && -f .env ]]; then
+        stored_env=".env"
+    elif [[ -n "$name" && -f "${name}/.env" ]]; then
+        stored_env="${name}/.env"
+    fi
+    if [[ -n "$stored_env" ]]; then
+        stored_primary=$(get_env_var PRIMARY_URL "$stored_env") \
+            || die "Cannot read PRIMARY_URL from $stored_env (exit $?)."
+        stored_listen=$(get_env_var LISTEN_IP "$stored_env") \
+            || die "Cannot read LISTEN_IP from $stored_env (exit $?)."
+        stored_ip_https=$(get_env_var IP_HTTPS "$stored_env") \
+            || die "Cannot read IP_HTTPS from $stored_env (exit $?)."
+        stored_listen_https=$(get_env_var LISTEN_IP_HTTPS "$stored_env") \
+            || die "Cannot read LISTEN_IP_HTTPS from $stored_env (exit $?)."
+        loopback=$(prod_env_default LOOPBACK_BIND_IP) || exit $?
+        [[ "$stored_listen_https" != "$loopback" ]] || stored_listen_https=""
+    fi
+    # What: ask each missing value; check it at once
+    # Why: an empty or bad answer is asked again, not later
     # From: Issue #1683 | PR #1980
-    if [[ -t 0 ]]; then
-        [[ -n "$primary" ]] || { ask "Primary Admin-UI URL (for example http://192.168.1.100:8080)" ""; primary="$REPLY"; }
-        [[ -n "$token" ]] || { ask "Registration token (Admin-UI: DNS, Secondary DNS)" ""; token="$REPLY"; }
-        [[ -n "$name" ]] || { ask "Name of this secondary (a-z, 0-9, -)" ""; name="$REPLY"; }
-        [[ -n "$ip_http" ]] || { ask "Primary proxy IP (IP_HTTP of the primary)" ""; ip_http="$REPLY"; }
+    if [[ "$tty" = 1 ]]; then
+        local listen_default="$stored_listen"
+        [[ -n "$primary_arg" ]] || ask_checked primary "Primary Admin-UI URL (for example http://192.168.1.100:8080)" "$stored_primary" is_http_url "Not an http(s) URL"
+        [[ -n "$token" ]] || ask_checked token "Registration token (Admin-UI: DNS, Secondary DNS)" "" is_nonempty_value "The token is required"
+        if [[ -z "$listen_ip" ]]; then
+            if [[ -z "$listen_default" ]]; then
+                listen_default=$(detect_lan_ip) \
+                    || print_warn "No LAN IP detected (exit $?); enter the DNS IP of this secondary."
+            fi
+            ask_checked listen_ip "DNS IP of this secondary (clients use it as DNS server)" "$listen_default" is_valid_ipv4 "Invalid IPv4 address"
+        fi
+    elif [[ -z "$primary" ]]; then
+        primary="$stored_primary"
     fi
     die_if_any_empty "Required argument(s) missing (see ./setup.sh secondary --help)" \
-        "--primary=$primary" "--token=$token" "--name=$name" "--ip-http=$ip_http"
+        "--primary=$primary" "--token=$token" "--name=$name"
 
     for cmd in curl docker jq; do
         command_available "$cmd" \
@@ -8288,10 +8400,25 @@ cmd_secondary() {
     compose_out=$(docker compose version 2>&1) \
         || die "'docker compose' is not available; install Docker Compose v2 before continuing (exit $?): $compose_out"
 
-    [[ "$name" =~ ^[a-zA-Z0-9-]+$ ]] \
+    is_secondary_name "$name" \
         || die "--name must contain only alphanumeric characters and dashes"
-    is_valid_ipv4 "$ip_http" \
-        || die "--ip-http must be a valid IPv4 address"
+    is_http_url "$primary" \
+        || die "--primary must be an http(s) URL, for example http://192.168.1.100:8080"
+    # What: --ip-http is optional; the primary sends its IP
+    # Why: live pve04: the secondary's own IP was typed here
+    # From: Issue #1683
+    local host_addrs=""
+    if [[ -n "$ip_http" ]]; then
+        is_valid_ipv4 "$ip_http" \
+            || die "--ip-http must be a valid IPv4 address"
+        if host_addrs=$(host_ipv4_addresses); then
+            if awk -v ip="$ip_http" '$1 == ip { found = 1 } END { exit !found }' <<< "$host_addrs"; then
+                print_warn "--ip-http ${ip_http} is an address of this host; it must be the primary's proxy IP."
+            fi
+        else
+            print_warn "Cannot list this host's IPv4 addresses (exit $?)."
+        fi
+    fi
     if [[ -n "$listen_ip" ]]; then
         is_valid_ipv4 "$listen_ip" \
             || die "--listen-ip must be a valid IPv4 address"
@@ -8303,6 +8430,14 @@ cmd_secondary() {
     listen_ip=$(secondary_choose_listen_ip "$listen_ip") \
         || die "No usable secondary bind IP on port ${dns_port} (exit $?; see above). Re-run with --listen-ip <ip> after freeing the port."
     print_ok "Secondary DNS bind IP: ${listen_ip}"
+    # What: a bind IP not on this host is offered for add
+    # Why: same step as the primary's IP_HTTPS; asks first
+    # From: Issue #1683
+    local host_ref=""
+    if [[ "$tty" = 1 ]]; then
+        host_ref=$(detect_lan_ip) || print_warn "No LAN IP detected (exit $?); cannot offer to add a bind IP."
+        [[ -z "$host_ref" ]] || ensure_host_ipv4 "$listen_ip" "$host_ref"
+    fi
     if [[ -n "$ip_https" || -n "$listen_ip_https" ]]; then
         [[ -n "$ip_https" && -n "$listen_ip_https" ]] \
             || die "--ip-https and --listen-ip-https must be given together"
@@ -8315,6 +8450,7 @@ cmd_secondary() {
         [[ "$listen_ip_https" != "$listen_ip" ]] \
             || die "the https bind IP must differ from the http bind IP ${listen_ip}"
         print_ok "Secondary https DNS bind IP: ${listen_ip_https}"
+        [[ -z "$host_ref" ]] || ensure_host_ipv4 "$listen_ip_https" "$host_ref"
     fi
     assert_prebuilt_image_platform_supported
     secondary_pin_channel_ref
@@ -8333,18 +8469,21 @@ cmd_secondary() {
         repo_texts[repo_i]=$(lancache_repo_file_text "${repo_files[repo_i]}") || exit $?
     done
 
+    # What: a secondary counts as installed when .env exists
+    # Why: a run that failed before .env leaves no blocker
+    # From: Issue #1683
     secondary_dir="${name}"
     if [[ "$rotate" -eq 1 ]]; then
         if [[ "$(basename "$PWD")" = "$name" && -f .env && -f docker-compose.yml ]]; then
             secondary_dir="."
-        elif [[ ! -d "$secondary_dir" ]]; then
-            die "No existing secondary directory '${secondary_dir}' found. Run --rotate from its parent directory or from inside the existing '${name}' directory."
+        elif [[ ! -f "${secondary_dir}/.env" ]]; then
+            die "No existing secondary '${secondary_dir}' (no ${secondary_dir}/.env). Run --rotate from its parent directory or from inside the existing '${name}' directory, or run without --rotate."
         fi
     else
-        if [[ "$(basename "$PWD")" = "$name" ]]; then
+        if [[ "$(basename "$PWD")" = "$name" && -f .env ]]; then
             die "Current directory already matches secondary '${name}'; rerun with --rotate to update the secondary files"
-        elif [[ -d "$secondary_dir" ]]; then
-            die "Directory '${secondary_dir}' already exists; rerun with --rotate to update the secondary files"
+        elif [[ -f "${secondary_dir}/.env" ]]; then
+            die "Secondary '${secondary_dir}' already exists; rerun with --rotate to update the secondary files"
         fi
     fi
 
@@ -8452,7 +8591,41 @@ cmd_secondary() {
         "ddns_tsig_key=$ddns_tsig_key" "dns_xfr_primary=$dns_xfr_primary" \
         "syslog_primary=$syslog_primary"
 
-    mkdir -p "$secondary_dir"
+    # What: IP_HTTP defaults to the primary's own answer
+    # Why: the primary knows its proxy IP; no typing slip
+    # From: Issue #1683
+    [[ -n "$ip_http" ]] || ip_http="$dns_xfr_primary"
+    is_valid_ipv4 "$ip_http" \
+        || die "The primary sent no valid proxy IP (${ip_http}); pass --ip-http <ip>."
+    # What: https DNS asked when the primary runs https
+    # Why: https stays optional, as on the primary.
+    # From: Issue #1683
+    local primary_https has_primary_https
+    primary_https=$(json_value '.primary_https' "$response") || die "$bad_response"
+    has_primary_https=$(json_value 'has("primary_https")' "$response") || die "$bad_response"
+    if [[ "$tty" = 1 && -z "$ip_https" && -z "$listen_ip_https" ]]; then
+        local https_default="N" https_ask=1 https_listen_default
+        if [[ "$has_primary_https" = true && -z "$primary_https" ]]; then
+            https_ask=0
+            print_ok "The primary runs no https proxy; this secondary runs no https DNS."
+        elif [[ -n "$primary_https" || -n "$stored_listen_https" ]]; then
+            https_default="Y"
+        fi
+        if [[ "$https_ask" = 1 ]] && confirm "Run the https DNS on this secondary too? [y/n]" "$https_default"; then
+            ip_https="$primary_https"
+            [[ -n "$ip_https" ]] \
+                || ask_checked ip_https "Primary https proxy IP (IP_HTTPS of the primary)" "$stored_ip_https" is_valid_ipv4 "Invalid IPv4 address"
+            https_listen_default="${stored_listen_https:-${listen_ip%.*}.$((10#${listen_ip##*.} + 1))}"
+            ask_checked listen_ip_https "https DNS IP of this secondary" "$https_listen_default" is_valid_ipv4 "Invalid IPv4 address"
+            [[ "$listen_ip_https" != "$listen_ip" ]] \
+                || die "the https bind IP must differ from the http bind IP ${listen_ip}"
+            listen_ip_https=$(secondary_choose_listen_ip "$listen_ip_https") \
+                || die "No usable secondary https bind IP on port ${dns_port} (exit $?; see above). Re-run with --listen-ip-https <ip> after freeing the port."
+            print_ok "Secondary https DNS bind IP: ${listen_ip_https}"
+            [[ -z "$host_ref" ]] || ensure_host_ipv4 "$listen_ip_https" "$host_ref"
+        fi
+    fi
+    validate_env_value PRIMARY_URL "$primary"
 
     existing_env_file=""
     if [[ -f "${secondary_dir}/.env" ]]; then
@@ -8579,6 +8752,10 @@ cmd_secondary() {
         snmp_community=$(generate_managed_secret SNMP_COMMUNITY stack) || exit $?
     fi
 
+    # What: the directory comes only with the first write
+    # Why: an earlier failure leaves no half secondary dir
+    # From: Issue #1683
+    mkdir -p "$secondary_dir" || die "Failed to create ${secondary_dir} (exit $?)."
     write_file_atomically "${secondary_dir}/docker-compose.yml" <<< "$secondary_compose" \
         || die "Failed to write ${secondary_dir}/docker-compose.yml (exit $?)."
     for repo_i in "${!repo_files[@]}"; do
@@ -8599,6 +8776,7 @@ cmd_secondary() {
     fi
 
     write_file_atomically "${secondary_dir}/.env" <<EOF
+PRIMARY_URL=${primary}
 IP_HTTP=${ip_http}
 LISTEN_IP=${listen_ip}
 IP_HTTPS=${ip_https}
@@ -8903,43 +9081,7 @@ printf '  %sSecond LAN IP%s: the HTTPS DNS/proxy address, always required.\n\n' 
 suggested_https="${IP_HTTP%.*}.$((10#${IP_HTTP##*.} + 1))"
 ask_checked IP_HTTPS "Second LAN IP (HTTPS mode)" "$suggested_https" is_valid_ipv4 "Invalid IPv4 address"
 require_separate_lan_ips "$IP_HTTP" "$IP_HTTPS"
-# What: IP_HTTPS goes on IP_HTTP's device and prefix
-# Why: same link and subnet; no guessed device or mask
-# From: Issue #1683 | PR #1858
-https_assigned=0 http_link=""
-if host_addresses=$(host_ipv4_addresses); then
-    awk -v ip="$IP_HTTPS" '$1 == ip { found = 1 } END { exit !found }' <<< "$host_addresses" \
-        && https_assigned=1
-    http_link=$(awk -v ip="$IP_HTTP" '$1 == ip { print $2, $3; exit }' <<< "$host_addresses")
-else
-    print_warn "Cannot list this host's IPv4 addresses (exit $?)."
-fi
-if [[ "$https_assigned" = 1 ]]; then
-    print_ok "$IP_HTTPS already assigned"
-else
-    print_warn "$IP_HTTPS not yet assigned to an interface"
-    if [[ -n "$http_link" ]]; then
-        read -r http_prefix http_dev <<< "$http_link"
-        if confirm "Add now? (ip addr add $IP_HTTPS/$http_prefix dev $http_dev) [y/N]" "N"; then
-            if [[ "$WIZARD_INTROSPECT_MODE" = "1" ]]; then
-                # What: introspection skips ip addr add
-                # Why: list-prompts only walks the prompts
-                # From: Issue #1176
-                print_ok "$IP_HTTPS would be added (skipped: introspection mode)"
-            elif ip addr add "$IP_HTTPS/$http_prefix" dev "$http_dev"; then
-                print_ok "$IP_HTTPS added (not persistent)"
-            else
-                print_warn "Adding failed (exit $?) — please add manually"
-            fi
-        fi
-    else
-        print_warn "Add $IP_HTTPS to the interface that carries $IP_HTTP."
-    fi
-    printf "\n"
-    print_warn "For persistent configuration after reboot:"
-    printf "    netplan:    sudo nano /etc/netplan/01-netcfg.yaml\n"
-    printf "    interfaces: sudo nano /etc/network/interfaces\n"
-fi
+ensure_host_ipv4 "$IP_HTTPS" "$IP_HTTP"
 
 printf "\n"
 printf '  %sHTTPS mode%s: also caches HTTPS downloads (Epic, EA, Blizzard…)\n' "${BOLD}" "${RESET}"
