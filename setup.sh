@@ -8274,6 +8274,25 @@ is_secondary_name() {
     [[ "$1" =~ ^[a-zA-Z0-9-]+$ ]]
 }
 
+# What: dies when the dns container name is taken here
+# Why: both use one SOT name; up failed only at the end
+# From: Issue #1683
+assert_secondary_container_free() {
+    local own cname rows owner
+    own=$(realpath -m "$1") || die "Cannot resolve the directory $1 (exit $?)."
+    cname=$(prod_env_default CONTAINER_NAME_DNS) || exit $?
+    rows=$(docker ps -a --filter "name=^/${cname}\$" \
+        --format '{{.Names}}|{{.Label "com.docker.compose.project.working_dir"}}') \
+        || die "Failed to list the containers of this host (exit $?)."
+    [[ -n "$rows" ]] || return 0
+    owner=${rows#*|}
+    # What: --rotate finds its own container; that is fine
+    # Why: same compose dir = this secondary, not another
+    # From: Issue #1683
+    [[ "$owner" = "$own" ]] && return 0
+    die "This host already runs a lancache system: container ${cname} (compose dir: ${owner:-unknown}). Install the secondary on another host, or remove that container first."
+}
+
 # What: secondary setup consumes primary credentials
 # Why: it must not modify the primary host
 # From: Issue #1683 | PR #1858
@@ -8341,6 +8360,17 @@ cmd_secondary() {
         esac
     done
 
+    # What: tools first, as the primary checks prerequisites
+    # Why: check, then ask, then act; no answer is wasted
+    # From: Issue #1683
+    for cmd in curl docker jq; do
+        command_available "$cmd" \
+            || die "$cmd is not installed or is not in PATH; run: sudo $0 install-requirements-secondary"
+    done
+
+    compose_out=$(docker compose version 2>&1) \
+        || die "'docker compose' is not available; install Docker Compose v2 before continuing (exit $?): $compose_out"
+
     # What: the name first; inside a secondary it is the dir
     # Why: the name selects the stored .env of --rotate
     # From: Issue #1683
@@ -8352,6 +8382,28 @@ cmd_secondary() {
         [[ "$rotate" -eq 1 && -f .env && -f docker-compose.yml ]] && name_default=$(basename "$PWD")
         ask_checked name "Name of this secondary (a-z, 0-9, -)" "$name_default" is_secondary_name "Only letters, digits and dashes"
     fi
+    die_if_any_empty "Required argument(s) missing (see ./setup.sh secondary --help)" "--name=$name"
+    is_secondary_name "$name" \
+        || die "--name must contain only alphanumeric characters and dashes"
+
+    # What: a secondary counts as installed when .env exists
+    # Why: before any question; a failed run blocks nothing
+    # From: Issue #1683
+    secondary_dir="${name}"
+    if [[ "$rotate" -eq 1 ]]; then
+        if [[ "$(basename "$PWD")" = "$name" && -f .env && -f docker-compose.yml ]]; then
+            secondary_dir="."
+        elif [[ ! -f "${secondary_dir}/.env" ]]; then
+            die "No existing secondary '${secondary_dir}' (no ${secondary_dir}/.env). Run --rotate from its parent directory or from inside the existing '${name}' directory, or run without --rotate."
+        fi
+    else
+        if [[ "$(basename "$PWD")" = "$name" && -f .env ]]; then
+            die "Current directory already matches secondary '${name}'; rerun with --rotate to update the secondary files"
+        elif [[ -f "${secondary_dir}/.env" ]]; then
+            die "Secondary '${secondary_dir}' already exists; rerun with --rotate to update the secondary files"
+        fi
+    fi
+    assert_secondary_container_free "$secondary_dir"
     # What: an existing secondary's .env answers the wizard
     # Why: --rotate asks again only for the token
     # From: Issue #1683
@@ -8391,18 +8443,8 @@ cmd_secondary() {
         primary="$stored_primary"
     fi
     die_if_any_empty "Required argument(s) missing (see ./setup.sh secondary --help)" \
-        "--primary=$primary" "--token=$token" "--name=$name"
+        "--primary=$primary" "--token=$token"
 
-    for cmd in curl docker jq; do
-        command_available "$cmd" \
-            || die "$cmd is not installed or is not in PATH; run: sudo $0 install-requirements-secondary"
-    done
-
-    compose_out=$(docker compose version 2>&1) \
-        || die "'docker compose' is not available; install Docker Compose v2 before continuing (exit $?): $compose_out"
-
-    is_secondary_name "$name" \
-        || die "--name must contain only alphanumeric characters and dashes"
     is_http_url "$primary" \
         || die "--primary must be an http(s) URL: http://<primary-ip>:<ui-port>"
     # What: --ip-http is optional; asked after registration
@@ -8462,24 +8504,6 @@ cmd_secondary() {
     for repo_i in "${!repo_files[@]}"; do
         repo_texts[repo_i]=$(lancache_repo_file_text "${repo_files[repo_i]}") || exit $?
     done
-
-    # What: a secondary counts as installed when .env exists
-    # Why: a run that failed before .env leaves no blocker
-    # From: Issue #1683
-    secondary_dir="${name}"
-    if [[ "$rotate" -eq 1 ]]; then
-        if [[ "$(basename "$PWD")" = "$name" && -f .env && -f docker-compose.yml ]]; then
-            secondary_dir="."
-        elif [[ ! -f "${secondary_dir}/.env" ]]; then
-            die "No existing secondary '${secondary_dir}' (no ${secondary_dir}/.env). Run --rotate from its parent directory or from inside the existing '${name}' directory, or run without --rotate."
-        fi
-    else
-        if [[ "$(basename "$PWD")" = "$name" && -f .env ]]; then
-            die "Current directory already matches secondary '${name}'; rerun with --rotate to update the secondary files"
-        elif [[ -f "${secondary_dir}/.env" ]]; then
-            die "Secondary '${secondary_dir}' already exists; rerun with --rotate to update the secondary files"
-        fi
-    fi
 
     # What: --rotate may check the platform before the POST
     # Why: a late failure would leave a rotated password
