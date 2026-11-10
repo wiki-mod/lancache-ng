@@ -609,7 +609,7 @@ ensure_host_ipv4() {
     print_warn "$ip not yet assigned to an interface"
     if [[ -n "$link" ]]; then
         read -r prefix dev <<< "$link"
-        if confirm "Add now? (ip addr add $ip/$prefix dev $dev) [y/N]" "N"; then
+        if confirm "Add now? (ip addr add $ip/$prefix dev $dev) [Y/n]" "Y"; then
             if [[ "$WIZARD_INTROSPECT_MODE" = "1" ]]; then
                 # What: introspection skips ip addr add
                 # Why: list-prompts only walks the prompts
@@ -8260,7 +8260,7 @@ is_secondary_name() {
 }
 
 # What: dies when the dns container name is taken here
-# Why: both use one SOT name; up failed only at the end
+# Why: primary and secondary share one SOT name
 # From: Issue #1683
 assert_secondary_container_free() {
     local own cname rows owner
@@ -8271,7 +8271,7 @@ assert_secondary_container_free() {
         || die "Failed to list the containers of this host (exit $?)."
     [[ -n "$rows" ]] || return 0
     owner=${rows#*|}
-    # What: --rotate finds its own container; that is fine
+    # What: --rotate may find its own container
     # Why: same compose dir = this secondary, not another
     # From: Issue #1683
     [[ "$owner" = "$own" ]] && return 0
@@ -8346,7 +8346,7 @@ cmd_secondary() {
     done
 
     # What: requirements installed first, as on the primary
-    # Why: a missing tool stopped the wizard; same set as primary
+    # Why: same set as the primary; no stop on a missing tool
     # From: Issue #1683
     [[ "$(id -u)" = "0" ]] \
         || die "This script must be run as root (sudo ./setup.sh secondary)."
@@ -8355,7 +8355,7 @@ cmd_secondary() {
     # What: the name first; inside a secondary it is the dir
     # Why: the name selects the stored .env of --rotate
     # From: Issue #1683
-    local tty=0 stored_env="" stored_listen="" stored_ip_https="" stored_listen_https="" loopback
+    local tty=0 stored_env="" stored_listen="" stored_listen_https="" loopback
     local primary_arg="$primary" stored_primary=""
     [[ -t 0 ]] && tty=1
     if [[ "$tty" = 1 && -z "$name" ]]; then
@@ -8398,8 +8398,6 @@ cmd_secondary() {
             || die "Cannot read PRIMARY_URL from $stored_env (exit $?)."
         stored_listen=$(get_env_var LISTEN_IP "$stored_env") \
             || die "Cannot read LISTEN_IP from $stored_env (exit $?)."
-        stored_ip_https=$(get_env_var IP_HTTPS "$stored_env") \
-            || die "Cannot read IP_HTTPS from $stored_env (exit $?)."
         stored_listen_https=$(get_env_var LISTEN_IP_HTTPS "$stored_env") \
             || die "Cannot read LISTEN_IP_HTTPS from $stored_env (exit $?)."
         loopback=$(prod_env_default LOOPBACK_BIND_IP) || exit $?
@@ -8428,8 +8426,8 @@ cmd_secondary() {
 
     is_http_url "$primary" \
         || die "--primary must be an http(s) URL: http://<primary-ip>:<ui-port>"
-    # What: --ip-http is optional; asked after registration
-    # Why: the primary's answer is then the default
+    # What: --ip-http is optional
+    # Why: the default is the primary's IP_HTTP
     # From: Issue #1683
     local host_addrs=""
     if [[ -n "$ip_http" ]]; then
@@ -8447,14 +8445,6 @@ cmd_secondary() {
     listen_ip=$(secondary_choose_listen_ip "$listen_ip") \
         || die "No usable secondary bind IP on port ${dns_port} (exit $?; see above). Re-run with --listen-ip <ip> after freeing the port."
     print_ok "Secondary DNS bind IP: ${listen_ip}"
-    # What: a bind IP not on this host is offered for add
-    # Why: same step as the primary's IP_HTTPS; asks first
-    # From: Issue #1683
-    local host_ref=""
-    if [[ "$tty" = 1 ]]; then
-        host_ref=$(detect_lan_ip) || print_warn "No LAN IP detected (exit $?); cannot offer to add a bind IP."
-        [[ -z "$host_ref" ]] || ensure_host_ipv4 "$listen_ip" "$host_ref"
-    fi
     if [[ -n "$ip_https" || -n "$listen_ip_https" ]]; then
         [[ -n "$ip_https" && -n "$listen_ip_https" ]] \
             || die "--ip-https and --listen-ip-https must be given together"
@@ -8467,7 +8457,25 @@ cmd_secondary() {
         [[ "$listen_ip_https" != "$listen_ip" ]] \
             || die "the https bind IP must differ from the http bind IP ${listen_ip}"
         print_ok "Secondary https DNS bind IP: ${listen_ip_https}"
-        [[ -z "$host_ref" ]] || ensure_host_ipv4 "$listen_ip_https" "$host_ref"
+    elif [[ "$tty" = 1 ]]; then
+        # What: https asked with the other questions
+        # Why: no change before all answers are known
+        # From: Issue #1683
+        local https_default="N" https_listen_default
+        [[ -z "$stored_listen_https" ]] || https_default="Y"
+        printf '\n  %sHTTPS mode%s: if the primary runs HTTPS mode, this secondary can\n' "${BOLD}" "${RESET}"
+        printf '  answer HTTPS clients on a second DNS IP.\n\n'
+        if confirm "Answer HTTPS clients on this secondary too? [y/n]" "$https_default"; then
+            https_listen_default="${stored_listen_https:-${listen_ip%.*}.$((10#${listen_ip##*.} + 1))}"
+            printf '\n  %sSecond DNS IP of this secondary%s: HTTPS clients enter it as their DNS server;\n' "${BOLD}" "${RESET}"
+            printf '  it must differ from %s.\n\n' "$listen_ip"
+            ask_checked listen_ip_https "Second DNS IP of this secondary (HTTPS clients)" "$https_listen_default" is_valid_ipv4 "Invalid IPv4 address"
+            [[ "$listen_ip_https" != "$listen_ip" ]] \
+                || die "the https bind IP must differ from the http bind IP ${listen_ip}"
+            listen_ip_https=$(secondary_choose_listen_ip "$listen_ip_https") \
+                || die "No usable secondary https bind IP on port ${dns_port} (exit $?; see above). Re-run with --listen-ip-https <ip> after freeing the port."
+            print_ok "Secondary https DNS bind IP: ${listen_ip_https}"
+        fi
     fi
     assert_prebuilt_image_platform_supported
     secondary_pin_channel_ref
@@ -8532,6 +8540,18 @@ cmd_secondary() {
         fi
     fi
 
+    # What: missing bind IPs are added after all answers
+    # Why: no change before all answers; asks as the primary
+    # From: Issue #1683
+    local host_ref=""
+    if [[ "$tty" = 1 ]]; then
+        host_ref=$(detect_lan_ip) || print_warn "No LAN IP detected (exit $?); cannot offer to add a bind IP."
+        if [[ -n "$host_ref" ]]; then
+            ensure_host_ipv4 "$listen_ip" "$host_ref"
+            [[ -z "$listen_ip_https" ]] || ensure_host_ipv4 "$listen_ip_https" "$host_ref"
+        fi
+    fi
+
     print_step "Registering secondary"
 
     # What: jq builds the body; the token comes on stdin
@@ -8590,14 +8610,9 @@ cmd_secondary() {
         "ddns_tsig_key=$ddns_tsig_key" "dns_xfr_primary=$dns_xfr_primary" \
         "syslog_primary=$syslog_primary"
 
-    # What: the cache IP, asked with the primary's answer
-    # Why: live pve04: the secondary's own IP was typed here
+    # What: the cache IP comes from the primary, not asked
+    # Why: the primary owns IP_HTTP; nothing to type
     # From: Issue #1683
-    if [[ -z "$ip_http" && "$tty" = 1 ]]; then
-        printf '\n  %sCache IP%s: this secondary answers game download names with it.\n' "${BOLD}" "${RESET}"
-        printf '  It is the proxy IP of the primary, not an IP of this host.\n\n'
-        ask_checked ip_http "Cache IP (proxy IP of the primary)" "$dns_xfr_primary" is_valid_ipv4 "Invalid IPv4 address"
-    fi
     [[ -n "$ip_http" ]] || ip_http="$dns_xfr_primary"
     is_valid_ipv4 "$ip_http" \
         || die "The primary sent no valid proxy IP (${ip_http}); pass --ip-http <ip>."
@@ -8608,43 +8623,14 @@ cmd_secondary() {
     else
         print_warn "Cannot list this host's IPv4 addresses (exit $?)."
     fi
-    # What: https DNS asked when the primary runs https
-    # Why: https stays optional, as on the primary.
+    # What: the https proxy IP comes from the primary
+    # Why: the user only answers yes/no and the second IP
     # From: Issue #1683
-    local primary_https has_primary_https
-    primary_https=$(json_value '.primary_https' "$response") || die "$bad_response"
-    has_primary_https=$(json_value 'has("primary_https")' "$response") || die "$bad_response"
-    if [[ "$tty" = 1 && -z "$ip_https" && -z "$listen_ip_https" ]]; then
-        local https_default="N" https_ask=1 https_listen_default
-        if [[ "$has_primary_https" = true && -z "$primary_https" ]]; then
-            https_ask=0
-            print_ok "The primary runs no HTTPS mode; this secondary answers HTTP clients only."
-        elif [[ -n "$primary_https" || -n "$stored_listen_https" ]]; then
-            https_default="Y"
-        fi
-        if [[ "$https_ask" = 1 ]]; then
-            printf '\n  %sHTTPS mode%s: the primary also caches HTTPS downloads' "${BOLD}" "${RESET}"
-            if [[ -n "$primary_https" ]]; then
-                printf ' (proxy IP %s).\n' "$primary_https"
-            else
-                printf ', if it runs HTTPS mode.\n'
-            fi
-            printf '  This secondary can answer HTTPS clients on a second DNS IP.\n\n'
-        fi
-        if [[ "$https_ask" = 1 ]] && confirm "Answer HTTPS clients on this secondary too? [y/n]" "$https_default"; then
-            ip_https="$primary_https"
-            [[ -n "$ip_https" ]] \
-                || ask_checked ip_https "HTTPS proxy IP of the primary (IP_HTTPS)" "$stored_ip_https" is_valid_ipv4 "Invalid IPv4 address"
-            https_listen_default="${stored_listen_https:-${listen_ip%.*}.$((10#${listen_ip##*.} + 1))}"
-            printf '\n  %sSecond DNS IP of this secondary%s: HTTPS clients enter it as their DNS server;\n' "${BOLD}" "${RESET}"
-            printf '  it must differ from %s.\n\n' "$listen_ip"
-            ask_checked listen_ip_https "Second DNS IP of this secondary (HTTPS clients)" "$https_listen_default" is_valid_ipv4 "Invalid IPv4 address"
-            [[ "$listen_ip_https" != "$listen_ip" ]] \
-                || die "the https bind IP must differ from the http bind IP ${listen_ip}"
-            listen_ip_https=$(secondary_choose_listen_ip "$listen_ip_https") \
-                || die "No usable secondary https bind IP on port ${dns_port} (exit $?; see above). Re-run with --listen-ip-https <ip> after freeing the port."
-            print_ok "Secondary https DNS bind IP: ${listen_ip_https}"
-            [[ -z "$host_ref" ]] || ensure_host_ipv4 "$listen_ip_https" "$host_ref"
+    if [[ -n "$listen_ip_https" && -z "$ip_https" ]]; then
+        ip_https=$(json_value '.primary_https' "$response") || die "$bad_response"
+        if [[ -z "$ip_https" ]]; then
+            print_warn "The primary runs no HTTPS mode; this secondary answers HTTP clients only."
+            listen_ip_https=""
         fi
     fi
     validate_env_value PRIMARY_URL "$primary"
