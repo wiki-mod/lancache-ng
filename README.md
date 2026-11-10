@@ -664,7 +664,9 @@ arguments, `setup.sh secondary` asks each value in the terminal and checks it
 at once. A bind IP that is not yet on the host is
 offered for `ip addr add`, as on the primary (not persistent).
 
-Before the first question, the wizard checks the tools, the secondary name and
+Run it as root. Like the primary install, it first installs missing
+requirements (curl, jq, Docker, Docker Compose v2; the same set as the primary).
+Before the first question, the wizard checks the secondary name and
 whether this host already runs a lancache dns container. A secondary needs its
 own host: if the primary (or another secondary) runs here, setup stops before
 it changes anything.
