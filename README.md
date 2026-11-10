@@ -653,20 +653,26 @@ bash <(curl -fsSL https://raw.githubusercontent.com/wiki-mod/lancache-ng/master/
   --primary http://192.168.1.10:8080 \
   --token <SECONDARY_REGISTRATION_TOKEN> \
   --name my-secondary \
-  --ip-http 192.168.1.10
+  --listen-ip 192.168.1.20
 ```
 
 The registration token is generated during primary setup and stored in `.env`.
+`--ip-http` is optional: the secondary takes the primary's proxy IP from the
+registration answer. Without arguments, `setup.sh secondary` asks each value
+in the terminal and checks it at once. A bind IP that is not yet on the host is
+offered for `ip addr add`, as on the primary (not persistent).
 
-Optional https side: add `--ip-https <primary https proxy ip> --listen-ip-https <second bind ip>`
-to the same command. The secondary's one dns container then also answers on the
-second bind IP; both flags are required together.
+Optional https side: when the primary runs https, the wizard asks whether this
+secondary runs the https DNS too. As arguments: `--ip-https <primary https proxy ip>
+--listen-ip-https <second bind ip>`; both flags are required together. The
+secondary's one dns container then also answers on the second bind IP.
 
 You can also view a ready command inside the Admin UI under the secondary DNS section.
 
 To renew the secondary's keys, rerun the same command with `--rotate`
 in that secondary's install directory. This rewrites the local secondary `.env` from the primary registration API
-without changing the secondary name.
+without changing the secondary name. In a terminal, `--rotate` offers the stored
+values (primary URL, bind IPs); only the token is asked again.
 
 After setup, point additional clients to the secondary DNS IP.
 
