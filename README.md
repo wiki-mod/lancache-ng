@@ -657,9 +657,11 @@ bash <(curl -fsSL https://raw.githubusercontent.com/wiki-mod/lancache-ng/master/
 ```
 
 The registration token is generated during primary setup and stored in `.env`.
-`--ip-http` is optional: the secondary takes the primary's proxy IP from the
-registration answer. Without arguments, `setup.sh secondary` asks each value
-in the terminal and checks it at once. A bind IP that is not yet on the host is
+`--ip-http` (the cache IP: the primary's proxy IP the secondary hands out for
+download names) is optional: the wizard asks it after registration with the
+primary's answer as default; without a terminal that answer is used. Without
+arguments, `setup.sh secondary` asks each value in the terminal and checks it
+at once. A bind IP that is not yet on the host is
 offered for `ip addr add`, as on the primary (not persistent).
 
 Optional https side: when the primary runs https, the wizard asks whether this
