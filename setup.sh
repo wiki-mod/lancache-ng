@@ -1495,7 +1495,7 @@ ensure_stack_requirements_installed() {
 
 # What: installs curl, jq, Docker, Compose; prints next step
 # Why: one set for both; old names stay as aliases
-# From: Issue #1068 | Issue #1683
+# From: Issue #1683
 cmd_install_requirements() {
     ensure_stack_requirements_installed
     print_ok "Requirements installed (curl, jq, Docker, Docker Compose v2). Next: ./setup.sh install (primary) or ./setup.sh secondary."
@@ -8348,7 +8348,7 @@ cmd_secondary() {
     done
 
     # What: requirements installed first, as on the primary
-    # Why: same set as the primary; no stop on a missing tool
+    # Why: a missing tool is installed, as on the primary
     # From: Issue #1683
     [[ "$(id -u)" = "0" ]] \
         || die "This script must be run as root (sudo ./setup.sh secondary)."
