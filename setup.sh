@@ -5636,11 +5636,16 @@ creates a local compose directory, writes the secondary .env file, and starts
 the container after the primary server returns the required secrets.
 Use --rotate in an existing secondary directory to refresh credentials after
 the primary changes its TSIG key.
-In a terminal, missing values are asked one by one and checked at once;
---rotate offers the values stored in the secondary's .env, only the token is
-asked again. When the primary runs https, the wizard asks whether this
-secondary runs the https DNS too. A bind IP that is not yet on this host is
-offered for "ip addr add", as on the primary.
+Order: check, ask, then act. Missing requirements are installed and the host
+is checked first; a host that already runs a lancache dns container stops
+before any change. In a terminal, missing values are asked one by one and
+checked at once: name, primary URL, token, whether the primary runs the latest
+channel, the DNS IP, and whether the primary has HTTPS (then the primary's
+HTTPS IP and a second DNS IP). --rotate offers the values stored in the
+secondary's .env; only the token is asked again. Then a bind IP not yet on
+this host is offered for "ip addr add", the channel's code is cloned as on
+the primary, and the secondary registers and starts.
+LANCACHE_IMAGE_CHANNEL sets the channel without a terminal.
 
 Required arguments:
   --primary <url>    Primary LanCache UI/API URL, for example http://<primary-ip>:<ui-port>
@@ -5650,7 +5655,7 @@ Required arguments:
 Optional arguments:
   --ip-http <ip>     Primary proxy IP for cached traffic (default: the IP the primary sends at registration)
   --listen-ip <ip>   Bind IP for the secondary DNS container (default: detected host LAN IP)
-  --ip-https <ip>    Primary https proxy IP; adds a second DNS bind (needs --listen-ip-https)
+  --ip-https <ip>    Primary HTTPS IP; adds a second DNS bind (needs --listen-ip-https)
   --listen-ip-https <ip>  Second bind IP for the https DNS (needs --ip-https; differs from --listen-ip)
   --rotate           Reuse an existing secondary directory and refresh credentials
 EOF
@@ -8530,7 +8535,7 @@ cmd_secondary() {
         fi
     fi
     # What: the channel's code is cloned, as on the primary
-    # Why: compose, SOT and the promote lock from one checkout
+    # Why: compose, SOT and promote lock from one checkout
     # From: Issue #1683
     channel_code_checkout "$LANCACHE_IMAGE_CHANNEL"
     SCRIPT_DIR="$CHANNEL_CODE_DIR"
