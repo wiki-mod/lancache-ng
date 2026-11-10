@@ -650,10 +650,10 @@ Setup example:
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/wiki-mod/lancache-ng/master/setup.sh) secondary \
-  --primary http://192.168.1.10:8080 \
+  --primary http://<primary-ip>:<ui-port> \
   --token <SECONDARY_REGISTRATION_TOKEN> \
   --name my-secondary \
-  --listen-ip 192.168.1.20
+  --listen-ip <dns-ip-of-this-secondary>
 ```
 
 The registration token is generated during primary setup and stored in `.env`.
