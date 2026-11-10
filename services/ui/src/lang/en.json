@@ -108,7 +108,7 @@
   "entry": "entry",
   "err_cache_fit": "cache size {x} does not fit; at most {y}",
   "err_hamster_empty": "enter addresses or a Steam app ID",
-  "err_ipv4": "enter a whole IPv4 address, e.g. 192.168.1.103",
+  "err_ipv4": "enter a whole IPv4 address, e.g. 192.0.2.10",
   "err_no_domain": "\"{x}\" is no domain name",
   "err_no_gib": "\"{x}\" is no whole GiB number",
   "err_password_min": "the password needs at least {x} characters",
