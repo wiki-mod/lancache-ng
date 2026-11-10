@@ -108,7 +108,7 @@
   "entry": "Eintrag",
   "err_cache_fit": "Cache-Größe {x} passt nicht; höchstens {y}",
   "err_hamster_empty": "Adressen oder eine Steam-App-ID eingeben",
-  "err_ipv4": "eine vollständige IPv4-Adresse eingeben, z. B. 192.168.1.103",
+  "err_ipv4": "eine vollständige IPv4-Adresse eingeben, z. B. 192.0.2.10",
   "err_no_domain": "\"{x}\" ist kein Domainname",
   "err_no_gib": "\"{x}\" ist keine ganze Zahl in GiB",
   "err_password_min": "das Passwort braucht mindestens {x} Zeichen",
