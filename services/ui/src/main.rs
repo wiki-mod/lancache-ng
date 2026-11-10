@@ -1015,13 +1015,7 @@ async fn domains(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     // What: HTTPS proxy IP when it is a second LAN IP.
     // Why: the copied command then sets the HTTPS DNS bind.
     // From: Issue #1683 | PR #1980
-    let https = s.text("IP_HTTPS").unwrap_or_default();
-    let own = !https.is_empty() && https != s.text("IP_HTTP")? && !https.starts_with("127.");
-    // What: no HTTPS part while HTTPS is off.
-    // Why: the field woke HTTPS that was off.
-    // From: Issue #1683 | PR #1980
-    let own = own && s.flag("HTTPS_ENABLED").unwrap_or(false);
-    ctx.insert("primary_ip_https", if own { https.as_str() } else { "" });
+    ctx.insert("primary_ip_https", &primary_https_ip(&s)?);
 
     // What: UI address on the LAN when none is set.
     // Why: live test: an empty --primary broke the command.
@@ -1280,6 +1274,19 @@ fn valid_peer_name(s: &Settings, name: &str) -> Result<bool, String> {
     Ok(!name.is_empty() && name.len() <= max && chars_ok)
 }
 
+// What: HTTPS proxy IP when HTTPS runs on a 2nd LAN IP.
+// Why: one rule for the DNS page and the secondary kit.
+// From: Issue #1683 | PR #1980
+fn primary_https_ip(s: &Settings) -> Result<String, String> {
+    let https = s.text("IP_HTTPS").unwrap_or_default();
+    let own = !https.is_empty() && https != s.text("IP_HTTP")? && !https.starts_with("127.");
+    // What: no HTTPS part while HTTPS is off.
+    // Why: the field woke HTTPS that was off.
+    // From: Issue #1683 | PR #1980
+    let own = own && s.flag("HTTPS_ENABLED").unwrap_or(false);
+    Ok(if own { https } else { String::new() })
+}
+
 // What: everything a new secondary needs.
 // Why: setup.sh secondary writes it to its env.
 // From: Issue #1683 | PR #1858
@@ -1288,6 +1295,10 @@ fn peer_kit(s: &Settings) -> Result<Value, String> {
     let primary = s.text("IP_HTTP")?;
     Ok(json!({
         "primary": primary,
+        // What: the primary's HTTPS proxy IP, else empty.
+        // Why: setup.sh offers the https DNS only then.
+        // From: Issue #1683
+        "primary_https": primary_https_ip(s)?,
         // What: the zones the primary serves.
         // Why: the secondary pulls each one by AXFR.
         // From: Issue #1683
