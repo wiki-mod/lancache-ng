@@ -31,7 +31,7 @@
             {{ <text_field label="Gateway" name="gateway" tone={tone} value={gateway} placeholder="192.168.1.1" required={true}/> }}
             {{ <text_field label={t.dns_server_1} name="dns_primary" tone={tone} value={dns_primary} placeholder="192.168.1.10" required={true}/> }}
             {{ <text_field label={t.dns_server_2} name="dns_secondary" tone={tone} value={dns_secondary} placeholder="192.168.1.11"/> }}
-            {{ <text_field label={t.ip_pool_start} name="pool_start" tone={tone} value={pool_start} placeholder="192.168.1.100" required={true}/> }}
+            {{ <text_field label={t.ip_pool_start} name="pool_start" tone={tone} value={pool_start} placeholder="192.0.2.100" required={true}/> }}
             {{ <text_field label={t.ip_pool_end} name="pool_end" tone={tone} value={pool_end} placeholder="192.168.1.200" required={true}/> }}
             {{ <text_field label={t.lease_time_s} name="lease_time" tone={tone} value={lease_time ~ ""}/> }}
             {{ <text_field label={t.dhcp_domain_label} name="domain" tone={tone} value={domain}/> }}
