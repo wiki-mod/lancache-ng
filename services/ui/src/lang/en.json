@@ -415,6 +415,7 @@
   "zone": "Zone",
   "zone_overview": "Zone overview",
   "search_zones": "Search zones",
+  "zone_overview_hint": "Each cell is the SOA serial number of the zone as loaded by that server. The primary column is the reference. Green: same serial as the primary (in sync). Red: different or missing serial, or server not reachable.",
   "zone_rollback_q": "Roll zone {x} back to this snapshot? Records added since the snapshot may be lost.",
   "zone_snapshots_rollback": "Zone snapshots & rollback",
   "dhcp_domain_label": "Domain",
