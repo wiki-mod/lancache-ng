@@ -712,25 +712,25 @@
     }
   }
 
-  // What: probe status code to German label and colour
-  // Why: renderHealth() shows one label per probe result
-  // From: Issue #1084
+  // What: health status word to label and colour
+  // Why: the server sends the worst state of all zones
+  // From: Issue #1683
   const HEALTH_LABELS = {
-    ok: [LC_T.ok_authoritative, 'text-green-400'],
-    not_authoritative: [LC_T.not_authoritative, 'text-amber-400'],
-    no_zone: [LC_T.zone_missing_refused, 'text-red-400'],
-    broken: [LC_T.error_servfail, 'text-red-400'],
-    unreachable: [LC_T.not_reachable, 'text-red-400'],
-    no_address: [LC_T.no_address_2, 'text-slate-500'],
+    in_sync: [LC_T.zones_in_sync, 'text-green-400'],
+    ahead: [LC_T.zone_ahead, 'text-amber-400'],
+    unknown: [LC_T.zone_serial_unknown, 'text-amber-400'],
+    behind: [LC_T.zone_behind, 'text-red-400'],
+    missing: [LC_T.zone_missing, 'text-red-400'],
     error: [LC_T.unexpected_answer, 'text-amber-400'],
+    unreachable: [LC_T.not_reachable, 'text-red-400'],
   };
 
-  // What: writes label, serial and detail of one probe
+  // What: writes label, zone count and per-zone detail
   // Why: one renderer for the click and the page-load run
   function renderHealth(span, data) {
     const [label, cls] = HEALTH_LABELS[data.status] || [LC_T.unknown, 'text-slate-500'];
     span.className = cls;
-    span.textContent = data.serial != null ? `${label} · Serial ${data.serial}` : label;
+    span.textContent = data.zones != null ? `${label} · ${data.zones} ${LC_T.zones}` : label;
     if (data.detail) span.title = data.detail;
   }
 
