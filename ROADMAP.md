@@ -30,8 +30,14 @@ Channels: `docs/combined-release-and-checklist.md`.
 | A second deployment profile besides `deploy/prod/` | Not intended |
 | Release `1.0.0` | Maintainer decision, no date |
 
-## Audit
+## Howto audit this file
 
-Procedure: `docs/policy/howto-audit-documentation.md`. This file states plans,
-not code facts; it is checked against the open issues and the referenced
-design document.
+The audit procedure of this file is `docs/policy/howto-audit-documentation.md`.
+
+### Special deviation
+
+| Field | Content |
+| --- | --- |
+| Step | 3 to 6 |
+| Reason | The file states plans, not code facts; its evidence is the state of the referenced issues and documents |
+| Replacement | Every row in "Intended work" names an issue label or a design document that exists. `gh issue list --label <label>` and `test -e <path>` give the state. A topic that is done is removed; an intended topic without a row is added. |
