@@ -2312,6 +2312,12 @@ pub mod pdns_conf {
                 out += &format!("{key}={value}\n");
             }
         }
+        // What: NOTIFY only to also-notify, not to NS.
+        // Why: port 53 of an NS host is a recursor.
+        // From: Issue #1683
+        if primary {
+            out += "only-notify=\n";
+        }
         Ok(out)
     }
 }
