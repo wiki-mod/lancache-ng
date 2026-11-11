@@ -1015,13 +1015,7 @@ async fn domains(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     // What: HTTPS proxy IP when it is a second LAN IP.
     // Why: the copied command then sets the HTTPS DNS bind.
     // From: Issue #1683 | PR #1980
-    let https = s.text("IP_HTTPS").unwrap_or_default();
-    let own = !https.is_empty() && https != s.text("IP_HTTP")? && !https.starts_with("127.");
-    // What: no HTTPS part while HTTPS is off.
-    // Why: the field woke HTTPS that was off.
-    // From: Issue #1683 | PR #1980
-    let own = own && s.flag("HTTPS_ENABLED").unwrap_or(false);
-    ctx.insert("primary_ip_https", if own { https.as_str() } else { "" });
+    ctx.insert("primary_ip_https", &primary_https_ip(&s)?);
 
     // What: UI address on the LAN when none is set.
     // Why: live test: an empty --primary broke the command.
@@ -1407,38 +1401,79 @@ async fn secondary_action(
 
 // What: SOA serial of one zone in a zone list.
 // Why: serials show whether a secondary is in sync.
-fn serial_of(zones: Vec<lancache_ng::pdns::Zone>, zone: &str) -> Option<u32> {
-    zones.into_iter().find(|z| z.name == zone).map(|z| z.serial)
+fn serial_of(zones: &[lancache_ng::pdns::Zone], zone: &str) -> Option<u32> {
+    zones.iter().find(|z| z.name == zone).map(|z| z.serial)
 }
 
-// What: LAN zone serial, primary vs secondary.
-// Why: shows a lost NOTIFY or AXFR (RFC 1982).
+// What: serial of each managed zone on both peers.
+// Why: shows a lost NOTIFY or AXFR in any zone (RFC 1982).
 // From: Issue #1683 | PR #1858
-async fn peer_serials(s: &Settings, address: &str) -> Result<(Option<u32>, Option<u32>), String> {
-    let zone = lan_zone(s)?;
+async fn peer_serials(s: &Settings, address: &str) -> Result<Vec<PeerZone>, String> {
     let port = s.uint("PDNS_AUTH_API_PORT")?;
     let url = format!("http://{address}:{port}/api/v1/servers/localhost");
     let key = secrets(s)?.pdns_api_key;
     let remote = lancache_ng::pdns::Api::new(http::client(s)?, &url, &key);
     let ours = pdns_api(s)?.zones().await?;
     let theirs = remote.zones().await?;
-    Ok((serial_of(ours, &zone), serial_of(theirs, &zone)))
+    Ok(lancache_ng::dns::managed_zones(s)?
+        .into_iter()
+        .map(|zone| PeerZone {
+            primary: serial_of(&ours, &zone),
+            secondary: serial_of(&theirs, &zone),
+            zone,
+        })
+        .collect())
 }
 
-// What: sync state and serial of one secondary.
-// Why: the secondaries page shows a status per peer.
-async fn secondary_health(s: &Settings, address: &str) -> Value {
-    match peer_serials(s, address).await {
-        Ok((Some(p), Some(r))) => {
-            let state = lancache_ng::dns::sync_state(p, r);
-            json!({"status": format!("{state:?}"), "serial": r})
-        }
-        Ok((_, r)) if r.is_none() => {
-            json!({"status": "missing", "detail": "zone not on secondary"})
-        }
-        Ok(_) => json!({"status": "error", "detail": "zone not on primary"}),
-        Err(e) => json!({"status": "unreachable", "detail": e}),
+// What: one managed zone with both serials.
+// Why: the health check reports every zone.
+// From: Issue #1683
+struct PeerZone {
+    zone: String,
+    primary: Option<u32>,
+    secondary: Option<u32>,
+}
+
+// What: state word of one zone; higher rank is worse.
+// Why: the peer status is the worst zone state.
+// From: Issue #1683
+fn zone_state(z: &PeerZone) -> (u8, &'static str) {
+    use lancache_ng::dns::Sync;
+    match (z.primary, z.secondary) {
+        (None, _) => (5, "error"),
+        (_, None) => (4, "missing"),
+        (Some(p), Some(r)) => match lancache_ng::dns::sync_state(p, r) {
+            Sync::InSync => (0, "in_sync"),
+            Sync::Ahead => (1, "ahead"),
+            Sync::Unknown => (2, "unknown"),
+            Sync::Behind => (3, "behind"),
+        },
     }
+}
+
+// What: worst state over all zones, each zone in detail.
+// Why: in sync only when every managed zone matches.
+// From: Issue #1683
+async fn secondary_health(s: &Settings, address: &str) -> Value {
+    let zones = match peer_serials(s, address).await {
+        Ok(z) => z,
+        Err(e) => return json!({"status": "unreachable", "detail": e}),
+    };
+    let mut worst = (0, "in_sync");
+    let mut lines = Vec::new();
+    for z in &zones {
+        let state = zone_state(z);
+        worst = worst.max(state);
+        let show = |v: Option<u32>| v.map_or_else(|| "-".to_string(), |n| n.to_string());
+        lines.push(format!(
+            "{}: {} (primary {}, secondary {})",
+            z.zone,
+            state.1,
+            show(z.primary),
+            show(z.secondary)
+        ));
+    }
+    json!({"status": worst.1, "zones": zones.len(), "detail": lines.join("\n")})
 }
 
 // What: flush recursor caches when a serial moves.
@@ -2922,6 +2957,19 @@ async fn ensure_primary_zones(s: &Settings) -> Result<(), String> {
     ensure_soa_nameserver(s, &api).await
 }
 
+// What: HTTPS IP when HTTPS runs on its own LAN IP.
+// Why: one rule for the DNS page and the ns2 record.
+// From: Issue #1683 | PR #1980
+fn primary_https_ip(s: &Settings) -> Result<String, String> {
+    let https = s.text("IP_HTTPS").unwrap_or_default();
+    let own = !https.is_empty() && https != s.text("IP_HTTP")? && !https.starts_with("127.");
+    // What: no HTTPS part while HTTPS is off.
+    // Why: the field woke HTTPS that was off.
+    // From: Issue #1683 | PR #1980
+    let own = own && s.flag("HTTPS_ENABLED").unwrap_or(false);
+    Ok(if own { https } else { String::new() })
+}
+
 // What: NS and A record for the SOA's nameserver.
 // Why: the SOA named ns1, but no record held that name.
 // From: Issue #1683
@@ -2933,13 +2981,44 @@ async fn ensure_soa_nameserver(s: &Settings, api: &lancache_ng::pdns::Api) -> Re
     for zone in lancache_ng::dns::managed_zones(s)? {
         ensure_rrset(api, &zone, &zone, "NS", ttl, std::slice::from_ref(&mname)).await?;
     }
-    // What: the A record only when ns1 is in the LAN zone.
+    // What: A and PTR only when ns1 is in the LAN zone.
     // Why: a foreign name has no home in a managed zone.
     // From: Issue #1683
     if mname.ends_with(&format!(".{lan}")) {
-        ensure_rrset(api, &lan, &mname, "A", ttl, &[s.text("IP_HTTP")?]).await?;
+        let ip = s.text("IP_HTTP")?;
+        ensure_rrset(api, &lan, &mname, "A", ttl, std::slice::from_ref(&ip)).await?;
+        ensure_ptr(s, api, &ip, &mname, ttl).await?;
+    }
+    // What: ns2 for the HTTPS IP: A and PTR, never NS.
+    // Why: HTTPS is optional and another resolver answers.
+    // From: Issue #1683
+    let https = primary_https_ip(s)?;
+    let ns2 = lancache_ng::dns::canonical_zone(&s.text("DNS_NS_HTTPS_NAME")?);
+    if !https.is_empty() && ns2.ends_with(&format!(".{lan}")) {
+        ensure_rrset(api, &lan, &ns2, "A", ttl, std::slice::from_ref(&https)).await?;
+        ensure_ptr(s, api, &https, &ns2, ttl).await?;
     }
     Ok(())
+}
+
+// What: PTR of an address in its managed reverse zone.
+// Why: a reverse zone the stack does not serve is left.
+// From: Issue #1683
+async fn ensure_ptr(
+    s: &Settings,
+    api: &lancache_ng::pdns::Api,
+    ip: &str,
+    host: &str,
+    ttl: u32,
+) -> Result<(), String> {
+    let rev = reverse_name(ip)?;
+    let Some(zone) = reverse_zone(s, &rev) else {
+        return Ok(());
+    };
+    if !lancache_ng::dns::managed_zones(s)?.contains(&zone) {
+        return Ok(());
+    }
+    ensure_rrset(api, &zone, &rev, "PTR", ttl, &[host.to_string()]).await
 }
 
 // What: writes one rrset only when it differs.
@@ -3684,4 +3763,40 @@ async fn main() -> Result<(), String> {
     )
     .await
     .map_err(|e| e.to_string())
+}
+
+// What: state rank of one zone and the worst-of rule.
+// Why: in sync only when every managed zone matches.
+// From: Issue #1683
+#[cfg(test)]
+mod tests {
+    use super::{PeerZone, zone_state};
+
+    fn zone(primary: Option<u32>, secondary: Option<u32>) -> PeerZone {
+        PeerZone {
+            zone: "lan.".to_string(),
+            primary,
+            secondary,
+        }
+    }
+
+    #[test]
+    fn zone_state_names_each_case() {
+        assert_eq!(zone_state(&zone(Some(3), Some(3))).1, "in_sync");
+        assert_eq!(zone_state(&zone(Some(3), Some(4))).1, "ahead");
+        assert_eq!(zone_state(&zone(Some(4), Some(3))).1, "behind");
+        assert_eq!(zone_state(&zone(Some(3), None)).1, "missing");
+        assert_eq!(zone_state(&zone(None, Some(3))).1, "error");
+    }
+
+    #[test]
+    fn one_lagging_zone_decides_the_status() {
+        let zones = [
+            zone(Some(3), Some(3)),
+            zone(Some(5), Some(4)),
+            zone(Some(1), Some(1)),
+        ];
+        let worst = zones.iter().map(zone_state).max().map(|s| s.1);
+        assert_eq!(worst, Some("behind"));
+    }
 }
