@@ -513,6 +513,7 @@
         <label for="zone-search">{{ t.search_zones }}</label>
         <input type="search" id="zone-search" autocomplete="off">
       </div>
+      <p class="field-hint">{{ t.zone_overview_hint }}</p>
       <div class="overflow-x-auto">
         <table class="table" id="zone-overview">
           <thead><tr id="zone-overview-head"></tr></thead>
@@ -573,7 +574,7 @@
   }
 
   // What: fills the zone table: zone, then one serial each
-  // Why: a serial unlike the primary's is marked red
+  // Why: green equals the primary's serial, red differs
   // From: Issue #1683
   async function loadZoneOverview() {
     const head = document.getElementById('zone-overview-head');
@@ -608,7 +609,8 @@
       r.serials.forEach((serial, i) => {
         const cell = row.insertCell();
         cell.textContent = serial == null ? '–' : serial;
-        if (i > 0 && !data.columns[i].error && serial !== r.serials[0]) cell.className = 'text-red-400';
+        if (i === 0) cell.className = 'font-semibold';
+        else if (!data.columns[i].error) cell.className = serial === r.serials[0] && serial != null ? 'text-green-400' : 'text-red-400';
       });
     });
     filterZoneOverview();
