@@ -38,6 +38,7 @@
     <button type="button" data-dns-tab="cdn" class="subtab dns-tab-btn">{{ t.cached_domains }}</button>
     <button type="button" data-dns-tab="primary" class="subtab dns-tab-btn">{{ t.primary_dns }}</button>
     <button type="button" data-dns-tab="secondary" class="subtab dns-tab-btn">{{ t.secondary_dns }}</button>
+    <button type="button" data-dns-tab="overview" class="subtab dns-tab-btn">{{ t.zone_overview }}</button>
     <button type="button" data-dns-tab="settings" class="subtab dns-tab-btn">{{ t.settings }}</button>
   </div>
 
@@ -169,7 +170,7 @@
         </div>
         <div class="field" style="margin-bottom:0; flex:1;">
           <label for="lan-content">{{ t.content }}</label>
-          <input type="text" id="lan-content" name="content" placeholder="192.168.1.50" required data-lan-record-content>
+          <input type="text" id="lan-content" name="content" placeholder="192.0.2.50" required data-lan-record-content>
         </div>
         {# What: also add the PTR for type A
            Why: DoMe 31.10.: PTR from the LAN entries
@@ -333,7 +334,7 @@
       <form action="{{ routes.setup_save | safe }}" method="post">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <input type="hidden" name="back" value="{{ pages.domains }}">
-        <div class="field"><label for="up-servers">{{ t.upstream_servers }}</label><input id="up-servers" name="DNS_UPSTREAM_SERVERS" placeholder="192.168.1.23 192.168.1.22" value="{{ v.DNS_UPSTREAM_SERVERS }}"></div>
+        <div class="field"><label for="up-servers">{{ t.upstream_servers }}</label><input id="up-servers" name="DNS_UPSTREAM_SERVERS" placeholder="192.0.2.23 192.0.2.22" value="{{ v.DNS_UPSTREAM_SERVERS }}"></div>
         <div class="field"><label for="up-zones">{{ t.upstream_zones }}</label><input id="up-zones" name="DNS_UPSTREAM_ZONES" placeholder="firma.local" value="{{ v.DNS_UPSTREAM_ZONES }}"></div>
         <div class="field"><label for="up-unsigned">{{ t.upstream_unsigned }}</label><input id="up-unsigned" name="DNS_UPSTREAM_UNSIGNED_ZONES" placeholder="firma.local" value="{{ v.DNS_UPSTREAM_UNSIGNED_ZONES }}"></div>
         <button type="submit" class="btn">{{ t.save }}</button>
@@ -503,6 +504,22 @@
         <p class="field-hint">{{ t.if_port_53_on_that_box }} <code>--listen-ip</code>{{ t.the_installer_shows_the_conflict_instead }}</p>
       </div>
     </section>
+
+    {# What: loaded serial of each zone on every server
+       Why: one table shows a lagging zone on any secondary
+       From: Issue #1683 #}
+    <section data-dns-panel="overview">
+      <div class="field" style="max-width:320px;">
+        <label for="zone-search">{{ t.search_zones }}</label>
+        <input type="search" id="zone-search" autocomplete="off">
+      </div>
+      <div class="overflow-x-auto">
+        <table class="table" id="zone-overview">
+          <thead><tr id="zone-overview-head"></tr></thead>
+          <tbody id="zone-overview-body"></tbody>
+        </table>
+      </div>
+    </section>
   </div>
 
 </div>
@@ -541,8 +558,10 @@
   const DNS_PANEL_TAB = {
     cdn: 'cdn', lan: 'primary', ptr: 'primary',
     settings: 'settings', zones: 'settings', secondary: 'secondary',
+    overview: 'overview',
   };
   function setActiveDnsTab(tabName) {
+    if (tabName === 'overview') loadZoneOverview();
     document.querySelectorAll('[data-dns-panel]').forEach((panel) => {
       panel.classList.toggle('hidden', DNS_PANEL_TAB[panel.dataset.dnsPanel] !== tabName);
     });
@@ -552,6 +571,60 @@
     });
     try { sessionStorage.setItem('dnsTab', tabName); } catch (e) { /* storage blocked */ }
   }
+
+  // What: fills the zone table: zone, then one serial each
+  // Why: a serial unlike the primary's is marked red
+  // From: Issue #1683
+  async function loadZoneOverview() {
+    const head = document.getElementById('zone-overview-head');
+    const body = document.getElementById('zone-overview-body');
+    if (!head || !body) return;
+    body.replaceChildren();
+    let data;
+    try {
+      const response = await fetch('{{ routes.zone_overview | safe }}');
+      if (!response.ok) throw new Error(response.status);
+      data = await response.json();
+    } catch (error) {
+      head.replaceChildren();
+      const row = body.insertRow();
+      row.insertCell().textContent = LC_T.js_error_x.replace('{x}', error.message);
+      return;
+    }
+    head.replaceChildren();
+    const first = document.createElement('th');
+    first.textContent = LC_T.zone;
+    head.appendChild(first);
+    data.columns.forEach((c) => {
+      const th = document.createElement('th');
+      th.textContent = c.name;
+      if (c.error) { th.className = 'text-red-400'; th.title = c.error; th.textContent += ' (' + LC_T.not_reachable + ')'; }
+      head.appendChild(th);
+    });
+    data.rows.forEach((r) => {
+      const row = body.insertRow();
+      row.dataset.zone = r.zone;
+      row.insertCell().textContent = r.zone;
+      r.serials.forEach((serial, i) => {
+        const cell = row.insertCell();
+        cell.textContent = serial == null ? '–' : serial;
+        if (i > 0 && !data.columns[i].error && serial !== r.serials[0]) cell.className = 'text-red-400';
+      });
+    });
+    filterZoneOverview();
+  }
+
+  // What: shows only rows whose zone name holds the text
+  // Why: many reverse zones make the table long
+  // From: Issue #1683
+  function filterZoneOverview() {
+    const input = document.getElementById('zone-search');
+    const text = input ? input.value.trim().toLowerCase() : '';
+    document.querySelectorAll('#zone-overview-body tr[data-zone]').forEach((row) => {
+      row.hidden = text !== '' && !row.dataset.zone.toLowerCase().includes(text);
+    });
+  }
+  document.getElementById('zone-search').addEventListener('input', filterZoneOverview);
 
   // What: puts the typed name into the install command
   // Why: no placeholder is left in the copied command
@@ -625,7 +698,7 @@
   // Why: each type has its own content format.
   // From: Issue #1683 | PR #1980
   const lanExamples = {
-    A: '192.168.1.50', AAAA: 'fd00::50', CNAME: 'nas.{{ lan_zone }}.',
+    A: '192.0.2.50', AAAA: 'fd00::50', CNAME: 'nas.{{ lan_zone }}.',
     MX: '10 mail.{{ lan_zone }}.', TXT: '"some text"',
     SRV: '10 5 5060 sip.{{ lan_zone }}.', CAA: '0 issue "letsencrypt.org"',
     HTTPS: '1 . alpn=h2', SVCB: '1 . alpn=h2',
