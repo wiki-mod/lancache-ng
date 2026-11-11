@@ -21,12 +21,12 @@ Channels: `docs/combined-release-and-checklist.md`.
 | --- | --- |
 | Find and fix bugs | issues with the label `bug` |
 | WireGuard remote LAN access | `docs/design-plannings/design-wireguard-remote-access.md` |
-
-## Not decided
-
-| Topic | State |
-| --- | --- |
-| Delegation of the LAN zones by another DNS server (NS records) | Port 53 is the recursor; a query without recursion desired is refused, so an NS delegation to lancache-ng fails. Options: a DNS proxy on port 53 (for example dnsdist), another way, or another DNS service. Not decided. |
+| DNS proxy dnsdist on port 53 in the dns image: client, authoritative, NOTIFY and AXFR traffic on one port; the real client IP reaches recursor and pdns by proxy protocol | `services/dns/Dockerfile` |
+| Downloads per device: amount from the cache (HIT) and from the internet (MISS) | nginx access log of the proxy |
+| Device names instead of IP addresses in these views | DHCP leases, PTR records |
+| Devices that hold a DHCP lease but never query the lancache DNS | DHCP leases, recursor query log |
+| HTTP or HTTPS mode per device, with TLS errors that point to a missing CA certificate | recursor query log on `IP_HTTPS`, nginx error log |
+| DNS queries per device | recursor query log |
 
 ## Not intended
 
@@ -46,4 +46,4 @@ The audit procedure of this file is `docs/policy/howto-audit-documentation.md`.
 | --- | --- |
 | Step | 3 to 6 |
 | Reason | The file states plans, not code facts; its evidence is the state of the referenced issues and documents |
-| Replacement | Every row in "Intended work" names an issue label or a design document that exists. `gh issue list --label <label>` and `test -e <path>` give the state. A topic that is done is removed; an intended topic without a row is added. |
+| Replacement | Every row in "Intended work" names an issue label, a design document or file, or the data source the topic builds on. `gh issue list --label <label>` and `test -e <path>` give the state. A topic that is done is removed; an intended topic without a row is added. |
