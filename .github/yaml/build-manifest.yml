@@ -674,6 +674,10 @@ runtime:
     - UI_ROUTE_SECONDARY_ROTATE=/api/secondary/{name}/rotate
     - UI_ROUTE_SECONDARY_HEALTH=/api/secondary/{name}/health
     - UI_ROUTE_SECONDARY_ADDRESS=/api/secondary/{name}/address
+    # What: serial of each zone on primary and secondaries.
+    # Why: the DNS page shows one zone overview table.
+    # From: Issue #1683
+    - UI_ROUTE_ZONE_OVERVIEW=/api/zones/overview
     - UI_ROUTE_DHCP_MODE=/dhcp/mode
     - UI_ROUTE_DHCP_DDNS=/dhcp/ddns
     - UI_ROUTE_DHCP_PROXY=/dhcp/proxy
