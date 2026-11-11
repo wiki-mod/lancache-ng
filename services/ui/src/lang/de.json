@@ -415,6 +415,7 @@
   "zone": "Zone",
   "zone_overview": "Zonenübersicht",
   "search_zones": "Zonen suchen",
+  "zone_overview_hint": "Jede Zelle ist die SOA-Seriennummer der Zone, wie sie der jeweilige Server geladen hat. Die Spalte Primary ist der Maßstab. Grün: dieselbe Seriennummer wie der Primary (synchron). Rot: abweichende oder fehlende Seriennummer, oder Server nicht erreichbar.",
   "zone_rollback_q": "Zone {x} auf diesen Snapshot zurückrollen? Seit dem Snapshot hinzugekommene Einträge können dabei verloren gehen.",
   "zone_snapshots_rollback": "Zonen-Sicherungen & Zurücksetzen",
   "dhcp_domain_label": "Domain",
