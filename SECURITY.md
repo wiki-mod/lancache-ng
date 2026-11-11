@@ -2,8 +2,10 @@
 
 ## Reporting a vulnerability
 
-Report vulnerabilities privately through
-[GitHub Security Advisories](https://github.com/wiki-mod/lancache-ng/security/advisories).
+Report vulnerabilities privately to the repository owner:
+
+- **GitHub**: Please open a private security advisory via [GitHub Security Advisories](https://github.com/wiki-mod/lancache-ng/security/advisories)
+
 Do not open a public issue for a vulnerability.
 
 A report contains:
