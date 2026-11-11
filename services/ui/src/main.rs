@@ -1409,12 +1409,8 @@ fn serial_of(zones: &[lancache_ng::pdns::Zone], zone: &str) -> Option<u32> {
 // Why: shows a lost NOTIFY or AXFR in any zone (RFC 1982).
 // From: Issue #1683 | PR #1858
 async fn peer_serials(s: &Settings, address: &str) -> Result<Vec<PeerZone>, String> {
-    let port = s.uint("PDNS_AUTH_API_PORT")?;
-    let url = format!("http://{address}:{port}/api/v1/servers/localhost");
-    let key = secrets(s)?.pdns_api_key;
-    let remote = lancache_ng::pdns::Api::new(http::client(s)?, &url, &key);
     let ours = pdns_api(s)?.zones().await?;
-    let theirs = remote.zones().await?;
+    let theirs = remote_zones(s, address).await?;
     Ok(lancache_ng::dns::managed_zones(s)?
         .into_iter()
         .map(|zone| PeerZone {
@@ -1423,6 +1419,47 @@ async fn peer_serials(s: &Settings, address: &str) -> Result<Vec<PeerZone>, Stri
             zone,
         })
         .collect())
+}
+
+// What: zone list of one secondary pdns API.
+// Why: health check and zone overview read the same.
+// From: Issue #1683
+async fn remote_zones(s: &Settings, address: &str) -> Result<Vec<lancache_ng::pdns::Zone>, String> {
+    let port = s.uint("PDNS_AUTH_API_PORT")?;
+    let url = format!("http://{address}:{port}/api/v1/servers/localhost");
+    let key = secrets(s)?.pdns_api_key;
+    lancache_ng::pdns::Api::new(http::client(s)?, &url, &key)
+        .zones()
+        .await
+}
+
+// What: serial table: managed zones, primary, secondaries.
+// Why: one overview of the loaded serial on each server.
+// From: Issue #1683
+async fn zone_overview(State(app): Shared) -> Page {
+    let s = app.settings();
+    let mut columns = vec![json!({"name": "Primary", "error": Value::Null})];
+    let mut lists = vec![pdns_api(&s)?.zones().await?];
+    for (name, address) in secondaries(&s) {
+        match remote_zones(&s, &address).await {
+            Ok(z) => {
+                columns.push(json!({"name": name, "error": Value::Null}));
+                lists.push(z);
+            }
+            Err(e) => {
+                columns.push(json!({"name": name, "error": e}));
+                lists.push(Vec::new());
+            }
+        }
+    }
+    let rows: Vec<Value> = lancache_ng::dns::managed_zones(&s)?
+        .into_iter()
+        .map(|zone| {
+            let serials: Vec<Option<u32>> = lists.iter().map(|l| serial_of(l, &zone)).collect();
+            json!({"zone": zone, "serials": serials})
+        })
+        .collect();
+    Ok(axum::Json(json!({"columns": columns, "rows": rows})).into_response())
 }
 
 // What: one managed zone with both serials.
@@ -3635,6 +3672,7 @@ fn router(app: Arc<App>) -> Result<Router, String> {
         .route(&p("UI_PAGE_STATS")?, get(stats))
         .route(&p("UI_ROUTE_STATS_GRAPH")?, get(graph))
         .route(&p("UI_ROUTE_WATCHDOG_STATUS")?, get(status))
+        .route(&p("UI_ROUTE_ZONE_OVERVIEW")?, get(zone_overview))
         .route(&p("UI_ROUTE_DESIRED_STATE")?, post(container_state))
         .route(&p("UI_ROUTE_RESTART_UI")?, post(restart_ui))
         .route(&p("UI_ROUTE_SERVICE_ACTION")?, post(service_action));
