@@ -1030,6 +1030,10 @@ runtime:
     # From: Issue #1683 | PR #1858
     - PDNS_LAUNCH=gsqlite3
     - PDNS_DEFAULT_SOA=ns1.@DHCP_DOMAIN@ hostmaster.@DHCP_DOMAIN@ 0 30 10 604800 300
+    # What: name of the HTTPS IP, A and PTR, never NS.
+    # Why: HTTPS is optional; ns1 is the name server.
+    # From: Issue #1683
+    - DNS_NS_HTTPS_NAME=ns2.@DHCP_DOMAIN@
     - PDNS_DNSUPDATE_FROM=@PRIVATE_NETS@
     - PDNS_LISTEN=0.0.0.0
     - PDNS_PRIMARY_API_URL=http://@DNS_SERVICE@:@PDNS_AUTH_API_PORT@/api/v1/servers/localhost
@@ -1350,6 +1354,7 @@ runtime:
     - PDNS_DATABASE=path;;;restart;dns
     - PDNS_LAUNCH=text;;;restart;dns
     - PDNS_DEFAULT_SOA=text;;;restart;dns
+    - DNS_NS_HTTPS_NAME=text;;;live;ui
     - PDNS_DNSUPDATE_FROM=list?;;;restart;dns
     - PDNS_LISTEN=list;;;restart;dns
     - PDNS_PRIMARY_API_URL=text?;;;live;services
