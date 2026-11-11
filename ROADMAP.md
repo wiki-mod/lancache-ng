@@ -27,6 +27,8 @@ Channels: `docs/combined-release-and-checklist.md`.
 | Devices that hold a DHCP lease but never query the lancache DNS | DHCP leases, recursor query log |
 | HTTP or HTTPS mode per device, with TLS errors that point to a missing CA certificate | recursor query log on `IP_HTTPS`, nginx error log |
 | DNS queries per device | recursor query log |
+| CacheHamster: prefill over HTTPS for HTTPS caching | `services/cachehamster/` |
+| CacheHamster: platforms besides Steam | `services/cachehamster/` |
 
 ## Not intended
 
