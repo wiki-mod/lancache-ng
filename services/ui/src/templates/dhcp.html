@@ -27,12 +27,12 @@
 {# Why: add and edit forms differ only in values and tone #}
 {# From: Issue #1683 | PR #1912 #}
 {% component subnet_fields(t, tone, ntp_auto, ntp_url, lease_time, subnet="", gateway="", dns_primary="", dns_secondary="", pool_start="", pool_end="", domain="", ntp_servers="") %}<div class="grid grid-cols-2 gap-3">
-            {{ <text_field label={t.subnet_cidr} name="subnet" tone={tone} value={subnet} placeholder="192.168.1.0/24" required={true}/> }}
-            {{ <text_field label="Gateway" name="gateway" tone={tone} value={gateway} placeholder="192.168.1.1" required={true}/> }}
-            {{ <text_field label={t.dns_server_1} name="dns_primary" tone={tone} value={dns_primary} placeholder="192.168.1.10" required={true}/> }}
-            {{ <text_field label={t.dns_server_2} name="dns_secondary" tone={tone} value={dns_secondary} placeholder="192.168.1.11"/> }}
+            {{ <text_field label={t.subnet_cidr} name="subnet" tone={tone} value={subnet} placeholder="192.0.2.0/24" required={true}/> }}
+            {{ <text_field label="Gateway" name="gateway" tone={tone} value={gateway} placeholder="192.0.2.1" required={true}/> }}
+            {{ <text_field label={t.dns_server_1} name="dns_primary" tone={tone} value={dns_primary} placeholder="192.0.2.10" required={true}/> }}
+            {{ <text_field label={t.dns_server_2} name="dns_secondary" tone={tone} value={dns_secondary} placeholder="192.0.2.11"/> }}
             {{ <text_field label={t.ip_pool_start} name="pool_start" tone={tone} value={pool_start} placeholder="192.0.2.100" required={true}/> }}
-            {{ <text_field label={t.ip_pool_end} name="pool_end" tone={tone} value={pool_end} placeholder="192.168.1.200" required={true}/> }}
+            {{ <text_field label={t.ip_pool_end} name="pool_end" tone={tone} value={pool_end} placeholder="192.0.2.200" required={true}/> }}
             {{ <text_field label={t.lease_time_s} name="lease_time" tone={tone} value={lease_time ~ ""}/> }}
             {{ <text_field label={t.dhcp_domain_label} name="domain" tone={tone} value={domain}/> }}
             <div class="col-span-2">
@@ -151,14 +151,14 @@
         <form method="post" action="{{ routes.dhcp_proxy | safe }}" class="space-y-3 rounded border border-amber-500/30 bg-slate-900/50 p-4">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <div class="grid gap-3 md:grid-cols-2">
-            {{ <text_field label={t.proxy_subnet_start} name="dhcp_subnet_start" value={dhcp_proxy_subnet_start} placeholder="192.168.1.0"/> }}
-            {{ <text_field label={t.dns_server_1} name="dhcp_dns_primary" value={dhcp_dns_primary} placeholder="192.168.1.10"/> }}
-            {{ <text_field label={t.dns_server_2} name="dhcp_dns_secondary" value={dhcp_dns_secondary} placeholder="192.168.1.11"/> }}
-            {{ <text_field label={t.router_gateway_option_optional_pxe_scope} name="dhcp_proxy_router" value={dhcp_proxy_router} placeholder="192.168.1.1"/> }}
-            {{ <text_field label={t.ntp_servers_optional_pxe_scoped} name="dhcp_ntp_servers" value={dhcp_ntp_servers} placeholder="192.168.1.20, 192.168.1.21"/> }}
+            {{ <text_field label={t.proxy_subnet_start} name="dhcp_subnet_start" value={dhcp_proxy_subnet_start} placeholder="192.0.2.0"/> }}
+            {{ <text_field label={t.dns_server_1} name="dhcp_dns_primary" value={dhcp_dns_primary} placeholder="192.0.2.10"/> }}
+            {{ <text_field label={t.dns_server_2} name="dhcp_dns_secondary" value={dhcp_dns_secondary} placeholder="192.0.2.11"/> }}
+            {{ <text_field label={t.router_gateway_option_optional_pxe_scope} name="dhcp_proxy_router" value={dhcp_proxy_router} placeholder="192.0.2.1"/> }}
+            {{ <text_field label={t.ntp_servers_optional_pxe_scoped} name="dhcp_ntp_servers" value={dhcp_ntp_servers} placeholder="192.0.2.20, 192.0.2.21"/> }}
             {{ <text_field label={t.domain_option_optional_pxe_scoped} name="dhcp_proxy_domain" value={dhcp_proxy_domain} placeholder={dhcp_domain}/> }}
             {{ <text_field label={t.pxe_boot_filename_optional} name="dhcp_proxy_boot_filename" value={dhcp_proxy_boot_filename} placeholder="pxelinux.0"/> }}
-            {{ <text_field label={t.pxe_boot_server_address_optional} name="dhcp_proxy_boot_server" value={dhcp_proxy_boot_server} placeholder="192.168.1.5"/> }}
+            {{ <text_field label={t.pxe_boot_server_address_optional} name="dhcp_proxy_boot_server" value={dhcp_proxy_boot_server} placeholder="192.0.2.5"/> }}
             <div class="col-span-2">
               <label class="block text-xs text-slate-400 mb-1">{{ t.additional_safe_custom_options_optional }}</label>
               <textarea name="dhcp_proxy_custom_options" rows="3" placeholder="60:PXEClient&#10;93:0"
@@ -184,8 +184,8 @@
         <form method="post" action="{{ routes.dhcp_relay | safe }}" class="space-y-3 rounded border border-sky-500/30 bg-slate-900/50 p-4">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <div class="grid gap-3 md:grid-cols-2">
-            {{ <text_field label={t.relay_local_address_this_relay_s} name="dhcp_relay_local_addr" value={dhcp_relay_local_addr} placeholder="192.168.1.2"/> }}
-            {{ <text_field label={t.upstream_dhcp_server} name="upstream_dhcp_ip" value={dhcp_upstream_dhcp_ip} placeholder="192.168.1.1" required={true}/> }}
+            {{ <text_field label={t.relay_local_address_this_relay_s} name="dhcp_relay_local_addr" value={dhcp_relay_local_addr} placeholder="192.0.2.2"/> }}
+            {{ <text_field label={t.upstream_dhcp_server} name="upstream_dhcp_ip" value={dhcp_upstream_dhcp_ip} placeholder="192.0.2.1" required={true}/> }}
           </div>
           <button type="submit"
                   class="btn btn-sky">
@@ -410,7 +410,7 @@
           </select>
         </div>
         {{ <text_field label={t.mac_address} name="mac" tone={raised_tone} placeholder="AA:BB:CC:DD:EE:FF" required={true}/> }}
-        {{ <text_field label={t.ip_address} name="ip" tone={raised_tone} placeholder="192.168.1.50" required={true}/> }}
+        {{ <text_field label={t.ip_address} name="ip" tone={raised_tone} placeholder="192.0.2.50" required={true}/> }}
         {{ <text_field label="Hostname" name="hostname" tone={raised_tone} placeholder="mydevice"/> }}
       </div>
       <p class="text-xs text-slate-500">{{ t.the_reservation_uses_simple_fields_extra }}</p>
