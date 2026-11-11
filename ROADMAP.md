@@ -22,6 +22,12 @@ Channels: `docs/combined-release-and-checklist.md`.
 | Find and fix bugs | issues with the label `bug` |
 | WireGuard remote LAN access | `docs/design-plannings/design-wireguard-remote-access.md` |
 
+## Not decided
+
+| Topic | State |
+| --- | --- |
+| Delegation of the LAN zones by another DNS server (NS records) | Port 53 is the recursor; a query without recursion desired is refused, so an NS delegation to lancache-ng fails. Options: a DNS proxy on port 53 (for example dnsdist), another way, or another DNS service. Not decided. |
+
 ## Not intended
 
 | Topic | State |
