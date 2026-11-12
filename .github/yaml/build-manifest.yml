@@ -680,6 +680,13 @@ runtime:
     - UI_ROUTE_SECONDARY_ROTATE=/api/secondary/{name}/rotate
     - UI_ROUTE_SECONDARY_HEALTH=/api/secondary/{name}/health
     - UI_ROUTE_SECONDARY_ADDRESS=/api/secondary/{name}/address
+    # What: NS entry of one secondary by hand.
+    # Why: a taken out NS comes back only this way.
+    # From: Issue #1683
+    - UI_ROUTE_SECONDARY_NS_ADD=/api/secondary/{name}/ns-add
+    - UI_ROUTE_SECONDARY_NS_REMOVE=/api/secondary/{name}/ns-remove
+    - UI_ROUTE_SECONDARY_NS_SWITCH=/domains/secondary-ns
+    - UI_ROUTE_SECONDARY_NS_AUTO=/domains/secondary-ns-auto
     # What: serial of each zone on primary and secondaries.
     # Why: the DNS page shows one zone overview table.
     # From: Issue #1683
@@ -1005,6 +1012,29 @@ runtime:
     - DNS_TXT_MAX_BYTES=255
     - DNS_SECONDARIES=
     - DNS_SECONDARY_ZONES=
+    # What: secondaries as NS records; off by default.
+    # Why: a dead NS slows every resolver that asks it.
+    # From: Issue #1683
+    - DNS_SECONDARY_NS_ENABLED=0
+    # What: NS removal of a dead secondary; off.
+    # Why: removal is a choice of the admin.
+    # From: Issue #1683
+    - DNS_SECONDARY_NS_AUTO_REMOVE=0
+    # What: names entered as NS; names taken out.
+    # Why: a taken out name comes back only by hand.
+    # From: Issue #1683
+    - DNS_SECONDARY_NS=
+    - DNS_SECONDARY_NS_OFF=
+    # What: check every 4 h, hourly while one fails.
+    # Why: serials via the pdns-API; a lag is pulled.
+    # From: Issue #1683
+    - DNS_SECONDARY_CHECK_SECONDS=14400
+    - DNS_SECONDARY_RECHECK_SECONDS=3600
+    # What: NS removal after 8 h and 3 failed checks.
+    # Why: one short outage must not remove an NS.
+    # From: Issue #1683
+    - DNS_SECONDARY_NS_REMOVE_AFTER_SECONDS=28800
+    - DNS_SECONDARY_NS_REMOVE_FAILS=3
     - DNS_SERVE_RFC1918=1
     # What: compose service name of the dns container.
     # Why: names differ per compose project; services stay.
@@ -1311,6 +1341,14 @@ runtime:
     - DNS_TXT_MAX_BYTES=uint;1;255;live;ui
     - DNS_REPLICATION_ROLE=choice;primary,secondary;;recreate;dns
     - DNS_SECONDARIES=list?;;;restart;dns
+    - DNS_SECONDARY_CHECK_SECONDS=uint;60;604800;live;ui
+    - DNS_SECONDARY_NS=list?;;;live;ui
+    - DNS_SECONDARY_NS_AUTO_REMOVE=bool;;;live;ui
+    - DNS_SECONDARY_NS_ENABLED=bool;;;live;ui
+    - DNS_SECONDARY_NS_OFF=list?;;;live;ui
+    - DNS_SECONDARY_NS_REMOVE_AFTER_SECONDS=uint;60;2592000;live;ui
+    - DNS_SECONDARY_NS_REMOVE_FAILS=uint;1;1000;live;ui
+    - DNS_SECONDARY_RECHECK_SECONDS=uint;60;86400;live;ui
     - DNS_SECONDARY_ZONES=list?;;;restart;dns
     - DNS_SERVE_RFC1918=bool;;;restart;dns
     - DNS_SNAPSHOT_DIR=path;;;live;ui
