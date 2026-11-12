@@ -456,7 +456,36 @@
       {# What: registered secondaries with their actions #}
       {# Why: health, address, token and removal per row #}
       <div data-sec-panel="settings">
-        <div class="section-title" style="margin-top:0;">{{ t.connected_secondaries }}</div>
+        {# What: switch 1 (NS entry) and switch 2 (removal)
+           Why: both off by default; the admin decides
+           From: Issue #1683 #}
+        <form action="{{ routes.secondary_ns_switch | safe }}" method="post">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <div class="toggle-row">
+            <div>
+              <div class="t-label">{{ t.secondary_ns_switch }}</div>
+              <div class="t-desc">{{ t.secondary_ns_switch_desc | replace(from="{every}", to=secondary_check_every) }}</div>
+            </div>
+            <label class="toggle">
+              <input type="checkbox" name="enabled" value="1" {% if secondary_ns_enabled %}checked{% endif %} onchange="this.form.requestSubmit()">
+              <span class="track"></span><span class="knob"></span>
+            </label>
+          </div>
+        </form>
+        <form action="{{ routes.secondary_ns_auto | safe }}" method="post">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <div class="toggle-row">
+            <div>
+              <div class="t-label">{{ t.secondary_ns_auto }}</div>
+              <div class="t-desc">{{ t.secondary_ns_auto_desc | replace(from="{after}", to=secondary_ns_after) | replace(from="{fails}", to=secondary_ns_fails ~ "") | replace(from="{recheck}", to=secondary_recheck_every) }}</div>
+            </div>
+            <label class="toggle">
+              <input type="checkbox" name="enabled" value="1" {% if secondary_ns_auto %}checked{% endif %} onchange="this.form.requestSubmit()">
+              <span class="track"></span><span class="knob"></span>
+            </label>
+          </div>
+        </form>
+        <div class="section-title">{{ t.connected_secondaries }}</div>
         {% if secondaries %}
         {% for secondary in secondaries %}
         <div class="snapshot-row">
@@ -466,6 +495,15 @@
           </div>
           <div class="snapshot-actions">
             <span class="tag off" id="health-{{ secondary.name }}">–</span>
+            {% if secondary_ns_enabled %}
+            {% if secondary.ns == "in" %}
+            <span class="tag">{{ t.ns_entered }}</span>
+            <a href="#" onclick="secondaryNs('{{ routes.secondary_ns_remove | safe }}', '{{ secondary.name }}'); return false;">{{ t.ns_remove }}</a>
+            {% else %}
+            <span class="tag off">{% if secondary.ns == "off" %}{{ t.ns_taken_out }}{% else %}{{ t.ns_not_entered }}{% endif %}</span>
+            <a href="#" onclick="secondaryNs('{{ routes.secondary_ns_add | safe }}', '{{ secondary.name }}'); return false;">{{ t.ns_add }}</a>
+            {% endif %}
+            {% endif %}
             <a href="#" onclick="checkSecondaryHealth('{{ secondary.name }}'); return false;">{{ t.check }}</a>
             <a href="#" onclick="editSecondaryAddress('{{ secondary.name }}', '{{ secondary.address | default(value='') }}'); return false;">{{ t.edit_address }}</a>
             <a href="#" onclick="rotateToken('{{ secondary.name }}'); return false;" style="color:var(--mist);">{{ t.rotate_token }}</a>
@@ -755,6 +793,25 @@
         alert(LC_T.js_token_renewed_x.replace('{x}', name));
       } else {
         alert(LC_T.js_token_renew_failed_x.replace('{x}', response.statusText));
+      }
+    } catch (error) {
+      alert(LC_T.js_error_x.replace('{x}', error.message));
+    }
+  }
+
+  // What: POST NS add or remove of one secondary
+  // Why: the server checks aa; its error text is shown
+  // From: Issue #1683
+  async function secondaryNs(route, name) {
+    try {
+      const response = await fetch(route.replace('{name}', name), {
+        method: 'POST',
+        headers: { 'X-CSRF-Token': CSRF_TOKEN }
+      });
+      if (response.ok) {
+        location.reload();
+      } else {
+        alert(LC_T.js_error_x.replace('{x}', await response.text()));
       }
     } catch (error) {
       alert(LC_T.js_error_x.replace('{x}', error.message));
