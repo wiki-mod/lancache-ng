@@ -241,7 +241,7 @@ You need:
 - port `53` free for DNS
 - port `80` free for HTTP cache traffic
 - port `443` free on both LAN IPs
-- port `5300` free on the HTTP IP (zone transfer to secondary DNS nodes)
+- port `5300` free on the HTTP IP (zone transfer to secondary DNS nodes of older versions)
 - port `8080` for the Admin UI
 - a second LAN IP (always required; HTTPS mode answers on it)
 - optional port `67/udp` if using the built in DHCP server
@@ -869,10 +869,10 @@ cached there, for clients with the CA certificate installed.
 
 | Port | Protocol | Used for |
 |---|---|---|
-| `53` | TCP and UDP | DNS (both LAN IPs) |
+| `53` | TCP and UDP | DNS (both LAN IPs); dnsdist also passes zone transfer and NOTIFY to the authoritative server |
 | `80` | TCP | HTTP cache (both LAN IPs) |
 | `443` | TCP | TLS passthrough on the HTTP IP, HTTPS mode cache on the HTTPS IP |
-| `5300` | TCP and UDP | zone transfer to secondary DNS nodes (HTTP IP) |
+| `5300` | TCP and UDP | zone transfer to secondary DNS nodes of older versions (HTTP IP); a new secondary uses `53` |
 | `8080` | TCP | Admin UI |
 | `67` | UDP | optional DHCP server |
 | `8000` | TCP | optional Kea control agent |
@@ -894,7 +894,7 @@ deploy/secondary/        Secondary DNS compose file
 docs/                    Documentation
 services/watchdog/       services image: watchdog, cachehamster, syslog-ng, chrony, snmpd
 services/proxy/          Unified proxy for HTTP mode and HTTPS mode
-services/dns/            DNS image: PowerDNS auth and recursor
+services/dns/            DNS image: dnsdist, PowerDNS auth and recursor
 services/dhcp/           DHCP image: Kea or dnsmasq proxy/relay
 services/ui/             Admin UI
 services/common/         Shared Rust crate
