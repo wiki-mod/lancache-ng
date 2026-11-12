@@ -1716,9 +1716,12 @@ async fn dhcp(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     }
     ctx.insert("dhcp_upstream_dhcp_ip", &opt("UPSTREAM_DHCP_IP"));
     ctx.insert("kea_snapshot_retention", &opt("KEA_SNAPSHOT_KEEP"));
+    // What: the hint shows only when own NTP is handed out.
+    // Why: one rule with the Kea and dnsmasq render.
+    // From: Issue #1683
     ctx.insert(
         "ntp_auto_dhcp_active",
-        &s.flag("NTP_AUTO_DHCP").unwrap_or(false),
+        &lancache_ng::dhcp::own_ntp(&s).unwrap_or(false),
     );
     let codes: Vec<u8> = lancache_ng::dhcp::MANAGED.iter().map(|m| m.code).collect();
     ctx.insert("kea_managed_codes", &codes);
