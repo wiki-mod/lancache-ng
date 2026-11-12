@@ -21,7 +21,7 @@ Channels: `docs/combined-release-and-checklist.md`.
 | --- | --- |
 | Find and fix bugs | issues with the label `bug` |
 | WireGuard remote LAN access | `docs/design-plannings/design-wireguard-remote-access.md` |
-| DNS proxy dnsdist on port 53 in the dns image: client, authoritative, NOTIFY and AXFR traffic on one port; the real client IP reaches recursor and pdns by proxy protocol | `services/dns/Dockerfile` |
+| Close port `5300` of the authoritative server to the LAN once no secondary of an older version pulls from it; timing open | `PDNS_AUTH_ADDRESS` in `.github/yaml/build-manifest.yml` |
 | Downloads per device: amount from the cache (HIT) and from the internet (MISS) | nginx access log of the proxy |
 | Device names instead of IP addresses in these views | DHCP leases, PTR records |
 | Devices that hold a DHCP lease but never query the lancache DNS | DHCP leases, recursor query log |
