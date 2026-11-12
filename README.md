@@ -506,9 +506,11 @@ LanCache-NG-NTP is a small NTP server (chrony). `setup.sh install` asks for it
 its clock against a list of public NTP servers and serves time to LAN clients
 on `123/udp`. The upstream server list is edited on the same page.
 
-The General page also stores a toggle "auto-set as DHCP NTP server"
-(`NTP_AUTO_DHCP`). It is not applied yet: Kea's `ntp-servers` option comes
-only from `DHCP_NTP_SERVERS`.
+The General page also has a toggle "Hand this time server to DHCP clients"
+(`NTP_AUTO_DHCP`). While it and LanCache-NG-NTP are on, every DHCP subnet
+hands out the HTTP IP as NTP server (option 42) instead of
+`DHCP_NTP_SERVERS`. When one of them is turned off, subnets that held the
+HTTP IP get `DHCP_NTP_SERVERS` back.
 
 ## Admin UI
 
