@@ -197,13 +197,6 @@ yn_default() {
     esac
 }
 
-# What: the 1/0 value of a y/n answer
-# Why: the wizard stores the answer, never a default
-# From: Issue #1683 | PR #1912
-yn_flag() {
-    case "${1,,}" in y|yes) printf '1\n' ;; *) printf '0\n' ;; esac
-}
-
 # What: the [y/N] or [Y/n] hint of a prompt default
 # Why: the capital letter marks the default answer
 # From: Issue #1683 | PR #1912
@@ -439,9 +432,8 @@ prompt_dns_upstream() {
     printf "  Names LanCache-NG does not know (for example your NAS) are\n"
     printf "  resolved from the internet. A router or firewall that knows\n"
     printf "  them can answer instead. Game CDN names stay with LanCache-NG.\n\n"
-    ask "Use an external DNS server? $(yn_hint "$use_yn")" "$use_yn"
     DNS_UPSTREAM_SERVERS="" DNS_UPSTREAM_ZONES="" DNS_UPSTREAM_UNSIGNED_ZONES=""
-    if [[ "$(yn_flag "$REPLY")" != 1 ]]; then
+    if ! confirm "Use an external DNS server? $(yn_hint "$use_yn")" "$use_yn"; then
         return 0
     fi
     while true; do
@@ -518,8 +510,10 @@ prompt_dns_local_reverse_zones() {
     printf "  Reverse lookups (IP to name, PTR) of private networks go to\n"
     printf "  the external DNS server or the internet. LanCache-NG can\n"
     printf "  answer them itself instead, from its own reverse zones.\n\n"
-    ask "Answer private reverse lookups locally? $(yn_hint "$yn")" "$yn"
-    DNS_LOCAL_REVERSE_ZONES=$(yn_flag "$REPLY")
+    DNS_LOCAL_REVERSE_ZONES=0
+    if confirm "Answer private reverse lookups locally? $(yn_hint "$yn")" "$yn"; then
+        DNS_LOCAL_REVERSE_ZONES=1
+    fi
 }
 
 # What: true for a boot filename without blank or comma
@@ -829,13 +823,22 @@ compose_profiles_for_runtime() {
     printf '%s\n' "$result"
 }
 
-# What: yes/no prompt; accepts y or yes, any case
+# What: yes/no prompt; y, yes, n or no, any case
 # Why: wraps ask() for boolean decisions
 # From: Issue #1683 | PR #1858
 confirm() {
     local prompt="$1" default="${2:-N}"
-    ask "$prompt" "$default"
-    [[ "$(yn_flag "$REPLY")" = 1 ]]
+    # What: ask again until the answer is y, yes, n or no.
+    # Why: a typo counted as no and skipped the step.
+    # From: Issue #1683
+    while true; do
+        ask "$prompt" "$default"
+        case "${REPLY,,}" in
+            y|yes) return 0 ;;
+            n|no) return 1 ;;
+        esac
+        print_warn "Answer y or n (got '$REPLY')."
+    done
 }
 
 # What: runs a broadcast DHCP probe before Kea activation
@@ -9134,8 +9137,10 @@ printf "\n"
 printf '  %sHTTPS mode%s: also caches HTTPS downloads (Epic, EA, Blizzard…)\n' "${BOLD}" "${RESET}"
 printf "  Requires a CA certificate on clients.\n\n"
 https_yn=$(yn_default HTTPS_ENABLED) || exit $?
-ask "Enable HTTPS mode? $(yn_hint "$https_yn")" "$https_yn"
-HTTPS_ENABLED=$(yn_flag "$REPLY")
+HTTPS_ENABLED=0
+if confirm "Enable HTTPS mode? $(yn_hint "$https_yn")" "$https_yn"; then
+    HTTPS_ENABLED=1
+fi
 print_ok "HTTPS mode $([[ "$HTTPS_ENABLED" = 1 ]] && echo enabled || echo disabled) (second IP $IP_HTTPS)"
 
 # What: step 3: the directory for all persistent state
@@ -9210,8 +9215,10 @@ auto_update_yn=$(yn_default AUTO_UPDATE_ENABLED) || exit $?
 printf "  Default: %s. Update manually any time with: ./setup.sh update\n\n" \
     "$([[ "$auto_update_yn" = "Y" ]] && echo enabled || echo disabled)"
 
-ask "Enable scheduled automatic updates? $(yn_hint "$auto_update_yn")" "$auto_update_yn"
-AUTO_UPDATE_ENABLED=$(yn_flag "$REPLY")
+AUTO_UPDATE_ENABLED=0
+if confirm "Enable scheduled automatic updates? $(yn_hint "$auto_update_yn")" "$auto_update_yn"; then
+    AUTO_UPDATE_ENABLED=1
+fi
 if [[ "$AUTO_UPDATE_ENABLED" = 1 ]]; then
     print_ok "Scheduled automatic updates enabled (ordered, health-gated, daily)"
 else
@@ -9456,8 +9463,10 @@ printf "  servers, that serves time to LAN clients on UDP/%s. Enable/disable and
 printf "  upstream server list are then configured from the Admin UI.\n"
 printf "  Default: %s.\n\n" "$([[ "$ntp_yn" = "Y" ]] && echo enabled || echo disabled)"
 
-ask "Enable LanCache-NG-NTP? $(yn_hint "$ntp_yn")" "$ntp_yn"
-NTP_ENABLED=$(yn_flag "$REPLY")
+NTP_ENABLED=0
+if confirm "Enable LanCache-NG-NTP? $(yn_hint "$ntp_yn")" "$ntp_yn"; then
+    NTP_ENABLED=1
+fi
 ntp_subdir=$(prod_env_default STATE_SUBDIR_NTP) || exit $?
 NTP_DATA_DIR="$LANCACHE_STATE_DIR/$ntp_subdir"
 if [[ "$NTP_ENABLED" = "1" ]]; then
