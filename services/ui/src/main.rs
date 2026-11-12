@@ -2706,6 +2706,7 @@ async fn apply_all(
     for (file, exec, tag) in [
         ("SNMPD_CONF_FILE", "SNMPD_RELOAD_EXEC", "snmpd"),
         ("PDNS_CONF_FILE", "PDNS_RESTART_EXEC", "pdns"),
+        ("DNSDIST_CONF_FILE", "DNSDIST_RESTART_EXEC", "dnsdist"),
     ] {
         let path = new.text(file)?;
         if !written.iter().any(|c| c.key == path) {
@@ -2925,17 +2926,25 @@ async fn set_wanted(app: &App, service: &str, run: bool) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
-// What: TSIG key in PowerDNS, bound to zones.
-// Why: AXFR needs the key, not only an address.
-// From: Issue #1683 | PR #1858
-async fn ensure_tsig(s: &Settings) -> Result<(), String> {
+// What: TSIG key in PowerDNS; returns its name.
+// Why: zones are created with the key, so it comes first.
+// From: Issue #1683
+async fn ensure_tsigkey(s: &Settings) -> Result<String, String> {
     let sec = secrets(s)?;
-    let api = pdns_api(s)?;
     let algorithm = s.text("DDNS_TSIG_ALGORITHM")?;
-    api.set_tsigkey(&sec.tsig_name, &algorithm, &sec.tsig_secret)
+    pdns_api(s)?
+        .set_tsigkey(&sec.tsig_name, &algorithm, &sec.tsig_secret)
         .await?;
+    Ok(sec.tsig_name)
+}
+
+// What: bind the TSIG key to every existing zone.
+// Why: zones of older versions were created without it.
+// From: Issue #1683 | PR #1858
+async fn ensure_tsig(s: &Settings, key: &str) -> Result<(), String> {
+    let api = pdns_api(s)?;
     let secondary = s.text("DNS_REPLICATION_ROLE")? == "secondary";
-    let key = vec![sec.tsig_name];
+    let key = vec![key.to_string()];
     for z in api.zones().await? {
         if secondary {
             api.set_secondary_tsig(&z.name, &key[0]).await?;
@@ -2949,29 +2958,56 @@ async fn ensure_tsig(s: &Settings) -> Result<(), String> {
 // What: create missing zones on a secondary.
 // Why: the zone list comes from registration.
 // From: Issue #1683 | PR #1858
-async fn ensure_secondary_zones(s: &Settings) -> Result<(), String> {
+async fn ensure_secondary_zones(s: &Settings, key: &str) -> Result<(), String> {
     let api = pdns_api(s)?;
     let have: Vec<String> = api.zones().await?.into_iter().map(|z| z.name).collect();
-    // What: the primary pdns port, not its recursor.
-    // Why: live 229: port 53 refused every SOA check.
-    // From: Issue #1683
-    let port = s.uint("PDNS_AUTH_PORT")?;
+    let zones = s.list("DNS_SECONDARY_ZONES");
+    let port = primary_xfr_port(s, zones.first()).await?;
     let masters = vec![format!("{}:{port}", s.text("DNS_XFR_PRIMARY")?)];
-    for zone in s.list("DNS_SECONDARY_ZONES") {
+    for zone in zones {
         let id = lancache_ng::pdns::zone_id(&zone);
         if have.contains(&id) {
             api.set_masters(&id, &masters).await?;
         } else {
-            api.create_secondary(&id, &masters).await?;
+            api.create_secondary(&id, &masters, key).await?;
         }
     }
     Ok(())
 }
 
+// What: port 53 if the primary answers aa there.
+// Why: older primaries have a recursor on 53; 5300 stays.
+// From: Issue #1683
+async fn primary_xfr_port(s: &Settings, zone: Option<&String>) -> Result<u64, String> {
+    let fallback = s.uint("PDNS_AUTH_PORT")?;
+    let Some(zone) = zone.cloned() else {
+        return Ok(fallback);
+    };
+    let port = s.uint("DNS_PORT")?;
+    let ip: std::net::IpAddr = s
+        .text("DNS_XFR_PRIMARY")?
+        .parse()
+        .map_err(|_| "DNS_XFR_PRIMARY is no IP address".to_string())?;
+    let addr = std::net::SocketAddr::new(ip, u16::try_from(port).map_err(|e| e.to_string())?);
+    let wait = Duration::from_secs(s.uint("SECONDARY_PROBE_TIMEOUT")?);
+    let probe = tokio::task::spawn_blocking(move || lancache_ng::dns::soa_probe(addr, &zone, wait))
+        .await
+        .map_err(|e| e.to_string())?;
+    // What: no aa or no answer: stay on PDNS_AUTH_PORT.
+    // Why: a failed probe must not stop the zones step.
+    // From: Issue #1683
+    let chosen = match &probe {
+        Ok(soa) if soa.authoritative && soa.rcode == 0 => port,
+        _ => fallback,
+    };
+    eprintln!("ui: primary {addr}: {probe:?}; XFR port {chosen}");
+    Ok(chosen)
+}
+
 // What: create missing primary zones; set DDNS meta.
 // Why: 4220b1c3 dropped pdnsutil create-zone, no owner.
 // From: Issue #1683 | PR #1980
-async fn ensure_primary_zones(s: &Settings) -> Result<(), String> {
+async fn ensure_primary_zones(s: &Settings, key: &str) -> Result<(), String> {
     let api = pdns_api(s)?;
     let have: Vec<String> = api.zones().await?.into_iter().map(|z| z.name).collect();
     let edit = vec![s.text("PDNS_SOA_EDIT")?];
@@ -2983,7 +3019,7 @@ async fn ensure_primary_zones(s: &Settings) -> Result<(), String> {
     for zone in lancache_ng::dns::managed_zones(s)? {
         let id = lancache_ng::pdns::zone_id(&zone);
         if !have.contains(&id) {
-            api.create_primary(&id, &edit[0]).await?;
+            api.create_primary(&id, &edit[0], key).await?;
         }
         api.set_metadata(&id, "SOA-EDIT-DNSUPDATE", &edit).await?;
         api.set_metadata(&id, "NOTIFY-DNSUPDATE", &["1".to_string()])
@@ -3087,20 +3123,21 @@ async fn ensure_rrset(
     api.set_rrset(zone, name, kind, ttl, want).await
 }
 
-// What: zones, then TSIG; one report line on error.
-// Why: TSIG binds to the zones that exist.
-// From: Issue #1683 | PR #1980
+// What: TSIG key, zones, then binding; one error line.
+// Why: the key is known, so no zone exists without it.
+// From: Issue #1683
 async fn ensure_zones(s: &Settings) -> Result<(), String> {
+    let key = ensure_tsigkey(s).await.map_err(|e| format!("tsig: {e}"))?;
     if s.text("DNS_REPLICATION_ROLE")? == "secondary" {
-        ensure_secondary_zones(s)
+        ensure_secondary_zones(s, &key)
             .await
             .map_err(|e| format!("secondary zones: {e}"))?;
     } else {
-        ensure_primary_zones(s)
+        ensure_primary_zones(s, &key)
             .await
             .map_err(|e| format!("primary zones: {e}"))?;
     }
-    ensure_tsig(s).await.map_err(|e| format!("tsig: {e}"))
+    ensure_tsig(s, &key).await.map_err(|e| format!("tsig: {e}"))
 }
 
 // What: retry zones and TSIG until pdns answers.
