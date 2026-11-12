@@ -994,11 +994,46 @@ async fn domains(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
         .filter(|z| z.ends_with(".arpa.") || z.ends_with(".arpa"))
         .collect();
     ctx.insert("reverse_zones", &reverse);
+    // What: NS state of each secondary: in, off or new.
+    // Why: the row shows it and offers the matching button.
+    // From: Issue #1683
+    let (ns, off) = (s.list("DNS_SECONDARY_NS"), s.list("DNS_SECONDARY_NS_OFF"));
     let peers: Vec<Value> = secondaries(&s)
         .into_iter()
-        .map(|(name, address)| json!({"name": name, "address": address}))
+        .map(|(name, address)| {
+            let state = if ns.contains(&name) {
+                "in"
+            } else if off.contains(&name) {
+                "off"
+            } else {
+                "new"
+            };
+            json!({"name": name, "address": address, "ns": state})
+        })
         .collect();
     ctx.insert("secondaries", &peers);
+    ctx.insert("secondary_ns_enabled", &s.flag("DNS_SECONDARY_NS_ENABLED")?);
+    ctx.insert(
+        "secondary_ns_auto",
+        &s.flag("DNS_SECONDARY_NS_AUTO_REMOVE")?,
+    );
+    let span = |key: &str| -> Result<String, String> { Ok(duration_text(s.uint(key)?)) };
+    ctx.insert(
+        "secondary_check_every",
+        &span("DNS_SECONDARY_CHECK_SECONDS")?,
+    );
+    ctx.insert(
+        "secondary_recheck_every",
+        &span("DNS_SECONDARY_RECHECK_SECONDS")?,
+    );
+    ctx.insert(
+        "secondary_ns_after",
+        &span("DNS_SECONDARY_NS_REMOVE_AFTER_SECONDS")?,
+    );
+    ctx.insert(
+        "secondary_ns_fails",
+        &s.uint("DNS_SECONDARY_NS_REMOVE_FAILS")?,
+    );
     ctx.insert("registration_token", &registration_token(&s)?);
     // What: setup.sh from the branch of this channel.
     // Why: a nightly primary must not hand out master.
@@ -1087,6 +1122,12 @@ async fn dns_action(
         "UI_ROUTE_AAAA_FILTER" => commit(&app, single_field("DNS_FILTER_AAAA", on)).await,
         "UI_ROUTE_QUERY_LOG" => commit(&app, single_field("DNS_QUERY_LOG", on)).await,
         "UI_ROUTE_DDNS_UNSIGNED" => commit(&app, single_field("DDNS_ALLOW_UNSIGNED", on)).await,
+        "UI_ROUTE_SECONDARY_NS_SWITCH" => {
+            commit(&app, single_field("DNS_SECONDARY_NS_ENABLED", on)).await
+        }
+        "UI_ROUTE_SECONDARY_NS_AUTO" => {
+            commit(&app, single_field("DNS_SECONDARY_NS_AUTO_REMOVE", on)).await
+        }
         "UI_ROUTE_LAN_ADD" | "UI_ROUTE_LAN_REMOVE" => {
             record(&s, op == "UI_ROUTE_LAN_ADD", &get).await
         }
@@ -1374,10 +1415,35 @@ async fn secondary_action(
     };
     match op {
         "UI_ROUTE_SECONDARY" => {
-            list.remove(at);
-            store_secondaries(&app, &list).await?;
+            let (_, address) = list.remove(at);
+            // What: the name leaves both NS lists too.
+            // Why: a new secondary of that name starts new.
+            // From: Issue #1683
+            let mut form = ns_change(&s, &name, None);
+            let rows: Vec<String> = list.iter().map(|(n, a)| format!("{n}@{a}")).collect();
+            form.insert("DNS_SECONDARIES".into(), rows.join(" "));
+            commit(&app, form).await?;
+            drop_peer_records(&app.settings(), &name, &address).await?;
             rotate_tsig(&app).await?;
             Ok(Redirect::to(&s.text("UI_PAGE_DOMAINS")?).into_response())
+        }
+        "UI_ROUTE_SECONDARY_NS_ADD" => {
+            if !s.flag("DNS_SECONDARY_NS_ENABLED")? {
+                return Err(bad_request("secondaries as NS are off"));
+            }
+            answers_aa(&s, &list[at].1, &lan_zone(&s)?)
+                .await
+                .map_err(bad_request)?;
+            commit(&app, ns_change(&s, &name, Some(true)))
+                .await
+                .map_err(bad_request)?;
+            Ok(StatusCode::NO_CONTENT.into_response())
+        }
+        "UI_ROUTE_SECONDARY_NS_REMOVE" => {
+            commit(&app, ns_change(&s, &name, Some(false)))
+                .await
+                .map_err(bad_request)?;
+            Ok(StatusCode::NO_CONTENT.into_response())
         }
         "UI_ROUTE_SECONDARY_ROTATE" => {
             Ok(axum::Json(json!({"token": renew_token(&s)?})).into_response())
@@ -1388,6 +1454,14 @@ async fn secondary_action(
             if !is_ip(&a.address) {
                 return Err(bad_request("no IP address"));
             }
+            // What: a new address drops the old records.
+            // Why: same address: no save, no ensure runs.
+            // From: Issue #1683
+            if list[at].1 != a.address {
+                drop_peer_records(&s, &name, &list[at].1)
+                    .await
+                    .map_err(bad_request)?;
+            }
             list[at].1 = a.address;
             store_secondaries(&app, &list).await.map_err(bad_request)?;
             Ok(StatusCode::NO_CONTENT.into_response())
@@ -1397,6 +1471,20 @@ async fn secondary_action(
         }
         _ => Err(Fail(StatusCode::NOT_FOUND, "unknown action".into())),
     }
+}
+
+// What: NS lists with a name in, out or in neither.
+// Why: Some(true) enters, Some(false) takes it out.
+// From: Issue #1683
+fn ns_change(s: &Settings, name: &str, entered: Option<bool>) -> Fields {
+    let mut form = list_change(s, "DNS_SECONDARY_NS", name, entered == Some(true));
+    form.extend(list_change(
+        s,
+        "DNS_SECONDARY_NS_OFF",
+        name,
+        entered == Some(false),
+    ));
+    form
 }
 
 // What: SOA serial of one zone in a zone list.
@@ -1425,12 +1513,153 @@ async fn peer_serials(s: &Settings, address: &str) -> Result<Vec<PeerZone>, Stri
 // Why: health check and zone overview read the same.
 // From: Issue #1683
 async fn remote_zones(s: &Settings, address: &str) -> Result<Vec<lancache_ng::pdns::Zone>, String> {
+    remote_api(s, address)?.zones().await
+}
+
+// What: pdns-API of one secondary.
+// Why: zone list and AXFR request use the same.
+// From: Issue #1683
+fn remote_api(s: &Settings, address: &str) -> Result<lancache_ng::pdns::Api, String> {
     let port = s.uint("PDNS_AUTH_API_PORT")?;
-    let url = format!("http://{address}:{port}/api/v1/servers/localhost");
+    let host = if address.contains(':') {
+        format!("[{address}]")
+    } else {
+        address.to_string()
+    };
+    let url = format!("http://{host}:{port}/api/v1/servers/localhost");
     let key = secrets(s)?.pdns_api_key;
-    lancache_ng::pdns::Api::new(http::client(s)?, &url, &key)
-        .zones()
-        .await
+    Ok(lancache_ng::pdns::Api::new(http::client(s)?, &url, &key))
+}
+
+// What: failed checks of one secondary in a row.
+// Why: NS removal needs time and count both.
+// From: Issue #1683
+struct Failing {
+    since: std::time::Instant,
+    count: u64,
+}
+
+// What: check every secondary; again after a wait.
+// Why: 4 h when all answer, hourly while one fails.
+// From: Issue #1683
+async fn secondary_watch(app: Arc<App>) {
+    let mut failing: BTreeMap<String, Failing> = BTreeMap::new();
+    loop {
+        let s = app.settings();
+        let key = match watch_round(&app, &s, &mut failing).await {
+            Ok(()) if failing.is_empty() => "DNS_SECONDARY_CHECK_SECONDS",
+            Ok(()) => "DNS_SECONDARY_RECHECK_SECONDS",
+            // What: own pdns down: no secondary is blamed.
+            // Why: at ui start the dns may not run yet.
+            // From: Issue #1683
+            Err(e) => {
+                eprintln!("ui: secondary check skipped: {e}");
+                "PDNS_SOA_COLD_RETRY"
+            }
+        };
+        let wait = s.uint(key).unwrap_or(60).max(1);
+        tokio::time::sleep(Duration::from_secs(wait)).await;
+    }
+}
+
+// What: one round over all secondaries.
+// Why: resync a lag, enter or take out NS names.
+// From: Issue #1683
+async fn watch_round(
+    app: &App,
+    s: &Settings,
+    failing: &mut BTreeMap<String, Failing>,
+) -> Result<(), String> {
+    let ours = pdns_api(s)?.zones().await?;
+    let peers = secondaries(s);
+    failing.retain(|n, _| peers.iter().any(|(p, _)| p == n));
+    let enabled = s.flag("DNS_SECONDARY_NS_ENABLED")?;
+    let auto = s.flag("DNS_SECONDARY_NS_AUTO_REMOVE")?;
+    let after = Duration::from_secs(s.uint("DNS_SECONDARY_NS_REMOVE_AFTER_SECONDS")?);
+    let fails = s.uint("DNS_SECONDARY_NS_REMOVE_FAILS")?;
+    let (mut ns, mut off) = (s.list("DNS_SECONDARY_NS"), s.list("DNS_SECONDARY_NS_OFF"));
+    for (name, address) in &peers {
+        // What: no aa counts as failure only for an NS.
+        // Why: an older secondary syncs but is never NS.
+        // From: Issue #1683
+        let outcome = match check_peer(s, &ours, address).await {
+            Ok(Err(e)) if !ns.contains(name) => {
+                if enabled {
+                    eprintln!("ui: secondary {name}: no NS: {e}");
+                }
+                Ok(false)
+            }
+            Ok(aa) => aa.map(|()| true),
+            Err(e) => Err(e),
+        };
+        match outcome {
+            Ok(aa) => {
+                failing.remove(name);
+                // What: first entry; never after take out.
+                // Why: re-entry only by hand.
+                // From: Issue #1683
+                if aa && enabled && !ns.contains(name) && !off.contains(name) {
+                    eprintln!("ui: secondary {name}: entered as NS");
+                    ns.push(name.clone());
+                }
+            }
+            Err(e) => {
+                let f = failing.entry(name.clone()).or_insert(Failing {
+                    since: std::time::Instant::now(),
+                    count: 0,
+                });
+                f.count += 1;
+                eprintln!("ui: secondary {name}: check {} failed: {e}", f.count);
+                let due = f.count >= fails && f.since.elapsed() > after;
+                if enabled && auto && due && ns.contains(name) {
+                    eprintln!("ui: secondary {name}: NS taken out");
+                    ns.retain(|n| n != name);
+                    off.push(name.clone());
+                }
+            }
+        }
+    }
+    let mut form = Fields::new();
+    for (key, now) in [("DNS_SECONDARY_NS", ns), ("DNS_SECONDARY_NS_OFF", off)] {
+        if now != s.list(key) {
+            form.insert(key.into(), now.join(" "));
+        }
+    }
+    if form.is_empty() {
+        return Ok(());
+    }
+    commit(app, form).await
+}
+
+// What: serials via pdns-API, lag pulled; aa result.
+// Why: an NS must answer aa; AXFR fixes a lost NOTIFY.
+// From: Issue #1683
+async fn check_peer(
+    s: &Settings,
+    ours: &[lancache_ng::pdns::Zone],
+    address: &str,
+) -> Result<Result<(), String>, String> {
+    let aa = answers_aa(s, address, &lan_zone(s)?).await;
+    let api = remote_api(s, address)?;
+    let theirs = api.zones().await?;
+    for zone in lancache_ng::dns::managed_zones(s)? {
+        let z = PeerZone {
+            primary: serial_of(ours, &zone),
+            secondary: serial_of(&theirs, &zone),
+            zone,
+        };
+        let (rank, word) = zone_state(&z);
+        // What: unknown and behind are pulled; missing not.
+        // Why: a missing zone has no copy to refresh.
+        // From: Issue #1683
+        if rank == 2 || rank == 3 {
+            match api.axfr_retrieve(&z.zone).await {
+                Ok(()) => eprintln!("ui: secondary {address}: {} {word}, AXFR asked", z.zone),
+                Err(e) => eprintln!("ui: secondary {address}: {} {word}, AXFR: {e}", z.zone),
+            }
+        }
+    }
+    Ok(aa)
 }
 
 // What: serial table: managed zones, primary, secondaries.
@@ -2988,28 +3217,54 @@ async fn ensure_secondary_zones(s: &Settings, key: &str) -> Result<(), String> {
 // From: Issue #1683
 async fn primary_xfr_port(s: &Settings, zone: Option<&String>) -> Result<u64, String> {
     let fallback = s.uint("PDNS_AUTH_PORT")?;
-    let Some(zone) = zone.cloned() else {
+    let Some(zone) = zone else {
         return Ok(fallback);
     };
-    let port = s.uint("DNS_PORT")?;
-    let ip: std::net::IpAddr = s
-        .text("DNS_XFR_PRIMARY")?
-        .parse()
-        .map_err(|_| "DNS_XFR_PRIMARY is no IP address".to_string())?;
-    let addr = std::net::SocketAddr::new(ip, u16::try_from(port).map_err(|e| e.to_string())?);
-    let wait = Duration::from_secs(s.uint("SECONDARY_PROBE_TIMEOUT")?);
-    let probe = tokio::task::spawn_blocking(move || lancache_ng::dns::soa_probe(addr, &zone, wait))
-        .await
-        .map_err(|e| e.to_string())?;
+    let primary = s.text("DNS_XFR_PRIMARY")?;
+    let probe = soa_on_dns_port(s, &primary, zone).await;
     // What: no aa or no answer: stay on PDNS_AUTH_PORT.
     // Why: a failed probe must not stop the zones step.
     // From: Issue #1683
     let chosen = match &probe {
-        Ok(soa) if soa.authoritative && soa.rcode == 0 => port,
+        Ok(soa) if soa.authoritative && soa.rcode == 0 => s.uint("DNS_PORT")?,
         _ => fallback,
     };
-    eprintln!("ui: primary {addr}: {probe:?}; XFR port {chosen}");
+    eprintln!("ui: primary {primary}: {probe:?}; XFR port {chosen}");
     Ok(chosen)
+}
+
+// What: non-RD SOA query to DNS_PORT of one address.
+// Why: XFR port choice and the NS check ask the same.
+// From: Issue #1683
+async fn soa_on_dns_port(
+    s: &Settings,
+    address: &str,
+    zone: &str,
+) -> Result<lancache_ng::dns::Soa, String> {
+    let ip: std::net::IpAddr = address
+        .parse()
+        .map_err(|_| format!("{address:?} is no IP address"))?;
+    let port = u16::try_from(s.uint("DNS_PORT")?).map_err(|e| e.to_string())?;
+    let addr = std::net::SocketAddr::new(ip, port);
+    let wait = Duration::from_secs(s.uint("SECONDARY_PROBE_TIMEOUT")?);
+    let zone = zone.to_string();
+    tokio::task::spawn_blocking(move || lancache_ng::dns::soa_probe(addr, &zone, wait))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+// What: Ok when the address answers zone with aa.
+// Why: only an authoritative secondary may be an NS.
+// From: Issue #1683
+async fn answers_aa(s: &Settings, address: &str, zone: &str) -> Result<(), String> {
+    let soa = soa_on_dns_port(s, address, zone).await?;
+    if soa.authoritative && soa.rcode == 0 {
+        return Ok(());
+    }
+    Err(format!(
+        "{address} answers {zone} with rcode {} and aa {}",
+        soa.rcode, soa.authoritative
+    ))
 }
 
 // What: create missing primary zones; set DDNS meta.
@@ -3059,8 +3314,18 @@ async fn ensure_soa_nameserver(s: &Settings, api: &lancache_ng::pdns::Api) -> Re
     let mname = lancache_ng::dns::canonical_zone(soa.split_whitespace().next().unwrap_or_default());
     let lan = lancache_ng::dns::canonical_zone(&s.text("DHCP_DOMAIN")?);
     let ttl = u32::try_from(s.uint("DNS_RECORD_TTL")?).map_err(|e| e.to_string())?;
+    let ns = ns_names(s, &mname)?;
     for zone in lancache_ng::dns::managed_zones(s)? {
-        ensure_rrset(api, &zone, &zone, "NS", ttl, std::slice::from_ref(&mname)).await?;
+        ensure_rrset(api, &zone, &zone, "NS", ttl, &ns).await?;
+    }
+    // What: A or AAAA and PTR of each secondary.
+    // Why: an NS name needs an address; logs show names.
+    // From: Issue #1683
+    for (name, address) in secondaries(s) {
+        let host = peer_host(s, &name)?;
+        let kind = address_kind(&address);
+        ensure_rrset(api, &lan, &host, kind, ttl, std::slice::from_ref(&address)).await?;
+        ensure_ptr(s, api, &address, &host, ttl).await?;
     }
     // What: A and PTR only when ns1 is in the LAN zone.
     // Why: a foreign name has no home in a managed zone.
@@ -3078,6 +3343,79 @@ async fn ensure_soa_nameserver(s: &Settings, api: &lancache_ng::pdns::Api) -> Re
     if !https.is_empty() && ns2.ends_with(&format!(".{lan}")) {
         ensure_rrset(api, &lan, &ns2, "A", ttl, std::slice::from_ref(&https)).await?;
         ensure_ptr(s, api, &https, &ns2, ttl).await?;
+    }
+    Ok(())
+}
+
+// What: seconds as "4 h", "90 min" or "45 s".
+// Why: the page shows the SOT check times readably.
+// From: Issue #1683
+fn duration_text(secs: u64) -> String {
+    match secs {
+        s if s >= 3600 && s % 3600 == 0 => format!("{} h", s / 3600),
+        s if s >= 60 && s % 60 == 0 => format!("{} min", s / 60),
+        s => format!("{s} s"),
+    }
+}
+
+// What: NS names: ns1, then entered secondaries.
+// Why: a secondary is NS only with the switch on.
+// From: Issue #1683
+fn ns_names(s: &Settings, mname: &str) -> Result<Vec<String>, String> {
+    let mut ns = vec![mname.to_string()];
+    if !s.flag("DNS_SECONDARY_NS_ENABLED")? {
+        return Ok(ns);
+    }
+    let entered = s.list("DNS_SECONDARY_NS");
+    for (name, _) in secondaries(s) {
+        if entered.contains(&name) {
+            ns.push(peer_host(s, &name)?);
+        }
+    }
+    Ok(ns)
+}
+
+// What: LAN name of a secondary, with trailing dot.
+// Why: A, PTR and NS records use the same name.
+// From: Issue #1683
+fn peer_host(s: &Settings, name: &str) -> Result<String, String> {
+    Ok(format!("{name}.{}", lan_zone(s)?))
+}
+
+// What: A for IPv4, AAAA for IPv6.
+// Why: a secondary may register either address.
+// From: Issue #1683
+fn address_kind(address: &str) -> &'static str {
+    if address.contains(':') { "AAAA" } else { "A" }
+}
+
+// What: drop address and PTR records of a secondary.
+// Why: a removed or moved secondary leaves no record.
+// From: Issue #1683
+async fn drop_peer_records(s: &Settings, name: &str, address: &str) -> Result<(), String> {
+    let api = pdns_api(s)?;
+    let host = peer_host(s, name)?;
+    let kind = address_kind(address);
+    api.set_rrset(&lan_zone(s)?, &host, kind, 0, &[]).await?;
+    let rev = reverse_name(address)?;
+    let Some(zone) = reverse_zone(s, &rev) else {
+        return Ok(());
+    };
+    if !lancache_ng::dns::managed_zones(s)?.contains(&zone) {
+        return Ok(());
+    }
+    // What: delete the PTR only when it names this host.
+    // Why: an own PTR of the admin must stay.
+    // From: Issue #1683
+    let ours = api.rrsets(&zone).await?.iter().any(|r| {
+        r["name"] == rev.as_str()
+            && r["type"] == "PTR"
+            && r["records"]
+                .as_array()
+                .is_some_and(|a| a.iter().any(|c| c["content"] == host.as_str()))
+    });
+    if ours {
+        api.set_rrset(&zone, &rev, "PTR", 0, &[]).await?;
     }
     Ok(())
 }
@@ -3566,13 +3904,15 @@ async fn lang(State(app): Shared, req: Request, next: Next) -> Response {
 // What: SOT keys of the actions each handler serves.
 // Why: the handler matches the key; the SOT owns the path.
 // From: Issue #1683
-const DNS_OPS: [&str; 12] = [
+const DNS_OPS: [&str; 14] = [
     "UI_ROUTE_DNS_ADD",
     "UI_ROUTE_DNS_REMOVE",
     "UI_ROUTE_DNS_TOGGLE",
     "UI_ROUTE_AAAA_FILTER",
     "UI_ROUTE_QUERY_LOG",
     "UI_ROUTE_DDNS_UNSIGNED",
+    "UI_ROUTE_SECONDARY_NS_SWITCH",
+    "UI_ROUTE_SECONDARY_NS_AUTO",
     "UI_ROUTE_LAN_ADD",
     "UI_ROUTE_LAN_REMOVE",
     "UI_ROUTE_PTR_ADD",
@@ -3602,11 +3942,13 @@ const HAMSTER_OPS: [&str; 5] = [
     "UI_ROUTE_HAMSTER_REMOVE",
     "UI_ROUTE_HAMSTER_LOGOUT",
 ];
-const SECONDARY_OPS: [&str; 4] = [
+const SECONDARY_OPS: [&str; 6] = [
     "UI_ROUTE_SECONDARY",
     "UI_ROUTE_SECONDARY_ROTATE",
     "UI_ROUTE_SECONDARY_HEALTH",
     "UI_ROUTE_SECONDARY_ADDRESS",
+    "UI_ROUTE_SECONDARY_NS_ADD",
+    "UI_ROUTE_SECONDARY_NS_REMOVE",
 ];
 
 // What: SOT key of the action a route serves.
@@ -3836,6 +4178,7 @@ async fn main() -> Result<(), String> {
     tokio::spawn(cache_scanner(app.clone()));
     tokio::spawn(flush_on_transfer(app.clone()));
     tokio::spawn(zones_at_start(app.clone()));
+    tokio::spawn(secondary_watch(app.clone()));
     let listen = format!("{}:{}", s.text("UI_LISTEN")?, s.uint("UI_PORT")?);
     let sock = tokio::net::TcpListener::bind(&listen)
         .await
@@ -3853,7 +4196,7 @@ async fn main() -> Result<(), String> {
 // From: Issue #1683
 #[cfg(test)]
 mod tests {
-    use super::{PeerZone, zone_state};
+    use super::{PeerZone, address_kind, duration_text, zone_state};
 
     fn zone(primary: Option<u32>, secondary: Option<u32>) -> PeerZone {
         PeerZone {
@@ -3881,5 +4224,25 @@ mod tests {
         ];
         let worst = zones.iter().map(zone_state).max().map(|s| s.1);
         assert_eq!(worst, Some("behind"));
+    }
+
+    // What: check times as h, min or s.
+    // Why: the page shows the SOT seconds readably.
+    // From: Issue #1683
+    #[test]
+    fn duration_text_picks_the_largest_whole_unit() {
+        assert_eq!(duration_text(14400), "4 h");
+        assert_eq!(duration_text(5400), "90 min");
+        assert_eq!(duration_text(45), "45 s");
+        assert_eq!(duration_text(3601), "3601 s");
+    }
+
+    // What: A for IPv4, AAAA for IPv6.
+    // Why: a secondary may register either address.
+    // From: Issue #1683
+    #[test]
+    fn address_kind_follows_the_family() {
+        assert_eq!(address_kind("192.0.2.20"), "A");
+        assert_eq!(address_kind("2001:db8::20"), "AAAA");
     }
 }
