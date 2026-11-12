@@ -4206,7 +4206,12 @@ pub mod render {
         let names: Vec<(String, bool)> =
             domains.lines().filter_map(crate::dns::cdn_entry).collect();
         dns_files(&mut o, sec, &names);
-        o.files.retain(|f| f.owner == "dns");
+        // What: dns files and the snmpd.conf.
+        // Why: live 229: snmpd waited; stop was killed.
+        // From: Issue #1683
+        let snmpd = s.text("SNMPD_CONF_FILE").map(PathBuf::from).ok();
+        o.files
+            .retain(|f| f.owner == "dns" || Some(&f.path) == snmpd.as_ref());
         // What: each error once, even if two files hit it.
         // Why: DoMe 07.11.: no double texts.
         // From: Issue #1683 | PR #1991
