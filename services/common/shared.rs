@@ -1016,11 +1016,24 @@ pub mod dhcp {
         dns
     }
 
+    // What: own NTP for DHCP: NTP on and NTP_AUTO_DHCP on.
+    // Why: the toggle was stored but never applied.
+    // From: Issue #1683
+    pub fn own_ntp(s: &Settings) -> Result<bool, String> {
+        Ok(s.flag("NTP_ENABLED")? && s.flag("NTP_AUTO_DHCP")?)
+    }
+
     // What: DHCP_NTP_SERVERS as IPv4 text; names resolve.
     // Why: option 42 holds IPs; dead names are skipped.
     // From: Issue #1683 | PR #1980
     pub fn ntp_addrs(s: &Settings) -> Result<Vec<String>, String> {
         use std::net::ToSocketAddrs as _;
+        // What: IP_HTTP while own NTP is handed out.
+        // Why: LanCache-NG-NTP answers on the HTTP IP.
+        // From: Issue #1683
+        if own_ntp(s)? {
+            return Ok(vec![s.text("IP_HTTP")?]);
+        }
         s.list("DHCP_NTP_SERVERS")
             .iter()
             .map(|host| {
@@ -3010,6 +3023,34 @@ pub mod kea_conf {
         subnets
     }
 
+    // What: ntp-servers of kept subnets follow own NTP.
+    // Why: while on, the toggle owns option 42 everywhere.
+    // From: Issue #1683
+    pub(crate) fn follow_ntp(mut subnets: Value, auto: bool, own: &str, back: &str) -> Value {
+        for sn in subnets.as_array_mut().into_iter().flatten() {
+            if auto && sn.get("option-data").is_none() {
+                sn["option-data"] = json!([]);
+            }
+            let Some(rows) = sn["option-data"].as_array_mut() else {
+                continue;
+            };
+            let at = rows.iter().position(|r| r["name"] == "ntp-servers");
+            match at {
+                Some(i) if auto => rows[i]["data"] = Value::from(own),
+                None if auto => rows.push(json!({"name": "ntp-servers", "data": own})),
+                // What: off returns own IP to default.
+                // Why: no NTP answers there when off.
+                // From: Issue #1683
+                Some(i) if rows[i]["data"] == own && back.is_empty() => {
+                    rows.remove(i);
+                }
+                Some(i) if rows[i]["data"] == own => rows[i]["data"] = Value::from(back),
+                _ => {}
+            }
+        }
+        subnets
+    }
+
     fn option_rows(s: &Settings, domain: &str) -> Result<Vec<Value>, String> {
         let mut rows = Vec::new();
         rows.push(json!({"name": "routers", "data": s.text("DHCP_GATEWAY")?}));
@@ -3052,6 +3093,9 @@ pub mod kea_conf {
             .cloned()
             .unwrap_or_else(|| json!([]));
         let kept = follow_domain(kept, before.as_deref(), &domain);
+        let back = crate::dhcp::ntp_addrs(s)?.join(", ");
+        let own = s.text("IP_HTTP")?;
+        let kept = follow_ntp(kept, crate::dhcp::own_ntp(s)?, &own, &back);
         let old = kept.as_array().into_iter().flatten();
         let old_main = old.clone().find(|x| x["id"].as_u64() == Some(id));
         let mut main = json!({
@@ -5166,6 +5210,35 @@ pub mod tidy {
 mod tests {
     use super::dns::{soa_query, soa_reply};
     use super::dnsdist_conf::{Listener, body, source};
+    use super::kea_conf::follow_ntp;
+    use serde_json::json;
+
+    // What: on sets own NTP; off gives only it back.
+    // Why: a user value must survive the off state.
+    // From: Issue #1683
+    #[test]
+    fn kept_subnets_follow_own_ntp() {
+        let own = "192.0.2.10";
+        let subnets = json!([
+            {"id": 2, "option-data": [{"name": "ntp-servers", "data": "192.0.2.99"}]},
+            {"id": 3},
+            {"id": 4, "option-data": [{"name": "routers", "data": "192.0.2.1"}]}
+        ]);
+        let on = follow_ntp(subnets, true, own, own);
+        for i in 0..3 {
+            let rows = on[i]["option-data"].as_array().cloned().unwrap_or_default();
+            let ntp: Vec<_> = rows.iter().filter(|r| r["name"] == "ntp-servers").collect();
+            assert_eq!(ntp.len(), 1);
+            assert_eq!(ntp[0]["data"], own);
+        }
+        assert_eq!(on[2]["option-data"][0]["name"], "routers");
+        let off = follow_ntp(on.clone(), false, own, "192.0.2.123");
+        assert_eq!(off[0]["option-data"][0]["data"], "192.0.2.123");
+        let none = follow_ntp(on, false, own, "");
+        assert_eq!(none[1]["option-data"], json!([]));
+        let kept = json!([{"option-data": [{"name": "ntp-servers", "data": "192.0.2.99"}]}]);
+        assert_eq!(follow_ntp(kept.clone(), false, own, ""), kept);
+    }
 
     // What: an aa reply with one SOA, name compressed.
     // Why: pdns answers this way to a non-RD query.
