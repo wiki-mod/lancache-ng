@@ -677,6 +677,28 @@ values (primary URL, bind IPs); only the token is asked again.
 
 After setup, point additional clients to the secondary DNS IP.
 
+### Secondaries as name servers
+
+Each registered secondary gets an A (or AAAA) and a PTR record
+`<name>.<lan domain>` on the primary. The Admin UI tab DNS, Secondary DNS
+has two switches, both off by default:
+
+| Switch | SOT key | Effect |
+| --- | --- | --- |
+| Enter secondaries as name servers (NS) | `DNS_SECONDARY_NS_ENABLED` | A secondary that answers the LAN zone authoritatively (`aa`) on port 53 is added to the NS records of every managed zone. |
+| Take dead secondaries out as NS | `DNS_SECONDARY_NS_AUTO_REMOVE` | An entered secondary is taken out after it failed for longer than `DNS_SECONDARY_NS_REMOVE_AFTER_SECONDS` (8 h) and at least `DNS_SECONDARY_NS_REMOVE_FAILS` (3) checks in a row. |
+
+The primary checks every secondary every `DNS_SECONDARY_CHECK_SECONDS`
+(4 h), and every `DNS_SECONDARY_RECHECK_SECONDS` (1 h) while one fails. A
+check compares the zone serials through the secondary's pdns-API and asks
+it for an AXFR of a zone that lags. A secondary of an older version answers
+port 53 with its recursor, not `aa`; it keeps syncing but is never entered.
+
+A secondary that was taken out, by hand or by the second switch, comes back
+only through "Enter NS" in its row; that button checks `aa` first.
+"Remove NS" takes it out by hand. Disconnecting a secondary removes its
+records and its NS entry; a new address replaces its A and PTR record.
+
 ## Manual setup
 
 The setup script is recommended.
