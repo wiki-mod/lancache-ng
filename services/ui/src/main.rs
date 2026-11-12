@@ -1476,15 +1476,20 @@ struct PeerZone {
 // From: Issue #1683
 fn zone_state(z: &PeerZone) -> (u8, &'static str) {
     use lancache_ng::dns::Sync;
-    match (z.primary, z.secondary) {
-        (None, _) => (5, "error"),
-        (_, None) => (4, "missing"),
-        (Some(p), Some(r)) => match lancache_ng::dns::sync_state(p, r) {
-            Sync::InSync => (0, "in_sync"),
-            Sync::Ahead => (1, "ahead"),
-            Sync::Unknown => (2, "unknown"),
-            Sync::Behind => (3, "behind"),
-        },
+    // What: let-else instead of None in a tuple pattern.
+    // Why: CodeQL read that None as an unused variable.
+    // From: Issue #1683
+    let Some(p) = z.primary else {
+        return (5, "error");
+    };
+    let Some(r) = z.secondary else {
+        return (4, "missing");
+    };
+    match lancache_ng::dns::sync_state(p, r) {
+        Sync::InSync => (0, "in_sync"),
+        Sync::Ahead => (1, "ahead"),
+        Sync::Unknown => (2, "unknown"),
+        Sync::Behind => (3, "behind"),
     }
 }
 
