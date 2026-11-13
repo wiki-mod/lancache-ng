@@ -197,13 +197,6 @@ yn_default() {
     esac
 }
 
-# What: the 1/0 value of a y/n answer
-# Why: the wizard stores the answer, never a default
-# From: Issue #1683 | PR #1912
-yn_flag() {
-    case "${1,,}" in y|yes) printf '1\n' ;; *) printf '0\n' ;; esac
-}
-
 # What: the [y/N] or [Y/n] hint of a prompt default
 # Why: the capital letter marks the default answer
 # From: Issue #1683 | PR #1912
@@ -439,9 +432,8 @@ prompt_dns_upstream() {
     printf "  Names LanCache-NG does not know (for example your NAS) are\n"
     printf "  resolved from the internet. A router or firewall that knows\n"
     printf "  them can answer instead. Game CDN names stay with LanCache-NG.\n\n"
-    ask "Use an external DNS server? $(yn_hint "$use_yn")" "$use_yn"
     DNS_UPSTREAM_SERVERS="" DNS_UPSTREAM_ZONES="" DNS_UPSTREAM_UNSIGNED_ZONES=""
-    if [[ "$(yn_flag "$REPLY")" != 1 ]]; then
+    if ! confirm "Use an external DNS server? $(yn_hint "$use_yn")" "$use_yn"; then
         return 0
     fi
     while true; do
@@ -518,8 +510,10 @@ prompt_dns_local_reverse_zones() {
     printf "  Reverse lookups (IP to name, PTR) of private networks go to\n"
     printf "  the external DNS server or the internet. LanCache-NG can\n"
     printf "  answer them itself instead, from its own reverse zones.\n\n"
-    ask "Answer private reverse lookups locally? $(yn_hint "$yn")" "$yn"
-    DNS_LOCAL_REVERSE_ZONES=$(yn_flag "$REPLY")
+    DNS_LOCAL_REVERSE_ZONES=0
+    if confirm "Answer private reverse lookups locally? $(yn_hint "$yn")" "$yn"; then
+        DNS_LOCAL_REVERSE_ZONES=1
+    fi
 }
 
 # What: true for a boot filename without blank or comma
@@ -585,6 +579,49 @@ host_lan_addresses() {
 # From: Issue #1683 | PR #1858
 print_host_addresses_failed() {
     print_error "Failed to list the IPv4 addresses of this host (exit $1)."
+}
+
+# What: offer ip addr add for an IP missing on this host
+# Why: one owner for the primary and the secondary binds
+# From: Issue #1683
+ensure_host_ipv4() {
+    local ip="$1" ref="$2" assigned=0 link="" addrs prefix dev
+    # What: $1 goes on the device and prefix of $2
+    # Why: same link and subnet; no guessed device or mask
+    # From: Issue #1683 | PR #1858
+    if addrs=$(host_ipv4_addresses); then
+        awk -v ip="$ip" '$1 == ip { found = 1 } END { exit !found }' <<< "$addrs" \
+            && assigned=1
+        link=$(awk -v ip="$ref" '$1 == ip { print $2, $3; exit }' <<< "$addrs")
+    else
+        print_warn "Cannot list this host's IPv4 addresses (exit $?)."
+    fi
+    if [[ "$assigned" = 1 ]]; then
+        print_ok "$ip already assigned"
+        return 0
+    fi
+    print_warn "$ip not yet assigned to an interface"
+    if [[ -n "$link" ]]; then
+        read -r prefix dev <<< "$link"
+        if confirm "Add now? (ip addr add $ip/$prefix dev $dev) [Y/n]" "Y"; then
+            if [[ "$WIZARD_INTROSPECT_MODE" = "1" ]]; then
+                # What: introspection skips ip addr add
+                # Why: list-prompts only walks the prompts
+                # From: Issue #1176
+                print_ok "$ip would be added (skipped: introspection mode)"
+            elif ip addr add "$ip/$prefix" dev "$dev"; then
+                print_ok "$ip added (not persistent)"
+            else
+                print_warn "Adding failed (exit $?) — please add manually"
+            fi
+        fi
+    else
+        print_warn "Add $ip to the interface that carries $ref."
+    fi
+    printf "\n"
+    print_warn "For persistent configuration after reboot:"
+    printf "    netplan:    sudo nano /etc/netplan/01-netcfg.yaml\n"
+    printf "    interfaces: sudo nano /etc/network/interfaces\n"
 }
 
 # What: internet-route source IP, else the first LAN IP
@@ -665,21 +702,23 @@ secondary_suggest_alternate_listen_ip() {
     return 1
 }
 
-# What: port-53 holders shown; prompt for alternate IP
-# Why: fails closed without a terminal, no endless loop
+# What: port 53 on the IP in variable $1; else ask again
+# Why: a nameref: in $(...) the prompt lost its terminal
 # From: Issue #1683 | PR #1858
 secondary_choose_listen_ip() {
-    local listen_ip="$1" conflicts suggestion dns_port
+    local -n _bind_ref="$1"
+    local keep="${2:-}" conflicts suggestion dns_port
 
     dns_port=$(prod_env_default DNS_PORT) || exit $?
     while true; do
-        conflicts="$(secondary_listen_ip_conflicts "$listen_ip")" || exit $?
-        if [[ -z "$conflicts" ]]; then
-            printf '%s\n' "$listen_ip"
-            return 0
-        fi
+        # What: --rotate keeps its own bind IP unchecked
+        # Why: the running secondary holds that port itself
+        # From: Issue #1683
+        [[ -n "$keep" && "$_bind_ref" = "$keep" ]] && return 0
+        conflicts="$(secondary_listen_ip_conflicts "$_bind_ref")" || exit $?
+        [[ -z "$conflicts" ]] && return 0
 
-        print_warn "Port ${dns_port} is already in use for bind IP ${listen_ip}."
+        print_warn "Port ${dns_port} is already in use for bind IP ${_bind_ref}."
         {
             printf '%s\n' "$conflicts" | sed 's/^/    /'
             # What: port-53 holder details, raw output
@@ -697,9 +736,9 @@ secondary_choose_listen_ip() {
             return 1
         fi
 
-        suggestion=$(secondary_suggest_alternate_listen_ip "$listen_ip") \
+        suggestion=$(secondary_suggest_alternate_listen_ip "$_bind_ref") \
             || (( $? == 1 )) || exit 2
-        ask_checked listen_ip "Use another Secondary bind IP" "${suggestion:-$listen_ip}" is_valid_ipv4 "Invalid IPv4 address"
+        ask_checked "$1" "Use another Secondary bind IP" "${suggestion:-$_bind_ref}" is_valid_ipv4 "Invalid IPv4 address"
     done
 }
 
@@ -784,13 +823,22 @@ compose_profiles_for_runtime() {
     printf '%s\n' "$result"
 }
 
-# What: yes/no prompt; accepts y or yes, any case
+# What: yes/no prompt; y, yes, n or no, any case
 # Why: wraps ask() for boolean decisions
 # From: Issue #1683 | PR #1858
 confirm() {
     local prompt="$1" default="${2:-N}"
-    ask "$prompt" "$default"
-    [[ "$(yn_flag "$REPLY")" = 1 ]]
+    # What: ask again until the answer is y, yes, n or no.
+    # Why: a typo counted as no and skipped the step.
+    # From: Issue #1683
+    while true; do
+        ask "$prompt" "$default"
+        case "${REPLY,,}" in
+            y|yes) return 0 ;;
+            n|no) return 1 ;;
+        esac
+        print_warn "Answer y or n (got '$REPLY')."
+    done
 }
 
 # What: runs a broadcast DHCP probe before Kea activation
@@ -1393,7 +1441,7 @@ ensure_docker_userland_proxy() {
 ensure_stack_requirements_installed() {
     local info out
     [[ "$(id -u)" = "0" ]] \
-        || die "This command must be run as root (sudo ./setup.sh install-requirements-primary or install-requirements-secondary)."
+        || die "This command must be run as root (sudo ./setup.sh install-requirements)."
     # What: refuses an unsupported arch before any install
     # Why: no host change on a host the stack cannot run on
     # From: Issue #1683 | PR #1858
@@ -1449,15 +1497,11 @@ ensure_stack_requirements_installed() {
 }
 
 # What: installs curl, jq, Docker, Compose; prints next step
-# Why: a host gets its requirements before any install
-# From: Issue #1068
-cmd_install_requirements_primary() {
+# Why: one set for both; old names stay as aliases
+# From: Issue #1683
+cmd_install_requirements() {
     ensure_stack_requirements_installed
-    print_ok "Primary node requirements installed (curl, jq, Docker, Docker Compose v2). Run ./setup.sh install next."
-}
-cmd_install_requirements_secondary() {
-    ensure_stack_requirements_installed
-    print_ok "Secondary node requirements installed (curl, jq, Docker, Docker Compose v2). Next: ./setup.sh secondary --help shows the registration command."
+    print_ok "Requirements installed (curl, jq, Docker, Docker Compose v2). Next: ./setup.sh install (primary) or ./setup.sh secondary."
 }
 
 # What: strips quotes and unquoted inline comments
@@ -3965,8 +4009,12 @@ lancache_channel_code_ref() {
 # Why: the prod compose names the ref; the slug is its name
 # From: Issue #1683 | PR #1858
 lancache_image_ref_vars() {
-    local vars
-    vars=$(sed -nE 's/^ *image: \$\{(LANCACHE_IMAGE_REF_([A-Z_]+)):\?.*$/\1 \2/p' "$PROD_COMPOSE" \
+    local vars text
+    # What: the compose text from the checkout or the ref
+    # Why: a curl|bash secondary has no $PROD_COMPOSE file
+    # From: Issue #1683
+    text=$(lancache_repo_file_text "${PROD_COMPOSE#"$SCRIPT_DIR"/}") || exit $?
+    vars=$(sed -nE 's/^ *image: \$\{(LANCACHE_IMAGE_REF_([A-Z_]+)):\?.*$/\1 \2/p' <<< "$text" \
         | awk '{ print $1, tolower($2) }' | sort -u) \
         || die "Failed to read the first-party image refs from $PROD_COMPOSE."
     [[ -n "$vars" ]] || die "$PROD_COMPOSE declares no LANCACHE_IMAGE_REF_* image; cannot pin a channel."
@@ -5390,13 +5438,12 @@ Commands:
   install              Run the guided first-time setup. Without a command,
                        setup.sh only prints this help; curl | bash passes
                        the command as: bash -s -- install
-  install-requirements-primary
-                       Install only the Docker prerequisites (curl, Docker
-                       engine, Docker Compose v2) for a primary node, without
-                       running the rest of the interactive installer.
-  install-requirements-secondary
-                       Install only the Docker prerequisites for a secondary
-                       DNS node, without running ./setup.sh secondary.
+  install-requirements
+                       Install only the prerequisites (curl, jq, Docker
+                       engine, Docker Compose v2), the same for primary and
+                       secondary. install and secondary run it on their own.
+                       Aliases: install-requirements-primary,
+                       install-requirements-secondary.
   list-prompts [answers-file]
                        Introspection mode: reports the exact ordered prompt
                        sequence the install wizard would ask for a given set
@@ -5462,27 +5509,17 @@ for validating a pre-release branch the same documented one-liner way that
 LANCACHE_IMAGE_CHANNEL already selects a specific image channel.
 EOF
             ;;
-        install-requirements-primary)
+        install-requirements|install-requirements-primary|install-requirements-secondary)
             cat <<EOF
-Usage: ./setup.sh install-requirements-primary
+Usage: ./setup.sh install-requirements
 
-Installs only the Docker prerequisites (curl, Docker engine, a running Docker
-daemon, and the Docker Compose v2 plugin) for a primary node, then stops --
-does not run the rest of the interactive installer. Useful for provisioning a
-host's requirements ahead of time, or standalone, separately from the guided
-setup. Must be run as root. Follow with ./setup.sh install.
-EOF
-            ;;
-        install-requirements-secondary)
-            cat <<EOF
-Usage: ./setup.sh install-requirements-secondary
+Installs only the prerequisites (curl, jq, Docker engine, a running Docker
+daemon, and the Docker Compose v2 plugin), then stops. Primary and secondary
+need the same set. ./setup.sh install and ./setup.sh secondary run this step
+on their own, so it is only needed to prepare a host ahead of time.
+Must be run as root.
 
-Installs only the Docker prerequisites (curl, Docker engine, a running Docker
-daemon, and the Docker Compose v2 plugin) for a secondary DNS node, then
-stops. ./setup.sh secondary itself only checks for these tools and fails with
-"docker is not installed" if they are missing -- this command lets an
-operator install exactly what a secondary needs, standalone, before running
-./setup.sh secondary. Must be run as root.
+Aliases: install-requirements-primary, install-requirements-secondary.
 EOF
             ;;
         list-prompts)
@@ -5595,23 +5632,33 @@ EOF
             ;;
         secondary)
             cat <<EOF
-Usage: ./setup.sh secondary --primary <url> --token <token> --name <name> --ip-http <ip> [--listen-ip <ip>] [--ip-https <ip> --listen-ip-https <ip>] [--rotate]
+Usage: ./setup.sh secondary --primary <url> --token <token> --name <name> [--ip-http <ip>] [--listen-ip <ip>] [--ip-https <ip> --listen-ip-https <ip>] [--rotate]
 
 Registers and starts a secondary DNS node on a remote host. The command
 creates a local compose directory, writes the secondary .env file, and starts
 the container after the primary server returns the required secrets.
 Use --rotate in an existing secondary directory to refresh credentials after
 the primary changes its TSIG key.
+Order: check, ask, then act. Missing requirements are installed and the host
+is checked first; a host that already runs a lancache dns container stops
+before any change. In a terminal, missing values are asked one by one and
+checked at once: name, primary URL, token, whether the primary runs the latest
+channel, the DNS IP, and whether the primary has HTTPS (then the primary's
+HTTPS IP and a second DNS IP). --rotate offers the values stored in the
+secondary's .env; only the token is asked again. Then a bind IP not yet on
+this host is offered for "ip addr add", the channel's code is cloned as on
+the primary, and the secondary registers and starts.
+LANCACHE_IMAGE_CHANNEL sets the channel without a terminal.
 
 Required arguments:
   --primary <url>    Primary LanCache UI/API URL, for example http://<primary-ip>:<ui-port>
   --token <token>    Secondary registration token from the primary server
   --name <name>      Secondary node name, using letters, numbers, and dashes only
-  --ip-http <ip>     Primary proxy IP address clients should use for cached traffic
 
 Optional arguments:
+  --ip-http <ip>     Primary proxy IP for cached traffic (default: the IP the primary sends at registration)
   --listen-ip <ip>   Bind IP for the secondary DNS container (default: detected host LAN IP)
-  --ip-https <ip>    Primary https proxy IP; adds a second DNS bind (needs --listen-ip-https)
+  --ip-https <ip>    Primary HTTPS IP; adds a second DNS bind (needs --listen-ip-https)
   --listen-ip-https <ip>  Second bind IP for the https DNS (needs --ip-https; differs from --listen-ip)
   --rotate           Reuse an existing secondary directory and refresh credentials
 EOF
@@ -6259,12 +6306,12 @@ set_active_channel_dir() {
     ln -sfn "${dir##*/}" "$link" || die "Failed to point $link at $dir (exit $?)."
 }
 
-# What: install runs from the chosen channel's dir
-# Why: compose files and images from one ref at once
+# What: clones or syncs the channel's code; sets current
+# Why: install and secondary share one checkout step
 # From: Issue #1683 | PR #1858
-install_repo_follow_channel() {
-    local channel="$1" target dir link branch branches old="" new exec_rc
-    shift
+channel_code_checkout() {
+    local channel="$1" target dir branch branches
+    CHANNEL_CODE_DIR="" CHANNEL_CODE_OLD="" CHANNEL_CODE_IN_PLACE=0
     # What: a named non-channel branch installs in place
     # Why: the operator chose that revision (AG-OP-009)
     # From: Issue #1683 | PR #1858
@@ -6276,15 +6323,15 @@ install_repo_follow_channel() {
             printf "  Compose files and this setup.sh come from that branch.\n"
             printf "  Updates will not move the checkout; switch it to master\n"
             printf "  (latest) or current_dev (nightly) to follow a channel.\n"
+            CHANNEL_CODE_DIR="$SCRIPT_DIR" CHANNEL_CODE_IN_PLACE=1
             return 0
         fi
     fi
     dir=$(channel_code_dir "$channel") || exit $?
-    link=$(channel_active_link) || exit $?
     target="${LANCACHE_SETUP_GIT_REF:-}"
     [[ -n "$target" ]] || target=$(lancache_channel_code_ref "$channel" "${LANCACHE_IMAGE_TAG:-}") || exit $?
     [[ -n "$target" ]] || die "Channel $channel needs LANCACHE_IMAGE_TAG to name its code."
-    [[ ! -e "$dir/.git" ]] || old=$(git -C "$dir" rev-parse HEAD) || die "Failed to read HEAD of $dir (exit $?)."
+    [[ ! -e "$dir/.git" ]] || CHANNEL_CODE_OLD=$(git -C "$dir" rev-parse HEAD) || die "Failed to read HEAD of $dir (exit $?)."
     print_step "Code of channel $channel in $dir ($target)"
     if [[ -n "${LANCACHE_SETUP_GIT_REF:-}" && -e "$dir/.git" ]]; then
         sync_repo_to_ref "$dir" "$target"
@@ -6295,6 +6342,19 @@ install_repo_follow_channel() {
         ensure_channel_checkout "$dir" "$target"
     fi
     set_active_channel_dir "$dir"
+    CHANNEL_CODE_DIR="$dir"
+}
+
+# What: install runs from the chosen channel's dir
+# Why: compose files and images from one ref at once
+# From: Issue #1683 | PR #1858
+install_repo_follow_channel() {
+    local channel="$1" dir link old new exec_rc
+    shift
+    channel_code_checkout "$channel"
+    [[ "$CHANNEL_CODE_IN_PLACE" = 0 ]] || return 0
+    dir="$CHANNEL_CODE_DIR" old="$CHANNEL_CODE_OLD"
+    link=$(channel_active_link) || exit $?
     new=$(git -C "$dir" rev-parse HEAD) || die "Failed to read HEAD of $dir (exit $?)."
     # What: running from current at its HEAD goes on here
     # Why: units then name current, the link, not a dir
@@ -8172,22 +8232,6 @@ lancache_repo_file_text() {
     curl -fsSL "$raw" || die "Failed to download ${path} from $raw (exit $?)."
 }
 
-# What: no checkout: files from LANCACHE_IMAGE_CHANNEL's ref
-# Why: AG-REL-009; curl|bash read HEAD (master) for nightly
-# From: Issue #1683 | PR #1984
-secondary_pin_channel_ref() {
-    local channel="${LANCACHE_IMAGE_CHANNEL:-}" ref
-    if [[ -n "${LANCACHE_SETUP_GIT_REF:-}" || -z "$channel" || -f "$SCRIPT_DIR/$LANCACHE_SOT" ]]; then
-        return 0
-    fi
-    validate_lancache_image_channel "$channel"
-    ref=$(lancache_channel_code_ref "$channel" "${LANCACHE_IMAGE_TAG:-}") || exit $?
-    [[ -n "$ref" ]] || die "LANCACHE_IMAGE_CHANNEL=${channel} needs LANCACHE_IMAGE_TAG (vX.Y.Z or sha-<commit>)."
-    LANCACHE_SETUP_GIT_REF="$ref"
-    LANCACHE_SOT_TEXT=$(lancache_repo_file_text "$LANCACHE_SOT") || exit $?
-    print_ok "Repository files from ${ref} (channel ${channel})"
-}
-
 # What: dies naming each NAME=VALUE pair with empty value
 # Why: arguments and response fields share the check
 # From: Issue #1683 | PR #1858
@@ -8199,6 +8243,46 @@ die_if_any_empty() {
         [[ -n "${pair#*=}" ]] || missing+=("${pair%%=*}")
     done
     [[ ${#missing[@]} -eq 0 ]] || die "${message}: ${missing[*]}"
+}
+
+# What: 0 for an http or https URL without spaces
+# Why: the secondary wizard checks the primary URL at once
+# From: Issue #1683
+is_http_url() {
+    [[ "$1" =~ ^https?://[^[:space:]]+$ ]]
+}
+
+# What: 0 for a non-empty answer
+# Why: the secondary wizard asks again on an empty token
+# From: Issue #1683
+is_nonempty_value() {
+    [[ -n "$1" ]]
+}
+
+# What: 0 for a secondary name of letters, digits, dashes
+# Why: the name is a DNS label and the directory name
+# From: Issue #1683
+is_secondary_name() {
+    [[ "$1" =~ ^[a-zA-Z0-9-]+$ ]]
+}
+
+# What: dies when the dns container name is taken here
+# Why: primary and secondary share one SOT name
+# From: Issue #1683
+assert_secondary_container_free() {
+    local own cname rows owner
+    own=$(realpath -m "$1") || die "Cannot resolve the directory $1 (exit $?)."
+    cname=$(prod_env_default CONTAINER_NAME_DNS) || exit $?
+    rows=$(docker ps -a --filter "name=^/${cname}\$" \
+        --format '{{.Names}}|{{.Label "com.docker.compose.project.working_dir"}}') \
+        || die "Failed to list the containers of this host (exit $?)."
+    [[ -n "$rows" ]] || return 0
+    owner=${rows#*|}
+    # What: --rotate may find its own container
+    # Why: same compose dir = this secondary, not another
+    # From: Issue #1683
+    [[ "$owner" = "$own" ]] && return 0
+    die "This host already runs a lancache system: container ${cname} (compose dir: ${owner:-unknown}). Install the secondary on another host, or remove that container first."
 }
 
 # What: secondary setup consumes primary credentials
@@ -8213,7 +8297,7 @@ cmd_secondary() {
     local explicit_lancache_image_tag keep_known_good_configs
     local preflight_dir preflight_env_file preflight_registry preflight_prefix preflight_channel preflight_env_tag
     local preflight_tag preflight_verified_registry="" preflight_verified_prefix="" preflight_verified_tag=""
-    local secondary_env_file compose_out bad_response secondary_compose
+    local secondary_env_file bad_response secondary_compose
     local channel_words pinned release dns_port
 
     while [[ $# -gt 0 ]]; do
@@ -8268,30 +8352,129 @@ cmd_secondary() {
         esac
     done
 
-    # What: ask for each missing value in a terminal
-    # Why: secondary without arguments guides like install
-    # From: Issue #1683 | PR #1980
-    if [[ -t 0 ]]; then
-        [[ -n "$primary" ]] || { ask "Primary Admin-UI URL (for example http://192.168.1.100:8080)" ""; primary="$REPLY"; }
-        [[ -n "$token" ]] || { ask "Registration token (Admin-UI: DNS, Secondary DNS)" ""; token="$REPLY"; }
-        [[ -n "$name" ]] || { ask "Name of this secondary (a-z, 0-9, -)" ""; name="$REPLY"; }
-        [[ -n "$ip_http" ]] || { ask "Primary proxy IP (IP_HTTP of the primary)" ""; ip_http="$REPLY"; }
+    # What: requirements installed first, as on the primary
+    # Why: a missing tool is installed, as on the primary
+    # From: Issue #1683
+    [[ "$(id -u)" = "0" ]] \
+        || die "This script must be run as root (sudo ./setup.sh secondary)."
+    ensure_stack_requirements_installed
+
+    # What: the name first; inside a secondary it is the dir
+    # Why: the name selects the stored .env of --rotate
+    # From: Issue #1683
+    local tty=0 stored_env="" stored_listen="" stored_listen_https="" stored_ip_https="" stored_channel="" loopback
+    local primary_arg="$primary" stored_primary=""
+    [[ -t 0 ]] && tty=1
+    if [[ "$tty" = 1 && -z "$name" ]]; then
+        local name_default=""
+        [[ "$rotate" -eq 1 && -f .env && -f docker-compose.yml ]] && name_default=$(basename "$PWD")
+        ask_checked name "Name of this secondary (a-z, 0-9, -)" "$name_default" is_secondary_name "Only letters, digits and dashes"
     fi
-    die_if_any_empty "Required argument(s) missing (see ./setup.sh secondary --help)" \
-        "--primary=$primary" "--token=$token" "--name=$name" "--ip-http=$ip_http"
-
-    for cmd in curl docker jq; do
-        command_available "$cmd" \
-            || die "$cmd is not installed or is not in PATH; run: sudo $0 install-requirements-secondary"
-    done
-
-    compose_out=$(docker compose version 2>&1) \
-        || die "'docker compose' is not available; install Docker Compose v2 before continuing (exit $?): $compose_out"
-
-    [[ "$name" =~ ^[a-zA-Z0-9-]+$ ]] \
+    die_if_any_empty "Required argument(s) missing (see ./setup.sh secondary --help)" "--name=$name"
+    is_secondary_name "$name" \
         || die "--name must contain only alphanumeric characters and dashes"
-    is_valid_ipv4 "$ip_http" \
-        || die "--ip-http must be a valid IPv4 address"
+
+    # What: a secondary counts as installed when .env exists
+    # Why: before any question; a failed run blocks nothing
+    # From: Issue #1683
+    secondary_dir="${name}"
+    if [[ "$rotate" -eq 1 ]]; then
+        if [[ "$(basename "$PWD")" = "$name" && -f .env && -f docker-compose.yml ]]; then
+            secondary_dir="."
+        elif [[ ! -f "${secondary_dir}/.env" ]]; then
+            die "No existing secondary '${secondary_dir}' (no ${secondary_dir}/.env). Run --rotate from its parent directory or from inside the existing '${name}' directory, or run without --rotate."
+        fi
+    else
+        if [[ "$(basename "$PWD")" = "$name" && -f .env ]]; then
+            die "Current directory already matches secondary '${name}'; rerun with --rotate to update the secondary files"
+        elif [[ -f "${secondary_dir}/.env" ]]; then
+            die "Secondary '${secondary_dir}' already exists; rerun with --rotate to update the secondary files"
+        fi
+    fi
+    assert_secondary_container_free "$secondary_dir"
+    # What: git for the channel clone, as on the primary
+    # Why: the secondary runs from its channel's checkout
+    # From: Issue #1683
+    command_available git || install_git
+    # What: an existing secondary's .env answers the wizard
+    # Why: --rotate asks again only for the token
+    # From: Issue #1683
+    if [[ -n "$name" && "$(basename "$PWD")" = "$name" && -f .env ]]; then
+        stored_env=".env"
+    elif [[ -n "$name" && -f "${name}/.env" ]]; then
+        stored_env="${name}/.env"
+    fi
+    if [[ -n "$stored_env" ]]; then
+        stored_primary=$(get_env_var PRIMARY_URL "$stored_env") \
+            || die "Cannot read PRIMARY_URL from $stored_env (exit $?)."
+        stored_listen=$(get_env_var LISTEN_IP "$stored_env") \
+            || die "Cannot read LISTEN_IP from $stored_env (exit $?)."
+        stored_listen_https=$(get_env_var LISTEN_IP_HTTPS "$stored_env") \
+            || die "Cannot read LISTEN_IP_HTTPS from $stored_env (exit $?)."
+        stored_ip_https=$(get_env_var IP_HTTPS "$stored_env") \
+            || die "Cannot read IP_HTTPS from $stored_env (exit $?)."
+        stored_channel=$(get_env_var LANCACHE_IMAGE_CHANNEL "$stored_env") \
+            || die "Cannot read LANCACHE_IMAGE_CHANNEL from $stored_env (exit $?)."
+        loopback=$(prod_env_default LOOPBACK_BIND_IP) || exit $?
+        [[ "$stored_listen_https" != "$loopback" ]] || stored_listen_https=""
+    fi
+    # What: the release channel and the other channel
+    # Why: the channel question is yes/no on the release one
+    # From: Issue #1683
+    local release_channel other_channel channel_list
+    release_channel=$(lancache_release_rows release) || exit $?
+    channel_list=$(lancache_release_rows channel) || exit $?
+    other_channel=$(awk -v r="$release_channel" '$0 != r { print; exit }' <<< "$channel_list") \
+        || die "Failed to read the channels of the SOT (exit $?)."
+    [[ -n "$other_channel" ]] || die "The SOT names no channel besides ${release_channel}."
+    # What: ask each missing value; check it at once
+    # Why: an empty or bad answer is asked again, not later
+    # From: Issue #1683 | PR #1980
+    if [[ "$tty" = 1 ]]; then
+        local listen_default="$stored_listen"
+        [[ -n "$primary_arg" ]] || ask_checked primary "Primary Admin-UI URL (http://<primary-ip>:<ui-port>)" "$stored_primary" is_http_url "Not an http(s) URL"
+        [[ -n "$token" ]] || ask_checked token "Registration token (Admin-UI: DNS, Secondary DNS)" "" is_nonempty_value "The token is required"
+        # What: the primary's channel as a yes/no question
+        # Why: the secondary clones and runs that channel
+        # From: Issue #1683
+        if [[ -z "${LANCACHE_IMAGE_CHANNEL:-}" ]]; then
+            local channel_yn="Y"
+            [[ -z "$stored_channel" || "$stored_channel" = "$release_channel" ]] || channel_yn="N"
+            if confirm "Runs the primary on the ${release_channel} channel? $(yn_hint "$channel_yn")" "$channel_yn"; then
+                LANCACHE_IMAGE_CHANNEL="$release_channel"
+            else
+                LANCACHE_IMAGE_CHANNEL="$other_channel"
+            fi
+        fi
+        if [[ -z "$listen_ip" ]]; then
+            if [[ -z "$listen_default" ]]; then
+                listen_default=$(detect_lan_ip) \
+                    || print_warn "No LAN IP detected (exit $?); enter the DNS IP of this secondary."
+            fi
+            printf '\n  %sDNS IP of this secondary%s: clients enter it as their DNS server.\n\n' "${BOLD}" "${RESET}"
+            ask_checked listen_ip "DNS IP of this secondary" "$listen_default" is_valid_ipv4 "Invalid IPv4 address"
+        fi
+    elif [[ -z "$primary" ]]; then
+        primary="$stored_primary"
+    fi
+    # What: no terminal: env, stored, else release channel
+    # Why: the clone needs one channel before any change
+    # From: Issue #1683
+    [[ -n "${LANCACHE_IMAGE_CHANNEL:-}" ]] || LANCACHE_IMAGE_CHANNEL="${stored_channel:-$release_channel}"
+    validate_lancache_image_channel "$LANCACHE_IMAGE_CHANNEL"
+    die_if_any_empty "Required argument(s) missing (see ./setup.sh secondary --help)" \
+        "--primary=$primary" "--token=$token"
+
+    is_http_url "$primary" \
+        || die "--primary must be an http(s) URL: http://<primary-ip>:<ui-port>"
+    # What: --ip-http is optional
+    # Why: the default is the primary's IP_HTTP
+    # From: Issue #1683
+    local host_addrs=""
+    if [[ -n "$ip_http" ]]; then
+        is_valid_ipv4 "$ip_http" \
+            || die "--ip-http must be a valid IPv4 address"
+    fi
     if [[ -n "$listen_ip" ]]; then
         is_valid_ipv4 "$listen_ip" \
             || die "--listen-ip must be a valid IPv4 address"
@@ -8300,7 +8483,15 @@ cmd_secondary() {
             || die "Could not auto-detect a secondary bind IP. Re-run with --listen-ip <ip>."
     fi
     dns_port=$(prod_env_default DNS_PORT) || exit $?
-    listen_ip=$(secondary_choose_listen_ip "$listen_ip") \
+    # What: --rotate keeps its stored bind IPs unchecked
+    # Why: its own running container holds them
+    # From: Issue #1683
+    local keep_listen="" keep_listen_https=""
+    if [[ "$rotate" -eq 1 ]]; then
+        keep_listen="$stored_listen"
+        keep_listen_https="$stored_listen_https"
+    fi
+    secondary_choose_listen_ip listen_ip "$keep_listen" \
         || die "No usable secondary bind IP on port ${dns_port} (exit $?; see above). Re-run with --listen-ip <ip> after freeing the port."
     print_ok "Secondary DNS bind IP: ${listen_ip}"
     if [[ -n "$ip_https" || -n "$listen_ip_https" ]]; then
@@ -8310,16 +8501,52 @@ cmd_secondary() {
             || die "--ip-https must be a valid IPv4 address"
         is_valid_ipv4 "$listen_ip_https" \
             || die "--listen-ip-https must be a valid IPv4 address"
-        listen_ip_https=$(secondary_choose_listen_ip "$listen_ip_https") \
+        secondary_choose_listen_ip listen_ip_https "$keep_listen_https" \
             || die "No usable secondary https bind IP on port ${dns_port} (exit $?; see above). Re-run with --listen-ip-https <ip> after freeing the port."
         [[ "$listen_ip_https" != "$listen_ip" ]] \
             || die "the https bind IP must differ from the http bind IP ${listen_ip}"
         print_ok "Secondary https DNS bind IP: ${listen_ip_https}"
+    elif [[ "$tty" = 1 ]]; then
+        # What: https asked with the other questions
+        # Why: no change before all answers are known
+        # From: Issue #1683
+        local https_default="Y" https_listen_default
+        [[ -z "$stored_env" || -n "$stored_listen_https" ]] || https_default="N"
+        if confirm "Has the primary HTTPS enabled? $(yn_hint "$https_default")" "$https_default" \
+            && confirm "Enable HTTPS secondary support? $(yn_hint "$https_default")" "$https_default"; then
+            ask_checked ip_https "HTTPS IP of the primary" "$stored_ip_https" is_valid_ipv4 "Invalid IPv4 address"
+            https_listen_default="${stored_listen_https:-${listen_ip%.*}.$((10#${listen_ip##*.} + 1))}"
+            printf '\n  %sSecond DNS IP of this secondary%s: HTTPS clients enter it as their DNS server;\n' "${BOLD}" "${RESET}"
+            printf '  it must differ from %s.\n\n' "$listen_ip"
+            ask_checked listen_ip_https "Second DNS IP of this secondary (HTTPS clients)" "$https_listen_default" is_valid_ipv4 "Invalid IPv4 address"
+            [[ "$listen_ip_https" != "$listen_ip" ]] \
+                || die "the https bind IP must differ from the http bind IP ${listen_ip}"
+            secondary_choose_listen_ip listen_ip_https "$keep_listen_https" \
+                || die "No usable secondary https bind IP on port ${dns_port} (exit $?; see above). Re-run with --listen-ip-https <ip> after freeing the port."
+            print_ok "Secondary https DNS bind IP: ${listen_ip_https}"
+        fi
     fi
+    # What: missing bind IPs are added after all answers
+    # Why: no change before all answers; asks as the primary
+    # From: Issue #1683
+    local host_ref=""
+    if [[ "$tty" = 1 ]]; then
+        host_ref=$(detect_lan_ip) || print_warn "No LAN IP detected (exit $?); cannot offer to add a bind IP."
+        if [[ -n "$host_ref" ]]; then
+            ensure_host_ipv4 "$listen_ip" "$host_ref"
+            [[ -z "$listen_ip_https" ]] || ensure_host_ipv4 "$listen_ip_https" "$host_ref"
+        fi
+    fi
+    # What: the channel's code is cloned, as on the primary
+    # Why: compose, SOT and promote lock from one checkout
+    # From: Issue #1683
+    channel_code_checkout "$LANCACHE_IMAGE_CHANNEL"
+    SCRIPT_DIR="$CHANNEL_CODE_DIR"
+    LANCACHE_SOT_TEXT=$(lancache_repo_file_text "$LANCACHE_SOT") || exit $?
+    PROD_COMPOSE="$SCRIPT_DIR/$(lancache_sot_value compose_file runtime)" || exit $?
     assert_prebuilt_image_platform_supported
-    secondary_pin_channel_ref
-    # What: the compose file is fetched before registration
-    # Why: a fetch failure must not follow a registration
+    # What: the compose file is read before registration
+    # Why: a read failure must not follow a registration
     # From: Issue #1683 | PR #1858
     secondary_compose=$(lancache_repo_file_text deploy/secondary/docker-compose.yml) || exit $?
     # What: the runtime files of the same ref as the compose
@@ -8332,21 +8559,6 @@ cmd_secondary() {
     for repo_i in "${!repo_files[@]}"; do
         repo_texts[repo_i]=$(lancache_repo_file_text "${repo_files[repo_i]}") || exit $?
     done
-
-    secondary_dir="${name}"
-    if [[ "$rotate" -eq 1 ]]; then
-        if [[ "$(basename "$PWD")" = "$name" && -f .env && -f docker-compose.yml ]]; then
-            secondary_dir="."
-        elif [[ ! -d "$secondary_dir" ]]; then
-            die "No existing secondary directory '${secondary_dir}' found. Run --rotate from its parent directory or from inside the existing '${name}' directory."
-        fi
-    else
-        if [[ "$(basename "$PWD")" = "$name" ]]; then
-            die "Current directory already matches secondary '${name}'; rerun with --rotate to update the secondary files"
-        elif [[ -d "$secondary_dir" ]]; then
-            die "Directory '${secondary_dir}' already exists; rerun with --rotate to update the secondary files"
-        fi
-    fi
 
     # What: --rotate may check the platform before the POST
     # Why: a late failure would leave a rotated password
@@ -8452,7 +8664,20 @@ cmd_secondary() {
         "ddns_tsig_key=$ddns_tsig_key" "dns_xfr_primary=$dns_xfr_primary" \
         "syslog_primary=$syslog_primary"
 
-    mkdir -p "$secondary_dir"
+    # What: the cache IP comes from the primary, not asked
+    # Why: the primary owns IP_HTTP; nothing to type
+    # From: Issue #1683
+    [[ -n "$ip_http" ]] || ip_http="$dns_xfr_primary"
+    is_valid_ipv4 "$ip_http" \
+        || die "The primary sent no valid proxy IP (${ip_http}); pass --ip-http <ip>."
+    if host_addrs=$(host_ipv4_addresses); then
+        if awk -v ip="$ip_http" '$1 == ip { found = 1 } END { exit !found }' <<< "$host_addrs"; then
+            print_warn "Cache IP ${ip_http} is an address of this host; it must be the proxy IP of the primary."
+        fi
+    else
+        print_warn "Cannot list this host's IPv4 addresses (exit $?)."
+    fi
+    validate_env_value PRIMARY_URL "$primary"
 
     existing_env_file=""
     if [[ -f "${secondary_dir}/.env" ]]; then
@@ -8579,6 +8804,10 @@ cmd_secondary() {
         snmp_community=$(generate_managed_secret SNMP_COMMUNITY stack) || exit $?
     fi
 
+    # What: the directory comes only with the first write
+    # Why: an earlier failure leaves no half secondary dir
+    # From: Issue #1683
+    mkdir -p "$secondary_dir" || die "Failed to create ${secondary_dir} (exit $?)."
     write_file_atomically "${secondary_dir}/docker-compose.yml" <<< "$secondary_compose" \
         || die "Failed to write ${secondary_dir}/docker-compose.yml (exit $?)."
     for repo_i in "${!repo_files[@]}"; do
@@ -8599,6 +8828,7 @@ cmd_secondary() {
     fi
 
     write_file_atomically "${secondary_dir}/.env" <<EOF
+PRIMARY_URL=${primary}
 IP_HTTP=${ip_http}
 LISTEN_IP=${listen_ip}
 IP_HTTPS=${ip_https}
@@ -8691,10 +8921,8 @@ case "$setup_command" in
             WIZARD_INTROSPECT_ANSWERS_FD=9
         fi
         ;;
-    install-requirements-primary)
-        cmd_install_requirements_primary; exit 0 ;;
-    install-requirements-secondary)
-        cmd_install_requirements_secondary; exit 0 ;;
+    install-requirements|install-requirements-primary|install-requirements-secondary)
+        cmd_install_requirements; exit 0 ;;
     update)
         cmd_update "${2:-$DEFAULT_INSTALL_DIR}"; exit 0 ;;
     auto-update)
@@ -8903,50 +9131,16 @@ printf '  %sSecond LAN IP%s: the HTTPS DNS/proxy address, always required.\n\n' 
 suggested_https="${IP_HTTP%.*}.$((10#${IP_HTTP##*.} + 1))"
 ask_checked IP_HTTPS "Second LAN IP (HTTPS mode)" "$suggested_https" is_valid_ipv4 "Invalid IPv4 address"
 require_separate_lan_ips "$IP_HTTP" "$IP_HTTPS"
-# What: IP_HTTPS goes on IP_HTTP's device and prefix
-# Why: same link and subnet; no guessed device or mask
-# From: Issue #1683 | PR #1858
-https_assigned=0 http_link=""
-if host_addresses=$(host_ipv4_addresses); then
-    awk -v ip="$IP_HTTPS" '$1 == ip { found = 1 } END { exit !found }' <<< "$host_addresses" \
-        && https_assigned=1
-    http_link=$(awk -v ip="$IP_HTTP" '$1 == ip { print $2, $3; exit }' <<< "$host_addresses")
-else
-    print_warn "Cannot list this host's IPv4 addresses (exit $?)."
-fi
-if [[ "$https_assigned" = 1 ]]; then
-    print_ok "$IP_HTTPS already assigned"
-else
-    print_warn "$IP_HTTPS not yet assigned to an interface"
-    if [[ -n "$http_link" ]]; then
-        read -r http_prefix http_dev <<< "$http_link"
-        if confirm "Add now? (ip addr add $IP_HTTPS/$http_prefix dev $http_dev) [y/N]" "N"; then
-            if [[ "$WIZARD_INTROSPECT_MODE" = "1" ]]; then
-                # What: introspection skips ip addr add
-                # Why: list-prompts only walks the prompts
-                # From: Issue #1176
-                print_ok "$IP_HTTPS would be added (skipped: introspection mode)"
-            elif ip addr add "$IP_HTTPS/$http_prefix" dev "$http_dev"; then
-                print_ok "$IP_HTTPS added (not persistent)"
-            else
-                print_warn "Adding failed (exit $?) — please add manually"
-            fi
-        fi
-    else
-        print_warn "Add $IP_HTTPS to the interface that carries $IP_HTTP."
-    fi
-    printf "\n"
-    print_warn "For persistent configuration after reboot:"
-    printf "    netplan:    sudo nano /etc/netplan/01-netcfg.yaml\n"
-    printf "    interfaces: sudo nano /etc/network/interfaces\n"
-fi
+ensure_host_ipv4 "$IP_HTTPS" "$IP_HTTP"
 
 printf "\n"
 printf '  %sHTTPS mode%s: also caches HTTPS downloads (Epic, EA, Blizzard…)\n' "${BOLD}" "${RESET}"
 printf "  Requires a CA certificate on clients.\n\n"
 https_yn=$(yn_default HTTPS_ENABLED) || exit $?
-ask "Enable HTTPS mode? $(yn_hint "$https_yn")" "$https_yn"
-HTTPS_ENABLED=$(yn_flag "$REPLY")
+HTTPS_ENABLED=0
+if confirm "Enable HTTPS mode? $(yn_hint "$https_yn")" "$https_yn"; then
+    HTTPS_ENABLED=1
+fi
 print_ok "HTTPS mode $([[ "$HTTPS_ENABLED" = 1 ]] && echo enabled || echo disabled) (second IP $IP_HTTPS)"
 
 # What: step 3: the directory for all persistent state
@@ -9021,8 +9215,10 @@ auto_update_yn=$(yn_default AUTO_UPDATE_ENABLED) || exit $?
 printf "  Default: %s. Update manually any time with: ./setup.sh update\n\n" \
     "$([[ "$auto_update_yn" = "Y" ]] && echo enabled || echo disabled)"
 
-ask "Enable scheduled automatic updates? $(yn_hint "$auto_update_yn")" "$auto_update_yn"
-AUTO_UPDATE_ENABLED=$(yn_flag "$REPLY")
+AUTO_UPDATE_ENABLED=0
+if confirm "Enable scheduled automatic updates? $(yn_hint "$auto_update_yn")" "$auto_update_yn"; then
+    AUTO_UPDATE_ENABLED=1
+fi
 if [[ "$AUTO_UPDATE_ENABLED" = 1 ]]; then
     print_ok "Scheduled automatic updates enabled (ordered, health-gated, daily)"
 else
@@ -9267,8 +9463,10 @@ printf "  servers, that serves time to LAN clients on UDP/%s. Enable/disable and
 printf "  upstream server list are then configured from the Admin UI.\n"
 printf "  Default: %s.\n\n" "$([[ "$ntp_yn" = "Y" ]] && echo enabled || echo disabled)"
 
-ask "Enable LanCache-NG-NTP? $(yn_hint "$ntp_yn")" "$ntp_yn"
-NTP_ENABLED=$(yn_flag "$REPLY")
+NTP_ENABLED=0
+if confirm "Enable LanCache-NG-NTP? $(yn_hint "$ntp_yn")" "$ntp_yn"; then
+    NTP_ENABLED=1
+fi
 ntp_subdir=$(prod_env_default STATE_SUBDIR_NTP) || exit $?
 NTP_DATA_DIR="$LANCACHE_STATE_DIR/$ntp_subdir"
 if [[ "$NTP_ENABLED" = "1" ]]; then

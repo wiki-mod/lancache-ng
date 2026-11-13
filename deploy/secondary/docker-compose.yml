@@ -80,6 +80,10 @@ services:
       # From: Issue #1683
       - "${LISTEN_IP:?LISTEN_IP is required}:${SOT_PDNS_AUTH_PORT}:${SOT_PDNS_AUTH_PORT}/udp"
       - "${LISTEN_IP:?LISTEN_IP is required}:${SOT_PDNS_AUTH_PORT}:${SOT_PDNS_AUTH_PORT}/tcp"
+      # What: pdns API for the primary's health check.
+      # Why: it reads serials; key and allow-from guard it.
+      # From: Issue #1683
+      - "${LISTEN_IP:?LISTEN_IP is required}:${SOT_PDNS_AUTH_API_PORT}:${SOT_PDNS_AUTH_API_PORT}/tcp"
     # What: a real DNS query; any reply counts.
     # Why: a dead upstream must not restart the dns.
     # From: Issue #1683 | PR #1980

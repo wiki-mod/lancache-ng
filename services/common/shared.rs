@@ -612,11 +612,21 @@ pub mod pdns {
             self.patch(zone, changes).await
         }
 
-        // What: add a zone that pulls from masters.
-        // Why: a secondary copies zones by AXFR.
-        // From: Issue #1683 | PR #1858
-        pub async fn create_secondary(&self, zone: &str, masters: &[String]) -> Result<(), String> {
-            let body = json!({"name": zone_id(zone), "kind": "Slave", "masters": masters});
+        // What: add a zone that pulls, with its key.
+        // Why: no zone may exist without its TSIG key.
+        // From: Issue #1683
+        pub async fn create_secondary(
+            &self,
+            zone: &str,
+            masters: &[String],
+            key: &str,
+        ) -> Result<(), String> {
+            let body = json!({
+                "name": zone_id(zone),
+                "kind": "Slave",
+                "masters": masters,
+                "slave_tsig_key_ids": [zone_id(key)],
+            });
             self.call(Method::POST, "/zones", Some(body))
                 .await
                 .map(drop)
@@ -633,12 +643,21 @@ pub mod pdns {
         // What: add a primary zone; SOA from default-soa.
         // Why: API writes and DDNS need the zone to exist.
         // From: Issue #1683 | PR #1980
-        pub async fn create_primary(&self, zone: &str, soa_edit: &str) -> Result<(), String> {
+        pub async fn create_primary(
+            &self,
+            zone: &str,
+            soa_edit: &str,
+            key: &str,
+        ) -> Result<(), String> {
+            // What: TSIG-ALLOW-AXFR set on create.
+            // Why: no zone may exist without its key.
+            // From: Issue #1683
             let body = json!({
                 "name": zone_id(zone),
                 "kind": "Master",
                 "nameservers": [],
                 "soa_edit_api": soa_edit,
+                "master_tsig_key_ids": [zone_id(key)],
             });
             self.call(Method::POST, "/zones", Some(body))
                 .await
@@ -867,6 +886,111 @@ pub mod dns {
             None => Sync::Unknown,
         }
     }
+
+    // What: SOA answer of one DNS server.
+    // Why: aa marks pdns data; serial shows the state.
+    // From: Issue #1683
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct Soa {
+        pub authoritative: bool,
+        pub rcode: u8,
+        pub serial: Option<u32>,
+    }
+
+    // What: SOA query for one zone, RD bit off.
+    // Why: without RD a recursor sends no aa answer.
+    // From: Issue #1683
+    pub fn soa_query(id: u16, zone: &str) -> Result<Vec<u8>, String> {
+        let mut q = id.to_be_bytes().to_vec();
+        q.extend_from_slice(&[0, 0, 0, 1, 0, 0, 0, 0, 0, 0]);
+        for label in zone.trim_end_matches('.').split('.') {
+            if label.is_empty() || label.len() > 63 {
+                return Err(format!("zone {zone:?} is no DNS name"));
+            }
+            q.push(label.len() as u8);
+            q.extend_from_slice(label.as_bytes());
+        }
+        q.extend_from_slice(&[0, 0, 6, 0, 1]);
+        Ok(q)
+    }
+
+    // What: end of a DNS name at offset at.
+    // Why: answers use labels and compression pointers.
+    // From: Issue #1683
+    fn name_end(msg: &[u8], mut at: usize) -> Result<usize, String> {
+        loop {
+            let len = *msg.get(at).ok_or("DNS name is cut off")?;
+            match len & 0xc0 {
+                0 if len == 0 => return Ok(at + 1),
+                0 => at += 1 + usize::from(len),
+                0xc0 if at + 1 < msg.len() => return Ok(at + 2),
+                _ => return Err("DNS name is cut off or bad".into()),
+            }
+        }
+    }
+
+    // What: aa bit, rcode and serial of a reply.
+    // Why: the id must match the query sent.
+    // From: Issue #1683
+    pub fn soa_reply(id: u16, msg: &[u8]) -> Result<Soa, String> {
+        let cut = || "DNS reply is cut off".to_string();
+        let word = |at: usize| {
+            msg.get(at..at + 2)
+                .map(|b| u16::from_be_bytes([b[0], b[1]]))
+                .ok_or_else(cut)
+        };
+        if word(0)? != id || msg[2] & 0x80 == 0 {
+            return Err("DNS reply does not match the query".into());
+        }
+        let mut at = 12;
+        for _ in 0..word(4)? {
+            at = name_end(msg, at)? + 4;
+        }
+        let mut serial = None;
+        for _ in 0..word(6)? {
+            at = name_end(msg, at)?;
+            let end = at + 10 + usize::from(word(at + 8)?);
+            if end > msg.len() {
+                return Err(cut());
+            }
+            if word(at)? == 6 && serial.is_none() {
+                let p = name_end(msg, name_end(msg, at + 10)?)?;
+                let b = msg.get(p..p + 4).filter(|_| p + 4 <= end).ok_or_else(cut)?;
+                serial = Some(u32::from_be_bytes([b[0], b[1], b[2], b[3]]));
+            }
+            at = end;
+        }
+        Ok(Soa {
+            authoritative: msg[2] & 0x04 != 0,
+            rcode: msg[3] & 0x0f,
+            serial,
+        })
+    }
+
+    // What: one SOA query over UDP, no RD.
+    // Why: no dig in the ui image; std and rand only.
+    // From: Issue #1683
+    pub fn soa_probe(
+        addr: std::net::SocketAddr,
+        zone: &str,
+        wait: std::time::Duration,
+    ) -> Result<Soa, String> {
+        let id: u16 = rand::random();
+        let query = soa_query(id, zone)?;
+        let any = if addr.is_ipv4() {
+            "0.0.0.0:0"
+        } else {
+            "[::]:0"
+        };
+        let err = |e: std::io::Error| format!("{addr}: {e}");
+        let sock = std::net::UdpSocket::bind(any).map_err(err)?;
+        sock.connect(addr).map_err(err)?;
+        sock.set_read_timeout(Some(wait)).map_err(err)?;
+        sock.send(&query).map_err(err)?;
+        let mut buf = [0u8; 4096];
+        let n = sock.recv(&mut buf).map_err(err)?;
+        soa_reply(id, &buf[..n])
+    }
 }
 
 // What: DHCP mode and option rules.
@@ -892,11 +1016,24 @@ pub mod dhcp {
         dns
     }
 
+    // What: own NTP for DHCP: NTP on and NTP_AUTO_DHCP on.
+    // Why: the toggle was stored but never applied.
+    // From: Issue #1683
+    pub fn own_ntp(s: &Settings) -> Result<bool, String> {
+        Ok(s.flag("NTP_ENABLED")? && s.flag("NTP_AUTO_DHCP")?)
+    }
+
     // What: DHCP_NTP_SERVERS as IPv4 text; names resolve.
     // Why: option 42 holds IPs; dead names are skipped.
     // From: Issue #1683 | PR #1980
     pub fn ntp_addrs(s: &Settings) -> Result<Vec<String>, String> {
         use std::net::ToSocketAddrs as _;
+        // What: IP_HTTP while own NTP is handed out.
+        // Why: LanCache-NG-NTP answers on the HTTP IP.
+        // From: Issue #1683
+        if own_ntp(s)? {
+            return Ok(vec![s.text("IP_HTTP")?]);
+        }
         s.list("DHCP_NTP_SERVERS")
             .iter()
             .map(|host| {
@@ -2289,6 +2426,16 @@ pub mod pdns_conf {
                 },
             ),
             ("allow-axfr-ips", joined("PDNS_AXFR_FROM")),
+            // What: dnsdist passes the client IP by header.
+            // Why: ACLs and logs need the real client IP.
+            // From: Issue #1683
+            (
+                "proxy-protocol-from",
+                crate::dnsdist_conf::source(
+                    &s.text("DNSDIST_SOURCE_ADDRESS")?,
+                    &s.text("LOOPBACK_BIND_IP")?,
+                )?,
+            ),
             ("xfr-cycle-interval", s.uint("PDNS_XFR_CYCLE")?.to_string()),
             ("dnsupdate", yes(primary)),
             ("allow-dnsupdate-from", joined("PDNS_DNSUPDATE_FROM")),
@@ -2311,6 +2458,12 @@ pub mod pdns_conf {
             if !value.is_empty() {
                 out += &format!("{key}={value}\n");
             }
+        }
+        // What: NOTIFY only to also-notify, not to NS.
+        // Why: port 53 of an NS host is a recursor.
+        // From: Issue #1683
+        if primary {
+            out += "only-notify=\n";
         }
         Ok(out)
     }
@@ -2604,6 +2757,14 @@ pub mod recursor_conf {
         y += &yaml_list(&s.list(&which.key("LISTEN")), "    ")?;
         y += &format!("  port: {}\n  allow_from:\n", u(&which.key("PORT"))?);
         y += &yaml_list(&s.list("DNS_QUERY_ALLOW_FROM"), "    ")?;
+        // What: dnsdist passes the client IP by header.
+        // Why: allow_from and logs see the real client.
+        // From: Issue #1683
+        let proxy = crate::dnsdist_conf::source(
+            &s.text("DNSDIST_SOURCE_ADDRESS")?,
+            &s.text("LOOPBACK_BIND_IP")?,
+        )?;
+        y += &format!("  proxy_protocol_from:\n{}", yaml_list(&[proxy], "    ")?);
         y += &format!(
             "recursor:\n  serve_rfc1918: {}\n",
             s.flag("DNS_SERVE_RFC1918")?
@@ -2654,6 +2815,150 @@ pub mod recursor_conf {
         };
         y += &format!("logging:\n  loglevel: {level}\n{quiet}{snmp}");
         Ok(y)
+    }
+}
+
+// What: dnsdist.conf in front of pdns and recursors.
+// Why: queries, NOTIFY and AXFR share port 53.
+// From: Issue #1683
+pub mod dnsdist_conf {
+    use crate::config::Settings;
+
+    // What: sender address of dnsdist to its backends.
+    // Why: only this address sends proxy protocol.
+    // From: Issue #1683
+    pub fn source(raw: &str, loopback: &str) -> Result<String, String> {
+        let ip: std::net::Ipv4Addr = raw
+            .parse()
+            .map_err(|_| format!("DNSDIST_SOURCE_ADDRESS={raw} is no IPv4 address"))?;
+        if !ip.is_loopback() {
+            return Err(format!(
+                "DNSDIST_SOURCE_ADDRESS={raw} is not in 127.0.0.0/8"
+            ));
+        }
+        // What: must differ from LOOPBACK_BIND_IP.
+        // Why: recursor to pdns runs from it, no header.
+        // From: Issue #1683
+        if raw == loopback {
+            return Err(format!(
+                "DNSDIST_SOURCE_ADDRESS={raw} equals LOOPBACK_BIND_IP"
+            ));
+        }
+        Ok(raw.to_string())
+    }
+
+    // What: one dnsdist port and its recursor.
+    // Why: HTTP and HTTPS mode keep their own caches.
+    // From: Issue #1683
+    pub struct Listener {
+        pub port: u64,
+        pub pool: &'static str,
+        pub backend: String,
+    }
+
+    fn plain(v: &str) -> Result<&str, String> {
+        if v.contains(['"', '\\', '\n', '\r']) {
+            return Err(format!("value {v:?} has quote or line break"));
+        }
+        Ok(v)
+    }
+
+    // What: dnsdist Lua config from plain values.
+    // Why: no Settings needed; the tests call it.
+    // From: Issue #1683
+    pub fn body(
+        listen: &[String],
+        acl: &[String],
+        source: &str,
+        auth: &str,
+        listeners: &[Listener],
+    ) -> Result<String, String> {
+        let first = listeners.first().ok_or("dnsdist needs a listener")?;
+        let mut out = String::from("setACL({})\n");
+        for net in acl {
+            out += &format!("addACL(\"{}\")\n", plain(net)?);
+        }
+        let mut call = "setLocal";
+        for l in listeners {
+            for addr in listen {
+                let addr = plain(addr)?;
+                let host = if addr.contains(':') {
+                    format!("[{addr}]")
+                } else {
+                    addr.to_string()
+                };
+                out += &format!("{call}(\"{host}:{}\")\n", l.port);
+                call = "addLocal";
+            }
+        }
+        let source = plain(source)?;
+        let mut server = |pool: &str, address: &str| -> Result<(), String> {
+            out += &format!(
+                "newServer({{address=\"{}\", pool=\"{pool}\", name=\"{pool}\", source=\"{source}\", useProxyProtocol=true, healthCheckMode=\"up\"}})\n",
+                plain(address)?
+            );
+            Ok(())
+        };
+        server("auth", auth)?;
+        for l in listeners {
+            server(l.pool, &l.backend)?;
+        }
+        // What: NOTIFY, XFR and non-RD queries to pdns.
+        // Why: a secondary asks SOA and AXFR without RD.
+        // From: Issue #1683
+        out += &format!(
+            "addAction(AndRule({{DSTPortRule({}), OrRule({{OpcodeRule(DNSOpcode.Notify), QTypeRule(DNSQType.AXFR), QTypeRule(DNSQType.IXFR), NotRule(RDRule())}})}}), PoolAction(\"auth\"))\n",
+            first.port
+        );
+        for l in listeners {
+            out += &format!(
+                "addAction(DSTPortRule({}), PoolAction(\"{}\"))\n",
+                l.port, l.pool
+            );
+        }
+        Ok(out)
+    }
+
+    // What: full dnsdist.conf for this node.
+    // Why: the ACL adds the replication peers.
+    // From: Issue #1683
+    pub fn render(s: &Settings) -> Result<String, String> {
+        let lo = s.text("LOOPBACK_BIND_IP")?;
+        let source = source(&s.text("DNSDIST_SOURCE_ADDRESS")?, &lo)?;
+        // What: peers pass the ACL besides the clients.
+        // Why: NOTIFY and AXFR now reach port 53 too.
+        // From: Issue #1683
+        let peers = match s.text("DNS_REPLICATION_ROLE")?.as_str() {
+            "primary" => crate::pdns_conf::secondary_ips(s),
+            _ => vec![s.text("DNS_XFR_PRIMARY")?],
+        };
+        let mut acl: Vec<String> = Vec::new();
+        for net in s.list("DNS_QUERY_ALLOW_FROM").into_iter().chain(peers) {
+            if !acl.contains(&net) {
+                acl.push(net);
+            }
+        }
+        let auth = format!(
+            "{}:{}",
+            s.text("PDNS_AUTH_ADDRESS")?,
+            s.uint("PDNS_AUTH_PORT")?
+        );
+        let mut listeners = vec![Listener {
+            port: s.uint("DNS_PORT")?,
+            pool: "http",
+            backend: format!("{lo}:{}", s.uint("RECURSOR_HTTP_PORT")?),
+        }];
+        // What: HTTPS port only when IP_HTTPS is set.
+        // Why: dns-https idles without IP_HTTPS.
+        // From: Issue #1683
+        if s.text("IP_HTTPS").is_ok_and(|ip| !ip.is_empty()) {
+            listeners.push(Listener {
+                port: s.uint("DNS_HTTPS_PORT")?,
+                pool: "https",
+                backend: format!("{lo}:{}", s.uint("RECURSOR_HTTPS_PORT")?),
+            });
+        }
+        body(&s.list("DNSDIST_LISTEN"), &acl, &source, &auth, &listeners)
     }
 }
 
@@ -2718,6 +3023,34 @@ pub mod kea_conf {
         subnets
     }
 
+    // What: ntp-servers of kept subnets follow own NTP.
+    // Why: while on, the toggle owns option 42 everywhere.
+    // From: Issue #1683
+    pub(crate) fn follow_ntp(mut subnets: Value, auto: bool, own: &str, back: &str) -> Value {
+        for sn in subnets.as_array_mut().into_iter().flatten() {
+            if auto && sn.get("option-data").is_none() {
+                sn["option-data"] = json!([]);
+            }
+            let Some(rows) = sn["option-data"].as_array_mut() else {
+                continue;
+            };
+            let at = rows.iter().position(|r| r["name"] == "ntp-servers");
+            match at {
+                Some(i) if auto => rows[i]["data"] = Value::from(own),
+                None if auto => rows.push(json!({"name": "ntp-servers", "data": own})),
+                // What: off returns own IP to default.
+                // Why: no NTP answers there when off.
+                // From: Issue #1683
+                Some(i) if rows[i]["data"] == own && back.is_empty() => {
+                    rows.remove(i);
+                }
+                Some(i) if rows[i]["data"] == own => rows[i]["data"] = Value::from(back),
+                _ => {}
+            }
+        }
+        subnets
+    }
+
     fn option_rows(s: &Settings, domain: &str) -> Result<Vec<Value>, String> {
         let mut rows = Vec::new();
         rows.push(json!({"name": "routers", "data": s.text("DHCP_GATEWAY")?}));
@@ -2760,6 +3093,9 @@ pub mod kea_conf {
             .cloned()
             .unwrap_or_else(|| json!([]));
         let kept = follow_domain(kept, before.as_deref(), &domain);
+        let back = crate::dhcp::ntp_addrs(s)?.join(", ");
+        let own = s.text("IP_HTTP")?;
+        let kept = follow_ntp(kept, crate::dhcp::own_ntp(s)?, &own, &back);
         let old = kept.as_array().into_iter().flatten();
         let old_main = old.clone().find(|x| x["id"].as_u64() == Some(id));
         let mut main = json!({
@@ -3602,6 +3938,7 @@ pub mod render {
             "PDNS_CONF_FILE",
             pdns_conf::auth(s, &sec.pdns_api_key),
         );
+        o.add_file("dns", "DNSDIST_CONF_FILE", crate::dnsdist_conf::render(s));
         for (which, ip_key) in [(Which::Http, "IP_HTTP"), (Which::Https, "IP_HTTPS")] {
             let Ok(answer) = s.text(ip_key) else { continue };
             let rpz_key = which.key("RPZ_FILE");
@@ -3869,7 +4206,12 @@ pub mod render {
         let names: Vec<(String, bool)> =
             domains.lines().filter_map(crate::dns::cdn_entry).collect();
         dns_files(&mut o, sec, &names);
-        o.files.retain(|f| f.owner == "dns");
+        // What: dns files and the snmpd.conf.
+        // Why: live 229: snmpd waited; stop was killed.
+        // From: Issue #1683
+        let snmpd = s.text("SNMPD_CONF_FILE").map(PathBuf::from).ok();
+        o.files
+            .retain(|f| f.owner == "dns" || Some(&f.path) == snmpd.as_ref());
         // What: each error once, even if two files hit it.
         // Why: DoMe 07.11.: no double texts.
         // From: Issue #1683 | PR #1991
@@ -4866,5 +5208,116 @@ pub mod tidy {
             }
         }
         Ok(total)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dns::{soa_query, soa_reply};
+    use super::dnsdist_conf::{Listener, body, source};
+    use super::kea_conf::follow_ntp;
+    use serde_json::json;
+
+    // What: on sets own NTP; off gives only it back.
+    // Why: a user value must survive the off state.
+    // From: Issue #1683
+    #[test]
+    fn kept_subnets_follow_own_ntp() {
+        let own = "192.0.2.10";
+        let subnets = json!([
+            {"id": 2, "option-data": [{"name": "ntp-servers", "data": "192.0.2.99"}]},
+            {"id": 3},
+            {"id": 4, "option-data": [{"name": "routers", "data": "192.0.2.1"}]}
+        ]);
+        let on = follow_ntp(subnets, true, own, own);
+        for i in 0..3 {
+            let rows = on[i]["option-data"].as_array().cloned().unwrap_or_default();
+            let ntp: Vec<_> = rows.iter().filter(|r| r["name"] == "ntp-servers").collect();
+            assert_eq!(ntp.len(), 1);
+            assert_eq!(ntp[0]["data"], own);
+        }
+        assert_eq!(on[2]["option-data"][0]["name"], "routers");
+        let off = follow_ntp(on.clone(), false, own, "192.0.2.123");
+        assert_eq!(off[0]["option-data"][0]["data"], "192.0.2.123");
+        let none = follow_ntp(on, false, own, "");
+        assert_eq!(none[1]["option-data"], json!([]));
+        let kept = json!([{"option-data": [{"name": "ntp-servers", "data": "192.0.2.99"}]}]);
+        assert_eq!(follow_ntp(kept.clone(), false, own, ""), kept);
+    }
+
+    // What: an aa reply with one SOA, name compressed.
+    // Why: pdns answers this way to a non-RD query.
+    // From: Issue #1683
+    fn reply(id: u16, aa: bool, serial: u32) -> Vec<u8> {
+        let mut m = soa_query(id, "lan").unwrap_or_default();
+        m[2] = if aa { 0x84 } else { 0x80 };
+        m[7] = 1;
+        let mut rdata = vec![2, b'n', b's', 0xc0, 12, 4, b'h', b'o', b's', b't', 0xc0, 12];
+        rdata.extend_from_slice(&serial.to_be_bytes());
+        rdata.extend_from_slice(&[0; 16]);
+        m.extend_from_slice(&[0xc0, 12, 0, 6, 0, 1, 0, 0, 0, 60]);
+        m.extend_from_slice(&(rdata.len() as u16).to_be_bytes());
+        m.extend_from_slice(&rdata);
+        m
+    }
+
+    #[test]
+    fn soa_query_has_no_rd_bit() {
+        let q = soa_query(7, "lan.").unwrap_or_default();
+        assert_eq!(&q[..4], &[0, 7, 0, 0]);
+        assert_eq!(&q[12..], &[3, b'l', b'a', b'n', 0, 0, 6, 0, 1]);
+        assert!(soa_query(7, "a..b").is_err());
+    }
+
+    #[test]
+    fn soa_reply_reads_aa_and_serial() {
+        let got = soa_reply(9, &reply(9, true, 2026111101));
+        assert_eq!(got.as_ref().map(|s| s.authoritative), Ok(true));
+        assert_eq!(got.as_ref().map(|s| s.serial), Ok(Some(2026111101)));
+        let rec = soa_reply(9, &reply(9, false, 1));
+        assert_eq!(rec.map(|s| s.authoritative), Ok(false));
+    }
+
+    #[test]
+    fn soa_reply_refuses_wrong_id_and_cut_data() {
+        assert!(soa_reply(8, &reply(9, true, 1)).is_err());
+        let full = reply(9, true, 1);
+        assert!(soa_reply(9, &full[..full.len() - 3]).is_err());
+    }
+
+    #[test]
+    fn source_must_be_loopback_but_not_bind_ip() {
+        assert!(source("127.126.125.124", "127.0.0.1").is_ok());
+        assert!(source("127.0.0.1", "127.0.0.1").is_err());
+        assert!(source("10.0.0.1", "127.0.0.1").is_err());
+        assert!(source("::1", "127.0.0.1").is_err());
+    }
+
+    #[test]
+    fn dnsdist_routes_xfr_to_auth_only_on_http_port() {
+        let l = |port, pool, backend: &str| Listener {
+            port,
+            pool,
+            backend: backend.to_string(),
+        };
+        let conf = body(
+            &["0.0.0.0".to_string()],
+            &["10.0.0.0/8".to_string(), "192.0.2.10".to_string()],
+            "127.126.125.124",
+            "127.0.0.1:5300",
+            &[
+                l(53, "http", "127.0.0.1:5301"),
+                l(1053, "https", "127.0.0.1:5302"),
+            ],
+        )
+        .unwrap_or_default();
+        assert!(conf.contains("setLocal(\"0.0.0.0:53\")\naddLocal(\"0.0.0.0:1053\")\n"));
+        assert!(conf.contains("addACL(\"192.0.2.10\")"));
+        assert!(conf.contains("AndRule({DSTPortRule(53), OrRule({OpcodeRule(DNSOpcode.Notify)"));
+        assert!(conf.contains("addAction(DSTPortRule(1053), PoolAction(\"https\"))"));
+        assert_eq!(conf.matches("useProxyProtocol=true").count(), 3);
+        assert!(body(&[], &[], "127.126.125.124", "x", &[]).is_err());
+        let bad = body(&["a\"b".to_string()], &[], "s", "a", &[l(53, "http", "b")]);
+        assert!(bad.is_err());
     }
 }

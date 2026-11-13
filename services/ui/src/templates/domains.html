@@ -38,6 +38,7 @@
     <button type="button" data-dns-tab="cdn" class="subtab dns-tab-btn">{{ t.cached_domains }}</button>
     <button type="button" data-dns-tab="primary" class="subtab dns-tab-btn">{{ t.primary_dns }}</button>
     <button type="button" data-dns-tab="secondary" class="subtab dns-tab-btn">{{ t.secondary_dns }}</button>
+    <button type="button" data-dns-tab="overview" class="subtab dns-tab-btn">{{ t.zone_overview }}</button>
     <button type="button" data-dns-tab="settings" class="subtab dns-tab-btn">{{ t.settings }}</button>
   </div>
 
@@ -169,7 +170,7 @@
         </div>
         <div class="field" style="margin-bottom:0; flex:1;">
           <label for="lan-content">{{ t.content }}</label>
-          <input type="text" id="lan-content" name="content" placeholder="192.168.1.50" required data-lan-record-content>
+          <input type="text" id="lan-content" name="content" placeholder="192.0.2.50" required data-lan-record-content>
         </div>
         {# What: also add the PTR for type A
            Why: DoMe 31.10.: PTR from the LAN entries
@@ -333,7 +334,7 @@
       <form action="{{ routes.setup_save | safe }}" method="post">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <input type="hidden" name="back" value="{{ pages.domains }}">
-        <div class="field"><label for="up-servers">{{ t.upstream_servers }}</label><input id="up-servers" name="DNS_UPSTREAM_SERVERS" placeholder="192.168.1.23 192.168.1.22" value="{{ v.DNS_UPSTREAM_SERVERS }}"></div>
+        <div class="field"><label for="up-servers">{{ t.upstream_servers }}</label><input id="up-servers" name="DNS_UPSTREAM_SERVERS" placeholder="192.0.2.23 192.0.2.22" value="{{ v.DNS_UPSTREAM_SERVERS }}"></div>
         <div class="field"><label for="up-zones">{{ t.upstream_zones }}</label><input id="up-zones" name="DNS_UPSTREAM_ZONES" placeholder="firma.local" value="{{ v.DNS_UPSTREAM_ZONES }}"></div>
         <div class="field"><label for="up-unsigned">{{ t.upstream_unsigned }}</label><input id="up-unsigned" name="DNS_UPSTREAM_UNSIGNED_ZONES" placeholder="firma.local" value="{{ v.DNS_UPSTREAM_UNSIGNED_ZONES }}"></div>
         <button type="submit" class="btn">{{ t.save }}</button>
@@ -455,7 +456,36 @@
       {# What: registered secondaries with their actions #}
       {# Why: health, address, token and removal per row #}
       <div data-sec-panel="settings">
-        <div class="section-title" style="margin-top:0;">{{ t.connected_secondaries }}</div>
+        {# What: switch 1 (NS entry) and switch 2 (removal)
+           Why: both off by default; the admin decides
+           From: Issue #1683 #}
+        <form action="{{ routes.secondary_ns_switch | safe }}" method="post">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <div class="toggle-row">
+            <div>
+              <div class="t-label">{{ t.secondary_ns_switch }}</div>
+              <div class="t-desc">{{ t.secondary_ns_switch_desc | replace(from="{every}", to=secondary_check_every) }}</div>
+            </div>
+            <label class="toggle">
+              <input type="checkbox" name="enabled" value="1" {% if secondary_ns_enabled %}checked{% endif %} onchange="this.form.requestSubmit()">
+              <span class="track"></span><span class="knob"></span>
+            </label>
+          </div>
+        </form>
+        <form action="{{ routes.secondary_ns_auto | safe }}" method="post">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <div class="toggle-row">
+            <div>
+              <div class="t-label">{{ t.secondary_ns_auto }}</div>
+              <div class="t-desc">{{ t.secondary_ns_auto_desc | replace(from="{after}", to=secondary_ns_after) | replace(from="{fails}", to=secondary_ns_fails ~ "") | replace(from="{recheck}", to=secondary_recheck_every) }}</div>
+            </div>
+            <label class="toggle">
+              <input type="checkbox" name="enabled" value="1" {% if secondary_ns_auto %}checked{% endif %} onchange="this.form.requestSubmit()">
+              <span class="track"></span><span class="knob"></span>
+            </label>
+          </div>
+        </form>
+        <div class="section-title">{{ t.connected_secondaries }}</div>
         {% if secondaries %}
         {% for secondary in secondaries %}
         <div class="snapshot-row">
@@ -465,6 +495,15 @@
           </div>
           <div class="snapshot-actions">
             <span class="tag off" id="health-{{ secondary.name }}">–</span>
+            {% if secondary_ns_enabled %}
+            {% if secondary.ns == "in" %}
+            <span class="tag">{{ t.ns_entered }}</span>
+            <a href="#" onclick="secondaryNs('{{ routes.secondary_ns_remove | safe }}', '{{ secondary.name }}'); return false;">{{ t.ns_remove }}</a>
+            {% else %}
+            <span class="tag off">{% if secondary.ns == "off" %}{{ t.ns_taken_out }}{% else %}{{ t.ns_not_entered }}{% endif %}</span>
+            <a href="#" onclick="secondaryNs('{{ routes.secondary_ns_add | safe }}', '{{ secondary.name }}'); return false;">{{ t.ns_add }}</a>
+            {% endif %}
+            {% endif %}
             <a href="#" onclick="checkSecondaryHealth('{{ secondary.name }}'); return false;">{{ t.check }}</a>
             <a href="#" onclick="editSecondaryAddress('{{ secondary.name }}', '{{ secondary.address | default(value='') }}'); return false;">{{ t.edit_address }}</a>
             <a href="#" onclick="rotateToken('{{ secondary.name }}'); return false;" style="color:var(--mist);">{{ t.rotate_token }}</a>
@@ -488,7 +527,7 @@
         </div>
         {% if primary_ip_https %}<div class="field" style="max-width:320px;">
           <label for="secondary-https-ip">{{ t.second_ip_of_the_secondary_for }}</label>
-          <input type="text" id="secondary-https-ip" maxlength="15" placeholder="192.168.1.103" autocomplete="off">
+          <input type="text" id="secondary-https-ip" maxlength="15" placeholder="192.0.2.11" autocomplete="off">
         </div>{% else %}<p class="field-hint">{{ t.https_off_hint }}</p>{% endif %}
         <div class="copy-row" style="max-width:none; align-items:flex-start; font-size:12.5px;">
           <code id="install-cmd" style="white-space:pre-wrap; overflow-x:visible;">LANCACHE_SETUP_GIT_REF={{ setup_git_ref }} bash &lt;(curl -fsSL {{ setup_script_url }}) secondary \
@@ -501,6 +540,23 @@
           <button type="button" onclick="copyText('install-cmd', this)">{{ t.copy }}</button>
         </div>
         <p class="field-hint">{{ t.if_port_53_on_that_box }} <code>--listen-ip</code>{{ t.the_installer_shows_the_conflict_instead }}</p>
+      </div>
+    </section>
+
+    {# What: loaded serial of each zone on every server
+       Why: one table shows a lagging zone on any secondary
+       From: Issue #1683 #}
+    <section data-dns-panel="overview">
+      <div class="field" style="max-width:320px;">
+        <label for="zone-search">{{ t.search_zones }}</label>
+        <input type="search" id="zone-search" autocomplete="off">
+      </div>
+      <p class="field-hint">{{ t.zone_overview_hint }}</p>
+      <div class="overflow-x-auto">
+        <table class="table" id="zone-overview">
+          <thead><tr id="zone-overview-head"></tr></thead>
+          <tbody id="zone-overview-body"></tbody>
+        </table>
       </div>
     </section>
   </div>
@@ -541,8 +597,10 @@
   const DNS_PANEL_TAB = {
     cdn: 'cdn', lan: 'primary', ptr: 'primary',
     settings: 'settings', zones: 'settings', secondary: 'secondary',
+    overview: 'overview',
   };
   function setActiveDnsTab(tabName) {
+    if (tabName === 'overview') loadZoneOverview();
     document.querySelectorAll('[data-dns-panel]').forEach((panel) => {
       panel.classList.toggle('hidden', DNS_PANEL_TAB[panel.dataset.dnsPanel] !== tabName);
     });
@@ -552,6 +610,61 @@
     });
     try { sessionStorage.setItem('dnsTab', tabName); } catch (e) { /* storage blocked */ }
   }
+
+  // What: fills the zone table: zone, then one serial each
+  // Why: green equals the primary's serial, red differs
+  // From: Issue #1683
+  async function loadZoneOverview() {
+    const head = document.getElementById('zone-overview-head');
+    const body = document.getElementById('zone-overview-body');
+    if (!head || !body) return;
+    body.replaceChildren();
+    let data;
+    try {
+      const response = await fetch('{{ routes.zone_overview | safe }}');
+      if (!response.ok) throw new Error(response.status);
+      data = await response.json();
+    } catch (error) {
+      head.replaceChildren();
+      const row = body.insertRow();
+      row.insertCell().textContent = LC_T.js_error_x.replace('{x}', error.message);
+      return;
+    }
+    head.replaceChildren();
+    const first = document.createElement('th');
+    first.textContent = LC_T.zone;
+    head.appendChild(first);
+    data.columns.forEach((c) => {
+      const th = document.createElement('th');
+      th.textContent = c.name;
+      if (c.error) { th.className = 'text-red-400'; th.title = c.error; th.textContent += ' (' + LC_T.not_reachable + ')'; }
+      head.appendChild(th);
+    });
+    data.rows.forEach((r) => {
+      const row = body.insertRow();
+      row.dataset.zone = r.zone;
+      row.insertCell().textContent = r.zone;
+      r.serials.forEach((serial, i) => {
+        const cell = row.insertCell();
+        cell.textContent = serial == null ? '–' : serial;
+        if (i === 0) cell.className = 'font-semibold';
+        else if (!data.columns[i].error) cell.className = serial === r.serials[0] && serial != null ? 'text-green-400' : 'text-red-400';
+      });
+    });
+    filterZoneOverview();
+  }
+
+  // What: shows only rows whose zone name holds the text
+  // Why: many reverse zones make the table long
+  // From: Issue #1683
+  function filterZoneOverview() {
+    const input = document.getElementById('zone-search');
+    const text = input ? input.value.trim().toLowerCase() : '';
+    document.querySelectorAll('#zone-overview-body tr[data-zone]').forEach((row) => {
+      row.hidden = text !== '' && !row.dataset.zone.toLowerCase().includes(text);
+    });
+  }
+  document.getElementById('zone-search').addEventListener('input', filterZoneOverview);
 
   // What: puts the typed name into the install command
   // Why: no placeholder is left in the copied command
@@ -625,7 +738,7 @@
   // Why: each type has its own content format.
   // From: Issue #1683 | PR #1980
   const lanExamples = {
-    A: '192.168.1.50', AAAA: 'fd00::50', CNAME: 'nas.{{ lan_zone }}.',
+    A: '192.0.2.50', AAAA: 'fd00::50', CNAME: 'nas.{{ lan_zone }}.',
     MX: '10 mail.{{ lan_zone }}.', TXT: '"some text"',
     SRV: '10 5 5060 sip.{{ lan_zone }}.', CAA: '0 issue "letsencrypt.org"',
     HTTPS: '1 . alpn=h2', SVCB: '1 . alpn=h2',
@@ -686,6 +799,25 @@
     }
   }
 
+  // What: POST NS add or remove of one secondary
+  // Why: the server checks aa; its error text is shown
+  // From: Issue #1683
+  async function secondaryNs(route, name) {
+    try {
+      const response = await fetch(route.replace('{name}', name), {
+        method: 'POST',
+        headers: { 'X-CSRF-Token': CSRF_TOKEN }
+      });
+      if (response.ok) {
+        location.reload();
+      } else {
+        alert(LC_T.js_error_x.replace('{x}', await response.text()));
+      }
+    } catch (error) {
+      alert(LC_T.js_error_x.replace('{x}', error.message));
+    }
+  }
+
   // What: DELETE of one secondary after confirm()
   // Why: removal cannot be undone; the page then reloads
   async function removeSecondary(name) {
@@ -712,25 +844,25 @@
     }
   }
 
-  // What: probe status code to German label and colour
-  // Why: renderHealth() shows one label per probe result
-  // From: Issue #1084
+  // What: health status word to label and colour
+  // Why: the server sends the worst state of all zones
+  // From: Issue #1683
   const HEALTH_LABELS = {
-    ok: [LC_T.ok_authoritative, 'text-green-400'],
-    not_authoritative: [LC_T.not_authoritative, 'text-amber-400'],
-    no_zone: [LC_T.zone_missing_refused, 'text-red-400'],
-    broken: [LC_T.error_servfail, 'text-red-400'],
-    unreachable: [LC_T.not_reachable, 'text-red-400'],
-    no_address: [LC_T.no_address_2, 'text-slate-500'],
+    in_sync: [LC_T.zones_in_sync, 'text-green-400'],
+    ahead: [LC_T.zone_ahead, 'text-amber-400'],
+    unknown: [LC_T.zone_serial_unknown, 'text-amber-400'],
+    behind: [LC_T.zone_behind, 'text-red-400'],
+    missing: [LC_T.zone_missing, 'text-red-400'],
     error: [LC_T.unexpected_answer, 'text-amber-400'],
+    unreachable: [LC_T.not_reachable, 'text-red-400'],
   };
 
-  // What: writes label, serial and detail of one probe
+  // What: writes label, zone count and per-zone detail
   // Why: one renderer for the click and the page-load run
   function renderHealth(span, data) {
     const [label, cls] = HEALTH_LABELS[data.status] || [LC_T.unknown, 'text-slate-500'];
     span.className = cls;
-    span.textContent = data.serial != null ? `${label} · Serial ${data.serial}` : label;
+    span.textContent = data.zones != null ? `${label} · ${data.zones} ${LC_T.zones}` : label;
     if (data.detail) span.title = data.detail;
   }
 

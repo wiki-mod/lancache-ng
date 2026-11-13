@@ -36,9 +36,9 @@ LanCache NG combines several services into one Docker based stack:
 - Admin UI for cache status, domains, DNS records, DHCP leases and settings
   - optional Kea DHCP server
   - optional DHCP-Dnsmasq-based proxy helper
-  - optional LanCache-NG-NTP server (chrony), disciplined against public NTP servers, serving LAN clients on UDP/123, with an opt-in DHCP auto-populate toggle
+  - LanCache-NG-NTP server (chrony), disciplined against public NTP servers, serving LAN clients on UDP/123; asked at install (default: on)
   - optional scheduled automatic updates (ordered, health-gated, Admin UI last)
-  - optional watchdog and convergence checks
+  - watchdog and convergence checks
   - optional secondary DNS nodes synced by NOTIFY and AXFR
 
 The goal is simple:
@@ -53,7 +53,7 @@ Later clients can receive the same files from your LAN.
 Run this on a Linux machine inside your network:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/wiki-mod/lancache-ng/master/setup.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/wiki-mod/lancache-ng/master/setup.sh | sudo bash -s -- install
 ```
 
 The setup script guides you through the installation. If required tools are missing, it installs them, such as Docker, curl and git, through the host package manager (apt, dnf, yum, pacman or apk) without a question and prints one "Installing requirements" line with the package names.
@@ -64,12 +64,12 @@ normal setup or update paths.
 It can:
 
 - check the required tools
-- ask before installing missing dependencies such as Docker, curl or git
+- install missing dependencies such as Docker, curl or git without a question
 - ask for the release channel first (`latest` or `nightly`)
 - clone the code of that channel to `/opt/lancache-ng/latest` or
   `/opt/lancache-ng/nightly`
 - ask for the cache server IP
-- optionally enable HTTPS caching with a second IP
+- ask for a second LAN IP (always required) and HTTPS caching (default: on)
 - ask for cache directory and cache size
 - optionally enable scheduled automatic updates (a host systemd timer)
 - create pre-update rollback backups
@@ -77,7 +77,7 @@ It can:
 - restore setup-script backups
 - optionally enable DHCP
 - optionally protect the Admin UI with a password
-- write the `.env` file
+- write `deploy/prod/.env.local` in the channel's code directory
 - create required directories
 - start the Docker stack
 - install systemd startup and convergence checks
@@ -104,7 +104,7 @@ http://<server-ip>:8080
 Example:
 
 ```text
-http://192.168.1.10:8080
+http://192.0.2.10:8080
 ```
 
 ## The two operating modes
@@ -130,7 +130,7 @@ HTTP mode:
 Example DNS target:
 
 ```text
-192.168.1.10
+192.0.2.10
 ```
 
 ### HTTPS mode
@@ -152,7 +152,7 @@ HTTPS mode:
 Example DNS target:
 
 ```text
-192.168.1.11
+192.0.2.11
 ```
 
 ### Running both modes together
@@ -163,8 +163,8 @@ Example:
 
 | Mode | Client setup | DNS server |
 |---|---|---|
-| HTTP mode | no certificate needed | `192.168.1.10` |
-| HTTPS mode | CA certificate installed | `192.168.1.11` |
+| HTTP mode | no certificate needed | `192.0.2.10` |
+| HTTPS mode | CA certificate installed | `192.0.2.11` |
 
 This lets you decide per client.
 
@@ -240,9 +240,10 @@ You need:
 - enough disk space for the cache
 - port `53` free for DNS
 - port `80` free for HTTP cache traffic
-- port `443` free if HTTPS mode is enabled
+- port `443` free on both LAN IPs
+- port `5300` free on the HTTP IP (zone transfer to secondary DNS nodes of older versions)
 - port `8080` for the Admin UI
-- optional second LAN IP for HTTPS mode
+- a second LAN IP (always required; HTTPS mode answers on it)
 - optional port `67/udp` if using the built in DHCP server
 
 Recommended storage:
@@ -261,7 +262,7 @@ The best choice depends on your network, internet speed and number of clients.
 Recommended installation:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/wiki-mod/lancache-ng/master/setup.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/wiki-mod/lancache-ng/master/setup.sh | sudo bash -s -- install
 ```
 
 During setup you will be asked for the important values. If required tools are missing, setup installs them without a question and prints one "Installing requirements" line with the package names.
@@ -270,8 +271,8 @@ Example values:
 
 | Setting | Example |
 |---|---|
-| HTTP mode IP | `192.168.1.10` |
-| HTTPS mode IP | `192.168.1.11` |
+| HTTP mode IP | `192.0.2.10` |
+| HTTPS mode IP | `192.0.2.11` |
 | data directory | `/opt/lancache-ng` |
 | code directory | `/opt/lancache-ng/current` |
 | cache directory (shared) | `/opt/lancache-ng/cache` |
@@ -308,7 +309,7 @@ The update command can:
   set is actually healthy, then restart the Admin UI last
 - automatically roll back to the pre-update backup if that health check fails
 - move the stack to the other code directory when the channel changed
-  (Admin UI Setup page, `LANCACHE_IMAGE_CHANNEL` in
+  (Admin UI General page, `LANCACHE_IMAGE_CHANNEL` in
   `/opt/lancache-ng/current/deploy/prod/.env.local`, or
   `sudo LANCACHE_IMAGE_CHANNEL=nightly /opt/lancache-ng/current/setup.sh update`);
   the moved `.env.local` keeps the new channel, and a failed move points
@@ -329,20 +330,18 @@ or install dependency.
 Instead of running `setup.sh update` manually, a host `systemd` timer
 (`lancache-auto-update.timer`) can run the same ordered, health-gated update
 on a schedule. Enable it at install time (the "Scheduled automatic updates"
-prompt, default: disabled), later by setting `AUTO_UPDATE_ENABLED=1` in `.env`
-and re-running `setup.sh`, or from the Admin UI's Setup page (release channel
-and scheduled-update toggle). A change made from the Admin UI is picked up by
-the host's convergence timer (currently every 5 minutes), not instantly --
-that control's own copy says so. It only actually pulls and restarts when the
-selected release channel has moved to a new image set -- an unchanged channel
-is a silent no-op, not a full restart on every tick. Manually trigger the same
-check with:
+prompt, default: disabled), later by setting `AUTO_UPDATE_ENABLED=1` in
+`/opt/lancache-ng/current/deploy/prod/.env.local`, or on the Admin UI's General
+page (release channel and scheduled-update toggle). The host's convergence
+timer (every 5 minutes) applies either change. An update pulls and restarts
+only when the selected channel moved to a new image set; an unchanged channel
+is a no-op. Manual trigger:
 
 ```bash
 sudo /opt/lancache-ng/current/setup.sh auto-update
 ```
 
-**Update validation:** The update command validates your configuration during the process. If required config values are missing or invalid, the update will abort immediately rather than continuing with a partial or degraded configuration. If this happens, check that your `.env` and `config/*/` files exist and contain all required keys. See `docs/README.md` (section 7) for rollback options.
+**Update validation:** The update command validates your configuration during the process. If required config values are missing or invalid, the update will abort immediately rather than continuing with a partial or degraded configuration. If this happens, check that `/opt/lancache-ng/current/deploy/prod/.env.local` exists and contains all required keys. See `docs/README.md` (section 7) for rollback options.
 
 Create a manual backup with:
 
@@ -369,21 +368,17 @@ Compose. The interactive installer asks which channel to use, defaulting to
 - `latest` (default) is the channel from `master`, promoted after the full
   release validation gate; release tags `vX.Y.Z` move it.
 - `nightly` is built from `current_dev`'s tip once a day plus on-demand
-  (renamed from `edge` in v0.3.0). It is experimental, may break the stack
-  and is not for production; `setup.sh` warns on install and on every update.
-- `vX.Y.Z` pins all stack services to an immutable release tag.
-- Branch and commit images are optional for development and testing.
-  If CI has published them, valid examples are branch names (for branch pushes)
-  and `sha-<commit>` tags (full commit SHA).
+  (formerly `edge`). It is experimental, may break the stack and is not for
+  production; `setup.sh` warns on install and on every update.
+- `pinned` with `LANCACHE_IMAGE_TAG` set to a release tag (`vX.Y.Z`,
+  `vX.Y.Z-rc.N`) or `sha-<40-hex commit SHA>` pins all stack services to one
+  immutable tag. Other tag values are rejected.
 
 Recommended for production:
 
 - Use `latest` for normal deployments.
-- Use a tagged release value (for example `v1.2.3`) for pinned deployments.
-- Use `nightly`, branch tags, or `sha-*` tags only for temporary test environments
-  where intentional drift is acceptable.
-
-The release workflow publishes service images with branch, tag, and SHA tags and keeps release source notes in GitHub releases.
+- Use `pinned` with a release tag (for example `v1.2.3`) for pinned deployments.
+- Use `nightly` or `sha-*` tags only for temporary test environments.
 
 ### Pinning the standalone installer's git ref
 
@@ -394,7 +389,7 @@ to a branch or tag to clone that ref into the channel's directory instead,
 for example to validate a pre-release branch:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/wiki-mod/lancache-ng/master/setup.sh | sudo LANCACHE_SETUP_GIT_REF=v0.2.0 bash
+curl -fsSL https://raw.githubusercontent.com/wiki-mod/lancache-ng/master/setup.sh | sudo LANCACHE_SETUP_GIT_REF=vX.Y.Z bash -s -- install
 ```
 
 A checkout on a branch that is no channel branch installs from where it is,
@@ -454,8 +449,8 @@ Example:
 
 | Client type | DNS server |
 |---|---|
-| normal client without certificate | `192.168.1.10` |
-| HTTPS client with certificate installed | `192.168.1.11` |
+| normal client without certificate | `192.0.2.10` |
+| HTTPS client with certificate installed | `192.0.2.11` |
 
 On many routers you can set the DNS server handed out by DHCP.  
 Set it to the LanCache NG HTTP IP if you want all clients to use HTTP mode.
@@ -467,9 +462,9 @@ For HTTPS mode, only point clients to the HTTPS IP after the CA certificate was 
 LanCache NG only caches traffic for clients that resolve CDN hostnames through
 its DNS servers. DHCP is the most reliable way to hand those DNS servers to
 clients. `setup.sh` lets you pick one of four DHCP modes (stored as
-`DHCP_MODE` in `.env`):
+`DHCP_MODE` in `.env.local`):
 
-- `disabled` — LanCache NG does not manage or proxy DHCP. You point clients at
+- `off` (default) — LanCache NG does not manage or proxy DHCP. You point clients at
   its DNS yourself (router DHCP option or static client config). This is the
   right starting point for most users.
 - `kea` — LanCache NG runs a full Kea DHCP server that hands out IP address,
@@ -506,18 +501,16 @@ to verify clients actually receive the LanCache NG DNS servers.
 
 ## Optional NTP
 
-LanCache-NG-NTP is a small, self-contained NTP server (chrony) you can enable
-from the Admin UI's Setup page. It disciplines its own clock against a curated
-set of public NTP servers (never operating as a standalone/undisciplined time
-source) and serves that time to LAN clients on `123/udp`. The upstream server
-list is editable from the same page.
+LanCache-NG-NTP is a small NTP server (chrony). `setup.sh install` asks for it
+(default: on); the Admin UI's General page switches it later. It disciplines
+its clock against a list of public NTP servers and serves time to LAN clients
+on `123/udp`. The upstream server list is edited on the same page.
 
-A separate "auto-set this as the DHCP NTP server" toggle, off by default, only
-takes effect when both LanCache-NG-NTP and the Kea DHCP server are enabled: it
-pushes this container's LAN address into Kea's `ntp-servers` DHCP option for
-every subnet, so clients no longer need a manually-typed third-party NTP
-server address. Turning the container on does not enable this by itself —
-the DHCP auto-populate toggle is always a separate, explicit choice.
+The General page also has a toggle "Hand this time server to DHCP clients"
+(`NTP_AUTO_DHCP`). While it and LanCache-NG-NTP are on, every DHCP subnet
+hands out the HTTP IP as NTP server (option 42) instead of
+`DHCP_NTP_SERVERS`. When one of them is turned off, subnets that held the
+HTTP IP get `DHCP_NTP_SERVERS` back.
 
 ## Admin UI
 
@@ -529,16 +522,13 @@ http://<server-ip>:8080
 
 The Admin UI can be used for:
 
-- cache overview
-- cache fill level
-- hit and miss statistics
-- active downloads
-- domain management
-- LAN DNS records
-- DHCP leases
-- NTP settings
-- settings
-- secondary DNS management
+- Dashboard: cache overview, fill level, active downloads, container status
+- Logs
+- Statistics: hit and miss statistics
+- Steam: CacheHamster prefill
+- DNS: cached domains, LAN DNS records, secondary DNS management
+- DHCP: mode and leases
+- General: settings, release channel, scheduled updates, NTP
 
 If the setup asks whether the Admin UI should be password protected, using a password is recommended.
 
@@ -579,14 +569,16 @@ See the certificate documentation before using HTTPS mode on it.
 On a client using LanCache NG as DNS server, run:
 
 ```bash
-nslookup steamcontent.com
+nslookup lancache.steamcontent.com
 ```
 
 or specify the DNS server directly:
 
 ```bash
-nslookup steamcontent.com 192.168.1.10
+nslookup lancache.steamcontent.com 192.0.2.10
 ```
+
+`steamcontent.com` itself is not redirected; only its subdomains are.
 
 If DNS routing works, known CDN domains should resolve to your cache IP instead of a public CDN IP.
 
@@ -616,16 +608,15 @@ Manual domain file:
 services/dns/cdn-domains.txt
 ```
 
-One list drives everything: DNS based cache routing, and (as of v0.2.0)
-HTTPS mode certificate coverage too. The proxy derives each entry's
-registrable root domain automatically at startup and generates a wildcard
-cert for it — there is no separate HTTPS domain file to keep in sync by hand.
+One list drives DNS cache routing and the HTTPS mode certificates. The Admin
+UI derives each entry's registrable root domain and generates a wildcard
+certificate for it; there is no separate HTTPS domain file.
 
-After manual file changes in a repository-based setup, restart the affected
-services so they reload the mounted files:
+After a manual file change, restart `ui`. It renders the DNS and proxy
+configuration and then restarts `dns` and `proxy`:
 
 ```bash
-sudo /opt/lancache-ng/current/setup.sh compose /opt/lancache-ng restart dns proxy
+sudo /opt/lancache-ng/current/setup.sh compose /opt/lancache-ng restart ui
 ```
 
 Only add domains you understand.  
@@ -648,27 +639,67 @@ syslog.
 
 Setup example:
 
+Run it as root, in a terminal (`bash <(curl …)` keeps the terminal for the
+questions; `curl … | bash` would not):
+
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/wiki-mod/lancache-ng/master/setup.sh) secondary \
-  --primary http://192.168.1.10:8080 \
-  --token <SECONDARY_REGISTRATION_TOKEN> \
-  --name my-secondary \
-  --ip-http 192.168.1.10
+bash <(curl -fsSL https://raw.githubusercontent.com/wiki-mod/lancache-ng/master/setup.sh) secondary
 ```
 
-The registration token is generated during primary setup and stored in `.env`.
+The registration token is generated during primary setup and stored in the primary's `.env.local`;
+the Admin UI shows it under DNS, Secondary DNS.
 
-Optional https side: add `--ip-https <primary https proxy ip> --listen-ip-https <second bind ip>`
-to the same command. The secondary's one dns container then also answers on the
-second bind IP; both flags are required together.
+The order is: check, ask, then act.
+
+1. Check: install missing requirements (curl, jq, git, Docker, Docker Compose
+   v2), check the name, and check whether this host already runs a lancache
+   dns container. A secondary needs its own host: if the primary (or another
+   secondary) runs here, setup stops before it changes anything.
+2. Ask: name, primary URL, token, whether the primary runs the latest channel,
+   the DNS IP of this secondary, whether the primary has HTTPS enabled and, if
+   so, whether this secondary supports it (then the primary's HTTPS IP and a
+   second DNS IP of this secondary). Each answer is checked at once.
+3. Act: add a missing bind IP (`ip addr add`, default yes, not persistent),
+   clone the code of the channel as the primary install does, register at the
+   primary, write the files and start the container.
+
+The cache IP (`IP_HTTP`) comes from the primary. Without a terminal, pass the
+values as arguments: `--primary`, `--token`, `--name`, `--listen-ip`, and for
+HTTPS `--ip-https <primary https ip> --listen-ip-https <second dns ip>`;
+`LANCACHE_IMAGE_CHANNEL` sets the channel.
 
 You can also view a ready command inside the Admin UI under the secondary DNS section.
 
 To renew the secondary's keys, rerun the same command with `--rotate`
 in that secondary's install directory. This rewrites the local secondary `.env` from the primary registration API
-without changing the secondary name.
+without changing the secondary name. In a terminal, `--rotate` offers the stored
+values (primary URL, bind IPs); only the token is asked again.
 
 After setup, point additional clients to the secondary DNS IP.
+
+### Secondaries as name servers
+
+Each registered secondary gets an A (or AAAA) and a PTR record
+`<name>.<lan domain>` on the primary. The Admin UI tab DNS, Secondary DNS
+has two switches, both off by default:
+
+| Switch | SOT key | Effect |
+| --- | --- | --- |
+| Enter secondaries as name servers (NS) | `DNS_SECONDARY_NS_ENABLED` | A secondary that answers the LAN zone authoritatively (`aa`) on port 53 is added to the NS records of every managed zone. |
+| Take dead secondaries out as NS | `DNS_SECONDARY_NS_AUTO_REMOVE` | An entered secondary is taken out after it failed for longer than `DNS_SECONDARY_NS_REMOVE_AFTER_SECONDS` (8 h) and at least `DNS_SECONDARY_NS_REMOVE_FAILS` (3) checks in a row. |
+
+The primary checks every secondary every `DNS_SECONDARY_CHECK_SECONDS`
+(4 h), and every `DNS_SECONDARY_RECHECK_SECONDS` (1 h) while one fails. A
+check compares the zone serials through the secondary's pdns-API and asks
+it for an AXFR of a zone that lags. A secondary of an older version answers
+port 53 with its recursor, not `aa`; it keeps syncing but is never entered.
+
+A secondary that was taken out, by hand or by the second switch, comes back
+only through "Enter NS" in its row; that button checks `aa` first.
+"Remove NS" takes it out by hand. Disconnecting a secondary removes its
+records and its NS entry and renews the TSIG key, as "Renew key" does: every
+other secondary stops syncing until it runs `setup.sh secondary --rotate`.
+A new address replaces its A and PTR record.
 
 ## Manual setup
 
@@ -679,10 +710,12 @@ Manual setup is useful if you want to inspect and control every file yourself.
 Clone the repository:
 
 ```bash
-cd /opt
-git clone https://github.com/wiki-mod/lancache-ng.git
-cd lancache-ng
+git clone https://github.com/wiki-mod/lancache-ng.git /opt/lancache-ng/latest
+cd /opt/lancache-ng/latest
 ```
+
+`/opt/lancache-ng` is the data directory; a clone directly into it is moved to
+`/opt/lancache-ng/latest` by the next `setup.sh update`.
 
 No `.env` file is tracked. `setup.sh install` writes the untracked runtime env
 file `deploy/prod/.env.local` with the values of your installation. Every
@@ -692,18 +725,17 @@ the installation values by hand, create `deploy/prod/.env.local` and set at
 least:
 
 ```env
-IP_HTTP=192.168.1.10
-IP_HTTPS=192.168.1.11
+IP_HTTP=192.0.2.10
+IP_HTTPS=192.0.2.11
 
 HTTPS_ENABLED=1
 
 LANCACHE_STATE_DIR=/opt/lancache-ng
 
 # Optional cache directory override. Leave unset unless you intentionally place
-# the cache on a separate disk; compose derives it from LANCACHE_STATE_DIR.
+# the cache on a separate disk; setup.sh derives it from LANCACHE_STATE_DIR.
 # CACHE_DIR=/opt/lancache-ng/cache
 
-CACHE_MAX_SIZE=50g
 CACHE_MEM_MB=512
 PROXY_SECURITY_MODE=lazy
 PROXY_ALLOWED_CLIENT_CIDRS=
@@ -722,24 +754,24 @@ LANCACHE_IMAGE_CHANNEL=latest
 LANCACHE_IMAGE_TAG=<set-by-setup>
 ```
 
-`NGINX_UPSTREAM_RESOLVER` is what nginx uses to resolve the *real* CDN hostnames it proxies to. Its default lives in `runtime.defaults` of `.github/yaml/build-manifest.yml`; put your own value in `deploy/prod/.env.local` (an empty value keeps the default), which `deploy/prod/docker-compose.yml` passes to the `proxy` service, then recreate that container from the repository root (`sudo ./setup.sh compose deploy/prod up -d proxy`). The default — `8.8.8.8 8.8.4.4` (Google Public DNS, IPv4 only; an IPv6 entry you add must be bracketed, as nginx's `resolver` directive requires) — is a convenience default, not a requirement. Set it to whatever real upstream DNS servers you prefer: your ISP's resolvers, a corporate DNS server, 1.1.1.1, or anything else. The actual requirement is that the chosen resolver returns the CDN's *real* origin address for these hostnames — not merely that its own server IP differs from the LanCache DNS/proxy IP. Setup rejects the obvious case (setting this directly to `IP_HTTP`/`IP_HTTPS`) automatically, but it cannot detect an indirect loop: for example, a split-DNS or conditional-forwarding resolver that itself forwards the CDN's zone back to the LanCache DNS server would still hand nginx the LanCache proxy IP, at which point nginx loops even though the configured resolver's own IP isn't the cache's. If you use split-DNS or conditional forwarding upstream of this resolver, make sure CDN zones aren't among the forwarded ones.
+`NGINX_UPSTREAM_RESOLVER` is what nginx uses to resolve the *real* CDN hostnames it proxies to. Its default lives in `runtime.defaults` of `.github/yaml/build-manifest.yml`; put your own value in `deploy/prod/.env.local` (an empty value keeps the default), which `deploy/prod/docker-compose.yml` passes to the `ui` service (it renders `nginx.conf`), then recreate both from the repository root (`sudo ./setup.sh compose deploy/prod up -d ui proxy`). The default — `8.8.8.8 8.8.4.4` (Google Public DNS, IPv4 only; an IPv6 entry you add must be bracketed, as nginx's `resolver` directive requires) — is a convenience default, not a requirement. Set it to whatever real upstream DNS servers you prefer: your ISP's resolvers, a corporate DNS server, 1.1.1.1, or anything else. The actual requirement is that the chosen resolver returns the CDN's *real* origin address for these hostnames — not merely that its own server IP differs from the LanCache DNS/proxy IP. The Admin UI renderer rejects the obvious cases (a loopback address, `IP_HTTP` or `IP_HTTPS`), but it cannot detect an indirect loop: for example, a split-DNS or conditional-forwarding resolver that itself forwards the CDN's zone back to the LanCache DNS server would still hand nginx the LanCache proxy IP, at which point nginx loops even though the configured resolver's own IP isn't the cache's. If you use split-DNS or conditional forwarding upstream of this resolver, make sure CDN zones aren't among the forwarded ones.
 
-`DNS_UPSTREAM_SERVERS` is what the DNS recursor uses for every name outside the LAN zones, for example private host names that only your router or firewall knows. Empty (the default) keeps the previous behavior: the recursor resolves those names itself from the root servers, and a private name is answered with `NXDOMAIN`. The easiest way to set it is `sudo ./setup.sh configure-upstream-dns`, which asks for the servers, the forwarded zones, the zones without DNSSEC and the local PTR zones. By hand, put one or more resolver IPs in `deploy/prod/.env.local` (`192.168.1.1`, `192.168.1.1:5353`, `[fd00::53]:53`; space or comma separated, no host names) and recreate the DNS container (`sudo ./setup.sh compose deploy/prod up -d dns`). `DNS_UPSTREAM_ZONES` limits the forwarding to the named zones (default `.`, every name; the CDN domains stay answered by LanCache either way). `DNS_UPSTREAM_UNSIGNED_ZONES` names private zones inside them that carry no DNSSEC, so their answers are not rejected; DNSSEC validation stays on for everything else that is forwarded. A resolver that is a loopback or unspecified address, `IP_HTTP`, `IP_HTTPS` or another address of LanCache itself is refused because the query would loop back; a zone served by the local authoritative server is refused too. A refused value does not stop the DNS container: it starts without an upstream and the DNS log names the entry (`ERROR: … starting WITHOUT an upstream resolver`). The names `NGINX_UPSTREAM_DNS` and `UPSTREAM_DNS` do not exist and are ignored.
+`DNS_UPSTREAM_SERVERS` is what the DNS recursor uses for every name outside the LAN zones, for example private host names that only your router or firewall knows. Empty (the default) keeps the previous behavior: the recursor resolves those names itself from the root servers, and a private name is answered with `NXDOMAIN`. The easiest way to set it is `sudo ./setup.sh configure-upstream-dns`, which asks for the servers, the forwarded zones, the zones without DNSSEC and the local PTR zones. By hand, put one or more resolver IPs in `deploy/prod/.env.local` (`192.0.2.1`, `192.0.2.1:5353`, `[fd00::53]:53`; space or comma separated, no host names) and recreate the DNS and UI containers (`sudo ./setup.sh compose deploy/prod up -d ui dns`; the `ui` renders the recursor files). `DNS_UPSTREAM_ZONES` limits the forwarding to the named zones (default `.`, every name; the CDN domains stay answered by LanCache either way). `DNS_UPSTREAM_UNSIGNED_ZONES` names private zones inside them that carry no DNSSEC, so their answers are not rejected; DNSSEC validation stays on for everything else that is forwarded. A resolver that is a loopback or unspecified address, `IP_HTTP`, `IP_HTTPS` or another address of LanCache itself is refused because the query would loop back; a zone served by the local authoritative server is refused too. A refused value stops the render of the Admin UI: no configuration file is written, and the `ui` log names the entry (`ui: start render: …: <value> is this LanCache-NG itself; that would loop`). The names `NGINX_UPSTREAM_DNS` and `UPSTREAM_DNS` do not exist and are ignored.
 
 `PROXY_SECURITY_MODE` controls how defensive the proxy is at request time:
 
 - `lazy` is the default and keeps the traditional LanCache-style behavior: if a client reaches the cache, nginx proxies the requested host upstream. This is the deliberate cache-first choice so new CDN hostnames keep working out of the box.
 - `strict` NOT RECOMMENDED! Only proxies hosts whose root domain is derived from `services/dns/cdn-domains.txt`; unknown hosts receive `403 Forbidden`. This reduces accidental or abusive proxying, but it can AND will break downloads until the missing CDN hostname is added to `cdn-domains.txt` — there is no separate file to maintain, but you still need to add every CDN hostname you want to cache by hand.
 
-`PROXY_ALLOWED_CLIENT_CIDRS` restricts who may use the proxy, for example `192.168.1.0/24 172.16.0.0/12`. An empty value keeps the default from `runtime.defaults` in `.github/yaml/build-manifest.yml` (the private networks and `fc00::/7`); it does not open the proxy to every client (`Settings::load` in `services/common/config.rs` treats an empty file or environment value as unset). Firewalling and Docker port bindings still define the outer boundary for the normal LAN-only deployment model.
+`PROXY_ALLOWED_CLIENT_CIDRS` restricts who may use the proxy, for example `192.0.2.0/24 172.16.0.0/12`. An empty value keeps the default from `runtime.defaults` in `.github/yaml/build-manifest.yml` (the private networks and `fc00::/7`); it does not open the proxy to every client (`Settings::load` in `services/common/config.rs` treats an empty file or environment value as unset). Firewalling and Docker port bindings still define the outer boundary for the normal LAN-only deployment model.
 
-The Admin UI keeps snapshots of the Kea DHCP configuration (`KEA_SNAPSHOT_KEEP`, default `20`) and of the lan and private reverse zone records (`DNS_SNAPSHOT_KEEP`, default `20`) for operator-selected rollback; see [docs/README.md](docs/README.md#6-known-good-snapshots-and-rollback). `setup.sh` also writes `KEEP_KNOWN_GOOD_CONFIGS` (default `3`) to the runtime env, but no service reads it.
+The Admin UI keeps snapshots of the Kea DHCP configuration (`KEA_SNAPSHOT_KEEP`, default `20`) and of the lan and private reverse zone records (`DNS_SNAPSHOT_KEEP`, default `20`) for operator-selected rollback; see [docs/README.md](docs/README.md#6-known-good-snapshots-and-rollback). `setup.sh secondary` also writes `KEEP_KNOWN_GOOD_CONFIGS` to the secondary's `.env`, but no service reads it.
 
 `LANCACHE_IMAGE_CHANNEL` controls the mutable stack channel. `latest` (from
-`master`) is the install default (SOT `release.install_channel`); an older
-`.env` that still names another value for it is rewritten to `latest` on
-update. `nightly` (renamed from `edge` in v0.3.0) is built daily
-from `current_dev`; it is experimental, may break the stack and is not for
+`master`) is the install default (SOT `release.install_channel`). On update, a
+former channel name in `.env.local` is rewritten to its current channel; a
+retired name stops the update with its reason. `nightly` (formerly `edge`) is
+built daily from `current_dev`; it is experimental, may break the stack and is not for
 production, and `setup.sh` warns on install and on every update with it.
 `setup.sh` resolves a mutable channel by reading every first-party image's
 channel digest twice while no promotion runs, and writes each image as
@@ -753,7 +785,7 @@ match the source tree.
 The resulting install/update path still stays pull-only and does not depend on
 local compiler caches or remote compiler services.
 
-Current prebuilt first-party images are published for both `linux/amd64` and `linux/arm64`, built natively on GitHub-hosted arm64 runners rather than emulated -- see `docs/self-hosted-actions-runner.md`.
+Prebuilt first-party images are published for `linux/amd64` and `linux/arm64`; arm64 is built natively on GitHub-hosted arm64 runners (`docs/ci-2.0-architecture.md`).
 
 Release channels, package rules and external image handling are documented in `docs/combined-release-and-checklist.md`.
 
@@ -767,17 +799,11 @@ If you use secondary DNS or DHCP DDNS, set a real secret value too:
 DDNS_TSIG_KEY=<generate-a-secret>
 ```
 
-`SECONDARY_REGISTRATION_TOKEN` is different from the values above: on an
-empty value or the checked-in `CHANGE_ME_SECONDARY_REGISTRATION_TOKEN`
-placeholder (an empty token previously allowed unauthenticated secondary
-registration — see issue #659), the Admin UI does not refuse to start — it
-generates a persistent random token on first boot and writes it to a file
-under its `/data` volume, logging the file path so you can retrieve it
-later if you decide to register a secondary DNS node. Startup only refuses
-to continue if that persisted token file itself already exists but is
-unusable (empty, still a placeholder, or unreadable/unwritable). To set the
-token explicitly instead of relying on auto-generation, replace the
-placeholder with a real secret:
+`SECONDARY_REGISTRATION_TOKEN`: `setup.sh install` generates it. Without a
+value in `.env.local`, the Admin UI creates a random token once and keeps it in
+the shared-secrets volume (`SECRETS_DIR`). The token is read on each
+registration request. A placeholder value, in `.env.local` or in that file, is
+an error; registration then fails. To set the token yourself:
 
 ```env
 SECONDARY_REGISTRATION_TOKEN=<generate-a-secret>
@@ -785,34 +811,33 @@ SECONDARY_REGISTRATION_TOKEN=<generate-a-secret>
 
 ### Secret generation and persistence
 
-Secrets in `.env` follow a simple rule: they are generated once on first install (or first update), and never rotated by later updates as long as a real value already exists. The `setup.sh` script provides a `get_or_generate_secret` helper that checks each secret key:
+Secrets in `.env.local` follow a simple rule: they are generated once on first install (or first update), and never rotated by later updates as long as a real value already exists. The `setup.sh` script provides a `get_or_generate_secret` helper that checks each secret key:
 
-- If the value is a placeholder (empty or the literal string `<generate-a-secret>`), a new secret is generated.
+- If the value is a placeholder (empty, containing `change_me`, starting with `changeme` or `your_`, ending in `_here`, or in angle brackets such as `<generate-a-secret>`), a new secret is generated.
 - If a real value is already present, it is preserved unchanged — even across multiple updates.
 
 Secret formats vary by key, not by naming suffix — despite the `*_KEY`/`*_PASSWORD` names, generation kind is assigned per key in `setup.sh`, and the two families are not generated the same way as each other:
 
-- 64 hex characters (`openssl rand -hex 32`): `KEA_CTRL_TOKEN`, `PDNS_API_KEY`, `SECONDARY_REGISTRATION_TOKEN`
+- 64 hex characters (`openssl rand -hex 32`): `KEA_CTRL_TOKEN`, `PDNS_API_KEY`, `SNMP_COMMUNITY`, `SECONDARY_REGISTRATION_TOKEN`
 - 44 base64 characters (`openssl rand -base64 32`): `DDNS_TSIG_KEY`
 - 20 alphanumeric characters: the Admin UI password. It is shown once; only its Argon2id hash is stored as `UI_AUTH_PASSWORD_HASH`.
-  The Setup page of the Admin UI can change it (old password required, at least 12 characters). The new Argon2id hash is saved as `UI_PASSWORD_HASH` in the UI settings file (`lancache-ui-settings.env` in the `ui-data` volume), which takes precedence over the `.env` value; to reset a lost password, run `sudo ./setup.sh reset-sign-in`, which turns the sign-in off until a new password is set on the Setup page.
+  The General page of the Admin UI can change it (old password required, at least 12 characters). The new Argon2id hash is saved as `UI_PASSWORD_HASH` in the UI settings file (`lancache-ui-settings.env` in the `ui-data` volume), which takes precedence over the `.env.local` value; to reset a lost password, run `sudo ./setup.sh reset-sign-in`, which turns the sign-in off until a new password is set on the General page.
 
-Store your actual secret values securely if you need to rotate them manually. The setup script will not regenerate them unless you explicitly delete or clear the `.env` entry.
+Store your actual secret values securely if you need to rotate them manually. The setup script will not regenerate them unless you explicitly delete or clear the `.env.local` entry.
 
 Create directories:
 
 ```bash
-mkdir -p /opt/lancache-ng/cache
-mkdir -p /opt/lancache-ng/kea
-mkdir -p /opt/lancache-ng/pdns
-mkdir -p /opt/lancache-ng/pdns-filter-state
+mkdir -p /opt/lancache-ng/{cache,ca,kea,ntp,pdns,pdns-filter-state,cachehamster,syslog-ng}
+chown 10001:10001 /opt/lancache-ng/syslog-ng
 ```
 
-Start the stack:
+Start the stack. Plain `docker compose` fails: the compose file needs the SOT
+values and image references that only `setup.sh compose` supplies.
 
 ```bash
-docker compose --env-file deploy/prod/.env.local -f deploy/prod/docker-compose.yml pull
-docker compose --env-file deploy/prod/.env.local -f deploy/prod/docker-compose.yml up -d
+sudo ./setup.sh compose deploy/prod pull
+sudo ./setup.sh compose deploy/prod up -d
 ```
 
 For later upgrades from this manual checkout, keep local changes in
@@ -834,7 +859,7 @@ state-path migrations and validates compose before restarting the stack.
 Check status:
 
 ```bash
-docker compose --env-file deploy/prod/.env.local -f deploy/prod/docker-compose.yml ps
+sudo ./setup.sh compose deploy/prod ps
 ```
 
 ## Proxmox LXC notes
@@ -843,12 +868,11 @@ LanCache NG can run inside a Proxmox LXC container.
 
 Recommended:
 
-- use a Debian based unpriviledged container
+- use a Debian based unprivileged container
 - use enough disk space
 - enable nesting
 - keep the container inside your LAN
-- give the container a static IP
-- use a second IP if HTTPS mode is enabled
+- give the container a static IP and a second static IP (always required)
 
 Example LXC config on the Proxmox host:
 
@@ -864,21 +888,24 @@ echo 'net.ipv4.ip_unprivileged_port_start=53' >> /etc/sysctl.conf
 sysctl -p
 ```
 
-If HTTPS mode is enabled, the container requires a second usable LAN IPs.
-- The reason is, that you then be able to cache also HTTPS downloads from the configured domain list.
-  - But you will need to install the CA-Certificate to let this happen.
+The second LAN IP carries HTTPS mode: HTTPS downloads of the listed domains are
+cached there, for clients with the CA certificate installed.
 
 ## Ports
 
 | Port | Protocol | Used for |
 |---|---|---|
-| `53` | TCP and UDP | DNS |
-| `80` | TCP | HTTP cache |
-| `443` | TCP | HTTPS mode cache |
+| `53` | TCP and UDP | DNS (both LAN IPs); dnsdist also passes zone transfer and NOTIFY to the authoritative server |
+| `80` | TCP | HTTP cache (both LAN IPs) |
+| `443` | TCP | TLS passthrough on the HTTP IP, HTTPS mode cache on the HTTPS IP |
+| `5300` | TCP and UDP | zone transfer to secondary DNS nodes of older versions (HTTP IP); a new secondary uses `53` |
 | `8080` | TCP | Admin UI |
 | `67` | UDP | optional DHCP server |
 | `8000` | TCP | optional Kea control agent |
-| `123` | UDP | optional LanCache-NG-NTP server |
+| `123` | UDP | LanCache-NG-NTP server (HTTP IP) |
+
+A secondary DNS node uses `53` (and `53` on its second IP for HTTPS clients),
+`5300` and `8081` (PowerDNS API, read by the primary's health check).
 
 Keep these ports inside your LAN.  
 Do not expose them directly to the internet.
@@ -893,11 +920,11 @@ deploy/secondary/        Secondary DNS compose file
 docs/                    Documentation
 services/watchdog/       services image: watchdog, cachehamster, syslog-ng, chrony, snmpd
 services/proxy/          Unified proxy for HTTP mode and HTTPS mode
-services/dns/            DNS image: PowerDNS auth and recursor
+services/dns/            DNS image: dnsdist, PowerDNS auth and recursor
 services/dhcp/           DHCP image: Kea or dnsmasq proxy/relay
 services/ui/             Admin UI
 services/common/         Shared Rust crate
-services/cachehamster/   CacheHamster scaffold, built into services
+services/cachehamster/   CacheHamster prefill daemon (Steam), built into services
 ```
 
 ## Common problems
@@ -944,8 +971,8 @@ Check:
 - the second IP is really assigned to the server
 - the CA certificate is installed
 - Firefox has the certificate if Firefox is used
-- the domain exists in the HTTPS domain list
-- the HTTPS proxy container is running
+- the domain exists in `services/dns/cdn-domains.txt`
+- the proxy container is running
 
 ### Admin UI does not open
 
@@ -1012,4 +1039,6 @@ Use HTTPS mode when:
 
 ## License
 
-AGPL-3.0 — see [LICENSE](LICENSE). Chosen specifically because this project is a network server: the AGPL closes the "SaaS loophole" plain GPL leaves open, so anyone running a modified version of lancache-ng as a network service (not just distributing binaries) must also make that modified source available to the service's users.
+AGPL-3.0-or-later, see [LICENSE](LICENSE). Anyone running a modified version
+of lancache-ng as a network service must make the modified source available to
+the users of that service.

@@ -161,12 +161,13 @@ services:
   dns:
     context: services/dns
     labels: [dns, pdns]
-    description: "LanCache-NG dns: PowerDNS auth, dns-http and dns-https recursors."
+    description: "LanCache-NG dns: dnsdist, PowerDNS auth, dns-http and dns-https recursors."
     build_type: apk
     processes:
       - pdns=/usr/sbin/pdns_server,--config-dir=@CONFIG_DIR@/dns,--guardian=no,--daemon=no
       - dns-http=/usr/sbin/pdns_recursor,--config-dir=@CONFIG_DIR@/dns,--config-name=http,--daemon=no
       - dns-https=/usr/sbin/pdns_recursor,--config-dir=@CONFIG_DIR@/dns,--config-name=https,--daemon=no
+      - dnsdist=/usr/bin/dnsdist,--supervised,--disable-syslog,-u,dnsdist,-g,dnsdist,-C,@DNSDIST_CONF_FILE@
       - snmpd=/usr/sbin/snmpd,-f,-C,-c,@SNMPD_CONF_FILE@
     # What: start script lines before openrc-init.
     # Why: stale OpenRC state blocks the services.
@@ -183,6 +184,10 @@ services:
       # From: Issue #1683
       - 'dns-https=if [ -z "${IP_HTTPS:-}" ]; then einfo "IP_HTTPS empty: dns-https off"; command=/bin/sleep; command_args=2147483647; return 0; fi; until [ -s @RECURSOR_HTTPS_CONF_FILE@ ]; do sleep @DNS_CONFIG_WAIT_SECONDS@; done'
       - 'snmpd=until [ -s @SNMPD_CONF_FILE@ ]; do sleep @DNS_CONFIG_WAIT_SECONDS@; done'
+      # What: raise the soft open-files limit first.
+      # Why: live 229: dnsdist warned, needs 10077 > 1024.
+      # From: Issue #1683
+      - 'dnsdist=ulimit -n @DNSDIST_OPEN_FILES@ && until [ -s @DNSDIST_CONF_FILE@ ]; do sleep @DNS_CONFIG_WAIT_SECONDS@; done'
       - 'pdns=until [ -s @PDNS_CONF_FILE@ ]; do sleep @DNS_CONFIG_WAIT_SECONDS@; done; [ -e @PDNS_DATABASE@ ] && return 0; sqlite3 @PDNS_DATABASE@ < @PDNS_SCHEMA_FILE@ && chown pdns:pdns @PDNS_DATABASE@ && return 0; rm -f @PDNS_DATABASE@; return 1'
     setup:
       - dir=@PDNS_CONF_DIR@/auth
@@ -196,6 +201,7 @@ services:
       - pdns
       - pdns-backend-sqlite3
       - pdns-doc
+      - dnsdist
       - pdns-recursor-luajit
       - bind-tools
       - sqlite
@@ -674,6 +680,17 @@ runtime:
     - UI_ROUTE_SECONDARY_ROTATE=/api/secondary/{name}/rotate
     - UI_ROUTE_SECONDARY_HEALTH=/api/secondary/{name}/health
     - UI_ROUTE_SECONDARY_ADDRESS=/api/secondary/{name}/address
+    # What: NS entry of one secondary by hand.
+    # Why: a taken out NS comes back only this way.
+    # From: Issue #1683
+    - UI_ROUTE_SECONDARY_NS_ADD=/api/secondary/{name}/ns-add
+    - UI_ROUTE_SECONDARY_NS_REMOVE=/api/secondary/{name}/ns-remove
+    - UI_ROUTE_SECONDARY_NS_SWITCH=/domains/secondary-ns
+    - UI_ROUTE_SECONDARY_NS_AUTO=/domains/secondary-ns-auto
+    # What: serial of each zone on primary and secondaries.
+    # Why: the DNS page shows one zone overview table.
+    # From: Issue #1683
+    - UI_ROUTE_ZONE_OVERVIEW=/api/zones/overview
     - UI_ROUTE_DHCP_MODE=/dhcp/mode
     - UI_ROUTE_DHCP_DDNS=/dhcp/ddns
     - UI_ROUTE_DHCP_PROXY=/dhcp/proxy
@@ -995,6 +1012,29 @@ runtime:
     - DNS_TXT_MAX_BYTES=255
     - DNS_SECONDARIES=
     - DNS_SECONDARY_ZONES=
+    # What: secondaries as NS records; off by default.
+    # Why: a dead NS slows every resolver that asks it.
+    # From: Issue #1683
+    - DNS_SECONDARY_NS_ENABLED=0
+    # What: NS removal of a dead secondary; off.
+    # Why: removal is a choice of the admin.
+    # From: Issue #1683
+    - DNS_SECONDARY_NS_AUTO_REMOVE=0
+    # What: names entered as NS; names taken out.
+    # Why: a taken out name comes back only by hand.
+    # From: Issue #1683
+    - DNS_SECONDARY_NS=
+    - DNS_SECONDARY_NS_OFF=
+    # What: check every 4 h, hourly while one fails.
+    # Why: serials via the pdns-API; a lag is pulled.
+    # From: Issue #1683
+    - DNS_SECONDARY_CHECK_SECONDS=14400
+    - DNS_SECONDARY_RECHECK_SECONDS=3600
+    # What: NS removal after 8 h and 3 failed checks.
+    # Why: one short outage must not remove an NS.
+    # From: Issue #1683
+    - DNS_SECONDARY_NS_REMOVE_AFTER_SECONDS=28800
+    - DNS_SECONDARY_NS_REMOVE_FAILS=3
     - DNS_SERVE_RFC1918=1
     # What: compose service name of the dns container.
     # Why: names differ per compose project; services stay.
@@ -1030,6 +1070,10 @@ runtime:
     # From: Issue #1683 | PR #1858
     - PDNS_LAUNCH=gsqlite3
     - PDNS_DEFAULT_SOA=ns1.@DHCP_DOMAIN@ hostmaster.@DHCP_DOMAIN@ 0 30 10 604800 300
+    # What: name of the HTTPS IP, A and PTR, never NS.
+    # Why: HTTPS is optional; ns1 is the name server.
+    # From: Issue #1683
+    - DNS_NS_HTTPS_NAME=ns2.@DHCP_DOMAIN@
     - PDNS_DNSUPDATE_FROM=@PRIVATE_NETS@
     - PDNS_LISTEN=0.0.0.0
     - PDNS_PRIMARY_API_URL=http://@DNS_SERVICE@:@PDNS_AUTH_API_PORT@/api/v1/servers/localhost
@@ -1085,6 +1129,10 @@ runtime:
     # Why: pdns reads its config only at start.
     # From: Issue #1683
     - PDNS_RESTART_EXEC=dns:rc-service+pdns+restart
+    # What: dnsdist restart on a new dnsdist.conf.
+    # Why: dnsdist reads its config only at start.
+    # From: Issue #1683
+    - DNSDIST_RESTART_EXEC=dns:rc-service+dnsdist+restart
     # What: dnsmasq restart on a proxy/relay switch.
     # Why: both sub-modes run the same dnsmasq daemon.
     # From: Issue #1683
@@ -1094,20 +1142,33 @@ runtime:
     - KEA_CTRL_CONF_FILE=@CONFIG_DIR@/dhcp/kea-ctrl-agent.conf
     - KEA_DDNS_CONF_FILE=@CONFIG_DIR@/dhcp/kea-dhcp-ddns.conf
     - PDNS_CONF_FILE=@CONFIG_DIR@/dns/pdns.conf
+    - DNSDIST_CONF_FILE=@CONFIG_DIR@/dns/dnsdist.conf
     - RECURSOR_HTTP_CONF_FILE=@CONFIG_DIR@/dns/recursor-http.yml
     - RECURSOR_HTTP_LUA_FILE=@CONFIG_DIR@/dns/http.lua
     - RECURSOR_HTTP_RPZ_FILE=@CONFIG_DIR@/dns/http.rpz
     - RECURSOR_HTTPS_CONF_FILE=@CONFIG_DIR@/dns/recursor-https.yml
     - RECURSOR_HTTPS_LUA_FILE=@CONFIG_DIR@/dns/https.lua
     - RECURSOR_HTTPS_RPZ_FILE=@CONFIG_DIR@/dns/https.rpz
-    # What: listen address, DNS and API port per recursor.
+    # What: dnsdist listens on DNS_PORT and DNS_HTTPS_PORT.
     # Why: compose maps IP_HTTP and IP_HTTPS to these ports.
-    # From: Issue #1683 | PR #1980
-    - RECURSOR_HTTP_LISTEN=0.0.0.0
-    - RECURSOR_HTTP_PORT=@DNS_PORT@
+    # From: Issue #1683
+    - DNSDIST_LISTEN=0.0.0.0
+    # What: dnsdist sender; 127/8, not LOOPBACK_BIND_IP.
+    # Why: pdns and recursors trust its proxy header.
+    # From: Issue #1683
+    - DNSDIST_SOURCE_ADDRESS=127.126.125.124
+    # What: soft open-files limit of dnsdist.
+    # Why: its TCP queue needs over 10000 descriptors.
+    # From: Issue #1683
+    - DNSDIST_OPEN_FILES=65536
+    # What: recursors listen behind dnsdist only.
+    # Why: dnsdist owns DNS_PORT and DNS_HTTPS_PORT.
+    # From: Issue #1683
+    - RECURSOR_HTTP_LISTEN=@LOOPBACK_BIND_IP@
+    - RECURSOR_HTTP_PORT=5301
     - RECURSOR_HTTP_API_PORT=@PDNS_HTTP_API_PORT@
-    - RECURSOR_HTTPS_LISTEN=0.0.0.0
-    - RECURSOR_HTTPS_PORT=@DNS_HTTPS_PORT@
+    - RECURSOR_HTTPS_LISTEN=@LOOPBACK_BIND_IP@
+    - RECURSOR_HTTPS_PORT=5302
     - RECURSOR_HTTPS_API_PORT=@PDNS_HTTPS_API_PORT@
     - SNMPD_CONF_FILE=@CONFIG_DIR@/services/snmpd.conf
     - SYSLOG_CONF_FILE=@CONFIG_DIR@/services/syslog-ng.conf
@@ -1183,7 +1244,7 @@ runtime:
     - UI_PORT=@UI_LISTEN_PORT@
     - UI_PUBLIC_URL=
     - UI_RECENT_REQUESTS=50
-    - UI_SERVICES=dns:pdns dns:dns-http dns:dns-https dns:snmpd services:syslog-ng services:chronyd services:snmpd services:lancache-cachehamster dhcp:kea-dhcp4 dhcp:kea-ctrl-agent dhcp:kea-dhcp-ddns dhcp:dnsmasq proxy:nginx proxy:snmpd ui:snmpd
+    - UI_SERVICES=dns:pdns dns:dns-http dns:dns-https dns:dnsdist dns:snmpd services:syslog-ng services:chronyd services:snmpd services:lancache-cachehamster dhcp:kea-dhcp4 dhcp:kea-ctrl-agent dhcp:kea-dhcp-ddns dhcp:dnsmasq proxy:nginx proxy:snmpd ui:snmpd
     - UI_STATUS_REFRESH=10
     - UI_USER=admin
     - UPSTREAM_DHCP_IP=
@@ -1280,6 +1341,14 @@ runtime:
     - DNS_TXT_MAX_BYTES=uint;1;255;live;ui
     - DNS_REPLICATION_ROLE=choice;primary,secondary;;recreate;dns
     - DNS_SECONDARIES=list?;;;restart;dns
+    - DNS_SECONDARY_CHECK_SECONDS=uint;60;604800;live;ui
+    - DNS_SECONDARY_NS=list?;;;live;ui
+    - DNS_SECONDARY_NS_AUTO_REMOVE=bool;;;live;ui
+    - DNS_SECONDARY_NS_ENABLED=bool;;;live;ui
+    - DNS_SECONDARY_NS_OFF=list?;;;live;ui
+    - DNS_SECONDARY_NS_REMOVE_AFTER_SECONDS=uint;60;2592000;live;ui
+    - DNS_SECONDARY_NS_REMOVE_FAILS=uint;1;1000;live;ui
+    - DNS_SECONDARY_RECHECK_SECONDS=uint;60;86400;live;ui
     - DNS_SECONDARY_ZONES=list?;;;restart;dns
     - DNS_SERVE_RFC1918=bool;;;restart;dns
     - DNS_SNAPSHOT_DIR=path;;;live;ui
@@ -1350,6 +1419,7 @@ runtime:
     - PDNS_DATABASE=path;;;restart;dns
     - PDNS_LAUNCH=text;;;restart;dns
     - PDNS_DEFAULT_SOA=text;;;restart;dns
+    - DNS_NS_HTTPS_NAME=text;;;live;ui
     - PDNS_DNSUPDATE_FROM=list?;;;restart;dns
     - PDNS_LISTEN=list;;;restart;dns
     - PDNS_PRIMARY_API_URL=text?;;;live;services
@@ -1374,12 +1444,16 @@ runtime:
     - RELOAD_EXEC=list;;;live;ui
     - SNMPD_RELOAD_EXEC=list;;;live;ui
     - PDNS_RESTART_EXEC=list;;;live;ui
+    - DNSDIST_RESTART_EXEC=list;;;live;ui
     - DNSMASQ_RESTART_EXEC=list;;;live;ui
     - NGINX_CONF_DIR=path;;;container;proxy
     - DNSMASQ_CONF_FILE=path;;;container;dhcp
     - KEA_CTRL_CONF_FILE=path;;;container;dhcp
     - KEA_DDNS_CONF_FILE=path;;;container;dhcp
     - PDNS_CONF_FILE=path;;;container;dns
+    - DNSDIST_CONF_FILE=path;;;container;dns
+    - DNSDIST_LISTEN=list;;;restart;dns
+    - DNSDIST_SOURCE_ADDRESS=text;;;restart;dns
     - RECURSOR_HTTP_CONF_FILE=path;;;container;dns
     - RECURSOR_HTTP_LUA_FILE=path;;;container;dns
     - RECURSOR_HTTP_RPZ_FILE=path;;;container;dns
@@ -1548,7 +1622,7 @@ runtime:
   # What: defaults compose interpolates as SOT_<KEY>.
   # Why: setup.sh and ci.sh export them; no clash with .env.
   # From: Issue #1683 | PR #1912
-  compose_keys: LANCACHE_LOG_PORT RUN_DIR SUPERVISE_RUN_DIR LANCACHE_SHARED_SECRET_DIR UI_DATA_DIR STATUS_DIR CACHE_DIR SYSLOG_LOG_ROOT RETENTION_STATE_DIR NTP_STATE_DIR CACHEHAMSTER_DATA_DIR DOCKER_SOCKET LOCALTIME_FILE CDN_DOMAINS_FILE PDNS_DATA_DIR DNS_STATE_DIR DNS_SNAPSHOT_MOUNT DHCP_SNAPSHOT_MOUNT PROXY_SNAPSHOT_MOUNT KEA_DATA_DIR UI_LISTEN_PORT DNS_PORT DNS_HTTPS_PORT PDNS_AUTH_PORT NTP_PORT PROXY_HTTP_PORT PROXY_HTTPS_PORT NGINX_PASSTHROUGH_PORT NGINX_DIR NGINX_SUBDIR_CA NGINX_SUBDIR_CERTS NGINX_CACHE_DIR NGINX_PSL_FILE PDNS_LUA_DNS_SCRIPT TEMPLATE_DIR STATIC_DIR LANG_DIR LOOPBACK_BIND_IP DHCP_API_HOST DNS_REPLICATION_ROLE_SECONDARY SECONDARY_RUNTIME_GID SECONDARY_SHARED_SECRET_DIR CONTAINER_NAME_SERVICES CONTAINER_NAME_PROXY CONTAINER_NAME_DNS CONTAINER_NAME_DHCP CONTAINER_NAME_UI HEALTHCHECK_INTERVAL HEALTHCHECK_TIMEOUT HEALTHCHECK_RETRIES HEALTHCHECK_START_PERIOD PROXY_HEALTH_PATH SETUP_DNS_PROBE_NAME CONFIG_DIR NGINX_CONF_DIR NGINX_TEMPLATE_DIR UI_SETTINGS_FILE HOST_NET_DEV_FILE HOST_NET_DEV_SOURCE HOST_NET_STAT_SOURCE HOST_NET_STAT_DIR HOST_MACHINE_ID_FILE
+  compose_keys: LANCACHE_LOG_PORT RUN_DIR SUPERVISE_RUN_DIR LANCACHE_SHARED_SECRET_DIR UI_DATA_DIR STATUS_DIR CACHE_DIR SYSLOG_LOG_ROOT RETENTION_STATE_DIR NTP_STATE_DIR CACHEHAMSTER_DATA_DIR DOCKER_SOCKET LOCALTIME_FILE CDN_DOMAINS_FILE PDNS_DATA_DIR DNS_STATE_DIR DNS_SNAPSHOT_MOUNT DHCP_SNAPSHOT_MOUNT PROXY_SNAPSHOT_MOUNT KEA_DATA_DIR UI_LISTEN_PORT DNS_PORT DNS_HTTPS_PORT PDNS_AUTH_PORT PDNS_AUTH_API_PORT NTP_PORT PROXY_HTTP_PORT PROXY_HTTPS_PORT NGINX_PASSTHROUGH_PORT NGINX_DIR NGINX_SUBDIR_CA NGINX_SUBDIR_CERTS NGINX_CACHE_DIR NGINX_PSL_FILE PDNS_LUA_DNS_SCRIPT TEMPLATE_DIR STATIC_DIR LANG_DIR LOOPBACK_BIND_IP DHCP_API_HOST DNS_REPLICATION_ROLE_SECONDARY SECONDARY_RUNTIME_GID SECONDARY_SHARED_SECRET_DIR CONTAINER_NAME_SERVICES CONTAINER_NAME_PROXY CONTAINER_NAME_DNS CONTAINER_NAME_DHCP CONTAINER_NAME_UI HEALTHCHECK_INTERVAL HEALTHCHECK_TIMEOUT HEALTHCHECK_RETRIES HEALTHCHECK_START_PERIOD PROXY_HEALTH_PATH SETUP_DNS_PROBE_NAME CONFIG_DIR NGINX_CONF_DIR NGINX_TEMPLATE_DIR UI_SETTINGS_FILE HOST_NET_DEV_FILE HOST_NET_DEV_SOURCE HOST_NET_STAT_SOURCE HOST_NET_STAT_DIR HOST_MACHINE_ID_FILE
   # What: managed secrets as "KEY generator owner".
   # Why: setup.sh and ci.sh filter one list.
   # From: Issue #1683 | PR #1912
