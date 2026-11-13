@@ -697,7 +697,9 @@ port 53 with its recursor, not `aa`; it keeps syncing but is never entered.
 A secondary that was taken out, by hand or by the second switch, comes back
 only through "Enter NS" in its row; that button checks `aa` first.
 "Remove NS" takes it out by hand. Disconnecting a secondary removes its
-records and its NS entry; a new address replaces its A and PTR record.
+records and its NS entry and renews the TSIG key, as "Renew key" does: every
+other secondary stops syncing until it runs `setup.sh secondary --rotate`.
+A new address replaces its A and PTR record.
 
 ## Manual setup
 
