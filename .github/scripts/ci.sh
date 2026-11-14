@@ -2111,6 +2111,22 @@ _ci_pr_green_reuse() {
     ci_log "[CI-INFO-PLAN-0013]" "ref=\"${ref}\" fingerprint=\"${fp}\" reason=\"last green run checked this tree and these digests; build, scan, test and validate NOT-RUN\""
 }
 
+# What: mark the pair ids of the images this PR uses.
+# Why: a PR writes no ledger record; GC keeps these.
+# From: Issue #1683
+_ci_pr_images_mark() {
+    local ref note
+    if [ "${PR_IS_FORK:-false}" = true ]; then
+        ci_log "[CI-INFO-PLAN-0027]" "reason=\"fork PR: the token cannot write refs; its images have the GC grace only\""
+        return 0
+    fi
+    ref="$(_ci_green_ref images)" || return 2
+    note="images ${_ci_plan_ids# }"
+    _ci_mark_write "${ref}" "${note}" "${note}"$'\n\n'"$(_ci_lock_note run)" "[CI-ERROR-PLAN-0028]" \
+        "reason=\"PR images mark not written\"" || return 2
+    ci_log "[CI-INFO-PLAN-0029]" "ref=\"${ref}\" ids=\"${_ci_plan_ids# }\" reason=\"GC keeps these images while the PR is open\""
+}
+
 # What: rc 0 if each release service has its index.
 # Why: a red platform stays out, also on release.
 # From: Issue #1683 | PR #1858
@@ -2230,6 +2246,13 @@ ci_cmd_plan_matrix() {
             pairs+="${service} ${platform} ${svc_type}"$'\n'
         done <<< "${plats}"
     done
+    # What: a PR marks every pair id before it probes.
+    # Why: GC reads the mark before a delete; no gap.
+    # From: Issue #1683
+    if [ "${authed}" = true ] && [ "${GITHUB_EVENT_NAME:-}" = pull_request ]; then
+        _ci_for_all_pairs _ci_plan_record || return "$?"
+        _ci_pr_images_mark || return "$?"
+    fi
     # What: all pair probes start after the ids, at once.
     # Why: A3: beside the id work they slowed it (+7 s).
     # From: Issue #1683 | PR #1858
@@ -11706,6 +11729,65 @@ _ci_gc_release_tags() {
     done <<<"${mig}"
 }
 
+# What: sha, tab, ref of every PR images mark.
+# Why: a cheap ls-remote shows a changed mark.
+# From: Issue #1683
+_ci_gc_pr_mark_shas() {
+    local remote prefix
+    remote="$(_ci_git_remote)" || return 2
+    prefix="$(_ci_variable CI_GREEN_REF)" || return 2
+    _ci_capture 0 git ls-remote --refs "${remote}" "${prefix}/pr-*-images"
+}
+
+# What: service, tab, digest of each marked PR image.
+# Why: an absent tag keeps nothing; UNKNOWN refuses.
+# From: Issue #1683
+_ci_gc_pr_roots() {
+    local remote marks sha ref subj item tag dig prc
+    remote="$(_ci_git_remote)" || return 2
+    marks="$(_ci_gc_pr_mark_shas)" || return 2
+    while IFS=$'\t' read -r sha ref; do
+        [ -n "${ref}" ] || continue
+        subj="$(_ci_ref_subject "${remote}" "${ref}" 1)" || return 2
+        if [ "${subj%% *}" != images ]; then
+            ci_log "[CI-ERROR-GC-0053]" "ref=\"${ref}\" sha=\"${sha}\" subject=\"${subj}\" reason=\"PR images mark is no images list; refusing roots\""
+            return 2
+        fi
+        for item in ${subj#images}; do
+            if [[ ! "${item}" =~ ^([^@]+)@([^=]+)=([0-9a-f]{64})$ ]]; then
+                ci_log "[CI-ERROR-GC-0054]" "ref=\"${ref}\" item=\"${item}\" reason=\"not service@platform=id; refusing roots\""
+                return 2
+            fi
+            tag="$(_ci_image_tag "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}")" || return 2
+            prc=0; dig="$(_ci_registry_probe "${tag}")" || prc=$?
+            case "${prc}" in
+                0) printf '%s\t%s\n' "${BASH_REMATCH[1]}" "${dig}" ;;
+                1) ;;
+                *)
+                    ci_log "[CI-ERROR-GC-0055]" "ref=\"${ref}\" tag=\"${tag}\" reason=\"PR image probe UNKNOWN; refusing roots\""
+                    return 2
+                    ;;
+            esac
+        done
+    done <<< "${marks}"
+}
+
+# What: re-read PR images marks; add roots on change.
+# Why: the pre-delete check must see marks made now.
+# From: Issue #1683
+_ci_gc_pr_refresh() {
+    local now add dig
+    now="$(_ci_gc_pr_mark_shas)" || return 2
+    [ "${now}" != "${_ci_gc_marks-}" ] || return 0
+    add="$(_ci_gc_pr_roots)" || return 2
+    _ci_gc_marks="${now}"
+    while IFS=$'\t' read -r _ dig; do
+        [ -n "${dig}" ] || continue
+        printf '%s\n' "${dig}" >> "${CI_GC_ROOTS_FILE}" || return 2
+    done <<< "${add}"
+    ci_log "[CI-INFO-GC-0056]" "reason=\"a PR images mark changed during gc; its roots were added\""
+}
+
 # What: Emit the transitive protected-root digest set.
 # Why: Ledger + channels + their index children (§75).
 # From: Issue #1683
@@ -11736,6 +11818,12 @@ _ci_gc_roots() {
         done <<< "${blob}"
         pairs="${pairs%$'\n'}"
     fi
+    # What: images an open PR's mark names are roots.
+    # Why: a PR writes no ledger record; it uses them.
+    # From: Issue #1683
+    local prs
+    prs="$(_ci_gc_pr_roots)" || return 2
+    [ -z "${prs}" ] || pairs="${pairs}"$'\n'"${prs}"
     local targets targets_rc=0 reltags
     targets="$(ci_build_targets)" || targets_rc=$?
     _ci_producer_ok "${targets_rc}" 0 || return 2
@@ -12037,9 +12125,13 @@ _ci_gc_mode() {
 # Why: Repo-wide reachability is the named §98 exception.
 # From: Issue #1683
 ci_cmd_gc() {
-    local mode roots rc=0
+    local mode roots rc=0 _ci_gc_marks
     _ci_gc_mode GC-0006 gc "$@" || return 2
     mode="${REPLY}"
+    # What: the PR images marks are read before the roots.
+    # Why: a mark changed after this is re-read on delete.
+    # From: Issue #1683
+    _ci_gc_marks="$(_ci_gc_pr_mark_shas)" || return 2
     if ! roots="$(_ci_gc_roots)"; then
         ci_log "[CI-ERROR-GC-0028]" "mode=${mode} source=\"_ci_gc_roots\" reason=\"protected roots not derivable (raw above); no gc\""
         return 2
@@ -12133,18 +12225,19 @@ _ci_gc_run() {
                 ci_log "[CI-INFO-GC-0051]" "deleted=${deleted} left=$((del - deleted)) reason=\"delete time used up; the next gc run goes on\""
                 break
             fi
-            # What: Re-check reachability before delete.
-            # Why: Re-check closes a TOCTOU delete gap.
+            # What: a pause before each delete, not the 1st.
+            # Why: DoMe: stay far below the hour API limit.
+            # From: Issue #1683 | PR #1858
+            [ "${deleted}" -eq 0 ] || sleep "${pause}"
+            # What: re-check after the pause; marks re-read.
+            # Why: the first roots file misses new marks.
             # From: Issue #1683
+            _ci_gc_pr_refresh || return 2
             if ! action="$(_ci_gc_classify "${line}")"; then return 2; fi
             if [ "${action}" != "DELETE" ]; then
                 ci_log "[CI-INFO-GC-0011]" "candidate=\"${line}\" reason=\"referenced at delete time; skipped\""
                 continue
             fi
-            # What: a pause before each delete, not the 1st.
-            # Why: DoMe: stay far below the hour API limit.
-            # From: Issue #1683 | PR #1858
-            [ "${deleted}" -eq 0 ] || sleep "${pause}"
             rc=0; _ci_gc_delete "${line}" || rc=$?
             # What: a used-up rate limit ends the run green.
             # Why: a 60 min job is under a rate window.
