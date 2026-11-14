@@ -373,11 +373,13 @@ Roll back with an immutable `sha-<full-sha>` or `vX.Y.Z` tag. Backups record
 the image revisions before an update.
 
 Retention is decided by reachability, not by a count budget. `ci.sh gc` decides
-it; `gc.yml` runs it on schedule (`43 */3 * * *`, every three hours) and on
-`workflow_dispatch`, with `--apply`. The policy values are the SOT
+it; `gc.yml` runs it on schedule (cron `43 */3 * * *`; GitHub may start a
+scheduled run hours later) and on `workflow_dispatch`, with `--apply`. The
+scheduled run uses the `ci.sh` of `master`. The policy values are the SOT
 `release.retention` keys. `gc.yml` also runs `gc-refs --apply` (green refs of
-closed pull requests, ended locks, dead marks) and
-`check orphaned-branches`.
+closed pull requests, ended locks, dead marks), also after a failed `gc` step,
+and `check orphaned-branches`. `gc` may delete for `CI_GC_DELETE_MINUTES`,
+counted from its start.
 
 ### 7.1 Protected roots
 
@@ -386,7 +388,9 @@ closed pull requests, ended locks, dead marks) and
 | every acceptance-ledger record, in any state (git ref `CI_LEDGER_REF`) | a pending record is not garbage |
 | every mutable channel of every build target | a channel protects the digest it points at now |
 | the release tags of the newest `release.retention.keep_release_lines` release lines, plus `migration_releases` | released digests are not garbage |
-| the layer-cache tags of every build target and platform | the cache is live |
+| the release candidate tags (`release.tag_prerelease`) of those lines and of any newer line | an active release candidate is pinned for testing |
+| every version with a commit tag (`release.tag_commit`, `sha-<full-sha>`) | commit tags are durable rollback points |
+| the layer-cache tags of every build target and platform | the cache is live; a superseded cache version gets the grace verdict |
 | the pair images named by the mark `CI_GREEN_REF/pr-<n>-images` of a pull request | a pull request writes no ledger record, but its runs use these images |
 | the index children of all of these | removing children orphans platform images |
 
@@ -396,7 +400,11 @@ mark when the pull request is closed. A fork pull request cannot write refs;
 its images have the grace window only.
 
 A failed read of any root is UNKNOWN: the run stops and deletes nothing. An
-empty root set also stops the run.
+empty root set, an absent ledger ref and a ledger record without service or
+digest also stop the run. A package listing answered with 404 while a channel
+tag of that package resolves stops the run: the delete token lacks access.
+`gc-refs` deletes a mark of the old pair-wide name; a mark name of no known
+format stops it.
 
 ### 7.2 Verdict and deletion
 
