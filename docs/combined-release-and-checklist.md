@@ -387,7 +387,13 @@ closed pull requests, ended locks, dead marks) and
 | every mutable channel of every build target | a channel protects the digest it points at now |
 | the release tags of the newest `release.retention.keep_release_lines` release lines, plus `migration_releases` | released digests are not garbage |
 | the layer-cache tags of every build target and platform | the cache is live |
+| the pair images named by the mark `CI_GREEN_REF/pr-<n>-images` of a pull request | a pull request writes no ledger record, but its runs use these images |
 | the index children of all of these | removing children orphans platform images |
+
+The plan of a pull request run writes `pr-<n>-images` with every pair id
+before it probes the registry; a new head replaces it. `gc-refs` deletes the
+mark when the pull request is closed. A fork pull request cannot write refs;
+its images have the grace window only.
 
 A failed read of any root is UNKNOWN: the run stops and deletes nothing. An
 empty root set also stops the run.
@@ -408,8 +414,10 @@ A candidate that cannot be classified stops the run. Without `--apply`, the
 run only prints verdicts. With `--apply` it deletes only when
 `release.retention.deletion_policy` is `manual-or-approved-automation-only` and
 GHCR authentication is present (`gc.yml` passes `GHCR_PACKAGE_DELETE_PAT`).
-Right before each delete the candidate is classified again; a candidate that is
-referenced now is kept and logged.
+Right before each delete, after the pause between deletes, GC reads the
+`pr-<n>-images` marks again, adds the images of a changed mark to the roots
+and classifies the candidate again; a candidate that is referenced now is kept
+and logged.
 
 ---
 
