@@ -5941,6 +5941,24 @@ capture_stack_health_baseline() {
     done
 }
 
+# What: services to wait for; no dhcp in mode off
+# Why: the ui stops dhcp on purpose in mode off
+# From: Issue #1683
+health_wait_services() {
+    local -n _wait_ref="$1"
+    local env_file="$2"
+    shift 2
+    local dhcp_svc dhcp_mode svc
+
+    dhcp_svc=$(prod_env_default DHCP_SERVICE) || exit $?
+    dhcp_mode=$(env_or_sot_default DHCP_MODE "$env_file") || exit $?
+    _wait_ref=()
+    for svc in "$@"; do
+        [[ "$dhcp_mode" = "off" && "$svc" = "$dhcp_svc" ]] && continue
+        _wait_ref+=("$svc")
+    done
+}
+
 # What: polls health and functional probe until timeout
 # Why: pre-update unhealthy services do not block the update
 # From: Issue #1683 | PR #1858
@@ -5949,19 +5967,10 @@ wait_for_stack_health() {
     shift
     local -a services=()
     local interval_seconds elapsed=0 svc all_healthy baseline
-    local dhcp_svc dhcp_mode
     local -a regressed_services pre_existing_unhealthy_services
 
     interval_seconds=$(prod_env_default SETUP_HEALTH_POLL_SECONDS) || exit $?
-    # What: no wait for dhcp while DHCP_MODE is off
-    # Why: the ui stops dhcp on purpose in mode off
-    # From: Issue #1683 | PR #2001
-    dhcp_svc=$(prod_env_default DHCP_SERVICE) || exit $?
-    dhcp_mode=$(env_or_sot_default DHCP_MODE "$_UPDATE_ENV_FILE") || exit $?
-    for svc in "$@"; do
-        [[ "$dhcp_mode" = "off" && "$svc" = "$dhcp_svc" ]] && continue
-        services+=("$svc")
-    done
+    health_wait_services services "$_UPDATE_ENV_FILE" "$@"
 
     while (( elapsed < timeout_seconds )); do
         all_healthy=1
@@ -9918,7 +9927,10 @@ _UPDATE_STACK_DIR="$INSTALL_DIR"
 _UPDATE_ENV_FILE="$ENV_LOCAL"
 install_wait=$(prod_env_default SETUP_HEALTH_WAIT_SERVICES_SECONDS) || exit $?
 install_poll=$(prod_env_default SETUP_HEALTH_POLL_SECONDS) || exit $?
-mapfile -t install_services < <(stack_compose "$INSTALL_DIR" "$ENV_LOCAL" config --services)
+install_services=$(stack_compose "$INSTALL_DIR" "$ENV_LOCAL" config --services) \
+    || die "Failed to list the services in $INSTALL_DIR (exit $?)."
+mapfile -t install_services <<<"$install_services"
+health_wait_services install_services "$ENV_LOCAL" "${install_services[@]}"
 install_waited=0
 install_bad=("${install_services[@]}")
 while (( ${#install_bad[@]} > 0 && install_waited < install_wait )); do
