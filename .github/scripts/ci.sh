@@ -11522,11 +11522,11 @@ _ci_release_vex_in() {
     printf 'release=vex tag=%s\n' "${tag}"
 }
 
-# What: every plain vX.Y.Z tag, in version order.
+# What: every vX.Y.Z tag, or every rc tag on $1 = true.
 # Why: one tag reader for release notes and GC roots.
 # From: Issue #1683 | PR #1858
 _ci_release_tags() {
-    local refs tags="" t remote
+    local refs tags="" t remote kind rc want="${1:-false}"
     remote="$(_ci_git_remote)" || return 2
     refs="$(_ci_capture 0 git ls-remote --tags --refs "${remote}")" || return 2
     # What: loads the SOT once before the per-tag subshells
@@ -11538,10 +11538,10 @@ _ci_release_tags() {
     # From: Issue #1683 | PR #1858
     while IFS= read -r t; do
         t="${t##*refs/tags/}"
-        if _ci_release_tag_final "${t}"; then
+        rc=0; kind="$(_ci_release_tag_kind "${t}")" || rc=$?
+        [ "${rc}" -le 1 ] || return 2
+        if [ "${rc}" -eq 0 ] && [ "${kind}" = "${want}" ]; then
             tags="${tags}${t}"$'\n'
-        elif [ "$?" -ne 1 ]; then
-            return 2
         fi
     done <<<"${refs}"
     tags="${tags%$'\n'}"
@@ -11714,6 +11714,23 @@ _ci_gc_release_tags() {
             *$'\n'"${t%.*}"$'\n'*) printf '%s\n' "${t}" ;;
         esac
     done <<<"${tags}"
+    # What: rc tags of kept lines and of newer lines.
+    # Why: §75: an active release candidate is a root.
+    # From: Issue #1683
+    local pres newest="" top
+    [ "${#lines[@]}" -eq 0 ] || newest="${lines[-1]}"
+    pres="$(_ci_release_tags true)" || return 2
+    while IFS= read -r t; do
+        [ -n "${t}" ] || continue
+        line="${t%%-*}"
+        line="${line%.*}"
+        case $'\n'"${keep}"$'\n' in
+            *$'\n'"${line}"$'\n'*) printf '%s\n' "${t}"; continue ;;
+        esac
+        [ -n "${newest}" ] || { printf '%s\n' "${t}"; continue; }
+        top="$(_ci_capture 0 sort -V <<< "${newest}"$'\n'"${line}")" || return 2
+        [ "${top##*$'\n'}" != "${line}" ] || [ "${line}" = "${newest}" ] || printf '%s\n' "${t}"
+    done <<<"${pres}"
     mig="$(_ci_block_entry_list release retention migration_releases)" || return 2
     # What: a migration entry must be a plain vX.Y.Z tag.
     # Why: a typo would silently protect nothing.
@@ -11776,16 +11793,66 @@ _ci_gc_pr_roots() {
 # Why: the pre-delete check must see marks made now.
 # From: Issue #1683
 _ci_gc_pr_refresh() {
-    local now add dig
+    local now add dig roots=""
     now="$(_ci_gc_pr_mark_shas)" || return 2
     [ "${now}" != "${_ci_gc_marks-}" ] || return 0
     add="$(_ci_gc_pr_roots)" || return 2
     _ci_gc_marks="${now}"
     while IFS=$'\t' read -r _ dig; do
-        [ -n "${dig}" ] || continue
-        printf '%s\n' "${dig}" >> "${CI_GC_ROOTS_FILE}" || return 2
+        [ -z "${dig}" ] || roots+="${dig}"$'\n'
     done <<< "${add}"
+    _ci_gc_root_add "${roots}" || return 2
     ci_log "[CI-INFO-GC-0056]" "reason=\"a PR images mark changed during gc; its roots were added\""
+}
+
+# What: append the digest lines $1 to the roots file.
+# Why: a lost root line would delete a live image.
+# From: Issue #1683
+_ci_gc_root_add() {
+    local werr
+    [ -n "$1" ] || return 0
+    if ! werr="$(_ci_nonblank_lines "$1" 2>&1 >> "${CI_GC_ROOTS_FILE}")"; then
+        ci_error "[CI-ERROR-GC-0064]" "file=\"${CI_GC_ROOTS_FILE}\" reason=\"roots file not extended; no gc\"" "${werr}"
+        return 2
+    fi
+}
+
+# What: add commit-tagged versions and their children.
+# Why: AG-REL-009: sha-<commit> tags are durable.
+# From: Issue #1683
+_ci_gc_commit_roots() {
+    local base re line tags tag dig svc kids kid rc hit n=0 add=""
+    base="$(_ci_image_ref)" || return 2
+    re="$(_ci_block_entry_field release "" tag_commit)" || return 2
+    if [ -z "${re}" ]; then
+        ci_log "[CI-ERROR-GC-0059]" "reason=\"no SOT release.tag_commit; refusing roots\""
+        return 2
+    fi
+    while IFS= read -r line; do
+        [ -n "${line}" ] || continue
+        tags="$(_ci_tab_field "${line}" 4)" || return 2
+        hit=""
+        for tag in ${tags//,/ }; do
+            if [[ "${tag}" =~ ${re} ]]; then hit=1; break; fi
+        done
+        [ -n "${hit}" ] || continue
+        dig="$(_ci_tab_field "${line}" 1)" || return 2
+        svc="$(_ci_tab_field "${line}" 5)" || return 2
+        add+="${dig}"$'\n'
+        rc=0; kids="$(_ci_index_children "${base}/${svc}@${dig}")" || rc=$?
+        if [ "${rc}" -eq 2 ]; then
+            ci_log "[CI-ERROR-GC-0060]" "service=\"${svc}\" digest=\"${dig}\" reason=\"index child read UNKNOWN; refusing roots\""
+            return 2
+        fi
+        if [ "${rc}" -eq 0 ]; then
+            while IFS= read -r kid; do
+                [ -z "${kid}" ] || add+="${kid#*=}"$'\n'
+            done <<< "${kids}"
+        fi
+        n=$((n + 1))
+    done <<< "$1"
+    _ci_gc_root_add "${add}" || return 2
+    ci_log "[CI-INFO-GC-0061]" "versions=${n} reason=\"commit-tagged versions and their children are roots\""
 }
 
 # What: Emit the transitive protected-root digest set.
@@ -11804,20 +11871,31 @@ _ci_gc_roots() {
         ci_log "[CI-ERROR-GC-0012]" "remote=\"${remote}\" ref=\"${ledger_ref}\" reason=\"ledger read UNKNOWN (raw above); refusing empty roots\""
         return 2
     fi
+    # What: an absent ledger ref refuses, never empties.
+    # Why: §26: ledger lost means CI blocked, not deletes.
+    # From: Issue #1683
+    if [ "${rc}" -eq 1 ]; then
+        ci_log "[CI-ERROR-GC-0057]" "remote=\"${remote}\" ref=\"${ledger_ref}\" reason=\"ledger ref absent; accepted digests unknown; refusing roots\""
+        return 2
+    fi
     # What: Every ledger record is a root, all states.
     # Why: PRODUCED_UNVERIFIED is pending, not garbage.
     # From: Issue #1683
-    if [ "${rc}" -eq 0 ]; then
-        local f2 f5
-        while IFS= read -r line; do
-            f2="$(_ci_tab_field "${line}" 2)"
-            f5="$(_ci_tab_field "${line}" 5)"
-            if [ -n "${f2}" ] && [ -n "${f5}" ]; then
-                pairs="${pairs}${f2}"$'\t'"${f5}"$'\n'
-            fi
-        done <<< "${blob}"
-        pairs="${pairs%$'\n'}"
-    fi
+    local f2 f5
+    while IFS= read -r line; do
+        [ -n "${line}" ] || continue
+        f2="$(_ci_tab_field "${line}" 2)"
+        f5="$(_ci_tab_field "${line}" 5)"
+        # What: a record without service or digest refuses.
+        # Why: a dropped record would delete its image.
+        # From: Issue #1683
+        if [ -z "${f2}" ] || [ -z "${f5}" ]; then
+            ci_log "[CI-ERROR-GC-0058]" "ref=\"${ledger_ref}\" record=\"${line}\" reason=\"ledger record without service or digest; refusing roots\""
+            return 2
+        fi
+        pairs="${pairs}${f2}"$'\t'"${f5}"$'\n'
+    done <<< "${blob}"
+    pairs="${pairs%$'\n'}"
     # What: images an open PR's mark names are roots.
     # Why: a PR writes no ledger record; it uses them.
     # From: Issue #1683
@@ -11850,7 +11928,7 @@ _ci_gc_roots() {
         # From: Issue #1683 | PR #1858
         done <<<"${produced}"$'\n'"${reltags}"
         # What: each layer cache tag of a target is a root.
-        # Why: §35 cache is live; §77 owns its GC.
+        # Why: §35 live cache; an old one gets the grace.
         # From: Issue #1683 | PR #1912
         local plats plat cref
         plats="$(_ci_platforms "${svc}")" || return 2
@@ -11894,11 +11972,35 @@ _ci_gh_versions() {
     # From: Issue #1683
     out="$(_ci_retry github-api gh api --paginate "/orgs/${owner}/packages/container/${pkg}/versions?per_page=${gh_page}" --jq '.[] | [.name, .id, .created_at, ((.metadata.container.tags // []) | join(","))] | @tsv')" || rc=$?
     if [ "${rc}" -ne 0 ]; then
-        _ci_text_has -i 'HTTP 404|Not Found' "${out}" && return 1
+        _ci_text_has -i 'HTTP 404' "${out}" && return 1
         ci_error "[CI-ERROR-GC-0018]" "owner=\"${owner}\" pkg=\"${pkg}\" reason=\"GHCR version listing failed\"" "${out}"
         return 2
     fi
     printf '%s\n' "${out}"
+}
+
+# What: rc 0 if no channel tag of service $1 resolves.
+# Why: a 404 listing of a live package is lost access.
+# From: Issue #1683
+_ci_gc_package_absent() {
+    local base channels ch prc
+    base="$(_ci_image_ref)" || return 2
+    channels="$(_ci_mutable_channels)" || return 2
+    while IFS= read -r ch; do
+        [ -n "${ch}" ] || continue
+        prc=0; _ci_registry_probe "${base}/$1:${ch}" >/dev/null || prc=$?
+        case "${prc}" in
+            1) ;;
+            0)
+                ci_log "[CI-ERROR-$2]" "service=\"$1\" tag=\"${ch}\" reason=\"package listing is 404 but the channel tag resolves; the delete token lacks access\""
+                return 2
+                ;;
+            *)
+                ci_log "[CI-ERROR-GC-0065]" "service=\"$1\" tag=\"${ch}\" reason=\"channel probe UNKNOWN after a 404 listing (raw above); no gc\""
+                return 2
+                ;;
+        esac
+    done <<< "${channels}"
 }
 
 # What: Enumerate GHCR versions of every built package.
@@ -11920,7 +12022,10 @@ _ci_gc_candidates() {
         # From: Issue #1683
         vers="$(_ci_gh_versions "${owner}" "${pkgbase}%2F${svc}")" || grc=$?
         [ "${grc}" -eq 2 ] && return 2
-        [ "${grc}" -eq 1 ] && continue
+        if [ "${grc}" -eq 1 ]; then
+            _ci_gc_package_absent "${svc}" GC-0062 || return 2
+            continue
+        fi
         found=$((found + 1))
         # What: Append the service so delete can target it.
         # Why: Delete path is package-scoped, not id-only.
@@ -11989,7 +12094,10 @@ _ci_gc_check_gone() {
     local -A active=()
     prefix="$(_ci_repo)" || return 2
     vers="$(_ci_gh_versions "${prefix%%/*}" "${prefix#*/}%2F${svc}")" || rc=$?
-    [ "${rc}" -eq 1 ] && return 0
+    if [ "${rc}" -eq 1 ]; then
+        _ci_gc_package_absent "${svc}" GC-0063
+        return "$?"
+    fi
     if [ "${rc}" -ne 0 ]; then
         ci_log "[CI-ERROR-GC-0033]" "service=\"${svc}\" reason=\"delete not confirmed; listing failed (raw above)\""
         return 2
@@ -12125,9 +12233,13 @@ _ci_gc_mode() {
 # Why: Repo-wide reachability is the named §98 exception.
 # From: Issue #1683
 ci_cmd_gc() {
-    local mode roots rc=0 _ci_gc_marks
+    local mode roots rc=0 _ci_gc_marks _ci_gc_start="${SECONDS}"
     _ci_gc_mode GC-0006 gc "$@" || return 2
     mode="${REPLY}"
+    # What: log in before the first registry probe.
+    # Why: anonymous probes are rate-limited (UNKNOWN).
+    # From: Issue #1683
+    _ci_require_ghcr_auth || return 2
     # What: the PR images marks are read before the roots.
     # Why: a mark changed after this is re-read on delete.
     # From: Issue #1683
@@ -12173,6 +12285,7 @@ _ci_gc_run() {
         printf 'gc result=noop candidates=0 mode=%s\n' "${mode}"
         return 0
     fi
+    _ci_gc_commit_roots "${cands}" || return 2
     if [ "${mode}" = "apply" ]; then
         policy="$(_ci_deletion_policy)" || return 2
         case "${policy}" in
@@ -12215,7 +12328,10 @@ _ci_gc_run() {
                 ci_log "[CI-ERROR-GC-0050]" "value=\"${mins}\" reason=\"CI_GC_DELETE_MINUTES not a positive integer\""
                 return 2 ;;
         esac
-        stop_s=$(( SECONDS + mins * 60 ))
+        # What: delete time counts from the gc start.
+        # Why: roots take minutes; gc-refs needs time.
+        # From: Issue #1683
+        stop_s=$(( ${_ci_gc_start:-${SECONDS}} + mins * 60 ))
         while IFS= read -r line; do
             [ -n "${line}" ] || continue
             # What: delete time used up ends the run green.
@@ -12393,8 +12509,14 @@ ci_cmd_gc_refs() {
                 return 2
             fi
             state=gone
-            if [ "${ref}" != "${prefix}/${svc}-${plat//\//-}-${dig#sha256:}" ]; then
+            # What: only the pair-wide name is old_format.
+            # Why: an unknown name may be a newer schema.
+            # From: Issue #1683
+            if [ "${ref}" = "${prefix}/${svc}-${plat//\//-}" ]; then
                 state=old_format
+            elif [ "${ref}" != "${prefix}/${svc}-${plat//\//-}-${dig#sha256:}" ]; then
+                ci_log "[CI-ERROR-GC-0066]" "ref=\"${ref}\" subject=\"${mark_subj["${ref}"]}\" reason=\"mark name in no known format; neither kept nor deleted\""
+                return 2
             else
                 rc=0; out="$(_ci_registry_probe "$(_ci_image_ref "${svc}" "${dig}")")" || rc=$?
                 case "${rc}" in
