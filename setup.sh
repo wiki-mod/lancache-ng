@@ -1610,7 +1610,7 @@ env_key_has_value() {
 }
 
 # What: true for empty, CHANGE_ME_*, <...> and alike
-# Why: shared.rs rule; plain sh, the dns exec embeds it
+# Why: placeholders are replaced; real secrets are kept
 # From: Issue #1683 | PR #1858
 secret_value_is_placeholder() {
     local value="$1" normalized
@@ -2974,7 +2974,7 @@ psl_backup_list() {
 # Why: DoMe: the old list stays, compressed, at most 3.
 # From: Issue #1683 | PR #1984
 psl_backup() {
-    local file="$1" name dir keep sum gz n=0 f
+    local file="$1" name dir keep sum gz n=0 f list
     name=$(prod_env_default NGINX_PSL_FILE) || exit $?
     keep=$(prod_env_default NGINX_PSL_BACKUP_KEEP) || exit $?
     dir=$(psl_backup_dir) || exit $?
@@ -2986,10 +2986,12 @@ psl_backup() {
         mv -f "$gz.tmp" "$gz" || die "Failed to back up $file to $gz (exit $?)."
     fi
     touch "$gz" || die "Failed to mark $gz as newest backup (exit $?)."
+    list=$(psl_backup_list "$dir") || die "Failed to list the PSL backups in $dir (exit $?)."
     while IFS= read -r f; do
+        [[ -n "$f" ]] || continue
         n=$((n + 1))
         [[ "$n" -le "$keep" ]] || rm -f -- "$f" || die "Failed to remove the old PSL backup $f (exit $?)."
-    done < <(psl_backup_list "$dir")
+    done <<< "$list"
     print_ok "Old Public Suffix List backed up to $gz"
 }
 
@@ -2997,15 +2999,17 @@ psl_backup() {
 # Why: no list at all would stop the stack from starting.
 # From: Issue #1683 | PR #1984
 psl_restore_backup() {
-    local dest="$1" tmp="$2" dir f
+    local dest="$1" tmp="$2" dir f list
     dir=$(psl_backup_dir) || exit $?
+    list=$(psl_backup_list "$dir") || die "Failed to list the PSL backups in $dir (exit $?)."
     while IFS= read -r f; do
+        [[ -n "$f" ]] || continue
         gzip -dc "$f" > "$tmp" || continue
         psl_file_is_valid "$tmp" || continue
         mv -f "$tmp" "$dest" || die "Failed to restore $f to $dest (exit $?)."
         print_warn "Public Suffix List restored from backup $f"
         return 0
-    done < <(psl_backup_list "$dir")
+    done <<< "$list"
     return 1
 }
 
@@ -6391,7 +6395,7 @@ install_repo_follow_channel() {
 # Why: its code moved to a channel dir; data stays
 # From: Issue #1683 | PR #1858
 remove_root_checkout() {
-    local root="$1" changes list f d
+    local root="$1" changes list f d sorted
     local -a dirs=()
     changes=$(git -C "$root" status --porcelain --untracked-files=no) \
         || die "Failed to read the git status of $root (exit $?)."
@@ -6413,6 +6417,7 @@ remove_root_checkout() {
     # What: drops emptied code dirs, deepest first
     # Why: a dir with data or other files must stay
     # From: Issue #1683 | PR #1858
+    sorted=$(printf '%s\n' "${dirs[@]}" | sort -ru) || die "Failed to sort the code dirs of $root (exit $?)."
     while IFS= read -r d; do
         [[ -n "$d" ]] || continue
         while [[ -n "$d" ]]; do
@@ -6425,7 +6430,7 @@ remove_root_checkout() {
                 d=""
             fi
         done
-    done < <(printf '%s\n' "${dirs[@]}" | sort -ru)
+    done <<< "$sorted"
     rm -rf -- "$root/.git" || die "Failed to remove $root/.git (exit $?)."
     print_ok "Old code in $root removed; its data stays"
 }
@@ -7523,8 +7528,8 @@ cmd_reset_to_last_known_good_config() {
             reset_kea_to_last_known_good_config "$install_dir" "$snapshot_id" "$assume_yes"
             ;;
         dns|pdns)
-            # What: dns and pdns both target the dns service
-            # Why: one container runs the rollback listener
+            # What: dns and pdns name the PowerDNS zones
+            # Why: users name the service either way
             # From: Issue #1683 | PR #1912
             reset_dns_to_last_known_good_config "dns" "$install_dir" "$zone" "$snapshot_id" "$assume_yes"
             ;;
@@ -7742,7 +7747,7 @@ reset_kea_to_last_known_good_config() {
 }
 
 # What: adds the trailing dot to a zone name if missing
-# Why: the rollback listener uses dot-terminated names
+# Why: lancache-ui lists zones with a final dot
 # From: Issue #1683 | PR #1858
 canonical_dns_zone() {
     local zone="$1"
@@ -7770,7 +7775,7 @@ confirm_snapshot_rollback() {
         || die "Cancelled."
 }
 
-# What: zones of a GET /snapshots body with a snapshot
+# What: zones with a snapshot in the zone-snapshots JSON
 # Why: every managed zone is listed, most of them empty
 # From: Issue #1683 | PR #1858
 list_dns_zones_with_snapshots() {
@@ -7778,14 +7783,14 @@ list_dns_zones_with_snapshots() {
 }
 
 # What: "<id> <created_unix>" per snapshot, newest first
-# Why: the listener's order; one line per mapfile entry
+# Why: lancache-ui lists newest first; one line per entry
 # From: Issue #1683 | PR #1858
 dns_zone_snapshot_entries() {
     json_value ".zones[\$zone][]? | \"\(.id) \(.created_unix)\"" "$1" --arg zone "$2"
 }
 
-# What: runs one listener request inside the DNS container
-# Why: the listener is not published to the host
+# What: runs one lancache-ui command in the ui container
+# Why: zone-snapshots and zone-rollback are ui commands
 # From: Issue #1683 | PR #1858
 dns_rollback_exec() (
     local install_dir="$1" env_file="$2" project out rc=0
