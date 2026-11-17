@@ -7965,8 +7965,13 @@ cmd_reset_sign_in() {
         || die "Cannot determine the compose project of $install_dir (exit $?)."
     out=$(stack_compose "$install_dir" "$env_file" -p "$project" exec -T ui lancache-ui reset-sign-in 2>&1) || rc=$?
     [[ $rc -eq 0 ]] || die "lancache-ui reset-sign-in in the ui container failed (exit $rc): $out"
-    stack_compose "$install_dir" "$env_file" -p "$project" restart ui >/dev/null \
-        || die "The ui container did not restart (exit $?); sign-in turns off on its next start."
+    # What: the .env hash goes too; the open UI is allowed
+    # Why: compose passes it; no hash and no opt-out stop ui
+    # From: Issue #1683 | PR #2017
+    set_env_key UI_AUTH_PASSWORD_HASH "" "$env_file"
+    set_env_key ALLOW_INSECURE_UI true "$env_file"
+    stack_compose "$install_dir" "$env_file" -p "$project" up -d ui >/dev/null \
+        || die "The ui container did not start again (exit $?); sign-in turns off on its next start."
     print_ok "Admin UI sign-in is off. Set a new user name and password under General, Sign-in."
 }
 
