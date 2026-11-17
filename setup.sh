@@ -3640,6 +3640,7 @@ CONVERGENCE_TIMER_WAS_ENABLED=0
 CONVERGENCE_SERVICE_WAS_ACTIVE=0
 UPDATE_CONVERGENCE_PAUSED=0
 UPDATE_CONVERGENCE_COMPLETED=0
+COMMAND_PAUSED_CONVERGENCE=0
 
 # What: pauses the convergence timer and service for update
 # Why: a running timer could start compose during migration
@@ -3718,6 +3719,27 @@ resume_lancache_convergence_after_failed_update() {
     exit "$exit_code"
 }
 
+# What: pauses convergence unless an outer update did
+# Why: a converge run during an apply hits name conflicts
+# From: Issue #1683 | PR #2017
+pause_convergence_for_command() {
+    [[ "${UPDATE_CONVERGENCE_PAUSED:-0}" != "1" ]] || return 0
+    # What: sets the resume flag before the pause call
+    # Why: a die inside pause still triggers the resume
+    # From: Issue #1683 | PR #1858
+    COMMAND_PAUSED_CONVERGENCE=1
+    pause_lancache_convergence_for_update
+}
+
+# What: resumes what pause_convergence_for_command paused
+# Why: EXIT traps call it; a second call does nothing
+# From: Issue #1683 | PR #2017
+resume_convergence_for_command() {
+    [[ "${COMMAND_PAUSED_CONVERGENCE:-0}" = "1" ]] || return 0
+    COMMAND_PAUSED_CONVERGENCE=0
+    resume_lancache_convergence_after_update
+}
+
 # What: EXIT trap while .env is prepared for moved code
 # Why: units must not start new code with the old .env
 # From: Issue #1683 | PR #1858
@@ -3737,6 +3759,15 @@ rollback_update_after_env_failure() {
 # Why: a timer `compose up` must not race manual recovery
 # From: Issue #1683 | PR #1858
 die_convergence_kept_paused() {
+    local resume
+    resume=$(convergence_resume_command) || exit $?
+    die "$1 Manual recovery required.${resume:+ Convergence stays paused; after recovery run: $resume}"
+}
+
+# What: the commands that undo the convergence pause
+# Why: a kept pause names how to end it; one text
+# From: Issue #1683 | PR #2017
+convergence_resume_command() {
     local resume="" cmd
     if [[ "$CONVERGENCE_TIMER_WAS_ENABLED" = "1" ]]; then
         resume=$(host_unit_command "$CONVERGE_TIMER_UNIT" enable)
@@ -3745,7 +3776,7 @@ die_convergence_kept_paused() {
         cmd=$(host_unit_command "$CONVERGE_TIMER_UNIT" start)
         resume="${resume:+$resume && }$cmd"
     fi
-    die "$1 Manual recovery required.${resume:+ Convergence stays paused; after recovery run: $resume}"
+    printf '%s\n' "$resume"
 }
 
 # What: true for a vX.Y.Z or vX.Y.Z-rc.N release tag
@@ -5204,7 +5235,6 @@ cmd_backup() (
 
     stack_stopped=0
     stack_was_running=0
-    backup_paused_convergence=0
     stamp=$(date -u +%Y%m%dT%H%M%SZ)
     dest="$backup_root/$stamp"
     # What: backup packs with the best present compressor
@@ -5218,7 +5248,7 @@ cmd_backup() (
     backup_cleanup() {
         local status=$?
         [[ "$stack_stopped" = "1" && "$stack_was_running" = "1" ]] && compose_stack_start "$install_dir"
-        [[ "$backup_paused_convergence" = "1" ]] && resume_lancache_convergence_after_update
+        resume_convergence_for_command
         rm -rf "$dest" || print_error "Failed to remove the unfinished backup $dest (exit $?)."
         rm -f "$archive.partial" || print_error "Failed to remove $archive.partial (exit $?)."
         umask "$old_umask"
@@ -5231,13 +5261,7 @@ cmd_backup() (
     # What: pauses convergence unless cmd_update did
     # Why: a second pause would overwrite saved timer state
     # From: Issue #1683 | PR #1858
-    if [[ "${UPDATE_CONVERGENCE_PAUSED:-0}" != "1" ]]; then
-        # What: sets the cleanup flag before the pause call
-        # Why: a die inside pause still triggers the resume
-        # From: Issue #1683 | PR #1858
-        backup_paused_convergence=1
-        pause_lancache_convergence_for_update
-    fi
+    pause_convergence_for_command
 
     print_step "Creating $mode backup"
     manifest=$(backup_manifest "$install_dir" "$mode") \
@@ -5328,7 +5352,7 @@ cmd_restore() (
     stack_was_running=0
     tmp=$(mktemp -d) || die "Failed to create a temporary directory for the restore (exit $?)."
     restore_cleanup() {
-        local status=$?
+        local status=$? resume
         if [[ "$stack_stopped" = "1" ]]; then
             if [[ "$status" -eq 0 ]]; then
                 # What: restarts only if it was running
@@ -5343,6 +5367,15 @@ cmd_restore() (
                 print_warn "Investigate the error above, then run: $SCRIPT_DIR/setup.sh compose \"$install_dir\" up -d"
             fi
         fi
+        # What: a failed restore keeps convergence paused
+        # Why: a converge run would start the partial stack
+        # From: Issue #1683 | PR #2017
+        if [[ "$status" -ne 0 && "${COMMAND_PAUSED_CONVERGENCE:-0}" = "1" ]]; then
+            COMMAND_PAUSED_CONVERGENCE=0
+            resume=$(convergence_resume_command)
+            [[ -z "$resume" ]] || print_warn "Convergence stays paused; after recovery run: $resume"
+        fi
+        resume_convergence_for_command
         rm -rf "$tmp" || print_error "Failed to remove the restore workspace $tmp (exit $?)."
         trap - EXIT
         return "$status"
@@ -5384,6 +5417,11 @@ cmd_restore() (
     archived_project=$(compose_project_name "$root/$rel_install" "$(runtime_env_file_for_install_dir "$root/$rel_install")") \
         || exit $?
     guard_restore_shared_project_volumes "$install_dir" "$archived_here" "$archived_project"
+
+    # What: no converge run while files and volumes return
+    # Why: it would start the stack on a half restore
+    # From: Issue #1683 | PR #2017
+    pause_convergence_for_command
 
     # What: records whether the stack was running
     # Why: restore restarts only a stack that was running
@@ -7963,6 +8001,11 @@ cmd_reset_sign_in() {
     env_file=$(require_stack_env_file "$install_dir") || exit $?
     project=$(compose_project_name "$install_dir" "$env_file") \
         || die "Cannot determine the compose project of $install_dir (exit $?)."
+    # What: no converge run while the ui is recreated
+    # Why: both recreate the ui and collide on its name
+    # From: Issue #1683 | PR #2017
+    trap resume_convergence_for_command EXIT
+    pause_convergence_for_command
     out=$(stack_compose "$install_dir" "$env_file" -p "$project" exec -T ui lancache-ui reset-sign-in 2>&1) || rc=$?
     [[ $rc -eq 0 ]] || die "lancache-ui reset-sign-in in the ui container failed (exit $rc): $out"
     # What: the .env hash goes too; the open UI is allowed
@@ -8046,6 +8089,11 @@ cmd_update_ip() {
     # From: Issue #1683 | PR #2017
     ensure_host_ipv4 "$new_ip_http" "$current_ip_http"
     ensure_host_ipv4 "$new_ip_https" "$current_ip_http"
+    # What: no converge run while the new IPs are applied
+    # Why: both recreate the same containers and collide
+    # From: Issue #1683 | PR #2017
+    trap resume_convergence_for_command EXIT
+    pause_convergence_for_command
 
     # What: the same baseline and gate as ./setup.sh update
     # Why: new IPs that fail the gate must not stay active
@@ -8244,6 +8292,11 @@ cmd_configure_upstream_dns() {
     printf "    Local PTR zones:    %s\n\n" "$([[ "$DNS_LOCAL_REVERSE_ZONES" = 1 ]] && echo on || echo off)"
 
     confirm "Apply changes? [y/N]" "N" || { printf "\n  Cancelled.\n\n"; exit 0; }
+    # What: no converge run while the change is applied
+    # Why: both recreate the same containers and collide
+    # From: Issue #1683 | PR #2017
+    trap resume_convergence_for_command EXIT
+    pause_convergence_for_command
 
     # What: the same baseline and gate as ./setup.sh update
     # Why: one health-gated restart path, no second copy
