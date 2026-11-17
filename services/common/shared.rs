@@ -3051,6 +3051,28 @@ pub mod kea_conf {
         subnets
     }
 
+    // What: true when an IPv4 address lies in a CIDR.
+    // Why: Kea refuses a reservation outside its subnet.
+    // From: Issue #1683 | PR #2017
+    fn in_subnet(ip: &str, cidr: &str) -> bool {
+        let Some((net, len)) = cidr.split_once('/') else {
+            return false;
+        };
+        let parsed = (
+            ip.parse::<std::net::Ipv4Addr>(),
+            net.parse::<std::net::Ipv4Addr>(),
+            len.parse::<u32>(),
+        );
+        let (Ok(ip), Ok(net), Ok(len)) = parsed else {
+            return false;
+        };
+        if len > 32 {
+            return false;
+        }
+        let mask = u32::MAX.checked_shl(32 - len).unwrap_or(0);
+        u32::from(ip) & mask == u32::from(net) & mask
+    }
+
     fn option_rows(s: &Settings, domain: &str) -> Result<Vec<Value>, String> {
         let mut rows = Vec::new();
         rows.push(json!({"name": "routers", "data": s.text("DHCP_GATEWAY")?}));
@@ -3106,12 +3128,24 @@ pub mod kea_conf {
             "valid-lifetime": valid,
             "max-valid-lifetime": max
         });
-        // What: hosts and code options of the old main.
-        // Why: they come from the ui, not from settings.
-        // From: Issue #1683
+        // What: old main hosts in subnet, coded options.
+        // Why: ui-made; Kea refuses hosts off its subnet.
+        // From: Issue #1683 | PR #2017
         if let Some(o) = old_main {
-            if let Some(hosts) = o.get("reservations") {
-                main["reservations"] = hosts.clone();
+            if let Some(hosts) = o.get("reservations").and_then(Value::as_array) {
+                let net = s.text("DHCP_SUBNET")?;
+                let fit: Vec<Value> = hosts
+                    .iter()
+                    .filter(|h| {
+                        let ok = h["ip-address"].as_str().is_none_or(|ip| in_subnet(ip, &net));
+                        if !ok {
+                            eprintln!("kea: reservation {h} is outside {net}; dropped");
+                        }
+                        ok
+                    })
+                    .cloned()
+                    .collect();
+                main["reservations"] = fit.into();
             }
             let coded = o["option-data"].as_array().into_iter().flatten();
             let coded: Vec<Value> = coded.filter(|r| r.get("name").is_none()).cloned().collect();
@@ -4812,7 +4846,7 @@ pub mod rrd {
         Ok(Path::new(&dir).join(format!("{}.rrd", g.name)))
     }
 
-    // What: runs a stats tool; an error names only the tool.
+    // What: runs a stats tool; errors name the tool only.
     // Why: snmpget args hold the SNMP community secret.
     // From: Issue #1683 | PR #2017
     fn run(cmd: &mut Command) -> Result<Vec<u8>, String> {
