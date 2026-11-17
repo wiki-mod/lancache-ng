@@ -847,7 +847,9 @@ pub mod dns {
         // What: a secondary serves the primary's zones.
         // Why: its DHCP_DOMAIN is only the SOT default.
         // From: Issue #1683 | PR #2017
-        if s.text("DNS_REPLICATION_ROLE").is_ok_and(|r| r == "secondary") {
+        if s.text("DNS_REPLICATION_ROLE")
+            .is_ok_and(|r| r == "secondary")
+        {
             return Ok(s
                 .list("DNS_SECONDARY_ZONES")
                 .iter()
