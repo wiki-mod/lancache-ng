@@ -3317,6 +3317,7 @@ async fn ensure_soa_nameserver(s: &Settings, api: &lancache_ng::pdns::Api) -> Re
     let ns = ns_names(s, &mname)?;
     for zone in lancache_ng::dns::managed_zones(s)? {
         ensure_rrset(api, &zone, &zone, "NS", ttl, &ns).await?;
+        ensure_soa_names(api, &zone, &soa).await?;
     }
     // What: A or AAAA and PTR of each secondary.
     // Why: an NS name needs an address; logs show names.
@@ -3438,6 +3439,39 @@ async fn ensure_ptr(
         return Ok(());
     }
     ensure_rrset(api, &zone, &rev, "PTR", ttl, &[host.to_string()]).await
+}
+
+// What: SOA mname and rname from PDNS_DEFAULT_SOA.
+// Why: a zone made before a domain change kept the old ns1.
+// From: Issue #1683 | PR #2017
+async fn ensure_soa_names(
+    api: &lancache_ng::pdns::Api,
+    zone: &str,
+    soa: &str,
+) -> Result<(), String> {
+    let mut names = soa.split_whitespace().map(lancache_ng::dns::canonical_zone);
+    let (Some(mname), Some(rname)) = (names.next(), names.next()) else {
+        return Err(format!("PDNS_DEFAULT_SOA {soa:?} names no mname and rname"));
+    };
+    let id = lancache_ng::pdns::zone_id(zone);
+    let rrsets = api.rrsets(zone).await?;
+    let Some(r) = rrsets
+        .iter()
+        .find(|r| r["name"] == id.as_str() && r["type"] == "SOA")
+    else {
+        return Ok(());
+    };
+    let have = r["records"][0]["content"].as_str().unwrap_or_default();
+    let parts: Vec<&str> = have.split_whitespace().collect();
+    if parts.len() != 7 || (parts[0] == mname && parts[1] == rname) {
+        return Ok(());
+    }
+    let ttl = r["ttl"]
+        .as_u64()
+        .and_then(|t| u32::try_from(t).ok())
+        .ok_or_else(|| format!("SOA of {zone} has no ttl"))?;
+    let content = format!("{mname} {rname} {}", parts[2..].join(" "));
+    api.set_rrset(zone, zone, "SOA", ttl, &[content]).await
 }
 
 // What: writes one rrset only when it differs.
