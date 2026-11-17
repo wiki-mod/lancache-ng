@@ -1493,6 +1493,16 @@ ensure_stack_requirements_installed() {
     # Why: primary, Kea and DNS replies need a real parser
     # From: Issue #1683 | PR #1858
     install_missing_tools jq
+    # What: ip and the tools of the SOT secret generators
+    # Why: minimal hosts lack them; installs need both
+    # From: Issue #1683 | PR #2017
+    local generators tools_text
+    local -a generator_tools=()
+    generators=$(lancache_sot_list secret_generators runtime) || exit $?
+    tools_text=$(awk 'NF { print $2 }' <<< "$generators" | sort -u) \
+        || die "Failed to read the secret generator tools (exit $?)."
+    mapfile -t generator_tools <<< "$tools_text"
+    install_missing_tools ip "${generator_tools[@]}"
 
     if ! command_available docker; then
         install_docker
