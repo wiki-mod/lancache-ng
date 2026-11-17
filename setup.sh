@@ -1415,10 +1415,10 @@ ensure_docker_userland_proxy() {
     print_step "Docker userland-proxy: ${current} -> ${want}"
     printf "  Docker restarts once; every container on this host restarts with it.\n"
     # What: no terminal leaves Docker as it is
-    # Why: an unattended update must not stop on a question
-    # From: Issue #1683 | PR #1985
+    # Why: install, secondary, update run unattended too
+    # From: Issue #1683 | PR #2017
     if ! terminal_available; then
-        print_warn "No terminal: Docker unchanged. Run setup.sh update in a shell to apply it."
+        print_warn "No terminal: Docker unchanged. Run this setup.sh command again in a terminal to apply it."
         return 0
     fi
     confirm "Change it and restart Docker now? [Y/n]" "Y" || {
