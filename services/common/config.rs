@@ -234,6 +234,63 @@ fn baked_rows(baked: &str) -> impl Iterator<Item = &str> {
         .filter(|r| !r.is_empty())
 }
 
+// What: file > env > default; a default fills @KEY@.
+// Why: a derived default follows the operator's value.
+// From: Issue #1683 | PR #2017
+fn effective(
+    key: &str,
+    file: &BTreeMap<String, String>,
+    env: &dyn Fn(&str) -> Option<String>,
+    defaults: &BTreeMap<&str, &str>,
+    depth: u8,
+) -> Result<Option<String>, String> {
+    if let Some(v) = file.get(key).filter(|v| !v.is_empty()) {
+        return Ok(Some(v.clone()));
+    }
+    if let Some(v) = env(key).filter(|v| !v.is_empty()) {
+        return Ok(Some(v));
+    }
+    match defaults.get(key).filter(|v| !v.is_empty()) {
+        Some(v) => expand_default(v, file, env, defaults, depth).map(Some),
+        None => Ok(None),
+    }
+}
+
+// What: each @KEY@ of a default replaced by its value.
+// Why: the SOT names other keys; the image bakes them raw.
+// From: Issue #1683 | PR #2017
+fn expand_default(
+    value: &str,
+    file: &BTreeMap<String, String>,
+    env: &dyn Fn(&str) -> Option<String>,
+    defaults: &BTreeMap<&str, &str>,
+    depth: u8,
+) -> Result<String, String> {
+    if depth > 16 {
+        return Err(format!("default {value:?}: @KEY@ refers to itself"));
+    }
+    let key_char = |b: &u8| b.is_ascii_uppercase() || b.is_ascii_digit() || *b == b'_';
+    let mut out = String::new();
+    let mut rest = value;
+    while let Some(at) = rest.find('@') {
+        out.push_str(&rest[..at]);
+        let after = &rest[at + 1..];
+        let len = after.bytes().take_while(key_char).count();
+        if len > 0 && after[len..].starts_with('@') {
+            let name = &after[..len];
+            let got = effective(name, file, env, defaults, depth + 1)?
+                .ok_or_else(|| format!("default {value:?} names @{name}@, which has no value"))?;
+            out.push_str(&got);
+            rest = &after[len + 1..];
+        } else {
+            out.push('@');
+            rest = after;
+        }
+    }
+    out.push_str(rest);
+    Ok(out)
+}
+
 // What: KEY=VALUE lines of the admin file.
 // Why: a missing file means no admin values yet.
 // From: Issue #1683 | PR #1858
@@ -322,17 +379,13 @@ impl Settings {
                     continue;
                 }
             };
-            let raw = file
-                .get(&spec.key)
-                .filter(|v| !v.is_empty())
-                .cloned()
-                .or_else(|| env(&spec.key).filter(|v| !v.is_empty()))
-                .or_else(|| {
-                    defaults
-                        .get(spec.key.as_str())
-                        .filter(|v| !v.is_empty())
-                        .map(|v| v.to_string())
-                });
+            let raw = match effective(&spec.key, &file, env, &defaults, 0) {
+                Ok(raw) => raw,
+                Err(e) => {
+                    errors.push(e);
+                    continue;
+                }
+            };
             match raw {
                 Some(raw) => match spec.check(&raw) {
                     Ok((value, note)) => {
@@ -353,8 +406,16 @@ impl Settings {
             if set.specs.contains_key(*key) {
                 continue;
             }
-            let raw = env(key).filter(|v| !v.is_empty());
-            let raw = raw.unwrap_or_else(|| value.to_string());
+            let raw = match env(key).filter(|v| !v.is_empty()) {
+                Some(raw) => raw,
+                None => match expand_default(value, &file, env, &defaults, 0) {
+                    Ok(raw) => raw,
+                    Err(e) => {
+                        errors.push(e);
+                        continue;
+                    }
+                },
+            };
             if !raw.is_empty() {
                 set.values.insert(key.to_string(), Value::Text(raw));
             }
