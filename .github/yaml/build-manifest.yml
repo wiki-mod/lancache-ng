@@ -759,6 +759,10 @@ runtime:
     - SETUP_HEALTH_BASELINE_SAMPLES=3
     - SETUP_HEALTH_BASELINE_INTERVAL_SECONDS=2
     - SETUP_DNS_PROBE_NAME=content1.steampowered.com
+    # What: max wait for dockerd after start or restart.
+    # Why: rc-service returns before dockerd listens.
+    # From: Issue #1683 | PR #2017
+    - SETUP_DOCKER_WAIT_SECONDS=60
     # What: repo files a secondary keeps in its compose dir.
     # Why: its compose mounts them from its dir.
     # From: Issue #1683 | PR #1858
