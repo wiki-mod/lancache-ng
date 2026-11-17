@@ -146,6 +146,13 @@ wizard_introspect_record_prompt() {
     REPLY="${line:-$default}"
 }
 
+# What: 0 when /dev/tty opens, so setup.sh can ask
+# Why: curl ... | bash: stdin is the script, not the user
+# From: Issue #1683 | PR #2017
+terminal_available() {
+    { : < /dev/tty; } 2>/dev/null
+}
+
 # What: ask() reads from /dev/tty, not stdin
 # Why: curl ... | bash occupies stdin with the script body
 # From: Issue #1683 | PR #1858
@@ -159,8 +166,9 @@ ask() {
     # What: no terminal stops setup.sh with a clear error
     # Why: a failed tty read took the default silently
     # From: Issue #1683 | PR #1858
-    { exec {tty_fd}< /dev/tty; } 2>&- \
+    terminal_available \
         || die "setup.sh needs a terminal to ask '$prompt'; run it in an interactive shell (for SSH: ssh -t)."
+    exec {tty_fd}< /dev/tty || die "Failed to open /dev/tty to ask '$prompt' (exit $?)."
     printf '  %s%s%s [%s]: ' "${BOLD}" "$prompt" "${RESET}" "$default"
     read -r REPLY <&"$tty_fd"
     exec {tty_fd}<&-
@@ -732,7 +740,7 @@ secondary_choose_listen_ip() {
             fi
         } >&2
 
-        if ! [[ -t 0 && -t 1 ]]; then
+        if ! terminal_available; then
             return 1
         fi
 
@@ -1409,7 +1417,7 @@ ensure_docker_userland_proxy() {
     # What: no terminal leaves Docker as it is
     # Why: an unattended update must not stop on a question
     # From: Issue #1683 | PR #1985
-    if ! { : < /dev/tty; } 2>/dev/null; then
+    if ! terminal_available; then
         print_warn "No terminal: Docker unchanged. Run setup.sh update in a shell to apply it."
         return 0
     fi
@@ -8378,7 +8386,7 @@ cmd_secondary() {
     # From: Issue #1683
     local tty=0 stored_env="" stored_listen="" stored_listen_https="" stored_ip_https="" stored_channel="" loopback
     local primary_arg="$primary" stored_primary=""
-    [[ -t 0 ]] && tty=1
+    terminal_available && tty=1
     if [[ "$tty" = 1 && -z "$name" ]]; then
         local name_default=""
         [[ "$rotate" -eq 1 && -f .env && -f docker-compose.yml ]] && name_default=$(basename "$PWD")
