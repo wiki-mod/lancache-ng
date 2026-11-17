@@ -3780,16 +3780,31 @@ fn asset(kind: &'static str, body: &'static [u8]) -> Response {
     ([(header::CONTENT_TYPE, kind)], body).into_response()
 }
 
-// What: password against a PHC hash.
+// What: password against a stored PHC hash.
 // Why: one owner for login and change.
 // From: Issue #1683 | PR #1858
 fn verify(hash: &str, pw: &str) -> bool {
-    let Ok(parsed) = PasswordHash::new(hash) else {
+    let phc = stored_phc(hash);
+    let Ok(parsed) = PasswordHash::new(&phc) else {
         return false;
     };
     Argon2::default()
         .verify_password(pw.as_bytes(), &parsed)
         .is_ok()
+}
+
+// What: PHC string of a stored hash; .env holds base64url.
+// Why: a PHC has "$"; the page file keeps the raw form.
+// From: Issue #1683 | PR #2017
+fn stored_phc(value: &str) -> String {
+    if value.starts_with('$') {
+        return value.to_string();
+    }
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(value)
+        .ok()
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .unwrap_or_else(|| value.to_string())
 }
 
 // What: Argon2id PHC string of a password.
@@ -3800,9 +3815,9 @@ fn phc(pw: &str) -> Result<String, String> {
     hash.map(|h| h.to_string()).map_err(|e| e.to_string())
 }
 
-// What: hash a password read from stdin.
-// Why: setup.sh keeps only the hash.
-// From: Issue #1683 | PR #1858
+// What: base64url PHC hash of a password from stdin.
+// Why: setup.sh keeps it in .env, which bars "$".
+// From: Issue #1683 | PR #2017
 fn hash_password() -> Result<(), String> {
     let mut line = String::new();
     std::io::stdin()
@@ -3812,7 +3827,8 @@ fn hash_password() -> Result<(), String> {
     if pw.is_empty() {
         return Err("the password on stdin is empty".into());
     }
-    println!("{}", phc(pw)?);
+    let env_form = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(phc(pw)?);
+    println!("{env_form}");
     Ok(())
 }
 
