@@ -5069,7 +5069,7 @@ restore_compose_volumes() {
         return 0
     fi
     compose_stack_available "$install_dir" \
-        || die "Backup contains Docker volume payloads, but Docker/compose is not available for $install_dir. Install Docker and restore again."
+        || die "Backup contains Docker volume payloads, but $install_dir has no docker-compose.yml or Docker is not available. Check the restored files and Docker, then restore again."
     require_helper_image
     archives=$(find "$volume_root" -maxdepth 1 -type f -name '*.tar') \
         || die "Failed to list the volume archives in $volume_root (exit $?)."
@@ -5341,7 +5341,13 @@ cmd_restore() (
     fi
     ensure_default_install_dir
     archived_install="${archived_install:-$DEFAULT_INSTALL_DIR}"
-    archived_install=$(realpath -m "$archived_install")
+    # What: the archived path as recorded; links kept
+    # Why: rootfs and manifest.txt hold it; current may move
+    # From: Issue #1683 | PR #2017
+    archived_install=$(realpath -m -s -- "$archived_install") \
+        || die "Cannot resolve the archived path $archived_install (exit $?)."
+    archived_here=$(realpath -m -- "$archived_install") \
+        || die "Cannot resolve the archived path $archived_install (exit $?)."
     rel_install="${archived_install#/}"
     archived_repo_root=""
     new_repo_root=""
@@ -5355,7 +5361,7 @@ cmd_restore() (
     # From: Issue #1683 | PR #1858
     archived_project=$(compose_project_name "$root/$rel_install" "$(runtime_env_file_for_install_dir "$root/$rel_install")") \
         || exit $?
-    guard_restore_shared_project_volumes "$install_dir" "$archived_install" "$archived_project"
+    guard_restore_shared_project_volumes "$install_dir" "$archived_here" "$archived_project"
 
     # What: records whether the stack was running
     # Why: restore restarts only a stack that was running
