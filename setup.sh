@@ -7520,22 +7520,29 @@ cmd_reset_to_last_known_good_config() {
         esac
     done
     service="${positional[0]:-}"
-    [[ -n "${positional[1]:-}" ]] && install_dir="${positional[1]}"
+    local -a rest=("${positional[@]:1}")
+    # What: the next word is install-dir if it is a path
+    # Why: install-dir is optional; zones and ids hold no /
+    # From: Issue #1683 | PR #2017
+    if [[ "${rest[0]:-}" == */* || ( -n "${rest[0]:-}" && -d "${rest[0]}" ) ]]; then
+        install_dir="${rest[0]}"
+        rest=("${rest[@]:1}")
+    fi
     # What: normalizes install-dir to an absolute path
     # Why: a relative path would double env_file's path
     # From: Issue #1683 | PR #1858
     install_dir=$(resolve_stack_dir "$install_dir") || exit $?
 
-    # What: positional[2] is zone (DNS) or snapshot (Kea)
+    # What: then zone and snapshot (DNS) or snapshot (Kea)
     # Why: DNS snapshots are per zone; Kea has one file
-    # From: Issue #1683 | PR #1858
+    # From: Issue #1683 | PR #2017
     case "$service" in
         dns|pdns)
-            zone="${positional[2]:-}"
-            snapshot_id="${positional[3]:-}"
+            zone="${rest[0]:-}"
+            snapshot_id="${rest[1]:-}"
             ;;
         *)
-            snapshot_id="${positional[2]:-}"
+            snapshot_id="${rest[0]:-}"
             ;;
     esac
 
