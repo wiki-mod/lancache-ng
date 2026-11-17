@@ -14168,7 +14168,11 @@ _ci_service_default_rows() {
             [ -z "${k}" ] || has_default["${k%%=*}"]=1
         done <<< "${d}"
     else
-        rows="$(_ci_runtime_defaults)" || return 2
+        # What: raw rows; config.rs fills @KEY@ at load
+        # Why: derived defaults follow operator values
+        # From: Issue #1683 | PR #2017
+        d="$(_ci_runtime_defaults)" || return 2
+        rows="$(_ci_required_field runtime defaults blocklist)" || return 2
     fi
     type="$(_ci_required_field "${service}" build_type)" || return 2
     if [ "${type}" = rust ]; then
@@ -14227,6 +14231,39 @@ _ci_service_default_rows() {
         fi
         out+="${row}"$'\n'
     done <<< "${rows}"
+    # What: rows an @KEY@ of a picked row names, chained
+    # Why: config.rs can fill @KEY@ only from baked rows
+    # From: Issue #1683 | PR #2017
+    if [ "${want}" != schema ]; then
+        local -A bake_all=() bake_seen=()
+        local todo next v name
+        while IFS= read -r row; do
+            [ -z "${row}" ] || bake_all["${row%%=*}"]="${row}"
+        done <<< "${rows}"
+        while IFS= read -r row; do
+            [ -z "${row}" ] || bake_seen["${row%%=*}"]=1
+        done <<< "${out}"
+        todo="${out}"
+        while [ -n "${todo}" ]; do
+            next=""
+            while IFS= read -r row; do
+                v="${row#*=}"
+                while [[ "${v}" =~ @([A-Z][A-Z0-9_]*)@ ]]; do
+                    name="${BASH_REMATCH[1]}"
+                    v="${v#*"@${name}@"}"
+                    if [ -z "${bake_all[${name}]+x}" ]; then
+                        ci_log "[CI-ERROR-BUILDARGS-0023]" "service=\"${service}\" key=\"${name}\" reason=\"@KEY@ names no runtime.defaults row\""
+                        return 2
+                    fi
+                    [ -z "${bake_seen[${name}]+x}" ] || continue
+                    bake_seen["${name}"]=1
+                    out+="${bake_all[${name}]}"$'\n'
+                    next+="${bake_all[${name}]}"$'\n'
+                done
+            done <<< "${todo}"
+            todo="${next}"
+        done
+    fi
     [ -n "${out}" ] || return 0
     _ci_job_memo_put "${memo}" "${out%$'\n'}" || return 2
     printf '%s' "${out}"
