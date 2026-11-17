@@ -1399,6 +1399,20 @@ install_docker() {
     esac
 }
 
+# What: waits until docker info answers, up to the SOT time
+# Why: rc-service returns before dockerd listens
+# From: Issue #1683 | PR #2017
+wait_for_docker_daemon() {
+    local why="$1" wait poll deadline info
+    wait=$(prod_env_default SETUP_DOCKER_WAIT_SECONDS) || exit $?
+    poll=$(prod_env_default SETUP_HEALTH_POLL_SECONDS) || exit $?
+    deadline=$((SECONDS + wait))
+    until info=$(docker info 2>&1); do
+        (( SECONDS < deadline )) || die "$why (no answer within ${wait} s): ${info##*$'\n'}"
+        sleep "$poll"
+    done
+}
+
 # What: Docker's userland-proxy set as the SOT says
 # Why: DoMe 07.11.: docker-proxy copied hairpin traffic
 # From: Issue #1683 | PR #1985
@@ -1438,8 +1452,7 @@ ensure_docker_userland_proxy() {
     chmod 0644 -- "$tmp" || die "Cannot chmod $tmp (exit $?)."
     mv -f -- "$tmp" "$file" || die "Cannot replace $file (exit $?)."
     host_unit_action "$DOCKER_UNIT" restart
-    docker info >/dev/null 2>&1 \
-        || die "Docker does not answer after the restart; the old file is ${file}.bak."
+    wait_for_docker_daemon "Docker does not answer after the restart; the old file is ${file}.bak"
     print_ok "Docker userland-proxy is ${want}"
 }
 
@@ -1490,8 +1503,7 @@ ensure_stack_requirements_installed() {
         print_warn "Docker daemon not reachable (${info##*$'\n'}) — starting now..."
         host_unit_action "$DOCKER_UNIT" enable
         host_unit_action "$DOCKER_UNIT" start
-        info=$(docker info 2>&1) \
-            || die "Docker daemon is still not reachable after starting it (exit $?): $info"
+        wait_for_docker_daemon "Docker daemon is still not reachable after starting it"
     fi
 
     if ! out=$(docker compose version 2>&1); then
