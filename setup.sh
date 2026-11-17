@@ -3613,8 +3613,17 @@ host_unit_action() {
             ;;
         *) die "Neither systemd nor OpenRC runs here; cannot $action $unit." ;;
     esac
-    [[ "$rc" -ne 124 ]] || die "Could not $action $unit within $limit s: $out"
-    [[ "$rc" -eq 0 ]] || die "Failed to $action $unit (exit $rc): $out"
+    [[ "$rc" -ne 124 ]] || die "Could not $action ${name:-$unit} within $limit s: $out"
+    [[ "$rc" -eq 0 ]] || die "Failed to $action ${name:-$unit} (exit $rc): $out"
+}
+
+# What: a unit's name on this host's init system
+# Why: messages name what the operator sees on OpenRC
+# From: Issue #1683 | PR #2017
+host_unit_name() {
+    local name=""
+    [[ "$(host_service_manager)" != openrc ]] || name=$(openrc_service_for_unit "$1")
+    printf '%s\n' "${name:-$1}"
 }
 
 # What: the command an operator runs for a unit action
@@ -3624,7 +3633,7 @@ host_unit_command() {
     local unit="$1" action="$2" manager name
     manager=$(host_service_manager)
     if [[ "$manager" = openrc ]]; then
-        name=$(openrc_service_for_unit "$unit")
+        name=$(host_unit_name "$unit")
         case "$action" in
             enable) printf 'rc-update add %s default\n' "$name" ;;
             disable) printf 'rc-update del %s default\n' "$name" ;;
@@ -3668,7 +3677,7 @@ pause_lancache_convergence_for_update() {
         print_step "Stopping active convergence service"
         host_unit_action "$CONVERGE_SERVICE_UNIT" stop
         if host_unit_active "$CONVERGE_SERVICE_UNIT"; then
-            die "$CONVERGE_SERVICE_UNIT is still active after stop; refusing to update concurrently."
+            die "$(host_unit_name "$CONVERGE_SERVICE_UNIT") is still active after stop; refusing to update concurrently."
         fi
     fi
 
@@ -7032,7 +7041,7 @@ lancache_read_ui_settings_override() {
 reconcile_auto_update_timer_state() {
     local env_file="$1" desired unit="$AUTO_UPDATE_TIMER_UNIT"
     if ! host_unit_exists "$unit"; then
-        print_skip "Syncing the auto-update timer: $unit is not installed"
+        print_skip "Syncing the auto-update timer: $(host_unit_name "$unit") is not installed"
         return 0
     fi
     desired=$(env_or_sot_default AUTO_UPDATE_ENABLED "$env_file") \
@@ -10021,8 +10030,8 @@ print_step "Starting stack"
 if [[ "$HOST_SERVICES_AVAILABLE" = "1" ]]; then
     host_unit_action "$STACK_UNIT" enable
     host_unit_action "$CONVERGE_TIMER_UNIT" enable
-    print_ok "$STACK_UNIT enabled for boot"
-    print_ok "$CONVERGE_TIMER_UNIT enabled for boot"
+    print_ok "$(host_unit_name "$STACK_UNIT") enabled for boot"
+    print_ok "$(host_unit_name "$CONVERGE_TIMER_UNIT") enabled for boot"
     [[ "$AUTO_UPDATE_ENABLED" != "1" ]] || host_unit_action "$AUTO_UPDATE_TIMER_UNIT" enable
     # What: "Start now? n" stops here, units on for boot
     # Why: the hint names the starts the yes path runs
@@ -10038,7 +10047,7 @@ if [[ "$HOST_SERVICES_AVAILABLE" = "1" ]]; then
     host_unit_action "$CONVERGE_TIMER_UNIT" start
     if [[ "$AUTO_UPDATE_ENABLED" = "1" ]]; then
         host_unit_action "$AUTO_UPDATE_TIMER_UNIT" start
-        print_ok "$AUTO_UPDATE_TIMER_UNIT enabled (scheduled automatic updates)"
+        print_ok "$(host_unit_name "$AUTO_UPDATE_TIMER_UNIT") enabled (scheduled automatic updates)"
     fi
 else
     if [[ "$start_now" = "0" ]]; then
