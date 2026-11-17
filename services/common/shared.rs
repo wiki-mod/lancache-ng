@@ -2426,9 +2426,25 @@ pub mod pdns_conf {
                         .collect();
                     to.join(",")
                 } else {
-                    String::new()
+                    // What: NOTIFY to the own recursors.
+                    // Why: AXFR ends old cached answers.
+                    // From: Issue #1683 | PR #2017
+                    let mut to = Vec::new();
+                    for which in [
+                        crate::recursor_conf::Which::Http,
+                        crate::recursor_conf::Which::Https,
+                    ] {
+                        let port = s.uint(&which.key("PORT"))?;
+                        to.extend(
+                            s.list(&which.key("LISTEN"))
+                                .iter()
+                                .map(|ip| format!("{ip}:{port}")),
+                        );
+                    }
+                    to.join(",")
                 },
             ),
+            ("secondary-do-renotify", yes(!primary)),
             (
                 "allow-notify-from",
                 if primary {
@@ -2474,9 +2490,7 @@ pub mod pdns_conf {
         // What: NOTIFY only to also-notify, not to NS.
         // Why: port 53 of an NS host is a recursor.
         // From: Issue #1683
-        if primary {
-            out += "only-notify=\n";
-        }
+        out += "only-notify=\n";
         Ok(out)
     }
 }
@@ -2722,7 +2736,8 @@ pub mod recursor_conf {
             s.text("PDNS_AUTH_ADDRESS")?,
             s.uint("PDNS_AUTH_PORT")?
         );
-        let local: String = crate::dns::managed_zones(s)?
+        let zones = crate::dns::managed_zones(s)?;
+        let local: String = zones
             .iter()
             .map(|z| {
                 format!(
@@ -2777,6 +2792,18 @@ pub mod recursor_conf {
             &s.text("LOOPBACK_BIND_IP")?,
         )?;
         y += &format!("  proxy_protocol_from:\n{}", yaml_list(&[proxy], "    ")?);
+        // What: NOTIFY from the own pdns wipes a zone.
+        // Why: a secondary has no ui to flush after AXFR.
+        // From: Issue #1683 | PR #2017
+        if s.text("DNS_REPLICATION_ROLE")? == "secondary" {
+            let names: Vec<String> = zones
+                .iter()
+                .map(|z| z.trim_end_matches('.').to_string())
+                .collect();
+            y += &format!("  allow_notify_for:\n{}", yaml_list(&names, "    ")?);
+            let from = [s.text("LOOPBACK_BIND_IP")?];
+            y += &format!("  allow_notify_from:\n{}", yaml_list(&from, "    ")?);
+        }
         y += &format!(
             "recursor:\n  serve_rfc1918: {}\n",
             s.flag("DNS_SERVE_RFC1918")?
@@ -3149,7 +3176,9 @@ pub mod kea_conf {
                 let fit: Vec<Value> = hosts
                     .iter()
                     .filter(|h| {
-                        let ok = h["ip-address"].as_str().is_none_or(|ip| in_subnet(ip, &net));
+                        let ok = h["ip-address"]
+                            .as_str()
+                            .is_none_or(|ip| in_subnet(ip, &net));
                         if !ok {
                             eprintln!("kea: reservation {h} is outside {net}; dropped");
                         }
