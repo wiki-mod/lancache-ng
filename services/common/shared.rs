@@ -844,6 +844,16 @@ pub mod dns {
     // Why: LAN, local.LAN and optional reverse zones.
     // From: Issue #1683 | PR #1858
     pub fn managed_zones(s: &Settings) -> Result<Vec<String>, String> {
+        // What: a secondary serves the primary's zones.
+        // Why: its DHCP_DOMAIN is only the SOT default.
+        // From: Issue #1683 | PR #2017
+        if s.text("DNS_REPLICATION_ROLE").is_ok_and(|r| r == "secondary") {
+            return Ok(s
+                .list("DNS_SECONDARY_ZONES")
+                .iter()
+                .map(|z| canonical_zone(z))
+                .collect());
+        }
         let lan = canonical_zone(&s.text("DHCP_DOMAIN")?);
         let mut zones = vec![format!("local.{lan}"), lan];
         if s.flag("DNS_SERVE_RFC1918")? {
