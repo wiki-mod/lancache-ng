@@ -2090,7 +2090,7 @@ stack_env_context() {
 # From: Issue #1683 | PR #1858
 resolve_stack_dir_checked() {
     local dir
-    dir=$(resolve_stack_dir "$(realpath -m "$1")") || exit $?
+    dir=$(resolve_stack_dir "$1") || exit $?
     [[ -f "$dir/docker-compose.yml" ]] || die_no_stack_found "$dir"
     printf '%s\n' "$dir"
 }
@@ -2382,22 +2382,24 @@ migrate_legacy_ca() {
     print_ok "CA moved from $src to $dest"
 }
 
-# What: a checkout root resolves to deploy/prod
-# Why: commands default to the checkout root
-# From: Issue #1683 | PR #1858
+# What: install-dir argument as the real deploy/prod dir
+# Why: current is a link; compose labels need one path
+# From: Issue #1683 | PR #2017
 resolve_stack_dir() {
-    local dir="$1"
+    local dir out
     local rel="${PROD_COMPOSE#"$SCRIPT_DIR/"}"
+    dir=$(realpath -m -- "$1") || die "Cannot resolve the path $1 (exit $?)."
     # What: <root>/current wins over an old root checkout
     # Why: after a move, the old code must not run again
     # From: Issue #1683 | PR #1858
     if [[ ! -f "$dir/docker-compose.yml" && -f "$dir/current/$rel" ]]; then
-        printf '%s\n' "$dir/current/${rel%/*}"
+        out="$dir/current/${rel%/*}"
     elif [[ ! -f "$dir/docker-compose.yml" && -f "$dir/$rel" ]]; then
-        printf '%s\n' "$dir/${rel%/*}"
+        out="$dir/${rel%/*}"
     else
-        printf '%s\n' "$dir"
+        out="$dir"
     fi
+    realpath -m -- "$out" || die "Cannot resolve the path $out (exit $?)."
 }
 
 # What: true for a quickstart copy outside deploy/prod
@@ -5292,7 +5294,7 @@ cmd_restore() (
     archive="${1:-}"
     ensure_default_install_dir
     install_dir="${2:-$DEFAULT_INSTALL_DIR}"
-    install_dir=$(resolve_stack_dir "$(realpath -m "$install_dir")") || exit $?
+    install_dir=$(resolve_stack_dir "$install_dir") || exit $?
     [[ -n "$archive" ]] || die "Usage: $0 restore <backup archive (.tar.zst, .tar.bz2 or .tar.gz)> [install-dir]"
     [[ -f "$archive" ]] || die "Backup archive not found: $archive"
     # What: requires openssl for the convergence step
@@ -6692,7 +6694,7 @@ perform_stack_update_flow() {
 cmd_update() {
     ensure_default_install_dir
     local install_dir="${1:-$DEFAULT_INSTALL_DIR}"
-    install_dir=$(resolve_stack_dir "$(realpath -m "$install_dir")") || exit $?
+    install_dir=$(resolve_stack_dir "$install_dir") || exit $?
     # What: a lone setup.sh first fetches its channel code
     # Why: without it a v0.3 quickstart is not migrated
     # From: Issue #1683
@@ -6855,7 +6857,7 @@ cmd_auto_update() {
     local env_file auto_update_enabled current_channel current_tag deployed_tag decision
     local deployed_refs current_refs pinned
 
-    install_dir=$(resolve_stack_dir "$(realpath -m "$install_dir")") || exit $?
+    install_dir=$(resolve_stack_dir "$install_dir") || exit $?
     [[ -f "$install_dir/docker-compose.yml" ]] \
         || die_no_stack_found "$install_dir"
     env_file=$(runtime_env_file_for_install_dir "$install_dir")
@@ -7003,7 +7005,7 @@ cmd_converge_reconcile() {
     local ui_auto_update current_auto_update
     local ui_cache_max_gb current_cache_max_gb
 
-    install_dir=$(resolve_stack_dir "$(realpath -m "$install_dir")") || exit $?
+    install_dir=$(resolve_stack_dir "$install_dir") || exit $?
     # What: a tick before the first install does nothing
     # Why: no compose file or .env exists to converge
     # From: Issue #1683 | PR #1858
@@ -7065,7 +7067,7 @@ cmd_debug() {
     ensure_default_install_dir
     local install_dir="${1:-$DEFAULT_INSTALL_DIR}"
     local env_file
-    install_dir=$(resolve_stack_dir "$(realpath -m "$install_dir")") || exit $?
+    install_dir=$(resolve_stack_dir "$install_dir") || exit $?
     [[ -f "$install_dir/docker-compose.yml" ]] \
         || die_no_stack_found "$install_dir"
 
@@ -7516,7 +7518,7 @@ cmd_reset_to_last_known_good_config() {
     # What: normalizes install-dir to an absolute path
     # Why: a relative path would double env_file's path
     # From: Issue #1683 | PR #1858
-    install_dir=$(resolve_stack_dir "$(realpath -m "$install_dir")") || exit $?
+    install_dir=$(resolve_stack_dir "$install_dir") || exit $?
 
     # What: positional[2] is zone (DNS) or snapshot (Kea)
     # Why: DNS snapshots are per zone; Kea has one file
@@ -7913,7 +7915,7 @@ cmd_reset_sign_in() {
         esac
         shift
     done
-    install_dir=$(resolve_stack_dir "$(realpath -m "$install_dir")") || exit $?
+    install_dir=$(resolve_stack_dir "$install_dir") || exit $?
     [[ "$(id -u)" = "0" ]] \
         || die "This script must be run as root (sudo ./setup.sh reset-sign-in [install-dir])."
     # What: nothing changes without an explicit yes
@@ -7939,7 +7941,7 @@ cmd_reset_sign_in() {
 cmd_update_ip() {
     ensure_default_install_dir
     local install_dir="${1:-$DEFAULT_INSTALL_DIR}"
-    install_dir=$(resolve_stack_dir "$(realpath -m "$install_dir")") || exit $?
+    install_dir=$(resolve_stack_dir "$install_dir") || exit $?
 
     printf "\n"
     printf '%s╔═══════════════════════════════════════╗%s\n' "${BOLD}" "${RESET}"
@@ -8138,7 +8140,7 @@ dns_upstream_is_live() {
 cmd_configure_upstream_dns() {
     ensure_default_install_dir
     local install_dir="${1:-$DEFAULT_INSTALL_DIR}"
-    install_dir=$(resolve_stack_dir "$(realpath -m "$install_dir")") || exit $?
+    install_dir=$(resolve_stack_dir "$install_dir") || exit $?
 
     printf "\n"
     printf '%s╔═══════════════════════════════════════╗%s\n' "${BOLD}" "${RESET}"
