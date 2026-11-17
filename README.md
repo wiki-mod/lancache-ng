@@ -691,7 +691,9 @@ has two switches, both off by default:
 The primary checks every secondary every `DNS_SECONDARY_CHECK_SECONDS`
 (4 h), and every `DNS_SECONDARY_RECHECK_SECONDS` (1 h) while one fails. A
 check compares the zone serials through the secondary's pdns-API and asks
-it for an AXFR of a zone that lags. A secondary of an older version answers
+it for an AXFR of a zone that lags. A zone the secondary holds with a higher
+serial, as after a restore of the primary, first gets a serial above it on
+the primary, so the secondary takes the restored zone. A secondary of an older version answers
 port 53 with its recursor, not `aa`; it keeps syncing but is never entered.
 
 A secondary that was taken out, by hand or by the second switch, comes back
