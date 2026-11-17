@@ -1649,10 +1649,19 @@ async fn check_peer(
             zone,
         };
         let (rank, word) = zone_state(&z);
-        // What: unknown and behind are pulled; missing not.
+        // What: ahead: our serial goes past theirs first.
+        // Why: a restore sets ours back; AXFR skips lower.
+        // From: Issue #1683 | PR #2017
+        if let (1, Some(theirs)) = (rank, z.secondary)
+            && let Err(e) = raise_serial(s, &z.zone, theirs).await
+        {
+            eprintln!("ui: secondary {address}: {} ahead, raise: {e}", z.zone);
+            continue;
+        }
+        // What: ahead, unknown, behind pulled; missing not.
         // Why: a missing zone has no copy to refresh.
         // From: Issue #1683
-        if rank == 2 || rank == 3 {
+        if (1..=3).contains(&rank) {
             match api.axfr_retrieve(&z.zone).await {
                 Ok(()) => eprintln!("ui: secondary {address}: {} {word}, AXFR asked", z.zone),
                 Err(e) => eprintln!("ui: secondary {address}: {} {word}, AXFR: {e}", z.zone),
@@ -3453,25 +3462,54 @@ async fn ensure_soa_names(
     let (Some(mname), Some(rname)) = (names.next(), names.next()) else {
         return Err(format!("PDNS_DEFAULT_SOA {soa:?} names no mname and rname"));
     };
+    let Some((ttl, mut f)) = soa_fields(api, zone).await? else {
+        return Ok(());
+    };
+    if f[0] == mname && f[1] == rname {
+        return Ok(());
+    }
+    f[0] = mname;
+    f[1] = rname;
+    api.set_rrset(zone, zone, "SOA", ttl, &[f.join(" ")]).await
+}
+
+// What: our SOA serial set past a secondary's.
+// Why: a restore sets it back; AXFR wants a higher one.
+// From: Issue #1683 | PR #2017
+async fn raise_serial(s: &Settings, zone: &str, past: u32) -> Result<(), String> {
+    let api = pdns_api(s)?;
+    let Some((ttl, mut f)) = soa_fields(&api, zone).await? else {
+        return Err(format!("{zone} has no SOA"));
+    };
+    f[2] = past.wrapping_add(1).to_string();
+    api.set_rrset(zone, zone, "SOA", ttl, &[f.join(" ")]).await
+}
+
+// What: ttl and the seven fields of a zone's SOA.
+// Why: name sync and serial lift edit one record.
+// From: Issue #1683 | PR #2017
+async fn soa_fields(
+    api: &lancache_ng::pdns::Api,
+    zone: &str,
+) -> Result<Option<(u32, Vec<String>)>, String> {
     let id = lancache_ng::pdns::zone_id(zone);
     let rrsets = api.rrsets(zone).await?;
     let Some(r) = rrsets
         .iter()
         .find(|r| r["name"] == id.as_str() && r["type"] == "SOA")
     else {
-        return Ok(());
+        return Ok(None);
     };
     let have = r["records"][0]["content"].as_str().unwrap_or_default();
-    let parts: Vec<&str> = have.split_whitespace().collect();
-    if parts.len() != 7 || (parts[0] == mname && parts[1] == rname) {
-        return Ok(());
+    let f: Vec<String> = have.split_whitespace().map(str::to_string).collect();
+    if f.len() != 7 {
+        return Err(format!("SOA of {zone} is not 7 fields: {have:?}"));
     }
     let ttl = r["ttl"]
         .as_u64()
         .and_then(|t| u32::try_from(t).ok())
         .ok_or_else(|| format!("SOA of {zone} has no ttl"))?;
-    let content = format!("{mname} {rname} {}", parts[2..].join(" "));
-    api.set_rrset(zone, zone, "SOA", ttl, &[content]).await
+    Ok(Some((ttl, f)))
 }
 
 // What: writes one rrset only when it differs.
