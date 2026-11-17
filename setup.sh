@@ -8014,6 +8014,12 @@ cmd_update_ip() {
 
     confirm "Apply changes? [y/N]" "N" || { printf "\n  Cancelled.\n\n"; exit 0; }
 
+    # What: a new IP not on this host is offered for add
+    # Why: compose binds it; a missing one fails the start
+    # From: Issue #1683 | PR #2017
+    ensure_host_ipv4 "$new_ip_http" "$current_ip_http"
+    ensure_host_ipv4 "$new_ip_https" "$current_ip_http"
+
     # What: the same baseline and gate as ./setup.sh update
     # Why: new IPs that fail the gate must not stay active
     # From: Issue #1683 | PR #1858
