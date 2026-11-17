@@ -9931,10 +9931,12 @@ fi
 printf '%s└──────────────────────────────────────────────┘%s\n\n' "${BOLD}" "${RESET}"
 
 ask "Start now? [Y/n]" "Y"
+start_now=1
+[[ "${REPLY,,}" != "n" ]] || start_now=0
 # What: skips the real start when introspection mode is on
 # Why: the walk never reaches pull or a host service
 # From: Issue #1683 | PR #1858
-[[ "$WIZARD_INTROSPECT_MODE" != "1" && "${REPLY,,}" != "n" ]] \
+[[ "$WIZARD_INTROSPECT_MODE" != "1" ]] \
     || { printf "\n  Start later with: %s compose %s up -d\n\n" "$SCRIPT_DIR/setup.sh" "$INSTALL_DIR"; exit 0; }
 
 # What: step 13: pulls images before enabling any unit
@@ -9963,14 +9965,28 @@ if [[ "$HOST_SERVICES_AVAILABLE" = "1" ]]; then
     host_unit_action "$CONVERGE_TIMER_UNIT" enable
     print_ok "$STACK_UNIT enabled for boot"
     print_ok "$CONVERGE_TIMER_UNIT enabled for boot"
+    [[ "$AUTO_UPDATE_ENABLED" != "1" ]] || host_unit_action "$AUTO_UPDATE_TIMER_UNIT" enable
+    # What: "Start now? n" stops here, units on for boot
+    # Why: the hint names the starts the yes path runs
+    # From: Issue #1683 | PR #2017
+    if [[ "$start_now" = "0" ]]; then
+        printf "\n  Not started. Start later with:\n"
+        printf '    %s\n' "$(host_unit_command "$STACK_UNIT" start)" "$(host_unit_command "$CONVERGE_TIMER_UNIT" start)"
+        [[ "$AUTO_UPDATE_ENABLED" != "1" ]] || printf '    %s\n' "$(host_unit_command "$AUTO_UPDATE_TIMER_UNIT" start)"
+        printf "\n"
+        exit 0
+    fi
     host_unit_action "$STACK_UNIT" start
     host_unit_action "$CONVERGE_TIMER_UNIT" start
     if [[ "$AUTO_UPDATE_ENABLED" = "1" ]]; then
-        host_unit_action "$AUTO_UPDATE_TIMER_UNIT" enable
         host_unit_action "$AUTO_UPDATE_TIMER_UNIT" start
         print_ok "$AUTO_UPDATE_TIMER_UNIT enabled (scheduled automatic updates)"
     fi
 else
+    if [[ "$start_now" = "0" ]]; then
+        printf "\n  Not started. Start later with: %s compose %s up -d\n\n" "$SCRIPT_DIR/setup.sh" "$INSTALL_DIR"
+        exit 0
+    fi
     stack_compose "$INSTALL_DIR" "$ENV_LOCAL" up -d || die "Failed to start the stack in $INSTALL_DIR (exit $?)."
 fi
 print_ok "Stack started"
