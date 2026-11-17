@@ -4812,11 +4812,15 @@ pub mod rrd {
         Ok(Path::new(&dir).join(format!("{}.rrd", g.name)))
     }
 
+    // What: runs a stats tool; an error names only the tool.
+    // Why: snmpget args hold the SNMP community secret.
+    // From: Issue #1683 | PR #2017
     fn run(cmd: &mut Command) -> Result<Vec<u8>, String> {
-        let out = cmd.output().map_err(|e| format!("{cmd:?}: {e}"))?;
+        let tool = cmd.get_program().to_string_lossy().into_owned();
+        let out = cmd.output().map_err(|e| format!("{tool}: {e}"))?;
         if !out.status.success() {
             let why = String::from_utf8_lossy(&out.stderr);
-            return Err(format!("{cmd:?}: {}", why.trim()));
+            return Err(format!("{tool}: {}", why.trim()));
         }
         Ok(out.stdout)
     }
