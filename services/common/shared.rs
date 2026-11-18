@@ -4160,6 +4160,20 @@ pub mod render {
         std::fs::write(stamp, print).map_err(|e| format!("{}: {e}", stamp.display()))
     }
 
+    // What: folder of the stack CA from SOT keys.
+    // Why: the ui issues the CA; cachehamster trusts it.
+    // From: Issue #871 | PR #2017
+    pub fn ca_dir(s: &Settings) -> Result<PathBuf, String> {
+        Ok(PathBuf::from(s.text("NGINX_DIR")?).join(s.text("NGINX_SUBDIR_CA")?))
+    }
+
+    // What: the stack CA certificate file.
+    // Why: one path for the issuer and every reader.
+    // From: Issue #871 | PR #2017
+    pub fn ca_cert(s: &Settings) -> Result<PathBuf, String> {
+        Ok(ca_dir(s)?.join(s.text("CA_CERT_FILE")?))
+    }
+
     // What: make the CA and every missing leaf cert.
     // Why: HTTPS mode needs one cert per map name.
     // From: Issue #1683 | PR #1980
@@ -4168,12 +4182,9 @@ pub mod render {
             return Ok(0);
         }
         let root = PathBuf::from(s.text("NGINX_DIR")?);
-        let ca = root.join(s.text("NGINX_SUBDIR_CA")?);
+        let ca = ca_dir(s)?;
         let dir = root.join(s.text("NGINX_SUBDIR_CERTS")?);
-        let (ca_key, ca_crt) = (
-            ca.join(s.text("CA_KEY_FILE")?),
-            ca.join(s.text("CA_CERT_FILE")?),
-        );
+        let (ca_key, ca_crt) = (ca.join(s.text("CA_KEY_FILE")?), ca_cert(s)?);
         let serial = ca.join(s.text("CA_SERIAL_FILE")?);
         let gid = s.text("LANCACHE_RUNTIME_GID")?;
         let gid = Some(gid.parse::<u32>().map_err(|e| format!("gid {gid}: {e}"))?);
