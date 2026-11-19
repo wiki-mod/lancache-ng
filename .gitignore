@@ -23,6 +23,11 @@ data/
 deploy/prod/.env.local
 config/prod/*.local.env
 
+# What: flock file of the stack .env (setup.sh and ui)
+# Why: runtime state, never part of the checkout
+# From: Issue #1683 | PR #2017
+deploy/prod/.env.local.lock
+
 # What: local Claude Code settings
 # Why: per-user tool state, not project content
 .claude/
