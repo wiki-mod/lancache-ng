@@ -7046,30 +7046,33 @@ ui_data_volume() {
     printf '%s\n' "$volume"
 }
 
-# What: merges the retired ui settings file into the .env
-# Why: one file; the ui values were newer, so they win
+# What: merges ui values the .env does not have yet
+# Why: one file; the old ui file stays for a rollback
 # From: Issue #1683 | PR #2017
 merge_retired_ui_settings() {
-    local install_dir="$1" env_file="$2" mode="$3" volume name raw line key value count=0
+    local install_dir="$1" env_file="$2" mode="$3" volume name raw seen line key value count=0
     volume=$(ui_data_volume "$install_dir" "$env_file") || exit $?
     [[ -n "$volume" ]] || return 0
     require_helper_image
     name=$(prod_env_default UI_SETTINGS_FILE_RETIRED) || exit $?
     name="${name##*/}"
-    # What: the file name goes in as $1, not as code
-    # Why: a value inside sh -c text would run as shell
-    # From: Issue #1683 | PR #1858
+    # What: the file and its copy from the last merge
+    # Why: only lines the old ui changed since are new
+    # From: Issue #1683 | PR #2017
     raw=$(docker run --rm -v "${volume}:/volume:ro" "$LANCACHE_HELPER_IMAGE" \
         sh -c 'if [ -e "/volume/$1" ]; then cat "/volume/$1"; fi' sh "$name") \
         || die "Failed to read the old Admin UI settings from Docker volume $volume (exit $?)."
     [[ -n "$raw" ]] || return 0
+    seen=$(docker run --rm -v "${volume}:/volume:ro" "$LANCACHE_HELPER_IMAGE" \
+        sh -c 'if [ -e "/volume/$1.merged" ]; then cat "/volume/$1.merged"; fi' sh "$name") \
+        || die "Failed to read the last merged Admin UI settings from Docker volume $volume (exit $?)."
     # What: install keeps its answers; update merges
     # Why: "Overwrite? y" means the wizard answers count
     # From: Issue #1683 | PR #2017
     if [[ "$mode" = merge ]]; then
-        print_step "Merging the Admin UI settings into $env_file"
         while IFS= read -r line; do
             [[ "$line" == *=* ]] || continue
+            list_has_line "$line" "$seen" && continue
             key="${line%%=*}"
             value="${line#*=}"
             # What: old ui key names and the raw PHC hash
@@ -7093,12 +7096,14 @@ merge_retired_ui_settings() {
             set_env_key "$key" "$value" "$env_file"
             count=$((count + 1))
         done <<< "$raw"
-        print_ok "Merged $count Admin UI setting(s) into $env_file"
+        [[ "$count" -eq 0 ]] || print_ok "Merged $count Admin UI setting(s) from $name into $env_file"
     fi
+    # What: the copy marks this state as merged
+    # Why: the next run merges only later changes
+    # From: Issue #1683 | PR #2017
     docker run --rm -v "${volume}:/volume" "$LANCACHE_HELPER_IMAGE" \
-        sh -c 'mv "/volume/$1" "/volume/$1.merged"' sh "$name" \
-        || die "Failed to retire the old Admin UI settings file in $volume (exit $?)."
-    print_ok "Retired the old Admin UI settings file ($name.merged in $volume)"
+        sh -c 'cmp -s "/volume/$1" "/volume/$1.merged" || cp -p "/volume/$1" "/volume/$1.merged"' sh "$name" \
+        || die "Failed to mark the old Admin UI settings as merged in $volume (exit $?)."
 }
 
 # What: syncs auto-update timer with AUTO_UPDATE_ENABLED
