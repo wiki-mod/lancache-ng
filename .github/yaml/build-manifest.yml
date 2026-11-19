@@ -80,11 +80,11 @@ services:
       - syslog-ng=/usr/sbin/syslog-ng,-F,-f,@SYSLOG_CONF_FILE@
       - chronyd=/usr/sbin/chronyd,-d,-f,@CHRONY_CONF_FILE@
       - snmpd=/usr/sbin/snmpd,-f,-C,-c,@SNMPD_CONF_FILE@
-    # What: NTP_ENABLED read from the ui file; 0 = idle.
+    # What: NTP_ENABLED read from the stack .env; 0 = idle.
     # Why: chronyd idles at 0 and logs no ERROR line.
-    # From: Issue #1683 | PR #1980
+    # From: Issue #1683 | PR #2017
     process_pre:
-      - 'chronyd=x="${NTP_ENABLED:-1}"; f=@UI_SETTINGS_FILE@; v=""; if [ -r "$f" ]; then v="$(sed -n "s/^NTP_ENABLED=//p" "$f")"; fi; if [ -n "$v" ]; then x="${v##*[[:space:]]}"; fi; if [ "$x" = 0 -o "$x" = false ]; then einfo "NTP_ENABLED=$x: chronyd off"; command=/bin/sleep; command_args=2147483647; return 0; fi; chown chrony:chrony @NTP_STATE_DIR@'
+      - 'chronyd=x="${NTP_ENABLED:-1}"; f=@STACK_ENV_FILE@; v=""; if [ -r "$f" ]; then v="$(sed -n "s/^NTP_ENABLED=//p" "$f")"; fi; if [ -n "$v" ]; then x="${v##*[[:space:]]}"; fi; if [ "$x" = 0 -o "$x" = false ]; then einfo "NTP_ENABLED=$x: chronyd off"; command=/bin/sleep; command_args=2147483647; return 0; fi; chown chrony:chrony @NTP_STATE_DIR@'
     # What: accounts and dirs ci.sh image-setup creates.
     # Why: no RUN logic in the Dockerfile; @KEY@ = default.
     # From: Issue #1683 | PR #1912
@@ -623,7 +623,15 @@ runtime:
     - LANCACHE_SHARED_SECRET_DIR=/var/lib/lancache-secrets
     - UI_DATA_DIR=/data
     - DESIRED_STATE_FILE=@UI_DATA_DIR@/desired-state.json
-    - UI_SETTINGS_FILE=@UI_DATA_DIR@/lancache-ui-settings.env
+    # What: dir and file of the stack .env in the containers
+    # Why: one file for setup.sh, Compose and the ui
+    # From: Issue #1683 | PR #2017
+    - STACK_ENV_DIR=/stack
+    - STACK_ENV_FILE=@STACK_ENV_DIR@/.env.local
+    # What: the old ui settings file; update merges it once
+    # Why: its values move into the stack .env, then it goes
+    # From: Issue #1683 | PR #2017
+    - UI_SETTINGS_FILE_RETIRED=@UI_DATA_DIR@/lancache-ui-settings.env
     - UI_SESSION_SECRET_FILE=@UI_DATA_DIR@/lancache-ui-session.secret
     - SECONDARY_REGISTRATION_TOKEN_FILE=@UI_DATA_DIR@/lancache-secondary-registration.token
     - UI_DATABASE_FILE=@UI_DATA_DIR@/lancache-ui.db
@@ -763,6 +771,10 @@ runtime:
     # Why: rc-service returns before dockerd listens.
     # From: Issue #1683 | PR #2017
     - SETUP_DOCKER_WAIT_SECONDS=60
+    # What: max wait of setup.sh for the stack .env lock.
+    # Why: the ui holds it only while it writes one change.
+    # From: Issue #1683 | PR #2017
+    - ENV_LOCK_WAIT_SECONDS=30
     # What: repo files a secondary keeps in its compose dir.
     # Why: its compose mounts them from its dir.
     # From: Issue #1683 | PR #1858
@@ -1243,14 +1255,14 @@ runtime:
     - UI_LISTEN=0.0.0.0
     - UI_LOG_LINES=500
     - UI_LOG_TAIL_CHUNK=65536
-    - UI_PASSWORD_HASH=
+    - UI_AUTH_PASSWORD_HASH=
     - UI_PASSWORD_MIN_LENGTH=12
     - UI_PORT=@UI_LISTEN_PORT@
     - UI_PUBLIC_URL=
     - UI_RECENT_REQUESTS=50
     - UI_SERVICES=dns:pdns dns:dns-http dns:dns-https dns:dnsdist dns:snmpd services:syslog-ng services:chronyd services:snmpd services:lancache-cachehamster dhcp:kea-dhcp4 dhcp:kea-ctrl-agent dhcp:kea-dhcp-ddns dhcp:dnsmasq proxy:nginx proxy:snmpd ui:snmpd
     - UI_STATUS_REFRESH=10
-    - UI_USER=admin
+    - UI_AUTH_USER=admin
     - UPSTREAM_DHCP_IP=
     - WATCHDOG_ALARM_FILE=@STATUS_DIR@/alarms.json
     - WATCHDOG_ALARM_FILE_MODE=0644
@@ -1544,14 +1556,14 @@ runtime:
     - UI_LISTEN=text;;;restart;ui
     - UI_LOG_LINES=uint;10;100000;live;ui
     - UI_LOG_TAIL_CHUNK=uint;1024;10485760;live;ui
-    - UI_PASSWORD_HASH=secret?;;;live;ui
+    - UI_AUTH_PASSWORD_HASH=secret?;;;live;ui
     - UI_PASSWORD_MIN_LENGTH=uint;8;128;live;ui
     - UI_PORT=uint;1;65535;recreate;ui
     - UI_PUBLIC_URL=text?;;;live;ui
     - UI_RECENT_REQUESTS=uint;1;1000;live;ui
     - UI_SERVICES=list;;;live;ui
     - UI_STATUS_REFRESH=uint;1;3600;live;ui
-    - UI_USER=text;;;live;ui
+    - UI_AUTH_USER=text;;;live;ui
     - UPSTREAM_DHCP_IP=text?;;;reload;dhcp
     - WATCHDOG_ALARM_FILE=path;;;live;services
     - WATCHDOG_ALARM_FILE_MODE=text;;;live;services
@@ -1626,7 +1638,7 @@ runtime:
   # What: defaults compose interpolates as SOT_<KEY>.
   # Why: setup.sh and ci.sh export them; no clash with .env.
   # From: Issue #1683 | PR #1912
-  compose_keys: LANCACHE_LOG_PORT RUN_DIR SUPERVISE_RUN_DIR LANCACHE_SHARED_SECRET_DIR UI_DATA_DIR STATUS_DIR CACHE_DIR SYSLOG_LOG_ROOT RETENTION_STATE_DIR NTP_STATE_DIR CACHEHAMSTER_DATA_DIR DOCKER_SOCKET LOCALTIME_FILE CDN_DOMAINS_FILE PDNS_DATA_DIR DNS_STATE_DIR DNS_SNAPSHOT_MOUNT DHCP_SNAPSHOT_MOUNT PROXY_SNAPSHOT_MOUNT KEA_DATA_DIR UI_LISTEN_PORT DNS_PORT DNS_HTTPS_PORT PDNS_AUTH_PORT PDNS_AUTH_API_PORT NTP_PORT PROXY_HTTP_PORT PROXY_HTTPS_PORT NGINX_PASSTHROUGH_PORT NGINX_DIR NGINX_SUBDIR_CA NGINX_SUBDIR_CERTS NGINX_CACHE_DIR NGINX_PSL_FILE PDNS_LUA_DNS_SCRIPT TEMPLATE_DIR STATIC_DIR LANG_DIR LOOPBACK_BIND_IP DHCP_API_HOST DNS_REPLICATION_ROLE_SECONDARY SECONDARY_RUNTIME_GID SECONDARY_SHARED_SECRET_DIR CONTAINER_NAME_SERVICES CONTAINER_NAME_PROXY CONTAINER_NAME_DNS CONTAINER_NAME_DHCP CONTAINER_NAME_UI HEALTHCHECK_INTERVAL HEALTHCHECK_TIMEOUT HEALTHCHECK_RETRIES HEALTHCHECK_START_PERIOD PROXY_HEALTH_PATH SETUP_DNS_PROBE_NAME CONFIG_DIR NGINX_CONF_DIR NGINX_TEMPLATE_DIR UI_SETTINGS_FILE HOST_NET_DEV_FILE HOST_NET_DEV_SOURCE HOST_NET_STAT_SOURCE HOST_NET_STAT_DIR HOST_MACHINE_ID_FILE
+  compose_keys: LANCACHE_LOG_PORT RUN_DIR SUPERVISE_RUN_DIR LANCACHE_SHARED_SECRET_DIR UI_DATA_DIR STATUS_DIR CACHE_DIR SYSLOG_LOG_ROOT RETENTION_STATE_DIR NTP_STATE_DIR CACHEHAMSTER_DATA_DIR DOCKER_SOCKET LOCALTIME_FILE CDN_DOMAINS_FILE PDNS_DATA_DIR DNS_STATE_DIR DNS_SNAPSHOT_MOUNT DHCP_SNAPSHOT_MOUNT PROXY_SNAPSHOT_MOUNT KEA_DATA_DIR UI_LISTEN_PORT DNS_PORT DNS_HTTPS_PORT PDNS_AUTH_PORT PDNS_AUTH_API_PORT NTP_PORT PROXY_HTTP_PORT PROXY_HTTPS_PORT NGINX_PASSTHROUGH_PORT NGINX_DIR NGINX_SUBDIR_CA NGINX_SUBDIR_CERTS NGINX_CACHE_DIR NGINX_PSL_FILE PDNS_LUA_DNS_SCRIPT TEMPLATE_DIR STATIC_DIR LANG_DIR LOOPBACK_BIND_IP DHCP_API_HOST DNS_REPLICATION_ROLE_SECONDARY SECONDARY_RUNTIME_GID SECONDARY_SHARED_SECRET_DIR CONTAINER_NAME_SERVICES CONTAINER_NAME_PROXY CONTAINER_NAME_DNS CONTAINER_NAME_DHCP CONTAINER_NAME_UI HEALTHCHECK_INTERVAL HEALTHCHECK_TIMEOUT HEALTHCHECK_RETRIES HEALTHCHECK_START_PERIOD PROXY_HEALTH_PATH SETUP_DNS_PROBE_NAME CONFIG_DIR NGINX_CONF_DIR NGINX_TEMPLATE_DIR STACK_ENV_DIR STACK_ENV_FILE HOST_NET_DEV_FILE HOST_NET_DEV_SOURCE HOST_NET_STAT_SOURCE HOST_NET_STAT_DIR HOST_MACHINE_ID_FILE
   # What: managed secrets as "KEY generator owner".
   # Why: setup.sh and ci.sh filter one list.
   # From: Issue #1683 | PR #1912
