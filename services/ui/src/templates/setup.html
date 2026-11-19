@@ -136,7 +136,7 @@
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <div>
         <label class="block text-xs text-slate-400 mb-1" for="ui_user">{{ t.user_name }}</label>
-        <input type="text" id="ui_user" name="user" required value="{{ v.UI_USER }}"
+        <input type="text" id="ui_user" name="user" required value="{{ v.UI_AUTH_USER }}"
                autocomplete="username" style="width:100%;">
       </div>
       {% if login_enabled %}<div>
