@@ -650,8 +650,9 @@ With real secondaries on a real stack:
 | --- | --- |
 | Reachability | `curl -u <user>:<pass> http://<ui host>:<port>/` succeeds. Without `UI_AUTH_USER` and `UI_AUTH_PASSWORD` and without `ALLOW_INSECURE_UI=true` the UI fails closed and restart-loops with `Admin-UI authentication is required` (AG-SEC-001); that is expected |
 | Container health on the dashboard | stop a monitored container and wait one watchdog round; its entry turns unhealthy (`GET /api/status`) and healthy again after a restart; a stale or missing status renders as stale or unavailable, never as the last known color |
-| Cache resize | change `CACHE_MAX_GB` on the Setup page and wait for the `lancache-converge.timer` run; `setup.sh converge-reconcile` writes the value into the runtime env and the proxy is recreated. Pass: `docker exec <proxy container> nginx -T` shows the new `max_size=` on `proxy_cache_path`; an HTTP `200` or `303` from the form is not the proof |
+| Cache resize | change `CACHE_MAX_GB` on the Setup page; the ui writes it into `.env.local`, and the next `lancache-converge.timer` run recreates the proxy, whose environment changed. Pass: `docker exec <proxy container> nginx -T` shows the new `max_size=` on `proxy_cache_path`; an HTTP `200` or `303` from the form is not the proof |
 | Self-restart | `POST /api/restart-ui` (restart button) ends the UI process; compose `restart: always` starts it again. Pass: `docker inspect --format '{{.State.StartedAt}}' "$(docker compose -f deploy/prod/docker-compose.yml ps -q ui)"` is later and the page reloads |
+| One settings file | a change on the Setup page changes only its own line in `.env.local`; comments and other keys stay. After `setup.sh install` with "Overwrite? y" the wizard answers apply. `setup.sh update` of an install that still has `lancache-ui-settings.env` moves its values into `.env.local` (`UI_USER` and `UI_PASSWORD_HASH` as `UI_AUTH_USER` and `UI_AUTH_PASSWORD_HASH`) and renames the file to `.merged` |
 | Start and stop of a container | the beam bar posts `{"state": "running"}` or `{"state": "stopped"}` to `POST /api/container/{service}`. Pass: a stopped service is listed as stopped by the user, the others stay healthy, Start brings it back |
 
 ### 10.7 Watchdog
@@ -821,6 +822,9 @@ before (or has no baseline) and is unhealthy now.
   (`result-gate`).
 - The `setup.sh` DHCP activation preflight (`run_kea_dhcp_activation_preflight`)
   has no CI check.
+- Two writers of the one settings file (`config::store`, the `setup.sh` env
+  writers under `with_env_lock`) and the merge of the old ui settings file:
+  section 10.6, row "One settings file", is live only.
 - `setup.sh` refusing an optional DHCP key that the render fills when empty
   (`DHCP_SUBNET_START`, `DHCP_RELAY_LOCAL_ADDR` in `migrate_env_for_update`
   and the wizard): section 10.3, row "Empty anchor", is live only.
