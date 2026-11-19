@@ -316,7 +316,7 @@ Settings of the `dnsmasq-proxy` render (`dnsmasq_conf`,
 
 | Setting | Rendered as | Note |
 | --- | --- | --- |
-| `DHCP_SUBNET_START` | `dhcp-range=<value>,proxy` | required; the network base address of the served LAN |
+| `DHCP_SUBNET_START` | `dhcp-range=<value>,proxy` | optional; the network base address of the served LAN, ending in `.0`; empty renders `dhcp-range=<IP_HTTP>,proxy`, so dnsmasq serves the LAN of the server address |
 | `UPSTREAM_DHCP_IP` | nothing | the proxy render uses no line from it |
 | `DHCP_DNS_SERVERS` | `dhcp-option-pxe=6,<list>` | the Admin UI form joins primary and secondary DNS into this list; empty uses `DHCP_DNS_PRIMARY` and `DHCP_DNS_SECONDARY` from `setup.sh`, then `IP_HTTP` (Kea too) |
 | `DHCP_PROXY_INTERFACE` | `interface=<value>` | optional |
@@ -363,7 +363,7 @@ reply (RFC 1542).
 
 | Setting | Meaning |
 | --- | --- |
-| `DHCP_RELAY_LOCAL_ADDR` | required; this relay's own IPv4 address on the client network, sent as `giaddr` so the upstream server picks the pool of the client's subnet |
+| `DHCP_RELAY_LOCAL_ADDR` | optional; this relay's own IPv4 address on the client network, sent as `giaddr` so the upstream server picks the pool of the client's subnet; empty uses this host's first own address that is not loopback (`IP_HTTP` first) |
 | `UPSTREAM_DHCP_IP` | required; the upstream DHCP server |
 
 The render is one row, `dhcp-relay=<DHCP_RELAY_LOCAL_ADDR>,<UPSTREAM_DHCP_IP>`,

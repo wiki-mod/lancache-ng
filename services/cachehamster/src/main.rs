@@ -840,11 +840,102 @@ async fn count(jobs: &Mutex<Vec<Job>>, id: &str, rate: &AtomicU64, got: Option<u
     j.state != State::Cancelled
 }
 
+// What: every download host resolves to the proxy.
+// Why: the proxy caches; the host DNS is never asked.
+// From: Issue #871 | PR #2017
+struct ToProxy(String);
+
+impl reqwest::dns::Resolve for ToProxy {
+    fn resolve(&self, _: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let proxy = self.0.clone();
+        Box::pin(async move {
+            let addrs: Vec<std::net::SocketAddr> = tokio::net::lookup_host((proxy.as_str(), 0))
+                .await?
+                .collect();
+            if addrs.is_empty() {
+                return Err(format!("{proxy}: no address").into());
+            }
+            Ok(Box::new(addrs.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
+}
+
+// What: the one way every download takes to the cache.
+// Why: AG-CODE-011: Steam, URL jobs and later stores.
+// From: Issue #871 | PR #2017
+#[derive(Clone)]
+struct Dl {
+    client: reqwest::Client,
+    http: u16,
+    https: u16,
+}
+
+impl Dl {
+    // What: client to the proxy container; trusts our CA.
+    // Why: DoMe 07.11.: docker-proxy cost 17 % CPU.
+    // From: Issue #871 | PR #2017
+    fn load(s: &Settings, connections: usize) -> Result<Self, String> {
+        let port = |k: &str| {
+            s.uint(k)
+                .and_then(|p| u16::try_from(p).map_err(|e| format!("{k}: {e}")))
+        };
+        // What: no total timeout; public roots stay.
+        // Why: a body may stream for hours; others pass.
+        // From: Issue #871 | PR #2017
+        let mut builder = reqwest::Client::builder()
+            .dns_resolver(Arc::new(ToProxy(s.text("CONTAINER_NAME_PROXY")?)))
+            .pool_max_idle_per_host(connections);
+        let ca = lancache_ng::render::ca_cert(s)?;
+        match std::fs::read(&ca) {
+            Ok(pem) => {
+                let cert = reqwest::Certificate::from_pem(&pem)
+                    .map_err(|e| format!("{}: {e}", ca.display()))?;
+                builder = builder.tls_certs_merge([cert]);
+            }
+            // What: no CA yet: logged; https then fails.
+            // Why: the ui issues it only in HTTPS mode.
+            // From: Issue #871 | PR #2017
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                eprintln!("cachehamster: no stack CA {}; https fails", ca.display());
+            }
+            Err(e) => return Err(format!("{}: {e}", ca.display())),
+        }
+        let client = builder
+            .build()
+            .map_err(|e| format!("download client: {e}"))?;
+        Ok(Self {
+            client,
+            http: port("PROXY_HTTP_PORT")?,
+            https: port("PROXY_HTTPS_PORT")?,
+        })
+    }
+
+    // What: the URL on the proxy port of its scheme.
+    // Why: SOT ports; a foreign port never reaches it.
+    // From: Issue #871 | PR #2017
+    fn url(&self, raw: &str) -> Result<reqwest::Url, String> {
+        let mut u = reqwest::Url::parse(raw).map_err(|e| format!("{raw}: {e}"))?;
+        let port = match u.scheme() {
+            "http" => self.http,
+            "https" => self.https,
+            other => return Err(format!("{raw}: scheme {other} is not http or https")),
+        };
+        if u.port().is_some() {
+            return Err(format!(
+                "{raw}: own port; only standard ports reach the cache"
+            ));
+        }
+        u.set_port(Some(port))
+            .map_err(|()| format!("{raw}: no port possible"))?;
+        Ok(u)
+    }
+}
+
 // What: run one URL job with many connections.
 // Why: bytes are read and dropped (RAM sink, no disk).
 // From: Issue #871 | PR #1858
 async fn run_urls(
-    client: reqwest::Client,
+    dl: Dl,
     urls: Vec<String>,
     connections: usize,
     jobs: Arc<Mutex<Vec<Job>>>,
@@ -853,8 +944,8 @@ async fn run_urls(
 ) -> State {
     let mut fetches = stream::iter(urls)
         .map(|url| {
-            let client = client.clone();
-            tokio::spawn(async move { http::drain(&client, &url).await })
+            let dl = dl.clone();
+            tokio::spawn(async move { http::drain(&dl.client, dl.url(&url)?.as_str()).await })
         })
         .buffer_unordered(connections);
     while let Some(joined) = fetches.next().await {
@@ -902,15 +993,12 @@ struct SteamCfg {
     // protocol version, package version, OS type, chat mode
     logon: [u64; 4],
     cdn_host: String,
-    proxy: std::net::SocketAddr,
-    proxy_name: String,
     branch: String,
     os: String,
 }
 
 impl SteamCfg {
     fn load(c: &Ctx) -> Result<Self, String> {
-        let addr = format!("{}:{}", c.s.text("IP_HTTP")?, c.s.uint("PROXY_HTTP_PORT")?);
         Ok(Self {
             dir: c.dir.clone(),
             bind: c.bind.clone(),
@@ -926,34 +1014,9 @@ impl SteamCfg {
                 c.s.uint("STEAM_CHAT_MODE")?,
             ],
             cdn_host: c.s.text("STEAM_CDN_HOST")?,
-            proxy: addr.parse().map_err(|e| format!("{addr}: {e}"))?,
-            proxy_name: format!(
-                "{}:{}",
-                c.s.text("CONTAINER_NAME_PROXY")?,
-                c.s.uint("PROXY_HTTP_PORT")?
-            ),
             branch: c.s.text("STEAM_BRANCH")?,
             os: c.s.text("STEAM_OS")?,
         })
-    }
-
-    // What: a client that sends the CDN host to the proxy.
-    // Why: the proxy caches by Host; DNS is not needed.
-    fn client(&self) -> Result<reqwest::Client, String> {
-        // What: the proxy container on the Docker network.
-        // Why: DoMe 07.11.: docker-proxy cost 17 % CPU.
-        // From: Issue #871 | PR #1985
-        use std::net::ToSocketAddrs;
-        let proxy = self
-            .proxy_name
-            .to_socket_addrs()
-            .ok()
-            .and_then(|mut a| a.next())
-            .unwrap_or(self.proxy);
-        reqwest::Client::builder()
-            .resolve(&self.cdn_host, proxy)
-            .build()
-            .map_err(|e| format!("CDN client: {e}"))
     }
 }
 
@@ -1571,8 +1634,11 @@ fn chunks_of(zipped: &[u8]) -> Result<Vec<(String, u64)>, String> {
 // What: every chunk URL of an app's depots.
 // Why: the URL job warms them through the proxy.
 // From: Issue #871 | PR #1858
-async fn app_urls(cfg: &SteamCfg, app: u32) -> Result<(Vec<String>, u64, Vec<String>), String> {
-    let client = cfg.client()?;
+async fn app_urls(
+    cfg: &SteamCfg,
+    dl: &Dl,
+    app: u32,
+) -> Result<(Vec<String>, u64, Vec<String>), String> {
     let web = reqwest::Client::new();
     let mut cm = Cm::login(cfg, &web).await?;
     let info = app_info(&mut cm, app).await?;
@@ -1618,8 +1684,9 @@ async fn app_urls(cfg: &SteamCfg, app: u32) -> Result<(Vec<String>, u64, Vec<Str
             "http://{}/depot/{depot}/manifest/{gid}/{}/{code}",
             cfg.cdn_host, cfg.manifest_api
         );
-        let resp = client
-            .get(&url)
+        let resp = dl
+            .client
+            .get(dl.url(&url)?)
             .send()
             .await
             .map_err(|e| format!("{url}: {}", http::error_chain(&e)))?;
@@ -1824,13 +1891,14 @@ async fn app_cache(c: &Ctx, args: &[String], evict: bool) -> Result<Value, Strin
 // From: Issue #871 | PR #1858
 async fn run_app(
     cfg: SteamCfg,
+    dl: Dl,
     app: u32,
     connections: usize,
     jobs: Arc<Mutex<Vec<Job>>>,
     id: String,
     rate: Arc<AtomicU64>,
 ) -> State {
-    let (urls, size, skipped) = match app_urls(&cfg, app).await {
+    let (urls, size, skipped) = match app_urls(&cfg, &dl, app).await {
         Ok(u) => u,
         Err(e) => return State::Failed(e),
     };
@@ -1839,18 +1907,14 @@ async fn run_app(
         j.size = size;
         j.skipped = skipped;
     }
-    let client = match cfg.client() {
-        Ok(c) => c,
-        Err(e) => return State::Failed(e),
-    };
-    run_urls(client, urls, connections, jobs, id, rate).await
+    run_urls(dl, urls, connections, jobs, id, rate).await
 }
 
 // What: one daemon round: orders in, due jobs out.
 // Why: up to CACHEHAMSTER_QUEUES jobs run at once.
 // From: Issue #871 | PR #1858
 struct Runner {
-    client: reqwest::Client,
+    dl: Dl,
     steam: SteamCfg,
     queues: usize,
     connections: usize,
@@ -1910,7 +1974,7 @@ impl Runner {
             let (jobs, id, rate) = (Arc::clone(&self.jobs), j.id.clone(), Arc::clone(&self.rate));
             let task = match &j.target {
                 Target::Urls(urls) => tokio::spawn(run_urls(
-                    self.client.clone(),
+                    self.dl.clone(),
                     urls.clone(),
                     self.connections,
                     jobs,
@@ -1919,6 +1983,7 @@ impl Runner {
                 )),
                 Target::SteamApp(app) => tokio::spawn(run_app(
                     self.steam.clone(),
+                    self.dl.clone(),
                     *app,
                     self.connections,
                     jobs,
@@ -1942,12 +2007,7 @@ async fn daemon(c: Ctx) -> Result<(), String> {
         usize::try_from(c.s.uint("CACHEHAMSTER_CONCURRENCY")?).map_err(|e| e.to_string())?;
     let tick = Duration::from_secs(c.s.uint("CACHEHAMSTER_POLL_INTERVAL")?);
     let report = c.s.uint("CACHEHAMSTER_THROUGHPUT_INTERVAL")?;
-    // What: a client without the general total timeout.
-    // Why: one large body may stream for hours.
-    let client = reqwest::Client::builder()
-        .pool_max_idle_per_host(connections)
-        .build()
-        .map_err(|e| format!("HTTP client: {e}"))?;
+    let dl = Dl::load(&c.s, connections)?;
     let mbit = c.s.uint("CACHEHAMSTER_MAX_MBIT")?;
     if mbit > 0 {
         let _ = PACE.set(Pace {
@@ -1973,7 +2033,7 @@ async fn daemon(c: Ctx) -> Result<(), String> {
         j.set(State::Waiting);
     }
     let mut runner = Runner {
-        client,
+        dl,
         steam: SteamCfg::load(&c)?,
         queues,
         connections,

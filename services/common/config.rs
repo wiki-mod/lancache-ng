@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 // What: env key of the baked default rows.
 // Why: the SOT bakes defaults into each image.
@@ -234,10 +234,79 @@ fn baked_rows(baked: &str) -> impl Iterator<Item = &str> {
         .filter(|r| !r.is_empty())
 }
 
-// What: KEY=VALUE lines of the admin file.
-// Why: a missing file means no admin values yet.
-// From: Issue #1683 | PR #1858
-fn read_file(path: &Path) -> Result<BTreeMap<String, String>, String> {
+// What: file, else env, else default; fills @KEY@.
+// Why: KEY= in the file means default; env is a stale copy.
+// From: Issue #1683 | PR #2017
+fn effective(
+    key: &str,
+    file: &BTreeMap<String, String>,
+    env: &dyn Fn(&str) -> Option<String>,
+    defaults: &BTreeMap<&str, &str>,
+    depth: u8,
+) -> Result<Option<String>, String> {
+    match file.get(key) {
+        Some(v) if !v.is_empty() => return Ok(Some(v.clone())),
+        Some(_) => {}
+        None => {
+            if let Some(v) = env(key).filter(|v| !v.is_empty()) {
+                return Ok(Some(v));
+            }
+        }
+    }
+    match defaults.get(key).filter(|v| !v.is_empty()) {
+        Some(v) => expand_default(v, file, env, defaults, depth).map(Some),
+        None => Ok(None),
+    }
+}
+
+// What: each @KEY@ of a default replaced by its value.
+// Why: the SOT names other keys; the image bakes them raw.
+// From: Issue #1683 | PR #2017
+fn expand_default(
+    value: &str,
+    file: &BTreeMap<String, String>,
+    env: &dyn Fn(&str) -> Option<String>,
+    defaults: &BTreeMap<&str, &str>,
+    depth: u8,
+) -> Result<String, String> {
+    if depth > 16 {
+        return Err(format!("default {value:?}: @KEY@ refers to itself"));
+    }
+    let key_char = |b: &u8| b.is_ascii_uppercase() || b.is_ascii_digit() || *b == b'_';
+    let mut out = String::new();
+    let mut rest = value;
+    while let Some(at) = rest.find('@') {
+        out.push_str(&rest[..at]);
+        let after = &rest[at + 1..];
+        let len = after.bytes().take_while(key_char).count();
+        if len > 0 && after[len..].starts_with('@') {
+            let name = &after[..len];
+            let got = effective(name, file, env, defaults, depth + 1)?
+                .ok_or_else(|| format!("default {value:?} names @{name}@, which has no value"))?;
+            out.push_str(&got);
+            rest = &after[len + 1..];
+        } else {
+            out.push('@');
+            rest = after;
+        }
+    }
+    out.push_str(rest);
+    Ok(out)
+}
+
+// What: the key of a KEY=VALUE line; None for comments.
+// Why: the stack .env holds What/Why/From comment lines.
+// From: Issue #1683 | PR #2017
+fn line_key(line: &str) -> Option<&str> {
+    let (key, _) = line.split_once('=')?;
+    let key = key.trim();
+    (!key.is_empty() && !key.starts_with('#')).then_some(key)
+}
+
+// What: the raw KEY=VALUE lines of the stack .env.
+// Why: a missing file means no values yet.
+// From: Issue #1683 | PR #2017
+pub fn read_raw(path: &Path) -> Result<BTreeMap<String, String>, String> {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
@@ -245,42 +314,123 @@ fn read_file(path: &Path) -> Result<BTreeMap<String, String>, String> {
     };
     Ok(text
         .lines()
-        .filter_map(|line| line.split_once('='))
-        .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+        .filter_map(|line| Some((line_key(line)?, line.split_once('=')?.1.trim())))
+        .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect())
 }
 
-// What: write checked admin values to the file.
-// Why: empty value removes the admin override.
-// From: Issue #1683 | PR #1858
+// What: the values of the stack .env; "$" values left out.
+// Why: setup.sh keeps ${VAR} that only Compose expands.
+// From: Issue #1683 | PR #2017
+pub fn read_file(path: &Path) -> Result<BTreeMap<String, String>, String> {
+    let mut all = read_raw(path)?;
+    all.retain(|_, v| !v.contains('$'));
+    Ok(all)
+}
+
+// What: lock file of the stack .env: <file>.lock.
+// Why: setup.sh flocks the same name before it writes.
+// From: Issue #1683 | PR #2017
+pub fn lock_path(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(".lock");
+    PathBuf::from(name)
+}
+
+// What: rejects what Compose would read differently.
+// Why: same rule as validate_env_value of setup.sh.
+// From: Issue #1683 | PR #2017
+fn env_safe(key: &str, raw: &str) -> Result<(), String> {
+    match raw
+        .chars()
+        .find(|c| matches!(c, '\n' | '\r' | '$' | '`' | '"' | '\'' | '\\' | '#'))
+    {
+        Some(c) => Err(format!("{key}: {c:?} is not allowed in the stack .env")),
+        None => Ok(()),
+    }
+}
+
+// What: checked values into the stack .env.
+// Why: every ui change goes through one write path.
+// From: Issue #1683 | PR #2017
 pub fn store(
     path: &Path,
     current: &Settings,
     updates: &BTreeMap<String, String>,
 ) -> Result<(), String> {
-    let mut all = read_file(path)?;
     for (key, raw) in updates {
-        if raw.contains(['\n', '\r']) {
-            return Err(format!("{key}: line break not allowed"));
+        env_safe(key, raw)?;
+        // What: a container setting is refused here.
+        // Why: in the .env the name is a Compose host path.
+        // From: Issue #1683 | PR #2017
+        if current
+            .spec(key)
+            .is_some_and(|s| s.effect == Effect::Container)
+        {
+            return Err(format!("{key}: a container setting; setup.sh sets it"));
         }
-        if raw.is_empty() {
-            all.remove(key);
-            continue;
+        if !raw.is_empty() {
+            current.validate(key, raw)?;
         }
-        current.validate(key, raw)?;
-        all.insert(key.clone(), raw.clone());
     }
-    let body: String = all.iter().map(|(k, v)| format!("{k}={v}\n")).collect();
-    let owner = crate::fs::Owner {
-        uid: None,
-        gid: None,
+    write_lines(path, updates)
+}
+
+// What: puts raw lines back as read_raw gave them.
+// Why: a refused save restores even ${VAR} values.
+// From: Issue #1683 | PR #2017
+pub fn restore(path: &Path, values: &BTreeMap<String, String>) -> Result<(), String> {
+    write_lines(path, values)
+}
+
+// What: sets KEY=VALUE lines in place under the lock.
+// Why: one file; comments, order and other keys stay.
+// From: Issue #1683 | PR #2017
+fn write_lines(path: &Path, updates: &BTreeMap<String, String>) -> Result<(), String> {
+    let lock = lock_path(path);
+    let held = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock)
+        .map_err(|e| format!("{}: {e}", lock.display()))?;
+    held.lock()
+        .map_err(|e| format!("{}: {e}", lock.display()))?;
+    let old = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(format!("{}: {e}", path.display())),
     };
+    let mut done = BTreeSet::new();
+    let mut body = String::new();
+    for line in old.lines() {
+        match line_key(line).filter(|k| updates.contains_key(*k)) {
+            Some(key) => {
+                // What: a second line of it is dropped.
+                // Why: Compose and setup.sh read one value.
+                // From: Issue #1683 | PR #2017
+                if done.insert(key.to_string()) {
+                    body.push_str(&format!("{key}={}\n", updates[key]));
+                }
+            }
+            None => {
+                body.push_str(line);
+                body.push('\n');
+            }
+        }
+    }
+    for (key, raw) in updates.iter().filter(|(k, _)| !done.contains(*k)) {
+        body.push_str(&format!("{key}={raw}\n"));
+    }
+    if body == old {
+        return Ok(());
+    }
     crate::fs::write(
         path,
         body.as_bytes(),
         0o600,
         crate::fs::Place::Replace,
-        owner,
+        crate::fs::Owner::default(),
     )
     .map_err(|e| format!("{}: {e}", path.display()))
 }
@@ -297,8 +447,8 @@ pub struct Settings {
 
 impl Settings {
     // What: load schema, then file > env > default.
-    // Why: a ui change is newer than the .env at start.
-    // From: Issue #1683 | PR #1858
+    // Why: the file is the live .env; env is from start.
+    // From: Issue #1683 | PR #2017
     pub fn load(
         env: &dyn Fn(&str) -> Option<String>,
         saved_file: Option<&Path>,
@@ -308,31 +458,36 @@ impl Settings {
         let defaults: BTreeMap<&str, &str> = baked_rows(&baked)
             .filter_map(|r| r.split_once('='))
             .collect();
-        let file = match saved_file {
+        let mut set = Self::default();
+        let mut errors = Vec::new();
+        let mut specs = Vec::new();
+        for row in baked_rows(&schema) {
+            match Spec::parse(row) {
+                Ok(spec) => specs.push(spec),
+                Err(e) => errors.push(e),
+            }
+        }
+        let mut file = match saved_file {
             Some(path) => read_file(path)?,
             None => BTreeMap::new(),
         };
-        let mut set = Self::default();
-        let mut errors = Vec::new();
-        for row in baked_rows(&schema) {
-            let spec = match Spec::parse(row) {
-                Ok(spec) => spec,
+        // What: the file sets ui keys, not container ones.
+        // Why: the .env has host paths under these names.
+        // From: Issue #1683 | PR #2017
+        let ui_keys: BTreeSet<&str> = specs
+            .iter()
+            .filter(|s| s.effect != Effect::Container)
+            .map(|s| s.key.as_str())
+            .collect();
+        file.retain(|k, _| ui_keys.contains(k.as_str()));
+        for spec in specs {
+            let raw = match effective(&spec.key, &file, env, &defaults, 0) {
+                Ok(raw) => raw,
                 Err(e) => {
                     errors.push(e);
                     continue;
                 }
             };
-            let raw = file
-                .get(&spec.key)
-                .filter(|v| !v.is_empty())
-                .cloned()
-                .or_else(|| env(&spec.key).filter(|v| !v.is_empty()))
-                .or_else(|| {
-                    defaults
-                        .get(spec.key.as_str())
-                        .filter(|v| !v.is_empty())
-                        .map(|v| v.to_string())
-                });
             match raw {
                 Some(raw) => match spec.check(&raw) {
                     Ok((value, note)) => {
@@ -353,8 +508,16 @@ impl Settings {
             if set.specs.contains_key(*key) {
                 continue;
             }
-            let raw = env(key).filter(|v| !v.is_empty());
-            let raw = raw.unwrap_or_else(|| value.to_string());
+            let raw = match env(key).filter(|v| !v.is_empty()) {
+                Some(raw) => raw,
+                None => match expand_default(value, &file, env, &defaults, 0) {
+                    Ok(raw) => raw,
+                    Err(e) => {
+                        errors.push(e);
+                        continue;
+                    }
+                },
+            };
             if !raw.is_empty() {
                 set.values.insert(key.to_string(), Value::Text(raw));
             }
