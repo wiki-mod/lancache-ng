@@ -602,6 +602,7 @@ the host network. The wire-level checks need a real LAN.
 | dnsmasq relay | between two segments, the client's lease comes from the client subnet's pool through the relay's `giaddr`, not from a same-subnet fallback |
 | One mode at a time | `DHCP_MODE` selects exactly one rendered dnsmasq or Kea config; inspect the rendered config inside the running container, not only the variable |
 | Sub-mode switch | switching `dnsmasq-proxy` and `dnsmasq-relay` on the Admin UI `/dhcp/mode` form makes dnsmasq run with the new sub-mode while the container keeps running |
+| Empty anchor | with `DHCP_SUBNET_START` or `DHCP_RELAY_LOCAL_ADDR` empty (a blank answer in `setup.sh`, or a mode switch in the Admin UI), the rendered `dhcp-range=<IP_HTTP>,proxy` or `dhcp-relay=<IP_HTTP>,<UPSTREAM_DHCP_IP>` uses the server address, and the next `setup.sh update` completes |
 
 CI covers the Kea snapshot and rollback against Kea's running config; the
 lease effect is live only.
@@ -820,6 +821,9 @@ before (or has no baseline) and is unhealthy now.
   (`result-gate`).
 - The `setup.sh` DHCP activation preflight (`run_kea_dhcp_activation_preflight`)
   has no CI check.
+- `setup.sh` refusing an optional DHCP key that the render fills when empty
+  (`DHCP_SUBNET_START`, `DHCP_RELAY_LOCAL_ADDR` in `migrate_env_for_update`
+  and the wizard): section 10.3, row "Empty anchor", is live only.
 - The `setup.sh update` health baseline and regression gate: section 10.12 is
   live only.
 - Dockerfile lint (`docker buildx build --call check`) runs in no job; `FROM
