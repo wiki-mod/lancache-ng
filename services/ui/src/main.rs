@@ -211,7 +211,10 @@ impl App {
             let val = s.text(key).unwrap_or_default();
             values.entry(key.into()).or_insert(val);
         }
-        let login = !s.text("UI_PASSWORD_HASH").unwrap_or_default().is_empty();
+        let login = !s
+            .text("UI_AUTH_PASSWORD_HASH")
+            .unwrap_or_default()
+            .is_empty();
         // What: page and route paths by short name.
         // Why: templates name the SOT key without prefix.
         // From: Issue #1683
@@ -338,14 +341,14 @@ fn basic_credentials(headers: &HeaderMap) -> Option<(String, String)> {
 // Why: the test stack runs without a password.
 // From: Issue #1683 | PR #1858
 async fn login_ok(s: &Settings, headers: &HeaderMap) -> bool {
-    let hash = s.text("UI_PASSWORD_HASH").unwrap_or_default();
+    let hash = s.text("UI_AUTH_PASSWORD_HASH").unwrap_or_default();
     if hash.is_empty() {
         return true;
     }
     let Some((user, pass)) = basic_credentials(headers) else {
         return false;
     };
-    let want = s.text("UI_USER").unwrap_or_default();
+    let want = s.text("UI_AUTH_USER").unwrap_or_default();
     let pass_ok = tokio::task::spawn_blocking(move || verify(&hash, &pass))
         .await
         .unwrap_or(false);
@@ -533,23 +536,23 @@ async fn password(
         ));
     }
     let wrong = tr("err_password_wrong");
-    let old = s.text("UI_PASSWORD_HASH").unwrap_or_default();
+    let old = s.text("UI_AUTH_PASSWORD_HASH").unwrap_or_default();
     let hashed = tokio::task::spawn_blocking(move || {
         if !old.is_empty() && !verify(&old, &current) {
             return Err(wrong);
         }
-        phc(&new)
+        env_hash(&new)
     })
     .await
     .map_err(|e| e.to_string())?
     .map_err(bad_request)?;
-    let mut change = Fields::from([("UI_PASSWORD_HASH".to_string(), hashed)]);
+    let mut change = Fields::from([("UI_AUTH_PASSWORD_HASH".to_string(), hashed)]);
     // What: the user name is set in the same form.
     // Why: DoMe 07.11.: any name, not only the default.
     // From: Issue #1683 | PR #1985
     let user = get("user").trim().to_string();
     if !user.is_empty() {
-        change.insert("UI_USER".to_string(), user);
+        change.insert("UI_AUTH_USER".to_string(), user);
     }
     let back = app.settings().text("UI_PAGE_SETUP")?;
     finish(commit(&app, change).await, &back)
@@ -585,7 +588,7 @@ async fn commit(app: &App, form: Fields) -> Result<(), String> {
     if updates.is_empty() {
         return Ok(());
     }
-    let before = std::fs::read(&path).ok();
+    let before = config::read_raw(&path)?;
     config::store(&path, &old, &updates)?;
     let new = Settings::load(&process_env, Some(&path))?;
     // What: a value that cannot render is not kept.
@@ -597,9 +600,14 @@ async fn commit(app: &App, form: Fields) -> Result<(), String> {
         // Why: DoMe 07.11.: an error left no trace in logs.
         // From: Issue #1683 | PR #1991
         eprintln!("ui: save refused: {e}");
-        if let Some(b) = before {
-            std::fs::write(&path, b).map_err(|w| format!("{e}; old file not restored: {w}"))?;
-        }
+        // What: only the changed keys get their old values.
+        // Why: a whole-file write undoes setup.sh edits.
+        // From: Issue #1683 | PR #2017
+        let back: Fields = updates
+            .keys()
+            .map(|k| (k.clone(), before.get(k).cloned().unwrap_or_default()))
+            .collect();
+        config::restore(&path, &back).map_err(|w| format!("{e}; old values not restored: {w}"))?;
         return Err(e);
     }
     for line in apply_all(app, &old, &new, true).await? {
@@ -3865,30 +3873,28 @@ fn verify(hash: &str, pw: &str) -> bool {
         .is_ok()
 }
 
-// What: PHC string of a stored hash; .env holds base64url.
-// Why: a PHC has "$"; the page file keeps the raw form.
+// What: PHC string of a stored base64url hash.
+// Why: the stack .env bars "$", which every PHC has.
 // From: Issue #1683 | PR #2017
 fn stored_phc(value: &str) -> String {
-    if value.starts_with('$') {
-        return value.to_string();
-    }
     base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(value)
         .ok()
         .and_then(|bytes| String::from_utf8(bytes).ok())
-        .unwrap_or_else(|| value.to_string())
+        .unwrap_or_default()
 }
 
-// What: Argon2id PHC string of a password.
-// Why: setup.sh and the page share it.
-// From: Issue #1683 | PR #1858
-fn phc(pw: &str) -> Result<String, String> {
+// What: Argon2id PHC hash of a password, base64url.
+// Why: one form in the .env for setup.sh and the page.
+// From: Issue #1683 | PR #2017
+fn env_hash(pw: &str) -> Result<String, String> {
     let hash: Result<PasswordHash, _> = Argon2::default().hash_password(pw.as_bytes());
-    hash.map(|h| h.to_string()).map_err(|e| e.to_string())
+    hash.map(|h| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(h.to_string()))
+        .map_err(|e| e.to_string())
 }
 
 // What: base64url PHC hash of a password from stdin.
-// Why: setup.sh keeps it in .env, which bars "$".
+// Why: setup.sh writes it into the stack .env.
 // From: Issue #1683 | PR #2017
 fn hash_password() -> Result<(), String> {
     let mut line = String::new();
@@ -3899,8 +3905,7 @@ fn hash_password() -> Result<(), String> {
     if pw.is_empty() {
         return Err("the password on stdin is empty".into());
     }
-    let env_form = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(phc(pw)?);
-    println!("{env_form}");
+    println!("{}", env_hash(pw)?);
     Ok(())
 }
 
@@ -4064,25 +4069,8 @@ async fn command(s: &Settings, args: &[String]) -> Option<Result<(), String>> {
         // From: Issue #1683
         Some("secondary-zones") => Some(ensure_zones(s).await),
         Some(DHCP_PROBE_CMD) => Some(dhcp_probe_cli(s)),
-        Some("reset-sign-in") => Some(reset_sign_in()),
         _ => None,
     }
-}
-
-// What: drop the saved password hash; sign-in is off.
-// Why: DoMe 07.11.: a locked-out user needs a way back.
-// From: Issue #1683 | PR #1985
-fn reset_sign_in() -> Result<(), String> {
-    let path = process_env(SETTINGS_FILE_ENV).ok_or("no settings file set")?;
-    let old = std::fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))?;
-    let kept: String = old
-        .lines()
-        .filter(|l| !l.starts_with("UI_PASSWORD_HASH="))
-        .map(|l| format!("{l}\n"))
-        .collect();
-    std::fs::write(&path, kept).map_err(|e| format!("{path}: {e}"))?;
-    println!("{}", json!({"sign_in": "off"}));
-    Ok(())
 }
 
 // What: one DHCP probe; the report as JSON.
@@ -4236,7 +4224,7 @@ async fn main() -> Result<(), String> {
     // What: no login and no opt-out stops the ui.
     // Why: AG-SEC-001: fail closed unless opted out.
     // From: Issue #1683 | PR #1985
-    let hash = s.text("UI_PASSWORD_HASH").unwrap_or_default();
+    let hash = s.text("UI_AUTH_PASSWORD_HASH").unwrap_or_default();
     if hash.is_empty() && !s.flag("ALLOW_INSECURE_UI").unwrap_or(false) {
         return Err("Admin-UI authentication is required".into());
     }
