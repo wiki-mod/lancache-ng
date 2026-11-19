@@ -23,6 +23,11 @@ CI_SCRIPT_DIR="${CI_SCRIPT_PATH%/*}"
 # From: Issue #1683 | PR #1858
 CI_MANIFEST_REL=".github/yaml/build-manifest.yml"
 
+# What: This script's repo-relative path.
+# Why: one name for runs, guards and recipe checks.
+# From: Issue #1683 | PR #2017
+CI_SCRIPT_REL=".github/scripts/ci.sh"
+
 # What: Repository root (.github/scripts/../..).
 # Why: Identity hashes git-tracked content from the root.
 # From: Issue #1683
@@ -4495,7 +4500,7 @@ _ci_impact_run() {
 # Why: 2.2 BUILD needs proof; 2.3 UNKNOWN != BUILD.
 # From: Issue #1683 | PR #1912
 _ci_impact_classify() {
-    local t="$1" p="$2" hid="$3" base="$4" base_manifest="$5" head="${6:-}" hc bc hs bs bt hi bi
+    local t="$1" p="$2" hid="$3" base="$4" base_manifest="$5" head="${6:-}" hc bc hs bs bt hi bi sd
     if [ -z "${hid}" ]; then
         ci_log "[CI-INFO-IMPACT-0009]" "service=\"${t}\" platform=\"${p}\" reason=\"head identity not computed (error above); UNKNOWN\""
         printf 'UNKNOWN\n'; return 0
@@ -4522,6 +4527,19 @@ _ci_impact_classify() {
     fi
     if [ "${hi}" != "${bi}" ]; then
         ci_log "[CI-INFO-IMPACT-0017]" "service=\"${t}\" platform=\"${p}\" base=\"${base}\" reason=\"identity inputs changed from ${bi//$'\n'/ } to ${hi//$'\n'/ }; BUILD\""
+        printf 'BUILD\n'; return 0
+    fi
+    # What: a changed ci.sh is a changed service id recipe.
+    # Why: ci.sh derives pins; AG-CI-010 spares toolchain.
+    # From: Issue #1683 | PR #2017
+    if [ "${bt}" = toolchain ]; then
+        sd=""
+    elif ! sd="$(cd -- "${CI_REPO_ROOT}" && _ci_capture 0 git diff --name-only "${base}" "${head:-HEAD}" -- "${CI_SCRIPT_REL}")"; then
+        ci_log "[CI-INFO-IMPACT-0022]" "service=\"${t}\" platform=\"${p}\" base=\"${base}\" reason=\"ci.sh diff unreadable (error above); UNKNOWN\""
+        printf 'UNKNOWN\n'; return 0
+    fi
+    if [ -n "${sd}" ]; then
+        ci_log "[CI-INFO-IMPACT-0021]" "service=\"${t}\" platform=\"${p}\" base=\"${base}\" reason=\"ci.sh changed from base, so the identity recipe changed; BUILD\""
         printf 'BUILD\n'; return 0
     fi
     # What: same inputs: only an SOT pin change is impact.
@@ -6476,7 +6494,7 @@ ci_cmd_build_tools_run() {
         -v /var/run/docker.sock:/var/run/docker.sock \
         -v "${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}" -v "${RUNNER_TEMP}:${RUNNER_TEMP}" \
         -w "${GITHUB_WORKSPACE}" "${envs[@]}" "${ref}" \
-        timeout -s KILL "$((min * 60))" bash .github/scripts/ci.sh "$@"
+        timeout -s KILL "$((min * 60))" bash "${CI_SCRIPT_REL}" "$@"
 }
 
 # What: args of the docker:// GHA runtime export step.
@@ -17617,7 +17635,7 @@ _ci_check_mutable_refs() {
 # Why: bare-path exec needs the bit; core.filemode hides it.
 # From: Issue #1683
 _ci_check_executable_bits() {
-    local -a owned=(.github/scripts/ci.sh) paths=()
+    local -a owned=("${CI_SCRIPT_REL}") paths=()
     local h path mode
     # What: a changed-file list only narrows the owned set.
     # Why: Dockerfile/Cargo.toml are no bare-path scripts.
@@ -17883,7 +17901,7 @@ _ci_check_ci_bats() {
 # From: Issue #1683 | PR #1858
 _ci_check_exit_evidence() {
     local -a _ci_override=("$@") files=()
-    _ci_scan_files files _ci_override '.github/scripts/ci.sh' || return 2
+    _ci_scan_files files _ci_override "${CI_SCRIPT_REL}" || return 2
     local path out xv_line xv_s xv_fn xv_nr xv_m xv_code xv_out
     local -a viol=() xv_lines=() xv_re=()
     local -A xv_site=()
