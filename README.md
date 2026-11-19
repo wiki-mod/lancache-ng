@@ -534,7 +534,7 @@ If the setup asks whether the Admin UI should be password protected, using a pas
 
 Do not expose the Admin UI to the internet.
 
-Settings changed in the Admin UI are saved in `lancache-ui-settings.env` in the UI data folder (`UI_SETTINGS_FILE` and `UI_DATA_DIR` in `.github/yaml/build-manifest.yml`). They win over the built-in defaults and survive an update. The nginx templates of the proxy are kept in `services/ui/nginx/` and are rendered into the proxy config folder (`NGINX_CONF_DIR`).
+Settings changed in the Admin UI are saved in the stack `.env.local` (`deploy/prod/.env.local`), the same file `setup.sh` writes and Docker Compose reads. The ui changes only the lines of the changed keys; comments and other keys stay. The ui and services containers mount its directory (`STACK_ENV_DIR` in `.github/yaml/build-manifest.yml`); of the containers only the ui writes it. A value cannot contain `$`, a backquote, quotes, a backslash or `#`, as for every `.env.local` value. Settings an older version kept in `lancache-ui-settings.env` (UI data folder) move into `.env.local` with the next `setup.sh update`; `setup.sh install` keeps its own answers. They win over the built-in defaults and survive an update. The nginx templates of the proxy are kept in `services/ui/nginx/` and are rendered into the proxy config folder (`NGINX_CONF_DIR`).
 
 ## HTTPS mode certificate
 
@@ -823,7 +823,7 @@ Secret formats vary by key, not by naming suffix — despite the `*_KEY`/`*_PASS
 - 64 hex characters (`openssl rand -hex 32`): `KEA_CTRL_TOKEN`, `PDNS_API_KEY`, `SNMP_COMMUNITY`, `SECONDARY_REGISTRATION_TOKEN`
 - 44 base64 characters (`openssl rand -base64 32`): `DDNS_TSIG_KEY`
 - 20 alphanumeric characters: the Admin UI password. It is shown once; only its Argon2id hash is stored as `UI_AUTH_PASSWORD_HASH`.
-  The General page of the Admin UI can change it (old password required, at least 12 characters). The new Argon2id hash is saved as `UI_PASSWORD_HASH` in the UI settings file (`lancache-ui-settings.env` in the `ui-data` volume), which takes precedence over the `.env.local` value; to reset a lost password, run `sudo ./setup.sh reset-sign-in`, which turns the sign-in off until a new password is set on the General page.
+  The General page of the Admin UI can change it (old password required, at least 12 characters). The new Argon2id hash is saved base64url-coded as `UI_AUTH_PASSWORD_HASH` in `.env.local`; to reset a lost password, run `sudo ./setup.sh reset-sign-in`, which turns the sign-in off until a new password is set on the General page.
 
 Store your actual secret values securely if you need to rotate them manually. The setup script will not regenerate them unless you explicitly delete or clear the `.env.local` entry.
 
