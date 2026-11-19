@@ -184,6 +184,12 @@ image digests: a changed service uses the digest built for its new identity, an
 unchanged service reuses the digest accepted for that identity. Nothing is
 retagged or pulled from a mutable channel to complete the stack.
 
+The plan builds a pair whose identity image is missing only on a proven input
+change from the base (`_ci_impact_classify`): changed build input content, a
+changed SOT identity input list or pin, or a changed `ci.sh`, which derives the
+pins and so the identity of every service image. A `ci.sh` change does not
+rebuild `build-tools` (AG-CI-010).
+
 On every push, `ci.sh assemble-stack` assembles the built services and every
 service the plan did not build. An unchanged service gets the index of its
 accepted digests under the new `sha-<full-sha>` tag; nothing is rebuilt. So a
