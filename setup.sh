@@ -4690,8 +4690,11 @@ migrate_env_for_update() (
 
     case "$dhcp_mode" in
         dnsmasq-proxy)
-            is_dnsmasq_subnet_start "$dhcp_subnet_start" \
-                || die "DHCP_MODE=dnsmasq-proxy requires a proxy-DHCP subnet start ending in .0 in $env_file. Set the subnet base for your LAN, then rerun setup.sh update."
+            # What: an empty subnet start stays empty
+            # Why: shared.rs proxy_range owns the blank case
+            # From: Issue #1683 | PR #2017
+            [[ -z "$dhcp_subnet_start" ]] || is_dnsmasq_subnet_start "$dhcp_subnet_start" \
+                || die "DHCP_MODE=dnsmasq-proxy has an invalid DHCP_SUBNET_START in $env_file. Set a network address ending in .0, or leave it empty for the LAN of IP_HTTP, then rerun setup.sh update."
             # What: an empty primary/secondary stays empty
             # Why: config.rs owns the rule for empty
             # From: Issue #1683 | PR #1912
@@ -4737,11 +4740,11 @@ migrate_env_for_update() (
             fi
             ;;
         dnsmasq-relay)
-            # What: relay needs local and upstream IPs
-            # Why: ProxyDHCP fields are unused in relay
-            # From: Issue #1683 | PR #1858
-            is_valid_ipv4 "$dhcp_relay_local_addr" \
-                || die "DHCP_MODE=dnsmasq-relay requires DHCP_RELAY_LOCAL_ADDR (this relay's own IPv4 on the client network) in $env_file. Set it, then rerun setup.sh update."
+            # What: needs upstream IP; empty local IP kept
+            # Why: dnsmasq_conf::render owns the blank case
+            # From: Issue #1683 | PR #2017
+            [[ -z "$dhcp_relay_local_addr" ]] || is_valid_ipv4 "$dhcp_relay_local_addr" \
+                || die "DHCP_MODE=dnsmasq-relay has an invalid DHCP_RELAY_LOCAL_ADDR in $env_file. Set this relay's own IPv4 on the client network, or leave it empty for IP_HTTP, then rerun setup.sh update."
             is_valid_ipv4 "$upstream_dhcp_ip" \
                 || die "DHCP_MODE=dnsmasq-relay requires the upstream DHCP server IPv4 in UPSTREAM_DHCP_IP in $env_file. Set it, then rerun setup.sh update."
             ;;
@@ -9413,6 +9416,7 @@ DHCP_SUBNET_DEFAULT=$(prod_env_default DHCP_SUBNET) || exit $?
 DHCP_GATEWAY_DEFAULT=$(prod_env_default DHCP_GATEWAY) || exit $?
 DHCP_RANGE_START_DEFAULT=$(prod_env_default DHCP_RANGE_START) || exit $?
 DHCP_RANGE_END_DEFAULT=$(prod_env_default DHCP_RANGE_END) || exit $?
+DHCP_SUBNET_START_DEFAULT=$(prod_env_default DHCP_SUBNET_START) || exit $?
 KEA_DATA_DIR=""
 DHCP_SUBNET=""
 DHCP_GATEWAY="$DHCP_GATEWAY_DEFAULT"
@@ -9481,13 +9485,10 @@ elif [[ "$DHCP_MODE" = "dnsmasq-proxy" ]]; then
     confirm "Continue with experimental dnsmasq-proxy mode? [y/N]" "N" \
         || die "Cancelled dnsmasq-proxy mode. Re-run setup and choose kea or off."
 
-    ask "DHCP subnet start for dnsmasq-proxy" "${DHCP_SUBNET_DEFAULT%/*}"
-    while true; do
-        DHCP_SUBNET_START="$REPLY"
-        is_dnsmasq_subnet_start "$DHCP_SUBNET_START" && break
-        print_error "DHCP subnet start must be a network address ending in .0, e.g. ${DHCP_SUBNET_DEFAULT%/*}"
-        ask "DHCP subnet start for dnsmasq-proxy" "${DHCP_SUBNET_DEFAULT%/*}"
-    done
+    # What: blank = empty key: dnsmasq serves IP_HTTP's LAN
+    # Why: shared.rs proxy_range owns the blank case
+    # From: Issue #1683 | PR #2017
+    ask_checked DHCP_SUBNET_START "DHCP subnet start for dnsmasq-proxy (blank = LAN of $IP_HTTP)" "$DHCP_SUBNET_START_DEFAULT" is_dnsmasq_subnet_start "Not a network address ending in .0" 1
 
     ask_checked DHCP_DNS_PRIMARY "Primary DNS option for proxy-DHCP/PXE clients (blank = HTTP IP)" "$DHCP_DNS_PRIMARY" is_valid_ipv4 "Invalid IPv4 address" 1
 
@@ -9559,7 +9560,7 @@ elif [[ "$DHCP_MODE" = "dnsmasq-proxy" ]]; then
         fi
     fi
 
-    print_ok "DHCP proxy mode enabled — subnet start: $DHCP_SUBNET_START"
+    print_ok "DHCP proxy mode enabled — subnet start: ${DHCP_SUBNET_START:-LAN of $IP_HTTP}"
 elif [[ "$DHCP_MODE" = "dnsmasq-relay" ]]; then
     # What: relay mode needs only local and upstream IPs
     # Why: a relay injects no subnet, DNS or PXE options
@@ -9567,11 +9568,14 @@ elif [[ "$DHCP_MODE" = "dnsmasq-relay" ]]; then
     print_warn "dnsmasq-relay forwards every client's DHCP request to an upstream DHCP server on another segment."
     print_warn "The upstream server owns the whole lease and every option; LanCache injects nothing of its own here."
 
-    ask_checked DHCP_RELAY_LOCAL_ADDR "This relay's own IP on the client-facing network (giaddr)" "" is_valid_ipv4 "Invalid IPv4 address"
+    # What: blank = empty key: the relay uses IP_HTTP
+    # Why: dnsmasq_conf::render owns the blank case
+    # From: Issue #1683 | PR #2017
+    ask_checked DHCP_RELAY_LOCAL_ADDR "This relay's own IP on the client-facing network (giaddr, blank = $IP_HTTP)" "" is_valid_ipv4 "Invalid IPv4 address" 1
 
     ask_checked UPSTREAM_DHCP_IP "Upstream DHCP server IP" "$DHCP_GATEWAY" is_valid_ipv4 "Invalid IPv4 address"
 
-    print_ok "DHCP relay mode enabled — relaying ${DHCP_RELAY_LOCAL_ADDR} -> upstream ${UPSTREAM_DHCP_IP}"
+    print_ok "DHCP relay mode enabled — relaying ${DHCP_RELAY_LOCAL_ADDR:-$IP_HTTP} -> upstream ${UPSTREAM_DHCP_IP}"
 else
     print_ok "DHCP skipped — existing router DHCP remains active"
 fi
@@ -9955,7 +9959,7 @@ else
     printf "  %-26s %s\n" "DHCP server:"             "disabled"
 fi
 if [[ "$DHCP_MODE" = "dnsmasq-proxy" ]]; then
-    printf "  %-26s %s\n" "DHCP proxy subnet start:" "$DHCP_SUBNET_START"
+    printf "  %-26s %s\n" "DHCP proxy subnet start:" "${DHCP_SUBNET_START:-LAN of $IP_HTTP}"
     [[ -n "$DHCP_PROXY_INTERFACE" ]] && printf "  %-26s %s\n" "  Listen interface:" "$DHCP_PROXY_INTERFACE"
     [[ -n "$DHCP_PROXY_ROUTER" ]] && printf "  %-26s %s\n" "  Router option (PXE-scoped):" "$DHCP_PROXY_ROUTER"
     [[ -n "$DHCP_NTP_SERVERS" ]] && printf "  %-26s %s\n" "  NTP option (PXE-scoped):" "$DHCP_NTP_SERVERS"
