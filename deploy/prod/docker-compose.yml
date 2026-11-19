@@ -35,7 +35,7 @@ x-service: &service
 # From: Issue #1683 | PR #1912
 x-environment:
   stack: &env-stack
-    LANCACHE_SETTINGS_FILE: ${SOT_UI_SETTINGS_FILE:?SOT_UI_SETTINGS_FILE is required}
+    LANCACHE_SETTINGS_FILE: ${SOT_STACK_ENV_FILE:?SOT_STACK_ENV_FILE is required}
     SNMP_COMMUNITY: ${SNMP_COMMUNITY}
     KEEP_KNOWN_GOOD_CONFIGS: ${KEEP_KNOWN_GOOD_CONFIGS:-}
     IP_HTTP: ${IP_HTTP:?IP_HTTP is required}
@@ -156,6 +156,10 @@ services:
       # From: Issue #1683 | PR #1912
       - &mount-secrets shared-secrets:${SOT_LANCACHE_SHARED_SECRET_DIR}
       - &mount-ui-data-ro ui-data:${SOT_UI_DATA_DIR}:ro
+      # What: this dir with the stack .env, read only.
+      # Why: one file for setup.sh, Compose and the ui.
+      # From: Issue #1683 | PR #2017
+      - .:${SOT_STACK_ENV_DIR}:ro
       - watchdog-status:${SOT_STATUS_DIR}
       # What: stack CA, read only, for the expiry check.
       # Why: WATCHDOG_CERT_FILES names it; it was missing.
@@ -341,21 +345,10 @@ services:
     image: ${LANCACHE_IMAGE_REF_UI:?LANCACHE_IMAGE_REF_UI is required}
     environment:
       <<: [*env-stack, *env-services-ui, *env-proxy-ui, *env-dns-dhcp-ui, *env-dns-ui, *env-dhcp-ui]
-      # What: start values the UI shows from the install.
-      # Why: else the UI shows the SOT default instead.
-      # From: Issue #1683 | PR #1858
-      AUTO_UPDATE_ENABLED: ${AUTO_UPDATE_ENABLED:-}
-      NTP_ENABLED: ${NTP_ENABLED:-}
-      NTP_UPSTREAM_SERVERS: ${NTP_UPSTREAM_SERVERS:-}
       LANCACHE_IMAGE_REGISTRY: ${LANCACHE_IMAGE_REGISTRY:?LANCACHE_IMAGE_REGISTRY is required}
       LANCACHE_IMAGE_PREFIX: ${LANCACHE_IMAGE_PREFIX:?LANCACHE_IMAGE_PREFIX is required}
       LANCACHE_IMAGE_CHANNEL: ${LANCACHE_IMAGE_CHANNEL:-}
       LANCACHE_IMAGE_TAG: ${LANCACHE_IMAGE_TAG:?LANCACHE_IMAGE_TAG is required}
-      # What: setup.sh login under the ui key names
-      # Why: G1: the setup.sh password never applied
-      # From: Issue #1683 | PR #1985
-      UI_USER: ${UI_AUTH_USER:-}
-      UI_PASSWORD_HASH: ${UI_AUTH_PASSWORD_HASH:-}
       ALLOW_INSECURE_UI: ${ALLOW_INSECURE_UI:-}
       UI_SESSION_TTL_SECONDS: ${UI_SESSION_TTL_SECONDS:-}
       KEA_CTRL_TOKEN: ${KEA_CTRL_TOKEN}
@@ -380,6 +373,10 @@ services:
       - proxy-certs:${SOT_NGINX_DIR}/${SOT_NGINX_SUBDIR_CERTS}
       - *mount-secrets
       - ui-data:${SOT_UI_DATA_DIR}
+      # What: this dir with the .env; the ui writes it.
+      # Why: one file for setup.sh, Compose and the ui.
+      # From: Issue #1683 | PR #2017
+      - .:${SOT_STACK_ENV_DIR}
       - *mount-cdn-domains
       - proxy-cache:${SOT_CACHE_DIR}:ro
       - *mount-pdns-filter
