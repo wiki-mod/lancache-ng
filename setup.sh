@@ -1493,8 +1493,8 @@ ensure_stack_requirements_installed() {
     # Why: primary, Kea and DNS replies need a real parser
     # From: Issue #1683 | PR #1858
     install_missing_tools jq
-    # What: ip and the tools of the SOT secret generators
-    # Why: minimal hosts lack them; installs need both
+    # What: ip, flock and the SOT secret generator tools
+    # Why: minimal hosts lack them; flock guards the .env
     # From: Issue #1683 | PR #2017
     local generators tools_text
     local -a generator_tools=()
@@ -1502,7 +1502,7 @@ ensure_stack_requirements_installed() {
     tools_text=$(awk 'NF { print $2 }' <<< "$generators" | sort -u) \
         || die "Failed to read the secret generator tools (exit $?)."
     mapfile -t generator_tools <<< "$tools_text"
-    install_missing_tools ip "${generator_tools[@]}"
+    install_missing_tools ip flock "${generator_tools[@]}"
 
     if ! command_available docker; then
         install_docker
@@ -1743,22 +1743,77 @@ validate_env_value() {
     # From: Issue #1683 | PR #1858
     [[ -z "$value" ]] && return 0
 
-    # What: rejects newline and shell or .env metachars
-    # Why: Compose .env parsing would change the value
-    # From: Issue #1683 | PR #1858
-    case "$value" in
-        *$'\n'* | *'$'* | *'`'* | *'"'* | *"'"* | *\\* | *'#'* )
-            die "$key contains unsafe characters for .env. Cannot proceed. Value: $value"
-            ;;
-    esac
+    env_value_is_safe "$value" \
+        || die "$key contains unsafe characters for .env. Cannot proceed. Value: $value"
+}
 
+# What: false on newline and shell or .env metachars
+# Why: Compose .env parsing would change the value
+# From: Issue #1683 | PR #1858
+env_value_is_safe() {
+    case "$1" in
+        *$'\n'* | *'$'* | *'`'* | *'"'* | *"'"* | *\\* | *'#'* ) return 1 ;;
+    esac
     return 0
+}
+
+# What: runs a command under flock of <env file>.lock
+# Why: the ui writes the same .env; one writer at a time
+# From: Issue #1683 | PR #2017
+with_env_lock() {
+    local env_file="$1" fd rc=0
+    shift
+    # What: a nested call runs under the lock it holds
+    # Why: a second flock of the same file would deadlock
+    # From: Issue #1683 | PR #2017
+    if [[ "${_ENV_LOCK_HELD:-}" = "$env_file" ]]; then
+        "$@"
+        return
+    fi
+    # What: both helpers read no stdin
+    # Why: the caller's stdin holds the file to write
+    # From: Issue #1683 | PR #2017
+    install_missing_tools flock </dev/null
+    [[ -n "${_ENV_LOCK_WAIT:-}" ]] || _ENV_LOCK_WAIT=$(prod_env_default ENV_LOCK_WAIT_SECONDS </dev/null) || exit $?
+    exec {fd}>>"${env_file}.lock" || die "Cannot open ${env_file}.lock (exit $?)."
+    if ! flock -w "$_ENV_LOCK_WAIT" "$fd"; then
+        exec {fd}>&-
+        die "$env_file stayed locked by another writer (the Admin UI) for ${_ENV_LOCK_WAIT}s; rerun setup.sh."
+    fi
+    _ENV_LOCK_HELD="$env_file"
+    "$@" || rc=$?
+    _ENV_LOCK_HELD=""
+    exec {fd}>&-
+    return "$rc"
+}
+
+# What: appends KEY=VALUE to an env file under the lock
+# Why: one owner of the append and its explicit die
+# From: Issue #1683 | PR #2017
+append_env_line() {
+    with_env_lock "$1" append_env_line_locked "$@"
+}
+
+# What: the append itself; with_env_lock holds the lock
+# Why: errexit is ignored in tested subshells
+# From: Issue #1683 | PR #2017
+append_env_line_locked() {
+    local env_file="$1" key="$2" value="$3"
+    printf '%s=%s\n' "$key" "$value" >> "$env_file" \
+        || die "Failed to append $key to $env_file."
 }
 
 # What: rewrites KEY= lines of an env file (set or remove)
 # Why: a failed awk must never truncate or mangle the file
 # From: Issue #1683 | PR #1858
 rewrite_env_key() {
+    with_env_lock "$1" rewrite_env_key_locked "$@"
+}
+
+# What: the rewrite itself; with_env_lock holds the lock
+# Why: read and replace must see no other writer between
+# From: Issue #1683 | PR #2017
+rewrite_env_key_locked() {
     local env_file="$1" key="$2" value="$3" mode="$4" out
     out=$(ENV_KEY="$key" ENV_VALUE="$value" ENV_MODE="$mode" awk -F= '
         $1 == ENVIRON["ENV_KEY"] {
@@ -1784,11 +1839,7 @@ set_env_key() {
     if env_key_exists "$key" "$env_file"; then
         rewrite_env_key "$env_file" "$key" "$value" set
     else
-        # What: explicit die on append failure
-        # Why: errexit is ignored in tested subshells
-        # From: Issue #1683 | PR #1858
-        printf '%s=%s\n' "$key" "$value" >> "$env_file" \
-            || die "Failed to append $key to $env_file."
+        append_env_line "$env_file" "$key" "$value"
     fi
 }
 
@@ -1819,11 +1870,7 @@ set_env_assignment() {
     if env_key_exists "$key" "$env_file"; then
         rewrite_env_key "$env_file" "$key" "$assignment_value" set
     else
-        # What: same explicit die as set_env_key
-        # Why: errexit is ignored in tested subshells
-        # From: Issue #1683 | PR #1858
-        printf '%s=%s\n' "$key" "$assignment_value" >> "$env_file" \
-            || die "Failed to append $key to $env_file."
+        append_env_line "$env_file" "$key" "$assignment_value"
     fi
 }
 
@@ -1837,8 +1884,7 @@ append_env_key_if_missing() {
     # Why: empty placeholders must survive updates
     # From: Issue #1683 | PR #1858
     env_key_exists "$key" "$env_file" \
-        || printf '%s=%s\n' "$key" "$value" >> "$env_file" \
-        || die "Failed to append $key to $env_file."
+        || append_env_line "$env_file" "$key" "$value"
 }
 
 # What: fills a default only when missing or empty
@@ -1858,11 +1904,7 @@ set_env_key_if_empty_or_missing() {
             set_env_key "$key" "$value" "$env_file"
         fi
     else
-        # What: same explicit die as set_env_key
-        # Why: errexit is ignored in tested subshells
-        # From: Issue #1683 | PR #1858
-        printf '%s=%s\n' "$key" "$value" >> "$env_file" \
-            || die "Failed to append $key to $env_file."
+        append_env_line "$env_file" "$key" "$value"
     fi
 }
 
@@ -1876,8 +1918,7 @@ append_env_assignment_if_missing() {
     # Why: keeps ${VAR:-...} interpolation intact
     # From: Issue #1683 | PR #1858
     env_key_exists "$key" "$env_file" \
-        || printf '%s=%s\n' "$key" "$assignment_value" >> "$env_file" \
-        || die "Failed to append $key to $env_file."
+        || append_env_line "$env_file" "$key" "$assignment_value"
 }
 
 # What: migrates an old key to a new one, or seeds fallback
@@ -4443,6 +4484,7 @@ migrate_env_for_update() (
 
     [[ -f "$env_file" ]] \
         || die "Missing $env_file. Cannot update safely because local runtime configuration is not available."
+    merge_retired_ui_settings "$install_dir" "$env_file" merge
 
     # What: a failed run puts the original .env back
     # Why: no failed check may leave .env half-written
@@ -4830,6 +4872,7 @@ package_name_for_tool() {
         pacman:dig) printf 'bind\n' ;;
         dnf:ss|dnf:ip|yum:ss|yum:ip) printf 'iproute\n' ;;
         *:ss|*:ip) printf 'iproute2\n' ;;
+        *:flock) printf 'util-linux\n' ;;
         apt-get:dig)
             if apt_package_available bind9-dnsutils; then
                 printf '%s\n' bind9-dnsutils
@@ -6974,15 +7017,6 @@ cmd_auto_update() {
     fi
 }
 
-# What: true if the UI channel is in the selectable list
-# Why: a retired or unknown name is a no-op on a tick
-# From: Issue #1683 | PR #1858
-lancache_ui_channel_override_is_valid() {
-    local selectable
-    selectable=$(lancache_selectable_channels) || exit $?
-    list_has_line "$1" "$selectable"
-}
-
 # What: channels the wizard offers, release channel last
 # Why: only SOT channel names; former names never show
 # From: Issue #1683 | PR #1858
@@ -6994,48 +7028,77 @@ lancache_selectable_channels() {
     printf '%s\n' "$release"
 }
 
-# What: true for a positive whole number of GiB
-# Why: a leading 0 must parse as decimal, not octal
-# From: Issue #1683 | PR #1858
-lancache_ui_cache_max_gb_override_is_valid() {
-    [[ "$1" =~ ^[0-9]+$ ]] || return 1
-    (( 10#$1 > 0 ))
-}
-
-# What: reads one KEY from the ui-data settings file
-# Why: checks the volume exists; docker run would create it
-# From: Issue #1683 | PR #1858
-lancache_read_ui_settings_override() {
-    local install_dir="$1" env_file="$2" key="$3" project volume raw rc=0 settings_file line found=""
+# What: the ui-data volume name; empty if it is absent
+# Why: docker run -v would create a missing volume
+# From: Issue #1683 | PR #2017
+ui_data_volume() {
+    local install_dir="$1" env_file="$2" project volume rc=0
     if ! command_available docker; then
-        print_skip "Reading the UI setting $key: docker is not available"
+        print_skip "Reading the old Admin UI settings: docker is not available"
         return 0
     fi
-    require_helper_image
     project=$(compose_project_name "$install_dir" "$env_file") \
         || die "Cannot resolve the compose project of $install_dir (exit $?)."
     volume="${project}_ui-data"
     docker_volume_exists "$volume" || rc=$?
-    if [[ "$rc" -eq 1 ]]; then
-        print_skip "Reading the UI setting $key: Docker volume $volume does not exist yet"
-        return 0
-    fi
-    [[ "$rc" -eq 0 ]] || die "Cannot check the Docker volume $volume; the UI settings were not read."
-    settings_file=$(prod_env_default UI_SETTINGS_FILE) || exit $?
-    settings_file="${settings_file##*/}"
+    [[ "$rc" -eq 1 ]] && return 0
+    [[ "$rc" -eq 0 ]] || die "Cannot check the Docker volume $volume; the old Admin UI settings were not read."
+    printf '%s\n' "$volume"
+}
+
+# What: merges the retired ui settings file into the .env
+# Why: one file; the ui values were newer, so they win
+# From: Issue #1683 | PR #2017
+merge_retired_ui_settings() {
+    local install_dir="$1" env_file="$2" mode="$3" volume name raw line key value count=0
+    volume=$(ui_data_volume "$install_dir" "$env_file") || exit $?
+    [[ -n "$volume" ]] || return 0
+    require_helper_image
+    name=$(prod_env_default UI_SETTINGS_FILE_RETIRED) || exit $?
+    name="${name##*/}"
     # What: the file name goes in as $1, not as code
     # Why: a value inside sh -c text would run as shell
     # From: Issue #1683 | PR #1858
     raw=$(docker run --rm -v "${volume}:/volume:ro" "$LANCACHE_HELPER_IMAGE" \
-        sh -c 'if [ -e "/volume/$1" ]; then cat "/volume/$1"; fi' sh "$settings_file") \
-        || die "Failed to read the UI settings from Docker volume $volume (exit $?)."
-    # What: the last KEY= line of $raw wins
-    # Why: a loop reads it all; no early-exit pipe
-    # From: Issue #1377
-    while IFS= read -r line; do
-        if [[ "$line" == "${key}="* ]]; then found="${line#"${key}="}"; fi
-    done <<<"$raw"
-    if [[ -n "$found" ]]; then printf '%s\n' "$found"; fi
+        sh -c 'if [ -e "/volume/$1" ]; then cat "/volume/$1"; fi' sh "$name") \
+        || die "Failed to read the old Admin UI settings from Docker volume $volume (exit $?)."
+    [[ -n "$raw" ]] || return 0
+    # What: install keeps its answers; update merges
+    # Why: "Overwrite? y" means the wizard answers count
+    # From: Issue #1683 | PR #2017
+    if [[ "$mode" = merge ]]; then
+        print_step "Merging the Admin UI settings into $env_file"
+        while IFS= read -r line; do
+            [[ "$line" == *=* ]] || continue
+            key="${line%%=*}"
+            value="${line#*=}"
+            # What: old ui key names and the raw PHC hash
+            # Why: the .env holds UI_AUTH_* and bars "$"
+            # From: Issue #1683 | PR #2017
+            case "$key" in
+                UI_USER) key=UI_AUTH_USER ;;
+                UI_PASSWORD_HASH)
+                    key=UI_AUTH_PASSWORD_HASH
+                    if [[ "$value" == '$'* ]]; then
+                        value=$(printf '%s' "$value" | openssl base64 -A | tr '+/' '-_' | tr -d '=') \
+                            || die "Failed to encode the Admin UI password hash (exit $?)."
+                    fi
+                    ;;
+            esac
+            # What: names the key, not its value, and a fix
+            # Why: the old ui file allowed what .env bars
+            # From: Issue #1683 | PR #2017
+            env_value_is_safe "$value" \
+                || die "The Admin UI setting $key holds a character the .env cannot keep (\$ \` \" ' \\ #). Change it in the Admin UI of the running version, then rerun setup.sh update."
+            set_env_key "$key" "$value" "$env_file"
+            count=$((count + 1))
+        done <<< "$raw"
+        print_ok "Merged $count Admin UI setting(s) into $env_file"
+    fi
+    docker run --rm -v "${volume}:/volume" "$LANCACHE_HELPER_IMAGE" \
+        sh -c 'mv "/volume/$1" "/volume/$1.merged"' sh "$name" \
+        || die "Failed to retire the old Admin UI settings file in $volume (exit $?)."
+    print_ok "Retired the old Admin UI settings file ($name.merged in $volume)"
 }
 
 # What: syncs auto-update timer with AUTO_UPDATE_ENABLED
@@ -7058,30 +7121,12 @@ reconcile_auto_update_timer_state() {
     fi
 }
 
-# What: copies a valid UI setting into .env when it differs
-# Why: channel and DHCP mode share read, check and write
-# From: Issue #1683 | PR #1858
-fold_ui_setting_into_env() {
-    local install_dir="$1" env_file="$2" key="$3" check="$4" label="$5" ui_value current
-    ui_value=$(lancache_read_ui_settings_override "$install_dir" "$env_file" "$key") \
-        || die "Cannot read the UI setting $key (exit $?)."
-    if [[ -n "$ui_value" ]] && "$check" "$ui_value"; then
-        current=$(get_env_var "$key" "$env_file") || exit $?
-        if [[ "$ui_value" != "$current" ]]; then
-            set_env_key "$key" "$ui_value" "$env_file"
-            print_ok "$label updated from Admin UI: ${current:-<unset>} -> $ui_value"
-        fi
-    fi
-}
-
-# What: copies valid Admin UI settings into .env per tick
-# Why: the next compose up must use the UI choice
-# From: Issue #819 | PR #831
+# What: syncs the auto-update timer with the .env per tick
+# Why: the ui writes the .env; the next compose up reads it
+# From: Issue #1683 | PR #2017
 cmd_converge_reconcile() {
     ensure_default_install_dir
     local install_dir="${1:-$DEFAULT_INSTALL_DIR}" env_file
-    local ui_auto_update current_auto_update
-    local ui_cache_max_gb current_cache_max_gb
 
     install_dir=$(resolve_stack_dir "$install_dir") || exit $?
     # What: a tick before the first install does nothing
@@ -7091,51 +7136,12 @@ cmd_converge_reconcile() {
         print_skip "Converge tick: $install_dir/docker-compose.yml does not exist yet"
         return 0
     fi
-    if ! command_available docker; then
-        print_skip "Converge tick: docker is not available"
-        return 0
-    fi
     env_file=$(runtime_env_file_for_install_dir "$install_dir")
     if [[ ! -f "$env_file" ]]; then
         print_skip "Converge tick: $env_file does not exist yet"
         return 0
     fi
-
-    fold_ui_setting_into_env "$install_dir" "$env_file" LANCACHE_IMAGE_CHANNEL lancache_ui_channel_override_is_valid "Release channel"
-
-    ui_auto_update=$(lancache_read_ui_settings_override "$install_dir" "$env_file" "AUTO_UPDATE_ENABLED") \
-        || die "Cannot read the UI setting AUTO_UPDATE_ENABLED (exit $?)."
-    if [[ "$ui_auto_update" = "0" || "$ui_auto_update" = "1" ]]; then
-        current_auto_update=$(env_or_sot_default AUTO_UPDATE_ENABLED "$env_file") || exit $?
-        if [[ "$ui_auto_update" != "$current_auto_update" ]]; then
-            set_env_key AUTO_UPDATE_ENABLED "$ui_auto_update" "$env_file"
-            print_ok "Scheduled automatic updates setting updated from Admin UI: ${ui_auto_update} (was ${current_auto_update})"
-        fi
-    fi
-
-    # What: folds the Admin UI DHCP mode into .env
-    # Why: the dhcp container reads DHCP_MODE at its start
-    # From: Issue #1683 | PR #1912
-    fold_ui_setting_into_env "$install_dir" "$env_file" DHCP_MODE is_valid_dhcp_mode "DHCP mode"
-
-    # What: reconciles the timer with .env's value
-    # Why: a manual .env edit must also take effect
-    # From: Issue #1683 | PR #1858
     reconcile_auto_update_timer_state "$env_file"
-
-    # What: UI cache size -> CACHE_MAX_GB
-    # Why: nginx and the dashboard read one value pair
-    # From: Issue #1069 | PR #1858
-    ui_cache_max_gb=$(lancache_read_ui_settings_override "$install_dir" "$env_file" "CACHE_MAX_GB") \
-        || die "Cannot read the UI setting CACHE_MAX_GB (exit $?)."
-    if [[ -n "$ui_cache_max_gb" ]] && lancache_ui_cache_max_gb_override_is_valid "$ui_cache_max_gb"; then
-        ui_cache_max_gb=$(( 10#$ui_cache_max_gb ))
-        current_cache_max_gb=$(get_env_var CACHE_MAX_GB "$env_file") || exit $?
-        if [[ "$ui_cache_max_gb" != "$current_cache_max_gb" ]]; then
-            set_env_key CACHE_MAX_GB "$ui_cache_max_gb" "$env_file"
-            print_ok "Cache size updated from Admin UI: ${current_cache_max_gb:-<unset>} GB -> ${ui_cache_max_gb} GB"
-        fi
-    fi
 }
 
 # What: read-only diagnostics that never repair
@@ -7974,7 +7980,7 @@ reset_dns_to_last_known_good_config() {
 # From: Issue #1683 | PR #1858
 restore_update_ip_env() {
     local install_dir="$1" env_file="$2" saved="$3" rc=0
-    write_file_atomically "$env_file" <<< "$saved" || rc=$?
+    with_env_lock "$env_file" write_file_atomically "$env_file" <<< "$saved" || rc=$?
     if [[ "$rc" -ne 0 ]]; then
         print_error "Failed to write the previous $env_file back (exit $rc)."
         return 1
@@ -7992,7 +7998,7 @@ restore_update_ip_env() {
 # From: Issue #1683 | PR #1985
 cmd_reset_sign_in() {
     ensure_default_install_dir
-    local install_dir="$DEFAULT_INSTALL_DIR" assume_yes=0 env_file project out rc=0
+    local install_dir="$DEFAULT_INSTALL_DIR" assume_yes=0 env_file project
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --yes|-y) assume_yes=1 ;;
@@ -8018,15 +8024,16 @@ cmd_reset_sign_in() {
     # From: Issue #1683 | PR #2017
     trap resume_convergence_for_command EXIT
     pause_convergence_for_command
-    out=$(stack_compose "$install_dir" "$env_file" -p "$project" exec -T ui lancache-ui reset-sign-in 2>&1) || rc=$?
-    [[ $rc -eq 0 ]] || die "lancache-ui reset-sign-in in the ui container failed (exit $rc): $out"
-    # What: the .env hash goes too; the open UI is allowed
-    # Why: compose passes it; no hash and no opt-out stop ui
+    # What: hash out, open UI allowed, in the one .env
+    # Why: no hash and no opt-out stop the ui (fail closed)
     # From: Issue #1683 | PR #2017
     set_env_key UI_AUTH_PASSWORD_HASH "" "$env_file"
     set_env_key ALLOW_INSECURE_UI true "$env_file"
-    stack_compose "$install_dir" "$env_file" -p "$project" up -d ui >/dev/null \
-        || die "The ui container did not start again (exit $?); sign-in turns off on its next start."
+    # What: a restart; the ui reads the .env only at start
+    # Why: the compose config is unchanged, up -d keeps it
+    # From: Issue #1683 | PR #2017
+    stack_compose "$install_dir" "$env_file" -p "$project" restart ui >/dev/null \
+        || die "The ui container did not restart (exit $?); sign-in turns off on its next start."
     print_ok "Admin UI sign-in is off. Set a new user name and password under General, Sign-in."
 }
 
@@ -8261,7 +8268,7 @@ cmd_configure_upstream_dns() {
 
     print_step "Reading current configuration"
 
-    local env_file ip_http ip_https lan ui_lan services apply_rc=0
+    local env_file ip_http ip_https lan services apply_rc=0
     local old_servers old_zones old_unsigned old_reverse dhcp_mode
     local -a all_services new_entries
     env_file=$(runtime_env_file_for_install_dir "$install_dir")
@@ -8274,11 +8281,6 @@ cmd_configure_upstream_dns() {
     ip_http=$(get_env_var IP_HTTP "$env_file") || exit $?
     ip_https=$(get_env_var IP_HTTPS "$env_file") || exit $?
     lan=$(env_or_sot_default DHCP_DOMAIN "$env_file") || exit $?
-    # What: the LAN domain saved in the UI wins
-    # Why: live 06.11.: home.lan from the UI was not seen
-    # From: Issue #1918
-    ui_lan=$(lancache_read_ui_settings_override "$install_dir" "$env_file" DHCP_DOMAIN) || exit $?
-    [[ -z "$ui_lan" ]] || lan="$ui_lan"
 
     printf '\n  %sCurrent configuration:%s\n' "${BOLD}" "${RESET}"
     printf "    DNS servers:        %s\n" "${old_servers:-none (LanCache-NG resolves names itself)}"
@@ -9869,10 +9871,11 @@ validate_initial_env_local() {
 }
 
 validate_initial_env_local
-render_initial_env_local | write_file_atomically "$ENV_LOCAL" \
+render_initial_env_local | with_env_lock "$ENV_LOCAL" write_file_atomically "$ENV_LOCAL" \
     || die "Failed to write $ENV_LOCAL (exit $?)."
 print_ok ".env.local written: $ENV_LOCAL"
 write_lancache_image_refs "$ENV_LOCAL" "$LANCACHE_IMAGE_REFS"
+merge_retired_ui_settings "$INSTALL_DIR" "$ENV_LOCAL" retire
 
 # What: step 10: creates the state directories
 # Why: compose bind mounts need existing directories
