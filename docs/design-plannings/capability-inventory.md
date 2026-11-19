@@ -131,7 +131,7 @@ Provided by `dhcp`, `kea_conf`, `kea`, `dhcp_probe` and `dnsmasq_conf` in
 
 - **ProxyDHCP and relay.** `dnsmasq_conf::render` renders `dnsmasq.conf` for
   `dnsmasq-proxy` and `dnsmasq-relay` (routes `/dhcp/proxy`, `/dhcp/relay`).
-  An empty `DHCP_SUBNET_START` makes the proxy range follow `DHCP_SUBNET`
+  An empty `DHCP_SUBNET_START` makes the proxy range use `IP_HTTP`
   (`proxy_range`); an empty `DHCP_RELAY_LOCAL_ADDR` makes the relay use this
   host's first non-loopback address (`recursor_conf::own_ips`).
 - **Options.** Router (3), DNS (6), domain (15), NTP (42) and custom options
