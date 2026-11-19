@@ -2136,14 +2136,13 @@ install_state_root() {
     printf '%s\n' "$state"
 }
 
-# What: the env file, the base .env and the state root
-# Why: backup and the log bundle resolve the same three
-# From: Issue #1683 | PR #1858
+# What: the one env file and the state root of a stack
+# Why: backup and the log bundle resolve the same two
+# From: Issue #1683 | PR #2017
 stack_env_context() {
     local install_dir="$1"
-    local -n _env_ref="$2" _base_env_ref="$3" _state_ref="$4"
+    local -n _env_ref="$2" _state_ref="$3"
     _env_ref=$(runtime_env_file_for_install_dir "$install_dir")
-    _base_env_ref="$install_dir/.env"
     _state_ref=$(install_state_root "$install_dir" "$_env_ref") \
         || die "Cannot resolve the state root of $install_dir (exit $?)."
 }
@@ -4913,14 +4912,13 @@ install_missing_tools() {
 # From: Issue #1683 | PR #1858
 backup_manifest() {
     local install_dir="$1" mode="$2"
-    local env_file="" cache_env_file="" state_dir=""
+    local env_file="" state_dir=""
     local cache_dir keys key dir sub bundle copy
-    stack_env_context "$install_dir" env_file cache_env_file state_dir
+    stack_env_context "$install_dir" env_file state_dir
     cache_dir=$(get_env_var CACHE_DIR "$env_file") || exit $?
     cache_dir="${cache_dir:-$state_dir/cache}"
 
-    printf '%s\n' "$cache_env_file"
-    [[ "$env_file" != "$cache_env_file" ]] && printf '%s\n' "$env_file"
+    printf '%s\n' "$env_file"
     printf '%s\n' "$install_dir/docker-compose.yml"
     # What: quickstart helper copies from the SOT list
     # Why: restore brings back what a quickstart had
@@ -7440,11 +7438,10 @@ cmd_create_logs_for_issue() (
     dest_root=$(realpath -m "$dest_root")
     install_missing_tools tar
 
-    local env_file="" cache_env_file="" state_dir=""
-    stack_env_context "$install_dir" env_file cache_env_file state_dir
+    local env_file="" state_dir=""
+    stack_env_context "$install_dir" env_file state_dir
 
     local -a env_files=("$env_file")
-    [[ "$cache_env_file" != "$env_file" && -f "$cache_env_file" ]] && env_files+=("$cache_env_file")
 
     local stamp ext archive
     secrets_file=""
@@ -7527,14 +7524,10 @@ cmd_create_logs_for_issue() (
     done
 
     print_step "Redacting configuration"
-    logbundle_redact_env_file "$cache_env_file" "$dest/env/.env"
-    logbundle_redact_stream "$secrets_file" < "$dest/env/.env" > "$dest/env/.env.tmp"
-    mv "$dest/env/.env.tmp" "$dest/env/.env"
-    if [[ "$env_file" != "$cache_env_file" ]]; then
-        logbundle_redact_env_file "$env_file" "$dest/env/.env.local"
-        logbundle_redact_stream "$secrets_file" < "$dest/env/.env.local" > "$dest/env/.env.local.tmp"
-        mv "$dest/env/.env.local.tmp" "$dest/env/.env.local"
-    fi
+    local env_copy="$dest/env/${env_file##*/}"
+    logbundle_redact_env_file "$env_file" "$env_copy"
+    logbundle_redact_stream "$secrets_file" < "$env_copy" > "$env_copy.tmp"
+    mv "$env_copy.tmp" "$env_copy"
 
     print_step "Known-good-snapshot directory listings"
     logbundle_named_volume_listing "$install_dir" "$env_file" proxy-config-snapshots config-snapshots \
