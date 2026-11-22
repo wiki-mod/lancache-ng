@@ -51,9 +51,9 @@ ENV LANCACHE_RUNTIME_GID=${LANCACHE_RUNTIME_GID} \
     LANCACHE_RUNTIME_DEFAULTS=${LANCACHE_RUNTIME_DEFAULTS} \
     LANCACHE_RUNTIME_SCHEMA=${LANCACHE_RUNTIME_SCHEMA}
 
-# What: NGINX_LINK_PARTS point into NGINX_CONF_DIR.
-# Why: ui renders them; plain nginx -t sees the live file
-# From: Issue #1683 | PR #1980
+# What: links into NGINX_CONF_DIR; own nginx.conf loads.
+# Why: module lines first, then the ui's live nginx.conf.
+# From: Issue #1683 | PR #2017
 RUN set -e; \
     declare -A v; IFS='|' read -ra kv <<< "${LANCACHE_RUNTIME_DEFAULTS}"; \
     for p in "${kv[@]}"; do v["${p%%=*}"]="${p#*=}"; done; \
@@ -64,7 +64,10 @@ RUN set -e; \
     src="$(x "${v[NGINX_DIR]}")"; dst="$(x "${v[NGINX_CONF_DIR]}")"; \
     for part in ${v[NGINX_LINK_PARTS]}; do \
       rm -rf "${src:?}/${part}"; ln -s "${dst}/${part}" "${src}/${part}"; \
-    done
+    done; \
+    rm -f "${src}/nginx.conf"; \
+    printf 'include %s/modules/*.conf;\ninclude %s/nginx.conf;\n' \
+      "${src}" "${dst}" > "${src}/nginx.conf"
 
 # What: one supervise-daemon script per SOT process.
 # Why: OpenRC restarts crashes; @KEY@ e.g. CONFIG_DIR.
