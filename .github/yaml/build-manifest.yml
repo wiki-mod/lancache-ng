@@ -80,11 +80,11 @@ services:
       - syslog-ng=/usr/sbin/syslog-ng,-F,-f,@SYSLOG_CONF_FILE@
       - chronyd=/usr/sbin/chronyd,-d,-f,@CHRONY_CONF_FILE@
       - snmpd=/usr/sbin/snmpd,-f,-C,-c,@SNMPD_CONF_FILE@
-    # What: NTP_ENABLED read from the stack .env; 0 = idle.
+    # What: NTP_ENABLED of .env, .env.local wins; 0 = idle.
     # Why: chronyd idles at 0 and logs no ERROR line.
     # From: Issue #1683 | PR #2017
     process_pre:
-      - 'chronyd=x="${NTP_ENABLED:-1}"; f=@STACK_ENV_FILE@; v=""; if [ -r "$f" ]; then v="$(sed -n "s/^NTP_ENABLED=//p" "$f")"; fi; if [ -n "$v" ]; then x="${v##*[[:space:]]}"; fi; if [ "$x" = 0 -o "$x" = false ]; then einfo "NTP_ENABLED=$x: chronyd off"; command=/bin/sleep; command_args=2147483647; return 0; fi; chown chrony:chrony @NTP_STATE_DIR@'
+      - 'chronyd=x="${NTP_ENABLED:-1}"; f=@STACK_ENV_FILE@; v=""; for g in "$f" "$f.local"; do if [ -r "$g" ] && grep -q "^NTP_ENABLED=" "$g"; then v="$(sed -n "s/^NTP_ENABLED=//p" "$g")"; fi; done; if [ -n "$v" ]; then x="${v##*[[:space:]]}"; fi; if [ "$x" = 0 -o "$x" = false ]; then einfo "NTP_ENABLED=$x: chronyd off"; command=/bin/sleep; command_args=2147483647; return 0; fi; chown chrony:chrony @NTP_STATE_DIR@'
     # What: accounts and dirs ci.sh image-setup creates.
     # Why: no RUN logic in the Dockerfile; @KEY@ = default.
     # From: Issue #1683 | PR #1912
@@ -627,7 +627,7 @@ runtime:
     # Why: one file for setup.sh, Compose and the ui
     # From: Issue #1683 | PR #2017
     - STACK_ENV_DIR=/stack
-    - STACK_ENV_FILE=@STACK_ENV_DIR@/.env.local
+    - STACK_ENV_FILE=@STACK_ENV_DIR@/.env
     # What: the old ui settings file; update merges it once
     # Why: its values move into the stack .env, then it goes
     # From: Issue #1683 | PR #2017
