@@ -21,6 +21,10 @@ services:
       - IP_HTTP=${IP_HTTP:?IP_HTTP is required}
       - IP_HTTPS=${IP_HTTPS:-}
       - PDNS_API_KEY=${PDNS_API_KEY}
+      # What: the compose project of this secondary.
+      # Why: the sync finds the dns container by project.
+      # From: Issue #1683
+      - COMPOSE_PROJECT=${COMPOSE_PROJECT_NAME}
       # What: own snmp community from setup.sh
       # Why: render-dns writes snmpd.conf with it
       # From: Issue #1683
@@ -132,6 +136,36 @@ services:
     # Why: pdns starts after this run may begin.
     # From: Issue #1683
     restart: on-failure
+    depends_on:
+      dns:
+        condition: service_started
+    healthcheck:
+      disable: true
+    logging:
+      driver: local
+
+  # What: long-running ui run: follow the primary's domains.
+  # Why: a LAN domain added on the primary reaches here.
+  # From: Issue #1683
+  sync:
+    image: ${LANCACHE_IMAGE_REF_UI:?LANCACHE_IMAGE_REF_UI is required}
+    command: ["secondary-sync"]
+    environment: *dns-env
+    volumes:
+      # What: write the dns configs, read the CDN list.
+      # Why: same renderer as the render one-shot.
+      # From: Issue #1683
+      - lancache-config:${SOT_CONFIG_DIR}
+      - ./cdn-domains.txt:${SOT_CDN_DOMAINS_FILE}:ro
+      # What: the persistent secrets dir of this node.
+      # Why: a stable recursor api key, no config churn.
+      # From: Issue #1683
+      - dns-config-snapshots:${SOT_DNS_SNAPSHOT_MOUNT}
+      # What: the Docker socket to reload the dns recursors.
+      # Why: rec_control runs inside the dns container.
+      # From: Issue #1683
+      - ${SOT_DOCKER_SOCKET}:${SOT_DOCKER_SOCKET}
+    restart: always
     depends_on:
       dns:
         condition: service_started
