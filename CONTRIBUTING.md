@@ -178,7 +178,7 @@ passes all of them.
 `deploy/prod/docker-compose.yml` uses `image:` only and never builds. To run
 local changes, build each changed service, tag it to the image reference the
 compose file resolves (`LANCACHE_IMAGE_REGISTRY`, `LANCACHE_IMAGE_PREFIX`,
-`LANCACHE_IMAGE_TAG` in `deploy/prod/.env.local`), then run
+`LANCACHE_IMAGE_TAG` in `deploy/prod/.env`), then run
 `docker compose -f deploy/prod/docker-compose.yml up -d`. Compose pulls only a
 missing image, so a matching local tag is used. For another host, push the
 image to a registry it can pull from or load it into its Docker daemon.
