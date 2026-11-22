@@ -13393,7 +13393,7 @@ _ci_validate_proxy() {
     fi
 }
 
-# What: setup.sh args on a one-run .env.local; @INST@=dir.
+# What: setup.sh args on a one-run .env; @INST@=dir.
 # Why: ci.sh runs setup.sh commands; it loads none of it.
 # From: Issue #1683 | PR #1858
 _ci_setup_run() {   # out rc errfile ("" = merge) env args
@@ -13411,7 +13411,7 @@ _ci_setup_run() {   # out rc errfile ("" = merge) env args
         [ "${_ci_su_a}" != @INST@ ] || _ci_su_a="${_ci_su_inst}"
         _ci_su_args+=("${_ci_su_a}")
     done
-    # What: one setup.sh run at a time holds .env.local.
+    # What: one setup.sh run at a time holds the .env.
     # Why: parallel checks share the one install dir.
     # From: Issue #1683 | PR #1858
     exec {_ci_su_fd}>"${CI_TMPDIR}/setup-run.lock"
@@ -13420,13 +13420,13 @@ _ci_setup_run() {   # out rc errfile ("" = merge) env args
         ci_error "[CI-ERROR-CORE-0160]" "lock=\"${CI_TMPDIR}/setup-run.lock\" reason=\"lock for the setup.sh run failed\"" "${_ci_su_lk}"
         return 2
     fi
-    _ci_validate_env_local "${_ci_su_inst}" "${_ci_su_env}" || { exec {_ci_su_fd}>&-; return 2; }
+    _ci_validate_env_file "${_ci_su_inst}" "${_ci_su_env}" || { exec {_ci_su_fd}>&-; return 2; }
     if [ -n "${_ci_su_err}" ]; then
         _ci_su_out="$(bash "${_ci_su_bin}" "${_ci_su_args[@]}" 2>"${_ci_su_err}")" || _ci_su_rc=$?
     else
         _ci_su_out="$(bash "${_ci_su_bin}" "${_ci_su_args[@]}" 2>&1)" || _ci_su_rc=$?
     fi
-    rm -f "${_ci_su_inst}/.env.local"
+    rm -f "${_ci_su_inst}/.env"
     exec {_ci_su_fd}>&-
 }
 
@@ -13534,18 +13534,23 @@ _ci_fill() {
     REPLY="${out}${text}"
 }
 
-# What: writes a deploy/prod install's .env.local, mode 600.
+# What: writes a deploy/prod install's .env, mode 600.
 # Why: setup.sh reads it; validate never overwrites one.
 # From: Issue #763 | PR #1912
-_ci_validate_env_local() {
-    local inst="$1" content="$2"
-    if [ -e "${inst}/.env.local" ]; then
-        ci_log "[CI-ERROR-VALIDATE-0113]" "path=\"${inst}/.env.local\" reason=\"an .env.local exists; validate never overwrites it\""
-        return 2
-    fi
-    if ! (umask 077 && printf '%s' "${content:+${content}$'\n'}" > "${inst}/.env.local"); then
-        ci_log "[CI-ERROR-VALIDATE-0093]" "dir=\"${inst}\" reason=\"setup.sh .env.local not written\""
-        rm -f "${inst}/.env.local"
+_ci_validate_env_file() {
+    local inst="$1" content="$2" f
+    # What: no .env and no .env.local may exist yet
+    # Why: an .env.local would win over the run's values
+    # From: Issue #1683 | PR #2017
+    for f in "${inst}/.env" "${inst}/.env.local"; do
+        if [ -e "${f}" ]; then
+            ci_log "[CI-ERROR-VALIDATE-0113]" "path=\"${f}\" reason=\"the file exists; validate never overwrites it\""
+            return 2
+        fi
+    done
+    if ! (umask 077 && printf '%s' "${content:+${content}$'\n'}" > "${inst}/.env"); then
+        ci_log "[CI-ERROR-VALIDATE-0093]" "dir=\"${inst}\" reason=\"setup.sh .env not written\""
+        rm -f "${inst}/.env"
         return 2
     fi
 }
@@ -19209,7 +19214,7 @@ _ci_state_keys() {
 }
 
 # What: SOT_ and state-dir rows setup.sh compose sets.
-# Why: setup.sh owns them; ci.sh runs it, $1 = .env.local.
+# Why: setup.sh owns them; ci.sh runs it, $1 = .env text.
 # From: Issue #1683 | PR #1858
 _ci_sot_compose_env() {
     local out rc err keys line k miss=""
