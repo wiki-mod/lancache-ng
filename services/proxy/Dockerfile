@@ -21,11 +21,6 @@ FROM ${ALPINE_IMAGE:-scratch}
 # From: Issue #1683 | PR #1980
 ARG BUILD_IDENTITY
 ARG APK_PACKAGES
-# What: extra apk repos and keys (nginx.org), from SOT.
-# Why: apk-setup reads them; empty for other images.
-# From: Issue #1683 | PR #1980
-ARG APK_TAGGED_REPOS
-ARG APK_KEYS
 ARG APK_BOOTSTRAP
 # What: bash first; every later RUN uses it.
 # Why: ci.sh is bash; ash is not allowed.
@@ -36,15 +31,15 @@ ARG CI_RETRY_MAX_ATTEMPTS
 ARG CI_RETRY_BACKOFF_BASE_SECONDS
 ARG CI_DOWNLOAD_CONNECT_TIMEOUT
 ARG CI_DOWNLOAD_STALL_SECONDS
-# What: packages and accounts through ci.sh.
-# Why: ci.sh owns repos, proxy CA, users and dirs.
-# From: Issue #1683 | PR #1980
-RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
-    --mount=type=secret,id=project_selfhosted_proxy_ca \
-    bash /usr/local/bin/ci.sh apk-setup ${APK_PACKAGES}
+# What: accounts first, then packages, through ci.sh.
+# Why: nginx keeps its SOT uid; its package reuses it.
+# From: Issue #1683 | PR #2017
 ARG IMAGE_SETUP
 RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
     bash /usr/local/bin/ci.sh image-setup
+RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
+    --mount=type=secret,id=project_selfhosted_proxy_ca \
+    bash /usr/local/bin/ci.sh apk-setup ${APK_PACKAGES}
 
 # What: shared gid, SOT defaults and SOT schema.
 # Why: the programs read them as env; compose names none.
