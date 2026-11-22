@@ -157,6 +157,7 @@ services:
     # From: Issue #1683 | PR #2017
     smoke:
       - 'printf "include /etc/nginx/modules/*.conf;\nevents {}\nstream { server { listen 127.0.0.1:9; ssl_preread on; return 1; } }\nhttp { server { listen 127.0.0.1:8; slice 1m; } }\n" > /tmp/smoke.conf && nginx -e stderr -t -q -c /tmp/smoke.conf'
+      - 'grep -q "modules/\*.conf" /etc/nginx/nginx.conf'
   dns:
     context: services/dns
     labels: [dns, pdns]
@@ -906,9 +907,9 @@ runtime:
     - NGINX_UID=100
     - NGINX_GID=101
     # What: NGINX_DIR parts the proxy image links
-    # Why: one nginx.conf; no package file stays
-    # From: Issue #1683
-    - NGINX_LINK_PARTS=nginx.conf conf.d stream.d proxy-params.conf
+    # Why: the ui renders them; package examples go
+    # From: Issue #1683 | PR #2017
+    - NGINX_LINK_PARTS=conf.d stream.d proxy-params.conf
     - NGINX_SUBDIR_CA=ssl/ca
     - NGINX_SUBDIR_CERTS=ssl/certs
     - CA_CERT_FILE=ca.crt
