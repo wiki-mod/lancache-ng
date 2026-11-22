@@ -63,12 +63,15 @@ Healthchecks:
 ## Configuration flow
 
 1. The user saves a setting in the ui. The ui writes the changed keys into
-   the stack `.env` (`STACK_ENV_FILE`: the install's `deploy/prod/.env.local`,
+   the stack `.env` (`STACK_ENV_FILE`: the install's `deploy/prod/.env`,
    mounted at `STACK_ENV_DIR`). `setup.sh` writes the same file; both hold a
-   flock of `<file>.lock` while they write. Precedence per key: this file (an
-   empty value means the SOT default), then the container env, then the SOT
-   default in `build-manifest.yml`. A file value with `$` is a Compose
-   expression; the container env holds its resolved value.
+   flock of `<file>.lock` while they write. An optional `<file>.local`
+   (`.env.local`) beside it overrides single keys; nothing writes it, and the
+   ui refuses to save a key it sets (`config::read_file`, `config::store`).
+   Precedence per key: `.env.local`, then `.env` (an empty value means the SOT
+   default), then the container env, then the SOT default in
+   `build-manifest.yml`. A file value with `$` is a Compose expression; the
+   container env holds its resolved value.
 2. The ui renders every config from the SOT and the saved settings
    (`render::all` in `shared.rs`) and writes changed files into the
    `lancache-config` volume under `CONFIG_DIR`.
