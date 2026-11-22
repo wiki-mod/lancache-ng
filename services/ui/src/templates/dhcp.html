@@ -23,10 +23,22 @@
               {% if hint is not none %}<p class="text-xs text-slate-500 mt-1">{{ hint | safe }}</p>{% endif %}
             </div>{% endcomponent text_field %}
 
+{# What: LAN domain dropdown of a subnet form #}
+{# Why: DDNS and DNS answer only for LAN domains #}
+{# From: Issue #1683 #}
+{% component domain_select(label, tone, domains, value="", optional=true, none_label="", foreign_label="") %}<div>
+              <label class="block text-xs text-slate-400 mb-1">{{ label }}</label>
+              <select name="domain" class="w-full px-3 py-2 border rounded text-white text-sm {{ tone }}">
+                {% if optional %}<option value=""{% if not value %} selected{% endif %}>{{ none_label }}</option>{% endif %}
+                {% for d in domains %}<option value="{{ d }}"{% if d == value %} selected{% endif %}>{{ d }}</option>{% endfor %}
+                {% if value and value not in domains %}<option value="{{ value }}" selected>{{ value }} {{ foreign_label }}</option>{% endif %}
+              </select>
+            </div>{% endcomponent domain_select %}
+
 {# What: the nine fields of one Kea subnet #}
 {# Why: add and edit forms differ only in values and tone #}
 {# From: Issue #1683 | PR #1912 #}
-{% component subnet_fields(t, tone, ntp_auto, ntp_url, lease_time, subnet="", gateway="", dns_primary="", dns_secondary="", pool_start="", pool_end="", domain="", ntp_servers="") %}<div class="grid grid-cols-2 gap-3">
+{% component subnet_fields(t, tone, ntp_auto, ntp_url, lease_time, domains, main=false, subnet="", gateway="", dns_primary="", dns_secondary="", pool_start="", pool_end="", domain="", ntp_servers="") %}<div class="grid grid-cols-2 gap-3">
             {{ <text_field label={t.subnet_cidr} name="subnet" tone={tone} value={subnet} placeholder="192.168.1.0/24" required={true}/> }}
             {{ <text_field label="Gateway" name="gateway" tone={tone} value={gateway} placeholder="192.168.1.1" required={true}/> }}
             {{ <text_field label={t.dns_server_1} name="dns_primary" tone={tone} value={dns_primary} placeholder="192.168.1.10" required={true}/> }}
@@ -34,7 +46,7 @@
             {{ <text_field label={t.ip_pool_start} name="pool_start" tone={tone} value={pool_start} placeholder="192.168.1.100" required={true}/> }}
             {{ <text_field label={t.ip_pool_end} name="pool_end" tone={tone} value={pool_end} placeholder="192.168.1.200" required={true}/> }}
             {{ <text_field label={t.lease_time_s} name="lease_time" tone={tone} value={lease_time ~ ""}/> }}
-            {{ <text_field label={t.dhcp_domain_label} name="domain" tone={tone} value={domain}/> }}
+            {{ <domain_select label={t.dhcp_domain_label} tone={tone} domains={domains} value={domain} optional={not main} none_label={t.dhcp_domain_none} foreign_label={t.dhcp_domain_foreign}/> }}
             <div class="col-span-2">
               {{ <text_field label={t.ntp_server} name="ntp_servers" tone={tone} value={ntp_servers} placeholder="192.0.2.123, 192.0.2.124"/> }}
               {% if ntp_auto %}
@@ -282,7 +294,7 @@
       <h3 class="text-sm font-medium text-white mb-3">{{ t.new_subnet }}</h3>
       <form method="POST" action="{{ routes.subnet_add | safe }}" class="space-y-3">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        {{ <subnet_fields t={t} tone={raised_tone} ntp_auto={ntp_auto_dhcp_active} ntp_url={pages.setup} dns_primary={dhcp_dns_primary} dns_secondary={dhcp_dns_secondary} lease_time={default_lease_time} domain={dhcp_domain} ntp_servers={dhcp_ntp_servers}/> }}
+        {{ <subnet_fields t={t} tone={raised_tone} ntp_auto={ntp_auto_dhcp_active} ntp_url={pages.setup} domains={lan_domain_names} dns_primary={dhcp_dns_primary} dns_secondary={dhcp_dns_secondary} lease_time={default_lease_time} domain={dhcp_domain} ntp_servers={dhcp_ntp_servers}/> }}
         <div class="flex gap-2">
           <button type="submit" class="btn btn-blue">
             {{ t.add_2 }}
@@ -327,7 +339,7 @@
         <form method="POST" action="{{ routes.subnet_update | safe }}" class="space-y-3">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <input type="hidden" name="id" value="{{ subnet.id }}">
-          {{ <subnet_fields t={t} tone="bg-slate-700 border-slate-600" ntp_auto={ntp_auto_dhcp_active} ntp_url={pages.setup} subnet={subnet.subnet} gateway={subnet.gateway} dns_primary={subnet.dns_primary} dns_secondary={subnet.dns_secondary} pool_start={subnet.pool_start} pool_end={subnet.pool_end} lease_time={subnet.lease_time} domain={subnet.domain} ntp_servers={subnet.ntp_servers}/> }}
+          {{ <subnet_fields t={t} tone="bg-slate-700 border-slate-600" ntp_auto={ntp_auto_dhcp_active} ntp_url={pages.setup} domains={lan_domain_names} main={subnet.id == main_subnet_id} subnet={subnet.subnet} gateway={subnet.gateway} dns_primary={subnet.dns_primary} dns_secondary={subnet.dns_secondary} pool_start={subnet.pool_start} pool_end={subnet.pool_end} lease_time={subnet.lease_time} domain={subnet.domain} ntp_servers={subnet.ntp_servers}/> }}
           <div class="flex gap-2">
             <button type="submit" class="btn btn-blue">
               {{ t.save }}

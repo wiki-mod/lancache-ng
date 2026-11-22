@@ -123,37 +123,84 @@
       </div>
     </section>
 
-    {# What: the LAN domain all local names end in
-       Why: DoMe 05.11.: own domain, next to its records
-       From: Issue #1683 | PR #1980 #}
+    {# What: LAN domains: role, records, DHCP use, actions
+       Why: each LAN domain is one zone in PowerDNS
+       From: Issue #1683 #}
     <section data-dns-panel="lan" class="hidden" style="margin-bottom:22px;">
-      <div class="section-title" style="margin-top:0;">{{ t.lan_domain }}</div>
-      <p class="section-sub">{{ t.every_local_name_ends_in_this }} <code>lancache-ng.lan</code> {{ t.a_printer_is }} <code>printer.lancache-ng.lan</code>{{ t.with }} <code>lan</code> {{ t.it_is }} <code>printer.lan</code>{{ t.dhcp_hands_it_to_the_clients }}</p>
-      <form action="{{ routes.setup_save | safe }}" method="post" class="field-row">
+      <div class="section-title" style="margin-top:0;">{{ t.lan_domains }}</div>
+      <p class="section-sub">{{ t.lan_domains_sub }}</p>
+      <div class="overflow-x-auto">
+        <table>
+          <tr><th>Domain</th><th>{{ t.role }}</th><th>{{ t.entries }}</th><th>{{ t.dhcp_subnets }}</th><th></th></tr>
+          {% for domain in lan_domains %}
+          <tr>
+            <td class="mono">{{ domain.name }}</td>
+            <td>{% if domain.main %}<span class="tag hit">{{ t.main_domain }}</span>{% else %}<span class="tag off">{{ t.extra_domain }}</span>{% endif %}</td>
+            <td class="mono">{{ domain.records | length }}</td>
+            <td class="mono">{% if domain.subnets %}{{ domain.subnets | join(sep=", ") }}{% else %}–{% endif %}</td>
+            <td>
+              {% if not domain.main %}
+              <div style="display:flex; gap:14px; flex-wrap:wrap;">
+                <form action="{{ routes.lan_domain_main | safe }}" method="post">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                  <input type="hidden" name="domain" value="{{ domain.name }}">
+                  <button type="submit" style="background:none; border:0; cursor:pointer; color:var(--mist); font-size:12.5px;">{{ t.make_main_domain }}</button>
+                </form>
+                {# What: remove is offered only for empty domains
+                   Why: the server refuses a domain with records
+                   From: Issue #1683 #}
+                {% if domain.records | length == 0 %}
+                <form action="{{ routes.lan_domain_remove | safe }}" method="post">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                  <input type="hidden" name="domain" value="{{ domain.name }}">
+                  <button type="submit" data-domain="{{ domain.name }}" onclick="return confirmRemoveDomain(this)" style="background:none; border:0; cursor:pointer; color:var(--danger); font-size:12.5px;">{{ t.remove }}</button>
+                </form>
+                {% else %}
+                <span style="color:var(--mist-dim); font-size:12.5px;" title="{{ t.remove_blocked_hint }}">{{ t.remove_blocked }}</span>
+                {% endif %}
+              </div>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </table>
+      </div>
+      <form action="{{ routes.lan_domain_add | safe }}" method="post" class="field-row" style="margin-top:12px;">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <input type="hidden" name="back" value="{{ pages.domains }}">
         <div class="field" style="margin-bottom:0;">
-          <label for="lan-domain">Domain</label>
-          <input type="text" id="lan-domain" name="DHCP_DOMAIN" value="{{ lan_zone }}" pattern="[A-Za-z0-9.-]+" required>
+          <label for="lan-domain-new">{{ t.add_lan_domain }}</label>
+          <input type="text" id="lan-domain-new" name="domain" placeholder="lab.lan" pattern="[A-Za-z0-9.-]+" required>
         </div>
-        <button type="submit" class="btn" style="margin-top:23px;">{{ t.save }}</button>
+        <button type="submit" class="btn" style="margin-top:23px;">{{ t.add_2 }}</button>
       </form>
     </section>
 
-    {# What: LAN records in PowerDNS: add form and list
+    {# What: records of the LAN domain the dropdown picks
        Why: changes apply live, no container restart
        From: Issue #1683 | PR #1912 #}
     <section data-dns-panel="lan" class="hidden">
       <div class="section-title" style="margin-top:0;">{{ t.lan_zone_records }}</div>
       <p class="section-sub">{{ t.custom_records_for_names_under_your }}</p>
+      <div class="field" style="max-width:260px;">
+        <label for="lan-zone-select">Domain</label>
+        <select id="lan-zone-select" data-lan-zone-select style="width:100%; padding:9px 11px; border-radius:8px; border:1px solid var(--navy-600); background:var(--navy-900); color:var(--foam); font-size:13.5px;">
+          {% for domain in lan_domains %}
+          <option value="{{ domain.name }}">{{ domain.name }}</option>
+          {% endfor %}
+        </select>
+      </div>
       {# What: record name, type, TTL, content, Add
          Why: type and content not parsed together
          From: Issue #1683 | PR #1976 #}
       <form action="{{ routes.lan_add | safe }}" method="post" class="field-row" style="max-width:none; align-items:flex-end;" data-lan-record-form>
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <div class="field" style="margin-bottom:0; max-width:180px;">
+        <input type="hidden" name="zone" value="{{ lan_zone }}" data-lan-zone-field>
+        <div class="field" style="margin-bottom:0; max-width:260px;">
           <label for="lan-name">Name</label>
-          <input type="text" id="lan-name" name="name" placeholder="printer.{{ lan_zone }}" required>
+          <div style="display:flex; align-items:stretch;">
+            <input type="text" id="lan-name" name="name" placeholder="printer" required style="border-top-right-radius:0; border-bottom-right-radius:0; min-width:0;">
+            <span class="mono" data-lan-suffix style="display:flex; align-items:center; padding:0 10px; border:1px solid var(--navy-600); border-left:0; border-radius:0 8px 8px 0; color:var(--mist); font-size:12.5px; white-space:nowrap;">.{{ lan_zone }}</span>
+          </div>
         </div>
         <div class="field" style="margin-bottom:0; max-width:110px;">
           <label for="lan-type">{{ t.type }}</label>
@@ -181,31 +228,31 @@
       </form>
 
       <table style="margin-top:4px;">
-        <tr><th>Name</th><th>{{ t.type }}</th><th>TTL</th><th>{{ t.content }}</th><th></th></tr>
-        {% set_global lan_shown = 0 %}
-        {% for record in lan_records %}
-        {% if record.type != "SOA" and record.type != "NS" %}
-        {% set_global lan_shown = lan_shown + 1 %}
-        <tr>
-          <td class="mono">{{ record.name }}</td>
-          <td><span class="tag off">{{ record.type }}</span></td>
-          <td class="mono">{{ record.ttl }}</td>
-          <td class="mono">{% for content in record.records %}{{ content.content }}{% if not loop.last %}<br>{% endif %}{% endfor %}</td>
-          <td>
-            <form action="{{ routes.lan_remove | safe }}" method="post">
-              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-              <input type="hidden" name="name" value="{{ record.name }}">
-              <input type="hidden" name="record_type" value="{{ record.type }}">
-              <input type="hidden" name="content" value="{% for c in record.records %}{{ c.content }}{% if not loop.last %};{% endif %}{% endfor %}">
-              <button type="submit" data-record-name="{{ record.name }}" data-record-type="{{ record.type }}" onclick="return confirmRemoveRecord(this)" style="background:none; border:0; cursor:pointer; color:var(--danger); font-size:12.5px;">{{ t.remove }}</button>
-            </form>
-          </td>
-        </tr>
-        {% endif %}
+        <thead><tr><th>Name</th><th>{{ t.type }}</th><th>TTL</th><th>{{ t.content }}</th><th></th></tr></thead>
+        {% for domain in lan_domains %}
+        <tbody data-lan-zone-rows="{{ domain.name }}"{% if not domain.main %} hidden{% endif %}>
+          {% for record in domain.records %}
+          <tr>
+            <td class="mono">{{ record.name }}</td>
+            <td><span class="tag off">{{ record.type }}</span></td>
+            <td class="mono">{{ record.ttl }}</td>
+            <td class="mono">{% for content in record.records %}{{ content.content }}{% if not loop.last %}<br>{% endif %}{% endfor %}</td>
+            <td>
+              <form action="{{ routes.lan_remove | safe }}" method="post">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="zone" value="{{ domain.name }}">
+                <input type="hidden" name="name" value="{{ record.name }}">
+                <input type="hidden" name="record_type" value="{{ record.type }}">
+                <input type="hidden" name="content" value="{% for c in record.records %}{{ c.content }}{% if not loop.last %};{% endif %}{% endfor %}">
+                <button type="submit" data-record-name="{{ record.name }}" data-record-type="{{ record.type }}" onclick="return confirmRemoveRecord(this)" style="background:none; border:0; cursor:pointer; color:var(--danger); font-size:12.5px;">{{ t.remove }}</button>
+              </form>
+            </td>
+          </tr>
+          {% else %}
+          <tr class="empty-row"><td colspan="5" style="color:var(--mist); font-style:italic; text-align:center;">{{ t.no_lan_records_yet }}</td></tr>
+          {% endfor %}
+        </tbody>
         {% endfor %}
-        {% if lan_shown == 0 %}
-        <tr class="empty-row"><td colspan="5" style="color:var(--mist); font-style:italic; text-align:center;">{{ t.no_lan_records_yet }}</td></tr>
-        {% endif %}
       </table>
     </section>
 
@@ -384,7 +431,7 @@
         <div>
           <h2 class="font-semibold text-slate-200">{{ t.zone_snapshots_rollback }}</h2>
           <p class="text-xs text-slate-500 mt-0.5">
-            {{ t.after_every_change_the_lan_zone }}{{ lan_zone }}{{ t.is_saved_a_rollback_puts_an }}
+            {{ t.after_every_change_the_lan_zone }}{% for domain in lan_domains %}{{ domain.name }}{% if not loop.last %}, {% endif %}{% endfor %}{{ t.is_saved_a_rollback_puts_an }}
           </p>
         </div>
         <span class="text-xs text-slate-400 flex-shrink-0">{{ t.kept }} {{ zone_snapshot_retention }}</span>
@@ -591,6 +638,13 @@
     return confirm(LC_T.remove_x_q.replace('{x}', btn.dataset.recordName + ' (' + btn.dataset.recordType + ')'));
   }
 
+  // What: confirm() with the LAN domain name
+  // Why: values come from data-*, not inline JS strings
+  // From: Issue #1683
+  function confirmRemoveDomain(btn) {
+    return confirm(LC_T.remove_x_q.replace('{x}', btn.dataset.domain));
+  }
+
   // What: confirm() with PTR IP and hostname
   // Why: values come from data-*, not inline JS strings
   // From: Issue #1683 | PR #1912
@@ -625,17 +679,41 @@
   // Why: each type has its own content format.
   // From: Issue #1683 | PR #1980
   const lanExamples = {
-    A: '192.168.1.50', AAAA: 'fd00::50', CNAME: 'nas.{{ lan_zone }}.',
-    MX: '10 mail.{{ lan_zone }}.', TXT: '"some text"',
-    SRV: '10 5 5060 sip.{{ lan_zone }}.', CAA: '0 issue "letsencrypt.org"',
+    A: '192.168.1.50', AAAA: 'fd00::50', CNAME: 'nas.@ZONE@.',
+    MX: '10 mail.@ZONE@.', TXT: '"some text"',
+    SRV: '10 5 5060 sip.@ZONE@.', CAA: '0 issue "letsencrypt.org"',
     HTTPS: '1 . alpn=h2', SVCB: '1 . alpn=h2',
-    NAPTR: '100 10 "U" "E2U+sip" "!^.*$!sip:info@{{ lan_zone }}!" .',
+    NAPTR: '100 10 "U" "E2U+sip" "!^.*$!sip:info@@ZONE@!" .',
     SSHFP: '4 2 123456789abcdef...', TLSA: '3 1 1 123456789abcdef...'
   };
   function lanExample() {
     const type = document.querySelector('[data-lan-record-type]').value;
-    document.querySelector('[data-lan-record-content]').placeholder = lanExamples[type] || '';
+    const zone = document.querySelector('[data-lan-zone-select]').value;
+    document.querySelector('[data-lan-record-content]').placeholder = (lanExamples[type] || '').replaceAll('@ZONE@', zone);
   }
+
+  // What: shows form and records of one LAN domain
+  // Why: the dropdown picks the zone; no reload per pick
+  // From: Issue #1683
+  function showLanZone(zone) {
+    const select = document.querySelector('[data-lan-zone-select]');
+    if (![...select.options].some((o) => o.value === zone)) zone = select.options[0].value;
+    select.value = zone;
+    document.querySelector('[data-lan-zone-field]').value = zone;
+    document.querySelector('[data-lan-suffix]').textContent = '.' + zone;
+    document.querySelectorAll('[data-lan-zone-rows]').forEach((rows) => {
+      rows.hidden = rows.dataset.lanZoneRows !== zone;
+    });
+    try { sessionStorage.setItem('dnsLanZone', zone); } catch (e) { /* storage blocked */ }
+    lanExample();
+  }
+  document.querySelector('[data-lan-zone-select]').addEventListener('change', (e) => showLanZone(e.target.value));
+  // What: reopens the last picked LAN domain
+  // Why: a form post reloads; the pick must stay
+  // From: Issue #1683
+  let startZone = '';
+  try { startZone = sessionStorage.getItem('dnsLanZone') || ''; } catch (e) { /* storage blocked */ }
+  showLanZone(startZone);
   document.querySelector('[data-lan-record-type]').addEventListener('change', lanExample);
   // What: PTR box only for type A.
   // Why: a PTR points to one IPv4 address.

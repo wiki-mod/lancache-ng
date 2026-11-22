@@ -1025,9 +1025,11 @@ async fn domains(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
                 records.insert(lan.clone(), own_rrsets(&rows));
                 for zone in lans.iter().skip(1) {
                     match api.rrsets(zone).await {
-                        Ok(rows) => records.insert(zone.clone(), own_rrsets(&rows)),
+                        Ok(rows) => {
+                            records.insert(zone.clone(), own_rrsets(&rows));
+                        }
                         Err(e) => ctx.insert("domain_error_message", &e),
-                    };
+                    }
                 }
                 ptr = ptr_rows(&s, &api).await;
             }
@@ -1802,6 +1804,15 @@ async fn dhcp(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     ctx.insert("dhcp_dns_secondary", dns.get(1).map_or("", String::as_str));
     ctx.insert("default_lease_time", &opt("DHCP_LEASE_TIME"));
     ctx.insert("dhcp_domain", &opt("DHCP_DOMAIN"));
+    // What: LAN domains for the subnet domain dropdown.
+    // Why: a subnet may only use a domain DNS serves.
+    // From: Issue #1683
+    let lan_names: Vec<String> = lancache_ng::dns::lan_domains(&s)?
+        .iter()
+        .map(|z| z.trim_end_matches('.').to_string())
+        .collect();
+    ctx.insert("lan_domain_names", &lan_names);
+    ctx.insert("main_subnet_id", &s.uint("DHCP_SUBNET_ID")?);
     ctx.insert("dhcp_ntp_servers", &opt("DHCP_NTP_SERVERS"));
     ctx.insert("dhcp_relay_local_addr", &opt("DHCP_RELAY_LOCAL_ADDR"));
     ctx.insert("dhcp_proxy_subnet_start", &opt("DHCP_SUBNET_START"));
@@ -1878,10 +1889,15 @@ async fn main_subnet(
         ("DHCP_RANGE_START", "pool_start"),
         ("DHCP_RANGE_END", "pool_end"),
         ("DHCP_GATEWAY", "gateway"),
-        ("DHCP_DOMAIN", "domain"),
         ("DHCP_NTP_SERVERS", "ntp_servers"),
     ] {
         f.insert(key.into(), get(field));
+    }
+    // What: main subnet domain sets the main LAN domain.
+    // Why: picking an extra swaps it with the old main.
+    // From: Issue #1683
+    if !get("domain").is_empty() {
+        f.extend(main_domain_fields(s, &get("domain"))?);
     }
     if !get("lease_time").is_empty() {
         f.insert("DHCP_LEASE_TIME".into(), get("lease_time"));
@@ -1999,11 +2015,19 @@ async fn kea_action(
             .parse::<u64>()
             .map_err(|_| format!("{k} must be a number"))
     };
+    // What: a subnet domain must be a LAN domain.
+    // Why: DDNS and DNS answer only for those zones.
+    // From: Issue #1683
+    if matches!(op, "UI_ROUTE_SUBNET_ADD" | "UI_ROUTE_SUBNET_UPDATE") && !get("domain").is_empty() {
+        chosen_lan_zone(s, &get("domain"))?;
+    }
     match op {
         "UI_ROUTE_SUBNET_ADD" => {
             kea_edit(s, |l| {
                 let next = l.iter().filter_map(|x| x["id"].as_u64()).max().unwrap_or(0) + 1;
-                l.push(subnet_from(get, next, None));
+                let mut sn = subnet_from(get, next, None);
+                lancache_ng::kea_conf::subnet_ddns_suffix(s, &mut sn)?;
+                l.push(sn);
                 Ok(())
             })
             .await
@@ -2013,7 +2037,7 @@ async fn kea_action(
             kea_edit(s, |l| {
                 let sn = subnet_mut(l, id)?;
                 *sn = subnet_from(get, id, Some(&sn.clone()));
-                Ok(())
+                lancache_ng::kea_conf::subnet_ddns_suffix(s, sn)
             })
             .await
         }
