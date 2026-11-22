@@ -131,33 +131,32 @@ services:
     process_pre:
       - 'nginx=until [ -s @NGINX_CONF_DIR@/nginx.conf ]; do sleep @PROXY_CONFIG_WAIT_SECONDS@; done'
       - 'snmpd=until [ -s @SNMPD_CONF_FILE@ ]; do sleep @PROXY_CONFIG_WAIT_SECONDS@; done'
+    # What: the nginx account first, with the SOT ids.
+    # Why: the package reuses it; old cache files stay ours.
+    # From: Issue #1683 | PR #2017
     setup:
+      - group=nginx:@NGINX_GID@
+      - user=nginx:@NGINX_UID@:nginx
       - group=@LOG_READER_GROUP@:@GID@
       - member=nginx:@LOG_READER_GROUP@
       - dir=@NGINX_DIR@/@NGINX_SUBDIR_CA@
       - dir=@NGINX_DIR@/@NGINX_SUBDIR_CERTS@
       - dir=@NGINX_CACHE_DIR@
     final_base: alpine
-    # What: final-image apk packages; nginx from nginx.org.
-    # Why: AG-KD-007: stream module only in nginx.org build.
-    # From: Issue #1683 | PR #1858
+    # What: final-image apk packages; nginx from Alpine.
+    # Why: AG-KD-007: stream comes as nginx-mod-stream.
+    # From: Issue #1683 | PR #2017
     packages:
       - openrc
       - openrc-init
       - openssl
-      - nginx@nginx
-    # What: nginx.org mainline repo for the base's branch.
-    # Why: apk-setup fills @ALPINE_BRANCH@ from the image.
-    # From: Issue #1683 | PR #1858
-    apk_repositories:
-      - nginx=http://nginx.org/packages/mainline/alpine/@ALPINE_BRANCH@/main
-    # What: the repo signing key and its sha256 pin.
-    # Why: the tagged repo is trusted only with this key.
-    # From: Issue #1683 | PR #1858
-    apk_keys:
-      - https://nginx.org/keys/nginx_signing.rsa.pub=ff7cf138acc09f2a5029300ab713fe6a1440605fca72e2bab76a4da9206fec87
+      - nginx
+      - nginx-mod-stream
+    # What: package load line; stream, ssl_preread, slice.
+    # Why: nginx -t fails without the stream module.
+    # From: Issue #1683 | PR #2017
     smoke:
-      - 'v="$(nginx -V 2>&1)" && grep -q -- --with-stream_ssl_preread_module <<< "${v}"'
+      - 'printf "include /etc/nginx/modules/*.conf;\nevents {}\nstream { server { listen 127.0.0.1:9; ssl_preread on; return 1; } }\nhttp { server { listen 127.0.0.1:8; slice 1m; } }\n" > /tmp/smoke.conf && nginx -e stderr -t -q -c /tmp/smoke.conf'
   dns:
     context: services/dns
     labels: [dns, pdns]
@@ -901,6 +900,11 @@ runtime:
     - PDNS_LUA_DNS_SCRIPT=@PDNS_CONF_DIR@/filter-aaaa.lua
     - PDNS_SCHEMA_FILE=/usr/share/doc/pdns/schema.sqlite3.sql
     - NGINX_DIR=/etc/nginx
+    # What: uid and gid of the nginx worker account.
+    # Why: cache files are 0600; no other uid reads them.
+    # From: Issue #1683 | PR #2017
+    - NGINX_UID=100
+    - NGINX_GID=101
     # What: NGINX_DIR parts the proxy image links
     # Why: one nginx.conf; no package file stays
     # From: Issue #1683
