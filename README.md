@@ -77,7 +77,7 @@ It can:
 - restore setup-script backups
 - optionally enable DHCP
 - optionally protect the Admin UI with a password
-- write `deploy/prod/.env.local` in the channel's code directory
+- write `deploy/prod/.env` in the channel's code directory
 - create required directories
 - start the Docker stack
 - install systemd startup and convergence checks
@@ -310,9 +310,9 @@ The update command can:
 - automatically roll back to the pre-update backup if that health check fails
 - move the stack to the other code directory when the channel changed
   (Admin UI General page, `LANCACHE_IMAGE_CHANNEL` in
-  `/opt/lancache-ng/current/deploy/prod/.env.local`, or
+  `/opt/lancache-ng/current/deploy/prod/.env`, or
   `sudo LANCACHE_IMAGE_CHANNEL=nightly /opt/lancache-ng/current/setup.sh update`);
-  the moved `.env.local` keeps the new channel, and a failed move points
+  the moved `.env` keeps the new channel, and a failed move points
   `/opt/lancache-ng/current` back. `nightly` is experimental and not for
   production; `setup.sh` warns when it is selected
 - move an old install cloned straight into `/opt/lancache-ng` to
@@ -331,7 +331,7 @@ Instead of running `setup.sh update` manually, a host `systemd` timer
 (`lancache-auto-update.timer`) can run the same ordered, health-gated update
 on a schedule. Enable it at install time (the "Scheduled automatic updates"
 prompt, default: disabled), later by setting `AUTO_UPDATE_ENABLED=1` in
-`/opt/lancache-ng/current/deploy/prod/.env.local`, or on the Admin UI's General
+`/opt/lancache-ng/current/deploy/prod/.env`, or on the Admin UI's General
 page (release channel and scheduled-update toggle). The host's convergence
 timer (every 5 minutes) applies either change. An update pulls and restarts
 only when the selected channel moved to a new image set; an unchanged channel
@@ -341,7 +341,7 @@ is a no-op. Manual trigger:
 sudo /opt/lancache-ng/current/setup.sh auto-update
 ```
 
-**Update validation:** The update command validates your configuration during the process. If required config values are missing or invalid, the update will abort immediately rather than continuing with a partial or degraded configuration. If this happens, check that `/opt/lancache-ng/current/deploy/prod/.env.local` exists and contains all required keys. See `docs/README.md` (section 7) for rollback options.
+**Update validation:** The update command validates your configuration during the process. If required config values are missing or invalid, the update will abort immediately rather than continuing with a partial or degraded configuration. If this happens, check that `/opt/lancache-ng/current/deploy/prod/.env` exists and contains all required keys. See `docs/README.md` (section 7) for rollback options.
 
 Create a manual backup with:
 
@@ -429,7 +429,7 @@ This bundles everything a maintainer needs to triage the report into one
 compressed, timestamped archive and prints its path:
 
 - `docker compose logs`/`ps`/`config` output
-- a copy of `.env`/`.env.local` with every credential-shaped value (API keys,
+- a copy of `.env` and, if present, `.env.local` with every credential-shaped value (API keys,
   TSIG keys, passwords, tokens) redacted
 - host facts (Docker/Compose versions, kernel, disk space)
 - known-good-snapshot directory listings (file names only, no content) --
@@ -462,7 +462,7 @@ For HTTPS mode, only point clients to the HTTPS IP after the CA certificate was 
 LanCache NG only caches traffic for clients that resolve CDN hostnames through
 its DNS servers. DHCP is the most reliable way to hand those DNS servers to
 clients. `setup.sh` lets you pick one of four DHCP modes (stored as
-`DHCP_MODE` in `.env.local`):
+`DHCP_MODE` in `.env`):
 
 - `off` (default) — LanCache NG does not manage or proxy DHCP. You point clients at
   its DNS yourself (router DHCP option or static client config). This is the
@@ -534,7 +534,7 @@ If the setup asks whether the Admin UI should be password protected, using a pas
 
 Do not expose the Admin UI to the internet.
 
-Settings changed in the Admin UI are saved in the stack `.env.local` (`deploy/prod/.env.local`), the same file `setup.sh` writes and Docker Compose reads. The ui changes only the lines of the changed keys; comments and other keys stay. The ui and services containers mount its directory (`STACK_ENV_DIR` in `.github/yaml/build-manifest.yml`); of the containers only the ui writes it. A value cannot contain `$`, a backquote, quotes, a backslash or `#`, as for every `.env.local` value. Settings an older version kept in `lancache-ui-settings.env` (UI data folder) move into `.env.local` with the next `setup.sh update`; `setup.sh install` keeps its own answers. They win over the built-in defaults and survive an update. The nginx templates of the proxy are kept in `services/ui/nginx/` and are rendered into the proxy config folder (`NGINX_CONF_DIR`).
+Settings changed in the Admin UI are saved in the stack `.env` (`deploy/prod/.env`), the same file `setup.sh` writes and Docker Compose reads. The ui changes only the lines of the changed keys; comments and other keys stay. The ui and services containers mount its directory (`STACK_ENV_DIR` in `.github/yaml/build-manifest.yml`); of the containers only the ui writes it. A value cannot contain `$`, a backquote, quotes, a backslash or `#`, as for every `.env` value. A key that `.env.local` overrides is not saved; the Admin UI names that file. Settings an older version kept in `lancache-ui-settings.env` (UI data folder) move into `.env` with the next `setup.sh update`; `setup.sh install` keeps its own answers. They win over the built-in defaults and survive an update. The nginx templates of the proxy are kept in `services/ui/nginx/` and are rendered into the proxy config folder (`NGINX_CONF_DIR`).
 
 ## HTTPS mode certificate
 
@@ -646,7 +646,7 @@ questions; `curl … | bash` would not):
 bash <(curl -fsSL https://raw.githubusercontent.com/wiki-mod/lancache-ng/master/setup.sh) secondary
 ```
 
-The registration token is generated during primary setup and stored in the primary's `.env.local`;
+The registration token is generated during primary setup and stored in the primary's `.env`;
 the Admin UI shows it under DNS, Secondary DNS.
 
 The order is: check, ask, then act.
@@ -703,6 +703,35 @@ records and its NS entry and renews the TSIG key, as "Renew key" does: every
 other secondary stops syncing until it runs `setup.sh secondary --rotate`.
 A new address replaces its A and PTR record.
 
+## Settings files: `.env` and `.env.local`
+
+`deploy/prod/.env` holds the settings; `setup.sh` and the Admin UI write it.
+An optional `deploy/prod/.env.local` beside it overrides single keys without
+changing `.env`, as a `.local` file does in fail2ban:
+
+- Put only the keys to override in it, as `KEY=value`. A key there wins over
+  the same key in `.env`; `KEY=` means the built-in default. Keys it does not
+  name keep their `.env` value.
+- `setup.sh compose` passes `.env` and then `.env.local` to Docker Compose;
+  `setup.sh` and the ui and services containers, which mount the folder, read
+  them in the same order. `sudo ./setup.sh compose deploy/prod up -d` applies a
+  change; the convergence timer does it within 5 minutes.
+- `setup.sh` and the Admin UI never write `.env.local`. `setup.sh update` names
+  its keys; a `setup.sh` change of such a key warns, and the Admin UI refuses
+  to save it.
+- Delete the file and run `sudo ./setup.sh compose deploy/prod up -d` to run
+  with `.env` alone again.
+- `setup.sh install` moves an existing `.env.local` aside to
+  `.env.local.pre-install-<UTC time>`. `setup.sh restore` moves it aside to
+  `.env.local.pre-restore-<UTC time>` when the backup has none.
+- Backups and `setup.sh create-logs-for-issue` include it.
+
+Up to v0.4.0, `.env.local` held all settings. The first `setup.sh` run of a
+newer version renames a `.env.local` without a `.env` beside it to `.env`, also
+inside a restored v0.4.0 backup. The `setup.sh` of v0.4.0 reads `.env` when no
+`.env.local` exists; delete a test `.env.local` before going back to v0.4.0,
+since v0.4.0 takes it as the whole configuration.
+
 ## Manual setup
 
 The setup script is recommended.
@@ -719,12 +748,11 @@ cd /opt/lancache-ng/latest
 `/opt/lancache-ng` is the data directory; a clone directly into it is moved to
 `/opt/lancache-ng/latest` by the next `setup.sh update`.
 
-No `.env` file is tracked. `setup.sh install` writes the untracked runtime env
-file `deploy/prod/.env.local` with the values of your installation. Every
-default value lives in `.github/yaml/build-manifest.yml` (`runtime.defaults`)
-and is baked into the images, so `.env.local` never repeats a default. To set
-the installation values by hand, create `deploy/prod/.env.local` and set at
-least:
+No env file is tracked. `setup.sh install` writes the untracked settings file
+`deploy/prod/.env` with the values of your installation. Every default value
+lives in `.github/yaml/build-manifest.yml` (`runtime.defaults`) and is baked
+into the images, so `.env` never repeats a default. To set the installation
+values by hand, create `deploy/prod/.env` and set at least:
 
 ```env
 IP_HTTP=192.0.2.10
@@ -756,9 +784,9 @@ LANCACHE_IMAGE_CHANNEL=latest
 LANCACHE_IMAGE_TAG=<set-by-setup>
 ```
 
-`NGINX_UPSTREAM_RESOLVER` is what nginx uses to resolve the *real* CDN hostnames it proxies to. Its default lives in `runtime.defaults` of `.github/yaml/build-manifest.yml`; put your own value in `deploy/prod/.env.local` (an empty value keeps the default), which `deploy/prod/docker-compose.yml` passes to the `ui` service (it renders `nginx.conf`), then recreate both from the repository root (`sudo ./setup.sh compose deploy/prod up -d ui proxy`). The default — `8.8.8.8 8.8.4.4` (Google Public DNS, IPv4 only; an IPv6 entry you add must be bracketed, as nginx's `resolver` directive requires) — is a convenience default, not a requirement. Set it to whatever real upstream DNS servers you prefer: your ISP's resolvers, a corporate DNS server, 1.1.1.1, or anything else. The actual requirement is that the chosen resolver returns the CDN's *real* origin address for these hostnames — not merely that its own server IP differs from the LanCache DNS/proxy IP. The Admin UI renderer rejects the obvious cases (a loopback address, `IP_HTTP` or `IP_HTTPS`), but it cannot detect an indirect loop: for example, a split-DNS or conditional-forwarding resolver that itself forwards the CDN's zone back to the LanCache DNS server would still hand nginx the LanCache proxy IP, at which point nginx loops even though the configured resolver's own IP isn't the cache's. If you use split-DNS or conditional forwarding upstream of this resolver, make sure CDN zones aren't among the forwarded ones.
+`NGINX_UPSTREAM_RESOLVER` is what nginx uses to resolve the *real* CDN hostnames it proxies to. Its default lives in `runtime.defaults` of `.github/yaml/build-manifest.yml`; put your own value in `deploy/prod/.env` (an empty value keeps the default), which `deploy/prod/docker-compose.yml` passes to the `ui` service (it renders `nginx.conf`), then recreate both from the repository root (`sudo ./setup.sh compose deploy/prod up -d ui proxy`). The default — `8.8.8.8 8.8.4.4` (Google Public DNS, IPv4 only; an IPv6 entry you add must be bracketed, as nginx's `resolver` directive requires) — is a convenience default, not a requirement. Set it to whatever real upstream DNS servers you prefer: your ISP's resolvers, a corporate DNS server, 1.1.1.1, or anything else. The actual requirement is that the chosen resolver returns the CDN's *real* origin address for these hostnames — not merely that its own server IP differs from the LanCache DNS/proxy IP. The Admin UI renderer rejects the obvious cases (a loopback address, `IP_HTTP` or `IP_HTTPS`), but it cannot detect an indirect loop: for example, a split-DNS or conditional-forwarding resolver that itself forwards the CDN's zone back to the LanCache DNS server would still hand nginx the LanCache proxy IP, at which point nginx loops even though the configured resolver's own IP isn't the cache's. If you use split-DNS or conditional forwarding upstream of this resolver, make sure CDN zones aren't among the forwarded ones.
 
-`DNS_UPSTREAM_SERVERS` is what the DNS recursor uses for every name outside the LAN zones, for example private host names that only your router or firewall knows. Empty (the default) keeps the previous behavior: the recursor resolves those names itself from the root servers, and a private name is answered with `NXDOMAIN`. The easiest way to set it is `sudo ./setup.sh configure-upstream-dns`, which asks for the servers, the forwarded zones, the zones without DNSSEC and the local PTR zones. By hand, put one or more resolver IPs in `deploy/prod/.env.local` (`192.0.2.1`, `192.0.2.1:5353`, `[fd00::53]:53`; space or comma separated, no host names) and recreate the DNS and UI containers (`sudo ./setup.sh compose deploy/prod up -d ui dns`; the `ui` renders the recursor files). `DNS_UPSTREAM_ZONES` limits the forwarding to the named zones (default `.`, every name; the CDN domains stay answered by LanCache either way). `DNS_UPSTREAM_UNSIGNED_ZONES` names private zones inside them that carry no DNSSEC, so their answers are not rejected; DNSSEC validation stays on for everything else that is forwarded. A resolver that is a loopback or unspecified address, `IP_HTTP`, `IP_HTTPS` or another address of LanCache itself is refused because the query would loop back; a zone served by the local authoritative server is refused too. A refused value stops the render of the Admin UI: no configuration file is written, and the `ui` log names the entry (`ui: start render: …: <value> is this LanCache-NG itself; that would loop`). The names `NGINX_UPSTREAM_DNS` and `UPSTREAM_DNS` do not exist and are ignored.
+`DNS_UPSTREAM_SERVERS` is what the DNS recursor uses for every name outside the LAN zones, for example private host names that only your router or firewall knows. Empty (the default) keeps the previous behavior: the recursor resolves those names itself from the root servers, and a private name is answered with `NXDOMAIN`. The easiest way to set it is `sudo ./setup.sh configure-upstream-dns`, which asks for the servers, the forwarded zones, the zones without DNSSEC and the local PTR zones. By hand, put one or more resolver IPs in `deploy/prod/.env` (`192.0.2.1`, `192.0.2.1:5353`, `[fd00::53]:53`; space or comma separated, no host names) and recreate the DNS and UI containers (`sudo ./setup.sh compose deploy/prod up -d ui dns`; the `ui` renders the recursor files). `DNS_UPSTREAM_ZONES` limits the forwarding to the named zones (default `.`, every name; the CDN domains stay answered by LanCache either way). `DNS_UPSTREAM_UNSIGNED_ZONES` names private zones inside them that carry no DNSSEC, so their answers are not rejected; DNSSEC validation stays on for everything else that is forwarded. A resolver that is a loopback or unspecified address, `IP_HTTP`, `IP_HTTPS` or another address of LanCache itself is refused because the query would loop back; a zone served by the local authoritative server is refused too. A refused value stops the render of the Admin UI: no configuration file is written, and the `ui` log names the entry (`ui: start render: …: <value> is this LanCache-NG itself; that would loop`). The names `NGINX_UPSTREAM_DNS` and `UPSTREAM_DNS` do not exist and are ignored.
 
 `PROXY_SECURITY_MODE` controls how defensive the proxy is at request time:
 
@@ -771,7 +799,7 @@ The Admin UI keeps snapshots of the Kea DHCP configuration (`KEA_SNAPSHOT_KEEP`,
 
 `LANCACHE_IMAGE_CHANNEL` controls the mutable stack channel. `latest` (from
 `master`) is the install default (SOT `release.install_channel`). On update, a
-former channel name in `.env.local` is rewritten to its current channel; a
+former channel name in `.env` is rewritten to its current channel; a
 retired name stops the update with its reason. `nightly` (formerly `edge`) is
 built daily from `current_dev`; it is experimental, may break the stack and is not for
 production, and `setup.sh` warns on install and on every update with it.
@@ -791,9 +819,9 @@ Prebuilt first-party images are published for `linux/amd64` and `linux/arm64`; a
 
 Release channels, package rules and external image handling are documented in `docs/combined-release-and-checklist.md`.
 
-Manual production changes belong in `deploy/prod/.env.local`, which is ignored by git and preferred by
-`setup.sh update`, `setup.sh auto-update`, `setup.sh backup`, `setup.sh restore`,
-`setup.sh update-ip`, and `setup.sh create-logs-for-issue` when present.
+Manual production changes belong in `deploy/prod/.env`, which is ignored by
+git. To try a value without changing `.env`, use `.env.local` (section
+"Settings files").
 
 If you use secondary DNS or DHCP DDNS, set a real secret value too:
 
@@ -802,9 +830,9 @@ DDNS_TSIG_KEY=<generate-a-secret>
 ```
 
 `SECONDARY_REGISTRATION_TOKEN`: `setup.sh install` generates it. Without a
-value in `.env.local`, the Admin UI creates a random token once and keeps it in
+value in `.env`, the Admin UI creates a random token once and keeps it in
 the shared-secrets volume (`SECRETS_DIR`). The token is read on each
-registration request. A placeholder value, in `.env.local` or in that file, is
+registration request. A placeholder value, in `.env` or in that file, is
 an error; registration then fails. To set the token yourself:
 
 ```env
@@ -813,7 +841,7 @@ SECONDARY_REGISTRATION_TOKEN=<generate-a-secret>
 
 ### Secret generation and persistence
 
-Secrets in `.env.local` follow a simple rule: they are generated once on first install (or first update), and never rotated by later updates as long as a real value already exists. The `setup.sh` script provides a `get_or_generate_secret` helper that checks each secret key:
+Secrets in `.env` follow a simple rule: they are generated once on first install (or first update), and never rotated by later updates as long as a real value already exists. The `setup.sh` script provides a `get_or_generate_secret` helper that checks each secret key:
 
 - If the value is a placeholder (empty, containing `change_me`, starting with `changeme` or `your_`, ending in `_here`, or in angle brackets such as `<generate-a-secret>`), a new secret is generated.
 - If a real value is already present, it is preserved unchanged — even across multiple updates.
@@ -823,9 +851,9 @@ Secret formats vary by key, not by naming suffix — despite the `*_KEY`/`*_PASS
 - 64 hex characters (`openssl rand -hex 32`): `KEA_CTRL_TOKEN`, `PDNS_API_KEY`, `SNMP_COMMUNITY`, `SECONDARY_REGISTRATION_TOKEN`
 - 44 base64 characters (`openssl rand -base64 32`): `DDNS_TSIG_KEY`
 - 20 alphanumeric characters: the Admin UI password. It is shown once; only its Argon2id hash is stored as `UI_AUTH_PASSWORD_HASH`.
-  The General page of the Admin UI can change it (old password required, at least 12 characters). The new Argon2id hash is saved base64url-coded as `UI_AUTH_PASSWORD_HASH` in `.env.local`; to reset a lost password, run `sudo ./setup.sh reset-sign-in`, which turns the sign-in off until a new password is set on the General page.
+  The General page of the Admin UI can change it (old password required, at least 12 characters). The new Argon2id hash is saved base64url-coded as `UI_AUTH_PASSWORD_HASH` in `.env`; to reset a lost password, run `sudo ./setup.sh reset-sign-in`, which turns the sign-in off until a new password is set on the General page.
 
-Store your actual secret values securely if you need to rotate them manually. The setup script will not regenerate them unless you explicitly delete or clear the `.env.local` entry.
+Store your actual secret values securely if you need to rotate them manually. The setup script will not regenerate them unless you explicitly delete or clear the `.env` entry.
 
 Create directories:
 
@@ -843,7 +871,7 @@ sudo ./setup.sh compose deploy/prod up -d
 ```
 
 For later upgrades from this manual checkout, keep local changes in
-`deploy/prod/.env.local`, create a rollback backup before pulling new repository
+`deploy/prod/.env`, create a rollback backup before pulling new repository
 files, then update the production stack directory explicitly instead of using a
 raw compose pull/up:
 
@@ -854,7 +882,7 @@ sudo ./setup.sh update "$(pwd)/deploy/prod"
 ```
 
 The explicit pre-pull backup preserves the currently working compose,
-`.env.local`, certificates and runtime config before tracked files change. The
+`.env`, `.env.local`, certificates and runtime config before tracked files change. The
 update command creates another rollback backup after the pull, applies
 state-path migrations and validates compose before restarting the stack.
 
