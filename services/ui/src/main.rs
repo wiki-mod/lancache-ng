@@ -134,17 +134,23 @@ type Fields = BTreeMap<String, String>;
 struct Fail(StatusCode, String);
 
 impl IntoResponse for Fail {
+    // What: the status with the text as body.
+    // Why: axum turns a returned Fail into a reply.
     fn into_response(self) -> Response {
         (self.0, self.1).into_response()
     }
 }
 
 impl From<String> for Fail {
+    // What: a plain error text becomes HTTP 500.
+    // Why: ? on Result<_, String> works in handlers.
     fn from(e: String) -> Self {
         Fail(StatusCode::INTERNAL_SERVER_ERROR, e)
     }
 }
 
+// What: a Fail with HTTP 400.
+// Why: refused input is the client's error, not ours.
 fn bad_request(text: impl Into<String>) -> Fail {
     Fail(StatusCode::BAD_REQUEST, text.into())
 }
@@ -266,6 +272,8 @@ impl App {
 struct Csrf(String);
 
 impl Csrf {
+    // What: SHA-256 of key and session id as hex.
+    // Why: the token follows the session, no store needed.
     fn from_session(key: &[u8; 32], session: &str) -> Self {
         let mut h = Sha256::new();
         h.update(key);
@@ -273,6 +281,8 @@ impl Csrf {
         Csrf(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
     }
 
+    // What: constant-time compare with the token.
+    // Why: timing must not leak how much of it matched.
     fn matches(&self, given: &str) -> bool {
         secret::equal(given, &self.0)
     }
@@ -844,7 +854,9 @@ fn reverse_zone(s: &Settings, name: &str) -> Option<String> {
 // From: Issue #1683
 fn lan_zone(s: &Settings) -> Result<String, String> {
     let lans = lancache_ng::dns::lan_domains(s)?;
-    lans.into_iter().next().ok_or_else(|| "no LAN domain".into())
+    lans.into_iter()
+        .next()
+        .ok_or_else(|| "no LAN domain".into())
 }
 
 // What: the LAN zone a form names; empty = main.
@@ -870,7 +882,12 @@ fn main_domain_fields(s: &Settings, main: &str) -> Result<Fields, String> {
     let want = lancache_ng::dns::canonical_zone(main.trim());
     let plain = |z: &String| z.trim_end_matches('.').to_string();
     let old = lans.first().cloned().unwrap_or_default();
-    let mut extra: Vec<String> = lans.iter().skip(1).filter(|z| **z != want).map(plain).collect();
+    let mut extra: Vec<String> = lans
+        .iter()
+        .skip(1)
+        .filter(|z| **z != want)
+        .map(plain)
+        .collect();
     // What: old main stays as extra only on a swap.
     // Why: a new name renames the main domain as before.
     // From: Issue #1683
@@ -1159,6 +1176,8 @@ fn list_change(s: &Settings, key: &str, item: &str, present: bool) -> Fields {
     Fields::from([(key.to_string(), items.join(" "))])
 }
 
+// What: a change of exactly one setting.
+// Why: switches and lists commit one key at a time.
 fn single_field(key: &str, value: impl ToString) -> Fields {
     Fields::from([(key.to_string(), value.to_string())])
 }
@@ -1414,6 +1433,8 @@ async fn store_secondaries(app: &App, list: &[(String, String)]) -> Result<(), S
     commit(app, single_field("DNS_SECONDARIES", rows.join(" "))).await
 }
 
+// What: true for an IPv4 or IPv6 address.
+// Why: secondary addresses must be plain IPs.
 fn is_ip(text: &str) -> bool {
     text.parse::<std::net::IpAddr>().is_ok()
 }
@@ -3100,7 +3121,10 @@ async fn ensure_secondary_zones(s: &Settings) -> Result<(), String> {
     // What: drop copies the primary no longer serves.
     // Why: a removed LAN domain must stop answering.
     // From: Issue #1683
-    for z in have.iter().filter(|z| z.kind == "Slave" && !wanted.contains(&z.name)) {
+    for z in have
+        .iter()
+        .filter(|z| z.kind == "Slave" && !wanted.contains(&z.name))
+    {
         api.delete_zone(&z.name).await?;
         eprintln!("ui: secondary zone {} removed", z.name);
     }
@@ -3159,8 +3183,14 @@ async fn merge_legacy_zone(
     // What: a clash keeps both zones and logs it.
     // Why: a record must never be overwritten silently.
     // From: Issue #1683
-    if let Some(r) = moved.iter().find(|r| parent.iter().any(|p| key(p) == key(r))) {
-        eprintln!("ui: zone {legacy} kept: {} {} also in {lan}", r["name"], r["type"]);
+    if let Some(r) = moved
+        .iter()
+        .find(|r| parent.iter().any(|p| key(p) == key(r)))
+    {
+        eprintln!(
+            "ui: zone {legacy} kept: {} {} also in {lan}",
+            r["name"], r["type"]
+        );
         return Ok(());
     }
     if !moved.is_empty() {
@@ -3173,7 +3203,10 @@ async fn merge_legacy_zone(
     }
     api.delete_zone(&legacy).await?;
     flush_zone(s, lan).await?;
-    eprintln!("ui: zone {legacy} merged into {lan} ({} rrsets)", moved.len());
+    eprintln!(
+        "ui: zone {legacy} merged into {lan} ({} rrsets)",
+        moved.len()
+    );
     Ok(())
 }
 
@@ -3483,6 +3516,8 @@ async fn health(State(app): Shared) -> Response {
     }
 }
 
+// What: a built-in file with its content type.
+// Why: CSS and icons ship inside the binary.
 fn asset(kind: &'static str, body: &'static [u8]) -> Response {
     ([(header::CONTENT_TYPE, kind)], body).into_response()
 }
@@ -3729,6 +3764,8 @@ fn render_dns(s: &Settings) -> Result<(), String> {
     Ok(())
 }
 
+// What: HTTP probe of the own health route.
+// Why: the Docker healthcheck needs a real answer.
 async fn healthcheck(s: &Settings) -> Result<(), String> {
     let url = format!(
         "http://{}:{}{}",

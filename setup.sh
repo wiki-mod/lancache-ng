@@ -353,23 +353,30 @@ dns_upstream_server_problem() {
 }
 
 # What: why one upstream zone is unusable, else nothing
-# Why: local zones stay; unsigned ones must be forwarded
+# Why: LAN zones stay; unsigned ones must be forwarded
 # From: Issue #1918 | PR #1858
 dns_upstream_zone_problem() {
-    local raw="$1" lan="${2,,}" forwarded="${3:-}" zone inside=0 item
-    local -a forwarded_zones
+    local raw="$1" lans="${2,,}" forwarded="${3:-}" zone inside=0 local_zone=0 item
+    local -a forwarded_zones lan_zones
     zone="${raw,,}"
     zone="${zone%.}"
     read -r -a forwarded_zones <<< "${forwarded//,/ }"
     for item in "${forwarded_zones[@]}"; do
         [[ "$zone" = "$item" || "$zone" == *".$item" ]] && inside=1
     done
+    # What: every LAN domain is answered here
+    # Why: multi-domain: each one is a local zone
+    # From: Issue #1683
+    read -r -a lan_zones <<< "${lans//,/ }"
+    for item in "${lan_zones[@]}"; do
+        [[ "$zone" = "$item" || "$zone" == *".$item" ]] && local_zone=1
+    done
     # What: "_" counts as a letter in zone names
     # Why: live 06.11.: _msdcs.home.lan was refused
     # From: Issue #1918
     if ! is_valid_dhcp_proxy_domain "${zone//_/a}"; then
         printf "'%s' is no valid domain name\n" "$raw"
-    elif [[ "$zone" = "$lan" || "$zone" == *".$lan" ]]; then
+    elif [[ "$local_zone" = 1 ]]; then
         printf "'%s' is answered by LanCache-NG itself\n" "$raw"
     elif [[ -n "$forwarded" && "$inside" = 0 ]]; then
         printf "'%s' is not inside a forwarded domain\n" "$raw"
@@ -488,7 +495,7 @@ prompt_dns_upstream() {
     printf "  DNSSEC checks stay on. Private domains of your network have\n"
     printf "  no signature; name them here, or their lookups fail.\n"
     printf "  Example: fritz.box lan.local. With none, such names stop\n"
-    printf "  resolving. Your own LAN zone (%s) always works.\n" "$lan"
+    printf "  resolving. Your own LAN zones (%s) always work.\n" "$lan"
     while true; do
         ask "Private domains without DNSSEC (space or comma, 'none')" "${unsigned:-none}"
         entries=()
@@ -5667,8 +5674,8 @@ Supported services:
   dns, pdns          Rolls back a PowerDNS zone via lancache-ui in the ui
                      container (PowerDNS API restore; NOTIFY and AXFR
                      reach the secondaries).
-                     Unlike Kea, PowerDNS tracks snapshots per zone (lan.,
-                     local.lan., and the private reverse zones), so a <zone>
+                     Unlike Kea, PowerDNS tracks snapshots per zone (each
+                     LAN domain and the private reverse zones), so a <zone>
                      argument is required -- omit it to list which zones
                      currently have snapshots instead of guessing one.
 
@@ -8071,7 +8078,7 @@ cmd_configure_upstream_dns() {
 
     print_step "Reading current configuration"
 
-    local env_file ip_http ip_https lan ui_lan services apply_rc=0
+    local env_file ip_http ip_https lan ui_lan extra_lan ui_extra services apply_rc=0
     local old_servers old_zones old_unsigned old_reverse dhcp_mode
     local -a all_services new_entries
     env_file=$(runtime_env_file_for_install_dir "$install_dir")
@@ -8089,6 +8096,13 @@ cmd_configure_upstream_dns() {
     # From: Issue #1918
     ui_lan=$(lancache_read_ui_settings_override "$install_dir" "$env_file" DHCP_DOMAIN) || exit $?
     [[ -z "$ui_lan" ]] || lan="$ui_lan"
+    # What: extra LAN domains join the local zone list
+    # Why: none of them may be forwarded upstream
+    # From: Issue #1683
+    extra_lan=$(get_env_var DNS_EXTRA_LAN_DOMAINS "$env_file") || exit $?
+    ui_extra=$(lancache_read_ui_settings_override "$install_dir" "$env_file" DNS_EXTRA_LAN_DOMAINS) || exit $?
+    [[ -z "$ui_extra" ]] || extra_lan="$ui_extra"
+    lan="${lan}${extra_lan:+ ${extra_lan//,/ }}"
 
     printf '\n  %sCurrent configuration:%s\n' "${BOLD}" "${RESET}"
     printf "    DNS servers:        %s\n" "${old_servers:-none (LanCache-NG resolves names itself)}"
@@ -9044,12 +9058,44 @@ while true; do
     print_error "Please enter a domain like lancache-ng.lan or lan"
 done
 print_ok "LAN domain: $DHCP_DOMAIN"
+# What: optional extra LAN domains, each its own zone
+# Why: DHCP subnets may hand out another LAN domain
+# From: Issue #1683
+printf "  More LAN domains are optional, for example lab.lan for a\n"
+printf "  second subnet. Each one gets its own zone. Empty = none.\n\n"
+DNS_EXTRA_LAN_DOMAINS=$(prod_env_default DNS_EXTRA_LAN_DOMAINS) || exit $?
+while true; do
+    ask "Additional LAN domains (space or comma separated)" "$DNS_EXTRA_LAN_DOMAINS"
+    read -r -a extra_entries <<< "${REPLY//,/ }"
+    extra_bad=""
+    extra_seen=" ${DHCP_DOMAIN} "
+    for extra_entry in "${extra_entries[@]}"; do
+        extra_entry="${extra_entry,,}"
+        extra_entry="${extra_entry%.}"
+        if ! is_valid_dhcp_proxy_domain "$extra_entry"; then
+            extra_bad="'${extra_entry}' is no valid domain name"
+        elif [[ "$extra_seen" == *" ${extra_entry} "* ]]; then
+            extra_bad="'${extra_entry}' is listed twice or is the main LAN domain"
+        elif [[ "$extra_entry" == *.arpa ]]; then
+            extra_bad="'${extra_entry}' is a reverse zone"
+        fi
+        extra_seen+="${extra_entry} "
+    done
+    [[ -z "$extra_bad" ]] && break
+    print_error "$extra_bad"
+done
+DNS_EXTRA_LAN_DOMAINS=$(dns_upstream_join "${extra_entries[@]}")
+if [[ -n "$DNS_EXTRA_LAN_DOMAINS" ]]; then
+    print_ok "Additional LAN domains: ${DNS_EXTRA_LAN_DOMAINS}"
+else
+    print_ok "No additional LAN domains"
+fi
 
 # What: optional external DNS server for unknown names
 # Why: a router may answer the names of LAN devices
 # From: Issue #1918 | PR #1858
 print_step "External DNS server (optional)"
-install_lan_zone="$DHCP_DOMAIN"
+install_lan_zone="${DHCP_DOMAIN}${DNS_EXTRA_LAN_DOMAINS:+ ${DNS_EXTRA_LAN_DOMAINS//,/ }}"
 prompt_dns_upstream "" "" "" "${IP_HTTP},${IP_HTTPS}" "$install_lan_zone"
 if [[ -n "$DNS_UPSTREAM_SERVERS" ]]; then
     print_ok "External DNS: ${DNS_UPSTREAM_SERVERS}"
@@ -9491,6 +9537,11 @@ DNS_UPSTREAM_UNSIGNED_ZONES=${DNS_UPSTREAM_UNSIGNED_ZONES}
 # Why: the Admin UI DNS settings can change it later
 # From: Issue #1683 | PR #1980
 DHCP_DOMAIN=${DHCP_DOMAIN}
+
+# What: more LAN domains, comma separated; may be empty
+# Why: each one is its own zone; the Admin UI edits them
+# From: Issue #1683
+DNS_EXTRA_LAN_DOMAINS=${DNS_EXTRA_LAN_DOMAINS}
 
 # What: 1 = LanCache-NG answers private PTR lookups itself
 # Why: 0 sends them on like every other name; kea needs 1

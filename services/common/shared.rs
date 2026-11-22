@@ -829,10 +829,10 @@ pub mod dns {
         for raw in std::iter::once(main).chain(extra.iter().map(String::as_str)) {
             let zone = canonical_zone(raw);
             let name = zone.trim_end_matches('.');
-            // What: a LAN domain has two or more labels.
-            // Why: a single label is a TLD the root denies.
+            // What: one label like "lan" is allowed.
+            // Why: setup.sh offers it; the NTA covers it.
             // From: Issue #1683
-            if !name.contains('.') || !is_dns_name(name, false, false) {
+            if !is_dns_name(name, false, false) {
                 return Err(format!("LAN domain {raw:?} is no domain name"));
             }
             if name.ends_with(".arpa") {
@@ -2721,6 +2721,8 @@ pub mod kea_conf {
     const NCR_FORMAT: &str = "JSON";
     const LOG_OUTPUT: &str = "stdout";
 
+    // What: Kea logger rows for the given names.
+    // Why: all Kea daemons log the same way to stdout.
     fn log_rows(s: &Settings, names: &[&str]) -> Result<Value, String> {
         let level = s.text("KEA_LOG_SEVERITY")?;
         let depth = s.uint("KEA_LOG_DEBUGLEVEL")?;
@@ -2743,6 +2745,8 @@ pub mod kea_conf {
         Ok(main.trim_end_matches('.').to_string())
     }
 
+    // What: Kea control socket of dhcp4.
+    // Why: ctrl-agent and dhcp4 must name one socket.
     fn socket(s: &Settings) -> Result<Value, String> {
         Ok(json!({"socket-type": SOCKET_KIND,
                   "socket-name": s.text("KEA_DHCP4_SOCKET")?}))
@@ -2775,7 +2779,10 @@ pub mod kea_conf {
     // From: Issue #1683
     pub fn subnet_ddns_suffix(s: &Settings, subnet: &mut Value) -> Result<(), String> {
         let lans = crate::dns::lan_domains(s)?;
-        let rows = subnet["option-data"].as_array().cloned().unwrap_or_default();
+        let rows = subnet["option-data"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
         let named = rows.iter().find(|r| r["name"] == "domain-name");
         let zone = named
             .and_then(|r| r["data"].as_str())
@@ -2793,6 +2800,8 @@ pub mod kea_conf {
         Ok(())
     }
 
+    // What: option-data of the main subnet.
+    // Why: the settings own router, DNS, domain, NTP.
     fn option_rows(s: &Settings, domain: &str) -> Result<Vec<Value>, String> {
         let mut rows = Vec::new();
         rows.push(json!({"name": "routers", "data": s.text("DHCP_GATEWAY")?}));
@@ -2959,6 +2968,8 @@ pub mod dnsmasq_conf {
     struct Conf(String);
 
     impl Conf {
+        // What: append one dnsmasq.conf row.
+        // Why: a line break would inject a second row.
         fn add(&mut self, row: &str) -> Result<(), String> {
             if row.contains(['\n', '\r']) {
                 return Err(format!("dnsmasq row {row:?} has a line break"));
@@ -2967,6 +2978,8 @@ pub mod dnsmasq_conf {
             self.0.push('\n');
             Ok(())
         }
+        // What: append prefix+value when value is set.
+        // Why: empty optional settings write no row.
         fn add_if(&mut self, prefix: &str, value: &str) -> Result<(), String> {
             if value.is_empty() {
                 return Ok(());
@@ -2975,6 +2988,8 @@ pub mod dnsmasq_conf {
         }
     }
 
+    // What: rows every dnsmasq mode starts with.
+    // Why: dnsmasq runs DHCP only, no DNS, no polling.
     fn base(s: &Settings) -> Result<Conf, String> {
         let mut c = Conf(String::new());
         for row in ["port=0", "no-resolv", "no-poll", "log-facility=-"] {
@@ -2986,6 +3001,8 @@ pub mod dnsmasq_conf {
         Ok(c)
     }
 
+    // What: pxe-service rows for BIOS and UEFI.
+    // Why: PXE needs a server and at least one file.
     fn pxe(s: &Settings, c: &mut Conf) -> Result<(), String> {
         let get = |k: &str| s.text(k).unwrap_or_default();
         let server = get("DHCP_PROXY_PXE_BOOT_SERVER");
@@ -3122,6 +3139,8 @@ pub mod nginx_conf {
             p
         }
 
+        // What: label count of the public suffix.
+        // Why: PSL rules: exception, wildcard, plain.
         fn suffix_labels(&self, labels: &[&str]) -> usize {
             let n = labels.len();
             let mut best = 1;
@@ -3159,6 +3178,8 @@ pub mod nginx_conf {
         pub root_wild: BTreeSet<String>,
     }
 
+    // What: push a name unless it is listed.
+    // Why: nginx rejects a host listed twice in a map.
     fn add_once(list: &mut Vec<String>, name: &str) {
         if !list.iter().any(|n| n == name) {
             list.push(name.to_string());
@@ -3259,10 +3280,14 @@ pub mod nginx_conf {
         Ok(out)
     }
 
+    // What: one aligned nginx map row.
+    // Why: map files stay readable in the volume.
     fn map_row(out: &mut String, key: &str, value: &str) {
         out.push_str(&format!("    {key:<45} {value};\n"));
     }
 
+    // What: nginx regex for names below base.
+    // Why: one label or any depth, dots escaped.
     fn ends_with_re(base: &str, one_label: bool) -> String {
         let label = if one_label { "[^.]+" } else { ".+" };
         format!("\"~^{label}\\.{}$\"", base.replace('.', "\\."))
@@ -3288,6 +3313,8 @@ pub mod nginx_conf {
         health: u64,
     }
 
+    // What: read every proxy setting into a Plan.
+    // Why: strict/lazy is checked once, not per file.
     fn plan(s: &Settings) -> Result<Plan, String> {
         let strict = match s.text("PROXY_SECURITY_MODE")?.as_str() {
             "strict" => true,
@@ -3321,6 +3348,8 @@ pub mod nginx_conf {
         })
     }
 
+    // What: allow rows per client CIDR, then deny.
+    // Why: no CIDR list means every client may use it.
     fn acl_file(p: &Plan) -> String {
         let mut out = HEAD.to_string();
         for c in &p.cidrs {
@@ -3332,6 +3361,8 @@ pub mod nginx_conf {
         out
     }
 
+    // What: SNI map of the TLS passthrough stream.
+    // Why: strict sends only known hosts to the origin.
     fn stream_file(p: &Plan, keys: &[(String, String)]) -> String {
         let mut out = format!("{HEAD}map $ssl_preread_server_name $stream_backend {{\n");
         out.push_str("    hostnames;\n");
@@ -3363,6 +3394,8 @@ pub mod nginx_conf {
         out
     }
 
+    // What: certificate and allowed-host maps.
+    // Why: nginx picks the cert by SNI from this map.
     fn https_map(p: &Plan, keys: &[(String, String)], fallback: &str) -> String {
         let mut out = format!("{HEAD}map $ssl_server_name $https_cert_name {{\n");
         out.push_str("    hostnames;\n");
@@ -3391,6 +3424,8 @@ pub mod nginx_conf {
         out
     }
 
+    // What: server block behind the proxy protocol.
+    // Why: the real client IP comes from the stream.
     fn relay_server(p: &Plan, listen: &str, body: &str) -> String {
         format!(
             "server {{\n    listen {listen} proxy_protocol;\n    set_real_ip_from {};\n{body}{}}}\n",
@@ -3398,6 +3433,8 @@ pub mod nginx_conf {
         )
     }
 
+    // What: SNI map: cached hosts go to the MITM relay.
+    // Why: only CDN hosts are decrypted and cached.
     fn dispatch_file(p: &Plan, h: &Hosts) -> String {
         let mut out = format!("{HEAD}map $ssl_preread_server_name $https_dispatch_backend {{\n");
         map_row(&mut out, "\"\"", &p.refuse_relay);
@@ -3508,6 +3545,8 @@ pub mod apply {
         Failed(Error),
     }
 
+    // What: Docker action for a settings effect.
+    // Why: live needs none; recreate needs compose.
     fn action_of(effect: Effect) -> Option<Action> {
         match effect {
             Effect::Live | Effect::Recreate => None,
@@ -3642,6 +3681,8 @@ pub mod render {
     }
 
     impl Out<'_> {
+        // What: keep a file or collect its error.
+        // Why: one render reports every error at once.
         fn add_file(&mut self, owner: &'static str, path_key: &str, body: Result<String, String>) {
             match (self.s.text(path_key), body) {
                 (Ok(p), Ok(body)) => self.files.push(File {
@@ -3652,6 +3693,9 @@ pub mod render {
                 (Err(e), _) | (_, Err(e)) => self.errs.push(e),
             }
         }
+
+        // What: pretty JSON file for Kea configs.
+        // Why: Kea reads JSON; diffs stay readable.
         fn put_json(
             &mut self,
             owner: &'static str,
@@ -3674,6 +3718,8 @@ pub mod render {
         h.max(1)
     }
 
+    // What: files of services and dns.
+    // Why: a secondary renders only these.
     fn dns_files(o: &mut Out, sec: &Secrets, names: &[(String, bool)]) {
         let s = o.s;
         o.add_file("services", "CHRONY_CONF_FILE", chrony::render(s));
@@ -3716,6 +3762,8 @@ pub mod render {
         }
     }
 
+    // What: files of the chosen DHCP mode.
+    // Why: each mode starts only its own programs.
     fn dhcp_files(o: &mut Out, sec: &Secrets) {
         let s = o.s;
         // What: the mode file names the dhcp runlevel.
@@ -3749,10 +3797,14 @@ pub mod render {
         }
     }
 
+    // What: file text with the path in the error.
+    // Why: a missing template must name its path.
     fn read(path: &PathBuf) -> Result<String, String> {
         std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))
     }
 
+    // What: nginx config from templates and CDN list.
+    // Why: certs and maps follow the domain list.
     fn nginx_files(o: &mut Out, domains: &str) -> Result<(), String> {
         let s = o.s;
         let src = PathBuf::from(s.text("NGINX_TEMPLATE_DIR")?);
@@ -3983,6 +4035,8 @@ pub mod ntp {
     const PACKET: usize = 48;
     const MODE_SERVER: u8 = 4;
 
+    // What: send one SNTP request, read the reply.
+    // Why: a short reply is no valid NTP packet.
     fn ask(host: &str, port: u64, wait: Duration) -> std::io::Result<[u8; PACKET]> {
         let sock = UdpSocket::bind("0.0.0.0:0")?;
         sock.set_read_timeout(Some(wait))?;
@@ -4069,6 +4123,8 @@ pub mod access {
         out
     }
 
+    // What: read file end in chunks until N lines.
+    // Why: logs are large; only the end is shown.
     fn read_back(path: &Path, want: usize, chunk: u64) -> std::io::Result<(Vec<u8>, bool)> {
         let mut f = std::fs::File::open(path)?;
         let mut pos = f.seek(SeekFrom::End(0))?;
@@ -4130,6 +4186,8 @@ pub mod access {
     }
 
     impl Stats {
+        // What: add one log entry to the totals.
+        // Why: HIT, MISS/EXPIRED and other are counted.
         fn count(&mut self, e: &Entry) {
             self.total_requests += 1;
             self.total_bytes += e.bytes;
@@ -4204,6 +4262,8 @@ pub mod cdn {
         pub is_valid: bool,
     }
 
+    // What: one CDN list row with its validity.
+    // Why: the ui marks rows that are no valid entry.
     fn new_row(name: String, is_default: bool, enabled: bool) -> Row {
         Row {
             is_valid: crate::dns::cdn_entry(&name).is_some(),
@@ -4408,10 +4468,14 @@ pub mod rrd {
         "blk_write",
     ];
 
+    // What: true for a-z, 0-9 and _ only.
+    // Why: names become RRD file and DS names.
     fn is_plain(word: &str) -> bool {
         !word.is_empty() && word.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
     }
 
+    // What: parse ds=oid=kind[=scale].
+    // Why: a bad SOT row stops instead of a blank graph.
     fn source(text: &str) -> Result<Source, String> {
         let parts: Vec<&str> = text.split('=').collect();
         let (ds, oid, kind, scale) = match parts[..] {
@@ -4433,6 +4497,8 @@ pub mod rrd {
         })
     }
 
+    // What: parse name:source+source of one tab.
+    // Why: SOT rows define graphs; no list in code.
     fn graph(row: &str, tab: &str) -> Result<Graph, String> {
         let (name, list) = row
             .split_once(':')
@@ -4556,6 +4622,8 @@ pub mod rrd {
         Ok(Path::new(&dir).join(format!("{}.rrd", g.name)))
     }
 
+    // What: run a tool; stderr on failure.
+    // Why: a failed rrdtool must show its reason.
     fn run(cmd: &mut Command) -> Result<Vec<u8>, String> {
         let out = cmd.output().map_err(|e| format!("{cmd:?}: {e}"))?;
         if !out.status.success() {
@@ -4600,6 +4668,8 @@ pub mod rrd {
         Ok(())
     }
 
+    // What: the value or U for rrdtool update.
+    // Why: rrdtool stores U as unknown, not zero.
     fn number_or_unknown(line: &str) -> String {
         match line.split_whitespace().next() {
             Some(v) if v.parse::<f64>().is_ok() => v.into(),
@@ -4718,6 +4788,8 @@ pub mod tidy {
     // From: Issue #1683 | PR #1858
     pub const DAY: u64 = 86_400;
 
+    // What: path with links and .. resolved.
+    // Why: a link must not lead tidy outside its root.
     fn resolved(path: &Path) -> std::io::Result<PathBuf> {
         let mut out = PathBuf::from("/");
         for part in path.components() {
@@ -4767,6 +4839,8 @@ pub mod tidy {
         pub mtime: u64,
     }
 
+    // What: change time in unix seconds; 0 if unknown.
+    // Why: age checks compare plain numbers.
     fn mtime(meta: &std::fs::Metadata) -> u64 {
         meta.modified()
             .ok()
