@@ -639,6 +639,13 @@ async fn save(
     {
         return Err(bad_request(tr("err_no_domain").replace("{x}", d)));
     }
+    // What: a new main domain also updates the extras.
+    // Why: an extra made main must leave the extra list.
+    // From: Issue #1683
+    let mut form = form;
+    if let Some(d) = form.get("DHCP_DOMAIN").cloned() {
+        form.extend(main_domain_fields(&app.settings(), &d).map_err(bad_request)?);
+    }
     // What: each upstream entry is checked before save.
     // Why: live 06.11. + threat model G3: no self loop.
     // From: Issue #1683 | PR #1985
@@ -686,9 +693,7 @@ async fn drop_old_zones(s: &Settings, before: &[String]) {
         // Why: a record the user added is never lost.
         // From: Issue #1683 | PR #1980
         let own = match api.rrsets(zone).await {
-            Ok(sets) => sets
-                .iter()
-                .any(|r| !matches!(r["type"].as_str(), Some("SOA" | "NS"))),
+            Ok(sets) => !own_rrsets(&sets).is_empty(),
             Err(_) => continue,
         };
         let done = if own {
@@ -834,17 +839,65 @@ fn reverse_zone(s: &Settings, name: &str) -> Option<String> {
         .max_by_key(String::len)
 }
 
-// What: LAN zone name in canonical form.
+// What: main LAN zone in canonical form.
 // Why: PowerDNS compares names with trailing dot.
+// From: Issue #1683
 fn lan_zone(s: &Settings) -> Result<String, String> {
-    Ok(lancache_ng::dns::canonical_zone(&s.text("DHCP_DOMAIN")?))
+    let lans = lancache_ng::dns::lan_domains(s)?;
+    lans.into_iter().next().ok_or_else(|| "no LAN domain".into())
+}
+
+// What: the LAN zone a form names; empty = main.
+// Why: records go only into a configured LAN domain.
+// From: Issue #1683
+fn chosen_lan_zone(s: &Settings, raw: &str) -> Result<String, String> {
+    if raw.trim().is_empty() {
+        return lan_zone(s);
+    }
+    let zone = lancache_ng::dns::canonical_zone(raw.trim());
+    if lancache_ng::dns::lan_domains(s)?.contains(&zone) {
+        Ok(zone)
+    } else {
+        Err(tr("err_not_lan_domain").replace("{x}", raw.trim()))
+    }
+}
+
+// What: settings that make one domain the main one.
+// Why: a former extra leaves the list; swap keeps both.
+// From: Issue #1683
+fn main_domain_fields(s: &Settings, main: &str) -> Result<Fields, String> {
+    let lans = lancache_ng::dns::lan_domains(s)?;
+    let want = lancache_ng::dns::canonical_zone(main.trim());
+    let plain = |z: &String| z.trim_end_matches('.').to_string();
+    let old = lans.first().cloned().unwrap_or_default();
+    let mut extra: Vec<String> = lans.iter().skip(1).filter(|z| **z != want).map(plain).collect();
+    // What: old main stays as extra only on a swap.
+    // Why: a new name renames the main domain as before.
+    // From: Issue #1683
+    if want != old && lans.iter().skip(1).any(|z| *z == want) {
+        extra.push(plain(&old));
+    }
+    Ok(Fields::from([
+        ("DHCP_DOMAIN".to_string(), plain(&want)),
+        ("DNS_EXTRA_LAN_DOMAINS".to_string(), extra.join(" ")),
+    ]))
+}
+
+// What: rrsets of a zone besides SOA and NS.
+// Why: only these are records a person added.
+// From: Issue #1683
+fn own_rrsets(rows: &[Value]) -> Vec<Value> {
+    rows.iter()
+        .filter(|r| !matches!(r["type"].as_str(), Some("SOA" | "NS")))
+        .cloned()
+        .collect()
 }
 
 // What: zones that keep snapshots.
-// Why: LAN zone plus the private reverse zones.
+// Why: LAN zones plus the private reverse zones.
 // From: Issue #1683 | PR #1858
 fn snapshot_zones(s: &Settings) -> Result<Vec<String>, String> {
-    let mut zones = vec![lan_zone(s)?];
+    let mut zones = lancache_ng::dns::lan_domains(s)?;
     zones.extend(lancache_ng::dns::private_reverse_zones(s));
     Ok(zones)
 }
@@ -956,25 +1009,47 @@ async fn ptr_rows(s: &Settings, api: &lancache_ng::pdns::Api) -> Vec<Value> {
 // From: Issue #1683 | PR #1858
 async fn domains(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     let s = app.settings();
+    let lans = lancache_ng::dns::lan_domains(&s)?;
     let lan = lan_zone(&s)?;
     let mut ctx = Context::new();
     ctx.insert("dns_domains", &lancache_ng::cdn::parse_rows(&s)?);
     ctx.insert("lan_zone", lan.trim_end_matches('.'));
-    let (mut lan_rows, mut ptr) = (Vec::new(), Vec::new());
+    let mut records: BTreeMap<String, Vec<Value>> = BTreeMap::new();
+    let mut ptr = Vec::new();
     match pdns_api(&s) {
-        // What: PTR rows only when the LAN zone answers.
+        // What: other zones only when the main zone answers.
         // Why: an unreachable API would time out 20 times.
         // From: Issue #1683 | PR #1980
         Ok(api) => match api.rrsets(&lan).await {
             Ok(rows) => {
-                lan_rows = rows;
+                records.insert(lan.clone(), own_rrsets(&rows));
+                for zone in lans.iter().skip(1) {
+                    match api.rrsets(zone).await {
+                        Ok(rows) => records.insert(zone.clone(), own_rrsets(&rows)),
+                        Err(e) => ctx.insert("domain_error_message", &e),
+                    };
+                }
                 ptr = ptr_rows(&s, &api).await;
             }
             Err(e) => ctx.insert("domain_error_message", &e),
         },
         Err(e) => ctx.insert("domain_error_message", &e),
     }
-    ctx.insert("lan_records", &lan_rows);
+    let subnets = domain_subnets(&s).await;
+    let rows: Vec<Value> = lans
+        .iter()
+        .enumerate()
+        .map(|(i, zone)| {
+            let own = records.get(zone).cloned().unwrap_or_default();
+            json!({
+                "name": zone.trim_end_matches('.'),
+                "main": i == 0,
+                "records": own,
+                "subnets": subnets.get(zone).cloned().unwrap_or_default(),
+            })
+        })
+        .collect();
+    ctx.insert("lan_domains", &rows);
     ctx.insert("ptr_records", &ptr);
     let groups: Vec<Value> = snapshot_list(&s)?
         .into_iter()
@@ -1044,6 +1119,33 @@ async fn domains(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     app.page("domains.html", ctx, &csrf)
 }
 
+// What: Kea subnets per LAN zone, by domain-name.
+// Why: the DNS page shows which subnet uses a domain.
+// From: Issue #1683
+async fn domain_subnets(s: &Settings) -> BTreeMap<String, Vec<String>> {
+    let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    if s.text("DHCP_MODE").unwrap_or_default() != "kea" {
+        return out;
+    }
+    // What: no Kea answer leaves the column empty.
+    // Why: the DNS page must not fail when dhcp is down.
+    // From: Issue #1683
+    let Ok(api) = kea_api(s) else { return out };
+    let Ok(cfg) = api.config().await else {
+        return out;
+    };
+    for sn in cfg["Dhcp4"]["subnet4"].as_array().into_iter().flatten() {
+        let domain = option_data(sn, "domain-name");
+        if domain.is_empty() {
+            continue;
+        }
+        let zone = lancache_ng::dns::canonical_zone(&domain);
+        let net = sn["subnet"].as_str().unwrap_or_default().to_string();
+        out.entry(zone).or_default().push(net);
+    }
+    out
+}
+
 // What: list setting with one item in or out.
 // Why: domain add, remove and toggle share it.
 // From: Issue #1683 | PR #1858
@@ -1096,6 +1198,9 @@ async fn dns_action(
         "UI_ROUTE_LAN_ADD" | "UI_ROUTE_LAN_REMOVE" => {
             record(&s, op == "UI_ROUTE_LAN_ADD", &get).await
         }
+        "UI_ROUTE_LAN_DOMAIN_ADD" | "UI_ROUTE_LAN_DOMAIN_REMOVE" | "UI_ROUTE_LAN_DOMAIN_MAIN" => {
+            lan_domain_action(&app, &s, op, &domain).await
+        }
         "UI_ROUTE_PTR_ADD" | "UI_ROUTE_PTR_REMOVE" => ptr(&s, op == "UI_ROUTE_PTR_ADD", &get).await,
         "UI_ROUTE_ZONE_ROLLBACK" => rollback(&s, &get("zone"), &get("snapshot_id")).await,
         "UI_ROUTE_TSIG_ROTATE" => rotate_tsig(&app).await,
@@ -1104,11 +1209,61 @@ async fn dns_action(
     finish(result, &s.text("UI_PAGE_DOMAINS")?)
 }
 
+// What: add, remove or promote one LAN domain.
+// Why: each LAN domain is one zone in PowerDNS.
+// From: Issue #1683
+async fn lan_domain_action(app: &App, s: &Settings, op: &str, raw: &str) -> Result<(), String> {
+    let zone = lancache_ng::dns::canonical_zone(raw.trim());
+    let name = zone.trim_end_matches('.').to_string();
+    let lans = lancache_ng::dns::lan_domains(s)?;
+    let before = lancache_ng::dns::managed_zones(s)?;
+    let change = match op {
+        "UI_ROUTE_LAN_DOMAIN_ADD" => {
+            let mut extra = s.list("DNS_EXTRA_LAN_DOMAINS");
+            extra.push(name.clone());
+            lancache_ng::dns::validate_lan_domains(&s.text("DHCP_DOMAIN")?, &extra)?;
+            list_change(s, "DNS_EXTRA_LAN_DOMAINS", &name, true)
+        }
+        "UI_ROUTE_LAN_DOMAIN_REMOVE" => {
+            if lans.first() == Some(&zone) {
+                return Err(tr("err_main_domain_remove").replace("{x}", &name));
+            }
+            if !lans.contains(&zone) {
+                return Err(tr("err_not_lan_domain").replace("{x}", &name));
+            }
+            // What: a domain with own records stays.
+            // Why: removing it would drop names from DNS.
+            // From: Issue #1683
+            let own = own_rrsets(&pdns_api(s)?.rrsets(&zone).await?).len();
+            if own > 0 {
+                return Err(tr("err_domain_has_records")
+                    .replace("{x}", &name)
+                    .replace("{n}", &own.to_string()));
+            }
+            list_change(s, "DNS_EXTRA_LAN_DOMAINS", &name, false)
+        }
+        _ => {
+            if !lans.contains(&zone) {
+                return Err(tr("err_not_lan_domain").replace("{x}", &name));
+            }
+            main_domain_fields(s, &name)?
+        }
+    };
+    commit(app, change).await?;
+    drop_old_zones(&app.settings(), &before).await;
+    Ok(())
+}
+
 // What: full name inside the LAN zone.
 // Why: a short name gets the zone appended.
 // From: Issue #1683 | PR #1858
 fn in_zone(name: &str, zone: &str) -> String {
-    if name.ends_with('.') || name.ends_with(zone.trim_end_matches('.')) {
+    // What: only a whole-label suffix counts as inside.
+    // Why: "xhome.lan" is not in zone "home.lan".
+    // From: Issue #1683
+    let bare = zone.trim_end_matches('.');
+    let inside = name == bare || name.ends_with(&format!(".{bare}"));
+    if name.ends_with('.') || inside {
         name.to_string()
     } else {
         format!("{name}.{zone}")
@@ -1145,7 +1300,7 @@ async fn record(
     add: bool,
     get: &(dyn Fn(&str) -> String + Sync),
 ) -> Result<(), String> {
-    let zone = lan_zone(s)?;
+    let zone = chosen_lan_zone(s, &get("zone"))?;
     let kind = get("record_type");
     if !s.list("DNS_LAN_RECORD_TYPES").contains(&kind) {
         return Err(tr("err_record_type").replace("{kind}", &kind));
@@ -1411,34 +1566,56 @@ fn serial_of(zones: Vec<lancache_ng::pdns::Zone>, zone: &str) -> Option<u32> {
     zones.into_iter().find(|z| z.name == zone).map(|z| z.serial)
 }
 
-// What: LAN zone serial, primary vs secondary.
+// What: serials of every managed zone on both peers.
 // Why: shows a lost NOTIFY or AXFR (RFC 1982).
 // From: Issue #1683 | PR #1858
-async fn peer_serials(s: &Settings, address: &str) -> Result<(Option<u32>, Option<u32>), String> {
-    let zone = lan_zone(s)?;
+async fn peer_serials(
+    s: &Settings,
+    address: &str,
+) -> Result<Vec<(String, Option<u32>, Option<u32>)>, String> {
     let port = s.uint("PDNS_AUTH_API_PORT")?;
     let url = format!("http://{address}:{port}/api/v1/servers/localhost");
     let key = secrets(s)?.pdns_api_key;
     let remote = lancache_ng::pdns::Api::new(http::client(s)?, &url, &key);
     let ours = pdns_api(s)?.zones().await?;
     let theirs = remote.zones().await?;
-    Ok((serial_of(ours, &zone), serial_of(theirs, &zone)))
+    Ok(lancache_ng::dns::managed_zones(s)?
+        .into_iter()
+        .map(|zone| {
+            let p = serial_of(ours.clone(), &zone);
+            let r = serial_of(theirs.clone(), &zone);
+            (zone, p, r)
+        })
+        .collect())
 }
 
-// What: sync state and serial of one secondary.
-// Why: the secondaries page shows a status per peer.
+// What: sync state of one secondary, worst zone wins.
+// Why: one lagging LAN domain must show as a problem.
+// From: Issue #1683
 async fn secondary_health(s: &Settings, address: &str) -> Value {
-    match peer_serials(s, address).await {
-        Ok((Some(p), Some(r))) => {
-            let state = lancache_ng::dns::sync_state(p, r);
-            json!({"status": format!("{state:?}"), "serial": r})
+    let rows = match peer_serials(s, address).await {
+        Ok(rows) => rows,
+        Err(e) => return json!({"status": "unreachable", "detail": e}),
+    };
+    let mut main_serial = None;
+    for (zone, primary, secondary) in &rows {
+        match (primary, secondary) {
+            (None, _) => {
+                return json!({"status": "error", "detail": format!("{zone} not on primary")});
+            }
+            (Some(_), None) => {
+                return json!({"status": "missing", "detail": format!("{zone} not on secondary")});
+            }
+            (Some(p), Some(r)) => {
+                let state = lancache_ng::dns::sync_state(*p, *r);
+                if state != lancache_ng::dns::Sync::InSync {
+                    return json!({"status": format!("{state:?}"), "serial": r, "detail": zone});
+                }
+                main_serial.get_or_insert(*r);
+            }
         }
-        Ok((_, r)) if r.is_none() => {
-            json!({"status": "missing", "detail": "zone not on secondary"})
-        }
-        Ok(_) => json!({"status": "error", "detail": "zone not on primary"}),
-        Err(e) => json!({"status": "unreachable", "detail": e}),
     }
+    json!({"status": "InSync", "serial": main_serial})
 }
 
 // What: flush recursor caches when a serial moves.
@@ -2879,19 +3056,29 @@ async fn ensure_tsig(s: &Settings) -> Result<(), String> {
 // From: Issue #1683 | PR #1858
 async fn ensure_secondary_zones(s: &Settings) -> Result<(), String> {
     let api = pdns_api(s)?;
-    let have: Vec<String> = api.zones().await?.into_iter().map(|z| z.name).collect();
+    let have = api.zones().await?;
     // What: the primary pdns port, not its recursor.
     // Why: live 229: port 53 refused every SOA check.
     // From: Issue #1683
     let port = s.uint("PDNS_AUTH_PORT")?;
     let masters = vec![format!("{}:{port}", s.text("DNS_XFR_PRIMARY")?)];
-    for zone in s.list("DNS_SECONDARY_ZONES") {
-        let id = lancache_ng::pdns::zone_id(&zone);
-        if have.contains(&id) {
-            api.set_masters(&id, &masters).await?;
+    let wanted: Vec<String> = lancache_ng::dns::managed_zones(s)?
+        .iter()
+        .map(|z| lancache_ng::pdns::zone_id(z))
+        .collect();
+    for id in &wanted {
+        if have.iter().any(|z| z.name == *id) {
+            api.set_masters(id, &masters).await?;
         } else {
-            api.create_secondary(&id, &masters).await?;
+            api.create_secondary(id, &masters).await?;
         }
+    }
+    // What: drop copies the primary no longer serves.
+    // Why: a removed LAN domain must stop answering.
+    // From: Issue #1683
+    for z in have.iter().filter(|z| z.kind == "Slave" && !wanted.contains(&z.name)) {
+        api.delete_zone(&z.name).await?;
+        eprintln!("ui: secondary zone {} removed", z.name);
     }
     Ok(())
 }
@@ -2919,6 +3106,50 @@ async fn ensure_primary_zones(s: &Settings) -> Result<(), String> {
         api.set_metadata(&id, "TSIG-ALLOW-DNSUPDATE", &signed)
             .await?;
     }
+    for lan in lancache_ng::dns::lan_domains(s)? {
+        merge_legacy_zone(s, &api, &have, &lan).await?;
+    }
+    Ok(())
+}
+
+// What: moves local.<domain> records into <domain>.
+// Why: zones before multi-domain had this extra zone.
+// From: Issue #1683
+async fn merge_legacy_zone(
+    s: &Settings,
+    api: &lancache_ng::pdns::Api,
+    have: &[String],
+    lan: &str,
+) -> Result<(), String> {
+    let legacy = lancache_ng::dns::legacy_local_zone(lan);
+    let id = lancache_ng::pdns::zone_id(&legacy);
+    // What: a LAN domain named local.<x> is kept.
+    // Why: then it is a configured zone, not legacy.
+    // From: Issue #1683
+    if !have.contains(&id) || lancache_ng::dns::lan_domains(s)?.contains(&legacy) {
+        return Ok(());
+    }
+    let moved = own_rrsets(&api.rrsets(&legacy).await?);
+    let key = |r: &Value| (r["name"].to_string(), r["type"].to_string());
+    let parent = own_rrsets(&api.rrsets(lan).await?);
+    // What: a clash keeps both zones and logs it.
+    // Why: a record must never be overwritten silently.
+    // From: Issue #1683
+    if let Some(r) = moved.iter().find(|r| parent.iter().any(|p| key(p) == key(r))) {
+        eprintln!("ui: zone {legacy} kept: {} {} also in {lan}", r["name"], r["type"]);
+        return Ok(());
+    }
+    if !moved.is_empty() {
+        snapshot(s, api, &legacy).await?;
+        snapshot(s, api, lan).await?;
+        let mut saved = api.rrsets(lan).await?;
+        saved.extend(moved.iter().cloned());
+        api.restore(lan, &saved).await?;
+        snapshot(s, api, lan).await?;
+    }
+    api.delete_zone(&legacy).await?;
+    flush_zone(s, lan).await?;
+    eprintln!("ui: zone {legacy} merged into {lan} ({} rrsets)", moved.len());
     Ok(())
 }
 
@@ -3356,7 +3587,7 @@ async fn lang(State(app): Shared, req: Request, next: Next) -> Response {
 // What: SOT keys of the actions each handler serves.
 // Why: the handler matches the key; the SOT owns the path.
 // From: Issue #1683
-const DNS_OPS: [&str; 12] = [
+const DNS_OPS: [&str; 15] = [
     "UI_ROUTE_DNS_ADD",
     "UI_ROUTE_DNS_REMOVE",
     "UI_ROUTE_DNS_TOGGLE",
@@ -3365,6 +3596,9 @@ const DNS_OPS: [&str; 12] = [
     "UI_ROUTE_DDNS_UNSIGNED",
     "UI_ROUTE_LAN_ADD",
     "UI_ROUTE_LAN_REMOVE",
+    "UI_ROUTE_LAN_DOMAIN_ADD",
+    "UI_ROUTE_LAN_DOMAIN_REMOVE",
+    "UI_ROUTE_LAN_DOMAIN_MAIN",
     "UI_ROUTE_PTR_ADD",
     "UI_ROUTE_PTR_REMOVE",
     "UI_ROUTE_ZONE_ROLLBACK",

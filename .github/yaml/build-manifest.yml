@@ -587,6 +587,10 @@ runtime:
     - DNS_UPSTREAM_ZONES=.
     - DNS_UPSTREAM_UNSIGNED_ZONES=
     - DHCP_DOMAIN=lancache-ng.lan
+    # What: more LAN domains beside DHCP_DOMAIN.
+    # Why: each gets its own zone; empty = only one.
+    # From: Issue #1683
+    - DNS_EXTRA_LAN_DOMAINS=
     - DHCP_DDNS_ENABLED=false
     - KEA_CTRL_USER=admin
     - KEA_CTRL_PORT=8000
@@ -663,6 +667,9 @@ runtime:
     - UI_ROUTE_DNS_TOGGLE=/domains/domain-toggle
     - UI_ROUTE_LAN_ADD=/domains/record-add
     - UI_ROUTE_LAN_REMOVE=/domains/record-remove
+    - UI_ROUTE_LAN_DOMAIN_ADD=/domains/lan-domain-add
+    - UI_ROUTE_LAN_DOMAIN_REMOVE=/domains/lan-domain-remove
+    - UI_ROUTE_LAN_DOMAIN_MAIN=/domains/lan-domain-main
     - UI_ROUTE_PTR_ADD=/domains/ptr-add
     - UI_ROUTE_PTR_REMOVE=/domains/ptr-remove
     - UI_ROUTE_AAAA_FILTER=/domains/aaaa-filter
@@ -691,6 +698,7 @@ runtime:
     - UI_ROUTE_SERVICE_ACTION=/api/service/{container}/{program}/{action}
     - UI_ROUTE_STATS_GRAPH=/stats/graph/{name}
     - UI_ROUTE_SECONDARY_REGISTER=/api/secondary/register
+    - UI_ROUTE_SECONDARY_ZONES=/api/secondary/zones
     - UI_ROUTE_HEALTH=@PROXY_HEALTH_PATH@
     # What: ui page refresh timings, in seconds.
     # Why: templates read the value; no literal in markup.
@@ -1269,6 +1277,7 @@ runtime:
     - DHCP_SUBNET=text;;;reload;dhcp
     - DHCP_SUBNET_ID=uint;1;4294967294;reload;dhcp
     - DHCP_SUBNET_START=text?;;;reload;dhcp
+    - DNS_EXTRA_LAN_DOMAINS=list?;;;reload;dns
     - DNS_FILTER_AAAA=bool;;;reload;dns
     - DNS_LAN_RECORD_TYPES=list;;;live;ui
     - DNS_LOCAL_REVERSE_ZONES=bool;;;reload;dns

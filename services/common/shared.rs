@@ -821,16 +821,64 @@ pub mod dns {
             .collect()
     }
 
+    // What: checked LAN domains, main domain first.
+    // Why: one rule for zones, DDNS, records and the ui.
+    // From: Issue #1683
+    pub fn validate_lan_domains(main: &str, extra: &[String]) -> Result<Vec<String>, String> {
+        let mut out: Vec<String> = Vec::new();
+        for raw in std::iter::once(main).chain(extra.iter().map(String::as_str)) {
+            let zone = canonical_zone(raw);
+            let name = zone.trim_end_matches('.');
+            // What: a LAN domain has two or more labels.
+            // Why: a single label is a TLD the root denies.
+            // From: Issue #1683
+            if !name.contains('.') || !is_dns_name(name, false, false) {
+                return Err(format!("LAN domain {raw:?} is no domain name"));
+            }
+            if name.ends_with(".arpa") {
+                return Err(format!("LAN domain {raw:?} is a reverse zone"));
+            }
+            if out.contains(&zone) {
+                return Err(format!("LAN domain {name} is listed twice"));
+            }
+            out.push(zone);
+        }
+        Ok(out)
+    }
+
+    // What: DHCP_DOMAIN, then DNS_EXTRA_LAN_DOMAINS.
+    // Why: DHCP and the NS names use the main domain.
+    // From: Issue #1683
+    pub fn lan_domains(s: &Settings) -> Result<Vec<String>, String> {
+        validate_lan_domains(&s.text("DHCP_DOMAIN")?, &s.list("DNS_EXTRA_LAN_DOMAINS"))
+    }
+
     // What: zones the stack serves itself.
-    // Why: LAN, local.LAN and optional reverse zones.
+    // Why: one zone per LAN domain, optional reverse.
     // From: Issue #1683 | PR #1858
     pub fn managed_zones(s: &Settings) -> Result<Vec<String>, String> {
-        let lan = canonical_zone(&s.text("DHCP_DOMAIN")?);
-        let mut zones = vec![format!("local.{lan}"), lan];
+        // What: a secondary serves the zones of its primary.
+        // Why: its DHCP_DOMAIN is only the SOT default.
+        // From: Issue #1683
+        if s.text("DNS_REPLICATION_ROLE")? == "secondary" {
+            return Ok(s
+                .list("DNS_SECONDARY_ZONES")
+                .iter()
+                .map(|z| canonical_zone(z))
+                .collect());
+        }
+        let mut zones = lan_domains(s)?;
         if s.flag("DNS_SERVE_RFC1918")? {
             zones.extend(private_reverse_zones(s));
         }
         Ok(zones)
+    }
+
+    // What: zone of the pre-multi-domain layout.
+    // Why: local.<domain> held no records; it is merged.
+    // From: Issue #1683
+    pub fn legacy_local_zone(lan: &str) -> String {
+        canonical_zone(&format!("local.{}", lan.trim_end_matches('.')))
     }
 
     // What: compare serials by RFC 1982.
@@ -2686,9 +2734,13 @@ pub mod kea_conf {
         Ok(Value::Array(rows))
     }
 
+    // What: main LAN domain without the final dot.
+    // Why: Kea options take the plain domain name.
+    // From: Issue #1683
     fn lan_domain(s: &Settings) -> Result<String, String> {
-        let zone = crate::dns::canonical_zone(&s.text("DHCP_DOMAIN")?);
-        Ok(zone.trim_end_matches('.').to_string())
+        let lans = crate::dns::lan_domains(s)?;
+        let main = lans.first().ok_or("no LAN domain")?;
+        Ok(main.trim_end_matches('.').to_string())
     }
 
     fn socket(s: &Settings) -> Result<Value, String> {
@@ -2716,6 +2768,29 @@ pub mod kea_conf {
             }
         }
         subnets
+    }
+
+    // What: subnet DDNS suffix from its domain-name.
+    // Why: Kea D2 picks the zone by the FQDN suffix.
+    // From: Issue #1683
+    pub fn subnet_ddns_suffix(s: &Settings, subnet: &mut Value) -> Result<(), String> {
+        let lans = crate::dns::lan_domains(s)?;
+        let rows = subnet["option-data"].as_array().cloned().unwrap_or_default();
+        let named = rows.iter().find(|r| r["name"] == "domain-name");
+        let zone = named
+            .and_then(|r| r["data"].as_str())
+            .map(crate::dns::canonical_zone);
+        let Some(obj) = subnet.as_object_mut() else {
+            return Err("subnet is no JSON object".into());
+        };
+        // What: the main domain uses the global suffix.
+        // Why: a foreign domain-name has no zone here.
+        // From: Issue #1683
+        match zone.filter(|z| lans.iter().skip(1).any(|l| l == z)) {
+            Some(z) => obj.insert("ddns-qualifying-suffix".into(), Value::from(z)),
+            None => obj.remove("ddns-qualifying-suffix"),
+        };
+        Ok(())
     }
 
     fn option_rows(s: &Settings, domain: &str) -> Result<Vec<Value>, String> {
@@ -2747,12 +2822,14 @@ pub mod kea_conf {
             s.text("DHCP_RANGE_START")?,
             s.text("DHCP_RANGE_END")?
         );
-        // What: the LAN domain of the last render.
-        // Why: kept subnets follow a changed DHCP_DOMAIN.
-        // From: Issue #1683 | PR #1980
+        // What: last main domain, if no LAN domain now.
+        // Why: kept subnets follow only a dropped domain.
+        // From: Issue #1683
+        let lans = crate::dns::lan_domains(s)?;
         let before = existing
             .and_then(|e| e.pointer("/Dhcp4/ddns-qualifying-suffix"))
             .and_then(Value::as_str)
+            .filter(|d| !lans.contains(&crate::dns::canonical_zone(d)))
             .map(|d| d.trim_end_matches('.').to_string());
         let id = s.uint("DHCP_SUBNET_ID")?;
         let kept = existing
@@ -2784,7 +2861,10 @@ pub mod kea_conf {
             }
         }
         let mut subnets = vec![main];
-        subnets.extend(old.filter(|x| x["id"].as_u64() != Some(id)).cloned());
+        for mut sn in old.filter(|x| x["id"].as_u64() != Some(id)).cloned() {
+            subnet_ddns_suffix(s, &mut sn)?;
+            subnets.push(sn);
+        }
         let updates = s.flag("DHCP_DDNS")?;
         Ok(json!({"Dhcp4": {
             "interfaces-config": {
@@ -2843,7 +2923,13 @@ pub mod kea_conf {
             "port": s.uint("PDNS_AUTH_PORT")?
         }]);
         let entry = |zone: &str| json!({"name": zone, "key-name": key, "dns-servers": target});
-        let lan = crate::dns::canonical_zone(&s.text("DHCP_DOMAIN")?);
+        // What: one forward entry per LAN domain.
+        // Why: D2 rejects a name outside every listed zone.
+        // From: Issue #1683
+        let forward: Vec<Value> = crate::dns::lan_domains(s)?
+            .iter()
+            .map(|z| entry(z))
+            .collect();
         let reverse: Vec<Value> = crate::dns::private_reverse_zones(s)
             .iter()
             .map(|z| entry(z))
@@ -2856,7 +2942,7 @@ pub mod kea_conf {
                 "algorithm": s.text("DDNS_TSIG_ALGORITHM")?,
                 "secret": secret
             }],
-            "forward-ddns": {"ddns-domains": [entry(&lan)]},
+            "forward-ddns": {"ddns-domains": forward},
             "reverse-ddns": {"ddns-domains": reverse},
             "loggers": log_rows(s, &["kea-dhcp-ddns"])?
         }}))
