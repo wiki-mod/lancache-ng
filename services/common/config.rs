@@ -324,8 +324,21 @@ pub fn read_raw(path: &Path) -> Result<BTreeMap<String, String>, String> {
 // From: Issue #1683 | PR #2017
 pub fn read_file(path: &Path) -> Result<BTreeMap<String, String>, String> {
     let mut all = read_raw(path)?;
+    // What: a key of <file>.local replaces the file's one.
+    // Why: Compose reads it as the second env file.
+    // From: Issue #1683 | PR #2017
+    all.extend(read_raw(&override_path(path))?);
     all.retain(|_, v| !v.contains('$'));
     Ok(all)
+}
+
+// What: override file of the stack .env: <file>.local.
+// Why: it wins for single keys, as fail2ban's .local.
+// From: Issue #1683 | PR #2017
+pub fn override_path(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(".local");
+    PathBuf::from(name)
 }
 
 // What: lock file of the stack .env: <file>.lock.
@@ -358,8 +371,19 @@ pub fn store(
     current: &Settings,
     updates: &BTreeMap<String, String>,
 ) -> Result<(), String> {
+    let over = override_path(path);
+    let overridden = read_raw(&over)?;
     for (key, raw) in updates {
         env_safe(key, raw)?;
+        // What: a key of <file>.local is refused here.
+        // Why: its value wins; a save changes nothing.
+        // From: Issue #1683 | PR #2017
+        if overridden.contains_key(key) {
+            return Err(format!(
+                "{key}: set in {}, which wins; remove it there first",
+                over.display()
+            ));
+        }
         // What: a container setting is refused here.
         // Why: in the .env the name is a Compose host path.
         // From: Issue #1683 | PR #2017
