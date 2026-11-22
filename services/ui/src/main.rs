@@ -1240,9 +1240,10 @@ async fn lan_domain_action(app: &App, s: &Settings, op: &str, raw: &str) -> Resu
     let before = lancache_ng::dns::managed_zones(s)?;
     let change = match op {
         "UI_ROUTE_LAN_DOMAIN_ADD" => {
-            let mut extra = s.list("DNS_EXTRA_LAN_DOMAINS");
+            let mut extra: Vec<String> = lans.iter().skip(1).cloned().collect();
             extra.push(name.clone());
-            lancache_ng::dns::validate_lan_domains(&s.text("DHCP_DOMAIN")?, &extra)?;
+            let main = lans.first().cloned().unwrap_or_default();
+            lancache_ng::dns::validate_lan_domains(&main, &extra)?;
             list_change(s, "DNS_EXTRA_LAN_DOMAINS", &name, true)
         }
         "UI_ROUTE_LAN_DOMAIN_REMOVE" => {
