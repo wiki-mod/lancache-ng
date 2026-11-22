@@ -250,7 +250,7 @@ commands, not in the usage text: `compose`, `converge-reconcile` and
   restarts Docker once after a confirmation; without a terminal it leaves Docker
   unchanged.
 - `reset-sign-in` asks first (`--yes` skips the question), empties
-  `UI_AUTH_PASSWORD_HASH`, sets `ALLOW_INSECURE_UI=true` in `.env.local` and
+  `UI_AUTH_PASSWORD_HASH`, sets `ALLOW_INSECURE_UI=true` in `.env` and
   restarts the `ui` container.
 - `backup` and `restore` cover the persistent state; `reset-to-last-known-good-config`
   restores the Kea snapshot.
