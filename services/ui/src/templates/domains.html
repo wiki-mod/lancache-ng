@@ -146,8 +146,8 @@
                   <input type="hidden" name="domain" value="{{ domain.name }}">
                   <button type="submit" style="background:none; border:0; cursor:pointer; color:var(--mist); font-size:12.5px;">{{ t.make_main_domain }}</button>
                 </form>
-                {# What: remove is offered only for empty domains
-                   Why: the server refuses a domain with records
+                {# What: remove only for empty domains
+                   Why: server refuses one with records
                    From: Issue #1683 #}
                 {% if domain.records | length == 0 %}
                 <form action="{{ routes.lan_domain_remove | safe }}" method="post">

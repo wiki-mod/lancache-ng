@@ -1034,7 +1034,7 @@ async fn domains(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     let mut records: BTreeMap<String, Vec<Value>> = BTreeMap::new();
     let mut ptr = Vec::new();
     match pdns_api(&s) {
-        // What: other zones only when the main zone answers.
+        // What: other zones only if the main one answers.
         // Why: an unreachable API would time out 20 times.
         // From: Issue #1683 | PR #1980
         Ok(api) => match api.rrsets(&lan).await {

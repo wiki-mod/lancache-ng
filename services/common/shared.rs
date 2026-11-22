@@ -857,7 +857,7 @@ pub mod dns {
     // Why: one zone per LAN domain, optional reverse.
     // From: Issue #1683 | PR #1858
     pub fn managed_zones(s: &Settings) -> Result<Vec<String>, String> {
-        // What: a secondary serves the zones of its primary.
+        // What: a secondary serves its primary's zones.
         // Why: its DHCP_DOMAIN is only the SOT default.
         // From: Issue #1683
         if s.text("DNS_REPLICATION_ROLE")? == "secondary" {
