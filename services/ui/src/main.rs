@@ -3327,10 +3327,15 @@ async fn secondary_sync_once(app: &App) -> Result<bool, String> {
         return Ok(false);
     }
     let want = primary_zone_set(&s).await?;
-    let mut have: Vec<String> = s
-        .list("DNS_SECONDARY_ZONES")
-        .iter()
-        .map(|z| lancache_ng::dns::canonical_zone(z))
+    // What: the zones this secondary already slaves.
+    // Why: compare live state, robust across restarts.
+    // From: Issue #1683
+    let mut have: Vec<String> = pdns_api(&s)?
+        .zones()
+        .await?
+        .into_iter()
+        .filter(|z| z.kind == "Slave")
+        .map(|z| lancache_ng::dns::canonical_zone(&z.name))
         .collect();
     have.sort();
     have.dedup();
