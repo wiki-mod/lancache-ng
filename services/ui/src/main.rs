@@ -3253,6 +3253,130 @@ async fn zones_at_start(app: Arc<App>) {
     }
 }
 
+// What: the primary's pdns auth API over the LAN.
+// Why: a secondary reads the LAN domain list there.
+// From: Issue #1683
+fn primary_api(s: &Settings) -> Result<lancache_ng::pdns::Api, String> {
+    let host = s.text("DNS_XFR_PRIMARY")?;
+    if host.is_empty() {
+        return Err("DNS_XFR_PRIMARY is empty".into());
+    }
+    let url = format!(
+        "http://{host}:{}/api/v1/servers/localhost",
+        s.uint("PDNS_AUTH_API_PORT")?
+    );
+    Ok(lancache_ng::pdns::Api::new(
+        http::client(s)?,
+        &url,
+        &secrets(s)?.pdns_api_key,
+    ))
+}
+
+// What: the primary's LAN zones the secondary must serve.
+// Why: the primary keeps managed zones as Master.
+// From: Issue #1683
+async fn primary_zone_set(s: &Settings) -> Result<Vec<String>, String> {
+    let mut zones: Vec<String> = primary_api(s)?
+        .zones()
+        .await?
+        .into_iter()
+        .filter(|z| z.kind == "Master")
+        .map(|z| lancache_ng::dns::canonical_zone(&z.name))
+        .collect();
+    zones.sort();
+    zones.dedup();
+    Ok(zones)
+}
+
+// What: reload the dns recursors when a config changed.
+// Why: a reload picks up a new zone without a restart.
+// From: Issue #1683
+async fn reload_changed(app: &App, s: &Settings, changed: &[config::Change]) -> Vec<String> {
+    let mut report = Vec::new();
+    let mut plan = apply::plan(changed);
+    if plan.is_empty() {
+        return report;
+    }
+    let Ok((grace, limit)) = app.limits(s) else {
+        return vec!["limits unreadable".into()];
+    };
+    let mut names = BTreeMap::new();
+    for owner in plan.keys() {
+        match container_of(app, s, owner).await {
+            Ok(name) => {
+                names.insert(owner.clone(), name);
+            }
+            Err(e) => report.push(format!("{owner}: skipped, {e}")),
+        }
+    }
+    plan.retain(|owner, _| names.contains_key(owner));
+    let lookup = |owner: &str| names.get(owner).cloned().unwrap_or_default();
+    let rx = s.list("RELOAD_EXEC");
+    for (owner, r) in apply::run(&app.docker, &plan, &rx, &lookup, grace, limit).await {
+        report.push(format!("{owner}: {r:?}"));
+    }
+    report
+}
+
+// What: one pass: match the secondary to the primary.
+// Why: a LAN domain added on the primary reaches here.
+// From: Issue #1683
+async fn secondary_sync_once(app: &App) -> Result<bool, String> {
+    let s = app.settings();
+    if s.text("DNS_REPLICATION_ROLE")? != "secondary" {
+        return Ok(false);
+    }
+    let want = primary_zone_set(&s).await?;
+    let mut have: Vec<String> = s
+        .list("DNS_SECONDARY_ZONES")
+        .iter()
+        .map(|z| lancache_ng::dns::canonical_zone(z))
+        .collect();
+    have.sort();
+    have.dedup();
+    if want == have {
+        return Ok(false);
+    }
+    // What: an empty answer keeps the current zones.
+    // Why: a primary blip must not drop every zone.
+    // From: Issue #1683
+    if want.is_empty() {
+        return Err("primary returned no Master zone".into());
+    }
+    let list: Vec<&str> = want.iter().map(|z| z.trim_end_matches('.')).collect();
+    let new = s.with("DNS_SECONDARY_ZONES", &list.join(" "))?;
+    let sec = secrets(&new)?;
+    let files = render::dns_only(&new, &sec).map_err(|e| e.join("; "))?;
+    let changed = write_files(&new, &files)?;
+    ensure_zones(&new).await?;
+    for line in reload_changed(app, &new, &changed).await {
+        eprintln!("ui: secondary-sync: {line}");
+    }
+    match app.settings.write() {
+        Ok(mut g) => *g = new,
+        Err(poisoned) => *poisoned.into_inner() = new,
+    }
+    eprintln!("ui: secondary-sync: zones set to {}", list.join(" "));
+    Ok(true)
+}
+
+// What: keep the secondary's LAN domains in sync.
+// Why: the primary's domain set changes over time.
+// From: Issue #1683
+async fn secondary_sync(app: Arc<App>) -> Result<(), String> {
+    loop {
+        let wait = app
+            .settings()
+            .uint("DNS_SECONDARY_SYNC_SECONDS")
+            .unwrap_or(120)
+            .max(5);
+        if let Err(e) = secondary_sync_once(&app).await {
+            eprintln!("ui: secondary-sync: {e}");
+        }
+        tokio::time::sleep(Duration::from_secs(wait)).await;
+    }
+}
+
 // What: path of the DDNS TSIG secret file.
 // Why: Kea DDNS and PowerDNS share this key.
 fn tsig_file(s: &Settings) -> Result<PathBuf, String> {
@@ -3887,6 +4011,21 @@ async fn main() -> Result<(), String> {
     let s = Settings::load(&process_env, saved.as_deref())?;
     if let Some(done) = command(&s, &args).await {
         return done;
+    }
+    // What: a secondary only syncs its LAN domains.
+    // Why: no ui server, no login; it follows the primary.
+    // From: Issue #1683
+    if args.first().map(String::as_str) == Some("secondary-sync") {
+        let app = Arc::new(App {
+            docker: docker::Api::new(&s.text("DOCKER_ENDPOINT")?)?,
+            tera: Tera::default(),
+            settings: RwLock::new(s.clone()),
+            saved: saved.clone(),
+            session_key: [0u8; 32],
+            cache_used: AtomicU64::new(u64::MAX),
+            rendered: AtomicBool::new(false),
+        });
+        return secondary_sync(app).await;
     }
     // What: no login and no opt-out stops the ui.
     // Why: AG-SEC-001: fail closed unless opted out.
