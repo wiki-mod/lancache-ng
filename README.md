@@ -612,10 +612,12 @@ optional additional LAN domains (`DNS_EXTRA_LAN_DOMAINS`, comma separated).
   `<domain>` (same names, snapshot of both zones first) and deletes it. If a
   name and type exist in both zones, the old zone stays and the log names the
   record.
-- A secondary serves the zones the primary sent at registration. After adding or
-  removing a LAN domain, rerun the secondary command with `--rotate` on each
-  secondary (see [Secondary DNS](#secondary-dns)); the secondary then creates the
-  new zones and deletes the ones the primary no longer serves.
+- A secondary follows the primary's LAN domains on its own. Every
+  `DNS_SECONDARY_SYNC_SECONDS` (SOT, 120 s) it reads the primary's zone list over
+  the primary's PowerDNS API (`IP_HTTP`, port `PDNS_AUTH_API_PORT`) and, when the
+  set changed, creates the new zones (with TSIG) and deletes the ones the primary
+  no longer serves, then reloads its recursors. Adding or removing a LAN domain on
+  the primary needs no action on the secondaries.
 
 ## Testing the cache
 
