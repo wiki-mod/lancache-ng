@@ -1003,7 +1003,7 @@ runtime:
     - DNS_SECONDARIES=
     - DNS_SECONDARY_ZONES=
     # What: how often a secondary syncs its LAN domains.
-    # Why: a new primary domain reaches secondaries by itself.
+    # Why: a primary domain reaches secondaries by itself.
     # From: Issue #1683
     - DNS_SECONDARY_SYNC_SECONDS=120
     - DNS_SERVE_RFC1918=1
