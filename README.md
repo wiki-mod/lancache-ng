@@ -590,6 +590,33 @@ nslookup steamcontent.com 192.168.1.10
 
 If DNS routing works, known CDN domains should resolve to your cache IP instead of a public CDN IP.
 
+## LAN domains
+
+Every local name ends in a LAN domain, for example `printer.home.lan`.
+`setup.sh install` asks for the main LAN domain (`DHCP_DOMAIN`) and for
+optional additional LAN domains (`DNS_EXTRA_LAN_DOMAINS`, comma separated).
+
+- Each LAN domain is its own zone in PowerDNS. The recursors answer it locally
+  and never forward it to an upstream resolver.
+- The main domain is the one DHCP hands to the main subnet; the name server
+  names use it too.
+- Admin UI, DNS page, Primary DNS tab: the domain list adds a domain, makes a
+  domain the main domain or removes one. A domain that still has records cannot
+  be removed. The dropdown below picks the domain whose records the page shows
+  and edits.
+- Admin UI, DHCP page: the domain of a Kea subnet is picked from the LAN
+  domains. With DDNS on, Kea registers the clients of that subnet in that
+  domain.
+- Installations from before multi-domain support had a second, empty zone
+  `local.<domain>`. At start the Admin UI moves any records of that zone into
+  `<domain>` (same names, snapshot of both zones first) and deletes it. If a
+  name and type exist in both zones, the old zone stays and the log names the
+  record.
+- A secondary serves the zones the primary sent at registration. After adding or
+  removing a LAN domain, rerun the secondary command with `--rotate` on each
+  secondary (see [Secondary DNS](#secondary-dns)); the secondary then creates the
+  new zones and deletes the ones the primary no longer serves.
+
 ## Testing the cache
 
 A simple test:

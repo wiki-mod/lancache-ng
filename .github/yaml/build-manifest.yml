@@ -698,7 +698,6 @@ runtime:
     - UI_ROUTE_SERVICE_ACTION=/api/service/{container}/{program}/{action}
     - UI_ROUTE_STATS_GRAPH=/stats/graph/{name}
     - UI_ROUTE_SECONDARY_REGISTER=/api/secondary/register
-    - UI_ROUTE_SECONDARY_ZONES=/api/secondary/zones
     - UI_ROUTE_HEALTH=@PROXY_HEALTH_PATH@
     # What: ui page refresh timings, in seconds.
     # Why: templates read the value; no literal in markup.

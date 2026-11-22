@@ -74,6 +74,10 @@ Provided by `pdns_conf`, `recursor_conf`, `pdns`, `dns` and `snapshot` in
 - **Cache routing.** `recursor_conf::rpz` builds the RPZ zone that answers every
   cache domain; `recursor_conf::lua` loads it and sets no-DNSSEC-check entries
   for local and listed private zones.
+- **LAN domains.** `dns::lan_domains` owns the list: `DHCP_DOMAIN` first, then
+  `DNS_EXTRA_LAN_DOMAINS`; `dns::managed_zones` makes one zone per LAN domain.
+  The Admin UI adds, removes and promotes domains (routes
+  `/domains/lan-domain-*`) and edits the records of each.
 - **Recursors.** `dns-http` and `dns-https` run with the configs
   `recursor_conf::yaml` renders; LAN zones go to the authoritative server;
   `ROOT_ZONE_MIRROR` keeps a root zone copy.
@@ -117,7 +121,9 @@ Provided by `dhcp`, `kea_conf`, `kea`, `dhcp_probe` and `dnsmasq_conf` in
   `kea::Api` sends `config-get`, `config-set`, `config-write`, `lease4-get-all`
   and `lease4-del`.
 - **DDNS.** `kea_conf::ddns` renders forward and reverse updates to the local
-  PowerDNS, signed with TSIG (`DDNS_TSIG_KEY`, `DDNS_TSIG_ALGORITHM`).
+  PowerDNS, signed with TSIG (`DDNS_TSIG_KEY`, `DDNS_TSIG_ALGORITHM`); one
+  forward domain per LAN domain. `kea_conf::subnet_ddns_suffix` gives a subnet
+  whose domain is an extra LAN domain its own `ddns-qualifying-suffix`.
 - **Admin UI.** Subnets (add, update, remove), options (add, remove, custom
   `CODE:VALUE` lines through `dhcp::custom_options`), static reservations,
   lease list and release, DDNS switch, NTP option (`dhcp::ntp_addrs`) and lease

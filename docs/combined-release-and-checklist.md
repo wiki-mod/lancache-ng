@@ -573,6 +573,20 @@ Further requirements:
   | bad unsigned zone | `DNS_UPSTREAM_UNSIGNED_ZONES=.` | the entry is rejected, as in none |
   | dead resolver | `configure-upstream-dns` with an address that runs no DNS | `setup.sh` reports the failed check and restores the three earlier values |
 
+- LAN domains (`DHCP_DOMAIN`, `DNS_EXTRA_LAN_DOMAINS`), Admin UI DNS page,
+  Primary DNS tab:
+
+  | Case | Input | Pass |
+  | --- | --- | --- |
+  | add | add `lab.lan`, add record `pve1` A `10.20.0.11` in it | `dig @<address> pve1.lab.lan` answers `10.20.0.11`; the zone `lab.lan.` exists in PowerDNS (`GET /api/v1/servers/localhost/zones`) |
+  | upstream refused | `configure-upstream-dns` with zone `lab.lan` | the zone is rejected as answered by LanCache-NG |
+  | remove locked | remove `lab.lan` while `pve1` exists | the Admin UI refuses with the record count; the zone stays |
+  | remove | remove `pve1`, then `lab.lan` | the zone is gone from PowerDNS; `dig pve1.lab.lan` no longer answers locally |
+  | swap | make `lab.lan` the main domain | `DHCP_DOMAIN=lab.lan`, the old main is in `DNS_EXTRA_LAN_DOMAINS`, both zones keep their records |
+  | DDNS | Kea subnet with domain `lab.lan`, DDNS on, a client takes a lease | the client name appears in `lab.lan`, not in the main domain |
+  | legacy zone | start the ui on a PowerDNS database that holds `local.<domain>` with one record | the record is in `<domain>` under the same name, `local.<domain>` is deleted, both snapshots exist; a second start changes nothing |
+  | secondary | add a domain on the primary, run `setup.sh secondary --rotate` on the secondary | the secondary holds the new zone and answers its records; a removed domain is deleted there |
+
 ### 10.3 DHCP in all three modes
 
 The `dhcp` container runs Kea or dnsmasq, one mode at a time (`DHCP_MODE`), on

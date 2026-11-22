@@ -419,7 +419,7 @@ The Admin UI is the only user of the store:
 | Subject | Store | Retention | Rollback |
 | --- | --- | --- | --- |
 | Kea DHCP configuration | `KEA_CONFIG_SNAPSHOT_DIR` (`KEA_CONFIG_SNAPSHOT_FILE`) | `KEA_SNAPSHOT_KEEP` (SOT 20) | Admin UI DHCP page (`POST /dhcp/kea-rollback`); `setup.sh reset-to-last-known-good-config kea` |
-| Records of the lan zone (`DHCP_DOMAIN`) and the private reverse zones | `DNS_SNAPSHOT_DIR/<zone>` | `DNS_SNAPSHOT_KEEP` (SOT 20) | Admin UI domains page (`POST /domains/zone-rollback`); `setup.sh reset-to-last-known-good-config dns` |
+| Records of every LAN domain zone (`DHCP_DOMAIN`, `DNS_EXTRA_LAN_DOMAINS`) and the private reverse zones | `DNS_SNAPSHOT_DIR/<zone>` | `DNS_SNAPSHOT_KEEP` (SOT 20) | Admin UI domains page (`POST /domains/zone-rollback`); `setup.sh reset-to-last-known-good-config dns` |
 
 Other zones, such as the RPZ, are not snapshotted. TSIG keys and zone metadata
 are not part of a zone snapshot.
