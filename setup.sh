@@ -1566,12 +1566,19 @@ _compose_parse_env_value() {
 # Why: compose uses the last; a read error must stop
 # From: Issue #1683 | PR #1858
 env_raw_assignments() {
-    local key="$1" env_file="$2" mode="$3" out
-    [[ -e "$env_file" ]] || return 0
+    local key="$1" env_file="$2" mode="$3" out f
+    local -a files=()
+    # What: <file>.local is read after the file itself
+    # Why: its lines win, as in compose's second env file
+    # From: Issue #1683 | PR #2017
+    for f in "$env_file" "$env_file.local"; do
+        [[ ! -e "$f" ]] || files+=("$f")
+    done
+    [[ ${#files[@]} -gt 0 ]] || return 0
     out=$(awk -F= -v key="$key" -v mode="$mode" '
         $1 == key { sub(/^[^=]*=/, ""); last = $0; seen = 1; if (mode == "all") print }
-        END { if (mode == "last" && seen) print last }' "$env_file") \
-        || die "Failed to read $key from $env_file (exit $?)."
+        END { if (mode == "last" && seen) print last }' "${files[@]}") \
+        || die "Failed to read $key from ${files[*]} (exit $?)."
     [[ -z "$out" ]] || printf '%s\n' "$out"
 }
 
@@ -1830,6 +1837,15 @@ rewrite_env_key_locked() {
         || die "Failed to write $key into $env_file (exit $?)."
 }
 
+# What: warns when <file>.local also sets the key
+# Why: its value wins; the write alone changes nothing
+# From: Issue #1683 | PR #2017
+warn_env_key_overridden() {
+    local key="$1" env_file="$2"
+    env_key_exists "$key" "$env_file.local" || return 0
+    print_warn "$key is also set in $env_file.local, which wins over $env_file; remove it there to use the value of $env_file." >&2
+}
+
 # What: sets KEY=VALUE after validating its characters
 # Why: duplicate lines are dropped, one assignment remains
 # From: Issue #1683 | PR #1858
@@ -1841,6 +1857,7 @@ set_env_key() {
     else
         append_env_line "$env_file" "$key" "$value"
     fi
+    warn_env_key_overridden "$key" "$env_file"
 }
 
 # What: dies on a bad .env key or a newline in a raw value
@@ -1872,6 +1889,7 @@ set_env_assignment() {
     else
         append_env_line "$env_file" "$key" "$assignment_value"
     fi
+    warn_env_key_overridden "$key" "$env_file"
 }
 
 # What: adds KEY=VALUE only if the key is absent
@@ -2097,6 +2115,7 @@ remove_env_key() {
 
     env_key_exists "$key" "$env_file" || return 0
     rewrite_env_key "$env_file" "$key" "" remove
+    warn_env_key_overridden "$key" "$env_file"
 }
 
 # What: default LANCACHE_STATE_DIR for an install dir
@@ -2142,7 +2161,7 @@ install_state_root() {
 stack_env_context() {
     local install_dir="$1"
     local -n _env_ref="$2" _state_ref="$3"
-    _env_ref=$(runtime_env_file_for_install_dir "$install_dir")
+    _env_ref=$(runtime_env_file_for_install_dir "$install_dir") || exit $?
     _state_ref=$(install_state_root "$install_dir" "$_env_ref") \
         || die "Cannot resolve the state root of $install_dir (exit $?)."
 }
@@ -2166,17 +2185,31 @@ is_deploy_prod_install_dir() {
     [[ "$dir" = "$rel" || "$dir" = */"$rel" ]]
 }
 
-# What: picks .env.local for prod checkouts when it exists
-# Why: git pull keeps operator production values
-# From: Issue #1683 | PR #1858
+# What: the stack's settings file, <install dir>/.env
+# Why: setup.sh and the ui write it; .env.local overrides
+# From: Issue #1683 | PR #2017
 runtime_env_file_for_install_dir() {
-    local install_dir="$1"
-
-    if is_deploy_prod_install_dir "$install_dir" && [[ -f "$install_dir/.env.local" ]]; then
-        printf '%s\n' "$install_dir/.env.local"
-    else
-        printf '%s\n' "$install_dir/.env"
+    local env_file="$1/.env"
+    # What: a lone .env.local is renamed to .env
+    # Why: v0.4.0 kept all settings in .env.local
+    # From: Issue #1683 | PR #2017
+    if [[ -f "$env_file.local" && ! -e "$env_file" ]]; then
+        mv -- "$env_file.local" "$env_file" \
+            || die "Failed to rename $env_file.local to $env_file (exit $?)."
+        print_warn "Renamed $env_file.local to $env_file: .env holds the settings, a new .env.local only overrides single keys." >&2
     fi
+    printf '%s\n' "$env_file"
+}
+
+# What: names the keys <file>.local overrides
+# Why: a forgotten test override must stay visible
+# From: Issue #1683 | PR #2017
+note_env_overrides() {
+    local env_file="$1" keys
+    [[ -f "$env_file.local" ]] || return 0
+    keys=$(awk -F= '/^[A-Za-z_][A-Za-z0-9_]*=/ && !seen[$1]++ { printf "%s ", $1 }' "$env_file.local") \
+        || die "Failed to read $env_file.local (exit $?)."
+    print_warn "$env_file.local overrides ${keys:-no key }of $env_file; delete it to run with $env_file alone."
 }
 
 # What: builds -f args for base and operator override
@@ -2529,7 +2562,7 @@ restore_quickstart_mounts() {
 # Why: AG-KD-008 one profile; AG-OP-007 convergence
 # From: Issue #1683 | PR #1858
 migrate_quickstart_install() (
-    local old_dir="$1" stack_dir="${PROD_COMPOSE%/*}" env_local old_env record project key value volume dir copy f
+    local old_dir="$1" stack_dir="${PROD_COMPOSE%/*}" new_env old_env record project key value volume dir copy f
     local services old_volumes prod_volumes rows missing copies keys old_raw new_raw old_value line path_keys bundle
     local https_ip fresh kept kept_list restored
     local -a service_list copy_lines path_key_list=()
@@ -2537,7 +2570,7 @@ migrate_quickstart_install() (
     path_keys="${path_keys//$'\n'/ }"
     read -ra path_key_list <<< "$path_keys"
     bundle=$(lancache_sot_list quickstart_bundle_copies runtime) || exit $?
-    env_local="$stack_dir/.env.local"
+    new_env=$(runtime_env_file_for_install_dir "$stack_dir") || exit $?
     old_env="$old_dir/.env"
     record="$old_dir/.quickstart-migration"
     [[ -f "$old_env" ]] || die "Cannot migrate $old_dir: $old_env is missing."
@@ -2567,10 +2600,10 @@ migrate_quickstart_install() (
     project=$(compose_project_name "$old_dir" "$old_env") \
         || die "Cannot resolve the compose project of $old_dir (exit $?); nothing was changed."
     # What: a retry without live copies starts afresh
-    # Why: a failed run's .env.local blocked every retry
+    # Why: a failed run's .env blocked every retry
     # From: Issue #1683 | PR #1858
     fresh=1
-    if [[ -f "$env_local" ]]; then
+    if [[ -f "$new_env" ]]; then
         fresh=0
         if [[ -f "$record" ]]; then
             fresh=$(awk -F'|' '$1 == "envlocal" { m = 1 } $1 == "rolledback" { c = 0 }
@@ -2579,22 +2612,22 @@ migrate_quickstart_install() (
         fi
     fi
     if [[ "$fresh" = 1 ]]; then
-        install -m 0600 "$old_env" "$env_local" || die "Failed to create $env_local from $old_env."
+        install -m 0600 "$old_env" "$new_env" || die "Failed to create $new_env from $old_env."
         printf 'envlocal|%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$record" \
-            || die "Failed to record the new $env_local in $record (exit $?)."
+            || die "Failed to record the new $new_env in $record (exit $?)."
     fi
-    if ! env_key_exists LANCACHE_STATE_DIR "$env_local"; then
-        set_env_key LANCACHE_STATE_DIR "$old_dir" "$env_local"
+    if ! env_key_exists LANCACHE_STATE_DIR "$new_env"; then
+        set_env_key LANCACHE_STATE_DIR "$old_dir" "$new_env"
     fi
     # What: relative paths become absolute to old dir
     # Why: prod resolves them against deploy/prod instead
     # From: Issue #1683 | PR #1858
     for key in "${path_key_list[@]}"; do
-        value=$(get_env_var "$key" "$env_local") || die "Cannot read $key from $env_local (exit $?)."
+        value=$(get_env_var "$key" "$new_env") || die "Cannot read $key from $new_env (exit $?)."
         [[ -n "$value" && "$value" != /* ]] || continue
-        set_env_key "$key" "$(realpath -m "$old_dir/$value")" "$env_local"
+        set_env_key "$key" "$(realpath -m "$old_dir/$value")" "$new_env"
     done
-    # What: every quickstart setting reaches .env.local
+    # What: every quickstart setting reaches .env
     # Why: changed secrets or IPs break running clients
     # From: Issue #1683 | PR #1858
     keys=$(awk -F= '/^[A-Za-z_][A-Za-z0-9_]*=/ {print $1}' "$old_env") \
@@ -2603,31 +2636,31 @@ migrate_quickstart_install() (
         [[ -n "$key" ]] || continue
         if [[ " $path_keys " == *" $key "* ]]; then
             old_value=$(get_env_var "$key" "$old_env") || die "Cannot read $key from $old_env (exit $?)."
-            new_raw=$(get_env_var "$key" "$env_local") || die "Cannot read $key from $env_local (exit $?)."
+            new_raw=$(get_env_var "$key" "$new_env") || die "Cannot read $key from $new_env (exit $?)."
             [[ -z "$old_value" || "$old_value" == /* ]] || old_value=$(realpath -m "$old_dir/$old_value")
             [[ "$new_raw" == "$old_value" ]] && continue
         else
             old_raw=$(get_env_assignment_value_raw "$key" "$old_env") || die "Cannot read $key from $old_env (exit $?)."
-            new_raw=$(get_env_assignment_value_raw "$key" "$env_local") || die "Cannot read $key from $env_local (exit $?)."
+            new_raw=$(get_env_assignment_value_raw "$key" "$new_env") || die "Cannot read $key from $new_env (exit $?)."
             [[ "$new_raw" == "$old_raw" ]] && continue
         fi
-        die "Postcondition failed: $key in $env_local differs from $old_env; nothing counts as migrated."
+        die "Postcondition failed: $key in $new_env differs from $old_env; nothing counts as migrated."
     done <<< "$keys"
-    # What: .env.local gets its image pins and keys now
+    # What: .env gets its image pins and keys now
     # Why: the prod compose has no default; render pre-stop
     # From: Issue #1683 | PR #1912
     migrate_env_for_update "$stack_dir" \
-        || die "Cannot prepare $env_local for the prod stack (exit $?); the quickstart stack in $old_dir was not stopped."
+        || die "Cannot prepare $new_env for the prod stack (exit $?); the quickstart stack in $old_dir was not stopped."
     # What: v0.3.2 plaintext UI password becomes a hash
     # Why: the ui needs user and hash; no plaintext stays
     # From: Issue #1683 | PR #1858
-    ensure_ui_password_hash "$stack_dir" "$env_local"
+    ensure_ui_password_hash "$stack_dir" "$new_env"
     # What: every quickstart volume has a home in prod
     # Why: data without a target would be left behind
     # From: Issue #1683 | PR #1858
     old_volumes=$(stack_compose "$old_dir" "$old_env" config --volumes) \
         || die "Cannot list the volumes of $old_dir (exit $?); the quickstart stack was not touched."
-    prod_volumes=$(stack_compose "$stack_dir" "$env_local" config --volumes) \
+    prod_volumes=$(stack_compose "$stack_dir" "$new_env" config --volumes) \
         || die "Cannot list the volumes of $PROD_COMPOSE (exit $?); the quickstart stack was not touched."
     rows=$(lancache_sot_list quickstart_volume_keys runtime) || exit $?
     kept_list=$(lancache_sot_list quickstart_volumes_kept runtime) || exit $?
@@ -2657,8 +2690,8 @@ migrate_quickstart_install() (
         || die "Pre-migration backup of $old_dir failed; the quickstart stack was not touched."
     stack_compose "$old_dir" "$old_env" stop \
         || die "Failed to stop the quickstart stack in $old_dir (exit $?); the quickstart stack was not touched."
-    copies=$(quickstart_volume_dirs "$env_local") \
-        || die "Cannot resolve the state directories of $env_local (exit $?)."
+    copies=$(quickstart_volume_dirs "$new_env") \
+        || die "Cannot resolve the state directories of $new_env (exit $?)."
     mapfile -t copy_lines <<< "$copies"
     for line in "${copy_lines[@]}"; do
         copy_volume_to_dir "${project}_${line%% *}" "${line#* }" "$record"
@@ -2666,14 +2699,14 @@ migrate_quickstart_install() (
     # What: prod uses the CA the quickstart clients trust
     # Why: another CA would break every client's TLS trust
     # From: Issue #1683 | PR #1858
-    migrate_legacy_ca "$old_dir/certs" "$env_local"
-    _UPDATE_ENV_FILE="$env_local" _UPDATE_STACK_DIR="$stack_dir"
+    migrate_legacy_ca "$old_dir/certs" "$new_env"
+    _UPDATE_ENV_FILE="$new_env" _UPDATE_STACK_DIR="$stack_dir"
     validate_compose_config "$stack_dir"
     local apply_rc=0
     # What: the migrated stack starts like a fresh install
     # Why: its config volume is empty until the ui renders
     # From: Issue #1683 | PR #1858
-    STACK_FIRST_PROD_START=1 apply_stack_update_ordered "$stack_dir" rollback_quickstart_migration "$old_dir" "$record" "$stack_dir" "$env_local" || apply_rc=$?
+    STACK_FIRST_PROD_START=1 apply_stack_update_ordered "$stack_dir" rollback_quickstart_migration "$old_dir" "$record" "$stack_dir" "$new_env" || apply_rc=$?
     if [[ "$apply_rc" -eq 2 ]]; then
         trap - EXIT
         UPDATE_CONVERGENCE_COMPLETED=1
@@ -3267,7 +3300,7 @@ sot_compose_env() {
 # From: Issue #1683 | PR #1912
 sot_compose() {
     local env_file="$1" rows state=""
-    local -a sot_env=()
+    local -a sot_env=() env_args=()
     shift
     # What: a quickstart .env may lack LANCACHE_STATE_DIR
     # Why: its state lives in the quickstart dir (v0.3.2)
@@ -3279,7 +3312,12 @@ sot_compose() {
     fi
     rows=$(sot_compose_env "$env_file" "$state") || exit $?
     mapfile -t sot_env <<< "$rows"
-    env "${sot_env[@]}" docker compose --env-file "$env_file" "$@"
+    # What: <file>.local as the second env file
+    # Why: compose takes a key from the later file
+    # From: Issue #1683 | PR #2017
+    env_args=(--env-file "$env_file")
+    [[ ! -f "$env_file.local" ]] || env_args+=(--env-file "$env_file.local")
+    env "${sot_env[@]}" docker compose "${env_args[@]}" "$@"
 }
 
 # What: "svc KEY [TARGET]" rows moved out of config/prod
@@ -4479,11 +4517,12 @@ migrate_env_for_update() (
     local required_keys required_key required_value
     local -a required_key_list=()
     local lancache_image_registry lancache_image_prefix lancache_image_channel lancache_image_tag
-    env_file=$(runtime_env_file_for_install_dir "$install_dir")
+    env_file=$(runtime_env_file_for_install_dir "$install_dir") || exit $?
 
     [[ -f "$env_file" ]] \
         || die "Missing $env_file. Cannot update safely because local runtime configuration is not available."
     merge_retired_ui_settings "$install_dir" "$env_file" merge
+    note_env_overrides "$env_file"
 
     # What: a failed run puts the original .env back
     # Why: no failed check may leave .env half-written
@@ -4599,7 +4638,7 @@ migrate_env_for_update() (
     remove_env_key SSL_ENABLED "$env_file"
 
     # What: validates an operator TTL; default is the SOT
-    # Why: .env.local never repeats a runtime.defaults value
+    # Why: .env never repeats a runtime.defaults value
     # From: Issue #1683 | PR #1912
     ui_session_ttl=$(get_env_var UI_SESSION_TTL_SECONDS "$env_file") || exit $?
     [[ -z "$ui_session_ttl" ]] || validate_ui_session_ttl_seconds "$ui_session_ttl" "$env_file"
@@ -4919,6 +4958,7 @@ backup_manifest() {
     cache_dir="${cache_dir:-$state_dir/cache}"
 
     printf '%s\n' "$env_file"
+    [[ ! -f "$env_file.local" ]] || printf '%s\n' "$env_file.local"
     printf '%s\n' "$install_dir/docker-compose.yml"
     # What: quickstart helper copies from the SOT list
     # Why: restore brings back what a quickstart had
@@ -4972,7 +5012,7 @@ require_stack_env_file() {
     local install_dir="$1" env_file
     [[ -f "$install_dir/docker-compose.yml" ]] \
         || die_no_stack_found "$install_dir"
-    env_file=$(runtime_env_file_for_install_dir "$install_dir")
+    env_file=$(runtime_env_file_for_install_dir "$install_dir") || exit $?
     [[ -f "$env_file" ]] || die "No .env found for $install_dir (expected $env_file)."
     printf '%s\n' "$env_file"
 }
@@ -5001,7 +5041,7 @@ compose_stack_or_skip() {
 compose_stack_running() {
     local install_dir="$1" env_file out
     compose_stack_available "$install_dir" || return 1
-    env_file=$(runtime_env_file_for_install_dir "$install_dir")
+    env_file=$(runtime_env_file_for_install_dir "$install_dir") || exit $?
     out=$(stack_compose "$install_dir" "$env_file" ps -q) \
         || die "Failed to list the containers of $install_dir (exit $?)."
     [[ -n "$out" ]]
@@ -5015,7 +5055,7 @@ compose_stack_stop() {
     local env_file
     compose_stack_or_skip "$install_dir" "Stopping the stack" || return 0
     print_step "Stopping stack for consistent backup/restore"
-    env_file=$(runtime_env_file_for_install_dir "$install_dir")
+    env_file=$(runtime_env_file_for_install_dir "$install_dir") || exit $?
     stack_compose "$install_dir" "$env_file" stop \
         || die "Failed to stop the stack in $install_dir (exit $?); nothing was copied."
 }
@@ -5028,7 +5068,7 @@ compose_stack_start() {
     local env_file
     compose_stack_or_skip "$install_dir" "Starting the stack" || return 0
     print_step "Starting stack"
-    env_file=$(runtime_env_file_for_install_dir "$install_dir")
+    env_file=$(runtime_env_file_for_install_dir "$install_dir") || exit $?
     stack_compose "$install_dir" "$env_file" up -d \
         || print_warn "docker compose up failed (exit $?); start it with: $SCRIPT_DIR/setup.sh compose $install_dir up -d"
 }
@@ -5050,7 +5090,7 @@ validate_compose_config() {
     local install_dir="$1"
     local env_file
     print_step "Validating Docker Compose configuration"
-    env_file=$(runtime_env_file_for_install_dir "$install_dir")
+    env_file=$(runtime_env_file_for_install_dir "$install_dir") || exit $?
     stack_compose "$install_dir" "$env_file" config --quiet \
         || die "Docker Compose configuration is not valid. The stack was not pulled or restarted."
     print_ok "Docker Compose configuration is valid"
@@ -5098,7 +5138,7 @@ compose_cache_volume_name() {
 compose_volume_names() {
     local install_dir="$1" container env_file project containers mounts volumes names=""
     compose_stack_or_skip "$install_dir" "Listing the Docker volumes" || return 0
-    env_file=$(runtime_env_file_for_install_dir "$install_dir")
+    env_file=$(runtime_env_file_for_install_dir "$install_dir") || exit $?
     project=$(compose_project_name "$install_dir" "$env_file") \
         || die "Cannot resolve the compose project of $install_dir (exit $?)."
     containers=$(stack_compose "$install_dir" "$env_file" ps --all -q) \
@@ -5148,7 +5188,7 @@ backup_compose_volumes() {
     compose_stack_or_skip "$install_dir" "Archiving the Docker volumes" || return 0
     require_helper_image
     mkdir -p "$volume_root" || die "Failed to create $volume_root (exit $?)."
-    env_file=$(runtime_env_file_for_install_dir "$install_dir")
+    env_file=$(runtime_env_file_for_install_dir "$install_dir") || exit $?
     cache_volume=$(compose_cache_volume_name "$install_dir" "$env_file") \
         || die "Cannot resolve the cache volume of $install_dir (exit $?)."
     volumes=$(compose_volume_names "$install_dir") \
@@ -5238,7 +5278,7 @@ guard_restore_shared_project_volumes() {
 record_image_revisions() {
     local install_dir="$1" output="$2" env_file revisions
     compose_stack_or_skip "$install_dir" "Recording the image revisions" || return 0
-    env_file=$(runtime_env_file_for_install_dir "$install_dir")
+    env_file=$(runtime_env_file_for_install_dir "$install_dir") || exit $?
     if revisions=$(stack_compose "$install_dir" "$env_file" images --format json); then
         :
     elif revisions=$(stack_compose "$install_dir" "$env_file" images); then
@@ -5282,8 +5322,8 @@ cmd_backup() (
     done
     install_dir=$(resolve_stack_dir_checked "$install_dir") || exit $?
     backup_root=$(realpath -m "$backup_root")
-    [[ -f "$(runtime_env_file_for_install_dir "$install_dir")" ]] \
-        || die_no_stack_found "$install_dir"
+    stack_env=$(runtime_env_file_for_install_dir "$install_dir") || exit $?
+    [[ -f "$stack_env" ]] || die_no_stack_found "$install_dir"
     install_missing_tools tar rsync
 
     stack_stopped=0
@@ -5372,7 +5412,7 @@ EOF
 )
 
 # What: moves stale .env.local aside when archive lacks one
-# Why: prefers .env.local over .env, so it must go
+# Why: its keys would win over the restored .env
 # From: Issue #1683 | PR #1858
 restore_clear_stale_env_local_if_unarchived() {
     local archived_install_root="$1" install_dir="$2" stale_target
@@ -5383,7 +5423,7 @@ restore_clear_stale_env_local_if_unarchived() {
     stale_target="$install_dir/.env.local.pre-restore-$(date -u +%Y%m%dT%H%M%SZ)"
     mv "$install_dir/.env.local" "$stale_target" \
         || die "Failed to move the stale $install_dir/.env.local aside (exit $?)."
-    print_warn "Archived backup has no .env.local; moved the stale pre-restore override to $(basename "$stale_target") so the restored .env takes effect."
+    print_warn "Archived backup has no .env.local; moved the override of before the restore to $(basename "$stale_target") so the restored .env alone takes effect."
 }
 
 # What: restores a backup archive; the body is a subshell
@@ -5464,10 +5504,14 @@ cmd_restore() (
         new_repo_root=$(deploy_prod_repo_root "$install_dir") || exit $?
     fi
 
+    # What: a v0.4.0 archive's lone .env.local becomes .env
+    # Why: restore then puts back .env, the settings file
+    # From: Issue #1683 | PR #2017
+    archived_env=$(runtime_env_file_for_install_dir "$root/$rel_install") || exit $?
     # What: resolves project name from archived compose
     # Why: the guard must check the archive's own project
     # From: Issue #1683 | PR #1858
-    archived_project=$(compose_project_name "$root/$rel_install" "$(runtime_env_file_for_install_dir "$root/$rel_install")") \
+    archived_project=$(compose_project_name "$root/$rel_install" "$archived_env") \
         || exit $?
     guard_restore_shared_project_volumes "$install_dir" "$archived_here" "$archived_project"
 
@@ -6226,7 +6270,8 @@ rollback_stack_update() {
         local wait services
         local -a restored_services
         _UPDATE_STACK_DIR="$install_dir"
-        _UPDATE_ENV_FILE=$(runtime_env_file_for_install_dir "$install_dir")
+        _UPDATE_ENV_FILE=$(runtime_env_file_for_install_dir "$install_dir") \
+            || { print_error "Cannot resolve the env file of $install_dir (exit $?). Manual recovery required."; return 1; }
         wait=$(prod_env_default SETUP_HEALTH_WAIT_SERVICES_SECONDS) || exit $?
         services=$(stack_compose "$install_dir" "$_UPDATE_ENV_FILE" config --services) \
             || { print_error "Cannot list the services of $install_dir (exit $?). Manual recovery required."; return 1; }
@@ -6386,7 +6431,7 @@ channel_code_dir() {
 # What: stack files a channel switch carries along
 # Why: switch and rollback must name the same files
 # From: Issue #1683 | PR #1858
-CHANNEL_STACK_FILES=(.env.local .env docker-compose.override.yml docker-compose.override.yaml)
+CHANNEL_STACK_FILES=(.env .env.local docker-compose.override.yml docker-compose.override.yaml)
 
 # What: <state root>/current links the running channel dir
 # Why: units and default commands follow it on a switch
@@ -6542,7 +6587,9 @@ remove_root_checkout() {
         [[ "$f" != */* ]] || dirs+=("${f%/*}")
     done < "$list"
     rm -f -- "$list" || die "Failed to remove $list (exit $?)."
-    rm -f -- "$root/deploy/prod/.env.local" || die "Failed to remove $root/deploy/prod/.env.local (exit $?)."
+    for f in .env .env.local .env.lock; do
+        rm -f -- "$root/deploy/prod/$f" || die "Failed to remove $root/deploy/prod/$f (exit $?)."
+    done
     # What: drops emptied code dirs, deepest first
     # Why: a dir with data or other files must stay
     # From: Issue #1683 | PR #1858
@@ -6706,7 +6753,7 @@ perform_stack_update_flow() {
     install_missing_tools curl dig jq
     ensure_docker_userland_proxy
     cd "$install_dir"
-    _UPDATE_ENV_FILE=$(runtime_env_file_for_install_dir "$install_dir")
+    _UPDATE_ENV_FILE=$(runtime_env_file_for_install_dir "$install_dir") || exit $?
     _UPDATE_STACK_DIR="$install_dir"
     UPDATE_CONVERGENCE_COMPLETED=0
     if [[ "${LANCACHE_UPDATE_RESUMED:-0}" = 1 ]]; then
@@ -6819,7 +6866,7 @@ cmd_update() {
     # From: Issue #1683
     if [[ ! -f "$PROD_COMPOSE" ]]; then
         local env_file channel tag
-        env_file=$(runtime_env_file_for_install_dir "$install_dir")
+        env_file=$(runtime_env_file_for_install_dir "$install_dir") || exit $?
         [[ -f "$env_file" ]] || die_no_stack_found "$install_dir"
         channel=$(resolve_lancache_image_channel "$env_file") || exit $?
         tag="${LANCACHE_IMAGE_TAG:-}"
@@ -6843,7 +6890,7 @@ cmd_compose() {
     [[ $# -ge 1 ]] || die "Usage: setup.sh compose <install-dir> <compose args>"
     install_dir=$(resolve_stack_dir_checked "$1") || exit $?
     shift
-    env_file=$(runtime_env_file_for_install_dir "$install_dir")
+    env_file=$(runtime_env_file_for_install_dir "$install_dir") || exit $?
     args=("$@")
     # What: a bare "up" skips dhcp while DHCP_MODE is off
     # Why: live 249: converge started dhcp every 5 min
@@ -6979,7 +7026,7 @@ cmd_auto_update() {
     install_dir=$(resolve_stack_dir "$install_dir") || exit $?
     [[ -f "$install_dir/docker-compose.yml" ]] \
         || die_no_stack_found "$install_dir"
-    env_file=$(runtime_env_file_for_install_dir "$install_dir")
+    env_file=$(runtime_env_file_for_install_dir "$install_dir") || exit $?
 
     # What: re-checks AUTO_UPDATE_ENABLED before acting
     # Why: a timer may stay enabled after .env is edited
@@ -7139,7 +7186,7 @@ cmd_converge_reconcile() {
         print_skip "Converge tick: $install_dir/docker-compose.yml does not exist yet"
         return 0
     fi
-    env_file=$(runtime_env_file_for_install_dir "$install_dir")
+    env_file=$(runtime_env_file_for_install_dir "$install_dir") || exit $?
     if [[ ! -f "$env_file" ]]; then
         print_skip "Converge tick: $env_file does not exist yet"
         return 0
@@ -7158,7 +7205,7 @@ cmd_debug() {
     [[ -f "$install_dir/docker-compose.yml" ]] \
         || die_no_stack_found "$install_dir"
 
-    env_file=$(runtime_env_file_for_install_dir "$install_dir")
+    env_file=$(runtime_env_file_for_install_dir "$install_dir") || exit $?
     local ip_http ip_https cache_dir
     ip_http=$(get_env_var IP_HTTP "$env_file") || exit $?
     ip_https=$(get_env_var IP_HTTPS "$env_file") || exit $?
@@ -7442,6 +7489,7 @@ cmd_create_logs_for_issue() (
     stack_env_context "$install_dir" env_file state_dir
 
     local -a env_files=("$env_file")
+    [[ ! -f "$env_file.local" ]] || env_files+=("$env_file.local")
 
     local stamp ext archive
     secrets_file=""
@@ -7524,10 +7572,13 @@ cmd_create_logs_for_issue() (
     done
 
     print_step "Redacting configuration"
-    local env_copy="$dest/env/${env_file##*/}"
-    logbundle_redact_env_file "$env_file" "$env_copy"
-    logbundle_redact_stream "$secrets_file" < "$env_copy" > "$env_copy.tmp"
-    mv "$env_copy.tmp" "$env_copy"
+    local env_copy one_env
+    for one_env in "${env_files[@]}"; do
+        env_copy="$dest/env/${one_env##*/}"
+        logbundle_redact_env_file "$one_env" "$env_copy"
+        logbundle_redact_stream "$secrets_file" < "$env_copy" > "$env_copy.tmp"
+        mv "$env_copy.tmp" "$env_copy" || die "Failed to finish $env_copy (exit $?)."
+    done
 
     print_step "Known-good-snapshot directory listings"
     logbundle_named_volume_listing "$install_dir" "$env_file" proxy-config-snapshots config-snapshots \
@@ -8061,7 +8112,7 @@ cmd_update_ip() {
     # Why: dns gets its IPs from IP_HTTP and IP_HTTPS
     # From: Issue #1683 | PR #1858
     local deploy_env
-    deploy_env=$(runtime_env_file_for_install_dir "$install_dir")
+    deploy_env=$(runtime_env_file_for_install_dir "$install_dir") || exit $?
     [[ -f "$deploy_env" ]] || die "Configuration not found: $deploy_env"
 
     local current_ip_http current_ip_https
@@ -8269,7 +8320,7 @@ cmd_configure_upstream_dns() {
     local env_file ip_http ip_https lan services apply_rc=0
     local old_servers old_zones old_unsigned old_reverse dhcp_mode
     local -a all_services new_entries
-    env_file=$(runtime_env_file_for_install_dir "$install_dir")
+    env_file=$(runtime_env_file_for_install_dir "$install_dir") || exit $?
     [[ -f "$env_file" ]] || die "Configuration not found: $env_file"
     old_servers=$(get_env_var DNS_UPSTREAM_SERVERS "$env_file") || exit $?
     old_zones=$(get_env_var DNS_UPSTREAM_ZONES "$env_file") || exit $?
@@ -9287,7 +9338,7 @@ print_step "Data directory"
 # Why: AG-KD-008: deploy/prod is the only deployment profile
 # From: Issue #1683 | PR #1858
 INSTALL_DIR="${PROD_COMPOSE%/*}"
-ENV_LOCAL="$INSTALL_DIR/.env.local"
+ENV_FILE="$INSTALL_DIR/.env"
 STATE_ROOT_DEFAULT=$(production_state_root_default "$INSTALL_DIR") \
     || die "Cannot read the default state root from $INSTALL_DIR (exit $?)."
 printf "  LanCache-NG itself stays in %s.\n" "$INSTALL_DIR"
@@ -9295,10 +9346,12 @@ printf "  Here you choose where its data goes: cache, DNS, DHCP, NTP.\n"
 ask "Data folder (not the install folder)" "$STATE_ROOT_DEFAULT"
 LANCACHE_STATE_DIR="$(realpath -m "$REPLY")"
 
-if [[ -f "$ENV_LOCAL" ]]; then
-    print_warn "Existing configuration found: $ENV_LOCAL"
+for found_env in "$ENV_FILE" "$ENV_FILE.local"; do
+    [[ -f "$found_env" ]] || continue
+    print_warn "Existing configuration found: $found_env"
     confirm "Overwrite? [y/N]" "N" || die "Cancelled."
-fi
+    break
+done
 
 if [[ "$WIZARD_INTROSPECT_MODE" != "1" ]]; then
     mkdir -p "$LANCACHE_STATE_DIR"
@@ -9638,18 +9691,18 @@ if confirm "Protect Admin-UI with password? [y/N]" "N"; then
     # Why: a read error must not rotate the stored password
     # From: Issue #1683 | PR #1858
     existing_ui_user=""
-    if [[ -f "$ENV_LOCAL" ]]; then
-        existing_ui_user=$(get_env_var UI_AUTH_USER "$ENV_LOCAL") || exit $?
+    if [[ -f "$ENV_FILE" || -f "$ENV_FILE.local" ]]; then
+        existing_ui_user=$(get_env_var UI_AUTH_USER "$ENV_FILE") || exit $?
     fi
-    if [[ -f "$ENV_LOCAL" ]] \
+    if [[ -f "$ENV_FILE" || -f "$ENV_FILE.local" ]] \
         && [[ "$existing_ui_user" = "$UI_AUTH_USER" ]] \
-        && env_key_has_usable_secret UI_AUTH_PASSWORD_HASH "$ENV_LOCAL"; then
-        UI_AUTH_PASSWORD_HASH=$(get_env_var UI_AUTH_PASSWORD_HASH "$ENV_LOCAL") || exit $?
+        && env_key_has_usable_secret UI_AUTH_PASSWORD_HASH "$ENV_FILE"; then
+        UI_AUTH_PASSWORD_HASH=$(get_env_var UI_AUTH_PASSWORD_HASH "$ENV_FILE") || exit $?
         print_ok "Existing Admin-UI password preserved"
-    elif [[ -f "$ENV_LOCAL" ]] \
+    elif [[ -f "$ENV_FILE" || -f "$ENV_FILE.local" ]] \
         && [[ "$existing_ui_user" = "$UI_AUTH_USER" ]] \
-        && env_key_has_usable_secret UI_AUTH_PASSWORD "$ENV_LOCAL"; then
-        UI_AUTH_PASSWORD=$(get_env_var UI_AUTH_PASSWORD "$ENV_LOCAL") || exit $?
+        && env_key_has_usable_secret UI_AUTH_PASSWORD "$ENV_FILE"; then
+        UI_AUTH_PASSWORD=$(get_env_var UI_AUTH_PASSWORD "$ENV_FILE") || exit $?
         print_ok "Existing Admin-UI password preserved; it is stored as a hash after the image pull"
     elif [[ "$WIZARD_INTROSPECT_MODE" = "1" ]]; then
         # What: introspection mode prints no real secret
@@ -9663,7 +9716,7 @@ if confirm "Protect Admin-UI with password? [y/N]" "N"; then
         print_ok "Credentials:"
         printf '    User:     %s%s%s\n' "${BOLD}" "$UI_AUTH_USER" "${RESET}"
         printf '    Password: %s%s%s\n' "${BOLD}" "$UI_AUTH_PASSWORD" "${RESET}"
-        print_warn "Note the password now; only its hash is stored in $ENV_LOCAL"
+        print_warn "Note the password now; only its hash is stored in $ENV_FILE"
         printf "\n"
     fi
     break
@@ -9679,17 +9732,28 @@ else
 fi
 done
 
-# What: step 9: writes .env.local in one atomic step
-# Why: a half-written .env.local must never exist
+# What: step 9: writes .env in one atomic step
+# Why: a half-written .env must never exist
 # From: Issue #1683 | PR #1858
 print_step "Writing .env"
 
-env_file="$ENV_LOCAL"
+env_file="$ENV_FILE"
 
 # What: from here on, the real install mutations run
 # Why: introspection mode must leave the host untouched
 # From: Issue #1683 | PR #1858
 if [[ "$WIZARD_INTROSPECT_MODE" != "1" ]]; then
+
+# What: a lone old .env.local is renamed; an override goes
+# Why: the answers of this install must be what runs
+# From: Issue #1683 | PR #2017
+env_file=$(runtime_env_file_for_install_dir "$INSTALL_DIR") || exit $?
+if [[ -f "$env_file.local" ]]; then
+    install_override="$env_file.local.pre-install-$(date -u +%Y%m%dT%H%M%SZ)"
+    mv -- "$env_file.local" "$install_override" \
+        || die "Failed to move $env_file.local aside (exit $?)."
+    print_warn "Moved the override $env_file.local to $install_override; this install writes $env_file alone."
+fi
 
 # What: generates or keeps secrets; placeholders regenerate
 # Why: empty or placeholder values are never used
@@ -9715,15 +9779,15 @@ while read -r secret_key secret_kind; do
     printf -v "$secret_key" '%s' "$secret_value"
 done <<< "$secret_rows"
 # What: an empty TTL means the SOT default
-# Why: .env.local never repeats a runtime.defaults value
+# Why: .env never repeats a runtime.defaults value
 # From: Issue #1683 | PR #1912
 UI_SESSION_TTL_SECONDS=$(get_env_var UI_SESSION_TTL_SECONDS "$env_file")
 [[ -z "$UI_SESSION_TTL_SECONDS" ]] || validate_ui_session_ttl_seconds "$UI_SESSION_TTL_SECONDS" "$env_file"
 
-# What: the first .env.local text; values are unquoted
+# What: the first .env text; values are unquoted
 # Why: the one key list; the check below reads this body
 # From: Issue #1683 | PR #1912
-render_initial_env_local() {
+render_initial_env() {
     cat <<EOF
 # What: LAN IP for HTTP; HTTP cached, HTTPS passed on
 # Why: HTTP mode needs no CA certificate
@@ -9853,10 +9917,10 @@ EOF
 # What: checks every ${VAR} the text uses, before writing
 # Why: a value with a newline or quote would break .env
 # From: Issue #1683 | PR #1912
-validate_initial_env_local() {
+validate_initial_env() {
     local body line key ref
-    body=$(declare -f render_initial_env_local) \
-        || die "Cannot read render_initial_env_local (exit $?)."
+    body=$(declare -f render_initial_env) \
+        || die "Cannot read render_initial_env (exit $?)."
     while IFS= read -r line; do
         key="${line%%=*}"
         [[ "$key" =~ ^[A-Z][A-Z0-9_]*$ ]] || key=""
@@ -9868,12 +9932,12 @@ validate_initial_env_local() {
     done <<< "$body"
 }
 
-validate_initial_env_local
-render_initial_env_local | with_env_lock "$ENV_LOCAL" write_file_atomically "$ENV_LOCAL" \
-    || die "Failed to write $ENV_LOCAL (exit $?)."
-print_ok ".env.local written: $ENV_LOCAL"
-write_lancache_image_refs "$ENV_LOCAL" "$LANCACHE_IMAGE_REFS"
-merge_retired_ui_settings "$INSTALL_DIR" "$ENV_LOCAL" retire
+validate_initial_env
+render_initial_env | with_env_lock "$ENV_FILE" write_file_atomically "$ENV_FILE" \
+    || die "Failed to write $ENV_FILE (exit $?)."
+print_ok ".env written: $ENV_FILE"
+write_lancache_image_refs "$ENV_FILE" "$LANCACHE_IMAGE_REFS"
+merge_retired_ui_settings "$INSTALL_DIR" "$ENV_FILE" retire
 
 # What: step 10: creates the state directories
 # Why: compose bind mounts need existing directories
@@ -10019,17 +10083,17 @@ if is_deploy_prod_install_dir "$INSTALL_DIR"; then
 fi
 print_step "Pulling images"
 cd "$INSTALL_DIR"
-stack_compose "$INSTALL_DIR" "$ENV_LOCAL" pull \
+stack_compose "$INSTALL_DIR" "$ENV_FILE" pull \
     || die "Failed to pull required container images. Check network access and GHCR authentication, then rerun setup.sh."
 
 # What: hashes the chosen Admin UI password via the ui image
-# Why: the plaintext never reaches .env.local
+# Why: the plaintext never reaches .env
 # From: Issue #1683 | PR #1912
 if [[ -n "$UI_AUTH_PASSWORD" ]]; then
-    set_ui_password_hash "$INSTALL_DIR" "$ENV_LOCAL" "$UI_AUTH_PASSWORD"
+    set_ui_password_hash "$INSTALL_DIR" "$ENV_FILE" "$UI_AUTH_PASSWORD"
 fi
 
-run_kea_dhcp_activation_preflight "$ENV_LOCAL"
+run_kea_dhcp_activation_preflight "$ENV_FILE"
 
 print_step "Starting stack"
 if [[ "$HOST_SERVICES_AVAILABLE" = "1" ]]; then
@@ -10059,7 +10123,7 @@ else
         printf "\n  Not started. Start later with: %s compose %s up -d\n\n" "$SCRIPT_DIR/setup.sh" "$INSTALL_DIR"
         exit 0
     fi
-    stack_compose "$INSTALL_DIR" "$ENV_LOCAL" up -d || die "Failed to start the stack in $INSTALL_DIR (exit $?)."
+    stack_compose "$INSTALL_DIR" "$ENV_FILE" up -d || die "Failed to start the stack in $INSTALL_DIR (exit $?)."
 fi
 print_ok "Stack started"
 
@@ -10068,13 +10132,13 @@ print_ok "Stack started"
 # From: Issue #1683 | PR #1980
 print_step "Waiting for healthy containers"
 _UPDATE_STACK_DIR="$INSTALL_DIR"
-_UPDATE_ENV_FILE="$ENV_LOCAL"
+_UPDATE_ENV_FILE="$ENV_FILE"
 install_wait=$(prod_env_default SETUP_HEALTH_WAIT_SERVICES_SECONDS) || exit $?
 install_poll=$(prod_env_default SETUP_HEALTH_POLL_SECONDS) || exit $?
-install_services=$(stack_compose "$INSTALL_DIR" "$ENV_LOCAL" config --services) \
+install_services=$(stack_compose "$INSTALL_DIR" "$ENV_FILE" config --services) \
     || die "Failed to list the services in $INSTALL_DIR (exit $?)."
 mapfile -t install_services <<<"$install_services"
-health_wait_services install_services "$ENV_LOCAL" "${install_services[@]}"
+health_wait_services install_services "$ENV_FILE" "${install_services[@]}"
 install_waited=0
 install_bad=("${install_services[@]}")
 while (( ${#install_bad[@]} > 0 && install_waited < install_wait )); do
@@ -10097,7 +10161,7 @@ fi
 # Why: compose owns IP and port; a print never aborts setup
 # From: Issue #1683 | PR #1858
 ui_url_rc=0
-ui_url=$(compose_config_value "$INSTALL_DIR" "$ENV_LOCAL" \
+ui_url=$(compose_config_value "$INSTALL_DIR" "$ENV_FILE" \
     '.services.ui.ports[0] // empty | "http://\(.host_ip):\(.published)"') || ui_url_rc=$?
 if [[ "$ui_url_rc" -ne 0 || -z "$ui_url" ]]; then
     print_warn "Cannot derive the Admin-UI URL (exit $ui_url_rc); the stack runs, see the ui ports in $INSTALL_DIR/docker-compose.yml."
@@ -10120,7 +10184,7 @@ fi
 printf "\n"
 if [[ "$HTTPS_ENABLED" = "1" ]]; then
     printf '  %sCA certificate%s (available after first start):\n' "${BOLD}" "${RESET}"
-    printf "    %s/%s\n" "$(prod_state_dir_for_key CA_DIR "$ENV_LOCAL")" "$(prod_env_default CA_CERT_FILE)"
+    printf "    %s/%s\n" "$(prod_state_dir_for_key CA_DIR "$ENV_FILE")" "$(prod_env_default CA_CERT_FILE)"
     printf "    → install on clients for HTTPS mode\n"
     printf '    → guide: %s/wiki\n' "$LANCACHE_REPO_URL"
     printf "\n"
@@ -10136,7 +10200,7 @@ printf "    Status:  %s/setup.sh debug\n"  "$SCRIPT_DIR"
 printf "    Update:  %s/setup.sh update\n" "$SCRIPT_DIR"
 printf "\n"
 # What: show the token a secondary registers with
-# Why: it was only written to .env.local, never shown
+# Why: it was only written to .env, never shown
 # From: Issue #1683 | PR #1980
 printf '  %sSecondary DNS token:%s %s\n' "${BOLD}" "${RESET}" "${SECONDARY_REGISTRATION_TOKEN:-}"
 printf "    Also in the Admin-UI: DNS, Secondary DNS.\n"
