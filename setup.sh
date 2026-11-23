@@ -373,7 +373,7 @@ dns_upstream_zone_problem() {
         [[ "$zone" = "$item" || "$zone" == *".$item" ]] && inside=1
     done
     # What: "_" counts as a letter in zone names
-    # Why: zone names like _msdcs.home.lan hold an underscore
+    # Why: zone names like _msdcs.home.lan hold underscores
     # From: Issue #1918
     if ! is_valid_dns_name "${zone//_/a}"; then
         printf "'%s' is no valid domain name\n" "$raw"
@@ -3711,7 +3711,7 @@ host_unit_action() {
     local unit="$1" action="$2" manager name out rc=0 limit
     manager=$(host_service_manager)
     # What: a start or stop ends after the SOT stop limit
-    # Why: a hung stop must not hold setup.sh update silently
+    # Why: a hung stop must not hold up setup.sh update
     # From: Issue #1683 | PR #1858
     limit=$(prod_env_default OPENRC_STOP_TIMEOUT_SECONDS) || exit $?
     limit=$(( limit + 60 ))
@@ -4288,7 +4288,7 @@ lancache_channel_ref_pass() {
         ref="${registry}/${prefix}/${slug}:${pointer_channel}"
         if ! digest=$(docker buildx imagetools inspect "$ref" --format '{{.Manifest.Digest}}' 2>&1); then
             # What: a missing image is no network fault.
-            # Why: not found means the channel lacks this image.
+            # Why: not found: the channel lacks this image.
             # From: Issue #1683 | PR #1980
             [[ "$digest" != *"not found"* ]] \
                 || die "${ref} does not exist: channel '${pointer_channel}' has no '${slug}' image. This checkout may need another channel, e.g. LANCACHE_IMAGE_CHANNEL=${testing} ./setup.sh install."
@@ -6322,7 +6322,7 @@ rollback_stack_update() {
             print_warn "LANCACHE_IMAGE_CHANNEL is $old_channel again; set it anew and run update to retry the switch"
         fi
         # What: old stack must be healthy before success
-        # Why: success must not show while containers are down
+        # Why: no success message while containers are down
         # From: Issue #1683 | PR #1991
         local wait services
         local -a restored_services
@@ -8506,14 +8506,14 @@ is_secondary_name() {
 }
 
 # What: dies when this host holds another lancache system
-# Why: runs before any change; a secondary needs its own host
+# Why: runs before any change; a secondary needs its host
 # From: Issue #1683 | PR #2017
 assert_secondary_host_free() {
     local own sub dir channels info cname rows owner
     local rel="${PROD_COMPOSE#"$SCRIPT_DIR/"}"
     local -a subs=("" current)
     # What: the physical path of the secondary dir, by cd
-    # Why: BusyBox has no realpath -m before the requirements
+    # Why: BusyBox lacks realpath -m before the requirements
     # From: Issue #1683 | PR #2017
     if [[ -d "$1" ]]; then
         own=$(cd -- "$1" && pwd -P) || die "Cannot resolve the directory $1 (exit $?)."
@@ -8952,8 +8952,8 @@ cmd_secondary() {
 
     channel_words=$(lancache_channel_words) || exit $?
     pinned=$(lancache_release_rows pinned) || exit $?
-    # What: the channel chosen above, checked against the primary
-    # Why: the clone runs before the primary names its channel
+    # What: the chosen channel, checked against the primary
+    # Why: the primary names its channel after the clone
     # From: Issue #1683 | PR #2017
     lancache_image_channel=$(lancache_stack_pointer_channel_for "$LANCACHE_IMAGE_CHANNEL") || exit $?
     primary_channel="$response_image_channel"
@@ -9002,7 +9002,7 @@ cmd_secondary() {
             lancache_image_refs_for_tag "" "$lancache_image_tag") \
             || die "Cannot pin the images of ${lancache_image_tag} for the secondary (exit $?)."
         # What: dns and the ui image; render uses the ui
-        # Why: the secondary compose requires both image refs
+        # Why: the secondary compose needs both image refs
         # From: Issue #1683
         for pin_key in LANCACHE_IMAGE_REF_DNS LANCACHE_IMAGE_REF_UI; do
             pin=$(awk -F= -v k="$pin_key" '$1 == k { print substr($0, length($1) + 2) }' <<< "$secondary_refs") \
