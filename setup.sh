@@ -4083,16 +4083,16 @@ validate_lancache_image_tag() {
 }
 
 # What: SOT release rows of one kind, fields after it
-# Why: AG-REL-010; hosts lack yq; one awk reader
+# Why: AG-REL-010; hosts lack yq; channels are nested
 # From: Issue #1683 | PR #1858
 lancache_release_rows() {
-    local kind="$1" sot="$LANCACHE_SOT" text="$LANCACHE_SOT_TEXT" rows counts n_channel n_release n_pinned
+    local kind="$1" sot="$LANCACHE_SOT" text="$LANCACHE_SOT_TEXT" rows counts n_channel n_release pinned
     rows=$(awk '
         /^[^ #]/ { top = $0; sub(/:.*/, "", top); next }
         top != "release" || /^ *#/ || /^ *$/ { next }
         { depth = match($0, /[^ ]/) - 1; line = substr($0, depth + 1)
           key = line; sub(/:.*/, "", key); val = line; sub(/^[^:]*: */, "", val) }
-        depth == 2 { sec = key; if (key == "pinned_channel") print "pinned", val; next }
+        depth == 2 { sec = key; next }
         depth == 4 && sec == "channels" { ch = key; print "channel", ch; next }
         depth == 4 && sec == "retired_channels" { gsub(/^"|"$/, "", val); print "retired", key, val; next }
         depth == 6 && sec == "channels" && key == "release_tags" && val == "true" { print "release", ch; next }
@@ -4102,11 +4102,16 @@ lancache_release_rows() {
             gsub(/^\[|\] *$/, "", val); n = split(val, list, / *, */)
             for (i = 1; i <= n; i++) if (list[i] != "") print "former", list[i], ch
         }' <<< "$text") || die "Failed to read the release block of ${sot}."
-    counts=$(awk '$1 == "channel" { c++ } $1 == "release" { r++ } $1 == "pinned" { p++ }
-        END { print c + 0, r + 0, p + 0 }' <<< "$rows") || die "Failed to count the release rows of ${sot}."
-    read -r n_channel n_release n_pinned <<< "$counts"
-    [[ "$n_channel" -ge 1 && "$n_release" -eq 1 && "$n_pinned" -eq 1 ]] \
-        || die "${sot} needs release channels, one release_tags channel and pinned_channel."
+    counts=$(awk '$1 == "channel" { c++ } $1 == "release" { r++ }
+        END { print c + 0, r + 0 }' <<< "$rows") || die "Failed to count the release rows of ${sot}."
+    read -r n_channel n_release <<< "$counts"
+    [[ "$n_channel" -ge 1 && "$n_release" -eq 1 ]] \
+        || die "${sot} needs release channels and one release_tags channel."
+    # What: the flat key pinned_channel joins the rows
+    # Why: lancache_sot_read owns keys right under a block
+    # From: Issue #1683 | PR #2017
+    pinned=$(lancache_sot_value pinned_channel release) || exit $?
+    rows+=$'\n'"pinned $pinned"
     awk -v k="$kind" '$1 == k { sub(/^[^ ]+ /, ""); print }' <<< "$rows"
 }
 
@@ -4351,7 +4356,7 @@ lancache_image_ref_vars() {
 }
 
 # What: one SOT key of a block: a scalar or its - items
-# Why: one awk reader for both; yq is not on a host
+# Why: one reader for flat keys; yq is not on a host
 # From: Issue #1683 | PR #1912
 lancache_sot_read() {
     local kind="$1" key="$2" block="$3" sot="$LANCACHE_SOT" text="$LANCACHE_SOT_TEXT" value
