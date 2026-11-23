@@ -4282,8 +4282,7 @@ lancache_channel_ref_pass() {
     local registry="$1" prefix="$2" pointer_channel="$3" vars="$4" var slug ref digest
     local release testing
     release=$(lancache_release_rows release) || exit $?
-    testing=$(lancache_other_channels) || exit $?
-    testing="${testing%%$'\n'*}"
+    testing=$(lancache_testing_channel) || exit $?
     while read -r var slug; do
         ref="${registry}/${prefix}/${slug}:${pointer_channel}"
         if ! digest=$(docker buildx imagetools inspect "$ref" --format '{{.Manifest.Digest}}' 2>&1); then
@@ -7124,6 +7123,15 @@ lancache_other_channels() {
     awk -v r="$release" '$0 != r' <<< "$channels"
 }
 
+# What: the first SOT channel besides the release channel
+# Why: hints and the secondary channel question name it
+# From: Issue #1683 | PR #2017
+lancache_testing_channel() {
+    local others
+    others=$(lancache_other_channels) || exit $?
+    printf '%s\n' "${others%%$'\n'*}"
+}
+
 # What: channels the wizard offers, release channel last
 # Why: only SOT channel names; former names never show
 # From: Issue #1683 | PR #1858
@@ -8693,8 +8701,7 @@ cmd_secondary() {
     # From: Issue #1683
     local release_channel other_channel
     release_channel=$(lancache_release_rows release) || exit $?
-    other_channel=$(lancache_other_channels) || exit $?
-    other_channel="${other_channel%%$'\n'*}"
+    other_channel=$(lancache_testing_channel) || exit $?
     [[ -n "$other_channel" ]] || die "The SOT names no channel besides ${release_channel}."
     # What: ask each missing value; check it at once
     # Why: an empty or bad answer is asked again, not later
