@@ -992,34 +992,6 @@ apk_install() {
     return 1
 }
 
-# What: installs a command's packages, then checks it
-# Why: a package that lacks the command must fail loudly
-# From: Issue #1683 | PR #1858
-install_required_command() {
-    local command_name="$1" reason="$2"
-    shift 2
-    # What: a present command installs nothing
-    # Why: a present tool must never read as missing
-    # From: Issue #1683 | PR #1858
-    command_available "$command_name" && return 0
-
-    install_packages "$reason" "$@" \
-        || die "Failed to install required package(s): $*"
-
-    command_available "$command_name" \
-        || die "$command_name is still missing after installing package(s): $*"
-}
-
-# What: named wrappers for curl and git
-# Why: call sites read as install_curl and install_git
-# From: Issue #1683 | PR #1858
-install_curl() {
-    install_required_command curl "curl is missing." curl
-}
-install_git() {
-    install_required_command git "git is missing." git
-}
-
 # What: true if apt has a candidate version for the package
 # Why: installed state is not checked here
 # From: Issue #1683 | PR #1858
@@ -1492,9 +1464,7 @@ ensure_stack_requirements_installed() {
     # From: Issue #1683 | PR #1858
     assert_prebuilt_image_platform_supported
 
-    if ! command_available curl; then
-        install_curl
-    fi
+    install_missing_tools curl
 
     # What: GNU coreutils, grep, tar and iproute2 on Alpine
     # Why: BusyBox lacks realpath -m, grep -P and ss
@@ -3153,7 +3123,7 @@ ensure_public_suffix_list() {
     dir="$repo_root/$rel"
     dest="$dir/$name"
     print_step "Loading the Public Suffix List"
-    install_curl
+    install_missing_tools curl
     tmp=$(mktemp "$dir/.$name.tmp.XXXXXX") || die "Failed to create a temporary file in $dir (exit $?)."
     if curl -fsSL --retry 3 -o "$tmp" "$url" && psl_file_is_valid "$tmp"; then
         if [[ -f "$dest" ]] && cmp -s "$tmp" "$dest"; then
@@ -6930,7 +6900,7 @@ cmd_update() {
         if is_commit_image_tag "$tag" || is_release_tag "$tag"; then
             export LANCACHE_IMAGE_TAG="$tag"
         fi
-        command_available git || install_git
+        install_missing_tools git
         install_repo_follow_channel "$channel" update "$install_dir"
         die "setup.sh did not continue from the code of channel $channel; the stack in $install_dir was not changed."
     fi
@@ -8673,7 +8643,7 @@ cmd_secondary() {
     # What: git for the channel clone, as on the primary
     # Why: the secondary runs from its channel's checkout
     # From: Issue #1683
-    command_available git || install_git
+    install_missing_tools git
     # What: the .env of the secondary dir; empty if none
     # Why: one file answers the wizard and keeps its values
     # From: Issue #1683 | PR #2017
@@ -9252,7 +9222,7 @@ if [[ "$WIZARD_INTROSPECT_MODE" != "1" ]]; then
     # From: Issue #1683 | PR #1858
     if [[ ! -f "$PROD_COMPOSE" ]]; then
         print_warn "No local repo found — the code of the chosen channel goes to ${DEFAULT_INSTALL_DIR}/<channel>."
-        command_available git || install_git
+        install_missing_tools git
     fi
 
     # What: version lines; an unknown version only warns
