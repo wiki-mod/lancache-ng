@@ -5271,6 +5271,14 @@ compose_cache_volume_name() {
     printf '%s_%s\n' "$project" "$volume"
 }
 
+# What: the named volumes that carry project label $1
+# Why: one owner of the label filter and its error
+# From: Issue #1683 | PR #2017
+compose_project_volumes() {
+    docker volume ls --filter "label=com.docker.compose.project=$1" --format '{{.Name}}' \
+        || die "Failed to list the volumes of compose project $1 (exit $?)."
+}
+
 # What: lists volumes of containers and the project label
 # Why: compose down removes containers but keeps volumes
 # From: Issue #1683 | PR #1858
@@ -5288,8 +5296,7 @@ compose_volume_names() {
             || die "Failed to read the volumes of container $container (exit $?)."
         names+="${mounts}"$'\n'
     done <<< "$containers"
-    volumes=$(docker volume ls --filter "label=com.docker.compose.project=${project}" --format '{{.Name}}') \
-        || die "Failed to list the volumes of compose project $project (exit $?)."
+    volumes=$(compose_project_volumes "$project") || exit $?
     names+="$volumes"
     awk 'NF' <<< "$names" | sort -u
 }
@@ -5303,8 +5310,7 @@ compose_project_has_named_volumes() {
     # What: captures the volume listing before testing it
     # Why: a live pipe can SIGPIPE under pipefail
     # From: Issue #1683 | PR #1858
-    volume_names="$(docker volume ls --filter "label=com.docker.compose.project=${project}" --format '{{.Name}}')" \
-        || die "Failed to list the volumes of compose project $project (exit $?)."
+    volume_names=$(compose_project_volumes "$project") || exit $?
     [[ -n "$volume_names" ]]
 }
 
