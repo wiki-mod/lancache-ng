@@ -601,6 +601,13 @@ print_host_addresses_failed() {
     fi
 }
 
+# What: the next IPv4 address after $1 (last octet + 1)
+# Why: one default for a second address of a host
+# From: Issue #1683 | PR #2017
+next_ipv4() {
+    printf '%s.%s\n' "${1%.*}" "$((10#${1##*.} + 1))"
+}
+
 # What: true if IP $1 is in the address rows $2
 # Why: one test for "this IP is an address of the host"
 # From: Issue #1683 | PR #2017
@@ -3498,13 +3505,27 @@ require_env_value_for_update() {
         || die "$key is missing or empty in $env_file. Set it before running setup.sh update."
 }
 
-# What: IP_HTTP and IP_HTTPS are two valid, distinct IPv4s
-# Why: dns-http and dns-https bind apart (AG-SETUP-001)
-# From: Issue #1683 | PR #1858
+# What: two valid, distinct IPv4s; $3 $4 name them
+# Why: http and https DNS bind apart (AG-SETUP-001)
+# From: Issue #1683 | PR #2017
 require_separate_lan_ips() {
-    is_valid_ipv4 "$1" || die "IP_HTTP is not a valid IPv4 address: $1"
-    is_valid_ipv4 "$2" || die "IP_HTTPS is not a valid IPv4 address: $2"
-    [[ "$1" != "$2" ]] || die "IP_HTTP and IP_HTTPS must be different."
+    local first="${3:-IP_HTTP}" second="${4:-IP_HTTPS}"
+    is_valid_ipv4 "$1" || die "$first is not a valid IPv4 address: $1"
+    is_valid_ipv4 "$2" || die "$second is not a valid IPv4 address: $2"
+    [[ "$1" != "$2" ]] || die "$first and $second must be different."
+}
+
+# What: checks and picks the https bind of a secondary
+# Why: argument and terminal path take the same steps
+# From: Issue #1683 | PR #2017
+secondary_https_bind() {
+    local -n _hb_ref="$1"
+    local http_bind="$2" keep="$3" dns_port
+    dns_port=$(prod_env_default DNS_PORT) || exit $?
+    secondary_choose_listen_ip "$1" "$keep" \
+        || die "No usable secondary https bind IP on port ${dns_port} (exit $?; see above). Re-run with --listen-ip-https <ip> after freeing the port."
+    require_separate_lan_ips "$http_bind" "$_hb_ref" "the http bind IP" "the https bind IP"
+    print_ok "Secondary https DNS bind IP: ${_hb_ref}"
 }
 
 # What: sets a secret only if no usable value exists
@@ -8700,11 +8721,7 @@ cmd_secondary() {
             || die "--ip-https must be a valid IPv4 address"
         is_valid_ipv4 "$listen_ip_https" \
             || die "--listen-ip-https must be a valid IPv4 address"
-        secondary_choose_listen_ip listen_ip_https "$keep_listen_https" \
-            || die "No usable secondary https bind IP on port ${dns_port} (exit $?; see above). Re-run with --listen-ip-https <ip> after freeing the port."
-        [[ "$listen_ip_https" != "$listen_ip" ]] \
-            || die "the https bind IP must differ from the http bind IP ${listen_ip}"
-        print_ok "Secondary https DNS bind IP: ${listen_ip_https}"
+        secondary_https_bind listen_ip_https "$listen_ip" "$keep_listen_https"
     elif [[ "$tty" = 1 ]]; then
         # What: https asked with the other questions
         # Why: no change before all answers are known
@@ -8714,15 +8731,11 @@ cmd_secondary() {
         if confirm "Has the primary HTTPS enabled? $(yn_hint "$https_default")" "$https_default" \
             && confirm "Enable HTTPS secondary support? $(yn_hint "$https_default")" "$https_default"; then
             ask_checked ip_https "HTTPS IP of the primary" "$stored_ip_https" is_valid_ipv4 "Invalid IPv4 address"
-            https_listen_default="${stored_listen_https:-${listen_ip%.*}.$((10#${listen_ip##*.} + 1))}"
+            https_listen_default="${stored_listen_https:-$(next_ipv4 "$listen_ip")}"
             printf '\n  %sSecond DNS IP of this secondary%s: HTTPS clients enter it as their DNS server;\n' "${BOLD}" "${RESET}"
             printf '  it must differ from %s.\n\n' "$listen_ip"
             ask_checked listen_ip_https "Second DNS IP of this secondary (HTTPS clients)" "$https_listen_default" is_valid_ipv4 "Invalid IPv4 address"
-            [[ "$listen_ip_https" != "$listen_ip" ]] \
-                || die "the https bind IP must differ from the http bind IP ${listen_ip}"
-            secondary_choose_listen_ip listen_ip_https "$keep_listen_https" \
-                || die "No usable secondary https bind IP on port ${dns_port} (exit $?; see above). Re-run with --listen-ip-https <ip> after freeing the port."
-            print_ok "Secondary https DNS bind IP: ${listen_ip_https}"
+            secondary_https_bind listen_ip_https "$listen_ip" "$keep_listen_https"
         fi
     fi
     # What: missing bind IPs are added after all answers
@@ -9326,7 +9339,7 @@ printf '  %sSecond LAN IP%s: the HTTPS DNS/proxy address, always required.\n\n' 
 # What: the second LAN address is always asked and checked
 # Why: AG-SETUP-001; prod runs dns-https on IP_HTTPS always
 # From: Issue #1683 | PR #1912
-suggested_https="${IP_HTTP%.*}.$((10#${IP_HTTP##*.} + 1))"
+suggested_https=$(next_ipv4 "$IP_HTTP")
 ask_checked IP_HTTPS "Second LAN IP (HTTPS mode)" "$suggested_https" is_valid_ipv4 "Invalid IPv4 address"
 require_separate_lan_ips "$IP_HTTP" "$IP_HTTPS"
 ensure_host_ipv4 "$IP_HTTPS" "$IP_HTTP"
