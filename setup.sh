@@ -870,7 +870,7 @@ confirm() {
 # Why: stops or warns before a second DHCP server exists
 # From: Issue #1683 | PR #1858
 run_kea_dhcp_activation_preflight() {
-    local env_file="$1" output="" count="" error="" image env_rows server_identifier=""
+    local env_file="$1" output="" count="" error="" image env_rows server_identifier="" ui_svc
 
     if [[ "$DHCP_MODE" != "kea" ]]; then
         print_skip "DHCP activation preflight: DHCP_MODE is '$DHCP_MODE', not kea"
@@ -883,9 +883,11 @@ run_kea_dhcp_activation_preflight() {
     # What: the ui image and env from the compose config
     # Why: the same probe and values as the Admin UI
     # From: Issue #1683 | PR #1985
-    image=$(compose_config_value "$INSTALL_DIR" "$env_file" .services.ui.image)
+    ui_svc=$(prod_env_default UI_SERVICE) || exit $?
+    image=$(compose_config_value "$INSTALL_DIR" "$env_file" '.services[$svc].image' --arg svc "$ui_svc")
     env_rows=$(compose_config_value "$INSTALL_DIR" "$env_file" \
-        '.services.ui.environment | to_entries | map("\(.key)=\(.value // "")") | join("\n")')
+        '.services[$svc].environment | to_entries | map("\(.key)=\(.value // "")") | join("\n")' \
+        --arg svc "$ui_svc")
 
     # What: one probe run with the host network
     # Why: a bridge network never carries LAN broadcasts
@@ -3170,8 +3172,9 @@ ensure_public_suffix_list() {
 # Why: only the hash is kept; a hash cannot be read back
 # From: Issue #1683 | PR #1912
 set_ui_password_hash() {
-    local install_dir="$1" env_file="$2" password="$3" hash
-    hash=$(printf '%s' "$password" | stack_compose "$install_dir" "$env_file" run --rm --no-deps -T ui hash-password) \
+    local install_dir="$1" env_file="$2" password="$3" hash ui_svc
+    ui_svc=$(prod_env_default UI_SERVICE) || exit $?
+    hash=$(printf '%s' "$password" | stack_compose "$install_dir" "$env_file" run --rm --no-deps -T "$ui_svc" hash-password) \
         || die "Failed to hash the Admin UI password in the ui image (exit $?); ${env_file} holds no password hash."
     [[ "$hash" =~ ^[A-Za-z0-9_-]+$ ]] || die "The ui image returned no usable password hash."
     set_env_key UI_AUTH_PASSWORD_HASH "$hash" "$env_file"
@@ -6331,15 +6334,16 @@ apply_stack_update_ordered() {
     local install_dir="$1"
     local -a all_services non_ui_services rollback=("${@:2}")
     [[ "${#rollback[@]}" -gt 0 ]] || rollback=(rollback_stack_update "$install_dir")
-    local svc wait_services wait_ui
+    local svc wait_services wait_ui ui_svc
 
+    ui_svc=$(prod_env_default UI_SERVICE) || exit $?
     wait_services=$(prod_env_default SETUP_HEALTH_WAIT_SERVICES_SECONDS) || exit $?
     wait_ui=$(prod_env_default SETUP_HEALTH_WAIT_UI_SECONDS) || exit $?
     stack_services_into all_services "$install_dir" "$_UPDATE_ENV_FILE" \
         || die "Cannot list the services of $install_dir (exit $?); nothing was started."
     non_ui_services=()
     for svc in "${all_services[@]}"; do
-        [[ "$svc" = "ui" ]] && continue
+        [[ "$svc" = "$ui_svc" ]] && continue
         non_ui_services+=("$svc")
     done
     # What: fails closed if no non-UI service exists
@@ -6370,9 +6374,9 @@ apply_stack_update_ordered() {
         && stack_update_step "Verifying non-UI services are healthy" "Non-UI services did not become healthy in time." \
             wait_for_stack_health "$wait_services" "${non_ui_services[@]}" \
         && stack_update_step "Starting Admin UI (last)" "Failed to start the Admin UI." \
-            stack_compose "$install_dir" "$_UPDATE_ENV_FILE" up -d --remove-orphans ui \
+            stack_compose "$install_dir" "$_UPDATE_ENV_FILE" up -d --remove-orphans "$ui_svc" \
         && stack_update_step "Verifying the whole stack is healthy" "Admin UI did not become healthy in time." \
-            wait_for_stack_health "$wait_ui" ui; then
+            wait_for_stack_health "$wait_ui" "$ui_svc"; then
         print_ok "Whole stack verified healthy"
         return 0
     fi
@@ -7847,10 +7851,12 @@ kea_dhcp4_command() {
 # Why: the UI writes there; the dir is a SOT default
 # From: Issue #1683 | PR #1858
 kea_snapshot_host_dir() {
-    local install_dir="$1" env_file="$2" kea_dir="$3" snapshot_dir target
+    local install_dir="$1" env_file="$2" kea_dir="$3" snapshot_dir target ui_svc
     snapshot_dir=$(prod_env_default KEA_CONFIG_SNAPSHOT_DIR) || exit $?
+    ui_svc=$(prod_env_default UI_SERVICE) || exit $?
     target=$(compose_config_value "$install_dir" "$env_file" \
-        "[.services.ui.volumes[]? | select(.source == \$src) | .target] | first" --arg src "$kea_dir") || exit $?
+        "[.services[\$svc].volumes[]? | select(.source == \$src) | .target] | first" \
+        --arg src "$kea_dir" --arg svc "$ui_svc") || exit $?
     [[ -n "$target" ]] || die "The ui service of $install_dir does not mount $kea_dir."
     case "$snapshot_dir" in
         "$target"/*) printf '%s/%s\n' "$kea_dir" "${snapshot_dir#"$target"/}" ;;
@@ -7984,11 +7990,12 @@ dns_zone_snapshot_entries() {
 # Why: zone-snapshots and zone-rollback are ui commands
 # From: Issue #1683 | PR #1858
 dns_rollback_exec() (
-    local install_dir="$1" env_file="$2" project out rc=0
+    local install_dir="$1" env_file="$2" project out rc=0 ui_svc
     shift 2
     project=$(compose_project_name "$install_dir" "$env_file") \
         || die "Cannot determine the compose project of $install_dir (exit $?)."
-    out=$(stack_compose "$install_dir" "$env_file" -p "$project" exec -T ui lancache-ui "$@" 2>&1) || rc=$?
+    ui_svc=$(prod_env_default UI_SERVICE) || exit $?
+    out=$(stack_compose "$install_dir" "$env_file" -p "$project" exec -T "$ui_svc" lancache-ui "$@" 2>&1) || rc=$?
     [[ $rc -eq 0 ]] || die "lancache-ui $1 in the ui container failed (exit $rc): $out"
     printf "%s\n" "$out" | tail -n 1
 )
@@ -8088,7 +8095,7 @@ restore_update_ip_env() {
 # From: Issue #1683 | PR #1985
 cmd_reset_sign_in() {
     ensure_default_install_dir
-    local install_dir="$DEFAULT_INSTALL_DIR" assume_yes=0 env_file project
+    local install_dir="$DEFAULT_INSTALL_DIR" assume_yes=0 env_file project ui_svc
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --yes|-y) assume_yes=1 ;;
@@ -8120,7 +8127,8 @@ cmd_reset_sign_in() {
     # What: a restart; the ui reads the .env only at start
     # Why: the compose config is unchanged, up -d keeps it
     # From: Issue #1683 | PR #2017
-    stack_compose "$install_dir" "$env_file" -p "$project" restart ui >/dev/null \
+    ui_svc=$(prod_env_default UI_SERVICE) || exit $?
+    stack_compose "$install_dir" "$env_file" -p "$project" restart "$ui_svc" >/dev/null \
         || die "The ui container did not restart (exit $?); sign-in turns off on its next start."
     print_ok "Admin UI sign-in is off. Set a new user name and password under General, Sign-in."
 }
@@ -8273,7 +8281,7 @@ restore_dns_upstream() {
     # From: Issue #1918
     stack_compose "$install_dir" "$env_file" up -d "$dns_svc" "$ui_svc" || rc=$?
     if [[ "$rc" -ne 0 ]]; then
-        print_error "Failed to restart dns and ui with the previous external DNS setting (exit $rc)."
+        print_error "Failed to restart $dns_svc and $ui_svc with the previous external DNS setting (exit $rc)."
         return 1
     fi
     print_warn "The previous external DNS setting is active again"
@@ -8283,7 +8291,7 @@ restore_dns_upstream() {
 # Why: the watchdog starts without upstream on a bad value
 # From: Issue #1918 | PR #1858
 dns_upstream_is_live() {
-    local install_dir="$1" env_file="$2" servers="$3" cid rc conf
+    local install_dir="$1" env_file="$2" servers="$3" cid rc conf dns_svc
     local wait poll waited=0 key server ok
     local -a confs=() wanted=()
     # What: the recursor files the ui renders, not /run.
@@ -8296,7 +8304,8 @@ dns_upstream_is_live() {
     wait=$(prod_env_default SETUP_HEALTH_WAIT_SERVICES_SECONDS) || exit $?
     poll=$(prod_env_default SETUP_HEALTH_POLL_SECONDS) || exit $?
     read -r -a wanted <<< "${servers//,/ }"
-    cid=$(stack_compose "$install_dir" "$env_file" ps -q dns) \
+    dns_svc=$(prod_env_default DNS_SERVICE) || exit $?
+    cid=$(stack_compose "$install_dir" "$env_file" ps -q "$dns_svc") \
         || die "Failed to look up the dns container of $install_dir (exit $?)."
     if [[ -z "$cid" ]]; then
         print_error "No dns container is running in $install_dir."
@@ -8347,8 +8356,9 @@ cmd_configure_upstream_dns() {
 
     print_step "Reading current configuration"
 
-    local env_file ip_http ip_https lan apply_rc=0
+    local env_file ip_http ip_https lan apply_rc=0 dns_svc
     local old_servers old_zones old_unsigned old_reverse dhcp_mode
+    dns_svc=$(prod_env_default DNS_SERVICE) || exit $?
     local -a all_services new_entries
     env_file=$(require_stack_env_file "$install_dir") || exit $?
     old_servers=$(get_env_var DNS_UPSTREAM_SERVERS "$env_file") || exit $?
@@ -8412,12 +8422,12 @@ cmd_configure_upstream_dns() {
     case "$apply_rc" in
         0) ;;
         1) die "The new external DNS setting failed the health gate; the previous setting is active again." ;;
-        *) die "The new setting failed the health gate, and restoring the previous one failed too. Check: $SCRIPT_DIR/setup.sh compose $install_dir logs dns" ;;
+        *) die "The new setting failed the health gate, and restoring the previous one failed too. Check: $SCRIPT_DIR/setup.sh compose $install_dir logs $dns_svc" ;;
     esac
     if ! dns_upstream_is_live "$install_dir" "$env_file" "$DNS_UPSTREAM_SERVERS"; then
         restore_dns_upstream "$install_dir" "$env_file" "$old_servers" "$old_zones" "$old_unsigned" "$old_reverse" \
-            || die "The dns container rejected the new setting, and restoring the previous one failed. Check: $SCRIPT_DIR/setup.sh compose $install_dir logs dns"
-        die "The dns container rejected the new setting (see: $SCRIPT_DIR/setup.sh compose $install_dir logs dns); the previous setting is active again."
+            || die "The dns container rejected the new setting, and restoring the previous one failed. Check: $SCRIPT_DIR/setup.sh compose $install_dir logs $dns_svc"
+        die "The dns container rejected the new setting (see: $SCRIPT_DIR/setup.sh compose $install_dir logs $dns_svc); the previous setting is active again."
     fi
     # What: the new servers must answer after the apply.
     # Why: a dead resolver must not stay active.
@@ -8425,7 +8435,7 @@ cmd_configure_upstream_dns() {
     read -r -a new_entries <<< "${DNS_UPSTREAM_SERVERS//,/ }"
     if (( ${#new_entries[@]} > 0 )) && ! dns_upstream_answers "${new_entries[@]}"; then
         restore_dns_upstream "$install_dir" "$env_file" "$old_servers" "$old_zones" "$old_unsigned" "$old_reverse" \
-            || die "A new external DNS server does not answer, and restoring the previous setting failed. Check: $SCRIPT_DIR/setup.sh compose $install_dir logs dns"
+            || die "A new external DNS server does not answer, and restoring the previous setting failed. Check: $SCRIPT_DIR/setup.sh compose $install_dir logs $dns_svc"
         die "A new external DNS server does not answer; the previous setting is active again."
     fi
     print_ok "External DNS setting applied and active in the dns container"
@@ -10210,8 +10220,10 @@ fi
 # Why: compose owns IP and port; a print never aborts setup
 # From: Issue #1683 | PR #1858
 ui_url_rc=0
+ui_svc=$(prod_env_default UI_SERVICE) || exit $?
 ui_url=$(compose_config_value "$INSTALL_DIR" "$ENV_FILE" \
-    '.services.ui.ports[0] // empty | "http://\(.host_ip):\(.published)"') || ui_url_rc=$?
+    '.services[$svc].ports[0] // empty | "http://\(.host_ip):\(.published)"' \
+    --arg svc "$ui_svc") || ui_url_rc=$?
 if [[ "$ui_url_rc" -ne 0 || -z "$ui_url" ]]; then
     print_warn "Cannot derive the Admin-UI URL (exit $ui_url_rc); the stack runs, see the ui ports in $INSTALL_DIR/docker-compose.yml."
     ui_url="(see the ui ports in $INSTALL_DIR/docker-compose.yml)"
