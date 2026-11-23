@@ -884,9 +884,9 @@ run_kea_dhcp_activation_preflight() {
     # Why: the same probe and values as the Admin UI
     # From: Issue #1683 | PR #1985
     ui_svc=$(prod_env_default UI_SERVICE) || exit $?
-    image=$(compose_config_value "$INSTALL_DIR" "$env_file" '.services[$svc].image' --arg svc "$ui_svc")
+    image=$(compose_config_value "$INSTALL_DIR" "$env_file" ".services[\$svc].image" --arg svc "$ui_svc")
     env_rows=$(compose_config_value "$INSTALL_DIR" "$env_file" \
-        '.services[$svc].environment | to_entries | map("\(.key)=\(.value // "")") | join("\n")' \
+        ".services[\$svc].environment | to_entries | map(\"\\(.key)=\\(.value // \"\")\") | join(\"\\n\")" \
         --arg svc "$ui_svc")
 
     # What: one probe run with the host network
@@ -2284,7 +2284,11 @@ stack_services_into() {
 # Why: a copy counts only when both lists are equal
 # From: Issue #1683 | PR #1858
 path_manifest() {
-    helper_run "${1}:/m:ro" -- sh -c '
+    local script
+    # What: the listing script, kept literal in a heredoc
+    # Why: it runs in the container; nothing expands here
+    # From: Issue #1683 | PR #2017
+    script=$(cat <<'MANIFEST'
         set -eu
         cd /m
         nl=$(find . -name "*
@@ -2310,7 +2314,10 @@ path_manifest() {
                 m=$(stat -c "%F %a %u %g" "$p")
                 printf "O %s %s\n" "$p" "$m"
             fi
-        done < /tmp/sorted'
+        done < /tmp/sorted
+MANIFEST
+    ) || die "Failed to read the manifest script (exit $?)."
+    helper_run "${1}:/m:ro" -- sh -c "$script"
 }
 
 # What: dies naming the first entry where two lists differ
@@ -4272,7 +4279,7 @@ helper_run() {
 # From: Issue #1683 | PR #2017
 helper_volume_file() {
     helper_run "${1}:/volume:ro" -- \
-        sh -c 'if [ -e "/volume/$1" ]; then cat "/volume/$1"; fi' sh "$2"
+        sh -c "if [ -e \"/volume/\$1\" ]; then cat \"/volume/\$1\"; fi" sh "$2"
 }
 
 # What: true while the channel's promote lock ref exists
@@ -7216,7 +7223,7 @@ merge_retired_ui_settings() {
     # Why: the next run merges only later changes
     # From: Issue #1683 | PR #2017
     helper_run "${volume}:/volume" -- \
-        sh -c 'cmp -s "/volume/$1" "/volume/$1.merged" || cp -p "/volume/$1" "/volume/$1.merged"' sh "$name" \
+        sh -c "cmp -s \"/volume/\$1\" \"/volume/\$1.merged\" || cp -p \"/volume/\$1\" \"/volume/\$1.merged\"" sh "$name" \
         || die "Failed to mark the old Admin UI settings as merged in $volume (exit $?)."
 }
 
@@ -7518,7 +7525,7 @@ logbundle_named_volume_listing() {
         return 0
     fi
     helper_run "${volume}:/data:ro" -- \
-        sh -c 'p="/data/$1"; if [ -e "$p" ]; then ls -laR "$p"; else echo "(no snapshots yet)"; fi' sh "$subpath" \
+        sh -c "p=\"/data/\$1\"; if [ -e \"\$p\" ]; then ls -laR \"\$p\"; else echo \"(no snapshots yet)\"; fi" sh "$subpath" \
         > "$out" 2>&1 || printf '(listing failed, exit %s)\n' "$?" >> "$out"
 }
 
@@ -10246,7 +10253,7 @@ fi
 ui_url_rc=0
 ui_svc=$(prod_env_default UI_SERVICE) || exit $?
 ui_url=$(compose_config_value "$INSTALL_DIR" "$ENV_FILE" \
-    '.services[$svc].ports[0] // empty | "http://\(.host_ip):\(.published)"' \
+    ".services[\$svc].ports[0] // empty | \"http://\\(.host_ip):\\(.published)\"" \
     --arg svc "$ui_svc") || ui_url_rc=$?
 if [[ "$ui_url_rc" -ne 0 || -z "$ui_url" ]]; then
     print_warn "Cannot derive the Admin-UI URL (exit $ui_url_rc); the stack runs, see the ui ports in $INSTALL_DIR/docker-compose.yml."
