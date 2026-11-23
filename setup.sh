@@ -10097,9 +10097,11 @@ else
 fi
 printf '%s└──────────────────────────────────────────────┘%s\n\n' "${BOLD}" "${RESET}"
 
-ask "Start now? [Y/n]" "Y"
+# What: "Start now?" asks like every yes/no question
+# Why: y, yes, n and no count; a typo asks again
+# From: Issue #1683 | PR #2017
 start_now=1
-[[ "${REPLY,,}" != "n" ]] || start_now=0
+confirm "Start now? [Y/n]" "Y" || start_now=0
 # What: skips the real start when introspection mode is on
 # Why: the walk never reaches pull or a host service
 # From: Issue #1683 | PR #1858
