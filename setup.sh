@@ -589,11 +589,23 @@ host_lan_addresses() {
     done <<< "$addrs"
 }
 
-# What: reports a failed host_lan_addresses call, exit as $1
-# Why: three callers share one error text
-# From: Issue #1683 | PR #1858
+# What: reports a failed host address listing, exit as $1
+# Why: one text; $2 = warn goes on, $3 is the next step
+# From: Issue #1683 | PR #2017
 print_host_addresses_failed() {
-    print_error "Failed to list the IPv4 addresses of this host (exit $1)."
+    local text="Failed to list the IPv4 addresses of this host (exit $1)."
+    if [[ "${2:-}" = warn ]]; then
+        print_warn "$text${3:+ $3}"
+    else
+        print_error "$text"
+    fi
+}
+
+# What: true if IP $1 is in the address rows $2
+# Why: one test for "this IP is an address of the host"
+# From: Issue #1683 | PR #2017
+ipv4_listed() {
+    awk -v ip="$1" '$1 == ip { found = 1 } END { exit !found }' <<< "$2"
 }
 
 # What: offer ip addr add for an IP missing on this host
@@ -605,11 +617,10 @@ ensure_host_ipv4() {
     # Why: same link and subnet; no guessed device or mask
     # From: Issue #1683 | PR #1858
     if addrs=$(host_ipv4_addresses); then
-        awk -v ip="$ip" '$1 == ip { found = 1 } END { exit !found }' <<< "$addrs" \
-            && assigned=1
+        ipv4_listed "$ip" "$addrs" && assigned=1
         link=$(awk -v ip="$ref" '$1 == ip { print $2, $3; exit }' <<< "$addrs")
     else
-        print_warn "Cannot list this host's IPv4 addresses (exit $?)."
+        print_host_addresses_failed "$?" warn
     fi
     if [[ "$assigned" = 1 ]]; then
         print_ok "$ip already assigned"
@@ -8859,11 +8870,11 @@ cmd_secondary() {
     is_valid_ipv4 "$ip_http" \
         || die "The primary sent no valid proxy IP (${ip_http}); pass --ip-http <ip>."
     if host_addrs=$(host_ipv4_addresses); then
-        if awk -v ip="$ip_http" '$1 == ip { found = 1 } END { exit !found }' <<< "$host_addrs"; then
+        if ipv4_listed "$ip_http" "$host_addrs"; then
             print_warn "Cache IP ${ip_http} is an address of this host; it must be the proxy IP of the primary."
         fi
     else
-        print_warn "Cannot list this host's IPv4 addresses (exit $?)."
+        print_host_addresses_failed "$?" warn
     fi
     validate_env_value PRIMARY_URL "$primary"
 
@@ -9299,7 +9310,7 @@ if lan_addresses=$(host_lan_addresses); then
     [[ "$detect_rc" -eq 0 ]] \
         || print_warn "No LAN IP detected (exit $detect_rc; see above); enter it below."
 else
-    print_warn "Cannot list this host's IPv4 addresses (exit $?); enter them below."
+    print_host_addresses_failed "$?" warn "Enter them below."
 fi
 printf "\n"
 
