@@ -6580,6 +6580,18 @@ checkout_branch_name() {
     printf '%s\n' "$branch"
 }
 
+# What: clones the code into dir $1, at branch or tag $2
+# Why: one owner of the clone address and its call
+# From: Issue #1683 | PR #2017
+clone_code() {
+    local dir="$1" ref="${2:-}"
+    if [[ -n "$ref" ]]; then
+        git clone --branch "$ref" "${LANCACHE_REPO_URL}.git" "$dir"
+    else
+        git clone "${LANCACHE_REPO_URL}.git" "$dir"
+    fi
+}
+
 # What: branch of checkout $1 if no channel branch
 # Why: a branch the operator chose is never moved
 # From: Issue #1683 | PR #2017
@@ -6691,10 +6703,9 @@ ensure_channel_checkout() {
     [[ ! -e "$dir" ]] || die "$dir exists but is no git checkout; move it away, then rerun setup.sh."
     mkdir -p "${dir%/*}" || die "Failed to create ${dir%/*} (exit $?)."
     if is_channel_branch "$target"; then
-        git clone --branch "$target" "${LANCACHE_REPO_URL}.git" "$dir" \
-            || die "Failed to clone $target into $dir (exit $?)."
+        clone_code "$dir" "$target" || die "Failed to clone $target into $dir (exit $?)."
     else
-        git clone "${LANCACHE_REPO_URL}.git" "$dir" || die "Failed to clone into $dir (exit $?)."
+        clone_code "$dir" || die "Failed to clone into $dir (exit $?)."
         sync_repo_to_commit "$dir" "$target"
     fi
 }
@@ -6738,7 +6749,7 @@ channel_code_checkout() {
     if [[ -n "${LANCACHE_SETUP_GIT_REF:-}" && -e "$dir/.git" ]]; then
         sync_repo_to_ref "$dir" "$target"
     elif [[ -n "${LANCACHE_SETUP_GIT_REF:-}" ]]; then
-        git clone --branch "$target" "${LANCACHE_REPO_URL}.git" "$dir" \
+        clone_code "$dir" "$target" \
             || die "Clone failed for LANCACHE_SETUP_GIT_REF='$target'. Check that it names a real branch or tag on origin."
     else
         ensure_channel_checkout "$dir" "$target"
