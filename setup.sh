@@ -2284,8 +2284,7 @@ stack_services_into() {
 # Why: a copy counts only when both lists are equal
 # From: Issue #1683 | PR #1858
 path_manifest() {
-    require_helper_image
-    docker run --rm -v "${1}:/m:ro" "$LANCACHE_HELPER_IMAGE" sh -c '
+    helper_run "${1}:/m:ro" -- sh -c '
         set -eu
         cd /m
         nl=$(find . -name "*
@@ -2350,7 +2349,6 @@ volume_copy_recorded() {
 copy_volume_to_dir() {
     local volume="$1" dir="$2" record="$3" rc=0 want have stage parent entries digest
     local -a lines
-    require_helper_image
     docker_volume_exists "$volume" || rc=$?
     if [[ "$rc" -eq 1 ]]; then
         print_skip "Copying Docker volume $volume: the volume does not exist"
@@ -2376,8 +2374,7 @@ copy_volume_to_dir() {
         stage="$parent/.${dir##*/}.quickstart-copy"
         mkdir -p -- "$parent" || die "Failed to create $parent (exit $?)."
         rm -rf -- "$stage" || die "Failed to remove the unfinished copy $stage (exit $?)."
-        docker run --rm -v "${volume}:/from:ro" -v "${parent}:/to" "$LANCACHE_HELPER_IMAGE" \
-            cp -a /from "/to/${stage##*/}" \
+        helper_run "${volume}:/from:ro" "${parent}:/to" -- cp -a /from "/to/${stage##*/}" \
             || die "Failed to copy the Docker volume $volume to $stage (exit $?); $dir was not changed."
         have=$(path_manifest "$stage") || die "Cannot list $stage (exit $?); $dir was not changed."
         [[ "$have" == "$want" ]] \
@@ -4254,6 +4251,30 @@ require_helper_image() {
     LANCACHE_HELPER_IMAGE=$(lancache_sot_value alpine base_images) || exit $?
 }
 
+# What: runs a command once in the helper image
+# Why: one place sets the image and the run flags
+# From: Issue #1683 | PR #2017
+helper_run() {
+    local -a mounts=()
+    while [[ $# -gt 0 && "$1" != "--" ]]; do
+        mounts+=(-v "$1")
+        shift
+    done
+    [[ "${1:-}" = "--" && $# -gt 1 ]] \
+        || die "helper_run needs its mounts, then -- and a command."
+    shift
+    require_helper_image
+    docker run --rm "${mounts[@]}" "$LANCACHE_HELPER_IMAGE" "$@"
+}
+
+# What: prints a file of a volume; nothing if it is absent
+# Why: a volume is no host path; the helper image reads it
+# From: Issue #1683 | PR #2017
+helper_volume_file() {
+    helper_run "${1}:/volume:ro" -- \
+        sh -c 'if [ -e "/volume/$1" ]; then cat "/volume/$1"; fi' sh "$2"
+}
+
 # What: true while the channel's promote lock ref exists
 # Why: promote moves every channel tag inside this lock
 # From: Issue #1683 | PR #1858
@@ -5208,10 +5229,8 @@ compose_project_has_named_volumes() {
 # From: Issue #1683 | PR #1858
 helper_volume_tar() {
     local volume="$1" root="$2" volume_mode="$3" backup_mode="$4" script="$5"
-    docker run --rm \
-        -v "${volume}:/volume${volume_mode}" \
-        -v "${root}:/backup${backup_mode}" \
-        "$LANCACHE_HELPER_IMAGE" sh -c "$script" sh "$volume"
+    helper_run "${volume}:/volume${volume_mode}" "${root}:/backup${backup_mode}" -- \
+        sh -c "$script" sh "$volume"
 }
 
 # What: archives named volumes; cache volume only in full
@@ -5220,7 +5239,6 @@ helper_volume_tar() {
 backup_compose_volumes() {
     local install_dir="$1" volume_root="$2" mode="$3" volume env_file cache_volume volumes
     compose_stack_or_skip "$install_dir" "Archiving the Docker volumes" || return 0
-    require_helper_image
     mkdir -p "$volume_root" || die "Failed to create $volume_root (exit $?)."
     env_file=$(runtime_env_file_for_install_dir "$install_dir") || exit $?
     cache_volume=$(compose_cache_volume_name "$install_dir" "$env_file") \
@@ -5250,7 +5268,6 @@ restore_compose_volumes() {
     fi
     compose_stack_available "$install_dir" \
         || die "Backup contains Docker volume payloads, but $install_dir has no docker-compose.yml or Docker is not available. Check the restored files and Docker, then restore again."
-    require_helper_image
     archives=$(find "$volume_root" -maxdepth 1 -type f -name '*.tar') \
         || die "Failed to list the volume archives in $volume_root (exit $?)."
     archives=$(sort <<< "$archives")
@@ -7153,18 +7170,15 @@ merge_retired_ui_settings() {
     local install_dir="$1" env_file="$2" mode="$3" volume name raw seen line key value count=0
     volume=$(ui_data_volume "$install_dir" "$env_file") || exit $?
     [[ -n "$volume" ]] || return 0
-    require_helper_image
     name=$(prod_env_default UI_SETTINGS_FILE_RETIRED) || exit $?
     name="${name##*/}"
     # What: the file and its copy from the last merge
     # Why: only lines the old ui changed since are new
     # From: Issue #1683 | PR #2017
-    raw=$(docker run --rm -v "${volume}:/volume:ro" "$LANCACHE_HELPER_IMAGE" \
-        sh -c 'if [ -e "/volume/$1" ]; then cat "/volume/$1"; fi' sh "$name") \
+    raw=$(helper_volume_file "$volume" "$name") \
         || die "Failed to read the old Admin UI settings from Docker volume $volume (exit $?)."
     [[ -n "$raw" ]] || return 0
-    seen=$(docker run --rm -v "${volume}:/volume:ro" "$LANCACHE_HELPER_IMAGE" \
-        sh -c 'if [ -e "/volume/$1.merged" ]; then cat "/volume/$1.merged"; fi' sh "$name") \
+    seen=$(helper_volume_file "$volume" "$name.merged") \
         || die "Failed to read the last merged Admin UI settings from Docker volume $volume (exit $?)."
     # What: install keeps its answers; update merges
     # Why: "Overwrite? y" means the wizard answers count
@@ -7201,7 +7215,7 @@ merge_retired_ui_settings() {
     # What: the copy marks this state as merged
     # Why: the next run merges only later changes
     # From: Issue #1683 | PR #2017
-    docker run --rm -v "${volume}:/volume" "$LANCACHE_HELPER_IMAGE" \
+    helper_run "${volume}:/volume" -- \
         sh -c 'cmp -s "/volume/$1" "/volume/$1.merged" || cp -p "/volume/$1" "/volume/$1.merged"' sh "$name" \
         || die "Failed to mark the old Admin UI settings as merged in $volume (exit $?)."
 }
@@ -7503,8 +7517,7 @@ logbundle_named_volume_listing() {
         printf 'volume lookup failed: %s\n' "$err" > "$out"
         return 0
     fi
-    require_helper_image
-    docker run --rm -v "${volume}:/data:ro" "$LANCACHE_HELPER_IMAGE" \
+    helper_run "${volume}:/data:ro" -- \
         sh -c 'p="/data/$1"; if [ -e "$p" ]; then ls -laR "$p"; else echo "(no snapshots yet)"; fi' sh "$subpath" \
         > "$out" 2>&1 || printf '(listing failed, exit %s)\n' "$?" >> "$out"
 }
