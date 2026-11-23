@@ -640,6 +640,13 @@ impl Settings {
         }
     }
 
+    // What: value as file mode, read as octal text.
+    // Why: the SOT owns every file mode, like 0640.
+    // From: Issue #1683 | PR #2017
+    pub fn mode(&self, key: &str) -> Result<u32, String> {
+        u32::from_str_radix(&self.text(key)?, 8).map_err(|e| format!("{key}: {e}"))
+    }
+
     // What: value as items; missing is empty.
     // Why: an unset optional list means no entries.
     // From: Issue #1683 | PR #1858

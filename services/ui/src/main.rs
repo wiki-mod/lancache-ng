@@ -2904,18 +2904,11 @@ async fn hamster_api(
     Ok(axum::Json(v).into_response())
 }
 
-// What: config file mode from octal SOT text.
-// Why: modes are written as octal like 0640.
-fn file_mode(s: &Settings) -> Result<u32, String> {
-    let raw = s.text("UI_CONFIG_FILE_MODE")?;
-    u32::from_str_radix(&raw, 8).map_err(|e| format!("UI_CONFIG_FILE_MODE: {e}"))
-}
-
 // What: write rendered files; list the changed.
 // Why: an unchanged file never wakes its owner.
 // From: Issue #1683 | PR #1858
 fn write_files(s: &Settings, files: &[render::File]) -> Result<Vec<config::Change>, String> {
-    let mode = file_mode(s)?;
+    let mode = s.mode("UI_CONFIG_FILE_MODE")?;
     let mut out = Vec::new();
     for f in files {
         // What: a first write wakes no owner.

@@ -4131,13 +4131,6 @@ pub mod render {
         Ok(())
     }
 
-    // What: octal mode from a SOT key.
-    // Why: the SOT owns every file mode.
-    // From: Issue #1683 | PR #1980
-    fn mode_of(s: &Settings, key: &str) -> Result<u32, String> {
-        u32::from_str_radix(&s.text(key)?, 8).map_err(|e| format!("{key}: {e}"))
-    }
-
     // What: set group and mode of one path.
     // Why: nginx workers read keys by the shared gid.
     // From: Issue #1683 | PR #1980
@@ -4200,7 +4193,7 @@ pub mod render {
         for d in [&ca, &dir] {
             std::fs::create_dir_all(d).map_err(|e| format!("{}: {e}", d.display()))?;
         }
-        grant(&dir, gid, mode_of(s, "CERT_DIR_MODE")?)?;
+        grant(&dir, gid, s.mode("CERT_DIR_MODE")?)?;
         if !(ca_crt.exists() && ca_key.exists()) {
             crate::cert::make_ca(
                 &ca_key,
@@ -4214,7 +4207,7 @@ pub mod render {
                 ca_crt.display()
             );
         }
-        grant(&ca_key, None, mode_of(s, "CA_KEY_MODE")?)?;
+        grant(&ca_key, None, s.mode("CA_KEY_MODE")?)?;
         drop_stale_leaves(&ca_crt, &dir, &dir.join(s.text("CA_STAMP_FILE")?))?;
         let tpl = PathBuf::from(s.text("NGINX_TEMPLATE_DIR")?);
         let psl = nginx_conf::Psl::parse(&read(&tpl.join(s.text("NGINX_PSL_FILE")?))?);
@@ -4226,7 +4219,7 @@ pub mod render {
         let mut names = vec![s.text("DEFAULT_CERT_DNS")?];
         names.extend(s.text("IP_HTTPS").ok());
         want.push((s.text("NGINX_DEFAULT_CERT")?, names));
-        let (key_mode, crt_mode) = (mode_of(s, "CERT_KEY_MODE")?, mode_of(s, "CERT_FILE_MODE")?);
+        let (key_mode, crt_mode) = (s.mode("CERT_KEY_MODE")?, s.mode("CERT_FILE_MODE")?);
         let mut made = 0;
         for (name, sans) in want {
             let (key, crt) = (

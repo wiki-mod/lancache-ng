@@ -461,8 +461,7 @@ async fn round(s: &Settings, m: &mut Memory) -> Findings {
 // From: Issue #1683 | PR #1858
 fn publish(s: &Settings, f: &Findings) -> Result<(), String> {
     let path = PathBuf::from(s.text("WATCHDOG_ALARM_FILE")?);
-    let mode = u32::from_str_radix(&s.text("WATCHDOG_ALARM_FILE_MODE")?, 8)
-        .map_err(|e| format!("WATCHDOG_ALARM_FILE_MODE: {e}"))?;
+    let mode = s.mode("WATCHDOG_ALARM_FILE_MODE")?;
     let report = Report {
         written: clock::unix_secs(),
         alarms: &f.alarms,
