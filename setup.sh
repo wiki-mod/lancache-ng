@@ -604,7 +604,7 @@ is_valid_dhcp_proxy_boot_filename() {
     local filename="${1:-}"
     [[ -n "$filename" && "${#filename}" -le 255 ]] || return 1
     [[ "$filename" != *[[:space:],]* ]] || return 1
-    # What: rejects newline and shell or .env metachars
+    # What: rejects line breaks, shell or .env metachars
     # Why: a later .env write fails after earlier steps ran
     # From: Issue #1683 | PR #1858
     env_value_is_safe "$filename"
@@ -1878,14 +1878,22 @@ validate_env_value() {
 # What: the characters env_value_is_safe rejects, as text
 # Why: messages name the same set the check uses
 # From: Issue #1683 | PR #2017
-ENV_UNSAFE_CHARS_TEXT="newline, \$, \`, \", ', \\ or #"
+ENV_UNSAFE_CHARS_TEXT="line break, \$, \`, \", ', \\ or #"
 
-# What: false on newline and shell or .env metachars
+# What: true when $1 holds a line feed or carriage return
+# Why: either one breaks a KEY=VALUE line of the .env
+# From: Issue #1683 | PR #2017
+has_line_break() {
+    [[ "$1" == *$'\n'* || "$1" == *$'\r'* ]]
+}
+
+# What: false on a line break, shell or .env metachars
 # Why: Compose .env parsing would change the value
 # From: Issue #1683 | PR #1858
 env_value_is_safe() {
+    ! has_line_break "$1" || return 1
     case "$1" in
-        *$'\n'* | *'$'* | *'`'* | *'"'* | *"'"* | *\\* | *'#'* ) return 1 ;;
+        *'$'* | *'`'* | *'"'* | *"'"* | *\\* | *'#'* ) return 1 ;;
     esac
     return 0
 }
@@ -1981,7 +1989,7 @@ set_env_key() {
     set_env_assignment "$key" "$value" "$env_file"
 }
 
-# What: dies on a bad .env key or a newline in a raw value
+# What: dies on a bad .env key or a line break in a value
 # Why: one owner of the raw-assignment check
 # From: Issue #1683 | PR #1858
 validate_env_assignment() {
@@ -1991,11 +1999,8 @@ validate_env_assignment() {
             die "Invalid .env key: $key"
             ;;
     esac
-    case "$assignment_value" in
-        *$'\n'*)
-            die "$key contains a newline and cannot be copied into .env."
-            ;;
-    esac
+    ! has_line_break "$assignment_value" \
+        || die "$key contains a line break and cannot be copied into .env."
 }
 
 # What: writes KEY=raw value: one line stays for the key
