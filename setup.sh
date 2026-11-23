@@ -5854,7 +5854,7 @@ channel than the chosen one stops the run before any file is written.
 LANCACHE_IMAGE_CHANNEL sets the channel without a terminal.
 
 Required arguments:
-  --primary <url>    Primary LanCache UI/API URL, for example http://<primary-ip>:<ui-port>
+  --primary <url>    Primary LanCache UI/API URL, for example ${PRIMARY_URL_EXAMPLE}
   --token <token>    Secondary registration token from the primary server
   --name <name>      Secondary node name: one DNS label (letters, digits, inner dashes)
 
@@ -8462,6 +8462,11 @@ die_if_any_empty() {
     [[ ${#missing[@]} -eq 0 ]] || die "${message}: ${missing[*]}"
 }
 
+# What: the form of a primary URL, as texts show it
+# Why: help, question and error name the same example
+# From: Issue #1683 | PR #2017
+PRIMARY_URL_EXAMPLE='http://<primary-ip>:<ui-port>'
+
 # What: 0 for an http or https URL without spaces
 # Why: the secondary wizard checks the primary URL at once
 # From: Issue #1683
@@ -8678,7 +8683,7 @@ cmd_secondary() {
     # From: Issue #1683 | PR #1980
     if [[ "$tty" = 1 ]]; then
         local listen_default="$stored_listen"
-        [[ -n "$primary_arg" ]] || ask_checked primary "Primary Admin-UI URL (http://<primary-ip>:<ui-port>)" "$stored_primary" is_http_url "Not an http(s) URL"
+        [[ -n "$primary_arg" ]] || ask_checked primary "Primary Admin-UI URL (${PRIMARY_URL_EXAMPLE})" "$stored_primary" is_http_url "Not an http(s) URL"
         [[ -n "$token" ]] || ask_checked token "Registration token (Admin-UI: DNS, Secondary DNS)" "" is_nonempty_value "The token is required"
         # What: the primary's channel as a yes/no question
         # Why: the secondary clones and runs that channel
@@ -8712,7 +8717,7 @@ cmd_secondary() {
         "--primary=$primary" "--token=$token"
 
     is_http_url "$primary" \
-        || die "--primary must be an http(s) URL: http://<primary-ip>:<ui-port>"
+        || die "--primary must be an http(s) URL: ${PRIMARY_URL_EXAMPLE}"
     # What: --ip-http is optional
     # Why: the default is the primary's IP_HTTP
     # From: Issue #1683
