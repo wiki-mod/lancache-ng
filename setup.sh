@@ -10009,7 +10009,10 @@ validate_initial_env() {
     while IFS= read -r line; do
         key="${line%%=*}"
         [[ "$key" =~ ^[A-Z][A-Z0-9_]*$ ]] || key=""
-        while [[ "$line" =~ \$\{([A-Za-z_][A-Za-z0-9_]*)\} ]]; do
+        # What: every form counts: ${VAR}, ${VAR?}
+        # Why: the secrets are written as ${VAR?}
+        # From: Issue #1683 | PR #2017
+        while [[ "$line" =~ \$\{([A-Za-z_][A-Za-z0-9_]*)[^}]*\} ]]; do
             ref="${BASH_REMATCH[1]}"
             validate_env_value "${key:-$ref}" "${!ref-}"
             line="${line/"${BASH_REMATCH[0]}"/}"
