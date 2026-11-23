@@ -8522,7 +8522,7 @@ cmd_secondary() {
     local response_image_registry response_image_prefix response_image_channel response_image_tag
     local existing_env_file lancache_image_registry lancache_image_prefix lancache_image_channel lancache_image_tag
     local explicit_lancache_image_tag keep_known_good_configs
-    local preflight_dir preflight_env_file preflight_registry preflight_prefix preflight_channel preflight_env_tag
+    local preflight_registry preflight_prefix preflight_channel preflight_env_tag
     local preflight_tag preflight_verified_registry="" preflight_verified_prefix="" preflight_verified_tag=""
     local secondary_env_file bad_response secondary_compose
     local channel_words pinned release dns_port
@@ -8588,7 +8588,7 @@ cmd_secondary() {
     # What: the name first; inside a secondary it is the dir
     # Why: the name selects the stored .env of --rotate
     # From: Issue #1683
-    local tty=0 stored_env="" stored_listen="" stored_listen_https="" stored_ip_https="" stored_channel="" loopback
+    local tty=0 stored_listen="" stored_listen_https="" stored_ip_https="" stored_channel="" loopback
     local primary_arg="$primary" stored_primary=""
     terminal_available && tty=1
     if [[ "$tty" = 1 && -z "$name" ]]; then
@@ -8622,25 +8622,25 @@ cmd_secondary() {
     # Why: the secondary runs from its channel's checkout
     # From: Issue #1683
     command_available git || install_git
+    # What: the .env of the secondary dir; empty if none
+    # Why: one file answers the wizard and keeps its values
+    # From: Issue #1683 | PR #2017
+    existing_env_file=""
+    [[ ! -f "${secondary_dir}/.env" ]] || existing_env_file="${secondary_dir}/.env"
     # What: an existing secondary's .env answers the wizard
     # Why: --rotate asks again only for the token
     # From: Issue #1683
-    if [[ -n "$name" && "$(basename "$PWD")" = "$name" && -f .env ]]; then
-        stored_env=".env"
-    elif [[ -n "$name" && -f "${name}/.env" ]]; then
-        stored_env="${name}/.env"
-    fi
-    if [[ -n "$stored_env" ]]; then
-        stored_primary=$(get_env_var PRIMARY_URL "$stored_env") \
-            || die "Cannot read PRIMARY_URL from $stored_env (exit $?)."
-        stored_listen=$(get_env_var LISTEN_IP "$stored_env") \
-            || die "Cannot read LISTEN_IP from $stored_env (exit $?)."
-        stored_listen_https=$(get_env_var LISTEN_IP_HTTPS "$stored_env") \
-            || die "Cannot read LISTEN_IP_HTTPS from $stored_env (exit $?)."
-        stored_ip_https=$(get_env_var IP_HTTPS "$stored_env") \
-            || die "Cannot read IP_HTTPS from $stored_env (exit $?)."
-        stored_channel=$(get_env_var LANCACHE_IMAGE_CHANNEL "$stored_env") \
-            || die "Cannot read LANCACHE_IMAGE_CHANNEL from $stored_env (exit $?)."
+    if [[ -n "$existing_env_file" ]]; then
+        stored_primary=$(get_env_var PRIMARY_URL "$existing_env_file") \
+            || die "Cannot read PRIMARY_URL from $existing_env_file (exit $?)."
+        stored_listen=$(get_env_var LISTEN_IP "$existing_env_file") \
+            || die "Cannot read LISTEN_IP from $existing_env_file (exit $?)."
+        stored_listen_https=$(get_env_var LISTEN_IP_HTTPS "$existing_env_file") \
+            || die "Cannot read LISTEN_IP_HTTPS from $existing_env_file (exit $?)."
+        stored_ip_https=$(get_env_var IP_HTTPS "$existing_env_file") \
+            || die "Cannot read IP_HTTPS from $existing_env_file (exit $?)."
+        stored_channel=$(get_env_var LANCACHE_IMAGE_CHANNEL "$existing_env_file") \
+            || die "Cannot read LANCACHE_IMAGE_CHANNEL from $existing_env_file (exit $?)."
         loopback=$(prod_env_default LOOPBACK_BIND_IP) || exit $?
         [[ "$stored_listen_https" != "$loopback" ]] || stored_listen_https=""
     fi
@@ -8732,7 +8732,7 @@ cmd_secondary() {
         # Why: no change before all answers are known
         # From: Issue #1683
         local https_default="Y" https_listen_default
-        [[ -z "$stored_env" || -n "$stored_listen_https" ]] || https_default="N"
+        [[ -z "$existing_env_file" || -n "$stored_listen_https" ]] || https_default="N"
         if confirm "Has the primary HTTPS enabled? $(yn_hint "$https_default")" "$https_default" \
             && confirm "Enable HTTPS secondary support? $(yn_hint "$https_default")" "$https_default"; then
             ask_checked ip_https "HTTPS IP of the primary" "$stored_ip_https" is_valid_ipv4 "Invalid IPv4 address"
@@ -8781,24 +8781,20 @@ cmd_secondary() {
     # Why: a late failure would leave a rotated password
     # From: Issue #1683 | PR #1858
     if [[ "$rotate" -eq 1 ]]; then
-        preflight_dir="$secondary_dir"
-        preflight_env_file=""
-        [[ -f "${preflight_dir}/.env" ]] && preflight_env_file="${preflight_dir}/.env"
-
-        if [[ -n "$preflight_env_file" ]]; then
+        if [[ -n "$existing_env_file" ]]; then
             # What: shell env wins, else secondary's .env
             # Why: a failed read must stop, not look unset
             # From: Issue #1683 | PR #1858
             preflight_registry="${LANCACHE_IMAGE_REGISTRY:-}" preflight_prefix="${LANCACHE_IMAGE_PREFIX:-}"
             preflight_channel="${LANCACHE_IMAGE_CHANNEL:-}" preflight_env_tag="${LANCACHE_IMAGE_TAG:-}"
-            [[ -n "$preflight_registry" ]] || preflight_registry=$(get_env_var LANCACHE_IMAGE_REGISTRY "$preflight_env_file") \
-                || die "Cannot read LANCACHE_IMAGE_REGISTRY from $preflight_env_file (exit $?)."
-            [[ -n "$preflight_prefix" ]] || preflight_prefix=$(get_env_var LANCACHE_IMAGE_PREFIX "$preflight_env_file") \
-                || die "Cannot read LANCACHE_IMAGE_PREFIX from $preflight_env_file (exit $?)."
-            [[ -n "$preflight_channel" ]] || preflight_channel=$(get_env_var LANCACHE_IMAGE_CHANNEL "$preflight_env_file") \
-                || die "Cannot read LANCACHE_IMAGE_CHANNEL from $preflight_env_file (exit $?)."
-            [[ -n "$preflight_env_tag" ]] || preflight_env_tag=$(get_env_var LANCACHE_IMAGE_TAG "$preflight_env_file") \
-                || die "Cannot read LANCACHE_IMAGE_TAG from $preflight_env_file (exit $?)."
+            [[ -n "$preflight_registry" ]] || preflight_registry=$(get_env_var LANCACHE_IMAGE_REGISTRY "$existing_env_file") \
+                || die "Cannot read LANCACHE_IMAGE_REGISTRY from $existing_env_file (exit $?)."
+            [[ -n "$preflight_prefix" ]] || preflight_prefix=$(get_env_var LANCACHE_IMAGE_PREFIX "$existing_env_file") \
+                || die "Cannot read LANCACHE_IMAGE_PREFIX from $existing_env_file (exit $?)."
+            [[ -n "$preflight_channel" ]] || preflight_channel=$(get_env_var LANCACHE_IMAGE_CHANNEL "$existing_env_file") \
+                || die "Cannot read LANCACHE_IMAGE_CHANNEL from $existing_env_file (exit $?)."
+            [[ -n "$preflight_env_tag" ]] || preflight_env_tag=$(get_env_var LANCACHE_IMAGE_TAG "$existing_env_file") \
+                || die "Cannot read LANCACHE_IMAGE_TAG from $existing_env_file (exit $?)."
 
             if [[ -n "$preflight_registry" && -n "$preflight_prefix" && -n "$preflight_channel" ]]; then
                 validate_lancache_image_registry "$preflight_registry"
@@ -8813,7 +8809,7 @@ cmd_secondary() {
                     preflight_tag=$(LANCACHE_IMAGE_REGISTRY="$preflight_registry" \
                         LANCACHE_IMAGE_PREFIX="$preflight_prefix" \
                         LANCACHE_IMAGE_CHANNEL="$preflight_channel" \
-                        resolve_lancache_image_tag "$preflight_env_file")
+                        resolve_lancache_image_tag "$existing_env_file")
                     assert_resolved_image_tag_platform_supported "$preflight_registry" "$preflight_prefix" "$preflight_tag"
                     preflight_verified_registry="$preflight_registry"
                     preflight_verified_prefix="$preflight_prefix"
@@ -8895,11 +8891,6 @@ cmd_secondary() {
         print_host_addresses_failed "$?" warn
     fi
     validate_env_value PRIMARY_URL "$primary"
-
-    existing_env_file=""
-    if [[ -f "${secondary_dir}/.env" ]]; then
-        existing_env_file="${secondary_dir}/.env"
-    fi
 
     lancache_image_registry="${LANCACHE_IMAGE_REGISTRY:-}"
     if [[ -z "$lancache_image_registry" && -n "$existing_env_file" ]]; then
