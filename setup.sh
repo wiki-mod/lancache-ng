@@ -3272,6 +3272,17 @@ env_or_sot_default() {
     printf '%s\n' "$value"
 }
 
+# What: a key's value from the shell env, else an env file
+# Why: an exported value wins over the stored one
+# From: Issue #1683 | PR #2017
+shell_or_env_value() {
+    local key="$1" env_file="${2:-}" value="${!1:-}"
+    if [[ -z "$value" && -n "$env_file" && -f "$env_file" ]]; then
+        value=$(get_env_var "$key" "$env_file") || exit $?
+    fi
+    printf '%s\n' "$value"
+}
+
 # What: sets DEFAULT_INSTALL_DIR from the SOT, once
 # Why: LANCACHE_STATE_DIR owns the checkout dir.
 # From: Issue #1683 | PR #1912
@@ -4147,12 +4158,9 @@ validate_lancache_image_prefix() {
 # Why: an override is validated and fails fast
 # From: Issue #1683 | PR #1858
 resolve_lancache_image_registry() {
-    local env_file="${1:-}" registry="${LANCACHE_IMAGE_REGISTRY:-}"
+    local env_file="${1:-}" registry
 
-    if [[ -z "$registry" && -n "$env_file" && -f "$env_file" ]]; then
-        registry=$(get_env_var LANCACHE_IMAGE_REGISTRY "$env_file") || exit $?
-    fi
-
+    registry=$(shell_or_env_value LANCACHE_IMAGE_REGISTRY "$env_file") || exit $?
     if [[ -z "$registry" ]]; then
         registry=$(lancache_sot_value registry release) || exit $?
     fi
@@ -4164,12 +4172,9 @@ resolve_lancache_image_registry() {
 # Why: same precedence as the registry resolver
 # From: Issue #1683 | PR #1858
 resolve_lancache_image_prefix() {
-    local env_file="${1:-}" prefix="${LANCACHE_IMAGE_PREFIX:-}"
+    local env_file="${1:-}" prefix
 
-    if [[ -z "$prefix" && -n "$env_file" && -f "$env_file" ]]; then
-        prefix=$(get_env_var LANCACHE_IMAGE_PREFIX "$env_file") || exit $?
-    fi
-
+    prefix=$(shell_or_env_value LANCACHE_IMAGE_PREFIX "$env_file") || exit $?
     prefix="${prefix:-${LANCACHE_REPO_URL#https://github.com/}}"
     validate_lancache_image_prefix "$prefix"
     printf '%s\n' "$prefix"
@@ -4179,16 +4184,11 @@ resolve_lancache_image_prefix() {
 # Why: an untagged install gets the release-tag channel
 # From: Issue #1683 | PR #1858
 resolve_lancache_image_channel() {
-    local env_file="${1:-}" channel="${LANCACHE_IMAGE_CHANNEL:-}" tag="${LANCACHE_IMAGE_TAG:-}" release_tag=""
+    local env_file="${1:-}" channel tag release_tag=""
     local words pinned release
 
-    if [[ -z "$channel" && -n "$env_file" && -f "$env_file" ]]; then
-        channel=$(get_env_var LANCACHE_IMAGE_CHANNEL "$env_file") || exit $?
-    fi
-
-    if [[ -z "$tag" && -n "$env_file" && -f "$env_file" ]]; then
-        tag=$(get_env_var LANCACHE_IMAGE_TAG "$env_file") || exit $?
-    fi
+    channel=$(shell_or_env_value LANCACHE_IMAGE_CHANNEL "$env_file") || exit $?
+    tag=$(shell_or_env_value LANCACHE_IMAGE_TAG "$env_file") || exit $?
 
     words=$(lancache_channel_words) || exit $?
     pinned=$(lancache_release_rows pinned) || exit $?
@@ -4559,18 +4559,13 @@ resolve_lancache_image_tag() {
     pinned=$(lancache_release_rows pinned) || exit $?
     lancache_direct_image_tag "$tag" "$words" && return 0
 
-    channel="${LANCACHE_IMAGE_CHANNEL:-}"
-    if [[ -z "$channel" && -n "$env_file" && -f "$env_file" ]]; then
-        channel=$(get_env_var LANCACHE_IMAGE_CHANNEL "$env_file") || exit $?
-    fi
+    channel=$(shell_or_env_value LANCACHE_IMAGE_CHANNEL "$env_file") || exit $?
 
     if [[ -n "$channel" ]] && list_has_line "$channel" "$words"; then
         lancache_stack_pointer_channel_for "$channel"
         return 0
     elif [[ -n "$channel" && "$channel" = "$pinned" ]]; then
-        if [[ -z "$tag" && -n "$env_file" && -f "$env_file" ]]; then
-            tag=$(get_env_var LANCACHE_IMAGE_TAG "$env_file") || exit $?
-        fi
+        [[ -n "$tag" ]] || tag=$(shell_or_env_value LANCACHE_IMAGE_TAG "$env_file") || exit $?
         [[ -n "$tag" ]] || tag=$(lancache_release_archive_tag_or_empty) || exit $?
         [[ -n "$tag" ]] \
             || die "LANCACHE_IMAGE_CHANNEL=$pinned requires LANCACHE_IMAGE_TAG to be set to an immutable sha-* or vX.Y.Z tag."
@@ -4578,9 +4573,7 @@ resolve_lancache_image_tag() {
         validate_lancache_image_channel "$channel"
     fi
 
-    if [[ -z "$tag" && -n "$env_file" && -f "$env_file" ]]; then
-        tag=$(get_env_var LANCACHE_IMAGE_TAG "$env_file") || exit $?
-    fi
+    [[ -n "$tag" ]] || tag=$(shell_or_env_value LANCACHE_IMAGE_TAG "$env_file") || exit $?
     lancache_direct_image_tag "$tag" "$words" && return 0
 
     [[ -n "$tag" ]] || tag=$(lancache_release_archive_tag_or_empty) || exit $?
@@ -6782,8 +6775,7 @@ update_repo_and_resume() {
     local exec_rc dir branches
     is_deploy_prod_install_dir "$install_dir" && repo_dir=$(deploy_prod_repo_root "$install_dir")
     channel=$(resolve_lancache_image_channel "$_UPDATE_ENV_FILE") || exit $?
-    tag="${LANCACHE_IMAGE_TAG:-}"
-    [[ -n "$tag" ]] || tag=$(get_env_var LANCACHE_IMAGE_TAG "$_UPDATE_ENV_FILE") || exit $?
+    tag=$(shell_or_env_value LANCACHE_IMAGE_TAG "$_UPDATE_ENV_FILE") || exit $?
     # What: another channel's dir or the old root moves
     # Why: each channel runs the code of its own dir
     # From: Issue #1683 | PR #1858
@@ -6983,8 +6975,7 @@ cmd_update() {
         env_file=$(runtime_env_file_for_install_dir "$install_dir") || exit $?
         [[ -f "$env_file" ]] || die_no_stack_found "$install_dir"
         channel=$(resolve_lancache_image_channel "$env_file") || exit $?
-        tag="${LANCACHE_IMAGE_TAG:-}"
-        [[ -n "$tag" ]] || tag=$(get_env_var LANCACHE_IMAGE_TAG "$env_file") || exit $?
+        tag=$(shell_or_env_value LANCACHE_IMAGE_TAG "$env_file") || exit $?
         if is_commit_image_tag "$tag" || is_release_tag "$tag"; then
             export LANCACHE_IMAGE_TAG="$tag"
         fi
@@ -8901,16 +8892,10 @@ cmd_secondary() {
             # What: shell env wins, else secondary's .env
             # Why: a failed read must stop, not look unset
             # From: Issue #1683 | PR #1858
-            preflight_registry="${LANCACHE_IMAGE_REGISTRY:-}" preflight_prefix="${LANCACHE_IMAGE_PREFIX:-}"
-            preflight_channel="${LANCACHE_IMAGE_CHANNEL:-}" preflight_env_tag="${LANCACHE_IMAGE_TAG:-}"
-            [[ -n "$preflight_registry" ]] || preflight_registry=$(get_env_var LANCACHE_IMAGE_REGISTRY "$existing_env_file") \
-                || die "Cannot read LANCACHE_IMAGE_REGISTRY from $existing_env_file (exit $?)."
-            [[ -n "$preflight_prefix" ]] || preflight_prefix=$(get_env_var LANCACHE_IMAGE_PREFIX "$existing_env_file") \
-                || die "Cannot read LANCACHE_IMAGE_PREFIX from $existing_env_file (exit $?)."
-            [[ -n "$preflight_channel" ]] || preflight_channel=$(get_env_var LANCACHE_IMAGE_CHANNEL "$existing_env_file") \
-                || die "Cannot read LANCACHE_IMAGE_CHANNEL from $existing_env_file (exit $?)."
-            [[ -n "$preflight_env_tag" ]] || preflight_env_tag=$(get_env_var LANCACHE_IMAGE_TAG "$existing_env_file") \
-                || die "Cannot read LANCACHE_IMAGE_TAG from $existing_env_file (exit $?)."
+            preflight_registry=$(shell_or_env_value LANCACHE_IMAGE_REGISTRY "$existing_env_file") || exit $?
+            preflight_prefix=$(shell_or_env_value LANCACHE_IMAGE_PREFIX "$existing_env_file") || exit $?
+            preflight_channel=$(shell_or_env_value LANCACHE_IMAGE_CHANNEL "$existing_env_file") || exit $?
+            preflight_env_tag=$(shell_or_env_value LANCACHE_IMAGE_TAG "$existing_env_file") || exit $?
 
             if [[ -n "$preflight_registry" && -n "$preflight_prefix" && -n "$preflight_channel" ]]; then
                 validate_lancache_image_registry "$preflight_registry"
@@ -9008,17 +8993,11 @@ cmd_secondary() {
     fi
     validate_env_value PRIMARY_URL "$primary"
 
-    lancache_image_registry="${LANCACHE_IMAGE_REGISTRY:-}"
-    if [[ -z "$lancache_image_registry" && -n "$existing_env_file" ]]; then
-        lancache_image_registry=$(get_env_var LANCACHE_IMAGE_REGISTRY "$existing_env_file") || exit $?
-    fi
+    lancache_image_registry=$(shell_or_env_value LANCACHE_IMAGE_REGISTRY "$existing_env_file") || exit $?
     lancache_image_registry=$(LANCACHE_IMAGE_REGISTRY="${lancache_image_registry:-$response_image_registry}" \
         resolve_lancache_image_registry) || die "Cannot resolve the image registry (exit $?)."
 
-    lancache_image_prefix="${LANCACHE_IMAGE_PREFIX:-}"
-    if [[ -z "$lancache_image_prefix" && -n "$existing_env_file" ]]; then
-        lancache_image_prefix=$(get_env_var LANCACHE_IMAGE_PREFIX "$existing_env_file") || exit $?
-    fi
+    lancache_image_prefix=$(shell_or_env_value LANCACHE_IMAGE_PREFIX "$existing_env_file") || exit $?
     lancache_image_prefix=$(LANCACHE_IMAGE_PREFIX="${lancache_image_prefix:-$response_image_prefix}" \
         resolve_lancache_image_prefix) || die "Cannot resolve the image prefix (exit $?)."
 
@@ -9102,10 +9081,7 @@ cmd_secondary() {
     # What: KEEP_KNOWN_GOOD_CONFIGS: env, .env, else empty
     # Why: per node; empty means the SOT runtime default
     # From: Issue #615 | PR #625
-    keep_known_good_configs="${KEEP_KNOWN_GOOD_CONFIGS:-}"
-    if [[ -z "$keep_known_good_configs" && -n "$existing_env_file" ]]; then
-        keep_known_good_configs=$(get_env_var KEEP_KNOWN_GOOD_CONFIGS "$existing_env_file") || exit $?
-    fi
+    keep_known_good_configs=$(shell_or_env_value KEEP_KNOWN_GOOD_CONFIGS "$existing_env_file") || exit $?
     # What: the upstream DNS keys survive --rotate
     # Why: rotate rewrites .env; the operator value stays
     # From: Issue #1918 | PR #1858
