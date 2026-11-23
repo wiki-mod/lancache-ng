@@ -6156,10 +6156,10 @@ capture_stack_health_baseline() {
     done
 }
 
-# What: services to wait for; no dhcp in mode off
-# Why: the ui stops dhcp on purpose in mode off
-# From: Issue #1683
-health_wait_services() {
+# What: the services that run; no dhcp in mode off
+# Why: one owner for compose up and the health waits
+# From: Issue #1683 | PR #2017
+wanted_stack_services() {
     local -n _wait_ref="$1"
     local env_file="$2"
     shift 2
@@ -6185,7 +6185,7 @@ wait_for_stack_health() {
     local -a regressed_services pre_existing_unhealthy_services
 
     interval_seconds=$(prod_env_default SETUP_HEALTH_POLL_SECONDS) || exit $?
-    health_wait_services services "$_UPDATE_ENV_FILE" "$@"
+    wanted_stack_services services "$_UPDATE_ENV_FILE" "$@"
 
     while (( elapsed < timeout_seconds )); do
         all_healthy=1
@@ -6923,8 +6923,8 @@ cmd_update() {
 # Why: units and operators start the stack exactly as setup
 # From: Issue #1683 | PR #1858
 cmd_compose() {
-    local install_dir env_file arg dhcp_svc dhcp_mode services svc
-    local -a args=() picked=()
+    local install_dir env_file arg services
+    local -a args=() listed=() picked=()
     [[ $# -ge 1 ]] || die "Usage: setup.sh compose <install-dir> <compose args>"
     install_dir=$(resolve_stack_dir_checked "$1") || exit $?
     shift
@@ -6937,16 +6937,11 @@ cmd_compose() {
         for arg in "${@:2}"; do
             [[ "$arg" = -* ]] || { stack_compose "$install_dir" "$env_file" "$@"; return; }
         done
-        dhcp_mode=$(env_or_sot_default DHCP_MODE "$env_file") || exit $?
-        if [[ "$dhcp_mode" = "off" ]]; then
-            dhcp_svc=$(prod_env_default DHCP_SERVICE) || exit $?
-            services=$(stack_compose "$install_dir" "$env_file" config --services) \
-                || die "Cannot list the services of $install_dir (exit $?)."
-            while IFS= read -r svc; do
-                [[ -z "$svc" || "$svc" = "$dhcp_svc" ]] || picked+=("$svc")
-            done <<< "$services"
-            args+=("${picked[@]}")
-        fi
+        services=$(stack_compose "$install_dir" "$env_file" config --services) \
+            || die "Cannot list the services of $install_dir (exit $?)."
+        mapfile -t listed <<< "$services"
+        wanted_stack_services picked "$env_file" "${listed[@]}"
+        (( ${#picked[@]} == ${#listed[@]} )) || args+=("${picked[@]}")
     fi
     stack_compose "$install_dir" "$env_file" "${args[@]}"
 }
@@ -10171,7 +10166,7 @@ install_poll=$(prod_env_default SETUP_HEALTH_POLL_SECONDS) || exit $?
 install_services=$(stack_compose "$INSTALL_DIR" "$ENV_FILE" config --services) \
     || die "Failed to list the services in $INSTALL_DIR (exit $?)."
 mapfile -t install_services <<<"$install_services"
-health_wait_services install_services "$ENV_FILE" "${install_services[@]}"
+wanted_stack_services install_services "$ENV_FILE" "${install_services[@]}"
 install_waited=0
 install_bad=("${install_services[@]}")
 while (( ${#install_bad[@]} > 0 && install_waited < install_wait )); do
