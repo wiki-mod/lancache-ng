@@ -573,6 +573,18 @@ Further requirements:
   | bad unsigned zone | `DNS_UPSTREAM_UNSIGNED_ZONES=.` | the entry is rejected, as in none |
   | dead resolver | `configure-upstream-dns` with an address that runs no DNS | `setup.sh` reports the failed check and restores the three earlier values |
 
+- Root zone copy (`ROOT_ZONE_MIRROR`, `ROOT_ZONE_MIRROR_SERVERS`,
+  `ROOT_ZONE_MIRROR_REFRESH`, `ROOT_ZONE_MIRROR_RETRY`): every recursor loads
+  the root zone into its cache by AXFR (`zoneToCache`) unless `.` goes to an
+  upstream resolver:
+
+  | Case | Input | Pass |
+  | --- | --- | --- |
+  | loaded | start the stack | each recursor (HTTP, HTTPS, primary, secondary) logs a successful root zone load with valid DNSSEC and ZONEMD |
+  | effect | the same name lookups with and without the copy | fewer queries to root servers and the response times for names under uncached TLDs are recorded |
+  | LAN names | `dig +adflag` for names under own endings while the copy is active | NOERROR, never NXDOMAIN from the root zone's denial |
+  | upstream | upstream resolver for zone `.` | no copy is loaded; names go to the upstream |
+
 - LAN domains (`DHCP_DOMAIN`, `DNS_EXTRA_LAN_DOMAINS`), Admin UI DNS page,
   Primary DNS tab:
 
@@ -649,7 +661,7 @@ With a real primary and at least one real secondary on another host
 | TSIG rotation | rotate the TSIG key in the Admin UI and run the secondary step that the README section "Secondary DNS" names | transfers to every secondary continue |
 | address change | change a secondary's address in the Admin UI | its health is checked at the new address |
 | removal | remove a secondary in the Admin UI | it no longer appears on the dashboard; the others keep working |
-| monitoring | delete one zone on a secondary that runs on another host | the Admin UI secondary health and the watchdog alarm show the zone as missing |
+| monitoring | two secondaries on other hosts; delete one zone on the first, stop the second, keep a zone on the first that the primary removed | the Admin UI secondary health and the watchdog alarm name the first secondary with the missing and the extra zone, report the second as unreachable, and keep checking the first |
 | same-host guard | `setup.sh secondary --name lancache-ng` on a primary host | the command stops; the primary keeps running unchanged |
 | update | `setup.sh update` of a secondary installed from the previous release | the zones are kept; a second run changes nothing |
 
@@ -891,8 +903,15 @@ PR #2019):
   zone list only at registration (`DNS_SECONDARY_ZONES`), so a zone added later
   never reaches it;
 - 10.5 monitoring: the secondary does not publish its PowerDNS API port, so the
-  Admin UI health check of a secondary on another host cannot reach it, and the
-  watchdog check reads `PDNS_SECONDARY_API_URL`, which nothing sets;
+  Admin UI health check of a secondary on another host cannot reach it (PR #2017
+  publishes the port). The watchdog check reads `PDNS_SECONDARY_API_URL`, which
+  nothing sets, instead of the registered list `DNS_SECONDARIES`; it holds one
+  address only, the services container has no `PDNS_API_KEY`, one unreachable
+  secondary stops the check, alarms do not name the secondary, and a zone the
+  primary removed is not reported;
+- 10.2 root zone copy: no code reads the `ROOT_ZONE_MIRROR` keys since the
+  rewrite of 2026-11-01; the recursors load no root zone. The SOT B-root
+  address `199.9.14.201` is outdated (now `170.247.170.2`);
 - 10.5 same-host guard: `setup.sh secondary` takes the compose project name
   from `--name` and does not check it; with `--name lancache-ng` it replaces the
   primary's `dns` container and uses its volumes;
