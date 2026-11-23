@@ -2589,7 +2589,6 @@ restore_quickstart_mounts() {
         empty_dir=0
         if [[ -d "$src" && ! -L "$src" ]]; then
             inside=$(dir_first_entry "$src") || die "Failed to list $src (exit $?)."
-
             [[ -z "$inside" ]] || continue
             empty_dir=1
         elif [[ -e "$src" ]]; then
@@ -3474,7 +3473,6 @@ adopt_moved_config_prod_keys() {
         print_ok "Deleted the emptied legacy file ${file##*/}"
     done
     remove_empty_dirs_up "${dir%/*}" "${dir##*/}"
-
 }
 
 # What: template edits move into <x>.local.env, newest wins
