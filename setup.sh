@@ -4680,7 +4680,6 @@ lancache_release_archive_tag_or_empty() {
     elif [[ "$?" = "2" ]]; then
         die "Cannot derive a valid release image tag from this checkout/archive."
     fi
-    true
 }
 
 # What: a channel's pointer word or a fixed tag
