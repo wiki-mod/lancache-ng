@@ -4916,7 +4916,6 @@ migrate_env_for_update() (
     # Why: the platform check runs before migration writes
     # From: Issue #1683 | PR #1858
 
-    ip_http=$(get_env_var IP_HTTP "$env_file") || die "Cannot read IP_HTTP from $env_file (exit $?)."
     append_env_migrated_assignment_if_missing UI_BIND_IP IP_HTTP "$ip_http" "$env_file"
 
     # What: drops the retired global logging switch
