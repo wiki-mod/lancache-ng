@@ -189,11 +189,15 @@ ask() {
 # From: Issue #1683 | PR #1912
 ask_checked() {
     local -n _ask_checked_ref="$1"
-    local prompt="$2" default="$3" check="$4" error="$5" optional="${6:-0}" retry_default="$3"
+    local prompt="$2" default="$3" check="$4" error="$5" optional="${6:-0}" normalize="${7:-}" retry_default="$3"
     [[ "$optional" != 1 ]] || retry_default=""
     ask "$prompt" "$default"
     while true; do
         _ask_checked_ref="$REPLY"
+        # What: function $7 reshapes the answer first
+        # Why: it is checked and stored in that one form
+        # From: Issue #1683 | PR #2017
+        [[ -z "$normalize" ]] || _ask_checked_ref=$("$normalize" "$REPLY") || exit $?
         [[ "$optional" = 1 && -z "$_ask_checked_ref" ]] && break
         "$check" "$_ask_checked_ref" && break
         print_error "${error}: ${_ask_checked_ref}"
@@ -282,6 +286,14 @@ is_valid_dns_name() {
     for label in "${labels[@]}"; do
         [[ "$label" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$ ]] || return 1
     done
+}
+
+# What: a DNS name in lower case without its final dot
+# Why: one spelling, so names compare and store alike
+# From: Issue #1683 | PR #2017
+dns_name_normalized() {
+    local name="${1,,}"
+    printf '%s\n' "${name%.}"
 }
 
 # What: true for one DHCP NTP entry: an IPv4 or a DNS name
@@ -381,8 +393,7 @@ dns_upstream_server_problem() {
 dns_upstream_zone_problem() {
     local raw="$1" lan="${2,,}" forwarded="${3:-}" zone inside=0 item
     local -a forwarded_zones
-    zone="${raw,,}"
-    zone="${zone%.}"
+    zone=$(dns_name_normalized "$raw")
     read -r -a forwarded_zones <<< "${forwarded//,/ }"
     for item in "${forwarded_zones[@]}"; do
         [[ "$zone" = "$item" || "$zone" == *".$item" ]] && inside=1
@@ -405,8 +416,8 @@ dns_upstream_zone_problem() {
 dns_upstream_join() {
     local item out=""
     for item in "$@"; do
-        item="${item,,}"
-        out+="${out:+,}${item%.}"
+        item=$(dns_name_normalized "$item")
+        out+="${out:+,}${item}"
     done
     printf '%s\n' "$out"
 }
@@ -9530,13 +9541,7 @@ print_step "LAN domain"
 printf "  Every local name ends in this domain. With lancache-ng.lan\n"
 printf "  a printer is printer.lancache-ng.lan; with lan printer.lan.\n\n"
 DHCP_DOMAIN=$(prod_env_default DHCP_DOMAIN) || exit $?
-while true; do
-    ask "LAN domain" "$DHCP_DOMAIN"
-    DHCP_DOMAIN="${REPLY,,}"
-    DHCP_DOMAIN="${DHCP_DOMAIN%.}"
-    is_valid_dns_name "$DHCP_DOMAIN" && break
-    print_error "Please enter a domain like lancache-ng.lan or lan"
-done
+ask_checked DHCP_DOMAIN "LAN domain" "$DHCP_DOMAIN" is_valid_dns_name "Not a domain like lancache-ng.lan or lan" 0 dns_name_normalized
 print_ok "LAN domain: $DHCP_DOMAIN"
 
 # What: optional external DNS server for unknown names
