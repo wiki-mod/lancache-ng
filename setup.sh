@@ -1514,12 +1514,18 @@ ensure_stack_requirements_installed() {
     ensure_docker_userland_proxy
 }
 
-# What: installs curl, jq, Docker, Compose; prints next step
+# What: what the requirements step installs, as one text
+# Why: result line and help name one list; wrapped for help
+# From: Issue #1683 | PR #2017
+REQUIREMENTS_TEXT="curl, jq, ip, flock, the tools that generate secrets, Docker with
+the Compose v2 plugin, and on Alpine the GNU tools setup.sh uses"
+
+# What: runs the requirements step; prints the next step
 # Why: one set for both; old names stay as aliases
 # From: Issue #1683
 cmd_install_requirements() {
     ensure_stack_requirements_installed
-    print_ok "Requirements installed (curl, jq, Docker, Docker Compose v2). Next: ./setup.sh install (primary) or ./setup.sh secondary."
+    print_ok "Requirements installed (${REQUIREMENTS_TEXT//$'\n'/ }). Next: ./setup.sh install (primary) or ./setup.sh secondary."
 }
 
 # What: strips quotes and unquoted inline comments
@@ -5656,9 +5662,10 @@ Commands:
                        setup.sh only prints this help; curl | bash passes
                        the command as: bash -s -- install
   install-requirements
-                       Install only the prerequisites (curl, jq, Docker
-                       engine, Docker Compose v2), the same for primary and
-                       secondary. install and secondary run it on their own.
+                       Install only the prerequisites, the same for primary
+                       and secondary; './setup.sh install-requirements
+                       --help' lists them. install and secondary run it on
+                       their own.
                        Aliases: install-requirements-primary,
                        install-requirements-secondary.
   list-prompts [answers-file]
@@ -5730,10 +5737,14 @@ EOF
             cat <<EOF
 Usage: ./setup.sh install-requirements
 
-Installs only the prerequisites (curl, jq, Docker engine, a running Docker
-daemon, and the Docker Compose v2 plugin), then stops. Primary and secondary
-need the same set. ./setup.sh install and ./setup.sh secondary run this step
-on their own, so it is only needed to prepare a host ahead of time.
+Installs only the prerequisites, then stops:
+${REQUIREMENTS_TEXT}.
+It starts the Docker daemon and enables it for boot. If Docker's
+userland-proxy setting differs from the one LanCache-NG needs, it asks
+before it changes the setting and restarts Docker; every container on this
+host restarts with it. Primary and secondary need the same set.
+./setup.sh install and ./setup.sh secondary run this step on their own, so
+it is only needed to prepare a host ahead of time.
 Must be run as root.
 
 Aliases: install-requirements-primary, install-requirements-secondary.

@@ -656,8 +656,11 @@ The order is: check, ask, then act.
    secondary needs its own host: if this host holds a LanCache-NG install
    (settings below the state root, the host service, or a dns container of
    the primary or another secondary, running or stopped), setup stops at
-   once. Then missing requirements are installed (curl, jq, git, Docker,
-   Docker Compose v2) and the container check runs once more.
+   once. Then missing requirements are installed (curl, jq, ip, flock, the
+   tools that generate secrets, git, Docker with the Compose v2 plugin, and
+   on Alpine the GNU tools setup.sh uses; the Docker daemon is started, and a
+   change of its userland-proxy setting is asked first) and the container
+   check runs once more.
 2. Ask: name, primary URL, token, whether the primary runs the latest channel,
    the DNS IP of this secondary, whether the primary has HTTPS enabled and, if
    so, whether this secondary supports it (then the primary's HTTPS IP and a
