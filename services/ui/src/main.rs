@@ -1308,12 +1308,12 @@ struct Register {
     address: Option<String>,
 }
 
-// What: checks a secondary name: length, a-z0-9-.
+// What: checks a secondary name: one label, SOT length.
 // Why: the name becomes a DNS label and file name.
 fn valid_peer_name(s: &Settings, name: &str) -> Result<bool, String> {
     let max = usize::try_from(s.uint("DNS_SECONDARY_NAME_MAX")?).map_err(|e| e.to_string())?;
-    let chars_ok = name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
-    Ok(!name.is_empty() && name.len() <= max && chars_ok)
+    let label = !name.contains('.') && lancache_ng::dns::is_dns_name(name, false, false);
+    Ok(name.len() <= max && label)
 }
 
 // What: everything a new secondary needs.
