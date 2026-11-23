@@ -9608,7 +9608,7 @@ done
 # Why: the next steps place their defaults below it
 # From: Issue #1683 | PR #1912
 if [[ "$WIZARD_INTROSPECT_MODE" != "1" ]]; then
-    mkdir -p "$LANCACHE_STATE_DIR"
+    mkdir -p "$LANCACHE_STATE_DIR" || die "Failed to create $LANCACHE_STATE_DIR (exit $?)."
 fi
 
 # What: cache directory, size and RAM buffer
@@ -10162,14 +10162,14 @@ merge_retired_ui_settings "$INSTALL_DIR" "$ENV_FILE" retire
 # Why: compose bind mounts need existing directories
 # From: Issue #1683 | PR #1858
 print_step "Creating directories"
-mkdir -p "$CACHE_DIR"
+mkdir -p "$CACHE_DIR" || die "Failed to create $CACHE_DIR (exit $?)."
 print_ok "Cache:          $CACHE_DIR"
 if [[ -n "$KEA_DATA_DIR" ]]; then
-    mkdir -p "$KEA_DATA_DIR"
+    mkdir -p "$KEA_DATA_DIR" || die "Failed to create $KEA_DATA_DIR (exit $?)."
     print_ok "Kea data:       $KEA_DATA_DIR"
 fi
 if [[ "$NTP_ENABLED" = "1" && -n "$NTP_DATA_DIR" ]]; then
-    mkdir -p "$NTP_DATA_DIR"
+    mkdir -p "$NTP_DATA_DIR" || die "Failed to create $NTP_DATA_DIR (exit $?)."
     print_ok "NTP data:       $NTP_DATA_DIR"
 fi
 # What: pre-creates syslog log root as the runtime uid
