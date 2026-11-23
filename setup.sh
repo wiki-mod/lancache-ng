@@ -212,6 +212,13 @@ yn_hint() {
     if [[ "$1" = "Y" ]]; then printf '[Y/n]\n'; else printf '[y/N]\n'; fi
 }
 
+# What: dies unless setup.sh runs as root; $1 = command
+# Why: one owner of the root check of every command
+# From: Issue #1683 | PR #2017
+require_root() {
+    [[ "$(id -u)" = "0" ]] || die "This command must be run as root (sudo ./setup.sh $1)."
+}
+
 # What: rejects a missing value or a flag as value
 # Why: a flag would silently consume the next option
 # From: Issue #1683 | PR #1858
@@ -1461,8 +1468,7 @@ ensure_docker_userland_proxy() {
 # From: Issue #1683 | PR #1858
 ensure_stack_requirements_installed() {
     local info out
-    [[ "$(id -u)" = "0" ]] \
-        || die "This command must be run as root (sudo ./setup.sh install-requirements)."
+    require_root "install-requirements"
     # What: refuses an unsupported arch before any install
     # Why: no host change on a host the stack cannot run on
     # From: Issue #1683 | PR #1858
@@ -8056,8 +8062,7 @@ cmd_reset_sign_in() {
         shift
     done
     install_dir=$(resolve_stack_dir "$install_dir") || exit $?
-    [[ "$(id -u)" = "0" ]] \
-        || die "This script must be run as root (sudo ./setup.sh reset-sign-in [install-dir])."
+    require_root "reset-sign-in [install-dir]"
     # What: nothing changes without an explicit yes
     # Why: DoMe 07.11.: a curious run must not lock out
     # From: Issue #1683 | PR #1985
@@ -8100,8 +8105,7 @@ cmd_update_ip() {
     printf '%s╚═══════════════════════════════════════╝%s\n' "${BOLD}" "${RESET}"
     printf "\n"
 
-    [[ "$(id -u)" = "0" ]] \
-        || die "This script must be run as root (sudo ./setup.sh update-ip [install-dir])."
+    require_root "update-ip [install-dir]"
     [[ -f "$install_dir/docker-compose.yml" ]] \
         || die_no_stack_found "$install_dir"
     assert_prebuilt_image_platform_supported
@@ -8310,8 +8314,7 @@ cmd_configure_upstream_dns() {
     printf '%s╚═══════════════════════════════════════╝%s\n' "${BOLD}" "${RESET}"
     printf "\n"
 
-    [[ "$(id -u)" = "0" ]] \
-        || die "This script must be run as root (sudo ./setup.sh configure-upstream-dns [install-dir])."
+    require_root "configure-upstream-dns [install-dir]"
     [[ -f "$install_dir/docker-compose.yml" ]] \
         || die_no_stack_found "$install_dir"
 
@@ -8541,8 +8544,7 @@ cmd_secondary() {
     # What: requirements installed first, as on the primary
     # Why: a missing tool is installed, as on the primary
     # From: Issue #1683
-    [[ "$(id -u)" = "0" ]] \
-        || die "This script must be run as root (sudo ./setup.sh secondary)."
+    require_root "secondary"
     ensure_stack_requirements_installed
 
     # What: the name first; inside a secondary it is the dir
@@ -9169,8 +9171,7 @@ printf "  Help:  ./setup.sh --help (use './setup.sh <command> --help' for detail
 if [[ "$WIZARD_INTROSPECT_MODE" != "1" ]]; then
     print_step "Checking prerequisites"
 
-    [[ "$(id -u)" = "0" ]] \
-        || die "This script must be run as root (sudo ./setup.sh install)."
+    require_root "install"
 
     ensure_stack_requirements_installed
 
