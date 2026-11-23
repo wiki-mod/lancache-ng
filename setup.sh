@@ -4305,6 +4305,15 @@ lancache_channel_branches() {
     awk '{ sub(/^refs\/heads\//, "", $2); print $2 }' <<< "$sources"
 }
 
+# What: true if $1 is the branch of a channel
+# Why: one owner of the question; an update moves only these
+# From: Issue #1683 | PR #2017
+is_channel_branch() {
+    local branches
+    branches=$(lancache_channel_branches) || exit $?
+    list_has_line "$1" "$branches"
+}
+
 # What: "<branch> (<channel>)" of each channel, with "or"
 # Why: a text shows the SOT pairs; it names no branch
 # From: Issue #1683 | PR #2017
@@ -6582,17 +6591,16 @@ checkout_head() {
 # Why: install and update follow the channel the same way
 # From: Issue #1683 | PR #1858
 channel_checkout_target() {
-    local repo_dir="$1" channel="$2" tag="$3" branch branches target changes
+    local repo_dir="$1" channel="$2" tag="$3" branch target changes
     if [[ ! -e "$repo_dir/.git" ]]; then
         print_ok "$repo_dir is not a git checkout; its files stay as they are" >&2
         return 0
     fi
     branch=$(checkout_branch_name "$repo_dir") || exit $?
-    branches=$(lancache_channel_branches) || exit $?
     # What: a branch outside the channel branches stays
     # Why: the operator chose that revision (AG-OP-009)
     # From: Issue #1683 | PR #1858
-    if [[ -n "$branch" ]] && ! list_has_line "$branch" "$branches"; then
+    if [[ -n "$branch" ]] && ! is_channel_branch "$branch"; then
         print_warn "Checkout $repo_dir is on $branch, no channel branch; repository not updated." >&2
         return 0
     fi
@@ -6613,9 +6621,8 @@ channel_checkout_target() {
 # Why: nightly code is current_dev, latest code master
 # From: Issue #1683 | PR #1858
 sync_repo_to_channel_ref() {
-    local repo_dir="$1" target="$2" branches
-    branches=$(lancache_channel_branches) || exit $?
-    if list_has_line "$target" "$branches"; then
+    local repo_dir="$1" target="$2"
+    if is_channel_branch "$target"; then
         sync_repo_to_branch "$repo_dir" "$target"
     else
         sync_repo_to_commit "$repo_dir" "$target"
@@ -6667,15 +6674,14 @@ is_channel_layout_repo() {
 # Why: install and a channel switch share the git steps
 # From: Issue #1683 | PR #1858
 ensure_channel_checkout() {
-    local dir="$1" target="$2" branches
+    local dir="$1" target="$2"
     if [[ -e "$dir/.git" ]]; then
         sync_repo_to_channel_ref "$dir" "$target"
         return 0
     fi
     [[ ! -e "$dir" ]] || die "$dir exists but is no git checkout; move it away, then rerun setup.sh."
     mkdir -p "${dir%/*}" || die "Failed to create ${dir%/*} (exit $?)."
-    branches=$(lancache_channel_branches) || exit $?
-    if list_has_line "$target" "$branches"; then
+    if is_channel_branch "$target"; then
         git clone --branch "$target" "${LANCACHE_REPO_URL}.git" "$dir" \
             || die "Failed to clone $target into $dir (exit $?)."
     else
@@ -6697,15 +6703,14 @@ set_active_channel_dir() {
 # Why: install and secondary share one checkout step
 # From: Issue #1683 | PR #1858
 channel_code_checkout() {
-    local channel="$1" target dir branch branches words
+    local channel="$1" target dir branch words
     CHANNEL_CODE_DIR="" CHANNEL_CODE_OLD="" CHANNEL_CODE_IN_PLACE=0
     # What: a named non-channel branch installs in place
     # Why: the operator chose that revision (AG-OP-009)
     # From: Issue #1683 | PR #1858
     if [[ -e "$SCRIPT_DIR/.git" ]]; then
         branch=$(checkout_branch_name "$SCRIPT_DIR") || exit $?
-        branches=$(lancache_channel_branches) || exit $?
-        if [[ -n "$branch" ]] && ! list_has_line "$branch" "$branches"; then
+        if [[ -n "$branch" ]] && ! is_channel_branch "$branch"; then
             print_warn "Checkout $SCRIPT_DIR is on $branch, no channel branch; installing from it."
             printf "  Compose files and this setup.sh come from that branch.\n"
             words=$(lancache_channel_branch_words) || exit $?
@@ -6854,7 +6859,7 @@ switch_channel_dir_and_resume() {
 # From: Issue #1683 | PR #1858
 update_repo_and_resume() {
     local install_dir="$1" repo_dir="$1" branch channel tag target old new baseline="" svc
-    local exec_rc dir branches
+    local exec_rc dir
     is_deploy_prod_install_dir "$install_dir" && repo_dir=$(deploy_prod_repo_root "$install_dir")
     channel=$(resolve_lancache_image_channel "$_UPDATE_ENV_FILE") || exit $?
     tag=$(shell_or_env_value LANCACHE_IMAGE_TAG "$_UPDATE_ENV_FILE") || exit $?
@@ -6864,8 +6869,7 @@ update_repo_and_resume() {
     if [[ -e "$repo_dir/.git" ]] && is_channel_layout_repo "$repo_dir"; then
         branch=$(checkout_branch_name "$repo_dir") || exit $?
         dir=$(channel_code_dir "$channel") || exit $?
-        branches=$(lancache_channel_branches) || exit $?
-        if [[ -z "$branch" ]] || list_has_line "$branch" "$branches"; then
+        if [[ -z "$branch" ]] || is_channel_branch "$branch"; then
             if [[ "$(realpath -m "$repo_dir")" != "$(realpath -m "$dir")" ]]; then
                 target=$(lancache_channel_code_ref "$channel" "$tag") || exit $?
                 [[ -n "$target" ]] || die "Channel $channel needs LANCACHE_IMAGE_TAG to name its code."
