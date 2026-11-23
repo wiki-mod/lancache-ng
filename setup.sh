@@ -7984,7 +7984,7 @@ reset_kea_to_last_known_good_config() {
         # What: forces base-10 for the snapshot id
         # Why: zero-padded ids would parse as octal
         # From: Issue #1683 | PR #1858
-        printf '  %s  (%s UTC)\n' "$sid" "$(date -u -d "@$(( 10#$sid / 1000000000 ))" '+%Y-%m-%d %H:%M:%S' 2>&1 || printf ' (exit %s)' "$?")"
+        print_snapshot_line "$sid" "$(( 10#$sid / 1000000000 ))"
     done
 
     if [[ -z "$snapshot_id" ]]; then
@@ -8023,6 +8023,16 @@ canonical_dns_zone() {
     else
         printf '%s.\n' "$zone"
     fi
+}
+
+# What: one snapshot line: id $1, UTC time of seconds $2
+# Why: the Kea and the DNS list show snapshots alike
+# From: Issue #1683 | PR #2017
+print_snapshot_line() {
+    local id="$1" seconds="$2" when rc=0
+    when=$(date -u -d "@${seconds}" '+%Y-%m-%d %H:%M:%S' 2>&1) || rc=$?
+    [[ "$rc" -eq 0 ]] || when+=" (exit $rc)"
+    printf '  %s  (%s UTC)\n' "$id" "$when"
 }
 
 # What: warns that the newest snapshot id $1 is used
@@ -8115,7 +8125,7 @@ reset_dns_to_last_known_good_config() {
     for (( idx = n - 1; idx >= 0; idx-- )); do
         eid="${entries[$idx]%% *}"
         ecreated="${entries[$idx]#* }"
-        printf '  %s  (%s UTC)\n' "$eid" "$(date -u -d "@${ecreated}" '+%Y-%m-%d %H:%M:%S' 2>&1 || printf ' (exit %s)' "$?")"
+        print_snapshot_line "$eid" "$ecreated"
     done
 
     if [[ -z "$snapshot_id" ]]; then
