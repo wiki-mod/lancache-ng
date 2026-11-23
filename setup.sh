@@ -10126,7 +10126,7 @@ print_step "Installing host services"
 # What: asks before taking units of another install
 # Why: units of another install are not taken silently
 # From: Issue #1683 | PR #1980
-host_unit_dir=$(runtime_default_in "$(runtime_defaults_list)" SYSTEMD_UNIT_DIR) || exit $?
+host_unit_dir=$(prod_env_default SYSTEMD_UNIT_DIR) || exit $?
 host_unit_owner=""
 if [[ -f "$host_unit_dir/$STACK_UNIT" ]]; then
     host_unit_owner=$(sed -n 's/^WorkingDirectory=//p' "$host_unit_dir/$STACK_UNIT")
