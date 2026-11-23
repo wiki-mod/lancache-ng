@@ -2786,17 +2786,7 @@ migrate_quickstart_install() (
     # From: Issue #1683 | PR #1858
     while IFS= read -r copy; do
         [[ "$copy" = */* ]] || continue
-        dir="${copy%/*}"
-        while [[ -n "$dir" ]]; do
-            if [[ -d "$old_dir/$dir" ]]; then
-                rmdir --ignore-fail-on-non-empty -- "$old_dir/$dir" || die "Failed to remove $old_dir/$dir (exit $?)."
-            fi
-            if [[ "$dir" = */* ]]; then
-                dir="${dir%/*}"
-            else
-                dir=""
-            fi
-        done
+        remove_empty_dirs_up "$old_dir" "${copy%/*}"
     done <<< "$bundle"$'\n'"$restored"
     rm -f "$old_dir/docker-compose.yml" "$old_env" || die "Failed to remove the quickstart files in $old_dir."
     trap - EXIT
@@ -2812,6 +2802,23 @@ migrate_quickstart_install() (
     [[ ! -e "${aside[0]}" ]] \
         || print_warn "Copies of earlier failed migration runs stay in: ${aside[*]}. Remove them when no longer needed."
 )
+
+# What: removes dir $2 and its parents below $1 while empty
+# Why: a dir that still holds files stays with its content
+# From: Issue #1683 | PR #2017
+remove_empty_dirs_up() {
+    local root="$1" dir="$2"
+    while [[ -n "$dir" ]]; do
+        if [[ -d "$root/$dir" ]]; then
+            rmdir --ignore-fail-on-non-empty -- "$root/$dir" || die "Failed to remove $root/$dir (exit $?)."
+        fi
+        if [[ "$dir" = */* ]]; then
+            dir="${dir%/*}"
+        else
+            dir=""
+        fi
+    done
+}
 
 # What: stops prod, moves copies aside, restarts quickstart
 # Why: a failed migration must leave the old install running
@@ -6714,16 +6721,7 @@ remove_root_checkout() {
     sorted=$(printf '%s\n' "${dirs[@]}" | sort -ru) || die "Failed to sort the code dirs of $root (exit $?)."
     while IFS= read -r d; do
         [[ -n "$d" ]] || continue
-        while [[ -n "$d" ]]; do
-            if [[ -d "$root/$d" ]]; then
-                rmdir --ignore-fail-on-non-empty -- "$root/$d" || die "Failed to remove $root/$d (exit $?)."
-            fi
-            if [[ "$d" = */* ]]; then
-                d="${d%/*}"
-            else
-                d=""
-            fi
-        done
+        remove_empty_dirs_up "$root" "$d"
     done <<< "$sorted"
     rm -rf -- "$root/.git" || die "Failed to remove $root/.git (exit $?)."
     print_ok "Old code in $root removed; its data stays"
