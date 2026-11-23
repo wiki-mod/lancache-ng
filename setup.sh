@@ -831,7 +831,7 @@ validate_ui_session_ttl_seconds() {
     local value="$1" source="${2:-UI_SESSION_TTL_SECONDS}" numeric max
 
     if [[ ! "$value" =~ ^[0-9]+$ ]]; then
-        die "UI_SESSION_TTL_SECONDS in ${source} must be an unsigned integer number of seconds."
+        die "UI_SESSION_TTL_SECONDS in ${source} must be a whole number of seconds."
     fi
     # What: strips leading zeros before the comparisons
     # Why: bash reads a leading zero as octal
@@ -4821,7 +4821,7 @@ migrate_env_for_update() (
     cache_mem_mb=$(get_env_var CACHE_MEM_MB "$env_file") || exit $?
     if [[ -n "$cache_mem_mb" ]] && ! is_positive_integer "$cache_mem_mb"; then
         remove_env_key CACHE_MEM_MB "$env_file"
-        print_warn "CACHE_MEM_MB '$cache_mem_mb' is no positive integer; removed, the build-manifest.yml default applies"
+        print_warn "CACHE_MEM_MB '$cache_mem_mb' is no positive number; removed, the build-manifest.yml default applies"
     fi
     migrate_proxy_security_mode_for_update "$env_file"
     migrate_dhcp_mode_for_update "$env_file"
@@ -9505,32 +9505,25 @@ fi
 # From: Issue #1683 | PR #1858
 print_step "Cache configuration"
 
-while true; do
-    ask "Cache directory (absolute path)" "$LANCACHE_STATE_DIR/cache"
-    CACHE_DIR="$REPLY"
-    is_absolute_path "$CACHE_DIR" && break
-    print_error "Please enter an absolute path (e.g. $LANCACHE_STATE_DIR/cache)."
-done
+CACHE_DIR=""
+ask_checked CACHE_DIR "Cache directory (absolute path)" "$LANCACHE_STATE_DIR/cache" is_absolute_path "Not an absolute path"
 
 default_cache_gb=$(cache_size_gb_from_env "$(prod_env_default CACHE_MAX_GB)") \
     || die "The CACHE_MAX_GB default is not a GiB number."
-while true; do
-    ask "Cache size in GiB" "$default_cache_gb"
-    cache_gb="$REPLY"
-    [[ "$cache_gb" =~ ^[0-9]+$ ]] && (( cache_gb > 0 )) && break
-    print_error "Please enter a positive integer (e.g. ${default_cache_gb})."
-done
+cache_gb=""
+ask_checked cache_gb "Cache size in GiB" "$default_cache_gb" is_positive_integer "Not a positive number"
+# What: leading zeros leave before the value is stored
+# Why: 08 means 8; no reader may take it as octal
+# From: Issue #1683 | PR #2017
+cache_gb=$((10#$cache_gb))
 
 default_cache_mem_mb=$(prod_env_default CACHE_MEM_MB) || exit $?
 printf "  RAM for the list of cached files (nginx keys_zone). It is no\n"
 printf "  file cache: 1 MB holds about 8000 entries. Linux keeps hot\n"
 printf "  files in free RAM by itself.\n"
-while true; do
-    ask "RAM for the cache index in MB" "$default_cache_mem_mb"
-    CACHE_MEM_MB="$REPLY"
-    is_positive_integer "$CACHE_MEM_MB" && break
-    print_error "Please enter a positive integer (e.g. 512)."
-done
+CACHE_MEM_MB=""
+ask_checked CACHE_MEM_MB "RAM for the cache index in MB" "$default_cache_mem_mb" is_positive_integer "Not a positive number"
+CACHE_MEM_MB=$((10#$CACHE_MEM_MB))
 
 # What: step 6: scheduled updates by a host service
 # Why: Watchtower cannot verify health or roll back
@@ -9647,19 +9640,9 @@ DHCP_PROXY_PXE_BOOT_FILENAME_BIOS=""
 DHCP_PROXY_PXE_BOOT_FILENAME_UEFI=""
 
 if [[ "$DHCP_MODE" = "kea" ]]; then
-    while true; do
-        ask "Kea data directory (config + leases, absolute path)" "$LANCACHE_STATE_DIR/kea"
-        KEA_DATA_DIR="$REPLY"
-        is_absolute_path "$KEA_DATA_DIR" && break
-        print_error "Please enter an absolute path (e.g. $LANCACHE_STATE_DIR/kea)."
-    done
+    ask_checked KEA_DATA_DIR "Kea data directory (config + leases, absolute path)" "$LANCACHE_STATE_DIR/kea" is_absolute_path "Not an absolute path"
 
-    while true; do
-        ask "DHCP subnet (CIDR)" "$DHCP_SUBNET_DEFAULT"
-        DHCP_SUBNET="$REPLY"
-        is_valid_cidr "$DHCP_SUBNET" && break
-        print_error "Invalid CIDR: $DHCP_SUBNET"
-    done
+    ask_checked DHCP_SUBNET "DHCP subnet (CIDR)" "$DHCP_SUBNET_DEFAULT" is_valid_cidr "Invalid CIDR"
 
     ask_checked DHCP_GATEWAY "Gateway" "$DHCP_GATEWAY_DEFAULT" is_valid_ipv4 "Invalid IPv4 address"
 
