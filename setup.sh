@@ -4274,8 +4274,8 @@ lancache_channel_ref_pass() {
     local registry="$1" prefix="$2" pointer_channel="$3" vars="$4" var slug ref digest
     local release testing
     release=$(lancache_release_rows release) || exit $?
-    testing=$(lancache_release_rows channel) || exit $?
-    testing=$(awk -v r="$release" '$0 != r { print; exit }' <<< "$testing")
+    testing=$(lancache_other_channels) || exit $?
+    testing="${testing%%$'\n'*}"
     while read -r var slug; do
         ref="${registry}/${prefix}/${slug}:${pointer_channel}"
         if ! digest=$(docker buildx imagetools inspect "$ref" --format '{{.Manifest.Digest}}' 2>&1); then
@@ -7100,15 +7100,22 @@ cmd_auto_update() {
     fi
 }
 
-# What: channels the wizard offers, release channel last
-# Why: only SOT channel names; former names never show
-# From: Issue #1683 | PR #1858
-lancache_selectable_channels() {
+# What: the SOT channels besides the release channel
+# Why: one owner; the first is the testing channel
+# From: Issue #1683 | PR #2017
+lancache_other_channels() {
     local channels release
     channels=$(lancache_release_rows channel) || exit $?
     release=$(lancache_release_rows release) || exit $?
     awk -v r="$release" '$0 != r' <<< "$channels"
-    printf '%s\n' "$release"
+}
+
+# What: channels the wizard offers, release channel last
+# Why: only SOT channel names; former names never show
+# From: Issue #1683 | PR #1858
+lancache_selectable_channels() {
+    lancache_other_channels || exit $?
+    lancache_release_rows release || exit $?
 }
 
 # What: the ui-data volume name; empty if it is absent
@@ -8641,11 +8648,10 @@ cmd_secondary() {
     # What: the release channel and the other channel
     # Why: the channel question is yes/no on the release one
     # From: Issue #1683
-    local release_channel other_channel channel_list
+    local release_channel other_channel
     release_channel=$(lancache_release_rows release) || exit $?
-    channel_list=$(lancache_release_rows channel) || exit $?
-    other_channel=$(awk -v r="$release_channel" '$0 != r { print; exit }' <<< "$channel_list") \
-        || die "Failed to read the channels of the SOT (exit $?)."
+    other_channel=$(lancache_other_channels) || exit $?
+    other_channel="${other_channel%%$'\n'*}"
     [[ -n "$other_channel" ]] || die "The SOT names no channel besides ${release_channel}."
     # What: ask each missing value; check it at once
     # Why: an empty or bad answer is asked again, not later
