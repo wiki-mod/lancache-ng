@@ -1756,8 +1756,13 @@ validate_env_value() {
     # From: Issue #1683 | PR #1858
     [[ -z "$value" ]] && return 0
 
-    env_value_is_safe "$value" \
-        || die "$key contains unsafe characters for .env. Cannot proceed. Value: $value"
+    env_value_is_safe "$value" && return 0
+    # What: a secret key is named without its value
+    # Why: the value would show on the terminal
+    # From: Issue #1683 | PR #2017
+    local shown=" Value: $value"
+    ! env_key_is_secret "$key" || shown=""
+    die "$key contains unsafe characters for .env. Cannot proceed.${shown}"
 }
 
 # What: the characters env_value_is_safe rejects, as text
@@ -7379,11 +7384,13 @@ generate_managed_secret() {
     generate_secret_value "$key" "${row#"$key "}"
 }
 
-# What: name-pattern net for secret-shaped env keys
-# Why: an operator's own secret key is redacted too
-# From: Issue #762
-logbundle_key_looks_like_secret() {
-    local key="$1"
+# What: true for a managed secret or a secret-shaped key
+# Why: one rule for redaction and for error texts
+# From: Issue #762 | PR #2017
+env_key_is_secret() {
+    local key="$1" managed
+    managed=$(managed_secret_env_keys) || exit $?
+    list_has_line "$key" "$managed" && return 0
     # What: a key naming a property of a secret is plain
     # Why: redacting a value like "none" garbles the bundle
     # From: Issue #1683 | PR #1912
@@ -7411,7 +7418,7 @@ logbundle_collect_secret_values() {
             || die "Cannot list the keys of $env_file (exit $?); no log bundle was written."
         while IFS= read -r key; do
             [[ -n "$key" ]] || continue
-            logbundle_key_looks_like_secret "$key" && key_set["$key"]=1
+            env_key_is_secret "$key" && key_set["$key"]=1
         done <<< "$keys"
     done
 
@@ -7479,7 +7486,7 @@ logbundle_redact_env_file() {
     while IFS= read -r line || [[ -n "$line" ]]; do
         if [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)= ]]; then
             key="${BASH_REMATCH[1]}"
-            if logbundle_key_looks_like_secret "$key"; then
+            if env_key_is_secret "$key"; then
                 printf '%s=[REDACTED]\n' "$key" >> "$dst"
                 continue
             fi
