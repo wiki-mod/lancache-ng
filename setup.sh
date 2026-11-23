@@ -269,9 +269,9 @@ is_valid_dhcp_proxy_interface() {
 }
 
 # What: true for a DNS name; labels 1-63, total up to 253
-# Why: dnsmasq writes the proxy domain into its config
-# From: Issue #450
-is_valid_dhcp_proxy_domain() {
+# Why: one rule for domains, zones, NTP and secondary names
+# From: Issue #450 | PR #2017
+is_valid_dns_name() {
     local domain="${1:-}"
     [[ -n "$domain" && "${#domain}" -le 253 ]] || return 1
     local label
@@ -289,7 +289,7 @@ is_valid_dhcp_ntp_server() {
     local entry="${1:-}"
     is_valid_ipv4 "$entry" && return 0
     [[ "$entry" =~ ^[0-9.]+$ ]] && return 1
-    is_valid_dhcp_proxy_domain "$entry"
+    is_valid_dns_name "$entry"
 }
 
 # What: true for an IPv6 literal of hex groups and colons
@@ -375,7 +375,7 @@ dns_upstream_zone_problem() {
     # What: "_" counts as a letter in zone names
     # Why: live 06.11.: _msdcs.home.lan was refused
     # From: Issue #1918
-    if ! is_valid_dhcp_proxy_domain "${zone//_/a}"; then
+    if ! is_valid_dns_name "${zone//_/a}"; then
         printf "'%s' is no valid domain name\n" "$raw"
     elif [[ "$zone" = "$lan" || "$zone" == *".$lan" ]]; then
         printf "'%s' is answered by LanCache-NG itself\n" "$raw"
@@ -4835,7 +4835,7 @@ migrate_env_for_update() (
                         || die "DHCP_NTP_SERVERS in $env_file must be a comma-separated list of IPv4 addresses or host names."
                 done
             fi
-            [[ -z "$dhcp_proxy_domain" ]] || is_valid_dhcp_proxy_domain "$dhcp_proxy_domain" \
+            [[ -z "$dhcp_proxy_domain" ]] || is_valid_dns_name "$dhcp_proxy_domain" \
                 || die "DHCP_PROXY_DOMAIN in $env_file must be a valid DNS domain name or empty."
             [[ -z "$dhcp_proxy_boot_filename" ]] || is_valid_dhcp_proxy_boot_filename "$dhcp_proxy_boot_filename" \
                 || die "DHCP_PROXY_BOOT_FILENAME in $env_file must not contain whitespace, commas, or other characters unsafe in a .env value (newline, \$, \`, \", ', \\, or #)."
@@ -5868,7 +5868,7 @@ LANCACHE_IMAGE_CHANNEL sets the channel without a terminal.
 Required arguments:
   --primary <url>    Primary LanCache UI/API URL, for example http://<primary-ip>:<ui-port>
   --token <token>    Secondary registration token from the primary server
-  --name <name>      Secondary node name, using letters, numbers, and dashes only
+  --name <name>      Secondary node name: one DNS label (letters, digits, inner dashes)
 
 Optional arguments:
   --ip-http <ip>     Primary proxy IP for cached traffic (default: the IP the primary sends at registration)
@@ -8482,11 +8482,11 @@ is_nonempty_value() {
     [[ -n "$1" ]]
 }
 
-# What: 0 for a secondary name of letters, digits, dashes
+# What: 0 for a secondary name: one DNS label, no dot
 # Why: the name is a DNS label and the directory name
-# From: Issue #1683
+# From: Issue #1683 | PR #2017
 is_secondary_name() {
-    [[ "$1" =~ ^[a-zA-Z0-9-]+$ ]]
+    [[ "$1" != *.* ]] && is_valid_dns_name "$1"
 }
 
 # What: dies when the dns container name is taken here
@@ -8590,11 +8590,11 @@ cmd_secondary() {
     if [[ "$tty" = 1 && -z "$name" ]]; then
         local name_default=""
         [[ "$rotate" -eq 1 && -f .env && -f docker-compose.yml ]] && name_default=$(basename "$PWD")
-        ask_checked name "Name of this secondary (a-z, 0-9, -)" "$name_default" is_secondary_name "Only letters, digits and dashes"
+        ask_checked name "Name of this secondary (a-z, 0-9, -)" "$name_default" is_secondary_name "Not one DNS label (letters, digits, inner dashes, at most 63)"
     fi
     die_if_any_empty "Required argument(s) missing (see ./setup.sh secondary --help)" "--name=$name"
     is_secondary_name "$name" \
-        || die "--name must contain only alphanumeric characters and dashes"
+        || die "--name must be one DNS label: letters, digits and inner dashes, at most 63 characters"
 
     # What: a secondary counts as installed when .env exists
     # Why: before any question; a failed run blocks nothing
@@ -9450,7 +9450,7 @@ while true; do
     ask "LAN domain" "$DHCP_DOMAIN"
     DHCP_DOMAIN="${REPLY,,}"
     DHCP_DOMAIN="${DHCP_DOMAIN%.}"
-    [[ "$DHCP_DOMAIN" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$ ]] && break
+    is_valid_dns_name "$DHCP_DOMAIN" && break
     print_error "Please enter a domain like lancache-ng.lan or lan"
 done
 print_ok "LAN domain: $DHCP_DOMAIN"
@@ -9602,7 +9602,7 @@ elif [[ "$DHCP_MODE" = "dnsmasq-proxy" ]]; then
             ask "NTP servers, PXE-scoped, comma-separated (blank = skip)" ""
         done
 
-        ask_checked DHCP_PROXY_DOMAIN "Domain option, PXE-scoped (blank = skip)" "$DHCP_PROXY_DOMAIN" is_valid_dhcp_proxy_domain "Invalid domain name" 1
+        ask_checked DHCP_PROXY_DOMAIN "Domain option, PXE-scoped (blank = skip)" "$DHCP_PROXY_DOMAIN" is_valid_dns_name "Invalid domain name" 1
 
         ask_checked DHCP_PROXY_BOOT_FILENAME "PXE boot filename (blank = skip PXE boot info)" "$DHCP_PROXY_BOOT_FILENAME" is_valid_dhcp_proxy_boot_filename "$boot_filename_error" 1
 
