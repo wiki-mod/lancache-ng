@@ -308,13 +308,13 @@ fn expand_default(
     Ok(out)
 }
 
-// What: the key of a KEY=VALUE line; None for comments.
+// What: key and value of a KEY=VALUE line; else None.
 // Why: the stack .env holds What/Why/From comment lines.
 // From: Issue #1683 | PR #2017
-fn line_key(line: &str) -> Option<&str> {
-    let (key, _) = line.split_once('=')?;
+fn line_entry(line: &str) -> Option<(&str, &str)> {
+    let (key, value) = line.split_once('=')?;
     let key = key.trim();
-    (!key.is_empty() && !key.starts_with('#')).then_some(key)
+    (!key.is_empty() && !key.starts_with('#')).then_some((key, value.trim()))
 }
 
 // What: the text of the stack .env; missing is empty.
@@ -334,7 +334,7 @@ fn read_text(path: &Path) -> Result<String, String> {
 pub fn read_raw(path: &Path) -> Result<BTreeMap<String, String>, String> {
     Ok(read_text(path)?
         .lines()
-        .filter_map(|line| Some((line_key(line)?, line.split_once('=')?.1.trim())))
+        .filter_map(line_entry)
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect())
 }
@@ -440,7 +440,8 @@ fn write_lines(path: &Path, updates: &BTreeMap<String, String>) -> Result<(), St
     let mut done = BTreeSet::new();
     let mut body = String::new();
     for line in old.lines() {
-        match line_key(line).filter(|k| updates.contains_key(*k)) {
+        let key = line_entry(line).map(|(key, _)| key);
+        match key.filter(|k| updates.contains_key(*k)) {
             Some(key) => {
                 // What: a second line of it is dropped.
                 // Why: Compose and setup.sh read one value.
