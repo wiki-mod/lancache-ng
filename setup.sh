@@ -5880,7 +5880,8 @@ channel, the DNS IP, and whether the primary has HTTPS (then the primary's
 HTTPS IP and a second DNS IP). --rotate offers the values stored in the
 secondary's .env; only the token is asked again. Then a bind IP not yet on
 this host is offered for "ip addr add", the channel's code is cloned as on
-the primary, and the secondary registers and starts.
+the primary, and the secondary registers and starts. A primary on another
+channel than the chosen one stops the run before any file is written.
 LANCACHE_IMAGE_CHANNEL sets the channel without a terminal.
 
 Required arguments:

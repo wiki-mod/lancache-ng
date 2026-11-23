@@ -652,7 +652,8 @@ the Admin UI shows it under DNS, Secondary DNS.
 The order is: check, ask, then act.
 
 1. Check: install missing requirements (curl, jq, git, Docker, Docker Compose
-   v2), check the name, and check whether this host already runs a lancache
+   v2), check the name (one DNS label: letters, digits and inner dashes, at
+   most 63 characters), and check whether this host already runs a lancache
    dns container. A secondary needs its own host: if the primary (or another
    secondary) runs here, setup stops before it changes anything.
 2. Ask: name, primary URL, token, whether the primary runs the latest channel,
@@ -661,7 +662,10 @@ The order is: check, ask, then act.
    second DNS IP of this secondary). Each answer is checked at once.
 3. Act: add a missing bind IP (`ip addr add`, default yes, not persistent),
    clone the code of the channel as the primary install does, register at the
-   primary, write the files and start the container.
+   primary, write the files and start the container. If the primary runs
+   another channel than the one chosen, setup stops before it writes a file
+   and names the channel to rerun with; the rerun replaces the entry the
+   primary already holds for this name.
 
 The cache IP (`IP_HTTP`) comes from the primary. Without a terminal, pass the
 values as arguments: `--primary`, `--token`, `--name`, `--listen-ip`, and for
