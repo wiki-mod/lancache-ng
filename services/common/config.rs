@@ -606,7 +606,7 @@ impl Settings {
             // What: a fixed SOT default is text; parse it.
             // Why: keys without schema row load as text.
             // From: Issue #1683 | PR #1980
-            Some(Value::Text(t)) => t.parse().map_err(|_| format!("{key} is no number")),
+            Some(Value::Text(t)) => parse_uint(t).ok_or_else(|| format!("{key} is no number")),
             Some(_) => Err(format!("{key} is no number")),
             None => Err(format!("{key} is not set")),
         }
@@ -618,6 +618,9 @@ impl Settings {
     pub fn flag(&self, key: &str) -> Result<bool, String> {
         match self.get(key) {
             Some(Value::Bool(b)) => Ok(*b),
+            // What: text answers only as true or false.
+            // Why: AG-SEC-001 names ALLOW_INSECURE_UI=true.
+            // From: Issue #1683 | PR #2017
             Some(Value::Text(t)) => t.parse().map_err(|_| format!("{key} is no bool")),
             Some(_) => Err(format!("{key} is no bool")),
             None => Err(format!("{key} is not set")),
