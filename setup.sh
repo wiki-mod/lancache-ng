@@ -5314,6 +5314,20 @@ compose_project_has_named_volumes() {
     [[ -n "$volume_names" ]]
 }
 
+# What: copies file or dir $1 to $2 with all attributes
+# Why: backup and restore copy alike; $2 keeps $1's name
+# From: Issue #1683 | PR #2017
+copy_with_attributes() {
+    local src="$1" dst="$2"
+    if [[ -d "$src" ]]; then
+        mkdir -p "$dst" || die "Failed to create $dst (exit $?)."
+        rsync -aH --numeric-ids "$src/" "$dst/"
+    else
+        mkdir -p "$(dirname "$dst")" || die "Failed to create the directory of $dst (exit $?)."
+        rsync -aH --numeric-ids "$src" "$(dirname "$dst")/"
+    fi
+}
+
 # What: runs a tar script on one volume in the helper image
 # Why: backup and restore share the mounts and the call
 # From: Issue #1683 | PR #1858
@@ -5527,15 +5541,7 @@ cmd_backup() (
     while IFS= read -r path; do
         [[ -e "$path" ]] || continue
         rel="${path#/}"
-        if [[ -d "$path" ]]; then
-            mkdir -p "$dest/rootfs/$rel" || die "Failed to create $dest/rootfs/$rel (exit $?)."
-            rsync -aH --numeric-ids "$path/" "$dest/rootfs/$rel/" \
-                || die "Failed to back up $path (exit $?)."
-        else
-            mkdir -p "$dest/rootfs/$(dirname "$rel")" || die "Failed to create the backup dir of $path (exit $?)."
-            rsync -aH --numeric-ids "$path" "$dest/rootfs/$(dirname "$rel")/" \
-                || die "Failed to back up $path (exit $?)."
-        fi
+        copy_with_attributes "$path" "$dest/rootfs/$rel" || die "Failed to back up $path (exit $?)."
         print_ok "Included: $path"
     done < "$dest/manifest.txt"
     backup_compose_volumes "$install_dir" "$dest/docker-volumes" "$mode"
@@ -5677,8 +5683,7 @@ cmd_restore() (
 
     print_step "Restoring backup"
     if [[ -d "$root/$rel_install" ]]; then
-        mkdir -p "$install_dir" || die "Failed to create $install_dir (exit $?)."
-        rsync -aH --numeric-ids "$root/$rel_install/" "$install_dir/" \
+        copy_with_attributes "$root/$rel_install" "$install_dir" \
             || die "Failed to restore $install_dir (exit $?)."
         # What: moves a stale .env.local aside first
         # Why: the rewrite must not treat it as archived
@@ -5706,14 +5711,7 @@ cmd_restore() (
         if [[ -n "$archived_repo_root" && -n "$new_repo_root" && "$path" = "$archived_repo_root"/* ]]; then
             target="${new_repo_root}${path#"$archived_repo_root"}"
         fi
-        if [[ -d "$root/$rel" ]]; then
-            mkdir -p "$target" || die "Failed to create $target (exit $?)."
-            rsync -aH --numeric-ids "$root/$rel/" "$target/" || die "Failed to restore $target (exit $?)."
-        else
-            mkdir -p "$(dirname "$target")" || die "Failed to create the directory of $target (exit $?)."
-            rsync -aH --numeric-ids "$root/$rel" "$(dirname "$target")/" \
-                || die "Failed to restore $target (exit $?)."
-        fi
+        copy_with_attributes "$root/$rel" "$target" || die "Failed to restore $target (exit $?)."
     done < "$backup_dir/manifest.txt"
     restore_compose_volumes "$install_dir" "$backup_dir/docker-volumes"
     print_ok "Files restored from $archive"
