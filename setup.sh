@@ -4537,6 +4537,14 @@ lancache_image_refs_for_tag() {
     done <<< "$vars"
 }
 
+# What: the image pin lines of env file $1, as stored
+# Why: update and restore read the pins one way
+# From: Issue #1683 | PR #2017
+lancache_image_refs_in_env() {
+    awk '/^LANCACHE_IMAGE_REF_[A-Z_]+=/' "$1" \
+        || die "Failed to read the image pins from $1 (exit $?)."
+}
+
 # What: replaces all image pins in an env file
 # Why: a stale channel pin must never shadow a chosen tag
 # From: Issue #1683 | PR #1858
@@ -4735,8 +4743,7 @@ migrate_env_for_update() (
         existing_image_tag=""
     fi
     local lancache_image_refs="" keep_image_refs=0 archived_refs
-    archived_refs=$(awk '/^LANCACHE_IMAGE_REF_[A-Z_]+=/' "$env_file") \
-        || die "Failed to read the image pins from $env_file (exit $?)."
+    archived_refs=$(lancache_image_refs_in_env "$env_file") || exit $?
     local stack_channels
     stack_channels=$(lancache_release_rows channel) || exit $?
     if [[ "$preserve_image_tag" = "1" ]] \
@@ -7178,8 +7185,7 @@ cmd_auto_update() {
     # What: stacks compared by image-pin fingerprint
     # Why: the channel word stays while digests move
     # From: Issue #1683 | PR #1858
-    deployed_refs=$(awk '/^LANCACHE_IMAGE_REF_[A-Z_]+=/' "$env_file") \
-        || die "Failed to read the image pins from $env_file (exit $?)."
+    deployed_refs=$(lancache_image_refs_in_env "$env_file") || exit $?
     deployed_tag=$(lancache_image_refs_fingerprint "$deployed_refs") \
         || die "Cannot fingerprint the deployed image pins of $env_file (exit $?)."
     # What: resolves the channel after local checks
