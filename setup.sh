@@ -5872,9 +5872,9 @@ creates a local compose directory, writes the secondary .env file, and starts
 the container after the primary server returns the required secrets.
 Use --rotate in an existing secondary directory to refresh credentials after
 the primary changes its TSIG key.
-Order: check, ask, then act. Missing requirements are installed and the host
-is checked first; a host that already runs a lancache dns container stops
-before any change. In a terminal, missing values are asked one by one and
+Order: check, ask, then act. The name and the host are checked before any
+change: a host that holds a LanCache-NG install (settings, host service or dns
+container) stops at once. Then missing requirements are installed. In a terminal, missing values are asked one by one and
 checked at once: name, primary URL, token, whether the primary runs the latest
 channel, the DNS IP, and whether the primary has HTTPS (then the primary's
 HTTPS IP and a second DNS IP). --rotate offers the values stored in the
@@ -8505,12 +8505,45 @@ is_secondary_name() {
     [[ "$1" != *.* ]] && is_valid_dns_name "$1"
 }
 
-# What: dies when the dns container name is taken here
-# Why: primary and secondary share one SOT name
-# From: Issue #1683
-assert_secondary_container_free() {
-    local own cname rows owner
-    own=$(realpath -m "$1") || die "Cannot resolve the directory $1 (exit $?)."
+# What: dies when this host holds another lancache system
+# Why: runs before any change; a secondary needs its own host
+# From: Issue #1683 | PR #2017
+assert_secondary_host_free() {
+    local own sub dir channels info cname rows owner
+    local rel="${PROD_COMPOSE#"$SCRIPT_DIR/"}"
+    local -a subs=("" current)
+    # What: the physical path of the secondary dir, by cd
+    # Why: BusyBox has no realpath -m before the requirements
+    # From: Issue #1683 | PR #2017
+    if [[ -d "$1" ]]; then
+        own=$(cd -- "$1" && pwd -P) || die "Cannot resolve the directory $1 (exit $?)."
+    else
+        own="$(pwd -P)/$1"
+    fi
+    # What: settings of an install below the state root
+    # Why: a stopped primary has no container to find
+    # From: Issue #1683 | PR #2017
+    channels=$(lancache_release_rows channel) || exit $?
+    mapfile -t -O 2 subs <<< "$channels"
+    for sub in "${subs[@]}"; do
+        dir="${DEFAULT_INSTALL_DIR}${sub:+/$sub}/${rel%/*}"
+        [[ ! -f "$dir/.env" && ! -f "$dir/.env.local" ]] \
+            || die "This host holds a LanCache-NG install (settings in ${dir}). A secondary needs its own host; nothing was changed."
+    done
+    [[ ! -f "$DEFAULT_INSTALL_DIR/docker-compose.yml" || "$DEFAULT_INSTALL_DIR" -ef "$own" ]] \
+        || die "This host holds a LanCache-NG install (${DEFAULT_INSTALL_DIR}/docker-compose.yml). A secondary needs its own host; nothing was changed."
+    # What: the stack unit of an install in any directory
+    # Why: an in-place install keeps no settings in the root
+    # From: Issue #1683 | PR #2017
+    ! host_unit_exists "$STACK_UNIT" \
+        || die "This host holds a LanCache-NG install (host service $(host_unit_name "$STACK_UNIT")). A secondary needs its own host; nothing was changed."
+    # What: the container check needs a Docker that answers
+    # Why: before the requirements Docker may be absent
+    # From: Issue #1683 | PR #2017
+    if ! command_available docker || ! info=$(docker info 2>&1); then
+        print_skip "Container check: Docker does not answer yet${info:+ (${info##*$'\n'})}; it runs again after the requirements"
+        return 0
+    fi
     cname=$(prod_env_default CONTAINER_NAME_DNS) || exit $?
     rows=$(container_compose_dirs "name=^/${cname}\$") || exit $?
     [[ -n "$rows" ]] || return 0
@@ -8589,11 +8622,7 @@ cmd_secondary() {
         esac
     done
 
-    # What: requirements installed first, as on the primary
-    # Why: a missing tool is installed, as on the primary
-    # From: Issue #1683
     require_root "secondary"
-    ensure_stack_requirements_installed
 
     # What: the name first; inside a secondary it is the dir
     # Why: the name selects the stored .env of --rotate
@@ -8627,7 +8656,12 @@ cmd_secondary() {
             die "Secondary '${secondary_dir}' already exists; rerun with --rotate to update the secondary files"
         fi
     fi
-    assert_secondary_container_free "$secondary_dir"
+    # What: host check, requirements, then the check again
+    # Why: no install, no Docker restart on a host in use
+    # From: Issue #1683 | PR #2017
+    assert_secondary_host_free "$secondary_dir"
+    ensure_stack_requirements_installed
+    assert_secondary_host_free "$secondary_dir"
     # What: git for the channel clone, as on the primary
     # Why: the secondary runs from its channel's checkout
     # From: Issue #1683

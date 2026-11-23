@@ -651,11 +651,13 @@ the Admin UI shows it under DNS, Secondary DNS.
 
 The order is: check, ask, then act.
 
-1. Check: install missing requirements (curl, jq, git, Docker, Docker Compose
-   v2), check the name (one DNS label: letters, digits and inner dashes, at
-   most 63 characters), and check whether this host already runs a lancache
-   dns container. A secondary needs its own host: if the primary (or another
-   secondary) runs here, setup stops before it changes anything.
+1. Check, before anything is installed or changed: the name (one DNS label:
+   letters, digits and inner dashes, at most 63 characters) and the host. A
+   secondary needs its own host: if this host holds a LanCache-NG install
+   (settings below the state root, the host service, or a dns container of
+   the primary or another secondary, running or stopped), setup stops at
+   once. Then missing requirements are installed (curl, jq, git, Docker,
+   Docker Compose v2) and the container check runs once more.
 2. Ask: name, primary URL, token, whether the primary runs the latest channel,
    the DNS IP of this secondary, whether the primary has HTTPS enabled and, if
    so, whether this secondary supports it (then the primary's HTTPS IP and a
