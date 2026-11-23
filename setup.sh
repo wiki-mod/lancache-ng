@@ -3158,8 +3158,8 @@ psl_backup() {
     sum=$(sha256sum "$file") || die "Failed to hash $file (exit $?)."
     gz="$dir/${name%.*}-${sum%% *}.${name##*.}.gz"
     if [[ ! -s "$gz" ]]; then
-        gzip -c "$file" > "$gz.tmp" || die "Failed to compress $file (exit $?)."
-        mv -f "$gz.tmp" "$gz" || die "Failed to back up $file to $gz (exit $?)."
+        write_file_atomically "$gz" 0644 -- gzip -c "$file" \
+            || die "Failed to back up $file to $gz (exit $?)."
     fi
     touch "$gz" || die "Failed to mark $gz as newest backup (exit $?)."
     list=$(psl_backup_list "$dir") || die "Failed to list the PSL backups in $dir (exit $?)."
@@ -3522,7 +3522,13 @@ adopt_config_prod_edits() {
 # From: Issue #1683 | PR #1858
 write_file_atomically() (
     target="$1"
-    mode="${2:-}"
+    shift
+    mode=""
+    if [[ $# -gt 0 && "$1" != "--" ]]; then
+        mode="$1"
+        shift
+    fi
+    [[ "${1:-}" != "--" ]] || shift
     dir=$(dirname "$target")
     tmp=$(mktemp "$dir/.$(basename "$target").tmp.XXXXXX") \
         || die "Failed to create a temporary file in $dir (exit $?)."
@@ -3541,7 +3547,14 @@ write_file_atomically() (
     else
         chmod 0600 "$tmp" || die "Failed to restrict $tmp (exit $?)."
     fi
-    cat > "$tmp" || die "Failed to write the temporary file for $target (exit $?)."
+    # What: a command after "--" writes the content
+    # Why: if it fails the target stays as it was
+    # From: Issue #1683 | PR #2017
+    if [[ $# -gt 0 ]]; then
+        "$@" > "$tmp" || die "Failed to produce the content of $target (exit $?); it was not changed."
+    else
+        cat > "$tmp" || die "Failed to write the temporary file for $target (exit $?)."
+    fi
     mv -- "$tmp" "$target" || die "Failed to replace $target (exit $?)."
 )
 
@@ -3549,14 +3562,18 @@ write_file_atomically() (
 # Why: sed reads a path as regex; #, & or \ break it
 # From: Issue #1683 | PR #1858
 replace_literal_in_file() {
-    local file="$1"
+    local file="$1" text
     [[ -n "$2" ]] || die "Refusing to replace an empty string in $file."
-    OLD_TEXT="$2" NEW_TEXT="$3" awk '{
+    # What: the new text is complete before it is written
+    # Why: a failed awk must leave the file as it was
+    # From: Issue #1683 | PR #2017
+    text=$(OLD_TEXT="$2" NEW_TEXT="$3" awk '{
         old = ENVIRON["OLD_TEXT"]; new = ENVIRON["NEW_TEXT"]; out = ""
         while ((i = index($0, old)) > 0) { out = out substr($0, 1, i - 1) new; $0 = substr($0, i + length(old)) }
         print out $0
-    }' "$file" | write_file_atomically "$file" \
-        || die "Failed to rewrite $file (exit $?)."
+    }' "$file" && printf x) || die "Failed to rewrite $file (exit $?); it was not changed."
+    printf '%s' "${text%x}" | write_file_atomically "$file" \
+        || die "Failed to write $file (exit $?)."
 }
 
 # What: dies if a required key is missing or empty
@@ -10032,7 +10049,7 @@ validate_initial_env() {
 }
 
 validate_initial_env
-render_initial_env | with_env_lock "$ENV_FILE" write_file_atomically "$ENV_FILE" \
+with_env_lock "$ENV_FILE" write_file_atomically "$ENV_FILE" -- render_initial_env \
     || die "Failed to write $ENV_FILE (exit $?)."
 print_ok ".env written: $ENV_FILE"
 write_lancache_image_refs "$ENV_FILE" "$LANCACHE_IMAGE_REFS"
