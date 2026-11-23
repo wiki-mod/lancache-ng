@@ -7572,26 +7572,24 @@ logbundle_capture() {
         || die "Failed to write $out (exit $?)."
 }
 
-# What: copies env file; redacts secret-shaped values
+# What: prints env file $1; secret keys show [REDACTED]
 # Why: placeholders are redacted too, defaults stay hidden
 # From: Issue #1683 | PR #1858
 logbundle_redact_env_file() {
-    local src="$1" dst="$2"
-    local line key
-    : > "$dst"
+    local src="$1" line key
     if [[ ! -f "$src" ]]; then
-        print_skip "Redacting $src: the file does not exist; $dst stays empty"
+        print_skip "Redacting $src: the file does not exist; its copy stays empty"
         return 0
     fi
     while IFS= read -r line || [[ -n "$line" ]]; do
         if [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)= ]]; then
             key="${BASH_REMATCH[1]}"
             if env_key_is_secret "$key"; then
-                printf '%s=[REDACTED]\n' "$key" >> "$dst"
+                printf '%s=[REDACTED]\n' "$key"
                 continue
             fi
         fi
-        printf '%s\n' "$line" >> "$dst"
+        printf '%s\n' "$line"
     done < "$src"
 }
 
@@ -7761,9 +7759,8 @@ cmd_create_logs_for_issue() (
     local env_copy one_env
     for one_env in "${env_files[@]}"; do
         env_copy="$dest/env/${one_env##*/}"
-        logbundle_redact_env_file "$one_env" "$env_copy"
-        logbundle_redact_stream "$secrets_file" < "$env_copy" > "$env_copy.tmp"
-        mv "$env_copy.tmp" "$env_copy" || die "Failed to finish $env_copy (exit $?)."
+        logbundle_redact_env_file "$one_env" | logbundle_redact_stream "$secrets_file" > "$env_copy" \
+            || die "Failed to finish $env_copy (exit $?)."
     done
 
     print_step "Known-good-snapshot directory listings"
