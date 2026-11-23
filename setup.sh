@@ -205,13 +205,6 @@ yn_default() {
     esac
 }
 
-# What: the [y/N] or [Y/n] hint of a prompt default
-# Why: the capital letter marks the default answer
-# From: Issue #1683 | PR #1912
-yn_hint() {
-    if [[ "$1" = "Y" ]]; then printf '[Y/n]\n'; else printf '[y/N]\n'; fi
-}
-
 # What: dies unless setup.sh runs as root; $1 = command
 # Why: one owner of the root check of every command
 # From: Issue #1683 | PR #2017
@@ -448,7 +441,7 @@ prompt_dns_upstream() {
     printf "  resolved from the internet. A router or firewall that knows\n"
     printf "  them can answer instead. Game CDN names stay with LanCache-NG.\n\n"
     DNS_UPSTREAM_SERVERS="" DNS_UPSTREAM_ZONES="" DNS_UPSTREAM_UNSIGNED_ZONES=""
-    if ! confirm "Use an external DNS server? $(yn_hint "$use_yn")" "$use_yn"; then
+    if ! confirm "Use an external DNS server?" "$use_yn"; then
         return 0
     fi
     while true; do
@@ -462,7 +455,7 @@ prompt_dns_upstream() {
         done
         if [[ -z "$bad" ]]; then
             dns_upstream_answers "${entries[@]}" && break
-            confirm "A server did not answer. Try it anyway (rolled back if still dead)? [y/N]" "N" && break
+            confirm "A server did not answer. Try it anyway (rolled back if still dead)?" "N" && break
             continue
         fi
         print_error "Invalid DNS server: $bad"
@@ -526,7 +519,7 @@ prompt_dns_local_reverse_zones() {
     printf "  the external DNS server or the internet. LanCache-NG can\n"
     printf "  answer them itself instead, from its own reverse zones.\n\n"
     DNS_LOCAL_REVERSE_ZONES=0
-    if confirm "Answer private reverse lookups locally? $(yn_hint "$yn")" "$yn"; then
+    if confirm "Answer private reverse lookups locally?" "$yn"; then
         DNS_LOCAL_REVERSE_ZONES=1
     fi
 }
@@ -636,7 +629,7 @@ ensure_host_ipv4() {
     print_warn "$ip not yet assigned to an interface"
     if [[ -n "$link" ]]; then
         read -r prefix dev <<< "$link"
-        if confirm "Add now? (ip addr add $ip/$prefix dev $dev) [Y/n]" "Y"; then
+        if confirm "Add now? (ip addr add $ip/$prefix dev $dev)" "Y"; then
             if [[ "$WIZARD_INTROSPECT_MODE" = "1" ]]; then
                 # What: introspection skips ip addr add
                 # Why: list-prompts only walks the prompts
@@ -860,12 +853,16 @@ compose_profiles_for_runtime() {
 # Why: wraps ask() for boolean decisions
 # From: Issue #1683 | PR #1858
 confirm() {
-    local prompt="$1" default="${2:-N}"
+    local prompt="$1" default="${2:-N}" hint="[y/N]"
+    # What: the capital letter of the hint marks the default
+    # Why: built here, so hint and default cannot disagree
+    # From: Issue #1683 | PR #2017
+    [[ "$default" != "Y" ]] || hint="[Y/n]"
     # What: ask again until the answer is y, yes, n or no.
     # Why: a typo must not count as no and skip the step.
     # From: Issue #1683
     while true; do
-        ask "$prompt" "$default"
+        ask "$prompt $hint" "$default"
         case "${REPLY,,}" in
             y|yes) return 0 ;;
             n|no) return 1 ;;
@@ -903,7 +900,7 @@ run_kea_dhcp_activation_preflight() {
         || ! error=$(json_value .error "$output") || [[ -n "$error" ]]; then
         print_warn "DHCP discovery preflight did not complete: ${error:-no probe answer}"
         print_warn "Kea activation will require an explicit confirmation because the safety check did not complete."
-        confirm "Continue with Kea activation anyway? [y/N]" "N" \
+        confirm "Continue with Kea activation anyway?" "N" \
             || die "Cancelled DHCP activation."
         return 0
     fi
@@ -915,7 +912,7 @@ run_kea_dhcp_activation_preflight() {
         server_identifier=$(json_value '.servers[0].server' "$output") || die "Cannot read the probe answer (exit $?)."
         print_warn "An existing DHCP server answered before Kea activation: ${server_identifier:-unknown}"
         print_warn "Kea would become a second active DHCP server if you continue."
-        confirm "Continue with Kea activation anyway? [y/N]" "N" \
+        confirm "Continue with Kea activation anyway?" "N" \
             || die "Cancelled DHCP activation."
     else
         print_ok "No DHCP server answer was detected before Kea activation."
@@ -1432,7 +1429,7 @@ ensure_docker_userland_proxy() {
         print_warn "No terminal: Docker unchanged. Run this setup.sh command again in a terminal to apply it."
         return 0
     fi
-    confirm "Change it and restart Docker now? [Y/n]" "Y" || {
+    confirm "Change it and restart Docker now?" "Y" || {
         print_warn "Skipped; Docker unchanged."
         return 0
     }
@@ -7958,7 +7955,7 @@ warn_newest_snapshot() {
 confirm_snapshot_rollback() {
     local target="$1" snapshot_id="$2" assume_yes="$3"
     [[ "$assume_yes" != "1" ]] || return 0
-    confirm "Roll ${target} back to snapshot ${snapshot_id} now? This applies immediately. [y/N]" "N" \
+    confirm "Roll ${target} back to snapshot ${snapshot_id} now? This applies immediately." "N" \
         || die "Cancelled."
 }
 
@@ -8099,7 +8096,7 @@ cmd_reset_sign_in() {
     # From: Issue #1683 | PR #1985
     if [[ "$assume_yes" != "1" ]]; then
         print_warn "This removes the Admin UI password. Until you set a new one, anyone in the LAN can open the Admin UI."
-        confirm "Turn the Admin UI sign-in off now? [y/N]" "N" || die "Cancelled; nothing was changed."
+        confirm "Turn the Admin UI sign-in off now?" "N" || die "Cancelled; nothing was changed."
     fi
     env_file=$(require_stack_env_file "$install_dir") || exit $?
     project=$(compose_project_name "$install_dir" "$env_file") \
@@ -8184,7 +8181,7 @@ cmd_update_ip() {
     printf "    HTTPS IP:    %s\n" "$new_ip_https"
     printf "\n"
 
-    confirm "Apply changes? [y/N]" "N" || { printf "\n  Cancelled.\n\n"; exit 0; }
+    confirm "Apply changes?" "N" || { printf "\n  Cancelled.\n\n"; exit 0; }
 
     # What: a new IP not on this host is offered for add
     # Why: compose binds it; a missing one fails the start
@@ -8386,7 +8383,7 @@ cmd_configure_upstream_dns() {
     printf "    No DNSSEC:          %s\n" "${DNS_UPSTREAM_UNSIGNED_ZONES:-none}"
     printf "    Local PTR zones:    %s\n\n" "$([[ "$DNS_LOCAL_REVERSE_ZONES" = 1 ]] && echo on || echo off)"
 
-    confirm "Apply changes? [y/N]" "N" || { printf "\n  Cancelled.\n\n"; exit 0; }
+    confirm "Apply changes?" "N" || { printf "\n  Cancelled.\n\n"; exit 0; }
     # What: no converge run while the change is applied
     # Why: both recreate the same containers and collide
     # From: Issue #1683 | PR #2017
@@ -8691,7 +8688,7 @@ cmd_secondary() {
         if [[ -z "${LANCACHE_IMAGE_CHANNEL:-}" ]]; then
             local channel_yn="Y"
             [[ -z "$stored_channel" || "$stored_channel" = "$release_channel" ]] || channel_yn="N"
-            if confirm "Runs the primary on the ${release_channel} channel? $(yn_hint "$channel_yn")" "$channel_yn"; then
+            if confirm "Runs the primary on the ${release_channel} channel?" "$channel_yn"; then
                 LANCACHE_IMAGE_CHANNEL="$release_channel"
             else
                 LANCACHE_IMAGE_CHANNEL="$other_channel"
@@ -8759,8 +8756,8 @@ cmd_secondary() {
         # From: Issue #1683
         local https_default="Y" https_listen_default
         [[ -z "$existing_env_file" || -n "$stored_listen_https" ]] || https_default="N"
-        if confirm "Has the primary HTTPS enabled? $(yn_hint "$https_default")" "$https_default" \
-            && confirm "Enable HTTPS secondary support? $(yn_hint "$https_default")" "$https_default"; then
+        if confirm "Has the primary HTTPS enabled?" "$https_default" \
+            && confirm "Enable HTTPS secondary support?" "$https_default"; then
             ask_checked ip_https "HTTPS IP of the primary" "$stored_ip_https" is_valid_ipv4 "Invalid IPv4 address"
             https_listen_default="${stored_listen_https:-$(next_ipv4 "$listen_ip")}"
             printf '\n  %sSecond DNS IP of this secondary%s: HTTPS clients enter it as their DNS server;\n' "${BOLD}" "${RESET}"
@@ -9272,7 +9269,7 @@ if [[ -n "${LANCACHE_IMAGE_CHANNEL:-}" ]]; then
         && list_has_line "$LANCACHE_IMAGE_CHANNEL" "$(lancache_selectable_channels)" \
         && [[ -z "${LANCACHE_CHANNEL_CONFIRMED:-}" ]]; then
         print_warn "The $LANCACHE_IMAGE_CHANNEL channel is experimental: untested daily builds that may break the stack; not for production use."
-        confirm "Install from $LANCACHE_IMAGE_CHANNEL anyway? [y/N]" "N" \
+        confirm "Install from $LANCACHE_IMAGE_CHANNEL anyway?" "N" \
             || die "Install cancelled; nothing was changed."
         export LANCACHE_CHANNEL_CONFIRMED=1
     fi
@@ -9304,7 +9301,7 @@ else
             # From: Issue #1683 | PR #1858
             if [[ "$LANCACHE_IMAGE_CHANNEL" != "$install_channel" ]]; then
                 print_warn "The $LANCACHE_IMAGE_CHANNEL channel is experimental: untested daily builds that may break the stack; not for production use."
-                confirm "Install from $LANCACHE_IMAGE_CHANNEL anyway? [y/N]" "N" || continue
+                confirm "Install from $LANCACHE_IMAGE_CHANNEL anyway?" "N" || continue
                 export LANCACHE_CHANNEL_CONFIRMED=1
             fi
             print_ok "Using the $LANCACHE_IMAGE_CHANNEL channel."
@@ -9372,7 +9369,7 @@ printf '  %sHTTPS mode%s: also caches HTTPS downloads (Epic, EA, Blizzard…)\n'
 printf "  Requires a CA certificate on clients.\n\n"
 https_yn=$(yn_default HTTPS_ENABLED) || exit $?
 HTTPS_ENABLED=0
-if confirm "Enable HTTPS mode? $(yn_hint "$https_yn")" "$https_yn"; then
+if confirm "Enable HTTPS mode?" "$https_yn"; then
     HTTPS_ENABLED=1
 fi
 print_ok "HTTPS mode $([[ "$HTTPS_ENABLED" = 1 ]] && echo enabled || echo disabled) (second IP $IP_HTTPS)"
@@ -9397,7 +9394,7 @@ LANCACHE_STATE_DIR="$(realpath -m "$REPLY")"
 for found_env in "$ENV_FILE" "$ENV_FILE.local"; do
     [[ -f "$found_env" ]] || continue
     print_warn "Existing configuration found: $found_env"
-    confirm "Overwrite? [y/N]" "N" || die "Cancelled."
+    confirm "Overwrite?" "N" || die "Cancelled."
     break
 done
 
@@ -9452,7 +9449,7 @@ printf "  Default: %s. Update manually any time with: ./setup.sh update\n\n" \
     "$([[ "$auto_update_yn" = "Y" ]] && echo enabled || echo disabled)"
 
 AUTO_UPDATE_ENABLED=0
-if confirm "Enable scheduled automatic updates? $(yn_hint "$auto_update_yn")" "$auto_update_yn"; then
+if confirm "Enable scheduled automatic updates?" "$auto_update_yn"; then
     AUTO_UPDATE_ENABLED=1
 fi
 if [[ "$AUTO_UPDATE_ENABLED" = 1 ]]; then
@@ -9583,7 +9580,7 @@ elif [[ "$DHCP_MODE" = "dnsmasq-proxy" ]]; then
     print_warn "dnsmasq-proxy uses dnsmasq proxy-DHCP."
     print_warn "It does not reliably replace DNS options from a normal router DHCP server."
     print_warn "Use Kea mode if LanCache must control normal client DNS settings."
-    confirm "Continue with experimental dnsmasq-proxy mode? [y/N]" "N" \
+    confirm "Continue with experimental dnsmasq-proxy mode?" "N" \
         || die "Cancelled dnsmasq-proxy mode. Re-run setup and choose kea or off."
 
     # What: blank = empty key: dnsmasq serves IP_HTTP's LAN
@@ -9601,7 +9598,7 @@ elif [[ "$DHCP_MODE" = "dnsmasq-proxy" ]]; then
     boot_filename_error="Invalid boot filename (no whitespace, commas, or other .env-unsafe characters like \$, \`, \", ', \\, #)"
     print_warn "Optional: additional dnsmasq relay/proxy options (router, NTP, domain, PXE/TFTP boot, listen interface, custom options)."
     print_warn "These are delivered only to PXE/network-boot-aware clients via the supplemental ProxyDHCP exchange, never to ordinary DHCP clients -- see docs/README.md."
-    if confirm "Configure additional dnsmasq relay/proxy options now? [y/N]" "N"; then
+    if confirm "Configure additional dnsmasq relay/proxy options now?" "N"; then
         ask_checked DHCP_PROXY_INTERFACE "Listen interface (blank = listen on all interfaces)" "$DHCP_PROXY_INTERFACE" is_valid_dhcp_proxy_interface "Invalid interface name" 1
 
         ask_checked DHCP_PROXY_ROUTER "Router/gateway option, PXE-scoped (blank = skip)" "$DHCP_PROXY_ROUTER" is_valid_ipv4 "Invalid IPv4 address" 1
@@ -9641,7 +9638,7 @@ elif [[ "$DHCP_MODE" = "dnsmasq-proxy" ]]; then
     # Why: without pxe-service dnsmasq never replies
     # From: Issue #1683 | PR #1858
     print_warn "Optional: PXE boot-pointer support. This makes dnsmasq start REPLYING to every PXE-tagged client on this segment, pointing them at an EXISTING external PXE/TFTP boot server -- lancache-ng does not host boot files itself. See docs/README.md."
-    if confirm "Configure PXE boot-pointer support now? [y/N]" "N"; then
+    if confirm "Configure PXE boot-pointer support now?" "N"; then
         ask_checked DHCP_PROXY_PXE_BOOT_SERVER "External PXE/TFTP boot server address (blank = skip PXE boot-pointer support)" "$DHCP_PROXY_PXE_BOOT_SERVER" is_valid_ipv4 "Invalid IPv4 address" 1
 
         if [[ -n "$DHCP_PROXY_PXE_BOOT_SERVER" ]]; then
@@ -9701,7 +9698,7 @@ printf "  upstream server list are then configured from the Admin UI.\n"
 printf "  Default: %s.\n\n" "$([[ "$ntp_yn" = "Y" ]] && echo enabled || echo disabled)"
 
 NTP_ENABLED=0
-if confirm "Enable LanCache-NG-NTP? $(yn_hint "$ntp_yn")" "$ntp_yn"; then
+if confirm "Enable LanCache-NG-NTP?" "$ntp_yn"; then
     NTP_ENABLED=1
 fi
 ntp_subdir=$(prod_env_default STATE_SUBDIR_NTP) || exit $?
@@ -9730,7 +9727,7 @@ ALLOW_INSECURE_UI=""
 # Why: a "no" to both must not end the install
 # From: Issue #1683 | PR #1980
 while true; do
-if confirm "Protect Admin-UI with password? [y/N]" "N"; then
+if confirm "Protect Admin-UI with password?" "N"; then
     ui_user_default=$(prod_env_default SETUP_UI_USER_DEFAULT) || exit $?
     ask "Username" "$ui_user_default"
     UI_AUTH_USER="$REPLY"
@@ -9770,7 +9767,7 @@ if confirm "Protect Admin-UI with password? [y/N]" "N"; then
     break
 else
     insecure_yn=$(yn_default ALLOW_INSECURE_UI) || exit $?
-    if confirm "Allow Admin-UI without authentication? $(yn_hint "$insecure_yn")" "$insecure_yn"; then
+    if confirm "Allow Admin-UI without authentication?" "$insecure_yn"; then
         ALLOW_INSECURE_UI=true
         print_warn "No password protection — Admin-UI will be reachable on $IP_HTTP"
         print_warn "This is explicitly allowed by ALLOW_INSECURE_UI=true"
@@ -10032,7 +10029,7 @@ if [[ -f "$host_unit_dir/$STACK_UNIT" ]]; then
 fi
 if [[ -n "$host_unit_owner" && "$host_unit_owner" != "$INSTALL_DIR" ]]; then
     print_warn "Host services now run the install in $host_unit_owner."
-    confirm "Move them to $INSTALL_DIR? [y/N]" "N" \
+    confirm "Move them to $INSTALL_DIR?" "N" \
         || die "Stopped; host services stay with $host_unit_owner."
 fi
 
@@ -10118,7 +10115,7 @@ printf '%s└──────────────────────�
 # Why: y, yes, n and no count; a typo asks again
 # From: Issue #1683 | PR #2017
 start_now=1
-confirm "Start now? [Y/n]" "Y" || start_now=0
+confirm "Start now?" "Y" || start_now=0
 # What: skips the real start when introspection mode is on
 # Why: the walk never reaches pull or a host service
 # From: Issue #1683 | PR #1858
