@@ -4912,10 +4912,6 @@ migrate_env_for_update() (
     fi
     migrate_proxy_security_mode_for_update "$env_file"
     migrate_dhcp_mode_for_update "$env_file"
-    # What: image keys were resolved at the top
-    # Why: the platform check runs before migration writes
-    # From: Issue #1683 | PR #1858
-
     append_env_migrated_assignment_if_missing UI_BIND_IP IP_HTTP "$ip_http" "$env_file"
 
     # What: drops the retired global logging switch
