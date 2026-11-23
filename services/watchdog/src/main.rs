@@ -469,11 +469,7 @@ fn publish(s: &Settings, f: &Findings) -> Result<(), String> {
         cache: &f.cache,
     };
     let body = serde_json::to_vec_pretty(&report).map_err(|e| e.to_string())?;
-    let owner = fs::Owner {
-        uid: None,
-        gid: None,
-    };
-    fs::write(&path, &body, mode, fs::Place::Replace, owner)
+    fs::write(&path, &body, mode, fs::Place::Replace, fs::Owner::default())
         .map_err(|e| format!("{}: {e}", path.display()))
 }
 

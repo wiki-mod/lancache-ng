@@ -863,10 +863,7 @@ fn snapshot_zones(s: &Settings) -> Result<Vec<String>, String> {
 fn zone_store(s: &Settings, zone: &str) -> Result<lancache_ng::snapshot::Store, String> {
     let dir = Path::new(&s.text("DNS_SNAPSHOT_DIR")?).join(zone.trim_end_matches('.'));
     let keep = usize::try_from(s.uint("DNS_SNAPSHOT_KEEP")?).map_err(|e| e.to_string())?;
-    let owner = fs::Owner {
-        uid: None,
-        gid: None,
-    };
+    let owner = fs::Owner::default();
     Ok(lancache_ng::snapshot::Store {
         dir,
         keep,
@@ -1261,23 +1258,19 @@ async fn ptr(s: &Settings, add: bool, get: &(dyn Fn(&str) -> String + Sync)) -> 
     flush_zone(s, &zone).await
 }
 
-// What: owner that leaves uid and gid unchanged.
-// Why: files keep the owner their reader expects.
-fn owner_keep() -> fs::Owner {
-    fs::Owner {
-        uid: None,
-        gid: None,
-    }
-}
-
 // What: token secondaries register with.
 // Why: kept like any secret; rotate renews it.
 // From: Issue #1683 | PR #1858
 fn registration_token(s: &Settings) -> Result<String, String> {
     let dir = PathBuf::from(s.text("SECRETS_DIR")?);
     let name = "SECONDARY_REGISTRATION_TOKEN";
-    secret::resolve(process_env(name).as_deref(), &dir, name, owner_keep())
-        .map_err(|e| e.to_string())
+    secret::resolve(
+        process_env(name).as_deref(),
+        &dir,
+        name,
+        fs::Owner::default(),
+    )
+    .map_err(|e| e.to_string())
 }
 
 // What: secondaries as (name, address).
@@ -1921,7 +1914,7 @@ fn kea_store(s: &Settings) -> Result<lancache_ng::snapshot::Store, String> {
     Ok(lancache_ng::snapshot::Store {
         dir,
         keep,
-        owner: owner_keep(),
+        owner: fs::Owner::default(),
         file: Some(s.text("KEA_CONFIG_SNAPSHOT_FILE")?),
     })
 }
@@ -2915,7 +2908,7 @@ fn write_files(s: &Settings, files: &[render::File]) -> Result<Vec<config::Chang
         // Why: owners read it at start; a HUP then kills.
         // From: Issue #1683 | PR #1980
         let wake = f.path.exists();
-        let changed = fs::write_if_changed(&f.path, f.body.as_bytes(), mode, owner_keep());
+        let changed = fs::write_if_changed(&f.path, f.body.as_bytes(), mode, fs::Owner::default());
         if changed.map_err(|e| format!("{}: {e}", f.path.display()))? && wake {
             out.push(config::Change {
                 key: f.path.display().to_string(),
@@ -3618,7 +3611,8 @@ fn tsig_secret(s: &Settings) -> Result<String, String> {
     {
         return Ok(v);
     }
-    secret::load_or_create(&file, new_tsig, owner_keep()).map_err(|e| format!("DDNS_TSIG_KEY: {e}"))
+    secret::load_or_create(&file, new_tsig, fs::Owner::default())
+        .map_err(|e| format!("DDNS_TSIG_KEY: {e}"))
 }
 
 // What: replace the TSIG secret and apply.
@@ -3633,7 +3627,7 @@ async fn rotate_tsig(app: &App) -> Result<(), String> {
         }
         _ => {}
     }
-    secret::load_or_create(&file, new_tsig, owner_keep())
+    secret::load_or_create(&file, new_tsig, fs::Owner::default())
         .map_err(|e| format!("DDNS_TSIG_KEY: {e}"))?;
     for line in apply_all(app, &s, &s, true).await? {
         eprintln!("ui: tsig rotate: {line}");
@@ -3647,7 +3641,7 @@ async fn rotate_tsig(app: &App) -> Result<(), String> {
 fn secrets(s: &Settings) -> Result<render::Secrets, String> {
     let dir = PathBuf::from(s.text("SECRETS_DIR")?);
     let get = |k: &str| {
-        secret::resolve(process_env(k).as_deref(), &dir, k, owner_keep())
+        secret::resolve(process_env(k).as_deref(), &dir, k, fs::Owner::default())
             .map_err(|e| format!("{k}: {e}"))
     };
     Ok(render::Secrets {
@@ -4222,8 +4216,8 @@ async fn main() -> Result<(), String> {
         return Err("Admin-UI authentication is required".into());
     }
     let dir = PathBuf::from(s.text("SECRETS_DIR")?);
-    let key =
-        secret::resolve(None, &dir, "UI_SESSION_KEY", owner_keep()).map_err(|e| e.to_string())?;
+    let key = secret::resolve(None, &dir, "UI_SESSION_KEY", fs::Owner::default())
+        .map_err(|e| e.to_string())?;
     TEXTS
         .set(texts(&s.text("LANG_DIR")?)?)
         .map_err(|_| "lang: files read twice".to_string())?;
