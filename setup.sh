@@ -832,6 +832,8 @@ secondary_choose_listen_ip() {
             fi
         } >&2
 
+        # What: without a terminal the conflict ends the run
+        # Why: another bind IP can only be offered by asking
         if ! terminal_available; then
             return 1
         fi
@@ -1181,6 +1183,8 @@ install_docker_apt_repo() {
             ;;
     esac
 
+    # What: lsb_release gives the codename if it is empty
+    # Why: the apt source line of Docker needs the codename
     if [[ -z "$codename" ]] && command_available lsb_release; then
         codename=$(lsb_release -cs) || die "lsb_release -cs failed (exit $?)."
     fi
@@ -1239,6 +1243,8 @@ install_docker_apt() {
     # From: Issue #1683 | PR #1858
     buildx_package=$(apt_buildx_package) || die "Cannot look up the Buildx apt package (exit $?)."
 
+    # What: Docker's plugin picks Docker CE, else the distro
+    # Why: engine and plugin come from one package source
     if [[ "$compose_package" = "$DOCKER_COMPOSE_PLUGIN" ]]; then
         docker_packages=("${DOCKER_CE_PACKAGES[@]}")
     else
@@ -5618,6 +5624,8 @@ cmd_backup() (
     # From: Issue #1683 | PR #1858
     stop_stack_noting_state "$install_dir"
 
+    # What: copies every listed path that exists here
+    # Why: the manifest also lists paths an install may lack
     while IFS= read -r path; do
         [[ -e "$path" ]] || continue
         rel="${path#/}"
@@ -8108,6 +8116,8 @@ reset_kea_to_last_known_good_config() {
         print_snapshot_line "$sid" "$(( 10#$sid / 1000000000 ))"
     done
 
+    # What: without an id the newest snapshot is taken
+    # Why: the warning names it before anything is restored
     if [[ -z "$snapshot_id" ]]; then
         snapshot_id="${snapshot_ids[${#snapshot_ids[@]}-1]}"
         warn_newest_snapshot "$snapshot_id"
@@ -8249,6 +8259,8 @@ reset_dns_to_last_known_good_config() {
         print_snapshot_line "$eid" "$ecreated"
     done
 
+    # What: without an id the newest snapshot is taken
+    # Why: the warning names it before anything is restored
     if [[ -z "$snapshot_id" ]]; then
         snapshot_id="${entries[0]%% *}"
         warn_newest_snapshot "$snapshot_id"
