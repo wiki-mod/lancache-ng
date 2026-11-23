@@ -2978,15 +2978,22 @@ EOF
     systemctl daemon-reload || die "systemctl daemon-reload failed (exit $?)."
 }
 
-# What: true if no tracked file has local changes
-# Why: untracked ca/ must not block; checkout guards it
+# What: the tracked files of a checkout that differ
+# Why: untracked ca/ must not count; a read error stops
 # From: Issue #1683 | PR #1858
-git_repo_is_clean() {
-    local repo_dir="$1" out
+git_tracked_changes() {
+    git -C "$1" status --porcelain --untracked-files=no \
+        || die "Failed to read the git status of $1 (exit $?)."
+}
 
-    out=$(git -C "$repo_dir" status --porcelain --untracked-files=no) \
-        || die "Failed to read the git status of $repo_dir (exit $?)."
-    [[ -z "$out" ]]
+# What: dies when a checkout has local changes
+# Why: moving it would lose them; one text for every move
+# From: Issue #1683 | PR #2017
+require_clean_repo() {
+    local repo_dir="$1" changes
+    changes=$(git_tracked_changes "$repo_dir") || exit $?
+    [[ -z "$changes" ]] \
+        || die "Existing repository at $repo_dir has local changes. Clean it first or remove $repo_dir, then rerun setup.sh."
 }
 
 # What: hard-resets a checkout to one origin branch
@@ -2995,8 +3002,7 @@ git_repo_is_clean() {
 sync_repo_to_branch() {
     local repo_dir="$1" branch="$2"
 
-    git_repo_is_clean "$repo_dir" \
-        || die "Existing repository at $repo_dir has local changes. Clean it first or remove $repo_dir, then rerun setup.sh."
+    require_clean_repo "$repo_dir"
 
     git -C "$repo_dir" fetch --prune origin \
         || die "Failed to refresh repository metadata for $repo_dir."
@@ -3012,8 +3018,7 @@ sync_repo_to_branch() {
 sync_repo_to_commit() {
     local repo_dir="$1" ref="$2"
 
-    git_repo_is_clean "$repo_dir" \
-        || die "Existing repository at $repo_dir has local changes. Clean it first or remove $repo_dir, then rerun setup.sh."
+    require_clean_repo "$repo_dir"
 
     git -C "$repo_dir" fetch --prune --tags origin \
         || die "Failed to refresh repository metadata for $repo_dir."
@@ -3034,8 +3039,7 @@ resolve_setup_bootstrap_ref() {
 sync_repo_to_ref() {
     local repo_dir="$1" ref="$2"
 
-    git_repo_is_clean "$repo_dir" \
-        || die "Existing repository at $repo_dir has local changes. Clean it first or remove $repo_dir, then rerun setup.sh."
+    require_clean_repo "$repo_dir"
 
     git -C "$repo_dir" fetch --prune origin "$ref" \
         || die "Failed to fetch ref '$ref' for $repo_dir. Check that LANCACHE_SETUP_GIT_REF names a real branch, tag, or commit on origin."
@@ -6490,8 +6494,7 @@ channel_checkout_target() {
         print_warn "Channel $channel has no LANCACHE_IMAGE_TAG; repository not updated." >&2
         return 0
     fi
-    changes=$(git -C "$repo_dir" status --porcelain --untracked-files=no) \
-        || die "Failed to read the git status of $repo_dir (exit $?)."
+    changes=$(git_tracked_changes "$repo_dir") || exit $?
     if [[ -n "$changes" ]]; then
         print_warn "Checkout $repo_dir has local changes; repository not updated:"$'\n'"$changes" >&2
         return 0
@@ -6665,8 +6668,7 @@ install_repo_follow_channel() {
 remove_root_checkout() {
     local root="$1" changes list f d sorted
     local -a dirs=()
-    changes=$(git -C "$root" status --porcelain --untracked-files=no) \
-        || die "Failed to read the git status of $root (exit $?)."
+    changes=$(git_tracked_changes "$root") || exit $?
     # What: changed tracked files keep the whole old code
     # Why: such a file may hold data; nothing is guessed
     # From: Issue #1683 | PR #1858
