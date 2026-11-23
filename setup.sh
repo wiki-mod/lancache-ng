@@ -8658,7 +8658,7 @@ cmd_secondary() {
     local explicit_lancache_image_tag keep_known_good_configs
     local preflight_registry preflight_prefix preflight_channel preflight_env_tag
     local preflight_tag preflight_verified_registry="" preflight_verified_prefix="" preflight_verified_tag=""
-    local secondary_env_file bad_response secondary_compose
+    local secondary_env_file bad_response secondary_compose dns_https_host_port
     local channel_words pinned dns_port primary_channel primary_tag_hint
 
     while [[ $# -gt 0 ]]; do
