@@ -294,6 +294,19 @@ is_valid_dhcp_ntp_server() {
     is_valid_dns_name "$entry"
 }
 
+# What: true for a comma-separated list of NTP entries
+# Why: blanks and empty entries do not count; one walk
+# From: Issue #1683 | PR #2017
+is_valid_dhcp_ntp_list() {
+    local entry
+    local -a entries
+    IFS=',' read -r -a entries <<< "${1:-}"
+    for entry in "${entries[@]}"; do
+        entry="${entry//[[:space:]]/}"
+        [[ -z "$entry" ]] || is_valid_dhcp_ntp_server "$entry" || return 1
+    done
+}
+
 # What: true for an IPv6 literal of hex groups and colons
 # Why: upstream DNS servers may be IPv6; Rust checks again
 # From: Issue #1918 | PR #1858
@@ -4599,7 +4612,7 @@ migrate_env_for_update() (
     # From: Issue #1683 | PR #1858
     local install_dir="$1" preserve_image_tag="${2:-0}" env_file dhcp_enabled dhcp_mode
     local dhcp_proxy_interface dhcp_proxy_router dhcp_ntp_servers dhcp_proxy_domain
-    local dhcp_proxy_boot_filename dhcp_proxy_boot_server _dhcp_ntp_check _dhcp_ntp_ip dhcp_relay_local_addr
+    local dhcp_proxy_boot_filename dhcp_proxy_boot_server dhcp_relay_local_addr
     # What: declares every temporary as function-local
     # Why: undeclared names would leak as globals
     # From: Issue #1683 | PR #1858
@@ -4884,14 +4897,8 @@ migrate_env_for_update() (
                 || die "DHCP_PROXY_INTERFACE in $env_file must be a valid interface name (letters, digits, '.', '-', '_') or empty."
             [[ -z "$dhcp_proxy_router" ]] || is_valid_ipv4 "$dhcp_proxy_router" \
                 || die "DHCP_PROXY_ROUTER in $env_file must be a valid IPv4 address or empty."
-            if [[ -n "$dhcp_ntp_servers" ]]; then
-                IFS=',' read -r -a _dhcp_ntp_check <<< "$dhcp_ntp_servers"
-                for _dhcp_ntp_ip in "${_dhcp_ntp_check[@]}"; do
-                    _dhcp_ntp_ip="${_dhcp_ntp_ip//[[:space:]]/}"
-                    [[ -z "$_dhcp_ntp_ip" ]] || is_valid_dhcp_ntp_server "$_dhcp_ntp_ip" \
-                        || die "DHCP_NTP_SERVERS in $env_file must be a comma-separated list of IPv4 addresses or host names."
-                done
-            fi
+            [[ -z "$dhcp_ntp_servers" ]] || is_valid_dhcp_ntp_list "$dhcp_ntp_servers" \
+                || die "DHCP_NTP_SERVERS in $env_file must be a comma-separated list of IPv4 addresses or host names."
             [[ -z "$dhcp_proxy_domain" ]] || is_valid_dns_name "$dhcp_proxy_domain" \
                 || die "DHCP_PROXY_DOMAIN in $env_file must be a valid DNS domain name or empty."
             [[ -z "$dhcp_proxy_boot_filename" ]] || is_valid_dhcp_proxy_boot_filename "$dhcp_proxy_boot_filename" \
@@ -9694,23 +9701,7 @@ elif [[ "$DHCP_MODE" = "dnsmasq-proxy" ]]; then
 
         ask_checked DHCP_PROXY_ROUTER "Router/gateway option, PXE-scoped (blank = skip)" "$DHCP_PROXY_ROUTER" is_valid_ipv4 "Invalid IPv4 address" 1
 
-        ask "NTP servers, PXE-scoped, comma-separated (blank = skip)" "$DHCP_NTP_SERVERS"
-        while true; do
-            DHCP_NTP_SERVERS="$REPLY"
-            if [[ -z "$DHCP_NTP_SERVERS" ]]; then
-                break
-            fi
-            _dhcp_ntp_ok=1
-            IFS=',' read -r -a _dhcp_ntp_check <<< "$DHCP_NTP_SERVERS"
-            for _dhcp_ntp_ip in "${_dhcp_ntp_check[@]}"; do
-                _dhcp_ntp_ip="${_dhcp_ntp_ip//[[:space:]]/}"
-                [[ -z "$_dhcp_ntp_ip" ]] && continue
-                is_valid_dhcp_ntp_server "$_dhcp_ntp_ip" || _dhcp_ntp_ok=0
-            done
-            [[ "$_dhcp_ntp_ok" = "1" ]] && break
-            print_error "Invalid NTP servers list (must be comma-separated IPv4 addresses or host names): $DHCP_NTP_SERVERS"
-            ask "NTP servers, PXE-scoped, comma-separated (blank = skip)" ""
-        done
+        ask_checked DHCP_NTP_SERVERS "NTP servers, PXE-scoped, comma-separated (blank = skip)" "$DHCP_NTP_SERVERS" is_valid_dhcp_ntp_list "Invalid NTP servers list (must be comma-separated IPv4 addresses or host names)" 1
 
         ask_checked DHCP_PROXY_DOMAIN "Domain option, PXE-scoped (blank = skip)" "$DHCP_PROXY_DOMAIN" is_valid_dns_name "Invalid domain name" 1
 
