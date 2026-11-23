@@ -113,6 +113,18 @@ print_title_box() {
     printf '%s╚%s╝%s\n\n' "${BOLD}" "$rule" "${RESET}"
 }
 
+# What: prints result text $2 between two green rules
+# Why: one look for the end of a flow; $1 is its colour
+# From: Issue #1683 | PR #2017
+print_result_banner() {
+    local colour="$1" text="$2" rule
+    printf -v rule '%*s' 50 ''
+    rule="${rule// /═}"
+    printf '\n%s%s%s%s\n' "${BOLD}" "${GREEN}" "$rule" "${RESET}"
+    printf '%s%s  %s%s\n' "${BOLD}" "$colour" "$text" "${RESET}"
+    printf '%s%s%s%s\n\n' "${BOLD}" "${GREEN}" "$rule" "${RESET}"
+}
+
 # What: true if a whole line of the list equals the needle
 # Why: one membership owner; no grep exit code to misread
 # From: Issue #1683 | PR #1858
@@ -8388,11 +8400,7 @@ cmd_update_ip() {
         *) die "The new IPs failed the health gate, and restoring the previous ones failed too. Check: $SCRIPT_DIR/setup.sh compose $install_dir logs" ;;
     esac
 
-    printf "\n"
-    printf '%s%s════════════════════════════════════════%s\n' "${BOLD}" "${GREEN}" "${RESET}"
-    printf '%s%s  Reconfiguration complete!%s\n' "${BOLD}" "${GREEN}" "${RESET}"
-    printf '%s%s════════════════════════════════════════%s\n' "${BOLD}" "${GREEN}" "${RESET}"
-    printf "\n"
+    print_result_banner "$GREEN" "Reconfiguration complete!"
     printf "  Done. Update your clients to use the new DNS IP.\n\n"
 }
 
@@ -10306,15 +10314,11 @@ if [[ "$ui_url_rc" -ne 0 || -z "$ui_url" ]]; then
     print_warn "Cannot derive the Admin-UI URL (exit $ui_url_rc); the stack runs, see the ui ports in $INSTALL_DIR/docker-compose.yml."
     ui_url="(see the ui ports in $INSTALL_DIR/docker-compose.yml)"
 fi
-printf "\n"
-printf '%s%s══════════════════════════════════════════════════%s\n' "${BOLD}" "${GREEN}" "${RESET}"
 if (( ${#install_bad[@]} > 0 )); then
-    printf '%s%s  LanCache-NG started, but not all containers are healthy%s\n' "${BOLD}" "${YELLOW}" "${RESET}"
+    print_result_banner "$YELLOW" "LanCache-NG started, but not all containers are healthy"
 else
-    printf '%s%s  LanCache-NG is running!%s\n' "${BOLD}" "${GREEN}" "${RESET}"
+    print_result_banner "$GREEN" "LanCache-NG is running!"
 fi
-printf '%s%s══════════════════════════════════════════════════%s\n' "${BOLD}" "${GREEN}" "${RESET}"
-printf "\n"
 if [[ -n "$UI_AUTH_USER" ]]; then
     printf '  %sAdmin-UI:%s    %s  (User: %s)\n' "${BOLD}" "${RESET}" "$ui_url" "$UI_AUTH_USER"
 else
