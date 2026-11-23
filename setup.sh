@@ -953,6 +953,22 @@ confirm_flag() {
     ! confirm "$2" "$3" || _confirm_flag_ref=1
 }
 
+# What: warns that channel $1 holds untested builds
+# Why: one owner of the warning text of such a channel
+# From: Issue #1683 | PR #2017
+warn_experimental_channel() {
+    print_warn "The $1 channel is experimental: untested daily builds that may break the stack; not for production use."
+}
+
+# What: warns of channel $1, asks a second yes, marks it
+# Why: prompt and preset channel take the same steps
+# From: Issue #1683 | PR #2017
+confirm_experimental_channel() {
+    warn_experimental_channel "$1"
+    confirm "Install from $1 anyway?" "N" || return 1
+    export LANCACHE_CHANNEL_CONFIRMED=1
+}
+
 # What: runs a broadcast DHCP probe before Kea activation
 # Why: stops or warns before a second DHCP server exists
 # From: Issue #1683 | PR #1858
@@ -4562,7 +4578,7 @@ lancache_channel_image_refs() {
         || die "Cannot read release.install_channel (exit $?)."
     install_channel=$(lancache_stack_pointer_channel_for "$install_channel") || exit $?
     if [[ "$pointer_channel" != "$install_channel" ]]; then
-        print_warn "The $channel channel is experimental: untested daily builds that may break the stack; not for production use." >&2
+        warn_experimental_channel "$channel" >&2
     fi
     while [[ "$n" -le "$max" ]]; do
         reason="promote lock ${lock_ref} is held"
@@ -9485,10 +9501,8 @@ if [[ -n "${LANCACHE_IMAGE_CHANNEL:-}" ]]; then
     if [[ "$LANCACHE_IMAGE_CHANNEL" != "$(lancache_sot_value install_channel release)" ]] \
         && list_has_line "$LANCACHE_IMAGE_CHANNEL" "$(lancache_selectable_channels)" \
         && [[ -z "${LANCACHE_CHANNEL_CONFIRMED:-}" ]]; then
-        print_warn "The $LANCACHE_IMAGE_CHANNEL channel is experimental: untested daily builds that may break the stack; not for production use."
-        confirm "Install from $LANCACHE_IMAGE_CHANNEL anyway?" "N" \
+        confirm_experimental_channel "$LANCACHE_IMAGE_CHANNEL" \
             || die "Install cancelled; nothing was changed."
-        export LANCACHE_CHANNEL_CONFIRMED=1
     fi
 else
     selectable=$(lancache_selectable_channels) || exit $?
@@ -9517,9 +9531,7 @@ else
             # Why: untested builds never install unwarned
             # From: Issue #1683 | PR #1858
             if [[ "$LANCACHE_IMAGE_CHANNEL" != "$install_channel" ]]; then
-                print_warn "The $LANCACHE_IMAGE_CHANNEL channel is experimental: untested daily builds that may break the stack; not for production use."
-                confirm "Install from $LANCACHE_IMAGE_CHANNEL anyway?" "N" || continue
-                export LANCACHE_CHANNEL_CONFIRMED=1
+                confirm_experimental_channel "$LANCACHE_IMAGE_CHANNEL" || continue
             fi
             print_ok "Using the $LANCACHE_IMAGE_CHANNEL channel."
             break
