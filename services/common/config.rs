@@ -336,18 +336,14 @@ pub fn read_file(path: &Path) -> Result<BTreeMap<String, String>, String> {
 // Why: it wins for single keys, as fail2ban's .local.
 // From: Issue #1683 | PR #2017
 pub fn override_path(path: &Path) -> PathBuf {
-    let mut name = path.as_os_str().to_owned();
-    name.push(".local");
-    PathBuf::from(name)
+    crate::fs::with_suffix(path, ".local")
 }
 
 // What: lock file of the stack .env: <file>.lock.
 // Why: setup.sh flocks the same name before it writes.
 // From: Issue #1683 | PR #2017
 pub fn lock_path(path: &Path) -> PathBuf {
-    let mut name = path.as_os_str().to_owned();
-    name.push(".lock");
-    PathBuf::from(name)
+    crate::fs::with_suffix(path, ".lock")
 }
 
 // What: rejects what Compose would read differently.

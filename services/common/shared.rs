@@ -58,6 +58,15 @@ pub mod fs {
         pub gid: Option<u32>,
     }
 
+    // What: the path with a suffix appended to its name.
+    // Why: one owner of sibling names like .local or .xz.
+    // From: Issue #1683 | PR #2017
+    pub fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
+        let mut name = path.as_os_str().to_owned();
+        name.push(suffix);
+        PathBuf::from(name)
+    }
+
     // What: apply owner and mode on an open file.
     // Why: fchown on the handle avoids a path race.
     // From: Issue #1683 | PR #1858
@@ -5202,9 +5211,7 @@ pub mod tidy {
             // What: late lines join the existing .xz file.
             // Why: live 07.11.: "File exists" every round.
             // From: Issue #1683 | PR #1985
-            let mut packed = f.path.clone().into_os_string();
-            packed.push(".xz");
-            let packed = std::path::PathBuf::from(packed);
+            let packed = super::fs::with_suffix(&f.path, ".xz");
             if packed.exists() {
                 if let Err(e) = append_xz(&f.path, &packed, preset) {
                     errs.push(e);
