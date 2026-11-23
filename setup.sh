@@ -9793,8 +9793,6 @@ done
 # From: Issue #1683 | PR #1858
 print_step "Writing .env"
 
-env_file="$ENV_FILE"
-
 # What: from here on, the real install mutations run
 # Why: introspection mode must leave the host untouched
 # From: Issue #1683 | PR #1858
@@ -9803,23 +9801,23 @@ if [[ "$WIZARD_INTROSPECT_MODE" != "1" ]]; then
 # What: a lone old .env.local is renamed; an override goes
 # Why: the answers of this install must be what runs
 # From: Issue #1683 | PR #2017
-env_file=$(runtime_env_file_for_install_dir "$INSTALL_DIR") || exit $?
-if [[ -f "$env_file.local" ]]; then
-    install_override="$env_file.local.pre-install-$(date -u +%Y%m%dT%H%M%SZ)"
-    mv -- "$env_file.local" "$install_override" \
-        || die "Failed to move $env_file.local aside (exit $?)."
-    print_warn "Moved the override $env_file.local to $install_override; this install writes $env_file alone."
+ENV_FILE=$(runtime_env_file_for_install_dir "$INSTALL_DIR") || exit $?
+if [[ -f "$ENV_FILE.local" ]]; then
+    install_override="$ENV_FILE.local.pre-install-$(date -u +%Y%m%dT%H%M%SZ)"
+    mv -- "$ENV_FILE.local" "$install_override" \
+        || die "Failed to move $ENV_FILE.local aside (exit $?)."
+    print_warn "Moved the override $ENV_FILE.local to $install_override; this install writes $ENV_FILE alone."
 fi
 
 # What: generates or keeps secrets; placeholders regenerate
 # Why: empty or placeholder values are never used
 # From: Issue #1683 | PR #1858
-LANCACHE_IMAGE_REGISTRY=$(resolve_lancache_image_registry "$env_file")
-LANCACHE_IMAGE_PREFIX=$(resolve_lancache_image_prefix "$env_file")
-LANCACHE_IMAGE_CHANNEL=$(resolve_lancache_image_channel "$env_file")
-LANCACHE_IMAGE_TAG=$(resolve_lancache_image_tag "$env_file")
-LANCACHE_IMAGE_REFS=$(lancache_image_refs_for_tag "$env_file" "$LANCACHE_IMAGE_TAG") \
-    || die "Cannot pin the images of ${LANCACHE_IMAGE_TAG}; ${env_file} was not written (exit $?)."
+LANCACHE_IMAGE_REGISTRY=$(resolve_lancache_image_registry "$ENV_FILE")
+LANCACHE_IMAGE_PREFIX=$(resolve_lancache_image_prefix "$ENV_FILE")
+LANCACHE_IMAGE_CHANNEL=$(resolve_lancache_image_channel "$ENV_FILE")
+LANCACHE_IMAGE_TAG=$(resolve_lancache_image_tag "$ENV_FILE")
+LANCACHE_IMAGE_REFS=$(lancache_image_refs_for_tag "$ENV_FILE" "$LANCACHE_IMAGE_TAG") \
+    || die "Cannot pin the images of ${LANCACHE_IMAGE_TAG}; ${ENV_FILE} was not written (exit $?)."
 
 # What: verifies the tag publishes this platform
 # Why: a platform failure must stop before state writes
@@ -9831,14 +9829,14 @@ assert_resolved_image_tag_platform_supported "$LANCACHE_IMAGE_REGISTRY" "$LANCAC
 # From: Issue #1683 | PR #1912
 secret_rows=$(managed_secret_rows stack) || exit $?
 while read -r secret_key secret_kind; do
-    secret_value=$(get_or_generate_secret "$secret_key" "$env_file" "$secret_kind") || exit $?
+    secret_value=$(get_or_generate_secret "$secret_key" "$ENV_FILE" "$secret_kind") || exit $?
     printf -v "$secret_key" '%s' "$secret_value"
 done <<< "$secret_rows"
 # What: an empty TTL means the SOT default
 # Why: .env never repeats a runtime.defaults value
 # From: Issue #1683 | PR #1912
-UI_SESSION_TTL_SECONDS=$(get_env_var UI_SESSION_TTL_SECONDS "$env_file")
-[[ -z "$UI_SESSION_TTL_SECONDS" ]] || validate_ui_session_ttl_seconds "$UI_SESSION_TTL_SECONDS" "$env_file"
+UI_SESSION_TTL_SECONDS=$(get_env_var UI_SESSION_TTL_SECONDS "$ENV_FILE")
+[[ -z "$UI_SESSION_TTL_SECONDS" ]] || validate_ui_session_ttl_seconds "$UI_SESSION_TTL_SECONDS" "$ENV_FILE"
 
 # What: the first .env text; values are unquoted
 # Why: the one key list; the check below reads this body
