@@ -5279,6 +5279,15 @@ is_same_channel_install() {
     is_channel_layout_repo "${a%/deploy/prod}" && is_channel_layout_repo "${b%/deploy/prod}"
 }
 
+# What: "id|compose dir" of each container a filter selects
+# Why: restore guard and secondary check read one label
+# From: Issue #1683 | PR #2017
+container_compose_dirs() {
+    docker ps -a --filter "$1" \
+        --format '{{.ID}}|{{.Label "com.docker.compose.project.working_dir"}}' \
+        || die "Failed to list the containers with $1 (exit $?)."
+}
+
 # What: blocks restore if other installs share the volumes
 # Why: project name is fixed, so volumes are shared
 # From: Issue #456 | PR #1673
@@ -5288,12 +5297,9 @@ guard_restore_shared_project_volumes() {
         print_skip "Shared-volume guard: docker is not available, so no containers can share the volumes"
         return 0
     fi
-    containers=$(docker ps -a --filter "label=com.docker.compose.project=${project}" --format '{{.ID}}') \
-        || die "Failed to list the containers of compose project $project (exit $?)."
-    while IFS= read -r container; do
+    containers=$(container_compose_dirs "label=com.docker.compose.project=${project}") || exit $?
+    while IFS='|' read -r container working_dir; do
         [[ -n "$container" ]] || continue
-        working_dir=$(docker inspect --format '{{ index .Config.Labels "com.docker.compose.project.working_dir" }}' "$container") \
-            || die "Failed to read the working directory label of container $container (exit $?)."
         [[ -n "$working_dir" ]] \
             || die "Refusing to restore: container $container of compose project '$project' has no working directory label, so its install cannot be attributed. Remove it with 'docker rm $container', then restore again."
         working_dir=$(realpath -m "$working_dir")
@@ -8496,9 +8502,7 @@ assert_secondary_container_free() {
     local own cname rows owner
     own=$(realpath -m "$1") || die "Cannot resolve the directory $1 (exit $?)."
     cname=$(prod_env_default CONTAINER_NAME_DNS) || exit $?
-    rows=$(docker ps -a --filter "name=^/${cname}\$" \
-        --format '{{.Names}}|{{.Label "com.docker.compose.project.working_dir"}}') \
-        || die "Failed to list the containers of this host (exit $?)."
+    rows=$(container_compose_dirs "name=^/${cname}\$") || exit $?
     [[ -n "$rows" ]] || return 0
     owner=${rows#*|}
     # What: --rotate may find its own container
