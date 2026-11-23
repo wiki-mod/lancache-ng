@@ -2614,6 +2614,8 @@ is_quickstart_install() {
 # From: Issue #1683 | PR #1858
 restore_quickstart_mounts() {
     local old_dir="$1" old_env="$2" record="$3" json sources src rel commit entry perms empty_dir inside
+    # What: only a git checkout can lose mount sources
+    # Why: git history holds the files that were dropped
     [[ -e "$old_dir/.git" ]] || return 0
     install_missing_tools jq
     json=$(stack_compose "$old_dir" "$old_env" config --format json) \
@@ -2621,6 +2623,8 @@ restore_quickstart_mounts() {
     sources=$(jq -r '.services[].volumes[]? | select(.type == "bind") | .source' <<< "$json") \
         || die "Cannot list the bind mounts of $old_dir (exit $?); nothing was changed."
     while IFS= read -r src; do
+        # What: only mount sources inside the old checkout
+        # Why: git does not touch paths outside of it
         [[ "$src" = "$old_dir"/* ]] || continue
         # What: an empty dir is missing if git had a file
         # Why: docker makes a missing mount source a dir
@@ -2644,10 +2648,14 @@ restore_quickstart_mounts() {
             entry=$(git -C "$old_dir" ls-tree "${commit}^" -- "$rel") \
                 || die "Failed to read $rel in ${commit}^ (exit $?)."
         fi
+        # What: no file in git: a dir stays, a gap stops
+        # Why: a missing mount source breaks the old stack
         if [[ "$entry" != 100*" blob "* ]]; then
             [[ "$empty_dir" = 0 ]] || continue
             die "$src is missing and git has no older file copy; restore it, then rerun setup.sh update. Nothing was changed."
         fi
+        # What: the restored file gets the mode git recorded
+        # Why: git keeps only the executable bit of a file
         perms=0644
         [[ "$entry" != 100755* ]] || perms=0755
         if [[ "$empty_dir" = 1 ]]; then
@@ -2718,6 +2726,8 @@ migrate_quickstart_install() (
         printf 'envlocal|%s\n' "$(utc_stamp iso)" >> "$record" \
             || die "Failed to record the new $new_env in $record (exit $?)."
     fi
+    # What: without a state root the old dir becomes it
+    # Why: the old stack kept its data inside its checkout
     if ! env_key_exists LANCACHE_STATE_DIR "$new_env"; then
         set_env_key LANCACHE_STATE_DIR "$old_dir" "$new_env"
     fi
@@ -2942,6 +2952,8 @@ stop() {
 }
 EOF
     chmod 0755 "$init_dir/$OPENRC_STACK_SERVICE" || die "Failed to make $init_dir/$OPENRC_STACK_SERVICE executable (exit $?)."
+    # What: one init script per job, named by its constant
+    # Why: both run the same loop; only job and name differ
     for job in converge auto-update; do
         name="$OPENRC_CONVERGE_SERVICE"
         [[ "$job" = converge ]] || name="$OPENRC_AUTO_UPDATE_SERVICE"
@@ -3152,6 +3164,8 @@ deploy_prod_repo_input_paths() {
     while IFS= read -r rel; do
         [[ -n "$rel" && -e "$repo_root/${rel#../../}" ]] && printf '%s\n' "$repo_root/${rel#../../}"
     done <<< "$rels"
+    # What: success even when the last test is false
+    # Why: a false && test would become its return value
     true
 }
 
@@ -3300,9 +3314,13 @@ ensure_ui_password_hash() {
         print_ok "Admin UI password stored as an Argon2id hash; the plaintext value was removed"
         return 0
     fi
+    # What: drops an empty or placeholder plaintext key
+    # Why: only the hash is kept; the key must not linger
     remove_env_key UI_AUTH_PASSWORD "$env_file"
     user=$(get_env_var UI_AUTH_USER "$env_file") || exit $?
     hash=$(get_env_var UI_AUTH_PASSWORD_HASH "$env_file") || exit $?
+    # What: a user without a hash gets a new password
+    # Why: the UI needs both; the plaintext is shown once
     [[ -n "$user" && -z "$hash" ]] || return 0
     password=$(generate_managed_secret UI_AUTH_PASSWORD ui) || exit $?
     set_ui_password_hash "$install_dir" "$env_file" "$password"
@@ -5184,6 +5202,8 @@ backup_manifest() {
         [[ -d "$cache_dir" ]] && printf '%s\n' "$cache_dir"
         [[ -d "$(legacy_state_path cache)" ]] && printf '%s\n' "$(legacy_state_path cache)"
     fi
+    # What: success even when the last test is false
+    # Why: a false && test would become its return value
     true
 }
 
@@ -7183,6 +7203,8 @@ cmd_openrc_loop() {
     trap 'OPENRC_LOOP_STOP=1' TERM
     openrc_loop_sleep "$first"
     while [[ "$OPENRC_LOOP_STOP" = 0 ]]; do
+        # What: a random delay below spread, of two RANDOMs
+        # Why: one RANDOM ends at 32767; spread may be more
         (( spread == 0 )) || openrc_loop_sleep "$(( (RANDOM * 32768 + RANDOM) % spread ))"
         [[ "$OPENRC_LOOP_STOP" = 0 ]] || break
         rc=0
