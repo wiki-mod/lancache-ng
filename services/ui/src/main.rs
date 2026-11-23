@@ -3321,7 +3321,7 @@ async fn ensure_soa_nameserver(s: &Settings, api: &lancache_ng::pdns::Api) -> Re
     // From: Issue #1683
     for (name, address) in secondaries(s) {
         let host = peer_host(s, &name)?;
-        let kind = address_kind(&address);
+        let kind = lancache_ng::dns::address_kind(&address);
         ensure_rrset(api, &lan, &host, kind, ttl, std::slice::from_ref(&address)).await?;
         ensure_ptr(s, api, &address, &host, ttl).await?;
     }
@@ -3380,20 +3380,13 @@ fn peer_host(s: &Settings, name: &str) -> Result<String, String> {
     Ok(format!("{name}.{}", lancache_ng::dns::lan_zone(s)?))
 }
 
-// What: A for IPv4, AAAA for IPv6.
-// Why: a secondary may register either address.
-// From: Issue #1683
-fn address_kind(address: &str) -> &'static str {
-    if address.contains(':') { "AAAA" } else { "A" }
-}
-
 // What: drop address and PTR records of a secondary.
 // Why: a removed or moved secondary leaves no record.
 // From: Issue #1683
 async fn drop_peer_records(s: &Settings, name: &str, address: &str) -> Result<(), String> {
     let api = pdns_api(s)?;
     let host = peer_host(s, name)?;
-    let kind = address_kind(address);
+    let kind = lancache_ng::dns::address_kind(address);
     api.set_rrset(&lancache_ng::dns::lan_zone(s)?, &host, kind, 0, &[])
         .await?;
     let rev = reverse_name(address)?;
@@ -4254,7 +4247,7 @@ async fn main() -> Result<(), String> {
 // From: Issue #1683
 #[cfg(test)]
 mod tests {
-    use super::{PeerZone, address_kind, duration_text, zone_state};
+    use super::{PeerZone, duration_text, zone_state};
 
     fn zone(primary: Option<u32>, secondary: Option<u32>) -> PeerZone {
         PeerZone {
@@ -4293,14 +4286,5 @@ mod tests {
         assert_eq!(duration_text(5400), "90 min");
         assert_eq!(duration_text(45), "45 s");
         assert_eq!(duration_text(3601), "3601 s");
-    }
-
-    // What: A for IPv4, AAAA for IPv6.
-    // Why: a secondary may register either address.
-    // From: Issue #1683
-    #[test]
-    fn address_kind_follows_the_family() {
-        assert_eq!(address_kind("192.0.2.20"), "A");
-        assert_eq!(address_kind("2001:db8::20"), "AAAA");
     }
 }

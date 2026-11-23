@@ -871,6 +871,13 @@ pub mod dns {
         }
     }
 
+    // What: A for an IPv4 address, AAAA for IPv6.
+    // Why: one owner of the record type of an address.
+    // From: Issue #1683 | PR #2017
+    pub fn address_kind(address: &str) -> &'static str {
+        if address.contains(':') { "AAAA" } else { "A" }
+    }
+
     // What: host:port; an IPv6 address gets brackets.
     // Why: bare, nobody sees where its port starts.
     // From: Issue #1683 | PR #2017
@@ -2605,7 +2612,7 @@ pub mod recursor_conf {
         if answer.parse::<std::net::IpAddr>().is_err() {
             return Err(format!("RPZ answer {answer:?} is no IP address"));
         }
-        let kind = if answer.contains(':') { "AAAA" } else { "A" };
+        let kind = crate::dns::address_kind(answer);
         let mname = s.text("RPZ_SOA_MNAME")?;
         let mut out = format!(
             "$TTL {}\n@ SOA {mname} {} {serial} {} {} {} {}\n@ NS {mname}\n",
@@ -5333,10 +5340,19 @@ pub mod tidy {
 
 #[cfg(test)]
 mod tests {
-    use super::dns::{soa_query, soa_reply};
+    use super::dns::{address_kind, soa_query, soa_reply};
     use super::dnsdist_conf::{Listener, body, source};
     use super::kea_conf::follow_ntp;
     use serde_json::json;
+
+    // What: A for IPv4, AAAA for IPv6.
+    // Why: a secondary may register either address.
+    // From: Issue #1683
+    #[test]
+    fn address_kind_follows_the_family() {
+        assert_eq!(address_kind("192.0.2.20"), "A");
+        assert_eq!(address_kind("2001:db8::20"), "AAAA");
+    }
 
     // What: on sets own NTP; off gives only it back.
     // Why: a user value must survive the off state.
