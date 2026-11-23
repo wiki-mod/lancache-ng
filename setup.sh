@@ -4618,7 +4618,7 @@ migrate_env_for_update() (
     local cache_dir cache_max_gb cache_max_size cache_gb cache_mem_mb ip_https ui_password ui_password_hash ui_user
     local compose_profiles dhcp_dns_primary dhcp_dns_secondary dhcp_subnet_start ip_http upstream_dhcp_ip
     local state_keys state_key state_sub state_sub_dir legacy_path
-    local state_dir ui_session_ttl
+    local state_dir ui_session_ttl legacy_ca_root
     local legacy_cache_http legacy_cache_https existing_image_tag
     local required_keys required_key required_value
     local -a required_key_list=()
@@ -4803,7 +4803,8 @@ migrate_env_for_update() (
     # What: the checkout CA becomes the CA state dir
     # Why: the old compose mounted ../../certs
     # From: Issue #1683 | PR #1912
-    migrate_legacy_ca "$install_dir/../../certs" "$env_file"
+    legacy_ca_root=$(deploy_prod_repo_root "$install_dir") || exit $?
+    migrate_legacy_ca "$legacy_ca_root/certs" "$env_file"
 
     # What: a user cache size fills its missing partner key
     # Why: no size set means the SOT default; none is copied
@@ -6950,7 +6951,9 @@ perform_stack_update_flow() {
         die "Update failed its post-update health gate and was rolled back to the pre-update backup. Investigate before retrying."
     fi
 
-    migrate_legacy_ca "$install_dir/../../certs" "$_UPDATE_ENV_FILE" 1
+    local legacy_ca_root
+    legacy_ca_root=$(deploy_prod_repo_root "$install_dir") || exit $?
+    migrate_legacy_ca "$legacy_ca_root/certs" "$_UPDATE_ENV_FILE" 1
     # What: the root keeps no code once a channel dir runs
     # Why: switch and quickstart migration both leave it
     # From: Issue #1683 | PR #2002
