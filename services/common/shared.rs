@@ -849,6 +849,13 @@ pub mod dns {
             .collect()
     }
 
+    // What: the LAN zone, DHCP_DOMAIN in canonical form.
+    // Why: PowerDNS compares names with a trailing dot.
+    // From: Issue #1683 | PR #2017
+    pub fn lan_zone(s: &Settings) -> Result<String, String> {
+        Ok(canonical_zone(&s.text("DHCP_DOMAIN")?))
+    }
+
     // What: zones the stack serves itself.
     // Why: LAN, local.LAN and optional reverse zones.
     // From: Issue #1683 | PR #1858
@@ -865,7 +872,7 @@ pub mod dns {
                 .map(|z| canonical_zone(z))
                 .collect());
         }
-        let lan = canonical_zone(&s.text("DHCP_DOMAIN")?);
+        let lan = lan_zone(s)?;
         let mut zones = vec![format!("local.{lan}"), lan];
         if s.flag("DNS_SERVE_RFC1918")? {
             zones.extend(private_reverse_zones(s));
@@ -3040,7 +3047,7 @@ pub mod kea_conf {
     }
 
     fn lan_domain(s: &Settings) -> Result<String, String> {
-        let zone = crate::dns::canonical_zone(&s.text("DHCP_DOMAIN")?);
+        let zone = crate::dns::lan_zone(s)?;
         Ok(zone.trim_end_matches('.').to_string())
     }
 
@@ -3263,7 +3270,7 @@ pub mod kea_conf {
             "port": s.uint("PDNS_AUTH_PORT")?
         }]);
         let entry = |zone: &str| json!({"name": zone, "key-name": key, "dns-servers": target});
-        let lan = crate::dns::canonical_zone(&s.text("DHCP_DOMAIN")?);
+        let lan = crate::dns::lan_zone(s)?;
         let reverse: Vec<Value> = crate::dns::private_reverse_zones(s)
             .iter()
             .map(|z| entry(z))

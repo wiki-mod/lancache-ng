@@ -842,17 +842,11 @@ fn reverse_zone(s: &Settings, name: &str) -> Option<String> {
         .max_by_key(String::len)
 }
 
-// What: LAN zone name in canonical form.
-// Why: PowerDNS compares names with trailing dot.
-fn lan_zone(s: &Settings) -> Result<String, String> {
-    Ok(lancache_ng::dns::canonical_zone(&s.text("DHCP_DOMAIN")?))
-}
-
 // What: zones that keep snapshots.
 // Why: LAN zone plus the private reverse zones.
 // From: Issue #1683 | PR #1858
 fn snapshot_zones(s: &Settings) -> Result<Vec<String>, String> {
-    let mut zones = vec![lan_zone(s)?];
+    let mut zones = vec![lancache_ng::dns::lan_zone(s)?];
     zones.extend(lancache_ng::dns::private_reverse_zones(s));
     Ok(zones)
 }
@@ -961,7 +955,7 @@ async fn ptr_rows(s: &Settings, api: &lancache_ng::pdns::Api) -> Vec<Value> {
 // From: Issue #1683 | PR #1858
 async fn domains(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     let s = app.settings();
-    let lan = lan_zone(&s)?;
+    let lan = lancache_ng::dns::lan_zone(&s)?;
     let mut ctx = Context::new();
     ctx.insert("dns_domains", &lancache_ng::cdn::parse_rows(&s)?);
     ctx.insert("lan_zone", lan.trim_end_matches('.'));
@@ -1185,7 +1179,7 @@ async fn record(
     add: bool,
     get: &(dyn Fn(&str) -> String + Sync),
 ) -> Result<(), String> {
-    let zone = lan_zone(s)?;
+    let zone = lancache_ng::dns::lan_zone(s)?;
     let kind = get("record_type");
     if !s.list("DNS_LAN_RECORD_TYPES").contains(&kind) {
         return Err(tr("err_record_type").replace("{kind}", &kind));
@@ -1432,7 +1426,7 @@ async fn secondary_action(
             if !s.flag("DNS_SECONDARY_NS_ENABLED")? {
                 return Err(bad_request("secondaries as NS are off"));
             }
-            answers_aa(&s, &list[at].1, &lan_zone(&s)?)
+            answers_aa(&s, &list[at].1, &lancache_ng::dns::lan_zone(&s)?)
                 .await
                 .map_err(bad_request)?;
             commit(&app, ns_change(&s, &name, Some(true)))
@@ -1640,7 +1634,7 @@ async fn check_peer(
     ours: &[lancache_ng::pdns::Zone],
     address: &str,
 ) -> Result<Result<(), String>, String> {
-    let aa = answers_aa(s, address, &lan_zone(s)?).await;
+    let aa = answers_aa(s, address, &lancache_ng::dns::lan_zone(s)?).await;
     let api = remote_api(s, address)?;
     let theirs = api.zones().await?;
     for zone in lancache_ng::dns::managed_zones(s)? {
@@ -3315,7 +3309,7 @@ fn primary_https_ip(s: &Settings) -> Result<String, String> {
 async fn ensure_soa_nameserver(s: &Settings, api: &lancache_ng::pdns::Api) -> Result<(), String> {
     let soa = s.text("PDNS_DEFAULT_SOA")?;
     let mname = lancache_ng::dns::canonical_zone(soa.split_whitespace().next().unwrap_or_default());
-    let lan = lancache_ng::dns::canonical_zone(&s.text("DHCP_DOMAIN")?);
+    let lan = lancache_ng::dns::lan_zone(s)?;
     let ttl = u32::try_from(s.uint("DNS_RECORD_TTL")?).map_err(|e| e.to_string())?;
     let ns = ns_names(s, &mname)?;
     for zone in lancache_ng::dns::managed_zones(s)? {
@@ -3383,7 +3377,7 @@ fn ns_names(s: &Settings, mname: &str) -> Result<Vec<String>, String> {
 // Why: A, PTR and NS records use the same name.
 // From: Issue #1683
 fn peer_host(s: &Settings, name: &str) -> Result<String, String> {
-    Ok(format!("{name}.{}", lan_zone(s)?))
+    Ok(format!("{name}.{}", lancache_ng::dns::lan_zone(s)?))
 }
 
 // What: A for IPv4, AAAA for IPv6.
@@ -3400,7 +3394,8 @@ async fn drop_peer_records(s: &Settings, name: &str, address: &str) -> Result<()
     let api = pdns_api(s)?;
     let host = peer_host(s, name)?;
     let kind = address_kind(address);
-    api.set_rrset(&lan_zone(s)?, &host, kind, 0, &[]).await?;
+    api.set_rrset(&lancache_ng::dns::lan_zone(s)?, &host, kind, 0, &[])
+        .await?;
     let rev = reverse_name(address)?;
     let Some(zone) = reverse_zone(s, &rev) else {
         return Ok(());
