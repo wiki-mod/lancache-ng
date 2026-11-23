@@ -79,8 +79,9 @@ Provided by `pdns_conf`, `recursor_conf`, `pdns`, `dns` and `snapshot` in
   The Admin UI adds, removes and promotes domains (routes
   `/domains/lan-domain-*`) and edits the records of each.
 - **Recursors.** `dns-http` and `dns-https` run with the configs
-  `recursor_conf::yaml` renders; LAN zones go to the authoritative server;
-  `ROOT_ZONE_MIRROR` keeps a root zone copy.
+  `recursor_conf::yaml` renders; LAN zones go to the authoritative server.
+  No root zone copy is loaded: the `ROOT_ZONE_MIRROR` keys have no reader since
+  the rewrite of 2026-11-01 (release checklist 11.4).
 - **Upstream forwarding.** `DNS_UPSTREAM_SERVERS`, `DNS_UPSTREAM_ZONES` and
   `DNS_UPSTREAM_UNSIGNED_ZONES` render forward entries; a local zone never goes
   out and the stack's own address is refused (`recursor_conf`).
