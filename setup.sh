@@ -5447,7 +5447,6 @@ write_compressed_tar() {
 cmd_backup() (
     mode="config"
     backup_root="$BACKUP_ROOT"
-    ensure_default_install_dir
     install_dir="$DEFAULT_INSTALL_DIR"
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -5572,7 +5571,6 @@ restore_clear_stale_env_local_if_unarchived() {
 # From: Issue #1683 | PR #1858
 cmd_restore() (
     archive="${1:-}"
-    ensure_default_install_dir
     install_dir="${2:-$DEFAULT_INSTALL_DIR}"
     install_dir=$(resolve_stack_dir "$install_dir") || exit $?
     [[ -n "$archive" ]] || die "Usage: $0 restore <backup archive (.tar.zst, .tar.bz2 or .tar.gz)> [install-dir]"
@@ -5630,7 +5628,6 @@ cmd_restore() (
         archived_install=$(awk -F': ' '/^Install directory: / {print $2; exit}' "$backup_dir/README.txt") \
             || die "Failed to read $backup_dir/README.txt (exit $?)."
     fi
-    ensure_default_install_dir
     archived_install="${archived_install:-$DEFAULT_INSTALL_DIR}"
     # What: the archived path as recorded; links kept
     # Why: rootfs and manifest.txt hold it; current may move
@@ -6577,7 +6574,6 @@ sync_repo_to_channel_ref() {
 # From: Issue #1683 | PR #1858
 channel_code_dir() {
     local pointer
-    ensure_default_install_dir
     pointer=$(lancache_stack_pointer_channel_for "$1") || exit $?
     printf '%s/%s\n' "$DEFAULT_INSTALL_DIR" "$pointer"
 }
@@ -6591,7 +6587,6 @@ CHANNEL_STACK_FILES=(.env .env.local docker-compose.override.yml docker-compose.
 # Why: units and default commands follow it on a switch
 # From: Issue #1683 | PR #1858
 channel_active_link() {
-    ensure_default_install_dir
     printf '%s/current\n' "$DEFAULT_INSTALL_DIR"
 }
 
@@ -6599,7 +6594,6 @@ channel_active_link() {
 # Why: an old install cloned the code right into it
 # From: Issue #1683 | PR #1858
 is_channel_root_dir() {
-    ensure_default_install_dir
     [[ "$(realpath -m "$1")" = "$(realpath -m "$DEFAULT_INSTALL_DIR")" ]]
 }
 
@@ -6609,7 +6603,6 @@ is_channel_root_dir() {
 is_channel_layout_repo() {
     local repo root pointers
     repo=$(realpath -m "$1")
-    ensure_default_install_dir
     root=$(realpath -m "$DEFAULT_INSTALL_DIR")
     [[ "$repo" != "$root" ]] || return 0
     [[ "${repo%/*}" = "$root" ]] || return 1
@@ -6982,7 +6975,6 @@ perform_stack_update_flow() {
     # What: the root keeps no code once a channel dir runs
     # Why: switch and quickstart migration both leave it
     # From: Issue #1683 | PR #2002
-    ensure_default_install_dir
     if [[ -e "$DEFAULT_INSTALL_DIR/.git" && "$(realpath -m "$install_dir")" != "$(realpath -m "$DEFAULT_INSTALL_DIR/$PROD_STACK_REL")" ]]; then
         migrate_legacy_ca "$DEFAULT_INSTALL_DIR/certs" "$_UPDATE_ENV_FILE" 1
         write_lancache_host_services "$(channel_active_link)/$PROD_STACK_REL" \
@@ -6999,7 +6991,6 @@ perform_stack_update_flow() {
 # Why: a failed health check rolls back to the backup
 # From: Issue #1683 | PR #1858
 cmd_update() {
-    ensure_default_install_dir
     local install_dir="${1:-$DEFAULT_INSTALL_DIR}"
     install_dir=$(resolve_stack_dir "$install_dir") || exit $?
     # What: a lone setup.sh first fetches its channel code
@@ -7152,7 +7143,6 @@ lancache_auto_update_should_proceed() {
 # Why: an unchanged channel must not restart the stack
 # From: Issue #1683 | PR #1858
 cmd_auto_update() {
-    ensure_default_install_dir
     local install_dir="${1:-$DEFAULT_INSTALL_DIR}"
     local env_file auto_update_enabled current_channel current_tag deployed_tag decision
     local deployed_refs current_refs pinned
@@ -7320,7 +7310,6 @@ reconcile_auto_update_timer_state() {
 # Why: the ui writes the .env; the next compose up reads it
 # From: Issue #1683 | PR #2017
 cmd_converge_reconcile() {
-    ensure_default_install_dir
     local install_dir="${1:-$DEFAULT_INSTALL_DIR}" env_file
 
     install_dir=$(resolve_stack_dir "$install_dir") || exit $?
@@ -7343,7 +7332,6 @@ cmd_converge_reconcile() {
 # Why: they run when the stack state is unknown
 # From: Issue #1683 | PR #1858
 cmd_debug() {
-    ensure_default_install_dir
     local install_dir="${1:-$DEFAULT_INSTALL_DIR}"
     local env_file
     install_dir=$(resolve_stack_dir_checked "$install_dir") || exit $?
@@ -7616,7 +7604,6 @@ logbundle_host_path_listing() {
 # Why: its EXIT trap reads the state; nothing leaks out
 # From: Issue #1683 | PR #1858
 cmd_create_logs_for_issue() (
-    ensure_default_install_dir
     local install_dir="$DEFAULT_INSTALL_DIR"
     local dest_root="$BACKUP_ROOT"
     while [[ $# -gt 0 ]]; do
@@ -7784,7 +7771,6 @@ EOF
 # Why: works when the Admin UI is unreachable
 # From: Issue #1683 | PR #1858
 cmd_reset_to_last_known_good_config() {
-    ensure_default_install_dir
     local service="" install_dir="$DEFAULT_INSTALL_DIR" snapshot_id="" zone="" assume_yes=0
     local -a positional=()
     while [[ $# -gt 0 ]]; do
@@ -8206,7 +8192,6 @@ restore_update_ip_env() {
 # Why: a locked-out user needs a way back in
 # From: Issue #1683 | PR #1985
 cmd_reset_sign_in() {
-    ensure_default_install_dir
     local install_dir="$DEFAULT_INSTALL_DIR" assume_yes=0 env_file project ui_svc
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -8249,7 +8234,6 @@ cmd_reset_sign_in() {
 # Why: uses the install's directory, not the repo
 # From: Issue #1683 | PR #1858
 cmd_update_ip() {
-    ensure_default_install_dir
     local install_dir="${1:-$DEFAULT_INSTALL_DIR}"
 
     printf "\n"
@@ -8454,7 +8438,6 @@ dns_upstream_is_live() {
 # Why: set, change or remove it without a reinstall
 # From: Issue #1918 | PR #1858
 cmd_configure_upstream_dns() {
-    ensure_default_install_dir
     local install_dir="${1:-$DEFAULT_INSTALL_DIR}"
 
     printf "\n"
@@ -9210,9 +9193,9 @@ load_script_dir_sot() {
 }
 load_script_dir_sot
 
-# What: runs the subcommand named in the first argument
-# Why: the install flow below runs only for install
-# From: Issue #1683 | PR #1858
+# What: DEFAULT_INSTALL_DIR is set before any command
+# Why: the help and every command read it
+# From: Issue #1683 | PR #1912
 ensure_default_install_dir
 
 # What: no command prints the help and changes nothing
@@ -9237,6 +9220,9 @@ if [[ "${2:-}" = "--help" || "${2:-}" = "help" ]] \
     && [[ ! "$setup_command" =~ ^(compose|converge-reconcile|openrc-loop|help|--help|-h)$ ]]; then
     print_command_help "$setup_command" && exit 0
 fi
+# What: runs the subcommand named in the first argument
+# Why: the install flow below runs only for install
+# From: Issue #1683 | PR #1858
 case "$setup_command" in
     install)
         # What: "install <channel>" picks the channel
