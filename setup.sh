@@ -164,7 +164,7 @@ ask() {
     fi
     local tty_fd
     # What: no terminal stops setup.sh with a clear error
-    # Why: a failed tty read took the default silently
+    # Why: a failed tty read must not take the default
     # From: Issue #1683 | PR #1858
     terminal_available \
         || die "setup.sh needs a terminal to ask '$prompt'; run it in an interactive shell (for SSH: ssh -t)."
@@ -373,7 +373,7 @@ dns_upstream_zone_problem() {
         [[ "$zone" = "$item" || "$zone" == *".$item" ]] && inside=1
     done
     # What: "_" counts as a letter in zone names
-    # Why: live 06.11.: _msdcs.home.lan was refused
+    # Why: zone names like _msdcs.home.lan hold an underscore
     # From: Issue #1918
     if ! is_valid_dns_name "${zone//_/a}"; then
         printf "'%s' is no valid domain name\n" "$raw"
@@ -736,7 +736,7 @@ secondary_suggest_alternate_listen_ip() {
 }
 
 # What: port 53 on the IP in variable $1; else ask again
-# Why: a nameref: in $(...) the prompt lost its terminal
+# Why: a nameref: in $(...) the prompt has no terminal
 # From: Issue #1683 | PR #1858
 secondary_choose_listen_ip() {
     local -n _bind_ref="$1"
@@ -862,7 +862,7 @@ compose_profiles_for_runtime() {
 confirm() {
     local prompt="$1" default="${2:-N}"
     # What: ask again until the answer is y, yes, n or no.
-    # Why: a typo counted as no and skipped the step.
+    # Why: a typo must not count as no and skip the step.
     # From: Issue #1683
     while true; do
         ask "$prompt" "$default"
@@ -952,7 +952,7 @@ apt_install() {
 }
 
 # What: one info line before a package install
-# Why: requirements install without a question (DoMe)
+# Why: requirements are installed without a question
 # From: Issue #1683
 announce_install() {
     local reason="$1"
@@ -999,7 +999,7 @@ install_required_command() {
     local command_name="$1" reason="$2"
     shift 2
     # What: a present command installs nothing
-    # Why: live 249: "curl is missing" with curl installed
+    # Why: a present tool must never read as missing
     # From: Issue #1683 | PR #1858
     command_available "$command_name" && return 0
 
@@ -1081,8 +1081,8 @@ apt_buildx_package() {
     done
 }
 
-# What: Docker install is a first-install convenience only
-# Why: production setup must stay separate from dev builds
+# What: dies unless the docker client and Compose v2 run
+# Why: an install step can succeed without either binary
 # From: Issue #1683 | PR #1858
 verify_docker_installation() {
     local out
@@ -1439,7 +1439,7 @@ wait_for_docker_daemon() {
 }
 
 # What: Docker's userland-proxy set as the SOT says
-# Why: DoMe 07.11.: docker-proxy copied hairpin traffic
+# Why: docker-proxy copies hairpin traffic
 # From: Issue #1683 | PR #1985
 ensure_docker_userland_proxy() {
     local file want current tmp
@@ -1481,7 +1481,7 @@ ensure_docker_userland_proxy() {
     print_ok "Docker userland-proxy is ${want}"
 }
 
-# What: installs curl, Docker, Docker Compose v2 plugin
+# What: installs and starts what the stack needs here
 # Why: secondary needs the same set as primary
 # From: Issue #1683 | PR #1858
 ensure_stack_requirements_installed() {
@@ -2033,7 +2033,7 @@ migrate_proxy_security_mode_for_update() {
 }
 
 # What: old DHCP_MODE=disabled becomes off
-# Why: the ui accepts only the SOT words (live test)
+# Why: the ui accepts only the SOT words
 # From: Issue #1683 | PR #1980
 migrate_dhcp_mode_for_update() {
     local env_file="$1" mode
@@ -2624,7 +2624,7 @@ migrate_quickstart_install() (
     project=$(compose_project_name "$old_dir" "$old_env") \
         || die "Cannot resolve the compose project of $old_dir (exit $?); nothing was changed."
     # What: a retry without live copies starts afresh
-    # Why: a failed run's .env blocked every retry
+    # Why: a failed run's .env must not block a retry
     # From: Issue #1683 | PR #1858
     fresh=1
     if [[ -f "$new_env" ]]; then
@@ -3048,7 +3048,7 @@ deploy_prod_repo_root() {
 }
 
 # What: existing repo paths compose reaches via ../../
-# Why: rollback restores them; a hand list missed one mount
+# Why: rollback restores them; a hand list misses mounts
 # From: Issue #1683 | PR #1858
 deploy_prod_repo_input_paths() {
     local install_dir="$1" repo_root rels rel
@@ -3100,7 +3100,7 @@ psl_backup_list() {
 }
 
 # What: gzip copy of a PSL, named by its sha256; keep N.
-# Why: DoMe: the old list stays, compressed, at most 3.
+# Why: a bad new list can go back to a kept old one.
 # From: Issue #1683 | PR #1984
 psl_backup() {
     local file="$1" name dir keep sum gz n=0 f list
@@ -3711,7 +3711,7 @@ host_unit_action() {
     local unit="$1" action="$2" manager name out rc=0 limit
     manager=$(host_service_manager)
     # What: a start or stop ends after the SOT stop limit
-    # Why: a hung stop held setup.sh update without a word
+    # Why: a hung stop must not hold setup.sh update silently
     # From: Issue #1683 | PR #1858
     limit=$(prod_env_default OPENRC_STOP_TIMEOUT_SECONDS) || exit $?
     limit=$(( limit + 60 ))
@@ -4288,7 +4288,7 @@ lancache_channel_ref_pass() {
         ref="${registry}/${prefix}/${slug}:${pointer_channel}"
         if ! digest=$(docker buildx imagetools inspect "$ref" --format '{{.Manifest.Digest}}' 2>&1); then
             # What: a missing image is no network fault.
-            # Why: live: it blamed the network.
+            # Why: not found means the channel lacks this image.
             # From: Issue #1683 | PR #1980
             [[ "$digest" != *"not found"* ]] \
                 || die "${ref} does not exist: channel '${pointer_channel}' has no '${slug}' image. This checkout may need another channel, e.g. LANCACHE_IMAGE_CHANNEL=${testing} ./setup.sh install."
@@ -4317,7 +4317,7 @@ EOF
             die "Failed to resolve ${ref} to a digest (${digest}). Check registry access or set LANCACHE_IMAGE_TAG to an immutable sha-* / vX.Y.Z tag."
         fi
         # What: the Digest: row when --format was ignored.
-        # Why: live: Debian buildx 0.13 prints the overview.
+        # Why: Debian buildx 0.13 prints the overview.
         # From: Issue #1683 | PR #1980
         if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ && "$digest" =~ (^|$'\n')Digest:[[:space:]]+(sha256:[0-9a-f]{64}) ]]; then
             digest="${BASH_REMATCH[2]}"
@@ -4357,7 +4357,7 @@ lancache_channel_image_refs() {
 
     printf '\n%s%s▶ Resolving image channel %s%s\n' "${BOLD}" "${CYAN}" "$channel" "${RESET}" >&2
     # What: every non-default pointer warns on each run
-    # Why: maintainer 29.10.: nightly is experimental
+    # Why: the other channels are untested daily builds
     # From: Issue #1683 | PR #1858
     install_channel=$(lancache_sot_value install_channel release) \
         || die "Cannot read release.install_channel (exit $?)."
@@ -4552,7 +4552,7 @@ migrate_env_for_update() (
     local dhcp_proxy_interface dhcp_proxy_router dhcp_ntp_servers dhcp_proxy_domain
     local dhcp_proxy_boot_filename dhcp_proxy_boot_server _dhcp_ntp_check _dhcp_ntp_ip dhcp_relay_local_addr
     # What: declares every temporary as function-local
-    # Why: undeclared names leaked as globals
+    # Why: undeclared names would leak as globals
     # From: Issue #1683 | PR #1858
     local dhcp_proxy_pxe_boot_server dhcp_proxy_pxe_boot_filename_bios dhcp_proxy_pxe_boot_filename_uefi
     local cache_dir cache_max_gb cache_max_size cache_gb cache_mem_mb ip_https ui_password ui_password_hash ui_user
@@ -4665,7 +4665,7 @@ migrate_env_for_update() (
     set_env_key_if_empty_or_missing LANCACHE_IMAGE_PREFIX "$lancache_image_prefix" "$env_file"
     set_env_key_if_empty_or_missing LANCACHE_IMAGE_CHANNEL "$lancache_image_channel" "$env_file"
     # What: a former channel name in .env becomes current
-    # Why: maintainer 29.10.: only latest and nightly
+    # Why: a former name has no stack tag of its own
     # From: Issue #1683 | PR #1858
     local env_channel current_channel
     env_channel=$(get_env_var LANCACHE_IMAGE_CHANNEL "$env_file") || exit $?
@@ -4922,7 +4922,7 @@ migrate_env_for_update() (
     ui_password_hash=$(get_env_var UI_AUTH_PASSWORD_HASH "$env_file") || exit $?
 
     # What: an install without UI login keeps running open
-    # Why: it ran so before; others take the SOT value
+    # Why: an open install stays open; others use the SOT
     # From: Issue #1683 | PR #1912
     if [[ -z "$ui_user" && -z "$ui_password" && -z "$ui_password_hash" ]]; then
         append_env_key_if_missing ALLOW_INSECURE_UI true "$env_file"
@@ -5390,6 +5390,8 @@ cmd_backup() (
     mkdir -p "$backup_root" || die "Failed to create $backup_root (exit $?)."
     old_umask=$(umask)
     umask 077
+    # What: restarts a stopped stack, drops partial output
+    # Why: any exit must leave the stack as it was found
     backup_cleanup() {
         local status=$?
         [[ "$stack_stopped" = "1" && "$stack_was_running" = "1" ]] && compose_stack_start "$install_dir"
@@ -5496,6 +5498,8 @@ cmd_restore() (
     stack_stopped=0
     stack_was_running=0
     tmp=$(mktemp -d) || die "Failed to create a temporary directory for the restore (exit $?)."
+    # What: restarts or keeps the stack, drops the workspace
+    # Why: a failed restore must not start a partial stack
     restore_cleanup() {
         local status=$? resume
         if [[ "$stack_stopped" = "1" ]]; then
@@ -5637,7 +5641,7 @@ cmd_restore() (
     # From: Issue #1683 | PR #1858
     if ! (
         # What: each step's failure ends the subshell
-        # Why: no errexit inside "if !"; failures went on
+        # Why: errexit is off inside "if !"
         # From: Issue #1683 | PR #1858
         migrate_env_for_update "$install_dir" 1 || exit $?
         if compose_stack_available "$install_dir"; then
@@ -6317,7 +6321,7 @@ rollback_stack_update() {
             print_warn "LANCACHE_IMAGE_CHANNEL is $old_channel again; set it anew and run update to retry the switch"
         fi
         # What: old stack must be healthy before success
-        # Why: success was shown with all containers exited
+        # Why: success must not show while containers are down
         # From: Issue #1683 | PR #1991
         local wait services
         local -a restored_services
@@ -6471,7 +6475,7 @@ sync_repo_to_channel_ref() {
 }
 
 # What: <state root>/<pointer>: one code dir per channel
-# Why: maintainer 29.10.: latest and nightly side by side
+# Why: each channel keeps its own code side by side
 # From: Issue #1683 | PR #1858
 channel_code_dir() {
     local pointer
@@ -6945,7 +6949,7 @@ cmd_compose() {
     env_file=$(runtime_env_file_for_install_dir "$install_dir") || exit $?
     args=("$@")
     # What: a bare "up" skips dhcp while DHCP_MODE is off
-    # Why: live 249: converge started dhcp every 5 min
+    # Why: converge must not start the dhcp the ui stopped
     # From: Issue #1683
     if [[ "${1:-}" = "up" ]]; then
         for arg in "${@:2}"; do
@@ -7589,7 +7593,7 @@ cmd_create_logs_for_issue() (
         printf '\nDisk usage:\n'
         df -h 2>&1 || printf '(df failed, exit %s)\n' "$?"
         # What: uptime, memory and processes of the host
-        # Why: audit A1-A8: load and RAM were missing
+        # Why: load and memory help to triage a report
         # From: Issue #1683 | PR #1980
         printf '\nUptime: %s\n' "$(uptime 2>&1 || printf ' (exit %s)' "$?")"
         printf '\nMemory:\n'
@@ -8097,7 +8101,7 @@ restore_update_ip_env() {
 }
 
 # What: turns the Admin UI sign-in off after a lockout
-# Why: DoMe 07.11.: a locked-out user needs a way back
+# Why: a locked-out user needs a way back in
 # From: Issue #1683 | PR #1985
 cmd_reset_sign_in() {
     ensure_default_install_dir
@@ -8112,7 +8116,7 @@ cmd_reset_sign_in() {
     install_dir=$(resolve_stack_dir "$install_dir") || exit $?
     require_root "reset-sign-in [install-dir]"
     # What: nothing changes without an explicit yes
-    # Why: DoMe 07.11.: a curious run must not lock out
+    # Why: a curious run must not open the Admin UI
     # From: Issue #1683 | PR #1985
     if [[ "$assume_yes" != "1" ]]; then
         print_warn "This removes the Admin UI password. Until you set a new one, anyone in the LAN can open the Admin UI."
@@ -8286,7 +8290,7 @@ restore_dns_upstream() {
     set_env_key DNS_UPSTREAM_UNSIGNED_ZONES "$5" "$env_file"
     set_env_key DNS_LOCAL_REVERSE_ZONES "$6" "$env_file"
     # What: the ui too; it renders the recursor files.
-    # Why: live 249: dns alone kept the new forwarders.
+    # Why: the ui renders the recursor files dns reads.
     # From: Issue #1918
     stack_compose "$install_dir" "$env_file" up -d "$dns_svc" "$ui_svc" || rc=$?
     if [[ "$rc" -ne 0 ]]; then
@@ -8304,7 +8308,7 @@ dns_upstream_is_live() {
     local wait poll waited=0 key server ok
     local -a confs=() wanted=()
     # What: the recursor files the ui renders, not /run.
-    # Why: live 249: grep of /run found none; a reject.
+    # Why: the ui writes these files; /run holds none.
     # From: Issue #1918
     for key in RECURSOR_HTTP_CONF_FILE RECURSOR_HTTPS_CONF_FILE; do
         conf=$(prod_env_default "$key") || exit $?
@@ -8783,7 +8787,7 @@ cmd_secondary() {
     done
 
     # What: --rotate may check the platform before the POST
-    # Why: a late failure would leave a rotated password
+    # Why: a platform failure must stop before registering
     # From: Issue #1683 | PR #1858
     if [[ "$rotate" -eq 1 ]]; then
         if [[ -n "$existing_env_file" ]]; then
@@ -8857,7 +8861,7 @@ cmd_secondary() {
     pdns_api_key=$(json_value .pdns_api_key "$response") || die "$bad_response"
     tsig_name=$(json_value .tsig_name "$response") || die "$bad_response"
     # What: zones the secondary pulls from the primary
-    # Why: live 229: no zone existed, so no AXFR ran
+    # Why: without a zone list no AXFR runs
     # From: Issue #1683
     local secondary_zones
     secondary_zones=$(json_value '.zones | join(" ")' "$response") || die "$bad_response"
@@ -8963,7 +8967,7 @@ cmd_secondary() {
             lancache_image_refs_for_tag "" "$lancache_image_tag") \
             || die "Cannot pin the images of ${lancache_image_tag} for the secondary (exit $?)."
         # What: dns and the ui image; render uses the ui
-        # Why: live 229: compose stopped without REF_UI
+        # Why: the secondary compose requires both image refs
         # From: Issue #1683
         for pin_key in LANCACHE_IMAGE_REF_DNS LANCACHE_IMAGE_REF_UI; do
             pin=$(awk -F= -v k="$pin_key" '$1 == k { print substr($0, length($1) + 2) }' <<< "$secondary_refs") \
@@ -9008,7 +9012,7 @@ cmd_secondary() {
     fi
 
     # What: own snmp community; kept on --rotate
-    # Why: live 229: render-dns died without it
+    # Why: the secondary render needs an SNMP community
     # From: Issue #1683
     local snmp_community=""
     if [[ -n "$existing_env_file" ]] \
@@ -9073,7 +9077,7 @@ EOF
 }
 
 # What: the SOT text, read once per setup.sh process
-# Why: each SOT read was its own cat or curl of it
+# Why: one read serves every SOT lookup of this run
 # From: Issue #1683 | PR #1912
 LANCACHE_SOT=.github/yaml/build-manifest.yml
 LANCACHE_SOT_TEXT=$(lancache_repo_file_text "$LANCACHE_SOT") || exit $?
@@ -9236,7 +9240,7 @@ print_step "Release channel"
 if [[ -n "${LANCACHE_IMAGE_CHANNEL:-}" ]]; then
     validate_lancache_image_channel "$LANCACHE_IMAGE_CHANNEL"
     # What: a former channel name is used under its new name
-    # Why: maintainer 29.10.: only latest and nightly
+    # Why: a former name has no stack tag of its own
     # From: Issue #1683 | PR #1858
     current_channel=$(lancache_stack_pointer_channel_for "$LANCACHE_IMAGE_CHANNEL") || exit $?
     if [[ "$current_channel" != "$LANCACHE_IMAGE_CHANNEL" ]]; then
@@ -9259,7 +9263,7 @@ else
     selectable=$(lancache_selectable_channels) || exit $?
     retired=$(lancache_release_rows retired) || exit $?
     # What: the default is SOT release.install_channel
-    # Why: maintainer 29.10.: latest, never nightly unwarned
+    # Why: an untested channel never installs unwarned
     # From: Issue #1683 | PR #1858
     install_channel=$(lancache_sot_value install_channel release) || exit $?
     list_has_line "$install_channel" "$selectable" \
@@ -9554,7 +9558,7 @@ if [[ "$DHCP_MODE" = "kea" ]]; then
     print_ok "DHCP enabled in Kea mode — Subnet: $DHCP_SUBNET, Pool: $DHCP_RANGE_START–$DHCP_RANGE_END"
     print_warn "Before Kea is activated, setup will run a non-invasive DHCP discovery preflight."
     # What: names the fence the dhcp container sets itself
-    # Why: its entrypoint owns the rule; a copy here drifted
+    # Why: its entrypoint owns the rule
     # From: Issue #1683 | PR #1858
     print_ok "The dhcp container limits the Kea control API to loopback and Docker networks."
     printf "\n"
@@ -9706,7 +9710,7 @@ UI_AUTH_PASSWORD=""
 UI_AUTH_PASSWORD_HASH=""
 ALLOW_INSECURE_UI=""
 # What: ask again until protection or open access is chosen
-# Why: a "no" to both used to end the whole install
+# Why: a "no" to both must not end the install
 # From: Issue #1683 | PR #1980
 while true; do
 if confirm "Protect Admin-UI with password? [y/N]" "N"; then
@@ -10002,7 +10006,7 @@ fi
 print_step "Installing host services"
 
 # What: asks before taking units of another install
-# Why: live test 05.11.: units of an old path were replaced
+# Why: units of another install are not taken silently
 # From: Issue #1683 | PR #1980
 host_unit_dir=$(runtime_default_in "$(runtime_defaults_list)" SYSTEMD_UNIT_DIR) || exit $?
 host_unit_owner=""
@@ -10229,7 +10233,7 @@ printf "    Status:  %s/setup.sh debug\n"  "$SCRIPT_DIR"
 printf "    Update:  %s/setup.sh update\n" "$SCRIPT_DIR"
 printf "\n"
 # What: show the token a secondary registers with
-# Why: it was only written to .env, never shown
+# Why: the operator needs it to register a secondary
 # From: Issue #1683 | PR #1980
 printf '  %sSecondary DNS token:%s %s\n' "${BOLD}" "${RESET}" "${SECONDARY_REGISTRATION_TOKEN:-}"
 printf "    Also in the Admin-UI: DNS, Secondary DNS.\n"
