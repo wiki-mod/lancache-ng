@@ -8525,7 +8525,7 @@ cmd_secondary() {
     local preflight_registry preflight_prefix preflight_channel preflight_env_tag
     local preflight_tag preflight_verified_registry="" preflight_verified_prefix="" preflight_verified_tag=""
     local secondary_env_file bad_response secondary_compose
-    local channel_words pinned release dns_port
+    local channel_words pinned dns_port primary_channel primary_tag_hint
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -8908,23 +8908,24 @@ cmd_secondary() {
 
     channel_words=$(lancache_channel_words) || exit $?
     pinned=$(lancache_release_rows pinned) || exit $?
-    release=$(lancache_release_rows release) || exit $?
-    lancache_image_channel="${LANCACHE_IMAGE_CHANNEL:-}"
-    if [[ -z "$lancache_image_channel" && -n "$existing_env_file" ]]; then
-        lancache_image_channel=$(get_env_var LANCACHE_IMAGE_CHANNEL "$existing_env_file") || exit $?
-    fi
-    if [[ -z "$lancache_image_channel" && -n "$response_image_channel" ]]; then
-        lancache_image_channel="$response_image_channel"
-    fi
-    if [[ -z "$lancache_image_channel" && -n "${response_image_tag:-}" ]] \
+    # What: the channel chosen above, checked against the primary
+    # Why: the clone runs before the primary names its channel
+    # From: Issue #1683 | PR #2017
+    lancache_image_channel=$(lancache_stack_pointer_channel_for "$LANCACHE_IMAGE_CHANNEL") || exit $?
+    primary_channel="$response_image_channel"
+    if [[ -z "$primary_channel" && -n "$response_image_tag" ]] \
         && list_has_line "$response_image_tag" "$channel_words"; then
-        lancache_image_channel="$response_image_tag"
+        primary_channel="$response_image_tag"
+    elif [[ -z "$primary_channel" && "$response_image_tag" =~ ^(sha-|v[0-9]) ]]; then
+        primary_channel="$pinned"
     fi
-    if [[ -z "$lancache_image_channel" && "${response_image_tag:-}" =~ ^(sha-|v[0-9]) ]]; then
-        lancache_image_channel="$pinned"
+    if [[ -n "$primary_channel" ]]; then
+        primary_channel=$(lancache_stack_pointer_channel_for "$primary_channel") || exit $?
+        primary_tag_hint=""
+        [[ "$primary_channel" != "$pinned" ]] || primary_tag_hint=" LANCACHE_IMAGE_TAG=${response_image_tag}"
+        [[ "$primary_channel" = "$lancache_image_channel" ]] \
+            || die "The primary runs the ${primary_channel} channel, this secondary chose ${lancache_image_channel}; nothing was written here. The primary lists '${name}' already; a rerun replaces that entry: LANCACHE_IMAGE_CHANNEL=${primary_channel}${primary_tag_hint} ./setup.sh secondary ..."
     fi
-    lancache_image_channel="${lancache_image_channel:-$release}"
-    validate_lancache_image_channel "$lancache_image_channel"
 
     explicit_lancache_image_tag="${LANCACHE_IMAGE_TAG:-}"
     tag_input="$explicit_lancache_image_tag"
