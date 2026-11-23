@@ -5869,6 +5869,9 @@ Commands:
                        of answers, without touching the filesystem, network,
                        or Docker. See './setup.sh list-prompts --help'.
   update [install-dir] Update an existing stack. Default dir: ${DEFAULT_INSTALL_DIR}
+  auto-update [install-dir]
+                       Run the scheduled update check now; the update timer
+                       calls it. Default dir: ${DEFAULT_INSTALL_DIR}
   update-ip [install-dir]
                        Change the configured HTTP and HTTPS listener IPs.
                        Default dir: ${DEFAULT_INSTALL_DIR}
@@ -5877,6 +5880,9 @@ Commands:
                        for names LanCache-NG does not know.
                        Default dir: ${DEFAULT_INSTALL_DIR}
   debug [install-dir]  Print diagnostic information for an existing stack.
+  compose <install-dir> <compose args>
+                       Run docker compose with the files and settings of the
+                       stack, for example: compose <install-dir> ps
   create-logs-for-issue [install-dir]
                        Bundle redacted logs/config into an archive to attach
                        to a GitHub bug report.
@@ -9380,7 +9386,7 @@ case "$setup_command" in
         # From: Issue #1683 | PR #1858
         shift; cmd_openrc_loop "$@"; exit 0 ;;
     compose)
-        # What: internal; units and recovery hints call it
+        # What: docker compose for the stack; also for units
         # Why: compose always needs the stack's file list
         # From: Issue #1683 | PR #1858
         shift; cmd_compose "$@"; exit 0 ;;

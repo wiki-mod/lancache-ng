@@ -57,7 +57,7 @@ Valid for `current_dev` at `e223782d`. Section 9 lists what is not verified.
   | `setup.sh update-ip [install-dir]` | change the HTTP and HTTPS listener IP addresses |
   | `setup.sh backup [--config\|--full] [install-dir] [--dest <path>]` | create a backup archive |
   | `setup.sh restore <archive> [install-dir]` | restore a backup archive |
-  | `setup.sh compose <install-dir> <compose arguments>` | internal; runs Docker Compose with the stack's file list (used by units and recovery hints) |
+  | `setup.sh compose <install-dir> <compose arguments>` | runs Docker Compose with the stack's file list (used by units, recovery hints and this guide) |
   | `setup.sh configure-upstream-dns` | set the upstream DNS servers |
   | `setup.sh reset-to-last-known-good-config <service> ...` | roll back a Kea configuration or a DNS zone (section 6) |
 
