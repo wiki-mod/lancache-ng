@@ -4763,9 +4763,7 @@ migrate_env_for_update() (
     # Why: a platform failure leaves other keys untouched
     # From: Issue #1683 | PR #1858
     lancache_image_registry=$(resolve_lancache_image_registry "$env_file") || exit $?
-    validate_lancache_image_registry "$lancache_image_registry"
     lancache_image_prefix=$(resolve_lancache_image_prefix "$env_file") || exit $?
-    validate_lancache_image_prefix "$lancache_image_prefix"
     lancache_image_channel=$(resolve_lancache_image_channel "$env_file") || exit $?
     existing_image_tag=$(get_env_var LANCACHE_IMAGE_TAG "$env_file") || exit $?
     # What: a short v0.3 sha- pin leaves .env, not the run
