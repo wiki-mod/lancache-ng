@@ -585,7 +585,8 @@ Further requirements:
   | swap | make `lab.lan` the main domain | `DHCP_DOMAIN=lab.lan`, the old main is in `DNS_EXTRA_LAN_DOMAINS`, both zones keep their records |
   | DDNS | Kea subnet with domain `lab.lan`, DDNS on, a client takes a lease | the client name appears in `lab.lan`, not in the main domain |
   | legacy zone | start the ui on a PowerDNS database that holds `local.<domain>` with one record | the record is in `<domain>` under the same name, `local.<domain>` is deleted, both snapshots exist; a second start changes nothing |
-  | PTR | add an A record with "PTR" ticked, then delete the A record | the PTR appears in its reverse zone and disappears with the A record; an address outside every reverse zone shows a message |
+  | PTR | add an A record with "PTR" ticked, then delete the A record | the PTR appears in its reverse zone and disappears with the A record; a PTR that names another host stays; an address outside every reverse zone shows a message; a second name on the same address does not silently replace the PTR |
+  | PTR afterwards | add three A records without "PTR", then add one PTR with the button in the LAN record table and the others with "add all" on the PTR tab | `dig -x` answers the name for all three |
 
   The secondary side of these cases is in section 10.5.
 
@@ -896,7 +897,10 @@ PR #2019):
   from `--name` and does not check it; with `--name lancache-ng` it replaces the
   primary's `dns` container and uses its volumes;
 - 10.2 PTR: an address outside every reverse zone is skipped without a
-  message, and deleting an A record leaves its PTR in place.
+  message, deleting an A record leaves its PTR in place, and a second name on
+  the same address replaces the PTR without a message;
+- 10.2 PTR afterwards: there is no way to add the missing PTR of an existing A
+  record other than typing address and name on the PTR tab.
 
 ### 11.5 Failure classes from the release run
 
