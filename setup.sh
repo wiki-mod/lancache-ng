@@ -1885,17 +1885,12 @@ warn_env_key_overridden() {
 }
 
 # What: sets KEY=VALUE after validating its characters
-# Why: duplicate lines are dropped, one assignment remains
+# Why: the write is set_env_assignment's; one writer
 # From: Issue #1683 | PR #1858
 set_env_key() {
     local key="$1" value="$2" env_file="$3"
     validate_env_value "$key" "$value"
-    if env_key_exists "$key" "$env_file"; then
-        rewrite_env_key "$env_file" "$key" "$value" set
-    else
-        append_env_line "$env_file" "$key" "$value"
-    fi
-    warn_env_key_overridden "$key" "$env_file"
+    set_env_assignment "$key" "$value" "$env_file"
 }
 
 # What: dies on a bad .env key or a newline in a raw value
@@ -1915,7 +1910,7 @@ validate_env_assignment() {
     esac
 }
 
-# What: sets raw value without character validation
+# What: writes KEY=raw value: one line stays for the key
 # Why: raw values may contain ${VAR} interpolation
 # From: Issue #1683 | PR #1858
 set_env_assignment() {
