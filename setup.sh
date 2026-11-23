@@ -450,6 +450,13 @@ dns_upstream_answers() {
     [[ "$failed" = 0 ]]
 }
 
+# What: true for the answer all or domains, any case
+# Why: the check of the forward question for ask_checked
+# From: Issue #1918 | PR #2017
+is_dns_forward_scope() {
+    [[ "${1,,}" = "all" || "${1,,}" = "domains" ]]
+}
+
 # What: asks the optional upstream DNS questions
 # Why: install and configure-upstream-dns ask the same
 # From: Issue #1918 | PR #1858
@@ -487,12 +494,8 @@ prompt_dns_upstream() {
     printf "  this server. domains: only the domains you list (for example\n"
     printf "  fritz.box or firma.local) go there; LanCache-NG looks up all\n"
     printf "  other names on the internet itself.\n"
-    while true; do
-        ask "Forward all names, or only some domains? [all/domains]" "$scope"
-        [[ "${REPLY,,}" = "all" || "${REPLY,,}" = "domains" ]] && break
-        print_error "Please answer 'all' or 'domains'"
-    done
-    if [[ "${REPLY,,}" = "domains" ]]; then
+    ask_checked scope "Forward all names, or only some domains? [all/domains]" "$scope" is_dns_forward_scope "Not 'all' or 'domains'"
+    if [[ "${scope,,}" = "domains" ]]; then
         while true; do
             ask "Domains to forward (space or comma separated)" "$zones"
             read -r -a entries <<< "${REPLY//,/ }"
