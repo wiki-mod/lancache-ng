@@ -9661,13 +9661,13 @@ else
 fi
 
 # What: the LAN domain of all local names
-# Why: own step; default lancache-ng.lan
+# Why: own step; texts and offer show the SOT default
 # From: Issue #1683 | PR #1980
 print_step "LAN domain"
-printf "  Every local name ends in this domain. With lancache-ng.lan\n"
-printf "  a printer is printer.lancache-ng.lan; with lan printer.lan.\n\n"
 DHCP_DOMAIN=$(prod_env_default DHCP_DOMAIN) || exit $?
-ask_checked DHCP_DOMAIN "LAN domain" "$DHCP_DOMAIN" is_valid_dns_name "Not a domain like lancache-ng.lan or lan" 0 dns_name_normalized
+printf "  Every local name ends in this domain. With %s\n" "$DHCP_DOMAIN"
+printf "  a printer is printer.%s; with lan printer.lan.\n\n" "$DHCP_DOMAIN"
+ask_checked DHCP_DOMAIN "LAN domain" "$DHCP_DOMAIN" is_valid_dns_name "Not a domain like ${DHCP_DOMAIN} or lan" 0 dns_name_normalized
 print_ok "LAN domain: $DHCP_DOMAIN"
 
 # What: optional external DNS server for unknown names
