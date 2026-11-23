@@ -9346,7 +9346,7 @@ printf "  This script sets up LanCache-NG and starts all containers.\n"
 printf "  After: ./setup.sh update  |  ./setup.sh debug  |  ./setup.sh update-ip\n"
 printf "  Help:  ./setup.sh --help (use './setup.sh <command> --help' for details)\n"
 
-# What: step 1: list-prompts skips root, Docker, git checks
+# What: list-prompts skips root, Docker, git checks
 # Why: lets list-prompts run cheaply in CI
 # From: Issue #1683 | PR #1858
 if [[ "$WIZARD_INTROSPECT_MODE" != "1" ]]; then
@@ -9356,7 +9356,7 @@ if [[ "$WIZARD_INTROSPECT_MODE" != "1" ]]; then
 
     ensure_stack_requirements_installed
 
-    # What: no checkout here: step 1b clones the code
+    # What: no checkout here: the channel step clones it
     # Why: it goes straight into the chosen channel's dir
     # From: Issue #1683 | PR #1858
     if [[ ! -f "$PROD_COMPOSE" ]]; then
@@ -9380,7 +9380,7 @@ if [[ "$WIZARD_INTROSPECT_MODE" != "1" ]]; then
     fi
 fi
 
-# What: step 1a: the image channel to install
+# What: the image channel to install
 # Why: first, so the checkout can follow it before asking
 # From: Issue #1683 | PR #1858
 print_step "Release channel"
@@ -9456,14 +9456,14 @@ else
     done
 fi
 
-# What: step 1b: setup runs from the channel's dir
+# What: setup runs from the channel's dir
 # Why: compose files and images from one ref at once
 # From: Issue #1683 | PR #1858
 if [[ "$WIZARD_INTROSPECT_MODE" != "1" ]]; then
     install_repo_follow_channel "$LANCACHE_IMAGE_CHANNEL" "$@"
 fi
 
-# What: step 2: LAN IPs and HTTPS mode
+# What: LAN IPs and HTTPS mode
 # Why: the DNS and proxy containers listen on these IPs
 # From: Issue #1683 | PR #1858
 print_step "Network configuration"
@@ -9511,7 +9511,7 @@ if confirm "Enable HTTPS mode?" "$https_yn"; then
 fi
 print_ok "HTTPS mode $([[ "$HTTPS_ENABLED" = 1 ]] && echo enabled || echo disabled) (second IP $IP_HTTPS)"
 
-# What: step 3: the directory for all persistent state
+# What: the directory for all persistent state
 # Why: cache, DNS, DHCP and NTP data live below it
 # From: Issue #1683 | PR #1858
 print_step "Data directory"
@@ -9539,7 +9539,7 @@ if [[ "$WIZARD_INTROSPECT_MODE" != "1" ]]; then
     mkdir -p "$LANCACHE_STATE_DIR"
 fi
 
-# What: step 4: cache directory, size and RAM buffer
+# What: cache directory, size and RAM buffer
 # Why: nginx needs size and keys_zone before it starts
 # From: Issue #1683 | PR #1858
 print_step "Cache configuration"
@@ -9564,7 +9564,7 @@ CACHE_MEM_MB=""
 ask_checked CACHE_MEM_MB "RAM for the cache index in MB" "$default_cache_mem_mb" is_positive_integer "Not a positive number"
 CACHE_MEM_MB=$((10#$CACHE_MEM_MB))
 
-# What: step 6: scheduled updates by a host service
+# What: scheduled updates by a host service
 # Why: Watchtower cannot verify health or roll back
 # From: Issue #1683 | PR #1858
 print_step "Scheduled automatic updates"
@@ -9588,7 +9588,7 @@ else
     print_warn "Scheduled automatic updates disabled — manual updates with: ./setup.sh update"
 fi
 
-# What: step: the LAN domain of all local names
+# What: the LAN domain of all local names
 # Why: own step; default lancache-ng.lan
 # From: Issue #1683 | PR #1980
 print_step "LAN domain"
@@ -9610,7 +9610,7 @@ else
     print_ok "No external DNS server; LanCache-NG resolves names itself"
 fi
 
-# What: step 7: DHCP mode and its addresses
+# What: DHCP mode and its addresses
 # Why: each mode needs its own set of keys
 # From: Issue #1683 | PR #1858
 print_step "DHCP mode"
@@ -9776,14 +9776,14 @@ else
     print_ok "DHCP skipped — existing router DHCP remains active"
 fi
 
-# What: step 7a: local private PTR zones, SOT default off
+# What: local private PTR zones, SOT default off
 # Why: kea DDNS writes PTR records into these zones
 # From: Issue #1918 | PR #1858
 print_step "Reverse lookups (PTR)"
 install_reverse_zones=$(prod_env_default DNS_LOCAL_REVERSE_ZONES) || exit $?
 prompt_dns_local_reverse_zones "$install_reverse_zones" "$DHCP_MODE"
 
-# What: step 7b: asks for the NTP start value
+# What: asks for the NTP start value
 # Why: the watchdog runs chronyd in the services container
 # From: Issue #1683 | PR #1912
 print_step "LanCache-NG-NTP"
@@ -9807,7 +9807,7 @@ else
     print_ok "LanCache-NG-NTP skipped — can be enabled later from the Admin UI"
 fi
 
-# What: step 8: Admin UI login and bind address
+# What: Admin UI login and bind address
 # Why: the Admin UI controls the whole stack
 # From: Issue #1683 | PR #1858
 print_step "Admin-UI access control"
@@ -9875,7 +9875,7 @@ else
 fi
 done
 
-# What: step 9: writes .env in one atomic step
+# What: writes .env in one atomic step
 # Why: a half-written .env must never exist
 # From: Issue #1683 | PR #1858
 print_step "Writing .env"
@@ -10083,7 +10083,7 @@ print_ok ".env written: $ENV_FILE"
 write_lancache_image_refs "$ENV_FILE" "$LANCACHE_IMAGE_REFS"
 merge_retired_ui_settings "$INSTALL_DIR" "$ENV_FILE" retire
 
-# What: step 10: creates the state directories
+# What: creates the state directories
 # Why: compose bind mounts need existing directories
 # From: Issue #1683 | PR #1858
 print_step "Creating directories"
@@ -10113,7 +10113,7 @@ else
     print_warn "Could not chown $syslog_ng_log_dir to uid $runtime_id ($chown_err) -- the services container may not be able to write logs there. See docs/architecture-ng.md's syslog-ng section, or chown it manually before starting the stack."
 fi
 
-# What: step 11: boot start, convergence, daily update
+# What: boot start, convergence, daily update
 # Why: units are enabled only after the first pull succeeds
 # From: Issue #1683 | PR #1858
 print_step "Installing host services"
@@ -10146,7 +10146,7 @@ fi
 # From: Issue #1683 | PR #1858
 fi
 
-# What: step 12: shows the answers, asks to start
+# What: shows the answers, asks to start
 # Why: nothing starts without the operator yes
 # From: Issue #1683 | PR #1858
 printf "\n"
@@ -10224,7 +10224,7 @@ confirm "Start now?" "Y" || start_now=0
 [[ "$WIZARD_INTROSPECT_MODE" != "1" ]] \
     || { printf "\n  Start later with: %s compose %s up -d\n\n" "$SCRIPT_DIR/setup.sh" "$INSTALL_DIR"; exit 0; }
 
-# What: step 13: pulls images before enabling any unit
+# What: pulls images before enabling any unit
 # Why: failed first installs stay reversible
 # From: Issue #1683 | PR #1858
 if is_deploy_prod_install_dir "$INSTALL_DIR"; then
@@ -10309,7 +10309,7 @@ else
     print_ok "All containers are healthy"
 fi
 
-# What: step 14: Admin UI URL from the ui port mapping
+# What: Admin UI URL from the ui port mapping
 # Why: compose owns IP and port; a print never aborts setup
 # From: Issue #1683 | PR #1858
 ui_url_rc=0
