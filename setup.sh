@@ -5922,7 +5922,7 @@ for validating a pre-release branch the same documented one-liner way that
 LANCACHE_IMAGE_CHANNEL already selects a specific image channel.
 EOF
             ;;
-        install-requirements|install-requirements-primary|install-requirements-secondary)
+        install-requirements)
             cat <<EOF
 Usage: ./setup.sh install-requirements
 
@@ -9319,6 +9319,8 @@ setup_command="$1"
 case "$setup_command" in
     --secondary) setup_command=secondary ;;
     --reconfigure|reconfigure) setup_command=update-ip ;;
+    install-requirements-primary|install-requirements-secondary)
+        setup_command=install-requirements ;;
 esac
 # What: "<command> --help" asks print_command_help
 # Why: one check; that function owns the help list
@@ -9355,7 +9357,7 @@ case "$setup_command" in
             WIZARD_INTROSPECT_ANSWERS_FD=9
         fi
         ;;
-    install-requirements|install-requirements-primary|install-requirements-secondary)
+    install-requirements)
         cmd_install_requirements; exit 0 ;;
     update)
         cmd_update "${2:-$DEFAULT_INSTALL_DIR}"; exit 0 ;;
