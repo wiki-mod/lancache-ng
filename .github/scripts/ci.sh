@@ -7296,67 +7296,19 @@ _ci_docker_build() {
     printf '%s\n' "${tag}"
 }
 
-# What: In-image apk setup: repos, update, upgrade, add.
+# What: in-image apk setup: http repos, update, add.
 # Why: one owner for http repos + update+upgrade + packages.
-# From: Issue #1683
+# From: Issue #1683 | PR #2017
 ci_cmd_apk_setup() {
-    local root="${CI_APK_ROOT:-}" out kv name bundle=""
-    local repos="${root}/etc/apk/repositories" ca
-    ca="${root}$(_ci_secret_file project_selfhosted_proxy_ca)"
+    local root="${CI_APK_ROOT:-}" out
+    local repos="${root}/etc/apk/repositories"
     if ! out="$(sed -i 's|^https://|http://|' "${repos}" 2>&1)"; then
         ci_error "[CI-ERROR-APKSETUP-0001]" "reason=\"apk repositories not switched to http\"" "${out}"
         return 2
     fi
-    # What: proxy CA only for this process, never the image.
-    # Why: https fetches pass the TLS proxy; no undo step.
-    # From: Issue #1683 | PR #1858
-    if [ -s "${ca}" ]; then
-        bundle="$(_ci_ca_bundle "[CI-ERROR-APKSETUP-0002]" "${root}${CI_SYSTEM_CA_PATH}" "$(<"${ca}")")" || return 2
-        export SSL_CERT_FILE="${bundle}"
-    fi
-    local -a plain_pkgs=() tagged_pkgs=()
-    for kv in "$@"; do
-        case "${kv}" in *@*) tagged_pkgs+=("${kv}") ;; *) plain_pkgs+=("${kv}") ;; esac
-    done
     _ci_apk_step update || return 2
     _ci_apk_step upgrade || return 2
-    [ "${#plain_pkgs[@]}" -eq 0 ] || _ci_apk_step add "${plain_pkgs[@]}" || return 2
-    [ -n "${APK_KEYS:-}${APK_TAGGED_REPOS:-}" ] || [ "${#tagged_pkgs[@]}" -gt 0 ] || { [ -z "${bundle}" ] || rm -f "${bundle}"; return 0; }
-    # What: tagged repos after the plain set; keys via curl.
-    # Why: the fetch owner needs curl, which apk just added.
-    # From: Issue #1683 | PR #1858
-    for kv in ${APK_KEYS:-}; do
-        name="${kv%=*}"; name="${name##*/}"
-        _ci_fetch_verified "${kv%=*}" "${kv##*=}" "${root}/etc/apk/keys/${name}" || return 2
-    done
-    # What: @ALPINE_BRANCH@ is vX.Y of this image's alpine.
-    # Why: the base is latest; the image knows its branch.
-    # From: Issue #1683 | PR #1858
-    local tagged="${APK_TAGGED_REPOS:-}" rel
-    case "${tagged}" in
-        *@ALPINE_BRANCH@*)
-            if ! rel="$(cat "${root}/etc/alpine-release" 2>&1)"; then
-                ci_error "[CI-ERROR-APKSETUP-0006]" "path=\"${root}/etc/alpine-release\" reason=\"no alpine release; no repo branch\"" "${rel}"
-                return 2
-            fi
-            if [[ ! "${rel}" =~ ^([0-9]+\.[0-9]+)\. ]]; then
-                ci_log "[CI-ERROR-APKSETUP-0007]" "release=\"${rel}\" reason=\"alpine release is not X.Y.Z; no repo branch\""
-                return 2
-            fi
-            _ci_fill "${tagged}" "ALPINE_BRANCH=v${BASH_REMATCH[1]}" || return 2
-            tagged="${REPLY}"
-            ;;
-    esac
-    for kv in ${tagged}; do
-        kv="@${kv%%=*} ${kv#*=}"
-        if ! out="$(printf '%s\n' "${kv}" 2>&1 >> "${repos}")"; then
-            ci_error "[CI-ERROR-APKSETUP-0004]" "repo=\"${kv}\" reason=\"tagged repo not added\"" "${out}"
-            return 2
-        fi
-    done
-    _ci_apk_step update || return 2
-    [ "${#tagged_pkgs[@]}" -eq 0 ] || _ci_apk_step add "${tagged_pkgs[@]}" || return 2
-    [ -z "${bundle}" ] || rm -f "${bundle}"
+    [ "$#" -eq 0 ] || _ci_apk_step add "$@" || return 2
 }
 
 # What: In-image accounts and directories from IMAGE_SETUP.
@@ -14143,13 +14095,6 @@ _ci_build_tools_build_args() {
     out="${out}${prefix}APK_PACKAGES=${pkgs}"$'\n'
     pkgs="$(_ci_apk_bootstrap_arg "${prefix}")" || return 2
     out="${out}${pkgs}"$'\n'
-    # What: add SOT tagged repos as build-arg
-    # Why: Dockerfile adds them; never owns URL
-    # From: Issue #1683 | PR #1858
-    pkgs="$(_ci_apk_repositories "${tool}")" || return 2
-    out="${out}${prefix}APK_TAGGED_REPOS=${pkgs}"$'\n'
-    pkgs="$(_ci_apk_keys "${tool}")" || return 2
-    [ -z "${pkgs}" ] || out="${out}${prefix}APK_KEYS=${pkgs}"$'\n'
     printf '%s' "${out}"
 }
 
@@ -14422,14 +14367,6 @@ _ci_service_build_args() {
     fi
     apk_pkgs="$(_ci_apk_bootstrap_arg "${prefix}")" || return 2
     out="${out}${apk_pkgs}"$'\n'
-    # What: the service's tagged repos and repo keys.
-    # Why: apk-setup adds them; the Dockerfile owns none.
-    # From: Issue #1683 | PR #1858
-    local tagged keys
-    tagged="$(_ci_apk_repositories "${service}")" || return 2
-    keys="$(_ci_apk_keys "${service}")" || return 2
-    [ -z "${tagged}" ] || out="${out}${prefix}APK_TAGGED_REPOS=${tagged}"$'\n'
-    [ -z "${keys}" ] || out="${out}${prefix}APK_KEYS=${keys}"$'\n'
     printf '%s' "${out}"
 }
 
@@ -14454,24 +14391,6 @@ ci_cmd_build_args() {
         ci_log "[CI-ERROR-BUILDARGS-0002]" "service=\"${service}\" reason=\"not a SOT build target\""
         return 2
     fi
-}
-
-# What: a target's SOT apk_repositories, space-joined.
-# Why: each target resolves with its own repos only.
-# From: Issue #1683
-_ci_apk_repositories() {
-    local out
-    out="$(_ci_target_list "$1" apk_repositories)" || return 2
-    printf '%s' "${out//$'\n'/ }"
-}
-
-# What: a target's SOT apk_keys (url=sha256), space-joined.
-# Why: one key list for apk-setup and the apk resolver.
-# From: Issue #1683 | PR #1858
-_ci_apk_keys() {
-    local out
-    out="$(_ci_target_list "$1" apk_keys)" || return 2
-    printf '%s' "${out//$'\n'/ }"
 }
 
 # What: the toolchain target's apk list; empty fails.
