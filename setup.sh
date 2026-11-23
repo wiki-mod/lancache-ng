@@ -594,9 +594,7 @@ prompt_dns_local_reverse_zones() {
     printf "  the external DNS server or the internet. LanCache-NG can\n"
     printf "  answer them itself instead, from its own reverse zones.\n\n"
     DNS_LOCAL_REVERSE_ZONES=0
-    if confirm "Answer private reverse lookups locally?" "$yn"; then
-        DNS_LOCAL_REVERSE_ZONES=1
-    fi
+    confirm_flag DNS_LOCAL_REVERSE_ZONES "Answer private reverse lookups locally?" "$yn"
 }
 
 # What: true for a boot filename without blank or comma
@@ -945,6 +943,14 @@ confirm() {
         esac
         print_warn "Answer y or n (got '$REPLY')."
     done
+}
+
+# What: sets $1 to 1 when a yes/no question gets a yes
+# Why: one owner of an answer kept as a 1/0 setting
+# From: Issue #1683 | PR #2017
+confirm_flag() {
+    local -n _confirm_flag_ref="$1"
+    ! confirm "$2" "$3" || _confirm_flag_ref=1
 }
 
 # What: runs a broadcast DHCP probe before Kea activation
@@ -9574,9 +9580,7 @@ printf '  %sHTTPS mode%s: also caches HTTPS downloads (Epic, EA, Blizzard…)\n'
 printf "  Requires a CA certificate on clients.\n\n"
 https_yn=$(yn_default HTTPS_ENABLED) || exit $?
 HTTPS_ENABLED=0
-if confirm "Enable HTTPS mode?" "$https_yn"; then
-    HTTPS_ENABLED=1
-fi
+confirm_flag HTTPS_ENABLED "Enable HTTPS mode?" "$https_yn"
 print_ok "HTTPS mode $([[ "$HTTPS_ENABLED" = 1 ]] && echo enabled || echo disabled) (second IP $IP_HTTPS)"
 
 # What: the directory for all persistent state
@@ -9653,9 +9657,7 @@ printf "  Default: %s. Update manually any time with: ./setup.sh update\n\n" \
     "$([[ "$auto_update_yn" = "Y" ]] && echo enabled || echo disabled)"
 
 AUTO_UPDATE_ENABLED=0
-if confirm "Enable scheduled automatic updates?" "$auto_update_yn"; then
-    AUTO_UPDATE_ENABLED=1
-fi
+confirm_flag AUTO_UPDATE_ENABLED "Enable scheduled automatic updates?" "$auto_update_yn"
 if [[ "$AUTO_UPDATE_ENABLED" = 1 ]]; then
     print_ok "Scheduled automatic updates enabled (ordered, health-gated, daily)"
 else
@@ -9870,9 +9872,7 @@ printf "  upstream server list are then configured from the Admin UI.\n"
 printf "  Default: %s.\n\n" "$([[ "$ntp_yn" = "Y" ]] && echo enabled || echo disabled)"
 
 NTP_ENABLED=0
-if confirm "Enable LanCache-NG-NTP?" "$ntp_yn"; then
-    NTP_ENABLED=1
-fi
+confirm_flag NTP_ENABLED "Enable LanCache-NG-NTP?" "$ntp_yn"
 ntp_subdir=$(prod_env_default STATE_SUBDIR_NTP) || exit $?
 NTP_DATA_DIR="$LANCACHE_STATE_DIR/$ntp_subdir"
 if [[ "$NTP_ENABLED" = "1" ]]; then
