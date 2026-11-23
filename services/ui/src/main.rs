@@ -998,7 +998,7 @@ async fn domains(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     // Why: the row shows it and offers the matching button.
     // From: Issue #1683
     let (ns, off) = (s.list("DNS_SECONDARY_NS"), s.list("DNS_SECONDARY_NS_OFF"));
-    let peers: Vec<Value> = secondaries(&s)
+    let peers: Vec<Value> = lancache_ng::pdns_conf::secondaries(&s)
         .into_iter()
         .map(|(name, address)| {
             let state = if ns.contains(&name) {
@@ -1268,24 +1268,11 @@ fn registration_token(s: &Settings) -> Result<String, String> {
     .map_err(|e| e.to_string())
 }
 
-// What: secondaries as (name, address).
-// Why: SOT list "name@ip" drives pdns and ui.
-// From: Issue #1683 | PR #1858
-fn secondaries(s: &Settings) -> Vec<(String, String)> {
-    let mut out = Vec::new();
-    for row in s.list("DNS_SECONDARIES") {
-        if let Some((name, addr)) = row.split_once('@') {
-            out.push((name.to_string(), addr.to_string()));
-        }
-    }
-    out
-}
-
 // What: saves secondaries as name@address rows.
 // Why: one SOT key holds the whole list.
 async fn store_secondaries(app: &App, list: &[(String, String)]) -> Result<(), String> {
-    let rows: Vec<String> = list.iter().map(|(n, a)| format!("{n}@{a}")).collect();
-    commit(app, single_field("DNS_SECONDARIES", rows.join(" "))).await
+    let rows = lancache_ng::pdns_conf::secondary_rows(list);
+    commit(app, single_field("DNS_SECONDARIES", rows)).await
 }
 
 fn is_ip(text: &str) -> bool {
@@ -1348,7 +1335,7 @@ async fn register(
     if !secret::equal(&r.token, &token) {
         return Err(Fail(StatusCode::UNAUTHORIZED, "wrong token".into()));
     }
-    let mut list = secondaries(&s);
+    let mut list = lancache_ng::pdns_conf::secondaries(&s);
     // What: sent address, else stored, else the peer IP.
     // Why: re-registration keeps a manual override.
     // From: Issue #1683 | PR #1858
@@ -1405,7 +1392,7 @@ async fn secondary_action(
 ) -> Page {
     csrf.check_header(&headers)?;
     let s = app.settings();
-    let mut list = secondaries(&s);
+    let mut list = lancache_ng::pdns_conf::secondaries(&s);
     let Some(at) = list.iter().position(|(n, _)| *n == name) else {
         return Err(Fail(StatusCode::NOT_FOUND, "no such secondary".into()));
     };
@@ -1416,8 +1403,8 @@ async fn secondary_action(
             // Why: a new secondary of that name starts new.
             // From: Issue #1683
             let mut form = ns_change(&s, &name, None);
-            let rows: Vec<String> = list.iter().map(|(n, a)| format!("{n}@{a}")).collect();
-            form.insert("DNS_SECONDARIES".into(), rows.join(" "));
+            let rows = lancache_ng::pdns_conf::secondary_rows(&list);
+            form.insert("DNS_SECONDARIES".into(), rows);
             commit(&app, form).await?;
             drop_peer_records(&app.settings(), &name, &address).await?;
             rotate_tsig(&app).await?;
@@ -1563,7 +1550,7 @@ async fn watch_round(
     failing: &mut BTreeMap<String, Failing>,
 ) -> Result<(), String> {
     let ours = pdns_api(s)?.zones().await?;
-    let peers = secondaries(s);
+    let peers = lancache_ng::pdns_conf::secondaries(s);
     failing.retain(|n, _| peers.iter().any(|(p, _)| p == n));
     let enabled = s.flag("DNS_SECONDARY_NS_ENABLED")?;
     let auto = s.flag("DNS_SECONDARY_NS_AUTO_REMOVE")?;
@@ -1670,7 +1657,7 @@ async fn zone_overview(State(app): Shared) -> Page {
     let s = app.settings();
     let mut columns = vec![json!({"name": "Primary", "error": Value::Null})];
     let mut lists = vec![pdns_api(&s)?.zones().await?];
-    for (name, address) in secondaries(&s) {
+    for (name, address) in lancache_ng::pdns_conf::secondaries(&s) {
         match remote_zones(&s, &address).await {
             Ok(z) => {
                 columns.push(json!({"name": name, "error": Value::Null}));
@@ -3319,7 +3306,7 @@ async fn ensure_soa_nameserver(s: &Settings, api: &lancache_ng::pdns::Api) -> Re
     // What: A or AAAA and PTR of each secondary.
     // Why: an NS name needs an address; logs show names.
     // From: Issue #1683
-    for (name, address) in secondaries(s) {
+    for (name, address) in lancache_ng::pdns_conf::secondaries(s) {
         let host = peer_host(s, &name)?;
         let kind = lancache_ng::dns::address_kind(&address);
         ensure_rrset(api, &lan, &host, kind, ttl, std::slice::from_ref(&address)).await?;
@@ -3365,7 +3352,7 @@ fn ns_names(s: &Settings, mname: &str) -> Result<Vec<String>, String> {
         return Ok(ns);
     }
     let entered = s.list("DNS_SECONDARY_NS");
-    for (name, _) in secondaries(s) {
+    for (name, _) in lancache_ng::pdns_conf::secondaries(s) {
         if entered.contains(&name) {
             ns.push(peer_host(s, &name)?);
         }

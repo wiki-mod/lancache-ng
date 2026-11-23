@@ -2438,13 +2438,32 @@ pub mod chrony {
 pub mod pdns_conf {
     use crate::config::Settings;
 
+    // What: registered secondaries as (name, address).
+    // Why: the SOT list holds one name@address per row.
+    // From: Issue #1683 | PR #2017
+    pub fn secondaries(s: &Settings) -> Vec<(String, String)> {
+        s.list("DNS_SECONDARIES")
+            .iter()
+            .filter_map(|row| row.split_once('@'))
+            .map(|(name, addr)| (name.to_string(), addr.to_string()))
+            .collect()
+    }
+
+    // What: the SOT text of a list of secondaries.
+    // Why: read and write share the name@address form.
+    // From: Issue #1683 | PR #2017
+    pub fn secondary_rows(list: &[(String, String)]) -> String {
+        let rows: Vec<String> = list.iter().map(|(n, a)| format!("{n}@{a}")).collect();
+        rows.join(" ")
+    }
+
     // What: addresses of registered secondaries.
     // Why: NOTIFY goes to every registered secondary.
     // From: Issue #1683 | PR #1858
     pub fn secondary_ips(s: &Settings) -> Vec<String> {
-        s.list("DNS_SECONDARIES")
-            .iter()
-            .filter_map(|e| e.split_once('@').map(|(_, ip)| ip.to_string()))
+        secondaries(s)
+            .into_iter()
+            .map(|(_, ip)| ip)
             .filter(|ip| ip.parse::<std::net::IpAddr>().is_ok())
             .collect()
     }
