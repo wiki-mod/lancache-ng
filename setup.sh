@@ -4271,6 +4271,16 @@ lancache_channel_branches() {
     awk '{ sub(/^refs\/heads\//, "", $2); print $2 }' <<< "$sources"
 }
 
+# What: "<branch> (<channel>)" of each channel, with "or"
+# Why: a text shows the SOT pairs; it names no branch
+# From: Issue #1683 | PR #2017
+lancache_channel_branch_words() {
+    local sources
+    sources=$(lancache_release_rows source) || exit $?
+    awk '{ sub(/^refs\/heads\//, "", $2); printf "%s%s (%s)", (NR > 1 ? " or " : ""), $2, $1 }
+        END { print "" }' <<< "$sources"
+}
+
 # What: git branch, tag or commit of a channel's code
 # Why: AG-REL-009: compose and images from one ref
 # From: Issue #1683 | PR #1858
@@ -5972,7 +5982,7 @@ the primary changes its TSIG key.
 Order: check, ask, then act. The name and the host are checked before any
 change: a host that holds a LanCache-NG install (settings, host service or dns
 container) stops at once. Then missing requirements are installed. In a terminal, missing values are asked one by one and
-checked at once: name, primary URL, token, whether the primary runs the latest
+checked at once: name, primary URL, token, whether the primary runs the $(lancache_release_rows release)
 channel, the DNS IP, and whether the primary has HTTPS (then the primary's
 HTTPS IP and a second DNS IP). --rotate offers the values stored in the
 secondary's .env; only the token is asked again. Then a bind IP not yet on
@@ -6652,7 +6662,7 @@ set_active_channel_dir() {
 # Why: install and secondary share one checkout step
 # From: Issue #1683 | PR #1858
 channel_code_checkout() {
-    local channel="$1" target dir branch branches
+    local channel="$1" target dir branch branches words
     CHANNEL_CODE_DIR="" CHANNEL_CODE_OLD="" CHANNEL_CODE_IN_PLACE=0
     # What: a named non-channel branch installs in place
     # Why: the operator chose that revision (AG-OP-009)
@@ -6663,8 +6673,9 @@ channel_code_checkout() {
         if [[ -n "$branch" ]] && ! list_has_line "$branch" "$branches"; then
             print_warn "Checkout $SCRIPT_DIR is on $branch, no channel branch; installing from it."
             printf "  Compose files and this setup.sh come from that branch.\n"
-            printf "  Updates will not move the checkout; switch it to master\n"
-            printf "  (latest) or current_dev (nightly) to follow a channel.\n"
+            words=$(lancache_channel_branch_words) || exit $?
+            printf "  Updates will not move the checkout; switch it to\n"
+            printf "  %s to follow a channel.\n" "$words"
             CHANNEL_CODE_DIR="$SCRIPT_DIR" CHANNEL_CODE_IN_PLACE=1
             return 0
         fi
