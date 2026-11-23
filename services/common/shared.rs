@@ -963,6 +963,15 @@ pub mod dns {
         pub serial: Option<u32>,
     }
 
+    impl Soa {
+        // What: true for an aa answer without an error.
+        // Why: only such a server holds the zone itself.
+        // From: Issue #1683 | PR #2017
+        pub fn serves_zone(&self) -> bool {
+            self.authoritative && self.rcode == 0
+        }
+    }
+
     // What: SOA query for one zone, RD bit off.
     // Why: without RD a recursor sends no aa answer.
     // From: Issue #1683

@@ -3210,7 +3210,7 @@ async fn primary_xfr_port(s: &Settings, zone: Option<&String>) -> Result<u64, St
     // Why: a failed probe must not stop the zones step.
     // From: Issue #1683
     let chosen = match &probe {
-        Ok(soa) if soa.authoritative && soa.rcode == 0 => s.uint("DNS_PORT")?,
+        Ok(soa) if soa.serves_zone() => s.uint("DNS_PORT")?,
         _ => fallback,
     };
     eprintln!("ui: primary {primary}: {probe:?}; XFR port {chosen}");
@@ -3242,7 +3242,7 @@ async fn soa_on_dns_port(
 // From: Issue #1683
 async fn answers_aa(s: &Settings, address: &str, zone: &str) -> Result<(), String> {
     let soa = soa_on_dns_port(s, address, zone).await?;
-    if soa.authoritative && soa.rcode == 0 {
+    if soa.serves_zone() {
         return Ok(());
     }
     Err(format!(
