@@ -3128,14 +3128,18 @@ psl_file_is_valid() {
     done
 }
 
-# What: the PSL backup dir and its backups, newest first.
-# Why: backup and restore read one list.
+# What: the dir that holds the PSL backups
+# Why: backup and restore name one place; SOT subdir
 # From: Issue #1683 | PR #1984
 psl_backup_dir() {
     local sub
     sub=$(prod_env_default NGINX_PSL_BACKUP_SUBDIR) || exit $?
     printf '%s/%s\n' "$BACKUP_ROOT" "$sub"
 }
+
+# What: the PSL backups of dir $1, newest first
+# Why: backup keeps the newest N; restore tries them
+# From: Issue #1683 | PR #1984
 psl_backup_list() {
     local dir="$1" f
     for f in "$dir"/*.gz; do
@@ -10099,7 +10103,10 @@ else
     print_warn "Start stack manually after reboot: $SCRIPT_DIR/setup.sh compose $INSTALL_DIR up -d"
 fi
 
-fi # WIZARD_INTROSPECT_MODE guard opened before "Writing .env" above
+# What: ends the block opened before "Writing .env"
+# Why: its lines are not indented; this names the pair
+# From: Issue #1683 | PR #1858
+fi
 
 # What: step 12: shows the answers, asks to start
 # Why: nothing starts without the operator yes
