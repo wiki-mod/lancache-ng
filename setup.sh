@@ -39,8 +39,8 @@ OPENRC_STACK_SERVICE="lancache"
 OPENRC_CONVERGE_SERVICE="lancache-converge"
 OPENRC_AUTO_UPDATE_SERVICE="lancache-auto-update"
 OPENRC_DOCKER_SERVICE="docker"
-# What: backup root and project repo
-# Why: one owner each; rollback must find the backups
+# What: the directory that holds the backups
+# Why: one place; rollback must find the backups there
 # From: Issue #1683 | PR #1858
 BACKUP_ROOT="${LANCACHE_BACKUP_ROOT:-/var/backups/lancache-ng}"
 # What: bootstrap copy of the SOT LANCACHE_REPO_URL
@@ -300,7 +300,7 @@ is_dnsmasq_subnet_start() {
     is_valid_ipv4 "$ip" && [[ "$ip" == *".0" ]]
 }
 
-# What: shape checks for optional dnsmasq relay/proxy values
+# What: true for an interface name of 1 to 64 characters
 # Why: hand-edited .env fails as closed as Admin UI input
 # From: Issue #450
 is_valid_dhcp_proxy_interface() {
@@ -2108,7 +2108,7 @@ legacy_state_path() {
     local child="${1:-}"
 
     # What: old installs keep PowerDNS data in pdns-standard
-    # Why: existing installs keep their data in that dir.
+    # Why: the move must find the data where 1.x wrote it
     # From: Issue #1683 | PR #1912
     [[ "$child" != pdns ]] || child=pdns-standard
     if [[ -n "$child" ]]; then
@@ -4711,9 +4711,6 @@ migrate_env_for_update() (
     local install_dir="$1" preserve_image_tag="${2:-0}" env_file dhcp_enabled dhcp_mode
     local dhcp_proxy_interface dhcp_proxy_router dhcp_ntp_servers dhcp_proxy_domain
     local dhcp_proxy_boot_filename dhcp_proxy_boot_server dhcp_relay_local_addr
-    # What: declares every temporary as function-local
-    # Why: undeclared names would leak as globals
-    # From: Issue #1683 | PR #1858
     local dhcp_proxy_pxe_boot_server dhcp_proxy_pxe_boot_filename_bios dhcp_proxy_pxe_boot_filename_uefi
     local cache_dir cache_max_gb cache_max_size cache_gb cache_mem_mb ip_https ui_password ui_password_hash ui_user
     local compose_profiles dhcp_dns_primary dhcp_dns_secondary dhcp_subnet_start ip_http upstream_dhcp_ip
@@ -8438,8 +8435,8 @@ restore_dns_upstream() {
     set_env_key DNS_UPSTREAM_ZONES "$4" "$env_file"
     set_env_key DNS_UPSTREAM_UNSIGNED_ZONES "$5" "$env_file"
     set_env_key DNS_LOCAL_REVERSE_ZONES "$6" "$env_file"
-    # What: the ui too; it renders the recursor files.
-    # Why: the ui renders the recursor files dns reads.
+    # What: starts dns and the ui with the new settings
+    # Why: the ui renders the recursor files dns reads
     # From: Issue #1918
     stack_compose "$install_dir" "$env_file" up -d "$dns_svc" "$ui_svc" || rc=$?
     if [[ "$rc" -ne 0 ]]; then
@@ -8456,8 +8453,8 @@ dns_upstream_is_live() {
     local install_dir="$1" env_file="$2" servers="$3" cid rc conf dns_svc
     local wait poll waited=0 key server ok
     local -a confs=() wanted=()
-    # What: the recursor files the ui renders, not /run.
-    # Why: the ui writes these files; /run holds none.
+    # What: collects the recursor files the ui renders
+    # Why: the wait below reads them; /run holds no copy
     # From: Issue #1918
     for key in RECURSOR_HTTP_CONF_FILE RECURSOR_HTTPS_CONF_FILE; do
         conf=$(prod_env_default "$key") || exit $?
@@ -9912,8 +9909,8 @@ if [[ -f "$ENV_FILE.local" ]]; then
     print_warn "Moved the override $ENV_FILE.local to $install_override; this install writes $ENV_FILE alone."
 fi
 
-# What: generates or keeps secrets; placeholders regenerate
-# Why: empty or placeholder values are never used
+# What: resolves registry, prefix, channel, tag and pins
+# Why: the image keys are fixed before .env is written
 # From: Issue #1683 | PR #1858
 LANCACHE_IMAGE_REGISTRY=$(resolve_lancache_image_registry "$ENV_FILE")
 LANCACHE_IMAGE_PREFIX=$(resolve_lancache_image_prefix "$ENV_FILE")
@@ -9928,7 +9925,7 @@ LANCACHE_IMAGE_REFS=$(lancache_image_refs_for_tag "$ENV_FILE" "$LANCACHE_IMAGE_T
 assert_resolved_image_tag_platform_supported "$LANCACHE_IMAGE_REGISTRY" "$LANCACHE_IMAGE_PREFIX" "$LANCACHE_IMAGE_TAG"
 
 # What: every SOT secret: the kept value or a generated one
-# Why: the SOT lists the keys; setup.sh names none itself
+# Why: the SOT lists the keys and how each is made
 # From: Issue #1683 | PR #1912
 secret_rows=$(managed_secret_rows stack) || exit $?
 while read -r secret_key secret_kind; do
@@ -10135,7 +10132,7 @@ fi
 print_step "Installing host services"
 
 # What: asks before taking units of another install
-# Why: units of another install are not taken silently
+# Why: the other install would no longer start at boot
 # From: Issue #1683 | PR #1980
 host_unit_dir=$(prod_env_default SYSTEMD_UNIT_DIR) || exit $?
 host_unit_owner=""
