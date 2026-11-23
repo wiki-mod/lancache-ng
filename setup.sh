@@ -4277,12 +4277,8 @@ resolve_lancache_image_channel() {
     fi
 
     if [[ -z "$channel" ]]; then
-        if release_tag=$(derive_release_archive_image_tag); then
-            channel="$pinned"
-        elif [[ "$?" = "2" ]]; then
-            die "Cannot derive a valid release image tag from this checkout/archive."
-        fi
-        [[ -n "$release_tag" ]] && channel="$pinned"
+        release_tag=$(lancache_release_archive_tag_or_empty) || exit $?
+        [[ -z "$release_tag" ]] || channel="$pinned"
     fi
 
     channel="${channel:-$release}"
