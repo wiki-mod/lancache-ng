@@ -12,7 +12,11 @@ if [ -z "${BASH_VERSION:-}" ]; then
     echo "setup.sh needs bash: run it as ./setup.sh or bash setup.sh." >&2
     exit 1
 fi
+# What: stops on errors, unset names and failed pipes
+# Why: a half-run setup must never look like success
 set -euo pipefail
+# What: a fixed C locale for every tool this script calls
+# Why: parsed tool output must not change with the host
 export LANG=C LC_ALL=C
 
 # What: absolute directory of this setup.sh
@@ -152,6 +156,8 @@ utc_stamp() {
     date -u "$format" || die "date failed (exit $?)."
 }
 
+# What: REPLY holds the last answer of ask()
+# Why: set -u needs the name before the first question
 REPLY=""
 # What: list-prompts makes ask()/confirm() record prompts
 # Why: one shared recorder keeps the prompt walk in sync
@@ -2098,12 +2104,14 @@ migrate_dhcp_mode_for_update() {
     fi
 }
 
-readonly LEGACY_STATE_ROOT="/srv/lancache"
-readonly -a LEGACY_STATE_CHILDREN=(cache pdns pdns-ssl pdns-filter-state kea nats nats-conf)
-
 # What: fixed pre-v0.1 state paths, used for migration
 # Why: backup, update and restore must find legacy data
 # From: Issue #1683 | PR #1858
+readonly LEGACY_STATE_ROOT="/srv/lancache"
+readonly -a LEGACY_STATE_CHILDREN=(cache pdns pdns-ssl pdns-filter-state kea nats nats-conf)
+
+# What: the legacy path of state child $1, or the root
+# Why: one place joins root and child; pdns differs
 legacy_state_path() {
     local child="${1:-}"
 
@@ -3890,6 +3898,8 @@ host_unit_command() {
     fi
 }
 
+# What: what the pause found and did, for the resume
+# Why: the resume restores exactly the state before it
 CONVERGENCE_TIMER_WAS_ACTIVE=0
 CONVERGENCE_TIMER_WAS_ENABLED=0
 CONVERGENCE_SERVICE_WAS_ACTIVE=0
@@ -9365,8 +9375,13 @@ printf "  Help:  ./setup.sh --help (use './setup.sh <command> --help' for detail
 if [[ "$WIZARD_INTROSPECT_MODE" != "1" ]]; then
     print_step "Checking prerequisites"
 
+    # What: install runs as root only
+    # Why: it writes host units, Docker settings and state
+    # From: Issue #1683 | PR #2017
     require_root "install"
 
+    # What: installs what the stack needs on this host
+    # Why: every later step uses Docker, jq or the tools
     ensure_stack_requirements_installed
 
     # What: no checkout here: the channel step clones it
@@ -9541,6 +9556,9 @@ printf "  Here you choose where its data goes: cache, DNS, DHCP, NTP.\n"
 ask "Data folder (not the install folder)" "$STATE_ROOT_DEFAULT"
 LANCACHE_STATE_DIR="$(realpath -m "$REPLY")"
 
+# What: an existing .env or .env.local needs a yes
+# Why: the install rewrites the settings of that stack
+# From: Issue #1683 | PR #2017
 for found_env in "$ENV_FILE" "$ENV_FILE.local"; do
     [[ -f "$found_env" ]] || continue
     print_warn "Existing configuration found: $found_env"
@@ -9548,6 +9566,9 @@ for found_env in "$ENV_FILE" "$ENV_FILE.local"; do
     break
 done
 
+# What: creates the data folder; list-prompts does not
+# Why: the next steps place their defaults below it
+# From: Issue #1683 | PR #1912
 if [[ "$WIZARD_INTROSPECT_MODE" != "1" ]]; then
     mkdir -p "$LANCACHE_STATE_DIR"
 fi
@@ -10089,6 +10110,9 @@ validate_initial_env() {
     done <<< "$body"
 }
 
+# What: checks every value, then writes .env in one move
+# Why: a bad value must stop before the file exists
+# From: Issue #1683 | PR #2017
 validate_initial_env
 with_env_lock "$ENV_FILE" write_file_atomically "$ENV_FILE" -- render_initial_env \
     || die "Failed to write $ENV_FILE (exit $?)."
@@ -10145,6 +10169,9 @@ if [[ -n "$host_unit_owner" && "$host_unit_owner" != "$INSTALL_DIR" ]]; then
         || die "Stopped; host services stay with $host_unit_owner."
 fi
 
+# What: writes the host units; notes if a manager exists
+# Why: without systemd or OpenRC the start stays manual
+# From: Issue #1683 | PR #1983
 HOST_SERVICES_AVAILABLE=0
 if write_lancache_host_services "$INSTALL_DIR"; then
     HOST_SERVICES_AVAILABLE=1
@@ -10255,8 +10282,13 @@ if [[ -n "$UI_AUTH_PASSWORD" ]]; then
     set_ui_password_hash "$INSTALL_DIR" "$ENV_FILE" "$UI_AUTH_PASSWORD"
 fi
 
+# What: probes the LAN for a DHCP server before Kea runs
+# Why: two DHCP servers on one LAN break its clients
+# From: Issue #1683 | PR #2017
 run_kea_dhcp_activation_preflight "$ENV_FILE"
 
+# What: enables the units for boot, then starts the stack
+# Why: "Start now? n" still leaves the boot start set
 print_step "Starting stack"
 if [[ "$HOST_SERVICES_AVAILABLE" = "1" ]]; then
     host_unit_action "$STACK_UNIT" enable
