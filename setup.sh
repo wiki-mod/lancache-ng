@@ -3561,10 +3561,18 @@ cache_size_gb_from_env() {
 # From: Issue #1683 | PR #1858
 assert_prebuilt_image_platform_supported() {
     local arch platform
-    arch=$(uname -m)
-    platform=$(host_image_platform "$arch") \
-        || die "This host's architecture '${arch}' has no container image platform; LanCache-NG cannot run here."
+    host_arch_and_platform arch platform
     print_ok "Host architecture ${arch} maps to image platform ${platform}"
+}
+
+# What: this host's arch and OCI platform; else dies
+# Why: one read and one error text for both checks
+# From: Issue #1683 | PR #2017
+host_arch_and_platform() {
+    local -n _arch_ref="$1" _platform_ref="$2"
+    _arch_ref=$(uname -m) || die "uname -m failed (exit $?)."
+    _platform_ref=$(host_image_platform "$_arch_ref") \
+        || die "This host's architecture '${_arch_ref}' has no container image platform; LanCache-NG cannot run here."
 }
 
 # What: `uname -m` to its OCI platform name (Docker naming)
@@ -3589,9 +3597,7 @@ assert_resolved_image_tag_platform_supported() {
     local registry="$1" prefix="$2" tag="$3"
     local arch platform image single_platform inspect_text discovered_platforms buildx_out plat_line plat_found=0
 
-    arch=$(uname -m)
-    platform=$(host_image_platform "$arch") \
-        || die "This host's architecture '${arch}' has no container image platform; LanCache-NG cannot run here."
+    host_arch_and_platform arch platform
 
     command_available docker \
         || die "docker is required to verify that image tag '${tag}' publishes a ${platform} image before continuing."
