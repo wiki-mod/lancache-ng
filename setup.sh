@@ -99,6 +99,15 @@ print_error(){ printf "  ${RED}✗${RESET} %s\n" "$*" >&2; }
 print_skip() { printf "  ${YELLOW}↷${RESET} SKIP: %s\n" "$*" >&2; }
 die()        { print_error "$*"; exit 1; }
 
+# What: prints a rule of $1 frame characters
+# Why: both frames draw their lines one way; no locale
+# From: Issue #1683 | PR #2017
+rule_line() {
+    local rule
+    printf -v rule '%*s' "$1" ''
+    printf '%s\n' "${rule// /═}"
+}
+
 # What: prints "LanCache-NG — $1" in a frame; $1 is ASCII
 # Why: one frame for every guided flow; no locale needed
 # From: Issue #1683 | PR #2017
@@ -106,8 +115,7 @@ print_title_box() {
     local title="$1" inner=39 rule pad
     (( ${#title} + 18 <= inner )) || inner=$(( ${#title} + 18 ))
     pad=$(( inner - 16 - ${#title} ))
-    printf -v rule '%*s' "$inner" ''
-    rule="${rule// /═}"
+    rule=$(rule_line "$inner")
     printf '\n%s╔%s╗%s\n' "${BOLD}" "$rule" "${RESET}"
     printf '%s║  LanCache-NG — %s%*s║%s\n' "${BOLD}" "$title" "$pad" '' "${RESET}"
     printf '%s╚%s╝%s\n\n' "${BOLD}" "$rule" "${RESET}"
@@ -118,8 +126,7 @@ print_title_box() {
 # From: Issue #1683 | PR #2017
 print_result_banner() {
     local colour="$1" text="$2" rule
-    printf -v rule '%*s' 50 ''
-    rule="${rule// /═}"
+    rule=$(rule_line 50)
     printf '\n%s%s%s%s\n' "${BOLD}" "${GREEN}" "$rule" "${RESET}"
     printf '%s%s  %s%s\n' "${BOLD}" "$colour" "$text" "${RESET}"
     printf '%s%s%s%s\n\n' "${BOLD}" "${GREEN}" "$rule" "${RESET}"
