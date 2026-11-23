@@ -3865,6 +3865,14 @@ resume_convergence_for_command() {
     resume_lancache_convergence_after_update
 }
 
+# What: pauses convergence; the EXIT trap resumes it
+# Why: commands without their own cleanup share one pair
+# From: Issue #1683 | PR #2017
+pause_convergence_until_exit() {
+    trap resume_convergence_for_command EXIT
+    pause_convergence_for_command
+}
+
 # What: EXIT trap while .env is prepared for moved code
 # Why: units must not start new code with the old .env
 # From: Issue #1683 | PR #1858
@@ -8116,8 +8124,7 @@ cmd_reset_sign_in() {
     # What: no converge run while the ui is recreated
     # Why: both recreate the ui and collide on its name
     # From: Issue #1683 | PR #2017
-    trap resume_convergence_for_command EXIT
-    pause_convergence_for_command
+    pause_convergence_until_exit
     # What: hash out, open UI allowed, in the one .env
     # Why: no hash and no opt-out stop the ui (fail closed)
     # From: Issue #1683 | PR #2017
@@ -8204,8 +8211,7 @@ cmd_update_ip() {
     # What: no converge run while the new IPs are applied
     # Why: both recreate the same containers and collide
     # From: Issue #1683 | PR #2017
-    trap resume_convergence_for_command EXIT
-    pause_convergence_for_command
+    pause_convergence_until_exit
 
     # What: the same baseline and gate as ./setup.sh update
     # Why: new IPs that fail the gate must not stay active
@@ -8401,8 +8407,7 @@ cmd_configure_upstream_dns() {
     # What: no converge run while the change is applied
     # Why: both recreate the same containers and collide
     # From: Issue #1683 | PR #2017
-    trap resume_convergence_for_command EXIT
-    pause_convergence_for_command
+    pause_convergence_until_exit
 
     # What: the same baseline and gate as ./setup.sh update
     # Why: one health-gated restart path, no second copy
