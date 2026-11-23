@@ -6072,7 +6072,7 @@ LANCACHE_IMAGE_CHANNEL sets the channel without a terminal.
 Required arguments:
   --primary <url>    Primary LanCache UI/API URL, for example ${PRIMARY_URL_EXAMPLE}
   --token <token>    Secondary registration token from the primary server
-  --name <name>      Secondary node name: one DNS label (letters, digits, inner dashes)
+  --name <name>      Secondary node name: ${SECONDARY_NAME_RULE}
 
 Optional arguments:
   --ip-http <ip>     Primary proxy IP for cached traffic (default: the IP the primary sends at registration)
@@ -8670,6 +8670,11 @@ die_if_any_empty() {
 # From: Issue #1683 | PR #2017
 PRIMARY_URL_EXAMPLE='http://<primary-ip>:<ui-port>'
 
+# What: the rule for the name of a secondary, as one text
+# Why: help, question and --name check say it alike
+# From: Issue #1683 | PR #2017
+SECONDARY_NAME_RULE='letters, digits and inner dashes, at most 63 characters'
+
 # What: 0 for an http or https URL without spaces
 # Why: the secondary wizard checks the primary URL at once
 # From: Issue #1683
@@ -8818,11 +8823,11 @@ cmd_secondary() {
     if [[ "$tty" = 1 && -z "$name" ]]; then
         local name_default=""
         [[ "$rotate" -eq 1 && -f .env && -f docker-compose.yml ]] && name_default=$(basename "$PWD")
-        ask_checked name "Name of this secondary (a-z, 0-9, -)" "$name_default" is_secondary_name "Not one DNS label (letters, digits, inner dashes, at most 63)"
+        ask_checked name "Name of this secondary (a-z, 0-9, -)" "$name_default" is_secondary_name "Not a valid name (${SECONDARY_NAME_RULE})"
     fi
     die_if_any_empty "Required argument(s) missing (see ./setup.sh secondary --help)" "--name=$name"
     is_secondary_name "$name" \
-        || die "--name must be one DNS label: letters, digits and inner dashes, at most 63 characters"
+        || die "--name allows ${SECONDARY_NAME_RULE}"
 
     # What: a secondary counts as installed when .env exists
     # Why: before any question; a failed run blocks nothing
