@@ -200,7 +200,7 @@ impl App {
         // From: Issue #1683 | PR #1980
         let mut values: BTreeMap<String, String> = s
             .specs()
-            .filter(|sp| !matches!(sp.kind, config::Kind::Secret))
+            .filter(|sp| !sp.is_secret())
             .map(|sp| (sp.key.clone(), String::new()))
             .collect();
         values.extend(s.texts().map(|(k, v)| (k.clone(), v)));
@@ -565,7 +565,7 @@ fn changes(old: &Settings, form: Fields) -> Fields {
     let mut out = Fields::new();
     for (key, value) in form {
         let Some(spec) = old.spec(&key) else { continue };
-        let secret = matches!(spec.kind, config::Kind::Secret);
+        let secret = spec.is_secret();
         if secret && value.is_empty() {
             continue;
         }

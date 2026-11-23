@@ -134,6 +134,13 @@ impl Effect {
 }
 
 impl Spec {
+    // What: true for a row of kind secret.
+    // Why: one owner of the test; pages hide such values.
+    // From: Issue #1683 | PR #2017
+    pub fn is_secret(&self) -> bool {
+        matches!(self.kind, Kind::Secret)
+    }
+
     // What: parse KEY=kind;min;max;effect;owner.
     // Why: the SOT schema row format.
     // From: Issue #1683 | PR #1858
@@ -576,7 +583,7 @@ impl Settings {
     pub fn texts(&self) -> impl Iterator<Item = (&String, String)> {
         self.values
             .iter()
-            .filter(|(k, _)| !matches!(self.specs.get(*k).map(|sp| &sp.kind), Some(Kind::Secret)))
+            .filter(|(k, _)| !self.specs.get(*k).is_some_and(Spec::is_secret))
             .map(|(k, v)| (k, v.to_string()))
     }
 
@@ -649,11 +656,7 @@ impl Settings {
     // From: Issue #1683 | PR #1858
     pub fn revision(&self) -> String {
         let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-        let public = self
-            .values
-            .iter()
-            .filter(|(k, _)| !matches!(self.specs.get(*k).map(|s| &s.kind), Some(Kind::Secret)));
-        for (key, value) in public {
+        for (key, value) in self.texts() {
             let line = format!("{key}={value}\0");
             for byte in line.bytes() {
                 hash ^= u64::from(byte);
