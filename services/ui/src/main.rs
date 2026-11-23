@@ -15,6 +15,7 @@ use axum::routing::{get, post};
 use axum::{Extension, Router};
 use base64::Engine as _;
 use lancache_ng::config::{self, Settings, process_env};
+use lancache_ng::dns::Role;
 use lancache_ng::{access, apply, docker, fs, http, human, render, secret};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -685,7 +686,7 @@ async fn drop_old_zones(s: &Settings, before: &[String]) {
     let Ok(now) = lancache_ng::dns::managed_zones(s) else {
         return;
     };
-    if s.text("DNS_REPLICATION_ROLE").unwrap_or_default() == "secondary" {
+    if Role::from_settings(s).is_ok_and(|r| r == Role::Secondary) {
         return;
     }
     let Ok(api) = pdns_api(s) else { return };
@@ -3177,7 +3178,7 @@ async fn ensure_tsigkey(s: &Settings) -> Result<String, String> {
 // From: Issue #1683 | PR #1858
 async fn ensure_tsig(s: &Settings, key: &str) -> Result<(), String> {
     let api = pdns_api(s)?;
-    let secondary = s.text("DNS_REPLICATION_ROLE")? == "secondary";
+    let secondary = Role::from_settings(s)? == Role::Secondary;
     let key = vec![key.to_string()];
     for z in api.zones().await? {
         if secondary {
@@ -3535,7 +3536,7 @@ async fn ensure_rrset(
 // From: Issue #1683
 async fn ensure_zones(s: &Settings) -> Result<(), String> {
     let key = ensure_tsigkey(s).await.map_err(|e| format!("tsig: {e}"))?;
-    if s.text("DNS_REPLICATION_ROLE")? == "secondary" {
+    if Role::from_settings(s)? == Role::Secondary {
         ensure_secondary_zones(s, &key)
             .await
             .map_err(|e| format!("secondary zones: {e}"))?;

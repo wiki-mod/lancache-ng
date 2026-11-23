@@ -849,6 +849,28 @@ pub mod dns {
             .collect()
     }
 
+    // What: the two replication roles of the SOT choice.
+    // Why: one owner of the role words; callers compare.
+    // From: Issue #1683 | PR #2017
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum Role {
+        Primary,
+        Secondary,
+    }
+
+    impl Role {
+        // What: role from DNS_REPLICATION_ROLE.
+        // Why: an unknown word is an error.
+        // From: Issue #1683 | PR #2017
+        pub fn from_settings(s: &Settings) -> Result<Self, String> {
+            match s.text("DNS_REPLICATION_ROLE")?.as_str() {
+                "primary" => Ok(Self::Primary),
+                "secondary" => Ok(Self::Secondary),
+                other => Err(format!("DNS_REPLICATION_ROLE={other} is unknown")),
+            }
+        }
+    }
+
     // What: the LAN zone, DHCP_DOMAIN in canonical form.
     // Why: PowerDNS compares names with a trailing dot.
     // From: Issue #1683 | PR #2017
@@ -863,9 +885,7 @@ pub mod dns {
         // What: a secondary serves the primary's zones.
         // Why: its DHCP_DOMAIN is only the SOT default.
         // From: Issue #1683 | PR #2017
-        if s.text("DNS_REPLICATION_ROLE")
-            .is_ok_and(|r| r == "secondary")
-        {
+        if Role::from_settings(s).is_ok_and(|r| r == Role::Secondary) {
             return Ok(s
                 .list("DNS_SECONDARY_ZONES")
                 .iter()
@@ -2415,11 +2435,7 @@ pub mod pdns_conf {
     // Why: API on; AXFR by TSIG, not by IP list.
     // From: Issue #1683 | PR #1858
     pub fn auth(s: &Settings, api_key: &str) -> Result<String, String> {
-        let primary = match s.text("DNS_REPLICATION_ROLE")?.as_str() {
-            "primary" => true,
-            "secondary" => false,
-            other => return Err(format!("DNS_REPLICATION_ROLE={other} is unknown")),
-        };
+        let primary = crate::dns::Role::from_settings(s)? == crate::dns::Role::Primary;
         let yes = |on: bool| if on { "yes" } else { "no" }.to_string();
         let joined = |key: &str| s.list(key).join(",");
         let rows = [
@@ -2811,7 +2827,7 @@ pub mod recursor_conf {
         // What: NOTIFY from the own pdns wipes a zone.
         // Why: a secondary has no ui to flush after AXFR.
         // From: Issue #1683 | PR #2017
-        if s.text("DNS_REPLICATION_ROLE")? == "secondary" {
+        if crate::dns::Role::from_settings(s)? == crate::dns::Role::Secondary {
             let names: Vec<String> = zones
                 .iter()
                 .map(|z| z.trim_end_matches('.').to_string())
@@ -2983,9 +2999,9 @@ pub mod dnsdist_conf {
         // What: peers pass the ACL besides the clients.
         // Why: NOTIFY and AXFR now reach port 53 too.
         // From: Issue #1683
-        let peers = match s.text("DNS_REPLICATION_ROLE")?.as_str() {
-            "primary" => crate::pdns_conf::secondary_ips(s),
-            _ => vec![s.text("DNS_XFR_PRIMARY")?],
+        let peers = match crate::dns::Role::from_settings(s)? {
+            crate::dns::Role::Primary => crate::pdns_conf::secondary_ips(s),
+            crate::dns::Role::Secondary => vec![s.text("DNS_XFR_PRIMARY")?],
         };
         let mut acl: Vec<String> = Vec::new();
         for net in s.list("DNS_QUERY_ALLOW_FROM").into_iter().chain(peers) {
