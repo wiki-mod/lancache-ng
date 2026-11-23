@@ -877,6 +877,15 @@ is_valid_dhcp_mode() {
     esac
 }
 
+# What: a DHCP mode in lower case; old disabled is off
+# Why: one spelling for the answer and the stored value
+# From: Issue #1683 | PR #2017
+dhcp_mode_normalized() {
+    local mode="${1,,}"
+    [[ "$mode" != "disabled" ]] || mode="off"
+    printf '%s\n' "$mode"
+}
+
 # What: checks UI session TTL is 1 to MAX seconds (1 year)
 # Why: a bad value must not yield a never-expiring cookie
 # From: Issue #1683 | PR #1858
@@ -2120,15 +2129,16 @@ migrate_proxy_security_mode_for_update() {
     fi
 }
 
-# What: old DHCP_MODE=disabled becomes off
+# What: a stored DHCP_MODE gets the answer spelling
 # Why: the ui accepts only the SOT words
 # From: Issue #1683 | PR #1980
 migrate_dhcp_mode_for_update() {
-    local env_file="$1" mode
+    local env_file="$1" mode normalized
     mode=$(get_env_var DHCP_MODE "$env_file") || exit $?
-    if [[ "$mode" = "disabled" ]]; then
-        set_env_key DHCP_MODE off "$env_file"
-        print_ok "Migrated legacy DHCP_MODE=disabled to off"
+    normalized=$(dhcp_mode_normalized "$mode") || exit $?
+    if [[ "$normalized" != "$mode" ]] && is_valid_dhcp_mode "$normalized"; then
+        set_env_key DHCP_MODE "$normalized" "$env_file"
+        print_ok "Migrated legacy DHCP_MODE=$mode to $normalized"
     fi
 }
 
@@ -9715,15 +9725,11 @@ printf "  dnsmasq-relay: forward DHCP to an upstream server on another segment (
 printf "  off: keep router DHCP and do nothing in LanCache\n\n"
 
 default_dhcp_mode=$(prod_env_default DHCP_MODE) || exit $?
-while true; do
-    ask "DHCP mode (off, kea, dnsmasq-proxy, dnsmasq-relay)" "$default_dhcp_mode"
-    DHCP_MODE="${REPLY,,}"
-    [[ "$DHCP_MODE" != "disabled" ]] || DHCP_MODE="off"
-    if is_valid_dhcp_mode "$DHCP_MODE"; then
-        break
-    fi
-    print_error "Invalid DHCP mode: $DHCP_MODE"
-done
+# What: DHCP_MODE starts empty before it is asked
+# Why: ask_checked fills it by name; the init shows it
+# From: Issue #1683 | PR #2017
+DHCP_MODE=""
+ask_checked DHCP_MODE "DHCP mode (off, kea, dnsmasq-proxy, dnsmasq-relay)" "$default_dhcp_mode" is_valid_dhcp_mode "Invalid DHCP mode" 0 dhcp_mode_normalized
 
 # What: DHCP defaults come from the SOT runtime.defaults
 # Why: AG-SEC-007; the SOT owns these values
