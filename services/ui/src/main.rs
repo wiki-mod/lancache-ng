@@ -3621,7 +3621,7 @@ fn new_tsig() -> String {
 fn tsig_secret(s: &Settings) -> Result<String, String> {
     let file = tsig_file(s)?;
     if !file.exists()
-        && let Some(v) = process_env("DDNS_TSIG_KEY").filter(|v| !v.is_empty())
+        && let Some(v) = config::env_set(&process_env, "DDNS_TSIG_KEY")
     {
         return Ok(v);
     }

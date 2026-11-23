@@ -241,6 +241,13 @@ fn baked_rows(baked: &str) -> impl Iterator<Item = &str> {
         .filter(|r| !r.is_empty())
 }
 
+// What: the env value of a key; empty counts as unset.
+// Why: Compose passes KEY= for a key nobody set.
+// From: Issue #1683 | PR #2017
+pub fn env_set(env: &dyn Fn(&str) -> Option<String>, key: &str) -> Option<String> {
+    env(key).filter(|v| !v.is_empty())
+}
+
 // What: file, else env, else default; fills @KEY@.
 // Why: KEY= in the file means default; env is a stale copy.
 // From: Issue #1683 | PR #2017
@@ -255,7 +262,7 @@ fn effective(
         Some(v) if !v.is_empty() => return Ok(Some(v.clone())),
         Some(_) => {}
         None => {
-            if let Some(v) = env(key).filter(|v| !v.is_empty()) {
+            if let Some(v) = env_set(env, key) {
                 return Ok(Some(v));
             }
         }
@@ -537,7 +544,7 @@ impl Settings {
             if set.specs.contains_key(*key) {
                 continue;
             }
-            let raw = match env(key).filter(|v| !v.is_empty()) {
+            let raw = match env_set(env, key) {
                 Some(raw) => raw,
                 None => match expand_default(value, &file, env, &defaults, 0) {
                     Ok(raw) => raw,
@@ -598,7 +605,7 @@ impl Settings {
         // From: Issue #1683 | PR #1980
         self.get(key)
             .map(Value::to_string)
-            .or_else(|| std::env::var(key).ok().filter(|v| !v.is_empty()))
+            .or_else(|| env_set(&process_env, key))
             .ok_or_else(|| format!("{key} is not set"))
     }
 
