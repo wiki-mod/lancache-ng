@@ -1568,6 +1568,14 @@ env_raw_assignments() {
     [[ -z "$out" ]] || printf '%s\n' "$out"
 }
 
+# What: the keys one env file assigns, each once, in order
+# Why: one reader of KEY= lines for every walk over keys
+# From: Issue #1683 | PR #2017
+env_file_keys() {
+    awk -F= '/^[A-Za-z_][A-Za-z0-9_]*=/ && !seen[$1]++ { print $1 }' "$1" \
+        || die "Failed to list the keys of $1 (exit $?)."
+}
+
 # What: the parsed value compose uses for a key, or ""
 # Why: setup must decide on the value the stack runs with
 # From: Issue #1683 | PR #1858
@@ -2198,9 +2206,9 @@ runtime_env_file_for_install_dir() {
 note_env_overrides() {
     local env_file="$1" keys
     [[ -f "$env_file.local" ]] || return 0
-    keys=$(awk -F= '/^[A-Za-z_][A-Za-z0-9_]*=/ && !seen[$1]++ { printf "%s ", $1 }' "$env_file.local") \
-        || die "Failed to read $env_file.local (exit $?)."
-    print_warn "$env_file.local overrides ${keys:-no key }of $env_file; delete it to run with $env_file alone."
+    keys=$(env_file_keys "$env_file.local") || exit $?
+    keys="${keys//$'\n'/ }"
+    print_warn "$env_file.local overrides ${keys:-no key} of $env_file; delete it to run with $env_file alone."
 }
 
 # What: builds -f args for base and operator override
@@ -2621,8 +2629,7 @@ migrate_quickstart_install() (
     # What: every quickstart setting reaches .env
     # Why: changed secrets or IPs break running clients
     # From: Issue #1683 | PR #1858
-    keys=$(awk -F= '/^[A-Za-z_][A-Za-z0-9_]*=/ {print $1}' "$old_env") \
-        || die "Failed to list the keys of $old_env (exit $?)."
+    keys=$(env_file_keys "$old_env") || exit $?
     while IFS= read -r key; do
         [[ -n "$key" ]] || continue
         if [[ " $path_keys " == *" $key "* ]]; then
@@ -3370,8 +3377,7 @@ adopt_moved_config_prod_keys() {
     [[ -d "$dir" ]] || return 0
     for file in "$dir"/*.local.env; do
         [[ -f "$file" ]] || continue
-        left=$(awk -F= '/^[A-Za-z_][A-Za-z0-9_]*=/ { print $1 }' "$file") \
-            || die "Failed to list the keys of $file (exit $?)."
+        left=$(env_file_keys "$file") || exit $?
         if [[ -n "$left" ]]; then
             print_warn "Kept ${file##*/}: it still sets ${left//$'\n'/, }, which no container reads. Move them into ${env_file##*/} or delete the file."
             continue
@@ -3408,8 +3414,7 @@ adopt_config_prod_edits() {
         if [[ ! -e "$template" ]]; then
             print_warn "Restoring $rel, which was deleted locally"
         else
-            keys=$(awk -F= '/^[A-Za-z_][A-Za-z0-9_]*=/ {print $1}' "$template") \
-                || die "Failed to list the keys of $template (exit $?)."
+            keys=$(env_file_keys "$template") || exit $?
             while IFS= read -r key; do
                 [[ -n "$key" ]] || continue
                 raw=$(get_env_assignment_value_raw "$key" "$template") \
@@ -7349,7 +7354,7 @@ logbundle_collect_secret_values() {
     local -A key_set=()
     local key env_file value
 
-    local keys rc
+    local keys
     keys=$(managed_secret_env_keys) || die "Cannot list the secret env keys (exit $?)."
     while IFS= read -r key; do
         [[ -n "$key" ]] && key_set["$key"]=1
@@ -7357,9 +7362,8 @@ logbundle_collect_secret_values() {
 
     for env_file in "${env_files[@]}"; do
         [[ -f "$env_file" ]] || continue
-        rc=0
-        keys=$(grep -oE '^[A-Za-z_][A-Za-z0-9_]*' "$env_file") || rc=$?
-        [[ "$rc" -le 1 ]] || die "Failed to read the keys of $env_file (exit $rc); no log bundle was written."
+        keys=$(env_file_keys "$env_file") \
+            || die "Cannot list the keys of $env_file (exit $?); no log bundle was written."
         while IFS= read -r key; do
             [[ -n "$key" ]] || continue
             logbundle_key_looks_like_secret "$key" && key_set["$key"]=1
