@@ -110,6 +110,15 @@ list_has_line() {
     return 1
 }
 
+# What: the UTC time now; for names, or "iso" for records
+# Why: backups, bundles and records stamp in one notation
+# From: Issue #1683 | PR #2017
+utc_stamp() {
+    local format='+%Y%m%dT%H%M%SZ'
+    [[ "${1:-name}" = name ]] || format='+%Y-%m-%dT%H:%M:%SZ'
+    date -u "$format" || die "date failed (exit $?)."
+}
+
 REPLY=""
 # What: list-prompts makes ask()/confirm() record prompts
 # Why: one shared recorder keeps the prompt walk in sync
@@ -2642,7 +2651,7 @@ migrate_quickstart_install() (
     fi
     if [[ "$fresh" = 1 ]]; then
         install -m 0600 "$old_env" "$new_env" || die "Failed to create $new_env from $old_env."
-        printf 'envlocal|%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$record" \
+        printf 'envlocal|%s\n' "$(utc_stamp iso)" >> "$record" \
             || die "Failed to record the new $new_env in $record (exit $?)."
     fi
     if ! env_key_exists LANCACHE_STATE_DIR "$new_env"; then
@@ -2745,7 +2754,7 @@ migrate_quickstart_install() (
     if ! write_lancache_host_services "$stack_dir"; then
         print_warn "Neither systemd nor OpenRC found — host services were not written"
     fi
-    printf 'completed|%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$record" \
+    printf 'completed|%s\n' "$(utc_stamp iso)" >> "$record" \
         || die "Failed to record the completed migration in $record (exit $?)."
     # What: bundle removed last; its absence marks done
     # Why: an interrupted run resumes on the next update
@@ -2801,7 +2810,7 @@ rollback_quickstart_migration() {
     print_warn "Rolling back the migration; restarting the quickstart stack in $old_dir"
     stack_compose "$stack_dir" "$env_file" stop \
         || { print_error "Failed to stop the migrated stack (exit $?). Manual recovery required."; return 1; }
-    stamp=$(date -u +%Y%m%dT%H%M%SZ)
+    stamp=$(utc_stamp)
     copies=$(awk -F'|' '$1 == "rolledback" { delete c } $1 == "copied" { c[$3] = 1 } END { for (d in c) print d }' "$record") \
         || { print_error "Failed to read $record (exit $?). Manual recovery required."; return 1; }
     while IFS= read -r dir; do
@@ -5417,7 +5426,7 @@ cmd_backup() (
 
     stack_stopped=0
     stack_was_running=0
-    stamp=$(date -u +%Y%m%dT%H%M%SZ)
+    stamp=$(utc_stamp)
     dest="$backup_root/$stamp"
     # What: backup packs with the best present compressor
     # Why: zstd -T0 uses all cores; gzip used only one
@@ -5511,7 +5520,7 @@ restore_clear_stale_env_local_if_unarchived() {
     [[ -f "$archived_install_root/.env.local" ]] && return 0
     [[ -f "$install_dir/.env.local" ]] || return 0
 
-    stale_target="$install_dir/.env.local.pre-restore-$(date -u +%Y%m%dT%H%M%SZ)"
+    stale_target="$install_dir/.env.local.pre-restore-$(utc_stamp)"
     mv "$install_dir/.env.local" "$stale_target" \
         || die "Failed to move the stale $install_dir/.env.local aside (exit $?)."
     print_warn "Archived backup has no .env.local; moved the override of before the restore to $(basename "$stale_target") so the restored .env alone takes effect."
@@ -7596,7 +7605,7 @@ cmd_create_logs_for_issue() (
 
     local stamp ext archive
     secrets_file=""
-    stamp=$(date -u +%Y%m%dT%H%M%SZ)
+    stamp=$(utc_stamp)
     dest="$dest_root/.create-logs-for-issue-$stamp"
     old_umask=$(umask)
     umask 077
@@ -9864,7 +9873,7 @@ if [[ "$WIZARD_INTROSPECT_MODE" != "1" ]]; then
 # From: Issue #1683 | PR #2017
 ENV_FILE=$(runtime_env_file_for_install_dir "$INSTALL_DIR") || exit $?
 if [[ -f "$ENV_FILE.local" ]]; then
-    install_override="$ENV_FILE.local.pre-install-$(date -u +%Y%m%dT%H%M%SZ)"
+    install_override="$ENV_FILE.local.pre-install-$(utc_stamp)"
     mv -- "$ENV_FILE.local" "$install_override" \
         || die "Failed to move $ENV_FILE.local aside (exit $?)."
     print_warn "Moved the override $ENV_FILE.local to $install_override; this install writes $ENV_FILE alone."
