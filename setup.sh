@@ -6580,6 +6580,15 @@ checkout_branch_name() {
     printf '%s\n' "$branch"
 }
 
+# What: branch of checkout $1 if no channel branch
+# Why: a branch the operator chose is never moved
+# From: Issue #1683 | PR #2017
+checkout_own_branch() {
+    local branch
+    branch=$(checkout_branch_name "$1") || exit $?
+    [[ -z "$branch" ]] || is_channel_branch "$branch" || printf '%s\n' "$branch"
+}
+
 # What: the commit a checkout stands on
 # Why: a move compares the commit before and after it
 # From: Issue #1683 | PR #2017
@@ -6596,11 +6605,11 @@ channel_checkout_target() {
         print_ok "$repo_dir is not a git checkout; its files stay as they are" >&2
         return 0
     fi
-    branch=$(checkout_branch_name "$repo_dir") || exit $?
+    branch=$(checkout_own_branch "$repo_dir") || exit $?
     # What: a branch outside the channel branches stays
     # Why: the operator chose that revision (AG-OP-009)
     # From: Issue #1683 | PR #1858
-    if [[ -n "$branch" ]] && ! is_channel_branch "$branch"; then
+    if [[ -n "$branch" ]]; then
         print_warn "Checkout $repo_dir is on $branch, no channel branch; repository not updated." >&2
         return 0
     fi
@@ -6709,8 +6718,8 @@ channel_code_checkout() {
     # Why: the operator chose that revision (AG-OP-009)
     # From: Issue #1683 | PR #1858
     if [[ -e "$SCRIPT_DIR/.git" ]]; then
-        branch=$(checkout_branch_name "$SCRIPT_DIR") || exit $?
-        if [[ -n "$branch" ]] && ! is_channel_branch "$branch"; then
+        branch=$(checkout_own_branch "$SCRIPT_DIR") || exit $?
+        if [[ -n "$branch" ]]; then
             print_warn "Checkout $SCRIPT_DIR is on $branch, no channel branch; installing from it."
             printf "  Compose files and this setup.sh come from that branch.\n"
             words=$(lancache_channel_branch_words) || exit $?
@@ -6867,9 +6876,9 @@ update_repo_and_resume() {
     # Why: each channel runs the code of its own dir
     # From: Issue #1683 | PR #1858
     if [[ -e "$repo_dir/.git" ]] && is_channel_layout_repo "$repo_dir"; then
-        branch=$(checkout_branch_name "$repo_dir") || exit $?
+        branch=$(checkout_own_branch "$repo_dir") || exit $?
         dir=$(channel_code_dir "$channel") || exit $?
-        if [[ -z "$branch" ]] || is_channel_branch "$branch"; then
+        if [[ -z "$branch" ]]; then
             if [[ "$(realpath -m "$repo_dir")" != "$(realpath -m "$dir")" ]]; then
                 target=$(lancache_channel_code_ref "$channel" "$tag") || exit $?
                 [[ -n "$target" ]] || die "Channel $channel needs LANCACHE_IMAGE_TAG to name its code."
