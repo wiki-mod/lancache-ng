@@ -99,6 +99,20 @@ print_error(){ printf "  ${RED}✗${RESET} %s\n" "$*" >&2; }
 print_skip() { printf "  ${YELLOW}↷${RESET} SKIP: %s\n" "$*" >&2; }
 die()        { print_error "$*"; exit 1; }
 
+# What: prints "LanCache-NG — $1" in a frame; $1 is ASCII
+# Why: one frame for every guided flow; no locale needed
+# From: Issue #1683 | PR #2017
+print_title_box() {
+    local title="$1" inner=39 rule pad
+    (( ${#title} + 18 <= inner )) || inner=$(( ${#title} + 18 ))
+    pad=$(( inner - 16 - ${#title} ))
+    printf -v rule '%*s' "$inner" ''
+    rule="${rule// /═}"
+    printf '\n%s╔%s╗%s\n' "${BOLD}" "$rule" "${RESET}"
+    printf '%s║  LanCache-NG — %s%*s║%s\n' "${BOLD}" "$title" "$pad" '' "${RESET}"
+    printf '%s╚%s╝%s\n\n' "${BOLD}" "$rule" "${RESET}"
+}
+
 # What: true if a whole line of the list equals the needle
 # Why: one membership owner; no grep exit code to misread
 # From: Issue #1683 | PR #1858
@@ -8261,11 +8275,7 @@ cmd_reset_sign_in() {
 cmd_update_ip() {
     local install_dir="${1:-$DEFAULT_INSTALL_DIR}"
 
-    printf "\n"
-    printf '%s╔═══════════════════════════════════════╗%s\n' "${BOLD}" "${RESET}"
-    printf '%s║  LanCache-NG — Reconfigure IPs        ║%s\n' "${BOLD}" "${RESET}"
-    printf '%s╚═══════════════════════════════════════╝%s\n' "${BOLD}" "${RESET}"
-    printf "\n"
+    print_title_box "Reconfigure IPs"
 
     require_root "update-ip [install-dir]"
     install_dir=$(resolve_stack_dir_checked "$install_dir") || exit $?
@@ -8465,11 +8475,7 @@ dns_upstream_is_live() {
 cmd_configure_upstream_dns() {
     local install_dir="${1:-$DEFAULT_INSTALL_DIR}"
 
-    printf "\n"
-    printf '%s╔═══════════════════════════════════════╗%s\n' "${BOLD}" "${RESET}"
-    printf '%s║  LanCache-NG — External DNS server    ║%s\n' "${BOLD}" "${RESET}"
-    printf '%s╚═══════════════════════════════════════╝%s\n' "${BOLD}" "${RESET}"
-    printf "\n"
+    print_title_box "External DNS server"
 
     require_root "configure-upstream-dns [install-dir]"
     install_dir=$(resolve_stack_dir_checked "$install_dir") || exit $?
@@ -9320,11 +9326,7 @@ esac
 # Why: prompt, write config once, then start containers
 # From: Issue #1683 | PR #1858
 
-printf "\n"
-printf '%s╔══════════════════════════════════════════╗%s\n' "${BOLD}" "${RESET}"
-printf '%s║      LanCache-NG — Initial Setup        ║%s\n' "${BOLD}" "${RESET}"
-printf '%s╚══════════════════════════════════════════╝%s\n' "${BOLD}" "${RESET}"
-printf "\n"
+print_title_box "Initial Setup"
 printf "  This script sets up LanCache-NG and starts all containers.\n"
 printf "  After: ./setup.sh update  |  ./setup.sh debug  |  ./setup.sh update-ip\n"
 printf "  Help:  ./setup.sh --help (use './setup.sh <command> --help' for details)\n"
