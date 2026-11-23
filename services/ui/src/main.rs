@@ -1517,12 +1517,8 @@ async fn remote_zones(s: &Settings, address: &str) -> Result<Vec<lancache_ng::pd
 // From: Issue #1683
 fn remote_api(s: &Settings, address: &str) -> Result<lancache_ng::pdns::Api, String> {
     let port = s.uint("PDNS_AUTH_API_PORT")?;
-    let host = if address.contains(':') {
-        format!("[{address}]")
-    } else {
-        address.to_string()
-    };
-    let url = format!("http://{host}:{port}/api/v1/servers/localhost");
+    let host = lancache_ng::dns::host_port(address, port);
+    let url = format!("http://{host}/api/v1/servers/localhost");
     let key = secrets(s)?.pdns_api_key;
     Ok(lancache_ng::pdns::Api::new(http::client(s)?, &url, &key))
 }
@@ -3198,7 +3194,10 @@ async fn ensure_secondary_zones(s: &Settings, key: &str) -> Result<(), String> {
     let have: Vec<String> = api.zones().await?.into_iter().map(|z| z.name).collect();
     let zones = s.list("DNS_SECONDARY_ZONES");
     let port = primary_xfr_port(s, zones.first()).await?;
-    let masters = vec![format!("{}:{port}", s.text("DNS_XFR_PRIMARY")?)];
+    let masters = vec![lancache_ng::dns::host_port(
+        &s.text("DNS_XFR_PRIMARY")?,
+        port,
+    )];
     for zone in zones {
         let id = lancache_ng::pdns::zone_id(&zone);
         if have.contains(&id) {
@@ -4238,7 +4237,7 @@ async fn main() -> Result<(), String> {
     tokio::spawn(flush_on_transfer(app.clone()));
     tokio::spawn(zones_at_start(app.clone()));
     tokio::spawn(secondary_watch(app.clone()));
-    let listen = format!("{}:{}", s.text("UI_LISTEN")?, s.uint("UI_PORT")?);
+    let listen = lancache_ng::dns::host_port(&s.text("UI_LISTEN")?, s.uint("UI_PORT")?);
     let sock = tokio::net::TcpListener::bind(&listen)
         .await
         .map_err(|e| format!("{listen}: {e}"))?;

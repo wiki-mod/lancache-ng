@@ -871,6 +871,17 @@ pub mod dns {
         }
     }
 
+    // What: host:port; an IPv6 address gets brackets.
+    // Why: bare, nobody sees where its port starts.
+    // From: Issue #1683 | PR #2017
+    pub fn host_port(host: &str, port: impl std::fmt::Display) -> String {
+        if host.contains(':') {
+            format!("[{host}]:{port}")
+        } else {
+            format!("{host}:{port}")
+        }
+    }
+
     // What: the LAN zone, DHCP_DOMAIN in canonical form.
     // Why: PowerDNS compares names with a trailing dot.
     // From: Issue #1683 | PR #2017
@@ -2454,7 +2465,7 @@ pub mod pdns_conf {
                     let port = s.uint("PDNS_AUTH_PORT")?;
                     let to: Vec<String> = secondary_ips(s)
                         .iter()
-                        .map(|ip| format!("{ip}:{port}"))
+                        .map(|ip| crate::dns::host_port(ip, port))
                         .collect();
                     to.join(",")
                 } else {
@@ -2470,7 +2481,7 @@ pub mod pdns_conf {
                         to.extend(
                             s.list(&which.key("LISTEN"))
                                 .iter()
-                                .map(|ip| format!("{ip}:{port}")),
+                                .map(|ip| crate::dns::host_port(ip, port)),
                         );
                     }
                     to.join(",")
@@ -2953,12 +2964,8 @@ pub mod dnsdist_conf {
         for l in listeners {
             for addr in listen {
                 let addr = plain(addr)?;
-                let host = if addr.contains(':') {
-                    format!("[{addr}]")
-                } else {
-                    addr.to_string()
-                };
-                out += &format!("{call}(\"{host}:{}\")\n", l.port);
+                let local = crate::dns::host_port(addr, l.port);
+                out += &format!("{call}(\"{local}\")\n");
                 call = "addLocal";
             }
         }
@@ -3017,7 +3024,7 @@ pub mod dnsdist_conf {
         let mut listeners = vec![Listener {
             port: s.uint("DNS_PORT")?,
             pool: "http",
-            backend: format!("{lo}:{}", s.uint("RECURSOR_HTTP_PORT")?),
+            backend: crate::dns::host_port(&lo, s.uint("RECURSOR_HTTP_PORT")?),
         }];
         // What: HTTPS port only when IP_HTTPS is set.
         // Why: dns-https idles without IP_HTTPS.
@@ -3026,7 +3033,7 @@ pub mod dnsdist_conf {
             listeners.push(Listener {
                 port: s.uint("DNS_HTTPS_PORT")?,
                 pool: "https",
-                backend: format!("{lo}:{}", s.uint("RECURSOR_HTTPS_PORT")?),
+                backend: crate::dns::host_port(&lo, s.uint("RECURSOR_HTTPS_PORT")?),
             });
         }
         body(&s.list("DNSDIST_LISTEN"), &acl, &source, &auth, &listeners)
@@ -3652,7 +3659,7 @@ pub mod nginx_conf {
             other => return Err(format!("PROXY_SECURITY_MODE {other} is not lazy/strict")),
         };
         let lo = s.text("LOOPBACK_BIND_IP")?;
-        let at = |k: &str| -> Result<String, String> { Ok(format!("{lo}:{}", s.uint(k)?)) };
+        let at = |k: &str| -> Result<String, String> { Ok(crate::dns::host_port(&lo, s.uint(k)?)) };
         Ok(Plan {
             strict,
             cidrs: s.list("PROXY_ALLOWED_CLIENT_CIDRS"),
