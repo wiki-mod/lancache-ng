@@ -649,9 +649,13 @@ ensure_host_ipv4() {
 # Why: the route source is right on multi-homed hosts
 # From: Issue #1683 | PR #1858
 detect_lan_ip() {
-    local ip routes addrs
+    local ip routes addrs probe
 
-    if routes=$(ip -4 route get 1.1.1.1); then
+    # What: the SOT probe target without its port
+    # Why: ip route get takes an address; nothing is sent
+    # From: Issue #1683 | PR #2017
+    probe=$(prod_env_default ROUTE_PROBE_TARGET) || exit $?
+    if routes=$(ip -4 route get "${probe%:*}"); then
         ip=$(awk '{for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit }}' <<< "$routes")
         if [[ -n "$ip" ]] && is_valid_ipv4 "$ip"; then
             printf '%s\n' "$ip"
