@@ -3565,6 +3565,16 @@ assert_prebuilt_image_platform_supported() {
     print_ok "Host architecture ${arch} maps to image platform ${platform}"
 }
 
+# What: dies unless docker and its buildx plugin answer
+# Why: registry reads need buildx; $1 says what needs it
+# From: Issue #1683 | PR #2017
+require_docker_buildx() {
+    local purpose="$1" out
+    command_available docker || die "docker is required to ${purpose}."
+    out=$(docker buildx version 2>&1) \
+        || die "docker buildx is required to ${purpose} (exit $?: ${out}). Install the ${DOCKER_BUILDX_PLUGIN} package, then rerun setup.sh."
+}
+
 # What: this host's arch and OCI platform; else dies
 # Why: one read and one error text for both checks
 # From: Issue #1683 | PR #2017
@@ -3595,14 +3605,11 @@ host_image_platform() {
 # From: Issue #1683 | PR #1858
 assert_resolved_image_tag_platform_supported() {
     local registry="$1" prefix="$2" tag="$3"
-    local arch platform image single_platform inspect_text discovered_platforms buildx_out plat_line plat_found=0
+    local arch platform image single_platform inspect_text discovered_platforms plat_line plat_found=0
 
     host_arch_and_platform arch platform
 
-    command_available docker \
-        || die "docker is required to verify that image tag '${tag}' publishes a ${platform} image before continuing."
-    buildx_out=$(docker buildx version 2>&1) \
-        || die "docker buildx is required to verify that image tag '${tag}' publishes a ${platform} image before continuing (exit $?: ${buildx_out}). Install the ${DOCKER_BUILDX_PLUGIN} package, then rerun setup.sh."
+    require_docker_buildx "verify that image tag '${tag}' publishes a ${platform} image before continuing"
 
     image="${registry}/${prefix}/dns:${tag}"
 
@@ -4365,7 +4372,7 @@ EOF
 # From: Issue #1683 | PR #1858
 lancache_channel_image_refs() {
     local env_file="$1" channel="$2"
-    local registry prefix pointer_channel vars max backoff lock_ref buildx_out n=1 first second reason line changed
+    local registry prefix pointer_channel vars max backoff lock_ref n=1 first second reason line changed
     local install_channel
     pointer_channel=$(lancache_stack_pointer_channel_for "$channel") || exit $?
     registry=$(resolve_lancache_image_registry "$env_file") \
@@ -4382,10 +4389,7 @@ lancache_channel_image_refs() {
         || die "Cannot read release.promote_lock_ref (exit $?)."
     lock_ref="${lock_ref}/${pointer_channel}"
 
-    command_available docker \
-        || die "Docker is required to resolve LANCACHE_IMAGE_CHANNEL=${channel}."
-    buildx_out=$(docker buildx version 2>&1) \
-        || die "docker buildx is required to resolve LANCACHE_IMAGE_CHANNEL=${channel} (exit $?: ${buildx_out}). Install the ${DOCKER_BUILDX_PLUGIN} package, then rerun setup.sh."
+    require_docker_buildx "resolve LANCACHE_IMAGE_CHANNEL=${channel}"
 
     printf '\n%s%s▶ Resolving image channel %s%s\n' "${BOLD}" "${CYAN}" "$channel" "${RESET}" >&2
     # What: every non-default pointer warns on each run
