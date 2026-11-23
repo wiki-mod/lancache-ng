@@ -2262,6 +2262,16 @@ stack_compose() {
     sot_compose "$env_file" "${stack_files[@]}" "$@"
 }
 
+# What: fills an array with the services of a stack
+# Why: one reader of the compose service list; rc on failure
+# From: Issue #1683 | PR #2017
+stack_services_into() {
+    local -n _stack_services_ref="$1"
+    local list
+    list=$(stack_compose "$2" "$3" config --services) || return $?
+    mapfile -t _stack_services_ref <<< "$list"
+}
+
 # What: sorted entries of a volume/dir: mode, owner, hash
 # Why: a copy counts only when both lists are equal
 # From: Issue #1683 | PR #1858
@@ -2562,7 +2572,7 @@ restore_quickstart_mounts() {
 # From: Issue #1683 | PR #1858
 migrate_quickstart_install() (
     local old_dir="$1" stack_dir="${PROD_COMPOSE%/*}" new_env old_env record project key value volume dir copy f
-    local services old_volumes prod_volumes rows missing copies keys old_raw new_raw old_value line path_keys bundle
+    local old_volumes prod_volumes rows missing copies keys old_raw new_raw old_value line path_keys bundle
     local https_ip fresh kept kept_list restored
     local -a service_list copy_lines path_key_list=()
     path_keys=$(lancache_sot_list quickstart_path_keys runtime) || exit $?
@@ -2592,9 +2602,8 @@ migrate_quickstart_install() (
     UPDATE_CONVERGENCE_PAUSED=1
     pause_lancache_convergence_for_update
     _UPDATE_ENV_FILE="$old_env" _UPDATE_STACK_DIR="$old_dir"
-    services=$(stack_compose "$old_dir" "$old_env" config --services) \
+    stack_services_into service_list "$old_dir" "$old_env" \
         || die "Cannot list the services of $old_dir (exit $?); nothing was changed."
-    mapfile -t service_list <<< "$services"
     capture_stack_health_baseline "${service_list[@]}"
     project=$(compose_project_name "$old_dir" "$old_env") \
         || die "Cannot resolve the compose project of $old_dir (exit $?); nothing was changed."
@@ -6296,15 +6305,14 @@ rollback_stack_update() {
         # What: old stack must be healthy before success
         # Why: no success message while containers are down
         # From: Issue #1683 | PR #1991
-        local wait services
+        local wait
         local -a restored_services
         _UPDATE_STACK_DIR="$install_dir"
         _UPDATE_ENV_FILE=$(runtime_env_file_for_install_dir "$install_dir") \
             || { print_error "Cannot resolve the env file of $install_dir (exit $?). Manual recovery required."; return 1; }
         wait=$(prod_env_default SETUP_HEALTH_WAIT_SERVICES_SECONDS) || exit $?
-        services=$(stack_compose "$install_dir" "$_UPDATE_ENV_FILE" config --services) \
+        stack_services_into restored_services "$install_dir" "$_UPDATE_ENV_FILE" \
             || { print_error "Cannot list the services of $install_dir (exit $?). Manual recovery required."; return 1; }
-        mapfile -t restored_services <<< "$services"
         if ! wait_for_stack_health "$wait" "${restored_services[@]}"; then
             print_error "Rollback restored the files, but the stack is not healthy. Manual recovery required: $SCRIPT_DIR/setup.sh compose $install_dir up -d"
             return 1
@@ -6323,13 +6331,12 @@ apply_stack_update_ordered() {
     local install_dir="$1"
     local -a all_services non_ui_services rollback=("${@:2}")
     [[ "${#rollback[@]}" -gt 0 ]] || rollback=(rollback_stack_update "$install_dir")
-    local svc services wait_services wait_ui
+    local svc wait_services wait_ui
 
     wait_services=$(prod_env_default SETUP_HEALTH_WAIT_SERVICES_SECONDS) || exit $?
     wait_ui=$(prod_env_default SETUP_HEALTH_WAIT_UI_SECONDS) || exit $?
-    services=$(stack_compose "$install_dir" "$_UPDATE_ENV_FILE" config --services) \
+    stack_services_into all_services "$install_dir" "$_UPDATE_ENV_FILE" \
         || die "Cannot list the services of $install_dir (exit $?); nothing was started."
-    mapfile -t all_services <<< "$services"
     non_ui_services=()
     for svc in "${all_services[@]}"; do
         [[ "$svc" = "ui" ]] && continue
@@ -6793,10 +6800,8 @@ perform_stack_update_flow() {
         # From: Issue #1391
         print_step "Capturing pre-update health baseline"
         local -a _update_baseline_services
-        local baseline_services
-        baseline_services=$(stack_compose "$install_dir" "$_UPDATE_ENV_FILE" config --services) \
+        stack_services_into _update_baseline_services "$install_dir" "$_UPDATE_ENV_FILE" \
             || die "Cannot list the services of $install_dir (exit $?); nothing was changed."
-        mapfile -t _update_baseline_services <<< "$baseline_services"
         capture_stack_health_baseline "${_update_baseline_services[@]}"
 
         UPDATE_CONVERGENCE_PAUSED=0
@@ -6912,7 +6917,7 @@ cmd_update() {
 # Why: units and operators start the stack exactly as setup
 # From: Issue #1683 | PR #1858
 cmd_compose() {
-    local install_dir env_file arg services
+    local install_dir env_file arg
     local -a args=() listed=() picked=()
     [[ $# -ge 1 ]] || die "Usage: setup.sh compose <install-dir> <compose args>"
     install_dir=$(resolve_stack_dir_checked "$1") || exit $?
@@ -6926,9 +6931,8 @@ cmd_compose() {
         for arg in "${@:2}"; do
             [[ "$arg" = -* ]] || { stack_compose "$install_dir" "$env_file" "$@"; return; }
         done
-        services=$(stack_compose "$install_dir" "$env_file" config --services) \
+        stack_services_into listed "$install_dir" "$env_file" \
             || die "Cannot list the services of $install_dir (exit $?)."
-        mapfile -t listed <<< "$services"
         wanted_stack_services picked "$env_file" "${listed[@]}"
         (( ${#picked[@]} == ${#listed[@]} )) || args+=("${picked[@]}")
     fi
@@ -7254,14 +7258,15 @@ cmd_debug() {
     # What: logs of every service the compose files define
     # Why: a fixed list misses profile services
     # From: Issue #1683 | PR #1858
-    local services svc
-    if services=$(stack_compose "$install_dir" "$env_file" config --services); then
-        while IFS= read -r svc; do
+    local svc
+    local -a services=()
+    if stack_services_into services "$install_dir" "$env_file"; then
+        for svc in "${services[@]}"; do
             [[ -n "$svc" ]] || continue
             printf '\n%s--- %s ---%s\n' "${BOLD}" "$svc" "${RESET}"
             stack_compose "$install_dir" "$env_file" logs --tail="$log_lines" "$svc" 2>&1 \
                 || print_error "Logs of $svc failed (exit $?)."
-        done <<< "$services"
+        done
     else
         print_error "Cannot list the compose services of $install_dir (exit $?)."
     fi
@@ -7586,15 +7591,18 @@ cmd_create_logs_for_issue() (
 
     print_step "Collecting service logs"
     local -a services=()
-    local services_list slrc=0
-    services_list=$(stack_compose "$install_dir" "$env_file" config --services 2>&1) || slrc=$?
+    local slrc=0 list_err="$dest/logs/_service-list-error.raw"
+    # What: compose's error text goes to a file, redacted
+    # Why: it can name values of the .env; the raw file goes
+    # From: Issue #1683 | PR #2017
+    stack_services_into services "$install_dir" "$env_file" 2> "$list_err" || slrc=$?
     if [[ "$slrc" -ne 0 ]]; then
-        printf 'service list failed (exit %s): %s\n' "$slrc" "$services_list" \
+        { printf 'service list failed (exit %s): ' "$slrc"; cat "$list_err"; } \
             | logbundle_redact_stream "$secrets_file" > "$dest/logs/_service-list-error.log"
         print_warn "Could not list the compose services; see logs/_service-list-error.log in the bundle."
-        services_list=""
+        services=()
     fi
-    mapfile -t services <<< "$services_list"
+    rm -f -- "$list_err" || die "Failed to remove $list_err (exit $?); no log bundle was written."
     local svc log_lines
     log_lines=$(prod_env_default SETUP_LOGBUNDLE_LOG_LINES) || exit $?
     for svc in "${services[@]}"; do
@@ -8192,15 +8200,14 @@ cmd_update_ip() {
     # What: the same baseline and gate as ./setup.sh update
     # Why: new IPs that fail the gate must not stay active
     # From: Issue #1683 | PR #1858
-    local services saved_env apply_rc=0
+    local saved_env apply_rc=0
     local -a all_services
     install_missing_tools curl dig jq
     _UPDATE_ENV_FILE="$deploy_env"
     _UPDATE_STACK_DIR="$install_dir"
     print_step "Capturing health baseline"
-    services=$(stack_compose "$install_dir" "$deploy_env" config --services) \
+    stack_services_into all_services "$install_dir" "$deploy_env" \
         || die "Cannot list the services of $install_dir (exit $?); nothing was changed."
-    mapfile -t all_services <<< "$services"
     capture_stack_health_baseline "${all_services[@]}"
     saved_env=$(cat -- "$deploy_env") || die "Cannot read $deploy_env (exit $?); nothing was changed."
 
@@ -8340,7 +8347,7 @@ cmd_configure_upstream_dns() {
 
     print_step "Reading current configuration"
 
-    local env_file ip_http ip_https lan services apply_rc=0
+    local env_file ip_http ip_https lan apply_rc=0
     local old_servers old_zones old_unsigned old_reverse dhcp_mode
     local -a all_services new_entries
     env_file=$(require_stack_env_file "$install_dir") || exit $?
@@ -8389,9 +8396,8 @@ cmd_configure_upstream_dns() {
     _UPDATE_ENV_FILE="$env_file"
     _UPDATE_STACK_DIR="$install_dir"
     print_step "Capturing health baseline"
-    services=$(stack_compose "$install_dir" "$env_file" config --services) \
+    stack_services_into all_services "$install_dir" "$env_file" \
         || die "Cannot list the services of $install_dir (exit $?); nothing was changed."
-    mapfile -t all_services <<< "$services"
     capture_stack_health_baseline "${all_services[@]}"
 
     print_step "Saving configuration"
@@ -10175,9 +10181,12 @@ _UPDATE_STACK_DIR="$INSTALL_DIR"
 _UPDATE_ENV_FILE="$ENV_FILE"
 install_wait=$(prod_env_default SETUP_HEALTH_WAIT_SERVICES_SECONDS) || exit $?
 install_poll=$(prod_env_default SETUP_HEALTH_POLL_SECONDS) || exit $?
-install_services=$(stack_compose "$INSTALL_DIR" "$ENV_FILE" config --services) \
+# What: the service array starts empty, then is filled
+# Why: stack_services_into writes it through a nameref
+# From: Issue #1683 | PR #2017
+install_services=()
+stack_services_into install_services "$INSTALL_DIR" "$ENV_FILE" \
     || die "Failed to list the services in $INSTALL_DIR (exit $?)."
-mapfile -t install_services <<<"$install_services"
 wanted_stack_services install_services "$ENV_FILE" "${install_services[@]}"
 install_waited=0
 install_bad=("${install_services[@]}")
