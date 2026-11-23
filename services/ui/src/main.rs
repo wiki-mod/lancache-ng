@@ -2897,7 +2897,7 @@ async fn hamster_api(
     if let Some(freed) = v.get("freed").and_then(Value::as_u64) {
         let _ = app
             .cache_used
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
                 (n != u64::MAX).then(|| n.saturating_sub(freed))
             });
     }
