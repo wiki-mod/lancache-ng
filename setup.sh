@@ -2218,9 +2218,8 @@ resolve_stack_dir_checked() {
 # Why: quickstart installs live elsewhere
 # From: Issue #1683 | PR #1858
 is_deploy_prod_install_dir() {
-    local dir="${1%/}" rel="${PROD_COMPOSE#"$SCRIPT_DIR/"}"
-    rel="${rel%/*}"
-    [[ "$dir" = "$rel" || "$dir" = */"$rel" ]]
+    local dir="${1%/}"
+    [[ "$dir" = "$PROD_STACK_REL" || "$dir" = */"$PROD_STACK_REL" ]]
 }
 
 # What: the stack's settings file, <install dir>/.env
@@ -2534,15 +2533,14 @@ migrate_legacy_ca() {
 # From: Issue #1683 | PR #2017
 resolve_stack_dir() {
     local dir out
-    local rel="${PROD_COMPOSE#"$SCRIPT_DIR/"}"
     dir=$(realpath -m -- "$1") || die "Cannot resolve the path $1 (exit $?)."
     # What: <root>/current wins over an old root checkout
     # Why: after a move, the old code must not run again
     # From: Issue #1683 | PR #1858
-    if [[ ! -f "$dir/docker-compose.yml" && -f "$dir/current/$rel" ]]; then
-        out="$dir/current/${rel%/*}"
-    elif [[ ! -f "$dir/docker-compose.yml" && -f "$dir/$rel" ]]; then
-        out="$dir/${rel%/*}"
+    if [[ ! -f "$dir/docker-compose.yml" && -f "$dir/current/$PROD_COMPOSE_REL" ]]; then
+        out="$dir/current/$PROD_STACK_REL"
+    elif [[ ! -f "$dir/docker-compose.yml" && -f "$dir/$PROD_COMPOSE_REL" ]]; then
+        out="$dir/$PROD_STACK_REL"
     else
         out="$dir"
     fi
@@ -4255,7 +4253,7 @@ lancache_image_ref_vars() {
     # What: the compose text from the checkout or the ref
     # Why: a curl|bash secondary has no $PROD_COMPOSE file
     # From: Issue #1683
-    text=$(lancache_repo_file_text "${PROD_COMPOSE#"$SCRIPT_DIR"/}") || exit $?
+    text=$(lancache_repo_file_text "$PROD_COMPOSE_REL") || exit $?
     vars=$(sed -nE 's/^ *image: \$\{(LANCACHE_IMAGE_REF_([A-Z_]+)):\?.*$/\1 \2/p' <<< "$text" \
         | awk '{ print $1, tolower($2) }' | sort -u) \
         || die "Failed to read the first-party image refs from $PROD_COMPOSE."
@@ -5334,8 +5332,8 @@ restore_compose_volumes() {
 # From: Issue #1683 | PR #1858
 is_same_channel_install() {
     local a="$1" b="$2"
-    [[ "$a" = */deploy/prod && "$b" = */deploy/prod ]] || return 1
-    is_channel_layout_repo "${a%/deploy/prod}" && is_channel_layout_repo "${b%/deploy/prod}"
+    [[ "$a" = */"$PROD_STACK_REL" && "$b" = */"$PROD_STACK_REL" ]] || return 1
+    is_channel_layout_repo "${a%/"$PROD_STACK_REL"}" && is_channel_layout_repo "${b%/"$PROD_STACK_REL"}"
 }
 
 # What: "id|compose dir" of each container a filter selects
@@ -6352,8 +6350,8 @@ rollback_stack_update() {
         # From: Issue #1683 | PR #1858
         local f
         for f in "${CHANNEL_STACK_FILES[@]}"; do
-            rm -f -- "$LANCACHE_UPDATE_REPO/deploy/prod/$f" \
-                || { print_error "Failed to remove $LANCACHE_UPDATE_REPO/deploy/prod/$f (exit $?)."; return 1; }
+            rm -f -- "$LANCACHE_UPDATE_REPO/$PROD_STACK_REL/$f" \
+                || { print_error "Failed to remove $LANCACHE_UPDATE_REPO/$PROD_STACK_REL/$f (exit $?)."; return 1; }
         done
         install_dir="$LANCACHE_UPDATE_FROM_INSTALL"
     # What: the checkout returns to its pre-update revision
@@ -6707,7 +6705,7 @@ remove_root_checkout() {
     done < "$list"
     rm -f -- "$list" || die "Failed to remove $list (exit $?)."
     for f in .env .env.local .env.lock; do
-        rm -f -- "$root/deploy/prod/$f" || die "Failed to remove $root/deploy/prod/$f (exit $?)."
+        rm -f -- "$root/$PROD_STACK_REL/$f" || die "Failed to remove $root/$PROD_STACK_REL/$f (exit $?)."
     done
     # What: drops emptied code dirs, deepest first
     # Why: a dir with data or other files must stay
@@ -6744,18 +6742,18 @@ switch_channel_dir_and_resume() {
     # Why: the running stack owns them; a copy is redone
     # From: Issue #1683 | PR #1858
     for f in "${files[@]}"; do
-        rm -f -- "$dir/deploy/prod/$f" || die "Failed to remove $dir/deploy/prod/$f (exit $?)."
+        rm -f -- "$dir/$PROD_STACK_REL/$f" || die "Failed to remove $dir/$PROD_STACK_REL/$f (exit $?)."
     done
     ensure_channel_checkout "$dir" "$target"
     for f in "${files[@]}"; do
         [[ -f "$install_dir/$f" ]] || continue
-        cp -p -- "$install_dir/$f" "$dir/deploy/prod/$f" \
-            || die "Failed to copy $install_dir/$f to $dir/deploy/prod (exit $?)."
+        cp -p -- "$install_dir/$f" "$dir/$PROD_STACK_REL/$f" \
+            || die "Failed to copy $install_dir/$f to $dir/$PROD_STACK_REL (exit $?)."
     done
     # What: the copied .env names the new channel
     # Why: else the next update moves the stack back
     # From: Issue #1683 | PR #1858
-    set_env_key LANCACHE_IMAGE_CHANNEL "$channel" "$dir/deploy/prod/${_UPDATE_ENV_FILE##*/}"
+    set_env_key LANCACHE_IMAGE_CHANNEL "$channel" "$dir/$PROD_STACK_REL/${_UPDATE_ENV_FILE##*/}"
     set_active_channel_dir "$dir"
     for svc in "${!_UPDATE_HEALTH_BASELINE[@]}"; do baseline+="${svc}=${_UPDATE_HEALTH_BASELINE[$svc]} "; done
     print_ok "Stack settings copied to $dir; continuing with its setup.sh"
@@ -6770,7 +6768,7 @@ switch_channel_dir_and_resume() {
     chmod +x "$dir/setup.sh" || die "Failed to make $dir/setup.sh executable (exit $?)."
     shopt -s execfail
     set +e
-    exec "$link/setup.sh" update "$link/deploy/prod" || {
+    exec "$link/setup.sh" update "$link/$PROD_STACK_REL" || {
         exec_rc=$?
         set -e
         die "Failed to start $link/setup.sh (exit $exec_rc); the stack was not changed."
@@ -6957,9 +6955,9 @@ perform_stack_update_flow() {
     # Why: switch and quickstart migration both leave it
     # From: Issue #1683 | PR #2002
     ensure_default_install_dir
-    if [[ -e "$DEFAULT_INSTALL_DIR/.git" && "$(realpath -m "$install_dir")" != "$(realpath -m "$DEFAULT_INSTALL_DIR/deploy/prod")" ]]; then
+    if [[ -e "$DEFAULT_INSTALL_DIR/.git" && "$(realpath -m "$install_dir")" != "$(realpath -m "$DEFAULT_INSTALL_DIR/$PROD_STACK_REL")" ]]; then
         migrate_legacy_ca "$DEFAULT_INSTALL_DIR/certs" "$_UPDATE_ENV_FILE" 1
-        write_lancache_host_services "$(channel_active_link)/deploy/prod" \
+        write_lancache_host_services "$(channel_active_link)/$PROD_STACK_REL" \
             || print_warn "Neither systemd nor OpenRC found — host services were not written"
         remove_root_checkout "$DEFAULT_INSTALL_DIR"
     fi
@@ -8586,7 +8584,6 @@ is_secondary_name() {
 # From: Issue #1683 | PR #2017
 assert_secondary_host_free() {
     local own sub dir channels info cname rows owner
-    local rel="${PROD_COMPOSE#"$SCRIPT_DIR/"}"
     local -a subs=("" current)
     # What: the physical path of the secondary dir, by cd
     # Why: BusyBox lacks realpath -m before the requirements
@@ -8602,7 +8599,7 @@ assert_secondary_host_free() {
     channels=$(lancache_release_rows channel) || exit $?
     mapfile -t -O 2 subs <<< "$channels"
     for sub in "${subs[@]}"; do
-        dir="${DEFAULT_INSTALL_DIR}${sub:+/$sub}/${rel%/*}"
+        dir="${DEFAULT_INSTALL_DIR}${sub:+/$sub}/${PROD_STACK_REL}"
         [[ ! -f "$dir/.env" && ! -f "$dir/.env.local" ]] \
             || die "This host holds a LanCache-NG install (settings in ${dir}). A secondary needs its own host; nothing was changed."
     done
@@ -9190,12 +9187,14 @@ EOF
 # From: Issue #1683 | PR #1912
 LANCACHE_SOT=.github/yaml/build-manifest.yml
 
-# What: loads the SOT of SCRIPT_DIR and sets PROD_COMPOSE
-# Why: one read per code dir serves every SOT lookup
+# What: loads the SOT of SCRIPT_DIR and the prod paths
+# Why: one read per code dir; the SOT owns compose_file
 # From: Issue #1683 | PR #2017
 load_script_dir_sot() {
     LANCACHE_SOT_TEXT=$(lancache_repo_file_text "$LANCACHE_SOT") || exit $?
-    PROD_COMPOSE="$SCRIPT_DIR/$(lancache_sot_value compose_file runtime)" || exit $?
+    PROD_COMPOSE_REL=$(lancache_sot_value compose_file runtime) || exit $?
+    PROD_STACK_REL="${PROD_COMPOSE_REL%/*}"
+    PROD_COMPOSE="$SCRIPT_DIR/$PROD_COMPOSE_REL"
 }
 load_script_dir_sot
 
