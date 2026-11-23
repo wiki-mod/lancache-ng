@@ -7971,7 +7971,7 @@ reset_kea_to_last_known_good_config() {
     print_ok "Snapshot persisted to kea-dhcp4.conf."
 
     print_ok "Kea rolled back to known-good snapshot $snapshot_id (validated, applied, and persisted)."
-    print_warn "This CLI fallback does not itself record a fresh known-good snapshot of the restored state (services/ui/src/main.rs's rollback_kea_snapshot does, when reached via the Admin UI) -- the next config change made through the Admin UI will."
+    print_warn "This CLI fallback records no new known-good snapshot of the restored state; the next change of the DHCP settings in the Admin UI records one."
 }
 
 # What: adds the trailing dot to a zone name if missing
