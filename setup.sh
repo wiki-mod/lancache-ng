@@ -2539,8 +2539,7 @@ migrate_legacy_ca() {
     # From: Issue #1683 | PR #1858
     [[ "$remove" = 1 ]] || return 0
     rm -f -- "$src/ca."* || die "Failed to remove the legacy CA in $src (exit $?)."
-    rmdir --ignore-fail-on-non-empty -- "$src" \
-        || die "Failed to remove the legacy CA in $src (exit $?)."
+    remove_empty_dirs_up "${src%/*}" "${src##*/}"
     print_ok "CA moved from $src to $dest"
 }
 
@@ -3462,7 +3461,7 @@ adopt_moved_config_prod_keys() {
     # What: an emptied legacy <svc>.local.env is deleted
     # Why: AG-SETUP-001: config/prod files must be deleted
     # From: Issue #1683 | PR #1858
-    local dir="$repo_root/config/prod" file left rest
+    local dir="$repo_root/config/prod" file left
     [[ -d "$dir" ]] || return 0
     for file in "$dir"/*.local.env; do
         [[ -f "$file" ]] || continue
@@ -3474,8 +3473,8 @@ adopt_moved_config_prod_keys() {
         rm -f -- "$file" || die "Failed to delete $file (exit $?)."
         print_ok "Deleted the emptied legacy file ${file##*/}"
     done
-    rest=$(find "$dir" -mindepth 1 -print -quit) || die "Failed to list $dir (exit $?)."
-    [[ -n "$rest" ]] || rmdir -- "$dir" || die "Failed to delete the empty $dir (exit $?)."
+    remove_empty_dirs_up "${dir%/*}" "${dir##*/}"
+
 }
 
 # What: template edits move into <x>.local.env, newest wins
