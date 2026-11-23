@@ -1448,7 +1448,7 @@ wait_for_docker_daemon() {
 # Why: docker-proxy copies hairpin traffic
 # From: Issue #1683 | PR #1985
 ensure_docker_userland_proxy() {
-    local file want current tmp
+    local file want current new
     file=$(lancache_sot_value docker_daemon_json runtime) || exit $?
     want=$(lancache_sot_value docker_userland_proxy runtime) || exit $?
     current="unset"
@@ -1471,17 +1471,15 @@ ensure_docker_userland_proxy() {
         return 0
     }
     mkdir -p -- "${file%/*}" || die "Cannot create ${file%/*} (exit $?)."
-    tmp=$(mktemp "${file}.XXXXXX") || die "mktemp next to $file failed (exit $?)."
     if [[ -f "$file" ]]; then
         cp -p -- "$file" "${file}.bak" || die "Cannot back up $file (exit $?)."
-        jq --argjson v "$want" '."userland-proxy" = $v' "$file" > "$tmp" \
-            || { rm -f -- "$tmp"; die "Cannot update $file (exit $?); Docker was not changed."; }
+        new=$(jq --argjson v "$want" '."userland-proxy" = $v' "$file") \
+            || die "Cannot update $file (exit $?); Docker was not changed."
     else
-        jq -n --argjson v "$want" '{"userland-proxy": $v}' > "$tmp" \
-            || { rm -f -- "$tmp"; die "Cannot write $file (exit $?)."; }
+        new=$(jq -n --argjson v "$want" '{"userland-proxy": $v}') \
+            || die "Cannot write $file (exit $?)."
     fi
-    chmod 0644 -- "$tmp" || die "Cannot chmod $tmp (exit $?)."
-    mv -f -- "$tmp" "$file" || die "Cannot replace $file (exit $?)."
+    write_file_atomically "$file" 0644 <<< "$new" || die "Cannot replace $file (exit $?)."
     host_unit_action "$DOCKER_UNIT" restart
     wait_for_docker_daemon "Docker does not answer after the restart; the old file is ${file}.bak"
     print_ok "Docker userland-proxy is ${want}"
@@ -3184,7 +3182,7 @@ psl_restore_backup() {
         [[ -n "$f" ]] || continue
         gzip -dc "$f" > "$tmp" || continue
         psl_file_is_valid "$tmp" || continue
-        mv -f "$tmp" "$dest" || die "Failed to restore $f to $dest (exit $?)."
+        write_file_atomically "$dest" 0644 < "$tmp" || die "Failed to restore $f to $dest (exit $?)."
         print_warn "Public Suffix List restored from backup $f"
         return 0
     done <<< "$list"
@@ -3203,7 +3201,7 @@ ensure_public_suffix_list() {
     dest="$dir/$name"
     print_step "Loading the Public Suffix List"
     install_missing_tools curl
-    tmp=$(mktemp "$dir/.$name.tmp.XXXXXX") || die "Failed to create a temporary file in $dir (exit $?)."
+    tmp=$(mktemp) || die "Failed to create a temporary file (exit $?)."
     if curl -fsSL --retry 3 -o "$tmp" "$url" && psl_file_is_valid "$tmp"; then
         if [[ -f "$dest" ]] && cmp -s "$tmp" "$dest"; then
             rm -f -- "$tmp"
@@ -3213,8 +3211,9 @@ ensure_public_suffix_list() {
         if psl_file_is_valid "$dest"; then
             psl_backup "$dest"
         fi
-        chmod 0644 "$tmp" || die "Failed to set the mode of $tmp (exit $?)."
-        mv -f "$tmp" "$dest" || die "Failed to put the Public Suffix List in $dest (exit $?)."
+        write_file_atomically "$dest" 0644 < "$tmp" \
+            || die "Failed to put the Public Suffix List in $dest (exit $?)."
+        rm -f -- "$tmp"
         print_ok "Public Suffix List updated from $url"
         return 0
     fi
@@ -3224,7 +3223,7 @@ ensure_public_suffix_list() {
         return 0
     fi
     if psl_restore_backup "$dest" "$tmp"; then
-        chmod 0644 "$dest" || die "Failed to set the mode of $dest (exit $?)."
+        rm -f -- "$tmp"
         return 0
     fi
     rm -f -- "$tmp"
@@ -3523,14 +3522,20 @@ adopt_config_prod_edits() {
 # From: Issue #1683 | PR #1858
 write_file_atomically() (
     target="$1"
+    mode="${2:-}"
     dir=$(dirname "$target")
     tmp=$(mktemp "$dir/.$(basename "$target").tmp.XXXXXX") \
         || die "Failed to create a temporary file in $dir (exit $?)."
     trap 'rm -f -- "$tmp"' EXIT
+    # What: mode $2, if given, is set on the file
+    # Why: files that others read name their own mode
+    # From: Issue #1683 | PR #2017
+    if [[ -n "$mode" ]]; then
+        chmod "$mode" "$tmp" || die "Failed to set mode $mode on $tmp (exit $?)."
     # What: an existing file keeps its owner and mode
     # Why: env files hold tokens and may be locked to 0600
     # From: Issue #1683 | PR #1858
-    if [[ -f "$target" ]]; then
+    elif [[ -f "$target" ]]; then
         chown --reference="$target" "$tmp" || die "Failed to preserve the owner of $target (exit $?)."
         chmod --reference="$target" "$tmp" || die "Failed to preserve the mode of $target (exit $?)."
     else
