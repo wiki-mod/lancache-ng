@@ -5018,12 +5018,11 @@ die_no_stack_found() {
 }
 
 # What: prints the stack's env file; dies when it is absent
-# Why: the DNS reset and the Kea reset share one error text
+# Why: one check and one text for every command needing it
 # From: Issue #1683 | PR #1858
 require_stack_env_file() {
-    local install_dir="$1" env_file
-    [[ -f "$install_dir/docker-compose.yml" ]] \
-        || die_no_stack_found "$install_dir"
+    local install_dir env_file
+    install_dir=$(resolve_stack_dir_checked "$1") || exit $?
     env_file=$(runtime_env_file_for_install_dir "$install_dir") || exit $?
     [[ -f "$env_file" ]] || die "No .env found for $install_dir (expected $env_file)."
     printf '%s\n' "$env_file"
@@ -5340,8 +5339,10 @@ cmd_backup() (
     done
     install_dir=$(resolve_stack_dir_checked "$install_dir") || exit $?
     backup_root=$(realpath -m "$backup_root")
-    stack_env=$(runtime_env_file_for_install_dir "$install_dir") || exit $?
-    [[ -f "$stack_env" ]] || die_no_stack_found "$install_dir"
+    # What: stops unless the stack's .env exists
+    # Why: a backup without settings restores no stack
+    # From: Issue #1683 | PR #2017
+    require_stack_env_file "$install_dir" > /dev/null
     install_missing_tools tar rsync
 
     stack_stopped=0
@@ -6767,9 +6768,7 @@ perform_stack_update_flow() {
         migrate_quickstart_install "$install_dir" || exit $?
         install_dir="${PROD_COMPOSE%/*}"
     fi
-    install_dir=$(resolve_stack_dir "$install_dir") || exit $?
-    [[ -f "$install_dir/docker-compose.yml" ]] \
-        || die_no_stack_found "$install_dir"
+    install_dir=$(resolve_stack_dir_checked "$install_dir") || exit $?
     # What: installs curl, dig and jq before any mutation
     # Why: the functional health gate must not silently skip
     # From: Issue #1683 | PR #1858
@@ -7041,9 +7040,7 @@ cmd_auto_update() {
     local env_file auto_update_enabled current_channel current_tag deployed_tag decision
     local deployed_refs current_refs pinned
 
-    install_dir=$(resolve_stack_dir "$install_dir") || exit $?
-    [[ -f "$install_dir/docker-compose.yml" ]] \
-        || die_no_stack_found "$install_dir"
+    install_dir=$(resolve_stack_dir_checked "$install_dir") || exit $?
     env_file=$(runtime_env_file_for_install_dir "$install_dir") || exit $?
 
     # What: re-checks AUTO_UPDATE_ENABLED before acting
@@ -7235,9 +7232,7 @@ cmd_debug() {
     ensure_default_install_dir
     local install_dir="${1:-$DEFAULT_INSTALL_DIR}"
     local env_file
-    install_dir=$(resolve_stack_dir "$install_dir") || exit $?
-    [[ -f "$install_dir/docker-compose.yml" ]] \
-        || die_no_stack_found "$install_dir"
+    install_dir=$(resolve_stack_dir_checked "$install_dir") || exit $?
 
     env_file=$(runtime_env_file_for_install_dir "$install_dir") || exit $?
     local ip_http ip_https cache_dir
@@ -8124,7 +8119,6 @@ cmd_reset_sign_in() {
 cmd_update_ip() {
     ensure_default_install_dir
     local install_dir="${1:-$DEFAULT_INSTALL_DIR}"
-    install_dir=$(resolve_stack_dir "$install_dir") || exit $?
 
     printf "\n"
     printf '%s╔═══════════════════════════════════════╗%s\n' "${BOLD}" "${RESET}"
@@ -8133,8 +8127,7 @@ cmd_update_ip() {
     printf "\n"
 
     require_root "update-ip [install-dir]"
-    [[ -f "$install_dir/docker-compose.yml" ]] \
-        || die_no_stack_found "$install_dir"
+    install_dir=$(resolve_stack_dir_checked "$install_dir") || exit $?
     assert_prebuilt_image_platform_supported
 
     print_step "Reading current configuration"
@@ -8143,8 +8136,7 @@ cmd_update_ip() {
     # Why: dns gets its IPs from IP_HTTP and IP_HTTPS
     # From: Issue #1683 | PR #1858
     local deploy_env
-    deploy_env=$(runtime_env_file_for_install_dir "$install_dir") || exit $?
-    [[ -f "$deploy_env" ]] || die "Configuration not found: $deploy_env"
+    deploy_env=$(require_stack_env_file "$install_dir") || exit $?
 
     local current_ip_http current_ip_https
     local new_ip_http new_ip_https
@@ -8332,7 +8324,6 @@ dns_upstream_is_live() {
 cmd_configure_upstream_dns() {
     ensure_default_install_dir
     local install_dir="${1:-$DEFAULT_INSTALL_DIR}"
-    install_dir=$(resolve_stack_dir "$install_dir") || exit $?
 
     printf "\n"
     printf '%s╔═══════════════════════════════════════╗%s\n' "${BOLD}" "${RESET}"
@@ -8341,16 +8332,14 @@ cmd_configure_upstream_dns() {
     printf "\n"
 
     require_root "configure-upstream-dns [install-dir]"
-    [[ -f "$install_dir/docker-compose.yml" ]] \
-        || die_no_stack_found "$install_dir"
+    install_dir=$(resolve_stack_dir_checked "$install_dir") || exit $?
 
     print_step "Reading current configuration"
 
     local env_file ip_http ip_https lan services apply_rc=0
     local old_servers old_zones old_unsigned old_reverse dhcp_mode
     local -a all_services new_entries
-    env_file=$(runtime_env_file_for_install_dir "$install_dir") || exit $?
-    [[ -f "$env_file" ]] || die "Configuration not found: $env_file"
+    env_file=$(require_stack_env_file "$install_dir") || exit $?
     old_servers=$(get_env_var DNS_UPSTREAM_SERVERS "$env_file") || exit $?
     old_zones=$(get_env_var DNS_UPSTREAM_ZONES "$env_file") || exit $?
     old_unsigned=$(get_env_var DNS_UPSTREAM_UNSIGNED_ZONES "$env_file") || exit $?
