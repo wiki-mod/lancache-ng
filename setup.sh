@@ -534,12 +534,7 @@ is_valid_dhcp_proxy_boot_filename() {
     # What: rejects newline and shell or .env metachars
     # Why: a later .env write fails after earlier steps ran
     # From: Issue #1683 | PR #1858
-    case "$filename" in
-        *$'\n'* | *'$'* | *'`'* | *'"'* | *"'"* | *\\* | *'#'* )
-            return 1
-            ;;
-    esac
-    return 0
+    env_value_is_safe "$filename"
 }
 
 # What: true if a server and any filename are both set
@@ -1744,6 +1739,11 @@ validate_env_value() {
     env_value_is_safe "$value" \
         || die "$key contains unsafe characters for .env. Cannot proceed. Value: $value"
 }
+
+# What: the characters env_value_is_safe rejects, as text
+# Why: messages name the same set the check uses
+# From: Issue #1683 | PR #2017
+ENV_UNSAFE_CHARS_TEXT="newline, \$, \`, \", ', \\ or #"
 
 # What: false on newline and shell or .env metachars
 # Why: Compose .env parsing would change the value
@@ -4812,15 +4812,15 @@ migrate_env_for_update() (
             [[ -z "$dhcp_proxy_domain" ]] || is_valid_dns_name "$dhcp_proxy_domain" \
                 || die "DHCP_PROXY_DOMAIN in $env_file must be a valid DNS domain name or empty."
             [[ -z "$dhcp_proxy_boot_filename" ]] || is_valid_dhcp_proxy_boot_filename "$dhcp_proxy_boot_filename" \
-                || die "DHCP_PROXY_BOOT_FILENAME in $env_file must not contain whitespace, commas, or other characters unsafe in a .env value (newline, \$, \`, \", ', \\, or #)."
+                || die "DHCP_PROXY_BOOT_FILENAME in $env_file must not contain whitespace, commas, or other characters unsafe in a .env value (${ENV_UNSAFE_CHARS_TEXT})."
             [[ -z "$dhcp_proxy_boot_server" ]] || is_valid_ipv4 "$dhcp_proxy_boot_server" \
                 || die "DHCP_PROXY_BOOT_SERVER in $env_file must be a valid IPv4 address or empty."
             [[ -z "$dhcp_proxy_pxe_boot_server" ]] || is_valid_ipv4 "$dhcp_proxy_pxe_boot_server" \
                 || die "DHCP_PROXY_PXE_BOOT_SERVER in $env_file must be a valid IPv4 address or empty."
             [[ -z "$dhcp_proxy_pxe_boot_filename_bios" ]] || is_valid_dhcp_proxy_boot_filename "$dhcp_proxy_pxe_boot_filename_bios" \
-                || die "DHCP_PROXY_PXE_BOOT_FILENAME_BIOS in $env_file must not contain whitespace, commas, or other characters unsafe in a .env value (newline, \$, \`, \", ', \\, or #)."
+                || die "DHCP_PROXY_PXE_BOOT_FILENAME_BIOS in $env_file must not contain whitespace, commas, or other characters unsafe in a .env value (${ENV_UNSAFE_CHARS_TEXT})."
             [[ -z "$dhcp_proxy_pxe_boot_filename_uefi" ]] || is_valid_dhcp_proxy_boot_filename "$dhcp_proxy_pxe_boot_filename_uefi" \
-                || die "DHCP_PROXY_PXE_BOOT_FILENAME_UEFI in $env_file must not contain whitespace, commas, or other characters unsafe in a .env value (newline, \$, \`, \", ', \\, or #)."
+                || die "DHCP_PROXY_PXE_BOOT_FILENAME_UEFI in $env_file must not contain whitespace, commas, or other characters unsafe in a .env value (${ENV_UNSAFE_CHARS_TEXT})."
             # What: PXE needs both server and filename
             # Why: update is unattended; never clears input
             # From: Issue #1683 | PR #1858
@@ -7171,7 +7171,7 @@ merge_retired_ui_settings() {
             # Why: the old ui file allowed what .env bars
             # From: Issue #1683 | PR #2017
             env_value_is_safe "$value" \
-                || die "The Admin UI setting $key holds a character the .env cannot keep (\$ \` \" ' \\ #). Change it in the Admin UI of the running version, then rerun setup.sh update."
+                || die "The Admin UI setting $key holds a character the .env cannot keep (${ENV_UNSAFE_CHARS_TEXT}). Change it in the Admin UI of the running version, then rerun setup.sh update."
             set_env_key "$key" "$value" "$env_file"
             count=$((count + 1))
         done <<< "$raw"
@@ -9595,7 +9595,7 @@ elif [[ "$DHCP_MODE" = "dnsmasq-proxy" ]]; then
     # What: optional relay/proxy options; all skippable
     # Why: a plain Enter still gives a working proxy
     # From: Issue #450
-    boot_filename_error="Invalid boot filename (no whitespace, commas, or other .env-unsafe characters like \$, \`, \", ', \\, #)"
+    boot_filename_error="Invalid boot filename (no whitespace, commas, or other .env-unsafe characters: ${ENV_UNSAFE_CHARS_TEXT})"
     print_warn "Optional: additional dnsmasq relay/proxy options (router, NTP, domain, PXE/TFTP boot, listen interface, custom options)."
     print_warn "These are delivered only to PXE/network-boot-aware clients via the supplemental ProxyDHCP exchange, never to ordinary DHCP clients -- see docs/README.md."
     if confirm "Configure additional dnsmasq relay/proxy options now?" "N"; then
