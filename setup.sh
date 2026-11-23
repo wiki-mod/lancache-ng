@@ -8791,8 +8791,7 @@ cmd_secondary() {
     # From: Issue #1683
     channel_code_checkout "$LANCACHE_IMAGE_CHANNEL"
     SCRIPT_DIR="$CHANNEL_CODE_DIR"
-    LANCACHE_SOT_TEXT=$(lancache_repo_file_text "$LANCACHE_SOT") || exit $?
-    PROD_COMPOSE="$SCRIPT_DIR/$(lancache_sot_value compose_file runtime)" || exit $?
+    load_script_dir_sot
     assert_prebuilt_image_platform_supported
     # What: the compose file is read before registration
     # Why: a read failure must not follow a registration
@@ -9099,16 +9098,19 @@ EOF
     print_ok "Secondary DNS '${name}' is running. Configure this host's IP as DNS on your clients."
 }
 
-# What: the SOT text, read once per setup.sh process
-# Why: one read serves every SOT lookup of this run
+# What: the path of the SOT inside the repository
+# Why: one name for the local read and the download
 # From: Issue #1683 | PR #1912
 LANCACHE_SOT=.github/yaml/build-manifest.yml
-LANCACHE_SOT_TEXT=$(lancache_repo_file_text "$LANCACHE_SOT") || exit $?
 
-# What: the prod compose file, SOT runtime.compose_file
-# Why: one owner; setup.sh and CI name the same file
-# From: Issue #1683 | PR #1858
-PROD_COMPOSE="$SCRIPT_DIR/$(lancache_sot_value compose_file runtime)" || exit $?
+# What: loads the SOT of SCRIPT_DIR and sets PROD_COMPOSE
+# Why: one read per code dir serves every SOT lookup
+# From: Issue #1683 | PR #2017
+load_script_dir_sot() {
+    LANCACHE_SOT_TEXT=$(lancache_repo_file_text "$LANCACHE_SOT") || exit $?
+    PROD_COMPOSE="$SCRIPT_DIR/$(lancache_sot_value compose_file runtime)" || exit $?
+}
+load_script_dir_sot
 
 # What: runs the subcommand named in the first argument
 # Why: the install flow below runs only for install
