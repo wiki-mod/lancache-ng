@@ -2389,6 +2389,13 @@ volume_copy_recorded() {
     [[ "$state" = "1" ]]
 }
 
+# What: prints one entry of dir $1, nothing when empty
+# Why: one owner of the "is this dir empty" question
+# From: Issue #1683 | PR #2017
+dir_first_entry() {
+    find -H "$1" -mindepth 1 -maxdepth 1 -print -quit
+}
+
 # What: copies a volume into a dir, proven equal, recorded
 # Why: a partial or unproven copy must never count as done
 # From: Issue #1683 | PR #1858
@@ -2409,7 +2416,7 @@ copy_volume_to_dir() {
         || die "Cannot list the Docker volume $volume (exit $?); nothing was copied."
     entries=""
     if [[ -e "$dir" ]]; then
-        entries=$(ls -A -- "$dir") || die "Cannot read $dir (exit $?); nothing was copied."
+        entries=$(dir_first_entry "$dir") || die "Cannot read $dir (exit $?); nothing was copied."
     fi
     if [[ -n "$entries" ]]; then
         have=$(path_manifest "$dir") || die "Cannot list $dir (exit $?); nothing was copied."
@@ -2582,8 +2589,8 @@ restore_quickstart_mounts() {
         # From: Issue #1683 | PR #1858
         empty_dir=0
         if [[ -d "$src" && ! -L "$src" ]]; then
-            inside=$(find "$src" -mindepth 1 -maxdepth 1 -print -quit) \
-                || die "Failed to list $src (exit $?)."
+            inside=$(dir_first_entry "$src") || die "Failed to list $src (exit $?)."
+
             [[ -z "$inside" ]] || continue
             empty_dir=1
         elif [[ -e "$src" ]]; then
