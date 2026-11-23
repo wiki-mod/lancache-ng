@@ -6471,6 +6471,13 @@ checkout_branch_name() {
     printf '%s\n' "$branch"
 }
 
+# What: the commit a checkout stands on
+# Why: a move compares the commit before and after it
+# From: Issue #1683 | PR #2017
+checkout_head() {
+    git -C "$1" rev-parse HEAD || die "Failed to read HEAD of $1 (exit $?)."
+}
+
 # What: the code ref a checkout moves to; empty = stays
 # Why: install and update follow the channel the same way
 # From: Issue #1683 | PR #1858
@@ -6615,7 +6622,7 @@ channel_code_checkout() {
     target="${LANCACHE_SETUP_GIT_REF:-}"
     [[ -n "$target" ]] || target=$(lancache_channel_code_ref "$channel" "${LANCACHE_IMAGE_TAG:-}") || exit $?
     [[ -n "$target" ]] || die "Channel $channel needs LANCACHE_IMAGE_TAG to name its code."
-    [[ ! -e "$dir/.git" ]] || CHANNEL_CODE_OLD=$(git -C "$dir" rev-parse HEAD) || die "Failed to read HEAD of $dir (exit $?)."
+    [[ ! -e "$dir/.git" ]] || CHANNEL_CODE_OLD=$(checkout_head "$dir") || exit $?
     print_step "Code of channel $channel in $dir ($target)"
     if [[ -n "${LANCACHE_SETUP_GIT_REF:-}" && -e "$dir/.git" ]]; then
         sync_repo_to_ref "$dir" "$target"
@@ -6639,7 +6646,7 @@ install_repo_follow_channel() {
     [[ "$CHANNEL_CODE_IN_PLACE" = 0 ]] || return 0
     dir="$CHANNEL_CODE_DIR" old="$CHANNEL_CODE_OLD"
     link=$(channel_active_link) || exit $?
-    new=$(git -C "$dir" rev-parse HEAD) || die "Failed to read HEAD of $dir (exit $?)."
+    new=$(checkout_head "$dir") || exit $?
     # What: running from current at its HEAD goes on here
     # Why: units then name current, the link, not a dir
     # From: Issue #1683 | PR #1858
@@ -6715,7 +6722,7 @@ switch_channel_dir_and_resume() {
     local -a files=("${CHANNEL_STACK_FILES[@]}")
     dir=$(channel_code_dir "$channel") || exit $?
     link=$(channel_active_link) || exit $?
-    [[ ! -e "$dir/.git" ]] || old=$(git -C "$dir" rev-parse HEAD) || die "Failed to read HEAD of $dir (exit $?)."
+    [[ ! -e "$dir/.git" ]] || old=$(checkout_head "$dir") || exit $?
     print_step "Moving the stack to $dir (channel $channel)"
     # What: old copies of the stack files leave first
     # Why: the running stack owns them; a copy is redone
@@ -6782,10 +6789,10 @@ update_repo_and_resume() {
     target=$(channel_checkout_target "$repo_dir" "$channel" "$tag") || exit $?
     [[ -n "$target" ]] || return 0
     branch=$(checkout_branch_name "$repo_dir") || exit $?
-    old=$(git -C "$repo_dir" rev-parse HEAD) || die "Failed to read HEAD of $repo_dir (exit $?)."
+    old=$(checkout_head "$repo_dir") || exit $?
     print_step "Updating repo to $target (channel $channel)"
     sync_repo_to_channel_ref "$repo_dir" "$target"
-    new=$(git -C "$repo_dir" rev-parse HEAD) || die "Failed to read HEAD of $repo_dir (exit $?)."
+    new=$(checkout_head "$repo_dir") || exit $?
     if [[ "$new" = "$old" ]]; then
         print_ok "Repository already at $new"
         return 0
