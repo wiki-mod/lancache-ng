@@ -310,16 +310,22 @@ fn line_key(line: &str) -> Option<&str> {
     (!key.is_empty() && !key.starts_with('#')).then_some(key)
 }
 
+// What: the text of the stack .env; missing is empty.
+// Why: reading and writing see a new install alike.
+// From: Issue #1683 | PR #2017
+fn read_text(path: &Path) -> Result<String, String> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(format!("{}: {e}", path.display())),
+    }
+}
+
 // What: the raw KEY=VALUE lines of the stack .env.
 // Why: a missing file means no values yet.
 // From: Issue #1683 | PR #2017
 pub fn read_raw(path: &Path) -> Result<BTreeMap<String, String>, String> {
-    let text = match std::fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
-        Err(e) => return Err(format!("{}: {e}", path.display())),
-    };
-    Ok(text
+    Ok(read_text(path)?
         .lines()
         .filter_map(|line| Some((line_key(line)?, line.split_once('=')?.1.trim())))
         .map(|(k, v)| (k.to_string(), v.to_string()))
@@ -423,11 +429,7 @@ fn write_lines(path: &Path, updates: &BTreeMap<String, String>) -> Result<(), St
         .map_err(|e| format!("{}: {e}", lock.display()))?;
     held.lock()
         .map_err(|e| format!("{}: {e}", lock.display()))?;
-    let old = match std::fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(e) => return Err(format!("{}: {e}", path.display())),
-    };
+    let old = read_text(path)?;
     let mut done = BTreeSet::new();
     let mut body = String::new();
     for line in old.lines() {
