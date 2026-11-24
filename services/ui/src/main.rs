@@ -129,6 +129,22 @@ const CSRF_FIELD: &str = "csrf_token";
 
 type Fields = BTreeMap<String, String>;
 
+// What: a form field without blanks; empty if missing.
+// Why: one reader for every form handler.
+// From: Issue #1683 | PR #2017
+fn field(form: &Fields, key: &str) -> String {
+    form.get(key)
+        .map(|v| v.trim().to_string())
+        .unwrap_or_default()
+}
+
+// What: true for the value of a ticked switch.
+// Why: the pages send 1 or true for "on".
+// From: Issue #1683 | PR #2017
+fn switch_on(value: &str) -> bool {
+    matches!(value, "1" | "true")
+}
+
 // What: error page text with an HTTP status.
 // Why: handlers return Result and use the ? sign.
 // From: Issue #1683 | PR #1858
@@ -1120,12 +1136,8 @@ async fn dns_action(
 ) -> Page {
     csrf.check(&form)?;
     let s = app.settings();
-    let get = |k: &str| {
-        form.get(k)
-            .map(|v| v.trim().to_string())
-            .unwrap_or_default()
-    };
-    let on = matches!(get("enabled").as_str(), "1" | "true");
+    let get = |k: &str| field(&form, k);
+    let on = switch_on(&get("enabled"));
     let domain = get("domain").to_ascii_lowercase();
     let result = match op {
         "UI_ROUTE_DNS_ADD" if lancache_ng::dns::cdn_entry(&domain).is_none() => {
@@ -2096,11 +2108,7 @@ fn dnsmasq_fields(form: &Fields, proxy: bool) -> Fields {
         out.insert(key, v.trim().to_string());
     }
     if proxy {
-        let get = |k: &str| {
-            form.get(k)
-                .map(|v| v.trim().to_string())
-                .unwrap_or_default()
-        };
+        let get = |k: &str| field(form, k);
         let dns: Vec<String> = [get("dhcp_dns_primary"), get("dhcp_dns_secondary")]
             .into_iter()
             .filter(|d| !d.is_empty())
@@ -2204,12 +2212,8 @@ async fn dhcp_action(
 ) -> Page {
     csrf.check(&form)?;
     let s = app.settings();
-    let get = |k: &str| {
-        form.get(k)
-            .map(|v| v.trim().to_string())
-            .unwrap_or_default()
-    };
-    let on = matches!(get("enabled").as_str(), "1" | "true");
+    let get = |k: &str| field(&form, k);
+    let on = switch_on(&get("enabled"));
     // What: relay without the real server: plain hint.
     // Why: DoMe 07.11.: a newbie got a bare key name.
     // From: Issue #1683 | PR #1991
@@ -2804,11 +2808,7 @@ async fn hamster_action(
     Form(form): Form<Fields>,
 ) -> Page {
     csrf.check(&form)?;
-    let get = |k: &str| {
-        form.get(k)
-            .map(|v| v.trim().to_string())
-            .unwrap_or_default()
-    };
+    let get = |k: &str| field(&form, k);
     let when = job_time(&get("when"), &get("at"))?;
     let what = match get("app").as_str() {
         "" => get("urls"),
