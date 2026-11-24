@@ -439,7 +439,6 @@
   "err_csrf": "Security check failed. Please reload the page.",
   "err_zone_has_records": "The zone still holds records.",
   "err_zone_no_snapshots": "Zone {zone} keeps no snapshots.",
-  "err_unknown_dns_action": "Unknown DNS action {op}.",
   "err_record_type": "Record type {kind} is not allowed.",
   "err_ttl_range": "TTL must be 1 to {max}.",
   "err_no_subnet": "No subnet {id}.",
@@ -469,5 +468,10 @@
   "err_ptr_taken": "{ip} already has the reverse entry {name}. Remove that entry first or untick the PTR box.",
   "reverse_zones_title": "Reverse zones",
   "ptr_records_title": "PTR records",
+  "err_no_secondary": "No secondary by that name.",
+  "err_secondary_ns_off": "Entering secondaries as name servers is off.",
+  "err_address_body": "The request needs an address.",
+  "err_no_ip": "That is not an IP address.",
+  "zone_col_primary": "Primary",
   "games_search": "Name, app ID or regex"
 }

@@ -1294,7 +1294,7 @@ fn single_field(key: &str, value: impl ToString) -> Fields {
 async fn dns_action(
     State(app): Shared,
     Extension(csrf): Extension<Csrf>,
-    Extension(Op(op)): Extension<Op>,
+    Extension(Op(op)): Extension<Op<DnsOp>>,
     Form(form): Form<Fields>,
 ) -> Page {
     csrf.check(&form)?;
@@ -1303,37 +1303,28 @@ async fn dns_action(
     let on = switch_on(&get("enabled"));
     let domain = get("domain").to_ascii_lowercase();
     let result = match op {
-        "UI_ROUTE_DNS_ADD" if lancache_ng::dns::cdn_entry(&domain).is_none() => {
+        DnsOp::DnsAdd if lancache_ng::dns::cdn_entry(&domain).is_none() => {
             Err(format!("{domain:?} is no valid domain entry"))
         }
-        "UI_ROUTE_DNS_ADD" => {
-            commit(&app, list_change(&s, "CDN_CUSTOM_DOMAINS", &domain, true)).await
-        }
-        "UI_ROUTE_DNS_REMOVE" => {
+        DnsOp::DnsAdd => commit(&app, list_change(&s, "CDN_CUSTOM_DOMAINS", &domain, true)).await,
+        DnsOp::DnsRemove => {
             commit(&app, list_change(&s, "CDN_CUSTOM_DOMAINS", &domain, false)).await
         }
-        "UI_ROUTE_DNS_TOGGLE" => {
+        DnsOp::DnsToggle => {
             commit(&app, list_change(&s, "CDN_DISABLED_DOMAINS", &domain, !on)).await
         }
-        "UI_ROUTE_AAAA_FILTER" => commit(&app, single_field("DNS_FILTER_AAAA", on)).await,
-        "UI_ROUTE_QUERY_LOG" => commit(&app, single_field("DNS_QUERY_LOG", on)).await,
-        "UI_ROUTE_DDNS_UNSIGNED" => commit(&app, single_field("DDNS_ALLOW_UNSIGNED", on)).await,
-        "UI_ROUTE_SECONDARY_NS_SWITCH" => {
-            commit(&app, single_field("DNS_SECONDARY_NS_ENABLED", on)).await
+        DnsOp::AaaaFilter => commit(&app, single_field("DNS_FILTER_AAAA", on)).await,
+        DnsOp::QueryLog => commit(&app, single_field("DNS_QUERY_LOG", on)).await,
+        DnsOp::DdnsUnsigned => commit(&app, single_field("DDNS_ALLOW_UNSIGNED", on)).await,
+        DnsOp::NsSwitch => commit(&app, single_field("DNS_SECONDARY_NS_ENABLED", on)).await,
+        DnsOp::NsAuto => commit(&app, single_field("DNS_SECONDARY_NS_AUTO_REMOVE", on)).await,
+        DnsOp::LanAdd | DnsOp::LanRemove => record(&s, matches!(op, DnsOp::LanAdd), &get).await,
+        DnsOp::LanDomainAdd | DnsOp::LanDomainRemove | DnsOp::LanDomainMain => {
+            lan_domain_action(&app, &s, op.key(), &domain).await
         }
-        "UI_ROUTE_SECONDARY_NS_AUTO" => {
-            commit(&app, single_field("DNS_SECONDARY_NS_AUTO_REMOVE", on)).await
-        }
-        "UI_ROUTE_LAN_ADD" | "UI_ROUTE_LAN_REMOVE" => {
-            record(&s, op == "UI_ROUTE_LAN_ADD", &get).await
-        }
-        "UI_ROUTE_LAN_DOMAIN_ADD" | "UI_ROUTE_LAN_DOMAIN_REMOVE" | "UI_ROUTE_LAN_DOMAIN_MAIN" => {
-            lan_domain_action(&app, &s, op, &domain).await
-        }
-        "UI_ROUTE_PTR_ADD" | "UI_ROUTE_PTR_REMOVE" => ptr(&s, op == "UI_ROUTE_PTR_ADD", &get).await,
-        "UI_ROUTE_ZONE_ROLLBACK" => rollback(&s, &get("zone"), &get("snapshot_id")).await,
-        "UI_ROUTE_TSIG_ROTATE" => rotate_tsig(&app).await,
-        _ => Err(tr("err_unknown_dns_action").replace("{op}", op)),
+        DnsOp::PtrAdd | DnsOp::PtrRemove => ptr(&s, matches!(op, DnsOp::PtrAdd), &get).await,
+        DnsOp::ZoneRollback => rollback(&s, &get("zone"), &get("snapshot_id")).await,
+        DnsOp::TsigRotate => rotate_tsig(&app).await,
     };
     finish(result, &s.text("UI_PAGE_DOMAINS")?)
 }
@@ -1685,7 +1676,7 @@ async fn secondary_action(
     State(app): Shared,
     Extension(csrf): Extension<Csrf>,
     axum::extract::Path(name): axum::extract::Path<String>,
-    Extension(Op(op)): Extension<Op>,
+    Extension(Op(op)): Extension<Op<SecondaryOp>>,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Page {
@@ -1693,10 +1684,10 @@ async fn secondary_action(
     let s = app.settings();
     let mut list = lancache_ng::pdns_conf::secondaries(&s);
     let Some(at) = list.iter().position(|(n, _)| *n == name) else {
-        return Err(Fail(StatusCode::NOT_FOUND, "no such secondary".into()));
+        return Err(Fail(StatusCode::NOT_FOUND, tr("err_no_secondary")));
     };
     match op {
-        "UI_ROUTE_SECONDARY" => {
+        SecondaryOp::Remove => {
             let (_, address) = list.remove(at);
             // What: the name leaves both NS lists too.
             // Why: a new secondary of that name starts new.
@@ -1709,9 +1700,9 @@ async fn secondary_action(
             rotate_tsig(&app).await?;
             Ok(Redirect::to(&s.text("UI_PAGE_DOMAINS")?).into_response())
         }
-        "UI_ROUTE_SECONDARY_NS_ADD" => {
+        SecondaryOp::NsAdd => {
             if !s.flag("DNS_SECONDARY_NS_ENABLED")? {
-                return Err(bad_request("secondaries as NS are off"));
+                return Err(bad_request(tr("err_secondary_ns_off")));
             }
             answers_aa(&s, &list[at].1, &lancache_ng::dns::lan_zone(&s)?)
                 .await
@@ -1721,20 +1712,18 @@ async fn secondary_action(
                 .map_err(bad_request)?;
             Ok(StatusCode::NO_CONTENT.into_response())
         }
-        "UI_ROUTE_SECONDARY_NS_REMOVE" => {
+        SecondaryOp::NsRemove => {
             commit(&app, ns_change(&s, &name, Some(false)))
                 .await
                 .map_err(bad_request)?;
             Ok(StatusCode::NO_CONTENT.into_response())
         }
-        "UI_ROUTE_SECONDARY_ROTATE" => {
-            Ok(axum::Json(json!({"token": renew_token(&s)?})).into_response())
-        }
-        "UI_ROUTE_SECONDARY_ADDRESS" => {
+        SecondaryOp::Rotate => Ok(axum::Json(json!({"token": renew_token(&s)?})).into_response()),
+        SecondaryOp::Address => {
             let axum::Json(a) = axum::Json::<Address>::from_bytes(&body)
-                .map_err(|_| bad_request("body must be {\"address\": ...}"))?;
+                .map_err(|_| bad_request(tr("err_address_body")))?;
             if !lancache_ng::dns::is_ip(&a.address) {
-                return Err(bad_request("no IP address"));
+                return Err(bad_request(tr("err_no_ip")));
             }
             // What: a new address drops the old records.
             // Why: same address: no save, no ensure runs.
@@ -1748,10 +1737,9 @@ async fn secondary_action(
             store_secondaries(&app, &list).await.map_err(bad_request)?;
             Ok(StatusCode::NO_CONTENT.into_response())
         }
-        "UI_ROUTE_SECONDARY_HEALTH" => {
+        SecondaryOp::Health => {
             Ok(axum::Json(secondary_health(&s, &list[at].1).await).into_response())
         }
-        _ => Err(Fail(StatusCode::NOT_FOUND, "unknown action".into())),
     }
 }
 
@@ -1967,7 +1955,7 @@ async fn check_peer(
 // From: Issue #1683
 async fn zone_overview(State(app): Shared) -> Page {
     let s = app.settings();
-    let mut columns = vec![json!({"name": "Primary", "error": Value::Null})];
+    let mut columns = vec![json!({"name": tr("zone_col_primary"), "error": Value::Null})];
     let mut lists = vec![pdns_api(&s)?.zones().await?];
     for (name, address) in lancache_ng::pdns_conf::secondaries(&s) {
         match remote_zones(&s, &address).await {
@@ -2578,7 +2566,7 @@ async fn kea_action(
 async fn dhcp_action(
     State(app): Shared,
     Extension(csrf): Extension<Csrf>,
-    Extension(Op(op)): Extension<Op>,
+    Extension(Op(op)): Extension<Op<DhcpOp>>,
     Form(form): Form<Fields>,
 ) -> Page {
     csrf.check(&form)?;
@@ -2589,7 +2577,7 @@ async fn dhcp_action(
     // Why: a bare key name tells the user nothing.
     // From: Issue #1683 | PR #1991
     let asked = DhcpMode::from_word(&get("dhcp_mode")).ok();
-    let relay = op == "UI_ROUTE_DHCP_MODE" && asked == Some(DhcpMode::DnsmasqRelay);
+    let relay = matches!(op, DhcpOp::Mode) && asked == Some(DhcpMode::DnsmasqRelay);
     if relay && s.text_or_empty("UPSTREAM_DHCP_IP").is_empty() {
         return Err(bad_request(tr("err_relay_needs_upstream")));
     }
@@ -2597,20 +2585,20 @@ async fn dhcp_action(
     // Why: without a card Kea answers nobody.
     // From: Issue #1683
     let cards = get("dhcp_proxy_interface");
-    if op == "UI_ROUTE_DHCP_MODE" && asked == Some(DhcpMode::Kea) && cards.is_empty() {
+    if matches!(op, DhcpOp::Mode) && asked == Some(DhcpMode::Kea) && cards.is_empty() {
         return Err(bad_request(tr("err_kea_needs_interface")));
     }
     let result = match op {
-        "UI_ROUTE_DHCP_MODE" => {
+        DhcpOp::Mode => {
             let mut f = single_field("DHCP_MODE", get("dhcp_mode"));
             f.insert("DHCP_PROXY_INTERFACE".into(), cards);
             commit(&app, f).await
         }
-        "UI_ROUTE_DHCP_DDNS" => commit(&app, single_field("DHCP_DDNS", on)).await,
-        "UI_ROUTE_DHCP_PROXY" | "UI_ROUTE_DHCP_RELAY" => {
-            commit(&app, dnsmasq_fields(&form, op == "UI_ROUTE_DHCP_PROXY")).await
+        DhcpOp::Ddns => commit(&app, single_field("DHCP_DDNS", on)).await,
+        DhcpOp::Proxy | DhcpOp::Relay => {
+            commit(&app, dnsmasq_fields(&form, matches!(op, DhcpOp::Proxy))).await
         }
-        _ => main_subnet(&app, &s, op, &get).await,
+        other => main_subnet(&app, &s, other.key(), &get).await,
     };
     finish(result, &s.text("UI_PAGE_DHCP")?)
 }
@@ -3185,7 +3173,7 @@ fn job_time(when: &str, at: &str) -> Result<String, Fail> {
 async fn hamster_action(
     State(app): Shared,
     Extension(csrf): Extension<Csrf>,
-    Extension(Op(op)): Extension<Op>,
+    Extension(Op(op)): Extension<Op<HamsterOp>>,
     Form(form): Form<Fields>,
 ) -> Page {
     csrf.check(&form)?;
@@ -3199,19 +3187,18 @@ async fn hamster_action(
     // What: a job needs addresses or an app ID.
     // Why: the text in the page language.
     // From: Issue #871 | PR #1980
-    if op == "UI_ROUTE_HAMSTER_ADD" && what.trim().is_empty() {
+    if matches!(op, HamsterOp::Add) && what.trim().is_empty() {
         return Err(bad_request(tr("err_hamster_empty")));
     }
     // What: the cachehamster command of each action.
     // Why: the daemon protocol names commands, not paths.
     // From: Issue #871
     let args: Vec<&str> = match op {
-        "UI_ROUTE_HAMSTER_ADD" => vec!["add", &name, &when, &what],
-        "UI_ROUTE_HAMSTER_START" => vec!["start", &id],
-        "UI_ROUTE_HAMSTER_CANCEL" => vec!["cancel", &id],
-        "UI_ROUTE_HAMSTER_REMOVE" => vec!["remove", &id],
-        "UI_ROUTE_HAMSTER_LOGOUT" => vec!["logout"],
-        _ => return Err(Fail(StatusCode::NOT_FOUND, "no such action".into())),
+        HamsterOp::Add => vec!["add", &name, &when, &what],
+        HamsterOp::Start => vec!["start", &id],
+        HamsterOp::Cancel => vec!["cancel", &id],
+        HamsterOp::Remove => vec!["remove", &id],
+        HamsterOp::Logout => vec!["logout"],
     };
     let back = app.settings().text("UI_PAGE_CACHEHAMSTER")?;
     finish(hamster(&app, &args).await.map(drop), &back)
@@ -4555,64 +4542,77 @@ async fn lang(State(app): Shared, req: Request, next: Next) -> Response {
     LANG.scope(code, next.run(req)).await
 }
 
-// What: SOT keys of the actions each handler serves.
-// Why: the handler matches the key; the SOT owns the path.
-// From: Issue #1683
-const DNS_OPS: [&str; 17] = [
-    "UI_ROUTE_DNS_ADD",
-    "UI_ROUTE_DNS_REMOVE",
-    "UI_ROUTE_DNS_TOGGLE",
-    "UI_ROUTE_AAAA_FILTER",
-    "UI_ROUTE_QUERY_LOG",
-    "UI_ROUTE_DDNS_UNSIGNED",
-    "UI_ROUTE_SECONDARY_NS_SWITCH",
-    "UI_ROUTE_SECONDARY_NS_AUTO",
-    "UI_ROUTE_LAN_ADD",
-    "UI_ROUTE_LAN_REMOVE",
-    "UI_ROUTE_LAN_DOMAIN_ADD",
-    "UI_ROUTE_LAN_DOMAIN_REMOVE",
-    "UI_ROUTE_LAN_DOMAIN_MAIN",
-    "UI_ROUTE_PTR_ADD",
-    "UI_ROUTE_PTR_REMOVE",
-    "UI_ROUTE_ZONE_ROLLBACK",
-    "UI_ROUTE_TSIG_ROTATE",
-];
-const DHCP_OPS: [&str; 13] = [
-    "UI_ROUTE_DHCP_MODE",
-    "UI_ROUTE_DHCP_DDNS",
-    "UI_ROUTE_DHCP_PROXY",
-    "UI_ROUTE_DHCP_RELAY",
-    "UI_ROUTE_SUBNET_ADD",
-    "UI_ROUTE_SUBNET_UPDATE",
-    "UI_ROUTE_SUBNET_REMOVE",
-    "UI_ROUTE_SUBNET_OPTION_ADD",
-    "UI_ROUTE_SUBNET_OPTION_REMOVE",
-    "UI_ROUTE_STATIC_ADD",
-    "UI_ROUTE_STATIC_REMOVE",
-    "UI_ROUTE_LEASE_RELEASE",
-    "UI_ROUTE_KEA_ROLLBACK",
-];
-const HAMSTER_OPS: [&str; 5] = [
-    "UI_ROUTE_HAMSTER_ADD",
-    "UI_ROUTE_HAMSTER_START",
-    "UI_ROUTE_HAMSTER_CANCEL",
-    "UI_ROUTE_HAMSTER_REMOVE",
-    "UI_ROUTE_HAMSTER_LOGOUT",
-];
-const SECONDARY_OPS: [&str; 6] = [
-    "UI_ROUTE_SECONDARY",
-    "UI_ROUTE_SECONDARY_ROTATE",
-    "UI_ROUTE_SECONDARY_HEALTH",
-    "UI_ROUTE_SECONDARY_ADDRESS",
-    "UI_ROUTE_SECONDARY_NS_ADD",
-    "UI_ROUTE_SECONDARY_NS_REMOVE",
-];
-
-// What: SOT key of the action a route serves.
-// Why: one handler serves several SOT paths.
-// From: Issue #1683
+// What: the SOT route key an action enum carries.
+// Why: router and handler read one list; no drift.
+// From: Issue #1683 | PR #2019
 #[derive(Clone, Copy)]
-struct Op(&'static str);
+struct Op<T>(T);
+
+macro_rules! route_ops {
+    ($name:ident { $($var:ident => $key:literal),+ $(,)? }) => {
+        #[derive(Clone, Copy)]
+        enum $name { $($var),+ }
+        impl $name {
+            const ALL: &'static [$name] = &[$($name::$var),+];
+            fn key(self) -> &'static str {
+                match self { $($name::$var => $key),+ }
+            }
+        }
+    };
+}
+
+route_ops!(DnsOp {
+    DnsAdd => "UI_ROUTE_DNS_ADD",
+    DnsRemove => "UI_ROUTE_DNS_REMOVE",
+    DnsToggle => "UI_ROUTE_DNS_TOGGLE",
+    AaaaFilter => "UI_ROUTE_AAAA_FILTER",
+    QueryLog => "UI_ROUTE_QUERY_LOG",
+    DdnsUnsigned => "UI_ROUTE_DDNS_UNSIGNED",
+    NsSwitch => "UI_ROUTE_SECONDARY_NS_SWITCH",
+    NsAuto => "UI_ROUTE_SECONDARY_NS_AUTO",
+    LanAdd => "UI_ROUTE_LAN_ADD",
+    LanRemove => "UI_ROUTE_LAN_REMOVE",
+    LanDomainAdd => "UI_ROUTE_LAN_DOMAIN_ADD",
+    LanDomainRemove => "UI_ROUTE_LAN_DOMAIN_REMOVE",
+    LanDomainMain => "UI_ROUTE_LAN_DOMAIN_MAIN",
+    PtrAdd => "UI_ROUTE_PTR_ADD",
+    PtrRemove => "UI_ROUTE_PTR_REMOVE",
+    ZoneRollback => "UI_ROUTE_ZONE_ROLLBACK",
+    TsigRotate => "UI_ROUTE_TSIG_ROTATE",
+});
+
+route_ops!(DhcpOp {
+    Mode => "UI_ROUTE_DHCP_MODE",
+    Ddns => "UI_ROUTE_DHCP_DDNS",
+    Proxy => "UI_ROUTE_DHCP_PROXY",
+    Relay => "UI_ROUTE_DHCP_RELAY",
+    SubnetAdd => "UI_ROUTE_SUBNET_ADD",
+    SubnetUpdate => "UI_ROUTE_SUBNET_UPDATE",
+    SubnetRemove => "UI_ROUTE_SUBNET_REMOVE",
+    SubnetOptionAdd => "UI_ROUTE_SUBNET_OPTION_ADD",
+    SubnetOptionRemove => "UI_ROUTE_SUBNET_OPTION_REMOVE",
+    StaticAdd => "UI_ROUTE_STATIC_ADD",
+    StaticRemove => "UI_ROUTE_STATIC_REMOVE",
+    LeaseRelease => "UI_ROUTE_LEASE_RELEASE",
+    KeaRollback => "UI_ROUTE_KEA_ROLLBACK",
+});
+
+route_ops!(HamsterOp {
+    Add => "UI_ROUTE_HAMSTER_ADD",
+    Start => "UI_ROUTE_HAMSTER_START",
+    Cancel => "UI_ROUTE_HAMSTER_CANCEL",
+    Remove => "UI_ROUTE_HAMSTER_REMOVE",
+    Logout => "UI_ROUTE_HAMSTER_LOGOUT",
+});
+
+route_ops!(SecondaryOp {
+    Remove => "UI_ROUTE_SECONDARY",
+    Rotate => "UI_ROUTE_SECONDARY_ROTATE",
+    Health => "UI_ROUTE_SECONDARY_HEALTH",
+    Address => "UI_ROUTE_SECONDARY_ADDRESS",
+    NsAdd => "UI_ROUTE_SECONDARY_NS_ADD",
+    NsRemove => "UI_ROUTE_SECONDARY_NS_REMOVE",
+});
 
 // What: command line uses besides the server.
 // Why: setup.sh and the healthcheck need them.
@@ -4709,17 +4709,20 @@ fn router(app: Arc<App>) -> Result<Router, String> {
     // What: one route per action, tagged with its SOT key.
     // Why: handlers match the key, never a path text.
     // From: Issue #1683
-    for key in DNS_OPS {
-        pages = pages.route(&p(key)?, post(dns_action).layer(Extension(Op(key))));
+    for &op in DnsOp::ALL {
+        pages = pages.route(&p(op.key())?, post(dns_action).layer(Extension(Op(op))));
     }
-    for key in DHCP_OPS {
-        pages = pages.route(&p(key)?, post(dhcp_action).layer(Extension(Op(key))));
+    for &op in DhcpOp::ALL {
+        pages = pages.route(&p(op.key())?, post(dhcp_action).layer(Extension(Op(op))));
     }
-    for key in HAMSTER_OPS {
-        pages = pages.route(&p(key)?, post(hamster_action).layer(Extension(Op(key))));
+    for &op in HamsterOp::ALL {
+        pages = pages.route(&p(op.key())?, post(hamster_action).layer(Extension(Op(op))));
     }
-    for key in SECONDARY_OPS {
-        pages = pages.route(&p(key)?, post(secondary_action).layer(Extension(Op(key))));
+    for &op in SecondaryOp::ALL {
+        pages = pages.route(
+            &p(op.key())?,
+            post(secondary_action).layer(Extension(Op(op))),
+        );
     }
     let pages = pages.layer(axum::middleware::from_fn_with_state(app.clone(), auth));
     Ok(Router::new()

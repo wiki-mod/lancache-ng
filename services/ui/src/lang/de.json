@@ -439,7 +439,6 @@
   "err_csrf": "Sicherheitsprüfung fehlgeschlagen. Bitte die Seite neu laden.",
   "err_zone_has_records": "Die Zone enthält noch Einträge.",
   "err_zone_no_snapshots": "Für die Zone {zone} gibt es keine Sicherungen.",
-  "err_unknown_dns_action": "Unbekannte DNS-Aktion {op}.",
   "err_record_type": "Eintragstyp {kind} ist nicht erlaubt.",
   "err_ttl_range": "TTL muss zwischen 1 und {max} liegen.",
   "err_no_subnet": "Subnetz {id} gibt es nicht.",
@@ -469,5 +468,10 @@
   "err_ptr_taken": "{ip} hat schon den Rückwärts-Eintrag {name}. Diesen Eintrag zuerst entfernen oder den PTR-Haken entfernen.",
   "reverse_zones_title": "Rückwärts-Zonen",
   "ptr_records_title": "PTR-Einträge",
+  "err_no_secondary": "Kein Secondary mit diesem Namen.",
+  "err_secondary_ns_off": "Secondaries als Nameserver eintragen ist aus.",
+  "err_address_body": "Die Anfrage braucht eine Adresse.",
+  "err_no_ip": "Das ist keine IP-Adresse.",
+  "zone_col_primary": "Primary",
   "games_search": "Name, App-ID oder Regex"
 }
