@@ -96,6 +96,16 @@ pub fn list_items(raw: &str) -> impl Iterator<Item = &str> {
         .filter(|item| !item.is_empty())
 }
 
+// What: not empty; only ASCII letters, digits and extra.
+// Why: such a value cannot leave its place in a config.
+// From: Issue #1683 | PR #2017
+pub fn is_plain(text: &str, extra: &str) -> bool {
+    !text.is_empty()
+        && text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || extra.contains(c))
+}
+
 // What: a bool from its usual words.
 // Why: env and forms send true/false, 1/0, yes/no, on/off.
 // From: Issue #1683 | PR #1858

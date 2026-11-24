@@ -1825,9 +1825,7 @@ pub mod log {
     // Why: values go into syslog-ng config text.
     // From: Issue #1683 | PR #1858
     fn is_plain(v: &str) -> bool {
-        !v.is_empty()
-            && v.chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        crate::config::is_plain(v, "_-")
     }
 
     // What: full syslog-ng.conf.
@@ -2397,9 +2395,7 @@ pub mod chrony {
     // Why: values go into a config file.
     // From: Issue #1683 | PR #1858
     fn is_plain(v: &str) -> bool {
-        !v.is_empty()
-            && v.chars()
-                .all(|c| c.is_ascii_alphanumeric() || ".:/-_".contains(c))
+        crate::config::is_plain(v, ".:/-_")
     }
 
     // What: full chrony.conf.
@@ -4818,7 +4814,7 @@ pub mod rrd {
     ];
 
     fn is_plain(word: &str) -> bool {
-        !word.is_empty() && word.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        crate::config::is_plain(word, "_")
     }
 
     fn source(text: &str) -> Result<Source, String> {
