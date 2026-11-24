@@ -2029,10 +2029,7 @@ async fn dhcp(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     // What: the hint shows only when own NTP is handed out.
     // Why: one rule with the Kea and dnsmasq render.
     // From: Issue #1683
-    ctx.insert(
-        "ntp_auto_dhcp_active",
-        &lancache_ng::dhcp::own_ntp(&s).unwrap_or(false),
-    );
+    ctx.insert("ntp_auto_dhcp_active", &lancache_ng::dhcp::own_ntp(&s)?);
     let codes: Vec<u8> = lancache_ng::dhcp::MANAGED.iter().map(|m| m.code).collect();
     ctx.insert("kea_managed_codes", &codes);
     ctx.insert("dnsmasq_managed_codes", &codes);
