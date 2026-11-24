@@ -6,18 +6,13 @@
 // Why: the how lives in shared.rs; no config here.
 // From: Issue #1683 | PR #1980
 
-use lancache_ng::config::{Settings, process_env};
+use lancache_ng::config::Settings;
 use lancache_ng::{cert, clock, dns, docker, fs, http, pdns, tidy};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-
-// What: env name of the saved settings file.
-// Why: needed before any setting can be read.
-// From: Issue #1683 | PR #1980
-const SETTINGS_FILE_ENV: &str = "LANCACHE_SETTINGS_FILE";
 
 // What: weight of one finding.
 // Why: the ui sorts and colours by it.
@@ -180,8 +175,7 @@ impl Memory {
 // Why: ui changes reach the watchdog via the file.
 // From: Issue #1683 | PR #1980
 fn load() -> Result<Settings, String> {
-    let saved = process_env(SETTINGS_FILE_ENV).map(PathBuf::from);
-    Settings::load(&process_env, saved.as_deref())
+    Settings::from_process()
 }
 
 // What: check every container; heal on a streak.

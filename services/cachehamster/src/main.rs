@@ -13,17 +13,12 @@ use std::time::Duration;
 
 use base64::Engine as _;
 use futures_util::{StreamExt, stream};
-use lancache_ng::config::{Settings, process_env};
+use lancache_ng::config::Settings;
 use lancache_ng::fs::{Owner, PRIVATE_MODE, Place, write};
 use lancache_ng::{clock, http, secret};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
-
-// What: env var naming the saved settings file.
-// Why: same lookup as ui and watchdog.
-// From: Issue #1683 | PR #1980
-const SETTINGS_FILE_ENV: &str = "LANCACHE_SETTINGS_FILE";
 
 // What: file names below CACHEHAMSTER_DATA_DIR.
 // Why: the daemon owns jobs; commands drop inbox files.
@@ -189,8 +184,7 @@ impl Ctx {
     // Why: every part of the service reads them once.
     // From: Issue #871 | PR #1980
     fn load() -> Result<Self, String> {
-        let saved = process_env(SETTINGS_FILE_ENV).map(PathBuf::from);
-        let s = Settings::load(&process_env, saved.as_deref())?;
+        let s = Settings::from_process()?;
         let dir = PathBuf::from(s.text("CACHEHAMSTER_DATA_DIR")?);
         let api = s.text("STEAM_API_URL")?.trim_end_matches('/').to_string();
         let bind = s.list("CACHEHAMSTER_BIND_FILES");

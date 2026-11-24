@@ -20,6 +20,11 @@ pub const DEFAULTS_KEY: &str = "LANCACHE_RUNTIME_DEFAULTS";
 // From: Issue #1683 | PR #1980
 pub const SCHEMA_KEY: &str = "LANCACHE_RUNTIME_SCHEMA";
 
+// What: env name of the saved settings file.
+// Why: needed before any setting can be read.
+// From: Issue #1683 | PR #2019
+pub const SETTINGS_FILE_ENV: &str = "LANCACHE_SETTINGS_FILE";
+
 // What: separator of baked rows.
 // Why: the SOT joins rows with a pipe.
 // From: Issue #1683 | PR #1980
@@ -518,6 +523,13 @@ pub struct Settings {
 }
 
 impl Settings {
+    // What: settings of this process and its saved file.
+    // Why: ui, watchdog and cachehamster start alike.
+    // From: Issue #1683 | PR #2019
+    pub fn from_process() -> Result<Self, String> {
+        Self::load(&process_env, saved_file().as_deref())
+    }
+
     // What: load schema, then file > env > default.
     // Why: the file is the live .env; env is from start.
     // From: Issue #1683 | PR #2017
@@ -767,6 +779,13 @@ pub struct Change {
     pub key: String,
     pub owner: String,
     pub effect: Effect,
+}
+
+// What: path of the saved settings file, if one is set.
+// Why: the ui also writes this file on a save.
+// From: Issue #1683 | PR #2019
+pub fn saved_file() -> Option<PathBuf> {
+    process_env(SETTINGS_FILE_ENV).map(PathBuf::from)
 }
 
 // What: reader for the process environment.

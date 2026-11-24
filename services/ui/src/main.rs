@@ -27,11 +27,6 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tera::{Context, Tera};
 
-// What: env name of the saved settings file.
-// Why: needed before any setting can be read.
-// From: Issue #1683 | PR #1980
-const SETTINGS_FILE_ENV: &str = "LANCACHE_SETTINGS_FILE";
-
 // What: CLI word of the one-shot DHCP probe.
 // Why: the ui and setup.sh start the same command.
 // From: Issue #1683 | PR #1985
@@ -631,7 +626,7 @@ fn changes(old: &Settings, form: Fields) -> Fields {
 // From: Issue #1683 | PR #1858
 async fn commit(app: &App, form: Fields) -> Result<(), String> {
     let Some(path) = app.saved.clone() else {
-        return Err(format!("{SETTINGS_FILE_ENV} is not set"));
+        return Err(format!("{} is not set", config::SETTINGS_FILE_ENV));
     };
     let old = app.settings();
     let updates = changes(&old, form);
@@ -4726,8 +4721,8 @@ async fn main() -> Result<(), String> {
     if args.first().map(String::as_str) == Some("hash-password") {
         return hash_password();
     }
-    let saved = process_env(SETTINGS_FILE_ENV).map(PathBuf::from);
-    let s = Settings::load(&process_env, saved.as_deref())?;
+    let saved = config::saved_file();
+    let s = Settings::from_process()?;
     if let Some(done) = command(&s, &args).await {
         return done;
     }
