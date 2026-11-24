@@ -2556,9 +2556,9 @@ _ci_rust_row() {
     if [[ "${at}" == *"cfg(test)"* ]] || [[ "${at}" == *"#[test]"* ]]; then
         tst=t
     fi
-    # What: pub(..) is pub, the head ends at a brace,
-    # semicolon, equals sign or parenthesis.
+    # What: pub(..) counts as pub; the head ends at { ; = (.
     # Why: one pass, as one gsub left to right.
+    # From: Issue #1683 | PR #1858
     s="${h}"
     head=""
     while [[ "${s}" =~ ${re_pub} ]]; do
@@ -2693,6 +2693,8 @@ _ci_rust_lex() {
                     rx_q="${rx_b:rx_p+1:1}"
                     if [ "${rx_q}" = / ]; then
                         # What: a line comment ends at LF.
+                        # Why: a comment is not Rust code.
+                        # From: Issue #1683 | PR #1858
                         rx_w="${rx_b:rx_p+2}"
                         rx_w="${rx_w%%$'\n'*}"
                         rx_p=$((rx_p + 3 + ${#rx_w}))
@@ -2799,8 +2801,9 @@ _ci_rust_lex() {
                 rx_p=$((rx_p + ${#rx_w}))
                 continue
             fi
-            # What: other bytes, a semicolon at depth 0 or
-            # a closing brace ends an item.
+            # What: code; ; or } at depth 0 ends an item.
+            # Why: one row per top-level item.
+            # From: Issue #1683 | PR #1858
             rx_cur+="${rx_c}"
             rx_code+="${rx_c}"
             rx_cl="${rx_c}"
@@ -2830,6 +2833,8 @@ _ci_rust_lex() {
         done
     done
     # What: open string, comment or brace: no item.
+    # Why: a cut file must not give half an item.
+    # From: Issue #1683 | PR #1858
     if [ "${rx_st}" != code ] || [ "${rx_dep}" != 0 ]; then
         return 1
     fi
@@ -2970,9 +2975,9 @@ _ci_lock_closure() {
             lk_in=1
         fi
     done
-    # What: by: name to numbers; b1/b2: one or more; c: a
-    # dep text to the numbers whose name+version or name it is.
+    # What: index: name, name+version and dep text to rows.
     # Why: a dep names one package or name+version of many.
+    # From: Issue #1683 | PR #1858
     for ((lk_i = 1; lk_i <= lk_p; lk_i++)); do
         lk_k="k${lk_nm[lk_i]-}"
         lk_by["${lk_k}"]+=" ${lk_i}"
@@ -3507,9 +3512,9 @@ _ci_batch_cut() {
                 fi
                 ;;
             1)
-                # What: size bytes, then one LF; a blob
-                # without own last LF ends on that LF.
+                # What: counts size bytes plus the LF after.
                 # Why: C locale: bytes, as in the header.
+                # From: Issue #1683 | PR #1858
                 bc_got=$((bc_got + ${#bc_l} + 1))
                 bc_b[bc_m]="${bc_l}"
                 bc_m=$((bc_m + 1))
