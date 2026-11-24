@@ -233,11 +233,11 @@ JSON commands that the Admin UI executes in that container (`hamster`).
 
 Commands of the dispatcher: `install`, `install-requirements` (aliases
 `install-requirements-primary`, `install-requirements-secondary`; `install`
-and `secondary` run it on their own), `update`, `auto-update`, `update-ip`,
-`configure-upstream-dns`, `create-logs-for-issue`, `secondary`, `backup`,
-`restore`, `reset-to-last-known-good-config` and `reset-sign-in`. Internal
-commands, not in the usage text: `compose`, `converge-reconcile` and
-`openrc-loop`.
+and `secondary` run it on their own), `list-prompts`, `update`,
+`auto-update`, `update-ip`, `configure-upstream-dns`, `debug`, `compose`,
+`create-logs-for-issue`, `secondary`, `backup`, `restore`,
+`reset-to-last-known-good-config` and `reset-sign-in`. Internal commands,
+not in the usage text: `converge-reconcile` and `openrc-loop`.
 
 - `install` runs the wizard and writes the environment file for `deploy/prod`;
   `secondary` takes the registration token of a primary (`--token`), builds the
