@@ -391,7 +391,7 @@ jobs:
     runs-on: ${{ needs.plan.outputs.runner }}
     timeout-minutes: ${{ fromJSON(needs.plan.outputs.timeouts)['validate'] }}
     # What: one job per SOT probe group, all at once.
-    # Why: DoMe 08.11.: serial probes made validate slow.
+    # Why: serial probes make validate slow.
     # From: Issue #1683 | PR #1858
     strategy:
       fail-fast: false

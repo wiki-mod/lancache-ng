@@ -5336,7 +5336,7 @@ _ci_ledger_blob() {
     [ "${sha}" != absent ] || return 1
     printf '%s\n' "${sha}" >&2
     # What: a state read before in this job is not fetched.
-    # Why: plan read one state 30 times per run (DoMe).
+    # Why: one job would read the same state many times.
     # From: Issue #1683 | PR #1858
     memo="ledger-${ledger_ref//\//-}-${sha}"
     if [ "${4:-}" != fetch ] && blob="$(_ci_job_memo_get "${memo}")"; then
@@ -12163,7 +12163,7 @@ _ci_gc_classify() {
         return 2
     fi
     # What: KEEP carries its cause: root or grace.
-    # Why: DoMe 08.11.: a KEEP line must say why.
+    # Why: a KEEP line must say why it is kept.
     # From: Issue #1683 | PR #1858
     case "${verdict}" in
         "${_CI_GC_REFERENCED} root") printf 'KEEP referenced by a protected root\n' ;;
@@ -12312,7 +12312,7 @@ _ci_gc_run() {
                 break
             fi
             # What: a pause before each delete, not the 1st.
-            # Why: DoMe: stay far below the hour API limit.
+            # Why: stay far below the hourly API limit.
             # From: Issue #1683 | PR #1858
             [ "${deleted}" -eq 0 ] || sleep "${pause}"
             # What: re-check after the pause; marks re-read.
@@ -13058,7 +13058,7 @@ _ci_validate_teardown() {
             docker compose -p "${project}" -f "${compose}" \
             down -v --remove-orphans >&2 || rc=2
         # What: log each container's stop signal and exit.
-        # Why: DoMe 08.11.: which container makes down slow.
+        # Why: it shows which container makes down slow.
         # From: Issue #1683 | PR #1858
         ev="$(_ci_run "[CI-ERROR-VALIDATE-0145]" "project=\"${project}\" reason=\"cannot read stop events\"" \
             docker events --since "${since}" --until "${EPOCHREALTIME}" \
@@ -13531,7 +13531,7 @@ _ci_validate_probes() {
     # From: Issue #1683 | PR #1858
     for p in "${probes[@]}"; do
         # What: each pass line carries the probe's time.
-        # Why: DoMe 08.11.: which probe makes validate slow.
+        # Why: it shows which probe makes validate slow.
         # From: Issue #1683 | PR #1858
         t0="${EPOCHREALTIME/./}"
         case "${p}" in
@@ -18401,7 +18401,7 @@ _ci_check_orphaned_branches() {
         found+=("branch=\"${branch}\" last_commit=${when[${branch}]} author=\"${who[${branch}]}\"")
     done <<< "${out}"
     # What: a finding is a warning; the job stays green.
-    # Why: DoMe 08.11.: report old branches, never fail.
+    # Why: old branches are reported, never a failure.
     # From: Issue #1683 | PR #1858
     ci_error "[CI-WARN-CHECK-0210]" "orphaned=${#found[@]} scanned=${scanned} checked=${old} reason=\"AG-GH-017: no PR and no issue reference\"" "$(printf '%s\n' "${found[@]}")"
     for branch in "${found[@]}"; do
