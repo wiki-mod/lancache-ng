@@ -6303,40 +6303,57 @@ service_container_id() {
     }
 }
 
-# What: probes health; one-shot containers pass on exit 0
-# Why: running state never holds for one-shot services
+# What: healthy, starting or failed for one service
+# Why: failed ends a gate at once; starting may still pass
 # From: Issue #1683 | PR #1858
-service_container_is_healthy() {
+service_container_state() {
     local service="$1"
     local container_id health status restart_policy exit_code
 
     # What: lookup includes stopped containers
     # Why: an exited one-shot service must still be found
     # From: Issue #1683 | PR #1858
-    container_id=$(service_container_id "$service") || return 1
-    [[ -n "$container_id" ]] || return 1
+    container_id=$(service_container_id "$service") || { printf 'starting\n'; return 0; }
+    [[ -n "$container_id" ]] || { printf 'starting\n'; return 0; }
 
+    # What: Docker's own verdict wins when a check exists
+    # Why: unhealthy comes after start_period and retries
+    # From: Issue #1683
     health=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$container_id") \
-        || { print_error "Failed to read the health of $service ($container_id, exit $?)."; return 1; }
-    if [[ -n "$health" ]]; then
-        [[ "$health" = "healthy" ]]
-        return $?
-    fi
+        || { print_error "Failed to read the health of $service ($container_id, exit $?)."; printf 'starting\n'; return 0; }
+    case "$health" in
+        healthy) printf 'healthy\n'; return 0 ;;
+        unhealthy) printf 'failed\n'; return 0 ;;
+        ?*) printf 'starting\n'; return 0 ;;
+    esac
 
     status=$(docker inspect --format '{{.State.Status}}' "$container_id") \
-        || { print_error "Failed to read the state of $service ($container_id, exit $?)."; return 1; }
-    [[ "$status" = "running" ]] && return 0
+        || { print_error "Failed to read the state of $service ($container_id, exit $?)."; printf 'starting\n'; return 0; }
+    case "$status" in
+        running) printf 'healthy\n'; return 0 ;;
+        created) printf 'starting\n'; return 0 ;;
+        restarting|dead) printf 'failed\n'; return 0 ;;
+    esac
 
+    # What: a one-shot service passes on exit 0
+    # Why: running state never holds for one-shot services
+    # From: Issue #1683 | PR #1858
     restart_policy=$(docker inspect --format '{{.HostConfig.RestartPolicy.Name}}' "$container_id") \
-        || { print_error "Failed to read the restart policy of $service ($container_id, exit $?)."; return 1; }
-    if [[ "$status" = "exited" && "$restart_policy" = "no" ]]; then
-        exit_code=$(docker inspect --format '{{.State.ExitCode}}' "$container_id") \
-            || { print_error "Failed to read the exit code of $service ($container_id, exit $?)."; return 1; }
-        [[ "$exit_code" = "0" ]]
-        return $?
+        || { print_error "Failed to read the restart policy of $service ($container_id, exit $?)."; printf 'starting\n'; return 0; }
+    exit_code=$(docker inspect --format '{{.State.ExitCode}}' "$container_id") \
+        || { print_error "Failed to read the exit code of $service ($container_id, exit $?)."; printf 'starting\n'; return 0; }
+    if [[ "$status" = "exited" && "$restart_policy" = "no" && "$exit_code" = "0" ]]; then
+        printf 'healthy\n'
+    else
+        printf 'failed\n'
     fi
+}
 
-    return 1
+# What: true while service $1 is healthy
+# Why: callers that only wait share the state above
+# From: Issue #1683
+service_container_is_healthy() {
+    [[ "$(service_container_state "$1")" = healthy ]]
 }
 
 # What: fails when a required probe tool is missing
@@ -6534,25 +6551,32 @@ wait_for_stack_health() {
     local timeout_seconds="$1"
     shift
     local -a services=()
-    local interval_seconds elapsed=0 svc all_healthy baseline
-    local -a regressed_services pre_existing_unhealthy_services
+    local interval_seconds start deadline svc all_healthy baseline state
+    local -a regressed_services pre_existing_unhealthy_services failed_services
 
     interval_seconds=$(prod_env_default SETUP_HEALTH_POLL_SECONDS) || exit $?
     wanted_stack_services services "$_UPDATE_ENV_FILE" "$@"
+    # What: the limit counts wall time, as in docker waits
+    # Why: each round takes seconds; sleeps alone stretch it
+    # From: Issue #1683
+    start=$SECONDS
+    deadline=$((start + timeout_seconds))
 
-    while (( elapsed < timeout_seconds )); do
+    while (( SECONDS < deadline )); do
         all_healthy=1
         regressed_services=()
         pre_existing_unhealthy_services=()
+        failed_services=()
         for svc in "${services[@]}"; do
-            if ! service_container_is_healthy "$svc"; then
-                baseline="${_UPDATE_HEALTH_BASELINE[$svc]-1}"
-                if [[ "$baseline" = "1" ]]; then
-                    all_healthy=0
-                    regressed_services+=("$svc")
-                else
-                    pre_existing_unhealthy_services+=("$svc")
-                fi
+            state=$(service_container_state "$svc") || exit $?
+            [[ "$state" != healthy ]] || continue
+            baseline="${_UPDATE_HEALTH_BASELINE[$svc]-1}"
+            if [[ "$baseline" = "1" ]]; then
+                all_healthy=0
+                regressed_services+=("$svc")
+                [[ "$state" != failed ]] || failed_services+=("$svc")
+            else
+                pre_existing_unhealthy_services+=("$svc")
             fi
         done
         if [[ "$all_healthy" = "1" ]] && verify_stack_functional_health; then
@@ -6561,8 +6585,14 @@ wait_for_stack_health() {
             fi
             return 0
         fi
+        # What: a service Docker marks failed ends the wait
+        # Why: waiting on keeps a broken stack running
+        # From: Issue #1683
+        if (( ${#failed_services[@]} > 0 )); then
+            print_error "Docker reports ${failed_services[*]} as unhealthy or stopped after $((SECONDS - start)) s; the gate ends now."
+            break
+        fi
         sleep "$interval_seconds"
-        elapsed=$((elapsed + interval_seconds))
     done
 
     if (( ${#regressed_services[@]} > 0 )); then
@@ -8747,7 +8777,7 @@ restore_dns_upstream() {
 # From: Issue #1918 | PR #1858
 dns_upstream_is_live() {
     local install_dir="$1" env_file="$2" servers="$3" cid rc conf dns_svc
-    local wait poll waited=0 key server ok
+    local wait poll deadline key server ok
     local -a confs=() wanted=()
     # What: collects the recursor files the ui renders
     # Why: the wait below reads them; /run holds no copy
@@ -8758,6 +8788,7 @@ dns_upstream_is_live() {
     done
     wait=$(prod_env_default SETUP_HEALTH_WAIT_SERVICES_SECONDS) || exit $?
     poll=$(prod_env_default SETUP_HEALTH_POLL_SECONDS) || exit $?
+    deadline=$((SECONDS + wait))
     read -r -a wanted <<< "${servers//,/ }"
     dns_svc=$(prod_env_default DNS_SERVICE) || exit $?
     cid=$(stack_compose "$install_dir" "$env_file" ps -q "$dns_svc") \
@@ -8784,12 +8815,11 @@ dns_upstream_is_live() {
             done
         done
         (( ok == 1 )) && return 0
-        if (( waited >= wait )); then
+        if (( SECONDS >= deadline )); then
             print_error "The recursor config in the dns container does not match the setting after ${wait}s (last read exit ${rc})."
             return 1
         fi
         sleep "$poll"
-        waited=$((waited + poll))
     done
 }
 
@@ -10665,11 +10695,10 @@ install_services=()
 stack_services_into install_services "$INSTALL_DIR" "$ENV_FILE" \
     || die "Failed to list the services in $INSTALL_DIR (exit $?)."
 wanted_stack_services install_services "$ENV_FILE" "${install_services[@]}"
-install_waited=0
+install_deadline=$((SECONDS + install_wait))
 install_bad=("${install_services[@]}")
-while (( ${#install_bad[@]} > 0 && install_waited < install_wait )); do
+while (( ${#install_bad[@]} > 0 && SECONDS < install_deadline )); do
     sleep "$install_poll"
-    install_waited=$((install_waited + install_poll))
     install_left=()
     for svc in "${install_bad[@]}"; do
         service_container_is_healthy "$svc" 2>/dev/null || install_left+=("$svc")
