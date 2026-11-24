@@ -343,7 +343,7 @@ fn disks(s: &Settings, f: &mut Findings) -> Result<(), String> {
 }
 
 // What: host conntrack use against its maximum.
-// Why: DoMe 07.11.: a full table drops new connections.
+// Why: a full table drops new connections.
 // From: Issue #1683 | PR #1985
 fn conntrack(s: &Settings, f: &mut Findings) -> Result<(), String> {
     let path = Path::new(&s.text("HOST_NET_STAT_DIR")?).join("nf_conntrack");

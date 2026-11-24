@@ -2709,7 +2709,7 @@ pub mod recursor_conf {
             s.uint("RPZ_SOA_MINIMUM")?,
         );
         // What: ".name" = subdomains, "name" = itself.
-        // Why: live 249: the apex of .steamcontent.com hit.
+        // Why: the apex of a subdomain row must not match.
         // From: Issue #1072
         for (d, subtree) in domains {
             let d = d.trim_end_matches('.');
@@ -2814,7 +2814,7 @@ pub mod recursor_conf {
     }
 
     // What: one upstream: IP, [IPv6]:port or IPv4:port.
-    // Why: live 06.11.: "[fd00::1" was saved unchecked.
+    // Why: a half bracket form must not be saved.
     // From: Issue #1683
     pub fn upstream_entry(key: &str, raw: &str, own: &[String]) -> Result<(), String> {
         let bad = || format!("{key}: {raw} is no IP address");
@@ -3276,7 +3276,7 @@ pub mod kea_conf {
     }
 
     // What: kea-dhcp4.conf; main subnet from settings.
-    // Why: DoMe 08.11.: settings are the only source.
+    // Why: the settings are the only source of it.
     // From: Issue #1683
     pub fn dhcp4(s: &Settings, existing: Option<&Value>) -> Result<Value, String> {
         let domain = lan_domain(s)?;
@@ -3499,7 +3499,7 @@ pub mod dnsmasq_conf {
         let mut c = base(s)?;
         if mode == Mode::DnsmasqRelay {
             // What: empty relay address = this host IP.
-            // Why: DoMe 07.11.: one-click mode switch.
+            // Why: the mode switch needs no further input.
             // From: Issue #1683 | PR #1985
             let local = Some(s.text_or_empty("DHCP_RELAY_LOCAL_ADDR"))
                 .filter(|v| !v.is_empty())
@@ -3818,7 +3818,7 @@ pub mod nginx_conf {
         out.push_str(&p.timeouts);
         out.push_str("}\n");
         // What: the refuse target sends a TLS alert.
-        // Why: live: a closed port logged [error].
+        // Why: a closed port would log an error per try.
         // From: Issue #1683 | PR #1980
         out.push_str(&format!(
             "\nserver {{\n    listen {} ssl;\n    ssl_reject_handshake on;\n}}\n",
@@ -4040,13 +4040,13 @@ pub mod apply {
                 None if effect == Effect::Recreate => Outcome::NeedsRecreate,
                 None => Outcome::Live,
                 // What: owner reload commands via exec.
-                // Why: DoMe 06.11.: a toggle restarted dns.
+                // Why: a reload must not restart it.
                 // From: Issue #1683
                 Some(Action::Reload) if exec_cmds(exec, owner).next().is_some() => {
                     let name = container_of(owner);
                     match reload_exec(api, &name, exec, owner, limit).await {
                         // What: failed reload: restart.
-                        // Why: 249 ran an old nginx.conf.
+                        // Why: else the old file runs on.
                         // From: Issue #1683 | PR #1985
                         Outcome::Failed(e) => {
                             eprintln!("apply: {owner}: reload failed ({e}); restart");
@@ -4440,7 +4440,7 @@ pub mod render {
         let domains = crate::cdn::effective(s).map_err(|e| vec![e])?;
         dns_files(&mut o, sec, &cdn_names(&domains));
         // What: dns files and the snmpd.conf.
-        // Why: live 229: snmpd waited; stop was killed.
+        // Why: snmpd waits for its file and blocks a stop.
         // From: Issue #1683
         let snmpd = s.text("SNMPD_CONF_FILE").map(PathBuf::from).ok();
         o.files
@@ -5000,7 +5000,7 @@ pub mod rrd {
     }
 
     // What: program values, row tab.name:sources.
-    // Why: 01.11.: PowerDNS, nginx, Kea, chrony values.
+    // Why: PowerDNS, nginx, Kea and chrony give values.
     // From: Issue #1683 | PR #1980
     pub fn service_graphs(s: &Settings) -> Result<Vec<Graph>, String> {
         let tabs = s.list("STATS_CONTAINERS");
@@ -5361,7 +5361,7 @@ pub mod tidy {
                 continue;
             }
             // What: late lines join the existing .xz file.
-            // Why: live 07.11.: "File exists" every round.
+            // Why: xz will not overwrite a file.
             // From: Issue #1683 | PR #1985
             let packed = super::fs::with_suffix(&f.path, ".xz");
             if packed.exists() {
@@ -5431,7 +5431,7 @@ pub mod tidy {
         for row in text.lines() {
             let cols: Vec<&str> = row.split(';').collect();
             // What: old dst.file rows or the d_store row.
-            // Why: live: syslog-ng 4 shows only d_store.
+            // Why: syslog-ng 4 shows only the d_store row.
             // From: Issue #1683
             let store = match cols.first() {
                 Some(&"dst.file") => true,
