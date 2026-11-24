@@ -126,7 +126,7 @@ services:
       driver: local
 
   # What: one-shot ui run: secondary zones and TSIG.
-  # Why: live 229: no zone existed, so no AXFR ran.
+  # Why: without a zone no AXFR ever runs.
   # From: Issue #1683
   zones:
     image: ${LANCACHE_IMAGE_REF_UI:?LANCACHE_IMAGE_REF_UI is required}

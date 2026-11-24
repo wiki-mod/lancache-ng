@@ -88,7 +88,7 @@ x-environment:
     DHCP_PROXY_BOOT_SERVER: ${DHCP_PROXY_BOOT_SERVER:-}
     DHCP_PROXY_CUSTOM_OPTIONS: ${DHCP_PROXY_CUSTOM_OPTIONS:-}
     # What: PXE values for the dnsmasq.conf render.
-    # Why: the ui renders it; live 229: no pxe-service.
+    # Why: the ui renders it; unset: no pxe-service.
     # From: Issue #1683
     DHCP_PROXY_PXE_BOOT_SERVER: ${DHCP_PROXY_PXE_BOOT_SERVER:-}
     DHCP_PROXY_PXE_BOOT_FILENAME_BIOS: ${DHCP_PROXY_PXE_BOOT_FILENAME_BIOS:-}
@@ -384,7 +384,7 @@ services:
       - ${SYSLOG_NG_LOG_DIR:?SYSLOG_NG_LOG_DIR is required}:${SOT_SYSLOG_LOG_ROOT}:ro
       - watchdog-status:${SOT_STATUS_DIR}:ro
       # What: pages, texts and css from the checkout.
-      # Why: DoMe 07.11.: page edits need no image build.
+      # Why: page edits need no image build.
       # From: Issue #1683 | PR #1991
       - ../../services/ui/src/templates:${SOT_TEMPLATE_DIR}:ro
       - ../../services/ui/src/lang:${SOT_LANG_DIR}:ro
