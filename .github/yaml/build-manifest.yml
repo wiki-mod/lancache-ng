@@ -1060,7 +1060,6 @@ runtime:
     # From: Issue #1683
     - DNS_SECONDARY_NS_REMOVE_AFTER_SECONDS=28800
     - DNS_SECONDARY_NS_REMOVE_FAILS=3
-    - DNS_SERVE_RFC1918=1
     # What: compose service name of the dns container.
     # Why: names differ per compose project; services stay.
     # From: Issue #1683 | PR #1980
@@ -1382,7 +1381,7 @@ runtime:
     - DNS_EXTRA_LAN_DOMAINS=list?;;;reload;dns
     - DNS_FILTER_AAAA=bool;;;reload;dns
     - DNS_LAN_RECORD_TYPES=list;;;live;ui
-    - DNS_LOCAL_REVERSE_ZONES=bool;;;reload;dns
+    - DNS_LOCAL_REVERSE_ZONES=bool;;;restart;dns
     - DNS_QUERY_LOG=bool;;;restart;dns
     - DNS_PRIVATE_REVERSE_ZONES=list;;;reload;dns
     - DNS_QUERY_ALLOW_FROM=list;;;reload;dns
@@ -1401,7 +1400,6 @@ runtime:
     - DNS_SECONDARY_RECHECK_SECONDS=uint;60;86400;live;ui
     - DNS_SECONDARY_ZONES=list?;;;restart;dns
     - DNS_SECONDARY_SYNC_SECONDS=uint;5;86400;live;services
-    - DNS_SERVE_RFC1918=bool;;;restart;dns
     - DNS_SNAPSHOT_DIR=path;;;live;ui
     - DNS_SNAPSHOT_KEEP=uint;1;1000;live;ui
     - DNS_UPSTREAM_SERVERS=list?;;;reload;dns

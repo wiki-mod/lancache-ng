@@ -992,7 +992,7 @@ pub mod dns {
                 .collect());
         }
         let mut zones = lan_domains(s)?;
-        if s.flag("DNS_SERVE_RFC1918")? {
+        if s.flag("DNS_LOCAL_REVERSE_ZONES")? {
             zones.extend(private_reverse_zones(s));
         }
         Ok(zones)
@@ -2977,7 +2977,7 @@ pub mod recursor_conf {
         }
         y += &format!(
             "recursor:\n  serve_rfc1918: {}\n",
-            s.flag("DNS_SERVE_RFC1918")?
+            s.flag("DNS_LOCAL_REVERSE_ZONES")?
         );
         y += &format!("  socket_dir: \"{}\"\n", s.text("RECURSOR_RUN_DIR")?);
         y += &format!("  forward_zones:\n{local}{recurse}");
