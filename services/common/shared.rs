@@ -1167,13 +1167,27 @@ pub mod dhcp {
         // Why: an unknown word is an error.
         // From: Issue #1683 | PR #1858
         pub fn from_settings(s: &Settings) -> Result<Self, String> {
-            match s.text("DHCP_MODE")?.as_str() {
+            Self::from_word(&s.text("DHCP_MODE")?)
+        }
+
+        // What: mode from its SOT word.
+        // Why: a form sends the same word as the setting.
+        // From: Issue #1683 | PR #2017
+        pub fn from_word(word: &str) -> Result<Self, String> {
+            match word {
                 "off" => Ok(Self::Off),
                 "kea" => Ok(Self::Kea),
                 "dnsmasq-proxy" => Ok(Self::DnsmasqProxy),
                 "dnsmasq-relay" => Ok(Self::DnsmasqRelay),
                 other => Err(format!("DHCP_MODE {other:?} has no handler")),
             }
+        }
+
+        // What: true for the two dnsmasq modes.
+        // Why: proxy and relay share one dnsmasq daemon.
+        // From: Issue #1683 | PR #2017
+        pub fn is_dnsmasq(self) -> bool {
+            matches!(self, Self::DnsmasqProxy | Self::DnsmasqRelay)
         }
     }
 

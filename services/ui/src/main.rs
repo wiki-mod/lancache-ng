@@ -15,6 +15,7 @@ use axum::routing::{get, post};
 use axum::{Extension, Router};
 use base64::Engine as _;
 use lancache_ng::config::{self, Settings, process_env};
+use lancache_ng::dhcp::Mode as DhcpMode;
 use lancache_ng::dns::Role;
 use lancache_ng::{access, apply, docker, fs, http, human, render, secret};
 use serde_json::{Value, json};
@@ -1955,9 +1956,10 @@ async fn dhcp(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     let mut ctx = Context::new();
     ctx.insert("dhcp_mode", &mode);
     ctx.insert("dhcp_modes", &s.list("DHCP_MODES"));
-    ctx.insert("dhcp_has_kea", &(mode == "kea"));
-    ctx.insert("dhcp_is_dnsmasq", &mode.starts_with("dnsmasq"));
-    ctx.insert("dhcp_is_relay", &(mode == "dnsmasq-relay"));
+    let kind = DhcpMode::from_word(&mode)?;
+    ctx.insert("dhcp_has_kea", &(kind == DhcpMode::Kea));
+    ctx.insert("dhcp_is_dnsmasq", &kind.is_dnsmasq());
+    ctx.insert("dhcp_is_relay", &(kind == DhcpMode::DnsmasqRelay));
     ctx.insert("dhcp_ddns_enabled", &s.flag("DHCP_DDNS")?);
     // What: form values the dhcp page shows.
     // Why: Tera stops on any missing variable.
@@ -2000,7 +2002,7 @@ async fn dhcp(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     ctx.insert("option_code_min", &1);
     ctx.insert("option_code_max", &(u8::MAX - 1));
     let (mut subnets, mut reservations, mut leases) = (Vec::new(), Vec::new(), Vec::new());
-    if mode == "kea" {
+    if kind == DhcpMode::Kea {
         match kea_api(&s) {
             Ok(api) => (subnets, reservations, leases) = kea_view(&api).await,
             Err(e) => ctx.insert("hint", &e),
@@ -2235,7 +2237,8 @@ async fn dhcp_action(
     // What: relay without the real server: plain hint.
     // Why: DoMe 07.11.: a newbie got a bare key name.
     // From: Issue #1683 | PR #1991
-    let relay = op == "UI_ROUTE_DHCP_MODE" && get("dhcp_mode") == "dnsmasq-relay";
+    let asked = DhcpMode::from_word(&get("dhcp_mode")).ok();
+    let relay = op == "UI_ROUTE_DHCP_MODE" && asked == Some(DhcpMode::DnsmasqRelay);
     if relay && s.text("UPSTREAM_DHCP_IP").unwrap_or_default().is_empty() {
         return Err(bad_request(tr("err_relay_needs_upstream")));
     }
@@ -2243,7 +2246,7 @@ async fn dhcp_action(
     // Why: live 229: no card, Kea answered nobody.
     // From: Issue #1683
     let cards = get("dhcp_proxy_interface");
-    if op == "UI_ROUTE_DHCP_MODE" && get("dhcp_mode") == "kea" && cards.is_empty() {
+    if op == "UI_ROUTE_DHCP_MODE" && asked == Some(DhcpMode::Kea) && cards.is_empty() {
         return Err(bad_request(tr("err_kea_needs_interface")));
     }
     let result = match op {
@@ -2610,7 +2613,7 @@ async fn sampler(app: Arc<App>) {
 // Why: pages hide it; apply and the watch keep it off.
 // From: Issue #1683 | PR #2017
 fn dhcp_off_service(s: &Settings) -> Result<Option<String>, String> {
-    if lancache_ng::dhcp::Mode::from_settings(s)? != lancache_ng::dhcp::Mode::Off {
+    if DhcpMode::from_settings(s)? != DhcpMode::Off {
         return Ok(None);
     }
     s.text("DHCP_SERVICE").map(Some)
@@ -3004,8 +3007,8 @@ async fn apply_all(
     // What: proxy and relay share one dnsmasq daemon.
     // Why: release 10.3: the container keeps running.
     // From: Issue #1683
-    let (was, now) = (old.text("DHCP_MODE")?, new.text("DHCP_MODE")?);
-    if was.starts_with("dnsmasq-") && now.starts_with("dnsmasq-") && plan.contains_key(&dhcp) {
+    let (was, now) = (DhcpMode::from_settings(old)?, DhcpMode::from_settings(new)?);
+    if was.is_dnsmasq() && now.is_dnsmasq() && plan.contains_key(&dhcp) {
         let ex = new.list("DNSMASQ_RESTART_EXEC");
         match container_of(app, new, &dhcp).await {
             Ok(name) if !ex.is_empty() => {
