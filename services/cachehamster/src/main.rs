@@ -42,7 +42,7 @@ const DEPOTS_DIR: &str = "depots";
 const MODE: u32 = 0o600;
 
 // What: when a job may run.
-// Why: DoMe: download now, later or scheduled.
+// Why: a download runs now, later or on a schedule.
 // From: Issue #871 | PR #1858
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "at")]
@@ -96,12 +96,12 @@ struct Job {
     #[serde(default)]
     history: Vec<Event>,
     // What: bytes to fetch, from the depot manifests.
-    // Why: DoMe 07.11.: show the preload size up front.
+    // Why: the preload size is shown up front.
     // From: Issue #871 | PR #1985
     #[serde(default)]
     size: u64,
     // What: depots Steam refused, with the reason.
-    // Why: DoMe 07.11.: Portal depot 401 left out unseen.
+    // Why: a refused depot must not vanish unseen.
     // From: Issue #871 | PR #1985
     #[serde(default)]
     skipped: Vec<String>,
@@ -165,7 +165,7 @@ struct Pending {
 }
 
 // What: the sealed Steam session kept on disk.
-// Why: DoMe ACK: only an encrypted session token is kept.
+// Why: only an encrypted session token is kept.
 // From: Issue #871 | PR #1858
 #[derive(Serialize, Deserialize)]
 struct Session {
@@ -249,7 +249,7 @@ fn session_key(dir: &Path) -> Result<[u8; 32], String> {
 }
 
 // What: one machine feature, trimmed; None if unusable.
-// Why: DoMe 08.11.: use what is there, skip the rest.
+// Why: use what the machine offers, skip the rest.
 // From: Issue #871
 fn feature(path: &str) -> Option<Vec<u8>> {
     let raw = std::fs::read(path).ok()?;
@@ -427,13 +427,13 @@ fn qr_size(c: &Ctx) -> Result<u32, String> {
 }
 
 // What: start a QR login; answers the QR as SVG.
-// Why: DoMe ACK: QR login is the primary login path.
+// Why: QR login is the primary login path.
 // From: Issue #871 | PR #1858
 async fn login_begin(c: &Ctx, client: &reqwest::Client) -> Result<Value, String> {
     let device = c.s.text("STEAM_DEVICE_NAME")?;
 
     // What: login as the Steam client platform (SOT).
-    // Why: live 05.11.: CM refused mobile tokens (5).
+    // Why: the CM refuses tokens of a mobile login.
     // From: Issue #871 | PR #1980
     let platform = c.s.uint("STEAM_AUTH_PLATFORM_TYPE")?.to_string();
     let r = steam_post(
@@ -741,7 +741,7 @@ fn apply_order(jobs: &mut Vec<Job>, order: Order) {
 }
 
 // What: the shared bandwidth limit of all jobs.
-// Why: DoMe 26.10. (Fund 92): limit the bandwidth.
+// Why: the jobs must not use the whole line.
 // From: Issue #871 | PR #1980
 static PACE: std::sync::OnceLock<Pace> = std::sync::OnceLock::new();
 
@@ -752,7 +752,7 @@ struct Pace {
 
 impl Pace {
     // What: each file books its time after the last one.
-    // Why: live 05.11.: idle time built credit, 47 Mbit/s.
+    // Why: idle time must not build up credit.
     // From: Issue #871 | PR #1980
     async fn wait(&self, got: u64) {
         let cost = Duration::from_secs_f64(got as f64 / self.bytes_per_sec as f64);
@@ -769,7 +769,7 @@ impl Pace {
 }
 
 // What: daily window HH:MM-HH:MM; may cross midnight.
-// Why: DoMe 26.10. (Fund 92): from when until when.
+// Why: downloads run from one time until another.
 // From: Issue #871 | PR #1980
 fn window(text: &str) -> Result<(u32, u32), String> {
     let mins = |t: &str| -> Option<u32> {
@@ -866,7 +866,7 @@ struct Dl {
 
 impl Dl {
     // What: client to the proxy container; trusts our CA.
-    // Why: DoMe 07.11.: docker-proxy cost 17 % CPU.
+    // Why: a direct client saves the docker-proxy load.
     // From: Issue #871 | PR #2017
     fn load(s: &Settings, connections: usize) -> Result<Self, String> {
         let port = |k: &str| s.num::<u16>(k);
@@ -1129,7 +1129,7 @@ fn depot_gid(d: &Kv, cfg: &SteamCfg) -> Option<u64> {
 type Depots = (Vec<(u32, u64)>, Vec<(u32, u32)>);
 
 // What: split the depots of one app.
-// Why: DoMe 07.11.: TFC 59 MB; HL base was skipped.
+// Why: shared depots of a base app must not be skipped.
 // From: Issue #871 | PR #1985
 fn depots_of(app: &Kv, cfg: &SteamCfg) -> Depots {
     let (mut own, mut borrowed) = (Vec::new(), Vec::new());
@@ -1291,7 +1291,7 @@ struct Frame {
 }
 
 // What: our own CM session over a websocket.
-// Why: DoMe 18:18: no third-party Steam library.
+// Why: no third-party Steam library is used.
 // From: Issue #871 | PR #1858
 struct Cm {
     ws: Ws,
@@ -1414,7 +1414,7 @@ impl Cm {
         };
         let raw_emsg = word(raw, 0)?;
         // What: skip frames without the protobuf flag.
-        // Why: live 06.11.: such a frame broke a job.
+        // Why: a frame without it is no protobuf message.
         if raw_emsg & PROTO_MASK == 0 {
             return Ok(());
         }
@@ -1464,7 +1464,7 @@ impl Cm {
                 return self.queue.remove(pos).ok_or_else(|| "CM queue".to_string());
             }
             // What: name why Steam ended the session.
-            // Why: DoMe 07.11.: only "CM closed" was shown.
+            // Why: "CM closed" alone names no reason.
             // From: Issue #871 | PR #1985
             if let Some(off) = self.queue.iter().find(|f| f.emsg == EMSG_LOGGED_OFF) {
                 let r = pb_read(&off.body).ok().and_then(|b| pb_int(&b, 1));
@@ -1821,7 +1821,7 @@ fn cached(c: &Ctx) -> Result<Value, String> {
 }
 
 // What: delete every file in the cache, keep folders.
-// Why: DoMe 07.11.: one button empties the whole cache.
+// Why: one button empties the whole cache.
 // From: Issue #871 | PR #1991
 fn wipe_dir(dir: &Path, freed: &mut (u64, u64)) -> Result<(), String> {
     let rd = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -1841,7 +1841,7 @@ fn wipe_dir(dir: &Path, freed: &mut (u64, u64)) -> Result<(), String> {
 }
 
 // What: empty the whole cache of every service.
-// Why: DoMe 07.11.: full wipe next to per-game evict.
+// Why: a full wipe stands next to the per-game evict.
 // From: Issue #871 | PR #1991
 fn wipe(c: &Ctx) -> Result<Value, String> {
     let mut freed = (0, 0);
@@ -1861,7 +1861,7 @@ async fn lookup(c: &Ctx, app: u32) -> Result<Vec<u32>, String> {
 }
 
 // What: check or evict one app in the cache.
-// Why: DoMe 07.11.: empty one game, not everything.
+// Why: one game can be emptied without the rest.
 // From: Issue #871 | PR #1991
 async fn app_cache(c: &Ctx, args: &[String], evict: bool) -> Result<Value, String> {
     let app: u32 = args
@@ -2007,7 +2007,7 @@ async fn daemon(c: Ctx) -> Result<(), String> {
     }
     let window = window(&c.s.text("CACHEHAMSTER_WINDOW")?)?;
     // What: the values this start runs with.
-    // Why: live 05.11. Fund 90: the value was not visible.
+    // Why: the values in use must be visible in the log.
     // From: Issue #871 | PR #1980
     eprintln!(
         "cachehamster: start: {queues} jobs, {connections} downloads each, {mbit} Mbit/s (0 = off), window {:02}:{:02}-{:02}:{:02}",
