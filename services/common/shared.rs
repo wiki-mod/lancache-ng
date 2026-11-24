@@ -2530,6 +2530,16 @@ pub mod pdns_conf {
             .collect()
     }
 
+    // What: address and port of the own pdns.
+    // Why: recursor and dnsdist send to the same place.
+    // From: Issue #1683 | PR #2017
+    pub fn auth_endpoint(s: &Settings) -> Result<String, String> {
+        Ok(crate::dns::host_port(
+            &s.text("PDNS_AUTH_ADDRESS")?,
+            s.uint("PDNS_AUTH_PORT")?,
+        ))
+    }
+
     // What: full pdns.conf for this node's role.
     // Why: API on; AXFR by TSIG, not by IP list.
     // From: Issue #1683 | PR #1858
@@ -2849,11 +2859,7 @@ pub mod recursor_conf {
         lua_file: &str,
     ) -> Result<String, String> {
         let u = |k: &str| s.uint(k).map(|v| v.to_string());
-        let auth = format!(
-            "{}:{}",
-            s.text("PDNS_AUTH_ADDRESS")?,
-            s.uint("PDNS_AUTH_PORT")?
-        );
+        let auth = crate::pdns_conf::auth_endpoint(s)?;
         let zones = crate::dns::managed_zones(s)?;
         let local: String = zones
             .iter()
@@ -3098,11 +3104,7 @@ pub mod dnsdist_conf {
                 acl.push(net);
             }
         }
-        let auth = format!(
-            "{}:{}",
-            s.text("PDNS_AUTH_ADDRESS")?,
-            s.uint("PDNS_AUTH_PORT")?
-        );
+        let auth = crate::pdns_conf::auth_endpoint(s)?;
         let mut listeners = vec![Listener {
             port: s.uint("DNS_PORT")?,
             pool: "http",
