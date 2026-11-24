@@ -185,8 +185,7 @@ impl App {
     // Why: every wait comes from the SOT.
     // From: Issue #1683 | PR #1858
     fn limits(&self, s: &Settings) -> Result<(u32, Duration), String> {
-        let grace = s.uint("UI_STOP_GRACE")?;
-        let grace = u32::try_from(grace).map_err(|e| e.to_string())?;
+        let grace = s.num::<u32>("UI_STOP_GRACE")?;
         Ok((grace, Duration::from_secs(s.uint("DOCKER_TIMEOUT")?)))
     }
 
