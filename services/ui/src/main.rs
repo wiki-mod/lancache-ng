@@ -2627,12 +2627,13 @@ async fn service_values(app: &App, s: &Settings, want: &[String]) -> BTreeMap<St
         out.insert("host:tx".into(), tx.to_string());
     }
 
-    // What: chronyc -c tracking: CSV, field 5 = offset.
+    // What: the tracking row: CSV, field 5 = offset.
     // Why: stratum and offset show the time source.
     // From: Issue #1683 | PR #1980
+    let tracking = s.list("CHRONY_TRACKING_EXEC");
     if has("chrony")
-        && let Ok(svc) = s.text("CACHEHAMSTER_SERVICE")
-        && let Ok((0, text)) = exec_in(app, s, &svc, &["chronyc", "-c", "tracking"]).await
+        && let Some((svc, cmd)) = apply::exec_rows(&tracking).next()
+        && let Ok((0, text)) = exec_in(app, s, svc, &cmd).await
     {
         let f: Vec<&str> = text.trim().split(',').collect();
         if let (Some(st), Some(off)) = (f.get(2), f.get(4)) {
@@ -2856,21 +2857,22 @@ async fn service_action(
     // What: only a running program is touched.
     // Why: a restart must not start kea in dnsmasq mode.
     // From: Issue #1683
-    let status = ["rc-service", program.as_str(), "status"];
+    let control = s.text("SERVICE_CONTROL_PROGRAM")?;
+    let status = [control.as_str(), program.as_str(), "status"];
     let (code, _) = exec_in(&app, &s, &container, &status)
         .await
         .map_err(|e| Fail(StatusCode::BAD_GATEWAY, e))?;
     if code != 0 {
         return Err(Fail(StatusCode::CONFLICT, tr("err_program_not_running")));
     }
-    let cmd = ["rc-service", program.as_str(), action.as_str()];
+    let cmd = [control.as_str(), program.as_str(), action.as_str()];
     let (code, out) = exec_in(&app, &s, &container, &cmd)
         .await
         .map_err(|e| Fail(StatusCode::BAD_GATEWAY, e))?;
     if code != 0 {
         return Err(Fail(
             StatusCode::BAD_GATEWAY,
-            format!("rc-service exit {code}: {out}"),
+            format!("{control} exit {code}: {out}"),
         ));
     }
     Ok(StatusCode::NO_CONTENT.into_response())

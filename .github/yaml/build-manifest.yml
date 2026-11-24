@@ -1145,23 +1145,31 @@ runtime:
     # What: reload commands per owner without HUP.
     # Why: a reload must not restart the container.
     # From: Issue #1683
-    - RELOAD_EXEC=dns:rec_control+--socket-dir=@RECURSOR_RUN_DIR@+--config-name=http+reload-lua-config dns:rec_control+--socket-dir=@RECURSOR_RUN_DIR@+--config-name=http+reload-acls dns:rec_control+--socket-dir=@RECURSOR_RUN_DIR@+--config-name=http+reload-zones dns:rec_control+--socket-dir=@RECURSOR_RUN_DIR@+--config-name=http+reload-lua-script dns:rec_control+--socket-dir=@RECURSOR_RUN_DIR@+--config-name=http+wipe-cache+.$ dns:rec_control+--socket-dir=@RECURSOR_RUN_DIR@+--config-name=https+reload-lua-config dns:rec_control+--socket-dir=@RECURSOR_RUN_DIR@+--config-name=https+reload-acls dns:rec_control+--socket-dir=@RECURSOR_RUN_DIR@+--config-name=https+reload-zones dns:rec_control+--socket-dir=@RECURSOR_RUN_DIR@+--config-name=https+reload-lua-script dns:rec_control+--socket-dir=@RECURSOR_RUN_DIR@+--config-name=https+wipe-cache+.$ proxy:rc-service+nginx+reload ui:rc-service+lancache-ui+reload
+    - RELOAD_EXEC=dns:rec_control+--socket-dir=@RECURSOR_RUN_DIR@+--config-name=http+reload-lua-config dns:rec_control+--socket-dir=@RECURSOR_RUN_DIR@+--config-name=http+reload-acls dns:rec_control+--socket-dir=@RECURSOR_RUN_DIR@+--config-name=http+reload-zones dns:rec_control+--socket-dir=@RECURSOR_RUN_DIR@+--config-name=http+reload-lua-script dns:rec_control+--socket-dir=@RECURSOR_RUN_DIR@+--config-name=http+wipe-cache+.$ dns:rec_control+--socket-dir=@RECURSOR_RUN_DIR@+--config-name=https+reload-lua-config dns:rec_control+--socket-dir=@RECURSOR_RUN_DIR@+--config-name=https+reload-acls dns:rec_control+--socket-dir=@RECURSOR_RUN_DIR@+--config-name=https+reload-zones dns:rec_control+--socket-dir=@RECURSOR_RUN_DIR@+--config-name=https+reload-lua-script dns:rec_control+--socket-dir=@RECURSOR_RUN_DIR@+--config-name=https+wipe-cache+.$ proxy:@SERVICE_CONTROL_PROGRAM@+nginx+reload ui:@SERVICE_CONTROL_PROGRAM@+lancache-ui+reload
+    # What: the program that controls a service.
+    # Why: the exec rows and the program menu name it once.
+    # From: Issue #1683 | PR #2017
+    - SERVICE_CONTROL_PROGRAM=rc-service
+    # What: the command that reads the state of chronyd.
+    # Why: the statistics show stratum and offset.
+    # From: Issue #1683 | PR #2017
+    - CHRONY_TRACKING_EXEC=services:chronyc+-c+tracking
     # What: snmpd reload per container on a new snmpd.conf.
     # Why: one file, several snmpd; HUP rereads it.
     # From: Issue #1683
-    - SNMPD_RELOAD_EXEC=dns:rc-service+snmpd+reload proxy:rc-service+snmpd+reload ui:rc-service+snmpd+reload
+    - SNMPD_RELOAD_EXEC=dns:@SERVICE_CONTROL_PROGRAM@+snmpd+reload proxy:@SERVICE_CONTROL_PROGRAM@+snmpd+reload ui:@SERVICE_CONTROL_PROGRAM@+snmpd+reload
     # What: pdns restart on a new pdns.conf.
     # Why: pdns reads its config only at start.
     # From: Issue #1683
-    - PDNS_RESTART_EXEC=dns:rc-service+pdns+restart
+    - PDNS_RESTART_EXEC=dns:@SERVICE_CONTROL_PROGRAM@+pdns+restart
     # What: dnsdist restart on a new dnsdist.conf.
     # Why: dnsdist reads its config only at start.
     # From: Issue #1683
-    - DNSDIST_RESTART_EXEC=dns:rc-service+dnsdist+restart
+    - DNSDIST_RESTART_EXEC=dns:@SERVICE_CONTROL_PROGRAM@+dnsdist+restart
     # What: dnsmasq restart on a proxy/relay switch.
     # Why: both sub-modes run the same dnsmasq daemon.
     # From: Issue #1683
-    - DNSMASQ_RESTART_EXEC=dhcp:rc-service+dnsmasq+restart
+    - DNSMASQ_RESTART_EXEC=dhcp:@SERVICE_CONTROL_PROGRAM@+dnsmasq+restart
     - NGINX_CONF_DIR=@CONFIG_DIR@/proxy
     - DNSMASQ_CONF_FILE=@CONFIG_DIR@/dhcp/dnsmasq.conf
     - KEA_CTRL_CONF_FILE=@CONFIG_DIR@/dhcp/kea-ctrl-agent.conf
@@ -1475,6 +1483,7 @@ runtime:
     - PDNS_RESTART_EXEC=list;;;live;ui
     - DNSDIST_RESTART_EXEC=list;;;live;ui
     - DNSMASQ_RESTART_EXEC=list;;;live;ui
+    - CHRONY_TRACKING_EXEC=list;;;live;ui
     - NGINX_CONF_DIR=path;;;container;proxy
     - DNSMASQ_CONF_FILE=path;;;container;dhcp
     - KEA_CTRL_CONF_FILE=path;;;container;dhcp

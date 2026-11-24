@@ -4056,14 +4056,21 @@ pub mod apply {
         }
     }
 
+    // What: owner and words of each "owner:cmd+arg" row.
+    // Why: one reader of the exec rows of the SOT.
+    // From: Issue #1683 | PR #2017
+    pub fn exec_rows(exec: &[String]) -> impl Iterator<Item = (&str, Vec<&str>)> {
+        exec.iter().filter_map(|e| {
+            let (owner, cmd) = e.split_once(':')?;
+            Some((owner, cmd.split('+').collect()))
+        })
+    }
+
     // What: an owner's reload commands, "owner:cmd+arg".
     // Why: RELOAD_EXEC in the SOT; no list in code.
     // From: Issue #1683
     fn exec_cmds<'a>(exec: &'a [String], owner: &'a str) -> impl Iterator<Item = Vec<&'a str>> {
-        exec.iter().filter_map(move |e| {
-            let (o, cmd) = e.split_once(':')?;
-            (o == owner).then(|| cmd.split('+').collect())
-        })
+        exec_rows(exec).filter_map(move |(o, cmd)| (o == owner).then_some(cmd))
     }
 
     // What: run every reload command; stop at the first.
