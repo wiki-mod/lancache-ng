@@ -466,5 +466,7 @@
   "cache_wipe_sure": "Wirklich alles löschen?",
   "cache_wipe_title": "Cache leeren",
   "cache_wipe_hint": "Löscht alle zwischengespeicherten Dateien aller Dienste. Sie werden beim nächsten Download neu geholt.",
+  "err_ptr_no_zone": "{ip} liegt in keiner Rückwärts-Zone dieses Stacks, deshalb kann kein PTR angelegt werden. PTR-Haken entfernen oder zuerst die Rückwärts-Zone anlegen.",
+  "err_ptr_taken": "{ip} hat schon den Rückwärts-Eintrag {name}. Diesen Eintrag zuerst entfernen oder den PTR-Haken entfernen.",
   "games_search": "Name, App-ID oder Regex"
 }

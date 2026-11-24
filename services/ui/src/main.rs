@@ -1456,24 +1456,77 @@ async fn record(
         }
     }
     let api = pdns_api(s)?;
+    let host = lancache_ng::pdns::zone_id(&name);
+    // What: the place of each wanted PTR, checked first.
+    // Why: no A is saved when its PTR cannot follow.
+    // From: Issue #1683 | PR #2019
+    let mut places = Vec::new();
+    if add && kind == "A" && get("ptr") == "1" {
+        for ip in &contents {
+            let Some((rev, rz)) = served_reverse_place(s, ip)? else {
+                return Err(tr("err_ptr_no_zone").replace("{ip}", ip));
+            };
+            let have = rrset_contents(&api, &rz, &rev, "PTR").await?;
+            if let Some(other) = have.iter().find(|h| **h != host) {
+                return Err(tr("err_ptr_taken")
+                    .replace("{ip}", ip)
+                    .replace("{name}", other));
+            }
+            places.push((rev, rz));
+        }
+    }
+    // What: the addresses the name loses with this change.
+    // Why: their PTR to this name must not stay behind.
+    // From: Issue #1683 | PR #2019
+    let mut gone = Vec::new();
+    if kind == "A" {
+        gone = rrset_contents(&api, &zone, &name, "A").await?;
+        gone.retain(|ip| !contents.contains(ip));
+    }
     api.set_rrset(&zone, &name, &kind, ttl, &contents).await?;
     snapshot(s, &api, &zone).await?;
     flush_zone(s, &zone).await?;
-    // What: PTR for each A address when ticked.
-    // Why: a LAN entry may want its reverse entry.
-    // From: Issue #1683 | PR #1980
-    if add && kind == "A" && get("ptr") == "1" {
-        let host = vec![lancache_ng::pdns::zone_id(&name)];
-        for ip in &contents {
-            let Ok(Some((rev, rz))) = reverse_place(s, ip) else {
-                continue;
-            };
-            api.set_rrset(&rz, &rev, "PTR", ttl, &host).await?;
+    for (rev, rz) in &places {
+        api.set_rrset(rz, rev, "PTR", ttl, std::slice::from_ref(&host))
+            .await?;
+        snapshot(s, &api, rz).await?;
+        flush_zone(s, rz).await?;
+    }
+    for ip in &gone {
+        let Some((rev, rz)) = served_reverse_place(s, ip)? else {
+            continue;
+        };
+        // What: drop the PTR only when it names this host.
+        // Why: a PTR to another name is not ours to drop.
+        // From: Issue #1683 | PR #2019
+        if rrset_contents(&api, &rz, &rev, "PTR").await? == [host.clone()] {
+            api.set_rrset(&rz, &rev, "PTR", 0, &[]).await?;
             snapshot(s, &api, &rz).await?;
             flush_zone(s, &rz).await?;
         }
     }
     Ok(())
+}
+
+// What: the contents of one record set; none: empty.
+// Why: PTR checks ask what a name holds right now.
+// From: Issue #1683 | PR #2019
+async fn rrset_contents(
+    api: &lancache_ng::pdns::Api,
+    zone: &str,
+    name: &str,
+    kind: &str,
+) -> Result<Vec<String>, String> {
+    let id = lancache_ng::pdns::zone_id(name);
+    Ok(api
+        .rrsets(zone)
+        .await?
+        .iter()
+        .filter(|r| r["name"] == id.as_str() && r["type"] == kind)
+        .filter_map(|r| r["records"].as_array())
+        .flatten()
+        .filter_map(|c| c["content"].as_str().map(str::to_string))
+        .collect())
 }
 
 // What: add or remove one PTR record.
@@ -3773,13 +3826,9 @@ async fn drop_peer_records(s: &Settings, name: &str, address: &str) -> Result<()
     // What: delete the PTR only when it names this host.
     // Why: an own PTR of the admin must stay.
     // From: Issue #1683
-    let ours = api.rrsets(&zone).await?.iter().any(|r| {
-        r["name"] == rev.as_str()
-            && r["type"] == "PTR"
-            && r["records"]
-                .as_array()
-                .is_some_and(|a| a.iter().any(|c| c["content"] == host.as_str()))
-    });
+    let ours = rrset_contents(&api, &zone, &rev, "PTR")
+        .await?
+        .contains(&host);
     if ours {
         api.set_rrset(&zone, &rev, "PTR", 0, &[]).await?;
     }

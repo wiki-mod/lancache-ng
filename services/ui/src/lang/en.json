@@ -466,5 +466,7 @@
   "cache_wipe_sure": "Really delete everything?",
   "cache_wipe_title": "Empty the cache",
   "cache_wipe_hint": "Deletes every cached file of all services. They are fetched again on the next download.",
+  "err_ptr_no_zone": "{ip} is in no reverse zone of this stack, so no PTR can be added. Untick the PTR box or add the reverse zone first.",
+  "err_ptr_taken": "{ip} already has the reverse entry {name}. Remove that entry first or untick the PTR box.",
   "games_search": "Name, app ID or regex"
 }
