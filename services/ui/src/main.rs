@@ -1763,6 +1763,13 @@ fn zone_state(z: &PeerZone) -> (u8, &'static str) {
     }
 }
 
+// What: the worst state of the zones; none: in sync.
+// Why: one lagging zone decides the peer status.
+// From: Issue #1683 | PR #2017
+fn worst_state(zones: &[PeerZone]) -> (u8, &'static str) {
+    zones.iter().map(zone_state).fold((0, "in_sync"), Ord::max)
+}
+
 // What: worst state over all zones, each zone in detail.
 // Why: in sync only when every managed zone matches.
 // From: Issue #1683
@@ -1771,11 +1778,10 @@ async fn secondary_health(s: &Settings, address: &str) -> Value {
         Ok(z) => z,
         Err(e) => return json!({"status": "unreachable", "detail": e}),
     };
-    let mut worst = (0, "in_sync");
+    let worst = worst_state(&zones);
     let mut lines = Vec::new();
     for z in &zones {
         let state = zone_state(z);
-        worst = worst.max(state);
         let show = |v: Option<u32>| v.map_or_else(|| "-".to_string(), |n| n.to_string());
         lines.push(format!(
             "{}: {} (primary {}, secondary {})",
@@ -4274,7 +4280,7 @@ async fn main() -> Result<(), String> {
 // From: Issue #1683
 #[cfg(test)]
 mod tests {
-    use super::{PeerZone, duration_text, zone_state};
+    use super::{PeerZone, duration_text, worst_state, zone_state};
 
     fn zone(primary: Option<u32>, secondary: Option<u32>) -> PeerZone {
         PeerZone {
@@ -4284,6 +4290,9 @@ mod tests {
         }
     }
 
+    // What: every pair of serials gets its state word.
+    // Why: the page and the check read these words.
+    // From: Issue #1683
     #[test]
     fn zone_state_names_each_case() {
         assert_eq!(zone_state(&zone(Some(3), Some(3))).1, "in_sync");
@@ -4293,6 +4302,9 @@ mod tests {
         assert_eq!(zone_state(&zone(None, Some(3))).1, "error");
     }
 
+    // What: the worst zone state is the peer status.
+    // Why: in sync only when every managed zone matches.
+    // From: Issue #1683
     #[test]
     fn one_lagging_zone_decides_the_status() {
         let zones = [
@@ -4300,8 +4312,8 @@ mod tests {
             zone(Some(5), Some(4)),
             zone(Some(1), Some(1)),
         ];
-        let worst = zones.iter().map(zone_state).max().map(|s| s.1);
-        assert_eq!(worst, Some("behind"));
+        assert_eq!(worst_state(&zones).1, "behind");
+        assert_eq!(worst_state(&[]).1, "in_sync");
     }
 
     // What: check times as h, min or s.
