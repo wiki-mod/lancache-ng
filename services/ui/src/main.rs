@@ -3288,7 +3288,7 @@ async fn ensure_secondary_zones(s: &Settings, key: &str) -> Result<(), String> {
 }
 
 // What: port 53 if the primary answers aa there.
-// Why: older primaries have a recursor on 53; 5300 stays.
+// Why: an older primary has its recursor on the DNS port.
 // From: Issue #1683
 async fn primary_xfr_port(s: &Settings, zone: Option<&String>) -> Result<u64, String> {
     let fallback = s.uint("PDNS_AUTH_PORT")?;
