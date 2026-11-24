@@ -2400,6 +2400,21 @@ fn sample_all(s: &Settings) -> Vec<String> {
     }
 }
 
+// What: stores one RRD row off the async threads.
+// Why: rrdtool blocks; an error joins the list.
+// From: Issue #1683 | PR #2017
+async fn store_row(
+    s: &Settings,
+    graph: lancache_ng::rrd::Graph,
+    row: Vec<String>,
+) -> Result<(), String> {
+    let s = s.clone();
+    let put = move || lancache_ng::rrd::store(&s, &graph, &row);
+    tokio::task::spawn_blocking(put)
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 // What: Docker stats of each container into RRD.
 // Why: values per container, not only the box.
 // From: Issue #1683 | PR #1980
@@ -2435,13 +2450,7 @@ async fn sample_containers(app: &App, s: &Settings) -> Vec<String> {
                 .iter()
                 .map(|x| lancache_ng::rrd::docker_value(&v, &x.oid))
                 .collect();
-            let (s2, g2) = (s.clone(), g.clone());
-            let put = move || lancache_ng::rrd::store(&s2, &g2, &vals);
-            match tokio::task::spawn_blocking(put).await {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => errs.push(e),
-                Err(e) => errs.push(e.to_string()),
-            }
+            errs.extend(store_row(s, g.clone(), vals).await.err());
         }
     }
     errs
@@ -2564,13 +2573,7 @@ async fn sample_services(app: &App, s: &Settings) -> Vec<String> {
             .iter()
             .map(|x| vals.get(&x.oid).cloned().unwrap_or_else(|| "U".into()))
             .collect();
-        let s2 = s.clone();
-        let put = move || lancache_ng::rrd::store(&s2, &g, &row);
-        match tokio::task::spawn_blocking(put).await {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => errs.push(e),
-            Err(e) => errs.push(e.to_string()),
-        }
+        errs.extend(store_row(s, g, row).await.err());
     }
     errs
 }
