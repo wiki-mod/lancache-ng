@@ -1708,11 +1708,12 @@ async fn check_peer(
     let api = remote_api(s, address)?;
     let theirs = api.zones().await?;
     for z in peer_zones(s, ours, &theirs)? {
-        let (rank, word) = zone_state(&z);
+        let state = zone_state(&z);
+        let word = state.word();
         // What: ahead: our serial goes past theirs first.
         // Why: a restore sets ours back; AXFR skips lower.
         // From: Issue #1683 | PR #2017
-        if let (1, Some(theirs)) = (rank, z.secondary)
+        if let (ZoneState::Ahead, Some(theirs)) = (state, z.secondary)
             && let Err(e) = raise_serial(s, &z.zone, theirs).await
         {
             eprintln!("ui: secondary {address}: {} ahead, raise: {e}", z.zone);
@@ -1721,7 +1722,10 @@ async fn check_peer(
         // What: ahead, unknown, behind pulled; missing not.
         // Why: a missing zone has no copy to refresh.
         // From: Issue #1683
-        if (1..=3).contains(&rank) {
+        if matches!(
+            state,
+            ZoneState::Ahead | ZoneState::Unknown | ZoneState::Behind
+        ) {
             match api.axfr_retrieve(&z.zone).await {
                 Ok(()) => eprintln!("ui: secondary {address}: {} {word}, AXFR asked", z.zone),
                 Err(e) => eprintln!("ui: secondary {address}: {} {word}, AXFR: {e}", z.zone),
@@ -1769,33 +1773,66 @@ struct PeerZone {
     secondary: Option<u32>,
 }
 
-// What: state word of one zone; higher rank is worse.
+// What: state of one zone on a secondary, mild to bad.
+// Why: the order picks the worst; callers name a state.
+// From: Issue #1683 | PR #2017
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum ZoneState {
+    InSync,
+    Ahead,
+    Unknown,
+    Behind,
+    Missing,
+    Error,
+}
+
+impl ZoneState {
+    // What: the word of a state in answers and log lines.
+    // Why: the page maps this word to label and colour.
+    // From: Issue #1683 | PR #2017
+    fn word(self) -> &'static str {
+        match self {
+            ZoneState::InSync => "in_sync",
+            ZoneState::Ahead => "ahead",
+            ZoneState::Unknown => "unknown",
+            ZoneState::Behind => "behind",
+            ZoneState::Missing => "missing",
+            ZoneState::Error => "error",
+        }
+    }
+}
+
+// What: state of one zone from its two serials.
 // Why: the peer status is the worst zone state.
 // From: Issue #1683
-fn zone_state(z: &PeerZone) -> (u8, &'static str) {
+fn zone_state(z: &PeerZone) -> ZoneState {
     use lancache_ng::dns::Sync;
     // What: let-else instead of None in a tuple pattern.
     // Why: CodeQL read that None as an unused variable.
     // From: Issue #1683
     let Some(p) = z.primary else {
-        return (5, "error");
+        return ZoneState::Error;
     };
     let Some(r) = z.secondary else {
-        return (4, "missing");
+        return ZoneState::Missing;
     };
     match lancache_ng::dns::sync_state(p, r) {
-        Sync::InSync => (0, "in_sync"),
-        Sync::Ahead => (1, "ahead"),
-        Sync::Unknown => (2, "unknown"),
-        Sync::Behind => (3, "behind"),
+        Sync::InSync => ZoneState::InSync,
+        Sync::Ahead => ZoneState::Ahead,
+        Sync::Unknown => ZoneState::Unknown,
+        Sync::Behind => ZoneState::Behind,
     }
 }
 
 // What: the worst state of the zones; none: in sync.
 // Why: one lagging zone decides the peer status.
 // From: Issue #1683 | PR #2017
-fn worst_state(zones: &[PeerZone]) -> (u8, &'static str) {
-    zones.iter().map(zone_state).fold((0, "in_sync"), Ord::max)
+fn worst_state(zones: &[PeerZone]) -> ZoneState {
+    zones
+        .iter()
+        .map(zone_state)
+        .max()
+        .unwrap_or(ZoneState::InSync)
 }
 
 // What: worst state over all zones, each zone in detail.
@@ -1809,17 +1846,17 @@ async fn secondary_health(s: &Settings, address: &str) -> Value {
     let worst = worst_state(&zones);
     let mut lines = Vec::new();
     for z in &zones {
-        let state = zone_state(z);
+        let state = zone_state(z).word();
         let show = |v: Option<u32>| v.map_or_else(|| "-".to_string(), |n| n.to_string());
         lines.push(format!(
             "{}: {} (primary {}, secondary {})",
             z.zone,
-            state.1,
+            state,
             show(z.primary),
             show(z.secondary)
         ));
     }
-    json!({"status": worst.1, "zones": zones.len(), "detail": lines.join("\n")})
+    json!({"status": worst.word(), "zones": zones.len(), "detail": lines.join("\n")})
 }
 
 // What: flush recursor caches when a serial moves.
@@ -4352,11 +4389,11 @@ mod tests {
     // From: Issue #1683
     #[test]
     fn zone_state_names_each_case() {
-        assert_eq!(zone_state(&zone(Some(3), Some(3))).1, "in_sync");
-        assert_eq!(zone_state(&zone(Some(3), Some(4))).1, "ahead");
-        assert_eq!(zone_state(&zone(Some(4), Some(3))).1, "behind");
-        assert_eq!(zone_state(&zone(Some(3), None)).1, "missing");
-        assert_eq!(zone_state(&zone(None, Some(3))).1, "error");
+        assert_eq!(zone_state(&zone(Some(3), Some(3))).word(), "in_sync");
+        assert_eq!(zone_state(&zone(Some(3), Some(4))).word(), "ahead");
+        assert_eq!(zone_state(&zone(Some(4), Some(3))).word(), "behind");
+        assert_eq!(zone_state(&zone(Some(3), None)).word(), "missing");
+        assert_eq!(zone_state(&zone(None, Some(3))).word(), "error");
     }
 
     // What: the worst zone state is the peer status.
@@ -4369,8 +4406,8 @@ mod tests {
             zone(Some(5), Some(4)),
             zone(Some(1), Some(1)),
         ];
-        assert_eq!(worst_state(&zones).1, "behind");
-        assert_eq!(worst_state(&[]).1, "in_sync");
+        assert_eq!(worst_state(&zones).word(), "behind");
+        assert_eq!(worst_state(&[]).word(), "in_sync");
     }
 
     // What: check times as h, min or s.
