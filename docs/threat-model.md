@@ -276,6 +276,9 @@ only its Argon2id hash.
   `UI_PASSWORD_MIN_LENGTH` characters (default 12, allowed 8 to 128); only the
   Argon2id hash is stored, base64url-coded, as `UI_AUTH_PASSWORD_HASH` in
   `.env`.
+- A request body larger than `UI_REQUEST_BODY_MAX_BYTES` (SOT default
+  2097152) is refused with status 413 before a handler reads it; the limit is
+  set on the router of the UI (`DefaultBodyLimit`).
 - The UI mounts the directory of the stack `.env` writable (`STACK_ENV_DIR`),
   `services` read-only; the file and its `.env.local` hold every stack secret.
   The UI never writes `.env.local`. Both containers already hold these secrets

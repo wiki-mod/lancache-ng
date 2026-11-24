@@ -1450,6 +1450,7 @@ async fn register(
 // Why: the edit dialog posts {"address": ...}.
 // From: Issue #1683 | PR #1980
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Address {
     address: String,
 }
@@ -1517,7 +1518,7 @@ async fn secondary_action(
             Ok(axum::Json(json!({"token": renew_token(&s)?})).into_response())
         }
         "UI_ROUTE_SECONDARY_ADDRESS" => {
-            let a: Address = serde_json::from_slice(&body)
+            let axum::Json(a) = axum::Json::<Address>::from_bytes(&body)
                 .map_err(|_| bad_request("body must be {\"address\": ...}"))?;
             if !lancache_ng::dns::is_ip(&a.address) {
                 return Err(bad_request("no IP address"));
@@ -4292,6 +4293,12 @@ fn router(app: Arc<App>) -> Result<Router, String> {
             get(move || async move { asset("image/png", logo) }),
         )
         .merge(pages)
+        // What: one size limit for every request body.
+        // Why: the SOT owns it, not a library default.
+        // From: Issue #1683 | PR #2017
+        .layer(axum::extract::DefaultBodyLimit::max(
+            s.num::<usize>("UI_REQUEST_BODY_MAX_BYTES")?,
+        ))
         .layer(axum::middleware::from_fn_with_state(app.clone(), secure))
         .layer(axum::middleware::from_fn_with_state(app.clone(), lang))
         .with_state(app))

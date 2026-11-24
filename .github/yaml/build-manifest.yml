@@ -1262,6 +1262,10 @@ runtime:
     - UI_LOG_TAIL_CHUNK=65536
     - UI_AUTH_PASSWORD_HASH=
     - UI_PASSWORD_MIN_LENGTH=12
+    # What: largest request body the Admin UI accepts.
+    # Why: a body is held in memory before it is read.
+    # From: Issue #1683 | PR #2017
+    - UI_REQUEST_BODY_MAX_BYTES=2097152
     - UI_PORT=@UI_LISTEN_PORT@
     - UI_PUBLIC_URL=
     - UI_RECENT_REQUESTS=50
@@ -1566,6 +1570,7 @@ runtime:
     - UI_PORT=uint;1;65535;recreate;ui
     - UI_PUBLIC_URL=text?;;;live;ui
     - UI_RECENT_REQUESTS=uint;1;1000;live;ui
+    - UI_REQUEST_BODY_MAX_BYTES=uint;1024;104857600;restart;ui
     - UI_SERVICES=list;;;live;ui
     - UI_STATUS_REFRESH=uint;1;3600;live;ui
     - UI_AUTH_USER=text;;;live;ui
