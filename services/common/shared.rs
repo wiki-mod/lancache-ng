@@ -3251,17 +3251,35 @@ pub mod kea_conf {
         Ok(rows)
     }
 
+    // What: the pool of a subnet as Kea writes it.
+    // Why: settings and the subnet form use one form.
+    // From: Issue #1683 | PR #2017
+    pub fn pool_text(start: &str, end: &str) -> String {
+        format!("{start} - {end}")
+    }
+
+    // What: true for an option given by code, not name.
+    // Why: such rows are the user's own options.
+    // From: Issue #1683 | PR #2017
+    pub fn is_coded(option: &Value) -> bool {
+        option.get("name").is_none()
+    }
+
+    // What: the coded options of a subnet.
+    // Why: they survive every rewrite of the subnet.
+    // From: Issue #1683 | PR #2017
+    pub fn coded_options(subnet: &Value) -> Vec<Value> {
+        let rows = subnet["option-data"].as_array().into_iter().flatten();
+        rows.filter(|o| is_coded(o)).cloned().collect()
+    }
+
     // What: kea-dhcp4.conf; main subnet from settings.
     // Why: DoMe 08.11.: settings are the only source.
     // From: Issue #1683
     pub fn dhcp4(s: &Settings, existing: Option<&Value>) -> Result<Value, String> {
         let domain = lan_domain(s)?;
         let (valid, max) = crate::dhcp::lease_limits(s, s.uint("DHCP_LEASE_TIME")?)?;
-        let pool = format!(
-            "{} - {}",
-            s.text("DHCP_RANGE_START")?,
-            s.text("DHCP_RANGE_END")?
-        );
+        let pool = pool_text(&s.text("DHCP_RANGE_START")?, &s.text("DHCP_RANGE_END")?);
         // What: the LAN domain of the last render.
         // Why: kept subnets follow a changed DHCP_DOMAIN.
         // From: Issue #1683 | PR #1980
@@ -3309,8 +3327,7 @@ pub mod kea_conf {
                     .collect();
                 main["reservations"] = fit.into();
             }
-            let coded = o["option-data"].as_array().into_iter().flatten();
-            let coded: Vec<Value> = coded.filter(|r| r.get("name").is_none()).cloned().collect();
+            let coded = coded_options(o);
             if let Some(rows) = main["option-data"].as_array_mut() {
                 rows.extend(coded);
             }

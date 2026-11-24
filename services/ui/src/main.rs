@@ -1891,12 +1891,9 @@ fn subnet_row(sn: &Value) -> Value {
         .collect();
     let pool = sn["pools"][0]["pool"].as_str().unwrap_or_default();
     let (start, end) = pool.split_once('-').unwrap_or(("", ""));
-    let custom: Vec<Value> = sn["option-data"]
-        .as_array()
+    let custom: Vec<Value> = lancache_ng::kea_conf::coded_options(sn)
         .into_iter()
-        .flatten()
-        .filter(|o| o.get("code").is_some() && o.get("name").is_none())
-        .cloned()
+        .filter(|o| o.get("code").is_some())
         .collect();
     json!({
         "id": sn["id"],
@@ -2099,10 +2096,9 @@ fn subnet_from(get: &(dyn Fn(&str) -> String + Sync), id: u64, old: Option<&Valu
         }
     }
     if let Some(old) = old {
-        let coded = old["option-data"].as_array().into_iter().flatten();
-        opts.extend(coded.filter(|o| o.get("name").is_none()).cloned());
+        opts.extend(lancache_ng::kea_conf::coded_options(old));
     }
-    let pool = format!("{} - {}", get("pool_start"), get("pool_end"));
+    let pool = lancache_ng::kea_conf::pool_text(&get("pool_start"), &get("pool_end"));
     let mut sn = json!({"id": id, "subnet": get("subnet"), "pools": [{"pool": pool}],
                         "option-data": opts});
     if let Ok(life) = get("lease_time").parse::<u64>() {
@@ -2193,7 +2189,7 @@ async fn kea_action(
                 let sn = subnet_mut(l, id)?;
                 let mut opts = sn["option-data"].as_array().cloned().unwrap_or_default();
                 let same = |o: &Value| o["code"].as_u64() == Some(u64::from(code));
-                opts.retain(|o| !same(o) || o.get("name").is_some());
+                opts.retain(|o| !same(o) || !lancache_ng::kea_conf::is_coded(o));
                 if op == "UI_ROUTE_SUBNET_OPTION_ADD" {
                     opts.push(json!({"code": code, "data": data}));
                 }
