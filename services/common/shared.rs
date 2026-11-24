@@ -3987,6 +3987,16 @@ pub mod apply {
         Outcome::Done(Action::Reload)
     }
 
+    // What: one Docker action, reported as an outcome.
+    // Why: run reports every action the same way.
+    // From: Issue #1683 | PR #2017
+    async fn acted(api: &Api, name: &str, action: Action, grace: u32, limit: Duration) -> Outcome {
+        match api.act(name, action, grace, limit).await {
+            Ok(()) => Outcome::Done(action),
+            Err(e) => Outcome::Failed(e),
+        }
+    }
+
     // What: carry out the plan: exec or restart.
     // Why: openrc-init drops HUP; reload runs commands.
     // From: Issue #1683 | PR #1980
@@ -4014,26 +4024,15 @@ pub mod apply {
                         // From: Issue #1683 | PR #1985
                         Outcome::Failed(e) => {
                             eprintln!("apply: {owner}: reload failed ({e}); restart");
-                            let a = Action::Restart;
-                            match api.act(&name, a, grace, limit).await {
-                                Ok(()) => Outcome::Done(a),
-                                Err(e) => Outcome::Failed(e),
-                            }
+                            acted(api, &name, Action::Restart, grace, limit).await
                         }
                         done => done,
                     }
                 }
                 Some(Action::Reload) => {
-                    let a = Action::Restart;
-                    match api.act(&container_of(owner), a, grace, limit).await {
-                        Ok(()) => Outcome::Done(a),
-                        Err(e) => Outcome::Failed(e),
-                    }
+                    acted(api, &container_of(owner), Action::Restart, grace, limit).await
                 }
-                Some(a) => match api.act(&container_of(owner), a, grace, limit).await {
-                    Ok(()) => Outcome::Done(a),
-                    Err(e) => Outcome::Failed(e),
-                },
+                Some(a) => acted(api, &container_of(owner), a, grace, limit).await,
             };
             out.push((owner.clone(), outcome));
         }
