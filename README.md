@@ -681,7 +681,7 @@ the Admin UI shows it under DNS, Secondary DNS.
 The order is: check, ask, then act.
 
 1. Check, before anything is installed or changed: the name (one DNS label:
-   letters, digits and inner dashes, at most 63 characters) and the host. A
+   letters, digits and inner dashes, at most 32 characters, SOT `DNS_SECONDARY_NAME_MAX`) and the host. A
    secondary needs its own host: if this host holds a LanCache-NG install
    (settings below the state root, the host service, or a dns container of
    the primary or another secondary, running or stopped), setup stops at
