@@ -1140,7 +1140,7 @@ pub mod dhcp {
     }
 
     // What: own NTP for DHCP: NTP on and NTP_AUTO_DHCP on.
-    // Why: the toggle was stored but never applied.
+    // Why: one rule for the render and the DHCP page.
     // From: Issue #1683
     pub fn own_ntp(s: &Settings) -> Result<bool, String> {
         Ok(s.flag("NTP_ENABLED")? && s.flag("NTP_AUTO_DHCP")?)
