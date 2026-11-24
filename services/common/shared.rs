@@ -898,6 +898,13 @@ pub mod dns {
             .map_err(|_| format!("{text:?} is no IP address"))
     }
 
+    // What: true for a loopback address, IPv4 or IPv6.
+    // Why: such an address is never a LAN address.
+    // From: Issue #1683 | PR #2017
+    pub fn is_loopback(text: &str) -> bool {
+        parse_ip(text).is_ok_and(|ip| ip.is_loopback())
+    }
+
     // What: true for a name below a zone, not the zone.
     // Why: only such a name gets records in that zone.
     // From: Issue #1683 | PR #2017
@@ -3480,7 +3487,7 @@ pub mod dnsmasq_conf {
                 .or_else(|| {
                     crate::recursor_conf::own_ips(s)
                         .into_iter()
-                        .find(|ip| !ip.starts_with("127."))
+                        .find(|ip| !crate::dns::is_loopback(ip))
                 })
                 .ok_or("DHCP-Relay: DHCP_RELAY_LOCAL_ADDR is not set")?;
             let upstream = s.text("UPSTREAM_DHCP_IP").map_err(|_| {

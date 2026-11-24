@@ -3333,7 +3333,8 @@ async fn ensure_primary_zones(s: &Settings, key: &str) -> Result<(), String> {
 // From: Issue #1683 | PR #1980
 fn primary_https_ip(s: &Settings) -> Result<String, String> {
     let https = s.text_or_empty("IP_HTTPS");
-    let own = !https.is_empty() && https != s.text("IP_HTTP")? && !https.starts_with("127.");
+    let own =
+        !https.is_empty() && https != s.text("IP_HTTP")? && !lancache_ng::dns::is_loopback(&https);
     // What: no HTTPS part while HTTPS is off.
     // Why: the field woke HTTPS that was off.
     // From: Issue #1683 | PR #1980
