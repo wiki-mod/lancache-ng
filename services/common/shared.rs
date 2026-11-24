@@ -810,7 +810,7 @@ pub mod dns {
     // Why: zone names compare equal in one form.
     // From: Issue #1683 | PR #1858
     pub fn canonical_zone(zone: &str) -> String {
-        format!("{}.", zone.trim_end_matches('.').to_ascii_lowercase())
+        crate::pdns::zone_id(&zone.to_ascii_lowercase())
     }
 
     // What: RFC 1035 host name check.

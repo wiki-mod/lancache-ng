@@ -1212,7 +1212,7 @@ async fn record(
     // Why: DoMe 31.10.: PTR from the LAN entries.
     // From: Issue #1683 | PR #1980
     if add && kind == "A" && get("ptr") == "1" {
-        let host = vec![format!("{}.", name.trim_end_matches('.'))];
+        let host = vec![lancache_ng::pdns::zone_id(&name)];
         for ip in &contents {
             let Ok(rev) = reverse_name(ip) else { continue };
             let Some(rz) = reverse_zone(s, &rev) else {
