@@ -1620,7 +1620,9 @@ async fn secondary_watch(app: Arc<App>) {
                 "PDNS_SOA_COLD_RETRY"
             }
         };
-        let wait = s.uint(key).unwrap_or(60).max(1);
+        let Some(wait) = or_stop("secondary check", s.uint(key)) else {
+            return;
+        };
         tokio::time::sleep(Duration::from_secs(wait)).await;
     }
 }
@@ -1832,8 +1834,12 @@ async fn flush_on_transfer(app: Arc<App>) {
     let mut logged = false;
     loop {
         let s = app.settings();
-        let wait = s.uint("UI_FLUSH_CHECK_SECONDS").unwrap_or(1).max(1);
-        let grace = s.uint("UI_FLUSH_GRACE_SECONDS").unwrap_or(0);
+        let Some(wait) = or_stop("cache flush", s.uint("UI_FLUSH_CHECK_SECONDS")) else {
+            return;
+        };
+        let Some(grace) = or_stop("cache flush", s.uint("UI_FLUSH_GRACE_SECONDS")) else {
+            return;
+        };
         match flush_round(&s, &mut seen).await {
             Err(e) => {
                 let since = *down.get_or_insert_with(std::time::Instant::now);
@@ -2346,7 +2352,7 @@ async fn stats(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     // What: one tab per source, with its origin.
     // Why: each value shows where it comes from.
     // From: Issue #1683 | PR #1980
-    let step = s.uint("STATS_STEP").unwrap_or_default();
+    let step = s.uint("STATS_STEP")?;
     ctx.insert("stats_step", &step);
     let snmp = s.text_or_empty("STATS_SNMP_TARGET");
     let mut tabs = vec![json!({
@@ -2613,18 +2619,23 @@ async fn sample_services(app: &App, s: &Settings) -> Vec<String> {
     errs
 }
 
+// What: a setting a background task cannot run without.
+// Why: the task ends with a log line, no made-up value.
+// From: Issue #1683 | PR #2017
+fn or_stop<T>(task: &str, value: Result<T, String>) -> Option<T> {
+    value
+        .inspect_err(|e| eprintln!("ui: {task} stop: {e}"))
+        .ok()
+}
+
 // What: records stats every STATS_STEP seconds.
 // Why: the dashboard graphs need a time series.
 // From: Issue #1683 | PR #1980
 async fn sampler(app: Arc<App>) {
     loop {
         let s = app.settings();
-        let step = match s.uint("STATS_STEP") {
-            Ok(v) => v,
-            Err(e) => {
-                eprintln!("ui: stats stop: {e}");
-                return;
-            }
+        let Some(step) = or_stop("stats", s.uint("STATS_STEP")) else {
+            return;
         };
         let c = s.clone();
         let errs = tokio::task::spawn_blocking(move || sample_all(&c)).await;
@@ -2714,12 +2725,11 @@ fn dir_bytes(root: &Path) -> u64 {
 async fn cache_scanner(app: Arc<App>) {
     loop {
         let s = app.settings();
-        let (step, dir) = match (s.uint("CACHE_USAGE_SCAN_SECONDS"), s.text("CACHE_DIR")) {
-            (Ok(step), Ok(dir)) => (step, dir),
-            (Err(e), _) | (_, Err(e)) => {
-                eprintln!("ui: cache count stop: {e}");
-                return;
-            }
+        let Some(step) = or_stop("cache count", s.uint("CACHE_USAGE_SCAN_SECONDS")) else {
+            return;
+        };
+        let Some(dir) = or_stop("cache count", s.text("CACHE_DIR")) else {
+            return;
         };
         match tokio::task::spawn_blocking(move || dir_bytes(Path::new(&dir))).await {
             Ok(bytes) => app.cache_used.store(bytes, Ordering::Relaxed),
@@ -3121,7 +3131,7 @@ async fn apply_all(
         }
         report.push(format!("{owner}: {result:?}"));
     }
-    for name in wait_healthy(app, new, &restarted, limit).await {
+    for name in wait_healthy(app, new, &restarted, limit).await? {
         report.push(format!("{name}: not healthy in time"));
     }
 
@@ -3172,9 +3182,14 @@ async fn apply_all(
 // What: wait until restarted containers are healthy.
 // Why: "done" must mean the service answers again.
 // From: Issue #1683 | PR #1980
-async fn wait_healthy(app: &App, s: &Settings, names: &[String], limit: Duration) -> Vec<String> {
-    let wait = Duration::from_secs(s.uint("APPLY_HEALTH_WAIT_SECONDS").unwrap_or(0));
-    let poll = Duration::from_secs(s.uint("APPLY_HEALTH_POLL_SECONDS").unwrap_or(1).max(1));
+async fn wait_healthy(
+    app: &App,
+    s: &Settings,
+    names: &[String],
+    limit: Duration,
+) -> Result<Vec<String>, String> {
+    let wait = Duration::from_secs(s.uint("APPLY_HEALTH_WAIT_SECONDS")?);
+    let poll = Duration::from_secs(s.uint("APPLY_HEALTH_POLL_SECONDS")?);
     let end = std::time::Instant::now() + wait;
     let mut late = Vec::new();
     for name in names {
@@ -3194,7 +3209,7 @@ async fn wait_healthy(app: &App, s: &Settings, names: &[String], limit: Duration
             tokio::time::sleep(poll).await;
         }
     }
-    late
+    Ok(late)
 }
 
 // What: start or stop a container for the user.
@@ -3624,8 +3639,12 @@ async fn zones_at_start(app: Arc<App>) {
     let began = std::time::Instant::now();
     loop {
         let s = app.settings();
-        let wait = s.uint("PDNS_SOA_COLD_RETRY").unwrap_or(1).max(1);
-        let grace = s.uint("UI_FLUSH_GRACE_SECONDS").unwrap_or(0);
+        let Some(wait) = or_stop("start zones", s.uint("PDNS_SOA_COLD_RETRY")) else {
+            return;
+        };
+        let Some(grace) = or_stop("start zones", s.uint("UI_FLUSH_GRACE_SECONDS")) else {
+            return;
+        };
         match ensure_zones(&s).await {
             Ok(()) => {
                 eprintln!("ui: start: zones ready");
