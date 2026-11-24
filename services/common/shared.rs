@@ -2056,7 +2056,7 @@ pub mod snapshot {
                 .filter_map(|e| e.file_name().into_string().ok())
                 .filter(|n| is_id(n) && self.path(n).is_file())
                 .collect();
-            ids.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| b.cmp(a)));
+            ids.sort_by(|a, b| crate::config::longest_first(a, b));
             Ok(ids)
         }
 
@@ -3850,7 +3850,7 @@ pub mod nginx_conf {
         }
         let wild_roots = h.roots.iter().filter(|r| h.root_wild.contains(*r));
         let mut bases: Vec<&String> = h.bases.iter().chain(wild_roots).collect();
-        bases.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| b.cmp(a)));
+        bases.sort_by(|a, b| crate::config::longest_first(a, b));
         for b in bases {
             map_row(&mut out, &ends_with_re(b, true), &p.mitm_relay);
             map_row(&mut out, &ends_with_re(b, false), &p.pass_relay);

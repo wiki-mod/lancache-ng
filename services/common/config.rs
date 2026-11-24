@@ -105,6 +105,13 @@ pub fn data_rows(text: &str) -> impl Iterator<Item = &str> {
         .filter(|row| !row.is_empty() && !row.starts_with('#'))
 }
 
+// What: order of texts: longer first, then descending.
+// Why: a longer number is newer, a longer suffix closer.
+// From: Issue #1683 | PR #2017
+pub fn longest_first(a: &str, b: &str) -> std::cmp::Ordering {
+    b.len().cmp(&a.len()).then_with(|| b.cmp(a))
+}
+
 // What: not empty; only ASCII letters, digits and extra.
 // Why: such a value cannot leave its place in a config.
 // From: Issue #1683 | PR #2017
