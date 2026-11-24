@@ -93,7 +93,7 @@ protects *from the operator*. It is called out again in "Out of scope".
 │  │  - proxy (nginx): HTTP cache,        - Admin UI (`ui`, Docker)    │ │
 │  │    HTTPS-mode MITM cache, HTTP-      - PowerDNS HTTP API          │ │
 │  │    mode SNI passthrough              - Kea Control Agent API      │ │
-│  │  - DNS (PowerDNS auth + recursor)      (port 8000, host-net, G2)  │ │
+│  │  - DNS (dnsdist, auth, recursors)      (port 8000, host-net, G2)  │ │
 │  │  - DHCP (Kea) OR dnsmasq             - watchdog in `services`     │ │
 │  │                                        (Docker socket)            │ │
 │  │                                                                   │ │
@@ -123,7 +123,8 @@ authoritative description: see `docs/architecture-ng.md` and the per-component
 sources in the inventory table.
 
 - **Containers** — exactly five: `services` (watchdog, cachehamster, syslog-ng,
-  chronyd, snmpd), `proxy` (nginx), `dns` (PowerDNS auth and two recursors),
+  chronyd, snmpd), `proxy` (nginx), `dns` (dnsdist, PowerDNS auth and two
+  recursors),
   `dhcp` (Kea or dnsmasq, selected by `DHCP_MODE`) and `ui`. Inside a
   container OpenRC keeps the programs alive; the watchdog in `services`
   restarts a sick container through the Docker API.
@@ -141,6 +142,18 @@ sources in the inventory table.
   (`DNS_UPSTREAM_SERVERS`, `DNS_UPSTREAM_ZONES`) can take names outside the
   LAN zones; DNSSEC validation stays on except for zones the operator lists in
   `DNS_UPSTREAM_UNSIGNED_ZONES`.
+- **DNS front** — dnsdist in the `dns` container takes the DNS ports
+  (`DNS_PORT`, `DNS_HTTPS_PORT`). Its ACL holds `DNS_QUERY_ALLOW_FROM` and
+  the replication peers. On `DNS_PORT` it sends NOTIFY, zone transfers and
+  queries without recursion desired to the authoritative server and
+  everything else to the recursor of that port (`dnsdist_conf::body`). It
+  reaches the authoritative server (`PDNS_AUTH_ADDRESS`, loopback by
+  default) and the two recursors (loopback) with the PROXY protocol from
+  one sender address (`DNSDIST_SOURCE_ADDRESS`, checked by
+  `dnsdist_conf::source`). PowerDNS and the recursors take a PROXY header
+  only from that address (`proxy-protocol-from` in `pdns_conf`,
+  `proxy_protocol_from` in `recursor_conf`), so their allow lists and logs
+  see the client address.
 - **Two proxy modes** (one nginx container, selected by which DNS IP the client
   uses): **HTTP mode** reads SNI via `ssl_preread` and forwards HTTPS blind
   to the real CDN (no CA needed); **HTTPS mode** terminates TLS using a per-domain

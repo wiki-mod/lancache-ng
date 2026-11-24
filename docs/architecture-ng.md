@@ -10,7 +10,7 @@ Dockerfiles and compose files name keys, never values.
 | --- | --- | --- |
 | `services` | lancache-watchdog, lancache-cachehamster, syslog-ng, chronyd, snmpd | OpenRC |
 | `proxy` | nginx, snmpd | OpenRC |
-| `dns` | PowerDNS auth, recursor `dns-http`, recursor `dns-https`, snmpd | OpenRC |
+| `dns` | dnsdist, PowerDNS auth, recursor `dns-http`, recursor `dns-https`, snmpd | OpenRC |
 | `dhcp` | Kea (dhcp4, ctrl-agent, ddns) or dnsmasq | OpenRC, runlevel = `DHCP_MODE` |
 | `ui` | lancache-ui, snmpd | OpenRC |
 
