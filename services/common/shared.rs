@@ -2809,7 +2809,6 @@ pub mod recursor_conf {
         ["IP_HTTP", "IP_HTTPS", "LISTEN_IP", "LISTEN_IP_HTTPS"]
             .iter()
             .filter_map(|k| s.text(k).ok())
-            .filter(|v| !v.is_empty())
             .collect()
     }
 
@@ -3528,8 +3527,9 @@ pub mod dnsmasq_conf {
             // What: empty relay address = this host IP.
             // Why: the mode switch needs no further input.
             // From: Issue #1683 | PR #1985
-            let local = Some(s.text_or_empty("DHCP_RELAY_LOCAL_ADDR"))
-                .filter(|v| !v.is_empty())
+            let local = s
+                .text("DHCP_RELAY_LOCAL_ADDR")
+                .ok()
                 .or_else(|| {
                     crate::recursor_conf::own_ips(s)
                         .into_iter()
