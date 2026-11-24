@@ -529,6 +529,13 @@ pub mod pdns {
         format!("{}.", zone.trim_end_matches('.'))
     }
 
+    // What: the API path of one zone.
+    // Why: every zone call starts with this path.
+    // From: Issue #1683 | PR #2017
+    fn zone_path(zone: &str) -> String {
+        format!("/zones/{}", zone_id(zone))
+    }
+
     impl Api {
         // What: a client for one server base URL.
         // Why: auth and recursor share this code.
@@ -575,7 +582,7 @@ pub mod pdns {
         // Why: soa-edit-api raises the serial once.
         // From: Issue #1683 | PR #1858
         async fn patch(&self, zone: &str, rrsets: Vec<Value>) -> Result<(), String> {
-            let path = format!("/zones/{}", zone_id(zone));
+            let path = zone_path(zone);
             self.call(Method::PATCH, &path, Some(json!({ "rrsets": rrsets })))
                 .await
                 .map(drop)
@@ -609,9 +616,7 @@ pub mod pdns {
         // Why: snapshots and lists read them.
         // From: Issue #1683 | PR #1858
         pub async fn rrsets(&self, zone: &str) -> Result<Vec<Value>, String> {
-            let text = self
-                .call(Method::GET, &format!("/zones/{}", zone_id(zone)), None)
-                .await?;
+            let text = self.call(Method::GET, &zone_path(zone), None).await?;
             let v: Value = serde_json::from_str(&text).map_err(|e| format!("zone {zone}: {e}"))?;
             Ok(v["rrsets"].as_array().cloned().unwrap_or_default())
         }
@@ -660,7 +665,7 @@ pub mod pdns {
         // Why: a changed LAN domain leaves its old zones.
         // From: Issue #1683 | PR #1980
         pub async fn delete_zone(&self, zone: &str) -> Result<(), String> {
-            let path = format!("/zones/{}", zone_id(zone));
+            let path = zone_path(zone);
             self.call(Method::DELETE, &path, None).await.map(drop)
         }
 
@@ -720,7 +725,7 @@ pub mod pdns {
             kind: &str,
             values: &[String],
         ) -> Result<(), String> {
-            let path = format!("/zones/{}/metadata/{kind}", zone_id(zone));
+            let path = format!("{}/metadata/{kind}", zone_path(zone));
             let body = json!({"kind": kind, "metadata": values});
             self.call(Method::PUT, &path, Some(body)).await.map(drop)
         }
@@ -729,7 +734,7 @@ pub mod pdns {
         // Why: a rerun fixes the masters of old zones.
         // From: Issue #1683
         pub async fn set_masters(&self, zone: &str, masters: &[String]) -> Result<(), String> {
-            let path = format!("/zones/{}", zone_id(zone));
+            let path = zone_path(zone);
             let body = json!({"masters": masters});
             self.call(Method::PUT, &path, Some(body)).await.map(drop)
         }
@@ -738,7 +743,7 @@ pub mod pdns {
         // Why: the API refuses meta AXFR-MASTER-TSIG.
         // From: Issue #1683
         pub async fn set_secondary_tsig(&self, zone: &str, key: &str) -> Result<(), String> {
-            let path = format!("/zones/{}", zone_id(zone));
+            let path = zone_path(zone);
             let body = json!({"slave_tsig_key_ids": [zone_id(key)]});
             self.call(Method::PUT, &path, Some(body)).await.map(drop)
         }
@@ -755,32 +760,24 @@ pub mod pdns {
         // Why: snapshots store what PowerDNS exports.
         // From: Issue #1683 | PR #1858
         pub async fn export(&self, zone: &str) -> Result<String, String> {
-            self.call(
-                Method::GET,
-                &format!("/zones/{}/export", zone_id(zone)),
-                None,
-            )
-            .await
+            self.call(Method::GET, &format!("{}/export", zone_path(zone)), None)
+                .await
         }
 
         // What: send NOTIFY to all secondaries now.
         // Why: a lagging secondary is pushed at once.
         // From: Issue #1683 | PR #1858
         pub async fn notify(&self, zone: &str) -> Result<(), String> {
-            self.call(
-                Method::PUT,
-                &format!("/zones/{}/notify", zone_id(zone)),
-                None,
-            )
-            .await
-            .map(drop)
+            self.call(Method::PUT, &format!("{}/notify", zone_path(zone)), None)
+                .await
+                .map(drop)
         }
 
         // What: pull a secondary zone now.
         // Why: a stale secondary resyncs without restart.
         // From: Issue #1683 | PR #1858
         pub async fn axfr_retrieve(&self, zone: &str) -> Result<(), String> {
-            let path = format!("/zones/{}/axfr-retrieve", zone_id(zone));
+            let path = format!("{}/axfr-retrieve", zone_path(zone));
             self.call(Method::PUT, &path, None).await.map(drop)
         }
 
