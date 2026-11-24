@@ -937,6 +937,18 @@ fn created_unix(path: &Path) -> Result<u64, String> {
     Ok(age.as_secs())
 }
 
+// What: the snapshots of a store as id and time rows.
+// Why: the DNS and the DHCP page show the same shape.
+// From: Issue #1683 | PR #2017
+fn snapshot_rows(store: &lancache_ng::snapshot::Store) -> Result<Vec<Value>, String> {
+    let mut rows = Vec::new();
+    for id in store.list().unwrap_or_default() {
+        let created = created_unix(&store.path(&id))?;
+        rows.push(json!({"id": id, "created_unix": created}));
+    }
+    Ok(rows)
+}
+
 // What: snapshots of all zones, newest first.
 // Why: DNS page and setup.sh show the same list.
 // From: Issue #1683 | PR #1858
@@ -944,12 +956,7 @@ fn snapshot_list(s: &Settings) -> Result<Vec<(String, Vec<Value>)>, String> {
     let mut out = Vec::new();
     for zone in snapshot_zones(s)? {
         let store = zone_store(s, &zone)?;
-        let mut rows = Vec::new();
-        for id in store.list().unwrap_or_default() {
-            let created = created_unix(&store.path(&id))?;
-            rows.push(json!({"id": id, "created_unix": created}));
-        }
-        out.push((zone, rows));
+        out.push((zone, snapshot_rows(&store)?));
     }
     Ok(out)
 }
@@ -1988,12 +1995,7 @@ async fn dhcp(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     ctx.insert("reservations", &reservations);
     ctx.insert("leases", &leases);
     let store = kea_store(&s)?;
-    let mut snaps = Vec::new();
-    for id in store.list().unwrap_or_default() {
-        let created = created_unix(&store.path(&id))?;
-        snaps.push(json!({"id": id, "created_unix": created}));
-    }
-    ctx.insert("kea_snapshots", &snaps);
+    ctx.insert("kea_snapshots", &snapshot_rows(&store)?);
     app.page("dhcp.html", ctx, &csrf)
 }
 
