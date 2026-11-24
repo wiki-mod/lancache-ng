@@ -846,6 +846,25 @@ fn reverse_zone(s: &Settings, name: &str) -> Option<String> {
         .max_by_key(String::len)
 }
 
+// What: reverse name of an address and its zone.
+// Why: every PTR change needs both; None: no such zone.
+// From: Issue #1683 | PR #2017
+fn reverse_place(s: &Settings, ip: &str) -> Result<Option<(String, String)>, String> {
+    let rev = reverse_name(ip)?;
+    Ok(reverse_zone(s, &rev).map(|zone| (rev, zone)))
+}
+
+// What: the same, only for a zone this stack serves.
+// Why: a PTR of a secondary goes into own zones only.
+// From: Issue #1683 | PR #2017
+fn served_reverse_place(s: &Settings, ip: &str) -> Result<Option<(String, String)>, String> {
+    let Some((rev, zone)) = reverse_place(s, ip)? else {
+        return Ok(None);
+    };
+    let served = lancache_ng::dns::managed_zones(s)?.contains(&zone);
+    Ok(served.then_some((rev, zone)))
+}
+
 // What: zones that keep snapshots.
 // Why: LAN zone plus the private reverse zones.
 // From: Issue #1683 | PR #1858
@@ -1214,8 +1233,7 @@ async fn record(
     if add && kind == "A" && get("ptr") == "1" {
         let host = vec![lancache_ng::pdns::zone_id(&name)];
         for ip in &contents {
-            let Ok(rev) = reverse_name(ip) else { continue };
-            let Some(rz) = reverse_zone(s, &rev) else {
+            let Ok(Some((rev, rz))) = reverse_place(s, ip) else {
                 continue;
             };
             api.set_rrset(&rz, &rev, "PTR", ttl, &host).await?;
@@ -3367,13 +3385,9 @@ async fn drop_peer_records(s: &Settings, name: &str, address: &str) -> Result<()
     let kind = lancache_ng::dns::address_kind(address);
     api.set_rrset(&lancache_ng::dns::lan_zone(s)?, &host, kind, 0, &[])
         .await?;
-    let rev = reverse_name(address)?;
-    let Some(zone) = reverse_zone(s, &rev) else {
+    let Some((rev, zone)) = served_reverse_place(s, address)? else {
         return Ok(());
     };
-    if !lancache_ng::dns::managed_zones(s)?.contains(&zone) {
-        return Ok(());
-    }
     // What: delete the PTR only when it names this host.
     // Why: an own PTR of the admin must stay.
     // From: Issue #1683
@@ -3400,13 +3414,9 @@ async fn ensure_ptr(
     host: &str,
     ttl: u32,
 ) -> Result<(), String> {
-    let rev = reverse_name(ip)?;
-    let Some(zone) = reverse_zone(s, &rev) else {
+    let Some((rev, zone)) = served_reverse_place(s, ip)? else {
         return Ok(());
     };
-    if !lancache_ng::dns::managed_zones(s)?.contains(&zone) {
-        return Ok(());
-    }
     ensure_rrset(api, &zone, &rev, "PTR", ttl, &[host.to_string()]).await
 }
 
