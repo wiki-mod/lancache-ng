@@ -2493,6 +2493,7 @@ _ci_rust_top() {
     local rt_fn='(^| )fn( |$)' rt_kw='(^| )(const|static|let|type|use)( |$)'
     # What: drop #[..] blocks, then cut at the first {.
     # Why: attributes before the { are not the head.
+    # From: Issue #1683 | PR #1858
     while [[ "${rt_s}" =~ ${rt_re} ]]; do
         rt_m="${BASH_REMATCH[0]}"
         rt_pre="${rt_s%%"${rt_m}"*}"
@@ -2530,6 +2531,7 @@ _ci_rust_row() {
     h="${t}"
     # What: leading #[..] and #![..], brackets nested.
     # Why: cfg(test) or #[test] there marks a test item.
+    # From: Issue #1683 | PR #1858
     while [[ "${h}" == "#["* ]] || [[ "${h}" == "#!["* ]]; do
         rest="${h}"
         d=0
@@ -2623,6 +2625,7 @@ _ci_rust_lex() {
             rx_c="${rx_b:rx_p:1}"
             # What: in a comment, string or raw string.
             # Why: a run of plain bytes moves in one step.
+            # From: Issue #1683 | PR #1858
             case "${rx_st}" in
                 block)
                     rx_q="${rx_b:rx_p+1:1}"
@@ -2710,6 +2713,7 @@ _ci_rust_lex() {
                 r | b)
                     # What: raw r, r# or br after non-words.
                     # Why: ends at a quote and its # count.
+                    # From: Issue #1683 | PR #1858
                     rx_q=" "
                     [ "${rx_p}" = 0 ] || rx_q="${rx_b:rx_p-1:1}"
                     if { [ "${rx_c}" = r ] || [ "${rx_b:rx_p+1:1}" = r ]; } &&
@@ -2743,6 +2747,7 @@ _ci_rust_lex() {
                 [${rx_sq}])
                     # What: quote, backslash: to a quote.
                     # Why: a char is 3 bytes, or a lifetime.
+                    # From: Issue #1683 | PR #1858
                     if [ "${rx_b:rx_p+1:1}" = "${rx_bs}" ]; then
                         rx_w="${rx_b:rx_p+2}"
                         while [[ "${rx_w}" != *"${rx_sq}"* ]] && [ "${rx_k}" -lt "${rx_n}" ]; do
@@ -2842,6 +2847,7 @@ _ci_rust_closure() {
     mapfile -t rl_lines || return 1
     # What: 5 tab fields a row; empty ones stay, rest cut.
     # Why: same fields as awk with FS = tab.
+    # From: Issue #1683 | PR #1858
     for rl_line in "${rl_lines[@]}"; do
         rl_n=$((rl_n + 1))
         rl_f=()
@@ -2867,6 +2873,7 @@ _ci_rust_closure() {
     done
     # What: passes until no row joins; its refs get wanted.
     # Why: headers, wanted items, impls of wanted types.
+    # From: Issue #1683 | PR #1858
     while [ "${rl_more}" = 1 ]; do
         rl_more=0
         for ((rl_i = 1; rl_i <= rl_n; rl_i++)); do
@@ -2938,6 +2945,7 @@ _ci_lock_closure() {
             lk_d="${lk_d%%[(]*}"
             # What: a package's deps sit in a row of lk_dl.
             # Why: a tab splits a dep, as awk split did.
+            # From: Issue #1683 | PR #1858
             [ -n "${lk_ds[lk_p]-}" ] || lk_ds[lk_p]="${lk_m}"
             if [[ "${lk_d}" == *$'\t'* ]]; then
                 read -r -a lk_a <<< "${lk_d}"
@@ -3142,6 +3150,7 @@ _ci_norm_lex() {
     while [ "${i}" -lt "${n}" ]; do
         # What: skip to a char that can change state.
         # Why: a loop over every char is too slow.
+        # From: Issue #1683 | PR #1858
         p="${l:i}"
         p="${p%%["${nv_set}"]*}"
         i=$((i + ${#p}))
@@ -3200,6 +3209,7 @@ _ci_norm_lex() {
         fi
         # What: # first or after blank or ;|&() ends it.
         # Why: the rest of the line is a comment then.
+        # From: Issue #1683 | PR #1858
         if [ "${c}" = "#" ]; then
             [ "${i}" -gt 0 ] || break
             case "${l:i-1:1}" in
@@ -3249,6 +3259,7 @@ _ci_norm_v1() {
         l="${l%"${nv_cr}"}"
         # What: heredoc lines stay up to the word.
         # Why: <<- strips leading tabs before the end test.
+        # From: Issue #1683 | PR #1858
         if [ -n "${nv_hd}" ]; then
             t="${l}"
             [ "${nv_tab}" = 0 ] || t="${t#"${t%%[!"${nv_ht}"]*}"}"
@@ -3260,6 +3271,7 @@ _ci_norm_v1() {
             dockerfile)
                 # What: a parser directive first.
                 # Why: no comment; it changes the build.
+                # From: Issue #1683 | PR #1858
                 if [ "${nv_past}" = 0 ] && [ "${l:0:1}" = "#" ] && [[ "${l}" == *=* ]]; then
                     k="${l:1}"
                     k="${k#"${k%%[![:space:]]*}"}"
@@ -3294,6 +3306,7 @@ _ci_norm_v1() {
                 _ci_norm_lex "${l}"
                 # What: open $( ), odd ticks or nesting.
                 # Why: the lexer is not sure then: keep raw.
+                # From: Issue #1683 | PR #1858
                 if [ "${nv_subst}" != 0 ] || [ "$((nv_ticks % 2))" = 1 ]; then
                     nv_rc=1
                     break
@@ -3341,6 +3354,7 @@ _ci_norm_files() {
         mapfile -t nv_in < "${f}" || return 2
         # What: a file with no line gets no verdict line.
         # Why: the caller then fails on the blob (0027).
+        # From: Issue #1683 | PR #1858
         [ "${#nv_in[@]}" -gt 0 ] || continue
         g="${f##*/}"
         g="${g%%.*}"
@@ -3369,6 +3383,7 @@ _ci_norm_content() {
     _ci_norm_v1 "$1" || rc=$?
     # What: no trailing blank lines, as $( ) gave before.
     # Why: the same text keeps the same id.
+    # From: Issue #1683 | PR #1858
     if [ "${nv_last}" -gt 0 ]; then
         printf -v out '%s\n' "${nv_out[@]:0:nv_last}"
         out="${out%"${nv_nl}"}"
@@ -3471,6 +3486,7 @@ _ci_batch_cut() {
             0)
                 # What: header: next oid and its size.
                 # Why: names file gives the blob order.
+                # From: Issue #1683 | PR #1858
                 bc_i=$((bc_i + 1))
                 if [ "${bc_i}" -gt "${#bc_names[@]}" ]; then
                     bc_bad="extra blob"
@@ -3520,6 +3536,7 @@ _ci_batch_cut() {
         [ "${bc_w}" = 1 ] || continue
         # What: the blob without trailing blank lines.
         # Why: $( ) strips trailing LF; <<< adds one LF.
+        # From: Issue #1683 | PR #1858
         if [ "${bc_last}" -gt 0 ]; then
             printf '%s\n' "${bc_b[@]:0:bc_last}" > "${bc_f}" || return 1
         else
@@ -4158,6 +4175,7 @@ _ci_dockerfile_copy_sources() {
         copy_args=()
         # What: JSON form splits at '", "'; else at blanks.
         # Why: the last item is the target, not a source.
+        # From: Issue #1683 | PR #1858
         if [[ "${rest}" == '['* ]]; then
             if [[ "${rest}" =~ ${open_re} ]]; then
                 rest="${rest:${#BASH_REMATCH[0]}}"
@@ -4187,6 +4205,7 @@ _ci_dockerfile_copy_sources() {
     done <<< "${lines}"
     # What: no trailing empty lines, as from a capture.
     # Why: an empty JSON item at the end is no source.
+    # From: Issue #1683 | PR #1858
     out="${out%"${out##*[!$'\n']}"}"
     [ -z "${out}" ] || printf '%s\n' "${out}"
 }
@@ -17637,6 +17656,7 @@ _ci_check_bats_and_chain() {
         out="" bc_cont="" bc_start=0 bc_n=0
         # What: \ at line end joins the next line.
         # Why: the finding names the first line of the join.
+        # From: Issue #1683 | PR #1858
         while IFS= read -r bc_raw || [ -n "${bc_raw}" ]; do
             bc_n=$((bc_n + 1))
             bc_line="${bc_cont:+${bc_cont} }${bc_raw}"
@@ -17831,6 +17851,7 @@ _ci_check_exit_evidence() {
     local -A xv_site=()
     # What: rules 0 1 3 4, 5 code, 6 fn head, 7 comment.
     # Why: rule 2 (< <() is a plain glob, no regex needed.
+    # From: Issue #1683 | PR #1858
     xv_re[0]='(^|[^_a-z])mktemp([[:space:]]|$)'
     xv_re[1]='for [A-Za-z_][A-Za-z0-9_]* in [^;]*\$\('
     xv_re[3]='\[\[? +"\$\((_ci_block_entry_field|_ci_block_entry_list|_ci_block_keys|_ci_channel_field|ci_service_field|ci_services|ci_build_targets|ci_service_context_paths)[ )]'
@@ -17841,6 +17862,7 @@ _ci_check_exit_evidence() {
     for path in "${files[@]}"; do
         # What: a subshell try keeps the raw open error.
         # Why: AG-INT-002: a failed read keeps its raw.
+        # From: Issue #1683 | PR #1858
         if ! out="$(mapfile -t xv_lines < "${path}" 2>&1)"; then
             ci_error "[CI-ERROR-CHECK-0123]" "file=\"${path}\" reason=\"exit-evidence scan failed\"" "${out}"
             return 2
@@ -17854,6 +17876,7 @@ _ci_check_exit_evidence() {
             [[ ! "${xv_line}" =~ ${xv_re[7]} ]] || continue
             # What: a glob runs before each regex.
             # Why: same hits; 20k lines stay fast.
+            # From: Issue #1683 | PR #1858
             xv_s="${xv_line}"
             [[ "${xv_s}" != *"'"* ]] || _ci_strip_squoted xv_s "${xv_line}"
             if [[ "${xv_s}" == *mktemp* ]] && [ "${xv_fn}" != "_ci_mktemp" ] && [[ "${xv_s}" =~ ${xv_re[0]} ]]; then
@@ -19050,6 +19073,7 @@ _ci_dockerfile_logical_lines() {
         dl_cand="${dl_phys#"${dl_phys%%[![:space:]]*}"}"
         # What: heredoc body lines drop up to the word.
         # Why: a body line is data, never an instruction.
+        # From: Issue #1683 | PR #1858
         if [ -n "${dl_hd}" ]; then
             [ "${dl_cand}" != "${dl_hd}" ] || dl_hd=""
             continue
@@ -19692,6 +19716,7 @@ _ci_job_rows() {
         nfile=$((nfile + 1))
         # What: split at tabs; empty fields stay.
         # Why: no subshell per field; read joins empty ones.
+        # From: Issue #1683 | PR #1858
         fl=()
         k="${line}"
         while [[ "${k}" == *$'\t'* ]]; do

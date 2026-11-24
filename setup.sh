@@ -832,6 +832,7 @@ secondary_choose_listen_ip() {
 
         # What: without a terminal the conflict ends the run
         # Why: another bind IP can only be offered by asking
+        # From: Issue #1683 | PR #2017
         if ! terminal_available; then
             return 1
         fi
@@ -1216,6 +1217,7 @@ install_docker_apt_repo() {
 
     # What: lsb_release gives the codename if it is empty
     # Why: the apt source line of Docker needs the codename
+    # From: Issue #1683 | PR #1912
     if [[ -z "$codename" ]] && command_available lsb_release; then
         codename=$(lsb_release -cs) || die "lsb_release -cs failed (exit $?)."
     fi
@@ -1276,6 +1278,7 @@ install_docker_apt() {
 
     # What: Docker's plugin picks Docker CE, else the distro
     # Why: engine and plugin come from one package source
+    # From: Issue #1683 | PR #1858
     if [[ "$compose_package" = "$DOCKER_COMPOSE_PLUGIN" ]]; then
         docker_packages=("${DOCKER_CE_PACKAGES[@]}")
     else
@@ -2659,6 +2662,7 @@ restore_quickstart_mounts() {
     local old_dir="$1" old_env="$2" record="$3" json sources src rel commit entry perms empty_dir inside
     # What: only a git checkout can lose mount sources
     # Why: git history holds the files that were dropped
+    # From: Issue #1683 | PR #1858
     [[ -e "$old_dir/.git" ]] || return 0
     install_missing_tools jq
     json=$(stack_compose "$old_dir" "$old_env" config --format json) \
@@ -2668,6 +2672,7 @@ restore_quickstart_mounts() {
     while IFS= read -r src; do
         # What: only mount sources inside the old checkout
         # Why: git does not touch paths outside of it
+        # From: Issue #1683 | PR #1858
         [[ "$src" = "$old_dir"/* ]] || continue
         # What: an empty dir is missing if git had a file
         # Why: docker makes a missing mount source a dir
@@ -2693,12 +2698,14 @@ restore_quickstart_mounts() {
         fi
         # What: no file in git: a dir stays, a gap stops
         # Why: a missing mount source breaks the old stack
+        # From: Issue #1683 | PR #1858
         if [[ "$entry" != 100*" blob "* ]]; then
             [[ "$empty_dir" = 0 ]] || continue
             die "$src is missing and git has no older file copy; restore it, then rerun setup.sh update. Nothing was changed."
         fi
         # What: the restored file gets the mode git recorded
         # Why: git keeps only the executable bit of a file
+        # From: Issue #1683 | PR #1858
         perms=0644
         [[ "$entry" != 100755* ]] || perms=0755
         if [[ "$empty_dir" = 1 ]]; then
@@ -2771,6 +2778,7 @@ migrate_quickstart_install() (
     fi
     # What: without a state root the old dir becomes it
     # Why: the old stack kept its data inside its checkout
+    # From: Issue #1683 | PR #2017
     if ! env_key_exists LANCACHE_STATE_DIR "$new_env"; then
         set_env_key LANCACHE_STATE_DIR "$old_dir" "$new_env"
     fi
@@ -2997,6 +3005,7 @@ EOF
     chmod 0755 "$init_dir/$OPENRC_STACK_SERVICE" || die "Failed to make $init_dir/$OPENRC_STACK_SERVICE executable (exit $?)."
     # What: one init script per job, named by its constant
     # Why: both run the same loop; only job and name differ
+    # From: Issue #1683 | PR #1858
     for job in converge auto-update; do
         name="$OPENRC_CONVERGE_SERVICE"
         [[ "$job" = converge ]] || name="$OPENRC_AUTO_UPDATE_SERVICE"
@@ -3209,6 +3218,7 @@ deploy_prod_repo_input_paths() {
     done <<< "$rels"
     # What: success even when the last test is false
     # Why: a false && test would become its return value
+    # From: Issue #1683 | PR #1858
     true
 }
 
@@ -3359,11 +3369,13 @@ ensure_ui_password_hash() {
     fi
     # What: drops an empty or placeholder plaintext key
     # Why: only the hash is kept; the key must not linger
+    # From: Issue #1683 | PR #1912
     remove_env_key UI_AUTH_PASSWORD "$env_file"
     user=$(get_env_var UI_AUTH_USER "$env_file") || exit $?
     hash=$(get_env_var UI_AUTH_PASSWORD_HASH "$env_file") || exit $?
     # What: a user without a hash gets a new password
     # Why: the UI needs both; the plaintext is shown once
+    # From: Issue #1683 | PR #1912
     [[ -n "$user" && -z "$hash" ]] || return 0
     password=$(generate_managed_secret UI_AUTH_PASSWORD ui) || exit $?
     set_ui_password_hash "$install_dir" "$env_file" "$password"
@@ -7255,6 +7267,7 @@ cmd_openrc_loop() {
     while [[ "$OPENRC_LOOP_STOP" = 0 ]]; do
         # What: a random delay below spread, of two RANDOMs
         # Why: one RANDOM ends at 32767; spread may be more
+        # From: Issue #1683 | PR #1858
         (( spread == 0 )) || openrc_loop_sleep "$(( (RANDOM * 32768 + RANDOM) % spread ))"
         [[ "$OPENRC_LOOP_STOP" = 0 ]] || break
         rc=0

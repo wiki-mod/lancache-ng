@@ -172,6 +172,7 @@ services:
       - ${CACHEHAMSTER_DATA_DIR:?CACHEHAMSTER_DATA_DIR is required}:${SOT_CACHEHAMSTER_DATA_DIR}
     # What: no capabilities except the list below.
     # Why: the container holds the Docker socket.
+    # From: Issue #1683 | PR #1912
     cap_drop:
       - ALL
     # What: capabilities the supervised processes need.
@@ -191,6 +192,7 @@ services:
 
   # What: nginx cache; the http and https side in one.
   # Why: the passthrough port relays SNI; 443 intercepts.
+  # From: Issue #1683 | PR #1912
   proxy:
     <<: *service
     # What: /run as tmpfs for OpenRC.
@@ -231,6 +233,7 @@ services:
       - lancache-config:${SOT_CONFIG_DIR}:ro
     # What: HTTP port on both IPs; HTTPS relayed or MITM.
     # Why: IP_HTTP relays TLS, IP_HTTPS intercepts it.
+    # From: Issue #1683 | PR #1858
     ports:
       - "${IP_HTTP}:${SOT_PROXY_HTTP_PORT}:${SOT_PROXY_HTTP_PORT}"
       - "${IP_HTTP}:${SOT_PROXY_HTTPS_PORT}:${SOT_NGINX_PASSTHROUGH_PORT}"
@@ -313,6 +316,7 @@ services:
       <<: [*env-stack, *env-dns-dhcp, *env-dns-dhcp-ui, *env-dhcp-ui]
       # What: Kea token and DDNS switch.
       # Why: only the DHCP daemons read these keys.
+      # From: Issue #1683 | PR #1912
       KEA_CTRL_TOKEN: ${KEA_CTRL_TOKEN}
       DHCP_DDNS_ENABLED: ${DHCP_DDNS_ENABLED:-}
     volumes:
@@ -405,6 +409,7 @@ services:
       - "${SOT_DHCP_API_HOST}:host-gateway"
     # What: the UI probes itself; no watchdog runs here.
     # Why: the UI image has no lancache-watchdog binary.
+    # From: Issue #1683 | PR #1912
     healthcheck:
       <<: *healthcheck-timing
       test: ["CMD", "lancache-ui", "healthcheck"]
