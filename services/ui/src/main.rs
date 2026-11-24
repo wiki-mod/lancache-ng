@@ -1258,13 +1258,7 @@ async fn ptr(s: &Settings, add: bool, get: &(dyn Fn(&str) -> String + Sync)) -> 
 fn registration_token(s: &Settings) -> Result<String, String> {
     let dir = PathBuf::from(s.text("SECRETS_DIR")?);
     let name = "SECONDARY_REGISTRATION_TOKEN";
-    secret::resolve(
-        process_env(name).as_deref(),
-        &dir,
-        name,
-        fs::Owner::default(),
-    )
-    .map_err(|e| e.to_string())
+    secret::resolve(&process_env, &dir, name, fs::Owner::default()).map_err(|e| e.to_string())
 }
 
 // What: saves secondaries as name@address rows.
@@ -3614,7 +3608,7 @@ async fn rotate_tsig(app: &App) -> Result<(), String> {
 fn secrets(s: &Settings) -> Result<render::Secrets, String> {
     let dir = PathBuf::from(s.text("SECRETS_DIR")?);
     let get = |k: &str| {
-        secret::resolve(process_env(k).as_deref(), &dir, k, fs::Owner::default())
+        secret::resolve(&process_env, &dir, k, fs::Owner::default())
             .map_err(|e| format!("{k}: {e}"))
     };
     Ok(render::Secrets {
@@ -4189,7 +4183,7 @@ async fn main() -> Result<(), String> {
         return Err("Admin-UI authentication is required".into());
     }
     let dir = PathBuf::from(s.text("SECRETS_DIR")?);
-    let key = secret::resolve(None, &dir, "UI_SESSION_KEY", fs::Owner::default())
+    let key = secret::resolve(&|_| None, &dir, "UI_SESSION_KEY", fs::Owner::default())
         .map_err(|e| e.to_string())?;
     TEXTS
         .set(texts(&s.text("LANG_DIR")?)?)

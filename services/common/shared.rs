@@ -312,17 +312,17 @@ pub mod secret {
     // Why: the operator may set it; else it is generated.
     // From: Issue #1683 | PR #1858
     pub fn resolve(
-        env_value: Option<&str>,
+        env: &dyn Fn(&str) -> Option<String>,
         dir: &Path,
         key: &str,
         owner: Owner,
     ) -> io::Result<String> {
-        match env_value.filter(|v| !v.is_empty()) {
-            Some(v) if is_placeholder(v) => Err(io::Error::new(
+        match crate::config::env_set(env, key) {
+            Some(v) if is_placeholder(&v) => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("{key} holds a placeholder"),
             )),
-            Some(v) => Ok(v.to_string()),
+            Some(v) => Ok(v),
             None => load_or_create(&file_of(dir, key), || random_hex(32), owner),
         }
     }
