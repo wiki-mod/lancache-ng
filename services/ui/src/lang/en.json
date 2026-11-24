@@ -16,7 +16,6 @@
   "additional_safe_custom_options_optional": "Additional safe custom options (optional, PXE-scoped)",
   "addresses": "addresses",
   "addresses_one_per_line": "Addresses, one per line",
-  "affected_reverse_zones": "Affected reverse zones",
   "after_each_dhcp_change_that_was": "After each DHCP change that was applied, the checked configuration is saved here as a snapshot. You can roll back to an earlier snapshot; the chosen configuration is checked again before it is applied.",
   "after_every_change_the_lan_zone": "After every change the LAN zones (",
   "all_entries_also_go_to_these": "All entries also go to these servers over TCP, buffered on disk. A secondary always also sends to its primary.",
@@ -468,5 +467,7 @@
   "cache_wipe_hint": "Deletes every cached file of all services. They are fetched again on the next download.",
   "err_ptr_no_zone": "{ip} is in no reverse zone of this stack, so no PTR can be added. Untick the PTR box or add the reverse zone first.",
   "err_ptr_taken": "{ip} already has the reverse entry {name}. Remove that entry first or untick the PTR box.",
+  "reverse_zones_title": "Reverse zones",
+  "ptr_records_title": "PTR records",
   "games_search": "Name, app ID or regex"
 }

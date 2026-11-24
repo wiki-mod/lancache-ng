@@ -1083,19 +1083,21 @@ async fn rollback(s: &Settings, zone: &str, id: &str) -> Result<(), String> {
     flush_zone(s, zone).await
 }
 
-// What: PTR rows of all private reverse zones.
-// Why: the DNS page lists them with the host.
+// What: PTR rows of each private reverse zone.
+// Why: the DNS page lists them per zone with the host.
 // From: Issue #1683 | PR #1980
 async fn ptr_rows(s: &Settings, api: &lancache_ng::pdns::Api) -> Vec<Value> {
     let mut out = Vec::new();
     for zone in lancache_ng::dns::private_reverse_zones(s) {
+        let mut rows = Vec::new();
         for r in api.rrsets(&zone).await.unwrap_or_default() {
             if r["type"] != "PTR" {
                 continue;
             }
             let host = r["records"][0]["content"].clone();
-            out.push(json!({"ip": r["name"], "ttl": r["ttl"], "hostname": host}));
+            rows.push(json!({"ip": r["name"], "ttl": r["ttl"], "hostname": host}));
         }
+        out.push(json!({"zone": zone, "records": rows}));
     }
     out
 }
@@ -1148,7 +1150,7 @@ async fn domains(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
         })
         .collect();
     ctx.insert("lan_domains", &rows);
-    ctx.insert("ptr_records", &ptr);
+    ctx.insert("ptr_zones", &ptr);
     let groups: Vec<Value> = snapshot_list(&s)?
         .into_iter()
         .filter(|(_, rows)| !rows.is_empty())
@@ -1162,11 +1164,6 @@ async fn domains(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     // From: Issue #1683 | PR #1980
     ctx.insert("dhcp_mode", &s.text("DHCP_MODE")?);
     ctx.insert("txt_max_bytes", &s.uint("DNS_TXT_MAX_BYTES")?);
-    let reverse: Vec<String> = lancache_ng::dns::managed_zones(&s)?
-        .into_iter()
-        .filter(|z| lancache_ng::dns::is_reverse_name(z))
-        .collect();
-    ctx.insert("reverse_zones", &reverse);
     // What: NS state of each secondary: in, off or new.
     // Why: the row shows it and offers the matching button.
     // From: Issue #1683
@@ -1449,11 +1446,7 @@ async fn record(
             .filter(|c| !c.is_empty())
             .map(|c| canonical(&kind, c))
             .collect();
-        let max = s.uint("DNS_RECORD_TTL_MAX")?;
-        ttl = get("ttl").parse::<u32>().unwrap_or(0);
-        if ttl == 0 || u64::from(ttl) > max {
-            return Err(tr("err_ttl_range").replace("{max}", &max.to_string()));
-        }
+        ttl = form_ttl(s, get)?;
     }
     let api = pdns_api(s)?;
     let host = lancache_ng::pdns::zone_id(&name);
@@ -1529,6 +1522,18 @@ async fn rrset_contents(
         .collect())
 }
 
+// What: the TTL a record form sends, within the limit.
+// Why: the LAN and the PTR form take the same field.
+// From: Issue #1683 | PR #2019
+fn form_ttl(s: &Settings, get: &(dyn Fn(&str) -> String + Sync)) -> Result<u32, String> {
+    let max = s.uint("DNS_RECORD_TTL_MAX")?;
+    let ttl = get("ttl").parse::<u32>().unwrap_or(0);
+    if ttl == 0 || u64::from(ttl) > max {
+        return Err(tr("err_ttl_range").replace("{max}", &max.to_string()));
+    }
+    Ok(ttl)
+}
+
 // What: add or remove one PTR record.
 // Why: name from the IP; zone from the list.
 // From: Issue #1683 | PR #1980
@@ -1542,9 +1547,10 @@ async fn ptr(s: &Settings, add: bool, get: &(dyn Fn(&str) -> String + Sync)) -> 
     let Some(zone) = reverse_zone(s, &name) else {
         return Err(format!("{name} is in no private reverse zone"));
     };
-    let ttl = s.num::<u32>("DNS_RECORD_TTL")?;
+    let mut ttl = 0;
     let mut contents = Vec::new();
     if add {
+        ttl = form_ttl(s, get)?;
         let host = get("hostname");
         contents.push(if host.ends_with('.') {
             host

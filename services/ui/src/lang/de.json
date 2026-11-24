@@ -16,7 +16,6 @@
   "additional_safe_custom_options_optional": "Zusätzliche sichere eigene Optionen (optional, nur PXE)",
   "addresses": "Adressen",
   "addresses_one_per_line": "Adressen, eine pro Zeile",
-  "affected_reverse_zones": "Betroffene Reverse-Zonen",
   "after_each_dhcp_change_that_was": "Nach jeder erfolgreich übernommenen DHCP-Änderung wird die validierte Konfiguration hier als Snapshot gesichert. Bei Bedarf kann auf einen früheren Snapshot zurückgerollt werden; die ausgewählte Konfiguration wird vor der Übernahme erneut geprüft.",
   "after_every_change_the_lan_zone": "Nach jeder Änderung werden die LAN-Zonen (",
   "all_entries_also_go_to_these": "Alle Einträge gehen zusätzlich per TCP an diese Server, mit Puffer auf der Platte. Ein Secondary sendet immer auch an seinen Primary.",
@@ -468,5 +467,7 @@
   "cache_wipe_hint": "Löscht alle zwischengespeicherten Dateien aller Dienste. Sie werden beim nächsten Download neu geholt.",
   "err_ptr_no_zone": "{ip} liegt in keiner Rückwärts-Zone dieses Stacks, deshalb kann kein PTR angelegt werden. PTR-Haken entfernen oder zuerst die Rückwärts-Zone anlegen.",
   "err_ptr_taken": "{ip} hat schon den Rückwärts-Eintrag {name}. Diesen Eintrag zuerst entfernen oder den PTR-Haken entfernen.",
+  "reverse_zones_title": "Rückwärts-Zonen",
+  "ptr_records_title": "PTR-Einträge",
   "games_search": "Name, App-ID oder Regex"
 }
