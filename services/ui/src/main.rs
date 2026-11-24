@@ -2934,6 +2934,27 @@ fn write_files(s: &Settings, files: &[render::File]) -> Result<Vec<config::Chang
     Ok(out)
 }
 
+// What: container name per plan owner; others drop out.
+// Why: an owner without a container has nothing to do.
+// From: Issue #1683 | PR #2017
+async fn plan_containers<V>(
+    app: &App,
+    s: &Settings,
+    plan: &mut BTreeMap<String, V>,
+) -> (BTreeMap<String, String>, Vec<String>) {
+    let (mut names, mut skipped) = (BTreeMap::new(), Vec::new());
+    for owner in plan.keys() {
+        match container_of(app, s, owner).await {
+            Ok(name) => {
+                names.insert(owner.clone(), name);
+            }
+            Err(e) => skipped.push(format!("{owner}: skipped, {e}")),
+        }
+    }
+    plan.retain(|owner, _| names.contains_key(owner));
+    (names, skipped)
+}
+
 // What: render, write and wake the owners.
 // Why: only owners with changes are touched.
 // From: Issue #1683 | PR #1858
@@ -3028,16 +3049,8 @@ async fn apply_all(
     // What: skip an owner that has no container yet.
     // Why: at stack start it reads the new files anyway.
     // From: Issue #1683 | PR #1980
-    let mut names = BTreeMap::new();
-    for owner in plan.keys() {
-        match container_of(app, new, owner).await {
-            Ok(name) => {
-                names.insert(owner.clone(), name);
-            }
-            Err(e) => report.push(format!("{owner}: skipped, {e}")),
-        }
-    }
-    plan.retain(|owner, _| names.contains_key(owner));
+    let (names, skipped) = plan_containers(app, new, &mut plan).await;
+    report.extend(skipped);
     let lookup = |owner: &str| names.get(owner).cloned().unwrap_or_default();
     let rx = new.list("RELOAD_EXEC");
     let mut restarted = Vec::new();
@@ -3108,13 +3121,7 @@ async fn apply_all(
                 owner: "proxy".into(),
                 effect: config::Effect::Reload,
             }]);
-            let mut names = BTreeMap::new();
-            for owner in plan.keys() {
-                if let Ok(name) = container_of(app, new, owner).await {
-                    names.insert(owner.clone(), name);
-                }
-            }
-            plan.retain(|owner, _| names.contains_key(owner));
+            let (names, _) = plan_containers(app, new, &mut plan).await;
             let lookup = |owner: &str| names.get(owner).cloned().unwrap_or_default();
             for (owner, result) in apply::run(&app.docker, &plan, &rx, &lookup, grace, limit).await
             {
