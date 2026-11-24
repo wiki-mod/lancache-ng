@@ -98,9 +98,11 @@ These fail a pull request:
 - `cargo fmt --check`, `cargo clippy -- -D warnings` and `cargo test` of each
   changed crate (`ci.sh test-stack`, job `test`)
 - `shellcheck` and `actionlint` findings (`ci.sh check shellcheck`,
-  `ci.sh check actionlint`, job `lint`)
-- every check of `ci.sh check all` (file headers, comment contract, compose
-  config and the other entries of `CI_CHECKS`), job `checks`
+  `ci.sh check actionlint`) and every other check of `ci.sh check all` (file
+  headers, comment contract and the other entries of `CI_CHECKS`), job
+  `checks`
+- a compose file of `deploy/prod` that `docker compose config` rejects
+  (`ci.sh validate`, job `validate`)
 
 CodeQL Rust reports `macro expansion failed` for ordinary macros (`format!`,
 `assert_eq!`, `vec!`, `json!`, `tracing::*`). These extraction warnings are
