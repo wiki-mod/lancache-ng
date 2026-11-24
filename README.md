@@ -672,9 +672,10 @@ The order is: check, ask, then act.
    and names the channel to rerun with; the rerun replaces the entry the
    primary already holds for this name.
 
-The cache IP (`IP_HTTP`) comes from the primary. Without a terminal, pass the
-values as arguments: `--primary`, `--token`, `--name`, `--listen-ip`, and for
-HTTPS `--ip-https <primary https ip> --listen-ip-https <second dns ip>`;
+The cache IP (`IP_HTTP`) comes from the primary; `--ip-http <ip>` sets another
+one. Without a terminal, pass the values as arguments: `--primary`, `--token`,
+`--name`, `--listen-ip`, and for HTTPS
+`--ip-https <primary https ip> --listen-ip-https <second dns ip>`;
 `LANCACHE_IMAGE_CHANNEL` sets the channel.
 
 You can also view a ready command inside the Admin UI under the secondary DNS section.
