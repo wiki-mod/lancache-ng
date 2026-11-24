@@ -2581,13 +2581,7 @@ pub mod pdns_conf {
             // What: dnsdist passes the client IP by header.
             // Why: ACLs and logs need the real client IP.
             // From: Issue #1683
-            (
-                "proxy-protocol-from",
-                crate::dnsdist_conf::source(
-                    &s.text("DNSDIST_SOURCE_ADDRESS")?,
-                    &s.text("LOOPBACK_BIND_IP")?,
-                )?,
-            ),
+            ("proxy-protocol-from", crate::dnsdist_conf::source_of(s)?),
             ("xfr-cycle-interval", s.uint("PDNS_XFR_CYCLE")?.to_string()),
             ("dnsupdate", yes(primary)),
             ("allow-dnsupdate-from", joined("PDNS_DNSUPDATE_FROM")),
@@ -2904,10 +2898,7 @@ pub mod recursor_conf {
         // What: dnsdist passes the client IP by header.
         // Why: allow_from and logs see the real client.
         // From: Issue #1683
-        let proxy = crate::dnsdist_conf::source(
-            &s.text("DNSDIST_SOURCE_ADDRESS")?,
-            &s.text("LOOPBACK_BIND_IP")?,
-        )?;
+        let proxy = crate::dnsdist_conf::source_of(s)?;
         y += &format!("  proxy_protocol_from:\n{}", yaml_list(&[proxy], "    ")?);
         // What: NOTIFY from the own pdns wipes a zone.
         // Why: a secondary has no ui to flush after AXFR.
@@ -2979,6 +2970,16 @@ pub mod recursor_conf {
 // From: Issue #1683
 pub mod dnsdist_conf {
     use crate::config::Settings;
+
+    // What: the sender address from the settings, checked.
+    // Why: pdns, recursor and dnsdist name the same one.
+    // From: Issue #1683 | PR #2017
+    pub fn source_of(s: &Settings) -> Result<String, String> {
+        source(
+            &s.text("DNSDIST_SOURCE_ADDRESS")?,
+            &s.text("LOOPBACK_BIND_IP")?,
+        )
+    }
 
     // What: sender address of dnsdist to its backends.
     // Why: only this address sends proxy protocol.
@@ -3076,7 +3077,7 @@ pub mod dnsdist_conf {
     // From: Issue #1683
     pub fn render(s: &Settings) -> Result<String, String> {
         let lo = s.text("LOOPBACK_BIND_IP")?;
-        let source = source(&s.text("DNSDIST_SOURCE_ADDRESS")?, &lo)?;
+        let source = source_of(s)?;
         // What: peers pass the ACL besides the clients.
         // Why: NOTIFY and AXFR now reach port 53 too.
         // From: Issue #1683
