@@ -940,15 +940,13 @@ PR #2019):
   address only, the services container has no `PDNS_API_KEY`, one unreachable
   secondary stops the check, alarms do not name the secondary, and a zone the
   primary removed is not reported;
-- 10.2 root zone copy: no code reads the `ROOT_ZONE_MIRROR` keys since the
-  rewrite of 2026-11-01; the recursors load no root zone. The SOT B-root
-  address `199.9.14.201` is outdated (now `170.247.170.2`);
 - 10.5 same-host guard: `setup.sh secondary` takes the compose project name
   from `--name` and does not check it; with `--name lancache-ng` it replaces the
   primary's `dns` container and uses its volumes;
-- 10.2 PTR: an address outside every reverse zone is skipped without a
-  message, deleting an A record leaves its PTR in place, and a second name on
-  the same address replaces the PTR without a message;
+- 10.4 HTTPS off then on leftovers: the ui writes rendered nginx files but
+  does not remove ones it no longer writes, so `https.conf` and the dispatch
+  file linger after HTTPS is turned off and the SSL server keeps its old
+  certificate (nginx -t stays valid);
 - 10.2 PTR afterwards: there is no way to add the missing PTR of an existing A
   record other than typing address and name on the PTR tab.
 
@@ -971,6 +969,12 @@ failure class.
 | dnsmasq sub-mode switch restarts the dhcp container | 10.3 | `4aafe168` |
 | file check set without PR labels: changelog rule always fails | 12.1 | `cc5748c8` |
 | PR into master reads build-tools `latest`: plan fails | 12.1 | `da958b3d` |
+| proxy fails with HTTPS off: unknown `$lancache_client_allowed` variable | 10.1 | `cbe44ace` |
+| a PTR is not kept in step with its A record | 10.2 | `ae4c8a75` |
+| recursors load no root zone copy | 10.2 | `76beade8` |
+| local reverse zones decided by the dead `DNS_SERVE_RFC1918` key | 10.2 | `f179e215` |
+| a record reaches a secondary only after the pdns xfr cycle, not within seconds | 10.5 | `b339f172` |
+| the zone table and the status line disagree on a secondary ahead | 10.6 | `0c5fed00` |
 
 ---
 
