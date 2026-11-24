@@ -1463,7 +1463,7 @@ async fn record(
             if let Some(other) = have.iter().find(|h| **h != host) {
                 return Err(tr("err_ptr_taken")
                     .replace("{ip}", ip)
-                    .replace("{name}", other));
+                    .replace("{name}", other.trim_end_matches('.')));
             }
             places.push((rev, rz));
         }
