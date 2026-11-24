@@ -466,13 +466,17 @@ not reachable:
 
 ### 6.5 Settings without a consumer
 
-The SOT and `deploy/prod/docker-compose.yml` define the snapshot directories
-`PROXY_CONFIG_SNAPSHOT_DIR`, `DHCP_CONFIG_SNAPSHOT_DIR` and
-`DNS_CONFIG_SNAPSHOT_DIR` with their volumes (`proxy-config-snapshots`,
-`dhcp-config-snapshots`, `dns-config-snapshots`), and `setup.sh` writes
-`KEEP_KNOWN_GOOD_CONFIGS` (default 3). No code in `services/` reads these
-values: no automatic fall-back of nginx, dnsmasq or PowerDNS to an older
-configuration exists in this tree.
+The SOT defines the snapshot directory `DNS_CONFIG_SNAPSHOT_DIR` in the volume
+`dns-config-snapshots`. No code in `services/` reads it: no automatic fall-back
+of nginx, dnsmasq or PowerDNS to an older configuration exists in this tree.
+The volume itself is in use: a secondary keeps its secrets in it
+(`SECONDARY_SHARED_SECRET_DIR`).
+
+Installs of earlier versions also hold the volumes `proxy-config-snapshots`
+and `dhcp-config-snapshots` and may hold `KEEP_KNOWN_GOOD_CONFIGS` in `.env`.
+Nothing reads them. `setup.sh` leaves them as they are; a backup still
+includes the two volumes. Remove them with `docker volume rm` when they are
+no longer needed.
 
 ---
 

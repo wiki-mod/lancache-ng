@@ -7888,10 +7888,6 @@ cmd_create_logs_for_issue() (
     done
 
     print_step "Known-good-snapshot directory listings"
-    logbundle_named_volume_listing "$install_dir" "$env_file" proxy-config-snapshots config-snapshots \
-        "$dest/known-good-snapshots/proxy.txt"
-    logbundle_named_volume_listing "$install_dir" "$env_file" dhcp-config-snapshots config-snapshots \
-        "$dest/known-good-snapshots/dhcp.txt"
     logbundle_named_volume_listing "$install_dir" "$env_file" dns-config-snapshots config-snapshots \
         "$dest/known-good-snapshots/dns.txt"
     # What: Kea snapshots: host path, then named volume
@@ -8822,7 +8818,7 @@ cmd_secondary() {
     local pdns_api_key tsig_name syslog_primary
     local response_image_registry response_image_prefix response_image_channel response_image_tag
     local existing_env_file lancache_image_registry lancache_image_prefix lancache_image_channel lancache_image_tag
-    local explicit_lancache_image_tag keep_known_good_configs
+    local explicit_lancache_image_tag
     local preflight_registry preflight_prefix preflight_channel preflight_env_tag
     local preflight_tag preflight_verified_registry="" preflight_verified_prefix="" preflight_verified_tag=""
     local secondary_env_file bad_response secondary_compose dns_https_host_port
@@ -9271,10 +9267,6 @@ cmd_secondary() {
         assert_resolved_image_tag_platform_supported "$lancache_image_registry" "$lancache_image_prefix" "$lancache_image_tag"
     fi
 
-    # What: KEEP_KNOWN_GOOD_CONFIGS: env, .env, else empty
-    # Why: per node; empty means the SOT runtime default
-    # From: Issue #615 | PR #625
-    keep_known_good_configs=$(shell_or_env_value KEEP_KNOWN_GOOD_CONFIGS "$existing_env_file") || exit $?
     # What: the upstream DNS keys survive --rotate
     # Why: rotate rewrites .env; the operator value stays
     # From: Issue #1918 | PR #1858
@@ -9335,7 +9327,6 @@ DNS_XFR_PRIMARY=${dns_xfr_primary}
 DDNS_TSIG_NAME=${tsig_name}
 DNS_SECONDARY_ZONES=${secondary_zones}
 SYSLOG_PRIMARY=${syslog_primary}
-KEEP_KNOWN_GOOD_CONFIGS=${keep_known_good_configs}
 DNS_LOCAL_REVERSE_ZONES=${local_reverse}
 ${upstream_rows}LANCACHE_IMAGE_REGISTRY=${lancache_image_registry}
 LANCACHE_IMAGE_PREFIX=${lancache_image_prefix}

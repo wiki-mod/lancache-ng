@@ -78,7 +78,7 @@ literal into a Compose file or into code.
 ### Docker volumes
 
 Rule for new volumes: lowercase, hyphen-separated, named for what they hold
-(for example `proxy-cache`, `proxy-config-snapshots`, `watchdog-status`,
+(for example `proxy-cache`, `dns-config-snapshots`, `watchdog-status`,
 `retention-state`, `ui-data`, `shared-secrets`).
 
 ### Host bind-mount directories
