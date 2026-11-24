@@ -2662,11 +2662,13 @@ is_quickstart_install() {
     ! is_deploy_prod_install_dir "$dir" && [[ -f "$dir/docker-compose.yml" && -f "$PROD_COMPOSE" ]]
 }
 
-# What: puts back deleted files the old stack bind-mounts
+# What: puts back lost files and dirs the old stack mounts
 # Why: a git pull drops them; the old stack must restart
 # From: Issue #1683 | PR #1858
 restore_quickstart_mounts() {
-    local old_dir="$1" old_env="$2" record="$3" json sources src rel commit entry perms empty_dir inside
+    local old_dir="$1" old_env="$2" record="$3" json sources src rel commit entry empty_dir inside
+    local missing="" tree meta path item perms
+    local -a plan=()
     # What: only a git checkout can lose mount sources
     # Why: git history holds the files that were dropped
     # From: Issue #1683 | PR #1858
@@ -2703,18 +2705,37 @@ restore_quickstart_mounts() {
             entry=$(git -C "$old_dir" ls-tree "${commit}^" -- "$rel") \
                 || die "Failed to read $rel in ${commit}^ (exit $?)."
         fi
-        # What: no file in git: a dir stays, a gap stops
-        # Why: a missing mount source breaks the old stack
-        # From: Issue #1683 | PR #1858
-        if [[ "$entry" != 100*" blob "* ]]; then
-            [[ "$empty_dir" = 0 ]] || continue
-            die "$src is missing and git has no older file copy; restore it, then rerun setup.sh update. Nothing was changed."
-        fi
+        # What: plans a file or a whole dir found in git
+        # Why: no write before every source is known
+        # From: Issue #1683
+        case "$entry" in
+            100*" blob "*)
+                plan+=("$commit|${entry%% *}|$rel|$empty_dir")
+                ;;
+            040000" tree "*)
+                tree=$(git -C "$old_dir" ls-tree -r "${commit}^" -- "$rel") \
+                    || die "Failed to read the tree $rel in ${commit}^ (exit $?)."
+                while IFS=$'\t' read -r meta path; do
+                    case "$meta" in
+                        100644" blob "*|100755" blob "*) plan+=("$commit|${meta%% *}|$path|0") ;;
+                        *) missing+=" $old_dir/$path (git mode ${meta%% *})" ;;
+                    esac
+                done <<< "$tree"
+                ;;
+            *)
+                [[ "$empty_dir" = 1 ]] || missing+=" $src"
+                ;;
+        esac
+    done <<< "$sources"
+    [[ -z "$missing" ]] \
+        || die "These mount sources are missing and git has no older copy:$missing. Restore them, then rerun setup.sh update. Nothing was changed."
+    for item in "${plan[@]}"; do
+        IFS='|' read -r commit perms rel empty_dir <<< "$item"
+        src="$old_dir/$rel"
         # What: the restored file gets the mode git recorded
         # Why: git keeps only the executable bit of a file
         # From: Issue #1683 | PR #1858
-        perms=0644
-        [[ "$entry" != 100755* ]] || perms=0755
+        if [[ "$perms" = 100755 ]]; then perms=0755; else perms=0644; fi
         if [[ "$empty_dir" = 1 ]]; then
             rmdir -- "$src" || die "Failed to remove the empty dir $src (exit $?)."
         fi
@@ -2723,7 +2744,7 @@ restore_quickstart_mounts() {
         chmod "$perms" "$src" || die "Failed to set the mode of $src (exit $?)."
         printf 'restored|%s\n' "$rel" >> "$record" || die "Failed to record $rel in $record (exit $?)."
         print_ok "Restored $rel for the old stack from git ${commit}^"
-    done <<< "$sources"
+    done
 }
 
 # What: converts a quickstart install into deploy/prod
