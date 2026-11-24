@@ -4750,6 +4750,26 @@ pub mod kea {
     }
 }
 
+// What: start of helper programs.
+// Why: every caller reads the exit status the same way.
+// From: Issue #1683 | PR #2017
+pub mod tool {
+    use std::process::Command;
+
+    // What: runs a tool; errors name the tool only.
+    // Why: arguments may hold a secret, as snmpget's do.
+    // From: Issue #1683 | PR #2017
+    pub fn run(cmd: &mut Command) -> Result<Vec<u8>, String> {
+        let tool = cmd.get_program().to_string_lossy().into_owned();
+        let out = cmd.output().map_err(|e| format!("{tool}: {e}"))?;
+        if !out.status.success() {
+            let why = String::from_utf8_lossy(&out.stderr);
+            return Err(format!("{tool}: {}", why.trim()));
+        }
+        Ok(out.stdout)
+    }
+}
+
 // What: statistics: SNMP samples into RRD files.
 // Why: replaces Netdata with native rrdtool.
 // From: Issue #1683 | PR #1858
@@ -4950,19 +4970,6 @@ pub mod rrd {
         Ok(Path::new(&dir).join(format!("{}.rrd", g.name)))
     }
 
-    // What: runs a stats tool; errors name the tool only.
-    // Why: snmpget args hold the SNMP community secret.
-    // From: Issue #1683 | PR #2017
-    fn run(cmd: &mut Command) -> Result<Vec<u8>, String> {
-        let tool = cmd.get_program().to_string_lossy().into_owned();
-        let out = cmd.output().map_err(|e| format!("{tool}: {e}"))?;
-        if !out.status.success() {
-            let why = String::from_utf8_lossy(&out.stderr);
-            return Err(format!("{tool}: {}", why.trim()));
-        }
-        Ok(out.stdout)
-    }
-
     // What: create the RRD when it is missing.
     // Why: step, heartbeat and archives from SOT.
     // From: Issue #1683 | PR #1858
@@ -4994,7 +5001,7 @@ pub mod rrd {
         for rra in s.list("STATS_RRAS") {
             cmd.arg(format!("RRA:{rra}"));
         }
-        run(&mut cmd)?;
+        crate::tool::run(&mut cmd)?;
         Ok(())
     }
 
@@ -5014,7 +5021,7 @@ pub mod rrd {
         get.arg(s.text("SNMP_COMMUNITY")?)
             .arg(s.text("STATS_SNMP_TARGET")?);
         get.args(g.sources.iter().map(|x| &x.oid));
-        let text = String::from_utf8_lossy(&run(&mut get)?).into_owned();
+        let text = String::from_utf8_lossy(&crate::tool::run(&mut get)?).into_owned();
         let values: Vec<String> = text.lines().map(number_or_unknown).collect();
         store(s, g, &values)
     }
@@ -5032,7 +5039,7 @@ pub mod rrd {
         put.arg("update")
             .arg(file(s, g)?)
             .arg(format!("N:{}", values.join(":")));
-        run(&mut put)?;
+        crate::tool::run(&mut put)?;
         Ok(())
     }
 
@@ -5100,7 +5107,7 @@ pub mod rrd {
             cmd.arg(format!("GPRINT:{}:AVERAGE:avg %8.2lf{unit}", src.ds));
             cmd.arg(format!("GPRINT:{}:MAX:max %8.2lf{unit}\\l", src.ds));
         }
-        run(&mut cmd)
+        crate::tool::run(&mut cmd)
     }
 }
 
@@ -5329,9 +5336,8 @@ pub mod tidy {
     // Why: syslog-ng-ctl stats lists the store rows.
     // From: Issue #1683 | PR #1858
     pub fn syslog_processed() -> Result<u64, String> {
-        let out = Command::new("syslog-ng-ctl").arg("stats").output();
-        let out = out.map_err(|e| format!("syslog-ng-ctl: {e}"))?;
-        let text = String::from_utf8_lossy(&out.stdout);
+        let out = crate::tool::run(Command::new("syslog-ng-ctl").arg("stats"))?;
+        let text = String::from_utf8_lossy(&out);
         let mut total = 0;
         for row in text.lines() {
             let cols: Vec<&str> = row.split(';').collect();
