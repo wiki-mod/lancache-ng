@@ -2699,17 +2699,13 @@ pub mod recursor_conf {
     // Why: empty or "." means all names; bad chars stop.
     // From: Issue #1683 | PR #1980
     fn upstream_zones(s: &Settings, key: &str) -> Result<Vec<String>, String> {
-        let ok = |c: char| c.is_ascii_alphanumeric() || "-._".contains(c);
         let mut out = Vec::new();
         for raw in s.list(key) {
             let z = raw.trim_end_matches('.').to_ascii_lowercase();
-            // What: label 1-63 chars, no "-" at an edge.
-            // Why: PC test 06.11.: a..b and -bad- passed.
+            // What: a name with "_" allowed; empty is ".".
+            // Why: a..b and -bad- are no names to forward.
             // From: Issue #1918
-            let label = |l: &str| {
-                !l.is_empty() && l.len() <= 63 && !l.starts_with('-') && !l.ends_with('-')
-            };
-            if !z.chars().all(ok) || (!z.is_empty() && !z.split('.').all(label)) {
+            if !z.is_empty() && !crate::dns::is_dns_name(&z, true, false) {
                 return Err(format!("{key}: bad domain {raw}"));
             }
             out.push(if z.is_empty() { ".".to_string() } else { z });
