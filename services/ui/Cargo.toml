@@ -25,6 +25,7 @@ LanCache-NG = { path = "../common" }
 argon2 = { workspace = true }
 axum = { workspace = true, features = ["form"] }
 base64 = { workspace = true }
+hex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }

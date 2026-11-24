@@ -35,7 +35,7 @@ x-service: &service
 # From: Issue #1683 | PR #1912
 x-environment:
   stack: &env-stack
-    LANCACHE_SETTINGS_FILE: ${SOT_UI_SETTINGS_FILE:?SOT_UI_SETTINGS_FILE is required}
+    LANCACHE_SETTINGS_FILE: ${SOT_STACK_ENV_FILE:?SOT_STACK_ENV_FILE is required}
     SNMP_COMMUNITY: ${SNMP_COMMUNITY}
     KEEP_KNOWN_GOOD_CONFIGS: ${KEEP_KNOWN_GOOD_CONFIGS:-}
     IP_HTTP: ${IP_HTTP:?IP_HTTP is required}
@@ -67,6 +67,13 @@ x-environment:
     DNS_UPSTREAM_ZONES: ${DNS_UPSTREAM_ZONES:-}
     DNS_UPSTREAM_UNSIGNED_ZONES: ${DNS_UPSTREAM_UNSIGNED_ZONES:-}
   dhcp-ui: &env-dhcp-ui
+    # What: Kea subnet, pool and gateway of the install.
+    # Why: the ui renders kea-dhcp4.conf from these keys.
+    # From: Issue #1683 | PR #2017
+    DHCP_SUBNET: ${DHCP_SUBNET:-}
+    DHCP_RANGE_START: ${DHCP_RANGE_START:-}
+    DHCP_RANGE_END: ${DHCP_RANGE_END:-}
+    DHCP_GATEWAY: ${DHCP_GATEWAY:-}
     DHCP_MODE: ${DHCP_MODE:-}
     DHCP_NTP_SERVERS: ${DHCP_NTP_SERVERS:-}
     DHCP_SUBNET_START: ${DHCP_SUBNET_START:-}
@@ -81,7 +88,7 @@ x-environment:
     DHCP_PROXY_BOOT_SERVER: ${DHCP_PROXY_BOOT_SERVER:-}
     DHCP_PROXY_CUSTOM_OPTIONS: ${DHCP_PROXY_CUSTOM_OPTIONS:-}
     # What: PXE values for the dnsmasq.conf render.
-    # Why: the ui renders it; live 229: no pxe-service.
+    # Why: the ui renders it; unset: no pxe-service.
     # From: Issue #1683
     DHCP_PROXY_PXE_BOOT_SERVER: ${DHCP_PROXY_PXE_BOOT_SERVER:-}
     DHCP_PROXY_PXE_BOOT_FILENAME_BIOS: ${DHCP_PROXY_PXE_BOOT_FILENAME_BIOS:-}
@@ -149,6 +156,10 @@ services:
       # From: Issue #1683 | PR #1912
       - &mount-secrets shared-secrets:${SOT_LANCACHE_SHARED_SECRET_DIR}
       - &mount-ui-data-ro ui-data:${SOT_UI_DATA_DIR}:ro
+      # What: this dir with the stack .env, read only.
+      # Why: one file for setup.sh, Compose and the ui.
+      # From: Issue #1683 | PR #2017
+      - .:${SOT_STACK_ENV_DIR}:ro
       - watchdog-status:${SOT_STATUS_DIR}
       # What: stack CA, read only, for the expiry check.
       # Why: WATCHDOG_CERT_FILES names it; it was missing.
@@ -161,6 +172,7 @@ services:
       - ${CACHEHAMSTER_DATA_DIR:?CACHEHAMSTER_DATA_DIR is required}:${SOT_CACHEHAMSTER_DATA_DIR}
     # What: no capabilities except the list below.
     # Why: the container holds the Docker socket.
+    # From: Issue #1683 | PR #1912
     cap_drop:
       - ALL
     # What: capabilities the supervised processes need.
@@ -180,6 +192,7 @@ services:
 
   # What: nginx cache; the http and https side in one.
   # Why: the passthrough port relays SNI; 443 intercepts.
+  # From: Issue #1683 | PR #1912
   proxy:
     <<: *service
     # What: /run as tmpfs for OpenRC.
@@ -189,7 +202,7 @@ services:
       - ${SOT_RUN_DIR}
     # What: a real HTTP request to the health path.
     # Why: only an answering nginx counts as healthy.
-    # From: Issue #1683 | PR #1858
+    # From: Issue #1683 | PR #1980
     healthcheck:
       <<: *healthcheck-timing
       test: ["CMD-SHELL", "curl -fsS -o /dev/null --max-time 2 http://${SOT_LOOPBACK_BIND_IP}:${SOT_PROXY_HTTP_PORT}${SOT_PROXY_HEALTH_PATH}"]
@@ -220,6 +233,7 @@ services:
       - lancache-config:${SOT_CONFIG_DIR}:ro
     # What: HTTP port on both IPs; HTTPS relayed or MITM.
     # Why: IP_HTTP relays TLS, IP_HTTPS intercepts it.
+    # From: Issue #1683 | PR #1858
     ports:
       - "${IP_HTTP}:${SOT_PROXY_HTTP_PORT}:${SOT_PROXY_HTTP_PORT}"
       - "${IP_HTTP}:${SOT_PROXY_HTTPS_PORT}:${SOT_NGINX_PASSTHROUGH_PORT}"
@@ -283,11 +297,11 @@ services:
     <<: *service
     # What: a stop by the UI survives a Docker restart.
     # Why: DHCP_MODE off keeps the container stopped.
-    # From: Issue #1683 | PR #1858
+    # From: Issue #1683 | PR #1980
     restart: unless-stopped
     # What: unhealthy when an OpenRC service crashed.
     # Why: the DHCP mode picks the services; all count.
-    # From: Issue #1683 | PR #1858
+    # From: Issue #1683 | PR #1980
     healthcheck:
       <<: *healthcheck-timing
       test: ["CMD-SHELL", "! rc-status --crashed | grep -q ."]
@@ -300,14 +314,11 @@ services:
     image: ${LANCACHE_IMAGE_REF_DHCP:?LANCACHE_IMAGE_REF_DHCP is required}
     environment:
       <<: [*env-stack, *env-dns-dhcp, *env-dns-dhcp-ui, *env-dhcp-ui]
-      # What: Kea token, DDNS switch and pool values.
+      # What: Kea token and DDNS switch.
       # Why: only the DHCP daemons read these keys.
+      # From: Issue #1683 | PR #1912
       KEA_CTRL_TOKEN: ${KEA_CTRL_TOKEN}
       DHCP_DDNS_ENABLED: ${DHCP_DDNS_ENABLED:-}
-      DHCP_SUBNET: ${DHCP_SUBNET:-}
-      DHCP_RANGE_START: ${DHCP_RANGE_START:-}
-      DHCP_RANGE_END: ${DHCP_RANGE_END:-}
-      DHCP_GATEWAY: ${DHCP_GATEWAY:-}
     volumes:
       # What: rendered configs; the ui writes, owners read.
       # Why: one owner per file; programs read SOT paths.
@@ -338,21 +349,10 @@ services:
     image: ${LANCACHE_IMAGE_REF_UI:?LANCACHE_IMAGE_REF_UI is required}
     environment:
       <<: [*env-stack, *env-services-ui, *env-proxy-ui, *env-dns-dhcp-ui, *env-dns-ui, *env-dhcp-ui]
-      # What: start values the UI shows from the install.
-      # Why: else the UI shows the SOT default instead.
-      # From: Issue #1683 | PR #1858
-      AUTO_UPDATE_ENABLED: ${AUTO_UPDATE_ENABLED:-}
-      NTP_ENABLED: ${NTP_ENABLED:-}
-      NTP_UPSTREAM_SERVERS: ${NTP_UPSTREAM_SERVERS:-}
       LANCACHE_IMAGE_REGISTRY: ${LANCACHE_IMAGE_REGISTRY:?LANCACHE_IMAGE_REGISTRY is required}
       LANCACHE_IMAGE_PREFIX: ${LANCACHE_IMAGE_PREFIX:?LANCACHE_IMAGE_PREFIX is required}
       LANCACHE_IMAGE_CHANNEL: ${LANCACHE_IMAGE_CHANNEL:-}
       LANCACHE_IMAGE_TAG: ${LANCACHE_IMAGE_TAG:?LANCACHE_IMAGE_TAG is required}
-      # What: setup.sh login under the ui key names
-      # Why: G1: the setup.sh password never applied
-      # From: Issue #1683 | PR #1985
-      UI_USER: ${UI_AUTH_USER:-}
-      UI_PASSWORD_HASH: ${UI_AUTH_PASSWORD_HASH:-}
       ALLOW_INSECURE_UI: ${ALLOW_INSECURE_UI:-}
       UI_SESSION_TTL_SECONDS: ${UI_SESSION_TTL_SECONDS:-}
       KEA_CTRL_TOKEN: ${KEA_CTRL_TOKEN}
@@ -377,6 +377,10 @@ services:
       - proxy-certs:${SOT_NGINX_DIR}/${SOT_NGINX_SUBDIR_CERTS}
       - *mount-secrets
       - ui-data:${SOT_UI_DATA_DIR}
+      # What: this dir with the .env; the ui writes it.
+      # Why: one file for setup.sh, Compose and the ui.
+      # From: Issue #1683 | PR #2017
+      - .:${SOT_STACK_ENV_DIR}
       - *mount-cdn-domains
       - proxy-cache:${SOT_CACHE_DIR}:ro
       - *mount-pdns-filter
@@ -384,7 +388,7 @@ services:
       - ${SYSLOG_NG_LOG_DIR:?SYSLOG_NG_LOG_DIR is required}:${SOT_SYSLOG_LOG_ROOT}:ro
       - watchdog-status:${SOT_STATUS_DIR}:ro
       # What: pages, texts and css from the checkout.
-      # Why: DoMe 07.11.: page edits need no image build.
+      # Why: page edits need no image build.
       # From: Issue #1683 | PR #1991
       - ../../services/ui/src/templates:${SOT_TEMPLATE_DIR}:ro
       - ../../services/ui/src/lang:${SOT_LANG_DIR}:ro
@@ -405,6 +409,7 @@ services:
       - "${SOT_DHCP_API_HOST}:host-gateway"
     # What: the UI probes itself; no watchdog runs here.
     # Why: the UI image has no lancache-watchdog binary.
+    # From: Issue #1683 | PR #1912
     healthcheck:
       <<: *healthcheck-timing
       test: ["CMD", "lancache-ui", "healthcheck"]

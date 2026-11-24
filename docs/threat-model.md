@@ -27,7 +27,7 @@ identifiers G1 to G3 are stable references used by code comments.
 
 | ID | Topic | State in the code | Threat |
 |---|---|---|---|
-| G1 | Admin UI login | The compose file passes `UI_AUTH_USER` and `UI_AUTH_PASSWORD_HASH` to the UI as `UI_USER` and `UI_PASSWORD_HASH` (`deploy/prod/docker-compose.yml`). `main` in `services/ui/src/main.rs` stops the `ui` process with "Admin-UI authentication is required" when `UI_PASSWORD_HASH` is empty and `ALLOW_INSECURE_UI` is not true. The SOT runtime default is `ALLOW_INSECURE_UI=true`. `setup.sh` asks "Protect Admin-UI with password? [y/N]" (default No) and, on No, "Allow Admin-UI without authentication?" (default from the SOT value); answering No to both repeats the question. An update appends `ALLOW_INSECURE_UI=true` to an install that has no login, so the open state is an explicit entry in `.env`. `AG-SEC-001` governs this case. `setup.sh reset-sign-in` removes the saved password hash after a lockout. | T3 |
+| G1 | Admin UI login | The UI reads `UI_AUTH_USER` and `UI_AUTH_PASSWORD_HASH` from the stack `.env` (`STACK_ENV_FILE`, the mounted `deploy/prod/.env`; a key in `deploy/prod/.env.local` wins). `main` in `services/ui/src/main.rs` stops the `ui` process with "Admin-UI authentication is required" when `UI_AUTH_PASSWORD_HASH` is empty and `ALLOW_INSECURE_UI` is not true. The SOT runtime default is `ALLOW_INSECURE_UI=true`. `setup.sh` asks "Protect Admin-UI with password? [y/N]" (default No) and, on No, "Allow Admin-UI without authentication?" (default from the SOT value); answering No to both repeats the question. An update appends `ALLOW_INSECURE_UI=true` to an install that has no login, so the open state is an explicit entry in `.env`. `AG-SEC-001` governs this case. `setup.sh reset-sign-in` empties the password hash in `.env.local` after a lockout. | T3 |
 | G2 | Kea Control Agent | `kea_conf::ctrl_agent` writes a basic `authentication` block (user `KEA_CTRL_USER`, password `KEA_CTRL_TOKEN`) and `kea::Api` sends them. The bind address is `KEA_CTRL_ADDRESS=@ANY_BIND_IP@` (`0.0.0.0`) on the host network. `KEA_CTRL_ALLOW_FROM` and `KEA_CTRL_CHAIN` exist only in the SOT; no code applies a firewall fence. | T12 |
 | G3 | nginx upstream resolver | `AG-OP-002` governs the nginx upstream resolver. `render::nginx_files` and the UI save path check every `NGINX_UPSTREAM_RESOLVER` entry with `recursor_conf::upstream_entry` (numeric address only; loopback, unspecified and this host's own addresses are refused as "would loop"). | T1 |
 
@@ -93,7 +93,7 @@ protects *from the operator*. It is called out again in "Out of scope".
 │  │  - proxy (nginx): HTTP cache,        - Admin UI (`ui`, Docker)    │ │
 │  │    HTTPS-mode MITM cache, HTTP-      - PowerDNS HTTP API          │ │
 │  │    mode SNI passthrough              - Kea Control Agent API      │ │
-│  │  - DNS (PowerDNS auth + recursor)      (port 8000, host-net, G2)  │ │
+│  │  - DNS (dnsdist, auth, recursors)      (port 8000, host-net, G2)  │ │
 │  │  - DHCP (Kea) OR dnsmasq             - watchdog in `services`     │ │
 │  │                                        (Docker socket)            │ │
 │  │                                                                   │ │
@@ -123,7 +123,8 @@ authoritative description: see `docs/architecture-ng.md` and the per-component
 sources in the inventory table.
 
 - **Containers** — exactly five: `services` (watchdog, cachehamster, syslog-ng,
-  chronyd, snmpd), `proxy` (nginx), `dns` (PowerDNS auth and two recursors),
+  chronyd, snmpd), `proxy` (nginx), `dns` (dnsdist, PowerDNS auth and two
+  recursors),
   `dhcp` (Kea or dnsmasq, selected by `DHCP_MODE`) and `ui`. Inside a
   container OpenRC keeps the programs alive; the watchdog in `services`
   restarts a sick container through the Docker API.
@@ -141,6 +142,18 @@ sources in the inventory table.
   (`DNS_UPSTREAM_SERVERS`, `DNS_UPSTREAM_ZONES`) can take names outside the
   LAN zones; DNSSEC validation stays on except for zones the operator lists in
   `DNS_UPSTREAM_UNSIGNED_ZONES`.
+- **DNS front** — dnsdist in the `dns` container takes the DNS ports
+  (`DNS_PORT`, `DNS_HTTPS_PORT`). Its ACL holds `DNS_QUERY_ALLOW_FROM` and
+  the replication peers. On `DNS_PORT` it sends NOTIFY, zone transfers and
+  queries without recursion desired to the authoritative server and
+  everything else to the recursor of that port (`dnsdist_conf::body`). It
+  reaches the authoritative server (`PDNS_AUTH_ADDRESS`, loopback by
+  default) and the two recursors (loopback) with the PROXY protocol from
+  one sender address (`DNSDIST_SOURCE_ADDRESS`, checked by
+  `dnsdist_conf::source`). PowerDNS and the recursors take a PROXY header
+  only from that address (`proxy-protocol-from` in `pdns_conf`,
+  `proxy_protocol_from` in `recursor_conf`), so their allow lists and logs
+  see the client address.
 - **Two proxy modes** (one nginx container, selected by which DNS IP the client
   uses): **HTTP mode** reads SNI via `ssl_preread` and forwards HTTPS blind
   to the real CDN (no CA needed); **HTTPS mode** terminates TLS using a per-domain
@@ -257,25 +270,34 @@ unauthenticated case. The setup flow generates `UI_AUTH_PASSWORD` and delivers
 only its Argon2id hash.
 
 **State in the code** (`services/ui/src/main.rs`):
-- **Password set:** the compose file passes `UI_AUTH_USER` and
-  `UI_AUTH_PASSWORD_HASH` to the UI as `UI_USER` and `UI_PASSWORD_HASH`
-  (G1). `login_ok` then requires HTTP Basic credentials, checked with
+- **Password set:** the UI reads `UI_AUTH_USER` and
+  `UI_AUTH_PASSWORD_HASH` from the stack `.env` (G1). `login_ok` then requires HTTP Basic credentials, checked with
   Argon2id and a constant-time user compare (`secret::equal`).
-- **No password:** `main` stops the `ui` process when `UI_PASSWORD_HASH` is
-  empty and `ALLOW_INSECURE_UI` is not true. With `ALLOW_INSECURE_UI=true`,
+- **No password:** `main` stops the `ui` process when `UI_AUTH_PASSWORD_HASH`
+  is empty and `ALLOW_INSECURE_UI` is not true. With `ALLOW_INSECURE_UI=true`,
   `login_ok` accepts every request. Unauthenticated access is an explicit choice
   with a default of open (`ALLOW_INSECURE_UI=true` in the SOT runtime defaults):
   `setup.sh` asks "Protect Admin-UI with password? [y/N]" (default No) and, on
   No, "Allow Admin-UI without authentication?" (default from the SOT value);
   answering No to both repeats the question. An update appends
   `ALLOW_INSECURE_UI=true` to an install that has no login.
-  `setup.sh reset-sign-in` removes the saved hash after a lockout.
+  `setup.sh reset-sign-in` empties the saved hash after a lockout.
 - Every state-changing request needs a CSRF token bound to the session
   (`Csrf::check`, `Csrf::check_header`); the session cookie is `HttpOnly` and
   `SameSite=Strict`.
 - A password changed on the Setup page needs the old password and at least
   `UI_PASSWORD_MIN_LENGTH` characters (default 12, allowed 8 to 128); only the
-  Argon2id hash is stored, in the UI settings file in the `ui-data` volume.
+  Argon2id hash is stored, base64url-coded, as `UI_AUTH_PASSWORD_HASH` in
+  `.env`.
+- A request body larger than `UI_REQUEST_BODY_MAX_BYTES` (SOT default
+  2097152) is refused with status 413 before a handler reads it; the limit is
+  set on the router of the UI (`DefaultBodyLimit`).
+- The UI mounts the directory of the stack `.env` writable (`STACK_ENV_DIR`),
+  `services` read-only; the file and its `.env.local` hold every stack secret.
+  The UI never writes `.env.local`. Both containers already hold these secrets
+  and the Docker socket, so the mount adds no new privilege. The UI refuses
+  values Compose would read differently (`$`, quotes, a backquote, a
+  backslash, `#`, line breaks).
 - The registration route for secondaries has its own token (T14).
 
 **Residual risk**: Depends on the operator's explicit choice. With a password

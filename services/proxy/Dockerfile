@@ -21,11 +21,6 @@ FROM ${ALPINE_IMAGE:-scratch}
 # From: Issue #1683 | PR #1980
 ARG BUILD_IDENTITY
 ARG APK_PACKAGES
-# What: extra apk repos and keys (nginx.org), from SOT.
-# Why: apk-setup reads them; empty for other images.
-# From: Issue #1683 | PR #1980
-ARG APK_TAGGED_REPOS
-ARG APK_KEYS
 ARG APK_BOOTSTRAP
 # What: bash first; every later RUN uses it.
 # Why: ci.sh is bash; ash is not allowed.
@@ -36,15 +31,14 @@ ARG CI_RETRY_MAX_ATTEMPTS
 ARG CI_RETRY_BACKOFF_BASE_SECONDS
 ARG CI_DOWNLOAD_CONNECT_TIMEOUT
 ARG CI_DOWNLOAD_STALL_SECONDS
-# What: packages and accounts through ci.sh.
-# Why: ci.sh owns repos, proxy CA, users and dirs.
-# From: Issue #1683 | PR #1980
-RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
-    --mount=type=secret,id=project_selfhosted_proxy_ca \
-    bash /usr/local/bin/ci.sh apk-setup ${APK_PACKAGES}
+# What: accounts first, then packages, through ci.sh.
+# Why: nginx keeps its SOT uid; its package reuses it.
+# From: Issue #1683 | PR #2017
 ARG IMAGE_SETUP
 RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
     bash /usr/local/bin/ci.sh image-setup
+RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
+    bash /usr/local/bin/ci.sh apk-setup ${APK_PACKAGES}
 
 # What: shared gid, SOT defaults and SOT schema.
 # Why: the programs read them as env; compose names none.
@@ -56,9 +50,9 @@ ENV LANCACHE_RUNTIME_GID=${LANCACHE_RUNTIME_GID} \
     LANCACHE_RUNTIME_DEFAULTS=${LANCACHE_RUNTIME_DEFAULTS} \
     LANCACHE_RUNTIME_SCHEMA=${LANCACHE_RUNTIME_SCHEMA}
 
-# What: NGINX_LINK_PARTS point into NGINX_CONF_DIR.
-# Why: ui renders them; plain nginx -t sees the live file
-# From: Issue #1683 | PR #1980
+# What: links into NGINX_CONF_DIR; own nginx.conf loads.
+# Why: module lines first, then the ui's live nginx.conf.
+# From: Issue #1683 | PR #2017
 RUN set -e; \
     declare -A v; IFS='|' read -ra kv <<< "${LANCACHE_RUNTIME_DEFAULTS}"; \
     for p in "${kv[@]}"; do v["${p%%=*}"]="${p#*=}"; done; \
@@ -69,7 +63,10 @@ RUN set -e; \
     src="$(x "${v[NGINX_DIR]}")"; dst="$(x "${v[NGINX_CONF_DIR]}")"; \
     for part in ${v[NGINX_LINK_PARTS]}; do \
       rm -rf "${src:?}/${part}"; ln -s "${dst}/${part}" "${src}/${part}"; \
-    done
+    done; \
+    rm -f "${src}/nginx.conf"; \
+    printf 'include %s/modules/*.conf;\ninclude %s/nginx.conf;\n' \
+      "${src}" "${dst}" > "${src}/nginx.conf"
 
 # What: one supervise-daemon script per SOT process.
 # Why: OpenRC restarts crashes; @KEY@ e.g. CONFIG_DIR.

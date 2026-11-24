@@ -10,7 +10,7 @@ Dockerfiles and compose files name keys, never values.
 | --- | --- | --- |
 | `services` | lancache-watchdog, lancache-cachehamster, syslog-ng, chronyd, snmpd | OpenRC |
 | `proxy` | nginx, snmpd | OpenRC |
-| `dns` | PowerDNS auth, recursor `dns-http`, recursor `dns-https`, snmpd | OpenRC |
+| `dns` | dnsdist, PowerDNS auth, recursor `dns-http`, recursor `dns-https`, snmpd | OpenRC |
 | `dhcp` | Kea (dhcp4, ctrl-agent, ddns) or dnsmasq | OpenRC, runlevel = `DHCP_MODE` |
 | `ui` | lancache-ui, snmpd | OpenRC |
 
@@ -62,10 +62,16 @@ Healthchecks:
 
 ## Configuration flow
 
-1. The user saves a setting in the ui. The ui stores only the changed
-   keys in `UI_SETTINGS_FILE` (`lancache-ui-settings.env` in the `ui-data`
-   volume). Precedence per key: this file, then the container env, then the
-   SOT default in `build-manifest.yml`.
+1. The user saves a setting in the ui. The ui writes the changed keys into
+   the stack `.env` (`STACK_ENV_FILE`: the install's `deploy/prod/.env`,
+   mounted at `STACK_ENV_DIR`). `setup.sh` writes the same file; both hold a
+   flock of `<file>.lock` while they write. An optional `<file>.local`
+   (`.env.local`) beside it overrides single keys; nothing writes it, and the
+   ui refuses to save a key it sets (`config::read_file`, `config::store`).
+   Precedence per key: `.env.local`, then `.env` (an empty value means the SOT
+   default), then the container env, then the SOT default in
+   `build-manifest.yml`. A file value with `$` is a Compose expression; the
+   container env holds its resolved value.
 2. The ui renders every config from the SOT and the saved settings
    (`render::all` in `shared.rs`) and writes changed files into the
    `lancache-config` volume under `CONFIG_DIR`.

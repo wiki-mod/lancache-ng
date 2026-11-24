@@ -19,14 +19,14 @@
     <div class="subtab active" data-ch-tab="jobs">Jobs</div>
     <div class="subtab" data-ch-tab="history">{{ t.history }}</div>
     {# What: Library only when logged in; Settings last. #}
-    {# Why: DoMe 07.11.: own tab; QR login in Settings. #}
+    {# Why: Library is an own tab; QR login in Settings. #}
     {# From: Issue #871 | PR #1985 #}
     {% if hamster and hamster.logged_in %}<div class="subtab" data-ch-tab="library">{{ t.library }}</div>{% endif %}
     <div class="subtab" data-ch-tab="settings">{{ t.settings }}</div>
   </div>
 
   {# What: Jobs = new job plus the last 3; History = all. #}
-  {# Why: DoMe 07.11.: no duplicate, less space. #}
+  {# Why: no duplicate list, less space. #}
   {# From: Issue #871 | PR #1985 #}
   {% for panel in ["jobs", "history"] %}
   <div class="subtab5-panel{% if panel == "jobs" %} active{% endif %}" data-ch-panel="{{ panel }}">
@@ -54,7 +54,7 @@
     {% if hamster and hamster.jobs | length > 0 %}
     <div style="overflow-x:auto;">
     {# What: fixed column widths for the job table #}
-    {# Why: DoMe 07.11.: rows shifted with the progress #}
+    {# Why: else the rows shift with the progress #}
     {# From: Issue #871 | PR #1985 #}
     <table class="table" style="table-layout:fixed; min-width:980px;">
       <colgroup><col style="width:110px"><col><col style="width:120px"><col style="width:90px"><col style="width:150px"><col style="width:250px"><col style="width:220px"></colgroup>
@@ -69,7 +69,7 @@
         <td style="font-variant-numeric:tabular-nums;">{{ j.done }} {{ t.of }} {{ j.total }} {{ t.done }} {{ j.failed }} {{ t.failed }} {{ j.bytes | filesizeformat }}{% if j.size %} {{ t.of }} {{ j.size | filesizeformat }}{% endif %}</td>
         <td>
           {# What: only the buttons this state can use #}
-          {# Why: DoMe 07.11.: three big buttons wrapped #}
+          {# Why: three big buttons wrap the row #}
           {# From: Issue #871 | PR #1985 #}
           {% set st = j.state.state %}{% if st == "running" %}{% set ops = ["cancel"] %}{% elif st == "waiting" %}{% set ops = ["start", "cancel", "remove"] %}{% else %}{% set ops = ["start", "remove"] %}{% endif %}
           {% if j.id %}<div style="display:flex; gap:6px; justify-content:flex-end; white-space:nowrap;">{% for op in ops %}
@@ -89,7 +89,7 @@
   {% endfor %}
 
   {# What: prefill speed (SOT keys) and the Steam login. #}
-  {# Why: DoMe 07.11.: own tab, not under Jobs. #}
+  {# Why: settings get an own tab, not under Jobs. #}
   {# From: Issue #871 | PR #1985 #}
   <div class="subtab5-panel" data-ch-panel="settings">
     <form action="{{ routes.setup_save | safe }}" method="post" class="form-row">
@@ -100,7 +100,7 @@
       <div class="field"><label for="hamster-mbit">{{ t.hamster_max_mbit }}</label><input type="number" id="hamster-mbit" name="CACHEHAMSTER_MAX_MBIT" min="0" max="100000" value="{{ v.CACHEHAMSTER_MAX_MBIT }}"></div>
       <div class="field"><label for="hamster-window">{{ t.hamster_window }}</label><input type="text" id="hamster-window" name="CACHEHAMSTER_WINDOW" pattern="[0-2][0-9]:[0-5][0-9]-[0-2][0-9]:[0-5][0-9]" placeholder="01:00-06:00" value="{{ v.CACHEHAMSTER_WINDOW }}"></div>
       {# What: Save first, red Log out right beside it. #}
-      {# Why: DoMe 07.11.: one row, log out in red. #}
+      {# Why: one row; red marks the log out. #}
       {# From: Issue #871 | PR #1991 #}
       <div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;">
         <button type="submit" class="btn">{{ t.save }}</button>
@@ -120,7 +120,7 @@
     <p class="status-line" id="hamster-login-state"></p>
     {% endif %}
     {# What: empties the whole cache on a 2nd click #}
-    {# Why: DoMe 07.11.: in settings, not the overview #}
+    {# Why: a wipe belongs to settings, not the overview #}
     {# From: Issue #871 | PR #1991 #}
     <div class="section-title">{{ t.cache_wipe_title }}</div>
     <p class="section-sub">{{ t.cache_wipe_hint }}</p>
@@ -151,7 +151,7 @@
 {% block scripts %}
 <script>
   // What: the open tab survives a reload.
-  // Why: DoMe 05.11.: after the login it showed Jobs.
+  // Why: else a reload after the login shows Jobs.
   // From: Issue #871 | PR #1980
   const pickTab = function (name) {
     document.querySelectorAll('[data-ch-tab]').forEach(function (o) { o.classList.toggle('active', o.dataset.chTab === name); });
@@ -162,7 +162,7 @@
     tab.addEventListener('click', function () {
       pickTab(tab.dataset.chTab);
       // What: after a preload, Jobs and History reload.
-      // Why: DoMe 07.11.: the new job never showed up.
+      // Why: else the new job does not show up.
       // From: Issue #871 | PR #1985
       if (window.hamsterAdded && (tab.dataset.chTab === 'jobs' || tab.dataset.chTab === 'history')) { location.reload(); }
     });
@@ -172,7 +172,7 @@
     if (saved && document.querySelector('[data-ch-tab="' + saved + '"]')) { pickTab(saved); }
   } catch (err) { reportError(err); }
   // What: date on the first line, time on the second.
-  // Why: DoMe 07.11.: one line made the column wide.
+  // Why: one line makes the column wide.
   // From: Issue #871 | PR #1985
   document.querySelectorAll('[data-unix]').forEach(function (el) {
     const d = new Date(Number(el.dataset.unix) * 1000);
@@ -181,7 +181,7 @@
     el.appendChild(document.createTextNode(d.toLocaleTimeString(undefined, { timeStyle: 'medium' })));
   });
   // What: the time field opens its calendar on click.
-  // Why: DoMe 05.11.: a click on "tt" opened nothing.
+  // Why: a click on the field alone opens nothing.
   // From: Issue #1683 | PR #1980
   const atField = document.getElementById('hamster-at');
   const whenField = document.getElementById('hamster-when');
@@ -228,7 +228,7 @@
     });
   }
   // What: reload while a job waits to start or runs.
-  // Why: DoMe 05.11.: "now" stayed on waiting on screen.
+  // Why: else "now" stays on waiting on screen.
   // From: Issue #871 | PR #1980
   if (document.querySelector('tr[data-busy]')) {
     setInterval(function () {
@@ -255,7 +255,7 @@
     });
   }
   // What: filter the games by name or app id.
-  // Why: DoMe 07.11.: a regex search was missing.
+  // Why: a regex search finds a game in a long list.
   // From: Issue #871 | PR #1991
   const find = document.getElementById('hamster-find');
   function findGames() {
@@ -272,7 +272,7 @@
   }
   if (find) { find.addEventListener('input', findGames); }
   // What: cache use and evict per library game.
-  // Why: DoMe 07.11.: empty one game, not everything.
+  // Why: empty one game, not everything.
   // From: Issue #871 | PR #1991
   const size = function (n) {
     return n >= 1073741824 ? (n / 1073741824).toFixed(1) + ' GiB' : Math.round(n / 1048576) + ' MiB';
@@ -316,17 +316,17 @@
     }).catch(function (e) { window.LancacheUi.fail(e); });
   }
   // What: the owned games survive a reload.
-  // Why: DoMe 07.11.: Ctrl+F5 emptied the list.
+  // Why: else a forced reload empties the list.
   // From: Issue #871 | PR #1985
   function showGames(games) {
         const t = document.getElementById('hamster-games');
         if (!t) { return; }
         // What: games sorted by name, A to Z.
-        // Why: DoMe 07.11.: the list came in app id order.
+        // Why: the list arrives in app id order.
         // From: Issue #871 | PR #1991
         games = games.slice().sort(function (a, b) { return String(a.name).localeCompare(String(b.name)); });
         // What: fixed column widths in the library.
-        // Why: DoMe 07.11.: Check made the row jump.
+        // Why: else Check makes the row jump.
         // From: Issue #871 | PR #1991
         t.style.tableLayout = 'fixed';
         t.innerHTML = '<tr><th style="width:7em">App ID</th><th>Name</th><th style="width:17em">' + LC_T.in_cache + '</th><th style="width:11em"></th></tr>';
@@ -336,7 +336,7 @@
           row.insertCell().textContent = g.name;
           cacheCell(row.insertCell(), g.appid);
           // What: one click adds a "now" job for this game.
-          // Why: DoMe 05.11.: load straight from the list.
+          // Why: a game loads straight from the list.
           // From: Issue #871 | PR #1980
           const f = document.createElement('form');
           f.method = 'post';
@@ -349,7 +349,7 @@
           const b = document.createElement('button');
           b.type = 'submit'; b.className = 'btn btn-sm'; b.textContent = LC_T.preload;
           // What: one width for every button label.
-          // Why: DoMe 07.11.: the list shifted on click.
+          // Why: else the list shifts on click.
           // From: Issue #871 | PR #1985
           b.style.minWidth = '9em'; b.style.whiteSpace = 'nowrap';
           f.addEventListener('submit', function (ev) {
@@ -370,7 +370,7 @@
     if (kept) { showGames(JSON.parse(kept)); }
   } catch (err) { reportError(err); }
   // What: the Library tab loads the games when empty.
-  // Why: DoMe 07.11.: no extra click after opening.
+  // Why: no extra click after opening.
   // From: Issue #871 | PR #1985
   const libTab = document.querySelector('[data-ch-tab="library"]');
   const autoLoad = function () {

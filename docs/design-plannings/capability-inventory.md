@@ -131,7 +131,7 @@ Provided by `dhcp`, `kea_conf`, `kea`, `dhcp_probe` and `dnsmasq_conf` in
 
 - **ProxyDHCP and relay.** `dnsmasq_conf::render` renders `dnsmasq.conf` for
   `dnsmasq-proxy` and `dnsmasq-relay` (routes `/dhcp/proxy`, `/dhcp/relay`).
-  An empty `DHCP_SUBNET_START` makes the proxy range follow `DHCP_SUBNET`
+  An empty `DHCP_SUBNET_START` makes the proxy range use `IP_HTTP`
   (`proxy_range`); an empty `DHCP_RELAY_LOCAL_ADDR` makes the relay use this
   host's first non-loopback address (`recursor_conf::own_ips`).
 - **Options.** Router (3), DNS (6), domain (15), NTP (42) and custom options
@@ -148,8 +148,9 @@ Provided by `services/ui/src/main.rs` and `services/ui/src/templates/`.
   `/cachehamster`; texts in German and English (`services/ui/src/lang/`). Every
   page and route path is a SOT key (`UI_PAGE_*`, `UI_ROUTE_*`); `router` reads
   them.
-- **Settings.** `/setup/save` stores changed keys in `UI_SETTINGS_FILE`;
-  precedence per key is that file, the container environment, the SOT default
+- **Settings.** `/setup/save` writes changed keys into the stack `.env`
+  (`STACK_ENV_FILE`) under its lock (`config::store`); precedence per key is
+  that file, the container environment, the SOT default
   (`config::Settings::load`).
 - **Config rendering.** `render::all` renders every config from the SOT and the
   settings into the `lancache-config` volume; `apply::plan` and `apply::run` reload
@@ -162,7 +163,7 @@ Provided by `services/ui/src/main.rs` and `services/ui/src/templates/`.
   reloads one program through `rc-service` in its container; only programs
   listed in `UI_SERVICES` and only a running program; `docker::Api` also reads container state
   and statistics.
-- **Access control.** HTTP Basic with an Argon2id hash when `UI_PASSWORD_HASH`
+- **Access control.** HTTP Basic with an Argon2id hash when `UI_AUTH_PASSWORD_HASH`
   is set (`login_ok`), CSRF tokens bound to the session (`Csrf`), password
   change on `/setup/password` (`UI_PASSWORD_MIN_LENGTH`).
 - **Status and statistics.** `/api/status` returns container states read from
@@ -173,9 +174,8 @@ Provided by `services/ui/src/main.rs` and `services/ui/src/templates/`.
 - **Logs.** `/logs` shows the stored logs and `/logs/save` switches logging per
   service.
 - **CLI.** `lancache-ui healthcheck`, `render-dns`, `zone-snapshots`,
-  `zone-rollback`, `dhcp-probe` (one DHCP probe as JSON, run on the host
-  network) and `reset-sign-in` (removes `UI_PASSWORD_HASH` from the settings
-  file).
+  `zone-rollback` and `dhcp-probe` (one DHCP probe as JSON, run on the host
+  network).
 
 ## Watchdog
 
@@ -231,12 +231,13 @@ JSON commands that the Admin UI executes in that container (`hamster`).
 
 ## setup.sh
 
-Commands of the dispatcher: `install`, `install-requirements-primary`,
-`install-requirements-secondary`, `update`, `auto-update`, `update-ip`,
-`configure-upstream-dns`, `create-logs-for-issue`, `secondary`, `backup`,
-`restore`, `reset-to-last-known-good-config` and `reset-sign-in`. Internal
-commands, not in the usage text: `compose`, `converge-reconcile` and
-`openrc-loop`.
+Commands of the dispatcher: `install`, `install-requirements` (aliases
+`install-requirements-primary`, `install-requirements-secondary`; `install`
+and `secondary` run it on their own), `list-prompts`, `update`,
+`auto-update`, `update-ip`, `configure-upstream-dns`, `debug`, `compose`,
+`create-logs-for-issue`, `secondary`, `backup`, `restore`,
+`reset-to-last-known-good-config` and `reset-sign-in`. Internal commands,
+not in the usage text: `converge-reconcile` and `openrc-loop`.
 
 - `install` runs the wizard and writes the environment file for `deploy/prod`;
   `secondary` takes the registration token of a primary (`--token`), builds the
@@ -248,8 +249,9 @@ commands, not in the usage text: `compose`, `converge-reconcile` and
   `userland-proxy` in `docker_daemon_json` to `docker_userland_proxy` (SOT) and
   restarts Docker once after a confirmation; without a terminal it leaves Docker
   unchanged.
-- `reset-sign-in` asks first (`--yes` skips the question), runs
-  `lancache-ui reset-sign-in` in the `ui` container and restarts it.
+- `reset-sign-in` asks first (`--yes` skips the question), empties
+  `UI_AUTH_PASSWORD_HASH`, sets `ALLOW_INSECURE_UI=true` in `.env` and
+  restarts the `ui` container.
 - `backup` and `restore` cover the persistent state; `reset-to-last-known-good-config`
   restores the Kea snapshot.
 

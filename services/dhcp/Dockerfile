@@ -32,10 +32,9 @@ ARG CI_RETRY_BACKOFF_BASE_SECONDS
 ARG CI_DOWNLOAD_CONNECT_TIMEOUT
 ARG CI_DOWNLOAD_STALL_SECONDS
 # What: packages and accounts through ci.sh.
-# Why: ci.sh owns repos, proxy CA, users and dirs.
-# From: Issue #1683 | PR #1980
+# Why: ci.sh owns repos, users and dirs.
+# From: Issue #1683 | PR #2017
 RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
-    --mount=type=secret,id=project_selfhosted_proxy_ca \
     bash /usr/local/bin/ci.sh apk-setup ${APK_PACKAGES}
 ARG IMAGE_SETUP
 RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
