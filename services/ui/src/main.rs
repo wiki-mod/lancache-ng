@@ -43,7 +43,7 @@ const DHCP_PROBE_CMD: &str = "dhcp-probe";
 const ENV_ONLY_KEYS: [&str; 2] = ["IP_HTTP", "LANCACHE_IMAGE_CHANNEL"];
 
 // What: read the files of one mounted folder.
-// Why: DoMe 07.11.: page edits need no image build.
+// Why: page edits need no image build.
 // From: Issue #1683 | PR #1991
 fn folder(dir: &str, ext: &str) -> Result<Vec<(String, String)>, String> {
     let err = |e: std::io::Error| format!("{dir}: {e}");
@@ -501,7 +501,7 @@ async fn dashboard(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page
     ctx.insert("cache_used_human", &human::bytes(0));
 
     // What: bar against the set size, not the disk.
-    // Why: live test 05.11.: the bar showed disk use.
+    // Why: the disk holds more than the cache.
     // From: Issue #1683 | PR #1980
     let max = gib_bytes(&s.text("CACHE_MAX_GB")?)?;
     let used = app.cache_used.load(Ordering::Relaxed);
@@ -511,7 +511,7 @@ async fn dashboard(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page
         ctx.insert("cache_pct", &pct);
     }
     // What: the form label names the largest size.
-    // Why: DoMe 07.11.: free space was not visible.
+    // Why: the form must show how much room is left.
     // From: Issue #1069 | PR #1991
     if let Ok(room) = cache_reachable(&s, max, used) {
         ctx.insert("cache_max_gib", &(room >> 30).to_string());
@@ -579,7 +579,7 @@ async fn password(
     .map_err(bad_request)?;
     let mut change = Fields::from([("UI_AUTH_PASSWORD_HASH".to_string(), hashed)]);
     // What: the user name is set in the same form.
-    // Why: DoMe 07.11.: any name, not only the default.
+    // Why: the login name is free to choose.
     // From: Issue #1683 | PR #1985
     let user = get("user").trim().to_string();
     if !user.is_empty() {
@@ -623,12 +623,12 @@ async fn commit(app: &App, form: Fields) -> Result<(), String> {
     config::store(&path, &old, &updates)?;
     let new = Settings::load(&process_env, Some(&path))?;
     // What: a value that cannot render is not kept.
-    // Why: live 05.11.: a looping upstream was saved.
+    // Why: a bad value must not reach the files.
     // From: Issue #1683 | PR #1980
     let check = secrets(&new).and_then(|sec| render::all(&new, &sec).map_err(|e| e.join("; ")));
     if let Err(e) = check {
         // What: a refused save is logged, not only shown.
-        // Why: DoMe 07.11.: an error left no trace in logs.
+        // Why: the error must leave a trace in the logs.
         // From: Issue #1683 | PR #1991
         eprintln!("ui: save refused: {e}");
         // What: only the changed keys get their old values.
@@ -679,7 +679,7 @@ async fn save(
         return Err(bad_request(tr("err_no_domain").replace("{x}", d)));
     }
     // What: each upstream entry is checked before save.
-    // Why: live 06.11. + threat model G3: no self loop.
+    // Why: threat model G3: no loop to this host.
     // From: Issue #1683 | PR #1985
     let own = lancache_ng::recursor_conf::own_ips(&app.settings());
     for key in ["DNS_UPSTREAM_SERVERS", "NGINX_UPSTREAM_RESOLVER"] {
@@ -694,7 +694,7 @@ async fn save(
     }
 
     // What: back to the page that sent the form.
-    // Why: live test: dashboard forms ended on /setup.
+    // Why: a form of the dashboard returns there.
     // From: Issue #1683 | PR #1980
     let back = form
         .get("back")
@@ -710,7 +710,7 @@ async fn save(
 }
 
 // What: remove zones a new LAN domain left behind.
-// Why: live test 05.11.: home.lan stayed after going back.
+// Why: an old zone would keep answering its names.
 // From: Issue #1683 | PR #1980
 async fn drop_old_zones(s: &Settings, before: &[String]) {
     let Ok(now) = lancache_ng::dns::managed_zones(s) else {
@@ -778,7 +778,7 @@ async fn logs(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     let programs = s.list("SYSLOG_PROGRAMS");
     let muted = s.list("SYSLOG_MUTED");
     // What: every folder the store holds, plus the list.
-    // Why: DoMe 05.11.: page empty; the store names differ.
+    // Why: the store may name folders the list lacks.
     // From: Issue #1683 | PR #1980
     let mut names = programs.clone();
     if let Ok(dirs) = std::fs::read_dir(&root) {
@@ -1120,7 +1120,7 @@ async fn domains(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     ctx.insert("primary_ip_https", &primary_https_ip(&s)?);
 
     // What: UI address on the LAN when none is set.
-    // Why: live test: an empty --primary broke the command.
+    // Why: the install command needs an address.
     // From: Issue #1683 | PR #1980
     let mut url = s.text_or_empty("UI_PUBLIC_URL");
     if url.is_empty() {
@@ -1270,7 +1270,7 @@ async fn record(
     snapshot(s, &api, &zone).await?;
     flush_zone(s, &zone).await?;
     // What: PTR for each A address when ticked.
-    // Why: DoMe 31.10.: PTR from the LAN entries.
+    // Why: a LAN entry may want its reverse entry.
     // From: Issue #1683 | PR #1980
     if add && kind == "A" && get("ptr") == "1" {
         let host = vec![lancache_ng::pdns::zone_id(&name)];
@@ -1800,7 +1800,7 @@ async fn secondary_health(s: &Settings, address: &str) -> Value {
 async fn flush_on_transfer(app: Arc<App>) {
     let mut seen: BTreeMap<String, u32> = BTreeMap::new();
     // What: an error only after the grace time.
-    // Why: DoMe 05.11.: a planned dns restart logged one.
+    // Why: a planned dns restart must log nothing.
     // From: Issue #1683 | PR #1980
     let mut down: Option<std::time::Instant> = None;
     let mut logged = false;
@@ -2020,7 +2020,7 @@ async fn dhcp(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
 }
 
 // What: the main subnet form also saves settings.
-// Why: DoMe 08.11.: settings are the only source.
+// Why: the settings are the only source of it.
 // From: Issue #1683
 async fn main_subnet(
     app: &App,
@@ -2237,7 +2237,7 @@ async fn dhcp_action(
     let get = |k: &str| field(&form, k);
     let on = switch_on(&get("enabled"));
     // What: relay without the real server: plain hint.
-    // Why: DoMe 07.11.: a newbie got a bare key name.
+    // Why: a bare key name tells the user nothing.
     // From: Issue #1683 | PR #1991
     let asked = DhcpMode::from_word(&get("dhcp_mode")).ok();
     let relay = op == "UI_ROUTE_DHCP_MODE" && asked == Some(DhcpMode::DnsmasqRelay);
@@ -2245,7 +2245,7 @@ async fn dhcp_action(
         return Err(bad_request(tr("err_relay_needs_upstream")));
     }
     // What: the Kea server needs a network card.
-    // Why: live 229: no card, Kea answered nobody.
+    // Why: without a card Kea answers nobody.
     // From: Issue #1683
     let cards = get("dhcp_proxy_interface");
     if op == "UI_ROUTE_DHCP_MODE" && asked == Some(DhcpMode::Kea) && cards.is_empty() {
@@ -2315,7 +2315,7 @@ async fn stats(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     }
 
     // What: one tab per source, with its origin.
-    // Why: DoMe 05.11.: no guessing where values come from.
+    // Why: each value shows where it comes from.
     // From: Issue #1683 | PR #1980
     let step = s.uint("STATS_STEP").unwrap_or_default();
     ctx.insert("stats_step", &step);
@@ -2328,7 +2328,7 @@ async fn stats(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
             .replace("{y}", &step.to_string()),
     })];
     // What: no dhcp tab while DHCP_MODE is off.
-    // Why: live 249: the tab showed a stopped dhcp.
+    // Why: the tab would show a stopped container.
     // From: Issue #1683
     let off = dhcp_off_service(&s).ok().flatten().unwrap_or_default();
     for c in s.list("STATS_CONTAINERS") {
@@ -2513,7 +2513,7 @@ async fn service_values(app: &App, s: &Settings, want: &[String]) -> BTreeMap<St
     }
 
     // What: host network bytes from the host's net/dev.
-    // Why: live test 05.11.: empty via dhcp in mode off.
+    // Why: in mode off no dhcp container gives it.
     // From: Issue #1683 | PR #1980
     if has("host")
         && let Ok(file) = s.text("HOST_NET_DEV_FILE")
@@ -2556,7 +2556,7 @@ async fn service_values(app: &App, s: &Settings, want: &[String]) -> BTreeMap<St
 }
 
 // What: program values into RRD each step.
-// Why: DoMe 01.11.: PowerDNS, nginx, Kea, chrony.
+// Why: PowerDNS, nginx, Kea and chrony give values.
 // From: Issue #1683 | PR #1980
 async fn sample_services(app: &App, s: &Settings) -> Vec<String> {
     let all = match lancache_ng::rrd::service_graphs(s) {
@@ -2626,7 +2626,7 @@ fn dhcp_off_service(s: &Settings) -> Result<Option<String>, String> {
 }
 
 // What: in mode off a running dhcp is stopped again.
-// Why: live 05.11.: compose up started it after the ui.
+// Why: compose up may start it after the ui.
 // From: Issue #1683 | PR #1980
 async fn dhcp_stays_off(app: &App, s: &Settings) -> Result<(), String> {
     let Some(service) = dhcp_off_service(s)? else {
@@ -2905,7 +2905,7 @@ async fn hamster_api(
         .await
         .map_err(|e| Fail(StatusCode::BAD_GATEWAY, e))?;
     // What: freed bytes leave the shown sum at once.
-    // Why: DoMe 07.11.: used kept 10.8 GiB after a wipe.
+    // Why: the sum must not lag behind a wipe.
     // From: Issue #871 | PR #1991
     if let Some(freed) = v.get("freed").and_then(Value::as_u64) {
         let _ = app
@@ -3010,7 +3010,7 @@ async fn apply_all(
         }
     }
     // What: at start zones_at_start owns this step.
-    // Why: live: dns not up yet gave an error line.
+    // Why: dns may not be up yet at that moment.
     // From: Issue #1683 | PR #1980
     if zones && let Err(e) = ensure_zones(new).await {
         report.push(e);
@@ -3018,7 +3018,7 @@ async fn apply_all(
     let mut plan = apply::plan(&changes);
     let (grace, limit) = app.limits(new)?;
     // What: mode off stops dhcp; a missing one is fine.
-    // Why: live: compose up started it again at start.
+    // Why: compose up may have started it again.
     // From: Issue #1683 | PR #1980
     let dhcp = new.text("DHCP_SERVICE")?;
     if dhcp_off_service(new)?.is_some() {
@@ -3035,7 +3035,7 @@ async fn apply_all(
         }
     }
     // What: proxy and relay share one dnsmasq daemon.
-    // Why: release 10.3: the container keeps running.
+    // Why: a mode change keeps the container running.
     // From: Issue #1683
     let (was, now) = (DhcpMode::from_settings(old)?, DhcpMode::from_settings(new)?);
     if was.is_dnsmasq() && now.is_dnsmasq() && plan.contains_key(&dhcp) {
@@ -3062,7 +3062,7 @@ async fn apply_all(
     let mut restarted = Vec::new();
     let mut results = apply::run(&app.docker, &plan, &rx, &lookup, grace, limit).await;
     // What: one more try for owners that got a 409.
-    // Why: live: restart while compose recreated proxy.
+    // Why: compose may recreate a container meanwhile.
     // From: Issue #1683 | PR #1980
     if results
         .iter()
@@ -3096,7 +3096,7 @@ async fn apply_all(
     }
 
     // What: after a dns restart wait for the pdns API.
-    // Why: live test: the page loaded before pdns ran.
+    // Why: a page must not load before pdns runs.
     // From: Issue #1683 | PR #1980
     if names
         .get(&new.text("DNS_SERVICE")?)
@@ -3299,7 +3299,7 @@ async fn answers_aa(s: &Settings, address: &str, zone: &str) -> Result<(), Strin
 }
 
 // What: create missing primary zones; set DDNS meta.
-// Why: 4220b1c3 dropped pdnsutil create-zone, no owner.
+// Why: no other step creates the zones in pdns.
 // From: Issue #1683 | PR #1980
 async fn ensure_primary_zones(s: &Settings, key: &str) -> Result<(), String> {
     let api = pdns_api(s)?;
@@ -3602,7 +3602,7 @@ async fn zones_at_start(app: Arc<App>) {
                 return;
             }
             // What: log only after the grace time.
-            // Why: live: dns starts with the ui.
+            // Why: dns starts together with the ui.
             // From: Issue #1683 | PR #1980
             Err(e) if began.elapsed().as_secs() >= grace => {
                 eprintln!("ui: start: zones wait for dns {grace} s: {e}");
@@ -3681,7 +3681,7 @@ fn secrets(s: &Settings) -> Result<render::Secrets, String> {
 }
 
 // What: bytes of a whole GiB number.
-// Why: DoMe 05.11.: cache sizes are whole GiB only.
+// Why: cache sizes are whole GiB only.
 // From: Issue #1683 | PR #1980
 fn gib_bytes(text: &str) -> Result<u64, String> {
     let n: u64 = text
@@ -3697,12 +3697,12 @@ fn gib_bytes(text: &str) -> Result<u64, String> {
 // From: Issue #1069 | PR #1991
 fn cache_reachable(s: &Settings, old: u64, cached: u64) -> Result<u64, String> {
     // What: the cache volume as the ui mounts it.
-    // Why: live test 05.11.: NGINX_CACHE_DIR is proxy-only.
+    // Why: NGINX_CACHE_DIR exists in the proxy only.
     // From: Issue #1069 | PR #1980
     let dir = s.text("CACHE_DIR")?;
     let sp = fs::space(Path::new(&dir)).map_err(|e| format!("{dir}: {e}"))?;
     // What: measured cache bytes; disk use as fallback.
-    // Why: 249 showed 60 GiB; the disk holds OS files too.
+    // Why: the disk holds files of the system too.
     // From: Issue #1069 | PR #1991
     let used = sp.total.saturating_sub(sp.free);
     let held = if cached == u64::MAX {
@@ -3765,7 +3765,7 @@ async fn status(State(app): Shared) -> Response {
         return axum::Json(json!({"state": "unavailable"})).into_response();
     };
     // What: the dhcp container while DHCP_MODE is off.
-    // Why: live test: bar offered Start for it.
+    // Why: the bar must not offer Start for it.
     // From: Issue #1683 | PR #1980
     let off = dhcp_off_service(&s).ok().flatten().unwrap_or_default();
     let limit = app.limits(&s).map(|(_, l)| l).ok();
@@ -3775,14 +3775,14 @@ async fn status(State(app): Shared) -> Response {
         let by_user = stopped.iter().any(|x| x == name);
         let mode_off = !off.is_empty() && name == off;
         // What: a stop nobody asked for is red, not gray.
-        // Why: release 10.6: the entry must turn unhealthy.
+        // Why: the entry must turn unhealthy.
         // From: Issue #1683
         let colour = match colour(c) {
             "gray" if !by_user && !mode_off => "red",
             other => other,
         };
         // What: last health check output when not green.
-        // Why: live test: "3 failures" showed no reason.
+        // Why: a failure count alone names no reason.
         // From: Issue #1683 | PR #1980
         let mut reason = String::new();
         if let (Some(l), "red" | "yellow", Some(id)) = (limit, colour, c["Id"].as_str())
