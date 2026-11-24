@@ -1795,11 +1795,8 @@ pub mod cert {
         let yoe = y - era * 400;
         let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + d - 1;
         let end = era * 146_097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719_468;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|e| e.to_string())?
-            .as_secs() as i64
-            / 86_400;
+        let today = crate::clock::unix_secs() / crate::tidy::DAY;
+        let now = i64::try_from(today).map_err(|e| e.to_string())?;
         Ok((day, end - now))
     }
 }
@@ -5176,6 +5173,13 @@ pub mod tidy {
     // From: Issue #1683 | PR #1858
     pub const DAY: u64 = 86_400;
 
+    // What: the first second of the day a time lies in.
+    // Why: files of today are still written and stay.
+    // From: Issue #1683 | PR #2017
+    fn day_start(now: u64) -> u64 {
+        now - now % DAY
+    }
+
     fn resolved(path: &Path) -> std::io::Result<PathBuf> {
         let mut out = PathBuf::from("/");
         for part in path.components() {
@@ -5284,7 +5288,7 @@ pub mod tidy {
         let mut all = files(dir);
         let mut size: u64 = all.iter().map(|f| f.size).sum();
         all.sort_by_key(|f| f.mtime);
-        let today = now - now % DAY;
+        let today = day_start(now);
         let mut errs = Vec::new();
         for f in &all {
             if size <= budget {
@@ -5305,7 +5309,7 @@ pub mod tidy {
     // Why: past days are never written again.
     // From: Issue #1683 | PR #1858
     pub fn pack_closed(dir: &Path, preset: u64, now: u64) -> Vec<String> {
-        let today = now - now % DAY;
+        let today = day_start(now);
         let mut errs = Vec::new();
         for f in files(dir) {
             if f.mtime >= today || f.path.extension().is_some_and(|e| e == "xz") {
