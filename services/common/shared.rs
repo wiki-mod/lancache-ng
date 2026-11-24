@@ -133,9 +133,7 @@ pub mod fs {
                 }),
             });
         drop(file);
-        if let Err(e) = fs::remove_file(&tmp)
-            && e.kind() != io::ErrorKind::NotFound
-        {
+        if let Err(e) = remove_if_present(&tmp) {
             eprintln!("fs: {} left behind: {e}", tmp.display());
         }
         result
