@@ -4215,6 +4215,15 @@ pub mod render {
         std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))
     }
 
+    // What: the hosts of a cache domain list.
+    // Why: nginx files and certificates need the same set.
+    // From: Issue #1683 | PR #2017
+    fn cache_hosts(s: &Settings, domains: &str) -> Result<nginx_conf::Hosts, String> {
+        let dir = PathBuf::from(s.text("NGINX_TEMPLATE_DIR")?);
+        let psl = nginx_conf::Psl::parse(&read(&dir.join(s.text("NGINX_PSL_FILE")?))?);
+        nginx_conf::hosts(domains, &psl)
+    }
+
     fn nginx_files(o: &mut Out, domains: &str) -> Result<(), String> {
         let s = o.s;
         let src = PathBuf::from(s.text("NGINX_TEMPLATE_DIR")?);
@@ -4226,8 +4235,7 @@ pub mod render {
         for raw in s.list("NGINX_UPSTREAM_RESOLVER") {
             crate::recursor_conf::upstream_entry("NGINX_UPSTREAM_RESOLVER", &raw, &own)?;
         }
-        let psl = nginx_conf::Psl::parse(&read(&src.join(s.text("NGINX_PSL_FILE")?))?);
-        let hosts = nginx_conf::hosts(domains, &psl)?;
+        let hosts = cache_hosts(s, domains)?;
         let https = s.flag("HTTPS_ENABLED")?;
         for name in s.list("NGINX_TEMPLATES") {
             if !https && name.ends_with("https.conf") {
@@ -4336,9 +4344,7 @@ pub mod render {
         }
         grant(&ca_key, None, s.mode("CA_KEY_MODE")?)?;
         drop_stale_leaves(&ca_crt, &dir, &dir.join(s.text("CA_STAMP_FILE")?))?;
-        let tpl = PathBuf::from(s.text("NGINX_TEMPLATE_DIR")?);
-        let psl = nginx_conf::Psl::parse(&read(&tpl.join(s.text("NGINX_PSL_FILE")?))?);
-        let hosts = nginx_conf::hosts(&crate::cdn::effective(s)?, &psl)?;
+        let hosts = cache_hosts(s, &crate::cdn::effective(s)?)?;
         let mut want = hosts.certs();
         // What: default cert: DNS name and IP_HTTPS.
         // Why: clients without SNI or by IP get this cert.
