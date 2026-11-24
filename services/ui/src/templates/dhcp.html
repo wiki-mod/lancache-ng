@@ -381,7 +381,7 @@
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <input type="hidden" name="subnet_id" value="{{ subnet.id }}">
           {{ <text_field label={t.option_code} name="code" type="number" min={option_code_min} max={option_code_max} placeholder="66" required={true}/> }}
-          {{ <text_field label={t.value} name="data" placeholder={t.n_192_168_1_10_or_bootfile} required={true}/> }}
+          {{ <text_field label={t.value} name="data" placeholder={t.address_or_bootfile_example} required={true}/> }}
           <button type="submit" class="btn btn-slate">
             {{ t.add_option }}
           </button>
