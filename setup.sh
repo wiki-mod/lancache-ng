@@ -2960,7 +2960,7 @@ rollback_quickstart_migration() {
     done <<< "$copies"
     printf 'rolledback|%s\n' "$stamp" >> "$record" \
         || { print_error "Failed to record the rollback in $record (exit $?). Manual recovery required."; return 1; }
-    stack_compose "$old_dir" "$old_dir/.env" up -d \
+    stack_up "$old_dir" "$old_dir/.env" -d \
         || { print_error "Failed to restart the quickstart stack in $old_dir (exit $?). Manual recovery required."; return 1; }
     print_ok "The quickstart stack in $old_dir runs again"
 }
@@ -5349,7 +5349,7 @@ compose_stack_start() {
     compose_stack_or_skip "$install_dir" "Starting the stack" || return 0
     print_step "Starting stack"
     env_file=$(runtime_env_file_for_install_dir "$install_dir") || exit $?
-    stack_compose "$install_dir" "$env_file" up -d \
+    stack_up "$install_dir" "$env_file" -d \
         || print_warn "docker compose up failed (exit $?); start it with: $SCRIPT_DIR/setup.sh compose $install_dir up -d"
 }
 
@@ -6325,7 +6325,7 @@ proxy_health_path() {
 # Why: an open port may belong to another container
 # From: Issue #849
 _verify_healthz_endpoint() {
-    local ip="$1" proxy_container_id port
+    local proxy_svc="$1" ip="$2" proxy_container_id port
 
     port=$(prod_env_default PROXY_HTTP_PORT) || exit $?
     if ! _tcp_port_reachable "$ip" "$port"; then
@@ -6333,14 +6333,14 @@ _verify_healthz_endpoint() {
         return 1
     fi
 
-    proxy_container_id=$(service_container_id proxy) || exit $?
+    proxy_container_id=$(service_container_id "$proxy_svc") || exit $?
     if [[ -z "$proxy_container_id" ]]; then
-        print_error "Functional check failed: no running 'proxy' container to probe /healthz through"
+        print_error "Functional check failed: no running '$proxy_svc' container to probe /healthz through"
         return 1
     fi
 
     if ! _proxy_container_publishes_port "$proxy_container_id" "$ip" "$port"; then
-        print_error "Functional check failed: the 'proxy' container's own Docker port binding does not include ${ip}:${port} -- the published port may be mapped to a different service"
+        print_error "Functional check failed: the '$proxy_svc' container's own Docker port binding does not include ${ip}:${port} -- the published port may be mapped to a different service"
         return 1
     fi
 
@@ -6359,24 +6359,38 @@ _verify_healthz_endpoint() {
 # Why: healthy alone does not prove a real answer
 # From: Issue #1683 | PR #1858
 verify_stack_functional_health() {
-    local ip_http ip_https https_enabled test_fqdn resolved
+    local ip_http ip_https https_enabled test_fqdn resolved proxy_svc dns_svc probed
+    local -a probe=()
 
     ip_http=$(get_env_var IP_HTTP "$_UPDATE_ENV_FILE") || exit $?
     ip_https=$(get_env_var IP_HTTPS "$_UPDATE_ENV_FILE") || exit $?
     https_enabled=$(env_or_sot_default HTTPS_ENABLED "$_UPDATE_ENV_FILE") || exit $?
+    # What: only services that should run are probed
+    # Why: a service the user stopped must not fail the gate
+    # From: Issue #1683
+    proxy_svc=$(prod_env_default PROXY_SERVICE) || exit $?
+    dns_svc=$(prod_env_default DNS_SERVICE) || exit $?
+    wanted_stack_services probe "$_UPDATE_ENV_FILE" "$proxy_svc" "$dns_svc"
+    probed=" ${probe[*]} "
 
-    if [[ -n "$ip_http" ]]; then
-        _verify_healthz_endpoint "$ip_http" || return 1
-    fi
-    if [[ "$https_enabled" = "1" && -n "$ip_https" ]]; then
-        _verify_healthz_endpoint "$ip_https" || return 1
+    if [[ "$probed" != *" $proxy_svc "* ]]; then
+        print_skip "Proxy probe: $proxy_svc is in SERVICES_STOPPED"
+    else
+        if [[ -n "$ip_http" ]]; then
+            _verify_healthz_endpoint "$proxy_svc" "$ip_http" || return 1
+        fi
+        if [[ "$https_enabled" = "1" && -n "$ip_https" ]]; then
+            _verify_healthz_endpoint "$proxy_svc" "$ip_https" || return 1
+        fi
     fi
 
     # What: dig an exact, non-wildcard cdn-domains.txt host
     # Why: wildcard-only RPZ entries never match their apex
     # From: Issue #1149 | PR #1150
     test_fqdn=$(prod_env_default SETUP_DNS_PROBE_NAME) || exit $?
-    if [[ -n "$ip_http" ]]; then
+    if [[ "$probed" != *" $dns_svc "* ]]; then
+        print_skip "DNS probe: $dns_svc is in SERVICES_STOPPED"
+    elif [[ -n "$ip_http" ]]; then
         require_functional_check_tool dig "the DNS resolution probe" || return 1
         if ! resolved=$(dns_short_answer "$ip_http" "" A "$test_fqdn"); then
             print_error "Functional check failed: DNS did not resolve ${test_fqdn} via ${ip_http}: ${resolved}"
@@ -6422,20 +6436,23 @@ capture_stack_health_baseline() {
     done
 }
 
-# What: the services that run; no dhcp in mode off
-# Why: one owner for compose up and the health waits
+# What: the services of $@ that should run
+# Why: SERVICES_STOPPED and dhcp in mode off stay down
 # From: Issue #1683 | PR #2017
 wanted_stack_services() {
     local -n _wait_ref="$1"
     local env_file="$2"
     shift 2
-    local dhcp_svc dhcp_mode svc
+    local dhcp_svc dhcp_mode stopped svc
 
     dhcp_svc=$(prod_env_default DHCP_SERVICE) || exit $?
     dhcp_mode=$(env_or_sot_default DHCP_MODE "$env_file") || exit $?
+    stopped=$(get_env_var SERVICES_STOPPED "$env_file") || exit $?
+    stopped=" ${stopped//,/ } "
     _wait_ref=()
     for svc in "$@"; do
         [[ "$dhcp_mode" = "off" && "$svc" = "$dhcp_svc" ]] && continue
+        [[ "$stopped" != *" $svc "* ]] || continue
         _wait_ref+=("$svc")
     done
 }
@@ -6620,7 +6637,7 @@ apply_stack_update_ordered() {
     # From: Issue #1683 | PR #1858
     if [[ "${STACK_FIRST_PROD_START:-0}" = 1 ]]; then
         if stack_update_step "Starting the whole stack (first start)" "Failed to start the stack." \
-                stack_compose "$install_dir" "$_UPDATE_ENV_FILE" up -d --remove-orphans \
+                stack_up "$install_dir" "$_UPDATE_ENV_FILE" -d --remove-orphans \
             && stack_update_step "Verifying the whole stack is healthy" "The stack did not become healthy in time." \
                 wait_for_stack_health "$(( wait_services + wait_ui ))" "${all_services[@]}"; then
             print_ok "Whole stack verified healthy"
@@ -6633,11 +6650,11 @@ apply_stack_update_ordered() {
     # Why: earlier steps may already change containers
     # From: Issue #1683 | PR #1858
     if stack_update_step "Starting non-UI services" "Failed to start non-UI services." \
-            stack_compose "$install_dir" "$_UPDATE_ENV_FILE" up -d --remove-orphans "${non_ui_services[@]}" \
+            stack_up "$install_dir" "$_UPDATE_ENV_FILE" -d --remove-orphans "${non_ui_services[@]}" \
         && stack_update_step "Verifying non-UI services are healthy" "Non-UI services did not become healthy in time." \
             wait_for_stack_health "$wait_services" "${non_ui_services[@]}" \
         && stack_update_step "Starting Admin UI (last)" "Failed to start the Admin UI." \
-            stack_compose "$install_dir" "$_UPDATE_ENV_FILE" up -d --remove-orphans "$ui_svc" \
+            stack_up "$install_dir" "$_UPDATE_ENV_FILE" -d --remove-orphans "$ui_svc" \
         && stack_update_step "Verifying the whole stack is healthy" "Admin UI did not become healthy in time." \
             wait_for_stack_health "$wait_ui" "$ui_svc"; then
         print_ok "Whole stack verified healthy"
@@ -7190,26 +7207,57 @@ cmd_update() {
 # Why: units and operators start the stack exactly as setup
 # From: Issue #1683 | PR #1858
 cmd_compose() {
-    local install_dir env_file arg
-    local -a args=() listed=() picked=()
+    local install_dir env_file
     [[ $# -ge 1 ]] || die "Usage: setup.sh compose <install-dir> <compose args>"
     install_dir=$(resolve_stack_dir_checked "$1") || exit $?
     shift
     env_file=$(runtime_env_file_for_install_dir "$install_dir") || exit $?
-    args=("$@")
-    # What: a bare "up" skips dhcp while DHCP_MODE is off
-    # Why: converge must not start the dhcp the ui stopped
+    local arg
+    # What: a bare "up" goes through stack_up
+    # Why: a service the operator names is started as asked
     # From: Issue #1683
     if [[ "${1:-}" = "up" ]]; then
         for arg in "${@:2}"; do
             [[ "$arg" = -* ]] || { stack_compose "$install_dir" "$env_file" "$@"; return; }
         done
-        stack_services_into listed "$install_dir" "$env_file" \
-            || die "Cannot list the services of $install_dir (exit $?)."
-        wanted_stack_services picked "$env_file" "${listed[@]}"
-        (( ${#picked[@]} == ${#listed[@]} )) || args+=("${picked[@]}")
+        shift
+        stack_up "$install_dir" "$env_file" "$@"
+        return
     fi
-    stack_compose "$install_dir" "$env_file" "${args[@]}"
+    stack_compose "$install_dir" "$env_file" "$@"
+}
+
+# What: compose up; unwanted services are only created
+# Why: no start undoes a stop by the user or by DHCP off
+# From: Issue #1683
+stack_up() {
+    local install_dir="$1" env_file="$2" svc wanted_list
+    local -a flags=() services=() wanted=() idle=()
+    shift 2
+    while [[ $# -gt 0 && "$1" = -* ]]; do
+        flags+=("$1")
+        shift
+    done
+    services=("$@")
+    if (( ${#services[@]} == 0 )); then
+        stack_services_into services "$install_dir" "$env_file" || {
+            print_error "Cannot list the services of $install_dir (exit $?); nothing was started."
+            return 1
+        }
+    fi
+    wanted_stack_services wanted "$env_file" "${services[@]}"
+    wanted_list=" ${wanted[*]} "
+    for svc in "${services[@]}"; do
+        [[ "$wanted_list" == *" $svc "* ]] || idle+=("$svc")
+    done
+    # What: created with the current config, not started
+    # Why: the ui can only start a container that exists
+    # From: Issue #1683
+    if (( ${#idle[@]} > 0 )); then
+        stack_compose "$install_dir" "$env_file" up --no-start "${idle[@]}" || return $?
+    fi
+    (( ${#wanted[@]} > 0 )) || return 0
+    stack_compose "$install_dir" "$env_file" up "${flags[@]}" "${wanted[@]}"
 }
 
 # What: seconds of a systemd span like 90s, 5min or 1h
@@ -8353,7 +8401,7 @@ restore_update_ip_env() {
         print_error "Failed to write the previous $env_file back (exit $rc)."
         return 1
     fi
-    stack_compose "$install_dir" "$env_file" up -d || rc=$?
+    stack_up "$install_dir" "$env_file" -d || rc=$?
     if [[ "$rc" -ne 0 ]]; then
         print_error "Failed to restart the stack with the previous IPs (exit $rc)."
         return 1
@@ -8540,7 +8588,7 @@ restore_dns_upstream() {
     # What: starts dns and the ui with the new settings
     # Why: the ui renders the recursor files dns reads
     # From: Issue #1918
-    stack_compose "$install_dir" "$env_file" up -d "$dns_svc" "$ui_svc" || rc=$?
+    stack_up "$install_dir" "$env_file" -d "$dns_svc" "$ui_svc" || rc=$?
     if [[ "$rc" -ne 0 ]]; then
         print_error "Failed to restart $dns_svc and $ui_svc with the previous external DNS setting (exit $rc)."
         return 1
@@ -9350,7 +9398,7 @@ LANCACHE_IMAGE_REF_UI=${secondary_ui_ref}
 EOF
 
     print_step "Starting secondary DNS container"
-    stack_compose "$(realpath -m "$secondary_dir")" "$secondary_env_file" up -d \
+    stack_up "$(realpath -m "$secondary_dir")" "$secondary_env_file" -d \
         || die "Failed to start docker compose in ${secondary_dir}. Review Docker logs and the generated compose file."
 
     print_ok "Secondary DNS '${name}' is running. Configure this host's IP as DNS on your clients."
@@ -10451,7 +10499,7 @@ else
         printf "\n  Not started. Start later with: %s compose %s up -d\n\n" "$SCRIPT_DIR/setup.sh" "$INSTALL_DIR"
         exit 0
     fi
-    stack_compose "$INSTALL_DIR" "$ENV_FILE" up -d || die "Failed to start the stack in $INSTALL_DIR (exit $?)."
+    stack_up "$INSTALL_DIR" "$ENV_FILE" -d || die "Failed to start the stack in $INSTALL_DIR (exit $?)."
 fi
 print_ok "Stack started"
 
