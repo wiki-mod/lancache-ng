@@ -874,7 +874,6 @@ async fn snapshot(s: &Settings, api: &lancache_ng::pdns::Api, zone: &str) -> Res
     let rows = api.rrsets(zone).await?;
     let body = serde_json::to_vec(&rows).map_err(|e| e.to_string())?;
     let store = zone_store(s, zone)?;
-    std::fs::create_dir_all(&store.dir).map_err(|e| format!("{}: {e}", store.dir.display()))?;
     store.save(&body)?;
     Ok(())
 }
@@ -2030,7 +2029,6 @@ async fn kea_edit(
     cfg["Dhcp4"]["subnet4"] = Value::Array(subnets);
     api.set_config(cfg.clone()).await?;
     let store = kea_store(s)?;
-    std::fs::create_dir_all(&store.dir).map_err(|e| format!("{}: {e}", store.dir.display()))?;
     store.save(&serde_json::to_vec(&cfg).map_err(|e| e.to_string())?)?;
     Ok(())
 }

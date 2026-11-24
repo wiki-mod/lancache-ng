@@ -1982,10 +1982,6 @@ pub mod snapshot {
         // From: Issue #1683 | PR #1858
         pub fn save(&self, body: &[u8]) -> Result<String, String> {
             let id = crate::clock::unix_nanos().to_string();
-            if self.file.is_some() {
-                std::fs::create_dir_all(self.dir.join(&id))
-                    .map_err(|e| format!("snapshot {id}: {e}"))?;
-            }
             fs::write(&self.path(&id), body, 0o600, Place::Exclusive, self.owner)
                 .map_err(|e| format!("snapshot {id}: {e}"))?;
             self.prune()?;
