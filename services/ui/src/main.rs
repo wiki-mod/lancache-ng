@@ -2577,7 +2577,11 @@ async fn sample_services(app: &App, s: &Settings) -> Vec<String> {
         let row: Vec<String> = g
             .sources
             .iter()
-            .map(|x| vals.get(&x.oid).cloned().unwrap_or_else(|| "U".into()))
+            .map(|x| {
+                vals.get(&x.oid)
+                    .cloned()
+                    .unwrap_or_else(|| lancache_ng::rrd::UNKNOWN.into())
+            })
             .collect();
         errs.extend(store_row(s, g, row).await.err());
     }

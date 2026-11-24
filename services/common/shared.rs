@@ -4866,6 +4866,11 @@ pub mod rrd {
     // From: Issue #1683 | PR #1980
     pub const MACHINE: &str = "machine";
 
+    // What: the sample value rrdtool reads as unknown.
+    // Why: a missing sample leaves a gap, not a zero.
+    // From: Issue #1683 | PR #2017
+    pub const UNKNOWN: &str = "U";
+
     // What: Docker stats fields a container graph reads.
     // Why: names of the per-container values.
     // From: Issue #1683 | PR #1980
@@ -5015,7 +5020,7 @@ pub mod rrd {
             "blk_write" => blk("write"),
             _ => None,
         };
-        got.map_or_else(|| "U".into(), |n| n.to_string())
+        got.map_or_else(|| UNKNOWN.into(), |n| n.to_string())
     }
 
     // What: RRD file of one graph.
@@ -5064,7 +5069,7 @@ pub mod rrd {
     fn number_or_unknown(line: &str) -> String {
         match line.split_whitespace().next() {
             Some(v) if v.parse::<f64>().is_ok() => v.into(),
-            _ => "U".into(),
+            _ => UNKNOWN.into(),
         }
     }
 
