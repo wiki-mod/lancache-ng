@@ -1474,13 +1474,10 @@ pub mod docker {
                 Action::Reload => "kill?signal=HUP".to_string(),
             };
             let path = format!("/containers/{name}/{verb}");
-            match self.call(Method::POST, &path, None, limit).await {
-                // What: 304: it is already in that state.
-                // Why: mode off stops dhcp on every apply.
-                // From: Issue #1683 | PR #1980
-                Err(Error::Status(304)) => Ok(()),
-                r => r.map(drop),
-            }
+            // What: 304 is ok here; call() says so already.
+            // Why: mode off stops dhcp on every apply.
+            // From: Issue #1683 | PR #1980
+            self.call(Method::POST, &path, None, limit).await.map(drop)
         }
 
         // What: run a one-shot container to its end.
