@@ -1922,18 +1922,38 @@ _ci_pr_fingerprint_pair() {
     esac
 }
 
+# What: green mark ref of PR $1 and kind $2, or a glob.
+# Why: one place owns <prefix>/pr-<n>[-<kind>].
+# From: Issue #1683 | PR #2017
+_ci_green_ref_of() {
+    local prefix
+    prefix="$(_ci_variable CI_GREEN_REF)" || return 2
+    printf '%s/pr-%s%s' "${prefix}" "$1" "${2:+-$2}"
+}
+
+# What: PR number of green ref $1; rc 1 if it has none.
+# Why: gc-refs reads the number back from the name.
+# From: Issue #1683 | PR #2017
+_ci_green_ref_pr() {
+    local head n
+    head="$(_ci_green_ref_of "")" || return 2
+    n="${1#"${head}"}"
+    n="${n%%-*}"
+    [[ "${n}" =~ ^[1-9][0-9]*$ ]] || return 1
+    printf '%s' "${n}"
+}
+
 # What: ref of a green run mark of one PR; $1 a kind.
 # Why: one ref per PR and kind keeps one value each.
 # From: Issue #1683 | PR #1858
 _ci_green_ref() {
-    local prefix n kind="${1:-}"
+    local n kind="${1:-}"
     n="$(_ci_env_required PR_NUMBER)" || return 2
     if [[ ! "${n}" =~ ^[1-9][0-9]*$ ]]; then
         ci_log "[CI-ERROR-PLAN-0012]" "pr=\"${n}\" reason=\"PR_NUMBER is no PR number\""
         return 2
     fi
-    prefix="$(_ci_variable CI_GREEN_REF)" || return 2
-    printf '%s/pr-%s%s' "${prefix}" "${n}" "${kind:+-${kind}}"
+    _ci_green_ref_of "${n}" "${kind}"
 }
 
 # What: checks mark subject: tree, diff base, tools.
@@ -5153,9 +5173,16 @@ _ci_build_lock_busy() {
 # Why: a pair-wide ref let the nightly evict a PR's mark.
 # From: Issue #1683 | PR #1858
 _ci_verified_ref() {
+    _ci_pair_mark_ref CI_VERIFIED_REF "$1" "$2" "$3"
+}
+
+# What: mark ref of key $1 for a pair, digest $4 or none.
+# Why: one place owns <prefix>/<svc>-<plat>[-<digest>].
+# From: Issue #1683 | PR #2017
+_ci_pair_mark_ref() {
     local prefix
-    prefix="$(_ci_variable CI_VERIFIED_REF)" || return 2
-    printf '%s/%s-%s-%s' "${prefix}" "$1" "${2//\//-}" "${3#sha256:}"
+    prefix="$(_ci_variable "$1")" || return 2
+    printf '%s/%s-%s%s' "${prefix}" "$2" "${3//\//-}" "${4:+-${4#sha256:}}"
 }
 
 # What: note a verified mark carries for one digest.
@@ -8542,9 +8569,8 @@ _ci_scan_identity() {
 # Why: a pair-wide ref let another run evict the mark.
 # From: Issue #1683 | PR #1858
 _ci_scan_mark() {
-    local prefix ref note
-    prefix="$(_ci_variable CI_SCANNED_REF)" || return 2
-    ref="${prefix}/$1-${2//\//-}-${3#sha256:}"
+    local ref note
+    ref="$(_ci_pair_mark_ref CI_SCANNED_REF "$1" "$2" "$3")" || return 2
     note="scanned $1 $2 $3 $4"
     if [ "$5" = has ]; then
         _ci_mark_listed CI_SCANNED_REF "${ref}" "${note}"
@@ -11744,10 +11770,10 @@ _ci_gc_release_tags() {
 # Why: a cheap ls-remote shows a changed mark.
 # From: Issue #1683
 _ci_gc_pr_mark_shas() {
-    local remote prefix
+    local remote marks
     remote="$(_ci_git_remote)" || return 2
-    prefix="$(_ci_variable CI_GREEN_REF)" || return 2
-    _ci_capture 0 git ls-remote --refs "${remote}" "${prefix}/pr-*-images"
+    marks="$(_ci_green_ref_of '*' images)" || return 2
+    _ci_capture 0 git ls-remote --refs "${remote}" "${marks}"
 }
 
 # What: service, tab, digest of each marked PR image.
@@ -12405,7 +12431,7 @@ _ci_gc_ref_reap() {
 # From: Issue #1683 | PR #1858
 ci_cmd_gc_refs() {
     local mode remote prefix repo refs sha ref n state holder rc keep=0 del=0 deleted=0
-    local build_lock promote_lock kind marks svc plat dig out auth=""
+    local build_lock promote_lock kind marks svc plat dig out auth="" form old want
     local -A mark_subj=()
     _ci_gc_mode GC-0036 gc-refs "$@" || return 2
     mode="${REPLY}"
@@ -12415,10 +12441,11 @@ ci_cmd_gc_refs() {
     refs="$(_ci_capture 0 git ls-remote --refs "${remote}" "${prefix}/*")" || return 2
     while IFS=$'\t' read -r sha ref; do
         [ -n "${ref}" ] || continue
-        n="${ref#"${prefix}/pr-"}"
-        n="${n%%-*}"
-        if [[ ! "${n}" =~ ^[1-9][0-9]*$ ]]; then
-            ci_log "[CI-ERROR-GC-0037]" "ref=\"${ref}\" reason=\"not of the form ${prefix}/pr-<number>[-<kind>]\""
+        rc=0; n="$(_ci_green_ref_pr "${ref}")" || rc=$?
+        [ "${rc}" -le 1 ] || return 2
+        if [ "${rc}" -eq 1 ]; then
+            form="$(_ci_green_ref_of '<number>')" || return 2
+            ci_log "[CI-ERROR-GC-0037]" "ref=\"${ref}\" reason=\"not of the form ${form}[-<kind>]\""
             return 2
         fi
         if ! state="$(_ci_retry github-read gh api --jq .state "repos/${repo}/pulls/${n}")"; then
@@ -12506,9 +12533,11 @@ ci_cmd_gc_refs() {
             # What: only the pair-wide name is old_format.
             # Why: an unknown name may be a newer schema.
             # From: Issue #1683
-            if [ "${ref}" = "${prefix}/${svc}-${plat//\//-}" ]; then
+            old="$(_ci_pair_mark_ref "${kind}" "${svc}" "${plat}")" || return 2
+            want="$(_ci_pair_mark_ref "${kind}" "${svc}" "${plat}" "${dig}")" || return 2
+            if [ "${ref}" = "${old}" ]; then
                 state=old_format
-            elif [ "${ref}" != "${prefix}/${svc}-${plat//\//-}-${dig#sha256:}" ]; then
+            elif [ "${ref}" != "${want}" ]; then
                 ci_log "[CI-ERROR-GC-0066]" "ref=\"${ref}\" subject=\"${mark_subj["${ref}"]}\" reason=\"mark name in no known format; neither kept nor deleted\""
                 return 2
             else
