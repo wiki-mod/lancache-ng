@@ -3,7 +3,7 @@
 //! SPDX-License-Identifier: AGPL-3.0-or-later
 //! What: cachehamster: prefill queue, Steam QR and depots.
 //! Why: warm the proxy cache now, later or on a schedule.
-//! From: Issue #871 | PR #1858
+//! From: Issue #871 | PR #1980
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -14,7 +14,7 @@ use std::time::Duration;
 use base64::Engine as _;
 use futures_util::{StreamExt, stream};
 use lancache_ng::config::{Settings, process_env};
-use lancache_ng::fs::{Owner, Place, write};
+use lancache_ng::fs::{Owner, PRIVATE_MODE, Place, write};
 use lancache_ng::{clock, http, secret};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -22,12 +22,12 @@ use tokio::sync::Mutex;
 
 // What: env var naming the saved settings file.
 // Why: same lookup as ui and watchdog.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 const SETTINGS_FILE_ENV: &str = "LANCACHE_SETTINGS_FILE";
 
 // What: file names below CACHEHAMSTER_DATA_DIR.
 // Why: the daemon owns jobs; commands drop inbox files.
-// From: Issue #871 | PR #1858
+// From: Issue #871 | PR #1980
 const KEY_FILE: &str = "session.key";
 const TOKEN_FILE: &str = "session.sealed";
 const BIND_FILE: &str = "session.bind";
@@ -36,14 +36,9 @@ const JOBS_FILE: &str = "jobs.json";
 const INBOX_DIR: &str = "inbox";
 const DEPOTS_DIR: &str = "depots";
 
-// What: file mode of every file written here.
-// Why: the session token and jobs are owner-only.
-// From: Issue #871 | PR #1858
-const MODE: u32 = 0o600;
-
 // What: when a job may run.
-// Why: DoMe: download now, later or scheduled.
-// From: Issue #871 | PR #1858
+// Why: a download runs now, later or on a schedule.
+// From: Issue #871 | PR #1980
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "at")]
 enum When {
@@ -54,7 +49,7 @@ enum When {
 
 // What: what a job fetches.
 // Why: plain URLs or a Steam app of the owned library.
-// From: Issue #871 | PR #1858
+// From: Issue #871 | PR #1980
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "value")]
 enum Target {
@@ -64,7 +59,7 @@ enum Target {
 
 // What: lifecycle state of one job.
 // Why: the UI shows it; Blocked names a missing part.
-// From: Issue #871 | PR #1858
+// From: Issue #871 | PR #1980
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "state", content = "reason")]
 enum State {
@@ -78,7 +73,7 @@ enum State {
 
 // What: one prefill job as kept in jobs.json.
 // Why: survives restarts; the daemon is its only writer.
-// From: Issue #871 | PR #1858
+// From: Issue #871 | PR #1980
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Job {
     id: String,
@@ -96,12 +91,12 @@ struct Job {
     #[serde(default)]
     history: Vec<Event>,
     // What: bytes to fetch, from the depot manifests.
-    // Why: DoMe 07.11.: show the preload size up front.
+    // Why: the preload size is shown up front.
     // From: Issue #871 | PR #1985
     #[serde(default)]
     size: u64,
     // What: depots Steam refused, with the reason.
-    // Why: DoMe 07.11.: Portal depot 401 left out unseen.
+    // Why: a refused depot must not vanish unseen.
     // From: Issue #871 | PR #1985
     #[serde(default)]
     skipped: Vec<String>,
@@ -134,7 +129,7 @@ impl Job {
 
 // What: an inbox entry written by a command.
 // Why: one writer for jobs.json; no lock across processes.
-// From: Issue #871 | PR #1858
+// From: Issue #871 | PR #1980
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "op")]
 enum Order {
@@ -156,7 +151,7 @@ enum Order {
 
 // What: a login started by login-begin, not yet done.
 // Why: login-poll needs both ids across processes.
-// From: Issue #871 | PR #1858
+// From: Issue #871 | PR #1980
 #[derive(Serialize, Deserialize)]
 struct Pending {
     client_id: String,
@@ -165,8 +160,8 @@ struct Pending {
 }
 
 // What: the sealed Steam session kept on disk.
-// Why: DoMe ACK: only an encrypted session token is kept.
-// From: Issue #871 | PR #1858
+// Why: only an encrypted session token is kept.
+// From: Issue #871 | PR #1980
 #[derive(Serialize, Deserialize)]
 struct Session {
     account: String,
@@ -181,7 +176,7 @@ struct Session {
 
 // What: paths and settings for one invocation.
 // Why: every command reads the same SOT keys.
-// From: Issue #871 | PR #1858
+// From: Issue #871 | PR #1980
 struct Ctx {
     s: Settings,
     dir: PathBuf,
@@ -190,6 +185,9 @@ struct Ctx {
 }
 
 impl Ctx {
+    // What: settings, data folder, API base, bind list.
+    // Why: every part of the service reads them once.
+    // From: Issue #871 | PR #1980
     fn load() -> Result<Self, String> {
         let saved = process_env(SETTINGS_FILE_ENV).map(PathBuf::from);
         let s = Settings::load(&process_env, saved.as_deref())?;
@@ -199,15 +197,21 @@ impl Ctx {
         Ok(Self { s, dir, api, bind })
     }
 
+    // What: a file name inside the data folder.
+    // Why: all state files live in one folder.
+    // From: Issue #871 | PR #1980
     fn path(&self, name: &str) -> PathBuf {
         self.dir.join(name)
     }
 
+    // What: writes a state file by replacing it.
+    // Why: a reader never sees a half file.
+    // From: Issue #871 | PR #1980
     fn save(&self, name: &str, body: &[u8]) -> Result<(), String> {
         write(
             &self.path(name),
             body,
-            MODE,
+            PRIVATE_MODE,
             Place::Replace,
             Owner::default(),
         )
@@ -217,7 +221,7 @@ impl Ctx {
 
 // What: a JSON file, or None when it does not exist.
 // Why: a missing file is a normal first state.
-// From: Issue #871 | PR #1858
+// From: Issue #871 | PR #1980
 fn read_json<T: for<'a> Deserialize<'a>>(path: &Path) -> Result<Option<T>, String> {
     match std::fs::read(path) {
         Ok(raw) => serde_json::from_slice(&raw)
@@ -230,18 +234,14 @@ fn read_json<T: for<'a> Deserialize<'a>>(path: &Path) -> Result<Option<T>, Strin
 
 // What: remove a file; a missing file is fine.
 // Why: logout and login cleanup must not hide IO errors.
-// From: Issue #871 | PR #1858
+// From: Issue #871 | PR #1980
 fn remove(path: &Path) -> Result<(), String> {
-    match std::fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(format!("{}: {e}", path.display())),
-    }
+    lancache_ng::fs::remove_if_present(path).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 // What: the 32-byte key that seals the session token.
 // Why: created once in the data dir, mode 0600.
-// From: Issue #871 | PR #1858
+// From: Issue #871 | PR #1980
 fn session_key(dir: &Path) -> Result<[u8; 32], String> {
     let hex = secret::load_or_create(
         &dir.join(KEY_FILE),
@@ -253,7 +253,7 @@ fn session_key(dir: &Path) -> Result<[u8; 32], String> {
 }
 
 // What: one machine feature, trimmed; None if unusable.
-// Why: DoMe 08.11.: use what is there, skip the rest.
+// Why: use what the machine offers, skip the rest.
 // From: Issue #871
 fn feature(path: &str) -> Option<Vec<u8>> {
     let raw = std::fs::read(path).ok()?;
@@ -277,7 +277,7 @@ fn bound_key(dir: &Path, bind: &[String], fresh: bool) -> Result<[u8; 32], Strin
             .cloned()
             .collect();
         let body = serde_json::to_vec(&names).map_err(|e| e.to_string())?;
-        write(&path, &body, MODE, Place::Replace, Owner::default())
+        write(&path, &body, PRIVATE_MODE, Place::Replace, Owner::default())
             .map_err(|e| format!("{BIND_FILE}: {e}"))?;
         names
     } else {
@@ -317,7 +317,7 @@ fn load_session(dir: &Path, bind: &[String]) -> Result<Option<Session>, String> 
 
 // What: seal and store a session.
 // Why: single writer of the token file.
-// From: Issue #871 | PR #1858
+// From: Issue #871 | PR #1980
 fn store_session(c: &Ctx, session: &Session) -> Result<(), String> {
     let plain = serde_json::to_vec(session).map_err(|e| e.to_string())?;
     c.save(
@@ -328,7 +328,7 @@ fn store_session(c: &Ctx, session: &Session) -> Result<(), String> {
 
 // What: POST a form to a Steam Web API method.
 // Why: one owner for URL, error text and the response key.
-// From: Issue #871 | PR #1858
+// From: Issue #871 | PR #1980
 async fn steam_post(
     client: &reqwest::Client,
     c: &Ctx,
@@ -358,7 +358,7 @@ async fn steam_post(
 
 // What: GET a Steam Web API method with query values.
 // Why: read-only service calls use GET.
-// From: Issue #871 | PR #1858
+// From: Issue #871 | PR #1980
 async fn steam_get(
     client: &reqwest::Client,
     c: &Ctx,
@@ -382,7 +382,7 @@ async fn steam_get(
 
 // What: a string field of a Steam response.
 // Why: Steam sends 64-bit ids as strings.
-// From: Issue #871 | PR #1858
+// From: Issue #871 | PR #1980
 fn field(v: &Value, key: &str) -> Option<String> {
     match v.get(key)? {
         Value::String(s) => Some(s.clone()),
@@ -393,7 +393,7 @@ fn field(v: &Value, key: &str) -> Option<String> {
 
 // What: the SteamID from the refresh token (JWT sub).
 // Why: GetOwnedGames and token refresh need it.
-// From: Issue #871 | PR #1858
+// From: Issue #871 | PR #1980
 fn steam_id_of(token: &str) -> Result<String, String> {
     field(&jwt_claims(token)?, "sub").ok_or_else(|| "refresh token has no sub".into())
 }
@@ -414,7 +414,7 @@ fn jwt_claims(token: &str) -> Result<Value, String> {
 
 // What: the QR code of a challenge URL as inline SVG.
 // Why: the UI embeds it; no image file, no CDN.
-// From: Issue #871 | PR #1858
+// From: Issue #871 | PR #1980
 fn qr_svg(url: &str, size: u32) -> Result<String, String> {
     let code = qrcode::QrCode::new(url.as_bytes()).map_err(|e| format!("QR: {e}"))?;
     Ok(code
@@ -425,19 +425,19 @@ fn qr_svg(url: &str, size: u32) -> Result<String, String> {
 
 // What: QR edge length in pixels, from the SOT.
 // Why: no size literal in code.
-// From: Issue #871 | PR #1858
+// From: Issue #871 | PR #1980
 fn qr_size(c: &Ctx) -> Result<u32, String> {
-    u32::try_from(c.s.uint("STEAM_QR_SIZE")?).map_err(|e| e.to_string())
+    c.s.num::<u32>("STEAM_QR_SIZE")
 }
 
 // What: start a QR login; answers the QR as SVG.
-// Why: DoMe ACK: QR login is the primary login path.
-// From: Issue #871 | PR #1858
+// Why: QR login is the primary login path.
+// From: Issue #871 | PR #1980
 async fn login_begin(c: &Ctx, client: &reqwest::Client) -> Result<Value, String> {
     let device = c.s.text("STEAM_DEVICE_NAME")?;
 
     // What: login as the Steam client platform (SOT).
-    // Why: live 05.11.: CM refused mobile tokens (5).
+    // Why: the CM refuses tokens of a mobile login.
     // From: Issue #871 | PR #1980
     let platform = c.s.uint("STEAM_AUTH_PLATFORM_TYPE")?.to_string();
     let r = steam_post(
@@ -468,7 +468,7 @@ async fn login_begin(c: &Ctx, client: &reqwest::Client) -> Result<Value, String>
 
 // What: one poll of a pending QR login.
 // Why: on approval the refresh token is sealed at once.
-// From: Issue #871 | PR #1858
+// From: Issue #871 | PR #1980
 async fn login_poll(c: &Ctx, client: &reqwest::Client) -> Result<Value, String> {
     let Some(mut p) = read_json::<Pending>(&c.path(PENDING_FILE))? else {
         return Ok(json!({"state": "idle"}));
@@ -493,6 +493,7 @@ async fn login_poll(c: &Ctx, client: &reqwest::Client) -> Result<Value, String> 
     }
     // What: Steam rotates the QR after a while.
     // Why: the UI must show the new code, not a dead one.
+    // From: Issue #871 | PR #1980
     if let Some(new_id) = field(&r, "new_client_id") {
         p.client_id = new_id;
         c.save(
@@ -514,15 +515,16 @@ async fn login_poll(c: &Ctx, client: &reqwest::Client) -> Result<Value, String> 
 
 // What: a short-lived access token from the session.
 // Why: Web API calls need it; a renewed one is not kept.
-// From: Issue #871 | PR #1858
+// From: Issue #871 | PR #1980
 async fn access_token(c: &Ctx, client: &reqwest::Client, s: &Session) -> Result<String, String> {
-    // What: the sealed token while it lives a minute more.
+    // What: the sealed token while it lives long enough.
     // Why: CM login needs a client token; see login_begin.
     // From: Issue #871 | PR #1980
+    let margin = c.s.uint("STEAM_TOKEN_MARGIN_SECONDS")?;
     let live = jwt_claims(&s.access_token)
         .ok()
         .and_then(|j| j.get("exp").and_then(Value::as_u64))
-        .is_some_and(|exp| exp > clock::unix_secs() + 60);
+        .is_some_and(|exp| exp > clock::unix_secs().saturating_add(margin));
     if live {
         return Ok(s.access_token.clone());
     }
@@ -542,7 +544,7 @@ async fn access_token(c: &Ctx, client: &reqwest::Client, s: &Session) -> Result<
 
 // What: the owned games of the logged-in account.
 // Why: the library tab picks apps from this list.
-// From: Issue #871 | PR #1858
+// From: Issue #871 | PR #1980
 async fn library(c: &Ctx, client: &reqwest::Client) -> Result<Value, String> {
     let s = load_session(&c.dir, &c.bind)?.ok_or("not logged in")?;
     let token = access_token(c, client, &s).await?;
@@ -572,7 +574,7 @@ async fn library(c: &Ctx, client: &reqwest::Client) -> Result<Value, String> {
 
 // What: queue an order for the daemon.
 // Why: unique names; the daemon reads them in order.
-// From: Issue #871 | PR #1858
+// From: Issue #871 | PR #1980
 fn submit(c: &Ctx, order: &Order) -> Result<Value, String> {
     let name = format!("{}-{}.json", clock::unix_nanos(), secret::random_hex(4));
     let body = serde_json::to_vec(order).map_err(|e| e.to_string())?;
@@ -582,7 +584,7 @@ fn submit(c: &Ctx, order: &Order) -> Result<Value, String> {
 
 // What: parse the add command arguments.
 // Why: add <name> <now|later|at:UNIX> <app:ID|url,url>.
-// From: Issue #871 | PR #1858
+// From: Issue #871 | PR #1980
 fn parse_add(args: &[String]) -> Result<Order, String> {
     let [name, when, what] = args else {
         return Err("usage: add <name> <now|later|at:UNIX> <app:ID|URL,URL>".into());
@@ -629,7 +631,7 @@ fn parse_add(args: &[String]) -> Result<Order, String> {
 
 // What: the status for the UI: login and jobs.
 // Why: one JSON answer per page refresh.
-// From: Issue #871 | PR #1858
+// From: Issue #871 | PR #1980
 fn status(c: &Ctx) -> Result<Value, String> {
     // What: an unusable login shows as logged out.
     // Why: the page then offers the QR login again.
@@ -671,7 +673,7 @@ fn status(c: &Ctx) -> Result<Value, String> {
 
 // What: apply inbox orders to the job list.
 // Why: the daemon is the single writer of jobs.json.
-// From: Issue #871 | PR #1858
+// From: Issue #871 | PR #1980
 fn take_inbox(c: &Ctx, jobs: &mut Vec<Job>, consume: bool) -> Result<(), String> {
     let dir = c.path(INBOX_DIR);
     let mut names: Vec<PathBuf> = match std::fs::read_dir(&dir) {
@@ -697,7 +699,7 @@ fn take_inbox(c: &Ctx, jobs: &mut Vec<Job>, consume: bool) -> Result<(), String>
 
 // What: one order applied to the list.
 // Why: start lifts a later job; cancel stops a running one.
-// From: Issue #871 | PR #1858
+// From: Issue #871 | PR #1980
 fn apply_order(jobs: &mut Vec<Job>, order: Order) {
     match order {
         Order::Add { name, target, when } => {
@@ -745,7 +747,7 @@ fn apply_order(jobs: &mut Vec<Job>, order: Order) {
 }
 
 // What: the shared bandwidth limit of all jobs.
-// Why: DoMe 26.10. (Fund 92): limit the bandwidth.
+// Why: the jobs must not use the whole line.
 // From: Issue #871 | PR #1980
 static PACE: std::sync::OnceLock<Pace> = std::sync::OnceLock::new();
 
@@ -756,7 +758,7 @@ struct Pace {
 
 impl Pace {
     // What: each file books its time after the last one.
-    // Why: live 05.11.: idle time built credit, 47 Mbit/s.
+    // Why: idle time must not build up credit.
     // From: Issue #871 | PR #1980
     async fn wait(&self, got: u64) {
         let cost = Duration::from_secs_f64(got as f64 / self.bytes_per_sec as f64);
@@ -773,7 +775,7 @@ impl Pace {
 }
 
 // What: daily window HH:MM-HH:MM; may cross midnight.
-// Why: DoMe 26.10. (Fund 92): from when until when.
+// Why: downloads run from one time until another.
 // From: Issue #871 | PR #1980
 fn window(text: &str) -> Result<(u32, u32), String> {
     let mins = |t: &str| -> Option<u32> {
@@ -793,11 +795,9 @@ fn in_window((from, to): (u32, u32)) -> bool {
     if to.abs_diff(from) == 1440 || from == to {
         return true;
     }
-    let now = std::process::Command::new("date")
-        .arg("+%H %M")
-        .output()
+    let now = lancache_ng::tool::run(std::process::Command::new("date").arg("+%H %M"))
         .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .and_then(|out| String::from_utf8(out).ok())
         .and_then(|t| {
             let (h, m) = t.trim().split_once(' ')?;
             Some(h.parse::<u32>().ok()? * 60 + m.parse::<u32>().ok()?)
@@ -811,7 +811,7 @@ fn in_window((from, to): (u32, u32)) -> bool {
 
 // What: true when a waiting job may start now.
 // Why: later waits for Start; At waits for its time.
-// From: Issue #871 | PR #1858
+// From: Issue #871 | PR #1980
 fn is_due(job: &Job, now: u64) -> bool {
     job.state == State::Waiting
         && match job.when {
@@ -823,7 +823,7 @@ fn is_due(job: &Job, now: u64) -> bool {
 
 // What: count one finished fetch into its job.
 // Why: false stops the job after a cancel.
-// From: Issue #871 | PR #1858
+// From: Issue #871 | PR #1980
 async fn count(jobs: &Mutex<Vec<Job>>, id: &str, rate: &AtomicU64, got: Option<u64>) -> bool {
     let mut list = jobs.lock().await;
     let Some(j) = list.iter_mut().find(|j| j.id == id) else {
@@ -840,11 +840,102 @@ async fn count(jobs: &Mutex<Vec<Job>>, id: &str, rate: &AtomicU64, got: Option<u
     j.state != State::Cancelled
 }
 
+// What: every download host resolves to the proxy.
+// Why: the proxy caches; the host DNS is never asked.
+// From: Issue #871 | PR #2017
+struct ToProxy(String);
+
+impl reqwest::dns::Resolve for ToProxy {
+    // What: answers every name with the proxy.
+    // Why: reqwest asks this, not the system DNS.
+    // From: Issue #871 | PR #2017
+    fn resolve(&self, _: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let proxy = self.0.clone();
+        Box::pin(async move {
+            let addrs: Vec<std::net::SocketAddr> = tokio::net::lookup_host((proxy.as_str(), 0))
+                .await?
+                .collect();
+            if addrs.is_empty() {
+                return Err(format!("{proxy}: no address").into());
+            }
+            Ok(Box::new(addrs.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
+}
+
+// What: the one way every download takes to the cache.
+// Why: AG-CODE-011: Steam, URL jobs and later stores.
+// From: Issue #871 | PR #2017
+#[derive(Clone)]
+struct Dl {
+    client: reqwest::Client,
+    http: u16,
+    https: u16,
+}
+
+impl Dl {
+    // What: client to the proxy container; trusts our CA.
+    // Why: a direct client saves the docker-proxy load.
+    // From: Issue #871 | PR #2017
+    fn load(s: &Settings, connections: usize) -> Result<Self, String> {
+        let port = |k: &str| s.num::<u16>(k);
+        // What: no total timeout; public roots stay.
+        // Why: a body may stream for hours; others pass.
+        // From: Issue #871 | PR #2017
+        let mut builder = reqwest::Client::builder()
+            .dns_resolver(Arc::new(ToProxy(s.text("CONTAINER_NAME_PROXY")?)))
+            .pool_max_idle_per_host(connections);
+        let ca = lancache_ng::render::ca_cert(s)?;
+        match std::fs::read(&ca) {
+            Ok(pem) => {
+                let cert = reqwest::Certificate::from_pem(&pem)
+                    .map_err(|e| format!("{}: {e}", ca.display()))?;
+                builder = builder.tls_certs_merge([cert]);
+            }
+            // What: no CA yet: logged; https then fails.
+            // Why: the ui issues it only in HTTPS mode.
+            // From: Issue #871 | PR #2017
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                eprintln!("cachehamster: no stack CA {}; https fails", ca.display());
+            }
+            Err(e) => return Err(format!("{}: {e}", ca.display())),
+        }
+        let client = builder
+            .build()
+            .map_err(|e| format!("download client: {e}"))?;
+        Ok(Self {
+            client,
+            http: port("PROXY_HTTP_PORT")?,
+            https: port("PROXY_HTTPS_PORT")?,
+        })
+    }
+
+    // What: the URL on the proxy port of its scheme.
+    // Why: SOT ports; a foreign port never reaches it.
+    // From: Issue #871 | PR #2017
+    fn url(&self, raw: &str) -> Result<reqwest::Url, String> {
+        let mut u = reqwest::Url::parse(raw).map_err(|e| format!("{raw}: {e}"))?;
+        let port = match u.scheme() {
+            "http" => self.http,
+            "https" => self.https,
+            other => return Err(format!("{raw}: scheme {other} is not http or https")),
+        };
+        if u.port().is_some() {
+            return Err(format!(
+                "{raw}: own port; only standard ports reach the cache"
+            ));
+        }
+        u.set_port(Some(port))
+            .map_err(|()| format!("{raw}: no port possible"))?;
+        Ok(u)
+    }
+}
+
 // What: run one URL job with many connections.
 // Why: bytes are read and dropped (RAM sink, no disk).
-// From: Issue #871 | PR #1858
+// From: Issue #871 | PR #1980
 async fn run_urls(
-    client: reqwest::Client,
+    dl: Dl,
     urls: Vec<String>,
     connections: usize,
     jobs: Arc<Mutex<Vec<Job>>>,
@@ -853,8 +944,8 @@ async fn run_urls(
 ) -> State {
     let mut fetches = stream::iter(urls)
         .map(|url| {
-            let client = client.clone();
-            tokio::spawn(async move { http::drain(&client, &url).await })
+            let dl = dl.clone();
+            tokio::spawn(async move { http::drain(&dl.client, dl.url(&url)?.as_str()).await })
         })
         .buffer_unordered(connections);
     while let Some(joined) = fetches.next().await {
@@ -889,7 +980,7 @@ async fn run_urls(
 
 // What: what the Steam step needs, cloned per job.
 // Why: a job task outlives the daemon round.
-// From: Issue #871 | PR #1858
+// From: Issue #871 | PR #1980
 #[derive(Clone)]
 struct SteamCfg {
     dir: PathBuf,
@@ -899,18 +990,20 @@ struct SteamCfg {
     manifest_api: u64,
     cell: String,
     heartbeat: Duration,
-    // protocol version, package version, OS type, chat mode
+    // What: logon values: protocol, package, OS, chat mode.
+    // Why: the logon message reads them by index.
+    // From: Issue #871 | PR #1980
     logon: [u64; 4],
     cdn_host: String,
-    proxy: std::net::SocketAddr,
-    proxy_name: String,
     branch: String,
     os: String,
 }
 
 impl SteamCfg {
+    // What: the Steam values of the SOT, read once.
+    // Why: a missing key fails before any login.
+    // From: Issue #871 | PR #1980
     fn load(c: &Ctx) -> Result<Self, String> {
-        let addr = format!("{}:{}", c.s.text("IP_HTTP")?, c.s.uint("PROXY_HTTP_PORT")?);
         Ok(Self {
             dir: c.dir.clone(),
             bind: c.bind.clone(),
@@ -926,40 +1019,15 @@ impl SteamCfg {
                 c.s.uint("STEAM_CHAT_MODE")?,
             ],
             cdn_host: c.s.text("STEAM_CDN_HOST")?,
-            proxy: addr.parse().map_err(|e| format!("{addr}: {e}"))?,
-            proxy_name: format!(
-                "{}:{}",
-                c.s.text("CONTAINER_NAME_PROXY")?,
-                c.s.uint("PROXY_HTTP_PORT")?
-            ),
             branch: c.s.text("STEAM_BRANCH")?,
             os: c.s.text("STEAM_OS")?,
         })
-    }
-
-    // What: a client that sends the CDN host to the proxy.
-    // Why: the proxy caches by Host; DNS is not needed.
-    fn client(&self) -> Result<reqwest::Client, String> {
-        // What: the proxy container on the Docker network.
-        // Why: DoMe 07.11.: docker-proxy cost 17 % CPU.
-        // From: Issue #871 | PR #1985
-        use std::net::ToSocketAddrs;
-        let proxy = self
-            .proxy_name
-            .to_socket_addrs()
-            .ok()
-            .and_then(|mut a| a.next())
-            .unwrap_or(self.proxy);
-        reqwest::Client::builder()
-            .resolve(&self.cdn_host, proxy)
-            .build()
-            .map_err(|e| format!("CDN client: {e}"))
     }
 }
 
 // What: a minimal text KeyValues (VDF) tree.
 // Why: PICS app info arrives as text KeyValues.
-// From: Issue #871 | PR #1858
+// From: Issue #871 | PR #1980
 #[derive(Debug, Default)]
 struct Kv(Vec<(String, KvValue)>);
 
@@ -970,6 +1038,9 @@ enum KvValue {
 }
 
 impl Kv {
+    // What: the value of a key, case ignored.
+    // Why: Steam writes key names in mixed case.
+    // From: Issue #871 | PR #1980
     fn get(&self, key: &str) -> Option<&KvValue> {
         self.0
             .iter()
@@ -977,6 +1048,9 @@ impl Kv {
             .map(|(_, v)| v)
     }
 
+    // What: the sub-node of a key, if it is one.
+    // Why: callers walk the tree without a match.
+    // From: Issue #871 | PR #1980
     fn node(&self, key: &str) -> Option<&Kv> {
         match self.get(key)? {
             KvValue::Node(n) => Some(n),
@@ -984,6 +1058,9 @@ impl Kv {
         }
     }
 
+    // What: the text of a key, if it is one.
+    // Why: callers read a leaf without a match.
+    // From: Issue #871 | PR #1980
     fn text(&self, key: &str) -> Option<&str> {
         match self.get(key)? {
             KvValue::Text(t) => Some(t),
@@ -1003,7 +1080,7 @@ enum Tok {
 
 // What: parse quoted tokens and braces into a Kv tree.
 // Why: only the subset Steam sends; escapes are kept.
-// From: Issue #871 | PR #1858
+// From: Issue #871 | PR #1980
 fn parse_kv(text: &str) -> Result<Kv, String> {
     let mut tokens: Vec<Tok> = Vec::new();
     let mut chars = text.chars().peekable();
@@ -1075,7 +1152,7 @@ fn depot_gid(d: &Kv, cfg: &SteamCfg) -> Option<u64> {
 type Depots = (Vec<(u32, u64)>, Vec<(u32, u32)>);
 
 // What: split the depots of one app.
-// Why: DoMe 07.11.: TFC 59 MB; HL base was skipped.
+// Why: shared depots of a base app must not be skipped.
 // From: Issue #871 | PR #1985
 fn depots_of(app: &Kv, cfg: &SteamCfg) -> Depots {
     let (mut own, mut borrowed) = (Vec::new(), Vec::new());
@@ -1097,7 +1174,7 @@ fn depots_of(app: &Kv, cfg: &SteamCfg) -> Depots {
 
 // What: a decoded protobuf field value.
 // Why: few Steam messages; coded by hand, no generator.
-// From: Issue #871 | PR #1858
+// From: Issue #871 | PR #1980
 #[derive(Clone, Debug)]
 enum Pb {
     Int(u64),
@@ -1106,11 +1183,14 @@ enum Pb {
 
 // What: protobuf writer for the fields Steam needs.
 // Why: varint, fixed32, fixed64 and length-delimited.
-// From: Issue #871 | PR #1858
+// From: Issue #871 | PR #1980
 #[derive(Default)]
 struct PbOut(Vec<u8>);
 
 impl PbOut {
+    // What: appends a base-128 varint.
+    // Why: tags and integers use this encoding.
+    // From: Issue #871 | PR #1980
     fn varint(&mut self, mut v: u64) {
         while v >= 0x80 {
             self.0.push((v as u8) | 0x80);
@@ -1118,21 +1198,33 @@ impl PbOut {
         }
         self.0.push(v as u8);
     }
+    // What: appends a varint field (wire type 0).
+    // Why: the tag carries field number and type.
+    // From: Issue #871 | PR #1980
     fn int(mut self, field: u32, v: u64) -> Self {
         self.varint(u64::from(field) << 3);
         self.varint(v);
         self
     }
+    // What: appends an 8-byte field (wire type 1).
+    // Why: the tag carries field number and type.
+    // From: Issue #871 | PR #1980
     fn fixed64(mut self, field: u32, v: u64) -> Self {
         self.varint((u64::from(field) << 3) | 1);
         self.0.extend_from_slice(&v.to_le_bytes());
         self
     }
+    // What: appends a 4-byte field (wire type 5).
+    // Why: the tag carries field number and type.
+    // From: Issue #871 | PR #1980
     fn fixed32(mut self, field: u32, v: u32) -> Self {
         self.varint((u64::from(field) << 3) | 5);
         self.0.extend_from_slice(&v.to_le_bytes());
         self
     }
+    // What: appends a field with length (wire type 2).
+    // Why: texts and nested messages use it.
+    // From: Issue #871 | PR #1980
     fn bytes(mut self, field: u32, v: &[u8]) -> Self {
         self.varint((u64::from(field) << 3) | 2);
         self.varint(v.len() as u64);
@@ -1143,8 +1235,11 @@ impl PbOut {
 
 // What: decode one protobuf message into field pairs.
 // Why: readers pick fields by number.
-// From: Issue #871 | PR #1858
+// From: Issue #871 | PR #1980
 fn pb_read(mut b: &[u8]) -> Result<Vec<(u32, Pb)>, String> {
+    // What: reads one varint and moves the slice on.
+    // Why: more than ten bytes is a broken message.
+    // From: Issue #871 | PR #1980
     fn varint(b: &mut &[u8]) -> Result<u64, String> {
         let mut v = 0u64;
         for shift in (0..64).step_by(7) {
@@ -1187,6 +1282,7 @@ fn pb_read(mut b: &[u8]) -> Result<Vec<(u32, Pb)>, String> {
 
 // What: last integer of a protobuf field number.
 // Why: protobuf lets a later value override.
+// From: Issue #871 | PR #1980
 fn pb_int(f: &[(u32, Pb)], n: u32) -> Option<u64> {
     f.iter().rev().find_map(|(k, v)| match v {
         Pb::Int(i) if *k == n => Some(*i),
@@ -1196,6 +1292,7 @@ fn pb_int(f: &[(u32, Pb)], n: u32) -> Option<u64> {
 
 // What: all byte values of a protobuf field.
 // Why: repeated fields appear more than once.
+// From: Issue #871 | PR #1980
 fn pb_all(f: &[(u32, Pb)], n: u32) -> impl Iterator<Item = &[u8]> {
     f.iter().filter_map(move |(k, v)| match v {
         Pb::Bytes(b) if *k == n => Some(b.as_slice()),
@@ -1205,7 +1302,7 @@ fn pb_all(f: &[(u32, Pb)], n: u32) -> impl Iterator<Item = &[u8]> {
 
 // What: Steam message numbers (EMsg) used here.
 // Why: values from Steam's enums_clientserver.proto.
-// From: Issue #871 | PR #1858
+// From: Issue #871 | PR #1980
 const EMSG_MULTI: u32 = 1;
 const EMSG_SERVICE_RESPONSE: u32 = 147;
 const EMSG_SERVICE_CALL: u32 = 151;
@@ -1219,9 +1316,11 @@ const EMSG_PICS_TOKEN_REQUEST: u32 = 8905;
 const EMSG_PICS_TOKEN_RESPONSE: u32 = 8906;
 // What: protobuf flag of the message number.
 // Why: every CM message sent here is protobuf.
+// From: Issue #871 | PR #1980
 const PROTO_MASK: u32 = 0x8000_0000;
 // What: Steam result code OK (EResult 1).
 // Why: fixed by the protocol, like an RFC constant.
+// From: Issue #871 | PR #1980
 const ERESULT_OK: u64 = 1;
 
 type Ws =
@@ -1229,7 +1328,7 @@ type Ws =
 
 // What: one CM frame: message number, header, body.
 // Why: header fields route job answers.
-// From: Issue #871 | PR #1858
+// From: Issue #871 | PR #1980
 struct Frame {
     emsg: u32,
     header: Vec<(u32, Pb)>,
@@ -1237,8 +1336,8 @@ struct Frame {
 }
 
 // What: our own CM session over a websocket.
-// Why: DoMe 18:18: no third-party Steam library.
-// From: Issue #871 | PR #1858
+// Why: no third-party Steam library is used.
+// From: Issue #871 | PR #1980
 struct Cm {
     ws: Ws,
     steam_id: u64,
@@ -1253,6 +1352,7 @@ struct Cm {
 impl Cm {
     // What: log in with the sealed QR session token.
     // Why: Steam takes the refresh token as access_token.
+    // From: Issue #871 | PR #1980
     async fn login(cfg: &SteamCfg, client: &reqwest::Client) -> Result<Self, String> {
         let s = load_session(&cfg.dir, &cfg.bind)?.ok_or("Steam login missing")?;
         let steam_id: u64 = steam_id_of(&s.refresh_token)?
@@ -1323,6 +1423,7 @@ impl Cm {
 
     // What: send one protobuf frame with our session.
     // Why: frame = emsg|flag, header length, header, body.
+    // From: Issue #871 | PR #1980
     async fn send(&mut self, emsg: u32, header: PbOut, body: &[u8]) -> Result<(), String> {
         use futures_util::SinkExt as _;
         let header = header.fixed64(1, self.steam_id).int(2, self.session);
@@ -1341,6 +1442,7 @@ impl Cm {
 
     // What: a heartbeat when the interval has passed.
     // Why: the CM drops a silent session.
+    // From: Issue #871 | PR #1980
     async fn beat(&mut self) -> Result<(), String> {
         if self.last_beat.elapsed() >= self.heartbeat {
             self.last_beat = std::time::Instant::now();
@@ -1351,6 +1453,7 @@ impl Cm {
 
     // What: unpack one websocket message into frames.
     // Why: Multi frames bundle many, maybe gzipped.
+    // From: Issue #871 | PR #1980
     fn unpack(&mut self, raw: &[u8]) -> Result<(), String> {
         let word = |b: &[u8], at: usize| -> Result<u32, String> {
             b.get(at..at + 4)
@@ -1360,7 +1463,8 @@ impl Cm {
         };
         let raw_emsg = word(raw, 0)?;
         // What: skip frames without the protobuf flag.
-        // Why: live 06.11.: such a frame broke a job.
+        // Why: a frame without it is no protobuf message.
+        // From: Issue #871 | PR #1985
         if raw_emsg & PROTO_MASK == 0 {
             return Ok(());
         }
@@ -1402,6 +1506,7 @@ impl Cm {
 
     // What: the next frame that matches, within the limit.
     // Why: other frames (notices) are skipped.
+    // From: Issue #871 | PR #1980
     async fn wait(&mut self, want: impl Fn(&Frame) -> bool) -> Result<Frame, String> {
         use futures_util::StreamExt as _;
         let deadline = tokio::time::Instant::now() + self.limit;
@@ -1410,7 +1515,7 @@ impl Cm {
                 return self.queue.remove(pos).ok_or_else(|| "CM queue".to_string());
             }
             // What: name why Steam ended the session.
-            // Why: DoMe 07.11.: only "CM closed" was shown.
+            // Why: "CM closed" alone names no reason.
             // From: Issue #871 | PR #1985
             if let Some(off) = self.queue.iter().find(|f| f.emsg == EMSG_LOGGED_OFF) {
                 let r = pb_read(&off.body).ok().and_then(|b| pb_int(&b, 1));
@@ -1431,6 +1536,7 @@ impl Cm {
 
     // What: send a job and wait for its answer frames.
     // Why: the answer carries our job id as jobid_target.
+    // From: Issue #871 | PR #1980
     async fn job(
         &mut self,
         emsg: u32,
@@ -1452,7 +1558,7 @@ impl Cm {
 
 // What: the app's KeyValues from PICS, with its token.
 // Why: owned apps need the PICS access token.
-// From: Issue #871 | PR #1858
+// From: Issue #871 | PR #1980
 async fn app_info(cm: &mut Cm, app: u32) -> Result<Kv, String> {
     let req = PbOut::default().int(2, u64::from(app));
     let f = cm
@@ -1498,7 +1604,7 @@ async fn app_info(cm: &mut Cm, app: u32) -> Result<Kv, String> {
 
 // What: the manifest request code of one depot.
 // Why: Steam CDN serves manifests only with this code.
-// From: Issue #871 | PR #1858
+// From: Issue #871 | PR #1980
 async fn request_code(
     cm: &mut Cm,
     app: u32,
@@ -1558,6 +1664,7 @@ fn chunks_of(zipped: &[u8]) -> Result<Vec<(String, u64)>, String> {
             if let Some(sha) = pb_all(&c, 1).next() {
                 // What: packed size, else the plain size.
                 // Why: the CDN sends chunks compressed.
+                // From: Issue #871 | PR #1985
                 let n = pb_int(&c, 5).or_else(|| pb_int(&c, 4)).unwrap_or(0);
                 ids.push((hex::encode(sha), n));
             }
@@ -1571,8 +1678,11 @@ fn chunks_of(zipped: &[u8]) -> Result<Vec<(String, u64)>, String> {
 // What: every chunk URL of an app's depots.
 // Why: the URL job warms them through the proxy.
 // From: Issue #871 | PR #1858
-async fn app_urls(cfg: &SteamCfg, app: u32) -> Result<(Vec<String>, u64, Vec<String>), String> {
-    let client = cfg.client()?;
+async fn app_urls(
+    cfg: &SteamCfg,
+    dl: &Dl,
+    app: u32,
+) -> Result<(Vec<String>, u64, Vec<String>), String> {
     let web = reqwest::Client::new();
     let mut cm = Cm::login(cfg, &web).await?;
     let info = app_info(&mut cm, app).await?;
@@ -1618,8 +1728,9 @@ async fn app_urls(cfg: &SteamCfg, app: u32) -> Result<(Vec<String>, u64, Vec<Str
             "http://{}/depot/{depot}/manifest/{gid}/{}/{code}",
             cfg.cdn_host, cfg.manifest_api
         );
-        let resp = client
-            .get(&url)
+        let resp = dl
+            .client
+            .get(dl.url(&url)?)
             .send()
             .await
             .map_err(|e| format!("{url}: {}", http::error_chain(&e)))?;
@@ -1663,7 +1774,7 @@ fn depot_ids(app: &Kv) -> Vec<u32> {
 fn save_depots(dir: &Path, app: u32, ids: &[u32]) -> Result<(), String> {
     let body = serde_json::to_vec(ids).map_err(|e| e.to_string())?;
     let path = dir.join(DEPOTS_DIR).join(format!("{app}.json"));
-    write(&path, &body, MODE, Place::Replace, Owner::default())
+    write(&path, &body, PRIVATE_MODE, Place::Replace, Owner::default())
         .map_err(|e| format!("{}: {e}", path.display()))
 }
 
@@ -1763,7 +1874,7 @@ fn cached(c: &Ctx) -> Result<Value, String> {
 }
 
 // What: delete every file in the cache, keep folders.
-// Why: DoMe 07.11.: one button empties the whole cache.
+// Why: one button empties the whole cache.
 // From: Issue #871 | PR #1991
 fn wipe_dir(dir: &Path, freed: &mut (u64, u64)) -> Result<(), String> {
     let rd = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -1783,7 +1894,7 @@ fn wipe_dir(dir: &Path, freed: &mut (u64, u64)) -> Result<(), String> {
 }
 
 // What: empty the whole cache of every service.
-// Why: DoMe 07.11.: full wipe next to per-game evict.
+// Why: a full wipe stands next to the per-game evict.
 // From: Issue #871 | PR #1991
 fn wipe(c: &Ctx) -> Result<Value, String> {
     let mut freed = (0, 0);
@@ -1803,7 +1914,7 @@ async fn lookup(c: &Ctx, app: u32) -> Result<Vec<u32>, String> {
 }
 
 // What: check or evict one app in the cache.
-// Why: DoMe 07.11.: empty one game, not everything.
+// Why: one game can be emptied without the rest.
 // From: Issue #871 | PR #1991
 async fn app_cache(c: &Ctx, args: &[String], evict: bool) -> Result<Value, String> {
     let app: u32 = args
@@ -1821,16 +1932,17 @@ async fn app_cache(c: &Ctx, args: &[String], evict: bool) -> Result<Value, Strin
 
 // What: run a Steam app job: resolve, then warm.
 // Why: same queue, connections and RAM sink as URLs.
-// From: Issue #871 | PR #1858
+// From: Issue #871 | PR #1980
 async fn run_app(
     cfg: SteamCfg,
+    dl: Dl,
     app: u32,
     connections: usize,
     jobs: Arc<Mutex<Vec<Job>>>,
     id: String,
     rate: Arc<AtomicU64>,
 ) -> State {
-    let (urls, size, skipped) = match app_urls(&cfg, app).await {
+    let (urls, size, skipped) = match app_urls(&cfg, &dl, app).await {
         Ok(u) => u,
         Err(e) => return State::Failed(e),
     };
@@ -1839,18 +1951,14 @@ async fn run_app(
         j.size = size;
         j.skipped = skipped;
     }
-    let client = match cfg.client() {
-        Ok(c) => c,
-        Err(e) => return State::Failed(e),
-    };
-    run_urls(client, urls, connections, jobs, id, rate).await
+    run_urls(dl, urls, connections, jobs, id, rate).await
 }
 
 // What: one daemon round: orders in, due jobs out.
 // Why: up to CACHEHAMSTER_QUEUES jobs run at once.
-// From: Issue #871 | PR #1858
+// From: Issue #871 | PR #1980
 struct Runner {
-    client: reqwest::Client,
+    dl: Dl,
     steam: SteamCfg,
     queues: usize,
     connections: usize,
@@ -1861,6 +1969,9 @@ struct Runner {
 }
 
 impl Runner {
+    // What: one pass: inbox, finished, window, due jobs.
+    // Why: the job file is saved after every pass.
+    // From: Issue #871 | PR #1980
     async fn round(&mut self, c: &Ctx) -> Result<(), String> {
         let mut list = self.jobs.lock().await;
         take_inbox(c, &mut list, true)?;
@@ -1910,7 +2021,7 @@ impl Runner {
             let (jobs, id, rate) = (Arc::clone(&self.jobs), j.id.clone(), Arc::clone(&self.rate));
             let task = match &j.target {
                 Target::Urls(urls) => tokio::spawn(run_urls(
-                    self.client.clone(),
+                    self.dl.clone(),
                     urls.clone(),
                     self.connections,
                     jobs,
@@ -1919,6 +2030,7 @@ impl Runner {
                 )),
                 Target::SteamApp(app) => tokio::spawn(run_app(
                     self.steam.clone(),
+                    self.dl.clone(),
                     *app,
                     self.connections,
                     jobs,
@@ -1935,19 +2047,13 @@ impl Runner {
 
 // What: the daemon loop.
 // Why: a broken round logs and retries, never exits.
-// From: Issue #871 | PR #1858
+// From: Issue #871 | PR #1980
 async fn daemon(c: Ctx) -> Result<(), String> {
-    let queues = usize::try_from(c.s.uint("CACHEHAMSTER_QUEUES")?).map_err(|e| e.to_string())?;
-    let connections =
-        usize::try_from(c.s.uint("CACHEHAMSTER_CONCURRENCY")?).map_err(|e| e.to_string())?;
+    let queues = c.s.num::<usize>("CACHEHAMSTER_QUEUES")?;
+    let connections = c.s.num::<usize>("CACHEHAMSTER_CONCURRENCY")?;
     let tick = Duration::from_secs(c.s.uint("CACHEHAMSTER_POLL_INTERVAL")?);
     let report = c.s.uint("CACHEHAMSTER_THROUGHPUT_INTERVAL")?;
-    // What: a client without the general total timeout.
-    // Why: one large body may stream for hours.
-    let client = reqwest::Client::builder()
-        .pool_max_idle_per_host(connections)
-        .build()
-        .map_err(|e| format!("HTTP client: {e}"))?;
+    let dl = Dl::load(&c.s, connections)?;
     let mbit = c.s.uint("CACHEHAMSTER_MAX_MBIT")?;
     if mbit > 0 {
         let _ = PACE.set(Pace {
@@ -1957,7 +2063,7 @@ async fn daemon(c: Ctx) -> Result<(), String> {
     }
     let window = window(&c.s.text("CACHEHAMSTER_WINDOW")?)?;
     // What: the values this start runs with.
-    // Why: live 05.11. Fund 90: the value was not visible.
+    // Why: the values in use must be visible in the log.
     // From: Issue #871 | PR #1980
     eprintln!(
         "cachehamster: start: {queues} jobs, {connections} downloads each, {mbit} Mbit/s (0 = off), window {:02}:{:02}-{:02}:{:02}",
@@ -1969,11 +2075,12 @@ async fn daemon(c: Ctx) -> Result<(), String> {
     let mut list = read_json::<Vec<Job>>(&c.path(JOBS_FILE))?.unwrap_or_default();
     // What: a restart leaves no job in Running.
     // Why: the task that ran it is gone.
+    // From: Issue #871 | PR #1980
     for j in list.iter_mut().filter(|j| j.state == State::Running) {
         j.set(State::Waiting);
     }
     let mut runner = Runner {
-        client,
+        dl,
         steam: SteamCfg::load(&c)?,
         queues,
         connections,
@@ -1996,7 +2103,7 @@ async fn daemon(c: Ctx) -> Result<(), String> {
                 bytes * 8 / (now - last).max(1) / 1_000_000,
             );
             // What: log while jobs run or state changed.
-            // Why: idle "0 jobs" line every 10 s is spam.
+            // Why: an idle line per round floods the log.
             // From: Issue #871 | PR #1984
             if state.0 > 0 || state != shown {
                 eprintln!("cachehamster: {} jobs running, {} Mbit/s", state.0, state.1);
@@ -2010,7 +2117,7 @@ async fn daemon(c: Ctx) -> Result<(), String> {
 
 // What: run one command and answer as JSON.
 // Why: the UI calls these through docker exec.
-// From: Issue #871 | PR #1858
+// From: Issue #871 | PR #1980
 async fn command(c: Ctx, args: &[String]) -> Result<Value, String> {
     let client = http::client(&c.s)?;
     match args.first().map(String::as_str) {
@@ -2044,7 +2151,7 @@ async fn command(c: Ctx, args: &[String]) -> Result<Value, String> {
 
 // What: entry point; no argument runs the daemon.
 // Why: one binary for the daemon and UI commands.
-// From: Issue #871 | PR #1858
+// From: Issue #871 | PR #1980
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();

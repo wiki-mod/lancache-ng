@@ -504,7 +504,7 @@ _ci_validate_ui_login() {
     return "${_ci_ul_rc}"
 }
 
-# What: setup.sh rollback around a one-run .env.local.
+# What: setup.sh rollback around a one-run .env.
 # Why: one owner for the dns and Kea rollback legs.
 # From: Issue #1683 | PR #1912
 _ci_validate_setup_rollback() {
@@ -926,8 +926,8 @@ PROG
     snap_b="$(_ci_validate_kea_add "${ubase}" "${jar}" "${csrf}" "${sid}" "${mac_b}" \
         "$(_ci_int_to_ipv4 $(( base + 3 )))" "${label}-2" "${snaps}")" || { rc=$?; rm -f "${jar}"; return "${rc}"; }
     rm -f "${jar}"
-    # What: .env.local holds this run's KEA_* values
-    # Why: setup.sh reads a deploy/prod install's .env.local
+    # What: .env holds this run's KEA_* values
+    # Why: setup.sh reads a deploy/prod install's .env
     # From: Issue #763 | PR #1912
     _ci_validate_setup_rollback resp rc "$(printf 'KEA_CTRL_TOKEN=%s\nKEA_CTRL_HOST=%s\nKEA_DATA_DIR=%s\n' \
         "${token}" "${kip}" "${dir}")" kea "${snap}" || return 2

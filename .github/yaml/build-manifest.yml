@@ -80,11 +80,11 @@ services:
       - syslog-ng=/usr/sbin/syslog-ng,-F,-f,@SYSLOG_CONF_FILE@
       - chronyd=/usr/sbin/chronyd,-d,-f,@CHRONY_CONF_FILE@
       - snmpd=/usr/sbin/snmpd,-f,-C,-c,@SNMPD_CONF_FILE@
-    # What: NTP_ENABLED read from the ui file; 0 = idle.
+    # What: NTP_ENABLED of .env, .env.local wins; 0 = idle.
     # Why: chronyd idles at 0 and logs no ERROR line.
-    # From: Issue #1683 | PR #1980
+    # From: Issue #1683 | PR #2017
     process_pre:
-      - 'chronyd=x="${NTP_ENABLED:-1}"; f=@UI_SETTINGS_FILE@; v=""; if [ -r "$f" ]; then v="$(sed -n "s/^NTP_ENABLED=//p" "$f")"; fi; if [ -n "$v" ]; then x="${v##*[[:space:]]}"; fi; if [ "$x" = 0 -o "$x" = false ]; then einfo "NTP_ENABLED=$x: chronyd off"; command=/bin/sleep; command_args=2147483647; return 0; fi; chown chrony:chrony @NTP_STATE_DIR@'
+      - 'chronyd=x="${NTP_ENABLED:-1}"; f=@STACK_ENV_FILE@; v=""; for g in "$f" "$f.local"; do if [ -r "$g" ] && grep -q "^NTP_ENABLED=" "$g"; then v="$(sed -n "s/^NTP_ENABLED=//p" "$g")"; fi; done; if [ -n "$v" ]; then x="${v##*[[:space:]]}"; fi; if [ "$x" = 0 -o "$x" = false ]; then einfo "NTP_ENABLED=$x: chronyd off"; command=/bin/sleep; command_args=2147483647; return 0; fi; chown chrony:chrony @NTP_STATE_DIR@'
     # What: accounts and dirs ci.sh image-setup creates.
     # Why: no RUN logic in the Dockerfile; @KEY@ = default.
     # From: Issue #1683 | PR #1912
@@ -101,7 +101,7 @@ services:
       - chrony-nts
       - net-snmp
       # What: openssl for the watchdog certificate check.
-      # Why: live test 05.11.: log flood, openssl missing.
+      # Why: without it every check logs an error.
       # From: Issue #1683 | PR #1980
       - openssl
       - xz
@@ -131,42 +131,43 @@ services:
     process_pre:
       - 'nginx=until [ -s @NGINX_CONF_DIR@/nginx.conf ]; do sleep @PROXY_CONFIG_WAIT_SECONDS@; done'
       - 'snmpd=until [ -s @SNMPD_CONF_FILE@ ]; do sleep @PROXY_CONFIG_WAIT_SECONDS@; done'
+    # What: the nginx account first, with the SOT ids.
+    # Why: the package reuses it; old cache files stay ours.
+    # From: Issue #1683 | PR #2017
     setup:
+      - group=nginx:@NGINX_GID@
+      - user=nginx:@NGINX_UID@:nginx
       - group=@LOG_READER_GROUP@:@GID@
       - member=nginx:@LOG_READER_GROUP@
       - dir=@NGINX_DIR@/@NGINX_SUBDIR_CA@
       - dir=@NGINX_DIR@/@NGINX_SUBDIR_CERTS@
       - dir=@NGINX_CACHE_DIR@
     final_base: alpine
-    # What: final-image apk packages; nginx from nginx.org.
-    # Why: AG-KD-007: stream module only in nginx.org build.
-    # From: Issue #1683 | PR #1858
+    # What: final-image apk packages; nginx from Alpine.
+    # Why: AG-KD-007: stream comes as nginx-mod-stream.
+    # From: Issue #1683 | PR #2017
     packages:
       - openrc
       - openrc-init
       - openssl
-      - nginx@nginx
-    # What: nginx.org mainline repo for the base's branch.
-    # Why: apk-setup fills @ALPINE_BRANCH@ from the image.
-    # From: Issue #1683 | PR #1858
-    apk_repositories:
-      - nginx=http://nginx.org/packages/mainline/alpine/@ALPINE_BRANCH@/main
-    # What: the repo signing key and its sha256 pin.
-    # Why: the tagged repo is trusted only with this key.
-    # From: Issue #1683 | PR #1858
-    apk_keys:
-      - https://nginx.org/keys/nginx_signing.rsa.pub=ff7cf138acc09f2a5029300ab713fe6a1440605fca72e2bab76a4da9206fec87
+      - nginx
+      - nginx-mod-stream
+    # What: package load line; stream, ssl_preread, slice.
+    # Why: nginx -t fails without the stream module.
+    # From: Issue #1683 | PR #2017
     smoke:
-      - 'v="$(nginx -V 2>&1)" && grep -q -- --with-stream_ssl_preread_module <<< "${v}"'
+      - 'printf "include /etc/nginx/modules/*.conf;\nevents {}\nstream { server { listen 127.0.0.1:9; ssl_preread on; return 1; } }\nhttp { server { listen 127.0.0.1:8; slice 1m; } }\n" > /tmp/smoke.conf && nginx -e stderr -t -q -c /tmp/smoke.conf'
+      - 'grep -q "modules/\*.conf" /etc/nginx/nginx.conf'
   dns:
     context: services/dns
     labels: [dns, pdns]
-    description: "LanCache-NG dns: PowerDNS auth, dns-http and dns-https recursors."
+    description: "LanCache-NG dns: dnsdist, PowerDNS auth, dns-http and dns-https recursors."
     build_type: apk
     processes:
       - pdns=/usr/sbin/pdns_server,--config-dir=@CONFIG_DIR@/dns,--guardian=no,--daemon=no
       - dns-http=/usr/sbin/pdns_recursor,--config-dir=@CONFIG_DIR@/dns,--config-name=http,--daemon=no
       - dns-https=/usr/sbin/pdns_recursor,--config-dir=@CONFIG_DIR@/dns,--config-name=https,--daemon=no
+      - dnsdist=/usr/bin/dnsdist,--supervised,--disable-syslog,-u,dnsdist,-g,dnsdist,-C,@DNSDIST_CONF_FILE@
       - snmpd=/usr/sbin/snmpd,-f,-C,-c,@SNMPD_CONF_FILE@
     # What: start script lines before openrc-init.
     # Why: stale OpenRC state blocks the services.
@@ -179,10 +180,14 @@ services:
     process_pre:
       - 'dns-http=until [ -s @RECURSOR_HTTP_CONF_FILE@ ]; do sleep @DNS_CONFIG_WAIT_SECONDS@; done'
       # What: no IP_HTTPS: dns-https idles, no wait loop.
-      # Why: live 229: the wait blocked pdns forever.
+      # Why: a wait for it would block pdns forever.
       # From: Issue #1683
       - 'dns-https=if [ -z "${IP_HTTPS:-}" ]; then einfo "IP_HTTPS empty: dns-https off"; command=/bin/sleep; command_args=2147483647; return 0; fi; until [ -s @RECURSOR_HTTPS_CONF_FILE@ ]; do sleep @DNS_CONFIG_WAIT_SECONDS@; done'
       - 'snmpd=until [ -s @SNMPD_CONF_FILE@ ]; do sleep @DNS_CONFIG_WAIT_SECONDS@; done'
+      # What: raise the soft open-files limit first.
+      # Why: dnsdist needs more than the default 1024.
+      # From: Issue #1683
+      - 'dnsdist=ulimit -n @DNSDIST_OPEN_FILES@ && until [ -s @DNSDIST_CONF_FILE@ ]; do sleep @DNS_CONFIG_WAIT_SECONDS@; done'
       - 'pdns=until [ -s @PDNS_CONF_FILE@ ]; do sleep @DNS_CONFIG_WAIT_SECONDS@; done; [ -e @PDNS_DATABASE@ ] && return 0; sqlite3 @PDNS_DATABASE@ < @PDNS_SCHEMA_FILE@ && chown pdns:pdns @PDNS_DATABASE@ && return 0; rm -f @PDNS_DATABASE@; return 1'
     setup:
       - dir=@PDNS_CONF_DIR@/auth
@@ -196,6 +201,7 @@ services:
       - pdns
       - pdns-backend-sqlite3
       - pdns-doc
+      - dnsdist
       - pdns-recursor-luajit
       - bind-tools
       - sqlite
@@ -468,7 +474,7 @@ runtime:
   # From: Issue #1683 | PR #1858
   compose_file: deploy/prod/docker-compose.yml
   # What: Docker daemon file and its userland-proxy value.
-  # Why: DoMe 07.11.: hairpin traffic ran via docker-proxy.
+  # Why: else hairpin traffic runs via docker-proxy.
   # From: Issue #1683 | PR #1985
   docker_daemon_json: /etc/docker/daemon.json
   docker_userland_proxy: false
@@ -547,7 +553,7 @@ runtime:
     - SYSLOG_TIME_REAP=30
     # What: syslog-ng store modes and transports.
     # Why: readers get group read; forward is reliable.
-    # From: Issue #1683 | PR #1858
+    # From: Issue #1683 | PR #1980
     - SYSLOG_DIR_PERM=0750
     - SYSLOG_FILE_PERM=0640
     - SYSLOG_IN_TRANSPORT=udp
@@ -614,14 +620,22 @@ runtime:
     - DHCP_GATEWAY=10.0.0.1
     - DHCP_NTP_SERVERS=debian.pool.ntp.org,time.nist.gov
     # What: the Admin UI is open until a login is set
-    # Why: DoMe 07.11.: "lazy ist default"
+    # Why: a new install is usable before a login exists
     # From: Issue #1683 | PR #1985
     - ALLOW_INSECURE_UI=true
     - SUPERVISE_RUN_DIR=/run/lancache
     - LANCACHE_SHARED_SECRET_DIR=/var/lib/lancache-secrets
     - UI_DATA_DIR=/data
     - DESIRED_STATE_FILE=@UI_DATA_DIR@/desired-state.json
-    - UI_SETTINGS_FILE=@UI_DATA_DIR@/lancache-ui-settings.env
+    # What: dir and file of the stack .env in the containers
+    # Why: one file for setup.sh, Compose and the ui
+    # From: Issue #1683 | PR #2017
+    - STACK_ENV_DIR=/stack
+    - STACK_ENV_FILE=@STACK_ENV_DIR@/.env
+    # What: the old ui settings file; update merges it once
+    # Why: its values move into the stack .env, then it goes
+    # From: Issue #1683 | PR #2017
+    - UI_SETTINGS_FILE_RETIRED=@UI_DATA_DIR@/lancache-ui-settings.env
     - UI_SESSION_SECRET_FILE=@UI_DATA_DIR@/lancache-ui-session.secret
     - SECONDARY_REGISTRATION_TOKEN_FILE=@UI_DATA_DIR@/lancache-secondary-registration.token
     - UI_DATABASE_FILE=@UI_DATA_DIR@/lancache-ui.db
@@ -681,6 +695,17 @@ runtime:
     - UI_ROUTE_SECONDARY_ROTATE=/api/secondary/{name}/rotate
     - UI_ROUTE_SECONDARY_HEALTH=/api/secondary/{name}/health
     - UI_ROUTE_SECONDARY_ADDRESS=/api/secondary/{name}/address
+    # What: NS entry of one secondary by hand.
+    # Why: a taken out NS comes back only this way.
+    # From: Issue #1683
+    - UI_ROUTE_SECONDARY_NS_ADD=/api/secondary/{name}/ns-add
+    - UI_ROUTE_SECONDARY_NS_REMOVE=/api/secondary/{name}/ns-remove
+    - UI_ROUTE_SECONDARY_NS_SWITCH=/domains/secondary-ns
+    - UI_ROUTE_SECONDARY_NS_AUTO=/domains/secondary-ns-auto
+    # What: serial of each zone on primary and secondaries.
+    # Why: the DNS page shows one zone overview table.
+    # From: Issue #1683
+    - UI_ROUTE_ZONE_OVERVIEW=/api/zones/overview
     - UI_ROUTE_DHCP_MODE=/dhcp/mode
     - UI_ROUTE_DHCP_DDNS=/dhcp/ddns
     - UI_ROUTE_DHCP_PROXY=/dhcp/proxy
@@ -749,6 +774,14 @@ runtime:
     - SETUP_HEALTH_BASELINE_SAMPLES=3
     - SETUP_HEALTH_BASELINE_INTERVAL_SECONDS=2
     - SETUP_DNS_PROBE_NAME=content1.steampowered.com
+    # What: max wait for dockerd after start or restart.
+    # Why: rc-service returns before dockerd listens.
+    # From: Issue #1683 | PR #2017
+    - SETUP_DOCKER_WAIT_SECONDS=60
+    # What: max wait of setup.sh for the stack .env lock.
+    # Why: the ui holds it only while it writes one change.
+    # From: Issue #1683 | PR #2017
+    - ENV_LOCK_WAIT_SECONDS=30
     # What: repo files a secondary keeps in its compose dir.
     # Why: its compose mounts them from its dir.
     # From: Issue #1683 | PR #1858
@@ -770,7 +803,7 @@ runtime:
     - DNS_QUERY_LOG=0
     # What: private reverse zones the stack serves.
     # Why: RFC 1918 and ULA ranges; no list in code.
-    # From: Issue #1683 | PR #1858
+    # From: Issue #1683 | PR #1980
     - DNS_PRIVATE_REVERSE_ZONES=10.in-addr.arpa. 168.192.in-addr.arpa. 16.172.in-addr.arpa. 17.172.in-addr.arpa. 18.172.in-addr.arpa. 19.172.in-addr.arpa. 20.172.in-addr.arpa. 21.172.in-addr.arpa. 22.172.in-addr.arpa. 23.172.in-addr.arpa. 24.172.in-addr.arpa. 25.172.in-addr.arpa. 26.172.in-addr.arpa. 27.172.in-addr.arpa. 28.172.in-addr.arpa. 29.172.in-addr.arpa. 30.172.in-addr.arpa. 31.172.in-addr.arpa. c.f.ip6.arpa. d.f.ip6.arpa.
     # What: the project address the ui links to.
     # Why: setup.sh bootstrap copy; ci.sh checks both.
@@ -845,7 +878,7 @@ runtime:
     - NTP_DRIFT_FILE=@NTP_STATE_DIR@/drift
     # What: chrony makestep: threshold and count.
     # Why: steps a bad clock only at start.
-    # From: Issue #1683 | PR #1858
+    # From: Issue #1683 | PR #1980
     - NTP_MAKESTEP=1.0 3
     - NTP_ENABLED=1
     - AUTO_UPDATE_ENABLED=0
@@ -875,10 +908,15 @@ runtime:
     - PDNS_LUA_DNS_SCRIPT=@PDNS_CONF_DIR@/filter-aaaa.lua
     - PDNS_SCHEMA_FILE=/usr/share/doc/pdns/schema.sqlite3.sql
     - NGINX_DIR=/etc/nginx
+    # What: uid and gid of the nginx worker account.
+    # Why: cache files are 0600; no other uid reads them.
+    # From: Issue #1683 | PR #2017
+    - NGINX_UID=100
+    - NGINX_GID=101
     # What: NGINX_DIR parts the proxy image links
-    # Why: one nginx.conf; no package file stays
-    # From: Issue #1683
-    - NGINX_LINK_PARTS=nginx.conf conf.d stream.d proxy-params.conf
+    # Why: the ui renders them; package examples go
+    # From: Issue #1683 | PR #2017
+    - NGINX_LINK_PARTS=conf.d stream.d proxy-params.conf
     - NGINX_SUBDIR_CA=ssl/ca
     - NGINX_SUBDIR_CERTS=ssl/certs
     - CA_CERT_FILE=ca.crt
@@ -925,7 +963,7 @@ runtime:
     - NGINX_SSL_SESSION_CACHE=shared:SSL:10m
     - NGINX_SSL_SESSION_TIMEOUT=1d
     # What: OpenSSL Options for the MITM server; -KTLS off.
-    # Why: DoMe 07.11.: kTLS cut nginx CPU 73 % in a test.
+    # Why: kTLS lowers the CPU load of nginx.
     # From: Issue #1683 | PR #1985
     - NGINX_SSL_CONF_OPTIONS=KTLS
     - NGINX_MAX_TEMP_FILE_SIZE=51200m
@@ -1006,6 +1044,29 @@ runtime:
     # Why: a primary domain reaches secondaries by itself.
     # From: Issue #1683
     - DNS_SECONDARY_SYNC_SECONDS=120
+    # What: secondaries as NS records; off by default.
+    # Why: a dead NS slows every resolver that asks it.
+    # From: Issue #1683
+    - DNS_SECONDARY_NS_ENABLED=0
+    # What: NS removal of a dead secondary; off.
+    # Why: removal is a choice of the admin.
+    # From: Issue #1683
+    - DNS_SECONDARY_NS_AUTO_REMOVE=0
+    # What: names entered as NS; names taken out.
+    # Why: a taken out name comes back only by hand.
+    # From: Issue #1683
+    - DNS_SECONDARY_NS=
+    - DNS_SECONDARY_NS_OFF=
+    # What: check interval; shorter while one fails.
+    # Why: serials via the pdns-API; a lag is pulled.
+    # From: Issue #1683
+    - DNS_SECONDARY_CHECK_SECONDS=14400
+    - DNS_SECONDARY_RECHECK_SECONDS=3600
+    # What: NS removal needs this time and this count.
+    # Why: one short outage must not remove an NS.
+    # From: Issue #1683
+    - DNS_SECONDARY_NS_REMOVE_AFTER_SECONDS=28800
+    - DNS_SECONDARY_NS_REMOVE_FAILS=3
     - DNS_SERVE_RFC1918=1
     # What: compose service name of the dns container.
     # Why: names differ per compose project; services stay.
@@ -1038,12 +1099,20 @@ runtime:
     - PDNS_DATABASE=@PDNS_DATA_DIR@/pdns.sqlite3
     # What: PowerDNS backend module.
     # Why: sqlite file in PDNS_DATABASE.
-    # From: Issue #1683 | PR #1858
+    # From: Issue #1683 | PR #1980
     - PDNS_LAUNCH=gsqlite3
     - PDNS_DEFAULT_SOA=ns1.@DHCP_DOMAIN@ hostmaster.@DHCP_DOMAIN@ 0 30 10 604800 300
+    # What: name of the HTTPS IP, A and PTR, never NS.
+    # Why: HTTPS is optional; ns1 is the name server.
+    # From: Issue #1683
+    - DNS_NS_HTTPS_NAME=ns2.@DHCP_DOMAIN@
     - PDNS_DNSUPDATE_FROM=@PRIVATE_NETS@
     - PDNS_LISTEN=0.0.0.0
-    - PDNS_PRIMARY_API_URL=http://@DNS_SERVICE@:@PDNS_AUTH_API_PORT@/api/v1/servers/localhost
+    # What: path of the PowerDNS API below host and port.
+    # Why: auth, recursors and secondaries share it.
+    # From: Issue #1683 | PR #2017
+    - PDNS_API_PATH=/api/v1/servers/localhost
+    - PDNS_PRIMARY_API_URL=http://@DNS_SERVICE@:@PDNS_AUTH_API_PORT@@PDNS_API_PATH@
     - PDNS_SECONDARY_API_URL=
     # What: SOA serial rule for API and DDNS writes.
     # Why: a change raises the serial; NOTIFY follows.
@@ -1085,44 +1154,69 @@ runtime:
     - OPENRC_ERROR_LOG=/proc/1/fd/2
     - LANCACHE_INIT_FILE=/usr/local/bin/lancache-init
     # What: reload commands per owner without HUP.
-    # Why: DoMe 06.11.: a dns toggle restarted dns.
+    # Why: a reload must not restart the container.
     # From: Issue #1683
-    - RELOAD_EXEC=dns:rec_control+--socket-dir=@RECURSOR_RUN_DIR@+--config-name=http+reload-lua-config dns:rec_control+--socket-dir=@RECURSOR_RUN_DIR@+--config-name=http+reload-acls dns:rec_control+--socket-dir=@RECURSOR_RUN_DIR@+--config-name=http+reload-zones dns:rec_control+--socket-dir=@RECURSOR_RUN_DIR@+--config-name=http+reload-lua-script dns:rec_control+--socket-dir=@RECURSOR_RUN_DIR@+--config-name=http+wipe-cache+.$ dns:rec_control+--socket-dir=@RECURSOR_RUN_DIR@+--config-name=https+reload-lua-config dns:rec_control+--socket-dir=@RECURSOR_RUN_DIR@+--config-name=https+reload-acls dns:rec_control+--socket-dir=@RECURSOR_RUN_DIR@+--config-name=https+reload-zones dns:rec_control+--socket-dir=@RECURSOR_RUN_DIR@+--config-name=https+reload-lua-script dns:rec_control+--socket-dir=@RECURSOR_RUN_DIR@+--config-name=https+wipe-cache+.$ proxy:rc-service+nginx+reload ui:rc-service+lancache-ui+reload
+    - RELOAD_EXEC=dns:rec_control+--socket-dir=@RECURSOR_RUN_DIR@+--config-name=http+reload-lua-config dns:rec_control+--socket-dir=@RECURSOR_RUN_DIR@+--config-name=http+reload-acls dns:rec_control+--socket-dir=@RECURSOR_RUN_DIR@+--config-name=http+reload-zones dns:rec_control+--socket-dir=@RECURSOR_RUN_DIR@+--config-name=http+reload-lua-script dns:rec_control+--socket-dir=@RECURSOR_RUN_DIR@+--config-name=http+wipe-cache+.$ dns:rec_control+--socket-dir=@RECURSOR_RUN_DIR@+--config-name=https+reload-lua-config dns:rec_control+--socket-dir=@RECURSOR_RUN_DIR@+--config-name=https+reload-acls dns:rec_control+--socket-dir=@RECURSOR_RUN_DIR@+--config-name=https+reload-zones dns:rec_control+--socket-dir=@RECURSOR_RUN_DIR@+--config-name=https+reload-lua-script dns:rec_control+--socket-dir=@RECURSOR_RUN_DIR@+--config-name=https+wipe-cache+.$ proxy:@SERVICE_CONTROL_PROGRAM@+nginx+reload ui:@SERVICE_CONTROL_PROGRAM@+lancache-ui+reload
+    # What: the program that controls a service.
+    # Why: the exec rows and the program menu name it once.
+    # From: Issue #1683 | PR #2017
+    - SERVICE_CONTROL_PROGRAM=rc-service
+    # What: the command that reads the state of chronyd.
+    # Why: the statistics show stratum and offset.
+    # From: Issue #1683 | PR #2017
+    - CHRONY_TRACKING_EXEC=services:chronyc+-c+tracking
     # What: snmpd reload per container on a new snmpd.conf.
     # Why: one file, several snmpd; HUP rereads it.
     # From: Issue #1683
-    - SNMPD_RELOAD_EXEC=dns:rc-service+snmpd+reload proxy:rc-service+snmpd+reload ui:rc-service+snmpd+reload
+    - SNMPD_RELOAD_EXEC=dns:@SERVICE_CONTROL_PROGRAM@+snmpd+reload proxy:@SERVICE_CONTROL_PROGRAM@+snmpd+reload ui:@SERVICE_CONTROL_PROGRAM@+snmpd+reload
     # What: pdns restart on a new pdns.conf.
     # Why: pdns reads its config only at start.
     # From: Issue #1683
-    - PDNS_RESTART_EXEC=dns:rc-service+pdns+restart
+    - PDNS_RESTART_EXEC=dns:@SERVICE_CONTROL_PROGRAM@+pdns+restart
+    # What: dnsdist restart on a new dnsdist.conf.
+    # Why: dnsdist reads its config only at start.
+    # From: Issue #1683
+    - DNSDIST_RESTART_EXEC=dns:@SERVICE_CONTROL_PROGRAM@+dnsdist+restart
     # What: dnsmasq restart on a proxy/relay switch.
     # Why: both sub-modes run the same dnsmasq daemon.
     # From: Issue #1683
-    - DNSMASQ_RESTART_EXEC=dhcp:rc-service+dnsmasq+restart
+    - DNSMASQ_RESTART_EXEC=dhcp:@SERVICE_CONTROL_PROGRAM@+dnsmasq+restart
     - NGINX_CONF_DIR=@CONFIG_DIR@/proxy
     - DNSMASQ_CONF_FILE=@CONFIG_DIR@/dhcp/dnsmasq.conf
     - KEA_CTRL_CONF_FILE=@CONFIG_DIR@/dhcp/kea-ctrl-agent.conf
     - KEA_DDNS_CONF_FILE=@CONFIG_DIR@/dhcp/kea-dhcp-ddns.conf
     - PDNS_CONF_FILE=@CONFIG_DIR@/dns/pdns.conf
+    - DNSDIST_CONF_FILE=@CONFIG_DIR@/dns/dnsdist.conf
     - RECURSOR_HTTP_CONF_FILE=@CONFIG_DIR@/dns/recursor-http.yml
     - RECURSOR_HTTP_LUA_FILE=@CONFIG_DIR@/dns/http.lua
     - RECURSOR_HTTP_RPZ_FILE=@CONFIG_DIR@/dns/http.rpz
     - RECURSOR_HTTPS_CONF_FILE=@CONFIG_DIR@/dns/recursor-https.yml
     - RECURSOR_HTTPS_LUA_FILE=@CONFIG_DIR@/dns/https.lua
     - RECURSOR_HTTPS_RPZ_FILE=@CONFIG_DIR@/dns/https.rpz
-    # What: listen address, DNS and API port per recursor.
+    # What: dnsdist listens on DNS_PORT and DNS_HTTPS_PORT.
     # Why: compose maps IP_HTTP and IP_HTTPS to these ports.
-    # From: Issue #1683 | PR #1980
-    - RECURSOR_HTTP_LISTEN=0.0.0.0
-    - RECURSOR_HTTP_PORT=@DNS_PORT@
+    # From: Issue #1683
+    - DNSDIST_LISTEN=0.0.0.0
+    # What: dnsdist sender; 127/8, not LOOPBACK_BIND_IP.
+    # Why: pdns and recursors trust its proxy header.
+    # From: Issue #1683
+    - DNSDIST_SOURCE_ADDRESS=127.126.125.124
+    # What: soft open-files limit of dnsdist.
+    # Why: its TCP queue needs over 10000 descriptors.
+    # From: Issue #1683
+    - DNSDIST_OPEN_FILES=65536
+    # What: recursors listen behind dnsdist only.
+    # Why: dnsdist owns DNS_PORT and DNS_HTTPS_PORT.
+    # From: Issue #1683
+    - RECURSOR_HTTP_LISTEN=@LOOPBACK_BIND_IP@
+    - RECURSOR_HTTP_PORT=5301
     - RECURSOR_HTTP_API_PORT=@PDNS_HTTP_API_PORT@
-    - RECURSOR_HTTPS_LISTEN=0.0.0.0
-    - RECURSOR_HTTPS_PORT=@DNS_HTTPS_PORT@
+    - RECURSOR_HTTPS_LISTEN=@LOOPBACK_BIND_IP@
+    - RECURSOR_HTTPS_PORT=5302
     - RECURSOR_HTTPS_API_PORT=@PDNS_HTTPS_API_PORT@
     - SNMPD_CONF_FILE=@CONFIG_DIR@/services/snmpd.conf
     - SYSLOG_CONF_FILE=@CONFIG_DIR@/services/syslog-ng.conf
-    - RECURSOR_API_URLS=http://@DNS_SERVICE@:@PDNS_HTTP_API_PORT@/api/v1/servers/localhost http://@DNS_SERVICE@:@PDNS_HTTPS_API_PORT@/api/v1/servers/localhost
+    - RECURSOR_API_URLS=http://@DNS_SERVICE@:@PDNS_HTTP_API_PORT@@PDNS_API_PATH@ http://@DNS_SERVICE@:@PDNS_HTTPS_API_PORT@@PDNS_API_PATH@
     - REPO_URL=https://github.com/wiki-mod/lancache-ng
     - SECRETS_DIR=@LANCACHE_SHARED_SECRET_DIR@
     # What: git ref per channel for the secondary setup.sh.
@@ -1173,6 +1267,10 @@ runtime:
     - STEAM_DEVICE_NAME=LanCache-NG
     - STEAM_AUTH_PLATFORM_TYPE=1
     - STEAM_HEARTBEAT_DEFAULT=30
+    # What: seconds a stored access token must still live.
+    # Why: a token that ends during a call fails it.
+    # From: Issue #871 | PR #2017
+    - STEAM_TOKEN_MARGIN_SECONDS=60
     - STEAM_MANIFEST_API_VERSION=5
     - STEAM_OS=windows
     - STEAM_PROTOCOL_VERSION=65580
@@ -1189,14 +1287,18 @@ runtime:
     - UI_LISTEN=0.0.0.0
     - UI_LOG_LINES=500
     - UI_LOG_TAIL_CHUNK=65536
-    - UI_PASSWORD_HASH=
+    - UI_AUTH_PASSWORD_HASH=
     - UI_PASSWORD_MIN_LENGTH=12
+    # What: largest request body the Admin UI accepts.
+    # Why: a body is held in memory before it is read.
+    # From: Issue #1683 | PR #2017
+    - UI_REQUEST_BODY_MAX_BYTES=2097152
     - UI_PORT=@UI_LISTEN_PORT@
     - UI_PUBLIC_URL=
     - UI_RECENT_REQUESTS=50
-    - UI_SERVICES=dns:pdns dns:dns-http dns:dns-https dns:snmpd services:syslog-ng services:chronyd services:snmpd services:lancache-cachehamster dhcp:kea-dhcp4 dhcp:kea-ctrl-agent dhcp:kea-dhcp-ddns dhcp:dnsmasq proxy:nginx proxy:snmpd ui:snmpd
+    - UI_SERVICES=dns:pdns dns:dns-http dns:dns-https dns:dnsdist dns:snmpd services:syslog-ng services:chronyd services:snmpd services:lancache-cachehamster dhcp:kea-dhcp4 dhcp:kea-ctrl-agent dhcp:kea-dhcp-ddns dhcp:dnsmasq proxy:nginx proxy:snmpd ui:snmpd
     - UI_STATUS_REFRESH=10
-    - UI_USER=admin
+    - UI_AUTH_USER=admin
     - UPSTREAM_DHCP_IP=
     - WATCHDOG_ALARM_FILE=@STATUS_DIR@/alarms.json
     - WATCHDOG_ALARM_FILE_MODE=0644
@@ -1208,12 +1310,12 @@ runtime:
     - WATCHDOG_DISK_MIN_FREE_PERCENT=10
     - WATCHDOG_DISK_PATHS=@CACHE_DIR@ @SYSLOG_LOG_ROOT@
     # What: host conntrack counters and the warn level.
-    # Why: DoMe 07.11.: a full table drops new connections.
+    # Why: a full table drops new connections.
     # From: Issue #1683 | PR #1985
     - HOST_NET_STAT_SOURCE=/proc/1/net/stat
     - HOST_NET_STAT_DIR=/host/net_stat
     # What: host machine-id sources; first found wins.
-    # Why: DoMe 08.11.: the Steam login binds to the host.
+    # Why: the Steam login binds to the host.
     # From: Issue #871
     - HOST_MACHINE_ID_SOURCES=/etc/machine-id /var/lib/dbus/machine-id /dev/null
     - HOST_MACHINE_ID_FILE=/host/machine-id
@@ -1236,7 +1338,7 @@ runtime:
     - DNS_SECONDARY_NAME_MAX=32
   # What: key=kind;min;max;effect;owner; ? = optional.
   # Why: config.rs checks every value against it.
-  # From: Issue #1683 | PR #1858
+  # From: Issue #1683 | PR #1980
   schema:
     - AUTO_UPDATE_ENABLED=bool;;;live;ui
     - NTP_AUTO_DHCP=bool;;;reload;dhcp
@@ -1292,6 +1394,14 @@ runtime:
     - DNS_TXT_MAX_BYTES=uint;1;255;live;ui
     - DNS_REPLICATION_ROLE=choice;primary,secondary;;recreate;dns
     - DNS_SECONDARIES=list?;;;restart;dns
+    - DNS_SECONDARY_CHECK_SECONDS=uint;60;604800;live;ui
+    - DNS_SECONDARY_NS=list?;;;live;ui
+    - DNS_SECONDARY_NS_AUTO_REMOVE=bool;;;live;ui
+    - DNS_SECONDARY_NS_ENABLED=bool;;;live;ui
+    - DNS_SECONDARY_NS_OFF=list?;;;live;ui
+    - DNS_SECONDARY_NS_REMOVE_AFTER_SECONDS=uint;60;2592000;live;ui
+    - DNS_SECONDARY_NS_REMOVE_FAILS=uint;1;1000;live;ui
+    - DNS_SECONDARY_RECHECK_SECONDS=uint;60;86400;live;ui
     - DNS_SECONDARY_ZONES=list?;;;restart;dns
     - DNS_SECONDARY_SYNC_SECONDS=uint;5;86400;live;services
     - DNS_SERVE_RFC1918=bool;;;restart;dns
@@ -1363,6 +1473,7 @@ runtime:
     - PDNS_DATABASE=path;;;restart;dns
     - PDNS_LAUNCH=text;;;restart;dns
     - PDNS_DEFAULT_SOA=text;;;restart;dns
+    - DNS_NS_HTTPS_NAME=text;;;live;ui
     - PDNS_DNSUPDATE_FROM=list?;;;restart;dns
     - PDNS_LISTEN=list;;;restart;dns
     - PDNS_PRIMARY_API_URL=text?;;;live;services
@@ -1387,12 +1498,17 @@ runtime:
     - RELOAD_EXEC=list;;;live;ui
     - SNMPD_RELOAD_EXEC=list;;;live;ui
     - PDNS_RESTART_EXEC=list;;;live;ui
+    - DNSDIST_RESTART_EXEC=list;;;live;ui
     - DNSMASQ_RESTART_EXEC=list;;;live;ui
+    - CHRONY_TRACKING_EXEC=list;;;live;ui
     - NGINX_CONF_DIR=path;;;container;proxy
     - DNSMASQ_CONF_FILE=path;;;container;dhcp
     - KEA_CTRL_CONF_FILE=path;;;container;dhcp
     - KEA_DDNS_CONF_FILE=path;;;container;dhcp
     - PDNS_CONF_FILE=path;;;container;dns
+    - DNSDIST_CONF_FILE=path;;;container;dns
+    - DNSDIST_LISTEN=list;;;restart;dns
+    - DNSDIST_SOURCE_ADDRESS=text;;;restart;dns
     - RECURSOR_HTTP_CONF_FILE=path;;;container;dns
     - RECURSOR_HTTP_LUA_FILE=path;;;container;dns
     - RECURSOR_HTTP_RPZ_FILE=path;;;container;dns
@@ -1457,6 +1573,7 @@ runtime:
     - STEAM_DEVICE_NAME=text;;;live;services
     - STEAM_AUTH_PLATFORM_TYPE=uint;0;10;live;services
     - STEAM_HEARTBEAT_DEFAULT=uint;1;600;live;services
+    - STEAM_TOKEN_MARGIN_SECONDS=uint;0;3600;live;services
     - STEAM_MANIFEST_API_VERSION=uint;1;100;live;services
     - STEAM_OS=choice;windows,macos,linux;;live;services
     - STEAM_PROTOCOL_VERSION=uint;1;1000000;live;services
@@ -1479,14 +1596,15 @@ runtime:
     - UI_LISTEN=text;;;restart;ui
     - UI_LOG_LINES=uint;10;100000;live;ui
     - UI_LOG_TAIL_CHUNK=uint;1024;10485760;live;ui
-    - UI_PASSWORD_HASH=secret?;;;live;ui
+    - UI_AUTH_PASSWORD_HASH=secret?;;;live;ui
     - UI_PASSWORD_MIN_LENGTH=uint;8;128;live;ui
     - UI_PORT=uint;1;65535;recreate;ui
     - UI_PUBLIC_URL=text?;;;live;ui
     - UI_RECENT_REQUESTS=uint;1;1000;live;ui
+    - UI_REQUEST_BODY_MAX_BYTES=uint;1024;104857600;restart;ui
     - UI_SERVICES=list;;;live;ui
     - UI_STATUS_REFRESH=uint;1;3600;live;ui
-    - UI_USER=text;;;live;ui
+    - UI_AUTH_USER=text;;;live;ui
     - UPSTREAM_DHCP_IP=text?;;;reload;dhcp
     - WATCHDOG_ALARM_FILE=path;;;live;services
     - WATCHDOG_ALARM_FILE_MODE=text;;;live;services
@@ -1561,7 +1679,7 @@ runtime:
   # What: defaults compose interpolates as SOT_<KEY>.
   # Why: setup.sh and ci.sh export them; no clash with .env.
   # From: Issue #1683 | PR #1912
-  compose_keys: LANCACHE_LOG_PORT RUN_DIR SUPERVISE_RUN_DIR LANCACHE_SHARED_SECRET_DIR UI_DATA_DIR STATUS_DIR CACHE_DIR SYSLOG_LOG_ROOT RETENTION_STATE_DIR NTP_STATE_DIR CACHEHAMSTER_DATA_DIR DOCKER_SOCKET LOCALTIME_FILE CDN_DOMAINS_FILE PDNS_DATA_DIR DNS_STATE_DIR DNS_SNAPSHOT_MOUNT DHCP_SNAPSHOT_MOUNT PROXY_SNAPSHOT_MOUNT KEA_DATA_DIR UI_LISTEN_PORT DNS_PORT DNS_HTTPS_PORT PDNS_AUTH_PORT PDNS_AUTH_API_PORT NTP_PORT PROXY_HTTP_PORT PROXY_HTTPS_PORT NGINX_PASSTHROUGH_PORT NGINX_DIR NGINX_SUBDIR_CA NGINX_SUBDIR_CERTS NGINX_CACHE_DIR NGINX_PSL_FILE PDNS_LUA_DNS_SCRIPT TEMPLATE_DIR STATIC_DIR LANG_DIR LOOPBACK_BIND_IP DHCP_API_HOST DNS_REPLICATION_ROLE_SECONDARY SECONDARY_RUNTIME_GID SECONDARY_SHARED_SECRET_DIR CONTAINER_NAME_SERVICES CONTAINER_NAME_PROXY CONTAINER_NAME_DNS CONTAINER_NAME_DHCP CONTAINER_NAME_UI HEALTHCHECK_INTERVAL HEALTHCHECK_TIMEOUT HEALTHCHECK_RETRIES HEALTHCHECK_START_PERIOD PROXY_HEALTH_PATH SETUP_DNS_PROBE_NAME CONFIG_DIR NGINX_CONF_DIR NGINX_TEMPLATE_DIR UI_SETTINGS_FILE HOST_NET_DEV_FILE HOST_NET_DEV_SOURCE HOST_NET_STAT_SOURCE HOST_NET_STAT_DIR HOST_MACHINE_ID_FILE
+  compose_keys: LANCACHE_LOG_PORT RUN_DIR SUPERVISE_RUN_DIR LANCACHE_SHARED_SECRET_DIR UI_DATA_DIR STATUS_DIR CACHE_DIR SYSLOG_LOG_ROOT RETENTION_STATE_DIR NTP_STATE_DIR CACHEHAMSTER_DATA_DIR DOCKER_SOCKET LOCALTIME_FILE CDN_DOMAINS_FILE PDNS_DATA_DIR DNS_STATE_DIR DNS_SNAPSHOT_MOUNT DHCP_SNAPSHOT_MOUNT PROXY_SNAPSHOT_MOUNT KEA_DATA_DIR UI_LISTEN_PORT DNS_PORT DNS_HTTPS_PORT PDNS_AUTH_PORT PDNS_AUTH_API_PORT NTP_PORT PROXY_HTTP_PORT PROXY_HTTPS_PORT NGINX_PASSTHROUGH_PORT NGINX_DIR NGINX_SUBDIR_CA NGINX_SUBDIR_CERTS NGINX_CACHE_DIR NGINX_PSL_FILE PDNS_LUA_DNS_SCRIPT TEMPLATE_DIR STATIC_DIR LANG_DIR LOOPBACK_BIND_IP DHCP_API_HOST DNS_REPLICATION_ROLE_SECONDARY SECONDARY_RUNTIME_GID SECONDARY_SHARED_SECRET_DIR CONTAINER_NAME_SERVICES CONTAINER_NAME_PROXY CONTAINER_NAME_DNS CONTAINER_NAME_DHCP CONTAINER_NAME_UI HEALTHCHECK_INTERVAL HEALTHCHECK_TIMEOUT HEALTHCHECK_RETRIES HEALTHCHECK_START_PERIOD PROXY_HEALTH_PATH SETUP_DNS_PROBE_NAME CONFIG_DIR NGINX_CONF_DIR NGINX_TEMPLATE_DIR STACK_ENV_DIR STACK_ENV_FILE HOST_NET_DEV_FILE HOST_NET_DEV_SOURCE HOST_NET_STAT_SOURCE HOST_NET_STAT_DIR HOST_MACHINE_ID_FILE
   # What: managed secrets as "KEY generator owner".
   # Why: setup.sh and ci.sh filter one list.
   # From: Issue #1683 | PR #1912
@@ -1816,7 +1934,7 @@ build_identity:
     inputs: [toolchain_source_sha, base_digest, package_refresh]
   # What: apk-only images: no Rust, no toolchain.
   # Why: source, base and package refresh key the id.
-  # From: Issue #1683 | PR #1858
+  # From: Issue #1683 | PR #1980
   apk:
     inputs: [source_sha, base_digest, package_refresh]
 
@@ -2239,7 +2357,7 @@ ci_variables:
   # From: Issue #1683 | PR #1912
   CI_BUILDX_BUILDER: lancache-ci
   # What: layer compression of every built image.
-  # Why: A3: gzip unpack took 12 s per job container.
+  # Why: zstd unpacks faster than gzip in a job.
   # From: Issue #1683 | PR #1858
   CI_IMAGE_COMPRESSION: zstd
   # What: poll seconds of every CI lock wait.
@@ -2292,11 +2410,11 @@ ci_variables:
   # From: Issue #1683 | PR #1858
   PR_TITLE_LINT_MODE: warn
   # What: debug mode (true|false): log all raw output.
-  # Why: DoMe: raw output of every command must show.
+  # Why: raw output of every command must show.
   # From: Issue #1683 | PR #1984
   PROJECT_DEBUG_MODE: "true"
   # What: seconds gc waits between two deletes.
-  # Why: DoMe: empty repo variable means 2 seconds.
+  # Why: an empty repo variable takes this value.
   # From: Issue #1683 | PR #1858
   PROJECT_GC_DELETE_PAUSE_SECONDS: 2
   # What: minutes gc may delete before it ends green.

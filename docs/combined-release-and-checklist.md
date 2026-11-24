@@ -184,6 +184,12 @@ image digests: a changed service uses the digest built for its new identity, an
 unchanged service reuses the digest accepted for that identity. Nothing is
 retagged or pulled from a mutable channel to complete the stack.
 
+The plan builds a pair whose identity image is missing only on a proven input
+change from the base (`_ci_impact_classify`): changed build input content, a
+changed SOT identity input list or pin, or a changed `ci.sh`, which derives the
+pins and so the identity of every service image. A `ci.sh` change does not
+rebuild `build-tools` (AG-CI-010).
+
 On every push, `ci.sh assemble-stack` assembles the built services and every
 service the plan did not build. An unchanged service gets the index of its
 accepted digests under the new `sha-<full-sha>` tag; nothing is rebuilt. So a
@@ -373,11 +379,13 @@ Roll back with an immutable `sha-<full-sha>` or `vX.Y.Z` tag. Backups record
 the image revisions before an update.
 
 Retention is decided by reachability, not by a count budget. `ci.sh gc` decides
-it; `gc.yml` runs it on schedule (`43 */3 * * *`, every three hours) and on
-`workflow_dispatch`, with `--apply`. The policy values are the SOT
+it; `gc.yml` runs it on schedule (cron `43 */3 * * *`; GitHub may start a
+scheduled run hours later) and on `workflow_dispatch`, with `--apply`. The
+scheduled run uses the `ci.sh` of `master`. The policy values are the SOT
 `release.retention` keys. `gc.yml` also runs `gc-refs --apply` (green refs of
-closed pull requests, ended locks, dead marks) and
-`check orphaned-branches`.
+closed pull requests, ended locks, dead marks), also after a failed `gc` step,
+and `check orphaned-branches`. `gc` may delete for `CI_GC_DELETE_MINUTES`,
+counted from its start.
 
 ### 7.1 Protected roots
 
@@ -386,11 +394,23 @@ closed pull requests, ended locks, dead marks) and
 | every acceptance-ledger record, in any state (git ref `CI_LEDGER_REF`) | a pending record is not garbage |
 | every mutable channel of every build target | a channel protects the digest it points at now |
 | the release tags of the newest `release.retention.keep_release_lines` release lines, plus `migration_releases` | released digests are not garbage |
-| the layer-cache tags of every build target and platform | the cache is live |
+| the release candidate tags (`release.tag_prerelease`) of those lines and of any newer line | an active release candidate is pinned for testing |
+| every version with a commit tag (`release.tag_commit`, `sha-<full-sha>`) | commit tags are durable rollback points |
+| the layer-cache tags of every build target and platform | the cache is live; a superseded cache version gets the grace verdict |
+| the pair images named by the mark `CI_GREEN_REF/pr-<n>-images` of a pull request | a pull request writes no ledger record, but its runs use these images |
 | the index children of all of these | removing children orphans platform images |
 
+The plan of a pull request run writes `pr-<n>-images` with every pair id
+before it probes the registry; a new head replaces it. `gc-refs` deletes the
+mark when the pull request is closed. A fork pull request cannot write refs;
+its images have the grace window only.
+
 A failed read of any root is UNKNOWN: the run stops and deletes nothing. An
-empty root set also stops the run.
+empty root set, an absent ledger ref and a ledger record without service or
+digest also stop the run. A package listing answered with 404 while a channel
+tag of that package resolves stops the run: the delete token lacks access.
+`gc-refs` deletes a mark of the old pair-wide name; a mark name of no known
+format stops it.
 
 ### 7.2 Verdict and deletion
 
@@ -408,8 +428,10 @@ A candidate that cannot be classified stops the run. Without `--apply`, the
 run only prints verdicts. With `--apply` it deletes only when
 `release.retention.deletion_policy` is `manual-or-approved-automation-only` and
 GHCR authentication is present (`gc.yml` passes `GHCR_PACKAGE_DELETE_PAT`).
-Right before each delete the candidate is classified again; a candidate that is
-referenced now is kept and logged.
+Right before each delete, after the pause between deletes, GC reads the
+`pr-<n>-images` marks again, adds the images of a changed mark to the roots
+and classifies the candidate again; a candidate that is referenced now is kept
+and logged.
 
 ---
 
@@ -615,6 +637,7 @@ the host network. The wire-level checks need a real LAN.
 | dnsmasq relay | between two segments, the client's lease comes from the client subnet's pool through the relay's `giaddr`, not from a same-subnet fallback |
 | One mode at a time | `DHCP_MODE` selects exactly one rendered dnsmasq or Kea config; inspect the rendered config inside the running container, not only the variable |
 | Sub-mode switch | switching `dnsmasq-proxy` and `dnsmasq-relay` on the Admin UI `/dhcp/mode` form makes dnsmasq run with the new sub-mode while the container keeps running |
+| Empty anchor | with `DHCP_SUBNET_START` or `DHCP_RELAY_LOCAL_ADDR` empty (a blank answer in `setup.sh`, or a mode switch in the Admin UI), the rendered `dhcp-range=<IP_HTTP>,proxy` or `dhcp-relay=<IP_HTTP>,<UPSTREAM_DHCP_IP>` uses the server address, and the next `setup.sh update` completes |
 
 CI covers the Kea snapshot and rollback against Kea's running config; the
 lease effect is live only.
@@ -671,8 +694,10 @@ With a real primary and at least one real secondary on another host
 | --- | --- |
 | Reachability | `curl -u <user>:<pass> http://<ui host>:<port>/` succeeds. Without `UI_AUTH_USER` and `UI_AUTH_PASSWORD` and without `ALLOW_INSECURE_UI=true` the UI fails closed and restart-loops with `Admin-UI authentication is required` (AG-SEC-001); that is expected |
 | Container health on the dashboard | stop a monitored container and wait one watchdog round; its entry turns unhealthy (`GET /api/status`) and healthy again after a restart; a stale or missing status renders as stale or unavailable, never as the last known color |
-| Cache resize | change `CACHE_MAX_GB` on the Setup page and wait for the `lancache-converge.timer` run; `setup.sh converge-reconcile` writes the value into the runtime env and the proxy is recreated. Pass: `docker exec <proxy container> nginx -T` shows the new `max_size=` on `proxy_cache_path`; an HTTP `200` or `303` from the form is not the proof |
+| Cache resize | change `CACHE_MAX_GB` on the Setup page; the ui writes it into `.env`, and the next `lancache-converge.timer` run recreates the proxy, whose environment changed. Pass: `docker exec <proxy container> nginx -T` shows the new `max_size=` on `proxy_cache_path`; an HTTP `200` or `303` from the form is not the proof |
 | Self-restart | `POST /api/restart-ui` (restart button) ends the UI process; compose `restart: always` starts it again. Pass: `docker inspect --format '{{.State.StartedAt}}' "$(docker compose -f deploy/prod/docker-compose.yml ps -q ui)"` is later and the page reloads |
+| One settings file | a change on the Setup page changes only its own line in `.env`; comments and other keys stay. After `setup.sh install` with "Overwrite? y" the wizard answers apply. `setup.sh update` of an install that still has `lancache-ui-settings.env` moves its values into `.env` (`UI_USER` and `UI_PASSWORD_HASH` as `UI_AUTH_USER` and `UI_AUTH_PASSWORD_HASH`) and keeps a copy as `.merged`; the file stays for a rollback, and a later update merges only lines it changed since |
+| Override file | `CACHE_MEM_MB=123` alone in `deploy/prod/.env.local`: `setup.sh compose deploy/prod config` differs from the run without the file in exactly that value; a Setup page save of `CACHE_MEM_MB` is refused and names `.env.local`; `setup.sh update` names the key. Deleting the file gives the first output again. An install of v0.4.0 (only `.env.local`) has `.env` and no `.env.local` after its first `setup.sh` run, with the same `compose config` apart from `LANCACHE_SETTINGS_FILE` |
 | Start and stop of a container | the beam bar posts `{"state": "running"}` or `{"state": "stopped"}` to `POST /api/container/{service}`. Pass: a stopped service is listed as stopped by the user, the others stay healthy, Start brings it back |
 
 ### 10.7 Watchdog
@@ -842,6 +867,12 @@ before (or has no baseline) and is unhealthy now.
   (`result-gate`).
 - The `setup.sh` DHCP activation preflight (`run_kea_dhcp_activation_preflight`)
   has no CI check.
+- Two writers of the one settings file (`config::store`, the `setup.sh` env
+  writers under `with_env_lock`) and the merge of the old ui settings file:
+  section 10.6, row "One settings file", is live only.
+- `setup.sh` refusing an optional DHCP key that the render fills when empty
+  (`DHCP_SUBNET_START`, `DHCP_RELAY_LOCAL_ADDR` in `migrate_env_for_update`
+  and the wizard): section 10.3, row "Empty anchor", is live only.
 - The `setup.sh update` health baseline and regression gate: section 10.12 is
   live only.
 - Dockerfile lint (`docker buildx build --call check`) runs in no job; `FROM

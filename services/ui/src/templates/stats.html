@@ -31,7 +31,7 @@
     <button type="button" class="subtab stats-tab" data-range="{{ r }}">{{ r }}</button>
     {% endfor %}
     {# What: reload the graphs every recording step. #}
-    {# Why: DoMe 07.11.: values change every minute. #}
+    {# Why: new values arrive with every step. #}
     {# From: Issue #1683 | PR #1985 #}
     <button type="button" class="subtab" id="stats-auto" data-step="{{ stats_step }}" aria-pressed="false">⟳ {{ t.auto_reload }}</button>
   </div>

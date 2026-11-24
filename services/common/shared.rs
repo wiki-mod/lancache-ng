@@ -10,13 +10,13 @@ pub mod config;
 
 // What: wall-clock time since the Unix epoch.
 // Why: file names, ids and logs need a plain number.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 pub mod clock {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     // What: nanoseconds since 1970; 0 if the clock is off.
     // Why: a clock before 1970 must not panic.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn unix_nanos() -> u128 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -25,7 +25,7 @@ pub mod clock {
 
     // What: whole seconds since 1970.
     // Why: retention and schedules count seconds.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn unix_secs() -> u64 {
         u64::try_from(unix_nanos() / 1_000_000_000).unwrap_or(u64::MAX)
     }
@@ -40,9 +40,14 @@ pub mod fs {
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     use std::path::{Path, PathBuf};
 
+    // What: file mode of a file only its owner may read.
+    // Why: secrets, tokens and snapshots share one mode.
+    // From: Issue #1683 | PR #2017
+    pub const PRIVATE_MODE: u32 = 0o600;
+
     // What: replace a file, or create it only if new.
     // Why: secrets are first-writer-wins; configs replace.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub enum Place {
         Replace,
@@ -51,16 +56,25 @@ pub mod fs {
 
     // What: optional uid and gid for a written file.
     // Why: root writes files a service user must read.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
     pub struct Owner {
         pub uid: Option<u32>,
         pub gid: Option<u32>,
     }
 
+    // What: the path with a suffix appended to its name.
+    // Why: one owner of sibling names like .local or .xz.
+    // From: Issue #1683 | PR #2017
+    pub fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
+        let mut name = path.as_os_str().to_owned();
+        name.push(suffix);
+        PathBuf::from(name)
+    }
+
     // What: apply owner and mode on an open file.
     // Why: fchown on the handle avoids a path race.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     fn set_owner(file: &File, owner: Owner, mode: Option<u32>) -> io::Result<()> {
         if owner.uid.is_some() || owner.gid.is_some() {
             std::os::unix::fs::fchown(file, owner.uid, owner.gid)?;
@@ -114,7 +128,7 @@ pub mod fs {
                 Place::Replace => fs::rename(&tmp, path).or_else(|e| {
                     // What: busy bind mount: write in place
                     // Why: rename onto a mount is EBUSY.
-                    // From: Issue #1683 | PR #1858
+                    // From: Issue #1683 | PR #1980
                     if e.kind() != io::ErrorKind::ResourceBusy {
                         return Err(e);
                     }
@@ -124,9 +138,7 @@ pub mod fs {
                 }),
             });
         drop(file);
-        if let Err(e) = fs::remove_file(&tmp)
-            && e.kind() != io::ErrorKind::NotFound
-        {
+        if let Err(e) = remove_if_present(&tmp) {
             eprintln!("fs: {} left behind: {e}", tmp.display());
         }
         result
@@ -154,6 +166,16 @@ pub mod fs {
         Ok(!same)
     }
 
+    // What: removes a file; a missing one is fine.
+    // Why: absent is the state the caller wants.
+    // From: Issue #1683 | PR #2017
+    pub fn remove_if_present(path: &Path) -> io::Result<()> {
+        match fs::remove_file(path) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        }
+    }
+
     // What: metadata, or None if the path is absent.
     // Why: absent is a normal state, not an error.
     // From: Issue #1683 | PR #1858
@@ -167,7 +189,7 @@ pub mod fs {
 
     // What: every regular file below root.
     // Why: retention sums and prunes by size and age.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn files_under(root: &Path) -> io::Result<Vec<(PathBuf, fs::Metadata)>> {
         let mut out = Vec::new();
         let mut dirs = vec![root.to_path_buf()];
@@ -192,7 +214,7 @@ pub mod fs {
 
     // What: total and free bytes of a filesystem.
     // Why: cache size checks need the real free space.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub struct Space {
         pub total: u64,
@@ -221,11 +243,6 @@ pub mod secret {
     use std::io;
     use std::path::{Path, PathBuf};
     use subtle::ConstantTimeEq;
-
-    // What: file mode of every secret file.
-    // Why: only the owning user may read a secret.
-    // From: Issue #1683 | PR #1858
-    const MODE: u32 = 0o600;
 
     // What: nonce length of ChaCha20-Poly1305.
     // Why: fixed by the cipher (RFC 8439).
@@ -261,6 +278,13 @@ pub mod secret {
         presented.as_bytes().ct_eq(expected.as_bytes()).into()
     }
 
+    // What: the directory of the secret files.
+    // Why: one owner of the SECRETS_DIR setting.
+    // From: Issue #1683 | PR #2017
+    pub fn dir(s: &crate::config::Settings) -> Result<PathBuf, String> {
+        Ok(PathBuf::from(s.text("SECRETS_DIR")?))
+    }
+
     // What: secret file of a key: A_B becomes a-b.
     // Why: one naming rule for every secret file.
     // From: Issue #1683 | PR #1858
@@ -289,7 +313,8 @@ pub mod secret {
             Ok(text) => usable(text),
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 let text = create();
-                match fs::write(path, text.as_bytes(), MODE, Place::Exclusive, owner) {
+                let mode = fs::PRIVATE_MODE;
+                match fs::write(path, text.as_bytes(), mode, Place::Exclusive, owner) {
                     Ok(()) => Ok(text),
                     Err(e) if e.kind() == io::ErrorKind::AlreadyExists => usable(read()?),
                     Err(e) => Err(e),
@@ -303,17 +328,17 @@ pub mod secret {
     // Why: the operator may set it; else it is generated.
     // From: Issue #1683 | PR #1858
     pub fn resolve(
-        env_value: Option<&str>,
+        env: &dyn Fn(&str) -> Option<String>,
         dir: &Path,
         key: &str,
         owner: Owner,
     ) -> io::Result<String> {
-        match env_value.filter(|v| !v.is_empty()) {
-            Some(v) if is_placeholder(v) => Err(io::Error::new(
+        match crate::config::env_set(env, key) {
+            Some(v) if is_placeholder(&v) => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("{key} holds a placeholder"),
             )),
-            Some(v) => Ok(v.to_string()),
+            Some(v) => Ok(v),
             None => load_or_create(&file_of(dir, key), || random_hex(32), owner),
         }
     }
@@ -345,7 +370,7 @@ pub mod secret {
 
     // What: decrypt what seal wrote.
     // Why: a wrong key or damage is a clear error.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn open(key: &[u8; 32], sealed: &[u8]) -> Result<Vec<u8>, String> {
         let Some((nonce, body)) = sealed.split_at_checked(NONCE_LEN) else {
             return Err("sealed data too short".into());
@@ -381,7 +406,7 @@ pub mod secret {
 
 // What: HTTP client, probe and drain.
 // Why: every crate uses the same timeouts from the SOT.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 pub mod http {
     use crate::config::Settings;
     use futures_util::StreamExt as _;
@@ -389,7 +414,7 @@ pub mod http {
 
     // What: shared client with SOT timeouts.
     // Why: no request may hang without a limit.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn client(s: &Settings) -> Result<reqwest::Client, String> {
         let secs = |key: &str| s.uint(key).map(Duration::from_secs);
         reqwest::Client::builder()
@@ -402,7 +427,7 @@ pub mod http {
 
     // What: error text with every source cause.
     // Why: reqwest hides the cause in source().
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn error_chain(error: &dyn std::error::Error) -> String {
         let mut parts = vec![error.to_string()];
         let mut next = error.source();
@@ -415,7 +440,7 @@ pub mod http {
 
     // What: GET url; ok only on 2xx.
     // Why: health probes of the proxy and the ui.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub async fn probe(url: &str, ca_pem: Option<&[u8]>, timeout: Duration) -> Result<(), String> {
         let mut builder = reqwest::Client::builder().timeout(timeout).no_proxy();
         if url.starts_with("https://") {
@@ -439,7 +464,7 @@ pub mod http {
 
     // What: GET url, count and drop the body.
     // Why: prefill warms the cache; nothing is stored.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub async fn drain(client: &reqwest::Client, url: &str) -> Result<(u16, u64), String> {
         let resp = client
             .get(url)
@@ -459,7 +484,7 @@ pub mod http {
 
 // What: client of the PowerDNS HTTP API.
 // Why: the ui writes records; no message bus in between.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 pub mod pdns {
     use reqwest::Method;
     use serde_json::{Value, json};
@@ -467,12 +492,12 @@ pub mod pdns {
 
     // What: auth header name of the PowerDNS API.
     // Why: fixed by PowerDNS.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     const KEY_HEADER: &str = "X-API-Key";
 
     // What: the zone fields the sync check reads.
     // Why: serial against notified serial shows lag.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     #[derive(Clone, Debug, serde::Deserialize)]
     pub struct Zone {
         pub id: String,
@@ -490,7 +515,7 @@ pub mod pdns {
 
     // What: one API endpoint with its key.
     // Why: base is .../api/v1/servers/<id> from the SOT.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     #[derive(Clone)]
     pub struct Api {
         client: reqwest::Client,
@@ -500,15 +525,22 @@ pub mod pdns {
 
     // What: name with exactly one final dot.
     // Why: the API wants canonical names.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn zone_id(zone: &str) -> String {
         format!("{}.", zone.trim_end_matches('.'))
+    }
+
+    // What: the API path of one zone.
+    // Why: every zone call starts with this path.
+    // From: Issue #1683 | PR #2017
+    fn zone_path(zone: &str) -> String {
+        format!("/zones/{}", zone_id(zone))
     }
 
     impl Api {
         // What: a client for one server base URL.
         // Why: auth and recursor share this code.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         pub fn new(client: reqwest::Client, base: &str, key: &str) -> Self {
             Self {
                 client,
@@ -519,7 +551,7 @@ pub mod pdns {
 
         // What: one request; non-2xx is an error.
         // Why: PowerDNS explains refusals in the body.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         async fn call(
             &self,
             method: Method,
@@ -549,9 +581,9 @@ pub mod pdns {
 
         // What: PATCH a list of rrset changes.
         // Why: soa-edit-api raises the serial once.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         async fn patch(&self, zone: &str, rrsets: Vec<Value>) -> Result<(), String> {
-            let path = format!("/zones/{}", zone_id(zone));
+            let path = zone_path(zone);
             self.call(Method::PATCH, &path, Some(json!({ "rrsets": rrsets })))
                 .await
                 .map(drop)
@@ -559,7 +591,7 @@ pub mod pdns {
 
         // What: replace one rrset; empty deletes it.
         // Why: a record edit is one PATCH.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         pub async fn set_rrset(
             &self,
             zone: &str,
@@ -583,18 +615,16 @@ pub mod pdns {
 
         // What: all rrsets of a zone.
         // Why: snapshots and lists read them.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         pub async fn rrsets(&self, zone: &str) -> Result<Vec<Value>, String> {
-            let text = self
-                .call(Method::GET, &format!("/zones/{}", zone_id(zone)), None)
-                .await?;
+            let text = self.call(Method::GET, &zone_path(zone), None).await?;
             let v: Value = serde_json::from_str(&text).map_err(|e| format!("zone {zone}: {e}"))?;
             Ok(v["rrsets"].as_array().cloned().unwrap_or_default())
         }
 
         // What: make the zone equal to saved rrsets.
         // Why: rollback; SOA stays so the serial rises.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         pub async fn restore(&self, zone: &str, saved: &[Value]) -> Result<(), String> {
             let id = |r: &Value| (r["name"].to_string(), r["type"].to_string());
             let wanted: BTreeSet<_> = saved.iter().map(id).collect();
@@ -612,11 +642,21 @@ pub mod pdns {
             self.patch(zone, changes).await
         }
 
-        // What: add a zone that pulls from masters.
-        // Why: a secondary copies zones by AXFR.
-        // From: Issue #1683 | PR #1858
-        pub async fn create_secondary(&self, zone: &str, masters: &[String]) -> Result<(), String> {
-            let body = json!({"name": zone_id(zone), "kind": "Slave", "masters": masters});
+        // What: add a zone that pulls, with its key.
+        // Why: no zone may exist without its TSIG key.
+        // From: Issue #1683
+        pub async fn create_secondary(
+            &self,
+            zone: &str,
+            masters: &[String],
+            key: &str,
+        ) -> Result<(), String> {
+            let body = json!({
+                "name": zone_id(zone),
+                "kind": "Slave",
+                "masters": masters,
+                "slave_tsig_key_ids": [zone_id(key)],
+            });
             self.call(Method::POST, "/zones", Some(body))
                 .await
                 .map(drop)
@@ -626,19 +666,28 @@ pub mod pdns {
         // Why: a changed LAN domain leaves its old zones.
         // From: Issue #1683 | PR #1980
         pub async fn delete_zone(&self, zone: &str) -> Result<(), String> {
-            let path = format!("/zones/{}", zone_id(zone));
+            let path = zone_path(zone);
             self.call(Method::DELETE, &path, None).await.map(drop)
         }
 
         // What: add a primary zone; SOA from default-soa.
         // Why: API writes and DDNS need the zone to exist.
         // From: Issue #1683 | PR #1980
-        pub async fn create_primary(&self, zone: &str, soa_edit: &str) -> Result<(), String> {
+        pub async fn create_primary(
+            &self,
+            zone: &str,
+            soa_edit: &str,
+            key: &str,
+        ) -> Result<(), String> {
+            // What: TSIG-ALLOW-AXFR set on create.
+            // Why: no zone may exist without its key.
+            // From: Issue #1683
             let body = json!({
                 "name": zone_id(zone),
                 "kind": "Master",
                 "nameservers": [],
                 "soa_edit_api": soa_edit,
+                "master_tsig_key_ids": [zone_id(key)],
             });
             self.call(Method::POST, "/zones", Some(body))
                 .await
@@ -647,7 +696,7 @@ pub mod pdns {
 
         // What: create or replace one TSIG key.
         // Why: rotation keeps the name; PUT needs a key.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         pub async fn set_tsigkey(
             &self,
             name: &str,
@@ -670,14 +719,14 @@ pub mod pdns {
 
         // What: set one metadata kind of a zone.
         // Why: per-zone metadata binds the TSIG key.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         pub async fn set_metadata(
             &self,
             zone: &str,
             kind: &str,
             values: &[String],
         ) -> Result<(), String> {
-            let path = format!("/zones/{}/metadata/{kind}", zone_id(zone));
+            let path = format!("{}/metadata/{kind}", zone_path(zone));
             let body = json!({"kind": kind, "metadata": values});
             self.call(Method::PUT, &path, Some(body)).await.map(drop)
         }
@@ -686,7 +735,7 @@ pub mod pdns {
         // Why: a rerun fixes the masters of old zones.
         // From: Issue #1683
         pub async fn set_masters(&self, zone: &str, masters: &[String]) -> Result<(), String> {
-            let path = format!("/zones/{}", zone_id(zone));
+            let path = zone_path(zone);
             let body = json!({"masters": masters});
             self.call(Method::PUT, &path, Some(body)).await.map(drop)
         }
@@ -695,14 +744,14 @@ pub mod pdns {
         // Why: the API refuses meta AXFR-MASTER-TSIG.
         // From: Issue #1683
         pub async fn set_secondary_tsig(&self, zone: &str, key: &str) -> Result<(), String> {
-            let path = format!("/zones/{}", zone_id(zone));
+            let path = zone_path(zone);
             let body = json!({"slave_tsig_key_ids": [zone_id(key)]});
             self.call(Method::PUT, &path, Some(body)).await.map(drop)
         }
 
         // What: all zones with serial and checks.
         // Why: sync state compares primary and secondary.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         pub async fn zones(&self) -> Result<Vec<Zone>, String> {
             let text = self.call(Method::GET, "/zones", None).await?;
             serde_json::from_str(&text).map_err(|e| format!("zone list: {e}"))
@@ -710,40 +759,32 @@ pub mod pdns {
 
         // What: the zone as BIND zone-file text.
         // Why: snapshots store what PowerDNS exports.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         pub async fn export(&self, zone: &str) -> Result<String, String> {
-            self.call(
-                Method::GET,
-                &format!("/zones/{}/export", zone_id(zone)),
-                None,
-            )
-            .await
+            self.call(Method::GET, &format!("{}/export", zone_path(zone)), None)
+                .await
         }
 
         // What: send NOTIFY to all secondaries now.
         // Why: a lagging secondary is pushed at once.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         pub async fn notify(&self, zone: &str) -> Result<(), String> {
-            self.call(
-                Method::PUT,
-                &format!("/zones/{}/notify", zone_id(zone)),
-                None,
-            )
-            .await
-            .map(drop)
+            self.call(Method::PUT, &format!("{}/notify", zone_path(zone)), None)
+                .await
+                .map(drop)
         }
 
         // What: pull a secondary zone now.
         // Why: a stale secondary resyncs without restart.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         pub async fn axfr_retrieve(&self, zone: &str) -> Result<(), String> {
-            let path = format!("/zones/{}/axfr-retrieve", zone_id(zone));
+            let path = format!("{}/axfr-retrieve", zone_path(zone));
             self.call(Method::PUT, &path, None).await.map(drop)
         }
 
         // What: name and value of each server counter.
         // Why: the dashboard shows query counts.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         pub async fn statistics(&self) -> Result<Vec<(String, String)>, String> {
             let text = self.call(Method::GET, "/statistics", None).await?;
             let rows: Vec<Value> =
@@ -756,7 +797,7 @@ pub mod pdns {
 
         // What: drop cached answers for a name.
         // Why: a changed record answers at once.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         pub async fn flush(&self, name: &str, subtree: bool) -> Result<(), String> {
             let path = format!("/cache/flush?domain={}&subtree={subtree}", zone_id(name));
             self.call(Method::PUT, &path, None).await.map(drop)
@@ -766,21 +807,21 @@ pub mod pdns {
 
 // What: DNS name rules, zones and serial math.
 // Why: ui, watchdog and renderers agree on one rule set.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 pub mod dns {
     use crate::config::Settings;
     use std::cmp::Ordering;
 
     // What: lowercase zone name with one final dot.
     // Why: zone names compare equal in one form.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn canonical_zone(zone: &str) -> String {
-        format!("{}.", zone.trim_end_matches('.').to_ascii_lowercase())
+        crate::pdns::zone_id(&zone.to_ascii_lowercase())
     }
 
     // What: RFC 1035 host name check.
     // Why: SRV needs "_", RPZ wildcards need "*".
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn is_dns_name(name: &str, underscore: bool, wildcard: bool) -> bool {
         let name = name.trim_end_matches('.');
         let label_ok = |label: &str| {
@@ -801,7 +842,7 @@ pub mod dns {
 
     // What: CDN list row: ".name" is the whole subtree.
     // Why: cdn-domains.txt uses this leading-dot form.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn cdn_entry(text: &str) -> Option<(String, bool)> {
         let row = text.trim().to_ascii_lowercase();
         let (subtree, name) = match row.strip_prefix('.') {
@@ -813,12 +854,88 @@ pub mod dns {
 
     // What: private reverse zones from the SOT.
     // Why: RFC 1918 and ULA ranges; no list in code.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn private_reverse_zones(s: &Settings) -> Vec<String> {
         s.list("DNS_PRIVATE_REVERSE_ZONES")
             .iter()
             .map(|z| canonical_zone(z))
             .collect()
+    }
+
+    // What: the two replication roles of the SOT choice.
+    // Why: one owner of the role words; callers compare.
+    // From: Issue #1683 | PR #2017
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum Role {
+        Primary,
+        Secondary,
+    }
+
+    impl Role {
+        // What: role from DNS_REPLICATION_ROLE.
+        // Why: an unknown word is an error.
+        // From: Issue #1683 | PR #2017
+        pub fn from_settings(s: &Settings) -> Result<Self, String> {
+            match s.text("DNS_REPLICATION_ROLE")?.as_str() {
+                "primary" => Ok(Self::Primary),
+                "secondary" => Ok(Self::Secondary),
+                other => Err(format!("DNS_REPLICATION_ROLE={other} is unknown")),
+            }
+        }
+    }
+
+    // What: true for an IPv4 or IPv6 address.
+    // Why: one owner of the test of an address text.
+    // From: Issue #1683 | PR #2017
+    pub fn is_ip(text: &str) -> bool {
+        parse_ip(text).is_ok()
+    }
+
+    // What: the address a text holds, or an error text.
+    // Why: one reader; the error names the bad text.
+    // From: Issue #1683 | PR #2017
+    pub fn parse_ip(text: &str) -> Result<std::net::IpAddr, String> {
+        text.parse()
+            .map_err(|_| format!("{text:?} is no IP address"))
+    }
+
+    // What: true for a loopback address, IPv4 or IPv6.
+    // Why: such an address is never a LAN address.
+    // From: Issue #1683 | PR #2017
+    pub fn is_loopback(text: &str) -> bool {
+        parse_ip(text).is_ok_and(|ip| ip.is_loopback())
+    }
+
+    // What: true for a name below a zone, not the zone.
+    // Why: only such a name gets records in that zone.
+    // From: Issue #1683 | PR #2017
+    pub fn is_below(name: &str, zone: &str) -> bool {
+        name.ends_with(&format!(".{zone}"))
+    }
+
+    // What: true for a name in the reverse DNS tree.
+    // Why: the reverse DNS tree is under arpa.
+    // From: Issue #1683 | PR #2017
+    pub fn is_reverse_name(name: &str) -> bool {
+        is_below(name, "arpa.")
+    }
+
+    // What: A for an IPv4 address, AAAA for IPv6.
+    // Why: one owner of the record type of an address.
+    // From: Issue #1683 | PR #2017
+    pub fn address_kind(address: &str) -> &'static str {
+        if address.contains(':') { "AAAA" } else { "A" }
+    }
+
+    // What: host:port; an IPv6 address gets brackets.
+    // Why: bare, nobody sees where its port starts.
+    // From: Issue #1683 | PR #2017
+    pub fn host_port(host: &str, port: impl std::fmt::Display) -> String {
+        if host.contains(':') {
+            format!("[{host}]:{port}")
+        } else {
+            format!("{host}:{port}")
+        }
     }
 
     // What: checked LAN domains, main domain first.
@@ -853,14 +970,21 @@ pub mod dns {
         validate_lan_domains(&s.text("DHCP_DOMAIN")?, &s.list("DNS_EXTRA_LAN_DOMAINS"))
     }
 
+    // What: the LAN zone, DHCP_DOMAIN in canonical form.
+    // Why: PowerDNS compares names with a trailing dot.
+    // From: Issue #1683 | PR #2017
+    pub fn lan_zone(s: &Settings) -> Result<String, String> {
+        Ok(canonical_zone(&s.text("DHCP_DOMAIN")?))
+    }
+
     // What: zones the stack serves itself.
     // Why: one zone per LAN domain, optional reverse.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn managed_zones(s: &Settings) -> Result<Vec<String>, String> {
-        // What: a secondary serves its primary's zones.
+        // What: a secondary serves the primary's zones.
         // Why: its DHCP_DOMAIN is only the SOT default.
-        // From: Issue #1683
-        if s.text("DNS_REPLICATION_ROLE")? == "secondary" {
+        // From: Issue #1683 | PR #2017
+        if Role::from_settings(s)? == Role::Secondary {
             return Ok(s
                 .list("DNS_SECONDARY_ZONES")
                 .iter()
@@ -883,7 +1007,7 @@ pub mod dns {
 
     // What: compare serials by RFC 1982.
     // Why: serials wrap; half the space apart is unknown.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn serial_cmp(a: u32, b: u32) -> Option<Ordering> {
         match b.wrapping_sub(a) {
             0 => Some(Ordering::Equal),
@@ -895,7 +1019,7 @@ pub mod dns {
 
     // What: replication state of a secondary zone.
     // Why: the dashboard shows lost NOTIFY or AXFR.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
     pub enum Sync {
         InSync,
@@ -906,7 +1030,7 @@ pub mod dns {
 
     // What: state from the two serials.
     // Why: one rule for watchdog and ui.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn sync_state(primary: u32, secondary: u32) -> Sync {
         match serial_cmp(secondary, primary) {
             Some(Ordering::Equal) => Sync::InSync,
@@ -915,11 +1039,127 @@ pub mod dns {
             None => Sync::Unknown,
         }
     }
+
+    // What: SOA answer of one DNS server.
+    // Why: aa marks pdns data; serial shows the state.
+    // From: Issue #1683
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct Soa {
+        pub authoritative: bool,
+        pub rcode: u8,
+        pub serial: Option<u32>,
+    }
+
+    impl Soa {
+        // What: true for an aa answer without an error.
+        // Why: only such a server holds the zone itself.
+        // From: Issue #1683 | PR #2017
+        pub fn serves_zone(&self) -> bool {
+            self.authoritative && self.rcode == 0
+        }
+    }
+
+    // What: SOA query for one zone, RD bit off.
+    // Why: without RD a recursor sends no aa answer.
+    // From: Issue #1683
+    pub fn soa_query(id: u16, zone: &str) -> Result<Vec<u8>, String> {
+        let mut q = id.to_be_bytes().to_vec();
+        q.extend_from_slice(&[0, 0, 0, 1, 0, 0, 0, 0, 0, 0]);
+        for label in zone.trim_end_matches('.').split('.') {
+            if label.is_empty() || label.len() > 63 {
+                return Err(format!("zone {zone:?} is no DNS name"));
+            }
+            q.push(label.len() as u8);
+            q.extend_from_slice(label.as_bytes());
+        }
+        q.extend_from_slice(&[0, 0, 6, 0, 1]);
+        Ok(q)
+    }
+
+    // What: end of a DNS name at offset at.
+    // Why: answers use labels and compression pointers.
+    // From: Issue #1683
+    fn name_end(msg: &[u8], mut at: usize) -> Result<usize, String> {
+        loop {
+            let len = *msg.get(at).ok_or("DNS name is cut off")?;
+            match len & 0xc0 {
+                0 if len == 0 => return Ok(at + 1),
+                0 => at += 1 + usize::from(len),
+                0xc0 if at + 1 < msg.len() => return Ok(at + 2),
+                _ => return Err("DNS name is cut off or bad".into()),
+            }
+        }
+    }
+
+    // What: aa bit, rcode and serial of a reply.
+    // Why: the id must match the query sent.
+    // From: Issue #1683
+    pub fn soa_reply(id: u16, msg: &[u8]) -> Result<Soa, String> {
+        let cut = || "DNS reply is cut off".to_string();
+        let word = |at: usize| {
+            msg.get(at..at + 2)
+                .map(|b| u16::from_be_bytes([b[0], b[1]]))
+                .ok_or_else(cut)
+        };
+        if word(0)? != id || msg[2] & 0x80 == 0 {
+            return Err("DNS reply does not match the query".into());
+        }
+        let mut at = 12;
+        for _ in 0..word(4)? {
+            at = name_end(msg, at)? + 4;
+        }
+        let mut serial = None;
+        for _ in 0..word(6)? {
+            at = name_end(msg, at)?;
+            let end = at + 10 + usize::from(word(at + 8)?);
+            if end > msg.len() {
+                return Err(cut());
+            }
+            if word(at)? == 6 && serial.is_none() {
+                let p = name_end(msg, name_end(msg, at + 10)?)?;
+                let b = msg.get(p..p + 4).filter(|_| p + 4 <= end).ok_or_else(cut)?;
+                serial = Some(u32::from_be_bytes([b[0], b[1], b[2], b[3]]));
+            }
+            at = end;
+        }
+        Ok(Soa {
+            authoritative: msg[2] & 0x04 != 0,
+            rcode: msg[3] & 0x0f,
+            serial,
+        })
+    }
+
+    // What: an unbound UDP socket of one address family.
+    // Why: an IPv4 socket cannot send to an IPv6 address.
+    // From: Issue #1683 | PR #2017
+    pub fn udp_for(v6: bool) -> std::io::Result<std::net::UdpSocket> {
+        std::net::UdpSocket::bind(if v6 { "[::]:0" } else { "0.0.0.0:0" })
+    }
+
+    // What: one SOA query over UDP, no RD.
+    // Why: no dig in the ui image; std and rand only.
+    // From: Issue #1683
+    pub fn soa_probe(
+        addr: std::net::SocketAddr,
+        zone: &str,
+        wait: std::time::Duration,
+    ) -> Result<Soa, String> {
+        let id: u16 = rand::random();
+        let query = soa_query(id, zone)?;
+        let err = |e: std::io::Error| format!("{addr}: {e}");
+        let sock = udp_for(addr.is_ipv6()).map_err(err)?;
+        sock.connect(addr).map_err(err)?;
+        sock.set_read_timeout(Some(wait)).map_err(err)?;
+        sock.send(&query).map_err(err)?;
+        let mut buf = [0u8; 4096];
+        let n = sock.recv(&mut buf).map_err(err)?;
+        soa_reply(id, &buf[..n])
+    }
 }
 
 // What: DHCP mode and option rules.
 // Why: Kea and dnsmasq get the same checked input.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 pub mod dhcp {
     use crate::config::Settings;
 
@@ -940,11 +1180,24 @@ pub mod dhcp {
         dns
     }
 
+    // What: own NTP for DHCP: NTP on and NTP_AUTO_DHCP on.
+    // Why: one rule for the render and the DHCP page.
+    // From: Issue #1683
+    pub fn own_ntp(s: &Settings) -> Result<bool, String> {
+        Ok(s.flag("NTP_ENABLED")? && s.flag("NTP_AUTO_DHCP")?)
+    }
+
     // What: DHCP_NTP_SERVERS as IPv4 text; names resolve.
     // Why: option 42 holds IPs; dead names are skipped.
     // From: Issue #1683 | PR #1980
     pub fn ntp_addrs(s: &Settings) -> Result<Vec<String>, String> {
         use std::net::ToSocketAddrs as _;
+        // What: IP_HTTP while own NTP is handed out.
+        // Why: LanCache-NG-NTP answers on the HTTP IP.
+        // From: Issue #1683
+        if own_ntp(s)? {
+            return Ok(vec![s.text("IP_HTTP")?]);
+        }
         s.list("DHCP_NTP_SERVERS")
             .iter()
             .map(|host| {
@@ -967,7 +1220,7 @@ pub mod dhcp {
 
     // What: the four DHCP modes of the SOT choice.
     // Why: exactly one program serves DHCP.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub enum Mode {
         Off,
@@ -979,9 +1232,16 @@ pub mod dhcp {
     impl Mode {
         // What: mode from DHCP_MODE.
         // Why: an unknown word is an error.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         pub fn from_settings(s: &Settings) -> Result<Self, String> {
-            match s.text("DHCP_MODE")?.as_str() {
+            Self::from_word(&s.text("DHCP_MODE")?)
+        }
+
+        // What: mode from its SOT word.
+        // Why: a form sends the same word as the setting.
+        // From: Issue #1683 | PR #2017
+        pub fn from_word(word: &str) -> Result<Self, String> {
+            match word {
                 "off" => Ok(Self::Off),
                 "kea" => Ok(Self::Kea),
                 "dnsmasq-proxy" => Ok(Self::DnsmasqProxy),
@@ -989,11 +1249,18 @@ pub mod dhcp {
                 other => Err(format!("DHCP_MODE {other:?} has no handler")),
             }
         }
+
+        // What: true for the two dnsmasq modes.
+        // Why: proxy and relay share one dnsmasq daemon.
+        // From: Issue #1683 | PR #2017
+        pub fn is_dnsmasq(self) -> bool {
+            matches!(self, Self::DnsmasqProxy | Self::DnsmasqRelay)
+        }
     }
 
     // What: an option the ui sets by its own field.
     // Why: custom rows must not override these.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub struct Managed {
         pub name: &'static str,
@@ -1002,33 +1269,42 @@ pub mod dhcp {
 
     // What: options with own fields (RFC 2132, 3397).
     // Why: names and codes are fixed by the RFCs.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub const MANAGED: [Managed; 5] = [
-        Managed {
-            name: "routers",
-            code: 3,
-        },
-        Managed {
-            name: "domain-name-servers",
-            code: 6,
-        },
-        Managed {
-            name: "domain-name",
-            code: 15,
-        },
-        Managed {
-            name: "ntp-servers",
-            code: 42,
-        },
-        Managed {
-            name: "domain-search",
-            code: 119,
-        },
+        ROUTERS,
+        DNS_SERVERS,
+        DOMAIN_NAME,
+        NTP_SERVERS,
+        DOMAIN_SEARCH,
     ];
+
+    // What: each managed option by its own name.
+    // Why: render and ui name an option, never its text.
+    // From: Issue #1683 | PR #2017
+    pub const ROUTERS: Managed = Managed {
+        name: "routers",
+        code: 3,
+    };
+    pub const DNS_SERVERS: Managed = Managed {
+        name: "domain-name-servers",
+        code: 6,
+    };
+    pub const DOMAIN_NAME: Managed = Managed {
+        name: "domain-name",
+        code: 15,
+    };
+    pub const NTP_SERVERS: Managed = Managed {
+        name: "ntp-servers",
+        code: 42,
+    };
+    pub const DOMAIN_SEARCH: Managed = Managed {
+        name: "domain-search",
+        code: 119,
+    };
 
     // What: check a custom option code.
     // Why: 0 and 255 are pad/end; managed have fields.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn option_code(raw: &str) -> Result<u8, String> {
         let code: u8 = raw
             .trim()
@@ -1045,9 +1321,9 @@ pub mod dhcp {
 
     // What: parse CODE:VALUE lines.
     // Why: one checked list for Kea and dnsmasq.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn custom_options(s: &Settings, raw: &str) -> Result<Vec<(u8, String)>, String> {
-        let max = usize::try_from(s.uint("DHCP_OPTION_DATA_MAX")?).unwrap_or(usize::MAX);
+        let max = s.num::<usize>("DHCP_OPTION_DATA_MAX")?;
         let mut out = Vec::new();
         for (n, line) in raw.lines().map(str::trim).enumerate() {
             if line.is_empty() {
@@ -1070,7 +1346,7 @@ pub mod dhcp {
 
     // What: valid and max lifetime of a lease.
     // Why: SOT bounds; max is a factor of valid.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn lease_limits(s: &Settings, lease: u64) -> Result<(u64, u64), String> {
         let min = s.uint("DHCP_LEASE_TIME_MIN")?;
         let max = s.uint("DHCP_LEASE_TIME_MAX")?;
@@ -1086,7 +1362,7 @@ pub mod dhcp {
 
 // What: minimal Docker Engine API client.
 // Why: ui and watchdog list, inspect, start and exec.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 pub mod docker {
     use reqwest::Method;
     use serde_json::{Value, json};
@@ -1095,13 +1371,27 @@ pub mod docker {
 
     // What: compose label of the project name.
     // Why: fixed by Docker Compose.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub const PROJECT_LABEL: &str = "com.docker.compose.project";
 
     // What: compose label of the service name.
     // Why: fixed by Docker Compose.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub const SERVICE_LABEL: &str = "com.docker.compose.service";
+
+    // What: compose service of a container row, if any.
+    // Why: one reader of the service label of a row.
+    // From: Issue #1683 | PR #2017
+    pub fn service_of(row: &serde_json::Value) -> Option<&str> {
+        row["Labels"][SERVICE_LABEL].as_str()
+    }
+
+    // What: name of a container row, without the slash.
+    // Why: Docker lists names as "/name".
+    // From: Issue #1683 | PR #2017
+    pub fn name_of(row: &serde_json::Value) -> Option<&str> {
+        row["Names"][0].as_str().map(|n| n.trim_start_matches('/'))
+    }
 
     // What: compose label of a "compose run" container.
     // Why: fixed by Docker Compose; "True" on run only.
@@ -1110,12 +1400,12 @@ pub mod docker {
 
     // What: URL host used over the unix socket.
     // Why: HTTP needs a host; the socket ignores it.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     const SOCKET_HOST: &str = "http://docker";
 
     // What: failure classes of an API call.
     // Why: callers treat timeouts apart from refusals.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     #[derive(Debug)]
     pub enum Error {
         Timeout,
@@ -1127,7 +1417,7 @@ pub mod docker {
     impl std::fmt::Display for Error {
         // What: readable text of an API error.
         // Why: shown in logs and the ui.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             match self {
                 Self::Timeout => f.write_str("Docker API timed out"),
@@ -1140,7 +1430,7 @@ pub mod docker {
 
     // What: container actions.
     // Why: Reload sends SIGHUP to PID 1.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub enum Action {
         Start,
@@ -1151,15 +1441,25 @@ pub mod docker {
 
     // What: one Docker endpoint.
     // Why: unix:// socket or tcp URL from the SOT.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub struct Api {
         client: reqwest::Client,
         base: String,
     }
 
+    // What: the Id of an answer; what names the call.
+    // Why: exec and create both go on with this Id.
+    // From: Issue #1683 | PR #2017
+    fn id_of(answer: &[u8], what: &str) -> Result<String, Error> {
+        decode(answer)?["Id"]
+            .as_str()
+            .map(str::to_string)
+            .ok_or_else(|| Error::Decode(format!("{what} without Id")))
+    }
+
     // What: JSON body of an answer.
     // Why: one decode error type.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     fn decode(bytes: &[u8]) -> Result<Value, Error> {
         serde_json::from_slice(bytes).map_err(|e| Error::Decode(e.to_string()))
     }
@@ -1167,7 +1467,7 @@ pub mod docker {
     impl Api {
         // What: client for a socket path or URL.
         // Why: no redirects; the engine never sends one.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         pub fn new(endpoint: &str) -> Result<Self, String> {
             let endpoint = endpoint.trim();
             let builder = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
@@ -1184,7 +1484,7 @@ pub mod docker {
 
         // What: one request; 2xx and 304 count as ok.
         // Why: 304 means already started or stopped.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         async fn call(
             &self,
             method: Method,
@@ -1216,7 +1516,7 @@ pub mod docker {
 
         // What: run a command in a container.
         // Why: OpenRC rc-service and ui CLIs run this way.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         pub async fn exec(
             &self,
             name: &str,
@@ -1231,10 +1531,7 @@ pub mod docker {
                     limit,
                 )
                 .await?;
-            let id = decode(&made)?["Id"]
-                .as_str()
-                .ok_or_else(|| Error::Decode("exec without Id".into()))?
-                .to_string();
+            let id = id_of(&made, "exec")?;
             let out = self
                 .call(
                     Method::POST,
@@ -1256,7 +1553,7 @@ pub mod docker {
 
         // What: all containers of a compose project.
         // Why: the ui and watchdog see stopped ones too.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         pub async fn project(&self, project: &str, limit: Duration) -> Result<Vec<Value>, Error> {
             let filter = json!({"label": [format!("{PROJECT_LABEL}={project}")]}).to_string();
             let url = reqwest::Url::parse_with_params(
@@ -1271,7 +1568,7 @@ pub mod docker {
 
         // What: full state of one container.
         // Why: health, restarts and state come from here.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         pub async fn inspect(&self, name: &str, limit: Duration) -> Result<Value, Error> {
             decode(
                 &self
@@ -1295,7 +1592,7 @@ pub mod docker {
 
         // What: start, stop, restart or HUP a container.
         // Why: grace is the stop timeout in seconds.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         pub async fn act(
             &self,
             name: &str,
@@ -1310,13 +1607,10 @@ pub mod docker {
                 Action::Reload => "kill?signal=HUP".to_string(),
             };
             let path = format!("/containers/{name}/{verb}");
-            match self.call(Method::POST, &path, None, limit).await {
-                // What: 304: it is already in that state.
-                // Why: mode off stops dhcp on every apply.
-                // From: Issue #1683 | PR #1980
-                Err(Error::Status(304)) => Ok(()),
-                r => r.map(drop),
-            }
+            // What: 304 is ok here; call() says so already.
+            // Why: mode off stops dhcp on every apply.
+            // From: Issue #1683 | PR #1980
+            self.call(Method::POST, &path, None, limit).await.map(drop)
         }
 
         // What: run a one-shot container to its end.
@@ -1331,10 +1625,7 @@ pub mod docker {
             let made = self
                 .call(Method::POST, "/containers/create", Some(spec), limit)
                 .await?;
-            let id = decode(&made)?["Id"]
-                .as_str()
-                .ok_or_else(|| Error::Decode("create without Id".into()))?
-                .to_string();
+            let id = id_of(&made, "create")?;
             let run = async {
                 let start = format!("/containers/{id}/start");
                 self.call(Method::POST, &start, None, limit).await?;
@@ -1374,39 +1665,29 @@ pub mod docker {
 
 // What: stack CA and leaf certificates via openssl.
 // Why: native tool; no crypto crate for X.509.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 pub mod cert {
     use std::path::Path;
     use std::process::Command;
 
     // What: run openssl; stderr becomes the error.
     // Why: a failed step names its subcommand.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     fn openssl(args: &[&str]) -> Result<String, String> {
-        let out = Command::new("openssl")
-            .args(args)
-            .output()
-            .map_err(|e| format!("openssl: {e}"))?;
-        if out.status.success() {
-            return Ok(String::from_utf8_lossy(&out.stdout).into_owned());
-        }
-        Err(format!(
-            "openssl {}: {}",
-            args.first().copied().unwrap_or_default(),
-            String::from_utf8_lossy(&out.stderr).trim()
-        ))
+        let out = crate::tool::run(Command::new("openssl").args(args))?;
+        Ok(String::from_utf8_lossy(&out).into_owned())
     }
 
     // What: path as an argument string.
     // Why: openssl takes text arguments.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     fn arg(p: &Path) -> String {
         p.display().to_string()
     }
 
     // What: self-signed CA key and certificate.
     // Why: HTTPS mode signs leaves with this CA.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn make_ca(
         key: &Path,
         crt: &Path,
@@ -1438,7 +1719,7 @@ pub mod cert {
 
     // What: leaf key and certificate signed by the CA.
     // Why: one leaf per CDN name set in HTTPS mode.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     #[allow(clippy::too_many_arguments)]
     pub fn make_leaf(
         ca_key: &Path,
@@ -1501,11 +1782,8 @@ pub mod cert {
             ])
         });
         for tmp in [&csr, &ext] {
-            match std::fs::remove_file(tmp) {
-                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-                    eprintln!("cert: {} left behind: {e}", tmp.display());
-                }
-                _ => {}
+            if let Err(e) = crate::fs::remove_if_present(tmp) {
+                eprintln!("cert: {} left behind: {e}", tmp.display());
             }
         }
         // What: a failed sign leaves no half key pair.
@@ -1535,7 +1813,7 @@ pub mod cert {
 
     // What: true if crt stays valid for within seconds.
     // Why: renew before expiry, not after.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn valid_for(crt: &Path, within: u64) -> Result<bool, String> {
         if !crt.is_file() {
             return Err("file missing".into());
@@ -1574,24 +1852,21 @@ pub mod cert {
         let yoe = y - era * 400;
         let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + d - 1;
         let end = era * 146_097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719_468;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|e| e.to_string())?
-            .as_secs() as i64
-            / 86_400;
+        let today = crate::clock::unix_secs() / crate::tidy::DAY;
+        let now = i64::try_from(today).map_err(|e| e.to_string())?;
         Ok((day, end - now))
     }
 }
 
 // What: syslog-ng config: store per program, forward.
 // Why: every container logs here; one place to read.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 pub mod log {
     use crate::config::Settings;
 
     // What: one forward target host:port.
     // Why: a secondary also forwards to its primary.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     #[derive(Clone, Debug, Eq, PartialEq)]
     pub struct Target {
         pub host: String,
@@ -1600,7 +1875,7 @@ pub mod log {
 
     // What: primary first, then extra targets.
     // Why: SYSLOG_PRIMARY is set only on a secondary.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn targets(s: &Settings) -> Result<Vec<Target>, String> {
         let primary = s.text("SYSLOG_PRIMARY").ok();
         primary
@@ -1625,7 +1900,7 @@ pub mod log {
 
     // What: one destination and log path per target.
     // Why: a disk buffer keeps lines while it is down.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn forward_block(s: &Settings, targets: &[Target], source: &str) -> Result<String, String> {
         let buffer = s.text("SYSLOG_BUFFER_DIR")?;
         let transport = s.text("SYSLOG_FWD_TRANSPORT")?;
@@ -1654,21 +1929,19 @@ pub mod log {
 
     // What: name of the local store destination.
     // Why: muted programs skip it; logs page reads it.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub const STORE: &str = "d_store";
 
     // What: plain name: letters, digits, _ and -.
     // Why: values go into syslog-ng config text.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     fn is_plain(v: &str) -> bool {
-        !v.is_empty()
-            && v.chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        crate::config::is_plain(v, "_-")
     }
 
     // What: full syslog-ng.conf.
     // Why: the watchdog image runs syslog-ng.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn render(s: &Settings) -> Result<String, String> {
         let root = s.text("SYSLOG_LOG_ROOT")?;
         let buffer = s.text("SYSLOG_BUFFER_DIR")?;
@@ -1716,13 +1989,13 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
 
 // What: net-snmp snmpd.conf.
 // Why: statistics and alarms come from SNMP, not Netdata.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 pub mod snmp {
     use crate::config::Settings;
 
     // What: one extend command (custom OID).
     // Why: stack counters beside the stock MIBs.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     #[derive(Clone, Debug)]
     pub struct Extend {
         pub name: String,
@@ -1731,7 +2004,7 @@ pub mod snmp {
 
     // What: one logmatch watch on a log file.
     // Why: counts error lines per program.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     #[derive(Clone, Debug)]
     pub struct LogMatch {
         pub name: String,
@@ -1741,7 +2014,7 @@ pub mod snmp {
 
     // What: full snmpd.conf from the SOT.
     // Why: community, listen and limits are settings.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn render(
         s: &Settings,
         extends: &[Extend],
@@ -1782,7 +2055,7 @@ pub mod snmp {
 
 // What: numbered known-good snapshots in one dir.
 // Why: zone and Kea rollbacks pick one by id.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 pub mod snapshot {
     use crate::fs::{self, Owner, Place};
     use std::path::PathBuf;
@@ -1799,7 +2072,7 @@ pub mod snapshot {
 
     // What: an id is a non-empty digit string.
     // Why: ids name files; no path can sneak in.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     fn is_id(name: &str) -> bool {
         !name.is_empty() && name.bytes().all(|b| b.is_ascii_digit())
     }
@@ -1817,14 +2090,11 @@ pub mod snapshot {
 
         // What: save body under a new time id.
         // Why: exclusive create; then prune old ones.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         pub fn save(&self, body: &[u8]) -> Result<String, String> {
             let id = crate::clock::unix_nanos().to_string();
-            if self.file.is_some() {
-                std::fs::create_dir_all(self.dir.join(&id))
-                    .map_err(|e| format!("snapshot {id}: {e}"))?;
-            }
-            fs::write(&self.path(&id), body, 0o600, Place::Exclusive, self.owner)
+            let mode = fs::PRIVATE_MODE;
+            fs::write(&self.path(&id), body, mode, Place::Exclusive, self.owner)
                 .map_err(|e| format!("snapshot {id}: {e}"))?;
             self.prune()?;
             Ok(id)
@@ -1832,7 +2102,7 @@ pub mod snapshot {
 
         // What: ids, newest first.
         // Why: longer digit string is newer, then text.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         pub fn list(&self) -> Result<Vec<String>, String> {
             let entries = match std::fs::read_dir(&self.dir) {
                 Ok(rd) => rd,
@@ -1844,13 +2114,13 @@ pub mod snapshot {
                 .filter_map(|e| e.file_name().into_string().ok())
                 .filter(|n| is_id(n) && self.path(n).is_file())
                 .collect();
-            ids.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| b.cmp(a)));
+            ids.sort_by(|a, b| crate::config::longest_first(a, b));
             Ok(ids)
         }
 
         // What: body of one snapshot.
         // Why: rollback restores exactly this.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         pub fn read(&self, id: &str) -> Result<Vec<u8>, String> {
             if !is_id(id) {
                 return Err(format!("bad snapshot id {id:?}"));
@@ -1860,7 +2130,7 @@ pub mod snapshot {
 
         // What: drop all but the newest keep.
         // Why: at least one stays to roll back to.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         fn prune(&self) -> Result<(), String> {
             for id in self.list()?.into_iter().skip(self.keep.max(1)) {
                 let path = self.dir.join(&id);
@@ -1877,7 +2147,7 @@ pub mod snapshot {
 
 // What: on-demand DHCP probe: DISCOVER, REQUEST, RELEASE.
 // Why: shows every DHCP server on the LAN and a real lease.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 pub mod dhcp_probe {
     use crate::config::Settings;
     use dhcproto::Decodable;
@@ -1890,18 +2160,18 @@ pub mod dhcp_probe {
 
     // What: DHCP client and server ports.
     // Why: fixed by RFC 2131.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     const CLIENT_PORT: u16 = 68;
     const SERVER_PORT: u16 = 67;
 
     // What: largest UDP payload.
     // Why: a receive buffer never truncates a reply.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     const UDP_MAX: usize = 65_535;
 
     // What: one labelled value of an answer.
     // Why: the ui prints a table per server.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
     pub struct Detail {
         pub label: String,
@@ -1910,7 +2180,7 @@ pub mod dhcp_probe {
 
     // What: one answering server.
     // Why: competing servers must be visible.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
     pub struct Server {
         pub server: Option<Ipv4Addr>,
@@ -1920,7 +2190,7 @@ pub mod dhcp_probe {
 
     // What: probe result for the ui.
     // Why: offers, lease result and hard errors apart.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
     pub struct Report {
         pub servers: Vec<Server>,
@@ -1932,7 +2202,7 @@ pub mod dhcp_probe {
     impl Report {
         // What: a report with offers and a lease text.
         // Why: most exits differ only in these.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         fn lease(servers: Vec<Server>, ok: bool, text: impl Into<String>) -> Self {
             Self {
                 servers,
@@ -1944,7 +2214,7 @@ pub mod dhcp_probe {
 
         // What: a report for a hard error.
         // Why: socket or send failures.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         fn error(servers: Vec<Server>, e: String) -> Self {
             Self {
                 servers,
@@ -1957,7 +2227,7 @@ pub mod dhcp_probe {
 
     // What: the options shown, with labels.
     // Why: option codes are fixed by RFC 2132.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     const FIELDS: [(&str, OptionCode); 8] = [
         ("Server", OptionCode::ServerIdentifier),
         ("Subnet mask", OptionCode::SubnetMask),
@@ -1971,7 +2241,7 @@ pub mod dhcp_probe {
 
     // What: text of one option, if shown.
     // Why: lists join with a comma.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     fn option_text(opt: &DhcpOption) -> Option<String> {
         Some(match opt {
             DhcpOption::ServerIdentifier(a)
@@ -1990,7 +2260,7 @@ pub mod dhcp_probe {
 
     // What: server, address and details of a reply.
     // Why: one reader for OFFER and ACK.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     fn read(msg: &Message) -> Server {
         let address = Some(msg.yiaddr()).filter(|a| !a.is_unspecified());
         let mut details: Vec<Detail> = address
@@ -2021,14 +2291,14 @@ pub mod dhcp_probe {
 
     // What: true if msg is of this DHCP type.
     // Why: replies are filtered by type.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     fn is(msg: &Message, kind: MessageType) -> bool {
         matches!(msg.opts().get(OptionCode::MessageType), Some(DhcpOption::MessageType(t)) if *t == kind)
     }
 
     // What: build one client message.
     // Why: broadcast flag except for RELEASE.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     fn message(
         xid: u32,
         mac: &[u8; 6],
@@ -2058,7 +2328,7 @@ pub mod dhcp_probe {
 
     // What: encode and send one message.
     // Why: errors become text for the report.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     fn send(sock: &UdpSocket, msg: &Message, to: SocketAddrV4) -> Result<(), String> {
         let mut buf = Vec::new();
         msg.encode(&mut Encoder::new(&mut buf))
@@ -2068,7 +2338,7 @@ pub mod dhcp_probe {
 
     // What: read replies of xid until done or deadline.
     // Why: f returns true when the wanted reply came.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     fn listen(
         sock: &UdpSocket,
         xid: u32,
@@ -2102,13 +2372,13 @@ pub mod dhcp_probe {
 
     // What: run the probe with SOT timings.
     // Why: random xid and local MAC; lease is released.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn run(s: &Settings) -> Report {
         let timing = || -> Result<(Duration, Duration, u32), String> {
             Ok((
                 Duration::from_millis(s.uint("DHCP_PROBE_WINDOW_MS")?),
                 Duration::from_millis(s.uint("DHCP_PROBE_ACK_WAIT_MS")?),
-                u32::try_from(s.uint("DHCP_PROBE_SENDS")?.max(1)).unwrap_or(u32::MAX),
+                s.num::<u32>("DHCP_PROBE_SENDS")?,
             ))
         };
         let (window, wait, sends) = match timing() {
@@ -2126,7 +2396,7 @@ pub mod dhcp_probe {
         let mut mac: [u8; 6] = rand::random();
         // What: locally administered unicast MAC.
         // Why: never collides with a real NIC (IEEE 802).
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         mac[0] = (mac[0] | 0x02) & !0x01;
         let discover = message(
             xid,
@@ -2225,22 +2495,20 @@ pub mod dhcp_probe {
 
 // What: chrony.conf for the stack NTP server.
 // Why: LAN clients get time from the appliance.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 pub mod chrony {
     use crate::config::Settings;
 
     // What: host, IP, CIDR or path characters only.
     // Why: values go into a config file.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     fn is_plain(v: &str) -> bool {
-        !v.is_empty()
-            && v.chars()
-                .all(|c| c.is_ascii_alphanumeric() || ".:/-_".contains(c))
+        crate::config::is_plain(v, ".:/-_")
     }
 
     // What: full chrony.conf.
     // Why: upstream needed; only SOT CIDRs may ask.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn render(s: &Settings) -> Result<String, String> {
         let upstream = s.list("NTP_UPSTREAM_SERVERS");
         if upstream.is_empty() {
@@ -2263,7 +2531,7 @@ pub mod chrony {
             s.uint("NTP_PORT")?
         );
         for host in &upstream {
-            let kind = if host.parse::<std::net::IpAddr>().is_ok() {
+            let kind = if crate::dns::is_ip(host) {
                 "server"
             } else {
                 "pool"
@@ -2279,30 +2547,55 @@ pub mod chrony {
 
 // What: pdns.conf of the authoritative server.
 // Why: primary notifies; secondary pulls with TSIG.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 pub mod pdns_conf {
     use crate::config::Settings;
 
-    // What: addresses of registered secondaries.
-    // Why: NOTIFY goes to every registered secondary.
-    // From: Issue #1683 | PR #1858
-    pub fn secondary_ips(s: &Settings) -> Vec<String> {
+    // What: registered secondaries as (name, address).
+    // Why: the SOT list holds one name@address per row.
+    // From: Issue #1683 | PR #2017
+    pub fn secondaries(s: &Settings) -> Vec<(String, String)> {
         s.list("DNS_SECONDARIES")
             .iter()
-            .filter_map(|e| e.split_once('@').map(|(_, ip)| ip.to_string()))
-            .filter(|ip| ip.parse::<std::net::IpAddr>().is_ok())
+            .filter_map(|row| row.split_once('@'))
+            .map(|(name, addr)| (name.to_string(), addr.to_string()))
             .collect()
+    }
+
+    // What: the SOT text of a list of secondaries.
+    // Why: read and write share the name@address form.
+    // From: Issue #1683 | PR #2017
+    pub fn secondary_rows(list: &[(String, String)]) -> String {
+        let rows: Vec<String> = list.iter().map(|(n, a)| format!("{n}@{a}")).collect();
+        rows.join(" ")
+    }
+
+    // What: addresses of registered secondaries.
+    // Why: NOTIFY goes to every registered secondary.
+    // From: Issue #1683 | PR #1980
+    pub fn secondary_ips(s: &Settings) -> Vec<String> {
+        secondaries(s)
+            .into_iter()
+            .map(|(_, ip)| ip)
+            .filter(|ip| crate::dns::is_ip(ip))
+            .collect()
+    }
+
+    // What: address and port of the own pdns.
+    // Why: recursor and dnsdist send to the same place.
+    // From: Issue #1683 | PR #2017
+    pub fn auth_endpoint(s: &Settings) -> Result<String, String> {
+        Ok(crate::dns::host_port(
+            &s.text("PDNS_AUTH_ADDRESS")?,
+            s.uint("PDNS_AUTH_PORT")?,
+        ))
     }
 
     // What: full pdns.conf for this node's role.
     // Why: API on; AXFR by TSIG, not by IP list.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn auth(s: &Settings, api_key: &str) -> Result<String, String> {
-        let primary = match s.text("DNS_REPLICATION_ROLE")?.as_str() {
-            "primary" => true,
-            "secondary" => false,
-            other => return Err(format!("DNS_REPLICATION_ROLE={other} is unknown")),
-        };
+        let primary = crate::dns::Role::from_settings(s)? == crate::dns::Role::Primary;
         let yes = |on: bool| if on { "yes" } else { "no" }.to_string();
         let joined = |key: &str| s.list(key).join(",");
         let rows = [
@@ -2321,13 +2614,29 @@ pub mod pdns_conf {
                     let port = s.uint("PDNS_AUTH_PORT")?;
                     let to: Vec<String> = secondary_ips(s)
                         .iter()
-                        .map(|ip| format!("{ip}:{port}"))
+                        .map(|ip| crate::dns::host_port(ip, port))
                         .collect();
                     to.join(",")
                 } else {
-                    String::new()
+                    // What: NOTIFY to the own recursors.
+                    // Why: AXFR ends old cached answers.
+                    // From: Issue #1683 | PR #2017
+                    let mut to = Vec::new();
+                    for which in [
+                        crate::recursor_conf::Which::Http,
+                        crate::recursor_conf::Which::Https,
+                    ] {
+                        let port = s.uint(&which.key("PORT"))?;
+                        to.extend(
+                            s.list(&which.key("LISTEN"))
+                                .iter()
+                                .map(|ip| crate::dns::host_port(ip, port)),
+                        );
+                    }
+                    to.join(",")
                 },
             ),
+            ("secondary-do-renotify", yes(!primary)),
             (
                 "allow-notify-from",
                 if primary {
@@ -2337,6 +2646,10 @@ pub mod pdns_conf {
                 },
             ),
             ("allow-axfr-ips", joined("PDNS_AXFR_FROM")),
+            // What: dnsdist passes the client IP by header.
+            // Why: ACLs and logs need the real client IP.
+            // From: Issue #1683
+            ("proxy-protocol-from", crate::dnsdist_conf::source_of(s)?),
             ("xfr-cycle-interval", s.uint("PDNS_XFR_CYCLE")?.to_string()),
             ("dnsupdate", yes(primary)),
             ("allow-dnsupdate-from", joined("PDNS_DNSUPDATE_FROM")),
@@ -2360,19 +2673,23 @@ pub mod pdns_conf {
                 out += &format!("{key}={value}\n");
             }
         }
+        // What: NOTIFY only to also-notify, not to NS.
+        // Why: port 53 of an NS host is a recursor.
+        // From: Issue #1683
+        out += "only-notify=\n";
         Ok(out)
     }
 }
 
 // What: recursor.yml, RPZ zone and Lua files.
 // Why: two recursors: HTTP mode and HTTPS mode.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 pub mod recursor_conf {
     use crate::config::Settings;
 
     // What: which of the two recursors.
     // Why: keys differ only by HTTP or HTTPS.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub enum Which {
         Http,
@@ -2405,7 +2722,7 @@ pub mod recursor_conf {
 
     // What: YAML list rows of quoted items.
     // Why: quotes or breaks would break the YAML.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     fn yaml_list(items: &[String], indent: &str) -> Result<String, String> {
         items
             .iter()
@@ -2421,17 +2738,17 @@ pub mod recursor_conf {
 
     // What: RPZ zone: every cache domain to answer.
     // Why: clients reach the proxy by DNS only.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn rpz(
         s: &Settings,
         domains: &[(String, bool)],
         answer: &str,
         serial: u32,
     ) -> Result<String, String> {
-        if answer.parse::<std::net::IpAddr>().is_err() {
+        if !crate::dns::is_ip(answer) {
             return Err(format!("RPZ answer {answer:?} is no IP address"));
         }
-        let kind = if answer.contains(':') { "AAAA" } else { "A" };
+        let kind = crate::dns::address_kind(answer);
         let mname = s.text("RPZ_SOA_MNAME")?;
         let mut out = format!(
             "$TTL {}\n@ SOA {mname} {} {serial} {} {} {} {}\n@ NS {mname}\n",
@@ -2443,7 +2760,7 @@ pub mod recursor_conf {
             s.uint("RPZ_SOA_MINIMUM")?,
         );
         // What: ".name" = subdomains, "name" = itself.
-        // Why: live 249: the apex of .steamcontent.com hit.
+        // Why: the apex of a subdomain row must not match.
         // From: Issue #1072
         for (d, subtree) in domains {
             let d = d.trim_end_matches('.');
@@ -2462,7 +2779,7 @@ pub mod recursor_conf {
 
     // What: Lua config that loads the RPZ file.
     // Why: the recursor reads RPZ only via Lua.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn lua(s: &Settings, rpz_file: &str) -> Result<String, String> {
         let policy = s.text("RPZ_POLICY_NAME")?;
         if [rpz_file, policy.as_str()]
@@ -2494,17 +2811,13 @@ pub mod recursor_conf {
     // Why: empty or "." means all names; bad chars stop.
     // From: Issue #1683 | PR #1980
     fn upstream_zones(s: &Settings, key: &str) -> Result<Vec<String>, String> {
-        let ok = |c: char| c.is_ascii_alphanumeric() || "-._".contains(c);
         let mut out = Vec::new();
         for raw in s.list(key) {
             let z = raw.trim_end_matches('.').to_ascii_lowercase();
-            // What: label 1-63 chars, no "-" at an edge.
-            // Why: PC test 06.11.: a..b and -bad- passed.
+            // What: a name with "_" allowed; empty is ".".
+            // Why: a..b and -bad- are no names to forward.
             // From: Issue #1918
-            let label = |l: &str| {
-                !l.is_empty() && l.len() <= 63 && !l.starts_with('-') && !l.ends_with('-')
-            };
-            if !z.chars().all(ok) || (!z.is_empty() && !z.split('.').all(label)) {
+            if !z.is_empty() && !crate::dns::is_dns_name(&z, true, false) {
                 return Err(format!("{key}: bad domain {raw}"));
             }
             out.push(if z.is_empty() { ".".to_string() } else { z });
@@ -2518,10 +2831,7 @@ pub mod recursor_conf {
         if key == "DNS_UPSTREAM_ZONES" {
             for m in crate::dns::managed_zones(s)? {
                 let m = m.trim_end_matches('.').to_ascii_lowercase();
-                if let Some(z) = out
-                    .iter()
-                    .find(|z| **z == m || z.ends_with(&format!(".{m}")))
-                {
+                if let Some(z) = out.iter().find(|z| **z == m || crate::dns::is_below(z, &m)) {
                     return Err(format!(
                         "{key}: {z} is the local zone {m}; it is answered here"
                     ));
@@ -2550,12 +2860,11 @@ pub mod recursor_conf {
         ["IP_HTTP", "IP_HTTPS", "LISTEN_IP", "LISTEN_IP_HTTPS"]
             .iter()
             .filter_map(|k| s.text(k).ok())
-            .filter(|v| !v.is_empty())
             .collect()
     }
 
     // What: one upstream: IP, [IPv6]:port or IPv4:port.
-    // Why: live 06.11.: "[fd00::1" was saved unchecked.
+    // Why: a half bracket form must not be saved.
     // From: Issue #1683
     pub fn upstream_entry(key: &str, raw: &str, own: &[String]) -> Result<(), String> {
         let bad = || format!("{key}: {raw} is no IP address");
@@ -2587,12 +2896,12 @@ pub mod recursor_conf {
 
     // What: Lua hook: AAAA answers become empty.
     // Why: keeps cache traffic on IPv4 when wanted.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub const AAAA_FILTER_LUA: &str = "function preresolve(dq)\n  if dq.qtype == pdns.AAAA then\n    dq.rcode = pdns.NOERROR\n    return true\n  end\n  return false\nend\n";
 
     // What: full recursor.yml (YAML settings).
     // Why: local zones go to auth; rest upstream.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn yaml(
         s: &Settings,
         which: Which,
@@ -2600,12 +2909,9 @@ pub mod recursor_conf {
         lua_file: &str,
     ) -> Result<String, String> {
         let u = |k: &str| s.uint(k).map(|v| v.to_string());
-        let auth = format!(
-            "{}:{}",
-            s.text("PDNS_AUTH_ADDRESS")?,
-            s.uint("PDNS_AUTH_PORT")?
-        );
-        let local: String = crate::dns::managed_zones(s)?
+        let auth = crate::pdns_conf::auth_endpoint(s)?;
+        let zones = crate::dns::managed_zones(s)?;
+        let local: String = zones
             .iter()
             .map(|z| {
                 format!(
@@ -2652,6 +2958,23 @@ pub mod recursor_conf {
         y += &yaml_list(&s.list(&which.key("LISTEN")), "    ")?;
         y += &format!("  port: {}\n  allow_from:\n", u(&which.key("PORT"))?);
         y += &yaml_list(&s.list("DNS_QUERY_ALLOW_FROM"), "    ")?;
+        // What: dnsdist passes the client IP by header.
+        // Why: allow_from and logs see the real client.
+        // From: Issue #1683
+        let proxy = crate::dnsdist_conf::source_of(s)?;
+        y += &format!("  proxy_protocol_from:\n{}", yaml_list(&[proxy], "    ")?);
+        // What: NOTIFY from the own pdns wipes a zone.
+        // Why: a secondary has no ui to flush after AXFR.
+        // From: Issue #1683 | PR #2017
+        if crate::dns::Role::from_settings(s)? == crate::dns::Role::Secondary {
+            let names: Vec<String> = zones
+                .iter()
+                .map(|z| z.trim_end_matches('.').to_string())
+                .collect();
+            y += &format!("  allow_notify_for:\n{}", yaml_list(&names, "    ")?);
+            let from = [s.text("LOOPBACK_BIND_IP")?];
+            y += &format!("  allow_notify_from:\n{}", yaml_list(&from, "    ")?);
+        }
         y += &format!(
             "recursor:\n  serve_rfc1918: {}\n",
             s.flag("DNS_SERVE_RFC1918")?
@@ -2705,24 +3028,172 @@ pub mod recursor_conf {
     }
 }
 
+// What: dnsdist.conf in front of pdns and recursors.
+// Why: queries, NOTIFY and AXFR share port 53.
+// From: Issue #1683
+pub mod dnsdist_conf {
+    use crate::config::Settings;
+
+    // What: the sender address from the settings, checked.
+    // Why: pdns, recursor and dnsdist name the same one.
+    // From: Issue #1683 | PR #2017
+    pub fn source_of(s: &Settings) -> Result<String, String> {
+        source(
+            &s.text("DNSDIST_SOURCE_ADDRESS")?,
+            &s.text("LOOPBACK_BIND_IP")?,
+        )
+    }
+
+    // What: sender address of dnsdist to its backends.
+    // Why: only this address sends proxy protocol.
+    // From: Issue #1683
+    pub fn source(raw: &str, loopback: &str) -> Result<String, String> {
+        let ip: std::net::Ipv4Addr = raw
+            .parse()
+            .map_err(|_| format!("DNSDIST_SOURCE_ADDRESS={raw} is no IPv4 address"))?;
+        if !ip.is_loopback() {
+            return Err(format!(
+                "DNSDIST_SOURCE_ADDRESS={raw} is not in 127.0.0.0/8"
+            ));
+        }
+        // What: must differ from LOOPBACK_BIND_IP.
+        // Why: recursor to pdns runs from it, no header.
+        // From: Issue #1683
+        if raw == loopback {
+            return Err(format!(
+                "DNSDIST_SOURCE_ADDRESS={raw} equals LOOPBACK_BIND_IP"
+            ));
+        }
+        Ok(raw.to_string())
+    }
+
+    // What: one dnsdist port and its recursor.
+    // Why: HTTP and HTTPS mode keep their own caches.
+    // From: Issue #1683
+    pub struct Listener {
+        pub port: u64,
+        pub pool: &'static str,
+        pub backend: String,
+    }
+
+    // What: refuses a quote, backslash or line break.
+    // Why: the value goes into a Lua string unchanged.
+    // From: Issue #1683 | PR #2017
+    fn plain(v: &str) -> Result<&str, String> {
+        if v.contains(['"', '\\', '\n', '\r']) {
+            return Err(format!("value {v:?} has quote or line break"));
+        }
+        Ok(v)
+    }
+
+    // What: dnsdist Lua config from plain values.
+    // Why: no Settings needed; the tests call it.
+    // From: Issue #1683
+    pub fn body(
+        listen: &[String],
+        acl: &[String],
+        source: &str,
+        auth: &str,
+        listeners: &[Listener],
+    ) -> Result<String, String> {
+        let first = listeners.first().ok_or("dnsdist needs a listener")?;
+        let mut out = String::from("setACL({})\n");
+        for net in acl {
+            out += &format!("addACL(\"{}\")\n", plain(net)?);
+        }
+        let mut call = "setLocal";
+        for l in listeners {
+            for addr in listen {
+                let addr = plain(addr)?;
+                let local = crate::dns::host_port(addr, l.port);
+                out += &format!("{call}(\"{local}\")\n");
+                call = "addLocal";
+            }
+        }
+        let source = plain(source)?;
+        let mut server = |pool: &str, address: &str| -> Result<(), String> {
+            out += &format!(
+                "newServer({{address=\"{}\", pool=\"{pool}\", name=\"{pool}\", source=\"{source}\", useProxyProtocol=true, healthCheckMode=\"up\"}})\n",
+                plain(address)?
+            );
+            Ok(())
+        };
+        server("auth", auth)?;
+        for l in listeners {
+            server(l.pool, &l.backend)?;
+        }
+        // What: NOTIFY, XFR and non-RD queries to pdns.
+        // Why: a secondary asks SOA and AXFR without RD.
+        // From: Issue #1683
+        out += &format!(
+            "addAction(AndRule({{DSTPortRule({}), OrRule({{OpcodeRule(DNSOpcode.Notify), QTypeRule(DNSQType.AXFR), QTypeRule(DNSQType.IXFR), NotRule(RDRule())}})}}), PoolAction(\"auth\"))\n",
+            first.port
+        );
+        for l in listeners {
+            out += &format!(
+                "addAction(DSTPortRule({}), PoolAction(\"{}\"))\n",
+                l.port, l.pool
+            );
+        }
+        Ok(out)
+    }
+
+    // What: full dnsdist.conf for this node.
+    // Why: the ACL adds the replication peers.
+    // From: Issue #1683
+    pub fn render(s: &Settings) -> Result<String, String> {
+        let lo = s.text("LOOPBACK_BIND_IP")?;
+        let source = source_of(s)?;
+        // What: peers pass the ACL besides the clients.
+        // Why: NOTIFY and AXFR now reach port 53 too.
+        // From: Issue #1683
+        let peers = match crate::dns::Role::from_settings(s)? {
+            crate::dns::Role::Primary => crate::pdns_conf::secondary_ips(s),
+            crate::dns::Role::Secondary => vec![s.text("DNS_XFR_PRIMARY")?],
+        };
+        let mut acl: Vec<String> = Vec::new();
+        for net in s.list("DNS_QUERY_ALLOW_FROM").into_iter().chain(peers) {
+            crate::config::add_once(&mut acl, &net);
+        }
+        let auth = crate::pdns_conf::auth_endpoint(s)?;
+        let mut listeners = vec![Listener {
+            port: s.uint("DNS_PORT")?,
+            pool: "http",
+            backend: crate::dns::host_port(&lo, s.uint("RECURSOR_HTTP_PORT")?),
+        }];
+        // What: HTTPS port only when IP_HTTPS is set.
+        // Why: dns-https idles without IP_HTTPS.
+        // From: Issue #1683
+        if s.text("IP_HTTPS").is_ok() {
+            listeners.push(Listener {
+                port: s.uint("DNS_HTTPS_PORT")?,
+                pool: "https",
+                backend: crate::dns::host_port(&lo, s.uint("RECURSOR_HTTPS_PORT")?),
+            });
+        }
+        body(&s.list("DNSDIST_LISTEN"), &acl, &source, &auth, &listeners)
+    }
+}
+
 // What: Kea config files built from the settings.
 // Why: one place turns SOT values into Kea JSON.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 pub mod kea_conf {
     use crate::config::Settings;
     use serde_json::{Value, json};
 
     // What: fixed Kea protocol words.
     // Why: Kea accepts only these; not tunable.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     const SOCKET_KIND: &str = "unix";
     const LEASE_BACKEND: &str = "memfile";
     const NCR_PROTOCOL: &str = "UDP";
     const NCR_FORMAT: &str = "JSON";
     const LOG_OUTPUT: &str = "stdout";
 
-    // What: Kea logger rows for the given names.
-    // Why: all Kea daemons log the same way to stdout.
+    // What: one Kea logger row per given name.
+    // Why: all Kea loggers share level and output.
+    // From: Issue #1683 | PR #1980
     fn log_rows(s: &Settings, names: &[&str]) -> Result<Value, String> {
         let level = s.text("KEA_LOG_SEVERITY")?;
         let depth = s.uint("KEA_LOG_DEBUGLEVEL")?;
@@ -2736,17 +3207,17 @@ pub mod kea_conf {
         Ok(Value::Array(rows))
     }
 
-    // What: main LAN domain without the final dot.
-    // Why: Kea options take the plain domain name.
-    // From: Issue #1683
+    // What: the LAN zone without its final dot.
+    // Why: DHCP options carry the name without the dot.
+    // From: Issue #1683 | PR #1980
     fn lan_domain(s: &Settings) -> Result<String, String> {
-        let lans = crate::dns::lan_domains(s)?;
-        let main = lans.first().ok_or("no LAN domain")?;
-        Ok(main.trim_end_matches('.').to_string())
+        let zone = crate::dns::lan_zone(s)?;
+        Ok(zone.trim_end_matches('.').to_string())
     }
 
-    // What: Kea control socket of dhcp4.
-    // Why: ctrl-agent and dhcp4 must name one socket.
+    // What: the control socket entry of Kea DHCPv4.
+    // Why: commands reach Kea through this socket.
+    // From: Issue #1683 | PR #1980
     fn socket(s: &Settings) -> Result<Value, String> {
         Ok(json!({"socket-type": SOCKET_KIND,
                   "socket-name": s.text("KEA_DHCP4_SOCKET")?}))
@@ -2765,13 +3236,65 @@ pub mod kea_conf {
             .flatten();
         for row in rows {
             let name = row["name"].as_str().unwrap_or_default();
-            let hit = matches!(name, "domain-name" | "domain-search")
-                && row["data"].as_str() == Some(before);
+            let follows = [crate::dhcp::DOMAIN_NAME, crate::dhcp::DOMAIN_SEARCH];
+            let hit =
+                follows.iter().any(|m| m.name == name) && row["data"].as_str() == Some(before);
             if hit {
                 row["data"] = Value::from(domain);
             }
         }
         subnets
+    }
+
+    // What: ntp-servers of kept subnets follow own NTP.
+    // Why: while on, the toggle owns option 42 everywhere.
+    // From: Issue #1683
+    pub(crate) fn follow_ntp(mut subnets: Value, auto: bool, own: &str, back: &str) -> Value {
+        for sn in subnets.as_array_mut().into_iter().flatten() {
+            if auto && sn.get("option-data").is_none() {
+                sn["option-data"] = json!([]);
+            }
+            let Some(rows) = sn["option-data"].as_array_mut() else {
+                continue;
+            };
+            let ntp = crate::dhcp::NTP_SERVERS.name;
+            let at = rows.iter().position(|r| r["name"] == ntp);
+            match at {
+                Some(i) if auto => rows[i]["data"] = Value::from(own),
+                None if auto => rows.push(json!({"name": ntp, "data": own})),
+                // What: off returns own IP to default.
+                // Why: no NTP answers there when off.
+                // From: Issue #1683
+                Some(i) if rows[i]["data"] == own && back.is_empty() => {
+                    rows.remove(i);
+                }
+                Some(i) if rows[i]["data"] == own => rows[i]["data"] = Value::from(back),
+                _ => {}
+            }
+        }
+        subnets
+    }
+
+    // What: true when an IPv4 address lies in a CIDR.
+    // Why: Kea refuses a reservation outside its subnet.
+    // From: Issue #1683 | PR #2017
+    fn in_subnet(ip: &str, cidr: &str) -> bool {
+        let Some((net, len)) = cidr.split_once('/') else {
+            return false;
+        };
+        let parsed = (
+            ip.parse::<std::net::Ipv4Addr>(),
+            net.parse::<std::net::Ipv4Addr>(),
+            len.parse::<u32>(),
+        );
+        let (Ok(ip), Ok(net), Ok(len)) = parsed else {
+            return false;
+        };
+        if len > 32 {
+            return false;
+        }
+        let mask = u32::MAX.checked_shl(32 - len).unwrap_or(0);
+        u32::from(ip) & mask == u32::from(net) & mask
     }
 
     // What: subnet DDNS suffix from its domain-name.
@@ -2800,37 +3323,57 @@ pub mod kea_conf {
         Ok(())
     }
 
-    // What: option-data of the main subnet.
-    // Why: the settings own router, DNS, domain, NTP.
+    // What: the option rows of the SOT subnet.
+    // Why: router, DNS, domain and NTP come from the SOT.
+    // From: Issue #1683 | PR #1980
     fn option_rows(s: &Settings, domain: &str) -> Result<Vec<Value>, String> {
+        use crate::dhcp::{DNS_SERVERS, DOMAIN_NAME, DOMAIN_SEARCH, NTP_SERVERS, ROUTERS};
         let mut rows = Vec::new();
-        rows.push(json!({"name": "routers", "data": s.text("DHCP_GATEWAY")?}));
+        rows.push(json!({"name": ROUTERS.name, "data": s.text("DHCP_GATEWAY")?}));
         let dns = crate::dhcp::dns_addrs(s).join(", ");
-        rows.push(json!({"name": "domain-name-servers", "data": dns}));
-        rows.push(json!({"name": "domain-name", "data": domain}));
-        rows.push(json!({"name": "domain-search", "data": domain}));
+        rows.push(json!({"name": DNS_SERVERS.name, "data": dns}));
+        rows.push(json!({"name": DOMAIN_NAME.name, "data": domain}));
+        rows.push(json!({"name": DOMAIN_SEARCH.name, "data": domain}));
         let ntp = crate::dhcp::ntp_addrs(s)?;
         if !ntp.is_empty() {
-            rows.push(json!({"name": "ntp-servers", "data": ntp.join(", ")}));
+            rows.push(json!({"name": NTP_SERVERS.name, "data": ntp.join(", ")}));
         }
-        let raw = s.text("DHCP_CUSTOM_OPTIONS").unwrap_or_default();
+        let raw = s.text_or_empty("DHCP_CUSTOM_OPTIONS");
         for (code, data) in crate::dhcp::custom_options(s, &raw)? {
             rows.push(json!({"code": code, "data": data}));
         }
         Ok(rows)
     }
 
+    // What: the pool of a subnet as Kea writes it.
+    // Why: settings and the subnet form use one form.
+    // From: Issue #1683 | PR #2017
+    pub fn pool_text(start: &str, end: &str) -> String {
+        format!("{start} - {end}")
+    }
+
+    // What: true for an option given by code, not name.
+    // Why: such rows are the user's own options.
+    // From: Issue #1683 | PR #2017
+    pub fn is_coded(option: &Value) -> bool {
+        option.get("name").is_none()
+    }
+
+    // What: the coded options of a subnet.
+    // Why: they survive every rewrite of the subnet.
+    // From: Issue #1683 | PR #2017
+    pub fn coded_options(subnet: &Value) -> Vec<Value> {
+        let rows = subnet["option-data"].as_array().into_iter().flatten();
+        rows.filter(|o| is_coded(o)).cloned().collect()
+    }
+
     // What: kea-dhcp4.conf; main subnet from settings.
-    // Why: DoMe 08.11.: settings are the only source.
+    // Why: the settings are the only source of it.
     // From: Issue #1683
     pub fn dhcp4(s: &Settings, existing: Option<&Value>) -> Result<Value, String> {
         let domain = lan_domain(s)?;
         let (valid, max) = crate::dhcp::lease_limits(s, s.uint("DHCP_LEASE_TIME")?)?;
-        let pool = format!(
-            "{} - {}",
-            s.text("DHCP_RANGE_START")?,
-            s.text("DHCP_RANGE_END")?
-        );
+        let pool = pool_text(&s.text("DHCP_RANGE_START")?, &s.text("DHCP_RANGE_END")?);
         // What: last main domain, if no LAN domain now.
         // Why: kept subnets follow only a dropped domain.
         // From: Issue #1683
@@ -2846,6 +3389,9 @@ pub mod kea_conf {
             .cloned()
             .unwrap_or_else(|| json!([]));
         let kept = follow_domain(kept, before.as_deref(), &domain);
+        let back = crate::dhcp::ntp_addrs(s)?.join(", ");
+        let own = s.text("IP_HTTP")?;
+        let kept = follow_ntp(kept, crate::dhcp::own_ntp(s)?, &own, &back);
         let old = kept.as_array().into_iter().flatten();
         let old_main = old.clone().find(|x| x["id"].as_u64() == Some(id));
         let mut main = json!({
@@ -2856,15 +3402,28 @@ pub mod kea_conf {
             "valid-lifetime": valid,
             "max-valid-lifetime": max
         });
-        // What: hosts and code options of the old main.
-        // Why: they come from the ui, not from settings.
-        // From: Issue #1683
+        // What: old main hosts in subnet, coded options.
+        // Why: ui-made; Kea refuses hosts off its subnet.
+        // From: Issue #1683 | PR #2017
         if let Some(o) = old_main {
-            if let Some(hosts) = o.get("reservations") {
-                main["reservations"] = hosts.clone();
+            if let Some(hosts) = o.get("reservations").and_then(Value::as_array) {
+                let net = s.text("DHCP_SUBNET")?;
+                let fit: Vec<Value> = hosts
+                    .iter()
+                    .filter(|h| {
+                        let ok = h["ip-address"]
+                            .as_str()
+                            .is_none_or(|ip| in_subnet(ip, &net));
+                        if !ok {
+                            eprintln!("kea: reservation {h} is outside {net}; dropped");
+                        }
+                        ok
+                    })
+                    .cloned()
+                    .collect();
+                main["reservations"] = fit.into();
             }
-            let coded = o["option-data"].as_array().into_iter().flatten();
-            let coded: Vec<Value> = coded.filter(|r| r.get("name").is_none()).cloned().collect();
+            let coded = coded_options(o);
             if let Some(rows) = main["option-data"].as_array_mut() {
                 rows.extend(coded);
             }
@@ -2925,7 +3484,7 @@ pub mod kea_conf {
 
     // What: kea-dhcp-ddns.conf, forward and reverse.
     // Why: name updates go to local pdns with TSIG.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn ddns(s: &Settings, key: &str, secret: &str) -> Result<Value, String> {
         let target = json!([{
             "ip-address": s.text("PDNS_AUTH_ADDRESS")?,
@@ -2960,7 +3519,7 @@ pub mod kea_conf {
 
 // What: dnsmasq.conf for proxy-DHCP or relay.
 // Why: one owner; a bad value stops the render.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 pub mod dnsmasq_conf {
     use crate::config::Settings;
     use crate::dhcp::Mode;
@@ -2968,8 +3527,9 @@ pub mod dnsmasq_conf {
     struct Conf(String);
 
     impl Conf {
-        // What: append one dnsmasq.conf row.
-        // Why: a line break would inject a second row.
+        // What: appends one row; refuses a line break.
+        // Why: a line break would start a new row.
+        // From: Issue #1683 | PR #1980
         fn add(&mut self, row: &str) -> Result<(), String> {
             if row.contains(['\n', '\r']) {
                 return Err(format!("dnsmasq row {row:?} has a line break"));
@@ -2978,8 +3538,9 @@ pub mod dnsmasq_conf {
             self.0.push('\n');
             Ok(())
         }
-        // What: append prefix+value when value is set.
-        // Why: empty optional settings write no row.
+        // What: appends prefix plus value unless empty.
+        // Why: an empty value gives a broken row.
+        // From: Issue #1683 | PR #1980
         fn add_if(&mut self, prefix: &str, value: &str) -> Result<(), String> {
             if value.is_empty() {
                 return Ok(());
@@ -2988,8 +3549,9 @@ pub mod dnsmasq_conf {
         }
     }
 
-    // What: rows every dnsmasq mode starts with.
-    // Why: dnsmasq runs DHCP only, no DNS, no polling.
+    // What: the rows every dnsmasq mode starts with.
+    // Why: port=0: dnsmasq serves DHCP only, no DNS.
+    // From: Issue #1683 | PR #1980
     fn base(s: &Settings) -> Result<Conf, String> {
         let mut c = Conf(String::new());
         for row in ["port=0", "no-resolv", "no-poll", "log-facility=-"] {
@@ -3001,10 +3563,11 @@ pub mod dnsmasq_conf {
         Ok(c)
     }
 
-    // What: pxe-service rows for BIOS and UEFI.
-    // Why: PXE needs a server and at least one file.
+    // What: pxe-service rows for BIOS and UEFI clients.
+    // Why: no server or no file: nothing to offer.
+    // From: Issue #1683 | PR #1980
     fn pxe(s: &Settings, c: &mut Conf) -> Result<(), String> {
-        let get = |k: &str| s.text(k).unwrap_or_default();
+        let get = |k: &str| s.text_or_empty(k);
         let server = get("DHCP_PROXY_PXE_BOOT_SERVER");
         let bios = get("DHCP_PROXY_PXE_BOOT_FILENAME_BIOS");
         let uefi = get("DHCP_PROXY_PXE_BOOT_FILENAME_UEFI");
@@ -3034,7 +3597,7 @@ pub mod dnsmasq_conf {
     // Why: 10.0.0.0 default missed the real LAN.
     // From: Issue #1683 | PR #1991
     fn proxy_range(s: &Settings) -> Result<String, String> {
-        let start = s.text("DHCP_SUBNET_START").unwrap_or_default();
+        let start = s.text_or_empty("DHCP_SUBNET_START");
         if !start.is_empty() {
             return Ok(format!("{start},proxy"));
         }
@@ -3046,19 +3609,20 @@ pub mod dnsmasq_conf {
 
     // What: render dnsmasq.conf for one mode.
     // Why: Off and Kea start no dnsmasq at all.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn render(s: &Settings, mode: Mode) -> Result<String, String> {
         let mut c = base(s)?;
         if mode == Mode::DnsmasqRelay {
             // What: empty relay address = this host IP.
-            // Why: DoMe 07.11.: one-click mode switch.
+            // Why: the mode switch needs no further input.
             // From: Issue #1683 | PR #1985
-            let local = Some(s.text("DHCP_RELAY_LOCAL_ADDR").unwrap_or_default())
-                .filter(|v| !v.is_empty())
+            let local = s
+                .text("DHCP_RELAY_LOCAL_ADDR")
+                .ok()
                 .or_else(|| {
                     crate::recursor_conf::own_ips(s)
                         .into_iter()
-                        .find(|ip| !ip.starts_with("127."))
+                        .find(|ip| !crate::dns::is_loopback(ip))
                 })
                 .ok_or("DHCP-Relay: DHCP_RELAY_LOCAL_ADDR is not set")?;
             let upstream = s.text("UPSTREAM_DHCP_IP").map_err(|_| {
@@ -3070,13 +3634,15 @@ pub mod dnsmasq_conf {
         if mode != Mode::DnsmasqProxy {
             return Err(format!("no dnsmasq in DHCP mode {mode:?}"));
         }
-        let get = |k: &str| s.text(k).unwrap_or_default();
+        let get = |k: &str| s.text_or_empty(k);
         c.add(&format!("dhcp-range={}", proxy_range(s)?))?;
         c.add_if("interface=", &s.list("DHCP_PROXY_INTERFACE").join(","))?;
-        c.add_if("dhcp-option-pxe=3,", &get("DHCP_PROXY_ROUTER"))?;
-        c.add_if("dhcp-option-pxe=6,", &crate::dhcp::dns_addrs(s).join(","))?;
-        c.add_if("dhcp-option-pxe=15,", &get("DHCP_PROXY_DOMAIN"))?;
-        c.add_if("dhcp-option-pxe=42,", &crate::dhcp::ntp_addrs(s)?.join(","))?;
+        use crate::dhcp::{DNS_SERVERS, DOMAIN_NAME, NTP_SERVERS, ROUTERS};
+        let by_code = |m: crate::dhcp::Managed| format!("dhcp-option-pxe={},", m.code);
+        c.add_if(&by_code(ROUTERS), &get("DHCP_PROXY_ROUTER"))?;
+        c.add_if(&by_code(DNS_SERVERS), &crate::dhcp::dns_addrs(s).join(","))?;
+        c.add_if(&by_code(DOMAIN_NAME), &get("DHCP_PROXY_DOMAIN"))?;
+        c.add_if(&by_code(NTP_SERVERS), &crate::dhcp::ntp_addrs(s)?.join(","))?;
         let file = get("DHCP_PROXY_BOOT_FILENAME");
         if !file.is_empty() {
             let server = get("DHCP_PROXY_BOOT_SERVER");
@@ -3093,7 +3659,7 @@ pub mod dnsmasq_conf {
 
 // What: generated nginx include files and cert plan.
 // Why: one owner of CDN host maps, ACL and dispatch.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 pub mod nginx_conf {
     use crate::config::Settings;
     use sha2::{Digest, Sha256};
@@ -3101,12 +3667,12 @@ pub mod nginx_conf {
 
     // What: first line of every generated file.
     // Why: tells a reader not to edit it by hand.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     const HEAD: &str = "# Generated by LanCache-NG; do not edit\n";
 
     // What: Public Suffix List rules.
     // Why: finds the registrable root of a CDN name.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     #[derive(Default)]
     pub struct Psl {
         plain: BTreeSet<String>,
@@ -3117,7 +3683,7 @@ pub mod nginx_conf {
     impl Psl {
         // What: read the PSL text format.
         // Why: publicsuffix.org rows: x, *.x, !x.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         pub fn parse(text: &str) -> Self {
             let mut p = Psl::default();
             for row in text.lines() {
@@ -3140,7 +3706,8 @@ pub mod nginx_conf {
         }
 
         // What: label count of the public suffix.
-        // Why: PSL rules: exception, wildcard, plain.
+        // Why: exception and wildcard rules change it.
+        // From: Issue #1683 | PR #1980
         fn suffix_labels(&self, labels: &[&str]) -> usize {
             let n = labels.len();
             let mut best = 1;
@@ -3159,7 +3726,7 @@ pub mod nginx_conf {
 
         // What: registrable root: suffix plus one label.
         // Why: PSL rule; an unknown TLD counts as suffix.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         pub fn root(&self, name: &str) -> Option<String> {
             let labels: Vec<&str> = name.split('.').collect();
             let keep = self.suffix_labels(&labels) + 1;
@@ -3169,7 +3736,7 @@ pub mod nginx_conf {
 
     // What: CDN names grouped by nginx handling.
     // Why: roots share a cert; bases and exact own one.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     #[derive(Default)]
     pub struct Hosts {
         pub roots: Vec<String>,
@@ -3178,36 +3745,27 @@ pub mod nginx_conf {
         pub root_wild: BTreeSet<String>,
     }
 
-    // What: push a name unless it is listed.
-    // Why: nginx rejects a host listed twice in a map.
-    fn add_once(list: &mut Vec<String>, name: &str) {
-        if !list.iter().any(|n| n == name) {
-            list.push(name.to_string());
-        }
-    }
-
     // What: group the cache domain list into Hosts.
     // Why: a bad or rootless row is an error, no skip.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn hosts(domains: &str, psl: &Psl) -> Result<Hosts, String> {
         let mut h = Hosts::default();
-        let rows = domains.lines().map(str::trim);
-        for row in rows.filter(|r| !r.is_empty() && !r.starts_with('#')) {
+        for row in crate::config::data_rows(domains) {
             let (name, wild) = crate::dns::cdn_entry(row)
                 .ok_or_else(|| format!("invalid domain entry {row:?}"))?;
             let root = psl
                 .root(&name)
                 .ok_or_else(|| format!("no registrable root for {name}"))?;
-            add_once(&mut h.roots, &root);
+            crate::config::add_once(&mut h.roots, &root);
             let parent = name.split_once('.').map(|(_, p)| p);
             if name == root {
                 if wild {
                     h.root_wild.insert(root);
                 }
             } else if wild {
-                add_once(&mut h.bases, &name);
+                crate::config::add_once(&mut h.bases, &name);
             } else if parent != Some(root.as_str()) {
-                add_once(&mut h.exact, &name);
+                crate::config::add_once(&mut h.exact, &name);
             }
         }
         Ok(h)
@@ -3215,16 +3773,16 @@ pub mod nginx_conf {
 
     // What: stable cert file name for one host.
     // Why: file names never carry raw host text.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     fn cert_id(host: &str, kind: &str) -> String {
         let sum = Sha256::digest(format!("{kind}:{host}").as_bytes());
-        sum[..16].iter().map(|b| format!("{b:02x}")).collect()
+        hex::encode(&sum[..16])
     }
 
     impl Hosts {
         // What: (server name key, cert name) pairs.
         // Why: feeds the cert map and the allow map.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         pub fn keys(&self) -> Vec<(String, String)> {
             let mut out = Vec::new();
             for r in &self.roots {
@@ -3242,7 +3800,7 @@ pub mod nginx_conf {
 
         // What: certs to issue: file name and SANs.
         // Why: cert::make_leaf issues exactly these.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         pub fn certs(&self) -> Vec<(String, Vec<String>)> {
             let mut out = Vec::new();
             for r in &self.roots {
@@ -3260,7 +3818,7 @@ pub mod nginx_conf {
 
     // What: fill ${KEY} in a shipped nginx template.
     // Why: values come from settings, not the env.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn template(text: &str, s: &Settings) -> Result<String, String> {
         let mut out = String::with_capacity(text.len());
         let mut rest = text;
@@ -3280,14 +3838,16 @@ pub mod nginx_conf {
         Ok(out)
     }
 
-    // What: one aligned nginx map row.
-    // Why: map files stay readable in the volume.
+    // What: one aligned key and value row of a map.
+    // Why: all nginx map rows share one format.
+    // From: Issue #1683 | PR #1980
     fn map_row(out: &mut String, key: &str, value: &str) {
         out.push_str(&format!("    {key:<45} {value};\n"));
     }
 
-    // What: nginx regex for names below base.
-    // Why: one label or any depth, dots escaped.
+    // What: nginx regex for names below a base.
+    // Why: one_label limits it to one more label.
+    // From: Issue #1683 | PR #1980
     fn ends_with_re(base: &str, one_label: bool) -> String {
         let label = if one_label { "[^.]+" } else { ".+" };
         format!("\"~^{label}\\.{}$\"", base.replace('.', "\\."))
@@ -3295,7 +3855,7 @@ pub mod nginx_conf {
 
     // What: all settings the files need, read once.
     // Why: one read; a missing key stops the render.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     struct Plan {
         strict: bool,
         cidrs: Vec<String>,
@@ -3313,8 +3873,9 @@ pub mod nginx_conf {
         health: u64,
     }
 
-    // What: read every proxy setting into a Plan.
-    // Why: strict/lazy is checked once, not per file.
+    // What: reads the settings into a Plan.
+    // Why: an unknown security mode stops the render.
+    // From: Issue #1683 | PR #1980
     fn plan(s: &Settings) -> Result<Plan, String> {
         let strict = match s.text("PROXY_SECURITY_MODE")?.as_str() {
             "strict" => true,
@@ -3322,7 +3883,7 @@ pub mod nginx_conf {
             other => return Err(format!("PROXY_SECURITY_MODE {other} is not lazy/strict")),
         };
         let lo = s.text("LOOPBACK_BIND_IP")?;
-        let at = |k: &str| -> Result<String, String> { Ok(format!("{lo}:{}", s.uint(k)?)) };
+        let at = |k: &str| -> Result<String, String> { Ok(crate::dns::host_port(&lo, s.uint(k)?)) };
         Ok(Plan {
             strict,
             cidrs: s.list("PROXY_ALLOWED_CLIENT_CIDRS"),
@@ -3348,8 +3909,9 @@ pub mod nginx_conf {
         })
     }
 
-    // What: allow rows per client CIDR, then deny.
-    // Why: no CIDR list means every client may use it.
+    // What: allow rows per client range, then deny.
+    // Why: no range set means no restriction.
+    // From: Issue #1683 | PR #1980
     fn acl_file(p: &Plan) -> String {
         let mut out = HEAD.to_string();
         for c in &p.cidrs {
@@ -3361,8 +3923,9 @@ pub mod nginx_conf {
         out
     }
 
-    // What: SNI map of the TLS passthrough stream.
-    // Why: strict sends only known hosts to the origin.
+    // What: the SNI map and the passthrough server.
+    // Why: strict passes only known hosts on.
+    // From: Issue #1683 | PR #1980
     fn stream_file(p: &Plan, keys: &[(String, String)]) -> String {
         let mut out = format!("{HEAD}map $ssl_preread_server_name $stream_backend {{\n");
         out.push_str("    hostnames;\n");
@@ -3385,7 +3948,7 @@ pub mod nginx_conf {
         out.push_str(&p.timeouts);
         out.push_str("}\n");
         // What: the refuse target sends a TLS alert.
-        // Why: live: a closed port logged [error].
+        // Why: a closed port would log an error per try.
         // From: Issue #1683 | PR #1980
         out.push_str(&format!(
             "\nserver {{\n    listen {} ssl;\n    ssl_reject_handshake on;\n}}\n",
@@ -3394,8 +3957,9 @@ pub mod nginx_conf {
         out
     }
 
-    // What: certificate and allowed-host maps.
-    // Why: nginx picks the cert by SNI from this map.
+    // What: maps for certificate, host and client.
+    // Why: strict allows listed hosts only.
+    // From: Issue #1683 | PR #1980
     fn https_map(p: &Plan, keys: &[(String, String)], fallback: &str) -> String {
         let mut out = format!("{HEAD}map $ssl_server_name $https_cert_name {{\n");
         out.push_str("    hostnames;\n");
@@ -3424,8 +3988,9 @@ pub mod nginx_conf {
         out
     }
 
-    // What: server block behind the proxy protocol.
-    // Why: the real client IP comes from the stream.
+    // What: a server block behind the PROXY protocol.
+    // Why: the client address comes from the stream.
+    // From: Issue #1683 | PR #1980
     fn relay_server(p: &Plan, listen: &str, body: &str) -> String {
         format!(
             "server {{\n    listen {listen} proxy_protocol;\n    set_real_ip_from {};\n{body}{}}}\n",
@@ -3433,8 +3998,9 @@ pub mod nginx_conf {
         )
     }
 
-    // What: SNI map: cached hosts go to the MITM relay.
-    // Why: only CDN hosts are decrypted and cached.
+    // What: the map from SNI to intercept or pass.
+    // Why: longer bases win; strict refuses the rest.
+    // From: Issue #1683 | PR #1980
     fn dispatch_file(p: &Plan, h: &Hosts) -> String {
         let mut out = format!("{HEAD}map $ssl_preread_server_name $https_dispatch_backend {{\n");
         map_row(&mut out, "\"\"", &p.refuse_relay);
@@ -3449,7 +4015,7 @@ pub mod nginx_conf {
         }
         let wild_roots = h.roots.iter().filter(|r| h.root_wild.contains(*r));
         let mut bases: Vec<&String> = h.bases.iter().chain(wild_roots).collect();
-        bases.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| b.cmp(a)));
+        bases.sort_by(|a, b| crate::config::longest_first(a, b));
         for b in bases {
             map_row(&mut out, &ends_with_re(b, true), &p.mitm_relay);
             map_row(&mut out, &ends_with_re(b, false), &p.pass_relay);
@@ -3485,7 +4051,7 @@ pub mod nginx_conf {
 
     // What: all generated files: (path, body).
     // Why: the ui writes them; nginx includes them.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn files(s: &Settings, h: &Hosts, https: bool) -> Result<Vec<(String, String)>, String> {
         let p = plan(s)?;
         let keys = h.keys();
@@ -3513,7 +4079,7 @@ pub mod nginx_conf {
 
 // What: apply saved setting changes to containers.
 // Why: each owner gets only the strongest action.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 pub mod apply {
     use crate::config::{Change, Effect};
     use crate::docker::{Action, Api, Error};
@@ -3522,7 +4088,7 @@ pub mod apply {
 
     // What: strongest effect per owning container.
     // Why: one restart already covers a reload.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn plan(changes: &[Change]) -> BTreeMap<String, Effect> {
         let mut out = BTreeMap::new();
         for c in changes {
@@ -3536,7 +4102,7 @@ pub mod apply {
 
     // What: result for one owner.
     // Why: the ui shows it; Recreate needs compose.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     #[derive(Debug)]
     pub enum Outcome {
         Live,
@@ -3545,8 +4111,9 @@ pub mod apply {
         Failed(Error),
     }
 
-    // What: Docker action for a settings effect.
-    // Why: live needs none; recreate needs compose.
+    // What: the container action a change needs.
+    // Why: live and recreate need none here.
+    // From: Issue #1683 | PR #1980
     fn action_of(effect: Effect) -> Option<Action> {
         match effect {
             Effect::Live | Effect::Recreate => None,
@@ -3555,14 +4122,21 @@ pub mod apply {
         }
     }
 
+    // What: owner and words of each "owner:cmd+arg" row.
+    // Why: one reader of the exec rows of the SOT.
+    // From: Issue #1683 | PR #2017
+    pub fn exec_rows(exec: &[String]) -> impl Iterator<Item = (&str, Vec<&str>)> {
+        exec.iter().filter_map(|e| {
+            let (owner, cmd) = e.split_once(':')?;
+            Some((owner, cmd.split('+').collect()))
+        })
+    }
+
     // What: an owner's reload commands, "owner:cmd+arg".
     // Why: RELOAD_EXEC in the SOT; no list in code.
     // From: Issue #1683
     fn exec_cmds<'a>(exec: &'a [String], owner: &'a str) -> impl Iterator<Item = Vec<&'a str>> {
-        exec.iter().filter_map(move |e| {
-            let (o, cmd) = e.split_once(':')?;
-            (o == owner).then(|| cmd.split('+').collect())
-        })
+        exec_rows(exec).filter_map(move |(o, cmd)| (o == owner).then_some(cmd))
     }
 
     // What: run every reload command; stop at the first.
@@ -3588,6 +4162,16 @@ pub mod apply {
         Outcome::Done(Action::Reload)
     }
 
+    // What: one Docker action, reported as an outcome.
+    // Why: run reports every action the same way.
+    // From: Issue #1683 | PR #2017
+    async fn acted(api: &Api, name: &str, action: Action, grace: u32, limit: Duration) -> Outcome {
+        match api.act(name, action, grace, limit).await {
+            Ok(()) => Outcome::Done(action),
+            Err(e) => Outcome::Failed(e),
+        }
+    }
+
     // What: carry out the plan: exec or restart.
     // Why: openrc-init drops HUP; reload runs commands.
     // From: Issue #1683 | PR #1980
@@ -3605,36 +4189,25 @@ pub mod apply {
                 None if effect == Effect::Recreate => Outcome::NeedsRecreate,
                 None => Outcome::Live,
                 // What: owner reload commands via exec.
-                // Why: DoMe 06.11.: a toggle restarted dns.
+                // Why: a reload must not restart it.
                 // From: Issue #1683
                 Some(Action::Reload) if exec_cmds(exec, owner).next().is_some() => {
                     let name = container_of(owner);
                     match reload_exec(api, &name, exec, owner, limit).await {
                         // What: failed reload: restart.
-                        // Why: 249 ran an old nginx.conf.
+                        // Why: else the old file runs on.
                         // From: Issue #1683 | PR #1985
                         Outcome::Failed(e) => {
                             eprintln!("apply: {owner}: reload failed ({e}); restart");
-                            let a = Action::Restart;
-                            match api.act(&name, a, grace, limit).await {
-                                Ok(()) => Outcome::Done(a),
-                                Err(e) => Outcome::Failed(e),
-                            }
+                            acted(api, &name, Action::Restart, grace, limit).await
                         }
                         done => done,
                     }
                 }
                 Some(Action::Reload) => {
-                    let a = Action::Restart;
-                    match api.act(&container_of(owner), a, grace, limit).await {
-                        Ok(()) => Outcome::Done(a),
-                        Err(e) => Outcome::Failed(e),
-                    }
+                    acted(api, &container_of(owner), Action::Restart, grace, limit).await
                 }
-                Some(a) => match api.act(&container_of(owner), a, grace, limit).await {
-                    Ok(()) => Outcome::Done(a),
-                    Err(e) => Outcome::Failed(e),
-                },
+                Some(a) => acted(api, &container_of(owner), a, grace, limit).await,
             };
             out.push((owner.clone(), outcome));
         }
@@ -3644,7 +4217,7 @@ pub mod apply {
 
 // What: every config file of the stack.
 // Why: the ui calls one function; paths from SOT.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 pub mod render {
     use crate::config::Settings;
     use crate::recursor_conf::{self, Which};
@@ -3653,7 +4226,7 @@ pub mod render {
 
     // What: secrets the config files embed.
     // Why: the caller reads them from the store.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub struct Secrets {
         pub pdns_api_key: String,
         pub recursor_api_key: String,
@@ -3664,7 +4237,7 @@ pub mod render {
 
     // What: one file and its owning container.
     // Why: apply::plan needs the owner per change.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub struct File {
         pub owner: &'static str,
         pub path: PathBuf,
@@ -3673,16 +4246,41 @@ pub mod render {
 
     // What: collector of files and errors.
     // Why: every bad value is named; nothing half done.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     struct Out<'a> {
         s: &'a Settings,
         files: Vec<File>,
         errs: Vec<String>,
     }
 
-    impl Out<'_> {
-        // What: keep a file or collect its error.
-        // Why: one render reports every error at once.
+    impl<'a> Out<'a> {
+        // What: an empty collector for one render run.
+        // Why: all and dns_only start the same way.
+        // From: Issue #1683 | PR #2017
+        fn new(s: &'a Settings) -> Self {
+            Self {
+                s,
+                files: Vec::new(),
+                errs: Vec::new(),
+            }
+        }
+
+        // What: the files, or the errors, each text once.
+        // Why: two files may hit the same bad value.
+        // From: Issue #1683 | PR #1991
+        fn finish(mut self) -> Result<Vec<File>, Vec<String>> {
+            let mut seen = std::collections::HashSet::new();
+            self.errs.retain(|e| seen.insert(e.clone()));
+            if self.errs.is_empty() {
+                Ok(self.files)
+            } else {
+                Err(self.errs)
+            }
+        }
+
+        // What: adds a file, or records the error.
+        // Why: a render reports all errors at once.
+        // From: Issue #1683 | PR #1980
         fn add_file(&mut self, owner: &'static str, path_key: &str, body: Result<String, String>) {
             match (self.s.text(path_key), body) {
                 (Ok(p), Ok(body)) => self.files.push(File {
@@ -3693,9 +4291,9 @@ pub mod render {
                 (Err(e), _) | (_, Err(e)) => self.errs.push(e),
             }
         }
-
-        // What: pretty JSON file for Kea configs.
-        // Why: Kea reads JSON; diffs stay readable.
+        // What: adds a JSON value as a pretty file.
+        // Why: a JSON error is recorded like any other.
+        // From: Issue #1683 | PR #1980
         fn put_json(
             &mut self,
             owner: &'static str,
@@ -3718,8 +4316,9 @@ pub mod render {
         h.max(1)
     }
 
-    // What: files of services and dns.
-    // Why: a secondary renders only these.
+    // What: the files of services and dns.
+    // Why: the full and the DNS-only render share it.
+    // From: Issue #1683 | PR #2004
     fn dns_files(o: &mut Out, sec: &Secrets, names: &[(String, bool)]) {
         let s = o.s;
         o.add_file("services", "CHRONY_CONF_FILE", chrony::render(s));
@@ -3734,6 +4333,7 @@ pub mod render {
             "PDNS_CONF_FILE",
             pdns_conf::auth(s, &sec.pdns_api_key),
         );
+        o.add_file("dns", "DNSDIST_CONF_FILE", crate::dnsdist_conf::render(s));
         for (which, ip_key) in [(Which::Http, "IP_HTTP"), (Which::Https, "IP_HTTPS")] {
             let Ok(answer) = s.text(ip_key) else { continue };
             let rpz_key = which.key("RPZ_FILE");
@@ -3756,14 +4356,19 @@ pub mod render {
                 .and_then(|l| recursor_conf::yaml(s, which, &sec.recursor_api_key, &l));
             o.add_file("dns", &which.key("CONF_FILE"), yaml);
         }
-        if s.flag("DNS_FILTER_AAAA").unwrap_or(false) {
-            let body = Ok(recursor_conf::AAAA_FILTER_LUA.to_string());
-            o.add_file("dns", "RECURSOR_AAAA_LUA_FILE", body);
+        match s.flag("DNS_FILTER_AAAA") {
+            Ok(true) => {
+                let body = Ok(recursor_conf::AAAA_FILTER_LUA.to_string());
+                o.add_file("dns", "RECURSOR_AAAA_LUA_FILE", body);
+            }
+            Ok(false) => {}
+            Err(e) => o.errs.push(e),
         }
     }
 
-    // What: files of the chosen DHCP mode.
-    // Why: each mode starts only its own programs.
+    // What: the files of dhcp for the active mode.
+    // Why: an unused mode gets no files.
+    // From: Issue #1683 | PR #1980
     fn dhcp_files(o: &mut Out, sec: &Secrets) {
         let s = o.s;
         // What: the mode file names the dhcp runlevel.
@@ -3797,14 +4402,25 @@ pub mod render {
         }
     }
 
-    // What: file text with the path in the error.
-    // Why: a missing template must name its path.
+    // What: reads a file; the error names the path.
+    // Why: an io error alone names no file.
+    // From: Issue #1683 | PR #1980
     fn read(path: &PathBuf) -> Result<String, String> {
         std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))
     }
 
-    // What: nginx config from templates and CDN list.
-    // Why: certs and maps follow the domain list.
+    // What: the hosts of a cache domain list.
+    // Why: nginx files and certificates need the same set.
+    // From: Issue #1683 | PR #2017
+    fn cache_hosts(s: &Settings, domains: &str) -> Result<nginx_conf::Hosts, String> {
+        let dir = PathBuf::from(s.text("NGINX_TEMPLATE_DIR")?);
+        let psl = nginx_conf::Psl::parse(&read(&dir.join(s.text("NGINX_PSL_FILE")?))?);
+        nginx_conf::hosts(domains, &psl)
+    }
+
+    // What: the nginx files of the proxy.
+    // Why: they follow the cache domain list.
+    // From: Issue #1683 | PR #1980
     fn nginx_files(o: &mut Out, domains: &str) -> Result<(), String> {
         let s = o.s;
         let src = PathBuf::from(s.text("NGINX_TEMPLATE_DIR")?);
@@ -3816,8 +4432,7 @@ pub mod render {
         for raw in s.list("NGINX_UPSTREAM_RESOLVER") {
             crate::recursor_conf::upstream_entry("NGINX_UPSTREAM_RESOLVER", &raw, &own)?;
         }
-        let psl = nginx_conf::Psl::parse(&read(&src.join(s.text("NGINX_PSL_FILE")?))?);
-        let hosts = nginx_conf::hosts(domains, &psl)?;
+        let hosts = cache_hosts(s, domains)?;
         let https = s.flag("HTTPS_ENABLED")?;
         for name in s.list("NGINX_TEMPLATES") {
             if !https && name.ends_with("https.conf") {
@@ -3846,13 +4461,6 @@ pub mod render {
             body: format!("{}\n", s.text("NGINX_HEALTHZ_BODY")?),
         });
         Ok(())
-    }
-
-    // What: octal mode from a SOT key.
-    // Why: the SOT owns every file mode.
-    // From: Issue #1683 | PR #1980
-    fn mode_of(s: &Settings, key: &str) -> Result<u32, String> {
-        u32::from_str_radix(&s.text(key)?, 8).map_err(|e| format!("{key}: {e}"))
     }
 
     // What: set group and mode of one path.
@@ -3886,6 +4494,20 @@ pub mod render {
         std::fs::write(stamp, print).map_err(|e| format!("{}: {e}", stamp.display()))
     }
 
+    // What: folder of the stack CA from SOT keys.
+    // Why: the ui issues the CA; cachehamster trusts it.
+    // From: Issue #871 | PR #2017
+    pub fn ca_dir(s: &Settings) -> Result<PathBuf, String> {
+        Ok(PathBuf::from(s.text("NGINX_DIR")?).join(s.text("NGINX_SUBDIR_CA")?))
+    }
+
+    // What: the stack CA certificate file.
+    // Why: one path for the issuer and every reader.
+    // From: Issue #871 | PR #2017
+    pub fn ca_cert(s: &Settings) -> Result<PathBuf, String> {
+        Ok(ca_dir(s)?.join(s.text("CA_CERT_FILE")?))
+    }
+
     // What: make the CA and every missing leaf cert.
     // Why: HTTPS mode needs one cert per map name.
     // From: Issue #1683 | PR #1980
@@ -3894,19 +4516,16 @@ pub mod render {
             return Ok(0);
         }
         let root = PathBuf::from(s.text("NGINX_DIR")?);
-        let ca = root.join(s.text("NGINX_SUBDIR_CA")?);
+        let ca = ca_dir(s)?;
         let dir = root.join(s.text("NGINX_SUBDIR_CERTS")?);
-        let (ca_key, ca_crt) = (
-            ca.join(s.text("CA_KEY_FILE")?),
-            ca.join(s.text("CA_CERT_FILE")?),
-        );
+        let (ca_key, ca_crt) = (ca.join(s.text("CA_KEY_FILE")?), ca_cert(s)?);
         let serial = ca.join(s.text("CA_SERIAL_FILE")?);
         let gid = s.text("LANCACHE_RUNTIME_GID")?;
         let gid = Some(gid.parse::<u32>().map_err(|e| format!("gid {gid}: {e}"))?);
         for d in [&ca, &dir] {
             std::fs::create_dir_all(d).map_err(|e| format!("{}: {e}", d.display()))?;
         }
-        grant(&dir, gid, mode_of(s, "CERT_DIR_MODE")?)?;
+        grant(&dir, gid, s.mode("CERT_DIR_MODE")?)?;
         if !(ca_crt.exists() && ca_key.exists()) {
             crate::cert::make_ca(
                 &ca_key,
@@ -3920,11 +4539,9 @@ pub mod render {
                 ca_crt.display()
             );
         }
-        grant(&ca_key, None, mode_of(s, "CA_KEY_MODE")?)?;
+        grant(&ca_key, None, s.mode("CA_KEY_MODE")?)?;
         drop_stale_leaves(&ca_crt, &dir, &dir.join(s.text("CA_STAMP_FILE")?))?;
-        let tpl = PathBuf::from(s.text("NGINX_TEMPLATE_DIR")?);
-        let psl = nginx_conf::Psl::parse(&read(&tpl.join(s.text("NGINX_PSL_FILE")?))?);
-        let hosts = nginx_conf::hosts(&crate::cdn::effective(s)?, &psl)?;
+        let hosts = cache_hosts(s, &crate::cdn::effective(s)?)?;
         let mut want = hosts.certs();
         // What: default cert: DNS name and IP_HTTPS.
         // Why: clients without SNI or by IP get this cert.
@@ -3932,7 +4549,7 @@ pub mod render {
         let mut names = vec![s.text("DEFAULT_CERT_DNS")?];
         names.extend(s.text("IP_HTTPS").ok());
         want.push((s.text("NGINX_DEFAULT_CERT")?, names));
-        let (key_mode, crt_mode) = (mode_of(s, "CERT_KEY_MODE")?, mode_of(s, "CERT_FILE_MODE")?);
+        let (key_mode, crt_mode) = (s.mode("CERT_KEY_MODE")?, s.mode("CERT_FILE_MODE")?);
         let mut made = 0;
         for (name, sans) in want {
             let (key, crt) = (
@@ -3959,15 +4576,18 @@ pub mod render {
         Ok(made)
     }
 
+    // What: the names of a cache domain list.
+    // Why: all and dns_only feed the dns files with them.
+    // From: Issue #1683 | PR #2017
+    fn cdn_names(domains: &str) -> Vec<(String, bool)> {
+        domains.lines().filter_map(crate::dns::cdn_entry).collect()
+    }
+
     // What: render all files; report every error.
     // Why: one call for the ui; nothing half written.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn all(s: &Settings, sec: &Secrets) -> Result<Vec<File>, Vec<String>> {
-        let mut o = Out {
-            s,
-            files: Vec::new(),
-            errs: Vec::new(),
-        };
+        let mut o = Out::new(s);
         let domains = match crate::cdn::effective(s) {
             Ok(d) => d,
             Err(e) => {
@@ -3975,74 +4595,53 @@ pub mod render {
                 String::new()
             }
         };
-        let names: Vec<(String, bool)> =
-            domains.lines().filter_map(crate::dns::cdn_entry).collect();
-        dns_files(&mut o, sec, &names);
+        dns_files(&mut o, sec, &cdn_names(&domains));
         dhcp_files(&mut o, sec);
         if let Err(e) = nginx_files(&mut o, &domains) {
             o.errs.push(e);
         }
-        // What: each error once, even if two files hit it.
-        // Why: DoMe 07.11.: no double texts.
-        // From: Issue #1683 | PR #1991
-        let mut seen = std::collections::HashSet::new();
-        o.errs.retain(|e| seen.insert(e.clone()));
-        if o.errs.is_empty() {
-            Ok(o.files)
-        } else {
-            Err(o.errs)
-        }
+        o.finish()
     }
 
     // What: only the dns files, for a secondary.
     // Why: a secondary runs only the dns container.
     // From: Issue #1683 | PR #1980
     pub fn dns_only(s: &Settings, sec: &Secrets) -> Result<Vec<File>, Vec<String>> {
-        let mut o = Out {
-            s,
-            files: Vec::new(),
-            errs: Vec::new(),
-        };
+        let mut o = Out::new(s);
         let domains = crate::cdn::effective(s).map_err(|e| vec![e])?;
-        let names: Vec<(String, bool)> =
-            domains.lines().filter_map(crate::dns::cdn_entry).collect();
-        dns_files(&mut o, sec, &names);
-        o.files.retain(|f| f.owner == "dns");
-        // What: each error once, even if two files hit it.
-        // Why: DoMe 07.11.: no double texts.
-        // From: Issue #1683 | PR #1991
-        let mut seen = std::collections::HashSet::new();
-        o.errs.retain(|e| seen.insert(e.clone()));
-        if o.errs.is_empty() {
-            Ok(o.files)
-        } else {
-            Err(o.errs)
-        }
+        dns_files(&mut o, sec, &cdn_names(&domains));
+        // What: dns files and the snmpd.conf.
+        // Why: snmpd waits for its file and blocks a stop.
+        // From: Issue #1683
+        let snmpd = s.text("SNMPD_CONF_FILE").map(PathBuf::from).ok();
+        o.files
+            .retain(|f| f.owner == "dns" || Some(&f.path) == snmpd.as_ref());
+        o.finish()
     }
 }
 
 // What: one SNTP query (RFC 4330).
 // Why: the ui shows whether chrony answers.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 pub mod ntp {
-    use std::net::UdpSocket;
     use std::time::Duration;
 
     // What: client request: version 4, mode 3.
     // Why: RFC 4330 first byte; rest stays zero.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     const REQUEST_HEAD: u8 = 0x23;
     const PACKET: usize = 48;
     const MODE_SERVER: u8 = 4;
 
-    // What: send one SNTP request, read the reply.
-    // Why: a short reply is no valid NTP packet.
+    // What: sends one NTP request, returns the reply.
+    // Why: the probe reads the raw reply packet.
+    // From: Issue #1683 | PR #1980
     fn ask(host: &str, port: u64, wait: Duration) -> std::io::Result<[u8; PACKET]> {
-        let sock = UdpSocket::bind("0.0.0.0:0")?;
+        let sock = crate::dns::udp_for(host.contains(':'))?;
         sock.set_read_timeout(Some(wait))?;
         let mut req = [0u8; PACKET];
         req[0] = REQUEST_HEAD;
-        sock.send_to(&req, format!("{host}:{port}"))?;
+        sock.send_to(&req, crate::dns::host_port(host, port))?;
         let mut reply = [0u8; PACKET];
         let n = sock.recv(&mut reply)?;
         if n < PACKET {
@@ -4053,7 +4652,7 @@ pub mod ntp {
 
     // What: true on a usable server reply.
     // Why: mode 4 and stratum 1..15 mean synced.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn answers(host: &str, port: u64, wait: Duration) -> bool {
         ask(host, port, wait)
             .map(|r| r[0] & 0x07 == MODE_SERVER && (1..=15).contains(&r[1]))
@@ -4063,14 +4662,14 @@ pub mod ntp {
 
 // What: proxy access log: recent requests, totals.
 // Why: dashboard and logs page share one parser.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 pub mod access {
     use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
     use std::path::{Path, PathBuf};
 
     // What: one request in nginx log_format cache.
     // Why: the ui lists host, path, status, size.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     #[derive(Clone, Debug, Default, serde::Serialize)]
     pub struct Entry {
         pub ip: String,
@@ -4085,7 +4684,7 @@ pub mod access {
 
     // What: read one line; None when no cache row.
     // Why: a syslog prefix before the IP is allowed.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn parse(line: &str) -> Option<Entry> {
         let (before, after) = line.split_once(" - [")?;
         let (time, after) = after.split_once("] \"")?;
@@ -4110,7 +4709,7 @@ pub mod access {
 
     // What: proxy log files, oldest first.
     // Why: syslog-ng writes one file per day.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn files(dir: &Path) -> Vec<PathBuf> {
         let Ok(rd) = std::fs::read_dir(dir) else {
             return Vec::new();
@@ -4123,8 +4722,9 @@ pub mod access {
         out
     }
 
-    // What: read file end in chunks until N lines.
-    // Why: logs are large; only the end is shown.
+    // What: reads a file from its end, in chunks.
+    // Why: a log tail must not load the whole file.
+    // From: Issue #1683 | PR #1980
     fn read_back(path: &Path, want: usize, chunk: u64) -> std::io::Result<(Vec<u8>, bool)> {
         let mut f = std::fs::File::open(path)?;
         let mut pos = f.seek(SeekFrom::End(0))?;
@@ -4144,7 +4744,7 @@ pub mod access {
 
     // What: last `limit` lines of the newest file.
     // Why: reads from the end; big logs stay cheap.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn tail_lines(dir: &Path, limit: usize, chunk: u64) -> Vec<String> {
         let Some(path) = files(dir).pop() else {
             return Vec::new();
@@ -4164,7 +4764,7 @@ pub mod access {
 
     // What: last `limit` cache requests.
     // Why: dashboard list; other lines are skipped.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn tail(dir: &Path, limit: usize, chunk: u64) -> Vec<Entry> {
         let lines = tail_lines(dir, limit.saturating_mul(4), chunk);
         let found: Vec<Entry> = lines.iter().filter_map(|l| parse(l)).collect();
@@ -4174,7 +4774,7 @@ pub mod access {
 
     // What: totals over all proxy log files.
     // Why: hit rate and traffic on the dashboard.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     #[derive(Clone, Debug, Default, serde::Serialize)]
     pub struct Stats {
         pub hits: u64,
@@ -4186,8 +4786,9 @@ pub mod access {
     }
 
     impl Stats {
-        // What: add one log entry to the totals.
-        // Why: HIT, MISS/EXPIRED and other are counted.
+        // What: adds one log entry to the totals.
+        // Why: EXPIRED is fetched anew, so a miss.
+        // From: Issue #1683 | PR #1980
         fn count(&mut self, e: &Entry) {
             self.total_requests += 1;
             self.total_bytes += e.bytes;
@@ -4201,7 +4802,7 @@ pub mod access {
 
     // What: count requests, hits and bytes.
     // Why: HIT is a hit; MISS and EXPIRED a miss.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn stats(dir: &Path) -> Stats {
         let mut st = Stats::default();
         for path in files(dir) {
@@ -4224,13 +4825,13 @@ pub mod access {
 
 // What: byte count as text in binary units.
 // Why: all ui pages show sizes the same way.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 pub mod human {
     const UNITS: [&str; 6] = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
 
     // What: 1536 becomes "1.5 KiB".
     // Why: whole numbers only; one decimal is enough.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn bytes(n: u64) -> String {
         let (mut whole, mut tenth, mut unit) = (n, 0, 0);
         while whole >= 1024 && unit < UNITS.len() - 1 {
@@ -4247,13 +4848,13 @@ pub mod human {
 
 // What: effective cache domain list.
 // Why: shipped rows minus disabled plus custom.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 pub mod cdn {
     use crate::config::Settings;
 
     // What: one row of the domain table.
     // Why: the ui shows shipped and own rows apart.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     #[derive(Clone, Debug, serde::Serialize)]
     pub struct Row {
         pub display: String,
@@ -4262,8 +4863,9 @@ pub mod cdn {
         pub is_valid: bool,
     }
 
-    // What: one CDN list row with its validity.
-    // Why: the ui marks rows that are no valid entry.
+    // What: a row; is_valid says if the name parses.
+    // Why: a bad name stays visible, marked.
+    // From: Issue #1683 | PR #1980
     fn new_row(name: String, is_default: bool, enabled: bool) -> Row {
         Row {
             is_valid: crate::dns::cdn_entry(&name).is_some(),
@@ -4275,22 +4877,18 @@ pub mod cdn {
 
     // What: shipped rows from the image file.
     // Why: blanks and # comments are not domains.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn defaults(s: &Settings) -> Result<Vec<String>, String> {
         let path = s.text("CDN_DEFAULT_DOMAINS_FILE")?;
         let text = std::fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))?;
-        let keep = |l: &&str| !l.is_empty() && !l.starts_with('#');
-        Ok(text
-            .lines()
-            .map(str::trim)
-            .filter(keep)
+        Ok(crate::config::data_rows(&text)
             .map(str::to_ascii_lowercase)
             .collect())
     }
 
     // What: all rows for the ui.
     // Why: shipped rows carry their on/off state.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn parse_rows(s: &Settings) -> Result<Vec<Row>, String> {
         let off = s.list("CDN_DISABLED_DOMAINS");
         let mut out = Vec::new();
@@ -4306,7 +4904,7 @@ pub mod cdn {
 
     // What: enabled rows, one per line.
     // Why: input of the RPZ and nginx host maps.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn effective(s: &Settings) -> Result<String, String> {
         let mut out = String::new();
         for r in parse_rows(s)?.into_iter().filter(|r| r.enabled) {
@@ -4319,19 +4917,19 @@ pub mod cdn {
 
 // What: Kea Control Agent client (REST, JSON).
 // Why: leases and subnets go through Kea itself.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 pub mod kea {
     use serde_json::{Value, json};
 
     // What: Kea result codes.
     // Why: Kea docs: 0 success, 3 empty answer.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     const RESULT_OK: i64 = 0;
     const RESULT_EMPTY: i64 = 3;
 
     // What: one control agent address.
     // Why: commands reach dhcp4 behind it.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub struct Api {
         client: reqwest::Client,
         url: String,
@@ -4354,7 +4952,7 @@ pub mod kea {
 
         // What: send one command; return arguments.
         // Why: 0 is ok, 3 is empty, rest is an error.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         pub async fn command(&self, command: &str, args: Option<Value>) -> Result<Value, String> {
             let fail = |e: String| format!("kea {command}: {e}");
             let mut body = json!({"command": command, "service": ["dhcp4"]});
@@ -4383,14 +4981,14 @@ pub mod kea {
 
         // What: running kea-dhcp4 config.
         // Why: subnets and reservations live there.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         pub async fn config(&self) -> Result<Value, String> {
             self.command("config-get", None).await
         }
 
         // What: apply and save a new config.
         // Why: config-set applies; config-write saves.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         pub async fn set_config(&self, config: Value) -> Result<(), String> {
             self.command("config-set", Some(config)).await?;
             self.command("config-write", Some(json!({}))).await?;
@@ -4399,7 +4997,7 @@ pub mod kea {
 
         // What: all IPv4 leases.
         // Why: lease_cmds hook; the ui lists them.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         pub async fn leases(&self) -> Result<Vec<Value>, String> {
             let args = self.command("lease4-get-all", None).await?;
             Ok(args["leases"].as_array().cloned().unwrap_or_default())
@@ -4407,7 +5005,7 @@ pub mod kea {
 
         // What: delete one lease by address.
         // Why: frees the address for the next client.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         pub async fn release(&self, ip: &str) -> Result<(), String> {
             let args = json!({"ip-address": ip});
             self.command("lease4-del", Some(args)).await?;
@@ -4416,9 +5014,29 @@ pub mod kea {
     }
 }
 
+// What: start of helper programs.
+// Why: every caller reads the exit status the same way.
+// From: Issue #1683 | PR #2017
+pub mod tool {
+    use std::process::Command;
+
+    // What: runs a tool; errors name the tool only.
+    // Why: arguments may hold a secret, as snmpget's do.
+    // From: Issue #1683 | PR #2017
+    pub fn run(cmd: &mut Command) -> Result<Vec<u8>, String> {
+        let tool = cmd.get_program().to_string_lossy().into_owned();
+        let out = cmd.output().map_err(|e| format!("{tool}: {e}"))?;
+        if !out.status.success() {
+            let why = String::from_utf8_lossy(&out.stderr);
+            return Err(format!("{tool}: {}", why.trim()));
+        }
+        Ok(out.stdout)
+    }
+}
+
 // What: statistics: SNMP samples into RRD files.
 // Why: replaces Netdata with native rrdtool.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 pub mod rrd {
     use crate::config::Settings;
     use std::path::{Path, PathBuf};
@@ -4426,12 +5044,12 @@ pub mod rrd {
 
     // What: RRD data source types we accept.
     // Why: rrdtool create: GAUGE, COUNTER, DERIVE.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     const KINDS: [&str; 3] = ["GAUGE", "COUNTER", "DERIVE"];
 
     // What: one data source of a graph.
     // Why: name, SNMP OID and RRD type.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     #[derive(Clone, Debug)]
     pub struct Source {
         pub ds: String,
@@ -4442,7 +5060,7 @@ pub mod rrd {
 
     // What: one graph, stored in one RRD file.
     // Why: SOT row name:ds=oid=TYPE+ds=oid=TYPE.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     #[derive(Clone, Debug)]
     pub struct Graph {
         pub name: String,
@@ -4456,6 +5074,11 @@ pub mod rrd {
     // From: Issue #1683 | PR #1980
     pub const MACHINE: &str = "machine";
 
+    // What: the sample value rrdtool reads as unknown.
+    // Why: a missing sample leaves a gap, not a zero.
+    // From: Issue #1683 | PR #2017
+    pub const UNKNOWN: &str = "U";
+
     // What: Docker stats fields a container graph reads.
     // Why: names of the per-container values.
     // From: Issue #1683 | PR #1980
@@ -4468,14 +5091,16 @@ pub mod rrd {
         "blk_write",
     ];
 
-    // What: true for a-z, 0-9 and _ only.
-    // Why: names become RRD file and DS names.
+    // What: plain characters or an underscore.
+    // Why: the names become file names and arguments.
+    // From: Issue #1683 | PR #1980
     fn is_plain(word: &str) -> bool {
-        !word.is_empty() && word.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        crate::config::is_plain(word, "_")
     }
 
-    // What: parse ds=oid=kind[=scale].
-    // Why: a bad SOT row stops instead of a blank graph.
+    // What: parses ds=oid=kind[=scale] of a graph.
+    // Why: a bad part is an error, never a default.
+    // From: Issue #1683 | PR #1980
     fn source(text: &str) -> Result<Source, String> {
         let parts: Vec<&str> = text.split('=').collect();
         let (ds, oid, kind, scale) = match parts[..] {
@@ -4497,8 +5122,9 @@ pub mod rrd {
         })
     }
 
-    // What: parse name:source+source of one tab.
-    // Why: SOT rows define graphs; no list in code.
+    // What: parses name:source+source of a row.
+    // Why: the name becomes a file name.
+    // From: Issue #1683 | PR #1980
     fn graph(row: &str, tab: &str) -> Result<Graph, String> {
         let (name, list) = row
             .split_once(':')
@@ -4521,7 +5147,7 @@ pub mod rrd {
 
     // What: graphs from STATS_GRAPHS.
     // Why: a bad row is an error, never skipped.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn graphs(s: &Settings) -> Result<Vec<Graph>, String> {
         s.list("STATS_GRAPHS")
             .iter()
@@ -4557,7 +5183,7 @@ pub mod rrd {
     }
 
     // What: program values, row tab.name:sources.
-    // Why: 01.11.: PowerDNS, nginx, Kea, chrony values.
+    // Why: PowerDNS, nginx, Kea and chrony give values.
     // From: Issue #1683 | PR #1980
     pub fn service_graphs(s: &Settings) -> Result<Vec<Graph>, String> {
         let tabs = s.list("STATS_CONTAINERS");
@@ -4611,31 +5237,20 @@ pub mod rrd {
             "blk_write" => blk("write"),
             _ => None,
         };
-        got.map_or_else(|| "U".into(), |n| n.to_string())
+        got.map_or_else(|| UNKNOWN.into(), |n| n.to_string())
     }
 
     // What: RRD file of one graph.
     // Why: one file per graph under STATS_DIR.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn file(s: &Settings, g: &Graph) -> Result<PathBuf, String> {
         let dir = s.text("STATS_DIR")?;
         Ok(Path::new(&dir).join(format!("{}.rrd", g.name)))
     }
 
-    // What: run a tool; stderr on failure.
-    // Why: a failed rrdtool must show its reason.
-    fn run(cmd: &mut Command) -> Result<Vec<u8>, String> {
-        let out = cmd.output().map_err(|e| format!("{cmd:?}: {e}"))?;
-        if !out.status.success() {
-            let why = String::from_utf8_lossy(&out.stderr);
-            return Err(format!("{cmd:?}: {}", why.trim()));
-        }
-        Ok(out.stdout)
-    }
-
     // What: create the RRD when it is missing.
     // Why: step, heartbeat and archives from SOT.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn ensure(s: &Settings, g: &Graph) -> Result<(), String> {
         let path = file(s, g)?;
         if path.exists() {
@@ -4664,29 +5279,30 @@ pub mod rrd {
         for rra in s.list("STATS_RRAS") {
             cmd.arg(format!("RRA:{rra}"));
         }
-        run(&mut cmd)?;
+        crate::tool::run(&mut cmd)?;
         Ok(())
     }
 
-    // What: the value or U for rrdtool update.
-    // Why: rrdtool stores U as unknown, not zero.
+    // What: the first word if a number, else unknown.
+    // Why: a failed read must not store a text.
+    // From: Issue #1683 | PR #1980
     fn number_or_unknown(line: &str) -> String {
         match line.split_whitespace().next() {
             Some(v) if v.parse::<f64>().is_ok() => v.into(),
-            _ => "U".into(),
+            _ => UNKNOWN.into(),
         }
     }
 
     // What: read all sources once, then store.
     // Why: snmpget -Oqv prints one value per line.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn sample(s: &Settings, g: &Graph) -> Result<(), String> {
         let mut get = Command::new("snmpget");
         get.args(["-v2c", "-Oqv", "-c"]);
         get.arg(s.text("SNMP_COMMUNITY")?)
             .arg(s.text("STATS_SNMP_TARGET")?);
         get.args(g.sources.iter().map(|x| &x.oid));
-        let text = String::from_utf8_lossy(&run(&mut get)?).into_owned();
+        let text = String::from_utf8_lossy(&crate::tool::run(&mut get)?).into_owned();
         let values: Vec<String> = text.lines().map(number_or_unknown).collect();
         store(s, g, &values)
     }
@@ -4704,13 +5320,13 @@ pub mod rrd {
         put.arg("update")
             .arg(file(s, g)?)
             .arg(format!("N:{}", values.join(":")));
-        run(&mut put)?;
+        crate::tool::run(&mut put)?;
         Ok(())
     }
 
     // What: PNG of one graph over a time range.
     // Why: rrdtool draws; the page shows the image.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn png(s: &Settings, g: &Graph, range: &str, dark: bool) -> Result<Vec<u8>, String> {
         if !s.list("STATS_RANGES").iter().any(|r| r == range) {
             return Err(format!("range {range} is not offered"));
@@ -4772,24 +5388,32 @@ pub mod rrd {
             cmd.arg(format!("GPRINT:{}:AVERAGE:avg %8.2lf{unit}", src.ds));
             cmd.arg(format!("GPRINT:{}:MAX:max %8.2lf{unit}\\l", src.ds));
         }
-        run(&mut cmd)
+        crate::tool::run(&mut cmd)
     }
 }
 
 // What: file tidying: safe paths, age, size, xz.
 // Why: the watchdog decides when; this does how.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 pub mod tidy {
     use std::path::{Component, Path, PathBuf};
     use std::process::Command;
 
     // What: seconds of one day.
     // Why: ages and daily stamps count in days.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub const DAY: u64 = 86_400;
 
-    // What: path with links and .. resolved.
-    // Why: a link must not lead tidy outside its root.
+    // What: the first second of the day a time lies in.
+    // Why: files of today are still written and stay.
+    // From: Issue #1683 | PR #2017
+    fn day_start(now: u64) -> u64 {
+        now - now % DAY
+    }
+
+    // What: the path with links and ".." resolved.
+    // Why: a part that does not exist yet stays.
+    // From: Issue #1683 | PR #1980
     fn resolved(path: &Path) -> std::io::Result<PathBuf> {
         let mut out = PathBuf::from("/");
         for part in path.components() {
@@ -4813,7 +5437,7 @@ pub mod tidy {
 
     // What: real folder strictly inside prefix.
     // Why: a bad setting must never clean elsewhere.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn inside(raw: &str, prefix: &str) -> Result<PathBuf, String> {
         if !raw.starts_with('/') {
             return Err(format!("{raw} is not an absolute path"));
@@ -4832,15 +5456,16 @@ pub mod tidy {
 
     // What: one regular file with its facts.
     // Why: links are never followed or removed.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub struct Item {
         pub path: PathBuf,
         pub size: u64,
         pub mtime: u64,
     }
 
-    // What: change time in unix seconds; 0 if unknown.
-    // Why: age checks compare plain numbers.
+    // What: change time in unix seconds, else 0.
+    // Why: ages are compared as plain seconds.
+    // From: Issue #1683 | PR #1980
     fn mtime(meta: &std::fs::Metadata) -> u64 {
         meta.modified()
             .ok()
@@ -4850,7 +5475,7 @@ pub mod tidy {
 
     // What: all regular files below a folder.
     // Why: base for age, size and pack runs.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn files(dir: &Path) -> Vec<Item> {
         let mut out = Vec::new();
         let mut todo = vec![dir.to_path_buf()];
@@ -4878,7 +5503,7 @@ pub mod tidy {
 
     // What: remove files older than days.
     // Why: returns count removed and the errors.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn drop_older(dir: &Path, days: u64, now: u64) -> (usize, Vec<String>) {
         let (mut gone, mut errs) = (0, Vec::new());
         for f in files(dir) {
@@ -4895,12 +5520,12 @@ pub mod tidy {
 
     // What: remove oldest until under budget.
     // Why: files written today stay; returns size.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn fit_budget(dir: &Path, budget: u64, now: u64) -> (u64, Vec<String>) {
         let mut all = files(dir);
         let mut size: u64 = all.iter().map(|f| f.size).sum();
         all.sort_by_key(|f| f.mtime);
-        let today = now - now % DAY;
+        let today = day_start(now);
         let mut errs = Vec::new();
         for f in &all {
             if size <= budget {
@@ -4919,35 +5544,28 @@ pub mod tidy {
 
     // What: xz every file closed before today.
     // Why: past days are never written again.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn pack_closed(dir: &Path, preset: u64, now: u64) -> Vec<String> {
-        let today = now - now % DAY;
+        let today = day_start(now);
         let mut errs = Vec::new();
         for f in files(dir) {
             if f.mtime >= today || f.path.extension().is_some_and(|e| e == "xz") {
                 continue;
             }
             // What: late lines join the existing .xz file.
-            // Why: live 07.11.: "File exists" every round.
+            // Why: xz will not overwrite a file.
             // From: Issue #1683 | PR #1985
-            let mut packed = f.path.clone().into_os_string();
-            packed.push(".xz");
-            let packed = std::path::PathBuf::from(packed);
+            let packed = super::fs::with_suffix(&f.path, ".xz");
             if packed.exists() {
                 if let Err(e) = append_xz(&f.path, &packed, preset) {
                     errs.push(e);
                 }
                 continue;
             }
-            let run = Command::new("xz")
-                .arg(format!("-{preset}"))
-                .arg("--")
-                .arg(&f.path)
-                .output();
-            match run {
-                Ok(o) if o.status.success() => {}
-                Ok(o) => errs.push(String::from_utf8_lossy(&o.stderr).trim().to_string()),
-                Err(e) => errs.push(format!("xz: {e}")),
+            let mut xz = Command::new("xz");
+            xz.arg(format!("-{preset}")).arg("--").arg(&f.path);
+            if let Err(e) = crate::tool::run(&mut xz) {
+                errs.push(e);
             }
         }
         errs
@@ -4961,23 +5579,15 @@ pub mod tidy {
             .append(true)
             .open(packed)
             .map_err(|e| format!("{}: {e}", packed.display()))?;
-        let o = Command::new("xz")
-            .arg(format!("-{preset}"))
-            .arg("-c")
-            .arg("--")
-            .arg(src)
-            .stdout(out)
-            .output()
-            .map_err(|e| format!("xz: {e}"))?;
-        if !o.status.success() {
-            return Err(String::from_utf8_lossy(&o.stderr).trim().to_string());
-        }
+        let mut xz = Command::new("xz");
+        xz.arg(format!("-{preset}")).arg("-c").arg("--").arg(src);
+        crate::tool::run(xz.stdout(out))?;
         std::fs::remove_file(src).map_err(|e| format!("{}: {e}", src.display()))
     }
 
     // What: is a daily job due by its stamp.
     // Why: a missing or future stamp means due.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn is_due(stamp: &Path, now: u64) -> bool {
         let last = std::fs::read_to_string(stamp)
             .ok()
@@ -4989,7 +5599,7 @@ pub mod tidy {
 
     // What: write a stamp time.
     // Why: next run waits a day from it.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn save_stamp(stamp: &Path, at: u64) -> Result<(), String> {
         let made = stamp.parent().map_or(Ok(()), std::fs::create_dir_all);
         let wrote = made.and_then(|()| std::fs::write(stamp, at.to_string() + "\n"));
@@ -4998,23 +5608,22 @@ pub mod tidy {
 
     // What: newest change time below a folder.
     // Why: shows whether logs are still written.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn newest(dir: &Path) -> u64 {
         files(dir).iter().map(|f| f.mtime).max().unwrap_or(0)
     }
 
     // What: processed count of syslog-ng file outputs.
     // Why: syslog-ng-ctl stats lists the store rows.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn syslog_processed() -> Result<u64, String> {
-        let out = Command::new("syslog-ng-ctl").arg("stats").output();
-        let out = out.map_err(|e| format!("syslog-ng-ctl: {e}"))?;
-        let text = String::from_utf8_lossy(&out.stdout);
+        let out = crate::tool::run(Command::new("syslog-ng-ctl").arg("stats"))?;
+        let text = String::from_utf8_lossy(&out);
         let mut total = 0;
         for row in text.lines() {
             let cols: Vec<&str> = row.split(';').collect();
             // What: old dst.file rows or the d_store row.
-            // Why: live: syslog-ng 4 shows only d_store.
+            // Why: syslog-ng 4 shows only the d_store row.
             // From: Issue #1683
             let store = match cols.first() {
                 Some(&"dst.file") => true,
@@ -5026,5 +5635,140 @@ pub mod tidy {
             }
         }
         Ok(total)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dns::{address_kind, soa_query, soa_reply};
+    use super::dnsdist_conf::{Listener, body, source};
+    use super::kea_conf::follow_ntp;
+    use serde_json::json;
+
+    // What: A for IPv4, AAAA for IPv6.
+    // Why: a secondary may register either address.
+    // From: Issue #1683
+    #[test]
+    fn address_kind_follows_the_family() {
+        assert_eq!(address_kind("192.0.2.20"), "A");
+        assert_eq!(address_kind("2001:db8::20"), "AAAA");
+    }
+
+    // What: on sets own NTP; off gives only it back.
+    // Why: a user value must survive the off state.
+    // From: Issue #1683
+    #[test]
+    fn kept_subnets_follow_own_ntp() {
+        let own = "192.0.2.10";
+        let subnets = json!([
+            {"id": 2, "option-data": [{"name": "ntp-servers", "data": "192.0.2.99"}]},
+            {"id": 3},
+            {"id": 4, "option-data": [{"name": "routers", "data": "192.0.2.1"}]}
+        ]);
+        let on = follow_ntp(subnets, true, own, own);
+        for i in 0..3 {
+            let rows = on[i]["option-data"].as_array().cloned().unwrap_or_default();
+            let ntp: Vec<_> = rows.iter().filter(|r| r["name"] == "ntp-servers").collect();
+            assert_eq!(ntp.len(), 1);
+            assert_eq!(ntp[0]["data"], own);
+        }
+        assert_eq!(on[2]["option-data"][0]["name"], "routers");
+        let off = follow_ntp(on.clone(), false, own, "192.0.2.123");
+        assert_eq!(off[0]["option-data"][0]["data"], "192.0.2.123");
+        let none = follow_ntp(on, false, own, "");
+        assert_eq!(none[1]["option-data"], json!([]));
+        let kept = json!([{"option-data": [{"name": "ntp-servers", "data": "192.0.2.99"}]}]);
+        assert_eq!(follow_ntp(kept.clone(), false, own, ""), kept);
+    }
+
+    // What: an aa reply with one SOA, name compressed.
+    // Why: pdns answers this way to a non-RD query.
+    // From: Issue #1683
+    fn reply(id: u16, aa: bool, serial: u32) -> Vec<u8> {
+        let mut m = soa_query(id, "lan").unwrap_or_default();
+        m[2] = if aa { 0x84 } else { 0x80 };
+        m[7] = 1;
+        let mut rdata = vec![2, b'n', b's', 0xc0, 12, 4, b'h', b'o', b's', b't', 0xc0, 12];
+        rdata.extend_from_slice(&serial.to_be_bytes());
+        rdata.extend_from_slice(&[0; 16]);
+        m.extend_from_slice(&[0xc0, 12, 0, 6, 0, 1, 0, 0, 0, 60]);
+        m.extend_from_slice(&(rdata.len() as u16).to_be_bytes());
+        m.extend_from_slice(&rdata);
+        m
+    }
+
+    // What: the SOA query: header, name, no RD bit.
+    // Why: the asked server must answer by itself.
+    // From: Issue #1683 | PR #2017
+    #[test]
+    fn soa_query_has_no_rd_bit() {
+        let q = soa_query(7, "lan.").unwrap_or_default();
+        assert_eq!(&q[..4], &[0, 7, 0, 0]);
+        assert_eq!(&q[12..], &[3, b'l', b'a', b'n', 0, 0, 6, 0, 1]);
+        assert!(soa_query(7, "a..b").is_err());
+    }
+
+    // What: aa flag and serial are read from a reply.
+    // Why: the peer check compares these two.
+    // From: Issue #1683 | PR #2017
+    #[test]
+    fn soa_reply_reads_aa_and_serial() {
+        let got = soa_reply(9, &reply(9, true, 2026111101));
+        assert_eq!(got.as_ref().map(|s| s.authoritative), Ok(true));
+        assert_eq!(got.as_ref().map(|s| s.serial), Ok(Some(2026111101)));
+        let rec = soa_reply(9, &reply(9, false, 1));
+        assert_eq!(rec.map(|s| s.authoritative), Ok(false));
+    }
+
+    // What: a foreign id or a cut packet is an error.
+    // Why: a wrong reply must not count as serial.
+    // From: Issue #1683 | PR #2017
+    #[test]
+    fn soa_reply_refuses_wrong_id_and_cut_data() {
+        assert!(soa_reply(8, &reply(9, true, 1)).is_err());
+        let full = reply(9, true, 1);
+        assert!(soa_reply(9, &full[..full.len() - 3]).is_err());
+    }
+
+    // What: source: loopback, not the bind address.
+    // Why: only this address sends proxy protocol.
+    // From: Issue #1683 | PR #2017
+    #[test]
+    fn source_must_be_loopback_but_not_bind_ip() {
+        assert!(source("127.126.125.124", "127.0.0.1").is_ok());
+        assert!(source("127.0.0.1", "127.0.0.1").is_err());
+        assert!(source("10.0.0.1", "127.0.0.1").is_err());
+        assert!(source("::1", "127.0.0.1").is_err());
+    }
+
+    // What: the config: listeners, ACL, pools, XFR.
+    // Why: transfers must reach the auth server only.
+    // From: Issue #1683 | PR #2017
+    #[test]
+    fn dnsdist_routes_xfr_to_auth_only_on_http_port() {
+        let l = |port, pool, backend: &str| Listener {
+            port,
+            pool,
+            backend: backend.to_string(),
+        };
+        let conf = body(
+            &["0.0.0.0".to_string()],
+            &["10.0.0.0/8".to_string(), "192.0.2.10".to_string()],
+            "127.126.125.124",
+            "127.0.0.1:5300",
+            &[
+                l(53, "http", "127.0.0.1:5301"),
+                l(1053, "https", "127.0.0.1:5302"),
+            ],
+        )
+        .unwrap_or_default();
+        assert!(conf.contains("setLocal(\"0.0.0.0:53\")\naddLocal(\"0.0.0.0:1053\")\n"));
+        assert!(conf.contains("addACL(\"192.0.2.10\")"));
+        assert!(conf.contains("AndRule({DSTPortRule(53), OrRule({OpcodeRule(DNSOpcode.Notify)"));
+        assert!(conf.contains("addAction(DSTPortRule(1053), PoolAction(\"https\"))"));
+        assert_eq!(conf.matches("useProxyProtocol=true").count(), 3);
+        assert!(body(&[], &[], "127.126.125.124", "x", &[]).is_err());
+        let bad = body(&["a\"b".to_string()], &[], "s", "a", &[l(53, "http", "b")]);
+        assert!(bad.is_err());
     }
 }

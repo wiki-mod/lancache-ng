@@ -4,7 +4,7 @@
 
 // What: watchdog: decides when to check and tidy.
 // Why: the how lives in shared.rs; no config here.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 
 use lancache_ng::config::{Settings, process_env};
 use lancache_ng::{cert, clock, dns, docker, fs, http, pdns, tidy};
@@ -16,12 +16,12 @@ use std::time::Duration;
 
 // What: env name of the saved settings file.
 // Why: needed before any setting can be read.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 const SETTINGS_FILE_ENV: &str = "LANCACHE_SETTINGS_FILE";
 
 // What: weight of one finding.
 // Why: the ui sorts and colours by it.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 enum Level {
     Warn,
@@ -40,7 +40,7 @@ struct Alarm {
 
 // What: findings and facts of one round.
 // Why: a check adds rows and never stops others.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 #[derive(Default)]
 struct Findings {
     alarms: Vec<Alarm>,
@@ -49,6 +49,9 @@ struct Findings {
 }
 
 impl Findings {
+    // What: records one alarm with level and source.
+    // Why: a check reports here and keeps running.
+    // From: Issue #1683 | PR #1980
     fn add(&mut self, level: Level, source: &str, text: impl Into<String>) {
         let (source, text) = (source.to_string(), text.into());
         self.alarms.push(Alarm {
@@ -57,9 +60,15 @@ impl Findings {
             text,
         });
     }
+    // What: records a warning.
+    // Why: most callers need only source and text.
+    // From: Issue #1683 | PR #1980
     fn warn(&mut self, source: &str, text: impl Into<String>) {
         self.add(Level::Warn, source, text);
     }
+    // What: records a critical alarm.
+    // Why: most callers need only source and text.
+    // From: Issue #1683 | PR #1980
     fn crit(&mut self, source: &str, text: impl Into<String>) {
         self.add(Level::Crit, source, text);
     }
@@ -67,7 +76,7 @@ impl Findings {
 
 // What: body of the alarm file.
 // Why: the ui shows it; the stamp proves life.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 #[derive(Serialize)]
 struct Report<'a> {
     written: u64,
@@ -78,7 +87,7 @@ struct Report<'a> {
 
 // What: Docker health of one container.
 // Why: degraded and starting are not failures.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 #[derive(Debug, PartialEq)]
 enum Health {
     Healthy,
@@ -117,6 +126,9 @@ impl Health {
         }
     }
 
+    // What: state word and colour of the status row.
+    // Why: one mapping; the page holds none.
+    // From: Issue #1683 | PR #1980
     fn word_and_colour(&self) -> (String, &'static str) {
         match self {
             Health::Healthy => ("healthy".into(), "green"),
@@ -128,6 +140,9 @@ impl Health {
         }
     }
 
+    // What: true for unhealthy or stopped.
+    // Why: only these count toward a restart.
+    // From: Issue #1683 | PR #1980
     fn failing(&self) -> bool {
         matches!(self, Health::Unhealthy | Health::Stopped(_))
     }
@@ -135,7 +150,7 @@ impl Health {
 
 // What: failure streaks and restart times.
 // Why: restart after RESTART_AFTER misses, capped.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 #[derive(Default)]
 struct Memory {
     streak: BTreeMap<String, u64>,
@@ -146,7 +161,7 @@ struct Memory {
 impl Memory {
     // What: may this container restart now.
     // Why: at most LIMIT restarts per WINDOW.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     fn restart_allowed(&mut self, s: &Settings, name: &str) -> Result<bool, String> {
         let max = s.uint("WATCHDOG_RESTART_LIMIT")?;
         let window = s.uint("WATCHDOG_RESTART_WINDOW")?;
@@ -163,6 +178,7 @@ impl Memory {
 
 // What: settings from env and the saved file.
 // Why: ui changes reach the watchdog via the file.
+// From: Issue #1683 | PR #1980
 fn load() -> Result<Settings, String> {
     let saved = process_env(SETTINGS_FILE_ENV).map(PathBuf::from);
     Settings::load(&process_env, saved.as_deref())
@@ -170,11 +186,11 @@ fn load() -> Result<Settings, String> {
 
 // What: check every container; heal on a streak.
 // Why: one miss is noise; RESTART_AFTER is a fault.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 async fn containers(s: &Settings, f: &mut Findings, m: &mut Memory) -> Result<(), String> {
     let api = docker::Api::new(&s.text("DOCKER_ENDPOINT")?)?;
     let limit = Duration::from_secs(s.uint("DOCKER_TIMEOUT")?);
-    let grace = u32::try_from(s.uint("WATCHDOG_STOP_GRACE")?).map_err(|e| e.to_string())?;
+    let grace = s.num::<u32>("WATCHDOG_STOP_GRACE")?;
     let after = s.uint("RESTART_AFTER")?;
     let project = s.text("COMPOSE_PROJECT")?;
     let stopped = s.list("SERVICES_STOPPED");
@@ -185,13 +201,10 @@ async fn containers(s: &Settings, f: &mut Findings, m: &mut Memory) -> Result<()
         .await
         .map_err(|e| e.to_string())?
     {
-        let Some(service) = row["Labels"][docker::SERVICE_LABEL].as_str() else {
+        let Some(service) = docker::service_of(&row) else {
             continue;
         };
-        let name = row["Names"][0]
-            .as_str()
-            .unwrap_or(service)
-            .trim_start_matches('/');
+        let name = docker::name_of(&row).unwrap_or(service);
         let inspect = api.inspect(name, limit).await.map_err(|e| e.to_string())?;
         let health = Health::from_inspect(&inspect);
         let (word, colour) = health.word_and_colour();
@@ -229,7 +242,7 @@ async fn containers(s: &Settings, f: &mut Findings, m: &mut Memory) -> Result<()
 
 // What: daily: drop cache files past their days.
 // Why: CACHE_VALID_DAYS keeps the disk usable.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 fn purge_cache(s: &Settings, f: &mut Findings, now: u64) -> Result<(), String> {
     let stamp = PathBuf::from(s.text("PURGE_STAMP")?);
     if !tidy::is_due(&stamp, now) {
@@ -246,6 +259,7 @@ fn purge_cache(s: &Settings, f: &mut Findings, now: u64) -> Result<(), String> {
 
 // What: log root, only inside the allowed prefix.
 // Why: cleanup must never delete outside the logs.
+// From: Issue #1683 | PR #1980
 fn log_root(s: &Settings) -> Result<PathBuf, String> {
     tidy::inside(
         &s.text("SYSLOG_LOG_ROOT")?,
@@ -255,7 +269,7 @@ fn log_root(s: &Settings) -> Result<PathBuf, String> {
 
 // What: daily: log age limit, then size budget.
 // Why: over budget retries after the cooldown.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 fn prune_logs(s: &Settings, f: &mut Findings, now: u64) -> Result<(), String> {
     let stamp = PathBuf::from(s.text("SYSLOG_PRUNE_STAMP")?);
     if !tidy::is_due(&stamp, now) {
@@ -279,7 +293,7 @@ fn prune_logs(s: &Settings, f: &mut Findings, now: u64) -> Result<(), String> {
 
 // What: pack closed log files with xz.
 // Why: saves log disk; open files stay plain.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 fn pack_logs(s: &Settings, f: &mut Findings, now: u64) -> Result<(), String> {
     for e in tidy::pack_closed(&log_root(s)?, s.uint("SYSLOG_XZ_PRESET")?, now) {
         f.warn("log pack", e);
@@ -289,7 +303,7 @@ fn pack_logs(s: &Settings, f: &mut Findings, now: u64) -> Result<(), String> {
 
 // What: logs arrive but nothing is written.
 // Why: a full or read-only log disk hides itself.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 fn log_writing(s: &Settings, f: &mut Findings, m: &mut Memory) -> Result<(), String> {
     let newest = tidy::newest(Path::new(&s.text("SYSLOG_LOG_ROOT")?));
     let count = tidy::syslog_processed()?;
@@ -305,7 +319,7 @@ fn log_writing(s: &Settings, f: &mut Findings, m: &mut Memory) -> Result<(), Str
 
 // What: cache disk use as a traffic light.
 // Why: the ui shows green, yellow or red.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 fn cache_light(s: &Settings, f: &mut Findings) -> Result<(), String> {
     let dir = s.text("CACHE_DIR")?;
     let sp = fs::space(Path::new(&dir)).map_err(|e| format!("{dir}: {e}"))?;
@@ -327,7 +341,7 @@ fn cache_light(s: &Settings, f: &mut Findings) -> Result<(), String> {
 
 // What: free space of each other watched path.
 // Why: a full log disk stops the logs.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 fn disks(s: &Settings, f: &mut Findings) -> Result<(), String> {
     let min = s.uint("WATCHDOG_DISK_MIN_FREE_PERCENT")?;
     for path in s.list("WATCHDOG_DISK_PATHS") {
@@ -346,7 +360,7 @@ fn disks(s: &Settings, f: &mut Findings) -> Result<(), String> {
 }
 
 // What: host conntrack use against its maximum.
-// Why: DoMe 07.11.: a full table drops new connections.
+// Why: a full table drops new connections.
 // From: Issue #1683 | PR #1985
 fn conntrack(s: &Settings, f: &mut Findings) -> Result<(), String> {
     let path = Path::new(&s.text("HOST_NET_STAT_DIR")?).join("nf_conntrack");
@@ -375,7 +389,7 @@ fn conntrack(s: &Settings, f: &mut Findings) -> Result<(), String> {
 
 // What: expiry of each watched certificate.
 // Why: warn before clients reject proxy or ui.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 fn certs(s: &Settings, f: &mut Findings) -> Result<(), String> {
     let within = s.uint("WATCHDOG_CERT_WARN_SECS")?;
     for path in s.list("WATCHDOG_CERT_FILES") {
@@ -393,9 +407,9 @@ fn certs(s: &Settings, f: &mut Findings) -> Result<(), String> {
 
 // What: zone serials, primary against secondary.
 // Why: shows a lost NOTIFY or a broken AXFR.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 async fn dns_sync(s: &Settings, f: &mut Findings) -> Result<(), String> {
-    let far = s.text("PDNS_SECONDARY_API_URL").unwrap_or_default();
+    let far = s.text_or_empty("PDNS_SECONDARY_API_URL");
     if far.is_empty() {
         return Ok(());
     }
@@ -461,8 +475,7 @@ async fn round(s: &Settings, m: &mut Memory) -> Findings {
 // From: Issue #1683 | PR #1858
 fn publish(s: &Settings, f: &Findings) -> Result<(), String> {
     let path = PathBuf::from(s.text("WATCHDOG_ALARM_FILE")?);
-    let mode = u32::from_str_radix(&s.text("WATCHDOG_ALARM_FILE_MODE")?, 8)
-        .map_err(|e| format!("WATCHDOG_ALARM_FILE_MODE: {e}"))?;
+    let mode = s.mode("WATCHDOG_ALARM_FILE_MODE")?;
     let report = Report {
         written: clock::unix_secs(),
         alarms: &f.alarms,
@@ -470,11 +483,7 @@ fn publish(s: &Settings, f: &Findings) -> Result<(), String> {
         cache: &f.cache,
     };
     let body = serde_json::to_vec_pretty(&report).map_err(|e| e.to_string())?;
-    let owner = fs::Owner {
-        uid: None,
-        gid: None,
-    };
-    fs::write(&path, &body, mode, fs::Place::Replace, owner)
+    fs::write(&path, &body, mode, fs::Place::Replace, fs::Owner::default())
         .map_err(|e| format!("{}: {e}", path.display()))
 }
 

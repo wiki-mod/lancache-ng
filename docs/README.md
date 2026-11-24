@@ -42,8 +42,9 @@ Valid for `current_dev` at `e223782d`. Section 9 lists what is not verified.
 ## 2. Settings and commands
 
 - The runtime settings of a production installation are in
-  `deploy/prod/.env.local`. No `.env` is tracked. `setup.sh` prefers this file
-  for backup, update, restore and `update-ip` when it exists.
+  `deploy/prod/.env`; `setup.sh` and the Admin UI write it. No env file is
+  tracked. An optional `deploy/prod/.env.local` overrides single keys of it
+  until it is deleted (README, section "Settings files").
 - The state root is `LANCACHE_STATE_DIR` (default `/opt/lancache-ng`). The
   code of each channel lives in its own directory below it; `current` links
   the one in use.
@@ -56,7 +57,7 @@ Valid for `current_dev` at `e223782d`. Section 9 lists what is not verified.
   | `setup.sh update-ip [install-dir]` | change the HTTP and HTTPS listener IP addresses |
   | `setup.sh backup [--config\|--full] [install-dir] [--dest <path>]` | create a backup archive |
   | `setup.sh restore <archive> [install-dir]` | restore a backup archive |
-  | `setup.sh compose <install-dir> <compose arguments>` | internal; runs Docker Compose with the stack's file list (used by units and recovery hints) |
+  | `setup.sh compose <install-dir> <compose arguments>` | runs Docker Compose with the stack's file list (used by units, recovery hints and this guide) |
   | `setup.sh configure-upstream-dns` | set the upstream DNS servers |
   | `setup.sh reset-to-last-known-good-config <service> ...` | roll back a Kea configuration or a DNS zone (section 6) |
 
@@ -95,7 +96,7 @@ Use this only when `setup.sh` is not available.
    A temporary assignment for testing:
 
    ```bash
-   ip addr add 192.168.2.11/24 dev eth0
+   ip addr add 192.0.2.11/24 dev eth0
    ip -4 addr show eth0
    ```
 
@@ -109,22 +110,22 @@ Use this only when `setup.sh` is not available.
      ethernets:
        eth0:
          addresses:
-           - 192.168.2.10/24
-           - 192.168.2.11/24
+           - 192.0.2.10/24
+           - 192.0.2.11/24
          routes:
            - to: default
-             via: 192.168.2.1
+             via: 192.0.2.1
    ```
 
    ```bash
    sudo netplan apply
    ```
 
-2. Set the new addresses in `deploy/prod/.env.local`:
+2. Set the new addresses in `deploy/prod/.env`:
 
    ```env
-   IP_HTTP=192.168.2.10
-   IP_HTTPS=192.168.2.11
+   IP_HTTP=192.0.2.10
+   IP_HTTPS=192.0.2.11
    ```
 
    The `dns` container takes its addresses from `IP_HTTP` and `IP_HTTPS`;
@@ -133,9 +134,8 @@ Use this only when `setup.sh` is not available.
 3. Recreate the stack and check it:
 
    ```bash
-   cd deploy/prod
-   docker compose --env-file .env.local up -d
-   docker compose --env-file .env.local ps
+   sudo ./setup.sh compose deploy/prod up -d
+   sudo ./setup.sh compose deploy/prod ps
    ```
 
 4. Point the clients at the new addresses: `IP_HTTP` for HTTP mode, `IP_HTTPS`
@@ -145,8 +145,8 @@ Use this only when `setup.sh` is not available.
 ### 3.3 Verify
 
 ```bash
-dig @192.168.2.10 steamcontent.com A +short   # expected: 192.168.2.10
-dig @192.168.2.11 steamcontent.com A +short   # expected: 192.168.2.11
+dig @192.0.2.10 steamcontent.com A +short   # expected: 192.0.2.10
+dig @192.0.2.11 steamcontent.com A +short   # expected: 192.0.2.11
 ```
 
 Both answers have to name the address that was queried.
@@ -155,8 +155,8 @@ Both answers have to name the address that was queried.
 
 | Symptom | Check |
 | --- | --- |
-| DNS does not answer on the new address | `ip -4 addr show`; `docker compose --env-file .env.local ps`; port 53 open on the new address in the host firewall |
-| Containers do not start | `docker compose --env-file .env.local logs -f` in `deploy/prod` |
+| DNS does not answer on the new address | `ip -4 addr show`; `sudo ./setup.sh compose deploy/prod ps`; port 53 open on the new address in the host firewall |
+| Containers do not start | `sudo ./setup.sh compose deploy/prod logs -f` |
 | Clients cannot reach the cache | ping the new address; check whether the client still uses the old DNS address; renew the DHCP lease (`ipconfig /renew` on Windows, `dhclient` on Linux) |
 
 ---
@@ -316,7 +316,7 @@ Settings of the `dnsmasq-proxy` render (`dnsmasq_conf`,
 
 | Setting | Rendered as | Note |
 | --- | --- | --- |
-| `DHCP_SUBNET_START` | `dhcp-range=<value>,proxy` | required; the network base address of the served LAN |
+| `DHCP_SUBNET_START` | `dhcp-range=<value>,proxy` | optional; the network base address of the served LAN, ending in `.0`; empty renders `dhcp-range=<IP_HTTP>,proxy`, so dnsmasq serves the LAN of the server address |
 | `UPSTREAM_DHCP_IP` | nothing | the proxy render uses no line from it |
 | `DHCP_DNS_SERVERS` | `dhcp-option-pxe=6,<list>` | the Admin UI form joins primary and secondary DNS into this list; empty uses `DHCP_DNS_PRIMARY` and `DHCP_DNS_SECONDARY` from `setup.sh`, then `IP_HTTP` (Kea too) |
 | `DHCP_PROXY_INTERFACE` | `interface=<value>` | optional |
@@ -363,7 +363,7 @@ reply (RFC 1542).
 
 | Setting | Meaning |
 | --- | --- |
-| `DHCP_RELAY_LOCAL_ADDR` | required; this relay's own IPv4 address on the client network, sent as `giaddr` so the upstream server picks the pool of the client's subnet |
+| `DHCP_RELAY_LOCAL_ADDR` | optional; this relay's own IPv4 address on the client network, sent as `giaddr` so the upstream server picks the pool of the client's subnet; empty uses this host's first own address that is not loopback (`IP_HTTP` first) |
 | `UPSTREAM_DHCP_IP` | required; the upstream DHCP server |
 
 The render is one row, `dhcp-relay=<DHCP_RELAY_LOCAL_ADDR>,<UPSTREAM_DHCP_IP>`,
@@ -501,9 +501,9 @@ sudo /opt/lancache-ng/current/setup.sh restore <backup archive> [install-dir]
   `/opt/lancache-ng/latest` (from `master`) and `/opt/lancache-ng/nightly`
   (from `current_dev`). `/opt/lancache-ng/current` points to the one in use.
   When the channel changes, `update` moves the stack to the other directory and
-  copies `deploy/prod/.env.local` and a compose override along. A failed move
-  points `current` back, restores the pre-update backup and removes the copied
-  files from the new directory.
+  copies `deploy/prod/.env`, `.env.local` and a compose override along. A
+  failed move points `current` back, restores the pre-update backup and removes
+  the copied files from the new directory.
 - `backup` and `restore` check that the required archive tools exist. On an
   `apt-get` system a missing `tar` or `rsync` is installed first. `restore`
   also needs `openssl`, because converging an incomplete `.env` can generate
@@ -524,10 +524,9 @@ records the running image revisions in it (`image-revisions.txt`) before
 
 The manifest includes these paths when they exist:
 
-- the active runtime env file (`.env` or `deploy/prod/.env.local`) and
-  `docker-compose.yml`; backups of `deploy/prod` also include the repository
-  runtime inputs the compose file reaches through `../../` (today
-  `services/dns/cdn-domains.txt`);
+- the stack `.env`, its `.env.local` and `docker-compose.yml`; backups of
+  `deploy/prod` also include the repository runtime inputs the compose file
+  reaches through `../../` (today `services/dns/cdn-domains.txt`);
 - Docker named volumes of the compose project, including those of stopped
   containers. The cache volume is only archived in `--full` mode;
 - `image-revisions.txt`;
@@ -572,7 +571,8 @@ Further behavior:
   images.
 - If the archive has no `.env.local`, an existing `.env.local` at the target is
   renamed to `.env.local.pre-restore-<UTC-timestamp>` so the restored `.env`
-  takes effect. The renamed file is never deleted.
+  alone takes effect. The renamed file is never deleted. An archive of v0.4.0
+  holds all settings in `.env.local`; restore renames it to `.env`.
 - Without Docker or Compose for the target, a config-only restore still works;
   the compose validation and the stack start are skipped with a warning. Docker
   is required when the archive contains volume payloads.

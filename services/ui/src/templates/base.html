@@ -696,7 +696,7 @@
     window.LancacheUi = { ms: function (seconds) { return seconds * 1000; } };
 
     // What: a visible error line at the page bottom.
-    // Why: live test: errors went only to the console.
+    // Why: else an error shows only in the console.
     // From: Issue #1683 | PR #1980
     window.LancacheUi.fail = function (err) {
       reportError(err);
@@ -716,7 +716,7 @@
     };
 
     // What: a bar at the bottom for every action.
-    // Why: DoMe 06.11.: buttons gave no sign of work.
+    // Why: a button alone gives no sign of work.
     // From: Issue #1683
     (function () {
       const bar = document.createElement('div');
@@ -1065,10 +1065,10 @@
     const DOCK_CONTROLLABLE_SERVICES = [{% for name in desired_services %}'{{ name }}',{% endfor %}];
     // What: programs per container (container:program)
     // Why: reload/restart one program via OpenRC
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     const DOCK_PROGRAMS = [{% for p in programs %}'{{ p }}',{% endfor %}];
     // What: the ui container: restart only, no stop.
-    // Why: DoMe 06.11.: restart in its menu like proxy.
+    // Why: its menu offers restart like the proxy menu.
     // From: Issue #1683 | PR #1985
     const UI_SERVICE_NAME = '{{ ui_service }}';
     async function programAction(container, program, action, button) {
@@ -1112,12 +1112,12 @@
         // From: Issue #1683 | PR #1980
         state.textContent = svc.stopped_by_user ? LC_T.stopped_by_the_user : (word[svc.status] || svc.status || '');
         // What: mode off wins over the colour word.
-        // Why: live test: Start offered with DHCP_MODE off.
+        // Why: else Start is offered with DHCP_MODE off.
         // From: Issue #1683 | PR #1980
         if (svc.mode_off) { state.textContent = LC_T.svc_mode_off; }
         wrap.appendChild(state);
         // What: health check output as a fold-out.
-        // Why: live test: "3 failures" gave no reason.
+        // Why: a failure count alone gives no reason.
         // From: Issue #1683 | PR #1980
         if (svc.reason) {
           const why = document.createElement('details');
@@ -1179,7 +1179,7 @@
           menu.className = 'beam-menu beam-name';
           menu.open = openMenu === svc.name;
           // What: opening a menu closes the others.
-          // Why: DoMe 07.11.: menus must not overlap.
+          // Why: open menus must not overlap.
           // From: Issue #1683 | PR #1991
           menu.addEventListener('toggle', function () {
             if (menu.open) {
@@ -1188,7 +1188,7 @@
             if (menu.open) { openMenu = svc.name; } else if (openMenu === svc.name) { openMenu = ''; }
           });
           // What: the container name opens its programs.
-          // Why: DoMe 06.11.: no extra "Programme" button.
+          // Why: it saves an extra button per container.
           // From: Issue #1683
           const sum = document.createElement('summary');
           sum.textContent = svc.name + ' \u25BE ';
@@ -1196,7 +1196,7 @@
           const list = document.createElement('div');
           list.className = 'beam-menu-list';
           // What: container Start/Stop is menu row one.
-          // Why: DoMe 06.11.: no Stop beside the menu.
+          // Why: one place for all actions of a container.
           // From: Issue #1683
           if (button) {
             const row = document.createElement('div');
@@ -1241,7 +1241,7 @@
         return wrap;
       }
       // What: wipe buttons empty the whole cache.
-      // Why: DoMe 07.11.: second click confirms the wipe.
+      // Why: a second click confirms the wipe.
       // From: Issue #871 | PR #1991
       document.querySelectorAll('[data-cache-wipe]').forEach(function (b) {
         const st = b.parentNode.querySelector('[data-cache-wipe-state]');
@@ -1257,7 +1257,7 @@
         });
       });
       // What: click outside or Escape closes service menus.
-      // Why: DoMe 07.11.: at most one menu, easy to close.
+      // Why: at most one menu is open, easy to close.
       // From: Issue #1683 | PR #1991
       const closeMenus = function (keep) {
         document.querySelectorAll('details.beam-menu[open]').forEach(function (m) { if (m !== keep) { m.open = false; } });

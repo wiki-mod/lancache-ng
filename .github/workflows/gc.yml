@@ -132,6 +132,10 @@ jobs:
       # Why: nothing else deletes them after the run ends.
       # From: Issue #1683 | PR #1858
       - name: Delete green refs of closed PRs and ended locks
+        # What: runs also after a failed gc step.
+        # Why: gc-refs reads its own state; gc fails alone.
+        # From: Issue #1683
+        if: ${{ !cancelled() }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GC_APPLY: ${{ inputs.apply }}

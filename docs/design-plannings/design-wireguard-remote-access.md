@@ -1,7 +1,7 @@
 # WireGuard Remote LAN Access — Design Plan
 
-**Status: design proposal only, not committed, not scheduled.** Nothing in
-this document is approved for implementation. This is the written design
+**Status: intended work (`ROADMAP.md`); the design below is not yet approved
+for implementation.** This is the written design
 plan issue [#818](https://github.com/wiki-mod/lancache-ng/issues/818) asked
 for: an optional WireGuard container giving an operator secure remote
 access into the LAN their lancache-ng deployment lives on, reviewed before
