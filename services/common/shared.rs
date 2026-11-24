@@ -190,18 +190,18 @@ pub mod fs {
     // What: every regular file below root.
     // Why: retention sums and prunes by size and age.
     // From: Issue #1683 | PR #1980
-    pub fn files_under(root: &Path) -> io::Result<Vec<(PathBuf, fs::Metadata)>> {
+    pub fn files_under(root: &Path) -> Vec<(PathBuf, fs::Metadata)> {
         let mut out = Vec::new();
         let mut dirs = vec![root.to_path_buf()];
         while let Some(dir) = dirs.pop() {
-            let entries = match fs::read_dir(&dir) {
-                Ok(e) => e,
-                Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
-                Err(e) => return Err(e),
+            let Ok(entries) = fs::read_dir(&dir) else {
+                continue;
             };
-            for entry in entries {
-                let path = entry?.path();
-                let meta = fs::symlink_metadata(&path)?;
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let Ok(meta) = fs::symlink_metadata(&path) else {
+                    continue;
+                };
                 if meta.is_dir() {
                     dirs.push(path);
                 } else if meta.is_file() {
@@ -209,7 +209,7 @@ pub mod fs {
                 }
             }
         }
-        Ok(out)
+        out
     }
 
     // What: total and free bytes of a filesystem.
@@ -5486,28 +5486,14 @@ pub mod tidy {
     // Why: base for age, size and pack runs.
     // From: Issue #1683 | PR #1980
     pub fn files(dir: &Path) -> Vec<Item> {
-        let mut out = Vec::new();
-        let mut todo = vec![dir.to_path_buf()];
-        while let Some(d) = todo.pop() {
-            let Ok(rd) = std::fs::read_dir(&d) else {
-                continue;
-            };
-            for e in rd.flatten() {
-                let Ok(meta) = std::fs::symlink_metadata(e.path()) else {
-                    continue;
-                };
-                if meta.is_dir() {
-                    todo.push(e.path());
-                } else if meta.is_file() {
-                    out.push(Item {
-                        path: e.path(),
-                        size: meta.len(),
-                        mtime: mtime(&meta),
-                    });
-                }
-            }
-        }
-        out
+        crate::fs::files_under(dir)
+            .into_iter()
+            .map(|(path, meta)| Item {
+                path,
+                size: meta.len(),
+                mtime: mtime(&meta),
+            })
+            .collect()
     }
 
     // What: remove files older than days.

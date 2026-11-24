@@ -3014,24 +3014,11 @@ async fn dhcp_stays_off(app: &App, s: &Settings) -> Result<(), String> {
 // From: Issue #1683 | PR #1980
 fn dir_bytes(root: &Path) -> u64 {
     use std::os::unix::fs::MetadataExt;
-    let mut total = 0u64;
-    let mut todo = vec![root.to_path_buf()];
-    while let Some(dir) = todo.pop() {
-        let Ok(list) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in list.flatten() {
-            let Ok(meta) = entry.metadata() else {
-                continue;
-            };
-            if meta.is_dir() {
-                todo.push(entry.path());
-            } else {
-                total = total.saturating_add(meta.blocks().saturating_mul(512));
-            }
-        }
-    }
-    total
+    lancache_ng::fs::files_under(root)
+        .into_iter()
+        .fold(0u64, |total, (_, meta)| {
+            total.saturating_add(meta.blocks().saturating_mul(512))
+        })
 }
 
 // What: count the cache folder now and then.
