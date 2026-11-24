@@ -1731,6 +1731,7 @@ runtime:
     - watchdog-logs
     - pdns-config-snapshots-standard
     - pdns-config-snapshots-ssl
+    - proxy-config-snapshots
     - pdns-data-ssl
     - nats-conf
     - nats-data
