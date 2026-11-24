@@ -1097,7 +1097,11 @@ runtime:
     - DNS_NS_HTTPS_NAME=ns2.@DHCP_DOMAIN@
     - PDNS_DNSUPDATE_FROM=@PRIVATE_NETS@
     - PDNS_LISTEN=0.0.0.0
-    - PDNS_PRIMARY_API_URL=http://@DNS_SERVICE@:@PDNS_AUTH_API_PORT@/api/v1/servers/localhost
+    # What: path of the PowerDNS API below host and port.
+    # Why: auth, recursors and secondaries share it.
+    # From: Issue #1683 | PR #2017
+    - PDNS_API_PATH=/api/v1/servers/localhost
+    - PDNS_PRIMARY_API_URL=http://@DNS_SERVICE@:@PDNS_AUTH_API_PORT@@PDNS_API_PATH@
     - PDNS_SECONDARY_API_URL=
     # What: SOA serial rule for API and DDNS writes.
     # Why: a change raises the serial; NOTIFY follows.
@@ -1193,7 +1197,7 @@ runtime:
     - RECURSOR_HTTPS_API_PORT=@PDNS_HTTPS_API_PORT@
     - SNMPD_CONF_FILE=@CONFIG_DIR@/services/snmpd.conf
     - SYSLOG_CONF_FILE=@CONFIG_DIR@/services/syslog-ng.conf
-    - RECURSOR_API_URLS=http://@DNS_SERVICE@:@PDNS_HTTP_API_PORT@/api/v1/servers/localhost http://@DNS_SERVICE@:@PDNS_HTTPS_API_PORT@/api/v1/servers/localhost
+    - RECURSOR_API_URLS=http://@DNS_SERVICE@:@PDNS_HTTP_API_PORT@@PDNS_API_PATH@ http://@DNS_SERVICE@:@PDNS_HTTPS_API_PORT@@PDNS_API_PATH@
     - REPO_URL=https://github.com/wiki-mod/lancache-ng
     - SECRETS_DIR=@LANCACHE_SHARED_SECRET_DIR@
     # What: git ref per channel for the secondary setup.sh.

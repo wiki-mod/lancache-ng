@@ -1603,7 +1603,7 @@ async fn remote_zones(s: &Settings, address: &str) -> Result<Vec<lancache_ng::pd
 fn remote_api(s: &Settings, address: &str) -> Result<lancache_ng::pdns::Api, String> {
     let port = s.uint("PDNS_AUTH_API_PORT")?;
     let host = lancache_ng::dns::host_port(address, port);
-    let url = format!("http://{host}/api/v1/servers/localhost");
+    let url = format!("http://{host}{}", s.text("PDNS_API_PATH")?);
     let key = secrets(s)?.pdns_api_key;
     Ok(lancache_ng::pdns::Api::new(http::client(s)?, &url, &key))
 }
