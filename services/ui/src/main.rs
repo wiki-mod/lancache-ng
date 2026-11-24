@@ -2627,20 +2627,18 @@ async fn dhcp_stays_off(app: &App, s: &Settings) -> Result<(), String> {
         return Ok(());
     };
     let (grace, limit) = app.limits(s)?;
-    let list = app.docker.project(&s.text("COMPOSE_PROJECT")?, limit).await;
-    let list = list.map_err(|e| e.to_string())?;
+    let list = project_containers(app, s).await?;
     // What: only the stack dhcp, not a "compose run" one.
     // Why: CI kea_rollback runs own Kea; it was stopped.
     // From: Issue #1683
     let running = list.iter().find(|c| {
-        c["Labels"][docker::SERVICE_LABEL].as_str() == Some(service.as_str())
+        docker::service_of(c) == Some(service.as_str())
             && c["Labels"][docker::ONEOFF_LABEL].as_str() != Some("True")
             && c["State"].as_str() == Some("running")
     });
-    let Some(name) = running.and_then(|c| c["Names"][0].as_str()) else {
+    let Some(name) = running.and_then(docker::name_of) else {
         return Ok(());
     };
-    let name = name.trim_start_matches('/');
     let r = app
         .docker
         .act(name, docker::Action::Stop, grace, limit)
@@ -2699,15 +2697,20 @@ async fn cache_scanner(app: Arc<App>) {
 // Why: Docker calls need the real name.
 // From: Issue #1683 | PR #1858
 async fn container_of(app: &App, s: &Settings, service: &str) -> Result<String, String> {
+    let list = project_containers(app, s).await?;
+    let hit = list.iter().find(|c| docker::service_of(c) == Some(service));
+    hit.and_then(docker::name_of)
+        .map(str::to_string)
+        .ok_or_else(|| tr("err_no_container").replace("{service}", service))
+}
+
+// What: the containers of this compose project.
+// Why: every lookup of a service starts from this list.
+// From: Issue #1683 | PR #2017
+async fn project_containers(app: &App, s: &Settings) -> Result<Vec<Value>, String> {
     let (_, limit) = app.limits(s)?;
     let list = app.docker.project(&s.text("COMPOSE_PROJECT")?, limit).await;
-    let list = list.map_err(|e| e.to_string())?;
-    let hit = list
-        .iter()
-        .find(|c| c["Labels"][docker::SERVICE_LABEL].as_str() == Some(service));
-    let name = hit.and_then(|c| c["Names"][0].as_str());
-    name.map(|n| n.trim_start_matches('/').to_string())
-        .ok_or_else(|| tr("err_no_container").replace("{service}", service))
+    list.map_err(|e| e.to_string())
 }
 
 // What: run a command in a service container.
@@ -3736,9 +3739,7 @@ async fn status(State(app): Shared) -> Response {
     let limit = app.limits(&s).map(|(_, l)| l).ok();
     let mut rows: Vec<Value> = Vec::new();
     for c in &list {
-        let name = c["Labels"][docker::SERVICE_LABEL]
-            .as_str()
-            .unwrap_or_default();
+        let name = docker::service_of(c).unwrap_or_default();
         let by_user = stopped.iter().any(|x| x == name);
         let mode_off = !off.is_empty() && name == off;
         // What: a stop nobody asked for is red, not gray.

@@ -185,13 +185,10 @@ async fn containers(s: &Settings, f: &mut Findings, m: &mut Memory) -> Result<()
         .await
         .map_err(|e| e.to_string())?
     {
-        let Some(service) = row["Labels"][docker::SERVICE_LABEL].as_str() else {
+        let Some(service) = docker::service_of(&row) else {
             continue;
         };
-        let name = row["Names"][0]
-            .as_str()
-            .unwrap_or(service)
-            .trim_start_matches('/');
+        let name = docker::name_of(&row).unwrap_or(service);
         let inspect = api.inspect(name, limit).await.map_err(|e| e.to_string())?;
         let health = Health::from_inspect(&inspect);
         let (word, colour) = health.word_and_colour();

@@ -1303,6 +1303,20 @@ pub mod docker {
     // From: Issue #1683 | PR #1858
     pub const SERVICE_LABEL: &str = "com.docker.compose.service";
 
+    // What: compose service of a container row, if any.
+    // Why: one reader of the service label of a row.
+    // From: Issue #1683 | PR #2017
+    pub fn service_of(row: &serde_json::Value) -> Option<&str> {
+        row["Labels"][SERVICE_LABEL].as_str()
+    }
+
+    // What: name of a container row, without the slash.
+    // Why: Docker lists names as "/name".
+    // From: Issue #1683 | PR #2017
+    pub fn name_of(row: &serde_json::Value) -> Option<&str> {
+        row["Names"][0].as_str().map(|n| n.trim_start_matches('/'))
+    }
+
     // What: compose label of a "compose run" container.
     // Why: fixed by Docker Compose; "True" on run only.
     // From: Issue #1683
