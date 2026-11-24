@@ -96,6 +96,15 @@ pub fn list_items(raw: &str) -> impl Iterator<Item = &str> {
         .filter(|item| !item.is_empty())
 }
 
+// What: the rows of a text without blanks and # rows.
+// Why: list files hold comments and empty lines.
+// From: Issue #1683 | PR #2017
+pub fn data_rows(text: &str) -> impl Iterator<Item = &str> {
+    text.lines()
+        .map(str::trim)
+        .filter(|row| !row.is_empty() && !row.starts_with('#'))
+}
+
 // What: not empty; only ASCII letters, digits and extra.
 // Why: such a value cannot leave its place in a config.
 // From: Issue #1683 | PR #2017

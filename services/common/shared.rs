@@ -3544,8 +3544,7 @@ pub mod nginx_conf {
     // From: Issue #1683 | PR #1858
     pub fn hosts(domains: &str, psl: &Psl) -> Result<Hosts, String> {
         let mut h = Hosts::default();
-        let rows = domains.lines().map(str::trim);
-        for row in rows.filter(|r| !r.is_empty() && !r.starts_with('#')) {
+        for row in crate::config::data_rows(domains) {
             let (name, wild) = crate::dns::cdn_entry(row)
                 .ok_or_else(|| format!("invalid domain entry {row:?}"))?;
             let root = psl
@@ -4603,11 +4602,7 @@ pub mod cdn {
     pub fn defaults(s: &Settings) -> Result<Vec<String>, String> {
         let path = s.text("CDN_DEFAULT_DOMAINS_FILE")?;
         let text = std::fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))?;
-        let keep = |l: &&str| !l.is_empty() && !l.starts_with('#');
-        Ok(text
-            .lines()
-            .map(str::trim)
-            .filter(keep)
+        Ok(crate::config::data_rows(&text)
             .map(str::to_ascii_lowercase)
             .collect())
     }
