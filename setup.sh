@@ -2900,10 +2900,10 @@ migrate_quickstart_install() (
     if [[ "$apply_rc" -eq 2 ]]; then
         trap - EXIT
         UPDATE_CONVERGENCE_COMPLETED=1
-        die_convergence_kept_paused "The migrated stack failed its health gate, and restarting the quickstart stack in $old_dir failed too."
+        die_convergence_kept_paused "The migrated stack failed its health gate, and restarting the quickstart stack in $old_dir failed too." "$old_dir"
     fi
     [[ "$apply_rc" -eq 0 ]] \
-        || die "The migrated stack failed its health gate; the quickstart stack in $old_dir runs again and nothing counts as migrated. Fix the cause, then rerun setup.sh update."
+        || die_with_recovery_help "The migrated stack failed its health gate; the quickstart stack in $old_dir runs again and nothing counts as migrated. Fix the cause, then rerun setup.sh update." "$old_dir"
     if ! write_lancache_host_services "$stack_dir"; then
         print_warn "Neither systemd nor OpenRC found — host services were not written"
     fi
@@ -2969,20 +2969,20 @@ rollback_quickstart_migration() {
     local old_dir="$1" record="$2" stack_dir="$3" env_file="$4" stamp copies dir
     print_warn "Rolling back the migration; restarting the quickstart stack in $old_dir"
     stack_compose "$stack_dir" "$env_file" stop \
-        || { print_error "Failed to stop the migrated stack (exit $?). Manual recovery required."; return 1; }
+        || { print_error "Failed to stop the migrated stack (exit $?)."; return 1; }
     stamp=$(utc_stamp)
     copies=$(awk -F'|' '$1 == "rolledback" { delete c } $1 == "copied" { c[$3] = 1 } END { for (d in c) print d }' "$record") \
-        || { print_error "Failed to read $record (exit $?). Manual recovery required."; return 1; }
+        || { print_error "Failed to read $record (exit $?)."; return 1; }
     while IFS= read -r dir; do
         [[ -n "$dir" && -e "$dir" ]] || continue
         mv -- "$dir" "$dir.rolledback-$stamp" \
-            || { print_error "Failed to move $dir aside (exit $?). Manual recovery required."; return 1; }
+            || { print_error "Failed to move $dir aside (exit $?)."; return 1; }
         print_warn "Moved the migrated copy $dir aside to $dir.rolledback-$stamp"
     done <<< "$copies"
     printf 'rolledback|%s\n' "$stamp" >> "$record" \
-        || { print_error "Failed to record the rollback in $record (exit $?). Manual recovery required."; return 1; }
+        || { print_error "Failed to record the rollback in $record (exit $?)."; return 1; }
     stack_up "$old_dir" "$old_dir/.env" -d \
-        || { print_error "Failed to restart the quickstart stack in $old_dir (exit $?). Manual recovery required."; return 1; }
+        || { print_error "Failed to restart the quickstart stack in $old_dir (exit $?)."; return 1; }
     print_ok "The quickstart stack in $old_dir runs again"
 }
 
@@ -4143,9 +4143,10 @@ rollback_update_after_env_failure() {
     trap - EXIT
     UPDATE_CONVERGENCE_COMPLETED=1
     rollback_stack_update "$_UPDATE_ROLLBACK_DIR" \
-        || die_convergence_kept_paused "Preparing .env for the new code failed, and the rollback to the pre-update backup failed too."
+        || die_convergence_kept_paused "Preparing .env for the new code failed, and the rollback to the pre-update backup failed too." "$_UPDATE_ROLLBACK_DIR"
     resume_lancache_convergence_after_update
     print_error "Preparing .env for the new code failed (exit $exit_code); the update was rolled back."
+    print_recovery_help "$_UPDATE_ROLLBACK_DIR"
     exit "$exit_code"
 }
 
@@ -4155,7 +4156,25 @@ rollback_update_after_env_failure() {
 die_convergence_kept_paused() {
     local resume
     resume=$(convergence_resume_command) || exit $?
-    die "$1 Manual recovery required.${resume:+ Convergence stays paused; after recovery run: $resume}"
+    die_with_recovery_help "$1 Manual recovery required.${resume:+ Convergence stays paused; after recovery run: $resume}" "$2"
+}
+
+# What: names the log bundle and where to report a failure
+# Why: one text for every failed update, rollback or restore
+# From: Issue #1683
+print_recovery_help() {
+    local dir="${1:-$DEFAULT_INSTALL_DIR}"
+    print_error "Logs for a bug report: sudo $SCRIPT_DIR/setup.sh create-logs-for-issue $dir"
+    print_error "Report the problem with that file at ${LANCACHE_REPO_URL}/issues"
+}
+
+# What: dies with message $1, then the recovery help
+# Why: a failed run ends with the next step for the operator
+# From: Issue #1683
+die_with_recovery_help() {
+    print_error "$1"
+    print_recovery_help "${2:-}"
+    exit 1
 }
 
 # What: the commands that undo the convergence pause
@@ -5808,6 +5827,7 @@ cmd_restore() (
                 # From: Issue #1683 | PR #1858
                 print_warn "Restore failed; leaving the stack stopped at $install_dir for manual recovery."
                 print_warn "Investigate the error above, then run: $SCRIPT_DIR/setup.sh compose \"$install_dir\" up -d"
+                print_recovery_help "$install_dir"
             fi
         fi
         # What: a failed restore keeps convergence paused
@@ -6578,7 +6598,7 @@ rollback_stack_update() {
 
     if [[ -d "$backup_root" ]]; then
         if ! backups=$(find "$backup_root" -maxdepth 1 -name 'lancache-ng-config-*.tar.*' ! -name '*.partial' -print); then
-            print_error "Failed to list the backups under $backup_root; cannot roll back automatically. Manual recovery required."
+            print_error "Failed to list the backups under $backup_root; cannot roll back automatically."
             return 1
         fi
         sorted_backups=$(sort <<< "$backups") \
@@ -6586,7 +6606,7 @@ rollback_stack_update() {
         latest_backup="${sorted_backups##*$'\n'}"
     fi
     if [[ -z "$latest_backup" ]]; then
-        print_error "No pre-update backup archive found under $backup_root; cannot roll back automatically. Manual recovery required."
+        print_error "No pre-update backup archive found under $backup_root; cannot roll back automatically."
         return 1
     fi
 
@@ -6597,10 +6617,10 @@ rollback_stack_update() {
         local link
         link=$(channel_active_link) || exit $?
         if is_channel_root_dir "$LANCACHE_UPDATE_SWITCHED_FROM"; then
-            rm -f -- "$link" || { print_error "Failed to remove $link (exit $?). Manual recovery required."; return 1; }
+            rm -f -- "$link" || { print_error "Failed to remove $link (exit $?)."; return 1; }
         else
             ln -sfn "${LANCACHE_UPDATE_SWITCHED_FROM##*/}" "$link" \
-                || { print_error "Failed to point $link back (exit $?). Manual recovery required."; return 1; }
+                || { print_error "Failed to point $link back (exit $?)."; return 1; }
         fi
         print_warn "Code of the stack is $LANCACHE_UPDATE_SWITCHED_FROM again"
         # What: the copied stack files leave the new dir
@@ -6622,7 +6642,7 @@ rollback_stack_update() {
         local -a back=(-B "${LANCACHE_UPDATE_BRANCH:-}")
         [[ -n "${LANCACHE_UPDATE_BRANCH:-}" ]] || back=(--detach)
         git -C "$LANCACHE_UPDATE_REPO" checkout -q -f "${back[@]}" "$LANCACHE_UPDATE_OLD_SHA" \
-            || { print_error "Failed to return $LANCACHE_UPDATE_REPO to $LANCACHE_UPDATE_OLD_SHA (exit $?). Manual recovery required."; return 1; }
+            || { print_error "Failed to return $LANCACHE_UPDATE_REPO to $LANCACHE_UPDATE_OLD_SHA (exit $?)."; return 1; }
         print_warn "Returned $LANCACHE_UPDATE_REPO to $LANCACHE_UPDATE_OLD_SHA"
     fi
     print_warn "Rolling back to pre-update backup: $latest_backup"
@@ -6642,18 +6662,18 @@ rollback_stack_update() {
         local -a restored_services
         _UPDATE_STACK_DIR="$install_dir"
         _UPDATE_ENV_FILE=$(runtime_env_file_for_install_dir "$install_dir") \
-            || { print_error "Cannot resolve the env file of $install_dir (exit $?). Manual recovery required."; return 1; }
+            || { print_error "Cannot resolve the env file of $install_dir (exit $?)."; return 1; }
         wait=$(prod_env_default SETUP_HEALTH_WAIT_SERVICES_SECONDS) || exit $?
         stack_services_into restored_services "$install_dir" "$_UPDATE_ENV_FILE" \
-            || { print_error "Cannot list the services of $install_dir (exit $?). Manual recovery required."; return 1; }
+            || { print_error "Cannot list the services of $install_dir (exit $?)."; return 1; }
         if ! wait_for_stack_health "$wait" "${restored_services[@]}"; then
-            print_error "Rollback restored the files, but the stack is not healthy. Manual recovery required: $SCRIPT_DIR/setup.sh compose $install_dir up -d"
+            print_error "Rollback restored the files, but the stack is not healthy; start it with: $SCRIPT_DIR/setup.sh compose $install_dir up -d"
             return 1
         fi
         print_ok "Rollback completed; stack restored to its pre-update state."
         return 0
     fi
-    print_error "Rollback itself failed. Manual recovery required: inspect $latest_backup and $install_dir directly."
+    print_error "Rollback itself failed; inspect $latest_backup and $install_dir directly."
     return 1
 }
 
@@ -7268,9 +7288,9 @@ perform_stack_update_flow() {
         trap - EXIT
         UPDATE_CONVERGENCE_COMPLETED=1
         rollback_stack_update "$install_dir" \
-            || die_convergence_kept_paused "Pulling the images failed, and the rollback to the pre-update backup failed too."
+            || die_convergence_kept_paused "Pulling the images failed, and the rollback to the pre-update backup failed too." "$install_dir"
         resume_lancache_convergence_after_update
-        die "Failed to pull required container images; the update was rolled back. Check network access and GHCR authentication, then rerun setup.sh update."
+        die_with_recovery_help "Failed to pull required container images; the update was rolled back. Check network access and GHCR authentication, then rerun setup.sh update." "$install_dir"
     fi
 
     ensure_ui_password_hash "$install_dir" "$_UPDATE_ENV_FILE"
@@ -7282,9 +7302,9 @@ perform_stack_update_flow() {
         trap - EXIT
         UPDATE_CONVERGENCE_COMPLETED=1
         [[ "$apply_rc" -eq 1 ]] \
-            || die_convergence_kept_paused "The update failed its health gate, and the rollback to the pre-update backup failed too."
+            || die_convergence_kept_paused "The update failed its health gate, and the rollback to the pre-update backup failed too." "$install_dir"
         resume_lancache_convergence_after_update
-        die "Update failed its post-update health gate and was rolled back to the pre-update backup. Investigate before retrying."
+        die_with_recovery_help "Update failed its post-update health gate and was rolled back to the pre-update backup. Investigate before retrying." "$install_dir"
     fi
 
     local legacy_ca_root
@@ -8692,8 +8712,8 @@ cmd_update_ip() {
         || apply_rc=$?
     case "$apply_rc" in
         0) ;;
-        1) die "The new IPs failed the health gate; the previous IPs are active again. Check that the new IPs are assigned to this host." ;;
-        *) die "The new IPs failed the health gate, and restoring the previous ones failed too. Check: $SCRIPT_DIR/setup.sh compose $install_dir logs" ;;
+        1) die_with_recovery_help "The new IPs failed the health gate; the previous IPs are active again. Check that the new IPs are assigned to this host." "$install_dir" ;;
+        *) die_with_recovery_help "The new IPs failed the health gate, and restoring the previous ones failed too. Manual recovery required." "$install_dir" ;;
     esac
 
     print_result_banner "$GREEN" "Reconfiguration complete!"
@@ -8786,9 +8806,8 @@ cmd_configure_upstream_dns() {
 
     print_step "Reading current configuration"
 
-    local env_file ip_http ip_https lan extra_lan apply_rc=0 dns_svc
+    local env_file ip_http ip_https lan extra_lan apply_rc=0
     local old_servers old_zones old_unsigned old_reverse dhcp_mode
-    dns_svc=$(prod_env_default DNS_SERVICE) || exit $?
     local -a all_services new_entries
     env_file=$(require_stack_env_file "$install_dir") || exit $?
     old_servers=$(get_env_var DNS_UPSTREAM_SERVERS "$env_file") || exit $?
@@ -8856,13 +8875,13 @@ cmd_configure_upstream_dns() {
         "$old_servers" "$old_zones" "$old_unsigned" "$old_reverse" || apply_rc=$?
     case "$apply_rc" in
         0) ;;
-        1) die "The new external DNS setting failed the health gate; the previous setting is active again." ;;
-        *) die "The new setting failed the health gate, and restoring the previous one failed too. Check: $SCRIPT_DIR/setup.sh compose $install_dir logs $dns_svc" ;;
+        1) die_with_recovery_help "The new external DNS setting failed the health gate; the previous setting is active again." "$install_dir" ;;
+        *) die_with_recovery_help "The new setting failed the health gate, and restoring the previous one failed too. Manual recovery required." "$install_dir" ;;
     esac
     if ! dns_upstream_is_live "$install_dir" "$env_file" "$DNS_UPSTREAM_SERVERS"; then
         restore_dns_upstream "$install_dir" "$env_file" "$old_servers" "$old_zones" "$old_unsigned" "$old_reverse" \
-            || die "The dns container rejected the new setting, and restoring the previous one failed. Check: $SCRIPT_DIR/setup.sh compose $install_dir logs $dns_svc"
-        die "The dns container rejected the new setting (see: $SCRIPT_DIR/setup.sh compose $install_dir logs $dns_svc); the previous setting is active again."
+            || die_with_recovery_help "The dns container rejected the new setting, and restoring the previous one failed. Manual recovery required." "$install_dir"
+        die_with_recovery_help "The dns container rejected the new setting; the previous setting is active again." "$install_dir"
     fi
     # What: the new servers must answer after the apply.
     # Why: a dead resolver must not stay active.
@@ -8870,7 +8889,7 @@ cmd_configure_upstream_dns() {
     read -r -a new_entries <<< "${DNS_UPSTREAM_SERVERS//,/ }"
     if (( ${#new_entries[@]} > 0 )) && ! dns_upstream_answers "${new_entries[@]}"; then
         restore_dns_upstream "$install_dir" "$env_file" "$old_servers" "$old_zones" "$old_unsigned" "$old_reverse" \
-            || die "A new external DNS server does not answer, and restoring the previous setting failed. Check: $SCRIPT_DIR/setup.sh compose $install_dir logs $dns_svc"
+            || die_with_recovery_help "A new external DNS server does not answer, and restoring the previous setting failed. Manual recovery required." "$install_dir"
         die "A new external DNS server does not answer; the previous setting is active again."
     fi
     print_ok "External DNS setting applied and active in the dns container"
