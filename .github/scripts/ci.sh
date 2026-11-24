@@ -5363,6 +5363,13 @@ _ci_head_commit() {
     _ci_capture 0 git -C "${CI_REPO_ROOT}" rev-parse --verify HEAD
 }
 
+# What: memo key of the state of ref $1 in this call.
+# Why: the reader and the writer of a ref share it.
+# From: Issue #1683 | PR #2017
+_ci_ref_state_memo() {
+    printf 'state-%s-%s' "${_CI_CALL_KEY}" "${1//\//-}"
+}
+
 # What: Print the ledger blob text; 1 empty, 2 unknown.
 # Why: A failed read is UNKNOWN, never "no records".
 # From: Issue #1683
@@ -5377,7 +5384,7 @@ _ci_ledger_blob() {
     # What: this call asks the remote for a ref state once.
     # Why: callers in one run reuse the answer.
     # From: Issue #1683 | PR #1858
-    state="state-${_CI_CALL_KEY}-${ledger_ref//\//-}"
+    state="$(_ci_ref_state_memo "${ledger_ref}")"
     if [ "${4:-}" = fetch ] || ! sha="$(_ci_job_memo_get "${state}")"; then
         sha="$(_ci_cas_ref_sha "${remote}" "${ledger_ref}")" || rc=$?
         [ "${rc}" -le 1 ] || return 2
@@ -5389,8 +5396,8 @@ _ci_ledger_blob() {
     # What: a state read before in this job is not fetched.
     # Why: one job would read the same state many times.
     # From: Issue #1683 | PR #1858
-    memo="ledger-${ledger_ref//\//-}-${sha}"
-    if [ "${4:-}" != fetch ] && blob="$(_ci_job_memo_get "${memo}")"; then
+    memo="ledger-${ledger_ref//\//-}"
+    if [ "${4:-}" != fetch ] && blob="$(_ci_job_memo_get "${memo}-${sha}")"; then
         printf '%s\n' "${blob}"
         return 0
     fi
@@ -5407,7 +5414,7 @@ _ci_ledger_blob() {
     # Why: a moved ref has a new state and is fetched anew.
     # From: Issue #1683 | PR #1858
     sha="$(_ci_capture 0 git rev-parse FETCH_HEAD)" || return 2
-    _ci_job_memo_put "ledger-${ledger_ref//\//-}-${sha}" "${blob}" || return 2
+    _ci_job_memo_put "${memo}-${sha}" "${blob}" || return 2
     printf '%s\n' "${blob}"
 }
 
@@ -5525,7 +5532,7 @@ _ci_ledger_upsert_once() {
         # What: a later read of this call sees the write.
         # Why: the reader keeps one ref state per call.
         # From: Issue #1683 | PR #1858
-        _ci_job_memo_put "state-${_CI_CALL_KEY}-${ledger_ref//\//-}" "${commitsha}" || return 3
+        _ci_job_memo_put "$(_ci_ref_state_memo "${ledger_ref}")" "${commitsha}" || return 3
         return 0
     fi
     _ci_cas_push_failed ledger "${ledger_ref}" "${rc}" "${raw}"
