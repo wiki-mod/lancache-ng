@@ -1090,6 +1090,13 @@ pub mod dns {
         })
     }
 
+    // What: an unbound UDP socket of one address family.
+    // Why: an IPv4 socket cannot send to an IPv6 address.
+    // From: Issue #1683 | PR #2017
+    pub fn udp_for(v6: bool) -> std::io::Result<std::net::UdpSocket> {
+        std::net::UdpSocket::bind(if v6 { "[::]:0" } else { "0.0.0.0:0" })
+    }
+
     // What: one SOA query over UDP, no RD.
     // Why: no dig in the ui image; std and rand only.
     // From: Issue #1683
@@ -1100,13 +1107,8 @@ pub mod dns {
     ) -> Result<Soa, String> {
         let id: u16 = rand::random();
         let query = soa_query(id, zone)?;
-        let any = if addr.is_ipv4() {
-            "0.0.0.0:0"
-        } else {
-            "[::]:0"
-        };
         let err = |e: std::io::Error| format!("{addr}: {e}");
-        let sock = std::net::UdpSocket::bind(any).map_err(err)?;
+        let sock = udp_for(addr.is_ipv6()).map_err(err)?;
         sock.connect(addr).map_err(err)?;
         sock.set_read_timeout(Some(wait)).map_err(err)?;
         sock.send(&query).map_err(err)?;
@@ -3115,7 +3117,7 @@ pub mod dnsdist_conf {
         // What: HTTPS port only when IP_HTTPS is set.
         // Why: dns-https idles without IP_HTTPS.
         // From: Issue #1683
-        if s.text("IP_HTTPS").is_ok_and(|ip| !ip.is_empty()) {
+        if s.text("IP_HTTPS").is_ok() {
             listeners.push(Listener {
                 port: s.uint("DNS_HTTPS_PORT")?,
                 pool: "https",
@@ -4535,7 +4537,6 @@ pub mod render {
 // Why: the ui shows whether chrony answers.
 // From: Issue #1683 | PR #1980
 pub mod ntp {
-    use std::net::UdpSocket;
     use std::time::Duration;
 
     // What: client request: version 4, mode 3.
@@ -4549,15 +4550,7 @@ pub mod ntp {
     // Why: the probe reads the raw reply packet.
     // From: Issue #1683 | PR #1980
     fn ask(host: &str, port: u64, wait: Duration) -> std::io::Result<[u8; PACKET]> {
-        // What: a socket of the family of the target.
-        // Why: an IPv4 socket cannot send to IPv6.
-        // From: Issue #1683 | PR #2017
-        let local = if host.contains(':') {
-            "[::]:0"
-        } else {
-            "0.0.0.0:0"
-        };
-        let sock = UdpSocket::bind(local)?;
+        let sock = crate::dns::udp_for(host.contains(':'))?;
         sock.set_read_timeout(Some(wait))?;
         let mut req = [0u8; PACKET];
         req[0] = REQUEST_HEAD;
