@@ -2325,10 +2325,7 @@ async fn stats(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     // What: no dhcp tab while DHCP_MODE is off.
     // Why: live 249: the tab showed a stopped dhcp.
     // From: Issue #1683
-    let off = match (s.text("DHCP_SERVICE"), s.text("DHCP_MODE")) {
-        (Ok(svc), Ok(mode)) if mode == "off" => svc,
-        _ => String::new(),
-    };
+    let off = dhcp_off_service(&s).ok().flatten().unwrap_or_default();
     for c in s.list("STATS_CONTAINERS") {
         if c == off {
             continue;
@@ -2609,14 +2606,23 @@ async fn sampler(app: Arc<App>) {
     }
 }
 
+// What: the dhcp service name while the mode is off.
+// Why: pages hide it; apply and the watch keep it off.
+// From: Issue #1683 | PR #2017
+fn dhcp_off_service(s: &Settings) -> Result<Option<String>, String> {
+    if lancache_ng::dhcp::Mode::from_settings(s)? != lancache_ng::dhcp::Mode::Off {
+        return Ok(None);
+    }
+    s.text("DHCP_SERVICE").map(Some)
+}
+
 // What: in mode off a running dhcp is stopped again.
 // Why: live 05.11.: compose up started it after the ui.
 // From: Issue #1683 | PR #1980
 async fn dhcp_stays_off(app: &App, s: &Settings) -> Result<(), String> {
-    if s.text("DHCP_MODE")? != "off" {
+    let Some(service) = dhcp_off_service(s)? else {
         return Ok(());
-    }
-    let service = s.text("DHCP_SERVICE")?;
+    };
     let (grace, limit) = app.limits(s)?;
     let list = app.docker.project(&s.text("COMPOSE_PROJECT")?, limit).await;
     let list = list.map_err(|e| e.to_string())?;
@@ -2982,7 +2988,7 @@ async fn apply_all(
     // Why: live: compose up started it again at start.
     // From: Issue #1683 | PR #1980
     let dhcp = new.text("DHCP_SERVICE")?;
-    if new.text("DHCP_MODE")? == "off" {
+    if dhcp_off_service(new)?.is_some() {
         plan.remove(&dhcp);
         match container_of(app, new, &dhcp).await {
             Ok(name) => {
@@ -3723,10 +3729,7 @@ async fn status(State(app): Shared) -> Response {
     // What: the dhcp container while DHCP_MODE is off.
     // Why: live test: bar offered Start for it.
     // From: Issue #1683 | PR #1980
-    let off = match (s.text("DHCP_SERVICE"), s.text("DHCP_MODE")) {
-        (Ok(svc), Ok(mode)) if mode == "off" => svc,
-        _ => String::new(),
-    };
+    let off = dhcp_off_service(&s).ok().flatten().unwrap_or_default();
     let limit = app.limits(&s).map(|(_, l)| l).ok();
     let mut rows: Vec<Value> = Vec::new();
     for c in &list {
