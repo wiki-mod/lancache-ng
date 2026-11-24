@@ -96,7 +96,7 @@ Use this only when `setup.sh` is not available.
    A temporary assignment for testing:
 
    ```bash
-   ip addr add 192.168.2.11/24 dev eth0
+   ip addr add 192.0.2.11/24 dev eth0
    ip -4 addr show eth0
    ```
 
@@ -110,11 +110,11 @@ Use this only when `setup.sh` is not available.
      ethernets:
        eth0:
          addresses:
-           - 192.168.2.10/24
-           - 192.168.2.11/24
+           - 192.0.2.10/24
+           - 192.0.2.11/24
          routes:
            - to: default
-             via: 192.168.2.1
+             via: 192.0.2.1
    ```
 
    ```bash
@@ -124,8 +124,8 @@ Use this only when `setup.sh` is not available.
 2. Set the new addresses in `deploy/prod/.env`:
 
    ```env
-   IP_HTTP=192.168.2.10
-   IP_HTTPS=192.168.2.11
+   IP_HTTP=192.0.2.10
+   IP_HTTPS=192.0.2.11
    ```
 
    The `dns` container takes its addresses from `IP_HTTP` and `IP_HTTPS`;
@@ -145,8 +145,8 @@ Use this only when `setup.sh` is not available.
 ### 3.3 Verify
 
 ```bash
-dig @192.168.2.10 steamcontent.com A +short   # expected: 192.168.2.10
-dig @192.168.2.11 steamcontent.com A +short   # expected: 192.168.2.11
+dig @192.0.2.10 steamcontent.com A +short   # expected: 192.0.2.10
+dig @192.0.2.11 steamcontent.com A +short   # expected: 192.0.2.11
 ```
 
 Both answers have to name the address that was queried.
