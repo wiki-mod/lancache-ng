@@ -1544,18 +1544,8 @@ pub mod cert {
     // Why: a failed step names its subcommand.
     // From: Issue #1683 | PR #1858
     fn openssl(args: &[&str]) -> Result<String, String> {
-        let out = Command::new("openssl")
-            .args(args)
-            .output()
-            .map_err(|e| format!("openssl: {e}"))?;
-        if out.status.success() {
-            return Ok(String::from_utf8_lossy(&out.stdout).into_owned());
-        }
-        Err(format!(
-            "openssl {}: {}",
-            args.first().copied().unwrap_or_default(),
-            String::from_utf8_lossy(&out.stderr).trim()
-        ))
+        let out = crate::tool::run(Command::new("openssl").args(args))?;
+        Ok(String::from_utf8_lossy(&out).into_owned())
     }
 
     // What: path as an argument string.
@@ -5268,15 +5258,10 @@ pub mod tidy {
                 }
                 continue;
             }
-            let run = Command::new("xz")
-                .arg(format!("-{preset}"))
-                .arg("--")
-                .arg(&f.path)
-                .output();
-            match run {
-                Ok(o) if o.status.success() => {}
-                Ok(o) => errs.push(String::from_utf8_lossy(&o.stderr).trim().to_string()),
-                Err(e) => errs.push(format!("xz: {e}")),
+            let mut xz = Command::new("xz");
+            xz.arg(format!("-{preset}")).arg("--").arg(&f.path);
+            if let Err(e) = crate::tool::run(&mut xz) {
+                errs.push(e);
             }
         }
         errs
@@ -5290,17 +5275,9 @@ pub mod tidy {
             .append(true)
             .open(packed)
             .map_err(|e| format!("{}: {e}", packed.display()))?;
-        let o = Command::new("xz")
-            .arg(format!("-{preset}"))
-            .arg("-c")
-            .arg("--")
-            .arg(src)
-            .stdout(out)
-            .output()
-            .map_err(|e| format!("xz: {e}"))?;
-        if !o.status.success() {
-            return Err(String::from_utf8_lossy(&o.stderr).trim().to_string());
-        }
+        let mut xz = Command::new("xz");
+        xz.arg(format!("-{preset}")).arg("-c").arg("--").arg(src);
+        crate::tool::run(xz.stdout(out))?;
         std::fs::remove_file(src).map_err(|e| format!("{}: {e}", src.display()))
     }
 

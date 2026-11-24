@@ -793,11 +793,9 @@ fn in_window((from, to): (u32, u32)) -> bool {
     if to.abs_diff(from) == 1440 || from == to {
         return true;
     }
-    let now = std::process::Command::new("date")
-        .arg("+%H %M")
-        .output()
+    let now = lancache_ng::tool::run(std::process::Command::new("date").arg("+%H %M"))
         .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .and_then(|out| String::from_utf8(out).ok())
         .and_then(|t| {
             let (h, m) = t.trim().split_once(' ')?;
             Some(h.parse::<u32>().ok()? * 60 + m.parse::<u32>().ok()?)
