@@ -138,6 +138,16 @@ fn field(form: &Fields, key: &str) -> String {
         .unwrap_or_default()
 }
 
+// What: first and second DNS server as a list.
+// Why: an empty field is no server.
+// From: Issue #1683 | PR #2017
+fn dns_pair(first: String, second: String) -> Vec<String> {
+    [first, second]
+        .into_iter()
+        .filter(|d| !d.is_empty())
+        .collect()
+}
+
 // What: true for the value of a ticked switch.
 // Why: the pages send 1 or true for "on".
 // From: Issue #1683 | PR #2017
@@ -2005,10 +2015,7 @@ async fn main_subnet(
     if !(hit && op == "UI_ROUTE_SUBNET_UPDATE") {
         return Ok(());
     }
-    let dns: Vec<String> = [get("dns_primary"), get("dns_secondary")]
-        .into_iter()
-        .filter(|d| !d.is_empty())
-        .collect();
+    let dns = dns_pair(get("dns_primary"), get("dns_secondary"));
     let mut f = Fields::new();
     for (key, field) in [
         ("DHCP_SUBNET", "subnet"),
@@ -2055,10 +2062,7 @@ async fn kea_edit(
 // Why: named options; code options and hosts kept.
 // From: Issue #1683 | PR #1858
 fn subnet_from(get: &(dyn Fn(&str) -> String + Sync), id: u64, old: Option<&Value>) -> Value {
-    let dns: Vec<String> = [get("dns_primary"), get("dns_secondary")]
-        .into_iter()
-        .filter(|d| !d.is_empty())
-        .collect();
+    let dns = dns_pair(get("dns_primary"), get("dns_secondary"));
     let mut opts = vec![
         json!({"name": "routers", "data": get("gateway")}),
         json!({"name": "domain-name-servers", "data": dns.join(", ")}),
@@ -2109,10 +2113,7 @@ fn dnsmasq_fields(form: &Fields, proxy: bool) -> Fields {
     }
     if proxy {
         let get = |k: &str| field(form, k);
-        let dns: Vec<String> = [get("dhcp_dns_primary"), get("dhcp_dns_secondary")]
-            .into_iter()
-            .filter(|d| !d.is_empty())
-            .collect();
+        let dns = dns_pair(get("dhcp_dns_primary"), get("dhcp_dns_secondary"));
         out.insert("DHCP_DNS_SERVERS".into(), dns.join(" "));
     }
     out
