@@ -951,7 +951,7 @@ pub mod dns {
         // What: a secondary serves the primary's zones.
         // Why: its DHCP_DOMAIN is only the SOT default.
         // From: Issue #1683 | PR #2017
-        if Role::from_settings(s).is_ok_and(|r| r == Role::Secondary) {
+        if Role::from_settings(s)? == Role::Secondary {
             return Ok(s
                 .list("DNS_SECONDARY_ZONES")
                 .iter()
@@ -1275,7 +1275,7 @@ pub mod dhcp {
     // Why: one checked list for Kea and dnsmasq.
     // From: Issue #1683 | PR #1980
     pub fn custom_options(s: &Settings, raw: &str) -> Result<Vec<(u8, String)>, String> {
-        let max = usize::try_from(s.uint("DHCP_OPTION_DATA_MAX")?).unwrap_or(usize::MAX);
+        let max = s.num::<usize>("DHCP_OPTION_DATA_MAX")?;
         let mut out = Vec::new();
         for (n, line) in raw.lines().map(str::trim).enumerate() {
             if line.is_empty() {
@@ -2329,7 +2329,7 @@ pub mod dhcp_probe {
             Ok((
                 Duration::from_millis(s.uint("DHCP_PROBE_WINDOW_MS")?),
                 Duration::from_millis(s.uint("DHCP_PROBE_ACK_WAIT_MS")?),
-                u32::try_from(s.uint("DHCP_PROBE_SENDS")?.max(1)).unwrap_or(u32::MAX),
+                s.num::<u32>("DHCP_PROBE_SENDS")?,
             ))
         };
         let (window, wait, sends) = match timing() {

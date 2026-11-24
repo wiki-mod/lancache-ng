@@ -720,7 +720,12 @@ async fn save(
         .filter(|b| b.starts_with('/') && !b.starts_with("//"))
         .cloned()
         .map_or_else(|| app.settings().text("UI_PAGE_SETUP"), Ok)?;
-    let before = lancache_ng::dns::managed_zones(&app.settings()).unwrap_or_default();
+    // What: the zones before the save; none if unreadable.
+    // Why: a save may repair the settings; it must run.
+    // From: Issue #1683 | PR #2017
+    let before = lancache_ng::dns::managed_zones(&app.settings())
+        .inspect_err(|e| eprintln!("ui: zones before the save unknown: {e}"))
+        .unwrap_or_default();
     let result = commit(&app, form).await;
     if result.is_ok() {
         drop_old_zones(&app.settings(), &before).await;
@@ -732,13 +737,21 @@ async fn save(
 // Why: an old zone would keep answering its names.
 // From: Issue #1683 | PR #1980
 async fn drop_old_zones(s: &Settings, before: &[String]) {
-    let Ok(now) = lancache_ng::dns::managed_zones(s) else {
-        return;
+    let read = (
+        lancache_ng::dns::managed_zones(s),
+        Role::from_settings(s),
+        pdns_api(s),
+    );
+    let (now, role, api) = match read {
+        (Ok(now), Ok(role), Ok(api)) => (now, role, api),
+        (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => {
+            eprintln!("ui: old zones kept: {e}");
+            return;
+        }
     };
-    if Role::from_settings(s).is_ok_and(|r| r == Role::Secondary) {
+    if role == Role::Secondary {
         return;
     }
-    let Ok(api) = pdns_api(s) else { return };
     for zone in before.iter().filter(|z| !now.contains(z)) {
         // What: only zones without own records go.
         // Why: a record the user added is never lost.
@@ -2399,7 +2412,7 @@ async fn stats(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     // What: no dhcp tab while DHCP_MODE is off.
     // Why: the tab would show a stopped container.
     // From: Issue #1683
-    let off = dhcp_off_service(&s).ok().flatten().unwrap_or_default();
+    let off = dhcp_off_service(&s)?.unwrap_or_default();
     for c in s.list("STATS_CONTAINERS") {
         if c == off {
             continue;
@@ -3841,18 +3854,22 @@ fn colour(c: &Value) -> &'static str {
 async fn status(State(app): Shared) -> Response {
     let s = app.settings();
     let stopped = s.list("SERVICES_STOPPED");
-    let list = match (app.limits(&s), s.text("COMPOSE_PROJECT")) {
-        (Ok((_, limit)), Ok(project)) => app.docker.project(&project, limit).await.ok(),
-        _ => None,
-    };
-    let Some(list) = list else {
-        return axum::Json(json!({"state": "unavailable"})).into_response();
-    };
     // What: the dhcp container while DHCP_MODE is off.
     // Why: the bar must not offer Start for it.
     // From: Issue #1683 | PR #1980
-    let off = dhcp_off_service(&s).ok().flatten().unwrap_or_default();
-    let limit = app.limits(&s).map(|(_, l)| l).ok();
+    let read = (
+        app.limits(&s),
+        s.text("COMPOSE_PROJECT"),
+        dhcp_off_service(&s),
+    );
+    let list = match &read {
+        (Ok((_, limit)), Ok(project), Ok(_)) => app.docker.project(project, *limit).await.ok(),
+        _ => None,
+    };
+    let (Some(list), (Ok((_, limit)), _, Ok(off))) = (list, read) else {
+        return axum::Json(json!({"state": "unavailable"})).into_response();
+    };
+    let off = off.unwrap_or_default();
     let mut rows: Vec<Value> = Vec::new();
     for c in &list {
         let name = docker::service_of(c).unwrap_or_default();
@@ -3869,8 +3886,8 @@ async fn status(State(app): Shared) -> Response {
         // Why: a failure count alone names no reason.
         // From: Issue #1683 | PR #1980
         let mut reason = String::new();
-        if let (Some(l), "red" | "yellow", Some(id)) = (limit, colour, c["Id"].as_str())
-            && let Ok(v) = app.docker.inspect(id, l).await
+        if let ("red" | "yellow", Some(id)) = (colour, c["Id"].as_str())
+            && let Ok(v) = app.docker.inspect(id, limit).await
         {
             reason = v["State"]["Health"]["Log"]
                 .as_array()
