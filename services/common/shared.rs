@@ -2797,7 +2797,31 @@ pub mod recursor_conf {
                 lua += &format!("addNTA(\"{z}\")\n");
             }
         }
+        lua += &root_copy(s)?;
         Ok(lua)
+    }
+
+    // What: Lua line that keeps a root zone copy cached.
+    // Why: fewer root queries; none if "." goes upstream.
+    // From: Issue #1683 | PR #2019
+    fn root_copy(s: &Settings) -> Result<String, String> {
+        let all_upstream = !upstream_servers(s)?.is_empty()
+            && upstream_zones(s, "DNS_UPSTREAM_ZONES")?
+                .iter()
+                .any(|z| z == ".");
+        if all_upstream || !s.flag("ROOT_ZONE_MIRROR")? {
+            return Ok(String::new());
+        }
+        let url = s.text("ROOT_ZONE_MIRROR_URL")?;
+        crate::config::plain(&url)?;
+        // What: the recursor checks ZONEMD and DNSSEC.
+        // Why: both are defaults of zoneToCache.
+        // From: Issue #1683 | PR #2019
+        Ok(format!(
+            "zoneToCache(\".\", \"url\", \"{url}\", {{ refreshPeriod={}, retryOnErrorPeriod={} }})\n",
+            s.uint("ROOT_ZONE_MIRROR_REFRESH")?,
+            s.uint("ROOT_ZONE_MIRROR_RETRY")?
+        ))
     }
 
     // What: domain list for upstream forwarding.
@@ -3069,9 +3093,6 @@ pub mod dnsdist_conf {
         pub backend: String,
     }
 
-    // What: refuses a quote, backslash or line break.
-    // Why: the value goes into a Lua string unchanged.
-    // From: Issue #1683 | PR #2017
     // What: dnsdist Lua config from plain values.
     // Why: no Settings needed; the tests call it.
     // From: Issue #1683
