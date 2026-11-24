@@ -3198,12 +3198,13 @@ async fn apply_all(
         .is_some_and(|n| restarted.contains(n))
     {
         let until = std::time::Instant::now() + limit;
+        let poll = Duration::from_secs(new.uint("APPLY_HEALTH_POLL_SECONDS")?);
         while let Err(e) = ensure_zones(new).await {
             if std::time::Instant::now() >= until {
                 report.push(format!("dns api: {e}"));
                 break;
             }
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            tokio::time::sleep(poll).await;
         }
     }
     // What: issue missing certs after the restarts.

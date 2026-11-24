@@ -1256,6 +1256,10 @@ runtime:
     - STEAM_DEVICE_NAME=LanCache-NG
     - STEAM_AUTH_PLATFORM_TYPE=1
     - STEAM_HEARTBEAT_DEFAULT=30
+    # What: seconds a stored access token must still live.
+    # Why: a token that ends during a call fails it.
+    # From: Issue #871 | PR #2017
+    - STEAM_TOKEN_MARGIN_SECONDS=60
     - STEAM_MANIFEST_API_VERSION=5
     - STEAM_OS=windows
     - STEAM_PROTOCOL_VERSION=65580
@@ -1556,6 +1560,7 @@ runtime:
     - STEAM_DEVICE_NAME=text;;;live;services
     - STEAM_AUTH_PLATFORM_TYPE=uint;0;10;live;services
     - STEAM_HEARTBEAT_DEFAULT=uint;1;600;live;services
+    - STEAM_TOKEN_MARGIN_SECONDS=uint;0;3600;live;services
     - STEAM_MANIFEST_API_VERSION=uint;1;100;live;services
     - STEAM_OS=choice;windows,macos,linux;;live;services
     - STEAM_PROTOCOL_VERSION=uint;1;1000000;live;services

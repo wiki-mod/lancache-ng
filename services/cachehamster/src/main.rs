@@ -517,13 +517,14 @@ async fn login_poll(c: &Ctx, client: &reqwest::Client) -> Result<Value, String> 
 // Why: Web API calls need it; a renewed one is not kept.
 // From: Issue #871 | PR #1980
 async fn access_token(c: &Ctx, client: &reqwest::Client, s: &Session) -> Result<String, String> {
-    // What: the sealed token while it lives a minute more.
+    // What: the sealed token while it lives long enough.
     // Why: CM login needs a client token; see login_begin.
     // From: Issue #871 | PR #1980
+    let margin = c.s.uint("STEAM_TOKEN_MARGIN_SECONDS")?;
     let live = jwt_claims(&s.access_token)
         .ok()
         .and_then(|j| j.get("exp").and_then(Value::as_u64))
-        .is_some_and(|exp| exp > clock::unix_secs() + 60);
+        .is_some_and(|exp| exp > clock::unix_secs().saturating_add(margin));
     if live {
         return Ok(s.access_token.clone());
     }
