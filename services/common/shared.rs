@@ -163,6 +163,16 @@ pub mod fs {
         Ok(!same)
     }
 
+    // What: removes a file; a missing one is fine.
+    // Why: absent is the state the caller wants.
+    // From: Issue #1683 | PR #2017
+    pub fn remove_if_present(path: &Path) -> io::Result<()> {
+        match fs::remove_file(path) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        }
+    }
+
     // What: metadata, or None if the path is absent.
     // Why: absent is a normal state, not an error.
     // From: Issue #1683 | PR #1858
@@ -1666,11 +1676,8 @@ pub mod cert {
             ])
         });
         for tmp in [&csr, &ext] {
-            match std::fs::remove_file(tmp) {
-                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-                    eprintln!("cert: {} left behind: {e}", tmp.display());
-                }
-                _ => {}
+            if let Err(e) = crate::fs::remove_if_present(tmp) {
+                eprintln!("cert: {} left behind: {e}", tmp.display());
             }
         }
         // What: a failed sign leaves no half key pair.

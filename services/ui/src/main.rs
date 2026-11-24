@@ -1380,12 +1380,7 @@ struct Address {
 fn renew_token(s: &Settings) -> Result<String, String> {
     let dir = secret::dir(s)?;
     let file = secret::file_of(&dir, "SECONDARY_REGISTRATION_TOKEN");
-    match std::fs::remove_file(&file) {
-        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-            return Err(format!("{}: {e}", file.display()));
-        }
-        _ => {}
-    }
+    fs::remove_if_present(&file).map_err(|e| format!("{}: {e}", file.display()))?;
     registration_token(s)
 }
 
@@ -3594,12 +3589,7 @@ fn tsig_secret(s: &Settings) -> Result<String, String> {
 async fn rotate_tsig(app: &App) -> Result<(), String> {
     let s = app.settings();
     let file = tsig_file(&s)?;
-    match std::fs::remove_file(&file) {
-        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-            return Err(format!("{}: {e}", file.display()));
-        }
-        _ => {}
-    }
+    fs::remove_if_present(&file).map_err(|e| format!("{}: {e}", file.display()))?;
     secret::load_or_create(&file, new_tsig, fs::Owner::default())
         .map_err(|e| format!("DDNS_TSIG_KEY: {e}"))?;
     for line in apply_all(app, &s, &s, true).await? {

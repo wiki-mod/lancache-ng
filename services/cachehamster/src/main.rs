@@ -232,11 +232,7 @@ fn read_json<T: for<'a> Deserialize<'a>>(path: &Path) -> Result<Option<T>, Strin
 // Why: logout and login cleanup must not hide IO errors.
 // From: Issue #871 | PR #1858
 fn remove(path: &Path) -> Result<(), String> {
-    match std::fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(format!("{}: {e}", path.display())),
-    }
+    lancache_ng::fs::remove_if_present(path).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 // What: the 32-byte key that seals the session token.
