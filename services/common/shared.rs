@@ -1390,6 +1390,16 @@ pub mod docker {
         base: String,
     }
 
+    // What: the Id of an answer; what names the call.
+    // Why: exec and create both go on with this Id.
+    // From: Issue #1683 | PR #2017
+    fn id_of(answer: &[u8], what: &str) -> Result<String, Error> {
+        decode(answer)?["Id"]
+            .as_str()
+            .map(str::to_string)
+            .ok_or_else(|| Error::Decode(format!("{what} without Id")))
+    }
+
     // What: JSON body of an answer.
     // Why: one decode error type.
     // From: Issue #1683 | PR #1858
@@ -1464,10 +1474,7 @@ pub mod docker {
                     limit,
                 )
                 .await?;
-            let id = decode(&made)?["Id"]
-                .as_str()
-                .ok_or_else(|| Error::Decode("exec without Id".into()))?
-                .to_string();
+            let id = id_of(&made, "exec")?;
             let out = self
                 .call(
                     Method::POST,
@@ -1561,10 +1568,7 @@ pub mod docker {
             let made = self
                 .call(Method::POST, "/containers/create", Some(spec), limit)
                 .await?;
-            let id = decode(&made)?["Id"]
-                .as_str()
-                .ok_or_else(|| Error::Decode("create without Id".into()))?
-                .to_string();
+            let id = id_of(&made, "create")?;
             let run = async {
                 let start = format!("/containers/{id}/start");
                 self.call(Method::POST, &start, None, limit).await?;
