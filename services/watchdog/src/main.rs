@@ -392,7 +392,7 @@ fn certs(s: &Settings, f: &mut Findings) -> Result<(), String> {
 // Why: shows a lost NOTIFY or a broken AXFR.
 // From: Issue #1683 | PR #1858
 async fn dns_sync(s: &Settings, f: &mut Findings) -> Result<(), String> {
-    let far = s.text("PDNS_SECONDARY_API_URL").unwrap_or_default();
+    let far = s.text_or_empty("PDNS_SECONDARY_API_URL");
     if far.is_empty() {
         return Ok(());
     }

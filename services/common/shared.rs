@@ -3231,7 +3231,7 @@ pub mod kea_conf {
         if !ntp.is_empty() {
             rows.push(json!({"name": "ntp-servers", "data": ntp.join(", ")}));
         }
-        let raw = s.text("DHCP_CUSTOM_OPTIONS").unwrap_or_default();
+        let raw = s.text_or_empty("DHCP_CUSTOM_OPTIONS");
         for (code, data) in crate::dhcp::custom_options(s, &raw)? {
             rows.push(json!({"code": code, "data": data}));
         }
@@ -3420,7 +3420,7 @@ pub mod dnsmasq_conf {
     }
 
     fn pxe(s: &Settings, c: &mut Conf) -> Result<(), String> {
-        let get = |k: &str| s.text(k).unwrap_or_default();
+        let get = |k: &str| s.text_or_empty(k);
         let server = get("DHCP_PROXY_PXE_BOOT_SERVER");
         let bios = get("DHCP_PROXY_PXE_BOOT_FILENAME_BIOS");
         let uefi = get("DHCP_PROXY_PXE_BOOT_FILENAME_UEFI");
@@ -3450,7 +3450,7 @@ pub mod dnsmasq_conf {
     // Why: 10.0.0.0 default missed the real LAN.
     // From: Issue #1683 | PR #1991
     fn proxy_range(s: &Settings) -> Result<String, String> {
-        let start = s.text("DHCP_SUBNET_START").unwrap_or_default();
+        let start = s.text_or_empty("DHCP_SUBNET_START");
         if !start.is_empty() {
             return Ok(format!("{start},proxy"));
         }
@@ -3469,7 +3469,7 @@ pub mod dnsmasq_conf {
             // What: empty relay address = this host IP.
             // Why: DoMe 07.11.: one-click mode switch.
             // From: Issue #1683 | PR #1985
-            let local = Some(s.text("DHCP_RELAY_LOCAL_ADDR").unwrap_or_default())
+            let local = Some(s.text_or_empty("DHCP_RELAY_LOCAL_ADDR"))
                 .filter(|v| !v.is_empty())
                 .or_else(|| {
                     crate::recursor_conf::own_ips(s)
@@ -3486,7 +3486,7 @@ pub mod dnsmasq_conf {
         if mode != Mode::DnsmasqProxy {
             return Err(format!("no dnsmasq in DHCP mode {mode:?}"));
         }
-        let get = |k: &str| s.text(k).unwrap_or_default();
+        let get = |k: &str| s.text_or_empty(k);
         c.add(&format!("dhcp-range={}", proxy_range(s)?))?;
         c.add_if("interface=", &s.list("DHCP_PROXY_INTERFACE").join(","))?;
         c.add_if("dhcp-option-pxe=3,", &get("DHCP_PROXY_ROUTER"))?;

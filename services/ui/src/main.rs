@@ -235,7 +235,7 @@ impl App {
         // Why: they live in env, not in the spec list.
         // From: Issue #1683 | PR #1980
         for key in ENV_ONLY_KEYS {
-            let val = s.text(key).unwrap_or_default();
+            let val = s.text_or_empty(key);
             values.entry(key.into()).or_insert(val);
         }
         let login = !password_hash(&s).is_empty();
@@ -258,7 +258,7 @@ impl App {
         ctx.insert("repo_url", &s.text("REPO_URL")?);
         ctx.insert("desired_services", &s.list("UI_CONTROLLABLE_SERVICES"));
         ctx.insert("programs", &s.list("UI_SERVICES"));
-        ctx.insert("ui_service", &s.text("UI_SERVICE").unwrap_or_default());
+        ctx.insert("ui_service", &s.text_or_empty("UI_SERVICE"));
         ctx.insert("watchdog_refresh_seconds", &s.uint("UI_STATUS_REFRESH")?);
         ctx.insert("warnings", &s.warnings);
         // What: texts of the request language.
@@ -266,7 +266,7 @@ impl App {
         // From: Issue #1683 | PR #1980
         let code = LANG
             .try_with(Clone::clone)
-            .unwrap_or_else(|_| s.text("UI_LANG_DEFAULT").unwrap_or_default());
+            .unwrap_or_else(|_| s.text_or_empty("UI_LANG_DEFAULT"));
         let empty = BTreeMap::new();
         let t = all_texts().get(&code).unwrap_or(&empty);
         let langs: Vec<(&str, &str)> = all_texts()
@@ -365,7 +365,7 @@ fn basic_credentials(headers: &HeaderMap) -> Option<(String, String)> {
 // Why: an empty hash means the ui runs without a login.
 // From: Issue #1683 | PR #2017
 fn password_hash(s: &Settings) -> String {
-    s.text("UI_AUTH_PASSWORD_HASH").unwrap_or_default()
+    s.text_or_empty("UI_AUTH_PASSWORD_HASH")
 }
 
 // What: Basic auth only when a hash is set.
@@ -379,7 +379,7 @@ async fn login_ok(s: &Settings, headers: &HeaderMap) -> bool {
     let Some((user, pass)) = basic_credentials(headers) else {
         return false;
     };
-    let want = s.text("UI_AUTH_USER").unwrap_or_default();
+    let want = s.text_or_empty("UI_AUTH_USER");
     let pass_ok = tokio::task::spawn_blocking(move || verify(&hash, &pass))
         .await
         .unwrap_or(false);
@@ -1122,7 +1122,7 @@ async fn domains(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     // What: UI address on the LAN when none is set.
     // Why: live test: an empty --primary broke the command.
     // From: Issue #1683 | PR #1980
-    let mut url = s.text("UI_PUBLIC_URL").unwrap_or_default();
+    let mut url = s.text_or_empty("UI_PUBLIC_URL");
     if url.is_empty() {
         url = format!("http://{}:{}", s.text("IP_HTTP")?, s.uint("UI_PORT")?);
     }
@@ -1366,7 +1366,7 @@ fn peer_kit(s: &Settings) -> Result<Value, String> {
         "tsig_name": sec.tsig_name,
         "tsig_secret": sec.tsig_secret,
         "syslog_primary": format!("{primary}:{}", s.uint("LANCACHE_LOG_PORT")?),
-        "dns_local_reverse_zones": s.text("DNS_LOCAL_REVERSE_ZONES").unwrap_or_default(),
+        "dns_local_reverse_zones": s.text_or_empty("DNS_LOCAL_REVERSE_ZONES"),
         "image_registry": process_env("LANCACHE_IMAGE_REGISTRY").unwrap_or_default(),
         "image_prefix": process_env("LANCACHE_IMAGE_PREFIX").unwrap_or_default(),
         "image_channel": process_env("LANCACHE_IMAGE_CHANNEL").unwrap_or_default(),
@@ -1970,7 +1970,7 @@ async fn dhcp(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     // What: form values the dhcp page shows.
     // Why: Tera stops on any missing variable.
     // From: Issue #1683 | PR #1980
-    let opt = |k: &str| s.text(k).unwrap_or_default();
+    let opt = |k: &str| s.text_or_empty(k);
     let dns = s.list("DHCP_DNS_SERVERS");
     ctx.insert("dhcp_dns_primary", dns.first().map_or("", String::as_str));
     ctx.insert("dhcp_dns_secondary", dns.get(1).map_or("", String::as_str));
@@ -2245,7 +2245,7 @@ async fn dhcp_action(
     // From: Issue #1683 | PR #1991
     let asked = DhcpMode::from_word(&get("dhcp_mode")).ok();
     let relay = op == "UI_ROUTE_DHCP_MODE" && asked == Some(DhcpMode::DnsmasqRelay);
-    if relay && s.text("UPSTREAM_DHCP_IP").unwrap_or_default().is_empty() {
+    if relay && s.text_or_empty("UPSTREAM_DHCP_IP").is_empty() {
         return Err(bad_request(tr("err_relay_needs_upstream")));
     }
     // What: the Kea server needs a network card.
@@ -2323,7 +2323,7 @@ async fn stats(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     // From: Issue #1683 | PR #1980
     let step = s.uint("STATS_STEP").unwrap_or_default();
     ctx.insert("stats_step", &step);
-    let snmp = s.text("STATS_SNMP_TARGET").unwrap_or_default();
+    let snmp = s.text_or_empty("STATS_SNMP_TARGET");
     let mut tabs = vec![json!({
         "id": lancache_ng::rrd::MACHINE,
         "label": tr("stats_machine"),
@@ -3328,7 +3328,7 @@ async fn ensure_primary_zones(s: &Settings, key: &str) -> Result<(), String> {
 // Why: one rule for the DNS page and the ns2 record.
 // From: Issue #1683 | PR #1980
 fn primary_https_ip(s: &Settings) -> Result<String, String> {
-    let https = s.text("IP_HTTPS").unwrap_or_default();
+    let https = s.text_or_empty("IP_HTTPS");
     let own = !https.is_empty() && https != s.text("IP_HTTP")? && !https.starts_with("127.");
     // What: no HTTPS part while HTTPS is off.
     // Why: the field woke HTTPS that was off.
@@ -3991,7 +3991,7 @@ fn pick_lang(app: &App, headers: &HeaderMap) -> String {
             return c;
         }
     }
-    app.settings().text("UI_LANG_DEFAULT").unwrap_or_default()
+    app.settings().text_or_empty("UI_LANG_DEFAULT")
 }
 
 // What: run the request in its language.

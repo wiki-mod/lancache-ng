@@ -629,6 +629,13 @@ impl Settings {
             .ok_or_else(|| format!("{key} is not set"))
     }
 
+    // What: value as text; empty when it is missing.
+    // Why: pages and optional features read it unguarded.
+    // From: Issue #1683 | PR #2017
+    pub fn text_or_empty(&self, key: &str) -> String {
+        self.text(key).unwrap_or_default()
+    }
+
     // What: value as number.
     // Why: only uint keys answer; others are errors.
     // From: Issue #1683 | PR #1858
