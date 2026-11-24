@@ -1256,7 +1256,7 @@ async fn ptr(s: &Settings, add: bool, get: &(dyn Fn(&str) -> String + Sync)) -> 
 // Why: kept like any secret; rotate renews it.
 // From: Issue #1683 | PR #1858
 fn registration_token(s: &Settings) -> Result<String, String> {
-    let dir = PathBuf::from(s.text("SECRETS_DIR")?);
+    let dir = secret::dir(s)?;
     let name = "SECONDARY_REGISTRATION_TOKEN";
     secret::resolve(&process_env, &dir, name, fs::Owner::default()).map_err(|e| e.to_string())
 }
@@ -1361,7 +1361,7 @@ struct Address {
 // Why: drop the file; resolve makes a fresh one.
 // From: Issue #1683 | PR #1858
 fn renew_token(s: &Settings) -> Result<String, String> {
-    let dir = PathBuf::from(s.text("SECRETS_DIR")?);
+    let dir = secret::dir(s)?;
     let file = secret::file_of(&dir, "SECONDARY_REGISTRATION_TOKEN");
     match std::fs::remove_file(&file) {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
@@ -3548,10 +3548,7 @@ async fn zones_at_start(app: Arc<App>) {
 // What: path of the DDNS TSIG secret file.
 // Why: Kea DDNS and PowerDNS share this key.
 fn tsig_file(s: &Settings) -> Result<PathBuf, String> {
-    Ok(secret::file_of(
-        Path::new(&s.text("SECRETS_DIR")?),
-        "DDNS_TSIG_KEY",
-    ))
+    Ok(secret::file_of(&secret::dir(s)?, "DDNS_TSIG_KEY"))
 }
 
 // What: fresh 32-byte TSIG secret, base64.
@@ -3606,7 +3603,7 @@ async fn rotate_tsig(app: &App) -> Result<(), String> {
 // Why: made once; restarts never change them.
 // From: Issue #1683 | PR #1858
 fn secrets(s: &Settings) -> Result<render::Secrets, String> {
-    let dir = PathBuf::from(s.text("SECRETS_DIR")?);
+    let dir = secret::dir(s)?;
     let get = |k: &str| {
         secret::resolve(&process_env, &dir, k, fs::Owner::default())
             .map_err(|e| format!("{k}: {e}"))
@@ -4182,7 +4179,7 @@ async fn main() -> Result<(), String> {
     if hash.is_empty() && !s.flag("ALLOW_INSECURE_UI").unwrap_or(false) {
         return Err("Admin-UI authentication is required".into());
     }
-    let dir = PathBuf::from(s.text("SECRETS_DIR")?);
+    let dir = secret::dir(&s)?;
     let key = secret::resolve(&|_| None, &dir, "UI_SESSION_KEY", fs::Owner::default())
         .map_err(|e| e.to_string())?;
     TEXTS

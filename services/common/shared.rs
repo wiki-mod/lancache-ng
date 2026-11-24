@@ -270,6 +270,13 @@ pub mod secret {
         presented.as_bytes().ct_eq(expected.as_bytes()).into()
     }
 
+    // What: the directory of the secret files.
+    // Why: one owner of the SECRETS_DIR setting.
+    // From: Issue #1683 | PR #2017
+    pub fn dir(s: &crate::config::Settings) -> Result<PathBuf, String> {
+        Ok(PathBuf::from(s.text("SECRETS_DIR")?))
+    }
+
     // What: secret file of a key: A_B becomes a-b.
     // Why: one naming rule for every secret file.
     // From: Issue #1683 | PR #1858
