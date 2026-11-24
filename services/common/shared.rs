@@ -3629,7 +3629,7 @@ pub mod nginx_conf {
     // From: Issue #1683 | PR #1858
     fn cert_id(host: &str, kind: &str) -> String {
         let sum = Sha256::digest(format!("{kind}:{host}").as_bytes());
-        sum[..16].iter().map(|b| format!("{b:02x}")).collect()
+        hex::encode(&sum[..16])
     }
 
     impl Hosts {

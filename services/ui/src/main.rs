@@ -297,7 +297,7 @@ impl Csrf {
         let mut h = Sha256::new();
         h.update(key);
         h.update(session.as_bytes());
-        Csrf(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
+        Csrf(hex::encode(h.finalize()))
     }
 
     fn matches(&self, given: &str) -> bool {
