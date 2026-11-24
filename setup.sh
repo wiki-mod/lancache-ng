@@ -3154,11 +3154,7 @@ sync_repo_to_branch() {
     local repo_dir="$1" branch="$2"
 
     require_clean_repo "$repo_dir"
-
-    git -C "$repo_dir" fetch --prune origin \
-        || die "Failed to refresh repository metadata for $repo_dir."
-    git -C "$repo_dir" show-ref --verify --quiet "refs/remotes/origin/$branch" \
-        || die "Remote branch origin/$branch is unavailable for $repo_dir."
+    channel_ref_commit "$repo_dir" "$branch" > /dev/null || exit $?
     git -C "$repo_dir" checkout -B "$branch" "origin/$branch" \
         || die "Failed to reset $repo_dir to origin/$branch."
 }
@@ -3167,13 +3163,29 @@ sync_repo_to_branch() {
 # Why: a pinned channel runs the code of its image tag
 # From: Issue #1683 | PR #1858
 sync_repo_to_commit() {
-    local repo_dir="$1" ref="$2"
+    local repo_dir="$1" ref="$2" commit
 
     require_clean_repo "$repo_dir"
+    commit=$(channel_ref_commit "$repo_dir" "$ref") || exit $?
+    git -C "$repo_dir" checkout --detach "$commit" \
+        || die "Failed to detach $repo_dir at $ref ($commit)."
+}
 
+# What: fetches origin; prints the commit of a code ref
+# Why: a move and its "already there" check read one commit
+# From: Issue #1683
+channel_ref_commit() {
+    local repo_dir="$1" ref="$2"
+    if is_channel_branch "$ref"; then
+        git -C "$repo_dir" fetch --prune origin \
+            || die "Failed to refresh repository metadata for $repo_dir."
+        git -C "$repo_dir" rev-parse --verify --quiet "refs/remotes/origin/${ref}^{commit}" \
+            || die "Remote branch origin/$ref is unavailable for $repo_dir."
+        return 0
+    fi
     git -C "$repo_dir" fetch --prune --tags origin \
         || die "Failed to refresh repository metadata for $repo_dir."
-    git -C "$repo_dir" checkout --detach "${ref}^{commit}" \
+    git -C "$repo_dir" rev-parse --verify --quiet "${ref}^{commit}" \
         || die "Tag or commit '$ref' is not on origin of $repo_dir; check LANCACHE_IMAGE_TAG."
 }
 
@@ -3599,15 +3611,23 @@ adopt_moved_config_prod_keys() {
     remove_empty_dirs_up "${dir%/*}" "${dir##*/}"
 }
 
+# What: the config/prod templates with local edits
+# Why: the move of edits and the update check read one list
+# From: Issue #1683
+config_prod_edited_files() {
+    local repo_root="$1"
+    [[ -e "$repo_root/.git" ]] || return 0
+    git -C "$repo_root" diff --name-only HEAD -- 'config/prod/*.env' \
+        || die "Failed to list edited config/prod files in $repo_root (exit $?)."
+}
+
 # What: template edits move into <x>.local.env, newest wins
 # Why: edits survive (AG-OP-009); checkout stays syncable
 # From: Issue #1683 | PR #1858
 adopt_config_prod_edits() {
     local repo_root="$1" rel template local_env key raw head_raw head list in_head keys
     local -a changed
-    [[ -e "$repo_root/.git" ]] || return 0
-    list=$(git -C "$repo_root" diff --name-only HEAD -- 'config/prod/*.env') \
-        || die "Failed to list edited config/prod files in $repo_root (exit $?)."
+    list=$(config_prod_edited_files "$repo_root") || exit $?
     mapfile -t changed <<< "$list"
     for rel in "${changed[@]}"; do
         [[ -n "$rel" && "$rel" != *.local.env ]] || continue
@@ -4670,6 +4690,17 @@ lancache_image_refs_for_tag() {
     done <<< "$vars"
 }
 
+# What: the tag and image pins an update would write now
+# Why: install, update, its check and auto-update agree
+# From: Issue #1683
+lancache_expected_image_pins() {
+    local -n _pins_tag="$1" _pins_refs="$2"
+    local env_file="$3"
+    _pins_tag=$(resolve_lancache_image_tag "$env_file") || exit $?
+    _pins_refs=$(lancache_image_refs_for_tag "$env_file" "$_pins_tag") \
+        || die "Cannot pin the images of ${_pins_tag} for ${env_file}; it stays unchanged (exit $?)."
+}
+
 # What: the image pin lines of env file $1, as stored
 # Why: update and restore read the pins one way
 # From: Issue #1683 | PR #2017
@@ -4893,9 +4924,7 @@ migrate_env_for_update() (
         # What: re-derives the channel from the tag itself
         # Why: no channel write to .env is needed first
         # From: Issue #1683 | PR #1858
-        lancache_image_tag=$(resolve_lancache_image_tag "$env_file") || exit $?
-        lancache_image_refs=$(lancache_image_refs_for_tag "$env_file" "$lancache_image_tag") \
-            || die "Cannot pin the images of ${lancache_image_tag} for ${env_file}; it stays unchanged (exit $?)."
+        lancache_expected_image_pins lancache_image_tag lancache_image_refs "$env_file"
     fi
     # What: a restore skips the registry platform check
     # Why: pins were checked once; a rollback needs no GHCR
@@ -6987,31 +7016,50 @@ switch_channel_dir_and_resume() {
     }
 }
 
-# What: pulls the checkout and reruns the update from it
-# Why: compose, templates and setup.sh must move together
-# From: Issue #1683 | PR #1858
-update_repo_and_resume() {
-    local install_dir="$1" repo_dir="$1" branch channel tag target old new baseline="" svc
-    local exec_rc dir
-    is_deploy_prod_install_dir "$install_dir" && repo_dir=$(deploy_prod_repo_root "$install_dir")
-    channel=$(resolve_lancache_image_channel "$_UPDATE_ENV_FILE") || exit $?
+# What: how an update moves the code: switch, move or stay
+# Why: the "nothing to do" check and the move share it
+# From: Issue #1683
+update_code_plan() {
+    local -n _plan_action="$1" _plan_repo="$2" _plan_channel="$3" _plan_target="$4"
+    local install_dir="$5" tag branch dir commit head
+    _plan_action=stay _plan_repo="$install_dir" _plan_target=""
+    is_deploy_prod_install_dir "$install_dir" && _plan_repo=$(deploy_prod_repo_root "$install_dir")
+    _plan_channel=$(resolve_lancache_image_channel "$_UPDATE_ENV_FILE") || exit $?
     tag=$(shell_or_env_value LANCACHE_IMAGE_TAG "$_UPDATE_ENV_FILE") || exit $?
     # What: another channel's dir or the old root moves
     # Why: each channel runs the code of its own dir
     # From: Issue #1683 | PR #1858
-    if [[ -e "$repo_dir/.git" ]] && is_channel_layout_repo "$repo_dir"; then
-        branch=$(checkout_own_branch "$repo_dir") || exit $?
-        dir=$(channel_code_dir "$channel") || exit $?
-        if [[ -z "$branch" ]]; then
-            if [[ "$(realpath -m "$repo_dir")" != "$(realpath -m "$dir")" ]]; then
-                target=$(lancache_channel_code_ref "$channel" "$tag") || exit $?
-                [[ -n "$target" ]] || die "Channel $channel needs LANCACHE_IMAGE_TAG to name its code."
-                switch_channel_dir_and_resume "$install_dir" "$repo_dir" "$channel" "$target"
-            fi
+    if [[ -e "$_plan_repo/.git" ]] && is_channel_layout_repo "$_plan_repo"; then
+        branch=$(checkout_own_branch "$_plan_repo") || exit $?
+        dir=$(channel_code_dir "$_plan_channel") || exit $?
+        if [[ -z "$branch" && "$(realpath -m "$_plan_repo")" != "$(realpath -m "$dir")" ]]; then
+            _plan_target=$(lancache_channel_code_ref "$_plan_channel" "$tag") || exit $?
+            [[ -n "$_plan_target" ]] || die "Channel $_plan_channel needs LANCACHE_IMAGE_TAG to name its code."
+            _plan_action=switch
+            return 0
         fi
     fi
-    target=$(channel_checkout_target "$repo_dir" "$channel" "$tag") || exit $?
-    [[ -n "$target" ]] || return 0
+    _plan_target=$(channel_checkout_target "$_plan_repo" "$_plan_channel" "$tag") || exit $?
+    [[ -n "$_plan_target" ]] || return 0
+    commit=$(channel_ref_commit "$_plan_repo" "$_plan_target") || exit $?
+    head=$(checkout_head "$_plan_repo") || exit $?
+    if [[ "$commit" = "$head" ]]; then
+        print_ok "Repository already at $head"
+        return 0
+    fi
+    _plan_action=move
+}
+
+# What: carries out the code plan and reruns the update
+# Why: compose, templates and setup.sh must move together
+# From: Issue #1683 | PR #1858
+update_repo_and_resume() {
+    local install_dir="$1" action="$2" repo_dir="$3" channel="$4" target="$5"
+    local branch old new baseline="" svc exec_rc
+    case "$action" in
+        stay) return 0 ;;
+        switch) switch_channel_dir_and_resume "$install_dir" "$repo_dir" "$channel" "$target" ;;
+    esac
     branch=$(checkout_branch_name "$repo_dir") || exit $?
     old=$(checkout_head "$repo_dir") || exit $?
     print_step "Updating repo to $target (channel $channel)"
@@ -7058,11 +7106,55 @@ update_resume_handoff() {
     print_ok "Continuing the update with $LANCACHE_UPDATE_REPO/setup.sh"
 }
 
+# What: names each container that differs from compose
+# Why: a missing, changed or sick container is update work
+# From: Issue #1683
+stack_container_drift() {
+    local install_dir="$1" env_file="$2" hashes svc want have id wanted_list
+    local -a all=() wanted=()
+    hashes=$(stack_compose "$install_dir" "$env_file" config --hash '*') \
+        || { printf 'compose config --hash failed (exit %s)\n' "$?"; return 0; }
+    stack_services_into all "$install_dir" "$env_file" \
+        || { printf 'the service list failed (exit %s)\n' "$?"; return 0; }
+    wanted_stack_services wanted "$env_file" "${all[@]}"
+    wanted_list=" ${wanted[*]} "
+    while read -r svc want; do
+        [[ -n "$svc" ]] || continue
+        id=$(service_container_id "$svc") || { printf '%s: container lookup failed\n' "$svc"; continue; }
+        if [[ -z "$id" ]]; then
+            printf '%s has no container\n' "$svc"
+            continue
+        fi
+        have=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.config-hash"}}' "$id") \
+            || { printf '%s: docker inspect failed (exit %s)\n' "$svc" "$?"; continue; }
+        [[ "$have" = "$want" ]] || printf '%s runs an older config\n' "$svc"
+        [[ "$wanted_list" != *" $svc "* ]] || service_container_is_healthy "$svc" \
+            || printf '%s is not running healthy\n' "$svc"
+    done <<< "$hashes"
+}
+
+# What: why an update has work; nothing when it has none
+# Why: a converged stack must not stop for a backup
+# From: Issue #1683
+update_pending_reasons() {
+    local install_dir="$1" code_action="$2" edited tag refs deployed
+    [[ "$code_action" = stay ]] || printf 'the code moves (%s)\n' "$code_action"
+    if is_deploy_prod_install_dir "$install_dir"; then
+        edited=$(config_prod_edited_files "$(deploy_prod_repo_root "$install_dir")") || exit $?
+        [[ -z "$edited" ]] || printf 'config/prod has local edits\n'
+    fi
+    lancache_expected_image_pins tag refs "$_UPDATE_ENV_FILE"
+    deployed=$(lancache_image_refs_in_env "$_UPDATE_ENV_FILE") || exit $?
+    [[ "$(lancache_image_refs_fingerprint "$refs")" = "$(lancache_image_refs_fingerprint "$deployed")" ]] \
+        || printf 'the image pins change (%s)\n' "$tag"
+    stack_container_drift "$install_dir" "$_UPDATE_ENV_FILE"
+}
+
 # What: runs update steps in fixed order, with rollback
 # Why: reordering can leave a half-migrated stack running
 # From: Issue #1683 | PR #1858
 perform_stack_update_flow() {
-    local install_dir="$1"
+    local install_dir="$1" migrated=0
     # What: refuses an unsupported arch before any change
     # Why: the quickstart migration below already mutates
     # From: Issue #1683 | PR #1858
@@ -7070,6 +7162,7 @@ perform_stack_update_flow() {
     if is_quickstart_install "$install_dir"; then
         migrate_quickstart_install "$install_dir" || exit $?
         install_dir="${PROD_COMPOSE%/*}"
+        migrated=1
     fi
     install_dir=$(resolve_stack_dir_checked "$install_dir") || exit $?
     # What: installs curl, dig and jq before any mutation
@@ -7086,6 +7179,19 @@ perform_stack_update_flow() {
         UPDATE_CONVERGENCE_PAUSED=1
         trap resume_lancache_convergence_after_failed_update EXIT
     else
+        # What: an update without work keeps the stack up
+        # Why: the backup would stop it for nothing
+        # From: Issue #1683
+        local plan_action plan_repo plan_channel plan_target pending
+        update_code_plan plan_action plan_repo plan_channel plan_target "$install_dir"
+        if [[ "$migrated" = 0 ]]; then
+            pending=$(update_pending_reasons "$install_dir" "$plan_action") || exit $?
+            if [[ -z "$pending" ]]; then
+                print_ok "Nothing to update: code, image pins and containers are current; the stack keeps running."
+                return 0
+            fi
+            print_ok "Update needed: ${pending//$'\n'/; }"
+        fi
         # What: health baseline before sync, backup, restart
         # Why: a later restart bakes regressions into it
         # From: Issue #1391
@@ -7116,7 +7222,7 @@ perform_stack_update_flow() {
             UPDATE_CONVERGENCE_COMPLETED=1
             die "Pre-update rollback backup failed. The convergence timer was restored because no update mutations were applied."
         fi
-        update_repo_and_resume "$install_dir"
+        update_repo_and_resume "$install_dir" "$plan_action" "$plan_repo" "$plan_channel" "$plan_target"
     fi
 
     # What: after a code move a failed .env step rolls back
@@ -7391,8 +7497,7 @@ cmd_auto_update() {
     # Why: disabled or pinned installs skip the registry
     # From: Issue #1683 | PR #1858
     if [[ "$auto_update_enabled" = "1" && "$current_channel" != "$pinned" ]]; then
-        current_refs=$(lancache_channel_image_refs "$env_file" "$current_channel") \
-            || die "Cannot resolve channel ${current_channel}; auto-update skipped this tick (exit $?)."
+        lancache_expected_image_pins current_tag current_refs "$env_file"
         current_tag=$(lancache_image_refs_fingerprint "$current_refs") \
             || die "Cannot fingerprint the current image pins of channel ${current_channel} (exit $?)."
     else
@@ -10113,9 +10218,11 @@ fi
 LANCACHE_IMAGE_REGISTRY=$(resolve_lancache_image_registry "$ENV_FILE")
 LANCACHE_IMAGE_PREFIX=$(resolve_lancache_image_prefix "$ENV_FILE")
 LANCACHE_IMAGE_CHANNEL=$(resolve_lancache_image_channel "$ENV_FILE")
-LANCACHE_IMAGE_TAG=$(resolve_lancache_image_tag "$ENV_FILE")
-LANCACHE_IMAGE_REFS=$(lancache_image_refs_for_tag "$ENV_FILE" "$LANCACHE_IMAGE_TAG") \
-    || die "Cannot pin the images of ${LANCACHE_IMAGE_TAG}; ${ENV_FILE} was not written (exit $?)."
+# What: the pins start empty; the call fills them by name
+# Why: shellcheck sees no assignment through a nameref
+# From: Issue #1683
+LANCACHE_IMAGE_REFS=""
+lancache_expected_image_pins LANCACHE_IMAGE_TAG LANCACHE_IMAGE_REFS "$ENV_FILE"
 
 # What: verifies the tag publishes this platform
 # Why: a platform failure must stop before state writes
