@@ -1603,7 +1603,7 @@ struct Failing {
 }
 
 // What: check every secondary; again after a wait.
-// Why: 4 h when all answer, hourly while one fails.
+// Why: the SOT sets a shorter wait while one fails.
 // From: Issue #1683
 async fn secondary_watch(app: Arc<App>) {
     let mut failing: BTreeMap<String, Failing> = BTreeMap::new();

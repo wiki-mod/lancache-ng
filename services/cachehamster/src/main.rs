@@ -2107,7 +2107,7 @@ async fn daemon(c: Ctx) -> Result<(), String> {
                 bytes * 8 / (now - last).max(1) / 1_000_000,
             );
             // What: log while jobs run or state changed.
-            // Why: idle "0 jobs" line every 10 s is spam.
+            // Why: an idle line per round floods the log.
             // From: Issue #871 | PR #1984
             if state.0 > 0 || state != shown {
                 eprintln!("cachehamster: {} jobs running, {} Mbit/s", state.0, state.1);

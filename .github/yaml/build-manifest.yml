@@ -1046,12 +1046,12 @@ runtime:
     # From: Issue #1683
     - DNS_SECONDARY_NS=
     - DNS_SECONDARY_NS_OFF=
-    # What: check every 4 h, hourly while one fails.
+    # What: check interval; shorter while one fails.
     # Why: serials via the pdns-API; a lag is pulled.
     # From: Issue #1683
     - DNS_SECONDARY_CHECK_SECONDS=14400
     - DNS_SECONDARY_RECHECK_SECONDS=3600
-    # What: NS removal after 8 h and 3 failed checks.
+    # What: NS removal needs this time and this count.
     # Why: one short outage must not remove an NS.
     # From: Issue #1683
     - DNS_SECONDARY_NS_REMOVE_AFTER_SECONDS=28800
@@ -2321,7 +2321,7 @@ ci_variables:
   # From: Issue #1683 | PR #1912
   CI_BUILDX_BUILDER: lancache-ci
   # What: layer compression of every built image.
-  # Why: A3: gzip unpack took 12 s per job container.
+  # Why: zstd unpacks faster than gzip in a job.
   # From: Issue #1683 | PR #1858
   CI_IMAGE_COMPRESSION: zstd
   # What: poll seconds of every CI lock wait.
@@ -2378,7 +2378,7 @@ ci_variables:
   # From: Issue #1683 | PR #1984
   PROJECT_DEBUG_MODE: "true"
   # What: seconds gc waits between two deletes.
-  # Why: an empty repo variable means 2 seconds.
+  # Why: an empty repo variable takes this value.
   # From: Issue #1683 | PR #1858
   PROJECT_GC_DELETE_PAUSE_SECONDS: 2
   # What: minutes gc may delete before it ends green.

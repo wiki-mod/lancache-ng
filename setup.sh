@@ -3103,7 +3103,7 @@ Type=oneshot
 WorkingDirectory=${stack_dir}
 ExecStart=${setup_sh} auto-update ${stack_dir}
 EOF
-    # What: daily, spread over 1h, missed runs caught up
+    # What: calendar with a spread; missed runs caught up
     # Why: installs must not all hit GHCR at the same minute
     # From: Issue #819
     cat > "$unit_dir/$AUTO_UPDATE_TIMER_UNIT" <<EOF || die "Failed to write $AUTO_UPDATE_TIMER_UNIT."
