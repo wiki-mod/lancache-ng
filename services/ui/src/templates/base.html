@@ -918,6 +918,18 @@
     // From: Issue #1437
     const CSRF_TOKEN = "{{ csrf_token }}";
 
+    // What: POST with the CSRF header; data goes as JSON
+    // Why: every page action sends the same request
+    // From: Issue #1683 | PR #2019
+    function csrfPost(url, data) {
+      const init = { method: 'POST', headers: { 'X-CSRF-Token': CSRF_TOKEN } };
+      if (data !== undefined) {
+        init.headers['Content-Type'] = 'application/json';
+        init.body = JSON.stringify(data);
+      }
+      return fetch(url, init);
+    }
+
     // What: shared watchdog poll for beambar + dashboard
     // Why: one fetch/interval, not one per template
     // From: Issue #1437
@@ -983,11 +995,7 @@
     async function setDockServiceState(service, state, button) {
       button.disabled = true;
       try {
-        const response = await fetch('{{ routes.desired_state | safe }}'.replace('{service}', service), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF_TOKEN },
-          body: JSON.stringify({ state: state }),
-        });
+        const response = await csrfPost('{{ routes.desired_state | safe }}'.replace('{service}', service), { state: state });
         // What: throws on a non-2xx desired-state response
         // Why: the catch below reports it as fetch error
         // From: Issue #1683 | PR #1912
@@ -1076,7 +1084,7 @@
       try {
         const url = '{{ routes.service_action | safe }}'
           .replace('{container}', container).replace('{program}', program).replace('{action}', action);
-        const response = await fetch(url, { method: 'POST', headers: { 'X-CSRF-Token': CSRF_TOKEN } });
+        const response = await csrfPost(url);
         if (!response.ok) { throw new Error(action + ' ' + program + ': HTTP ' + response.status); }
       } catch (err) {
         reportError(err);

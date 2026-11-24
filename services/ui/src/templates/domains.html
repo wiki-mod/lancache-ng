@@ -855,16 +855,7 @@
   // Why: server rotates; alert shows the result
   async function rotateToken(name) {
     try {
-      const response = await fetch('{{ routes.secondary_rotate | safe }}'.replace('{name}', name), {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-CSRF-Token': CSRF_TOKEN
-        },
-        body: JSON.stringify({
-          token: "{{ registration_token }}"
-        })
-      });
+      const response = await csrfPost('{{ routes.secondary_rotate | safe }}'.replace('{name}', name));
 
       if (response.ok) {
         const data = await response.json();
@@ -882,10 +873,7 @@
   // From: Issue #1683
   async function secondaryNs(route, name) {
     try {
-      const response = await fetch(route.replace('{name}', name), {
-        method: 'POST',
-        headers: { 'X-CSRF-Token': CSRF_TOKEN }
-      });
+      const response = await csrfPost(route.replace('{name}', name));
       if (response.ok) {
         location.reload();
       } else {
@@ -904,12 +892,7 @@
     }
 
     try {
-      const response = await fetch('{{ routes.secondary | safe }}'.replace('{name}', name), {
-        method: 'POST',
-        headers: {
-          'X-CSRF-Token': CSRF_TOKEN
-        }
-      });
+      const response = await csrfPost('{{ routes.secondary | safe }}'.replace('{name}', name));
 
       if (response.ok) {
         alert(LC_T.js_removed_x.replace('{x}', name));
@@ -950,10 +933,7 @@
     const span = document.getElementById('health-' + name);
     if (span) { span.className = 'text-slate-400'; span.textContent = LC_T.js_checking; }
     try {
-      const response = await fetch('{{ routes.secondary_health | safe }}'.replace('{name}', name), {
-        method: 'POST',
-        headers: { 'X-CSRF-Token': CSRF_TOKEN }
-      });
+      const response = await csrfPost('{{ routes.secondary_health | safe }}'.replace('{name}', name));
       if (response.ok) {
         renderHealth(span, await response.json());
       } else if (span) {
@@ -971,11 +951,7 @@
     const input = prompt(LC_T.js_address_for_x.replace('{x}', name), current || '');
     if (input === null) return;
     try {
-      const response = await fetch('{{ routes.secondary_address | safe }}'.replace('{name}', name), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF_TOKEN },
-        body: JSON.stringify({ address: input.trim() })
-      });
+      const response = await csrfPost('{{ routes.secondary_address | safe }}'.replace('{name}', name), { address: input.trim() });
       if (response.ok) {
         location.reload();
       } else if (response.status === 400) {

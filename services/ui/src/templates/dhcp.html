@@ -669,10 +669,7 @@ async function checkDhcpConflict() {
   clientDetailsEl.textContent = '';
   let data;
   try {
-    const res = await fetch('{{ routes.dhcp_check | safe }}', {
-      method: 'POST',
-      headers: { 'X-CSRF-Token': CSRF_TOKEN },
-    });
+    const res = await csrfPost('{{ routes.dhcp_check | safe }}');
     if (!res.ok) { throw new Error('HTTP ' + res.status); }
     data = await res.json();
   } catch (err) {
