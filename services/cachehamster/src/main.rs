@@ -994,7 +994,9 @@ struct SteamCfg {
     manifest_api: u64,
     cell: String,
     heartbeat: Duration,
-    // protocol version, package version, OS type, chat mode
+    // What: logon values: protocol, package, OS, chat mode.
+    // Why: the logon message reads them by index.
+    // From: Issue #871 | PR #1980
     logon: [u64; 4],
     cdn_host: String,
     branch: String,
