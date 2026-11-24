@@ -2727,11 +2727,8 @@ pub mod recursor_conf {
         items
             .iter()
             .map(|i| {
-                if i.contains(['"', '\\', '\n', '\r']) {
-                    Err(format!("value {i:?} has quote or line break"))
-                } else {
-                    Ok([indent, "- \"", i.as_str(), "\"\n"].concat())
-                }
+                crate::config::plain(i)?;
+                Ok([indent, "- \"", i.as_str(), "\"\n"].concat())
             })
             .collect()
     }
@@ -2782,12 +2779,8 @@ pub mod recursor_conf {
     // From: Issue #1683 | PR #1980
     pub fn lua(s: &Settings, rpz_file: &str) -> Result<String, String> {
         let policy = s.text("RPZ_POLICY_NAME")?;
-        if [rpz_file, policy.as_str()]
-            .iter()
-            .any(|v| v.contains(['"', '\\', '\n']))
-        {
-            return Err("RPZ path or policy name is not plain".into());
-        }
+        crate::config::plain(rpz_file)?;
+        crate::config::plain(&policy)?;
         let mut lua = format!("rpzFile(\"{rpz_file}\", {{ policyName=\"{policy}\" }})\n");
         // What: no DNSSEC check for the local zones.
         // Why: they are unsigned; the root denies them.
@@ -3079,13 +3072,6 @@ pub mod dnsdist_conf {
     // What: refuses a quote, backslash or line break.
     // Why: the value goes into a Lua string unchanged.
     // From: Issue #1683 | PR #2017
-    fn plain(v: &str) -> Result<&str, String> {
-        if v.contains(['"', '\\', '\n', '\r']) {
-            return Err(format!("value {v:?} has quote or line break"));
-        }
-        Ok(v)
-    }
-
     // What: dnsdist Lua config from plain values.
     // Why: no Settings needed; the tests call it.
     // From: Issue #1683
@@ -3099,22 +3085,22 @@ pub mod dnsdist_conf {
         let first = listeners.first().ok_or("dnsdist needs a listener")?;
         let mut out = String::from("setACL({})\n");
         for net in acl {
-            out += &format!("addACL(\"{}\")\n", plain(net)?);
+            out += &format!("addACL(\"{}\")\n", crate::config::plain(net)?);
         }
         let mut call = "setLocal";
         for l in listeners {
             for addr in listen {
-                let addr = plain(addr)?;
+                let addr = crate::config::plain(addr)?;
                 let local = crate::dns::host_port(addr, l.port);
                 out += &format!("{call}(\"{local}\")\n");
                 call = "addLocal";
             }
         }
-        let source = plain(source)?;
+        let source = crate::config::plain(source)?;
         let mut server = |pool: &str, address: &str| -> Result<(), String> {
             out += &format!(
                 "newServer({{address=\"{}\", pool=\"{pool}\", name=\"{pool}\", source=\"{source}\", useProxyProtocol=true, healthCheckMode=\"up\"}})\n",
-                plain(address)?
+                crate::config::plain(address)?
             );
             Ok(())
         };

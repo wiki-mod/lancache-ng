@@ -136,6 +136,16 @@ pub fn is_plain(text: &str, extra: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || extra.contains(c))
 }
 
+// What: value with no quote, backslash or line break.
+// Why: one check for a value put into a quoted config.
+// From: Issue #1683 | PR #2019
+pub fn plain(v: &str) -> Result<&str, String> {
+    if v.contains(['"', '\\', '\n', '\r']) {
+        return Err(format!("value {v:?} has quote or line break"));
+    }
+    Ok(v)
+}
+
 // What: a bool from its usual words.
 // Why: env and forms send true/false, 1/0, yes/no, on/off.
 // From: Issue #1683 | PR #1858
