@@ -3874,9 +3874,9 @@ _ci_listing_items() {
 # From: Issue #1683 | PR #1858
 _ci_cargo_lock() {
     local write="${1:-}" lock seen out remote rc=0 val="" refresh=0
-    local run="${GITHUB_RUN_ID:-local}"
+    local run="${GITHUB_RUN_ID:-local}" memo=cargo-lock.done
     lock="$(_ci_repo_path CI_CARGO_LOCK)" || return 2
-    if seen="$(_ci_job_memo_get cargo-lock.done)" && [ "${seen}" = "${lock}" ] && [ -s "${lock}" ]; then
+    if seen="$(_ci_job_memo_get "${memo}")" && [ "${seen}" = "${lock}" ] && [ -s "${lock}" ]; then
         return 0
     fi
     _ci_refresh_event || refresh=$?
@@ -3901,7 +3901,7 @@ _ci_cargo_lock() {
         fi
         [ -z "${out}" ] || printf '%s\n' "${out}" >&2
         ci_log "[CI-INFO-RESOLVE-0017]" "path=\"${lock}\" run=\"${val%% *}\" reason=\"lock of the last refresh run; reuse\""
-        _ci_job_memo_put cargo-lock.done "${lock}"
+        _ci_job_memo_put "${memo}" "${lock}"
         return 0
     fi
     if ! out="$(cd "${CI_REPO_ROOT:-.}" && _ci_retry cargo cargo generate-lockfile)"; then
@@ -3918,7 +3918,7 @@ _ci_cargo_lock() {
         printf 'cargo-lock\t%s %s\n' "${run}" "${val}" | _ci_ledger_upsert "${remote}" CI_REFRESH_REF CI_REFRESH_FILE replace || rc=$?
         [ "${rc}" -eq 0 ] || ci_log "[CI-WARN-RESOLVE-0019]" "path=\"${lock}\" rc=${rc} reason=\"lock record not written (raw above); later runs resolve anew\""
     fi
-    _ci_job_memo_put cargo-lock.done "${lock}"
+    _ci_job_memo_put "${memo}" "${lock}"
 }
 
 # What: Rust id lines; $3 text: the reached item texts.
@@ -7786,19 +7786,20 @@ SH
 # Why: one reader for rows and version-drift.
 # From: Issue #1683 | PR #1858
 _ci_cargo_members() {
-    local key="" out
+    local key="" out memo
     # What: the list is kept per manifest text.
     # Why: A3: plan parsed one manifest 80 times.
     # From: Issue #1683 | PR #1858
     if [ -f "$1" ]; then
         key="$(printf '%s' "$(<"$1")" | _ci_sha256_hex)" || return 2
-        if out="$(_ci_job_memo_get "cargo-members-${key}")"; then
+        memo="cargo-members-${key}"
+        if out="$(_ci_job_memo_get "${memo}")"; then
             printf '%s\n' "${out}"
             return 0
         fi
     fi
     out="$(_ci_capture 0 yq -p toml -oy '.workspace.members[]' "$1")" || return 2
-    [ -z "${key}" ] || [ -z "${out}" ] || _ci_job_memo_put "cargo-members-${key}" "${out}" || return 2
+    [ -z "${key}" ] || [ -z "${out}" ] || _ci_job_memo_put "${memo}" "${out}" || return 2
     printf '%s\n' "${out}"
 }
 
@@ -14702,6 +14703,7 @@ ci_cmd_build_tools() {
 _ci_base_image() {
     local key="$1" id="$2" ctx="$3" val digest memo wait="" err
     local lock="${RUNNER_TEMP:-}/base-image.lock"
+    local name="base-image-$1.ref"
     # What: a running background read: wait once, reread.
     # Why: one read per base; no second read beside it.
     # From: Issue #1683 | PR #1858
@@ -14710,7 +14712,7 @@ _ci_base_image() {
     # Why: build arg, labels and id name the same digest.
     # From: Issue #1683 | PR #1858
     while :; do
-        if memo="$(_ci_job_memo_get "base-image-${key}.ref")"; then
+        if memo="$(_ci_job_memo_get "${name}")"; then
             printf '%s\n' "${memo}"
             return 0
         fi
@@ -14727,7 +14729,7 @@ _ci_base_image() {
         return 2
     fi
     digest="$(_ci_registry_digest "${val}")" || return 2
-    _ci_job_memo_put "base-image-${key}.ref" "${val}@${digest}" || return 2
+    _ci_job_memo_put "${name}" "${val}@${digest}" || return 2
     printf '%s@%s\n' "${val}" "${digest}"
 }
 
