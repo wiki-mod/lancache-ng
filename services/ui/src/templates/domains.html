@@ -659,8 +659,8 @@
   }
 
   // What: fills the zone table: zone, then one serial each
-  // Why: green equals the primary's serial, red differs
-  // From: Issue #1683
+  // Why: the server names each state; one colour map
+  // From: Issue #1683 | PR #2019
   async function loadZoneOverview() {
     const head = document.getElementById('zone-overview-head');
     const body = document.getElementById('zone-overview-body');
@@ -694,8 +694,9 @@
       r.serials.forEach((serial, i) => {
         const cell = row.insertCell();
         cell.textContent = serial == null ? '–' : serial;
-        if (i === 0) cell.className = 'font-semibold';
-        else if (!data.columns[i].error) cell.className = serial === r.serials[0] && serial != null ? 'text-green-400' : 'text-red-400';
+        if (i === 0) { cell.className = 'font-semibold'; return; }
+        const known = HEALTH_LABELS[r.states[i - 1]];
+        if (known) { cell.className = known[1]; cell.title = known[0]; }
       });
     });
     filterZoneOverview();

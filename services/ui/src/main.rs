@@ -1985,7 +1985,25 @@ async fn zone_overview(State(app): Shared) -> Page {
         .into_iter()
         .map(|zone| {
             let serials: Vec<Option<u32>> = lists.iter().map(|l| serial_of(l, &zone)).collect();
-            json!({"zone": zone, "serials": serials})
+            // What: state word of each secondary's cell.
+            // Why: table and status line share zone_state.
+            // From: Issue #1683 | PR #2019
+            let states: Vec<Option<&str>> = serials
+                .iter()
+                .zip(&columns)
+                .skip(1)
+                .map(|(theirs, column)| {
+                    column["error"].is_null().then(|| {
+                        let row = PeerZone {
+                            zone: zone.clone(),
+                            primary: serials[0],
+                            secondary: *theirs,
+                        };
+                        zone_state(&row).word()
+                    })
+                })
+                .collect();
+            json!({"zone": zone, "serials": serials, "states": states})
         })
         .collect();
     Ok(axum::Json(json!({"columns": columns, "rows": rows})).into_response())
