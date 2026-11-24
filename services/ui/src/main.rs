@@ -1969,7 +1969,8 @@ fn option_data(sn: &Value, name: &str) -> String {
 // Why: the page shows fields; Kea has option-data.
 // From: Issue #1683 | PR #1980
 fn subnet_row(sn: &Value) -> Value {
-    let dns: Vec<String> = option_data(sn, "domain-name-servers")
+    use lancache_ng::dhcp::{DNS_SERVERS, DOMAIN_NAME, NTP_SERVERS, ROUTERS};
+    let dns: Vec<String> = option_data(sn, DNS_SERVERS.name)
         .split(',')
         .map(|x| x.trim().to_string())
         .collect();
@@ -1982,11 +1983,11 @@ fn subnet_row(sn: &Value) -> Value {
     json!({
         "id": sn["id"],
         "subnet": sn["subnet"],
-        "gateway": option_data(sn, "routers"),
+        "gateway": option_data(sn, ROUTERS.name),
         "dns_primary": dns.first().cloned().unwrap_or_default(),
         "dns_secondary": dns.get(1).cloned().unwrap_or_default(),
-        "ntp_servers": option_data(sn, "ntp-servers"),
-        "domain": option_data(sn, "domain-name"),
+        "ntp_servers": option_data(sn, NTP_SERVERS.name),
+        "domain": option_data(sn, DOMAIN_NAME.name),
         "pool_start": start.trim(),
         "pool_end": end.trim(),
         "lease_time": sn["valid-lifetime"],
@@ -2166,11 +2167,15 @@ async fn kea_edit(
 // From: Issue #1683 | PR #1980
 fn subnet_from(get: &(dyn Fn(&str) -> String + Sync), id: u64, old: Option<&Value>) -> Value {
     let dns = dns_pair(get("dns_primary"), get("dns_secondary"));
+    use lancache_ng::dhcp::{DNS_SERVERS, DOMAIN_NAME, NTP_SERVERS, ROUTERS};
     let mut opts = vec![
-        json!({"name": "routers", "data": get("gateway")}),
-        json!({"name": "domain-name-servers", "data": dns.join(", ")}),
+        json!({"name": ROUTERS.name, "data": get("gateway")}),
+        json!({"name": DNS_SERVERS.name, "data": dns.join(", ")}),
     ];
-    for (name, field) in [("domain-name", "domain"), ("ntp-servers", "ntp_servers")] {
+    for (name, field) in [
+        (DOMAIN_NAME.name, "domain"),
+        (NTP_SERVERS.name, "ntp_servers"),
+    ] {
         let value = get(field);
         if !value.is_empty() {
             opts.push(json!({"name": name, "data": value}));

@@ -1232,27 +1232,36 @@ pub mod dhcp {
     // Why: names and codes are fixed by the RFCs.
     // From: Issue #1683 | PR #1980
     pub const MANAGED: [Managed; 5] = [
-        Managed {
-            name: "routers",
-            code: 3,
-        },
-        Managed {
-            name: "domain-name-servers",
-            code: 6,
-        },
-        Managed {
-            name: "domain-name",
-            code: 15,
-        },
-        Managed {
-            name: "ntp-servers",
-            code: 42,
-        },
-        Managed {
-            name: "domain-search",
-            code: 119,
-        },
+        ROUTERS,
+        DNS_SERVERS,
+        DOMAIN_NAME,
+        NTP_SERVERS,
+        DOMAIN_SEARCH,
     ];
+
+    // What: each managed option by its own name.
+    // Why: render and ui name an option, never its text.
+    // From: Issue #1683 | PR #2017
+    pub const ROUTERS: Managed = Managed {
+        name: "routers",
+        code: 3,
+    };
+    pub const DNS_SERVERS: Managed = Managed {
+        name: "domain-name-servers",
+        code: 6,
+    };
+    pub const DOMAIN_NAME: Managed = Managed {
+        name: "domain-name",
+        code: 15,
+    };
+    pub const NTP_SERVERS: Managed = Managed {
+        name: "ntp-servers",
+        code: 42,
+    };
+    pub const DOMAIN_SEARCH: Managed = Managed {
+        name: "domain-search",
+        code: 119,
+    };
 
     // What: check a custom option code.
     // Why: 0 and 255 are pad/end; managed have fields.
@@ -3189,8 +3198,9 @@ pub mod kea_conf {
             .flatten();
         for row in rows {
             let name = row["name"].as_str().unwrap_or_default();
-            let hit = matches!(name, "domain-name" | "domain-search")
-                && row["data"].as_str() == Some(before);
+            let follows = [crate::dhcp::DOMAIN_NAME, crate::dhcp::DOMAIN_SEARCH];
+            let hit =
+                follows.iter().any(|m| m.name == name) && row["data"].as_str() == Some(before);
             if hit {
                 row["data"] = Value::from(domain);
             }
@@ -3209,10 +3219,11 @@ pub mod kea_conf {
             let Some(rows) = sn["option-data"].as_array_mut() else {
                 continue;
             };
-            let at = rows.iter().position(|r| r["name"] == "ntp-servers");
+            let ntp = crate::dhcp::NTP_SERVERS.name;
+            let at = rows.iter().position(|r| r["name"] == ntp);
             match at {
                 Some(i) if auto => rows[i]["data"] = Value::from(own),
-                None if auto => rows.push(json!({"name": "ntp-servers", "data": own})),
+                None if auto => rows.push(json!({"name": ntp, "data": own})),
                 // What: off returns own IP to default.
                 // Why: no NTP answers there when off.
                 // From: Issue #1683
@@ -3252,15 +3263,16 @@ pub mod kea_conf {
     // Why: router, DNS, domain and NTP come from the SOT.
     // From: Issue #1683 | PR #1980
     fn option_rows(s: &Settings, domain: &str) -> Result<Vec<Value>, String> {
+        use crate::dhcp::{DNS_SERVERS, DOMAIN_NAME, DOMAIN_SEARCH, NTP_SERVERS, ROUTERS};
         let mut rows = Vec::new();
-        rows.push(json!({"name": "routers", "data": s.text("DHCP_GATEWAY")?}));
+        rows.push(json!({"name": ROUTERS.name, "data": s.text("DHCP_GATEWAY")?}));
         let dns = crate::dhcp::dns_addrs(s).join(", ");
-        rows.push(json!({"name": "domain-name-servers", "data": dns}));
-        rows.push(json!({"name": "domain-name", "data": domain}));
-        rows.push(json!({"name": "domain-search", "data": domain}));
+        rows.push(json!({"name": DNS_SERVERS.name, "data": dns}));
+        rows.push(json!({"name": DOMAIN_NAME.name, "data": domain}));
+        rows.push(json!({"name": DOMAIN_SEARCH.name, "data": domain}));
         let ntp = crate::dhcp::ntp_addrs(s)?;
         if !ntp.is_empty() {
-            rows.push(json!({"name": "ntp-servers", "data": ntp.join(", ")}));
+            rows.push(json!({"name": NTP_SERVERS.name, "data": ntp.join(", ")}));
         }
         let raw = s.text_or_empty("DHCP_CUSTOM_OPTIONS");
         for (code, data) in crate::dhcp::custom_options(s, &raw)? {
@@ -3550,10 +3562,12 @@ pub mod dnsmasq_conf {
         let get = |k: &str| s.text_or_empty(k);
         c.add(&format!("dhcp-range={}", proxy_range(s)?))?;
         c.add_if("interface=", &s.list("DHCP_PROXY_INTERFACE").join(","))?;
-        c.add_if("dhcp-option-pxe=3,", &get("DHCP_PROXY_ROUTER"))?;
-        c.add_if("dhcp-option-pxe=6,", &crate::dhcp::dns_addrs(s).join(","))?;
-        c.add_if("dhcp-option-pxe=15,", &get("DHCP_PROXY_DOMAIN"))?;
-        c.add_if("dhcp-option-pxe=42,", &crate::dhcp::ntp_addrs(s)?.join(","))?;
+        use crate::dhcp::{DNS_SERVERS, DOMAIN_NAME, NTP_SERVERS, ROUTERS};
+        let by_code = |m: crate::dhcp::Managed| format!("dhcp-option-pxe={},", m.code);
+        c.add_if(&by_code(ROUTERS), &get("DHCP_PROXY_ROUTER"))?;
+        c.add_if(&by_code(DNS_SERVERS), &crate::dhcp::dns_addrs(s).join(","))?;
+        c.add_if(&by_code(DOMAIN_NAME), &get("DHCP_PROXY_DOMAIN"))?;
+        c.add_if(&by_code(NTP_SERVERS), &crate::dhcp::ntp_addrs(s)?.join(","))?;
         let file = get("DHCP_PROXY_BOOT_FILENAME");
         if !file.is_empty() {
             let server = get("DHCP_PROXY_BOOT_SERVER");
