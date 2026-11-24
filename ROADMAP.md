@@ -22,7 +22,7 @@ Channels: `docs/combined-release-and-checklist.md`.
 | Find and fix bugs | issues with the label `bug` |
 | Multi-domain support for DNS: more than one LAN domain; in work | `DHCP_DOMAIN` in `.github/yaml/build-manifest.yml`, `managed_zones` in `services/common/shared.rs` |
 | WireGuard remote LAN access | `docs/design-plannings/design-wireguard-remote-access.md` |
-| Close port `5300` of the authoritative server to the LAN once no secondary of an older version pulls from it; timing open | `PDNS_AUTH_ADDRESS` in `.github/yaml/build-manifest.yml` |
+| Close port `5300` of the authoritative server to the LAN once no secondary of an older version pulls from it; timing open | the `PDNS_AUTH_PORT` port mapping of `dns` in `deploy/prod/docker-compose.yml` |
 | Downloads per device: amount from the cache (HIT) and from the internet (MISS) | nginx access log of the proxy |
 | Device names instead of IP addresses in these views | DHCP leases, PTR records |
 | Devices that hold a DHCP lease but never query the lancache DNS | DHCP leases, recursor query log |
