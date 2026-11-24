@@ -2131,13 +2131,21 @@ async fn flush_zone(s: &Settings, zone: &str) -> Result<(), String> {
 // Why: recursors would serve old answers until TTL.
 // From: Issue #1683 | PR #1980
 async fn flush_round(s: &Settings, seen: &mut BTreeMap<String, u32>) -> Result<(), String> {
-    for zone in pdns_api(s)?.zones().await? {
+    let api = pdns_api(s)?;
+    let peers = !lancache_ng::pdns_conf::secondaries(s).is_empty();
+    for zone in api.zones().await? {
         // What: note a serial only after its flush worked.
         // Why: a flush during a dns restart must retry.
         // From: Issue #1683 | PR #1980
         let before = seen.get(&zone.name).copied();
         if before.is_some_and(|b| b != zone.serial) {
             flush_zone(s, &zone.name).await?;
+            // What: NOTIFY to the secondaries right away.
+            // Why: live: pdns alone waited up to 60 s.
+            // From: Issue #1683 | PR #2019
+            if peers {
+                api.notify(&zone.name).await?;
+            }
         }
         seen.insert(zone.name.clone(), zone.serial);
     }
