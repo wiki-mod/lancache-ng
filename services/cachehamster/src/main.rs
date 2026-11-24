@@ -873,10 +873,7 @@ impl Dl {
     // Why: DoMe 07.11.: docker-proxy cost 17 % CPU.
     // From: Issue #871 | PR #2017
     fn load(s: &Settings, connections: usize) -> Result<Self, String> {
-        let port = |k: &str| {
-            s.uint(k)
-                .and_then(|p| u16::try_from(p).map_err(|e| format!("{k}: {e}")))
-        };
+        let port = |k: &str| s.num::<u16>(k);
         // What: no total timeout; public roots stay.
         // Why: a body may stream for hours; others pass.
         // From: Issue #871 | PR #2017
