@@ -4366,7 +4366,7 @@ async fn main() -> Result<(), String> {
     .map_err(|e| e.to_string())
 }
 
-// What: state rank of one zone and the worst-of rule.
+// What: state of one zone and the worst-of rule.
 // Why: in sync only when every managed zone matches.
 // From: Issue #1683
 #[cfg(test)]
