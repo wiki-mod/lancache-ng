@@ -202,7 +202,7 @@ services:
       - ${SOT_RUN_DIR}
     # What: a real HTTP request to the health path.
     # Why: only an answering nginx counts as healthy.
-    # From: Issue #1683 | PR #1858
+    # From: Issue #1683 | PR #1980
     healthcheck:
       <<: *healthcheck-timing
       test: ["CMD-SHELL", "curl -fsS -o /dev/null --max-time 2 http://${SOT_LOOPBACK_BIND_IP}:${SOT_PROXY_HTTP_PORT}${SOT_PROXY_HEALTH_PATH}"]
@@ -297,11 +297,11 @@ services:
     <<: *service
     # What: a stop by the UI survives a Docker restart.
     # Why: DHCP_MODE off keeps the container stopped.
-    # From: Issue #1683 | PR #1858
+    # From: Issue #1683 | PR #1980
     restart: unless-stopped
     # What: unhealthy when an OpenRC service crashed.
     # Why: the DHCP mode picks the services; all count.
-    # From: Issue #1683 | PR #1858
+    # From: Issue #1683 | PR #1980
     healthcheck:
       <<: *healthcheck-timing
       test: ["CMD-SHELL", "! rc-status --crashed | grep -q ."]

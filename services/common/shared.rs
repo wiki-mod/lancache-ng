@@ -10,13 +10,13 @@ pub mod config;
 
 // What: wall-clock time since the Unix epoch.
 // Why: file names, ids and logs need a plain number.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 pub mod clock {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     // What: nanoseconds since 1970; 0 if the clock is off.
     // Why: a clock before 1970 must not panic.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn unix_nanos() -> u128 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -25,7 +25,7 @@ pub mod clock {
 
     // What: whole seconds since 1970.
     // Why: retention and schedules count seconds.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn unix_secs() -> u64 {
         u64::try_from(unix_nanos() / 1_000_000_000).unwrap_or(u64::MAX)
     }
@@ -42,7 +42,7 @@ pub mod fs {
 
     // What: replace a file, or create it only if new.
     // Why: secrets are first-writer-wins; configs replace.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub enum Place {
         Replace,
@@ -51,7 +51,7 @@ pub mod fs {
 
     // What: optional uid and gid for a written file.
     // Why: root writes files a service user must read.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
     pub struct Owner {
         pub uid: Option<u32>,
@@ -69,7 +69,7 @@ pub mod fs {
 
     // What: apply owner and mode on an open file.
     // Why: fchown on the handle avoids a path race.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     fn set_owner(file: &File, owner: Owner, mode: Option<u32>) -> io::Result<()> {
         if owner.uid.is_some() || owner.gid.is_some() {
             std::os::unix::fs::fchown(file, owner.uid, owner.gid)?;
@@ -123,7 +123,7 @@ pub mod fs {
                 Place::Replace => fs::rename(&tmp, path).or_else(|e| {
                     // What: busy bind mount: write in place
                     // Why: rename onto a mount is EBUSY.
-                    // From: Issue #1683 | PR #1858
+                    // From: Issue #1683 | PR #1980
                     if e.kind() != io::ErrorKind::ResourceBusy {
                         return Err(e);
                     }
@@ -184,7 +184,7 @@ pub mod fs {
 
     // What: every regular file below root.
     // Why: retention sums and prunes by size and age.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn files_under(root: &Path) -> io::Result<Vec<(PathBuf, fs::Metadata)>> {
         let mut out = Vec::new();
         let mut dirs = vec![root.to_path_buf()];
@@ -209,7 +209,7 @@ pub mod fs {
 
     // What: total and free bytes of a filesystem.
     // Why: cache size checks need the real free space.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub struct Space {
         pub total: u64,
@@ -369,7 +369,7 @@ pub mod secret {
 
     // What: decrypt what seal wrote.
     // Why: a wrong key or damage is a clear error.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn open(key: &[u8; 32], sealed: &[u8]) -> Result<Vec<u8>, String> {
         let Some((nonce, body)) = sealed.split_at_checked(NONCE_LEN) else {
             return Err("sealed data too short".into());
@@ -405,7 +405,7 @@ pub mod secret {
 
 // What: HTTP client, probe and drain.
 // Why: every crate uses the same timeouts from the SOT.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 pub mod http {
     use crate::config::Settings;
     use futures_util::StreamExt as _;
@@ -413,7 +413,7 @@ pub mod http {
 
     // What: shared client with SOT timeouts.
     // Why: no request may hang without a limit.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn client(s: &Settings) -> Result<reqwest::Client, String> {
         let secs = |key: &str| s.uint(key).map(Duration::from_secs);
         reqwest::Client::builder()
@@ -426,7 +426,7 @@ pub mod http {
 
     // What: error text with every source cause.
     // Why: reqwest hides the cause in source().
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn error_chain(error: &dyn std::error::Error) -> String {
         let mut parts = vec![error.to_string()];
         let mut next = error.source();
@@ -439,7 +439,7 @@ pub mod http {
 
     // What: GET url; ok only on 2xx.
     // Why: health probes of the proxy and the ui.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub async fn probe(url: &str, ca_pem: Option<&[u8]>, timeout: Duration) -> Result<(), String> {
         let mut builder = reqwest::Client::builder().timeout(timeout).no_proxy();
         if url.starts_with("https://") {
@@ -463,7 +463,7 @@ pub mod http {
 
     // What: GET url, count and drop the body.
     // Why: prefill warms the cache; nothing is stored.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub async fn drain(client: &reqwest::Client, url: &str) -> Result<(u16, u64), String> {
         let resp = client
             .get(url)
@@ -483,7 +483,7 @@ pub mod http {
 
 // What: client of the PowerDNS HTTP API.
 // Why: the ui writes records; no message bus in between.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 pub mod pdns {
     use reqwest::Method;
     use serde_json::{Value, json};
@@ -491,12 +491,12 @@ pub mod pdns {
 
     // What: auth header name of the PowerDNS API.
     // Why: fixed by PowerDNS.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     const KEY_HEADER: &str = "X-API-Key";
 
     // What: the zone fields the sync check reads.
     // Why: serial against notified serial shows lag.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     #[derive(Clone, Debug, serde::Deserialize)]
     pub struct Zone {
         pub id: String,
@@ -514,7 +514,7 @@ pub mod pdns {
 
     // What: one API endpoint with its key.
     // Why: base is .../api/v1/servers/<id> from the SOT.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     #[derive(Clone)]
     pub struct Api {
         client: reqwest::Client,
@@ -524,7 +524,7 @@ pub mod pdns {
 
     // What: name with exactly one final dot.
     // Why: the API wants canonical names.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn zone_id(zone: &str) -> String {
         format!("{}.", zone.trim_end_matches('.'))
     }
@@ -539,7 +539,7 @@ pub mod pdns {
     impl Api {
         // What: a client for one server base URL.
         // Why: auth and recursor share this code.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         pub fn new(client: reqwest::Client, base: &str, key: &str) -> Self {
             Self {
                 client,
@@ -550,7 +550,7 @@ pub mod pdns {
 
         // What: one request; non-2xx is an error.
         // Why: PowerDNS explains refusals in the body.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         async fn call(
             &self,
             method: Method,
@@ -580,7 +580,7 @@ pub mod pdns {
 
         // What: PATCH a list of rrset changes.
         // Why: soa-edit-api raises the serial once.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         async fn patch(&self, zone: &str, rrsets: Vec<Value>) -> Result<(), String> {
             let path = zone_path(zone);
             self.call(Method::PATCH, &path, Some(json!({ "rrsets": rrsets })))
@@ -590,7 +590,7 @@ pub mod pdns {
 
         // What: replace one rrset; empty deletes it.
         // Why: a record edit is one PATCH.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         pub async fn set_rrset(
             &self,
             zone: &str,
@@ -614,7 +614,7 @@ pub mod pdns {
 
         // What: all rrsets of a zone.
         // Why: snapshots and lists read them.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         pub async fn rrsets(&self, zone: &str) -> Result<Vec<Value>, String> {
             let text = self.call(Method::GET, &zone_path(zone), None).await?;
             let v: Value = serde_json::from_str(&text).map_err(|e| format!("zone {zone}: {e}"))?;
@@ -623,7 +623,7 @@ pub mod pdns {
 
         // What: make the zone equal to saved rrsets.
         // Why: rollback; SOA stays so the serial rises.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         pub async fn restore(&self, zone: &str, saved: &[Value]) -> Result<(), String> {
             let id = |r: &Value| (r["name"].to_string(), r["type"].to_string());
             let wanted: BTreeSet<_> = saved.iter().map(id).collect();
@@ -695,7 +695,7 @@ pub mod pdns {
 
         // What: create or replace one TSIG key.
         // Why: rotation keeps the name; PUT needs a key.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         pub async fn set_tsigkey(
             &self,
             name: &str,
@@ -718,7 +718,7 @@ pub mod pdns {
 
         // What: set one metadata kind of a zone.
         // Why: per-zone metadata binds the TSIG key.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         pub async fn set_metadata(
             &self,
             zone: &str,
@@ -750,7 +750,7 @@ pub mod pdns {
 
         // What: all zones with serial and checks.
         // Why: sync state compares primary and secondary.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         pub async fn zones(&self) -> Result<Vec<Zone>, String> {
             let text = self.call(Method::GET, "/zones", None).await?;
             serde_json::from_str(&text).map_err(|e| format!("zone list: {e}"))
@@ -758,7 +758,7 @@ pub mod pdns {
 
         // What: the zone as BIND zone-file text.
         // Why: snapshots store what PowerDNS exports.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         pub async fn export(&self, zone: &str) -> Result<String, String> {
             self.call(Method::GET, &format!("{}/export", zone_path(zone)), None)
                 .await
@@ -766,7 +766,7 @@ pub mod pdns {
 
         // What: send NOTIFY to all secondaries now.
         // Why: a lagging secondary is pushed at once.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         pub async fn notify(&self, zone: &str) -> Result<(), String> {
             self.call(Method::PUT, &format!("{}/notify", zone_path(zone)), None)
                 .await
@@ -775,7 +775,7 @@ pub mod pdns {
 
         // What: pull a secondary zone now.
         // Why: a stale secondary resyncs without restart.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         pub async fn axfr_retrieve(&self, zone: &str) -> Result<(), String> {
             let path = format!("{}/axfr-retrieve", zone_path(zone));
             self.call(Method::PUT, &path, None).await.map(drop)
@@ -783,7 +783,7 @@ pub mod pdns {
 
         // What: name and value of each server counter.
         // Why: the dashboard shows query counts.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         pub async fn statistics(&self) -> Result<Vec<(String, String)>, String> {
             let text = self.call(Method::GET, "/statistics", None).await?;
             let rows: Vec<Value> =
@@ -796,7 +796,7 @@ pub mod pdns {
 
         // What: drop cached answers for a name.
         // Why: a changed record answers at once.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         pub async fn flush(&self, name: &str, subtree: bool) -> Result<(), String> {
             let path = format!("/cache/flush?domain={}&subtree={subtree}", zone_id(name));
             self.call(Method::PUT, &path, None).await.map(drop)
@@ -806,21 +806,21 @@ pub mod pdns {
 
 // What: DNS name rules, zones and serial math.
 // Why: ui, watchdog and renderers agree on one rule set.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 pub mod dns {
     use crate::config::Settings;
     use std::cmp::Ordering;
 
     // What: lowercase zone name with one final dot.
     // Why: zone names compare equal in one form.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn canonical_zone(zone: &str) -> String {
         crate::pdns::zone_id(&zone.to_ascii_lowercase())
     }
 
     // What: RFC 1035 host name check.
     // Why: SRV needs "_", RPZ wildcards need "*".
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn is_dns_name(name: &str, underscore: bool, wildcard: bool) -> bool {
         let name = name.trim_end_matches('.');
         let label_ok = |label: &str| {
@@ -841,7 +841,7 @@ pub mod dns {
 
     // What: CDN list row: ".name" is the whole subtree.
     // Why: cdn-domains.txt uses this leading-dot form.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn cdn_entry(text: &str) -> Option<(String, bool)> {
         let row = text.trim().to_ascii_lowercase();
         let (subtree, name) = match row.strip_prefix('.') {
@@ -853,7 +853,7 @@ pub mod dns {
 
     // What: private reverse zones from the SOT.
     // Why: RFC 1918 and ULA ranges; no list in code.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn private_reverse_zones(s: &Settings) -> Vec<String> {
         s.list("DNS_PRIVATE_REVERSE_ZONES")
             .iter()
@@ -946,7 +946,7 @@ pub mod dns {
 
     // What: zones the stack serves itself.
     // Why: LAN, local.LAN and optional reverse zones.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn managed_zones(s: &Settings) -> Result<Vec<String>, String> {
         // What: a secondary serves the primary's zones.
         // Why: its DHCP_DOMAIN is only the SOT default.
@@ -968,7 +968,7 @@ pub mod dns {
 
     // What: compare serials by RFC 1982.
     // Why: serials wrap; half the space apart is unknown.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn serial_cmp(a: u32, b: u32) -> Option<Ordering> {
         match b.wrapping_sub(a) {
             0 => Some(Ordering::Equal),
@@ -980,7 +980,7 @@ pub mod dns {
 
     // What: replication state of a secondary zone.
     // Why: the dashboard shows lost NOTIFY or AXFR.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
     pub enum Sync {
         InSync,
@@ -991,7 +991,7 @@ pub mod dns {
 
     // What: state from the two serials.
     // Why: one rule for watchdog and ui.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn sync_state(primary: u32, secondary: u32) -> Sync {
         match serial_cmp(secondary, primary) {
             Some(Ordering::Equal) => Sync::InSync,
@@ -1118,7 +1118,7 @@ pub mod dns {
 
 // What: DHCP mode and option rules.
 // Why: Kea and dnsmasq get the same checked input.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 pub mod dhcp {
     use crate::config::Settings;
 
@@ -1179,7 +1179,7 @@ pub mod dhcp {
 
     // What: the four DHCP modes of the SOT choice.
     // Why: exactly one program serves DHCP.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub enum Mode {
         Off,
@@ -1191,7 +1191,7 @@ pub mod dhcp {
     impl Mode {
         // What: mode from DHCP_MODE.
         // Why: an unknown word is an error.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         pub fn from_settings(s: &Settings) -> Result<Self, String> {
             Self::from_word(&s.text("DHCP_MODE")?)
         }
@@ -1219,7 +1219,7 @@ pub mod dhcp {
 
     // What: an option the ui sets by its own field.
     // Why: custom rows must not override these.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub struct Managed {
         pub name: &'static str,
@@ -1228,7 +1228,7 @@ pub mod dhcp {
 
     // What: options with own fields (RFC 2132, 3397).
     // Why: names and codes are fixed by the RFCs.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub const MANAGED: [Managed; 5] = [
         Managed {
             name: "routers",
@@ -1254,7 +1254,7 @@ pub mod dhcp {
 
     // What: check a custom option code.
     // Why: 0 and 255 are pad/end; managed have fields.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn option_code(raw: &str) -> Result<u8, String> {
         let code: u8 = raw
             .trim()
@@ -1271,7 +1271,7 @@ pub mod dhcp {
 
     // What: parse CODE:VALUE lines.
     // Why: one checked list for Kea and dnsmasq.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn custom_options(s: &Settings, raw: &str) -> Result<Vec<(u8, String)>, String> {
         let max = usize::try_from(s.uint("DHCP_OPTION_DATA_MAX")?).unwrap_or(usize::MAX);
         let mut out = Vec::new();
@@ -1296,7 +1296,7 @@ pub mod dhcp {
 
     // What: valid and max lifetime of a lease.
     // Why: SOT bounds; max is a factor of valid.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn lease_limits(s: &Settings, lease: u64) -> Result<(u64, u64), String> {
         let min = s.uint("DHCP_LEASE_TIME_MIN")?;
         let max = s.uint("DHCP_LEASE_TIME_MAX")?;
@@ -1312,7 +1312,7 @@ pub mod dhcp {
 
 // What: minimal Docker Engine API client.
 // Why: ui and watchdog list, inspect, start and exec.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 pub mod docker {
     use reqwest::Method;
     use serde_json::{Value, json};
@@ -1321,12 +1321,12 @@ pub mod docker {
 
     // What: compose label of the project name.
     // Why: fixed by Docker Compose.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub const PROJECT_LABEL: &str = "com.docker.compose.project";
 
     // What: compose label of the service name.
     // Why: fixed by Docker Compose.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub const SERVICE_LABEL: &str = "com.docker.compose.service";
 
     // What: compose service of a container row, if any.
@@ -1350,12 +1350,12 @@ pub mod docker {
 
     // What: URL host used over the unix socket.
     // Why: HTTP needs a host; the socket ignores it.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     const SOCKET_HOST: &str = "http://docker";
 
     // What: failure classes of an API call.
     // Why: callers treat timeouts apart from refusals.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     #[derive(Debug)]
     pub enum Error {
         Timeout,
@@ -1367,7 +1367,7 @@ pub mod docker {
     impl std::fmt::Display for Error {
         // What: readable text of an API error.
         // Why: shown in logs and the ui.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             match self {
                 Self::Timeout => f.write_str("Docker API timed out"),
@@ -1380,7 +1380,7 @@ pub mod docker {
 
     // What: container actions.
     // Why: Reload sends SIGHUP to PID 1.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub enum Action {
         Start,
@@ -1391,7 +1391,7 @@ pub mod docker {
 
     // What: one Docker endpoint.
     // Why: unix:// socket or tcp URL from the SOT.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub struct Api {
         client: reqwest::Client,
         base: String,
@@ -1409,7 +1409,7 @@ pub mod docker {
 
     // What: JSON body of an answer.
     // Why: one decode error type.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     fn decode(bytes: &[u8]) -> Result<Value, Error> {
         serde_json::from_slice(bytes).map_err(|e| Error::Decode(e.to_string()))
     }
@@ -1417,7 +1417,7 @@ pub mod docker {
     impl Api {
         // What: client for a socket path or URL.
         // Why: no redirects; the engine never sends one.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         pub fn new(endpoint: &str) -> Result<Self, String> {
             let endpoint = endpoint.trim();
             let builder = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
@@ -1434,7 +1434,7 @@ pub mod docker {
 
         // What: one request; 2xx and 304 count as ok.
         // Why: 304 means already started or stopped.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         async fn call(
             &self,
             method: Method,
@@ -1466,7 +1466,7 @@ pub mod docker {
 
         // What: run a command in a container.
         // Why: OpenRC rc-service and ui CLIs run this way.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         pub async fn exec(
             &self,
             name: &str,
@@ -1503,7 +1503,7 @@ pub mod docker {
 
         // What: all containers of a compose project.
         // Why: the ui and watchdog see stopped ones too.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         pub async fn project(&self, project: &str, limit: Duration) -> Result<Vec<Value>, Error> {
             let filter = json!({"label": [format!("{PROJECT_LABEL}={project}")]}).to_string();
             let url = reqwest::Url::parse_with_params(
@@ -1518,7 +1518,7 @@ pub mod docker {
 
         // What: full state of one container.
         // Why: health, restarts and state come from here.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         pub async fn inspect(&self, name: &str, limit: Duration) -> Result<Value, Error> {
             decode(
                 &self
@@ -1542,7 +1542,7 @@ pub mod docker {
 
         // What: start, stop, restart or HUP a container.
         // Why: grace is the stop timeout in seconds.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         pub async fn act(
             &self,
             name: &str,
@@ -1615,14 +1615,14 @@ pub mod docker {
 
 // What: stack CA and leaf certificates via openssl.
 // Why: native tool; no crypto crate for X.509.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 pub mod cert {
     use std::path::Path;
     use std::process::Command;
 
     // What: run openssl; stderr becomes the error.
     // Why: a failed step names its subcommand.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     fn openssl(args: &[&str]) -> Result<String, String> {
         let out = crate::tool::run(Command::new("openssl").args(args))?;
         Ok(String::from_utf8_lossy(&out).into_owned())
@@ -1630,14 +1630,14 @@ pub mod cert {
 
     // What: path as an argument string.
     // Why: openssl takes text arguments.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     fn arg(p: &Path) -> String {
         p.display().to_string()
     }
 
     // What: self-signed CA key and certificate.
     // Why: HTTPS mode signs leaves with this CA.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn make_ca(
         key: &Path,
         crt: &Path,
@@ -1669,7 +1669,7 @@ pub mod cert {
 
     // What: leaf key and certificate signed by the CA.
     // Why: one leaf per CDN name set in HTTPS mode.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     #[allow(clippy::too_many_arguments)]
     pub fn make_leaf(
         ca_key: &Path,
@@ -1763,7 +1763,7 @@ pub mod cert {
 
     // What: true if crt stays valid for within seconds.
     // Why: renew before expiry, not after.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn valid_for(crt: &Path, within: u64) -> Result<bool, String> {
         if !crt.is_file() {
             return Err("file missing".into());
@@ -1810,13 +1810,13 @@ pub mod cert {
 
 // What: syslog-ng config: store per program, forward.
 // Why: every container logs here; one place to read.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 pub mod log {
     use crate::config::Settings;
 
     // What: one forward target host:port.
     // Why: a secondary also forwards to its primary.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     #[derive(Clone, Debug, Eq, PartialEq)]
     pub struct Target {
         pub host: String,
@@ -1825,7 +1825,7 @@ pub mod log {
 
     // What: primary first, then extra targets.
     // Why: SYSLOG_PRIMARY is set only on a secondary.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn targets(s: &Settings) -> Result<Vec<Target>, String> {
         let primary = s.text("SYSLOG_PRIMARY").ok();
         primary
@@ -1850,7 +1850,7 @@ pub mod log {
 
     // What: one destination and log path per target.
     // Why: a disk buffer keeps lines while it is down.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn forward_block(s: &Settings, targets: &[Target], source: &str) -> Result<String, String> {
         let buffer = s.text("SYSLOG_BUFFER_DIR")?;
         let transport = s.text("SYSLOG_FWD_TRANSPORT")?;
@@ -1879,19 +1879,19 @@ pub mod log {
 
     // What: name of the local store destination.
     // Why: muted programs skip it; logs page reads it.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub const STORE: &str = "d_store";
 
     // What: plain name: letters, digits, _ and -.
     // Why: values go into syslog-ng config text.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     fn is_plain(v: &str) -> bool {
         crate::config::is_plain(v, "_-")
     }
 
     // What: full syslog-ng.conf.
     // Why: the watchdog image runs syslog-ng.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn render(s: &Settings) -> Result<String, String> {
         let root = s.text("SYSLOG_LOG_ROOT")?;
         let buffer = s.text("SYSLOG_BUFFER_DIR")?;
@@ -1939,13 +1939,13 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
 
 // What: net-snmp snmpd.conf.
 // Why: statistics and alarms come from SNMP, not Netdata.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 pub mod snmp {
     use crate::config::Settings;
 
     // What: one extend command (custom OID).
     // Why: stack counters beside the stock MIBs.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     #[derive(Clone, Debug)]
     pub struct Extend {
         pub name: String,
@@ -1954,7 +1954,7 @@ pub mod snmp {
 
     // What: one logmatch watch on a log file.
     // Why: counts error lines per program.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     #[derive(Clone, Debug)]
     pub struct LogMatch {
         pub name: String,
@@ -1964,7 +1964,7 @@ pub mod snmp {
 
     // What: full snmpd.conf from the SOT.
     // Why: community, listen and limits are settings.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn render(
         s: &Settings,
         extends: &[Extend],
@@ -2005,7 +2005,7 @@ pub mod snmp {
 
 // What: numbered known-good snapshots in one dir.
 // Why: zone and Kea rollbacks pick one by id.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 pub mod snapshot {
     use crate::fs::{self, Owner, Place};
     use std::path::PathBuf;
@@ -2022,7 +2022,7 @@ pub mod snapshot {
 
     // What: an id is a non-empty digit string.
     // Why: ids name files; no path can sneak in.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     fn is_id(name: &str) -> bool {
         !name.is_empty() && name.bytes().all(|b| b.is_ascii_digit())
     }
@@ -2040,7 +2040,7 @@ pub mod snapshot {
 
         // What: save body under a new time id.
         // Why: exclusive create; then prune old ones.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         pub fn save(&self, body: &[u8]) -> Result<String, String> {
             let id = crate::clock::unix_nanos().to_string();
             fs::write(&self.path(&id), body, 0o600, Place::Exclusive, self.owner)
@@ -2051,7 +2051,7 @@ pub mod snapshot {
 
         // What: ids, newest first.
         // Why: longer digit string is newer, then text.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         pub fn list(&self) -> Result<Vec<String>, String> {
             let entries = match std::fs::read_dir(&self.dir) {
                 Ok(rd) => rd,
@@ -2069,7 +2069,7 @@ pub mod snapshot {
 
         // What: body of one snapshot.
         // Why: rollback restores exactly this.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         pub fn read(&self, id: &str) -> Result<Vec<u8>, String> {
             if !is_id(id) {
                 return Err(format!("bad snapshot id {id:?}"));
@@ -2079,7 +2079,7 @@ pub mod snapshot {
 
         // What: drop all but the newest keep.
         // Why: at least one stays to roll back to.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         fn prune(&self) -> Result<(), String> {
             for id in self.list()?.into_iter().skip(self.keep.max(1)) {
                 let path = self.dir.join(&id);
@@ -2096,7 +2096,7 @@ pub mod snapshot {
 
 // What: on-demand DHCP probe: DISCOVER, REQUEST, RELEASE.
 // Why: shows every DHCP server on the LAN and a real lease.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 pub mod dhcp_probe {
     use crate::config::Settings;
     use dhcproto::Decodable;
@@ -2109,18 +2109,18 @@ pub mod dhcp_probe {
 
     // What: DHCP client and server ports.
     // Why: fixed by RFC 2131.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     const CLIENT_PORT: u16 = 68;
     const SERVER_PORT: u16 = 67;
 
     // What: largest UDP payload.
     // Why: a receive buffer never truncates a reply.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     const UDP_MAX: usize = 65_535;
 
     // What: one labelled value of an answer.
     // Why: the ui prints a table per server.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
     pub struct Detail {
         pub label: String,
@@ -2129,7 +2129,7 @@ pub mod dhcp_probe {
 
     // What: one answering server.
     // Why: competing servers must be visible.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
     pub struct Server {
         pub server: Option<Ipv4Addr>,
@@ -2139,7 +2139,7 @@ pub mod dhcp_probe {
 
     // What: probe result for the ui.
     // Why: offers, lease result and hard errors apart.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
     pub struct Report {
         pub servers: Vec<Server>,
@@ -2151,7 +2151,7 @@ pub mod dhcp_probe {
     impl Report {
         // What: a report with offers and a lease text.
         // Why: most exits differ only in these.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         fn lease(servers: Vec<Server>, ok: bool, text: impl Into<String>) -> Self {
             Self {
                 servers,
@@ -2163,7 +2163,7 @@ pub mod dhcp_probe {
 
         // What: a report for a hard error.
         // Why: socket or send failures.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         fn error(servers: Vec<Server>, e: String) -> Self {
             Self {
                 servers,
@@ -2176,7 +2176,7 @@ pub mod dhcp_probe {
 
     // What: the options shown, with labels.
     // Why: option codes are fixed by RFC 2132.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     const FIELDS: [(&str, OptionCode); 8] = [
         ("Server", OptionCode::ServerIdentifier),
         ("Subnet mask", OptionCode::SubnetMask),
@@ -2190,7 +2190,7 @@ pub mod dhcp_probe {
 
     // What: text of one option, if shown.
     // Why: lists join with a comma.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     fn option_text(opt: &DhcpOption) -> Option<String> {
         Some(match opt {
             DhcpOption::ServerIdentifier(a)
@@ -2209,7 +2209,7 @@ pub mod dhcp_probe {
 
     // What: server, address and details of a reply.
     // Why: one reader for OFFER and ACK.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     fn read(msg: &Message) -> Server {
         let address = Some(msg.yiaddr()).filter(|a| !a.is_unspecified());
         let mut details: Vec<Detail> = address
@@ -2240,14 +2240,14 @@ pub mod dhcp_probe {
 
     // What: true if msg is of this DHCP type.
     // Why: replies are filtered by type.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     fn is(msg: &Message, kind: MessageType) -> bool {
         matches!(msg.opts().get(OptionCode::MessageType), Some(DhcpOption::MessageType(t)) if *t == kind)
     }
 
     // What: build one client message.
     // Why: broadcast flag except for RELEASE.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     fn message(
         xid: u32,
         mac: &[u8; 6],
@@ -2277,7 +2277,7 @@ pub mod dhcp_probe {
 
     // What: encode and send one message.
     // Why: errors become text for the report.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     fn send(sock: &UdpSocket, msg: &Message, to: SocketAddrV4) -> Result<(), String> {
         let mut buf = Vec::new();
         msg.encode(&mut Encoder::new(&mut buf))
@@ -2287,7 +2287,7 @@ pub mod dhcp_probe {
 
     // What: read replies of xid until done or deadline.
     // Why: f returns true when the wanted reply came.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     fn listen(
         sock: &UdpSocket,
         xid: u32,
@@ -2321,7 +2321,7 @@ pub mod dhcp_probe {
 
     // What: run the probe with SOT timings.
     // Why: random xid and local MAC; lease is released.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn run(s: &Settings) -> Report {
         let timing = || -> Result<(Duration, Duration, u32), String> {
             Ok((
@@ -2345,7 +2345,7 @@ pub mod dhcp_probe {
         let mut mac: [u8; 6] = rand::random();
         // What: locally administered unicast MAC.
         // Why: never collides with a real NIC (IEEE 802).
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         mac[0] = (mac[0] | 0x02) & !0x01;
         let discover = message(
             xid,
@@ -2444,20 +2444,20 @@ pub mod dhcp_probe {
 
 // What: chrony.conf for the stack NTP server.
 // Why: LAN clients get time from the appliance.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 pub mod chrony {
     use crate::config::Settings;
 
     // What: host, IP, CIDR or path characters only.
     // Why: values go into a config file.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     fn is_plain(v: &str) -> bool {
         crate::config::is_plain(v, ".:/-_")
     }
 
     // What: full chrony.conf.
     // Why: upstream needed; only SOT CIDRs may ask.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn render(s: &Settings) -> Result<String, String> {
         let upstream = s.list("NTP_UPSTREAM_SERVERS");
         if upstream.is_empty() {
@@ -2496,7 +2496,7 @@ pub mod chrony {
 
 // What: pdns.conf of the authoritative server.
 // Why: primary notifies; secondary pulls with TSIG.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 pub mod pdns_conf {
     use crate::config::Settings;
 
@@ -2521,7 +2521,7 @@ pub mod pdns_conf {
 
     // What: addresses of registered secondaries.
     // Why: NOTIFY goes to every registered secondary.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn secondary_ips(s: &Settings) -> Vec<String> {
         secondaries(s)
             .into_iter()
@@ -2542,7 +2542,7 @@ pub mod pdns_conf {
 
     // What: full pdns.conf for this node's role.
     // Why: API on; AXFR by TSIG, not by IP list.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn auth(s: &Settings, api_key: &str) -> Result<String, String> {
         let primary = crate::dns::Role::from_settings(s)? == crate::dns::Role::Primary;
         let yes = |on: bool| if on { "yes" } else { "no" }.to_string();
@@ -2632,13 +2632,13 @@ pub mod pdns_conf {
 
 // What: recursor.yml, RPZ zone and Lua files.
 // Why: two recursors: HTTP mode and HTTPS mode.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 pub mod recursor_conf {
     use crate::config::Settings;
 
     // What: which of the two recursors.
     // Why: keys differ only by HTTP or HTTPS.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub enum Which {
         Http,
@@ -2671,7 +2671,7 @@ pub mod recursor_conf {
 
     // What: YAML list rows of quoted items.
     // Why: quotes or breaks would break the YAML.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     fn yaml_list(items: &[String], indent: &str) -> Result<String, String> {
         items
             .iter()
@@ -2687,7 +2687,7 @@ pub mod recursor_conf {
 
     // What: RPZ zone: every cache domain to answer.
     // Why: clients reach the proxy by DNS only.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn rpz(
         s: &Settings,
         domains: &[(String, bool)],
@@ -2728,7 +2728,7 @@ pub mod recursor_conf {
 
     // What: Lua config that loads the RPZ file.
     // Why: the recursor reads RPZ only via Lua.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn lua(s: &Settings, rpz_file: &str) -> Result<String, String> {
         let policy = s.text("RPZ_POLICY_NAME")?;
         if [rpz_file, policy.as_str()]
@@ -2845,12 +2845,12 @@ pub mod recursor_conf {
 
     // What: Lua hook: AAAA answers become empty.
     // Why: keeps cache traffic on IPv4 when wanted.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub const AAAA_FILTER_LUA: &str = "function preresolve(dq)\n  if dq.qtype == pdns.AAAA then\n    dq.rcode = pdns.NOERROR\n    return true\n  end\n  return false\nend\n";
 
     // What: full recursor.yml (YAML settings).
     // Why: local zones go to auth; rest upstream.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn yaml(
         s: &Settings,
         which: Which,
@@ -3128,14 +3128,14 @@ pub mod dnsdist_conf {
 
 // What: Kea config files built from the settings.
 // Why: one place turns SOT values into Kea JSON.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 pub mod kea_conf {
     use crate::config::Settings;
     use serde_json::{Value, json};
 
     // What: fixed Kea protocol words.
     // Why: Kea accepts only these; not tunable.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     const SOCKET_KIND: &str = "unix";
     const LEASE_BACKEND: &str = "memfile";
     const NCR_PROTOCOL: &str = "UDP";
@@ -3401,7 +3401,7 @@ pub mod kea_conf {
 
     // What: kea-dhcp-ddns.conf, forward and reverse.
     // Why: name updates go to local pdns with TSIG.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn ddns(s: &Settings, key: &str, secret: &str) -> Result<Value, String> {
         let target = json!([{
             "ip-address": s.text("PDNS_AUTH_ADDRESS")?,
@@ -3430,7 +3430,7 @@ pub mod kea_conf {
 
 // What: dnsmasq.conf for proxy-DHCP or relay.
 // Why: one owner; a bad value stops the render.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 pub mod dnsmasq_conf {
     use crate::config::Settings;
     use crate::dhcp::Mode;
@@ -3520,7 +3520,7 @@ pub mod dnsmasq_conf {
 
     // What: render dnsmasq.conf for one mode.
     // Why: Off and Kea start no dnsmasq at all.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn render(s: &Settings, mode: Mode) -> Result<String, String> {
         let mut c = base(s)?;
         if mode == Mode::DnsmasqRelay {
@@ -3568,7 +3568,7 @@ pub mod dnsmasq_conf {
 
 // What: generated nginx include files and cert plan.
 // Why: one owner of CDN host maps, ACL and dispatch.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 pub mod nginx_conf {
     use crate::config::Settings;
     use sha2::{Digest, Sha256};
@@ -3576,12 +3576,12 @@ pub mod nginx_conf {
 
     // What: first line of every generated file.
     // Why: tells a reader not to edit it by hand.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     const HEAD: &str = "# Generated by LanCache-NG; do not edit\n";
 
     // What: Public Suffix List rules.
     // Why: finds the registrable root of a CDN name.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     #[derive(Default)]
     pub struct Psl {
         plain: BTreeSet<String>,
@@ -3592,7 +3592,7 @@ pub mod nginx_conf {
     impl Psl {
         // What: read the PSL text format.
         // Why: publicsuffix.org rows: x, *.x, !x.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         pub fn parse(text: &str) -> Self {
             let mut p = Psl::default();
             for row in text.lines() {
@@ -3635,7 +3635,7 @@ pub mod nginx_conf {
 
         // What: registrable root: suffix plus one label.
         // Why: PSL rule; an unknown TLD counts as suffix.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         pub fn root(&self, name: &str) -> Option<String> {
             let labels: Vec<&str> = name.split('.').collect();
             let keep = self.suffix_labels(&labels) + 1;
@@ -3645,7 +3645,7 @@ pub mod nginx_conf {
 
     // What: CDN names grouped by nginx handling.
     // Why: roots share a cert; bases and exact own one.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     #[derive(Default)]
     pub struct Hosts {
         pub roots: Vec<String>,
@@ -3665,7 +3665,7 @@ pub mod nginx_conf {
 
     // What: group the cache domain list into Hosts.
     // Why: a bad or rootless row is an error, no skip.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn hosts(domains: &str, psl: &Psl) -> Result<Hosts, String> {
         let mut h = Hosts::default();
         for row in crate::config::data_rows(domains) {
@@ -3691,7 +3691,7 @@ pub mod nginx_conf {
 
     // What: stable cert file name for one host.
     // Why: file names never carry raw host text.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     fn cert_id(host: &str, kind: &str) -> String {
         let sum = Sha256::digest(format!("{kind}:{host}").as_bytes());
         hex::encode(&sum[..16])
@@ -3700,7 +3700,7 @@ pub mod nginx_conf {
     impl Hosts {
         // What: (server name key, cert name) pairs.
         // Why: feeds the cert map and the allow map.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         pub fn keys(&self) -> Vec<(String, String)> {
             let mut out = Vec::new();
             for r in &self.roots {
@@ -3718,7 +3718,7 @@ pub mod nginx_conf {
 
         // What: certs to issue: file name and SANs.
         // Why: cert::make_leaf issues exactly these.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         pub fn certs(&self) -> Vec<(String, Vec<String>)> {
             let mut out = Vec::new();
             for r in &self.roots {
@@ -3736,7 +3736,7 @@ pub mod nginx_conf {
 
     // What: fill ${KEY} in a shipped nginx template.
     // Why: values come from settings, not the env.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn template(text: &str, s: &Settings) -> Result<String, String> {
         let mut out = String::with_capacity(text.len());
         let mut rest = text;
@@ -3773,7 +3773,7 @@ pub mod nginx_conf {
 
     // What: all settings the files need, read once.
     // Why: one read; a missing key stops the render.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     struct Plan {
         strict: bool,
         cidrs: Vec<String>,
@@ -3969,7 +3969,7 @@ pub mod nginx_conf {
 
     // What: all generated files: (path, body).
     // Why: the ui writes them; nginx includes them.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn files(s: &Settings, h: &Hosts, https: bool) -> Result<Vec<(String, String)>, String> {
         let p = plan(s)?;
         let keys = h.keys();
@@ -3997,7 +3997,7 @@ pub mod nginx_conf {
 
 // What: apply saved setting changes to containers.
 // Why: each owner gets only the strongest action.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 pub mod apply {
     use crate::config::{Change, Effect};
     use crate::docker::{Action, Api, Error};
@@ -4006,7 +4006,7 @@ pub mod apply {
 
     // What: strongest effect per owning container.
     // Why: one restart already covers a reload.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn plan(changes: &[Change]) -> BTreeMap<String, Effect> {
         let mut out = BTreeMap::new();
         for c in changes {
@@ -4020,7 +4020,7 @@ pub mod apply {
 
     // What: result for one owner.
     // Why: the ui shows it; Recreate needs compose.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     #[derive(Debug)]
     pub enum Outcome {
         Live,
@@ -4128,7 +4128,7 @@ pub mod apply {
 
 // What: every config file of the stack.
 // Why: the ui calls one function; paths from SOT.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 pub mod render {
     use crate::config::Settings;
     use crate::recursor_conf::{self, Which};
@@ -4137,7 +4137,7 @@ pub mod render {
 
     // What: secrets the config files embed.
     // Why: the caller reads them from the store.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub struct Secrets {
         pub pdns_api_key: String,
         pub recursor_api_key: String,
@@ -4148,7 +4148,7 @@ pub mod render {
 
     // What: one file and its owning container.
     // Why: apply::plan needs the owner per change.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub struct File {
         pub owner: &'static str,
         pub path: PathBuf,
@@ -4157,7 +4157,7 @@ pub mod render {
 
     // What: collector of files and errors.
     // Why: every bad value is named; nothing half done.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     struct Out<'a> {
         s: &'a Settings,
         files: Vec<File>,
@@ -4496,7 +4496,7 @@ pub mod render {
 
     // What: render all files; report every error.
     // Why: one call for the ui; nothing half written.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn all(s: &Settings, sec: &Secrets) -> Result<Vec<File>, Vec<String>> {
         let mut o = Out::new(s);
         let domains = match crate::cdn::effective(s) {
@@ -4533,14 +4533,14 @@ pub mod render {
 
 // What: one SNTP query (RFC 4330).
 // Why: the ui shows whether chrony answers.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 pub mod ntp {
     use std::net::UdpSocket;
     use std::time::Duration;
 
     // What: client request: version 4, mode 3.
     // Why: RFC 4330 first byte; rest stays zero.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     const REQUEST_HEAD: u8 = 0x23;
     const PACKET: usize = 48;
     const MODE_SERVER: u8 = 4;
@@ -4572,7 +4572,7 @@ pub mod ntp {
 
     // What: true on a usable server reply.
     // Why: mode 4 and stratum 1..15 mean synced.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn answers(host: &str, port: u64, wait: Duration) -> bool {
         ask(host, port, wait)
             .map(|r| r[0] & 0x07 == MODE_SERVER && (1..=15).contains(&r[1]))
@@ -4582,14 +4582,14 @@ pub mod ntp {
 
 // What: proxy access log: recent requests, totals.
 // Why: dashboard and logs page share one parser.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 pub mod access {
     use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
     use std::path::{Path, PathBuf};
 
     // What: one request in nginx log_format cache.
     // Why: the ui lists host, path, status, size.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     #[derive(Clone, Debug, Default, serde::Serialize)]
     pub struct Entry {
         pub ip: String,
@@ -4604,7 +4604,7 @@ pub mod access {
 
     // What: read one line; None when no cache row.
     // Why: a syslog prefix before the IP is allowed.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn parse(line: &str) -> Option<Entry> {
         let (before, after) = line.split_once(" - [")?;
         let (time, after) = after.split_once("] \"")?;
@@ -4629,7 +4629,7 @@ pub mod access {
 
     // What: proxy log files, oldest first.
     // Why: syslog-ng writes one file per day.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn files(dir: &Path) -> Vec<PathBuf> {
         let Ok(rd) = std::fs::read_dir(dir) else {
             return Vec::new();
@@ -4664,7 +4664,7 @@ pub mod access {
 
     // What: last `limit` lines of the newest file.
     // Why: reads from the end; big logs stay cheap.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn tail_lines(dir: &Path, limit: usize, chunk: u64) -> Vec<String> {
         let Some(path) = files(dir).pop() else {
             return Vec::new();
@@ -4684,7 +4684,7 @@ pub mod access {
 
     // What: last `limit` cache requests.
     // Why: dashboard list; other lines are skipped.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn tail(dir: &Path, limit: usize, chunk: u64) -> Vec<Entry> {
         let lines = tail_lines(dir, limit.saturating_mul(4), chunk);
         let found: Vec<Entry> = lines.iter().filter_map(|l| parse(l)).collect();
@@ -4694,7 +4694,7 @@ pub mod access {
 
     // What: totals over all proxy log files.
     // Why: hit rate and traffic on the dashboard.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     #[derive(Clone, Debug, Default, serde::Serialize)]
     pub struct Stats {
         pub hits: u64,
@@ -4722,7 +4722,7 @@ pub mod access {
 
     // What: count requests, hits and bytes.
     // Why: HIT is a hit; MISS and EXPIRED a miss.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn stats(dir: &Path) -> Stats {
         let mut st = Stats::default();
         for path in files(dir) {
@@ -4745,13 +4745,13 @@ pub mod access {
 
 // What: byte count as text in binary units.
 // Why: all ui pages show sizes the same way.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 pub mod human {
     const UNITS: [&str; 6] = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
 
     // What: 1536 becomes "1.5 KiB".
     // Why: whole numbers only; one decimal is enough.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn bytes(n: u64) -> String {
         let (mut whole, mut tenth, mut unit) = (n, 0, 0);
         while whole >= 1024 && unit < UNITS.len() - 1 {
@@ -4768,13 +4768,13 @@ pub mod human {
 
 // What: effective cache domain list.
 // Why: shipped rows minus disabled plus custom.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 pub mod cdn {
     use crate::config::Settings;
 
     // What: one row of the domain table.
     // Why: the ui shows shipped and own rows apart.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     #[derive(Clone, Debug, serde::Serialize)]
     pub struct Row {
         pub display: String,
@@ -4797,7 +4797,7 @@ pub mod cdn {
 
     // What: shipped rows from the image file.
     // Why: blanks and # comments are not domains.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn defaults(s: &Settings) -> Result<Vec<String>, String> {
         let path = s.text("CDN_DEFAULT_DOMAINS_FILE")?;
         let text = std::fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))?;
@@ -4808,7 +4808,7 @@ pub mod cdn {
 
     // What: all rows for the ui.
     // Why: shipped rows carry their on/off state.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn parse_rows(s: &Settings) -> Result<Vec<Row>, String> {
         let off = s.list("CDN_DISABLED_DOMAINS");
         let mut out = Vec::new();
@@ -4824,7 +4824,7 @@ pub mod cdn {
 
     // What: enabled rows, one per line.
     // Why: input of the RPZ and nginx host maps.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn effective(s: &Settings) -> Result<String, String> {
         let mut out = String::new();
         for r in parse_rows(s)?.into_iter().filter(|r| r.enabled) {
@@ -4837,19 +4837,19 @@ pub mod cdn {
 
 // What: Kea Control Agent client (REST, JSON).
 // Why: leases and subnets go through Kea itself.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 pub mod kea {
     use serde_json::{Value, json};
 
     // What: Kea result codes.
     // Why: Kea docs: 0 success, 3 empty answer.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     const RESULT_OK: i64 = 0;
     const RESULT_EMPTY: i64 = 3;
 
     // What: one control agent address.
     // Why: commands reach dhcp4 behind it.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub struct Api {
         client: reqwest::Client,
         url: String,
@@ -4872,7 +4872,7 @@ pub mod kea {
 
         // What: send one command; return arguments.
         // Why: 0 is ok, 3 is empty, rest is an error.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         pub async fn command(&self, command: &str, args: Option<Value>) -> Result<Value, String> {
             let fail = |e: String| format!("kea {command}: {e}");
             let mut body = json!({"command": command, "service": ["dhcp4"]});
@@ -4901,14 +4901,14 @@ pub mod kea {
 
         // What: running kea-dhcp4 config.
         // Why: subnets and reservations live there.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         pub async fn config(&self) -> Result<Value, String> {
             self.command("config-get", None).await
         }
 
         // What: apply and save a new config.
         // Why: config-set applies; config-write saves.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         pub async fn set_config(&self, config: Value) -> Result<(), String> {
             self.command("config-set", Some(config)).await?;
             self.command("config-write", Some(json!({}))).await?;
@@ -4917,7 +4917,7 @@ pub mod kea {
 
         // What: all IPv4 leases.
         // Why: lease_cmds hook; the ui lists them.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         pub async fn leases(&self) -> Result<Vec<Value>, String> {
             let args = self.command("lease4-get-all", None).await?;
             Ok(args["leases"].as_array().cloned().unwrap_or_default())
@@ -4925,7 +4925,7 @@ pub mod kea {
 
         // What: delete one lease by address.
         // Why: frees the address for the next client.
-        // From: Issue #1683 | PR #1858
+        // From: Issue #1683 | PR #1980
         pub async fn release(&self, ip: &str) -> Result<(), String> {
             let args = json!({"ip-address": ip});
             self.command("lease4-del", Some(args)).await?;
@@ -4956,7 +4956,7 @@ pub mod tool {
 
 // What: statistics: SNMP samples into RRD files.
 // Why: replaces Netdata with native rrdtool.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 pub mod rrd {
     use crate::config::Settings;
     use std::path::{Path, PathBuf};
@@ -4964,12 +4964,12 @@ pub mod rrd {
 
     // What: RRD data source types we accept.
     // Why: rrdtool create: GAUGE, COUNTER, DERIVE.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     const KINDS: [&str; 3] = ["GAUGE", "COUNTER", "DERIVE"];
 
     // What: one data source of a graph.
     // Why: name, SNMP OID and RRD type.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     #[derive(Clone, Debug)]
     pub struct Source {
         pub ds: String,
@@ -4980,7 +4980,7 @@ pub mod rrd {
 
     // What: one graph, stored in one RRD file.
     // Why: SOT row name:ds=oid=TYPE+ds=oid=TYPE.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     #[derive(Clone, Debug)]
     pub struct Graph {
         pub name: String,
@@ -5067,7 +5067,7 @@ pub mod rrd {
 
     // What: graphs from STATS_GRAPHS.
     // Why: a bad row is an error, never skipped.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn graphs(s: &Settings) -> Result<Vec<Graph>, String> {
         s.list("STATS_GRAPHS")
             .iter()
@@ -5162,7 +5162,7 @@ pub mod rrd {
 
     // What: RRD file of one graph.
     // Why: one file per graph under STATS_DIR.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn file(s: &Settings, g: &Graph) -> Result<PathBuf, String> {
         let dir = s.text("STATS_DIR")?;
         Ok(Path::new(&dir).join(format!("{}.rrd", g.name)))
@@ -5170,7 +5170,7 @@ pub mod rrd {
 
     // What: create the RRD when it is missing.
     // Why: step, heartbeat and archives from SOT.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn ensure(s: &Settings, g: &Graph) -> Result<(), String> {
         let path = file(s, g)?;
         if path.exists() {
@@ -5215,7 +5215,7 @@ pub mod rrd {
 
     // What: read all sources once, then store.
     // Why: snmpget -Oqv prints one value per line.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn sample(s: &Settings, g: &Graph) -> Result<(), String> {
         let mut get = Command::new("snmpget");
         get.args(["-v2c", "-Oqv", "-c"]);
@@ -5246,7 +5246,7 @@ pub mod rrd {
 
     // What: PNG of one graph over a time range.
     // Why: rrdtool draws; the page shows the image.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn png(s: &Settings, g: &Graph, range: &str, dark: bool) -> Result<Vec<u8>, String> {
         if !s.list("STATS_RANGES").iter().any(|r| r == range) {
             return Err(format!("range {range} is not offered"));
@@ -5314,14 +5314,14 @@ pub mod rrd {
 
 // What: file tidying: safe paths, age, size, xz.
 // Why: the watchdog decides when; this does how.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 pub mod tidy {
     use std::path::{Component, Path, PathBuf};
     use std::process::Command;
 
     // What: seconds of one day.
     // Why: ages and daily stamps count in days.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub const DAY: u64 = 86_400;
 
     // What: the first second of the day a time lies in.
@@ -5357,7 +5357,7 @@ pub mod tidy {
 
     // What: real folder strictly inside prefix.
     // Why: a bad setting must never clean elsewhere.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn inside(raw: &str, prefix: &str) -> Result<PathBuf, String> {
         if !raw.starts_with('/') {
             return Err(format!("{raw} is not an absolute path"));
@@ -5376,7 +5376,7 @@ pub mod tidy {
 
     // What: one regular file with its facts.
     // Why: links are never followed or removed.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub struct Item {
         pub path: PathBuf,
         pub size: u64,
@@ -5395,7 +5395,7 @@ pub mod tidy {
 
     // What: all regular files below a folder.
     // Why: base for age, size and pack runs.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn files(dir: &Path) -> Vec<Item> {
         let mut out = Vec::new();
         let mut todo = vec![dir.to_path_buf()];
@@ -5423,7 +5423,7 @@ pub mod tidy {
 
     // What: remove files older than days.
     // Why: returns count removed and the errors.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn drop_older(dir: &Path, days: u64, now: u64) -> (usize, Vec<String>) {
         let (mut gone, mut errs) = (0, Vec::new());
         for f in files(dir) {
@@ -5440,7 +5440,7 @@ pub mod tidy {
 
     // What: remove oldest until under budget.
     // Why: files written today stay; returns size.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn fit_budget(dir: &Path, budget: u64, now: u64) -> (u64, Vec<String>) {
         let mut all = files(dir);
         let mut size: u64 = all.iter().map(|f| f.size).sum();
@@ -5464,7 +5464,7 @@ pub mod tidy {
 
     // What: xz every file closed before today.
     // Why: past days are never written again.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn pack_closed(dir: &Path, preset: u64, now: u64) -> Vec<String> {
         let today = day_start(now);
         let mut errs = Vec::new();
@@ -5507,7 +5507,7 @@ pub mod tidy {
 
     // What: is a daily job due by its stamp.
     // Why: a missing or future stamp means due.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn is_due(stamp: &Path, now: u64) -> bool {
         let last = std::fs::read_to_string(stamp)
             .ok()
@@ -5519,7 +5519,7 @@ pub mod tidy {
 
     // What: write a stamp time.
     // Why: next run waits a day from it.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn save_stamp(stamp: &Path, at: u64) -> Result<(), String> {
         let made = stamp.parent().map_or(Ok(()), std::fs::create_dir_all);
         let wrote = made.and_then(|()| std::fs::write(stamp, at.to_string() + "\n"));
@@ -5528,14 +5528,14 @@ pub mod tidy {
 
     // What: newest change time below a folder.
     // Why: shows whether logs are still written.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn newest(dir: &Path) -> u64 {
         files(dir).iter().map(|f| f.mtime).max().unwrap_or(0)
     }
 
     // What: processed count of syslog-ng file outputs.
     // Why: syslog-ng-ctl stats lists the store rows.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn syslog_processed() -> Result<u64, String> {
         let out = crate::tool::run(Command::new("syslog-ng-ctl").arg("stats"))?;
         let text = String::from_utf8_lossy(&out);

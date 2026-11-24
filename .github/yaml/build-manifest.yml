@@ -553,7 +553,7 @@ runtime:
     - SYSLOG_TIME_REAP=30
     # What: syslog-ng store modes and transports.
     # Why: readers get group read; forward is reliable.
-    # From: Issue #1683 | PR #1858
+    # From: Issue #1683 | PR #1980
     - SYSLOG_DIR_PERM=0750
     - SYSLOG_FILE_PERM=0640
     - SYSLOG_IN_TRANSPORT=udp
@@ -796,7 +796,7 @@ runtime:
     - DNS_QUERY_LOG=0
     # What: private reverse zones the stack serves.
     # Why: RFC 1918 and ULA ranges; no list in code.
-    # From: Issue #1683 | PR #1858
+    # From: Issue #1683 | PR #1980
     - DNS_PRIVATE_REVERSE_ZONES=10.in-addr.arpa. 168.192.in-addr.arpa. 16.172.in-addr.arpa. 17.172.in-addr.arpa. 18.172.in-addr.arpa. 19.172.in-addr.arpa. 20.172.in-addr.arpa. 21.172.in-addr.arpa. 22.172.in-addr.arpa. 23.172.in-addr.arpa. 24.172.in-addr.arpa. 25.172.in-addr.arpa. 26.172.in-addr.arpa. 27.172.in-addr.arpa. 28.172.in-addr.arpa. 29.172.in-addr.arpa. 30.172.in-addr.arpa. 31.172.in-addr.arpa. c.f.ip6.arpa. d.f.ip6.arpa.
     # What: the project address the ui links to.
     # Why: setup.sh bootstrap copy; ci.sh checks both.
@@ -871,7 +871,7 @@ runtime:
     - NTP_DRIFT_FILE=@NTP_STATE_DIR@/drift
     # What: chrony makestep: threshold and count.
     # Why: steps a bad clock only at start.
-    # From: Issue #1683 | PR #1858
+    # From: Issue #1683 | PR #1980
     - NTP_MAKESTEP=1.0 3
     - NTP_ENABLED=1
     - AUTO_UPDATE_ENABLED=0
@@ -1088,7 +1088,7 @@ runtime:
     - PDNS_DATABASE=@PDNS_DATA_DIR@/pdns.sqlite3
     # What: PowerDNS backend module.
     # Why: sqlite file in PDNS_DATABASE.
-    # From: Issue #1683 | PR #1858
+    # From: Issue #1683 | PR #1980
     - PDNS_LAUNCH=gsqlite3
     - PDNS_DEFAULT_SOA=ns1.@DHCP_DOMAIN@ hostmaster.@DHCP_DOMAIN@ 0 30 10 604800 300
     # What: name of the HTTPS IP, A and PTR, never NS.
@@ -1307,7 +1307,7 @@ runtime:
     - DNS_SECONDARY_NAME_MAX=32
   # What: key=kind;min;max;effect;owner; ? = optional.
   # Why: config.rs checks every value against it.
-  # From: Issue #1683 | PR #1858
+  # From: Issue #1683 | PR #1980
   schema:
     - AUTO_UPDATE_ENABLED=bool;;;live;ui
     - NTP_AUTO_DHCP=bool;;;reload;dhcp
@@ -1898,7 +1898,7 @@ build_identity:
     inputs: [toolchain_source_sha, base_digest, package_refresh]
   # What: apk-only images: no Rust, no toolchain.
   # Why: source, base and package refresh key the id.
-  # From: Issue #1683 | PR #1858
+  # From: Issue #1683 | PR #1980
   apk:
     inputs: [source_sha, base_digest, package_refresh]
 

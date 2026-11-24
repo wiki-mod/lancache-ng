@@ -1065,7 +1065,7 @@
     const DOCK_CONTROLLABLE_SERVICES = [{% for name in desired_services %}'{{ name }}',{% endfor %}];
     // What: programs per container (container:program)
     // Why: reload/restart one program via OpenRC
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     const DOCK_PROGRAMS = [{% for p in programs %}'{{ p }}',{% endfor %}];
     // What: the ui container: restart only, no stop.
     // Why: its menu offers restart like the proxy menu.

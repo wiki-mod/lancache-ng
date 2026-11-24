@@ -4,7 +4,7 @@
 
 // What: settings from SOT schema, defaults, file, env.
 // Why: every crate reads values through one checked set.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -12,22 +12,22 @@ use std::path::{Path, PathBuf};
 
 // What: env key of the baked default rows.
 // Why: the SOT bakes defaults into each image.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 pub const DEFAULTS_KEY: &str = "LANCACHE_RUNTIME_DEFAULTS";
 
 // What: env key of the baked schema rows.
 // Why: kind, range, effect and owner per key.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 pub const SCHEMA_KEY: &str = "LANCACHE_RUNTIME_SCHEMA";
 
 // What: separator of baked rows.
 // Why: the SOT joins rows with a pipe.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 const ROW_SEP: char = '|';
 
 // What: type of a value.
 // Why: the schema kind decides parsing and the ui field.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Kind {
     Text,
@@ -41,7 +41,7 @@ pub enum Kind {
 
 // What: what a change needs before it is live.
 // Why: only affected programs act on a change.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum Effect {
     Live,
@@ -53,7 +53,7 @@ pub enum Effect {
 
 // What: one schema row.
 // Why: the ui builds fields and the runner plans from it.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Spec {
     pub key: String,
@@ -65,7 +65,7 @@ pub struct Spec {
 
 // What: a checked value.
 // Why: callers never parse raw text again.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Value {
     Text(String),
@@ -77,7 +77,7 @@ pub enum Value {
 impl fmt::Display for Value {
     // What: canonical text of a value.
     // Why: revision and diff compare this text.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Text(v) => f.write_str(v),
@@ -90,7 +90,7 @@ impl fmt::Display for Value {
 
 // What: items of a list value.
 // Why: the SOT allows comma and blank as separators.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 pub fn list_items(raw: &str) -> impl Iterator<Item = &str> {
     raw.split(|c: char| c == ',' || c.is_whitespace())
         .filter(|item| !item.is_empty())
@@ -135,7 +135,7 @@ pub fn parse_bool(raw: &str) -> Option<bool> {
 
 // What: a plain decimal number, digits only.
 // Why: "+5" or " 5" in a setting is a typo.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 fn parse_uint(raw: &str) -> Option<u64> {
     if raw.is_empty() || !raw.bytes().all(|b| b.is_ascii_digit()) {
         return None;
@@ -146,7 +146,7 @@ fn parse_uint(raw: &str) -> Option<u64> {
 impl Effect {
     // What: effect from its SOT word.
     // Why: an unknown word is an error, never Live.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     fn parse(word: &str) -> Result<Self, String> {
         match word {
             "live" => Ok(Self::Live),
@@ -169,7 +169,7 @@ impl Spec {
 
     // What: parse KEY=kind;min;max;effect;owner.
     // Why: the SOT schema row format.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     fn parse(row: &str) -> Result<Self, String> {
         let (key, rest) = row
             .split_once('=')
@@ -213,7 +213,7 @@ impl Spec {
 
     // What: check raw text against this spec.
     // Why: one check for env, file, defaults and forms.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     fn check(&self, raw: &str) -> Result<(Value, Option<String>), String> {
         let key = &self.key;
         match &self.kind {
@@ -259,7 +259,7 @@ impl Spec {
 
 // What: non-empty rows of a baked list.
 // Why: an empty row is no entry.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 fn baked_rows(baked: &str) -> impl Iterator<Item = &str> {
     baked
         .split(ROW_SEP)
@@ -500,7 +500,7 @@ fn write_lines(path: &Path, updates: &BTreeMap<String, String>) -> Result<(), St
 
 // What: the checked settings of one process.
 // Why: one load at start; reload builds a new set.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 #[derive(Clone, Debug, Default)]
 pub struct Settings {
     specs: BTreeMap<String, Spec>,
@@ -594,21 +594,21 @@ impl Settings {
 
     // What: the schema row of one key.
     // Why: the ui needs kind and effect per field.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn spec(&self, key: &str) -> Option<&Spec> {
         self.specs.get(key)
     }
 
     // What: all schema rows in key order.
     // Why: the setup page lists every setting.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn specs(&self) -> impl Iterator<Item = &Spec> {
         self.specs.values()
     }
 
     // What: the checked value of one key.
     // Why: optional keys may have none.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn get(&self, key: &str) -> Option<&Value> {
         self.values.get(key)
     }
@@ -625,7 +625,7 @@ impl Settings {
 
     // What: value as text; missing is an error.
     // Why: the error names the key.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn text(&self, key: &str) -> Result<String, String> {
         // What: a compose-only key falls back to the env.
         // Why: operator keys like IP_HTTPS have no SOT row.
@@ -645,7 +645,7 @@ impl Settings {
 
     // What: value as number.
     // Why: only uint keys answer; others are errors.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn uint(&self, key: &str) -> Result<u64, String> {
         match self.get(key) {
             Some(Value::Uint(n)) => Ok(*n),
@@ -660,7 +660,7 @@ impl Settings {
 
     // What: value as bool.
     // Why: only bool keys answer; others are errors.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn flag(&self, key: &str) -> Result<bool, String> {
         match self.get(key) {
             Some(Value::Bool(b)) => Ok(*b),
@@ -689,7 +689,7 @@ impl Settings {
 
     // What: value as items; missing is empty.
     // Why: an unset optional list means no entries.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn list(&self, key: &str) -> Vec<String> {
         match self.get(key) {
             Some(Value::List(items)) => items.clone(),
@@ -700,7 +700,7 @@ impl Settings {
 
     // What: check one raw value for a key.
     // Why: forms are checked before they are stored.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn validate(&self, key: &str, raw: &str) -> Result<Value, String> {
         self.spec(key)
             .ok_or_else(|| format!("{key} is not a known setting"))?
@@ -710,7 +710,7 @@ impl Settings {
 
     // What: FNV-1a id of all non-secret values.
     // Why: shows which config is live.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn revision(&self) -> String {
         let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
         for (key, value) in self.texts() {
@@ -725,7 +725,7 @@ impl Settings {
 
     // What: keys whose value differs in newer.
     // Why: the runner acts per owner and effect.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     pub fn diff(&self, newer: &Self) -> Vec<Change> {
         let keys: BTreeSet<&String> = self.values.keys().chain(newer.values.keys()).collect();
         keys.into_iter()
@@ -752,7 +752,7 @@ pub struct Change {
 
 // What: reader for the process environment.
 // Why: Settings::load takes any reader.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 pub fn process_env(name: &str) -> Option<String> {
     std::env::var(name).ok()
 }

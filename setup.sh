@@ -4830,7 +4830,7 @@ migrate_env_for_update() (
     remove_env_key IP_SSL "$env_file"
     # What: drops every NATS and Netdata key on update.
     # Why: NATS and Netdata are gone from the stack.
-    # From: Issue #1683 | PR #1858
+    # From: Issue #1683 | PR #1980
     local retired
     for retired in NATS_DNS_REPLICA_USER NATS_DNS_REPLICA_PASSWORD \
         NATS_UI_PASSWORD NATS_DNS_WRITER_PASSWORD NATS_CALLOUT_PASSWORD \

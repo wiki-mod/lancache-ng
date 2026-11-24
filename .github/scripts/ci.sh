@@ -67,7 +67,7 @@ CI_ARG_IMAGE_SETUP=IMAGE_SETUP
 CI_ARG_DEFAULTS=LANCACHE_RUNTIME_DEFAULTS
 # What: build-arg and env name of the SOT settings schema.
 # Why: config.rs checks every value against it.
-# From: Issue #1683 | PR #1858
+# From: Issue #1683 | PR #1980
 CI_ARG_SCHEMA=LANCACHE_RUNTIME_SCHEMA
 
 # What: SOT keys ci.sh openrc-setup reads in an image.
@@ -14272,7 +14272,7 @@ _ci_service_defaults_arg() {
 
 # What: the SOT schema rows of the keys one image reads.
 # Why: config.rs needs a spec for every read key.
-# From: Issue #1683 | PR #1858
+# From: Issue #1683 | PR #1980
 _ci_service_schema_arg() {
     local rows
     rows="$(_ci_service_default_rows "$1" schema)" || return 2

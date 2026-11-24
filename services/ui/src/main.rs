@@ -29,7 +29,7 @@ use tera::{Context, Tera};
 
 // What: env name of the saved settings file.
 // Why: needed before any setting can be read.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 const SETTINGS_FILE_ENV: &str = "LANCACHE_SETTINGS_FILE";
 
 // What: CLI word of the one-shot DHCP probe.
@@ -120,12 +120,12 @@ tokio::task_local! {
 
 // What: session cookie name.
 // Why: the CSRF token is derived from it.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 const COOKIE: &str = "lancache_session";
 
 // What: form field that carries the CSRF token.
 // Why: templates and handlers share one name.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 const CSRF_FIELD: &str = "csrf_token";
 
 type Fields = BTreeMap<String, String>;
@@ -158,7 +158,7 @@ fn switch_on(value: &str) -> bool {
 
 // What: error page text with an HTTP status.
 // Why: handlers return Result and use the ? sign.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 struct Fail(StatusCode, String);
 
 impl IntoResponse for Fail {
@@ -297,7 +297,7 @@ impl App {
 
 // What: CSRF token bound to the session.
 // Why: a foreign site cannot read the cookie.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 #[derive(Clone)]
 struct Csrf(String);
 
@@ -321,7 +321,7 @@ impl Csrf {
 
     // What: form check; refuse without a match.
     // Why: each POST changes state.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     fn check(&self, form: &Fields) -> Result<(), Fail> {
         match form.get(CSRF_FIELD) {
             Some(t) if self.matches(t) => Ok(()),
@@ -331,7 +331,7 @@ impl Csrf {
 
     // What: header check for script calls.
     // Why: JSON calls send the token as a header.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     fn check_header(&self, headers: &HeaderMap) -> Result<(), Fail> {
         let given = headers.get("x-csrf-token").and_then(|v| v.to_str().ok());
         match given {
@@ -405,7 +405,7 @@ async fn login_ok(s: &Settings, headers: &HeaderMap) -> bool {
 
 // What: login, session cookie and CSRF token.
 // Why: runs before every protected handler.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 async fn auth(State(app): Shared, mut req: Request, next: Next) -> Response {
     let s = app.settings();
     if !login_ok(&s, req.headers()).await {
@@ -468,7 +468,7 @@ async fn proxy_log(s: &Settings) -> Result<(Value, Vec<Value>), String> {
 
 // What: active, requests, waiting from stub_status.
 // Why: live counters next to the log figures.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 async fn fetch_proxy_live(s: &Settings) -> Option<serde_json::Value> {
     let url = s.text("PROXY_STATUS_URL").ok()?;
     let resp = http::client(s).ok()?.get(&url).send().await.ok()?;
@@ -478,7 +478,7 @@ async fn fetch_proxy_live(s: &Settings) -> Option<serde_json::Value> {
 
 // What: read the stub_status text into numbers.
 // Why: nginx gives plain text, the page needs fields.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 fn parse_stub_status(body: &str) -> Option<serde_json::Value> {
     let nums: Vec<u64> = body
         .split_whitespace()
@@ -540,7 +540,7 @@ async fn dashboard(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page
 
 // What: does our NTP server answer.
 // Why: General page shows the live state.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 async fn ntp_answers(s: &Settings) -> Result<bool, String> {
     if !s.flag("NTP_ENABLED")? {
         return Ok(false);
@@ -556,7 +556,7 @@ async fn ntp_answers(s: &Settings) -> Result<bool, String> {
 
 // What: General page.
 // Why: channel, updates, NTP and login.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 async fn setup(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     let s = app.settings();
     let mut ctx = Context::new();
@@ -566,7 +566,7 @@ async fn setup(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
 
 // What: set a new ui password (Argon2id).
 // Why: only the hash is kept; old one must match.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 async fn password(
     State(app): Shared,
     Extension(csrf): Extension<Csrf>,
@@ -610,7 +610,7 @@ async fn password(
 
 // What: keep only real changes of known keys.
 // Why: an empty secret field means keep it.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 fn changes(old: &Settings, form: Fields) -> Fields {
     let mut out = Fields::new();
     for (key, value) in form {
@@ -672,7 +672,7 @@ async fn commit(app: &App, form: Fields) -> Result<(), String> {
 
 // What: end a form: redirect back or show error.
 // Why: every form handler ends the same way.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 fn finish(result: Result<(), String>, back: &str) -> Page {
     result.map_err(bad_request)?;
     Ok(Redirect::to(back).into_response())
@@ -680,7 +680,7 @@ fn finish(result: Result<(), String>, back: &str) -> Page {
 
 // What: General page form.
 // Why: field names are the SOT keys.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 async fn save(
     State(app): Shared,
     Extension(csrf): Extension<Csrf>,
@@ -763,7 +763,7 @@ async fn drop_old_zones(s: &Settings, before: &[String]) {
 
 // What: newest lines of all programs, merged.
 // Why: syslog-ng keeps one folder per program.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 fn newest_lines(root: &Path, programs: &[String], max: usize, chunk: u64) -> Vec<Value> {
     let mut all = Vec::new();
     for p in programs {
@@ -788,7 +788,7 @@ fn newest_lines(root: &Path, programs: &[String], max: usize, chunk: u64) -> Vec
 
 // What: logs page.
 // Why: newest lines plus on/off per program.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 async fn logs(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     let s = app.settings();
     let root = PathBuf::from(s.text("SYSLOG_LOG_ROOT")?);
@@ -826,7 +826,7 @@ async fn logs(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
 
 // What: save forward targets and muted programs.
 // Why: switch on_<program>; missing means muted.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 async fn logs_save(
     State(app): Shared,
     Extension(csrf): Extension<Csrf>,
@@ -851,7 +851,7 @@ async fn logs_save(
 
 // What: PowerDNS API of this node.
 // Why: records live only in PowerDNS.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 fn pdns_api(s: &Settings) -> Result<lancache_ng::pdns::Api, String> {
     let key = secrets(s)?.pdns_api_key;
     let url = s.text("PDNS_PRIMARY_API_URL")?;
@@ -872,7 +872,7 @@ fn recursor_apis(s: &Settings) -> Result<Vec<lancache_ng::pdns::Api>, String> {
 
 // What: reverse DNS name of an address.
 // Why: PTR rows live in in-addr.arpa or ip6.arpa.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 fn reverse_name(ip: &str) -> Result<String, String> {
     use std::net::IpAddr;
     let addr = lancache_ng::dns::parse_ip(ip)?;
@@ -895,7 +895,7 @@ fn reverse_name(ip: &str) -> Result<String, String> {
 
 // What: private reverse zone holding a name.
 // Why: the PowerDNS PATCH needs the zone.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 fn reverse_zone(s: &Settings, name: &str) -> Option<String> {
     let zones = lancache_ng::dns::private_reverse_zones(s);
     zones
@@ -925,7 +925,7 @@ fn served_reverse_place(s: &Settings, ip: &str) -> Result<Option<(String, String
 
 // What: zones that keep snapshots.
 // Why: LAN zone plus the private reverse zones.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 fn snapshot_zones(s: &Settings) -> Result<Vec<String>, String> {
     let mut zones = vec![lancache_ng::dns::lan_zone(s)?];
     zones.extend(lancache_ng::dns::private_reverse_zones(s));
@@ -934,7 +934,7 @@ fn snapshot_zones(s: &Settings) -> Result<Vec<String>, String> {
 
 // What: snapshot store of one zone.
 // Why: undo a bad change; count from the SOT.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 fn zone_store(s: &Settings, zone: &str) -> Result<lancache_ng::snapshot::Store, String> {
     let dir = Path::new(&s.text("DNS_SNAPSHOT_DIR")?).join(zone.trim_end_matches('.'));
     let keep = s.num::<usize>("DNS_SNAPSHOT_KEEP")?;
@@ -949,7 +949,7 @@ fn zone_store(s: &Settings, zone: &str) -> Result<lancache_ng::snapshot::Store, 
 
 // What: keep the zone's records after a change.
 // Why: each change can be undone later.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 async fn snapshot(s: &Settings, api: &lancache_ng::pdns::Api, zone: &str) -> Result<(), String> {
     let rows = api.rrsets(zone).await?;
     let body = serde_json::to_vec(&rows).map_err(|e| e.to_string())?;
@@ -984,7 +984,7 @@ fn snapshot_rows(store: &lancache_ng::snapshot::Store) -> Result<Vec<Value>, Str
 
 // What: snapshots of all zones, newest first.
 // Why: DNS page and setup.sh show the same list.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 fn snapshot_list(s: &Settings) -> Result<Vec<(String, Vec<Value>)>, String> {
     let mut out = Vec::new();
     for zone in snapshot_zones(s)? {
@@ -996,7 +996,7 @@ fn snapshot_list(s: &Settings) -> Result<Vec<(String, Vec<Value>)>, String> {
 
 // What: print {"zones":{zone:[{id,created_unix}]}}.
 // Why: setup.sh reset-config reads this shape.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 fn zone_snapshots_cli(s: &Settings) -> Result<(), String> {
     let zones: serde_json::Map<String, Value> = snapshot_list(s)?
         .into_iter()
@@ -1023,7 +1023,7 @@ async fn rollback(s: &Settings, zone: &str, id: &str) -> Result<(), String> {
 
 // What: PTR rows of all private reverse zones.
 // Why: the DNS page lists them with the host.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 async fn ptr_rows(s: &Settings, api: &lancache_ng::pdns::Api) -> Vec<Value> {
     let mut out = Vec::new();
     for zone in lancache_ng::dns::private_reverse_zones(s) {
@@ -1040,7 +1040,7 @@ async fn ptr_rows(s: &Settings, api: &lancache_ng::pdns::Api) -> Vec<Value> {
 
 // What: DNS page.
 // Why: records are read live from PowerDNS.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 async fn domains(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     let s = app.settings();
     let lan = lancache_ng::dns::lan_zone(&s)?;
@@ -1162,7 +1162,7 @@ async fn domains(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
 
 // What: list setting with one item in or out.
 // Why: domain add, remove and toggle share it.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 fn list_change(s: &Settings, key: &str, item: &str, present: bool) -> Fields {
     let mut items: Vec<String> = s.list(key).into_iter().filter(|x| x != item).collect();
     if present {
@@ -1227,7 +1227,7 @@ async fn dns_action(
 
 // What: full name inside the LAN zone.
 // Why: a short name gets the zone appended.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 fn in_zone(name: &str, zone: &str) -> String {
     if name.ends_with('.') || name.ends_with(zone.trim_end_matches('.')) {
         name.to_string()
@@ -1260,7 +1260,7 @@ fn canonical(kind: &str, c: &str) -> String {
 
 // What: add or remove one LAN record set.
 // Why: PATCH sets or deletes; NOTIFY follows.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 async fn record(
     s: &Settings,
     add: bool,
@@ -1311,7 +1311,7 @@ async fn record(
 
 // What: add or remove one PTR record.
 // Why: name from the IP; zone from the list.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 async fn ptr(s: &Settings, add: bool, get: &(dyn Fn(&str) -> String + Sync)) -> Result<(), String> {
     let ip = get("ip");
     let name = if lancache_ng::dns::is_reverse_name(&ip) {
@@ -1340,7 +1340,7 @@ async fn ptr(s: &Settings, add: bool, get: &(dyn Fn(&str) -> String + Sync)) -> 
 
 // What: token secondaries register with.
 // Why: kept like any secret; rotate renews it.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 fn registration_token(s: &Settings) -> Result<String, String> {
     let dir = secret::dir(s)?;
     let name = "SECONDARY_REGISTRATION_TOKEN";
@@ -1357,7 +1357,7 @@ async fn store_secondaries(app: &App, list: &[(String, String)]) -> Result<(), S
 
 // What: body of a secondary registration.
 // Why: the token proves the admin gave the command.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 #[derive(serde::Deserialize)]
 struct Register {
     token: String,
@@ -1377,7 +1377,7 @@ fn valid_peer_name(s: &Settings, name: &str) -> Result<bool, String> {
 
 // What: everything a new secondary needs.
 // Why: setup.sh secondary writes it to its env.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 fn peer_kit(s: &Settings) -> Result<Value, String> {
     let sec = secrets(s)?;
     let primary = s.text("IP_HTTP")?;
@@ -1401,7 +1401,7 @@ fn peer_kit(s: &Settings) -> Result<Value, String> {
 
 // What: register a secondary (public route).
 // Why: token checked; reply has the whole kit.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 async fn register(
     State(app): Shared,
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
@@ -1415,7 +1415,7 @@ async fn register(
     let mut list = lancache_ng::pdns_conf::secondaries(&s);
     // What: sent address, else stored, else the peer IP.
     // Why: re-registration keeps a manual override.
-    // From: Issue #1683 | PR #1858
+    // From: Issue #1683 | PR #1980
     let stored = list
         .iter()
         .find(|(n, _)| *n == r.name)
@@ -1435,7 +1435,7 @@ async fn register(
 
 // What: body with a new peer address.
 // Why: the edit dialog posts {"address": ...}.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 #[derive(serde::Deserialize)]
 struct Address {
     address: String,
@@ -1443,7 +1443,7 @@ struct Address {
 
 // What: new registration token.
 // Why: drop the file; resolve makes a fresh one.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 fn renew_token(s: &Settings) -> Result<String, String> {
     let dir = secret::dir(s)?;
     let file = secret::file_of(&dir, "SECONDARY_REGISTRATION_TOKEN");
@@ -1453,7 +1453,7 @@ fn renew_token(s: &Settings) -> Result<String, String> {
 
 // What: secondary actions from the DNS page.
 // Why: remove, rotate, address and health.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 async fn secondary_action(
     State(app): Shared,
     Extension(csrf): Extension<Csrf>,
@@ -1917,7 +1917,7 @@ fn option_data(sn: &Value, name: &str) -> String {
 
 // What: one Kea subnet as flat page fields.
 // Why: the page shows fields; Kea has option-data.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 fn subnet_row(sn: &Value) -> Value {
     let dns: Vec<String> = option_data(sn, "domain-name-servers")
         .split(',')
@@ -1946,7 +1946,7 @@ fn subnet_row(sn: &Value) -> Value {
 
 // What: subnets, reservations, leases from Kea.
 // Why: read live; nothing is kept in the ui.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 async fn kea_view(api: &lancache_ng::kea::Api) -> (Vec<Value>, Vec<Value>, Vec<Value>) {
     let (mut subnets, mut reservations, mut leases) = (Vec::new(), Vec::new(), Vec::new());
     if let Ok(cfg) = api.config().await {
@@ -1972,7 +1972,7 @@ async fn kea_view(api: &lancache_ng::kea::Api) -> (Vec<Value>, Vec<Value>, Vec<V
 
 // What: snapshot store of the Kea config.
 // Why: each subnet change can be undone.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 fn kea_store(s: &Settings) -> Result<lancache_ng::snapshot::Store, String> {
     let dir = PathBuf::from(s.text("KEA_CONFIG_SNAPSHOT_DIR")?);
     let keep = s.num::<usize>("KEA_SNAPSHOT_KEEP")?;
@@ -1986,7 +1986,7 @@ fn kea_store(s: &Settings) -> Result<lancache_ng::snapshot::Store, String> {
 
 // What: DHCP page.
 // Why: mode, proxy, relay and live Kea data.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 async fn dhcp(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     let s = app.settings();
     let mode = s.text("DHCP_MODE")?;
@@ -2092,7 +2092,7 @@ async fn main_subnet(
 
 // What: change Kea subnets with a closure.
 // Why: get, edit, set, write, snapshot; one path.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 async fn kea_edit(
     s: &Settings,
     edit: impl FnOnce(&mut Vec<Value>) -> Result<(), String>,
@@ -2116,7 +2116,7 @@ async fn kea_edit(
 
 // What: Kea subnet from the subnet form.
 // Why: named options; code options and hosts kept.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 fn subnet_from(get: &(dyn Fn(&str) -> String + Sync), id: u64, old: Option<&Value>) -> Value {
     let dns = dns_pair(get("dns_primary"), get("dns_secondary"));
     let mut opts = vec![
@@ -2154,7 +2154,7 @@ fn subnet_mut(list: &mut [Value], id: u64) -> Result<&mut Value, String> {
 
 // What: SOT keys of the proxy and relay forms.
 // Why: field dhcp_x maps to key DHCP_X.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 fn dnsmasq_fields(form: &Fields, proxy: bool) -> Fields {
     let mut out = Fields::new();
     for (k, v) in form {
@@ -2177,7 +2177,7 @@ fn dnsmasq_fields(form: &Fields, proxy: bool) -> Fields {
 
 // What: Kea subnet, option and host edits.
 // Why: all go through kea_edit.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 async fn kea_action(
     s: &Settings,
     op: &str,
@@ -2260,7 +2260,7 @@ async fn kea_action(
 
 // What: one DHCP page form, chosen by op.
 // Why: SOT keys via commit; Kea via kea_action.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 async fn dhcp_action(
     State(app): Shared,
     Extension(csrf): Extension<Csrf>,
@@ -2303,7 +2303,7 @@ async fn dhcp_action(
 
 // What: DHCP precheck on demand.
 // Why: finds foreign servers; tests one lease.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 async fn dhcp_check(
     State(app): Shared,
     Extension(csrf): Extension<Csrf>,
@@ -2334,7 +2334,7 @@ async fn dhcp_check(
 
 // What: statistics page, one tab per range.
 // Why: rrdtool draws; the page shows PNGs.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 async fn stats(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     let s = app.settings();
     let mut ctx = Context::new();
@@ -2385,7 +2385,7 @@ async fn stats(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
 
 // What: query of one graph image.
 // Why: dark=1 uses the dark colour set.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 #[derive(serde::Deserialize)]
 struct GraphQuery {
     range: String,
@@ -2404,7 +2404,7 @@ fn graph_title(title: &str) -> String {
 
 // What: one graph as PNG.
 // Why: drawn on request; RRD files stay small.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 async fn graph(
     State(app): Shared,
     axum::extract::Path(name): axum::extract::Path<String>,
@@ -2426,7 +2426,7 @@ async fn graph(
 
 // What: SNMP samples into RRD each step.
 // Why: the ui owns the statistics files.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 fn sample_all(s: &Settings) -> Vec<String> {
     match lancache_ng::rrd::graphs(s) {
         Err(e) => vec![e],
@@ -2741,7 +2741,7 @@ async fn cache_scanner(app: Arc<App>) {
 
 // What: container name of a compose service.
 // Why: Docker calls need the real name.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 async fn container_of(app: &App, s: &Settings, service: &str) -> Result<String, String> {
     let list = project_containers(app, s).await?;
     let hit = list.iter().find(|c| docker::service_of(c) == Some(service));
@@ -2761,7 +2761,7 @@ async fn project_containers(app: &App, s: &Settings) -> Result<Vec<Value>, Strin
 
 // What: run a command in a service container.
 // Why: rc-service and cachehamster go this way.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 async fn exec_in(
     app: &App,
     s: &Settings,
@@ -2778,7 +2778,7 @@ async fn exec_in(
 
 // What: restart or reload one program.
 // Why: only through OpenRC; only listed ones.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 async fn service_action(
     State(app): Shared,
     Extension(csrf): Extension<Csrf>,
@@ -2825,7 +2825,7 @@ async fn service_action(
 
 // What: one cachehamster command; JSON answer.
 // Why: it runs in the services container.
-// From: Issue #871 | PR #1858
+// From: Issue #871 | PR #1980
 async fn hamster(app: &App, args: &[&str]) -> Result<Value, String> {
     let s = app.settings();
     let program = s.text("CACHEHAMSTER_PROGRAM")?;
@@ -2852,7 +2852,7 @@ async fn hamster(app: &App, args: &[&str]) -> Result<Value, String> {
 
 // What: cachehamster page.
 // Why: prefill is driven from the ui only.
-// From: Issue #871 | PR #1858
+// From: Issue #871 | PR #1980
 async fn cachehamster(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     let mut ctx = Context::new();
     match hamster(&app, &["status"]).await {
@@ -2864,7 +2864,7 @@ async fn cachehamster(State(app): Shared, Extension(csrf): Extension<Csrf>) -> P
 
 // What: when a job runs, as a command word.
 // Why: the page sends unix seconds for "at".
-// From: Issue #871 | PR #1858
+// From: Issue #871 | PR #1980
 fn job_time(when: &str, at: &str) -> Result<String, Fail> {
     match when {
         "at" => at
@@ -2878,7 +2878,7 @@ fn job_time(when: &str, at: &str) -> Result<String, Fail> {
 
 // What: add, start, cancel, remove, logout.
 // Why: each maps to one cachehamster command.
-// From: Issue #871 | PR #1858
+// From: Issue #871 | PR #1980
 async fn hamster_action(
     State(app): Shared,
     Extension(csrf): Extension<Csrf>,
@@ -2916,7 +2916,7 @@ async fn hamster_action(
 
 // What: JSON calls: QR login and library.
 // Why: the page polls without a reload.
-// From: Issue #871 | PR #1858
+// From: Issue #871 | PR #1980
 async fn hamster_api(
     State(app): Shared,
     Extension(csrf): Extension<Csrf>,
@@ -2959,7 +2959,7 @@ async fn hamster_api(
 
 // What: write rendered files; list the changed.
 // Why: an unchanged file never wakes its owner.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 fn write_files(s: &Settings, files: &[render::File]) -> Result<Vec<config::Change>, String> {
     let mode = s.mode("UI_CONFIG_FILE_MODE")?;
     let mut out = Vec::new();
@@ -3003,7 +3003,7 @@ async fn plan_containers<V>(
 
 // What: render, write and wake the owners.
 // Why: only owners with changes are touched.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 async fn apply_all(
     app: &App,
     old: &Settings,
@@ -3214,7 +3214,7 @@ async fn wait_healthy(
 
 // What: start or stop a container for the user.
 // Why: SERVICES_STOPPED is the wish the watchdog obeys.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 async fn set_wanted(app: &App, service: &str, run: bool) -> Result<(), String> {
     let s = app.settings();
     if !s
@@ -3671,7 +3671,7 @@ fn tsig_file(s: &Settings) -> Result<PathBuf, String> {
 
 // What: fresh 32-byte TSIG secret, base64.
 // Why: PowerDNS and Kea both read base64.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 fn new_tsig() -> String {
     let hex = secret::random_hex(32);
     let bytes: Vec<u8> = hex
@@ -3685,7 +3685,7 @@ fn new_tsig() -> String {
 
 // What: TSIG secret; a rotated file wins.
 // Why: a ui rotation beats the setup.sh value.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 fn tsig_secret(s: &Settings) -> Result<String, String> {
     let file = tsig_file(s)?;
     if !file.exists()
@@ -3699,7 +3699,7 @@ fn tsig_secret(s: &Settings) -> Result<String, String> {
 
 // What: replace the TSIG secret and apply.
 // Why: shuts out a removed or leaked secondary.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 async fn rotate_tsig(app: &App) -> Result<(), String> {
     let s = app.settings();
     let file = tsig_file(&s)?;
@@ -3789,7 +3789,7 @@ fn cache_room(s: &Settings, form: &Fields, cached: u64) -> Result<(), Fail> {
 
 // What: traffic-light colour of a container.
 // Why: the beambar shows green, yellow, red, gray.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 fn colour(c: &Value) -> &'static str {
     let status = c["Status"].as_str().unwrap_or_default();
     match c["State"].as_str().unwrap_or_default() {
@@ -3803,7 +3803,7 @@ fn colour(c: &Value) -> &'static str {
 
 // What: container states for the beambar.
 // Why: Docker is the source; no status files.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 async fn status(State(app): Shared) -> Response {
     let s = app.settings();
     let stopped = s.list("SERVICES_STOPPED");
@@ -3857,7 +3857,7 @@ async fn status(State(app): Shared) -> Response {
 
 // What: wish from the beambar button.
 // Why: body {"state": "running" or "stopped"}.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 #[derive(serde::Deserialize)]
 struct Want {
     state: String,
@@ -3865,7 +3865,7 @@ struct Want {
 
 // What: start or stop one container.
 // Why: the wish is saved first; see set_wanted.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 async fn container_state(
     State(app): Shared,
     Extension(csrf): Extension<Csrf>,
@@ -3887,7 +3887,7 @@ async fn container_state(
 
 // What: restart the ui container itself.
 // Why: Docker restarts it; the page reloads.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 async fn restart_ui(
     State(app): Shared,
     Extension(csrf): Extension<Csrf>,
@@ -3924,7 +3924,7 @@ fn asset(kind: &'static str, body: &'static [u8]) -> Response {
 
 // What: password against a stored PHC hash.
 // Why: one owner for login and change.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 fn verify(hash: &str, pw: &str) -> bool {
     let phc = stored_phc(hash);
     let Ok(parsed) = PasswordHash::new(&phc) else {
@@ -4114,7 +4114,7 @@ struct Op(&'static str);
 
 // What: command line uses besides the server.
 // Why: setup.sh and the healthcheck need them.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 async fn command(s: &Settings, args: &[String]) -> Option<Result<(), String>> {
     match args.first().map(String::as_str) {
         Some("zone-snapshots") => Some(zone_snapshots_cli(s)),
@@ -4274,7 +4274,7 @@ async fn secure(State(app): Shared, req: Request, next: Next) -> Response {
 
 // What: entry: a command or the web server.
 // Why: one binary for ui, setup.sh, healthcheck.
-// From: Issue #1683 | PR #1858
+// From: Issue #1683 | PR #1980
 #[tokio::main]
 async fn main() -> Result<(), String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
