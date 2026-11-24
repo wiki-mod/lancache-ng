@@ -659,6 +659,13 @@ impl Settings {
         }
     }
 
+    // What: value as a narrower number type.
+    // Why: callers need usize, u32 or u16, not u64.
+    // From: Issue #1683 | PR #2017
+    pub fn num<T: TryFrom<u64>>(&self, key: &str) -> Result<T, String> {
+        T::try_from(self.uint(key)?).map_err(|_| format!("{key} is out of range"))
+    }
+
     // What: value as file mode, read as octal text.
     // Why: the SOT owns every file mode, like 0640.
     // From: Issue #1683 | PR #2017

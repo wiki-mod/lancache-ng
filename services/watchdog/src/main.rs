@@ -174,7 +174,7 @@ fn load() -> Result<Settings, String> {
 async fn containers(s: &Settings, f: &mut Findings, m: &mut Memory) -> Result<(), String> {
     let api = docker::Api::new(&s.text("DOCKER_ENDPOINT")?)?;
     let limit = Duration::from_secs(s.uint("DOCKER_TIMEOUT")?);
-    let grace = u32::try_from(s.uint("WATCHDOG_STOP_GRACE")?).map_err(|e| e.to_string())?;
+    let grace = s.num::<u32>("WATCHDOG_STOP_GRACE")?;
     let after = s.uint("RESTART_AFTER")?;
     let project = s.text("COMPOSE_PROJECT")?;
     let stopped = s.list("SERVICES_STOPPED");

@@ -427,7 +427,7 @@ fn qr_svg(url: &str, size: u32) -> Result<String, String> {
 // Why: no size literal in code.
 // From: Issue #871 | PR #1858
 fn qr_size(c: &Ctx) -> Result<u32, String> {
-    u32::try_from(c.s.uint("STEAM_QR_SIZE")?).map_err(|e| e.to_string())
+    c.s.num::<u32>("STEAM_QR_SIZE")
 }
 
 // What: start a QR login; answers the QR as SVG.
@@ -2000,9 +2000,8 @@ impl Runner {
 // Why: a broken round logs and retries, never exits.
 // From: Issue #871 | PR #1858
 async fn daemon(c: Ctx) -> Result<(), String> {
-    let queues = usize::try_from(c.s.uint("CACHEHAMSTER_QUEUES")?).map_err(|e| e.to_string())?;
-    let connections =
-        usize::try_from(c.s.uint("CACHEHAMSTER_CONCURRENCY")?).map_err(|e| e.to_string())?;
+    let queues = c.s.num::<usize>("CACHEHAMSTER_QUEUES")?;
+    let connections = c.s.num::<usize>("CACHEHAMSTER_CONCURRENCY")?;
     let tick = Duration::from_secs(c.s.uint("CACHEHAMSTER_POLL_INTERVAL")?);
     let report = c.s.uint("CACHEHAMSTER_THROUGHPUT_INTERVAL")?;
     let dl = Dl::load(&c.s, connections)?;

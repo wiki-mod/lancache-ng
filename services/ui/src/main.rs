@@ -405,7 +405,7 @@ fn with_human(v: &impl serde::Serialize, field: &str, n: u64) -> Value {
 // From: Issue #1683 | PR #1858
 async fn proxy_log(s: &Settings) -> Result<(Value, Vec<Value>), String> {
     let dir = Path::new(&s.text("SYSLOG_LOG_ROOT")?).join(s.text("PROXY_LOG_PROGRAM")?);
-    let limit = usize::try_from(s.uint("UI_RECENT_REQUESTS")?).map_err(|e| e.to_string())?;
+    let limit = s.num::<usize>("UI_RECENT_REQUESTS")?;
     let chunk = s.uint("UI_LOG_TAIL_CHUNK")?;
     let (stats, recent) = tokio::task::spawn_blocking(move || {
         (access::stats(&dir), access::tail(&dir, limit, chunk))
@@ -747,7 +747,7 @@ fn newest_lines(root: &Path, programs: &[String], max: usize, chunk: u64) -> Vec
 async fn logs(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     let s = app.settings();
     let root = PathBuf::from(s.text("SYSLOG_LOG_ROOT")?);
-    let max = usize::try_from(s.uint("UI_LOG_LINES")?).map_err(|e| e.to_string())?;
+    let max = s.num::<usize>("UI_LOG_LINES")?;
     let chunk = s.uint("UI_LOG_TAIL_CHUNK")?;
     let programs = s.list("SYSLOG_PROGRAMS");
     let muted = s.list("SYSLOG_MUTED");
@@ -861,7 +861,7 @@ fn snapshot_zones(s: &Settings) -> Result<Vec<String>, String> {
 // From: Issue #1683 | PR #1858
 fn zone_store(s: &Settings, zone: &str) -> Result<lancache_ng::snapshot::Store, String> {
     let dir = Path::new(&s.text("DNS_SNAPSHOT_DIR")?).join(zone.trim_end_matches('.'));
-    let keep = usize::try_from(s.uint("DNS_SNAPSHOT_KEEP")?).map_err(|e| e.to_string())?;
+    let keep = s.num::<usize>("DNS_SNAPSHOT_KEEP")?;
     let owner = fs::Owner::default();
     Ok(lancache_ng::snapshot::Store {
         dir,
@@ -1240,7 +1240,7 @@ async fn ptr(s: &Settings, add: bool, get: &(dyn Fn(&str) -> String + Sync)) -> 
     let Some(zone) = reverse_zone(s, &name) else {
         return Err(format!("{name} is in no private reverse zone"));
     };
-    let ttl = u32::try_from(s.uint("DNS_RECORD_TTL")?).map_err(|e| e.to_string())?;
+    let ttl = s.num::<u32>("DNS_RECORD_TTL")?;
     let mut contents = Vec::new();
     if add {
         let host = get("hostname");
@@ -1290,7 +1290,7 @@ struct Register {
 // What: checks a secondary name: one label, SOT length.
 // Why: the name becomes a DNS label and file name.
 fn valid_peer_name(s: &Settings, name: &str) -> Result<bool, String> {
-    let max = usize::try_from(s.uint("DNS_SECONDARY_NAME_MAX")?).map_err(|e| e.to_string())?;
+    let max = s.num::<usize>("DNS_SECONDARY_NAME_MAX")?;
     let label = !name.contains('.') && lancache_ng::dns::is_dns_name(name, false, false);
     Ok(name.len() <= max && label)
 }
@@ -1885,7 +1885,7 @@ async fn kea_view(api: &lancache_ng::kea::Api) -> (Vec<Value>, Vec<Value>, Vec<V
 // From: Issue #1683 | PR #1858
 fn kea_store(s: &Settings) -> Result<lancache_ng::snapshot::Store, String> {
     let dir = PathBuf::from(s.text("KEA_CONFIG_SNAPSHOT_DIR")?);
-    let keep = usize::try_from(s.uint("KEA_SNAPSHOT_KEEP")?).map_err(|e| e.to_string())?;
+    let keep = s.num::<usize>("KEA_SNAPSHOT_KEEP")?;
     Ok(lancache_ng::snapshot::Store {
         dir,
         keep,
@@ -3224,7 +3224,7 @@ async fn soa_on_dns_port(
     let ip: std::net::IpAddr = address
         .parse()
         .map_err(|_| format!("{address:?} is no IP address"))?;
-    let port = u16::try_from(s.uint("DNS_PORT")?).map_err(|e| e.to_string())?;
+    let port = s.num::<u16>("DNS_PORT")?;
     let addr = std::net::SocketAddr::new(ip, port);
     let wait = Duration::from_secs(s.uint("SECONDARY_PROBE_TIMEOUT")?);
     let zone = zone.to_string();
@@ -3293,7 +3293,7 @@ async fn ensure_soa_nameserver(s: &Settings, api: &lancache_ng::pdns::Api) -> Re
     let soa = s.text("PDNS_DEFAULT_SOA")?;
     let mname = lancache_ng::dns::canonical_zone(soa.split_whitespace().next().unwrap_or_default());
     let lan = lancache_ng::dns::lan_zone(s)?;
-    let ttl = u32::try_from(s.uint("DNS_RECORD_TTL")?).map_err(|e| e.to_string())?;
+    let ttl = s.num::<u32>("DNS_RECORD_TTL")?;
     let ns = ns_names(s, &mname)?;
     for zone in lancache_ng::dns::managed_zones(s)? {
         ensure_rrset(api, &zone, &zone, "NS", ttl, &ns).await?;
