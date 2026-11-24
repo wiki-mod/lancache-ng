@@ -4464,11 +4464,19 @@ pub mod ntp {
     const MODE_SERVER: u8 = 4;
 
     fn ask(host: &str, port: u64, wait: Duration) -> std::io::Result<[u8; PACKET]> {
-        let sock = UdpSocket::bind("0.0.0.0:0")?;
+        // What: a socket of the family of the target.
+        // Why: an IPv4 socket cannot send to IPv6.
+        // From: Issue #1683 | PR #2017
+        let local = if host.contains(':') {
+            "[::]:0"
+        } else {
+            "0.0.0.0:0"
+        };
+        let sock = UdpSocket::bind(local)?;
         sock.set_read_timeout(Some(wait))?;
         let mut req = [0u8; PACKET];
         req[0] = REQUEST_HEAD;
-        sock.send_to(&req, format!("{host}:{port}"))?;
+        sock.send_to(&req, crate::dns::host_port(host, port))?;
         let mut reply = [0u8; PACKET];
         let n = sock.recv(&mut reply)?;
         if n < PACKET {
