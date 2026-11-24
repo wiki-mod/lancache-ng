@@ -856,7 +856,7 @@ fn recursor_apis(s: &Settings) -> Result<Vec<lancache_ng::pdns::Api>, String> {
 // From: Issue #1683 | PR #1858
 fn reverse_name(ip: &str) -> Result<String, String> {
     use std::net::IpAddr;
-    let addr: IpAddr = ip.parse().map_err(|_| format!("{ip:?} is no IP address"))?;
+    let addr = lancache_ng::dns::parse_ip(ip)?;
     Ok(match addr {
         IpAddr::V4(v4) => {
             let mut o = v4.octets();
@@ -3261,9 +3261,7 @@ async fn soa_on_dns_port(
     address: &str,
     zone: &str,
 ) -> Result<lancache_ng::dns::Soa, String> {
-    let ip: std::net::IpAddr = address
-        .parse()
-        .map_err(|_| format!("{address:?} is no IP address"))?;
+    let ip = lancache_ng::dns::parse_ip(address)?;
     let port = s.num::<u16>("DNS_PORT")?;
     let addr = std::net::SocketAddr::new(ip, port);
     let wait = Duration::from_secs(s.uint("SECONDARY_PROBE_TIMEOUT")?);
@@ -3351,7 +3349,7 @@ async fn ensure_soa_nameserver(s: &Settings, api: &lancache_ng::pdns::Api) -> Re
     // What: A and PTR only when ns1 is in the LAN zone.
     // Why: a foreign name has no home in a managed zone.
     // From: Issue #1683
-    if mname.ends_with(&format!(".{lan}")) {
+    if lancache_ng::dns::is_below(&mname, &lan) {
         let ip = s.text("IP_HTTP")?;
         ensure_rrset(api, &lan, &mname, "A", ttl, std::slice::from_ref(&ip)).await?;
         ensure_ptr(s, api, &ip, &mname, ttl).await?;
@@ -3361,7 +3359,7 @@ async fn ensure_soa_nameserver(s: &Settings, api: &lancache_ng::pdns::Api) -> Re
     // From: Issue #1683
     let https = primary_https_ip(s)?;
     let ns2 = lancache_ng::dns::canonical_zone(&s.text("DNS_NS_HTTPS_NAME")?);
-    if !https.is_empty() && ns2.ends_with(&format!(".{lan}")) {
+    if !https.is_empty() && lancache_ng::dns::is_below(&ns2, &lan) {
         ensure_rrset(api, &lan, &ns2, "A", ttl, std::slice::from_ref(&https)).await?;
         ensure_ptr(s, api, &https, &ns2, ttl).await?;
     }

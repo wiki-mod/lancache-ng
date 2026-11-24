@@ -890,7 +890,22 @@ pub mod dns {
     // Why: one owner of the test of an address text.
     // From: Issue #1683 | PR #2017
     pub fn is_ip(text: &str) -> bool {
-        text.parse::<std::net::IpAddr>().is_ok()
+        parse_ip(text).is_ok()
+    }
+
+    // What: the address a text holds, or an error text.
+    // Why: one reader; the error names the bad text.
+    // From: Issue #1683 | PR #2017
+    pub fn parse_ip(text: &str) -> Result<std::net::IpAddr, String> {
+        text.parse()
+            .map_err(|_| format!("{text:?} is no IP address"))
+    }
+
+    // What: true for a name below a zone, not the zone.
+    // Why: only such a name gets records in that zone.
+    // From: Issue #1683 | PR #2017
+    pub fn is_below(name: &str, zone: &str) -> bool {
+        name.ends_with(&format!(".{zone}"))
     }
 
     // What: A for an IPv4 address, AAAA for IPv6.
@@ -2749,10 +2764,7 @@ pub mod recursor_conf {
         if key == "DNS_UPSTREAM_ZONES" {
             for m in crate::dns::managed_zones(s)? {
                 let m = m.trim_end_matches('.').to_ascii_lowercase();
-                if let Some(z) = out
-                    .iter()
-                    .find(|z| **z == m || z.ends_with(&format!(".{m}")))
-                {
+                if let Some(z) = out.iter().find(|z| **z == m || crate::dns::is_below(z, &m)) {
                     return Err(format!(
                         "{key}: {z} is the local zone {m}; it is answered here"
                     ));
