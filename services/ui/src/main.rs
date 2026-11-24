@@ -3214,7 +3214,7 @@ async fn ensure_tsig(s: &Settings, key: &str) -> Result<(), String> {
 // From: Issue #1683 | PR #1858
 async fn ensure_secondary_zones(s: &Settings, key: &str) -> Result<(), String> {
     let api = pdns_api(s)?;
-    let have: Vec<String> = api.zones().await?.into_iter().map(|z| z.name).collect();
+    let have = zone_names(&api).await?;
     let zones = s.list("DNS_SECONDARY_ZONES");
     let port = primary_xfr_port(s, zones.first()).await?;
     let masters = vec![lancache_ng::dns::host_port(
@@ -3292,7 +3292,7 @@ async fn answers_aa(s: &Settings, address: &str, zone: &str) -> Result<(), Strin
 // From: Issue #1683 | PR #1980
 async fn ensure_primary_zones(s: &Settings, key: &str) -> Result<(), String> {
     let api = pdns_api(s)?;
-    let have: Vec<String> = api.zones().await?.into_iter().map(|z| z.name).collect();
+    let have = zone_names(&api).await?;
     let edit = vec![s.text("PDNS_SOA_EDIT")?];
     let signed = if s.flag("DDNS_ALLOW_UNSIGNED")? {
         Vec::new()
@@ -3447,6 +3447,26 @@ async fn ensure_ptr(
     ensure_rrset(api, &zone, &rev, "PTR", ttl, &[host.to_string()]).await
 }
 
+// What: writes the fields of a SOA back to its zone.
+// Why: every SOA edit ends with the same record write.
+// From: Issue #1683 | PR #2017
+async fn write_soa(
+    api: &lancache_ng::pdns::Api,
+    zone: &str,
+    ttl: u32,
+    fields: &[String],
+) -> Result<(), String> {
+    api.set_rrset(zone, zone, "SOA", ttl, &[fields.join(" ")])
+        .await
+}
+
+// What: the names of the zones a server holds.
+// Why: both zone setups skip a zone that exists.
+// From: Issue #1683 | PR #2017
+async fn zone_names(api: &lancache_ng::pdns::Api) -> Result<Vec<String>, String> {
+    Ok(api.zones().await?.into_iter().map(|z| z.name).collect())
+}
+
 // What: SOA mname and rname from PDNS_DEFAULT_SOA.
 // Why: a zone made before a domain change kept the old ns1.
 // From: Issue #1683 | PR #2017
@@ -3467,7 +3487,7 @@ async fn ensure_soa_names(
     }
     f[0] = mname;
     f[1] = rname;
-    api.set_rrset(zone, zone, "SOA", ttl, &[f.join(" ")]).await
+    write_soa(api, zone, ttl, &f).await
 }
 
 // What: our SOA serial set past a secondary's.
@@ -3479,7 +3499,7 @@ async fn raise_serial(s: &Settings, zone: &str, past: u32) -> Result<(), String>
         return Err(format!("{zone} has no SOA"));
     };
     f[2] = past.wrapping_add(1).to_string();
-    api.set_rrset(zone, zone, "SOA", ttl, &[f.join(" ")]).await
+    write_soa(&api, zone, ttl, &f).await
 }
 
 // What: ttl and the seven fields of a zone's SOA.
