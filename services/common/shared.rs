@@ -878,6 +878,13 @@ pub mod dns {
         }
     }
 
+    // What: true for an IPv4 or IPv6 address.
+    // Why: one owner of the test of an address text.
+    // From: Issue #1683 | PR #2017
+    pub fn is_ip(text: &str) -> bool {
+        text.parse::<std::net::IpAddr>().is_ok()
+    }
+
     // What: A for an IPv4 address, AAAA for IPv6.
     // Why: one owner of the record type of an address.
     // From: Issue #1683 | PR #2017
@@ -2413,7 +2420,7 @@ pub mod chrony {
             s.uint("NTP_PORT")?
         );
         for host in &upstream {
-            let kind = if host.parse::<std::net::IpAddr>().is_ok() {
+            let kind = if crate::dns::is_ip(host) {
                 "server"
             } else {
                 "pool"
@@ -2459,7 +2466,7 @@ pub mod pdns_conf {
         secondaries(s)
             .into_iter()
             .map(|(_, ip)| ip)
-            .filter(|ip| ip.parse::<std::net::IpAddr>().is_ok())
+            .filter(|ip| crate::dns::is_ip(ip))
             .collect()
     }
 
@@ -2623,7 +2630,7 @@ pub mod recursor_conf {
         answer: &str,
         serial: u32,
     ) -> Result<String, String> {
-        if answer.parse::<std::net::IpAddr>().is_err() {
+        if !crate::dns::is_ip(answer) {
             return Err(format!("RPZ answer {answer:?} is no IP address"));
         }
         let kind = crate::dns::address_kind(answer);

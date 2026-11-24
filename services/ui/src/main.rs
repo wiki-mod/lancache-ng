@@ -1271,10 +1271,6 @@ async fn store_secondaries(app: &App, list: &[(String, String)]) -> Result<(), S
     commit(app, single_field("DNS_SECONDARIES", rows)).await
 }
 
-fn is_ip(text: &str) -> bool {
-    text.parse::<std::net::IpAddr>().is_ok()
-}
-
 // What: body of a secondary registration.
 // Why: the token proves the admin gave the command.
 // From: Issue #1683 | PR #1858
@@ -1343,7 +1339,7 @@ async fn register(
         .address
         .or(stored)
         .unwrap_or_else(|| peer.ip().to_string());
-    if !valid_peer_name(&s, &r.name)? || !is_ip(&address) {
+    if !valid_peer_name(&s, &r.name)? || !lancache_ng::dns::is_ip(&address) {
         return Err(bad_request("name or address is not valid"));
     }
     list.retain(|(n, _)| *n != r.name);
@@ -1430,7 +1426,7 @@ async fn secondary_action(
         "UI_ROUTE_SECONDARY_ADDRESS" => {
             let a: Address = serde_json::from_slice(&body)
                 .map_err(|_| bad_request("body must be {\"address\": ...}"))?;
-            if !is_ip(&a.address) {
+            if !lancache_ng::dns::is_ip(&a.address) {
                 return Err(bad_request("no IP address"));
             }
             // What: a new address drops the old records.
