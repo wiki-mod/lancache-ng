@@ -4239,7 +4239,7 @@ pub mod render {
     // Why: apply::plan needs the owner per change.
     // From: Issue #1683 | PR #1980
     pub struct File {
-        pub owner: &'static str,
+        pub owner: String,
         pub path: PathBuf,
         pub body: String,
     }
@@ -4278,30 +4278,26 @@ pub mod render {
             }
         }
 
-        // What: adds a file, or records the error.
+        // What: adds a file of the service a SOT key names.
         // Why: a render reports all errors at once.
         // From: Issue #1683 | PR #1980
-        fn add_file(&mut self, owner: &'static str, path_key: &str, body: Result<String, String>) {
-            match (self.s.text(path_key), body) {
-                (Ok(p), Ok(body)) => self.files.push(File {
+        fn add_file(&mut self, service_key: &str, path_key: &str, body: Result<String, String>) {
+            let owner = self.s.text(service_key);
+            match (owner, self.s.text(path_key), body) {
+                (Ok(owner), Ok(p), Ok(body)) => self.files.push(File {
                     owner,
                     path: PathBuf::from(p),
                     body,
                 }),
-                (Err(e), _) | (_, Err(e)) => self.errs.push(e),
+                (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => self.errs.push(e),
             }
         }
         // What: adds a JSON value as a pretty file.
         // Why: a JSON error is recorded like any other.
         // From: Issue #1683 | PR #1980
-        fn put_json(
-            &mut self,
-            owner: &'static str,
-            key: &str,
-            v: Result<serde_json::Value, String>,
-        ) {
+        fn put_json(&mut self, service_key: &str, key: &str, v: Result<serde_json::Value, String>) {
             let body = v.and_then(|v| serde_json::to_string_pretty(&v).map_err(|e| e.to_string()));
-            self.add_file(owner, key, body);
+            self.add_file(service_key, key, body);
         }
     }
 
@@ -4321,19 +4317,23 @@ pub mod render {
     // From: Issue #1683 | PR #2004
     fn dns_files(o: &mut Out, sec: &Secrets, names: &[(String, bool)]) {
         let s = o.s;
-        o.add_file("services", "CHRONY_CONF_FILE", chrony::render(s));
-        o.add_file("services", "SYSLOG_CONF_FILE", log::render(s));
+        o.add_file("SERVICES_SERVICE", "CHRONY_CONF_FILE", chrony::render(s));
+        o.add_file("SERVICES_SERVICE", "SYSLOG_CONF_FILE", log::render(s));
         o.add_file(
-            "services",
+            "SERVICES_SERVICE",
             "SNMPD_CONF_FILE",
             crate::snmp::render(s, &[], &[]),
         );
         o.add_file(
-            "dns",
+            "DNS_SERVICE",
             "PDNS_CONF_FILE",
             pdns_conf::auth(s, &sec.pdns_api_key),
         );
-        o.add_file("dns", "DNSDIST_CONF_FILE", crate::dnsdist_conf::render(s));
+        o.add_file(
+            "DNS_SERVICE",
+            "DNSDIST_CONF_FILE",
+            crate::dnsdist_conf::render(s),
+        );
         for (which, ip_key) in [(Which::Http, "IP_HTTP"), (Which::Https, "IP_HTTPS")] {
             let Ok(answer) = s.text(ip_key) else { continue };
             let rpz_key = which.key("RPZ_FILE");
@@ -4345,21 +4345,21 @@ pub mod render {
                 .map(|b| content_serial(&b))
                 .unwrap_or(1);
             o.add_file(
-                "dns",
+                "DNS_SERVICE",
                 &rpz_key,
                 recursor_conf::rpz(s, names, &answer, serial),
             );
             let lua = s.text(&rpz_key).and_then(|p| recursor_conf::lua(s, &p));
-            o.add_file("dns", &lua_key, lua);
+            o.add_file("DNS_SERVICE", &lua_key, lua);
             let yaml = s
                 .text(&lua_key)
                 .and_then(|l| recursor_conf::yaml(s, which, &sec.recursor_api_key, &l));
-            o.add_file("dns", &which.key("CONF_FILE"), yaml);
+            o.add_file("DNS_SERVICE", &which.key("CONF_FILE"), yaml);
         }
         match s.flag("DNS_FILTER_AAAA") {
             Ok(true) => {
                 let body = Ok(recursor_conf::AAAA_FILTER_LUA.to_string());
-                o.add_file("dns", "RECURSOR_AAAA_LUA_FILE", body);
+                o.add_file("DNS_SERVICE", "RECURSOR_AAAA_LUA_FILE", body);
             }
             Ok(false) => {}
             Err(e) => o.errs.push(e),
@@ -4375,7 +4375,7 @@ pub mod render {
         // Why: the dhcp entry reads it at every start.
         // From: Issue #1683 | PR #1980
         let mode = s.text("DHCP_MODE").map(|m| format!("{m}\n"));
-        o.add_file("dhcp", "DHCP_MODE_FILE", mode);
+        o.add_file("DHCP_SERVICE", "DHCP_MODE_FILE", mode);
         match dhcp::Mode::from_settings(s) {
             Ok(dhcp::Mode::Off) => {}
             Ok(dhcp::Mode::Kea) => {
@@ -4385,19 +4385,23 @@ pub mod render {
                     .and_then(|p| std::fs::read(p).ok())
                     .and_then(|b| serde_json::from_slice(&b).ok());
                 o.put_json(
-                    "dhcp",
+                    "DHCP_SERVICE",
                     "KEA_DHCP4_CONF_FILE",
                     kea_conf::dhcp4(s, kept.as_ref()),
                 );
                 o.put_json(
-                    "dhcp",
+                    "DHCP_SERVICE",
                     "KEA_CTRL_CONF_FILE",
                     kea_conf::ctrl_agent(s, &sec.kea_ctrl_token),
                 );
                 let ddns = kea_conf::ddns(s, &sec.tsig_name, &sec.tsig_secret);
-                o.put_json("dhcp", "KEA_DDNS_CONF_FILE", ddns);
+                o.put_json("DHCP_SERVICE", "KEA_DDNS_CONF_FILE", ddns);
             }
-            Ok(mode) => o.add_file("dhcp", "DNSMASQ_CONF_FILE", dnsmasq_conf::render(s, mode)),
+            Ok(mode) => o.add_file(
+                "DHCP_SERVICE",
+                "DNSMASQ_CONF_FILE",
+                dnsmasq_conf::render(s, mode),
+            ),
             Err(e) => o.errs.push(e),
         }
     }
@@ -4434,20 +4438,21 @@ pub mod render {
         }
         let hosts = cache_hosts(s, domains)?;
         let https = s.flag("HTTPS_ENABLED")?;
+        let proxy = s.text("PROXY_SERVICE")?;
         for name in s.list("NGINX_TEMPLATES") {
             if !https && name.ends_with("https.conf") {
                 continue;
             }
             let body = nginx_conf::template(&read(&src.join(&name))?, s)?;
             o.files.push(File {
-                owner: "proxy",
+                owner: proxy.clone(),
                 path: dst.join(&name),
                 body,
             });
         }
         for (rel, body) in nginx_conf::files(s, &hosts, https)? {
             o.files.push(File {
-                owner: "proxy",
+                owner: proxy.clone(),
                 path: dst.join(rel),
                 body,
             });
@@ -4456,7 +4461,7 @@ pub mod render {
         // Why: proxy-params.conf aliases it; ui owns files.
         // From: Issue #1683 | PR #1980
         o.files.push(File {
-            owner: "proxy",
+            owner: proxy,
             path: dst.join(s.text("NGINX_HEALTHZ_FILE")?),
             body: format!("{}\n", s.text("NGINX_HEALTHZ_BODY")?),
         });
@@ -4614,8 +4619,9 @@ pub mod render {
         // Why: snmpd waits for its file and blocks a stop.
         // From: Issue #1683
         let snmpd = s.text("SNMPD_CONF_FILE").map(PathBuf::from).ok();
+        let dns = s.text("DNS_SERVICE").map_err(|e| vec![e])?;
         o.files
-            .retain(|f| f.owner == "dns" || Some(&f.path) == snmpd.as_ref());
+            .retain(|f| f.owner == dns || Some(&f.path) == snmpd.as_ref());
         o.finish()
     }
 }

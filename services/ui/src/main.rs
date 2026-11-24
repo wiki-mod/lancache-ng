@@ -3208,7 +3208,7 @@ fn write_files(s: &Settings, files: &[render::File]) -> Result<Vec<config::Chang
         if changed.map_err(|e| format!("{}: {e}", f.path.display()))? && wake {
             out.push(config::Change {
                 key: f.path.display().to_string(),
-                owner: f.owner.to_string(),
+                owner: f.owner.clone(),
                 effect: config::Effect::Reload,
             });
         }
@@ -3401,7 +3401,7 @@ async fn apply_all(
             report.push(format!("certs: {n} issued"));
             let mut plan = apply::plan(&[config::Change {
                 key: "certs".into(),
-                owner: "proxy".into(),
+                owner: new.text("PROXY_SERVICE")?,
                 effect: config::Effect::Reload,
             }]);
             let (names, _) = plan_containers(app, new, &mut plan).await;
