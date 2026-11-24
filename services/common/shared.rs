@@ -4028,7 +4028,31 @@ pub mod render {
         errs: Vec<String>,
     }
 
-    impl Out<'_> {
+    impl<'a> Out<'a> {
+        // What: an empty collector for one render run.
+        // Why: all and dns_only start the same way.
+        // From: Issue #1683 | PR #2017
+        fn new(s: &'a Settings) -> Self {
+            Self {
+                s,
+                files: Vec::new(),
+                errs: Vec::new(),
+            }
+        }
+
+        // What: the files, or the errors, each text once.
+        // Why: two files may hit the same bad value.
+        // From: Issue #1683 | PR #1991
+        fn finish(mut self) -> Result<Vec<File>, Vec<String>> {
+            let mut seen = std::collections::HashSet::new();
+            self.errs.retain(|e| seen.insert(e.clone()));
+            if self.errs.is_empty() {
+                Ok(self.files)
+            } else {
+                Err(self.errs)
+            }
+        }
+
         fn add_file(&mut self, owner: &'static str, path_key: &str, body: Result<String, String>) {
             match (self.s.text(path_key), body) {
                 (Ok(p), Ok(body)) => self.files.push(File {
@@ -4299,15 +4323,18 @@ pub mod render {
         Ok(made)
     }
 
+    // What: the names of a cache domain list.
+    // Why: all and dns_only feed the dns files with them.
+    // From: Issue #1683 | PR #2017
+    fn cdn_names(domains: &str) -> Vec<(String, bool)> {
+        domains.lines().filter_map(crate::dns::cdn_entry).collect()
+    }
+
     // What: render all files; report every error.
     // Why: one call for the ui; nothing half written.
     // From: Issue #1683 | PR #1858
     pub fn all(s: &Settings, sec: &Secrets) -> Result<Vec<File>, Vec<String>> {
-        let mut o = Out {
-            s,
-            files: Vec::new(),
-            errs: Vec::new(),
-        };
+        let mut o = Out::new(s);
         let domains = match crate::cdn::effective(s) {
             Ok(d) => d,
             Err(e) => {
@@ -4315,54 +4342,28 @@ pub mod render {
                 String::new()
             }
         };
-        let names: Vec<(String, bool)> =
-            domains.lines().filter_map(crate::dns::cdn_entry).collect();
-        dns_files(&mut o, sec, &names);
+        dns_files(&mut o, sec, &cdn_names(&domains));
         dhcp_files(&mut o, sec);
         if let Err(e) = nginx_files(&mut o, &domains) {
             o.errs.push(e);
         }
-        // What: each error once, even if two files hit it.
-        // Why: DoMe 07.11.: no double texts.
-        // From: Issue #1683 | PR #1991
-        let mut seen = std::collections::HashSet::new();
-        o.errs.retain(|e| seen.insert(e.clone()));
-        if o.errs.is_empty() {
-            Ok(o.files)
-        } else {
-            Err(o.errs)
-        }
+        o.finish()
     }
 
     // What: only the dns files, for a secondary.
     // Why: a secondary runs only the dns container.
     // From: Issue #1683 | PR #1980
     pub fn dns_only(s: &Settings, sec: &Secrets) -> Result<Vec<File>, Vec<String>> {
-        let mut o = Out {
-            s,
-            files: Vec::new(),
-            errs: Vec::new(),
-        };
+        let mut o = Out::new(s);
         let domains = crate::cdn::effective(s).map_err(|e| vec![e])?;
-        let names: Vec<(String, bool)> =
-            domains.lines().filter_map(crate::dns::cdn_entry).collect();
-        dns_files(&mut o, sec, &names);
+        dns_files(&mut o, sec, &cdn_names(&domains));
         // What: dns files and the snmpd.conf.
         // Why: live 229: snmpd waited; stop was killed.
         // From: Issue #1683
         let snmpd = s.text("SNMPD_CONF_FILE").map(PathBuf::from).ok();
         o.files
             .retain(|f| f.owner == "dns" || Some(&f.path) == snmpd.as_ref());
-        // What: each error once, even if two files hit it.
-        // Why: DoMe 07.11.: no double texts.
-        // From: Issue #1683 | PR #1991
-        let mut seen = std::collections::HashSet::new();
-        o.errs.retain(|e| seen.insert(e.clone()));
-        if o.errs.is_empty() {
-            Ok(o.files)
-        } else {
-            Err(o.errs)
-        }
+        o.finish()
     }
 }
 
