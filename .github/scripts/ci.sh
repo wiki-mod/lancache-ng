@@ -3831,12 +3831,19 @@ ci_cmd_update_psl() {
     _ci_run "[CI-ERROR-CACHE-0037]" "dir=\"${dest}\" reason=\"PSL not put in place\"" cp -f -- "${dir}/${name}" "${dest}/${name}"
 }
 
+# What: memo key of a rust keep or drop listing.
+# Why: one format for the read and the two writes.
+# From: Issue #1683 | PR #2019
+_ci_rust_memo_key() {
+    printf 'rust-%s-%s' "$1" "$2"
+}
+
 # What: Rust items of a listing row's blob; $3 keep|drop.
 # Why: A3: plan read each library per service and ref.
 # From: Issue #1683 | PR #1858
 _ci_listing_items() {
     local oid="${1#*$'\t'}" mode="${3:-drop}" blob out row keep="" drop=""
-    if out="$(_ci_job_memo_get "rust-${mode}-${oid}")"; then
+    if out="$(_ci_job_memo_get "$(_ci_rust_memo_key "${mode}" "${oid}")")"; then
         printf '%s\n' "${out}"
         return 0
     fi
@@ -3860,8 +3867,8 @@ _ci_listing_items() {
     done <<< "${out}"
     keep="${keep%$'\n'}"
     drop="${drop%$'\n'}"
-    [ -z "${keep}" ] || _ci_job_memo_put "rust-keep-${oid}" "${keep}" || return 2
-    [ -z "${drop}" ] || _ci_job_memo_put "rust-drop-${oid}" "${drop}" || return 2
+    [ -z "${keep}" ] || _ci_job_memo_put "$(_ci_rust_memo_key keep "${oid}")" "${keep}" || return 2
+    [ -z "${drop}" ] || _ci_job_memo_put "$(_ci_rust_memo_key drop "${oid}")" "${drop}" || return 2
     if [ "${mode}" = keep ]; then
         printf '%s\n' "${keep}"
     else
