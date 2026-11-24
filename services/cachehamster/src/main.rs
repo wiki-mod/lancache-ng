@@ -489,6 +489,7 @@ async fn login_poll(c: &Ctx, client: &reqwest::Client) -> Result<Value, String> 
     }
     // What: Steam rotates the QR after a while.
     // Why: the UI must show the new code, not a dead one.
+    // From: Issue #871 | PR #1980
     if let Some(new_id) = field(&r, "new_client_id") {
         p.client_id = new_id;
         c.save(
@@ -1241,6 +1242,7 @@ fn pb_read(mut b: &[u8]) -> Result<Vec<(u32, Pb)>, String> {
 
 // What: last integer of a protobuf field number.
 // Why: protobuf lets a later value override.
+// From: Issue #871 | PR #1980
 fn pb_int(f: &[(u32, Pb)], n: u32) -> Option<u64> {
     f.iter().rev().find_map(|(k, v)| match v {
         Pb::Int(i) if *k == n => Some(*i),
@@ -1250,6 +1252,7 @@ fn pb_int(f: &[(u32, Pb)], n: u32) -> Option<u64> {
 
 // What: all byte values of a protobuf field.
 // Why: repeated fields appear more than once.
+// From: Issue #871 | PR #1980
 fn pb_all(f: &[(u32, Pb)], n: u32) -> impl Iterator<Item = &[u8]> {
     f.iter().filter_map(move |(k, v)| match v {
         Pb::Bytes(b) if *k == n => Some(b.as_slice()),
@@ -1273,9 +1276,11 @@ const EMSG_PICS_TOKEN_REQUEST: u32 = 8905;
 const EMSG_PICS_TOKEN_RESPONSE: u32 = 8906;
 // What: protobuf flag of the message number.
 // Why: every CM message sent here is protobuf.
+// From: Issue #871 | PR #1980
 const PROTO_MASK: u32 = 0x8000_0000;
 // What: Steam result code OK (EResult 1).
 // Why: fixed by the protocol, like an RFC constant.
+// From: Issue #871 | PR #1980
 const ERESULT_OK: u64 = 1;
 
 type Ws =
@@ -1307,6 +1312,7 @@ struct Cm {
 impl Cm {
     // What: log in with the sealed QR session token.
     // Why: Steam takes the refresh token as access_token.
+    // From: Issue #871 | PR #1980
     async fn login(cfg: &SteamCfg, client: &reqwest::Client) -> Result<Self, String> {
         let s = load_session(&cfg.dir, &cfg.bind)?.ok_or("Steam login missing")?;
         let steam_id: u64 = steam_id_of(&s.refresh_token)?
@@ -1377,6 +1383,7 @@ impl Cm {
 
     // What: send one protobuf frame with our session.
     // Why: frame = emsg|flag, header length, header, body.
+    // From: Issue #871 | PR #1980
     async fn send(&mut self, emsg: u32, header: PbOut, body: &[u8]) -> Result<(), String> {
         use futures_util::SinkExt as _;
         let header = header.fixed64(1, self.steam_id).int(2, self.session);
@@ -1395,6 +1402,7 @@ impl Cm {
 
     // What: a heartbeat when the interval has passed.
     // Why: the CM drops a silent session.
+    // From: Issue #871 | PR #1980
     async fn beat(&mut self) -> Result<(), String> {
         if self.last_beat.elapsed() >= self.heartbeat {
             self.last_beat = std::time::Instant::now();
@@ -1405,6 +1413,7 @@ impl Cm {
 
     // What: unpack one websocket message into frames.
     // Why: Multi frames bundle many, maybe gzipped.
+    // From: Issue #871 | PR #1980
     fn unpack(&mut self, raw: &[u8]) -> Result<(), String> {
         let word = |b: &[u8], at: usize| -> Result<u32, String> {
             b.get(at..at + 4)
@@ -1415,6 +1424,7 @@ impl Cm {
         let raw_emsg = word(raw, 0)?;
         // What: skip frames without the protobuf flag.
         // Why: a frame without it is no protobuf message.
+        // From: Issue #871 | PR #1985
         if raw_emsg & PROTO_MASK == 0 {
             return Ok(());
         }
@@ -1456,6 +1466,7 @@ impl Cm {
 
     // What: the next frame that matches, within the limit.
     // Why: other frames (notices) are skipped.
+    // From: Issue #871 | PR #1980
     async fn wait(&mut self, want: impl Fn(&Frame) -> bool) -> Result<Frame, String> {
         use futures_util::StreamExt as _;
         let deadline = tokio::time::Instant::now() + self.limit;
@@ -1485,6 +1496,7 @@ impl Cm {
 
     // What: send a job and wait for its answer frames.
     // Why: the answer carries our job id as jobid_target.
+    // From: Issue #871 | PR #1980
     async fn job(
         &mut self,
         emsg: u32,
@@ -1612,6 +1624,7 @@ fn chunks_of(zipped: &[u8]) -> Result<Vec<(String, u64)>, String> {
             if let Some(sha) = pb_all(&c, 1).next() {
                 // What: packed size, else the plain size.
                 // Why: the CDN sends chunks compressed.
+                // From: Issue #871 | PR #1985
                 let n = pb_int(&c, 5).or_else(|| pb_int(&c, 4)).unwrap_or(0);
                 ids.push((hex::encode(sha), n));
             }
@@ -2019,6 +2032,7 @@ async fn daemon(c: Ctx) -> Result<(), String> {
     let mut list = read_json::<Vec<Job>>(&c.path(JOBS_FILE))?.unwrap_or_default();
     // What: a restart leaves no job in Running.
     // Why: the task that ran it is gone.
+    // From: Issue #871 | PR #1980
     for j in list.iter_mut().filter(|j| j.state == State::Running) {
         j.set(State::Waiting);
     }

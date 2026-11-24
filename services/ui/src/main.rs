@@ -328,6 +328,7 @@ impl Csrf {
 
 // What: session id from the Cookie header.
 // Why: browsers may send several Cookie headers.
+// From: Issue #1683 | PR #1980
 fn session_cookie(headers: &HeaderMap) -> Option<String> {
     cookie(headers, COOKIE)
 }
@@ -350,6 +351,7 @@ fn cookie(headers: &HeaderMap, name: &str) -> Option<String> {
 
 // What: user and password from HTTP Basic auth.
 // Why: scripts log in without a session cookie.
+// From: Issue #1683 | PR #1980
 fn basic_credentials(headers: &HeaderMap) -> Option<(String, String)> {
     let raw = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
     let encoded = raw.strip_prefix("Basic ")?;
@@ -411,6 +413,7 @@ async fn auth(State(app): Shared, mut req: Request, next: Next) -> Response {
 
 // What: JSON file, or null when missing or bad.
 // Why: pages render even before the file exists.
+// From: Issue #1683 | PR #1980
 fn read_json(path: &str) -> Value {
     std::fs::read(path)
         .ok()
@@ -420,6 +423,7 @@ fn read_json(path: &str) -> Value {
 
 // What: adds a human-readable byte size field.
 // Why: pages show sizes like 40 GiB, not raw bytes.
+// From: Issue #1683 | PR #1980
 fn with_human(v: &impl serde::Serialize, field: &str, n: u64) -> Value {
     let mut out = serde_json::to_value(v).unwrap_or(Value::Null);
     out[field] = human::bytes(n).into();
@@ -941,6 +945,7 @@ async fn snapshot(s: &Settings, api: &lancache_ng::pdns::Api, zone: &str) -> Res
 
 // What: file change time as unix seconds.
 // Why: snapshot age needs a plain number.
+// From: Issue #1683 | PR #1980
 fn created_unix(path: &Path) -> Result<u64, String> {
     let when = std::fs::metadata(path).and_then(|m| m.modified());
     let when = when.map_err(|e| format!("{}: {e}", path.display()))?;
@@ -1326,6 +1331,7 @@ fn registration_token(s: &Settings) -> Result<String, String> {
 
 // What: saves secondaries as name@address rows.
 // Why: one SOT key holds the whole list.
+// From: Issue #1683 | PR #1980
 async fn store_secondaries(app: &App, list: &[(String, String)]) -> Result<(), String> {
     let rows = lancache_ng::pdns_conf::secondary_rows(list);
     commit(app, single_field("DNS_SECONDARIES", rows)).await
@@ -1344,6 +1350,7 @@ struct Register {
 
 // What: checks a secondary name: one label, SOT length.
 // Why: the name becomes a DNS label and file name.
+// From: Issue #1683 | PR #2017
 fn valid_peer_name(s: &Settings, name: &str) -> Result<bool, String> {
     let max = s.num::<usize>("DNS_SECONDARY_NAME_MAX")?;
     let label = !name.contains('.') && lancache_ng::dns::is_dns_name(name, false, false);
@@ -1519,6 +1526,7 @@ fn ns_change(s: &Settings, name: &str, entered: Option<bool>) -> Fields {
 
 // What: SOA serial of one zone in a zone list.
 // Why: serials show whether a secondary is in sync.
+// From: Issue #1683 | PR #1980
 fn serial_of(zones: &[lancache_ng::pdns::Zone], zone: &str) -> Option<u32> {
     zones.iter().find(|z| z.name == zone).map(|z| z.serial)
 }
@@ -1839,6 +1847,7 @@ async fn flush_zone(s: &Settings, zone: &str) -> Result<(), String> {
 
 // What: clears recursor cache for changed zones.
 // Why: recursors would serve old answers until TTL.
+// From: Issue #1683 | PR #1980
 async fn flush_round(s: &Settings, seen: &mut BTreeMap<String, u32>) -> Result<(), String> {
     for zone in pdns_api(s)?.zones().await? {
         // What: note a serial only after its flush worked.
@@ -1873,6 +1882,7 @@ fn kea_api(s: &Settings) -> Result<lancache_ng::kea::Api, String> {
 
 // What: value of one Kea option in a subnet.
 // Why: forms show options by name, Kea stores a list.
+// From: Issue #1683 | PR #1980
 fn option_data(sn: &Value, name: &str) -> String {
     let rows = sn["option-data"].as_array().cloned().unwrap_or_default();
     let hit = rows.iter().find(|o| o["name"] == name);
@@ -2112,6 +2122,7 @@ fn subnet_from(get: &(dyn Fn(&str) -> String + Sync), id: u64, old: Option<&Valu
 
 // What: Kea subnet with the given id.
 // Why: edits target a subnet by id, not position.
+// From: Issue #1683 | PR #1980
 fn subnet_mut(list: &mut [Value], id: u64) -> Result<&mut Value, String> {
     let found = list.iter_mut().find(|x| x["id"].as_u64() == Some(id));
     found.ok_or_else(|| tr("err_no_subnet").replace("{id}", &id.to_string()))
@@ -2586,6 +2597,7 @@ async fn sample_services(app: &App, s: &Settings) -> Vec<String> {
 
 // What: records stats every STATS_STEP seconds.
 // Why: the dashboard graphs need a time series.
+// From: Issue #1683 | PR #1980
 async fn sampler(app: Arc<App>) {
     loop {
         let s = app.settings();
@@ -3615,6 +3627,7 @@ async fn zones_at_start(app: Arc<App>) {
 
 // What: path of the DDNS TSIG secret file.
 // Why: Kea DDNS and PowerDNS share this key.
+// From: Issue #1683 | PR #1980
 fn tsig_file(s: &Settings) -> Result<PathBuf, String> {
     Ok(secret::file_of(&secret::dir(s)?, "DDNS_TSIG_KEY"))
 }

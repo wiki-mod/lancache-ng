@@ -163,6 +163,7 @@ impl Memory {
 
 // What: settings from env and the saved file.
 // Why: ui changes reach the watchdog via the file.
+// From: Issue #1683 | PR #1980
 fn load() -> Result<Settings, String> {
     let saved = process_env(SETTINGS_FILE_ENV).map(PathBuf::from);
     Settings::load(&process_env, saved.as_deref())
@@ -243,6 +244,7 @@ fn purge_cache(s: &Settings, f: &mut Findings, now: u64) -> Result<(), String> {
 
 // What: log root, only inside the allowed prefix.
 // Why: cleanup must never delete outside the logs.
+// From: Issue #1683 | PR #1980
 fn log_root(s: &Settings) -> Result<PathBuf, String> {
     tidy::inside(
         &s.text("SYSLOG_LOG_ROOT")?,
