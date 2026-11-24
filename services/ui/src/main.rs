@@ -1528,11 +1528,22 @@ fn serial_of(zones: &[lancache_ng::pdns::Zone], zone: &str) -> Option<u32> {
 async fn peer_serials(s: &Settings, address: &str) -> Result<Vec<PeerZone>, String> {
     let ours = pdns_api(s)?.zones().await?;
     let theirs = remote_zones(s, address).await?;
+    peer_zones(s, &ours, &theirs)
+}
+
+// What: both serials of every managed zone.
+// Why: the table and the check compare the same rows.
+// From: Issue #1683 | PR #2017
+fn peer_zones(
+    s: &Settings,
+    ours: &[lancache_ng::pdns::Zone],
+    theirs: &[lancache_ng::pdns::Zone],
+) -> Result<Vec<PeerZone>, String> {
     Ok(lancache_ng::dns::managed_zones(s)?
         .into_iter()
         .map(|zone| PeerZone {
-            primary: serial_of(&ours, &zone),
-            secondary: serial_of(&theirs, &zone),
+            primary: serial_of(ours, &zone),
+            secondary: serial_of(theirs, &zone),
             zone,
         })
         .collect())
@@ -1667,12 +1678,7 @@ async fn check_peer(
     let aa = answers_aa(s, address, &lancache_ng::dns::lan_zone(s)?).await;
     let api = remote_api(s, address)?;
     let theirs = api.zones().await?;
-    for zone in lancache_ng::dns::managed_zones(s)? {
-        let z = PeerZone {
-            primary: serial_of(ours, &zone),
-            secondary: serial_of(&theirs, &zone),
-            zone,
-        };
+    for z in peer_zones(s, ours, &theirs)? {
         let (rank, word) = zone_state(&z);
         // What: ahead: our serial goes past theirs first.
         // Why: a restore sets ours back; AXFR skips lower.
