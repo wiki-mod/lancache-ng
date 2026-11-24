@@ -838,6 +838,18 @@ fn pdns_api(s: &Settings) -> Result<lancache_ng::pdns::Api, String> {
     Ok(lancache_ng::pdns::Api::new(http::client(s)?, &url, &key))
 }
 
+// What: one API client per recursor.
+// Why: flush and statistics reach every recursor.
+// From: Issue #1683 | PR #2017
+fn recursor_apis(s: &Settings) -> Result<Vec<lancache_ng::pdns::Api>, String> {
+    let key = secrets(s)?.recursor_api_key;
+    let client = http::client(s)?;
+    Ok(s.list("RECURSOR_API_URLS")
+        .iter()
+        .map(|url| lancache_ng::pdns::Api::new(client.clone(), url, &key))
+        .collect())
+}
+
 // What: reverse DNS name of an address.
 // Why: PTR rows live in in-addr.arpa or ip6.arpa.
 // From: Issue #1683 | PR #1858
@@ -1806,10 +1818,7 @@ async fn flush_on_transfer(app: Arc<App>) {
 // Why: an edit shows at once, not after the poll.
 // From: Issue #1683 | PR #1980
 async fn flush_zone(s: &Settings, zone: &str) -> Result<(), String> {
-    let key = secrets(s)?.recursor_api_key;
-    let client = http::client(s)?;
-    for url in s.list("RECURSOR_API_URLS") {
-        let r = lancache_ng::pdns::Api::new(client.clone(), &url, &key);
+    for r in recursor_apis(s)? {
         r.flush(zone, true).await?;
     }
     Ok(())
@@ -2460,10 +2469,9 @@ async fn service_values(app: &App, s: &Settings, want: &[String]) -> BTreeMap<St
         }
     }
     if has("recursor")
-        && let (Ok(sec), Ok(client)) = (secrets(s), http::client(s))
+        && let Ok(apis) = recursor_apis(s)
     {
-        for url in s.list("RECURSOR_API_URLS") {
-            let r = lancache_ng::pdns::Api::new(client.clone(), &url, &sec.recursor_api_key);
+        for r in apis {
             if let Ok(rows) = r.statistics().await {
                 add_stats(&mut out, "recursor", rows);
             }
