@@ -908,6 +908,13 @@ pub mod dns {
         name.ends_with(&format!(".{zone}"))
     }
 
+    // What: true for a name in the reverse DNS tree.
+    // Why: the reverse DNS tree is under arpa.
+    // From: Issue #1683 | PR #2017
+    pub fn is_reverse_name(name: &str) -> bool {
+        is_below(name, "arpa.")
+    }
+
     // What: A for an IPv4 address, AAAA for IPv6.
     // Why: one owner of the record type of an address.
     // From: Issue #1683 | PR #2017

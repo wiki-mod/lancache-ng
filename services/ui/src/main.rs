@@ -1058,7 +1058,7 @@ async fn domains(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     ctx.insert("txt_max_bytes", &s.uint("DNS_TXT_MAX_BYTES")?);
     let reverse: Vec<String> = lancache_ng::dns::managed_zones(&s)?
         .into_iter()
-        .filter(|z| z.ends_with(".arpa.") || z.ends_with(".arpa"))
+        .filter(|z| lancache_ng::dns::is_reverse_name(z))
         .collect();
     ctx.insert("reverse_zones", &reverse);
     // What: NS state of each secondary: in, off or new.
@@ -1291,7 +1291,7 @@ async fn record(
 // From: Issue #1683 | PR #1858
 async fn ptr(s: &Settings, add: bool, get: &(dyn Fn(&str) -> String + Sync)) -> Result<(), String> {
     let ip = get("ip");
-    let name = if ip.ends_with(".arpa.") {
+    let name = if lancache_ng::dns::is_reverse_name(&ip) {
         ip
     } else {
         reverse_name(&ip)?
