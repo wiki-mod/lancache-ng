@@ -83,7 +83,7 @@
         </label>
       </div>
       {# What: test commands folded under the NTP block. #}
-      {# Why: DoMe 07.11.: they sat amid the settings. #}
+      {# Why: test commands are not settings. #}
       {# From: Issue #1683 | PR #1985 #}
       <details style="margin-top:12px;">
         <summary class="field-hint" style="cursor:pointer;">{{ t.test_from_a_pc_in_the }}</summary>
@@ -111,7 +111,7 @@
     </div>
 
     {# What: empties the whole cache on a 2nd click #}
-    {# Why: DoMe 07.11.: in settings, not the overview #}
+    {# Why: a wipe belongs to settings, not the overview #}
     {# From: Issue #871 | PR #1991 #}
     <div class="section-title">{{ t.cache_wipe_title }}</div>
     <p class="section-sub">{{ t.cache_wipe_hint }}</p>
@@ -121,7 +121,7 @@
     </div>
     <div class="section-title">{{ t.sign_in }}</div>
     {# What: set a password here to turn sign-in on. #}
-    {# Why: DoMe 07.11.: off was not changeable here. #}
+    {# Why: sign-in off must be changeable on this page. #}
     {# From: Issue #1683 | PR #1985 #}
     {% if login_enabled %}
     <p class="section-sub">{{ t.this_admin_ui_requires_a_username }}</p>
