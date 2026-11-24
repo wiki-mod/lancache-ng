@@ -190,6 +190,9 @@ struct Ctx {
 }
 
 impl Ctx {
+    // What: settings, data folder, API base, bind list.
+    // Why: every part of the service reads them once.
+    // From: Issue #871 | PR #1980
     fn load() -> Result<Self, String> {
         let saved = process_env(SETTINGS_FILE_ENV).map(PathBuf::from);
         let s = Settings::load(&process_env, saved.as_deref())?;
@@ -199,10 +202,16 @@ impl Ctx {
         Ok(Self { s, dir, api, bind })
     }
 
+    // What: a file name inside the data folder.
+    // Why: all state files live in one folder.
+    // From: Issue #871 | PR #1980
     fn path(&self, name: &str) -> PathBuf {
         self.dir.join(name)
     }
 
+    // What: writes a state file by replacing it.
+    // Why: a reader never sees a half file.
+    // From: Issue #871 | PR #1980
     fn save(&self, name: &str, body: &[u8]) -> Result<(), String> {
         write(
             &self.path(name),
@@ -841,6 +850,9 @@ async fn count(jobs: &Mutex<Vec<Job>>, id: &str, rate: &AtomicU64, got: Option<u
 struct ToProxy(String);
 
 impl reqwest::dns::Resolve for ToProxy {
+    // What: answers every name with the proxy.
+    // Why: reqwest asks this, not the system DNS.
+    // From: Issue #871 | PR #2017
     fn resolve(&self, _: reqwest::dns::Name) -> reqwest::dns::Resolving {
         let proxy = self.0.clone();
         Box::pin(async move {
@@ -990,6 +1002,9 @@ struct SteamCfg {
 }
 
 impl SteamCfg {
+    // What: the Steam values of the SOT, read once.
+    // Why: a missing key fails before any login.
+    // From: Issue #871 | PR #1980
     fn load(c: &Ctx) -> Result<Self, String> {
         Ok(Self {
             dir: c.dir.clone(),
@@ -1025,6 +1040,9 @@ enum KvValue {
 }
 
 impl Kv {
+    // What: the value of a key, case ignored.
+    // Why: Steam writes key names in mixed case.
+    // From: Issue #871 | PR #1980
     fn get(&self, key: &str) -> Option<&KvValue> {
         self.0
             .iter()
@@ -1032,6 +1050,9 @@ impl Kv {
             .map(|(_, v)| v)
     }
 
+    // What: the sub-node of a key, if it is one.
+    // Why: callers walk the tree without a match.
+    // From: Issue #871 | PR #1980
     fn node(&self, key: &str) -> Option<&Kv> {
         match self.get(key)? {
             KvValue::Node(n) => Some(n),
@@ -1039,6 +1060,9 @@ impl Kv {
         }
     }
 
+    // What: the text of a key, if it is one.
+    // Why: callers read a leaf without a match.
+    // From: Issue #871 | PR #1980
     fn text(&self, key: &str) -> Option<&str> {
         match self.get(key)? {
             KvValue::Text(t) => Some(t),
@@ -1166,6 +1190,9 @@ enum Pb {
 struct PbOut(Vec<u8>);
 
 impl PbOut {
+    // What: appends a base-128 varint.
+    // Why: tags and integers use this encoding.
+    // From: Issue #871 | PR #1980
     fn varint(&mut self, mut v: u64) {
         while v >= 0x80 {
             self.0.push((v as u8) | 0x80);
@@ -1173,21 +1200,33 @@ impl PbOut {
         }
         self.0.push(v as u8);
     }
+    // What: appends a varint field (wire type 0).
+    // Why: the tag carries field number and type.
+    // From: Issue #871 | PR #1980
     fn int(mut self, field: u32, v: u64) -> Self {
         self.varint(u64::from(field) << 3);
         self.varint(v);
         self
     }
+    // What: appends an 8-byte field (wire type 1).
+    // Why: the tag carries field number and type.
+    // From: Issue #871 | PR #1980
     fn fixed64(mut self, field: u32, v: u64) -> Self {
         self.varint((u64::from(field) << 3) | 1);
         self.0.extend_from_slice(&v.to_le_bytes());
         self
     }
+    // What: appends a 4-byte field (wire type 5).
+    // Why: the tag carries field number and type.
+    // From: Issue #871 | PR #1980
     fn fixed32(mut self, field: u32, v: u32) -> Self {
         self.varint((u64::from(field) << 3) | 5);
         self.0.extend_from_slice(&v.to_le_bytes());
         self
     }
+    // What: appends a field with length (wire type 2).
+    // Why: texts and nested messages use it.
+    // From: Issue #871 | PR #1980
     fn bytes(mut self, field: u32, v: &[u8]) -> Self {
         self.varint((u64::from(field) << 3) | 2);
         self.varint(v.len() as u64);
@@ -1200,6 +1239,9 @@ impl PbOut {
 // Why: readers pick fields by number.
 // From: Issue #871 | PR #1858
 fn pb_read(mut b: &[u8]) -> Result<Vec<(u32, Pb)>, String> {
+    // What: reads one varint and moves the slice on.
+    // Why: more than ten bytes is a broken message.
+    // From: Issue #871 | PR #1980
     fn varint(b: &mut &[u8]) -> Result<u64, String> {
         let mut v = 0u64;
         for shift in (0..64).step_by(7) {
@@ -1929,6 +1971,9 @@ struct Runner {
 }
 
 impl Runner {
+    // What: one pass: inbox, finished, window, due jobs.
+    // Why: the job file is saved after every pass.
+    // From: Issue #871 | PR #1980
     async fn round(&mut self, c: &Ctx) -> Result<(), String> {
         let mut list = self.jobs.lock().await;
         take_inbox(c, &mut list, true)?;

@@ -162,17 +162,26 @@ fn switch_on(value: &str) -> bool {
 struct Fail(StatusCode, String);
 
 impl IntoResponse for Fail {
+    // What: status code plus text as the response.
+    // Why: axum sends a handler error through it.
+    // From: Issue #1683 | PR #1980
     fn into_response(self) -> Response {
         (self.0, self.1).into_response()
     }
 }
 
 impl From<String> for Fail {
+    // What: an error text becomes status 500.
+    // Why: handlers pass internal errors on with ?.
+    // From: Issue #1683 | PR #1980
     fn from(e: String) -> Self {
         Fail(StatusCode::INTERNAL_SERVER_ERROR, e)
     }
 }
 
+// What: a Fail with status 400 and the text.
+// Why: wrong input is not a server error.
+// From: Issue #1683 | PR #1980
 fn bad_request(text: impl Into<String>) -> Fail {
     Fail(StatusCode::BAD_REQUEST, text.into())
 }
@@ -293,6 +302,9 @@ impl App {
 struct Csrf(String);
 
 impl Csrf {
+    // What: token: SHA-256 of key and session.
+    // Why: each session has its own form token.
+    // From: Issue #1683 | PR #1980
     fn from_session(key: &[u8; 32], session: &str) -> Self {
         let mut h = Sha256::new();
         h.update(key);
@@ -300,6 +312,9 @@ impl Csrf {
         Csrf(hex::encode(h.finalize()))
     }
 
+    // What: compares a given token in constant time.
+    // Why: a plain compare leaks it by timing.
+    // From: Issue #1683 | PR #1980
     fn matches(&self, given: &str) -> bool {
         secret::equal(given, &self.0)
     }
@@ -1156,6 +1171,9 @@ fn list_change(s: &Settings, key: &str, item: &str, present: bool) -> Fields {
     Fields::from([(key.to_string(), items.join(" "))])
 }
 
+// What: a form with exactly one field.
+// Why: commit takes Fields; a switch saves one key.
+// From: Issue #1683 | PR #1980
 fn single_field(key: &str, value: impl ToString) -> Fields {
     Fields::from([(key.to_string(), value.to_string())])
 }
@@ -3878,6 +3896,9 @@ async fn health(State(app): Shared) -> Response {
     }
 }
 
+// What: a built-in file with its content type.
+// Why: css, icon and logo are read once at start.
+// From: Issue #1683 | PR #1980
 fn asset(kind: &'static str, body: &'static [u8]) -> Response {
     ([(header::CONTENT_TYPE, kind)], body).into_response()
 }
@@ -4121,6 +4142,9 @@ fn render_dns(s: &Settings) -> Result<(), String> {
     Ok(())
 }
 
+// What: asks the own health route on loopback.
+// Why: the container health check runs this.
+// From: Issue #1683 | PR #1980
 async fn healthcheck(s: &Settings) -> Result<(), String> {
     let url = format!(
         "http://{}:{}{}",
@@ -4296,6 +4320,9 @@ async fn main() -> Result<(), String> {
 mod tests {
     use super::{PeerZone, duration_text, worst_state, zone_state};
 
+    // What: a zone row with the two given serials.
+    // Why: the tests differ only in the serials.
+    // From: Issue #1683 | PR #2017
     fn zone(primary: Option<u32>, secondary: Option<u32>) -> PeerZone {
         PeerZone {
             zone: "lan.".to_string(),

@@ -3026,6 +3026,9 @@ pub mod dnsdist_conf {
         pub backend: String,
     }
 
+    // What: refuses a quote, backslash or line break.
+    // Why: the value goes into a Lua string unchanged.
+    // From: Issue #1683 | PR #2017
     fn plain(v: &str) -> Result<&str, String> {
         if v.contains(['"', '\\', '\n', '\r']) {
             return Err(format!("value {v:?} has quote or line break"));
@@ -3140,6 +3143,9 @@ pub mod kea_conf {
     const NCR_FORMAT: &str = "JSON";
     const LOG_OUTPUT: &str = "stdout";
 
+    // What: one Kea logger row per given name.
+    // Why: all Kea loggers share level and output.
+    // From: Issue #1683 | PR #1980
     fn log_rows(s: &Settings, names: &[&str]) -> Result<Value, String> {
         let level = s.text("KEA_LOG_SEVERITY")?;
         let depth = s.uint("KEA_LOG_DEBUGLEVEL")?;
@@ -3153,11 +3159,17 @@ pub mod kea_conf {
         Ok(Value::Array(rows))
     }
 
+    // What: the LAN zone without its final dot.
+    // Why: DHCP options carry the name without the dot.
+    // From: Issue #1683 | PR #1980
     fn lan_domain(s: &Settings) -> Result<String, String> {
         let zone = crate::dns::lan_zone(s)?;
         Ok(zone.trim_end_matches('.').to_string())
     }
 
+    // What: the control socket entry of Kea DHCPv4.
+    // Why: commands reach Kea through this socket.
+    // From: Issue #1683 | PR #1980
     fn socket(s: &Settings) -> Result<Value, String> {
         Ok(json!({"socket-type": SOCKET_KIND,
                   "socket-name": s.text("KEA_DHCP4_SOCKET")?}))
@@ -3235,6 +3247,9 @@ pub mod kea_conf {
         u32::from(ip) & mask == u32::from(net) & mask
     }
 
+    // What: the option rows of the SOT subnet.
+    // Why: router, DNS, domain and NTP come from the SOT.
+    // From: Issue #1683 | PR #1980
     fn option_rows(s: &Settings, domain: &str) -> Result<Vec<Value>, String> {
         let mut rows = Vec::new();
         rows.push(json!({"name": "routers", "data": s.text("DHCP_GATEWAY")?}));
@@ -3424,6 +3439,9 @@ pub mod dnsmasq_conf {
     struct Conf(String);
 
     impl Conf {
+        // What: appends one row; refuses a line break.
+        // Why: a line break would start a new row.
+        // From: Issue #1683 | PR #1980
         fn add(&mut self, row: &str) -> Result<(), String> {
             if row.contains(['\n', '\r']) {
                 return Err(format!("dnsmasq row {row:?} has a line break"));
@@ -3432,6 +3450,9 @@ pub mod dnsmasq_conf {
             self.0.push('\n');
             Ok(())
         }
+        // What: appends prefix plus value unless empty.
+        // Why: an empty value gives a broken row.
+        // From: Issue #1683 | PR #1980
         fn add_if(&mut self, prefix: &str, value: &str) -> Result<(), String> {
             if value.is_empty() {
                 return Ok(());
@@ -3440,6 +3461,9 @@ pub mod dnsmasq_conf {
         }
     }
 
+    // What: the rows every dnsmasq mode starts with.
+    // Why: port=0: dnsmasq serves DHCP only, no DNS.
+    // From: Issue #1683 | PR #1980
     fn base(s: &Settings) -> Result<Conf, String> {
         let mut c = Conf(String::new());
         for row in ["port=0", "no-resolv", "no-poll", "log-facility=-"] {
@@ -3451,6 +3475,9 @@ pub mod dnsmasq_conf {
         Ok(c)
     }
 
+    // What: pxe-service rows for BIOS and UEFI clients.
+    // Why: no server or no file: nothing to offer.
+    // From: Issue #1683 | PR #1980
     fn pxe(s: &Settings, c: &mut Conf) -> Result<(), String> {
         let get = |k: &str| s.text_or_empty(k);
         let server = get("DHCP_PROXY_PXE_BOOT_SERVER");
@@ -3587,6 +3614,9 @@ pub mod nginx_conf {
             p
         }
 
+        // What: label count of the public suffix.
+        // Why: exception and wildcard rules change it.
+        // From: Issue #1683 | PR #1980
         fn suffix_labels(&self, labels: &[&str]) -> usize {
             let n = labels.len();
             let mut best = 1;
@@ -3624,6 +3654,9 @@ pub mod nginx_conf {
         pub root_wild: BTreeSet<String>,
     }
 
+    // What: adds a name unless the list has it.
+    // Why: two rows of one name break an nginx map.
+    // From: Issue #1683 | PR #1980
     fn add_once(list: &mut Vec<String>, name: &str) {
         if !list.iter().any(|n| n == name) {
             list.push(name.to_string());
@@ -3723,10 +3756,16 @@ pub mod nginx_conf {
         Ok(out)
     }
 
+    // What: one aligned key and value row of a map.
+    // Why: all nginx map rows share one format.
+    // From: Issue #1683 | PR #1980
     fn map_row(out: &mut String, key: &str, value: &str) {
         out.push_str(&format!("    {key:<45} {value};\n"));
     }
 
+    // What: nginx regex for names below a base.
+    // Why: one_label limits it to one more label.
+    // From: Issue #1683 | PR #1980
     fn ends_with_re(base: &str, one_label: bool) -> String {
         let label = if one_label { "[^.]+" } else { ".+" };
         format!("\"~^{label}\\.{}$\"", base.replace('.', "\\."))
@@ -3752,6 +3791,9 @@ pub mod nginx_conf {
         health: u64,
     }
 
+    // What: reads the settings into a Plan.
+    // Why: an unknown security mode stops the render.
+    // From: Issue #1683 | PR #1980
     fn plan(s: &Settings) -> Result<Plan, String> {
         let strict = match s.text("PROXY_SECURITY_MODE")?.as_str() {
             "strict" => true,
@@ -3785,6 +3827,9 @@ pub mod nginx_conf {
         })
     }
 
+    // What: allow rows per client range, then deny.
+    // Why: no range set means no restriction.
+    // From: Issue #1683 | PR #1980
     fn acl_file(p: &Plan) -> String {
         let mut out = HEAD.to_string();
         for c in &p.cidrs {
@@ -3796,6 +3841,9 @@ pub mod nginx_conf {
         out
     }
 
+    // What: the SNI map and the passthrough server.
+    // Why: strict passes only known hosts on.
+    // From: Issue #1683 | PR #1980
     fn stream_file(p: &Plan, keys: &[(String, String)]) -> String {
         let mut out = format!("{HEAD}map $ssl_preread_server_name $stream_backend {{\n");
         out.push_str("    hostnames;\n");
@@ -3827,6 +3875,9 @@ pub mod nginx_conf {
         out
     }
 
+    // What: maps for certificate, host and client.
+    // Why: strict allows listed hosts only.
+    // From: Issue #1683 | PR #1980
     fn https_map(p: &Plan, keys: &[(String, String)], fallback: &str) -> String {
         let mut out = format!("{HEAD}map $ssl_server_name $https_cert_name {{\n");
         out.push_str("    hostnames;\n");
@@ -3855,6 +3906,9 @@ pub mod nginx_conf {
         out
     }
 
+    // What: a server block behind the PROXY protocol.
+    // Why: the client address comes from the stream.
+    // From: Issue #1683 | PR #1980
     fn relay_server(p: &Plan, listen: &str, body: &str) -> String {
         format!(
             "server {{\n    listen {listen} proxy_protocol;\n    set_real_ip_from {};\n{body}{}}}\n",
@@ -3862,6 +3916,9 @@ pub mod nginx_conf {
         )
     }
 
+    // What: the map from SNI to intercept or pass.
+    // Why: longer bases win; strict refuses the rest.
+    // From: Issue #1683 | PR #1980
     fn dispatch_file(p: &Plan, h: &Hosts) -> String {
         let mut out = format!("{HEAD}map $ssl_preread_server_name $https_dispatch_backend {{\n");
         map_row(&mut out, "\"\"", &p.refuse_relay);
@@ -3972,6 +4029,9 @@ pub mod apply {
         Failed(Error),
     }
 
+    // What: the container action a change needs.
+    // Why: live and recreate need none here.
+    // From: Issue #1683 | PR #1980
     fn action_of(effect: Effect) -> Option<Action> {
         match effect {
             Effect::Live | Effect::Recreate => None,
@@ -4129,6 +4189,9 @@ pub mod render {
             }
         }
 
+        // What: adds a file, or records the error.
+        // Why: a render reports all errors at once.
+        // From: Issue #1683 | PR #1980
         fn add_file(&mut self, owner: &'static str, path_key: &str, body: Result<String, String>) {
             match (self.s.text(path_key), body) {
                 (Ok(p), Ok(body)) => self.files.push(File {
@@ -4139,6 +4202,9 @@ pub mod render {
                 (Err(e), _) | (_, Err(e)) => self.errs.push(e),
             }
         }
+        // What: adds a JSON value as a pretty file.
+        // Why: a JSON error is recorded like any other.
+        // From: Issue #1683 | PR #1980
         fn put_json(
             &mut self,
             owner: &'static str,
@@ -4161,6 +4227,9 @@ pub mod render {
         h.max(1)
     }
 
+    // What: the files of services and dns.
+    // Why: the full and the DNS-only render share it.
+    // From: Issue #1683 | PR #2004
     fn dns_files(o: &mut Out, sec: &Secrets, names: &[(String, bool)]) {
         let s = o.s;
         o.add_file("services", "CHRONY_CONF_FILE", chrony::render(s));
@@ -4204,6 +4273,9 @@ pub mod render {
         }
     }
 
+    // What: the files of dhcp for the active mode.
+    // Why: an unused mode gets no files.
+    // From: Issue #1683 | PR #1980
     fn dhcp_files(o: &mut Out, sec: &Secrets) {
         let s = o.s;
         // What: the mode file names the dhcp runlevel.
@@ -4237,6 +4309,9 @@ pub mod render {
         }
     }
 
+    // What: reads a file; the error names the path.
+    // Why: an io error alone names no file.
+    // From: Issue #1683 | PR #1980
     fn read(path: &PathBuf) -> Result<String, String> {
         std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))
     }
@@ -4250,6 +4325,9 @@ pub mod render {
         nginx_conf::hosts(domains, &psl)
     }
 
+    // What: the nginx files of the proxy.
+    // Why: they follow the cache domain list.
+    // From: Issue #1683 | PR #1980
     fn nginx_files(o: &mut Out, domains: &str) -> Result<(), String> {
         let s = o.s;
         let src = PathBuf::from(s.text("NGINX_TEMPLATE_DIR")?);
@@ -4463,6 +4541,9 @@ pub mod ntp {
     const PACKET: usize = 48;
     const MODE_SERVER: u8 = 4;
 
+    // What: sends one NTP request, returns the reply.
+    // Why: the probe reads the raw reply packet.
+    // From: Issue #1683 | PR #1980
     fn ask(host: &str, port: u64, wait: Duration) -> std::io::Result<[u8; PACKET]> {
         // What: a socket of the family of the target.
         // Why: an IPv4 socket cannot send to IPv6.
@@ -4557,6 +4638,9 @@ pub mod access {
         out
     }
 
+    // What: reads a file from its end, in chunks.
+    // Why: a log tail must not load the whole file.
+    // From: Issue #1683 | PR #1980
     fn read_back(path: &Path, want: usize, chunk: u64) -> std::io::Result<(Vec<u8>, bool)> {
         let mut f = std::fs::File::open(path)?;
         let mut pos = f.seek(SeekFrom::End(0))?;
@@ -4618,6 +4702,9 @@ pub mod access {
     }
 
     impl Stats {
+        // What: adds one log entry to the totals.
+        // Why: EXPIRED is fetched anew, so a miss.
+        // From: Issue #1683 | PR #1980
         fn count(&mut self, e: &Entry) {
             self.total_requests += 1;
             self.total_bytes += e.bytes;
@@ -4692,6 +4779,9 @@ pub mod cdn {
         pub is_valid: bool,
     }
 
+    // What: a row; is_valid says if the name parses.
+    // Why: a bad name stays visible, marked.
+    // From: Issue #1683 | PR #1980
     fn new_row(name: String, is_default: bool, enabled: bool) -> Row {
         Row {
             is_valid: crate::dns::cdn_entry(&name).is_some(),
@@ -4917,10 +5007,16 @@ pub mod rrd {
         "blk_write",
     ];
 
+    // What: plain characters or an underscore.
+    // Why: the names become file names and arguments.
+    // From: Issue #1683 | PR #1980
     fn is_plain(word: &str) -> bool {
         crate::config::is_plain(word, "_")
     }
 
+    // What: parses ds=oid=kind[=scale] of a graph.
+    // Why: a bad part is an error, never a default.
+    // From: Issue #1683 | PR #1980
     fn source(text: &str) -> Result<Source, String> {
         let parts: Vec<&str> = text.split('=').collect();
         let (ds, oid, kind, scale) = match parts[..] {
@@ -4942,6 +5038,9 @@ pub mod rrd {
         })
     }
 
+    // What: parses name:source+source of a row.
+    // Why: the name becomes a file name.
+    // From: Issue #1683 | PR #1980
     fn graph(row: &str, tab: &str) -> Result<Graph, String> {
         let (name, list) = row
             .split_once(':')
@@ -5100,6 +5199,9 @@ pub mod rrd {
         Ok(())
     }
 
+    // What: the first word if a number, else unknown.
+    // Why: a failed read must not store a text.
+    // From: Issue #1683 | PR #1980
     fn number_or_unknown(line: &str) -> String {
         match line.split_whitespace().next() {
             Some(v) if v.parse::<f64>().is_ok() => v.into(),
@@ -5225,6 +5327,9 @@ pub mod tidy {
         now - now % DAY
     }
 
+    // What: the path with links and ".." resolved.
+    // Why: a part that does not exist yet stays.
+    // From: Issue #1683 | PR #1980
     fn resolved(path: &Path) -> std::io::Result<PathBuf> {
         let mut out = PathBuf::from("/");
         for part in path.components() {
@@ -5274,6 +5379,9 @@ pub mod tidy {
         pub mtime: u64,
     }
 
+    // What: change time in unix seconds, else 0.
+    // Why: ages are compared as plain seconds.
+    // From: Issue #1683 | PR #1980
     fn mtime(meta: &std::fs::Metadata) -> u64 {
         meta.modified()
             .ok()
@@ -5505,6 +5613,9 @@ mod tests {
         m
     }
 
+    // What: the SOA query: header, name, no RD bit.
+    // Why: the asked server must answer by itself.
+    // From: Issue #1683 | PR #2017
     #[test]
     fn soa_query_has_no_rd_bit() {
         let q = soa_query(7, "lan.").unwrap_or_default();
@@ -5513,6 +5624,9 @@ mod tests {
         assert!(soa_query(7, "a..b").is_err());
     }
 
+    // What: aa flag and serial are read from a reply.
+    // Why: the peer check compares these two.
+    // From: Issue #1683 | PR #2017
     #[test]
     fn soa_reply_reads_aa_and_serial() {
         let got = soa_reply(9, &reply(9, true, 2026111101));
@@ -5522,6 +5636,9 @@ mod tests {
         assert_eq!(rec.map(|s| s.authoritative), Ok(false));
     }
 
+    // What: a foreign id or a cut packet is an error.
+    // Why: a wrong reply must not count as serial.
+    // From: Issue #1683 | PR #2017
     #[test]
     fn soa_reply_refuses_wrong_id_and_cut_data() {
         assert!(soa_reply(8, &reply(9, true, 1)).is_err());
@@ -5529,6 +5646,9 @@ mod tests {
         assert!(soa_reply(9, &full[..full.len() - 3]).is_err());
     }
 
+    // What: source: loopback, not the bind address.
+    // Why: only this address sends proxy protocol.
+    // From: Issue #1683 | PR #2017
     #[test]
     fn source_must_be_loopback_but_not_bind_ip() {
         assert!(source("127.126.125.124", "127.0.0.1").is_ok());
@@ -5537,6 +5657,9 @@ mod tests {
         assert!(source("::1", "127.0.0.1").is_err());
     }
 
+    // What: the config: listeners, ACL, pools, XFR.
+    // Why: transfers must reach the auth server only.
+    // From: Issue #1683 | PR #2017
     #[test]
     fn dnsdist_routes_xfr_to_auth_only_on_http_port() {
         let l = |port, pool, backend: &str| Listener {

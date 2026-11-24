@@ -49,6 +49,9 @@ struct Findings {
 }
 
 impl Findings {
+    // What: records one alarm with level and source.
+    // Why: a check reports here and keeps running.
+    // From: Issue #1683 | PR #1980
     fn add(&mut self, level: Level, source: &str, text: impl Into<String>) {
         let (source, text) = (source.to_string(), text.into());
         self.alarms.push(Alarm {
@@ -57,9 +60,15 @@ impl Findings {
             text,
         });
     }
+    // What: records a warning.
+    // Why: most callers need only source and text.
+    // From: Issue #1683 | PR #1980
     fn warn(&mut self, source: &str, text: impl Into<String>) {
         self.add(Level::Warn, source, text);
     }
+    // What: records a critical alarm.
+    // Why: most callers need only source and text.
+    // From: Issue #1683 | PR #1980
     fn crit(&mut self, source: &str, text: impl Into<String>) {
         self.add(Level::Crit, source, text);
     }
@@ -117,6 +126,9 @@ impl Health {
         }
     }
 
+    // What: state word and colour of the status row.
+    // Why: one mapping; the page holds none.
+    // From: Issue #1683 | PR #1980
     fn word_and_colour(&self) -> (String, &'static str) {
         match self {
             Health::Healthy => ("healthy".into(), "green"),
@@ -128,6 +140,9 @@ impl Health {
         }
     }
 
+    // What: true for unhealthy or stopped.
+    // Why: only these count toward a restart.
+    // From: Issue #1683 | PR #1980
     fn failing(&self) -> bool {
         matches!(self, Health::Unhealthy | Health::Stopped(_))
     }
