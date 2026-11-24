@@ -212,10 +212,7 @@ impl App {
             let val = s.text(key).unwrap_or_default();
             values.entry(key.into()).or_insert(val);
         }
-        let login = !s
-            .text("UI_AUTH_PASSWORD_HASH")
-            .unwrap_or_default()
-            .is_empty();
+        let login = !password_hash(&s).is_empty();
         // What: page and route paths by short name.
         // Why: templates name the SOT key without prefix.
         // From: Issue #1683
@@ -338,11 +335,18 @@ fn basic_credentials(headers: &HeaderMap) -> Option<(String, String)> {
     Some((user.to_string(), pass.to_string()))
 }
 
+// What: the stored login hash; empty when none is set.
+// Why: an empty hash means the ui runs without a login.
+// From: Issue #1683 | PR #2017
+fn password_hash(s: &Settings) -> String {
+    s.text("UI_AUTH_PASSWORD_HASH").unwrap_or_default()
+}
+
 // What: Basic auth only when a hash is set.
 // Why: the test stack runs without a password.
 // From: Issue #1683 | PR #1858
 async fn login_ok(s: &Settings, headers: &HeaderMap) -> bool {
-    let hash = s.text("UI_AUTH_PASSWORD_HASH").unwrap_or_default();
+    let hash = password_hash(s);
     if hash.is_empty() {
         return true;
     }
@@ -537,7 +541,7 @@ async fn password(
         ));
     }
     let wrong = tr("err_password_wrong");
-    let old = s.text("UI_AUTH_PASSWORD_HASH").unwrap_or_default();
+    let old = password_hash(&s);
     let hashed = tokio::task::spawn_blocking(move || {
         if !old.is_empty() && !verify(&old, &current) {
             return Err(wrong);
@@ -4175,7 +4179,7 @@ async fn main() -> Result<(), String> {
     // What: no login and no opt-out stops the ui.
     // Why: AG-SEC-001: fail closed unless opted out.
     // From: Issue #1683 | PR #1985
-    let hash = s.text("UI_AUTH_PASSWORD_HASH").unwrap_or_default();
+    let hash = password_hash(&s);
     if hash.is_empty() && !s.flag("ALLOW_INSECURE_UI").unwrap_or(false) {
         return Err("Admin-UI authentication is required".into());
     }
