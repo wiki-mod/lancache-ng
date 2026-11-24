@@ -14,7 +14,7 @@ use std::time::Duration;
 use base64::Engine as _;
 use futures_util::{StreamExt, stream};
 use lancache_ng::config::{Settings, process_env};
-use lancache_ng::fs::{Owner, Place, write};
+use lancache_ng::fs::{Owner, PRIVATE_MODE, Place, write};
 use lancache_ng::{clock, http, secret};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -35,11 +35,6 @@ const PENDING_FILE: &str = "login.pending";
 const JOBS_FILE: &str = "jobs.json";
 const INBOX_DIR: &str = "inbox";
 const DEPOTS_DIR: &str = "depots";
-
-// What: file mode of every file written here.
-// Why: the session token and jobs are owner-only.
-// From: Issue #871 | PR #1980
-const MODE: u32 = 0o600;
 
 // What: when a job may run.
 // Why: a download runs now, later or on a schedule.
@@ -216,7 +211,7 @@ impl Ctx {
         write(
             &self.path(name),
             body,
-            MODE,
+            PRIVATE_MODE,
             Place::Replace,
             Owner::default(),
         )
@@ -282,7 +277,7 @@ fn bound_key(dir: &Path, bind: &[String], fresh: bool) -> Result<[u8; 32], Strin
             .cloned()
             .collect();
         let body = serde_json::to_vec(&names).map_err(|e| e.to_string())?;
-        write(&path, &body, MODE, Place::Replace, Owner::default())
+        write(&path, &body, PRIVATE_MODE, Place::Replace, Owner::default())
             .map_err(|e| format!("{BIND_FILE}: {e}"))?;
         names
     } else {
@@ -1778,7 +1773,7 @@ fn depot_ids(app: &Kv) -> Vec<u32> {
 fn save_depots(dir: &Path, app: u32, ids: &[u32]) -> Result<(), String> {
     let body = serde_json::to_vec(ids).map_err(|e| e.to_string())?;
     let path = dir.join(DEPOTS_DIR).join(format!("{app}.json"));
-    write(&path, &body, MODE, Place::Replace, Owner::default())
+    write(&path, &body, PRIVATE_MODE, Place::Replace, Owner::default())
         .map_err(|e| format!("{}: {e}", path.display()))
 }
 

@@ -491,7 +491,7 @@ fn write_lines(path: &Path, updates: &BTreeMap<String, String>) -> Result<(), St
     crate::fs::write(
         path,
         body.as_bytes(),
-        0o600,
+        crate::fs::PRIVATE_MODE,
         crate::fs::Place::Replace,
         crate::fs::Owner::default(),
     )

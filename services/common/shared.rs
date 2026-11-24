@@ -40,6 +40,11 @@ pub mod fs {
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     use std::path::{Path, PathBuf};
 
+    // What: file mode of a file only its owner may read.
+    // Why: secrets, tokens and snapshots share one mode.
+    // From: Issue #1683 | PR #2017
+    pub const PRIVATE_MODE: u32 = 0o600;
+
     // What: replace a file, or create it only if new.
     // Why: secrets are first-writer-wins; configs replace.
     // From: Issue #1683 | PR #1980
@@ -239,11 +244,6 @@ pub mod secret {
     use std::path::{Path, PathBuf};
     use subtle::ConstantTimeEq;
 
-    // What: file mode of every secret file.
-    // Why: only the owning user may read a secret.
-    // From: Issue #1683 | PR #1858
-    const MODE: u32 = 0o600;
-
     // What: nonce length of ChaCha20-Poly1305.
     // Why: fixed by the cipher (RFC 8439).
     // From: Issue #1683 | PR #1858
@@ -313,7 +313,8 @@ pub mod secret {
             Ok(text) => usable(text),
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 let text = create();
-                match fs::write(path, text.as_bytes(), MODE, Place::Exclusive, owner) {
+                let mode = fs::PRIVATE_MODE;
+                match fs::write(path, text.as_bytes(), mode, Place::Exclusive, owner) {
                     Ok(()) => Ok(text),
                     Err(e) if e.kind() == io::ErrorKind::AlreadyExists => usable(read()?),
                     Err(e) => Err(e),
@@ -2054,7 +2055,8 @@ pub mod snapshot {
         // From: Issue #1683 | PR #1980
         pub fn save(&self, body: &[u8]) -> Result<String, String> {
             let id = crate::clock::unix_nanos().to_string();
-            fs::write(&self.path(&id), body, 0o600, Place::Exclusive, self.owner)
+            let mode = fs::PRIVATE_MODE;
+            fs::write(&self.path(&id), body, mode, Place::Exclusive, self.owner)
                 .map_err(|e| format!("snapshot {id}: {e}"))?;
             self.prune()?;
             Ok(id)
