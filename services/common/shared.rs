@@ -4267,9 +4267,13 @@ pub mod render {
                 .and_then(|l| recursor_conf::yaml(s, which, &sec.recursor_api_key, &l));
             o.add_file("dns", &which.key("CONF_FILE"), yaml);
         }
-        if s.flag("DNS_FILTER_AAAA").unwrap_or(false) {
-            let body = Ok(recursor_conf::AAAA_FILTER_LUA.to_string());
-            o.add_file("dns", "RECURSOR_AAAA_LUA_FILE", body);
+        match s.flag("DNS_FILTER_AAAA") {
+            Ok(true) => {
+                let body = Ok(recursor_conf::AAAA_FILTER_LUA.to_string());
+                o.add_file("dns", "RECURSOR_AAAA_LUA_FILE", body);
+            }
+            Ok(false) => {}
+            Err(e) => o.errs.push(e),
         }
     }
 

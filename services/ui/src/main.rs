@@ -3379,7 +3379,7 @@ fn primary_https_ip(s: &Settings) -> Result<String, String> {
     // What: no HTTPS part while HTTPS is off.
     // Why: the field woke HTTPS that was off.
     // From: Issue #1683 | PR #1980
-    let own = own && s.flag("HTTPS_ENABLED").unwrap_or(false);
+    let own = own && s.flag("HTTPS_ENABLED")?;
     Ok(if own { https } else { String::new() })
 }
 
@@ -4290,7 +4290,7 @@ async fn main() -> Result<(), String> {
     // Why: AG-SEC-001: fail closed unless opted out.
     // From: Issue #1683 | PR #1985
     let hash = password_hash(&s);
-    if hash.is_empty() && !s.flag("ALLOW_INSECURE_UI").unwrap_or(false) {
+    if hash.is_empty() && !s.flag("ALLOW_INSECURE_UI")? {
         return Err("Admin-UI authentication is required".into());
     }
     let dir = secret::dir(&s)?;
