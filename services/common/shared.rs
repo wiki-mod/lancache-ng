@@ -4055,18 +4055,21 @@ pub mod nginx_conf {
     pub fn files(s: &Settings, h: &Hosts, https: bool) -> Result<Vec<(String, String)>, String> {
         let p = plan(s)?;
         let keys = h.keys();
+        let fallback = s.text("NGINX_DEFAULT_CERT")?;
+        // What: client, cdn and cert maps, HTTPS off too.
+        // Why: proxy-params.conf reads the first two.
+        // From: Issue #1683 | PR #2019
         let mut out = vec![
             (p.acl.clone(), acl_file(&p)),
             (s.text("NGINX_STREAM_TARGETS_FILE")?, stream_file(&p, &keys)),
+            (
+                s.text("NGINX_HTTPS_MAP_FILE")?,
+                https_map(&p, &keys, &fallback),
+            ),
         ];
         if !https {
             return Ok(out);
         }
-        let fallback = s.text("NGINX_DEFAULT_CERT")?;
-        out.push((
-            s.text("NGINX_HTTPS_MAP_FILE")?,
-            https_map(&p, &keys, &fallback),
-        ));
         let listen = format!(
             "{HEAD}listen {0}:{1} ssl proxy_protocol default_server;\nlisten {0}:{2} ssl;\n",
             p.lo, p.mitm, p.health
