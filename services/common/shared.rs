@@ -3115,9 +3115,7 @@ pub mod dnsdist_conf {
         };
         let mut acl: Vec<String> = Vec::new();
         for net in s.list("DNS_QUERY_ALLOW_FROM").into_iter().chain(peers) {
-            if !acl.contains(&net) {
-                acl.push(net);
-            }
+            crate::config::add_once(&mut acl, &net);
         }
         let auth = crate::pdns_conf::auth_endpoint(s)?;
         let mut listeners = vec![Listener {
@@ -3672,15 +3670,6 @@ pub mod nginx_conf {
         pub root_wild: BTreeSet<String>,
     }
 
-    // What: adds a name unless the list has it.
-    // Why: two rows of one name break an nginx map.
-    // From: Issue #1683 | PR #1980
-    fn add_once(list: &mut Vec<String>, name: &str) {
-        if !list.iter().any(|n| n == name) {
-            list.push(name.to_string());
-        }
-    }
-
     // What: group the cache domain list into Hosts.
     // Why: a bad or rootless row is an error, no skip.
     // From: Issue #1683 | PR #1980
@@ -3692,16 +3681,16 @@ pub mod nginx_conf {
             let root = psl
                 .root(&name)
                 .ok_or_else(|| format!("no registrable root for {name}"))?;
-            add_once(&mut h.roots, &root);
+            crate::config::add_once(&mut h.roots, &root);
             let parent = name.split_once('.').map(|(_, p)| p);
             if name == root {
                 if wild {
                     h.root_wild.insert(root);
                 }
             } else if wild {
-                add_once(&mut h.bases, &name);
+                crate::config::add_once(&mut h.bases, &name);
             } else if parent != Some(root.as_str()) {
-                add_once(&mut h.exact, &name);
+                crate::config::add_once(&mut h.exact, &name);
             }
         }
         Ok(h)

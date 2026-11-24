@@ -816,9 +816,7 @@ async fn logs(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     if let Ok(dirs) = std::fs::read_dir(&root) {
         for d in dirs.flatten().filter(|d| d.path().is_dir()) {
             let n = d.file_name().to_string_lossy().into_owned();
-            if !names.contains(&n) {
-                names.push(n);
-            }
+            config::add_once(&mut names, &n);
         }
     }
     let hosts = names.clone();

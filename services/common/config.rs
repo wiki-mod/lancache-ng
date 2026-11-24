@@ -112,6 +112,15 @@ pub fn longest_first(a: &str, b: &str) -> std::cmp::Ordering {
     b.len().cmp(&a.len()).then_with(|| b.cmp(a))
 }
 
+// What: adds an item unless the list has it.
+// Why: lists keep first-seen order without doubles.
+// From: Issue #1683 | PR #1980
+pub fn add_once(list: &mut Vec<String>, item: &str) {
+    if !list.iter().any(|n| n == item) {
+        list.push(item.to_string());
+    }
+}
+
 // What: not empty; only ASCII letters, digits and extra.
 // Why: such a value cannot leave its place in a config.
 // From: Issue #1683 | PR #2017
