@@ -1,4 +1,3 @@
-// This must be removed when done, this is a reminder to align with ag-law-001 and specially with ag-code-011
 //!
 //! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 //! SPDX-License-Identifier: AGPL-3.0-or-later
@@ -8,6 +7,7 @@
 // From: Issue #1683
 mod cachehamster;
 mod config;
+mod dhcp;
 mod dns;
 mod shared;
 mod ui;

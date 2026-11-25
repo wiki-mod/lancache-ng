@@ -2,14 +2,16 @@
 //! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 //! SPDX-License-Identifier: AGPL-3.0-or-later
 
+use crate::dhcp::*;
+use crate::dns::*;
+
 // What: admin ui: settings, pages and actions.
 // Why: owns settings; renders and applies configs.
 // From: Issue #1683 | PR #1858
 
 use crate::config::{self, Settings, process_env};
-use crate::shared::dhcp::{Mode as DhcpMode, option_data};
-use crate::shared::dns::Role;
-use crate::shared::peer::{self, PeerZone, ZoneState};
+use crate::shared::dhcp::Mode as DhcpMode;
+use crate::shared::peer::{self, PeerZone};
 use crate::shared::{access, apply, docker, fs, http, human, render, secret};
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use axum::extract::{Form, Request, State};
@@ -31,17 +33,17 @@ use tera::{Context, Tera};
 // What: CLI word of the one-shot DHCP probe.
 // Why: the ui and setup.sh start the same command.
 // From: Issue #1683 | PR #1985
-const DHCP_PROBE_CMD: &str = "dhcp-probe";
+pub(crate) const DHCP_PROBE_CMD: &str = "dhcp-probe";
 
 // What: page keys read from env, not from specs.
 // Why: compose sets them; no schema row exists.
 // From: Issue #1683 | PR #1980
-const ENV_ONLY_KEYS: [&str; 2] = ["IP_HTTP", "LANCACHE_IMAGE_CHANNEL"];
+pub(crate) const ENV_ONLY_KEYS: [&str; 2] = ["IP_HTTP", "LANCACHE_IMAGE_CHANNEL"];
 
 // What: read the files of one mounted folder.
 // Why: page edits need no image build.
 // From: Issue #1683 | PR #1991
-fn folder(dir: &str, ext: &str) -> Result<Vec<(String, String)>, String> {
+pub(crate) fn folder(dir: &str, ext: &str) -> Result<Vec<(String, String)>, String> {
     let err = |e: std::io::Error| format!("{dir}: {e}");
     let mut out = Vec::new();
     for entry in std::fs::read_dir(dir).map_err(err)? {
@@ -65,7 +67,7 @@ fn folder(dir: &str, ext: &str) -> Result<Vec<(String, String)>, String> {
 // What: one static file of the mounted folder.
 // Why: css and icons change without an image build.
 // From: Issue #1683 | PR #1991
-fn static_file(dir: &str, name: &str) -> Result<&'static [u8], String> {
+pub(crate) fn static_file(dir: &str, name: &str) -> Result<&'static [u8], String> {
     let path = std::path::Path::new(dir).join(name);
     let body = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     Ok(Box::leak(body.into_boxed_slice()))
@@ -74,22 +76,22 @@ fn static_file(dir: &str, name: &str) -> Result<&'static [u8], String> {
 // What: cookie of the language the user picked.
 // Why: the selector sets it; the ui reads it.
 // From: Issue #1683 | PR #1980
-const LANG_COOKIE: &str = "lc_lang";
+pub(crate) const LANG_COOKIE: &str = "lc_lang";
 
 // What: texts per language: code, key, text.
 // Why: page() picks one map per request.
 // From: Issue #1683 | PR #1980
-type Texts = BTreeMap<String, BTreeMap<String, String>>;
+pub(crate) type Texts = BTreeMap<String, BTreeMap<String, String>>;
 
 // What: the language files, read once at start.
 // Why: form errors outside page() need them too.
 // From: Issue #1683 | PR #1980
-static TEXTS: std::sync::OnceLock<Texts> = std::sync::OnceLock::new();
+pub(crate) static TEXTS: std::sync::OnceLock<Texts> = std::sync::OnceLock::new();
 
 // What: all languages; empty before the start read.
 // Why: one access path for page(), tr() and the layer.
 // From: Issue #1683 | PR #1980
-fn all_texts() -> &'static Texts {
+pub(crate) fn all_texts() -> &'static Texts {
     static EMPTY: Texts = Texts::new();
     TEXTS.get().unwrap_or(&EMPTY)
 }
@@ -97,7 +99,7 @@ fn all_texts() -> &'static Texts {
 // What: one text in the request language.
 // Why: form errors speak the language of the page.
 // From: Issue #1683 | PR #1980
-fn tr(key: &str) -> String {
+pub(crate) fn tr(key: &str) -> String {
     let code = LANG.try_with(Clone::clone).unwrap_or_default();
     let all = all_texts();
     all.get(&code)
@@ -117,19 +119,19 @@ tokio::task_local! {
 // What: session cookie name.
 // Why: the CSRF token is derived from it.
 // From: Issue #1683 | PR #1980
-const COOKIE: &str = "lancache_session";
+pub(crate) const COOKIE: &str = "lancache_session";
 
 // What: form field that carries the CSRF token.
 // Why: templates and handlers share one name.
 // From: Issue #1683 | PR #1980
-const CSRF_FIELD: &str = "csrf_token";
+pub(crate) const CSRF_FIELD: &str = "csrf_token";
 
-type Fields = BTreeMap<String, String>;
+pub(crate) type Fields = BTreeMap<String, String>;
 
 // What: a form field without blanks; empty if missing.
 // Why: one reader for every form handler.
 // From: Issue #1683 | PR #2017
-fn field(form: &Fields, key: &str) -> String {
+pub(crate) fn field(form: &Fields, key: &str) -> String {
     form.get(key)
         .map(|v| v.trim().to_string())
         .unwrap_or_default()
@@ -138,7 +140,7 @@ fn field(form: &Fields, key: &str) -> String {
 // What: first and second DNS server as a list.
 // Why: an empty field is no server.
 // From: Issue #1683 | PR #2017
-fn dns_pair(first: String, second: String) -> Vec<String> {
+pub(crate) fn dns_pair(first: String, second: String) -> Vec<String> {
     [first, second]
         .into_iter()
         .filter(|d| !d.is_empty())
@@ -148,7 +150,7 @@ fn dns_pair(first: String, second: String) -> Vec<String> {
 // What: error page text with an HTTP status.
 // Why: handlers return Result and use the ? sign.
 // From: Issue #1683 | PR #1980
-struct Fail(StatusCode, String);
+pub(crate) struct Fail(StatusCode, String);
 
 impl IntoResponse for Fail {
     // What: status code plus text as the response.
@@ -171,35 +173,35 @@ impl From<String> for Fail {
 // What: a Fail with status 400 and the text.
 // Why: wrong input is not a server error.
 // From: Issue #1683 | PR #1980
-fn bad_request(text: impl Into<String>) -> Fail {
+pub(crate) fn bad_request(text: impl Into<String>) -> Fail {
     Fail(StatusCode::BAD_REQUEST, text.into())
 }
 
-type Page = Result<Response, Fail>;
+pub(crate) type Page = Result<Response, Fail>;
 
 // What: state shared by all handlers.
 // Why: settings swap whole after each save.
 // From: Issue #1683 | PR #1858
-struct App {
-    settings: RwLock<Settings>,
-    saved: Option<PathBuf>,
-    tera: Tera,
-    docker: docker::Api,
-    session_key: [u8; 32],
-    cache_used: AtomicU64,
+pub(crate) struct App {
+    pub(crate) settings: RwLock<Settings>,
+    pub(crate) saved: Option<PathBuf>,
+    pub(crate) tera: Tera,
+    pub(crate) docker: docker::Api,
+    pub(crate) session_key: [u8; 32],
+    pub(crate) cache_used: AtomicU64,
     // What: true once every config was rendered.
     // Why: dns and proxy wait for these files.
     // From: Issue #1683 | PR #1858
-    rendered: AtomicBool,
+    pub(crate) rendered: AtomicBool,
 }
 
-type Shared = State<Arc<App>>;
+pub(crate) type Shared = State<Arc<App>>;
 
 impl App {
     // What: copy of the current settings.
     // Why: a handler never sees half an update.
     // From: Issue #1683 | PR #1858
-    fn settings(&self) -> Settings {
+    pub(crate) fn settings(&self) -> Settings {
         match self.settings.read() {
             Ok(s) => s.clone(),
             Err(poisoned) => poisoned.into_inner().clone(),
@@ -209,7 +211,7 @@ impl App {
     // What: Docker stop grace and call limit.
     // Why: every wait comes from the SOT.
     // From: Issue #1683 | PR #1858
-    fn limits(&self, s: &Settings) -> Result<(u32, Duration), String> {
+    pub(crate) fn limits(&self, s: &Settings) -> Result<(u32, Duration), String> {
         let grace = s.num::<u32>("UI_STOP_GRACE")?;
         Ok((grace, Duration::from_secs(s.uint("DOCKER_TIMEOUT")?)))
     }
@@ -217,7 +219,7 @@ impl App {
     // What: render a page with the shared context.
     // Why: menu, csrf and values on every page.
     // From: Issue #1683 | PR #1858
-    fn page(&self, name: &str, mut ctx: Context, csrf: &Csrf) -> Page {
+    pub(crate) fn page(&self, name: &str, mut ctx: Context, csrf: &Csrf) -> Page {
         let s = self.settings();
         let page = name.trim_end_matches(".html");
         // What: every spec key, unset ones as empty text.
@@ -288,7 +290,7 @@ impl App {
 // Why: a foreign site cannot read the cookie.
 // From: Issue #1683 | PR #1980
 #[derive(Clone)]
-struct Csrf(String);
+pub(crate) struct Csrf(String);
 
 impl Csrf {
     // What: token: SHA-256 of key and session.
@@ -333,14 +335,14 @@ impl Csrf {
 // What: session id from the Cookie header.
 // Why: browsers may send several Cookie headers.
 // From: Issue #1683 | PR #1980
-fn session_cookie(headers: &HeaderMap) -> Option<String> {
+pub(crate) fn session_cookie(headers: &HeaderMap) -> Option<String> {
     cookie(headers, COOKIE)
 }
 
 // What: one cookie value by name.
 // Why: session and language cookie share the parse.
 // From: Issue #1683 | PR #1980
-fn cookie(headers: &HeaderMap, name: &str) -> Option<String> {
+pub(crate) fn cookie(headers: &HeaderMap, name: &str) -> Option<String> {
     for value in headers.get_all(header::COOKIE) {
         let Ok(text) = value.to_str() else { continue };
         for part in text.split(';') {
@@ -356,7 +358,7 @@ fn cookie(headers: &HeaderMap, name: &str) -> Option<String> {
 // What: user and password from HTTP Basic auth.
 // Why: scripts log in without a session cookie.
 // From: Issue #1683 | PR #1980
-fn basic_credentials(headers: &HeaderMap) -> Option<(String, String)> {
+pub(crate) fn basic_credentials(headers: &HeaderMap) -> Option<(String, String)> {
     let raw = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
     let encoded = raw.strip_prefix("Basic ")?;
     let bytes = base64::engine::general_purpose::STANDARD
@@ -370,14 +372,14 @@ fn basic_credentials(headers: &HeaderMap) -> Option<(String, String)> {
 // What: the stored login hash; empty when none is set.
 // Why: an empty hash means the ui runs without a login.
 // From: Issue #1683 | PR #2017
-fn password_hash(s: &Settings) -> String {
+pub(crate) fn password_hash(s: &Settings) -> String {
     s.text_or_empty("UI_AUTH_PASSWORD_HASH")
 }
 
 // What: Basic auth only when a hash is set.
 // Why: the test stack runs without a password.
 // From: Issue #1683 | PR #1858
-async fn login_ok(s: &Settings, headers: &HeaderMap) -> bool {
+pub(crate) async fn login_ok(s: &Settings, headers: &HeaderMap) -> bool {
     let hash = password_hash(s);
     if hash.is_empty() {
         return true;
@@ -395,7 +397,7 @@ async fn login_ok(s: &Settings, headers: &HeaderMap) -> bool {
 // What: login, session cookie and CSRF token.
 // Why: runs before every protected handler.
 // From: Issue #1683 | PR #1980
-async fn auth(State(app): Shared, mut req: Request, next: Next) -> Response {
+pub(crate) async fn auth(State(app): Shared, mut req: Request, next: Next) -> Response {
     let s = app.settings();
     if !login_ok(&s, req.headers()).await {
         let realm = [(header::WWW_AUTHENTICATE, "Basic realm=\"LanCache Admin\"")];
@@ -418,7 +420,7 @@ async fn auth(State(app): Shared, mut req: Request, next: Next) -> Response {
 // What: JSON file, or null when missing or bad.
 // Why: pages render even before the file exists.
 // From: Issue #1683 | PR #1980
-fn read_json(path: &str) -> Value {
+pub(crate) fn read_json(path: &str) -> Value {
     std::fs::read(path)
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok())
@@ -428,7 +430,7 @@ fn read_json(path: &str) -> Value {
 // What: adds a human-readable byte size field.
 // Why: pages show sizes like 40 GiB, not raw bytes.
 // From: Issue #1683 | PR #1980
-fn with_human(v: &impl serde::Serialize, field: &str, n: u64) -> Value {
+pub(crate) fn with_human(v: &impl serde::Serialize, field: &str, n: u64) -> Value {
     let mut out = serde_json::to_value(v).unwrap_or(Value::Null);
     out[field] = human::bytes(n).into();
     out
@@ -437,7 +439,7 @@ fn with_human(v: &impl serde::Serialize, field: &str, n: u64) -> Value {
 // What: proxy request totals and recent rows.
 // Why: dashboard; read off the async threads.
 // From: Issue #1683 | PR #1858
-async fn proxy_log(s: &Settings) -> Result<(Value, Vec<Value>), String> {
+pub(crate) async fn proxy_log(s: &Settings) -> Result<(Value, Vec<Value>), String> {
     let dir = Path::new(&s.text("SYSLOG_LOG_ROOT")?).join(s.text("PROXY_LOG_PROGRAM")?);
     let limit = s.num::<usize>("UI_RECENT_REQUESTS")?;
     let chunk = s.uint("UI_LOG_TAIL_CHUNK")?;
@@ -458,7 +460,7 @@ async fn proxy_log(s: &Settings) -> Result<(Value, Vec<Value>), String> {
 // What: active, requests, waiting from stub_status.
 // Why: live counters next to the log figures.
 // From: Issue #1683 | PR #1980
-async fn fetch_proxy_live(s: &Settings) -> Option<serde_json::Value> {
+pub(crate) async fn fetch_proxy_live(s: &Settings) -> Option<serde_json::Value> {
     let url = s.text("PROXY_STATUS_URL").ok()?;
     let resp = http::client(s).ok()?.get(&url).send().await.ok()?;
     let body = resp.error_for_status().ok()?.text().await.ok()?;
@@ -468,7 +470,7 @@ async fn fetch_proxy_live(s: &Settings) -> Option<serde_json::Value> {
 // What: read the stub_status text into numbers.
 // Why: nginx gives plain text, the page needs fields.
 // From: Issue #1683 | PR #1980
-fn parse_stub_status(body: &str) -> Option<serde_json::Value> {
+pub(crate) fn parse_stub_status(body: &str) -> Option<serde_json::Value> {
     let nums: Vec<u64> = body
         .split_whitespace()
         .filter_map(|w| w.parse().ok())
@@ -484,7 +486,7 @@ fn parse_stub_status(body: &str) -> Option<serde_json::Value> {
 // What: dashboard: alarms, containers, cache.
 // Why: first page; shows what needs a look.
 // From: Issue #1683 | PR #1858
-async fn dashboard(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
+pub(crate) async fn dashboard(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     let s = app.settings();
     let mut ctx = Context::new();
     ctx.insert("alarms", &read_json(&s.text("WATCHDOG_ALARM_FILE")?));
@@ -521,26 +523,10 @@ async fn dashboard(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page
     app.page("dashboard.html", ctx, &csrf)
 }
 
-// What: does our NTP server answer.
-// Why: General page shows the live state.
-// From: Issue #1683 | PR #1980
-async fn ntp_answers(s: &Settings) -> Result<bool, String> {
-    if !s.flag("NTP_ENABLED")? {
-        return Ok(false);
-    }
-    let ip = s.text("IP_HTTP")?;
-    let port = s.uint("NTP_PORT")?;
-    let wait = Duration::from_millis(s.uint("NTP_PROBE_WAIT_MS")?);
-    let probe = move || crate::shared::ntp::answers(&ip, port, wait);
-    tokio::task::spawn_blocking(probe)
-        .await
-        .map_err(|e| e.to_string())
-}
-
 // What: General page.
 // Why: channel, updates, NTP and login.
 // From: Issue #1683 | PR #1980
-async fn setup(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
+pub(crate) async fn setup(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     let s = app.settings();
     let mut ctx = Context::new();
     ctx.insert("ntp_answers", &ntp_answers(&s).await?);
@@ -550,7 +536,7 @@ async fn setup(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
 // What: set a new ui password (Argon2id).
 // Why: only the hash is kept; old one must match.
 // From: Issue #1683 | PR #1980
-async fn password(
+pub(crate) async fn password(
     State(app): Shared,
     Extension(csrf): Extension<Csrf>,
     Form(form): Form<Fields>,
@@ -594,7 +580,7 @@ async fn password(
 // What: keep only real changes of known keys.
 // Why: an empty secret field means keep it.
 // From: Issue #1683 | PR #1980
-fn changes(old: &Settings, form: Fields) -> Fields {
+pub(crate) fn changes(old: &Settings, form: Fields) -> Fields {
     let mut out = Fields::new();
     for (key, value) in form {
         let Some(spec) = old.spec(&key) else { continue };
@@ -612,7 +598,7 @@ fn changes(old: &Settings, form: Fields) -> Fields {
 // What: save, reload, render, write, apply.
 // Why: one path for every setting change.
 // From: Issue #1683 | PR #1858
-async fn commit(app: &App, form: Fields) -> Result<(), String> {
+pub(crate) async fn commit(app: &App, form: Fields) -> Result<(), String> {
     let Some(path) = app.saved.clone() else {
         return Err(format!("{} is not set", config::SETTINGS_FILE_ENV));
     };
@@ -658,7 +644,7 @@ async fn commit(app: &App, form: Fields) -> Result<(), String> {
 // What: end a form: redirect back or show error.
 // Why: every form handler ends the same way.
 // From: Issue #1683 | PR #1980
-fn finish(result: Result<(), String>, back: &str) -> Page {
+pub(crate) fn finish(result: Result<(), String>, back: &str) -> Page {
     result.map_err(bad_request)?;
     Ok(Redirect::to(back).into_response())
 }
@@ -666,7 +652,7 @@ fn finish(result: Result<(), String>, back: &str) -> Page {
 // What: General page form.
 // Why: field names are the SOT keys.
 // From: Issue #1683 | PR #1980
-async fn save(
+pub(crate) async fn save(
     State(app): Shared,
     Extension(csrf): Extension<Csrf>,
     Form(form): Form<Fields>,
@@ -720,46 +706,10 @@ async fn save(
     finish(result, &back)
 }
 
-// What: remove zones a new LAN domain left behind.
-// Why: an old zone would keep answering its names.
-// From: Issue #1683 | PR #1980
-async fn drop_old_zones(s: &Settings, before: &[String]) {
-    let read = (hosted_now(s), Role::from_settings(s), pdns_api(s));
-    let (now, role, api) = match read {
-        (Ok(now), Ok(role), Ok(api)) => (now, role, api),
-        (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => {
-            eprintln!("ui: old zones kept: {e}");
-            return;
-        }
-    };
-    if role == Role::Secondary {
-        return;
-    }
-    for zone in before.iter().filter(|z| !now.contains(z)) {
-        // What: only zones without own records go.
-        // Why: a record the user added is never lost.
-        // From: Issue #1683 | PR #1980
-        let own = match api.rrsets(zone).await {
-            Ok(sets) => !own_rrsets(&sets).is_empty(),
-            Err(_) => continue,
-        };
-        let done = if own {
-            Err(tr("err_zone_has_records"))
-        } else {
-            api.delete_zone(zone).await
-        };
-        match done {
-            Ok(()) => eprintln!("ui: zone {zone} removed"),
-            Err(e) => eprintln!("ui: zone {zone} kept: {e}"),
-        }
-    }
-    peers_follow(s);
-}
-
 // What: newest lines of all programs, merged.
 // Why: syslog-ng keeps one folder per program.
 // From: Issue #1683 | PR #1980
-fn newest_lines(root: &Path, programs: &[String], max: usize, chunk: u64) -> Vec<Value> {
+pub(crate) fn newest_lines(root: &Path, programs: &[String], max: usize, chunk: u64) -> Vec<Value> {
     let mut all = Vec::new();
     for p in programs {
         for line in access::tail_lines(&root.join(p), max, chunk) {
@@ -784,7 +734,7 @@ fn newest_lines(root: &Path, programs: &[String], max: usize, chunk: u64) -> Vec
 // What: logs page.
 // Why: newest lines plus on/off per program.
 // From: Issue #1683 | PR #1980
-async fn logs(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
+pub(crate) async fn logs(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     let s = app.settings();
     let root = PathBuf::from(s.text("SYSLOG_LOG_ROOT")?);
     let max = s.num::<usize>("UI_LOG_LINES")?;
@@ -821,7 +771,7 @@ async fn logs(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
 // What: save forward targets and muted programs.
 // Why: switch on_<program>; missing means muted.
 // From: Issue #1683 | PR #1980
-async fn logs_save(
+pub(crate) async fn logs_save(
     State(app): Shared,
     Extension(csrf): Extension<Csrf>,
     Form(form): Form<Fields>,
@@ -843,156 +793,10 @@ async fn logs_save(
     finish(commit(&app, change).await, &back)
 }
 
-// What: PowerDNS API of this node.
-// Why: records live only in PowerDNS.
-// From: Issue #1683 | PR #1980
-fn pdns_api(s: &Settings) -> Result<crate::shared::pdns::Api, String> {
-    peer::own_api(s, http::client(s)?, &secret::get(s, "PDNS_API_KEY")?)
-}
-
-// What: reverse DNS name of an address.
-// Why: PTR rows live in in-addr.arpa or ip6.arpa.
-// From: Issue #1683 | PR #1980
-fn reverse_name(ip: &str) -> Result<String, String> {
-    use std::net::IpAddr;
-    let addr = crate::shared::dns::parse_ip(ip)?;
-    Ok(match addr {
-        IpAddr::V4(v4) => {
-            let mut o = v4.octets();
-            o.reverse();
-            format!("{}.{}.{}.{}.in-addr.arpa.", o[0], o[1], o[2], o[3])
-        }
-        IpAddr::V6(v6) => {
-            let mut nibbles = Vec::with_capacity(32);
-            for b in v6.octets().iter().rev() {
-                nibbles.push(format!("{:x}", b & 0x0f));
-                nibbles.push(format!("{:x}", b >> 4));
-            }
-            format!("{}.ip6.arpa.", nibbles.join("."))
-        }
-    })
-}
-
-// What: private reverse zone holding a name.
-// Why: the PowerDNS PATCH needs the zone.
-// From: Issue #1683 | PR #1980
-fn reverse_zone(s: &Settings, name: &str) -> Option<String> {
-    crate::shared::dns::zone_of(name, &crate::shared::dns::private_reverse_zones(s))
-}
-
-// What: reverse name of an address and its zone.
-// Why: every PTR change needs both; None: no such zone.
-// From: Issue #1683 | PR #2017
-fn reverse_place(s: &Settings, ip: &str) -> Result<Option<(String, String)>, String> {
-    let rev = reverse_name(ip)?;
-    Ok(reverse_zone(s, &rev).map(|zone| (rev, zone)))
-}
-
-// What: the same, only for a zone this stack serves.
-// Why: a PTR of a secondary goes into own zones only.
-// From: Issue #1683 | PR #2017
-fn served_reverse_place(s: &Settings, ip: &str) -> Result<Option<(String, String)>, String> {
-    let Some((rev, zone)) = reverse_place(s, ip)? else {
-        return Ok(None);
-    };
-    let served = crate::shared::dns::managed_zones(s)?.contains(&zone);
-    Ok(served.then_some((rev, zone)))
-}
-
-// What: the LAN zone a form names; empty = main.
-// Why: records go only into a configured LAN domain.
-// From: Issue #1683
-fn chosen_lan_zone(s: &Settings, raw: &str) -> Result<String, String> {
-    if raw.trim().is_empty() {
-        return crate::shared::dns::lan_zone(s);
-    }
-    let zone = crate::shared::dns::canonical_zone(raw.trim());
-    if crate::shared::dns::lan_domains(s)?.contains(&zone) {
-        Ok(zone)
-    } else {
-        Err(tr("err_not_lan_domain").replace("{x}", raw.trim()))
-    }
-}
-
-// What: settings that make one domain the main one.
-// Why: a former extra leaves the list; swap keeps both.
-// From: Issue #1683
-fn main_domain_fields(s: &Settings, main: &str) -> Result<Fields, String> {
-    let lans = crate::shared::dns::lan_domains(s)?;
-    let want = crate::shared::dns::canonical_zone(main.trim());
-    let plain = |z: &String| z.trim_end_matches('.').to_string();
-    let old = lans.first().cloned().unwrap_or_default();
-    let mut extra: Vec<String> = lans
-        .iter()
-        .skip(1)
-        .filter(|z| **z != want)
-        .map(plain)
-        .collect();
-    // What: old main stays as extra only on a swap.
-    // Why: a new name renames the main domain as before.
-    // From: Issue #1683
-    if want != old && lans.iter().skip(1).any(|z| *z == want) {
-        extra.push(plain(&old));
-    }
-    // What: the new set passes the LAN domain rule.
-    // Why: one rule; else lan_domains fails everywhere.
-    // From: Issue #1683
-    crate::shared::dns::validate_lan_domains(&plain(&want), &extra)?;
-    Ok(Fields::from([
-        ("DHCP_DOMAIN".to_string(), plain(&want)),
-        ("DNS_EXTRA_LAN_DOMAINS".to_string(), extra.join(" ")),
-    ]))
-}
-
-// What: rrsets of a zone besides SOA, NS and DS.
-// Why: only these are records a person added.
-// From: Issue #1683
-fn own_rrsets(rows: &[Value]) -> Vec<Value> {
-    rows.iter()
-        .filter(|r| !matches!(r["type"].as_str(), Some("SOA" | "NS" | "DS")))
-        .cloned()
-        .collect()
-}
-
-// What: zones that keep snapshots.
-// Why: LAN zones plus the private reverse zones.
-// From: Issue #1683 | PR #1980
-fn snapshot_zones(s: &Settings) -> Result<Vec<String>, String> {
-    let mut zones = crate::shared::dns::lan_domains(s)?;
-    zones.extend(crate::shared::dns::private_reverse_zones(s));
-    Ok(zones)
-}
-
-// What: snapshot store of one zone.
-// Why: undo a bad change; count from the SOT.
-// From: Issue #1683 | PR #1980
-fn zone_store(s: &Settings, zone: &str) -> Result<crate::shared::snapshot::Store, String> {
-    let dir = Path::new(&s.text("DNS_SNAPSHOT_DIR")?).join(zone.trim_end_matches('.'));
-    let keep = s.num::<usize>("DNS_SNAPSHOT_KEEP")?;
-    let owner = fs::Owner::default();
-    Ok(crate::shared::snapshot::Store {
-        dir,
-        keep,
-        owner,
-        file: None,
-    })
-}
-
-// What: keep the zone's records after a change.
-// Why: each change can be undone later.
-// From: Issue #1683 | PR #1980
-async fn snapshot(s: &Settings, api: &crate::shared::pdns::Api, zone: &str) -> Result<(), String> {
-    let rows = api.rrsets(zone).await?;
-    let body = serde_json::to_vec(&rows).map_err(|e| e.to_string())?;
-    let store = zone_store(s, zone)?;
-    store.save(&body)?;
-    Ok(())
-}
-
 // What: file change time as unix seconds.
 // Why: snapshot age needs a plain number.
 // From: Issue #1683 | PR #1980
-fn created_unix(path: &Path) -> Result<u64, String> {
+pub(crate) fn created_unix(path: &Path) -> Result<u64, String> {
     let meta = std::fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
     Ok(crate::shared::fs::modified_secs(&meta))
 }
@@ -1000,7 +804,7 @@ fn created_unix(path: &Path) -> Result<u64, String> {
 // What: the snapshots of a store as id and time rows.
 // Why: the DNS and the DHCP page show the same shape.
 // From: Issue #1683 | PR #2017
-fn snapshot_rows(store: &crate::shared::snapshot::Store) -> Result<Vec<Value>, String> {
+pub(crate) fn snapshot_rows(store: &crate::shared::snapshot::Store) -> Result<Vec<Value>, String> {
     let mut rows = Vec::new();
     for id in store.list().unwrap_or_default() {
         let created = created_unix(&store.path(&id))?;
@@ -1009,108 +813,10 @@ fn snapshot_rows(store: &crate::shared::snapshot::Store) -> Result<Vec<Value>, S
     Ok(rows)
 }
 
-// What: snapshots of all zones, newest first.
-// Why: DNS page and setup.sh show the same list.
-// From: Issue #1683 | PR #1980
-fn snapshot_list(s: &Settings) -> Result<Vec<(String, Vec<Value>)>, String> {
-    let mut out = Vec::new();
-    for zone in snapshot_zones(s)? {
-        let store = zone_store(s, &zone)?;
-        out.push((zone, snapshot_rows(&store)?));
-    }
-    Ok(out)
-}
-
-// What: print {"zones":{zone:[{id,created_unix}]}}.
-// Why: setup.sh reset-config reads this shape.
-// From: Issue #1683 | PR #1980
-fn zone_snapshots_cli(s: &Settings) -> Result<(), String> {
-    let zones: serde_json::Map<String, Value> = snapshot_list(s)?
-        .into_iter()
-        .map(|(z, rows)| (z, Value::Array(rows)))
-        .collect();
-    println!("{}", json!({"zones": zones}));
-    Ok(())
-}
-
-// What: put one zone back to a snapshot.
-// Why: PATCH restores; a new snapshot records it.
-// From: Issue #1683 | PR #1980
-async fn rollback(s: &Settings, zone: &str, id: &str) -> Result<(), String> {
-    if !snapshot_zones(s)?.iter().any(|z| z == zone) {
-        return Err(tr("err_zone_no_snapshots").replace("{zone}", zone));
-    }
-    let body = zone_store(s, zone)?.read(id)?;
-    let rows: Vec<Value> = serde_json::from_slice(&body).map_err(|e| e.to_string())?;
-    let api = pdns_api(s)?;
-    api.restore(zone, &rows).await?;
-    snapshot(s, &api, zone).await?;
-    peer::flush_zone(s, zone).await
-}
-
-// What: PTR rows of each private reverse zone.
-// Why: the DNS page lists them per zone with the host.
-// From: Issue #1683 | PR #1980
-async fn ptr_rows(s: &Settings, api: &crate::shared::pdns::Api) -> Vec<Value> {
-    let mut out = Vec::new();
-    for zone in crate::shared::dns::private_reverse_zones(s) {
-        let mut rows = Vec::new();
-        for r in api.rrsets(&zone).await.unwrap_or_default() {
-            if r["type"] != "PTR" {
-                continue;
-            }
-            let host = r["records"][0]["content"].clone();
-            rows.push(json!({"ip": r["name"], "ttl": r["ttl"], "hostname": host}));
-        }
-        out.push(json!({"zone": zone, "records": rows}));
-    }
-    out
-}
-
-// What: A and AAAA addresses whose PTR is missing.
-// Why: one click adds it; DoMe 23.11.
-// From: Issue #1683 | PR #2019
-fn missing_ptrs(
-    s: &Settings,
-    records: &mut BTreeMap<String, Vec<Value>>,
-    ptr: &[Value],
-) -> Vec<Value> {
-    let have: Vec<&str> = ptr
-        .iter()
-        .filter_map(|g| g["records"].as_array())
-        .flatten()
-        .filter_map(|r| r["ip"].as_str())
-        .collect();
-    let mut all = Vec::new();
-    for rows in records.values_mut() {
-        for r in rows.iter_mut() {
-            if !matches!(r["type"].as_str(), Some("A" | "AAAA")) {
-                continue;
-            }
-            let ips: Vec<String> = r["records"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|c| c["content"].as_str())
-                .filter(|ip| {
-                    matches!(served_reverse_place(s, ip), Ok(Some((rev, _)))
-                        if !have.contains(&rev.as_str()))
-                })
-                .map(str::to_string)
-                .collect();
-            for ip in &ips {
-                all.push(json!({"ip": ip, "hostname": r["name"], "ttl": r["ttl"]}));
-            }
-            r["missing_ptr"] = json!(ips);
-        }
-    }
-    all
-}
-
 // What: DNS page.
 // Why: records are read live from PowerDNS.
 // From: Issue #1683 | PR #1980
-async fn domains(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
+pub(crate) async fn domains(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     let s = app.settings();
     let lans = crate::shared::dns::lan_domains(&s)?;
     let lan = crate::shared::dns::lan_zone(&s)?;
@@ -1258,37 +964,10 @@ async fn domains(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     app.page("domains.html", ctx, &csrf)
 }
 
-// What: Kea subnets per LAN zone, by domain-name.
-// Why: the DNS page shows which subnet uses a domain.
-// From: Issue #1683
-async fn domain_subnets(s: &Settings) -> BTreeMap<String, Vec<String>> {
-    let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    if DhcpMode::from_settings(s).ok() != Some(DhcpMode::Kea) {
-        return out;
-    }
-    // What: no Kea answer leaves the column empty.
-    // Why: the DNS page must not fail when dhcp is down.
-    // From: Issue #1683
-    let Ok(api) = kea_api(s) else { return out };
-    let Ok(cfg) = api.config().await else {
-        return out;
-    };
-    for sn in cfg["Dhcp4"]["subnet4"].as_array().into_iter().flatten() {
-        let domain = option_data(sn, crate::shared::dhcp::DOMAIN_NAME.name);
-        if domain.is_empty() {
-            continue;
-        }
-        let zone = crate::shared::dns::canonical_zone(&domain);
-        let net = sn["subnet"].as_str().unwrap_or_default().to_string();
-        out.entry(zone).or_default().push(net);
-    }
-    out
-}
-
 // What: list setting with one item in or out.
 // Why: domain add, remove and toggle share it.
 // From: Issue #1683 | PR #1980
-fn list_change(s: &Settings, key: &str, item: &str, present: bool) -> Fields {
+pub(crate) fn list_change(s: &Settings, key: &str, item: &str, present: bool) -> Fields {
     let mut items: Vec<String> = s.list(key).into_iter().filter(|x| x != item).collect();
     if present {
         items.push(item.to_string());
@@ -1299,14 +978,14 @@ fn list_change(s: &Settings, key: &str, item: &str, present: bool) -> Fields {
 // What: a form with exactly one field.
 // Why: commit takes Fields; a switch saves one key.
 // From: Issue #1683 | PR #1980
-fn single_field(key: &str, value: impl ToString) -> Fields {
+pub(crate) fn single_field(key: &str, value: impl ToString) -> Fields {
     Fields::from([(key.to_string(), value.to_string())])
 }
 
 // What: one DNS page form, chosen by its SOT key.
 // Why: all DNS forms share one handler.
 // From: Issue #1683
-async fn dns_action(
+pub(crate) async fn dns_action(
     State(app): Shared,
     Extension(csrf): Extension<Csrf>,
     Extension(Op(op)): Extension<Op<DnsOp>>,
@@ -1344,287 +1023,28 @@ async fn dns_action(
     finish(result, &s.text("UI_PAGE_DOMAINS")?)
 }
 
-// What: add, remove or promote one LAN domain.
-// Why: each LAN domain is one zone in PowerDNS.
-// From: Issue #1683
-async fn lan_domain_action(app: &App, s: &Settings, op: &str, raw: &str) -> Result<(), String> {
-    let zone = crate::shared::dns::canonical_zone(raw.trim());
-    let name = zone.trim_end_matches('.').to_string();
-    let lans = crate::shared::dns::lan_domains(s)?;
-    let before = hosted_now(s)?;
-    let change = match op {
-        "UI_ROUTE_LAN_DOMAIN_ADD" => {
-            let mut extra: Vec<String> = lans.iter().skip(1).cloned().collect();
-            extra.push(name.clone());
-            let main = lans.first().cloned().unwrap_or_default();
-            crate::shared::dns::validate_lan_domains(&main, &extra)?;
-            list_change(s, "DNS_EXTRA_LAN_DOMAINS", &name, true)
-        }
-        "UI_ROUTE_LAN_DOMAIN_REMOVE" => {
-            if lans.first() == Some(&zone) {
-                return Err(tr("err_main_domain_remove").replace("{x}", &name));
-            }
-            if !lans.contains(&zone) {
-                return Err(tr("err_not_lan_domain").replace("{x}", &name));
-            }
-            // What: a domain with own records stays.
-            // Why: removing it would drop names from DNS.
-            // From: Issue #1683
-            let own = own_rrsets(&pdns_api(s)?.rrsets(&zone).await?).len();
-            if own > 0 {
-                return Err(tr("err_domain_has_records")
-                    .replace("{x}", &name)
-                    .replace("{n}", &own.to_string()));
-            }
-            list_change(s, "DNS_EXTRA_LAN_DOMAINS", &name, false)
-        }
-        _ => {
-            if !lans.contains(&zone) {
-                return Err(tr("err_not_lan_domain").replace("{x}", &name));
-            }
-            main_domain_fields(s, &name)?
-        }
-    };
-    commit(app, change).await?;
-    drop_old_zones(&app.settings(), &before).await;
-    Ok(())
-}
-
-// What: full name inside the LAN zone.
-// Why: a short name gets the zone appended.
-// From: Issue #1683 | PR #1980
-fn in_zone(name: &str, zone: &str) -> String {
-    // What: only a whole-label suffix counts as inside.
-    // Why: "xhome.lan" is not in zone "home.lan".
-    // From: Issue #1683
-    let bare = zone.trim_end_matches('.');
-    let inside = crate::shared::dns::is_within(name, bare);
-    if name.ends_with('.') || inside {
-        name.to_string()
-    } else {
-        format!("{name}.{zone}")
-    }
-}
-
-// What: content in the form PowerDNS stores.
-// Why: TXT needs quotes; target names end in a dot.
-// From: Issue #1683 | PR #1980
-fn canonical(kind: &str, c: &str) -> String {
-    let dot = crate::shared::pdns::zone_id;
-    match kind {
-        "TXT" if !c.starts_with('"') => format!("\"{}\"", c.replace('"', "\\\"")),
-        "CNAME" => dot(c),
-        "MX" | "SRV" => match c.rsplit_once(' ') {
-            Some((head, target)) => format!("{head} {}", dot(target)),
-            None => c.to_string(),
-        },
-        // What: a DS digest in small hex letters.
-        // Why: pdns and its key list may differ in case.
-        // From: Issue #1683 | PR #2019
-        "DS" => c.to_ascii_lowercase(),
-        _ => c.to_string(),
-    }
-}
-
-// What: add or remove one LAN record set.
-// Why: PATCH sets or deletes; NOTIFY follows.
-// From: Issue #1683 | PR #1980
-async fn record(
-    s: &Settings,
-    add: bool,
-    get: &(dyn Fn(&str) -> String + Sync),
-) -> Result<(), String> {
-    let zone = chosen_lan_zone(s, &get("zone"))?;
-    let kind = get("record_type");
-    if !s.list("DNS_LAN_RECORD_TYPES").contains(&kind) {
-        return Err(tr("err_record_type").replace("{kind}", &kind));
-    }
-    let name = in_zone(&get("name"), &zone);
-    let mut contents = Vec::new();
-    let mut ttl = 0;
-    if add {
-        let raw = get("content");
-        contents = raw
-            .split(';')
-            .map(str::trim)
-            .filter(|c| !c.is_empty())
-            .map(|c| canonical(&kind, c))
-            .collect();
-        ttl = form_ttl(s, get)?;
-    }
-    let api = pdns_api(s)?;
-    let host = crate::shared::pdns::zone_id(&name);
-    // What: the place of each wanted PTR, checked first.
-    // Why: no A is saved when its PTR cannot follow.
-    // From: Issue #1683 | PR #2019
-    let mut places = Vec::new();
-    if add && kind == "A" && get("ptr") == "1" {
-        for ip in &contents {
-            let Some((rev, rz)) = served_reverse_place(s, ip)? else {
-                return Err(tr("err_ptr_no_zone").replace("{ip}", ip));
-            };
-            let have = rrset_contents(&api, &rz, &rev, "PTR").await?;
-            if let Some(other) = have.iter().find(|h| **h != host) {
-                return Err(tr("err_ptr_taken")
-                    .replace("{ip}", ip)
-                    .replace("{name}", other.trim_end_matches('.')));
-            }
-            places.push((rev, rz));
-        }
-    }
-    // What: the addresses the name loses with this change.
-    // Why: their PTR to this name must not stay behind.
-    // From: Issue #1683 | PR #2019
-    let mut gone = Vec::new();
-    if kind == "A" {
-        gone = rrset_contents(&api, &zone, &name, "A").await?;
-        gone.retain(|ip| !contents.contains(ip));
-    }
-    api.set_rrset(&zone, &name, &kind, ttl, &contents).await?;
-    snapshot(s, &api, &zone).await?;
-    peer::flush_zone(s, &zone).await?;
-    for (rev, rz) in &places {
-        api.set_rrset(rz, rev, "PTR", ttl, std::slice::from_ref(&host))
-            .await?;
-        snapshot(s, &api, rz).await?;
-        peer::flush_zone(s, rz).await?;
-    }
-    for ip in &gone {
-        let Some((rev, rz)) = served_reverse_place(s, ip)? else {
-            continue;
-        };
-        // What: drop the PTR only when it names this host.
-        // Why: a PTR to another name is not ours to drop.
-        // From: Issue #1683 | PR #2019
-        if rrset_contents(&api, &rz, &rev, "PTR").await? == [host.clone()] {
-            api.set_rrset(&rz, &rev, "PTR", 0, &[]).await?;
-            snapshot(s, &api, &rz).await?;
-            peer::flush_zone(s, &rz).await?;
-        }
-    }
-    Ok(())
-}
-
-// What: the contents of one record set; none: empty.
-// Why: PTR checks ask what a name holds right now.
-// From: Issue #1683 | PR #2019
-async fn rrset_contents(
-    api: &crate::shared::pdns::Api,
-    zone: &str,
-    name: &str,
-    kind: &str,
-) -> Result<Vec<String>, String> {
-    let id = crate::shared::pdns::zone_id(name);
-    Ok(api
-        .rrsets(zone)
-        .await?
-        .iter()
-        .filter(|r| r["name"] == id.as_str() && r["type"] == kind)
-        .filter_map(|r| r["records"].as_array())
-        .flatten()
-        .filter_map(|c| c["content"].as_str().map(str::to_string))
-        .collect())
-}
-
-// What: the TTL a record form sends, within the limit.
-// Why: the LAN and the PTR form take the same field.
-// From: Issue #1683 | PR #2019
-fn form_ttl(s: &Settings, get: &(dyn Fn(&str) -> String + Sync)) -> Result<u32, String> {
-    let max = s.uint("DNS_RECORD_TTL_MAX")?;
-    let ttl = get("ttl").parse::<u32>().unwrap_or(0);
-    if ttl == 0 || u64::from(ttl) > max {
-        return Err(tr("err_ttl_range").replace("{max}", &max.to_string()));
-    }
-    Ok(ttl)
-}
-
-// What: add or remove one PTR record.
-// Why: name from the IP; zone from the list.
-// From: Issue #1683 | PR #1980
-async fn ptr(s: &Settings, add: bool, get: &(dyn Fn(&str) -> String + Sync)) -> Result<(), String> {
-    let ip = get("ip");
-    let name = if crate::shared::dns::is_reverse_name(&ip) {
-        ip
-    } else {
-        reverse_name(&ip)?
-    };
-    let Some(zone) = reverse_zone(s, &name) else {
-        return Err(format!("{name} is in no private reverse zone"));
-    };
-    let mut ttl = 0;
-    let mut contents = Vec::new();
-    if add {
-        ttl = form_ttl(s, get)?;
-        contents.push(crate::shared::pdns::zone_id(&get("hostname")));
-    }
-    let api = pdns_api(s)?;
-    api.set_rrset(&zone, &name, "PTR", ttl, &contents).await?;
-    snapshot(s, &api, &zone).await?;
-    peer::flush_zone(s, &zone).await
-}
-
 // What: token secondaries register with.
 // Why: kept like any secret; rotate renews it.
 // From: Issue #1683 | PR #1980
-fn registration_token(s: &Settings) -> Result<String, String> {
+pub(crate) fn registration_token(s: &Settings) -> Result<String, String> {
     secret::get(s, "SECONDARY_REGISTRATION_TOKEN")
-}
-
-// What: saves secondaries as name@address rows.
-// Why: one SOT key holds the whole list.
-// From: Issue #1683 | PR #1980
-async fn store_secondaries(app: &App, list: &[(String, String)]) -> Result<(), String> {
-    let rows = crate::shared::pdns_conf::secondary_rows(list);
-    commit(app, single_field("DNS_SECONDARIES", rows)).await
 }
 
 // What: body of a secondary registration.
 // Why: the token proves the admin gave the command.
 // From: Issue #1683 | PR #1980
 #[derive(serde::Deserialize)]
-struct Register {
-    token: String,
-    name: String,
+pub(crate) struct Register {
+    pub(crate) token: String,
+    pub(crate) name: String,
     #[serde(default)]
-    address: Option<String>,
-}
-
-// What: checks a secondary name: one label, SOT length.
-// Why: the name becomes a DNS label and file name.
-// From: Issue #1683 | PR #2017
-fn valid_peer_name(s: &Settings, name: &str) -> Result<bool, String> {
-    let max = s.num::<usize>("DNS_SECONDARY_NAME_MAX")?;
-    let label = !name.contains('.') && crate::shared::dns::is_dns_name(name, false, false);
-    Ok(name.len() <= max && label)
-}
-
-// What: everything a new secondary needs.
-// Why: setup.sh secondary writes it to its env.
-// From: Issue #1683 | PR #1980
-fn peer_kit(s: &Settings) -> Result<Value, String> {
-    let primary = s.text("IP_HTTP")?;
-    Ok(json!({
-        "primary": primary,
-        // What: the zones the primary serves.
-        // Why: the secondary pulls each one by AXFR.
-        // From: Issue #1683
-        "zones": crate::shared::dns::managed_zones(s)?,
-        "pdns_api_key": secret::get(s, "PDNS_API_KEY")?,
-        "tsig_name": s.text("DDNS_TSIG_NAME")?,
-        "tsig_secret": secret::tsig_secret(s)?,
-        "syslog_primary": format!("{primary}:{}", s.uint("LANCACHE_LOG_PORT")?),
-        "dns_local_reverse_zones": s.text_or_empty("DNS_LOCAL_REVERSE_ZONES"),
-        "image_registry": process_env("LANCACHE_IMAGE_REGISTRY").unwrap_or_default(),
-        "image_prefix": process_env("LANCACHE_IMAGE_PREFIX").unwrap_or_default(),
-        "image_channel": process_env("LANCACHE_IMAGE_CHANNEL").unwrap_or_default(),
-        "image_tag": process_env("LANCACHE_IMAGE_TAG").unwrap_or_default(),
-    }))
+    pub(crate) address: Option<String>,
 }
 
 // What: register a secondary (public route).
 // Why: token checked; reply has the whole kit.
 // From: Issue #1683 | PR #1980
-async fn register(
+pub(crate) async fn register(
     State(app): Shared,
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     axum::Json(r): axum::Json<Register>,
@@ -1660,14 +1080,14 @@ async fn register(
 // From: Issue #1683 | PR #1980
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Address {
-    address: String,
+pub(crate) struct Address {
+    pub(crate) address: String,
 }
 
 // What: new registration token.
 // Why: drop the file; resolve makes a fresh one.
 // From: Issue #1683 | PR #1980
-fn renew_token(s: &Settings) -> Result<String, String> {
+pub(crate) fn renew_token(s: &Settings) -> Result<String, String> {
     let dir = secret::dir(s)?;
     let file = secret::file_of(&dir, "SECONDARY_REGISTRATION_TOKEN");
     fs::remove_if_present(&file).map_err(|e| format!("{}: {e}", file.display()))?;
@@ -1677,7 +1097,7 @@ fn renew_token(s: &Settings) -> Result<String, String> {
 // What: secondary actions from the DNS page.
 // Why: remove, rotate, address and health.
 // From: Issue #1683 | PR #1980
-async fn secondary_action(
+pub(crate) async fn secondary_action(
     State(app): Shared,
     Extension(csrf): Extension<Csrf>,
     axum::extract::Path(name): axum::extract::Path<String>,
@@ -1748,222 +1168,18 @@ async fn secondary_action(
     }
 }
 
-// What: NS lists with a name in, out or in neither.
-// Why: Some(true) enters, Some(false) takes it out.
-// From: Issue #1683
-fn ns_change(s: &Settings, name: &str, entered: Option<bool>) -> Fields {
-    let mut form = list_change(s, "DNS_SECONDARY_NS", name, entered == Some(true));
-    form.extend(list_change(
-        s,
-        "DNS_SECONDARY_NS_OFF",
-        name,
-        entered == Some(false),
-    ));
-    form
-}
-
-// What: serial of each managed zone on both peers.
-// Why: shows a lost NOTIFY or AXFR in any zone (RFC 1982).
-// From: Issue #1683 | PR #1858
-async fn peer_serials(s: &Settings, address: &str) -> Result<Vec<PeerZone>, String> {
-    let ours = pdns_api(s)?.zones().await?;
-    let theirs = peer::zones_at(s, address).await?;
-    peer::peer_zones(s, &ours, &theirs)
-}
-
-// What: pdns API of one peer by its address.
-// Why: zone list, AXFR request and sync use it.
-// From: Issue #1683
-fn remote_api(s: &Settings, address: &str) -> Result<crate::shared::pdns::Api, String> {
-    peer::api_at(
-        s,
-        http::client(s)?,
-        address,
-        &secret::get(s, "PDNS_API_KEY")?,
-    )
-}
-
 // What: failed checks of one secondary in a row.
 // Why: NS removal needs time and count both.
 // From: Issue #1683
-struct Failing {
-    since: std::time::Instant,
-    count: u64,
-}
-
-// What: check every secondary; again after a wait.
-// Why: the SOT sets a shorter wait while one fails.
-// From: Issue #1683
-async fn secondary_watch(app: Arc<App>) {
-    let mut failing: BTreeMap<String, Failing> = BTreeMap::new();
-    loop {
-        let s = app.settings();
-        let key = match watch_round(&app, &s, &mut failing).await {
-            Ok(()) if failing.is_empty() => "DNS_SECONDARY_CHECK_SECONDS",
-            Ok(()) => "DNS_SECONDARY_RECHECK_SECONDS",
-            // What: own pdns down: no secondary is blamed.
-            // Why: at ui start the dns may not run yet.
-            // From: Issue #1683
-            Err(e) => {
-                eprintln!("ui: secondary check skipped: {e}");
-                "PDNS_SOA_COLD_RETRY"
-            }
-        };
-        let Some(wait) = or_stop("secondary check", s.uint(key)) else {
-            return;
-        };
-        tokio::time::sleep(Duration::from_secs(wait)).await;
-    }
-}
-
-// What: one round over all secondaries.
-// Why: resync a lag, enter or take out NS names.
-// From: Issue #1683
-async fn watch_round(
-    app: &App,
-    s: &Settings,
-    failing: &mut BTreeMap<String, Failing>,
-) -> Result<(), String> {
-    let ours = pdns_api(s)?.zones().await?;
-    let peers = crate::shared::pdns_conf::secondaries(s);
-    failing.retain(|n, _| peers.iter().any(|(p, _)| p == n));
-    let enabled = s.flag("DNS_SECONDARY_NS_ENABLED")?;
-    let auto = s.flag("DNS_SECONDARY_NS_AUTO_REMOVE")?;
-    let after = Duration::from_secs(s.uint("DNS_SECONDARY_NS_REMOVE_AFTER_SECONDS")?);
-    let fails = s.uint("DNS_SECONDARY_NS_REMOVE_FAILS")?;
-    let (mut ns, mut off) = (s.list("DNS_SECONDARY_NS"), s.list("DNS_SECONDARY_NS_OFF"));
-    for (name, address) in &peers {
-        // What: no aa counts as failure only for an NS.
-        // Why: an older secondary syncs but is never NS.
-        // From: Issue #1683
-        let outcome = match check_peer(s, &ours, address).await {
-            Ok(Err(e)) if !ns.contains(name) => {
-                if enabled {
-                    eprintln!("ui: secondary {name}: no NS: {e}");
-                }
-                Ok(false)
-            }
-            Ok(aa) => aa.map(|()| true),
-            Err(e) => Err(e),
-        };
-        match outcome {
-            Ok(aa) => {
-                failing.remove(name);
-                // What: first entry; never after take out.
-                // Why: re-entry only by hand.
-                // From: Issue #1683
-                if aa && enabled && !ns.contains(name) && !off.contains(name) {
-                    eprintln!("ui: secondary {name}: entered as NS");
-                    ns.push(name.clone());
-                }
-            }
-            Err(e) => {
-                let f = failing.entry(name.clone()).or_insert(Failing {
-                    since: std::time::Instant::now(),
-                    count: 0,
-                });
-                f.count += 1;
-                eprintln!("ui: secondary {name}: check {} failed: {e}", f.count);
-                let due = f.count >= fails && f.since.elapsed() > after;
-                if enabled && auto && due && ns.contains(name) {
-                    eprintln!("ui: secondary {name}: NS taken out");
-                    ns.retain(|n| n != name);
-                    off.push(name.clone());
-                }
-            }
-        }
-    }
-    let mut form = Fields::new();
-    for (key, now) in [("DNS_SECONDARY_NS", ns), ("DNS_SECONDARY_NS_OFF", off)] {
-        if now != s.list(key) {
-            form.insert(key.into(), now.join(" "));
-        }
-    }
-    if form.is_empty() {
-        return Ok(());
-    }
-    commit(app, form).await
-}
-
-// What: one secondary gets our zone list.
-// Why: added or removed domains reach it alone.
-// From: Issue #1683
-async fn peer_follows(
-    s: &Settings,
-    api: &crate::shared::pdns::Api,
-    address: &str,
-) -> Result<(), String> {
-    let masters = vec![crate::shared::dns::host_port(
-        &s.text("IP_HTTP")?,
-        s.uint("PDNS_AUTH_PORT")?,
-    )];
-    let who = format!("ui: secondary {address}");
-    let key = s.text("DDNS_TSIG_NAME")?;
-    peer::match_zones(api, &hosted_now(s)?, &masters, &key, true, &who).await
-}
-
-// What: every secondary follows, in the background.
-// Why: a zone change must not wait for the slow check.
-// From: Issue #1683
-fn peers_follow(s: &Settings) {
-    let s = s.clone();
-    tokio::spawn(async move {
-        for (name, address) in crate::shared::pdns_conf::secondaries(&s) {
-            let done = match remote_api(&s, &address) {
-                Ok(api) => peer_follows(&s, &api, &address).await,
-                Err(e) => Err(e),
-            };
-            if let Err(e) = done {
-                eprintln!("ui: secondary {name}: zones not matched: {e}");
-            }
-        }
-    });
-}
-
-// What: serials via pdns-API, lag pulled; aa result.
-// Why: an NS must answer aa; AXFR fixes a lost NOTIFY.
-// From: Issue #1683
-async fn check_peer(
-    s: &Settings,
-    ours: &[crate::shared::pdns::Zone],
-    address: &str,
-) -> Result<Result<(), String>, String> {
-    let aa = answers_aa(s, address, &crate::shared::dns::lan_zone(s)?).await;
-    let api = remote_api(s, address)?;
-    peer_follows(s, &api, address).await?;
-    let theirs = api.zones().await?;
-    for z in peer::peer_zones(s, ours, &theirs)? {
-        let state = peer::zone_state(&z);
-        let word = state.word();
-        // What: ahead: our serial goes past theirs first.
-        // Why: a restore sets ours back; AXFR skips lower.
-        // From: Issue #1683 | PR #2017
-        if let (ZoneState::Ahead, Some(theirs)) = (state, z.secondary)
-            && let Err(e) = raise_serial(s, &z.zone, theirs).await
-        {
-            eprintln!("ui: secondary {address}: {} ahead, raise: {e}", z.zone);
-            continue;
-        }
-        // What: ahead, unknown, behind pulled; missing not.
-        // Why: a missing zone has no copy to refresh.
-        // From: Issue #1683
-        if matches!(
-            state,
-            ZoneState::Ahead | ZoneState::Unknown | ZoneState::Behind
-        ) {
-            match api.axfr_retrieve(&z.zone).await {
-                Ok(()) => eprintln!("ui: secondary {address}: {} {word}, AXFR asked", z.zone),
-                Err(e) => eprintln!("ui: secondary {address}: {} {word}, AXFR: {e}", z.zone),
-            }
-        }
-    }
-    Ok(aa)
+pub(crate) struct Failing {
+    pub(crate) since: std::time::Instant,
+    pub(crate) count: u64,
 }
 
 // What: serial table: managed zones, primary, secondaries.
 // Why: one overview of the loaded serial on each server.
 // From: Issue #1683
-async fn zone_overview(State(app): Shared) -> Page {
+pub(crate) async fn zone_overview(State(app): Shared) -> Page {
     let s = app.settings();
     let mut columns = vec![json!({"name": tr("zone_col_primary"), "error": Value::Null})];
     let mut lists = vec![pdns_api(&s)?.zones().await?];
@@ -2008,184 +1224,10 @@ async fn zone_overview(State(app): Shared) -> Page {
     Ok(axum::Json(json!({"columns": columns, "rows": rows})).into_response())
 }
 
-// What: worst state over all zones, each zone in detail.
-// Why: in sync only when every managed zone matches.
-// From: Issue #1683
-async fn secondary_health(s: &Settings, address: &str) -> Value {
-    let zones = match peer_serials(s, address).await {
-        Ok(z) => z,
-        Err(e) => return json!({"status": "unreachable", "detail": e}),
-    };
-    let worst = peer::worst_state(&zones);
-    let mut lines = Vec::new();
-    for z in &zones {
-        let state = peer::zone_state(z).word();
-        let show = |v: Option<u32>| v.map_or_else(|| "-".to_string(), |n| n.to_string());
-        lines.push(format!(
-            "{}: {} (primary {}, secondary {})",
-            z.zone,
-            state,
-            show(z.primary),
-            show(z.secondary)
-        ));
-    }
-    json!({"status": worst.word(), "zones": zones.len(), "detail": lines.join("\n")})
-}
-
-// What: flush recursor caches when a serial moves.
-// Why: UI, DDNS, AXFR and rollback all bump it.
-// From: Issue #1683 | PR #1980
-async fn flush_on_transfer(app: Arc<App>) {
-    let mut seen = peer::Flushed::default();
-    // What: an error only after the grace time.
-    // Why: a planned dns restart must log nothing.
-    // From: Issue #1683 | PR #1980
-    let mut down: Option<std::time::Instant> = None;
-    let mut logged = false;
-    loop {
-        let s = app.settings();
-        let Some(wait) = or_stop("cache flush", s.uint("UI_FLUSH_CHECK_SECONDS")) else {
-            return;
-        };
-        let Some(grace) = or_stop("cache flush", s.uint("UI_FLUSH_GRACE_SECONDS")) else {
-            return;
-        };
-        match flush_round(&s, &mut seen).await {
-            Err(e) => {
-                let since = *down.get_or_insert_with(std::time::Instant::now);
-                if !logged && since.elapsed().as_secs() >= grace {
-                    eprintln!("ui: cache flush fails for {grace} s: {e}");
-                    logged = true;
-                }
-            }
-            Ok(()) => {
-                if logged {
-                    eprintln!("ui: cache flush works again");
-                }
-                (down, logged) = (None, false);
-            }
-        }
-        tokio::time::sleep(Duration::from_secs(wait)).await;
-    }
-}
-
-// What: clears recursor cache for changed zones.
-// Why: recursors would serve old answers until TTL.
-// From: Issue #1683 | PR #1980
-async fn flush_round(s: &Settings, seen: &mut peer::Flushed) -> Result<(), String> {
-    let api = pdns_api(s)?;
-    let peers = !crate::shared::pdns_conf::secondaries(s).is_empty();
-    let zones: BTreeMap<String, u32> = api
-        .zones()
-        .await?
-        .into_iter()
-        .map(|z| (z.name, z.serial))
-        .collect();
-    for (zone, serial) in seen.due(&zones) {
-        peer::flush_zone(s, &zone).await?;
-        // What: NOTIFY to the secondaries right away.
-        // Why: live: pdns alone waited up to 60 s.
-        // From: Issue #1683 | PR #2019
-        if peers {
-            api.notify(&zone).await?;
-        }
-        seen.done(&zone, serial);
-    }
-    Ok(())
-}
-
-// What: Kea control agent of this stack.
-// Why: host from env; basic auth with the stack token.
-// From: Issue #1683 | PR #1980
-fn kea_api(s: &Settings) -> Result<crate::shared::kea::Api, String> {
-    let url = format!(
-        "http://{}:{}/",
-        s.text("DHCP_API_HOST")?,
-        s.uint("KEA_CTRL_PORT")?
-    );
-    let token = secret::get(s, "KEA_CTRL_TOKEN")?;
-    Ok(crate::shared::kea::Api::new(
-        http::client(s)?,
-        &url,
-        &s.text("KEA_CTRL_USER")?,
-        &token,
-    ))
-}
-
-// What: one Kea subnet as flat page fields.
-// Why: the page shows fields; Kea has option-data.
-// From: Issue #1683 | PR #1980
-fn subnet_row(sn: &Value) -> Value {
-    use crate::shared::dhcp::{DNS_SERVERS, DOMAIN_NAME, NTP_SERVERS, ROUTERS};
-    let dns: Vec<String> = option_data(sn, DNS_SERVERS.name)
-        .split(',')
-        .map(|x| x.trim().to_string())
-        .collect();
-    let pool = sn["pools"][0]["pool"].as_str().unwrap_or_default();
-    let (start, end) = pool.split_once('-').unwrap_or(("", ""));
-    let custom: Vec<Value> = crate::shared::kea_conf::coded_options(sn)
-        .into_iter()
-        .filter(|o| o.get("code").is_some())
-        .collect();
-    json!({
-        "id": sn["id"],
-        "subnet": sn["subnet"],
-        "gateway": option_data(sn, ROUTERS.name),
-        "dns_primary": dns.first().cloned().unwrap_or_default(),
-        "dns_secondary": dns.get(1).cloned().unwrap_or_default(),
-        "ntp_servers": option_data(sn, NTP_SERVERS.name),
-        "domain": option_data(sn, DOMAIN_NAME.name),
-        "pool_start": start.trim(),
-        "pool_end": end.trim(),
-        "lease_time": sn["valid-lifetime"],
-        "custom_options": custom,
-    })
-}
-
-// What: subnets, reservations, leases from Kea.
-// Why: read live; nothing is kept in the ui.
-// From: Issue #1683 | PR #1980
-async fn kea_view(api: &crate::shared::kea::Api) -> (Vec<Value>, Vec<Value>, Vec<Value>) {
-    let (mut subnets, mut reservations, mut leases) = (Vec::new(), Vec::new(), Vec::new());
-    if let Ok(cfg) = api.config().await {
-        for sn in cfg["Dhcp4"]["subnet4"].as_array().into_iter().flatten() {
-            for r in sn["reservations"].as_array().into_iter().flatten() {
-                reservations.push(json!({
-                    "subnet_id": sn["id"], "mac": r["hw-address"],
-                    "ip": r["ip-address"], "hostname": r["hostname"],
-                }));
-            }
-            subnets.push(subnet_row(sn));
-        }
-    }
-    for l in api.leases().await.unwrap_or_default() {
-        let ends = l["cltt"].as_u64().unwrap_or(0) + l["valid-lft"].as_u64().unwrap_or(0);
-        leases.push(json!({
-            "ip": l["ip-address"], "mac": l["hw-address"], "hostname": l["hostname"],
-            "subnet_id": l["subnet-id"], "expires": ends.to_string(),
-        }));
-    }
-    (subnets, reservations, leases)
-}
-
-// What: snapshot store of the Kea config.
-// Why: each subnet change can be undone.
-// From: Issue #1683 | PR #1980
-fn kea_store(s: &Settings) -> Result<crate::shared::snapshot::Store, String> {
-    let dir = PathBuf::from(s.text("KEA_CONFIG_SNAPSHOT_DIR")?);
-    let keep = s.num::<usize>("KEA_SNAPSHOT_KEEP")?;
-    Ok(crate::shared::snapshot::Store {
-        dir,
-        keep,
-        owner: fs::Owner::default(),
-        file: Some(s.text("KEA_CONFIG_SNAPSHOT_FILE")?),
-    })
-}
-
 // What: DHCP page.
 // Why: mode, proxy, relay and live Kea data.
 // From: Issue #1683 | PR #1980
-async fn dhcp(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
+pub(crate) async fn dhcp(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     let s = app.settings();
     let mode = s.text("DHCP_MODE")?;
     let mut ctx = Context::new();
@@ -2260,223 +1302,10 @@ async fn dhcp(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     app.page("dhcp.html", ctx, &csrf)
 }
 
-// What: the main subnet form also saves settings.
-// Why: the settings are the only source of it.
-// From: Issue #1683
-async fn main_subnet(
-    app: &App,
-    s: &Settings,
-    op: &str,
-    get: &(dyn Fn(&str) -> String + Sync),
-) -> Result<(), String> {
-    let main = s.uint("DHCP_SUBNET_ID")?.to_string();
-    let hit = get("id") == main;
-    if hit && op == "UI_ROUTE_SUBNET_REMOVE" {
-        return Err(tr("err_main_subnet_remove"));
-    }
-    kea_action(s, op, get).await?;
-    if !(hit && op == "UI_ROUTE_SUBNET_UPDATE") {
-        return Ok(());
-    }
-    let dns = dns_pair(get("dns_primary"), get("dns_secondary"));
-    let mut f = Fields::new();
-    for (key, field) in [
-        ("DHCP_SUBNET", "subnet"),
-        ("DHCP_RANGE_START", "pool_start"),
-        ("DHCP_RANGE_END", "pool_end"),
-        ("DHCP_GATEWAY", "gateway"),
-        ("DHCP_NTP_SERVERS", "ntp_servers"),
-    ] {
-        f.insert(key.into(), get(field));
-    }
-    // What: main subnet domain sets the main LAN domain.
-    // Why: picking an extra swaps it with the old main.
-    // From: Issue #1683
-    if !get("domain").is_empty() {
-        f.extend(main_domain_fields(s, &get("domain"))?);
-    }
-    if !get("lease_time").is_empty() {
-        f.insert("DHCP_LEASE_TIME".into(), get("lease_time"));
-    }
-    f.insert("DHCP_DNS_SERVERS".into(), dns.join(" "));
-    commit(app, f).await
-}
-
-// What: change Kea subnets with a closure.
-// Why: get, edit, set, write, snapshot; one path.
-// From: Issue #1683 | PR #1980
-async fn kea_edit(
-    s: &Settings,
-    edit: impl FnOnce(&mut Vec<Value>) -> Result<(), String>,
-) -> Result<(), String> {
-    let api = kea_api(s)?;
-    let mut cfg = api.config().await?;
-    if let Some(top) = cfg.as_object_mut() {
-        top.remove("hash");
-    }
-    let mut subnets = cfg["Dhcp4"]["subnet4"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
-    edit(&mut subnets)?;
-    cfg["Dhcp4"]["subnet4"] = Value::Array(subnets);
-    api.set_config(cfg.clone()).await?;
-    let store = kea_store(s)?;
-    store.save(&serde_json::to_vec(&cfg).map_err(|e| e.to_string())?)?;
-    Ok(())
-}
-
-// What: Kea subnet from the subnet form.
-// Why: named options; code options and hosts kept.
-// From: Issue #1683 | PR #1980
-fn subnet_from(get: &(dyn Fn(&str) -> String + Sync), id: u64, old: Option<&Value>) -> Value {
-    let dns = dns_pair(get("dns_primary"), get("dns_secondary"));
-    let hosts: Vec<String> = config::list_items(&get("ntp_servers"))
-        .map(str::to_string)
-        .collect();
-    let ntp = crate::shared::dhcp::ipv4_of(&hosts, "ntp_servers");
-    let mut opts = crate::shared::kea_conf::named_rows(&get("gateway"), &dns, &get("domain"), &ntp);
-    if let Some(old) = old {
-        opts.extend(crate::shared::kea_conf::coded_options(old));
-    }
-    let pool = crate::shared::kea_conf::pool_text(&get("pool_start"), &get("pool_end"));
-    let mut sn = json!({"id": id, "subnet": get("subnet"), "pools": [{"pool": pool}],
-                        "option-data": opts});
-    if let Ok(life) = get("lease_time").parse::<u64>() {
-        sn["valid-lifetime"] = life.into();
-    }
-    if let Some(hosts) = old.and_then(|o| o.get("reservations")) {
-        sn["reservations"] = hosts.clone();
-    }
-    sn
-}
-
-// What: Kea subnet with the given id.
-// Why: edits target a subnet by id, not position.
-// From: Issue #1683 | PR #1980
-fn subnet_mut(list: &mut [Value], id: u64) -> Result<&mut Value, String> {
-    let found = list.iter_mut().find(|x| x["id"].as_u64() == Some(id));
-    found.ok_or_else(|| tr("err_no_subnet").replace("{id}", &id.to_string()))
-}
-
-// What: SOT keys of the proxy and relay forms.
-// Why: field dhcp_x maps to key DHCP_X.
-// From: Issue #1683 | PR #1980
-fn dnsmasq_fields(form: &Fields, proxy: bool) -> Fields {
-    let mut out = Fields::new();
-    for (k, v) in form {
-        let ours = k.starts_with("dhcp_") || k.starts_with("upstream_");
-        if !ours || k.starts_with("dhcp_dns_") {
-            continue;
-        }
-        let key = k
-            .to_ascii_uppercase()
-            .replace("DHCP_PROXY_CUSTOM_OPTIONS", "DHCP_CUSTOM_OPTIONS");
-        out.insert(key, v.trim().to_string());
-    }
-    if proxy {
-        let get = |k: &str| field(form, k);
-        let dns = dns_pair(get("dhcp_dns_primary"), get("dhcp_dns_secondary"));
-        out.insert("DHCP_DNS_SERVERS".into(), dns.join(" "));
-    }
-    out
-}
-
-// What: Kea subnet, option and host edits.
-// Why: all go through kea_edit.
-// From: Issue #1683 | PR #1980
-async fn kea_action(
-    s: &Settings,
-    op: &str,
-    get: &(dyn Fn(&str) -> String + Sync),
-) -> Result<(), String> {
-    let num = |k: &str| {
-        get(k)
-            .parse::<u64>()
-            .map_err(|_| format!("{k} must be a number"))
-    };
-    // What: a subnet domain must be a LAN domain.
-    // Why: DDNS and DNS answer only for those zones.
-    // From: Issue #1683
-    if matches!(op, "UI_ROUTE_SUBNET_ADD" | "UI_ROUTE_SUBNET_UPDATE") && !get("domain").is_empty() {
-        chosen_lan_zone(s, &get("domain"))?;
-    }
-    match op {
-        "UI_ROUTE_SUBNET_ADD" => {
-            kea_edit(s, |l| {
-                let next = l.iter().filter_map(|x| x["id"].as_u64()).max().unwrap_or(0) + 1;
-                let mut sn = subnet_from(get, next, None);
-                crate::shared::kea_conf::subnet_ddns_suffix(s, &mut sn)?;
-                l.push(sn);
-                Ok(())
-            })
-            .await
-        }
-        "UI_ROUTE_SUBNET_UPDATE" => {
-            let id = num("id")?;
-            kea_edit(s, |l| {
-                let sn = subnet_mut(l, id)?;
-                *sn = subnet_from(get, id, Some(&sn.clone()));
-                crate::shared::kea_conf::subnet_ddns_suffix(s, sn)
-            })
-            .await
-        }
-        "UI_ROUTE_SUBNET_REMOVE" => {
-            let id = num("id")?;
-            kea_edit(s, |l| {
-                l.retain(|x| x["id"].as_u64() != Some(id));
-                Ok(())
-            })
-            .await
-        }
-        "UI_ROUTE_SUBNET_OPTION_ADD" | "UI_ROUTE_SUBNET_OPTION_REMOVE" => {
-            let (id, code) = (
-                num("subnet_id")?,
-                crate::shared::dhcp::option_code(&get("code"))?,
-            );
-            let data = get("data");
-            kea_edit(s, |l| {
-                let sn = subnet_mut(l, id)?;
-                let mut opts = sn["option-data"].as_array().cloned().unwrap_or_default();
-                let same = |o: &Value| o["code"].as_u64() == Some(u64::from(code));
-                opts.retain(|o| !same(o) || !crate::shared::kea_conf::is_coded(o));
-                if op == "UI_ROUTE_SUBNET_OPTION_ADD" {
-                    opts.push(json!({"code": code, "data": data}));
-                }
-                sn["option-data"] = opts.into();
-                Ok(())
-            })
-            .await
-        }
-        "UI_ROUTE_STATIC_ADD" | "UI_ROUTE_STATIC_REMOVE" => {
-            let id = num("subnet_id")?;
-            let (mac, ip, host) = (get("mac"), get("ip"), get("hostname"));
-            kea_edit(s, |l| {
-                let sn = subnet_mut(l, id)?;
-                let mut hosts = sn["reservations"].as_array().cloned().unwrap_or_default();
-                hosts.retain(|r| r["hw-address"].as_str() != Some(mac.as_str()));
-                if op == "UI_ROUTE_STATIC_ADD" {
-                    hosts.push(json!({"hw-address": mac, "ip-address": ip, "hostname": host}));
-                }
-                sn["reservations"] = hosts.into();
-                Ok(())
-            })
-            .await
-        }
-        "UI_ROUTE_LEASE_RELEASE" => kea_api(s)?.release(&get("ip")).await,
-        "UI_ROUTE_KEA_ROLLBACK" => {
-            let body = kea_store(s)?.read(&get("snapshot_id"))?;
-            let cfg: Value = serde_json::from_slice(&body).map_err(|e| e.to_string())?;
-            kea_api(s)?.set_config(cfg).await
-        }
-        _ => Err(tr("err_unknown_dhcp_action").replace("{op}", op)),
-    }
-}
-
 // What: one DHCP page form, chosen by op.
 // Why: SOT keys via commit; Kea via kea_action.
 // From: Issue #1683 | PR #1980
-async fn dhcp_action(
+pub(crate) async fn dhcp_action(
     State(app): Shared,
     Extension(csrf): Extension<Csrf>,
     Extension(Op(op)): Extension<Op<DhcpOp>>,
@@ -2519,7 +1348,7 @@ async fn dhcp_action(
 // What: DHCP precheck on demand.
 // Why: finds foreign servers; tests one lease.
 // From: Issue #1683 | PR #1980
-async fn dhcp_check(
+pub(crate) async fn dhcp_check(
     State(app): Shared,
     Extension(csrf): Extension<Csrf>,
     headers: HeaderMap,
@@ -2550,7 +1379,7 @@ async fn dhcp_check(
 // What: statistics page, one tab per range.
 // Why: rrdtool draws; the page shows PNGs.
 // From: Issue #1683 | PR #1980
-async fn stats(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
+pub(crate) async fn stats(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     let s = app.settings();
     let mut ctx = Context::new();
     match crate::shared::rrd::all(&s) {
@@ -2602,16 +1431,16 @@ async fn stats(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
 // Why: dark=1 uses the dark colour set.
 // From: Issue #1683 | PR #1980
 #[derive(serde::Deserialize)]
-struct GraphQuery {
-    range: String,
+pub(crate) struct GraphQuery {
+    pub(crate) range: String,
     #[serde(default)]
-    dark: u8,
+    pub(crate) dark: u8,
 }
 
 // What: graph title in the page language.
 // Why: SOT names are English words; key graph_<name>.
 // From: Issue #1683 | PR #1980
-fn graph_title(title: &str) -> String {
+pub(crate) fn graph_title(title: &str) -> String {
     let key = format!("graph_{}", title.replace(' ', "_"));
     let text = tr(&key);
     if text == key { title.to_string() } else { text }
@@ -2620,7 +1449,7 @@ fn graph_title(title: &str) -> String {
 // What: one graph as PNG.
 // Why: drawn on request; RRD files stay small.
 // From: Issue #1683 | PR #1980
-async fn graph(
+pub(crate) async fn graph(
     State(app): Shared,
     axum::extract::Path(name): axum::extract::Path<String>,
     axum::extract::Query(q): axum::extract::Query<GraphQuery>,
@@ -2642,7 +1471,7 @@ async fn graph(
 // What: SNMP samples into RRD each step.
 // Why: the ui owns the statistics files.
 // From: Issue #1683 | PR #1980
-fn sample_all(s: &Settings) -> Vec<String> {
+pub(crate) fn sample_all(s: &Settings) -> Vec<String> {
     match crate::shared::rrd::graphs(s) {
         Err(e) => vec![e],
         Ok(list) => list
@@ -2655,7 +1484,7 @@ fn sample_all(s: &Settings) -> Vec<String> {
 // What: stores one RRD row off the async threads.
 // Why: rrdtool blocks; an error joins the list.
 // From: Issue #1683 | PR #2017
-async fn store_row(
+pub(crate) async fn store_row(
     s: &Settings,
     graph: crate::shared::rrd::Graph,
     row: Vec<String>,
@@ -2670,7 +1499,7 @@ async fn store_row(
 // What: Docker stats of each container into RRD.
 // Why: values per container, not only the box.
 // From: Issue #1683 | PR #1980
-async fn sample_containers(app: &App, s: &Settings) -> Vec<String> {
+pub(crate) async fn sample_containers(app: &App, s: &Settings) -> Vec<String> {
     let all = match crate::shared::rrd::container_graphs(s) {
         Ok(v) => v,
         Err(e) => return vec![e],
@@ -2711,7 +1540,11 @@ async fn sample_containers(app: &App, s: &Settings) -> Vec<String> {
 // What: numbers of a PowerDNS statistics list.
 // Why: values come as text; prefix names the server.
 // From: Issue #1683 | PR #1980
-fn add_stats(out: &mut BTreeMap<String, String>, prefix: &str, rows: Vec<(String, String)>) {
+pub(crate) fn add_stats(
+    out: &mut BTreeMap<String, String>,
+    prefix: &str,
+    rows: Vec<(String, String)>,
+) {
     for (name, value) in rows {
         let Ok(n) = value.parse::<u64>() else {
             continue;
@@ -2725,7 +1558,11 @@ fn add_stats(out: &mut BTreeMap<String, String>, prefix: &str, rows: Vec<(String
 // What: program values one sample round reads.
 // Why: a program that is off leaves its values unknown.
 // From: Issue #1683 | PR #1980
-async fn service_values(app: &App, s: &Settings, want: &[String]) -> BTreeMap<String, String> {
+pub(crate) async fn service_values(
+    app: &App,
+    s: &Settings,
+    want: &[String],
+) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
     let has = |p: &str| want.iter().any(|w| w.split(':').next() == Some(p));
     if has("nginx")
@@ -2809,7 +1646,7 @@ async fn service_values(app: &App, s: &Settings, want: &[String]) -> BTreeMap<St
 // What: program values into RRD each step.
 // Why: PowerDNS, nginx, Kea and chrony give values.
 // From: Issue #1683 | PR #1980
-async fn sample_services(app: &App, s: &Settings) -> Vec<String> {
+pub(crate) async fn sample_services(app: &App, s: &Settings) -> Vec<String> {
     let all = match crate::shared::rrd::service_graphs(s) {
         Ok(v) => v,
         Err(e) => return vec![e],
@@ -2838,7 +1675,7 @@ async fn sample_services(app: &App, s: &Settings) -> Vec<String> {
 // What: a setting a background task cannot run without.
 // Why: the task ends with a log line, no made-up value.
 // From: Issue #1683 | PR #2017
-fn or_stop<T>(task: &str, value: Result<T, String>) -> Option<T> {
+pub(crate) fn or_stop<T>(task: &str, value: Result<T, String>) -> Option<T> {
     value
         .inspect_err(|e| eprintln!("ui: {task} stop: {e}"))
         .ok()
@@ -2847,7 +1684,7 @@ fn or_stop<T>(task: &str, value: Result<T, String>) -> Option<T> {
 // What: records stats every STATS_STEP seconds.
 // Why: the dashboard graphs need a time series.
 // From: Issue #1683 | PR #1980
-async fn sampler(app: Arc<App>) {
+pub(crate) async fn sampler(app: Arc<App>) {
     loop {
         let s = app.settings();
         let Some(step) = or_stop("stats", s.uint("STATS_STEP")) else {
@@ -2874,32 +1711,10 @@ async fn sampler(app: Arc<App>) {
     }
 }
 
-// What: in mode off a running dhcp is stopped again.
-// Why: compose up may start it after the ui.
-// From: Issue #1683 | PR #1980
-async fn dhcp_stays_off(app: &App, s: &Settings) -> Result<Option<String>, String> {
-    let Some(service) = crate::shared::dhcp::off_service(s)? else {
-        return Ok(None);
-    };
-    let (grace, limit) = app.limits(s)?;
-    let list = project_containers(app, s).await?;
-    let running = list.iter().find(|c| {
-        docker::service_of(c) == Some(service.as_str()) && c["State"].as_str() == Some("running")
-    });
-    let Some(name) = running.and_then(docker::name_of) else {
-        return Ok(None);
-    };
-    let r = app
-        .docker
-        .act(name, docker::Action::Stop, grace, limit)
-        .await;
-    Ok(Some(format!("mode off, stop {name} {r:?}")))
-}
-
 // What: bytes the cache folder holds on disk.
 // Why: disk use counts other files on a shared disk.
 // From: Issue #1683 | PR #1980
-fn dir_bytes(root: &Path) -> u64 {
+pub(crate) fn dir_bytes(root: &Path) -> u64 {
     use std::os::unix::fs::MetadataExt;
     crate::shared::fs::files_under(root)
         .into_iter()
@@ -2911,7 +1726,7 @@ fn dir_bytes(root: &Path) -> u64 {
 // What: count the cache folder now and then.
 // Why: a walk is slow; the dashboard reads the last sum.
 // From: Issue #1683 | PR #1980
-async fn cache_scanner(app: Arc<App>) {
+pub(crate) async fn cache_scanner(app: Arc<App>) {
     loop {
         let s = app.settings();
         let Some(step) = or_stop("cache count", s.uint("CACHE_USAGE_SCAN_SECONDS")) else {
@@ -2931,7 +1746,7 @@ async fn cache_scanner(app: Arc<App>) {
 // What: container name of a compose service.
 // Why: Docker calls need the real name.
 // From: Issue #1683 | PR #1980
-async fn container_of(app: &App, s: &Settings, service: &str) -> Result<String, String> {
+pub(crate) async fn container_of(app: &App, s: &Settings, service: &str) -> Result<String, String> {
     let list = project_containers(app, s).await?;
     let hit = list.iter().find(|c| docker::service_of(c) == Some(service));
     hit.and_then(docker::name_of)
@@ -2942,14 +1757,14 @@ async fn container_of(app: &App, s: &Settings, service: &str) -> Result<String, 
 // What: the containers of this compose project.
 // Why: every lookup of a service starts from this list.
 // From: Issue #1683 | PR #2017
-async fn project_containers(app: &App, s: &Settings) -> Result<Vec<Value>, String> {
+pub(crate) async fn project_containers(app: &App, s: &Settings) -> Result<Vec<Value>, String> {
     app.docker.stack(s).await
 }
 
 // What: run a command in a service container.
 // Why: rc-service and cachehamster go this way.
 // From: Issue #1683 | PR #1980
-async fn exec_in(
+pub(crate) async fn exec_in(
     app: &App,
     s: &Settings,
     service: &str,
@@ -2966,7 +1781,7 @@ async fn exec_in(
 // What: restart or reload one program.
 // Why: only through OpenRC; only listed ones.
 // From: Issue #1683 | PR #1980
-async fn service_action(
+pub(crate) async fn service_action(
     State(app): Shared,
     Extension(csrf): Extension<Csrf>,
     axum::extract::Path((container, program, action)): axum::extract::Path<(
@@ -3014,7 +1829,7 @@ async fn service_action(
 // What: one cachehamster command; JSON answer.
 // Why: it runs in the services container.
 // From: Issue #871 | PR #1980
-async fn hamster(app: &App, args: &[&str]) -> Result<Value, String> {
+pub(crate) async fn hamster(app: &App, args: &[&str]) -> Result<Value, String> {
     let s = app.settings();
     let program = s.text("CACHEHAMSTER_PROGRAM")?;
     let mut cmd = vec![program.as_str()];
@@ -3041,7 +1856,7 @@ async fn hamster(app: &App, args: &[&str]) -> Result<Value, String> {
 // What: cachehamster page.
 // Why: prefill is driven from the ui only.
 // From: Issue #871 | PR #1980
-async fn cachehamster(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
+pub(crate) async fn cachehamster(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     let mut ctx = Context::new();
     match hamster(&app, &["status"]).await {
         Ok(v) => ctx.insert("hamster", &v),
@@ -3053,7 +1868,7 @@ async fn cachehamster(State(app): Shared, Extension(csrf): Extension<Csrf>) -> P
 // What: when a job runs, as a command word.
 // Why: the page sends unix seconds for "at".
 // From: Issue #871 | PR #1980
-fn job_time(when: &str, at: &str) -> Result<String, Fail> {
+pub(crate) fn job_time(when: &str, at: &str) -> Result<String, Fail> {
     match when {
         "at" => at
             .parse::<u64>()
@@ -3067,7 +1882,7 @@ fn job_time(when: &str, at: &str) -> Result<String, Fail> {
 // What: add, start, cancel, remove, logout.
 // Why: each maps to one cachehamster command.
 // From: Issue #871 | PR #1980
-async fn hamster_action(
+pub(crate) async fn hamster_action(
     State(app): Shared,
     Extension(csrf): Extension<Csrf>,
     Extension(Op(op)): Extension<Op<HamsterOp>>,
@@ -3104,7 +1919,7 @@ async fn hamster_action(
 // What: JSON calls: QR login and library.
 // Why: the page polls without a reload.
 // From: Issue #871 | PR #1980
-async fn hamster_api(
+pub(crate) async fn hamster_api(
     State(app): Shared,
     Extension(csrf): Extension<Csrf>,
     axum::extract::Path(op): axum::extract::Path<String>,
@@ -3147,7 +1962,7 @@ async fn hamster_api(
 // What: drop proxy render files no longer written.
 // Why: an old https.conf keeps the SSL server alive.
 // From: Issue #1683 | PR #2019
-fn prune_rendered(s: &Settings, files: &[render::File]) -> Result<Vec<PathBuf>, String> {
+pub(crate) fn prune_rendered(s: &Settings, files: &[render::File]) -> Result<Vec<PathBuf>, String> {
     let conf = PathBuf::from(s.text("NGINX_CONF_DIR")?);
     let mut removed = Vec::new();
     for sub in ["conf.d", "stream.d"] {
@@ -3178,7 +1993,7 @@ fn prune_rendered(s: &Settings, files: &[render::File]) -> Result<Vec<PathBuf>, 
 // What: container name per plan owner; others drop out.
 // Why: an owner without a container has nothing to do.
 // From: Issue #1683 | PR #2017
-async fn plan_containers<V>(
+pub(crate) async fn plan_containers<V>(
     app: &App,
     s: &Settings,
     plan: &mut BTreeMap<String, V>,
@@ -3199,7 +2014,7 @@ async fn plan_containers<V>(
 // What: render with the live chain, then write.
 // Why: apply and start share one way to the files.
 // From: Issue #1683 | PR #2019
-async fn render_and_write(
+pub(crate) async fn render_and_write(
     s: &Settings,
 ) -> Result<(Vec<render::File>, Vec<config::Change>), String> {
     let sec = render::secrets(s)?;
@@ -3209,64 +2024,10 @@ async fn render_and_write(
     Ok((files, written))
 }
 
-// What: the live chain; on error NTA everywhere.
-// Why: no proof must never mean SERVFAIL.
-// From: Issue #1683 | PR #2019
-async fn dnssec_chain(s: &Settings) -> crate::shared::recursor_conf::Chain {
-    match read_chain(s).await {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("ui: DNSSEC anchors off: {e}");
-            crate::shared::recursor_conf::Chain::default()
-        }
-    }
-}
-
-// What: anchors of top zones; zones chained to them.
-// Why: a zone loses its NTA only on a proven chain.
-// From: Issue #1683 | PR #2019
-async fn read_chain(s: &Settings) -> Result<crate::shared::recursor_conf::Chain, String> {
-    let mut chain = crate::shared::recursor_conf::Chain::default();
-    if Role::from_settings(s)? != Role::Primary {
-        return Ok(chain);
-    }
-    let tops = own_tops(s)?;
-    if tops.is_empty() {
-        return Ok(chain);
-    }
-    let api = pdns_api(s)?;
-    for top in &tops {
-        let ds = api.ds(top).await.unwrap_or_default();
-        if !ds.is_empty() {
-            chain.secured.push(top.clone());
-        }
-        chain.anchors.push((top.clone(), ds));
-    }
-    let norm = |rows: Vec<String>| {
-        let mut v: Vec<String> = rows.iter().map(|r| canonical("DS", r)).collect();
-        v.sort();
-        v
-    };
-    for (zone, parent) in own_links(s, &tops)? {
-        let Some(parent) = parent else {
-            continue;
-        };
-        if !chain.secured.contains(&parent) {
-            continue;
-        }
-        let want = norm(api.ds(&zone).await.unwrap_or_default());
-        let have = norm(rrset_contents(&api, &parent, &zone, "DS").await?);
-        if !want.is_empty() && want == have {
-            chain.secured.push(zone);
-        }
-    }
-    Ok(chain)
-}
-
 // What: render, write and wake the owners.
 // Why: only owners with changes are touched.
 // From: Issue #1683 | PR #1980
-async fn apply_all(
+pub(crate) async fn apply_all(
     app: &App,
     old: &Settings,
     new: &Settings,
@@ -3461,7 +2222,7 @@ async fn apply_all(
 // What: wait until restarted containers are healthy.
 // Why: "done" must mean the service answers again.
 // From: Issue #1683 | PR #1980
-async fn wait_healthy(
+pub(crate) async fn wait_healthy(
     app: &App,
     s: &Settings,
     names: &[String],
@@ -3494,7 +2255,7 @@ async fn wait_healthy(
 // What: start or stop a container for the user.
 // Why: SERVICES_STOPPED is the wish the watchdog obeys.
 // From: Issue #1683 | PR #1980
-async fn set_wanted(app: &App, service: &str, run: bool) -> Result<(), String> {
+pub(crate) async fn set_wanted(app: &App, service: &str, run: bool) -> Result<(), String> {
     let s = app.settings();
     if !s
         .list("UI_CONTROLLABLE_SERVICES")
@@ -3517,209 +2278,10 @@ async fn set_wanted(app: &App, service: &str, run: bool) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
-// What: Ok when the address answers zone with aa.
-// Why: only an authoritative secondary may be an NS.
-// From: Issue #1683
-async fn answers_aa(s: &Settings, address: &str, zone: &str) -> Result<(), String> {
-    let soa = peer::soa_on_dns_port(s, address, zone).await?;
-    if soa.serves_zone() {
-        return Ok(());
-    }
-    Err(format!(
-        "{address} answers {zone} with rcode {} and aa {}",
-        soa.rcode, soa.authoritative
-    ))
-}
-
-// What: create missing primary zones; set DDNS meta.
-// Why: no other step creates the zones in pdns.
-// From: Issue #1683 | PR #1980
-async fn ensure_primary_zones(s: &Settings, key: &str) -> Result<(), String> {
-    let api = pdns_api(s)?;
-    let have = zone_names(&api).await?;
-    let edit = vec![s.text("PDNS_SOA_EDIT")?];
-    let signed = if s.flag("DDNS_ALLOW_UNSIGNED")? {
-        Vec::new()
-    } else {
-        vec![s.text("DDNS_TSIG_NAME")?]
-    };
-    let tops = own_tops(s)?;
-    let hosted = hosted_zones(s, &tops)?;
-    for zone in &hosted {
-        let id = crate::shared::pdns::zone_id(zone);
-        if !have.contains(&id) {
-            api.create_primary(&id, &edit[0], key).await?;
-        }
-        api.set_metadata(&id, "SOA-EDIT-DNSUPDATE", &edit).await?;
-        api.set_metadata(&id, "NOTIFY-DNSUPDATE", &["1".to_string()])
-            .await?;
-        api.set_metadata(&id, "TSIG-ALLOW-DNSUPDATE", &signed)
-            .await?;
-    }
-    for lan in crate::shared::dns::lan_domains(s)? {
-        merge_legacy_zone(s, &api, &have, &lan).await?;
-    }
-    ensure_own_endings(s, &api, &tops).await?;
-    ensure_soa_nameserver(s, &api, &hosted).await
-}
-
-// What: top zones of own endings; no PSL, none.
-// Why: an ending we cannot check may be public.
-// From: Issue #1683 | PR #2019
-fn own_tops(s: &Settings) -> Result<Vec<String>, String> {
-    match render::psl(s) {
-        Ok(psl) => crate::shared::dns::top_zones(s, &psl),
-        Err(e) => {
-            eprintln!("ui: no own top zones: {e}");
-            Ok(Vec::new())
-        }
-    }
-}
-
-// What: the hosted zones with the tops read now.
-// Why: drop_old_zones compares before and after.
-// From: Issue #1683 | PR #2019
-fn hosted_now(s: &Settings) -> Result<Vec<String>, String> {
-    hosted_zones(s, &own_tops(s)?)
-}
-
-// What: zones the primary keeps: managed plus tops.
-// Why: one list creates zones, NS and SOA names.
-// From: Issue #1683 | PR #2019
-fn hosted_zones(s: &Settings, tops: &[String]) -> Result<Vec<String>, String> {
-    let mut zones = crate::shared::dns::managed_zones(s)?;
-    for top in tops {
-        config::add_once(&mut zones, top);
-    }
-    Ok(zones)
-}
-
-// What: LAN zones of own endings and their parent.
-// Why: signing and the resolver chain walk one list.
-// From: Issue #1683 | PR #2019
-fn own_links(s: &Settings, tops: &[String]) -> Result<Vec<(String, Option<String>)>, String> {
-    use crate::shared::dns::{is_within, parent_zone};
-    let mut signed: Vec<String> = crate::shared::dns::lan_domains(s)?
-        .into_iter()
-        .filter(|z| tops.iter().any(|t| is_within(z, t)))
-        .collect();
-    // What: parents before their children.
-    // Why: a chain holds only if every link above holds.
-    // From: Issue #1683 | PR #2019
-    signed.sort_by_key(|z| z.matches('.').count());
-    let mut parents = tops.to_vec();
-    parents.extend(signed.iter().cloned());
-    Ok(signed
-        .into_iter()
-        .map(|z| {
-            let p = parent_zone(&z, &parents);
-            (z, p)
-        })
-        .collect())
-}
-
-// What: sign own endings; parents hold NS and DS.
-// Why: .lan and .local validate only along a chain.
-// From: Issue #1683 | PR #2019
-async fn ensure_own_endings(
-    s: &Settings,
-    api: &crate::shared::pdns::Api,
-    tops: &[String],
-) -> Result<(), String> {
-    let ns = ns_names(s, &soa_names(s)?.0)?;
-    let ttl = s.num::<u32>("DNS_RECORD_TTL")?;
-    for top in tops {
-        api.secure(top).await?;
-    }
-    let mut wanted: Vec<(String, String)> = Vec::new();
-    for (zone, parent) in own_links(s, tops)? {
-        let zone = &zone;
-        api.secure(zone).await?;
-        let Some(parent) = parent else {
-            continue;
-        };
-        ensure_rrset(api, &parent, zone, "NS", ttl, &ns).await?;
-        // What: no DS when it cannot be read.
-        // Why: no DS is unchecked; a wrong DS is SERVFAIL.
-        // From: Issue #1683 | PR #2019
-        let ds = api.ds(zone).await.unwrap_or_else(|e| {
-            eprintln!("ui: no DS for {zone}: {e}");
-            Vec::new()
-        });
-        ensure_rrset(api, &parent, zone, "DS", ttl, &ds).await?;
-        wanted.push((parent, zone.clone()));
-    }
-    // What: drop delegations of gone zones in top zones.
-    // Why: a top zone is ours; a LAN zone keeps all rows.
-    // From: Issue #1683 | PR #2019
-    for top in tops {
-        for r in api.rrsets(top).await? {
-            let (Some(name), Some(kind)) = (r["name"].as_str(), r["type"].as_str()) else {
-                continue;
-            };
-            let child = (top.clone(), name.to_string());
-            if name != top && matches!(kind, "NS" | "DS") && !wanted.contains(&child) {
-                api.set_rrset(top, name, kind, ttl, &[]).await?;
-            }
-        }
-    }
-    Ok(())
-}
-
-// What: moves local.<domain> records into <domain>.
-// Why: zones before multi-domain had this extra zone.
-// From: Issue #1683
-async fn merge_legacy_zone(
-    s: &Settings,
-    api: &crate::shared::pdns::Api,
-    have: &[String],
-    lan: &str,
-) -> Result<(), String> {
-    let legacy = crate::shared::dns::legacy_local_zone(lan);
-    let id = crate::shared::pdns::zone_id(&legacy);
-    // What: a LAN domain named local.<x> is kept.
-    // Why: then it is a configured zone, not legacy.
-    // From: Issue #1683
-    if !have.contains(&id) || crate::shared::dns::lan_domains(s)?.contains(&legacy) {
-        return Ok(());
-    }
-    let moved = own_rrsets(&api.rrsets(&legacy).await?);
-    let key = |r: &Value| (r["name"].to_string(), r["type"].to_string());
-    let parent = own_rrsets(&api.rrsets(lan).await?);
-    // What: a clash keeps both zones and logs it.
-    // Why: a record must never be overwritten silently.
-    // From: Issue #1683
-    if let Some(r) = moved
-        .iter()
-        .find(|r| parent.iter().any(|p| key(p) == key(r)))
-    {
-        eprintln!(
-            "ui: zone {legacy} kept: {} {} also in {lan}",
-            r["name"], r["type"]
-        );
-        return Ok(());
-    }
-    if !moved.is_empty() {
-        snapshot(s, api, &legacy).await?;
-        snapshot(s, api, lan).await?;
-        let mut saved = api.rrsets(lan).await?;
-        saved.extend(moved.iter().cloned());
-        api.restore(lan, &saved).await?;
-        snapshot(s, api, lan).await?;
-    }
-    api.delete_zone(&legacy).await?;
-    peer::flush_zone(s, lan).await?;
-    eprintln!(
-        "ui: zone {legacy} merged into {lan} ({} rrsets)",
-        moved.len()
-    );
-    Ok(())
-}
-
 // What: HTTPS IP when HTTPS runs on its own LAN IP.
 // Why: one rule for the DNS page and the ns2 record.
 // From: Issue #1683 | PR #1980
-fn primary_https_ip(s: &Settings) -> Result<String, String> {
+pub(crate) fn primary_https_ip(s: &Settings) -> Result<String, String> {
     let https = s.text_or_empty("IP_HTTPS");
     let own = !https.is_empty()
         && https != s.text("IP_HTTP")?
@@ -3731,56 +2293,10 @@ fn primary_https_ip(s: &Settings) -> Result<String, String> {
     Ok(if own { https } else { String::new() })
 }
 
-// What: NS and A record for the SOA's nameserver.
-// Why: the SOA named ns1, but no record held that name.
-// From: Issue #1683
-async fn ensure_soa_nameserver(
-    s: &Settings,
-    api: &crate::shared::pdns::Api,
-    hosted: &[String],
-) -> Result<(), String> {
-    let names = soa_names(s)?;
-    let mname = names.0.clone();
-    let lan = crate::shared::dns::lan_zone(s)?;
-    let ttl = s.num::<u32>("DNS_RECORD_TTL")?;
-    let ns = ns_names(s, &mname)?;
-    for zone in hosted {
-        ensure_rrset(api, zone, zone, "NS", ttl, &ns).await?;
-        ensure_soa_names(api, zone, &names).await?;
-    }
-    // What: A or AAAA and PTR of each secondary.
-    // Why: an NS name needs an address; logs show names.
-    // From: Issue #1683
-    for (name, address) in crate::shared::pdns_conf::secondaries(s) {
-        let host = peer_host(s, &name)?;
-        let kind = crate::shared::dns::address_kind(&address);
-        ensure_rrset(api, &lan, &host, kind, ttl, std::slice::from_ref(&address)).await?;
-        ensure_ptr(s, api, &address, &host, ttl).await?;
-    }
-    // What: A and PTR only when ns1 is in the LAN zone.
-    // Why: a foreign name has no home in a managed zone.
-    // From: Issue #1683
-    if crate::shared::dns::is_below(&mname, &lan) {
-        let ip = s.text("IP_HTTP")?;
-        ensure_rrset(api, &lan, &mname, "A", ttl, std::slice::from_ref(&ip)).await?;
-        ensure_ptr(s, api, &ip, &mname, ttl).await?;
-    }
-    // What: ns2 for the HTTPS IP: A and PTR, never NS.
-    // Why: HTTPS is optional and another resolver answers.
-    // From: Issue #1683
-    let https = primary_https_ip(s)?;
-    let ns2 = crate::shared::dns::canonical_zone(&s.text("DNS_NS_HTTPS_NAME")?);
-    if !https.is_empty() && crate::shared::dns::is_below(&ns2, &lan) {
-        ensure_rrset(api, &lan, &ns2, "A", ttl, std::slice::from_ref(&https)).await?;
-        ensure_ptr(s, api, &https, &ns2, ttl).await?;
-    }
-    Ok(())
-}
-
 // What: seconds as "4 h", "90 min" or "45 s".
 // Why: the page shows the SOT check times readably.
 // From: Issue #1683
-fn duration_text(secs: u64) -> String {
+pub(crate) fn duration_text(secs: u64) -> String {
     match secs {
         s if s >= 3600 && s % 3600 == 0 => format!("{} h", s / 3600),
         s if s >= 60 && s % 60 == 0 => format!("{} min", s / 60),
@@ -3788,226 +2304,10 @@ fn duration_text(secs: u64) -> String {
     }
 }
 
-// What: NS names: ns1, then entered secondaries.
-// Why: a secondary is NS only with the switch on.
-// From: Issue #1683
-fn ns_names(s: &Settings, mname: &str) -> Result<Vec<String>, String> {
-    let mut ns = vec![mname.to_string()];
-    if !s.flag("DNS_SECONDARY_NS_ENABLED")? {
-        return Ok(ns);
-    }
-    let entered = s.list("DNS_SECONDARY_NS");
-    for (name, _) in crate::shared::pdns_conf::secondaries(s) {
-        if entered.contains(&name) {
-            ns.push(peer_host(s, &name)?);
-        }
-    }
-    Ok(ns)
-}
-
-// What: LAN name of a secondary, with trailing dot.
-// Why: A, PTR and NS records use the same name.
-// From: Issue #1683
-fn peer_host(s: &Settings, name: &str) -> Result<String, String> {
-    Ok(format!("{name}.{}", crate::shared::dns::lan_zone(s)?))
-}
-
-// What: drop address and PTR records of a secondary.
-// Why: a removed or moved secondary leaves no record.
-// From: Issue #1683
-async fn drop_peer_records(s: &Settings, name: &str, address: &str) -> Result<(), String> {
-    let api = pdns_api(s)?;
-    let host = peer_host(s, name)?;
-    let kind = crate::shared::dns::address_kind(address);
-    api.set_rrset(&crate::shared::dns::lan_zone(s)?, &host, kind, 0, &[])
-        .await?;
-    let Some((rev, zone)) = served_reverse_place(s, address)? else {
-        return Ok(());
-    };
-    // What: delete the PTR only when it names this host.
-    // Why: an own PTR of the admin must stay.
-    // From: Issue #1683
-    let ours = rrset_contents(&api, &zone, &rev, "PTR")
-        .await?
-        .contains(&host);
-    if ours {
-        api.set_rrset(&zone, &rev, "PTR", 0, &[]).await?;
-    }
-    Ok(())
-}
-
-// What: PTR of an address in its managed reverse zone.
-// Why: a reverse zone the stack does not serve is left.
-// From: Issue #1683
-async fn ensure_ptr(
-    s: &Settings,
-    api: &crate::shared::pdns::Api,
-    ip: &str,
-    host: &str,
-    ttl: u32,
-) -> Result<(), String> {
-    let Some((rev, zone)) = served_reverse_place(s, ip)? else {
-        return Ok(());
-    };
-    ensure_rrset(api, &zone, &rev, "PTR", ttl, &[host.to_string()]).await
-}
-
-// What: writes the fields of a SOA back to its zone.
-// Why: every SOA edit ends with the same record write.
-// From: Issue #1683 | PR #2017
-async fn write_soa(
-    api: &crate::shared::pdns::Api,
-    zone: &str,
-    ttl: u32,
-    fields: &[String],
-) -> Result<(), String> {
-    api.set_rrset(zone, zone, "SOA", ttl, &[fields.join(" ")])
-        .await
-}
-
-// What: the names of the zones a server holds.
-// Why: both zone setups skip a zone that exists.
-// From: Issue #1683 | PR #2017
-async fn zone_names(api: &crate::shared::pdns::Api) -> Result<Vec<String>, String> {
-    Ok(api.zones().await?.into_iter().map(|z| z.name).collect())
-}
-
-// What: mname and rname of PDNS_DEFAULT_SOA.
-// Why: NS rows and SOA fields read one parse.
-// From: Issue #1683 | PR #2019
-fn soa_names(s: &Settings) -> Result<(String, String), String> {
-    let soa = s.text("PDNS_DEFAULT_SOA")?;
-    let mut names = soa
-        .split_whitespace()
-        .map(crate::shared::dns::canonical_zone);
-    let (Some(mname), Some(rname)) = (names.next(), names.next()) else {
-        return Err(format!("PDNS_DEFAULT_SOA {soa:?} names no mname and rname"));
-    };
-    Ok((mname, rname))
-}
-
-// What: SOA mname and rname from PDNS_DEFAULT_SOA.
-// Why: a zone made before a domain change kept the old ns1.
-// From: Issue #1683 | PR #2017
-async fn ensure_soa_names(
-    api: &crate::shared::pdns::Api,
-    zone: &str,
-    names: &(String, String),
-) -> Result<(), String> {
-    let (mname, rname) = names;
-    let Some((ttl, mut f)) = soa_fields(api, zone).await? else {
-        return Ok(());
-    };
-    if &f[0] == mname && &f[1] == rname {
-        return Ok(());
-    }
-    f[0] = mname.clone();
-    f[1] = rname.clone();
-    write_soa(api, zone, ttl, &f).await
-}
-
-// What: our SOA serial set past a secondary's.
-// Why: a restore sets it back; AXFR wants a higher one.
-// From: Issue #1683 | PR #2017
-async fn raise_serial(s: &Settings, zone: &str, past: u32) -> Result<(), String> {
-    let api = pdns_api(s)?;
-    let Some((ttl, mut f)) = soa_fields(&api, zone).await? else {
-        return Err(format!("{zone} has no SOA"));
-    };
-    f[2] = past.wrapping_add(1).to_string();
-    write_soa(&api, zone, ttl, &f).await
-}
-
-// What: ttl and the seven fields of a zone's SOA.
-// Why: name sync and serial lift edit one record.
-// From: Issue #1683 | PR #2017
-async fn soa_fields(
-    api: &crate::shared::pdns::Api,
-    zone: &str,
-) -> Result<Option<(u32, Vec<String>)>, String> {
-    let id = crate::shared::pdns::zone_id(zone);
-    let rrsets = api.rrsets(zone).await?;
-    let Some(r) = rrsets
-        .iter()
-        .find(|r| r["name"] == id.as_str() && r["type"] == "SOA")
-    else {
-        return Ok(None);
-    };
-    let have = r["records"][0]["content"].as_str().unwrap_or_default();
-    let f: Vec<String> = have.split_whitespace().map(str::to_string).collect();
-    if f.len() != 7 {
-        return Err(format!("SOA of {zone} is not 7 fields: {have:?}"));
-    }
-    let ttl = r["ttl"]
-        .as_u64()
-        .and_then(|t| u32::try_from(t).ok())
-        .ok_or_else(|| format!("SOA of {zone} has no ttl"))?;
-    Ok(Some((ttl, f)))
-}
-
-// What: writes one rrset only when it differs.
-// Why: an equal PATCH would still raise the serial.
-// From: Issue #1683
-async fn ensure_rrset(
-    api: &crate::shared::pdns::Api,
-    zone: &str,
-    name: &str,
-    kind: &str,
-    ttl: u32,
-    want: &[String],
-) -> Result<(), String> {
-    let id = crate::shared::pdns::zone_id(name);
-    let rows = api.rrsets(zone).await?;
-    let found = rows
-        .iter()
-        .find(|r| r["name"] == id.as_str() && r["type"] == kind);
-    let same = match found {
-        // What: an absent rrset that should be absent.
-        // Why: a DELETE of nothing still raises the serial.
-        // From: Issue #1683 | PR #2019
-        None => want.is_empty(),
-        Some(r) => {
-            let have: Vec<&str> = r["records"]
-                .as_array()
-                .map(|a| a.iter().filter_map(|c| c["content"].as_str()).collect())
-                .unwrap_or_default();
-            r["ttl"] == ttl
-                && have.len() == want.len()
-                && want.iter().all(|w| have.contains(&w.as_str()))
-        }
-    };
-    if same {
-        return Ok(());
-    }
-    api.set_rrset(zone, name, kind, ttl, want).await
-}
-
-// What: TSIG key, zones, then binding; one error line.
-// Why: the key is known, so no zone exists without it.
-// From: Issue #1683
-async fn ensure_zones(s: &Settings) -> Result<(), String> {
-    let key = peer::ensure_tsigkey(s)
-        .await
-        .map_err(|e| format!("tsig: {e}"))?;
-    if Role::from_settings(s)? == Role::Secondary {
-        peer::ensure_secondary_zones(s, &key)
-            .await
-            .map_err(|e| format!("secondary zones: {e}"))?;
-    } else {
-        ensure_primary_zones(s, &key)
-            .await
-            .map_err(|e| format!("primary zones: {e}"))?;
-        peers_follow(s);
-    }
-    peer::ensure_tsig(s, &key)
-        .await
-        .map_err(|e| format!("tsig: {e}"))
-}
-
 // What: retry zones and TSIG until pdns answers.
 // Why: at ui start the dns container may not run yet.
 // From: Issue #1683 | PR #1980
-async fn zones_at_start(app: Arc<App>) {
+pub(crate) async fn zones_at_start(app: Arc<App>) {
     let began = std::time::Instant::now();
     loop {
         let s = app.settings();
@@ -4048,7 +2348,11 @@ async fn zones_at_start(app: Arc<App>) {
 // What: reload the dns recursors when a config changed.
 // Why: a reload picks up a new zone without a restart.
 // From: Issue #1683
-async fn reload_changed(app: &App, s: &Settings, changed: &[config::Change]) -> Vec<String> {
+pub(crate) async fn reload_changed(
+    app: &App,
+    s: &Settings,
+    changed: &[config::Change],
+) -> Vec<String> {
     let mut report = Vec::new();
     let mut plan = apply::plan(changed);
     if plan.is_empty() {
@@ -4067,25 +2371,10 @@ async fn reload_changed(app: &App, s: &Settings, changed: &[config::Change]) -> 
     report
 }
 
-// What: replace the TSIG secret and apply.
-// Why: shuts out a removed or leaked secondary.
-// From: Issue #1683 | PR #1980
-async fn rotate_tsig(app: &App) -> Result<(), String> {
-    let s = app.settings();
-    let file = secret::tsig_file(&s)?;
-    fs::remove_if_present(&file).map_err(|e| format!("{}: {e}", file.display()))?;
-    secret::load_or_create(&file, secret::new_tsig, fs::Owner::default())
-        .map_err(|e| format!("DDNS_TSIG_KEY: {e}"))?;
-    for line in apply_all(app, &s, &s, true).await? {
-        eprintln!("ui: tsig rotate: {line}");
-    }
-    Ok(())
-}
-
 // What: bytes of a whole GiB number.
 // Why: cache sizes are whole GiB only.
 // From: Issue #1683 | PR #1980
-fn gib_bytes(text: &str) -> Result<u64, String> {
+pub(crate) fn gib_bytes(text: &str) -> Result<u64, String> {
     let n: u64 = text
         .trim()
         .parse()
@@ -4097,7 +2386,7 @@ fn gib_bytes(text: &str) -> Result<u64, String> {
 // What: largest cache size the disk allows, in bytes.
 // Why: the form shows it; the save check enforces it.
 // From: Issue #1069 | PR #1991
-fn cache_reachable(s: &Settings, old: u64, cached: u64) -> Result<u64, String> {
+pub(crate) fn cache_reachable(s: &Settings, old: u64, cached: u64) -> Result<u64, String> {
     // What: the cache volume as the ui mounts it.
     // Why: NGINX_CACHE_DIR exists in the proxy only.
     // From: Issue #1069 | PR #1980
@@ -4118,7 +2407,7 @@ fn cache_reachable(s: &Settings, old: u64, cached: u64) -> Result<u64, String> {
 // What: refuse a bigger cache without room.
 // Why: growth must fit the free disk space.
 // From: Issue #1069
-fn cache_room(s: &Settings, form: &Fields, cached: u64) -> Result<(), Fail> {
+pub(crate) fn cache_room(s: &Settings, form: &Fields, cached: u64) -> Result<(), Fail> {
     let Some(wanted) = form.get("CACHE_MAX_GB") else {
         return Ok(());
     };
@@ -4142,7 +2431,7 @@ fn cache_room(s: &Settings, form: &Fields, cached: u64) -> Result<(), Fail> {
 // What: container states for the beambar.
 // Why: Docker is the source; no status files.
 // From: Issue #1683 | PR #1980
-async fn status(State(app): Shared) -> Response {
+pub(crate) async fn status(State(app): Shared) -> Response {
     let s = app.settings();
     let stopped = s.list("SERVICES_STOPPED");
     // What: the dhcp container while DHCP_MODE is off.
@@ -4188,14 +2477,14 @@ async fn status(State(app): Shared) -> Response {
 // Why: body {"state": "running" or "stopped"}.
 // From: Issue #1683 | PR #1980
 #[derive(serde::Deserialize)]
-struct Want {
-    state: String,
+pub(crate) struct Want {
+    pub(crate) state: String,
 }
 
 // What: start or stop one container.
 // Why: the wish is saved first; see set_wanted.
 // From: Issue #1683 | PR #1980
-async fn container_state(
+pub(crate) async fn container_state(
     State(app): Shared,
     Extension(csrf): Extension<Csrf>,
     axum::extract::Path(service): axum::extract::Path<String>,
@@ -4217,7 +2506,7 @@ async fn container_state(
 // What: restart the ui container itself.
 // Why: Docker restarts it; the page reloads.
 // From: Issue #1683 | PR #1980
-async fn restart_ui(
+pub(crate) async fn restart_ui(
     State(app): Shared,
     Extension(csrf): Extension<Csrf>,
     Form(form): Form<Fields>,
@@ -4236,7 +2525,7 @@ async fn restart_ui(
 // What: unhealthy until the configs are rendered.
 // Why: a failed start render hid behind a healthy ui.
 // From: Issue #1683 | PR #1858
-async fn health(State(app): Shared) -> Response {
+pub(crate) async fn health(State(app): Shared) -> Response {
     if app.rendered.load(Ordering::Relaxed) {
         "ok".into_response()
     } else {
@@ -4247,14 +2536,14 @@ async fn health(State(app): Shared) -> Response {
 // What: a built-in file with its content type.
 // Why: css, icon and logo are read once at start.
 // From: Issue #1683 | PR #1980
-fn asset(kind: &'static str, body: &'static [u8]) -> Response {
+pub(crate) fn asset(kind: &'static str, body: &'static [u8]) -> Response {
     ([(header::CONTENT_TYPE, kind)], body).into_response()
 }
 
 // What: password against a stored PHC hash.
 // Why: one owner for login and change.
 // From: Issue #1683 | PR #1980
-fn verify(hash: &str, pw: &str) -> bool {
+pub(crate) fn verify(hash: &str, pw: &str) -> bool {
     let phc = stored_phc(hash);
     let Ok(parsed) = PasswordHash::new(&phc) else {
         return false;
@@ -4267,7 +2556,7 @@ fn verify(hash: &str, pw: &str) -> bool {
 // What: PHC string of a stored base64url hash.
 // Why: the stack .env bars "$", which every PHC has.
 // From: Issue #1683 | PR #2017
-fn stored_phc(value: &str) -> String {
+pub(crate) fn stored_phc(value: &str) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(value)
         .ok()
@@ -4278,7 +2567,7 @@ fn stored_phc(value: &str) -> String {
 // What: Argon2id PHC hash of a password, base64url.
 // Why: one form in the .env for setup.sh and the page.
 // From: Issue #1683 | PR #2017
-fn env_hash(pw: &str) -> Result<String, String> {
+pub(crate) fn env_hash(pw: &str) -> Result<String, String> {
     let hash: Result<PasswordHash, _> = Argon2::default().hash_password(pw.as_bytes());
     hash.map(|h| env_form(&h.to_string()))
         .map_err(|e| e.to_string())
@@ -4287,14 +2576,14 @@ fn env_hash(pw: &str) -> Result<String, String> {
 // What: a PHC string in its .env form, base64url.
 // Why: the stack .env bars "$", which every PHC has.
 // From: Issue #1683
-fn env_form(phc: &str) -> String {
+pub(crate) fn env_form(phc: &str) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(phc)
 }
 
 // What: one line from stdin without its line end.
 // Why: both setup.sh commands read their input so.
 // From: Issue #1683
-fn stdin_line() -> Result<String, String> {
+pub(crate) fn stdin_line() -> Result<String, String> {
     let mut line = String::new();
     std::io::stdin()
         .read_line(&mut line)
@@ -4305,7 +2594,7 @@ fn stdin_line() -> Result<String, String> {
 // What: base64url PHC hash of a password from stdin.
 // Why: setup.sh writes it into the stack .env.
 // From: Issue #1683 | PR #2017
-fn hash_password() -> Result<(), String> {
+pub(crate) fn hash_password() -> Result<(), String> {
     let pw = stdin_line()?;
     if pw.is_empty() {
         return Err("the password on stdin is empty".into());
@@ -4317,7 +2606,7 @@ fn hash_password() -> Result<(), String> {
 // What: .env form of a PHC hash from stdin.
 // Why: setup.sh moves an old hash without openssl.
 // From: Issue #1683
-fn encode_password_hash() -> Result<(), String> {
+pub(crate) fn encode_password_hash() -> Result<(), String> {
     let phc = stdin_line()?;
     PasswordHash::new(&phc).map_err(|e| format!("no PHC hash on stdin: {e}"))?;
     println!("{}", env_form(&phc));
@@ -4327,7 +2616,7 @@ fn encode_password_hash() -> Result<(), String> {
 // What: image identity functions for the page footer.
 // Why: Tera checks calls when a template is added.
 // From: Issue #1683 | PR #1980
-fn register_image_functions(t: &mut Tera) {
+pub(crate) fn register_image_functions(t: &mut Tera) {
     for (func, key) in [
         ("lancache_image_registry", "LANCACHE_IMAGE_REGISTRY"),
         ("lancache_image_prefix", "LANCACHE_IMAGE_PREFIX"),
@@ -4343,7 +2632,7 @@ fn register_image_functions(t: &mut Tera) {
 // What: compile the mounted templates at start.
 // Why: a broken template stops the start.
 // From: Issue #1683 | PR #1991
-fn templates(dir: &str) -> Result<Tera, String> {
+pub(crate) fn templates(dir: &str) -> Result<Tera, String> {
     let mut t = Tera::default();
     t.autoescape_on(vec!["html"]);
     register_image_functions(&mut t);
@@ -4364,7 +2653,7 @@ fn templates(dir: &str) -> Result<Tera, String> {
 // What: read the language files at start.
 // Why: a broken file or a missing key stops the start.
 // From: Issue #1683 | PR #1980
-fn texts(dir: &str) -> Result<Texts, String> {
+pub(crate) fn texts(dir: &str) -> Result<Texts, String> {
     let mut all = Texts::new();
     for (name, body) in folder(dir, "json")? {
         let code = name.trim_end_matches(".json").to_string();
@@ -4382,7 +2671,7 @@ fn texts(dir: &str) -> Result<Texts, String> {
 // What: language of one request.
 // Why: cookie first, then the browser, then the SOT.
 // From: Issue #1683 | PR #1980
-fn pick_lang(app: &App, headers: &HeaderMap) -> String {
+pub(crate) fn pick_lang(app: &App, headers: &HeaderMap) -> String {
     let known = |c: &str| all_texts().contains_key(c);
     if let Some(c) = cookie(headers, LANG_COOKIE).filter(|c| known(c)) {
         return c;
@@ -4404,7 +2693,7 @@ fn pick_lang(app: &App, headers: &HeaderMap) -> String {
 // What: run the request in its language.
 // Why: page() reads it; no handler passes it on.
 // From: Issue #1683 | PR #1980
-async fn lang(State(app): Shared, req: Request, next: Next) -> Response {
+pub(crate) async fn lang(State(app): Shared, req: Request, next: Next) -> Response {
     let code = pick_lang(&app, req.headers());
     LANG.scope(code, next.run(req)).await
 }
@@ -4413,12 +2702,12 @@ async fn lang(State(app): Shared, req: Request, next: Next) -> Response {
 // Why: router and handler read one list; no drift.
 // From: Issue #1683 | PR #2019
 #[derive(Clone, Copy)]
-struct Op<T>(T);
+pub(crate) struct Op<T>(T);
 
 macro_rules! route_ops {
     ($name:ident { $($var:ident => $key:literal),+ $(,)? }) => {
         #[derive(Clone, Copy)]
-        enum $name { $($var),+ }
+        pub(crate) enum $name { $($var),+ }
         impl $name {
             const ALL: &'static [$name] = &[$($name::$var),+];
             fn key(self) -> &'static str {
@@ -4484,7 +2773,7 @@ route_ops!(SecondaryOp {
 // What: command line uses besides the server.
 // Why: setup.sh and the healthcheck need them.
 // From: Issue #1683 | PR #1980
-async fn command(s: &Settings, args: &[String]) -> Option<Result<(), String>> {
+pub(crate) async fn command(s: &Settings, args: &[String]) -> Option<Result<(), String>> {
     match args.first().map(String::as_str) {
         Some("zone-snapshots") => Some(zone_snapshots_cli(s)),
         Some("zone-rollback") => Some(match &args[1..] {
@@ -4502,22 +2791,10 @@ async fn command(s: &Settings, args: &[String]) -> Option<Result<(), String>> {
     }
 }
 
-// What: one DHCP probe; the report as JSON.
-// Why: runs on the host network, apart from the ui.
-// From: Issue #1683 | PR #1985
-fn dhcp_probe_cli(s: &Settings) -> Result<(), String> {
-    let report = crate::shared::dhcp_probe::run(s);
-    println!(
-        "{}",
-        serde_json::to_string(&report).map_err(|e| e.to_string())?
-    );
-    Ok(())
-}
-
 // What: asks the own health route on loopback.
 // Why: the container health check runs this.
 // From: Issue #1683 | PR #1980
-async fn healthcheck(s: &Settings) -> Result<(), String> {
+pub(crate) async fn healthcheck(s: &Settings) -> Result<(), String> {
     let url = format!(
         "http://{}:{}{}",
         s.text("LOOPBACK_BIND_IP")?,
@@ -4531,7 +2808,7 @@ async fn healthcheck(s: &Settings) -> Result<(), String> {
 // What: all ui routes plus auth and headers.
 // Why: paths come from the SOT; one place maps them.
 // From: Issue #1683
-fn router(app: Arc<App>) -> Result<Router, String> {
+pub(crate) fn router(app: Arc<App>) -> Result<Router, String> {
     let s = app.settings();
     let p = |key: &str| s.text(key);
     let dir = s.text("STATIC_DIR")?;
@@ -4606,7 +2883,7 @@ fn router(app: Arc<App>) -> Result<Router, String> {
 // What: security headers on every answer, from SOT.
 // Why: no framing, no sniffing, no foreign scripts.
 // From: Issue #1683 | PR #1980
-async fn secure(State(app): Shared, req: Request, next: Next) -> Response {
+pub(crate) async fn secure(State(app): Shared, req: Request, next: Next) -> Response {
     let s = app.settings();
     let https = req
         .headers()
