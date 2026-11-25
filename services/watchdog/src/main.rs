@@ -418,7 +418,7 @@ async fn dns_sync(s: &Settings, f: &mut Findings) -> Result<(), String> {
         .await
         .map_err(|e| format!("primary: {e}"))?;
     for (name, address) in peers {
-        let api = match peer::secondary_api(s, client.clone(), &address, &key) {
+        let api = match peer::api_at(s, client.clone(), &address, &key) {
             Ok(a) => a,
             Err(e) => {
                 f.crit(&name, format!("secondary unreachable: {e}"));

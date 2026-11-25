@@ -1820,11 +1820,11 @@ async fn remote_zones(s: &Settings, address: &str) -> Result<Vec<lancache_ng::pd
     remote_api(s, address)?.zones().await
 }
 
-// What: pdns-API of one secondary.
-// Why: zone list and AXFR request use the same.
+// What: pdns API of one peer by its address.
+// Why: zone list, AXFR request and sync use it.
 // From: Issue #1683
 fn remote_api(s: &Settings, address: &str) -> Result<lancache_ng::pdns::Api, String> {
-    peer::secondary_api(s, http::client(s)?, address, &secrets(s)?.pdns_api_key)
+    peer::api_at(s, http::client(s)?, address, &secrets(s)?.pdns_api_key)
 }
 
 // What: failed checks of one secondary in a row.
@@ -4230,15 +4230,7 @@ fn primary_api(s: &Settings) -> Result<lancache_ng::pdns::Api, String> {
     if host.is_empty() {
         return Err("DNS_XFR_PRIMARY is empty".into());
     }
-    let url = format!(
-        "http://{host}:{}/api/v1/servers/localhost",
-        s.uint("PDNS_AUTH_API_PORT")?
-    );
-    Ok(lancache_ng::pdns::Api::new(
-        http::client(s)?,
-        &url,
-        &secrets(s)?.pdns_api_key,
-    ))
+    remote_api(s, &host)
 }
 
 // What: the primary's LAN zones the secondary must serve.

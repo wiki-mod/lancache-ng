@@ -2889,10 +2889,10 @@ pub mod peer {
         ))
     }
 
-    // What: pdns API of one secondary by its address.
-    // Why: zone list and AXFR request use the same.
+    // What: pdns API of one peer by its address.
+    // Why: zone list, AXFR request and sync use it.
     // From: Issue #1683 | PR #2019
-    pub fn secondary_api(
+    pub fn api_at(
         s: &Settings,
         client: reqwest::Client,
         address: &str,
