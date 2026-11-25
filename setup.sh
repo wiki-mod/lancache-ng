@@ -1551,6 +1551,13 @@ ensure_docker_userland_proxy() {
     fi
     [[ "$current" == "$want" ]] && return 0
     print_step "Docker userland-proxy: ${current} -> ${want}"
+    # What: no init to restart Docker leaves it unchanged
+    # Why: a file without a restart reads as done next run
+    # From: Issue #1683
+    if [[ -z "$(host_service_manager)" ]]; then
+        print_warn "Neither systemd nor OpenRC runs here, so setup.sh cannot restart Docker; Docker unchanged. Set \"userland-proxy\": ${want} in $file and restart Docker yourself."
+        return 0
+    fi
     printf "  Docker restarts once; every container on this host restarts with it.\n"
     # What: no terminal leaves Docker as it is
     # Why: install, secondary, update run unattended too
@@ -1563,8 +1570,10 @@ ensure_docker_userland_proxy() {
         print_warn "Skipped; Docker unchanged."
         return 0
     }
+    local had_file=0
     mkdir -p -- "${file%/*}" || die "Cannot create ${file%/*} (exit $?)."
     if [[ -f "$file" ]]; then
+        had_file=1
         cp -p -- "$file" "${file}.bak" || die "Cannot back up $file (exit $?)."
         new=$(jq --argjson v "$want" '."userland-proxy" = $v' "$file") \
             || die "Cannot update $file (exit $?); Docker was not changed."
@@ -1573,7 +1582,17 @@ ensure_docker_userland_proxy() {
             || die "Cannot write $file (exit $?)."
     fi
     write_file_atomically "$file" 0644 <<< "$new" || die "Cannot replace $file (exit $?)."
-    host_unit_action "$DOCKER_UNIT" restart
+    # What: a failed restart puts the old file back
+    # Why: the setting and the running Docker must agree
+    # From: Issue #1683
+    if ! ( host_unit_action "$DOCKER_UNIT" restart ); then
+        if [[ "$had_file" = 1 ]]; then
+            cp -p -- "${file}.bak" "$file" || die "Docker did not restart, and putting ${file}.bak back failed (exit $?)."
+        else
+            rm -f -- "$file" || die "Docker did not restart, and removing the new $file failed (exit $?)."
+        fi
+        die "Docker did not restart; $file is as before. Check Docker, then rerun setup.sh."
+    fi
     wait_for_docker_daemon "Docker does not answer after the restart; the old file is ${file}.bak"
     print_ok "Docker userland-proxy is ${want}"
 }
