@@ -946,8 +946,6 @@ PR #2019):
 - 10.5 same-host guard: `setup.sh secondary` takes the compose project name
   from `--name` and does not check it; with `--name lancache-ng` it replaces the
   primary's `dns` container and uses its volumes;
-- 10.2 PTR afterwards: there is no way to add the missing PTR of an existing A
-  record other than typing address and name on the PTR tab;
 - 10.5 update and update from 0.3.x: the README names no way to update a
   secondary (`setup.sh secondary --rotate` re-registers it), and a secondary
   of v0.3.x that is bound over NATS has no migration path;
@@ -982,6 +980,7 @@ failure class.
 | the watchdog checks one unset URL, not the registered secondaries | 10.5 | `12e27473` |
 | `https.conf` and the dispatch file linger after HTTPS is turned off | 10.4 | `5a4b7397` |
 | a reverse name matched a private reverse zone by text end (`110.x` into `10.in-addr.arpa.`) | 10.2 | `61955810` |
+| a missing PTR of an existing A record could only be typed in by hand | 10.2 | `a9c195e3` |
 
 ---
 
