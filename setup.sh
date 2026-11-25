@@ -1950,8 +1950,15 @@ append_env_line() {
 # Why: errexit is ignored in tested subshells
 # From: Issue #1683 | PR #2017
 append_env_line_locked() {
-    local env_file="$1" key="$2" value="$3"
-    printf '%s=%s\n' "$key" "$value" >> "$env_file" \
+    local env_file="$1" key="$2" value="$3" last="" lead=""
+    # What: a missing final newline is added first
+    # Why: a hand-edited end would else glue to the new line
+    # From: Issue #1683
+    if [[ -s "$env_file" ]]; then
+        last=$(tail -c 1 -- "$env_file") || die "Failed to read the end of $env_file (exit $?)."
+        [[ -z "$last" ]] || lead=$'\n'
+    fi
+    printf '%s%s=%s\n' "$lead" "$key" "$value" >> "$env_file" \
         || die "Failed to append $key to $env_file."
 }
 
