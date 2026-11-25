@@ -576,19 +576,33 @@ is_dns_forward_scope() {
     [[ "${1,,}" = "all" || "${1,,}" = "domains" ]]
 }
 
-# What: why an extra LAN domain is unusable, else nothing
-# Why: each extra domain becomes a zone beside the main one
+# What: why a LAN domain is unusable; $2 = main for extras
+# Why: each domain is a zone; the ui refuses the same names
 # From: Issue #1683
-lan_extra_domain_problem() {
-    local entry main="$2"
+lan_domain_problem() {
+    local entry main="${2:-}"
     entry=$(dns_name_normalized "$1")
     if ! is_valid_dns_name "$entry"; then
         printf "'%s' is no valid domain name\n" "$entry"
-    elif [[ "$entry" = "$main" ]]; then
+    elif [[ -n "$main" && "$entry" = "$main" ]]; then
         printf "'%s' is the main LAN domain\n" "$entry"
-    elif [[ "$entry" == *.arpa ]]; then
+    elif [[ "${entry##*.}" = arpa ]]; then
         printf "'%s' is a reverse zone\n" "$entry"
+    # What: localhost and invalid are special-use names
+    # Why: RFC 6761; resolvers never ask a server for them
+    # From: Issue #1683
+    elif [[ "${entry##*.}" = localhost || "${entry##*.}" = invalid ]]; then
+        printf "'%s' ends in the special name %s\n" "$entry" "${entry##*.}"
     fi
+}
+
+# What: true if lan_domain_problem names no problem
+# Why: ask_checked takes a yes/no check with one argument
+# From: Issue #1683
+is_lan_domain() {
+    local problem
+    problem=$(lan_domain_problem "$1") || exit $?
+    [[ -z "$problem" ]]
 }
 
 # What: asks the optional upstream DNS questions
@@ -9888,7 +9902,7 @@ print_step "LAN domain"
 DHCP_DOMAIN=$(prod_env_default DHCP_DOMAIN) || exit $?
 printf "  Every local name ends in this domain. With %s\n" "$DHCP_DOMAIN"
 printf "  a printer is printer.%s; with lan printer.lan.\n\n" "$DHCP_DOMAIN"
-ask_checked DHCP_DOMAIN "LAN domain" "$DHCP_DOMAIN" is_valid_dns_name "Not a domain like ${DHCP_DOMAIN} or lan" 0 dns_name_normalized
+ask_checked DHCP_DOMAIN "LAN domain" "$DHCP_DOMAIN" is_lan_domain "Not a usable LAN domain (like ${DHCP_DOMAIN} or lan; no .arpa, .localhost or .invalid)" 0 dns_name_normalized
 print_ok "LAN domain: $DHCP_DOMAIN"
 # What: optional extra LAN domains, each its own zone
 # Why: DHCP subnets may hand out another LAN domain
@@ -9898,7 +9912,7 @@ printf "  second subnet. Each one gets its own zone. Empty = none.\n\n"
 DNS_EXTRA_LAN_DOMAINS=$(prod_env_default DNS_EXTRA_LAN_DOMAINS) || exit $?
 extra_entries=()
 ask_list --optional extra_entries "Additional LAN domains (space or comma separated)" "$DNS_EXTRA_LAN_DOMAINS" \
-    "LAN domain" lan_extra_domain_problem "$DHCP_DOMAIN"
+    "LAN domain" lan_domain_problem "$DHCP_DOMAIN"
 DNS_EXTRA_LAN_DOMAINS=$(dns_upstream_join "${extra_entries[@]}")
 if [[ -n "$DNS_EXTRA_LAN_DOMAINS" ]]; then
     print_ok "Additional LAN domains: ${DNS_EXTRA_LAN_DOMAINS}"
