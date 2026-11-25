@@ -1194,8 +1194,15 @@ verify_docker_installation() {
     command_available docker \
         || die "Docker client binary is missing after installation."
 
-    out=$(docker compose version 2>&1) \
+    out=$(compose_v2_version) \
         || die "Docker Compose v2 is missing after installation (exit $?): $out"
+}
+
+# What: the docker compose version text; rc 0 when v2 runs
+# Why: one probe for "is Compose usable" and the final check
+# From: Issue #1683
+compose_v2_version() {
+    docker compose version 2>&1
 }
 
 # What: installs docker-cli only if docker is still missing
@@ -1291,11 +1298,19 @@ resolve_apt_compose_package() {
 # Why: distro packages are preferred over Docker's own repo
 # From: Issue #1683 | PR #1858
 install_docker_apt() {
-    local compose_package="" buildx_package=""
+    local part="$1" what="Docker and the Docker Compose plugin" compose_package="" buildx_package=""
     local -a docker_packages=()
 
-    apt-get update -y || die "apt-get update failed (exit $?); Docker was not installed."
-    resolve_apt_compose_package compose_package "Docker and the Docker Compose plugin"
+    [[ "$part" = all ]] || what="the Docker Compose plugin"
+    apt-get update -y || die "apt-get update failed (exit $?); $what was not installed."
+    resolve_apt_compose_package compose_package "$what"
+    # What: a Compose-only install stops after the plugin
+    # Why: Docker itself is already on the host
+    # From: Issue #1683 | PR #1858
+    if [[ "$part" = compose ]]; then
+        apt_install "$compose_package" || die "Failed to install $compose_package (exit $?)."
+        return 0
+    fi
 
     # What: installs buildx when the apt index has it
     # Why: docker buildx is needed before the first pull
@@ -1319,20 +1334,6 @@ install_docker_apt() {
     if [[ "${docker_packages[0]}" = "$APT_DOCKER_ENGINE" ]]; then
         ensure_apt_docker_client
     fi
-
-    verify_docker_installation
-}
-
-# What: Compose-only install via apt, same fallbacks
-# Why: Docker present; only the Compose plugin missing
-# From: Issue #1683 | PR #1858
-install_docker_compose_apt() {
-    local compose_package=""
-
-    apt-get update -y || die "apt-get update failed (exit $?); Docker Compose was not installed."
-    resolve_apt_compose_package compose_package "the Docker Compose plugin"
-    apt_install "$compose_package" || die "Failed to install $compose_package (exit $?)."
-    verify_docker_installation
 }
 
 # What: keeps only the named packages that rpm lists
@@ -1471,68 +1472,42 @@ install_docker_rpm() {
         yum-config-manager --add-repo "$repo_url" || die "Failed to add Docker's yum repository $repo_url (exit $?)."
         yum install -y "${packages[@]}" || die "Failed to install ${packages[*]} (exit $?)."
     fi
+}
 
+# What: installs Docker ($1 all) or only Compose (compose)
+# Why: one dispatch per package manager, then one check
+# From: Issue #1683 | PR #1858
+install_docker_parts() {
+    local part="$1" manager reason="Docker is missing" what="Docker" manual="Docker and the Docker Compose plugin"
+    local -a rpm_packages=() pacman_packages=("${PACMAN_DOCKER_PACKAGES[@]}") apk_packages=("${APK_DOCKER_PACKAGES[@]}")
+    local apt_list="$APT_DOCKER_ENGINE, one of ${APT_COMPOSE_PACKAGES[*]}, Buildx when the index has one"
+    local rpm_list="${DOCKER_RPM_PACKAGES[*]}"
+    if [[ "$part" = compose ]]; then
+        reason="Docker Compose plugin missing" what="Docker Compose" manual="the Docker Compose plugin"
+        rpm_packages=("$DOCKER_COMPOSE_PLUGIN") pacman_packages=("$PACMAN_COMPOSE") apk_packages=("$APK_COMPOSE")
+        apt_list="one of ${APT_COMPOSE_PACKAGES[*]}" rpm_list="$DOCKER_COMPOSE_PLUGIN"
+    fi
+    manager=$(host_package_manager)
+    case "$manager" in
+        apt-get)
+            announce_install "$reason" "$apt_list"
+            install_docker_apt "$part" || die "Failed to install $what."
+            ;;
+        dnf|yum)
+            announce_install "$reason, from Docker's RPM repository" "$rpm_list"
+            install_docker_rpm "$manager" "${rpm_packages[@]}" || die "Failed to install $what."
+            ;;
+        pacman)
+            install_packages "$reason." "${pacman_packages[@]}" || die "Failed to install $what."
+            ;;
+        apk)
+            install_packages "$reason." "${apk_packages[@]}" || die "Failed to install $what."
+            ;;
+        *)
+            die "No supported package manager found. Please install $manual manually, then rerun setup.sh."
+            ;;
+    esac
     verify_docker_installation
-}
-
-# What: installs only the Compose v2 plugin
-# Why: each manager has its own Compose package
-# From: Issue #1683 | PR #1858
-install_docker_compose() {
-    local manager
-
-    manager=$(host_package_manager)
-    case "$manager" in
-        apt-get)
-            announce_install "Docker Compose plugin missing" "one of ${APT_COMPOSE_PACKAGES[*]}"
-            install_docker_compose_apt || die "Failed to install Docker Compose."
-            ;;
-        dnf|yum)
-            announce_install "Docker Compose plugin missing, from Docker's RPM repository" "$DOCKER_COMPOSE_PLUGIN"
-            install_docker_rpm "$manager" "$DOCKER_COMPOSE_PLUGIN" || die "Failed to install Docker Compose."
-            ;;
-        pacman)
-            install_packages "Docker Compose plugin missing." "$PACMAN_COMPOSE" \
-                || die "Failed to install Docker Compose."
-            ;;
-        apk)
-            install_packages "Docker Compose plugin missing." "$APK_COMPOSE" \
-                || die "Failed to install Docker Compose."
-            ;;
-        *)
-            die "No supported package manager found. Please install the Docker Compose plugin manually, then rerun setup.sh."
-            ;;
-    esac
-}
-
-# What: installs Docker engine and Compose v2 per manager
-# Why: each manager has its own package set
-# From: Issue #1683 | PR #1858
-install_docker() {
-    local manager
-
-    manager=$(host_package_manager)
-    case "$manager" in
-        apt-get)
-            announce_install "Docker is missing" "$APT_DOCKER_ENGINE, one of ${APT_COMPOSE_PACKAGES[*]}, Buildx when the index has one"
-            install_docker_apt || die "Failed to install Docker."
-            ;;
-        dnf|yum)
-            announce_install "Docker is missing, from Docker's RPM repository" "${DOCKER_RPM_PACKAGES[*]}"
-            install_docker_rpm "$manager" || die "Failed to install Docker."
-            ;;
-        pacman)
-            install_packages "Docker is missing." "${PACMAN_DOCKER_PACKAGES[@]}" \
-                || die "Failed to install Docker."
-            ;;
-        apk)
-            install_packages "Docker is missing." "${APK_DOCKER_PACKAGES[@]}" \
-                || die "Failed to install Docker."
-            ;;
-        *)
-            die "No supported package manager found. Please install Docker and the Docker Compose plugin manually, then rerun setup.sh."
-            ;;
-    esac
 }
 
 # What: waits until docker info answers, up to the SOT time
@@ -1636,7 +1611,7 @@ ensure_stack_requirements_installed() {
     install_missing_tools ip flock "${generator_tools[@]}"
 
     if ! command_available docker; then
-        install_docker
+        install_docker_parts all
         print_ok "Docker installed"
     fi
 
@@ -1647,13 +1622,10 @@ ensure_stack_requirements_installed() {
         wait_for_docker_daemon "Docker daemon is still not reachable after starting it"
     fi
 
-    if ! out=$(docker compose version 2>&1); then
+    if ! out=$(compose_v2_version); then
         print_warn "Docker Compose plugin not usable (${out##*$'\n'}) — installing..."
-        install_docker_compose
+        install_docker_parts compose
     fi
-
-    out=$(docker compose version 2>&1) \
-        || die "Docker Compose plugin still missing after installing Docker requirements (exit $?): $out"
     ensure_docker_userland_proxy
 }
 
