@@ -6396,16 +6396,6 @@ _proxy_container_publishes_port() {
     return 1
 }
 
-# What: the health path of the SOT PROXY_HEALTH_URL
-# Why: host probes use the one SOT path, not a literal
-# From: Issue #1683 | PR #1858
-proxy_health_path() {
-    local url rest
-    url=$(prod_env_default PROXY_HEALTH_URL) || exit $?
-    rest="${url#*://}"
-    printf '/%s\n' "${rest#*/}"
-}
-
 # What: checks port, proxy binding and /healthz of one IP
 # Why: an open port may belong to another container
 # From: Issue #849
@@ -7749,22 +7739,17 @@ cmd_debug() {
         print_host_addresses_failed "$?"
     fi
 
+    # What: the health gate's proxy probe for each LAN IP
+    # Why: debug shows the cause the update would stop on
+    # From: Issue #1683 | PR #1858
     print_step "Health checks"
-    if ! command_available curl; then
-        print_warn "curl not found — health checks skipped"
-    else
-        local ip probe health_path url
-        health_path=$(proxy_health_path) || exit $?
-        for ip in "$ip_http" "$ip_https"; do
-            [[ -z "$ip" ]] && continue
-            url="http://${ip}${health_path}"
-            if probe=$(curl -sS -f "$url" 2>&1); then
-                print_ok "$url — OK: $probe"
-            else
-                print_error "$url — ERROR (exit $?): $probe"
-            fi
-        done
-    fi
+    local ip proxy_svc
+    proxy_svc=$(prod_env_default PROXY_SERVICE) || exit $?
+    _UPDATE_STACK_DIR="$install_dir" _UPDATE_ENV_FILE="$env_file"
+    for ip in "$ip_http" "$ip_https"; do
+        [[ -n "$ip" ]] || continue
+        _verify_healthz_endpoint "$proxy_svc" "$ip" || print_warn "Proxy probe for $ip failed; see above."
+    done
 }
 
 # What: bundles redacted diagnostics for a bug report
