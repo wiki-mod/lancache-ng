@@ -982,6 +982,10 @@ struct SteamCfg {
     cdn_host: String,
     branch: String,
     os: String,
+    // What: the shared client with the SOT timeouts.
+    // Why: no Steam request may hang without a limit.
+    // From: Issue #871
+    web: reqwest::Client,
 }
 
 impl SteamCfg {
@@ -1006,6 +1010,7 @@ impl SteamCfg {
             cdn_host: c.s.text("STEAM_CDN_HOST")?,
             branch: c.s.text("STEAM_BRANCH")?,
             os: c.s.text("STEAM_OS")?,
+            web: http::client(&c.s)?,
         })
     }
 }
@@ -1666,8 +1671,7 @@ async fn app_urls(
     dl: &Dl,
     app: u32,
 ) -> Result<(Vec<String>, u64, Vec<String>), String> {
-    let web = reqwest::Client::new();
-    let mut cm = Cm::login(cfg, &web).await?;
+    let mut cm = Cm::login(cfg, &cfg.web).await?;
     let info = app_info(&mut cm, app).await?;
     // What: keep the depots for the library cache view.
     // Why: a preloaded game shows its size at once.
@@ -1867,7 +1871,7 @@ fn wipe(c: &Ctx) -> Result<Value, String> {
 // From: Issue #871 | PR #1991
 async fn lookup(c: &Ctx, app: u32) -> Result<Vec<u32>, String> {
     let cfg = SteamCfg::load(c)?;
-    let mut cm = Cm::login(&cfg, &reqwest::Client::new()).await?;
+    let mut cm = Cm::login(&cfg, &cfg.web).await?;
     let ids = depot_ids(&app_info(&mut cm, app).await?);
     save_depots(&c.dir, app, &ids)?;
     Ok(ids)
