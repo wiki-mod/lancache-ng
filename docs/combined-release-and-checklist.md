@@ -595,10 +595,10 @@ Further requirements:
   | bad unsigned zone | `DNS_UPSTREAM_UNSIGNED_ZONES=.` | the entry is rejected, as in none |
   | dead resolver | `configure-upstream-dns` with an address that runs no DNS | `setup.sh` reports the failed check and restores the three earlier values |
 
-- Root zone copy (`ROOT_ZONE_MIRROR`, `ROOT_ZONE_MIRROR_SERVERS`,
+- Root zone copy (`ROOT_ZONE_MIRROR`, `ROOT_ZONE_MIRROR_URL`,
   `ROOT_ZONE_MIRROR_REFRESH`, `ROOT_ZONE_MIRROR_RETRY`): every recursor loads
-  the root zone into its cache by AXFR (`zoneToCache`) unless `.` goes to an
-  upstream resolver:
+  the root zone into its cache from `ROOT_ZONE_MIRROR_URL` (`zoneToCache`) unless
+  `.` goes to an upstream resolver:
 
   | Case | Input | Pass |
   | --- | --- | --- |
@@ -621,6 +621,11 @@ Further requirements:
   | legacy zone | start the ui on a PowerDNS database that holds `local.<domain>` with one record | the record is in `<domain>` under the same name, `local.<domain>` is deleted, both snapshots exist; a second start changes nothing |
   | PTR | add an A record with "PTR" ticked, then delete the A record | the PTR appears in its reverse zone and disappears with the A record; a PTR that names another host stays; an address outside every reverse zone shows a message; a second name on the same address does not silently replace the PTR |
   | PTR afterwards | add three A records without "PTR", then add one PTR with the button in the LAN record table and the others with "add all" on the PTR tab | `dig -x` answers the name for all three |
+  | own ending | add `buero.local` (an ending the Public Suffix List does not know) | the zones `local.` and `buero.local.` exist and are signed; `local.` holds NS and the current DS of `buero.local.`; `dig +dnssec @<address> buero.local SOA` answers with the AD flag; a missing name in it answers NXDOMAIN with the AD flag |
+  | Internet ending | add `intern.de` | no zone `de.` is created; the LAN domain list tags `intern.de` as an Internet ending; its names answer without the AD flag |
+  | special name | add `x.localhost` or `router.invalid` | the Admin UI refuses with a message; no zone is created |
+  | last below an ending | remove the last LAN domain below `.test` | its zone and the zone `test.` are removed; the other top zones and their anchors stay |
+  | dns down at start | stop the `dns` container, restart the `ui`, then start `dns` | while `dns` is down the recursor config holds an NTA for every own zone and ending; after `dns` is up again the anchors return without a further change and names under own endings answer with the AD flag |
 
   The secondary side of these cases is in section 10.5.
 
@@ -687,6 +692,8 @@ With a real primary and at least one real secondary on another host
 | monitoring | two secondaries on other hosts; delete one zone on the first, stop the second, keep a zone on the first that the primary removed | the Admin UI secondary health and the watchdog alarm name the first secondary with the missing and the extra zone, report the second as unreachable, and keep checking the first |
 | same-host guard | `setup.sh secondary --name lancache-ng` on a primary host | the command stops; the primary keeps running unchanged |
 | update | `setup.sh update` of a secondary installed from the previous release | the zones are kept; a second run changes nothing |
+| update from 0.3.x | a secondary of v0.3.x (bound to its primary over NATS) after the primary was updated | `setup.sh` leads the operator through the migration; the secondary ends with every zone of the primary |
+| own endings | a LAN domain below an own ending (section 10.2, row "own ending") | both recursors of the secondary answer its names with the AD flag, without an NTA for the ending |
 
 ### 10.6 Admin UI
 
@@ -940,7 +947,12 @@ PR #2019):
   from `--name` and does not check it; with `--name lancache-ng` it replaces the
   primary's `dns` container and uses its volumes;
 - 10.2 PTR afterwards: there is no way to add the missing PTR of an existing A
-  record other than typing address and name on the PTR tab.
+  record other than typing address and name on the PTR tab;
+- 10.5 update and update from 0.3.x: the README names no way to update a
+  secondary (`setup.sh secondary --rotate` re-registers it), and a secondary
+  of v0.3.x that is bound over NATS has no migration path;
+- 10.5 own endings: a secondary renders its recursor config without the
+  primary's anchors and keeps the NTA, and it does not hold the top zones.
 
 ### 11.5 Failure classes from the release run
 
@@ -969,6 +981,7 @@ failure class.
 | the zone table and the status line disagree on a secondary ahead | 10.6 | `0c5fed00` |
 | the watchdog checks one unset URL, not the registered secondaries | 10.5 | `12e27473` |
 | `https.conf` and the dispatch file linger after HTTPS is turned off | 10.4 | `5a4b7397` |
+| a reverse name matched a private reverse zone by text end (`110.x` into `10.in-addr.arpa.`) | 10.2 | `61955810` |
 
 ---
 
