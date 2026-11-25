@@ -728,7 +728,7 @@ async fn save(
     // What: the zones before the save; none if unreadable.
     // Why: a save may repair the settings; it must run.
     // From: Issue #1683 | PR #2017
-    let before = lancache_ng::dns::managed_zones(&app.settings())
+    let before = hosted_now(&app.settings())
         .inspect_err(|e| eprintln!("ui: zones before the save unknown: {e}"))
         .unwrap_or_default();
     let result = commit(&app, form).await;
@@ -742,11 +742,7 @@ async fn save(
 // Why: an old zone would keep answering its names.
 // From: Issue #1683 | PR #1980
 async fn drop_old_zones(s: &Settings, before: &[String]) {
-    let read = (
-        lancache_ng::dns::managed_zones(s),
-        Role::from_settings(s),
-        pdns_api(s),
-    );
+    let read = (hosted_now(s), Role::from_settings(s), pdns_api(s));
     let (now, role, api) = match read {
         (Ok(now), Ok(role), Ok(api)) => (now, role, api),
         (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => {
@@ -972,12 +968,12 @@ fn main_domain_fields(s: &Settings, main: &str) -> Result<Fields, String> {
     ]))
 }
 
-// What: rrsets of a zone besides SOA and NS.
+// What: rrsets of a zone besides SOA, NS and DS.
 // Why: only these are records a person added.
 // From: Issue #1683
 fn own_rrsets(rows: &[Value]) -> Vec<Value> {
     rows.iter()
-        .filter(|r| !matches!(r["type"].as_str(), Some("SOA" | "NS")))
+        .filter(|r| !matches!(r["type"].as_str(), Some("SOA" | "NS" | "DS")))
         .cloned()
         .collect()
 }
@@ -1333,7 +1329,7 @@ async fn lan_domain_action(app: &App, s: &Settings, op: &str, raw: &str) -> Resu
     let zone = lancache_ng::dns::canonical_zone(raw.trim());
     let name = zone.trim_end_matches('.').to_string();
     let lans = lancache_ng::dns::lan_domains(s)?;
-    let before = lancache_ng::dns::managed_zones(s)?;
+    let before = hosted_now(s)?;
     let change = match op {
         "UI_ROUTE_LAN_DOMAIN_ADD" => {
             let mut extra: Vec<String> = lans.iter().skip(1).cloned().collect();
@@ -3713,6 +3709,13 @@ fn own_tops(s: &Settings) -> Result<Vec<String>, String> {
             Ok(Vec::new())
         }
     }
+}
+
+// What: the hosted zones with the tops read now.
+// Why: drop_old_zones compares before and after.
+// From: Issue #1683 | PR #2019
+fn hosted_now(s: &Settings) -> Result<Vec<String>, String> {
+    hosted_zones(s, &own_tops(s)?)
 }
 
 // What: zones the primary keeps: managed plus tops.
