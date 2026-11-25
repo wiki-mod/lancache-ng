@@ -7780,6 +7780,11 @@ merge_retired_ui_settings() {
     # Why: "Overwrite? y" means the wizard answers count
     # From: Issue #1683 | PR #2017
     if [[ "$mode" = merge ]]; then
+        # What: every value is checked first, then written
+        # Why: a stop on a later line must not half-merge
+        # From: Issue #1683 | PR #2017
+        local -a merge_keys=() merge_values=()
+        local i
         while IFS= read -r line; do
             [[ "$line" == *=* ]] || continue
             list_has_line "$line" "$seen" && continue
@@ -7803,9 +7808,14 @@ merge_retired_ui_settings() {
             # From: Issue #1683 | PR #2017
             env_value_is_safe "$value" \
                 || die "The Admin UI setting $key holds a character the .env cannot keep (${ENV_UNSAFE_CHARS_TEXT}). Change it in the Admin UI of the running version, then rerun setup.sh update."
-            set_env_key "$key" "$value" "$env_file"
-            count=$((count + 1))
+            validate_env_value "$key" "$value"
+            merge_keys+=("$key")
+            merge_values+=("$value")
         done <<< "$raw"
+        for i in "${!merge_keys[@]}"; do
+            set_env_key "${merge_keys[i]}" "${merge_values[i]}" "$env_file"
+            count=$((count + 1))
+        done
         [[ "$count" -eq 0 ]] || print_ok "Merged $count Admin UI setting(s) from $name into $env_file"
     fi
     # What: the copy marks this state as merged
