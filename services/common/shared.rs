@@ -989,6 +989,14 @@ pub mod dns {
         }
     }
 
+    // What: the last label of a name, without dots.
+    // Why: endings decide top zones and refused names.
+    // From: Issue #1683 | PR #2019
+    pub fn ending(name: &str) -> &str {
+        let bare = name.trim_end_matches('.');
+        bare.rsplit('.').next().unwrap_or(bare)
+    }
+
     // What: checked LAN domains, main domain first.
     // Why: one rule for zones, DDNS, records and the ui.
     // From: Issue #1683
@@ -1003,8 +1011,15 @@ pub mod dns {
             if !is_dns_name(name, false, false) {
                 return Err(format!("LAN domain {raw:?} is no domain name"));
             }
-            if name.ends_with(".arpa") {
-                return Err(format!("LAN domain {raw:?} is a reverse zone"));
+            // What: reverse and RFC 6761 endings refused.
+            // Why: hosts answer localhost, invalid locally.
+            // From: Issue #1683 | PR #2019
+            match ending(name) {
+                "arpa" => return Err(format!("LAN domain {raw:?} is a reverse zone")),
+                e @ ("localhost" | "invalid") => {
+                    return Err(format!("LAN domain {raw:?} ends in the special name {e}"));
+                }
+                _ => {}
             }
             if out.contains(&zone) {
                 return Err(format!("LAN domain {name} is listed twice"));
@@ -1055,8 +1070,7 @@ pub mod dns {
     pub fn top_zones(s: &Settings, psl: &crate::nginx_conf::Psl) -> Result<Vec<String>, String> {
         let mut out: Vec<String> = Vec::new();
         for zone in lan_domains(s)? {
-            let name = zone.trim_end_matches('.');
-            let last = name.rsplit('.').next().unwrap_or(name);
+            let last = ending(&zone);
             if !psl.is_tld(last) {
                 crate::config::add_once(&mut out, &canonical_zone(last));
             }
