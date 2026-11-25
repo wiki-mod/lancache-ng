@@ -1127,18 +1127,29 @@ fn depot_gid(d: &Kv, cfg: &SteamCfg) -> Option<u64> {
 // From: Issue #871 | PR #1985
 type Depots = (Vec<(u32, u64)>, Vec<(u32, u32)>);
 
+// What: the depot nodes of an app with their ids.
+// Why: keys like "branches" in "depots" are no depot.
+// From: Issue #871 | PR #1985
+fn depot_nodes(app: &Kv) -> Vec<(u32, &Kv)> {
+    let Some(depots) = app.node("appinfo").unwrap_or(app).node("depots") else {
+        return Vec::new();
+    };
+    depots
+        .0
+        .iter()
+        .filter_map(|(id, v)| match (v, id.parse::<u32>()) {
+            (KvValue::Node(d), Ok(id)) => Some((id, d)),
+            _ => None,
+        })
+        .collect()
+}
+
 // What: split the depots of one app.
 // Why: shared depots of a base app must not be skipped.
 // From: Issue #871 | PR #1985
 fn depots_of(app: &Kv, cfg: &SteamCfg) -> Depots {
     let (mut own, mut borrowed) = (Vec::new(), Vec::new());
-    let Some(depots) = app.node("appinfo").unwrap_or(app).node("depots") else {
-        return (own, borrowed);
-    };
-    for (id, v) in &depots.0 {
-        let (KvValue::Node(d), Ok(id)) = (v, id.parse::<u32>()) else {
-            continue;
-        };
+    for (id, d) in depot_nodes(app) {
         if let Some(gid) = depot_gid(d, cfg) {
             own.push((id, gid));
         } else if let Some(from) = d.text("depotfromapp").and_then(|t| t.parse().ok()) {
@@ -1726,16 +1737,10 @@ async fn app_urls(
 // Why: evict must not drop the shared base of mods.
 // From: Issue #871 | PR #1991
 fn depot_ids(app: &Kv) -> Vec<u32> {
-    let Some(depots) = app.node("appinfo").unwrap_or(app).node("depots") else {
-        return Vec::new();
-    };
-    depots
-        .0
-        .iter()
-        .filter_map(|(id, v)| match v {
-            KvValue::Node(d) if d.text("depotfromapp").is_none() => id.parse().ok(),
-            _ => None,
-        })
+    depot_nodes(app)
+        .into_iter()
+        .filter(|(_, d)| d.text("depotfromapp").is_none())
+        .map(|(id, _)| id)
         .collect()
 }
 
