@@ -759,17 +759,21 @@ impl Pace {
     }
 }
 
+// What: minutes after midnight of HH:MM; 24:00 too.
+// Why: the window and the clock are read the same way.
+// From: Issue #871 | PR #1980
+fn minutes(t: &str) -> Option<u32> {
+    let (h, m) = t.trim().split_once(':')?;
+    let (h, m): (u32, u32) = (h.parse().ok()?, m.parse().ok()?);
+    (h <= 24 && m < 60 && h * 60 + m <= 1440).then_some(h * 60 + m)
+}
+
 // What: daily window HH:MM-HH:MM; may cross midnight.
 // Why: downloads run from one time until another.
 // From: Issue #871 | PR #1980
 fn window(text: &str) -> Result<(u32, u32), String> {
-    let mins = |t: &str| -> Option<u32> {
-        let (h, m) = t.trim().split_once(':')?;
-        let (h, m): (u32, u32) = (h.parse().ok()?, m.parse().ok()?);
-        (h <= 24 && m < 60 && h * 60 + m <= 1440).then_some(h * 60 + m)
-    };
     text.split_once('-')
-        .and_then(|(a, b)| Some((mins(a)?, mins(b)?)))
+        .and_then(|(a, b)| Some((minutes(a)?, minutes(b)?)))
         .ok_or_else(|| format!("CACHEHAMSTER_WINDOW={text}: use HH:MM-HH:MM"))
 }
 
@@ -780,13 +784,10 @@ fn in_window((from, to): (u32, u32)) -> bool {
     if to.abs_diff(from) == 1440 || from == to {
         return true;
     }
-    let now = lancache_ng::tool::run(std::process::Command::new("date").arg("+%H %M"))
+    let now = lancache_ng::tool::run(std::process::Command::new("date").arg("+%H:%M"))
         .ok()
         .and_then(|out| String::from_utf8(out).ok())
-        .and_then(|t| {
-            let (h, m) = t.trim().split_once(' ')?;
-            Some(h.parse::<u32>().ok()? * 60 + m.parse::<u32>().ok()?)
-        });
+        .and_then(|t| minutes(&t));
     match now {
         Some(n) if from < to => (from..to).contains(&n),
         Some(n) => n >= from || n < to,
