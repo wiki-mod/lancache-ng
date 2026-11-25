@@ -7093,7 +7093,7 @@ channel_code_checkout() {
 # Why: compose files and images from one ref at once
 # From: Issue #1683 | PR #1858
 install_repo_follow_channel() {
-    local channel="$1" dir link old new exec_rc
+    local channel="$1" dir link old new
     shift
     channel_code_checkout "$channel"
     [[ "$CHANNEL_CODE_IN_PLACE" = 0 ]] || return 0
@@ -7112,14 +7112,7 @@ install_repo_follow_channel() {
     # Why: its channel prompt is then skipped, not repeated
     # From: Issue #1683 | PR #1858
     export LANCACHE_IMAGE_CHANNEL="$channel"
-    chmod +x "$dir/setup.sh" || die "Failed to make $dir/setup.sh executable (exit $?)."
-    shopt -s execfail
-    set +e
-    exec "$link/setup.sh" "$@" || {
-        exec_rc=$?
-        set -e
-        die "Failed to start $link/setup.sh (exit $exec_rc); nothing was installed yet."
-    }
+    exec_setup_sh "$link/setup.sh" "nothing was installed yet." "$@"
 }
 
 # What: drops the git files of an old root checkout
@@ -7171,7 +7164,7 @@ remove_root_checkout() {
 # Why: a channel change runs the code of the new channel
 # From: Issue #1683 | PR #1858
 switch_channel_dir_and_resume() {
-    local install_dir="$1" repo_dir="$2" channel="$3" target="$4" dir link old="" baseline="" svc exec_rc f
+    local install_dir="$1" repo_dir="$2" channel="$3" target="$4" dir link old="" f
     local -a files=("${CHANNEL_STACK_FILES[@]}")
     dir=$(channel_code_dir "$channel") || exit $?
     link=$(channel_active_link) || exit $?
@@ -7194,24 +7187,14 @@ switch_channel_dir_and_resume() {
     # From: Issue #1683 | PR #1858
     set_env_key LANCACHE_IMAGE_CHANNEL "$channel" "$dir/$PROD_STACK_REL/${_UPDATE_ENV_FILE##*/}"
     set_active_channel_dir "$dir"
-    for svc in "${!_UPDATE_HEALTH_BASELINE[@]}"; do baseline+="${svc}=${_UPDATE_HEALTH_BASELINE[$svc]} "; done
     print_ok "Stack settings copied to $dir; continuing with its setup.sh"
     # What: the switch is undone by the link, not by git
     # Why: the old dir keeps its code; rollback starts it
     # From: Issue #1683 | PR #1858
-    export LANCACHE_UPDATE_RESUMED=1 LANCACHE_UPDATE_REPO="$dir" LANCACHE_UPDATE_BRANCH="" \
-        LANCACHE_UPDATE_OLD_SHA="" LANCACHE_UPDATE_BASELINE="$baseline" LANCACHE_BACKUP_ROOT="$BACKUP_ROOT" \
-        LANCACHE_UPDATE_SWITCHED_FROM="$repo_dir" LANCACHE_UPDATE_FROM_INSTALL="$install_dir" \
-        CONVERGENCE_TIMER_WAS_ACTIVE CONVERGENCE_TIMER_WAS_ENABLED CONVERGENCE_SERVICE_WAS_ACTIVE
+    export_update_resume_state "$dir" "" ""
+    export LANCACHE_UPDATE_SWITCHED_FROM="$repo_dir" LANCACHE_UPDATE_FROM_INSTALL="$install_dir"
     [[ -n "$old" ]] || print_ok "New channel dir $dir"
-    chmod +x "$dir/setup.sh" || die "Failed to make $dir/setup.sh executable (exit $?)."
-    shopt -s execfail
-    set +e
-    exec "$link/setup.sh" update "$link/$PROD_STACK_REL" || {
-        exec_rc=$?
-        set -e
-        die "Failed to start $link/setup.sh (exit $exec_rc); the stack was not changed."
-    }
+    exec_setup_sh "$link/setup.sh" "the stack was not changed." update "$link/$PROD_STACK_REL"
 }
 
 # What: how an update moves the code: switch, move or stay
@@ -7253,7 +7236,7 @@ update_code_plan() {
 # From: Issue #1683 | PR #1858
 update_repo_and_resume() {
     local install_dir="$1" action="$2" repo_dir="$3" channel="$4" target="$5"
-    local branch old new baseline="" svc exec_rc
+    local branch old new
     case "$action" in
         stay) return 0 ;;
         switch) switch_channel_dir_and_resume "$install_dir" "$repo_dir" "$channel" "$target" ;;
@@ -7267,21 +7250,35 @@ update_repo_and_resume() {
         print_ok "Repository already at $new"
         return 0
     fi
-    for svc in "${!_UPDATE_HEALTH_BASELINE[@]}"; do baseline+="${svc}=${_UPDATE_HEALTH_BASELINE[$svc]} "; done
     print_ok "Repository moved $old -> $new; continuing with its setup.sh"
-    export LANCACHE_UPDATE_RESUMED=1 LANCACHE_UPDATE_REPO="$repo_dir" LANCACHE_UPDATE_BRANCH="$branch" \
-        LANCACHE_UPDATE_OLD_SHA="$old" LANCACHE_UPDATE_BASELINE="$baseline" LANCACHE_BACKUP_ROOT="$BACKUP_ROOT" \
+    export_update_resume_state "$repo_dir" "$branch" "$old"
+    exec_setup_sh "$repo_dir/setup.sh" "the stack was not changed." update "$install_dir"
+}
+
+# What: hands the update state to the next setup.sh
+# Why: update_resume_handoff reads exactly these values
+# From: Issue #1683 | PR #1858
+export_update_resume_state() {
+    local repo="$1" branch="$2" old_sha="$3" baseline="" svc
+    for svc in "${!_UPDATE_HEALTH_BASELINE[@]}"; do baseline+="${svc}=${_UPDATE_HEALTH_BASELINE[$svc]} "; done
+    export LANCACHE_UPDATE_RESUMED=1 LANCACHE_UPDATE_REPO="$repo" LANCACHE_UPDATE_BRANCH="$branch" \
+        LANCACHE_UPDATE_OLD_SHA="$old_sha" LANCACHE_UPDATE_BASELINE="$baseline" LANCACHE_BACKUP_ROOT="$BACKUP_ROOT" \
         CONVERGENCE_TIMER_WAS_ACTIVE CONVERGENCE_TIMER_WAS_ENABLED CONVERGENCE_SERVICE_WAS_ACTIVE
-    # What: a failed exec returns to die, trap and all
-    # Why: errexit ends bash at a failed exec, skipping EXIT
-    # From: Issue #1683 | PR #1912
+}
+
+# What: goes on in another setup.sh; a failed exec dies
+# Why: errexit ends bash at a failed exec, skipping EXIT
+# From: Issue #1683 | PR #1912
+exec_setup_sh() {
+    local script="$1" failed="$2" rc
+    shift 2
+    chmod +x "$script" || die "Failed to make $script executable (exit $?)."
     shopt -s execfail
     set +e
-    exec "$repo_dir/setup.sh" update "$install_dir" || {
-        exec_rc=$?
-        set -e
-        die "Failed to start $repo_dir/setup.sh (exit $exec_rc); the stack was not changed."
-    }
+    exec "$script" "$@"
+    rc=$?
+    set -e
+    die "Failed to start $script (exit $rc); $failed"
 }
 
 # What: takes the paused state and baseline over after exec
