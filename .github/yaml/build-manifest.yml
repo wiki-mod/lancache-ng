@@ -538,18 +538,6 @@ runtime:
     # From: Issue #1683 | PR #1985
     - DHCP_PROBE_WAIT_TIMEOUT=30
     - PDNS_SOA_COLD_RETRY=5
-    - DNS_CONFIRM_PAUSE_MS=100
-    # What: in-process zone confirmation tries before a Nak.
-    # Why: a longer sleep holds the message past ack_wait.
-    # From: Issue #1095
-    - DNS_CONFIRM_TRIES=3
-    # What: deliveries after which a flush no longer waits.
-    # Why: bounds a retry loop that has no max_deliver.
-    # From: Issue #1095
-    - DNS_CONFIRM_MAX_DELIVERIES=100
-    - DNS_SYNC_TICK=60
-    - PDNS_ZONE_CHECK_TIMEOUT=10
-    - DNS_FLUSH_TIMEOUT=3
     - SYSLOG_TIME_REAP=30
     # What: syslog-ng store modes and transports.
     # Why: readers get group read; forward is reliable.
