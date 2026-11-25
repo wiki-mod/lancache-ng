@@ -3058,10 +3058,32 @@ pub mod peer {
             .unwrap_or(ZoneState::InSync)
     }
 
-    // What: pdns API of the primary on this node.
-    // Why: records live only in PowerDNS.
+    // What: one API client per recursor.
+    // Why: flush and statistics reach every recursor.
+    // From: Issue #1683 | PR #2017
+    pub fn recursor_apis(s: &Settings) -> Result<Vec<crate::pdns::Api>, String> {
+        let key = crate::render::secrets(s)?.recursor_api_key;
+        let client = crate::http::client(s)?;
+        Ok(s.list("RECURSOR_API_URLS")
+            .iter()
+            .map(|url| crate::pdns::Api::new(client.clone(), url, &key))
+            .collect())
+    }
+
+    // What: clears one zone in every recursor cache.
+    // Why: an edit shows at once, not after the poll.
+    // From: Issue #1683 | PR #1980
+    pub async fn flush_zone(s: &Settings, zone: &str) -> Result<(), String> {
+        for r in recursor_apis(s)? {
+            r.flush(zone, true).await?;
+        }
+        Ok(())
+    }
+
+    // What: pdns API of this node, primary or secondary.
+    // Why: records and zones live only in PowerDNS.
     // From: Issue #1683 | PR #2019
-    pub fn primary_api(
+    pub fn own_api(
         s: &Settings,
         client: reqwest::Client,
         key: &str,
@@ -4626,7 +4648,7 @@ pub mod apply {
     // What: an owner's reload commands, "owner:cmd+arg".
     // Why: RELOAD_EXEC in the SOT; no list in code.
     // From: Issue #1683
-    fn exec_cmds<'a>(exec: &'a [String], owner: &'a str) -> impl Iterator<Item = Vec<&'a str>> {
+    pub fn exec_cmds<'a>(exec: &'a [String], owner: &'a str) -> impl Iterator<Item = Vec<&'a str>> {
         exec_rows(exec).filter_map(move |(o, cmd)| (o == owner).then_some(cmd))
     }
 

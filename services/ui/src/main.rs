@@ -858,19 +858,7 @@ async fn logs_save(
 // Why: records live only in PowerDNS.
 // From: Issue #1683 | PR #1980
 fn pdns_api(s: &Settings) -> Result<lancache_ng::pdns::Api, String> {
-    peer::primary_api(s, http::client(s)?, &render::secrets(s)?.pdns_api_key)
-}
-
-// What: one API client per recursor.
-// Why: flush and statistics reach every recursor.
-// From: Issue #1683 | PR #2017
-fn recursor_apis(s: &Settings) -> Result<Vec<lancache_ng::pdns::Api>, String> {
-    let key = render::secrets(s)?.recursor_api_key;
-    let client = http::client(s)?;
-    Ok(s.list("RECURSOR_API_URLS")
-        .iter()
-        .map(|url| lancache_ng::pdns::Api::new(client.clone(), url, &key))
-        .collect())
+    peer::own_api(s, http::client(s)?, &render::secrets(s)?.pdns_api_key)
 }
 
 // What: reverse DNS name of an address.
@@ -1064,7 +1052,7 @@ async fn rollback(s: &Settings, zone: &str, id: &str) -> Result<(), String> {
     let api = pdns_api(s)?;
     api.restore(zone, &rows).await?;
     snapshot(s, &api, zone).await?;
-    flush_zone(s, zone).await
+    peer::flush_zone(s, zone).await
 }
 
 // What: PTR rows of each private reverse zone.
@@ -1507,12 +1495,12 @@ async fn record(
     }
     api.set_rrset(&zone, &name, &kind, ttl, &contents).await?;
     snapshot(s, &api, &zone).await?;
-    flush_zone(s, &zone).await?;
+    peer::flush_zone(s, &zone).await?;
     for (rev, rz) in &places {
         api.set_rrset(rz, rev, "PTR", ttl, std::slice::from_ref(&host))
             .await?;
         snapshot(s, &api, rz).await?;
-        flush_zone(s, rz).await?;
+        peer::flush_zone(s, rz).await?;
     }
     for ip in &gone {
         let Some((rev, rz)) = served_reverse_place(s, ip)? else {
@@ -1524,7 +1512,7 @@ async fn record(
         if rrset_contents(&api, &rz, &rev, "PTR").await? == [host.clone()] {
             api.set_rrset(&rz, &rev, "PTR", 0, &[]).await?;
             snapshot(s, &api, &rz).await?;
-            flush_zone(s, &rz).await?;
+            peer::flush_zone(s, &rz).await?;
         }
     }
     Ok(())
@@ -1590,7 +1578,7 @@ async fn ptr(s: &Settings, add: bool, get: &(dyn Fn(&str) -> String + Sync)) -> 
     let api = pdns_api(s)?;
     api.set_rrset(&zone, &name, "PTR", ttl, &contents).await?;
     snapshot(s, &api, &zone).await?;
-    flush_zone(s, &zone).await
+    peer::flush_zone(s, &zone).await
 }
 
 // What: token secondaries register with.
@@ -2109,16 +2097,6 @@ async fn flush_on_transfer(app: Arc<App>) {
     }
 }
 
-// What: clears one zone in every recursor cache.
-// Why: an edit shows at once, not after the poll.
-// From: Issue #1683 | PR #1980
-async fn flush_zone(s: &Settings, zone: &str) -> Result<(), String> {
-    for r in recursor_apis(s)? {
-        r.flush(zone, true).await?;
-    }
-    Ok(())
-}
-
 // What: clears recursor cache for changed zones.
 // Why: recursors would serve old answers until TTL.
 // From: Issue #1683 | PR #1980
@@ -2131,7 +2109,7 @@ async fn flush_round(s: &Settings, seen: &mut BTreeMap<String, u32>) -> Result<(
         // From: Issue #1683 | PR #1980
         let before = seen.get(&zone.name).copied();
         if before.is_some_and(|b| b != zone.serial) {
-            flush_zone(s, &zone.name).await?;
+            peer::flush_zone(s, &zone.name).await?;
             // What: NOTIFY to the secondaries right away.
             // Why: live: pdns alone waited up to 60 s.
             // From: Issue #1683 | PR #2019
@@ -2792,7 +2770,7 @@ async fn service_values(app: &App, s: &Settings, want: &[String]) -> BTreeMap<St
         }
     }
     if has("recursor")
-        && let Ok(apis) = recursor_apis(s)
+        && let Ok(apis) = peer::recursor_apis(s)
     {
         for r in apis {
             if let Ok(rows) = r.statistics().await {
@@ -3898,7 +3876,7 @@ async fn merge_legacy_zone(
         snapshot(s, api, lan).await?;
     }
     api.delete_zone(&legacy).await?;
-    flush_zone(s, lan).await?;
+    peer::flush_zone(s, lan).await?;
     eprintln!(
         "ui: zone {legacy} merged into {lan} ({} rrsets)",
         moved.len()
