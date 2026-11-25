@@ -1852,16 +1852,16 @@ generate_secret_value() {
     printf '%s\n' "$value"
 }
 
-# What: keeps a usable secret, else generates one
-# Why: empty values and placeholders are replaced
+# What: keeps a usable secret, else makes one (SOT owner $3)
+# Why: one keep-or-make rule; placeholders are replaced
 # From: Issue #1683 | PR #1858
 get_or_generate_secret() {
-    local key="$1" env_file="$2" kind="$3"
+    local key="$1" env_file="$2" owner="$3"
 
-    if env_key_has_usable_secret "$key" "$env_file"; then
+    if [[ -n "$env_file" ]] && env_key_has_usable_secret "$key" "$env_file"; then
         get_env_var "$key" "$env_file"
     else
-        generate_secret_value "$key" "$kind"
+        generate_managed_secret "$key" "$owner"
     fi
 }
 
@@ -3778,12 +3778,10 @@ secondary_https_bind() {
 # Why: an operator's real secret is never overwritten
 # From: Issue #1683 | PR #1858
 ensure_secret_env_key() {
-    local key="$1" env_file="$2" kind="$3" value
-    if env_key_has_usable_secret "$key" "$env_file"; then
-        return 0
-    fi
-
-    value=$(generate_secret_value "$key" "$kind") || exit $?
+    local key="$1" env_file="$2" owner="$3" value current
+    current=$(get_env_var "$key" "$env_file") || exit $?
+    value=$(get_or_generate_secret "$key" "$env_file" "$owner") || exit $?
+    [[ "$value" != "$current" ]] || return 0
     set_env_key "$key" "$value" "$env_file"
     print_ok "Generated missing or placeholder secret: $key"
 }
@@ -5223,8 +5221,8 @@ migrate_env_for_update() (
     # Why: real operator values are preserved
     # From: Issue #1683 | PR #1858
     secret_rows=$(managed_secret_rows stack) || exit $?
-    while read -r secret_key secret_kind; do
-        ensure_secret_env_key "$secret_key" "$env_file" "$secret_kind"
+    while read -r secret_key _; do
+        ensure_secret_env_key "$secret_key" "$env_file" stack
     done <<< "$secret_rows"
 
     # What: strips retired project profiles from the env
@@ -9532,13 +9530,8 @@ cmd_secondary() {
     # What: own snmp community; kept on --rotate
     # Why: the secondary render needs an SNMP community
     # From: Issue #1683
-    local snmp_community=""
-    if [[ -n "$existing_env_file" ]] \
-        && env_key_has_usable_secret SNMP_COMMUNITY "$existing_env_file"; then
-        snmp_community=$(get_env_var SNMP_COMMUNITY "$existing_env_file") || exit $?
-    else
-        snmp_community=$(generate_managed_secret SNMP_COMMUNITY stack) || exit $?
-    fi
+    local snmp_community
+    snmp_community=$(get_or_generate_secret SNMP_COMMUNITY "$existing_env_file" stack) || exit $?
 
     # What: the directory comes only with the first write
     # Why: an earlier failure leaves no half secondary dir
@@ -10317,8 +10310,8 @@ assert_resolved_image_tag_platform_supported "$LANCACHE_IMAGE_REGISTRY" "$LANCAC
 # Why: the SOT lists the keys and how each is made
 # From: Issue #1683 | PR #1912
 secret_rows=$(managed_secret_rows stack) || exit $?
-while read -r secret_key secret_kind; do
-    secret_value=$(get_or_generate_secret "$secret_key" "$ENV_FILE" "$secret_kind") || exit $?
+while read -r secret_key _; do
+    secret_value=$(get_or_generate_secret "$secret_key" "$ENV_FILE" stack) || exit $?
     printf -v "$secret_key" '%s' "$secret_value"
 done <<< "$secret_rows"
 # What: an empty TTL means the SOT default
