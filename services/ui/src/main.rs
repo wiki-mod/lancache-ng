@@ -847,7 +847,7 @@ async fn logs_save(
 // Why: records live only in PowerDNS.
 // From: Issue #1683 | PR #1980
 fn pdns_api(s: &Settings) -> Result<lancache_ng::pdns::Api, String> {
-    peer::own_api(s, http::client(s)?, &render::secrets(s)?.pdns_api_key)
+    peer::own_api(s, http::client(s)?, &secret::get(s, "PDNS_API_KEY")?)
 }
 
 // What: reverse DNS name of an address.
@@ -1567,9 +1567,7 @@ async fn ptr(s: &Settings, add: bool, get: &(dyn Fn(&str) -> String + Sync)) -> 
 // Why: kept like any secret; rotate renews it.
 // From: Issue #1683 | PR #1980
 fn registration_token(s: &Settings) -> Result<String, String> {
-    let dir = secret::dir(s)?;
-    let name = "SECONDARY_REGISTRATION_TOKEN";
-    secret::resolve(&process_env, &dir, name, fs::Owner::default()).map_err(|e| e.to_string())
+    secret::get(s, "SECONDARY_REGISTRATION_TOKEN")
 }
 
 // What: saves secondaries as name@address rows.
@@ -1604,7 +1602,6 @@ fn valid_peer_name(s: &Settings, name: &str) -> Result<bool, String> {
 // Why: setup.sh secondary writes it to its env.
 // From: Issue #1683 | PR #1980
 fn peer_kit(s: &Settings) -> Result<Value, String> {
-    let sec = render::secrets(s)?;
     let primary = s.text("IP_HTTP")?;
     Ok(json!({
         "primary": primary,
@@ -1612,9 +1609,9 @@ fn peer_kit(s: &Settings) -> Result<Value, String> {
         // Why: the secondary pulls each one by AXFR.
         // From: Issue #1683
         "zones": lancache_ng::dns::managed_zones(s)?,
-        "pdns_api_key": sec.pdns_api_key,
-        "tsig_name": sec.tsig_name,
-        "tsig_secret": sec.tsig_secret,
+        "pdns_api_key": secret::get(s, "PDNS_API_KEY")?,
+        "tsig_name": s.text("DDNS_TSIG_NAME")?,
+        "tsig_secret": secret::tsig_secret(s)?,
         "syslog_primary": format!("{primary}:{}", s.uint("LANCACHE_LOG_PORT")?),
         "dns_local_reverse_zones": s.text_or_empty("DNS_LOCAL_REVERSE_ZONES"),
         "image_registry": process_env("LANCACHE_IMAGE_REGISTRY").unwrap_or_default(),
@@ -1782,7 +1779,7 @@ fn remote_api(s: &Settings, address: &str) -> Result<lancache_ng::pdns::Api, Str
         s,
         http::client(s)?,
         address,
-        &render::secrets(s)?.pdns_api_key,
+        &secret::get(s, "PDNS_API_KEY")?,
     )
 }
 
@@ -1901,7 +1898,7 @@ async fn peer_follows(
         s.uint("PDNS_AUTH_PORT")?,
     )];
     let who = format!("ui: secondary {address}");
-    let key = render::secrets(s)?.tsig_name;
+    let key = s.text("DDNS_TSIG_NAME")?;
     peer::match_zones(api, &hosted_now(s)?, &masters, &key, true, &who).await
 }
 
@@ -2106,7 +2103,7 @@ fn kea_api(s: &Settings) -> Result<lancache_ng::kea::Api, String> {
         s.text("DHCP_API_HOST")?,
         s.uint("KEA_CTRL_PORT")?
     );
-    let token = render::secrets(s)?.kea_ctrl_token;
+    let token = secret::get(s, "KEA_CTRL_TOKEN")?;
     Ok(lancache_ng::kea::Api::new(
         http::client(s)?,
         &url,
@@ -3550,7 +3547,7 @@ async fn ensure_primary_zones(s: &Settings, key: &str) -> Result<(), String> {
     let signed = if s.flag("DDNS_ALLOW_UNSIGNED")? {
         Vec::new()
     } else {
-        vec![render::secrets(s)?.tsig_name]
+        vec![s.text("DDNS_TSIG_NAME")?]
     };
     let tops = own_tops(s)?;
     let hosted = hosted_zones(s, &tops)?;

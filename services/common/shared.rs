@@ -3068,16 +3068,16 @@ pub mod peer {
     // Why: zones are made with the key; it comes first.
     // From: Issue #1683
     pub async fn ensure_tsigkey(s: &Settings) -> Result<String, String> {
-        let sec = crate::render::secrets(s)?;
+        let name = s.text("DDNS_TSIG_NAME")?;
         let algorithm = s.text("DDNS_TSIG_ALGORITHM")?;
         own_api(
             s,
             crate::http::client(s)?,
-            &crate::render::secrets(s)?.pdns_api_key,
+            &crate::secret::get(s, "PDNS_API_KEY")?,
         )?
-        .set_tsigkey(&sec.tsig_name, &algorithm, &sec.tsig_secret)
+        .set_tsigkey(&name, &algorithm, &crate::secret::tsig_secret(s)?)
         .await?;
-        Ok(sec.tsig_name)
+        Ok(name)
     }
 
     // What: bind the TSIG key to every existing zone.
@@ -3087,7 +3087,7 @@ pub mod peer {
         let api = own_api(
             s,
             crate::http::client(s)?,
-            &crate::render::secrets(s)?.pdns_api_key,
+            &crate::secret::get(s, "PDNS_API_KEY")?,
         )?;
         let secondary = crate::dns::Role::from_settings(s)? == crate::dns::Role::Secondary;
         let key = vec![key.to_string()];
@@ -3115,7 +3115,7 @@ pub mod peer {
             &own_api(
                 s,
                 crate::http::client(s)?,
-                &crate::render::secrets(s)?.pdns_api_key,
+                &crate::secret::get(s, "PDNS_API_KEY")?,
             )?,
             &zones,
             &masters,
@@ -3219,7 +3219,7 @@ pub mod peer {
     // Why: flush and statistics reach every recursor.
     // From: Issue #1683 | PR #2017
     pub fn recursor_apis(s: &Settings) -> Result<Vec<crate::pdns::Api>, String> {
-        let key = crate::render::secrets(s)?.recursor_api_key;
+        let key = crate::secret::get(s, "RECURSOR_API_KEY")?;
         let client = crate::http::client(s)?;
         Ok(s.list("RECURSOR_API_URLS")
             .iter()
