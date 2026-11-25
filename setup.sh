@@ -1455,8 +1455,11 @@ install_docker_rpm() {
         packages=("${DOCKER_RPM_PACKAGES[@]}")
     fi
 
+    # What: only an engine package needs the conflict check
+    # Why: a plugin alone joins a Docker that already runs
+    # From: Issue #1683
     for package in "${packages[@]}"; do
-        for docker_package in "${DOCKER_RPM_PACKAGES[@]}"; do
+        for docker_package in "${DOCKER_CE_PACKAGES[@]}"; do
             if [[ "$package" = "$docker_package" ]]; then
                 needs_engine=1
             fi
