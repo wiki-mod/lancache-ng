@@ -7780,7 +7780,7 @@ merge_retired_ui_settings() {
                 UI_PASSWORD_HASH)
                     key=UI_AUTH_PASSWORD_HASH
                     if [[ "$value" == '$'* ]]; then
-                        value=$(printf '%s' "$value" | openssl base64 -A | tr '+/' '-_' | tr -d '=') \
+                        value=$(printf '%s' "$value" | base64 -w 0 | tr '+/' '-_' | tr -d '=') \
                             || die "Failed to encode the Admin UI password hash (exit $?)."
                     fi
                     ;;
