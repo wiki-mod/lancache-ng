@@ -450,7 +450,13 @@ dns_upstream_split() {
         _split_host_ref="${_split_host_ref%%\]*}"
     elif [[ "$entry" == *:* && "$entry" != *:*:* ]]; then
         _split_host_ref="${entry%:*}" _split_port_ref="${entry#*:}"
+    else
+        return 0
     fi
+    # What: rc 1 when a colon is followed by no port
+    # Why: the dns service rejects "9.9.9.9:" at render
+    # From: Issue #1918 | PR #1858
+    [[ -n "$_split_port_ref" ]]
 }
 
 # What: why one upstream server is unusable, else nothing
@@ -459,10 +465,11 @@ dns_upstream_split() {
 dns_upstream_server_problem() {
     local entry="$1" own="$2" host port net nets
     local -a loopback_nets
-    dns_upstream_split "$entry" host port
+    local split_rc=0
+    dns_upstream_split "$entry" host port || split_rc=$?
     nets=$(prod_env_default LOOPBACK_NETS) || exit $?
     read -r -a loopback_nets <<< "$nets"
-    if [[ -n "$port" ]] && ! uint_in_range "$port" 1 65535; then
+    if [[ "$split_rc" != 0 ]] || { [[ -n "$port" ]] && ! uint_in_range "$port" 1 65535; }; then
         printf "'%s' has no port from 1 to 65535\n" "$entry"
     elif ! is_valid_ipv4 "$host" && ! is_valid_ipv6 "$host"; then
         printf "'%s' is no IPv4 or IPv6 address\n" "$entry"
@@ -550,8 +557,10 @@ dns_upstream_answers() {
     fi
     install_missing_tools dig
     for entry in "$@"; do
-        dns_upstream_split "$entry" host port
-        if answer=$(dns_short_answer "$host" "$port" NS .); then
+        if ! dns_upstream_split "$entry" host port; then
+            print_warn "$entry has no port after the colon; not queried"
+            failed=1
+        elif answer=$(dns_short_answer "$host" "$port" NS .); then
             print_ok "$entry answers DNS queries"
         else
             print_warn "$entry did not answer a DNS query: $answer"
