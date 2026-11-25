@@ -124,7 +124,6 @@
   "busy_running": "Running …",
   "error_prefix": "Error: ",
   "zone_behind": "Behind",
-  "every_local_name_ends_in_this": "Every local name ends in this domain. With",
   "exact_domain_only": "Exact domain only",
   "expired": "expired",
   "expires": "Expires",
