@@ -4056,16 +4056,8 @@ async fn reload_changed(app: &App, s: &Settings, changed: &[config::Change]) -> 
     let Ok((grace, limit)) = app.limits(s) else {
         return vec!["limits unreadable".into()];
     };
-    let mut names = BTreeMap::new();
-    for owner in plan.keys() {
-        match container_of(app, s, owner).await {
-            Ok(name) => {
-                names.insert(owner.clone(), name);
-            }
-            Err(e) => report.push(format!("{owner}: skipped, {e}")),
-        }
-    }
-    plan.retain(|owner, _| names.contains_key(owner));
+    let (names, skipped) = plan_containers(app, s, &mut plan).await;
+    report.extend(skipped);
     let lookup = |owner: &str| names.get(owner).cloned().unwrap_or_default();
     let rx = s.list("RELOAD_EXEC");
     for (owner, r) in apply::run(&app.docker, &plan, &rx, &lookup, grace, limit).await {
