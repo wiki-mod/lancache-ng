@@ -2157,19 +2157,6 @@ set_env_key_if_empty_or_missing() {
     fi
 }
 
-# What: appends a raw assignment if the key is missing
-# Why: raw values keep their interpolation
-# From: Issue #1683 | PR #1858
-append_env_assignment_if_missing() {
-    local key="$1" assignment_value="$2" env_file="$3"
-    validate_env_assignment "$key" "$assignment_value"
-    # What: appends an assignment verbatim if key is missing
-    # Why: keeps ${VAR:-...} interpolation intact
-    # From: Issue #1683 | PR #1858
-    env_key_exists "$key" "$env_file" \
-        || append_env_line "$env_file" "$key" "$assignment_value"
-}
-
 # What: migrates an old key to a new one, or seeds fallback
 # Why: an empty target is a valid, intentional state
 # From: Issue #1683 | PR #1858
