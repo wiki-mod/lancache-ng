@@ -6410,6 +6410,13 @@ service_container_state() {
 
     status=$(docker inspect --format '{{.State.Status}}' "$container_id") \
         || { print_error "Failed to read the state of $service ($container_id, exit $?)."; printf 'starting\n'; return 0; }
+    restart_policy=$(docker inspect --format '{{.HostConfig.RestartPolicy.Name}}' "$container_id") \
+        || { print_error "Failed to read the restart policy of $service ($container_id, exit $?)."; printf 'starting\n'; return 0; }
+    # What: an on-failure one-shot may restart; not failed
+    # Why: it retries until its peer is up, then exits 0
+    # From: Issue #1683 | PR #2017
+    [[ "$status" != restarting || "$restart_policy" != on-failure ]] \
+        || { printf 'starting\n'; return 0; }
     case "$status" in
         running) printf 'healthy\n'; return 0 ;;
         created) printf 'starting\n'; return 0 ;;
@@ -6419,11 +6426,9 @@ service_container_state() {
     # What: a one-shot service passes on exit 0
     # Why: running state never holds for one-shot services
     # From: Issue #1683 | PR #1858
-    restart_policy=$(docker inspect --format '{{.HostConfig.RestartPolicy.Name}}' "$container_id") \
-        || { print_error "Failed to read the restart policy of $service ($container_id, exit $?)."; printf 'starting\n'; return 0; }
     exit_code=$(docker inspect --format '{{.State.ExitCode}}' "$container_id") \
         || { print_error "Failed to read the exit code of $service ($container_id, exit $?)."; printf 'starting\n'; return 0; }
-    if [[ "$status" = "exited" && "$restart_policy" = "no" && "$exit_code" = "0" ]]; then
+    if [[ "$status" = "exited" && "$restart_policy" =~ ^(no|on-failure)$ && "$exit_code" = "0" ]]; then
         printf 'healthy\n'
     else
         printf 'failed\n'
@@ -6518,7 +6523,8 @@ _verify_healthz_endpoint() {
 # From: Issue #1683 | PR #1858
 verify_stack_functional_health() {
     local ip_http ip_https https_enabled test_fqdn resolved proxy_svc dns_svc probed
-    local -a probe=()
+    local stack dns_port dns_ips
+    local -a probe=() stack_svcs=()
 
     ip_http=$(get_env_var IP_HTTP "$_UPDATE_ENV_FILE") || exit $?
     ip_https=$(get_env_var IP_HTTPS "$_UPDATE_ENV_FILE") || exit $?
@@ -6530,8 +6536,16 @@ verify_stack_functional_health() {
     dns_svc=$(prod_env_default DNS_SERVICE) || exit $?
     wanted_stack_services probe "$_UPDATE_ENV_FILE" "$proxy_svc" "$dns_svc"
     probed=" ${probe[*]} "
+    # What: a service the stack lacks is not probed
+    # Why: a secondary stack runs dns without a proxy
+    # From: Issue #1683 | PR #2017
+    stack_services_into stack_svcs "$_UPDATE_STACK_DIR" "$_UPDATE_ENV_FILE" \
+        || die "Failed to list the services in $_UPDATE_STACK_DIR (exit $?)."
+    stack=" ${stack_svcs[*]} "
 
-    if [[ "$probed" != *" $proxy_svc "* ]]; then
+    if [[ "$stack" != *" $proxy_svc "* ]]; then
+        print_skip "Proxy probe: this stack has no $proxy_svc"
+    elif [[ "$probed" != *" $proxy_svc "* ]]; then
         print_skip "Proxy probe: $proxy_svc is in SERVICES_STOPPED"
     else
         if [[ -n "$ip_http" ]]; then
@@ -6546,15 +6560,24 @@ verify_stack_functional_health() {
     # Why: wildcard-only RPZ entries never match their apex
     # From: Issue #1149 | PR #1150
     test_fqdn=$(prod_env_default SETUP_DNS_PROBE_NAME) || exit $?
-    # What: DNS is asked on both LAN IPs that are set
-    # Why: dns-https answers on IP_HTTPS whenever it is set
-    # From: Issue #1683
+    # What: DNS is asked on each host IP dns publishes on
+    # Why: compose owns the binds of primary and secondary
+    # From: Issue #1683 | PR #2017
     local ip
-    if [[ "$probed" != *" $dns_svc "* ]]; then
+    if [[ "$stack" != *" $dns_svc "* ]]; then
+        print_skip "DNS probe: this stack has no $dns_svc"
+    elif [[ "$probed" != *" $dns_svc "* ]]; then
         print_skip "DNS probe: $dns_svc is in SERVICES_STOPPED"
     else
-        for ip in "$ip_http" "$ip_https"; do
-            [[ -n "$ip" ]] || continue
+        dns_port=$(prod_env_default DNS_PORT) || exit $?
+        dns_ips=$(compose_config_value "$_UPDATE_STACK_DIR" "$_UPDATE_ENV_FILE" \
+            "[.services[\$svc].ports[]? | select(.protocol == \"udp\" and (.published | tostring) == \$port and (.host_ip // \"\") != \"\") | .host_ip] | unique | .[]" \
+            --arg svc "$dns_svc" --arg port "$dns_port")
+        if [[ -z "$dns_ips" ]]; then
+            print_error "Functional check failed: $dns_svc publishes port ${dns_port} on no host IP"
+            return 1
+        fi
+        for ip in $dns_ips; do
             require_functional_check_tool dig "the DNS resolution probe" || return 1
             if ! resolved=$(dns_short_answer "$ip" "" A "$test_fqdn"); then
                 print_error "Functional check failed: DNS did not resolve ${test_fqdn} via ${ip}: ${resolved}"
@@ -6693,6 +6716,27 @@ wait_for_stack_health() {
             fi
         done
     fi
+    return 1
+}
+
+# What: the update's health gate after a first start
+# Why: install and secondary check a start the same way
+# From: Issue #1683 | PR #1980
+started_stack_health_gate() {
+    local stack_dir="$1" env_file="$2" wait_services wait_ui
+    local -a started_services=()
+    print_step "Waiting for healthy containers"
+    _UPDATE_STACK_DIR="$stack_dir"
+    _UPDATE_ENV_FILE="$env_file"
+    wait_services=$(prod_env_default SETUP_HEALTH_WAIT_SERVICES_SECONDS) || exit $?
+    wait_ui=$(prod_env_default SETUP_HEALTH_WAIT_UI_SECONDS) || exit $?
+    stack_services_into started_services "$stack_dir" "$env_file" \
+        || die "Failed to list the services in $stack_dir (exit $?)."
+    if wait_for_stack_health "$((wait_services + wait_ui))" "${started_services[@]}"; then
+        print_ok "All containers are healthy"
+        return 0
+    fi
+    print_warn "See: $SCRIPT_DIR/setup.sh debug, or docker logs <container>"
     return 1
 }
 
@@ -9612,7 +9656,11 @@ EOF
     stack_up "$(realpath -m "$secondary_dir")" "$secondary_env_file" -d \
         || die "Failed to start docker compose in ${secondary_dir}. Review Docker logs and the generated compose file."
 
-    print_ok "Secondary DNS '${name}' is running. Configure this host's IP as DNS on your clients."
+    if started_stack_health_gate "$(realpath -m "$secondary_dir")" "$secondary_env_file"; then
+        print_ok "Secondary DNS '${name}' is running. Configure this host's IP as DNS on your clients."
+    else
+        print_warn "Secondary DNS '${name}' started, but not all containers are healthy."
+    fi
 }
 
 # What: the path of the SOT inside the repository
@@ -10700,28 +10748,8 @@ else
 fi
 print_ok "Stack started"
 
-# What: the update's health gate after the first start
-# Why: one wait: probes, early stop and logs as on update
-# From: Issue #1683 | PR #1980
-print_step "Waiting for healthy containers"
-_UPDATE_STACK_DIR="$INSTALL_DIR"
-_UPDATE_ENV_FILE="$ENV_FILE"
-install_wait_services=$(prod_env_default SETUP_HEALTH_WAIT_SERVICES_SECONDS) || exit $?
-install_wait_ui=$(prod_env_default SETUP_HEALTH_WAIT_UI_SECONDS) || exit $?
-# What: the service array starts empty, then is filled
-# Why: stack_services_into writes it through a nameref
-# From: Issue #1683 | PR #2017
-install_services=()
-stack_services_into install_services "$INSTALL_DIR" "$ENV_FILE" \
-    || die "Failed to list the services in $INSTALL_DIR (exit $?)."
 install_healthy=1
-wait_for_stack_health "$((install_wait_services + install_wait_ui))" "${install_services[@]}" \
-    || install_healthy=0
-if [[ "$install_healthy" = 1 ]]; then
-    print_ok "All containers are healthy"
-else
-    print_warn "See: $SCRIPT_DIR/setup.sh debug, or docker logs <container>"
-fi
+started_stack_health_gate "$INSTALL_DIR" "$ENV_FILE" || install_healthy=0
 
 # What: Admin UI URL from the ui port mapping
 # Why: compose owns IP and port; a print never aborts setup
