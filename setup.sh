@@ -319,11 +319,22 @@ is_valid_ipv4() {
     [[ "$ip" =~ ^${octet}\.${octet}\.${octet}\.${octet}$ ]]
 }
 
+# What: true for a base-10 whole number from min to max
+# Why: digit count first, so (( )) never overflows
+# From: Issue #1683 | PR #1858
+uint_in_range() {
+    local value="${1:-}" min="$2" max="${3:-999999999999999999}" n
+    [[ "$value" =~ ^[0-9]+$ ]] || return 1
+    n="${value#"${value%%[!0]*}"}"
+    n="${n:-0}"
+    (( ${#n} <= ${#max} )) && (( 10#$n >= min && 10#$n <= 10#$max ))
+}
+
 # What: true for integers above zero, base-10 forced
-# Why: leading zeros like 010 must not parse as octal
+# Why: ask_checked takes a check with one argument
 # From: Issue #1683 | PR #1858
 is_positive_integer() {
-    [[ "${1:-}" =~ ^[0-9]+$ ]] && (( 10#$1 > 0 ))
+    uint_in_range "${1:-}" 1
 }
 
 # What: true if the value starts with /
@@ -451,7 +462,7 @@ dns_upstream_server_problem() {
     dns_upstream_split "$entry" host port
     nets=$(prod_env_default LOOPBACK_NETS) || exit $?
     read -r -a loopback_nets <<< "$nets"
-    if [[ -n "$port" ]] && ! { is_positive_integer "$port" && (( 10#$port <= 65535 )); }; then
+    if [[ -n "$port" ]] && ! uint_in_range "$port" 1 65535; then
         printf "'%s' has no port from 1 to 65535\n" "$entry"
     elif ! is_valid_ipv4 "$host" && ! is_valid_ipv6 "$host"; then
         printf "'%s' is no IPv4 or IPv6 address\n" "$entry"
@@ -907,23 +918,10 @@ dhcp_mode_normalized() {
 # Why: a bad value must not yield a never-expiring cookie
 # From: Issue #1683 | PR #1858
 validate_ui_session_ttl_seconds() {
-    local value="$1" source="${2:-UI_SESSION_TTL_SECONDS}" numeric max
-
-    if [[ ! "$value" =~ ^[0-9]+$ ]]; then
-        die "UI_SESSION_TTL_SECONDS in ${source} must be a whole number of seconds."
-    fi
-    # What: strips leading zeros before the comparisons
-    # Why: bash reads a leading zero as octal
-    # From: Issue #1683 | PR #1858
-    numeric="${value#"${value%%[!0]*}"}"
-    numeric="${numeric:-0}"
-    if [[ "$numeric" = "0" ]]; then
-        die "UI_SESSION_TTL_SECONDS in ${source} must be greater than zero."
-    fi
+    local value="$1" source="${2:-UI_SESSION_TTL_SECONDS}" max
     max=$(prod_env_default UI_SESSION_TTL_MAX_SECONDS) || exit $?
-    if (( ${#numeric} > ${#max} )) || { (( ${#numeric} == ${#max} )) && (( 10#$numeric > 10#$max )); }; then
-        die "UI_SESSION_TTL_SECONDS in ${source} must be at most ${max} seconds."
-    fi
+    uint_in_range "$value" 1 "$max" \
+        || die "UI_SESSION_TTL_SECONDS in ${source} must be a whole number of seconds from 1 to ${max}."
 }
 
 # What: COMPOSE_PROFILES without retired project profiles
@@ -3748,15 +3746,15 @@ ensure_secret_env_key() {
     print_ok "Generated missing or placeholder secret: $key"
 }
 
-# What: "50g"/"50G"/"50" as bare GB; rc 1 if not a number
+# What: "50g"/"50G"/"50" as bare GB; rc 1 unless above 0
 # Why: callers pick the fallback from the SOT defaults
 # From: Issue #1683 | PR #1858
 cache_size_gb_from_env() {
     local cache_max_size="$1"
     cache_max_size="${cache_max_size,,}"
     cache_max_size="${cache_max_size%g}"
-    [[ "$cache_max_size" =~ ^[0-9]+$ ]] || return 1
-    printf '%s\n' "$cache_max_size"
+    uint_in_range "$cache_max_size" 1 || return 1
+    printf '%s\n' "$(( 10#$cache_max_size ))"
 }
 
 # What: dies unless this host's arch has an OCI platform
@@ -7393,9 +7391,9 @@ stack_up() {
 timespan_seconds() {
     local span="$1"
     case "$span" in
-        *min) [[ "${span%min}" =~ ^[0-9]+$ ]] && printf '%s\n' "$(( 10#${span%min} * 60 ))" && return 0 ;;
-        *h) [[ "${span%h}" =~ ^[0-9]+$ ]] && printf '%s\n' "$(( 10#${span%h} * 3600 ))" && return 0 ;;
-        *s) [[ "${span%s}" =~ ^[0-9]+$ ]] && printf '%s\n' "$(( 10#${span%s} ))" && return 0 ;;
+        *min) uint_in_range "${span%min}" 0 && printf '%s\n' "$(( 10#${span%min} * 60 ))" && return 0 ;;
+        *h) uint_in_range "${span%h}" 0 && printf '%s\n' "$(( 10#${span%h} * 3600 ))" && return 0 ;;
+        *s) uint_in_range "${span%s}" 0 && printf '%s\n' "$(( 10#${span%s} ))" && return 0 ;;
     esac
     die "Unsupported time span '$span'; use <n>s, <n>min or <n>h."
 }
@@ -8327,7 +8325,7 @@ reset_kea_to_last_known_good_config() {
     # From: Issue #1683 | PR #1912
     kea_ctrl_user=$(prod_env_default KEA_CTRL_USER) || exit $?
     kea_ctrl_port=$(prod_env_default KEA_CTRL_PORT) || exit $?
-    [[ "$kea_ctrl_port" =~ ^[0-9]+$ ]] || die "The SOT KEA_CTRL_PORT is not a port number."
+    uint_in_range "$kea_ctrl_port" 1 65535 || die "The SOT KEA_CTRL_PORT is not a port number."
     kea_ctrl_url="http://${kea_ctrl_host}:${kea_ctrl_port}/"
 
     state_dir=$(install_state_root "$install_dir" "$env_file") \
