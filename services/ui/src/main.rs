@@ -1095,6 +1095,46 @@ async fn ptr_rows(s: &Settings, api: &lancache_ng::pdns::Api) -> Vec<Value> {
     out
 }
 
+// What: A and AAAA addresses whose PTR is missing.
+// Why: one click adds it; DoMe 23.11.
+// From: Issue #1683 | PR #2019
+fn missing_ptrs(
+    s: &Settings,
+    records: &mut BTreeMap<String, Vec<Value>>,
+    ptr: &[Value],
+) -> Vec<Value> {
+    let have: Vec<&str> = ptr
+        .iter()
+        .filter_map(|g| g["records"].as_array())
+        .flatten()
+        .filter_map(|r| r["ip"].as_str())
+        .collect();
+    let mut all = Vec::new();
+    for rows in records.values_mut() {
+        for r in rows.iter_mut() {
+            if !matches!(r["type"].as_str(), Some("A" | "AAAA")) {
+                continue;
+            }
+            let ips: Vec<String> = r["records"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|c| c["content"].as_str())
+                .filter(|ip| {
+                    matches!(served_reverse_place(s, ip), Ok(Some((rev, _)))
+                        if !have.contains(&rev.as_str()))
+                })
+                .map(str::to_string)
+                .collect();
+            for ip in &ips {
+                all.push(json!({"ip": ip, "hostname": r["name"], "ttl": r["ttl"]}));
+            }
+            r["missing_ptr"] = json!(ips);
+        }
+    }
+    all
+}
+
 // What: DNS page.
 // Why: records are read live from PowerDNS.
 // From: Issue #1683 | PR #1980
@@ -1128,6 +1168,8 @@ async fn domains(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
         },
         Err(e) => ctx.insert("domain_error_message", &e),
     }
+    let missing = missing_ptrs(&s, &mut records, &ptr);
+    ctx.insert("missing_ptrs", &missing);
     let subnets = domain_subnets(&s).await;
     // What: a domain under a real Internet ending.
     // Why: in the LAN it hides its own Internet names.
