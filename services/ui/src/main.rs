@@ -145,13 +145,6 @@ fn dns_pair(first: String, second: String) -> Vec<String> {
         .collect()
 }
 
-// What: true for the value of a ticked switch.
-// Why: the pages send 1 or true for "on".
-// From: Issue #1683 | PR #2017
-fn switch_on(value: &str) -> bool {
-    matches!(value, "1" | "true")
-}
-
 // What: error page text with an HTTP status.
 // Why: handlers return Result and use the ? sign.
 // From: Issue #1683 | PR #1980
@@ -1322,7 +1315,7 @@ async fn dns_action(
     csrf.check(&form)?;
     let s = app.settings();
     let get = |k: &str| field(&form, k);
-    let on = switch_on(&get("enabled"));
+    let on = config::parse_bool(&get("enabled")).unwrap_or(false);
     let domain = get("domain").to_ascii_lowercase();
     let result = match op {
         DnsOp::DnsAdd if lancache_ng::dns::cdn_entry(&domain).is_none() => {
@@ -2503,7 +2496,7 @@ async fn dhcp_action(
     csrf.check(&form)?;
     let s = app.settings();
     let get = |k: &str| field(&form, k);
-    let on = switch_on(&get("enabled"));
+    let on = config::parse_bool(&get("enabled")).unwrap_or(false);
     // What: relay without the real server: plain hint.
     // Why: a bare key name tells the user nothing.
     // From: Issue #1683 | PR #1991
