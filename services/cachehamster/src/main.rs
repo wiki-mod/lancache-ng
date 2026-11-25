@@ -667,14 +667,8 @@ fn status(c: &Ctx) -> Result<Value, String> {
 // From: Issue #871 | PR #1980
 fn take_inbox(c: &Ctx, jobs: &mut Vec<Job>, consume: bool) -> Result<(), String> {
     let dir = c.path(INBOX_DIR);
-    let mut names: Vec<PathBuf> = match std::fs::read_dir(&dir) {
-        Ok(rd) => rd
-            .map(|e| e.map(|e| e.path()))
-            .collect::<Result<_, _>>()
-            .map_err(|e| format!("{}: {e}", dir.display()))?,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(format!("{}: {e}", dir.display())),
-    };
+    let mut names =
+        lancache_ng::fs::entries_if_present(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     names.sort();
     for path in names {
         match read_json::<Order>(&path) {
@@ -1771,14 +1765,10 @@ fn save_depots(dir: &Path, app: u32, ids: &[u32]) -> Result<(), String> {
 // From: Issue #871 | PR #1991
 fn known_depots(dir: &Path) -> Result<BTreeMap<u32, Vec<u32>>, String> {
     let dir = dir.join(DEPOTS_DIR);
-    let rd = match std::fs::read_dir(&dir) {
-        Ok(rd) => rd,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
-        Err(e) => return Err(format!("{}: {e}", dir.display())),
-    };
+    let paths =
+        lancache_ng::fs::entries_if_present(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let mut out = BTreeMap::new();
-    for e in rd {
-        let path = e.map_err(|e| e.to_string())?.path();
+    for path in paths {
         let Some(app) = path
             .file_stem()
             .and_then(|s| s.to_str())

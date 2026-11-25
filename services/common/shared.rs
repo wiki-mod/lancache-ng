@@ -194,6 +194,17 @@ pub mod fs {
         }
     }
 
+    // What: paths in a folder; an absent one is empty.
+    // Why: a folder made on first write may not exist.
+    // From: Issue #1683
+    pub fn entries_if_present(dir: &Path) -> io::Result<Vec<PathBuf>> {
+        match fs::read_dir(dir) {
+            Ok(rd) => rd.map(|e| e.map(|e| e.path())).collect(),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+            Err(e) => Err(e),
+        }
+    }
+
     // What: change time in unix seconds, else 0.
     // Why: ages and snapshot times are plain seconds.
     // From: Issue #1683 | PR #1980
@@ -2225,14 +2236,11 @@ pub mod snapshot {
         // Why: longer digit string is newer, then text.
         // From: Issue #1683 | PR #1980
         pub fn list(&self) -> Result<Vec<String>, String> {
-            let entries = match std::fs::read_dir(&self.dir) {
-                Ok(rd) => rd,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-                Err(e) => return Err(format!("{}: {e}", self.dir.display())),
-            };
+            let entries = crate::fs::entries_if_present(&self.dir)
+                .map_err(|e| format!("{}: {e}", self.dir.display()))?;
             let mut ids: Vec<String> = entries
-                .filter_map(Result::ok)
-                .filter_map(|e| e.file_name().into_string().ok())
+                .iter()
+                .filter_map(|p| p.file_name()?.to_str().map(String::from))
                 .filter(|n| is_id(n) && self.path(n).is_file())
                 .collect();
             ids.sort_by(|a, b| crate::config::longest_first(a, b));
