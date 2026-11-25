@@ -3187,28 +3187,21 @@ require_clean_repo() {
         || die "Existing repository at $repo_dir has local changes. Clean it first or remove $repo_dir, then rerun setup.sh."
 }
 
-# What: hard-resets a checkout to one origin branch
-# Why: refuses dirty trees, so local edits survive
+# What: a clean checkout on a branch, a tag or a commit
+# Why: one move: a branch follows origin, the rest detaches
 # From: Issue #1683 | PR #1858
-sync_repo_to_branch() {
-    local repo_dir="$1" branch="$2"
-
-    require_clean_repo "$repo_dir"
-    channel_ref_commit "$repo_dir" "$branch" > /dev/null || exit $?
-    git -C "$repo_dir" checkout -B "$branch" "origin/$branch" \
-        || die "Failed to reset $repo_dir to origin/$branch."
-}
-
-# What: detaches a clean checkout at a tag or commit
-# Why: a pinned channel runs the code of its image tag
-# From: Issue #1683 | PR #1858
-sync_repo_to_commit() {
+sync_repo_to_code_ref() {
     local repo_dir="$1" ref="$2" commit
 
     require_clean_repo "$repo_dir"
     commit=$(channel_ref_commit "$repo_dir" "$ref") || exit $?
-    git -C "$repo_dir" checkout --detach "$commit" \
-        || die "Failed to detach $repo_dir at $ref ($commit)."
+    if git -C "$repo_dir" rev-parse --verify --quiet "refs/remotes/origin/$ref" > /dev/null; then
+        git -C "$repo_dir" checkout -B "$ref" "origin/$ref" \
+            || die "Failed to reset $repo_dir to origin/$ref."
+    else
+        git -C "$repo_dir" checkout --detach "$commit" \
+            || die "Failed to detach $repo_dir at $ref ($commit)."
+    fi
 }
 
 # What: fetches origin; prints the commit of a code ref
@@ -3216,17 +3209,16 @@ sync_repo_to_commit() {
 # From: Issue #1683
 channel_ref_commit() {
     local repo_dir="$1" ref="$2"
-    if is_channel_branch "$ref"; then
-        git -C "$repo_dir" fetch --prune origin \
-            || die "Failed to refresh repository metadata for $repo_dir."
-        git -C "$repo_dir" rev-parse --verify --quiet "refs/remotes/origin/${ref}^{commit}" \
-            || die "Remote branch origin/$ref is unavailable for $repo_dir."
-        return 0
-    fi
     git -C "$repo_dir" fetch --prune --tags origin \
         || die "Failed to refresh repository metadata for $repo_dir."
-    git -C "$repo_dir" rev-parse --verify --quiet "${ref}^{commit}" \
-        || die "Tag or commit '$ref' is not on origin of $repo_dir; check LANCACHE_IMAGE_TAG."
+    git -C "$repo_dir" rev-parse --verify --quiet "refs/remotes/origin/${ref}^{commit}" && return 0
+    git -C "$repo_dir" rev-parse --verify --quiet "${ref}^{commit}" && return 0
+    # What: a commit no branch or tag holds is fetched by id
+    # Why: LANCACHE_SETUP_GIT_REF may name such a commit
+    # From: Issue #1683
+    git -C "$repo_dir" fetch --quiet origin "$ref" \
+        && git -C "$repo_dir" rev-parse --verify --quiet "FETCH_HEAD^{commit}" && return 0
+    die "Branch, tag or commit '$ref' is not on origin of $repo_dir; check LANCACHE_IMAGE_TAG or LANCACHE_SETUP_GIT_REF."
 }
 
 # What: returns LANCACHE_SETUP_GIT_REF, empty if unset
@@ -3234,20 +3226,6 @@ channel_ref_commit() {
 # From: Issue #1683 | PR #1858
 resolve_setup_bootstrap_ref() {
     printf '%s\n' "${LANCACHE_SETUP_GIT_REF:-}"
-}
-
-# What: hard-resets a checkout to a pinned ref
-# Why: fetches the named ref explicitly; dirty trees refused
-# From: Issue #1683 | PR #1858
-sync_repo_to_ref() {
-    local repo_dir="$1" ref="$2"
-
-    require_clean_repo "$repo_dir"
-
-    git -C "$repo_dir" fetch --prune origin "$ref" \
-        || die "Failed to fetch ref '$ref' for $repo_dir. Check that LANCACHE_SETUP_GIT_REF names a real branch, tag, or commit on origin."
-    git -C "$repo_dir" checkout -B "$ref" FETCH_HEAD \
-        || die "Failed to reset $repo_dir to ref '$ref'."
 }
 
 # What: repo root two levels above a deploy/prod dir
@@ -6830,16 +6808,11 @@ checkout_branch_name() {
     printf '%s\n' "$branch"
 }
 
-# What: clones the code into dir $1, at branch or tag $2
+# What: clones the code into dir $1
 # Why: one owner of the clone address and its call
 # From: Issue #1683 | PR #2017
 clone_code() {
-    local dir="$1" ref="${2:-}"
-    if [[ -n "$ref" ]]; then
-        git clone --branch "$ref" "${LANCACHE_REPO_URL}.git" "$dir"
-    else
-        git clone "${LANCACHE_REPO_URL}.git" "$dir"
-    fi
+    git clone "${LANCACHE_REPO_URL}.git" "$1"
 }
 
 # What: branch of checkout $1 if no channel branch
@@ -6888,18 +6861,6 @@ channel_checkout_target() {
     printf '%s\n' "$target"
 }
 
-# What: a channel follows its branch, pinned its tag
-# Why: nightly code is current_dev, latest code master
-# From: Issue #1683 | PR #1858
-sync_repo_to_channel_ref() {
-    local repo_dir="$1" target="$2"
-    if is_channel_branch "$target"; then
-        sync_repo_to_branch "$repo_dir" "$target"
-    else
-        sync_repo_to_commit "$repo_dir" "$target"
-    fi
-}
-
 # What: <state root>/<pointer>: one code dir per channel
 # Why: each channel keeps its own code side by side
 # From: Issue #1683 | PR #1858
@@ -6946,18 +6907,12 @@ is_channel_layout_repo() {
 # From: Issue #1683 | PR #1858
 ensure_channel_checkout() {
     local dir="$1" target="$2"
-    if [[ -e "$dir/.git" ]]; then
-        sync_repo_to_channel_ref "$dir" "$target"
-        return 0
-    fi
-    [[ ! -e "$dir" ]] || die "$dir exists but is no git checkout; move it away, then rerun setup.sh."
-    mkdir -p "${dir%/*}" || die "Failed to create ${dir%/*} (exit $?)."
-    if is_channel_branch "$target"; then
-        clone_code "$dir" "$target" || die "Failed to clone $target into $dir (exit $?)."
-    else
+    if [[ ! -e "$dir/.git" ]]; then
+        [[ ! -e "$dir" ]] || die "$dir exists but is no git checkout; move it away, then rerun setup.sh."
+        mkdir -p "${dir%/*}" || die "Failed to create ${dir%/*} (exit $?)."
         clone_code "$dir" || die "Failed to clone into $dir (exit $?)."
-        sync_repo_to_commit "$dir" "$target"
     fi
+    sync_repo_to_code_ref "$dir" "$target"
 }
 
 # What: points <state root>/current at one channel dir
@@ -6996,14 +6951,7 @@ channel_code_checkout() {
     [[ -n "$target" ]] || die "Channel $channel needs LANCACHE_IMAGE_TAG to name its code."
     [[ ! -e "$dir/.git" ]] || CHANNEL_CODE_OLD=$(checkout_head "$dir") || exit $?
     print_step "Code of channel $channel in $dir ($target)"
-    if [[ -n "${LANCACHE_SETUP_GIT_REF:-}" && -e "$dir/.git" ]]; then
-        sync_repo_to_ref "$dir" "$target"
-    elif [[ -n "${LANCACHE_SETUP_GIT_REF:-}" ]]; then
-        clone_code "$dir" "$target" \
-            || die "Clone failed for LANCACHE_SETUP_GIT_REF='$target'. Check that it names a real branch or tag on origin."
-    else
-        ensure_channel_checkout "$dir" "$target"
-    fi
+    ensure_channel_checkout "$dir" "$target"
     set_active_channel_dir "$dir"
     CHANNEL_CODE_DIR="$dir"
 }
@@ -7171,7 +7119,7 @@ update_repo_and_resume() {
     branch=$(checkout_branch_name "$repo_dir") || exit $?
     old=$(checkout_head "$repo_dir") || exit $?
     print_step "Updating repo to $target (channel $channel)"
-    sync_repo_to_channel_ref "$repo_dir" "$target"
+    sync_repo_to_code_ref "$repo_dir" "$target"
     new=$(checkout_head "$repo_dir") || exit $?
     if [[ "$new" = "$old" ]]; then
         print_ok "Repository already at $new"
