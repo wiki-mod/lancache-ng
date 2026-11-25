@@ -187,8 +187,7 @@ async fn containers(s: &Settings, f: &mut Findings, m: &mut Memory) -> Result<()
     let grace = s.num::<u32>("WATCHDOG_STOP_GRACE")?;
     let after = s.uint("RESTART_AFTER")?;
     let stopped = s.list("SERVICES_STOPPED");
-    let dhcp_off = s.text("DHCP_MODE")? == "off";
-    let dhcp_service = s.text("DHCP_SERVICE")?;
+    let dhcp_off = lancache_ng::dhcp::off_service(s)?;
     for row in api.stack(s).await? {
         let Some(service) = docker::service_of(&row) else {
             continue;
@@ -198,7 +197,7 @@ async fn containers(s: &Settings, f: &mut Findings, m: &mut Memory) -> Result<()
         let health = Health::from_inspect(&inspect);
         let (word, colour) = health.word_and_colour();
         let by_user = stopped.iter().any(|x| x == service);
-        let wanted = !(by_user || dhcp_off && service == dhcp_service);
+        let wanted = !(by_user || dhcp_off.as_deref() == Some(service));
         f.containers.push(serde_json::json!({
             "service": service, "name": name, "health": word,
             "colour": colour, "stopped_by_user": by_user,

@@ -1379,6 +1379,16 @@ pub mod dhcp {
         }
     }
 
+    // What: the dhcp service name while the mode is off.
+    // Why: pages hide it; apply and the watch keep it off.
+    // From: Issue #1683 | PR #2017
+    pub fn off_service(s: &Settings) -> Result<Option<String>, String> {
+        if Mode::from_settings(s)? != Mode::Off {
+            return Ok(None);
+        }
+        s.text("DHCP_SERVICE").map(Some)
+    }
+
     // What: an option the ui sets by its own field.
     // Why: custom rows must not override these.
     // From: Issue #1683 | PR #1980

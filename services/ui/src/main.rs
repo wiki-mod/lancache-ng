@@ -2631,7 +2631,7 @@ async fn stats(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     // What: no dhcp tab while DHCP_MODE is off.
     // Why: the tab would show a stopped container.
     // From: Issue #1683
-    let off = dhcp_off_service(&s)?.unwrap_or_default();
+    let off = lancache_ng::dhcp::off_service(&s)?.unwrap_or_default();
     for c in s.list("STATS_CONTAINERS") {
         if c == off {
             continue;
@@ -2923,21 +2923,11 @@ async fn sampler(app: Arc<App>) {
     }
 }
 
-// What: the dhcp service name while the mode is off.
-// Why: pages hide it; apply and the watch keep it off.
-// From: Issue #1683 | PR #2017
-fn dhcp_off_service(s: &Settings) -> Result<Option<String>, String> {
-    if DhcpMode::from_settings(s)? != DhcpMode::Off {
-        return Ok(None);
-    }
-    s.text("DHCP_SERVICE").map(Some)
-}
-
 // What: in mode off a running dhcp is stopped again.
 // Why: compose up may start it after the ui.
 // From: Issue #1683 | PR #1980
 async fn dhcp_stays_off(app: &App, s: &Settings) -> Result<(), String> {
-    let Some(service) = dhcp_off_service(s)? else {
+    let Some(service) = lancache_ng::dhcp::off_service(s)? else {
         return Ok(());
     };
     let (grace, limit) = app.limits(s)?;
@@ -3434,7 +3424,7 @@ async fn apply_all(
     // Why: compose up may have started it again.
     // From: Issue #1683 | PR #1980
     let dhcp = new.text("DHCP_SERVICE")?;
-    if dhcp_off_service(new)?.is_some() {
+    if lancache_ng::dhcp::off_service(new)?.is_some() {
         plan.remove(&dhcp);
         match container_of(app, new, &dhcp).await {
             Ok(name) => {
@@ -4429,7 +4419,7 @@ async fn status(State(app): Shared) -> Response {
     // What: the dhcp container while DHCP_MODE is off.
     // Why: the bar must not offer Start for it.
     // From: Issue #1683 | PR #1980
-    let read = (app.limits(&s), dhcp_off_service(&s));
+    let read = (app.limits(&s), lancache_ng::dhcp::off_service(&s));
     let list = project_containers(&app, &s).await.ok();
     let (Some(list), (Ok((_, limit)), Ok(off))) = (list, read) else {
         return axum::Json(json!({"state": "unavailable"})).into_response();
