@@ -1438,12 +1438,7 @@ impl Cm {
     // Why: Multi frames bundle many, maybe gzipped.
     // From: Issue #871 | PR #1980
     fn unpack(&mut self, raw: &[u8]) -> Result<(), String> {
-        let word = |b: &[u8], at: usize| -> Result<u32, String> {
-            b.get(at..at + 4)
-                .and_then(|w| w.try_into().ok())
-                .map(u32::from_le_bytes)
-                .ok_or_else(|| "CM frame too short".to_string())
-        };
+        let word = |b: &[u8], at: usize| le32(b, at, "CM frame");
         let raw_emsg = word(raw, 0)?;
         // What: skip frames without the protobuf flag.
         // Why: a frame without it is no protobuf message.
@@ -1629,12 +1624,7 @@ fn chunks_of(zipped: &[u8]) -> Result<Vec<(String, u64)>, String> {
         .map_err(|e| format!("manifest zip: {e}"))?
         .read_to_end(&mut raw)
         .map_err(|e| format!("manifest zip: {e}"))?;
-    let word = |at: usize| -> Result<u32, String> {
-        raw.get(at..at + 4)
-            .and_then(|b| b.try_into().ok())
-            .map(u32::from_le_bytes)
-            .ok_or_else(|| "manifest too short".to_string())
-    };
+    let word = |at: usize| le32(&raw, at, "manifest");
     if word(0)? != PAYLOAD_MAGIC {
         return Err("manifest payload magic missing".into());
     }
@@ -1954,8 +1944,7 @@ impl Runner {
                     j.set(State::Waiting);
                 }
             }
-            let body = serde_json::to_vec_pretty(&*list).map_err(|e| e.to_string())?;
-            return c.save(JOBS_FILE, &body);
+            return save_jobs(c, &list);
         }
         let now = clock::unix_secs();
         let logged_in = c.path(TOKEN_FILE).exists();
@@ -1993,9 +1982,26 @@ impl Runner {
             };
             self.running.insert(j.id.clone(), task);
         }
-        let body = serde_json::to_vec_pretty(&*list).map_err(|e| e.to_string())?;
-        c.save(JOBS_FILE, &body)
+        save_jobs(c, &list)
     }
+}
+
+// What: write the job list to jobs.json.
+// Why: the daemon is the one writer; one format.
+// From: Issue #871 | PR #1980
+fn save_jobs(c: &Ctx, list: &[Job]) -> Result<(), String> {
+    let body = serde_json::to_vec_pretty(list).map_err(|e| e.to_string())?;
+    c.save(JOBS_FILE, &body)
+}
+
+// What: u32, little endian, at a byte offset.
+// Why: CM frames and manifests both carry such words.
+// From: Issue #871 | PR #1980
+fn le32(b: &[u8], at: usize, what: &str) -> Result<u32, String> {
+    b.get(at..at + 4)
+        .and_then(|w| w.try_into().ok())
+        .map(u32::from_le_bytes)
+        .ok_or_else(|| format!("{what} too short"))
 }
 
 // What: the daemon loop.
