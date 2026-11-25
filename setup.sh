@@ -988,27 +988,39 @@ validate_ui_session_ttl_seconds() {
         || die "UI_SESSION_TTL_SECONDS in ${source} must be a whole number of seconds from 1 to ${max}."
 }
 
-# What: COMPOSE_PROFILES without retired project profiles
-# Why: five fixed services; operator profiles stay
+# What: writes COMPOSE_PROFILES: role, then own profiles
+# Why: compose picks a role's services; retired ones go
 # From: Issue #1683 | PR #1912
-compose_profiles_for_runtime() {
-    local existing="${1:-}" profile result="" trimmed
+set_compose_profiles() {
+    local stack_dir="$1" env_file="$2" existing profile result trimmed primary secondary
     local -a profiles
+    if (( $# > 2 )); then
+        existing="$3"
+    else
+        existing=$(get_env_var COMPOSE_PROFILES "$env_file") || exit $?
+    fi
+    # What: role names from the SOT; the .env tells which
+    # Why: is_secondary_dir is the one test for a secondary
+    # From: Issue #1683 | PR #2017
+    primary=$(prod_env_default DNS_REPLICATION_ROLE) || exit $?
+    secondary=$(prod_env_default DNS_REPLICATION_ROLE_SECONDARY) || exit $?
+    result="$primary"
+    ! is_secondary_dir "$stack_dir" || result="$secondary"
 
     IFS=',' read -r -a profiles <<< "$existing"
     for profile in "${profiles[@]}"; do
         trimmed="${profile#"${profile%%[![:space:]]*}"}"
         trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
         case "$trimmed" in
-            ""|ssl|dhcp-kea|dhcp-proxy|ntp|logging) continue ;;
+            ""|ssl|dhcp-kea|dhcp-proxy|ntp|logging|"$primary"|"$secondary") continue ;;
         esac
         case ",$result," in
             *",$trimmed,"*) ;;
-            *) [[ -n "$result" ]] && result+=","; result+="$trimmed" ;;
+            *) result+=",$trimmed" ;;
         esac
     done
 
-    printf '%s\n' "$result"
+    set_env_key COMPOSE_PROFILES "$result" "$env_file"
 }
 
 # What: yes/no prompt; y, yes, n or no, any case
@@ -5278,12 +5290,10 @@ migrate_env_for_update() (
         ensure_secret_env_key "$secret_key" "$env_file" stack
     done <<< "$secret_rows"
 
-    # What: strips retired project profiles from the env
-    # Why: an old install still lists dhcp-kea, ntp, logging
+    # What: role profile in, retired project profiles out
+    # Why: old installs lack the role, list dhcp-kea, ntp
     # From: Issue #1683 | PR #1912
-    if env_key_exists COMPOSE_PROFILES "$env_file"; then
-        set_env_key COMPOSE_PROFILES "$(compose_profiles_for_runtime "$compose_profiles")" "$env_file"
-    fi
+    set_compose_profiles "$install_dir" "$env_file"
 
     # What: UI auth is user-chosen; user needs a password
     # Why: unset user and password mean insecure UI
@@ -9100,7 +9110,10 @@ is_secondary_name() {
 # Why: every release writes LISTEN_IP; other .env lack it
 # From: Issue #1683
 is_secondary_dir() {
-    env_key_exists LISTEN_IP "$1/.env"
+    # What: deploy/prod is the primary, whatever .env says
+    # Why: a hand-set LISTEN_IP must not change its role
+    # From: Issue #1683 | PR #2017
+    ! is_deploy_prod_install_dir "$1" && env_key_exists LISTEN_IP "$1/.env"
 }
 
 # What: dies when this host holds another lancache system
@@ -9612,6 +9625,14 @@ cmd_secondary() {
     local snmp_community
     snmp_community=$(get_or_generate_secret SNMP_COMMUNITY "$existing_env_file" stack) || exit $?
 
+    # What: own compose profiles survive --rotate
+    # Why: rotate rewrites .env; the role is set anew below
+    # From: Issue #1683 | PR #2017
+    local own_profiles=""
+    if [[ -n "$existing_env_file" ]]; then
+        own_profiles=$(get_env_var COMPOSE_PROFILES "$existing_env_file") || exit $?
+    fi
+
     # What: the directory comes only with the first write
     # Why: an earlier failure leaves no half secondary dir
     # From: Issue #1683
@@ -9657,6 +9678,7 @@ LANCACHE_IMAGE_TAG=${lancache_image_tag}
 LANCACHE_IMAGE_REF_DNS=${secondary_dns_ref}
 LANCACHE_IMAGE_REF_UI=${secondary_ui_ref}
 EOF
+    set_compose_profiles "$secondary_dir" "$secondary_env_file" "$own_profiles"
 
     print_step "Starting secondary DNS container"
     stack_up "$(realpath -m "$secondary_dir")" "$secondary_env_file" -d \
@@ -10551,6 +10573,7 @@ with_env_lock "$ENV_FILE" write_file_atomically "$ENV_FILE" -- render_initial_en
     || die "Failed to write $ENV_FILE (exit $?)."
 print_ok ".env written: $ENV_FILE"
 write_lancache_image_refs "$ENV_FILE" "$LANCACHE_IMAGE_REFS"
+set_compose_profiles "$INSTALL_DIR" "$ENV_FILE" ""
 merge_retired_ui_settings "$INSTALL_DIR" "$ENV_FILE" retire
 
 # What: creates the state directories
