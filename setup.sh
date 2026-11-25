@@ -1463,8 +1463,11 @@ install_docker_rpm() {
     # From: Issue #1683 | PR #1858
     if [[ "$manager" = dnf ]]; then
         dnf install -y dnf-plugins-core || die "Failed to install dnf-plugins-core (exit $?)."
+        # What: dnf5 replaces an existing Docker repo file
+        # Why: a rerun would else fail on the file it wrote
+        # From: Issue #1683
         dnf config-manager --add-repo "$repo_url" \
-            || dnf config-manager addrepo --from-repofile="$repo_url" \
+            || dnf config-manager addrepo --overwrite --from-repofile="$repo_url" \
             || die "Failed to add Docker's dnf repository $repo_url (exit $?)."
         dnf install -y "${packages[@]}" || die "Failed to install ${packages[*]} (exit $?)."
     else
