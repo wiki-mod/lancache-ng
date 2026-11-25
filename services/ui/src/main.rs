@@ -3146,6 +3146,39 @@ async fn hamster_api(
     Ok(axum::Json(v).into_response())
 }
 
+// What: drop proxy render files no longer written.
+// Why: an old https.conf keeps the SSL server alive.
+// From: Issue #1683 | PR #2019
+fn prune_rendered(s: &Settings, files: &[render::File]) -> Result<Vec<PathBuf>, String> {
+    let conf = PathBuf::from(s.text("NGINX_CONF_DIR")?);
+    let mut removed = Vec::new();
+    for sub in ["conf.d", "stream.d"] {
+        let dir = conf.join(sub);
+        let kept: std::collections::BTreeSet<&std::path::Path> = files
+            .iter()
+            .map(|f| f.path.as_path())
+            .filter(|p| p.parent() == Some(dir.as_path()))
+            .collect();
+        // What: skip a dir this render did not fill.
+        // Why: an empty set must not wipe the dir.
+        // From: Issue #1683 | PR #2019
+        if kept.is_empty() {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() && !kept.contains(path.as_path()) {
+                std::fs::remove_file(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+                removed.push(path);
+            }
+        }
+    }
+    Ok(removed)
+}
+
 // What: write rendered files; list the changed.
 // Why: an unchanged file never wakes its owner.
 // From: Issue #1683 | PR #1980
@@ -3205,6 +3238,20 @@ async fn apply_all(
     let written = write_files(new, &files)?;
     app.rendered.store(true, Ordering::Relaxed);
     changes.extend(written.iter().cloned());
+    // What: drop proxy render files no longer written.
+    // Why: a left-over https.conf keeps the SSL server up.
+    // From: Issue #1683 | PR #2019
+    let removed = prune_rendered(new, &files)?;
+    if !removed.is_empty() {
+        for path in &removed {
+            eprintln!("ui: removed stale {}", path.display());
+        }
+        changes.push(config::Change {
+            key: "proxy-prune".into(),
+            owner: new.text("PROXY_SERVICE")?,
+            effect: config::Effect::Reload,
+        });
+    }
     // What: PowerDNS steps report, not abort.
     // Why: pdns starts only after the restart below.
     // From: Issue #1683 | PR #1980
