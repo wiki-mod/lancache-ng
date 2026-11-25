@@ -1599,6 +1599,10 @@ ensure_stack_requirements_installed() {
     # Why: primary, Kea and DNS replies need a real parser
     # From: Issue #1683 | PR #1858
     install_missing_tools jq
+    # What: the health gate's tools, as update installs them
+    # Why: install runs the same gate after its first start
+    # From: Issue #1683 | PR #1980
+    install_health_gate_tools
     # What: ip, flock and the SOT secret generator tools
     # Why: minimal hosts lack them; flock guards the .env
     # From: Issue #1683 | PR #2017
@@ -1629,10 +1633,17 @@ ensure_stack_requirements_installed() {
     ensure_docker_userland_proxy
 }
 
+# What: curl, dig and jq for the health gate's probes
+# Why: one list for install, update, update-ip and DNS
+# From: Issue #1683 | PR #1858
+install_health_gate_tools() {
+    install_missing_tools curl dig jq
+}
+
 # What: what the requirements step installs, as one text
 # Why: result line and help name one list; wrapped for help
 # From: Issue #1683 | PR #2017
-REQUIREMENTS_TEXT="curl, jq, ip, flock, the tools that generate secrets, Docker with
+REQUIREMENTS_TEXT="curl, jq, dig, ip, flock, the tools that generate secrets, Docker with
 the Compose v2 plugin, and on Alpine the GNU tools setup.sh uses"
 
 # What: runs the requirements step; prints the next step
@@ -6583,8 +6594,8 @@ wait_for_stack_health() {
     done
 
     if (( ${#regressed_services[@]} > 0 )); then
-        print_error "Service(s) regressed from healthy to unhealthy during this update: ${regressed_services[*]}"
-        # What: dumps each regressed service's recent logs
+        print_error "Service(s) not healthy after this start: ${regressed_services[*]}"
+        # What: dumps each unhealthy service's recent logs
         # Why: the operator needs the cause
         # From: Issue #1683 | PR #1858
         local log_lines
@@ -6595,10 +6606,10 @@ wait_for_stack_health() {
             # Why: set -e would abort the update
             # From: Issue #1683 | PR #1858
             if container_id=$(service_container_id "$svc") && [[ -n "$container_id" ]]; then
-                print_warn "Last $log_lines log lines for regressed service '$svc' (container $container_id):"
+                print_warn "Last $log_lines log lines for unhealthy service '$svc' (container $container_id):"
                 docker logs --tail "$log_lines" "$container_id" 2>&1 | sed 's/^/    /' || print_warn "Could not retrieve logs for '$svc' (container may already be gone)."
             else
-                print_warn "No container found for regressed service '$svc'; cannot dump its logs."
+                print_warn "No container found for unhealthy service '$svc'; cannot dump its logs."
             fi
         done
     fi
@@ -7196,7 +7207,7 @@ perform_stack_update_flow() {
     # What: installs curl, dig and jq before any mutation
     # Why: the functional health gate must not silently skip
     # From: Issue #1683 | PR #1858
-    install_missing_tools curl dig jq
+    install_health_gate_tools
     ensure_docker_userland_proxy
     cd "$install_dir"
     _UPDATE_ENV_FILE=$(runtime_env_file_for_install_dir "$install_dir") || exit $?
@@ -8654,7 +8665,7 @@ cmd_update_ip() {
     # From: Issue #1683 | PR #1858
     local saved_env apply_rc=0
     local -a all_services
-    install_missing_tools curl dig jq
+    install_health_gate_tools
     _UPDATE_ENV_FILE="$deploy_env"
     _UPDATE_STACK_DIR="$install_dir"
     print_step "Capturing health baseline"
@@ -8841,7 +8852,7 @@ cmd_configure_upstream_dns() {
     # What: the same baseline and gate as ./setup.sh update
     # Why: one health-gated restart path, no second copy
     # From: Issue #1918 | PR #1858
-    install_missing_tools curl dig jq
+    install_health_gate_tools
     _UPDATE_ENV_FILE="$env_file"
     _UPDATE_STACK_DIR="$install_dir"
     print_step "Capturing health baseline"
@@ -10605,36 +10616,27 @@ else
 fi
 print_ok "Stack started"
 
-# What: wait until every container reports healthy
-# Why: "running" must not show while a service is broken
+# What: the update's health gate after the first start
+# Why: one wait: probes, early stop and logs as on update
 # From: Issue #1683 | PR #1980
 print_step "Waiting for healthy containers"
 _UPDATE_STACK_DIR="$INSTALL_DIR"
 _UPDATE_ENV_FILE="$ENV_FILE"
-install_wait=$(prod_env_default SETUP_HEALTH_WAIT_SERVICES_SECONDS) || exit $?
-install_poll=$(prod_env_default SETUP_HEALTH_POLL_SECONDS) || exit $?
+install_wait_services=$(prod_env_default SETUP_HEALTH_WAIT_SERVICES_SECONDS) || exit $?
+install_wait_ui=$(prod_env_default SETUP_HEALTH_WAIT_UI_SECONDS) || exit $?
 # What: the service array starts empty, then is filled
 # Why: stack_services_into writes it through a nameref
 # From: Issue #1683 | PR #2017
 install_services=()
 stack_services_into install_services "$INSTALL_DIR" "$ENV_FILE" \
     || die "Failed to list the services in $INSTALL_DIR (exit $?)."
-wanted_stack_services install_services "$ENV_FILE" "${install_services[@]}"
-install_deadline=$((SECONDS + install_wait))
-install_bad=("${install_services[@]}")
-while (( ${#install_bad[@]} > 0 && SECONDS < install_deadline )); do
-    sleep "$install_poll"
-    install_left=()
-    for svc in "${install_bad[@]}"; do
-        service_container_is_healthy "$svc" 2>/dev/null || install_left+=("$svc")
-    done
-    install_bad=("${install_left[@]}")
-done
-if (( ${#install_bad[@]} > 0 )); then
-    print_warn "Not healthy after ${install_wait} s: ${install_bad[*]}"
-    print_warn "See: $SCRIPT_DIR/setup.sh debug, or docker logs <container>"
-else
+install_healthy=1
+wait_for_stack_health "$((install_wait_services + install_wait_ui))" "${install_services[@]}" \
+    || install_healthy=0
+if [[ "$install_healthy" = 1 ]]; then
     print_ok "All containers are healthy"
+else
+    print_warn "See: $SCRIPT_DIR/setup.sh debug, or docker logs <container>"
 fi
 
 # What: Admin UI URL from the ui port mapping
@@ -10649,7 +10651,7 @@ if [[ "$ui_url_rc" -ne 0 || -z "$ui_url" ]]; then
     print_warn "Cannot derive the Admin-UI URL (exit $ui_url_rc); the stack runs, see the ui ports in $INSTALL_DIR/docker-compose.yml."
     ui_url="(see the ui ports in $INSTALL_DIR/docker-compose.yml)"
 fi
-if (( ${#install_bad[@]} > 0 )); then
+if [[ "$install_healthy" = 0 ]]; then
     print_result_banner "$YELLOW" "LanCache-NG started, but not all containers are healthy"
 else
     print_result_banner "$GREEN" "LanCache-NG is running!"
