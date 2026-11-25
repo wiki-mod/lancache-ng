@@ -6,9 +6,9 @@
 // Why: a secondary has no ui to render after a change.
 // From: Issue #1683
 
-use lancache_ng::config::Settings;
-use lancache_ng::dns::Role;
-use lancache_ng::{apply, http, peer, render, secret, tool};
+use crate::config::Settings;
+use crate::shared::dns::Role;
+use crate::shared::{apply, http, peer, render, secret, tool};
 use std::collections::BTreeMap;
 use std::time::Duration;
 
@@ -114,8 +114,7 @@ async fn round(s: &Settings, done: &mut Done) -> Result<(), String> {
 // What: idle on a primary, else rounds forever.
 // Why: OpenRC keeps the process; the primary's ui renders.
 // From: Issue #1683
-#[tokio::main]
-async fn main() -> Result<(), String> {
+pub async fn run(_args: &[String]) -> Result<(), String> {
     let mut done = Done::default();
     loop {
         let s = Settings::from_process()?;

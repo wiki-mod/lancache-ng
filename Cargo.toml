@@ -9,11 +9,7 @@
 [workspace]
 resolver = "3"
 members = [
-    "services/ui",
-    "services/cachehamster",
-    "services/watchdog",
-    "services/common",
-    "services/dns",
+    "services/lancache-ng",
 ]
 
 # What: license, edition from SOT release; no version.

@@ -1,0 +1,37 @@
+
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+# What: manifest of the lancache-ng all-in-one program.
+# Why: one binary; roles and commands dispatch from main.
+# From: Issue #1683
+[package]
+name = "lancache-ng-bin"
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "lancache-ng"
+path = "src/main.rs"
+
+[dependencies]
+argon2 = { workspace = true }
+axum = { workspace = true, features = ["form"] }
+base64 = { workspace = true }
+chacha20poly1305 = { workspace = true }
+dhcproto = { workspace = true }
+flate2 = { workspace = true }
+futures-util = { workspace = true }
+hex = { workspace = true }
+qrcode = { workspace = true }
+rand = { workspace = true }
+reqwest = { workspace = true, features = ["stream"] }
+rustix = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+subtle = { workspace = true }
+tera = { workspace = true }
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+zip = { workspace = true }

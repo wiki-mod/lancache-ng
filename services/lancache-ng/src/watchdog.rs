@@ -6,9 +6,9 @@
 // Why: the how lives in shared.rs; no config here.
 // From: Issue #1683 | PR #1980
 
-use lancache_ng::config::Settings;
-use lancache_ng::docker::Health;
-use lancache_ng::{cert, clock, docker, fs, http, tidy};
+use crate::config::Settings;
+use crate::shared::docker::Health;
+use crate::shared::{cert, clock, docker, fs, http, tidy};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::{BTreeMap, VecDeque};
@@ -125,7 +125,7 @@ async fn containers(s: &Settings, f: &mut Findings, m: &mut Memory) -> Result<()
     let grace = s.num::<u32>("WATCHDOG_STOP_GRACE")?;
     let after = s.uint("RESTART_AFTER")?;
     let stopped = s.list("SERVICES_STOPPED");
-    let dhcp_off = lancache_ng::dhcp::off_service(s)?;
+    let dhcp_off = crate::shared::dhcp::off_service(s)?;
     for row in api.stack(s).await? {
         let Some(service) = docker::service_of(&row) else {
             continue;
@@ -335,15 +335,15 @@ fn certs(s: &Settings, f: &mut Findings) -> Result<(), String> {
 // Why: shows a lost NOTIFY or a broken AXFR.
 // From: Issue #1683 | PR #1980
 async fn dns_sync(s: &Settings, f: &mut Findings) -> Result<(), String> {
-    use lancache_ng::peer;
+    use crate::shared::peer;
     // What: the registered secondaries, not a lone URL.
     // Why: one list owns the peers; each gets a check.
     // From: Issue #1683 | PR #2019
-    let peers = lancache_ng::pdns_conf::secondaries(s);
+    let peers = crate::shared::pdns_conf::secondaries(s);
     if peers.is_empty() {
         return Ok(());
     }
-    let key = lancache_ng::secret::get(s, "PDNS_API_KEY")?;
+    let key = crate::shared::secret::get(s, "PDNS_API_KEY")?;
     let client = http::client(s)?;
     let ours = peer::own_api(s, client.clone(), &key)?
         .zones()
@@ -455,9 +455,8 @@ fn healthcheck() -> Result<(), String> {
 // What: healthcheck command, else the check loop.
 // Why: settings are reread; a bad round never exits.
 // From: Issue #1683 | PR #1858
-#[tokio::main]
-async fn main() -> Result<(), String> {
-    if std::env::args().nth(1).as_deref() == Some("healthcheck") {
+pub async fn run(args: &[String]) -> Result<(), String> {
+    if args.first().map(String::as_str) == Some("healthcheck") {
         if let Err(e) = healthcheck() {
             eprintln!("watchdog healthcheck: {e}");
             std::process::exit(1);

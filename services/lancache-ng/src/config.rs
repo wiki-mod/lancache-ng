@@ -371,7 +371,8 @@ fn line_entry(line: &str) -> Option<(&str, &str)> {
 // Why: reading and writing see a new install alike.
 // From: Issue #1683 | PR #2017
 fn read_text(path: &Path) -> Result<String, String> {
-    let bytes = crate::fs::read_if_present(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let bytes =
+        crate::shared::fs::read_if_present(path).map_err(|e| format!("{}: {e}", path.display()))?;
     String::from_utf8(bytes.unwrap_or_default()).map_err(|e| format!("{}: {e}", path.display()))
 }
 
@@ -403,14 +404,14 @@ pub fn read_file(path: &Path) -> Result<BTreeMap<String, String>, String> {
 // Why: it wins for single keys, as fail2ban's .local.
 // From: Issue #1683 | PR #2017
 pub fn override_path(path: &Path) -> PathBuf {
-    crate::fs::with_suffix(path, ".local")
+    crate::shared::fs::with_suffix(path, ".local")
 }
 
 // What: lock file of the stack .env: <file>.lock.
 // Why: setup.sh flocks the same name before it writes.
 // From: Issue #1683 | PR #2017
 pub fn lock_path(path: &Path) -> PathBuf {
-    crate::fs::with_suffix(path, ".lock")
+    crate::shared::fs::with_suffix(path, ".lock")
 }
 
 // What: rejects what Compose would read differently.
@@ -509,12 +510,12 @@ fn write_lines(path: &Path, updates: &BTreeMap<String, String>) -> Result<(), St
     if body == old {
         return Ok(());
     }
-    crate::fs::write(
+    crate::shared::fs::write(
         path,
         body.as_bytes(),
-        crate::fs::PRIVATE_MODE,
-        crate::fs::Place::Replace,
-        crate::fs::Owner::default(),
+        crate::shared::fs::PRIVATE_MODE,
+        crate::shared::fs::Place::Replace,
+        crate::shared::fs::Owner::default(),
     )
     .map_err(|e| format!("{}: {e}", path.display()))
 }
@@ -744,21 +745,6 @@ impl Settings {
         let mut copy = self.clone();
         copy.values.insert(key.to_string(), value);
         Ok(copy)
-    }
-
-    // What: FNV-1a id of all non-secret values.
-    // Why: shows which config is live.
-    // From: Issue #1683 | PR #1980
-    pub fn revision(&self) -> String {
-        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-        for (key, value) in self.texts() {
-            let line = format!("{key}={value}\0");
-            for byte in line.bytes() {
-                hash ^= u64::from(byte);
-                hash = hash.wrapping_mul(0x0100_0000_01b3);
-            }
-        }
-        format!("{hash:016x}")
     }
 
     // What: keys whose value differs in newer.

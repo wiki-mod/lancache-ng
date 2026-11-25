@@ -11,11 +11,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use crate::config::Settings;
+use crate::shared::fs::{Owner, PRIVATE_MODE, Place, write};
+use crate::shared::{clock, http, secret};
 use base64::Engine as _;
 use futures_util::{StreamExt, stream};
-use lancache_ng::config::Settings;
-use lancache_ng::fs::{Owner, PRIVATE_MODE, Place, write};
-use lancache_ng::{clock, http, secret};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
@@ -218,7 +218,7 @@ impl Ctx {
 // From: Issue #871 | PR #1980
 fn read_json<T: for<'a> Deserialize<'a>>(path: &Path) -> Result<Option<T>, String> {
     let raw =
-        lancache_ng::fs::read_if_present(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        crate::shared::fs::read_if_present(path).map_err(|e| format!("{}: {e}", path.display()))?;
     raw.map(|b| serde_json::from_slice(&b))
         .transpose()
         .map_err(|e| format!("{}: {e}", path.display()))
@@ -228,7 +228,7 @@ fn read_json<T: for<'a> Deserialize<'a>>(path: &Path) -> Result<Option<T>, Strin
 // Why: logout and login cleanup must not hide IO errors.
 // From: Issue #871 | PR #1980
 fn remove(path: &Path) -> Result<(), String> {
-    lancache_ng::fs::remove_if_present(path).map_err(|e| format!("{}: {e}", path.display()))
+    crate::shared::fs::remove_if_present(path).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 // What: the 32-byte key that seals the session token.
@@ -291,7 +291,7 @@ fn bound_key(dir: &Path, bind: &[String], fresh: bool) -> Result<[u8; 32], Strin
 // Why: the plaintext token never touches the disk.
 // From: Issue #871 | PR #1858
 fn load_session(dir: &Path, bind: &[String]) -> Result<Option<Session>, String> {
-    let read = lancache_ng::fs::read_if_present(&dir.join(TOKEN_FILE));
+    let read = crate::shared::fs::read_if_present(&dir.join(TOKEN_FILE));
     let Some(sealed) = read.map_err(|e| format!("{TOKEN_FILE}: {e}"))? else {
         return Ok(None);
     };
@@ -653,8 +653,8 @@ fn status(c: &Ctx) -> Result<Value, String> {
 // From: Issue #871 | PR #1980
 fn take_inbox(c: &Ctx, jobs: &mut Vec<Job>, consume: bool) -> Result<(), String> {
     let dir = c.path(INBOX_DIR);
-    let mut names =
-        lancache_ng::fs::entries_if_present(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let mut names = crate::shared::fs::entries_if_present(&dir)
+        .map_err(|e| format!("{}: {e}", dir.display()))?;
     names.sort();
     for path in names {
         match read_json::<Order>(&path) {
@@ -770,7 +770,7 @@ fn in_window((from, to): (u32, u32)) -> bool {
     if to.abs_diff(from) == 1440 || from == to {
         return true;
     }
-    let now = lancache_ng::tool::run(std::process::Command::new("date").arg("+%H:%M"))
+    let now = crate::shared::tool::run(std::process::Command::new("date").arg("+%H:%M"))
         .ok()
         .and_then(|out| String::from_utf8(out).ok())
         .and_then(|t| minutes(&t));
@@ -857,8 +857,10 @@ impl Dl {
         let mut builder = reqwest::Client::builder()
             .dns_resolver(Arc::new(ToProxy(s.text("CONTAINER_NAME_PROXY")?)))
             .pool_max_idle_per_host(connections);
-        let ca = lancache_ng::render::ca_cert(s)?;
-        match lancache_ng::fs::read_if_present(&ca).map_err(|e| format!("{}: {e}", ca.display()))? {
+        let ca = crate::shared::render::ca_cert(s)?;
+        match crate::shared::fs::read_if_present(&ca)
+            .map_err(|e| format!("{}: {e}", ca.display()))?
+        {
             Some(pem) => {
                 let cert = reqwest::Certificate::from_pem(&pem)
                     .map_err(|e| format!("{}: {e}", ca.display()))?;
@@ -1749,8 +1751,8 @@ fn save_depots(dir: &Path, app: u32, ids: &[u32]) -> Result<(), String> {
 // From: Issue #871 | PR #1991
 fn known_depots(dir: &Path) -> Result<BTreeMap<u32, Vec<u32>>, String> {
     let dir = dir.join(DEPOTS_DIR);
-    let paths =
-        lancache_ng::fs::entries_if_present(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let paths = crate::shared::fs::entries_if_present(&dir)
+        .map_err(|e| format!("{}: {e}", dir.display()))?;
     let mut out = BTreeMap::new();
     for path in paths {
         let Some(app) = path
@@ -1792,7 +1794,7 @@ fn walk_cache(
     sizes: &mut BTreeMap<u32, u64>,
     freed: &mut (u64, u64),
 ) -> Result<(), String> {
-    for (path, meta) in lancache_ng::fs::files_under(dir) {
+    for (path, meta) in crate::shared::fs::files_under(dir) {
         let Some(depot) = key_depot(&path) else {
             continue;
         };
@@ -1828,7 +1830,7 @@ fn cached(c: &Ctx) -> Result<Value, String> {
 // Why: one button empties the whole cache.
 // From: Issue #871 | PR #1991
 fn wipe_dir(dir: &Path, freed: &mut (u64, u64)) -> Result<(), String> {
-    for (path, meta) in lancache_ng::fs::files_under(dir) {
+    for (path, meta) in crate::shared::fs::files_under(dir) {
         remove(&path)?;
         freed.0 += meta.len();
         freed.1 += 1;
@@ -2111,9 +2113,8 @@ async fn command(c: Ctx, args: &[String]) -> Result<Value, String> {
 // What: entry point; no argument runs the daemon.
 // Why: one binary for the daemon and UI commands.
 // From: Issue #871 | PR #1980
-#[tokio::main]
-async fn main() -> std::process::ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+pub async fn run(args: &[String]) -> std::process::ExitCode {
+    let args: Vec<String> = args.to_vec();
     let result = match Ctx::load() {
         Err(e) => Err(e),
         Ok(c) if args.first().is_none_or(|a| a == "daemon") => {

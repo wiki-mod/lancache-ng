@@ -6,8 +6,6 @@
 // Why: one owner per behaviour; crates stay thin.
 // From: Issue #1683 | PR #1858
 
-pub mod config;
-
 // What: wall-clock time since the Unix epoch.
 // Why: file names, ids and logs need a plain number.
 // From: Issue #1683 | PR #1980
@@ -169,17 +167,6 @@ pub mod fs {
         match fs::remove_file(path) {
             Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
             _ => Ok(()),
-        }
-    }
-
-    // What: metadata, or None if the path is absent.
-    // Why: absent is a normal state, not an error.
-    // From: Issue #1683 | PR #1858
-    pub fn metadata_if_present(path: &Path) -> io::Result<Option<fs::Metadata>> {
-        match fs::symlink_metadata(path) {
-            Ok(m) => Ok(Some(m)),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(e),
         }
     }
 
@@ -569,15 +556,10 @@ pub mod pdns {
     // From: Issue #1683 | PR #1980
     #[derive(Clone, Debug, serde::Deserialize)]
     pub struct Zone {
-        pub id: String,
         pub name: String,
         pub kind: String,
         #[serde(default)]
         pub serial: u32,
-        #[serde(default)]
-        pub notified_serial: u32,
-        #[serde(default)]
-        pub last_check: u64,
         #[serde(default)]
         pub masters: Vec<String>,
     }
@@ -826,14 +808,6 @@ pub mod pdns {
             serde_json::from_str(&text).map_err(|e| format!("zone list: {e}"))
         }
 
-        // What: the zone as BIND zone-file text.
-        // Why: snapshots store what PowerDNS exports.
-        // From: Issue #1683 | PR #1980
-        pub async fn export(&self, zone: &str) -> Result<String, String> {
-            self.call(Method::GET, &format!("{}/export", zone_path(zone)), None)
-                .await
-        }
-
         // What: send NOTIFY to all secondaries now.
         // Why: a lagging secondary is pushed at once.
         // From: Issue #1683 | PR #1980
@@ -918,7 +892,7 @@ pub mod dns {
     // Why: zone names compare equal in one form.
     // From: Issue #1683 | PR #1980
     pub fn canonical_zone(zone: &str) -> String {
-        crate::pdns::zone_id(&zone.to_ascii_lowercase())
+        crate::shared::pdns::zone_id(&zone.to_ascii_lowercase())
     }
 
     // What: RFC 1035 host name check.
@@ -1138,7 +1112,10 @@ pub mod dns {
     // What: top zones of endings the Internet lacks.
     // Why: a signed .lan needs its own top zone.
     // From: Issue #1683 | PR #2019
-    pub fn top_zones(s: &Settings, psl: &crate::nginx_conf::Psl) -> Result<Vec<String>, String> {
+    pub fn top_zones(
+        s: &Settings,
+        psl: &crate::shared::nginx_conf::Psl,
+    ) -> Result<Vec<String>, String> {
         let mut out: Vec<String> = Vec::new();
         for zone in lan_domains(s)? {
             let last = ending(&zone);
@@ -1180,6 +1157,7 @@ pub mod dns {
     // Why: the dashboard shows lost NOTIFY or AXFR.
     // From: Issue #1683 | PR #1980
     #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+    #[allow(clippy::enum_variant_names)]
     pub enum Sync {
         InSync,
         Behind,
@@ -1958,7 +1936,7 @@ pub mod cert {
     // Why: a failed step names its subcommand.
     // From: Issue #1683 | PR #1980
     fn openssl(args: &[&str]) -> Result<String, String> {
-        let out = crate::tool::run(Command::new("openssl").args(args))?;
+        let out = crate::shared::tool::run(Command::new("openssl").args(args))?;
         Ok(String::from_utf8_lossy(&out).into_owned())
     }
 
@@ -2066,7 +2044,7 @@ pub mod cert {
             ])
         });
         for tmp in [&csr, &ext] {
-            if let Err(e) = crate::fs::remove_if_present(tmp) {
+            if let Err(e) = crate::shared::fs::remove_if_present(tmp) {
                 eprintln!("cert: {} left behind: {e}", tmp.display());
             }
         }
@@ -2136,7 +2114,7 @@ pub mod cert {
         let yoe = y - era * 400;
         let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + d - 1;
         let end = era * 146_097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719_468;
-        let today = crate::clock::unix_secs() / crate::tidy::DAY;
+        let today = crate::shared::clock::unix_secs() / crate::shared::tidy::DAY;
         let now = i64::try_from(today).map_err(|e| e.to_string())?;
         Ok((day, end - now))
     }
@@ -2341,7 +2319,7 @@ pub mod snmp {
 // Why: zone and Kea rollbacks pick one by id.
 // From: Issue #1683 | PR #1980
 pub mod snapshot {
-    use crate::fs::{self, Owner, Place};
+    use crate::shared::fs::{self, Owner, Place};
     use std::path::PathBuf;
 
     // What: snapshot dir, keep count, owner, file name.
@@ -2376,7 +2354,7 @@ pub mod snapshot {
         // Why: exclusive create; then prune old ones.
         // From: Issue #1683 | PR #1980
         pub fn save(&self, body: &[u8]) -> Result<String, String> {
-            let id = crate::clock::unix_nanos().to_string();
+            let id = crate::shared::clock::unix_nanos().to_string();
             let mode = fs::PRIVATE_MODE;
             fs::write(&self.path(&id), body, mode, Place::Exclusive, self.owner)
                 .map_err(|e| format!("snapshot {id}: {e}"))?;
@@ -2388,7 +2366,7 @@ pub mod snapshot {
         // Why: longer digit string is newer, then text.
         // From: Issue #1683 | PR #1980
         pub fn list(&self) -> Result<Vec<String>, String> {
-            let entries = crate::fs::entries_if_present(&self.dir)
+            let entries = crate::shared::fs::entries_if_present(&self.dir)
                 .map_err(|e| format!("{}: {e}", self.dir.display()))?;
             let mut ids: Vec<String> = entries
                 .iter()
@@ -2812,7 +2790,7 @@ pub mod chrony {
             s.uint("NTP_PORT")?
         );
         for host in &upstream {
-            let kind = if crate::dns::is_ip(host) {
+            let kind = if crate::shared::dns::is_ip(host) {
                 "server"
             } else {
                 "pool"
@@ -2858,7 +2836,7 @@ pub mod pdns_conf {
         secondaries(s)
             .into_iter()
             .map(|(_, ip)| ip)
-            .filter(|ip| crate::dns::is_ip(ip))
+            .filter(|ip| crate::shared::dns::is_ip(ip))
             .collect()
     }
 
@@ -2866,7 +2844,7 @@ pub mod pdns_conf {
     // Why: recursor and dnsdist send to the same place.
     // From: Issue #1683 | PR #2017
     pub fn auth_endpoint(s: &Settings) -> Result<String, String> {
-        Ok(crate::dns::host_port(
+        Ok(crate::shared::dns::host_port(
             &s.text("PDNS_AUTH_ADDRESS")?,
             s.uint("PDNS_AUTH_PORT")?,
         ))
@@ -2876,7 +2854,8 @@ pub mod pdns_conf {
     // Why: API on; AXFR by TSIG, not by IP list.
     // From: Issue #1683 | PR #1980
     pub fn auth(s: &Settings, api_key: &str) -> Result<String, String> {
-        let primary = crate::dns::Role::from_settings(s)? == crate::dns::Role::Primary;
+        let primary =
+            crate::shared::dns::Role::from_settings(s)? == crate::shared::dns::Role::Primary;
         let yes = |on: bool| if on { "yes" } else { "no" }.to_string();
         let joined = |key: &str| s.list(key).join(",");
         let rows = [
@@ -2899,7 +2878,7 @@ pub mod pdns_conf {
                     let port = s.uint("PDNS_AUTH_PORT")?;
                     let to: Vec<String> = secondary_ips(s)
                         .iter()
-                        .map(|ip| crate::dns::host_port(ip, port))
+                        .map(|ip| crate::shared::dns::host_port(ip, port))
                         .collect();
                     to.join(",")
                 } else {
@@ -2908,14 +2887,14 @@ pub mod pdns_conf {
                     // From: Issue #1683 | PR #2017
                     let mut to = Vec::new();
                     for which in [
-                        crate::recursor_conf::Which::Http,
-                        crate::recursor_conf::Which::Https,
+                        crate::shared::recursor_conf::Which::Http,
+                        crate::shared::recursor_conf::Which::Https,
                     ] {
                         let port = s.uint(&which.key("PORT"))?;
                         to.extend(
                             s.list(&which.key("LISTEN"))
                                 .iter()
-                                .map(|ip| crate::dns::host_port(ip, port)),
+                                .map(|ip| crate::shared::dns::host_port(ip, port)),
                         );
                     }
                     to.join(",")
@@ -2934,7 +2913,10 @@ pub mod pdns_conf {
             // What: dnsdist passes the client IP by header.
             // Why: ACLs and logs need the real client IP.
             // From: Issue #1683
-            ("proxy-protocol-from", crate::dnsdist_conf::source_of(s)?),
+            (
+                "proxy-protocol-from",
+                crate::shared::dnsdist_conf::source_of(s)?,
+            ),
             ("xfr-cycle-interval", s.uint("PDNS_XFR_CYCLE")?.to_string()),
             ("dnsupdate", yes(primary)),
             ("allow-dnsupdate-from", joined("PDNS_DNSUPDATE_FROM")),
@@ -3013,7 +2995,7 @@ pub mod peer {
     // What: SOA serial of one zone in a zone list.
     // Why: serials show whether a secondary is in sync.
     // From: Issue #1683 | PR #1980
-    pub fn serial_of(zones: &[crate::pdns::Zone], zone: &str) -> Option<u32> {
+    pub fn serial_of(zones: &[crate::shared::pdns::Zone], zone: &str) -> Option<u32> {
         zones.iter().find(|z| z.name == zone).map(|z| z.serial)
     }
 
@@ -3022,10 +3004,10 @@ pub mod peer {
     // From: Issue #1683 | PR #2017
     pub fn peer_zones(
         s: &Settings,
-        ours: &[crate::pdns::Zone],
-        theirs: &[crate::pdns::Zone],
+        ours: &[crate::shared::pdns::Zone],
+        theirs: &[crate::shared::pdns::Zone],
     ) -> Result<Vec<PeerZone>, String> {
-        Ok(crate::dns::managed_zones(s)?
+        Ok(crate::shared::dns::managed_zones(s)?
             .into_iter()
             .map(|zone| PeerZone {
                 primary: serial_of(ours, &zone),
@@ -3039,7 +3021,7 @@ pub mod peer {
     // Why: the peer status is the worst zone state.
     // From: Issue #1683
     pub fn zone_state(z: &PeerZone) -> ZoneState {
-        use crate::dns::Sync;
+        use crate::shared::dns::Sync;
         // What: let-else instead of None in a tuple.
         // Why: CodeQL read that None as unused.
         // From: Issue #1683
@@ -3049,7 +3031,7 @@ pub mod peer {
         let Some(r) = z.secondary else {
             return ZoneState::Missing;
         };
-        match crate::dns::sync_state(p, r) {
+        match crate::shared::dns::sync_state(p, r) {
             Sync::InSync => ZoneState::InSync,
             Sync::Ahead => ZoneState::Ahead,
             Sync::Unknown => ZoneState::Unknown,
@@ -3076,10 +3058,10 @@ pub mod peer {
         let algorithm = s.text("DDNS_TSIG_ALGORITHM")?;
         own_api(
             s,
-            crate::http::client(s)?,
-            &crate::secret::get(s, "PDNS_API_KEY")?,
+            crate::shared::http::client(s)?,
+            &crate::shared::secret::get(s, "PDNS_API_KEY")?,
         )?
-        .set_tsigkey(&name, &algorithm, &crate::secret::tsig_secret(s)?)
+        .set_tsigkey(&name, &algorithm, &crate::shared::secret::tsig_secret(s)?)
         .await?;
         Ok(name)
     }
@@ -3090,10 +3072,11 @@ pub mod peer {
     pub async fn ensure_tsig(s: &Settings, key: &str) -> Result<(), String> {
         let api = own_api(
             s,
-            crate::http::client(s)?,
-            &crate::secret::get(s, "PDNS_API_KEY")?,
+            crate::shared::http::client(s)?,
+            &crate::shared::secret::get(s, "PDNS_API_KEY")?,
         )?;
-        let secondary = crate::dns::Role::from_settings(s)? == crate::dns::Role::Secondary;
+        let secondary =
+            crate::shared::dns::Role::from_settings(s)? == crate::shared::dns::Role::Secondary;
         let key = vec![key.to_string()];
         for z in api.zones().await? {
             if secondary {
@@ -3111,15 +3094,18 @@ pub mod peer {
     pub async fn ensure_secondary_zones(s: &Settings, key: &str) -> Result<(), String> {
         let zones = s.list("DNS_SECONDARY_ZONES");
         let port = primary_xfr_port(s, zones.first()).await?;
-        let masters = vec![crate::dns::host_port(&s.text("DNS_XFR_PRIMARY")?, port)];
+        let masters = vec![crate::shared::dns::host_port(
+            &s.text("DNS_XFR_PRIMARY")?,
+            port,
+        )];
         // What: no removal; the primary's check prunes.
         // Why: this list is from setup and may be older.
         // From: Issue #1683
         match_zones(
             &own_api(
                 s,
-                crate::http::client(s)?,
-                &crate::secret::get(s, "PDNS_API_KEY")?,
+                crate::shared::http::client(s)?,
+                &crate::shared::secret::get(s, "PDNS_API_KEY")?,
             )?,
             &zones,
             &masters,
@@ -3134,7 +3120,7 @@ pub mod peer {
     // Why: one rule at setup and in the primary's check.
     // From: Issue #1683
     pub async fn match_zones(
-        api: &crate::pdns::Api,
+        api: &crate::shared::pdns::Api,
         zones: &[String],
         masters: &[String],
         key: &str,
@@ -3142,7 +3128,10 @@ pub mod peer {
         who: &str,
     ) -> Result<(), String> {
         let have = api.zones().await?;
-        let wanted: Vec<String> = zones.iter().map(|z| crate::pdns::zone_id(z)).collect();
+        let wanted: Vec<String> = zones
+            .iter()
+            .map(|z| crate::shared::pdns::zone_id(z))
+            .collect();
         for id in &wanted {
             if let Some(z) = have.iter().find(|z| z.name == *id) {
                 if z.masters != masters {
@@ -3198,13 +3187,13 @@ pub mod peer {
         s: &Settings,
         address: &str,
         zone: &str,
-    ) -> Result<crate::dns::Soa, String> {
-        let ip = crate::dns::parse_ip(address)?;
+    ) -> Result<crate::shared::dns::Soa, String> {
+        let ip = crate::shared::dns::parse_ip(address)?;
         let port = s.num::<u16>("DNS_PORT")?;
         let addr = std::net::SocketAddr::new(ip, port);
         let wait = std::time::Duration::from_secs(s.uint("SECONDARY_PROBE_TIMEOUT")?);
         let zone = zone.to_string();
-        tokio::task::spawn_blocking(move || crate::dns::soa_probe(addr, &zone, wait))
+        tokio::task::spawn_blocking(move || crate::shared::dns::soa_probe(addr, &zone, wait))
             .await
             .map_err(|e| e.to_string())?
     }
@@ -3212,9 +3201,12 @@ pub mod peer {
     // What: the zone list of one secondary by address.
     // Why: the watchdog and the ui read the same list.
     // From: Issue #1683
-    pub async fn zones_at(s: &Settings, address: &str) -> Result<Vec<crate::pdns::Zone>, String> {
-        let key = crate::secret::get(s, "PDNS_API_KEY")?;
-        api_at(s, crate::http::client(s)?, address, &key)?
+    pub async fn zones_at(
+        s: &Settings,
+        address: &str,
+    ) -> Result<Vec<crate::shared::pdns::Zone>, String> {
+        let key = crate::shared::secret::get(s, "PDNS_API_KEY")?;
+        api_at(s, crate::shared::http::client(s)?, address, &key)?
             .zones()
             .await
     }
@@ -3222,12 +3214,12 @@ pub mod peer {
     // What: one API client per recursor.
     // Why: flush and statistics reach every recursor.
     // From: Issue #1683 | PR #2017
-    pub fn recursor_apis(s: &Settings) -> Result<Vec<crate::pdns::Api>, String> {
-        let key = crate::secret::get(s, "RECURSOR_API_KEY")?;
-        let client = crate::http::client(s)?;
+    pub fn recursor_apis(s: &Settings) -> Result<Vec<crate::shared::pdns::Api>, String> {
+        let key = crate::shared::secret::get(s, "RECURSOR_API_KEY")?;
+        let client = crate::shared::http::client(s)?;
         Ok(s.list("RECURSOR_API_URLS")
             .iter()
-            .map(|url| crate::pdns::Api::new(client.clone(), url, &key))
+            .map(|url| crate::shared::pdns::Api::new(client.clone(), url, &key))
             .collect())
     }
 
@@ -3278,8 +3270,8 @@ pub mod peer {
         s: &Settings,
         client: reqwest::Client,
         key: &str,
-    ) -> Result<crate::pdns::Api, String> {
-        Ok(crate::pdns::Api::new(
+    ) -> Result<crate::shared::pdns::Api, String> {
+        Ok(crate::shared::pdns::Api::new(
             client,
             &s.text("PDNS_PRIMARY_API_URL")?,
             key,
@@ -3294,10 +3286,10 @@ pub mod peer {
         client: reqwest::Client,
         address: &str,
         key: &str,
-    ) -> Result<crate::pdns::Api, String> {
-        let host = crate::dns::host_port(address, s.uint("PDNS_AUTH_API_PORT")?);
+    ) -> Result<crate::shared::pdns::Api, String> {
+        let host = crate::shared::dns::host_port(address, s.uint("PDNS_AUTH_API_PORT")?);
         let url = format!("http://{host}{}", s.text("PDNS_API_PATH")?);
-        Ok(crate::pdns::Api::new(client, &url, key))
+        Ok(crate::shared::pdns::Api::new(client, &url, key))
     }
 
     #[cfg(test)]
@@ -3409,10 +3401,10 @@ pub mod recursor_conf {
         answer: &str,
         serial: u32,
     ) -> Result<String, String> {
-        if !crate::dns::is_ip(answer) {
+        if !crate::shared::dns::is_ip(answer) {
             return Err(format!("RPZ answer {answer:?} is no IP address"));
         }
-        let kind = crate::dns::address_kind(answer);
+        let kind = crate::shared::dns::address_kind(answer);
         let mname = s.text("RPZ_SOA_MNAME")?;
         let mut out = format!(
             "$TTL {}\n@ SOA {mname} {} {serial} {} {} {} {}\n@ NS {mname}\n",
@@ -3428,7 +3420,7 @@ pub mod recursor_conf {
         // From: Issue #1072
         for (d, subtree) in domains {
             let d = d.trim_end_matches('.');
-            if !crate::dns::is_dns_name(d, false, true) {
+            if !crate::shared::dns::is_dns_name(d, false, true) {
                 return Err(format!("cache domain {d:?} is no DNS name"));
             }
             let owner = if *subtree {
@@ -3452,7 +3444,7 @@ pub mod recursor_conf {
         // What: no DNSSEC check for an unchained zone.
         // Why: the root denies it; no chain, no proof.
         // From: Issue #1683 | PR #1980
-        for z in crate::dns::managed_zones(s)? {
+        for z in crate::shared::dns::managed_zones(s)? {
             if !chain.secured.contains(&z) {
                 lua += &format!("addNTA(\"{}\")\n", z.trim_end_matches('.'));
             }
@@ -3517,7 +3509,7 @@ pub mod recursor_conf {
             // What: a name with "_" allowed; empty is ".".
             // Why: a..b and -bad- are no names to forward.
             // From: Issue #1918
-            if !z.is_empty() && !crate::dns::is_dns_name(&z, true, false) {
+            if !z.is_empty() && !crate::shared::dns::is_dns_name(&z, true, false) {
                 return Err(format!("{key}: bad domain {raw}"));
             }
             out.push(if z.is_empty() { ".".to_string() } else { z });
@@ -3529,9 +3521,9 @@ pub mod recursor_conf {
         // Why: local names sent out return NXDOMAIN.
         // From: Issue #1683 | PR #1980
         if key == "DNS_UPSTREAM_ZONES" {
-            for m in crate::dns::managed_zones(s)? {
+            for m in crate::shared::dns::managed_zones(s)? {
                 let m = m.trim_end_matches('.').to_ascii_lowercase();
-                if let Some(z) = out.iter().find(|z| crate::dns::is_within(z, &m)) {
+                if let Some(z) = out.iter().find(|z| crate::shared::dns::is_within(z, &m)) {
                     return Err(format!(
                         "{key}: {z} is the local zone {m}; it is answered here"
                     ));
@@ -3610,8 +3602,8 @@ pub mod recursor_conf {
         chain: &Chain,
     ) -> Result<String, String> {
         let u = |k: &str| s.uint(k).map(|v| v.to_string());
-        let auth = crate::pdns_conf::auth_endpoint(s)?;
-        let mut zones = crate::dns::managed_zones(s)?;
+        let auth = crate::shared::pdns_conf::auth_endpoint(s)?;
+        let mut zones = crate::shared::dns::managed_zones(s)?;
         // What: the top zones go to pdns too.
         // Why: else the root copy denies them (POC case d).
         // From: Issue #1683 | PR #2019
@@ -3668,12 +3660,12 @@ pub mod recursor_conf {
         // What: dnsdist passes the client IP by header.
         // Why: allow_from and logs see the real client.
         // From: Issue #1683
-        let proxy = crate::dnsdist_conf::source_of(s)?;
+        let proxy = crate::shared::dnsdist_conf::source_of(s)?;
         y += &format!("  proxy_protocol_from:\n{}", yaml_list(&[proxy], "    ")?);
         // What: NOTIFY from the own pdns wipes a zone.
         // Why: a secondary has no ui to flush after AXFR.
         // From: Issue #1683 | PR #2017
-        if crate::dns::Role::from_settings(s)? == crate::dns::Role::Secondary {
+        if crate::shared::dns::Role::from_settings(s)? == crate::shared::dns::Role::Secondary {
             let names: Vec<String> = zones
                 .iter()
                 .map(|z| z.trim_end_matches('.').to_string())
@@ -3802,7 +3794,7 @@ pub mod dnsdist_conf {
         for l in listeners {
             for addr in listen {
                 let addr = crate::config::plain(addr)?;
-                let local = crate::dns::host_port(addr, l.port);
+                let local = crate::shared::dns::host_port(addr, l.port);
                 out += &format!("{call}(\"{local}\")\n");
                 call = "addLocal";
             }
@@ -3844,19 +3836,19 @@ pub mod dnsdist_conf {
         // What: peers pass the ACL besides the clients.
         // Why: NOTIFY and AXFR now reach port 53 too.
         // From: Issue #1683
-        let peers = match crate::dns::Role::from_settings(s)? {
-            crate::dns::Role::Primary => crate::pdns_conf::secondary_ips(s),
-            crate::dns::Role::Secondary => vec![s.text("DNS_XFR_PRIMARY")?],
+        let peers = match crate::shared::dns::Role::from_settings(s)? {
+            crate::shared::dns::Role::Primary => crate::shared::pdns_conf::secondary_ips(s),
+            crate::shared::dns::Role::Secondary => vec![s.text("DNS_XFR_PRIMARY")?],
         };
         let mut acl: Vec<String> = Vec::new();
         for net in s.list("DNS_QUERY_ALLOW_FROM").into_iter().chain(peers) {
             crate::config::add_once(&mut acl, &net);
         }
-        let auth = crate::pdns_conf::auth_endpoint(s)?;
+        let auth = crate::shared::pdns_conf::auth_endpoint(s)?;
         let mut listeners = vec![Listener {
             port: s.uint("DNS_PORT")?,
             pool: "http",
-            backend: crate::dns::host_port(&lo, s.uint("RECURSOR_HTTP_PORT")?),
+            backend: crate::shared::dns::host_port(&lo, s.uint("RECURSOR_HTTP_PORT")?),
         }];
         // What: HTTPS port only when IP_HTTPS is set.
         // Why: dns-https idles without IP_HTTPS.
@@ -3865,7 +3857,7 @@ pub mod dnsdist_conf {
             listeners.push(Listener {
                 port: s.uint("DNS_HTTPS_PORT")?,
                 pool: "https",
-                backend: crate::dns::host_port(&lo, s.uint("RECURSOR_HTTPS_PORT")?),
+                backend: crate::shared::dns::host_port(&lo, s.uint("RECURSOR_HTTPS_PORT")?),
             });
         }
         body(&s.list("DNSDIST_LISTEN"), &acl, &source, &auth, &listeners)
@@ -3908,7 +3900,7 @@ pub mod kea_conf {
     // Why: DHCP options carry the name without the dot.
     // From: Issue #1683 | PR #1980
     fn lan_domain(s: &Settings) -> Result<String, String> {
-        let zone = crate::dns::lan_zone(s)?;
+        let zone = crate::shared::dns::lan_zone(s)?;
         Ok(zone.trim_end_matches('.').to_string())
     }
 
@@ -3933,7 +3925,10 @@ pub mod kea_conf {
             .flatten();
         for row in rows {
             let name = row["name"].as_str().unwrap_or_default();
-            let follows = [crate::dhcp::DOMAIN_NAME, crate::dhcp::DOMAIN_SEARCH];
+            let follows = [
+                crate::shared::dhcp::DOMAIN_NAME,
+                crate::shared::dhcp::DOMAIN_SEARCH,
+            ];
             let hit =
                 follows.iter().any(|m| m.name == name) && row["data"].as_str() == Some(before);
             if hit {
@@ -3954,7 +3949,7 @@ pub mod kea_conf {
             let Some(rows) = sn["option-data"].as_array_mut() else {
                 continue;
             };
-            let ntp = crate::dhcp::NTP_SERVERS.name;
+            let ntp = crate::shared::dhcp::NTP_SERVERS.name;
             let at = rows.iter().position(|r| r["name"] == ntp);
             match at {
                 Some(i) if auto => rows[i]["data"] = Value::from(own),
@@ -3998,11 +3993,12 @@ pub mod kea_conf {
     // Why: Kea D2 picks the zone by the FQDN suffix.
     // From: Issue #1683
     pub fn subnet_ddns_suffix(s: &Settings, subnet: &mut Value) -> Result<(), String> {
-        let lans = crate::dns::lan_domains(s)?;
-        let domain = crate::dhcp::option_data(subnet, crate::dhcp::DOMAIN_NAME.name);
+        let lans = crate::shared::dns::lan_domains(s)?;
+        let domain =
+            crate::shared::dhcp::option_data(subnet, crate::shared::dhcp::DOMAIN_NAME.name);
         let zone = Some(domain)
             .filter(|d| !d.is_empty())
-            .map(|d| crate::dns::canonical_zone(&d));
+            .map(|d| crate::shared::dns::canonical_zone(&d));
         let Some(obj) = subnet.as_object_mut() else {
             return Err("subnet is no JSON object".into());
         };
@@ -4020,11 +4016,11 @@ pub mod kea_conf {
     // Why: router, DNS, domain and NTP come from the SOT.
     // From: Issue #1683 | PR #1980
     fn option_rows(s: &Settings, domain: &str) -> Result<Vec<Value>, String> {
-        let dns = crate::dhcp::dns_addrs(s);
-        let ntp = crate::dhcp::ntp_addrs(s)?;
+        let dns = crate::shared::dhcp::dns_addrs(s);
+        let ntp = crate::shared::dhcp::ntp_addrs(s)?;
         let mut rows = named_rows(&s.text("DHCP_GATEWAY")?, &dns, domain, &ntp);
         let raw = s.text_or_empty("DHCP_CUSTOM_OPTIONS");
-        for (code, data) in crate::dhcp::custom_options(s, &raw)? {
+        for (code, data) in crate::shared::dhcp::custom_options(s, &raw)? {
             rows.push(json!({"code": code, "data": data}));
         }
         Ok(rows)
@@ -4034,7 +4030,7 @@ pub mod kea_conf {
     // Why: settings and the subnet form give the same rows.
     // From: Issue #1683
     pub fn named_rows(gateway: &str, dns: &[String], domain: &str, ntp: &[String]) -> Vec<Value> {
-        use crate::dhcp::{DNS_SERVERS, DOMAIN_NAME, DOMAIN_SEARCH, NTP_SERVERS, ROUTERS};
+        use crate::shared::dhcp::{DNS_SERVERS, DOMAIN_NAME, DOMAIN_SEARCH, NTP_SERVERS, ROUTERS};
         let mut rows = vec![
             json!({"name": ROUTERS.name, "data": gateway}),
             json!({"name": DNS_SERVERS.name, "data": dns.join(", ")}),
@@ -4076,16 +4072,16 @@ pub mod kea_conf {
     // From: Issue #1683
     pub fn dhcp4(s: &Settings, existing: Option<&Value>) -> Result<Value, String> {
         let domain = lan_domain(s)?;
-        let (valid, max) = crate::dhcp::lease_limits(s, s.uint("DHCP_LEASE_TIME")?)?;
+        let (valid, max) = crate::shared::dhcp::lease_limits(s, s.uint("DHCP_LEASE_TIME")?)?;
         let pool = pool_text(&s.text("DHCP_RANGE_START")?, &s.text("DHCP_RANGE_END")?);
         // What: last main domain, if no LAN domain now.
         // Why: kept subnets follow only a dropped domain.
         // From: Issue #1683
-        let lans = crate::dns::lan_domains(s)?;
+        let lans = crate::shared::dns::lan_domains(s)?;
         let before = existing
             .and_then(|e| e.pointer("/Dhcp4/ddns-qualifying-suffix"))
             .and_then(Value::as_str)
-            .filter(|d| !lans.contains(&crate::dns::canonical_zone(d)))
+            .filter(|d| !lans.contains(&crate::shared::dns::canonical_zone(d)))
             .map(|d| d.trim_end_matches('.').to_string());
         let id = s.uint("DHCP_SUBNET_ID")?;
         let kept = existing
@@ -4093,9 +4089,9 @@ pub mod kea_conf {
             .cloned()
             .unwrap_or_else(|| json!([]));
         let kept = follow_domain(kept, before.as_deref(), &domain);
-        let back = crate::dhcp::ntp_addrs(s)?.join(", ");
+        let back = crate::shared::dhcp::ntp_addrs(s)?.join(", ");
         let own = s.text("IP_HTTP")?;
-        let kept = follow_ntp(kept, crate::dhcp::own_ntp(s)?, &own, &back);
+        let kept = follow_ntp(kept, crate::shared::dhcp::own_ntp(s)?, &own, &back);
         let old = kept.as_array().into_iter().flatten();
         let old_main = old.clone().find(|x| x["id"].as_u64() == Some(id));
         let mut main = json!({
@@ -4164,7 +4160,7 @@ pub mod kea_conf {
             "ddns-override-client-update": true,
             "ddns-replace-client-name": s.text("KEA_DDNS_REPLACE_CLIENT_NAME")?,
             "ddns-generated-prefix": s.text("KEA_DDNS_GENERATED_PREFIX")?,
-            "ddns-qualifying-suffix": crate::pdns::zone_id(&domain),
+            "ddns-qualifying-suffix": crate::shared::pdns::zone_id(&domain),
             "loggers": log_rows(s, &["kea-dhcp4", "kea-dhcp4.packets"])?
         }}))
     }
@@ -4198,11 +4194,11 @@ pub mod kea_conf {
         // What: one forward entry per LAN domain.
         // Why: D2 rejects a name outside every listed zone.
         // From: Issue #1683
-        let forward: Vec<Value> = crate::dns::lan_domains(s)?
+        let forward: Vec<Value> = crate::shared::dns::lan_domains(s)?
             .iter()
             .map(|z| entry(z))
             .collect();
-        let reverse: Vec<Value> = crate::dns::private_reverse_zones(s)
+        let reverse: Vec<Value> = crate::shared::dns::private_reverse_zones(s)
             .iter()
             .map(|z| entry(z))
             .collect();
@@ -4226,7 +4222,7 @@ pub mod kea_conf {
 // From: Issue #1683 | PR #1980
 pub mod dnsmasq_conf {
     use crate::config::Settings;
-    use crate::dhcp::Mode;
+    use crate::shared::dhcp::Mode;
 
     struct Conf(String);
 
@@ -4324,9 +4320,9 @@ pub mod dnsmasq_conf {
                 .text("DHCP_RELAY_LOCAL_ADDR")
                 .ok()
                 .or_else(|| {
-                    crate::recursor_conf::own_ips(s)
+                    crate::shared::recursor_conf::own_ips(s)
                         .into_iter()
-                        .find(|ip| !crate::dns::is_loopback(ip))
+                        .find(|ip| !crate::shared::dns::is_loopback(ip))
                 })
                 .ok_or("DHCP-Relay: DHCP_RELAY_LOCAL_ADDR is not set")?;
             let upstream = s.text("UPSTREAM_DHCP_IP").map_err(|_| {
@@ -4341,19 +4337,25 @@ pub mod dnsmasq_conf {
         let get = |k: &str| s.text_or_empty(k);
         c.add(&format!("dhcp-range={}", proxy_range(s)?))?;
         c.add_if("interface=", &s.list("DHCP_PROXY_INTERFACE").join(","))?;
-        use crate::dhcp::{DNS_SERVERS, DOMAIN_NAME, NTP_SERVERS, ROUTERS};
-        let by_code = |m: crate::dhcp::Managed| format!("dhcp-option-pxe={},", m.code);
+        use crate::shared::dhcp::{DNS_SERVERS, DOMAIN_NAME, NTP_SERVERS, ROUTERS};
+        let by_code = |m: crate::shared::dhcp::Managed| format!("dhcp-option-pxe={},", m.code);
         c.add_if(&by_code(ROUTERS), &get("DHCP_PROXY_ROUTER"))?;
-        c.add_if(&by_code(DNS_SERVERS), &crate::dhcp::dns_addrs(s).join(","))?;
+        c.add_if(
+            &by_code(DNS_SERVERS),
+            &crate::shared::dhcp::dns_addrs(s).join(","),
+        )?;
         c.add_if(&by_code(DOMAIN_NAME), &get("DHCP_PROXY_DOMAIN"))?;
-        c.add_if(&by_code(NTP_SERVERS), &crate::dhcp::ntp_addrs(s)?.join(","))?;
+        c.add_if(
+            &by_code(NTP_SERVERS),
+            &crate::shared::dhcp::ntp_addrs(s)?.join(","),
+        )?;
         let file = get("DHCP_PROXY_BOOT_FILENAME");
         if !file.is_empty() {
             let server = get("DHCP_PROXY_BOOT_SERVER");
             c.add(&format!("dhcp-boot={file},,{server}"))?;
         }
         let raw = get("DHCP_CUSTOM_OPTIONS");
-        for (code, data) in crate::dhcp::custom_options(s, &raw)? {
+        for (code, data) in crate::shared::dhcp::custom_options(s, &raw)? {
             c.add(&format!("dhcp-option-pxe={code},{data}"))?;
         }
         pxe(s, &mut c)?;
@@ -4463,7 +4465,7 @@ pub mod nginx_conf {
     pub fn hosts(domains: &str, psl: &Psl) -> Result<Hosts, String> {
         let mut h = Hosts::default();
         for row in crate::config::data_rows(domains) {
-            let (name, wild) = crate::dns::cdn_entry(row)
+            let (name, wild) = crate::shared::dns::cdn_entry(row)
                 .ok_or_else(|| format!("invalid domain entry {row:?}"))?;
             let root = psl
                 .root(&name)
@@ -4595,7 +4597,9 @@ pub mod nginx_conf {
             other => return Err(format!("PROXY_SECURITY_MODE {other} is not lazy/strict")),
         };
         let lo = s.text("LOOPBACK_BIND_IP")?;
-        let at = |k: &str| -> Result<String, String> { Ok(crate::dns::host_port(&lo, s.uint(k)?)) };
+        let at = |k: &str| -> Result<String, String> {
+            Ok(crate::shared::dns::host_port(&lo, s.uint(k)?))
+        };
         Ok(Plan {
             strict,
             cidrs: s.list("PROXY_ALLOWED_CLIENT_CIDRS"),
@@ -4797,7 +4801,7 @@ pub mod nginx_conf {
 // From: Issue #1683 | PR #1980
 pub mod apply {
     use crate::config::{Change, Effect};
-    use crate::docker::{Action, Api, Error};
+    use crate::shared::docker::{Action, Api, Error};
     use std::collections::BTreeMap;
     use std::time::Duration;
 
@@ -4935,8 +4939,8 @@ pub mod apply {
 // From: Issue #1683 | PR #1980
 pub mod render {
     use crate::config::Settings;
-    use crate::recursor_conf::{self, Chain, Which};
-    use crate::{chrony, dhcp, dnsmasq_conf, kea_conf, log, nginx_conf, pdns_conf};
+    use crate::shared::recursor_conf::{self, Chain, Which};
+    use crate::shared::{chrony, dhcp, dnsmasq_conf, kea_conf, log, nginx_conf, pdns_conf};
     use std::path::{Path, PathBuf};
 
     // What: secrets the config files embed.
@@ -5037,7 +5041,7 @@ pub mod render {
         o.add_file(
             "SERVICES_SERVICE",
             "SNMPD_CONF_FILE",
-            crate::snmp::render(s, &[], &[]),
+            crate::shared::snmp::render(s, &[], &[]),
         );
         o.add_file(
             "DNS_SERVICE",
@@ -5047,7 +5051,7 @@ pub mod render {
         o.add_file(
             "DNS_SERVICE",
             "DNSDIST_CONF_FILE",
-            crate::dnsdist_conf::render(s),
+            crate::shared::dnsdist_conf::render(s),
         );
         for (which, ip_key) in [(Which::Http, "IP_HTTP"), (Which::Https, "IP_HTTPS")] {
             let Ok(answer) = s.text(ip_key) else { continue };
@@ -5156,9 +5160,9 @@ pub mod render {
         // What: nginx resolvers must not be this host.
         // Why: threat model G3: own DNS sends CDNs here.
         // From: Issue #1683 | PR #1985
-        let own = crate::recursor_conf::own_ips(s);
+        let own = crate::shared::recursor_conf::own_ips(s);
         for raw in s.list("NGINX_UPSTREAM_RESOLVER") {
-            crate::recursor_conf::upstream_entry("NGINX_UPSTREAM_RESOLVER", &raw, &own)?;
+            crate::shared::recursor_conf::upstream_entry("NGINX_UPSTREAM_RESOLVER", &raw, &own)?;
         }
         let hosts = cache_hosts(s, domains)?;
         let https = s.flag("HTTPS_ENABLED")?;
@@ -5206,7 +5210,7 @@ pub mod render {
     // Why: leaves of an old CA fail on every client.
     // From: Issue #1683 | PR #1980
     fn drop_stale_leaves(ca_crt: &Path, dir: &Path, stamp: &Path) -> Result<(), String> {
-        let print = crate::cert::fingerprint(ca_crt)?;
+        let print = crate::shared::cert::fingerprint(ca_crt)?;
         if std::fs::read_to_string(stamp).ok().as_deref() == Some(print.as_str()) {
             return Ok(());
         }
@@ -5256,7 +5260,7 @@ pub mod render {
         }
         grant(&dir, gid, s.mode("CERT_DIR_MODE")?)?;
         if !(ca_crt.exists() && ca_key.exists()) {
-            crate::cert::make_ca(
+            crate::shared::cert::make_ca(
                 &ca_key,
                 &ca_crt,
                 &s.text("CA_SUBJECT")?,
@@ -5270,7 +5274,7 @@ pub mod render {
         }
         grant(&ca_key, None, s.mode("CA_KEY_MODE")?)?;
         drop_stale_leaves(&ca_crt, &dir, &dir.join(s.text("CA_STAMP_FILE")?))?;
-        let hosts = cache_hosts(s, &crate::cdn::effective(s)?)?;
+        let hosts = cache_hosts(s, &crate::shared::cdn::effective(s)?)?;
         let mut want = hosts.certs();
         // What: default cert: DNS name and IP_HTTPS.
         // Why: clients without SNI or by IP get this cert.
@@ -5286,7 +5290,7 @@ pub mod render {
                 dir.join(format!("{name}.crt")),
             );
             if !(crt.exists() && key.exists()) {
-                crate::cert::make_leaf(
+                crate::shared::cert::make_leaf(
                     &ca_key,
                     &ca_crt,
                     &serial,
@@ -5309,14 +5313,17 @@ pub mod render {
     // Why: all and dns_only feed the dns files with them.
     // From: Issue #1683 | PR #2017
     fn cdn_names(domains: &str) -> Vec<(String, bool)> {
-        domains.lines().filter_map(crate::dns::cdn_entry).collect()
+        domains
+            .lines()
+            .filter_map(crate::shared::dns::cdn_entry)
+            .collect()
     }
 
     // What: secrets the configs embed.
     // Why: made once; restarts never change them.
     // From: Issue #1683 | PR #1858
     pub fn secrets(s: &Settings) -> Result<Secrets, String> {
-        use crate::secret;
+        use crate::shared::secret;
         Ok(Secrets {
             pdns_api_key: secret::get(s, "PDNS_API_KEY")?,
             recursor_api_key: secret::get(s, "RECURSOR_API_KEY")?,
@@ -5337,8 +5344,9 @@ pub mod render {
             // Why: owners read it at start; a HUP kills.
             // From: Issue #1683 | PR #1980
             let wake = f.path.exists();
-            let owner = crate::fs::Owner::default();
-            let changed = crate::fs::write_if_changed(&f.path, f.body.as_bytes(), mode, owner);
+            let owner = crate::shared::fs::Owner::default();
+            let changed =
+                crate::shared::fs::write_if_changed(&f.path, f.body.as_bytes(), mode, owner);
             if changed.map_err(|e| format!("{}: {e}", f.path.display()))? && wake {
                 out.push(crate::config::Change {
                     key: f.path.display().to_string(),
@@ -5355,7 +5363,7 @@ pub mod render {
     // From: Issue #1683 | PR #1980
     pub fn all(s: &Settings, sec: &Secrets, chain: &Chain) -> Result<Vec<File>, Vec<String>> {
         let mut o = Out::new(s);
-        let domains = match crate::cdn::effective(s) {
+        let domains = match crate::shared::cdn::effective(s) {
             Ok(d) => d,
             Err(e) => {
                 o.errs.push(e);
@@ -5375,7 +5383,7 @@ pub mod render {
     // From: Issue #1683 | PR #1980
     pub fn dns_only(s: &Settings, sec: &Secrets) -> Result<Vec<File>, Vec<String>> {
         let mut o = Out::new(s);
-        let domains = crate::cdn::effective(s).map_err(|e| vec![e])?;
+        let domains = crate::shared::cdn::effective(s).map_err(|e| vec![e])?;
         // What: a secondary renders without anchors.
         // Why: it keeps the NTA until the zone list.
         // From: Issue #1683 | PR #2019
@@ -5408,11 +5416,11 @@ pub mod ntp {
     // Why: the probe reads the raw reply packet.
     // From: Issue #1683 | PR #1980
     fn ask(host: &str, port: u64, wait: Duration) -> std::io::Result<[u8; PACKET]> {
-        let sock = crate::dns::udp_for(host.contains(':'))?;
+        let sock = crate::shared::dns::udp_for(host.contains(':'))?;
         sock.set_read_timeout(Some(wait))?;
         let mut req = [0u8; PACKET];
         req[0] = REQUEST_HEAD;
-        sock.send_to(&req, crate::dns::host_port(host, port))?;
+        sock.send_to(&req, crate::shared::dns::host_port(host, port))?;
         let mut reply = [0u8; PACKET];
         let n = sock.recv(&mut reply)?;
         if n < PACKET {
@@ -5639,7 +5647,7 @@ pub mod cdn {
     // From: Issue #1683 | PR #1980
     fn new_row(name: String, is_default: bool, enabled: bool) -> Row {
         Row {
-            is_valid: crate::dns::cdn_entry(&name).is_some(),
+            is_valid: crate::shared::dns::cdn_entry(&name).is_some(),
             display: name,
             is_default,
             enabled,
@@ -5737,7 +5745,7 @@ pub mod kea {
                 .json(&body)
                 .send()
                 .await
-                .map_err(|e| fail(crate::http::error_chain(&e)))?;
+                .map_err(|e| fail(crate::shared::http::error_chain(&e)))?;
             let all: Value = reply.json().await.map_err(|e| fail(e.to_string()))?;
             let answer = match all.get(0) {
                 Some(first) => first.clone(),
@@ -6050,7 +6058,7 @@ pub mod rrd {
         for rra in s.list("STATS_RRAS") {
             cmd.arg(format!("RRA:{rra}"));
         }
-        crate::tool::run(&mut cmd)?;
+        crate::shared::tool::run(&mut cmd)?;
         Ok(())
     }
 
@@ -6073,7 +6081,7 @@ pub mod rrd {
         get.arg(s.text("SNMP_COMMUNITY")?)
             .arg(s.text("STATS_SNMP_TARGET")?);
         get.args(g.sources.iter().map(|x| &x.oid));
-        let text = String::from_utf8_lossy(&crate::tool::run(&mut get)?).into_owned();
+        let text = String::from_utf8_lossy(&crate::shared::tool::run(&mut get)?).into_owned();
         let values: Vec<String> = text.lines().map(number_or_unknown).collect();
         store(s, g, &values)
     }
@@ -6091,7 +6099,7 @@ pub mod rrd {
         put.arg("update")
             .arg(file(s, g)?)
             .arg(format!("N:{}", values.join(":")));
-        crate::tool::run(&mut put)?;
+        crate::shared::tool::run(&mut put)?;
         Ok(())
     }
 
@@ -6159,7 +6167,7 @@ pub mod rrd {
             cmd.arg(format!("GPRINT:{}:AVERAGE:avg %8.2lf{unit}", src.ds));
             cmd.arg(format!("GPRINT:{}:MAX:max %8.2lf{unit}\\l", src.ds));
         }
-        crate::tool::run(&mut cmd)
+        crate::shared::tool::run(&mut cmd)
     }
 }
 
@@ -6238,12 +6246,12 @@ pub mod tidy {
     // Why: base for age, size and pack runs.
     // From: Issue #1683 | PR #1980
     pub fn files(dir: &Path) -> Vec<Item> {
-        crate::fs::files_under(dir)
+        crate::shared::fs::files_under(dir)
             .into_iter()
             .map(|(path, meta)| Item {
                 path,
                 size: meta.len(),
-                mtime: crate::fs::modified_secs(&meta),
+                mtime: crate::shared::fs::modified_secs(&meta),
             })
             .collect()
     }
@@ -6311,7 +6319,7 @@ pub mod tidy {
             }
             let mut xz = Command::new("xz");
             xz.arg(format!("-{preset}")).arg("--").arg(&f.path);
-            if let Err(e) = crate::tool::run(&mut xz) {
+            if let Err(e) = crate::shared::tool::run(&mut xz) {
                 errs.push(e);
             }
         }
@@ -6328,7 +6336,7 @@ pub mod tidy {
             .map_err(|e| format!("{}: {e}", packed.display()))?;
         let mut xz = Command::new("xz");
         xz.arg(format!("-{preset}")).arg("-c").arg("--").arg(src);
-        crate::tool::run(xz.stdout(out))?;
+        crate::shared::tool::run(xz.stdout(out))?;
         std::fs::remove_file(src).map_err(|e| format!("{}: {e}", src.display()))
     }
 
@@ -6364,7 +6372,7 @@ pub mod tidy {
     // Why: syslog-ng-ctl stats lists the store rows.
     // From: Issue #1683 | PR #1980
     pub fn syslog_processed() -> Result<u64, String> {
-        let out = crate::tool::run(Command::new("syslog-ng-ctl").arg("stats"))?;
+        let out = crate::shared::tool::run(Command::new("syslog-ng-ctl").arg("stats"))?;
         let text = String::from_utf8_lossy(&out);
         let mut total = 0;
         for row in text.lines() {
