@@ -506,7 +506,6 @@ runtime:
     - RPZ_SOA_EXPIRE=86400
     - RPZ_SOA_MINIMUM=60
     - RPZ_POLICY_NAME=lancache-rpz
-    - ROOT_ZONE_MIRROR_SERVERS=199.9.14.201 192.33.4.12 192.5.5.241
     - ROOT_ZONE_MIRROR_URL=https://www.internic.net/domain/root.zone
     - ROOT_ZONE_MIRROR_REFRESH=1800
     - ROOT_ZONE_MIRROR_RETRY=3600
