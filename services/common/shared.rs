@@ -1889,7 +1889,7 @@ pub mod docker {
             };
             let path = format!("/containers/{name}/{verb}");
             // What: 304 is ok here; call() says so already.
-            // Why: a stop of a stopped container is no error.
+            // Why: stopping a stopped one is no error.
             // From: Issue #1683 | PR #1980
             self.call(Method::POST, &path, None, limit).await.map(drop)
         }
