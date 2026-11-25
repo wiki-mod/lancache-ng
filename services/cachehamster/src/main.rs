@@ -317,19 +317,29 @@ fn store_session(c: &Ctx, session: &Session) -> Result<(), String> {
     )
 }
 
-// What: POST a form to a Steam Web API method.
+// What: how a Steam Web API call sends its values.
+// Why: write calls post a form, read calls use GET.
+// From: Issue #871 | PR #1980
+enum Req<'a> {
+    Get(&'a [(&'a str, &'a str)]),
+    Post(&'a [(&'a str, &'a str)]),
+}
+
+// What: one Steam Web API call; its "response" part.
 // Why: one owner for URL, error text and the response key.
 // From: Issue #871 | PR #1980
-async fn steam_post(
+async fn steam_api(
     client: &reqwest::Client,
-    c: &Ctx,
+    api: &str,
     method: &str,
-    form: &[(&str, &str)],
+    req: Req<'_>,
 ) -> Result<Value, String> {
-    let url = format!("{}/{method}/v1/", c.api);
-    let resp = client
-        .post(&url)
-        .form(form)
+    let url = format!("{api}/{method}/v1/");
+    let call = match req {
+        Req::Get(query) => client.get(&url).query(query),
+        Req::Post(form) => client.post(&url).form(form),
+    };
+    let resp = call
         .send()
         .await
         .map_err(|e| format!("{method}: {}", http::error_chain(&e)))?;
@@ -342,30 +352,6 @@ async fn steam_post(
         .to_string();
     if !status.is_success() {
         return Err(format!("{method}: HTTP {status}, eresult {eresult}"));
-    }
-    let body: Value = resp.json().await.map_err(|e| format!("{method}: {e}"))?;
-    Ok(body.get("response").cloned().unwrap_or(Value::Null))
-}
-
-// What: GET a Steam Web API method with query values.
-// Why: read-only service calls use GET.
-// From: Issue #871 | PR #1980
-async fn steam_get(
-    client: &reqwest::Client,
-    c: &Ctx,
-    method: &str,
-    query: &[(&str, &str)],
-) -> Result<Value, String> {
-    let url = format!("{}/{method}/v1/", c.api);
-    let resp = client
-        .get(&url)
-        .query(query)
-        .send()
-        .await
-        .map_err(|e| format!("{method}: {}", http::error_chain(&e)))?;
-    let status = resp.status();
-    if !status.is_success() {
-        return Err(format!("{method}: HTTP {status}"));
     }
     let body: Value = resp.json().await.map_err(|e| format!("{method}: {e}"))?;
     Ok(body.get("response").cloned().unwrap_or(Value::Null))
@@ -431,14 +417,14 @@ async fn login_begin(c: &Ctx, client: &reqwest::Client) -> Result<Value, String>
     // Why: the CM refuses tokens of a mobile login.
     // From: Issue #871 | PR #1980
     let platform = c.s.uint("STEAM_AUTH_PLATFORM_TYPE")?.to_string();
-    let r = steam_post(
+    let r = steam_api(
         client,
-        c,
+        &c.api,
         "IAuthenticationService/BeginAuthSessionViaQR",
-        &[
+        Req::Post(&[
             ("device_friendly_name", &device),
             ("platform_type", &platform),
-        ],
+        ]),
     )
     .await?;
     let pending = Pending {
@@ -464,11 +450,11 @@ async fn login_poll(c: &Ctx, client: &reqwest::Client) -> Result<Value, String> 
     let Some(mut p) = read_json::<Pending>(&c.path(PENDING_FILE))? else {
         return Ok(json!({"state": "idle"}));
     };
-    let r = steam_post(
+    let r = steam_api(
         client,
-        c,
+        &c.api,
         "IAuthenticationService/PollAuthSessionStatus",
-        &[("client_id", &p.client_id), ("request_id", &p.request_id)],
+        Req::Post(&[("client_id", &p.client_id), ("request_id", &p.request_id)]),
     )
     .await?;
     if let Some(token) = field(&r, "refresh_token") {
@@ -519,14 +505,14 @@ async fn access_token(c: &Ctx, client: &reqwest::Client, s: &Session) -> Result<
     if live {
         return Ok(s.access_token.clone());
     }
-    let r = steam_post(
+    let r = steam_api(
         client,
-        c,
+        &c.api,
         "IAuthenticationService/GenerateAccessTokenForApp",
-        &[
+        Req::Post(&[
             ("refresh_token", &s.refresh_token),
             ("steamid", &s.steam_id),
-        ],
+        ]),
     )
     .await?;
     field(&r, "access_token")
@@ -539,16 +525,16 @@ async fn access_token(c: &Ctx, client: &reqwest::Client, s: &Session) -> Result<
 async fn library(c: &Ctx, client: &reqwest::Client) -> Result<Value, String> {
     let s = load_session(&c.dir, &c.bind)?.ok_or("not logged in")?;
     let token = access_token(c, client, &s).await?;
-    let r = steam_get(
+    let r = steam_api(
         client,
-        c,
+        &c.api,
         "IPlayerService/GetOwnedGames",
-        &[
+        Req::Get(&[
             ("access_token", &token),
             ("steamid", &s.steam_id),
             ("include_appinfo", "1"),
             ("include_played_free_games", "1"),
-        ],
+        ]),
     )
     .await?;
     let games: Vec<Value> = r
@@ -1348,16 +1334,14 @@ impl Cm {
         let steam_id: u64 = steam_id_of(&s.refresh_token)?
             .parse()
             .map_err(|e| format!("steam id: {e}"))?;
-        let list: Value = client
-            .get(format!("{}/ISteamDirectory/GetCMList/v1/", cfg.api))
-            .query(&[("cellid", cfg.cell.as_str())])
-            .send()
-            .await
-            .map_err(|e| format!("CM list: {}", http::error_chain(&e)))?
-            .json()
-            .await
-            .map_err(|e| format!("CM list: {e}"))?;
-        let host = list["response"]["serverlist_websockets"][0]
+        let list = steam_api(
+            client,
+            &cfg.api,
+            "ISteamDirectory/GetCMList",
+            Req::Get(&[("cellid", cfg.cell.as_str())]),
+        )
+        .await?;
+        let host = list["serverlist_websockets"][0]
             .as_str()
             .ok_or("CM list: no websocket server")?
             .to_string();
