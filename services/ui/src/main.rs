@@ -15,7 +15,7 @@ use axum::routing::{get, post};
 use axum::{Extension, Router};
 use base64::Engine as _;
 use lancache_ng::config::{self, Settings, process_env};
-use lancache_ng::dhcp::Mode as DhcpMode;
+use lancache_ng::dhcp::{Mode as DhcpMode, option_data};
 use lancache_ng::dns::Role;
 use lancache_ng::peer::{self, PeerZone, ZoneState};
 use lancache_ng::{access, apply, docker, fs, http, human, render, secret};
@@ -1302,7 +1302,7 @@ async fn domain_subnets(s: &Settings) -> BTreeMap<String, Vec<String>> {
         return out;
     };
     for sn in cfg["Dhcp4"]["subnet4"].as_array().into_iter().flatten() {
-        let domain = option_data(sn, "domain-name");
+        let domain = option_data(sn, lancache_ng::dhcp::DOMAIN_NAME.name);
         if domain.is_empty() {
             continue;
         }
@@ -2128,17 +2128,6 @@ fn kea_api(s: &Settings) -> Result<lancache_ng::kea::Api, String> {
         &s.text("KEA_CTRL_USER")?,
         &token,
     ))
-}
-
-// What: value of one Kea option in a subnet.
-// Why: forms show options by name, Kea stores a list.
-// From: Issue #1683 | PR #1980
-fn option_data(sn: &Value, name: &str) -> String {
-    let rows = sn["option-data"].as_array().cloned().unwrap_or_default();
-    let hit = rows.iter().find(|o| o["name"] == name);
-    hit.and_then(|o| o["data"].as_str())
-        .unwrap_or_default()
-        .to_string()
 }
 
 // What: one Kea subnet as flat page fields.

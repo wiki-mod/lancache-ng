@@ -1390,6 +1390,17 @@ pub mod dhcp {
         code: 119,
     };
 
+    // What: value of one Kea option in a subnet.
+    // Why: forms show options by name, Kea stores a list.
+    // From: Issue #1683 | PR #1980
+    pub fn option_data(subnet: &serde_json::Value, name: &str) -> String {
+        let rows = subnet["option-data"].as_array().into_iter().flatten();
+        let hit = rows.into_iter().find(|o| o["name"] == name);
+        hit.and_then(|o| o["data"].as_str())
+            .unwrap_or_default()
+            .to_string()
+    }
+
     // What: check a custom option code.
     // Why: 0 and 255 are pad/end; managed have fields.
     // From: Issue #1683 | PR #1980
@@ -3602,14 +3613,10 @@ pub mod kea_conf {
     // From: Issue #1683
     pub fn subnet_ddns_suffix(s: &Settings, subnet: &mut Value) -> Result<(), String> {
         let lans = crate::dns::lan_domains(s)?;
-        let rows = subnet["option-data"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default();
-        let named = rows.iter().find(|r| r["name"] == "domain-name");
-        let zone = named
-            .and_then(|r| r["data"].as_str())
-            .map(crate::dns::canonical_zone);
+        let domain = crate::dhcp::option_data(subnet, crate::dhcp::DOMAIN_NAME.name);
+        let zone = Some(domain)
+            .filter(|d| !d.is_empty())
+            .map(|d| crate::dns::canonical_zone(&d));
         let Some(obj) = subnet.as_object_mut() else {
             return Err("subnet is no JSON object".into());
         };
