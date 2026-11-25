@@ -640,7 +640,9 @@ async fn commit(app: &App, form: Fields) -> Result<(), String> {
     // What: a value that cannot render is not kept.
     // Why: a bad value must not reach the files.
     // From: Issue #1683 | PR #1980
-    let check = secrets(&new).and_then(|sec| render::all(&new, &sec).map_err(|e| e.join("; ")));
+    let none = lancache_ng::recursor_conf::Chain::default();
+    let check =
+        secrets(&new).and_then(|sec| render::all(&new, &sec, &none).map_err(|e| e.join("; ")));
     if let Err(e) = check {
         // What: a refused save is logged, not only shown.
         // Why: the error must leave a trace in the logs.
@@ -1404,6 +1406,10 @@ fn canonical(kind: &str, c: &str) -> String {
             Some((head, target)) => format!("{head} {}", dot(target)),
             None => c.to_string(),
         },
+        // What: a DS digest in small hex letters.
+        // Why: pdns and its key list may differ in case.
+        // From: Issue #1683 | PR #2019
+        "DS" => c.to_ascii_lowercase(),
         _ => c.to_string(),
     }
 }
@@ -3220,6 +3226,73 @@ async fn plan_containers<V>(
     (names, skipped)
 }
 
+// What: render with the live chain, then write.
+// Why: apply and start share one way to the files.
+// From: Issue #1683 | PR #2019
+async fn render_and_write(
+    s: &Settings,
+) -> Result<(Vec<render::File>, Vec<config::Change>), String> {
+    let sec = secrets(s)?;
+    let chain = dnssec_chain(s).await;
+    let files = render::all(s, &sec, &chain).map_err(|e| e.join("; "))?;
+    let written = write_files(s, &files)?;
+    Ok((files, written))
+}
+
+// What: the live chain; on error NTA everywhere.
+// Why: no proof must never mean SERVFAIL.
+// From: Issue #1683 | PR #2019
+async fn dnssec_chain(s: &Settings) -> lancache_ng::recursor_conf::Chain {
+    match read_chain(s).await {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("ui: DNSSEC anchors off: {e}");
+            lancache_ng::recursor_conf::Chain::default()
+        }
+    }
+}
+
+// What: anchors of top zones; zones chained to them.
+// Why: a zone loses its NTA only on a proven chain.
+// From: Issue #1683 | PR #2019
+async fn read_chain(s: &Settings) -> Result<lancache_ng::recursor_conf::Chain, String> {
+    let mut chain = lancache_ng::recursor_conf::Chain::default();
+    if Role::from_settings(s)? != Role::Primary {
+        return Ok(chain);
+    }
+    let tops = own_tops(s)?;
+    if tops.is_empty() {
+        return Ok(chain);
+    }
+    let api = pdns_api(s)?;
+    for top in &tops {
+        let ds = api.ds(top).await.unwrap_or_default();
+        if !ds.is_empty() {
+            chain.secured.push(top.clone());
+        }
+        chain.anchors.push((top.clone(), ds));
+    }
+    let norm = |rows: Vec<String>| {
+        let mut v: Vec<String> = rows.iter().map(|r| canonical("DS", r)).collect();
+        v.sort();
+        v
+    };
+    for (zone, parent) in own_links(s, &tops)? {
+        let Some(parent) = parent else {
+            continue;
+        };
+        if !chain.secured.contains(&parent) {
+            continue;
+        }
+        let want = norm(api.ds(&zone).await.unwrap_or_default());
+        let have = norm(rrset_contents(&api, &parent, &zone, "DS").await?);
+        if !want.is_empty() && want == have {
+            chain.secured.push(zone);
+        }
+    }
+    Ok(chain)
+}
+
 // What: render, write and wake the owners.
 // Why: only owners with changes are touched.
 // From: Issue #1683 | PR #1980
@@ -3229,10 +3302,8 @@ async fn apply_all(
     new: &Settings,
     zones: bool,
 ) -> Result<Vec<String>, String> {
-    let sec = secrets(new)?;
-    let files = render::all(new, &sec).map_err(|e| e.join("; "))?;
+    let (files, written) = render_and_write(new).await?;
     let mut changes = old.diff(new);
-    let written = write_files(new, &files)?;
     app.rendered.store(true, Ordering::Relaxed);
     changes.extend(written.iter().cloned());
     // What: drop proxy render files no longer written.
@@ -3287,6 +3358,15 @@ async fn apply_all(
     // From: Issue #1683 | PR #1980
     if zones && let Err(e) = ensure_zones(new).await {
         report.push(e);
+    }
+    // What: render again once the zones stand.
+    // Why: a new zone has its DS only after ensure.
+    // From: Issue #1683 | PR #2019
+    if zones {
+        match render_and_write(new).await {
+            Ok((_, again)) => changes.extend(again),
+            Err(e) => report.push(e),
+        }
     }
     let mut plan = apply::plan(&changes);
     let (grace, limit) = app.limits(new)?;
@@ -3646,6 +3726,30 @@ fn hosted_zones(s: &Settings, tops: &[String]) -> Result<Vec<String>, String> {
     Ok(zones)
 }
 
+// What: LAN zones of own endings and their parent.
+// Why: signing and the resolver chain walk one list.
+// From: Issue #1683 | PR #2019
+fn own_links(s: &Settings, tops: &[String]) -> Result<Vec<(String, Option<String>)>, String> {
+    use lancache_ng::dns::{is_within, parent_zone};
+    let mut signed: Vec<String> = lancache_ng::dns::lan_domains(s)?
+        .into_iter()
+        .filter(|z| tops.iter().any(|t| is_within(z, t)))
+        .collect();
+    // What: parents before their children.
+    // Why: a chain holds only if every link above holds.
+    // From: Issue #1683 | PR #2019
+    signed.sort_by_key(|z| z.matches('.').count());
+    let mut parents = tops.to_vec();
+    parents.extend(signed.iter().cloned());
+    Ok(signed
+        .into_iter()
+        .map(|z| {
+            let p = parent_zone(&z, &parents);
+            (z, p)
+        })
+        .collect())
+}
+
 // What: sign own endings; parents hold NS and DS.
 // Why: .lan and .local validate only along a chain.
 // From: Issue #1683 | PR #2019
@@ -3654,24 +3758,16 @@ async fn ensure_own_endings(
     api: &lancache_ng::pdns::Api,
     tops: &[String],
 ) -> Result<(), String> {
-    use lancache_ng::dns::{is_within, parent_zone};
-    let lans = lancache_ng::dns::lan_domains(s)?;
     let ns = ns_names(s, &soa_names(s)?.0)?;
     let ttl = s.num::<u32>("DNS_RECORD_TTL")?;
     for top in tops {
         api.secure(top).await?;
     }
-    let signed: Vec<String> = lans
-        .iter()
-        .filter(|z| tops.iter().any(|t| is_within(z, t)))
-        .cloned()
-        .collect();
-    let mut parents = tops.to_vec();
-    parents.extend(lans.iter().cloned());
     let mut wanted: Vec<(String, String)> = Vec::new();
-    for zone in &signed {
+    for (zone, parent) in own_links(s, tops)? {
+        let zone = &zone;
         api.secure(zone).await?;
-        let Some(parent) = parent_zone(zone, &parents) else {
+        let Some(parent) = parent else {
             continue;
         };
         ensure_rrset(api, &parent, zone, "NS", ttl, &ns).await?;
@@ -4048,6 +4144,17 @@ async fn zones_at_start(app: Arc<App>) {
         match ensure_zones(&s).await {
             Ok(()) => {
                 eprintln!("ui: start: zones ready");
+                // What: the anchors once pdns answers.
+                // Why: the start render ran before dns.
+                // From: Issue #1683 | PR #2019
+                match render_and_write(&s).await {
+                    Ok((_, written)) => {
+                        for line in reload_changed(&app, &s, &written).await {
+                            eprintln!("ui: start: {line}");
+                        }
+                    }
+                    Err(e) => eprintln!("ui: start: anchors: {e}"),
+                }
                 return;
             }
             // What: log only after the grace time.

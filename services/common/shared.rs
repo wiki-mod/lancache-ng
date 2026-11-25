@@ -2928,6 +2928,21 @@ pub mod peer {
 pub mod recursor_conf {
     use crate::config::Settings;
 
+    // What: live DNSSEC state of the own zones.
+    // Why: render stays pure; pdns holds the keys.
+    // From: Issue #1683 | PR #2019
+    #[derive(Clone, Debug, Default, Eq, PartialEq)]
+    pub struct Chain {
+        // What: top zone and its DS rows; none = NTA.
+        // Why: a missing DS must never leave it unchecked.
+        // From: Issue #1683 | PR #2019
+        pub anchors: Vec<(String, Vec<String>)>,
+        // What: zones whose chain from an anchor holds.
+        // Why: only those may lose their NTA.
+        // From: Issue #1683 | PR #2019
+        pub secured: Vec<String>,
+    }
+
     // What: which of the two recursors.
     // Why: keys differ only by HTTP or HTTPS.
     // From: Issue #1683 | PR #1980
@@ -3018,16 +3033,32 @@ pub mod recursor_conf {
     // What: Lua config that loads the RPZ file.
     // Why: the recursor reads RPZ only via Lua.
     // From: Issue #1683 | PR #1980
-    pub fn lua(s: &Settings, rpz_file: &str) -> Result<String, String> {
+    pub fn lua(s: &Settings, rpz_file: &str, chain: &Chain) -> Result<String, String> {
         let policy = s.text("RPZ_POLICY_NAME")?;
         crate::config::plain(rpz_file)?;
         crate::config::plain(&policy)?;
         let mut lua = format!("rpzFile(\"{rpz_file}\", {{ policyName=\"{policy}\" }})\n");
-        // What: no DNSSEC check for the local zones.
-        // Why: they are unsigned; the root denies them.
+        // What: no DNSSEC check for an unchained zone.
+        // Why: the root denies it; no chain, no proof.
         // From: Issue #1683 | PR #1980
         for z in crate::dns::managed_zones(s)? {
-            lua += &format!("addNTA(\"{}\")\n", z.trim_end_matches('.'));
+            if !chain.secured.contains(&z) {
+                lua += &format!("addNTA(\"{}\")\n", z.trim_end_matches('.'));
+            }
+        }
+        // What: a top zone is anchored by its own DS.
+        // Why: .lan and .local then validate (POC 25.11.).
+        // From: Issue #1683 | PR #2019
+        for (zone, ds) in &chain.anchors {
+            let name = zone.trim_end_matches('.');
+            crate::config::plain(name)?;
+            if ds.is_empty() {
+                lua += &format!("addNTA(\"{name}\")\n");
+            }
+            for row in ds {
+                crate::config::plain(row)?;
+                lua += &format!("addTA(\"{name}\", \"{row}\")\n");
+            }
         }
 
         // What: no DNSSEC check for private domains.
@@ -3165,10 +3196,17 @@ pub mod recursor_conf {
         which: Which,
         api_key: &str,
         lua_file: &str,
+        chain: &Chain,
     ) -> Result<String, String> {
         let u = |k: &str| s.uint(k).map(|v| v.to_string());
         let auth = crate::pdns_conf::auth_endpoint(s)?;
-        let zones = crate::dns::managed_zones(s)?;
+        let mut zones = crate::dns::managed_zones(s)?;
+        // What: the top zones go to pdns too.
+        // Why: else the root copy denies them (POC case d).
+        // From: Issue #1683 | PR #2019
+        for (zone, _) in &chain.anchors {
+            crate::config::add_once(&mut zones, zone);
+        }
         let local: String = zones
             .iter()
             .map(|z| {
@@ -4479,7 +4517,7 @@ pub mod apply {
 // From: Issue #1683 | PR #1980
 pub mod render {
     use crate::config::Settings;
-    use crate::recursor_conf::{self, Which};
+    use crate::recursor_conf::{self, Chain, Which};
     use crate::{chrony, dhcp, dnsmasq_conf, kea_conf, log, nginx_conf, pdns_conf};
     use std::path::{Path, PathBuf};
 
@@ -4574,7 +4612,7 @@ pub mod render {
     // What: the files of services and dns.
     // Why: the full and the DNS-only render share it.
     // From: Issue #1683 | PR #2004
-    fn dns_files(o: &mut Out, sec: &Secrets, names: &[(String, bool)]) {
+    fn dns_files(o: &mut Out, sec: &Secrets, names: &[(String, bool)], chain: &Chain) {
         let s = o.s;
         o.add_file("SERVICES_SERVICE", "CHRONY_CONF_FILE", chrony::render(s));
         o.add_file("SERVICES_SERVICE", "SYSLOG_CONF_FILE", log::render(s));
@@ -4608,11 +4646,13 @@ pub mod render {
                 &rpz_key,
                 recursor_conf::rpz(s, names, &answer, serial),
             );
-            let lua = s.text(&rpz_key).and_then(|p| recursor_conf::lua(s, &p));
+            let lua = s
+                .text(&rpz_key)
+                .and_then(|p| recursor_conf::lua(s, &p, chain));
             o.add_file("DNS_SERVICE", &lua_key, lua);
             let yaml = s
                 .text(&lua_key)
-                .and_then(|l| recursor_conf::yaml(s, which, &sec.recursor_api_key, &l));
+                .and_then(|l| recursor_conf::yaml(s, which, &sec.recursor_api_key, &l, chain));
             o.add_file("DNS_SERVICE", &which.key("CONF_FILE"), yaml);
         }
         match s.flag("DNS_FILTER_AAAA") {
@@ -4857,7 +4897,7 @@ pub mod render {
     // What: render all files; report every error.
     // Why: one call for the ui; nothing half written.
     // From: Issue #1683 | PR #1980
-    pub fn all(s: &Settings, sec: &Secrets) -> Result<Vec<File>, Vec<String>> {
+    pub fn all(s: &Settings, sec: &Secrets, chain: &Chain) -> Result<Vec<File>, Vec<String>> {
         let mut o = Out::new(s);
         let domains = match crate::cdn::effective(s) {
             Ok(d) => d,
@@ -4866,7 +4906,7 @@ pub mod render {
                 String::new()
             }
         };
-        dns_files(&mut o, sec, &cdn_names(&domains));
+        dns_files(&mut o, sec, &cdn_names(&domains), chain);
         dhcp_files(&mut o, sec);
         if let Err(e) = nginx_files(&mut o, &domains) {
             o.errs.push(e);
@@ -4880,7 +4920,10 @@ pub mod render {
     pub fn dns_only(s: &Settings, sec: &Secrets) -> Result<Vec<File>, Vec<String>> {
         let mut o = Out::new(s);
         let domains = crate::cdn::effective(s).map_err(|e| vec![e])?;
-        dns_files(&mut o, sec, &cdn_names(&domains));
+        // What: a secondary renders without anchors.
+        // Why: it keeps the NTA until the zone list.
+        // From: Issue #1683 | PR #2019
+        dns_files(&mut o, sec, &cdn_names(&domains), &Chain::default());
         // What: dns files and the snmpd.conf.
         // Why: snmpd waits for its file and blocks a stop.
         // From: Issue #1683
