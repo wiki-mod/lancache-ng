@@ -3602,8 +3602,10 @@ async fn ensure_primary_zones(s: &Settings, key: &str) -> Result<(), String> {
     } else {
         vec![secrets(s)?.tsig_name]
     };
-    for zone in lancache_ng::dns::managed_zones(s)? {
-        let id = lancache_ng::pdns::zone_id(&zone);
+    let tops = own_tops(s)?;
+    let hosted = hosted_zones(s, &tops)?;
+    for zone in &hosted {
+        let id = lancache_ng::pdns::zone_id(zone);
         if !have.contains(&id) {
             api.create_primary(&id, &edit[0], key).await?;
         }
@@ -3616,8 +3618,32 @@ async fn ensure_primary_zones(s: &Settings, key: &str) -> Result<(), String> {
     for lan in lancache_ng::dns::lan_domains(s)? {
         merge_legacy_zone(s, &api, &have, &lan).await?;
     }
-    ensure_own_endings(s, &api, key, &have).await?;
-    ensure_soa_nameserver(s, &api).await
+    ensure_own_endings(s, &api, &tops).await?;
+    ensure_soa_nameserver(s, &api, &hosted).await
+}
+
+// What: top zones of own endings; no PSL, none.
+// Why: an ending we cannot check may be public.
+// From: Issue #1683 | PR #2019
+fn own_tops(s: &Settings) -> Result<Vec<String>, String> {
+    match render::psl(s) {
+        Ok(psl) => lancache_ng::dns::top_zones(s, &psl),
+        Err(e) => {
+            eprintln!("ui: no own top zones: {e}");
+            Ok(Vec::new())
+        }
+    }
+}
+
+// What: zones the primary keeps: managed plus tops.
+// Why: one list creates zones, NS and SOA names.
+// From: Issue #1683 | PR #2019
+fn hosted_zones(s: &Settings, tops: &[String]) -> Result<Vec<String>, String> {
+    let mut zones = lancache_ng::dns::managed_zones(s)?;
+    for top in tops {
+        config::add_once(&mut zones, top);
+    }
+    Ok(zones)
 }
 
 // What: sign own endings; parents hold NS and DS.
@@ -3626,33 +3652,13 @@ async fn ensure_primary_zones(s: &Settings, key: &str) -> Result<(), String> {
 async fn ensure_own_endings(
     s: &Settings,
     api: &lancache_ng::pdns::Api,
-    key: &str,
-    have: &[String],
+    tops: &[String],
 ) -> Result<(), String> {
-    use lancache_ng::dns::{canonical_zone, is_within, parent_zone};
-    // What: no list, no top zone; the NTA stays.
-    // Why: an ending we cannot check may be public.
-    // From: Issue #1683 | PR #2019
-    let psl = match lancache_ng::render::psl(s) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("ui: no own top zones: {e}");
-            return Ok(());
-        }
-    };
-    let tops = lancache_ng::dns::top_zones(s, &psl)?;
+    use lancache_ng::dns::{is_within, parent_zone};
     let lans = lancache_ng::dns::lan_domains(s)?;
-    let soa = s.text("PDNS_DEFAULT_SOA")?;
-    let mname = canonical_zone(soa.split_whitespace().next().unwrap_or_default());
-    let ns = ns_names(s, &mname)?;
+    let ns = ns_names(s, &soa_names(s)?.0)?;
     let ttl = s.num::<u32>("DNS_RECORD_TTL")?;
-    for top in &tops {
-        if !have.contains(top) {
-            api.create_primary(top, &s.text("PDNS_SOA_EDIT")?, key)
-                .await?;
-        }
-        ensure_rrset(api, top, top, "NS", ttl, &ns).await?;
-        ensure_soa_names(api, top, &soa).await?;
+    for top in tops {
         api.secure(top).await?;
     }
     let signed: Vec<String> = lans
@@ -3660,7 +3666,7 @@ async fn ensure_own_endings(
         .filter(|z| tops.iter().any(|t| is_within(z, t)))
         .cloned()
         .collect();
-    let mut parents = tops.clone();
+    let mut parents = tops.to_vec();
     parents.extend(lans.iter().cloned());
     let mut wanted: Vec<(String, String)> = Vec::new();
     for zone in &signed {
@@ -3682,7 +3688,7 @@ async fn ensure_own_endings(
     // What: drop delegations of gone zones in top zones.
     // Why: a top zone is ours; a LAN zone keeps all rows.
     // From: Issue #1683 | PR #2019
-    for top in &tops {
+    for top in tops {
         for r in api.rrsets(top).await? {
             let (Some(name), Some(kind)) = (r["name"].as_str(), r["type"].as_str()) else {
                 continue;
@@ -3763,15 +3769,19 @@ fn primary_https_ip(s: &Settings) -> Result<String, String> {
 // What: NS and A record for the SOA's nameserver.
 // Why: the SOA named ns1, but no record held that name.
 // From: Issue #1683
-async fn ensure_soa_nameserver(s: &Settings, api: &lancache_ng::pdns::Api) -> Result<(), String> {
-    let soa = s.text("PDNS_DEFAULT_SOA")?;
-    let mname = lancache_ng::dns::canonical_zone(soa.split_whitespace().next().unwrap_or_default());
+async fn ensure_soa_nameserver(
+    s: &Settings,
+    api: &lancache_ng::pdns::Api,
+    hosted: &[String],
+) -> Result<(), String> {
+    let names = soa_names(s)?;
+    let mname = names.0.clone();
     let lan = lancache_ng::dns::lan_zone(s)?;
     let ttl = s.num::<u32>("DNS_RECORD_TTL")?;
     let ns = ns_names(s, &mname)?;
-    for zone in lancache_ng::dns::managed_zones(s)? {
-        ensure_rrset(api, &zone, &zone, "NS", ttl, &ns).await?;
-        ensure_soa_names(api, &zone, &soa).await?;
+    for zone in hosted {
+        ensure_rrset(api, zone, zone, "NS", ttl, &ns).await?;
+        ensure_soa_names(api, zone, &names).await?;
     }
     // What: A or AAAA and PTR of each secondary.
     // Why: an NS name needs an address; logs show names.
@@ -3897,26 +3907,35 @@ async fn zone_names(api: &lancache_ng::pdns::Api) -> Result<Vec<String>, String>
     Ok(api.zones().await?.into_iter().map(|z| z.name).collect())
 }
 
+// What: mname and rname of PDNS_DEFAULT_SOA.
+// Why: NS rows and SOA fields read one parse.
+// From: Issue #1683 | PR #2019
+fn soa_names(s: &Settings) -> Result<(String, String), String> {
+    let soa = s.text("PDNS_DEFAULT_SOA")?;
+    let mut names = soa.split_whitespace().map(lancache_ng::dns::canonical_zone);
+    let (Some(mname), Some(rname)) = (names.next(), names.next()) else {
+        return Err(format!("PDNS_DEFAULT_SOA {soa:?} names no mname and rname"));
+    };
+    Ok((mname, rname))
+}
+
 // What: SOA mname and rname from PDNS_DEFAULT_SOA.
 // Why: a zone made before a domain change kept the old ns1.
 // From: Issue #1683 | PR #2017
 async fn ensure_soa_names(
     api: &lancache_ng::pdns::Api,
     zone: &str,
-    soa: &str,
+    names: &(String, String),
 ) -> Result<(), String> {
-    let mut names = soa.split_whitespace().map(lancache_ng::dns::canonical_zone);
-    let (Some(mname), Some(rname)) = (names.next(), names.next()) else {
-        return Err(format!("PDNS_DEFAULT_SOA {soa:?} names no mname and rname"));
-    };
+    let (mname, rname) = names;
     let Some((ttl, mut f)) = soa_fields(api, zone).await? else {
         return Ok(());
     };
-    if f[0] == mname && f[1] == rname {
+    if &f[0] == mname && &f[1] == rname {
         return Ok(());
     }
-    f[0] = mname;
-    f[1] = rname;
+    f[0] = mname.clone();
+    f[1] = rname.clone();
     write_soa(api, zone, ttl, &f).await
 }
 
