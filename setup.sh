@@ -8971,7 +8971,7 @@ cmd_configure_upstream_dns() {
 
     local env_file ip_http ip_https lan extra_lan apply_rc=0
     local old_servers old_zones old_unsigned old_reverse dhcp_mode
-    local -a all_services new_entries
+    local -a all_services
     env_file=$(require_stack_env_file "$install_dir") || exit $?
     old_servers=$(get_env_var DNS_UPSTREAM_SERVERS "$env_file") || exit $?
     old_zones=$(get_env_var DNS_UPSTREAM_ZONES "$env_file") || exit $?
@@ -9041,21 +9041,32 @@ cmd_configure_upstream_dns() {
         1) die_with_recovery_help "The new external DNS setting failed the health gate; the previous setting is active again." "$install_dir" ;;
         *) die_with_recovery_help "The new setting failed the health gate, and restoring the previous one failed too. Manual recovery required." "$install_dir" ;;
     esac
-    if ! dns_upstream_is_live "$install_dir" "$env_file" "$DNS_UPSTREAM_SERVERS"; then
-        restore_dns_upstream "$install_dir" "$env_file" "$old_servers" "$old_zones" "$old_unsigned" "$old_reverse" \
-            || die_with_recovery_help "The dns container rejected the new setting, and restoring the previous one failed. Manual recovery required." "$install_dir"
-        die_with_recovery_help "The dns container rejected the new setting; the previous setting is active again." "$install_dir"
-    fi
-    # What: the new servers must answer after the apply.
-    # Why: a dead resolver must not stay active.
+    check_dns_upstream_or_restore "$install_dir" "$env_file" \
+        "$old_servers" "$old_zones" "$old_unsigned" "$old_reverse" || apply_rc=$?
+    case "$apply_rc" in
+        0) print_ok "External DNS setting applied and active in the dns container" ;;
+        1) die "The new external DNS setting did not work after the start; the previous setting is active again." ;;
+        *) die_with_recovery_help "The new external DNS setting did not work, and restoring the previous one failed. Manual recovery required." "$install_dir" ;;
+    esac
+}
+
+# What: new upstream setting live and answering, else undo
+# Why: install and configure-upstream-dns promise a rollback
+# From: Issue #1918 | PR #1858
+check_dns_upstream_or_restore() {
+    local install_dir="$1" env_file="$2"
+    local -a new_entries
+    shift 2
+    # What: the dns container took the setting, then answers
+    # Why: a dead resolver must not stay active
     # From: Issue #1683
     read -r -a new_entries <<< "${DNS_UPSTREAM_SERVERS//,/ }"
-    if (( ${#new_entries[@]} > 0 )) && ! dns_upstream_answers "${new_entries[@]}"; then
-        restore_dns_upstream "$install_dir" "$env_file" "$old_servers" "$old_zones" "$old_unsigned" "$old_reverse" \
-            || die_with_recovery_help "A new external DNS server does not answer, and restoring the previous setting failed. Manual recovery required." "$install_dir"
-        die "A new external DNS server does not answer; the previous setting is active again."
+    if dns_upstream_is_live "$install_dir" "$env_file" "$DNS_UPSTREAM_SERVERS" \
+        && { (( ${#new_entries[@]} == 0 )) || dns_upstream_answers "${new_entries[@]}"; }; then
+        return 0
     fi
-    print_ok "External DNS setting applied and active in the dns container"
+    restore_dns_upstream "$install_dir" "$env_file" "$@" || return 2
+    return 1
 }
 
 # What: a repo file's text: checkout or the same ref
@@ -10802,6 +10813,21 @@ print_ok "Stack started"
 
 install_healthy=1
 started_stack_health_gate "$INSTALL_DIR" "$ENV_FILE" || install_healthy=0
+
+# What: a chosen external DNS server is checked live
+# Why: the prompt promised: rolled back if still dead
+# From: Issue #1918 | PR #2017
+if [[ "$install_healthy" = 1 && -n "$DNS_UPSTREAM_SERVERS" ]]; then
+    print_step "Checking the external DNS server"
+    upstream_rc=0
+    check_dns_upstream_or_restore "$INSTALL_DIR" "$ENV_FILE" "" "" "" "$DNS_LOCAL_REVERSE_ZONES" \
+        || upstream_rc=$?
+    case "$upstream_rc" in
+        0) print_ok "External DNS server ${DNS_UPSTREAM_SERVERS} is in use" ;;
+        1) print_warn "External DNS server ${DNS_UPSTREAM_SERVERS} did not work; LanCache-NG resolves names itself. Set it again with: $SCRIPT_DIR/setup.sh configure-upstream-dns" ;;
+        *) print_error "External DNS server ${DNS_UPSTREAM_SERVERS} did not work, and switching it off failed; see: $SCRIPT_DIR/setup.sh debug" ;;
+    esac
+fi
 
 # What: Admin UI URL from the ui port mapping
 # Why: compose owns IP and port; a print never aborts setup
