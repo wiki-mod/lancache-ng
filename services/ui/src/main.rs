@@ -3476,11 +3476,11 @@ async fn wait_healthy(
     for name in names {
         loop {
             let state = app.docker.inspect(name, limit).await.ok();
-            let field = |p: &str| state.as_ref().and_then(|v| v.pointer(p)).cloned();
-            let running = field("/State/Running").and_then(|v| v.as_bool());
-            let health = field("/State/Health/Status");
-            let health = health.as_ref().and_then(Value::as_str);
-            if running == Some(true) && health.is_none_or(|h| h == "healthy") {
+            let health = state.as_ref().map(docker::Health::from_inspect);
+            if matches!(
+                health,
+                Some(docker::Health::Healthy | docker::Health::Degraded)
+            ) {
                 break;
             }
             if std::time::Instant::now() >= end {
