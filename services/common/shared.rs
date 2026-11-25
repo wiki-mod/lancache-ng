@@ -3199,6 +3199,16 @@ pub mod peer {
             .map_err(|e| e.to_string())?
     }
 
+    // What: the zone list of one secondary by address.
+    // Why: the watchdog and the ui read the same list.
+    // From: Issue #1683
+    pub async fn zones_at(s: &Settings, address: &str) -> Result<Vec<crate::pdns::Zone>, String> {
+        let key = crate::secret::get(s, "PDNS_API_KEY")?;
+        api_at(s, crate::http::client(s)?, address, &key)?
+            .zones()
+            .await
+    }
+
     // What: one API client per recursor.
     // Why: flush and statistics reach every recursor.
     // From: Issue #1683 | PR #2017

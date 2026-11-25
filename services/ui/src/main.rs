@@ -1788,15 +1788,8 @@ fn ns_change(s: &Settings, name: &str, entered: Option<bool>) -> Fields {
 // From: Issue #1683 | PR #1858
 async fn peer_serials(s: &Settings, address: &str) -> Result<Vec<PeerZone>, String> {
     let ours = pdns_api(s)?.zones().await?;
-    let theirs = remote_zones(s, address).await?;
+    let theirs = peer::zones_at(s, address).await?;
     peer::peer_zones(s, &ours, &theirs)
-}
-
-// What: zone list of one secondary pdns API.
-// Why: health check and zone overview read the same.
-// From: Issue #1683
-async fn remote_zones(s: &Settings, address: &str) -> Result<Vec<lancache_ng::pdns::Zone>, String> {
-    remote_api(s, address)?.zones().await
 }
 
 // What: pdns API of one peer by its address.
@@ -1996,7 +1989,7 @@ async fn zone_overview(State(app): Shared) -> Page {
     let mut columns = vec![json!({"name": tr("zone_col_primary"), "error": Value::Null})];
     let mut lists = vec![pdns_api(&s)?.zones().await?];
     for (name, address) in lancache_ng::pdns_conf::secondaries(&s) {
-        match remote_zones(&s, &address).await {
+        match peer::zones_at(&s, &address).await {
             Ok(z) => {
                 columns.push(json!({"name": name, "error": Value::Null}));
                 lists.push(z);

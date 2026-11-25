@@ -350,17 +350,7 @@ async fn dns_sync(s: &Settings, f: &mut Findings) -> Result<(), String> {
         .await
         .map_err(|e| format!("primary: {e}"))?;
     for (name, address) in peers {
-        let api = match peer::api_at(s, client.clone(), &address, &key) {
-            Ok(a) => a,
-            Err(e) => {
-                f.crit(&name, format!("secondary unreachable: {e}"));
-                continue;
-            }
-        };
-        // What: one bad secondary must not stop the rest.
-        // Why: the others still need their alarm.
-        // From: Issue #1683 | PR #2019
-        let theirs = match api.zones().await {
+        let theirs = match peer::zones_at(s, &address).await {
             Ok(z) => z,
             Err(e) => {
                 f.crit(&name, format!("secondary unreachable: {e}"));
