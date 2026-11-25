@@ -8195,14 +8195,30 @@ list_kea_snapshot_ids() {
     printf '%s\n' "${ids[@]}" | sort
 }
 
-# What: splits "<body>\n<code>" into body and HTTP code
-# Why: callers keep no temp file to clean up on any exit
+# What: POSTs JSON; sets the reply body and HTTP code
+# Why: the one sender; 1 no link, 2 garbled, 3 not 2xx
 # From: Issue #1683 | PR #1858
-split_http_response() {
-    local -n _http_body_ref="$1" _http_code_ref="$2"
-    _http_code_ref="${3##*$'\n'}"
-    _http_body_ref="${3%$'\n'*}"
-    [[ "$_http_code_ref" =~ ^[0-9]{3}$ ]]
+http_post_json() {
+    local -n _post_body_ref="$1" _post_code_ref="$2"
+    local url="$3" body="$4" user="${5:-}" token="${6:-}" out
+    # What: body on stdin, login via a -K config pipe
+    # Why: argv caps one arg at 128 KiB and shows secrets
+    # From: Issue #1304 | PR #1550
+    out=$(printf '%s' "$body" | curl -sS -w '\n%{http_code}' \
+        -H "Content-Type: application/json" --data-binary @- \
+        -K <(curl_user_config "$user" "$token") "$url") || return 1
+    _post_code_ref="${out##*$'\n'}"
+    _post_body_ref="${out%$'\n'*}"
+    [[ "$_post_code_ref" =~ ^[0-9]{3}$ ]] || return 2
+    [[ "$_post_code_ref" == 2* ]] || return 3
+}
+
+# What: curl config line for Basic auth; none if no user
+# Why: quotes and backslashes in the token stay literal
+# From: Issue #1304 | PR #1550
+curl_user_config() {
+    [[ -n "$1" ]] || return 0
+    printf 'user = "%s"\n' "$(printf '%s:%s' "$1" "$2" | sed 's/\\/\\\\/g; s/"/\\"/g')"
 }
 
 # What: values of a jq filter on JSON; null prints ""
@@ -8231,26 +8247,13 @@ compose_config_value() {
 # From: Issue #1683 | PR #1858
 kea_ctrl_send() {
     local kea_ctrl_url="$1" kea_ctrl_user="$2" kea_ctrl_token="$3" body="$4"
-    local out http_status response
-
-    # What: passes the Basic-Auth token to curl via -K stdin
-    # Why: -u would expose the token in process argv
-    # From: Issue #1304 | PR #1550
-    local kea_ctrl_token_escaped
-    kea_ctrl_token_escaped=$(printf '%s' "$kea_ctrl_token" | sed 's/\\/\\\\/g; s/"/\\"/g')
-    if ! out=$(printf 'user = "%s:%s"\n' "$kea_ctrl_user" "$kea_ctrl_token_escaped" | curl -sS -w '\n%{http_code}' -X POST \
-        -H "Content-Type: application/json" \
-        -K - \
-        -d "$body" \
-        "$kea_ctrl_url"); then
-        die "Failed to connect to Kea's Control Agent at ${kea_ctrl_url}. Is the dhcp container running?"
-    fi
-    split_http_response response http_status "$out" \
-        || die "Unrecognized response from Kea's Control Agent: ${out}"
-
-    if [[ ! "$http_status" =~ ^2 ]]; then
-        die "Kea's Control Agent rejected the request with HTTP ${http_status}. Response: ${response}"
-    fi
+    local http_status response
+    http_post_json response http_status "$kea_ctrl_url" "$body" \
+        "$kea_ctrl_user" "$kea_ctrl_token" || case $? in
+        1) die "Failed to connect to Kea's Control Agent at ${kea_ctrl_url}. Is the dhcp container running?" ;;
+        2) die "Unrecognized response from Kea's Control Agent: ${response}" ;;
+        *) die "Kea's Control Agent rejected the request with HTTP ${http_status}. Response: ${response}" ;;
+    esac
     printf '%s\n' "$response"
 }
 
@@ -9010,7 +9013,7 @@ assert_secondary_host_free() {
 # From: Issue #1683 | PR #1858
 cmd_secondary() {
     local primary="" token="" name="" ip_http="" listen_ip="" ip_https="" listen_ip_https="" rotate=0
-    local out http_status response secondary_dir cmd ddns_tsig_key dns_xfr_primary tag_input
+    local http_status response secondary_dir cmd ddns_tsig_key dns_xfr_primary tag_input
     local pdns_api_key tsig_name syslog_primary
     local response_image_registry response_image_prefix response_image_channel response_image_tag
     local existing_env_file lancache_image_registry lancache_image_prefix lancache_image_channel lancache_image_tag
@@ -9319,19 +9322,11 @@ cmd_secondary() {
     # From: Issue #1683 | PR #1912
     local register_route
     register_route=$(prod_env_default UI_ROUTE_SECONDARY_REGISTER) || exit $?
-    if ! out=$(printf '%s' "$request" \
-        | curl -sS -w '\n%{http_code}' -X POST \
-        -H "Content-Type: application/json" \
-        -d @- \
-        "${primary}${register_route}"); then
-        die "Failed to connect to primary server at ${primary}. Check the URL, network connectivity, and that the primary service is running."
-    fi
-    split_http_response response http_status "$out" \
-        || die "Unrecognized response from primary server at ${primary}."
-
-    if [[ ! "$http_status" =~ ^2 ]]; then
-        die "Primary server rejected the registration request with HTTP ${http_status}. Verify the registration token, secondary name, and primary server logs."
-    fi
+    http_post_json response http_status "${primary}${register_route}" "$request" || case $? in
+        1) die "Failed to connect to primary server at ${primary}. Check the URL, network connectivity, and that the primary service is running." ;;
+        2) die "Unrecognized response from primary server at ${primary}." ;;
+        *) die "Primary server rejected the registration request with HTTP ${http_status}. Verify the registration token, secondary name, and primary server logs." ;;
+    esac
     [[ -n "$response" ]] || die "Empty response from primary server after successful registration request"
 
     bad_response="Unrecognized response from primary server at ${primary}."
