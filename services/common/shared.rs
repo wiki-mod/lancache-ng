@@ -187,6 +187,16 @@ pub mod fs {
         }
     }
 
+    // What: change time in unix seconds, else 0.
+    // Why: ages and snapshot times are plain seconds.
+    // From: Issue #1683 | PR #1980
+    pub fn modified_secs(meta: &fs::Metadata) -> u64 {
+        meta.modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_secs())
+    }
+
     // What: every regular file below root.
     // Why: retention sums and prunes by size and age.
     // From: Issue #1683 | PR #1980
@@ -5801,16 +5811,6 @@ pub mod tidy {
         pub mtime: u64,
     }
 
-    // What: change time in unix seconds, else 0.
-    // Why: ages are compared as plain seconds.
-    // From: Issue #1683 | PR #1980
-    fn mtime(meta: &std::fs::Metadata) -> u64 {
-        meta.modified()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map_or(0, |d| d.as_secs())
-    }
-
     // What: all regular files below a folder.
     // Why: base for age, size and pack runs.
     // From: Issue #1683 | PR #1980
@@ -5820,7 +5820,7 @@ pub mod tidy {
             .map(|(path, meta)| Item {
                 path,
                 size: meta.len(),
-                mtime: mtime(&meta),
+                mtime: crate::fs::modified_secs(&meta),
             })
             .collect()
     }

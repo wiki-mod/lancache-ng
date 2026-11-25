@@ -1017,12 +1017,8 @@ async fn snapshot(s: &Settings, api: &lancache_ng::pdns::Api, zone: &str) -> Res
 // Why: snapshot age needs a plain number.
 // From: Issue #1683 | PR #1980
 fn created_unix(path: &Path) -> Result<u64, String> {
-    let when = std::fs::metadata(path).and_then(|m| m.modified());
-    let when = when.map_err(|e| format!("{}: {e}", path.display()))?;
-    let age = when
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| e.to_string())?;
-    Ok(age.as_secs())
+    let meta = std::fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(lancache_ng::fs::modified_secs(&meta))
 }
 
 // What: the snapshots of a store as id and time rows.
