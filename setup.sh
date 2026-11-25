@@ -217,8 +217,14 @@ ask() {
         || die "setup.sh needs a terminal to ask '$prompt'; run it in an interactive shell (for SSH: ssh -t)."
     exec {tty_fd}< /dev/tty || die "Failed to open /dev/tty to ask '$prompt' (exit $?)."
     printf '  %s%s%s [%s]: ' "${BOLD}" "$prompt" "${RESET}" "$default"
-    read -r REPLY <&"$tty_fd"
+    local read_rc=0
+    read -r REPLY <&"$tty_fd" || read_rc=$?
     exec {tty_fd}<&-
+    # What: input that ends without an answer stops setup
+    # Why: set -e would else end the run without a word
+    # From: Issue #1683
+    [[ "$read_rc" -eq 0 || -n "$REPLY" ]] \
+        || die "No answer to '$prompt': the input ended (Ctrl-D?). setup.sh stops here; run it again to go on."
     REPLY="${REPLY:-$default}"
 }
 
