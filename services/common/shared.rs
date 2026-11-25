@@ -2967,6 +2967,7 @@ pub mod pdns_conf {
 // From: Issue #1683 | PR #2019
 pub mod peer {
     use crate::config::Settings;
+    use std::collections::BTreeMap;
 
     // What: both serials of one managed zone.
     // Why: the health check reports every zone.
@@ -3225,6 +3226,36 @@ pub mod peer {
             .iter()
             .map(|url| crate::pdns::Api::new(client.clone(), url, &key))
             .collect())
+    }
+
+    // What: serial each zone was last flushed at.
+    // Why: one rule for the ui and the dns helper.
+    // From: Issue #1683
+    #[derive(Default)]
+    pub struct Flushed(Option<BTreeMap<String, u32>>);
+
+    impl Flushed {
+        // What: zones whose serial moved since the flush.
+        // Why: at start pdns NOTIFY already wiped them.
+        // From: Issue #1683
+        pub fn due(&mut self, zones: &BTreeMap<String, u32>) -> Vec<(String, u32)> {
+            let seen = self.0.get_or_insert_with(|| zones.clone());
+            seen.retain(|zone, _| zones.contains_key(zone));
+            zones
+                .iter()
+                .filter(|(zone, serial)| seen.get(*zone) != Some(*serial))
+                .map(|(zone, serial)| (zone.clone(), *serial))
+                .collect()
+        }
+
+        // What: note a flush that worked.
+        // Why: a failed one stays due for the next round.
+        // From: Issue #1683
+        pub fn done(&mut self, zone: &str, serial: u32) {
+            self.0
+                .get_or_insert_with(BTreeMap::new)
+                .insert(zone.to_string(), serial);
+        }
     }
 
     // What: clears one zone in every recursor cache.

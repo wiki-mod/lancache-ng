@@ -64,7 +64,7 @@ struct Done {
     // What: the serial each zone was last flushed at.
     // Why: a failed flush is retried next round.
     // From: Issue #1683
-    flushed: Option<BTreeMap<String, u32>>,
+    flushed: peer::Flushed,
 }
 
 // What: TSIG key, setup zones without removal, binding.
@@ -102,19 +102,9 @@ async fn round(s: &Settings, done: &mut Done) -> Result<(), String> {
         done.reload_due = false;
         eprintln!("lancache-dns: recursors forward {} zones", names.len());
     }
-    // What: at start the serials are taken as flushed.
-    // Why: pdns NOTIFY already wipes a zone it pulls.
-    // From: Issue #1683
-    let flushed = done.flushed.get_or_insert_with(|| zones.clone());
-    flushed.retain(|zone, _| zones.contains_key(zone));
-    for (zone, serial) in &zones {
-        if flushed.get(zone) == Some(serial) {
-            continue;
-        }
-        match peer::flush_zone(s, zone).await {
-            Ok(()) => {
-                flushed.insert(zone.clone(), *serial);
-            }
+    for (zone, serial) in done.flushed.due(&zones) {
+        match peer::flush_zone(s, &zone).await {
+            Ok(()) => done.flushed.done(&zone, serial),
             Err(e) => eprintln!("lancache-dns: flush {zone}: {e}"),
         }
     }

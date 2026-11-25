@@ -2036,7 +2036,7 @@ async fn secondary_health(s: &Settings, address: &str) -> Value {
 // Why: UI, DDNS, AXFR and rollback all bump it.
 // From: Issue #1683 | PR #1980
 async fn flush_on_transfer(app: Arc<App>) {
-    let mut seen: BTreeMap<String, u32> = BTreeMap::new();
+    let mut seen = peer::Flushed::default();
     // What: an error only after the grace time.
     // Why: a planned dns restart must log nothing.
     // From: Issue #1683 | PR #1980
@@ -2072,24 +2072,24 @@ async fn flush_on_transfer(app: Arc<App>) {
 // What: clears recursor cache for changed zones.
 // Why: recursors would serve old answers until TTL.
 // From: Issue #1683 | PR #1980
-async fn flush_round(s: &Settings, seen: &mut BTreeMap<String, u32>) -> Result<(), String> {
+async fn flush_round(s: &Settings, seen: &mut peer::Flushed) -> Result<(), String> {
     let api = pdns_api(s)?;
     let peers = !lancache_ng::pdns_conf::secondaries(s).is_empty();
-    for zone in api.zones().await? {
-        // What: note a serial only after its flush worked.
-        // Why: a flush during a dns restart must retry.
-        // From: Issue #1683 | PR #1980
-        let before = seen.get(&zone.name).copied();
-        if before.is_some_and(|b| b != zone.serial) {
-            peer::flush_zone(s, &zone.name).await?;
-            // What: NOTIFY to the secondaries right away.
-            // Why: live: pdns alone waited up to 60 s.
-            // From: Issue #1683 | PR #2019
-            if peers {
-                api.notify(&zone.name).await?;
-            }
+    let zones: BTreeMap<String, u32> = api
+        .zones()
+        .await?
+        .into_iter()
+        .map(|z| (z.name, z.serial))
+        .collect();
+    for (zone, serial) in seen.due(&zones) {
+        peer::flush_zone(s, &zone).await?;
+        // What: NOTIFY to the secondaries right away.
+        // Why: live: pdns alone waited up to 60 s.
+        // From: Issue #1683 | PR #2019
+        if peers {
+            api.notify(&zone).await?;
         }
-        seen.insert(zone.name.clone(), zone.serial);
+        seen.done(&zone, serial);
     }
     Ok(())
 }
