@@ -7141,7 +7141,7 @@ remove_root_checkout() {
     local_commit=$(git -C "$root" rev-list --max-count=1 HEAD --branches --not --remotes) \
         || die "Failed to list the local commits of $root (exit $?)."
     if [[ -n "$local_commit" ]] || git -C "$root" rev-parse --verify --quiet refs/stash > /dev/null; then
-        print_warn "Old code in $root stays; it holds commits on no remote or a stash."
+        print_warn "Old code in $root stays: it holds saved work (git commits or a git stash) that exists nowhere else. Push or drop that work; the next update then removes the old code."
         return 0
     fi
     list=$(mktemp) || die "Failed to create a temporary file (exit $?)."
