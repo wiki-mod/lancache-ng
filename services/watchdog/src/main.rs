@@ -186,15 +186,10 @@ async fn containers(s: &Settings, f: &mut Findings, m: &mut Memory) -> Result<()
     let limit = Duration::from_secs(s.uint("DOCKER_TIMEOUT")?);
     let grace = s.num::<u32>("WATCHDOG_STOP_GRACE")?;
     let after = s.uint("RESTART_AFTER")?;
-    let project = s.text("COMPOSE_PROJECT")?;
     let stopped = s.list("SERVICES_STOPPED");
     let dhcp_off = s.text("DHCP_MODE")? == "off";
     let dhcp_service = s.text("DHCP_SERVICE")?;
-    for row in api
-        .project(&project, limit)
-        .await
-        .map_err(|e| e.to_string())?
-    {
+    for row in api.stack(s).await? {
         let Some(service) = docker::service_of(&row) else {
             continue;
         };

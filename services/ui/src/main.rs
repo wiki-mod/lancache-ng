@@ -495,13 +495,7 @@ async fn dashboard(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page
     let s = app.settings();
     let mut ctx = Context::new();
     ctx.insert("alarms", &read_json(&s.text("WATCHDOG_ALARM_FILE")?));
-    let (_, limit) = app.limits(&s)?;
-    let project = s.text("COMPOSE_PROJECT")?;
-    let containers = app
-        .docker
-        .project(&project, limit)
-        .await
-        .unwrap_or_default();
+    let containers = project_containers(&app, &s).await.unwrap_or_default();
     ctx.insert("containers", &containers);
     let (totals, recent) = proxy_log(&s).await?;
     ctx.insert("log_stats", &totals);
@@ -3014,9 +3008,7 @@ async fn container_of(app: &App, s: &Settings, service: &str) -> Result<String, 
 // Why: every lookup of a service starts from this list.
 // From: Issue #1683 | PR #2017
 async fn project_containers(app: &App, s: &Settings) -> Result<Vec<Value>, String> {
-    let (_, limit) = app.limits(s)?;
-    let list = app.docker.project(&s.text("COMPOSE_PROJECT")?, limit).await;
-    list.map_err(|e| e.to_string())
+    app.docker.stack(s).await
 }
 
 // What: run a command in a service container.
@@ -4437,16 +4429,9 @@ async fn status(State(app): Shared) -> Response {
     // What: the dhcp container while DHCP_MODE is off.
     // Why: the bar must not offer Start for it.
     // From: Issue #1683 | PR #1980
-    let read = (
-        app.limits(&s),
-        s.text("COMPOSE_PROJECT"),
-        dhcp_off_service(&s),
-    );
-    let list = match &read {
-        (Ok((_, limit)), Ok(project), Ok(_)) => app.docker.project(project, *limit).await.ok(),
-        _ => None,
-    };
-    let (Some(list), (Ok((_, limit)), _, Ok(off))) = (list, read) else {
+    let read = (app.limits(&s), dhcp_off_service(&s));
+    let list = project_containers(&app, &s).await.ok();
+    let (Some(list), (Ok((_, limit)), Ok(off))) = (list, read) else {
         return axum::Json(json!({"state": "unavailable"})).into_response();
     };
     let off = off.unwrap_or_default();
