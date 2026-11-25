@@ -124,6 +124,10 @@ services:
       NTP_ENABLED: ${NTP_ENABLED:-}
       CACHE_VALID_DAYS: ${CACHE_VALID_DAYS:-}
       NTP_UPSTREAM_SERVERS: ${NTP_UPSTREAM_SERVERS:-}
+      # What: the watchdog checks the secondaries' serials.
+      # Why: it reads the primary and each secondary API.
+      # From: Issue #1683 | PR #2019
+      PDNS_API_KEY: ${PDNS_API_KEY}
     # What: the log input on loopback; NTP on IP_HTTP.
     # Why: Docker logs only; DHCP option 42 names IP_HTTP.
     # From: Issue #1683 | PR #1858

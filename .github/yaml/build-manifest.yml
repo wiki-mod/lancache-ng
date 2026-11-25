@@ -1108,7 +1108,6 @@ runtime:
     # From: Issue #1683 | PR #2017
     - PDNS_API_PATH=/api/v1/servers/localhost
     - PDNS_PRIMARY_API_URL=http://@DNS_SERVICE@:@PDNS_AUTH_API_PORT@@PDNS_API_PATH@
-    - PDNS_SECONDARY_API_URL=
     # What: SOA serial rule for API and DDNS writes.
     # Why: a change raises the serial; NOTIFY follows.
     # From: Issue #1683 | PR #1980
@@ -1473,7 +1472,6 @@ runtime:
     - PDNS_DNSUPDATE_FROM=list?;;;restart;dns
     - PDNS_LISTEN=list;;;restart;dns
     - PDNS_PRIMARY_API_URL=text?;;;live;services
-    - PDNS_SECONDARY_API_URL=text?;;;live;services
     - PDNS_SOA_EDIT=text;;;live;ui
     - PDNS_SOA_COLD_RETRY=uint;1;3600;live;ui
     - PDNS_XFR_CYCLE=uint;1;86400;restart;dns

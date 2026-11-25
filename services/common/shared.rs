@@ -2680,6 +2680,169 @@ pub mod pdns_conf {
         Ok(out)
     }
 }
+// What: compare a secondary's loaded serials to ours.
+// Why: ui status and watchdog alarm use one owner.
+// From: Issue #1683 | PR #2019
+pub mod peer {
+    use crate::config::Settings;
+
+    // What: both serials of one managed zone.
+    // Why: the health check reports every zone.
+    // From: Issue #1683 | PR #1980
+    pub struct PeerZone {
+        pub zone: String,
+        pub primary: Option<u32>,
+        pub secondary: Option<u32>,
+    }
+
+    // What: state of one zone on a secondary, mild to bad.
+    // Why: the order picks the worst; callers name a state.
+    // From: Issue #1683 | PR #2017
+    #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+    pub enum ZoneState {
+        InSync,
+        Ahead,
+        Unknown,
+        Behind,
+        Missing,
+        Error,
+    }
+
+    impl ZoneState {
+        // What: the word of a state in answers and logs.
+        // Why: the page maps this word to label and colour.
+        // From: Issue #1683 | PR #2017
+        pub fn word(self) -> &'static str {
+            match self {
+                ZoneState::InSync => "in_sync",
+                ZoneState::Ahead => "ahead",
+                ZoneState::Unknown => "unknown",
+                ZoneState::Behind => "behind",
+                ZoneState::Missing => "missing",
+                ZoneState::Error => "error",
+            }
+        }
+    }
+
+    // What: SOA serial of one zone in a zone list.
+    // Why: serials show whether a secondary is in sync.
+    // From: Issue #1683 | PR #1980
+    pub fn serial_of(zones: &[crate::pdns::Zone], zone: &str) -> Option<u32> {
+        zones.iter().find(|z| z.name == zone).map(|z| z.serial)
+    }
+
+    // What: both serials of every managed zone.
+    // Why: table and check compare the same rows.
+    // From: Issue #1683 | PR #2017
+    pub fn peer_zones(
+        s: &Settings,
+        ours: &[crate::pdns::Zone],
+        theirs: &[crate::pdns::Zone],
+    ) -> Result<Vec<PeerZone>, String> {
+        Ok(crate::dns::managed_zones(s)?
+            .into_iter()
+            .map(|zone| PeerZone {
+                primary: serial_of(ours, &zone),
+                secondary: serial_of(theirs, &zone),
+                zone,
+            })
+            .collect())
+    }
+
+    // What: state of one zone from its two serials.
+    // Why: the peer status is the worst zone state.
+    // From: Issue #1683
+    pub fn zone_state(z: &PeerZone) -> ZoneState {
+        use crate::dns::Sync;
+        // What: let-else instead of None in a tuple.
+        // Why: CodeQL read that None as unused.
+        // From: Issue #1683
+        let Some(p) = z.primary else {
+            return ZoneState::Error;
+        };
+        let Some(r) = z.secondary else {
+            return ZoneState::Missing;
+        };
+        match crate::dns::sync_state(p, r) {
+            Sync::InSync => ZoneState::InSync,
+            Sync::Ahead => ZoneState::Ahead,
+            Sync::Unknown => ZoneState::Unknown,
+            Sync::Behind => ZoneState::Behind,
+        }
+    }
+
+    // What: the worst state of the zones; none: in sync.
+    // Why: one lagging zone decides the peer status.
+    // From: Issue #1683 | PR #2017
+    pub fn worst_state(zones: &[PeerZone]) -> ZoneState {
+        zones
+            .iter()
+            .map(zone_state)
+            .max()
+            .unwrap_or(ZoneState::InSync)
+    }
+
+    // What: pdns API of the primary on this node.
+    // Why: records live only in PowerDNS.
+    // From: Issue #1683 | PR #2019
+    pub fn primary_api(
+        s: &Settings,
+        client: reqwest::Client,
+        key: &str,
+    ) -> Result<crate::pdns::Api, String> {
+        Ok(crate::pdns::Api::new(
+            client,
+            &s.text("PDNS_PRIMARY_API_URL")?,
+            key,
+        ))
+    }
+
+    // What: pdns API of one secondary by its address.
+    // Why: zone list and AXFR request use the same.
+    // From: Issue #1683 | PR #2019
+    pub fn secondary_api(
+        s: &Settings,
+        client: reqwest::Client,
+        address: &str,
+        key: &str,
+    ) -> Result<crate::pdns::Api, String> {
+        let host = crate::dns::host_port(address, s.uint("PDNS_AUTH_API_PORT")?);
+        let url = format!("http://{host}{}", s.text("PDNS_API_PATH")?);
+        Ok(crate::pdns::Api::new(client, &url, key))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{PeerZone, worst_state, zone_state};
+
+        // What: a zone row with the two given serials.
+        // Why: the tests differ only in the serials.
+        // From: Issue #1683 | PR #2017
+        fn zone(primary: Option<u32>, secondary: Option<u32>) -> PeerZone {
+            PeerZone {
+                zone: "z".into(),
+                primary,
+                secondary,
+            }
+        }
+
+        #[test]
+        fn zone_state_names_each_case() {
+            assert_eq!(zone_state(&zone(Some(3), Some(3))).word(), "in_sync");
+            assert_eq!(zone_state(&zone(Some(3), Some(4))).word(), "ahead");
+            assert_eq!(zone_state(&zone(Some(4), Some(3))).word(), "behind");
+            assert_eq!(zone_state(&zone(Some(3), None)).word(), "missing");
+            assert_eq!(zone_state(&zone(None, Some(3))).word(), "error");
+        }
+
+        #[test]
+        fn one_lagging_zone_decides_the_status() {
+            let zones = vec![zone(Some(3), Some(3)), zone(Some(5), Some(4))];
+            assert_eq!(worst_state(&zones).word(), "behind");
+            assert_eq!(worst_state(&[]).word(), "in_sync");
+        }
+    }
+}
 
 // What: recursor.yml, RPZ zone and Lua files.
 // Why: two recursors: HTTP mode and HTTPS mode.

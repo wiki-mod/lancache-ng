@@ -17,6 +17,7 @@ use base64::Engine as _;
 use lancache_ng::config::{self, Settings, process_env};
 use lancache_ng::dhcp::Mode as DhcpMode;
 use lancache_ng::dns::Role;
+use lancache_ng::peer::{self, PeerZone, ZoneState};
 use lancache_ng::{access, apply, docker, fs, http, human, render, secret};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -864,9 +865,7 @@ async fn logs_save(
 // Why: records live only in PowerDNS.
 // From: Issue #1683 | PR #1980
 fn pdns_api(s: &Settings) -> Result<lancache_ng::pdns::Api, String> {
-    let key = secrets(s)?.pdns_api_key;
-    let url = s.text("PDNS_PRIMARY_API_URL")?;
-    Ok(lancache_ng::pdns::Api::new(http::client(s)?, &url, &key))
+    peer::primary_api(s, http::client(s)?, &secrets(s)?.pdns_api_key)
 }
 
 // What: one API client per recursor.
@@ -1757,38 +1756,13 @@ fn ns_change(s: &Settings, name: &str, entered: Option<bool>) -> Fields {
     form
 }
 
-// What: SOA serial of one zone in a zone list.
-// Why: serials show whether a secondary is in sync.
-// From: Issue #1683 | PR #1980
-fn serial_of(zones: &[lancache_ng::pdns::Zone], zone: &str) -> Option<u32> {
-    zones.iter().find(|z| z.name == zone).map(|z| z.serial)
-}
-
 // What: serial of each managed zone on both peers.
 // Why: shows a lost NOTIFY or AXFR in any zone (RFC 1982).
 // From: Issue #1683 | PR #1858
 async fn peer_serials(s: &Settings, address: &str) -> Result<Vec<PeerZone>, String> {
     let ours = pdns_api(s)?.zones().await?;
     let theirs = remote_zones(s, address).await?;
-    peer_zones(s, &ours, &theirs)
-}
-
-// What: both serials of every managed zone.
-// Why: the table and the check compare the same rows.
-// From: Issue #1683 | PR #2017
-fn peer_zones(
-    s: &Settings,
-    ours: &[lancache_ng::pdns::Zone],
-    theirs: &[lancache_ng::pdns::Zone],
-) -> Result<Vec<PeerZone>, String> {
-    Ok(lancache_ng::dns::managed_zones(s)?
-        .into_iter()
-        .map(|zone| PeerZone {
-            primary: serial_of(ours, &zone),
-            secondary: serial_of(theirs, &zone),
-            zone,
-        })
-        .collect())
+    peer::peer_zones(s, &ours, &theirs)
 }
 
 // What: zone list of one secondary pdns API.
@@ -1802,11 +1776,7 @@ async fn remote_zones(s: &Settings, address: &str) -> Result<Vec<lancache_ng::pd
 // Why: zone list and AXFR request use the same.
 // From: Issue #1683
 fn remote_api(s: &Settings, address: &str) -> Result<lancache_ng::pdns::Api, String> {
-    let port = s.uint("PDNS_AUTH_API_PORT")?;
-    let host = lancache_ng::dns::host_port(address, port);
-    let url = format!("http://{host}{}", s.text("PDNS_API_PATH")?);
-    let key = secrets(s)?.pdns_api_key;
-    Ok(lancache_ng::pdns::Api::new(http::client(s)?, &url, &key))
+    peer::secondary_api(s, http::client(s)?, address, &secrets(s)?.pdns_api_key)
 }
 
 // What: failed checks of one secondary in a row.
@@ -1922,8 +1892,8 @@ async fn check_peer(
     let aa = answers_aa(s, address, &lancache_ng::dns::lan_zone(s)?).await;
     let api = remote_api(s, address)?;
     let theirs = api.zones().await?;
-    for z in peer_zones(s, ours, &theirs)? {
-        let state = zone_state(&z);
+    for z in peer::peer_zones(s, ours, &theirs)? {
+        let state = peer::zone_state(&z);
         let word = state.word();
         // What: ahead: our serial goes past theirs first.
         // Why: a restore sets ours back; AXFR skips lower.
@@ -1972,7 +1942,7 @@ async fn zone_overview(State(app): Shared) -> Page {
     let rows: Vec<Value> = lancache_ng::dns::managed_zones(&s)?
         .into_iter()
         .map(|zone| {
-            let serials: Vec<Option<u32>> = lists.iter().map(|l| serial_of(l, &zone)).collect();
+            let serials: Vec<Option<u32>> = lists.iter().map(|l| peer::serial_of(l, &zone)).collect();
             // What: state word of each secondary's cell.
             // Why: table and status line share zone_state.
             // From: Issue #1683 | PR #2019
@@ -1987,7 +1957,7 @@ async fn zone_overview(State(app): Shared) -> Page {
                             primary: serials[0],
                             secondary: *theirs,
                         };
-                        zone_state(&row).word()
+                        peer::zone_state(&row).word()
                     })
                 })
                 .collect();
@@ -1995,77 +1965,6 @@ async fn zone_overview(State(app): Shared) -> Page {
         })
         .collect();
     Ok(axum::Json(json!({"columns": columns, "rows": rows})).into_response())
-}
-
-// What: one managed zone with both serials.
-// Why: the health check reports every zone.
-// From: Issue #1683
-struct PeerZone {
-    zone: String,
-    primary: Option<u32>,
-    secondary: Option<u32>,
-}
-
-// What: state of one zone on a secondary, mild to bad.
-// Why: the order picks the worst; callers name a state.
-// From: Issue #1683 | PR #2017
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-enum ZoneState {
-    InSync,
-    Ahead,
-    Unknown,
-    Behind,
-    Missing,
-    Error,
-}
-
-impl ZoneState {
-    // What: the word of a state in answers and log lines.
-    // Why: the page maps this word to label and colour.
-    // From: Issue #1683 | PR #2017
-    fn word(self) -> &'static str {
-        match self {
-            ZoneState::InSync => "in_sync",
-            ZoneState::Ahead => "ahead",
-            ZoneState::Unknown => "unknown",
-            ZoneState::Behind => "behind",
-            ZoneState::Missing => "missing",
-            ZoneState::Error => "error",
-        }
-    }
-}
-
-// What: state of one zone from its two serials.
-// Why: the peer status is the worst zone state.
-// From: Issue #1683
-fn zone_state(z: &PeerZone) -> ZoneState {
-    use lancache_ng::dns::Sync;
-    // What: let-else instead of None in a tuple pattern.
-    // Why: CodeQL read that None as an unused variable.
-    // From: Issue #1683
-    let Some(p) = z.primary else {
-        return ZoneState::Error;
-    };
-    let Some(r) = z.secondary else {
-        return ZoneState::Missing;
-    };
-    match lancache_ng::dns::sync_state(p, r) {
-        Sync::InSync => ZoneState::InSync,
-        Sync::Ahead => ZoneState::Ahead,
-        Sync::Unknown => ZoneState::Unknown,
-        Sync::Behind => ZoneState::Behind,
-    }
-}
-
-// What: the worst state of the zones; none: in sync.
-// Why: one lagging zone decides the peer status.
-// From: Issue #1683 | PR #2017
-fn worst_state(zones: &[PeerZone]) -> ZoneState {
-    zones
-        .iter()
-        .map(zone_state)
-        .max()
-        .unwrap_or(ZoneState::InSync)
 }
 
 // What: worst state over all zones, each zone in detail.
@@ -2076,10 +1975,10 @@ async fn secondary_health(s: &Settings, address: &str) -> Value {
         Ok(z) => z,
         Err(e) => return json!({"status": "unreachable", "detail": e}),
     };
-    let worst = worst_state(&zones);
+    let worst = peer::worst_state(&zones);
     let mut lines = Vec::new();
     for z in &zones {
-        let state = zone_state(z).word();
+        let state = peer::zone_state(z).word();
         let show = |v: Option<u32>| v.map_or_else(|| "-".to_string(), |n| n.to_string());
         lines.push(format!(
             "{}: {} (primary {}, secondary {})",
@@ -4863,44 +4762,7 @@ async fn main() -> Result<(), String> {
 // From: Issue #1683
 #[cfg(test)]
 mod tests {
-    use super::{PeerZone, duration_text, worst_state, zone_state};
-
-    // What: a zone row with the two given serials.
-    // Why: the tests differ only in the serials.
-    // From: Issue #1683 | PR #2017
-    fn zone(primary: Option<u32>, secondary: Option<u32>) -> PeerZone {
-        PeerZone {
-            zone: "lan.".to_string(),
-            primary,
-            secondary,
-        }
-    }
-
-    // What: every pair of serials gets its state word.
-    // Why: the page and the check read these words.
-    // From: Issue #1683
-    #[test]
-    fn zone_state_names_each_case() {
-        assert_eq!(zone_state(&zone(Some(3), Some(3))).word(), "in_sync");
-        assert_eq!(zone_state(&zone(Some(3), Some(4))).word(), "ahead");
-        assert_eq!(zone_state(&zone(Some(4), Some(3))).word(), "behind");
-        assert_eq!(zone_state(&zone(Some(3), None)).word(), "missing");
-        assert_eq!(zone_state(&zone(None, Some(3))).word(), "error");
-    }
-
-    // What: the worst zone state is the peer status.
-    // Why: in sync only when every managed zone matches.
-    // From: Issue #1683
-    #[test]
-    fn one_lagging_zone_decides_the_status() {
-        let zones = [
-            zone(Some(3), Some(3)),
-            zone(Some(5), Some(4)),
-            zone(Some(1), Some(1)),
-        ];
-        assert_eq!(worst_state(&zones).word(), "behind");
-        assert_eq!(worst_state(&[]).word(), "in_sync");
-    }
+    use super::duration_text;
 
     // What: check times as h, min or s.
     // Why: the page shows the SOT seconds readably.

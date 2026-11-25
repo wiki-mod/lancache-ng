@@ -7,7 +7,7 @@
 // From: Issue #1683 | PR #1980
 
 use lancache_ng::config::Settings;
-use lancache_ng::{cert, clock, dns, docker, fs, http, pdns, tidy};
+use lancache_ng::{cert, clock, dns, docker, fs, http, tidy};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::{BTreeMap, VecDeque};
@@ -403,28 +403,61 @@ fn certs(s: &Settings, f: &mut Findings) -> Result<(), String> {
 // Why: shows a lost NOTIFY or a broken AXFR.
 // From: Issue #1683 | PR #1980
 async fn dns_sync(s: &Settings, f: &mut Findings) -> Result<(), String> {
-    let far = s.text_or_empty("PDNS_SECONDARY_API_URL");
-    if far.is_empty() {
+    use lancache_ng::peer;
+    // What: the registered secondaries, not a lone URL.
+    // Why: one list owns the peers; each gets a check.
+    // From: Issue #1683 | PR #2019
+    let peers = lancache_ng::pdns_conf::secondaries(s);
+    if peers.is_empty() {
         return Ok(());
     }
     let key = s.text("PDNS_API_KEY")?;
     let client = http::client(s)?;
-    let near = pdns::Api::new(client.clone(), &s.text("PDNS_PRIMARY_API_URL")?, &key);
-    let far = pdns::Api::new(client, &far, &key);
-    let ours = near.zones().await.map_err(|e| format!("primary: {e}"))?;
-    let theirs = far.zones().await.map_err(|e| format!("secondary: {e}"))?;
-    let seen: BTreeMap<&str, u32> = theirs.iter().map(|z| (z.name.as_str(), z.serial)).collect();
-    for z in &ours {
-        let Some(&other) = seen.get(z.name.as_str()) else {
-            f.crit(&z.name, "zone missing on secondary");
-            continue;
+    let ours = peer::primary_api(s, client.clone(), &key)?
+        .zones()
+        .await
+        .map_err(|e| format!("primary: {e}"))?;
+    let managed: std::collections::BTreeSet<String> = dns::managed_zones(s)?.into_iter().collect();
+    for (name, address) in peers {
+        let api = match peer::secondary_api(s, client.clone(), &address, &key) {
+            Ok(a) => a,
+            Err(e) => {
+                f.crit(&name, format!("secondary unreachable: {e}"));
+                continue;
+            }
         };
-        let state = dns::sync_state(z.serial, other);
-        if state != dns::Sync::InSync {
-            f.warn(
-                &z.name,
-                format!("{state:?}: primary {} secondary {other}", z.serial),
-            );
+        // What: one bad secondary must not stop the rest.
+        // Why: the others still need their alarm.
+        // From: Issue #1683 | PR #2019
+        let theirs = match api.zones().await {
+            Ok(z) => z,
+            Err(e) => {
+                f.crit(&name, format!("secondary unreachable: {e}"));
+                continue;
+            }
+        };
+        for z in peer::peer_zones(s, &ours, &theirs)? {
+            let state = peer::zone_state(&z);
+            if state != peer::ZoneState::InSync {
+                f.warn(
+                    &name,
+                    format!(
+                        "zone {} {}: primary {:?} secondary {:?}",
+                        z.zone,
+                        state.word(),
+                        z.primary,
+                        z.secondary
+                    ),
+                );
+            }
+        }
+        // What: a zone the primary no longer serves.
+        // Why: a stale slave keeps answering old names.
+        // From: Issue #1683 | PR #2019
+        for z in &theirs {
+            if z.kind == "Slave" && !managed.contains(&z.name) {
+                f.warn(&name, format!("extra zone {} not on the primary", z.name));
+            }
         }
     }
     Ok(())
