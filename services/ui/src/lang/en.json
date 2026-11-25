@@ -198,6 +198,8 @@
   "kea_mode_is_active_the_configuration": "DHCP-Server mode is active. The configuration area below is visible and editable with direct fields for gateway, DNS, NTP, reservations, and subnet details.",
   "kept": "Kept:",
   "lan_also_ptr": "Also add PTR",
+  "lan_domain_public": "Internet ending",
+  "lan_domain_public_hint": "{x} lies under an ending that exists on the Internet. In your LAN this zone hides the real Internet names of {x}.",
   "lan_domains": "LAN domains",
   "lan_domains_sub": "Each LAN domain is its own zone. The main domain is the one DHCP hands to the main subnet; the name server names use it too. A subnet can use any LAN domain; its clients are registered there by DDNS.",
   "lan_zone_records": "LAN zone records",

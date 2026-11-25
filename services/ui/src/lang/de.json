@@ -198,6 +198,8 @@
   "kea_mode_is_active_the_configuration": "Der Modus DHCP-Server ist aktiv. Der Einstellungsbereich unten zeigt Felder für Gateway, DNS, NTP, Reservierungen und Subnetze.",
   "kept": "Aufbewahrung:",
   "lan_also_ptr": "PTR mit anlegen",
+  "lan_domain_public": "Internet-Endung",
+  "lan_domain_public_hint": "{x} liegt unter einer Endung, die es im Internet gibt. Im LAN verdeckt diese Zone die echten Internet-Namen von {x}.",
   "lan_domains": "LAN-Domains",
   "lan_domains_sub": "Jede LAN-Domain ist eine eigene Zone. Die Haupt-Domain gibt DHCP dem Hauptsubnetz mit; auch die Nameserver-Namen nutzen sie. Ein Subnetz kann jede LAN-Domain nutzen; seine Clients werden dort per DDNS eingetragen.",
   "lan_zone_records": "Einträge der LAN-Zone",

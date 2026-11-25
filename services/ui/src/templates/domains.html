@@ -135,7 +135,10 @@
           <tr><th>Domain</th><th>{{ t.role }}</th><th>{{ t.entries }}</th><th>{{ t.dhcp_subnets }}</th><th></th></tr>
           {% for domain in lan_domains %}
           <tr>
-            <td class="mono">{{ domain.name }}</td>
+            {# What: tag for an Internet ending
+               Why: the zone hides its Internet names
+               From: Issue #1683 | PR #2019 #}
+            <td class="mono">{{ domain.name }}{% if domain.public %} <span class="tag miss" title="{{ t.lan_domain_public_hint | replace(from="{x}", to=domain.name) }}">{{ t.lan_domain_public }}</span>{% endif %}</td>
             <td>{% if domain.main %}<span class="tag hit">{{ t.main_domain }}</span>{% else %}<span class="tag off">{{ t.extra_domain }}</span>{% endif %}</td>
             <td class="mono">{{ domain.records | length }}</td>
             <td class="mono">{% if domain.subnets %}{{ domain.subnets | join(sep=", ") }}{% else %}–{% endif %}</td>

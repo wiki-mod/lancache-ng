@@ -1129,16 +1129,24 @@ async fn domains(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
         Err(e) => ctx.insert("domain_error_message", &e),
     }
     let subnets = domain_subnets(&s).await;
+    // What: a domain under a real Internet ending.
+    // Why: in the LAN it hides its own Internet names.
+    // From: Issue #1683 | PR #2019
+    let psl = render::psl(&s).ok();
     let rows: Vec<Value> = lans
         .iter()
         .enumerate()
         .map(|(i, zone)| {
             let own = records.get(zone).cloned().unwrap_or_default();
+            let public = psl
+                .as_ref()
+                .is_some_and(|p| p.is_tld(lancache_ng::dns::ending(zone)));
             json!({
                 "name": zone.trim_end_matches('.'),
                 "main": i == 0,
                 "records": own,
                 "subnets": subnets.get(zone).cloned().unwrap_or_default(),
+                "public": public,
             })
         })
         .collect();
