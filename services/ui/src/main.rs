@@ -795,10 +795,11 @@ async fn logs(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     // Why: the store may name folders the list lacks.
     // From: Issue #1683 | PR #1980
     let mut names = programs.clone();
-    if let Ok(dirs) = std::fs::read_dir(&root) {
-        for d in dirs.flatten().filter(|d| d.path().is_dir()) {
-            let n = d.file_name().to_string_lossy().into_owned();
-            config::add_once(&mut names, &n);
+    let dirs = lancache_ng::fs::entries_if_present(&root)
+        .map_err(|e| format!("{}: {e}", root.display()))?;
+    for d in dirs.iter().filter(|d| d.is_dir()) {
+        if let Some(n) = d.file_name() {
+            config::add_once(&mut names, &n.to_string_lossy());
         }
     }
     let hosts = names.clone();
@@ -3177,11 +3178,9 @@ fn prune_rendered(s: &Settings, files: &[render::File]) -> Result<Vec<PathBuf>, 
         if kept.is_empty() {
             continue;
         }
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
+        let entries = lancache_ng::fs::entries_if_present(&dir)
+            .map_err(|e| format!("{}: {e}", dir.display()))?;
+        for path in entries {
             if path.is_file() && !kept.contains(path.as_path()) {
                 std::fs::remove_file(&path).map_err(|e| format!("{}: {e}", path.display()))?;
                 removed.push(path);
