@@ -3630,6 +3630,10 @@ async fn match_zones(
             }
         } else {
             api.create_secondary(id, masters, key).await?;
+            // What: pull the new zone now.
+            // Why: else pdns waits for xfr-cycle-interval.
+            // From: Issue #1683
+            api.axfr_retrieve(id).await?;
             eprintln!("{who}: secondary zone {id} added");
         }
     }
