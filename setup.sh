@@ -403,16 +403,23 @@ is_valid_ipv6() {
         && "$ip" != *:::* && "${ip#*::}" != *::* ]]
 }
 
+# What: splits an IPv4 CIDR into address and prefix 0-32
+# Why: one parser; the address check is is_valid_ipv4
+# From: Issue #1683 | PR #1858
+ipv4_cidr_split() {
+    local -n _cidr_net_ref="$2" _cidr_bits_ref="$3"
+    [[ "$1" == */* ]] || return 1
+    _cidr_net_ref="${1%/*}" _cidr_bits_ref="${1#*/}"
+    is_valid_ipv4 "$_cidr_net_ref" && [[ "$_cidr_bits_ref" =~ ^(0|[1-9][0-9]?)$ ]] \
+        && (( _cidr_bits_ref <= 32 ))
+}
+
 # What: true if an IPv4 lies inside an IPv4 CIDR
 # Why: LOOPBACK_NETS names loopback as nets, not as IPs
 # From: Issue #1918 | PR #1858
 ipv4_in_cidr() {
-    local ip="$1" net="${2%/*}" bits="${2#*/}" a b c d n m
-    if ! is_valid_ipv4 "$ip" || ! is_valid_ipv4 "$net" \
-        || [[ ! "$bits" =~ ^[0-9]{1,2}$ ]] || (( 10#$bits > 32 )); then
-        return 1
-    fi
-    bits=$(( 10#$bits ))
+    local ip="$1" net bits a b c d n m
+    is_valid_ipv4 "$ip" && ipv4_cidr_split "$2" net bits || return 1
     IFS=. read -r a b c d <<< "$ip"
     n=$(( (a << 24) | (b << 16) | (c << 8) | d ))
     IFS=. read -r a b c d <<< "$net"
@@ -873,25 +880,8 @@ secondary_choose_listen_ip() {
 # Why: rejects bad masks before DHCP config is written
 # From: Issue #1683 | PR #1858
 is_valid_cidr() {
-    local cidr="$1" ip mask octets part
-
-    if [[ ! "$cidr" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$ ]]; then
-        return 1
-    fi
-
-    ip=${cidr%/*}
-    mask=${cidr#*/}
-
-    [[ "$mask" =~ ^[0-9]+$ ]] || return 1
-    (( mask >= 1 && mask <= 32 )) || return 1
-
-    IFS='.' read -r -a octets <<< "$ip"
-    for part in "${octets[@]}"; do
-        [[ "$part" =~ ^[0-9]{1,3}$ ]] || return 1
-        (( part >= 0 && part <= 255 )) || return 1
-    done
-
-    return 0
+    local net bits
+    ipv4_cidr_split "$1" net bits && (( bits >= 1 ))
 }
 
 # What: lists the valid DHCP_MODE values
