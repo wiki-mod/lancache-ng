@@ -2,7 +2,7 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-# What: dns image: PowerDNS auth and two recursors.
+# What: dns image: PowerDNS, recursors, dns helper.
 # Why: OpenRC keeps each SOT process alive.
 # From: Issue #1683 | PR #1980
 
@@ -10,6 +10,46 @@
 # Why: SOT base_images.alpine is the sole owner.
 # From: Issue #1683
 ARG ALPINE_IMAGE
+
+# What: build-tools image pin, supplied by ci.sh.
+# Why: one toolchain image builds every Rust crate.
+# From: Issue #1683 | PR #1980
+ARG BUILD_TOOLS_IMAGE
+
+# What: Rust build stage; ci.sh rust-build does the work.
+# Why: ci.sh owns caches, target and crate list.
+# From: Issue #1683 | PR #1980
+FROM ${BUILD_TOOLS_IMAGE:-scratch} AS builder
+ARG MUSL_TARGET
+ARG RUST_CRATES
+ARG CARGO_BUILD_JOBS=
+ARG PROJECT_CARGO_LTO=
+ARG PROJECT_CARGO_CODEGENUNIT=
+ARG BUILD_TOOLS_IMAGE
+ARG CI_TOOLCHAIN_COMPILERS
+ARG CI_CACHE_PREFIX
+ARG CI_CARGO_HOME
+ARG CI_RUST_SOURCE_DIR
+ARG CI_RETRY_MAX_ATTEMPTS
+ARG CI_RETRY_BACKOFF_BASE_SECONDS
+ARG CI_DOWNLOAD_CONNECT_TIMEOUT
+ARG CI_DOWNLOAD_STALL_SECONDS
+WORKDIR /build
+# What: source tree bind, build secrets, cargo caches.
+# Why: rust-build reads the tree there; no COPY list.
+# From: Issue #1683 | PR #1980
+RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \
+    --mount=type=bind,target=${CI_RUST_SOURCE_DIR},rw \
+    --mount=type=secret,id=sccache_redis_url \
+    --mount=type=secret,id=sccache_policy \
+    --mount=type=secret,id=sccache_gha \
+    --mount=type=secret,id=sccache_dist_config \
+    --mount=type=secret,id=distcc_potential_hosts \
+    --mount=type=secret,id=ccache_redis_url \
+    --mount=type=secret,id=project_selfhosted_proxy_ca \
+    --mount=type=cache,target=${CI_CARGO_HOME}/registry,sharing=locked \
+    --mount=type=cache,target=${CI_CARGO_HOME}/git,sharing=locked \
+    bash /usr/local/bin/ci.sh rust-build dns "${RUST_CRATES}"
 
 # What: final image on the SOT Alpine pin.
 # Why: scratch only fails a build without the arg.
@@ -49,6 +89,11 @@ ARG LANCACHE_RUNTIME_SCHEMA
 ENV LANCACHE_RUNTIME_GID=${LANCACHE_RUNTIME_GID} \
     LANCACHE_RUNTIME_DEFAULTS=${LANCACHE_RUNTIME_DEFAULTS} \
     LANCACHE_RUNTIME_SCHEMA=${LANCACHE_RUNTIME_SCHEMA}
+
+# What: the dns helper, the Rust program of this image.
+# Why: built in the builder stage from this checkout.
+# From: Issue #1683
+COPY --from=builder /build/lancache-dns-out /usr/local/bin/lancache-dns
 
 # What: one supervise-daemon script per SOT process.
 # Why: OpenRC restarts crashes; @KEY@ e.g. CONFIG_DIR.

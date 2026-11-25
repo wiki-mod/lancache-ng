@@ -608,8 +608,9 @@ optional additional LAN domains (`DNS_EXTRA_LAN_DOMAINS`, comma separated).
   domain is added or removed, and in every secondary check, the primary sets the
   zones of each registered secondary over that secondary's PowerDNS API: new zones
   are created with the TSIG key and pulled, zones the primary no longer serves
-  are deleted. The secondary's DNS server answers a new domain at once; its
-  resolver on the DNS port forwards it after the secondary's next start.
+  are deleted. On the secondary the dns helper `lancache-dns` updates the
+  resolver's forward zones and flushes changed zones, so both answer a new or
+  removed domain alike within seconds.
 
 ## Testing the cache
 

@@ -111,8 +111,11 @@ Provided by `pdns_conf`, `recursor_conf`, `pdns`, `dns` and `snapshot` in
   secondary hold exactly its zones (`match_zones` via `peer_follows`): right
   after its own zones change and in every secondary check, over the secondary's
   pdns API, creating zones with TSIG and deleting the ones it no longer serves.
-  The secondary's one-shot `secondary-zones` uses the same function without
-  deleting.
+  On the secondary the dns helper `lancache-dns` (services/dns, a process in
+  the dns image) writes the dns configs from the zones its pdns holds, adds
+  the TSIG key and the setup zones once without deleting, reloads both
+  recursors and flushes a zone whose serial moved; it replaces the former
+  one-shots `render-dns` and `secondary-zones`.
 
 ## DHCP
 
@@ -186,7 +189,7 @@ Provided by `services/ui/src/main.rs` and `services/ui/src/templates/`.
   `access::stats` shows proxy requests, hits and bytes.
 - **Logs.** `/logs` shows the stored logs and `/logs/save` switches logging per
   service.
-- **CLI.** `lancache-ui healthcheck`, `render-dns`, `zone-snapshots`,
+- **CLI.** `lancache-ui healthcheck`, `zone-snapshots`,
   `zone-rollback` and `dhcp-probe` (one DHCP probe as JSON, run on the host
   network).
 

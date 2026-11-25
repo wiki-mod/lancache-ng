@@ -3058,6 +3058,147 @@ pub mod peer {
             .unwrap_or(ZoneState::InSync)
     }
 
+    // What: TSIG key in PowerDNS; returns its name.
+    // Why: zones are made with the key; it comes first.
+    // From: Issue #1683
+    pub async fn ensure_tsigkey(s: &Settings) -> Result<String, String> {
+        let sec = crate::render::secrets(s)?;
+        let algorithm = s.text("DDNS_TSIG_ALGORITHM")?;
+        own_api(
+            s,
+            crate::http::client(s)?,
+            &crate::render::secrets(s)?.pdns_api_key,
+        )?
+        .set_tsigkey(&sec.tsig_name, &algorithm, &sec.tsig_secret)
+        .await?;
+        Ok(sec.tsig_name)
+    }
+
+    // What: bind the TSIG key to every existing zone.
+    // Why: zones of older versions were created without it.
+    // From: Issue #1683 | PR #1858
+    pub async fn ensure_tsig(s: &Settings, key: &str) -> Result<(), String> {
+        let api = own_api(
+            s,
+            crate::http::client(s)?,
+            &crate::render::secrets(s)?.pdns_api_key,
+        )?;
+        let secondary = crate::dns::Role::from_settings(s)? == crate::dns::Role::Secondary;
+        let key = vec![key.to_string()];
+        for z in api.zones().await? {
+            if secondary {
+                api.set_secondary_tsig(&z.name, &key[0]).await?;
+            } else {
+                api.set_metadata(&z.name, "TSIG-ALLOW-AXFR", &key).await?;
+            }
+        }
+        Ok(())
+    }
+
+    // What: create missing zones on a secondary.
+    // Why: the zone list comes from registration.
+    // From: Issue #1683 | PR #1858
+    pub async fn ensure_secondary_zones(s: &Settings, key: &str) -> Result<(), String> {
+        let zones = s.list("DNS_SECONDARY_ZONES");
+        let port = primary_xfr_port(s, zones.first()).await?;
+        let masters = vec![crate::dns::host_port(&s.text("DNS_XFR_PRIMARY")?, port)];
+        // What: no removal; the primary's check prunes.
+        // Why: this list is from setup and may be older.
+        // From: Issue #1683
+        match_zones(
+            &own_api(
+                s,
+                crate::http::client(s)?,
+                &crate::render::secrets(s)?.pdns_api_key,
+            )?,
+            &zones,
+            &masters,
+            key,
+            false,
+            "secondary",
+        )
+        .await
+    }
+
+    // What: a secondary holds exactly the wanted zones.
+    // Why: one rule at setup and in the primary's check.
+    // From: Issue #1683
+    pub async fn match_zones(
+        api: &crate::pdns::Api,
+        zones: &[String],
+        masters: &[String],
+        key: &str,
+        prune: bool,
+        who: &str,
+    ) -> Result<(), String> {
+        let have = api.zones().await?;
+        let wanted: Vec<String> = zones.iter().map(|z| crate::pdns::zone_id(z)).collect();
+        for id in &wanted {
+            if let Some(z) = have.iter().find(|z| z.name == *id) {
+                if z.masters != masters {
+                    api.set_masters(id, masters).await?;
+                }
+            } else {
+                api.create_secondary(id, masters, key).await?;
+                // What: pull the new zone now.
+                // Why: else pdns waits a xfr cycle.
+                // From: Issue #1683
+                api.axfr_retrieve(id).await?;
+                eprintln!("{who}: secondary zone {id} added");
+            }
+        }
+        // What: drop copies the primary no longer serves.
+        // Why: a removed LAN domain must stop answering.
+        // From: Issue #1683
+        for z in have
+            .iter()
+            .filter(|z| prune && z.kind == "Slave" && !wanted.contains(&z.name))
+        {
+            api.delete_zone(&z.name).await?;
+            eprintln!("{who}: secondary zone {} removed", z.name);
+        }
+        Ok(())
+    }
+
+    // What: port 53 if the primary answers aa there.
+    // Why: an older primary has its recursor on DNS_PORT.
+    // From: Issue #1683
+    pub async fn primary_xfr_port(s: &Settings, zone: Option<&String>) -> Result<u64, String> {
+        let fallback = s.uint("PDNS_AUTH_PORT")?;
+        let Some(zone) = zone else {
+            return Ok(fallback);
+        };
+        let primary = s.text("DNS_XFR_PRIMARY")?;
+        let probe = soa_on_dns_port(s, &primary, zone).await;
+        // What: no aa or no answer: stay on PDNS_AUTH_PORT.
+        // Why: a failed probe must not stop the zones step.
+        // From: Issue #1683
+        let chosen = match &probe {
+            Ok(soa) if soa.serves_zone() => s.uint("DNS_PORT")?,
+            _ => fallback,
+        };
+        eprintln!("primary {primary}: {probe:?}; XFR port {chosen}");
+        Ok(chosen)
+    }
+
+    // What: non-RD SOA query to DNS_PORT of one address.
+    // Why: XFR port choice and the NS check ask the same.
+    // From: Issue #1683
+    pub async fn soa_on_dns_port(
+        s: &Settings,
+        address: &str,
+        zone: &str,
+    ) -> Result<crate::dns::Soa, String> {
+        let ip = crate::dns::parse_ip(address)?;
+        let port = s.num::<u16>("DNS_PORT")?;
+        let addr = std::net::SocketAddr::new(ip, port);
+        let wait = std::time::Duration::from_secs(s.uint("SECONDARY_PROBE_TIMEOUT")?);
+        let zone = zone.to_string();
+        tokio::task::spawn_blocking(move || crate::dns::soa_probe(addr, &zone, wait))
+            .await
+            .map_err(|e| e.to_string())?
+    }
+
     // What: one API client per recursor.
     // Why: flush and statistics reach every recursor.
     // From: Issue #1683 | PR #2017

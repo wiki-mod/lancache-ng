@@ -48,11 +48,15 @@ fn reload(s: &Settings) -> Result<(), String> {
     Ok(())
 }
 
-// What: what the recursors have taken over so far.
+// What: what is in place so far.
 // Why: a step is noted only after it worked.
 // From: Issue #1683
 #[derive(Default)]
 struct Done {
+    // What: TSIG key, setup zones and key binding done.
+    // Why: once per start; then the primary keeps zones.
+    // From: Issue #1683
+    seeded: bool,
     // What: a written config not yet reloaded.
     // Why: a failed reload must be retried.
     // From: Issue #1683
@@ -63,14 +67,35 @@ struct Done {
     flushed: Option<BTreeMap<String, u32>>,
 }
 
+// What: TSIG key, setup zones without removal, binding.
+// Why: the secondary pulls with its key from the start.
+// From: Issue #1683
+async fn seed(s: &Settings) -> Result<(), String> {
+    let key = peer::ensure_tsigkey(s).await?;
+    peer::ensure_secondary_zones(s, &key).await?;
+    peer::ensure_tsig(s, &key).await
+}
+
 // What: one round towards the wanted state.
 // Why: same input changes nothing; a failure retries.
 // From: Issue #1683
 async fn round(s: &Settings, done: &mut Done) -> Result<(), String> {
-    let zones = own_zones(s).await?;
-    let names: Vec<String> = zones.keys().cloned().collect();
+    // What: before pdns answers, the setup zone list.
+    // Why: pdns and recursors start on the first write.
+    // From: Issue #1683
+    let live = own_zones(s).await;
+    let names: Vec<String> = match &live {
+        Ok(zones) => zones.keys().cloned().collect(),
+        Err(_) => s.list("DNS_SECONDARY_ZONES"),
+    };
     if write_for(s, &names)? {
         done.reload_due = true;
+    }
+    let zones = live?;
+    if !done.seeded {
+        seed(s).await?;
+        done.seeded = true;
+        eprintln!("lancache-dns: TSIG key and setup zones in place");
     }
     if done.reload_due {
         reload(s)?;

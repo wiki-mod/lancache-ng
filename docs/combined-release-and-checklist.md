@@ -937,10 +937,10 @@ Known not met by `current_dev`; the cases stay in the scenarios as the target,
 and each entry leaves this list with the commit that fixes it (tracked in
 PR #2019):
 
-- 10.5 zone set and the zone part of secondary down: the primary now sets each
-  secondary's zones at once (b0828d40), and a secondary that was down gets them
-  at the primary's next secondary check; but the secondary's resolver forwards a
-  zone added later only after the secondary's next start (work item 37);
+- 10.5 zone set and the zone part of secondary down: the primary sets each
+  secondary's zones at once (b0828d40) and the dns helper lancache-dns makes the
+  secondary's recursors follow (work item 37); open until verified from a built
+  dns image on the release candidate;
 - 10.5 monitoring: the secondary does not publish its PowerDNS API port, so the
   Admin UI health check of a secondary on another host cannot reach it (PR #2017
   publishes the port);

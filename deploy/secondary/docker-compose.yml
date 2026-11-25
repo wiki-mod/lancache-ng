@@ -22,7 +22,7 @@ services:
       - IP_HTTPS=${IP_HTTPS:-}
       - PDNS_API_KEY=${PDNS_API_KEY}
       # What: own snmp community from setup.sh
-      # Why: render-dns writes snmpd.conf with it
+      # Why: lancache-dns writes snmpd.conf with it
       # From: Issue #1683
       - SNMP_COMMUNITY=${SNMP_COMMUNITY:?SNMP_COMMUNITY is required}
       # What: the primary's TSIG key; no generated fallback.
@@ -62,7 +62,7 @@ services:
       # Why: a runtime file, not in the image.
       # From: Issue #1683 | PR #1858
       - ./filter-aaaa.lua:${SOT_PDNS_LUA_DNS_SCRIPT}:ro
-      # What: dns configs; render and the helper write.
+      # What: dns configs; lancache-dns writes them.
       # Why: the helper follows zones the primary sets.
       # From: Issue #1683 | PR #1980
       - lancache-config:${SOT_CONFIG_DIR}
@@ -93,57 +93,9 @@ services:
       retries: ${SOT_HEALTHCHECK_RETRIES:?SOT_HEALTHCHECK_RETRIES is required}
       start_period: ${SOT_HEALTHCHECK_START_PERIOD:?SOT_HEALTHCHECK_START_PERIOD is required}
     restart: always
-    # What: start only after the configs are written.
-    # Why: the dns programs read them at start.
-    # From: Issue #1683 | PR #1980
-    depends_on:
-      render:
-        condition: service_completed_successfully
     # What: Docker's local driver; it rotates by itself.
     # Why: no services container, so no syslog-ng here.
     # From: Issue #1683
-    logging:
-      driver: local
-
-  # What: one-shot ui run that writes the dns configs.
-  # Why: a secondary has no ui server; same renderer.
-  # From: Issue #1683 | PR #1980
-  render:
-    image: ${LANCACHE_IMAGE_REF_UI:?LANCACHE_IMAGE_REF_UI is required}
-    command: ["render-dns"]
-    environment: *dns-env
-    volumes:
-      - lancache-config:${SOT_CONFIG_DIR}
-      - ./cdn-domains.txt:${SOT_CDN_DOMAINS_FILE}:ro
-      # What: the one secrets dir of this secondary.
-      # Why: render and the dns helper embed the same keys.
-      # From: Issue #1683
-      - dns-config-snapshots:${SOT_DNS_SNAPSHOT_MOUNT}
-    restart: "no"
-    # What: no probe; the run ends after one write.
-    # Why: dns waits for its exit code instead.
-    # From: Issue #1683 | PR #1980
-    healthcheck:
-      disable: true
-    logging:
-      driver: local
-
-  # What: one-shot ui run: secondary zones and TSIG.
-  # Why: without a zone no AXFR ever runs.
-  # From: Issue #1683
-  zones:
-    image: ${LANCACHE_IMAGE_REF_UI:?LANCACHE_IMAGE_REF_UI is required}
-    command: ["secondary-zones"]
-    environment: *dns-env
-    # What: retry until the pdns API answers.
-    # Why: pdns starts after this run may begin.
-    # From: Issue #1683
-    restart: on-failure
-    depends_on:
-      dns:
-        condition: service_started
-    healthcheck:
-      disable: true
     logging:
       driver: local
 

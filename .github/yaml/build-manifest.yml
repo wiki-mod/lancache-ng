@@ -161,9 +161,14 @@ services:
   dns:
     context: services/dns
     labels: [dns, pdns]
-    description: "LanCache-NG dns: dnsdist, PowerDNS auth, dns-http and dns-https recursors."
-    build_type: apk
+    description: "LanCache-NG dns: dnsdist, PowerDNS auth, dns-http and dns-https recursors, dns helper."
+    build_type: rust
+    # What: crates (cargo -p) the dns image builds.
+    # Why: the dns helper runs in the dns container.
+    # From: Issue #1683
+    crates: [lancache-dns]
     processes:
+      - lancache-dns=/usr/local/bin/lancache-dns
       - pdns=/usr/sbin/pdns_server,--config-dir=@CONFIG_DIR@/dns,--guardian=no,--daemon=no
       - dns-http=/usr/sbin/pdns_recursor,--config-dir=@CONFIG_DIR@/dns,--config-name=http,--daemon=no
       - dns-https=/usr/sbin/pdns_recursor,--config-dir=@CONFIG_DIR@/dns,--config-name=https,--daemon=no

@@ -48,3 +48,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 subtle = { workspace = true }
+# What: tokio for one blocking DNS probe off the runtime.
+# Why: the ui and the dns helper ask the primary alike.
+# From: Issue #1683
+tokio = { workspace = true }
