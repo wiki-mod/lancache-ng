@@ -6490,10 +6490,8 @@ _ci_sccache_env() {
     export SCCACHE_SERVER_UDS="${sock_dir}/s${step}.sock"
     probe="$(_ci_sccache_start)" || prc=$?
     [ "${prc}" -eq 0 ] && return 0
-    # What: a cache that will not start is infrastructure
-    # absence; drop redis, then remote, then local.
-    # Why: ci-2.0-architecture.md §72.2: absence degrades,
-    # it never ends the build; required is no exception.
+    # What: a cache that will not start is absence.
+    # Why: §72.2: absence degrades to direct rustc.
     # From: Issue #1683 | PR #2019
     while [ -n "${chain}" ]; do
         next="$(_ci_sccache_chain_next "${chain}")"
@@ -7628,16 +7626,14 @@ _ci_sccache_report() {
     # From: Issue #1683 | PR #1912
     cause="$(_ci_capture 1 grep -E 'storage check result|storage write check failed|cache storage (read check|failed to read)|Error executing cache write|Cache read error|Cache timed out|compile result: cache error' "${log}")" || return 2
     cause="$(_ci_capture 1 grep -vE "${ok}" <<< "${cause}")" || return 2
-    # What: cache-level errors after a build that compiled.
-    # Why: §72.2: a cache fault is infrastructure, not a
-    # build failure; sccache already compiled, so warn only.
+    # What: cache errors after a build that compiled.
+    # Why: §72.2: a cache fault only warns, never fails.
     # From: Issue #1683 | PR #2019
     ci_error "[CI-WARN-CACHE-0017]" "mode=${_CI_SCCACHE_MODE} errors=\"${errs# }\" log=\"${log}\" reason=\"sccache cache level fault; build compiled\"" "${cause}"
 }
 
-# What: cargo build; an sccache outage degrades, required
-# included; a real build error fails at once (§72.2).
-# Why: a cache is an optimization, never build correctness.
+# What: cargo build; an sccache outage degrades (§72.2).
+# Why: a real build error fails at once, never degrades.
 # From: Issue #1683 | PR #2019
 _ci_rust_cargo_build() {
     local crates="$1" musl_target="$2" cargo_jobs="$3" crate
@@ -7685,15 +7681,13 @@ _ci_rust_cargo_build() {
         case "${layers[0]}" in
             ccache|distcc)
                 # What: ccache/distcc outage; kept failing.
-                # Why: §72.2 wants degrade, but their
-                # mid-build teardown is a follow-up.
+                # Why: §72.2 degrade is a follow-up here.
                 # From: Issue #1683 | PR #1912
                 ci_log "[CI-ERROR-RUSTBUILD-0011]" "rc=${cargo_status} layer=${layers[0]} reason=\"configured accelerator outage; no fallback (AG-CI-007)\""
                 return 2 ;;
             sccache)
                 # What: sccache outage; drop it and retry.
-                # Why: §72.2: absence degrades, required
-                # included; a real error returned above.
+                # Why: §72.2: absence degrades; required.
                 # From: Issue #1683 | PR #2019
                 unset RUSTC_WRAPPER SCCACHE_REDIS SCCACHE_CONF SCCACHE_REDIS_KEY_PREFIX
                 ci_log "[CI-WARN-RUSTBUILD-0013]" "reason=\"accelerator outage; retry without sccache\"" ;;
