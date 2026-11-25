@@ -1057,9 +1057,8 @@ pub mod dns {
         for zone in lan_domains(s)? {
             let name = zone.trim_end_matches('.');
             let last = name.rsplit('.').next().unwrap_or(name);
-            let top = canonical_zone(last);
-            if !psl.is_tld(last) && !out.contains(&top) {
-                out.push(top);
+            if !psl.is_tld(last) {
+                crate::config::add_once(&mut out, &canonical_zone(last));
             }
         }
         Ok(out)
