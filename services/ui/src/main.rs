@@ -2880,13 +2880,8 @@ async fn dhcp_stays_off(app: &App, s: &Settings) -> Result<Option<String>, Strin
     };
     let (grace, limit) = app.limits(s)?;
     let list = project_containers(app, s).await?;
-    // What: only the stack dhcp, not a "compose run" one.
-    // Why: CI kea_rollback runs own Kea; it was stopped.
-    // From: Issue #1683
     let running = list.iter().find(|c| {
-        docker::service_of(c) == Some(service.as_str())
-            && c["Labels"][docker::ONEOFF_LABEL].as_str() != Some("True")
-            && c["State"].as_str() == Some("running")
+        docker::service_of(c) == Some(service.as_str()) && c["State"].as_str() == Some("running")
     });
     let Some(name) = running.and_then(docker::name_of) else {
         return Ok(None);

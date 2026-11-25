@@ -1836,15 +1836,18 @@ pub mod docker {
             serde_json::from_slice(&body).map_err(|e| Error::Decode(e.to_string()))
         }
 
-        // What: the containers of this stack's project.
-        // Why: one rule for project name and call limit.
+        // What: the service containers of this stack.
+        // Why: a "compose run" one is no service.
         // From: Issue #1683
         pub async fn stack(&self, s: &crate::config::Settings) -> Result<Vec<Value>, String> {
             let limit = Duration::from_secs(s.uint("DOCKER_TIMEOUT")?);
             let project = s.text("COMPOSE_PROJECT")?;
-            self.project(&project, limit)
+            let mut rows = self
+                .project(&project, limit)
                 .await
-                .map_err(|e| e.to_string())
+                .map_err(|e| e.to_string())?;
+            rows.retain(|r| r["Labels"][ONEOFF_LABEL].as_str() != Some("True"));
+            Ok(rows)
         }
 
         // What: full state of one container.
