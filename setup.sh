@@ -6127,12 +6127,13 @@ Runs the guided LanCache-NG installer. The optional channel word
 setup.sh does nothing without a command, so the curl | bash one-liner
 passes it: ... | sudo bash -s -- install [<channel>]
 
-When no local repo is found (the standalone curl | bash path), this command
-self-clones to ${DEFAULT_INSTALL_DIR} from the remote's default branch by
-default. Set LANCACHE_SETUP_GIT_REF to a branch, tag, or commit-ish (e.g.
-LANCACHE_SETUP_GIT_REF=vX.Y.Z) to bootstrap from that ref instead -- useful
-for validating a pre-release branch the same documented one-liner way that
-LANCACHE_IMAGE_CHANNEL already selects a specific image channel.
+The code of the chosen channel goes to its own directory,
+${DEFAULT_INSTALL_DIR}/<channel>, at that channel's branch or tag; the
+link ${DEFAULT_INSTALL_DIR}/current names the running one. Set
+LANCACHE_SETUP_GIT_REF to a branch, tag or commit (e.g.
+LANCACHE_SETUP_GIT_REF=vX.Y.Z) to take that code instead, for example to
+try a pre-release branch; the images still follow the channel. A checkout
+on a branch that is no channel branch installs from where it is.
 EOF
             ;;
         install-requirements)
