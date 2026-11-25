@@ -1824,27 +1824,16 @@ fn walk_cache(
     sizes: &mut BTreeMap<u32, u64>,
     freed: &mut (u64, u64),
 ) -> Result<(), String> {
-    let rd = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    for e in rd {
-        let e = e.map_err(|e| e.to_string())?;
-        let ty = e.file_type().map_err(|e| e.to_string())?;
-        if ty.is_dir() {
-            walk_cache(&e.path(), drop, sizes, freed)?;
-            continue;
-        }
-        if !ty.is_file() {
-            continue;
-        }
-        let Some(depot) = key_depot(&e.path()) else {
+    for (path, meta) in lancache_ng::fs::files_under(dir) {
+        let Some(depot) = key_depot(&path) else {
             continue;
         };
-        let len = e.metadata().map(|m| m.len()).unwrap_or(0);
         if drop(depot) {
-            remove(&e.path())?;
-            freed.0 += len;
+            remove(&path)?;
+            freed.0 += meta.len();
             freed.1 += 1;
         } else {
-            *sizes.entry(depot).or_default() += len;
+            *sizes.entry(depot).or_default() += meta.len();
         }
     }
     Ok(())
@@ -1871,18 +1860,10 @@ fn cached(c: &Ctx) -> Result<Value, String> {
 // Why: one button empties the whole cache.
 // From: Issue #871 | PR #1991
 fn wipe_dir(dir: &Path, freed: &mut (u64, u64)) -> Result<(), String> {
-    let rd = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    for e in rd {
-        let e = e.map_err(|e| e.to_string())?;
-        let ty = e.file_type().map_err(|e| e.to_string())?;
-        if ty.is_dir() {
-            wipe_dir(&e.path(), freed)?;
-        } else if ty.is_file() {
-            let len = e.metadata().map(|m| m.len()).unwrap_or(0);
-            remove(&e.path())?;
-            freed.0 += len;
-            freed.1 += 1;
-        }
+    for (path, meta) in lancache_ng::fs::files_under(dir) {
+        remove(&path)?;
+        freed.0 += meta.len();
+        freed.1 += 1;
     }
     Ok(())
 }
