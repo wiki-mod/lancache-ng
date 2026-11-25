@@ -6719,20 +6719,30 @@ wait_for_stack_health() {
     return 1
 }
 
-# What: the update's health gate after a first start
-# Why: install and secondary check a start the same way
-# From: Issue #1683 | PR #1980
-started_stack_health_gate() {
+# What: waits for a stack whose services all started at once
+# Why: services and ui limits add up; rc 2 = no service list
+# From: Issue #1683 | PR #2017
+wait_for_whole_stack() {
     local stack_dir="$1" env_file="$2" wait_services wait_ui
     local -a started_services=()
-    print_step "Waiting for healthy containers"
     _UPDATE_STACK_DIR="$stack_dir"
     _UPDATE_ENV_FILE="$env_file"
     wait_services=$(prod_env_default SETUP_HEALTH_WAIT_SERVICES_SECONDS) || exit $?
     wait_ui=$(prod_env_default SETUP_HEALTH_WAIT_UI_SECONDS) || exit $?
     stack_services_into started_services "$stack_dir" "$env_file" \
-        || die "Failed to list the services in $stack_dir (exit $?)."
-    if wait_for_stack_health "$((wait_services + wait_ui))" "${started_services[@]}"; then
+        || { print_error "Failed to list the services in $stack_dir (exit $?)."; return 2; }
+    wait_for_stack_health "$((wait_services + wait_ui))" "${started_services[@]}"
+}
+
+# What: the update's health gate after a first start
+# Why: install and secondary check a start the same way
+# From: Issue #1683 | PR #1980
+started_stack_health_gate() {
+    local rc=0
+    print_step "Waiting for healthy containers"
+    wait_for_whole_stack "$1" "$2" || rc=$?
+    [[ "$rc" -ne 2 ]] || die "Cannot check the stack in $1 without its service list."
+    if [[ "$rc" -eq 0 ]]; then
         print_ok "All containers are healthy"
         return 0
     fi
@@ -6810,15 +6820,10 @@ rollback_stack_update() {
         # What: old stack must be healthy before success
         # Why: no success message while containers are down
         # From: Issue #1683 | PR #1991
-        local wait
-        local -a restored_services
-        _UPDATE_STACK_DIR="$install_dir"
-        _UPDATE_ENV_FILE=$(runtime_env_file_for_install_dir "$install_dir") \
+        local restored_env
+        restored_env=$(runtime_env_file_for_install_dir "$install_dir") \
             || { print_error "Cannot resolve the env file of $install_dir (exit $?)."; return 1; }
-        wait=$(prod_env_default SETUP_HEALTH_WAIT_SERVICES_SECONDS) || exit $?
-        stack_services_into restored_services "$install_dir" "$_UPDATE_ENV_FILE" \
-            || { print_error "Cannot list the services of $install_dir (exit $?)."; return 1; }
-        if ! wait_for_stack_health "$wait" "${restored_services[@]}"; then
+        if ! wait_for_whole_stack "$install_dir" "$restored_env"; then
             print_error "Rollback restored the files, but the stack is not healthy; start it with: $SCRIPT_DIR/setup.sh compose $install_dir up -d"
             return 1
         fi
@@ -6861,7 +6866,7 @@ apply_stack_update_ordered() {
         if stack_update_step "Starting the whole stack (first start)" "Failed to start the stack." \
                 stack_up "$install_dir" "$_UPDATE_ENV_FILE" -d --remove-orphans \
             && stack_update_step "Verifying the whole stack is healthy" "The stack did not become healthy in time." \
-                wait_for_stack_health "$(( wait_services + wait_ui ))" "${all_services[@]}"; then
+                wait_for_whole_stack "$install_dir" "$_UPDATE_ENV_FILE"; then
             print_ok "Whole stack verified healthy"
             return 0
         fi
