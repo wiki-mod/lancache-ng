@@ -2849,7 +2849,7 @@ migrate_quickstart_install() (
     local old_dir="$1" stack_dir="${PROD_COMPOSE%/*}" new_env old_env record project key value volume dir copy f
     local old_volumes prod_volumes rows missing copies keys old_raw new_raw old_value line path_keys bundle
     local https_ip fresh kept kept_list restored
-    local -a service_list copy_lines path_key_list=()
+    local -a copy_lines path_key_list=()
     path_keys=$(lancache_sot_list quickstart_path_keys runtime) || exit $?
     path_keys="${path_keys//$'\n'/ }"
     read -ra path_key_list <<< "$path_keys"
@@ -2876,10 +2876,7 @@ migrate_quickstart_install() (
     trap resume_lancache_convergence_after_failed_update EXIT
     UPDATE_CONVERGENCE_PAUSED=1
     pause_lancache_convergence_for_update
-    _UPDATE_ENV_FILE="$old_env" _UPDATE_STACK_DIR="$old_dir"
-    stack_services_into service_list "$old_dir" "$old_env" \
-        || die "Cannot list the services of $old_dir (exit $?); nothing was changed."
-    capture_stack_health_baseline "${service_list[@]}"
+    capture_stack_health_baseline "$old_dir" "$old_env"
     project=$(compose_project_name "$old_dir" "$old_env") \
         || die "Cannot resolve the compose project of $old_dir (exit $?); nothing was changed."
     # What: a retry without live copies starts afresh
@@ -6609,12 +6606,16 @@ verify_stack_functional_health() {
     return 0
 }
 
-# What: records pre-update health of each named service
+# What: records pre-change health of every stack service
 # Why: gate fails only on regressions; several stable reads
 # From: Issue #1683 | PR #1858
 capture_stack_health_baseline() {
-    local -a services=("$@")
+    local -a services=()
     local svc container_id sample healthy_streak samples interval
+    _UPDATE_STACK_DIR="$1"
+    _UPDATE_ENV_FILE="$2"
+    stack_services_into services "$1" "$2" \
+        || die "Cannot list the services of $1 (exit $?); nothing was changed."
 
     # What: sample count and interval from the SOT defaults
     # Why: one healthy read can hit a crash-loop window
@@ -7397,10 +7398,7 @@ perform_stack_update_flow() {
         # Why: a later restart bakes regressions into it
         # From: Issue #1391
         print_step "Capturing pre-update health baseline"
-        local -a _update_baseline_services
-        stack_services_into _update_baseline_services "$install_dir" "$_UPDATE_ENV_FILE" \
-            || die "Cannot list the services of $install_dir (exit $?); nothing was changed."
-        capture_stack_health_baseline "${_update_baseline_services[@]}"
+        capture_stack_health_baseline "$install_dir" "$_UPDATE_ENV_FILE"
 
         UPDATE_CONVERGENCE_PAUSED=0
         trap resume_lancache_convergence_after_failed_update EXIT
@@ -8831,14 +8829,9 @@ cmd_update_ip() {
     # Why: new IPs that fail the gate must not stay active
     # From: Issue #1683 | PR #1858
     local saved_env apply_rc=0
-    local -a all_services
     install_health_gate_tools
-    _UPDATE_ENV_FILE="$deploy_env"
-    _UPDATE_STACK_DIR="$install_dir"
     print_step "Capturing health baseline"
-    stack_services_into all_services "$install_dir" "$deploy_env" \
-        || die "Cannot list the services of $install_dir (exit $?); nothing was changed."
-    capture_stack_health_baseline "${all_services[@]}"
+    capture_stack_health_baseline "$install_dir" "$deploy_env"
     saved_env=$(cat -- "$deploy_env") || die "Cannot read $deploy_env (exit $?); nothing was changed."
 
     print_step "Updating configuration files"
@@ -8971,7 +8964,6 @@ cmd_configure_upstream_dns() {
 
     local env_file ip_http ip_https lan extra_lan apply_rc=0
     local old_servers old_zones old_unsigned old_reverse dhcp_mode
-    local -a all_services
     env_file=$(require_stack_env_file "$install_dir") || exit $?
     old_servers=$(get_env_var DNS_UPSTREAM_SERVERS "$env_file") || exit $?
     old_zones=$(get_env_var DNS_UPSTREAM_ZONES "$env_file") || exit $?
@@ -9020,12 +9012,8 @@ cmd_configure_upstream_dns() {
     # Why: one health-gated restart path, no second copy
     # From: Issue #1918 | PR #1858
     install_health_gate_tools
-    _UPDATE_ENV_FILE="$env_file"
-    _UPDATE_STACK_DIR="$install_dir"
     print_step "Capturing health baseline"
-    stack_services_into all_services "$install_dir" "$env_file" \
-        || die "Cannot list the services of $install_dir (exit $?); nothing was changed."
-    capture_stack_health_baseline "${all_services[@]}"
+    capture_stack_health_baseline "$install_dir" "$env_file"
 
     print_step "Saving configuration"
     set_env_key DNS_UPSTREAM_SERVERS "$DNS_UPSTREAM_SERVERS" "$env_file"
