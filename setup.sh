@@ -76,12 +76,11 @@ APT_COMPOSE_PACKAGES=("$DOCKER_COMPOSE_PLUGIN" docker-compose-v2 "$APT_LEGACY_CO
 APT_BUILDX_PACKAGES=("$DOCKER_BUILDX_PLUGIN" docker-buildx)
 PACMAN_COMPOSE="docker-compose"
 PACMAN_DOCKER_PACKAGES=(docker "$PACMAN_COMPOSE" docker-buildx)
-# What: Alpine Docker packages and the GNU tools of setup.sh
-# Why: BusyBox lacks options like realpath -m and grep -P
+# What: Alpine Docker packages
+# Why: lookups, install sets, hints and prompts share them
 # From: Issue #1683 | PR #1858
 APK_COMPOSE="docker-cli-compose"
 APK_DOCKER_PACKAGES=(docker "$APK_COMPOSE" docker-cli-buildx)
-APK_GNU_PACKAGES=(coreutils grep tar iproute2)
 
 # What: ANSI colors only when stdout is a terminal
 # Why: logs and pipes must not get escape codes
@@ -1576,24 +1575,10 @@ ensure_stack_requirements_installed() {
     # From: Issue #1683 | PR #1858
     assert_prebuilt_image_platform_supported
 
-    install_missing_tools curl
-
-    # What: GNU coreutils, grep, tar and iproute2 on Alpine
+    # What: curl and the GNU tools; realpath means coreutils
     # Why: BusyBox lacks realpath -m, grep -P and ss
     # From: Issue #1683 | PR #1858
-    local manager installed package
-    local -a gnu_missing=()
-    manager=$(host_package_manager)
-    if [[ "$manager" = apk ]]; then
-        installed=$(apk info) || die "apk info failed (exit $?)."
-        for package in "${APK_GNU_PACKAGES[@]}"; do
-            list_has_line "$package" "$installed" || gnu_missing+=("$package")
-        done
-        if (( ${#gnu_missing[@]} > 0 )); then
-            install_packages "Alpine's BusyBox tools lack options setup.sh uses." "${gnu_missing[@]}" \
-                || die "Failed to install ${gnu_missing[*]}."
-        fi
-    fi
+    install_missing_tools curl realpath grep tar ss
 
     # What: jq reads every JSON answer this script gets
     # Why: primary, Kea and DNS replies need a real parser
@@ -5256,7 +5241,9 @@ package_name_for_tool() {
         pacman:dig) printf 'bind\n' ;;
         dnf:ss|dnf:ip|yum:ss|yum:ip) printf 'iproute\n' ;;
         *:ss|*:ip) printf 'iproute2\n' ;;
+        apk:flock) printf 'flock\n' ;;
         *:flock) printf 'util-linux\n' ;;
+        *:realpath) printf 'coreutils\n' ;;
         apt-get:dig)
             if apt_package_available bind9-dnsutils; then
                 printf '%s\n' bind9-dnsutils
@@ -5277,7 +5264,7 @@ install_missing_tools() {
     local -a missing=() packages=() tools=("$@")
     local tool package
     for tool in "${tools[@]}"; do
-        command_available "$tool" || missing+=("$tool")
+        tool_usable "$tool" || missing+=("$tool")
     done
     (( ${#missing[@]} == 0 )) && return 0
     for tool in "${missing[@]}"; do
@@ -5287,9 +5274,17 @@ install_missing_tools() {
     install_packages "missing tool(s) ${missing[*]}" "${packages[@]}" \
         || die "Failed to install required tool(s): ${missing[*]}"
     for tool in "${missing[@]}"; do
-        command_available "$tool" \
-            || die "$tool is still missing after installing package(s): ${packages[*]}"
+        tool_usable "$tool" \
+            || die "$tool is still missing or only BusyBox's after installing package(s): ${packages[*]}"
     done
+}
+
+# What: command_available, and no BusyBox applet
+# Why: applets lack options like flock -w or realpath -m
+# From: Issue #1683
+tool_usable() {
+    command_available "$1" || return 1
+    [[ "$(readlink -f "$(command -v "$1")")" != */busybox ]]
 }
 
 # What: lists the paths a config or full backup includes
