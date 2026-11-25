@@ -1381,9 +1381,7 @@ impl Cm {
         // What: a login id of its own per CM connection.
         // Why: two jobs logged each other off (eresult 34).
         // From: Issue #871 | PR #1985
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.subsec_nanos());
+        let nanos = u32::try_from(clock::unix_nanos() % 1_000_000_000).unwrap_or(0);
         let ip = PbOut::default().fixed32(1, nanos | 1);
         let logon = PbOut::default()
             .int(1, cfg.logon[0])
