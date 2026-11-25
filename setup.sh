@@ -8386,16 +8386,11 @@ reset_kea_to_last_known_good_config() {
     print_warn "This CLI fallback records no new known-good snapshot of the restored state; the next change of the DHCP settings in the Admin UI records one."
 }
 
-# What: adds the trailing dot to a zone name if missing
-# Why: lancache-ui lists zones with a final dot
+# What: zone as the ui lists it: lower case, final dot
+# Why: dns_name_normalized owns case; the dot is the ui's
 # From: Issue #1683 | PR #1858
 canonical_dns_zone() {
-    local zone="$1"
-    if [[ "$zone" == *. ]]; then
-        printf '%s\n' "$zone"
-    else
-        printf '%s.\n' "$zone"
-    fi
+    printf '%s.\n' "$(dns_name_normalized "$1")"
 }
 
 # What: one snapshot line: id $1, UTC time of seconds $2
