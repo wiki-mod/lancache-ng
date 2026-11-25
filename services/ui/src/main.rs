@@ -907,11 +907,7 @@ fn reverse_name(ip: &str) -> Result<String, String> {
 // Why: the PowerDNS PATCH needs the zone.
 // From: Issue #1683 | PR #1980
 fn reverse_zone(s: &Settings, name: &str) -> Option<String> {
-    let zones = lancache_ng::dns::private_reverse_zones(s);
-    zones
-        .into_iter()
-        .filter(|z| name.ends_with(z.as_str()))
-        .max_by_key(String::len)
+    lancache_ng::dns::zone_of(name, &lancache_ng::dns::private_reverse_zones(s))
 }
 
 // What: reverse name of an address and its zone.
@@ -1382,7 +1378,7 @@ fn in_zone(name: &str, zone: &str) -> String {
     // Why: "xhome.lan" is not in zone "home.lan".
     // From: Issue #1683
     let bare = zone.trim_end_matches('.');
-    let inside = name == bare || name.ends_with(&format!(".{bare}"));
+    let inside = lancache_ng::dns::is_within(name, bare);
     if name.ends_with('.') || inside {
         name.to_string()
     } else {
@@ -3633,7 +3629,7 @@ async fn ensure_own_endings(
     key: &str,
     have: &[String],
 ) -> Result<(), String> {
-    use lancache_ng::dns::{canonical_zone, is_below, parent_zone};
+    use lancache_ng::dns::{canonical_zone, is_within, parent_zone};
     // What: no list, no top zone; the NTA stays.
     // Why: an ending we cannot check may be public.
     // From: Issue #1683 | PR #2019
@@ -3661,7 +3657,7 @@ async fn ensure_own_endings(
     }
     let signed: Vec<String> = lans
         .iter()
-        .filter(|z| tops.iter().any(|t| *z == t || is_below(z, t)))
+        .filter(|z| tops.iter().any(|t| is_within(z, t)))
         .cloned()
         .collect();
     let mut parents = tops.clone();

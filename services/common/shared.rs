@@ -946,6 +946,24 @@ pub mod dns {
         name.ends_with(&format!(".{zone}"))
     }
 
+    // What: true for the zone itself or a name below it.
+    // Why: one rule for "this name lies in that zone".
+    // From: Issue #1683 | PR #2019
+    pub fn is_within(name: &str, zone: &str) -> bool {
+        name == zone || is_below(name, zone)
+    }
+
+    // What: longest zone of a list that holds a name.
+    // Why: a record or a DS goes into exactly that zone.
+    // From: Issue #1683 | PR #2019
+    pub fn zone_of(name: &str, zones: &[String]) -> Option<String> {
+        zones
+            .iter()
+            .filter(|z| is_within(name, z))
+            .max_by_key(|z| z.len())
+            .cloned()
+    }
+
     // What: true for a name in the reverse DNS tree.
     // Why: the reverse DNS tree is under arpa.
     // From: Issue #1683 | PR #2017
@@ -1047,15 +1065,12 @@ pub mod dns {
         Ok(out)
     }
 
-    // What: nearest listed zone strictly above a zone.
+    // What: the listed zone that holds a zone's parent.
     // Why: the DS of a zone belongs in that parent.
     // From: Issue #1683 | PR #2019
     pub fn parent_zone(zone: &str, zones: &[String]) -> Option<String> {
-        zones
-            .iter()
-            .filter(|p| is_below(zone, p))
-            .max_by_key(|p| p.len())
-            .cloned()
+        let (_, up) = zone.split_once('.')?;
+        zone_of(up, zones)
     }
 
     // What: zone of the pre-multi-domain layout.
@@ -3075,7 +3090,7 @@ pub mod recursor_conf {
         if key == "DNS_UPSTREAM_ZONES" {
             for m in crate::dns::managed_zones(s)? {
                 let m = m.trim_end_matches('.').to_ascii_lowercase();
-                if let Some(z) = out.iter().find(|z| **z == m || crate::dns::is_below(z, &m)) {
+                if let Some(z) = out.iter().find(|z| crate::dns::is_within(z, &m)) {
                     return Err(format!(
                         "{key}: {z} is the local zone {m}; it is answered here"
                     ));
