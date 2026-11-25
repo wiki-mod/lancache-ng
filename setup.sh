@@ -1277,8 +1277,11 @@ install_docker_apt_repo() {
     apt_install ca-certificates curl gnupg \
         || die "Failed to install ca-certificates, curl and gnupg (exit $?)."
     install -m 0755 -d "$key_dir" || die "Failed to create $key_dir (exit $?)."
+    # What: gpg replaces an existing key without asking
+    # Why: a rerun has no terminal for gpg's question
+    # From: Issue #1683
     curl -fsSL "$DOCKER_REPO_URL/$os_id/gpg" \
-        | gpg --dearmor -o "$key_file" \
+        | gpg --batch --yes --dearmor -o "$key_file" \
         || die "Failed to install Docker's apt signing key (exit $?)."
     chmod a+r "$key_file" || die "Failed to make Docker's apt signing key readable (exit $?)."
     dpkg_arch=$(dpkg --print-architecture) || die "dpkg --print-architecture failed (exit $?)."
