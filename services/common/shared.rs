@@ -153,11 +153,7 @@ pub mod fs {
         mode: u32,
         owner: Owner,
     ) -> io::Result<bool> {
-        let same = match fs::read(path) {
-            Ok(old) => old == contents,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => false,
-            Err(e) => return Err(e),
-        };
+        let same = read_if_present(path)?.is_some_and(|old| old == contents);
         if same {
             set_path_owner(path, owner, Some(mode))?;
         } else {
@@ -182,6 +178,17 @@ pub mod fs {
     pub fn metadata_if_present(path: &Path) -> io::Result<Option<fs::Metadata>> {
         match fs::symlink_metadata(path) {
             Ok(m) => Ok(Some(m)),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    // What: file bytes, or None if the file is absent.
+    // Why: a missing file is a normal first state.
+    // From: Issue #1683
+    pub fn read_if_present(path: &Path) -> io::Result<Option<Vec<u8>>> {
+        match fs::read(path) {
+            Ok(b) => Ok(Some(b)),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e),
         }
@@ -319,9 +326,13 @@ pub mod secret {
                 Ok(text)
             }
         };
-        match read() {
-            Ok(text) => usable(text),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+        match fs::read_if_present(path)? {
+            Some(raw) => {
+                let text = String::from_utf8(raw)
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+                usable(text.trim().to_string())
+            }
+            None => {
                 let text = create();
                 let mode = fs::PRIVATE_MODE;
                 match fs::write(path, text.as_bytes(), mode, Place::Exclusive, owner) {
@@ -330,7 +341,6 @@ pub mod secret {
                     Err(e) => Err(e),
                 }
             }
-            Err(e) => Err(e),
         }
     }
 

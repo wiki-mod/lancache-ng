@@ -371,11 +371,8 @@ fn line_entry(line: &str) -> Option<(&str, &str)> {
 // Why: reading and writing see a new install alike.
 // From: Issue #1683 | PR #2017
 fn read_text(path: &Path) -> Result<String, String> {
-    match std::fs::read_to_string(path) {
-        Ok(text) => Ok(text),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
-        Err(e) => Err(format!("{}: {e}", path.display())),
-    }
+    let bytes = crate::fs::read_if_present(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    String::from_utf8(bytes.unwrap_or_default()).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 // What: the raw KEY=VALUE lines of the stack .env.

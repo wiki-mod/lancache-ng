@@ -217,13 +217,11 @@ impl Ctx {
 // Why: a missing file is a normal first state.
 // From: Issue #871 | PR #1980
 fn read_json<T: for<'a> Deserialize<'a>>(path: &Path) -> Result<Option<T>, String> {
-    match std::fs::read(path) {
-        Ok(raw) => serde_json::from_slice(&raw)
-            .map(Some)
-            .map_err(|e| format!("{}: {e}", path.display())),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(format!("{}: {e}", path.display())),
-    }
+    let raw =
+        lancache_ng::fs::read_if_present(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    raw.map(|b| serde_json::from_slice(&b))
+        .transpose()
+        .map_err(|e| format!("{}: {e}", path.display()))
 }
 
 // What: remove a file; a missing file is fine.
@@ -293,10 +291,9 @@ fn bound_key(dir: &Path, bind: &[String], fresh: bool) -> Result<[u8; 32], Strin
 // Why: the plaintext token never touches the disk.
 // From: Issue #871 | PR #1858
 fn load_session(dir: &Path, bind: &[String]) -> Result<Option<Session>, String> {
-    let sealed = match std::fs::read(dir.join(TOKEN_FILE)) {
-        Ok(raw) => raw,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(format!("{TOKEN_FILE}: {e}")),
+    let read = lancache_ng::fs::read_if_present(&dir.join(TOKEN_FILE));
+    let Some(sealed) = read.map_err(|e| format!("{TOKEN_FILE}: {e}"))? else {
+        return Ok(None);
     };
     // What: an old or moved login opens no more.
     // Why: the operator must know to scan the QR again.
@@ -880,8 +877,8 @@ impl Dl {
             .dns_resolver(Arc::new(ToProxy(s.text("CONTAINER_NAME_PROXY")?)))
             .pool_max_idle_per_host(connections);
         let ca = lancache_ng::render::ca_cert(s)?;
-        match std::fs::read(&ca) {
-            Ok(pem) => {
+        match lancache_ng::fs::read_if_present(&ca).map_err(|e| format!("{}: {e}", ca.display()))? {
+            Some(pem) => {
                 let cert = reqwest::Certificate::from_pem(&pem)
                     .map_err(|e| format!("{}: {e}", ca.display()))?;
                 builder = builder.tls_certs_merge([cert]);
@@ -889,10 +886,9 @@ impl Dl {
             // What: no CA yet: logged; https then fails.
             // Why: the ui issues it only in HTTPS mode.
             // From: Issue #871 | PR #2017
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            None => {
                 eprintln!("cachehamster: no stack CA {}; https fails", ca.display());
             }
-            Err(e) => return Err(format!("{}: {e}", ca.display())),
         }
         let client = builder
             .build()
