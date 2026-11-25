@@ -1282,7 +1282,7 @@ async fn domains(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
 // From: Issue #1683
 async fn domain_subnets(s: &Settings) -> BTreeMap<String, Vec<String>> {
     let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    if s.text("DHCP_MODE").unwrap_or_default() != "kea" {
+    if DhcpMode::from_settings(s).ok() != Some(DhcpMode::Kea) {
         return out;
     }
     // What: no Kea answer leaves the column empty.
