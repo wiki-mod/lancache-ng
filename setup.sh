@@ -8947,6 +8947,13 @@ is_secondary_name() {
     [[ "$1" != *.* && "${#1}" -le "$max" ]] && is_valid_dns_name "$1"
 }
 
+# What: true when the dir holds a secondary's .env
+# Why: every release writes LISTEN_IP; other .env lack it
+# From: Issue #1683
+is_secondary_dir() {
+    env_key_exists LISTEN_IP "$1/.env"
+}
+
 # What: dies when this host holds another lancache system
 # Why: runs before any change; a secondary needs its host
 # From: Issue #1683 | PR #2017
@@ -9073,29 +9080,27 @@ cmd_secondary() {
     terminal_available && tty=1
     if [[ "$tty" = 1 && -z "$name" ]]; then
         local name_default=""
-        [[ "$rotate" -eq 1 && -f .env && -f docker-compose.yml ]] && name_default=$(basename "$PWD")
+        [[ "$rotate" -eq 1 ]] && is_secondary_dir . && name_default=$(basename "$PWD")
         ask_checked name "Name of this secondary (a-z, 0-9, -)" "$name_default" is_secondary_name "Not a valid name ($(secondary_name_rule))"
     fi
     die_if_any_empty "Required argument(s) missing (see ./setup.sh secondary --help)" "--name=$name"
     is_secondary_name "$name" \
         || die "--name allows $(secondary_name_rule)"
 
-    # What: a secondary counts as installed when .env exists
+    # What: secondary dir: here if this is it, else ./name
     # Why: before any question; a failed run blocks nothing
     # From: Issue #1683
     secondary_dir="${name}"
+    [[ "$(basename "$PWD")" != "$name" ]] || ! is_secondary_dir . || secondary_dir="."
     if [[ "$rotate" -eq 1 ]]; then
-        if [[ "$(basename "$PWD")" = "$name" && -f .env && -f docker-compose.yml ]]; then
-            secondary_dir="."
-        elif [[ ! -f "${secondary_dir}/.env" ]]; then
-            die "No existing secondary '${secondary_dir}' (no ${secondary_dir}/.env). Run --rotate from its parent directory or from inside the existing '${name}' directory, or run without --rotate."
-        fi
-    else
-        if [[ "$(basename "$PWD")" = "$name" && -f .env ]]; then
-            die "Current directory already matches secondary '${name}'; rerun with --rotate to update the secondary files"
-        elif [[ -f "${secondary_dir}/.env" ]]; then
-            die "Secondary '${secondary_dir}' already exists; rerun with --rotate to update the secondary files"
-        fi
+        is_secondary_dir "$secondary_dir" \
+            || die "No existing secondary '${name}' (no secondary settings in ${secondary_dir}/.env). Run --rotate from its parent directory or from inside the existing '${name}' directory, or run without --rotate."
+    elif [[ "$secondary_dir" = "." ]]; then
+        die "Current directory already matches secondary '${name}'; rerun with --rotate to update the secondary files"
+    elif is_secondary_dir "$secondary_dir"; then
+        die "Secondary '${secondary_dir}' already exists; rerun with --rotate to update the secondary files"
+    elif [[ -e "${secondary_dir}/.env" ]]; then
+        die "${secondary_dir}/.env belongs to another program; choose another --name or run setup.sh from another directory. Nothing was changed."
     fi
     # What: host check, requirements, then the check again
     # Why: no install, no Docker restart on a host in use
@@ -9111,7 +9116,7 @@ cmd_secondary() {
     # Why: one file answers the wizard and keeps its values
     # From: Issue #1683 | PR #2017
     existing_env_file=""
-    [[ ! -f "${secondary_dir}/.env" ]] || existing_env_file="${secondary_dir}/.env"
+    ! is_secondary_dir "$secondary_dir" || existing_env_file="${secondary_dir}/.env"
     # What: an existing secondary's .env answers the wizard
     # Why: --rotate asks again only for the token
     # From: Issue #1683
