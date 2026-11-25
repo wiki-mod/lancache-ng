@@ -771,6 +771,7 @@ async fn drop_old_zones(s: &Settings, before: &[String]) {
             Err(e) => eprintln!("ui: zone {zone} kept: {e}"),
         }
     }
+    peers_follow(s);
 }
 
 // What: newest lines of all programs, merged.
@@ -1925,6 +1926,41 @@ async fn watch_round(
     commit(app, form).await
 }
 
+// What: one secondary gets our zone list.
+// Why: added or removed domains reach it alone.
+// From: Issue #1683
+async fn peer_follows(
+    s: &Settings,
+    api: &lancache_ng::pdns::Api,
+    address: &str,
+) -> Result<(), String> {
+    let masters = vec![lancache_ng::dns::host_port(
+        &s.text("IP_HTTP")?,
+        s.uint("PDNS_AUTH_PORT")?,
+    )];
+    let who = format!("ui: secondary {address}");
+    let key = secrets(s)?.tsig_name;
+    match_zones(api, &hosted_now(s)?, &masters, &key, true, &who).await
+}
+
+// What: every secondary follows, in the background.
+// Why: a zone change must not wait for the slow check.
+// From: Issue #1683
+fn peers_follow(s: &Settings) {
+    let s = s.clone();
+    tokio::spawn(async move {
+        for (name, address) in lancache_ng::pdns_conf::secondaries(&s) {
+            let done = match remote_api(&s, &address) {
+                Ok(api) => peer_follows(&s, &api, &address).await,
+                Err(e) => Err(e),
+            };
+            if let Err(e) = done {
+                eprintln!("ui: secondary {name}: zones not matched: {e}");
+            }
+        }
+    });
+}
+
 // What: serials via pdns-API, lag pulled; aa result.
 // Why: an NS must answer aa; AXFR fixes a lost NOTIFY.
 // From: Issue #1683
@@ -1935,6 +1971,7 @@ async fn check_peer(
 ) -> Result<Result<(), String>, String> {
     let aa = answers_aa(s, address, &lancache_ng::dns::lan_zone(s)?).await;
     let api = remote_api(s, address)?;
+    peer_follows(s, &api, address).await?;
     let theirs = api.zones().await?;
     for z in peer::peer_zones(s, ours, &theirs)? {
         let state = peer::zone_state(&z);
@@ -3616,23 +3653,42 @@ async fn ensure_tsig(s: &Settings, key: &str) -> Result<(), String> {
 // Why: the zone list comes from registration.
 // From: Issue #1683 | PR #1858
 async fn ensure_secondary_zones(s: &Settings, key: &str) -> Result<(), String> {
-    let api = pdns_api(s)?;
-    let have = api.zones().await?;
     let zones = s.list("DNS_SECONDARY_ZONES");
     let port = primary_xfr_port(s, zones.first()).await?;
     let masters = vec![lancache_ng::dns::host_port(
         &s.text("DNS_XFR_PRIMARY")?,
         port,
     )];
+    // What: no removal here; the primary's check prunes.
+    // Why: this list is from setup and may be older.
+    // From: Issue #1683
+    match_zones(&pdns_api(s)?, &zones, &masters, key, false, "ui").await
+}
+
+// What: a secondary holds exactly the wanted zones.
+// Why: one rule at setup and in the primary's check.
+// From: Issue #1683
+async fn match_zones(
+    api: &lancache_ng::pdns::Api,
+    zones: &[String],
+    masters: &[String],
+    key: &str,
+    prune: bool,
+    who: &str,
+) -> Result<(), String> {
+    let have = api.zones().await?;
     let wanted: Vec<String> = zones
         .iter()
         .map(|z| lancache_ng::pdns::zone_id(z))
         .collect();
     for id in &wanted {
-        if have.iter().any(|z| z.name == *id) {
-            api.set_masters(id, &masters).await?;
+        if let Some(z) = have.iter().find(|z| z.name == *id) {
+            if z.masters != masters {
+                api.set_masters(id, masters).await?;
+            }
         } else {
-            api.create_secondary(id, &masters, key).await?;
+            api.create_secondary(id, masters, key).await?;
+            eprintln!("{who}: secondary zone {id} added");
         }
     }
     // What: drop copies the primary no longer serves.
@@ -3640,10 +3696,10 @@ async fn ensure_secondary_zones(s: &Settings, key: &str) -> Result<(), String> {
     // From: Issue #1683
     for z in have
         .iter()
-        .filter(|z| z.kind == "Slave" && !wanted.contains(&z.name))
+        .filter(|z| prune && z.kind == "Slave" && !wanted.contains(&z.name))
     {
         api.delete_zone(&z.name).await?;
-        eprintln!("ui: secondary zone {} removed", z.name);
+        eprintln!("{who}: secondary zone {} removed", z.name);
     }
     Ok(())
 }
@@ -4162,6 +4218,7 @@ async fn ensure_zones(s: &Settings) -> Result<(), String> {
         ensure_primary_zones(s, &key)
             .await
             .map_err(|e| format!("primary zones: {e}"))?;
+        peers_follow(s);
     }
     ensure_tsig(s, &key).await.map_err(|e| format!("tsig: {e}"))
 }
