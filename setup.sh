@@ -5890,7 +5890,7 @@ restore_clear_stale_env_local_if_unarchived() {
     stale_target="$install_dir/.env.local.pre-restore-$(utc_stamp)"
     mv "$install_dir/.env.local" "$stale_target" \
         || die "Failed to move the stale $install_dir/.env.local aside (exit $?)."
-    print_warn "Archived backup has no .env.local; moved the override of before the restore to $(basename "$stale_target") so the restored .env alone takes effect."
+    print_warn "The backup has no .env.local, so the .env.local that was here is now $stale_target; only the restored settings count."
 }
 
 # What: restores a backup archive; the body is a subshell
