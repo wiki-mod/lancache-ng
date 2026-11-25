@@ -244,6 +244,42 @@ ask_checked() {
     done
 }
 
+# What: asks a list, checks each entry, asks again on fault
+# Why: one owner of the list ask; ask_checked owns one value
+# From: Issue #1683
+ask_list() {
+    local optional=0 none_word="" entry key bad problem seen
+    while [[ "${1:-}" = --* ]]; do
+        case "$1" in
+            --optional) optional=1; shift ;;
+            --none) none_word="$2"; optional=1; shift 2 ;;
+            *) die "ask_list: unknown option $1" ;;
+        esac
+    done
+    local -n _ask_list_ref="$1"
+    local prompt="$2" default="$3" label="$4" check="$5"
+    shift 5
+    while true; do
+        ask "$prompt" "$default"
+        _ask_list_ref=()
+        [[ -n "$none_word" && "${REPLY,,}" = "$none_word" ]] || read -r -a _ask_list_ref <<< "${REPLY//,/ }"
+        bad="" seen=" "
+        (( ${#_ask_list_ref[@]} > 0 || optional == 1 )) || bad="enter at least one ${label}"
+        for entry in "${_ask_list_ref[@]}"; do
+            problem=$("$check" "$entry" "$@") || exit $?
+            # What: the same value twice is refused
+            # Why: a list names each server or domain once
+            # From: Issue #1683
+            key=$(dns_name_normalized "$entry")
+            [[ -n "$problem" || "$seen" != *" $key "* ]] || problem="'${entry}' is listed twice"
+            seen+="$key "
+            [[ -z "$problem" ]] || bad="$problem"
+        done
+        [[ -n "$bad" ]] || return 0
+        print_error "Invalid ${label}: $bad"
+    done
+}
+
 # What: a SOT 0/1 or true/false default as Y or N
 # Why: the SOT owns each default; a prompt only shows it
 # From: Issue #1683 | PR #1912
@@ -514,12 +550,27 @@ is_dns_forward_scope() {
     [[ "${1,,}" = "all" || "${1,,}" = "domains" ]]
 }
 
+# What: why an extra LAN domain is unusable, else nothing
+# Why: each extra domain becomes a zone beside the main one
+# From: Issue #1683
+lan_extra_domain_problem() {
+    local entry main="$2"
+    entry=$(dns_name_normalized "$1")
+    if ! is_valid_dns_name "$entry"; then
+        printf "'%s' is no valid domain name\n" "$entry"
+    elif [[ "$entry" = "$main" ]]; then
+        printf "'%s' is the main LAN domain\n" "$entry"
+    elif [[ "$entry" == *.arpa ]]; then
+        printf "'%s' is a reverse zone\n" "$entry"
+    fi
+}
+
 # What: asks the optional upstream DNS questions
 # Why: install and configure-upstream-dns ask the same
 # From: Issue #1918 | PR #1858
 prompt_dns_upstream() {
     local servers="$1" zones="$2" unsigned="$3" own="$4" lan="$5"
-    local use_yn="N" scope="all" entry problem bad
+    local use_yn="N" scope="all"
     local -a entries
     [[ -z "$servers" ]] || use_yn="Y"
     [[ -z "$zones" ]] || scope="domains"
@@ -531,20 +582,9 @@ prompt_dns_upstream() {
         return 0
     fi
     while true; do
-        ask "DNS server IPs (space or comma separated)" "$servers"
-        read -r -a entries <<< "${REPLY//,/ }"
-        bad=""
-        (( ${#entries[@]} > 0 )) || bad="enter at least one IP address"
-        for entry in "${entries[@]}"; do
-            problem=$(dns_upstream_server_problem "$entry" "$own") || exit $?
-            [[ -z "$problem" ]] || bad="$problem"
-        done
-        if [[ -z "$bad" ]]; then
-            dns_upstream_answers "${entries[@]}" && break
-            confirm "A server did not answer. Try it anyway (rolled back if still dead)?" "N" && break
-            continue
-        fi
-        print_error "Invalid DNS server: $bad"
+        ask_list entries "DNS server IPs (space or comma separated)" "$servers" "DNS server" dns_upstream_server_problem "$own"
+        dns_upstream_answers "${entries[@]}" && break
+        confirm "A server did not answer. Try it anyway (rolled back if still dead)?" "N" && break
     done
     DNS_UPSTREAM_SERVERS=$(dns_upstream_join "${entries[@]}")
     printf "  all: every name LanCache-NG does not answer itself goes to\n"
@@ -553,36 +593,15 @@ prompt_dns_upstream() {
     printf "  other names on the internet itself.\n"
     ask_checked scope "Forward all names, or only some domains? [all/domains]" "$scope" is_dns_forward_scope "Not 'all' or 'domains'"
     if [[ "${scope,,}" = "domains" ]]; then
-        while true; do
-            ask "Domains to forward (space or comma separated)" "$zones"
-            read -r -a entries <<< "${REPLY//,/ }"
-            bad=""
-            (( ${#entries[@]} > 0 )) || bad="enter at least one domain"
-            for entry in "${entries[@]}"; do
-                problem=$(dns_upstream_zone_problem "$entry" "$lan")
-                [[ -z "$problem" ]] || bad="$problem"
-            done
-            [[ -n "$bad" ]] || break
-            print_error "Invalid domain: $bad"
-        done
+        ask_list entries "Domains to forward (space or comma separated)" "$zones" "domain" dns_upstream_zone_problem "$lan"
         DNS_UPSTREAM_ZONES=$(dns_upstream_join "${entries[@]}")
     fi
     printf "  DNSSEC checks stay on. Private domains of your network have\n"
     printf "  no signature; name them here, or their lookups fail.\n"
     printf "  Example: fritz.box lan.local. With none, such names stop\n"
     printf "  resolving. Your own LAN zones (%s) always work.\n" "$lan"
-    while true; do
-        ask "Private domains without DNSSEC (space or comma, 'none')" "${unsigned:-none}"
-        entries=()
-        [[ "${REPLY,,}" = "none" ]] || read -r -a entries <<< "${REPLY//,/ }"
-        bad=""
-        for entry in "${entries[@]}"; do
-            problem=$(dns_upstream_zone_problem "$entry" "$lan" "$DNS_UPSTREAM_ZONES")
-            [[ -z "$problem" ]] || bad="$problem"
-        done
-        [[ -n "$bad" ]] || break
-        print_error "Invalid private domain: $bad"
-    done
+    ask_list --none none entries "Private domains without DNSSEC (space or comma, 'none')" "${unsigned:-none}" "private domain" \
+        dns_upstream_zone_problem "$lan" "$DNS_UPSTREAM_ZONES"
     DNS_UPSTREAM_UNSIGNED_ZONES=$(dns_upstream_join "${entries[@]}")
 }
 
@@ -9971,25 +9990,9 @@ print_ok "LAN domain: $DHCP_DOMAIN"
 printf "  More LAN domains are optional, for example lab.lan for a\n"
 printf "  second subnet. Each one gets its own zone. Empty = none.\n\n"
 DNS_EXTRA_LAN_DOMAINS=$(prod_env_default DNS_EXTRA_LAN_DOMAINS) || exit $?
-while true; do
-    ask "Additional LAN domains (space or comma separated)" "$DNS_EXTRA_LAN_DOMAINS"
-    read -r -a extra_entries <<< "${REPLY//,/ }"
-    extra_bad=""
-    extra_seen=" ${DHCP_DOMAIN} "
-    for extra_entry in "${extra_entries[@]}"; do
-        extra_entry=$(dns_name_normalized "$extra_entry")
-        if ! is_valid_dns_name "$extra_entry"; then
-            extra_bad="'${extra_entry}' is no valid domain name"
-        elif [[ "$extra_seen" == *" ${extra_entry} "* ]]; then
-            extra_bad="'${extra_entry}' is listed twice or is the main LAN domain"
-        elif [[ "$extra_entry" == *.arpa ]]; then
-            extra_bad="'${extra_entry}' is a reverse zone"
-        fi
-        extra_seen+="${extra_entry} "
-    done
-    [[ -z "$extra_bad" ]] && break
-    print_error "$extra_bad"
-done
+extra_entries=()
+ask_list --optional extra_entries "Additional LAN domains (space or comma separated)" "$DNS_EXTRA_LAN_DOMAINS" \
+    "LAN domain" lan_extra_domain_problem "$DHCP_DOMAIN"
 DNS_EXTRA_LAN_DOMAINS=$(dns_upstream_join "${extra_entries[@]}")
 if [[ -n "$DNS_EXTRA_LAN_DOMAINS" ]]; then
     print_ok "Additional LAN domains: ${DNS_EXTRA_LAN_DOMAINS}"
