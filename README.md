@@ -604,12 +604,12 @@ optional additional LAN domains (`DNS_EXTRA_LAN_DOMAINS`, comma separated).
   `<domain>` (same names, snapshot of both zones first) and deletes it. If a
   name and type exist in both zones, the old zone stays and the log names the
   record.
-- A secondary follows the primary's LAN domains on its own. Every
-  `DNS_SECONDARY_SYNC_SECONDS` (SOT, 120 s) it reads the primary's zone list over
-  the primary's PowerDNS API (`IP_HTTP`, port `PDNS_AUTH_API_PORT`) and, when the
-  set changed, creates the new zones (with TSIG) and deletes the ones the primary
-  no longer serves, then reloads its recursors. Adding or removing a LAN domain on
-  the primary needs no action on the secondaries.
+- A secondary follows the primary's LAN domains on its own. Right after a LAN
+  domain is added or removed, and in every secondary check, the primary sets the
+  zones of each registered secondary over that secondary's PowerDNS API: new zones
+  are created with the TSIG key and pulled, zones the primary no longer serves
+  are deleted. The secondary's DNS server answers a new domain at once; its
+  resolver on the DNS port forwards it after the secondary's next start.
 
 ## Testing the cache
 

@@ -736,16 +736,6 @@ impl Settings {
             .map(|(value, _)| value)
     }
 
-    // What: a copy with one checked value replaced.
-    // Why: render a config for a value not yet on disk.
-    // From: Issue #1683
-    pub fn with(&self, key: &str, raw: &str) -> Result<Self, String> {
-        let value = self.validate(key, raw)?;
-        let mut copy = self.clone();
-        copy.values.insert(key.to_string(), value);
-        Ok(copy)
-    }
-
     // What: FNV-1a id of all non-secret values.
     // Why: shows which config is live.
     // From: Issue #1683 | PR #1980

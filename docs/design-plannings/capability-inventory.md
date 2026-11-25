@@ -107,12 +107,12 @@ Provided by `pdns_conf`, `recursor_conf`, `pdns`, `dns` and `snapshot` in
 - **Secondaries.** The Admin UI registers, removes, rotates the token of,
   checks and re-addresses secondaries (`register`, `secondary_action`) and
   rotates the TSIG key (`rotate_tsig`).
-- **Secondary domain sync.** A secondary runs the `ui` image as `secondary-sync`
-  (`secondary_sync`): every `DNS_SECONDARY_SYNC_SECONDS` it reads the primary's
-  Master zones over the primary pdns API, and when they differ from its own slave
-  zones it renders the dns config, creates or removes the slave zones with TSIG
-  (`ensure_zones`) and reloads the recursors. The primary publishes that API on
-  `IP_HTTP`.
+- **Secondary domain sync.** The primary's Admin UI makes each registered
+  secondary hold exactly its zones (`match_zones` via `peer_follows`): right
+  after its own zones change and in every secondary check, over the secondary's
+  pdns API, creating zones with TSIG and deleting the ones it no longer serves.
+  The secondary's one-shot `secondary-zones` uses the same function without
+  deleting.
 
 ## DHCP
 

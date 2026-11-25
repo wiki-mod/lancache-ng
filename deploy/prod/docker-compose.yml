@@ -292,10 +292,6 @@ services:
       # From: Issue #1683 | PR #1912
       - "${IP_HTTP}:${SOT_PDNS_AUTH_PORT}:${SOT_PDNS_AUTH_PORT}/udp"
       - "${IP_HTTP}:${SOT_PDNS_AUTH_PORT}:${SOT_PDNS_AUTH_PORT}/tcp"
-      # What: PowerDNS auth API on IP_HTTP, TCP only.
-      # Why: a secondary reads the LAN domain list here.
-      # From: Issue #1683
-      - "${IP_HTTP}:${SOT_PDNS_AUTH_API_PORT}:${SOT_PDNS_AUTH_API_PORT}/tcp"
 
   # What: Kea or dnsmasq proxy/relay, one mode at a time.
   # Why: DHCP needs the host network for broadcasts.

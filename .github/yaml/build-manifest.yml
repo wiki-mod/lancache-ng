@@ -1021,10 +1021,6 @@ runtime:
     - DNS_TXT_MAX_BYTES=255
     - DNS_SECONDARIES=
     - DNS_SECONDARY_ZONES=
-    # What: how often a secondary syncs its LAN domains.
-    # Why: a primary domain reaches secondaries by itself.
-    # From: Issue #1683
-    - DNS_SECONDARY_SYNC_SECONDS=120
     # What: secondaries as NS records; off by default.
     # Why: a dead NS slows every resolver that asks it.
     # From: Issue #1683
@@ -1386,7 +1382,6 @@ runtime:
     - DNS_SECONDARY_NS_REMOVE_FAILS=uint;1;1000;live;ui
     - DNS_SECONDARY_RECHECK_SECONDS=uint;60;86400;live;ui
     - DNS_SECONDARY_ZONES=list?;;;restart;dns
-    - DNS_SECONDARY_SYNC_SECONDS=uint;5;86400;live;services
     - DNS_SNAPSHOT_DIR=path;;;live;ui
     - DNS_SNAPSHOT_KEEP=uint;1;1000;live;ui
     - DNS_UPSTREAM_SERVERS=list?;;;reload;dns
