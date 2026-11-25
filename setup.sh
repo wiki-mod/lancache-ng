@@ -404,13 +404,45 @@ is_valid_dhcp_ntp_list() {
     done
 }
 
-# What: true for an IPv6 literal of hex groups and colons
-# Why: upstream DNS servers may be IPv6; Rust checks again
+# What: true for an IPv6 address; $2 gets its full form
+# Why: the dns service parses it strictly; compare by value
 # From: Issue #1918 | PR #1858
 is_valid_ipv6() {
-    local ip="${1:-}"
-    [[ "$ip" == *:*:* && "$ip" =~ ^[0-9A-Fa-f:]+$ && ! "$ip" =~ [0-9A-Fa-f]{5} \
-        && "$ip" != *:::* && "${ip#*::}" != *::* ]]
+    local ip="${1:-}" v4="" head tail g n fill out=""
+    local -a parts=() hg=() tg=() oct=()
+    [[ "$ip" == *:* && "$ip" =~ ^[0-9A-Fa-f:.]+$ && "$ip" != *:::* ]] || return 1
+    [[ ( "$ip" != :* || "$ip" == ::* ) && ( "$ip" != *: || "$ip" == *:: ) ]] || return 1
+    # What: a dotted IPv4 tail is the last two groups
+    # Why: ::ffff:192.0.2.1 is an IPv6 address too
+    # From: Issue #1918
+    if [[ "${ip##*:}" == *.* ]]; then
+        v4="${ip##*:}"
+        is_valid_ipv4 "$v4" || return 1
+        IFS=. read -r -a oct <<< "$v4"
+        ip="${ip%:*}:$(printf '%x:%x' $(( oct[0] * 256 + oct[1] )) $(( oct[2] * 256 + oct[3] )))"
+    fi
+    if [[ "$ip" == *::* ]]; then
+        head="${ip%%::*}" tail="${ip#*::}"
+        [[ "$tail" != *::* ]] || return 1
+        [[ -z "$head" ]] || IFS=: read -r -a hg <<< "$head"
+        [[ -z "$tail" ]] || IFS=: read -r -a tg <<< "$tail"
+        fill=$(( 8 - ${#hg[@]} - ${#tg[@]} ))
+        (( fill >= 1 )) || return 1
+        parts=("${hg[@]}")
+        for (( n = 0; n < fill; n++ )); do parts+=(0); done
+        parts+=("${tg[@]}")
+    else
+        IFS=: read -r -a parts <<< "$ip"
+        (( ${#parts[@]} == 8 )) || return 1
+    fi
+    for g in "${parts[@]}"; do
+        [[ "$g" =~ ^[0-9A-Fa-f]{1,4}$ ]] || return 1
+        out+="${out:+:}$(printf '%x' "$(( 16#$g ))")"
+    done
+    if [[ -n "${2:-}" ]]; then
+        local -n _ipv6_full_ref="$2"
+        _ipv6_full_ref="$out"
+    fi
 }
 
 # What: splits an IPv4 CIDR into address and prefix 0-32
@@ -462,7 +494,7 @@ dns_upstream_split() {
 # Why: the prompt names the reason while the user types
 # From: Issue #1918 | PR #1858
 dns_upstream_server_problem() {
-    local entry="$1" own="$2" host port net nets
+    local entry="$1" own="$2" host port net nets host6="" net6=""
     local -a loopback_nets
     local split_rc=0
     dns_upstream_split "$entry" host port || split_rc=$?
@@ -477,8 +509,12 @@ dns_upstream_server_problem() {
     elif [[ ",${own}," == *",${host},"* ]]; then
         printf "'%s' is a LanCache-NG address; forwarding to it would loop\n" "$entry"
     else
+        # What: IPv6 nets compare in full form, IPv4 as CIDR
+        # Why: 0::1 and ::1 are the same loopback address
+        # From: Issue #1918
         for net in "${loopback_nets[@]}"; do
-            if [[ "${host,,}" = "$net" ]] || ipv4_in_cidr "$host" "$net"; then
+            if { is_valid_ipv6 "$host" host6 && is_valid_ipv6 "$net" net6 && [[ "$host6" = "$net6" ]]; } \
+                || ipv4_in_cidr "$host" "$net"; then
                 printf "'%s' is this host itself, not an external DNS server\n" "$entry"
                 break
             fi
