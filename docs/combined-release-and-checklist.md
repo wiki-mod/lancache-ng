@@ -935,18 +935,10 @@ PR #2019):
   never reaches it;
 - 10.5 monitoring: the secondary does not publish its PowerDNS API port, so the
   Admin UI health check of a secondary on another host cannot reach it (PR #2017
-  publishes the port). The watchdog check reads `PDNS_SECONDARY_API_URL`, which
-  nothing sets, instead of the registered list `DNS_SECONDARIES`; it holds one
-  address only, the services container has no `PDNS_API_KEY`, one unreachable
-  secondary stops the check, alarms do not name the secondary, and a zone the
-  primary removed is not reported;
+  publishes the port);
 - 10.5 same-host guard: `setup.sh secondary` takes the compose project name
   from `--name` and does not check it; with `--name lancache-ng` it replaces the
   primary's `dns` container and uses its volumes;
-- 10.4 HTTPS off then on leftovers: the ui writes rendered nginx files but
-  does not remove ones it no longer writes, so `https.conf` and the dispatch
-  file linger after HTTPS is turned off and the SSL server keeps its old
-  certificate (nginx -t stays valid);
 - 10.2 PTR afterwards: there is no way to add the missing PTR of an existing A
   record other than typing address and name on the PTR tab.
 
@@ -975,6 +967,8 @@ failure class.
 | local reverse zones decided by the dead `DNS_SERVE_RFC1918` key | 10.2 | `f179e215` |
 | a record reaches a secondary only after the pdns xfr cycle, not within seconds | 10.5 | `b339f172` |
 | the zone table and the status line disagree on a secondary ahead | 10.6 | `0c5fed00` |
+| the watchdog checks one unset URL, not the registered secondaries | 10.5 | `12e27473` |
+| `https.conf` and the dispatch file linger after HTTPS is turned off | 10.4 | `5a4b7397` |
 
 ---
 
