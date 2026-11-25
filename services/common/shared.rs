@@ -374,6 +374,44 @@ pub mod secret {
         }
     }
 
+    // What: one secret by its key: env, else the file.
+    // Why: every program gets the same key the same way.
+    // From: Issue #1683
+    pub fn get(s: &crate::config::Settings, key: &str) -> Result<String, String> {
+        resolve(&crate::config::process_env, &dir(s)?, key, Owner::default())
+            .map_err(|e| format!("{key}: {e}"))
+    }
+
+    // What: path of the DDNS TSIG secret file.
+    // Why: Kea DDNS and PowerDNS share this key.
+    // From: Issue #1683 | PR #1980
+    pub fn tsig_file(s: &crate::config::Settings) -> Result<PathBuf, String> {
+        Ok(file_of(&dir(s)?, "DDNS_TSIG_KEY"))
+    }
+
+    // What: fresh 32-byte TSIG secret, base64.
+    // Why: PowerDNS and Kea both read base64.
+    // From: Issue #1683 | PR #1980
+    pub fn new_tsig() -> String {
+        use base64::Engine as _;
+        key_bytes(&random_hex(32))
+            .map(|key| base64::engine::general_purpose::STANDARD.encode(key))
+            .unwrap_or_default()
+    }
+
+    // What: TSIG secret; a rotated file wins.
+    // Why: a ui rotation beats the setup.sh value.
+    // From: Issue #1683 | PR #1980
+    pub fn tsig_secret(s: &crate::config::Settings) -> Result<String, String> {
+        let file = tsig_file(s)?;
+        if !file.exists()
+            && let Some(v) = crate::config::env_set(&crate::config::process_env, "DDNS_TSIG_KEY")
+        {
+            return Ok(v);
+        }
+        load_or_create(&file, new_tsig, Owner::default()).map_err(|e| format!("DDNS_TSIG_KEY: {e}"))
+    }
+
     // What: 32 raw key bytes from 64 hex digits.
     // Why: the cipher takes raw bytes.
     // From: Issue #1683 | PR #1858
@@ -5048,6 +5086,44 @@ pub mod render {
     // From: Issue #1683 | PR #2017
     fn cdn_names(domains: &str) -> Vec<(String, bool)> {
         domains.lines().filter_map(crate::dns::cdn_entry).collect()
+    }
+
+    // What: secrets the configs embed.
+    // Why: made once; restarts never change them.
+    // From: Issue #1683 | PR #1858
+    pub fn secrets(s: &Settings) -> Result<Secrets, String> {
+        use crate::secret;
+        Ok(Secrets {
+            pdns_api_key: secret::get(s, "PDNS_API_KEY")?,
+            recursor_api_key: secret::get(s, "RECURSOR_API_KEY")?,
+            tsig_name: s.text("DDNS_TSIG_NAME")?,
+            tsig_secret: secret::tsig_secret(s)?,
+            kea_ctrl_token: secret::get(s, "KEA_CTRL_TOKEN")?,
+        })
+    }
+
+    // What: write rendered files; list the changed.
+    // Why: an unchanged file never wakes its owner.
+    // From: Issue #1683 | PR #1980
+    pub fn write_files(s: &Settings, files: &[File]) -> Result<Vec<crate::config::Change>, String> {
+        let mode = s.mode("UI_CONFIG_FILE_MODE")?;
+        let mut out = Vec::new();
+        for f in files {
+            // What: a first write wakes no owner.
+            // Why: owners read it at start; a HUP kills.
+            // From: Issue #1683 | PR #1980
+            let wake = f.path.exists();
+            let owner = crate::fs::Owner::default();
+            let changed = crate::fs::write_if_changed(&f.path, f.body.as_bytes(), mode, owner);
+            if changed.map_err(|e| format!("{}: {e}", f.path.display()))? && wake {
+                out.push(crate::config::Change {
+                    key: f.path.display().to_string(),
+                    owner: f.owner.clone(),
+                    effect: crate::config::Effect::Reload,
+                });
+            }
+        }
+        Ok(out)
     }
 
     // What: render all files; report every error.

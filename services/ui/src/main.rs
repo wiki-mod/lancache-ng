@@ -635,8 +635,8 @@ async fn commit(app: &App, form: Fields) -> Result<(), String> {
     // Why: a bad value must not reach the files.
     // From: Issue #1683 | PR #1980
     let none = lancache_ng::recursor_conf::Chain::default();
-    let check =
-        secrets(&new).and_then(|sec| render::all(&new, &sec, &none).map_err(|e| e.join("; ")));
+    let check = render::secrets(&new)
+        .and_then(|sec| render::all(&new, &sec, &none).map_err(|e| e.join("; ")));
     if let Err(e) = check {
         // What: a refused save is logged, not only shown.
         // Why: the error must leave a trace in the logs.
@@ -858,14 +858,14 @@ async fn logs_save(
 // Why: records live only in PowerDNS.
 // From: Issue #1683 | PR #1980
 fn pdns_api(s: &Settings) -> Result<lancache_ng::pdns::Api, String> {
-    peer::primary_api(s, http::client(s)?, &secrets(s)?.pdns_api_key)
+    peer::primary_api(s, http::client(s)?, &render::secrets(s)?.pdns_api_key)
 }
 
 // What: one API client per recursor.
 // Why: flush and statistics reach every recursor.
 // From: Issue #1683 | PR #2017
 fn recursor_apis(s: &Settings) -> Result<Vec<lancache_ng::pdns::Api>, String> {
-    let key = secrets(s)?.recursor_api_key;
+    let key = render::secrets(s)?.recursor_api_key;
     let client = http::client(s)?;
     Ok(s.list("RECURSOR_API_URLS")
         .iter()
@@ -1273,7 +1273,7 @@ async fn domains(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
         "ddns_unsigned_updates_allowed",
         &s.flag("DDNS_ALLOW_UNSIGNED")?,
     );
-    ctx.insert("ddns_tsig_key_configured", &tsig_secret(&s).is_ok());
+    ctx.insert("ddns_tsig_key_configured", &secret::tsig_secret(&s).is_ok());
     app.page("domains.html", ctx, &csrf)
 }
 
@@ -1634,7 +1634,7 @@ fn valid_peer_name(s: &Settings, name: &str) -> Result<bool, String> {
 // Why: setup.sh secondary writes it to its env.
 // From: Issue #1683 | PR #1980
 fn peer_kit(s: &Settings) -> Result<Value, String> {
-    let sec = secrets(s)?;
+    let sec = render::secrets(s)?;
     let primary = s.text("IP_HTTP")?;
     Ok(json!({
         "primary": primary,
@@ -1815,7 +1815,12 @@ async fn remote_zones(s: &Settings, address: &str) -> Result<Vec<lancache_ng::pd
 // Why: zone list, AXFR request and sync use it.
 // From: Issue #1683
 fn remote_api(s: &Settings, address: &str) -> Result<lancache_ng::pdns::Api, String> {
-    peer::api_at(s, http::client(s)?, address, &secrets(s)?.pdns_api_key)
+    peer::api_at(
+        s,
+        http::client(s)?,
+        address,
+        &render::secrets(s)?.pdns_api_key,
+    )
 }
 
 // What: failed checks of one secondary in a row.
@@ -1933,7 +1938,7 @@ async fn peer_follows(
         s.uint("PDNS_AUTH_PORT")?,
     )];
     let who = format!("ui: secondary {address}");
-    let key = secrets(s)?.tsig_name;
+    let key = render::secrets(s)?.tsig_name;
     match_zones(api, &hosted_now(s)?, &masters, &key, true, &who).await
 }
 
@@ -2148,7 +2153,7 @@ fn kea_api(s: &Settings) -> Result<lancache_ng::kea::Api, String> {
         s.text("DHCP_API_HOST")?,
         s.uint("KEA_CTRL_PORT")?
     );
-    let token = secrets(s)?.kea_ctrl_token;
+    let token = render::secrets(s)?.kea_ctrl_token;
     Ok(lancache_ng::kea::Api::new(
         http::client(s)?,
         &url,
@@ -3232,29 +3237,6 @@ fn prune_rendered(s: &Settings, files: &[render::File]) -> Result<Vec<PathBuf>, 
     Ok(removed)
 }
 
-// What: write rendered files; list the changed.
-// Why: an unchanged file never wakes its owner.
-// From: Issue #1683 | PR #1980
-fn write_files(s: &Settings, files: &[render::File]) -> Result<Vec<config::Change>, String> {
-    let mode = s.mode("UI_CONFIG_FILE_MODE")?;
-    let mut out = Vec::new();
-    for f in files {
-        // What: a first write wakes no owner.
-        // Why: owners read it at start; a HUP then kills.
-        // From: Issue #1683 | PR #1980
-        let wake = f.path.exists();
-        let changed = fs::write_if_changed(&f.path, f.body.as_bytes(), mode, fs::Owner::default());
-        if changed.map_err(|e| format!("{}: {e}", f.path.display()))? && wake {
-            out.push(config::Change {
-                key: f.path.display().to_string(),
-                owner: f.owner.clone(),
-                effect: config::Effect::Reload,
-            });
-        }
-    }
-    Ok(out)
-}
-
 // What: container name per plan owner; others drop out.
 // Why: an owner without a container has nothing to do.
 // From: Issue #1683 | PR #2017
@@ -3282,10 +3264,10 @@ async fn plan_containers<V>(
 async fn render_and_write(
     s: &Settings,
 ) -> Result<(Vec<render::File>, Vec<config::Change>), String> {
-    let sec = secrets(s)?;
+    let sec = render::secrets(s)?;
     let chain = dnssec_chain(s).await;
     let files = render::all(s, &sec, &chain).map_err(|e| e.join("; "))?;
-    let written = write_files(s, &files)?;
+    let written = render::write_files(s, &files)?;
     Ok((files, written))
 }
 
@@ -3606,7 +3588,7 @@ async fn set_wanted(app: &App, service: &str, run: bool) -> Result<(), String> {
 // Why: zones are created with the key, so it comes first.
 // From: Issue #1683
 async fn ensure_tsigkey(s: &Settings) -> Result<String, String> {
-    let sec = secrets(s)?;
+    let sec = render::secrets(s)?;
     let algorithm = s.text("DDNS_TSIG_ALGORITHM")?;
     pdns_api(s)?
         .set_tsigkey(&sec.tsig_name, &algorithm, &sec.tsig_secret)
@@ -3749,7 +3731,7 @@ async fn ensure_primary_zones(s: &Settings, key: &str) -> Result<(), String> {
     let signed = if s.flag("DDNS_ALLOW_UNSIGNED")? {
         Vec::new()
     } else {
-        vec![secrets(s)?.tsig_name]
+        vec![render::secrets(s)?.tsig_name]
     };
     let tops = own_tops(s)?;
     let hosted = hosted_zones(s, &tops)?;
@@ -4276,67 +4258,19 @@ async fn reload_changed(app: &App, s: &Settings, changed: &[config::Change]) -> 
     report
 }
 
-// What: path of the DDNS TSIG secret file.
-// Why: Kea DDNS and PowerDNS share this key.
-// From: Issue #1683 | PR #1980
-fn tsig_file(s: &Settings) -> Result<PathBuf, String> {
-    Ok(secret::file_of(&secret::dir(s)?, "DDNS_TSIG_KEY"))
-}
-
-// What: fresh 32-byte TSIG secret, base64.
-// Why: PowerDNS and Kea both read base64.
-// From: Issue #1683 | PR #1980
-fn new_tsig() -> String {
-    secret::key_bytes(&secret::random_hex(32))
-        .map(|key| base64::engine::general_purpose::STANDARD.encode(key))
-        .unwrap_or_default()
-}
-
-// What: TSIG secret; a rotated file wins.
-// Why: a ui rotation beats the setup.sh value.
-// From: Issue #1683 | PR #1980
-fn tsig_secret(s: &Settings) -> Result<String, String> {
-    let file = tsig_file(s)?;
-    if !file.exists()
-        && let Some(v) = config::env_set(&process_env, "DDNS_TSIG_KEY")
-    {
-        return Ok(v);
-    }
-    secret::load_or_create(&file, new_tsig, fs::Owner::default())
-        .map_err(|e| format!("DDNS_TSIG_KEY: {e}"))
-}
-
 // What: replace the TSIG secret and apply.
 // Why: shuts out a removed or leaked secondary.
 // From: Issue #1683 | PR #1980
 async fn rotate_tsig(app: &App) -> Result<(), String> {
     let s = app.settings();
-    let file = tsig_file(&s)?;
+    let file = secret::tsig_file(&s)?;
     fs::remove_if_present(&file).map_err(|e| format!("{}: {e}", file.display()))?;
-    secret::load_or_create(&file, new_tsig, fs::Owner::default())
+    secret::load_or_create(&file, secret::new_tsig, fs::Owner::default())
         .map_err(|e| format!("DDNS_TSIG_KEY: {e}"))?;
     for line in apply_all(app, &s, &s, true).await? {
         eprintln!("ui: tsig rotate: {line}");
     }
     Ok(())
-}
-
-// What: secrets the configs embed.
-// Why: made once; restarts never change them.
-// From: Issue #1683 | PR #1858
-fn secrets(s: &Settings) -> Result<render::Secrets, String> {
-    let dir = secret::dir(s)?;
-    let get = |k: &str| {
-        secret::resolve(&process_env, &dir, k, fs::Owner::default())
-            .map_err(|e| format!("{k}: {e}"))
-    };
-    Ok(render::Secrets {
-        pdns_api_key: get("PDNS_API_KEY")?,
-        recursor_api_key: get("RECURSOR_API_KEY")?,
-        tsig_name: s.text("DDNS_TSIG_NAME")?,
-        tsig_secret: tsig_secret(s)?,
-        kea_ctrl_token: get("KEA_CTRL_TOKEN")?,
-    })
 }
 
 // What: bytes of a whole GiB number.
@@ -4753,9 +4687,9 @@ fn dhcp_probe_cli(s: &Settings) -> Result<(), String> {
 // Why: a secondary has no ui server to render them.
 // From: Issue #1683 | PR #1980
 fn render_dns(s: &Settings) -> Result<(), String> {
-    let sec = secrets(s)?;
+    let sec = render::secrets(s)?;
     let files = render::dns_only(s, &sec).map_err(|e| e.join("; "))?;
-    let changed = write_files(s, &files)?;
+    let changed = render::write_files(s, &files)?;
     println!(
         "{}",
         json!({"written": files.len(), "changed": changed.len()})

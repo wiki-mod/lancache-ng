@@ -343,7 +343,7 @@ async fn dns_sync(s: &Settings, f: &mut Findings) -> Result<(), String> {
     if peers.is_empty() {
         return Ok(());
     }
-    let key = s.text("PDNS_API_KEY")?;
+    let key = lancache_ng::secret::get(s, "PDNS_API_KEY")?;
     let client = http::client(s)?;
     let ours = peer::primary_api(s, client.clone(), &key)?
         .zones()
