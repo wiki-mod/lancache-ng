@@ -4396,20 +4396,6 @@ fn cache_room(s: &Settings, form: &Fields, cached: u64) -> Result<(), Fail> {
     Ok(())
 }
 
-// What: traffic-light colour of a container.
-// Why: the beambar shows green, yellow, red, gray.
-// From: Issue #1683 | PR #1980
-fn colour(c: &Value) -> &'static str {
-    let status = c["Status"].as_str().unwrap_or_default();
-    match c["State"].as_str().unwrap_or_default() {
-        "running" if status.contains("(unhealthy)") => "red",
-        "running" if status.contains("(health: starting)") => "yellow",
-        "running" => "green",
-        "exited" | "created" => "gray",
-        _ => "red",
-    }
-}
-
 // What: container states for the beambar.
 // Why: Docker is the source; no status files.
 // From: Issue #1683 | PR #1980
@@ -4430,28 +4416,22 @@ async fn status(State(app): Shared) -> Response {
         let name = docker::service_of(c).unwrap_or_default();
         let by_user = stopped.iter().any(|x| x == name);
         let mode_off = !off.is_empty() && name == off;
-        // What: a stop nobody asked for is red, not gray.
-        // Why: the entry must turn unhealthy.
+        // What: colour and reason from the full state.
+        // Why: one rule with the watchdog (work item 30).
         // From: Issue #1683
-        let colour = match colour(c) {
-            "gray" if !by_user && !mode_off => "red",
-            other => other,
+        let inspect = match c["Id"].as_str() {
+            Some(id) => app.docker.inspect(id, limit).await.unwrap_or_default(),
+            None => Value::Null,
         };
+        let health = docker::Health::from_inspect(&inspect);
+        let colour = health.colour(!by_user && !mode_off);
         // What: last health check output when not green.
         // Why: a failure count alone names no reason.
         // From: Issue #1683 | PR #1980
-        let mut reason = String::new();
-        if let ("red" | "yellow", Some(id)) = (colour, c["Id"].as_str())
-            && let Ok(v) = app.docker.inspect(id, limit).await
-        {
-            reason = v["State"]["Health"]["Log"]
-                .as_array()
-                .and_then(|a| a.last())
-                .and_then(|e| e["Output"].as_str())
-                .unwrap_or_default()
-                .trim()
-                .to_string();
-        }
+        let reason = match colour {
+            "red" | "yellow" | "amber" => docker::last_check(&inspect).trim().to_string(),
+            _ => String::new(),
+        };
         rows.push(
             json!({"name": name, "status": colour, "health": c["Status"],
                "reason": reason, "mode_off": mode_off,

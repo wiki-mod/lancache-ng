@@ -1521,6 +1521,90 @@ pub mod docker {
     // From: Issue #1683 | PR #1980
     pub const SERVICE_LABEL: &str = "com.docker.compose.service";
 
+    // What: Docker health of one container.
+    // Why: degraded and starting are not failures.
+    // From: Issue #1683 | PR #1980
+    #[derive(Debug, PartialEq)]
+    pub enum Health {
+        Healthy,
+        Degraded,
+        Starting,
+        Unhealthy,
+        Stopped(String),
+        Unknown(String),
+    }
+
+    impl Health {
+        // What: read docker inspect State.
+        // Why: newest check output DEGRADED: refines ok.
+        // From: Issue #1296
+        pub fn from_inspect(inspect: &Value) -> Self {
+            let state = inspect.pointer("/State/Status").and_then(Value::as_str);
+            if state != Some("running") {
+                return Health::Stopped(state.unwrap_or("unknown").into());
+            }
+            let status = inspect
+                .pointer("/State/Health/Status")
+                .and_then(Value::as_str);
+            let degraded = last_check(inspect)
+                .lines()
+                .any(|l| l.starts_with("DEGRADED: "));
+            match status.unwrap_or("none") {
+                "healthy" if degraded => Health::Degraded,
+                "healthy" | "none" => Health::Healthy,
+                "starting" => Health::Starting,
+                "unhealthy" => Health::Unhealthy,
+                other => Health::Unknown(other.into()),
+            }
+        }
+
+        // What: the state word for logs and the alarm file.
+        // Why: a stopped one names its Docker state.
+        // From: Issue #1683 | PR #1980
+        pub fn word(&self) -> String {
+            match self {
+                Health::Healthy => "healthy".into(),
+                Health::Degraded => "degraded".into(),
+                Health::Starting => "starting".into(),
+                Health::Unhealthy => "unhealthy".into(),
+                Health::Stopped(s) | Health::Unknown(s) => s.clone(),
+            }
+        }
+
+        // What: the one colour rule of bar and watchdog.
+        // Why: a stop the user wanted is gray, else red.
+        // From: Issue #1683
+        pub fn colour(&self, wanted: bool) -> &'static str {
+            match self {
+                Health::Healthy => "green",
+                Health::Degraded => "amber",
+                Health::Starting | Health::Unknown(_) => "yellow",
+                Health::Unhealthy => "red",
+                Health::Stopped(_) if wanted => "red",
+                Health::Stopped(_) => "gray",
+            }
+        }
+
+        // What: true for unhealthy or stopped.
+        // Why: only these count toward a restart.
+        // From: Issue #1683 | PR #1980
+        pub fn failing(&self) -> bool {
+            matches!(self, Health::Unhealthy | Health::Stopped(_))
+        }
+    }
+
+    // What: output of the newest health check.
+    // Why: it names the reason of a bad state.
+    // From: Issue #1683 | PR #1980
+    pub fn last_check(inspect: &Value) -> &str {
+        inspect
+            .pointer("/State/Health/Log")
+            .and_then(Value::as_array)
+            .and_then(|log| log.last())
+            .and_then(|e| e["Output"].as_str())
+            .unwrap_or_default()
+    }
+
     // What: compose service of a container row, if any.
     // Why: one reader of the service label of a row.
     // From: Issue #1683 | PR #2017

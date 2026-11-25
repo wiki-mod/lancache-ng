@@ -7,6 +7,7 @@
 // From: Issue #1683 | PR #1980
 
 use lancache_ng::config::Settings;
+use lancache_ng::docker::Health;
 use lancache_ng::{cert, clock, docker, fs, http, tidy};
 use serde::Serialize;
 use serde_json::Value;
@@ -80,69 +81,6 @@ struct Report<'a> {
     cache: &'a Value,
 }
 
-// What: Docker health of one container.
-// Why: degraded and starting are not failures.
-// From: Issue #1683 | PR #1980
-#[derive(Debug, PartialEq)]
-enum Health {
-    Healthy,
-    Degraded,
-    Starting,
-    Unhealthy,
-    Stopped(String),
-    Unknown(String),
-}
-
-impl Health {
-    // What: read docker inspect State.
-    // Why: newest check output DEGRADED: refines ok.
-    // From: Issue #1296
-    fn from_inspect(inspect: &Value) -> Self {
-        let state = inspect.pointer("/State/Status").and_then(Value::as_str);
-        if state != Some("running") {
-            return Health::Stopped(state.unwrap_or("unknown").into());
-        }
-        let status = inspect
-            .pointer("/State/Health/Status")
-            .and_then(Value::as_str);
-        let last = inspect
-            .pointer("/State/Health/Log")
-            .and_then(Value::as_array)
-            .and_then(|log| log.last())
-            .and_then(|e| e["Output"].as_str())
-            .unwrap_or_default();
-        let degraded = last.lines().any(|l| l.starts_with("DEGRADED: "));
-        match status.unwrap_or("none") {
-            "healthy" if degraded => Health::Degraded,
-            "healthy" | "none" => Health::Healthy,
-            "starting" => Health::Starting,
-            "unhealthy" => Health::Unhealthy,
-            other => Health::Unknown(other.into()),
-        }
-    }
-
-    // What: state word and colour of the status row.
-    // Why: one mapping; the page holds none.
-    // From: Issue #1683 | PR #1980
-    fn word_and_colour(&self) -> (String, &'static str) {
-        match self {
-            Health::Healthy => ("healthy".into(), "green"),
-            Health::Degraded => ("degraded".into(), "amber"),
-            Health::Starting => ("starting".into(), "yellow"),
-            Health::Unhealthy => ("unhealthy".into(), "red"),
-            Health::Stopped(s) => (s.clone(), "red"),
-            Health::Unknown(s) => (s.clone(), "yellow"),
-        }
-    }
-
-    // What: true for unhealthy or stopped.
-    // Why: only these count toward a restart.
-    // From: Issue #1683 | PR #1980
-    fn failing(&self) -> bool {
-        matches!(self, Health::Unhealthy | Health::Stopped(_))
-    }
-}
-
 // What: failure streaks and restart times.
 // Why: restart after RESTART_AFTER misses, capped.
 // From: Issue #1683 | PR #1980
@@ -195,9 +133,9 @@ async fn containers(s: &Settings, f: &mut Findings, m: &mut Memory) -> Result<()
         let name = docker::name_of(&row).unwrap_or(service);
         let inspect = api.inspect(name, limit).await.map_err(|e| e.to_string())?;
         let health = Health::from_inspect(&inspect);
-        let (word, colour) = health.word_and_colour();
         let by_user = stopped.iter().any(|x| x == service);
         let wanted = !(by_user || dhcp_off.as_deref() == Some(service));
+        let (word, colour) = (health.word(), health.colour(wanted));
         f.containers.push(serde_json::json!({
             "service": service, "name": name, "health": word,
             "colour": colour, "stopped_by_user": by_user,
