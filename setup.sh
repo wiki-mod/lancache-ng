@@ -6504,14 +6504,21 @@ verify_stack_functional_health() {
     # Why: wildcard-only RPZ entries never match their apex
     # From: Issue #1149 | PR #1150
     test_fqdn=$(prod_env_default SETUP_DNS_PROBE_NAME) || exit $?
+    # What: DNS is asked on both LAN IPs that are set
+    # Why: dns-https answers on IP_HTTPS whenever it is set
+    # From: Issue #1683
+    local ip
     if [[ "$probed" != *" $dns_svc "* ]]; then
         print_skip "DNS probe: $dns_svc is in SERVICES_STOPPED"
-    elif [[ -n "$ip_http" ]]; then
-        require_functional_check_tool dig "the DNS resolution probe" || return 1
-        if ! resolved=$(dns_short_answer "$ip_http" "" A "$test_fqdn"); then
-            print_error "Functional check failed: DNS did not resolve ${test_fqdn} via ${ip_http}: ${resolved}"
-            return 1
-        fi
+    else
+        for ip in "$ip_http" "$ip_https"; do
+            [[ -n "$ip" ]] || continue
+            require_functional_check_tool dig "the DNS resolution probe" || return 1
+            if ! resolved=$(dns_short_answer "$ip" "" A "$test_fqdn"); then
+                print_error "Functional check failed: DNS did not resolve ${test_fqdn} via ${ip}: ${resolved}"
+                return 1
+            fi
+        done
     fi
 
     return 0
