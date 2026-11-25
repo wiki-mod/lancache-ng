@@ -4412,20 +4412,14 @@ resolve_lancache_image_prefix() {
 # From: Issue #1683 | PR #1858
 resolve_lancache_image_channel() {
     local env_file="${1:-}" channel tag release_tag=""
-    local words pinned release
+    local pinned release
 
     channel=$(shell_or_env_value LANCACHE_IMAGE_CHANNEL "$env_file") || exit $?
     tag=$(shell_or_env_value LANCACHE_IMAGE_TAG "$env_file") || exit $?
+    channel=$(lancache_channel_of "$channel" "$tag") || exit $?
 
-    words=$(lancache_channel_words) || exit $?
     pinned=$(lancache_release_rows pinned) || exit $?
     release=$(lancache_release_rows release) || exit $?
-    if [[ -n "$tag" ]] && list_has_line "$tag" "$words"; then
-        channel="${channel:-$tag}"
-    elif [[ "$tag" == sha-* || "$tag" == v[0-9]* ]]; then
-        channel="${channel:-$pinned}"
-    fi
-
     if [[ -z "$channel" ]]; then
         release_tag=$(lancache_release_archive_tag_or_empty) || exit $?
         [[ -z "$release_tag" ]] || channel="$pinned"
@@ -4434,6 +4428,35 @@ resolve_lancache_image_channel() {
     channel="${channel:-$release}"
     validate_lancache_image_channel "$channel"
     lancache_stack_pointer_channel_for "$channel"
+}
+
+# What: the channel a channel and a tag input mean, or ""
+# Why: a set channel wins; a word or a fixed tag names one
+# From: Issue #1683
+lancache_channel_of() {
+    local channel="$1" tag="$2" kind
+    if [[ -z "$channel" ]]; then
+        kind=$(lancache_tag_kind "$tag") || exit $?
+        case "$kind" in
+            channel) channel="$tag" ;;
+            fixed) channel=$(lancache_release_rows pinned) || exit $? ;;
+        esac
+    fi
+    printf '%s\n' "$channel"
+}
+
+# What: what an image tag names: channel, fixed or nothing
+# Why: one rule; a new tag form changes only this place
+# From: Issue #1683
+lancache_tag_kind() {
+    local tag="$1" words
+    [[ -n "$tag" ]] || return 0
+    words=$(lancache_channel_words) || exit $?
+    if list_has_line "$tag" "$words"; then
+        printf 'channel\n'
+    elif [[ "$tag" == sha-* || "$tag" == v[0-9]* ]]; then
+        printf 'fixed\n'
+    fi
 }
 
 # What: maps a former name to its channel; others pass
@@ -4782,19 +4805,16 @@ write_lancache_image_refs() {
 # Why: the env tag and the .env tag follow one rule
 # From: Issue #1683 | PR #1912
 lancache_direct_image_tag() {
-    local tag="$1" words="$2"
-    if [[ -n "$tag" ]] && list_has_line "$tag" "$words"; then
-        lancache_stack_pointer_channel_for "$tag"
-        return 0
-    fi
-    case "$tag" in
-        sha-*|v[0-9]*)
+    local tag="$1" kind
+    kind=$(lancache_tag_kind "$tag") || exit $?
+    case "$kind" in
+        channel) lancache_stack_pointer_channel_for "$tag" ;;
+        fixed)
             validate_lancache_image_tag "$tag"
             printf '%s\n' "$tag"
-            return 0
             ;;
+        *) return 1 ;;
     esac
-    return 1
 }
 
 # What: release tag of this checkout, empty if it has none
@@ -4817,7 +4837,7 @@ resolve_lancache_image_tag() {
 
     words=$(lancache_channel_words) || exit $?
     pinned=$(lancache_release_rows pinned) || exit $?
-    lancache_direct_image_tag "$tag" "$words" && return 0
+    lancache_direct_image_tag "$tag" && return 0
 
     channel=$(shell_or_env_value LANCACHE_IMAGE_CHANNEL "$env_file") || exit $?
 
@@ -4834,7 +4854,7 @@ resolve_lancache_image_tag() {
     fi
 
     [[ -n "$tag" ]] || tag=$(shell_or_env_value LANCACHE_IMAGE_TAG "$env_file") || exit $?
-    lancache_direct_image_tag "$tag" "$words" && return 0
+    lancache_direct_image_tag "$tag" && return 0
 
     [[ -n "$tag" ]] || tag=$(lancache_release_archive_tag_or_empty) || exit $?
     if [[ -z "$tag" ]]; then
@@ -9058,7 +9078,7 @@ cmd_secondary() {
     local preflight_registry preflight_prefix preflight_channel preflight_env_tag
     local preflight_tag preflight_verified_registry="" preflight_verified_prefix="" preflight_verified_tag=""
     local secondary_env_file bad_response secondary_compose dns_https_host_port
-    local channel_words pinned dns_port primary_channel primary_tag_hint
+    local response_tag_kind pinned dns_port primary_channel primary_tag_hint
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -9426,19 +9446,12 @@ cmd_secondary() {
     lancache_image_prefix=$(LANCACHE_IMAGE_PREFIX="${lancache_image_prefix:-$response_image_prefix}" \
         resolve_lancache_image_prefix) || die "Cannot resolve the image prefix (exit $?)."
 
-    channel_words=$(lancache_channel_words) || exit $?
     pinned=$(lancache_release_rows pinned) || exit $?
     # What: the chosen channel, checked against the primary
     # Why: the primary names its channel after the clone
     # From: Issue #1683 | PR #2017
     lancache_image_channel=$(lancache_stack_pointer_channel_for "$LANCACHE_IMAGE_CHANNEL") || exit $?
-    primary_channel="$response_image_channel"
-    if [[ -z "$primary_channel" && -n "$response_image_tag" ]] \
-        && list_has_line "$response_image_tag" "$channel_words"; then
-        primary_channel="$response_image_tag"
-    elif [[ -z "$primary_channel" && "$response_image_tag" =~ ^(sha-|v[0-9]) ]]; then
-        primary_channel="$pinned"
-    fi
+    primary_channel=$(lancache_channel_of "$response_image_channel" "$response_image_tag") || exit $?
     if [[ -n "$primary_channel" ]]; then
         primary_channel=$(lancache_stack_pointer_channel_for "$primary_channel") || exit $?
         primary_tag_hint=""
@@ -9452,8 +9465,9 @@ cmd_secondary() {
     if [[ -z "$explicit_lancache_image_tag" && "$lancache_image_channel" = "$pinned" && -n "$existing_env_file" ]]; then
         tag_input=$(get_env_var LANCACHE_IMAGE_TAG "$existing_env_file") || exit $?
     fi
-    if [[ -z "$explicit_lancache_image_tag" && "$lancache_image_channel" = "$pinned" && -z "$tag_input" && -n "$response_image_tag" ]] \
-        && ! list_has_line "$response_image_tag" "$channel_words"; then
+    response_tag_kind=$(lancache_tag_kind "$response_image_tag") || exit $?
+    if [[ -z "$explicit_lancache_image_tag" && "$lancache_image_channel" = "$pinned" && -z "$tag_input" && -n "$response_image_tag" \
+        && "$response_tag_kind" != channel ]]; then
         tag_input="$response_image_tag"
     fi
     if [[ "$lancache_image_channel" != "$pinned" && -z "$explicit_lancache_image_tag" ]]; then
