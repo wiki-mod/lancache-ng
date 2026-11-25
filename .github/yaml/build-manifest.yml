@@ -1034,6 +1034,10 @@ runtime:
     # From: Issue #1683
     - DNS_SECONDARY_NS=
     - DNS_SECONDARY_NS_OFF=
+    # What: wait between two rounds of the dns helper.
+    # Why: a zone the primary sets is forwarded soon.
+    # From: Issue #1683
+    - DNS_FOLLOW_SECONDS=10
     # What: check interval; shorter while one fails.
     # Why: serials via the pdns-API; a lag is pulled.
     # From: Issue #1683
@@ -1373,6 +1377,7 @@ runtime:
     - DNS_TXT_MAX_BYTES=uint;1;255;live;ui
     - DNS_REPLICATION_ROLE=choice;primary,secondary;;recreate;dns
     - DNS_SECONDARIES=list?;;;restart;dns
+    - DNS_FOLLOW_SECONDS=uint;2;3600;restart;dns
     - DNS_SECONDARY_CHECK_SECONDS=uint;60;604800;live;ui
     - DNS_SECONDARY_NS=list?;;;live;ui
     - DNS_SECONDARY_NS_AUTO_REMOVE=bool;;;live;ui
