@@ -7,7 +7,7 @@
 // From: Issue #1683 | PR #1980
 
 use lancache_ng::config::Settings;
-use lancache_ng::{cert, clock, dns, docker, fs, http, tidy};
+use lancache_ng::{cert, clock, docker, fs, http, tidy};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::{BTreeMap, VecDeque};
@@ -417,7 +417,6 @@ async fn dns_sync(s: &Settings, f: &mut Findings) -> Result<(), String> {
         .zones()
         .await
         .map_err(|e| format!("primary: {e}"))?;
-    let managed: std::collections::BTreeSet<String> = dns::managed_zones(s)?.into_iter().collect();
     for (name, address) in peers {
         let api = match peer::secondary_api(s, client.clone(), &address, &key) {
             Ok(a) => a,
@@ -455,7 +454,7 @@ async fn dns_sync(s: &Settings, f: &mut Findings) -> Result<(), String> {
         // Why: a stale slave keeps answering old names.
         // From: Issue #1683 | PR #2019
         for z in &theirs {
-            if z.kind == "Slave" && !managed.contains(&z.name) {
+            if z.kind == "Slave" && peer::serial_of(&ours, &z.name).is_none() {
                 f.warn(&name, format!("extra zone {} not on the primary", z.name));
             }
         }
