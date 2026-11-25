@@ -2862,8 +2862,10 @@ async fn sampler(app: Arc<App>) {
         for e in sample_services(&app, &s).await {
             eprintln!("ui: stats: {e}");
         }
-        if let Err(e) = dhcp_stays_off(&app, &s).await {
-            eprintln!("ui: dhcp: {e}");
+        match dhcp_stays_off(&app, &s).await {
+            Ok(Some(done)) => eprintln!("ui: dhcp: {done}"),
+            Ok(None) => {}
+            Err(e) => eprintln!("ui: dhcp: {e}"),
         }
         tokio::time::sleep(Duration::from_secs(step)).await;
     }
@@ -2872,9 +2874,9 @@ async fn sampler(app: Arc<App>) {
 // What: in mode off a running dhcp is stopped again.
 // Why: compose up may start it after the ui.
 // From: Issue #1683 | PR #1980
-async fn dhcp_stays_off(app: &App, s: &Settings) -> Result<(), String> {
+async fn dhcp_stays_off(app: &App, s: &Settings) -> Result<Option<String>, String> {
     let Some(service) = lancache_ng::dhcp::off_service(s)? else {
-        return Ok(());
+        return Ok(None);
     };
     let (grace, limit) = app.limits(s)?;
     let list = project_containers(app, s).await?;
@@ -2887,14 +2889,13 @@ async fn dhcp_stays_off(app: &App, s: &Settings) -> Result<(), String> {
             && c["State"].as_str() == Some("running")
     });
     let Some(name) = running.and_then(docker::name_of) else {
-        return Ok(());
+        return Ok(None);
     };
     let r = app
         .docker
         .act(name, docker::Action::Stop, grace, limit)
         .await;
-    eprintln!("ui: dhcp: mode off, stop {name} {r:?}");
-    Ok(())
+    Ok(Some(format!("mode off, stop {name} {r:?}")))
 }
 
 // What: bytes the cache folder holds on disk.
@@ -3347,14 +3348,9 @@ async fn apply_all(
     let dhcp = new.text("DHCP_SERVICE")?;
     if lancache_ng::dhcp::off_service(new)?.is_some() {
         plan.remove(&dhcp);
-        match container_of(app, new, &dhcp).await {
-            Ok(name) => {
-                let r = app
-                    .docker
-                    .act(&name, docker::Action::Stop, grace, limit)
-                    .await;
-                report.push(format!("{dhcp}: mode off, stop {r:?}"));
-            }
+        match dhcp_stays_off(app, new).await {
+            Ok(Some(done)) => report.push(format!("{dhcp}: {done}")),
+            Ok(None) => {}
             Err(e) => report.push(format!("{dhcp}: mode off, {e}")),
         }
     }
