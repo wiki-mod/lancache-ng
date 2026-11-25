@@ -4339,14 +4339,9 @@ fn tsig_file(s: &Settings) -> Result<PathBuf, String> {
 // Why: PowerDNS and Kea both read base64.
 // From: Issue #1683 | PR #1980
 fn new_tsig() -> String {
-    let hex = secret::random_hex(32);
-    let bytes: Vec<u8> = hex
-        .as_bytes()
-        .chunks(2)
-        .filter_map(|p| std::str::from_utf8(p).ok())
-        .filter_map(|p| u8::from_str_radix(p, 16).ok())
-        .collect();
-    base64::engine::general_purpose::STANDARD.encode(bytes)
+    secret::key_bytes(&secret::random_hex(32))
+        .map(|key| base64::engine::general_purpose::STANDARD.encode(key))
+        .unwrap_or_default()
 }
 
 // What: TSIG secret; a rotated file wins.
