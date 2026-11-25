@@ -1350,14 +1350,21 @@ pub mod dhcp {
     // Why: option 42 holds IPs; dead names are skipped.
     // From: Issue #1683 | PR #1980
     pub fn ntp_addrs(s: &Settings) -> Result<Vec<String>, String> {
-        use std::net::ToSocketAddrs as _;
         // What: IP_HTTP while own NTP is handed out.
         // Why: LanCache-NG-NTP answers on the HTTP IP.
         // From: Issue #1683
         if own_ntp(s)? {
             return Ok(vec![s.text("IP_HTTP")?]);
         }
-        s.list("DHCP_NTP_SERVERS")
+        Ok(ipv4_of(&s.list("DHCP_NTP_SERVERS"), "DHCP_NTP_SERVERS"))
+    }
+
+    // What: IPv4 text of each host; names resolve.
+    // Why: option 42 holds IPs; dead names are skipped.
+    // From: Issue #1683 | PR #1980
+    pub fn ipv4_of(hosts: &[String], key: &str) -> Vec<String> {
+        use std::net::ToSocketAddrs as _;
+        hosts
             .iter()
             .map(|host| {
                 if let Ok(ip) = host.parse::<std::net::Ipv4Addr>() {
@@ -1365,15 +1372,14 @@ pub mod dhcp {
                 }
                 (host.as_str(), 0)
                     .to_socket_addrs()
-                    .map_err(|e| format!("DHCP_NTP_SERVERS: cannot resolve {host}: {e}"))?
+                    .map_err(|e| format!("{key}: cannot resolve {host}: {e}"))?
                     .find_map(|a| match a {
                         std::net::SocketAddr::V4(v4) => Some(v4.ip().to_string()),
                         std::net::SocketAddr::V6(_) => None,
                     })
-                    .ok_or_else(|| format!("DHCP_NTP_SERVERS: {host} has no IPv4 address"))
+                    .ok_or_else(|| format!("{key}: {host} has no IPv4 address"))
             })
             .filter_map(|r: Result<String, String>| r.map_err(|e| eprintln!("{e}; skipped")).ok())
-            .map(Ok)
             .collect()
     }
 
@@ -3980,22 +3986,33 @@ pub mod kea_conf {
     // Why: router, DNS, domain and NTP come from the SOT.
     // From: Issue #1683 | PR #1980
     fn option_rows(s: &Settings, domain: &str) -> Result<Vec<Value>, String> {
-        use crate::dhcp::{DNS_SERVERS, DOMAIN_NAME, DOMAIN_SEARCH, NTP_SERVERS, ROUTERS};
-        let mut rows = Vec::new();
-        rows.push(json!({"name": ROUTERS.name, "data": s.text("DHCP_GATEWAY")?}));
-        let dns = crate::dhcp::dns_addrs(s).join(", ");
-        rows.push(json!({"name": DNS_SERVERS.name, "data": dns}));
-        rows.push(json!({"name": DOMAIN_NAME.name, "data": domain}));
-        rows.push(json!({"name": DOMAIN_SEARCH.name, "data": domain}));
+        let dns = crate::dhcp::dns_addrs(s);
         let ntp = crate::dhcp::ntp_addrs(s)?;
-        if !ntp.is_empty() {
-            rows.push(json!({"name": NTP_SERVERS.name, "data": ntp.join(", ")}));
-        }
+        let mut rows = named_rows(&s.text("DHCP_GATEWAY")?, &dns, domain, &ntp);
         let raw = s.text_or_empty("DHCP_CUSTOM_OPTIONS");
         for (code, data) in crate::dhcp::custom_options(s, &raw)? {
             rows.push(json!({"code": code, "data": data}));
         }
         Ok(rows)
+    }
+
+    // What: the named options of one Kea subnet.
+    // Why: settings and the subnet form give the same rows.
+    // From: Issue #1683
+    pub fn named_rows(gateway: &str, dns: &[String], domain: &str, ntp: &[String]) -> Vec<Value> {
+        use crate::dhcp::{DNS_SERVERS, DOMAIN_NAME, DOMAIN_SEARCH, NTP_SERVERS, ROUTERS};
+        let mut rows = vec![
+            json!({"name": ROUTERS.name, "data": gateway}),
+            json!({"name": DNS_SERVERS.name, "data": dns.join(", ")}),
+        ];
+        if !domain.is_empty() {
+            rows.push(json!({"name": DOMAIN_NAME.name, "data": domain}));
+            rows.push(json!({"name": DOMAIN_SEARCH.name, "data": domain}));
+        }
+        if !ntp.is_empty() {
+            rows.push(json!({"name": NTP_SERVERS.name, "data": ntp.join(", ")}));
+        }
+        rows
     }
 
     // What: the pool of a subnet as Kea writes it.

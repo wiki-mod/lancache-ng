@@ -2349,20 +2349,11 @@ async fn kea_edit(
 // From: Issue #1683 | PR #1980
 fn subnet_from(get: &(dyn Fn(&str) -> String + Sync), id: u64, old: Option<&Value>) -> Value {
     let dns = dns_pair(get("dns_primary"), get("dns_secondary"));
-    use lancache_ng::dhcp::{DNS_SERVERS, DOMAIN_NAME, NTP_SERVERS, ROUTERS};
-    let mut opts = vec![
-        json!({"name": ROUTERS.name, "data": get("gateway")}),
-        json!({"name": DNS_SERVERS.name, "data": dns.join(", ")}),
-    ];
-    for (name, field) in [
-        (DOMAIN_NAME.name, "domain"),
-        (NTP_SERVERS.name, "ntp_servers"),
-    ] {
-        let value = get(field);
-        if !value.is_empty() {
-            opts.push(json!({"name": name, "data": value}));
-        }
-    }
+    let hosts: Vec<String> = config::list_items(&get("ntp_servers"))
+        .map(str::to_string)
+        .collect();
+    let ntp = lancache_ng::dhcp::ipv4_of(&hosts, "ntp_servers");
+    let mut opts = lancache_ng::kea_conf::named_rows(&get("gateway"), &dns, &get("domain"), &ntp);
     if let Some(old) = old {
         opts.extend(lancache_ng::kea_conf::coded_options(old));
     }
