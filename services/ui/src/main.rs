@@ -4291,23 +4291,47 @@ fn stored_phc(value: &str) -> String {
 // From: Issue #1683 | PR #2017
 fn env_hash(pw: &str) -> Result<String, String> {
     let hash: Result<PasswordHash, _> = Argon2::default().hash_password(pw.as_bytes());
-    hash.map(|h| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(h.to_string()))
+    hash.map(|h| env_form(&h.to_string()))
         .map_err(|e| e.to_string())
+}
+
+// What: a PHC string in its .env form, base64url.
+// Why: the stack .env bars "$", which every PHC has.
+// From: Issue #1683
+fn env_form(phc: &str) -> String {
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(phc)
+}
+
+// What: one line from stdin without its line end.
+// Why: both setup.sh commands read their input so.
+// From: Issue #1683
+fn stdin_line() -> Result<String, String> {
+    let mut line = String::new();
+    std::io::stdin()
+        .read_line(&mut line)
+        .map_err(|e| e.to_string())?;
+    Ok(line.trim_end_matches(['\r', '\n']).to_string())
 }
 
 // What: base64url PHC hash of a password from stdin.
 // Why: setup.sh writes it into the stack .env.
 // From: Issue #1683 | PR #2017
 fn hash_password() -> Result<(), String> {
-    let mut line = String::new();
-    std::io::stdin()
-        .read_line(&mut line)
-        .map_err(|e| e.to_string())?;
-    let pw = line.trim_end_matches(['\r', '\n']);
+    let pw = stdin_line()?;
     if pw.is_empty() {
         return Err("the password on stdin is empty".into());
     }
-    println!("{}", env_hash(pw)?);
+    println!("{}", env_hash(&pw)?);
+    Ok(())
+}
+
+// What: .env form of a PHC hash from stdin.
+// Why: setup.sh moves an old hash without openssl.
+// From: Issue #1683
+fn encode_password_hash() -> Result<(), String> {
+    let phc = stdin_line()?;
+    PasswordHash::new(&phc).map_err(|e| format!("no PHC hash on stdin: {e}"))?;
+    println!("{}", env_form(&phc));
     Ok(())
 }
 
@@ -4627,8 +4651,10 @@ async fn secure(State(app): Shared, req: Request, next: Next) -> Response {
 #[tokio::main]
 async fn main() -> Result<(), String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.first().map(String::as_str) == Some("hash-password") {
-        return hash_password();
+    match args.first().map(String::as_str) {
+        Some("hash-password") => return hash_password(),
+        Some("encode-password-hash") => return encode_password_hash(),
+        _ => {}
     }
     let saved = config::saved_file();
     let s = Settings::from_process()?;
