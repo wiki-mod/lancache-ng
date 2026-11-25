@@ -7078,7 +7078,7 @@ channel_code_checkout() {
         fi
     fi
     dir=$(channel_code_dir "$channel") || exit $?
-    target="${LANCACHE_SETUP_GIT_REF:-}"
+    target=$(resolve_setup_bootstrap_ref) || exit $?
     [[ -n "$target" ]] || target=$(lancache_channel_code_ref "$channel" "${LANCACHE_IMAGE_TAG:-}") || exit $?
     [[ -n "$target" ]] || die "Channel $channel needs LANCACHE_IMAGE_TAG to name its code."
     [[ ! -e "$dir/.git" ]] || CHANNEL_CODE_OLD=$(checkout_head "$dir") || exit $?
