@@ -112,7 +112,6 @@
   "err_hamster_empty": "enter addresses or a Steam app ID",
   "err_ipv4": "enter a whole IPv4 address, e.g. 192.0.2.10",
   "err_main_domain_remove": "{x} is the main domain and cannot be removed. Make another domain the main domain first.",
-  "err_no_domain": "\"{x}\" is no domain name",
   "err_no_gib": "\"{x}\" is no whole GiB number",
   "err_not_lan_domain": "{x} is not a LAN domain of this stack. Add it on the DNS page first.",
   "err_password_min": "the password needs at least {x} characters",

@@ -677,11 +677,6 @@ async fn save(
         &form,
         app.cache_used.load(Ordering::Relaxed),
     )?;
-    if let Some(d) = form.get("DHCP_DOMAIN")
-        && !lancache_ng::dns::is_dns_name(d, false, false)
-    {
-        return Err(bad_request(tr("err_no_domain").replace("{x}", d)));
-    }
     // What: a new main domain also updates the extras.
     // Why: an extra made main must leave the extra list.
     // From: Issue #1683
@@ -938,6 +933,10 @@ fn main_domain_fields(s: &Settings, main: &str) -> Result<Fields, String> {
     if want != old && lans.iter().skip(1).any(|z| *z == want) {
         extra.push(plain(&old));
     }
+    // What: the new set passes the LAN domain rule.
+    // Why: one rule; else lan_domains fails everywhere.
+    // From: Issue #1683
+    lancache_ng::dns::validate_lan_domains(&plain(&want), &extra)?;
     Ok(Fields::from([
         ("DHCP_DOMAIN".to_string(), plain(&want)),
         ("DNS_EXTRA_LAN_DOMAINS".to_string(), extra.join(" ")),
