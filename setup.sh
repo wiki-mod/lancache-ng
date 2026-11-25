@@ -7056,7 +7056,7 @@ install_repo_follow_channel() {
 # Why: its code moved to a channel dir; data stays
 # From: Issue #1683 | PR #1858
 remove_root_checkout() {
-    local root="$1" changes list f d sorted
+    local root="$1" changes list f d sorted local_commit
     local -a dirs=()
     changes=$(git_tracked_changes "$root") || exit $?
     # What: changed tracked files keep the whole old code
@@ -7064,6 +7064,15 @@ remove_root_checkout() {
     # From: Issue #1683 | PR #1858
     if [[ -n "$changes" ]]; then
         print_warn "Old code in $root stays; these tracked files differ:"$'\n'"$changes"
+        return 0
+    fi
+    # What: commits on no remote or a stash keep it too
+    # Why: only .git holds them; no backup has them
+    # From: Issue #1683 | PR #2017
+    local_commit=$(git -C "$root" rev-list --max-count=1 HEAD --branches --not --remotes) \
+        || die "Failed to list the local commits of $root (exit $?)."
+    if [[ -n "$local_commit" ]] || git -C "$root" rev-parse --verify --quiet refs/stash > /dev/null; then
+        print_warn "Old code in $root stays; it holds commits on no remote or a stash."
         return 0
     fi
     list=$(mktemp) || die "Failed to create a temporary file (exit $?)."
