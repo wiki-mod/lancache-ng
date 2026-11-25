@@ -4130,7 +4130,7 @@ pub mod kea_conf {
             "ddns-override-client-update": true,
             "ddns-replace-client-name": s.text("KEA_DDNS_REPLACE_CLIENT_NAME")?,
             "ddns-generated-prefix": s.text("KEA_DDNS_GENERATED_PREFIX")?,
-            "ddns-qualifying-suffix": format!("{domain}."),
+            "ddns-qualifying-suffix": crate::pdns::zone_id(&domain),
             "loggers": log_rows(s, &["kea-dhcp4", "kea-dhcp4.packets"])?
         }}))
     }

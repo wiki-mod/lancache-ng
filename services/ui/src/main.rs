@@ -1410,13 +1410,7 @@ fn in_zone(name: &str, zone: &str) -> String {
 // Why: TXT needs quotes; target names end in a dot.
 // From: Issue #1683 | PR #1980
 fn canonical(kind: &str, c: &str) -> String {
-    let dot = |n: &str| {
-        if n.ends_with('.') {
-            n.to_string()
-        } else {
-            format!("{n}.")
-        }
-    };
+    let dot = lancache_ng::pdns::zone_id;
     match kind {
         "TXT" if !c.starts_with('"') => format!("\"{}\"", c.replace('"', "\\\"")),
         "CNAME" => dot(c),
@@ -1561,12 +1555,7 @@ async fn ptr(s: &Settings, add: bool, get: &(dyn Fn(&str) -> String + Sync)) -> 
     let mut contents = Vec::new();
     if add {
         ttl = form_ttl(s, get)?;
-        let host = get("hostname");
-        contents.push(if host.ends_with('.') {
-            host
-        } else {
-            format!("{host}.")
-        });
+        contents.push(lancache_ng::pdns::zone_id(&get("hostname")));
     }
     let api = pdns_api(s)?;
     api.set_rrset(&zone, &name, "PTR", ttl, &contents).await?;
