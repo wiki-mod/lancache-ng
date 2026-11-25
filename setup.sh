@@ -1684,13 +1684,8 @@ ensure_stack_requirements_installed() {
     # What: ip, flock and the SOT secret generator tools
     # Why: minimal hosts lack them; flock guards the .env
     # From: Issue #1683 | PR #2017
-    local generators tools_text
-    local -a generator_tools=()
-    generators=$(lancache_sot_list secret_generators runtime) || exit $?
-    tools_text=$(awk 'NF { print $2 }' <<< "$generators" | sort -u) \
-        || die "Failed to read the secret generator tools (exit $?)."
-    mapfile -t generator_tools <<< "$tools_text"
-    install_missing_tools ip flock "${generator_tools[@]}"
+    install_missing_tools ip flock
+    install_secret_generator_tools
 
     if ! command_available docker; then
         install_docker_parts all
@@ -1716,6 +1711,19 @@ ensure_stack_requirements_installed() {
 # From: Issue #1683 | PR #1858
 install_health_gate_tools() {
     install_missing_tools curl dig jq
+}
+
+# What: the tools the SOT secret generators run
+# Why: install, update and restore may make a secret
+# From: Issue #1683 | PR #2017
+install_secret_generator_tools() {
+    local generators tools_text
+    local -a generator_tools=()
+    generators=$(lancache_sot_list secret_generators runtime) || exit $?
+    tools_text=$(awk 'NF { print $2 }' <<< "$generators" | sort -u) \
+        || die "Failed to read the secret generator tools (exit $?)."
+    mapfile -t generator_tools <<< "$tools_text"
+    install_missing_tools "${generator_tools[@]}"
 }
 
 # What: what the requirements step installs, as one text
@@ -5894,10 +5902,11 @@ cmd_restore() (
     install_dir=$(resolve_stack_dir "$install_dir") || exit $?
     [[ -n "$archive" ]] || die "Usage: $0 restore <backup archive (.tar.zst, .tar.bz2 or .tar.gz)> [install-dir]"
     [[ -f "$archive" ]] || die "Backup archive not found: $archive"
-    # What: requires openssl for the convergence step
+    # What: tools of the restore and its convergence step
     # Why: fails before restore mutations on minimal hosts
     # From: Issue #1683 | PR #1858
-    install_missing_tools tar rsync openssl
+    install_missing_tools tar rsync
+    install_secret_generator_tools
 
     stack_stopped=0
     stack_was_running=0
@@ -7347,6 +7356,10 @@ perform_stack_update_flow() {
     # Why: the quickstart migration below already mutates
     # From: Issue #1683 | PR #1858
     assert_prebuilt_image_platform_supported
+    # What: secret tools before the migration and .env step
+    # Why: both may make a secret; nothing changed yet
+    # From: Issue #1683 | PR #2017
+    install_secret_generator_tools
     if is_quickstart_install "$install_dir"; then
         migrate_quickstart_install "$install_dir" || exit $?
         install_dir="${PROD_COMPOSE%/*}"
