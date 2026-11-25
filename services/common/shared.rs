@@ -1033,7 +1033,9 @@ pub mod dns {
     // Why: DHCP and the NS names use the main domain.
     // From: Issue #1683
     pub fn lan_domains(s: &Settings) -> Result<Vec<String>, String> {
-        validate_lan_domains(&s.text("DHCP_DOMAIN")?, &s.list("DNS_EXTRA_LAN_DOMAINS"))
+        let main = lan_zone(s)?;
+        let main = main.trim_end_matches('.');
+        validate_lan_domains(main, &s.list("DNS_EXTRA_LAN_DOMAINS"))
     }
 
     // What: the LAN zone, DHCP_DOMAIN in canonical form.
