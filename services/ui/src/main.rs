@@ -1942,7 +1942,8 @@ async fn zone_overview(State(app): Shared) -> Page {
     let rows: Vec<Value> = lancache_ng::dns::managed_zones(&s)?
         .into_iter()
         .map(|zone| {
-            let serials: Vec<Option<u32>> = lists.iter().map(|l| peer::serial_of(l, &zone)).collect();
+            let serials: Vec<Option<u32>> =
+                lists.iter().map(|l| peer::serial_of(l, &zone)).collect();
             // What: state word of each secondary's cell.
             // Why: table and status line share zone_state.
             // From: Issue #1683 | PR #2019
@@ -3619,7 +3620,84 @@ async fn ensure_primary_zones(s: &Settings, key: &str) -> Result<(), String> {
     for lan in lancache_ng::dns::lan_domains(s)? {
         merge_legacy_zone(s, &api, &have, &lan).await?;
     }
+    ensure_own_endings(s, &api, key, &have).await?;
     ensure_soa_nameserver(s, &api).await
+}
+
+// What: sign own endings; parents hold NS and DS.
+// Why: .lan and .local validate only along a chain.
+// From: Issue #1683 | PR #2019
+async fn ensure_own_endings(
+    s: &Settings,
+    api: &lancache_ng::pdns::Api,
+    key: &str,
+    have: &[String],
+) -> Result<(), String> {
+    use lancache_ng::dns::{canonical_zone, is_below, parent_zone};
+    // What: no list, no top zone; the NTA stays.
+    // Why: an ending we cannot check may be public.
+    // From: Issue #1683 | PR #2019
+    let psl = match lancache_ng::render::psl(s) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("ui: no own top zones: {e}");
+            return Ok(());
+        }
+    };
+    let tops = lancache_ng::dns::top_zones(s, &psl)?;
+    let lans = lancache_ng::dns::lan_domains(s)?;
+    let soa = s.text("PDNS_DEFAULT_SOA")?;
+    let mname = canonical_zone(soa.split_whitespace().next().unwrap_or_default());
+    let ns = ns_names(s, &mname)?;
+    let ttl = s.num::<u32>("DNS_RECORD_TTL")?;
+    for top in &tops {
+        if !have.contains(top) {
+            api.create_primary(top, &s.text("PDNS_SOA_EDIT")?, key)
+                .await?;
+        }
+        ensure_rrset(api, top, top, "NS", ttl, &ns).await?;
+        ensure_soa_names(api, top, &soa).await?;
+        api.secure(top).await?;
+    }
+    let signed: Vec<String> = lans
+        .iter()
+        .filter(|z| tops.iter().any(|t| *z == t || is_below(z, t)))
+        .cloned()
+        .collect();
+    let mut parents = tops.clone();
+    parents.extend(lans.iter().cloned());
+    let mut wanted: Vec<(String, String)> = Vec::new();
+    for zone in &signed {
+        api.secure(zone).await?;
+        let Some(parent) = parent_zone(zone, &parents) else {
+            continue;
+        };
+        ensure_rrset(api, &parent, zone, "NS", ttl, &ns).await?;
+        // What: no DS when it cannot be read.
+        // Why: no DS is unchecked; a wrong DS is SERVFAIL.
+        // From: Issue #1683 | PR #2019
+        let ds = api.ds(zone).await.unwrap_or_else(|e| {
+            eprintln!("ui: no DS for {zone}: {e}");
+            Vec::new()
+        });
+        ensure_rrset(api, &parent, zone, "DS", ttl, &ds).await?;
+        wanted.push((parent, zone.clone()));
+    }
+    // What: drop delegations of gone zones in top zones.
+    // Why: a top zone is ours; a LAN zone keeps all rows.
+    // From: Issue #1683 | PR #2019
+    for top in &tops {
+        for r in api.rrsets(top).await? {
+            let (Some(name), Some(kind)) = (r["name"].as_str(), r["type"].as_str()) else {
+                continue;
+            };
+            let child = (top.clone(), name.to_string());
+            if name != top && matches!(kind, "NS" | "DS") && !wanted.contains(&child) {
+                api.set_rrset(top, name, kind, ttl, &[]).await?;
+            }
+        }
+    }
+    Ok(())
 }
 
 // What: moves local.<domain> records into <domain>.
@@ -3897,17 +3975,25 @@ async fn ensure_rrset(
     want: &[String],
 ) -> Result<(), String> {
     let id = lancache_ng::pdns::zone_id(name);
-    let same = api.rrsets(zone).await?.iter().any(|r| {
-        let have: Vec<&str> = r["records"]
-            .as_array()
-            .map(|a| a.iter().filter_map(|c| c["content"].as_str()).collect())
-            .unwrap_or_default();
-        r["name"] == id.as_str()
-            && r["type"] == kind
-            && r["ttl"] == ttl
-            && have.len() == want.len()
-            && want.iter().all(|w| have.contains(&w.as_str()))
-    });
+    let rows = api.rrsets(zone).await?;
+    let found = rows
+        .iter()
+        .find(|r| r["name"] == id.as_str() && r["type"] == kind);
+    let same = match found {
+        // What: an absent rrset that should be absent.
+        // Why: a DELETE of nothing still raises the serial.
+        // From: Issue #1683 | PR #2019
+        None => want.is_empty(),
+        Some(r) => {
+            let have: Vec<&str> = r["records"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|c| c["content"].as_str()).collect())
+                .unwrap_or_default();
+            r["ttl"] == ttl
+                && have.len() == want.len()
+                && want.iter().all(|w| have.contains(&w.as_str()))
+        }
+    };
     if same {
         return Ok(());
     }

@@ -802,6 +802,39 @@ pub mod pdns {
             let path = format!("/cache/flush?domain={}&subtree={subtree}", zone_id(name));
             self.call(Method::PUT, &path, None).await.map(drop)
         }
+
+        // What: give a zone a signing key once.
+        // Why: a new key each apply breaks every anchor.
+        // From: Issue #1683 | PR #2019
+        pub async fn secure(&self, zone: &str) -> Result<(), String> {
+            let text = self.call(Method::GET, &zone_path(zone), None).await?;
+            let v: Value = serde_json::from_str(&text).map_err(|e| format!("zone {zone}: {e}"))?;
+            if v["dnssec"].as_bool() == Some(true) {
+                return Ok(());
+            }
+            let keys = format!("{}/cryptokeys", zone_path(zone));
+            let body = json!({"keytype": "csk", "active": true, "published": true});
+            self.call(Method::POST, &keys, Some(body)).await?;
+            let rectify = format!("{}/rectify", zone_path(zone));
+            self.call(Method::PUT, &rectify, None).await.map(drop)
+        }
+
+        // What: SHA-256 DS rows of the active keys.
+        // Why: the parent zone and the anchors need them.
+        // From: Issue #1683 | PR #2019
+        pub async fn ds(&self, zone: &str) -> Result<Vec<String>, String> {
+            let path = format!("{}/cryptokeys", zone_path(zone));
+            let text = self.call(Method::GET, &path, None).await?;
+            let keys: Vec<Value> =
+                serde_json::from_str(&text).map_err(|e| format!("keys of {zone}: {e}"))?;
+            Ok(keys
+                .iter()
+                .filter(|k| k["active"].as_bool() == Some(true))
+                .flat_map(|k| k["ds"].as_array().cloned().unwrap_or_default())
+                .filter_map(|d| d.as_str().map(str::to_string))
+                .filter(|d| d.split_whitespace().nth(2) == Some("2"))
+                .collect())
+        }
     }
 }
 
@@ -996,6 +1029,33 @@ pub mod dns {
             zones.extend(private_reverse_zones(s));
         }
         Ok(zones)
+    }
+
+    // What: top zones of endings the Internet lacks.
+    // Why: a signed .lan needs its own top zone.
+    // From: Issue #1683 | PR #2019
+    pub fn top_zones(s: &Settings, psl: &crate::nginx_conf::Psl) -> Result<Vec<String>, String> {
+        let mut out: Vec<String> = Vec::new();
+        for zone in lan_domains(s)? {
+            let name = zone.trim_end_matches('.');
+            let last = name.rsplit('.').next().unwrap_or(name);
+            let top = canonical_zone(last);
+            if !psl.is_tld(last) && !out.contains(&top) {
+                out.push(top);
+            }
+        }
+        Ok(out)
+    }
+
+    // What: nearest listed zone strictly above a zone.
+    // Why: the DS of a zone belongs in that parent.
+    // From: Issue #1683 | PR #2019
+    pub fn parent_zone(zone: &str, zones: &[String]) -> Option<String> {
+        zones
+            .iter()
+            .filter(|p| is_below(zone, p))
+            .max_by_key(|p| p.len())
+            .cloned()
     }
 
     // What: zone of the pre-multi-domain layout.
@@ -2601,6 +2661,10 @@ pub mod pdns_conf {
         let rows = [
             ("launch", s.text("PDNS_LAUNCH")?),
             ("gsqlite3-database", s.text("PDNS_DATABASE")?),
+            // What: the backend keeps DNSSEC keys.
+            // Why: own endings are signed and anchored.
+            // From: Issue #1683 | PR #2019
+            ("gsqlite3-dnssec", yes(true)),
             ("local-address", joined("PDNS_LISTEN")),
             ("local-port", s.uint("PDNS_AUTH_PORT")?.to_string()),
             ("primary", yes(primary)),
@@ -3902,6 +3966,14 @@ pub mod nginx_conf {
             let keep = self.suffix_labels(&labels) + 1;
             (labels.len() >= keep).then(|| labels[labels.len() - keep..].join("."))
         }
+
+        // What: does the Internet know this one label?
+        // Why: an unknown ending gets its own top zone.
+        // From: Issue #1683 | PR #2019
+        pub fn is_tld(&self, label: &str) -> bool {
+            let l = label.to_ascii_lowercase();
+            self.plain.contains(&l) || self.wild.contains(&l)
+        }
     }
 
     // What: CDN names grouped by nginx handling.
@@ -4590,9 +4662,16 @@ pub mod render {
     // Why: nginx files and certificates need the same set.
     // From: Issue #1683 | PR #2017
     fn cache_hosts(s: &Settings, domains: &str) -> Result<nginx_conf::Hosts, String> {
+        nginx_conf::hosts(domains, &psl(s)?)
+    }
+
+    // What: the Public Suffix List next to the templates.
+    // Why: cache names and own endings read one list.
+    // From: Issue #1683 | PR #2019
+    pub fn psl(s: &Settings) -> Result<nginx_conf::Psl, String> {
         let dir = PathBuf::from(s.text("NGINX_TEMPLATE_DIR")?);
-        let psl = nginx_conf::Psl::parse(&read(&dir.join(s.text("NGINX_PSL_FILE")?))?);
-        nginx_conf::hosts(domains, &psl)
+        let text = read(&dir.join(s.text("NGINX_PSL_FILE")?))?;
+        Ok(nginx_conf::Psl::parse(&text))
     }
 
     // What: the nginx files of the proxy.
