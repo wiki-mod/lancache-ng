@@ -491,8 +491,7 @@ pub(crate) async fn dashboard(State(app): Shared, Extension(csrf): Extension<Csr
     // What: a bad alarm file is logged, the page stays.
     // Why: the dashboard must render without the file.
     // From: Issue #1683 | PR #2020
-    let path = s.text("WATCHDOG_ALARM_FILE")?;
-    let alarms = fs::read_json::<Value>(Path::new(&path))
+    let alarms = crate::watchdog::report(&s)
         .inspect_err(|e| eprintln!("ui: alarms: {e}"))
         .ok()
         .flatten();
@@ -2433,6 +2432,25 @@ pub(crate) fn cache_room(s: &Settings, form: &Fields, cached: u64) -> Result<(),
     Ok(())
 }
 
+// What: the watchdog alarm report as JSON.
+// Why: REST diagnosis on the reader of ui and CLI.
+// From: Issue #1683 | PR #2020
+pub(crate) async fn alarms(State(app): Shared) -> Response {
+    match crate::watchdog::report(&app.settings()) {
+        Ok(Some(v)) => axum::Json(v).into_response(),
+        Ok(None) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            axum::Json(json!({"error": "no alarm report written yet"})),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(json!({"error": e})),
+        )
+            .into_response(),
+    }
+}
+
 // What: container states for the beambar.
 // Why: Docker is the source; no status files.
 // From: Issue #1683 | PR #1980
@@ -2856,6 +2874,7 @@ pub(crate) fn router(app: Arc<App>) -> Result<Router, String> {
         .route(&p("UI_PAGE_STATS")?, get(stats))
         .route(&p("UI_ROUTE_STATS_GRAPH")?, get(graph))
         .route(&p("UI_ROUTE_CONTAINER_STATUS")?, get(status))
+        .route(&p("UI_ROUTE_ALARMS")?, get(alarms))
         .route(&p("UI_ROUTE_ZONE_OVERVIEW")?, get(zone_overview))
         .route(&p("UI_ROUTE_DESIRED_STATE")?, post(container_state))
         .route(&p("UI_ROUTE_RESTART_UI")?, post(restart_ui))

@@ -798,6 +798,7 @@ runtime:
     - UI_ROUTE_FAVICON=/favicon.ico
     - UI_ROUTE_LOGO_ICON=/static/logo-icon.png
     - UI_ROUTE_CONTAINER_STATUS=/api/status
+    - UI_ROUTE_ALARMS=/api/alarms
     - UI_ROUTE_DESIRED_STATE=/api/container/{service}
     - UI_ROUTE_RESTART_UI=/api/restart-ui
     - UI_ROUTE_SETUP_SAVE=/setup/save

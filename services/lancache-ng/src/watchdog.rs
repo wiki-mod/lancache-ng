@@ -440,14 +440,21 @@ fn publish(s: &Settings, f: &Findings) -> Result<(), String> {
         .map_err(|e| format!("{}: {e}", path.display()))
 }
 
+// What: the last alarm report the watchdog wrote.
+// Why: ui, REST, CLI and healthcheck read one way.
+// From: Issue #1683 | PR #2020
+pub(crate) fn report(s: &Settings) -> Result<Option<Value>, String> {
+    fs::read_json(&PathBuf::from(s.text("WATCHDOG_ALARM_FILE")?))
+}
+
 // What: healthcheck mode for the container probe.
 // Why: fresh alarm file means the watch loop runs.
 // From: Issue #1683 | PR #1980
 fn healthcheck() -> Result<(), String> {
     let s = Settings::from_process()?;
     let limit = s.uint("CHECK_INTERVAL")? * s.uint("RESTART_AFTER")?.max(1);
-    let path = PathBuf::from(s.text("WATCHDOG_ALARM_FILE")?);
-    let v: Value = fs::read_json(&path)?.ok_or_else(|| format!("{}: missing", path.display()))?;
+    let v = report(&s)?
+        .ok_or_else(|| format!("{}: missing", s.text_or_empty("WATCHDOG_ALARM_FILE")))?;
     let written = v["written"].as_u64().ok_or("written missing")?;
     let age = clock::unix_secs().saturating_sub(written);
     if age > limit {
@@ -469,10 +476,19 @@ pub async fn run(args: &[String]) -> Result<(), String> {
             }
             return Ok(());
         }
+        // What: the last alarm report as JSON on stdout.
+        // Why: the CLI reads what the ui and REST show.
+        // From: Issue #1683 | PR #2020
+        Some("alarms") => {
+            let s = Settings::from_process()?;
+            let v = report(&s)?.ok_or("no alarm report written yet")?;
+            println!("{v}");
+            return Ok(());
+        }
         // What: an unknown word fails with the list.
         // Why: it must not start a second check loop.
         // From: Issue #1683 | PR #2020
-        Some(_) => return Err("commands: healthcheck (none: check loop)".into()),
+        Some(_) => return Err("commands: healthcheck alarms (none: check loop)".into()),
     }
     use tokio::signal::unix::{SignalKind, signal};
     let mut settings = Settings::from_process()?;
