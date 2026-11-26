@@ -33,23 +33,19 @@ use std::path::PathBuf;
 // From: Issue #1683
 pub(crate) async fn domain_subnets(s: &Settings) -> BTreeMap<String, Vec<String>> {
     let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    if DhcpMode::from_settings(s).ok() != Some(DhcpMode::Kea) {
-        return out;
-    }
     // What: no Kea answer leaves the column empty.
     // Why: the DNS page must not fail when dhcp is down.
     // From: Issue #1683
-    let Ok(api) = kea_api(s) else { return out };
-    let Ok(cfg) = api.config().await else {
+    let Ok(Some(cfg)) = kea_config(s).await else {
         return out;
     };
-    for sn in cfg["Dhcp4"]["subnet4"].as_array().into_iter().flatten() {
-        let domain = option_data(sn, crate::shared::dhcp::DOMAIN_NAME.name);
+    for row in kea_subnets(&cfg).0 {
+        let domain = row["domain"].as_str().unwrap_or_default();
         if domain.is_empty() {
             continue;
         }
-        let zone = crate::shared::dns::canonical_zone(&domain);
-        let net = sn["subnet"].as_str().unwrap_or_default().to_string();
+        let zone = crate::shared::dns::canonical_zone(domain);
+        let net = row["subnet"].as_str().unwrap_or_default().to_string();
         out.entry(zone).or_default().push(net);
     }
     out
@@ -103,32 +99,54 @@ pub(crate) fn subnet_row(sn: &Value) -> Value {
     })
 }
 
-// What: subnets, reservations, leases from Kea.
-// Why: read live; nothing is kept in the ui.
-// From: Issue #1683 | PR #1980
-pub(crate) async fn kea_view(
-    api: &crate::shared::kea::Api,
-) -> (Vec<Value>, Vec<Value>, Vec<Value>) {
-    let (mut subnets, mut reservations, mut leases) = (Vec::new(), Vec::new(), Vec::new());
-    if let Ok(cfg) = api.config().await {
-        for sn in cfg["Dhcp4"]["subnet4"].as_array().into_iter().flatten() {
-            for r in sn["reservations"].as_array().into_iter().flatten() {
-                reservations.push(json!({
-                    "subnet_id": sn["id"], "mac": r["hw-address"],
-                    "ip": r["ip-address"], "hostname": r["hostname"],
-                }));
-            }
-            subnets.push(subnet_row(sn));
-        }
+// What: the live Kea config; none if mode is not Kea.
+// Why: one Kea read for every subnet reader.
+// From: Issue #1683 | PR #2020
+async fn kea_config(s: &Settings) -> Result<Option<Value>, String> {
+    if DhcpMode::from_settings(s)? != DhcpMode::Kea {
+        return Ok(None);
     }
-    for l in api.leases().await.unwrap_or_default() {
+    Ok(Some(kea_api(s)?.config().await?))
+}
+
+// What: subnet rows and reservations of a Kea config.
+// Why: the page, REST, CLI and DNS page share them.
+// From: Issue #1683 | PR #1980
+fn kea_subnets(cfg: &Value) -> (Vec<Value>, Vec<Value>) {
+    let (mut subnets, mut reservations) = (Vec::new(), Vec::new());
+    for sn in cfg["Dhcp4"]["subnet4"].as_array().into_iter().flatten() {
+        for r in sn["reservations"].as_array().into_iter().flatten() {
+            reservations.push(json!({
+                "subnet_id": sn["id"], "mac": r["hw-address"],
+                "ip": r["ip-address"], "hostname": r["hostname"],
+            }));
+        }
+        subnets.push(subnet_row(sn));
+    }
+    (subnets, reservations)
+}
+
+// What: subnets, reservations, leases from Kea.
+// Why: one reader for the page, REST and CLI.
+// From: Issue #1683 | PR #2020
+pub(crate) async fn kea_state(s: &Settings) -> Result<Option<Value>, String> {
+    let Some(cfg) = kea_config(s).await? else {
+        return Ok(None);
+    };
+    let (subnets, reservations) = kea_subnets(&cfg);
+    let mut leases = Vec::new();
+    for l in kea_api(s)?.leases().await? {
         let ends = l["cltt"].as_u64().unwrap_or(0) + l["valid-lft"].as_u64().unwrap_or(0);
         leases.push(json!({
             "ip": l["ip-address"], "mac": l["hw-address"], "hostname": l["hostname"],
             "subnet_id": l["subnet-id"], "expires": ends.to_string(),
         }));
     }
-    (subnets, reservations, leases)
+    Ok(Some(json!({
+        "subnets": subnets,
+        "reservations": reservations,
+        "leases": leases,
+    })))
 }
 
 // What: snapshot store of the Kea config.

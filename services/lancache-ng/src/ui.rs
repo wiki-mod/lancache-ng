@@ -22,7 +22,7 @@
 
 use crate::config::{self, Settings, process_env};
 use crate::dhcp::{
-    dhcp_probe_cli, dhcp_stays_off, dnsmasq_fields, domain_subnets, kea_api, kea_store, kea_view,
+    dhcp_probe_cli, dhcp_stays_off, dnsmasq_fields, domain_subnets, kea_api, kea_state, kea_store,
     main_subnet,
 };
 use crate::dns::{
@@ -1299,16 +1299,21 @@ pub(crate) async fn dhcp(State(app): Shared, Extension(csrf): Extension<Csrf>) -
     ctx.insert("dnsmasq_managed_codes", &codes);
     ctx.insert("option_code_min", &1);
     ctx.insert("option_code_max", &(u8::MAX - 1));
-    let (mut subnets, mut reservations, mut leases) = (Vec::new(), Vec::new(), Vec::new());
-    if kind == DhcpMode::Kea {
-        match kea_api(&s) {
-            Ok(api) => (subnets, reservations, leases) = kea_view(&api).await,
-            Err(e) => ctx.insert("hint", &e),
+    // What: a Kea error is logged and kept as hint.
+    // Why: empty lists alone hid a dead Kea.
+    // From: Issue #1683 | PR #2020
+    let state = match kea_state(&s).await {
+        Ok(v) => v.unwrap_or_else(|| json!({})),
+        Err(e) => {
+            eprintln!("ui: dhcp page: {e}");
+            ctx.insert("hint", &e);
+            json!({})
         }
+    };
+    for key in ["subnets", "reservations", "leases"] {
+        let rows = state[key].as_array().cloned().unwrap_or_default();
+        ctx.insert(key, &rows);
     }
-    ctx.insert("subnets", &subnets);
-    ctx.insert("reservations", &reservations);
-    ctx.insert("leases", &leases);
     let store = kea_store(&s)?;
     ctx.insert("kea_snapshots", &snapshot_rows(&store)?);
     app.page("dhcp.html", ctx, &csrf)
@@ -2436,11 +2441,31 @@ pub(crate) fn cache_room(s: &Settings, form: &Fields, cached: u64) -> Result<(),
 // Why: REST diagnosis on the reader of ui and CLI.
 // From: Issue #1683 | PR #2020
 pub(crate) async fn alarms(State(app): Shared) -> Response {
-    match crate::watchdog::report(&app.settings()) {
+    let report = crate::watchdog::report(&app.settings());
+    json_reply(report, "no alarm report written yet")
+}
+
+// What: Kea subnets, reservations and leases as JSON.
+// Why: REST diagnosis on the reader of page and CLI.
+// From: Issue #1683 | PR #2020
+pub(crate) async fn dhcp_state(State(app): Shared) -> Response {
+    json_reply(kea_state(&app.settings()).await, NOT_KEA)
+}
+
+// What: the text when the DHCP mode is not Kea.
+// Why: REST and CLI say the same.
+// From: Issue #1683 | PR #2020
+const NOT_KEA: &str = "DHCP mode is not kea";
+
+// What: 200 value, 503 not available, 500 error.
+// Why: every REST reader answers the same way.
+// From: Issue #1683 | PR #2020
+fn json_reply(r: Result<Option<Value>, String>, none: &str) -> Response {
+    match r {
         Ok(Some(v)) => axum::Json(v).into_response(),
         Ok(None) => (
             StatusCode::SERVICE_UNAVAILABLE,
-            axum::Json(json!({"error": "no alarm report written yet"})),
+            axum::Json(json!({"error": none})),
         )
             .into_response(),
         Err(e) => (
@@ -2809,6 +2834,17 @@ pub(crate) async fn command(s: &Settings, args: &[String]) -> Option<Result<(), 
             _ => Err("usage: zone-rollback <zone> <snapshot-id>".into()),
         }),
         Some("healthcheck") => Some(healthcheck(s).await),
+        // What: Kea subnets, reservations, leases as JSON.
+        // Why: same reader as the DHCP page and REST.
+        // From: Issue #1683 | PR #2020
+        Some("dhcp-state") => Some(match kea_state(s).await {
+            Ok(Some(v)) => {
+                println!("{v}");
+                Ok(())
+            }
+            Ok(None) => Err(NOT_KEA.into()),
+            Err(e) => Err(e),
+        }),
         // What: one DHCP probe as JSON on stdout.
         // Why: setup.sh and the DHCP page run it.
         // From: Issue #1683 | PR #1985
@@ -2824,13 +2860,14 @@ pub(crate) async fn command(s: &Settings, args: &[String]) -> Option<Result<(), 
 // What: every command of the ui role; none = the server.
 // Why: the help names the same set as the match.
 // From: Issue #1683 | PR #2020
-const COMMANDS: [&str; 8] = [
+const COMMANDS: [&str; 9] = [
     "hash-password",
     "encode-password-hash",
     "zone-snapshots",
     "registration-token",
     "zone-rollback",
     "healthcheck",
+    "dhcp-state",
     DHCP_PROBE_CMD,
     "(none: web server)",
 ];
@@ -2875,6 +2912,7 @@ pub(crate) fn router(app: Arc<App>) -> Result<Router, String> {
         .route(&p("UI_ROUTE_STATS_GRAPH")?, get(graph))
         .route(&p("UI_ROUTE_CONTAINER_STATUS")?, get(status))
         .route(&p("UI_ROUTE_ALARMS")?, get(alarms))
+        .route(&p("UI_ROUTE_DHCP_STATE")?, get(dhcp_state))
         .route(&p("UI_ROUTE_ZONE_OVERVIEW")?, get(zone_overview))
         .route(&p("UI_ROUTE_DESIRED_STATE")?, post(container_state))
         .route(&p("UI_ROUTE_RESTART_UI")?, post(restart_ui))
