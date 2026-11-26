@@ -4558,13 +4558,22 @@ lancache_stack_pointer_channel_for() {
     printf '%s\n' "${target:-$channel}"
 }
 
+# What: "channel branch" per SOT channel, prefix removed
+# Why: one place cuts refs/heads/ off the source_ref
+# From: Issue #1683 | PR #2017
+lancache_channel_source_branches() {
+    local sources
+    sources=$(lancache_release_rows source) || exit $?
+    awk '{ sub(/^refs\/heads\//, "", $2); print $1, $2 }' <<< "$sources"
+}
+
 # What: the source branches of the SOT channels
 # Why: only these branches does an update move
 # From: Issue #1683 | PR #1858
 lancache_channel_branches() {
-    local sources
-    sources=$(lancache_release_rows source) || exit $?
-    awk '{ sub(/^refs\/heads\//, "", $2); print $2 }' <<< "$sources"
+    local pairs
+    pairs=$(lancache_channel_source_branches) || exit $?
+    awk '{ print $2 }' <<< "$pairs"
 }
 
 # What: true if $1 is the branch of a channel
@@ -4580,17 +4589,17 @@ is_channel_branch() {
 # Why: a text shows the SOT pairs; it names no branch
 # From: Issue #1683 | PR #2017
 lancache_channel_branch_words() {
-    local sources
-    sources=$(lancache_release_rows source) || exit $?
-    awk '{ sub(/^refs\/heads\//, "", $2); printf "%s%s (%s)", (NR > 1 ? " or " : ""), $2, $1 }
-        END { print "" }' <<< "$sources"
+    local pairs
+    pairs=$(lancache_channel_source_branches) || exit $?
+    awk '{ printf "%s%s (%s)", (NR > 1 ? " or " : ""), $2, $1 }
+        END { print "" }' <<< "$pairs"
 }
 
 # What: git branch, tag or commit of a channel's code
 # Why: AG-REL-009: compose and images from one ref
 # From: Issue #1683 | PR #1858
 lancache_channel_code_ref() {
-    local channel="$1" tag="$2" pinned sources ref
+    local channel="$1" tag="$2" pinned pairs ref
     pinned=$(lancache_release_rows pinned) || exit $?
     if [[ "$channel" = "$pinned" ]]; then
         # What: sha-<commit> is a commit, vX.Y.Z a tag
@@ -4600,10 +4609,10 @@ lancache_channel_code_ref() {
         return 0
     fi
     channel=$(lancache_stack_pointer_channel_for "$channel") || exit $?
-    sources=$(lancache_release_rows source) || exit $?
-    ref=$(awk -v c="$channel" '$1 == c { print $2; exit }' <<< "$sources")
+    pairs=$(lancache_channel_source_branches) || exit $?
+    ref=$(awk -v c="$channel" '$1 == c { print $2; exit }' <<< "$pairs")
     [[ -n "$ref" ]] || die "${LANCACHE_SOT} defines no release.channels.${channel}.source_ref."
-    printf '%s\n' "${ref#refs/heads/}"
+    printf '%s\n' "$ref"
 }
 
 # What: ref variable and slug of each first-party image
