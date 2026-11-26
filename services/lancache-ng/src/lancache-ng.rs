@@ -5342,13 +5342,20 @@ mod shared {
             mode: u32,
             owner: Owner,
         ) -> io::Result<bool> {
-            let same = read_if_present(path)?.is_some_and(|old| old == contents);
+            let same = same_content(path, contents)?;
             if same {
                 set_path_owner(path, owner, Some(mode))?;
             } else {
                 write(path, contents, mode, Place::Replace, owner)?;
             }
             Ok(!same)
+        }
+
+        // What: true when the file holds these bytes.
+        // Why: write and plan judge a change the same way.
+        // From: Issue #1683 | PR #2020
+        pub fn same_content(path: &Path, contents: &[u8]) -> io::Result<bool> {
+            Ok(read_if_present(path)?.is_some_and(|old| old == contents))
         }
 
         // What: removes a file; a missing one is fine.
@@ -7136,6 +7143,18 @@ mod shared {
                     (r, Body::Json(json!({"state": state})))
                 }
                 ["ui", "restart"] => (s.text("UI_ROUTE_RESTART_UI")?, Body::Form(vec![])),
+                // What: dry run: render, compare, no write.
+                // Why: a read; it needs no running ui.
+                // From: Issue #1683 | PR #2020
+                ["plan"] => {
+                    let v = crate::ui::render_plan(&s).await?;
+                    println!("{v}");
+                    return match v["errors"].as_array().map(Vec::len) {
+                        Some(0) => Ok(()),
+                        _ => Err("plan: the render has errors".into()),
+                    };
+                }
+                ["apply"] => (s.text("UI_ROUTE_APPLY")?, Body::Form(vec![])),
                 ["service", c, p, a @ ("restart" | "reload")] => {
                     let r = s
                         .text("UI_ROUTE_SERVICE_ACTION")?
@@ -7145,8 +7164,8 @@ mod shared {
                     (r, Body::Form(vec![]))
                 }
                 _ => {
-                    return Err("commands: status | container <service> start|stop | \
-                                ui restart | \
+                    return Err("commands: status | plan | apply | \
+                                container <service> start|stop | ui restart | \
                                 service <container> <program> restart|reload"
                         .into());
                 }
@@ -10987,12 +11006,39 @@ end
                 let changed =
                     crate::shared::fs::write_if_changed(&f.path, f.body.as_bytes(), mode, owner);
                 if changed.map_err(|e| format!("{}: {e}", f.path.display()))? && wake {
-                    out.push(crate::config::Change {
-                        key: f.path.display().to_string(),
-                        owner: f.owner.clone(),
-                        effect: crate::config::Effect::Reload,
-                    });
+                    out.push(change_of(f));
                 }
+            }
+            Ok(out)
+        }
+
+        // What: the change a rewritten file causes.
+        // Why: write and plan wake the owner the same way.
+        // From: Issue #1683 | PR #2020
+        pub fn change_of(f: &File) -> crate::config::Change {
+            crate::config::Change {
+                key: f.path.display().to_string(),
+                owner: f.owner.clone(),
+                effect: crate::config::Effect::Reload,
+            }
+        }
+
+        // What: per file: path, owner and new/changed/same.
+        // Why: a dry run shows what an apply would touch.
+        // From: Issue #1683 | PR #2020
+        pub fn plan(files: &[File]) -> Result<Vec<(&File, &'static str)>, String> {
+            let mut out = Vec::with_capacity(files.len());
+            for f in files {
+                let state = if !f.path.exists() {
+                    "new"
+                } else if crate::shared::fs::same_content(&f.path, f.body.as_bytes())
+                    .map_err(|e| format!("{}: {e}", f.path.display()))?
+                {
+                    "same"
+                } else {
+                    "changed"
+                };
+                out.push((f, state));
             }
             Ok(out)
         }
@@ -12901,13 +12947,7 @@ mod ui {
         let before = config::read_raw(&path)?;
         config::store(&path, &old, &updates)?;
         let new = Settings::load(&process_env, Some(&path))?;
-        // What: a value that cannot render is not kept.
-        // Why: a bad value must not reach the files.
-        // From: Issue #1683 | PR #1980
-        let none = crate::shared::recursor_conf::Chain::default();
-        let check = render::secrets(&new)
-            .and_then(|sec| render::all(&new, &sec, &none).map_err(|e| e.join("; ")));
-        if let Err(e) = check {
+        if let Err(e) = render_check(&new) {
             // What: refused save is logged, not only shown.
             // Why: the error must leave trace in the logs.
             // From: Issue #1683 | PR #1991
@@ -12923,14 +12963,69 @@ mod ui {
                 .map_err(|w| format!("{e}; old values not restored: {w}"))?;
             return Err(e);
         }
-        for line in apply_all(app, &old, &new, true).await? {
+        for line in adopt(app, &old, new).await? {
             eprintln!("ui: apply: {line}");
         }
+        Ok(())
+    }
+
+    // What: a value that cannot render is not kept.
+    // Why: a bad value must not reach the files.
+    // From: Issue #1683 | PR #1980
+    pub(crate) fn render_check(new: &Settings) -> Result<(), String> {
+        let none = crate::shared::recursor_conf::Chain::default();
+        let sec = render::secrets(new)?;
+        render::all(new, &sec, &none).map_err(|e| e.join("; "))?;
+        Ok(())
+    }
+
+    // What: apply new settings, then make them current.
+    // Why: save and apply-now end the same way.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn adopt(
+        app: &App,
+        old: &Settings,
+        new: Settings,
+    ) -> Result<Vec<String>, String> {
+        let lines = apply_all(app, old, &new, true).await?;
         match app.settings.write() {
             Ok(mut s) => *s = new,
             Err(poisoned) => *poisoned.into_inner() = new,
         }
-        Ok(())
+        Ok(lines)
+    }
+
+    // What: read the settings file again and apply it.
+    // Why: a hand edit or a lost file takes effect.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn apply_now(app: &App) -> Result<Vec<String>, String> {
+        let old = app.settings();
+        let new = match app.saved.clone() {
+            Some(path) => Settings::load(&process_env, Some(&path))?,
+            None => old.clone(),
+        };
+        render_check(&new)?;
+        adopt(app, &old, new).await
+    }
+
+    // What: GET the apply plan: files, owners, errors.
+    // Why: REST dry run on the reader of the CLI.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn apply_plan_api(State(app): Shared) -> Response {
+        json_reply(render_plan(&app.settings()).await.map(Some), "")
+    }
+
+    // What: POST apply now; answers the apply report.
+    // Why: CLI and REST apply without a restart.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn apply_api(
+        State(app): Shared,
+        Extension(csrf): Extension<Csrf>,
+        headers: HeaderMap,
+    ) -> Page {
+        csrf.check_header(&headers)?;
+        let lines = apply_now(&app).await.map_err(bad_request)?;
+        Ok(axum::Json(json!({"report": lines})).into_response())
     }
 
     // What: end a form: redirect back or show error.
@@ -14199,8 +14294,33 @@ mod ui {
         s: &Settings,
         files: &[render::File],
     ) -> Result<Vec<PathBuf>, String> {
+        let stale = stale_rendered(s, files)?;
+        for path in &stale {
+            std::fs::remove_file(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        }
+        Ok(stale)
+    }
+
+    // What: a proxy reload, tagged with its reason.
+    // Why: prune, plan and new certs ask the same.
+    // From: Issue #1683 | PR #2020
+    pub(crate) fn proxy_reload(s: &Settings, why: &str) -> Result<config::Change, String> {
+        Ok(config::Change {
+            key: why.into(),
+            owner: s.text("PROXY_SERVICE")?,
+            effect: config::Effect::Reload,
+        })
+    }
+
+    // What: proxy render files this render no longer has.
+    // Why: prune removes them; the plan lists them.
+    // From: Issue #1683 | PR #2020
+    pub(crate) fn stale_rendered(
+        s: &Settings,
+        files: &[render::File],
+    ) -> Result<Vec<PathBuf>, String> {
         let conf = PathBuf::from(s.text("NGINX_CONF_DIR")?);
-        let mut removed = Vec::new();
+        let mut stale = Vec::new();
         for sub in ["conf.d", "stream.d"] {
             let dir = conf.join(sub);
             let kept: std::collections::BTreeSet<&std::path::Path> = files
@@ -14218,12 +14338,11 @@ mod ui {
                 .map_err(|e| format!("{}: {e}", dir.display()))?;
             for path in entries {
                 if path.is_file() && !kept.contains(path.as_path()) {
-                    std::fs::remove_file(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-                    removed.push(path);
+                    stale.push(path);
                 }
             }
         }
-        Ok(removed)
+        Ok(stale)
     }
 
     // What: container name per plan owner; others drop out.
@@ -14260,6 +14379,39 @@ mod ui {
         Ok((files, written))
     }
 
+    // What: what an apply would write and whom it wakes.
+    // Why: page, REST and CLI show one dry run.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn render_plan(s: &Settings) -> Result<Value, String> {
+        let sec = render::secrets(s)?;
+        let chain = dnssec_chain(s).await;
+        let files = match render::all(s, &sec, &chain) {
+            Ok(f) => f,
+            Err(errors) => return Ok(json!({"errors": errors})),
+        };
+        let rows = render::plan(&files)?;
+        let mut changes = Vec::new();
+        let mut list = Vec::new();
+        for (f, state) in &rows {
+            // What: a new file wakes nobody, as in write.
+            // Why: owners read it at their start.
+            // From: Issue #1683 | PR #2020
+            if *state == "changed" {
+                changes.push(render::change_of(f));
+            }
+            list.push(json!({"path": f.path, "owner": f.owner, "state": state}));
+        }
+        let stale = stale_rendered(s, &files)?;
+        if !stale.is_empty() {
+            changes.push(proxy_reload(s, "proxy-prune")?);
+        }
+        let owners: BTreeMap<String, String> = apply::plan(&changes)
+            .into_iter()
+            .map(|(o, e)| (o, format!("{e:?}").to_lowercase()))
+            .collect();
+        Ok(json!({"files": list, "stale": stale, "owners": owners, "errors": []}))
+    }
+
     // What: render, write and wake the owners.
     // Why: only owners with changes are touched.
     // From: Issue #1683 | PR #1980
@@ -14281,11 +14433,7 @@ mod ui {
             for path in &removed {
                 eprintln!("ui: removed stale {}", path.display());
             }
-            changes.push(config::Change {
-                key: "proxy-prune".into(),
-                owner: new.text("PROXY_SERVICE")?,
-                effect: config::Effect::Reload,
-            });
+            changes.push(proxy_reload(new, "proxy-prune")?);
         }
         // What: PowerDNS steps report, not abort.
         // Why: pdns starts only after the restart below.
@@ -14438,11 +14586,7 @@ mod ui {
             Ok(0) => {}
             Ok(n) => {
                 report.push(format!("certs: {n} issued"));
-                let mut plan = apply::plan(&[config::Change {
-                    key: "certs".into(),
-                    owner: new.text("PROXY_SERVICE")?,
-                    effect: config::Effect::Reload,
-                }]);
+                let mut plan = apply::plan(&[proxy_reload(new, "certs")?]);
                 let (names, _) = plan_containers(app, new, &mut plan).await;
                 let lookup = |owner: &str| names.get(owner).cloned().unwrap_or_default();
                 for (owner, result) in
@@ -15202,6 +15346,8 @@ mod ui {
             .route(&p("UI_ROUTE_PROXY_LOG")?, get(proxy_log_api))
             .route(&p("UI_ROUTE_SECRETS")?, get(secrets_api))
             .route(&p("UI_ROUTE_CACHE")?, get(cache_api))
+            .route(&p("UI_ROUTE_APPLY_PLAN")?, get(apply_plan_api))
+            .route(&p("UI_ROUTE_APPLY")?, post(apply_api))
             .route(&p("UI_ROUTE_ZONE_OVERVIEW")?, get(zone_overview))
             .route(&p("UI_ROUTE_DESIRED_STATE")?, post(container_state))
             .route(&p("UI_ROUTE_RESTART_UI")?, post(restart_ui))

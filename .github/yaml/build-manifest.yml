@@ -809,6 +809,8 @@ runtime:
     - UI_ROUTE_PROXY_LOG=/api/proxy-log
     - UI_ROUTE_SECRETS=/api/secrets
     - UI_ROUTE_CACHE=/api/cache
+    - UI_ROUTE_APPLY_PLAN=/api/apply/plan
+    - UI_ROUTE_APPLY=/api/apply
     - UI_ROUTE_DESIRED_STATE=/api/container/{service}
     - UI_ROUTE_RESTART_UI=/api/restart-ui
     - UI_ROUTE_SETUP_SAVE=/setup/save
