@@ -811,6 +811,7 @@ runtime:
     - UI_ROUTE_PROXY_STATUS=/api/proxy-status
     - UI_ROUTE_NTP=/api/ntp
     - UI_ROUTE_NTP_TRACKING=/api/ntp/tracking
+    - UI_ROUTE_DNS_RECORDS=/api/dns/records
     - UI_ROUTE_PROXY_LOG=/api/proxy-log
     - UI_ROUTE_SECRETS=/api/secrets
     - UI_ROUTE_CACHE=/api/cache

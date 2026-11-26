@@ -3921,6 +3921,17 @@ mod dns {
                 }
                 Ok(())
             }
+            // What: LAN domains, records, PTRs as JSON.
+            // Why: a read; it needs no running ui.
+            // From: Issue #1683 | PR #2020
+            Some("records") => {
+                let v = lan_view(&Settings::from_process()?).await?;
+                println!("{v}");
+                match v["error"].as_str() {
+                    Some(e) => Err(format!("records: {e}")),
+                    None => Ok(()),
+                }
+            }
             // What: container probe: any reply counts.
             // Why: a dead upstream must not restart dns.
             // From: Issue #1683 | PR #2020
@@ -4010,10 +4021,11 @@ mod dns {
     // What: every command of the dns role.
     // Why: the help names the same set as the match.
     // From: Issue #1683 | PR #2020
-    const COMMANDS: [&str; 12] = [
+    const COMMANDS: [&str; 13] = [
         "daemon",
         "follow-once",
         "healthcheck",
+        "records",
         "sync-check",
         "do",
         "secondary",
@@ -4329,6 +4341,61 @@ mod dns {
         api.restore(zone, &rows).await?;
         snapshot(s, &api, zone).await?;
         peer::flush_zone(s, zone).await
+    }
+
+    // What: LAN domains with records, subnets, PTRs.
+    // Why: page, REST and CLI read one listing.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn lan_view(s: &Settings) -> Result<Value, String> {
+        let lans = crate::shared::dns::lan_domains(s)?;
+        let lan = crate::shared::dns::lan_zone(s)?;
+        let mut records: BTreeMap<String, Vec<Value>> = BTreeMap::new();
+        let (mut ptr, mut error) = (Vec::new(), None);
+        match peer::own_api(s) {
+            // What: other zones only if main one answers.
+            // Why: unreachable API would time out 20 times.
+            // From: Issue #1683 | PR #1980
+            Ok(api) => match api.rrsets(&lan).await {
+                Ok(rows) => {
+                    records.insert(lan.clone(), own_rrsets(&rows));
+                    for zone in lans.iter().skip(1) {
+                        match api.rrsets(zone).await {
+                            Ok(rows) => {
+                                records.insert(zone.clone(), own_rrsets(&rows));
+                            }
+                            Err(e) => error = Some(e),
+                        }
+                    }
+                    ptr = ptr_rows(s, &api).await;
+                }
+                Err(e) => error = Some(e),
+            },
+            Err(e) => error = Some(e),
+        }
+        let missing = missing_ptrs(s, &mut records, &ptr);
+        let subnets = crate::dhcp::domain_subnets(s).await;
+        // What: a domain under a real Internet ending.
+        // Why: in the LAN it hides its own Internet names.
+        // From: Issue #1683 | PR #2019
+        let psl = render::psl(s).ok();
+        let rows: Vec<Value> = lans
+            .iter()
+            .enumerate()
+            .map(|(i, zone)| {
+                let own = records.get(zone).cloned().unwrap_or_default();
+                let public = psl
+                    .as_ref()
+                    .is_some_and(|p| p.is_tld(crate::shared::dns::ending(zone)));
+                json!({
+                    "name": zone.trim_end_matches('.'),
+                    "main": i == 0,
+                    "records": own,
+                    "subnets": subnets.get(zone).cloned().unwrap_or_default(),
+                    "public": public,
+                })
+            })
+            .collect();
+        Ok(json!({"domains": rows, "ptr_zones": ptr, "missing_ptrs": missing, "error": error}))
     }
 
     // What: PTR rows of each private reverse zone.
@@ -13458,15 +13525,14 @@ end
 mod ui {
     use crate::config::{self, Settings, process_env};
     use crate::dhcp::{
-        dhcp_probe_cli, dhcp_stays_off, dnsmasq_fields, domain_subnets, kea_snapshots, kea_state,
-        kea_store, main_subnet,
+        dhcp_probe_cli, dhcp_stays_off, dnsmasq_fields, kea_snapshots, kea_state, kea_store,
+        main_subnet,
     };
     use crate::dns::{
         answers_aa, dnssec_chain, drop_old_zones, drop_peer_records, ensure_zones,
-        flush_on_transfer, hosted_now, lan_domain_action, main_domain_fields, missing_ptrs,
-        ns_change, own_rrsets, peer_kit, ptr, ptr_rows, record, rollback, rotate_tsig,
-        secondary_health, secondary_watch, snapshot_list, snapshot_zones, store_secondaries,
-        valid_peer_name, zone_snapshots,
+        flush_on_transfer, hosted_now, lan_domain_action, main_domain_fields, ns_change, peer_kit,
+        ptr, record, rollback, rotate_tsig, secondary_health, secondary_watch, snapshot_list,
+        snapshot_zones, store_secondaries, valid_peer_name, zone_snapshots,
     };
     use crate::shared::dhcp::Mode as DhcpMode;
     use crate::shared::peer;
@@ -14367,60 +14433,17 @@ mod ui {
     // From: Issue #1683 | PR #1980
     pub(crate) async fn domains(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
         let s = app.settings();
-        let lans = crate::shared::dns::lan_domains(&s)?;
         let lan = crate::shared::dns::lan_zone(&s)?;
         let mut ctx = Context::new();
         ctx.insert("dns_domains", &crate::shared::cdn::parse_rows(&s)?);
         ctx.insert("lan_zone", lan.trim_end_matches('.'));
-        let mut records: BTreeMap<String, Vec<Value>> = BTreeMap::new();
-        let mut ptr = Vec::new();
-        match peer::own_api(&s) {
-            // What: other zones only if main one answers.
-            // Why: unreachable API would time out 20 times.
-            // From: Issue #1683 | PR #1980
-            Ok(api) => match api.rrsets(&lan).await {
-                Ok(rows) => {
-                    records.insert(lan.clone(), own_rrsets(&rows));
-                    for zone in lans.iter().skip(1) {
-                        match api.rrsets(zone).await {
-                            Ok(rows) => {
-                                records.insert(zone.clone(), own_rrsets(&rows));
-                            }
-                            Err(e) => ctx.insert("domain_error_message", &e),
-                        }
-                    }
-                    ptr = ptr_rows(&s, &api).await;
-                }
-                Err(e) => ctx.insert("domain_error_message", &e),
-            },
-            Err(e) => ctx.insert("domain_error_message", &e),
+        let view = crate::dns::lan_view(&s).await?;
+        if let Some(e) = view["error"].as_str() {
+            ctx.insert("domain_error_message", e);
         }
-        let missing = missing_ptrs(&s, &mut records, &ptr);
-        ctx.insert("missing_ptrs", &missing);
-        let subnets = domain_subnets(&s).await;
-        // What: a domain under a real Internet ending.
-        // Why: in the LAN it hides its own Internet names.
-        // From: Issue #1683 | PR #2019
-        let psl = render::psl(&s).ok();
-        let rows: Vec<Value> = lans
-            .iter()
-            .enumerate()
-            .map(|(i, zone)| {
-                let own = records.get(zone).cloned().unwrap_or_default();
-                let public = psl
-                    .as_ref()
-                    .is_some_and(|p| p.is_tld(crate::shared::dns::ending(zone)));
-                json!({
-                    "name": zone.trim_end_matches('.'),
-                    "main": i == 0,
-                    "records": own,
-                    "subnets": subnets.get(zone).cloned().unwrap_or_default(),
-                    "public": public,
-                })
-            })
-            .collect();
-        ctx.insert("lan_domains", &rows);
-        ctx.insert("ptr_zones", &ptr);
+        ctx.insert("missing_ptrs", &view["missing_ptrs"]);
+        ctx.insert("lan_domains", &view["domains"]);
+        ctx.insert("ptr_zones", &view["ptr_zones"]);
         let groups: Vec<Value> = snapshot_list(&s)?
             .into_iter()
             .filter(|(_, rows)| !rows.is_empty())
@@ -15147,6 +15170,13 @@ mod ui {
             return Err(format!("{} exit {code}: {}", cmd.join(" "), text.trim()));
         }
         crate::shared::ntp::tracking(&text)
+    }
+
+    // What: GET UI_ROUTE_DNS_RECORDS: LAN records.
+    // Why: REST reads what page and CLI read.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn dns_records_api(State(app): Shared) -> Page {
+        Ok(axum::Json(crate::dns::lan_view(&app.settings()).await?).into_response())
     }
 
     // What: GET UI_ROUTE_NTP_TRACKING: chrony state.
@@ -16846,6 +16876,7 @@ mod ui {
             route("UI_ROUTE_SETTINGS_SCHEMA", Get, Api, settings_schema_api),
             route("UI_ROUTE_DNS_FLUSH", Post, Api, dns_flush_api),
             route("UI_ROUTE_DNSSEC", Get, Api, dnssec_api),
+            route("UI_ROUTE_DNS_RECORDS", Get, Api, dns_records_api),
             route("UI_ROUTE_DNS_API_CHECK", Get, Api, dns_api_check),
             route("UI_ROUTE_DNS_STATS", Get, Api, dns_stats_api),
             route("UI_ROUTE_DNS_QUERY", Get, Api, dns_query_api),
