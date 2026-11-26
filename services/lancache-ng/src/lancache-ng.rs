@@ -3278,7 +3278,17 @@ mod dhcp {
             Some("state") => kea_state(&s).await?.ok_or(NOT_KEA)?,
             Some("kea-snapshots") => kea_snapshots(&s)?,
             Some("stats") => json!(kea_stats(&s).await?.ok_or(NOT_KEA)?),
-            _ => return Err("commands: state kea-snapshots stats".into()),
+            // What: rollback calls Kea itself, not the ui.
+            // Why: a repair must work while the ui is down.
+            // From: Issue #1683 | PR #2020
+            Some("kea-rollback") => match &args[1..] {
+                [id] => {
+                    kea_rollback(&s, id).await?;
+                    json!({"restored": "kea", "snapshot": id})
+                }
+                _ => return Err("usage: kea-rollback <snapshot-id>".into()),
+            },
+            _ => return Err("commands: state kea-snapshots stats kea-rollback".into()),
         };
         println!("{v}");
         Ok(())
@@ -3289,6 +3299,14 @@ mod dhcp {
     // From: Issue #1683 | PR #2020
     pub(crate) fn kea_snapshots(s: &Settings) -> Result<Value, String> {
         Ok(json!({"snapshots": kea_store(s)?.rows()?}))
+    }
+
+    // What: put the Kea config back to a snapshot.
+    // Why: page and CLI repair Kea the same way.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn kea_rollback(s: &Settings, id: &str) -> Result<(), String> {
+        let cfg: Value = kea_store(s)?.read(id)?;
+        kea_api(s)?.set_config(cfg).await
     }
 
     // What: change Kea subnets with a closure.
@@ -3460,10 +3478,7 @@ mod dhcp {
                 .await
             }
             "UI_ROUTE_LEASE_RELEASE" => kea_api(s)?.release(&get("ip")).await,
-            "UI_ROUTE_KEA_ROLLBACK" => {
-                let cfg: Value = kea_store(s)?.read(&get("snapshot_id"))?;
-                kea_api(s)?.set_config(cfg).await
-            }
+            "UI_ROUTE_KEA_ROLLBACK" => kea_rollback(s, &get("snapshot_id")).await,
             _ => Err(tr("err_unknown_dhcp_action").replace("{op}", op)),
         }
     }
