@@ -2299,7 +2299,7 @@ env_key_fill() {
 # Why: add keeps a rollback's old compose working
 # From: Issue #1683 | PR #1912
 env_key_or_old_name() {
-    local env_file="$1" mode="$2" pair value
+    local env_file="$1" mode="$2" pair value file
     for pair in IP_HTTP:IP_STANDARD IP_HTTPS:IP_SSL HTTPS_ENABLED:SSL_ENABLED \
         PDNS_DIR:PDNS_STANDARD_DIR; do
         # What: "read KEY": KEY, else its old name; no write
@@ -2312,8 +2312,14 @@ env_key_or_old_name() {
             printf '%s\n' "$value"
             return 0
         fi
-        env_key_fill "${pair%%:*}" "$env_file" absent "" "${pair#*:}"
-        [[ "$mode" = add ]] || remove_env_key "${pair#*:}" "$env_file"
+        # What: <env>.local is renamed in place as well
+        # Why: compose lets the later file win
+        # From: Issue #1683 | PR #2017
+        for file in "$env_file" "$env_file.local"; do
+            [[ "$file" = "$env_file" || -f "$file" ]] || continue
+            env_key_fill "${pair%%:*}" "$file" absent "" "${pair#*:}"
+            [[ "$mode" = add ]] || remove_env_key "${pair#*:}" "$file"
+        done
     done
 }
 
@@ -7492,6 +7498,10 @@ perform_stack_update_flow() {
         if [[ "$migrated" = 0 ]]; then
             pending=$(update_pending_reasons "$install_dir" "$plan_action") || exit $?
             if [[ -z "$pending" ]]; then
+                # What: old key names leave on a no-op
+                # Why: no code move or rollback needs them
+                # From: Issue #1683 | PR #1912
+                env_key_or_old_name "$_UPDATE_ENV_FILE" move
                 print_ok "Nothing to update: code, image pins and containers are current; the stack keeps running."
                 return 0
             fi
