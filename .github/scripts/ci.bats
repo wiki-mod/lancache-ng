@@ -130,6 +130,7 @@ _ci_check_proxy_nginx_policy() {
         out="" hz_in=0
         # What: per block "body|allows|deny|alias|return".
         # Why: deny is 1 for deny all; with no allow after.
+        # From: Issue #1683 | PR #2012
         while IFS= read -r hz_raw || [ -n "${hz_raw}" ]; do
             read -r -a hz_fld <<< "${hz_raw}"
             if [ "${hz_fld[0]-}" = location ] && [ "${hz_fld[1]-}" = "=" ] && [ "${hz_fld[2]-}" = "${hp}" ] && [ "${hz_fld[3]-}" = "{" ]; then
@@ -173,6 +174,7 @@ _ci_check_proxy_nginx_policy() {
         out="" la_in=0
         # What: rows "loc|T|target", "loc|D|" and "loc|S|".
         # Why: each location line opens a new block.
+        # From: Issue #1683 | PR #2012
         while IFS= read -r la_raw || [ -n "${la_raw}" ]; do
             read -r -a la_fld <<< "${la_raw}"
             if [ "${la_fld[0]-}" = location ]; then
@@ -249,7 +251,7 @@ _ci_check_proxy_nginx_policy() {
     _ci_file_match "[CI-ERROR-CHECK-0182]" "reason=\"https include not searched\"" "${px}/conf.d/https.conf" "    include     \${NGINX_DIR}/\${NGINX_HTTPS_LISTEN_FILE};" -Fx \
         || { [ "$?" -eq 1 ] || return 2; viol+=("${px#"${repo_root}/"}/conf.d/https.conf: no include of the SOT keys NGINX_DIR and NGINX_HTTPS_LISTEN_FILE"); }
     if _ci_file_match "[CI-ERROR-CHECK-0183]" "reason=\"https listen not searched\"" "${px}/conf.d/https.conf" '^[[:space:]]*listen[[:space:]]'; then
-        viol+=("${px#"${repo_root}/"}/conf.d/https.conf: literal listen; the watchdog renders it")
+        viol+=("${px#"${repo_root}/"}/conf.d/https.conf: literal listen; the ui renders it")
     elif [ "$?" -ne 1 ]; then
         return 2
     fi
@@ -696,9 +698,22 @@ _ci_curl_secret() {
 # Why: the ui owns them; setup.sh calls the same.
 # From: Issue #628 | PR #1980
 _ci_validate_zone_snapshots() {
-    local cid="$1" bin out
-    bin="$(_ci_required_field ui crates list)" || return 2
-    out="$(_ci_capture 0 _ci_bounded_exec "${cid}" "${bin%%$'\n'*}" zone-snapshots)" || return 2
+    local cid="$1" crate rows row out
+    local -a cmd=() run=()
+    crate="$(_ci_required_field ui crates list)" || return 2
+    rows="$(_ci_required_field ui processes list)" || return 2
+    # What: the ui process row that runs the crate binary.
+    # Why: the binary needs its role word; the row has it.
+    # From: Issue #1683 | PR #2020
+    while IFS= read -r row; do
+        IFS=, read -r -a cmd <<< "${row#*=}"
+        if [ "${cmd[0]##*/}" = "${crate%%$'\n'*}" ]; then
+            run=("${cmd[@]}")
+            break
+        fi
+    done <<< "${rows}"
+    [ "${#run[@]}" -gt 0 ] || { ci_log "[CI-ERROR-VALIDATE-0151]" "crate=\"${crate%%$'\n'*}\" reason=\"no ui process row runs the crate binary\""; return 2; }
+    out="$(_ci_capture 0 _ci_bounded_exec "${cid}" "${run[@]}" zone-snapshots)" || return 2
     printf '%s\n' "${out##*$'\n'}"
 }
 
@@ -1810,6 +1825,7 @@ _ci_logging_matrix_canonical() {
     local lead_re='^\|[[:space:]]*' tick_re=$'`[a-z0-9-]+`'
     # What: rows of the first table after the marker line.
     # Why: the first non-table line after a row ends it.
+    # From: Issue #1683 | PR #2012
     while IFS= read -r line || [ -n "${line}" ]; do
         if [[ "${line}" == *'**Logging matrix**'* ]]; then
             marked=1
@@ -2043,6 +2059,7 @@ _ci_dockerfile_stage_missing_args() {
         [[ ! "${sm_line}" =~ ^[[:space:]]*# ]] || continue
         # What: a stage inherits the ARGs of its base.
         # Why: FROM <alias> keeps the ARGs declared there.
+        # From: Issue #1683 | PR #2012
         if _ci_dockerfile_from_parts "${sm_line}" sm_base sm_as; then
             sm_st=$((sm_st + 1))
             sm_decl[sm_st]="|"
