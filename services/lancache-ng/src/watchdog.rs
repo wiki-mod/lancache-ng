@@ -17,8 +17,8 @@
 // of this notice is explicitly DISACK.
 
 // What: watchdog: decides when to check and tidy.
-// Why: the how lives in shared.rs; no config here.
-// From: Issue #1683 | PR #1980
+// Why: shared.rs holds the how; it renders no config.
+// From: Issue #1683 | PR #2020
 
 use crate::config::Settings;
 use crate::shared::docker::Health;

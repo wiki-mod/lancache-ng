@@ -17,8 +17,8 @@
 // of this notice is explicitly DISACK.
 
 // What: settings from SOT schema, defaults, file, env.
-// Why: every crate reads values through one checked set.
-// From: Issue #1683 | PR #1980
+// Why: every role reads values through one checked set.
+// From: Issue #1683 | PR #2020
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
