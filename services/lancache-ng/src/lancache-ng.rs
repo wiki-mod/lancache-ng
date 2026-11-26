@@ -6126,12 +6126,13 @@ mod shared {
         use futures_util::StreamExt as _;
         use std::time::Duration;
 
-        // What: what a CLI write sends: JSON or form.
-        // Why: REST routes take JSON, page actions forms.
+        // What: what a CLI call sends: JSON, form, none.
+        // Why: REST takes JSON, forms; None is a GET read.
         // From: Issue #1683 | PR #2020
         pub enum Body {
             Json(serde_json::Value),
             Form(Vec<(String, String)>),
+            None,
         }
 
         // What: POST to the ui over its CLI socket.
@@ -6152,10 +6153,11 @@ mod shared {
                 .timeout(Duration::from_secs(s.uint("UI_CLI_WRITE_TIMEOUT_SECONDS")?))
                 .build()
                 .map_err(|e| format!("{path}: {e}"))?;
-            let req = client.post(format!("http://ui{route}"));
+            let url = format!("http://ui{route}");
             let req = match &body {
-                Body::Json(v) => req.json(v),
-                Body::Form(f) => req.form(f),
+                Body::Json(v) => client.post(url).json(v),
+                Body::Form(f) => client.post(url).form(f),
+                Body::None => client.get(url),
             };
             let resp = req
                 .send()
@@ -11950,14 +11952,69 @@ end
             Ok(status(s).await?["answers"].as_bool().unwrap_or(false))
         }
 
-        // What: lancache-ng ntp check: own NTP as JSON.
+        // What: names of the chronyc -c tracking fields.
+        // Why: the CSV row has no header; order is fixed.
+        // From: Issue #1683 | PR #2020
+        const TRACKING: [&str; 14] = [
+            "ref_id",
+            "ref_name",
+            "stratum",
+            "ref_time",
+            "system_time",
+            "last_offset",
+            "rms_offset",
+            "frequency_ppm",
+            "residual_freq_ppm",
+            "skew_ppm",
+            "root_delay",
+            "root_dispersion",
+            "update_interval",
+            "leap_status",
+        ];
+
+        // What: one chronyc -c tracking row as JSON.
+        // Why: sampler, REST and CLI read one parser.
+        // From: Issue #1683 | PR #2020
+        pub fn tracking(text: &str) -> Result<serde_json::Value, String> {
+            let f: Vec<&str> = text.trim().split(',').collect();
+            if f.len() < TRACKING.len() {
+                return Err(format!("chronyc tracking: {} fields: {text}", f.len()));
+            }
+            let mut out = serde_json::Map::new();
+            for (name, raw) in TRACKING.iter().zip(&f) {
+                let num = !name.starts_with("ref_");
+                let v = match (raw.parse::<i64>(), raw.parse::<f64>()) {
+                    (Ok(n), _) if num => serde_json::json!(n),
+                    (_, Ok(n)) if num => serde_json::json!(n),
+                    _ => serde_json::json!(raw),
+                };
+                out.insert(name.to_string(), v);
+            }
+            Ok(out.into())
+        }
+
+        // What: lancache-ng ntp check | tracking.
         // Why: NTP reads have their CLI with their owner.
         // From: Issue #1683 | PR #2020
         pub async fn ntp_run(args: &[String]) -> Result<(), String> {
-            if args.first().map(String::as_str) != Some("check") {
-                return Err("commands: check".into());
+            let s = crate::config::Settings::from_process()?;
+            match args.first().map(String::as_str) {
+                Some("check") => {}
+                // What: tracking through the ui.
+                // Why: chronyc runs in services via docker.
+                // From: Issue #1683 | PR #2020
+                Some("tracking") => {
+                    let route = s.text("UI_ROUTE_NTP_TRACKING")?;
+                    let body = crate::shared::http::Body::None;
+                    println!(
+                        "{}",
+                        crate::shared::http::ui_socket(&s, &route, body).await?
+                    );
+                    return Ok(());
+                }
+                _ => return Err("commands: check | tracking".into()),
             }
-            let v = status(&crate::config::Settings::from_process()?).await?;
+            let v = status(&s).await?;
             println!("{v}");
             match (v["enabled"].as_bool(), v["answers"].as_bool()) {
                 (Some(true), Some(false)) => Err("ntp check: own NTP does not answer".into()),
@@ -15065,21 +15122,39 @@ mod ui {
             out.insert("host:tx".into(), tx.to_string());
         }
 
-        // What: the tracking row: CSV, field 5 = offset.
-        // Why: stratum and offset show the time source.
+        // What: stratum and offset of the time source.
+        // Why: the graph reads the tracking reader.
         // From: Issue #1683 | PR #1980
-        let tracking = s.list("CHRONY_TRACKING_EXEC");
         if has("chrony")
-            && let Some((svc, cmd)) = apply::exec_rows(&tracking).next()
-            && let Ok((0, text)) = exec_in(app, s, svc, &cmd).await
+            && let Ok(v) = chrony_tracking(app, s).await
         {
-            let f: Vec<&str> = text.trim().split(',').collect();
-            if let (Some(st), Some(off)) = (f.get(2), f.get(4)) {
-                out.insert("chrony:stratum".into(), st.to_string());
-                out.insert("chrony:offset".into(), off.to_string());
-            }
+            out.insert("chrony:stratum".into(), v["stratum"].to_string());
+            out.insert("chrony:offset".into(), v["system_time"].to_string());
         }
         out
+    }
+
+    // What: chrony tracking from its container.
+    // Why: sampler and REST run one command, one parser.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn chrony_tracking(app: &App, s: &Settings) -> Result<Value, String> {
+        let rows = s.list("CHRONY_TRACKING_EXEC");
+        let (svc, cmd) = apply::exec_rows(&rows)
+            .next()
+            .ok_or("CHRONY_TRACKING_EXEC has no service:command row")?;
+        let (code, text) = exec_in(app, s, svc, &cmd).await?;
+        if code != 0 {
+            return Err(format!("{} exit {code}: {}", cmd.join(" "), text.trim()));
+        }
+        crate::shared::ntp::tracking(&text)
+    }
+
+    // What: GET UI_ROUTE_NTP_TRACKING: chrony state.
+    // Why: REST and CLI read the tracking reader.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn ntp_tracking_api(State(app): Shared) -> Response {
+        let r = chrony_tracking(&app, &app.settings()).await;
+        json_reply(r.map(Some), "")
     }
 
     // What: program values into RRD each step.
@@ -16763,6 +16838,7 @@ mod ui {
             route("UI_ROUTE_DHCP_STATS", Get, Api, dhcp_stats_api),
             route("UI_ROUTE_PROXY_STATUS", Get, Api, proxy_status_api),
             route("UI_ROUTE_NTP", Get, Api, ntp_api),
+            route("UI_ROUTE_NTP_TRACKING", Get, Api, ntp_tracking_api),
             route("UI_ROUTE_PROXY_LOG", Get, Api, proxy_log_api),
             route("UI_ROUTE_SECRETS", Get, Api, secrets_api),
             route("UI_ROUTE_CACHE", Get, Api, cache_api),
