@@ -866,33 +866,84 @@ runtime:
     # Why: steps a bad clock only at start.
     # From: Issue #1683 | PR #1980
     - NTP_MAKESTEP=1.0 3
+    # What: own NTP server on, and as a DHCP option.
+    # Why: DHCP hands out NTP only when both are on.
+    # From: Issue #1683 | PR #2020
     - NTP_ENABLED=1
-    - AUTO_UPDATE_ENABLED=0
     - NTP_AUTO_DHCP=0
+    # What: install choice for automatic updates.
+    # Why: setup.sh and the setup page read it.
+    # From: Issue #1683 | PR #2020
+    - AUTO_UPDATE_ENABLED=0
+    # What: ui security headers and dev mode switches.
+    # Why: deprecated; unread since v0.4.0.
+    # From: Issue #1683 | PR #2020
     - UI_SECURITY_HEADERS=true
     - LANCACHE_DEV_MODE=false
+    # What: stamps of the last cache purge and log prune.
+    # Why: the watchdog runs each once a day, restarts too.
+    # From: Issue #1683 | PR #2020
     - RETENTION_STATE_DIR=/var/lib/lancache-retention-state
     - PURGE_STAMP=@RETENTION_STATE_DIR@/purge.stamp
     - SYSLOG_PRUNE_STAMP=@RETENTION_STATE_DIR@/syslog-prune.stamp
+    # What: watchdog state dir; it holds alarms.json.
+    # Why: a named volume keeps alarms over restarts.
+    # From: Issue #1683 | PR #2020
     - STATUS_DIR=/var/run/watchdog
+    # What: status.json path of the old watchdog.
+    # Why: deprecated; unread since v0.4.0.
+    # From: Issue #1683 | PR #2020
     - STATUS_FILE=@STATUS_DIR@/status.json
+    # What: syslog-ng log root and its allowed prefix.
+    # Why: the watchdog prunes logs only inside it.
+    # From: Issue #1683 | PR #2020
     - SYSLOG_LOG_ROOT=/var/log/lancache-syslog-ng
     - SYSLOG_LOG_ROOT_ALLOWED_PREFIX=/var/log
+    # What: nginx stub_status path and the ui URL to it.
+    # Why: the dashboard shows live proxy counters.
+    # From: Issue #1683 | PR #2020
     - PROXY_STATUS_PATH=/nginx_status
     - PROXY_STATUS_URL=http://@PROXY_SERVICE@@PROXY_STATUS_PATH@
+    # What: host name of Kea on the Docker host.
+    # Why: compose maps it to host-gateway for the ui.
+    # From: Issue #1683 | PR #2020
     - DHCP_API_HOST=host.docker.internal
+    # What: URL of the dns service.
+    # Why: deprecated; no release has read it.
+    # From: Issue #1683 | PR #2020
     - DNS_URL=http://dns
+    # What: install defaults: HTTPS on, DHCP mode off.
+    # Why: setup.sh and the ui change them later.
+    # From: Issue #1683 | PR #2020
     - HTTPS_ENABLED=1
     - DHCP_MODE=off
+    # What: shared group of logs and TLS keys.
+    # Why: one gid lets the programs of all images read.
+    # From: Issue #1683 | PR #2020
     - LOG_READER_GROUP=lancache
+    # What: install dir of the stack on the host.
+    # Why: setup.sh installs there; CI cleans it up.
+    # From: Issue #1683 | PR #2020
     - LANCACHE_STATE_DIR=/opt/lancache-ng
+    # What: ui template, static file and text dirs.
+    # Why: compose mounts them from the checkout.
+    # From: Issue #1683 | PR #2020
     - TEMPLATE_DIR=/templates
     - STATIC_DIR=/static
     - LANG_DIR=/lang
+    # What: pdns config dir, run dir and schema file.
+    # Why: the dns setup and start rows use them.
+    # From: Issue #1683 | PR #2020
     - PDNS_CONF_DIR=/etc/pdns
     - PDNS_RUN_DIR=/var/run/pdns
-    - PDNS_LUA_DNS_SCRIPT=@PDNS_CONF_DIR@/filter-aaaa.lua
     - PDNS_SCHEMA_FILE=/usr/share/doc/pdns/schema.sqlite3.sql
+    # What: mount path of filter-aaaa.lua in dns.
+    # Why: deprecated; the recursor loads its own file.
+    # From: Issue #1683 | PR #2020
+    - PDNS_LUA_DNS_SCRIPT=@PDNS_CONF_DIR@/filter-aaaa.lua
+    # What: nginx config root of the proxy and the ui.
+    # Why: templates and the cert dirs sit below it.
+    # From: Issue #1683 | PR #2020
     - NGINX_DIR=/etc/nginx
     # What: uid and gid of the nginx worker account.
     # Why: cache files are 0600; no other uid reads them.
