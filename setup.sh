@@ -2562,7 +2562,7 @@ resolve_stack_dir_checked() {
     printf '%s\n' "$dir"
 }
 
-# What: true if dir $2 has role $1: prod, secondary, quickstart
+# What: dir $2 has role $1: prod, secondary or quickstart
 # Why: one owner of the roles and of how they exclude
 # From: Issue #1683 | PR #1858
 install_dir_is() {
